@@ -44,3 +44,8 @@ add_test(NAME SystemTest       COMMAND ${TESTS_TARGET} --run_test=SystemTest --l
 add_test(NAME PostprocessTest  COMMAND ${TESTS_TARGET} --run_test=PostprocessTest --log_level=message)
 add_test(NAME SystemHealthTest COMMAND ${TESTS_TARGET} --run_test=SystemHealthTest --log_level=message)
 add_test(NAME RemoteTest       COMMAND ${TESTS_TARGET} --run_test=RemoteTest --log_level=message)
+if(TARGET ${PACKAGE})
+	# these leave through exit(): the daemon's destructors must still run cleanly
+	add_test(NAME ExitVersionTest COMMAND ${PACKAGE} --version)
+	add_test(NAME ExitHelpTest    COMMAND ${PACKAGE} --help)
+endif()

@@ -1167,6 +1167,10 @@ void NZBGet::SetupFirstStart()
 
 void RunMain()
 {
+	// exit() runs the static destructors with the daemon still alive, and its
+	// destructors lock file-scope mutexes: destroy it first
+	atexit([] { g_NZBGet.reset(); });
+
 	bool reload = false;
 	while (!g_NZBGet || g_NZBGet->GetReloading())
 	{

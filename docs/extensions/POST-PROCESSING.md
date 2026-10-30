@@ -46,7 +46,7 @@ in the Extension Manager.
   - **WARNING/PASSWORD**;
   - **SUCCESS/ALL**;
   - **SUCCESS/UNPACK**.
-For the complete list see description of [API-Method "history"](../api/HISTORY.md).
+For the complete list see description of [API-Method "history"](../api/API.md#api-method-history).
   - **NOTE** one difference to the status returned by method history is that `NZBPP_STATUS` assumes all scripts are ended successfully. Even if one of the scripts executed before the current one has failed the status will not be set to `WARNING/SCRIPT` as method history will do. For example for a successful download the status would be `SUCCESS/ALL` instead. Because most scripts don’t depend on other scripts they shouldn’t assume the download has failed if any of the previous scripts (such as a notification script) has failed. The scripts interested in that info still can use parameter `NZBPP_SCRIPTSTATUS`.
 - **NZBPP_SCRIPTSTATUS** - `v13.0` Summary status of the scripts executed before the current one:
   - **NONE** - no other scripts were executed yet or all of them have ended with exit code `NONE`;

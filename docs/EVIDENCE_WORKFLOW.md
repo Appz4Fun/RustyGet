@@ -111,6 +111,22 @@ restoration remain unverified.
 | `PR104-continuation3-native0-helper-oracle-HOLD-1792037328807135000/receipt.json` | `e6213a011ce4083662d5a1259fc131f7a202ab41fbb8449435b4fcef7dbc3909` |
 | `committed-capture-contract-tests.stdout` | `4a1e0d1a64e4aeaa45f6685371c518969c698602cd6cdcefcd89f36d12b5b02d` |
 
+### Packed evidence
+
+These directories were packed on 2026-10-30, byte for byte from commit
+`a7747a1b7b7ad250495a1ba92bed452173654435`, to keep the repository under a file
+limit. Each archive's tar header names that commit. Before removing the
+directories, every member's Git blob ID and mode was compared with the commit's
+tree. Unpacked, each directory's Git tree ID must match the value below.
+
+| Archive | Restores | Members | Source tree | Archive SHA-256 |
+| --- | --- | --- | --- | --- |
+| `rust/tests/latin1_caller/evidence.tar.gz` | `rust/tests/latin1_caller/evidence` | 70 | `fe195b1da7335d7c433b2f34382daeb3aa1330df` | `8fc54a07e3ffc4905af75b8b1ca5321925a36f1a11beea54f800e072fc63533d` |
+| `benchmarks/nanobench-poc.tar.gz` | `benchmarks/nanobench-poc` | 13 | `0e9dbd2c2ce17f7cfbfe15c3b16bad0d17ba4f3c` | `d7529560dfcdec80d5da64cc7253cf33b270bd885f5f11e5f59957e44f3d8ac1` |
+
+Packing changes where these records live, not what they establish. No stored
+verdict was rerun or requalified.
+
 ## Tool roles
 
 | Tool | Role | Boundary |

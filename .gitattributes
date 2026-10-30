@@ -1,14 +1,5 @@
 * text=auto
 
-# Use CRLF for certain Windows files.
-*.vcproj                        eol=crlf
-*.sln                           eol=crlf
-*.bat                           eol=crlf
-README-WINDOWS.txt              eol=crlf
-nzbget-setup.nsi                eol=crlf
-platforms/windows/package-info.json       eol=crlf
-platforms/windows/resources/resource.h    eol=crlf
-platforms/windows/resources/nzbget.rc     eol=crlf
 tests/testdata/**/*             binary
 
 # Configure GitHub's language detector

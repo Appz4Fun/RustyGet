@@ -5,12 +5,6 @@ if("${CMAKE_SOURCE_DIR}" STREQUAL "${CMAKE_BINARY_DIR}")
 endif()
 
 
-# Skip all install() rules from FetchContent dependencies on Windows
-# NZBGet Windows installers are packaged via custom NSIS scripts
-if(WIN32)
-	set(CMAKE_SKIP_INSTALL_RULES ON)
-endif()
-
 # Force all FetchContent downloads/builds into a fixed, cacheable directory
 # This ensures CI cache (build/deps) captures all dependencies
 set(FETCHCONTENT_BASE_DIR ${CMAKE_BINARY_DIR}/deps CACHE PATH "FetchContent base directory" FORCE)
@@ -36,10 +30,6 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_C_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# MSVC runtime library: static (/MT for Release/MinSizeRel/RelWithDebInfo, /MTd for Debug)
-# Controlled by CMP0091 (NEW). Set before project() to initialize all targets.
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "MSVC runtime library" FORCE)
-
 string(REGEX MATCH "^([0-9]+)\\.([0-9]+)" VERSION_MATCH ${VERSION})
 set(VERSION_MAJOR ${CMAKE_MATCH_1})
 set(VERSION_MINOR ${CMAKE_MATCH_2})
@@ -60,6 +50,10 @@ project(
 	LANGUAGES C CXX
 )
 
+if(WIN32 OR ANDROID)
+	message(FATAL_ERROR "RustyGet builds on Linux and macOS only: Windows and Android support was retired.")
+endif()
+
 set(EXTERNAL_DEPS "")
 include(cmake/common.cmake)
 
@@ -69,11 +63,7 @@ target_include_directories(libnzbget PUBLIC ${CMAKE_SOURCE_DIR} ${CMAKE_BINARY_D
 
 include(daemon/sources.cmake)
 
-if(WIN32)
-	include(cmake/windows.cmake)
-else()
-	include(cmake/posix.cmake)
-endif()
+include(cmake/posix.cmake)
 
 configure_file(
 	${CMAKE_SOURCE_DIR}/cmake/config.h.in
@@ -102,35 +92,14 @@ if(NOT BUILD_ONLY_TESTS)
 	apply_sanitizers(${PACKAGE})
 endif()
 
-if(WIN32)
-	if(NOT BUILD_ONLY_TESTS)
-		target_sources(${PACKAGE} PRIVATE ${CMAKE_SOURCE_DIR}/platforms/windows/resources/nzbget.rc)
-		configure_file(
-			${CMAKE_SOURCE_DIR}/platforms/windows/resources/version.rc.in
-			${CMAKE_BINARY_DIR}/version.rc
+if(NOT BUILD_ONLY_TESTS)
+	if(CMAKE_BUILD_TYPE STREQUAL "Release" AND CMAKE_STRIP)
+		add_custom_command(
+			TARGET ${PACKAGE} POST_BUILD
+			COMMAND ${CMAKE_STRIP} $<TARGET_FILE:${PACKAGE}>
 		)
-		configure_file(
-			${CMAKE_SOURCE_DIR}/platforms/windows/version.nsi.in
-			${CMAKE_BINARY_DIR}/version.nsi
-			@ONLY
-		)
-		configure_file(
-			${CMAKE_SOURCE_DIR}/platforms/windows/version-uninstall.nsi.in
-			${CMAKE_BINARY_DIR}/version-uninstall.nsi
-			@ONLY
-		)
-		target_sources(${PACKAGE} PRIVATE ${CMAKE_BINARY_DIR}/version.rc)
 	endif()
-else()
-	if(NOT BUILD_ONLY_TESTS)
-		if(CMAKE_BUILD_TYPE STREQUAL "Release" AND CMAKE_STRIP)
-			add_custom_command(
-				TARGET ${PACKAGE} POST_BUILD
-				COMMAND ${CMAKE_STRIP} $<TARGET_FILE:${PACKAGE}>
-			)
-		endif()
-		include(${CMAKE_SOURCE_DIR}/cmake/install.cmake)
-	endif()
+	include(${CMAKE_SOURCE_DIR}/cmake/install.cmake)
 endif()
 
 if(ENABLE_TESTS OR BUILD_ONLY_TESTS)

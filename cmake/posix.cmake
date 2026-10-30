@@ -50,19 +50,6 @@ if(ENABLE_CLANG_TIDY)
 	set(CMAKE_CXX_CLANG_TIDY clang-tidy -checks=-*,readability-*)
 endif()
 
-# On Android (Bionic libc), pthreads functions are built directly into libc.so.
-# When CMAKE_TRY_COMPILE_TARGET_TYPE is STATIC_LIBRARY, FindThreads cannot test linking
-# and erroneously falls back to -lpthreads. Prevent this by pre-initializing thread flags.
-if(ANDROID OR NZBGET_BUILD_PLATFORM STREQUAL "android" OR TOOLCHAIN_PREFIX MATCHES "android" OR CMAKE_SYSTEM_NAME STREQUAL "Android")
-	set(CMAKE_THREAD_LIBS_INIT "" CACHE STRING "" FORCE)
-	set(CMAKE_HAVE_THREADS_LIBRARY 1 CACHE BOOL "" FORCE)
-	set(CMAKE_USE_WIN32_THREADS_INIT 0 CACHE BOOL "" FORCE)
-	set(CMAKE_USE_PTHREADS_INIT 1 CACHE BOOL "" FORCE)
-	set(THREADS_PREFER_PTHREAD_FLAG ON CACHE BOOL "" FORCE)
-	set(CMAKE_HAVE_PTHREADS_CREATE 0 CACHE BOOL "" FORCE)
-	set(Threads_FOUND TRUE CACHE BOOL "" FORCE)
-endif()
-
 if(ENABLE_STATIC)
 	# due to the error "ld: library not found for -crt0.o" when using Apple Clang with "-static"
 	if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
@@ -100,17 +87,12 @@ else()
 	endif()
 
 	if(NOT DISABLE_CURSES)
-		if(ANDROID)
-			include(${CMAKE_SOURCE_DIR}/cmake/ncurses.cmake)
-			set(LIBS ${LIBS} Curses::ncursesw)
-		else()
-			set(CURSES_NEED_NCURSES TRUE)
-			if(NOT APPLE)
-				set(CURSES_NEED_WIDE TRUE)
-			endif()
-			find_package(Curses REQUIRED)
-			set(LIBS ${LIBS} ${CURSES_LIBRARIES})
+		set(CURSES_NEED_NCURSES TRUE)
+		if(NOT APPLE)
+			set(CURSES_NEED_WIDE TRUE)
 		endif()
+		find_package(Curses REQUIRED)
+		set(LIBS ${LIBS} ${CURSES_LIBRARIES})
 	endif()
 
 	if(NOT DISABLE_GZIP)
@@ -139,9 +121,7 @@ if(NOT HAVE_SYSTEM_REGEX_H)
 endif()
 
 # Large File Support (LFS)
-if (NOT ANDROID AND NOT TOOLCHAIN_PREFIX MATCHES "android")
-	add_compile_definitions(_FILE_OFFSET_BITS=64 _LARGEFILE_SOURCE _LARGE_FILES)
-endif()
+add_compile_definitions(_FILE_OFFSET_BITS=64 _LARGEFILE_SOURCE _LARGE_FILES)
 
 check_include_files(sys/prctl.h HAVE_SYS_PRCTL_H)
 check_include_files(regex.h HAVE_REGEX_H)

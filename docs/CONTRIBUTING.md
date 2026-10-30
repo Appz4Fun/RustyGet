@@ -18,8 +18,6 @@ NZBGet natively supports for multiple platforms and build options, so each platf
 
 - [POSIX](POSIX.md)
 - [macOS](MACOS.md)
-- [Windows](WINDOWS.md)
-- [Android](ANDROID.md)
 - [Docker](https://github.com/nzbgetcom/nzbget/blob/develop/docker/README.md)
 
 ### Branches naming policy ###

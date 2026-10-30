@@ -55,10 +55,6 @@ apt install libboost-test-dev #(optional: for testing)
 ```bash
 apt install clang-tidy
 ```
-### FreeBSD: 
-```bash
-pkg install cmake ninja ncurses openssl libxml2 zlib boost-libs
-```
 ### macOS:
 ```bash
 xcode-select --install

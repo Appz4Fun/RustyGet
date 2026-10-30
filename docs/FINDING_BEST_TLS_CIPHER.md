@@ -33,11 +33,6 @@ NZBGet uses the [OpenSSL](https://openssl-library.org/) library for its TLS/SSL 
   brew install openssl
   ```
 
-  - On Windows, you may need to download an installer from a trusted source or use a package manager like Chocolatey:
-  ```text
-  choco install openssl
-  ```
-
 ### Finding the Fastest Cipher on Your System
 
 In the terminal execute the command

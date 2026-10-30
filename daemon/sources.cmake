@@ -157,16 +157,6 @@ target_sources(libnzbget PRIVATE
 	${CMAKE_SOURCE_DIR}/daemon/systemhealth/DisplayValidator.cpp
 )
 
-if(WIN32)
-	target_sources(libnzbget PRIVATE
-		${CMAKE_SOURCE_DIR}/daemon/windows/StdAfx.cpp
-		${CMAKE_SOURCE_DIR}/daemon/windows/WinConsole.cpp
-		${CMAKE_SOURCE_DIR}/daemon/windows/WinService.cpp
-		${CMAKE_SOURCE_DIR}/daemon/util/Utf8.cpp
-	)
-	target_include_directories(libnzbget PUBLIC ${CMAKE_SOURCE_DIR}/platforms/windows)
-endif()
-
 target_include_directories(libnzbget PUBLIC
 	${CMAKE_SOURCE_DIR}/daemon/connect
 	${CMAKE_SOURCE_DIR}/daemon/extension

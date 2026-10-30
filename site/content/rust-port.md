@@ -114,14 +114,14 @@ All items start open. An open item can contain Rust code already; it means the w
 ### Companion programs and supported platforms
 
 - [ ] Replace the bundled test/news server, its frontend, NZB generator, and yEnc encoder (`nserv/NntpServer.*`, `NServMain.*`, `NServFrontend.*`, `NzbGenerator.*`, `YEncoder.*`).
-- [ ] Replace Windows console, service, encoding, and resource/build integration if Windows remains supported (`daemon/windows/`, `util/Utf8.*`, `platforms/windows/`, `cmake/windows.cmake`). Windows currently retains the C++ implementation.
+- [ ] Remove the code left over from retired platforms: the `WIN32` branches in `daemon/` and `tests/`, `util/Utf8.*`, and the Windows, Android, and FreeBSD branches in `cmake/*.cmake`.
 - [ ] Verify the macOS app launcher, daemon controller, RPC bridge, packaging, signing, and universal builds (`platforms/macos/`). Its Objective-C sources aren't C++, but still require a compatibility and native-dependency audit.
-- [ ] Qualify every retained OS, architecture, and build combination. Include Linux, macOS, Windows, FreeBSD, Android, static builds, and cross builds. Record explicit support retirements before removing a platform's fallback.
-- [ ] Update Docker images, Linux packages, installers, Flatpak, Snap, QNAP packaging, and platform build scripts to use the Rust executable and approved helper set.
+- [ ] Qualify every retained OS, architecture, and build combination. Include Linux, macOS, static builds, and cross builds. Windows, Android, FreeBSD, QNAP, Synology, Flatpak, and Snap were retired on 2026-10-30. Record any further support retirement before removing a platform's fallback.
+- [ ] Update Docker images, Linux packages, installers, and platform build scripts to use the Rust executable and approved helper set.
 
 ### Linked and native dependencies
 
-Inventory [POSIX dependencies](https://github.com/Appz4Fun/nzbget/blob/dupe-article-fallback/cmake/posix.cmake), [Windows dependencies](https://github.com/Appz4Fun/nzbget/blob/dupe-article-fallback/cmake/windows.cmake), `cmake/*.cmake`, `lib/sources.cmake`, `rust/Cargo.toml`, and `rust/Cargo.lock`. Record versions, transitive dependencies, feature flags, static/dynamic linkage, and shipped artifacts for each retained target. Rust crate names and C interfaces don't establish implementation language.
+Inventory [POSIX dependencies](https://github.com/Appz4Fun/nzbget/blob/dupe-article-fallback/cmake/posix.cmake), `cmake/*.cmake`, `lib/sources.cmake`, `rust/Cargo.toml`, and `rust/Cargo.lock`. Record versions, transitive dependencies, feature flags, static/dynamic linkage, and shipped artifacts for each retained target. Rust crate names and C interfaces don't establish implementation language.
 
 - [ ] Replace PAR2-Turbo and its `par2-turbo`, `gf16`, and `hasher` build targets; qualify full verification/repair and renaming. The existing `rust-par2` dependency doesn't prove the C++ repair engine is gone.
 - [ ] Remove Boost headers and compiled components from app builds, including JSON and any remaining algorithm/container use; track `Boost.Test` separately below.

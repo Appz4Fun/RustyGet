@@ -104,7 +104,7 @@ On 2026-10-09 the NZBGet maintainers closed it without merging, along with the r
 
 ## Build and run
 
-RustyGet has no release packages yet. Build it from source with CMake, a C++20 compiler, and Rust. The repository pins Rust 1.99.0, and rustup installs it on the first build.
+RustyGet runs on Linux and macOS. It has no release packages yet, so build it from source with CMake, a C++20 compiler, and Rust. The repository pins Rust 1.99.0, and rustup installs it on the first build.
 
 ```bash
 git clone https://github.com/Appz4Fun/nzbget.git rustyget
@@ -134,7 +134,7 @@ The **[documentation site](https://appz4fun.github.io/nzbget/)** covers:
 - [Check, repair, and unpack](https://appz4fun.github.io/nzbget/post-processing.html), [Servers, RSS, and scheduling](https://appz4fun.github.io/nzbget/automation.html), and [Performance tuning](https://appz4fun.github.io/nzbget/performance.html)
 - [Configuration options](https://appz4fun.github.io/nzbget/options.html), generated from `nzbget.conf`
 - [API and compatibility](https://appz4fun.github.io/nzbget/api.html) and the [Design system](https://appz4fun.github.io/nzbget/design-system.html)
-- [Offline benchmark viewer and evidence](benchmarks/nanobench-poc/README.md), a fixture-only proof of concept with its production performance hold unchanged
+- [Offline benchmark viewer and evidence](benchmarks/nanobench-poc.tar.gz), a fixture-only proof of concept with its production performance hold unchanged. Unpack it and open `nanobench-poc/index.html`.
 
 The site's source is in [`site/`](site). It deploys on every push to the default branch, after Vale checks the prose against the Google developer documentation style.
 

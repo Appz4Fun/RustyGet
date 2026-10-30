@@ -29,7 +29,7 @@ Speed limits
 : Enforcing `DownloadRate` costs extra work. Leave it at `0` for the best speed.
 
 Console mode
-: The terminal interface (`-s`) redraws constantly. Run as a daemon (`-D`) on POSIX systems or as a service on Windows, and attach a remote console only when you need one.
+: The terminal interface (`-s`) redraws constantly. Run as a daemon (`-D`), and attach a remote console only when you need one.
 
 ## When memory is the limit
 

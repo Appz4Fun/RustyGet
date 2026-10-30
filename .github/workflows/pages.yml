@@ -45,6 +45,9 @@ jobs:
           tar -xzf "$RUNNER_TEMP/vale.tar.gz" -C "$RUNNER_TEMP/vale" vale
           echo "$RUNNER_TEMP/vale" >> "$GITHUB_PATH"
 
+      - name: Fetch the Vale style
+        run: sh site/tools/fetch-vale-style.sh
+
       - name: Check prose (Google style)
         # bash -o pipefail: a Vale failure must not hide behind tee
         shell: bash

@@ -78,7 +78,6 @@ ipch/
 # NZBGet specific
 nzbget
 build
-!synology/package/SynoBuildConf/build
 *.temp
 *.pyc
 pytest.ini
@@ -86,7 +85,6 @@ pytest.ini
 /.idea
 docker/downloads
 docker/config
-*.snap
 
 # Ignore all dotfiles except those explicitly needed
 .*
@@ -95,6 +93,9 @@ docker/config
 !/.vale.ini
 !.github/
 !.github/**
+
+# Fetched by site/tools/fetch-vale-style.sh
+site/vale/styles/Google/
 
 # local secrets (API keys) — never commit
 .env

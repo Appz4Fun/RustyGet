@@ -211,8 +211,10 @@ BOOST_AUTO_TEST_CASE(TlsProbeTriesSecondResolvedAddressOfSameFamily)
 {
 	OwnedBackend backend;
 	LoopbackTls fixture(TLS1_3_VERSION, TLS1_3_VERSION, "ECDHE-RSA-AES128-GCM-SHA256", "TLS_AES_128_GCM_SHA256");
+	// The first address must fail at once on every platform. macOS drops packets
+	// for 127.0.0.2 rather than refusing them, which would spend the whole deadline.
 	BOOST_CHECK_EQUAL(ProbeFixture(backend, fixture, "TLS_AES_128_GCM_SHA256", 13, 1000, 0,
-		[](void*) { return 0; }, nullptr, "127.0.0.2\n127.0.0.1"), 1);
+		[](void*) { return 0; }, nullptr, "255.255.255.255\n127.0.0.1"), 1);
 	BOOST_CHECK_EQUAL(fixture.negotiated.load(), TLS1_3_VERSION);
 }
 

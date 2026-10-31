@@ -179,7 +179,7 @@ class Fixture:
                   "ControlPort": port, "ControlUsername": "", "ControlPassword": "", "AuthorizedIP": "127.0.0.1",
                   "RestrictedUsername": "example-restricted", "RestrictedPassword": "example-restricted",
                   "AddUsername": "example-add", "AddPassword": "example-add", "SecureControl": "no",
-                  "CertStore": cert, "WriteLog": "append", "OutputMode": "log", "UpdateCheck": "none"}
+                  "CertStore": cert, "CertCheck": "yes", "WriteLog": "append", "OutputMode": "log", "UpdateCheck": "none"}
         for index, provider in enumerate(self.providers, 1):
             fields = {"Host": "localhost", "Port": provider.port, "Connections": 1, "Encryption": "yes",
                       "CertVerification": "strict", "IpVersion": "ipv4", "Active": "no", "Level": 1,

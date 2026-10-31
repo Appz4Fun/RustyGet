@@ -191,7 +191,7 @@ impl Backend for Native {
             1 => Probe { support: Support::Supported, message: "Supported" },
             0 => Probe { support: Support::Unsupported, message: "Unsupported cipher suite" },
             -2 => unknown("DNS resolution failed."), -3 => unknown("Server probe deadline exceeded."),
-            -4 => unknown("Certificate verification failed."), -5 => unknown("Server authentication failed."),
+            -4 => unknown("Certificate verification failed. Check the CertCheck and CertStore options."), -5 => unknown("Server authentication failed."),
             -6 => unknown("Cancelled."), _ => unknown("TLS or NNTP compatibility could not be established."),
         }
     }

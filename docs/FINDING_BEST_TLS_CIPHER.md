@@ -28,6 +28,11 @@ TLS 1.2/1.3 authenticated-encryption suites exposed by the linked TLS library;
 weak and incompatible cipher types are excluded. A timeout, certificate or login
 failure leaves that server's setting unchanged. Cancel stops further testing.
 
+A server whose **ServerX.CertVerification** is Minimal or Strict can only be
+tested with **CertCheck** enabled and **CertStore** set. Otherwise the test reports
+a certificate failure for that server and leaves its cipher unchanged. **CertCheck**
+is off in the source tree's `nzbget.conf`; the packaged builds and Docker image turn it on.
+
 Closing the dialog keeps the test running and tracks its result. Settings saves
 wait until that result is reconciled. Updated WebUI clients also include their
 saved server identity/cipher baseline with each save; NZBGet checks it under the

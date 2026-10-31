@@ -27,7 +27,7 @@ saved/reload results, cancellation, unsaved-server guards, unavailable backends,
 keyboard close and the final table column. Optional sanitized JPEGs use
 `NZBGET_UI_CAPTURE_DIR`. This dialog check uses a Config stub; actual editor
 reconciliation and native behavior require the isolated daemon fixture described
-in `tests/functional/tlscipher/README.md` and separate Settings checks.
+in `docs/FUNCTIONAL_TESTING.md` and separate Settings checks.
 The `tls-cipher-settings.js` check uses the real Settings model and intercepts
 optimizer and save RPCs. It checks unsaved-server rejection, unrelated unsaved
 field retention, confirmed cipher baselines, changed-browser rejection and the

@@ -239,3 +239,8 @@ http://localhost:6789/username:password/
 Please note, that in this case the password is saved in a bookmark or in
 browser history in plain text and is easy to find by persons having
 access to your computer.
+
+## RSS and duplicate check
+
+
+### Coming soon

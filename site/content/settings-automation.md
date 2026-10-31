@@ -30,7 +30,7 @@ Key options: [`FeedN.URL`](options.md#feedn-url), [`FeedN.Filter`](options.md#fe
 <figcaption>The example URL does not connect to an indexer. Open the picture to inspect the full section.</figcaption>
 </figure>
 
-For rule syntax and examples, see the [RSS guide](https://github.com/Appz4Fun/nzbget/blob/HEAD/docs/usage/RSS.md) and the option's built-in help.
+For rule syntax and examples, see the [RSS guide](https://github.com/Appz4Fun/nzbget/blob/HEAD/docs/HOW_TO_USE.md#rss-and-duplicate-check) and the option's built-in help.
 
 ## Scheduler
 

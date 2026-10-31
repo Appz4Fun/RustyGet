@@ -214,9 +214,9 @@ This method returns array of structures with following fields:
 - **DownloadedSizeMB** `(int)` - `v14.0` Amount of downloaded data for group in MiB.
 - **DownloadTimeSec** `(int)` - `v14.0` Download time in seconds.
 - **MessageCount** `(int)` - `v15.0` Number of messages stored in the item log. Messages can be retrieved with method [loadlog](#api-method-loadlog).
-- **DupeKey** `(string)` - Duplicate key. [RSS](../usage/RSS.md).
-- **DupeScore** `(int)` - Duplicate score. [RSS](../usage/RSS.md).
-- **DupeMode** `(string)` - Duplicate mode. One of SCORE, ALL, FORCE. [RSS](../usage/RSS.md).
+- **DupeKey** `(string)` - Duplicate key. [RSS](../HOW_TO_USE.md#rss-and-duplicate-check).
+- **DupeScore** `(int)` - Duplicate score. [RSS](../HOW_TO_USE.md#rss-and-duplicate-check).
+- **DupeMode** `(string)` - Duplicate mode. One of SCORE, ALL, FORCE. [RSS](../HOW_TO_USE.md#rss-and-duplicate-check).
 - **Parameters** `(struct[])` - Post-processing parameters for group. An array of structures with following fields:
   - **Name** `(string)`- Name of post-processing parameter.
   - **Value** `(string)` - Value of post-processing parameter.
@@ -323,9 +323,9 @@ This method returns an array of structures with following fields:
 - **RepairTimeSec** `(int)` - `v14.0` Par-repair time in seconds.
 - **UnpackTimeSec** `(int)` - `v14.0` Unpack time in seconds.
 - **MessageCount** `(int)` - `v15.0` Number of messages stored in the item log. Messages can be retrieved with method loadlog.
-- **DupeKey** `(string)` - Duplicate key. See [RSS](../usage/RSS.md).
-- **DupeScore** `(int)` - Duplicate score. See [RSS](../usage/RSS.md).
-- **DupeMode** `(string)` - Duplicate mode. One of **SCORE**, **ALL**, **FORCE**. See [RSS](../usage/RSS.md).
+- **DupeKey** `(string)` - Duplicate key. See [RSS](../HOW_TO_USE.md#rss-and-duplicate-check).
+- **DupeScore** `(int)` - Duplicate score. See [RSS](../HOW_TO_USE.md#rss-and-duplicate-check).
+- **DupeMode** `(string)` - Duplicate mode. One of **SCORE**, **ALL**, **FORCE**. See [RSS](../HOW_TO_USE.md#rss-and-duplicate-check).
 - **Status** `(string)` - Total status of the download. One of the predefined text constants such as `SUCCESS/ALL` or `FAILURE/UNPACK`, etc. For the complete list see below.
 - **ParStatus** `(string)` - Result of par-check/repair:
   - **NONE** - par-check wasn’t performed;
@@ -458,9 +458,9 @@ _Add an NZB, archive file, or URL to the download queue_
 - **Priority** `(int)` - priority for nzb-file. 0 for `normal priority`, positive values for high priority and negative values for low priority. Downloads with priorities equal to or greater than 900 are downloaded and post-processed even if the program is in paused state (force mode). Default priorities are: -100 (very low), -50 (low), 0 (normal), 50 (high), 100 (very high), 900 (force).
 - **AddToTop** `(bool)` - `true` if the file should be added to the top of the download queue or `false` if to the end.
 - **AddPaused** `(bool)` - `true` if the file should be added in paused state.
-DupeKey (string) - duplicate key for nzb-file. See [RSS](../usage/RSS.md).
-- **DupeScore** `(int)` - duplicate score for nzb-file. See [RSS](../usage/RSS.md).
-- **DupeMode** `(string)` - duplicate mode for nzb-file. See [RSS](../usage/RSS.md).
+DupeKey (string) - duplicate key for nzb-file. See [RSS](../HOW_TO_USE.md#rss-and-duplicate-check).
+- **DupeScore** `(int)` - duplicate score for nzb-file. See [RSS](../HOW_TO_USE.md#rss-and-duplicate-check).
+- **DupeMode** `(string)` - duplicate mode for nzb-file. See [RSS](../HOW_TO_USE.md#rss-and-duplicate-check).
 - **AutoCategory** `(bool)` - If true, the category will be automatically detected from the NZB file (if available).
 - **PPParameters** `(array)` - `v16.0` post-processing parameters. The array consists of structures with following fields:
   - **Name** `(string)` - name of post-processing parameter.
@@ -545,9 +545,9 @@ Edit items in download queue or in history.
   - **GroupMerge** - Merge groups.
   - **GroupSetParameter** - Set post-processing parameter for group. `Param` contains string in form of `Paramname=Paramvalue`.
   - **GroupSetName** - Rename group. Param contains new name.
-  - **GroupSetDupeKey** - Set duplicate key. Param contains duplicate key. See [RSS](../usage/RSS.md).
-  - **GroupSetDupeScore** - Set duplicate score. Param contains duplicate score. See [RSS](../usage/RSS.md).
-  - **GroupSetDupeMode** - Set duplicate mode. Param contains one of `SCORE`, `ALL`, `FORCE`. See [RSS](../usage/RSS.md).
+  - **GroupSetDupeKey** - Set duplicate key. Param contains duplicate key. See [RSS](../HOW_TO_USE.md#rss-and-duplicate-check).
+  - **GroupSetDupeScore** - Set duplicate score. Param contains duplicate score. See [RSS](../HOW_TO_USE.md#rss-and-duplicate-check).
+  - **GroupSetDupeMode** - Set duplicate mode. Param contains one of `SCORE`, `ALL`, `FORCE`. See [RSS](../HOW_TO_USE.md#rss-and-duplicate-check).
   - **GroupSort** - `v15.0` Sort selected or all groups. Parameter `Param` must be one of: `name`, `priority`, `category`, `size`, `left`; add character `+` or `-` to sort to explicitly define ascending or descending order (for example `name-`); if none of these characters is used the auto-mode is active: the items are sorted in ascending order first, if nothing changed - they are sorted again in descending order. `Parameter IDs` contains the list of groups to sort; pass empty array to sort all groups.
   - **PostMoveOffset** - ~~`v13.0`~~ Deprecated, use `GroupMoveOffset` instead.
   - **PostMoveTop** - ~~`v13.0`~~ Deprecated, use `GroupMoveTop` instead.
@@ -561,13 +561,13 @@ Edit items in download queue or in history.
   - **HistorySetName** - `v15.0` Rename history item. `Param` contains new name.
   - **HistorySetCategory** - `v15.0` Set category for history item. Param contains category name.
   - **HistorySetParameter** - Set post-processing parameter for history items. `Param` contains string in form of `Paramname=Paramvalue`.
-  - **HistorySetDupeKey** - Set duplicate key. `Param` contains duplicate key. See [RSS](../usage/RSS.md).
-  - **HistorySetDupeScore** - Set duplicate score. `Param` contains duplicate score. See [RSS](../usage/RSS.md).
-  - **HistorySetDupeMode** - Set duplicate mode. `Param` contains one of `SCORE`, `ALL`, `FORCE`. See [RSS](../usage/RSS.md).
-  - **HistorySetDupeBackup** - Set `use as duplicate backup-flag` for history items. `Param` contains `0` or `1`. See [RSS](../usage/RSS.md).
-  - **HistoryMarkBad** - Mark history item as bad (and download other duplicate). See [RSS](../usage/RSS.md).
-  - **HistoryMarkGood** - Mark history item as good. See [RSS](../usage/RSS.md).
-  - **HistoryMarkSuccess** - `v15.0` Mark history item as success. See [RSS](../usage/RSS.md).
+  - **HistorySetDupeKey** - Set duplicate key. `Param` contains duplicate key. See [RSS](../HOW_TO_USE.md#rss-and-duplicate-check).
+  - **HistorySetDupeScore** - Set duplicate score. `Param` contains duplicate score. See [RSS](../HOW_TO_USE.md#rss-and-duplicate-check).
+  - **HistorySetDupeMode** - Set duplicate mode. `Param` contains one of `SCORE`, `ALL`, `FORCE`. See [RSS](../HOW_TO_USE.md#rss-and-duplicate-check).
+  - **HistorySetDupeBackup** - Set `use as duplicate backup-flag` for history items. `Param` contains `0` or `1`. See [RSS](../HOW_TO_USE.md#rss-and-duplicate-check).
+  - **HistoryMarkBad** - Mark history item as bad (and download other duplicate). See [RSS](../HOW_TO_USE.md#rss-and-duplicate-check).
+  - **HistoryMarkGood** - Mark history item as good. See [RSS](../HOW_TO_USE.md#rss-and-duplicate-check).
+  - **HistoryMarkSuccess** - `v15.0` Mark history item as success. See [RSS](../HOW_TO_USE.md#rss-and-duplicate-check).
 - **Offset (int)** - ~~`v18.0`~~ offset for commands `FileMoveOffset` and `GroupMoveOffset`. For all other commands must be `0`. `v18.0` Offset is passed in `Param` and parameter `Offset` should not be passed at all.
 - **Param** `(string)` - additional parameter if mentioned in the command description, otherwise an empty string.
 - **IDs** `(struct[])` - array of IDs (as integers).

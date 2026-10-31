@@ -114,6 +114,15 @@ const { fixtureURL } = require('./workspace-fixture');
       const last = dialog.locator('#TlsCipherServers tbody tr').last().locator('td').last();
       await last.scrollIntoViewIfNeeded();
       assert(await last.isVisible(), 'Last outcome remains accessible');
+      if (width === 1280) {
+        // A long outcome wraps, so its ending is readable without scrolling.
+        await page.evaluate(() => {
+          cipherState.Servers[2].Message = 'Certificate verification failed. Check the CertCheck and CertStore options.';
+          TlsCipherDialog.showModal();
+        });
+        await page.waitForFunction(() => document.querySelector('#TlsCipherServers').textContent.includes('CertStore options'));
+        assert(await page.locator('#TlsCipherServers').evaluate(element => element.scrollWidth <= element.clientWidth), 'Outcome text wraps');
+      }
       if (process.env.NZBGET_UI_CAPTURE_DIR && [1280, 390].includes(width)) {
         // Keep injection assertions above; use ordinary sanitized labels in pictures.
         await page.evaluate(() => {

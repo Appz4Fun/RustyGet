@@ -3609,6 +3609,7 @@ body.phone,
 #TlsCipherDialog .tls-cipher-table { overflow-x: auto; max-width: 100%; margin-bottom: 16px; }
 #TlsCipherDialog table { width: 100%; margin-bottom: 0; }
 #TlsCipherDialog td, #TlsCipherDialog th { white-space: nowrap; text-align: left; }
+#TlsCipherServers td:last-child { white-space: normal; min-width: 14em; }
 #TlsCipherDialog #TlsCipherState, #TlsCipherDialog #TlsCipherCommon { overflow-wrap: anywhere; }
 #TlsCipherDialog .modal-footer { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 #TlsCipherDialog .modal-footer .btn { margin-left: 0; }

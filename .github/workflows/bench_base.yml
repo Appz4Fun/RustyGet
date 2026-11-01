@@ -26,8 +26,8 @@ jobs:
   canonical:
     name: Resolve the current canonical controller
     if: >-
-      ${{ github.repository == 'Appz4Fun/nzbget' &&
-          github.ref == 'refs/heads/dupe-article-fallback' }}
+      ${{ github.repository == 'Appz4Fun/RustyGet' &&
+          github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -42,11 +42,11 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$EVIDENCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          default_branch=$(gh api repos/Appz4Fun/nzbget --jq .default_branch)
-          [[ "$default_branch" == dupe-article-fallback ]]
-          canonical_sha=$(gh api repos/Appz4Fun/nzbget/branches/dupe-article-fallback --jq .commit.sha)
+          default_branch=$(gh api repos/Appz4Fun/RustyGet --jq .default_branch)
+          [[ "$default_branch" == main ]]
+          canonical_sha=$(gh api repos/Appz4Fun/RustyGet/branches/main --jq .commit.sha)
           [[ "$canonical_sha" == "$GITHUB_SHA" ]]
-          [[ "$GITHUB_WORKFLOW_REF" == Appz4Fun/nzbget/.github/workflows/bench_base.yml@refs/heads/dupe-article-fallback ]]
+          [[ "$GITHUB_WORKFLOW_REF" == Appz4Fun/RustyGet/.github/workflows/bench_base.yml@refs/heads/main ]]
           printf 'sha=%s\n' "$canonical_sha" >> "$GITHUB_OUTPUT"
 
   validate:
@@ -73,7 +73,7 @@ jobs:
           BENCH_TESTBED: ${{ inputs.testbed }}
         run: |
           python3 scripts/bench/publish.py --mode base \
-            --repository Appz4Fun/nzbget \
+            --repository Appz4Fun/RustyGet \
             --evidence-sha "$EVIDENCE_SHA" \
             --expected-base-sha "$CANONICAL_SHA" \
             --testbed "$BENCH_TESTBED" \
@@ -115,8 +115,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [[ $(gh api repos/Appz4Fun/nzbget --jq .default_branch) == dupe-article-fallback ]]
-          [[ $(gh api repos/Appz4Fun/nzbget/branches/dupe-article-fallback --jq .commit.sha) == "$CANONICAL_SHA" ]]
+          [[ $(gh api repos/Appz4Fun/RustyGet --jq .default_branch) == main ]]
+          [[ $(gh api repos/Appz4Fun/RustyGet/branches/main --jq .commit.sha) == "$CANONICAL_SHA" ]]
 
       - name: Diagnose publication configuration without exposing values
         id: config
@@ -157,7 +157,7 @@ jobs:
           BENCH_TESTBED: ${{ inputs.testbed }}
         run: |
           python3 scripts/bench/publish.py --mode base \
-            --repository Appz4Fun/nzbget \
+            --repository Appz4Fun/RustyGet \
             --evidence-sha "$EVIDENCE_SHA" \
             --expected-base-sha "$CANONICAL_SHA" \
             --testbed "$BENCH_TESTBED" \

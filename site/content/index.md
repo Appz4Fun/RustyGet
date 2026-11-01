@@ -38,4 +38,4 @@ See [Feature highlights](features.md) for the full list.
 
 ## Status
 
-RustyGet is in active development and runs in daily use. The C++ code inherited from NZBGet moves to Rust one module at a time, each port proven against the old code. There are no release packages yet, and the API may change as the rewrite goes on. Follow progress in the [Rust port status](rust-port.md) and the [repository](https://github.com/Appz4Fun/nzbget).
+RustyGet is in active development and runs in daily use. The C++ code inherited from NZBGet moves to Rust one module at a time, each port proven against the old code. There are no release packages yet, and the API may change as the rewrite goes on. Follow progress in the [Rust port status](rust-port.md) and the [repository](https://github.com/Appz4Fun/RustyGet).

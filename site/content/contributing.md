@@ -7,7 +7,7 @@ lede = "RustyGet is rewriting a mature program while people use it every day. Th
 
 ## Report a problem
 
-Open an issue in the [repository](https://github.com/Appz4Fun/nzbget/issues). Include:
+Open an issue in the [repository](https://github.com/Appz4Fun/RustyGet/issues). Include:
 
 - The commit you built, from `nzbget -v` or the footer of the web interface.
 - The settings involved, especially `DupeArticleFallback`, `HealthCheck`, and `DupeSearch`.
@@ -55,7 +55,7 @@ python3 tests/functional/dupefallback/harness.py --nzbget /tmp/nzbget-under-test
 
 Check the pass count, not just the exit code: a build without `-DENABLE_TESTS=ON` runs no unit tests and still exits with `0`.
 
-`--fallback-mode live` or `--fallback-mode stream` runs the scenarios written for a lower `DupeArticleFallback` mode under that one. The daemon gates its features on the order `no`, `article`, `stream`, `live`, so whatever passes under a mode must pass under every higher one. The scenario `dupesearchrealindexer` searches a real NZBHydra2 when `NZBHYDRA2_URL` and `NZBHYDRA2_APIKEY` are set, in the environment or in a `.env` file in the repository root, and is skipped without them. Every nzb-file it fetches counts as a grab at your indexers, so run it on purpose. See [Functional testing](https://github.com/Appz4Fun/RustyGet/blob/dupe-article-fallback/docs/FUNCTIONAL_TESTING.md) for the details.
+`--fallback-mode live` or `--fallback-mode stream` runs the scenarios written for a lower `DupeArticleFallback` mode under that one. The daemon gates its features on the order `no`, `article`, `stream`, `live`, so whatever passes under a mode must pass under every higher one. The scenario `dupesearchrealindexer` searches a real NZBHydra2 when `NZBHYDRA2_URL` and `NZBHYDRA2_APIKEY` are set, in the environment or in a `.env` file in the repository root, and is skipped without them. Every nzb-file it fetches counts as a grab at your indexers, so run it on purpose. See [Functional testing](https://github.com/Appz4Fun/RustyGet/blob/main/docs/FUNCTIONAL_TESTING.md) for the details.
 
 ## Edit the documentation
 

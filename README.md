@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="https://appz4fun.github.io/nzbget/"><img alt="Documentation" src="https://img.shields.io/badge/docs-appz4fun.github.io%2Fnzbget-a8400f"></a>
-  <a href="https://github.com/Appz4Fun/nzbget/actions/workflows/pages.yml"><img alt="Docs build" src="https://github.com/Appz4Fun/nzbget/actions/workflows/pages.yml/badge.svg"></a>
+  <a href="https://github.com/Appz4Fun/RustyGet/actions/workflows/pages.yml"><img alt="Docs build" src="https://github.com/Appz4Fun/RustyGet/actions/workflows/pages.yml/badge.svg"></a>
   <img alt="Rust 1.99.0" src="https://img.shields.io/badge/rust-1.99.0-1d6f60">
   <img alt="Status: rewrite in progress" src="https://img.shields.io/badge/status-rewrite%20in%20progress-8a5a00">
   <a href="COPYING"><img alt="License: GPL v2 or later" src="https://img.shields.io/badge/license-GPL--2.0--or--later-3d5a73"></a>
@@ -107,7 +107,7 @@ On 2026-10-09 the NZBGet maintainers closed it without merging, along with the r
 RustyGet runs on Linux and macOS. It has no release packages yet, so build it from source with CMake, a C++20 compiler, and Rust. The repository pins Rust 1.99.0, and rustup installs it on the first build.
 
 ```bash
-git clone https://github.com/Appz4Fun/nzbget.git rustyget
+git clone https://github.com/Appz4Fun/RustyGet.git rustyget
 cd rustyget
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j 8

@@ -54,12 +54,12 @@ github_actor=$(gh api --hostname github.com user --jq .login) || exit 1
 test "$github_actor" = xbmc4lyfe || exit 1
 canonical_remote=$(git remote get-url origin) || exit 1
 case "$canonical_remote" in
-  https://github.com/Appz4Fun/nzbget.git|https://github.com/Appz4Fun/nzbget) ;;
+  https://github.com/Appz4Fun/RustyGet.git|https://github.com/Appz4Fun/RustyGet) ;;
   *) printf "%s\n" "Expected project HTTPS remote" >&2; exit 1 ;;
 esac
 git status --porcelain
 git -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
-  fetch origin dupe-article-fallback
+  fetch origin main
 ```
 
 - Keep the demonstrated credential-helper override for authorized Git mutations

@@ -3,7 +3,7 @@ on:
   pull_request:
     paths: ['tools/nzbget-observe/**', '.github/workflows/observe.yml']
   push:
-    branches: [dupe-article-fallback]
+    branches: [main]
     paths: ['tools/nzbget-observe/**', '.github/workflows/observe.yml']
 permissions:
   contents: read

@@ -66,7 +66,7 @@ if "-DNZBGET_USE_RUST" not in get("CXX_DEFINES"):
     sys.exit("the build doesn't use Rust: nothing to compare")
 link = (BUILD / "CMakeFiles/nzbget.dir/link.txt").read_text()
 link = shlex.split(link)
-libs = link[link.index("liblibnzbget.a"):]
+libs = link[next(i for i, item in enumerate(link) if item.rsplit("/", 1)[-1] in ("libnzbget.a", "liblibnzbget.a")):]
 if os.environ.get("FSOPS_RUST_ARCHIVE"):
     libs = [os.environ["FSOPS_RUST_ARCHIVE"] if lib.endswith("/libnzbget_rs.a") else lib for lib in libs]
 

@@ -36,7 +36,7 @@ cxx_flags = re.search(r"^CXX_FLAGS = (.*)$", flags, re.M).group(1)
 defines = re.search(r"^CXX_DEFINES = (.*)$", flags, re.M).group(1)
 includes = re.search(r"^CXX_INCLUDES = (.*)$", flags, re.M).group(1)
 link = (BUILD / "CMakeFiles/nzbget.dir/link.txt").read_text().split()
-libs = [a for a in link[link.index("liblibnzbget.a"):]]
+libs = [a for a in link[next(i for i, item in enumerate(link) if item.rsplit("/", 1)[-1] in ("libnzbget.a", "liblibnzbget.a")):]]
 
 harness = r'''
 #include "nzbget.h"

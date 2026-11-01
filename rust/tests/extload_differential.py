@@ -75,7 +75,7 @@ def renamed(src, name, fallback=False):
 
 
 tests_main = (ROOT / "tests/main.cpp").read_text()
-# the globals liblibnzbget expects (nzbget.cpp defines them in the daemon)
+# the globals libnzbget expects (nzbget.cpp defines them in the daemon)
 globals_block = tests_main[tests_main.index('#include "ServerPool.h"'):tests_main.index("void ExitProc(){}") + len("void ExitProc(){}")]
 
 old_src = subprocess.check_output(["git", "show", f"{REFERENCE}:daemon/extension/ExtensionLoader.cpp"], cwd=ROOT, text=True)
@@ -86,7 +86,7 @@ get = lambda k: re.search(rf"^{k} = (.*)$", flags, re.M).group(1)
 if "-DNZBGET_USE_RUST" not in get("CXX_DEFINES"):
     sys.exit("the build doesn't use Rust: nothing to compare")
 link = shlex.split((BUILD / "CMakeFiles/nzbget.dir/link.txt").read_text())
-libs = link[link.index("liblibnzbget.a"):]
+libs = link[next(i for i, item in enumerate(link) if item.rsplit("/", 1)[-1] in ("libnzbget.a", "liblibnzbget.a")):]
 
 main = r'''
 #include "nzbget.h"

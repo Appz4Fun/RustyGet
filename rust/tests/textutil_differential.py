@@ -92,7 +92,7 @@ get = lambda k: re.search(rf"^{k} = (.*)$", flags, re.M).group(1)
 if "-DNZBGET_USE_RUST" not in get("CXX_DEFINES"):
     sys.exit("the build doesn't use Rust: nothing to compare")
 link = (BUILD / "CMakeFiles/nzbget.dir/link.txt").read_text().split()
-libs = link[link.index("liblibnzbget.a"):]
+libs = link[next(i for i, item in enumerate(link) if item.rsplit("/", 1)[-1] in ("libnzbget.a", "liblibnzbget.a")):]
 
 main = r'''
 #include "nzbget.h"
@@ -339,7 +339,9 @@ with tempfile.TemporaryDirectory(prefix="nzbget-textutil-") as temp:
     (temp / "main.cpp").write_text(main)
     binary = temp / "textutil"
     sanitizer_flags = ["-O1", "-g", "-fsanitize=address,undefined", "-fno-sanitize-recover=all"]
-    for extra, mode in ((sanitizer_flags, "bounded"), ([], "extreme"),
+    # The extreme pass relies on the pre-port int arithmetic wrapping, which is
+    # what GCC compiles it to; clang may widen it instead, so make it explicit.
+    for extra, mode in ((sanitizer_flags, "bounded"), (["-fwrapv"], "extreme"),
                         (sanitizer_flags + ["-funsigned-char", "-DTEXTUTIL_WRAPPERS_ONLY"], "bounded"),
                         (sanitizer_flags + ["-fsigned-char", "-DTEXTUTIL_WRAPPERS_ONLY"], "bounded")):
         subprocess.run([*shlex.split(os.environ.get("CXX", "c++")), *shlex.split(get("CXX_FLAGS")), *shlex.split(get("CXX_DEFINES")),

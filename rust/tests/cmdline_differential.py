@@ -48,7 +48,7 @@ get = lambda k: re.search(rf"^{k} = (.*)$", flags, re.M).group(1)
 if "-DNZBGET_USE_RUST" not in get("CXX_DEFINES"):
     sys.exit("the build doesn't use Rust: nothing to compare")
 link = (BUILD / "CMakeFiles/nzbget.dir/link.txt").read_text().split()
-libs = link[link.index("liblibnzbget.a"):]
+libs = link[next(i for i, item in enumerate(link) if item.rsplit("/", 1)[-1] in ("libnzbget.a", "liblibnzbget.a")):]
 # Exercise an independently configured Debug Rust archive with the same C++
 # dependencies, without rebuilding the whole application a second time.
 if os.environ.get("CMDLINE_RUST_ARCHIVE"):
@@ -285,7 +285,10 @@ void TestSinkExceptions()
     (temp / "old.cpp").write_text(renamed(old_src, old_header, "OldCommandLineParser"))
     (temp / "fallback.cpp").write_text(renamed(new_src, header, "FallbackCommandLineParser", fallback=True))
     binary = temp / "cmdline"
-    for extra in (["-O1", "-g", "-fsanitize=address,undefined", "-fno-sanitize-recover=all"], []):
+    # -R nan exercises the host's float-to-int conversion on purpose (see the
+    # comment at the sink); clang's "undefined" group includes float-cast-overflow.
+    for extra in (["-O1", "-g", "-fsanitize=address,undefined", "-fno-sanitize=float-cast-overflow",
+                   "-fno-sanitize-recover=all"], []):
         subprocess.run([*shlex.split(os.environ.get("CXX", "c++")), *shlex.split(os.environ.get("CMDLINE_CXX_FLAGS", get("CXX_FLAGS"))), *shlex.split(get("CXX_DEFINES")),
                         *extra, "-w", *shlex.split(get("CXX_INCLUDES")), str(temp / "main.cpp"), str(temp / "old.cpp"),
                         str(temp / "fallback.cpp"), str(temp / "new.cpp"), "-o", str(binary),

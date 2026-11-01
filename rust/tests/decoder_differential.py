@@ -48,7 +48,7 @@ get = lambda k: re.search(rf"^{k} = (.*)$", flags, re.M).group(1)
 if "-DNZBGET_USE_RUST" not in get("CXX_DEFINES"):
     sys.exit("the build doesn't use Rust: nothing to compare")
 link = (BUILD / "CMakeFiles/nzbget.dir/link.txt").read_text().split()
-libs = link[link.index("liblibnzbget.a"):]
+libs = link[next(i for i, item in enumerate(link) if item.rsplit("/", 1)[-1] in ("libnzbget.a", "liblibnzbget.a")):]
 
 harness = r'''
 #include "nzbget.h"

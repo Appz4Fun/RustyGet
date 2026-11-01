@@ -6156,7 +6156,14 @@ def _real_indexer():
         (v for k, v in env.items() if 'HYDRA' in k.upper() and 'URL' in k.upper()), None)
     key = env.get(REAL_INDEXER_KEY_VAR) or next(
         (v for k, v in env.items() if 'HYDRA' in k.upper() and 'KEY' in k.upper()), None)
-    return (url, key) if url and key else None
+    if not url or not key:
+        return None
+    # NZBHydra2's Newznab endpoint is <base>/api; a URL copied from the browser
+    # is the base, which answers every query with the web page
+    url = url.strip().rstrip('/')
+    if not url.endswith('/api'):
+        url += '/api'
+    return (url, key.strip())
 
 
 def _real_indexer_options():

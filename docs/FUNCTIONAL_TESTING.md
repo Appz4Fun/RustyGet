@@ -128,7 +128,8 @@ python3 tests/functional/dupefallback/harness.py --nzbget /absolute/build/nzbget
 
 `dupesearchrealindexer` runs the duplicate search against a real Newznab
 indexer (NZBHydra2) instead of the fake one. It needs `NZBHYDRA2_URL` (the
-api endpoint, for example `http://hydra.local:5076/api`) and
+api endpoint, for example `http://hydra.local:5076/api`; the base URL from
+the browser's address bar works too, `/api` is appended) and
 `NZBHYDRA2_APIKEY`, from the environment or from a `.env` file in the
 repository root (ignored by git); without them it is a `SKIP`. It asks the
 indexer for its newest scene-named TV posting with the fewest other listings,

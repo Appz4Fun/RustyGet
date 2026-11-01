@@ -33,11 +33,6 @@ On POSIX systems:
 ~/usr/etc/nzbget.conf
 ```
 
-On Windows:
-```
-<EXE-DIR>\nzbget.conf
-```
-
 If you put the configuration file in other place, you can use command-
 line switch "-c `<filename>`" to point the program to correct location.
 
@@ -49,12 +44,6 @@ options via command-line.
 
 NZBGet can be used in either standalone mode which downloads a single file 
 or as a server which is able to queue up numerous download requests.
-
-TIP for Windows users: NZBGet is controlled via various command line
-parameters. For easier using there is a simple shell script included
-in "nzbget-shell.bat". Start this script from Windows Explorer and you will
-be running a command shell with PATH adjusted to find NZBGet executable.
-Then you can type all commands without full path to nzbget.exe.
 
 ### Standalone mode:
 --------------------
@@ -217,7 +206,7 @@ transmitted in unsecured way. For this reason it is highly recommended
 to configure your Firewall to not expose the port used by NZBGet to WAN. 
 
 If you need to control server from WAN it is better to connect to server's
-terminal via SSH (POSIX) or remote desktop (Windows) and then run
+terminal via SSH and then run
 nzbget-client-commands in this terminal.
 
 ### Web-interface
@@ -250,3 +239,8 @@ http://localhost:6789/username:password/
 Please note, that in this case the password is saved in a bookmark or in
 browser history in plain text and is easy to find by persons having
 access to your computer.
+
+## RSS and duplicate check
+
+
+### Coming soon

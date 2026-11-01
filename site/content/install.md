@@ -1,8 +1,8 @@
 +++
 title = "Install and build"
-description = "Build RustyGet from source on Linux, macOS, or FreeBSD with CMake and the pinned Rust toolchain, then run it as a service."
+description = "Build RustyGet from source on Linux or macOS with CMake and the pinned Rust toolchain, then run it as a service."
 eyebrow = "Get started"
-lede = "RustyGet builds from source with CMake, a C++20 compiler, and Rust. Release packages come back once the build workflows are rebuilt for the rewrite."
+lede = "RustyGet runs on Linux and macOS, and builds from source with CMake, a C++20 compiler, and Rust. Release packages come back once the build workflows are rebuilt for the rewrite."
 +++
 
 > [!IMPORTANT] No release packages yet
@@ -37,12 +37,6 @@ macOS with Homebrew:
 ```bash
 xcode-select --install
 brew install cmake ncurses openssl libxml2 zlib boost
-```
-
-FreeBSD:
-
-```bash
-pkg install cmake ncurses openssl libxml2 zlib boost-libs
 ```
 
 ### Install Rust

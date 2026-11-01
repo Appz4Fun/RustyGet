@@ -30,12 +30,8 @@ body:
     description: Select a specific platform for this issue, choose All if it applies to all platforms
     options:
     - All
-    - Windows
     - macOS
-    - NAS/Synology/QNAP
     - Linux/Docker
-    - FreeBSD
-    - Android
   validations:
     required: true
 - type: textarea

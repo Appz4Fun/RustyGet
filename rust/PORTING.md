@@ -187,8 +187,7 @@ sources, lockfile, build scripts, and configuration. Both the daemon and test
 executable inherit the archive and Rust's native link dependencies.
 Static executable builds select Rust's static CRT dependencies as well.
 
-Windows keeps the original C++ encoders, so its existing build does not acquire a
-Rust dependency. Non-macOS cross builds also keep C++ unless a matching target is
+Non-macOS cross builds keep C++ unless a matching target is
 provided with `-DNZBGET_RUST_TARGET=<triple>`. macOS selects the target from the
 CMake architecture and forwards `CMAKE_OSX_DEPLOYMENT_TARGET`. Install the Rust
 standard library for the chosen target to enable Rust for that architecture.

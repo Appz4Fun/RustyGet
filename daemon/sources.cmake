@@ -1,6 +1,7 @@
 target_sources(libnzbget PRIVATE
 	${CMAKE_SOURCE_DIR}/daemon/connect/Connection.cpp
 	${CMAKE_SOURCE_DIR}/daemon/connect/TlsSocket.cpp
+	${CMAKE_SOURCE_DIR}/daemon/connect/TlsCipherBackend.cpp
 	${CMAKE_SOURCE_DIR}/daemon/connect/WebDownloader.cpp
 	${CMAKE_SOURCE_DIR}/daemon/connect/HttpClient.cpp
 	${CMAKE_SOURCE_DIR}/daemon/connect/NetworkSpeedTest.cpp
@@ -156,16 +157,6 @@ target_sources(libnzbget PRIVATE
 	${CMAKE_SOURCE_DIR}/daemon/systemhealth/ConnectionValidator.cpp
 	${CMAKE_SOURCE_DIR}/daemon/systemhealth/DisplayValidator.cpp
 )
-
-if(WIN32)
-	target_sources(libnzbget PRIVATE
-		${CMAKE_SOURCE_DIR}/daemon/windows/StdAfx.cpp
-		${CMAKE_SOURCE_DIR}/daemon/windows/WinConsole.cpp
-		${CMAKE_SOURCE_DIR}/daemon/windows/WinService.cpp
-		${CMAKE_SOURCE_DIR}/daemon/util/Utf8.cpp
-	)
-	target_include_directories(libnzbget PUBLIC ${CMAKE_SOURCE_DIR}/platforms/windows)
-endif()
 
 target_include_directories(libnzbget PUBLIC
 	${CMAKE_SOURCE_DIR}/daemon/connect

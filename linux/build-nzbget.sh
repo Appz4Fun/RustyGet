@@ -30,15 +30,12 @@ COREX=4
 TESTING="no"
 
 # build variables
-ALL_ARCHS="armel armhf aarch64 i686 x86_64 riscv64 ppc6xx i686-ndk x86_64-ndk armhf-ndk aarch64-ndk x86_64-bsd"
-ALL_PLATFORMS="linux android freebsd"
+ALL_ARCHS="armel armhf aarch64 i686 x86_64 riscv64 ppc6xx"
+ALL_PLATFORMS="linux"
 OUTPUTDIR=build
 BUILDROOT_HOME=/build
 LIB_SRC_PATH=$BUILDROOT_HOME/source
 LIB_PATH=$BUILDROOT_HOME/lib
-# freebsd variables
-FREEBSD_SYSROOT=/build/freebsd/sysroot
-FREEBSD_CLANG_VER=14
 
 # unpackers versions (nzbgetcom/7zip and nzbgetcom/unrar release tags)
 . "$PWD/unpackers.env"
@@ -74,7 +71,7 @@ parse_args()
     for PARAM in "$@"
     do
         case $PARAM in
-            android|linux|freebsd)
+            linux)
                 PLATFORMS=`echo "$PLATFORMS $PARAM" | xargs`
                 ;;
             release|debug)
@@ -139,13 +136,7 @@ parse_args()
     for ARCH in $ARCHS; do
         ARCH_NEED=0
         for PLATFORM in $PLATFORMS; do
-            if [[ $ARCH == *-ndk ]] && [ "$PLATFORM" == "android" ]; then
-                ARCH_NEED=1
-            fi
-            if [[ $ARCH == *-bsd ]] && [ "$PLATFORM" == "freebsd" ]; then
-                ARCH_NEED=1
-            fi
-            if [[ $ARCH != *-ndk ]] && [[ $ARCH != *-bsd ]] && [ "$PLATFORM" == "linux" ]; then
+            if [ "$PLATFORM" == "linux" ]; then
                 ARCH_NEED=1
             fi
         done
@@ -182,13 +173,7 @@ filter_archs()
     PLATFORM_ARCHS=""
     for ARCH in $ARCHS
     do
-        if [[ $ARCH == *-ndk ]] && [ "$PLATFORM" == "android" ]; then
-            PLATFORM_ARCHS=`echo "$PLATFORM_ARCHS $ARCH" | xargs`
-        fi
-        if [[ $ARCH == *-bsd ]] && [ "$PLATFORM" == "freebsd" ]; then
-            PLATFORM_ARCHS=`echo "$PLATFORM_ARCHS $ARCH" | xargs`
-        fi
-        if [[ $ARCH != *-ndk ]] && [[ $ARCH != *-bsd ]] && [ "$PLATFORM" == "linux" ]; then
+        if [ "$PLATFORM" == "linux" ]; then
             PLATFORM_ARCHS=`echo "$PLATFORM_ARCHS $ARCH" | xargs`
         fi
     done
@@ -196,8 +181,7 @@ filter_archs()
 
 get_short_arch()
 {
-    ARCH_SHORT="${ARCH/-ndk/}"
-    ARCH_SHORT="${ARCH_SHORT/-bsd/}"
+    ARCH_SHORT="$ARCH"
 }
 
 download_lib_source()
@@ -253,11 +237,7 @@ build_lib()
                 --prefix="$PWD/../$LIB"
                 ;;
             zlib)
-                if [ "$PLATFORM" == "freebsd" ]; then
-                    LIBS="$FREEBSD_SYSROOT/libs" ./configure --static --prefix="$PWD/../$LIB"
-                else
-                    ./configure --static --prefix="$PWD/../$LIB"
-                fi
+                ./configure --static --prefix="$PWD/../$LIB"
                 ;;
             libxml2)
                 ./autogen.sh --host=$HOST \
@@ -295,43 +275,6 @@ build_lib()
                     ppc6xx)
                         OPENSSL_ARCH=linux-ppc
                         ;;
-                    x86_64-bsd)
-                        OPENSSL_ARCH=BSD-x86_64
-                        ;;
-                    *-ndk)
-                        _CC=$CC
-                        unset CC
-                        _CPP=$CPP
-                        unset CPP
-                        _CXX=$CXX
-                        unset CXX
-                        _AR=$AR
-                        unset AR
-                        _STRIP=$STRIP
-                        unset STRIP
-                        OPENSSL_OPTS="-D__ANDROID_API__=21 no-asm"
-                        export ANDROID_NDK_ROOT="$TOOLCHAIN_PATH/android-ndk"
-                        case $ARCH in
-                            i686-ndk)
-                                OPENSSL_ARCH=android-x86
-                                ANDROID_TOOLCHAIN=x86-4.9
-                                ;;
-                            x86_64-ndk)
-                                OPENSSL_ARCH=android-x86_64
-                                ANDROID_TOOLCHAIN=x86_64-4.9
-                                ;;
-                            armhf-ndk)
-                                OPENSSL_ARCH=android-arm
-                                ANDROID_TOOLCHAIN=arm-linux-androideabi-4.9
-                                ;;
-                            aarch64-ndk)
-                                OPENSSL_ARCH=android-arm64
-                                ANDROID_TOOLCHAIN=aarch64-linux-android-4.9
-                                ;;
-                        esac
-                        _PATH=$PATH
-                        export PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin:$ANDROID_NDK_ROOT/toolchains/$ANDROID_TOOLCHAIN/prebuilt/linux-x86_64/bin:$PATH"
-                        ;;
                     *)
                         OPENSSL_ARCH=linux-$ARCH
                         ;;
@@ -352,13 +295,8 @@ build_lib()
                 ;;
             boost)
                 ./bootstrap.sh --with-libraries=json,filesystem --prefix="$PWD/../$LIB"
-                if [ "$PLATFORM" == "freebsd" ]; then
-                    echo "using clang : clang : clang-$FREEBSD_CLANG_VER ; " >>  project-config.jam
-                    ./b2 --toolset=clang cxxflags="--target=x86_64-pc-freebsd --sysroot=$FREEBSD_SYSROOT -I$FREEBSD_SYSROOT/usr/include/c++/v1" cxxstd=14 link=static runtime-link=static install
-                else
-                    echo "using gcc : buildroot : $CXX ; " >>  project-config.jam
-                    ./b2 --toolset=gcc-buildroot cxxstd=14 link=static runtime-link=static install
-                fi
+                echo "using gcc : buildroot : $CXX ; " >>  project-config.jam
+                ./b2 --toolset=gcc-buildroot cxxstd=14 link=static runtime-link=static install
                 ;;
         esac
         if [ "$LIB" != "boost" ]; then
@@ -368,16 +306,6 @@ build_lib()
             else
                 make install
             fi
-        fi
-        # restore vars after android openssl build
-        if [ "$LIB" == "openssl" ]  && [ "$PLATFORM" == "android" ] ; then
-            export CC=$_CC
-            export CPP=$_CPP
-            export CXX=$_CXX
-            export AR=$_AR
-            export STRIP=$_STRIP
-            export PATH=$_PATH
-            unset ANDROID_NDK_ROOT
         fi
         cd ..
         rm -rf ${LIB_SRC_FILE/.tar.gz/}
@@ -506,66 +434,21 @@ build_bin()
             export HOST="powerpc-buildroot-linux-musl"
             CMAKE_SYSTEM_PROCESSOR="powerpc"
             ;;
-        i686-ndk)
-            export HOST="i686-linux-android"
-            CMAKE_SYSTEM_PROCESSOR="i686"
-            ;;
-        x86_64-ndk)
-            export HOST="x86_64-linux-android"
-            CMAKE_SYSTEM_PROCESSOR="x86_64"
-            ;;
-        armhf-ndk)
-            export HOST="arm-linux-androideabi"
-            CMAKE_SYSTEM_PROCESSOR="arm"
-            ;;
-        aarch64-ndk)
-            export HOST="aarch64-linux-android"
-            CMAKE_SYSTEM_PROCESSOR="aarch64"
-            ;;
-        x86_64-bsd)
-            export HOST="x86_64-bsd"
-            CMAKE_SYSTEM_PROCESSOR="x86_64"
-            ;;
     esac
 
 
-    case $PLATFORM in
-        android)
-            TOOLCHAIN_PATH=$BUILDROOT_HOME/android
-            unset CPP
-            export CC="$TOOLCHAIN_PATH/$ARCH/output/host/usr/bin/$HOST-clang"
-            export CXX="$TOOLCHAIN_PATH/$ARCH/output/host/usr/bin/$HOST-clang++"
-            export AR="$TOOLCHAIN_PATH/$ARCH/output/host/usr/bin/$HOST-ar"
-            export STRIP="$TOOLCHAIN_PATH/$ARCH/output/host/usr/bin/$HOST-strip"
-            ;;
-        freebsd)
-            export CC="clang-$FREEBSD_CLANG_VER"
-            export CPP="clang-cpp-$FREEBSD_CLANG_VER"
-            export CXX="clang++-$FREEBSD_CLANG_VER"
-            unset AR
-            unset STRIP
-            ;;
-        *)
-            TOOLCHAIN_PATH=$BUILDROOT_HOME/buildroot
-            export CC="$TOOLCHAIN_PATH/$ARCH/output/host/usr/bin/$HOST-gcc"
-            export CPP="$TOOLCHAIN_PATH/$ARCH/output/host/usr/bin/$HOST-cpp"
-            export CXX="$TOOLCHAIN_PATH/$ARCH/output/host/usr/bin/$HOST-g++"
-            export AR="$TOOLCHAIN_PATH/$ARCH/output/host/usr/bin/$HOST-ar"
-            export STRIP="$TOOLCHAIN_PATH/$ARCH/output/host/usr/bin/$HOST-strip"
-            ;;
-    esac
+    TOOLCHAIN_PATH=$BUILDROOT_HOME/buildroot
+    export CC="$TOOLCHAIN_PATH/$ARCH/output/host/usr/bin/$HOST-gcc"
+    export CPP="$TOOLCHAIN_PATH/$ARCH/output/host/usr/bin/$HOST-cpp"
+    export CXX="$TOOLCHAIN_PATH/$ARCH/output/host/usr/bin/$HOST-g++"
+    export AR="$TOOLCHAIN_PATH/$ARCH/output/host/usr/bin/$HOST-ar"
+    export STRIP="$TOOLCHAIN_PATH/$ARCH/output/host/usr/bin/$HOST-strip"
 
     # clean build flags
     export CXXFLAGS="-Os"
     export CPPFLAGS="-Os"
     export LDFLAGS=""
     export NZBGET_INCLUDES="$TOOLCHAIN_PATH/$ARCH/output/staging/usr/include/;"
-
-    if [ "$PLATFORM" == "freebsd" ]; then
-        export CXXFLAGS="-Os --sysroot=$FREEBSD_SYSROOT -I$FREEBSD_SYSROOT/usr/include/c++/v1"
-        export CFLAGS=$CXXFLAGS
-        export CPPFLAGS=$CXXFLAGS
-    fi
 
     build_lib "https://invisible-island.net/archives/ncurses/ncurses-$NCURSES_VERSION.tar.gz"
     build_lib "https://zlib.net/zlib-$ZLIB_VERSION.tar.gz"
@@ -577,22 +460,8 @@ build_bin()
     CMAKE_SYSTEM_NAME="Linux"
     CMAKE_EXTRA_ARGS=""
     TOOLCHAIN_PREFIX="$TOOLCHAIN_PATH/$ARCH/output/host/usr/bin/$HOST"
-    case $PLATFORM in
-        android)
-            export LIBS="$LDFLAGS -lxml2 -lboost_json -lboost_filesystem -lssl -lcrypto -lz -lncursesw -latomic"
-            CMAKE_EXTRA_ARGS="-DCOMPILER=clang -DTOOLCHAIN_PREFIX=$TOOLCHAIN_PREFIX"
-            ;;
-        freebsd)
-            export LIBS="$LDFLAGS -lxml2 -lboost_json -lssl -lcrypto -lz -lncursesw -lc++ -lexecinfo -lelf -Wl,--whole-archive -lpthread -Wl,--no-whole-archive"
-            export INCLUDES="$NZBGET_INCLUDES;$FREEBSD_SYSROOT/usr/include/c++/v1"
-            CMAKE_SYSTEM_NAME="FreeBSD"
-            CMAKE_EXTRA_ARGS="-DCMAKE_SYSROOT=$FREEBSD_SYSROOT -DCMAKE_CXX_FLAGS=-I$FREEBSD_SYSROOT/usr/include/c++/v1"
-            ;;
-        *)
-            export LIBS="$LDFLAGS -lxml2 -lrt -lboost_json -lc -lssl -lcrypto -lz -lncursesw -latomic -Wl,--whole-archive -lpthread -Wl,--no-whole-archive"
-            CMAKE_EXTRA_ARGS="-DTOOLCHAIN_PREFIX=$TOOLCHAIN_PREFIX"
-            ;;
-    esac
+    export LIBS="$LDFLAGS -lxml2 -lrt -lboost_json -lc -lssl -lcrypto -lz -lncursesw -latomic -Wl,--whole-archive -lpthread -Wl,--no-whole-archive"
+    CMAKE_EXTRA_ARGS="-DTOOLCHAIN_PREFIX=$TOOLCHAIN_PREFIX"
 
     unset CFLAGS
     unset CXXFLAGS

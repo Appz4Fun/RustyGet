@@ -1,5 +1,7 @@
 # C++ dependency and platform retirement
 
+Windows, Android, QNAP, Synology, FreeBSD, Flatpak and Snap were retired on 2026-10-30; see [Retired paths](../RUST_MIGRATION_STATUS.md#retired-paths). Statements below about those targets describe the recorded source commits.
+
 Original dependency snapshot default: `badf75a2007ad01e21eedfd677b835ff9860cd51`. Application source and CMake inputs are unchanged from the source inventory at `4cf19abd`; that intervening default change affected WebUI assets only. Supplemental caller/platform/reference audits bind `7d3d6412f93cd43452f1b390b4ed705c7691df54`. Refresh the actual default before integration. This is source inspection, not a native build, profiling result, or replacement qualification.
 
 The recorded `df05caed` feature subject remains historical collection provenance; it is not required to be retrievable from a single-head reviewed checkout. The separate `local_blob_source_commit` binds refreshed default ancestor `dad395285b4fba2392aed6b1fbff0fd305d5792d`, and every local source blob is independently checked against that object. These roles are distinct; the old collection subject is not relabeled as a different checkout.

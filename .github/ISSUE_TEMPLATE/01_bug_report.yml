@@ -39,12 +39,8 @@ body:
     description: Select a specific platform for this bug report, choose All if it applies to all platforms
     options:
     - All
-    - Windows
     - macOS
-    - NAS/Synology/QNAP/ASUSTOR
     - Linux/Docker
-    - FreeBSD
-    - Android
   validations:
     required: true
 - type: textarea

@@ -19,16 +19,22 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
-REFERENCE = "75817c42"
+# The pre-port C++ (daemon/queue/Deobfuscation.cpp and .h) is pinned by blob so
+# that the pin does not depend on the commit that last changed it. The .cpp blob
+# is the reference after nzbgetcom/nzbget #1057 (short mixed hashes, brackets,
+# product names) was applied to it.
+REFERENCE_CPP = "7f0da06d5463f1629b91365c3ad3a2f6b22f7a95"
+REFERENCE_H = "d743ed4e2fac6bdaca90bf6598866003e41aae1c"
+REFERENCE = REFERENCE_CPP[:8]
 BUILD = Path(sys.argv[1]).resolve()
 INPUTS = [str(Path(a).resolve()) for a in sys.argv[2:]]
 for path in INPUTS:
     if not Path(path).is_file():
         sys.exit(f"Input file does not exist: {path}")
 
-old = subprocess.check_output(["git", "show", f"{REFERENCE}:daemon/queue/Deobfuscation.cpp"], cwd=ROOT, text=True)
+old = subprocess.check_output(["git", "show", REFERENCE_CPP], cwd=ROOT, text=True)
 old = old.replace('#include "Deobfuscation.h"', '#include "OldDeobfuscation.h"').replace("namespace Deobfuscation", "namespace OldDeobfuscation")
-header = subprocess.check_output(["git", "show", f"{REFERENCE}:daemon/queue/Deobfuscation.h"], cwd=ROOT, text=True)
+header = subprocess.check_output(["git", "show", REFERENCE_H], cwd=ROOT, text=True)
 header = header.replace("namespace Deobfuscation", "namespace OldDeobfuscation").replace("DEOBFUSCATION_H", "OLDDEOBFUSCATION_H")
 
 flags = (BUILD / "CMakeFiles/libnzbget.dir/flags.make").read_text()
@@ -36,7 +42,8 @@ get = lambda k: re.search(rf"^{k} = (.*)$", flags, re.M).group(1)
 if "-DNZBGET_USE_RUST" not in shlex.split(get("CXX_DEFINES")):
     sys.exit("Build must enable Rust; otherwise this would compare C++ with C++")
 link = shlex.split((BUILD / "CMakeFiles/nzbget.dir/link.txt").read_text())
-libs = link[link.index("liblibnzbget.a"):]
+# the daemon library is libnzbget.a (OUTPUT_NAME nzbget); older builds named it liblibnzbget.a
+libs = link[next(i for i, item in enumerate(link) if item.endswith(("/libnzbget.a", "liblibnzbget.a")) or item == "libnzbget.a"):]
 libs = [str(BUILD / lib) if not lib.startswith(("-", "/")) else lib for lib in libs]
 
 harness = r'''
@@ -81,7 +88,10 @@ int main(int argc, char** argv) {
     const char* parts[] = {"Interstellar", "OPPENHEIMER", "The", "Of", "Into", "MQHeRbSCIoPs", "BCDFGHJKLMNP", "5KzdcWdGVGUG83Q9jv8KXht4O2k57w",
         "1234567890123456", "abc", "xyz", "123", "b00bs", "Backup_12345S01-02", "123456_01", "ABCDEFGHIJK123", "abcdefghijkl123",
         "part01", "vol01+02", ".rar", ".par2", ".001", ".mkv", ".7z", ".r01", ".sfv", "2014", "II", "XIV", "\xe9t\xe9", "S01E02",
-        " yEnc (1/50)", "\"", "\"\"", "[PRiVATE]-[", "]-[", " - \"\"", "[", "]", "-", "/", "Re: ", " (", ".", "_", " ", "1080p"};
+        " yEnc (1/50)", "\"", "\"\"", "[PRiVATE]-[", "]-[", " - \"\"", "[", "]", "(", ")", "-", "/", "Re: ", " (", ".", "_", " ", "1080p",
+        // nzbgetcom #1057: short mixed hashes, alternations, brackets, product names, tags, numeric stems
+        "xK1RT5Er", "xKRTvErc", "aBcDeFgH", "a4f9c2e1b8", "bcdfghjklmnpq", "iPhone13Pro", "macOSVentura", "eBayPlus",
+        "hevc10bit", "x264Hi10P", "S01E01E02", "S01E01v2", "60fps", "720p", "Show", "deadbeefcafe1234", "9780141036144", "1712345678"};
     for (const char* loc : {"C", "C.UTF-8", "en_US.ISO8859-1"}) {
         if (!setlocale(LC_CTYPE, loc)) { printf("locale %s unavailable\n", loc); continue; }
         for (auto& l : lines) check(l);

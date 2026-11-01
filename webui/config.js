@@ -3818,19 +3818,29 @@ var UpdateDialog = (new function($)
 
 		var installedVer = installedVersion;
 
+		// A plain string "<" sorts "26.10" below "26.3": compare the numeric parts.
+		function versionLess(left, right)
+		{
+			if (!right)
+			{
+				return false;
+			}
+			return String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: 'base' }) < 0;
+		}
+
 		var canInstallStable = UpdateInfo['stable-version'] &&
-			(installedVer < UpdateInfo['stable-version']);
+			versionLess(installedVer, UpdateInfo['stable-version']);
 		var canInstallTesting = UpdateInfo['testing-version'] &&
-			(installedVer < UpdateInfo['testing-version']);
+			versionLess(installedVer, UpdateInfo['testing-version']);
 			  
 			  
 		Util.show('#UpdateDialog_InstallStable', canInstallStable);
 		Util.show('#UpdateDialog_InstallTesting', canInstallTesting);
 
-		var canDownloadStable = 
-			(installedVer < VersionInfo['stable-version']);
-		var canDownloadTesting = 
-			(installedVer < VersionInfo['testing-version']);
+		var canDownloadStable =
+			versionLess(installedVer, VersionInfo['stable-version']);
+		var canDownloadTesting =
+			versionLess(installedVer, VersionInfo['testing-version']);
 			  
 			  
 		Util.show('#UpdateDialog_DownloadStable', canDownloadStable);

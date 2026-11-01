@@ -560,7 +560,12 @@ std::unique_ptr<Connection> Connection::Accept()
 
 	InitSocketOpts(socket);
 
-	return std::make_unique<Connection>(socket, m_tls);
+	// InitSocketOpts() applied the listener's timeout to the new socket:
+	// keep the Connection's own idea of it (used by the poll/select waits)
+	// in step instead of the constructor's default
+	auto acceptedConnection = std::make_unique<Connection>(socket, m_tls);
+	acceptedConnection->SetTimeout(m_timeout);
+	return acceptedConnection;
 }
 
 int Connection::TryRecv(char* buffer, int size)

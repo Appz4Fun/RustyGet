@@ -1190,7 +1190,9 @@ def scenario_declaredcountnopair(daemon, t):
     daemon.append(api, 'RelCount', primary, False, 'dc-key', 100)
     h = daemon.wait_history(api, 'RelCount')
     recovered = int(h.get('DupeRecoveredArticles', 0))
-    borrowed = _grep_log(t, 'from duplicate collections')
+    # (the borrowing's own message; "Queueing stream repair ... from duplicate
+    # collections" under the stream/live modes is not a borrowed article)
+    borrowed = _grep_log(t, 'missing article(s) of Rel.bin from duplicate collections')
     ok = recovered == 0 and borrowed == 0 and int(h.get('FailedArticles', 0)) == 3
     return ('declaredcountnopair', ok, 'status=%s recovered=%d recovered_logs=%d failed_articles=%s'
             % (h['Status'], recovered, borrowed, h.get('FailedArticles')))
@@ -3243,11 +3245,17 @@ def scenario_reloadpostqueue(daemon, t):
             'status=%s integrity=%s' % (status, integ))
 
 
+# the archive tools the daemon shells out to, wherever this host has them: the
+# harness runs on Linux and macOS, and a distribution's path isn't portable. A
+# scenario that names a tool the host lacks is skipped (see main()).
+UNRAR_CMD = 'UnrarCmd=%s' % (generators.UNRAR_PATH or 'unrar')
+SEVENZIP_CMD = 'SevenZipCmd=%s' % (generators.SEVENZIP_PATH or '7z')
+
 PROD_OPTIONS = ['DupeArticleFallback=live', 'DupeStreamDecompress=yes', 'ContinuePartial=yes',
                 'ArticleCache=8192', 'FileNaming=auto', 'ReorderFiles=yes', 'PostStrategy=rocket',
                 'ParCheck=auto', 'ParRepair=yes', 'ParScan=dupe', 'ParQuick=yes', 'ParRename=yes',
                 'RarRename=yes', 'DirectRename=yes', 'HealthCheck=dupe', 'Unpack=yes', 'DirectUnpack=yes',
-                'UnrarCmd=/usr/bin/unrar', 'SevenZipCmd=/usr/bin/7z', 'ArticleRetries=0']
+                UNRAR_CMD, SEVENZIP_CMD, 'ArticleRetries=0']
 
 
 def _prod_7z_set(t, tag, movie, volume_kb=1500):
@@ -3257,7 +3265,7 @@ def _prod_7z_set(t, tag, movie, volume_kb=1500):
     work = _tf.mkdtemp(prefix='prod7z-')
     with open(os.path.join(work, 'movie.mkv'), 'wb') as f:
         f.write(movie)
-    subprocess.run(['/usr/bin/7z', 'a', '-mx0', '-v%dk' % volume_kb, 'out.7z', 'movie.mkv'], cwd=work,
+    subprocess.run([generators.SEVENZIP_PATH, 'a', '-mx0', '-v%dk' % volume_kb, 'out.7z', 'movie.mkv'], cwd=work,
                    check=True, capture_output=True)
     vols = sorted(n for n in os.listdir(work) if n.startswith('out.7z.'))
     out = [(n[len('out'):], open(os.path.join(work, n), 'rb').read()) for n in vols]
@@ -9550,9 +9558,17 @@ def scenario_uucache(daemon, t):
 
 
 def _cpu_seconds(pid):
-    with open('/proc/%d/stat' % pid) as f:
-        fields = f.read().rsplit(')', 1)[1].split()
-    return (int(fields[11]) + int(fields[12])) / os.sysconf('SC_CLK_TCK')
+    """The CPU time a process has used: from /proc where there is one, else
+    from ps (macOS), whose cputime reads [[days-]hours:]minutes:seconds[.fraction]."""
+    try:
+        with open('/proc/%d/stat' % pid) as f:
+            fields = f.read().rsplit(')', 1)[1].split()
+        return (int(fields[11]) + int(fields[12])) / os.sysconf('SC_CLK_TCK')
+    except FileNotFoundError:
+        out = subprocess.run(['ps', '-o', 'cputime=', '-p', str(pid)], capture_output=True, text=True).stdout.strip()
+        days, _, clock = out.rpartition('-')
+        parts = [float(part) for part in clock.split(':')]
+        return sum(part * 60 ** i for i, part in enumerate(reversed(parts))) + float(days or 0) * 86400
 
 
 def scenario_heldidle(daemon, t):
@@ -10451,17 +10467,14 @@ def scenario_daemonlock(daemon, t):
     # whatever happened, no daemon of this config outlives the test (after the
     # reload one could, under a pid the lock-file no longer named)
     conf_arg = base[base.index('-c') + 1] if '-c' in base else None
-    for entry in os.listdir('/proc'):
-        if entry.isdigit() and conf_arg:
+    if conf_arg:
+        # (pgrep -f matches the whole command line, on Linux and macOS alike)
+        found = _sp.run(['pgrep', '-f', conf_arg], capture_output=True, text=True).stdout.split()
+        for entry in found:
             try:
-                cmd = open('/proc/%s/cmdline' % entry, 'rb').read().split(b'\0')
-            except OSError:
-                continue
-            if conf_arg.encode() in cmd:
-                try:
-                    os.kill(int(entry), 9)
-                except OSError:
-                    pass
+                os.kill(int(entry), 9)
+            except (OSError, ValueError):
+                pass
     ok = first_up and _re.fullmatch(r'\d+\n', pid) is not None and kept and removed
     return ('daemonlock', ok, 'up=%s pid=%r kept=%s removed=%s' % (first_up, pid, kept, removed))
 
@@ -10671,15 +10684,21 @@ FDLIST_EXTENSION = '''#!/bin/sh
 ##############################################################################
 # fd 0 is nzbget's own stdin (the harness gives it a socket); the rest
 n=0
-for f in /proc/$$/fd/*; do
-  [ "${f##*/}" = 0 ] && continue
-  case "$(readlink "$f")" in socket:*) n=$((n+1));; esac
-done
-echo "[INFO] inherited sockets=$n"
 files=0
-for f in /proc/$$/fd/*; do
-  case "$(readlink "$f")" in */nzbget.log|*/queue/*) files=$((files+1));; esac
-done
+if [ -d /proc/$$/fd ]; then
+  for f in /proc/$$/fd/*; do
+    [ "${f##*/}" = 0 ] && continue
+    case "$(readlink "$f")" in socket:*) n=$((n+1));; esac
+  done
+  for f in /proc/$$/fd/*; do
+    case "$(readlink "$f")" in */nzbget.log|*/queue/*) files=$((files+1));; esac
+  done
+else
+  # no /proc (macOS): lsof lists this shell's descriptors with their type
+  n=$(lsof -nP -p $$ -a -d 1-1024 2>/dev/null | awk '$5 == "IPv4" || $5 == "IPv6" || $5 == "unix" { c++ } END { print c + 0 }')
+  files=$(lsof -nP -p $$ 2>/dev/null | awk '$NF ~ "/nzbget[.]log$|/queue/" { c++ } END { print c + 0 }')
+fi
+echo "[INFO] inherited sockets=$n"
 echo "[INFO] inherited state files=$files"
 exit 93
 '''
@@ -12004,8 +12023,8 @@ SCENARIO_OPTIONS = {
     'fleetcopy': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'fleetmostlydead': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'fleetpaused': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
-    'jointwosets': ['Unpack=yes', 'UnrarCmd=/usr/bin/unrar', 'SevenZipCmd=/usr/bin/7z'],
-    'joinequalpieces': ['Unpack=yes', 'UnrarCmd=/usr/bin/unrar', 'SevenZipCmd=/usr/bin/7z', 'ParCheck=force'],
+    'jointwosets': ['Unpack=yes', UNRAR_CMD, SEVENZIP_CMD],
+    'joinequalpieces': ['Unpack=yes', UNRAR_CMD, SEVENZIP_CMD, 'ParCheck=force'],
     'parscanpercent': ['ParCheck=force', 'ParScan=full'],
     'retentionnodate': ['Server1.Retention=30', 'ArticleRetries=0'],
     'damagedfilestate': ['ContinuePartial=yes', 'ArticleRetries=0', 'DupeArticleFallback=no'],
@@ -12013,8 +12032,8 @@ SCENARIO_OPTIONS = {
     'joingroupreconnect': ['Server1.JoinGroup=yes', 'Server1.Connections=1', 'ArticleRetries=0', 'DirectWrite=no'],
     'joingroupnogroups': ['Server1.JoinGroup=yes', 'ArticleRetries=0', 'DirectWrite=no'],
     'stallquit': ['ArticleTimeout=5', 'ArticleRetries=2', 'ArticleInterval=0', 'DirectWrite=no', 'Server1.Connections=1'],
-    'directunpackkeep': ['Unpack=yes', 'DirectUnpack=yes', 'UseTempUnpackDir=no', 'UnrarCmd=/usr/bin/unrar', 'UnpackCleanupDisk=yes', 'ParCheck=auto'],
-    'directunpackkeepnointer': ['InterDir=', 'Unpack=yes', 'DirectUnpack=yes', 'UseTempUnpackDir=no', 'UnrarCmd=/usr/bin/unrar', 'UnpackCleanupDisk=yes', 'ParCheck=auto'],
+    'directunpackkeep': ['Unpack=yes', 'DirectUnpack=yes', 'UseTempUnpackDir=no', UNRAR_CMD, 'UnpackCleanupDisk=yes', 'ParCheck=auto'],
+    'directunpackkeepnointer': ['InterDir=', 'Unpack=yes', 'DirectUnpack=yes', 'UseTempUnpackDir=no', UNRAR_CMD, 'UnpackCleanupDisk=yes', 'ParCheck=auto'],
     'apiaccess': ['ControlPassword=ctlpass', 'RestrictedUsername=ro', 'RestrictedPassword=ropass'],
     'articledecoy': ['DupeArticleFallback=article', 'HealthCheck=dupe', 'ParCheck=auto'],
     'articledecoypar': ['DupeArticleFallback=article', 'HealthCheck=dupe', 'ParCheck=auto'],
@@ -12053,15 +12072,15 @@ SCENARIO_OPTIONS = {
     'scangrowing': ['NzbDirInterval=1', 'NzbDirFileAge=4'],
     'archiveyoung': ['NzbDirInterval=1', 'NzbDirFileAge=4'],
     'scriptparcheck': ['ParCheck=auto', 'Extensions=askpar'],
-    'pathtraversalnzb': ['Unpack=yes', 'UnrarCmd=/usr/bin/unrar', 'FileNaming=nzb'],
-    'pathtraversalarticle': ['Unpack=yes', 'UnrarCmd=/usr/bin/unrar', 'FileNaming=article'],
+    'pathtraversalnzb': ['Unpack=yes', UNRAR_CMD, 'FileNaming=nzb'],
+    'pathtraversalarticle': ['Unpack=yes', UNRAR_CMD, 'FileNaming=article'],
     'urlclosed': ['UrlRetries=1', 'UrlInterval=1'],
     'urlretrywait': ['UrlTimeout=2', 'UrlInterval=20', 'UrlRetries=2'],
     'historyeditlist': ['DupeCheck=yes'],
     'speedtestnohistory': ['KeepHistory=0'],
     'scanlongcommand': ['Extensions=longscan'],
-    'innerarchivekeep': ['InterDir=', 'Unpack=yes', 'UseTempUnpackDir=no', 'UnrarCmd=/usr/bin/unrar', 'SevenZipCmd=/usr/bin/7z', 'UnpackCleanupDisk=yes'],
-    'innerarchivekeepdirect': ['InterDir=', 'Unpack=yes', 'DirectUnpack=yes', 'UseTempUnpackDir=no', 'UnrarCmd=/usr/bin/unrar', 'SevenZipCmd=/usr/bin/7z', 'UnpackCleanupDisk=yes'],
+    'innerarchivekeep': ['InterDir=', 'Unpack=yes', 'UseTempUnpackDir=no', UNRAR_CMD, SEVENZIP_CMD, 'UnpackCleanupDisk=yes'],
+    'innerarchivekeepdirect': ['InterDir=', 'Unpack=yes', 'DirectUnpack=yes', 'UseTempUnpackDir=no', UNRAR_CMD, SEVENZIP_CMD, 'UnpackCleanupDisk=yes'],
     'fleetscoremax': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'fleetmerged': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'fleetduringpost': ['DupeArticleFallback=no', 'HealthCheck=dupe', 'Extensions=slowpost'],
@@ -12119,6 +12138,37 @@ SCENARIO_OPTIONS = {
     'failoverlive': ['DupeArticleFallback=live', 'HealthCheck=dupe', 'ParCheck=auto'],
 }
 DEFAULT_OPTIONS = ['DupeArticleFallback=yes']
+
+# the values of DupeArticleFallback in the order of Options::EDupeArticleFallback;
+# the daemon gates its features with >= on that order, so whatever passes under
+# a mode must pass under every higher one. --fallback-mode runs the scenarios
+# written for a lower mode under the requested one to check that promise.
+FALLBACK_MODES = ['no', 'article', 'stream', 'live']
+
+
+def _fallback_mode(options):
+    """The DupeArticleFallback value a scenario's options select ("yes" is the
+    legacy spelling of "article")."""
+    mode = 'no'
+    for option in options:
+        if option.startswith('DupeArticleFallback='):
+            mode = option.split('=', 1)[1]
+    return 'article' if mode == 'yes' else mode
+
+
+def _promote_fallback(options, mode):
+    """The options with DupeArticleFallback set to ``mode``."""
+    return ['DupeArticleFallback=%s' % mode if option.startswith('DupeArticleFallback=') else option
+            for option in options]
+
+
+# scenarios that test their own mode's sequence of events and so are never
+# promoted: livegate asserts that the live pass does NOT run under "stream";
+# streamrestartcredit shuts down during a post-processing repair that the live
+# pass has already made by then (nothing to interrupt); wholefilerestart
+# restarts while a whole-file job waits for post-processing, which the live
+# pass has already begun (the restart redoes it: two recreations, not one)
+FALLBACK_MODE_BOUND = {'livegate', 'streamrestartcredit', 'wholefilerestart'}
 # scenarios that read nserv's request log (nserv.log)
 CAPTURE_REQUESTS = {'repost', 'wholefileproofcost'}
 # extra nserv arguments per scenario (-w: response latency in ms)
@@ -12201,6 +12251,9 @@ def main():
                     help="'all', a scenario name, or several separated by commas")
     ap.add_argument('--serial', help='adb device serial (adb target)')
     ap.add_argument('--keep', action='store_true', help='keep the workdir')
+    ap.add_argument('--fallback-mode', choices=FALLBACK_MODES[2:],
+                    help='run the scenarios written for a lower DupeArticleFallback mode '
+                         '(article, stream) under this one; the others are left out')
     args = ap.parse_args()
 
     # 'all', one name, or several separated by commas
@@ -12208,6 +12261,18 @@ def main():
     unknown = [name for name in scenarios if name not in SCENARIOS]
     if unknown:
         ap.error('unknown scenario(s): %s' % ', '.join(unknown))
+    if args.fallback_mode:
+        # only a scenario of a lower mode than the requested one is promoted;
+        # one written for "no" tests the absence of the feature, one already
+        # at or above the requested mode is covered by a plain run
+        def promoted(name):
+            options = SCENARIO_OPTIONS.get(name, DEFAULT_OPTIONS)
+            mode = _fallback_mode(options() if callable(options) else options)
+            return name not in FALLBACK_MODE_BOUND and mode != 'no' and \
+                FALLBACK_MODES.index(mode) < FALLBACK_MODES.index(args.fallback_mode)
+        left_out = [name for name in scenarios if not promoted(name)]
+        scenarios = [name for name in scenarios if promoted(name)]
+        print('fallback-mode=%s: %d scenarios promoted, %d left out' % (args.fallback_mode, len(scenarios), len(left_out)))
     results = []
 
     for name in scenarios:
@@ -12239,6 +12304,17 @@ def main():
             options = SCENARIO_OPTIONS.get(name, DEFAULT_OPTIONS)
             # a function gives options that depend on the start time
             options = list(options() if callable(options) else options)
+            if args.fallback_mode:
+                options = _promote_fallback(options, args.fallback_mode)
+            # a scenario that hands the daemon an archive tool this host lacks
+            # is a SKIP, like the xcrypt_*/xdecomp_* ones without their module
+            missing = [tool for prefix, tool, have in (('UnrarCmd=', 'unrar', generators.HAVE_UNRAR),
+                                                       ('SevenZipCmd=', '7z', generators.HAVE_7Z))
+                       if not have and any(option.startswith(prefix) for option in options)]
+            if missing:
+                results.append((name, None, 'SKIP: %s is not installed' % ' and '.join(missing)))
+                print('[SKIP] %s  (%s is not installed)' % (name, ' and '.join(missing)))
+                continue
             nserv_port = nntp
             proxy_port = None
             if flaky or corrupt or rewrite or delay or first_fail:
@@ -12345,8 +12421,9 @@ def main():
     passed_count = sum(1 for _, p, _ in results if p)
     failed = any(p is False for _, p, _ in results)
     suffix = ' (+%d skipped)' % skipped if skipped else ''
-    print('\n=== %s / %s scenarios passed%s on target=%s ===' % (
-        passed_count, attempted, suffix, args.target))
+    print('\n=== %s / %s scenarios passed%s on target=%s%s ===' % (
+        passed_count, attempted, suffix, args.target,
+        ' fallback-mode=%s' % args.fallback_mode if args.fallback_mode else ''))
     if failed:
         return 1
     # A requested scenario that cannot run is an explicit, machine-readable

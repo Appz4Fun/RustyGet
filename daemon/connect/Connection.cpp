@@ -36,6 +36,19 @@
 #endif
 
 #ifndef WIN32
+// a socket is close-on-exec, so that the scripts nzbget starts don't inherit
+// its connections and listeners. socket() takes the flag where SOCK_CLOEXEC
+// exists, accept4() on Linux; elsewhere (macOS has neither) it is set afterwards
+static inline void SetCloseOnExec(SOCKET socket)
+{
+	if (socket != INVALID_SOCKET)
+	{
+		fcntl(socket, F_SETFD, fcntl(socket, F_GETFD, 0) | FD_CLOEXEC);
+	}
+}
+#endif
+
+#ifndef WIN32
 #include <poll.h>
 #endif
 
@@ -236,6 +249,9 @@ bool Connection::Bind()
 		strcpy(addr.sun_path, m_host.c_str());
 
 		m_socket = socket(PF_UNIX, SOCK_STREAM | SOCKET_CLOEXEC, 0);
+#if !defined(WIN32) && !defined(SOCK_CLOEXEC)
+		SetCloseOnExec(m_socket);
+#endif
 		if (m_socket == INVALID_SOCKET)
 		{
 			ReportError("Socket creation failed for %s", m_host.c_str(), true);
@@ -280,6 +296,9 @@ bool Connection::Bind()
 		for (addr = addr_list; addr != nullptr; addr = addr->ai_next)
 		{
 			m_socket = socket(addr->ai_family, addr->ai_socktype | SOCKET_CLOEXEC, addr->ai_protocol);
+#if !defined(WIN32) && !defined(SOCK_CLOEXEC)
+			SetCloseOnExec(m_socket);
+#endif
 #ifdef WIN32
 			SetHandleInformation((HANDLE)m_socket, HANDLE_FLAG_INHERIT, 0);
 #endif
@@ -322,6 +341,9 @@ bool Connection::Bind()
 		sSocketAddress.sin_port = htons(m_port);
 
 		m_socket = socket(PF_INET, SOCK_STREAM | SOCKET_CLOEXEC, 0);
+#if !defined(WIN32) && !defined(SOCK_CLOEXEC)
+		SetCloseOnExec(m_socket);
+#endif
 		if (m_socket == INVALID_SOCKET)
 		{
 			ReportError("Socket creation failed for %s", m_host.c_str(), true);
@@ -501,6 +523,9 @@ std::unique_ptr<Connection> Connection::Accept()
 		socket = accept4(m_socket, nullptr, nullptr, SOCK_CLOEXEC);
 #else
 		socket = accept(m_socket, nullptr, nullptr);
+#ifndef WIN32
+		SetCloseOnExec(socket);
+#endif
 #endif
 #ifndef WIN32
 		if (socket == INVALID_SOCKET && m_status != csCancelled)
@@ -614,6 +639,9 @@ bool Connection::DoConnect()
 		strcpy(addr.sun_path, m_host.c_str());
 
 		m_socket = socket(PF_UNIX, SOCK_STREAM | SOCKET_CLOEXEC, 0);
+#if !defined(WIN32) && !defined(SOCK_CLOEXEC)
+		SetCloseOnExec(m_socket);
+#endif
 		if (m_socket == INVALID_SOCKET)
 		{
 			ReportError("Socket creation failed for %s", m_host.c_str(), true);
@@ -712,6 +740,9 @@ bool Connection::DoConnect()
 			}
 
 			m_socket = socket(addr->ai_family, addr->ai_socktype | SOCKET_CLOEXEC, addr->ai_protocol);
+#if !defined(WIN32) && !defined(SOCK_CLOEXEC)
+			SetCloseOnExec(m_socket);
+#endif
 #ifdef WIN32
 			SetHandleInformation((HANDLE)m_socket, HANDLE_FLAG_INHERIT, 0);
 #endif
@@ -761,6 +792,9 @@ bool Connection::DoConnect()
 		}
 
 		m_socket = socket(PF_INET, SOCK_STREAM | SOCKET_CLOEXEC, 0);
+#if !defined(WIN32) && !defined(SOCK_CLOEXEC)
+		SetCloseOnExec(m_socket);
+#endif
 		if (m_socket == INVALID_SOCKET)
 		{
 			ReportError("Socket creation failed for %s", m_host.c_str(), true);

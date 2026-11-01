@@ -192,7 +192,11 @@ bool DupeArticleFallback::TryFallback(DownloadQueue* downloadQueue, FileInfo* fi
 		// keeps waiting for par-check, which knows which files it protects).
 		// Once lifted, the wait stays lifted: a projection can fall back below the
 		// par2 data (articles fetched from a lead duplicate count as arrived).
-		bool parDefer = ShouldDeferToPar(nzbInfo);
+		// A par-check that runs only when asked for (ParCheck=manual) repairs
+		// nothing by itself, and the stream repair of post-processing waits for
+		// it too: a hole left to it stayed, while the "article" mode had filled
+		// it. Then the articles are borrowed as in that mode.
+		bool parDefer = g_Options->GetParCheck() != Options::pcManual && ShouldDeferToPar(nzbInfo);
 		ParDamage::Verdict damage = parDefer ? ParDamage::Judge(nzbInfo) : ParDamage::Verdict();
 		// par2 repairs whole blocks: the blocks the failed articles spoiled may
 		// be more than its volumes hold long before the bytes are (ParDamage);

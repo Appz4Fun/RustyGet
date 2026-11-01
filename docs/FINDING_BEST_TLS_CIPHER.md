@@ -33,6 +33,11 @@ tested with **CertCheck** enabled and **CertStore** set. Otherwise the test repo
 a certificate failure for that server and leaves its cipher unchanged. **CertCheck**
 is off in the source tree's `nzbget.conf`; packaged builds turn it on.
 
+A **ServerX.Cipher** written as a reference to another setting, such as
+`${Server1.Cipher}`, stops the test before any server is probed, because a change
+to the referenced cipher would change this server's cipher too. Replace the
+reference with a plain value first. References in a host or port are fine.
+
 The test needs the Rust library. The Docker image builds without it, so the
 button stays disabled there.
 

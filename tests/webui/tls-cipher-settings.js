@@ -171,6 +171,7 @@ async function installOfflineModel(page, base) {
       await page.locator('#ConfigNav a[href="#NEWS-SERVERS"]').press('Enter');
       completed = { Available: true, State: 'completed', JobID: 'example-browser-job', Saved: true, ReloadRequired: true,
         Message: 'Saved fixture cipher.', Servers: [{ ID: 1, Name: 'Example provider', Host: originalHost, Port: Number(port),
+          SavedHost: originalHost, SavedPort: String(port),
           OldCipher: originalCipher, SelectedCipher: 'TLS_AES_128_GCM_SHA256', Outcome: 'saved' }] };
       await action.press('Enter');
       await dialog.waitFor({ state: 'visible' });
@@ -307,7 +308,7 @@ async function installOfflineModel(page, base) {
         boot.setSavedValue('Server2.Cipher', other);
         const result = { Available: true, State: 'completed', JobID: 'retained-saved-job', Saved: true,
           ReloadRequired: true, Message: 'Saved fixture cipher.', Servers: [{ ID: 1, Name: 'Example provider',
-            Host: 'example.invalid', Port: 563, OldCipher: 'TLS_AES_128_GCM_SHA256',
+            Host: 'example.invalid', Port: 563, SavedHost: 'example.invalid', SavedPort: '563', OldCipher: 'TLS_AES_128_GCM_SHA256',
             SelectedCipher: selected, Outcome: 'saved' }] };
         const writes = [], errors = [];
         let holdNextStatus = false, releaseStatus;
@@ -361,15 +362,15 @@ async function installOfflineModel(page, base) {
           assert.equal(await field.inputValue(), changed);
           await field.fill(original);
         }
-        for (const identity of [{ Host: 'different.example.invalid' }, { Port: 564 }]) {
+        for (const identity of [{ SavedHost: 'different.example.invalid' }, { SavedPort: '564' }, { SavedPort: 563 }]) {
           const mismatch = { ...result, Servers: [{ ...result.Servers[0], ...identity }] };
           assert.equal(await page.evaluate(({ result, snapshot }) => Config.applyCipherResults(result, snapshot),
-            { result: mismatch, snapshot: loadedSnapshot }), false, 'Clean selected values still require the exact server identity');
+            { result: mismatch, snapshot: loadedSnapshot }), false, 'Clean selected values still require the exact saved server identity');
         }
 
         const mixed = { ...result, Servers: [result.Servers[0], { ID: 2, Name: 'Second provider',
-          Host: 'second.example.invalid', Port: 563, OldCipher: 'TLS_AES_128_GCM_SHA256',
-          SelectedCipher: other, Outcome: 'saved' }] };
+          Host: 'second.example.invalid', Port: 563, SavedHost: 'second.example.invalid', SavedPort: '563',
+          OldCipher: 'TLS_AES_128_GCM_SHA256', SelectedCipher: other, Outcome: 'saved' }] };
         async function refreshSettings() {
           await page.evaluate(() => { Config.hide(); Config.show(); Config.shown(); });
           await newsEditor();
@@ -389,6 +390,24 @@ async function installOfflineModel(page, base) {
         assert.equal(await page.evaluate(({ result, snapshot }) => Config.applyCipherResults(result, snapshot),
           { result: mixed, snapshot: mixedSnapshot }), true);
         assert.equal(await page.evaluate(() => JSON.stringify(Config.config().values)), mixedValues);
+
+        // Saved text can be a ${...} reference or a zero-padded port while the
+        // report carries the resolved values. The saved text decides identity,
+        // so a correct result must not block this tab's Settings saves.
+        boot.setSavedValue('Server2.Host', '${Server1.Host}');
+        boot.setSavedValue('Server2.Port', '0563');
+        await refreshSettings();
+        const referenceSnapshot = await page.evaluate(() => Config.cipherSnapshot());
+        const reference = { ...result, Servers: [{ ID: 2, Name: 'Second provider', Host: 'example.invalid', Port: 563,
+          SavedHost: '${Server1.Host}', SavedPort: '0563', OldCipher: other, SelectedCipher: selected, Outcome: 'saved' }] };
+        assert.equal(await page.evaluate(({ result, snapshot }) => Config.applyCipherResults(result, snapshot),
+          { result: reference, snapshot: referenceSnapshot }), true, 'A saved host reference and zero-padded port name the same server');
+        assert.equal(await page.evaluate(() => Config.config().values.find(value => value.Name === 'Server2.Cipher').Value), selected);
+        const resolvedOnly = { ...reference, Servers: [{ ...reference.Servers[0], SavedHost: 'example.invalid', SavedPort: '563' }] };
+        assert.equal(await page.evaluate(({ result, snapshot }) => Config.applyCipherResults(result, snapshot),
+          { result: resolvedOnly, snapshot: referenceSnapshot }), false, 'Resolved values are not the saved identity');
+        boot.setSavedValue('Server2.Host', 'second.example.invalid');
+        boot.setSavedValue('Server2.Port', '563');
 
         boot.setSavedValue('Server1.Cipher', result.Servers[0].OldCipher);
         boot.setSavedValue('Server2.Cipher', selected);

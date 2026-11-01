@@ -52,6 +52,8 @@ impl Decryptor for Engine {
 
 fn parse_snapshot(bytes: Vec<u8>) -> Result<Snapshot, Error> {
     let mut options: BTreeMap<String, Option<String>> = BTreeMap::new();
+    // the values before expansion: what Settings shows and what a patch rewrites
+    let mut saved: BTreeMap<String, Option<String>> = BTreeMap::new();
     let mut expanded_bytes = 0usize;
     for line in bytes.split(|&b| b == b'\n') {
         if let Some((name, _, eq)) = tlscipher::option(line) {
@@ -62,6 +64,7 @@ fn parse_snapshot(bytes: Vec<u8>) -> Result<Snapshot, Error> {
             let value = &line[eq + 1..];
             let value = value.strip_suffix(b"\r").unwrap_or(value);
             let mut value = std::str::from_utf8(value).ok().map(str::to_owned);
+            saved.insert(name.clone(), value.clone());
             if let Some(value) = &mut value {
                 // Match Options::SetOption's sequential saved-variable expansion.
                 // Unknown variables remain unresolved; never send unresolved
@@ -103,6 +106,9 @@ fn parse_snapshot(bytes: Vec<u8>) -> Result<Snapshot, Error> {
                 _ => Err(Error("Server fields must be valid UTF-8 without NUL bytes.")),
             }
         };
+        let saved_of = |field: &str| -> &str {
+            saved.get(&format!("server{id}.{field}")).and_then(|s| s.as_deref()).unwrap_or("")
+        };
         let host = get("host")?;
         let encryption = get("encryption")?.to_ascii_lowercase();
         if ["", "no", "false", "off", "0"].contains(&encryption.as_str()) { continue; }
@@ -115,6 +121,12 @@ fn parse_snapshot(bytes: Vec<u8>) -> Result<Snapshot, Error> {
         if [host, get("username")?, get("password")?].iter().any(|s| s.contains("${")) {
             return Err(Error("Server variable references could not be resolved; no provider probes were started."));
         }
+        // A cipher written as a reference follows another setting. Comparing
+        // or patching its expanded value would leave the reference in place,
+        // so a change to the referenced cipher would change this server too.
+        if saved_of("cipher").contains("${") {
+            return Err(Error("A server cipher refers to another setting; replace it with a plain value before optimizing. No provider probes were started."));
+        }
         if get("username")?.is_empty() != get("password")?.is_empty() {
             return Err(Error("Both username and password are required for server authentication; no provider probes were started."));
         }
@@ -126,6 +138,7 @@ fn parse_snapshot(bytes: Vec<u8>) -> Result<Snapshot, Error> {
             "" | "auto" => 0, "ipv4" => 4, "ipv6" => 6, _ => return Err(Error("Invalid server IP version.")),
         };
         servers.push(Server { id, name: get("name")?.to_owned(), host: host.to_owned(), port,
+            saved_host: saved_of("host").to_owned(), saved_port: saved_of("port").to_owned(),
             username: get("username")?.to_owned(), password: get("password")?.to_owned(),
             cipher: get("cipher")?.to_owned(), ip_version, verification });
     }
@@ -334,6 +347,19 @@ mod tests {
         let snapshot = parse_snapshot(b"UnpackPassword=original\n$Login=${UnpackPassword}\nUnpackPassword=changed\nServer1.Connections=1\nServer1.Host=example.invalid\nServer1.Port=563\nServer1.Encryption=yes\nServer1.Username=user\nServer1.Password=${$Login}\n".to_vec()).unwrap();
         assert_eq!(snapshot.servers[0].password, "original");
         assert!(parse_snapshot(b"Server1.Connections=1\nServer1.Host=example.invalid\nServer1.Port=563\nServer1.Encryption=yes\nServer1.Password=${Unknown}\n".to_vec()).is_err());
+    }
+    #[test]
+    fn cipher_references_reject_and_saved_identity_text_is_kept() {
+        let base = "Server1.Connections=1\nServer1.Host=example.invalid\nServer1.Port=563\nServer1.Encryption=yes\nServer1.Cipher=TLS_AES_128_GCM_SHA256\n\
+            Server2.Connections=1\nServer2.Host=${Server1.Host}\nServer2.Port=0563\nServer2.Encryption=yes\n";
+        // a saved reference to another cipher would silently follow a change to it
+        assert_eq!(parse_snapshot(format!("{base}Server2.Cipher=${{Server1.Cipher}}\n").into_bytes()).err().map(|e| e.0.contains("refers to another setting")), Some(true));
+        // a plaintext server's cipher is never probed or patched
+        let snapshot = parse_snapshot(format!("{base}Server2.Cipher=TLS_AES_128_GCM_SHA256\nServer3.Host=plain.invalid\nServer3.Port=119\nServer3.Encryption=no\nServer3.Cipher=${{Server1.Cipher}}\n").into_bytes()).unwrap();
+        assert_eq!(snapshot.servers.len(), 2);
+        assert_eq!((snapshot.servers[1].host.as_str(), snapshot.servers[1].port), ("example.invalid", 563));
+        assert_eq!((snapshot.servers[1].saved_host.as_str(), snapshot.servers[1].saved_port.as_str()), ("${Server1.Host}", "0563"));
+        assert_eq!((snapshot.servers[0].saved_host.as_str(), snapshot.servers[0].saved_port.as_str()), ("example.invalid", "563"));
     }
     #[test]
     fn orphan_or_incomplete_saved_servers_do_not_start_probes() {

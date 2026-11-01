@@ -2381,8 +2381,10 @@ var Config = (new function($)
 			var prefix = 'Server' + server.ID + '.';
 			var cipher = findOptionByName(prefix + 'Cipher');
 			var host = findOptionByName(prefix + 'Host'), port = findOptionByName(prefix + 'Port');
-			if (!cipher || !host || !port ||
-				getOptionValue(host) !== server.Host || String(getOptionValue(port)) !== String(server.Port)) return false;
+			// The editor holds the saved text. A ${...} reference or a zero-padded
+			// port differs from the resolved Host and Port the daemon probed.
+			if (!cipher || !host || !port || typeof server.SavedHost !== 'string' || typeof server.SavedPort !== 'string' ||
+				getOptionValue(host) !== server.SavedHost || String(getOptionValue(port)) !== server.SavedPort) return false;
 			// A fresh Settings read may already contain the persisted result.
 			// This no-op needs no old snapshot; changing a value still does.
 			if (getOptionValue(cipher) === server.SelectedCipher) continue;

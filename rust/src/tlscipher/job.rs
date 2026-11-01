@@ -8,6 +8,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[derive(Clone)]
 pub struct Server {
     pub id: u32, pub name: String, pub host: String, pub port: u16,
+    // host and port as written in the saved configuration: a ${...} reference
+    // or a zero-padded port is what a Settings editor shows for this server
+    pub saved_host: String, pub saved_port: String,
     pub username: String, pub password: String, pub cipher: String,
     pub ip_version: u8, pub verification: u8,
 }
@@ -31,8 +34,8 @@ struct AlgorithmResult {
 }
 #[derive(Clone)]
 struct ServerResult {
-    id: u32, name: String, host: String, port: u16, old: String, selected: String,
-    outcome: &'static str, message: &'static str,
+    id: u32, name: String, host: String, port: u16, saved_host: String, saved_port: String,
+    old: String, selected: String, outcome: &'static str, message: &'static str,
     support: Vec<Option<bool>>,
 }
 struct Report {
@@ -82,8 +85,8 @@ impl Report {
         out.push_str("],\"Servers\":[");
         for (i, s) in self.servers.iter().enumerate() {
             if i > 0 { out.push(','); }
-            let _ = write!(out, "{{\"ID\":{},\"Name\":{},\"Host\":{},\"Port\":{},\"OldCipher\":{},\"SelectedCipher\":{},\"Outcome\":{},\"Message\":{},\"CipherSupport\":[",
-                s.id, quote(&s.name), quote(&s.host), s.port, quote(&s.old), quote(&s.selected), quote(s.outcome), quote(s.message));
+            let _ = write!(out, "{{\"ID\":{},\"Name\":{},\"Host\":{},\"Port\":{},\"SavedHost\":{},\"SavedPort\":{},\"OldCipher\":{},\"SelectedCipher\":{},\"Outcome\":{},\"Message\":{},\"CipherSupport\":[",
+                s.id, quote(&s.name), quote(&s.host), s.port, quote(&s.saved_host), quote(&s.saved_port), quote(&s.old), quote(&s.selected), quote(s.outcome), quote(s.message));
             out.push_str(&s.support.iter().map(|s| match s { Some(true) => "true", Some(false) => "false", None => "null" }).collect::<Vec<_>>().join(","));
             out.push_str("]}");
         }
@@ -138,6 +141,7 @@ impl Service {
         let report = Arc::new(Mutex::new(Report { id: id.clone(), state: "measuring", message: "Measuring local authenticated-decryption speed.", saved: false,
             algorithms: algorithms.into_iter().map(|name| AlgorithmResult { name, rate: None, samples: Vec::new(), message: "Waiting" }).collect(),
             servers: snapshot.servers.iter().map(|s| ServerResult { id: s.id, name: s.name.clone(), host: s.host.clone(), port: s.port,
+                saved_host: s.saved_host.clone(), saved_port: s.saved_port.clone(),
                 old: s.cipher.clone(), selected: String::new(), outcome: "waiting", message: "", support: vec![None; suites.len()] }).collect(), common: None,
             excluded, current_algorithm: String::new(), current_server: 0, current_cipher: String::new(), completed_probes: 0,
             total_probes: (snapshot.servers.len() * suites.len()) as u32, ciphers: suites.iter().map(|s| s.name.clone()).collect() }));
@@ -348,6 +352,7 @@ mod tests {
     fn status_escapes_untrusted_names_and_omits_credentials() {
         let report = Report { id: "example".into(), state: "completed", message: "done", saved: false, algorithms: vec![],
             servers: vec![ServerResult { id: 1, name: "quote\"\n<script>".into(), host: "example.invalid".into(), port: 563,
+                saved_host: "${Server2.Host}".into(), saved_port: "0563".into(),
                 old: "".into(), selected: "".into(), outcome: "unchanged", message: "", support: vec![Some(true), Some(false), None] }], common: None,
             excluded: vec![], current_algorithm: String::new(), current_server: 0, current_cipher: String::new(), completed_probes: 0, total_probes: 0,
             ciphers: vec!["one".into(), "two".into(), "three".into()] };
@@ -355,6 +360,8 @@ mod tests {
         assert!(json.contains("quote\\\"\\n<script>"));
         assert!(!json.contains("Password")); assert!(!json.contains("Username"));
         assert!(json.contains("\"CipherSupport\":[true,false,null]"));
+        // Settings compares its editor against the saved text, not the resolved values
+        assert!(json.contains("\"Host\":\"example.invalid\",\"Port\":563,\"SavedHost\":\"${Server2.Host}\",\"SavedPort\":\"0563\","));
     }
     #[test]
     fn unknown_job_ids_do_not_cancel_anything() {
@@ -387,6 +394,7 @@ mod tests {
                 self.snapshots.fetch_add(1, Ordering::SeqCst);
                 Ok(Snapshot { bytes: b"Server1.Host=example.invalid\n".to_vec(), servers: vec![Server {
                     id: 1, name: "Example".into(), host: "example.invalid".into(), port: 563,
+                    saved_host: "example.invalid".into(), saved_port: "563".into(),
                     username: "private-user".into(), password: "private-pass".into(), cipher: "".into(), ip_version: 0, verification: 2,
                 }] })
             }
@@ -443,6 +451,7 @@ mod tests {
             let count = if self.large == 0 { 2 } else { self.large };
             Ok(Snapshot { bytes: b"owned synthetic snapshot".to_vec(), servers: (1..=count).map(|id| Server {
                 id: id as u32, name: "Example \"name\"\n<script>".into(), host: "example.invalid".into(), port: 563,
+                saved_host: "example.invalid".into(), saved_port: "563".into(),
                 username: "PRIVATE_TEST_USERNAME".into(), password: "PRIVATE_TEST_PASSWORD".into(),
                 cipher: "a".repeat(if self.large == 256 { 4096 } else if self.large > 0 { 2048 } else { 0 }),
                 ip_version: 0, verification: 2,

@@ -42,6 +42,11 @@ def _find_7z():
 SEVENZIP_PATH = _find_7z()
 HAVE_7Z = SEVENZIP_PATH is not None
 
+# unrar the same way: the daemon's UnrarCmd gets this path (harness.py's
+# UNRAR_CMD), and a scenario that needs it is skipped where there is none
+UNRAR_PATH = shutil.which('unrar')
+HAVE_UNRAR = UNRAR_PATH is not None
+
 
 def rar3_store_volumes(inner_name, data, volume_size, method=0x30):
     """Split ``data`` into RAR3 store-mode volumes (MAIN + FILE + ENDARC).

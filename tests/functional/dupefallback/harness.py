@@ -33,6 +33,14 @@ abstraction:
 * ``AdbTarget`` runs them inside a connected Android emulator/device over adb,
   forwarding the RPC port back to the host.
 
+``--fallback-mode live`` (or ``stream``) runs the scenarios written for a lower
+``DupeArticleFallback`` mode under that one (the daemon gates its features with
+``>=`` on no < article < stream < live, so whatever passes under a mode must
+pass under every higher one); see ``FALLBACK_MODE_BOUND`` for the few that
+assert their own mode's sequence of events. ``dupesearchrealindexer`` searches a
+real NZBHydra2 (``NZBHYDRA2_URL``/``NZBHYDRA2_APIKEY``, environment or the
+repository's ``.env``) and is a SKIP without them.
+
 Scenarios (all use the ``!serverlist`` nserv message-id suffix to make an
 article "missing" on the active server, so no real Usenet access is needed):
 
@@ -1190,7 +1198,9 @@ def scenario_declaredcountnopair(daemon, t):
     daemon.append(api, 'RelCount', primary, False, 'dc-key', 100)
     h = daemon.wait_history(api, 'RelCount')
     recovered = int(h.get('DupeRecoveredArticles', 0))
-    borrowed = _grep_log(t, 'from duplicate collections')
+    # (the borrowing's own message; "Queueing stream repair ... from duplicate
+    # collections" under the stream/live modes is not a borrowed article)
+    borrowed = _grep_log(t, 'missing article(s) of Rel.bin from duplicate collections')
     ok = recovered == 0 and borrowed == 0 and int(h.get('FailedArticles', 0)) == 3
     return ('declaredcountnopair', ok, 'status=%s recovered=%d recovered_logs=%d failed_articles=%s'
             % (h['Status'], recovered, borrowed, h.get('FailedArticles')))
@@ -3243,11 +3253,17 @@ def scenario_reloadpostqueue(daemon, t):
             'status=%s integrity=%s' % (status, integ))
 
 
+# the archive tools the daemon shells out to, wherever this host has them: the
+# harness runs on Linux and macOS, and a distribution's path isn't portable. A
+# scenario that names a tool the host lacks is skipped (see main()).
+UNRAR_CMD = 'UnrarCmd=%s' % (generators.UNRAR_PATH or 'unrar')
+SEVENZIP_CMD = 'SevenZipCmd=%s' % (generators.SEVENZIP_PATH or '7z')
+
 PROD_OPTIONS = ['DupeArticleFallback=live', 'DupeStreamDecompress=yes', 'ContinuePartial=yes',
                 'ArticleCache=8192', 'FileNaming=auto', 'ReorderFiles=yes', 'PostStrategy=rocket',
                 'ParCheck=auto', 'ParRepair=yes', 'ParScan=dupe', 'ParQuick=yes', 'ParRename=yes',
                 'RarRename=yes', 'DirectRename=yes', 'HealthCheck=dupe', 'Unpack=yes', 'DirectUnpack=yes',
-                'UnrarCmd=/usr/bin/unrar', 'SevenZipCmd=/usr/bin/7z', 'ArticleRetries=0']
+                UNRAR_CMD, SEVENZIP_CMD, 'ArticleRetries=0']
 
 
 def _prod_7z_set(t, tag, movie, volume_kb=1500):
@@ -3257,7 +3273,7 @@ def _prod_7z_set(t, tag, movie, volume_kb=1500):
     work = _tf.mkdtemp(prefix='prod7z-')
     with open(os.path.join(work, 'movie.mkv'), 'wb') as f:
         f.write(movie)
-    subprocess.run(['/usr/bin/7z', 'a', '-mx0', '-v%dk' % volume_kb, 'out.7z', 'movie.mkv'], cwd=work,
+    subprocess.run([generators.SEVENZIP_PATH, 'a', '-mx0', '-v%dk' % volume_kb, 'out.7z', 'movie.mkv'], cwd=work,
                    check=True, capture_output=True)
     vols = sorted(n for n in os.listdir(work) if n.startswith('out.7z.'))
     out = [(n[len('out'):], open(os.path.join(work, n), 'rb').read()) for n in vols]
@@ -6106,6 +6122,127 @@ def scenario_dupesearchindexerdown(daemon, t):
     return ('dupesearchindexerdown', ok, 'released_logs=%d searches=%d donors=%d' % (released, searches, len(donors)))
 
 
+REAL_INDEXER_URL_VAR, REAL_INDEXER_KEY_VAR = 'NZBHYDRA2_URL', 'NZBHYDRA2_APIKEY'
+
+
+def _dotenv():
+    """The environment, completed from the repository's .env (KEY=VALUE lines;
+    the file is ignored by git). Its values are settings of a real indexer and
+    are never printed."""
+    values = dict(os.environ)
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', '.env')
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                key, value = line.split('=', 1)
+                key = key.strip()
+                if key.startswith('export '):
+                    key = key[len('export '):].strip()
+                values.setdefault(key, value.strip().strip('"\''))
+    except OSError:
+        pass
+    return values
+
+
+def _real_indexer():
+    """(url, api key) of the real Newznab indexer to test against, or None:
+    NZBHYDRA2_URL and NZBHYDRA2_APIKEY, or failing those any variable naming
+    HYDRA and URL / KEY."""
+    env = _dotenv()
+    url = env.get(REAL_INDEXER_URL_VAR) or next(
+        (v for k, v in env.items() if 'HYDRA' in k.upper() and 'URL' in k.upper()), None)
+    key = env.get(REAL_INDEXER_KEY_VAR) or next(
+        (v for k, v in env.items() if 'HYDRA' in k.upper() and 'KEY' in k.upper()), None)
+    if not url or not key:
+        return None
+    # NZBHydra2's Newznab endpoint is <base>/api; a URL copied from the browser
+    # is the base, which answers every query with the web page
+    url = url.strip().rstrip('/')
+    if not url.endswith('/api'):
+        url += '/api'
+    return (url, key.strip())
+
+
+def _real_indexer_options():
+    url, key = _real_indexer() or ('http://127.0.0.1:1/api', 'none')
+    # a dry run (queues nothing), few probe articles: the news server is the
+    # fake one without articles, every posting found is dead
+    return ['DupeArticleFallback=no', 'DupeSearch=yes', 'DupeSearchDelay=1', 'DupeSearchDryRun=yes',
+            'DupeSearchUrl=%s' % url, 'DupeSearchApiKey=%s' % key,
+            'DupeFastDonors=0', 'DupeBodyChecks=0', 'DupeHealthMin=5', 'DupeHealthMax=10']
+
+
+def scenario_dupesearchrealindexer(daemon, t):
+    """The search against a real Newznab indexer (NZBHydra2), named by
+    NZBHYDRA2_URL and NZBHYDRA2_APIKEY in the environment or the repository's
+    .env (SKIP without them). The fake indexer answers as the daemon expects;
+    this checks that the daemon asks as the real one expects, and reads what
+    it really answers. A scene-named TV posting the indexer lists right now
+    (the one with the fewest other listings, to spare the indexers' grab
+    limits) is appended as a pick whose articles the fake news server lacks.
+    The daemon must find that release again with its own queries, fetch the
+    nzb-files of its listings through the indexer and judge them, with no
+    indexer error, no unreadable answer and no api key in the log; the dry
+    run queues nothing."""
+    indexer = _real_indexer()
+    if not indexer:
+        return ('dupesearchrealindexer', None,
+                'SKIP: %s/%s not set (environment or .env)' % (REAL_INDEXER_URL_VAR, REAL_INDEXER_KEY_VAR))
+    url, key = indexer
+    import urllib.request as _req
+    import xml.etree.ElementTree as _et
+
+    def ask(**params):
+        query = urllib.parse.urlencode(dict(params, apikey=key, o='xml'))
+        with _req.urlopen('%s?%s' % (url, query), timeout=120) as reply:
+            return _et.fromstring(reply.read())
+
+    def titles(root):
+        return [item.findtext('title') or '' for item in root.iter('item')]
+
+    caps = ask(t='caps')
+    if caps.tag != 'caps':
+        return ('dupesearchrealindexer', False, 'caps answered <%s> %s' % (caps.tag, (caps.get('description') or '')[:60]))
+    # the newest TV postings; a scene name gives the daemon's queries a group to go by
+    newest = titles(ask(t='tvsearch', limit='100')) or titles(ask(t='search', q='1080p', limit='100'))
+    scene = [x for x in newest if re.search(r'\bS\d{2}E\d{2}\b', x, re.I) and re.search(r'[.\s-][A-Za-z0-9]{2,}$', x)]
+    if not scene:
+        return ('dupesearchrealindexer', False, 'no scene-named TV posting among %d newest listings' % len(newest))
+    counted = sorted((len(titles(ask(t='search', q=re.sub(r'[._]', ' ', x), limit='100'))), x) for x in scene[:4])
+    counted = [(n, x) for n, x in counted if n >= 1]
+    if not counted:
+        return ('dupesearchrealindexer', False, 'none of %d scene-named postings is found by its own title' % len(scene[:4]))
+    listings, title = counted[0]
+    api = daemon.wait_ready()
+    _ds_append(api, title, _ds_nzb(t, 'ri'), '', 100)
+    deadline = time.time() + 300
+    while time.time() < deadline and _grep_log(t, 'DupeSearch: %s: results=' % title) == 0:
+        time.sleep(1)
+    log = t.read_file('nzbget.log').decode(errors='replace')
+    found = re.search(r'DupeSearch: %s: (\d+) result\(s\) from (\d+) search\(es\) \((\d+) failed, (\d+) page\(s\)\), '
+                      r'(\d+) of them the same release' % re.escape(title), log)
+    summary = re.search(r'DupeSearch: %s: results=(\d+) candidates=(\d+) postings=(\d+) verified=(\d+) added=(\d+) '
+                        r'rejected=\{([^}]*)\}' % re.escape(title), log)
+    results, searches, failed, same = (
+        (int(found.group(1)), int(found.group(2)), int(found.group(3)), int(found.group(5))) if found else (0, 0, -1, 0))
+    postings = int(summary.group(3)) if summary else -1
+    not_xml = log.count("isn't XML")
+    indexer_errors = log.count('answered the search') + log.count('failed (HTTP ')
+    leaked = key in log
+    alive = t.procs[-1].poll() is None
+    queued = [g['NZBName'] for g in api.listgroups() if g['NZBName'] != title]
+    ok = (found is not None and summary is not None and results >= 1 and same >= 1 and failed == 0 and
+          postings >= 1 and not_xml == 0 and indexer_errors == 0 and not leaked and alive and not queued)
+    return ('dupesearchrealindexer', ok,
+            'title=%r indexer_listings=%d results=%d searches=%d failed=%d same_release=%d postings=%d summary=%s '
+            'not_xml=%d indexer_errors=%d api_key_in_log=%s queued=%s alive=%s'
+            % (title, listings, results, searches, failed, same, postings, summary is not None,
+               not_xml, indexer_errors, leaked, queued, alive))
+
+
 def scenario_dupesearchquerydrop(daemon, t):
     """The indexer drops the connection of the search that has the results,
     once, without an answer (as an indexer under load does): the search asks it
@@ -8662,7 +8799,9 @@ def scenario_parprojection(daemon, t):
     only when the failures outgrew the par2 data, near the end of the download,
     and about 140 articles failed; now only those that failed before 200 were
     tried (about 30) are left to post-processing. (The par2 files are
-    recognized by name; ParCheck=manual leaves them unread.)"""
+    recognized by name; the par-check of post-processing can't read them and
+    fails, which doesn't matter here. The wait for par-check needs one that
+    runs by itself: under ParCheck=manual the articles are borrowed at once.)"""
     seg, n = 4_000, 1_000
     size = seg * n
     data = _payload(size, 5959)
@@ -9550,9 +9689,17 @@ def scenario_uucache(daemon, t):
 
 
 def _cpu_seconds(pid):
-    with open('/proc/%d/stat' % pid) as f:
-        fields = f.read().rsplit(')', 1)[1].split()
-    return (int(fields[11]) + int(fields[12])) / os.sysconf('SC_CLK_TCK')
+    """The CPU time a process has used: from /proc where there is one, else
+    from ps (macOS), whose cputime reads [[days-]hours:]minutes:seconds[.fraction]."""
+    try:
+        with open('/proc/%d/stat' % pid) as f:
+            fields = f.read().rsplit(')', 1)[1].split()
+        return (int(fields[11]) + int(fields[12])) / os.sysconf('SC_CLK_TCK')
+    except FileNotFoundError:
+        out = subprocess.run(['ps', '-o', 'cputime=', '-p', str(pid)], capture_output=True, text=True).stdout.strip()
+        days, _, clock = out.rpartition('-')
+        parts = [float(part) for part in clock.split(':')]
+        return sum(part * 60 ** i for i, part in enumerate(reversed(parts))) + float(days or 0) * 86400
 
 
 def scenario_heldidle(daemon, t):
@@ -10451,17 +10598,14 @@ def scenario_daemonlock(daemon, t):
     # whatever happened, no daemon of this config outlives the test (after the
     # reload one could, under a pid the lock-file no longer named)
     conf_arg = base[base.index('-c') + 1] if '-c' in base else None
-    for entry in os.listdir('/proc'):
-        if entry.isdigit() and conf_arg:
+    if conf_arg:
+        # (pgrep -f matches the whole command line, on Linux and macOS alike)
+        found = _sp.run(['pgrep', '-f', conf_arg], capture_output=True, text=True).stdout.split()
+        for entry in found:
             try:
-                cmd = open('/proc/%s/cmdline' % entry, 'rb').read().split(b'\0')
-            except OSError:
-                continue
-            if conf_arg.encode() in cmd:
-                try:
-                    os.kill(int(entry), 9)
-                except OSError:
-                    pass
+                os.kill(int(entry), 9)
+            except (OSError, ValueError):
+                pass
     ok = first_up and _re.fullmatch(r'\d+\n', pid) is not None and kept and removed
     return ('daemonlock', ok, 'up=%s pid=%r kept=%s removed=%s' % (first_up, pid, kept, removed))
 
@@ -10671,16 +10815,25 @@ FDLIST_EXTENSION = '''#!/bin/sh
 ##############################################################################
 # fd 0 is nzbget's own stdin (the harness gives it a socket); the rest
 n=0
-for f in /proc/$$/fd/*; do
-  [ "${f##*/}" = 0 ] && continue
-  case "$(readlink "$f")" in socket:*) n=$((n+1));; esac
-done
-echo "[INFO] inherited sockets=$n"
 files=0
-for f in /proc/$$/fd/*; do
-  case "$(readlink "$f")" in */nzbget.log|*/queue/*) files=$((files+1));; esac
-done
+paths=
+if [ -d /proc/$$/fd ]; then
+  for f in /proc/$$/fd/*; do
+    [ "${f##*/}" = 0 ] && continue
+    case "$(readlink "$f")" in socket:*) n=$((n+1));; esac
+  done
+  for f in /proc/$$/fd/*; do
+    case "$(readlink "$f")" in */nzbget.log|*/queue/*) files=$((files+1)); paths="$paths $(readlink "$f")";; esac
+  done
+else
+  # no /proc (macOS): lsof lists this shell's descriptors with their type
+  n=$(lsof -nP -p $$ -a -d 1-1024 2>/dev/null | awk '$5 == "IPv4" || $5 == "IPv6" || $5 == "unix" { c++ } END { print c + 0 }')
+  paths=$(lsof -nP -p $$ 2>/dev/null | awk '$NF ~ "/nzbget[.]log$|/queue/" { printf " %s", $NF }')
+  files=$(echo $paths | wc -w | tr -d ' ')
+fi
+echo "[INFO] inherited sockets=$n"
 echo "[INFO] inherited state files=$files"
+[ -n "$paths" ] && echo "[INFO] inherited state paths:$paths"
 exit 93
 '''
 
@@ -11546,6 +11699,7 @@ SCENARIOS = {
     'dupesearchtwopicks': scenario_dupesearchtwopicks,
     'dupesearchindexerdown': scenario_dupesearchindexerdown,
     'dupesearchquerydrop': scenario_dupesearchquerydrop,
+    'dupesearchrealindexer': scenario_dupesearchrealindexer,
     'fleetdeadfirst': scenario_fleetdeadfirst,
     'fleettwins': scenario_fleettwins,
     'fleettimeout': scenario_fleettimeout,
@@ -11954,7 +12108,7 @@ SCENARIO_OPTIONS = {
     'projectedworsebackup': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'projectededge': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'projectededgelead': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
-    'parprojection': ['DupeArticleFallback=stream', 'ParCheck=manual'],
+    'parprojection': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'deaddownloadstray2': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'deaddownloadrestart': ['DupeArticleFallback=no', 'HealthCheck=dupe', 'ContinuePartial=yes'],
     'deadbackupsonly': ['DupeArticleFallback=no', 'HealthCheck=dupe', 'Server1.Connections=2'],
@@ -11984,6 +12138,7 @@ SCENARIO_OPTIONS = {
     'dupesearchambiguous': ['DupeArticleFallback=no', 'DupeSearch=yes', 'DupeSearchDelay=2', 'DupeSearchApiKey=k', 'DupeFastDonors=2'],
     'dupesearchtwopicks': ['DupeArticleFallback=no', 'DupeSearch=yes', 'DupeSearchDelay=2', 'DupeSearchApiKey=k'],
     'dupesearchindexerdown': ['DupeArticleFallback=no', 'DupeSearch=yes', 'DupeSearchDelay=2', 'DupeSearchApiKey=k'],
+    'dupesearchrealindexer': _real_indexer_options,
     'dupesearchquerydrop': ['DupeArticleFallback=no', 'DupeSearch=yes', 'DupeSearchDelay=2', 'DupeSearchApiKey=k'],
     'fleetdeadfirst': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'fleettwins': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
@@ -12004,8 +12159,8 @@ SCENARIO_OPTIONS = {
     'fleetcopy': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'fleetmostlydead': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'fleetpaused': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
-    'jointwosets': ['Unpack=yes', 'UnrarCmd=/usr/bin/unrar', 'SevenZipCmd=/usr/bin/7z'],
-    'joinequalpieces': ['Unpack=yes', 'UnrarCmd=/usr/bin/unrar', 'SevenZipCmd=/usr/bin/7z', 'ParCheck=force'],
+    'jointwosets': ['Unpack=yes', UNRAR_CMD, SEVENZIP_CMD],
+    'joinequalpieces': ['Unpack=yes', UNRAR_CMD, SEVENZIP_CMD, 'ParCheck=force'],
     'parscanpercent': ['ParCheck=force', 'ParScan=full'],
     'retentionnodate': ['Server1.Retention=30', 'ArticleRetries=0'],
     'damagedfilestate': ['ContinuePartial=yes', 'ArticleRetries=0', 'DupeArticleFallback=no'],
@@ -12013,8 +12168,8 @@ SCENARIO_OPTIONS = {
     'joingroupreconnect': ['Server1.JoinGroup=yes', 'Server1.Connections=1', 'ArticleRetries=0', 'DirectWrite=no'],
     'joingroupnogroups': ['Server1.JoinGroup=yes', 'ArticleRetries=0', 'DirectWrite=no'],
     'stallquit': ['ArticleTimeout=5', 'ArticleRetries=2', 'ArticleInterval=0', 'DirectWrite=no', 'Server1.Connections=1'],
-    'directunpackkeep': ['Unpack=yes', 'DirectUnpack=yes', 'UseTempUnpackDir=no', 'UnrarCmd=/usr/bin/unrar', 'UnpackCleanupDisk=yes', 'ParCheck=auto'],
-    'directunpackkeepnointer': ['InterDir=', 'Unpack=yes', 'DirectUnpack=yes', 'UseTempUnpackDir=no', 'UnrarCmd=/usr/bin/unrar', 'UnpackCleanupDisk=yes', 'ParCheck=auto'],
+    'directunpackkeep': ['Unpack=yes', 'DirectUnpack=yes', 'UseTempUnpackDir=no', UNRAR_CMD, 'UnpackCleanupDisk=yes', 'ParCheck=auto'],
+    'directunpackkeepnointer': ['InterDir=', 'Unpack=yes', 'DirectUnpack=yes', 'UseTempUnpackDir=no', UNRAR_CMD, 'UnpackCleanupDisk=yes', 'ParCheck=auto'],
     'apiaccess': ['ControlPassword=ctlpass', 'RestrictedUsername=ro', 'RestrictedPassword=ropass'],
     'articledecoy': ['DupeArticleFallback=article', 'HealthCheck=dupe', 'ParCheck=auto'],
     'articledecoypar': ['DupeArticleFallback=article', 'HealthCheck=dupe', 'ParCheck=auto'],
@@ -12053,15 +12208,15 @@ SCENARIO_OPTIONS = {
     'scangrowing': ['NzbDirInterval=1', 'NzbDirFileAge=4'],
     'archiveyoung': ['NzbDirInterval=1', 'NzbDirFileAge=4'],
     'scriptparcheck': ['ParCheck=auto', 'Extensions=askpar'],
-    'pathtraversalnzb': ['Unpack=yes', 'UnrarCmd=/usr/bin/unrar', 'FileNaming=nzb'],
-    'pathtraversalarticle': ['Unpack=yes', 'UnrarCmd=/usr/bin/unrar', 'FileNaming=article'],
+    'pathtraversalnzb': ['Unpack=yes', UNRAR_CMD, 'FileNaming=nzb'],
+    'pathtraversalarticle': ['Unpack=yes', UNRAR_CMD, 'FileNaming=article'],
     'urlclosed': ['UrlRetries=1', 'UrlInterval=1'],
     'urlretrywait': ['UrlTimeout=2', 'UrlInterval=20', 'UrlRetries=2'],
     'historyeditlist': ['DupeCheck=yes'],
     'speedtestnohistory': ['KeepHistory=0'],
     'scanlongcommand': ['Extensions=longscan'],
-    'innerarchivekeep': ['InterDir=', 'Unpack=yes', 'UseTempUnpackDir=no', 'UnrarCmd=/usr/bin/unrar', 'SevenZipCmd=/usr/bin/7z', 'UnpackCleanupDisk=yes'],
-    'innerarchivekeepdirect': ['InterDir=', 'Unpack=yes', 'DirectUnpack=yes', 'UseTempUnpackDir=no', 'UnrarCmd=/usr/bin/unrar', 'SevenZipCmd=/usr/bin/7z', 'UnpackCleanupDisk=yes'],
+    'innerarchivekeep': ['InterDir=', 'Unpack=yes', 'UseTempUnpackDir=no', UNRAR_CMD, SEVENZIP_CMD, 'UnpackCleanupDisk=yes'],
+    'innerarchivekeepdirect': ['InterDir=', 'Unpack=yes', 'DirectUnpack=yes', 'UseTempUnpackDir=no', UNRAR_CMD, SEVENZIP_CMD, 'UnpackCleanupDisk=yes'],
     'fleetscoremax': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'fleetmerged': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'fleetduringpost': ['DupeArticleFallback=no', 'HealthCheck=dupe', 'Extensions=slowpost'],
@@ -12119,6 +12274,40 @@ SCENARIO_OPTIONS = {
     'failoverlive': ['DupeArticleFallback=live', 'HealthCheck=dupe', 'ParCheck=auto'],
 }
 DEFAULT_OPTIONS = ['DupeArticleFallback=yes']
+
+# the values of DupeArticleFallback in the order of Options::EDupeArticleFallback;
+# the daemon gates its features with >= on that order, so whatever passes under
+# a mode must pass under every higher one. --fallback-mode runs the scenarios
+# written for a lower mode under the requested one to check that promise.
+FALLBACK_MODES = ['no', 'article', 'stream', 'live']
+
+
+def _fallback_mode(options):
+    """The DupeArticleFallback value a scenario's options select ("yes" is the
+    legacy spelling of "article")."""
+    mode = 'no'
+    for option in options:
+        if option.startswith('DupeArticleFallback='):
+            mode = option.split('=', 1)[1]
+    return 'article' if mode == 'yes' else mode
+
+
+def _promote_fallback(options, mode):
+    """The options with DupeArticleFallback set to ``mode``."""
+    return ['DupeArticleFallback=%s' % mode if option.startswith('DupeArticleFallback=') else option
+            for option in options]
+
+
+# scenarios that test their own mode's sequence of events and so are never
+# promoted: livegate asserts that the live pass does NOT run under "stream";
+# streamrestartcredit shuts down during a post-processing repair that the live
+# pass has already made by then (nothing to interrupt); wholefilerestart
+# restarts while a whole-file job waits for post-processing, which the live
+# pass has already begun (the restart redoes it: two recreations, not one);
+# wholefilestale zeroes the recreated volume after the shutdown to stand for
+# a recreation cut short, but the live pass may have finished it, and a
+# finished job is rightly not redone
+FALLBACK_MODE_BOUND = {'livegate', 'streamrestartcredit', 'wholefilerestart', 'wholefilestale'}
 # scenarios that read nserv's request log (nserv.log)
 CAPTURE_REQUESTS = {'repost', 'wholefileproofcost'}
 # extra nserv arguments per scenario (-w: response latency in ms)
@@ -12185,7 +12374,7 @@ SCENARIO_NEWZNAB = {'dupesearchheldbad', 'dupesearchheldforce', 'dupesearchheldh
                    'dupesearchresumedeleted'}
 
 # scenarios with a FakeNntp news server in place of nserv
-SCENARIO_FAKE_NNTP = {'dupesearchheldbad', 'dupesearchheldforce', 'dupesearchheldhealthy', 'dupesearchheldpendingbad', 'dupesearchcappartial', 'dupesearchrankingrestart', 'dupesearchinterruptedmemo', 'dupesearchcapdead', 'dupesearchownedhistory', 'dupesearchtitlememo', 'dupesearchpardata', 'dupesearchfastdeadretry', 'dupesearchkeylessbackup', 'dupesearchranknoserver', 'dupesearchplacewhole', 'dupesearchpargap', 'dupesearchhistoryother', 'dupesearchhistoryrename', 'dupesearchstructuralcache', 'dupesearchwholeorder', 'dupesearchexplicitprefix', 'dupesearchownedlegacy', 'dupesearchretiredfleet', 'dupesearchvanishedbackup', 'dupesearchhistoryown', 'dupesearchbroaderretry', 'dupesearchzerolate', 'dupesearchwatchpersist', 'dupesearchpartialdead', 'dupesearchlegacyrename', 'dupesearchwatchscript', 'dupesearchwatchfetchrename', 'dupesearchwatchrestart', 'dupesearchwatchbackup', 'dupesearchlenientinner', 'dupesearchwatchrename', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetduringpost', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetalldead', 'fleetshutdown', 'dupesearchresumedeleted', 'dupesearchpickdeleted', 'dupesearchpickgoneadd', 'dupesearchquickstop', 'dupesearchresubmit', 'dupesearchkeychanged', 'dupesearchresume', 'dupesearchgroup', 'dupesearchrerank', 'dupesearchfailedfirst', 'dupesearchfailedrestart', 'dupesearchtwopicks', 'dupesearchindexerdown', 'dupesearchquerydrop', 'dupesearchalldead', 'dupesearchtwinmember', 'dupesearchambiguous', 'dupesearchrestartcheck', 'dupesearchdonors', 'dupesearchfastdead', 'dupesearchrescorefail', 'dupesearchdryrun'}
+SCENARIO_FAKE_NNTP = {'dupesearchrealindexer', 'dupesearchheldbad', 'dupesearchheldforce', 'dupesearchheldhealthy', 'dupesearchheldpendingbad', 'dupesearchcappartial', 'dupesearchrankingrestart', 'dupesearchinterruptedmemo', 'dupesearchcapdead', 'dupesearchownedhistory', 'dupesearchtitlememo', 'dupesearchpardata', 'dupesearchfastdeadretry', 'dupesearchkeylessbackup', 'dupesearchranknoserver', 'dupesearchplacewhole', 'dupesearchpargap', 'dupesearchhistoryother', 'dupesearchhistoryrename', 'dupesearchstructuralcache', 'dupesearchwholeorder', 'dupesearchexplicitprefix', 'dupesearchownedlegacy', 'dupesearchretiredfleet', 'dupesearchvanishedbackup', 'dupesearchhistoryown', 'dupesearchbroaderretry', 'dupesearchzerolate', 'dupesearchwatchpersist', 'dupesearchpartialdead', 'dupesearchlegacyrename', 'dupesearchwatchscript', 'dupesearchwatchfetchrename', 'dupesearchwatchrestart', 'dupesearchwatchbackup', 'dupesearchlenientinner', 'dupesearchwatchrename', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetduringpost', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetalldead', 'fleetshutdown', 'dupesearchresumedeleted', 'dupesearchpickdeleted', 'dupesearchpickgoneadd', 'dupesearchquickstop', 'dupesearchresubmit', 'dupesearchkeychanged', 'dupesearchresume', 'dupesearchgroup', 'dupesearchrerank', 'dupesearchfailedfirst', 'dupesearchfailedrestart', 'dupesearchtwopicks', 'dupesearchindexerdown', 'dupesearchquerydrop', 'dupesearchalldead', 'dupesearchtwinmember', 'dupesearchambiguous', 'dupesearchrestartcheck', 'dupesearchdonors', 'dupesearchfastdead', 'dupesearchrescorefail', 'dupesearchdryrun'}
 
 
 # --------------------------------------------------------------------------- #
@@ -12201,6 +12390,9 @@ def main():
                     help="'all', a scenario name, or several separated by commas")
     ap.add_argument('--serial', help='adb device serial (adb target)')
     ap.add_argument('--keep', action='store_true', help='keep the workdir')
+    ap.add_argument('--fallback-mode', choices=FALLBACK_MODES[2:],
+                    help='run the scenarios written for a lower DupeArticleFallback mode '
+                         '(article, stream) under this one; the others are left out')
     args = ap.parse_args()
 
     # 'all', one name, or several separated by commas
@@ -12208,6 +12400,18 @@ def main():
     unknown = [name for name in scenarios if name not in SCENARIOS]
     if unknown:
         ap.error('unknown scenario(s): %s' % ', '.join(unknown))
+    if args.fallback_mode:
+        # only a scenario of a lower mode than the requested one is promoted;
+        # one written for "no" tests the absence of the feature, one already
+        # at or above the requested mode is covered by a plain run
+        def promoted(name):
+            options = SCENARIO_OPTIONS.get(name, DEFAULT_OPTIONS)
+            mode = _fallback_mode(options() if callable(options) else options)
+            return name not in FALLBACK_MODE_BOUND and mode != 'no' and \
+                FALLBACK_MODES.index(mode) < FALLBACK_MODES.index(args.fallback_mode)
+        left_out = [name for name in scenarios if not promoted(name)]
+        scenarios = [name for name in scenarios if promoted(name)]
+        print('fallback-mode=%s: %d scenarios promoted, %d left out' % (args.fallback_mode, len(scenarios), len(left_out)))
     results = []
 
     for name in scenarios:
@@ -12239,6 +12443,17 @@ def main():
             options = SCENARIO_OPTIONS.get(name, DEFAULT_OPTIONS)
             # a function gives options that depend on the start time
             options = list(options() if callable(options) else options)
+            if args.fallback_mode:
+                options = _promote_fallback(options, args.fallback_mode)
+            # a scenario that hands the daemon an archive tool this host lacks
+            # is a SKIP, like the xcrypt_*/xdecomp_* ones without their module
+            missing = [tool for prefix, tool, have in (('UnrarCmd=', 'unrar', generators.HAVE_UNRAR),
+                                                       ('SevenZipCmd=', '7z', generators.HAVE_7Z))
+                       if not have and any(option.startswith(prefix) for option in options)]
+            if missing:
+                results.append((name, None, 'SKIP: %s is not installed' % ' and '.join(missing)))
+                print('[SKIP] %s  (%s is not installed)' % (name, ' and '.join(missing)))
+                continue
             nserv_port = nntp
             proxy_port = None
             if flaky or corrupt or rewrite or delay or first_fail:
@@ -12345,8 +12560,9 @@ def main():
     passed_count = sum(1 for _, p, _ in results if p)
     failed = any(p is False for _, p, _ in results)
     suffix = ' (+%d skipped)' % skipped if skipped else ''
-    print('\n=== %s / %s scenarios passed%s on target=%s ===' % (
-        passed_count, attempted, suffix, args.target))
+    print('\n=== %s / %s scenarios passed%s on target=%s%s ===' % (
+        passed_count, attempted, suffix, args.target,
+        ' fallback-mode=%s' % args.fallback_mode if args.fallback_mode else ''))
     if failed:
         return 1
     # A requested scenario that cannot run is an explicit, machine-readable

@@ -7,7 +7,7 @@ name: docs
 
 on:
   push:
-    branches: [main, dupe-article-fallback]
+    branches: [main]
   workflow_dispatch:
 
 permissions:

@@ -3,7 +3,7 @@ name: bench archive closed pull request
 
 on:
   pull_request_target:
-    branches: [dupe-article-fallback]
+    branches: [main]
     types: [closed]
 
 permissions:

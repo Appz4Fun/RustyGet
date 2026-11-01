@@ -3,9 +3,9 @@ name: bench pull request
 
 on:
   push:
-    branches: [dupe-article-fallback]
+    branches: [main]
   pull_request_target:
-    branches: [dupe-article-fallback]
+    branches: [main]
     types: [opened, reopened, synchronize, edited]
   workflow_dispatch:
     inputs:
@@ -40,8 +40,8 @@ jobs:
   targets:
     name: Discover guarded lifecycle targets
     if: >-
-      github.repository == 'Appz4Fun/nzbget' &&
-      ((github.event_name != 'pull_request_target' && github.ref == 'refs/heads/dupe-article-fallback') ||
+      github.repository == 'Appz4Fun/RustyGet' &&
+      ((github.event_name != 'pull_request_target' && github.ref == 'refs/heads/main') ||
        (github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name == github.repository))
     runs-on: ubuntu-latest
     outputs:

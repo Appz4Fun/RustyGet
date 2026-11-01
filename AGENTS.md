@@ -8,7 +8,8 @@ this project. Human instructions and current coordination ownership take priorit
 - Preserve dirty work and earlier evidence. Use isolated work when necessary;
   do not create unsigned stash commits or reset another owner's checkout.
 - Refresh the actual remote default before integration. This fork uses
-  `dupe-article-fallback`; do not assume `main` or silently substitute another ref.
+  `main` (named `dupe-article-fallback` until 2026-11-01); verify it with
+  `git ls-remote --symref origin HEAD` rather than silently substituting another ref.
 - Every new Git commit must have author and committer `xbmc4lyfe`, email
   `273732874+xbmc4lyfe@users.noreply.github.com`, and the configured signing key.
   Verify GitHub reports the pushed commit as verified before integration.

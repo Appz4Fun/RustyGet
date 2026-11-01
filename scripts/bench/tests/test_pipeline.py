@@ -529,7 +529,7 @@ class PublisherIdentityContractTests(unittest.TestCase):
     def invoke(self, manifest=None, current_base=BASE_SHA, current_head=CANDIDATE_SHA,
                actor="xbmc4lyfe", identity_only=False, cli_arguments=None,
                raw_manifest=None, response_updates=None, allow_status_posts=False,
-               head_repository="Appz4Fun/nzbget", publish=False, raw_samples=b"", raw_receipt=None):
+               head_repository="Appz4Fun/RustyGet", publish=False, raw_samples=b"", raw_receipt=None):
         import base64
         evidence_sha, tree_sha = "3" * 40, "4" * 40
         manifest = controlled_manifest() if manifest is None else manifest
@@ -542,17 +542,17 @@ class PublisherIdentityContractTests(unittest.TestCase):
             sha = hashlib.sha1(b"blob " + str(len(raw)).encode() + b"\0" + raw).hexdigest()
             tree.append({"path": "benchmark-results/" + name, "mode": "100644",
                          "type": "blob", "sha": sha, "size": len(raw)})
-            blobs["/repos/Appz4Fun/nzbget/git/blobs/" + sha] = {
+            blobs["/repos/Appz4Fun/RustyGet/git/blobs/" + sha] = {
                 "sha": sha, "encoding": "base64", "content": base64.b64encode(raw).decode()}
-        prefix = "/repos/Appz4Fun/nzbget"
+        prefix = "/repos/Appz4Fun/RustyGet"
         responses = {
             "/user": {"login": actor},
-            prefix: {"default_branch": "dupe-article-fallback"},
-            prefix + "/branches/dupe-article-fallback": {
+            prefix: {"default_branch": "main"},
+            prefix + "/branches/main": {
                 "commit": {"sha": current_base}, "protected": False},
             prefix + "/pulls/7": {"number": 7, "state": "open",
-                "base": {"sha": current_base, "ref": "dupe-article-fallback",
-                         "repo": {"full_name": "Appz4Fun/nzbget"}},
+                "base": {"sha": current_base, "ref": "main",
+                         "repo": {"full_name": "Appz4Fun/RustyGet"}},
                 "head": {"sha": current_head, "repo": {"full_name": head_repository},
                          "ref": "codex/controlled-contract"}},
             prefix + "/commits/" + evidence_sha: {
@@ -578,7 +578,7 @@ class PublisherIdentityContractTests(unittest.TestCase):
         elif identity_only:
             arguments += ["--verify-identity-only"]
         else:
-            arguments += ["--mode", "pr", "--repository", "Appz4Fun/nzbget", "--pr", "7",
+            arguments += ["--mode", "pr", "--repository", "Appz4Fun/RustyGet", "--pr", "7",
                           "--evidence-sha", evidence_sha, "--expected-base-sha", BASE_SHA,
                           "--expected-head-sha", CANDIDATE_SHA, "--controller-sha", BASE_SHA,
                           "--testbed", manifest["testbed"], "--output-dir", str(self.output)]
@@ -637,7 +637,7 @@ class PublisherIdentityContractTests(unittest.TestCase):
 
     def lifecycle_arguments(self, intent="manual"):
         arguments = ["--set-pr-status", "pending", "--status-intent", intent,
-                     "--repository", "Appz4Fun/nzbget", "--pr", "7", "--controller-sha", BASE_SHA]
+                     "--repository", "Appz4Fun/RustyGet", "--pr", "7", "--controller-sha", BASE_SHA]
         if intent == "manual":
             arguments += ["--expected-head-sha", CANDIDATE_SHA]
         return arguments
@@ -651,14 +651,14 @@ class PublisherIdentityContractTests(unittest.TestCase):
         self.assertEqual([call["payload"]["description"] for call in writes],
                          ["Pending base:" + BASE_SHA, "HOLD base:" + BASE_SHA])
         evidence_read = next(index for index, call in enumerate(calls)
-                             if call["endpoint"] == "/repos/Appz4Fun/nzbget/commits/" + "3" * 40)
+                             if call["endpoint"] == "/repos/Appz4Fun/RustyGet/commits/" + "3" * 40)
         self.assertLess(calls.index(writes[0]), evidence_read)
         self.assertLess(evidence_read, calls.index(writes[1]))
         self.assertIn("published=false", self.github_output.read_text())
         self.assertNotIn("published=true", self.github_output.read_text())
 
     def test_lifecycle_stale_base_success_is_invalidated_to_pending(self):
-        endpoint = "/repos/Appz4Fun/nzbget/commits/" + CANDIDATE_SHA + "/statuses?per_page=100&page=1"
+        endpoint = "/repos/Appz4Fun/RustyGet/commits/" + CANDIDATE_SHA + "/statuses?per_page=100&page=1"
         prior = {"context": "paired caller qualification", "state": "success",
                  "creator": {"login": "xbmc4lyfe"}, "description": "PASS base:" + "9" * 40}
         result = self.invoke(cli_arguments=self.lifecycle_arguments("automatic"),
@@ -670,7 +670,7 @@ class PublisherIdentityContractTests(unittest.TestCase):
         self.assertIn("status_written=true", self.github_output.read_text())
 
     def test_lifecycle_current_base_success_is_preserved_without_write(self):
-        endpoint = "/repos/Appz4Fun/nzbget/commits/" + CANDIDATE_SHA + "/statuses?per_page=100&page=1"
+        endpoint = "/repos/Appz4Fun/RustyGet/commits/" + CANDIDATE_SHA + "/statuses?per_page=100&page=1"
         prior = {"context": "paired caller qualification", "state": "success",
                  "creator": {"login": "xbmc4lyfe"}, "description": "PASS base:" + BASE_SHA}
         result = self.invoke(cli_arguments=self.lifecycle_arguments("automatic"),
@@ -694,12 +694,12 @@ class PublisherIdentityContractTests(unittest.TestCase):
         responses = {}
         for page, count in ((1, 100), (2, 100), (3, 57)):
             rows = [{"number": (page - 1) * 100 + index + 1, "state": "open",
-                     "base": {"sha": BASE_SHA, "ref": "dupe-article-fallback",
-                              "repo": {"full_name": "Appz4Fun/nzbget"}},
-                     "head": {"sha": CANDIDATE_SHA, "repo": {"full_name": "Appz4Fun/nzbget"}}}
+                     "base": {"sha": BASE_SHA, "ref": "main",
+                              "repo": {"full_name": "Appz4Fun/RustyGet"}},
+                     "head": {"sha": CANDIDATE_SHA, "repo": {"full_name": "Appz4Fun/RustyGet"}}}
                     for index in range(count)]
-            responses[f"/repos/Appz4Fun/nzbget/pulls?state=open&base=dupe-article-fallback&per_page=100&page={page}"] = rows
-        result = self.invoke(cli_arguments=["--list-prs", "--repository", "Appz4Fun/nzbget",
+            responses[f"/repos/Appz4Fun/RustyGet/pulls?state=open&base=main&per_page=100&page={page}"] = rows
+        result = self.invoke(cli_arguments=["--list-prs", "--repository", "Appz4Fun/RustyGet",
                                             "--controller-sha", BASE_SHA], response_updates=responses)
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertTrue(any(call["endpoint"].endswith("&page=3") for call in self.api_calls()))

@@ -155,14 +155,14 @@ github_actor=$(gh api --hostname github.com user --jq .login) || exit 1
 test "$github_actor" = xbmc4lyfe || exit 1
 canonical_remote=$(git remote get-url origin) || exit 1
 case "$canonical_remote" in
-  https://github.com/Appz4Fun/nzbget.git|https://github.com/Appz4Fun/nzbget) ;;
+  https://github.com/Appz4Fun/RustyGet.git|https://github.com/Appz4Fun/RustyGet) ;;
   *) printf "%s\n" "Expected project HTTPS remote" >&2; exit 1 ;;
 esac
 git -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
   fetch origin \
-  refs/heads/dupe-article-fallback:refs/remotes/origin/dupe-article-fallback \
+  refs/heads/main:refs/remotes/origin/main \
   "refs/heads/$OWNED_FEATURE_BRANCH:refs/remotes/origin/$OWNED_FEATURE_BRANCH" || exit 1
-base_commit=$(git rev-parse --verify origin/dupe-article-fallback) || exit 1
+base_commit=$(git rev-parse --verify origin/main) || exit 1
 feature_commit=$(git rev-parse --verify "origin/$OWNED_FEATURE_BRANCH") || exit 1
 squash_commit=$(git rev-parse --verify "$SQUASH_HEAD^{commit}") || exit 1
 test "$feature_commit" = "$squash_commit" || exit 1
@@ -174,7 +174,7 @@ commit_identity=$(git show -s --format='%an <%ae>|%cn <%ce>' "$SQUASH_HEAD") || 
 test "$commit_identity" = 'xbmc4lyfe <273732874+xbmc4lyfe@users.noreply.github.com>|xbmc4lyfe <273732874+xbmc4lyfe@users.noreply.github.com>' || exit 1
 git show --show-signature --format=fuller "$SQUASH_HEAD" || exit 1
 git diff --exit-code "$REVIEWED_HEAD" "$SQUASH_HEAD" -- || exit 1
-github_verified=$(gh api --hostname github.com "repos/Appz4Fun/nzbget/commits/$SQUASH_HEAD" \
+github_verified=$(gh api --hostname github.com "repos/Appz4Fun/RustyGet/commits/$SQUASH_HEAD" \
   --jq '.commit | .verification.verified == true and .verification.reason == "valid" and .author.name == "xbmc4lyfe" and .committer.name == "xbmc4lyfe" and .author.email == "273732874+xbmc4lyfe@users.noreply.github.com" and .committer.email == "273732874+xbmc4lyfe@users.noreply.github.com"') || exit 1
 test "$github_verified" = true || exit 1
 ```

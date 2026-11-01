@@ -52,7 +52,7 @@ You don't need to pick a version. The repository pins Rust 1.99.0, and rustup in
 ## Build
 
 ```bash
-git clone https://github.com/Appz4Fun/nzbget.git rustyget
+git clone https://github.com/Appz4Fun/RustyGet.git rustyget
 cd rustyget
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j 8

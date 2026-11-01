@@ -48,7 +48,7 @@ Path(sys.argv[sys.argv.index('--github-output') + 1]).write_text(
                        CALLS=str(calls), ROWS=rows, FAILURE=failure,
                        BENCH_ENV=str(folder / 'bench-env'), GUARD_ENV=str(folder / 'guard-env'),
                        BENCHER_PROJECT='test-project', BENCHER_KEY='credential-canary',
-                       BENCHER_HOST_URL='https://bencher.example', PR_NUMBER=pr_number, GITHUB_REPOSITORY='Appz4Fun/nzbget',
+                       BENCHER_HOST_URL='https://bencher.example', PR_NUMBER=pr_number, GITHUB_REPOSITORY='Appz4Fun/RustyGet',
                        BENCH_GITHUB_TOKEN='github-token-canary', BENCHMARK_GITHUB_TOKEN='configured-token-canary',
                        GH_TOKEN='gh-token-canary', GITHUB_TOKEN='actions-token-canary',
                        GUARD_READY=str(guard_ready).lower(), GUARD_FAILS=str(int(guard_fails)))

@@ -27,7 +27,7 @@ The C++ version of each ported routine stays behind `NZBGET_USE_RUST`, so builds
 ## Zero C++ checklist
 <!-- vale Google.Headings = YES -->
 
-This is the remaining-work inventory, checked against source revision `29fdbe88`. The [app source list](https://github.com/Appz4Fun/nzbget/blob/dupe-article-fallback/daemon/sources.cmake), headers, Rust call boundaries, dependency definitions, and platform packaging define its scope. Keep this inventory current when adding code or dependencies. The [per-file migration inventory](https://github.com/Appz4Fun/nzbget/blob/dupe-article-fallback/docs/RUST_MIGRATION_STATUS.md), [caller boundary map](https://github.com/Appz4Fun/nzbget/blob/dupe-article-fallback/docs/rust-migration/BOUNDARY_MAP.md), and [dependency retirement audit](https://github.com/Appz4Fun/nzbget/blob/dupe-article-fallback/docs/rust-migration/DEPENDENCY_RETIREMENT.md) retain detailed evidence and existing holds; this checklist doesn't change their qualification or ownership gates.
+This is the remaining-work inventory, checked against source revision `29fdbe88`. The [app source list](https://github.com/Appz4Fun/RustyGet/blob/main/daemon/sources.cmake), headers, Rust call boundaries, dependency definitions, and platform packaging define its scope. Keep this inventory current when adding code or dependencies. The [per-file migration inventory](https://github.com/Appz4Fun/RustyGet/blob/main/docs/RUST_MIGRATION_STATUS.md), [caller boundary map](https://github.com/Appz4Fun/RustyGet/blob/main/docs/rust-migration/BOUNDARY_MAP.md), and [dependency retirement audit](https://github.com/Appz4Fun/RustyGet/blob/main/docs/rust-migration/DEPENDENCY_RETIREMENT.md) retain detailed evidence and existing holds; this checklist doesn't change their qualification or ownership gates.
 
 The module table below lists Rust code that exists. A listed module can replace only selected routines: C++ can still own its objects, locks, transport, callbacks, and callers. A module's presence or a benchmark result doesn't complete a checklist item.
 
@@ -121,7 +121,7 @@ All items start open. An open item can contain Rust code already; it means the w
 
 ### Linked and native dependencies
 
-Inventory [POSIX dependencies](https://github.com/Appz4Fun/nzbget/blob/dupe-article-fallback/cmake/posix.cmake), `cmake/*.cmake`, `lib/sources.cmake`, `rust/Cargo.toml`, and `rust/Cargo.lock`. Record versions, transitive dependencies, feature flags, static/dynamic linkage, and shipped artifacts for each retained target. Rust crate names and C interfaces don't establish implementation language.
+Inventory [POSIX dependencies](https://github.com/Appz4Fun/RustyGet/blob/main/cmake/posix.cmake), `cmake/*.cmake`, `lib/sources.cmake`, `rust/Cargo.toml`, and `rust/Cargo.lock`. Record versions, transitive dependencies, feature flags, static/dynamic linkage, and shipped artifacts for each retained target. Rust crate names and C interfaces don't establish implementation language.
 
 - [ ] Replace PAR2-Turbo and its `par2-turbo`, `gf16`, and `hasher` build targets; qualify full verification/repair and renaming. The existing `rust-par2` dependency doesn't prove the C++ repair engine is gone.
 - [ ] Remove Boost headers and compiled components from app builds, including JSON and any remaining algorithm/container use; track `Boost.Test` separately below.
@@ -142,7 +142,7 @@ Inventory [POSIX dependencies](https://github.com/Appz4Fun/nzbget/blob/dupe-arti
 ### Qualification and development tooling
 
 - [ ] For each replacement, retain byte-for-byte differential coverage, fuzz/mutated inputs, ownership/lifetime checks, and applicable sanitizer runs while the C++ reference is available.
-- [ ] Meet the current [replacement performance gates](https://github.com/Appz4Fun/nzbget/blob/dupe-article-fallback/docs/RUST_REPLACEMENT_PLAN.md) with matched complete callers, real I/O/FFI/allocation costs, reproducible inputs, and retained slower/inconclusive results. A module benchmark alone isn't acceptance.
+- [ ] Meet the current [replacement performance gates](https://github.com/Appz4Fun/RustyGet/blob/main/docs/RUST_REPLACEMENT_PLAN.md) with matched complete callers, real I/O/FFI/allocation costs, reproducible inputs, and retained slower/inconclusive results. A module benchmark alone isn't acceptance.
 - [ ] Verify queue/state upgrade and restart compatibility, IDs, partial downloads, failure recovery, signals, concurrency, and process cleanup across supported platforms.
 - [ ] Replace app C++ unit/integration tests and `Boost.Test` with coverage of the Rust-owned behavior; retain end-to-end API, download, repair, unpack, and duplicate-recovery scenarios.
 - [ ] Decide the historical reference-tooling boundary. C++ differential/benchmark harnesses can remain in an archived migration reference, but must leave the required build/test/release path before claiming a C++-free development toolchain.

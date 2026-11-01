@@ -22,7 +22,7 @@ import urllib.request
 from collections import deque
 
 ACTOR = "xbmc4lyfe"
-BRANCH = "dupe-article-fallback"
+BRANCH = "main"
 STATUS_CONTEXT = "paired caller qualification"
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -123,7 +123,7 @@ def verified_github_actor(api):
 
 
 def archive_guard(api, repository, number):
-    require(repository == "Appz4Fun/nzbget" and type(number) is int and number > 0, "invalid archive repository or PR number")
+    require(repository == "Appz4Fun/RustyGet" and type(number) is int and number > 0, "invalid archive repository or PR number")
     actor = verified_github_actor(api)
     pr = api.get(f"/repos/{repository}/pulls/{number}")
     require(pr.get("number") == number and pr.get("base", {}).get("repo", {}).get("full_name") == repository and
@@ -227,7 +227,7 @@ def canonical_pr_number(value):
 
 def live_pr_context(api, repository, number, controller_sha, expected_head=None):
     """Bind lifecycle writes to current state, independently of stale proof."""
-    require(repository == "Appz4Fun/nzbget" and type(number) is int and number > 0 and digest(controller_sha, SHA), "invalid lifecycle controller or PR identity")
+    require(repository == "Appz4Fun/RustyGet" and type(number) is int and number > 0 and digest(controller_sha, SHA), "invalid lifecycle controller or PR identity")
     require(api.get(f"/repos/{repository}").get("default_branch") == BRANCH, "trusted controller must use the canonical default branch")
     branch = api.get(f"/repos/{repository}/branches/{BRANCH}")
     base = branch.get("commit", {}).get("sha")
@@ -274,7 +274,7 @@ def update_pr_status(api, repository, number, controller_sha, state, intent="man
 
 
 def list_lifecycle_prs(api, repository, controller_sha, selected=None):
-    require(repository == "Appz4Fun/nzbget" and digest(controller_sha, SHA), "invalid lifecycle discovery identity")
+    require(repository == "Appz4Fun/RustyGet" and digest(controller_sha, SHA), "invalid lifecycle discovery identity")
     require(api.get(f"/repos/{repository}").get("default_branch") == BRANCH and
             api.get(f"/repos/{repository}/branches/{BRANCH}").get("commit", {}).get("sha") == controller_sha,
             "lifecycle discovery controller is stale")
@@ -738,7 +738,7 @@ def main(argv=None):
     parser.add_argument("--status-intent", choices=("manual", "automatic"), default="manual")
     parser.add_argument("--github-output")
     parser.add_argument("--mode", choices=("base", "pr"))
-    parser.add_argument("--repository", default="Appz4Fun/nzbget")
+    parser.add_argument("--repository", default="Appz4Fun/RustyGet")
     parser.add_argument("--evidence-sha")
     parser.add_argument("--expected-base-sha")
     parser.add_argument("--expected-head-sha")
@@ -786,7 +786,7 @@ def main(argv=None):
             write_outputs(args.github_output, {"actor": verified_github_actor(api), "ready": "true"}, raw_protection)
             print("GitHub identity verified: xbmc4lyfe")
             return 0
-        require(args.repository == "Appz4Fun/nzbget", "evidence must belong to Appz4Fun/nzbget")
+        require(args.repository == "Appz4Fun/RustyGet", "evidence must belong to Appz4Fun/RustyGet")
         if args.publish and args.mode == "pr":
             update_pr_status(api, args.repository, args.pr, args.controller_sha, "pending", expected_head=args.expected_head_sha)
         if manages_outputs:

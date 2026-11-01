@@ -24,7 +24,7 @@ BASE, HEAD, EVIDENCE = "1" * 40, "2" * 40, "3" * 40
 
 class StatusAPI:
     """Controlled GitHub transport with an existing green head status."""
-    def __init__(self, base=BASE, head=HEAD, actor="xbmc4lyfe", state="open", head_repo="Appz4Fun/nzbget", ref="dupe-article-fallback"):
+    def __init__(self, base=BASE, head=HEAD, actor="xbmc4lyfe", state="open", head_repo="Appz4Fun/RustyGet", ref="main"):
         self.base, self.head, self.actor = base, head, actor
         self.state, self.head_repo, self.ref = state, head_repo, ref
         self.writes = []
@@ -37,14 +37,14 @@ class StatusAPI:
         if "/branches/" in endpoint:
             return {"commit": {"sha": self.base}, "protected": False}
         if "/pulls/" in endpoint:
-            return {"number": 7, "state": self.state, "base": {"sha": self.base, "ref": self.ref, "repo": {"full_name": "Appz4Fun/nzbget"}},
+            return {"number": 7, "state": self.state, "base": {"sha": self.base, "ref": self.ref, "repo": {"full_name": "Appz4Fun/RustyGet"}},
                     "head": {"sha": self.head, "repo": {"full_name": self.head_repo}}}
         if "/commits/" in endpoint:
             return {"sha": EVIDENCE, "author": {"login": "xbmc4lyfe"}, "committer": {"login": "xbmc4lyfe"},
                     "commit": {"author": {"name": "xbmc4lyfe"}, "committer": {"name": "xbmc4lyfe"},
                                "verification": {"verified": False, "reason": "unsigned"}, "tree": {"sha": "4" * 40}},
                     "files": [{"filename": "benchmark-results/manifest.json", "status": "added"}]}
-        return {"default_branch": "dupe-article-fallback"}
+        return {"default_branch": "main"}
 
     def get_list(self, endpoint):
         return self.statuses if "/statuses?" in endpoint else []
@@ -130,22 +130,22 @@ class PublisherTests(unittest.TestCase):
                 publish.verify_blob(altered, sha, bound)
 
     def test_pr_binding_rejects_stale_base_head_closed_and_wrong_repository(self):
-        pr = {"number": 7, "state": "open", "base": {"sha": BASE, "ref": "dupe-article-fallback", "repo": {"full_name": "Appz4Fun/nzbget"}},
-              "head": {"sha": HEAD, "repo": {"full_name": "Appz4Fun/nzbget"}}}
-        publish.validate_pr(pr, "Appz4Fun/nzbget", 7, BASE, HEAD)
+        pr = {"number": 7, "state": "open", "base": {"sha": BASE, "ref": "main", "repo": {"full_name": "Appz4Fun/RustyGet"}},
+              "head": {"sha": HEAD, "repo": {"full_name": "Appz4Fun/RustyGet"}}}
+        publish.validate_pr(pr, "Appz4Fun/RustyGet", 7, BASE, HEAD)
         for mutate in (lambda p: p["base"].update(sha="9" * 40), lambda p: p["head"].update(sha="9" * 40),
                        lambda p: p.update(state="closed"), lambda p: p["base"]["repo"].update(full_name="other/repo"),
                        lambda p: p["head"]["repo"].update(full_name="fork/repo"), lambda p: p["head"].update(repo=None)):
             bad = copy.deepcopy(pr)
             mutate(bad)
             with self.assertRaises(publish.PublicationError):
-                publish.validate_pr(bad, "Appz4Fun/nzbget", 7, BASE, HEAD)
+                publish.validate_pr(bad, "Appz4Fun/RustyGet", 7, BASE, HEAD)
 
     def test_manual_malformed_or_stale_evidence_revokes_existing_success(self):
         for current_base in (BASE, "5" * 40):
             api = StatusAPI(base=current_base)
             with tempfile.TemporaryDirectory() as temp, patch.object(publish, "GitHub", return_value=api), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                result = publish.main(["--mode", "pr", "--publish", "--repository", "Appz4Fun/nzbget", "--evidence-sha", EVIDENCE,
+                result = publish.main(["--mode", "pr", "--publish", "--repository", "Appz4Fun/RustyGet", "--evidence-sha", EVIDENCE,
                                        "--expected-base-sha", BASE, "--expected-head-sha", HEAD, "--controller-sha", current_base,
                                        "--pr", "7", "--testbed", "i7-existing", "--output-dir", temp])
             self.assertEqual(result, 2)
@@ -155,17 +155,17 @@ class PublisherTests(unittest.TestCase):
     def test_automatic_base_change_revokes_old_success_but_preserves_new_current_pass(self):
         current_base = "5" * 40
         api = StatusAPI(base=current_base)
-        result = publish.update_pr_status(api, "Appz4Fun/nzbget", 7, current_base, "pending", "automatic")
+        result = publish.update_pr_status(api, "Appz4Fun/RustyGet", 7, current_base, "pending", "automatic")
         self.assertTrue(result["written"])
         self.assertEqual(api.statuses[0]["state"], "pending")
         api.statuses.insert(0, {"context": "paired caller qualification", "state": "success",
                                "description": "PASS base:" + current_base, "creator": {"login": "xbmc4lyfe"}})
         api.writes.clear()
-        result = publish.update_pr_status(api, "Appz4Fun/nzbget", 7, current_base, "pending", "automatic")
+        result = publish.update_pr_status(api, "Appz4Fun/RustyGet", 7, current_base, "pending", "automatic")
         self.assertEqual(result["status"], "skip_current_pass")
         self.assertEqual(api.writes, [])
         # Manual revalidation remains independent of delayed automatic events.
-        publish.update_pr_status(api, "Appz4Fun/nzbget", 7, current_base, "pending", expected_head=HEAD)
+        publish.update_pr_status(api, "Appz4Fun/RustyGet", 7, current_base, "pending", expected_head=HEAD)
         self.assertEqual(api.statuses[0]["state"], "pending")
 
     def test_lifecycle_wrong_identity_closed_fork_retarget_and_moved_head_write_nothing(self):
@@ -173,13 +173,13 @@ class PublisherTests(unittest.TestCase):
                     StatusAPI(head_repo="fork/repo"), StatusAPI(head_repo=None), StatusAPI(ref="develop"),
                     StatusAPI(head="6" * 40), StatusAPI(base="5" * 40)):
             with self.assertRaises(publish.PublicationError):
-                publish.update_pr_status(api, "Appz4Fun/nzbget", 7, BASE, "failure", expected_head=HEAD)
+                publish.update_pr_status(api, "Appz4Fun/RustyGet", 7, BASE, "failure", expected_head=HEAD)
             self.assertEqual(api.writes, [])
 
     def test_hold_status_does_not_require_bencher_configuration_or_execute_a_command(self):
         api = StatusAPI()
         with patch.dict("os.environ", {}, clear=True), patch.object(publish, "GitHub", return_value=api), patch.object(publish.subprocess, "run") as run, contextlib.redirect_stdout(io.StringIO()):
-            result = publish.main(["--set-pr-status", "failure", "--status-intent", "manual", "--repository", "Appz4Fun/nzbget",
+            result = publish.main(["--set-pr-status", "failure", "--status-intent", "manual", "--repository", "Appz4Fun/RustyGet",
                                    "--controller-sha", BASE, "--pr", "7", "--expected-head-sha", HEAD])
             self.assertEqual(result, 0)
             run.assert_not_called()
@@ -239,7 +239,7 @@ class PublisherTests(unittest.TestCase):
                 return super().get(endpoint)
         api = Moving()
         with self.assertRaises(publish.PublicationError):
-            publish.update_pr_status(api, "Appz4Fun/nzbget", 7, BASE, "pending", expected_head=HEAD)
+            publish.update_pr_status(api, "Appz4Fun/RustyGet", 7, BASE, "pending", expected_head=HEAD)
         self.assertEqual(api.writes, [])
 
     def test_pr_number_aliases_cannot_bypass_archive_concurrency_group(self):
@@ -256,21 +256,21 @@ class PublisherTests(unittest.TestCase):
                         return [{"context": "unrelated"}] * 100
                     return self.statuses
                 if endpoint.endswith("page=1"):
-                    return [{"number": number, "state": "open", "base": {"sha": BASE, "ref": "dupe-article-fallback", "repo": {"full_name": "Appz4Fun/nzbget"}},
-                             "head": {"sha": HEAD, "repo": {"full_name": "Appz4Fun/nzbget"}}} for number in range(1, 101)]
-                return [{"number": 101, "state": "open", "base": {"sha": BASE, "ref": "dupe-article-fallback", "repo": {"full_name": "Appz4Fun/nzbget"}},
-                         "head": {"sha": HEAD, "repo": {"full_name": "Appz4Fun/nzbget"}}},
-                        {"number": 102, "state": "open", "base": {"sha": BASE, "ref": "dupe-article-fallback", "repo": {"full_name": "Appz4Fun/nzbget"}},
+                    return [{"number": number, "state": "open", "base": {"sha": BASE, "ref": "main", "repo": {"full_name": "Appz4Fun/RustyGet"}},
+                             "head": {"sha": HEAD, "repo": {"full_name": "Appz4Fun/RustyGet"}}} for number in range(1, 101)]
+                return [{"number": 101, "state": "open", "base": {"sha": BASE, "ref": "main", "repo": {"full_name": "Appz4Fun/RustyGet"}},
+                         "head": {"sha": HEAD, "repo": {"full_name": "Appz4Fun/RustyGet"}}},
+                        {"number": 102, "state": "open", "base": {"sha": BASE, "ref": "main", "repo": {"full_name": "Appz4Fun/RustyGet"}},
                          "head": {"sha": HEAD, "repo": {"full_name": "fork/repo"}}}]
         api = Pages()
-        self.assertEqual(publish.list_lifecycle_prs(api, "Appz4Fun/nzbget", BASE), list(range(1, 102)))
-        self.assertEqual(publish.latest_qualification(api, "Appz4Fun/nzbget", HEAD)["state"], "success")
+        self.assertEqual(publish.list_lifecycle_prs(api, "Appz4Fun/RustyGet", BASE), list(range(1, 102)))
+        self.assertEqual(publish.latest_qualification(api, "Appz4Fun/RustyGet", HEAD)["state"], "success")
 
     def test_automatic_invalidation_does_not_trust_another_actor_or_unbound_success(self):
         for creator, description in (("github-actions[bot]", "PASS base:" + BASE), ("xbmc4lyfe", "PASS")):
             api = StatusAPI()
             api.statuses[0].update(creator={"login": creator}, description=description)
-            result = publish.update_pr_status(api, "Appz4Fun/nzbget", 7, BASE, "pending", "automatic")
+            result = publish.update_pr_status(api, "Appz4Fun/RustyGet", 7, BASE, "pending", "automatic")
             self.assertTrue(result["written"])
             self.assertEqual(api.statuses[0]["state"], "pending")
 
@@ -278,14 +278,14 @@ class PublisherTests(unittest.TestCase):
         class Many(StatusAPI):
             def get_list(self, endpoint):
                 page = int(endpoint.rsplit("page=", 1)[1])
-                return [{"number": number, "state": "open", "base": {"sha": BASE, "ref": "dupe-article-fallback", "repo": {"full_name": "Appz4Fun/nzbget"}},
-                         "head": {"sha": HEAD, "repo": {"full_name": "Appz4Fun/nzbget"}}} for number in range((page - 1) * 100 + 1, page * 100 + 1)]
+                return [{"number": number, "state": "open", "base": {"sha": BASE, "ref": "main", "repo": {"full_name": "Appz4Fun/RustyGet"}},
+                         "head": {"sha": HEAD, "repo": {"full_name": "Appz4Fun/RustyGet"}}} for number in range((page - 1) * 100 + 1, page * 100 + 1)]
         with self.assertRaises(publish.PublicationError):
-            publish.list_lifecycle_prs(Many(), "Appz4Fun/nzbget", BASE)
+            publish.list_lifecycle_prs(Many(), "Appz4Fun/RustyGet", BASE)
 
     def test_success_is_bound_to_latest_live_head_and_full_base_sha(self):
         api = StatusAPI()
-        args = argparse.Namespace(mode="pr", repository="Appz4Fun/nzbget", pr=7, expected_base_sha=BASE,
+        args = argparse.Namespace(mode="pr", repository="Appz4Fun/RustyGet", pr=7, expected_base_sha=BASE,
                                   controller_sha=BASE, testbed="i7-existing", output_dir=Path("results"), evidence_sha=EVIDENCE)
         with patch.dict("os.environ", {"BENCHER_KEY": "private-key", "BENCHER_PROJECT": "existing-project"}), patch.object(publish.subprocess, "run", return_value=argparse.Namespace(returncode=0)):
             publish.publish_results(api, args, self.manifest(), {"status": "PASS"}, True)
@@ -307,7 +307,7 @@ class PublisherTests(unittest.TestCase):
                     self.head = "6" * 40
                 return response
         api = Moving()
-        args = argparse.Namespace(mode="pr", repository="Appz4Fun/nzbget", pr=7, expected_base_sha=BASE,
+        args = argparse.Namespace(mode="pr", repository="Appz4Fun/RustyGet", pr=7, expected_base_sha=BASE,
                                   controller_sha=BASE, testbed="i7-existing", output_dir=Path("results"), evidence_sha=EVIDENCE)
         with patch.dict("os.environ", {"BENCHER_KEY": "private-key", "BENCHER_PROJECT": "existing-project"}), patch.object(publish.subprocess, "run", return_value=argparse.Namespace(returncode=0)) as run:
             with self.assertRaises(publish.PublicationError):
@@ -318,10 +318,10 @@ class PublisherTests(unittest.TestCase):
     def test_zero_or_fork_only_lifecycle_targets_are_empty_without_writes(self):
         class ForkOnly(StatusAPI):
             def get_list(self, endpoint):
-                return [{"number": 7, "state": "open", "base": {"sha": BASE, "ref": "dupe-article-fallback", "repo": {"full_name": "Appz4Fun/nzbget"}},
+                return [{"number": 7, "state": "open", "base": {"sha": BASE, "ref": "main", "repo": {"full_name": "Appz4Fun/RustyGet"}},
                          "head": {"sha": HEAD, "repo": {"full_name": "fork/repo"}}}]
         for api in (StatusAPI(), ForkOnly()):
-            self.assertEqual(publish.list_lifecycle_prs(api, "Appz4Fun/nzbget", BASE), [])
+            self.assertEqual(publish.list_lifecycle_prs(api, "Appz4Fun/RustyGet", BASE), [])
             self.assertEqual(api.writes, [])
 
     def test_identity_uses_api_not_actor_environment(self):
@@ -338,18 +338,18 @@ class PublisherTests(unittest.TestCase):
 
     def test_archive_checks_identity_live_state_and_same_repository(self):
         class API:
-            def __init__(self, state="closed", actor="xbmc4lyfe", repository="Appz4Fun/nzbget"):
+            def __init__(self, state="closed", actor="xbmc4lyfe", repository="Appz4Fun/RustyGet"):
                 self.state, self.actor, self.repository = state, actor, repository
             def get(self, endpoint):
                 if endpoint == "/user":
                     return {"login": self.actor}
-                return {"number": 7, "state": self.state, "base": {"ref": "dupe-article-fallback", "repo": {"full_name": "Appz4Fun/nzbget"}},
+                return {"number": 7, "state": self.state, "base": {"ref": "main", "repo": {"full_name": "Appz4Fun/RustyGet"}},
                         "head": {"repo": {"full_name": self.repository}}}
-        self.assertEqual(publish.archive_guard(API(), "Appz4Fun/nzbget", 7), {"status": "ready", "ready": True, "actor": "xbmc4lyfe"})
-        self.assertEqual(publish.archive_guard(API(state="open"), "Appz4Fun/nzbget", 7)["status"], "skip_reopened")
+        self.assertEqual(publish.archive_guard(API(), "Appz4Fun/RustyGet", 7), {"status": "ready", "ready": True, "actor": "xbmc4lyfe"})
+        self.assertEqual(publish.archive_guard(API(state="open"), "Appz4Fun/RustyGet", 7)["status"], "skip_reopened")
         for api in (API(actor="bot"), API(repository="fork/repo"), API(state="unknown")):
             with self.assertRaises(publish.PublicationError):
-                publish.archive_guard(api, "Appz4Fun/nzbget", 7)
+                publish.archive_guard(api, "Appz4Fun/RustyGet", 7)
 
     def manifest(self):
         return {"schema_version": 1, "base_sha": BASE, "candidate_sha": HEAD, "testbed": "i7-existing",
@@ -393,7 +393,7 @@ class PublisherTests(unittest.TestCase):
                 "collection-receipt.json": json.dumps(self.receipt(manifest_raw, samples_raw)).encode()}
 
     def publication_arguments(self, output):
-        return ["--mode", "pr", "--publish", "--repository", "Appz4Fun/nzbget", "--evidence-sha", EVIDENCE,
+        return ["--mode", "pr", "--publish", "--repository", "Appz4Fun/RustyGet", "--evidence-sha", EVIDENCE,
                 "--expected-base-sha", BASE, "--expected-head-sha", HEAD, "--controller-sha", BASE,
                 "--pr", "7", "--testbed", "i7-existing", "--output-dir", str(output)]
 
@@ -878,7 +878,7 @@ class PublisherTests(unittest.TestCase):
             (output / "selected-bencher.json").write_text('{"stale":"data"}')
             diagnostic = io.StringIO()
             with patch.object(publish, "GitHub", return_value=API()), patch.dict("os.environ", {"BENCH_GITHUB_TOKEN": "private-token"}), contextlib.redirect_stderr(diagnostic):
-                status = publish.main(["--mode", "pr", "--repository", "Appz4Fun/nzbget", "--evidence-sha", EVIDENCE,
+                status = publish.main(["--mode", "pr", "--repository", "Appz4Fun/RustyGet", "--evidence-sha", EVIDENCE,
                                        "--expected-base-sha", BASE, "--expected-head-sha", HEAD, "--controller-sha", BASE,
                                        "--pr", "7", "--testbed", "i7-existing", "--output-dir", str(output)])
             self.assertEqual(status, 2)
@@ -888,7 +888,7 @@ class PublisherTests(unittest.TestCase):
             self.assertNotIn("private-token", diagnostic.getvalue())
 
     def test_hold_pr_and_unreviewed_receipt_never_invoke_bencher_or_github_writes(self):
-        args = argparse.Namespace(mode="pr", repository="Appz4Fun/nzbget", pr=7, expected_base_sha=BASE,
+        args = argparse.Namespace(mode="pr", repository="Appz4Fun/RustyGet", pr=7, expected_base_sha=BASE,
                                   controller_sha=BASE, testbed="i7-existing", output_dir=Path("results"), evidence_sha=EVIDENCE)
         class API:
             def get(self, endpoint):
@@ -902,7 +902,7 @@ class PublisherTests(unittest.TestCase):
             run.assert_not_called()
 
     def test_base_hold_is_monitoring_only_and_wrong_identity_blocks_bencher(self):
-        args = argparse.Namespace(mode="base", repository="Appz4Fun/nzbget", pr=None, expected_base_sha=BASE,
+        args = argparse.Namespace(mode="base", repository="Appz4Fun/RustyGet", pr=None, expected_base_sha=BASE,
                                   controller_sha=BASE, testbed="i7-existing", output_dir=Path("results"), evidence_sha=EVIDENCE)
         class API:
             def __init__(self, actor="xbmc4lyfe"):
@@ -912,7 +912,7 @@ class PublisherTests(unittest.TestCase):
                     return {"login": self.actor}
                 if "/branches/" in endpoint:
                     return {"commit": {"sha": BASE}, "protected": False}
-                return {"default_branch": "dupe-article-fallback"}
+                return {"default_branch": "main"}
             def post(self, endpoint, payload):
                 raise AssertionError("baseline monitoring must not claim PR qualification")
         with patch.dict("os.environ", {"BENCHER_KEY": "private-key", "BENCHER_PROJECT": "existing-project"}), patch.object(publish.subprocess, "run") as run:
@@ -931,7 +931,7 @@ class PublisherTests(unittest.TestCase):
                 publish.clear_owned_outputs(output)
 
     def test_baseline_retains_original_history_alert_policy(self):
-        command = publish.bencher_command("project", "dupe-article-fallback", BASE, BASE, "i7-existing", Path("data.json"), "")
+        command = publish.bencher_command("project", "main", BASE, BASE, "i7-existing", Path("data.json"), "")
         for flag, value in (("--threshold-measure", "latency"), ("--threshold-test", "percentage"),
                             ("--threshold-max-sample-size", "16"), ("--threshold-upper-boundary", "0.10")):
             self.assertEqual(command[command.index(flag) + 1], value)
@@ -982,18 +982,18 @@ class PublisherTests(unittest.TestCase):
                             return {"truncated": False, "tree": entries}
                         if "/git/blobs/" in endpoint:
                             return blobs[endpoint.rsplit("/", 1)[1]]
-                        if endpoint.endswith("/branches/dupe-article-fallback"):
+                        if endpoint.endswith("/branches/main"):
                             return {"protected": False, "commit": {"sha": BASE}}
                         if endpoint.endswith("/pulls/7"):
-                            return {"number": 7, "state": "open", "base": {"sha": BASE, "ref": "dupe-article-fallback", "repo": {"full_name": "Appz4Fun/nzbget"}},
-                                    "head": {"sha": "9" * 40 if stale_head else HEAD, "repo": {"full_name": "Appz4Fun/nzbget"}}}
-                        return {"default_branch": "dupe-article-fallback"}
+                            return {"number": 7, "state": "open", "base": {"sha": BASE, "ref": "main", "repo": {"full_name": "Appz4Fun/RustyGet"}},
+                                    "head": {"sha": "9" * 40 if stale_head else HEAD, "repo": {"full_name": "Appz4Fun/RustyGet"}}}
+                        return {"default_branch": "main"}
                     def post(self, endpoint, payload):
                         raise AssertionError("validation must never write")
                 output = Path(temp) / ("output-" + str(missing_receipt) + str(stale_head))
                 diagnostic = io.StringIO()
                 with patch.object(controller, "GitHub", return_value=API()), contextlib.redirect_stdout(diagnostic), contextlib.redirect_stderr(diagnostic):
-                    status = controller.main(["--mode", "pr", "--repository", "Appz4Fun/nzbget", "--evidence-sha", EVIDENCE,
+                    status = controller.main(["--mode", "pr", "--repository", "Appz4Fun/RustyGet", "--evidence-sha", EVIDENCE,
                                               "--expected-base-sha", BASE, "--expected-head-sha", HEAD, "--controller-sha", BASE,
                                               "--pr", "7", "--testbed", "i7-existing", "--output-dir", str(output)])
                 self.assertEqual(status, 2 if stale_head else 0, diagnostic.getvalue())

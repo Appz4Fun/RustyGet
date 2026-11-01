@@ -7827,7 +7827,9 @@ def scenario_deadpickafterreload(daemon, t):
     nzbget shuts its parts down); the new coordinator allows them again, so the
     probe still abandons a dead pick after a reload."""
     api = daemon.wait_ready()
-    daemon.reload(api)
+    api.reload()
+    time.sleep(3)
+    daemon.wait_ready()
     name, ok, detail = scenario_deadpickprobe(daemon, t)
     return ('deadpickafterreload', ok, detail)
 

@@ -436,14 +436,16 @@ bool FileSystem::AllocateFile(const char* filename, int64 size, [[maybe_unused]]
 	CloseHandle(hFile);
 	ok = true;
 #else
-	// create file
-	FILE* file = fopen(filename, FOPEN_AB);
-	if (!file)
+	// create file; DiskFile opens it close-on-exec, so a script started by
+	// another thread at this moment does not inherit the descriptor
 	{
-		errmsg = GetLastErrorMessage();
-		return false;
+		DiskFile file;
+		if (!file.Open(filename, DiskFile::omAppend))
+		{
+			errmsg = GetLastErrorMessage();
+			return false;
+		}
 	}
-	fclose(file);
 
 	// there are no reliable function to expand file on POSIX, so we must try different approaches,
 	// starting with the fastest one and hoping it will work
@@ -455,8 +457,8 @@ bool FileSystem::AllocateFile(const char* filename, int64 size, [[maybe_unused]]
 	{
 		// 2) truncate did not work, expanding the file by writing to it (that's slow)
 		truncate(filename, 0);
-		file = fopen(filename, FOPEN_AB);
-		if (!file)
+		DiskFile file;
+		if (!file.Open(filename, DiskFile::omAppend))
 		{
 			errmsg = GetLastErrorMessage();
 			return false;
@@ -468,16 +470,16 @@ bool FileSystem::AllocateFile(const char* filename, int64 size, [[maybe_unused]]
 		for (int64 remaining = size; remaining > 0;)
 		{
 			int64 needbytes = std::min(remaining, (int64)zeros.Size());
-			int64 written = fwrite(zeros, 1, needbytes, file);
+			int64 written = file.Write(zeros, needbytes);
 			if (written != needbytes)
 			{
 				errmsg = GetLastErrorMessage();
-				fclose(file);
+				file.Close();
 				return false;
 			}
 			remaining -= written;
 		}
-		fclose(file);
+		file.Close();
 
 		ok = FileSize(filename) == size;
 		if (!ok)
@@ -1838,16 +1840,6 @@ bool FileSystem::FlushDirBuffers(const char* filename, CString& errmsg)
 {
 #ifdef WIN32
 	FILE* file = _wfopen(UtfPathToWidePath(filename), WString(FOPEN_RBP));
-#else
-	BString<1024> parentPath = filename;
-	char* p = (char*)strrchr(parentPath, PATH_SEPARATOR);
-	if (p)
-	{
-		*p = '\0';
-	}
-	FILE* file = fopen(parentPath, FOPEN_RB);
-#endif
-
 	if (!file)
 	{
 		errmsg = GetLastErrorMessage();
@@ -1856,6 +1848,25 @@ bool FileSystem::FlushDirBuffers(const char* filename, CString& errmsg)
 	bool ok = FlushFileBuffers(fileno(file), errmsg);
 	fclose(file);
 	return ok;
+#else
+	BString<1024> parentPath = filename;
+	char* p = (char*)strrchr(parentPath, PATH_SEPARATOR);
+	if (p)
+	{
+		*p = '\0';
+	}
+	// the directory is opened close-on-exec through DiskFile: the descriptor
+	// is short-lived, but a script forked meanwhile must not inherit it
+	DiskFile dir;
+	if (!dir.Open(parentPath, DiskFile::omRead))
+	{
+		errmsg = GetLastErrorMessage();
+		return false;
+	}
+	bool ok = FlushFileBuffers(dir.GetFileDescriptor(), errmsg);
+	dir.Close();
+	return ok;
+#endif
 }
 
 #ifndef WIN32

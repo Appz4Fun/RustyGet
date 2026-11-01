@@ -181,6 +181,100 @@ BOOST_AUTO_TEST_CASE(CreateDirectoryExclusiveRejectsSymlink)
 	BOOST_CHECK(targetStillPresent);
 }
 
+// Starts "sh" through fork+exec and asks it to read from the descriptor.
+// Returns 1 when the child still sees the descriptor, 0 when it is closed
+// there (close-on-exec), -1 when the check itself could not run.
+static int ChildSeesDescriptor(int fd)
+{
+	char script[128];
+	snprintf(script, sizeof(script), "exec 2>/dev/null; : <&%i", fd);
+	pid_t pid = fork();
+	if (pid == -1)
+	{
+		return -1;
+	}
+	if (pid == 0)
+	{
+		execl("/bin/sh", "sh", "-c", script, (char*)nullptr);
+		_exit(127);
+	}
+	int status = 0;
+	if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status) || WEXITSTATUS(status) == 127)
+	{
+		return -1;
+	}
+	return WEXITSTATUS(status) == 0 ? 1 : 0;
+}
+
+BOOST_AUTO_TEST_CASE(DiskFileCloseOnExecTest)
+{
+	const fs::path dir = fs::temp_directory_path() / fs::make_unique_filename("nzbget-cloexec-%%%%-%%%%");
+	BOOST_REQUIRE(fs::create_directory(dir));
+	const std::string tempFile = (dir / "file.tmp").string();
+
+	// every DiskFile open mode, including the directory open used by FlushDirBuffers
+	const std::pair<const char*, DiskFile::EOpenMode> opens[] = {
+		{tempFile.c_str(), DiskFile::omWrite},
+		{tempFile.c_str(), DiskFile::omAppend},
+		{tempFile.c_str(), DiskFile::omReadWrite},
+		{tempFile.c_str(), DiskFile::omRead},
+		{dir.c_str(), DiskFile::omRead},
+	};
+	for (const auto& open : opens)
+	{
+		DiskFile file;
+		BOOST_REQUIRE_MESSAGE(file.Open(open.first, open.second), open.first);
+		int fd = file.GetFileDescriptor();
+		BOOST_REQUIRE(fd >= 0);
+		int flags = fcntl(fd, F_GETFD);
+		BOOST_REQUIRE(flags != -1);
+		BOOST_CHECK_MESSAGE((flags & FD_CLOEXEC) != 0, open.first);
+		file.Close();
+	}
+
+	fs::remove_all(dir);
+}
+
+BOOST_AUTO_TEST_CASE(ForkExecDoesNotRetainCloseOnExecFilesTest)
+{
+	const fs::path path = fs::temp_directory_path() / fs::make_unique_filename("nzbget-cloexec-%%%%-%%%%");
+	{
+		std::ofstream(path) << "cloexec";
+	}
+
+	DiskFile file;
+	BOOST_REQUIRE(file.Open(path.string().c_str(), DiskFile::omRead));
+	int fd = file.GetFileDescriptor();
+	BOOST_REQUIRE(fd >= 0);
+
+	// control: dup() clears close-on-exec, so the child must see this copy
+	int inherited = dup(fd);
+	BOOST_REQUIRE(inherited >= 0);
+	BOOST_CHECK_EQUAL(ChildSeesDescriptor(inherited), 1);
+	close(inherited);
+
+	BOOST_CHECK_EQUAL(ChildSeesDescriptor(fd), 0);
+
+	file.Close();
+	fs::remove(path);
+}
+
+BOOST_AUTO_TEST_CASE(AllocateAndFlushDirBuffersTest)
+{
+	const fs::path dir = fs::temp_directory_path() / fs::make_unique_filename("nzbget-allocate-%%%%-%%%%");
+	BOOST_REQUIRE(fs::create_directory(dir));
+	const std::string file = (dir / "allocated.bin").string();
+
+	CString errmsg;
+	BOOST_REQUIRE_MESSAGE(FileSystem::AllocateFile(file.c_str(), 100000, false, errmsg), (*errmsg ? *errmsg : ""));
+	BOOST_CHECK_EQUAL(FileSystem::FileSize(file.c_str()), 100000);
+	BOOST_CHECK_MESSAGE(FileSystem::FlushDirBuffers(file.c_str(), errmsg), (*errmsg ? *errmsg : ""));
+
+	BOOST_CHECK(!FileSystem::AllocateFile((dir / "missing" / "x.bin").string().c_str(), 10, false, errmsg));
+	BOOST_CHECK(!errmsg.Empty());
+
+	fs::remove_all(dir);
+}
 #endif
 
 BOOST_AUTO_TEST_CASE(CreateDirectoryExclusiveCreatesOnce)

@@ -35,13 +35,17 @@ fn lower(b: u8) -> bool {
 const MAX_TITLE_LEN: usize = 32;
 const MAX_PLAUSIBLE_EXT_LEN: usize = 4;
 const MIN_DEOBFUSCATE_SIZE: usize = 3;
+const MIN_MIXED_ALNUM_HASH_LEN: usize = 10;
 const MIN_ALNUM_HASH_LEN: usize = 12;
-const MIN_CAPS_HASH_LEN: usize = 10;
+const MIN_CAPS_HASH_LEN: usize = 8;
+const MIN_VOWELLESS_HASH_LEN: usize = 8;
+const MIN_LOW_VOWEL_HASH_LEN: usize = 24;
+const MIN_VOWEL_RATIO_DIVISOR: usize = 5;
 const MAX_MOVIE_TITLE_LEN: usize = 15;
-const MIN_ALPHA_RUN_HASH_LEN: usize = 24;
 const MIN_NUMERIC_HASH_LEN: usize = 16;
-const MIN_INTERIOR_CAPS_COUNT: usize = 3;
+const MIN_INTERIOR_CAPS_COUNT: usize = 2;
 const MIN_CASE_TRANSITIONS_FOR_HASH: usize = 3;
+const MIN_ALNUM_ALTERNATIONS_FOR_HASH: usize = 6;
 
 fn find(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
     if from > hay.len() {
@@ -83,8 +87,20 @@ fn extension_info(s: &[u8]) -> (Vec<u8>, Vec<u8>) {
     (raw, real)
 }
 
+fn is_vowel(c: u8) -> bool {
+    b"aeiouyAEIOUY".contains(&c)
+}
+
+fn count_vowels(s: &[u8]) -> usize {
+    s.iter().filter(|&&c| is_vowel(c)).count()
+}
+
 fn looks_like_camel_case_title(tok: &[u8]) -> bool {
     if tok.is_empty() {
+        return false;
+    }
+    // all-uppercase strings are for the all-caps heuristics, not CamelCase
+    if tok.iter().all(|&c| upper(c)) {
         return false;
     }
     const CONNECTORS: [&[u8]; 7] = [b"On", b"In", b"To", b"Of", b"At", b"By", b"No"];
@@ -92,6 +108,9 @@ fn looks_like_camel_case_title(tok: &[u8]) -> bool {
         b"XXX", b"XXIII", b"XXII", b"XXI", b"XX", b"XIX", b"XVIII", b"XVII", b"XVI", b"XV", b"XIV", b"XIII", b"XII", b"XI",
         b"X", b"IX", b"VIII", b"VII", b"VI", b"V", b"IV", b"III", b"II", b"I",
     ];
+    const MAX_PRODUCT_PREFIX_LEN: usize = 3;
+    const MIN_ACRONYM_SUFFIX_LEN: usize = 2;
+    const MAX_ACRONYM_SUFFIX_LEN: usize = 3;
     let is_year = |s: &[u8]| s.len() == 4 && (s.starts_with(b"19") || s.starts_with(b"20"));
     let match_word = |p: usize| -> Option<usize> {
         if p >= tok.len() || !upper(tok[p]) {
@@ -112,17 +131,51 @@ fn looks_like_camel_case_title(tok: &[u8]) -> bool {
         }
         (end - p >= 3).then_some(end)
     };
-    let Some(mut pos) = match_word(0) else { return false };
+    // a title word, or a 2-3 letter acronym ("OS", "HD", "TV")
+    let match_segment = |p: usize| -> Option<usize> {
+        if let Some(end) = match_word(p) {
+            return Some(end);
+        }
+        if p + 1 < tok.len() && upper(tok[p]) && upper(tok[p + 1]) {
+            let mut end = p + 2;
+            if end < tok.len() && upper(tok[end]) {
+                // a lowercase 4th letter: the 3rd belongs to the next word ("macOSVentura")
+                if end + 1 < tok.len() && lower(tok[end + 1]) {
+                    return Some(end);
+                }
+                end += 1;
+            }
+            if end == tok.len() || digit(tok[end]) || upper(tok[end]) {
+                return Some(end);
+            }
+        }
+        None
+    };
+    let mut pos = 0;
+    if tok.starts_with(b"1080p") || tok.starts_with(b"2160p") {
+        pos = 5;
+    } else if tok.starts_with(b"720p") || tok.starts_with(b"480p") {
+        pos = 4;
+    } else if lower(tok[0]) {
+        // short lowerCamelCase product prefixes ("i" of "iPhone", "e" of "eBay", "mac" of "macOS")
+        let prefix = tok.iter().take_while(|&&c| lower(c)).count();
+        if (1..=MAX_PRODUCT_PREFIX_LEN).contains(&prefix) && (prefix == 1 || count_vowels(&tok[..prefix]) > 0) {
+            pos = prefix;
+        }
+    }
+    // the title starts with a capitalized word, preposition or acronym
+    let Some(mut pos) = match_segment(pos) else { return false };
     while pos < tok.len() {
         let mut next = pos;
         while next < tok.len() && digit(tok[next]) {
             next += 1;
         }
         let count = next - pos;
+        // only 1-2 digits or a 4-digit release year between words
         if count > 0 && !is_year(&tok[pos..next]) && count > 2 {
             break;
         }
-        match match_word(next) {
+        match match_segment(next) {
             Some(end) => pos = end,
             None => break,
         }
@@ -130,19 +183,15 @@ fn looks_like_camel_case_title(tok: &[u8]) -> bool {
     if pos == tok.len() {
         return true;
     }
+    // optional suffix: 1-3 digits, a 4-digit year, a Roman numeral or a 2-3 letter acronym
     let tail = &tok[pos..];
     if tail.iter().all(|&c| digit(c)) && ((1..=3).contains(&tail.len()) || is_year(tail)) {
         return true;
     }
-    ROMAN.contains(&tail)
-}
-
-fn is_vowel(c: u8) -> bool {
-    b"aeiouyAEIOUY".contains(&c)
-}
-
-fn count_vowels(s: &[u8]) -> usize {
-    s.iter().filter(|&&c| is_vowel(c)).count()
+    if ROMAN.contains(&tail) {
+        return true;
+    }
+    (MIN_ACRONYM_SUFFIX_LEN..=MAX_ACRONYM_SUFFIX_LEN).contains(&tail.len()) && tail.iter().all(|&c| upper(c))
 }
 
 fn looks_like_hash_blob(tok: &[u8]) -> bool {
@@ -167,19 +216,35 @@ fn looks_like_hash_blob(tok: &[u8]) -> bool {
         }
     }
     let n = tok.len();
-    // 1. a mixed alphanumeric token of 12+ characters
-    if n >= MIN_ALNUM_HASH_LEN && alphas > 0 && digits > 0 && alphas + digits == n {
-        return true;
+    let alnum_only = alphas > 0 && digits > 0 && alphas + digits == n;
+    // 1. an alphanumeric token: 8+ characters starting lowercase-then-uppercase
+    //    with 2+ capitals, 10+ mixed-case, or 12+ single-case
+    if alnum_only {
+        if n >= MIN_CAPS_HASH_LEN && lower(tok[0]) && upper(tok[1]) && uppers >= MIN_INTERIOR_CAPS_COUNT {
+            return true;
+        }
+        let min_len = if lowers > 0 && uppers > 0 { MIN_MIXED_ALNUM_HASH_LEN } else { MIN_ALNUM_HASH_LEN };
+        if n >= min_len {
+            return true;
+        }
     }
-    // 2. 16+ digits
+    // 2. 10+ alphanumeric characters alternating often between letters and digits
+    //    (a4f9c2e1b8; hevc10bit, x264Hi10P, S01E01E02 have <= 5 transitions)
+    if n >= MIN_MIXED_ALNUM_HASH_LEN && alnum_only {
+        let transitions = tok.windows(2).filter(|w| digit(w[0]) != digit(w[1])).count();
+        if transitions >= MIN_ALNUM_ALTERNATIONS_FOR_HASH {
+            return true;
+        }
+    }
+    // 3. 16+ digits
     if digits >= MIN_NUMERIC_HASH_LEN && digits == n {
         return true;
     }
-    // 3. short all-caps titles with plausible vowels
+    // 4. short all-caps titles with plausible vowels
     if n <= MAX_MOVIE_TITLE_LEN && alphas > 0 && digits == 0 && uppers == alphas && (n <= 3 || count_vowels(tok) * 5 >= n) {
         return false;
     }
-    // 4. interior caps or an all-caps consonant string
+    // 5. interior caps (MQHeRbSCIoPs, xKRTvErc, aBcDeFgH) or an all-caps consonant string
     let allowed = MIN_INTERIOR_CAPS_COUNT + upper(tok[0]) as usize;
     if n >= MIN_CAPS_HASH_LEN && digits == 0 && uppers >= allowed {
         if uppers == alphas {
@@ -193,8 +258,15 @@ fn looks_like_hash_blob(tok: &[u8]) -> bool {
             }
         }
     }
-    // 5. long single-case alphabetic runs with < 20% vowels
-    n >= MIN_ALPHA_RUN_HASH_LEN && alphas == n && (lowers == alphas || uppers == alphas) && count_vowels(tok) * 5 < n
+    // 6. 8+ letters without a vowel (bcdfghjklmnpq, BCDFGHJKLMNP)
+    if n >= MIN_VOWELLESS_HASH_LEN && alphas == n && count_vowels(tok) == 0 {
+        return true;
+    }
+    // 7. long single-case alphabetic runs with < 20% vowels
+    n >= MIN_LOW_VOWEL_HASH_LEN
+        && alphas == n
+        && (lowers == alphas || uppers == alphas)
+        && count_vowels(tok) * MIN_VOWEL_RATIO_DIVISOR < n
 }
 
 fn all(s: &[u8], f: impl Fn(u8) -> bool) -> bool {
@@ -295,9 +367,14 @@ pub fn is_excessively_obfuscated(s: &[u8]) -> bool {
     if hashed_release(stem) {
         return true;
     }
-    let mixed = |t: &[u8]| t.iter().any(|&c| upper(c)) && t.iter().any(|&c| lower(c));
+    let mixed = |t: &[u8]| {
+        let uppers = t.iter().filter(|&&c| upper(c)).count();
+        let lowers = t.iter().filter(|&&c| lower(c)).count();
+        // a Capitalized word ("Show", "Movie") is not a hash fragment
+        uppers > 0 && lowers > 0 && !(uppers == 1 && upper(t[0]))
+    };
     let mut prev: &[u8] = &[];
-    for tok in stem.split(|c| b"._- ".contains(c)).filter(|t| !t.is_empty()) {
+    for tok in stem.split(|c| b"._- []()".contains(c)).filter(|t| !t.is_empty()) {
         if looks_like_hash_blob(tok) {
             return true;
         }
@@ -417,5 +494,87 @@ mod tests {
         assert!(!is_excessively_obfuscated(b"Interstellar.2014.1080p.mkv"));
         assert!(!is_excessively_obfuscated(b"abcdef0123456789abcd.part01.rar"));
         assert!(is_excessively_obfuscated(b"abc"));
+    }
+
+    fn obfuscated(names: &[&str], expected: bool) {
+        for name in names {
+            assert_eq!(is_excessively_obfuscated(name.as_bytes()), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn short_mixed_hashes_and_brackets() {
+        obfuscated(&["xK1RT5Ervcw.mkv", "xK1RT5Er.mkv"], true);
+        // brackets and parentheses around obfuscated tokens
+        obfuscated(&["[xK1RT5Ervcw].mkv", "(xK1RT5Ervcw).mkv", "Release.[deadbeefcafe1234].mkv"], true);
+        // frequent alpha-digit alternations
+        obfuscated(&["a4f9c2e1b8.mkv", "k3m9p2x7q1.mkv"], true);
+        // pure-alpha tokens with random case transitions, starting lowercase
+        obfuscated(&["xKRTvErc.mkv", "aBcDeFgH.mkv"], true);
+        // consonant-only tokens and low-vowel runs
+        obfuscated(&["bcdfghjklmnpq.mkv", "qwrtypsdfghjklzxc.mkv", "qwrtypsdfghjklzxcvbnmqwerty.mkv"], true);
+    }
+
+    #[test]
+    fn release_tags_products_and_words_stay() {
+        obfuscated(
+            &[
+                "Movie.2024.1080p.hevc10bit.mkv",
+                "Movie.2024.1080p.x264bluray.mkv",
+                "Show.720p.dts51audio.mkv",
+                "Title.2024.webdl2024.mkv",
+                "Show.2024.1080pRemux.mkv",
+                "Show.2024.1080pBluRay.mkv",
+            ],
+            false,
+        );
+        // product names with case or digits
+        obfuscated(&["iPhone13Pro.mkv", "iPhoneSE.mkv", "macOSVentura.mkv", "eBayPlus.mkv"], false);
+        // release tags and compact episode identifiers
+        obfuscated(
+            &["Show.x264Hi10P.mkv", "Show.S01E01E02.mkv", "Show.S01E01v2.mkv", "Movie.1080p60fps.mkv", "Movie.1080p10bit.mkv"],
+            false,
+        );
+        // compound German words
+        obfuscated(&["Doku.schlittschuhschritt.mkv", "Doku.kraftfahrzeugpflicht.mkv"], false);
+        obfuscated(&["LIGHTSWITCH.mkv", "BLACKKNIGHTS.mkv", "PSYCHOPATHS.mkv", "INTERSTELLAR.mkv"], false);
+        obfuscated(&["The.Show.Name.mkv", "StarTrekIntoDarkness", "SpiderManNoWayHome.mkv", "MissionImpossibleIII.mkv"], false);
+    }
+
+    #[test]
+    fn numeric_stems() {
+        // 16+ digits is a hash; shorter IDs, timestamps and ISBNs are legitimate
+        obfuscated(&["18446744073709551615.mkv", "1234567890123456.mkv"], true);
+        obfuscated(
+            &[
+                "8492017364.mkv",
+                "1234567890.mkv",
+                "1712345678.mkv",
+                "Stream.1712345678.mkv",
+                "Book.9780141036144.epub",
+                "1917.mkv",
+                "2012.mkv",
+                "20240102.mkv",
+            ],
+            false,
+        );
+    }
+
+    #[test]
+    fn hash_blob_heuristics() {
+        assert!(looks_like_hash_blob(b"MQHeRbSCIoPs"));
+        assert!(looks_like_hash_blob(b"BCDFGHJKLMNP"));
+        assert!(looks_like_hash_blob(b"deadbeefcafe1234"));
+        assert!(!looks_like_hash_blob(b"OPPENHEIMER"));
+        assert!(!looks_like_hash_blob(b"HDR"));
+        assert!(!looks_like_hash_blob(b"Movie2024Extended"));
+        assert!(looks_like_hash_blob(b"Movie9999Extended"));
+        // the C++ counterparts keep an empty token as a hash
+        assert!(looks_like_hash_blob(b""));
+        assert!(looks_like_camel_case_title(b"iPhone13Pro"));
+        assert!(looks_like_camel_case_title(b"1080pBluRay"));
+        assert!(looks_like_camel_case_title(b"MovieHD"));
+        assert!(!looks_like_camel_case_title(b"ABCDEF"));
+        assert!(!looks_like_camel_case_title(b"xKRTvErc"));
     }
 }

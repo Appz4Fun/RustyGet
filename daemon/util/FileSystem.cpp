@@ -2115,9 +2115,23 @@ bool DiskFile::Open(const char* filename, EOpenMode mode)
 #ifdef WIN32
 	m_file = _wfopen(FileSystem::UtfPathToWidePath(filename), WString(strmode));
 #else
-	// "e": close-on-exec (glibc and macOS alike), the scripts nzbget starts
-	// don't inherit the log, the queue state files and the articles being written
-	m_file = fopen(filename, (std::string(strmode) + "e").c_str());
+	// Close-on-exec from the start: the scripts nzbget starts don't inherit
+	// the log, the queue state files and the articles being written. (The
+	// "e" letter of fopen does that on glibc, while macOS ignores it.)
+	int flags = mode == omRead ? O_RDONLY : mode == omReadWrite ? O_RDWR :
+		mode == omWrite ? O_WRONLY | O_CREAT | O_TRUNC : O_WRONLY | O_CREAT | O_APPEND;
+	int fd = open(filename, flags | O_CLOEXEC, 0666);
+	if (fd == -1)
+	{
+		return false;
+	}
+	m_file = fdopen(fd, strmode);
+	if (!m_file)
+	{
+		int error = errno;
+		close(fd);
+		errno = error;
+	}
 #endif
 	return m_file;
 }

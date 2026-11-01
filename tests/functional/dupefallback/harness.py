@@ -8792,7 +8792,9 @@ def scenario_parprojection(daemon, t):
     only when the failures outgrew the par2 data, near the end of the download,
     and about 140 articles failed; now only those that failed before 200 were
     tried (about 30) are left to post-processing. (The par2 files are
-    recognized by name; ParCheck=manual leaves them unread.)"""
+    recognized by name; the par-check of post-processing can't read them and
+    fails, which doesn't matter here. The wait for par-check needs one that
+    runs by itself: under ParCheck=manual the articles are borrowed at once.)"""
     seg, n = 4_000, 1_000
     size = seg * n
     data = _payload(size, 5959)
@@ -10807,21 +10809,24 @@ FDLIST_EXTENSION = '''#!/bin/sh
 # fd 0 is nzbget's own stdin (the harness gives it a socket); the rest
 n=0
 files=0
+paths=
 if [ -d /proc/$$/fd ]; then
   for f in /proc/$$/fd/*; do
     [ "${f##*/}" = 0 ] && continue
     case "$(readlink "$f")" in socket:*) n=$((n+1));; esac
   done
   for f in /proc/$$/fd/*; do
-    case "$(readlink "$f")" in */nzbget.log|*/queue/*) files=$((files+1));; esac
+    case "$(readlink "$f")" in */nzbget.log|*/queue/*) files=$((files+1)); paths="$paths $(readlink "$f")";; esac
   done
 else
   # no /proc (macOS): lsof lists this shell's descriptors with their type
   n=$(lsof -nP -p $$ -a -d 1-1024 2>/dev/null | awk '$5 == "IPv4" || $5 == "IPv6" || $5 == "unix" { c++ } END { print c + 0 }')
-  files=$(lsof -nP -p $$ 2>/dev/null | awk '$NF ~ "/nzbget[.]log$|/queue/" { c++ } END { print c + 0 }')
+  paths=$(lsof -nP -p $$ 2>/dev/null | awk '$NF ~ "/nzbget[.]log$|/queue/" { printf " %s", $NF }')
+  files=$(echo $paths | wc -w | tr -d ' ')
 fi
 echo "[INFO] inherited sockets=$n"
 echo "[INFO] inherited state files=$files"
+[ -n "$paths" ] && echo "[INFO] inherited state paths:$paths"
 exit 93
 '''
 
@@ -12096,7 +12101,7 @@ SCENARIO_OPTIONS = {
     'projectedworsebackup': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'projectededge': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'projectededgelead': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
-    'parprojection': ['DupeArticleFallback=stream', 'ParCheck=manual'],
+    'parprojection': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'deaddownloadstray2': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'deaddownloadrestart': ['DupeArticleFallback=no', 'HealthCheck=dupe', 'ContinuePartial=yes'],
     'deadbackupsonly': ['DupeArticleFallback=no', 'HealthCheck=dupe', 'Server1.Connections=2'],
@@ -12291,8 +12296,11 @@ def _promote_fallback(options, mode):
 # streamrestartcredit shuts down during a post-processing repair that the live
 # pass has already made by then (nothing to interrupt); wholefilerestart
 # restarts while a whole-file job waits for post-processing, which the live
-# pass has already begun (the restart redoes it: two recreations, not one)
-FALLBACK_MODE_BOUND = {'livegate', 'streamrestartcredit', 'wholefilerestart'}
+# pass has already begun (the restart redoes it: two recreations, not one);
+# wholefilestale zeroes the recreated volume after the shutdown to stand for
+# a recreation cut short, but the live pass may have finished it, and a
+# finished job is rightly not redone
+FALLBACK_MODE_BOUND = {'livegate', 'streamrestartcredit', 'wholefilerestart', 'wholefilestale'}
 # scenarios that read nserv's request log (nserv.log)
 CAPTURE_REQUESTS = {'repost', 'wholefileproofcost'}
 # extra nserv arguments per scenario (-w: response latency in ms)

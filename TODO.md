@@ -17,8 +17,11 @@ independent; none blocks a release.
 - **`dupe-article-fallback`** on origin is the former default branch, frozen at
   the same commit as PR #115's merge. Delete once nothing external links to it.
 - **Origin URL** is still `git@github.com:xbmc4lyfe/nzbget` (GitHub redirects
-  to `Appz4Fun/RustyGet`); run `git remote set-url origin
-  git@github.com:Appz4Fun/RustyGet.git`.
+  to `Appz4Fun/RustyGet`). The identity checks in
+  `docs/DEPLOYMENT_AGENT_PROCEDURES.md` and
+  `docs/BENCHMARK_AGENT_PROCEDURES.md` accept only the canonical HTTPS URL, so
+  run `git remote set-url origin https://github.com/Appz4Fun/RustyGet.git` and
+  use the verified credential-helper override from AGENTS.md.
 
 ## Tests
 

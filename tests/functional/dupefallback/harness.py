@@ -527,6 +527,22 @@ class Daemon:
                 time.sleep(0.3)
         raise RuntimeError('nzbget did not become ready')
 
+    def reload(self, api, timeout=60):
+        """Reload nzbget and return a proxy to the reloaded instance. The
+        ``reload`` call answers before the old instance stops, so for a while
+        its port still takes calls and a status reply can come from it; the
+        port then closes until the new instance listens. Wait for the new
+        instance's start-up line in the log, which it writes after the old one
+        has stopped, before asking whether it is ready."""
+        started = _grep_log(self.t, 'nzbget runs on')
+        api.reload()
+        deadline = time.time() + timeout
+        while _grep_log(self.t, 'nzbget runs on') <= started:
+            if time.time() > deadline:
+                raise RuntimeError('nzbget did not start again after the reload')
+            time.sleep(0.2)
+        return self.wait_ready(timeout=timeout)
+
     def append(self, api, name, nzb_xml, paused, dupekey, score):
         content = base64.standard_b64encode(nzb_xml.encode()).decode()
         return api.append(name, content, 'test', 0, False, paused,
@@ -3215,9 +3231,7 @@ def scenario_reloadpostqueue(daemon, t):
     while time.time() < deadline and _grep_log(t, 'Collection RelRP completely downloaded') == 0:
         time.sleep(0.2)
     for _ in range(3):
-        api.reload()
-        time.sleep(1)
-        api = daemon.wait_ready(timeout=60)
+        api = daemon.reload(api)
     api.resumepost()
     try:
         h = daemon.wait_history(api, 'RelRP', timeout=60)
@@ -7813,9 +7827,7 @@ def scenario_deadpickafterreload(daemon, t):
     nzbget shuts its parts down); the new coordinator allows them again, so the
     probe still abandons a dead pick after a reload."""
     api = daemon.wait_ready()
-    api.reload()
-    time.sleep(3)
-    daemon.wait_ready()
+    daemon.reload(api)
     name, ok, detail = scenario_deadpickprobe(daemon, t)
     return ('deadpickafterreload', ok, detail)
 

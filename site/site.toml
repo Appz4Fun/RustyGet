@@ -11,7 +11,7 @@ status = "rewrite in progress"
 repo = "https://github.com/Appz4Fun/nzbget"
 # Source links use the branch being built (GITHUB_REF_NAME in Actions), else this one.
 branch = "dupe-article-fallback"
-base_url = "https://appz4fun.github.io/nzbget/"
+base_url = "https://appz4fun.github.io/RustyGet/"
 
 [[nav]]
 title = "Overview"

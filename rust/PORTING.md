@@ -170,7 +170,7 @@ Generated keys and managed score floors persist without client edits.
 
 Track remaining application areas, native dependencies, external helpers,
 platforms, qualification, and final C++ removal in the
-[zero C++ checklist](https://appz4fun.github.io/nzbget/rust-port.html#zero-c-checklist).
+[zero C++ checklist](https://appz4fun.github.io/RustyGet/rust-port.html#zero-c-checklist).
 Its source is `site/content/rust-port.md`. The generated module table lists
 existing Rust modules, not a complete application migration.
 

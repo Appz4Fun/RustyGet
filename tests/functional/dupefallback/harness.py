@@ -33,6 +33,14 @@ abstraction:
 * ``AdbTarget`` runs them inside a connected Android emulator/device over adb,
   forwarding the RPC port back to the host.
 
+``--fallback-mode live`` (or ``stream``) runs the scenarios written for a lower
+``DupeArticleFallback`` mode under that one (the daemon gates its features with
+``>=`` on no < article < stream < live, so whatever passes under a mode must
+pass under every higher one); see ``FALLBACK_MODE_BOUND`` for the few that
+assert their own mode's sequence of events. ``dupesearchrealindexer`` searches a
+real NZBHydra2 (``NZBHYDRA2_URL``/``NZBHYDRA2_APIKEY``, environment or the
+repository's ``.env``) and is a SKIP without them.
+
 Scenarios (all use the ``!serverlist`` nserv message-id suffix to make an
 article "missing" on the active server, so no real Usenet access is needed):
 
@@ -6114,6 +6122,120 @@ def scenario_dupesearchindexerdown(daemon, t):
     return ('dupesearchindexerdown', ok, 'released_logs=%d searches=%d donors=%d' % (released, searches, len(donors)))
 
 
+REAL_INDEXER_URL_VAR, REAL_INDEXER_KEY_VAR = 'NZBHYDRA2_URL', 'NZBHYDRA2_APIKEY'
+
+
+def _dotenv():
+    """The environment, completed from the repository's .env (KEY=VALUE lines;
+    the file is ignored by git). Its values are settings of a real indexer and
+    are never printed."""
+    values = dict(os.environ)
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', '..', '.env')
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                key, value = line.split('=', 1)
+                key = key.strip()
+                if key.startswith('export '):
+                    key = key[len('export '):].strip()
+                values.setdefault(key, value.strip().strip('"\''))
+    except OSError:
+        pass
+    return values
+
+
+def _real_indexer():
+    """(url, api key) of the real Newznab indexer to test against, or None:
+    NZBHYDRA2_URL and NZBHYDRA2_APIKEY, or failing those any variable naming
+    HYDRA and URL / KEY."""
+    env = _dotenv()
+    url = env.get(REAL_INDEXER_URL_VAR) or next(
+        (v for k, v in env.items() if 'HYDRA' in k.upper() and 'URL' in k.upper()), None)
+    key = env.get(REAL_INDEXER_KEY_VAR) or next(
+        (v for k, v in env.items() if 'HYDRA' in k.upper() and 'KEY' in k.upper()), None)
+    return (url, key) if url and key else None
+
+
+def _real_indexer_options():
+    url, key = _real_indexer() or ('http://127.0.0.1:1/api', 'none')
+    # a dry run (queues nothing), few probe articles: the news server is the
+    # fake one without articles, every posting found is dead
+    return ['DupeArticleFallback=no', 'DupeSearch=yes', 'DupeSearchDelay=1', 'DupeSearchDryRun=yes',
+            'DupeSearchUrl=%s' % url, 'DupeSearchApiKey=%s' % key,
+            'DupeFastDonors=0', 'DupeBodyChecks=0', 'DupeHealthMin=5', 'DupeHealthMax=10']
+
+
+def scenario_dupesearchrealindexer(daemon, t):
+    """The search against a real Newznab indexer (NZBHydra2), named by
+    NZBHYDRA2_URL and NZBHYDRA2_APIKEY in the environment or the repository's
+    .env (SKIP without them). The fake indexer answers as the daemon expects;
+    this checks that the daemon asks as the real one expects, and reads what
+    it really answers. A scene-named TV posting the indexer lists right now
+    (the one with the fewest other listings, to spare the indexers' grab
+    limits) is appended as a pick whose articles the fake news server lacks.
+    The daemon must find that release again with its own queries, fetch the
+    nzb-files of its listings through the indexer and judge them, with no
+    indexer error, no unreadable answer and no api key in the log; the dry
+    run queues nothing."""
+    indexer = _real_indexer()
+    if not indexer:
+        return ('dupesearchrealindexer', None,
+                'SKIP: %s/%s not set (environment or .env)' % (REAL_INDEXER_URL_VAR, REAL_INDEXER_KEY_VAR))
+    url, key = indexer
+    import urllib.request as _req
+    import xml.etree.ElementTree as _et
+
+    def ask(**params):
+        query = urllib.parse.urlencode(dict(params, apikey=key, o='xml'))
+        with _req.urlopen('%s?%s' % (url, query), timeout=120) as reply:
+            return _et.fromstring(reply.read())
+
+    def titles(root):
+        return [item.findtext('title') or '' for item in root.iter('item')]
+
+    caps = ask(t='caps')
+    if caps.tag != 'caps':
+        return ('dupesearchrealindexer', False, 'caps answered <%s> %s' % (caps.tag, (caps.get('description') or '')[:60]))
+    # the newest TV postings; a scene name gives the daemon's queries a group to go by
+    newest = titles(ask(t='tvsearch', limit='100')) or titles(ask(t='search', q='1080p', limit='100'))
+    scene = [x for x in newest if re.search(r'\bS\d{2}E\d{2}\b', x, re.I) and re.search(r'[.\s-][A-Za-z0-9]{2,}$', x)]
+    if not scene:
+        return ('dupesearchrealindexer', False, 'no scene-named TV posting among %d newest listings' % len(newest))
+    counted = sorted((len(titles(ask(t='search', q=re.sub(r'[._]', ' ', x), limit='100'))), x) for x in scene[:4])
+    counted = [(n, x) for n, x in counted if n >= 1]
+    if not counted:
+        return ('dupesearchrealindexer', False, 'none of %d scene-named postings is found by its own title' % len(scene[:4]))
+    listings, title = counted[0]
+    api = daemon.wait_ready()
+    _ds_append(api, title, _ds_nzb(t, 'ri'), '', 100)
+    deadline = time.time() + 300
+    while time.time() < deadline and _grep_log(t, 'DupeSearch: %s: results=' % title) == 0:
+        time.sleep(1)
+    log = t.read_file('nzbget.log').decode(errors='replace')
+    found = re.search(r'DupeSearch: %s: (\d+) result\(s\) from (\d+) search\(es\) \((\d+) failed, (\d+) page\(s\)\), '
+                      r'(\d+) of them the same release' % re.escape(title), log)
+    summary = re.search(r'DupeSearch: %s: results=(\d+) candidates=(\d+) postings=(\d+) verified=(\d+) added=(\d+) '
+                        r'rejected=\{([^}]*)\}' % re.escape(title), log)
+    results, searches, failed, same = (
+        (int(found.group(1)), int(found.group(2)), int(found.group(3)), int(found.group(5))) if found else (0, 0, -1, 0))
+    postings = int(summary.group(3)) if summary else -1
+    not_xml = log.count("isn't XML")
+    indexer_errors = log.count('answered the search') + log.count('failed (HTTP ')
+    leaked = key in log
+    alive = t.procs[-1].poll() is None
+    queued = [g['NZBName'] for g in api.listgroups() if g['NZBName'] != title]
+    ok = (found is not None and summary is not None and results >= 1 and same >= 1 and failed == 0 and
+          postings >= 1 and not_xml == 0 and indexer_errors == 0 and not leaked and alive and not queued)
+    return ('dupesearchrealindexer', ok,
+            'title=%r indexer_listings=%d results=%d searches=%d failed=%d same_release=%d postings=%d summary=%s '
+            'not_xml=%d indexer_errors=%d api_key_in_log=%s queued=%s alive=%s'
+            % (title, listings, results, searches, failed, same, postings, summary is not None,
+               not_xml, indexer_errors, leaked, queued, alive))
+
+
 def scenario_dupesearchquerydrop(daemon, t):
     """The indexer drops the connection of the search that has the results,
     once, without an answer (as an indexer under load does): the search asks it
@@ -11565,6 +11687,7 @@ SCENARIOS = {
     'dupesearchtwopicks': scenario_dupesearchtwopicks,
     'dupesearchindexerdown': scenario_dupesearchindexerdown,
     'dupesearchquerydrop': scenario_dupesearchquerydrop,
+    'dupesearchrealindexer': scenario_dupesearchrealindexer,
     'fleetdeadfirst': scenario_fleetdeadfirst,
     'fleettwins': scenario_fleettwins,
     'fleettimeout': scenario_fleettimeout,
@@ -12003,6 +12126,7 @@ SCENARIO_OPTIONS = {
     'dupesearchambiguous': ['DupeArticleFallback=no', 'DupeSearch=yes', 'DupeSearchDelay=2', 'DupeSearchApiKey=k', 'DupeFastDonors=2'],
     'dupesearchtwopicks': ['DupeArticleFallback=no', 'DupeSearch=yes', 'DupeSearchDelay=2', 'DupeSearchApiKey=k'],
     'dupesearchindexerdown': ['DupeArticleFallback=no', 'DupeSearch=yes', 'DupeSearchDelay=2', 'DupeSearchApiKey=k'],
+    'dupesearchrealindexer': _real_indexer_options,
     'dupesearchquerydrop': ['DupeArticleFallback=no', 'DupeSearch=yes', 'DupeSearchDelay=2', 'DupeSearchApiKey=k'],
     'fleetdeadfirst': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
     'fleettwins': ['DupeArticleFallback=no', 'HealthCheck=dupe'],
@@ -12235,7 +12359,7 @@ SCENARIO_NEWZNAB = {'dupesearchheldbad', 'dupesearchheldforce', 'dupesearchheldh
                    'dupesearchresumedeleted'}
 
 # scenarios with a FakeNntp news server in place of nserv
-SCENARIO_FAKE_NNTP = {'dupesearchheldbad', 'dupesearchheldforce', 'dupesearchheldhealthy', 'dupesearchheldpendingbad', 'dupesearchcappartial', 'dupesearchrankingrestart', 'dupesearchinterruptedmemo', 'dupesearchcapdead', 'dupesearchownedhistory', 'dupesearchtitlememo', 'dupesearchpardata', 'dupesearchfastdeadretry', 'dupesearchkeylessbackup', 'dupesearchranknoserver', 'dupesearchplacewhole', 'dupesearchpargap', 'dupesearchhistoryother', 'dupesearchhistoryrename', 'dupesearchstructuralcache', 'dupesearchwholeorder', 'dupesearchexplicitprefix', 'dupesearchownedlegacy', 'dupesearchretiredfleet', 'dupesearchvanishedbackup', 'dupesearchhistoryown', 'dupesearchbroaderretry', 'dupesearchzerolate', 'dupesearchwatchpersist', 'dupesearchpartialdead', 'dupesearchlegacyrename', 'dupesearchwatchscript', 'dupesearchwatchfetchrename', 'dupesearchwatchrestart', 'dupesearchwatchbackup', 'dupesearchlenientinner', 'dupesearchwatchrename', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetduringpost', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetalldead', 'fleetshutdown', 'dupesearchresumedeleted', 'dupesearchpickdeleted', 'dupesearchpickgoneadd', 'dupesearchquickstop', 'dupesearchresubmit', 'dupesearchkeychanged', 'dupesearchresume', 'dupesearchgroup', 'dupesearchrerank', 'dupesearchfailedfirst', 'dupesearchfailedrestart', 'dupesearchtwopicks', 'dupesearchindexerdown', 'dupesearchquerydrop', 'dupesearchalldead', 'dupesearchtwinmember', 'dupesearchambiguous', 'dupesearchrestartcheck', 'dupesearchdonors', 'dupesearchfastdead', 'dupesearchrescorefail', 'dupesearchdryrun'}
+SCENARIO_FAKE_NNTP = {'dupesearchrealindexer', 'dupesearchheldbad', 'dupesearchheldforce', 'dupesearchheldhealthy', 'dupesearchheldpendingbad', 'dupesearchcappartial', 'dupesearchrankingrestart', 'dupesearchinterruptedmemo', 'dupesearchcapdead', 'dupesearchownedhistory', 'dupesearchtitlememo', 'dupesearchpardata', 'dupesearchfastdeadretry', 'dupesearchkeylessbackup', 'dupesearchranknoserver', 'dupesearchplacewhole', 'dupesearchpargap', 'dupesearchhistoryother', 'dupesearchhistoryrename', 'dupesearchstructuralcache', 'dupesearchwholeorder', 'dupesearchexplicitprefix', 'dupesearchownedlegacy', 'dupesearchretiredfleet', 'dupesearchvanishedbackup', 'dupesearchhistoryown', 'dupesearchbroaderretry', 'dupesearchzerolate', 'dupesearchwatchpersist', 'dupesearchpartialdead', 'dupesearchlegacyrename', 'dupesearchwatchscript', 'dupesearchwatchfetchrename', 'dupesearchwatchrestart', 'dupesearchwatchbackup', 'dupesearchlenientinner', 'dupesearchwatchrename', 'uucache', 'stallquit', 'joingroupreconnect', 'joingroupnogroups', 'fleetparallel', 'fleetduringpost', 'fleetslowurlfirst', 'fleetwide', 'fleetsamekey', 'fleetscoremax', 'fleetmerged', 'fleetslowurl', 'fleetpaused', 'fleetmostlydead', 'fleetlarge', 'fleetcopy', 'fleetbusy', 'fleetdeadtwins', 'fleetfailover', 'fleetaddbackup', 'fleetresendslow', 'fleetresend', 'fleetallerror', 'fleetotherkey', 'fleetnokey', 'fleetdeadfirst', 'fleettwins', 'fleettimeout', 'fleetone', 'fleetalldead', 'fleetshutdown', 'dupesearchresumedeleted', 'dupesearchpickdeleted', 'dupesearchpickgoneadd', 'dupesearchquickstop', 'dupesearchresubmit', 'dupesearchkeychanged', 'dupesearchresume', 'dupesearchgroup', 'dupesearchrerank', 'dupesearchfailedfirst', 'dupesearchfailedrestart', 'dupesearchtwopicks', 'dupesearchindexerdown', 'dupesearchquerydrop', 'dupesearchalldead', 'dupesearchtwinmember', 'dupesearchambiguous', 'dupesearchrestartcheck', 'dupesearchdonors', 'dupesearchfastdead', 'dupesearchrescorefail', 'dupesearchdryrun'}
 
 
 # --------------------------------------------------------------------------- #

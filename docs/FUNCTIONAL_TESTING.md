@@ -88,6 +88,59 @@ After test completion NZBGet is terminated. To analyze a test failure it can be 
   pytest -v parcheck/parcheck_auto_test.py::test_parchecker_repair --hold
 ```
 
+## DupeArticleFallback harness
+
+`tests/functional/dupefallback/harness.py` drives a scratch daemon and nzbget's
+own test news server (`nzbget --nserv`) through several hundred offline
+scenarios of the duplicate features: article borrowing, stream and live repair,
+whole-file recreation, par-repair hand-offs, `HealthCheck=dupe` failover, the
+duplicate search against a fake Newznab indexer, and the queue and API edges
+around them. It runs on Linux and macOS and needs Python 3 with
+`cryptography`, plus `7z` and `unrar` on PATH for the archive scenarios; a
+scenario whose tool or module is missing is reported as `SKIP` and the run
+exits 77, never green.
+
+```sh
+tests/functional/dupefallback/run-local.sh /absolute/build/nzbget            # every scenario
+tests/functional/dupefallback/run-local.sh /absolute/build/nzbget stream,livegate
+tests/functional/dupefallback/run-linux-docker.sh /absolute/linux-x86_64/nzbget
+```
+
+A failed scenario keeps its work directory (the daemon's `nzbget.log`, its
+configuration and queue) and prints the path.
+
+### The mode matrix
+
+`DupeArticleFallback` is ordered `no < article < stream < live` and the daemon
+gates its features with `>=`, so a scenario written for a lower mode must pass
+under a higher one. `--fallback-mode live` (or `stream`) runs every scenario
+written for a lower mode with its `DupeArticleFallback=` option raised to that
+mode; scenarios written for `no`, scenarios already at or above the requested
+mode, and the few in `FALLBACK_MODE_BOUND` (they assert the sequence of events
+of their own mode) are left out.
+
+```sh
+python3 tests/functional/dupefallback/harness.py --nzbget /absolute/build/nzbget --fallback-mode live
+python3 tests/functional/dupefallback/harness.py --nzbget /absolute/build/nzbget --fallback-mode stream
+```
+
+### A real indexer
+
+`dupesearchrealindexer` runs the duplicate search against a real Newznab
+indexer (NZBHydra2) instead of the fake one. It needs `NZBHYDRA2_URL` (the
+api endpoint, for example `http://hydra.local:5076/api`) and
+`NZBHYDRA2_APIKEY`, from the environment or from a `.env` file in the
+repository root (ignored by git); without them it is a `SKIP`. It asks the
+indexer for its newest scene-named TV posting with the fewest other listings,
+appends that title as a pick whose articles the fake news server lacks, and
+checks that the daemon finds the release again with its own queries, fetches
+the nzb-files of its listings through the indexer and judges them, with no
+indexer error, no unreadable answer and no api key in the log. It is a dry
+run and queues nothing, but every nzb-file fetched counts as a grab at the
+indexers behind NZBHydra2: run it on purpose, not in every loop. The api key
+lands in the scratch daemon's configuration, which a failed run keeps; do not
+publish such a directory.
+
 ## TLS cipher optimizer fixture
 
 `fixture.py` starts a candidate NZBGet binary with a new configuration, queue,

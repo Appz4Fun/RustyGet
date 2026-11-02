@@ -1339,9 +1339,18 @@ MemoryMonitor* g_MemoryMonitor = nullptr;
 
 MemoryMonitor::MemoryMonitor()
 {
+	InitOptions();
+}
+
+void MemoryMonitor::InitOptions()
+{
 	if (g_Options && g_Options->GetMemoryPressurePath() && strlen(g_Options->GetMemoryPressurePath()) > 0)
 	{
 		nzbget_rs_memory_pressure_set_mock_root(g_Options->GetMemoryPressurePath());
+	}
+	else if (g_Options)
+	{
+		nzbget_rs_memory_pressure_set_mock_root(nullptr);
 	}
 	UpdateState();
 }

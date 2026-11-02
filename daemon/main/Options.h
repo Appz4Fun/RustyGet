@@ -823,6 +823,7 @@ public:
 	MemoryMonitor();
 	~MemoryMonitor() override;
 
+	void InitOptions();
 	void Run() override;
 	void Stop() override;
 

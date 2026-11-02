@@ -81,6 +81,7 @@ private:
 	bool m_unpackOk = false;
 	bool m_finalDirCreated = false;
 	bool m_processed = false;
+	std::atomic<bool> m_cancelled{false};
 	std::atomic<bool> m_unpacking{false};
 	void CreateUnpackDir();
 	void FindArchiveFiles();

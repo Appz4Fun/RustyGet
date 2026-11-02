@@ -10,9 +10,12 @@ pub mod decode;
 pub mod decoder;
 pub mod deobfuscation;
 pub mod directrenamer;
+pub mod donorscore;
+pub mod dupesearch_nzb;
 pub mod escape;
 pub mod extload;
 pub mod feedfilter;
+pub mod ffi;
 pub mod filetypes;
 pub mod fsdelete;
 #[cfg(unix)]
@@ -25,41 +28,38 @@ pub mod options;
 pub mod parparser;
 pub mod parrenamer;
 pub mod paths;
+pub mod posting;
 pub mod rarreader;
 pub mod rarrenamer;
+pub mod releasename;
 pub mod renameanalyzer;
 pub mod rpcparams;
 pub mod rpcroute;
 pub mod scheduler;
 pub mod statmeter;
 pub mod text;
+pub mod tlscipher;
+pub mod twin;
 pub mod url;
 pub mod urlcoord;
 pub mod util;
-pub mod tlscipher;
 pub mod webdownload;
 pub mod webserver;
 pub mod webutil;
-pub mod ffi;
-pub mod donorscore;
-pub mod dupesearch_nzb;
-pub mod releasename;
-pub mod posting;
-pub mod twin;
 pub mod wildmask;
 
 pub mod dupeidentity;
 
-pub mod streampatchparts;
-pub mod streamcompare;
 pub mod deadpostings;
 pub mod dupewatch;
+pub mod streamcompare;
+pub mod streampatchparts;
 
 pub mod dupepurge;
 
-pub mod purgejournal;
 #[cfg(test)]
 mod allocation_probe;
+pub mod purgejournal;
 
 pub mod memory_pressure {
     //! Low-Memory & OOM Resilience Monitor (Requirement R8).
@@ -281,29 +281,11 @@ pub mod memory_pressure {
             parse_psi(&content, &mut metrics);
         }
 
-        // 2. Linux Cgroups v2
-        let cgroup2_cur = resolve_subpath(final_mock_root, "sys/fs/cgroup/memory.current");
-        let cgroup2_max = resolve_subpath(final_mock_root, "sys/fs/cgroup/memory.max");
-        if let (Ok(cur_str), Ok(max_str)) = (
-            std::fs::read_to_string(&cgroup2_cur),
-            std::fs::read_to_string(&cgroup2_max),
-        ) {
-            parse_cgroup_v2(&cur_str, &max_str, &mut metrics);
-        }
+        // 2. Linux Cgroups v2 (hierarchy-aware via /proc/self/cgroup & /proc/self/mountinfo)
+        sample_cgroup_v2_hierarchy(final_mock_root, &mut metrics);
 
-        // 3. Linux Cgroups v1 (with inactive_file subtraction)
-        let cgroup1_usage =
-            resolve_subpath(final_mock_root, "sys/fs/cgroup/memory/memory.usage_in_bytes");
-        let cgroup1_limit =
-            resolve_subpath(final_mock_root, "sys/fs/cgroup/memory/memory.limit_in_bytes");
-        let cgroup1_stat = resolve_subpath(final_mock_root, "sys/fs/cgroup/memory/memory.stat");
-        if let (Ok(usage_str), Ok(limit_str)) = (
-            std::fs::read_to_string(&cgroup1_usage),
-            std::fs::read_to_string(&cgroup1_limit),
-        ) {
-            let stat_str = std::fs::read_to_string(&cgroup1_stat).ok();
-            parse_cgroup_v1(&usage_str, &limit_str, stat_str.as_deref(), &mut metrics);
-        }
+        // 3. Linux Cgroups v1 (hierarchy-aware with inactive_file subtraction)
+        sample_cgroup_v1_hierarchy(final_mock_root, &mut metrics);
 
         // 4. Host meminfo (/proc/meminfo)
         let meminfo_path = resolve_subpath(final_mock_root, "proc/meminfo");
@@ -330,10 +312,263 @@ pub mod memory_pressure {
     }
 
     fn resolve_subpath(root: Option<&Path>, subpath: &str) -> PathBuf {
+        let trimmed = subpath.trim_start_matches('/');
         if let Some(r) = root {
-            r.join(subpath)
+            r.join(trimmed)
         } else {
-            PathBuf::from("/").join(subpath)
+            PathBuf::from("/").join(trimmed)
+        }
+    }
+
+    fn unescape_mountinfo_path(raw: &str) -> String {
+        raw.replace("\\040", " ")
+            .replace("\\011", "\t")
+            .replace("\\012", "\n")
+            .replace("\\134", "\\")
+    }
+
+    fn parse_proc_self_cgroup_paths(content: &str) -> (Option<String>, Option<String>) {
+        let mut v2_path: Option<String> = None;
+        let mut v1_mem_path: Option<String> = None;
+
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let mut parts = trimmed.splitn(3, ':');
+            let (Some(hier_id), Some(controllers), Some(cg_path)) =
+                (parts.next(), parts.next(), parts.next())
+            else {
+                continue;
+            };
+            if hier_id == "0" && controllers.is_empty() {
+                v2_path = Some(cg_path.to_string());
+            } else if controllers.split(',').any(|c| c == "memory") {
+                v1_mem_path = Some(cg_path.to_string());
+            }
+        }
+        (v2_path, v1_mem_path)
+    }
+
+    fn parse_mountinfo_cgroup_mounts(
+        content: &str,
+    ) -> (Option<(String, String)>, Option<(String, String)>) {
+        let mut v2_mount: Option<(String, String)> = None;
+        let mut v1_mem_mount: Option<(String, String)> = None;
+
+        for line in content.lines() {
+            let Some((pre, post)) = line.split_once(" - ") else {
+                continue;
+            };
+            let pre_fields: Vec<&str> = pre.split_whitespace().collect();
+            let post_fields: Vec<&str> = post.split_whitespace().collect();
+            if pre_fields.len() < 5 || post_fields.is_empty() {
+                continue;
+            }
+            let mount_root = unescape_mountinfo_path(pre_fields[3]);
+            let mount_point = unescape_mountinfo_path(pre_fields[4]);
+            let fs_type = post_fields[0];
+            let super_opts = post_fields.get(2).copied().unwrap_or("");
+
+            if fs_type == "cgroup2" && v2_mount.is_none() {
+                v2_mount = Some((mount_root, mount_point));
+            } else if fs_type == "cgroup"
+                && (super_opts.split(',').any(|o| o == "memory")
+                    || mount_point.ends_with("/memory"))
+                && v1_mem_mount.is_none()
+            {
+                v1_mem_mount = Some((mount_root, mount_point));
+            }
+        }
+
+        (v2_mount, v1_mem_mount)
+    }
+
+    fn build_cgroup_hierarchy_dirs(
+        mock_root: Option<&Path>,
+        default_mount_subpath: &str,
+        mount_info: Option<(String, String)>,
+        proc_cgroup_path: Option<&str>,
+    ) -> Vec<PathBuf> {
+        let (mount_root_in_cg, mount_point_subpath) = match mount_info {
+            Some((m_root, m_point)) => (m_root, m_point),
+            None => ("/".to_string(), default_mount_subpath.to_string()),
+        };
+
+        let mount_base = resolve_subpath(mock_root, &mount_point_subpath);
+        let fallback_base = resolve_subpath(mock_root, default_mount_subpath);
+        let base_dir = if mount_base.exists() || !fallback_base.exists() {
+            mount_base
+        } else {
+            fallback_base
+        };
+
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        let mut push_hierarchy = |rel_str: &str| {
+            let clean_rel = rel_str.trim_matches('/');
+            let mut cur = if clean_rel.is_empty() {
+                base_dir.clone()
+            } else {
+                base_dir.join(clean_rel)
+            };
+            loop {
+                if !dirs.contains(&cur) {
+                    dirs.push(cur.clone());
+                }
+                if cur == base_dir {
+                    break;
+                }
+                match cur.parent() {
+                    Some(parent) if parent.starts_with(&base_dir) => cur = parent.to_path_buf(),
+                    _ => break,
+                }
+            }
+        };
+
+        if let Some(cg_path) = proc_cgroup_path {
+            let norm_cg = format!("/{}", cg_path.trim_start_matches('/'));
+            let norm_mount_root = format!("/{}", mount_root_in_cg.trim_matches('/'));
+            if norm_mount_root != "/" {
+                if let Some(stripped) = norm_cg.strip_prefix(&norm_mount_root) {
+                    push_hierarchy(stripped);
+                }
+            }
+            push_hierarchy(&norm_cg);
+        }
+
+        if !dirs.contains(&base_dir) {
+            dirs.push(base_dir);
+        }
+
+        dirs
+    }
+
+    fn sample_cgroup_v2_hierarchy(mock_root: Option<&Path>, m: &mut MemoryMetrics) {
+        let proc_cg = std::fs::read_to_string(resolve_subpath(mock_root, "proc/self/cgroup")).ok();
+        let mountinfo =
+            std::fs::read_to_string(resolve_subpath(mock_root, "proc/self/mountinfo")).ok();
+
+        let (v2_cg_path, _) = proc_cg
+            .as_deref()
+            .map(parse_proc_self_cgroup_paths)
+            .unwrap_or((None, None));
+        let (v2_mount, _) = mountinfo
+            .as_deref()
+            .map(parse_mountinfo_cgroup_mounts)
+            .unwrap_or((None, None));
+
+        let dirs = build_cgroup_hierarchy_dirs(
+            mock_root,
+            "sys/fs/cgroup",
+            v2_mount,
+            v2_cg_path.as_deref(),
+        );
+
+        let mut leaf_cur: Option<u64> = None;
+        let mut best_finite: Option<(f64, u32)> = None;
+        let mut saw_unbounded = false;
+
+        for dir in dirs {
+            let cur_val = std::fs::read_to_string(dir.join("memory.current"))
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok());
+            if leaf_cur.is_none() {
+                leaf_cur = cur_val;
+            }
+            let effective_cur = match (cur_val, leaf_cur) {
+                (Some(c), Some(l)) => Some(c.max(l)),
+                (Some(c), None) => Some(c),
+                (None, Some(l)) => Some(l),
+                (None, None) => None,
+            };
+
+            let Ok(max_str) = std::fs::read_to_string(dir.join("memory.max")) else {
+                continue;
+            };
+            let Some(cur) = effective_cur else {
+                continue;
+            };
+
+            let mut candidate = MemoryMetrics::default();
+            parse_cgroup_v2(&cur.to_string(), &max_str, &mut candidate);
+            if let (Some(pct), Some(headroom)) = (
+                candidate.cgroup_utilization_pct,
+                candidate.cgroup_headroom_mb,
+            ) {
+                let replace = match best_finite {
+                    None => true,
+                    Some((best_pct, best_headroom)) => {
+                        pct > best_pct
+                            || ((pct - best_pct).abs() < f64::EPSILON && headroom < best_headroom)
+                    }
+                };
+                if replace {
+                    best_finite = Some((pct, headroom));
+                }
+            } else if candidate.cgroup_utilization_pct.is_some() {
+                saw_unbounded = true;
+            }
+        }
+
+        if let Some((pct, headroom)) = best_finite {
+            m.cgroup_utilization_pct = Some(pct);
+            m.cgroup_headroom_mb = Some(headroom);
+        } else if saw_unbounded {
+            m.cgroup_utilization_pct = Some(0.0);
+        }
+    }
+
+    fn sample_cgroup_v1_hierarchy(mock_root: Option<&Path>, m: &mut MemoryMetrics) {
+        let proc_cg = std::fs::read_to_string(resolve_subpath(mock_root, "proc/self/cgroup")).ok();
+        let mountinfo =
+            std::fs::read_to_string(resolve_subpath(mock_root, "proc/self/mountinfo")).ok();
+
+        let (_, v1_cg_path) = proc_cg
+            .as_deref()
+            .map(parse_proc_self_cgroup_paths)
+            .unwrap_or((None, None));
+        let (_, v1_mount) = mountinfo
+            .as_deref()
+            .map(parse_mountinfo_cgroup_mounts)
+            .unwrap_or((None, None));
+
+        let dirs = build_cgroup_hierarchy_dirs(
+            mock_root,
+            "sys/fs/cgroup/memory",
+            v1_mount,
+            v1_cg_path.as_deref(),
+        );
+
+        let mut leaf_usage: Option<u64> = None;
+        let mut leaf_stat: Option<String> = None;
+
+        for dir in dirs {
+            let usage_val = std::fs::read_to_string(dir.join("memory.usage_in_bytes"))
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok());
+            let stat_str = std::fs::read_to_string(dir.join("memory.stat")).ok();
+            if leaf_usage.is_none() {
+                leaf_usage = usage_val;
+            }
+            if leaf_stat.is_none() {
+                leaf_stat = stat_str.clone();
+            }
+
+            let Ok(limit_str) = std::fs::read_to_string(dir.join("memory.limit_in_bytes")) else {
+                continue;
+            };
+            let effective_usage = match (usage_val, leaf_usage) {
+                (Some(u), Some(l)) => Some(u.max(l)),
+                (Some(u), None) => Some(u),
+                (None, Some(l)) => Some(l),
+                (None, None) => None,
+            };
+            let Some(usage) = effective_usage else {
+                continue;
+            };
+            let effective_stat = stat_str.as_deref().or(leaf_stat.as_deref());
+            parse_cgroup_v1(&usage.to_string(), &limit_str, effective_stat, m);
         }
     }
 
@@ -736,6 +971,66 @@ pub mod memory_pressure {
             set_override_tier(-1); // Reset
             assert_eq!(evaluate_state(&m), PressureTier::Critical);
         }
+
+        #[test]
+        fn test_cgroup_hierarchy_sampling_v2_and_v1() {
+            let tmp =
+                std::env::temp_dir().join(format!("nzbget_cg_hier_test_{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&tmp);
+
+            // Root cgroup is unbounded ("max"), child service cgroup is unbounded ("max"),
+            // parent slice ("system.slice") has a 500 MB finite limit, and child has 400 MB usage.
+            let proc_self = tmp.join("proc/self");
+            let cg_root = tmp.join("sys/fs/cgroup");
+            let cg_slice = cg_root.join("system.slice");
+            let cg_service = cg_slice.join("nzbget.service");
+            std::fs::create_dir_all(&proc_self).unwrap();
+            std::fs::create_dir_all(&cg_service).unwrap();
+
+            std::fs::write(
+                proc_self.join("cgroup"),
+                "0::/system.slice/nzbget.service\n",
+            )
+            .unwrap();
+            std::fs::write(cg_root.join("memory.current"), "900000000\n").unwrap();
+            std::fs::write(cg_root.join("memory.max"), "max\n").unwrap();
+            std::fs::write(cg_slice.join("memory.max"), "500000000\n").unwrap();
+            std::fs::write(cg_service.join("memory.current"), "400000000\n").unwrap();
+            std::fs::write(cg_service.join("memory.max"), "max\n").unwrap();
+
+            let m = sample_system_metrics(Some(&tmp));
+            assert_eq!(m.cgroup_utilization_pct, Some(80.0));
+            assert_eq!(m.cgroup_headroom_mb, Some(95));
+            assert_eq!(evaluate_state(&m), PressureTier::Constrained);
+
+            // Now test cgroup v1 child hierarchy
+            let _ = std::fs::remove_dir_all(&tmp);
+            let proc_self_v1 = tmp.join("proc/self");
+            let cg_v1_root = tmp.join("sys/fs/cgroup/memory");
+            let cg_v1_leaf = cg_v1_root.join("docker/container1");
+            std::fs::create_dir_all(&proc_self_v1).unwrap();
+            std::fs::create_dir_all(&cg_v1_leaf).unwrap();
+
+            std::fs::write(
+                proc_self_v1.join("cgroup"),
+                "6:cpu,cpuacct:/docker/container1\n5:memory:/docker/container1\n",
+            )
+            .unwrap();
+            std::fs::write(cg_v1_root.join("memory.usage_in_bytes"), "100000000\n").unwrap();
+            std::fs::write(
+                cg_v1_root.join("memory.limit_in_bytes"),
+                "9223372036854771712\n",
+            )
+            .unwrap();
+            std::fs::write(cg_v1_leaf.join("memory.usage_in_bytes"), "475000000\n").unwrap();
+            std::fs::write(cg_v1_leaf.join("memory.limit_in_bytes"), "500000000\n").unwrap();
+
+            let m_v1 = sample_system_metrics(Some(&tmp));
+            assert_eq!(m_v1.cgroup_utilization_pct, Some(95.0));
+            assert_eq!(evaluate_state(&m_v1), PressureTier::Critical);
+
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
     }
 }
 
@@ -1014,7 +1309,7 @@ pub mod lifecycle {
                 // Active unpack deferral check (Requirement R3):
                 // If in-process reload is requested, ensure active unpack finishes before tearing down
                 let c_reloading = hooks.is_reloading.map(|f| unsafe { f() }).unwrap_or(false);
-                let is_reload = !self.is_stopping()
+                let mut is_reload = !self.is_stopping()
                     && if hooks.reload.is_some() && hooks.is_reloading.is_some() {
                         c_reloading
                     } else {
@@ -1026,6 +1321,13 @@ pub mod lifecycle {
                         while !self.is_stopping() && unsafe { unpack_fn() } {
                             std::thread::sleep(Duration::from_millis(100));
                         }
+                    }
+                    if self.is_stopping()
+                        || (hooks.reload.is_some()
+                            && hooks.is_reloading.is_some()
+                            && !hooks.is_reloading.map(|f| unsafe { f() }).unwrap_or(false))
+                    {
+                        is_reload = false;
                     }
                 }
 
@@ -1351,28 +1653,24 @@ pub mod entrypoint {
         argp: *mut *mut c_char,
     ) -> c_int {
         // 1. Pre-flight check
-        match inspect_preflight(argc, argv as *const *mut c_char) {
-            EntrypointRoute::TlsCipherResolve => {
-                return crate::ffi::nzbget_rs_tls_cipher_resolver(
-                    argc,
-                    argv as *const *const c_char,
-                );
-            }
-            EntrypointRoute::NServ => {
-                let hooks = get_hooks().or_else(resolve_hooks);
-                if let Some(hooks) = hooks {
-                    if let Some(nserv) = hooks.nserv_main {
-                        return nserv(argc, argv);
-                    }
-                }
-                eprintln!("ERROR: Could not start NServ, the program was compiled without NServ");
-                return 1;
-            }
-            EntrypointRoute::DaemonLifecycle => {}
+        let route = inspect_preflight(argc, argv as *const *mut c_char);
+        if route == EntrypointRoute::TlsCipherResolve {
+            return crate::ffi::nzbget_rs_tls_cipher_resolver(argc, argv as *const *const c_char);
         }
 
         // 2. Platform initialization
         init_platform(argc, argv, argp);
+
+        if route == EntrypointRoute::NServ {
+            let hooks = get_hooks().or_else(resolve_hooks);
+            if let Some(hooks) = hooks {
+                if let Some(nserv) = hooks.nserv_main {
+                    return nserv(argc, argv);
+                }
+            }
+            eprintln!("ERROR: Could not start NServ, the program was compiled without NServ");
+            return 1;
+        }
 
         #[cfg(windows)]
         {

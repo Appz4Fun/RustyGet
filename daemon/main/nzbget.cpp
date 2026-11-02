@@ -330,20 +330,9 @@ int NZBGet::Phase1_Init(bool reload)
 
 	BootConfig();
 
-	ProcessDirect();
-
-	if (g_Options->GetServerMode() && g_Options->GetSystemHealthCheck())
+	if (m_memoryMonitor)
 	{
-		m_systemHealth = std::make_unique<SystemHealth::Service>(
-			*g_Options,
-			*g_ServerPool->GetServers(),
-			*g_FeedCoordinator->GetFeeds(),
-			m_scheduler->GetTasks(),
-			*g_Log);
-		g_SystemHealth = m_systemHealth.get();
-
-		const auto report = m_systemHealth->Diagnose();
-		SystemHealth::Log(report);
+		m_memoryMonitor->InitOptions();
 	}
 
 #ifndef WIN32
@@ -371,6 +360,22 @@ int NZBGet::Phase1_Init(bool reload)
 #ifndef DISABLE_TLS
 	TlsSocket::InitOptions(g_Options->GetCertCheck() ? g_Options->GetCertStore() : "");
 #endif
+
+	ProcessDirect();
+
+	if (g_Options->GetServerMode() && g_Options->GetSystemHealthCheck())
+	{
+		m_systemHealth = std::make_unique<SystemHealth::Service>(
+			*g_Options,
+			*g_ServerPool->GetServers(),
+			*g_FeedCoordinator->GetFeeds(),
+			m_scheduler->GetTasks(),
+			*g_Log);
+		g_SystemHealth = m_systemHealth.get();
+
+		const auto report = m_systemHealth->Diagnose();
+		SystemHealth::Log(report);
+	}
 
 	if (m_commandLineParser->GetDaemonMode())
 	{
@@ -795,6 +800,26 @@ extern void Reload();
 std::atomic<bool> g_SigHupPending{false};
 std::atomic<bool> g_SigExitPending{false};
 
+static std::mutex g_reloadMutex;
+static std::condition_variable g_reloadCond;
+static bool g_reloadPending{false};
+static bool g_reloadWorkerRunning{false};
+static std::chrono::steady_clock::time_point g_reloadTargetTime;
+static std::chrono::steady_clock::time_point g_reloadFirstRequestTime;
+static std::thread g_reloadThread;
+
+static void CancelAndJoinReloadThread()
+{
+	std::unique_lock<std::mutex> lock(g_reloadMutex);
+	g_reloadPending = false;
+	g_reloadCond.notify_all();
+	if (g_reloadThread.joinable() && g_reloadThread.get_id() != std::this_thread::get_id())
+	{
+		g_reloadCond.wait(lock, [] { return !g_reloadWorkerRunning; });
+		g_reloadThread.join();
+	}
+}
+
 void NZBGet::DoMainLoop()
 {
 	debug("Entering main program loop");
@@ -927,7 +952,8 @@ int NZBGet::Phase3_ServerActivation()
 
 void NZBGet::Phase4_Shutdown(bool reload)
 {
-	(void)reload;
+	m_reloading = reload;
+	CancelAndJoinReloadThread();
 	ScriptController::TerminateAll();
 
 	StopRemoteServer();
@@ -1096,7 +1122,27 @@ void NZBGet::ProcessSigVerify()
 
 void NZBGet::Stop(bool reload)
 {
-	m_reloading = reload;
+	if (!reload)
+	{
+		{
+			std::lock_guard<std::mutex> reloadGuard(g_reloadMutex);
+			g_reloadPending = false;
+			g_reloadCond.notify_all();
+		}
+#if defined(NZBGET_USE_RUST) && !defined(WIN32)
+		nzbget_rs_signal_notify(SIGTERM);
+#endif
+	}
+
+	{
+		std::lock_guard<std::mutex> guard(m_waitMutex);
+		if (m_stopped && !m_reloading && reload)
+		{
+			debug("Ignoring reload request because shutdown is already in progress");
+			return;
+		}
+		m_reloading = reload;
+	}
 
 	if (!m_reloading)
 	{
@@ -1115,6 +1161,9 @@ void NZBGet::Stop(bool reload)
 	if (g_SigExitPending.exchange(false))
 	{
 		m_reloading = false;
+#if defined(NZBGET_USE_RUST) && !defined(WIN32)
+		nzbget_rs_signal_notify(SIGTERM);
+#endif
 	}
 	if (m_commandLineParser->GetRemoteClientMode())
 	{
@@ -1319,12 +1368,6 @@ void RunMain()
 	g_NZBGet.reset();
 }
 
-static std::mutex g_reloadMutex;
-static std::condition_variable g_reloadCond;
-static bool g_reloadPending{false};
-static std::chrono::steady_clock::time_point g_reloadTargetTime;
-static std::chrono::steady_clock::time_point g_reloadFirstRequestTime;
-
 void Reload()
 {
 	if (g_NZBGet && g_NZBGet->GetReloading())
@@ -1341,14 +1384,26 @@ void Reload()
 
 	if (!g_reloadPending)
 	{
+		g_reloadCond.wait(lock, [] { return !g_reloadWorkerRunning; });
+		if (g_NZBGet && g_NZBGet->GetReloading())
+		{
+			debug("Daemon is already reloading");
+			return;
+		}
+		if (g_reloadThread.joinable())
+		{
+			g_reloadThread.join();
+		}
+
 		g_reloadPending = true;
+		g_reloadWorkerRunning = true;
 		g_reloadFirstRequestTime = now;
 		g_reloadTargetTime = now + DEBOUNCE_DELAY;
 
-		std::thread([]() {
+		g_reloadThread = std::thread([]() {
 			std::unique_lock<std::mutex> lock(g_reloadMutex);
 
-			while (g_reloadPending)
+			while (g_reloadPending && !g_SigExitPending.load())
 			{
 				auto now = std::chrono::steady_clock::now();
 				if (now >= g_reloadTargetTime ||
@@ -1362,39 +1417,60 @@ void Reload()
 
 			if (!g_reloadPending)
 			{
+				g_reloadWorkerRunning = false;
+				g_reloadCond.notify_all();
 				return;
 			}
 
-			lock.unlock();
-
-			if (g_PrePostProcessor && g_PrePostProcessor->HasActiveUnpack())
+			bool loggedDeferral = false;
+			while (g_reloadPending && !g_SigExitPending.load())
 			{
-				info("Unpack is actively executing; deferring reload until unpack completes...");
-			}
-
-			while (g_PrePostProcessor && g_PrePostProcessor->HasActiveUnpack() &&
-				g_NZBGet && !g_NZBGet->GetReloading() && g_reloadPending && !g_SigExitPending.load())
-			{
-				Util::Sleep(200);
+				lock.unlock();
+				bool activeUnpack = g_PrePostProcessor && g_PrePostProcessor->HasActiveUnpack();
+				bool alreadyReloading = !g_NZBGet || g_NZBGet->GetReloading();
+				if (activeUnpack && !loggedDeferral)
+				{
+					info("Unpack is actively executing; deferring reload until unpack completes...");
+					loggedDeferral = true;
+				}
+				lock.lock();
+				if (!g_reloadPending || g_SigExitPending.load() || !activeUnpack || alreadyReloading)
+				{
+					break;
+				}
+				g_reloadCond.wait_for(lock, std::chrono::milliseconds(100));
 			}
 
 			if (g_SigExitPending.exchange(false))
 			{
+				g_reloadPending = false;
+				g_reloadWorkerRunning = false;
+				g_reloadCond.notify_all();
+				lock.unlock();
 				ExitProc();
 				return;
 			}
 
+			if (!g_reloadPending)
 			{
-				std::lock_guard<std::mutex> guard(g_reloadMutex);
-				g_reloadPending = false;
+				g_reloadWorkerRunning = false;
+				g_reloadCond.notify_all();
+				return;
 			}
+
+			g_reloadPending = false;
+			lock.unlock();
 
 			if (g_NZBGet && !g_NZBGet->GetReloading())
 			{
 				info("Reloading...");
 				g_NZBGet->Stop(true);
 			}
-		}).detach();
+
+			lock.lock();
+			g_reloadWorkerRunning = false;
+			g_reloadCond.notify_all();
+		});
 	}
 	else
 	{
@@ -1413,6 +1489,9 @@ void ExitProc()
 		g_reloadPending = false;
 		g_reloadCond.notify_all();
 	}
+#if defined(NZBGET_USE_RUST) && !defined(WIN32)
+	nzbget_rs_signal_notify(SIGTERM);
+#endif
 
 	if (g_NZBGet)
 	{

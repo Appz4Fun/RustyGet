@@ -316,6 +316,16 @@ int ScriptController::Execute()
 	PrepareArgs();
 
 	m_completed = false;
+#ifdef WIN32
+	SetProcess(0, 0);
+#else
+	m_processId = 0;
+#endif
+	if (m_terminated)
+	{
+		m_completed = true;
+		return -1;
+	}
 	int exitCode = 0;
 
 #ifdef CHILD_WATCHDOG
@@ -449,6 +459,11 @@ int ScriptController::Execute()
 
 	debug("Exit code %i", exitCode);
 	m_completed = true;
+#ifdef WIN32
+	SetProcess(0, 0);
+#else
+	m_processId = 0;
+#endif
 	return exitCode;
 }
 
@@ -839,6 +854,16 @@ int ScriptController::WaitProcess()
 #endif
 }
 
+bool ScriptController::HasActiveProcess()
+{
+#ifdef WIN32
+	std::lock_guard guard(m_processMutex);
+	return m_processId != 0 && !m_completed;
+#else
+	return m_processId.load() > 0 && !m_completed;
+#endif
+}
+
 void ScriptController::Terminate()
 {
 	debug("Stopping %s", *m_infoName);
@@ -846,15 +871,15 @@ void ScriptController::Terminate()
 
 #ifdef WIN32
 	std::lock_guard guard(m_processMutex);
-	BOOL ok = TerminateProcess(m_processId, -1) || m_completed;
+	BOOL ok = !m_processId || TerminateProcess(m_processId, -1) || m_completed;
 #else
-	pid_t killId = m_processId;
-	if (getpgid(killId) == killId)
+	pid_t killId = m_processId.load();
+	if (killId > 0 && getpgid(killId) == killId)
 	{
 		// if the child process has its own group (setsid() was successful), kill the whole group
 		killId = -killId;
 	}
-	bool ok = (killId && kill(killId, SIGKILL) == 0) || m_completed;
+	bool ok = killId <= 0 || kill(killId, SIGKILL) == 0 || m_completed;
 #endif
 
 	if (ok)
@@ -874,16 +899,7 @@ void ScriptController::TerminateAll()
 	Guard guard(m_runningMutex);
 	for (ScriptController* script : m_runningScripts)
 	{
-		bool hasProcess;
-#ifdef WIN32
-		{
-			std::lock_guard processGuard(script->m_processMutex);
-			hasProcess = script->m_processId != 0;
-		}
-#else
-		hasProcess = script->m_processId != 0;
-#endif
-		if (hasProcess && !script->m_detached)
+		if (script->HasActiveProcess() && !script->m_detached)
 		{
 			// send break signal and wait up to 5 seconds for graceful termination
 			if (script->Break())
@@ -905,9 +921,10 @@ bool ScriptController::Break()
 
 #ifdef WIN32
 	std::lock_guard guard(m_processMutex);
-	BOOL ok = m_processId && GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, m_dwProcessId);
+	BOOL ok = m_processId && !m_completed && GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, m_dwProcessId);
 #else
-	bool ok = kill(m_processId, SIGINT) == 0;
+	pid_t pid = m_processId.load();
+	bool ok = pid > 0 && !m_completed && kill(pid, SIGINT) == 0;
 #endif
 
 	if (ok)

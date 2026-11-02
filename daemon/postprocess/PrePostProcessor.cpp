@@ -224,7 +224,7 @@ bool PrePostProcessor::HasActiveUnpack(DownloadQueue* downloadQueue, bool includ
 		if (nzbInfo->GetUnpackThread())
 		{
 			DirectUnpack* directUnpack = (DirectUnpack*)nzbInfo->GetUnpackThread();
-			if (directUnpack->IsUnpacking() && (includeWaitingVolume || !directUnpack->IsWaitingVolume()))
+			if (includeWaitingVolume || (directUnpack->IsUnpacking() && !directUnpack->IsWaitingVolume()))
 			{
 				return true;
 			}

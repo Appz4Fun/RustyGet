@@ -33,7 +33,7 @@ void DirectUnpack::StartJob(NzbInfo* nzbInfo)
 {
 	DirectUnpack* directUnpack = new DirectUnpack();
 	directUnpack->m_nzbId = nzbInfo->GetId();
-	directUnpack->m_unpacking = true;
+	directUnpack->m_unpacking = false;
 	directUnpack->m_waitingVolume = false;
 	directUnpack->SetAutoDestroy(true);
 
@@ -221,9 +221,14 @@ void DirectUnpack::ExecuteUnrar(const char* archiveName)
 
 	SetNeedWrite(true);
 	Guard unpackGuard(UnpackController::GetUnpackMutex());
+	if (IsStopped())
+	{
+		return;
+	}
 	m_waitingVolume = false;
 	m_unpacking = true;
 	int exitCode = Execute();
+	m_unpacking = false;
 	m_waitingVolume = false;
 	SetLogPrefix(nullptr);
 
@@ -465,9 +470,9 @@ void DirectUnpack::Stop(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 	Thread::Stop();
 	if (m_unpacking)
 	{
-		if (Break())
+		if (HasActiveProcess() && Break())
 		{
-			for (int i = 0; i < 50 && m_unpacking; ++i)
+			for (int i = 0; i < 50 && m_unpacking && HasActiveProcess(); ++i)
 			{
 				Util::Sleep(100);
 			}

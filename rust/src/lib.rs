@@ -824,9 +824,13 @@ pub mod memory_pressure {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use std::sync::Mutex;
+
+        static MP_TEST_MUTEX: Mutex<()> = Mutex::new(());
 
         #[test]
         fn test_psi_parsing_and_evaluation() {
+            let _guard = MP_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
             let psi_normal = "some avg10=1.50 avg60=0.00 avg300=0.00 total=10\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n";
             let mut m = MemoryMetrics::default();
             parse_psi(psi_normal, &mut m);
@@ -850,6 +854,7 @@ pub mod memory_pressure {
 
         #[test]
         fn test_cgroup_v2_parsing_and_extremes() {
+            let _guard = MP_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
             let mut m = MemoryMetrics::default();
             parse_cgroup_v2("400000000\n", "500000000\n", &mut m);
             assert_eq!(m.cgroup_utilization_pct, Some(80.0));
@@ -869,6 +874,7 @@ pub mod memory_pressure {
 
         #[test]
         fn test_cgroup_v1_working_set_accounting() {
+            let _guard = MP_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
             let usage = "450000000\n";
             let limit = "500000000\n";
             let stat = "cache 100000000\nrss 300000000\ninactive_file 100000000\n";
@@ -881,6 +887,7 @@ pub mod memory_pressure {
 
         #[test]
         fn test_meminfo_parsing() {
+            let _guard = MP_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
             let meminfo = "MemTotal:       16384000 kB\nMemFree:         1000000 kB\nMemAvailable:    3276800 kB\nBuffers:          500000 kB\nCached:          2000000 kB\n";
             let mut m = MemoryMetrics::default();
             parse_meminfo(meminfo, &mut m);
@@ -948,6 +955,7 @@ pub mod memory_pressure {
 
         #[test]
         fn test_override_tier() {
+            let _guard = MP_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
             let m = MemoryMetrics {
                 psi_some_avg10: Some(50.0), // Critical
                 ..Default::default()
@@ -966,6 +974,7 @@ pub mod memory_pressure {
 
         #[test]
         fn test_cgroup_hierarchy_sampling_v2_and_v1() {
+            let _guard = MP_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
             let tmp =
                 std::env::temp_dir().join(format!("nzbget_cg_hier_test_{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&tmp);
@@ -1353,6 +1362,9 @@ pub mod lifecycle {
     }
 
     #[cfg(test)]
+    pub(crate) static TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(test)]
     mod tests {
         use super::*;
         use std::sync::atomic::AtomicUsize;
@@ -1446,9 +1458,11 @@ pub mod lifecycle {
 
         #[test]
         fn test_daemon_loop_full_clean_cycle() {
+            let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
             MOCK_CALL_COUNT.store(0, Ordering::SeqCst);
             MOCK_P1_RELOAD.store(false, Ordering::SeqCst);
             MOCK_P4_RELOAD.store(false, Ordering::SeqCst);
+            MOCK_UNPACK_COUNT.store(0, Ordering::SeqCst);
 
             let hooks = LifecycleHooks {
                 set_process_args: None,
@@ -1488,6 +1502,7 @@ pub mod lifecycle {
 
         #[test]
         fn test_daemon_loop_early_exit_client_mode() {
+            let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
             let hooks = LifecycleHooks {
                 set_process_args: None,
                 util_init: None,
@@ -1530,9 +1545,12 @@ pub mod lifecycle {
 
         #[test]
         fn test_daemon_loop_in_process_reload_and_unpack_deferral() {
+            let _guard = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
             RELOAD_SIM_STEP.store(0, Ordering::SeqCst);
             MOCK_UNPACK_COUNT.store(2, Ordering::SeqCst); // 2 active unpack polls
             MOCK_CALL_COUNT.store(0, Ordering::SeqCst);
+            MOCK_P1_RELOAD.store(false, Ordering::SeqCst);
+            MOCK_P4_RELOAD.store(false, Ordering::SeqCst);
 
             let hooks = LifecycleHooks {
                 set_process_args: None,

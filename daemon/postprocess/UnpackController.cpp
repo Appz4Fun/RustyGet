@@ -616,7 +616,8 @@ bool UnpackController::JoinFile(const char* fragBaseName)
 
 void UnpackController::Completed()
 {
-	bool stopped = IsStopped() || (GetTerminated() && !m_autoTerminated);
+	bool stopped = !m_autoTerminated && (!m_postInfo || !m_postInfo->GetDeleted()) &&
+		(IsStopped() || GetTerminated());
 	if (stopped)
 	{
 		debug("Unpack stopped due to reload/shutdown, preserving _unpack directory");
@@ -643,7 +644,8 @@ void UnpackController::Completed()
 			(m_postInfo->GetNzbInfo()->GetParStatus() <= NzbInfo::psSkipped ||
 			 !m_postInfo->GetNzbInfo()->GetParFull()) &&
 			!m_unpackStartError && !m_unpackSpaceError && !m_unpackPasswordError &&
-			(!GetTerminated() || m_autoTerminated) && m_hasParFiles)
+			(!GetTerminated() || m_autoTerminated) &&
+			(!IsStopped() || m_autoTerminated) && m_hasParFiles)
 		{
 			RequestParCheck(!m_password.Empty() ||
 				Util::EmptyStr(g_Options->GetUnpackPassFile()) || m_passListTried ||
@@ -1041,11 +1043,11 @@ void UnpackController::Stop()
 {
 	debug("Stopping unpack");
 	Thread::Stop();
-	if (m_unpacking)
+	if (m_unpacking && HasActiveProcess())
 	{
 		if (Break())
 		{
-			for (int i = 0; i < 50 && m_unpacking; ++i)
+			for (int i = 0; i < 50 && m_unpacking && HasActiveProcess(); ++i)
 			{
 				Util::Sleep(100);
 			}

@@ -8569,6 +8569,9 @@ mod lifecycle_ffi_tests {
 
     #[test]
     fn test_lifecycle_ffi_queries() {
+        let _guard = crate::lifecycle::TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         nzbget_rs_lifecycle_set_phase(1);
         assert_eq!(nzbget_rs_lifecycle_get_phase(), 1);
         nzbget_rs_lifecycle_set_phase(0);

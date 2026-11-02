@@ -1724,7 +1724,24 @@ bool DiskState::LoadFileInfo(FileInfo* fileInfo, StateDiskFile& infile, int form
 		if (cnt < 2) goto error;
 		if (fileSummary) fileInfo->SetFilenameConfirmed(static_cast<bool>(filenameConfirmed));
 		if (fileSummary) fileInfo->SetTime(static_cast<time_t>(time));
-		if (cnt >= 3) fileInfo->SetOutputInitialized(outputInitialized != 0);
+		if (fileSummary && cnt >= 3)
+		{
+			bool restoredOutputInit = outputInitialized != 0;
+			if (restoredOutputInit && g_Options &&
+				(g_Options->GetDirectWrite() || fileInfo->GetForceDirectWrite()))
+			{
+				const char* destDir = fileInfo->GetNzbInfo() ? fileInfo->GetNzbInfo()->GetDestDir() : nullptr;
+				bool hasOwnOutFile = !fileInfo->GetOutputFilename().empty() &&
+					FileSystem::FileExists(fileInfo->GetOutputFilename().c_str());
+				bool hasOutTmp = destDir && !Util::EmptyStr(destDir) &&
+					FileSystem::FileExists(BString<1024>("%s%c%i.out.tmp", destDir, PATH_SEPARATOR, fileInfo->GetId()));
+				bool hasForceDest = fileInfo->GetForceDirectWrite() && destDir &&
+					!Util::EmptyStr(destDir) && !Util::EmptyStr(fileInfo->GetFilename()) &&
+					FileSystem::FileExists(BString<1024>("%s%c%s", destDir, PATH_SEPARATOR, fileInfo->GetFilename()));
+				restoredOutputInit = hasOwnOutFile || hasOutTmp || hasForceDest;
+			}
+			fileInfo->SetOutputInitialized(restoredOutputInit);
+		}
 	}
 	else if (formatVersion >= 4)
 	{
@@ -2037,28 +2054,35 @@ bool DiskState::LoadFileState(FileInfo* fileInfo, Servers* servers, StateDiskFil
 		}
 	}
 
-	// Crash recovery fallback for DirectWrite: if the file's own direct-write output exists on disk with valid progress
-	if (!fileInfo->GetOutputInitialized() && (g_Options->GetDirectWrite() || fileInfo->GetForceDirectWrite()))
+	// Validate or recover DirectWrite OutputInitialized against the actual on-disk direct-write output file
+	if (g_Options && (g_Options->GetDirectWrite() || fileInfo->GetForceDirectWrite()))
 	{
 		const char* destDir = fileInfo->GetNzbInfo() ? fileInfo->GetNzbInfo()->GetDestDir() : nullptr;
-		if (destDir && !Util::EmptyStr(fileInfo->GetFilename()))
+		bool hasOwnOutFile = !fileInfo->GetOutputFilename().empty() &&
+			FileSystem::FileExists(fileInfo->GetOutputFilename().c_str());
+		bool hasOutTmp = destDir && !Util::EmptyStr(destDir) &&
+			FileSystem::FileExists(BString<1024>("%s%c%i.out.tmp", destDir, PATH_SEPARATOR, fileInfo->GetId()));
+		bool hasCompletedDest = (completed || fileInfo->GetForceDirectWrite()) && destDir &&
+			!Util::EmptyStr(destDir) && !Util::EmptyStr(fileInfo->GetFilename()) &&
+			FileSystem::FileExists(BString<1024>("%s%c%s", destDir, PATH_SEPARATOR, fileInfo->GetFilename()));
+		bool hasDirectWriteOutput = hasOwnOutFile || hasOutTmp || hasCompletedDest;
+
+		if (fileInfo->GetOutputInitialized() && !hasDirectWriteOutput)
 		{
-			BString<1024> outTmpPath("%s%c%i.out.tmp", destDir, PATH_SEPARATOR, fileInfo->GetId());
-			BString<1024> destPath("%s%c%s", destDir, PATH_SEPARATOR, fileInfo->GetFilename());
-			bool hasOwnOutFile = !fileInfo->GetOutputFilename().empty() &&
-				FileSystem::FileExists(fileInfo->GetOutputFilename().c_str());
-			bool hasOutTmp = FileSystem::FileExists(outTmpPath);
-			bool hasCompletedDest = (completed || fileInfo->GetForceDirectWrite()) &&
-				FileSystem::FileExists(destPath);
-			if ((hasOwnOutFile || hasOutTmp || hasCompletedDest) &&
-				(fileInfo->GetSuccessArticles() > 0 || completed))
-			{
-				fileInfo->SetOutputInitialized(true);
-				if (fileInfo->GetOutputFilename().empty())
-				{
-					fileInfo->SetOutputFilename(hasOutTmp ? *outTmpPath : *destPath);
-				}
-			}
+			fileInfo->SetOutputInitialized(false);
+		}
+		else if (!fileInfo->GetOutputInitialized() && hasDirectWriteOutput &&
+			(fileInfo->GetSuccessArticles() > 0 || completed))
+		{
+			fileInfo->SetOutputInitialized(true);
+		}
+
+		if (fileInfo->GetOutputInitialized() && fileInfo->GetOutputFilename().empty() &&
+			(hasOutTmp || hasCompletedDest))
+		{
+			fileInfo->SetOutputFilename(hasOutTmp ?
+				*BString<1024>("%s%c%i.out.tmp", destDir, PATH_SEPARATOR, fileInfo->GetId()) :
+				*BString<1024>("%s%c%s", destDir, PATH_SEPARATOR, fileInfo->GetFilename()));
 		}
 	}
 

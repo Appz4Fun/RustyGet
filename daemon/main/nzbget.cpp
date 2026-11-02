@@ -785,10 +785,6 @@ void NZBGet::StopFrontend()
 			{
 				ExitProc();
 			}
-			else if (g_SigHupPending.exchange(false))
-			{
-				Reload();
-			}
 			Util::Sleep(50);
 		}
 		debug("Frontend stopped");
@@ -962,6 +958,21 @@ int NZBGet::Phase3_ServerActivation()
 
 		DoMainLoop();
 	}
+	else if (m_frontend)
+	{
+		while (!m_stopped && !m_reloading && m_frontend->IsRunning())
+		{
+			if (g_SigExitPending.exchange(false))
+			{
+				ExitProc();
+			}
+			else if (g_SigHupPending.exchange(false))
+			{
+				Reload();
+			}
+			Util::Sleep(50);
+		}
+	}
 
 	return 0;
 }
@@ -974,6 +985,7 @@ void NZBGet::Phase4_Shutdown(bool reload)
 
 	StopRemoteServer();
 	StopFrontend();
+	CancelAndJoinReloadThread();
 
 	Final();
 }

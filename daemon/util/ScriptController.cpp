@@ -873,13 +873,14 @@ void ScriptController::Terminate()
 	std::lock_guard guard(m_processMutex);
 	BOOL ok = !m_processId || TerminateProcess(m_processId, -1) || m_completed;
 #else
-	pid_t killId = m_processId.load();
-	if (killId > 0 && getpgid(killId) == killId)
+	pid_t childPid = m_processId.load();
+	pid_t killId = childPid;
+	if (childPid > 0 && getpgid(childPid) == childPid)
 	{
 		// if the child process has its own group (setsid() was successful), kill the whole group
-		killId = -killId;
+		killId = -childPid;
 	}
-	bool ok = killId <= 0 || kill(killId, SIGKILL) == 0 || m_completed;
+	bool ok = childPid <= 0 || kill(killId, SIGKILL) == 0 || m_completed;
 #endif
 
 	if (ok)

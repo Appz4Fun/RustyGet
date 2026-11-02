@@ -1767,6 +1767,15 @@ bool QueueCoordinator::HasActiveDupe(DownloadQueue* downloadQueue, NzbInfo* nzbI
 		return false;
 	}
 
+	// An active post-processing/repair job (or extra-priority par fetch) already owns
+	// the active slot and must not be blocked from downloading its own repair volumes.
+	if (nzbInfo->HasExtraPriority() ||
+		(nzbInfo->GetPostInfo() &&
+		 (nzbInfo->GetPostInfo()->GetWorking() || nzbInfo->GetPostInfo()->GetStage() != PostInfo::ptQueued)))
+	{
+		return false;
+	}
+
 	for (NzbInfo* queued : downloadQueue->GetQueue())
 	{
 		if (queued != nzbInfo &&
@@ -1781,7 +1790,11 @@ bool QueueCoordinator::HasActiveDupe(DownloadQueue* downloadQueue, NzbInfo* nzbI
 			}
 
 			bool isActiveDownload = queued->GetActiveDownloads() > 0;
-			bool isPostProcessing = queued->GetPostInfo() != nullptr;
+			bool isPostProcessing = queued->GetPostInfo() != nullptr &&
+				(queued->GetPostInfo()->GetWorking() ||
+				 queued->GetPostInfo()->GetStage() != PostInfo::ptQueued ||
+				 queued->HasExtraPriority() ||
+				 nzbInfo->GetCompletedFiles()->empty());
 			bool isDirectUnpacking = queued->GetDirectUnpackStatus() == NzbInfo::nsRunning;
 
 			if (isActiveDownload || isPostProcessing || isDirectUnpacking)

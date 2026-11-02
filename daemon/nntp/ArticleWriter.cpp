@@ -121,7 +121,8 @@ bool ArticleWriter::Start(Decoder::EFormat format, const char* filename, int64 f
 		if (g_Options->GetDirectWrite() && !IsDupeFallbackArticle())
 		{
 			Guard guard = m_fileInfo->GuardOutputFile();
-			if (!m_fileInfo->GetOutputInitialized())
+			if (!m_fileInfo->GetOutputInitialized() ||
+				(!GetSkipDiskWrite() && !FileSystem::FileExists(m_outputFilename.c_str())))
 			{
 				if (!GetSkipDiskWrite() && !CreateOutputFile(fileSize))
 				{

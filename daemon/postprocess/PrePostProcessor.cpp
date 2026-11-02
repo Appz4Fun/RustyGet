@@ -277,6 +277,10 @@ void PrePostProcessor::SanitisePostQueue()
 			else
 			{
 				postInfo->SetStage(PostInfo::ptQueued);
+				if (nzbInfo->GetUnpackTried() && nzbInfo->GetParStatus() <= NzbInfo::psSkipped)
+				{
+					postInfo->SetRequestParCheck(true);
+				}
 			}
 			postInfo->SetWorking(false);
 		}

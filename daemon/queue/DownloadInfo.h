@@ -863,6 +863,8 @@ public:
 	void MoveFileList(NzbInfo* srcNzbInfo);
 	void UpdateMinMaxTime();
 	PostInfo* GetPostInfo() { return m_postInfo.get(); }
+	bool GetParRepaired() { return m_parRepaired; }
+	void SetParRepaired(bool parRepaired) { m_parRepaired = parRepaired; }
 	bool GetUnpackTried() { return m_unpackTried; }
 	void SetUnpackTried(bool unpackTried) { m_unpackTried = unpackTried; }
 	int GetLastUnpackStatus() { return m_lastUnpackStatus; }
@@ -1004,6 +1006,7 @@ private:
 	MessageList m_messages;
 	int m_idMessageGen = 0;
 	std::unique_ptr<PostInfo> m_postInfo;
+	bool m_parRepaired = false;
 	bool m_unpackTried = false;
 	int m_lastUnpackStatus = 0;
 	std::vector<CString> m_extractedArchives;
@@ -1102,8 +1105,12 @@ public:
 	void SetParCannotCover(bool parCannotCover) { m_parCannotCover = parCannotCover; }
 	bool GetForceRepair() { return m_forceRepair; }
 	void SetForceRepair(bool forceRepair) { m_forceRepair = forceRepair; }
-	bool GetParRepaired() { return m_parRepaired; }
-	void SetParRepaired(bool parRepaired) { m_parRepaired = parRepaired; }
+	bool GetParRepaired() { return m_nzbInfo ? m_nzbInfo->GetParRepaired() : m_parRepaired; }
+	void SetParRepaired(bool parRepaired)
+	{
+		m_parRepaired = parRepaired;
+		if (m_nzbInfo) m_nzbInfo->SetParRepaired(parRepaired);
+	}
 	bool GetUnpackTried() { return m_nzbInfo ? m_nzbInfo->GetUnpackTried() : m_unpackTried; }
 	void SetUnpackTried(bool unpackTried)
 	{

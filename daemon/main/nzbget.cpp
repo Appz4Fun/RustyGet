@@ -974,7 +974,7 @@ void NZBGet::Run(bool reload)
 	Phase1_Init(reload);
 	Phase2_SubsystemsAndState(reload);
 	Phase3_ServerActivation();
-	Phase4_Shutdown(reload);
+	Phase4_Shutdown(m_reloading);
 }
 
 void NZBGet::ProcessClientRequest()

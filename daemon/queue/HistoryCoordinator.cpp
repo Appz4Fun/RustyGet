@@ -504,6 +504,7 @@ void HistoryCoordinator::MoveToQueue(DownloadQueue* downloadQueue, HistoryList::
 	{
 		nzbInfo->SetUnpackStatus(NzbInfo::usNone);
 		nzbInfo->SetDirectUnpackStatus(NzbInfo::nsNone);
+		nzbInfo->SetParRepaired(false);
 		nzbInfo->SetUnpackTried(false);
 		nzbInfo->SetLastUnpackStatus(0);
 		nzbInfo->GetExtractedArchives()->clear();
@@ -640,6 +641,7 @@ void HistoryCoordinator::HistoryRedownload(DownloadQueue* downloadQueue, History
 	nzbInfo->SetRarRenameStatus(NzbInfo::rsNone);
 	nzbInfo->SetDirectRenameStatus(NzbInfo::tsNone);
 	nzbInfo->SetDirectUnpackStatus(NzbInfo::nsNone);
+	nzbInfo->SetParRepaired(false);
 	nzbInfo->SetUnpackTried(false);
 	nzbInfo->SetLastUnpackStatus(0);
 	nzbInfo->GetExtractedArchives()->clear();

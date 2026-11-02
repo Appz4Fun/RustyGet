@@ -914,7 +914,8 @@ void DiskState::SaveDupeTrailer(const std::vector<NzbInfo*>& nzbs, StateDiskFile
 	{
 		outfile.PrintLine("%i", nzbInfo->GetId());
 		outfile.PrintLine("DirectUnpackStatus=%i", static_cast<int>(nzbInfo->GetDirectUnpackStatus()));
-		outfile.PrintLine("UnpackTried=%i", static_cast<int>(nzbInfo->GetUnpackTried()));
+		int unpackTriedFlags = (nzbInfo->GetUnpackTried() ? 1 : 0) | (nzbInfo->GetParRepaired() ? 2 : 0);
+		outfile.PrintLine("UnpackTried=%i", unpackTriedFlags);
 		outfile.PrintLine("LastUnpackStatus=%i", nzbInfo->GetLastUnpackStatus());
 		std::string extractedArchives;
 		std::vector<CString>* archives = nzbInfo->GetExtractedArchives();
@@ -978,7 +979,8 @@ bool DiskState::LoadDupeTrailer(const std::function<NzbInfo*(int)>& find, StateD
 			int unpackTried = 0;
 			if (sscanf(buf, "UnpackTried=%i", &unpackTried) == 1 || sscanf(buf, "%i", &unpackTried) == 1)
 			{
-				target->SetUnpackTried(static_cast<bool>(unpackTried));
+				target->SetUnpackTried((unpackTried & 1) != 0);
+				target->SetParRepaired((unpackTried & 2) != 0);
 			}
 			else goto error;
 
@@ -1532,7 +1534,8 @@ bool DiskState::LoadNzbInfo(NzbInfo* nzbInfo, Servers* servers, StateDiskFile& i
 		int unpackTried = 0;
 		if (sscanf(buf, "UnpackTried=%i", &unpackTried) == 1 || sscanf(buf, "%i", &unpackTried) == 1)
 		{
-			nzbInfo->SetUnpackTried(static_cast<bool>(unpackTried));
+			nzbInfo->SetUnpackTried((unpackTried & 1) != 0);
+			nzbInfo->SetParRepaired((unpackTried & 2) != 0);
 		}
 		else goto error;
 

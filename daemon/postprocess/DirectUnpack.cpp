@@ -27,6 +27,7 @@
 #include "FileTypes.h"
 #include "Options.h"
 #include "UnpackController.h"
+#include "PrePostProcessor.h"
 
 void DirectUnpack::StartJob(NzbInfo* nzbInfo)
 {
@@ -427,7 +428,10 @@ void DirectUnpack::AddMessage(Message::EKind kind, const char* text)
 void DirectUnpack::Stop(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 {
 	debug("Stopping %s", *m_infoName);
-	m_cancelled = true;
+	if (!(g_PrePostProcessor && g_PrePostProcessor->IsStopped()))
+	{
+		m_cancelled = true;
+	}
 	if (m_processed)
 	{
 		if (nzbInfo)

@@ -207,6 +207,7 @@ public:
 	void Run(bool reload);
 	void Stop(bool reload);
 	bool GetReloading() { return m_reloading; }
+	bool GetStopped() const { return m_stopped; }
 
 	int Phase1_Init(bool reload);
 	int Phase2_SubsystemsAndState(bool reload);
@@ -951,16 +952,20 @@ int NZBGet::Phase3_ServerActivation()
 
 	if (!m_commandLineParser->GetRemoteClientMode())
 	{
-		if (!m_commandLineParser->GetServerMode())
+		if (!m_commandLineParser->GetServerMode() && !g_SigExitPending.load())
 		{
 			ProcessStandalone();
 		}
 
 		DoMainLoop();
 	}
-	else if (m_frontend)
+	else
 	{
-		while (!m_stopped && !m_reloading && m_frontend->IsRunning())
+		if (g_SigExitPending.exchange(false))
+		{
+			ExitProc();
+		}
+		while (m_frontend && !m_stopped && !m_reloading && m_frontend->IsRunning())
 		{
 			if (g_SigExitPending.exchange(false))
 			{
@@ -1398,9 +1403,9 @@ void RunMain()
 
 void Reload()
 {
-	if (g_NZBGet && g_NZBGet->GetReloading())
+	if (!g_NZBGet || g_NZBGet->GetReloading() || g_NZBGet->GetStopped() || g_SigExitPending.load())
 	{
-		debug("Daemon is already reloading");
+		debug("Daemon is already reloading or stopping");
 		return;
 	}
 
@@ -1413,14 +1418,22 @@ void Reload()
 	if (!g_reloadPending)
 	{
 		g_reloadCond.wait(lock, [] { return !g_reloadWorkerRunning; });
-		if (g_NZBGet && g_NZBGet->GetReloading())
+		if (!g_NZBGet || g_NZBGet->GetReloading() || g_NZBGet->GetStopped() || g_SigExitPending.load())
 		{
-			debug("Daemon is already reloading");
+			debug("Daemon is already reloading or stopping");
 			return;
 		}
 		if (g_reloadThread.joinable())
 		{
-			g_reloadThread.join();
+			std::thread finishedThread = std::move(g_reloadThread);
+			lock.unlock();
+			finishedThread.join();
+			lock.lock();
+			if (g_reloadPending || g_reloadWorkerRunning ||
+				!g_NZBGet || g_NZBGet->GetReloading() || g_NZBGet->GetStopped() || g_SigExitPending.load())
+			{
+				return;
+			}
 		}
 
 		g_reloadPending = true;
@@ -1443,7 +1456,7 @@ void Reload()
 				g_reloadCond.wait_for(lock, g_reloadTargetTime - now);
 			}
 
-			if (!g_reloadPending)
+			if (!g_reloadPending && !g_SigExitPending.load())
 			{
 				g_reloadWorkerRunning = false;
 				g_reloadCond.notify_all();
@@ -1472,10 +1485,11 @@ void Reload()
 			if (g_SigExitPending.exchange(false))
 			{
 				g_reloadPending = false;
-				g_reloadWorkerRunning = false;
-				g_reloadCond.notify_all();
 				lock.unlock();
 				ExitProc();
+				lock.lock();
+				g_reloadWorkerRunning = false;
+				g_reloadCond.notify_all();
 				return;
 			}
 

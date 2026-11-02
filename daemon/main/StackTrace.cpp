@@ -294,9 +294,9 @@ void InstallErrorHandler()
 	}
 #endif
 
-	s_shutdownInitiated.store(false);
-	g_SigHupPending.store(false);
-	g_SigExitPending.store(false);
+	bool exitPending = g_SigExitPending.load(std::memory_order_seq_cst);
+	s_shutdownInitiated.store(exitPending, std::memory_order_seq_cst);
+	g_SigHupPending.store(false, std::memory_order_seq_cst);
 
 	struct sigaction sa;
 	memset(&sa, 0, sizeof(sa));

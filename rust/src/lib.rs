@@ -466,7 +466,8 @@ pub mod memory_pressure {
         );
 
         let mut leaf_cur: Option<u64> = None;
-        let mut best_finite: Option<(f64, u32)> = None;
+        let mut max_pct: Option<f64> = None;
+        let mut min_headroom: Option<u32> = None;
         let mut saw_unbounded = false;
 
         for dir in dirs {
@@ -496,22 +497,14 @@ pub mod memory_pressure {
                 candidate.cgroup_utilization_pct,
                 candidate.cgroup_headroom_mb,
             ) {
-                let replace = match best_finite {
-                    None => true,
-                    Some((best_pct, best_headroom)) => {
-                        pct > best_pct
-                            || ((pct - best_pct).abs() < f64::EPSILON && headroom < best_headroom)
-                    }
-                };
-                if replace {
-                    best_finite = Some((pct, headroom));
-                }
+                max_pct = Some(max_pct.map_or(pct, |prev| prev.max(pct)));
+                min_headroom = Some(min_headroom.map_or(headroom, |prev| prev.min(headroom)));
             } else if candidate.cgroup_utilization_pct.is_some() {
                 saw_unbounded = true;
             }
         }
 
-        if let Some((pct, headroom)) = best_finite {
+        if let (Some(pct), Some(headroom)) = (max_pct, min_headroom) {
             m.cgroup_utilization_pct = Some(pct);
             m.cgroup_headroom_mb = Some(headroom);
         } else if saw_unbounded {
@@ -641,16 +634,15 @@ pub mod memory_pressure {
         let pct = (working_set as f64 / limit as f64) * 100.0;
         let headroom = (limit.saturating_sub(working_set) / (1024 * 1024)) as u32;
 
-        // Adopt worst case if v2 was already parsed
-        if let Some(existing_pct) = m.cgroup_utilization_pct {
-            if pct > existing_pct {
-                m.cgroup_utilization_pct = Some(pct);
-                m.cgroup_headroom_mb = Some(headroom);
-            }
-        } else {
-            m.cgroup_utilization_pct = Some(pct);
-            m.cgroup_headroom_mb = Some(headroom);
-        }
+        // Adopt worst case across hierarchy/v2: max utilization pct and min headroom MB independently
+        m.cgroup_utilization_pct = Some(
+            m.cgroup_utilization_pct
+                .map_or(pct, |existing_pct| existing_pct.max(pct)),
+        );
+        m.cgroup_headroom_mb = Some(
+            m.cgroup_headroom_mb
+                .map_or(headroom, |existing_hr| existing_hr.min(headroom)),
+        );
     }
 
     pub fn parse_meminfo(content: &str, m: &mut MemoryMetrics) {
@@ -1002,6 +994,18 @@ pub mod memory_pressure {
             assert_eq!(m.cgroup_utilization_pct, Some(80.0));
             assert_eq!(m.cgroup_headroom_mb, Some(95));
             assert_eq!(evaluate_state(&m), PressureTier::Constrained);
+
+            // Child has 15 MiB headroom (113 MiB / 128 MiB = 88.28%) while parent slice is at 89% (890 MiB / 1000 MiB):
+            // min headroom (15 MiB) and max utilization (89.0%) must be aggregated independently -> Critical.
+            std::fs::write(cg_service.join("memory.current"), (113u64 * 1024 * 1024).to_string()).unwrap();
+            std::fs::write(cg_service.join("memory.max"), (128u64 * 1024 * 1024).to_string()).unwrap();
+            std::fs::write(cg_slice.join("memory.current"), (890u64 * 1024 * 1024).to_string()).unwrap();
+            std::fs::write(cg_slice.join("memory.max"), (1000u64 * 1024 * 1024).to_string()).unwrap();
+
+            let m_nested = sample_system_metrics(Some(&tmp));
+            assert_eq!(m_nested.cgroup_utilization_pct, Some(89.0));
+            assert_eq!(m_nested.cgroup_headroom_mb, Some(15));
+            assert_eq!(evaluate_state(&m_nested), PressureTier::Critical);
 
             // Now test cgroup v1 child hierarchy
             let _ = std::fs::remove_dir_all(&tmp);

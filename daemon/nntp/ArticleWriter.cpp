@@ -1254,6 +1254,10 @@ void ArticleCache::Run()
 			{
 				MemoryMonitor::TrimHeap();
 			}
+			else if (!justFlushed && !IsStopped())
+			{
+				Util::Sleep(5);
+			}
 		}
 		else if (!m_allocated)
 		{

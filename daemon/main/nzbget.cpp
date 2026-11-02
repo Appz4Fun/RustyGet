@@ -761,13 +761,21 @@ void NZBGet::StopFrontend()
 {
 	if (m_frontend)
 	{
-		if (!m_commandLineParser->GetRemoteClientMode())
+		if (!m_commandLineParser->GetRemoteClientMode() || m_stopped)
 		{
 			debug("Stopping Frontend");
 			m_frontend->Stop();
 		}
 		while (m_frontend->IsRunning())
 		{
+			if (g_SigExitPending.exchange(false))
+			{
+				ExitProc();
+			}
+			else if (g_SigHupPending.exchange(false))
+			{
+				Reload();
+			}
 			Util::Sleep(50);
 		}
 		debug("Frontend stopped");

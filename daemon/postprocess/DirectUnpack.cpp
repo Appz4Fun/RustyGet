@@ -213,9 +213,11 @@ void DirectUnpack::ExecuteUnrar(const char* archiveName)
 
 	SetNeedWrite(true);
 	Guard unpackGuard(UnpackController::GetUnpackMutex());
+	m_waitingVolume = false;
 	m_unpacking = true;
 	int exitCode = Execute();
 	m_unpacking = false;
+	m_waitingVolume = false;
 	SetLogPrefix(nullptr);
 
 	m_unpackOk = exitCode == 0 && m_allOkMessageReceived && !GetTerminated() && !m_cancelled;
@@ -489,6 +491,7 @@ void DirectUnpack::WaitNextVolume(const char* filename)
 	BString<1024> fullFilename("%s%c%s", *m_destDir, PATH_SEPARATOR, filename);
 	if (FileSystem::FileExists(fullFilename))
 	{
+		m_waitingVolume = false;
 		Write("\n"); // emulating click on Enter-key for "continue"
 	}
 	else
@@ -497,6 +500,7 @@ void DirectUnpack::WaitNextVolume(const char* filename)
 		{
 			Guard guard(m_volumeMutex);
 			m_waitingFile = filename;
+			m_waitingVolume = true;
 			nzbCompleted = m_nzbCompleted;
 		}
 		// the queue lock only after the volume lock is released: the queue side
@@ -527,6 +531,7 @@ void DirectUnpack::FileDownloaded(DownloadQueue* downloadQueue, FileInfo* fileIn
 	if (m_waitingFile && !strcasecmp(fileInfo->GetFilename(), m_waitingFile))
 	{
 		m_waitingFile = nullptr;
+		m_waitingVolume = false;
 		Write("\n"); // emulating click on Enter-key for "continue"
 	}
 

@@ -38,7 +38,7 @@ public:
 	void NzbDownloaded(DownloadQueue* downloadQueue, NzbInfo* nzbInfo);
 	void NzbDeleted(DownloadQueue* downloadQueue, NzbInfo* nzbInfo);
 	static bool IsArchiveFilename(const char* filename);
-	bool IsUnpacking() const { return m_unpacking; }
+	bool IsUnpacking() const { return m_unpacking && !m_waitingVolume; }
 
 protected:
 	virtual bool ReadLine(char* buf, int bufSize, FILE* stream);
@@ -82,6 +82,7 @@ private:
 	bool m_finalDirCreated = false;
 	bool m_processed = false;
 	std::atomic<bool> m_cancelled{false};
+	std::atomic<bool> m_waitingVolume{false};
 	std::atomic<bool> m_unpacking{false};
 	void CreateUnpackDir();
 	void FindArchiveFiles();

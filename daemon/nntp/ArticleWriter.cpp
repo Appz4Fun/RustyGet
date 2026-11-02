@@ -1424,12 +1424,30 @@ int MemoryMonitor::GetEffectiveArticleCacheMB() const
 
 int MemoryMonitor::GetEffectiveParBufferMB(int configuredMB) const
 {
+	int tier = m_tier.load(std::memory_order_acquire);
+	if (tier == NZBGET_RS_PRESSURE_CRITICAL)
+	{
+		return configuredMB == 0 ? 0 : std::max(8, std::min(configuredMB, 16));
+	}
+	else if (tier == NZBGET_RS_PRESSURE_NORMAL)
+	{
+		return configuredMB;
+	}
 	return (int)nzbget_rs_memory_pressure_effective_par_buffer((uint32_t)configuredMB);
 }
 
 int MemoryMonitor::GetEffectiveDownloadsLimit(int configuredLimit) const
 {
-	return (int)nzbget_rs_memory_pressure_effective_downloads_limit((uint32_t)configuredLimit);
+	int tier = m_tier.load(std::memory_order_acquire);
+	if (tier == NZBGET_RS_PRESSURE_CRITICAL)
+	{
+		return std::max(1, configuredLimit / 4);
+	}
+	else if (tier == NZBGET_RS_PRESSURE_CONSTRAINED)
+	{
+		return std::max(2, configuredLimit / 2);
+	}
+	return configuredLimit;
 }
 
 void MemoryMonitor::TrimHeap()
@@ -1441,14 +1459,16 @@ void MemoryMonitor::UpdateState()
 {
 	int rawSample = nzbget_rs_memory_pressure_sample();
 	int currentTier = m_tier.load(std::memory_order_relaxed);
+	int nextTier = currentTier;
+	bool transitioned = false;
 
 	if (rawSample > currentTier)
 	{
 		// Immediate escalation on higher pressure (1 sample)
-		m_tier.store(rawSample, std::memory_order_release);
+		nextTier = rawSample;
 		m_candidateTier = rawSample;
 		m_consecutiveSamples = 0;
-		ApplyTierTransition((NzbgetRsPressureTier)currentTier, (NzbgetRsPressureTier)rawSample);
+		transitioned = true;
 	}
 	else if (rawSample < currentTier)
 	{
@@ -1458,9 +1478,9 @@ void MemoryMonitor::UpdateState()
 			m_consecutiveSamples++;
 			if (m_consecutiveSamples >= 2)
 			{
-				m_tier.store(rawSample, std::memory_order_release);
+				nextTier = rawSample;
 				m_consecutiveSamples = 0;
-				ApplyTierTransition((NzbgetRsPressureTier)currentTier, (NzbgetRsPressureTier)rawSample);
+				transitioned = true;
 			}
 		}
 		else
@@ -1476,13 +1496,27 @@ void MemoryMonitor::UpdateState()
 	}
 
 	uint32_t cfgCache = g_Options ? (uint32_t)g_Options->GetArticleCache() : 0;
-	m_effectiveCacheMB.store(nzbget_rs_memory_pressure_effective_cache(cfgCache), std::memory_order_release);
+	uint32_t effCache = (nextTier == NZBGET_RS_PRESSURE_CRITICAL) ? 0 :
+		(nextTier == NZBGET_RS_PRESSURE_NORMAL) ? cfgCache :
+		(rawSample == nextTier ? nzbget_rs_memory_pressure_effective_cache(cfgCache) : (cfgCache / 2));
+	m_effectiveCacheMB.store(effCache, std::memory_order_release);
 
 	uint32_t cfgPar = g_Options ? (uint32_t)g_Options->GetParBuffer() : 0;
-	m_effectiveParBufferMB.store(nzbget_rs_memory_pressure_effective_par_buffer(cfgPar), std::memory_order_release);
+	uint32_t effPar = (nextTier == NZBGET_RS_PRESSURE_CRITICAL) ? (cfgPar == 0 ? 0 : std::max(8u, std::min(cfgPar, 16u))) :
+		(nextTier == NZBGET_RS_PRESSURE_NORMAL) ? cfgPar :
+		(rawSample == nextTier ? nzbget_rs_memory_pressure_effective_par_buffer(cfgPar) : std::max(16u, cfgPar / 2));
+	m_effectiveParBufferMB.store(effPar, std::memory_order_release);
 
 	uint32_t cfgLimit = 20;
-	m_effectiveDownloadsLimit.store(nzbget_rs_memory_pressure_effective_downloads_limit(cfgLimit), std::memory_order_release);
+	uint32_t effLimit = (nextTier == NZBGET_RS_PRESSURE_CRITICAL) ? std::max(1u, cfgLimit / 4) :
+		(nextTier == NZBGET_RS_PRESSURE_CONSTRAINED) ? std::max(2u, cfgLimit / 2) : cfgLimit;
+	m_effectiveDownloadsLimit.store(effLimit, std::memory_order_release);
+
+	if (transitioned)
+	{
+		m_tier.store(nextTier, std::memory_order_release);
+		ApplyTierTransition((NzbgetRsPressureTier)currentTier, (NzbgetRsPressureTier)nextTier);
+	}
 }
 
 void MemoryMonitor::ApplyTierTransition(NzbgetRsPressureTier oldTier, NzbgetRsPressureTier newTier)

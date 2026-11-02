@@ -581,6 +581,8 @@ public:
 	bool GetDaemonMode() const { return m_daemonMode; }
 	void SetRemoteClientMode(bool remoteClientMode) { m_remoteClientMode = remoteClientMode; }
 	bool GetRemoteClientMode() const { return m_remoteClientMode; }
+	void SetDirectClientMode(bool directClientMode) { m_directClientMode = directClientMode; }
+	bool GetDirectClientMode() const { return m_directClientMode; }
 
 	const fs::path& GetAppDirPath() const { return m_appDirPath; }
 	const fs::path& GetConfigFilePath() const { return m_configFilePath; }
@@ -782,6 +784,7 @@ private:
 	bool m_serverMode = false;
 	bool m_daemonMode = false;
 	bool m_remoteClientMode = false;
+	bool m_directClientMode = false;
 
 	void Init(const char* exeName, const char* configFilename, bool noConfig,
 		CmdOptList* commandLineOptions, bool noDiskAccess, Extender* extender);

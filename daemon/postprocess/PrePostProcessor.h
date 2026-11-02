@@ -34,8 +34,8 @@ public:
 	void Stop() override;
 	bool HasMoreJobs() { return m_queuedJobs > 0; }
 	int GetJobCount() { return m_queuedJobs; }
-	bool HasActiveUnpack();
-	bool HasActiveUnpack(DownloadQueue* downloadQueue);
+	bool HasActiveUnpack(bool includeWaitingVolume = true);
+	bool HasActiveUnpack(DownloadQueue* downloadQueue, bool includeWaitingVolume = true);
 	bool EditList(DownloadQueue* downloadQueue, IdList* idList, DownloadQueue::EEditAction action,
 		const char* args);
 	void NzbAdded(DownloadQueue* downloadQueue, NzbInfo* nzbInfo);

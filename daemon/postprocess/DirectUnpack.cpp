@@ -33,6 +33,8 @@ void DirectUnpack::StartJob(NzbInfo* nzbInfo)
 {
 	DirectUnpack* directUnpack = new DirectUnpack();
 	directUnpack->m_nzbId = nzbInfo->GetId();
+	directUnpack->m_unpacking = true;
+	directUnpack->m_waitingVolume = false;
 	directUnpack->SetAutoDestroy(true);
 
 	nzbInfo->SetUnpackThread(directUnpack);
@@ -52,6 +54,7 @@ void DirectUnpack::Run()
 		if (!nzbInfo)
 		{
 			debug("Could not find NzbInfo for %i", m_nzbId);
+			m_unpacking = false;
 			return;
 		}
 
@@ -88,6 +91,7 @@ void DirectUnpack::Run()
 
 		if (archive)
 		{
+			m_waitingVolume = false;
 			if (!m_processed)
 			{
 				PrintMessage(Message::mkInfo, "Directly unpacking %s", *m_name);
@@ -111,9 +115,13 @@ void DirectUnpack::Run()
 			{
 				break;
 			}
+			m_waitingVolume = true;
 			Util::Sleep(100);
 		}
 	}
+
+	m_unpacking = false;
+	m_waitingVolume = false;
 
 	bool interrupted = !m_cancelled && (IsStopped() || GetTerminated());
 	if (!m_unpackOk && !interrupted)
@@ -216,7 +224,6 @@ void DirectUnpack::ExecuteUnrar(const char* archiveName)
 	m_waitingVolume = false;
 	m_unpacking = true;
 	int exitCode = Execute();
-	m_unpacking = false;
 	m_waitingVolume = false;
 	SetLogPrefix(nullptr);
 

@@ -777,7 +777,7 @@ bool QueueEditor::EditGroup(NzbInfo* nzbInfo, DownloadQueue::EEditAction action,
 		{
 			nzbInfo->SetDeleteStatus(NzbInfo::dsDupe);
 		}
-		nzbInfo->SetCleanupDisk(action != DownloadQueue::eaGroupParkDelete);
+		nzbInfo->SetCleanupDisk(action != DownloadQueue::eaGroupParkDelete || !nzbInfo->GetParking());
 	}
 
 	DownloadQueue::EEditAction GroupToFileMap[] = {
@@ -812,7 +812,10 @@ bool QueueEditor::EditGroup(NzbInfo* nzbInfo, DownloadQueue::EEditAction action,
 
 	bool ok = InternEditList(&itemList, nullptr, GroupToFileMap[action], args);
 
-	if ((action == DownloadQueue::eaGroupDelete || action == DownloadQueue::eaGroupDupeDelete || action == DownloadQueue::eaGroupFinalDelete) &&
+	if ((action == DownloadQueue::eaGroupDelete ||
+		action == DownloadQueue::eaGroupParkDelete ||
+		action == DownloadQueue::eaGroupDupeDelete ||
+		action == DownloadQueue::eaGroupFinalDelete) &&
 		// NZBInfo could have been destroyed already
 		m_downloadQueue->GetQueue()->Find(id))
 	{

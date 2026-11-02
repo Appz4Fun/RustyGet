@@ -333,12 +333,13 @@ BOOST_AUTO_TEST_CASE(CipherSaveMetadataRejectsMalformedAndNeverLeaksIntoFile)
 		Options* options = g_Options; ScriptConfig* scripts = g_ScriptConfig; fs::path path, dir;
 		~Restore() { g_Options = options; g_ScriptConfig = scripts; std::error_code ignored; fs::remove(path, ignored); fs::remove(dir, ignored); }
 	} restore{g_Options, g_ScriptConfig, path, dir};
-	{ std::ofstream out(path); out << "Server1.Host=example.invalid\nServer1.Cipher=old\n"; }
+	{ std::ofstream out(path); out << "Server1.Host=example.invalid\nServer1.Encryption=yes\nServer1.Cipher=old\n"; }
 	Options options("nzbget", path.string().c_str(), true, nullptr, nullptr); g_Options = &options;
 	ScriptConfig scripts; g_ScriptConfig = &scripts;
 	Options::OptEntries entries; BOOST_REQUIRE(scripts.LoadConfig(&entries));
 	std::string token = ScriptConfig::CipherBaseline(entries);
 	Json::JsonArray values{Json::JsonObject{{"Name", "Server1.Host"}, {"Value", "example.invalid"}},
+		Json::JsonObject{{"Name", "Server1.Encryption"}, {"Value", "yes"}},
 		Json::JsonObject{{"Name", "Server1.Cipher"}, {"Value", "optimized"}},
 		Json::JsonObject{{"Name", "_TlsCipherBaseline"}, {"Value", token}}};
 	Json::JsonObject request{{"method", "saveconfig"}, {"params", Json::JsonArray{values}}, {"id", 1}};
@@ -553,6 +554,15 @@ BOOST_AUTO_TEST_CASE(SaveConfigRejectsConflictingSettings)
 		BOOST_CHECK(HasErrorCode(reply, 3));
 		BOOST_CHECK(reply.find("DirectUnpack=yes") != std::string::npos);
 		BOOST_CHECK(reply.find("UnpackPauseQueue=yes") != std::string::npos);
+	}
+
+	// Omitted options in saveconfig resolve against replacement-config defaults:
+	// FlushQueue=no with DirectWrite omitted (defaults to yes) must be rejected
+	{
+		std::string reply = RpcReply("/jsonrpc", XmlRpcProcessor::hmPost,
+			R"({"method":"saveconfig","params":[[{"Name":"FlushQueue","Value":"no"}]],"id":1})");
+		BOOST_CHECK(HasErrorCode(reply, 3));
+		BOOST_CHECK(reply.find("DirectWrite=yes") != std::string::npos);
 	}
 }
 

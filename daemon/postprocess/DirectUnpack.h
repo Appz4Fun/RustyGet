@@ -38,7 +38,8 @@ public:
 	void NzbDownloaded(DownloadQueue* downloadQueue, NzbInfo* nzbInfo);
 	void NzbDeleted(DownloadQueue* downloadQueue, NzbInfo* nzbInfo);
 	static bool IsArchiveFilename(const char* filename);
-	bool IsUnpacking() const { return m_unpacking && !m_waitingVolume; }
+	bool IsUnpacking() const { return m_unpacking; }
+	bool IsWaitingVolume() const { return m_waitingVolume; }
 
 protected:
 	virtual bool ReadLine(char* buf, int bufSize, FILE* stream);

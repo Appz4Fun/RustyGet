@@ -198,13 +198,13 @@ void PrePostProcessor::Stop()
 	m_waitCond.notify_all();
 }
 
-bool PrePostProcessor::HasActiveUnpack()
+bool PrePostProcessor::HasActiveUnpack(bool includeWaitingVolume)
 {
 	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-	return HasActiveUnpack(downloadQueue);
+	return HasActiveUnpack(downloadQueue, includeWaitingVolume);
 }
 
-bool PrePostProcessor::HasActiveUnpack(DownloadQueue* downloadQueue)
+bool PrePostProcessor::HasActiveUnpack(DownloadQueue* downloadQueue, bool includeWaitingVolume)
 {
 	// Check post-processing active jobs for UnpackController
 	{
@@ -218,13 +218,13 @@ bool PrePostProcessor::HasActiveUnpack(DownloadQueue* downloadQueue)
 		}
 	}
 
-	// Check direct unpack jobs: is unrar actively extracting a volume?
+	// Check direct unpack jobs: does a direct unpack own the unpack slot / actively extract?
 	for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
 	{
 		if (nzbInfo->GetUnpackThread())
 		{
 			DirectUnpack* directUnpack = (DirectUnpack*)nzbInfo->GetUnpackThread();
-			if (directUnpack->IsUnpacking())
+			if (directUnpack->IsUnpacking() && (includeWaitingVolume || !directUnpack->IsWaitingVolume()))
 			{
 				return true;
 			}
@@ -614,7 +614,7 @@ void PrePostProcessor::NzbCompleted(DownloadQueue* downloadQueue, NzbInfo* nzbIn
 void PrePostProcessor::DeleteCleanup(NzbInfo* nzbInfo)
 {
 	if (nzbInfo->GetCleanupDisk() ||
-		nzbInfo->GetDeleteStatus() == NzbInfo::dsDupe)
+		(nzbInfo->GetDeleteStatus() == NzbInfo::dsDupe && !nzbInfo->GetParking()))
 	{
 		if (nzbInfo->GetSkipDiskWrite() || g_Options->GetSkipWrite())
 		{

@@ -3783,25 +3783,13 @@ void SaveConfigXmlCommand::Execute()
 				{
 					cipherVal = cEntry->GetValue();
 				}
-				else if (g_Options)
-				{
-					cipherVal = g_Options->GetOption(*cipherOpt);
-				}
 
 				if (cipherVal && cipherVal[0] != '\0')
 				{
-					bool encDisabled = false;
+					bool encDisabled = true;
 					if (Options::OptEntry* eEntry = optEntries.FindOption(*encOpt))
 					{
-						encDisabled = !parseBool(eEntry->GetValue(), true);
-					}
-					else if (g_Options)
-					{
-						const char* optVal = g_Options->GetOption(*encOpt);
-						if (optVal)
-						{
-							encDisabled = !parseBool(optVal, true);
-						}
+						encDisabled = !parseBool(eEntry->GetValue(), false);
 					}
 
 					if (encDisabled)
@@ -3819,7 +3807,7 @@ void SaveConfigXmlCommand::Execute()
 	bool hasHealthCheck = (optEntries.FindOption("HealthCheck") != nullptr);
 	if (hasDupeSearch || hasHealthCheck)
 	{
-		bool dupeSearch = g_Options ? g_Options->GetDupeSearch() : false;
+		bool dupeSearch = false;
 		if (Options::OptEntry* entry = optEntries.FindOption("DupeSearch"))
 		{
 			dupeSearch = parseBool(entry->GetValue(), false);
@@ -3829,10 +3817,6 @@ void SaveConfigXmlCommand::Execute()
 		if (Options::OptEntry* entry = optEntries.FindOption("HealthCheck"))
 		{
 			healthCheckPark = entry->GetValue() && (!strcasecmp(entry->GetValue(), "park") || !strcasecmp(entry->GetValue(), "hcpark"));
-		}
-		else if (g_Options)
-		{
-			healthCheckPark = (g_Options->GetHealthCheck() == Options::hcPark);
 		}
 
 		if (dupeSearch && healthCheckPark)
@@ -3847,13 +3831,13 @@ void SaveConfigXmlCommand::Execute()
 	bool hasDirectWrite = (optEntries.FindOption("DirectWrite") != nullptr);
 	if (hasFlushQueue || hasDirectWrite)
 	{
-		bool flushQueue = g_Options ? g_Options->GetFlushQueue() : true;
+		bool flushQueue = true;
 		if (Options::OptEntry* entry = optEntries.FindOption("FlushQueue"))
 		{
 			flushQueue = parseBool(entry->GetValue(), true);
 		}
 
-		bool directWrite = g_Options ? g_Options->GetDirectWrite() : true;
+		bool directWrite = true;
 		if (Options::OptEntry* entry = optEntries.FindOption("DirectWrite"))
 		{
 			directWrite = parseBool(entry->GetValue(), true);
@@ -3871,13 +3855,13 @@ void SaveConfigXmlCommand::Execute()
 	bool hasDirectUnpack = (optEntries.FindOption("DirectUnpack") != nullptr);
 	if (hasUnpackPauseQueue || hasDirectUnpack)
 	{
-		bool unpackPauseQueue = g_Options ? g_Options->GetUnpackPauseQueue() : false;
+		bool unpackPauseQueue = false;
 		if (Options::OptEntry* entry = optEntries.FindOption("UnpackPauseQueue"))
 		{
 			unpackPauseQueue = parseBool(entry->GetValue(), false);
 		}
 
-		bool directUnpack = g_Options ? g_Options->GetDirectUnpack() : false;
+		bool directUnpack = false;
 		if (Options::OptEntry* entry = optEntries.FindOption("DirectUnpack"))
 		{
 			directUnpack = parseBool(entry->GetValue(), false);

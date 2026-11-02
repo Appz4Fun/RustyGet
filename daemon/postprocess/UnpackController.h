@@ -35,6 +35,7 @@ public:
 	static void StartJob(PostInfo* postInfo);
 	static bool HasCompletedArchiveFiles(NzbInfo* nzbInfo);
 	static Mutex& GetUnpackMutex();
+	bool IsUnpacking() const { return m_unpacking; }
 
 	~UnpackController() override;
 

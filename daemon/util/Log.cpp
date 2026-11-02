@@ -75,8 +75,7 @@ void Log::Filelog(const char* msg, ...)
 	Util::FormatTime(rawtime, time, 50);
 
 	const int day = 86400;
-	if (g_Options->GetServerMode()
-		&& static_cast<int>(rawtime) / day != static_cast<int>(m_lastWritten.load()) / day 
+	if (static_cast<int>(rawtime) / day != static_cast<int>(m_lastWritten.load()) / day 
 		&& g_Options->GetWriteLog() == Options::wlRotate)
 	{
 		if (m_logFile)
@@ -386,11 +385,12 @@ void Log::InitOptions()
 {
 	const char* messageType[] = { "INFO", "WARNING", "ERROR", "DEBUG", "DETAIL"};
 
-	if (g_Options->GetServerMode() && g_Options->GetWriteLog() != Options::wlNone && g_Options->GetLogFile())
+	if (!g_Options->GetRemoteClientMode() && !g_Options->GetDirectClientMode() &&
+		g_Options->GetWriteLog() != Options::wlNone && g_Options->GetLogFile())
 	{
 		UpdateLogPath(g_Options->GetLogFile());
 
-		if (g_Options->GetWriteLog() == Options::wlReset)
+		if (g_Options->GetServerMode() && g_Options->GetWriteLog() == Options::wlReset)
 		{
 			g_Log->ResetLog();
 		}

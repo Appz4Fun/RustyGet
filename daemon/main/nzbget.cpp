@@ -547,6 +547,14 @@ void NZBGet::BootConfig()
 	m_options->SetRemoteClientMode(m_commandLineParser->GetRemoteClientMode());
 	m_options->SetServerMode(m_commandLineParser->GetServerMode());
 	m_options->SetDaemonMode(m_commandLineParser->GetDaemonMode());
+	m_options->SetDirectClientMode(
+#ifdef DEBUG
+		m_commandLineParser->GetTestBacktrace() ||
+#endif
+		m_commandLineParser->GetWebGet() ||
+		m_commandLineParser->GetSigVerify() ||
+		m_commandLineParser->GetClientOperation() != CommandLineParser::opClientNoOperation ||
+		m_commandLineParser->GetPrintOptions());
 	m_workState->SetPauseDownload(m_commandLineParser->GetPauseDownload());
 	m_workState->SetSpeedLimit(g_Options->GetDownloadRate());
 
@@ -757,6 +765,11 @@ void NZBGet::StartFrontend()
 	}
 }
 
+extern void ExitProc();
+extern void Reload();
+std::atomic<bool> g_SigHupPending{false};
+std::atomic<bool> g_SigExitPending{false};
+
 void NZBGet::StopFrontend()
 {
 	if (m_frontend)
@@ -802,11 +815,6 @@ void NZBGet::ProcessStandalone()
 	m_scanner->InitPPParameters(category, nzbInfo->GetParameters(), false);
 	m_queueCoordinator->AddNzbFileToQueue(std::move(nzbInfo), nullptr, false);
 }
-
-extern void ExitProc();
-extern void Reload();
-std::atomic<bool> g_SigHupPending{false};
-std::atomic<bool> g_SigExitPending{false};
 
 static std::mutex g_reloadMutex;
 static std::condition_variable g_reloadCond;
@@ -972,7 +980,7 @@ void NZBGet::Phase4_Shutdown(bool reload)
 
 bool NZBGet::HasActiveUnpack() const
 {
-	return m_prePostProcessor ? m_prePostProcessor->HasActiveUnpack() : false;
+	return m_prePostProcessor ? m_prePostProcessor->HasActiveUnpack(false) : false;
 }
 
 void NZBGet::Run(bool reload)
@@ -1158,10 +1166,10 @@ void NZBGet::Stop(bool reload)
 		info("Stopping, please wait...");
 	}
 
-	if (m_reloading && m_prePostProcessor && m_prePostProcessor->HasActiveUnpack())
+	if (m_reloading && m_prePostProcessor && m_prePostProcessor->HasActiveUnpack(false))
 	{
 		info("Waiting for active unpack to complete before in-process reload...");
-		while (m_prePostProcessor && m_prePostProcessor->HasActiveUnpack() && !g_SigExitPending.load())
+		while (m_prePostProcessor && m_prePostProcessor->HasActiveUnpack(false) && !g_SigExitPending.load())
 		{
 			Util::Sleep(100);
 		}
@@ -1434,7 +1442,7 @@ void Reload()
 			while (g_reloadPending && !g_SigExitPending.load())
 			{
 				lock.unlock();
-				bool activeUnpack = g_PrePostProcessor && g_PrePostProcessor->HasActiveUnpack();
+				bool activeUnpack = g_PrePostProcessor && g_PrePostProcessor->HasActiveUnpack(false);
 				bool alreadyReloading = !g_NZBGet || g_NZBGet->GetReloading();
 				if (activeUnpack && !loggedDeferral)
 				{
@@ -1576,7 +1584,7 @@ void nzbget_c_phase4_shutdown(bool reloading)
 
 bool nzbget_c_has_active_unpack(void)
 {
-	return g_NZBGet ? g_NZBGet->HasActiveUnpack() : (g_PrePostProcessor ? g_PrePostProcessor->HasActiveUnpack() : false);
+	return g_NZBGet ? g_NZBGet->HasActiveUnpack() : (g_PrePostProcessor ? g_PrePostProcessor->HasActiveUnpack(false) : false);
 }
 
 bool nzbget_c_is_reloading(void)

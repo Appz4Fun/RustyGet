@@ -125,13 +125,26 @@ BOOST_AUTO_TEST_CASE(ClientModeNoLogFileBindingTest)
 	cmdOpts.push_back("LogFile=test_client_mode.log");
 	Options options(&cmdOpts, nullptr);
 	options.SetServerMode(false);
+	options.SetRemoteClientMode(true);
 	g_Options = &options;
 
 	log.InitOptions();
 
-	// In client mode, LogFile must not be bound
+	// In remote client mode, LogFile must not be bound
 	BOOST_CHECK(log.GetLogFilename().empty());
 	BOOST_CHECK(!FileSystem::FileExists("test_client_mode.log"));
+
+	// In direct client mode (-p, -v, etc.), LogFile must not be bound
+	options.SetRemoteClientMode(false);
+	options.SetDirectClientMode(true);
+	log.InitOptions();
+	BOOST_CHECK(log.GetLogFilename().empty());
+	BOOST_CHECK(!FileSystem::FileExists("test_client_mode.log"));
+
+	// In standalone download mode, LogFile must be bound
+	options.SetDirectClientMode(false);
+	log.InitOptions();
+	BOOST_CHECK(!log.GetLogFilename().empty());
 
 	// In server mode, LogFile must be bound
 	options.SetServerMode(true);

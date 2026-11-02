@@ -83,10 +83,18 @@ bool RemoteClient::InitConnection()
 {
 	const char* controlIp = !strcmp(g_Options->GetControlIp(), "0.0.0.0") ? "127.0.0.1" : g_Options->GetControlIp();
 
-	// Create a connection to the server
-	m_connection = std::make_unique<Connection>(controlIp, g_Options->GetControlPort(), false);
-
-	bool OK = m_connection->Connect();
+	// Create a connection to the server (retry briefly if server is mid-reload)
+	bool OK = false;
+	for (int attempt = 0; attempt < 10; ++attempt)
+	{
+		m_connection = std::make_unique<Connection>(controlIp, g_Options->GetControlPort(), false);
+		OK = m_connection->Connect();
+		if (OK)
+		{
+			break;
+		}
+		Util::Sleep(50);
+	}
 	if (!OK)
 	{
 		printf("Unable to send request to nzbget-server at %s (port %i)\n", controlIp, g_Options->GetControlPort());

@@ -244,6 +244,10 @@ void PrePostProcessor::SanitisePostQueue()
 	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
 	for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
 	{
+		if (nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsRunning && !nzbInfo->GetUnpackThread())
+		{
+			nzbInfo->SetDirectUnpackStatus(NzbInfo::nsNone);
+		}
 		PostInfo* postInfo = nzbInfo->GetPostInfo();
 		if (!postInfo && nzbInfo->GetKind() == NzbInfo::nkNzb && !nzbInfo->GetCompletedFiles()->empty() &&
 			nzbInfo->GetDeleteStatus() == NzbInfo::dsNone && nzbInfo->IsDownloadCompleted(true))
@@ -1471,7 +1475,7 @@ void PrePostProcessor::FileDownloaded(DownloadQueue* downloadQueue, NzbInfo* nzb
 				DirectUnpack::StartJob(nzbInfo);
 			}
 		}
-		else if (nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsRunning)
+		else if (nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsRunning && nzbInfo->GetUnpackThread())
 		{
 			((DirectUnpack*)nzbInfo->GetUnpackThread())->FileDownloaded(downloadQueue, fileInfo);
 		}

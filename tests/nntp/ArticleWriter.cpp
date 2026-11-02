@@ -71,4 +71,70 @@ BOOST_AUTO_TEST_CASE(ForcedDirectWriteKeepsExistingOutputInCollectionDirectory)
 	BOOST_CHECK_EQUAL(content, "existing archive bytes");
 }
 
+BOOST_AUTO_TEST_CASE(DirectWritePreservesUnrelatedExistingOutputInCollectionDirectory)
+{
+	struct Fixture
+	{
+		Options* previousOptions = g_Options;
+		ArticleCache* previousCache = g_ArticleCache;
+		fs::path directory = fs::temp_directory_path() / fs::make_unique_filename();
+		std::unique_ptr<Options> options;
+		ArticleCache cache;
+		Fixture()
+		{
+			fs::create_directories(directory);
+			Options::CmdOptList cmdOpts;
+			cmdOpts.emplace_back("NzbLog=no");
+			cmdOpts.emplace_back("WriteLog=none");
+			cmdOpts.emplace_back("DirectWrite=yes");
+			cmdOpts.emplace_back("DupeCheck=no");
+			options = std::make_unique<Options>(&cmdOpts, nullptr);
+			g_ArticleCache = &cache;
+		}
+		~Fixture()
+		{
+			g_ArticleCache = previousCache;
+			options.reset();
+			g_Options = previousOptions;
+			fs::error_code ec;
+			fs::remove_all(directory, ec);
+		}
+	} fixture;
+
+	const fs::path existingPath = fixture.directory / "part151.rar";
+	{
+		std::ofstream existing(existingPath.string(), std::ios::binary);
+		existing << "unrelated existing archive bytes";
+	}
+	const fs::path tempOutPath = fixture.directory / "42.out.tmp";
+	{
+		std::ofstream tempOut(tempOutPath.string(), std::ios::binary);
+		tempOut << "newly downloaded archive bytes";
+	}
+
+	NzbInfo nzb;
+	nzb.SetName("Release title");
+	nzb.SetDestDir(fixture.directory.string().c_str());
+	FileInfo file;
+	file.SetId(42);
+	file.SetNzbInfo(&nzb);
+	file.SetFilename("part151.rar");
+	file.SetForceDirectWrite(false);
+	file.SetOutputInitialized(true);
+	file.SetSuccessArticles(1);
+	ArticleInfo article;
+	article.SetPartNumber(1);
+	ArticleWriter writer;
+	writer.SetFileInfo(&file);
+	writer.SetArticleInfo(&article);
+	writer.Prepare();
+
+	DiskFile output;
+	auto paths = writer.SetupOutputFile(output, fixture.directory.string(),
+		"part151.rar", "Release title/part151.rar", true, false);
+	BOOST_REQUIRE(paths);
+	output.Close();
+	BOOST_CHECK_NE(paths->finalPath, existingPath.string());
+}
+
 BOOST_AUTO_TEST_SUITE_END()

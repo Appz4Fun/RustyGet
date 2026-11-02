@@ -1552,11 +1552,20 @@ void QueueCoordinator::LoadPartialState(FileInfo* fileInfo)
 		g_DiskState->LoadFileState(fileInfo, g_ServerPool->GetServers(), false);
 		if ((g_Options->GetDirectWrite() || fileInfo->GetForceDirectWrite()) && !fileInfo->GetOutputInitialized())
 		{
-			BString<1024> outputFilename("%s%c%s", fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, fileInfo->GetFilename());
-			if (FileSystem::FileExists(outputFilename))
+			BString<1024> outTmpFilename("%s%c%i.out.tmp", fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, fileInfo->GetId());
+			if (FileSystem::FileExists(outTmpFilename))
 			{
-				fileInfo->SetOutputFilename(outputFilename);
+				fileInfo->SetOutputFilename(outTmpFilename);
 				fileInfo->SetOutputInitialized(true);
+			}
+			else if (fileInfo->GetForceDirectWrite())
+			{
+				BString<1024> outputFilename("%s%c%s", fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, fileInfo->GetFilename());
+				if (FileSystem::FileExists(outputFilename))
+				{
+					fileInfo->SetOutputFilename(outputFilename);
+					fileInfo->SetOutputInitialized(true);
+				}
 			}
 		}
 	}

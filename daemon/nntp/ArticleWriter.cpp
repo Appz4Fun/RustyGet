@@ -105,9 +105,7 @@ bool ArticleWriter::Start(Decoder::EFormat format, const char* filename, int64 f
 			if (g_Options->GetDirectWrite() || m_fileInfo->GetForceDirectWrite())
 			{
 				Guard guard = m_fileInfo->GuardOutputFile();
-				isOwnOutputFile = outputInitialized ||
-					m_fileInfo->GetSuccessArticles() > 0 ||
-					m_fileInfo->GetCompletedArticles() > 0 ||
+				isOwnOutputFile = m_fileInfo->GetForceDirectWrite() ||
 					(!m_fileInfo->GetOutputFilename().empty() &&
 					 FileSystem::SameFilename(m_fileInfo->GetOutputFilename().c_str(), destFilePath));
 			}
@@ -117,17 +115,6 @@ bool ArticleWriter::Start(Decoder::EFormat format, const char* filename, int64 f
 			{
 				m_duplicate = true;
 				return false;
-			}
-
-			if (isOwnOutputFile && !outputInitialized)
-			{
-				Guard guard = m_fileInfo->GuardOutputFile();
-				m_fileInfo->SetOutputInitialized(true);
-				if (m_fileInfo->GetOutputFilename().empty())
-				{
-					m_fileInfo->SetOutputFilename(destFilePath);
-				}
-				m_outputFilename = destFilePath.Str();
 			}
 		}
 
@@ -377,7 +364,7 @@ void ArticleWriter::BuildOutputFilename()
 		else
 		{
 			BString<1024> destPath("%s%c%s", destDir, PATH_SEPARATOR, m_fileInfo->GetFilename());
-			if (m_fileInfo->GetOutputInitialized() && FileSystem::FileExists(destPath))
+			if (m_fileInfo->GetForceDirectWrite() && m_fileInfo->GetOutputInitialized() && FileSystem::FileExists(destPath))
 			{
 				filename = destPath.Str();
 				m_fileInfo->SetOutputFilename(filename);
@@ -419,10 +406,15 @@ bool ArticleWriter::CompleteFileParts()
 		filename = m_fileInfo->GetFilename();
 	}
 
+	if (m_outputFilename.empty() && !m_fileInfo->GetOutputFilename().empty())
+	{
+		m_outputFilename = m_fileInfo->GetOutputFilename();
+	}
 	if ((g_Options->GetDirectWrite() || m_fileInfo->GetForceDirectWrite()) && !m_fileInfo->GetOutputInitialized())
 	{
 		BString<1024> destPath("%s%c%s", nzbDestDir.c_str(), PATH_SEPARATOR, filename.c_str());
-		if (FileSystem::FileExists(destPath) || (!m_outputFilename.empty() && FileSystem::FileExists(m_outputFilename.c_str())))
+		if ((!m_outputFilename.empty() && FileSystem::FileExists(m_outputFilename.c_str())) ||
+			(m_fileInfo->GetForceDirectWrite() && FileSystem::FileExists(destPath)))
 		{
 			m_fileInfo->SetOutputInitialized(true);
 		}
@@ -536,21 +528,10 @@ ArticleWriter::SetupOutputFile(DiskFile &outfile,
 {
 	OutputPaths paths;
 	std::string targetPath = std::string(destDir) + PATH_SEPARATOR + std::string(filename);
-	if (m_fileInfo->GetForceDirectWrite() || (directWrite && (!m_outputFilename.empty() && FileSystem::SameFilename(m_outputFilename.c_str(), targetPath.c_str()))))
+	if (m_fileInfo->GetForceDirectWrite() ||
+		(directWrite && !m_outputFilename.empty() && FileSystem::SameFilename(m_outputFilename.c_str(), targetPath.c_str())))
 	{
 		paths.finalPath = targetPath;
-	}
-	else if (directWrite)
-	{
-		if (FileSystem::FileExists(targetPath.c_str()) &&
-			(m_fileInfo->GetOutputInitialized() || m_fileInfo->GetSuccessArticles() > 0))
-		{
-			paths.finalPath = targetPath;
-		}
-		else
-		{
-			paths.finalPath = FileSystem::MakeUniqueFilename(destDir.data(), filename.data()).Str();
-		}
 	}
 	else
 	{
@@ -1277,11 +1258,7 @@ void ArticleCache::Run()
 		else if (!m_allocated)
 		{
 			std::unique_lock<std::mutex> lk(m_allocMutex);
-			m_allocCond.wait(lk, [&] {
-				bool crit = g_MemoryMonitor &&
-					g_MemoryMonitor->GetTier() == NZBGET_RS_PRESSURE_CRITICAL;
-				return IsStopped() || m_allocated > 0 || crit;
-			});
+			m_allocCond.wait(lk, [&] { return IsStopped() || m_allocated > 0; });
 			resetCounter = 0;
 		}
 		else
@@ -1374,6 +1351,10 @@ MemoryMonitor::~MemoryMonitor()
 	if (IsRunning())
 	{
 		Stop();
+	}
+	while (IsRunning())
+	{
+		Util::Sleep(10);
 	}
 }
 

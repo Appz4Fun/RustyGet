@@ -593,9 +593,13 @@ void NZBGet::Cleanup()
 	if (m_memoryMonitor)
 	{
 		m_memoryMonitor->Stop();
+		while (m_memoryMonitor->IsRunning())
+		{
+			Util::Sleep(10);
+		}
 	}
-	m_memoryMonitor.reset();
 	g_MemoryMonitor = nullptr;
+	m_memoryMonitor.reset();
 	g_QueueScriptCoordinator = nullptr;
 	// destroyed while the global still points to it: its destructor waits for
 	// a running update-script, whose thread finishes through g_Maintenance
@@ -786,6 +790,11 @@ void NZBGet::ProcessStandalone()
 	m_queueCoordinator->AddNzbFileToQueue(std::move(nzbInfo), nullptr, false);
 }
 
+extern void ExitProc();
+extern void Reload();
+std::atomic<bool> g_SigHupPending{false};
+std::atomic<bool> g_SigExitPending{false};
+
 void NZBGet::DoMainLoop()
 {
 	debug("Entering main program loop");
@@ -818,8 +827,18 @@ void NZBGet::DoMainLoop()
 #ifdef WIN32
 		m_winConsole->IsRunning() ||
 #endif
+		(m_memoryMonitor && m_memoryMonitor->IsRunning()) ||
 		m_articleCache->IsRunning())
 	{
+		if (g_SigExitPending.exchange(false))
+		{
+			ExitProc();
+		}
+		else if (g_SigHupPending.exchange(false))
+		{
+			Reload();
+		}
+
 		if (!m_options->GetServerMode() &&
 			!m_queueCoordinator->HasMoreJobs() &&
 			!m_urlCoordinator->HasMoreJobs() &&
@@ -863,9 +882,25 @@ void NZBGet::DoMainLoop()
 
 		if (m_options->GetServerMode() && !m_stopped)
 		{
-			// wait for stop signal
-			std::unique_lock<std::mutex> lk(m_waitMutex);
-			m_waitCond.wait(lk, [&]{ return m_stopped; });
+			// wait for stop signal or pending POSIX signal
+			while (!m_stopped)
+			{
+				{
+					std::unique_lock<std::mutex> lk(m_waitMutex);
+					m_waitCond.wait_for(lk, std::chrono::milliseconds(50), [&]{
+						return m_stopped || g_SigExitPending.load() || g_SigHupPending.load();
+					});
+				}
+
+				if (g_SigExitPending.exchange(false))
+				{
+					ExitProc();
+				}
+				else if (g_SigHupPending.exchange(false))
+				{
+					Reload();
+				}
+			}
 		}
 	}
 
@@ -1065,16 +1100,21 @@ void NZBGet::Stop(bool reload)
 
 	if (!m_reloading)
 	{
+		g_SigHupPending.store(false);
 		info("Stopping, please wait...");
 	}
 
 	if (m_reloading && m_prePostProcessor && m_prePostProcessor->HasActiveUnpack())
 	{
 		info("Waiting for active unpack to complete before in-process reload...");
-		while (m_prePostProcessor && m_prePostProcessor->HasActiveUnpack())
+		while (m_prePostProcessor && m_prePostProcessor->HasActiveUnpack() && !g_SigExitPending.load())
 		{
 			Util::Sleep(100);
 		}
+	}
+	if (g_SigExitPending.exchange(false))
+	{
+		m_reloading = false;
 	}
 	if (m_commandLineParser->GetRemoteClientMode())
 	{
@@ -1333,9 +1373,15 @@ void Reload()
 			}
 
 			while (g_PrePostProcessor && g_PrePostProcessor->HasActiveUnpack() &&
-				g_NZBGet && !g_NZBGet->GetReloading() && g_reloadPending)
+				g_NZBGet && !g_NZBGet->GetReloading() && g_reloadPending && !g_SigExitPending.load())
 			{
 				Util::Sleep(200);
+			}
+
+			if (g_SigExitPending.exchange(false))
+			{
+				ExitProc();
+				return;
 			}
 
 			{

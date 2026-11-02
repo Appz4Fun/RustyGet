@@ -68,6 +68,7 @@ public:
 	bool Write(char* buffer, int len);
 	void Finish(bool success);
 	bool GetDuplicate() { return m_duplicate; }
+	bool HasCachedBuffer() { return m_articleData.GetData() != nullptr; }
 	void LogStartMessage(std::string_view infoFilename, bool directWrite, bool cached);
 	std::optional<OutputPaths> SetupOutputFile(DiskFile &outfile,
 											std::string_view destDir,

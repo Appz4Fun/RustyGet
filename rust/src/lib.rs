@@ -953,9 +953,11 @@ pub mod lifecycle {
             #[cfg(unix)]
             {
                 if signum == SIGHUP {
-                    self.trigger_reload();
+                    if !self.is_stopping() {
+                        self.reloading.store(true, Ordering::SeqCst);
+                    }
                 } else if signum == SIGINT || signum == SIGTERM {
-                    self.trigger_shutdown();
+                    self.stopping.store(true, Ordering::SeqCst);
                 }
             }
             #[cfg(not(unix))]
@@ -1012,11 +1014,16 @@ pub mod lifecycle {
                 // Active unpack deferral check (Requirement R3):
                 // If in-process reload is requested, ensure active unpack finishes before tearing down
                 let c_reloading = hooks.is_reloading.map(|f| unsafe { f() }).unwrap_or(false);
-                let is_reload = self.is_reloading() || c_reloading;
+                let is_reload = !self.is_stopping()
+                    && if hooks.reload.is_some() && hooks.is_reloading.is_some() {
+                        c_reloading
+                    } else {
+                        self.is_reloading() || c_reloading
+                    };
 
                 if is_reload {
                     if let Some(unpack_fn) = hooks.has_active_unpack {
-                        while unsafe { unpack_fn() } {
+                        while !self.is_stopping() && unsafe { unpack_fn() } {
                             std::thread::sleep(Duration::from_millis(100));
                         }
                     }

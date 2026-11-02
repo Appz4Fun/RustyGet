@@ -177,6 +177,8 @@ void InstallErrorHandler()
 #else
 
 static std::atomic<bool> s_shutdownInitiated{false};
+extern std::atomic<bool> g_SigHupPending;
+extern std::atomic<bool> g_SigExitPending;
 
 #ifdef DEBUG
 typedef void(*sighandler)(int);
@@ -240,14 +242,13 @@ void SignalProc(int signum)
 	{
 #ifdef SIGHUP
 		case SIGHUP:
-			if (s_shutdownInitiated.load())
+			if (s_shutdownInitiated.load(std::memory_order_relaxed))
 			{
 				return;
 			}
+			g_SigHupPending.store(true, std::memory_order_seq_cst);
 #ifdef NZBGET_USE_RUST
 			nzbget_rs_signal_notify(signum);
-#else
-			Reload();
 #endif
 			break;
 #endif
@@ -255,7 +256,7 @@ void SignalProc(int signum)
 		case SIGINT:
 		case SIGTERM:
 		{
-			if (s_shutdownInitiated.exchange(true))
+			if (s_shutdownInitiated.exchange(true, std::memory_order_seq_cst))
 			{
 				return; // Absorb duplicate signal during storm
 			}
@@ -264,10 +265,9 @@ void SignalProc(int signum)
 #ifdef SIGHUP
 			signal(SIGHUP, SIG_IGN);
 #endif
+			g_SigExitPending.store(true, std::memory_order_seq_cst);
 #ifdef NZBGET_USE_RUST
 			nzbget_rs_signal_notify(signum);
-#else
-			ExitProc();
 #endif
 			break;
 		}
@@ -295,6 +295,8 @@ void InstallErrorHandler()
 #endif
 
 	s_shutdownInitiated.store(false);
+	g_SigHupPending.store(false);
+	g_SigExitPending.store(false);
 
 	struct sigaction sa;
 	memset(&sa, 0, sizeof(sa));

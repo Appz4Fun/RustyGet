@@ -966,6 +966,10 @@ bool DiskState::LoadDupeTrailer(const std::function<NzbInfo*(int)>& find, StateD
 			int directUnpackStatus = 0;
 			if (sscanf(buf, "DirectUnpackStatus=%i", &directUnpackStatus) == 1 || sscanf(buf, "%i", &directUnpackStatus) == 1)
 			{
+				if (directUnpackStatus == static_cast<int>(NzbInfo::nsRunning))
+				{
+					directUnpackStatus = static_cast<int>(NzbInfo::nsNone);
+				}
 				target->SetDirectUnpackStatus(static_cast<NzbInfo::EDirectUnpackStatus>(directUnpackStatus));
 			}
 			else goto error;
@@ -1516,6 +1520,10 @@ bool DiskState::LoadNzbInfo(NzbInfo* nzbInfo, Servers* servers, StateDiskFile& i
 		int directUnpackStatus = 0;
 		if (sscanf(buf, "DirectUnpackStatus=%i", &directUnpackStatus) == 1 || sscanf(buf, "%i", &directUnpackStatus) == 1)
 		{
+			if (directUnpackStatus == static_cast<int>(NzbInfo::nsRunning))
+			{
+				directUnpackStatus = static_cast<int>(NzbInfo::nsNone);
+			}
 			nzbInfo->SetDirectUnpackStatus(static_cast<NzbInfo::EDirectUnpackStatus>(directUnpackStatus));
 		}
 		else goto error;
@@ -2026,21 +2034,26 @@ bool DiskState::LoadFileState(FileInfo* fileInfo, Servers* servers, StateDiskFil
 		}
 	}
 
-	// Crash recovery fallback for DirectWrite: if output file exists in DestDir with valid progress
+	// Crash recovery fallback for DirectWrite: if the file's own direct-write output exists on disk with valid progress
 	if (!fileInfo->GetOutputInitialized() && (g_Options->GetDirectWrite() || fileInfo->GetForceDirectWrite()))
 	{
 		const char* destDir = fileInfo->GetNzbInfo() ? fileInfo->GetNzbInfo()->GetDestDir() : nullptr;
 		if (destDir && !Util::EmptyStr(fileInfo->GetFilename()))
 		{
+			BString<1024> outTmpPath("%s%c%i.out.tmp", destDir, PATH_SEPARATOR, fileInfo->GetId());
 			BString<1024> destPath("%s%c%s", destDir, PATH_SEPARATOR, fileInfo->GetFilename());
-			bool fileOnDiskExists = FileSystem::FileExists(destPath) ||
-				(!fileInfo->GetOutputFilename().empty() && FileSystem::FileExists(fileInfo->GetOutputFilename().c_str()));
-			if (fileOnDiskExists && (fileInfo->GetSuccessArticles() > 0 || completed))
+			bool hasOwnOutFile = !fileInfo->GetOutputFilename().empty() &&
+				FileSystem::FileExists(fileInfo->GetOutputFilename().c_str());
+			bool hasOutTmp = FileSystem::FileExists(outTmpPath);
+			bool hasCompletedDest = (completed || fileInfo->GetForceDirectWrite()) &&
+				FileSystem::FileExists(destPath);
+			if ((hasOwnOutFile || hasOutTmp || hasCompletedDest) &&
+				(fileInfo->GetSuccessArticles() > 0 || completed))
 			{
 				fileInfo->SetOutputInitialized(true);
-				if (fileInfo->GetOutputFilename().empty() && FileSystem::FileExists(destPath))
+				if (fileInfo->GetOutputFilename().empty())
 				{
-					fileInfo->SetOutputFilename(destPath);
+					fileInfo->SetOutputFilename(hasOutTmp ? *outTmpPath : *destPath);
 				}
 			}
 		}

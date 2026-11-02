@@ -226,9 +226,11 @@ void DirectUnpack::ExecuteUnrar(const char* archiveName)
 		return;
 	}
 	m_waitingVolume = false;
+	m_execThreadId = std::this_thread::get_id();
 	m_unpacking = true;
 	int exitCode = Execute();
 	m_unpacking = false;
+	m_execThreadId = std::thread::id{};
 	m_waitingVolume = false;
 	SetLogPrefix(nullptr);
 
@@ -468,9 +470,10 @@ void DirectUnpack::Stop(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 		}
 	}
 	Thread::Stop();
+	bool isExecThread = std::this_thread::get_id() == m_execThreadId.load();
 	if (m_unpacking)
 	{
-		if (HasActiveProcess() && Break())
+		if (!isExecThread && !m_cancelled && HasActiveProcess() && Break())
 		{
 			for (int i = 0; i < 50 && m_unpacking && HasActiveProcess(); ++i)
 			{

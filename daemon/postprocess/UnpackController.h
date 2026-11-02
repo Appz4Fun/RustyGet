@@ -95,6 +95,7 @@ private:
 	bool m_unpackDirCreated = false;
 	bool m_passListTried = false;
 	std::atomic<bool> m_unpacking{false};
+	std::atomic<std::thread::id> m_execThreadId{};
 	FileList m_joinedFiles;
 	FileList m_downloadedFiles;
 

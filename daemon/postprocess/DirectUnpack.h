@@ -85,6 +85,7 @@ private:
 	std::atomic<bool> m_cancelled{false};
 	std::atomic<bool> m_waitingVolume{false};
 	std::atomic<bool> m_unpacking{false};
+	std::atomic<std::thread::id> m_execThreadId{};
 	void CreateUnpackDir();
 	void FindArchiveFiles();
 	void ExecuteUnrar(const char* archiveName);

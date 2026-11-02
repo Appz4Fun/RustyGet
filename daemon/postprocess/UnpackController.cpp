@@ -321,9 +321,11 @@ void UnpackController::ExecuteUnrar(const char* password)
 
 	SetProgressLabel("");
 	Guard unpackGuard(GetUnpackMutex());
+	m_execThreadId = std::this_thread::get_id();
 	m_unpacking = true;
 	int exitCode = Execute();
 	m_unpacking = false;
+	m_execThreadId = std::thread::id{};
 	SetLogPrefix(nullptr);
 	SetProgressLabel("");
 
@@ -379,9 +381,11 @@ void UnpackController::ExecuteSevenZip(const char* password, bool multiVolumes)
 	SetLogPrefix("7-Zip");
 	SetProgressLabel("");
 	Guard unpackGuard(GetUnpackMutex());
+	m_execThreadId = std::this_thread::get_id();
 	m_unpacking = true;
 	int exitCode = Execute();
 	m_unpacking = false;
+	m_execThreadId = std::thread::id{};
 	SetLogPrefix(nullptr);
 	SetProgressLabel("");
 
@@ -1043,7 +1047,8 @@ void UnpackController::Stop()
 {
 	debug("Stopping unpack");
 	Thread::Stop();
-	if (m_unpacking && HasActiveProcess())
+	bool isExecThread = std::this_thread::get_id() == m_execThreadId.load();
+	if (!isExecThread && !m_autoTerminated && m_unpacking && HasActiveProcess())
 	{
 		if (Break())
 		{

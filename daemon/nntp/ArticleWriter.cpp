@@ -94,14 +94,24 @@ bool ArticleWriter::Start(Decoder::EFormat format, const char* filename, int64 f
 			{
 				Guard guard = m_fileInfo->GuardOutputFile();
 				outputInitialized = m_fileInfo->GetOutputInitialized();
-				if (!g_Options->GetDirectWrite())
+				if (!g_Options->GetDirectWrite() && !m_fileInfo->GetForceDirectWrite())
 				{
 					m_fileInfo->SetOutputInitialized(true);
 				}
 			}
 
-			if (!outputInitialized && filename &&
-				FileSystem::FileExists(BString<1024>("%s%c%s", m_fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, filename)))
+			BString<1024> destFilePath("%s%c%s", m_fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, filename);
+			bool isOwnOutputFile = false;
+			if (g_Options->GetDirectWrite() || m_fileInfo->GetForceDirectWrite())
+			{
+				Guard guard = m_fileInfo->GuardOutputFile();
+				isOwnOutputFile = m_fileInfo->GetForceDirectWrite() ||
+					(!m_fileInfo->GetOutputFilename().empty() &&
+					 FileSystem::SameFilename(m_fileInfo->GetOutputFilename().c_str(), destFilePath));
+			}
+
+			if (!outputInitialized && !isOwnOutputFile && filename &&
+				FileSystem::FileExists(destFilePath))
 			{
 				m_duplicate = true;
 				return false;
@@ -111,7 +121,8 @@ bool ArticleWriter::Start(Decoder::EFormat format, const char* filename, int64 f
 		if (g_Options->GetDirectWrite() && !IsDupeFallbackArticle())
 		{
 			Guard guard = m_fileInfo->GuardOutputFile();
-			if (!m_fileInfo->GetOutputInitialized())
+			if (!m_fileInfo->GetOutputInitialized() ||
+				(!GetSkipDiskWrite() && !FileSystem::FileExists(m_outputFilename.c_str())))
 			{
 				if (!GetSkipDiskWrite() && !CreateOutputFile(fileSize))
 				{
@@ -123,16 +134,25 @@ bool ArticleWriter::Start(Decoder::EFormat format, const char* filename, int64 f
 	}
 
 	// allocate cache buffer; yEnc only: a cached article is written at its offset,
+	bool isCritical = g_MemoryMonitor &&
+		g_MemoryMonitor->GetTier() == NZBGET_RS_PRESSURE_CRITICAL;
+
+	// allocate cache buffer; yEnc only: a cached article is written at its offset,
 	// and only yEnc tells it (uuencoded parts all have 0 and overwrote each other,
 	// uncached they're appended in order)
 	if (g_Options->GetArticleCache() > 0 && !g_Options->GetRawArticle() &&
 		m_format == Decoder::efYenc &&
-		!IsDupeFallbackArticle())
+		!IsDupeFallbackArticle() &&
+		!isCritical)
 	{
 		m_articleData = g_ArticleCache->Alloc(m_articleSize);
 
 		while (!m_articleData.GetData() && g_ArticleCache->GetFlushing())
 		{
+			if (g_MemoryMonitor && g_MemoryMonitor->GetTier() == NZBGET_RS_PRESSURE_CRITICAL)
+			{
+				break;
+			}
 			Util::Sleep(5);
 			m_articleData = g_ArticleCache->Alloc(m_articleSize);
 		}
@@ -344,16 +364,25 @@ void ArticleWriter::BuildOutputFilename()
 		}
 		else
 		{
-			ss.str("");
-			ss.clear();
+			BString<1024> destPath("%s%c%s", destDir, PATH_SEPARATOR, m_fileInfo->GetFilename());
+			if (m_fileInfo->GetForceDirectWrite() && m_fileInfo->GetOutputInitialized() && FileSystem::FileExists(destPath))
+			{
+				filename = destPath.Str();
+				m_fileInfo->SetOutputFilename(filename);
+			}
+			else
+			{
+				ss.str("");
+				ss.clear();
 
-			ss << destDir;
-			ss << PATH_SEPARATOR;
-			ss << m_fileInfo->GetId();
-			ss << ".out.tmp";
+				ss << destDir;
+				ss << PATH_SEPARATOR;
+				ss << m_fileInfo->GetId();
+				ss << ".out.tmp";
 
-			filename = ss.str();
-			m_fileInfo->SetOutputFilename(filename);
+				filename = ss.str();
+				m_fileInfo->SetOutputFilename(filename);
+			}
 		}
 
 		m_outputFilename = std::move(filename);
@@ -367,9 +396,6 @@ bool ArticleWriter::CompleteFileParts()
 	debug("ArticleFilename: %s", m_fileInfo->GetFilename());
 
 	// 1. Gather context & configuration
-	bool directWrite = (g_Options->GetDirectWrite() || m_fileInfo->GetForceDirectWrite()) && m_fileInfo->GetOutputInitialized();
-	bool cached = m_fileInfo->GetCachedArticles() > 0;
-
 	std::string nzbDestDir;
 	std::string nzbName;
 	std::string filename;
@@ -380,6 +406,22 @@ bool ArticleWriter::CompleteFileParts()
 		nzbDestDir = m_fileInfo->GetNzbInfo()->GetDestDir();
 		filename = m_fileInfo->GetFilename();
 	}
+
+	if (m_outputFilename.empty() && !m_fileInfo->GetOutputFilename().empty())
+	{
+		m_outputFilename = m_fileInfo->GetOutputFilename();
+	}
+	if ((g_Options->GetDirectWrite() || m_fileInfo->GetForceDirectWrite()) && !m_fileInfo->GetOutputInitialized())
+	{
+		BString<1024> destPath("%s%c%s", nzbDestDir.c_str(), PATH_SEPARATOR, filename.c_str());
+		if ((!m_outputFilename.empty() && FileSystem::FileExists(m_outputFilename.c_str())) ||
+			(m_fileInfo->GetForceDirectWrite() && FileSystem::FileExists(destPath)))
+		{
+			m_fileInfo->SetOutputInitialized(true);
+		}
+	}
+	bool directWrite = (g_Options->GetDirectWrite() || m_fileInfo->GetForceDirectWrite()) && m_fileInfo->GetOutputInitialized();
+	bool cached = m_fileInfo->GetCachedArticles() > 0;
 
 	std::string fullInfoPath = nzbName + PATH_SEPARATOR + filename;
 	LogStartMessage(fullInfoPath, directWrite, cached);
@@ -486,10 +528,16 @@ ArticleWriter::SetupOutputFile(DiskFile &outfile,
 							bool cached)
 {
 	OutputPaths paths;
-	if (m_fileInfo->GetForceDirectWrite())
-		paths.finalPath = std::string(destDir) + PATH_SEPARATOR + std::string(filename);
+	std::string targetPath = std::string(destDir) + PATH_SEPARATOR + std::string(filename);
+	if (m_fileInfo->GetForceDirectWrite() ||
+		(directWrite && !m_outputFilename.empty() && FileSystem::SameFilename(m_outputFilename.c_str(), targetPath.c_str())))
+	{
+		paths.finalPath = targetPath;
+	}
 	else
+	{
 		paths.finalPath = FileSystem::MakeUniqueFilename(destDir.data(), filename.data()).Str();
+	}
 
 	paths.tempPath = paths.finalPath + ".tmp";
 
@@ -520,11 +568,18 @@ ArticleWriter::SetupOutputFile(DiskFile &outfile,
 	// Scenario B: Direct Write (Append/Modify existing)
 	else if (directWrite)
 	{
-		if (!outfile.Open(m_outputFilename.c_str(), DiskFile::omReadWrite))
+		const char* openPath = m_outputFilename.c_str();
+		if (!FileSystem::FileExists(openPath) && FileSystem::FileExists(paths.finalPath.c_str()))
+		{
+			openPath = paths.finalPath.c_str();
+			m_outputFilename = paths.finalPath;
+		}
+
+		if (!outfile.Open(openPath, DiskFile::omReadWrite))
 		{
 			m_fileInfo->GetNzbInfo()->PrintMessage(
 				Message::mkError, "Could not open file %s: %s",
-				m_outputFilename.c_str(), *FileSystem::GetLastErrorMessage());
+				openPath, *FileSystem::GetLastErrorMessage());
 			return std::nullopt;
 		}
 		paths.tempPath = m_outputFilename;
@@ -1114,8 +1169,11 @@ CachedSegmentData ArticleCache::Alloc(int size)
 	std::lock_guard<std::mutex> guard(m_allocMutex);
 
 	void* p = nullptr;
+	size_t effectiveLimit = g_MemoryMonitor ?
+		g_MemoryMonitor->GetEffectiveArticleCacheBytes() :
+		(size_t)g_Options->GetArticleCache() * 1024 * 1024;
 
-	if (m_allocated + size <= (size_t)g_Options->GetArticleCache() * 1024 * 1024)
+	if (effectiveLimit > 0 && (m_allocated + size <= effectiveLimit))
 	{
 		p = malloc(size);
 		if (p)
@@ -1169,19 +1227,38 @@ void ArticleCache::Free(CachedSegmentData* segment)
 
 void ArticleCache::Run()
 {
-	// automatically flush the cache if it is filled to 90% (only in DirectWrite mode)
-	size_t fillThreshold = (size_t)g_Options->GetArticleCache() * 1024 * 1024 / 100 * 90;
-
 	int resetCounter = 0;
 	bool justFlushed = false;
 	while (!IsStopped() || m_allocated > 0)
 	{
-		if ((justFlushed || resetCounter >= 1000 || IsStopped() ||
+		size_t effectiveLimit = g_MemoryMonitor ?
+			g_MemoryMonitor->GetEffectiveArticleCacheBytes() :
+			(size_t)g_Options->GetArticleCache() * 1024 * 1024;
+
+		bool isCritical = g_MemoryMonitor &&
+			g_MemoryMonitor->GetTier() == NZBGET_RS_PRESSURE_CRITICAL;
+		bool isConstrained = g_MemoryMonitor &&
+			g_MemoryMonitor->GetTier() == NZBGET_RS_PRESSURE_CONSTRAINED;
+
+		size_t fillThreshold = (effectiveLimit > 0) ? (effectiveLimit / 100 * 90) : 0;
+		bool needEmergencyFlush = isCritical && (m_allocated > 0);
+		bool needConstrainedFlush = isConstrained && (m_allocated > effectiveLimit);
+
+		if ((justFlushed || resetCounter >= 1000 || IsStopped() || needEmergencyFlush || needConstrainedFlush ||
 			(g_Options->GetDirectWrite() && m_allocated >= fillThreshold)) &&
 			m_allocated > 0)
 		{
-			justFlushed = CheckFlush(IsStopped() || m_allocated >= fillThreshold);
+			justFlushed = CheckFlush(IsStopped() || needEmergencyFlush || (m_allocated >= fillThreshold));
 			resetCounter = 0;
+
+			if (needEmergencyFlush && m_allocated == 0)
+			{
+				MemoryMonitor::TrimHeap();
+			}
+			else if (!justFlushed && !IsStopped())
+			{
+				Util::Sleep(5);
+			}
 		}
 		else if (!m_allocated)
 		{
@@ -1260,5 +1337,211 @@ ArticleCache::FlushGuard::~FlushGuard()
 	if (m_guard)
 	{
 		g_ArticleCache->m_flushing = false;
+	}
+}
+
+MemoryMonitor* g_MemoryMonitor = nullptr;
+
+MemoryMonitor::MemoryMonitor()
+{
+	InitOptions();
+}
+
+void MemoryMonitor::InitOptions()
+{
+	if (g_Options && g_Options->GetMemoryPressurePath() && strlen(g_Options->GetMemoryPressurePath()) > 0)
+	{
+		nzbget_rs_memory_pressure_set_mock_root(g_Options->GetMemoryPressurePath());
+	}
+	else if (g_Options)
+	{
+		nzbget_rs_memory_pressure_set_mock_root(nullptr);
+	}
+	UpdateState();
+}
+
+MemoryMonitor::~MemoryMonitor()
+{
+	if (IsRunning())
+	{
+		Stop();
+	}
+	while (IsRunning())
+	{
+		Util::Sleep(10);
+	}
+}
+
+void MemoryMonitor::Run()
+{
+	debug("MemoryMonitor thread started");
+
+	while (!IsStopped())
+	{
+		UpdateState();
+
+		int interval = g_Options ? g_Options->GetMemoryPressureInterval() : 500;
+		if (interval < 50)
+		{
+			interval = 50;
+		}
+
+		int slept = 0;
+		while (!IsStopped() && slept < interval)
+		{
+			Util::Sleep(50);
+			slept += 50;
+		}
+	}
+
+	debug("MemoryMonitor thread stopped");
+}
+
+void MemoryMonitor::Stop()
+{
+	Thread::Stop();
+}
+
+const char* MemoryMonitor::GetTierName() const
+{
+	switch (GetTier())
+	{
+		case NZBGET_RS_PRESSURE_CRITICAL: return "CRITICAL";
+		case NZBGET_RS_PRESSURE_CONSTRAINED: return "CONSTRAINED";
+		case NZBGET_RS_PRESSURE_NORMAL:
+		default: return "NORMAL";
+	}
+}
+
+size_t MemoryMonitor::GetEffectiveArticleCacheBytes() const
+{
+	return (size_t)m_effectiveCacheMB.load(std::memory_order_acquire) * 1024 * 1024;
+}
+
+int MemoryMonitor::GetEffectiveArticleCacheMB() const
+{
+	return (int)m_effectiveCacheMB.load(std::memory_order_acquire);
+}
+
+int MemoryMonitor::GetEffectiveParBufferMB(int configuredMB) const
+{
+	int tier = m_tier.load(std::memory_order_acquire);
+	if (tier == NZBGET_RS_PRESSURE_CRITICAL)
+	{
+		return configuredMB == 0 ? 0 : std::max(8, std::min(configuredMB, 16));
+	}
+	else if (tier == NZBGET_RS_PRESSURE_NORMAL)
+	{
+		return configuredMB;
+	}
+	return (int)nzbget_rs_memory_pressure_effective_par_buffer((uint32_t)configuredMB);
+}
+
+int MemoryMonitor::GetEffectiveDownloadsLimit(int configuredLimit) const
+{
+	int tier = m_tier.load(std::memory_order_acquire);
+	if (tier == NZBGET_RS_PRESSURE_CRITICAL)
+	{
+		return std::max(1, configuredLimit / 4);
+	}
+	else if (tier == NZBGET_RS_PRESSURE_CONSTRAINED)
+	{
+		return std::max(2, configuredLimit / 2);
+	}
+	return configuredLimit;
+}
+
+void MemoryMonitor::TrimHeap()
+{
+	nzbget_rs_memory_pressure_trim_heap();
+}
+
+void MemoryMonitor::UpdateState()
+{
+	int rawSample = nzbget_rs_memory_pressure_sample();
+	int currentTier = m_tier.load(std::memory_order_relaxed);
+	int nextTier = currentTier;
+	bool transitioned = false;
+
+	if (rawSample > currentTier)
+	{
+		// Immediate escalation on higher pressure (1 sample)
+		nextTier = rawSample;
+		m_candidateTier = rawSample;
+		m_consecutiveSamples = 0;
+		transitioned = true;
+	}
+	else if (rawSample < currentTier)
+	{
+		// 2-sample hysteresis on de-escalation
+		if (rawSample == m_candidateTier)
+		{
+			m_consecutiveSamples++;
+			if (m_consecutiveSamples >= 2)
+			{
+				nextTier = rawSample;
+				m_consecutiveSamples = 0;
+				transitioned = true;
+			}
+		}
+		else
+		{
+			m_candidateTier = rawSample;
+			m_consecutiveSamples = 1;
+		}
+	}
+	else
+	{
+		m_candidateTier = rawSample;
+		m_consecutiveSamples = 0;
+	}
+
+	uint32_t cfgCache = g_Options ? (uint32_t)g_Options->GetArticleCache() : 0;
+	uint32_t effCache = (nextTier == NZBGET_RS_PRESSURE_CRITICAL) ? 0 :
+		(nextTier == NZBGET_RS_PRESSURE_NORMAL) ? cfgCache :
+		(rawSample == nextTier ? nzbget_rs_memory_pressure_effective_cache(cfgCache) : (cfgCache / 2));
+	m_effectiveCacheMB.store(effCache, std::memory_order_release);
+
+	uint32_t cfgPar = g_Options ? (uint32_t)g_Options->GetParBuffer() : 0;
+	uint32_t effPar = (nextTier == NZBGET_RS_PRESSURE_CRITICAL) ? (cfgPar == 0 ? 0 : std::max(8u, std::min(cfgPar, 16u))) :
+		(nextTier == NZBGET_RS_PRESSURE_NORMAL) ? cfgPar :
+		(rawSample == nextTier ? nzbget_rs_memory_pressure_effective_par_buffer(cfgPar) : std::max(16u, cfgPar / 2));
+	m_effectiveParBufferMB.store(effPar, std::memory_order_release);
+
+	uint32_t cfgLimit = 20;
+	uint32_t effLimit = (nextTier == NZBGET_RS_PRESSURE_CRITICAL) ? std::max(1u, cfgLimit / 4) :
+		(nextTier == NZBGET_RS_PRESSURE_CONSTRAINED) ? std::max(2u, cfgLimit / 2) : cfgLimit;
+	m_effectiveDownloadsLimit.store(effLimit, std::memory_order_release);
+
+	if (transitioned)
+	{
+		m_tier.store(nextTier, std::memory_order_release);
+		ApplyTierTransition((NzbgetRsPressureTier)currentTier, (NzbgetRsPressureTier)nextTier);
+	}
+}
+
+void MemoryMonitor::ApplyTierTransition(NzbgetRsPressureTier oldTier, NzbgetRsPressureTier newTier)
+{
+	if (newTier == NZBGET_RS_PRESSURE_CRITICAL)
+	{
+		warn("System memory pressure CRITICAL (>=90%%): shedding article cache and throttling downloads");
+		if (g_ArticleCache)
+		{
+			g_ArticleCache->WakeupFlush();
+		}
+		TrimHeap();
+	}
+	else if (newTier == NZBGET_RS_PRESSURE_CONSTRAINED)
+	{
+		detail("System memory pressure CONSTRAINED: shrinking article cache ceiling");
+		if (g_ArticleCache)
+		{
+			g_ArticleCache->WakeupFlush();
+		}
+	}
+	else if (newTier == NZBGET_RS_PRESSURE_NORMAL && oldTier != NZBGET_RS_PRESSURE_NORMAL)
+	{
+		detail("System memory pressure returned to NORMAL: restoring cache and download capacity");
+		TrimHeap();
 	}
 }

@@ -34,6 +34,8 @@ public:
 	void Stop() override;
 	bool HasMoreJobs() { return m_queuedJobs > 0; }
 	int GetJobCount() { return m_queuedJobs; }
+	bool HasActiveUnpack(bool includeWaitingVolume = true);
+	bool HasActiveUnpack(DownloadQueue* downloadQueue, bool includeWaitingVolume = true);
 	bool EditList(DownloadQueue* downloadQueue, IdList* idList, DownloadQueue::EEditAction action,
 		const char* args);
 	void NzbAdded(DownloadQueue* downloadQueue, NzbInfo* nzbInfo);
@@ -48,6 +50,7 @@ protected:
 private:
 	int m_queuedJobs = 0;
 	RawNzbList m_activeJobs;
+	std::recursive_mutex m_activeJobsMutex;
 	std::mutex m_waitMutex;
 	std::condition_variable m_waitCond;
 

@@ -39,6 +39,7 @@ const int DISKSTATE_FILE_VERSION = 7;
 const int DISKSTATE_FILE_LEGACY_VERSION = 9;
 // the line that starts this build's data after upstream's in a queue, history or progress file
 const char* DUPESTATE_TRAILER = "#dupestate 1";
+const char* UNPACKSTATE_TRAILER = "#unpackstate 1";
 // the line that carries a file state's decoded file size after upstream's data
 const char* DECODED_TRAILER = "#decoded ";
 const int DISKSTATE_STATS_VERSION = 4;
@@ -395,7 +396,7 @@ bool DiskState::LoadDownloadQueue(DownloadQueue* downloadQueue, Servers* servers
 			}
 
 			formatVersion = stateFile.GetFileVersion();
-			m_legacyQueueRead |= formatVersion > DISKSTATE_QUEUE_VERSION;
+			m_legacyQueueRead |= formatVersion != DISKSTATE_QUEUE_VERSION;
 
 			if (formatVersion <= 0)
 			{
@@ -434,7 +435,7 @@ bool DiskState::LoadDownloadQueue(DownloadQueue* downloadQueue, Servers* servers
 				{ queueFilesFailed = true; goto error; }
 			}
 
-			m_legacyQueueRead |= stateFile.GetFileVersion() > DISKSTATE_QUEUE_VERSION;
+			m_legacyQueueRead |= stateFile.GetFileVersion() != DISKSTATE_QUEUE_VERSION;
 			if (!LoadProgress(downloadQueue->GetQueue(), servers, *infile, stateFile.GetFileVersion())) { queueFilesFailed = true; goto error; }
 		}
 	}
@@ -456,7 +457,7 @@ bool DiskState::LoadDownloadQueue(DownloadQueue* downloadQueue, Servers* servers
 				{ queueFilesFailed = true; goto error; }
 			}
 
-			m_legacyQueueRead |= stateFile.GetFileVersion() > DISKSTATE_QUEUE_VERSION;
+			m_legacyQueueRead |= stateFile.GetFileVersion() != DISKSTATE_QUEUE_VERSION;
 			if (!LoadHistory(downloadQueue->GetHistory(), servers, *infile, stateFile.GetFileVersion())) { queueFilesFailed = true; goto error; }
 		}
 	}
@@ -906,6 +907,31 @@ void DiskState::SaveDupeTrailer(const std::vector<NzbInfo*>& nzbs, StateDiskFile
 		outfile.PrintLine("%i", nzbInfo->GetId());
 		SaveDupeExtras(nzbInfo, outfile);
 	}
+
+	outfile.PrintLine("%s", UNPACKSTATE_TRAILER);
+	outfile.PrintLine("%i", (int)nzbs.size());
+	for (NzbInfo* nzbInfo : nzbs)
+	{
+		outfile.PrintLine("%i", nzbInfo->GetId());
+		outfile.PrintLine("DirectUnpackStatus=%i", static_cast<int>(nzbInfo->GetDirectUnpackStatus()));
+		int unpackTriedFlags = (nzbInfo->GetUnpackTried() ? 1 : 0) | (nzbInfo->GetParRepaired() ? 2 : 0);
+		outfile.PrintLine("UnpackTried=%i", unpackTriedFlags);
+		outfile.PrintLine("LastUnpackStatus=%i", nzbInfo->GetLastUnpackStatus());
+		std::string extractedArchives;
+		std::vector<CString>* archives = nzbInfo->GetExtractedArchives();
+		if (archives && !archives->empty())
+		{
+			for (size_t i = 0; i < archives->size(); i++)
+			{
+				if (i > 0)
+				{
+					extractedArchives.push_back(',');
+				}
+				extractedArchives.append((*archives)[i]);
+			}
+		}
+		outfile.PrintLine("ExtractedArchives=%s", extractedArchives.c_str());
+	}
 }
 
 bool DiskState::LoadDupeTrailer(const std::function<NzbInfo*(int)>& find, StateDiskFile& infile)
@@ -924,6 +950,68 @@ bool DiskState::LoadDupeTrailer(const std::function<NzbInfo*(int)>& find, StateD
 		NzbInfo* nzbInfo = find(id);
 		NzbInfo unknown;	// an nzb no longer listed: its extras are read and dropped
 		if (!LoadDupeExtras(nzbInfo ? nzbInfo : &unknown, infile, DISKSTATE_QUEUE_LEGACY_VERSION)) goto error;
+	}
+	if (infile.ReadLine(buf, sizeof(buf)) && !strcmp(buf, UNPACKSTATE_TRAILER))
+	{
+		int unpackCount = 0;
+		if (infile.ScanLine("%i", &unpackCount) != 1 || unpackCount < 0) goto error;
+		for (int i = 0; i < unpackCount; i++)
+		{
+			int id = 0;
+			if (infile.ScanLine("%i", &id) != 1) goto error;
+			NzbInfo* nzbInfo = find(id);
+			NzbInfo unknown;
+			NzbInfo* target = nzbInfo ? nzbInfo : &unknown;
+
+			if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+			int directUnpackStatus = 0;
+			if (sscanf(buf, "DirectUnpackStatus=%i", &directUnpackStatus) == 1 || sscanf(buf, "%i", &directUnpackStatus) == 1)
+			{
+				if (directUnpackStatus == static_cast<int>(NzbInfo::nsRunning))
+				{
+					directUnpackStatus = static_cast<int>(NzbInfo::nsNone);
+				}
+				target->SetDirectUnpackStatus(static_cast<NzbInfo::EDirectUnpackStatus>(directUnpackStatus));
+			}
+			else goto error;
+
+			if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+			int unpackTried = 0;
+			if (sscanf(buf, "UnpackTried=%i", &unpackTried) == 1 || sscanf(buf, "%i", &unpackTried) == 1)
+			{
+				target->SetUnpackTried((unpackTried & 1) != 0);
+				target->SetParRepaired((unpackTried & 2) != 0);
+			}
+			else goto error;
+
+			if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+			int lastUnpackStatus = 0;
+			if (sscanf(buf, "LastUnpackStatus=%i", &lastUnpackStatus) == 1 || sscanf(buf, "%i", &lastUnpackStatus) == 1)
+			{
+				target->SetLastUnpackStatus(lastUnpackStatus);
+			}
+			else goto error;
+
+			std::vector<char> largeBuf(65536);
+			if (!infile.ReadLine(largeBuf.data(), largeBuf.size())) goto error;
+			char* archivesStr = largeBuf.data();
+			if (strncmp(archivesStr, "ExtractedArchives=", 18) == 0)
+			{
+				archivesStr += 18;
+			}
+			std::vector<CString>* archives = target->GetExtractedArchives();
+			if (archives)
+			{
+				archives->clear();
+				for (char* token = strtok(archivesStr, ","); token; token = strtok(nullptr, ","))
+				{
+					if (*token)
+					{
+						archives->emplace_back(token);
+					}
+				}
+			}
+		}
 	}
 	return true;
 
@@ -1033,7 +1121,6 @@ void DiskState::SaveNzbInfo(NzbInfo* nzbInfo, StateDiskFile& outfile)
 				(int)fileInfo->GetExtraPriority());
 		}
 	}
-
 }
 
 bool DiskState::LoadNzbInfo(NzbInfo* nzbInfo, Servers* servers, StateDiskFile& infile, int formatVersion)
@@ -1426,7 +1513,60 @@ bool DiskState::LoadNzbInfo(NzbInfo* nzbInfo, Servers* servers, StateDiskFile& i
 	nzbInfo->GetStreamRepairJobs()->clear();
 	// earlier builds of this branch wrote it inline (formats 65 and 66); the trailer
 	// of the queue file carries it since
-	if (formatVersion >= 65 && !LoadDupeExtras(nzbInfo, infile, formatVersion)) goto error;
+	if ((formatVersion == 65 || formatVersion == 66) && !LoadDupeExtras(nzbInfo, infile, formatVersion)) goto error;
+
+	// restore unpack state (R3)
+	if (formatVersion >= 67)
+	{
+		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+		int directUnpackStatus = 0;
+		if (sscanf(buf, "DirectUnpackStatus=%i", &directUnpackStatus) == 1 || sscanf(buf, "%i", &directUnpackStatus) == 1)
+		{
+			if (directUnpackStatus == static_cast<int>(NzbInfo::nsRunning))
+			{
+				directUnpackStatus = static_cast<int>(NzbInfo::nsNone);
+			}
+			nzbInfo->SetDirectUnpackStatus(static_cast<NzbInfo::EDirectUnpackStatus>(directUnpackStatus));
+		}
+		else goto error;
+
+		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+		int unpackTried = 0;
+		if (sscanf(buf, "UnpackTried=%i", &unpackTried) == 1 || sscanf(buf, "%i", &unpackTried) == 1)
+		{
+			nzbInfo->SetUnpackTried((unpackTried & 1) != 0);
+			nzbInfo->SetParRepaired((unpackTried & 2) != 0);
+		}
+		else goto error;
+
+		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
+		int lastUnpackStatus = 0;
+		if (sscanf(buf, "LastUnpackStatus=%i", &lastUnpackStatus) == 1 || sscanf(buf, "%i", &lastUnpackStatus) == 1)
+		{
+			nzbInfo->SetLastUnpackStatus(lastUnpackStatus);
+		}
+		else goto error;
+
+		std::vector<char> largeBuf(65536);
+		if (!infile.ReadLine(largeBuf.data(), largeBuf.size())) goto error;
+		char* archivesStr = largeBuf.data();
+		if (strncmp(archivesStr, "ExtractedArchives=", 18) == 0)
+		{
+			archivesStr += 18;
+		}
+		std::vector<CString>* archives = nzbInfo->GetExtractedArchives();
+		if (archives)
+		{
+			archives->clear();
+			for (char* token = strtok(archivesStr, ","); token; token = strtok(nullptr, ","))
+			{
+				if (*token)
+				{
+					archives->emplace_back(token);
+				}
+			}
+		}
+	}
 
 	return true;
 
@@ -1497,7 +1637,7 @@ bool DiskState::SaveFileInfo(FileInfo* fileInfo, StateDiskFile& outfile, bool ar
 	outfile.PrintLine("%s", fileInfo->GetOrigname() ? fileInfo->GetOrigname() : "");
 	outfile.PrintLine("%s", fileInfo->GetOutputFilename().c_str());
 
-	outfile.PrintLine("%i,%i", (int)fileInfo->GetFilenameConfirmed(), (int)fileInfo->GetTime());
+	outfile.PrintLine("%i,%i,%i", (int)fileInfo->GetFilenameConfirmed(), (int)fileInfo->GetTime(), (int)fileInfo->GetOutputInitialized());
 
 	uint32 High, Low;
 	Util::SplitInt64(fileInfo->GetSize(), &High, &Low);
@@ -1579,10 +1719,29 @@ bool DiskState::LoadFileInfo(FileInfo* fileInfo, StateDiskFile& infile, int form
 
 	if (formatVersion >= 5)
 	{
-		int time, filenameConfirmed;
-		if (infile.ScanLine("%i,%i", &filenameConfirmed, &time) != 2) goto error;
+		int time = 0, filenameConfirmed = 0, outputInitialized = 0;
+		int cnt = infile.ScanLine("%i,%i,%i", &filenameConfirmed, &time, &outputInitialized);
+		if (cnt < 2) goto error;
 		if (fileSummary) fileInfo->SetFilenameConfirmed(static_cast<bool>(filenameConfirmed));
 		if (fileSummary) fileInfo->SetTime(static_cast<time_t>(time));
+		if (fileSummary && cnt >= 3)
+		{
+			bool restoredOutputInit = outputInitialized != 0;
+			if (restoredOutputInit && g_Options &&
+				(g_Options->GetDirectWrite() || fileInfo->GetForceDirectWrite()))
+			{
+				const char* destDir = fileInfo->GetNzbInfo() ? fileInfo->GetNzbInfo()->GetDestDir() : nullptr;
+				bool hasOwnOutFile = !fileInfo->GetOutputFilename().empty() &&
+					FileSystem::FileExists(fileInfo->GetOutputFilename().c_str());
+				bool hasOutTmp = destDir && !Util::EmptyStr(destDir) &&
+					FileSystem::FileExists(BString<1024>("%s%c%i.out.tmp", destDir, PATH_SEPARATOR, fileInfo->GetId()));
+				bool hasForceDest = fileInfo->GetForceDirectWrite() && destDir &&
+					!Util::EmptyStr(destDir) && !Util::EmptyStr(fileInfo->GetFilename()) &&
+					FileSystem::FileExists(BString<1024>("%s%c%s", destDir, PATH_SEPARATOR, fileInfo->GetFilename()));
+				restoredOutputInit = hasOwnOutFile || hasOutTmp || hasForceDest;
+			}
+			fileInfo->SetOutputInitialized(restoredOutputInit);
+		}
 	}
 	else if (formatVersion >= 4)
 	{
@@ -1698,6 +1857,7 @@ bool DiskState::SaveFileState(FileInfo* fileInfo, StateDiskFile& outfile, bool c
 	uint32 decodedHigh, decodedLow;
 	Util::SplitInt64(fileInfo->GetDecodedFileSize(), &decodedHigh, &decodedLow);
 	outfile.PrintLine("%s%u,%u", DECODED_TRAILER, decodedHigh, decodedLow);
+	outfile.PrintLine("OutputInitialized=%i", (int)fileInfo->GetOutputInitialized());
 
 	outfile.Close();
 	return true;
@@ -1876,14 +2036,53 @@ bool DiskState::LoadFileState(FileInfo* fileInfo, Servers* servers, StateDiskFil
 
 	if (formatVersion < 8)
 	{
-		// the decoded file size after upstream's data, where this build wrote it
+		// data after upstream's data, where this build wrote it
 		char trailer[1024];
-		uint32 decodedHigh, decodedLow;
-		if (infile.ReadLine(trailer, sizeof(trailer)) &&
-			!strncmp(trailer, DECODED_TRAILER, strlen(DECODED_TRAILER)) &&
-			sscanf(trailer + strlen(DECODED_TRAILER), "%u,%u", &decodedHigh, &decodedLow) == 2)
+		while (infile.ReadLine(trailer, sizeof(trailer)))
 		{
-			fileInfo->SetDecodedFileSize(Util::JoinInt64(decodedHigh, decodedLow));
+			uint32 decodedHigh, decodedLow;
+			int outputInit = 0;
+			if (!strncmp(trailer, DECODED_TRAILER, strlen(DECODED_TRAILER)) &&
+				sscanf(trailer + strlen(DECODED_TRAILER), "%u,%u", &decodedHigh, &decodedLow) == 2)
+			{
+				fileInfo->SetDecodedFileSize(Util::JoinInt64(decodedHigh, decodedLow));
+			}
+			else if (sscanf(trailer, "OutputInitialized=%i", &outputInit) == 1)
+			{
+				fileInfo->SetOutputInitialized(outputInit != 0);
+			}
+		}
+	}
+
+	// Validate or recover DirectWrite OutputInitialized against the actual on-disk direct-write output file
+	if (g_Options && (g_Options->GetDirectWrite() || fileInfo->GetForceDirectWrite()))
+	{
+		const char* destDir = fileInfo->GetNzbInfo() ? fileInfo->GetNzbInfo()->GetDestDir() : nullptr;
+		bool hasOwnOutFile = !fileInfo->GetOutputFilename().empty() &&
+			FileSystem::FileExists(fileInfo->GetOutputFilename().c_str());
+		bool hasOutTmp = destDir && !Util::EmptyStr(destDir) &&
+			FileSystem::FileExists(BString<1024>("%s%c%i.out.tmp", destDir, PATH_SEPARATOR, fileInfo->GetId()));
+		bool hasCompletedDest = (completed || fileInfo->GetForceDirectWrite()) && destDir &&
+			!Util::EmptyStr(destDir) && !Util::EmptyStr(fileInfo->GetFilename()) &&
+			FileSystem::FileExists(BString<1024>("%s%c%s", destDir, PATH_SEPARATOR, fileInfo->GetFilename()));
+		bool hasDirectWriteOutput = hasOwnOutFile || hasOutTmp || hasCompletedDest;
+
+		if (fileInfo->GetOutputInitialized() && !hasDirectWriteOutput)
+		{
+			fileInfo->SetOutputInitialized(false);
+		}
+		else if (!fileInfo->GetOutputInitialized() && hasDirectWriteOutput &&
+			(fileInfo->GetSuccessArticles() > 0 || completed))
+		{
+			fileInfo->SetOutputInitialized(true);
+		}
+
+		if (fileInfo->GetOutputInitialized() && fileInfo->GetOutputFilename().empty() &&
+			(hasOutTmp || hasCompletedDest))
+		{
+			fileInfo->SetOutputFilename(hasOutTmp ?
+				*BString<1024>("%s%c%i.out.tmp", destDir, PATH_SEPARATOR, fileInfo->GetId()) :
+				*BString<1024>("%s%c%s", destDir, PATH_SEPARATOR, fileInfo->GetFilename()));
 		}
 	}
 

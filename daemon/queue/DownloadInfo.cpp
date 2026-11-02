@@ -542,6 +542,9 @@ void NzbInfo::EnterPostProcess()
 void NzbInfo::LeavePostProcess()
 {
 	m_postInfo.reset();
+	m_unpackTried = false;
+	m_lastUnpackStatus = 0;
+	m_extractedArchives.clear();
 	ClearMessages();
 }
 

@@ -333,12 +333,13 @@ BOOST_AUTO_TEST_CASE(CipherSaveMetadataRejectsMalformedAndNeverLeaksIntoFile)
 		Options* options = g_Options; ScriptConfig* scripts = g_ScriptConfig; fs::path path, dir;
 		~Restore() { g_Options = options; g_ScriptConfig = scripts; std::error_code ignored; fs::remove(path, ignored); fs::remove(dir, ignored); }
 	} restore{g_Options, g_ScriptConfig, path, dir};
-	{ std::ofstream out(path); out << "Server1.Host=example.invalid\nServer1.Cipher=old\n"; }
+	{ std::ofstream out(path); out << "Server1.Host=example.invalid\nServer1.Encryption=yes\nServer1.Cipher=old\n"; }
 	Options options("nzbget", path.string().c_str(), true, nullptr, nullptr); g_Options = &options;
 	ScriptConfig scripts; g_ScriptConfig = &scripts;
 	Options::OptEntries entries; BOOST_REQUIRE(scripts.LoadConfig(&entries));
 	std::string token = ScriptConfig::CipherBaseline(entries);
 	Json::JsonArray values{Json::JsonObject{{"Name", "Server1.Host"}, {"Value", "example.invalid"}},
+		Json::JsonObject{{"Name", "Server1.Encryption"}, {"Value", "yes"}},
 		Json::JsonObject{{"Name", "Server1.Cipher"}, {"Value", "optimized"}},
 		Json::JsonObject{{"Name", "_TlsCipherBaseline"}, {"Value", token}}};
 	Json::JsonObject request{{"method", "saveconfig"}, {"params", Json::JsonArray{values}}, {"id", 1}};
@@ -504,6 +505,104 @@ BOOST_AUTO_TEST_CASE(TlsCipherStatusIsStructuredAndReportsUnavailableBackend)
 	BOOST_CHECK(reply.find("unavailable") != std::string::npos);
 #endif
 	BOOST_CHECK(reply.size() <= 1024 * 1024);
+}
+
+BOOST_AUTO_TEST_CASE(SaveConfigRejectsConflictingSettings)
+{
+	namespace fs = std::filesystem;
+	auto dir = fs::temp_directory_path() / ("nzbget-r7-rpc-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+	BOOST_REQUIRE(fs::create_directory(dir));
+	auto path = dir / "nzbget.conf";
+	struct Restore {
+		Options* options = g_Options; ScriptConfig* scripts = g_ScriptConfig; fs::path path, dir;
+		~Restore() { g_Options = options; g_ScriptConfig = scripts; std::error_code ignored; fs::remove(path, ignored); fs::remove(dir, ignored); }
+	} restore{g_Options, g_ScriptConfig, path, dir};
+	{ std::ofstream out(path); out << "MainDir=" << dir.string() << "\n"; }
+	Options options("nzbget", path.string().c_str(), true, nullptr, nullptr); g_Options = &options;
+	ScriptConfig scripts; g_ScriptConfig = &scripts;
+
+	// Rule 7.1: ServerX.Encryption=no with ServerX.Cipher
+	{
+		std::string reply = RpcReply("/jsonrpc", XmlRpcProcessor::hmPost,
+			R"({"method":"saveconfig","params":[[{"Name":"Server1.Encryption","Value":"no"},{"Name":"Server1.Cipher","Value":"AES128"}]],"id":1})");
+		BOOST_CHECK(HasErrorCode(reply, 3));
+		BOOST_CHECK(reply.find("Server1.Cipher cannot be configured when Server1.Encryption is disabled") != std::string::npos);
+	}
+
+	// Rule 7.2: DupeSearch=yes with HealthCheck=park
+	{
+		std::string reply = RpcReply("/jsonrpc", XmlRpcProcessor::hmPost,
+			R"({"method":"saveconfig","params":[[{"Name":"DupeSearch","Value":"yes"},{"Name":"HealthCheck","Value":"park"}]],"id":1})");
+		BOOST_CHECK(HasErrorCode(reply, 3));
+		BOOST_CHECK(reply.find("DupeSearch=yes") != std::string::npos);
+		BOOST_CHECK(reply.find("HealthCheck=park") != std::string::npos);
+	}
+
+	// Rule 7.3: DirectWrite=yes with FlushQueue=no
+	{
+		std::string reply = RpcReply("/jsonrpc", XmlRpcProcessor::hmPost,
+			R"({"method":"saveconfig","params":[[{"Name":"DirectWrite","Value":"yes"},{"Name":"FlushQueue","Value":"no"}]],"id":1})");
+		BOOST_CHECK(HasErrorCode(reply, 3));
+		BOOST_CHECK(reply.find("DirectWrite=yes") != std::string::npos);
+		BOOST_CHECK(reply.find("FlushQueue=yes") != std::string::npos);
+	}
+
+	// Rule 7.4: DirectUnpack=yes with UnpackPauseQueue=no
+	{
+		std::string reply = RpcReply("/jsonrpc", XmlRpcProcessor::hmPost,
+			R"({"method":"saveconfig","params":[[{"Name":"DirectUnpack","Value":"yes"},{"Name":"UnpackPauseQueue","Value":"no"}]],"id":1})");
+		BOOST_CHECK(HasErrorCode(reply, 3));
+		BOOST_CHECK(reply.find("DirectUnpack=yes") != std::string::npos);
+		BOOST_CHECK(reply.find("UnpackPauseQueue=yes") != std::string::npos);
+	}
+
+	// Omitted options in saveconfig resolve against replacement-config defaults:
+	// FlushQueue=no with DirectWrite omitted (defaults to yes) must be rejected
+	{
+		std::string reply = RpcReply("/jsonrpc", XmlRpcProcessor::hmPost,
+			R"({"method":"saveconfig","params":[[{"Name":"FlushQueue","Value":"no"}]],"id":1})");
+		BOOST_CHECK(HasErrorCode(reply, 3));
+		BOOST_CHECK(reply.find("DirectWrite=yes") != std::string::npos);
+	}
+}
+
+BOOST_AUTO_TEST_CASE(BootTimeConfigReconciliationTest)
+{
+	struct RestoreOptions
+	{
+		Options* m_options;
+		RestoreOptions() : m_options(g_Options) {}
+		~RestoreOptions() { g_Options = m_options; }
+	} restore;
+
+	Options::CmdOptList cmdOpts;
+	cmdOpts.push_back("Server1.Host=example.com");
+	cmdOpts.push_back("Server1.Port=119");
+	cmdOpts.push_back("Server1.Encryption=no");
+	cmdOpts.push_back("Server1.Cipher=AES128-GCM-SHA256");
+	cmdOpts.push_back("DupeSearch=yes");
+	cmdOpts.push_back("HealthCheck=park");
+	cmdOpts.push_back("DirectWrite=yes");
+	cmdOpts.push_back("FlushQueue=no");
+	cmdOpts.push_back("DirectUnpack=yes");
+	cmdOpts.push_back("UnpackPauseQueue=no");
+
+	Options options(&cmdOpts, nullptr);
+
+	// Verify Rule 7.1: Cipher is cleared
+	const char* cipher = options.GetOption("Server1.Cipher");
+	BOOST_CHECK(!cipher || cipher[0] == '\0');
+
+	// Verify Rule 7.2: DupeSearch is disabled
+	BOOST_CHECK_EQUAL(options.GetDupeSearch(), false);
+
+	// Verify Rule 7.3: FlushQueue is forced to true
+	BOOST_CHECK_EQUAL(options.GetFlushQueue(), true);
+
+	// Verify Rule 7.4: Mutex enforced is set
+	BOOST_CHECK_EQUAL(options.GetUnpackMutexEnforced(), true);
+	const char* mutexOpt = options.GetOption("_UnpackMutexEnforced");
+	BOOST_CHECK(mutexOpt && strcmp(mutexOpt, "yes") == 0);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -74,6 +74,7 @@ public:
 	void SetEnvVarSpecial(const char* prefix, const char* name, const char* value);
 	void SetIntEnvVar(const char* name, int value);
 	bool IsTerminated() const { return m_terminated; }
+	bool HasActiveProcess();
 
 protected:
 	void ProcessOutput(char* text);
@@ -117,7 +118,7 @@ private:
 	HANDLE m_processId = 0;
 	DWORD m_dwProcessId = 0;
 #else
-	pid_t m_processId = 0;
+	std::atomic<pid_t> m_processId{0};
 #endif
 
 	inline static const long ARGS_LIMIT_SIZE = []() -> long

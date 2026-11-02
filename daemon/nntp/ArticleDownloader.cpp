@@ -399,6 +399,16 @@ ArticleDownloader::EStatus ArticleDownloader::Download()
 
 	while (!IsStopped() && !m_decoder.GetEof())
 	{
+		// Memory pressure throttling: pace uncached network reads if memory is Critical and cache is flushing.
+		// Never block an article that already allocated a cache buffer before pressure turned Critical,
+		// as its buffer only becomes flushable after Download() finishes and calls ArticleWriter::Finish().
+		if (!IsStopped() && !m_articleWriter.HasCachedBuffer() && g_MemoryMonitor &&
+			g_MemoryMonitor->GetTier() == NZBGET_RS_PRESSURE_CRITICAL &&
+			g_ArticleCache && g_ArticleCache->GetFlushing())
+		{
+			Util::Sleep(10);
+		}
+
 		// throttle the bandwidth
 		while (!IsStopped() && (g_WorkState->GetSpeedLimit() > 0.0f) &&
 			(g_StatMeter->CalcCurrentDownloadSpeed() > g_WorkState->GetSpeedLimit() ||

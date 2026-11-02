@@ -26,11 +26,15 @@
 #include "FileSystem.h"
 #include "FileTypes.h"
 #include "Options.h"
+#include "UnpackController.h"
+#include "PrePostProcessor.h"
 
 void DirectUnpack::StartJob(NzbInfo* nzbInfo)
 {
 	DirectUnpack* directUnpack = new DirectUnpack();
 	directUnpack->m_nzbId = nzbInfo->GetId();
+	directUnpack->m_unpacking = false;
+	directUnpack->m_waitingVolume = false;
 	directUnpack->SetAutoDestroy(true);
 
 	nzbInfo->SetUnpackThread(directUnpack);
@@ -50,6 +54,7 @@ void DirectUnpack::Run()
 		if (!nzbInfo)
 		{
 			debug("Could not find NzbInfo for %i", m_nzbId);
+			m_unpacking = false;
 			return;
 		}
 
@@ -86,6 +91,7 @@ void DirectUnpack::Run()
 
 		if (archive)
 		{
+			m_waitingVolume = false;
 			if (!m_processed)
 			{
 				PrintMessage(Message::mkInfo, "Directly unpacking %s", *m_name);
@@ -94,10 +100,12 @@ void DirectUnpack::Run()
 				m_processed = true;
 			}
 
+			size_t committedArchives = m_extractedArchives.size();
 			ExecuteUnrar(archive);
 
 			if (!m_unpackOk)
 			{
+				m_extractedArchives.resize(committedArchives);
 				break;
 			}
 		}
@@ -107,11 +115,16 @@ void DirectUnpack::Run()
 			{
 				break;
 			}
+			m_waitingVolume = true;
 			Util::Sleep(100);
 		}
 	}
 
-	if (!m_unpackOk)
+	m_unpacking = false;
+	m_waitingVolume = false;
+
+	bool interrupted = !m_cancelled && (IsStopped() || GetTerminated());
+	if (!m_unpackOk && !interrupted)
 	{
 		Cleanup();
 	}
@@ -127,9 +140,13 @@ void DirectUnpack::Run()
 		}
 
 		nzbInfo->SetUnpackThread(nullptr);
-		nzbInfo->SetDirectUnpackStatus(m_processed ? m_unpackOk && !IsStopped() ? NzbInfo::nsSuccess : NzbInfo::nsFailure : NzbInfo::nsNone);
+		nzbInfo->SetDirectUnpackStatus(m_processed ? (m_unpackOk && !interrupted && !m_cancelled ? NzbInfo::nsSuccess : (interrupted ? NzbInfo::nsNone : NzbInfo::nsFailure)) : NzbInfo::nsNone);
 
-		if (nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsSuccess)
+		if (interrupted)
+		{
+			debug("%s stopped due to reload/shutdown, preserving unpack state", *m_infoName);
+		}
+		else if (nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsSuccess)
 		{
 			nzbInfo->AddMessage(Message::mkInfo, BString<1024>("%s successful", *m_infoNameUp));
 		}
@@ -138,10 +155,10 @@ void DirectUnpack::Run()
 			nzbInfo->AddMessage(Message::mkWarning, BString<1024>("%s failed", *m_infoNameUp));
 		}
 
-		if (nzbInfo->GetPostInfo() && nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsSuccess)
+		if (nzbInfo->GetExtractedArchives() && (nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsSuccess || interrupted))
 		{
 			std::move(m_extractedArchives.begin(), m_extractedArchives.end(),
-				std::back_inserter(*nzbInfo->GetPostInfo()->GetExtractedArchives()));
+				std::back_inserter(*nzbInfo->GetExtractedArchives()));
 		}
 
 		AddExtraTime(nzbInfo);
@@ -203,14 +220,24 @@ void DirectUnpack::ExecuteUnrar(const char* archiveName)
 	m_allOkMessageReceived = false;
 
 	SetNeedWrite(true);
+	Guard unpackGuard(UnpackController::GetUnpackMutex());
+	if (IsStopped())
+	{
+		return;
+	}
+	m_waitingVolume = false;
+	m_execThreadId = std::this_thread::get_id();
 	m_unpacking = true;
 	int exitCode = Execute();
 	m_unpacking = false;
+	m_execThreadId = std::thread::id{};
+	m_waitingVolume = false;
 	SetLogPrefix(nullptr);
 
-	m_unpackOk = exitCode == 0 && m_allOkMessageReceived && !GetTerminated();
+	m_unpackOk = exitCode == 0 && m_allOkMessageReceived && !GetTerminated() && !m_cancelled;
 
-	if (!m_unpackOk && exitCode > 0)
+	bool interrupted = !m_cancelled && (IsStopped() || GetTerminated());
+	if (!m_unpackOk && exitCode > 0 && !interrupted)
 	{
 		PrintMessage(Message::mkError, "Unrar error code: %i", exitCode);
 	}
@@ -417,6 +444,10 @@ void DirectUnpack::AddMessage(Message::EKind kind, const char* text)
 void DirectUnpack::Stop(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 {
 	debug("Stopping %s", *m_infoName);
+	if (!(g_PrePostProcessor && g_PrePostProcessor->IsStopped()))
+	{
+		m_cancelled = true;
+	}
 	if (m_processed)
 	{
 		if (nzbInfo)
@@ -439,9 +470,20 @@ void DirectUnpack::Stop(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 		}
 	}
 	Thread::Stop();
+	bool isExecThread = std::this_thread::get_id() == m_execThreadId.load();
 	if (m_unpacking)
 	{
-		Terminate();
+		if (!isExecThread && !m_cancelled && HasActiveProcess() && Break())
+		{
+			for (int i = 0; i < 50 && m_unpacking && HasActiveProcess(); ++i)
+			{
+				Util::Sleep(100);
+			}
+		}
+		if (m_unpacking)
+		{
+			Terminate();
+		}
 	}
 }
 
@@ -464,6 +506,7 @@ void DirectUnpack::WaitNextVolume(const char* filename)
 	BString<1024> fullFilename("%s%c%s", *m_destDir, PATH_SEPARATOR, filename);
 	if (FileSystem::FileExists(fullFilename))
 	{
+		m_waitingVolume = false;
 		Write("\n"); // emulating click on Enter-key for "continue"
 	}
 	else
@@ -472,6 +515,7 @@ void DirectUnpack::WaitNextVolume(const char* filename)
 		{
 			Guard guard(m_volumeMutex);
 			m_waitingFile = filename;
+			m_waitingVolume = true;
 			nzbCompleted = m_nzbCompleted;
 		}
 		// the queue lock only after the volume lock is released: the queue side
@@ -502,6 +546,7 @@ void DirectUnpack::FileDownloaded(DownloadQueue* downloadQueue, FileInfo* fileIn
 	if (m_waitingFile && !strcasecmp(fileInfo->GetFilename(), m_waitingFile))
 	{
 		m_waitingFile = nullptr;
+		m_waitingVolume = false;
 		Write("\n"); // emulating click on Enter-key for "continue"
 	}
 

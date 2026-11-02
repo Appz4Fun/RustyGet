@@ -231,7 +231,10 @@ void QueueCoordinator::Run()
 			bool hasMoreArticles = GetNextArticle(downloadQueue, fileInfo, articleInfo);
 			articeDownloadsRunning = !m_activeDownloads.empty();
 			m_hasMoreJobs = hasMoreArticles || articeDownloadsRunning;
-			bool canProceed = !IsStopped() && Util::SafeIntCast<size_t, int>(m_activeDownloads.size()) < m_downloadsLimit;
+			int effectiveLimit = g_MemoryMonitor
+				? g_MemoryMonitor->GetEffectiveDownloadsLimit(m_downloadsLimit)
+				: m_downloadsLimit;
+			bool canProceed = !IsStopped() && Util::SafeIntCast<size_t, int>(m_activeDownloads.size()) < effectiveLimit;
 
 			if (hasMoreArticles && canProceed && (!g_WorkState->GetDownloadHeld() || fileInfo->GetExtraPriority()))
 			{
@@ -572,6 +575,7 @@ bool QueueCoordinator::GetNextArticle(DownloadQueue* downloadQueue, FileInfo* &f
 			bool nzbPaused = nzbInfo->GetFileList()->size() - nzbInfo->GetPausedFileCount() <= 0;
 
 			if ((!fileInfo || nzbHigherPriority) && !nzbPaused &&
+				!HasActiveDupe(downloadQueue, nzbInfo) &&
 				(!(g_WorkState->GetPauseDownload() || g_WorkState->GetQuotaReached()) || nzbInfo->GetForcePriority()))
 			{
 				for (FileInfo* fileInfo1 : nzbInfo->GetFileList())
@@ -1546,6 +1550,24 @@ void QueueCoordinator::LoadPartialState(FileInfo* fileInfo)
 	if (fileInfo->GetPartialState() == FileInfo::psPartial)
 	{
 		g_DiskState->LoadFileState(fileInfo, g_ServerPool->GetServers(), false);
+		if ((g_Options->GetDirectWrite() || fileInfo->GetForceDirectWrite()) && !fileInfo->GetOutputInitialized())
+		{
+			BString<1024> outTmpFilename("%s%c%i.out.tmp", fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, fileInfo->GetId());
+			if (FileSystem::FileExists(outTmpFilename))
+			{
+				fileInfo->SetOutputFilename(outTmpFilename);
+				fileInfo->SetOutputInitialized(true);
+			}
+			else if (fileInfo->GetForceDirectWrite())
+			{
+				BString<1024> outputFilename("%s%c%s", fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, fileInfo->GetFilename());
+				if (FileSystem::FileExists(outputFilename))
+				{
+					fileInfo->SetOutputFilename(outputFilename);
+					fileInfo->SetOutputInitialized(true);
+				}
+			}
+		}
 	}
 	else if (fileInfo->GetPartialState() == FileInfo::psCompleted)
 	{
@@ -1729,6 +1751,59 @@ bool QueueCoordinator::HasSizeTwin(DownloadQueue* downloadQueue, NzbInfo* nzbInf
 			return true;
 		}
 	}
+	return false;
+}
+
+/*
+ * Checks whether another job in the queue sharing the same DupeKey is currently
+ * active (actively downloading, in post-processing, or direct unpacking).
+ * Called under GuardedDownloadQueue lock.
+ */
+bool QueueCoordinator::HasActiveDupe(DownloadQueue* downloadQueue, NzbInfo* nzbInfo) const
+{
+	const char* dupeKey = nzbInfo->GetDupeKey();
+	if (Util::EmptyStr(dupeKey))
+	{
+		return false;
+	}
+
+	// An active post-processing/repair job (or extra-priority par fetch) already owns
+	// the active slot and must not be blocked from downloading its own repair volumes.
+	if (nzbInfo->HasExtraPriority() ||
+		(nzbInfo->GetPostInfo() &&
+		 (nzbInfo->GetPostInfo()->GetWorking() || nzbInfo->GetPostInfo()->GetStage() != PostInfo::ptQueued)))
+	{
+		return false;
+	}
+
+	for (NzbInfo* queued : downloadQueue->GetQueue())
+	{
+		if (queued != nzbInfo &&
+			!Util::EmptyStr(queued->GetDupeKey()) &&
+			!strcasecmp(queued->GetDupeKey(), dupeKey))
+		{
+			// Ignore jobs that are being deleted and have finished draining active downloads
+			if ((queued->GetDeleting() || queued->GetDeleteStatus() != NzbInfo::dsNone) &&
+				queued->GetActiveDownloads() == 0)
+			{
+				continue;
+			}
+
+			bool isActiveDownload = queued->GetActiveDownloads() > 0;
+			bool isPostProcessing = queued->GetPostInfo() != nullptr &&
+				(queued->GetPostInfo()->GetWorking() ||
+				 queued->GetPostInfo()->GetStage() != PostInfo::ptQueued ||
+				 queued->HasExtraPriority() ||
+				 nzbInfo->GetCompletedFiles()->empty());
+			bool isDirectUnpacking = queued->GetDirectUnpackStatus() == NzbInfo::nsRunning;
+
+			if (isActiveDownload || isPostProcessing || isDirectUnpacking)
+			{
+				return true;
+			}
+		}
+	}
+
 	return false;
 }
 

@@ -135,6 +135,7 @@ private:
 	int DownloadCriticalHealth(DownloadQueue* downloadQueue, NzbInfo* nzbInfo);
 	static bool CertainlyParless(NzbInfo* nzbInfo);
 	static bool HasSizeTwin(DownloadQueue* downloadQueue, NzbInfo* nzbInfo);
+	bool HasActiveDupe(DownloadQueue* downloadQueue, NzbInfo* nzbInfo) const;
 	static int FilesTried(NzbInfo* nzbInfo);
 	void RejectBorrowedArticles(FileInfo* fileInfo, const std::vector<ArticleInfo*>& articles);
 	void CountAsFailed(FileInfo* fileInfo, ArticleInfo* articleInfo);

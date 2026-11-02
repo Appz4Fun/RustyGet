@@ -44,6 +44,13 @@ bool UnpackController::ParamList::Exists(const char* param)
 	return std::find(begin(), end(), param) != end();
 }
 
+static Mutex s_unpackMutex;
+
+Mutex& UnpackController::GetUnpackMutex()
+{
+	return s_unpackMutex;
+}
+
 void UnpackController::StartJob(PostInfo* postInfo)
 {
 	UnpackController* unpackController = new UnpackController();
@@ -313,7 +320,12 @@ void UnpackController::ExecuteUnrar(const char* password)
 	m_unpacker = upUnrar;
 
 	SetProgressLabel("");
+	Guard unpackGuard(GetUnpackMutex());
+	m_execThreadId = std::this_thread::get_id();
+	m_unpacking = true;
 	int exitCode = Execute();
+	m_unpacking = false;
+	m_execThreadId = std::thread::id{};
 	SetLogPrefix(nullptr);
 	SetProgressLabel("");
 
@@ -322,7 +334,7 @@ void UnpackController::ExecuteUnrar(const char* password)
 	m_unpackSpaceError = exitCode == 5;
 	m_unpackPasswordError |= exitCode == 11; // only for rar5-archives
 
-	if (!m_unpackOk && exitCode > 0 && !WillRetryWithPass())
+	if (!m_unpackOk && exitCode > 0 && !WillRetryWithPass() && !IsStopped() && !GetTerminated())
 	{
 		PrintMessage(Message::mkError, "Unrar error code: %i", exitCode);
 	}
@@ -368,14 +380,19 @@ void UnpackController::ExecuteSevenZip(const char* password, bool multiVolumes)
 	PrintMessage(Message::mkInfo, "Executing 7-Zip");
 	SetLogPrefix("7-Zip");
 	SetProgressLabel("");
+	Guard unpackGuard(GetUnpackMutex());
+	m_execThreadId = std::this_thread::get_id();
+	m_unpacking = true;
 	int exitCode = Execute();
+	m_unpacking = false;
+	m_execThreadId = std::thread::id{};
 	SetLogPrefix(nullptr);
 	SetProgressLabel("");
 
 	m_unpackOk = exitCode == 0 && m_allOkMessageReceived && !GetTerminated();
 	m_unpackStartError = exitCode == -1 && !m_autoTerminated;
 
-	if (!m_unpackOk && exitCode > 0 && !WillRetryWithPass())
+	if (!m_unpackOk && exitCode > 0 && !WillRetryWithPass() && !IsStopped() && !GetTerminated())
 	{
 		PrintMessage(Message::mkError, "7-Zip error code: %i", exitCode);
 	}
@@ -603,6 +620,14 @@ bool UnpackController::JoinFile(const char* fragBaseName)
 
 void UnpackController::Completed()
 {
+	bool stopped = !m_autoTerminated && (!m_postInfo || !m_postInfo->GetDeleted()) &&
+		(IsStopped() || GetTerminated());
+	if (stopped)
+	{
+		debug("Unpack stopped due to reload/shutdown, preserving _unpack directory");
+		return;
+	}
+
 	bool cleanupSuccess = Cleanup();
 
 	if (m_unpackOk && cleanupSuccess)
@@ -623,7 +648,8 @@ void UnpackController::Completed()
 			(m_postInfo->GetNzbInfo()->GetParStatus() <= NzbInfo::psSkipped ||
 			 !m_postInfo->GetNzbInfo()->GetParFull()) &&
 			!m_unpackStartError && !m_unpackSpaceError && !m_unpackPasswordError &&
-			(!GetTerminated() || m_autoTerminated) && m_hasParFiles)
+			(!GetTerminated() || m_autoTerminated) &&
+			(!IsStopped() || m_autoTerminated) && m_hasParFiles)
 		{
 			RequestParCheck(!m_password.Empty() ||
 				Util::EmptyStr(g_Options->GetUnpackPassFile()) || m_passListTried ||
@@ -1021,7 +1047,25 @@ void UnpackController::Stop()
 {
 	debug("Stopping unpack");
 	Thread::Stop();
-	Terminate();
+	bool isExecThread = std::this_thread::get_id() == m_execThreadId.load();
+	if (!isExecThread && !m_autoTerminated && m_unpacking && HasActiveProcess())
+	{
+		if (Break())
+		{
+			for (int i = 0; i < 50 && m_unpacking && HasActiveProcess(); ++i)
+			{
+				Util::Sleep(100);
+			}
+		}
+		if (m_unpacking)
+		{
+			Terminate();
+		}
+	}
+	else
+	{
+		Terminate();
+	}
 }
 
 void UnpackController::SetProgressLabel(const char* progressLabel)

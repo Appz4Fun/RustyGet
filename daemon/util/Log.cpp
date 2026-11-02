@@ -385,7 +385,8 @@ void Log::InitOptions()
 {
 	const char* messageType[] = { "INFO", "WARNING", "ERROR", "DEBUG", "DETAIL"};
 
-	if (g_Options->GetWriteLog() != Options::wlNone && g_Options->GetLogFile())
+	if (!g_Options->GetRemoteClientMode() && !g_Options->GetDirectClientMode() &&
+		g_Options->GetWriteLog() != Options::wlNone && g_Options->GetLogFile())
 	{
 		UpdateLogPath(g_Options->GetLogFile());
 

@@ -23,11 +23,14 @@
 #ifndef OPTIONS_H
 #define OPTIONS_H
 
+#include <atomic>
+#include <cstdint>
 #include <string_view>
 #include "NString.h"
 #include "Thread.h"
 #include "FeedInfo.h"
 #include "FileSystem.h"
+#include "nzbget_rs.h"
 
 
 class Options
@@ -173,6 +176,8 @@ public:
 	static constexpr std::string_view DAILYQUOTA = "DailyQuota";
 	static constexpr std::string_view REORDERFILES = "ReorderFiles";
 	static constexpr std::string_view UPDATECHECK = "UpdateCheck";
+	static constexpr std::string_view MEMORYPRESSUREINTERVAL = "MemoryPressureInterval";
+	static constexpr std::string_view MEMORYPRESSUREPATH = "MemoryPressurePath";
 
 // obsolete options
 	static constexpr std::string_view POSTLOGKIND = "PostLogKind";
@@ -537,6 +542,8 @@ public:
 	const char* GetSevenZipCmd() const { return m_sevenZipCmd; }
 	const char* GetUnpackPassFile() const { return m_unpackPassFile; }
 	bool GetUnpackPauseQueue() const { return m_unpackPauseQueue; }
+	bool GetUnpackMutexEnforced() const { return m_unpackMutexEnforced; }
+	void SetUnpackMutexEnforced(bool unpackMutexEnforced) { m_unpackMutexEnforced = unpackMutexEnforced; }
 	const char* GetExtCleanupDisk() const { return m_extCleanupDisk; }
 	const char* GetParIgnoreExt() const { return m_parIgnoreExt; }
 	bool GetPostDownloadRename() const { return m_postDownloadRename; }
@@ -549,6 +556,8 @@ public:
 	int GetPropagationDelay() const { return m_propagationDelay; }
 	int GetArticleCache() const { return m_articleCache; }
 	int GetEventInterval() const { return m_eventInterval; }
+	int GetMemoryPressureInterval() const { return m_memoryPressureInterval; }
+	const char* GetMemoryPressurePath() const { return m_memoryPressurePath; }
 	const std::string& GetShellOverride() const { return m_shellOverride; }
 	int GetMonthlyQuota() const { return m_monthlyQuota; }
 	int GetQuotaStartDay() const { return m_quotaStartDay; }
@@ -563,6 +572,7 @@ public:
 	Categories* GetCategories() { return &m_categories; }
 	const Categories* GetCategories() const { return &m_categories; }
 	Category* FindCategory(const char* name, bool searchAliases) { return m_categories.FindCategory(name, searchAliases); }
+	const char* GetOption(const char* optname);
 
 	// Current state
 	void SetServerMode(bool serverMode) { m_serverMode = serverMode; }
@@ -745,6 +755,7 @@ private:
 	CString m_sevenZipCmd;
 	CString m_unpackPassFile;
 	bool m_unpackPauseQueue;
+	bool m_unpackMutexEnforced = false;
 	CString m_extCleanupDisk;
 	CString m_parIgnoreExt;
 	CString m_unpackIgnoreExt;
@@ -754,6 +765,8 @@ private:
 	int m_propagationDelay = 0;
 	int m_articleCache = 0;
 	int m_eventInterval = 0;
+	int m_memoryPressureInterval = 500;
+	CString m_memoryPressurePath;
 	std::string m_shellOverride;
 	int m_monthlyQuota = 0;
 	int m_quotaStartDay = 0;
@@ -785,7 +798,6 @@ private:
 	int ParseIntValue(const char* OptName, int base);
 	FeedInfo::CategorySource ParseCategorySource(const char* value);
 	OptEntry* FindOption(const char* optname);
-	const char* GetOption(const char* optname);
 	void SetOption(const char* optname, const char* value);
 	void SetToolPathOption(fs::path& pathOpt, std::string_view value);
 	bool SetOptionString(const char* option);
@@ -804,5 +816,39 @@ private:
 };
 
 extern Options* g_Options;
+
+class MemoryMonitor final : public Thread
+{
+public:
+	MemoryMonitor();
+	~MemoryMonitor() override;
+
+	void Run() override;
+	void Stop() override;
+
+	NzbgetRsPressureTier GetTier() const { return (NzbgetRsPressureTier)m_tier.load(std::memory_order_acquire); }
+	const char* GetTierName() const;
+
+	size_t GetEffectiveArticleCacheBytes() const;
+	int GetEffectiveArticleCacheMB() const;
+	int GetEffectiveParBufferMB(int configuredMB) const;
+	int GetEffectiveDownloadsLimit(int configuredLimit) const;
+
+	static void TrimHeap();
+
+private:
+	std::atomic<int> m_tier{NZBGET_RS_PRESSURE_NORMAL};
+	std::atomic<uint32_t> m_effectiveCacheMB{0};
+	std::atomic<uint32_t> m_effectiveParBufferMB{0};
+	std::atomic<uint32_t> m_effectiveDownloadsLimit{0};
+
+	int m_consecutiveSamples = 0;
+	int m_candidateTier = NZBGET_RS_PRESSURE_NORMAL;
+
+	void UpdateState();
+	void ApplyTierTransition(NzbgetRsPressureTier oldTier, NzbgetRsPressureTier newTier);
+};
+
+extern MemoryMonitor* g_MemoryMonitor;
 
 #endif

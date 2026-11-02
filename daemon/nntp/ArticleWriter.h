@@ -144,6 +144,11 @@ public:
 	bool GetFlushing() { return m_flushing; }
 	size_t GetAllocated() { return m_allocated; }
 	bool FileBusy(FileInfo* fileInfo) { return fileInfo == m_fileInfo; }
+	void WakeupFlush()
+	{
+		std::lock_guard<std::mutex> guard(m_allocMutex);
+		m_allocCond.notify_all();
+	}
 
 private:
 	std::atomic<size_t> m_allocated{0};

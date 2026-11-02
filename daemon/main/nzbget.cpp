@@ -123,9 +123,24 @@ char* (*g_Arguments)[] = nullptr;
 int main(int argc, char *argv[], char *argp[])
 {
 #ifdef NZBGET_USE_RUST
-	if (argc > 1 && !strcmp(argv[1], "--internal-tls-cipher-resolve"))
-		return nzbget_rs_tls_cipher_resolver(argc, argv);
-#endif
+	static const NzbgetCLifecycleHooks hooks = {
+		nzbget_c_set_process_args,
+		nzbget_c_util_init,
+		nzbget_c_nserv_main,
+		nzbget_c_win_service_check,
+		nzbget_c_phase1_init,
+		nzbget_c_phase2_subsystems_create_and_recover,
+		nzbget_c_phase3_server_activate,
+		nzbget_c_phase4_shutdown,
+		nzbget_c_has_active_unpack,
+		nzbget_c_is_reloading,
+		nzbget_c_stop_server,
+		nzbget_c_reload,
+		nzbget_c_exit_proc
+	};
+	nzbget_rs_register_lifecycle_hooks(&hooks);
+	return nzbget_rs_main(argc, argv, argp);
+#else
 #ifdef WIN32
 #ifdef _DEBUG
 	_CrtSetReportMode(_CRT_WARN, _CRTDBG_MODE_FILE | _CRTDBG_MODE_DEBUG);
@@ -181,6 +196,7 @@ int main(int argc, char *argv[], char *argp[])
 	RunMain();
 
 	return 0;
+#endif
 }
 
 
@@ -191,6 +207,12 @@ public:
 	void Run(bool reload);
 	void Stop(bool reload);
 	bool GetReloading() { return m_reloading; }
+
+	int Phase1_Init(bool reload);
+	int Phase2_SubsystemsAndState(bool reload);
+	int Phase3_ServerActivation();
+	void Phase4_Shutdown(bool reload);
+	bool HasActiveUnpack() const;
 
 	// Options::Extender
 	void AddNewsServer(int id, bool active, const char* name, const char* host,
@@ -233,6 +255,7 @@ private:
 	std::unique_ptr<ExtensionManager::Manager> m_extensionManager;
 	std::unique_ptr<System::SystemInfo> m_systemInfo;
 	std::unique_ptr<SystemHealth::Service> m_systemHealth;
+	std::unique_ptr<MemoryMonitor> m_memoryMonitor;
 
 #ifdef WIN32
 	std::unique_ptr<WinConsole> m_winConsole;
@@ -284,8 +307,9 @@ NZBGet::~NZBGet()
 	Cleanup();
 }
 
-void NZBGet::Init()
+int NZBGet::Phase1_Init(bool reload)
 {
+	m_reloading = reload;
 	m_log = std::make_unique<Log>();
 
 	debug("nzbget %s", Util::VersionRevision());
@@ -306,7 +330,9 @@ void NZBGet::Init()
 
 	BootConfig();
 
-	if (g_Options->GetSystemHealthCheck())
+	ProcessDirect();
+
+	if (g_Options->GetServerMode() && g_Options->GetSystemHealthCheck())
 	{
 		m_systemHealth = std::make_unique<SystemHealth::Service>(
 			*g_Options,
@@ -367,8 +393,11 @@ void NZBGet::Init()
 		info("nzbget %s remote-mode", Util::VersionRevision());
 	}
 
-	info("using %s", m_options->GetConfigFilename());
-	info("nzbget runs on %s:%i", m_options->GetControlIp(), m_options->GetControlPort());
+	if (m_options->GetServerMode())
+	{
+		info("using %s", m_options->GetConfigFilename());
+		info("nzbget runs on %s:%i", m_options->GetControlIp(), m_options->GetControlPort());
+	}
 
 #ifdef DEBUG
 	std::stringstream ss;
@@ -382,13 +411,26 @@ void NZBGet::Init()
 
 	m_reloading = false;
 
+	InstallErrorHandler();
+
+	return 0;
+}
+
+int NZBGet::Phase2_SubsystemsAndState(bool reload)
+{
+	(void)reload;
 	if (!m_commandLineParser->GetRemoteClientMode())
 	{
 		m_serverPool->InitConnections();
 		m_statMeter->Init();
 	}
+	return 0;
+}
 
-	InstallErrorHandler();
+void NZBGet::Init()
+{
+	Phase1_Init(m_reloading);
+	Phase2_SubsystemsAndState(m_reloading);
 }
 
 void NZBGet::Final()
@@ -449,6 +491,9 @@ void NZBGet::CreateGlobals()
 
 	m_articleCache = std::make_unique<ArticleCache>();
 	g_ArticleCache = m_articleCache.get();
+
+	m_memoryMonitor = std::make_unique<MemoryMonitor>();
+	g_MemoryMonitor = m_memoryMonitor.get();
 
 	m_maintenance = std::make_unique<Maintenance>();
 	g_Maintenance = m_maintenance.get();
@@ -545,6 +590,12 @@ void NZBGet::Cleanup()
 	g_ServerPool = nullptr;
 	g_FeedCoordinator = nullptr;
 	g_ArticleCache = nullptr;
+	if (m_memoryMonitor)
+	{
+		m_memoryMonitor->Stop();
+	}
+	m_memoryMonitor.reset();
+	g_MemoryMonitor = nullptr;
 	g_QueueScriptCoordinator = nullptr;
 	// destroyed while the global still points to it: its destructor waits for
 	// a running update-script, whose thread finishes through g_Maintenance
@@ -752,6 +803,10 @@ void NZBGet::DoMainLoop()
 	{
 		m_articleCache->Start();
 	}
+	if (m_memoryMonitor)
+	{
+		m_memoryMonitor->Start();
+	}
 
 	// enter main program-loop
 	while (m_queueCoordinator->IsRunning() ||
@@ -795,6 +850,10 @@ void NZBGet::DoMainLoop()
 			{
 				m_articleCache->Stop();
 			}
+			if (m_memoryMonitor && !m_memoryMonitor->IsStopped())
+			{
+				m_memoryMonitor->Stop();
+			}
 			if (!m_serviceCoordinator->IsStopped())
 			{
 				m_serviceCoordinator->Stop();
@@ -813,14 +872,8 @@ void NZBGet::DoMainLoop()
 	debug("Main program loop terminated");
 }
 
-void NZBGet::Run(bool reload)
+int NZBGet::Phase3_ServerActivation()
 {
-	m_reloading = reload;
-
-	Init();
-
-	ProcessDirect();
-
 	StartRemoteServer();
 	StartFrontend();
 
@@ -834,12 +887,33 @@ void NZBGet::Run(bool reload)
 		DoMainLoop();
 	}
 
+	return 0;
+}
+
+void NZBGet::Phase4_Shutdown(bool reload)
+{
+	(void)reload;
 	ScriptController::TerminateAll();
 
 	StopRemoteServer();
 	StopFrontend();
 
 	Final();
+}
+
+bool NZBGet::HasActiveUnpack() const
+{
+	return m_prePostProcessor ? m_prePostProcessor->HasActiveUnpack() : false;
+}
+
+void NZBGet::Run(bool reload)
+{
+	m_reloading = reload;
+
+	Phase1_Init(reload);
+	Phase2_SubsystemsAndState(reload);
+	Phase3_ServerActivation();
+	Phase4_Shutdown(reload);
 }
 
 void NZBGet::ProcessClientRequest()
@@ -993,6 +1067,15 @@ void NZBGet::Stop(bool reload)
 	{
 		info("Stopping, please wait...");
 	}
+
+	if (m_reloading && m_prePostProcessor && m_prePostProcessor->HasActiveUnpack())
+	{
+		info("Waiting for active unpack to complete before in-process reload...");
+		while (m_prePostProcessor && m_prePostProcessor->HasActiveUnpack())
+		{
+			Util::Sleep(100);
+		}
+	}
 	if (m_commandLineParser->GetRemoteClientMode())
 	{
 		if (m_frontend)
@@ -1013,6 +1096,10 @@ void NZBGet::Stop(bool reload)
 			m_prePostProcessor->Stop();
 			m_feedCoordinator->Stop();
 			m_articleCache->Stop();
+			if (m_memoryMonitor)
+			{
+				m_memoryMonitor->Stop();
+			}
 			m_queueScriptCoordinator->Stop();
 #ifdef WIN32
 			m_winConsole->Stop();
@@ -1192,13 +1279,195 @@ void RunMain()
 	g_NZBGet.reset();
 }
 
+static std::mutex g_reloadMutex;
+static std::condition_variable g_reloadCond;
+static bool g_reloadPending{false};
+static std::chrono::steady_clock::time_point g_reloadTargetTime;
+static std::chrono::steady_clock::time_point g_reloadFirstRequestTime;
+
 void Reload()
 {
-	info("Reloading...");
-	g_NZBGet->Stop(true);
+	if (g_NZBGet && g_NZBGet->GetReloading())
+	{
+		debug("Daemon is already reloading");
+		return;
+	}
+
+	auto now = std::chrono::steady_clock::now();
+	std::unique_lock<std::mutex> lock(g_reloadMutex);
+
+	constexpr auto DEBOUNCE_DELAY = std::chrono::milliseconds(100);
+	constexpr auto MAX_BURST_DELAY = std::chrono::milliseconds(1500);
+
+	if (!g_reloadPending)
+	{
+		g_reloadPending = true;
+		g_reloadFirstRequestTime = now;
+		g_reloadTargetTime = now + DEBOUNCE_DELAY;
+
+		std::thread([]() {
+			std::unique_lock<std::mutex> lock(g_reloadMutex);
+
+			while (g_reloadPending)
+			{
+				auto now = std::chrono::steady_clock::now();
+				if (now >= g_reloadTargetTime ||
+					now - g_reloadFirstRequestTime >= std::chrono::milliseconds(1500))
+				{
+					break;
+				}
+
+				g_reloadCond.wait_for(lock, g_reloadTargetTime - now);
+			}
+
+			if (!g_reloadPending)
+			{
+				return;
+			}
+
+			lock.unlock();
+
+			if (g_PrePostProcessor && g_PrePostProcessor->HasActiveUnpack())
+			{
+				info("Unpack is actively executing; deferring reload until unpack completes...");
+			}
+
+			while (g_PrePostProcessor && g_PrePostProcessor->HasActiveUnpack() &&
+				g_NZBGet && !g_NZBGet->GetReloading() && g_reloadPending)
+			{
+				Util::Sleep(200);
+			}
+
+			{
+				std::lock_guard<std::mutex> guard(g_reloadMutex);
+				g_reloadPending = false;
+			}
+
+			if (g_NZBGet && !g_NZBGet->GetReloading())
+			{
+				info("Reloading...");
+				g_NZBGet->Stop(true);
+			}
+		}).detach();
+	}
+	else
+	{
+		auto newTarget = now + DEBOUNCE_DELAY;
+		auto maxTarget = g_reloadFirstRequestTime + MAX_BURST_DELAY;
+		g_reloadTargetTime = (newTarget < maxTarget) ? newTarget : maxTarget;
+		g_reloadCond.notify_one();
+		debug("Reload request debounced, target extended");
+	}
 }
 
 void ExitProc()
 {
-	g_NZBGet->Stop(false);
+	{
+		std::lock_guard<std::mutex> guard(g_reloadMutex);
+		g_reloadPending = false;
+		g_reloadCond.notify_all();
+	}
+
+	if (g_NZBGet)
+	{
+		g_NZBGet->Stop(false);
+	}
 }
+
+extern "C" {
+
+void nzbget_c_set_process_args(int argc, char* argv[], char* argp[])
+{
+	g_ArgumentCount = argc;
+	g_Arguments = (char*(*)[])argv;
+	g_EnvironmentVariables = (char*(*)[])argp;
+}
+
+void nzbget_c_util_init(void)
+{
+	Util::Init();
+}
+
+int nzbget_c_nserv_main(int argc, char* argv[])
+{
+#ifndef DISABLE_NSERV
+	return NServMain(argc, argv);
+#else
+	(void)argc; (void)argv;
+	printf("ERROR: Could not start NServ, the program was compiled without NServ\n");
+	return 1;
+#endif
+}
+
+int nzbget_c_win_service_check(int argc, char* argv[])
+{
+#ifdef WIN32
+	InstallUninstallServiceCheck(argc, argv);
+#else
+	(void)argc; (void)argv;
+#endif
+	return 0;
+}
+
+int nzbget_c_phase1_init(bool reloading)
+{
+	static bool atexitRegistered = false;
+	if (!atexitRegistered)
+	{
+		atexit([] { g_NZBGet.reset(); });
+		atexitRegistered = true;
+	}
+
+	g_NZBGet = std::make_unique<NZBGet>();
+	return g_NZBGet->Phase1_Init(reloading);
+}
+
+int nzbget_c_phase2_subsystems_create_and_recover(bool reloading)
+{
+	return g_NZBGet ? g_NZBGet->Phase2_SubsystemsAndState(reloading) : 0;
+}
+
+int nzbget_c_phase3_server_activate(void)
+{
+	return g_NZBGet ? g_NZBGet->Phase3_ServerActivation() : 0;
+}
+
+void nzbget_c_phase4_shutdown(bool reloading)
+{
+	if (g_NZBGet)
+	{
+		g_NZBGet->Phase4_Shutdown(reloading);
+	}
+	g_NZBGet.reset();
+}
+
+bool nzbget_c_has_active_unpack(void)
+{
+	return g_NZBGet ? g_NZBGet->HasActiveUnpack() : (g_PrePostProcessor ? g_PrePostProcessor->HasActiveUnpack() : false);
+}
+
+bool nzbget_c_is_reloading(void)
+{
+	return g_NZBGet ? g_NZBGet->GetReloading() : false;
+}
+
+void nzbget_c_stop_server(bool reloading)
+{
+	if (g_NZBGet)
+	{
+		g_NZBGet->Stop(reloading);
+	}
+}
+
+void nzbget_c_reload(void)
+{
+	Reload();
+}
+
+void nzbget_c_exit_proc(void)
+{
+	ExitProc();
+}
+
+}
+

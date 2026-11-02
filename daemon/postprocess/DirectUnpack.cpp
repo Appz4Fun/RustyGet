@@ -26,6 +26,7 @@
 #include "FileSystem.h"
 #include "FileTypes.h"
 #include "Options.h"
+#include "UnpackController.h"
 
 void DirectUnpack::StartJob(NzbInfo* nzbInfo)
 {
@@ -111,7 +112,8 @@ void DirectUnpack::Run()
 		}
 	}
 
-	if (!m_unpackOk)
+	bool stopped = IsStopped() || GetTerminated();
+	if (!m_unpackOk && !stopped)
 	{
 		Cleanup();
 	}
@@ -127,9 +129,13 @@ void DirectUnpack::Run()
 		}
 
 		nzbInfo->SetUnpackThread(nullptr);
-		nzbInfo->SetDirectUnpackStatus(m_processed ? m_unpackOk && !IsStopped() ? NzbInfo::nsSuccess : NzbInfo::nsFailure : NzbInfo::nsNone);
+		nzbInfo->SetDirectUnpackStatus(m_processed ? (m_unpackOk && !stopped ? NzbInfo::nsSuccess : (stopped ? NzbInfo::nsNone : NzbInfo::nsFailure)) : NzbInfo::nsNone);
 
-		if (nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsSuccess)
+		if (stopped)
+		{
+			debug("%s stopped due to reload/shutdown, preserving unpack state", *m_infoName);
+		}
+		else if (nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsSuccess)
 		{
 			nzbInfo->AddMessage(Message::mkInfo, BString<1024>("%s successful", *m_infoNameUp));
 		}
@@ -138,10 +144,10 @@ void DirectUnpack::Run()
 			nzbInfo->AddMessage(Message::mkWarning, BString<1024>("%s failed", *m_infoNameUp));
 		}
 
-		if (nzbInfo->GetPostInfo() && nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsSuccess)
+		if (nzbInfo->GetExtractedArchives() && (nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsSuccess || stopped))
 		{
 			std::move(m_extractedArchives.begin(), m_extractedArchives.end(),
-				std::back_inserter(*nzbInfo->GetPostInfo()->GetExtractedArchives()));
+				std::back_inserter(*nzbInfo->GetExtractedArchives()));
 		}
 
 		AddExtraTime(nzbInfo);
@@ -203,6 +209,7 @@ void DirectUnpack::ExecuteUnrar(const char* archiveName)
 	m_allOkMessageReceived = false;
 
 	SetNeedWrite(true);
+	Guard unpackGuard(UnpackController::GetUnpackMutex());
 	m_unpacking = true;
 	int exitCode = Execute();
 	m_unpacking = false;
@@ -210,7 +217,7 @@ void DirectUnpack::ExecuteUnrar(const char* archiveName)
 
 	m_unpackOk = exitCode == 0 && m_allOkMessageReceived && !GetTerminated();
 
-	if (!m_unpackOk && exitCode > 0)
+	if (!m_unpackOk && exitCode > 0 && !IsStopped() && !GetTerminated())
 	{
 		PrintMessage(Message::mkError, "Unrar error code: %i", exitCode);
 	}
@@ -441,7 +448,17 @@ void DirectUnpack::Stop(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 	Thread::Stop();
 	if (m_unpacking)
 	{
-		Terminate();
+		if (Break())
+		{
+			for (int i = 0; i < 50 && m_unpacking; ++i)
+			{
+				Util::Sleep(100);
+			}
+		}
+		if (m_unpacking)
+		{
+			Terminate();
+		}
 	}
 }
 

@@ -34,6 +34,7 @@ public:
 	void Stop() override;
 	static void StartJob(PostInfo* postInfo);
 	static bool HasCompletedArchiveFiles(NzbInfo* nzbInfo);
+	static Mutex& GetUnpackMutex();
 
 	~UnpackController() override;
 
@@ -92,6 +93,7 @@ private:
 	bool m_finalDirCreated = false;
 	bool m_unpackDirCreated = false;
 	bool m_passListTried = false;
+	std::atomic<bool> m_unpacking{false};
 	FileList m_joinedFiles;
 	FileList m_downloadedFiles;
 

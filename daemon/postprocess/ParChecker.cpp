@@ -68,9 +68,14 @@ public:
 			? g_Options->GetParThreads() 
 			: Util::NumberOfCpuCores();
 		m_threadsToUse = m_threadsToUse > 0 ? m_threadsToUse : 1;
-		m_memToUse = g_Options->GetParBuffer() > 0 
-			? g_Options->GetParBuffer()
-			: 0;
+		int configuredParBuffer = g_Options->GetParBuffer();
+		m_memToUse = g_MemoryMonitor
+			? g_MemoryMonitor->GetEffectiveParBufferMB(configuredParBuffer)
+			: (configuredParBuffer > 0 ? configuredParBuffer : 16);
+		if (m_memToUse < 16)
+		{
+			m_memToUse = 16;
+		}
 	}
 	Par2::Result PreProcess(const std::string& parFilename);
 	Par2::Result Process(bool dorepair);
@@ -271,6 +276,8 @@ void ParChecker::Cleanup()
 	m_sourceFiles.clear();
 	m_dupeSources.clear();
 	m_errMsg = "";
+
+	MemoryMonitor::TrimHeap();
 }
 
 void ParChecker::Execute()

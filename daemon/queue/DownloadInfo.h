@@ -863,6 +863,11 @@ public:
 	void MoveFileList(NzbInfo* srcNzbInfo);
 	void UpdateMinMaxTime();
 	PostInfo* GetPostInfo() { return m_postInfo.get(); }
+	bool GetUnpackTried() { return m_unpackTried; }
+	void SetUnpackTried(bool unpackTried) { m_unpackTried = unpackTried; }
+	int GetLastUnpackStatus() { return m_lastUnpackStatus; }
+	void SetLastUnpackStatus(int lastUnpackStatus) { m_lastUnpackStatus = lastUnpackStatus; }
+	std::vector<CString>* GetExtractedArchives() { return &m_extractedArchives; }
 	void EnterPostProcess();
 	void LeavePostProcess();
 	bool IsDupeSuccess();
@@ -999,6 +1004,9 @@ private:
 	MessageList m_messages;
 	int m_idMessageGen = 0;
 	std::unique_ptr<PostInfo> m_postInfo;
+	bool m_unpackTried = false;
+	int m_lastUnpackStatus = 0;
+	std::vector<CString> m_extractedArchives;
 	int64 m_downloadedSize = 0;
 	time_t m_downloadStartTime = 0;
 	int m_downloadStartSec = 0;
@@ -1096,18 +1104,28 @@ public:
 	void SetForceRepair(bool forceRepair) { m_forceRepair = forceRepair; }
 	bool GetParRepaired() { return m_parRepaired; }
 	void SetParRepaired(bool parRepaired) { m_parRepaired = parRepaired; }
-	bool GetUnpackTried() { return m_unpackTried; }
-	void SetUnpackTried(bool unpackTried) { m_unpackTried = unpackTried; }
+	bool GetUnpackTried() { return m_nzbInfo ? m_nzbInfo->GetUnpackTried() : m_unpackTried; }
+	void SetUnpackTried(bool unpackTried)
+	{
+		m_unpackTried = unpackTried;
+		if (m_nzbInfo) m_nzbInfo->SetUnpackTried(unpackTried);
+	}
 	bool GetPassListTried() { return m_passListTried; }
 	void SetPassListTried(bool passListTried) { m_passListTried = passListTried; }
-	int GetLastUnpackStatus() { return m_lastUnpackStatus; }
-	void SetLastUnpackStatus(int unpackStatus) { m_lastUnpackStatus = unpackStatus; }
+	int GetLastUnpackStatus() { return m_nzbInfo ? m_nzbInfo->GetLastUnpackStatus() : m_lastUnpackStatus; }
+	void SetLastUnpackStatus(int unpackStatus)
+	{
+		m_lastUnpackStatus = unpackStatus;
+		if (m_nzbInfo) m_nzbInfo->SetLastUnpackStatus(unpackStatus);
+	}
 	bool GetNeedParCheck() { return m_needParCheck; }
 	void SetNeedParCheck(bool needParCheck) { m_needParCheck = needParCheck; }
+	bool GetNeedUnpack() const { return m_needUnpack; }
+	void SetNeedUnpack(bool needUnpack) { m_needUnpack = needUnpack; }
 	Thread* GetPostThread() { return m_postThread; }
 	void SetPostThread(Thread* postThread) { m_postThread = postThread; }
 	ParredFiles* GetParredFiles() { return &m_parredFiles; }
-	ExtractedArchives* GetExtractedArchives() { return &m_extractedArchives; }
+	ExtractedArchives* GetExtractedArchives() { return m_nzbInfo ? m_nzbInfo->GetExtractedArchives() : &m_extractedArchives; }
 
 private:
 	NzbInfo* m_nzbInfo = nullptr;
@@ -1126,6 +1144,7 @@ private:
 	bool m_passListTried = false;
 	int m_lastUnpackStatus = 0;
 	bool m_needParCheck = false;
+	bool m_needUnpack = false;
 	EStage m_stage = ptQueued;
 	CString m_progressLabel = "";
 	int m_fileProgress = 0;

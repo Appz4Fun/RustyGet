@@ -263,8 +263,9 @@ void Options::ConfigWarn(const char* msg, ...)
 	tmp2[1024-1] = '\0';
 	va_end(ap);
 
-	printf("%s(%i): %s\n", FileSystem::BaseFileName(m_configFilename), m_configLine, tmp2);
-	warn("%s(%i): %s", FileSystem::BaseFileName(m_configFilename), m_configLine, tmp2);
+	const char* filename = m_configFilename ? FileSystem::BaseFileName(m_configFilename) : "<noconfig>";
+	printf("%s(%i): %s\n", filename, m_configLine, tmp2);
+	warn("%s(%i): %s", filename, m_configLine, tmp2);
 }
 
 void Options::LocateOptionSrcPos(const char *optionName)
@@ -425,6 +426,8 @@ void Options::InitDefaults()
 	SetOption(TIMECORRECTION.data(), "0");
 	SetOption(PROPAGATIONDELAY.data(), "0");
 	SetOption(ARTICLECACHE.data(), "0");
+	SetOption(MEMORYPRESSUREINTERVAL.data(), "500");
+	SetOption(MEMORYPRESSUREPATH.data(), "");
 	SetOption(EVENTINTERVAL.data(), "0");
 	SetOption(SHELLOVERRIDE.data(), "");
 	SetOption(MONTHLYQUOTA.data(), "0");
@@ -718,6 +721,9 @@ void Options::InitOptions()
 	m_timeCorrection *= 60;
 	m_propagationDelay		= ParseIntValue(PROPAGATIONDELAY.data(), 10) * 60;
 	m_articleCache			= ParseIntValue(ARTICLECACHE.data(), 10);
+	m_memoryPressurePath	= GetOption(MEMORYPRESSUREPATH.data());
+	int memoryPressureInterval = ParseIntValue(MEMORYPRESSUREINTERVAL.data(), 10);
+	m_memoryPressureInterval = memoryPressureInterval > 0 ? memoryPressureInterval : 500;
 	m_eventInterval			= ParseIntValue(EVENTINTERVAL.data(), 10);
 	m_parBuffer				= ParseIntValue(PARBUFFER.data(), 10);
 	m_parThreads			= ParseIntValue(PARTHREADS.data(), 10);
@@ -2036,6 +2042,61 @@ void Options::CheckOptions()
 	if (!m_unpackPassFile.Empty() && !FileSystem::FileExists(m_unpackPassFile))
 	{
 		ConfigError("Invalid value for option \"UnpackPassFile\": %s. File not found", *m_unpackPassFile);
+	}
+
+	// Configuration Conflict Reconciliation (R7)
+	// Rule 7.1: ServerX.Encryption=no with ServerX.Cipher configured
+	for (int n = 1; ; n++)
+	{
+		BString<100> encOpt("Server%i.Encryption", n);
+		BString<100> cipherOpt("Server%i.Cipher", n);
+		const char* ntls = GetOption(encOpt);
+		const char* ncipher = GetOption(cipherOpt);
+		if (!ntls && !ncipher && !GetOption(BString<100>("Server%i.Host", n)) && !GetOption(BString<100>("Server%i.Name", n)))
+		{
+			break;
+		}
+
+		bool tls = false;
+		if (ntls)
+		{
+			tls = (bool)ParseEnumValue(encOpt, BoolCount, BoolNames, BoolValues);
+		}
+
+		if (!tls && ncipher && ncipher[0] != '\0')
+		{
+			LocateOptionSrcPos(cipherOpt);
+			ConfigWarn("Option %s ('%s') is ignored because %s is disabled for Server%i.",
+				*cipherOpt, ncipher, *encOpt, n);
+			SetOption(cipherOpt, "");
+		}
+	}
+
+	// Rule 7.2: Disable DupeSearch if HealthCheck=park
+	if (m_dupeSearch && m_healthCheck == hcPark)
+	{
+		LocateOptionSrcPos(DUPESEARCH.data());
+		ConfigWarn("Option 'DupeSearch' automatically disabled: 'HealthCheck' is set to 'park', which suspends failed downloads without triggering duplicate donor resolution.");
+		m_dupeSearch = false;
+		SetOption(DUPESEARCH.data(), "no");
+	}
+
+	// Rule 7.3: Force FlushQueue=yes if DirectWrite=yes
+	if (!m_flushQueue && m_directWrite)
+	{
+		LocateOptionSrcPos(FLUSHQUEUE.data());
+		ConfigWarn("Option 'FlushQueue=no' is incompatible with 'DirectWrite=yes'. Automatically enabling 'FlushQueue=yes' to ensure queue crash-recovery and prevent duplicate file corruption.");
+		m_flushQueue = true;
+		SetOption(FLUSHQUEUE.data(), "yes");
+	}
+
+	// Rule 7.4: DirectUnpack=yes with UnpackPauseQueue=no enforces runtime unpack mutex
+	if (!m_unpackPauseQueue && m_directUnpack)
+	{
+		LocateOptionSrcPos(DIRECTUNPACK.data());
+		ConfigWarn("Option 'DirectUnpack=yes' with 'UnpackPauseQueue=no' can cause severe disk thrashing. Unpack concurrency will be serialized across jobs to protect I/O throughput.");
+		m_unpackMutexEnforced = true;
+		SetOption("_UnpackMutexEnforced", "yes");
 	}
 }
 

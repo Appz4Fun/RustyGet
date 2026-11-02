@@ -78,7 +78,9 @@ bool DupeCoordinator::FilesOnDisk(NzbInfo* nzbInfo)
 
 NzbInfo* DupeCoordinator::DownloadedOnDisk(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 {
-	if (g_Options->GetHealthCheck() != Options::hcDupe || Util::EmptyStr(nzbInfo->GetDupeKey()))
+	bool dupeHealth = g_Options->GetHealthCheck() == Options::hcDupe ||
+		g_Options->GetHealthCheck() == Options::hcPark;
+	if (!dupeHealth || Util::EmptyStr(nzbInfo->GetDupeKey()))
 	{
 		return nullptr;
 	}
@@ -466,9 +468,13 @@ void DupeCoordinator::NzbCompleted(DownloadQueue* downloadQueue, NzbInfo* nzbInf
 	// one copy is downloaded and on disk: the others of its key still downloading,
 	// repairing or checking are stopped and kept as backups (B77: Sugar S01E01 - a
 	// copy kept repairing for minutes after another one had succeeded, then failed)
-	if (g_Options->GetHealthCheck() == Options::hcDupe && !Util::EmptyStr(nzbInfo->GetDupeKey()) &&
+	bool dupeHealth = g_Options->GetHealthCheck() == Options::hcDupe ||
+		g_Options->GetHealthCheck() == Options::hcPark;
+	if (dupeHealth && !Util::EmptyStr(nzbInfo->GetDupeKey()) &&
 		nzbInfo->GetDeleteStatus() == NzbInfo::dsNone && nzbInfo->IsDupeSuccess() && FilesOnDisk(nzbInfo))
 	{
+		DownloadQueue::EEditAction deleteAction = (g_Options->GetHealthCheck() == Options::hcPark) ?
+			DownloadQueue::eaGroupParkDelete : DownloadQueue::eaGroupDupeDelete;
 		std::vector<std::pair<int, bool>> others;	// id, in post-processing
 		for (NzbInfo* queued : downloadQueue->GetQueue())
 		{
@@ -478,17 +484,14 @@ void DupeCoordinator::NzbCompleted(DownloadQueue* downloadQueue, NzbInfo* nzbInf
 			{
 				queued->PrintMessage(Message::mkInfo, "Stopping %s: %s is downloaded and on disk",
 					queued->GetName(), nzbInfo->GetName());
+				queued->SetDeleteStatus(NzbInfo::dsDupe);
 				others.emplace_back(queued->GetId(), queued->GetPostInfo() != nullptr);
-				if (queued->GetPostInfo())
-				{
-					queued->SetDeleteStatus(NzbInfo::dsDupe);
-				}
 			}
 		}
 		for (const auto& other : others)
 		{
 			downloadQueue->EditEntry(other.first, other.second ? DownloadQueue::eaPostDelete :
-				DownloadQueue::eaGroupDupeDelete, nullptr);
+				deleteAction, nullptr);
 		}
 	}
 }

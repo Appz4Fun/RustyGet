@@ -1279,6 +1279,75 @@ int nzbget_rs_dupe_par_doomed(uint64_t dataBytes, uint64_t articleBytes, const u
 
 int nzbget_rs_dupe_outer_ok(const char* title, size_t titleLen, const char* name, size_t len);
 
+// Memory Pressure Monitor C ABI (Requirement R8)
+typedef enum {
+    NZBGET_RS_PRESSURE_NORMAL = 0,
+    NZBGET_RS_PRESSURE_CONSTRAINED = 1,
+    NZBGET_RS_PRESSURE_CRITICAL = 2
+} NzbgetRsPressureTier;
+
+int32_t nzbget_rs_memory_pressure_sample(void);
+uint32_t nzbget_rs_memory_pressure_effective_cache(uint32_t configured_mb);
+uint32_t nzbget_rs_memory_pressure_effective_par_buffer(uint32_t configured_mb);
+uint32_t nzbget_rs_memory_pressure_effective_downloads_limit(uint32_t configured_limit);
+void nzbget_rs_memory_pressure_set_mock_root(const char* mock_root);
+void nzbget_rs_memory_pressure_set_override(int32_t tier);
+void nzbget_rs_memory_pressure_trim_heap(void);
+
+// ============================================================================
+// Daemon Lifecycle Coordination C ABI (Requirement R2, Milestone M5)
+// ============================================================================
+
+typedef enum {
+    NZBGET_RS_PHASE_UNINITIALIZED = 0,
+    NZBGET_RS_PHASE_OPTIONS_LOGGING = 1,
+    NZBGET_RS_PHASE_SUBSYSTEMS_RECOVERY = 2,
+    NZBGET_RS_PHASE_SERVERS_ACTIVE = 3,
+    NZBGET_RS_PHASE_SHUTDOWN_RELOAD = 4,
+    NZBGET_RS_PHASE_TERMINATED = 5
+} NzbgetRsLifecyclePhase;
+
+typedef struct {
+    void (*set_process_args)(int argc, char* argv[], char* argp[]);
+    void (*util_init)(void);
+    int  (*nserv_main)(int argc, char* argv[]);
+    int  (*win_service_check)(int argc, char* argv[]);
+    int  (*phase1_init)(bool reloading);
+    int  (*phase2_subsystems_create_and_recover)(bool reloading);
+    int  (*phase3_server_activate)(void);
+    void (*phase4_shutdown)(bool reloading);
+    bool (*has_active_unpack)(void);
+    bool (*is_reloading)(void);
+    void (*stop_server)(bool reloading);
+    void (*reload)(void);
+    void (*exit_proc)(void);
+} NzbgetCLifecycleHooks;
+
+int nzbget_rs_main(int argc, char* argv[], char* argp[]);
+void nzbget_rs_register_lifecycle_hooks(const NzbgetCLifecycleHooks* hooks);
+NzbgetRsLifecyclePhase nzbget_rs_lifecycle_get_phase(void);
+void nzbget_rs_lifecycle_set_phase(NzbgetRsLifecyclePhase phase);
+bool nzbget_rs_is_reloading(void);
+bool nzbget_rs_is_stopping(void);
+void nzbget_rs_reload(void);
+void nzbget_rs_shutdown(void);
+void nzbget_rs_signal_notify(int signum);
+
+// C++ subsystem bridge functions exported to Rust
+void nzbget_c_set_process_args(int argc, char* argv[], char* argp[]);
+void nzbget_c_util_init(void);
+int  nzbget_c_nserv_main(int argc, char* argv[]);
+int  nzbget_c_win_service_check(int argc, char* argv[]);
+int  nzbget_c_phase1_init(bool reloading);
+int  nzbget_c_phase2_subsystems_create_and_recover(bool reloading);
+int  nzbget_c_phase3_server_activate(void);
+void nzbget_c_phase4_shutdown(bool reloading);
+bool nzbget_c_has_active_unpack(void);
+bool nzbget_c_is_reloading(void);
+void nzbget_c_stop_server(bool reloading);
+void nzbget_c_reload(void);
+void nzbget_c_exit_proc(void);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

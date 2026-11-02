@@ -1733,6 +1733,9 @@ void StatusXmlCommand::Execute()
 		"<member><name>ArticleCacheLo</name><value><i4>%u</i4></value></member>\n"
 		"<member><name>ArticleCacheHi</name><value><i4>%u</i4></value></member>\n"
 		"<member><name>ArticleCacheMB</name><value><i4>%i</i4></value></member>\n"
+		"<member><name>MemoryPressure</name><value><string>%s</string></value></member>\n"
+		"<member><name>EffectiveArticleCacheMB</name><value><i4>%i</i4></value></member>\n"
+		"<member><name>EffectiveParBufferMB</name><value><i4>%i</i4></value></member>\n"
 		"<member><name>DownloadRate</name><value><i4>%i</i4></value></member>\n"				// deprecated
 		"<member><name>DownloadRateLo</name><value><i4>%i</i4></value></member>\n"
 		"<member><name>DownloadRateHi</name><value><i4>%i</i4></value></member>\n"
@@ -1795,6 +1798,9 @@ void StatusXmlCommand::Execute()
 		"\"ArticleCacheLo\" : %u,\n"
 		"\"ArticleCacheHi\" : %u,\n"
 		"\"ArticleCacheMB\" : %i,\n"
+		"\"MemoryPressure\" : \"%s\",\n"
+		"\"EffectiveArticleCacheMB\" : %i,\n"
+		"\"EffectiveParBufferMB\" : %i,\n"
 		"\"DownloadRate\" : %i,\n"				// deprecated
 		"\"DownloadRateLo\" : %u,\n"
 		"\"DownloadRateHi\" : %u,\n"
@@ -1874,6 +1880,10 @@ void StatusXmlCommand::Execute()
 	uint32 articleCacheHi, articleCacheLo;
 	Util::SplitInt64(articleCache, &articleCacheHi, &articleCacheLo);
 	int articleCacheMBytes = (int)(articleCache / 1024 / 1024);
+
+	const char* memoryPressure = g_MemoryMonitor ? g_MemoryMonitor->GetTierName() : "NORMAL";
+	int effectiveArticleCacheMB = g_MemoryMonitor ? g_MemoryMonitor->GetEffectiveArticleCacheMB() : g_Options->GetArticleCache();
+	int effectiveParBufferMB = g_MemoryMonitor ? g_MemoryMonitor->GetEffectiveParBufferMB(g_Options->GetParBuffer()) : g_Options->GetParBuffer();
 
 	int64 downloadRate = g_StatMeter->CalcCurrentDownloadSpeed();
 	uint32 downloadRateHi, downloadRateLo;
@@ -1970,6 +1980,7 @@ void StatusXmlCommand::Execute()
 		forcedSizeHi, forcedMBytes, downloadedSizeLo, downloadedSizeHi, downloadedMBytes,
 		monthSizeLo, monthSizeHi, monthMBytes, daySizeLo, daySizeHi, dayMBytes,
 		articleCacheLo, articleCacheHi, articleCacheMBytes,
+		memoryPressure, effectiveArticleCacheMB, effectiveParBufferMB,
 		Util::SafeIntCast<int64, int32>(downloadRate),
 		downloadRateLo,
 		downloadRateHi,
@@ -3732,6 +3743,151 @@ void SaveConfigXmlCommand::Execute()
 	{
 		BuildErrorResponse(2, "Invalid parameter");
 		return;
+	}
+
+	// Helper lambda to parse boolean option strings
+	auto parseBool = [](const char* val, bool defVal) -> bool
+	{
+		if (!val) return defVal;
+		if (!strcasecmp(val, "yes") || !strcasecmp(val, "true") || !strcmp(val, "1") ||
+			!strcasecmp(val, "on") || !strcasecmp(val, "enable") || !strcasecmp(val, "enabled"))
+		{
+			return true;
+		}
+		if (!strcasecmp(val, "no") || !strcasecmp(val, "false") || !strcmp(val, "0") ||
+			!strcasecmp(val, "off") || !strcasecmp(val, "disable") || !strcasecmp(val, "disabled"))
+		{
+			return false;
+		}
+		return defVal;
+	};
+
+	// Configuration Conflict Validation (R7)
+	// Rule 7.1: ServerX.Encryption=no with ServerX.Cipher configured
+	std::set<int> checkedServers;
+	for (const auto& entry : optEntries)
+	{
+		const char* entryName = entry.GetName();
+		if (entryName && !strncasecmp(entryName, "Server", 6))
+		{
+			int sIndex = 0;
+			if (sscanf(entryName + 6, "%d.", &sIndex) == 1 && sIndex > 0)
+			{
+				if (!checkedServers.insert(sIndex).second) continue;
+
+				BString<100> cipherOpt("Server%i.Cipher", sIndex);
+				BString<100> encOpt("Server%i.Encryption", sIndex);
+
+				const char* cipherVal = nullptr;
+				if (Options::OptEntry* cEntry = optEntries.FindOption(*cipherOpt))
+				{
+					cipherVal = cEntry->GetValue();
+				}
+				else if (g_Options)
+				{
+					cipherVal = g_Options->GetOption(*cipherOpt);
+				}
+
+				if (cipherVal && cipherVal[0] != '\0')
+				{
+					bool encDisabled = false;
+					if (Options::OptEntry* eEntry = optEntries.FindOption(*encOpt))
+					{
+						encDisabled = !parseBool(eEntry->GetValue(), true);
+					}
+					else if (g_Options)
+					{
+						const char* optVal = g_Options->GetOption(*encOpt);
+						if (optVal)
+						{
+							encDisabled = !parseBool(optVal, true);
+						}
+					}
+
+					if (encDisabled)
+					{
+						BuildErrorResponse(3, "Configuration conflict: Server%i.Cipher cannot be configured when Server%i.Encryption is disabled. Clear the cipher suite or enable encryption.", sIndex, sIndex);
+						return;
+					}
+				}
+			}
+		}
+	}
+
+	// Rule 7.2: DupeSearch=yes with HealthCheck=park
+	bool hasDupeSearch = (optEntries.FindOption("DupeSearch") != nullptr);
+	bool hasHealthCheck = (optEntries.FindOption("HealthCheck") != nullptr);
+	if (hasDupeSearch || hasHealthCheck)
+	{
+		bool dupeSearch = g_Options ? g_Options->GetDupeSearch() : false;
+		if (Options::OptEntry* entry = optEntries.FindOption("DupeSearch"))
+		{
+			dupeSearch = parseBool(entry->GetValue(), false);
+		}
+
+		bool healthCheckPark = false;
+		if (Options::OptEntry* entry = optEntries.FindOption("HealthCheck"))
+		{
+			healthCheckPark = entry->GetValue() && (!strcasecmp(entry->GetValue(), "park") || !strcasecmp(entry->GetValue(), "hcpark"));
+		}
+		else if (g_Options)
+		{
+			healthCheckPark = (g_Options->GetHealthCheck() == Options::hcPark);
+		}
+
+		if (dupeSearch && healthCheckPark)
+		{
+			BuildErrorResponse(3, "Configuration conflict: 'DupeSearch=yes' is incompatible with 'HealthCheck=park'. DupeSearch requires 'HealthCheck=dupe' to fetch alternative donor releases when an NZB fails.");
+			return;
+		}
+	}
+
+	// Rule 7.3: DirectWrite=yes with FlushQueue=no
+	bool hasFlushQueue = (optEntries.FindOption("FlushQueue") != nullptr);
+	bool hasDirectWrite = (optEntries.FindOption("DirectWrite") != nullptr);
+	if (hasFlushQueue || hasDirectWrite)
+	{
+		bool flushQueue = g_Options ? g_Options->GetFlushQueue() : true;
+		if (Options::OptEntry* entry = optEntries.FindOption("FlushQueue"))
+		{
+			flushQueue = parseBool(entry->GetValue(), true);
+		}
+
+		bool directWrite = g_Options ? g_Options->GetDirectWrite() : true;
+		if (Options::OptEntry* entry = optEntries.FindOption("DirectWrite"))
+		{
+			directWrite = parseBool(entry->GetValue(), true);
+		}
+
+		if (directWrite && !flushQueue)
+		{
+			BuildErrorResponse(3, "Configuration conflict: 'DirectWrite=yes' requires 'FlushQueue=yes'. Disabling queue flushing during direct disk writes causes disk state desynchronization and corruption upon unexpected shutdown.");
+			return;
+		}
+	}
+
+	// Rule 7.4: DirectUnpack=yes with UnpackPauseQueue=no
+	bool hasUnpackPauseQueue = (optEntries.FindOption("UnpackPauseQueue") != nullptr);
+	bool hasDirectUnpack = (optEntries.FindOption("DirectUnpack") != nullptr);
+	if (hasUnpackPauseQueue || hasDirectUnpack)
+	{
+		bool unpackPauseQueue = g_Options ? g_Options->GetUnpackPauseQueue() : false;
+		if (Options::OptEntry* entry = optEntries.FindOption("UnpackPauseQueue"))
+		{
+			unpackPauseQueue = parseBool(entry->GetValue(), false);
+		}
+
+		bool directUnpack = g_Options ? g_Options->GetDirectUnpack() : false;
+		if (Options::OptEntry* entry = optEntries.FindOption("DirectUnpack"))
+		{
+			directUnpack = parseBool(entry->GetValue(), false);
+		}
+
+		if (directUnpack && !unpackPauseQueue)
+		{
+			BuildErrorResponse(3, "Configuration conflict: 'DirectUnpack=yes' requires 'UnpackPauseQueue=yes'. Disabling queue pause during direct unpack causes concurrent unpack disk thrashing.");
+			return;
+		}
 	}
 
 	// save to config file

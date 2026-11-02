@@ -24,6 +24,16 @@
 #include "Options.h"
 #include "StackTrace.h"
 
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#else
+extern void Reload();
+#endif
+
+#include <atomic>
+#include <signal.h>
+#include <cstring>
+
 extern void ExitProc();
 
 #ifdef WIN32
@@ -166,6 +176,8 @@ void InstallErrorHandler()
 
 #else
 
+static std::atomic<bool> s_shutdownInitiated{false};
+
 #ifdef DEBUG
 typedef void(*sighandler)(int);
 std::vector<sighandler> SignalProcList;
@@ -226,15 +238,39 @@ void SignalProc(int signum)
 {
 	switch (signum)
 	{
-		case SIGINT:
-			signal(SIGINT, SIG_DFL);   // Reset the signal handler
-			ExitProc();
+#ifdef SIGHUP
+		case SIGHUP:
+			if (s_shutdownInitiated.load())
+			{
+				return;
+			}
+#ifdef NZBGET_USE_RUST
+			nzbget_rs_signal_notify(signum);
+#else
+			Reload();
+#endif
 			break;
+#endif
 
+		case SIGINT:
 		case SIGTERM:
-			signal(SIGTERM, SIG_DFL);   // Reset the signal handler
+		{
+			if (s_shutdownInitiated.exchange(true))
+			{
+				return; // Absorb duplicate signal during storm
+			}
+			signal(SIGINT, SIG_IGN);
+			signal(SIGTERM, SIG_IGN);
+#ifdef SIGHUP
+			signal(SIGHUP, SIG_IGN);
+#endif
+#ifdef NZBGET_USE_RUST
+			nzbget_rs_signal_notify(signum);
+#else
 			ExitProc();
+#endif
 			break;
+		}
 
 		case SIGCHLD:
 			// ignoring
@@ -258,8 +294,24 @@ void InstallErrorHandler()
 	}
 #endif
 
-	signal(SIGINT, SignalProc);
-	signal(SIGTERM, SignalProc);
+	s_shutdownInitiated.store(false);
+
+	struct sigaction sa;
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = SignalProc;
+	sigemptyset(&sa.sa_mask);
+	sigaddset(&sa.sa_mask, SIGINT);
+	sigaddset(&sa.sa_mask, SIGTERM);
+#ifdef SIGHUP
+	sigaddset(&sa.sa_mask, SIGHUP);
+#endif
+	sa.sa_flags = SA_RESTART;
+
+	sigaction(SIGINT, &sa, nullptr);
+	sigaction(SIGTERM, &sa, nullptr);
+#ifdef SIGHUP
+	sigaction(SIGHUP, &sa, nullptr);
+#endif
 	signal(SIGPIPE, SIG_IGN);
 #ifdef DEBUG
 	if (g_Options->GetCrashTrace())

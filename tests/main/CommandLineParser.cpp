@@ -23,6 +23,9 @@
 
 #include <boost/test/unit_test.hpp>
 #include "CommandLineParser.h"
+#include "Log.h"
+#include "Options.h"
+#include "FileSystem.h"
 
 BOOST_AUTO_TEST_SUITE(MainTest)
 
@@ -99,6 +102,41 @@ BOOST_AUTO_TEST_CASE(OptionAfterArguments)
 	BOOST_REQUIRE_EQUAL(editParser.GetEditQueueIdList()->size(), 3);
 	BOOST_CHECK_EQUAL(editParser.GetEditQueueIdList()->at(0), 1);
 	BOOST_CHECK_EQUAL(editParser.GetEditQueueIdList()->at(2), 3);
+}
+
+BOOST_AUTO_TEST_CASE(ClientModeNoLogFileBindingTest)
+{
+	struct RestoreGlobals
+	{
+		Options* m_options;
+		Log* m_log;
+		RestoreGlobals() : m_options(g_Options), m_log(g_Log) {}
+		~RestoreGlobals()
+		{
+			g_Options = m_options;
+			g_Log = m_log;
+			FileSystem::DeleteFile("test_client_mode.log");
+		}
+	} restore;
+
+	Log log;
+	Options::CmdOptList cmdOpts;
+	cmdOpts.push_back("WriteLog=rotate");
+	cmdOpts.push_back("LogFile=test_client_mode.log");
+	Options options(&cmdOpts, nullptr);
+	options.SetServerMode(false);
+	g_Options = &options;
+
+	log.InitOptions();
+
+	// In client mode, LogFile must not be bound
+	BOOST_CHECK(log.GetLogFilename().empty());
+	BOOST_CHECK(!FileSystem::FileExists("test_client_mode.log"));
+
+	// In server mode, LogFile must be bound
+	options.SetServerMode(true);
+	log.InitOptions();
+	BOOST_CHECK(!log.GetLogFilename().empty());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

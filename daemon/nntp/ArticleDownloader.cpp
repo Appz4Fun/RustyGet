@@ -399,6 +399,15 @@ ArticleDownloader::EStatus ArticleDownloader::Download()
 
 	while (!IsStopped() && !m_decoder.GetEof())
 	{
+		// Memory pressure throttling: pace network reads if memory is Critical and cache is draining
+		while (!IsStopped() && g_MemoryMonitor &&
+			g_MemoryMonitor->GetTier() == NZBGET_RS_PRESSURE_CRITICAL &&
+			g_ArticleCache && g_ArticleCache->GetAllocated() > 0)
+		{
+			SetLastUpdateTimeNow();
+			Util::Sleep(25);
+		}
+
 		// throttle the bandwidth
 		while (!IsStopped() && (g_WorkState->GetSpeedLimit() > 0.0f) &&
 			(g_StatMeter->CalcCurrentDownloadSpeed() > g_WorkState->GetSpeedLimit() ||

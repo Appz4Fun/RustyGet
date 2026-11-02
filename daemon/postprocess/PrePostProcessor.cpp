@@ -104,6 +104,7 @@ void PrePostProcessor::WaitJobs()
 	{
 		{
 			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+			std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
 			if (m_activeJobs.empty())
 			{
 				break;
@@ -116,6 +117,7 @@ void PrePostProcessor::WaitJobs()
 	// kill remaining post-processing jobs; not safe but we can't wait any longer
 	{
 		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+		std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
 		for (NzbInfo* postJob : m_activeJobs)
 		{
 			if (postJob->GetPostInfo() && postJob->GetPostInfo()->GetPostThread())
@@ -168,6 +170,7 @@ void PrePostProcessor::Stop()
 
 	{
 		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+		std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
 
 		for (NzbInfo* postJob : m_activeJobs)
 		{
@@ -193,6 +196,42 @@ void PrePostProcessor::Stop()
 	// Resume Run() to exit it
 	std::lock_guard<std::mutex> guard(m_waitMutex);
 	m_waitCond.notify_all();
+}
+
+bool PrePostProcessor::HasActiveUnpack()
+{
+	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+	return HasActiveUnpack(downloadQueue);
+}
+
+bool PrePostProcessor::HasActiveUnpack(DownloadQueue* downloadQueue)
+{
+	// Check post-processing active jobs for UnpackController
+	{
+		std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
+		for (NzbInfo* postJob : m_activeJobs)
+		{
+			if (postJob->GetPostInfo() && postJob->GetPostInfo()->GetStage() == PostInfo::ptUnpacking)
+			{
+				return true;
+			}
+		}
+	}
+
+	// Check direct unpack jobs: is unrar actively extracting a volume?
+	for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
+	{
+		if (nzbInfo->GetUnpackThread())
+		{
+			DirectUnpack* directUnpack = (DirectUnpack*)nzbInfo->GetUnpackThread();
+			if (directUnpack->IsUnpacking())
+			{
+				return true;
+			}
+		}
+	}
+
+	return false;
 }
 
 /**
@@ -291,16 +330,19 @@ void PrePostProcessor::DownloadQueueUpdate(void* aspect)
 		}
 
 #ifndef DISABLE_PARCHECK
-		for (NzbInfo* postJob : m_activeJobs)
 		{
-			if (postJob && queueAspect->fileInfo->GetNzbInfo() == postJob &&
-				postJob->GetPostInfo() && postJob->GetPostInfo()->GetPostThread() &&
-				postJob->GetPostInfo()->GetStage() >= PostInfo::ptLoadingPars &&
-				postJob->GetPostInfo()->GetStage() <= PostInfo::ptVerifyingRepaired &&
-				((RepairController*)postJob->GetPostInfo()->GetPostThread())->AddPar(
-					queueAspect->fileInfo, queueAspect->action == DownloadQueue::eaFileDeleted))
+			std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
+			for (NzbInfo* postJob : m_activeJobs)
 			{
-				return;
+				if (postJob && queueAspect->fileInfo->GetNzbInfo() == postJob &&
+					postJob->GetPostInfo() && postJob->GetPostInfo()->GetPostThread() &&
+					postJob->GetPostInfo()->GetStage() >= PostInfo::ptLoadingPars &&
+					postJob->GetPostInfo()->GetStage() <= PostInfo::ptVerifyingRepaired &&
+					((RepairController*)postJob->GetPostInfo()->GetPostThread())->AddPar(
+						queueAspect->fileInfo, queueAspect->action == DownloadQueue::eaFileDeleted))
+				{
+					return;
+				}
 			}
 		}
 #endif
@@ -430,7 +472,10 @@ void PrePostProcessor::NzbDownloaded(DownloadQueue* downloadQueue, NzbInfo* nzbI
 		if (nzbInfo->GetUnpackThread())
 		{
 			nzbInfo->GetPostInfo()->SetWorking(true);
-			m_activeJobs.push_back(nzbInfo);
+			{
+				std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
+				m_activeJobs.push_back(nzbInfo);
+			}
 			((DirectUnpack*)nzbInfo->GetUnpackThread())->NzbDownloaded(downloadQueue, nzbInfo);
 		}
 
@@ -442,6 +487,7 @@ void PrePostProcessor::NzbDownloaded(DownloadQueue* downloadQueue, NzbInfo* nzbI
 			nzbInfo->GetPostInfo()->SetWorking(true);
 			if (!nzbInfo->GetUnpackThread())
 			{
+				std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
 				m_activeJobs.push_back(nzbInfo);
 			}
 		}
@@ -615,6 +661,7 @@ void PrePostProcessor::DeleteCleanup(NzbInfo* nzbInfo)
 void PrePostProcessor::CheckRequestPar(DownloadQueue* downloadQueue)
 {
 #ifndef DISABLE_PARCHECK
+	std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
 	for (NzbInfo* postJob : m_activeJobs)
 	{
 		PostInfo* postInfo = postJob->GetPostInfo();
@@ -662,6 +709,7 @@ void PrePostProcessor::CheckRequestPar(DownloadQueue* downloadQueue)
 
 void PrePostProcessor::CleanupJobs(DownloadQueue* downloadQueue)
 {
+	std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
 	m_activeJobs.erase(std::remove_if(m_activeJobs.begin(), m_activeJobs.end(),
 		[processor = this, downloadQueue](NzbInfo* postJob)
 		{
@@ -701,6 +749,7 @@ void PrePostProcessor::CleanupJobs(DownloadQueue* downloadQueue)
 
 bool PrePostProcessor::CanRunMoreJobs(bool* allowPar)
 {
+	std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
 	int totalJobs = (int)m_activeJobs.size();
 	int parJobs = 0;
 	int otherJobs = 0;
@@ -740,6 +789,9 @@ bool PrePostProcessor::CanRunMoreJobs(bool* allowPar)
 NzbInfo* PrePostProcessor::PickNextJob(DownloadQueue* downloadQueue, bool allowPar)
 {
 	NzbInfo* nzbInfo = nullptr;
+	std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
+
+	bool hasActiveUnpack = HasActiveUnpack(downloadQueue);
 
 	for (NzbInfo* nzbInfo1: downloadQueue->GetQueue())
 	{
@@ -754,6 +806,7 @@ NzbInfo* PrePostProcessor::PickNextJob(DownloadQueue* downloadQueue, bool allowP
 			(!nzbInfo || nzbInfo1->GetPriority() > nzbInfo->GetPriority()) &&
 			(!g_WorkState->GetPausePostProcess() || nzbInfo1->GetForcePriority()) &&
 			(allowPar || !nzbInfo1->GetPostInfo()->GetNeedParCheck()) &&
+			(!hasActiveUnpack || !nzbInfo1->GetPostInfo()->GetNeedUnpack()) &&
 			(std::find(m_activeJobs.begin(), m_activeJobs.end(), nzbInfo1) == m_activeJobs.end()) &&
 			nzbInfo1->IsDownloadCompleted(true))
 		{
@@ -768,10 +821,18 @@ void PrePostProcessor::CheckPostQueue()
 {
 	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
 
-	size_t countBefore = m_activeJobs.size();
+	size_t countBefore;
+	{
+		std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
+		countBefore = m_activeJobs.size();
+	}
 	CheckRequestPar(downloadQueue);
 	CleanupJobs(downloadQueue);
-	bool changed = m_activeJobs.size() != countBefore;
+	bool changed;
+	{
+		std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
+		changed = m_activeJobs.size() != countBefore;
+	}
 
 	bool allowPar;
 	while (CanRunMoreJobs(&allowPar) && !IsStopped())
@@ -782,7 +843,10 @@ void PrePostProcessor::CheckPostQueue()
 			break;
 		}
 
-		m_activeJobs.push_back(postJob);
+		{
+			std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
+			m_activeJobs.push_back(postJob);
+		}
 
 		PostInfo* postInfo = postJob->GetPostInfo();
 		if (postInfo->GetStage() == PostInfo::ptQueued &&
@@ -801,7 +865,10 @@ void PrePostProcessor::CheckPostQueue()
 		UpdatePauseState();
 	}
 
-	Util::SetStandByMode(m_activeJobs.empty());
+	{
+		std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
+		Util::SetStandByMode(m_activeJobs.empty());
+	}
 }
 
 #ifndef DISABLE_PARCHECK
@@ -1186,6 +1253,12 @@ void PrePostProcessor::StartJob(DownloadQueue* downloadQueue, PostInfo* postInfo
 
 	if (unpack)
 	{
+		if (HasActiveUnpack(downloadQueue))
+		{
+			postInfo->SetNeedUnpack(true);
+			return;
+		}
+		postInfo->SetNeedUnpack(false);
 		EnterStage(downloadQueue, postInfo, PostInfo::ptUnpacking);
 		UnpackController::StartJob(postInfo);
 	}
@@ -1240,6 +1313,7 @@ void PrePostProcessor::JobCompleted(DownloadQueue* downloadQueue, PostInfo* post
 void PrePostProcessor::UpdatePauseState()
 {
 	bool needPause = false;
+	std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
 	for (NzbInfo* postJob : m_activeJobs)
 	{
 		switch (postJob->GetPostInfo()->GetStage())
@@ -1349,12 +1423,15 @@ bool PrePostProcessor::PostQueueDelete(DownloadQueue* downloadQueue, IdList* idL
 
 					JobCompleted(downloadQueue, postInfo);
 
-					m_activeJobs.erase(std::remove_if(m_activeJobs.begin(), m_activeJobs.end(),
-						[postInfo](NzbInfo* postJob)
-						{
-							return postInfo == postJob->GetPostInfo();
-						}),
-						m_activeJobs.end());
+					{
+						std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
+						m_activeJobs.erase(std::remove_if(m_activeJobs.begin(), m_activeJobs.end(),
+							[postInfo](NzbInfo* postJob)
+							{
+								return postInfo == postJob->GetPostInfo();
+							}),
+							m_activeJobs.end());
+					}
 
 					ok = true;
 				}
@@ -1384,7 +1461,8 @@ void PrePostProcessor::FileDownloaded(DownloadQueue* downloadQueue, NzbInfo* nzb
 		if (nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsNone &&
 			nzbInfo->GetDirectRenameStatus() != NzbInfo::tsRunning &&
 			DirectUnpack::IsArchiveFilename(fileInfo->GetFilename()) &&
-			CanRunMoreJobs(&allowPar))
+			CanRunMoreJobs(&allowPar) &&
+			!HasActiveUnpack(downloadQueue))
 		{
 			NzbParameter* unpackParameter = nzbInfo->GetParameters()->Find("*Unpack:");
 			bool wantUnpack = !(unpackParameter && !strcasecmp(unpackParameter->GetValue(), "no"));

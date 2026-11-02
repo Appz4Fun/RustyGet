@@ -6635,6 +6635,55 @@ pub unsafe extern "C" fn nzbget_rs_dupe_outer_ok(title: *const c_char, title_len
         && (!crate::releasename::readable(name) || crate::dupeidentity::consistent(title,name)))
 }
 
+// Memory Pressure Monitor C ABI (Requirement R8)
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_memory_pressure_sample() -> i32 {
+    let metrics = crate::memory_pressure::sample_system_metrics(None);
+    crate::memory_pressure::evaluate_state(&metrics) as i32
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_memory_pressure_effective_cache(configured_mb: u32) -> u32 {
+    let tier = crate::memory_pressure::get_last_tier();
+    let headroom = crate::memory_pressure::get_last_headroom_mb();
+    crate::memory_pressure::calculate_effective_cache_limit(configured_mb, tier, headroom)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_memory_pressure_effective_par_buffer(configured_mb: u32) -> u32 {
+    let tier = crate::memory_pressure::get_last_tier();
+    let headroom = crate::memory_pressure::get_last_headroom_mb();
+    crate::memory_pressure::calculate_effective_par_buffer(configured_mb, tier, headroom)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_memory_pressure_effective_downloads_limit(configured_limit: u32) -> u32 {
+    let tier = crate::memory_pressure::get_last_tier();
+    crate::memory_pressure::calculate_effective_downloads_limit(configured_limit, tier)
+}
+
+/// # Safety
+/// mock_root must be null or point to a readable NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_memory_pressure_set_mock_root(mock_root: *const c_char) {
+    if mock_root.is_null() {
+        crate::memory_pressure::set_mock_root(None);
+    } else if let Ok(s) = CStr::from_ptr(mock_root).to_str() {
+        crate::memory_pressure::set_mock_root(Some(s));
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_memory_pressure_set_override(tier: i32) {
+    crate::memory_pressure::set_override_tier(tier);
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_memory_pressure_trim_heap() {
+    crate::memory_pressure::trim_heap();
+}
+
 // Version 1 purge preflight ABI. Trusted guarded host snapshots only.
 use crate::dupepurge as purge;
 #[repr(C)]
@@ -8465,5 +8514,69 @@ mod purge_snapshot_review_tests {
         assert_eq!(owned.roots.len(), 1); assert_eq!(owned.roots[0].id, 1);
         assert_eq!(owned.roots[0].descriptor_identity, b"root"); assert!(owned.roots[0].configured_container);
         assert_ne!(owned.roots[0].descriptor_identity.as_ptr(), identity.as_ptr());
+    }
+}
+
+// ============================================================================
+// Daemon Lifecycle Coordination C ABI (Requirement R2, Milestone M5)
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_register_lifecycle_hooks(hooks: *const crate::lifecycle::LifecycleHooks) {
+    if let Some(hooks) = hooks.as_ref() {
+        crate::lifecycle::register_hooks(*hooks);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_lifecycle_get_phase() -> u32 {
+    crate::lifecycle::LifecycleManager::global().get_phase() as u32
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_lifecycle_set_phase(phase: u32) {
+    crate::lifecycle::LifecycleManager::global().set_phase(phase.into());
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_is_reloading() -> bool {
+    crate::lifecycle::LifecycleManager::global().is_reloading()
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_is_stopping() -> bool {
+    crate::lifecycle::LifecycleManager::global().is_stopping()
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_reload() {
+    crate::lifecycle::LifecycleManager::global().trigger_reload();
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_shutdown() {
+    crate::lifecycle::LifecycleManager::global().trigger_shutdown();
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_signal_notify(signum: std::ffi::c_int) {
+    crate::lifecycle::LifecycleManager::global().notify_signal(signum);
+}
+
+#[cfg(test)]
+mod lifecycle_ffi_tests {
+    use super::*;
+
+    #[test]
+    fn test_lifecycle_ffi_queries() {
+        nzbget_rs_lifecycle_set_phase(1);
+        assert_eq!(nzbget_rs_lifecycle_get_phase(), 1);
+        nzbget_rs_lifecycle_set_phase(0);
+        assert_eq!(nzbget_rs_lifecycle_get_phase(), 0);
+
+        assert!(!nzbget_rs_is_reloading());
+        assert!(!nzbget_rs_is_stopping());
+
+        nzbget_rs_signal_notify(0); // no-op for signum 0
     }
 }

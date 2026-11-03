@@ -50,6 +50,7 @@ pub mod wildmask;
 
 pub mod dupeidentity;
 pub mod dupefallback;
+pub mod streamrepair;
 
 pub mod deadpostings;
 pub mod dupewatch;

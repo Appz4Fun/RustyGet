@@ -1446,6 +1446,96 @@ int nzbget_rs_article_downloader_validate_yenc(
     int fallback_round, int64_t dupe_expected_offset, int64_t dupe_expected_end,
     int64_t* out_offset, int* out_size);
 
+typedef struct NzbgetRsMemberRange {
+    int32_t member_index;
+    int64_t offset;
+    int64_t size;
+} NzbgetRsMemberRange;
+
+typedef struct NzbgetRsContentRun {
+    int64_t inner_offset;
+    int32_t member_index;
+    int64_t member_offset;
+    int64_t size;
+} NzbgetRsContentRun;
+
+int nzbget_rs_stream_is_eligible(const char* filename);
+size_t nzbget_rs_stream_compute_holes(
+    const NzbgetRsByteRange* covered, size_t count, int64_t file_size,
+    NzbgetRsByteRange* out_holes, size_t cap);
+int64_t nzbget_rs_stream_total_size(const NzbgetRsByteRange* ranges, size_t count);
+int nzbget_rs_stream_intersects_any(
+    NzbgetRsByteRange range, const NzbgetRsByteRange* ranges, size_t count);
+size_t nzbget_rs_stream_estimate_donor_ranges(
+    const int* article_sizes, size_t count, int64_t target_file_size,
+    NzbgetRsByteRange* out_ranges);
+size_t nzbget_rs_stream_select_probe_parts(
+    const NzbgetRsByteRange* donor_ranges, size_t donor_count,
+    const NzbgetRsByteRange* holes, size_t hole_count, int count,
+    int* out_parts, size_t cap);
+size_t nzbget_rs_stream_subtract_covered(
+    const NzbgetRsByteRange* holes, size_t hole_count, NzbgetRsByteRange covered,
+    NzbgetRsByteRange* out_holes, size_t cap);
+NzbgetRsBuf nzbget_rs_stream_volume_set_key(const char* filename);
+int nzbget_rs_stream_decoded_size_plausible(int64_t decoded_size, int64_t encoded_size);
+NzbgetRsBuf nzbget_rs_stream_suffix_key(const char* filename);
+NzbgetRsBuf nzbget_rs_stream_volume_key(const char* filename);
+int nzbget_rs_stream_exceeds_decompress_cap(
+    int64_t total_bytes, int64_t next_chunk, int64_t total_extent, int64_t member_declared_size);
+
+size_t nzbget_rs_composite_to_members(
+    const int32_t* member_indexes, const int64_t* disk_bases, const int64_t* member_sizes,
+    size_t member_count, NzbgetRsByteRange range, NzbgetRsMemberRange* out_pieces, size_t cap);
+int nzbget_rs_holed_source_intersects(
+    const NzbgetRsByteRange* holes, size_t hole_count, int64_t offset, int64_t size);
+size_t nzbget_rs_content_map_to_inner(
+    const NzbgetRsContentRun* runs, size_t run_count, int32_t member_index,
+    NzbgetRsByteRange member_range, NzbgetRsByteRange* out_ranges, size_t cap);
+size_t nzbget_rs_content_map_from_inner(
+    const NzbgetRsContentRun* runs, size_t run_count, NzbgetRsByteRange inner_range,
+    NzbgetRsMemberRange* out_pieces, size_t cap);
+size_t nzbget_rs_content_map_cipher_range(
+    const NzbgetRsContentRun* runs, const int64_t* cipher_data_offsets,
+    const int64_t* cipher_sizes, const uint8_t* has_crypto, size_t run_count,
+    NzbgetRsByteRange cipher_range, NzbgetRsMemberRange* out_pieces, size_t cap);
+void nzbget_rs_content_mapper_group_sets(
+    const char* const* member_names, size_t count, void* ctx,
+    void (*on_set)(void* ctx, int32_t format, const int32_t* members, size_t member_count));
+size_t nzbget_rs_content_mapper_coalesce_ranges(
+    const NzbgetRsByteRange* ranges, size_t count, NzbgetRsByteRange* out_ranges, size_t cap);
+int nzbget_rs_content_mapper_build_zip_map(
+    const int32_t* member_indexes, const int64_t* member_sizes, size_t count,
+    void* ctx,
+    int (*read_cb)(void* ctx, int32_t member_index, int64_t offset, uint8_t* buf, int64_t size),
+    void (*on_success)(void* ctx, const char* inner_name, int64_t inner_size,
+        const NzbgetRsContentRun* runs, size_t run_count),
+    void (*on_error)(void* ctx, const char* skip_reason));
+int nzbget_rs_content_mapper_build_seven_zip_map(
+    const int32_t* member_indexes, const int64_t* member_sizes, size_t count,
+    void* ctx,
+    int (*read_cb)(void* ctx, int32_t member_index, int64_t offset, uint8_t* buf, int64_t size),
+    void (*on_success)(void* ctx, const char* inner_name, int64_t inner_size,
+        const NzbgetRsContentRun* runs, size_t run_count),
+    void (*on_error)(void* ctx, const char* skip_reason));
+
+size_t nzbget_rs_stream_build_probe_windows(
+    int64_t inner_size, const NzbgetRsByteRange* holes, size_t hole_count,
+    const NzbgetRsByteRange* original_holes, size_t orig_count,
+    int probe_count, int64_t min_probe_compare_bytes,
+    NzbgetRsByteRange* out_windows, size_t cap);
+int64_t nzbget_rs_stream_plain_compare_floor(
+    const NzbgetRsContentRun* runs, size_t run_count,
+    const NzbgetRsByteRange* original_inner_holes, size_t orig_count,
+    const NzbgetRsByteRange* windows, size_t window_count);
+int64_t nzbget_rs_stream_encrypted_chain_start(
+    int64_t window_offset, int64_t window_end, int64_t block_size,
+    const NzbgetRsByteRange* original_holes, size_t orig_count);
+int nzbget_rs_stream_buffer_has_varied_data(const uint8_t* data, size_t len);
+void nzbget_rs_stream_compute_positional_rank(
+    const char* const* member_names, const int64_t* member_sizes, size_t member_count,
+    const char* target_filename, int64_t target_decoded_size,
+    int* out_rank, int* out_window);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

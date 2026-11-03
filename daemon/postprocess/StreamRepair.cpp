@@ -39,6 +39,9 @@
 #include "FileSystem.h"
 #include "Unpack.h"
 #include "ParParser.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 namespace
 {
@@ -933,6 +936,28 @@ void StreamRepairController::ComputePositionalRanks(const char* destDir,
 	// for positional pairing to fire (the set-signature check). Complete
 	// members' sizes come from disk (DirectWrite pre-allocates full size; a
 	// join-mode short file drops out of the window, degrading to later tiers)
+#ifdef NZBGET_USE_RUST
+	std::vector<const char*> names;
+	std::vector<int64_t> sizes;
+	names.reserve(memberNames.size());
+	sizes.reserve(memberNames.size());
+	for (const CString& memberName : memberNames)
+	{
+		BString<1024> memberPath("%s%c%s", destDir, PATH_SEPARATOR, *memberName);
+		names.push_back(*memberName);
+		sizes.push_back(FileSystem::FileSize(memberPath));
+	}
+	for (RepairTarget& target : targets)
+	{
+		int rank = -1;
+		int windowSize = 0;
+		nzbget_rs_stream_compute_positional_rank(
+			names.data(), sizes.data(), names.size(),
+			target.Filename, target.DecodedFileSize, &rank, &windowSize);
+		target.PositionalRank = rank;
+		target.PositionalWindow = windowSize;
+	}
+#else
 	std::vector<std::pair<const char*, int64>> memberSizes;
 	for (const CString& memberName : memberNames)
 	{
@@ -966,6 +991,7 @@ void StreamRepairController::ComputePositionalRanks(const char* destDir,
 		target.PositionalRank = selfSeen ? rank : -1;
 		target.PositionalWindow = selfSeen ? windowSize : 0;
 	}
+#endif
 }
 
 void StreamRepairController::CollectDonors(DownloadQueue* downloadQueue, NzbInfo* nzbInfo,
@@ -1707,10 +1733,18 @@ bool StreamRepairController::CompareProbes(DiskFile& file, const RepairTarget& t
 			// constant-byte runs (zero padding, sparse regions) match ANY
 			// same-size sibling and prove nothing; identity needs at least
 			// one compared range with two distinct byte values
+#ifdef NZBGET_USE_RUST
+			if (!sawVariedData && range.Size > 1)
+			{
+				sawVariedData = nzbget_rs_stream_buffer_has_varied_data(
+					reinterpret_cast<const uint8_t*>(rangeData), (size_t)range.Size) != 0;
+			}
+#else
 			for (int64 i = 1; i < range.Size && !sawVariedData; i++)
 			{
 				sawVariedData = rangeData[i] != rangeData[0];
 			}
+#endif
 		}
 	}
 
@@ -2248,6 +2282,23 @@ std::vector<StreamRange> StreamRepairController::BuildProbeWindows(const RepairS
 	const StreamRangeList& holes = repairSet.InnerHoles;
 	const StreamRangeList& originalHoles = repairSet.OriginalInnerHoles;
 
+#ifdef NZBGET_USE_RUST
+	std::vector<NzbgetRsByteRange> out(DupeStreamRepair::ProbeCount * 2 + 1);
+	size_t count = nzbget_rs_stream_build_probe_windows(
+		repairSet.Map->GetInnerSize(),
+		reinterpret_cast<const NzbgetRsByteRange*>(holes.data()), holes.size(),
+		reinterpret_cast<const NzbgetRsByteRange*>(originalHoles.data()), originalHoles.size(),
+		DupeStreamRepair::ProbeCount, DupeStreamRepair::MinProbeCompareBytes,
+		out.data(), out.size());
+	count = std::min(count, out.size());
+	std::vector<StreamRange> windows;
+	windows.reserve(count);
+	for (size_t i = 0; i < count; i++)
+	{
+		windows.push_back({out[i].offset, out[i].size});
+	}
+	return windows;
+#else
 	std::vector<StreamRange> windows;
 	for (const StreamRange& hole : holes)
 	{
@@ -2291,6 +2342,7 @@ std::vector<StreamRange> StreamRepairController::BuildProbeWindows(const RepairS
 	// shared bytes count once toward achievable and totalCompared, or the
 	// 64-byte identity floor silently weakens
 	return ContentMapper::CoalesceRanges(std::move(windows));
+#endif
 }
 
 /* the plaintext-target compare floor: everything reachable must match,
@@ -2302,6 +2354,19 @@ int64 StreamRepairController::PlainCompareFloor(RepairSetData& repairSet,
 	const std::vector<StreamRange>& windows)
 {
 	ContentMap& targetMap = *repairSet.Map;
+#ifdef NZBGET_USE_RUST
+	std::vector<NzbgetRsContentRun> rsRuns;
+	rsRuns.reserve(targetMap.GetRuns()->size());
+	for (const ContentRun& run : *targetMap.GetRuns())
+	{
+		rsRuns.push_back({run.InnerOffset, run.MemberIndex, run.MemberOffset, run.Size});
+	}
+	return nzbget_rs_stream_plain_compare_floor(
+		rsRuns.data(), rsRuns.size(),
+		reinterpret_cast<const NzbgetRsByteRange*>(repairSet.OriginalInnerHoles.data()),
+		repairSet.OriginalInnerHoles.size(),
+		reinterpret_cast<const NzbgetRsByteRange*>(windows.data()), windows.size());
+#else
 	int64 mappedBytes = 0;
 	for (const ContentRun& run : *targetMap.GetRuns())
 	{
@@ -2322,6 +2387,7 @@ int64 StreamRepairController::PlainCompareFloor(RepairSetData& repairSet,
 		return -1;
 	}
 	return std::min(base, achievable);
+#endif
 }
 
 bool StreamRepairController::VerifyDonorSet(RepairSetData& repairSet, ContentMap& donorMap,
@@ -2379,10 +2445,18 @@ bool StreamRepairController::VerifyDonorSet(RepairSetData& repairSet, ContentMap
 				return false;	// same inner size but different bytes
 			}
 			totalCompared += piece.Range.Size;
+#ifdef NZBGET_USE_RUST
+			if (!sawVariedData && piece.Range.Size > 1)
+			{
+				sawVariedData = nzbget_rs_stream_buffer_has_varied_data(
+					reinterpret_cast<const uint8_t*>(pieceData), (size_t)piece.Range.Size) != 0;
+			}
+#else
 			for (int64 i = 1; i < piece.Range.Size && !sawVariedData; i++)
 			{
 				sawVariedData = pieceData[i] != pieceData[0];
 			}
+#endif
 		}
 	}
 
@@ -2603,6 +2677,12 @@ bool StreamRepairController::VerifyEncryptedFromSource(RepairSetData& repairSet,
 	// window's head - fail toward less evidence, never toward trusting garbage
 	auto chainStart = [&originalHoles](const StreamRange& window, int64 windowEnd)
 	{
+#ifdef NZBGET_USE_RUST
+		return nzbget_rs_stream_encrypted_chain_start(
+			window.Offset, windowEnd, blockSize,
+			reinterpret_cast<const NzbgetRsByteRange*>(originalHoles.data()),
+			originalHoles.size());
+#else
 		int64 blockFrom = window.Offset / blockSize * blockSize;
 		while (blockFrom > 0 && blockFrom < windowEnd)
 		{
@@ -2619,6 +2699,7 @@ bool StreamRepairController::VerifyEncryptedFromSource(RepairSetData& repairSet,
 			blockFrom += blockSize;
 		}
 		return blockFrom;
+#endif
 	};
 
 	// floor semantics as in the plain path, with the achievable evidence
@@ -2714,10 +2795,18 @@ bool StreamRepairController::VerifyEncryptedFromSource(RepairSetData& repairSet,
 		// constant PLAINTEXT proves nothing even in cipher space (any
 		// zero-padded sibling matches): variedness is judged on the plaintext
 		const char* plainWindow = donorData.data() + (from - blockFrom);
+#ifdef NZBGET_USE_RUST
+		if (!sawVariedData && windowEnd - from > 1)
+		{
+			sawVariedData = nzbget_rs_stream_buffer_has_varied_data(
+				reinterpret_cast<const uint8_t*>(plainWindow), (size_t)(windowEnd - from)) != 0;
+		}
+#else
 		for (int64 i = 1; i < windowEnd - from && !sawVariedData; i++)
 		{
 			sawVariedData = plainWindow[i] != plainWindow[0];
 		}
+#endif
 	}
 
 	return totalCompared >= required && sawVariedData;
@@ -3354,10 +3443,18 @@ bool StreamRepairController::VerifyDonorInnerFile(RepairSetData& repairSet,
 				return false;	// same inner size but different bytes - wrong donor
 			}
 			totalCompared += piece.Range.Size;
+#ifdef NZBGET_USE_RUST
+			if (!sawVariedData && piece.Range.Size > 1)
+			{
+				sawVariedData = nzbget_rs_stream_buffer_has_varied_data(
+					reinterpret_cast<const uint8_t*>(pieceData), (size_t)piece.Range.Size) != 0;
+			}
+#else
 			for (int64 i = 1; i < piece.Range.Size && !sawVariedData; i++)
 			{
 				sawVariedData = pieceData[i] != pieceData[0];
 			}
+#endif
 		}
 	}
 

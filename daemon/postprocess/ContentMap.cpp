@@ -27,6 +27,9 @@
 #include "RarReader.h"
 #include "StreamCrypto.h"
 #include "Util.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 bool DiskContentSource::Read(int64 offset, void* buffer, int64 size)
 {
@@ -67,6 +70,20 @@ bool CompositeSource::Read(int64 offset, void* buffer, int64 size)
 
 std::vector<MemberRange> CompositeSource::ToMembers(const StreamRange& logicalRange) const
 {
+#ifdef NZBGET_USE_RUST
+	std::vector<NzbgetRsMemberRange> rsPieces(m_memberIndexes.size());
+	NzbgetRsByteRange lr{logicalRange.Offset, logicalRange.Size};
+	size_t count = nzbget_rs_composite_to_members(
+		m_memberIndexes.data(), m_memberBases.data(), m_memberSizes.data(),
+		m_memberIndexes.size(), lr, rsPieces.data(), rsPieces.size());
+	std::vector<MemberRange> pieces;
+	pieces.reserve(count);
+	for (size_t i = 0; i < count; i++)
+	{
+		pieces.push_back({rsPieces[i].member_index, {rsPieces[i].offset, rsPieces[i].size}});
+	}
+	return pieces;
+#else
 	std::vector<MemberRange> pieces;
 	for (size_t i = 0; i < m_memberIndexes.size(); i++)
 	{
@@ -78,10 +95,19 @@ std::vector<MemberRange> CompositeSource::ToMembers(const StreamRange& logicalRa
 		}
 	}
 	return pieces;
+#endif
 }
 
 bool HoledSource::Read(int64 offset, void* buffer, int64 size)
 {
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_holed_source_intersects(
+		reinterpret_cast<const NzbgetRsByteRange*>(m_holes.data()),
+		m_holes.size(), offset, size) != 0)
+	{
+		return false;
+	}
+#else
 	for (const StreamRange& hole : m_holes)
 	{
 		if (offset < hole.End() && hole.Offset < offset + size)
@@ -89,6 +115,7 @@ bool HoledSource::Read(int64 offset, void* buffer, int64 size)
 			return false;
 		}
 	}
+#endif
 	return m_inner.Read(offset, buffer, size);
 }
 
@@ -113,6 +140,25 @@ ContentSource* HoledSourceSet::GetSource(int memberIndex)
 
 StreamRangeList ContentMap::MapToInner(int memberIndex, const StreamRange& memberRange) const
 {
+#ifdef NZBGET_USE_RUST
+	std::vector<NzbgetRsContentRun> rsRuns;
+	rsRuns.reserve(m_runs.size());
+	for (const ContentRun& run : m_runs)
+	{
+		rsRuns.push_back({run.InnerOffset, run.MemberIndex, run.MemberOffset, run.Size});
+	}
+	std::vector<NzbgetRsByteRange> out(m_runs.size());
+	NzbgetRsByteRange mr{memberRange.Offset, memberRange.Size};
+	size_t count = nzbget_rs_content_map_to_inner(
+		rsRuns.data(), rsRuns.size(), memberIndex, mr, out.data(), out.size());
+	StreamRangeList innerRanges;
+	innerRanges.reserve(count);
+	for (size_t i = 0; i < count; i++)
+	{
+		innerRanges.push_back({out[i].offset, out[i].size});
+	}
+	return innerRanges;
+#else
 	StreamRangeList innerRanges;
 	for (const ContentRun& run : m_runs)
 	{
@@ -128,10 +174,30 @@ StreamRangeList ContentMap::MapToInner(int memberIndex, const StreamRange& membe
 		}
 	}
 	return innerRanges;
+#endif
 }
 
 std::vector<MemberRange> ContentMap::MapFromInner(const StreamRange& innerRange) const
 {
+#ifdef NZBGET_USE_RUST
+	std::vector<NzbgetRsContentRun> rsRuns;
+	rsRuns.reserve(m_runs.size());
+	for (const ContentRun& run : m_runs)
+	{
+		rsRuns.push_back({run.InnerOffset, run.MemberIndex, run.MemberOffset, run.Size});
+	}
+	std::vector<NzbgetRsMemberRange> out(m_runs.size());
+	NzbgetRsByteRange ir{innerRange.Offset, innerRange.Size};
+	size_t count = nzbget_rs_content_map_from_inner(
+		rsRuns.data(), rsRuns.size(), ir, out.data(), out.size());
+	std::vector<MemberRange> pieces;
+	pieces.reserve(count);
+	for (size_t i = 0; i < count; i++)
+	{
+		pieces.push_back({out[i].member_index, {out[i].offset, out[i].size}});
+	}
+	return pieces;
+#else
 	std::vector<MemberRange> pieces;
 	for (const ContentRun& run : m_runs)
 	{
@@ -144,6 +210,7 @@ std::vector<MemberRange> ContentMap::MapFromInner(const StreamRange& innerRange)
 		}
 	}
 	return pieces;
+#endif
 }
 
 int64 ContentMap::GetCipherStreamSize() const
@@ -158,6 +225,36 @@ int64 ContentMap::GetCipherStreamSize() const
 
 std::vector<MemberRange> ContentMap::MapCipherRange(const StreamRange& cipherRange) const
 {
+#ifdef NZBGET_USE_RUST
+	if (cipherRange.Offset < 0 || cipherRange.Size <= 0 ||
+		m_runCryptos.size() != m_runs.size())
+	{
+		return {};
+	}
+	std::vector<NzbgetRsContentRun> rsRuns(m_runs.size());
+	std::vector<int64_t> cipherOffsets(m_runs.size());
+	std::vector<int64_t> cipherSizes(m_runs.size());
+	std::vector<uint8_t> hasCrypto(m_runs.size());
+	for (size_t i = 0; i < m_runs.size(); i++)
+	{
+		rsRuns[i] = {m_runs[i].InnerOffset, m_runs[i].MemberIndex, m_runs[i].MemberOffset, m_runs[i].Size};
+		cipherOffsets[i] = m_runCryptos[i].CipherDataOffset;
+		cipherSizes[i] = m_runCryptos[i].CipherSize;
+		hasCrypto[i] = m_runCryptos[i].Crypto ? 1 : 0;
+	}
+	std::vector<NzbgetRsMemberRange> out(m_runs.size());
+	NzbgetRsByteRange cr{cipherRange.Offset, cipherRange.Size};
+	size_t count = nzbget_rs_content_map_cipher_range(
+		rsRuns.data(), cipherOffsets.data(), cipherSizes.data(), hasCrypto.data(),
+		m_runs.size(), cr, out.data(), out.size());
+	std::vector<MemberRange> pieces;
+	pieces.reserve(count);
+	for (size_t i = 0; i < count; i++)
+	{
+		pieces.push_back({out[i].member_index, {out[i].offset, out[i].size}});
+	}
+	return pieces;
+#else
 	std::vector<MemberRange> pieces;
 	if (cipherRange.Offset < 0 || cipherRange.Size <= 0 ||
 		m_runCryptos.size() != m_runs.size())
@@ -194,6 +291,7 @@ std::vector<MemberRange> ContentMap::MapCipherRange(const StreamRange& cipherRan
 		return {};	// the range runs past the cipher stream - fail closed
 	}
 	return pieces;
+#endif
 }
 
 bool ContentMap::ReadCipherRange(ContentSourceSet& sources, const StreamRange& cipherRange,
@@ -292,6 +390,7 @@ void ContentMap::ExcludeMember(int memberIndex)
 	}
 }
 
+#ifndef NZBGET_USE_RUST
 namespace
 {
 
@@ -746,6 +845,7 @@ bool ParseSevenZipStreamsInfo(SevenZipReader& reader, SevenZipStreams& streams)
 }
 
 }
+#endif
 
 bool ContentMapper::IsCompressibleArchive(const MemberSet& set)
 {
@@ -764,6 +864,26 @@ bool ContentMapper::IsCompressibleArchive(const MemberSet& set)
 
 std::vector<MemberSet> ContentMapper::GroupSets(const std::vector<SetMember>& members)
 {
+#ifdef NZBGET_USE_RUST
+	std::vector<const char*> names;
+	names.reserve(members.size());
+	for (const SetMember& m : members)
+	{
+		names.push_back(m.Name.c_str());
+	}
+	std::vector<MemberSet> sets;
+	nzbget_rs_content_mapper_group_sets(
+		names.data(), names.size(), &sets,
+		[](void* ctx, int32_t format, const int32_t* memberIndices, size_t memberCount)
+		{
+			auto* out = static_cast<std::vector<MemberSet>*>(ctx);
+			MemberSet s;
+			s.Format = static_cast<MemberSet::EFormat>(format);
+			s.Members.assign(memberIndices, memberIndices + memberCount);
+			out->push_back(std::move(s));
+		});
+	return sets;
+#else
 	// bucket keys: scheme family + lowercased base name
 	std::vector<std::pair<std::string, SetBucket>> buckets;
 	auto bucketFor = [&buckets](const std::string& key, MemberSet::EFormat format) -> SetBucket&
@@ -918,6 +1038,7 @@ std::vector<MemberSet> ContentMapper::GroupSets(const std::vector<SetMember>& me
 		});
 
 	return sets;
+#endif
 }
 
 std::unique_ptr<ContentMap> ContentMapper::BuildMap(const std::vector<SetMember>& members,
@@ -1357,6 +1478,55 @@ std::unique_ptr<ContentMap> ContentMapper::BuildRarMap(const std::vector<SetMemb
 std::unique_ptr<ContentMap> ContentMapper::BuildZipMap(const std::vector<SetMember>& members,
 	const MemberSet& set, ContentSourceSet& sources, std::string& skipReason)
 {
+	(void)members;
+#ifdef NZBGET_USE_RUST
+	std::vector<int64_t> memberSizes;
+	memberSizes.reserve(set.Members.size());
+	for (int memberIndex : set.Members)
+	{
+		ContentSource* source = sources.GetSource(memberIndex);
+		if (!source || source->Size() <= 0)
+		{
+			skipReason = "member unreadable";
+			return nullptr;
+		}
+		memberSizes.push_back(source->Size());
+	}
+	struct MapBuildCtx
+	{
+		ContentSourceSet* Sources;
+		std::unique_ptr<ContentMap> Map;
+		std::string* SkipReason;
+	} ctx{&sources, nullptr, &skipReason};
+
+	nzbget_rs_content_mapper_build_zip_map(
+		set.Members.data(), memberSizes.data(), set.Members.size(), &ctx,
+		[](void* rawCtx, int32_t memberIndex, int64_t offset, uint8_t* buf, int64_t size) -> int
+		{
+			auto* c = static_cast<MapBuildCtx*>(rawCtx);
+			ContentSource* src = c->Sources->GetSource(memberIndex);
+			return (src && src->Read(offset, buf, size)) ? 1 : 0;
+		},
+		[](void* rawCtx, const char* innerName, int64_t innerSize,
+			const NzbgetRsContentRun* runs, size_t runCount)
+		{
+			auto* c = static_cast<MapBuildCtx*>(rawCtx);
+			c->Map = std::make_unique<ContentMap>();
+			c->Map->SetInnerName(innerName);
+			c->Map->SetInnerSize(innerSize);
+			for (size_t i = 0; i < runCount; i++)
+			{
+				c->Map->GetRuns()->push_back({runs[i].inner_offset, runs[i].member_index,
+					runs[i].member_offset, runs[i].size});
+			}
+		},
+		[](void* rawCtx, const char* reason)
+		{
+			auto* c = static_cast<MapBuildCtx*>(rawCtx);
+			*c->SkipReason = reason ? reason : "";
+		});
+	return std::move(ctx.Map);
+#else
 	// the logical zip stream: z01..zNN then the final .zip (set order);
 	// only directory and header regions are read - data holes don't block
 	std::vector<int64> memberSizes;
@@ -1596,11 +1766,61 @@ std::unique_ptr<ContentMap> ContentMapper::BuildZipMap(const std::vector<SetMemb
 	}
 
 	return map;
+#endif
 }
 
 std::unique_ptr<ContentMap> ContentMapper::BuildSevenZipMap(const std::vector<SetMember>& members,
 	const MemberSet& set, ContentSourceSet& sources, std::string& skipReason)
 {
+	(void)members;
+#ifdef NZBGET_USE_RUST
+	std::vector<int64_t> memberSizes;
+	memberSizes.reserve(set.Members.size());
+	for (int memberIndex : set.Members)
+	{
+		ContentSource* source = sources.GetSource(memberIndex);
+		if (!source || source->Size() <= 0)
+		{
+			skipReason = "member unreadable";
+			return nullptr;
+		}
+		memberSizes.push_back(source->Size());
+	}
+	struct MapBuildCtx
+	{
+		ContentSourceSet* Sources;
+		std::unique_ptr<ContentMap> Map;
+		std::string* SkipReason;
+	} ctx{&sources, nullptr, &skipReason};
+
+	nzbget_rs_content_mapper_build_seven_zip_map(
+		set.Members.data(), memberSizes.data(), set.Members.size(), &ctx,
+		[](void* rawCtx, int32_t memberIndex, int64_t offset, uint8_t* buf, int64_t size) -> int
+		{
+			auto* c = static_cast<MapBuildCtx*>(rawCtx);
+			ContentSource* src = c->Sources->GetSource(memberIndex);
+			return (src && src->Read(offset, buf, size)) ? 1 : 0;
+		},
+		[](void* rawCtx, const char* innerName, int64_t innerSize,
+			const NzbgetRsContentRun* runs, size_t runCount)
+		{
+			auto* c = static_cast<MapBuildCtx*>(rawCtx);
+			c->Map = std::make_unique<ContentMap>();
+			c->Map->SetInnerName(innerName);
+			c->Map->SetInnerSize(innerSize);
+			for (size_t i = 0; i < runCount; i++)
+			{
+				c->Map->GetRuns()->push_back({runs[i].inner_offset, runs[i].member_index,
+					runs[i].member_offset, runs[i].size});
+			}
+		},
+		[](void* rawCtx, const char* reason)
+		{
+			auto* c = static_cast<MapBuildCtx*>(rawCtx);
+			*c->SkipReason = reason ? reason : "";
+		});
+	return std::move(ctx.Map);
+#else
 	std::vector<int64> memberSizes;
 	int64 totalSize = 0;
 	for (int memberIndex : set.Members)
@@ -1870,6 +2090,7 @@ std::unique_ptr<ContentMap> ContentMapper::BuildSevenZipMap(const std::vector<Se
 	}
 
 	return map;
+#endif
 }
 
 std::vector<RepairSetData> ContentMapper::BuildRepairSets(const std::vector<SetMember>& members,
@@ -1927,6 +2148,19 @@ std::vector<RepairSetData> ContentMapper::BuildRepairSets(const std::vector<SetM
 
 StreamRangeList ContentMapper::CoalesceRanges(std::vector<StreamRange> ranges)
 {
+#ifdef NZBGET_USE_RUST
+	std::vector<NzbgetRsByteRange> out(ranges.size());
+	size_t count = nzbget_rs_content_mapper_coalesce_ranges(
+		reinterpret_cast<const NzbgetRsByteRange*>(ranges.data()), ranges.size(),
+		out.data(), out.size());
+	StreamRangeList merged;
+	merged.reserve(count);
+	for (size_t i = 0; i < count; i++)
+	{
+		merged.push_back({out[i].offset, out[i].size});
+	}
+	return merged;
+#else
 	std::sort(ranges.begin(), ranges.end(),
 		[](const StreamRange& range1, const StreamRange& range2)
 		{
@@ -1947,4 +2181,5 @@ StreamRangeList ContentMapper::CoalesceRanges(std::vector<StreamRange> ranges)
 		}
 	}
 	return merged;
+#endif
 }

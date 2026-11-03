@@ -32,6 +32,9 @@
 #include "DupeArticleFallback.h"
 #include "FileSystem.h"
 #include "Options.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 BOOST_AUTO_TEST_SUITE(QueueTest)
 
@@ -1017,5 +1020,69 @@ BOOST_AUTO_TEST_CASE(ParDamageBlocksTouchedTest)
 	BOOST_CHECK_EQUAL(ParDamage::BlocksTouched({}, block), 0);
 	BOOST_CHECK_EQUAL(ParDamage::BlocksTouched({ { 0, 10 } }, 0), 0);
 }
+
+#ifdef NZBGET_USE_RUST
+BOOST_AUTO_TEST_CASE(StreamRepairRustFfiBoundaryTest)
+{
+	BOOST_CHECK_EQUAL(nzbget_rs_stream_is_eligible("movie.mkv"), 1);
+	BOOST_CHECK_EQUAL(nzbget_rs_stream_is_eligible("movie.par2"), 0);
+	BOOST_CHECK_EQUAL(nzbget_rs_stream_decoded_size_plausible(980, 1000), 1);
+	BOOST_CHECK_EQUAL(nzbget_rs_stream_exceeds_decompress_cap(0, 1024, 0, 1024), 0);
+
+	NzbgetRsBuf volSet = nzbget_rs_stream_volume_set_key("Show.part01.rar");
+	BOOST_CHECK_EQUAL(std::string(reinterpret_cast<const char*>(volSet.data), volSet.len), "show.part#.rar");
+	nzbget_rs_free(volSet);
+
+	NzbgetRsBuf volKey = nzbget_rs_stream_volume_key("Show.part01.rar");
+	BOOST_CHECK_EQUAL(std::string(reinterpret_cast<const char*>(volKey.data), volKey.len), "part1.rar");
+	nzbget_rs_free(volKey);
+
+	NzbgetRsBuf sufKey = nzbget_rs_stream_suffix_key("Show.part01.rar");
+	BOOST_CHECK_EQUAL(std::string(reinterpret_cast<const char*>(sufKey.data), sufKey.len), "part01.rar");
+	nzbget_rs_free(sufKey);
+
+	NzbgetRsByteRange r[2] = {{0, 100}, {200, 100}};
+	BOOST_CHECK_EQUAL(nzbget_rs_stream_total_size(r, 2), 200);
+	BOOST_CHECK_EQUAL(nzbget_rs_stream_intersects_any({50, 20}, r, 2), 1);
+	BOOST_CHECK_EQUAL(nzbget_rs_stream_intersects_any({110, 50}, r, 2), 0);
+
+	NzbgetRsByteRange outHoles[4] = {};
+	BOOST_CHECK_EQUAL(nzbget_rs_stream_compute_holes(r, 2, 300, outHoles, 4), 1u);
+	BOOST_CHECK_EQUAL(outHoles[0].offset, 100);
+	BOOST_CHECK_EQUAL(outHoles[0].size, 100);
+
+	int advSizes[2] = {150, 150};
+	NzbgetRsByteRange est[2] = {};
+	BOOST_CHECK_EQUAL(nzbget_rs_stream_estimate_donor_ranges(advSizes, 2, 300, est), 2u);
+
+	int probes[2] = {};
+	BOOST_CHECK(nzbget_rs_stream_select_probe_parts(r, 2, outHoles, 1, 2, probes, 2) >= 1u);
+
+	NzbgetRsByteRange sub[4] = {};
+	BOOST_CHECK_EQUAL(nzbget_rs_stream_subtract_covered(r, 2, {0, 100}, sub, 4), 1u);
+
+	NzbgetRsByteRange win[4] = {};
+	BOOST_CHECK(nzbget_rs_stream_build_probe_windows(300, outHoles, 1, outHoles, 1, 2, 16, win, 4) >= 1u);
+
+	NzbgetRsByteRange fiveHoles[3] = {{0, 100}, {100000, 100}, {200000, 100}};
+	NzbgetRsByteRange fiveWin[5] = {};
+	BOOST_CHECK_EQUAL(nzbget_rs_stream_build_probe_windows(300000, fiveHoles, 3, fiveHoles, 3, 2, 16, fiveWin, 5), 5u);
+
+	NzbgetRsContentRun runs[1] = {{0, 0, 0, 1000000}};
+	BOOST_CHECK_EQUAL(nzbget_rs_stream_plain_compare_floor(runs, 1, outHoles, 1, r, 1), 100);
+
+	BOOST_CHECK_EQUAL(nzbget_rs_stream_encrypted_chain_start(32, 64, 16, outHoles, 1), 32);
+
+	const uint8_t varied[4] = {1, 2, 3, 4};
+	BOOST_CHECK_EQUAL(nzbget_rs_stream_buffer_has_varied_data(varied, 4), 1);
+
+	const char* names[2] = {"b.rar", "a.rar"};
+	int64_t sizes[2] = {1000, 1000};
+	int rank = -1, window = 0;
+	nzbget_rs_stream_compute_positional_rank(names, sizes, 2, "b.rar", 980, &rank, &window);
+	BOOST_CHECK_EQUAL(rank, 1);
+	BOOST_CHECK_EQUAL(window, 2);
+}
+#endif
 
 BOOST_AUTO_TEST_SUITE_END()

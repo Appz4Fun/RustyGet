@@ -9165,3 +9165,599 @@ pub unsafe extern "C" fn nzbget_rs_article_downloader_validate_yenc(
     }
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_is_eligible(filename: *const c_char) -> c_int {
+    if filename.is_null() {
+        return 0;
+    }
+    crate::streamrepair::is_stream_eligible(CStr::from_ptr(filename).to_bytes()) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_compute_holes(
+    covered: *const crate::dupefallback::NzbgetRsByteRange,
+    count: usize,
+    file_size: i64,
+    out_holes: *mut crate::dupefallback::NzbgetRsByteRange,
+    cap: usize,
+) -> usize {
+    let slice = if count == 0 || covered.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(covered, count)
+    };
+    let holes = crate::streamrepair::compute_holes(slice, file_size);
+    if !out_holes.is_null() && cap > 0 {
+        let n = holes.len().min(cap);
+        std::ptr::copy_nonoverlapping(holes.as_ptr(), out_holes, n);
+    }
+    holes.len()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_total_size(
+    ranges: *const crate::dupefallback::NzbgetRsByteRange,
+    count: usize,
+) -> i64 {
+    let slice = if count == 0 || ranges.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(ranges, count)
+    };
+    crate::streamrepair::total_size(slice)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_intersects_any(
+    range: crate::dupefallback::NzbgetRsByteRange,
+    ranges: *const crate::dupefallback::NzbgetRsByteRange,
+    count: usize,
+) -> c_int {
+    let slice = if count == 0 || ranges.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(ranges, count)
+    };
+    crate::streamrepair::intersects_any(range, slice) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_estimate_donor_ranges(
+    article_sizes: *const c_int,
+    count: usize,
+    target_file_size: i64,
+    out_ranges: *mut crate::dupefallback::NzbgetRsByteRange,
+) -> usize {
+    if count == 0 || article_sizes.is_null() {
+        return 0;
+    }
+    let sizes = std::slice::from_raw_parts(article_sizes, count);
+    let ranges = crate::streamrepair::estimate_donor_ranges(sizes, target_file_size);
+    if !out_ranges.is_null() && !ranges.is_empty() {
+        std::ptr::copy_nonoverlapping(ranges.as_ptr(), out_ranges, ranges.len());
+    }
+    ranges.len()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_select_probe_parts(
+    donor_ranges: *const crate::dupefallback::NzbgetRsByteRange,
+    donor_count: usize,
+    holes: *const crate::dupefallback::NzbgetRsByteRange,
+    hole_count: usize,
+    count: c_int,
+    out_parts: *mut c_int,
+    cap: usize,
+) -> usize {
+    let donors = if donor_count == 0 || donor_ranges.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(donor_ranges, donor_count)
+    };
+    let hole_slice = if hole_count == 0 || holes.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(holes, hole_count)
+    };
+    let parts = crate::streamrepair::select_probe_parts(donors, hole_slice, count);
+    if !out_parts.is_null() && cap > 0 {
+        let n = parts.len().min(cap);
+        std::ptr::copy_nonoverlapping(parts.as_ptr(), out_parts, n);
+    }
+    parts.len()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_subtract_covered(
+    holes: *const crate::dupefallback::NzbgetRsByteRange,
+    hole_count: usize,
+    covered: crate::dupefallback::NzbgetRsByteRange,
+    out_holes: *mut crate::dupefallback::NzbgetRsByteRange,
+    cap: usize,
+) -> usize {
+    let hole_slice = if hole_count == 0 || holes.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(holes, hole_count)
+    };
+    let rem = crate::streamrepair::subtract_covered(hole_slice, covered);
+    if !out_holes.is_null() && cap > 0 {
+        let n = rem.len().min(cap);
+        std::ptr::copy_nonoverlapping(rem.as_ptr(), out_holes, n);
+    }
+    rem.len()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_volume_set_key(filename: *const c_char) -> RsBuf {
+    let bytes = if filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    into_buf(crate::streamrepair::volume_set_key(bytes))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_stream_decoded_size_plausible(
+    decoded_size: i64,
+    encoded_size: i64,
+) -> c_int {
+    crate::streamrepair::decoded_size_plausible(decoded_size, encoded_size) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_suffix_key(filename: *const c_char) -> RsBuf {
+    let bytes = if filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    into_buf(crate::streamrepair::suffix_key(bytes))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_volume_key(filename: *const c_char) -> RsBuf {
+    let bytes = if filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    into_buf(crate::streamrepair::volume_key(bytes))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_stream_exceeds_decompress_cap(
+    total_bytes: i64,
+    next_chunk: i64,
+    total_extent: i64,
+    member_declared_size: i64,
+) -> c_int {
+    crate::streamrepair::exceeds_decompress_cap(
+        total_bytes,
+        next_chunk,
+        total_extent,
+        member_declared_size,
+    ) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_composite_to_members(
+    member_indexes: *const i32,
+    disk_bases: *const i64,
+    member_sizes: *const i64,
+    member_count: usize,
+    range: crate::dupefallback::NzbgetRsByteRange,
+    out_pieces: *mut crate::streamrepair::NzbgetRsMemberRange,
+    cap: usize,
+) -> usize {
+    if member_count == 0
+        || member_indexes.is_null()
+        || disk_bases.is_null()
+        || member_sizes.is_null()
+    {
+        return 0;
+    }
+    let idx = std::slice::from_raw_parts(member_indexes, member_count);
+    let bases = std::slice::from_raw_parts(disk_bases, member_count);
+    let sizes = std::slice::from_raw_parts(member_sizes, member_count);
+    let pieces = crate::streamrepair::composite_to_members(idx, bases, sizes, range);
+    if !out_pieces.is_null() && cap > 0 {
+        let n = pieces.len().min(cap);
+        std::ptr::copy_nonoverlapping(pieces.as_ptr(), out_pieces, n);
+    }
+    pieces.len()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_holed_source_intersects(
+    holes: *const crate::dupefallback::NzbgetRsByteRange,
+    hole_count: usize,
+    offset: i64,
+    size: i64,
+) -> c_int {
+    let hole_slice = if hole_count == 0 || holes.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(holes, hole_count)
+    };
+    crate::streamrepair::holed_source_intersects(hole_slice, offset, size) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_content_map_to_inner(
+    runs: *const crate::streamrepair::NzbgetRsContentRun,
+    run_count: usize,
+    member_index: i32,
+    member_range: crate::dupefallback::NzbgetRsByteRange,
+    out_ranges: *mut crate::dupefallback::NzbgetRsByteRange,
+    cap: usize,
+) -> usize {
+    let run_slice = if run_count == 0 || runs.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(runs, run_count)
+    };
+    let res = crate::streamrepair::content_map_to_inner(run_slice, member_index, member_range);
+    if !out_ranges.is_null() && cap > 0 {
+        let n = res.len().min(cap);
+        std::ptr::copy_nonoverlapping(res.as_ptr(), out_ranges, n);
+    }
+    res.len()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_content_map_from_inner(
+    runs: *const crate::streamrepair::NzbgetRsContentRun,
+    run_count: usize,
+    inner_range: crate::dupefallback::NzbgetRsByteRange,
+    out_pieces: *mut crate::streamrepair::NzbgetRsMemberRange,
+    cap: usize,
+) -> usize {
+    let run_slice = if run_count == 0 || runs.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(runs, run_count)
+    };
+    let res = crate::streamrepair::content_map_from_inner(run_slice, inner_range);
+    if !out_pieces.is_null() && cap > 0 {
+        let n = res.len().min(cap);
+        std::ptr::copy_nonoverlapping(res.as_ptr(), out_pieces, n);
+    }
+    res.len()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_content_map_cipher_range(
+    runs: *const crate::streamrepair::NzbgetRsContentRun,
+    cipher_data_offsets: *const i64,
+    cipher_sizes: *const i64,
+    has_crypto: *const u8,
+    run_count: usize,
+    cipher_range: crate::dupefallback::NzbgetRsByteRange,
+    out_pieces: *mut crate::streamrepair::NzbgetRsMemberRange,
+    cap: usize,
+) -> usize {
+    if run_count == 0
+        || runs.is_null()
+        || cipher_data_offsets.is_null()
+        || cipher_sizes.is_null()
+        || has_crypto.is_null()
+    {
+        return 0;
+    }
+    let run_slice = std::slice::from_raw_parts(runs, run_count);
+    let offsets_slice = std::slice::from_raw_parts(cipher_data_offsets, run_count);
+    let sizes_slice = std::slice::from_raw_parts(cipher_sizes, run_count);
+    let crypto_slice = std::slice::from_raw_parts(has_crypto, run_count);
+    let res = crate::streamrepair::content_map_cipher_range(
+        run_slice,
+        offsets_slice,
+        sizes_slice,
+        crypto_slice,
+        cipher_range,
+    );
+    if !out_pieces.is_null() && cap > 0 {
+        let n = res.len().min(cap);
+        std::ptr::copy_nonoverlapping(res.as_ptr(), out_pieces, n);
+    }
+    res.len()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_content_mapper_group_sets(
+    member_names: *const *const c_char,
+    count: usize,
+    ctx: *mut std::ffi::c_void,
+    on_set: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, *const i32, usize)>,
+) {
+    let Some(cb) = on_set else {
+        return;
+    };
+    let mut slices: Vec<&[u8]> = Vec::with_capacity(count);
+    if !member_names.is_null() {
+        let ptrs = std::slice::from_raw_parts(member_names, count);
+        for &p in ptrs {
+            slices.push(if p.is_null() {
+                b""
+            } else {
+                CStr::from_ptr(p).to_bytes()
+            });
+        }
+    }
+    let sets = crate::streamrepair::content_mapper_group_sets(&slices);
+    for (fmt, members) in sets {
+        cb(ctx, fmt, members.as_ptr(), members.len());
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_content_mapper_coalesce_ranges(
+    ranges: *const crate::dupefallback::NzbgetRsByteRange,
+    count: usize,
+    out_ranges: *mut crate::dupefallback::NzbgetRsByteRange,
+    cap: usize,
+) -> usize {
+    let slice = if count == 0 || ranges.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(ranges, count)
+    };
+    let merged = crate::streamrepair::content_mapper_coalesce_ranges(slice);
+    if !out_ranges.is_null() && cap > 0 {
+        let n = merged.len().min(cap);
+        std::ptr::copy_nonoverlapping(merged.as_ptr(), out_ranges, n);
+    }
+    merged.len()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_content_mapper_build_zip_map(
+    member_indexes: *const i32,
+    member_sizes: *const i64,
+    count: usize,
+    ctx: *mut std::ffi::c_void,
+    read_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, i64, *mut u8, i64) -> c_int>,
+    on_success: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            *const c_char,
+            i64,
+            *const crate::streamrepair::NzbgetRsContentRun,
+            usize,
+        ),
+    >,
+    on_error: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
+) -> c_int {
+    let Some(read_fn) = read_cb else {
+        return 0;
+    };
+    let idx = if count == 0 || member_indexes.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(member_indexes, count)
+    };
+    let sizes = if count == 0 || member_sizes.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(member_sizes, count)
+    };
+    match crate::streamrepair::content_mapper_build_zip_map(idx, sizes, |m_idx, offset, buf| {
+        read_fn(ctx, m_idx, offset, buf.as_mut_ptr(), buf.len() as i64) != 0
+    }) {
+        Ok((mut inner_name, inner_size, runs)) => {
+            inner_name.push(0);
+            if let Some(cb) = on_success {
+                cb(
+                    ctx,
+                    inner_name.as_ptr().cast(),
+                    inner_size,
+                    runs.as_ptr(),
+                    runs.len(),
+                );
+            }
+            1
+        }
+        Err(reason) => {
+            if let Some(cb) = on_error {
+                let mut reason_c = reason.as_bytes().to_vec();
+                reason_c.push(0);
+                cb(ctx, reason_c.as_ptr().cast());
+            }
+            0
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_content_mapper_build_seven_zip_map(
+    member_indexes: *const i32,
+    member_sizes: *const i64,
+    count: usize,
+    ctx: *mut std::ffi::c_void,
+    read_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, i64, *mut u8, i64) -> c_int>,
+    on_success: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            *const c_char,
+            i64,
+            *const crate::streamrepair::NzbgetRsContentRun,
+            usize,
+        ),
+    >,
+    on_error: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
+) -> c_int {
+    let Some(read_fn) = read_cb else {
+        return 0;
+    };
+    let idx = if count == 0 || member_indexes.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(member_indexes, count)
+    };
+    let sizes = if count == 0 || member_sizes.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(member_sizes, count)
+    };
+    match crate::streamrepair::content_mapper_build_seven_zip_map(
+        idx,
+        sizes,
+        |m_idx, offset, buf| read_fn(ctx, m_idx, offset, buf.as_mut_ptr(), buf.len() as i64) != 0,
+    ) {
+        Ok((mut inner_name, inner_size, runs)) => {
+            inner_name.push(0);
+            if let Some(cb) = on_success {
+                cb(
+                    ctx,
+                    inner_name.as_ptr().cast(),
+                    inner_size,
+                    runs.as_ptr(),
+                    runs.len(),
+                );
+            }
+            1
+        }
+        Err(reason) => {
+            if let Some(cb) = on_error {
+                let mut reason_c = reason.as_bytes().to_vec();
+                reason_c.push(0);
+                cb(ctx, reason_c.as_ptr().cast());
+            }
+            0
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_build_probe_windows(
+    inner_size: i64,
+    holes: *const crate::dupefallback::NzbgetRsByteRange,
+    hole_count: usize,
+    original_holes: *const crate::dupefallback::NzbgetRsByteRange,
+    orig_count: usize,
+    probe_count: c_int,
+    min_probe_compare_bytes: i64,
+    out_windows: *mut crate::dupefallback::NzbgetRsByteRange,
+    cap: usize,
+) -> usize {
+    let h = if hole_count == 0 || holes.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(holes, hole_count)
+    };
+    let orig = if orig_count == 0 || original_holes.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(original_holes, orig_count)
+    };
+    let windows = crate::streamrepair::build_probe_windows(
+        inner_size,
+        h,
+        orig,
+        probe_count,
+        min_probe_compare_bytes,
+    );
+    if !out_windows.is_null() && cap > 0 {
+        let n = windows.len().min(cap);
+        std::ptr::copy_nonoverlapping(windows.as_ptr(), out_windows, n);
+    }
+    windows.len()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_plain_compare_floor(
+    runs: *const crate::streamrepair::NzbgetRsContentRun,
+    run_count: usize,
+    original_inner_holes: *const crate::dupefallback::NzbgetRsByteRange,
+    orig_count: usize,
+    windows: *const crate::dupefallback::NzbgetRsByteRange,
+    window_count: usize,
+) -> i64 {
+    let r = if run_count == 0 || runs.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(runs, run_count)
+    };
+    let orig = if orig_count == 0 || original_inner_holes.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(original_inner_holes, orig_count)
+    };
+    let w = if window_count == 0 || windows.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(windows, window_count)
+    };
+    crate::streamrepair::plain_compare_floor(r, orig, w)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_encrypted_chain_start(
+    window_offset: i64,
+    window_end: i64,
+    block_size: i64,
+    original_holes: *const crate::dupefallback::NzbgetRsByteRange,
+    orig_count: usize,
+) -> i64 {
+    let orig = if orig_count == 0 || original_holes.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(original_holes, orig_count)
+    };
+    crate::streamrepair::encrypted_chain_start(window_offset, window_end, block_size, orig)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_buffer_has_varied_data(
+    data: *const u8,
+    len: usize,
+) -> c_int {
+    if len < 2 || data.is_null() {
+        return 0;
+    }
+    crate::streamrepair::buffer_has_varied_data(std::slice::from_raw_parts(data, len)) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_compute_positional_rank(
+    member_names: *const *const c_char,
+    member_sizes: *const i64,
+    member_count: usize,
+    target_filename: *const c_char,
+    target_decoded_size: i64,
+    out_rank: *mut c_int,
+    out_window: *mut c_int,
+) {
+    let mut names: Vec<&[u8]> = Vec::with_capacity(member_count);
+    if !member_names.is_null() {
+        let ptrs = std::slice::from_raw_parts(member_names, member_count);
+        for &p in ptrs {
+            names.push(if p.is_null() {
+                b""
+            } else {
+                CStr::from_ptr(p).to_bytes()
+            });
+        }
+    }
+    let sizes = if member_count == 0 || member_sizes.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(member_sizes, member_count)
+    };
+    let target = if target_filename.is_null() {
+        b""
+    } else {
+        CStr::from_ptr(target_filename).to_bytes()
+    };
+    let (rank, window) =
+        crate::streamrepair::compute_positional_rank(&names, sizes, target, target_decoded_size);
+    if !out_rank.is_null() {
+        *out_rank = rank;
+    }
+    if !out_window.is_null() {
+        *out_window = window;
+    }
+}
+
+

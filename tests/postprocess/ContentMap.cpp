@@ -29,6 +29,9 @@
 #include "ContentMap.h"
 #include "RarReader.h"
 #include "StreamCrypto.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 BOOST_AUTO_TEST_SUITE(PostprocessTest)
 
@@ -2277,5 +2280,62 @@ BOOST_AUTO_TEST_CASE(ContentMapperIsCompressibleArchiveTest)
 	BOOST_CHECK(!ContentMapper::IsCompressibleArchive(MemberSet{MemberSet::mfBare, {0}}));
 	BOOST_CHECK(!ContentMapper::IsCompressibleArchive(MemberSet{MemberSet::mfSplit, {0, 1}}));
 }
+
+#ifdef NZBGET_USE_RUST
+BOOST_AUTO_TEST_CASE(ContentMapRustFfiBoundaryTest)
+{
+	int32_t mIds[2] = {10, 20};
+	int64_t dBases[2] = {0, 100};
+	int64_t mSizes[2] = {100, 100};
+	NzbgetRsMemberRange comp[2] = {};
+	BOOST_CHECK_EQUAL(nzbget_rs_composite_to_members(mIds, dBases, mSizes, 2, {50, 100}, comp, 2), 2u);
+
+	NzbgetRsByteRange holes[1] = {{10, 20}};
+	BOOST_CHECK_EQUAL(nzbget_rs_holed_source_intersects(holes, 1, 15, 5), 1);
+	BOOST_CHECK_EQUAL(nzbget_rs_holed_source_intersects(holes, 1, 0, 10), 0);
+
+	NzbgetRsContentRun runs[1] = {{0, 0, 100, 50}};
+	NzbgetRsByteRange toIn[2] = {};
+	BOOST_CHECK_EQUAL(nzbget_rs_content_map_to_inner(runs, 1, 0, {110, 20}, toIn, 2), 1u);
+
+	NzbgetRsMemberRange fromIn[2] = {};
+	BOOST_CHECK_EQUAL(nzbget_rs_content_map_from_inner(runs, 1, {10, 20}, fromIn, 2), 1u);
+
+	int64_t cOffs[1] = {100};
+	int64_t cSizes[1] = {64};
+	uint8_t hasCrypto[1] = {1};
+	NzbgetRsMemberRange cPieces[2] = {};
+	BOOST_CHECK_EQUAL(nzbget_rs_content_map_cipher_range(runs, cOffs, cSizes, hasCrypto, 1, {0, 32}, cPieces, 2), 1u);
+
+	const char* names[2] = {"movie.part01.rar", "movie.part02.rar"};
+	size_t setsCount = 0;
+	nzbget_rs_content_mapper_group_sets(names, 2, &setsCount,
+		[](void* ctx, int32_t, const int32_t*, size_t)
+		{
+			(*static_cast<size_t*>(ctx))++;
+		});
+	BOOST_CHECK_EQUAL(setsCount, 1u);
+
+	NzbgetRsByteRange coalIn[2] = {{0, 10}, {10, 10}};
+	NzbgetRsByteRange coalOut[2] = {};
+	BOOST_CHECK_EQUAL(nzbget_rs_content_mapper_coalesce_ranges(coalIn, 2, coalOut, 2), 1u);
+
+	int32_t zMem[1] = {0};
+	int64_t zSz[1] = {10};
+	std::string reason;
+	nzbget_rs_content_mapper_build_zip_map(zMem, zSz, 1, &reason,
+		[](void*, int32_t, int64_t, uint8_t*, int64_t) -> int { return 0; },
+		[](void*, const char*, int64_t, const NzbgetRsContentRun*, size_t) {},
+		[](void* ctx, const char* r) { *static_cast<std::string*>(ctx) = r ? r : ""; });
+	BOOST_CHECK(!reason.empty());
+
+	reason.clear();
+	nzbget_rs_content_mapper_build_seven_zip_map(zMem, zSz, 1, &reason,
+		[](void*, int32_t, int64_t, uint8_t*, int64_t) -> int { return 0; },
+		[](void*, const char*, int64_t, const NzbgetRsContentRun*, size_t) {},
+		[](void* ctx, const char* r) { *static_cast<std::string*>(ctx) = r ? r : ""; });
+	BOOST_CHECK(!reason.empty());
+}
+#endif
 
 BOOST_AUTO_TEST_SUITE_END()

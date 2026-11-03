@@ -47,6 +47,9 @@
 
 bool DupeStreamRepair::IsStreamEligible(const char* filename)
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_stream_is_eligible(filename) != 0;
+#else
 	if (Util::EmptyStr(filename))
 	{
 		return false;
@@ -72,6 +75,7 @@ bool DupeStreamRepair::IsStreamEligible(const char* filename)
 	}
 
 	return false;
+#endif
 }
 
 StreamRangeList DupeStreamRepair::ComputeHoles(FileInfo* fileInfo)
@@ -84,6 +88,27 @@ StreamRangeList DupeStreamRepair::ComputeHoles(FileInfo* fileInfo)
 
 	// ranges of successfully decoded articles; failed articles carry no
 	// offset/size (their yEnc headers never arrived) and default to 0/0
+#ifdef NZBGET_USE_RUST
+	std::vector<NzbgetRsByteRange> covered;
+	covered.reserve(fileInfo->GetArticles()->size());
+	for (ArticleInfo* article : fileInfo->GetArticles())
+	{
+		if (article->GetStatus() == ArticleInfo::aiFinished && article->GetSegmentSize() > 0)
+		{
+			covered.push_back({article->GetSegmentOffset(), article->GetSegmentSize()});
+		}
+	}
+	std::vector<NzbgetRsByteRange> rsHoles(covered.size() + 1);
+	size_t count = nzbget_rs_stream_compute_holes(
+		covered.data(), covered.size(), fileSize, rsHoles.data(), rsHoles.size());
+	StreamRangeList holes;
+	holes.reserve(count);
+	for (size_t i = 0; i < count; i++)
+	{
+		holes.push_back({rsHoles[i].offset, rsHoles[i].size});
+	}
+	return holes;
+#else
 	StreamRangeList covered;
 	for (ArticleInfo* article : fileInfo->GetArticles())
 	{
@@ -115,20 +140,31 @@ StreamRangeList DupeStreamRepair::ComputeHoles(FileInfo* fileInfo)
 	}
 
 	return holes;
+#endif
 }
 
 int64 DupeStreamRepair::TotalSize(const StreamRangeList& ranges)
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_stream_total_size(
+		reinterpret_cast<const NzbgetRsByteRange*>(ranges.data()), ranges.size());
+#else
 	int64 total = 0;
 	for (const StreamRange& range : ranges)
 	{
 		total += range.Size;
 	}
 	return total;
+#endif
 }
 
 bool DupeStreamRepair::IntersectsAny(const StreamRange& range, const StreamRangeList& ranges)
 {
+#ifdef NZBGET_USE_RUST
+	NzbgetRsByteRange r{range.Offset, range.Size};
+	return nzbget_rs_stream_intersects_any(
+		r, reinterpret_cast<const NzbgetRsByteRange*>(ranges.data()), ranges.size()) != 0;
+#else
 	for (const StreamRange& other : ranges)
 	{
 		if (RangesIntersect(range, other))
@@ -137,10 +173,29 @@ bool DupeStreamRepair::IntersectsAny(const StreamRange& range, const StreamRange
 		}
 	}
 	return false;
+#endif
 }
 
 StreamRangeList DupeStreamRepair::EstimateDonorRanges(FileInfo* donorFile, int64 decodedFileSize)
 {
+#ifdef NZBGET_USE_RUST
+	std::vector<int> sizes;
+	sizes.reserve(donorFile->GetArticles()->size());
+	for (ArticleInfo* article : donorFile->GetArticles())
+	{
+		sizes.push_back(article->GetSize());
+	}
+	std::vector<NzbgetRsByteRange> rsRanges(sizes.size());
+	size_t count = nzbget_rs_stream_estimate_donor_ranges(
+		sizes.data(), sizes.size(), decodedFileSize, rsRanges.data());
+	StreamRangeList ranges;
+	ranges.reserve(count);
+	for (size_t i = 0; i < count; i++)
+	{
+		ranges.push_back({rsRanges[i].offset, rsRanges[i].size});
+	}
+	return ranges;
+#else
 	StreamRangeList ranges;
 
 	int64 totalEncoded = 0;
@@ -176,6 +231,7 @@ StreamRangeList DupeStreamRepair::EstimateDonorRanges(FileInfo* donorFile, int64
 	}
 
 	return ranges;
+#endif
 }
 
 std::vector<int> DupeStreamRepair::SelectPatchParts(const StreamRangeList& donorRanges,
@@ -225,6 +281,19 @@ std::vector<int> DupeStreamRepair::SelectPatchParts(const StreamRangeList& donor
 std::vector<int> DupeStreamRepair::SelectProbeParts(const StreamRangeList& donorRanges,
 	const StreamRangeList& holes, int probeCount)
 {
+#ifdef NZBGET_USE_RUST
+	if (probeCount <= 0 || donorRanges.empty())
+	{
+		return {};
+	}
+	std::vector<int> probes(donorRanges.size());
+	size_t count = nzbget_rs_stream_select_probe_parts(
+		reinterpret_cast<const NzbgetRsByteRange*>(donorRanges.data()), donorRanges.size(),
+		reinterpret_cast<const NzbgetRsByteRange*>(holes.data()), holes.size(),
+		probeCount, probes.data(), probes.size());
+	probes.resize(count);
+	return probes;
+#else
 	if (probeCount <= 0 || donorRanges.empty())
 	{
 		return {};
@@ -336,10 +405,24 @@ std::vector<int> DupeStreamRepair::SelectProbeParts(const StreamRangeList& donor
 		probes.push_back(candidates[candidates.size() * (2 * k + 1) / (2 * probeCount)]);
 	}
 	return probes;
+#endif
 }
 
 void DupeStreamRepair::SubtractCovered(StreamRangeList& ranges, const StreamRange& covered)
 {
+#ifdef NZBGET_USE_RUST
+	std::vector<NzbgetRsByteRange> out(ranges.size() * 2 + 1);
+	NzbgetRsByteRange cov{covered.Offset, covered.Size};
+	size_t count = nzbget_rs_stream_subtract_covered(
+		reinterpret_cast<const NzbgetRsByteRange*>(ranges.data()), ranges.size(),
+		cov, out.data(), out.size());
+	ranges.clear();
+	ranges.reserve(count);
+	for (size_t i = 0; i < count; i++)
+	{
+		ranges.push_back({out[i].offset, out[i].size});
+	}
+#else
 	StreamRangeList remaining;
 
 	for (const StreamRange& range : ranges)
@@ -360,6 +443,7 @@ void DupeStreamRepair::SubtractCovered(StreamRangeList& ranges, const StreamRang
 	}
 
 	ranges = std::move(remaining);
+#endif
 }
 
 #ifdef NZBGET_USE_RUST
@@ -663,6 +747,12 @@ FileInfo* DupeStreamRepair::SelectWholeFileDonor(const char* targetFilename, int
 
 std::string DupeStreamRepair::VolumeSetKey(const char* filename)
 {
+#ifdef NZBGET_USE_RUST
+	NzbgetRsBuf buf = nzbget_rs_stream_volume_set_key(filename);
+	std::string res(buf.data ? buf.data : "", buf.len);
+	nzbget_rs_free(buf);
+	return res;
+#else
 	if (Util::EmptyStr(filename))
 	{
 		return "";
@@ -723,16 +813,27 @@ std::string DupeStreamRepair::VolumeSetKey(const char* filename)
 		return name.substr(0, begin) + "#";
 	}
 	return "";
+#endif
 }
 
 bool DupeStreamRepair::DecodedSizePlausible(int64 decodedFileSize, int64 encodedSize)
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_stream_decoded_size_plausible(decodedFileSize, encodedSize) != 0;
+#else
 	return decodedFileSize > 0 && encodedSize > 0 && decodedFileSize <= encodedSize &&
 		decodedFileSize >= encodedSize - encodedSize / 8;
+#endif
 }
 
 std::string DupeStreamRepair::VolumeKey(const char* filename)
 {
+#ifdef NZBGET_USE_RUST
+	NzbgetRsBuf buf = nzbget_rs_stream_volume_key(filename);
+	std::string res(buf.data ? buf.data : "", buf.len);
+	nzbget_rs_free(buf);
+	return res;
+#else
 	std::string key = SuffixKey(filename);
 	std::string out;
 	out.reserve(key.size());
@@ -759,10 +860,17 @@ std::string DupeStreamRepair::VolumeKey(const char* filename)
 		i = end;
 	}
 	return out;
+#endif
 }
 
 std::string DupeStreamRepair::SuffixKey(const char* filename)
 {
+#ifdef NZBGET_USE_RUST
+	NzbgetRsBuf buf = nzbget_rs_stream_suffix_key(filename);
+	std::string res(buf.data ? buf.data : "", buf.len);
+	nzbget_rs_free(buf);
+	return res;
+#else
 	if (Util::EmptyStr(filename))
 	{
 		return "";
@@ -789,6 +897,7 @@ std::string DupeStreamRepair::SuffixKey(const char* filename)
 		ch = (char)tolower((unsigned char)ch);
 	}
 	return key;
+#endif
 }
 
 std::vector<FileInfo*> DupeStreamRepair::SelectDonorCandidates(const char* targetFilename,
@@ -989,8 +1098,13 @@ std::string DupeStreamRepair::SelectExtractedInner(const char* dir, int64 innerS
 bool DupeStreamRepair::ExceedsDecompressCap(int64 totalBytes, int64 addBytes,
 	int64 totalExtent, int64 addExtent)
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_stream_exceeds_decompress_cap(
+		totalBytes, addBytes, totalExtent, addExtent) != 0;
+#else
 	return totalBytes + addBytes > MaxDecompressBytes ||
 		totalExtent + addExtent > MaxDecompressBytes;
+#endif
 }
 
 std::string DupeStreamRepair::BuildDonorKey(NzbInfo* donorNzb, const char* password)

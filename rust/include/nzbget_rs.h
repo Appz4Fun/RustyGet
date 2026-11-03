@@ -1731,6 +1731,137 @@ int nzbget_rs_qhp_compare_inner_files(
     const char* name1, int par1, int64_t size1,
     const char* name2, int par2, int64_t size2, int same_par_collection);
 
+// ============================================================================
+// DiskState, PrePostProcessor, Scanner & TwinCheck Hot-Path FFI (`rust/src/diskstatepp.rs`)
+// ============================================================================
+
+typedef struct NzbgetRsArticleLoadEval {
+    int32_t valid;
+    int32_t status;
+    int64_t segment_offset;
+    int32_t segment_size;
+    int32_t dupe_fallback_round;
+    int32_t need_result_filename;
+    int32_t completed_articles;
+} NzbgetRsArticleLoadEval;
+
+typedef struct NzbgetRsPostJobCandidate {
+    uint8_t has_post_info;
+    uint8_t working;
+    uint8_t has_queue_script_job;
+    uint8_t direct_unpack_running;
+    uint8_t has_live_repair_thread;
+    int32_t priority;
+    uint8_t force_priority;
+    uint8_t need_par_check;
+    uint8_t need_unpack;
+    uint8_t in_active_jobs;
+    uint8_t download_completed;
+} NzbgetRsPostJobCandidate;
+
+typedef struct NzbgetRsPostStageDecision {
+    int32_t unpack;
+    int32_t skip_unpack_due_to_par;
+    int32_t cleanup;
+    int32_t move_inter;
+    int32_t post_download_renaming;
+    int32_t post_unpack_renaming;
+} NzbgetRsPostStageDecision;
+
+int nzbget_rs_dsp_parse_format_version(const char* format_signature);
+void nzbget_rs_dsp_sanitize_line_breaks(char* buf, size_t len);
+int nzbget_rs_dsp_parse_ids_file(const char* text, int* out_nzb_id, int* out_file_id);
+int nzbget_rs_dsp_classify_queue_dir_id(const char* filename, int* out_is_nzb_log);
+int nzbget_rs_dsp_classify_legacy_file_state(
+    const char* filename, const char* header_line, int file_version, int legacy_version,
+    int* out_id, int* out_suffix_kind);
+int nzbget_rs_dsp_validate_repair_hole(
+    uint32_t offset_hi, uint32_t offset_lo, uint32_t size_hi, uint32_t size_lo,
+    int64_t decoded_size, int64_t* out_offset, int64_t* out_size);
+int nzbget_rs_dsp_has_dupe_extras(
+    int recovered_articles, int64_t recovered_bytes, int recovered_holes, size_t repair_jobs_count);
+int nzbget_rs_dsp_pack_unpack_tried_flags(int unpack_tried, int par_repaired);
+int nzbget_rs_dsp_parse_unpack_state_lines(
+    const char* line1, const char* line2, const char* line3, int ns_running, int ns_none,
+    int* out_direct_status, int* out_unpack_tried, int* out_par_repaired, int* out_last_unpack_status);
+int nzbget_rs_dsp_normalize_post_stage(int post_stage, int format_version, int pt_finished);
+int nzbget_rs_dsp_eval_article_load_state(
+    int format_version, int completed, int fields, int status_in, int64_t segment_offset_in,
+    int segment_size_in, int staged_fallback_in, int part_number, int staged_file_exists,
+    int direct_write, int force_direct_write, int has_result_filename, int completed_articles_in,
+    int total_size, NzbgetRsArticleLoadEval* out_eval);
+void nzbget_rs_dsp_reconcile_direct_write_output(
+    int output_initialized, int has_own_out_file, int has_out_tmp, int has_completed_dest,
+    int success_articles, int completed, int output_filename_empty,
+    int* out_new_output_initialized, int* out_pick_path_kind);
+int nzbget_rs_dsp_classify_temp_file(const char* filename, int* out_file_id, int* out_part);
+int nzbget_rs_dsp_is_orphan_queue_file(
+    const char* filename, const int* sorted_file_ids, size_t file_ids_len,
+    const int* sorted_nzb_ids, size_t nzb_ids_len);
+int nzbget_rs_dsp_match_servers(
+    const char* const* server_names, const char* const* server_hosts, const int* server_ports,
+    const char* const* server_users, size_t server_count,
+    const int* ref_state_ids, const char* const* ref_names, const char* const* ref_hosts,
+    const int* ref_ports, const char* const* ref_users, size_t ref_count,
+    int* out_server_state_ids);
+void nzbget_rs_dsp_sanitize_log_text(char* buf, size_t len);
+int nzbget_rs_dsp_parse_log_line(
+    const char* line, int* out_time, int* out_kind, size_t* out_text_offset);
+
+void nzbget_rs_dsp_sanitise_post_stage(
+    int stage, int pt_executing_script, int pt_finished, int pt_queued, int dest_dir_exists,
+    int unpack_tried, int par_status, int ps_skipped, int* out_stage, int* out_request_par_check);
+int nzbget_rs_dsp_classify_file_event(
+    int is_file_completed, int is_file_deleted, int dupe_deleted, int delete_status,
+    int ds_none, int ds_health, int has_post_info, int download_completed_ignore_paused,
+    int download_completed_all);
+void nzbget_rs_dsp_eval_nzb_completed(
+    int dupe_hint, int dh_redownload_auto, int keep_history, int avoid_history, int dupe_check,
+    int dupe_mode, int dm_force, int fails_over, int delete_status, int ds_none, int ds_health,
+    int ds_bad, int ds_scan, int ds_copy, int* out_add_to_history, int* out_call_dupe_completed,
+    int* out_enqueue_deleted_script, int* out_need_save);
+int nzbget_rs_dsp_can_run_more_jobs(
+    const int* job_stages, size_t job_count, int pt_loading_pars, int pt_verifying_repaired,
+    int pt_repairing, int post_strategy, int* out_allow_par);
+int nzbget_rs_dsp_pick_next_post_job(
+    const NzbgetRsPostJobCandidate* candidates, size_t count, int allow_par,
+    int has_active_unpack, int pause_post_process);
+void nzbget_rs_dsp_eval_post_stages(
+    int want_unpack, int unpack_status, int delete_status, int par_status, int cleanup_status,
+    int has_ext_cleanup_disk, int health, int move_status, int in_inter_dir,
+    int direct_unpack_status, int opt_post_download_rename, int post_download_renaming_status,
+    int has_dest_dir, int has_name, int opt_rename_after_unpack, int post_unpack_renaming_status,
+    NzbgetRsPostStageDecision* out_decision);
+int nzbget_rs_dsp_calc_post_pause_state(
+    const int* job_stages, size_t job_count, int par_pause_queue, int unpack_pause_queue,
+    int script_pause_queue);
+
+void nzbget_rs_dsp_scanner_next_pass(
+    int nzb_dir_interval, int nzb_dir_file_age, int has_scan_script, int current_pass,
+    int* out_next_interval, int* out_next_pass);
+int nzbget_rs_dsp_can_process_extension(const char* full_filename);
+int nzbget_rs_dsp_eval_file_age(
+    int64_t old_size, int64_t new_size, int64_t last_change, int64_t current_time, int file_age,
+    int64_t* out_size, int64_t* out_last_change);
+int nzbget_rs_dsp_should_drop_scan_file(
+    int64_t last_change, int64_t current_time, int nzb_dir_interval, int nzb_dir_file_age);
+int nzbget_rs_dsp_classify_missed_articles(
+    int missed_articles, int total_articles, int is_cut_short);
+int nzbget_rs_dsp_is_nzb_xml_prefix(const uint8_t* buf, size_t len);
+NzbgetRsBuf nzbget_rs_dsp_normalize_external_nzb_name(
+    const char* nzb_name, const char* valid_name, int is_nzb);
+
+int nzbget_rs_dsp_twin_sample_indices(
+    const size_t* primary_seg_counts, const int64_t* primary_seg_bytes, size_t primary_seg_bytes_len,
+    size_t primary_files, const size_t* dupe_seg_counts, const int64_t* dupe_seg_bytes,
+    size_t dupe_seg_bytes_len, size_t dupe_files, size_t sample_count,
+    size_t* out_file_indices, size_t* out_seg_indices);
+int nzbget_rs_dsp_twin_select_primary(
+    const uint8_t* queued, const uint8_t* is_dupe, const int* scores, size_t count);
+NzbgetRsBuf nzbget_rs_dsp_twin_resolve_kind(
+    int is_primary, int is_dupe, int by_par2, const char* by_files, int listed, int same_print,
+    int sampleable, int sampled_now, const char* sampled_val);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

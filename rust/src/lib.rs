@@ -53,6 +53,7 @@ pub mod dupefallback;
 pub mod streamrepair;
 pub mod postrepair;
 pub mod queuehotpath;
+pub mod diskstatepp;
 
 pub mod deadpostings;
 pub mod dupewatch;

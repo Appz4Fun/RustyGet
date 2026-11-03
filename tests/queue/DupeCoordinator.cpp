@@ -260,6 +260,23 @@ BOOST_AUTO_TEST_CASE(RustDupeCoordinatorFfiParity)
 	BOOST_CHECK_NE(nzbget_rs_qhp_parse_dupe_mode("force", &parsedMode), 0);
 	BOOST_CHECK_EQUAL(parsedMode, (int)dmForce);
 	BOOST_CHECK_EQUAL(nzbget_rs_qhp_parse_dupe_mode("bad", &parsedMode), 0);
+
+	BOOST_CHECK_EQUAL(nzbget_rs_dsp_parse_format_version("nzbget diskstate file version 64"), 64);
+	int nzbId = 0, fileId = 0;
+	BOOST_CHECK_NE(nzbget_rs_dsp_parse_ids_file("nzb 17 file 309\n", &nzbId, &fileId), 0);
+	BOOST_CHECK_EQUAL(nzbId, 17);
+	BOOST_CHECK_EQUAL(fileId, 309);
+	int isNzbLog = 0;
+	BOOST_CHECK_EQUAL(nzbget_rs_dsp_classify_queue_dir_id("n42.log", &isNzbLog), 42);
+	BOOST_CHECK_NE(isNzbLog, 0);
+	BOOST_CHECK_EQUAL(nzbget_rs_dsp_classify_queue_dir_id("108s", &isNzbLog), 108);
+	BOOST_CHECK_EQUAL(isNzbLog, 0);
+	BOOST_CHECK_EQUAL(nzbget_rs_dsp_normalize_post_stage(6, 58, 12), 7);
+	BOOST_CHECK_EQUAL(nzbget_rs_dsp_normalize_post_stage(14, 64, 12), 12);
+	BOOST_CHECK_NE(nzbget_rs_dsp_can_process_extension("Show.S01E01.nzb"), 0);
+	BOOST_CHECK_EQUAL(nzbget_rs_dsp_can_process_extension("Show.S01E01.nzb.queued"), 0);
+	BOOST_CHECK_EQUAL(nzbget_rs_dsp_classify_missed_articles(2, 50, 0), 1);
+	BOOST_CHECK_EQUAL(nzbget_rs_dsp_classify_missed_articles(10, 50, 0), 2);
 }
 #endif
 

@@ -44,6 +44,9 @@
 #include "PostDownloadRenamer.h"
 #include "ParDamage.h"
 #include <mutex>
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 PrePostProcessor::PrePostProcessor()
 {
@@ -269,6 +272,26 @@ void PrePostProcessor::SanitisePostQueue()
 		if (postInfo)
 		{
 			m_queuedJobs++;
+#ifdef NZBGET_USE_RUST
+			int nextStage = 0;
+			int reqParCheck = 0;
+			nzbget_rs_dsp_sanitise_post_stage(
+				(int)postInfo->GetStage(),
+				(int)PostInfo::ptExecutingScript,
+				(int)PostInfo::ptFinished,
+				(int)PostInfo::ptQueued,
+				FileSystem::DirectoryExists(nzbInfo->GetDestDir()) ? 1 : 0,
+				nzbInfo->GetUnpackTried() ? 1 : 0,
+				(int)nzbInfo->GetParStatus(),
+				(int)NzbInfo::psSkipped,
+				&nextStage,
+				&reqParCheck);
+			postInfo->SetStage((PostInfo::EStage)nextStage);
+			if (reqParCheck)
+			{
+				postInfo->SetRequestParCheck(true);
+			}
+#else
 			if (postInfo->GetStage() == PostInfo::ptExecutingScript ||
 				!FileSystem::DirectoryExists(nzbInfo->GetDestDir()))
 			{
@@ -282,6 +305,7 @@ void PrePostProcessor::SanitisePostQueue()
 					postInfo->SetRequestParCheck(true);
 				}
 			}
+#endif
 			postInfo->SetWorking(false);
 		}
 	}
@@ -355,6 +379,31 @@ void PrePostProcessor::DownloadQueueUpdate(void* aspect)
 		}
 #endif
 
+#ifdef NZBGET_USE_RUST
+		int eventAction = nzbget_rs_dsp_classify_file_event(
+			queueAspect->action == DownloadQueue::eaFileCompleted ? 1 : 0,
+			queueAspect->action == DownloadQueue::eaFileDeleted ? 1 : 0,
+			queueAspect->fileInfo->GetDupeDeleted() ? 1 : 0,
+			(int)queueAspect->fileInfo->GetNzbInfo()->GetDeleteStatus(),
+			(int)NzbInfo::dsNone,
+			(int)NzbInfo::dsHealth,
+			queueAspect->nzbInfo->GetPostInfo() ? 1 : 0,
+			queueAspect->nzbInfo->IsDownloadCompleted(true) ? 1 : 0,
+			queueAspect->nzbInfo->IsDownloadCompleted(false) ? 1 : 0);
+		if (eventAction == 1)
+		{
+			queueAspect->nzbInfo->PrintMessage(Message::mkInfo,
+				"Collection %s completely downloaded", queueAspect->nzbInfo->GetName());
+			g_QueueScriptCoordinator->EnqueueScript(queueAspect->nzbInfo, QueueScriptCoordinator::qeNzbDownloaded);
+			NzbDownloaded(queueAspect->downloadQueue, queueAspect->nzbInfo);
+		}
+		else if (eventAction == 2)
+		{
+			queueAspect->nzbInfo->PrintMessage(Message::mkInfo,
+				"Collection %s deleted from queue", queueAspect->nzbInfo->GetName());
+			NzbDeleted(queueAspect->downloadQueue, queueAspect->nzbInfo);
+		}
+#else
 		if ((queueAspect->action == DownloadQueue::eaFileCompleted ||
 			 queueAspect->fileInfo->GetDupeDeleted()) &&
 			queueAspect->fileInfo->GetNzbInfo()->GetDeleteStatus() != NzbInfo::dsHealth &&
@@ -376,6 +425,7 @@ void PrePostProcessor::DownloadQueueUpdate(void* aspect)
 				"Collection %s deleted from queue", queueAspect->nzbInfo->GetName());
 			NzbDeleted(queueAspect->downloadQueue, queueAspect->nzbInfo);
 		}
+#endif
 	}
 }
 
@@ -565,6 +615,44 @@ void PrePostProcessor::NzbDeleted(DownloadQueue* downloadQueue, NzbInfo* nzbInfo
 
 void PrePostProcessor::NzbCompleted(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, bool saveQueue)
 {
+#ifdef NZBGET_USE_RUST
+	int addToHistoryInt = 0, callDupeCompletedInt = 0, enqueueDeletedScriptInt = 0, needSaveInt = 0;
+	nzbget_rs_dsp_eval_nzb_completed(
+		(int)nzbInfo->GetDupeHint(),
+		(int)NzbInfo::dhRedownloadAuto,
+		g_Options->GetKeepHistory(),
+		nzbInfo->GetAvoidHistory() ? 1 : 0,
+		g_Options->GetDupeCheck() ? 1 : 0,
+		(int)nzbInfo->GetDupeMode(),
+		(int)dmForce,
+		DupeCoordinator::FailsOver(nzbInfo) ? 1 : 0,
+		(int)nzbInfo->GetDeleteStatus(),
+		(int)NzbInfo::dsNone,
+		(int)NzbInfo::dsHealth,
+		(int)NzbInfo::dsBad,
+		(int)NzbInfo::dsScan,
+		(int)NzbInfo::dsCopy,
+		&addToHistoryInt,
+		&callDupeCompletedInt,
+		&enqueueDeletedScriptInt,
+		&needSaveInt);
+	bool addToHistory = addToHistoryInt != 0;
+	if (addToHistory)
+	{
+		g_HistoryCoordinator->AddToHistory(downloadQueue, nzbInfo);
+	}
+	nzbInfo->SetAvoidHistory(false);
+	bool needSave = needSaveInt != 0;
+	if (callDupeCompletedInt)
+	{
+		g_DupeCoordinator->NzbCompleted(downloadQueue, nzbInfo);
+		needSave = true;
+	}
+	if (enqueueDeletedScriptInt)
+	{
+		g_QueueScriptCoordinator->EnqueueScript(nzbInfo, QueueScriptCoordinator::qeNzbDeleted);
+	}
+#else
 	bool downloadDupe = nzbInfo->GetDupeHint() == NzbInfo::dhRedownloadAuto;
 	bool addToHistory = g_Options->GetKeepHistory() > 0 && !nzbInfo->GetAvoidHistory();
 	if (addToHistory)
@@ -593,6 +681,7 @@ void PrePostProcessor::NzbCompleted(DownloadQueue* downloadQueue, NzbInfo* nzbIn
 	{
 		g_QueueScriptCoordinator->EnqueueScript(nzbInfo, QueueScriptCoordinator::qeNzbDeleted);
 	}
+#endif
 
 	if (!addToHistory)
 	{
@@ -758,6 +847,25 @@ void PrePostProcessor::CleanupJobs(DownloadQueue* downloadQueue)
 bool PrePostProcessor::CanRunMoreJobs(bool* allowPar)
 {
 	std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
+#ifdef NZBGET_USE_RUST
+	std::vector<int> stages;
+	stages.reserve(m_activeJobs.size());
+	for (NzbInfo* postJob : m_activeJobs)
+	{
+		stages.push_back((int)postJob->GetPostInfo()->GetStage());
+	}
+	int allowParInt = 0;
+	int canRun = nzbget_rs_dsp_can_run_more_jobs(
+		stages.data(),
+		stages.size(),
+		(int)PostInfo::ptLoadingPars,
+		(int)PostInfo::ptVerifyingRepaired,
+		(int)PostInfo::ptRepairing,
+		(int)g_Options->GetPostStrategy(),
+		&allowParInt);
+	*allowPar = allowParInt != 0;
+	return canRun != 0;
+#else
 	int totalJobs = (int)m_activeJobs.size();
 	int parJobs = 0;
 	int otherJobs = 0;
@@ -792,6 +900,7 @@ bool PrePostProcessor::CanRunMoreJobs(bool* allowPar)
 	}
 
 	return false;
+#endif
 }
 
 NzbInfo* PrePostProcessor::PickNextJob(DownloadQueue* downloadQueue, bool allowPar)
@@ -801,6 +910,43 @@ NzbInfo* PrePostProcessor::PickNextJob(DownloadQueue* downloadQueue, bool allowP
 
 	bool hasActiveUnpack = HasActiveUnpack(downloadQueue);
 
+#ifdef NZBGET_USE_RUST
+	std::vector<NzbInfo*> items;
+	std::vector<NzbgetRsPostJobCandidate> candidates;
+	items.reserve(downloadQueue->GetQueue()->size());
+	candidates.reserve(downloadQueue->GetQueue()->size());
+	for (NzbInfo* nzbInfo1 : downloadQueue->GetQueue())
+	{
+		items.push_back(nzbInfo1);
+		NzbgetRsPostJobCandidate c{};
+		PostInfo* pi = nzbInfo1->GetPostInfo();
+		c.has_post_info = pi ? 1 : 0;
+		c.working = (pi && pi->GetWorking()) ? 1 : 0;
+		c.direct_unpack_running = nzbInfo1->GetDirectUnpackStatus() == NzbInfo::nsRunning ? 1 : 0;
+		c.has_live_repair_thread = nzbInfo1->GetLiveRepairThread() != nullptr ? 1 : 0;
+		c.priority = nzbInfo1->GetPriority();
+		c.force_priority = nzbInfo1->GetForcePriority() ? 1 : 0;
+		c.need_par_check = (pi && pi->GetNeedParCheck()) ? 1 : 0;
+		c.need_unpack = (pi && pi->GetNeedUnpack()) ? 1 : 0;
+		if (pi && !pi->GetWorking() && !c.direct_unpack_running && !c.has_live_repair_thread)
+		{
+			c.has_queue_script_job = g_QueueScriptCoordinator->HasJob(nzbInfo1->GetId(), nullptr) ? 1 : 0;
+			c.in_active_jobs = std::find(m_activeJobs.begin(), m_activeJobs.end(), nzbInfo1) != m_activeJobs.end() ? 1 : 0;
+			c.download_completed = nzbInfo1->IsDownloadCompleted(true) ? 1 : 0;
+		}
+		candidates.push_back(c);
+	}
+	int picked = nzbget_rs_dsp_pick_next_post_job(
+		candidates.data(),
+		candidates.size(),
+		allowPar ? 1 : 0,
+		hasActiveUnpack ? 1 : 0,
+		g_WorkState->GetPausePostProcess() ? 1 : 0);
+	if (picked >= 0 && (size_t)picked < items.size())
+	{
+		nzbInfo = items[(size_t)picked];
+	}
+#else
 	for (NzbInfo* nzbInfo1: downloadQueue->GetQueue())
 	{
 		if (nzbInfo1->GetPostInfo() && !nzbInfo1->GetPostInfo()->GetWorking() &&
@@ -821,6 +967,7 @@ NzbInfo* PrePostProcessor::PickNextJob(DownloadQueue* downloadQueue, bool allowP
 			nzbInfo = nzbInfo1;
 		}
 	}
+#endif
 
 	return nzbInfo;
 }
@@ -1191,6 +1338,42 @@ void PrePostProcessor::StartJob(DownloadQueue* downloadQueue, PostInfo* postInfo
 	}
 #endif
 
+#ifdef NZBGET_USE_RUST
+	bool inInterDir = !Util::EmptyStr(g_Options->GetInterDir()) &&
+		!strncmp(nzbInfo->GetDestDir(), g_Options->GetInterDir(), strlen(g_Options->GetInterDir())) &&
+		nzbInfo->GetDestDir()[strlen(g_Options->GetInterDir())] == PATH_SEPARATOR;
+	NzbgetRsPostStageDecision stageDec{};
+	nzbget_rs_dsp_eval_post_stages(
+		wantUnpack ? 1 : 0,
+		(int)nzbInfo->GetUnpackStatus(),
+		(int)nzbInfo->GetDeleteStatus(),
+		(int)nzbInfo->GetParStatus(),
+		(int)nzbInfo->GetCleanupStatus(),
+		!Util::EmptyStr(g_Options->GetExtCleanupDisk()) ? 1 : 0,
+		nzbInfo->CalcHealth(),
+		(int)nzbInfo->GetMoveStatus(),
+		inInterDir ? 1 : 0,
+		(int)nzbInfo->GetDirectUnpackStatus(),
+		g_Options->GetPostDownloadRename() ? 1 : 0,
+		(int)nzbInfo->GetPostDownloadRenamingStatus(),
+		!Util::EmptyStr(nzbInfo->GetDestDir()) ? 1 : 0,
+		!Util::EmptyStr(nzbInfo->GetName()) ? 1 : 0,
+		g_Options->GetRenameAfterUnpack() ? 1 : 0,
+		(int)nzbInfo->GetPostUnpackRenamingStatus(),
+		&stageDec);
+	if (stageDec.skip_unpack_due_to_par)
+	{
+		nzbInfo->PrintMessage(Message::mkWarning,
+			"Skipping unpack for %s due to %s", nzbInfo->GetName(),
+			nzbInfo->GetParStatus() == NzbInfo::psManual ? "required par-repair" : "par-failure");
+		nzbInfo->SetUnpackStatus(NzbInfo::usSkipped);
+	}
+	unpack = stageDec.unpack != 0;
+	bool cleanup = stageDec.cleanup != 0;
+	bool moveInter = stageDec.move_inter != 0;
+	bool postDownloadRenaming = stageDec.post_download_renaming != 0;
+	bool postUnpackRenaming = stageDec.post_unpack_renaming != 0;
+#else
 	bool parFailed = nzbInfo->GetParStatus() == NzbInfo::psFailure ||
 		nzbInfo->GetParStatus() == NzbInfo::psRepairPossible ||
 		nzbInfo->GetParStatus() == NzbInfo::psManual;
@@ -1258,6 +1441,7 @@ void PrePostProcessor::StartJob(DownloadQueue* downloadQueue, PostInfo* postInfo
 		nzbInfo->GetParStatus() != NzbInfo::psManual &&
 		!moveInter &&
 		(nzbInfo->GetMoveStatus() == NzbInfo::msSuccess || nzbInfo->GetMoveStatus() == NzbInfo::msNone);
+#endif
 
 	if (unpack)
 	{
@@ -1322,6 +1506,20 @@ void PrePostProcessor::UpdatePauseState()
 {
 	bool needPause = false;
 	std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
+#ifdef NZBGET_USE_RUST
+	std::vector<int> stages;
+	stages.reserve(m_activeJobs.size());
+	for (NzbInfo* postJob : m_activeJobs)
+	{
+		stages.push_back((int)postJob->GetPostInfo()->GetStage());
+	}
+	needPause = nzbget_rs_dsp_calc_post_pause_state(
+		stages.data(),
+		stages.size(),
+		g_Options->GetParPauseQueue() ? 1 : 0,
+		g_Options->GetUnpackPauseQueue() ? 1 : 0,
+		g_Options->GetScriptPauseQueue() ? 1 : 0) != 0;
+#else
 	for (NzbInfo* postJob : m_activeJobs)
 	{
 		switch (postJob->GetPostInfo()->GetStage())
@@ -1353,6 +1551,7 @@ void PrePostProcessor::UpdatePauseState()
 				break;
 		}
 	}
+#endif
 
 	if (needPause && !g_WorkState->GetTempPauseDownload())
 	{

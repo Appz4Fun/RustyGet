@@ -330,6 +330,13 @@ bool RarVolume::ReadFrom(ContentSource& source)
 
 int RarVolume::DetectRarVersion(RarSourceCursor& file)
 {
+#ifdef NZBGET_USE_RUST
+	uint8_t fileSignature[8]{};
+	int cnt = (int)file.Read(fileSignature, sizeof(fileSignature));
+	return cnt == (int)sizeof(fileSignature)
+		? nzbget_rs_unpack_detect_rar_signature(fileSignature, sizeof(fileSignature))
+		: 0;
+#else
 	static char RAR3_SIGNATURE[] = { 0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00 };
 	static char RAR5_SIGNATURE[] = { 0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x01, 0x00 };
 
@@ -342,6 +349,7 @@ int RarVolume::DetectRarVersion(RarSourceCursor& file)
 	bool rar3 = !rar5 && cnt == sizeof(fileSignature) && !strcmp(RAR3_SIGNATURE, fileSignature);
 
 	return rar3 ? 3 : rar5 ? 5 : 0;
+#endif
 }
 
 bool RarVolume::Read(RarSourceCursor& file, RarBlock* block, void* buffer, int64 size)

@@ -25,6 +25,9 @@
 #include "DupeCoordinator.h"
 #include "FileSystem.h"
 #include "Options.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 BOOST_AUTO_TEST_SUITE(QueueTest)
 
@@ -219,5 +222,28 @@ BOOST_AUTO_TEST_CASE(DupeCoordinatorFindDupeBackupTest)
 	queue.GetHistory()->Add(std::make_unique<HistoryInfo>(std::move(good)), true);
 	BOOST_CHECK(coordinator.FindDupeBackup(&queue, item, item->GetName(), item->GetDupeKey()) == nullptr);
 }
+
+#ifdef NZBGET_USE_RUST
+BOOST_AUTO_TEST_CASE(RustDupeCoordinatorFfiParity)
+{
+	BOOST_CHECK_NE(nzbget_rs_dupecoord_same_name_or_key("Movie.A", "imdb:123", "Movie.B", "IMDB:123"), 0);
+	BOOST_CHECK_EQUAL(nzbget_rs_dupecoord_same_name_or_key("Movie.A", "imdb:123", "Movie.A", "imdb:456"), 0);
+	BOOST_CHECK_NE(nzbget_rs_dupecoord_same_name_or_key("Movie.A", "", "movie.a", nullptr), 0);
+
+	BOOST_CHECK_NE(nzbget_rs_dupecoord_failover_warranted(1000, 300, 300), 0);
+	BOOST_CHECK_EQUAL(nzbget_rs_dupecoord_failover_warranted(1000, 300, 299), 0);
+	BOOST_CHECK_EQUAL(nzbget_rs_dupecoord_parse_alive_permille("96.5"), 965);
+	BOOST_CHECK_EQUAL(nzbget_rs_dupecoord_parse_alive_permille("invalid"), -1);
+
+	BOOST_CHECK_EQUAL(nzbget_rs_dupecoord_status_from_text("SUCCESS/ALL"), (int)DupeCoordinator::dsSuccess);
+	BOOST_CHECK_EQUAL(nzbget_rs_dupecoord_status_from_text("FAILURE/PAR"), (int)DupeCoordinator::dsFailure);
+	BOOST_CHECK_EQUAL(nzbget_rs_dupecoord_status_from_text("WARNING/SCRIPT"), (int)DupeCoordinator::dsWarning);
+
+	NzbgetRsBuf reason = nzbget_rs_dupecoord_format_no_backup_reason(5, 1, 1, 1, 1, 0, 1);
+	std::string text(reason.data ? reason.data : "", reason.len);
+	nzbget_rs_free(reason);
+	BOOST_CHECK(text.find("5 other item(s) of the key in history:") != std::string::npos);
+}
+#endif
 
 BOOST_AUTO_TEST_SUITE_END()

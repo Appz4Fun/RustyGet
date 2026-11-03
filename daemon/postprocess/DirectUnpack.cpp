@@ -28,6 +28,9 @@
 #include "Options.h"
 #include "UnpackController.h"
 #include "PrePostProcessor.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 void DirectUnpack::StartJob(NzbInfo* nzbInfo)
 {
@@ -382,6 +385,53 @@ void DirectUnpack::AddMessage(Message::EKind kind, const char* text)
 	debug("%s", text);
 
 	BString<1024> msgText = text;
+#ifdef NZBGET_USE_RUST
+	NzbgetRsUnpackMessageInfo info{};
+	nzbget_rs_unpack_parse_message(text, m_unpackExtendedDir, 0, &info);
+	if (info.strip_extracting_dir != 0)
+	{
+		msgText.Format("Unrar: Extracting %s", text + info.stripped_suffix_offset);
+	}
+	if (info.is_insert_disk != 0)
+	{
+		BString<1024> filename;
+		filename.Set(text + info.insert_disk_name_offset, (int)info.insert_disk_name_len);
+		WaitNextVolume(filename);
+		return;
+	}
+
+	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+	NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_nzbId);
+	if (nzbInfo)
+	{
+		nzbInfo->AddMessage(kind, msgText);
+	}
+	else
+	{
+		ScriptController::AddMessage(kind, msgText);
+	}
+
+	if (info.has_extracting_progress != 0 && nzbInfo)
+	{
+		SetProgressLabel(nzbInfo, msgText + 7);
+	}
+
+	if (info.has_extracting_from != 0 && nzbInfo)
+	{
+		SetProgressLabel(nzbInfo, text + 7);
+		m_extractedArchives.emplace_back(text + 23);
+	}
+
+	if (!IsStopped() && (info.decrypt_error != 0 || info.direct_password_error != 0 || info.crc_or_volume_error != 0))
+	{
+		Stop(downloadQueue, nzbInfo);
+	}
+
+	if (info.all_ok != 0)
+	{
+		m_allOkMessageReceived = true;
+	}
+#else
 	int len = strlen(text);
 
 	// Modify unrar messages for better readability:
@@ -439,6 +489,7 @@ void DirectUnpack::AddMessage(Message::EKind kind, const char* text)
 	{
 		m_allOkMessageReceived = true;
 	}
+#endif
 }
 
 void DirectUnpack::Stop(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)

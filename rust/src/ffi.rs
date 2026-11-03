@@ -9760,4 +9760,411 @@ pub unsafe extern "C" fn nzbget_rs_stream_compute_positional_rank(
     }
 }
 
+// ============================================================================
+// Post-Repair & DupeCoordinator Hot-Path FFI (`rust/src/postrepair.rs`)
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupecoord_same_name_or_key(
+    name1: *const c_char,
+    dupe_key1: *const c_char,
+    name2: *const c_char,
+    dupe_key2: *const c_char,
+) -> c_int {
+    let n1 = if name1.is_null() { b"" } else { CStr::from_ptr(name1).to_bytes() };
+    let k1 = if dupe_key1.is_null() { b"" } else { CStr::from_ptr(dupe_key1).to_bytes() };
+    let n2 = if name2.is_null() { b"" } else { CStr::from_ptr(name2).to_bytes() };
+    let k2 = if dupe_key2.is_null() { b"" } else { CStr::from_ptr(dupe_key2).to_bytes() };
+    crate::postrepair::same_name_or_key(n1, k1, n2, k2) as c_int
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dupecoord_failover_warranted(
+    item_score: c_int,
+    health: c_int,
+    backup_score: c_int,
+) -> c_int {
+    crate::postrepair::failover_warranted(item_score, health, backup_score) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupecoord_parse_alive_permille(
+    value: *const c_char,
+) -> c_int {
+    crate::postrepair::parse_alive_permille_cstr(value)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dupecoord_fails_over(
+    dupe_check: c_int,
+    dupe_mode: c_int,
+    health_check: c_int,
+) -> c_int {
+    crate::postrepair::fails_over(dupe_check != 0, dupe_mode, health_check) as c_int
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dupecoord_classify_no_backup_item(
+    delete_status: c_int,
+    dupe_mode: c_int,
+    file_exists: c_int,
+    health: c_int,
+    critical_health: c_int,
+    mark_status: c_int,
+    alive: c_int,
+) -> c_int {
+    crate::postrepair::classify_no_backup_item(
+        delete_status,
+        dupe_mode,
+        file_exists != 0,
+        health,
+        critical_health,
+        mark_status,
+        alive,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dupecoord_format_no_backup_reason(
+    total: c_int,
+    not_backup: c_int,
+    forced: c_int,
+    no_file: c_int,
+    unhealthy: c_int,
+    bad: c_int,
+    dead: c_int,
+) -> RsBuf {
+    into_buf(crate::postrepair::format_no_backup_reason(
+        total, not_backup, forced, no_file, unhealthy, bad, dead,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupecoord_status_from_text(
+    text_status: *const c_char,
+) -> c_int {
+    let s = if text_status.is_null() {
+        b""
+    } else {
+        CStr::from_ptr(text_status).to_bytes()
+    };
+    crate::postrepair::status_from_text(s)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupecoord_select_dupe_backup(
+    has_self_nzb: c_int,
+    self_full_content_hash: u32,
+    dupe_health: c_int,
+    history: *const crate::postrepair::NzbgetRsDupeHistoryCandidate,
+    history_count: usize,
+    queue: *const crate::postrepair::NzbgetRsDupeQueueCandidate,
+    queue_count: usize,
+    ctx: *mut std::ffi::c_void,
+    file_exists_cb: Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, history_index: usize) -> c_int>,
+) -> c_int {
+    let h = if history_count == 0 || history.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(history, history_count)
+    };
+    let q = if queue_count == 0 || queue.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(queue, queue_count)
+    };
+    crate::postrepair::select_dupe_backup(
+        has_self_nzb != 0,
+        self_full_content_hash,
+        dupe_health != 0,
+        h,
+        q,
+        |idx| {
+            if let Some(cb) = file_exists_cb {
+                cb(ctx, idx) != 0
+            } else {
+                false
+            }
+        },
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dupematcher_size_diff_ok(
+    size1: i64,
+    size2: i64,
+    max_diff_percent: c_int,
+) -> c_int {
+    crate::postrepair::size_diff_ok(size1, size2, max_diff_percent) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupematcher_parse_rar_lister_line(
+    text: *const c_char,
+    expected_size: i64,
+    max_size: *mut i64,
+    compressed: *mut c_int,
+    last_size_max: *mut c_int,
+) -> c_int {
+    crate::postrepair::parse_rar_lister_line_cstr(
+        text,
+        expected_size,
+        max_size,
+        compressed,
+        last_size_max,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_streamcrypto_rar3_swizzle_key(
+    digest20: *const u8,
+    key16_out: *mut u8,
+) {
+    if digest20.is_null() || key16_out.is_null() {
+        return;
+    }
+    let d: &[u8; 20] = &*(digest20 as *const [u8; 20]);
+    let k: &mut [u8; 16] = &mut *(key16_out as *mut [u8; 16]);
+    crate::postrepair::rar3_swizzle_key(d, k);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_streamcrypto_rar5_fold_psw_check(
+    value32: *const u8,
+    check8_out: *mut u8,
+) {
+    if value32.is_null() || check8_out.is_null() {
+        return;
+    }
+    let v: &[u8; 32] = &*(value32 as *const [u8; 32]);
+    let c: &mut [u8; 8] = &mut *(check8_out as *mut [u8; 8]);
+    crate::postrepair::rar5_fold_psw_check(v, c);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_repair_select_more_pars(
+    sorted_block_counts: *const c_int,
+    count: usize,
+    block_needed: c_int,
+    out_indices: *mut usize,
+    cap: usize,
+    out_remaining_needed: *mut c_int,
+) -> usize {
+    let counts = if count == 0 || sorted_block_counts.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(sorted_block_counts, count)
+    };
+    let (indices, rem) = crate::postrepair::select_more_pars(counts, block_needed);
+    if !out_remaining_needed.is_null() {
+        *out_remaining_needed = rem;
+    }
+    if !out_indices.is_null() && cap > 0 {
+        let n = indices.len().min(cap);
+        std::ptr::copy_nonoverlapping(indices.as_ptr(), out_indices, n);
+    }
+    indices.len()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_repair_pick_twin_volume(
+    sorted_volume_blocks: *const c_int,
+    count: usize,
+    left: c_int,
+) -> isize {
+    let vols = if count == 0 || sorted_volume_blocks.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(sorted_volume_blocks, count)
+    };
+    crate::postrepair::pick_twin_volume(vols, left)
+        .map(|i| i as isize)
+        .unwrap_or(-1)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_repair_check_par_time_limit(
+    par_time_limit_min: c_int,
+    is_repairing_stage: c_int,
+    elapsed_sec: i64,
+    stage_progress: c_int,
+    out_estimated_sec: *mut c_int,
+) -> c_int {
+    if let Some(est) = crate::postrepair::check_par_time_limit(
+        par_time_limit_min,
+        is_repairing_stage != 0,
+        elapsed_sec,
+        stage_progress,
+    ) {
+        if !out_estimated_sec.is_null() {
+            *out_estimated_sec = est;
+        }
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_parchecker_maybe_splitted_fragment(
+    filename1: *const c_char,
+    filename2: *const c_char,
+) -> c_int {
+    if filename1.is_null() || filename2.is_null() {
+        return 0;
+    }
+    let f1 = CStr::from_ptr(filename1).to_bytes();
+    let f2 = CStr::from_ptr(filename2).to_bytes();
+    crate::postrepair::maybe_splitted_fragment(f1, f2) as c_int
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_parchecker_calc_stage_progress(
+    stage: c_int,
+    file_progress: c_int,
+    processed_count: c_int,
+    files_to_repair: c_int,
+    source_files_count: c_int,
+    extra_files: c_int,
+    quick_files: c_int,
+) -> c_int {
+    crate::postrepair::calc_stage_progress(
+        stage,
+        file_progress,
+        processed_count,
+        files_to_repair,
+        source_files_count,
+        extra_files,
+        quick_files,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_parchecker_compute_valid_blocks(
+    block_count: usize,
+    block_size: i64,
+    file_size: i64,
+    segments: *const crate::postrepair::NzbgetRsParSegment,
+    segment_count: usize,
+    out_valid: *mut u8,
+) {
+    if block_count == 0 || out_valid.is_null() {
+        return;
+    }
+    let segs = if segment_count == 0 || segments.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(segments, segment_count)
+    };
+    let valid_slice = std::slice::from_raw_parts_mut(out_valid, block_count);
+    crate::postrepair::compute_valid_blocks(block_count, block_size, file_size, segs, valid_slice);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_parchecker_smart_calc_range_crc(
+    start: i64,
+    end: i64,
+    segments: *const crate::postrepair::NzbgetRsParSegment,
+    segment_count: usize,
+    ctx: *mut std::ffi::c_void,
+    dumb_calc_cb: Option<
+        unsafe extern "C" fn(ctx: *mut std::ffi::c_void, start: i64, end: i64, out_crc: *mut u32) -> c_int,
+    >,
+    out_crc: *mut u32,
+) -> c_int {
+    let segs = if segment_count == 0 || segments.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(segments, segment_count)
+    };
+    let res = crate::postrepair::smart_calc_range_crc(start, end, segs, |s, e| {
+        let cb = dumb_calc_cb?;
+        let mut c = 0u32;
+        if cb(ctx, s, e, &mut c) != 0 {
+            Some(c)
+        } else {
+            None
+        }
+    });
+    if let Some(crc) = res {
+        if !out_crc.is_null() {
+            *out_crc = crc;
+        }
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_parchecker_classify_streambuf_line(
+    msg: *const c_char,
+    out_offset: *mut usize,
+) -> c_int {
+    if msg.is_null() {
+        if !out_offset.is_null() {
+            *out_offset = 0;
+        }
+        return 1;
+    }
+    let bytes = CStr::from_ptr(msg).to_bytes();
+    let (extra_debug, offset) = crate::postrepair::classify_streambuf_line(bytes);
+    if !out_offset.is_null() {
+        *out_offset = offset;
+    }
+    extra_debug as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_unpack_detect_rar_signature(
+    sig_bytes: *const u8,
+    sig_len: usize,
+) -> c_int {
+    if sig_bytes.is_null() || sig_len != 8 {
+        return 0;
+    }
+    crate::postrepair::detect_rar_signature(std::slice::from_raw_parts(sig_bytes, sig_len))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_unpack_check_joinable_fragments(
+    count: c_int,
+    min_seg: c_int,
+    max_seg: c_int,
+    dif_size_min: c_int,
+    par_success: c_int,
+) -> c_int {
+    crate::postrepair::check_joinable_fragments(
+        count,
+        min_seg,
+        max_seg,
+        dif_size_min,
+        par_success != 0,
+    ) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_unpack_parse_message(
+    text: *const c_char,
+    unpack_extended_dir: *const c_char,
+    is_seven_zip: c_int,
+    out_info: *mut crate::postrepair::NzbgetRsUnpackMessageInfo,
+) {
+    if out_info.is_null() {
+        return;
+    }
+    let t = if text.is_null() {
+        b""
+    } else {
+        CStr::from_ptr(text).to_bytes()
+    };
+    let d = if unpack_extended_dir.is_null() {
+        b""
+    } else {
+        CStr::from_ptr(unpack_extended_dir).to_bytes()
+    };
+    *out_info = crate::postrepair::parse_unpack_message(t, d, is_seven_zip != 0);
+}
+
+
 

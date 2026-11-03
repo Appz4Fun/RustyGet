@@ -26,6 +26,9 @@
 #include "Options.h"
 #include "ScriptController.h"
 #include "Thread.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 class RarLister : public Thread, public ScriptController
 {
@@ -107,6 +110,36 @@ void RarLister::Run()
 
 void RarLister::AddMessage(Message::EKind kind, const char* text)
 {
+#ifdef NZBGET_USE_RUST
+	int compressed = m_compressed ? 1 : 0;
+	int lastSizeMax = m_lastSizeMax ? 1 : 0;
+	int action = nzbget_rs_dupematcher_parse_rar_lister_line(
+		text, m_expectedSize, &m_maxSize, &compressed, &lastSizeMax);
+	m_compressed = compressed != 0;
+	m_lastSizeMax = lastSizeMax != 0;
+	if (action == 1)
+	{
+		m_owner->PrintMessage(Message::mkDetail, "Reading file %s", text + 9);
+	}
+	else if (action == 2)
+	{
+		m_lastFilename = text + 14;
+	}
+	else if (action == 3)
+	{
+		strncpy(m_filenameBuf, m_lastFilename, m_filenameBufLen);
+		m_filenameBuf[m_filenameBufLen-1] = '\0';
+		return;
+	}
+	else if (action == 4)
+	{
+		return;
+	}
+	else if (action == 5)
+	{
+		Terminate();
+	}
+#else
 	if (!strncasecmp(text, "Archive: ", 9))
 	{
 		m_owner->PrintMessage(Message::mkDetail, "Reading file %s", text + 9);
@@ -139,11 +172,15 @@ void RarLister::AddMessage(Message::EKind kind, const char* text)
 			Terminate();
 		}
 	}
+#endif
 }
 
 
 bool DupeMatcher::SizeDiffOK(int64 size1, int64 size2, int maxDiffPercent)
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_dupematcher_size_diff_ok(size1, size2, maxDiffPercent) != 0;
+#else
 	if (size1 == 0 || size2 == 0)
 	{
 		return false;
@@ -154,6 +191,7 @@ bool DupeMatcher::SizeDiffOK(int64 size1, int64 size2, int maxDiffPercent)
 	int64 max = size1 > size2 ? size1 : size2;
 	int diffPercent = (int)(diff * 100 / max);
 	return diffPercent < maxDiffPercent;
+#endif
 }
 
 bool DupeMatcher::Prepare()

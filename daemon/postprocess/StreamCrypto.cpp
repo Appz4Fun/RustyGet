@@ -23,6 +23,9 @@
 #include <cstring>
 #include "StreamCrypto.h"
 #include "NString.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 #ifndef DISABLE_TLS
 #include "OpenSSL.h"
@@ -86,6 +89,9 @@ bool StreamCrypto::DeriveRar3(const char* password, const uint8 salt[8],
 
 	EVP_DigestFinal(context.get(), digest, nullptr);
 
+#ifdef NZBGET_USE_RUST
+	nzbget_rs_streamcrypto_rar3_swizzle_key(digest, keyOut);
+#else
 	for (int i = 0; i < 4; i++)
 	{
 		for (int j = 0; j < 4; j++)
@@ -93,6 +99,7 @@ bool StreamCrypto::DeriveRar3(const char* password, const uint8 salt[8],
 			keyOut[i * 4 + j] = digest[i * 4 + 3 - j];
 		}
 	}
+#endif
 
 	return true;
 #else
@@ -141,9 +148,13 @@ bool StreamCrypto::DeriveRar5PswCheck(const char* password, uint8 kdfCount,
 	if (!PKCS5_PBKDF2_HMAC(pwd, (int)strlen(pwd), salt, 16,
 		iterations, EVP_sha256(), 32, value)) return false;
 
+#ifdef NZBGET_USE_RUST
+	nzbget_rs_streamcrypto_rar5_fold_psw_check(value, checkOut);
+#else
 	uint8 check[8] = {};
 	for (int i = 0; i < 32; i++) check[i % 8] ^= value[i];
 	memcpy(checkOut, check, 8);
+#endif
 	return true;
 #else
 	(void)salt;

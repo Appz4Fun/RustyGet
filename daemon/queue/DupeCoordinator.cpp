@@ -33,13 +33,20 @@
 #include <set>
 #include "QueueScript.h"
 #include "QueueCoordinator.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 bool DupeCoordinator::SameNameOrKey(const char* name1, const char* dupeKey1,
 	const char* name2, const char* dupeKey2)
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_dupecoord_same_name_or_key(name1, dupeKey1, name2, dupeKey2) != 0;
+#else
 	bool hasDupeKeys = !Util::EmptyStr(dupeKey1) && !Util::EmptyStr(dupeKey2);
 	return (hasDupeKeys && !strcasecmp(dupeKey1, dupeKey2)) ||
 		(!hasDupeKeys && !strcasecmp(name1, name2));
+#endif
 }
 
 /**
@@ -514,23 +521,50 @@ std::string DupeCoordinator::NoBackupReason(DownloadQueue* downloadQueue, NzbInf
 		NzbInfo* item = historyInfo->GetNzbInfo();
 		total++;
 		int alive = AlivePermille(item);
+#ifdef NZBGET_USE_RUST
+		bool fileExists = (item->GetDeleteStatus() == NzbInfo::dsDupe || item->GetDeleteStatus() == NzbInfo::dsCopy) &&
+			item->GetDupeMode() != dmForce ? FileSystem::FileExists(item->GetQueuedFilename()) : false;
+		int bucket = nzbget_rs_dupecoord_classify_no_backup_item(
+			(int)item->GetDeleteStatus(), (int)item->GetDupeMode(), fileExists ? 1 : 0,
+			item->CalcHealth(), item->CalcCriticalHealth(true), (int)item->GetMarkStatus(), alive);
+		if (bucket == 1) notBackup++;
+		else if (bucket == 2) forced++;
+		else if (bucket == 3) noFile++;
+		else if (bucket == 4) unhealthy++;
+		else if (bucket == 5) bad++;
+		else if (bucket == 6) dead++;
+#else
 		if (item->GetDeleteStatus() != NzbInfo::dsDupe && item->GetDeleteStatus() != NzbInfo::dsCopy) notBackup++;
 		else if (item->GetDupeMode() == dmForce) forced++;
 		else if (!FileSystem::FileExists(item->GetQueuedFilename())) noFile++;
 		else if (item->CalcHealth() < item->CalcCriticalHealth(true)) unhealthy++;
 		else if (item->GetMarkStatus() == NzbInfo::ksBad) bad++;
 		else if (alive == 0) dead++;
+#endif
 	}
+#ifdef NZBGET_USE_RUST
+	NzbgetRsBuf buf = nzbget_rs_dupecoord_format_no_backup_reason(
+		total, notBackup, forced, noFile, unhealthy, bad, dead);
+	std::string out(buf.data ? buf.data : "", buf.len);
+	nzbget_rs_free(buf);
+	return out;
+#else
 	return BString<1024>("%i other item(s) of the key in history: %i failed/succeeded/deleted, %i forced, "
 		"%i without nzb-file, %i unhealthy, %i marked bad, %i found dead; the rest scored below a queued or "
 		"successful duplicate, or were copies of this download", total, notBackup, forced, noFile, unhealthy,
 		bad, dead).Str();
+#endif
 }
 
 bool DupeCoordinator::FailsOver(NzbInfo* nzbInfo)
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_dupecoord_fails_over(
+		g_Options->GetDupeCheck() ? 1 : 0, (int)nzbInfo->GetDupeMode(), (int)g_Options->GetHealthCheck()) != 0;
+#else
 	return g_Options->GetDupeCheck() && (nzbInfo->GetDupeMode() == dmScore ||
 		(nzbInfo->GetDupeMode() == dmForce && g_Options->GetHealthCheck() == Options::hcDupe));
+#endif
 }
 
 /**
@@ -551,6 +585,72 @@ void DupeCoordinator::ReturnBestDupe(DownloadQueue* downloadQueue, NzbInfo* nzbI
 
 HistoryInfo* DupeCoordinator::FindDupeBackup(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, const char* nzbName, const char* dupeKey)
 {
+#ifdef NZBGET_USE_RUST
+	std::vector<HistoryInfo*> historyItems;
+	std::vector<NzbgetRsDupeHistoryCandidate> historyCandidates;
+	historyItems.reserve(downloadQueue->GetHistory()->size());
+	historyCandidates.reserve(downloadQueue->GetHistory()->size());
+	for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
+	{
+		historyItems.push_back(historyInfo);
+		NzbgetRsDupeHistoryCandidate c{};
+		c.kind = (int)historyInfo->GetKind();
+		if (historyInfo->GetKind() == HistoryInfo::hkNzb || historyInfo->GetKind() == HistoryInfo::hkUrl)
+		{
+			NzbInfo* item = historyInfo->GetNzbInfo();
+			c.dupe_mode = (int)item->GetDupeMode();
+			c.dupe_score = item->GetDupeScore();
+			c.is_dupe_success = item->IsDupeSuccess() ? 1 : 0;
+			c.mark_status = (int)item->GetMarkStatus();
+			c.delete_status = (int)item->GetDeleteStatus();
+			c.full_content_hash = item->GetFullContentHash();
+			c.alive_permille = AlivePermille(item);
+			c.health = item->CalcHealth();
+			c.critical_health = item->CalcCriticalHealth(true);
+			c.same_name_or_key = SameNameOrKey(item->GetName(), item->GetDupeKey(), nzbName, dupeKey) ? 1 : 0;
+		}
+		else if (historyInfo->GetKind() == HistoryInfo::hkDup)
+		{
+			DupInfo* dup = historyInfo->GetDupInfo();
+			c.dupe_mode = (int)dup->GetDupeMode();
+			c.dupe_score = dup->GetDupeScore();
+			c.dup_status = (int)dup->GetStatus();
+			c.same_name_or_key = SameNameOrKey(dup->GetName(), dup->GetDupeKey(), nzbName, dupeKey) ? 1 : 0;
+		}
+		historyCandidates.push_back(c);
+	}
+
+	std::vector<NzbgetRsDupeQueueCandidate> queueCandidates;
+	queueCandidates.reserve(downloadQueue->GetQueue()->size());
+	for (NzbInfo* queuedNzbInfo : downloadQueue->GetQueue())
+	{
+		NzbgetRsDupeQueueCandidate q{};
+		q.is_self = (queuedNzbInfo == nzbInfo) ? 1 : 0;
+		q.is_nzb_kind = (queuedNzbInfo->GetKind() == NzbInfo::nkNzb) ? 1 : 0;
+		q.dupe_mode = (int)queuedNzbInfo->GetDupeMode();
+		q.dupe_score = queuedNzbInfo->GetDupeScore();
+		q.same_name_or_key = SameNameOrKey(queuedNzbInfo->GetName(), queuedNzbInfo->GetDupeKey(), nzbName, dupeKey) ? 1 : 0;
+		queueCandidates.push_back(q);
+	}
+
+	auto fileExistsCb = [](void* ctx, size_t idx) -> int {
+		auto* items = static_cast<std::vector<HistoryInfo*>*>(ctx);
+		return FileSystem::FileExists((*items)[idx]->GetNzbInfo()->GetQueuedFilename()) ? 1 : 0;
+	};
+
+	int winner = nzbget_rs_dupecoord_select_dupe_backup(
+		nzbInfo != nullptr ? 1 : 0,
+		nzbInfo ? nzbInfo->GetFullContentHash() : 0,
+		g_Options->GetHealthCheck() == Options::hcDupe ? 1 : 0,
+		historyCandidates.data(),
+		historyCandidates.size(),
+		queueCandidates.data(),
+		queueCandidates.size(),
+		&historyItems,
+		fileExistsCb);
+
+	return winner >= 0 && (size_t)winner < historyItems.size() ? historyItems[(size_t)winner] : nullptr;
+#else
 	// check if history (recent or dup) has other success-duplicates or good-duplicates
 	bool dupeFound = false;
 	int historyScore = 0;
@@ -673,10 +773,14 @@ HistoryInfo* DupeCoordinator::FindDupeBackup(DownloadQueue* downloadQueue, NzbIn
 	}
 
 	return historyDupe;
+#endif
 }
 
 bool DupeCoordinator::DupeFailoverWarranted(int itemScore, int health, int backupScore)
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_dupecoord_failover_warranted(itemScore, health, backupScore) != 0;
+#else
 	// The item's score was assigned when it was queued, before its health was
 	// known; what it still warrants shrinks with its health (a posting at 30%
 	// health warrants 30% of its score). A backup not below that is the
@@ -686,6 +790,7 @@ bool DupeCoordinator::DupeFailoverWarranted(int itemScore, int health, int backu
 	health = std::max(0, std::min(1000, health));
 	int warranted = itemScore > 0 ? (int)((int64)itemScore * health / 1000) : 0;
 	return warranted == 0 || backupScore >= warranted;
+#endif
 }
 
 void DupeCoordinator::HistoryMark(DownloadQueue* downloadQueue, HistoryInfo* historyInfo, NzbInfo::EMarkStatus markStatus)
@@ -808,6 +913,9 @@ DupeCoordinator::EDupeStatus DupeCoordinator::GetDupeStatus(DownloadQueue* downl
 			SameNameOrKey(name, dupeKey, historyInfo->GetNzbInfo()->GetName(), historyInfo->GetNzbInfo()->GetDupeKey()))
 		{
 			const char* textStatus = historyInfo->GetNzbInfo()->MakeTextStatus(true);
+#ifdef NZBGET_USE_RUST
+			statuses = (EDupeStatus)(statuses | nzbget_rs_dupecoord_status_from_text(textStatus));
+#else
 			if (!strncasecmp(textStatus, "SUCCESS", 7))
 			{
 				statuses = (EDupeStatus)(statuses | dsSuccess);
@@ -820,6 +928,7 @@ DupeCoordinator::EDupeStatus DupeCoordinator::GetDupeStatus(DownloadQueue* downl
 			{
 				statuses = (EDupeStatus)(statuses | dsWarning);
 			}
+#endif
 		}
 
 		if (historyInfo->GetKind() == HistoryInfo::hkDup &&
@@ -872,6 +981,9 @@ int DupeCoordinator::AlivePermille(NzbInfo* nzbInfo, const char* name)
 	{
 		return -1;
 	}
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_dupecoord_parse_alive_permille(parameter->GetValue());
+#else
 	char* end = nullptr;
 	double percent = strtod(parameter->GetValue(), &end);
 	if (end == parameter->GetValue() || std::isnan(percent))
@@ -879,4 +991,5 @@ int DupeCoordinator::AlivePermille(NzbInfo* nzbInfo, const char* name)
 		return -1;
 	}
 	return (int)std::lround(std::min(100.0, std::max(0.0, percent)) * 10);
+#endif
 }

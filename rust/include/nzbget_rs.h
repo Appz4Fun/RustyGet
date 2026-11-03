@@ -1536,6 +1536,109 @@ void nzbget_rs_stream_compute_positional_rank(
     const char* target_filename, int64_t target_decoded_size,
     int* out_rank, int* out_window);
 
+// ============================================================================
+// Post-Repair & DupeCoordinator Hot-Path FFI (`rust/src/postrepair.rs`)
+// ============================================================================
+
+typedef struct NzbgetRsDupeHistoryCandidate {
+    int32_t kind;
+    int32_t dupe_mode;
+    int32_t dupe_score;
+    int32_t is_dupe_success;
+    int32_t mark_status;
+    int32_t dup_status;
+    int32_t delete_status;
+    uint32_t full_content_hash;
+    int32_t alive_permille;
+    int32_t health;
+    int32_t critical_health;
+    int32_t same_name_or_key;
+} NzbgetRsDupeHistoryCandidate;
+
+typedef struct NzbgetRsDupeQueueCandidate {
+    int32_t is_self;
+    int32_t is_nzb_kind;
+    int32_t dupe_mode;
+    int32_t dupe_score;
+    int32_t same_name_or_key;
+} NzbgetRsDupeQueueCandidate;
+
+typedef struct NzbgetRsParSegment {
+    int32_t success;
+    int64_t offset;
+    int32_t size;
+    uint32_t crc;
+} NzbgetRsParSegment;
+
+typedef struct NzbgetRsUnpackMessageInfo {
+    int32_t strip_extracting_dir;
+    size_t stripped_suffix_offset;
+    int32_t is_insert_disk;
+    size_t insert_disk_name_offset;
+    size_t insert_disk_name_len;
+    int32_t reset_stage_time;
+    int32_t has_extracting_progress;
+    int32_t has_extracting_from;
+    int32_t decrypt_error;
+    int32_t password_error;
+    int32_t direct_password_error;
+    int32_t crc_or_volume_error;
+    int32_t all_ok;
+} NzbgetRsUnpackMessageInfo;
+
+int nzbget_rs_dupecoord_same_name_or_key(
+    const char* name1, const char* dupe_key1, const char* name2, const char* dupe_key2);
+int nzbget_rs_dupecoord_failover_warranted(int item_score, int health, int backup_score);
+int nzbget_rs_dupecoord_parse_alive_permille(const char* value);
+int nzbget_rs_dupecoord_fails_over(int dupe_check, int dupe_mode, int health_check);
+int nzbget_rs_dupecoord_classify_no_backup_item(
+    int delete_status, int dupe_mode, int file_exists, int health, int critical_health,
+    int mark_status, int alive);
+NzbgetRsBuf nzbget_rs_dupecoord_format_no_backup_reason(
+    int total, int not_backup, int forced, int no_file, int unhealthy, int bad, int dead);
+int nzbget_rs_dupecoord_status_from_text(const char* text_status);
+int nzbget_rs_dupecoord_select_dupe_backup(
+    int has_self_nzb, uint32_t self_full_content_hash, int dupe_health,
+    const NzbgetRsDupeHistoryCandidate* history, size_t history_count,
+    const NzbgetRsDupeQueueCandidate* queue, size_t queue_count,
+    void* ctx, int (*file_exists_cb)(void* ctx, size_t history_index));
+
+int nzbget_rs_dupematcher_size_diff_ok(int64_t size1, int64_t size2, int max_diff_percent);
+int nzbget_rs_dupematcher_parse_rar_lister_line(
+    const char* text, int64_t expected_size, int64_t* max_size, int* compressed, int* last_size_max);
+
+void nzbget_rs_streamcrypto_rar3_swizzle_key(const uint8_t* digest20, uint8_t* key16_out);
+void nzbget_rs_streamcrypto_rar5_fold_psw_check(const uint8_t* value32, uint8_t* check8_out);
+
+size_t nzbget_rs_repair_select_more_pars(
+    const int* sorted_block_counts, size_t count, int block_needed,
+    size_t* out_indices, size_t cap, int* out_remaining_needed);
+ptrdiff_t nzbget_rs_repair_pick_twin_volume(
+    const int* sorted_volume_blocks, size_t count, int left);
+int nzbget_rs_repair_check_par_time_limit(
+    int par_time_limit_min, int is_repairing_stage, int64_t elapsed_sec,
+    int stage_progress, int* out_estimated_sec);
+
+int nzbget_rs_parchecker_maybe_splitted_fragment(const char* filename1, const char* filename2);
+int nzbget_rs_parchecker_calc_stage_progress(
+    int stage, int file_progress, int processed_count, int files_to_repair,
+    int source_files_count, int extra_files, int quick_files);
+void nzbget_rs_parchecker_compute_valid_blocks(
+    size_t block_count, int64_t block_size, int64_t file_size,
+    const NzbgetRsParSegment* segments, size_t segment_count, uint8_t* out_valid);
+int nzbget_rs_parchecker_smart_calc_range_crc(
+    int64_t start, int64_t end, const NzbgetRsParSegment* segments, size_t segment_count,
+    void* ctx, int (*dumb_calc_cb)(void* ctx, int64_t start, int64_t end, uint32_t* out_crc),
+    uint32_t* out_crc);
+int nzbget_rs_parchecker_classify_streambuf_line(const char* msg, size_t* out_offset);
+
+int nzbget_rs_unpack_detect_rar_signature(const uint8_t* sig_bytes, size_t sig_len);
+int nzbget_rs_unpack_check_joinable_fragments(
+    int count, int min_seg, int max_seg, int dif_size_min, int par_success);
+void nzbget_rs_unpack_parse_message(
+    const char* text, const char* unpack_extended_dir, int is_seven_zip,
+    NzbgetRsUnpackMessageInfo* out_info);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

@@ -36,6 +36,9 @@
 #include "Options.h"
 #include "Util.h"
 #include "FileSystem.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 static const char* Par2CmdLineErrStr[] = { 
 	"OK",
@@ -231,6 +234,22 @@ int ParChecker::StreamBuf::overflow(int ch)
 
 		char* msg = m_buffer.data();
 
+#ifdef NZBGET_USE_RUST
+		if (msg)
+		{
+			size_t offset = 0;
+			bool extraDebug = nzbget_rs_parchecker_classify_streambuf_line(msg, &offset) != 0;
+			msg += offset;
+			if (extraDebug)
+			{
+				debug("Par: %s", msg);
+			}
+			else
+			{
+				m_owner->PrintMessage(m_kind, "Par: %s", msg);
+			}
+		}
+#else
 		// make par2-logging less verbose
 		bool extraDebug = !msg || strchr(msg, '%') ||
 			!strncmp(msg, "Loading", 7) ||
@@ -252,6 +271,7 @@ int ParChecker::StreamBuf::overflow(int ch)
 				m_owner->PrintMessage(m_kind, "Par: %s", msg);
 			}
 		}
+#endif
 
 		m_buffer.clear();
 	}
@@ -853,6 +873,9 @@ bool ParChecker::AddSplittedFragments()
 
 bool ParChecker::MaybeSplittedFragement(const char* filename1, const char* filename2)
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_parchecker_maybe_splitted_fragment(filename1, filename2) != 0;
+#else
 	// check if name is same but the first name has additional numerical extension
 	size_t len = strlen(filename2);
 	if (!strncasecmp(filename1, filename2, len))
@@ -883,6 +906,7 @@ bool ParChecker::MaybeSplittedFragement(const char* filename1, const char* filen
 	}
 
 	return false;
+#endif
 }
 
 bool ParChecker::AddMissingFiles()
@@ -1099,6 +1123,15 @@ void ParChecker::SignalProgress(int progress)
 
 	m_fileProgress = progress;
 
+#ifdef NZBGET_USE_RUST
+	int sourceFilesCount = (m_stage != ptRepairing && m_stage != ptVerifyingRepaired)
+		? static_cast<int>(GetRepairer()->sourcefiles.size())
+		: 0;
+	m_stageProgress = nzbget_rs_parchecker_calc_stage_progress(
+		(int)m_stage, m_fileProgress, m_processedCount, m_filesToRepair,
+		sourceFilesCount, m_extraFiles, m_quickFiles);
+	debug("Current-progress: %i, Total-progress: %i", m_fileProgress, m_stageProgress);
+#else
 	if (m_stage == ptRepairing)
 	{
 		// calculating repair-data for all files
@@ -1149,6 +1182,7 @@ void ParChecker::SignalProgress(int progress)
 	debug("Current-progress: %i, Total-progress: %i", m_fileProgress, m_stageProgress);
 
 	m_stageProgress = std::clamp(m_stageProgress, 0, 1000);
+#endif
 
 	UpdateProgress();
 }
@@ -1438,6 +1472,24 @@ bool ParChecker::VerifyPartialDataFile(Par2::DiskFile&, Par2::Par2RepairerSource
 
 	// determine presumably valid and bad blocks based on article download status
 	validBlocks.resize(packet->BlockCount(), false);
+#ifdef NZBGET_USE_RUST
+	if (!validBlocks.empty())
+	{
+		std::vector<NzbgetRsParSegment> rsSegs;
+		rsSegs.reserve(segments.size());
+		for (Segment& segment : segments)
+		{
+			rsSegs.push_back({segment.GetSuccess() ? 1 : 0, segment.GetOffset(), segment.GetSize(), segment.GetCrc()});
+		}
+		std::vector<uint8_t> outValid(validBlocks.size(), 0);
+		nzbget_rs_parchecker_compute_valid_blocks(
+			validBlocks.size(), blocksize, fileSize, rsSegs.data(), rsSegs.size(), outValid.data());
+		for (size_t i = 0; i < validBlocks.size(); ++i)
+		{
+			validBlocks[i] = outValid[i] != 0;
+		}
+	}
+#else
 	for (size_t i = 0; i < validBlocks.size(); ++i)
 	{
 		int64 blockStart = i * blocksize;
@@ -1470,6 +1522,7 @@ bool ParChecker::VerifyPartialDataFile(Par2::DiskFile&, Par2::Par2RepairerSource
 		}
 		validBlocks[i] = blockOK && blockEndFound;
 	}
+#endif
 
 	DiskFile infile;
 	if (!infile.Open(filename, DiskFile::omRead))
@@ -1538,6 +1591,37 @@ bool ParChecker::VerifyPartialDataFile(Par2::DiskFile&, Par2::Par2RepairerSource
 bool ParChecker::SmartCalcFileRangeCrc(DiskFile& file, int64 start, int64 end, SegmentList& segments,
 	uint32& downloadCrcOut)
 {
+#ifdef NZBGET_USE_RUST
+	std::vector<NzbgetRsParSegment> rsSegs;
+	rsSegs.reserve(segments.size());
+	for (Segment& segment : segments)
+	{
+		rsSegs.push_back({segment.GetSuccess() ? 1 : 0, segment.GetOffset(), segment.GetSize(), segment.GetCrc()});
+	}
+	struct DumbCtx
+	{
+		ParChecker* self;
+		DiskFile* file;
+	} ctx{this, &file};
+	auto dumbCb = [](void* rawCtx, int64_t s, int64_t e, uint32_t* outCrc) -> int {
+		auto* c = static_cast<DumbCtx*>(rawCtx);
+		uint32 crc = 0;
+		if (!c->self->DumbCalcFileRangeCrc(*c->file, s, e, crc))
+		{
+			return 0;
+		}
+		*outCrc = crc;
+		return 1;
+	};
+	uint32 outCrc = 0;
+	if (nzbget_rs_parchecker_smart_calc_range_crc(
+		start, end, rsSegs.data(), rsSegs.size(), &ctx, dumbCb, &outCrc) == 0)
+	{
+		return false;
+	}
+	downloadCrcOut = outCrc;
+	return true;
+#else
 	uint32 downloadCrc = 0;
 	bool started = false;
 	for (Segment& segment : segments)
@@ -1584,6 +1668,7 @@ bool ParChecker::SmartCalcFileRangeCrc(DiskFile& file, int64 start, int64 end, S
 
 	downloadCrcOut = downloadCrc;
 	return true;
+#endif
 }
 
 /*

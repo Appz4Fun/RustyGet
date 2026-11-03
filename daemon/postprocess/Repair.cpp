@@ -30,6 +30,9 @@
 #include <fstream>
 #include <set>
 #include <iterator>
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 #ifndef DISABLE_PARCHECK
 bool RepairController::PostParChecker::RequestMorePars(int blockNeeded, int* blockFound)
@@ -396,11 +399,26 @@ std::vector<std::string> RepairController::PostParChecker::RequestTwinVolumes(in
 	int left = blockNeeded;
 	while (left > 0 && !volumes.empty() && !IsStopped())
 	{
+#ifdef NZBGET_USE_RUST
+		std::vector<int> volBlocks;
+		volBlocks.reserve(volumes.size());
+		for (const Volume& v : volumes)
+		{
+			volBlocks.push_back(v.blocks);
+		}
+		ptrdiff_t idx = nzbget_rs_repair_pick_twin_volume(volBlocks.data(), volBlocks.size(), left);
+		if (idx < 0 || (size_t)idx >= volumes.size())
+		{
+			break;
+		}
+		auto it = volumes.begin() + idx;
+#else
 		auto it = std::find_if(volumes.begin(), volumes.end(), [left](const Volume& v) { return v.blocks >= left; });
 		if (it == volumes.end())
 		{
 			it = volumes.end() - 1;
 		}
+#endif
 		PrintMessage(Message::mkInfo, "Fetching %s of twin %s for par-repair (%i block(s))",
 			it->entry->filename.c_str(), m_twinName.c_str(), it->blocks);
 		std::string path = FetchTwinFile(*it->entry);
@@ -617,6 +635,24 @@ bool RepairController::RequestMorePars(NzbInfo* nzbInfo, const char* parFilename
 
 	if (blockFound >= blockNeeded)
 	{
+#ifdef NZBGET_USE_RUST
+		std::vector<int> sortedCounts;
+		sortedCounts.reserve(availableBlocks.size());
+		for (const BlockInfo& b : availableBlocks)
+		{
+			sortedCounts.push_back(b.m_blockCount);
+		}
+		std::vector<size_t> selectedIdx(availableBlocks.size());
+		int remNeeded = blockNeeded;
+		size_t selCount = nzbget_rs_repair_select_more_pars(
+			sortedCounts.data(), sortedCounts.size(), blockNeeded,
+			selectedIdx.data(), selectedIdx.size(), &remNeeded);
+		blockNeeded = remNeeded;
+		for (size_t i = 0; i < selCount && i < selectedIdx.size(); ++i)
+		{
+			selectedBlocks.push_back(availableBlocks[selectedIdx[i]]);
+		}
+#else
 		// collect as much blocks as needed
 		for (Blocks::iterator it = availableBlocks.begin(); blockNeeded > 0 && it != availableBlocks.end(); ++it)
 		{
@@ -639,6 +675,7 @@ bool RepairController::RequestMorePars(NzbInfo* nzbInfo, const char* parFilename
 				++it;
 			}
 		}
+#endif
 
 		// unpause files with blocks
 		for (BlockInfo& blockInfo : selectedBlocks)
@@ -788,6 +825,20 @@ void RepairController::UpdateParCheckProgress()
 		bool parCancel = false;
 		if (!IsStopped())
 		{
+#ifdef NZBGET_USE_RUST
+			int estimatedRepairTime = 0;
+			if (nzbget_rs_repair_check_par_time_limit(
+				g_Options->GetParTimeLimit(),
+				m_parChecker.GetStage() == PostParChecker::ptRepairing ? 1 : 0,
+				(int64)(current - postInfo->GetStageTime()),
+				postInfo->GetStageProgress(),
+				&estimatedRepairTime) != 0)
+			{
+				debug("Estimated repair time %i seconds", estimatedRepairTime);
+				m_parChecker.PrintMessage(Message::mkWarning, "Cancelling par-repair for %s, estimated repair time (%i minutes) exceeds allowed repair time", m_parChecker.GetInfoName(), estimatedRepairTime / 60);
+				parCancel = true;
+			}
+#else
 			if ((g_Options->GetParTimeLimit() > 0) &&
 				m_parChecker.GetStage() == PostParChecker::ptRepairing &&
 				((g_Options->GetParTimeLimit() > 5 && current - postInfo->GetStageTime() > 5 * 60) ||
@@ -805,6 +856,7 @@ void RepairController::UpdateParCheckProgress()
 					parCancel = true;
 				}
 			}
+#endif
 		}
 
 		if (parCancel)

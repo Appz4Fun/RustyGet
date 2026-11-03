@@ -26,6 +26,9 @@
 #include "FileSystem.h"
 #include "ParParser.h"
 #include "Options.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 UnpackController::~UnpackController()
 {
@@ -505,10 +508,16 @@ bool UnpackController::JoinFile(const char* fragBaseName)
 		}
 	}
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_unpack_check_joinable_fragments(
+		count, min, max, difSizeMin,
+		m_postInfo->GetNzbInfo()->GetParStatus() == NzbInfo::psSuccess ? 1 : 0) == 0)
+#else
 	int correctedCount = count - (min == 0 ? 1 : 0);
 	if ((min > 1) || correctedCount != max ||
 		((difSizeMin != correctedCount || difSizeMin > max) &&
 		 m_postInfo->GetNzbInfo()->GetParStatus() != NzbInfo::psSuccess))
+#endif
 	{
 		PrintMessage(Message::mkWarning, "Could not join splitted file %s: missing fragments detected", *destBaseName);
 		return false;
@@ -780,6 +789,18 @@ bool UnpackController::IsDownloadedFile(const char* filename)
 
 bool UnpackController::FileHasRarSignature(const char* filename)
 {
+#ifdef NZBGET_USE_RUST
+	uint8_t fileSignature[8]{};
+	int cnt = 0;
+	DiskFile infile;
+	if (infile.Open(filename, DiskFile::omRead))
+	{
+		cnt = (int)infile.Read(fileSignature, sizeof(fileSignature));
+		infile.Close();
+	}
+	return cnt == (int)sizeof(fileSignature) &&
+		nzbget_rs_unpack_detect_rar_signature(fileSignature, sizeof(fileSignature)) != 0;
+#else
 	char rar4Signature[] = { 0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00 };
 	char rar5Signature[] = { 0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x01, 0x00 };
 
@@ -796,6 +817,7 @@ bool UnpackController::FileHasRarSignature(const char* filename)
 	bool rar = cnt == sizeof(fileSignature) &&
 		(!strcmp(rar4Signature, fileSignature) || !strcmp(rar5Signature, fileSignature));
 	return rar;
+#endif
 }
 
 bool UnpackController::Cleanup()
@@ -959,6 +981,68 @@ bool UnpackController::ReadLine(char* buf, int bufSize, FILE* stream)
 void UnpackController::AddMessage(Message::EKind kind, const char* text)
 {
 	BString<1024> msgText = text;
+#ifdef NZBGET_USE_RUST
+	NzbgetRsUnpackMessageInfo info{};
+	nzbget_rs_unpack_parse_message(
+		text, m_unpackExtendedDir, m_unpacker == upSevenZip ? 1 : 0, &info);
+	if (m_unpacker == upUnrar && info.strip_extracting_dir != 0)
+	{
+		msgText.Format("Unrar: Extracting %s", text + info.stripped_suffix_offset);
+	}
+
+	if (m_postInfo)
+	{
+		m_postInfo->GetNzbInfo()->AddMessage(kind, msgText);
+	}
+
+	if (m_postInfo && m_unpacker == upUnrar && info.reset_stage_time != 0)
+	{
+		m_postInfo->SetStageTime(Util::CurrentTime());
+	}
+
+	if (m_postInfo && m_unpacker == upUnrar && info.has_extracting_progress != 0)
+	{
+		SetProgressLabel(msgText + 7);
+	}
+
+	if (m_postInfo && m_unpacker == upUnrar && info.has_extracting_from != 0)
+	{
+#ifdef DEBUG
+		const char *filename = text + 23;
+		debug("Filename: %s", filename);
+#endif
+		SetProgressLabel(text + 7);
+	}
+
+	if (info.decrypt_error != 0)
+	{
+		m_unpackDecryptError = true;
+	}
+
+	if (m_unpacker == upUnrar && info.password_error != 0)
+	{
+		m_unpackPasswordError = true;
+	}
+
+	if (!IsStopped() && (m_unpackDecryptError || m_unpackPasswordError || info.crc_or_volume_error != 0))
+	{
+		if (m_postInfo && !WillRetryWithPass())
+		{
+			m_postInfo->GetNzbInfo()->AddMessage(
+				Message::mkWarning,
+				BString<1024>("Cancelling %s due to errors", *m_infoName)
+			);
+		}
+
+		m_autoTerminated = true;
+		Stop();
+	}
+
+	if (info.all_ok != 0)
+	{
+		m_allOkMessageReceived = true;
+	}
+#else
 	int len = strlen(text);
 
 	// Modify unrar messages for better readability:
@@ -1041,6 +1125,7 @@ void UnpackController::AddMessage(Message::EKind kind, const char* text)
 	{
 		m_allOkMessageReceived = true;
 	}
+#endif
 }
 
 void UnpackController::Stop()

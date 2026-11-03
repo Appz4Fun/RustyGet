@@ -49,6 +49,7 @@ pub mod webutil;
 pub mod wildmask;
 
 pub mod dupeidentity;
+pub mod dupefallback;
 
 pub mod deadpostings;
 pub mod dupewatch;

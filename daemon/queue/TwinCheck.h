@@ -99,6 +99,10 @@ public:
 	/* what a stored file list is bound to: "fingerprint#posting", "" without a
 	 * usable fingerprint */
 	static std::string Identity(NzbInfo* nzbInfo);
+	/* parses the FileDesc packets in <data>, stores the file list for <nzbId>
+	 * bound to <posting>, and returns its fingerprint ("" if none) */
+	static std::string PutPar2(int nzbId, const char* posting, const char* data, size_t size,
+		bool* complete = nullptr);
 	static int HasSigs(int nzbId, const char* identity);	// 0 none, 1 partial, 2 complete
 	/* keeps the stored lists of the postings in <live> ("id\tfingerprint" lines) */
 	static void Prune(const std::string& live);

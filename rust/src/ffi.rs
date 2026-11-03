@@ -8583,3 +8583,585 @@ mod lifecycle_ffi_tests {
         nzbget_rs_signal_notify(0); // no-op for signum 0
     }
 }
+
+// ============================================================================
+// DupeArticleFallback, ParDamage, DupeProbe, ServerPool, ArticleFetcher &
+// ArticleDownloader Hot-Path C ABI (rust/src/dupefallback.rs)
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dupe_fallback_par_cannot_cover(
+    par_size: i64,
+    par_failed_size: i64,
+    current_failed_size: i64,
+    current_success_size: i64,
+    par_current_success_size: i64,
+    total_size: i64,
+    current_success_articles: c_int,
+    current_failed_articles: c_int,
+    with_margin: c_int,
+) -> c_int {
+    crate::dupefallback::par_cannot_cover(
+        par_size,
+        par_failed_size,
+        current_failed_size,
+        current_success_size,
+        par_current_success_size,
+        total_size,
+        current_success_articles,
+        current_failed_articles,
+        with_margin != 0,
+    ) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_has_extension(filename: *const c_char) -> c_int {
+    if filename.is_null() {
+        return 0;
+    }
+    let bytes = CStr::from_ptr(filename).to_bytes();
+    crate::dupefallback::has_extension(bytes) as c_int
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dupe_fallback_sizes_match(
+    size1: i64,
+    size2: i64,
+    div: c_int,
+) -> c_int {
+    crate::dupefallback::sizes_match(size1, size2, div) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_declared_parts(subject: *const c_char) -> c_int {
+    if subject.is_null() {
+        return 0;
+    }
+    let bytes = CStr::from_ptr(subject).to_bytes();
+    crate::dupefallback::declared_parts(bytes)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_steps_hash(
+    sizes: *const c_int,
+    count: usize,
+) -> u64 {
+    if sizes.is_null() || count == 0 {
+        return 0;
+    }
+    let slice = std::slice::from_raw_parts(sizes, count);
+    crate::dupefallback::article_size_steps_hash(slice)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_steps_match(
+    target_sizes: *const c_int,
+    target_count: usize,
+    donor_sizes: *const c_int,
+    donor_count: usize,
+) -> c_int {
+    if target_sizes.is_null() || donor_sizes.is_null() || target_count == 0 || donor_count == 0 {
+        return 0;
+    }
+    let target = std::slice::from_raw_parts(target_sizes, target_count);
+    let donor = std::slice::from_raw_parts(donor_sizes, donor_count);
+    crate::dupefallback::article_size_steps_match(target, donor) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_structure_matches(
+    target_subject: *const c_char,
+    target_total_articles: c_int,
+    target_size: i64,
+    target_parts: *const c_int,
+    target_sizes: *const c_int,
+    target_count: usize,
+    donor_subject: *const c_char,
+    donor_total_articles: c_int,
+    donor_size: i64,
+    donor_parts: *const c_int,
+    donor_sizes: *const c_int,
+    donor_count: usize,
+) -> c_int {
+    if target_count == 0
+        || target_parts.is_null()
+        || target_sizes.is_null()
+        || (donor_count > 0 && (donor_parts.is_null() || donor_sizes.is_null()))
+    {
+        return 0;
+    }
+    let t_subj = if target_subject.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(target_subject).to_bytes()
+    };
+    let d_subj = if donor_subject.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(donor_subject).to_bytes()
+    };
+    let t_parts = std::slice::from_raw_parts(target_parts, target_count);
+    let t_sizes = std::slice::from_raw_parts(target_sizes, target_count);
+    let d_parts = if donor_count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(donor_parts, donor_count)
+    };
+    let d_sizes = if donor_count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(donor_sizes, donor_count)
+    };
+    crate::dupefallback::structure_matches(
+        t_subj,
+        target_total_articles,
+        target_size,
+        t_parts,
+        t_sizes,
+        d_subj,
+        donor_total_articles,
+        donor_size,
+        d_parts,
+        d_sizes,
+    ) as c_int
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dupe_fallback_expected_offset(
+    index: isize,
+    part_number: c_int,
+    prev_part_number: c_int,
+    prev_status: c_int,
+    prev_offset: i64,
+    prev_size: c_int,
+) -> i64 {
+    crate::dupefallback::expected_segment_offset(
+        index,
+        part_number,
+        prev_part_number,
+        prev_status,
+        prev_offset,
+        prev_size,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dupe_fallback_expected_end(
+    index: isize,
+    count: usize,
+    part_number: c_int,
+    decoded_file_size: i64,
+    next_part_number: c_int,
+    next_status: c_int,
+    next_offset: i64,
+    next_size: c_int,
+) -> i64 {
+    crate::dupefallback::expected_segment_end(
+        index,
+        count,
+        part_number,
+        decoded_file_size,
+        next_part_number,
+        next_status,
+        next_offset,
+        next_size,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dupe_fallback_segment_aligned(
+    segment_offset: i64,
+    segment_size: c_int,
+    expected_offset: i64,
+    expected_end: i64,
+) -> c_int {
+    crate::dupefallback::segment_aligned(segment_offset, segment_size, expected_offset, expected_end)
+        as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_first_untiled(
+    articles: *const crate::dupefallback::NzbgetRsArticleGeom,
+    count: usize,
+    decoded_size: i64,
+) -> isize {
+    if decoded_size <= 0 {
+        return -1;
+    }
+    let slice = if count == 0 || articles.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(articles, count)
+    };
+    crate::dupefallback::first_untiled_article(slice, decoded_size)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_merge_decoded_size(
+    decoded_file_size: *mut i64,
+    article_file_size: i64,
+) -> c_int {
+    if decoded_file_size.is_null() {
+        return 0;
+    }
+    let (conflict, new_val) =
+        crate::dupefallback::merge_decoded_file_size(*decoded_file_size, article_file_size);
+    *decoded_file_size = new_val;
+    conflict as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_register_lead_failure(
+    fallback_round: c_int,
+    lead_snapshot: c_int,
+    donor_count: c_int,
+    next_lead: c_int,
+    lead_donor_id: *mut c_int,
+    lead_failures: *mut c_int,
+    lead_switches: *mut c_int,
+) -> c_int {
+    if lead_donor_id.is_null() || lead_failures.is_null() || lead_switches.is_null() {
+        return 0;
+    }
+    crate::dupefallback::register_lead_failure(
+        fallback_round,
+        lead_snapshot,
+        donor_count,
+        next_lead,
+        &mut *lead_donor_id,
+        &mut *lead_failures,
+        &mut *lead_switches,
+    ) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_register_lead_success(
+    fallback_round: c_int,
+    lead_snapshot: c_int,
+    lead_donor_id: c_int,
+    expected_offset: i64,
+    expected_end: i64,
+    lead_failures: *mut c_int,
+    lead_switches: *mut c_int,
+) {
+    if lead_failures.is_null() || lead_switches.is_null() {
+        return;
+    }
+    crate::dupefallback::register_lead_success(
+        fallback_round,
+        lead_snapshot,
+        lead_donor_id,
+        expected_offset,
+        expected_end,
+        &mut *lead_failures,
+        &mut *lead_switches,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par2_range_covered(
+    ranges: *const crate::dupefallback::NzbgetRsByteRange,
+    count: usize,
+    from: i64,
+    to: i64,
+) -> c_int {
+    let slice = if count == 0 || ranges.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(ranges, count)
+    };
+    crate::dupefallback::range_covered(slice, from, to) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par2_scan_file(
+    path: *const c_char,
+    ctx: *mut std::ffi::c_void,
+    on_main: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, u64)>,
+    on_desc: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            *const c_char,
+            *const c_char,
+            *const c_char,
+            u64,
+            *const c_char,
+            usize,
+        ),
+    >,
+    on_ifsc: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            *const c_char,
+            *const c_char,
+            *const u32,
+            usize,
+        ),
+    >,
+) {
+    if path.is_null() {
+        return;
+    }
+    #[cfg(unix)]
+    let path_ref = {
+        use std::os::unix::ffi::OsStrExt;
+        std::path::Path::new(std::ffi::OsStr::from_bytes(CStr::from_ptr(path).to_bytes()))
+    };
+    #[cfg(not(unix))]
+    let path_buf = std::path::PathBuf::from(CStr::from_ptr(path).to_string_lossy().into_owned());
+    #[cfg(not(unix))]
+    let path_ref = path_buf.as_path();
+
+    crate::dupefallback::scan_par2_file(
+        path_ref,
+        |set_id, block_size| {
+            if let Some(cb) = on_main {
+                let mut set_c = [0u8; 33];
+                set_c[..32].copy_from_slice(set_id);
+                cb(ctx, set_c.as_ptr().cast(), block_size);
+            }
+        },
+        |set_id, file_id, hash16k, length, name| {
+            if let Some(cb) = on_desc {
+                let mut set_c = [0u8; 33];
+                let mut file_c = [0u8; 33];
+                let mut hash_c = [0u8; 33];
+                set_c[..32].copy_from_slice(set_id);
+                file_c[..32].copy_from_slice(file_id);
+                hash_c[..32].copy_from_slice(hash16k);
+                cb(
+                    ctx,
+                    set_c.as_ptr().cast(),
+                    file_c.as_ptr().cast(),
+                    hash_c.as_ptr().cast(),
+                    length,
+                    name.as_ptr().cast(),
+                    name.len(),
+                );
+            }
+        },
+        |set_id, file_id, crcs| {
+            if let Some(cb) = on_ifsc {
+                let mut set_c = [0u8; 33];
+                let mut file_c = [0u8; 33];
+                set_c[..32].copy_from_slice(set_id);
+                file_c[..32].copy_from_slice(file_id);
+                cb(
+                    ctx,
+                    set_c.as_ptr().cast(),
+                    file_c.as_ptr().cast(),
+                    crcs.as_ptr(),
+                    crcs.len(),
+                );
+            }
+        },
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_damage_blocks_touched(
+    holes: *const crate::dupefallback::NzbgetRsByteRange,
+    count: usize,
+    block_size: u64,
+) -> c_int {
+    let slice = if count == 0 || holes.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(holes, count)
+    };
+    crate::dupefallback::blocks_touched(slice, block_size)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_damage_project(
+    known: c_int,
+    damaged_blocks: c_int,
+    recovery_blocks: c_int,
+    done_bytes: i64,
+    total_bytes: i64,
+    out_projected_blocks: *mut c_int,
+    out_certain: *mut c_int,
+    out_projected: *mut c_int,
+) {
+    let (proj, certain, projected) = crate::dupefallback::project_par_damage(
+        known != 0,
+        damaged_blocks,
+        recovery_blocks,
+        done_bytes,
+        total_bytes,
+    );
+    if !out_projected_blocks.is_null() {
+        *out_projected_blocks = proj;
+    }
+    if !out_certain.is_null() {
+        *out_certain = certain as c_int;
+    }
+    if !out_projected.is_null() {
+        *out_projected = projected as c_int;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_probe_sample_indexes(
+    total: usize,
+    count: c_int,
+    out_indexes: *mut usize,
+    cap: usize,
+) -> usize {
+    let indexes = crate::dupefallback::dupe_probe_sample_indexes(total, count);
+    if !out_indexes.is_null() && cap > 0 {
+        let write_len = indexes.len().min(cap);
+        std::ptr::copy_nonoverlapping(indexes.as_ptr(), out_indexes, write_len);
+    }
+    indexes.len()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_probe_classify(response: *const c_char) -> c_int {
+    let opt = if response.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(response).to_bytes())
+    };
+    crate::dupefallback::dupe_probe_classify(opt)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dupe_probe_is_dead(
+    existing: c_int,
+    definitive_servers: c_int,
+    active_servers: c_int,
+) -> c_int {
+    crate::dupefallback::dupe_probe_is_dead(existing, definitive_servers, active_servers) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_server_pool_normalize_levels(
+    servers: *const crate::dupefallback::NzbgetRsServerNormInput,
+    count: usize,
+    out_sorted_indices: *mut usize,
+    out_norm_levels: *mut c_int,
+) -> c_int {
+    if count == 0 || servers.is_null() || out_sorted_indices.is_null() || out_norm_levels.is_null() {
+        return 0;
+    }
+    let srv_slice = std::slice::from_raw_parts(servers, count);
+    let sorted_slice = std::slice::from_raw_parts_mut(out_sorted_indices, count);
+    let norm_slice = std::slice::from_raw_parts_mut(out_norm_levels, count);
+    crate::dupefallback::server_pool_normalize_levels(srv_slice, sorted_slice, norm_slice)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_server_pool_is_blocked(
+    block_time: i64,
+    cur_time: i64,
+    retry_interval: c_int,
+) -> c_int {
+    crate::dupefallback::server_pool_is_blocked(block_time, cur_time, retry_interval) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_server_pool_level_should_close(
+    in_use: *const u8,
+    connected: *const u8,
+    free_times: *const i64,
+    count: usize,
+    cur_time: i64,
+    hold_seconds: c_int,
+) -> c_int {
+    if count == 0 || in_use.is_null() || connected.is_null() || free_times.is_null() {
+        return 0;
+    }
+    let u = std::slice::from_raw_parts(in_use, count);
+    let c = std::slice::from_raw_parts(connected, count);
+    let f = std::slice::from_raw_parts(free_times, count);
+    crate::dupefallback::server_pool_level_should_close(u, c, f, cur_time, hold_seconds) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_article_fetch_add_raw_bytes(
+    raw_bytes: *mut i64,
+    bytes: i64,
+) -> c_int {
+    if raw_bytes.is_null() {
+        return 0;
+    }
+    crate::dupefallback::article_fetch_add_raw_bytes(&mut *raw_bytes, bytes) as c_int
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_article_fetch_header_within_limit(
+    raw_bytes: i64,
+    declared_range_known: c_int,
+) -> c_int {
+    crate::dupefallback::article_fetch_header_within_limit(raw_bytes, declared_range_known != 0)
+        as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_article_fetch_add_decoded_bytes(
+    decoded_bytes: *mut i64,
+    bytes: i64,
+    begin: i64,
+    end: i64,
+    file_size: i64,
+) -> c_int {
+    if decoded_bytes.is_null() {
+        return 0;
+    }
+    crate::dupefallback::article_fetch_add_decoded_bytes(
+        &mut *decoded_bytes,
+        bytes,
+        begin,
+        end,
+        file_size,
+    ) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_article_downloader_check_response(
+    response: *const c_char,
+    auth_error: c_int,
+) -> c_int {
+    let opt = if response.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(response).to_bytes())
+    };
+    crate::dupefallback::article_downloader_check_response(opt, auth_error != 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_article_downloader_validate_yenc(
+    begin_pos: i64,
+    end_pos: i64,
+    article_file_size: i64,
+    expected_file_size: i64,
+    fallback_round: c_int,
+    dupe_expected_offset: i64,
+    dupe_expected_end: i64,
+    out_offset: *mut i64,
+    out_size: *mut c_int,
+) -> c_int {
+    match crate::dupefallback::article_downloader_validate_yenc(
+        begin_pos,
+        end_pos,
+        article_file_size,
+        expected_file_size,
+        fallback_round,
+        dupe_expected_offset,
+        dupe_expected_end,
+    ) {
+        Ok((offset, size)) => {
+            if !out_offset.is_null() {
+                *out_offset = offset;
+            }
+            if !out_size.is_null() {
+                *out_size = size;
+            }
+            0
+        }
+        Err(code) => code,
+    }
+}
+

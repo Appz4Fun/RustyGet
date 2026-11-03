@@ -23,6 +23,9 @@
 #include "nzbget.h"
 #include "ServerPool.h"
 #include "Util.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 static const int CONNECTION_HOLD_SECODNS = 5;
 
@@ -72,6 +75,26 @@ void ServerPool::NormalizeLevels()
 		return;
 	}
 
+#ifdef NZBGET_USE_RUST
+	size_t count = m_sortedServers.size();
+	std::vector<NzbgetRsServerNormInput> inputs(count);
+	std::vector<size_t> sortedIndices(count);
+	std::vector<int> normLevels(count);
+	std::vector<NewsServer*> origServers = m_sortedServers;
+	for (size_t i = 0; i < count; i++)
+	{
+		inputs[i].level = origServers[i]->GetLevel();
+		inputs[i].active = origServers[i]->GetActive() ? 1 : 0;
+		inputs[i].max_connections = origServers[i]->GetMaxConnections();
+	}
+	m_maxNormLevel = nzbget_rs_server_pool_normalize_levels(
+		inputs.data(), count, sortedIndices.data(), normLevels.data());
+	for (size_t i = 0; i < count; i++)
+	{
+		origServers[i]->SetNormLevel(normLevels[i]);
+		m_sortedServers[i] = origServers[sortedIndices[i]];
+	}
+#else
 	std::sort(m_sortedServers.begin(), m_sortedServers.end(),
 		[](NewsServer* server1, NewsServer* server2)
 		{
@@ -107,6 +130,7 @@ void ServerPool::NormalizeLevels()
 			newsServer->SetNormLevel(-1);
 		}
 	}
+#endif
 }
 
 void ServerPool::InitConnections()
@@ -300,9 +324,13 @@ bool ServerPool::IsServerBlocked(NewsServer* newsServer)
 	}
 
 	time_t curTime = Util::CurrentTime();
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_server_pool_is_blocked(newsServer->GetBlockTime(), curTime, m_retryInterval) != 0;
+#else
 	bool blocked = newsServer->GetBlockTime() <= curTime &&
 		curTime < newsServer->GetBlockTime() + m_retryInterval;
 	return blocked;
+#endif
 }
 
 void ServerPool::CloseUnusedConnections()
@@ -333,6 +361,25 @@ void ServerPool::CloseUnusedConnections()
 	// close all opened connections on levels not having any in-use connections
 	for (int level = 0; level <= m_maxNormLevel; level++)
 	{
+#ifdef NZBGET_USE_RUST
+		std::vector<uint8_t> inUse;
+		std::vector<uint8_t> connected;
+		std::vector<int64_t> freeTimes;
+		for (PooledConnection* connection : &m_connections)
+		{
+			if (connection->GetNewsServer()->GetNormLevel() == level)
+			{
+				inUse.push_back(connection->GetInUse() ? 1 : 0);
+				connected.push_back(connection->GetStatus() == Connection::csConnected ? 1 : 0);
+				freeTimes.push_back((int64_t)connection->GetFreeTime());
+			}
+		}
+		if (nzbget_rs_server_pool_level_should_close(
+			inUse.empty() ? nullptr : inUse.data(),
+			connected.empty() ? nullptr : connected.data(),
+			freeTimes.empty() ? nullptr : freeTimes.data(),
+			inUse.size(), (int64_t)curtime, CONNECTION_HOLD_SECODNS) != 0)
+#else
 		// check if we have in-use connections on the level; the hold time counts
 		// from the most recently freed open connection (never used ones don't count)
 		bool hasInUseConnections = false;
@@ -362,6 +409,7 @@ void ServerPool::CloseUnusedConnections()
 		// if there are no in-use connections on the level and the hold time out has
 		// expired - close all connections of the level.
 		if (!hasInUseConnections && hasOpenConnections && inactiveTime > CONNECTION_HOLD_SECODNS)
+#endif
 		{
 			for (PooledConnection* connection : &m_connections)
 			{

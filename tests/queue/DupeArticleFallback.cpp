@@ -25,7 +25,15 @@
 #include <set>
 #include "DownloadInfo.h"
 #include "DupeArticleFallback.h"
+#include "TwinCheck.h"
 #include "Options.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
+#ifndef DISABLE_PARCHECK
+#include <par2/libpar2.h>
+#include <par2/md5.h>
+#endif
 
 BOOST_AUTO_TEST_SUITE(QueueTest)
 
@@ -1450,5 +1458,357 @@ BOOST_AUTO_TEST_CASE(DupeArticleFallbackHasDonorArticlesTest)
 	file->GetArticles()->at(1)->SetDupeFallbackRound(1);
 	BOOST_CHECK(DupeArticleFallback::HasDonorArticles(file.get()));
 }
+
+#if defined(NZBGET_USE_RUST) && !defined(DISABLE_PARCHECK)
+namespace
+{
+
+struct Par2Spec
+{
+	const char* name;
+	uint64 length;
+	char md5Fill;
+};
+
+std::string BuildValidPar2Packet(const std::string& setId, const char* type, const std::string& body)
+{
+	std::string tail = setId + std::string(type, 16) + body;
+	uint64 length = 32 + tail.size();
+	std::string lenBytes;
+	for (int i = 0; i < 8; i++)
+	{
+		lenBytes += (char)((length >> (8 * i)) & 0xff);
+	}
+	Par2::MD5Context ctx;
+	ctx.Update(tail.data(), tail.size());
+	Par2::MD5Hash hash;
+	ctx.Final(hash);
+	return std::string("PAR2\0PKT", 8) + lenBytes +
+		std::string((const char*)hash.hash, 16) + tail;
+}
+
+std::string BuildValidPar2Set(const std::vector<Par2Spec>& specs, uint64 blockSize = 1000)
+{
+	auto le64 = [](uint64 value)
+		{
+			std::string out;
+			for (int i = 0; i < 8; i++) out += (char)((value >> (8 * i)) & 0xff);
+			return out;
+		};
+	auto le32 = [](uint32 value)
+		{
+			std::string out;
+			for (int i = 0; i < 4; i++) out += (char)((value >> (8 * i)) & 0xff);
+			return out;
+		};
+
+	std::string setId(16, 'S');
+	std::string mainBody = le64(blockSize) + le32((uint32)specs.size());
+	std::string descPackets;
+	for (size_t i = 0; i < specs.size(); i++)
+	{
+		std::string fileId(16, (char)('A' + i));
+		mainBody += fileId;
+		std::string paddedName(specs[i].name);
+		while (paddedName.size() % 4 != 0)
+		{
+			paddedName.push_back('\0');
+		}
+		std::string descBody = fileId + std::string(16, specs[i].md5Fill) +
+			std::string(16, specs[i].md5Fill) + le64(specs[i].length) + paddedName;
+		descPackets += BuildValidPar2Packet(setId, "PAR 2.0\0FileDesc", descBody);
+	}
+	return BuildValidPar2Packet(setId, "PAR 2.0\0Main\0\0\0\0", mainBody) + descPackets;
+}
+
+void WriteDonorNzbFile(const fs::path& path,
+	const std::vector<std::pair<std::string, std::string>>& files)
+{
+	std::ofstream out(path, std::ios::binary | std::ios::trunc);
+	out << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+		<< "<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n";
+	for (const auto& entry : files)
+	{
+		out << "<file poster=\"p\" date=\"1\" subject=\"&quot;" << entry.first << "&quot; yEnc (1/2)\">\n"
+			<< "<groups><group>alt.binaries.test</group></groups>\n"
+			<< "<segments>\n"
+			<< "<segment bytes=\"500000\" number=\"1\">" << entry.second << "-1@example.com</segment>\n"
+			<< "<segment bytes=\"500000\" number=\"2\">" << entry.second << "-2@example.com</segment>\n"
+			<< "</segments>\n"
+			<< "</file>\n";
+	}
+	out << "</nzb>\n";
+}
+
+void RegisterPar2TwinIdentity(NzbInfo* nzbInfo, uint32 fullContentHash,
+	const std::vector<Par2Spec>& specs)
+{
+	nzbInfo->SetFullContentHash(fullContentHash);
+	std::string par2 = BuildValidPar2Set(specs);
+	bool complete = false;
+	std::string print = TwinCheck::PutPar2(nzbInfo->GetId(),
+		TwinCheck::Posting(nzbInfo).c_str(), par2.data(), par2.size(), &complete);
+	BOOST_REQUIRE(!print.empty());
+	BOOST_REQUIRE(complete);
+	nzbInfo->GetParameters()->SetParameter(TwinCheck::FilesParam, print.c_str());
+}
+
+class TestDownloadQueue final : public DownloadQueue
+{
+public:
+	TestDownloadQueue() { Init(this); }
+	~TestDownloadQueue() { Final(); }
+	bool EditEntry(int, EEditAction, const char*) override { return false; }
+	bool EditList(IdList*, NameList*, EMatchMode, EEditAction, const char*) override { return false; }
+	void HistoryChanged() override {}
+	void Save() override {}
+	void SaveChanged() override {}
+};
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(DupeArticleFallbackBorrowsFromOwnTwinWhileDeferringToParTest)
+{
+	fs::path dir = fs::temp_directory_path() / ("nzbget-twin-defer-" + std::to_string(getpid()));
+	fs::remove_all(dir);
+	fs::create_directories(dir);
+
+	for (const char* mode : {"DupeArticleFallback=stream", "DupeArticleFallback=live"})
+	{
+		FallbackOptionsGuard optionsGuard;
+		std::string queueDirOpt = "QueueDir=" + dir.string();
+		Options::CmdOptList cmdOpts;
+		cmdOpts.push_back(mode);
+		cmdOpts.push_back(queueDirOpt.c_str());
+		Options options(&cmdOpts, nullptr);
+		TestDownloadQueue queue;
+		DupeArticleFallback fallback;
+
+		// Primary has 3 data files and ample PAR2 (ShouldDeferToPar is true)
+		auto primary = std::make_unique<NzbInfo>();
+		primary->SetId(101);
+		primary->SetName("Release.A1");
+		primary->SetDupeKey("series.s01e01");
+		primary->SetDupeScore(999998);
+		primary->SetParSize(2000000);
+		primary->SetDirectRenameStatus(NzbInfo::tsSuccess);
+		fs::path primaryNzbPath = dir / "primary.nzb";
+		WriteDonorNzbFile(primaryNzbPath, {
+			{"vol1.rar", "a1-v1"},
+			{"vol2.rar", "a1-v2"},
+			{"vol3.rar", "a1-v3"}});
+		primary->SetQueuedFilename(primaryNzbPath.string().c_str());
+		RegisterPar2TwinIdentity(primary.get(), 1001, {
+			{"vol1.rar", 1000000, '1'},
+			{"vol2.rar", 1000000, '2'},
+			{"vol3.rar", 1000000, '3'}});
+
+		// Near-twin shares 2 of 3 files (like a 16/18 near-twin), while vol3.rar differs
+		auto nearTwin = std::make_unique<NzbInfo>();
+		nearTwin->SetId(102);
+		nearTwin->SetName("Release.A2.NearTwin");
+		nearTwin->SetDupeKey("series.s01e01");
+		nearTwin->SetDupeScore(999993);
+		fs::path nearTwinNzbPath = dir / "neartwin.nzb";
+		WriteDonorNzbFile(nearTwinNzbPath, {
+			{"vol1.rar", "a2-v1"},
+			{"vol2.rar", "a2-v2"},
+			{"vol3.rar", "a2-v3"}});
+		nearTwin->SetQueuedFilename(nearTwinNzbPath.string().c_str());
+		RegisterPar2TwinIdentity(nearTwin.get(), 1002, {
+			{"vol1.rar", 1000000, '1'},
+			{"vol2-par2only.rar", 1000000, '2'},
+			{"vol3.rar", 1000000, '9'}});
+
+		// Alt shares only 1 of 3 files (<= 50%, so TwinCheck::Kind is "alt")
+		auto altDonor = std::make_unique<NzbInfo>();
+		altDonor->SetId(103);
+		altDonor->SetName("Release.Alt");
+		altDonor->SetDupeKey("series.s01e01");
+		altDonor->SetDupeScore(999997);
+		fs::path altNzbPath = dir / "alt.nzb";
+		WriteDonorNzbFile(altNzbPath, {
+			{"vol1.rar", "alt-v1"},
+			{"vol2.rar", "alt-v2"},
+			{"vol3.rar", "alt-v3"}});
+		altDonor->SetQueuedFilename(altNzbPath.string().c_str());
+		RegisterPar2TwinIdentity(altDonor.get(), 1003, {
+			{"vol1.rar", 1000000, '1'},
+			{"vol2.rar", 1000000, '8'},
+			{"vol3.rar", 1000000, '7'}});
+
+		NzbInfo* primaryPtr = primary.get();
+		queue.GetQueue()->Add(std::move(primary), false);
+		queue.GetQueue()->Add(std::move(nearTwin), false);
+		queue.GetQueue()->Add(std::move(altDonor), false);
+
+		BOOST_REQUIRE(DupeArticleFallback::ShouldDeferToPar(primaryPtr));
+		BOOST_REQUIRE(!DupeArticleFallback::ParCannotCover(primaryPtr));
+
+		// Shared file vol1.rar borrows part 2 from nearTwin immediately during download
+		std::unique_ptr<FileInfo> vol1 = BuildFile("vol1.rar", {{1, 500000}, {2, 500000}}, "a1-v1");
+		vol1->SetNzbInfo(primaryPtr);
+		ArticleInfo* vol1Part2 = vol1->GetArticles()->at(1).get();
+		BOOST_CHECK(fallback.TryFallback(&queue, vol1.get(), vol1Part2));
+		BOOST_CHECK_EQUAL(vol1Part2->GetMessageId(), "<a2-v1-2@example.com>");
+		BOOST_CHECK_EQUAL(primaryPtr->GetDupeParDeferState(), NzbInfo::dpNone);
+		BOOST_CHECK_EQUAL(primaryPtr->GetDupeUnsourcedArticles(), 0);
+
+		// When the donor's PAR2 name ("vol2-par2only.rar") cannot be located in the donor NZB,
+		// twinOnly mode refuses to fall through to filename/structural matching
+		std::unique_ptr<FileInfo> vol2 = BuildFile("vol2.rar", {{1, 500000}, {2, 500000}}, "a1-v2");
+		vol2->SetNzbInfo(primaryPtr);
+		ArticleInfo* vol2Part2 = vol2->GetArticles()->at(1).get();
+		BOOST_CHECK(!fallback.TryFallback(&queue, vol2.get(), vol2Part2));
+		BOOST_CHECK_EQUAL(vol2Part2->GetMessageId(), "a1-v2-2@example.com");
+
+		// Non-shared file vol3.rar (differs in nearTwin, and altDonor is an "alt" not a twin)
+		// is NOT borrowed; it defers to primary's own PAR2 repair
+		std::unique_ptr<FileInfo> vol3 = BuildFile("vol3.rar", {{1, 500000}, {2, 500000}}, "a1-v3");
+		vol3->SetNzbInfo(primaryPtr);
+		ArticleInfo* vol3Part2 = vol3->GetArticles()->at(1).get();
+		BOOST_CHECK(!fallback.TryFallback(&queue, vol3.get(), vol3Part2));
+		BOOST_CHECK_EQUAL(vol3Part2->GetMessageId(), "a1-v3-2@example.com");
+		BOOST_CHECK_EQUAL(primaryPtr->GetDupeParDeferState(), NzbInfo::dpDeferred);
+		BOOST_CHECK_EQUAL(primaryPtr->GetDupeUnsourcedArticles(), 0);
+	}
+
+	TwinCheck::Prune("\n");
+	fs::remove_all(dir);
+}
+
+BOOST_AUTO_TEST_CASE(DupeArticleFallbackBorrowsOnlyFromOwnTwinAcrossTwoTwinPairsTest)
+{
+	// Two separate uploads of the same release, each with its own twin (4 NZBs total:
+	// A1+A2 and B1+B2). Even when B1 and B2 are twins of each other and carry a
+	// "DupeKind=twin" parameter, A1 must borrow ONLY from its own twin A2 and never
+	// from B1 or B2, and B1 must borrow ONLY from its own twin B2 and never from A1 or A2.
+	fs::path dir = fs::temp_directory_path() / ("nzbget-two-twin-pairs-" + std::to_string(getpid()));
+	fs::remove_all(dir);
+	fs::create_directories(dir);
+
+	FallbackOptionsGuard optionsGuard;
+	std::string queueDirOpt = "QueueDir=" + dir.string();
+	Options::CmdOptList cmdOpts;
+	cmdOpts.push_back("DupeArticleFallback=stream");
+	cmdOpts.push_back(queueDirOpt.c_str());
+	Options options(&cmdOpts, nullptr);
+	TestDownloadQueue queue;
+	DupeArticleFallback fallback;
+
+	auto makeNzb = [&](int id, const char* name, int score, uint32 hash,
+		const char* prefix, char md5Fill)
+	{
+		auto nzb = std::make_unique<NzbInfo>();
+		nzb->SetId(id);
+		nzb->SetName(name);
+		nzb->SetDupeKey("series.s01e01");
+		nzb->SetDupeScore(score);
+		nzb->SetParSize(2000000);
+		nzb->SetDirectRenameStatus(NzbInfo::tsSuccess);
+		fs::path nzbPath = dir / (std::string(name) + ".nzb");
+		WriteDonorNzbFile(nzbPath, {
+			{"vol1.rar", (std::string(prefix) + "-v1").c_str()},
+			{"vol2.rar", (std::string(prefix) + "-v2").c_str()}});
+		nzb->SetQueuedFilename(nzbPath.string().c_str());
+		RegisterPar2TwinIdentity(nzb.get(), hash, {
+			{"vol1.rar", 1000000, md5Fill},
+			{"vol2.rar", 1000000, (char)(md5Fill + 1)}});
+		return nzb;
+	};
+
+	auto a1 = makeNzb(201, "Upload.A1", 999996, 2001, "a1", 'a');
+	auto a2 = makeNzb(202, "Upload.A2", 999992, 2002, "a2", 'a');
+	auto b1 = makeNzb(203, "Upload.B1", 999999, 2003, "b1", 'k');
+	auto b2 = makeNzb(204, "Upload.B2", 999998, 2004, "b2", 'k');
+
+	// Simulate B1 and B2 already carrying DupeKind=twin from an earlier check
+	a2->GetParameters()->SetParameter(TwinCheck::KindParam, "twin");
+	b1->GetParameters()->SetParameter(TwinCheck::KindParam, "twin");
+	b2->GetParameters()->SetParameter(TwinCheck::KindParam, "twin");
+
+	NzbInfo* a1Ptr = a1.get();
+	NzbInfo* b1Ptr = b1.get();
+	queue.GetQueue()->Add(std::move(a1), false);
+	queue.GetQueue()->Add(std::move(a2), false);
+	queue.GetQueue()->Add(std::move(b1), false);
+	queue.GetQueue()->Add(std::move(b2), false);
+
+	// 1. While A1 is downloading, it borrows ONLY from A2 (never from B1 or B2,
+	// even though B1 and B2 have higher DupeScores and DupeKind=twin)
+	std::unique_ptr<FileInfo> a1Vol1 = BuildFile("vol1.rar", {{1, 500000}, {2, 500000}}, "a1-v1");
+	a1Vol1->SetNzbInfo(a1Ptr);
+	ArticleInfo* a1Part2 = a1Vol1->GetArticles()->at(1).get();
+	BOOST_REQUIRE(fallback.TryFallback(&queue, a1Vol1.get(), a1Part2));
+	BOOST_CHECK_EQUAL(a1Part2->GetMessageId(), "<a2-v1-2@example.com>");
+	BOOST_REQUIRE_EQUAL(a1Part2->GetDupeSources()->size(), 1u);
+
+	// If A2 also misses part 2 on the news servers, A1 must NOT fall back to B1 or B2
+	BOOST_CHECK(!fallback.TryFallback(&queue, a1Vol1.get(), a1Part2));
+	BOOST_CHECK_EQUAL(a1Part2->GetMessageId(), "a1-v1-2@example.com");
+
+	// 2. Conversely, while B1 is downloading, it borrows ONLY from B2 (never from A1 or A2)
+	std::unique_ptr<FileInfo> b1Vol1 = BuildFile("vol1.rar", {{1, 500000}, {2, 500000}}, "b1-v1");
+	b1Vol1->SetNzbInfo(b1Ptr);
+	ArticleInfo* b1Part2 = b1Vol1->GetArticles()->at(1).get();
+	BOOST_REQUIRE(fallback.TryFallback(&queue, b1Vol1.get(), b1Part2));
+	BOOST_CHECK_EQUAL(b1Part2->GetMessageId(), "<b2-v1-2@example.com>");
+	BOOST_REQUIRE_EQUAL(b1Part2->GetDupeSources()->size(), 1u);
+
+	TwinCheck::Prune("\n");
+	fs::remove_all(dir);
+}
+
+BOOST_AUTO_TEST_CASE(DupeFallbackAndNntpRustFfiBoundaryTest)
+{
+	// 1. ParDamage blocks_touched + project
+	NzbgetRsByteRange holes[2] = {{0, 200}, {150, 200}};
+	BOOST_CHECK_EQUAL(nzbget_rs_par_damage_blocks_touched(holes, 2, 100), 4);
+	int projBlocks = 0;
+	int certain = 0;
+	int projected = 0;
+	nzbget_rs_par_damage_project(1, 5, 10, 200, 1000, &projBlocks, &certain, &projected);
+	BOOST_CHECK_EQUAL(projBlocks, 25);
+	BOOST_CHECK_EQUAL(certain, 0);
+	BOOST_CHECK_EQUAL(projected, 1);
+
+	// 2. DupeProbe sample_indexes + classify + is_dead
+	size_t idx[4] = {0};
+	BOOST_CHECK_EQUAL(nzbget_rs_dupe_probe_sample_indexes(20, 4, idx, 4), 4u);
+	BOOST_CHECK_EQUAL(idx[0], 2u);
+	BOOST_CHECK_EQUAL(idx[3], 17u);
+	BOOST_CHECK_EQUAL(nzbget_rs_dupe_probe_classify("223 0 <msg@id>"), 0);
+	BOOST_CHECK_EQUAL(nzbget_rs_dupe_probe_classify("430 No such article"), 1);
+	BOOST_CHECK_EQUAL(nzbget_rs_dupe_probe_is_dead(0, 2, 2), 1);
+
+	// 3. ServerPool normalize_levels + is_blocked + level_should_close
+	NzbgetRsServerNormInput servers[2] = {{10, 1, 4}, {0, 1, 8}};
+	size_t sortedIdx[2] = {0};
+	int normLevels[2] = {0};
+	BOOST_CHECK_EQUAL(nzbget_rs_server_pool_normalize_levels(servers, 2, sortedIdx, normLevels), 1);
+	BOOST_CHECK_EQUAL(sortedIdx[0], 1u);
+	BOOST_CHECK_EQUAL(normLevels[1], 0);
+	BOOST_CHECK_EQUAL(normLevels[0], 1);
+	BOOST_CHECK_EQUAL(nzbget_rs_server_pool_is_blocked(100, 105, 10), 1);
+	uint8_t inUse[1] = {0};
+	uint8_t connected[1] = {1};
+	int64_t freeTimes[1] = {100};
+	BOOST_CHECK_EQUAL(nzbget_rs_server_pool_level_should_close(inUse, connected, freeTimes, 1, 120, 5), 1);
+
+	// 4. ArticleFetcher & ArticleDownloader checks
+	int64_t rawBytes = 0;
+	BOOST_CHECK_EQUAL(nzbget_rs_article_fetch_add_raw_bytes(&rawBytes, 1024), 1);
+	BOOST_CHECK_EQUAL(nzbget_rs_article_fetch_header_within_limit(rawBytes, 0), 1);
+	int64_t decodedBytes = 0;
+	BOOST_CHECK_EQUAL(nzbget_rs_article_fetch_add_decoded_bytes(&decodedBytes, 500, 1, 500, 1000), 1);
+	BOOST_CHECK_EQUAL(nzbget_rs_article_downloader_check_response("222 0 <msg@id>", 0), 3);
+	int64_t outOffset = -1;
+	int outSize = -1;
+	BOOST_CHECK_EQUAL(nzbget_rs_article_downloader_validate_yenc(
+		1, 500, 1000, 1000, 1, 0, 500, &outOffset, &outSize), 0);
+	BOOST_CHECK_EQUAL(outOffset, 0);
+	BOOST_CHECK_EQUAL(outSize, 500);
+}
+#endif
 
 BOOST_AUTO_TEST_SUITE_END()

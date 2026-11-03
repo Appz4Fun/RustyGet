@@ -55,19 +55,20 @@ std::string RsString(NzbgetRsBuf buf)
 bool OpenStore()
 {
 	// no options (unit tests): no store, and every list unknown
-	static std::atomic<bool> opened{false};
+	static std::string openedPath;
 	static std::mutex mutex;
-	if (opened)
+	if (!g_Options || Util::EmptyStr(g_Options->GetQueueDir()))
 	{
-		return true;
+		return false;
 	}
+	std::string path = std::string(g_Options->GetQueueDir()) + PATH_SEPARATOR + "twincheck";
 	std::lock_guard<std::mutex> guard(mutex);
-	if (!opened && g_Options && !Util::EmptyStr(g_Options->GetQueueDir()))
+	if (openedPath != path)
 	{
-		nzbget_rs_twin_open((std::string(g_Options->GetQueueDir()) + PATH_SEPARATOR + "twincheck").c_str());
-		opened = true;
+		nzbget_rs_twin_open(path.c_str());
+		openedPath = std::move(path);
 	}
-	return opened;
+	return true;
 }
 
 std::vector<TwinCheck::FileSig> SigLines(const std::string& text)
@@ -218,18 +219,9 @@ void TwinCheckJob::Run()
 		return;
 	}
 	// parsed, kept with its file list and fingerprinted in Rust (twin.rs)
-	// "fingerprint\tcomplete" from Rust (twin.rs), which keeps the file list
-	std::string fingerprint;
 	bool complete = false;
-#ifdef NZBGET_USE_RUST
-	if (readable && OpenStore())
-	{
-		std::string result = RsString(nzbget_rs_twin_put_par2(m_nzbId, m_posting.c_str(), (const unsigned char*)data.data(), data.size()));
-		size_t tab = result.find('\t');
-		fingerprint = result.substr(0, tab);
-		complete = tab != std::string::npos && result.substr(tab + 1) == "1";
-	}
-#endif
+	std::string fingerprint = readable ?
+		TwinCheck::PutPar2(m_nzbId, m_posting.c_str(), data.data(), data.size(), &complete) : "";
 	bool known = !fingerprint.empty();
 	if (fetched && (!known || !complete))
 	{
@@ -449,6 +441,28 @@ std::string TwinCheck::Identity(NzbInfo* nzbInfo)
 		return "";
 	}
 	return std::string(print->GetValue()) + "#" + Posting(nzbInfo);
+}
+
+std::string TwinCheck::PutPar2(int nzbId, const char* posting, const char* data, size_t size,
+	bool* complete)
+{
+	if (complete)
+	{
+		*complete = false;
+	}
+	if (!data || !size || !OpenStore())
+	{
+		return "";
+	}
+	// "fingerprint\tcomplete" from Rust (twin.rs), which keeps the file list
+	std::string result = RsString(nzbget_rs_twin_put_par2(nzbId, posting ? posting : "",
+		(const unsigned char*)data, size));
+	size_t tab = result.find('\t');
+	if (complete)
+	{
+		*complete = tab != std::string::npos && result.substr(tab + 1) == "1";
+	}
+	return result.substr(0, tab);
 }
 
 int TwinCheck::HasSigs(int nzbId, const char* print)
@@ -690,6 +704,14 @@ std::vector<TwinCheck::FileSig> TwinCheck::ParsePar2(const char* data, size_t si
 
 std::string TwinCheck::Posting(NzbInfo*) { return ""; }
 std::string TwinCheck::Identity(NzbInfo*) { return ""; }
+std::string TwinCheck::PutPar2(int, const char*, const char*, size_t, bool* complete)
+{
+	if (complete)
+	{
+		*complete = false;
+	}
+	return "";
+}
 int TwinCheck::HasSigs(int, const char*) { return 0; }
 void TwinCheck::Prune(const std::string&) {}
 std::string TwinCheck::Kind(int, const char*, int, const char*) { return ""; }

@@ -30,6 +30,9 @@
 #include "ServerPool.h"
 #include "StatMeter.h"
 #include "Util.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 ArticleDownloader::ArticleDownloader()
 	: m_fileInfo(nullptr)
@@ -499,6 +502,26 @@ ArticleDownloader::EStatus ArticleDownloader::Download()
 
 ArticleDownloader::EStatus ArticleDownloader::CheckResponse(const char* response, const char* comment)
 {
+#ifdef NZBGET_USE_RUST
+	EStatus status = (EStatus)nzbget_rs_article_downloader_check_response(
+		response, m_connection->GetAuthError() ? 1 : 0);
+	if (status != adFinished)
+	{
+		if (!response)
+		{
+			if (!IsStopped())
+			{
+				detail("Article %s @ %s failed, %s: Connection closed by remote host",
+					*m_infoName, *m_connectionName, comment);
+			}
+		}
+		else
+		{
+			detail("Article %s @ %s failed, %s: %s", *m_infoName, *m_connectionName, comment, response);
+		}
+	}
+	return status;
+#else
 	if (!response)
 	{
 		if (!IsStopped())
@@ -533,6 +556,7 @@ ArticleDownloader::EStatus ArticleDownloader::CheckResponse(const char* response
 		detail("Article %s @ %s failed, %s: %s", *m_infoName, *m_connectionName, comment, response);
 		return adFailed;
 	}
+#endif
 }
 
 bool ArticleDownloader::Write(char* buffer, int len)
@@ -549,6 +573,47 @@ bool ArticleDownloader::Write(char* buffer, int len)
 			articleFilename = m_decoder.GetArticleFilename();
 			if (m_decoder.GetFormat() == Decoder::efYenc)
 			{
+#ifdef NZBGET_USE_RUST
+				int64 beginPos = m_decoder.GetBeginPos();
+				int64 endPos = m_decoder.GetEndPos();
+				articleFileSize = m_decoder.GetSize();
+				int64 expectedFileSize = m_fileInfo->GetDecodedFileSize();
+				int64 dupeExpectedOffset = m_articleInfo->GetDupeExpectedOffset();
+				int64 dupeExpectedEnd = m_articleInfo->GetDupeExpectedEnd();
+				int rc = nzbget_rs_article_downloader_validate_yenc(
+					beginPos, endPos, articleFileSize, expectedFileSize,
+					m_articleInfo->GetDupeFallbackRound(), dupeExpectedOffset, dupeExpectedEnd,
+					&articleOffset, &articleSize);
+				if (rc == 1)
+				{
+					return false;
+				}
+				if (rc == 2)
+				{
+					warn("Malformed article %s: range %lli-%lli out of range (file size %lli)", *m_infoName,
+						(long long)beginPos, (long long)endPos, (long long)articleFileSize);
+					return false;
+				}
+				m_decodedFileSize = articleFileSize;
+				if (rc == 3)
+				{
+					detail("Discarding article %s from duplicate: file size mismatch (%lli vs %lli)",
+						*m_infoName, (long long)articleFileSize, (long long)expectedFileSize);
+					return false;
+				}
+				if (rc == 4)
+				{
+					detail("Discarding article %s from duplicate: decoded offset mismatch (%lli vs %lli)",
+						*m_infoName, (long long)(beginPos - 1), (long long)dupeExpectedOffset);
+					return false;
+				}
+				if (rc == 5)
+				{
+					detail("Discarding article %s from duplicate: decoded end mismatch (%lli vs %lli)",
+						*m_infoName, (long long)endPos, (long long)dupeExpectedEnd);
+					return false;
+				}
+#else
 				if (m_decoder.GetBeginPos() == 0 || m_decoder.GetEndPos() == 0)
 				{
 					return false;
@@ -598,6 +663,7 @@ bool ArticleDownloader::Write(char* buffer, int len)
 						*m_infoName, (long long)(articleOffset + articleSize), (long long)dupeExpectedEnd);
 					return false;
 				}
+#endif
 			}
 		}
 

@@ -26,6 +26,9 @@
 #include "DupeArticleFallback.h"
 #include "ParParser.h"
 #include "FileSystem.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 namespace
 {
@@ -95,6 +98,15 @@ void ParDamage::FileCompleted(NzbInfo* nzbInfo, FileInfo* fileInfo, const std::s
 
 int ParDamage::BlocksTouched(const StreamRangeList& holes, uint64 blockSize)
 {
+#ifdef NZBGET_USE_RUST
+	static_assert(sizeof(StreamRange) == sizeof(NzbgetRsByteRange) &&
+		offsetof(StreamRange, Offset) == offsetof(NzbgetRsByteRange, offset) &&
+		offsetof(StreamRange, Size) == offsetof(NzbgetRsByteRange, size),
+		"StreamRange layout must match NzbgetRsByteRange");
+	return nzbget_rs_par_damage_blocks_touched(
+		holes.empty() ? nullptr : reinterpret_cast<const NzbgetRsByteRange*>(holes.data()),
+		holes.size(), blockSize);
+#else
 	if (blockSize == 0)
 	{
 		return 0;
@@ -122,6 +134,7 @@ int ParDamage::BlocksTouched(const StreamRangeList& holes, uint64 blockSize)
 		}
 	}
 	return (int)std::min<int64>(count, INT_MAX);
+#endif
 }
 
 ParDamage::Verdict ParDamage::Judge(NzbInfo* nzbInfo)
@@ -211,9 +224,15 @@ ParDamage::Verdict ParDamage::Judge(NzbInfo* nzbInfo)
 
 	verdict.doneBytes = state.doneBytes;
 	verdict.totalBytes = std::max<int64>(0, nzbInfo->GetSize() - nzbInfo->GetParSize());
+#ifdef NZBGET_USE_RUST
+	nzbget_rs_par_damage_project(verdict.known ? 1 : 0, verdict.damagedBlocks,
+		verdict.recoveryBlocks, verdict.doneBytes, verdict.totalBytes,
+		&verdict.projectedBlocks, nullptr, nullptr);
+#else
 	verdict.projectedBlocks = verdict.doneBytes > 0 ?
 		(int)std::min<int64>(INT_MAX, (int64)verdict.damagedBlocks * verdict.totalBytes / verdict.doneBytes) :
 		verdict.damagedBlocks;
+#endif
 	return verdict;
 }
 

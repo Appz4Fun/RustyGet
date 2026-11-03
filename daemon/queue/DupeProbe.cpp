@@ -30,6 +30,9 @@
 #include "NntpConnection.h"
 #include "Log.h"
 #include "Util.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 namespace
 {
@@ -54,16 +57,26 @@ std::vector<size_t> DupeProbe::SampleIndexes(size_t total, int count)
 		return indexes;
 	}
 
+#ifdef NZBGET_USE_RUST
+	size_t wanted = std::min(total, (size_t)count);
+	indexes.resize(wanted);
+	nzbget_rs_dupe_probe_sample_indexes(total, count, indexes.data(), indexes.size());
+	return indexes;
+#else
 	size_t wanted = std::min(total, (size_t)count);
 	for (size_t i = 0; i < wanted; i++)
 	{
 		indexes.push_back(((2 * i + 1) * total) / (2 * wanted));
 	}
 	return indexes;
+#endif
 }
 
 DupeProbe::EAnswer DupeProbe::Classify(const char* response)
 {
+#ifdef NZBGET_USE_RUST
+	return (EAnswer)nzbget_rs_dupe_probe_classify(response);
+#else
 	if (!response)
 	{
 		return daUnknown;
@@ -84,12 +97,17 @@ DupeProbe::EAnswer DupeProbe::Classify(const char* response)
 		return daMissing;
 	}
 	return daUnknown;
+#endif
 }
 
 bool DupeProbe::IsDead(int existing, int definitiveServers, int activeServers)
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_dupe_probe_is_dead(existing, definitiveServers, activeServers) != 0;
+#else
 	return existing < MinAliveSamples && definitiveServers > 0 &&
 		definitiveServers >= activeServers;
+#endif
 }
 
 void DupeProbe::Start(int nzbId, std::vector<Sample> samples, int recoveredAtStart)

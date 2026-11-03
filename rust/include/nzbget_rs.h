@@ -1348,6 +1348,104 @@ void nzbget_c_stop_server(bool reloading);
 void nzbget_c_reload(void);
 void nzbget_c_exit_proc(void);
 
+// ============================================================================
+// DupeArticleFallback, ParDamage, DupeProbe, ServerPool, ArticleFetcher &
+// ArticleDownloader Hot-Path C ABI (rust/src/dupefallback.rs)
+// ============================================================================
+
+typedef struct {
+    int32_t part_number;
+    int32_t status;
+    int64_t segment_offset;
+    int32_t segment_size;
+    int32_t fallback_round;
+} NzbgetRsArticleGeom;
+
+typedef struct {
+    int64_t offset;
+    int64_t size;
+} NzbgetRsByteRange;
+
+typedef struct {
+    int32_t level;
+    int32_t active;
+    int32_t max_connections;
+} NzbgetRsServerNormInput;
+
+int nzbget_rs_dupe_fallback_par_cannot_cover(
+    int64_t par_size, int64_t par_failed_size, int64_t current_failed_size,
+    int64_t current_success_size, int64_t par_current_success_size, int64_t total_size,
+    int current_success_articles, int current_failed_articles, int with_margin);
+int nzbget_rs_dupe_fallback_has_extension(const char* filename);
+int nzbget_rs_dupe_fallback_sizes_match(int64_t size1, int64_t size2, int div);
+int nzbget_rs_dupe_fallback_declared_parts(const char* subject);
+uint64_t nzbget_rs_dupe_fallback_steps_hash(const int* sizes, size_t count);
+int nzbget_rs_dupe_fallback_steps_match(
+    const int* target_sizes, size_t target_count,
+    const int* donor_sizes, size_t donor_count);
+int nzbget_rs_dupe_fallback_structure_matches(
+    const char* target_subject, int target_total_articles, int64_t target_size,
+    const int* target_parts, const int* target_sizes, size_t target_count,
+    const char* donor_subject, int donor_total_articles, int64_t donor_size,
+    const int* donor_parts, const int* donor_sizes, size_t donor_count);
+int64_t nzbget_rs_dupe_fallback_expected_offset(
+    ptrdiff_t index, int part_number, int prev_part_number, int prev_status,
+    int64_t prev_offset, int prev_size);
+int64_t nzbget_rs_dupe_fallback_expected_end(
+    ptrdiff_t index, size_t count, int part_number, int64_t decoded_file_size,
+    int next_part_number, int next_status, int64_t next_offset, int next_size);
+int nzbget_rs_dupe_fallback_segment_aligned(
+    int64_t segment_offset, int segment_size, int64_t expected_offset, int64_t expected_end);
+ptrdiff_t nzbget_rs_dupe_fallback_first_untiled(
+    const NzbgetRsArticleGeom* articles, size_t count, int64_t decoded_size);
+int nzbget_rs_dupe_fallback_merge_decoded_size(int64_t* decoded_file_size, int64_t article_file_size);
+int nzbget_rs_dupe_fallback_register_lead_failure(
+    int fallback_round, int lead_snapshot, int donor_count, int next_lead,
+    int* lead_donor_id, int* lead_failures, int* lead_switches);
+void nzbget_rs_dupe_fallback_register_lead_success(
+    int fallback_round, int lead_snapshot, int lead_donor_id,
+    int64_t expected_offset, int64_t expected_end,
+    int* lead_failures, int* lead_switches);
+int nzbget_rs_par2_range_covered(
+    const NzbgetRsByteRange* ranges, size_t count, int64_t from, int64_t to);
+void nzbget_rs_par2_scan_file(
+    const char* path, void* ctx,
+    void (*on_main)(void* ctx, const char* set_id, uint64_t block_size),
+    void (*on_desc)(void* ctx, const char* set_id, const char* file_id, const char* hash16k,
+        uint64_t length, const char* name, size_t name_len),
+    void (*on_ifsc)(void* ctx, const char* set_id, const char* file_id,
+        const uint32_t* crcs, size_t crc_count));
+
+int nzbget_rs_par_damage_blocks_touched(
+    const NzbgetRsByteRange* holes, size_t count, uint64_t block_size);
+void nzbget_rs_par_damage_project(
+    int known, int damaged_blocks, int recovery_blocks, int64_t done_bytes, int64_t total_bytes,
+    int* out_projected_blocks, int* out_certain, int* out_projected);
+
+size_t nzbget_rs_dupe_probe_sample_indexes(
+    size_t total, int count, size_t* out_indexes, size_t cap);
+int nzbget_rs_dupe_probe_classify(const char* response);
+int nzbget_rs_dupe_probe_is_dead(int existing, int definitive_servers, int active_servers);
+
+int nzbget_rs_server_pool_normalize_levels(
+    const NzbgetRsServerNormInput* servers, size_t count,
+    size_t* out_sorted_indices, int* out_norm_levels);
+int nzbget_rs_server_pool_is_blocked(int64_t block_time, int64_t cur_time, int retry_interval);
+int nzbget_rs_server_pool_level_should_close(
+    const uint8_t* in_use, const uint8_t* connected, const int64_t* free_times,
+    size_t count, int64_t cur_time, int hold_seconds);
+
+int nzbget_rs_article_fetch_add_raw_bytes(int64_t* raw_bytes, int64_t bytes);
+int nzbget_rs_article_fetch_header_within_limit(int64_t raw_bytes, int declared_range_known);
+int nzbget_rs_article_fetch_add_decoded_bytes(
+    int64_t* decoded_bytes, int64_t bytes, int64_t begin, int64_t end, int64_t file_size);
+
+int nzbget_rs_article_downloader_check_response(const char* response, int auth_error);
+int nzbget_rs_article_downloader_validate_yenc(
+    int64_t begin_pos, int64_t end_pos, int64_t article_file_size, int64_t expected_file_size,
+    int fallback_round, int64_t dupe_expected_offset, int64_t dupe_expected_end,
+    int64_t* out_offset, int* out_size);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

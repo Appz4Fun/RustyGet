@@ -34,6 +34,9 @@
 #include "Util.h"
 #include "FileSystem.h"
 #include <fstream>
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 #ifndef DISABLE_PARCHECK
 #include <par2/libpar2.h>
 #include <par2/md5.h>
@@ -110,6 +113,14 @@ bool DupeArticleFallback::ShouldDeferToPar(NzbInfo* nzbInfo)
 
 bool DupeArticleFallback::ParCannotCover(NzbInfo* nzbInfo, bool withMargin)
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_dupe_fallback_par_cannot_cover(
+		nzbInfo->GetParSize(), nzbInfo->GetParCurrentFailedSize(),
+		nzbInfo->GetCurrentFailedSize(), nzbInfo->GetCurrentSuccessSize(),
+		nzbInfo->GetParCurrentSuccessSize(), nzbInfo->GetSize(),
+		nzbInfo->GetCurrentSuccessArticles(), nzbInfo->GetCurrentFailedArticles(),
+		withMargin ? 1 : 0) != 0;
+#else
 	// Damaged data bytes beyond every recovery byte the collection has (minus
 	// its own failed parity) can never be repaired by its par2 set; waiting
 	// for par-check would only forfeit the download-time recovery. Block
@@ -135,6 +146,7 @@ bool DupeArticleFallback::ParCannotCover(NzbInfo* nzbInfo, bool withMargin)
 	}
 	double projectedFailed = (double)dataFailed * dataTotal / dataTried;
 	return projectedFailed + (withMargin ? (double)dataTotal * ParEdgeMargin / 1000 : 0) > parAvailable;
+#endif
 }
 
 bool DupeArticleFallback::TryFallback(DownloadQueue* downloadQueue, FileInfo* fileInfo, ArticleInfo* articleInfo)
@@ -182,6 +194,7 @@ bool DupeArticleFallback::TryFallback(DownloadQueue* downloadQueue, FileInfo* fi
 		return false;
 	}
 
+	bool defer = false;
 	if (g_Options->GetDupeArticleFallback() >= Options::dafStream)
 	{
 		// The first article identifies its file (the 16k hash direct-rename
@@ -201,32 +214,26 @@ bool DupeArticleFallback::TryFallback(DownloadQueue* downloadQueue, FileInfo* fi
 		// par2 repairs whole blocks: the blocks the failed articles spoiled may
 		// be more than its volumes hold long before the bytes are (ParDamage);
 		// borrowing then starts, and the par-damage failover waits for it
-		bool defer = parDefer && articleInfo->GetPartNumber() != 1 &&
+		defer = parDefer && articleInfo->GetPartNumber() != 1 &&
 			nzbInfo->GetDupeParDeferState() != NzbInfo::dpLifted && !ParCannotCover(nzbInfo) &&
 			!damage.Certain() && !damage.Projected();
-		// say once per collection which way the par-first rule went, so a
-		// download that borrowed nothing can be told apart from one that tried
-		if (defer && nzbInfo->GetDupeParDeferState() == NzbInfo::dpNone &&
-			downloadQueue && !CollectDonors(downloadQueue, nzbInfo).empty())
+		if (parDefer && !defer && articleInfo->GetPartNumber() != 1)
 		{
-			nzbInfo->SetDupeParDeferState(NzbInfo::dpDeferred);
-			nzbInfo->PrintMessage(Message::mkInfo,
-				"Deferring duplicate recovery for %s to par-check (its par2 files may cover the damage)",
-				nzbInfo->GetName());
-		}
-		else if (parDefer && !defer && articleInfo->GetPartNumber() != 1 &&
-			nzbInfo->GetDupeParDeferState() == NzbInfo::dpDeferred)
-		{
+			if (nzbInfo->GetDupeParDeferState() == NzbInfo::dpDeferred)
+			{
+				nzbInfo->PrintMessage(Message::mkInfo,
+					"Damage of %s exceeds its par2 recovery data (or will, judged by the articles tried so far), "
+					"recovering missing articles from duplicates",
+					nzbInfo->GetName());
+			}
 			nzbInfo->SetDupeParDeferState(NzbInfo::dpLifted);
-			nzbInfo->PrintMessage(Message::mkInfo,
-				"Damage of %s exceeds its par2 recovery data (or will, judged by the articles tried so far), "
-				"recovering missing articles from duplicates",
-				nzbInfo->GetName());
 		}
-		if (defer)
-		{
-			return false;
-		}
+	}
+
+	int round = articleInfo->GetDupeFallbackRound();
+	if (defer && (round == 0 ? !downloadQueue : articleInfo->GetDupeSourceDonors()->empty()))
+	{
+		return false;
 	}
 
 	// preserve the article's own (primary) message-id before the first
@@ -236,7 +243,6 @@ bool DupeArticleFallback::TryFallback(DownloadQueue* downloadQueue, FileInfo* fi
 		articleInfo->SetDupeOriginalMessageId(articleInfo->GetMessageId());
 	}
 
-	int round = articleInfo->GetDupeFallbackRound();
 	if (round == 0)
 	{
 		// the article's source order is decided once, at its first fallback:
@@ -245,7 +251,9 @@ bool DupeArticleFallback::TryFallback(DownloadQueue* downloadQueue, FileInfo* fi
 		// shift the round->source mapping under it (which would skip or
 		// repeat sources). The trade-off is deliberate: a duplicate appearing
 		// later serves fresh articles, not articles already mid-fallback.
-		PinSources(downloadQueue, fileInfo, articleInfo);
+		// While deferring to par-check, only proven twins of this primary whose
+		// par2 file list carries the exact same file bytes are pinned.
+		PinSources(downloadQueue, fileInfo, articleInfo, defer);
 	}
 	else if (round == 1 && RegisterLeadFailure(fileInfo, articleInfo))
 	{
@@ -265,6 +273,24 @@ bool DupeArticleFallback::TryFallback(DownloadQueue* downloadQueue, FileInfo* fi
 	}
 	if (round >= (int)sources.size())
 	{
+		if (defer)
+		{
+			// say once per collection which way the par-first rule went, so a
+			// download that borrowed nothing can be told apart from one that tried
+			if (!articleInfo->GetDupeProactive() && nzbInfo->GetDupeParDeferState() == NzbInfo::dpNone &&
+				downloadQueue && !CollectDonors(downloadQueue, nzbInfo).empty())
+			{
+				nzbInfo->SetDupeParDeferState(NzbInfo::dpDeferred);
+				nzbInfo->PrintMessage(Message::mkInfo,
+					"Deferring duplicate recovery for %s to par-check (its par2 files may cover the damage)",
+					nzbInfo->GetName());
+			}
+			if (pinnedRound > 0 && !Util::EmptyStr(articleInfo->GetDupeOriginalMessageId()))
+			{
+				articleInfo->SetMessageId(articleInfo->GetDupeOriginalMessageId());
+			}
+			return false;
+		}
 		if (pinnedRound == 0 && !articleInfo->GetDupeProactive())
 		{
 			// no duplicate carries this article's file at all (an article asked of a
@@ -367,6 +393,7 @@ struct Par2FileSums
 	uint64 blockSize = 0;	// that set's block size
 };
 
+#ifndef NZBGET_USE_RUST
 uint64 ReadLe64(const uchar* p)
 {
 	uint64 value = 0;
@@ -393,6 +420,7 @@ std::string Hex(const uchar* p, int len)
 	}
 	return hex;
 }
+#endif
 
 // the par2 data of every par2 file in <dir> (recognized by its packet magic, so
 // obfuscated names count too); recovery packets are skipped, not read
@@ -409,6 +437,40 @@ std::map<std::string, Par2FileSums> LoadPar2Sums(const char* dir, uint64& blockS
 	while (const char* filename = browser.Next())
 	{
 		BString<1024> path("%s%c%s", dir, PATH_SEPARATOR, filename);
+#ifdef NZBGET_USE_RUST
+		struct ScanCtx
+		{
+			std::map<std::string, Par2FileSums>* files;
+			std::map<std::string, uint64>* setBlockSizes;
+			uint64* blockSize;
+		} scanCtx{ &files, &setBlockSizes, &blockSize };
+		nzbget_rs_par2_scan_file(
+			*path, &scanCtx,
+			[](void* ctx, const char* setId, uint64_t bs)
+			{
+				auto* s = static_cast<ScanCtx*>(ctx);
+				*s->blockSize = bs;
+				(*s->setBlockSizes)[setId] = bs;
+			},
+			[](void* ctx, const char* setId, const char* fileId, const char* hash16k,
+			   uint64_t length, const char* name, size_t nameLen)
+			{
+				auto* s = static_cast<ScanCtx*>(ctx);
+				Par2FileSums& sums = (*s->files)[fileId];
+				sums.setId = setId;
+				sums.hash16k = hash16k;
+				sums.length = length;
+				sums.name.assign(name, nameLen);
+			},
+			[](void* ctx, const char* setId, const char* fileId,
+			   const uint32_t* crcs, size_t crcCount)
+			{
+				auto* s = static_cast<ScanCtx*>(ctx);
+				Par2FileSums& sums = (*s->files)[fileId];
+				sums.setId = setId;
+				sums.crcs.assign(crcs, crcs + crcCount);
+			});
+#else
 		std::ifstream in(fs::u8path(*path), std::ios::binary);
 		uchar header[64];
 		uint64 pos = 0;
@@ -463,6 +525,7 @@ std::map<std::string, Par2FileSums> LoadPar2Sums(const char* dir, uint64& blockS
 			}
 			pos += length;
 		}
+#endif
 	}
 	for (auto& entry : files)
 	{
@@ -547,6 +610,20 @@ std::vector<ArticleInfo*> DupeArticleFallback::BorrowedPar2Mismatches(FileInfo* 
 		}
 	}
 	std::sort(arrived.begin(), arrived.end());
+#ifdef NZBGET_USE_RUST
+	std::vector<NzbgetRsByteRange> arrivedRanges(arrived.size());
+	for (size_t i = 0; i < arrived.size(); i++)
+	{
+		arrivedRanges[i].offset = arrived[i].first;
+		arrivedRanges[i].size = arrived[i].second - arrived[i].first;
+	}
+	auto covered = [&arrivedRanges](int64 from, int64 to)
+		{
+			return nzbget_rs_par2_range_covered(
+				arrivedRanges.empty() ? nullptr : arrivedRanges.data(),
+				arrivedRanges.size(), from, to) != 0;
+		};
+#else
 	auto covered = [&arrived](int64 from, int64 to)
 		{
 			for (const auto& range : arrived)
@@ -563,6 +640,7 @@ std::vector<ArticleInfo*> DupeArticleFallback::BorrowedPar2Mismatches(FileInfo* 
 			}
 			return from >= to;
 		};
+#endif
 
 	std::ifstream in(fs::u8path(path), std::ios::binary);
 	std::vector<char> buffer((size_t)blockSize);
@@ -643,6 +721,19 @@ void DupeArticleFallback::FinishPin(FileInfo* fileInfo, ArticleInfo* articleInfo
 
 bool DupeArticleFallback::RegisterLeadFailure(FileInfo* fileInfo, ArticleInfo* articleInfo)
 {
+#ifdef NZBGET_USE_RUST
+	int leadDonorId = fileInfo->GetDupeLeadDonorId();
+	int leadFailures = fileInfo->GetDupeLeadFailures();
+	int leadSwitches = fileInfo->GetDupeLeadSwitches();
+	bool rotated = nzbget_rs_dupe_fallback_register_lead_failure(
+		articleInfo->GetDupeFallbackRound(), articleInfo->GetDupeLeadSnapshot(),
+		articleInfo->GetDupeDonorCount(), articleInfo->GetDupeNextLead(),
+		&leadDonorId, &leadFailures, &leadSwitches) != 0;
+	fileInfo->SetDupeLeadDonorId(leadDonorId);
+	fileInfo->SetDupeLeadFailures(leadFailures);
+	fileInfo->SetDupeLeadSwitches(leadSwitches);
+	return rotated;
+#else
 	// only a failed fetch of the pinned lead donor counts, and only while that
 	// donor is still the file's lead: late failures of an already demoted lead
 	// reported by in-flight articles must not cascade-demote donors that were
@@ -671,10 +762,29 @@ bool DupeArticleFallback::RegisterLeadFailure(FileInfo* fileInfo, ArticleInfo* a
 		return true;
 	}
 	return false;
+#endif
 }
 
 void DupeArticleFallback::RegisterLeadSuccess(FileInfo* fileInfo, ArticleInfo* articleInfo)
 {
+#ifdef NZBGET_USE_RUST
+	if (articleInfo->GetDupeFallbackRound() != 1 ||
+		articleInfo->GetDupeLeadSnapshot() == 0 ||
+		articleInfo->GetDupeLeadSnapshot() != fileInfo->GetDupeLeadDonorId())
+	{
+		return;
+	}
+	int leadFailures = fileInfo->GetDupeLeadFailures();
+	int leadSwitches = fileInfo->GetDupeLeadSwitches();
+	nzbget_rs_dupe_fallback_register_lead_success(
+		articleInfo->GetDupeFallbackRound(), articleInfo->GetDupeLeadSnapshot(),
+		fileInfo->GetDupeLeadDonorId(),
+		ExpectedSegmentOffset(fileInfo, articleInfo),
+		ExpectedSegmentEnd(fileInfo, articleInfo),
+		&leadFailures, &leadSwitches);
+	fileInfo->SetDupeLeadFailures(leadFailures);
+	fileInfo->SetDupeLeadSwitches(leadSwitches);
+#else
 	if (articleInfo->GetDupeFallbackRound() != 1 ||
 		articleInfo->GetDupeLeadSnapshot() == 0 ||
 		articleInfo->GetDupeLeadSnapshot() != fileInfo->GetDupeLeadDonorId())
@@ -694,6 +804,7 @@ void DupeArticleFallback::RegisterLeadSuccess(FileInfo* fileInfo, ArticleInfo* a
 	{
 		fileInfo->SetDupeLeadSwitches(0);
 	}
+#endif
 }
 
 void DupeArticleFallback::VacateGhostLead(FileInfo* fileInfo, const RawNzbList& donors)
@@ -784,9 +895,36 @@ RawNzbList DupeArticleFallback::CollectDonors(DownloadQueue* downloadQueue, NzbI
 		}
 	}
 
-	std::sort(donors.begin(), donors.end(),
-		[](NzbInfo* donor1, NzbInfo* donor2)
+	std::string ownIdentity = TwinCheck::Identity(nzbInfo);
+	std::set<const NzbInfo*> twinDonors;
+	if (!ownIdentity.empty())
+	{
+		for (NzbInfo* donor : donors)
 		{
+			if (nzbInfo->GetFullContentHash() > 0 &&
+				nzbInfo->GetFullContentHash() == donor->GetFullContentHash())
+			{
+				continue;
+			}
+			std::string donorIdentity = TwinCheck::Identity(donor);
+			if (!donorIdentity.empty() &&
+				!strncmp(TwinCheck::Kind(nzbInfo->GetId(), ownIdentity.c_str(), donor->GetId(),
+					donorIdentity.c_str()).c_str(), "twin", 4))
+			{
+				twinDonors.insert(donor);
+			}
+		}
+	}
+
+	std::sort(donors.begin(), donors.end(),
+		[&twinDonors](NzbInfo* donor1, NzbInfo* donor2)
+		{
+			bool twin1 = twinDonors.count(donor1) > 0;
+			bool twin2 = twinDonors.count(donor2) > 0;
+			if (twin1 != twin2)
+			{
+				return twin1;
+			}
 			return donor1->GetDupeScore() > donor2->GetDupeScore() ||
 				(donor1->GetDupeScore() == donor2->GetDupeScore() &&
 				 donor1->GetId() < donor2->GetId());
@@ -796,12 +934,28 @@ RawNzbList DupeArticleFallback::CollectDonors(DownloadQueue* downloadQueue, NzbI
 }
 
 void DupeArticleFallback::PinSources(DownloadQueue* downloadQueue, FileInfo* fileInfo,
-	ArticleInfo* articleInfo)
+	ArticleInfo* articleInfo, bool twinOnly)
 {
 	NzbInfo* nzbInfo = fileInfo->GetNzbInfo();
 
 	RawNzbList donors = CollectDonors(downloadQueue, nzbInfo);
 	VacateGhostLead(fileInfo, donors);
+	if (twinOnly && fileInfo->GetDupeLeadDonorId() != 0)
+	{
+		std::string ownIdentity = TwinCheck::Identity(nzbInfo);
+		int leadId = fileInfo->GetDupeLeadDonorId();
+		auto it = std::find_if(donors.begin(), donors.end(),
+			[leadId](NzbInfo* donor) { return donor->GetId() == leadId; });
+		std::string leadIdentity = it != donors.end() ? TwinCheck::Identity(*it) : "";
+		if (ownIdentity.empty() || leadIdentity.empty() ||
+			strncmp(TwinCheck::Kind(nzbInfo->GetId(), ownIdentity.c_str(), leadId,
+				leadIdentity.c_str()).c_str(), "twin", 4) != 0)
+		{
+			fileInfo->SetDupeLeadDonorId(0);
+			fileInfo->SetDupeLeadFailures(0);
+			fileInfo->SetDupeLeadSwitches(0);
+		}
+	}
 	RotateToLead(donors, fileInfo->GetDupeLeadDonorId());
 
 	// the name the target's own nzb-file gives this file: the downloaded name
@@ -840,7 +994,7 @@ void DupeArticleFallback::PinSources(DownloadQueue* downloadQueue, FileInfo* fil
 			std::string donorIdentity = TwinCheck::Identity(donorNzbInfo);
 			AppendDonorCandidate(candidates, contributors, donorNzbInfo->GetId(),
 				parsedDonor, fileInfo, articleInfo->GetPartNumber(), targetNzbFilename,
-				donorIdentity.c_str());
+				donorIdentity.c_str(), twinOnly);
 		}
 		else
 		{
@@ -848,7 +1002,7 @@ void DupeArticleFallback::PinSources(DownloadQueue* downloadQueue, FileInfo* fil
 		}
 	}
 
-	if (candidates.empty() && !donors.empty() && !fileInfo->GetDupeNoSourceLogged())
+	if (!twinOnly && candidates.empty() && !donors.empty() && !fileInfo->GetDupeNoSourceLogged())
 	{
 		// the silent "did not even try" case: say why no duplicate could help,
 		// once per file (it was once per missing article: dozens a second)
@@ -868,9 +1022,10 @@ void DupeArticleFallback::PinSources(DownloadQueue* downloadQueue, FileInfo* fil
 void DupeArticleFallback::AppendDonorCandidate(std::vector<CString>& candidates,
 	std::vector<int>& contributors, int donorNzbId,
 	NzbInfo* parsedDonor, FileInfo* targetFile, int partNumber, const char* targetNzbFilename,
-	const char* donorPrint)
+	const char* donorPrint, bool twinOnly)
 {
-	FileInfo* donorFile = MatchDonorFile(targetFile, parsedDonor, targetNzbFilename, donorNzbId, donorPrint);
+	FileInfo* donorFile = MatchDonorFile(targetFile, parsedDonor, targetNzbFilename,
+		donorNzbId, donorPrint, twinOnly);
 	if (!donorFile)
 	{
 		return;
@@ -987,7 +1142,7 @@ NzbInfo* DupeArticleFallback::GetParsedDonor(NzbInfo* donorNzbInfo)
 }
 
 FileInfo* DupeArticleFallback::MatchDonorFile(FileInfo* targetFile, NzbInfo* donorNzb,
-	const char* targetNzbFilename, int donorNzbId, const char* donorPrint)
+	const char* targetNzbFilename, int donorNzbId, const char* donorPrint, bool twinOnly)
 {
 	if (IsParFile(targetFile))
 	{
@@ -1000,10 +1155,18 @@ FileInfo* DupeArticleFallback::MatchDonorFile(FileInfo* targetFile, NzbInfo* don
 	// "": not known (incomplete or missing lists, several candidates)
 	NzbInfo* own = targetFile->GetNzbInfo();
 	std::string ownIdentity = own ? TwinCheck::Identity(own) : "";
+	if (twinOnly)
+	{
+		if (!donorNzbId || ownIdentity.empty() || Util::EmptyStr(donorPrint) ||
+			strncmp(TwinCheck::Kind(own->GetId(), ownIdentity.c_str(), donorNzbId, donorPrint).c_str(), "twin", 4) != 0)
+		{
+			return nullptr;
+		}
+	}
 	std::string byContent = donorNzbId && !ownIdentity.empty() && !Util::EmptyStr(donorPrint) ?
 		TwinCheck::MatchByContent(own->GetId(), ownIdentity.c_str(), targetFile->GetFilename(),
 			targetNzbFilename, donorNzbId, donorPrint) : "";
-	if (byContent == "-")
+	if (byContent == "-" || (twinOnly && byContent.empty()))
 	{
 		return nullptr;
 	}
@@ -1031,9 +1194,9 @@ FileInfo* DupeArticleFallback::MatchDonorFile(FileInfo* targetFile, NzbInfo* don
 			}
 		}
 		FileInfo* named = exact.size() == 1 ? exact[0] : exact.empty() && folded.size() == 1 ? folded[0] : nullptr;
-		if (named)
+		if (named || twinOnly)
 		{
-			return StructureMatches(targetFile, named) ? named : nullptr;
+			return named && StructureMatches(targetFile, named) ? named : nullptr;
 		}
 	}
 
@@ -1107,6 +1270,14 @@ uint64 DupeArticleFallback::ArticleSizeStepsHash(FileInfo* fileInfo)
 		return 0;
 	}
 
+#ifdef NZBGET_USE_RUST
+	std::vector<int> sizes(articles->size());
+	for (size_t i = 0; i < articles->size(); i++)
+	{
+		sizes[i] = (*articles)[i]->GetSize();
+	}
+	return nzbget_rs_dupe_fallback_steps_hash(sizes.data(), sizes.size());
+#else
 	// FNV-1a over the article count and the steps between consecutive sizes
 	uint64 hash = 14695981039346656037ULL;
 	auto mix = [&hash](int64 value)
@@ -1127,6 +1298,7 @@ uint64 DupeArticleFallback::ArticleSizeStepsHash(FileInfo* fileInfo)
 		varying |= step != 0 && i < articles->size() - 1;
 	}
 	return varying && hash != 0 ? hash : 0;
+#endif
 }
 
 bool DupeArticleFallback::ArticleSizeStepsMatch(FileInfo* targetFile, FileInfo* donorFile)
@@ -1145,6 +1317,18 @@ bool DupeArticleFallback::ArticleSizeStepsMatch(FileInfo* targetFile, FileInfo* 
 		return false;
 	}
 
+#ifdef NZBGET_USE_RUST
+	std::vector<int> targetSizes(targetArticles->size());
+	std::vector<int> donorSizes(donorArticles->size());
+	for (size_t i = 0; i < targetArticles->size(); i++)
+	{
+		targetSizes[i] = (*targetArticles)[i]->GetSize();
+		donorSizes[i] = (*donorArticles)[i]->GetSize();
+	}
+	return nzbget_rs_dupe_fallback_steps_match(
+		targetSizes.data(), targetSizes.size(),
+		donorSizes.data(), donorSizes.size()) != 0;
+#else
 	bool varying = false;
 	for (size_t i = 1; i < targetArticles->size(); i++)
 	{
@@ -1158,8 +1342,10 @@ bool DupeArticleFallback::ArticleSizeStepsMatch(FileInfo* targetFile, FileInfo* 
 		varying |= targetStep != 0 && i < targetArticles->size() - 1;
 	}
 	return varying;
+#endif
 }
 
+#ifndef NZBGET_USE_RUST
 // The part count a yEnc subject declares, its last "(part/count)"; 0 if it has none
 // (an obfuscated subject). An nzb-file that lacks segments keeps the poster's count.
 static int DeclaredParts(FileInfo* fileInfo)
@@ -1178,6 +1364,7 @@ static int DeclaredParts(FileInfo* fileInfo)
 	}
 	return declared;
 }
+#endif
 
 bool DupeArticleFallback::StructureMatches(FileInfo* targetFile, FileInfo* donorFile)
 {
@@ -1189,6 +1376,29 @@ bool DupeArticleFallback::StructureMatches(FileInfo* targetFile, FileInfo* donor
 		return false;
 	}
 
+#ifdef NZBGET_USE_RUST
+	std::vector<int> targetParts(targetArticles->size());
+	std::vector<int> targetSizes(targetArticles->size());
+	for (size_t i = 0; i < targetArticles->size(); i++)
+	{
+		targetParts[i] = (*targetArticles)[i]->GetPartNumber();
+		targetSizes[i] = (*targetArticles)[i]->GetSize();
+	}
+	std::vector<int> donorParts(donorArticles->size());
+	std::vector<int> donorSizes(donorArticles->size());
+	for (size_t i = 0; i < donorArticles->size(); i++)
+	{
+		donorParts[i] = (*donorArticles)[i]->GetPartNumber();
+		donorSizes[i] = (*donorArticles)[i]->GetSize();
+	}
+	return nzbget_rs_dupe_fallback_structure_matches(
+		targetFile->GetSubject(), targetFile->GetTotalArticles(), targetFile->GetSize(),
+		targetParts.data(), targetSizes.data(), targetParts.size(),
+		donorFile->GetSubject(), donorFile->GetTotalArticles(), donorFile->GetSize(),
+		donorParts.empty() ? nullptr : donorParts.data(),
+		donorSizes.empty() ? nullptr : donorSizes.data(),
+		donorParts.size()) != 0;
+#else
 	// twins are posted in as many parts: a file whose subject counts other parts, or
 	// that has a part beyond the count the release's subject declares, is another file
 	// (B39: dead volumes of 29 parts paired with a healthy 30-part file)
@@ -1275,6 +1485,7 @@ bool DupeArticleFallback::StructureMatches(FileInfo* targetFile, FileInfo* donor
 	}
 
 	return true;
+#endif
 }
 
 const char* DupeArticleFallback::FindDonorMessageId(FileInfo* donorFile, int partNumber)
@@ -1292,8 +1503,12 @@ const char* DupeArticleFallback::FindDonorMessageId(FileInfo* donorFile, int par
 
 bool DupeArticleFallback::SizesMatch(int64 size1, int64 size2, int div)
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_dupe_fallback_sizes_match(size1, size2, div) != 0;
+#else
 	int64 diff = size1 > size2 ? size1 - size2 : size2 - size1;
 	return diff <= std::max(size1, size2) / div;
+#endif
 }
 
 static int FindArticleIndex(ArticleList* articles, ArticleInfo* articleInfo)
@@ -1317,6 +1532,15 @@ int64 DupeArticleFallback::ExpectedSegmentOffset(FileInfo* fileInfo, ArticleInfo
 		return -1;
 	}
 
+#ifdef NZBGET_USE_RUST
+	ArticleInfo* prev = index > 0 ? (*articles)[index - 1].get() : nullptr;
+	return nzbget_rs_dupe_fallback_expected_offset(
+		index, articleInfo->GetPartNumber(),
+		prev ? prev->GetPartNumber() : 0,
+		prev ? (int)prev->GetStatus() : 0,
+		prev ? prev->GetSegmentOffset() : 0,
+		prev ? prev->GetSegmentSize() : 0);
+#else
 	if (articleInfo->GetPartNumber() == 1)
 	{
 		// the first part of a file always decodes to offset 0
@@ -1337,6 +1561,7 @@ int64 DupeArticleFallback::ExpectedSegmentOffset(FileInfo* fileInfo, ArticleInfo
 	}
 
 	return -1;
+#endif
 }
 
 int64 DupeArticleFallback::ExpectedSegmentEnd(FileInfo* fileInfo, ArticleInfo* articleInfo)
@@ -1348,6 +1573,16 @@ int64 DupeArticleFallback::ExpectedSegmentEnd(FileInfo* fileInfo, ArticleInfo* a
 		return -1;
 	}
 
+#ifdef NZBGET_USE_RUST
+	ArticleInfo* next = (index + 1 < (int)articles->size()) ? (*articles)[index + 1].get() : nullptr;
+	return nzbget_rs_dupe_fallback_expected_end(
+		index, articles->size(), articleInfo->GetPartNumber(),
+		fileInfo->GetDecodedFileSize(),
+		next ? next->GetPartNumber() : 0,
+		next ? (int)next->GetStatus() : 0,
+		next ? next->GetSegmentOffset() : 0,
+		next ? next->GetSegmentSize() : 0);
+#else
 	if (index == (int)articles->size() - 1)
 	{
 		// the last article of a file must decode up to the decoded file size
@@ -1363,10 +1598,23 @@ int64 DupeArticleFallback::ExpectedSegmentEnd(FileInfo* fileInfo, ArticleInfo* a
 	}
 
 	return -1;
+#endif
 }
 
 bool DupeArticleFallback::SegmentAligned(FileInfo* fileInfo, ArticleInfo* articleInfo)
 {
+#ifdef NZBGET_USE_RUST
+	int64 begin = articleInfo->GetSegmentOffset();
+	int size = articleInfo->GetSegmentSize();
+	if (size <= 0)
+	{
+		return true;
+	}
+	return nzbget_rs_dupe_fallback_segment_aligned(
+		begin, size,
+		ExpectedSegmentOffset(fileInfo, articleInfo),
+		ExpectedSegmentEnd(fileInfo, articleInfo)) != 0;
+#else
 	int64 begin = articleInfo->GetSegmentOffset();
 	int size = articleInfo->GetSegmentSize();
 	if (size <= 0)
@@ -1388,6 +1636,7 @@ bool DupeArticleFallback::SegmentAligned(FileInfo* fileInfo, ArticleInfo* articl
 	}
 
 	return true;
+#endif
 }
 
 ArticleInfo* DupeArticleFallback::FirstUntiledArticle(FileInfo* fileInfo)
@@ -1403,6 +1652,22 @@ ArticleInfo* DupeArticleFallback::FirstUntiledArticle(FileInfo* fileInfo)
 		return nullptr;
 	}
 
+#ifdef NZBGET_USE_RUST
+	ArticleList* articles = fileInfo->GetArticles();
+	std::vector<NzbgetRsArticleGeom> geom(articles->size());
+	for (size_t i = 0; i < articles->size(); i++)
+	{
+		ArticleInfo* a = (*articles)[i].get();
+		geom[i].part_number = a->GetPartNumber();
+		geom[i].status = (int32_t)a->GetStatus();
+		geom[i].segment_offset = a->GetSegmentOffset();
+		geom[i].segment_size = a->GetSegmentSize();
+		geom[i].fallback_round = a->GetDupeFallbackRound();
+	}
+	ptrdiff_t idx = nzbget_rs_dupe_fallback_first_untiled(
+		geom.empty() ? nullptr : geom.data(), geom.size(), decodedSize);
+	return (idx >= 0 && (size_t)idx < articles->size()) ? (*articles)[(size_t)idx].get() : nullptr;
+#else
 	int64 expected = 0;
 	ArticleList* articles = fileInfo->GetArticles();
 	for (size_t index = 0; index < articles->size(); index++)
@@ -1452,6 +1717,7 @@ ArticleInfo* DupeArticleFallback::FirstUntiledArticle(FileInfo* fileInfo)
 	}
 
 	return nullptr;
+#endif
 }
 
 bool DupeArticleFallback::HasDonorArticles(FileInfo* fileInfo)
@@ -1468,6 +1734,12 @@ bool DupeArticleFallback::HasDonorArticles(FileInfo* fileInfo)
 
 bool DupeArticleFallback::MergeDecodedFileSize(FileInfo* fileInfo, int64 articleFileSize)
 {
+#ifdef NZBGET_USE_RUST
+	int64 decodedFileSize = fileInfo->GetDecodedFileSize();
+	bool conflict = nzbget_rs_dupe_fallback_merge_decoded_size(&decodedFileSize, articleFileSize) != 0;
+	fileInfo->SetDecodedFileSize(decodedFileSize);
+	return conflict;
+#else
 	int64 decodedFileSize = fileInfo->GetDecodedFileSize();
 	if (articleFileSize <= 0 || decodedFileSize < 0 || decodedFileSize == articleFileSize)
 	{
@@ -1482,6 +1754,7 @@ bool DupeArticleFallback::MergeDecodedFileSize(FileInfo* fileInfo, int64 article
 
 	fileInfo->SetDecodedFileSize(-1);
 	return true;
+#endif
 }
 
 std::vector<DupeArticleFallback::Par2Desc> DupeArticleFallback::ListPar2Files(const char* dir)
@@ -1525,6 +1798,9 @@ FileInfo::EFirstContent DupeArticleFallback::FirstContent(FileInfo* fileInfo)
 
 bool DupeArticleFallback::HasExtension(const char* filename)
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_dupe_fallback_has_extension(filename) != 0;
+#else
 	// "x.mkv", "x.part01.rar", "x.7z.001", "x.r00": 1 to 4 letters or digits after the last dot
 	const char* dot = strrchr(filename, '.');
 	if (!dot || dot == filename)
@@ -1544,4 +1820,5 @@ bool DupeArticleFallback::HasExtension(const char* filename)
 		}
 	}
 	return true;
+#endif
 }

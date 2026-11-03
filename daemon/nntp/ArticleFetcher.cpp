@@ -34,25 +34,39 @@
 #include "StatMeter.h"
 #include "Util.h"
 #include "WorkState.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 bool ArticleFetchLimits::AddRawBytes(int64 bytes)
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_article_fetch_add_raw_bytes(&m_rawBytes, bytes) != 0;
+#else
 	if (bytes < 0 || bytes > MaxRawBytes - m_rawBytes)
 	{
 		return false;
 	}
 	m_rawBytes += bytes;
 	return true;
+#endif
 }
 
 bool ArticleFetchLimits::HeaderWithinLimit(bool declaredRangeKnown) const
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_article_fetch_header_within_limit(m_rawBytes, declaredRangeKnown ? 1 : 0) != 0;
+#else
 	return declaredRangeKnown || m_rawBytes <= MaxHeaderBytes;
+#endif
 }
 
 bool ArticleFetchLimits::AddDecodedBytes(int64 bytes, int64 begin, int64 end,
 	int64 fileSize)
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_article_fetch_add_decoded_bytes(&m_decodedBytes, bytes, begin, end, fileSize) != 0;
+#else
 	if (bytes < 0 || begin <= 0 || end < begin || fileSize <= 0 || end > fileSize)
 	{
 		return false;
@@ -65,6 +79,7 @@ bool ArticleFetchLimits::AddDecodedBytes(int64 bytes, int64 begin, int64 end,
 	}
 	m_decodedBytes += bytes;
 	return true;
+#endif
 }
 
 ArticleFetcher::FetchedArticle ArticleFetcher::Fetch(const char* messageId,

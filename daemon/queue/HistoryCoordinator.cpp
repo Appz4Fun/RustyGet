@@ -37,6 +37,9 @@
 #include "DupeProbe.h"
 #include "ParDamage.h"
 #include "DupeSearch.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 /**
  * Removes old entries from (recent) history
@@ -162,6 +165,17 @@ void HistoryCoordinator::AddToHistory(DownloadQueue* downloadQueue, NzbInfo* nzb
 
 	// Cleaning up parked files if par-check was successful or unpack was successful or
 	// health is 100% (if unpack and par-check were not performed) or if deleted
+#ifdef NZBGET_USE_RUST
+	bool cleanupParkedFiles = nzbget_rs_qhp_should_cleanup_parked_files(
+		(int32_t)nzbInfo->GetParStatus(),
+		(int32_t)nzbInfo->GetUnpackStatus(),
+		nzbInfo->GetFailedSize(),
+		nzbInfo->GetParFailedSize(),
+		(int32_t)nzbInfo->GetDeleteStatus(),
+		nzbInfo->GetParking() ? 1 : 0,
+		nzbInfo->GetUnpackCleanedUpDisk() ? 1 : 0
+	) != 0;
+#else
 	bool cleanupParkedFiles =
 		((nzbInfo->GetParStatus() == NzbInfo::psSuccess ||
 		  nzbInfo->GetParStatus() == NzbInfo::psRepairPossible) &&
@@ -180,6 +194,7 @@ void HistoryCoordinator::AddToHistory(DownloadQueue* downloadQueue, NzbInfo* nzb
 
 	// Parking not possible if files were already deleted
 	cleanupParkedFiles |= nzbInfo->GetUnpackCleanedUpDisk();
+#endif
 
 	if (cleanupParkedFiles)
 	{
@@ -315,6 +330,13 @@ void HistoryCoordinator::HistoryHide(DownloadQueue* downloadQueue, HistoryInfo* 
 	dupInfo->SetFullContentHash(historyInfo->GetNzbInfo()->GetFullContentHash());
 	dupInfo->SetFilteredContentHash(historyInfo->GetNzbInfo()->GetFilteredContentHash());
 
+#ifdef NZBGET_USE_RUST
+	dupInfo->SetStatus((DupInfo::EStatus)nzbget_rs_qhp_classify_dup_status(
+		(int32_t)historyInfo->GetNzbInfo()->GetMarkStatus(),
+		(int32_t)historyInfo->GetNzbInfo()->GetDeleteStatus(),
+		historyInfo->GetNzbInfo()->IsDupeSuccess() ? 1 : 0
+	));
+#else
 	dupInfo->SetStatus(
 		historyInfo->GetNzbInfo()->GetMarkStatus() == NzbInfo::ksGood ? DupInfo::dsGood :
 		historyInfo->GetNzbInfo()->GetMarkStatus() == NzbInfo::ksBad ? DupInfo::dsBad :
@@ -325,6 +347,7 @@ void HistoryCoordinator::HistoryHide(DownloadQueue* downloadQueue, HistoryInfo* 
 		historyInfo->GetNzbInfo()->GetDeleteStatus() == NzbInfo::dsCopy ? DupInfo::dsDeleted :
 		historyInfo->GetNzbInfo()->IsDupeSuccess() ? DupInfo::dsSuccess :
 		DupInfo::dsFailed);
+#endif
 
 	std::unique_ptr<HistoryInfo> newHistoryInfo = std::make_unique<HistoryInfo>(std::move(dupInfo));
 	newHistoryInfo->SetTime(historyInfo->GetTime());
@@ -880,9 +903,18 @@ void HistoryCoordinator::ResetArticles(FileInfo* fileInfo, bool allFailed, bool 
 
 	for (ArticleInfo* pa : fileInfo->GetArticles())
 	{
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_qhp_should_reset_article(
+			(int)pa->GetStatus(),
+			(int)fileInfo->GetPartialState(),
+			allFailed ? 1 : 0,
+			resetFailed ? 1 : 0
+		) != 0)
+#else
 		if ((pa->GetStatus() == ArticleInfo::aiFailed && (resetFailed || fileInfo->GetPartialState() == FileInfo::psNone)) ||
 			(pa->GetStatus() == ArticleInfo::aiUndefined && resetFailed && allFailed) ||
 			(pa->GetStatus() == ArticleInfo::aiFinished && fileInfo->GetPartialState() == FileInfo::psNone))
+#endif
 		{
 			fileInfo->SetCompletedArticles(fileInfo->GetCompletedArticles() - 1);
 			fileInfo->SetRemainingSize(fileInfo->GetRemainingSize() + pa->GetSize());
@@ -983,6 +1015,15 @@ void HistoryCoordinator::HistorySetDupeParam(HistoryInfo* historyInfo, DownloadQ
 	EDupeMode mode = dmScore;
 	if (action == DownloadQueue::eaHistorySetDupeMode)
 	{
+#ifdef NZBGET_USE_RUST
+		int parsedMode = 0;
+		if (!nzbget_rs_qhp_parse_dupe_mode(text, &parsedMode))
+		{
+			error("Could not set duplicate mode for %s: incorrect mode (%s)", historyInfo->GetName(), text);
+			return;
+		}
+		mode = (EDupeMode)parsedMode;
+#else
 		if (!strcasecmp(text, "SCORE"))
 		{
 			mode = dmScore;
@@ -1000,6 +1041,7 @@ void HistoryCoordinator::HistorySetDupeParam(HistoryInfo* historyInfo, DownloadQ
 			error("Could not set duplicate mode for %s: incorrect mode (%s)", historyInfo->GetName(), text);
 			return;
 		}
+#endif
 	}
 
 	if (historyInfo->GetKind() == HistoryInfo::hkNzb || historyInfo->GetKind() == HistoryInfo::hkUrl)

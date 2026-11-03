@@ -26,6 +26,9 @@
 #include "Options.h"
 #include "Util.h"
 #include "FileSystem.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 std::atomic<int> FileInfo::m_idGen{0};
 int FileInfo::m_idMax = 0;
@@ -82,6 +85,16 @@ void NzbParameterList::CopyFrom(NzbParameterList* sourceParameters)
 
 ScriptStatus::EStatus ScriptStatusList::CalcTotalStatus()
 {
+#ifdef NZBGET_USE_RUST
+	std::vector<int32_t> statuses;
+	statuses.reserve(size());
+	for (ScriptStatus& scriptStatus : this)
+	{
+		statuses.push_back((int32_t)scriptStatus.GetStatus());
+	}
+	return (ScriptStatus::EStatus)nzbget_rs_qhp_script_calc_total_status(
+		statuses.empty() ? nullptr : statuses.data(), statuses.size());
+#else
 	ScriptStatus::EStatus status = ScriptStatus::srNone;
 
 	for (ScriptStatus& scriptStatus : this)
@@ -95,6 +108,7 @@ ScriptStatus::EStatus ScriptStatusList::CalcTotalStatus()
 	}
 
 	return status;
+#endif
 }
 
 
@@ -252,6 +266,12 @@ CString NzbInfo::MakeNiceUrlName(const char* urlStr, const char* nzbFilename)
 // "reserve" more bytes; a name starting with "." gets "_" in front (hidden).
 static std::string DirNameOf(const char* name, size_t reserve)
 {
+#ifdef NZBGET_USE_RUST
+	NzbgetRsBuf buf = nzbget_rs_qhp_dir_name_of(name, reserve);
+	std::string dirName(buf.data ? buf.data : "nzb");
+	nzbget_rs_free(buf);
+	return dirName;
+#else
 	std::string dirName = Util::EmptyStr(name) ? "nzb" : name;
 	if (dirName[0] == '.')
 	{
@@ -273,6 +293,7 @@ static std::string DirNameOf(const char* name, size_t reserve)
 		}
 	}
 	return dirName;
+#endif
 }
 
 void NzbInfo::BuildDestDirName()
@@ -328,6 +349,9 @@ CString NzbInfo::BuildFinalDirName()
 
 int NzbInfo::CalcHealth()
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_qhp_calc_health(m_size, m_parSize, m_currentFailedSize, m_parCurrentFailedSize);
+#else
 	if (m_currentFailedSize == 0 || m_size == m_parSize)
 	{
 		return 1000;
@@ -342,6 +366,7 @@ int NzbInfo::CalcHealth()
 	}
 
 	return health;
+#endif
 }
 
 bool NzbInfo::RenameCompletedFile(const char* oldName, const char* newAbsoluteOrRelativePath)
@@ -369,6 +394,10 @@ bool NzbInfo::RenameCompletedFile(const char* oldName, const char* newAbsoluteOr
 
 int NzbInfo::CalcCriticalHealth(bool allowEstimation)
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_qhp_calc_critical_health(
+		m_size, m_parSize, m_parCurrentFailedSize, allowEstimation ? 1 : 0);
+#else
 	if (m_size == 0)
 	{
 		return 1000;
@@ -398,10 +427,24 @@ int NzbInfo::CalcCriticalHealth(bool allowEstimation)
 	}
 
 	return criticalHealth;
+#endif
 }
 
 void NzbInfo::UpdateMinMaxTime()
 {
+#ifdef NZBGET_USE_RUST
+	std::vector<int64_t> times;
+	times.reserve(m_fileList.size());
+	for (FileInfo* fileInfo : &m_fileList)
+	{
+		times.push_back((int64_t)fileInfo->GetTime());
+	}
+	int64_t minTime = 0, maxTime = 0;
+	nzbget_rs_qhp_update_min_max_time(
+		times.empty() ? nullptr : times.data(), times.size(), &minTime, &maxTime);
+	m_minTime = (time_t)minTime;
+	m_maxTime = (time_t)maxTime;
+#else
 	m_minTime = 0;
 	m_maxTime = 0;
 
@@ -426,6 +469,7 @@ void NzbInfo::UpdateMinMaxTime()
 			}
 		}
 	}
+#endif
 }
 
 void NzbInfo::AddMessage(Message::EKind kind, const char * text, bool print)
@@ -576,6 +620,13 @@ void NzbInfo::SetActiveDownloads(int activeDownloads)
 
 bool NzbInfo::IsDupeSuccess()
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_qhp_is_dupe_success(
+		(int)m_markStatus, (int)m_deleteStatus, (int)m_parStatus,
+		(int)m_unpackStatus, (int)m_urlStatus, CalcHealth(),
+		CalcCriticalHealth(true), CalcCriticalHealth(false),
+		g_Options->GetHealthCheck() == Options::hcDupe ? 1 : 0) != 0;
+#else
 	bool failure =
 		m_markStatus != NzbInfo::ksSuccess &&
 		m_markStatus != NzbInfo::ksGood &&
@@ -598,10 +649,22 @@ bool NzbInfo::IsDupeSuccess()
 		 (m_unpackStatus == NzbInfo::usNone || m_unpackStatus == NzbInfo::usSkipped) &&
 		 CalcHealth() < CalcCriticalHealth(false)));
 	return !failure;
+#endif
 }
 
 const char* NzbInfo::MakeTextStatus(bool ignoreScriptStatus)
 {
+#ifdef NZBGET_USE_RUST
+	int health = m_kind == NzbInfo::nkNzb ? CalcHealth() : 0;
+	int criticalHealth = m_kind == NzbInfo::nkNzb ? CalcCriticalHealth(false) : 0;
+	ScriptStatus::EStatus scriptStatus = (m_kind == NzbInfo::nkNzb && !ignoreScriptStatus)
+		? m_scriptStatuses.CalcTotalStatus()
+		: ScriptStatus::srSuccess;
+	return nzbget_rs_qhp_make_text_status(
+		(int)m_kind, (int)m_markStatus, (int)m_deleteStatus, (int)m_parStatus,
+		(int)m_unpackStatus, (int)m_moveStatus, (int)m_urlStatus,
+		(int)scriptStatus, health, criticalHealth);
+#else
 	const char* status = "FAILURE/INTERNAL_ERROR";
 
 	if (m_kind == NzbInfo::nkNzb)
@@ -739,6 +802,7 @@ const char* NzbInfo::MakeTextStatus(bool ignoreScriptStatus)
 	}
 
 	return status;
+#endif
 }
 
 void NzbInfo::UpdateCurrentStats()
@@ -954,6 +1018,9 @@ CompletedFile::CompletedFile(int id, std::string filename, std::string origname,
 
 bool CompletedFile::SameFilename(const char* name) const
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_qhp_completed_same_filename(m_filename.c_str(), name) != 0;
+#else
 	if (!name) return false;
 
 	std::string_view s1 = m_filename;
@@ -967,6 +1034,7 @@ bool CompletedFile::SameFilename(const char* name) const
 		if (c2 == '\\') c2 = '/';
 		return std::tolower(static_cast<unsigned char>(c1)) == std::tolower(static_cast<unsigned char>(c2));
 	});
+#endif
 }
 
 void DupInfo::SetId(int id)

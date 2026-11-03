@@ -31,6 +31,9 @@
 #include "UrlCoordinator.h"
 #include "ParParser.h"
 #include "DupeSearch.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 const int MAX_ID = 1000000000;
 
@@ -68,6 +71,16 @@ private:
 
 bool GroupSorter::Execute(const char* sort)
 {
+#ifdef NZBGET_USE_RUST
+	int32_t rsCriteria = 0, rsOrder = 0;
+	if (!nzbget_rs_qhp_parse_sort_spec(sort, &rsCriteria, &rsOrder))
+	{
+		error("Could not sort groups: incorrect sort order (%s)", sort);
+		return false;
+	}
+	m_sortCriteria = (ESortCriteria)rsCriteria;
+	m_sortOrder = (ESortOrder)rsOrder;
+#else
 	if (!strcasecmp(sort, "name") || !strcasecmp(sort, "name+") || !strcasecmp(sort, "name-"))
 	{
 		m_sortCriteria = scName;
@@ -111,6 +124,7 @@ bool GroupSorter::Execute(const char* sort)
 	{
 		m_sortOrder = soAuto;
 	}
+#endif
 
 	RawNzbList tempList;
 	for (NzbInfo* nzbInfo : m_nzbList)
@@ -528,6 +542,10 @@ void QueueEditor::PrepareList(ItemList* itemList, IdList* idList,
 				IdList::iterator it2 = std::find(idList->begin(), idList->end(), fileInfo->GetId());
 				if (it2 != idList->end())
 				{
+#ifdef NZBGET_USE_RUST
+					int workOffset = 0;
+					nzbget_rs_qhp_clamp_move_offset(index, nrEntries, offset, lastDestPos, &workOffset, &lastDestPos);
+#else
 					int workOffset = offset;
 					int destPos = index + workOffset;
 					if (lastDestPos == -1)
@@ -553,6 +571,7 @@ void QueueEditor::PrepareList(ItemList* itemList, IdList* idList,
 						}
 					}
 					lastDestPos = index + workOffset;
+#endif
 					itemList->emplace_back(fileInfo.get(), nullptr, workOffset);
 				}
 			}
@@ -584,6 +603,10 @@ void QueueEditor::PrepareList(ItemList* itemList, IdList* idList,
 			IdList::iterator it2 = std::find(idList->begin(), idList->end(), nzbInfo->GetId());
 			if (it2 != idList->end())
 			{
+#ifdef NZBGET_USE_RUST
+				int workOffset = 0;
+				nzbget_rs_qhp_clamp_move_offset(index, nrEntries, offset, lastDestPos, &workOffset, &lastDestPos);
+#else
 				int workOffset = offset;
 				int destPos = index + workOffset;
 				if (lastDestPos == -1)
@@ -609,6 +632,7 @@ void QueueEditor::PrepareList(ItemList* itemList, IdList* idList,
 					}
 				}
 				lastDestPos = index + workOffset;
+#endif
 				itemList->emplace_back(nullptr, nzbInfo.get(), workOffset);
 			}
 		}
@@ -874,6 +898,39 @@ void QueueEditor::PausePars(RawFileList* fileList, bool extraParsOnly)
 {
 	debug("QueueEditor: Pausing pars");
 
+#ifdef NZBGET_USE_RUST
+	size_t count = fileList->size();
+	std::vector<uint8_t> rsIsPar;
+	std::vector<uint8_t> rsHasVol;
+	std::vector<int64_t> rsSizes;
+	rsIsPar.reserve(count);
+	rsHasVol.reserve(count);
+	rsSizes.reserve(count);
+	std::vector<uint8_t> rsOutPause(count, 0);
+	for (FileInfo* fileInfo : fileList)
+	{
+		rsIsPar.push_back(fileInfo->GetParFile() ? 1 : 0);
+		BString<1024> loFileName = fileInfo->GetFilename();
+		for (char* p = loFileName; *p; p++) *p = tolower(*p);
+		rsHasVol.push_back(strstr(loFileName, ".vol") != nullptr ? 1 : 0);
+		rsSizes.push_back(fileInfo->GetSize());
+	}
+	nzbget_rs_qhp_select_pars_to_pause(
+		rsIsPar.empty() ? nullptr : rsIsPar.data(),
+		rsHasVol.empty() ? nullptr : rsHasVol.data(),
+		rsSizes.empty() ? nullptr : rsSizes.data(),
+		count,
+		extraParsOnly ? 1 : 0,
+		rsOutPause.empty() ? nullptr : rsOutPause.data()
+	);
+	for (size_t i = 0; i < count; i++)
+	{
+		if (rsOutPause[i])
+		{
+			(*fileList)[i]->SetPaused(true);
+		}
+	}
+#else
 	RawFileList Pars, Vols;
 
 	for (FileInfo* fileInfo : fileList)
@@ -931,6 +988,7 @@ void QueueEditor::PausePars(RawFileList* fileList, bool extraParsOnly)
 			}
 		}
 	}
+#endif
 }
 
 void QueueEditor::SetNzbPriority(NzbInfo* nzbInfo, const char* priority)
@@ -1289,6 +1347,15 @@ void QueueEditor::SetNzbDupeParam(NzbInfo* nzbInfo, DownloadQueue::EEditAction a
 
 		case DownloadQueue::eaGroupSetDupeMode:
 			{
+#ifdef NZBGET_USE_RUST
+				int parsedMode = 0;
+				if (!nzbget_rs_qhp_parse_dupe_mode(text, &parsedMode))
+				{
+					error("Could not set duplicate mode for %s: incorrect mode (%s)", nzbInfo->GetName(), text);
+					return;
+				}
+				nzbInfo->SetDupeMode((EDupeMode)parsedMode);
+#else
 				EDupeMode mode = dmScore;
 				if (!strcasecmp(text, "SCORE"))
 				{
@@ -1308,6 +1375,7 @@ void QueueEditor::SetNzbDupeParam(NzbInfo* nzbInfo, DownloadQueue::EEditAction a
 					return;
 				}
 				nzbInfo->SetDupeMode(mode);
+#endif
 				break;
 			}
 
@@ -1324,6 +1392,20 @@ void QueueEditor::SortGroupFiles(NzbInfo* nzbInfo)
 	std::sort(nzbInfo->GetFileList()->begin(), nzbInfo->GetFileList()->end(),
 		[](const std::unique_ptr<FileInfo>& fileInfo1, const std::unique_ptr<FileInfo>& fileInfo2)
 		{
+#ifdef NZBGET_USE_RUST
+			bool samePar = fileInfo1->GetParFile() && fileInfo2->GetParFile() &&
+				ParParser::SameParCollection(fileInfo1->GetFilename(), fileInfo2->GetFilename(),
+					fileInfo1->GetFilenameConfirmed() && fileInfo2->GetFilenameConfirmed());
+			return nzbget_rs_qhp_compare_inner_files(
+				fileInfo1->GetFilename(),
+				fileInfo1->GetParFile() ? 1 : 0,
+				fileInfo1->GetSize(),
+				fileInfo2->GetFilename(),
+				fileInfo2->GetParFile() ? 1 : 0,
+				fileInfo2->GetSize(),
+				samePar ? 1 : 0
+			) != 0;
+#else
 			if (!fileInfo1->GetParFile() && !fileInfo2->GetParFile())
 			{
 				// ".rar"-files are ordered before ".r01", etc. files
@@ -1362,6 +1444,7 @@ void QueueEditor::SortGroupFiles(NzbInfo* nzbInfo)
 			}
 
 			return strcmp(fileInfo1->GetFilename(), fileInfo2->GetFilename()) < 0;
+#endif
 		});
 }
 

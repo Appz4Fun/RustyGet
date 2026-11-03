@@ -52,6 +52,7 @@ pub mod dupeidentity;
 pub mod dupefallback;
 pub mod streamrepair;
 pub mod postrepair;
+pub mod queuehotpath;
 
 pub mod deadpostings;
 pub mod dupewatch;

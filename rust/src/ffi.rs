@@ -10166,5 +10166,525 @@ pub unsafe extern "C" fn nzbget_rs_unpack_parse_message(
     *out_info = crate::postrepair::parse_unpack_message(t, d, is_seven_zip != 0);
 }
 
+// ============================================================================
+// QueueCoordinator, ArticleWriter, HistoryCoordinator, QueueEditor &
+// DownloadInfo Hot-Path FFI (`rust/src/queuehotpath.rs`)
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qhp_script_calc_total_status(
+    statuses: *const i32,
+    len: usize,
+) -> c_int {
+    let slice = if len == 0 || statuses.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(statuses, len)
+    };
+    crate::queuehotpath::script_calc_total_status(slice)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qhp_dir_name_of(
+    name: *const c_char,
+    reserve: usize,
+) -> RsBuf {
+    let bytes = crate::queuehotpath::cstr_to_bytes(name);
+    let mut out = crate::queuehotpath::dir_name_of(bytes, reserve);
+    out.push(0);
+    into_buf(out)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_qhp_calc_health(
+    size: i64,
+    par_size: i64,
+    current_failed_size: i64,
+    par_current_failed_size: i64,
+) -> c_int {
+    crate::queuehotpath::calc_health(
+        size,
+        par_size,
+        current_failed_size,
+        par_current_failed_size,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_qhp_calc_critical_health(
+    size: i64,
+    par_size: i64,
+    par_current_failed_size: i64,
+    allow_estimation: c_int,
+) -> c_int {
+    crate::queuehotpath::calc_critical_health(
+        size,
+        par_size,
+        par_current_failed_size,
+        allow_estimation != 0,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qhp_update_min_max_time(
+    times: *const i64,
+    len: usize,
+    out_min: *mut i64,
+    out_max: *mut i64,
+) {
+    let slice = if len == 0 || times.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(times, len)
+    };
+    let (mn, mx) = crate::queuehotpath::calc_min_max_time(slice);
+    if !out_min.is_null() {
+        *out_min = mn;
+    }
+    if !out_max.is_null() {
+        *out_max = mx;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_qhp_is_dupe_success(
+    mark_status: c_int,
+    delete_status: c_int,
+    par_status: c_int,
+    unpack_status: c_int,
+    url_status: c_int,
+    health: c_int,
+    critical_health_est: c_int,
+    critical_health_exact: c_int,
+    health_check_dupe: c_int,
+) -> c_int {
+    crate::queuehotpath::is_dupe_success(
+        mark_status,
+        delete_status,
+        par_status,
+        unpack_status,
+        url_status,
+        health,
+        critical_health_est,
+        critical_health_exact,
+        health_check_dupe != 0,
+    ) as c_int
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_qhp_make_text_status(
+    kind: c_int,
+    mark_status: c_int,
+    delete_status: c_int,
+    par_status: c_int,
+    unpack_status: c_int,
+    move_status: c_int,
+    url_status: c_int,
+    script_status: c_int,
+    health: c_int,
+    critical_health: c_int,
+) -> *const c_char {
+    crate::queuehotpath::make_text_status_cstr(
+        kind,
+        mark_status,
+        delete_status,
+        par_status,
+        unpack_status,
+        move_status,
+        url_status,
+        script_status,
+        health,
+        critical_health,
+    )
+    .as_ptr()
+    .cast()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qhp_completed_same_filename(
+    a: *const c_char,
+    b: *const c_char,
+) -> c_int {
+    if a.is_null() || b.is_null() {
+        return 0;
+    }
+    crate::queuehotpath::completed_same_filename(
+        CStr::from_ptr(a).to_bytes(),
+        CStr::from_ptr(b).to_bytes(),
+    ) as c_int
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_qhp_calc_write_buffer_size(
+    write_buffer_kb: c_int,
+    rec_size: c_int,
+) -> c_int {
+    crate::queuehotpath::calc_write_buffer_size(write_buffer_kb, rec_size)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_qhp_classify_completed_file_status(
+    total_articles: c_int,
+    success_articles: c_int,
+    missed_articles: c_int,
+    failed_articles: c_int,
+) -> c_int {
+    crate::queuehotpath::classify_completed_file_status(
+        total_articles,
+        success_articles,
+        missed_articles,
+        failed_articles,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qhp_resolve_completed_filename(
+    completed: c_int,
+    file_status: c_int,
+    output_filename: *const c_char,
+    file_filename: *const c_char,
+    dest_dir: *const c_char,
+    path_sep: c_char,
+    output_file_exists: c_int,
+) -> RsBuf {
+    let mut out = crate::queuehotpath::resolve_completed_filename(
+        completed != 0,
+        file_status,
+        crate::queuehotpath::cstr_to_bytes(output_filename),
+        crate::queuehotpath::cstr_to_bytes(file_filename),
+        crate::queuehotpath::cstr_to_bytes(dest_dir),
+        path_sep as u8,
+        output_file_exists != 0,
+    );
+    out.push(0);
+    into_buf(out)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qhp_article_cache_should_flush(
+    allocated: usize,
+    effective_limit: usize,
+    tier: c_int,
+    just_flushed: c_int,
+    reset_counter: c_int,
+    is_stopped: c_int,
+    direct_write: c_int,
+    out_flush_everything: *mut c_int,
+    out_need_emergency_flush: *mut c_int,
+) -> c_int {
+    let (should, flush_all, emerg) = crate::queuehotpath::article_cache_should_flush(
+        allocated,
+        effective_limit,
+        tier,
+        just_flushed != 0,
+        reset_counter,
+        is_stopped != 0,
+        direct_write != 0,
+    );
+    if !out_flush_everything.is_null() {
+        *out_flush_everything = flush_all as c_int;
+    }
+    if !out_need_emergency_flush.is_null() {
+        *out_need_emergency_flush = emerg as c_int;
+    }
+    should as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qhp_memory_monitor_step(
+    raw_sample: c_int,
+    current_tier: c_int,
+    candidate_tier: *mut c_int,
+    consecutive_samples: *mut c_int,
+    out_next_tier: *mut c_int,
+) -> c_int {
+    let mut cand = if candidate_tier.is_null() {
+        0
+    } else {
+        *candidate_tier
+    };
+    let mut consec = if consecutive_samples.is_null() {
+        0
+    } else {
+        *consecutive_samples
+    };
+    let (next, transitioned) =
+        crate::queuehotpath::memory_monitor_step(raw_sample, current_tier, &mut cand, &mut consec);
+    if !candidate_tier.is_null() {
+        *candidate_tier = cand;
+    }
+    if !consecutive_samples.is_null() {
+        *consecutive_samples = consec;
+    }
+    if !out_next_tier.is_null() {
+        *out_next_tier = next;
+    }
+    transitioned as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qhp_adjust_downloads_limit(
+    norm_levels: *const i32,
+    actives: *const u8,
+    max_conns: *const i32,
+    count: usize,
+) -> c_int {
+    if count == 0 || norm_levels.is_null() || actives.is_null() || max_conns.is_null() {
+        return 2;
+    }
+    crate::queuehotpath::calc_downloads_limit(
+        std::slice::from_raw_parts(norm_levels, count),
+        std::slice::from_raw_parts(actives, count),
+        std::slice::from_raw_parts(max_conns, count),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_qhp_is_propagation_wait(
+    post_time: i64,
+    propagation_delay: c_int,
+    cur_date: i64,
+) -> c_int {
+    crate::queuehotpath::is_propagation_wait(post_time, propagation_delay, cur_date) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qhp_select_next_file(
+    files: *const crate::queuehotpath::RsCandidateFile,
+    count: usize,
+    propagation_delay: c_int,
+    cur_date: i64,
+    out_best_idx: *mut c_int,
+    out_prop_wait_idx: *mut c_int,
+) {
+    let slice = if count == 0 || files.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(files, count)
+    };
+    let (best, prop) =
+        crate::queuehotpath::select_next_file(slice, propagation_delay, cur_date);
+    if !out_best_idx.is_null() {
+        *out_best_idx = best;
+    }
+    if !out_prop_wait_idx.is_null() {
+        *out_prop_wait_idx = prop;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qhp_is_data_filename(filename: *const c_char) -> c_int {
+    crate::queuehotpath::is_data_filename(crate::queuehotpath::cstr_to_bytes(filename)) as c_int
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_qhp_size_near(size1: i64, size2: i64) -> c_int {
+    crate::queuehotpath::size_near(size1, size2) as c_int
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_qhp_download_hopeless(
+    total: c_int,
+    current_success: c_int,
+    current_failed: c_int,
+) -> c_int {
+    crate::queuehotpath::download_hopeless(total, current_success, current_failed) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qhp_eval_dead_download(
+    current_success: c_int,
+    dupe_recovered: c_int,
+    current_failed: c_int,
+    file_count: c_int,
+    dupe_failed_run: c_int,
+    par_cannot_cover_exact: c_int,
+    critical: c_int,
+    par_edge_margin: c_int,
+    files_tried: c_int,
+    probing_sec: c_int,
+    out_eval: *mut crate::queuehotpath::RsDeadDownloadEval,
+) {
+    if out_eval.is_null() {
+        return;
+    }
+    *out_eval = crate::queuehotpath::eval_dead_download(
+        current_success,
+        dupe_recovered,
+        current_failed,
+        file_count,
+        dupe_failed_run,
+        par_cannot_cover_exact != 0,
+        critical,
+        par_edge_margin,
+        files_tried,
+        probing_sec,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qhp_is_side_file(
+    filename: *const c_char,
+    ext_cleanup_disk: *const c_char,
+) -> c_int {
+    crate::queuehotpath::is_side_file(
+        crate::queuehotpath::cstr_to_bytes(filename),
+        crate::queuehotpath::cstr_to_bytes(ext_cleanup_disk),
+    ) as c_int
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_qhp_is_hanging_download(
+    now: i64,
+    last_update: i64,
+    article_timeout: c_int,
+    is_running: c_int,
+) -> c_int {
+    crate::queuehotpath::is_hanging_download(now, last_update, article_timeout, is_running != 0)
+        as c_int
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_qhp_should_cleanup_parked_files(
+    par_status: c_int,
+    unpack_status: c_int,
+    failed_size: i64,
+    par_failed_size: i64,
+    delete_status: c_int,
+    parking: c_int,
+    unpack_cleaned_up_disk: c_int,
+) -> c_int {
+    crate::queuehotpath::should_cleanup_parked_files(
+        par_status,
+        unpack_status,
+        failed_size,
+        par_failed_size,
+        delete_status,
+        parking != 0,
+        unpack_cleaned_up_disk != 0,
+    ) as c_int
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_qhp_classify_dup_status(
+    mark_status: c_int,
+    delete_status: c_int,
+    is_dupe_success: c_int,
+) -> c_int {
+    crate::queuehotpath::classify_dup_status(mark_status, delete_status, is_dupe_success != 0)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_qhp_should_reset_article(
+    article_status: c_int,
+    partial_state: c_int,
+    all_failed: c_int,
+    reset_failed: c_int,
+) -> c_int {
+    crate::queuehotpath::should_reset_article(
+        article_status,
+        partial_state,
+        all_failed != 0,
+        reset_failed != 0,
+    ) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qhp_parse_dupe_mode(
+    text: *const c_char,
+    out_mode: *mut c_int,
+) -> c_int {
+    if let Some(m) = crate::queuehotpath::parse_dupe_mode(crate::queuehotpath::cstr_to_bytes(text)) {
+        if !out_mode.is_null() {
+            *out_mode = m;
+        }
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qhp_parse_sort_spec(
+    sort: *const c_char,
+    out_criteria: *mut c_int,
+    out_order: *mut c_int,
+) -> c_int {
+    if let Some((crit, ord)) =
+        crate::queuehotpath::parse_sort_spec(crate::queuehotpath::cstr_to_bytes(sort))
+    {
+        if !out_criteria.is_null() {
+            *out_criteria = crit;
+        }
+        if !out_order.is_null() {
+            *out_order = ord;
+        }
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qhp_clamp_move_offset(
+    index: c_int,
+    nr_entries: c_int,
+    offset: c_int,
+    last_dest_pos: c_int,
+    out_work_offset: *mut c_int,
+    out_last_dest_pos: *mut c_int,
+) {
+    let (w, last) = crate::queuehotpath::clamp_move_offset(index, nr_entries, offset, last_dest_pos);
+    if !out_work_offset.is_null() {
+        *out_work_offset = w;
+    }
+    if !out_last_dest_pos.is_null() {
+        *out_last_dest_pos = last;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qhp_select_pars_to_pause(
+    is_par: *const u8,
+    has_vol: *const u8,
+    sizes: *const i64,
+    len: usize,
+    extra_pars_only: c_int,
+    out_pause: *mut u8,
+) {
+    if len == 0 || is_par.is_null() || has_vol.is_null() || sizes.is_null() || out_pause.is_null() {
+        return;
+    }
+    crate::queuehotpath::select_pars_to_pause(
+        std::slice::from_raw_parts(is_par, len),
+        std::slice::from_raw_parts(has_vol, len),
+        std::slice::from_raw_parts(sizes, len),
+        extra_pars_only != 0,
+        std::slice::from_raw_parts_mut(out_pause, len),
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qhp_compare_inner_files(
+    name1: *const c_char,
+    par1: c_int,
+    size1: i64,
+    name2: *const c_char,
+    par2: c_int,
+    size2: i64,
+    same_par_collection: c_int,
+) -> c_int {
+    crate::queuehotpath::compare_inner_files(
+        crate::queuehotpath::cstr_to_bytes(name1),
+        par1 != 0,
+        size1,
+        crate::queuehotpath::cstr_to_bytes(name2),
+        par2 != 0,
+        size2,
+        same_par_collection != 0,
+    ) as c_int
+}
+
+
 
 

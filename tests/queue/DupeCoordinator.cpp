@@ -243,6 +243,23 @@ BOOST_AUTO_TEST_CASE(RustDupeCoordinatorFfiParity)
 	std::string text(reason.data ? reason.data : "", reason.len);
 	nzbget_rs_free(reason);
 	BOOST_CHECK(text.find("5 other item(s) of the key in history:") != std::string::npos);
+
+	BOOST_CHECK_EQUAL(nzbget_rs_qhp_calc_health(1000, 0, 100, 0), 900);
+	BOOST_CHECK_EQUAL(nzbget_rs_qhp_calc_critical_health(1100, 100, 0, 1), 900);
+	BOOST_CHECK_EQUAL(nzbget_rs_qhp_calc_write_buffer_size(500, 1024 * 1024), 500 * 1024);
+	BOOST_CHECK_NE(nzbget_rs_qhp_is_data_filename("Show.S01E01.mkv"), 0);
+	BOOST_CHECK_EQUAL(nzbget_rs_qhp_is_data_filename("Show.S01E01.par2"), 0);
+	BOOST_CHECK_NE(nzbget_rs_qhp_size_near(10000, 10025), 0);
+	BOOST_CHECK_EQUAL(nzbget_rs_qhp_size_near(10000, 10035), 0);
+	BOOST_CHECK_NE(nzbget_rs_qhp_download_hopeless(1000, 5, 95), 0);
+	int parsedMode = -1;
+	BOOST_CHECK_NE(nzbget_rs_qhp_parse_dupe_mode("score", &parsedMode), 0);
+	BOOST_CHECK_EQUAL(parsedMode, (int)dmScore);
+	BOOST_CHECK_NE(nzbget_rs_qhp_parse_dupe_mode("all", &parsedMode), 0);
+	BOOST_CHECK_EQUAL(parsedMode, (int)dmAll);
+	BOOST_CHECK_NE(nzbget_rs_qhp_parse_dupe_mode("force", &parsedMode), 0);
+	BOOST_CHECK_EQUAL(parsedMode, (int)dmForce);
+	BOOST_CHECK_EQUAL(nzbget_rs_qhp_parse_dupe_mode("bad", &parsedMode), 0);
 }
 #endif
 

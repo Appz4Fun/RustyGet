@@ -1639,6 +1639,98 @@ void nzbget_rs_unpack_parse_message(
     const char* text, const char* unpack_extended_dir, int is_seven_zip,
     NzbgetRsUnpackMessageInfo* out_info);
 
+// ============================================================================
+// QueueCoordinator, ArticleWriter, HistoryCoordinator, QueueEditor &
+// DownloadInfo Hot-Path FFI (`rust/src/queuehotpath.rs`)
+// ============================================================================
+
+typedef struct NzbgetRsCandidateFile {
+    int32_t nzb_priority;
+    int32_t extra_priority;
+    int32_t paused;
+    int32_t deleted;
+    int32_t already_checked;
+    int64_t post_time;
+} NzbgetRsCandidateFile;
+
+typedef struct NzbgetRsDeadDownloadEval {
+    int32_t own;
+    int32_t tried;
+    int32_t dead_rate;
+    int32_t dead_run;
+    int32_t dead;
+    int32_t projected;
+    int32_t doomed;
+    int32_t hopeless;
+    int32_t far_below;
+    int32_t below;
+} NzbgetRsDeadDownloadEval;
+
+int nzbget_rs_qhp_script_calc_total_status(const int32_t* statuses, size_t len);
+NzbgetRsBuf nzbget_rs_qhp_dir_name_of(const char* name, size_t reserve);
+int nzbget_rs_qhp_calc_health(
+    int64_t size, int64_t par_size, int64_t current_failed_size, int64_t par_current_failed_size);
+int nzbget_rs_qhp_calc_critical_health(
+    int64_t size, int64_t par_size, int64_t par_current_failed_size, int allow_estimation);
+void nzbget_rs_qhp_update_min_max_time(
+    const int64_t* times, size_t len, int64_t* out_min, int64_t* out_max);
+int nzbget_rs_qhp_is_dupe_success(
+    int mark_status, int delete_status, int par_status, int unpack_status, int url_status,
+    int health, int critical_health_est, int critical_health_exact, int health_check_dupe);
+const char* nzbget_rs_qhp_make_text_status(
+    int kind, int mark_status, int delete_status, int par_status, int unpack_status,
+    int move_status, int url_status, int script_status, int health, int critical_health);
+int nzbget_rs_qhp_completed_same_filename(const char* a, const char* b);
+
+int nzbget_rs_qhp_calc_write_buffer_size(int write_buffer_kb, int rec_size);
+int nzbget_rs_qhp_classify_completed_file_status(
+    int total_articles, int success_articles, int missed_articles, int failed_articles);
+NzbgetRsBuf nzbget_rs_qhp_resolve_completed_filename(
+    int completed, int file_status, const char* output_filename, const char* file_filename,
+    const char* dest_dir, char path_sep, int output_file_exists);
+int nzbget_rs_qhp_article_cache_should_flush(
+    size_t allocated, size_t effective_limit, int tier, int just_flushed, int reset_counter,
+    int is_stopped, int direct_write, int* out_flush_everything, int* out_need_emergency_flush);
+int nzbget_rs_qhp_memory_monitor_step(
+    int raw_sample, int current_tier, int* candidate_tier, int* consecutive_samples,
+    int* out_next_tier);
+
+int nzbget_rs_qhp_adjust_downloads_limit(
+    const int32_t* norm_levels, const uint8_t* actives, const int32_t* max_conns, size_t count);
+int nzbget_rs_qhp_is_propagation_wait(int64_t post_time, int propagation_delay, int64_t cur_date);
+void nzbget_rs_qhp_select_next_file(
+    const NzbgetRsCandidateFile* files, size_t count, int propagation_delay, int64_t cur_date,
+    int* out_best_idx, int* out_prop_wait_idx);
+int nzbget_rs_qhp_is_data_filename(const char* filename);
+int nzbget_rs_qhp_size_near(int64_t size1, int64_t size2);
+int nzbget_rs_qhp_download_hopeless(int total, int current_success, int current_failed);
+void nzbget_rs_qhp_eval_dead_download(
+    int current_success, int dupe_recovered, int current_failed, int file_count,
+    int dupe_failed_run, int par_cannot_cover_exact, int critical, int par_edge_margin,
+    int files_tried, int probing_sec, NzbgetRsDeadDownloadEval* out_eval);
+int nzbget_rs_qhp_is_side_file(const char* filename, const char* ext_cleanup_disk);
+int nzbget_rs_qhp_is_hanging_download(
+    int64_t now, int64_t last_update, int article_timeout, int is_running);
+
+int nzbget_rs_qhp_should_cleanup_parked_files(
+    int par_status, int unpack_status, int64_t failed_size, int64_t par_failed_size,
+    int delete_status, int parking, int unpack_cleaned_up_disk);
+int nzbget_rs_qhp_classify_dup_status(int mark_status, int delete_status, int is_dupe_success);
+int nzbget_rs_qhp_should_reset_article(
+    int article_status, int partial_state, int all_failed, int reset_failed);
+int nzbget_rs_qhp_parse_dupe_mode(const char* text, int* out_mode);
+
+int nzbget_rs_qhp_parse_sort_spec(const char* sort, int* out_criteria, int* out_order);
+void nzbget_rs_qhp_clamp_move_offset(
+    int index, int nr_entries, int offset, int last_dest_pos,
+    int* out_work_offset, int* out_last_dest_pos);
+void nzbget_rs_qhp_select_pars_to_pause(
+    const uint8_t* is_par, const uint8_t* has_vol, const int64_t* sizes, size_t len,
+    int extra_pars_only, uint8_t* out_pause);
+int nzbget_rs_qhp_compare_inner_files(
+    const char* name1, int par1, int64_t size1,
+    const char* name2, int par2, int64_t size2, int same_par_collection);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

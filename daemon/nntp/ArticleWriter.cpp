@@ -54,11 +54,19 @@ CachedSegmentData& CachedSegmentData::operator=(CachedSegmentData&& other)
 
 void ArticleWriter::SetWriteBuffer(DiskFile& outFile, int recSize)
 {
+#ifdef NZBGET_USE_RUST
+	int bufSize = nzbget_rs_qhp_calc_write_buffer_size(g_Options->GetWriteBuffer(), recSize);
+	if (bufSize > 0)
+	{
+		outFile.SetWriteBuffer(bufSize);
+	}
+#else
 	if (g_Options->GetWriteBuffer() > 0)
 	{
 		outFile.SetWriteBuffer(recSize > 0 && recSize < g_Options->GetWriteBuffer() * 1024 ?
 			recSize : g_Options->GetWriteBuffer() * 1024);
 	}
+#endif
 }
 
 void ArticleWriter::Prepare()
@@ -1235,6 +1243,28 @@ void ArticleCache::Run()
 			g_MemoryMonitor->GetEffectiveArticleCacheBytes() :
 			(size_t)g_Options->GetArticleCache() * 1024 * 1024;
 
+#ifdef NZBGET_USE_RUST
+		int tier = g_MemoryMonitor ? (int)g_MemoryMonitor->GetTier() : (int)NZBGET_RS_PRESSURE_NORMAL;
+		int flushEverything = 0;
+		int needEmergencyFlush = 0;
+		if (nzbget_rs_qhp_article_cache_should_flush(
+				m_allocated, effectiveLimit, tier, justFlushed ? 1 : 0, resetCounter,
+				IsStopped() ? 1 : 0, g_Options->GetDirectWrite() ? 1 : 0,
+				&flushEverything, &needEmergencyFlush) != 0)
+		{
+			justFlushed = CheckFlush(flushEverything != 0);
+			resetCounter = 0;
+
+			if (needEmergencyFlush != 0 && m_allocated == 0)
+			{
+				MemoryMonitor::TrimHeap();
+			}
+			else if (!justFlushed && !IsStopped())
+			{
+				Util::Sleep(5);
+			}
+		}
+#else
 		bool isCritical = g_MemoryMonitor &&
 			g_MemoryMonitor->GetTier() == NZBGET_RS_PRESSURE_CRITICAL;
 		bool isConstrained = g_MemoryMonitor &&
@@ -1260,6 +1290,7 @@ void ArticleCache::Run()
 				Util::Sleep(5);
 			}
 		}
+#endif
 		else if (!m_allocated)
 		{
 			std::unique_lock<std::mutex> lk(m_allocMutex);
@@ -1461,6 +1492,10 @@ void MemoryMonitor::UpdateState()
 	int rawSample = nzbget_rs_memory_pressure_sample();
 	int currentTier = m_tier.load(std::memory_order_relaxed);
 	int nextTier = currentTier;
+#ifdef NZBGET_USE_RUST
+	bool transitioned = nzbget_rs_qhp_memory_monitor_step(
+		rawSample, currentTier, &m_candidateTier, &m_consecutiveSamples, &nextTier) != 0;
+#else
 	bool transitioned = false;
 
 	if (rawSample > currentTier)
@@ -1495,6 +1530,7 @@ void MemoryMonitor::UpdateState()
 		m_candidateTier = rawSample;
 		m_consecutiveSamples = 0;
 	}
+#endif
 
 	uint32_t cfgCache = g_Options ? (uint32_t)g_Options->GetArticleCache() : 0;
 	uint32_t effCache = (nextTier == NZBGET_RS_PRESSURE_CRITICAL) ? 0 :

@@ -25,6 +25,9 @@
 #include "DownloadInfo.h"
 #include "Options.h"
 #include "Util.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 FeedFile::FeedFile(const char* filename, const char* infoName) 
 	: m_fileName(filename ? filename : "")
@@ -45,6 +48,11 @@ void FeedFile::LogDebugInfo()
 
 void FeedFile::ParseSubject(FeedItemInfo& feedItemInfo)
 {
+#ifdef NZBGET_USE_RUST
+	NzbgetRsBuf buf = nzbget_rs_df_parse_feed_subject(feedItemInfo.GetTitle());
+	feedItemInfo.SetFilename(buf.data ? buf.data : "");
+	nzbget_rs_free(buf);
+#else
 	// if title has quotation marks we use only part within quotation marks
 	char* p = (char*)feedItemInfo.GetTitle();
 	char* start = strchr(p, '\"');
@@ -73,6 +81,7 @@ void FeedFile::ParseSubject(FeedItemInfo& feedItemInfo)
 	}
 
 	feedItemInfo.SetFilename(feedItemInfo.GetTitle());
+#endif
 }
 
 
@@ -107,6 +116,10 @@ bool FeedFile::Parse()
 
 int64 FeedFile::ExtractSizeFromDescription(std::string_view description)
 {
+#ifdef NZBGET_USE_RUST
+	std::string descStr(description);
+	return nzbget_rs_df_extract_size_from_description(descStr.c_str());
+#else
 	size_t pos = description.find("Size");
 	if (pos == std::string::npos)
 	{
@@ -169,6 +182,7 @@ int64 FeedFile::ExtractSizeFromDescription(std::string_view description)
 	}
 
 	return static_cast<int64>(std::round(size));
+#endif
 }
 
 void FeedFile::Parse_StartElement(const char* name, const char **atts)

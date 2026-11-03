@@ -1862,6 +1862,112 @@ NzbgetRsBuf nzbget_rs_dsp_twin_resolve_kind(
     int is_primary, int is_dupe, int by_par2, const char* by_files, int listed, int same_print,
     int sampleable, int sampled_now, const char* sampled_val);
 
+// ============================================================================
+// DupeSearch, Fleet, DonorHealth, Newznab, FeedCoordinator, FeedInfo &
+// FeedFile Hot-Path FFI (`rust/src/dupefeed.rs`)
+// ============================================================================
+
+typedef struct NzbgetRsPendingMetaView {
+    int32_t valid;
+    size_t title_offset;
+    size_t title_len;
+    size_t indexer_offset;
+    size_t indexer_len;
+    int32_t grabs;
+    int64_t size;
+    int64_t date;
+} NzbgetRsPendingMetaView;
+
+typedef struct NzbgetRsDupeSearchStateLine {
+    int32_t valid;
+    int32_t within_ttl;
+    size_t key_offset;
+    size_t key_len;
+    int32_t score;
+    int64_t time;
+    size_t title_offset;
+    size_t title_len;
+    int32_t retryable;
+} NzbgetRsDupeSearchStateLine;
+
+NzbgetRsBuf nzbget_rs_df_lower_key(const char* key);
+int nzbget_rs_df_saved_history_backup(
+    int has_pick, uint32_t pick_full_hash, int candidate_delete_status,
+    uint32_t candidate_full_hash, int ds_dupe, int ds_copy);
+int nzbget_rs_df_placement_available(
+    int has_backup, int is_nzb_kind, int deleting, int delete_status,
+    int ds_none, int ds_manual, int ds_dupe, int ds_copy,
+    int mark_status, int ks_bad, int dupe_mode, int dm_force,
+    int in_history, int whole_backup, int has_post_info, int is_dupe_success,
+    int has_pick, uint32_t pick_full_hash, uint32_t backup_full_hash,
+    int queued_file_exists, int health, int critical_health,
+    int health_check_is_dupe, int has_marked_alive, int marked_alive_val);
+void nzbget_rs_df_sort_verified_postings(
+    const int64_t* total_bytes, const int* grabs, const int64_t* dates,
+    size_t count, int64_t pick_bytes, size_t* out_order);
+void nzbget_rs_df_eval_member_rerank(
+    int base, int wanted_score, int dead_score, int old_score, double alive, int all_dead,
+    int* out_score, int* out_percent, int* out_add_alive_zero);
+int nzbget_rs_df_eval_pick_gone(
+    int has_pick, int deleting, int delete_status, int ds_manual,
+    const char* pick_eff_key, const char* job_dupe_key,
+    const char* pick_norm_name, const char* job_norm_name);
+NzbgetRsBuf nzbget_rs_df_format_pending_meta(
+    const char* title, const char* indexer, int grabs, int64_t size, int64_t date);
+void nzbget_rs_df_parse_pending_meta(
+    const char* meta, size_t len, NzbgetRsPendingMetaView* out_view);
+int nzbget_rs_df_parse_dupesearch_state_line(
+    const char* line, size_t len, int64_t now, int64_t state_ttl_sec,
+    NzbgetRsDupeSearchStateLine* out_line);
+
+void nzbget_rs_df_eval_fleet_member_health(
+    int checked, int result_complete, int present, int missing, int error,
+    int min_known, int min_alive_pct,
+    int* out_alive_pct, int* out_dead, int* out_member_complete);
+size_t nzbget_rs_df_rank_fleet_candidates(
+    const uint8_t* has_error, const int* same_as, const uint8_t* dead,
+    const int* alive, const int64_t* total_bytes, size_t count, size_t* out_ranked);
+int nzbget_rs_df_eval_fleet_outcome_reason(
+    int any_usable, int any_alive, int any_unknown, int on_disk);
+
+double nzbget_rs_df_donor_health_alive(
+    int present, int missing, int error, int min_known);
+int nzbget_rs_df_donor_health_dead_probe(
+    int present, int missing, int min_known);
+size_t nzbget_rs_df_donor_sample_count(
+    size_t total_ids, int percent, int minimum, int maximum);
+int nzbget_rs_df_adjust_pipeline_depth(
+    int depth, int64_t took_ms, int pipeline_max);
+int nzbget_rs_df_eval_article_votes(const int* votes, size_t count);
+int nzbget_rs_df_resolve_unsettled_vote(const int* votes, size_t count);
+
+NzbgetRsBuf nzbget_rs_df_url_encode(const char* text, size_t len);
+NzbgetRsBuf nzbget_rs_df_digits_only(const char* text, size_t len);
+int64_t nzbget_rs_df_days_from_civil(int64_t year, int month, int day);
+int64_t nzbget_rs_df_parse_newznab_date(const char* text, size_t len);
+NzbgetRsBuf nzbget_rs_df_build_newznab_url(
+    const char* base, const char* const* param_keys, const char* const* param_vals,
+    size_t param_count, const char* api_key);
+NzbgetRsBuf nzbget_rs_df_mask_newznab_text(const char* text, size_t len);
+
+NzbgetRsBuf nzbget_rs_df_normalize_feed_nzb_name(const char* filename);
+NzbgetRsBuf nzbget_rs_df_format_dupe_status_mask(int dupe_status);
+int nzbget_rs_df_should_start_feed(
+    int interval_min, int64_t next_update, int64_t current_time, int fetch,
+    int status, int fs_running, int* out_set_force);
+int nzbget_rs_df_calc_feed_next_interval(
+    int success, int interval_min, int last_interval_sec, int* out_last_interval_sec);
+int nzbget_rs_df_is_feed_cache_expired(
+    int64_t last_usage, int cache_time_sec, int64_t cur_time);
+int nzbget_rs_df_parse_prefixed_int(const char* value);
+NzbgetRsBuf nzbget_rs_df_build_feed_dupe_key(
+    const char* rage_id_str, const char* tvdb_id_str, const char* tvmaze_id_str,
+    const char* series, int item_rage_id, int item_tvdb_id, int item_tvmaze_id,
+    int item_imdb_id, int season_num, int episode_num,
+    const char* season, const char* episode);
+NzbgetRsBuf nzbget_rs_df_parse_feed_subject(const char* title);
+int64_t nzbget_rs_df_extract_size_from_description(const char* description);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

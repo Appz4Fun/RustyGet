@@ -33,6 +33,9 @@
 #include "DiskState.h"
 #include "DupeCoordinator.h"
 #include "UrlCoordinator.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 std::unique_ptr<NzbInfo> NzbInfoCreator::Create(const FeedInfo& feedInfo, const FeedItemInfo& feedItemInfo) const
 {
@@ -43,6 +46,15 @@ std::unique_ptr<NzbInfo> NzbInfoCreator::Create(const FeedInfo& feedInfo, const 
 
 	// add .nzb-extension if not present
 	BString<1024> nzbName = feedItemInfo.GetFilename();
+#ifdef NZBGET_USE_RUST
+	NzbgetRsBuf normBuf = nzbget_rs_df_normalize_feed_nzb_name(*nzbName);
+	if (normBuf.len > 0 && normBuf.data)
+	{
+		BString<1024> nzbName2("%s", normBuf.data);
+		nzbInfo->SetFilename(FileSystem::MakeValidFilename(nzbName2));
+	}
+	nzbget_rs_free(normBuf);
+#else
 	char* ext = strrchr(nzbName, '.');
 	if (ext && !strcasecmp(ext, ".nzb"))
 	{
@@ -53,6 +65,7 @@ std::unique_ptr<NzbInfo> NzbInfoCreator::Create(const FeedInfo& feedInfo, const 
 		BString<1024> nzbName2("%s.nzb", *nzbName);
 		nzbInfo->SetFilename(FileSystem::MakeValidFilename(nzbName2));
 	}
+#endif
 
 	ApplyCategory(*nzbInfo, feedInfo, feedItemInfo);
 
@@ -90,10 +103,15 @@ std::unique_ptr<RegEx>& FeedCoordinator::FilterHelper::GetRegEx(int id)
 
 void FeedCoordinator::FilterHelper::CalcDupeStatus(const char* title, const char* dupeKey, char* statusBuf, int bufLen)
 {
+	DupeCoordinator::EDupeStatus dupeStatus = g_DupeCoordinator->GetDupeStatus(DownloadQueue::Guard(), title, dupeKey);
+
+#ifdef NZBGET_USE_RUST
+	NzbgetRsBuf buf = nzbget_rs_df_format_dupe_status_mask((int)dupeStatus);
+	strncpy(statusBuf, buf.data ? buf.data : "", bufLen);
+	nzbget_rs_free(buf);
+#else
 	const char* dupeStatusName[] = { "", "QUEUED", "DOWNLOADING", "3", "SUCCESS", "5", "6", "7", "WARNING",
 		"9", "10", "11", "12", "13", "14", "15", "FAILURE" };
-
-	DupeCoordinator::EDupeStatus dupeStatus = g_DupeCoordinator->GetDupeStatus(DownloadQueue::Guard(), title, dupeKey);
 
 	BString<1024> statuses;
 	for (int i = 1; i <= (int)DupeCoordinator::dsFailure; i = i << 1)
@@ -109,6 +127,7 @@ void FeedCoordinator::FilterHelper::CalcDupeStatus(const char* title, const char
 	}
 
 	strncpy(statusBuf, statuses, bufLen);
+#endif
 }
 
 FeedCoordinator::FeedCoordinator()
@@ -163,6 +182,20 @@ void FeedCoordinator::Run()
 				// check feed list and update feeds
 				for (FeedInfo* feedInfo : &m_feeds)
 				{
+#ifdef NZBGET_USE_RUST
+					int setForce = 0;
+					if (nzbget_rs_df_should_start_feed(
+						feedInfo->GetInterval(), (int64_t)feedInfo->GetNextUpdate(), (int64_t)current,
+						feedInfo->GetFetch() ? 1 : 0, (int)feedInfo->GetStatus(), (int)FeedInfo::fsRunning,
+						&setForce))
+					{
+						StartFeedDownload(feedInfo, feedInfo->GetFetch());
+					}
+					else if (setForce)
+					{
+						m_force = true;
+					}
+#else
 					if (((feedInfo->GetInterval() > 0 &&
 						 (feedInfo->GetNextUpdate() == 0 ||
 						  current >= feedInfo->GetNextUpdate() ||
@@ -176,6 +209,7 @@ void FeedCoordinator::Run()
 					{
 						m_force = true;
 					}
+#endif
 				}
 			}
 		}
@@ -406,6 +440,12 @@ void FeedCoordinator::SchedulerNextUpdate(FeedInfo* feedInfo, bool success)
 	time_t current = Util::CurrentTime();
 	int interval;
 
+#ifdef NZBGET_USE_RUST
+	int newLastInterval = 0;
+	interval = nzbget_rs_df_calc_feed_next_interval(
+		success ? 1 : 0, feedInfo->GetInterval(), feedInfo->GetLastInterval(), &newLastInterval);
+	feedInfo->SetLastInterval(newLastInterval);
+#else
 	if (success)
 	{
 		interval = feedInfo->GetInterval() * 60;
@@ -420,6 +460,7 @@ void FeedCoordinator::SchedulerNextUpdate(FeedInfo* feedInfo, bool success)
 		interval = std::min(interval, feedInfo->GetInterval() * 60);
 		feedInfo->SetLastInterval(interval);
 	}
+#endif
 
 	detail("Scheduling update for feed %s in %i minute(s)", feedInfo->GetName(), interval / 60);
 	feedInfo->SetNextUpdate(current + interval);
@@ -770,8 +811,13 @@ void FeedCoordinator::CleanupCache()
 	m_feedCache.remove_if(
 		[curTime](FeedCacheItem& feedCacheItem)
 		{
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_df_is_feed_cache_expired(
+				(int64_t)feedCacheItem.GetLastUsage(), feedCacheItem.GetCacheTimeSec(), (int64_t)curTime))
+#else
 			if (feedCacheItem.GetLastUsage() + feedCacheItem.GetCacheTimeSec() < curTime ||
 				feedCacheItem.GetLastUsage() > curTime)
+#endif
 			{
 				debug("Deleting %s from feed cache", feedCacheItem.GetUrl());
 				return true;

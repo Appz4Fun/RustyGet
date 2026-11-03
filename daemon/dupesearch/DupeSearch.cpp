@@ -69,13 +69,44 @@ NzbInfo* FindNzb(DownloadQueue* downloadQueue, int nzbId)
 
 bool SavedHistoryBackup(NzbInfo* pick, NzbInfo* candidate)
 {
+#ifdef NZBGET_USE_RUST
+    return nzbget_rs_df_saved_history_backup(
+        pick != nullptr ? 1 : 0, pick ? pick->GetFullContentHash() : 0,
+        (int)candidate->GetDeleteStatus(), candidate->GetFullContentHash(),
+        (int)NzbInfo::dsDupe, (int)NzbInfo::dsCopy) != 0;
+#else
     return candidate->GetDeleteStatus() == NzbInfo::dsDupe ||
         (pick && candidate->GetDeleteStatus() == NzbInfo::dsCopy &&
          candidate->GetFullContentHash() != pick->GetFullContentHash());
+#endif
 }
 
 bool PlacementAvailable(DownloadQueue* queue, NzbInfo* pick, NzbInfo* backup, bool wholeBackup = false)
 {
+#ifdef NZBGET_USE_RUST
+    if (!backup || backup->GetKind() != NzbInfo::nkNzb || backup->GetDeleting() ||
+        backup->GetDeleteStatus() == NzbInfo::dsManual || backup->GetMarkStatus() == NzbInfo::ksBad ||
+        backup->GetDupeMode() == dmForce) return false;
+    bool inHistory = queue->GetQueue()->Find(backup->GetId()) != backup;
+    bool isDupeSuccess = inHistory && backup->IsDupeSuccess();
+    bool hasPostInfo = backup->GetPostInfo() != nullptr;
+    bool savedBackup = SavedHistoryBackup(pick, backup);
+    bool needDiskAndHealth = inHistory && !isDupeSuccess && (!wholeBackup || !hasPostInfo) && savedBackup;
+    bool queuedFileExists = needDiskAndHealth && FileSystem::FileExists(backup->GetQueuedFilename());
+    int health = (needDiskAndHealth && queuedFileExists && wholeBackup) ? backup->CalcHealth() : 0;
+    int critHealth = (needDiskAndHealth && queuedFileExists && wholeBackup) ? backup->CalcCriticalHealth(true) : 0;
+    NzbParameter* markedAlive = backup->GetParameters()->Find(DupeSearch::AliveParam);
+    return nzbget_rs_df_placement_available(
+        1, 1, 0, (int)backup->GetDeleteStatus(),
+        (int)NzbInfo::dsNone, (int)NzbInfo::dsManual, (int)NzbInfo::dsDupe, (int)NzbInfo::dsCopy,
+        (int)backup->GetMarkStatus(), (int)NzbInfo::ksBad,
+        (int)backup->GetDupeMode(), (int)dmForce,
+        inHistory ? 1 : 0, wholeBackup ? 1 : 0, hasPostInfo ? 1 : 0, isDupeSuccess ? 1 : 0,
+        pick != nullptr ? 1 : 0, pick ? pick->GetFullContentHash() : 0, backup->GetFullContentHash(),
+        queuedFileExists ? 1 : 0, health, critHealth,
+        g_Options->GetHealthCheck() == Options::hcDupe ? 1 : 0,
+        markedAlive != nullptr ? 1 : 0, markedAlive ? atoi(markedAlive->GetValue()) : 0) != 0;
+#else
     if (!backup || backup->GetKind() != NzbInfo::nkNzb || backup->GetDeleting() ||
         backup->GetDeleteStatus() == NzbInfo::dsManual || backup->GetMarkStatus() == NzbInfo::ksBad ||
         backup->GetDupeMode() == dmForce) return false;
@@ -90,11 +121,18 @@ bool PlacementAvailable(DownloadQueue* queue, NzbInfo* pick, NzbInfo* backup, bo
         FileSystem::FileExists(backup->GetQueuedFilename()) &&
         (!wholeBackup || backup->CalcHealth() >= backup->CalcCriticalHealth(true)) &&
         !(g_Options->GetHealthCheck() == Options::hcDupe && markedAlive && atoi(markedAlive->GetValue()) == 0);
+#endif
 }
 
 
 std::string LowerKey(const std::string& key)
 {
+#ifdef NZBGET_USE_RUST
+	NzbgetRsBuf buf = nzbget_rs_df_lower_key(key.c_str());
+	std::string out(buf.data ? buf.data : "", buf.len);
+	nzbget_rs_free(buf);
+	return out;
+#else
 	std::string out = key;
 	for (char& ch : out)
 	{
@@ -105,6 +143,7 @@ std::string LowerKey(const std::string& key)
 		}
 	}
 	return out;
+#endif
 }
 
 // the key a download is searched under: its own, or one made from its name
@@ -1006,6 +1045,30 @@ void DupeSearch::Place(const Job& job, const NzbSummary& pick, std::vector<NzbFe
 	// closest size first: the likeliest byte-identical repost; then the most grabbed
 	long long pickBytes = (long long)std::min(DupeIdentity::WholeBytes(pick),
         (unsigned long long)std::numeric_limits<long long>::max());
+#ifdef NZBGET_USE_RUST
+	if (verified.size() > 1)
+	{
+		std::vector<int64_t> totalBytes(verified.size());
+		std::vector<int> grabs(verified.size());
+		std::vector<int64_t> dates(verified.size());
+		std::vector<size_t> orderIdx(verified.size());
+		for (size_t i = 0; i < verified.size(); i++)
+		{
+			totalBytes[i] = verified[i].info.totalBytes;
+			grabs[i] = verified[i].listing.grabs;
+			dates[i] = (int64_t)verified[i].listing.date;
+		}
+		nzbget_rs_df_sort_verified_postings(
+			totalBytes.data(), grabs.data(), dates.data(), verified.size(), pickBytes, orderIdx.data());
+		std::vector<NzbFetcher::Fetched> sorted;
+		sorted.reserve(verified.size());
+		for (size_t idx : orderIdx)
+		{
+			sorted.push_back(std::move(verified[idx]));
+		}
+		verified = std::move(sorted);
+	}
+#else
 	auto distance = [&](const NzbFetcher::Fetched& f)
 		{ return f.info.totalBytes > pickBytes ? f.info.totalBytes - pickBytes : pickBytes - f.info.totalBytes; };
 	std::stable_sort(verified.begin(), verified.end(), [&](const NzbFetcher::Fetched& x, const NzbFetcher::Fetched& y)
@@ -1014,6 +1077,7 @@ void DupeSearch::Place(const Job& job, const NzbSummary& pick, std::vector<NzbFe
 			if (x.listing.grabs != y.listing.grabs) return x.listing.grabs > y.listing.grabs;
 			return x.listing.date > y.listing.date;
 		});
+#endif
 
 	DonorHealth::ServerList servers;
 	if (!verified.empty() || !job.members.empty())
@@ -1395,6 +1459,18 @@ void DupeSearch::Place(const Job& job, const NzbSummary& pick, std::vector<NzbFe
 		int score = base + wanted[n];
 		if (donor.member)
 		{
+#ifdef NZBGET_USE_RUST
+			int percent = 0;
+			int addAliveZero = 0;
+			nzbget_rs_df_eval_member_rerank(
+				base, wanted[n], DonorScore::Dead, donor.oldScore, donor.entry.alive, allDead ? 1 : 0,
+				&score, &percent, &addAliveZero);
+			params.push_back(std::string(HealthParam) + "=" + std::to_string(percent));
+			if (addAliveZero)
+			{
+				params.push_back(std::string(AliveParam) + "=0");
+			}
+#else
 			// not DupeAlive: that marks a duplicate a dupe tool added, and this one
 			// may be a client's own backup - unless it is dead: then DupeAlive=0 keeps
 			// any failover from fetching it
@@ -1409,6 +1485,7 @@ void DupeSearch::Place(const Job& job, const NzbSummary& pick, std::vector<NzbFe
 			{
 				score = donor.oldScore;
 			}
+#endif
 		}
 		if (SetScore(donor.id, score, params))
 		{
@@ -1525,6 +1602,25 @@ std::string DupeSearch::PickGone(const Job& job)
 	// in history after a download or a failure it still wants its duplicates;
 	// deleted by the user it doesn't: the first duplicate would download
 	NzbInfo* pick = FindNzb(downloadQueue, job.nzbId);
+#ifdef NZBGET_USE_RUST
+	if (!pick || pick->GetDeleting() || pick->GetDeleteStatus() == NzbInfo::dsManual)
+	{
+		return "the pick was deleted";
+	}
+	std::string pickEffKey = EffectiveKey(pick);
+	std::string pickNormName = ReleaseName::Normalize(pick->GetName());
+	std::string jobNormName = ReleaseName::Normalize(job.name);
+	int reason = nzbget_rs_df_eval_pick_gone(
+		1, 0, (int)pick->GetDeleteStatus(), (int)NzbInfo::dsManual,
+		pickEffKey.c_str(), job.dupeKey.c_str(), pickNormName.c_str(), jobNormName.c_str());
+	switch (reason)
+	{
+		case 1: return "the pick was deleted";
+		case 2: return "the duplicate key of the pick changed";
+		case 3: return "the name of the pick changed";
+		default: return "";
+	}
+#else
 	if (!pick || pick->GetDeleting() || pick->GetDeleteStatus() == NzbInfo::dsManual)
 	{
 		return "the pick was deleted";
@@ -1539,6 +1635,7 @@ std::string DupeSearch::PickGone(const Job& job)
         return "the name of the pick changed";
     }
 	return "";
+#endif
 }
 
 int DupeSearch::AddDonor(const Job& job, const NzbSummary& pick, const NzbFetcher::Fetched& posting, int score, double alive)
@@ -1744,11 +1841,20 @@ void DupeSearch::SavePending(const Job& job, const NzbSummary& pick, const std::
 	{
 		const Newznab::Result& listing = verified[i].listing;
 		std::string base = dir + PATH_SEPARATOR + std::to_string(i);
+#ifdef NZBGET_USE_RUST
+		NzbgetRsBuf metaBuf = nzbget_rs_df_format_pending_meta(
+			listing.title.c_str(), listing.indexer.c_str(), listing.grabs, listing.size, (int64_t)listing.date);
+		std::string metaStr(metaBuf.data ? metaBuf.data : "", metaBuf.len);
+		nzbget_rs_free(metaBuf);
+		ok = DupeUtil::WriteAtomic(base + ".nzb", verified[i].data) && DupeUtil::WriteAtomic(base + ".meta", metaStr) &&
+            DupeUtil::WriteAtomic(base + ".inner", verified[i].sameInner ? "1\n" : "0\n");
+#else
 		std::stringstream meta;
 		meta << listing.title << '\t' << listing.indexer << '\t' << listing.grabs << '\t' << listing.size << '\t'
 			<< (long long)listing.date << "\t\n";
 		ok = DupeUtil::WriteAtomic(base + ".nzb", verified[i].data) && DupeUtil::WriteAtomic(base + ".meta", meta.str()) &&
             DupeUtil::WriteAtomic(base + ".inner", verified[i].sameInner ? "1\n" : "0\n");
+#endif
 	}
 	if (!ok || !DupeUtil::WriteAtomic(dir + PATH_SEPARATOR + "phase", "fetched\n"))
 	{
@@ -1893,6 +1999,16 @@ void DupeSearch::ResumePending()
 				break;
 			}
 			NzbFetcher::Fetched posting;
+#ifdef NZBGET_USE_RUST
+			std::string metaRaw = DupeUtil::ReadAll(base + ".meta");
+			NzbgetRsPendingMetaView view{};
+			nzbget_rs_df_parse_pending_meta(metaRaw.data(), metaRaw.size(), &view);
+			posting.listing.title.assign(metaRaw.data() + view.title_offset, view.title_len);
+			posting.listing.indexer.assign(metaRaw.data() + view.indexer_offset, view.indexer_len);
+			posting.listing.grabs = view.grabs;
+			posting.listing.size = view.size;
+			posting.listing.date = (time_t)view.date;
+#else
 			std::stringstream meta(DupeUtil::ReadAll(base + ".meta"));
 			std::string grabs, size, date;
 			std::getline(meta, posting.listing.title, '\t');
@@ -1903,6 +2019,7 @@ void DupeSearch::ResumePending()
 			posting.listing.grabs = atoi(grabs.c_str());
 			posting.listing.size = atoll(size.c_str());
 			posting.listing.date = (time_t)atoll(date.c_str());
+#endif
 			posting.data = DupeUtil::ReadAll(base + ".nzb");
 			if (!NzbReader::Parse(posting.data, posting.info))
 			{
@@ -1942,6 +2059,22 @@ void DupeSearch::LoadState()
 	std::lock_guard<std::mutex> guard(m_mutex);
 	while (std::getline(file, line))
 	{
+#ifdef NZBGET_USE_RUST
+		NzbgetRsDupeSearchStateLine parsed{};
+		if (nzbget_rs_df_parse_dupesearch_state_line(line.data(), line.size(), (int64_t)now, StateTtlSec, &parsed))
+		{
+			if (parsed.within_ttl)
+			{
+				std::string key(line.data() + parsed.key_offset, parsed.key_len);
+				Searched searched;
+				searched.score = parsed.score;
+				searched.time = (time_t)parsed.time;
+				searched.title.assign(line.data() + parsed.title_offset, parsed.title_len);
+				searched.retryable = parsed.retryable != 0;
+				RecordSearch(key, searched);
+			}
+		}
+#else
 		std::stringstream stream(line);
 		std::string key, score, time;
 		if (std::getline(stream, key, '\t') && std::getline(stream, score, '\t') && std::getline(stream, time, '\t'))
@@ -1960,6 +2093,7 @@ void DupeSearch::LoadState()
 				RecordSearch(key, searched);
 			}
 		}
+#endif
 	}
 }
 

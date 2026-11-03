@@ -35,6 +35,9 @@
 #include "Util.h"
 
 #include "DupeUtil.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 using DupeUtil::Lower;
 using DupeUtil::Trim;
@@ -136,6 +139,12 @@ private:
 
 std::string UrlEncode(const std::string& text)
 {
+#ifdef NZBGET_USE_RUST
+	NzbgetRsBuf buf = nzbget_rs_df_url_encode(text.data(), text.size());
+	std::string out(buf.data ? buf.data : "", buf.len);
+	nzbget_rs_free(buf);
+	return out;
+#else
 	static const char* hex = "0123456789ABCDEF";
 	std::string out;
 	for (unsigned char ch : text)
@@ -156,10 +165,17 @@ std::string UrlEncode(const std::string& text)
 		}
 	}
 	return out;
+#endif
 }
 
 std::string DigitsOnly(const std::string& text)
 {
+#ifdef NZBGET_USE_RUST
+	NzbgetRsBuf buf = nzbget_rs_df_digits_only(text.data(), text.size());
+	std::string out(buf.data ? buf.data : "", buf.len);
+	nzbget_rs_free(buf);
+	return out;
+#else
 	std::string out;
 	for (char ch : text)
 	{
@@ -169,17 +185,22 @@ std::string DigitsOnly(const std::string& text)
 		}
 	}
 	return out;
+#endif
 }
 
 // days since 1970-01-01 of a civil date
 long long DaysFromCivil(long long year, int month, int day)
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_df_days_from_civil(year, month, day);
+#else
 	year -= month <= 2;
 	long long era = (year >= 0 ? year : year - 399) / 400;
 	long long yoe = year - era * 400;
 	long long doy = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
 	long long doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
 	return era * 146097 + doe - 719468;
+#endif
 }
 
 }
@@ -193,6 +214,9 @@ bool Newznab::ParseResponse(const std::string& xml, Page& page)
 
 time_t Newznab::ParseDate(const std::string& text)
 {
+#ifdef NZBGET_USE_RUST
+	return (time_t)nzbget_rs_df_parse_newznab_date(text.data(), text.size());
+#else
 	// no date is this long, and std::regex recurses per character (a run of a
 	// megabyte of spaces from an indexer ran the thread out of stack)
 	if (text.size() > 64)
@@ -292,6 +316,7 @@ time_t Newznab::ParseDate(const std::string& text)
 		}
 	}
 	return (time_t)(seconds - offset);
+#endif
 }
 
 std::vector<Newznab::Params> Newznab::BuildQueries(const std::string& title, const std::string& imdb,
@@ -334,6 +359,20 @@ std::vector<Newznab::Params> Newznab::BuildQueries(const std::string& title, con
 
 std::string Newznab::BuildUrl(const std::string& base, const Params& params, const std::string& apiKey)
 {
+#ifdef NZBGET_USE_RUST
+	std::vector<const char*> keys(params.size());
+	std::vector<const char*> vals(params.size());
+	for (size_t i = 0; i < params.size(); i++)
+	{
+		keys[i] = params[i].first.c_str();
+		vals[i] = params[i].second.c_str();
+	}
+	NzbgetRsBuf buf = nzbget_rs_df_build_newznab_url(
+		base.c_str(), keys.data(), vals.data(), params.size(), apiKey.c_str());
+	std::string out(buf.data ? buf.data : "", buf.len);
+	nzbget_rs_free(buf);
+	return out;
+#else
 	std::string url = base;
 	// an address without a path ("http://host:5076") is the indexer's web page,
 	// which answers every search with HTML (B91: every search "isn't XML"): the
@@ -356,15 +395,23 @@ std::string Newznab::BuildUrl(const std::string& base, const Params& params, con
 	}
 	url += "apikey=" + UrlEncode(apiKey);
 	return url;
+#endif
 }
 
 std::string Newznab::Mask(const std::string& text)
 {
+#ifdef NZBGET_USE_RUST
+	NzbgetRsBuf buf = nzbget_rs_df_mask_newznab_text(text.data(), text.size());
+	std::string out(buf.data ? buf.data : "", buf.len);
+	nzbget_rs_free(buf);
+	return out;
+#else
 	static const std::regex apiKey("(apikey=)[^&\\s]+", std::regex::icase);
 	static const std::regex credentials("//[^/@\\s:]+:[^/@\\s]+@");
 	// cut first: std::regex recurses per character of a match
 	std::string masked = std::regex_replace(text.substr(0, 1024), apiKey, "$1***");
 	return std::regex_replace(masked, credentials, "//***@");
+#endif
 }
 
 std::vector<Newznab::Result> Newznab::Search(const std::string& base, const std::string& apiKey,

@@ -54,6 +54,7 @@ pub mod streamrepair;
 pub mod postrepair;
 pub mod queuehotpath;
 pub mod diskstatepp;
+pub mod dupefeed;
 
 pub mod deadpostings;
 pub mod dupewatch;

@@ -11539,6 +11539,575 @@ pub unsafe extern "C" fn nzbget_rs_dsp_twin_resolve_kind(
     into_buf(out)
 }
 
+// ============================================================================
+// DupeSearch, Fleet, DonorHealth, Newznab, FeedCoordinator, FeedInfo &
+// FeedFile Hot-Path FFI (`rust/src/dupefeed.rs`)
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_lower_key(key: *const c_char) -> RsBuf {
+    into_buf(crate::dupefeed::lower_key(crate::diskstatepp::cstr_to_bytes(key)))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_saved_history_backup(
+    has_pick: c_int,
+    pick_full_hash: u32,
+    candidate_delete_status: c_int,
+    candidate_full_hash: u32,
+    ds_dupe: c_int,
+    ds_copy: c_int,
+) -> c_int {
+    if crate::dupefeed::saved_history_backup(
+        has_pick != 0,
+        pick_full_hash,
+        candidate_delete_status,
+        candidate_full_hash,
+        ds_dupe,
+        ds_copy,
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_placement_available(
+    has_backup: c_int,
+    is_nzb_kind: c_int,
+    deleting: c_int,
+    delete_status: c_int,
+    ds_none: c_int,
+    ds_manual: c_int,
+    ds_dupe: c_int,
+    ds_copy: c_int,
+    mark_status: c_int,
+    ks_bad: c_int,
+    dupe_mode: c_int,
+    dm_force: c_int,
+    in_history: c_int,
+    whole_backup: c_int,
+    has_post_info: c_int,
+    is_dupe_success: c_int,
+    has_pick: c_int,
+    pick_full_hash: u32,
+    backup_full_hash: u32,
+    queued_file_exists: c_int,
+    health: c_int,
+    critical_health: c_int,
+    health_check_is_dupe: c_int,
+    has_marked_alive: c_int,
+    marked_alive_val: c_int,
+) -> c_int {
+    if crate::dupefeed::placement_available(
+        has_backup != 0,
+        is_nzb_kind != 0,
+        deleting != 0,
+        delete_status,
+        ds_none,
+        ds_manual,
+        ds_dupe,
+        ds_copy,
+        mark_status,
+        ks_bad,
+        dupe_mode,
+        dm_force,
+        in_history != 0,
+        whole_backup != 0,
+        has_post_info != 0,
+        is_dupe_success != 0,
+        has_pick != 0,
+        pick_full_hash,
+        backup_full_hash,
+        queued_file_exists != 0,
+        health,
+        critical_health,
+        health_check_is_dupe != 0,
+        has_marked_alive != 0,
+        marked_alive_val,
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_sort_verified_postings(
+    total_bytes: *const i64,
+    grabs: *const c_int,
+    dates: *const i64,
+    count: usize,
+    pick_bytes: i64,
+    out_order: *mut usize,
+) {
+    if count == 0 || total_bytes.is_null() || grabs.is_null() || dates.is_null() || out_order.is_null() {
+        return;
+    }
+    crate::dupefeed::sort_verified_postings(
+        std::slice::from_raw_parts(total_bytes, count),
+        std::slice::from_raw_parts(grabs, count),
+        std::slice::from_raw_parts(dates, count),
+        pick_bytes,
+        std::slice::from_raw_parts_mut(out_order, count),
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_eval_member_rerank(
+    base: c_int,
+    wanted_score: c_int,
+    dead_score: c_int,
+    old_score: c_int,
+    alive: f64,
+    all_dead: c_int,
+    out_score: *mut c_int,
+    out_percent: *mut c_int,
+    out_add_alive_zero: *mut c_int,
+) {
+    let (score, percent, add_zero) = crate::dupefeed::eval_member_rerank(
+        base,
+        wanted_score,
+        dead_score,
+        old_score,
+        alive,
+        all_dead != 0,
+    );
+    if !out_score.is_null() {
+        *out_score = score;
+    }
+    if !out_percent.is_null() {
+        *out_percent = percent;
+    }
+    if !out_add_alive_zero.is_null() {
+        *out_add_alive_zero = if add_zero { 1 } else { 0 };
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_eval_pick_gone(
+    has_pick: c_int,
+    deleting: c_int,
+    delete_status: c_int,
+    ds_manual: c_int,
+    pick_eff_key: *const c_char,
+    job_dupe_key: *const c_char,
+    pick_norm_name: *const c_char,
+    job_norm_name: *const c_char,
+) -> c_int {
+    crate::dupefeed::eval_pick_gone(
+        has_pick != 0,
+        deleting != 0,
+        delete_status,
+        ds_manual,
+        crate::diskstatepp::cstr_to_bytes(pick_eff_key),
+        crate::diskstatepp::cstr_to_bytes(job_dupe_key),
+        crate::diskstatepp::cstr_to_bytes(pick_norm_name),
+        crate::diskstatepp::cstr_to_bytes(job_norm_name),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_format_pending_meta(
+    title: *const c_char,
+    indexer: *const c_char,
+    grabs: c_int,
+    size: i64,
+    date: i64,
+) -> RsBuf {
+    let out = crate::dupefeed::format_pending_meta(
+        crate::diskstatepp::cstr_to_bytes(title),
+        crate::diskstatepp::cstr_to_bytes(indexer),
+        grabs,
+        size,
+        date,
+    );
+    into_buf(out)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_parse_pending_meta(
+    meta: *const c_char,
+    len: usize,
+    out_view: *mut crate::dupefeed::RsPendingMetaView,
+) {
+    if out_view.is_null() {
+        return;
+    }
+    let slice = if meta.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(meta as *const u8, len)
+    };
+    *out_view = crate::dupefeed::parse_pending_meta(slice);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_parse_dupesearch_state_line(
+    line: *const c_char,
+    len: usize,
+    now: i64,
+    state_ttl_sec: i64,
+    out_line: *mut crate::dupefeed::RsDupeSearchStateLine,
+) -> c_int {
+    if out_line.is_null() || line.is_null() || len == 0 {
+        return 0;
+    }
+    let slice = std::slice::from_raw_parts(line as *const u8, len);
+    let parsed = crate::dupefeed::parse_dupesearch_state_line(slice, now, state_ttl_sec);
+    let ok = parsed.valid;
+    *out_line = parsed;
+    ok
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_eval_fleet_member_health(
+    checked: c_int,
+    result_complete: c_int,
+    present: c_int,
+    missing: c_int,
+    error: c_int,
+    min_known: c_int,
+    min_alive_pct: c_int,
+    out_alive_pct: *mut c_int,
+    out_dead: *mut c_int,
+    out_member_complete: *mut c_int,
+) {
+    let (alive, dead, complete) = crate::dupefeed::eval_fleet_member_health(
+        checked != 0,
+        result_complete != 0,
+        present,
+        missing,
+        error,
+        min_known,
+        min_alive_pct,
+    );
+    if !out_alive_pct.is_null() {
+        *out_alive_pct = alive;
+    }
+    if !out_dead.is_null() {
+        *out_dead = if dead { 1 } else { 0 };
+    }
+    if !out_member_complete.is_null() {
+        *out_member_complete = if complete { 1 } else { 0 };
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_rank_fleet_candidates(
+    has_error: *const u8,
+    same_as: *const c_int,
+    dead: *const u8,
+    alive: *const c_int,
+    total_bytes: *const i64,
+    count: usize,
+    out_ranked: *mut usize,
+) -> usize {
+    if count == 0
+        || has_error.is_null()
+        || same_as.is_null()
+        || dead.is_null()
+        || alive.is_null()
+        || total_bytes.is_null()
+        || out_ranked.is_null()
+    {
+        return 0;
+    }
+    crate::dupefeed::rank_fleet_candidates(
+        std::slice::from_raw_parts(has_error, count),
+        std::slice::from_raw_parts(same_as, count),
+        std::slice::from_raw_parts(dead, count),
+        std::slice::from_raw_parts(alive, count),
+        std::slice::from_raw_parts(total_bytes, count),
+        std::slice::from_raw_parts_mut(out_ranked, count),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_eval_fleet_outcome_reason(
+    any_usable: c_int,
+    any_alive: c_int,
+    any_unknown: c_int,
+    on_disk: c_int,
+) -> c_int {
+    crate::dupefeed::eval_fleet_outcome_reason(
+        any_usable != 0,
+        any_alive != 0,
+        any_unknown != 0,
+        on_disk != 0,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_donor_health_alive(
+    present: c_int,
+    missing: c_int,
+    error: c_int,
+    min_known: c_int,
+) -> f64 {
+    crate::dupefeed::donor_health_alive(present, missing, error, min_known)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_donor_health_dead_probe(
+    present: c_int,
+    missing: c_int,
+    min_known: c_int,
+) -> c_int {
+    if crate::dupefeed::donor_health_dead_probe(present, missing, min_known) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_donor_sample_count(
+    total_ids: usize,
+    percent: c_int,
+    minimum: c_int,
+    maximum: c_int,
+) -> usize {
+    crate::dupefeed::donor_sample_count(total_ids, percent, minimum, maximum)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_adjust_pipeline_depth(
+    depth: c_int,
+    took_ms: i64,
+    pipeline_max: c_int,
+) -> c_int {
+    crate::dupefeed::adjust_pipeline_depth(depth, took_ms, pipeline_max)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_eval_article_votes(
+    votes: *const c_int,
+    count: usize,
+) -> c_int {
+    if votes.is_null() || count == 0 {
+        return 0;
+    }
+    crate::dupefeed::eval_article_votes(std::slice::from_raw_parts(votes, count))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_resolve_unsettled_vote(
+    votes: *const c_int,
+    count: usize,
+) -> c_int {
+    if votes.is_null() || count == 0 {
+        return 0;
+    }
+    crate::dupefeed::resolve_unsettled_vote(std::slice::from_raw_parts(votes, count))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_url_encode(text: *const c_char, len: usize) -> RsBuf {
+    let slice = if text.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(text as *const u8, len)
+    };
+    into_buf(crate::dupefeed::url_encode(slice))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_digits_only(text: *const c_char, len: usize) -> RsBuf {
+    let slice = if text.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(text as *const u8, len)
+    };
+    into_buf(crate::dupefeed::digits_only(slice))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_days_from_civil(
+    year: i64,
+    month: c_int,
+    day: c_int,
+) -> i64 {
+    crate::dupefeed::days_from_civil(year, month, day)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_parse_newznab_date(
+    text: *const c_char,
+    len: usize,
+) -> i64 {
+    let slice = if text.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(text as *const u8, len)
+    };
+    crate::dupefeed::parse_newznab_date(slice)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_build_newznab_url(
+    base: *const c_char,
+    param_keys: *const *const c_char,
+    param_vals: *const *const c_char,
+    param_count: usize,
+    api_key: *const c_char,
+) -> RsBuf {
+    let mut keys: Vec<&[u8]> = Vec::with_capacity(param_count);
+    let mut vals: Vec<&[u8]> = Vec::with_capacity(param_count);
+    if !param_keys.is_null() && !param_vals.is_null() {
+        for i in 0..param_count {
+            keys.push(crate::diskstatepp::cstr_to_bytes(*param_keys.add(i)));
+            vals.push(crate::diskstatepp::cstr_to_bytes(*param_vals.add(i)));
+        }
+    }
+    let out = crate::dupefeed::build_newznab_url(
+        crate::diskstatepp::cstr_to_bytes(base),
+        &keys,
+        &vals,
+        crate::diskstatepp::cstr_to_bytes(api_key),
+    );
+    into_buf(out)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_mask_newznab_text(
+    text: *const c_char,
+    len: usize,
+) -> RsBuf {
+    let slice = if text.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(text as *const u8, len)
+    };
+    into_buf(crate::dupefeed::mask_newznab_text(slice))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_normalize_feed_nzb_name(
+    filename: *const c_char,
+) -> RsBuf {
+    into_buf(crate::dupefeed::normalize_feed_nzb_name(
+        crate::diskstatepp::cstr_to_bytes(filename),
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_format_dupe_status_mask(dupe_status: c_int) -> RsBuf {
+    into_buf(crate::dupefeed::format_dupe_status_mask(dupe_status))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_should_start_feed(
+    interval_min: c_int,
+    next_update: i64,
+    current_time: i64,
+    fetch: c_int,
+    status: c_int,
+    fs_running: c_int,
+    out_set_force: *mut c_int,
+) -> c_int {
+    let (start, set_force) = crate::dupefeed::should_start_feed(
+        interval_min,
+        next_update,
+        current_time,
+        fetch != 0,
+        status,
+        fs_running,
+    );
+    if !out_set_force.is_null() {
+        *out_set_force = if set_force { 1 } else { 0 };
+    }
+    if start {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_calc_feed_next_interval(
+    success: c_int,
+    interval_min: c_int,
+    last_interval_sec: c_int,
+    out_last_interval_sec: *mut c_int,
+) -> c_int {
+    let (interval_sec, new_last) = crate::dupefeed::calc_feed_next_interval(
+        success != 0,
+        interval_min,
+        last_interval_sec,
+    );
+    if !out_last_interval_sec.is_null() {
+        *out_last_interval_sec = new_last;
+    }
+    interval_sec
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_is_feed_cache_expired(
+    last_usage: i64,
+    cache_time_sec: c_int,
+    cur_time: i64,
+) -> c_int {
+    if crate::dupefeed::is_feed_cache_expired(last_usage, cache_time_sec, cur_time) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_parse_prefixed_int(value: *const c_char) -> c_int {
+    crate::dupefeed::parse_prefixed_int(crate::diskstatepp::cstr_to_bytes(value))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_build_feed_dupe_key(
+    rage_id_str: *const c_char,
+    tvdb_id_str: *const c_char,
+    tvmaze_id_str: *const c_char,
+    series: *const c_char,
+    item_rage_id: c_int,
+    item_tvdb_id: c_int,
+    item_tvmaze_id: c_int,
+    item_imdb_id: c_int,
+    season_num: c_int,
+    episode_num: c_int,
+    season: *const c_char,
+    episode: *const c_char,
+) -> RsBuf {
+    let out = crate::dupefeed::build_feed_dupe_key(
+        crate::diskstatepp::cstr_to_bytes(rage_id_str),
+        crate::diskstatepp::cstr_to_bytes(tvdb_id_str),
+        crate::diskstatepp::cstr_to_bytes(tvmaze_id_str),
+        crate::diskstatepp::cstr_to_bytes(series),
+        item_rage_id,
+        item_tvdb_id,
+        item_tvmaze_id,
+        item_imdb_id,
+        season_num,
+        episode_num,
+        crate::diskstatepp::cstr_to_bytes(season),
+        crate::diskstatepp::cstr_to_bytes(episode),
+    );
+    into_buf(out)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_parse_feed_subject(title: *const c_char) -> RsBuf {
+    into_buf(crate::dupefeed::parse_feed_subject(
+        crate::diskstatepp::cstr_to_bytes(title),
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_df_extract_size_from_description(
+    description: *const c_char,
+) -> i64 {
+    crate::dupefeed::extract_size_from_description(crate::diskstatepp::cstr_to_bytes(description))
+}
+
+
 
 
 

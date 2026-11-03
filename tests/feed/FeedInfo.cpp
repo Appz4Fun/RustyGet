@@ -21,6 +21,9 @@
 
 #include <boost/test/unit_test.hpp>
 #include "FeedInfo.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 BOOST_AUTO_TEST_SUITE(FeedTest)
 
@@ -96,5 +99,43 @@ BOOST_AUTO_TEST_CASE(BuildDupeKeyUsesSeriesIdentifierPriority)
 	tvmazeEpisode.BuildDupeKey(nullptr, nullptr, nullptr, nullptr);
 	BOOST_CHECK_EQUAL(tvmazeEpisode.GetDupeKey(), "tvmazeid=123456-S02-E69");
 }
+
+#ifdef NZBGET_USE_RUST
+BOOST_AUTO_TEST_CASE(RustDupeFeedFfiBoundaryTest)
+{
+	NzbgetRsBuf norm = nzbget_rs_df_normalize_feed_nzb_name("Release.Name.NZB");
+	BOOST_CHECK_EQUAL(std::string(norm.data, norm.len), "Release.Name.nzb");
+	nzbget_rs_free(norm);
+
+	NzbgetRsBuf statusMask = nzbget_rs_df_format_dupe_status_mask(1 | 4 | 16);
+	BOOST_CHECK_EQUAL(std::string(statusMask.data, statusMask.len), "QUEUED,SUCCESS,FAILURE");
+	nzbget_rs_free(statusMask);
+
+	int setForce = 0;
+	BOOST_CHECK_EQUAL(nzbget_rs_df_should_start_feed(15, 1000, 1200, 0, 0, 1, &setForce), 1);
+	BOOST_CHECK_EQUAL(setForce, 0);
+
+	int lastInterval = 0;
+	BOOST_CHECK_EQUAL(nzbget_rs_df_calc_feed_next_interval(0, 15, 60, &lastInterval), 120);
+	BOOST_CHECK_EQUAL(lastInterval, 120);
+
+	NzbgetRsBuf meta = nzbget_rs_df_format_pending_meta("Rel.Title", "IndexerA", 25, 123456789LL, 1749517805LL);
+	NzbgetRsPendingMetaView view{};
+	nzbget_rs_df_parse_pending_meta(meta.data, meta.len, &view);
+	BOOST_CHECK_EQUAL(view.valid, 1);
+	BOOST_CHECK_EQUAL(std::string(meta.data + view.title_offset, view.title_len), "Rel.Title");
+	BOOST_CHECK_EQUAL(std::string(meta.data + view.indexer_offset, view.indexer_len), "IndexerA");
+	BOOST_CHECK_EQUAL(view.grabs, 25);
+	BOOST_CHECK_EQUAL(view.size, 123456789LL);
+	BOOST_CHECK_EQUAL(view.date, 1749517805LL);
+	nzbget_rs_free(meta);
+
+	BOOST_CHECK_EQUAL(nzbget_rs_df_adjust_pipeline_depth(4, 500, 32), 8);
+	int votes[] = { 2, 1 };
+	BOOST_CHECK_EQUAL(nzbget_rs_df_eval_article_votes(votes, 2), 1);
+	BOOST_CHECK_EQUAL(nzbget_rs_df_parse_newznab_date("Tue, 10 Jun 2025 01:10:05+0000", 30), 1749517805LL);
+	BOOST_CHECK_EQUAL(nzbget_rs_df_extract_size_from_description("Size: 1e3 MB"), 1000LL * 1024LL * 1024LL);
+}
+#endif
 
 BOOST_AUTO_TEST_SUITE_END()

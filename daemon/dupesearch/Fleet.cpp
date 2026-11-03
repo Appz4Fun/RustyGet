@@ -41,6 +41,9 @@
 #include "Options.h"
 #include "Log.h"
 #include "WorkState.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 namespace
 {
@@ -354,6 +357,17 @@ Fleet::Result Fleet::Append(Request request)
 		{
 			continue;
 		}
+#ifdef NZBGET_USE_RUST
+		int alivePct = -1, isDead = 0, memberComplete = 0;
+		nzbget_rs_df_eval_fleet_member_health(
+			candidate.checked ? 1 : 0, result.complete ? 1 : 0,
+			candidate.health.present, candidate.health.missing, candidate.health.error,
+			DonorHealth::MinKnown, g_Options->GetDupeMinAlive(),
+			&alivePct, &isDead, &memberComplete);
+		candidate.alive = alivePct;
+		candidate.dead = isDead != 0;
+		result.complete &= memberComplete != 0;
+#else
 		// cut short with nothing found present, a posting is unknown, not dead: its
 		// unsettled articles only count as missing at the limit (F7)
 		bool unknown = !candidate.checked || (!result.complete && candidate.health.present == 0);
@@ -363,6 +377,7 @@ Fleet::Result Fleet::Append(Request request)
 			(alive >= 0 && alive * 100 < g_Options->GetDupeMinAlive() &&
 			 candidate.health.missing >= DonorHealth::MinKnown));
 		result.complete &= candidate.checked && candidate.health.Answered() >= DonorHealth::MinKnown;
+#endif
 	}
 	for (Candidate& candidate : candidates)
 	{
@@ -375,6 +390,38 @@ Fleet::Result Fleet::Append(Request request)
 
 	// the wholest first; of equal health the size most of the fleet has (the
 	// release's own packaging), then the order the client sent them in
+#ifdef NZBGET_USE_RUST
+	std::vector<uint8_t> hasError(candidates.size());
+	std::vector<int> sameAs(candidates.size());
+	std::vector<uint8_t> isDeadArr(candidates.size());
+	std::vector<int> aliveArr(candidates.size());
+	std::vector<int64_t> totalBytesArr(candidates.size());
+	std::vector<size_t> rankedIdx(candidates.size());
+	for (size_t i = 0; i < candidates.size(); i++)
+	{
+		hasError[i] = candidates[i].error.empty() ? 0 : 1;
+		sameAs[i] = candidates[i].sameAs;
+		isDeadArr[i] = candidates[i].dead ? 1 : 0;
+		aliveArr[i] = candidates[i].alive;
+		totalBytesArr[i] = candidates[i].summary.totalBytes;
+	}
+	size_t rankedCount = nzbget_rs_df_rank_fleet_candidates(
+		hasError.data(), sameAs.data(), isDeadArr.data(), aliveArr.data(), totalBytesArr.data(),
+		candidates.size(), rankedIdx.data());
+	std::vector<Candidate*> order;
+	std::vector<Candidate*> ranked;
+	ranked.reserve(rankedCount);
+	for (size_t i = 0; i < rankedCount; i++)
+	{
+		Candidate* c = &candidates[rankedIdx[i]];
+		ranked.push_back(c);
+		if (c->sameAs < 0)
+		{
+			order.push_back(c);
+		}
+	}
+	auto tier = [](const Candidate& c) { return !c.error.empty() ? 3 : c.dead ? 2 : c.alive < 0 ? 1 : 0; };
+#else
 	std::vector<long long> sizes;
 	for (Candidate& candidate : candidates)
 	{
@@ -414,6 +461,7 @@ Fleet::Result Fleet::Append(Request request)
 			}
 		}
 	}
+#endif
 
 	// nzbget shuts down: adding now would wait for the stopped scanner for good (as
 	// in B37); the client sends the fleet again after the restart
@@ -546,8 +594,17 @@ Fleet::Result Fleet::Append(Request request)
 		// below the floor is dead, though the check of the rest ran to the limit (F10)
 		bool anyUnknown = std::any_of(order.begin(), order.end(),
 			[&](const Candidate* c) { return c->error.empty() && c->alive < 0; });
+#ifdef NZBGET_USE_RUST
+		int reasonCode = nzbget_rs_df_eval_fleet_outcome_reason(
+			anyUsable ? 1 : 0, anyAlive ? 1 : 0, anyUnknown ? 1 : 0, onDisk ? 1 : 0);
+		static const char* const kReasons[] = {
+			"NO_USABLE_MEMBERS", "INCOMPLETE", "ALL_DEAD", "ALREADY_DOWNLOADED", "NOT_QUEUED"
+		};
+		result.reason = kReasons[(reasonCode >= 0 && reasonCode < 5) ? reasonCode : 4];
+#else
 		result.reason = !anyUsable ? "NO_USABLE_MEMBERS" : !anyAlive ? (anyUnknown ? "INCOMPLETE" : "ALL_DEAD") :
 			onDisk ? "ALREADY_DOWNLOADED" : "NOT_QUEUED";
+#endif
 	}
 	info("Fleet of %i nzb-file(s) for %s: %s%s", (int)request.members.size(), request.dupeKey.c_str(),
 		result.chosen ? ("queued #" + std::to_string(result.chosen)).c_str() : result.reason.c_str(),

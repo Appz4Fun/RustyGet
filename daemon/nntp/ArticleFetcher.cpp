@@ -34,52 +34,22 @@
 #include "StatMeter.h"
 #include "Util.h"
 #include "WorkState.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 bool ArticleFetchLimits::AddRawBytes(int64 bytes)
 {
-#ifdef NZBGET_USE_RUST
 	return nzbget_rs_article_fetch_add_raw_bytes(&m_rawBytes, bytes) != 0;
-#else
-	if (bytes < 0 || bytes > MaxRawBytes - m_rawBytes)
-	{
-		return false;
-	}
-	m_rawBytes += bytes;
-	return true;
-#endif
 }
 
 bool ArticleFetchLimits::HeaderWithinLimit(bool declaredRangeKnown) const
 {
-#ifdef NZBGET_USE_RUST
 	return nzbget_rs_article_fetch_header_within_limit(m_rawBytes, declaredRangeKnown ? 1 : 0) != 0;
-#else
-	return declaredRangeKnown || m_rawBytes <= MaxHeaderBytes;
-#endif
 }
 
 bool ArticleFetchLimits::AddDecodedBytes(int64 bytes, int64 begin, int64 end,
 	int64 fileSize)
 {
-#ifdef NZBGET_USE_RUST
 	return nzbget_rs_article_fetch_add_decoded_bytes(&m_decodedBytes, bytes, begin, end, fileSize) != 0;
-#else
-	if (bytes < 0 || begin <= 0 || end < begin || fileSize <= 0 || end > fileSize)
-	{
-		return false;
-	}
-
-	int64 declaredBytes = end - begin + 1;
-	if (declaredBytes > MaxDecodedBytes || bytes > declaredBytes - m_decodedBytes)
-	{
-		return false;
-	}
-	m_decodedBytes += bytes;
-	return true;
-#endif
 }
 
 ArticleFetcher::FetchedArticle ArticleFetcher::Fetch(const char* messageId,
@@ -460,7 +430,6 @@ ArticleFetcher::FetchedArticle ArticleFetcher::FetchFromConnection(NntpConnectio
 		return result;
 	}
 
-#ifdef NZBGET_USE_RUST
 	int64 decOffset = 0;
 	int64 decFileSize = 0;
 	int decSuccess = 0;
@@ -477,24 +446,6 @@ ArticleFetcher::FetchedArticle ArticleFetcher::FetchFromConnection(NntpConnectio
 	result.Offset = decOffset;
 	result.FileSize = decFileSize;
 	result.Success = decSuccess != 0;
-#else
-	if (decoder.Check() != Decoder::dsFinished ||
-		decoder.GetFormat() != Decoder::efYenc ||
-		decoder.GetBeginPos() <= 0 || decoder.GetEndPos() <= 0 ||
-		result.Data.empty())
-	{
-		detail("Stream repair: article %s from %s failed decoding",
-			messageId, connection->GetNewsServer()->GetName());
-		return result;
-	}
-
-	// yEnc part positions are 1-based inclusive; the decoded byte count must
-	// match the declared part range or the article cannot be trusted
-	result.Offset = decoder.GetBeginPos() - 1;
-	result.FileSize = decoder.GetSize();
-	result.Success = (int64)result.Data.size() ==
-		decoder.GetEndPos() - decoder.GetBeginPos() + 1;
-#endif
 
 	return result;
 }
@@ -562,17 +513,10 @@ void ArticleBatchFetcher::Begin(std::vector<Request> requests)
 bool ArticleBatchFetcher::ClaimNext(int batchId, size_t& index, Request& request)
 {
 	Guard guard(m_mutex);
-#ifdef NZBGET_USE_RUST
 	if (!nzbget_rs_cdn_article_batch_can_claim_next(
 		batchId, m_batchId, m_cancelled ? 1 : 0, m_stopped ? 1 : 0,
 		m_nextClaim, m_requests.size(), m_nextDeliver, GetWindowParts(),
 		m_bufferedBytes, MaxBufferedBytes))
-#else
-	if (batchId != m_batchId || m_cancelled || m_stopped ||
-		m_nextClaim >= m_requests.size() ||
-		m_nextClaim - m_nextDeliver >= (size_t)GetWindowParts() ||
-		m_bufferedBytes >= MaxBufferedBytes)
-#endif
 	{
 		return false;
 	}

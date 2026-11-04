@@ -22,9 +22,7 @@
 #include "nzbget.h"
 #include "FeedInfo.h"
 #include "Util.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 FeedInfo::FeedInfo(
 	int id,
@@ -64,11 +62,7 @@ FeedItemInfo::Attr* FeedItemInfo::Attributes::Find(const char* name)
 {
 	for (Attr& attr : this)
 	{
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_sfc_feed_info_attr_name_eq_ignore_case(attr.GetName(), name) != 0)
-#else
-		if (!strcasecmp(attr.GetName(), name))
-#endif
 		{
 			return &attr;
 		}
@@ -92,25 +86,12 @@ void FeedItemInfo::SetEpisode(const char* episode)
 
 int FeedItemInfo::ParsePrefixedInt(const char *value)
 {
-#ifdef NZBGET_USE_RUST
 	return nzbget_rs_df_parse_prefixed_int(value);
-#else
-	const char* val = value;
-	if (!strchr("0123456789", *val))
-	{
-		val++;
-	}
-	return atoi(val);
-#endif
 }
 
 void FeedItemInfo::AppendDupeKey(const char* extraDupeKey)
 {
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_sfc_feed_info_should_append_dupe_key(m_dupeKey.empty() ? 1 : 0, extraDupeKey) != 0)
-#else
-	if (!m_dupeKey.empty() && !Util::EmptyStr(extraDupeKey))
-#endif
 	{
 		m_dupeKey += "-";
 		m_dupeKey += extraDupeKey;
@@ -119,7 +100,6 @@ void FeedItemInfo::AppendDupeKey(const char* extraDupeKey)
 
 void FeedItemInfo::BuildDupeKey(const char* rageId, const char* tvdbId, const char* tvmazeId, const char* series)
 {
-#ifdef NZBGET_USE_RUST
 	bool anySeriesId = !Util::EmptyStr(series) ||
 		(!Util::EmptyStr(rageId) ? atoi(rageId) : m_rageId) != 0 ||
 		(!Util::EmptyStr(tvdbId) ? atoi(tvdbId) : m_tvdbId) != 0 ||
@@ -133,47 +113,11 @@ void FeedItemInfo::BuildDupeKey(const char* rageId, const char* tvdbId, const ch
 	m_dupeKey.assign(buf.data ? buf.data : "", buf.len);
 	nzbget_rs_free(buf);
 	m_dupeKey.shrink_to_fit();
-#else
-	int rageIdVal = !Util::EmptyStr(rageId) ? atoi(rageId) : m_rageId;
-	int tvdbIdVal = !Util::EmptyStr(tvdbId) ? atoi(tvdbId) : m_tvdbId;
-	int tvmazeIdVal = !Util::EmptyStr(tvmazeId) ? atoi(tvmazeId) : m_tvmazeId;
-
-	if (!Util::EmptyStr(series) && GetSeasonNum() != 0 && GetEpisodeNum() != 0)
-	{
-		m_dupeKey = std::string("series=") + series + "-" + m_season + "-" + m_episode;
-	}
-	else if (rageIdVal != 0 && GetSeasonNum() != 0 && GetEpisodeNum() != 0)
-	{
-		m_dupeKey = "rageid=" + std::to_string(rageIdVal) + "-" + m_season + "-" + m_episode;
-	}
-	else if (tvdbIdVal != 0 && GetSeasonNum() != 0 && GetEpisodeNum() != 0)
-	{
-		m_dupeKey = "tvdbid=" + std::to_string(tvdbIdVal) + "-" + m_season + "-" + m_episode;
-	}
-	else if (tvmazeIdVal != 0 && GetSeasonNum() != 0 && GetEpisodeNum() != 0)
-	{
-		m_dupeKey = "tvmazeid=" + std::to_string(tvmazeIdVal) + "-" + m_season + "-" + m_episode;
-	}
-	else if (m_imdbId != 0)
-	{
-		m_dupeKey = "imdb=" + std::to_string(m_imdbId);
-	}
-	else
-	{
-		m_dupeKey = "";
-	}
-
-	m_dupeKey.shrink_to_fit();
-#endif
 }
 
 int FeedItemInfo::GetSeasonNum()
 {
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_sfc_feed_info_should_parse_season_episode(m_season.empty() ? 1 : 0, m_seasonEpisodeParsed ? 1 : 0) != 0)
-#else
-	if (m_season.empty() && !m_seasonEpisodeParsed)
-#endif
 	{
 		ParseSeasonEpisode();
 	}
@@ -183,11 +127,7 @@ int FeedItemInfo::GetSeasonNum()
 
 int FeedItemInfo::GetEpisodeNum()
 {
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_sfc_feed_info_should_parse_season_episode(m_episode.empty() ? 1 : 0, m_seasonEpisodeParsed ? 1 : 0) != 0)
-#else
-	if (m_episode.empty() && !m_seasonEpisodeParsed)
-#endif
 	{
 		ParseSeasonEpisode();
 	}

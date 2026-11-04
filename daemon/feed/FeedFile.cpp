@@ -25,9 +25,7 @@
 #include "DownloadInfo.h"
 #include "Options.h"
 #include "Util.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 FeedFile::FeedFile(const char* filename, const char* infoName) 
 	: m_fileName(filename ? filename : "")
@@ -48,40 +46,9 @@ void FeedFile::LogDebugInfo()
 
 void FeedFile::ParseSubject(FeedItemInfo& feedItemInfo)
 {
-#ifdef NZBGET_USE_RUST
 	NzbgetRsBuf buf = nzbget_rs_df_parse_feed_subject(feedItemInfo.GetTitle());
 	feedItemInfo.SetFilename(buf.data ? buf.data : "");
 	nzbget_rs_free(buf);
-#else
-	// if title has quotation marks we use only part within quotation marks
-	char* p = (char*)feedItemInfo.GetTitle();
-	char* start = strchr(p, '\"');
-	if (start)
-	{
-		start++;
-		char* end = strchr(start + 1, '\"');
-		if (end)
-		{
-			int len = (int)(end - start);
-			char* point = strchr(start + 1, '.');
-			if (point && point < end)
-			{
-				CString filename(start, len);
-
-				char* ext = strrchr(filename, '.');
-				if (ext && !strcasecmp(ext, ".par2"))
-				{
-					*ext = '\0';
-				}
-
-				feedItemInfo.SetFilename(filename);
-				return;
-			}
-		}
-	}
-
-	feedItemInfo.SetFilename(feedItemInfo.GetTitle());
-#endif
 }
 
 
@@ -116,73 +83,8 @@ bool FeedFile::Parse()
 
 int64 FeedFile::ExtractSizeFromDescription(std::string_view description)
 {
-#ifdef NZBGET_USE_RUST
 	std::string descStr(description);
 	return nzbget_rs_df_extract_size_from_description(descStr.c_str());
-#else
-	size_t pos = description.find("Size");
-	if (pos == std::string::npos)
-	{
-		pos = description.find("size");
-	}
-	if (pos == std::string::npos)
-	{
-		return 0;
-	}
-
-	pos += 4;
-
-	double size = 0;
-	bool foundSize = false;
-	std::string units;
-
-	for (; pos < description.size(); ++pos)
-	{
-		if (description[pos] == ':' || std::isspace(description[pos]))
-			continue;
-		
-		if (!foundSize)
-		{
-			auto res = Util::StrToNum<double>(description.data() + pos);
-			if (!res)
-			{
-				break;
-			}
-			else
-			{
-				foundSize = true;
-				size = res.value();
-				for (; pos < description.size() && !std::isspace(description[pos]); ++pos);
-				continue;
-			}
-		}
-
-		if (pos + 2 <= description.size())
-		{
-			units = description.substr(pos, 2);
-			break;
-		}
-	}
-
-	if (units == "KB")
-	{
-		size *= 1024.0;
-	}	
-	else if (units == "MB")
-	{
-		size *= 1024.0 * 1024.0;
-	}	
-	else if (units == "GB")
-	{
-		size *= 1024.0 * 1024.0 * 1024.0;
-	}
-	else if (units == "TB")
-	{
-		size *= 1024.0 * 1024.0 * 1024.0 * 1024.0;
-	}
-
-	return static_cast<int64>(std::round(size));
-#endif
 }
 
 void FeedFile::Parse_StartElement(const char* name, const char **atts)
@@ -208,7 +110,6 @@ void FeedFile::Parse_StartElement(const char* name, const char **atts)
 		// <enclosure url="http://myindexer.com/fetch/9eeb264aecce961a6e0d" length="150263340" type="application/x-nzb" />
 		for (; *atts; atts+=2)
 		{
-#ifdef NZBGET_USE_RUST
 			int encKind = nzbget_rs_sfc_feed_file_classify_enclosure_attr(atts[0]);
 			if (encKind == 1)
 			{
@@ -221,19 +122,6 @@ void FeedFile::Parse_StartElement(const char* name, const char **atts)
 				int64 size = atoll(atts[1]);
 				m_feedItemInfo->SetSize(size);
 			}
-#else
-			if (!strcmp("url", atts[0]))
-			{
-				CString url = atts[1];
-				WebUtil::XmlDecode(url);
-				m_feedItemInfo->SetUrl(url);
-			}
-			else if (!strcmp("length", atts[0]))
-			{
-				int64 size = atoll(atts[1]);
-				m_feedItemInfo->SetSize(size);
-			}
-#endif
 			if (m_feedItemInfo->GetSize() == 0)
 			{
 				int64 size = ExtractSizeFromDescription(m_feedItemInfo->GetDescription());
@@ -242,19 +130,12 @@ void FeedFile::Parse_StartElement(const char* name, const char **atts)
 		}
 	}
 	else if (m_feedItemInfo && 
-#ifdef NZBGET_USE_RUST
 		atts[0] && atts[1] && atts[2] && atts[3] &&
 		nzbget_rs_sfc_feed_file_is_newznab_attr_element(name, atts[0], atts[1], atts[2], atts[3]) != 0
-#else
-		(!strcmp("newznab:attr", name) || !strcmp("nZEDb:attr", name)) &&
-		atts[0] && atts[1] && atts[2] && atts[3] &&
-		!strcmp("name", atts[0]) && !strcmp("value", atts[2])
-#endif
 	)
 	{
 		m_feedItemInfo->GetAttributes()->emplace_back(atts[1], atts[3]);
 
-#ifdef NZBGET_USE_RUST
 		int attrKind = nzbget_rs_sfc_feed_file_classify_newznab_attr_key(atts[1], m_feedItemInfo->GetSize());
 		if (attrKind == 1)
 		{
@@ -285,53 +166,6 @@ void FeedFile::Parse_StartElement(const char* name, const char **atts)
 		{
 			m_feedItemInfo->SetSeason(atts[3]);
 		}
-#else
-		// <newznab:attr name="size" value="5423523453534" />
-		if (m_feedItemInfo->GetSize() == 0 &&
-			!strcmp("size", atts[1]))
-		{
-			int64 size = atoll(atts[3]);
-			m_feedItemInfo->SetSize(size);
-		}
-
-		// <newznab:attr name="imdb" value="1588173"/>
-		else if (!strcmp("imdb", atts[1]))
-		{
-			m_feedItemInfo->SetImdbId(atoi(atts[3]));
-		}
-
-		// <newznab:attr name="rageid" value="33877"/>
-		else if (!strcmp("rageid", atts[1]))
-		{
-			m_feedItemInfo->SetRageId(atoi(atts[3]));
-		}
-
-		// <newznab:attr name="tvdbid" value="33877"/>
-		else if (!strcmp("tvdbid", atts[1]))
-		{
-			m_feedItemInfo->SetTvdbId(atoi(atts[3]));
-		}
-
-		// <newznab:attr name="tvmazeid" value="33877"/>
-		else if (!strcmp("tvmazeid", atts[1]))
-		{
-			m_feedItemInfo->SetTvmazeId(atoi(atts[3]));
-		}
-
-		// <newznab:attr name="episode" value="E09"/>
-		// <newznab:attr name="episode" value="9"/>
-		else if (!strcmp("episode", atts[1]))
-		{
-			m_feedItemInfo->SetEpisode(atts[3]);
-		}
-
-		// <newznab:attr name="season" value="S03"/>
-		// <newznab:attr name="season" value="3"/>
-		else if (!strcmp("season", atts[1]))
-		{
-			m_feedItemInfo->SetSeason(atts[3]);
-		}
-#endif
 	}
 }
 
@@ -343,7 +177,6 @@ void FeedFile::Parse_EndElement(const char* name)
 	// Trim the collected content once after all chunks (text + CDATA) are merged
 	Util::Trim(m_tagContent);
 
-#ifdef NZBGET_USE_RUST
 	int endKind = m_feedItemInfo
 		? nzbget_rs_sfc_feed_file_classify_end_element(name, 1, m_feedItemInfo->GetUrl()[0] == '\0' ? 1 : 0)
 		: 0;
@@ -382,43 +215,6 @@ void FeedFile::Parse_EndElement(const char* name)
 		}
 		ResetTagContent();
 	}
-#else
-	if (!strcmp("title", name) && m_feedItemInfo)
-	{
-		m_feedItemInfo->SetTitle(m_tagContent.c_str());
-		ResetTagContent();
-		ParseSubject(*m_feedItemInfo);
-	}
-	else if (!strcmp("link", name) && m_feedItemInfo && m_feedItemInfo->GetUrl()[0] == '\0')
-	{
-		m_feedItemInfo->SetUrl(m_tagContent.c_str());
-		ResetTagContent();
-	}
-	else if (!strcmp("category", name) && m_feedItemInfo)
-	{
-		m_feedItemInfo->SetCategory(m_tagContent.c_str());
-		ResetTagContent();
-	}
-	else if (!strcmp("description", name) && m_feedItemInfo)
-	{
-		// cleanup CDATA
-		CString description = m_tagContent.c_str();
-		WebUtil::XmlStripTags(description);
-		WebUtil::XmlDecode(description);
-		WebUtil::XmlRemoveEntities(description);
-		m_feedItemInfo->SetDescription(description);
-		ResetTagContent();
-	}
-	else if (!strcmp("pubDate", name) && m_feedItemInfo)
-	{
-		time_t unixtime = WebUtil::ParseRfc822DateTime(m_tagContent.c_str());
-		if (unixtime > 0)
-		{
-			m_feedItemInfo->SetTime(unixtime);
-		}
-		ResetTagContent();
-	}
-#endif
 
 	m_currentElement.clear();
 }
@@ -486,10 +282,6 @@ void FeedFile::SAX_error(FeedFile* file, const char *msg, ...)
 	va_end(argp);
 
 	// remove trailing CRLF
-#ifdef NZBGET_USE_RUST
 	errMsg[nzbget_rs_sfc_feed_file_trim_trailing_crlf_space_len(errMsg)] = '\0';
-#else
-	for (char* pend = errMsg + strlen(errMsg) - 1; pend >= errMsg && (*pend == '\n' || *pend == '\r' || *pend == ' '); pend--) *pend = '\0';
-#endif
 	error("Error parsing rss feed %s: %s", file->m_infoName.c_str(), errMsg);
 }

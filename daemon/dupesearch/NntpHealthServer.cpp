@@ -30,9 +30,7 @@
 #include "NntpConnection.h"
 #include "ServerPool.h"
 #include "Util.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 namespace
 {
@@ -41,19 +39,11 @@ namespace
 // list it without them
 std::string Bracketed(const std::string& messageId)
 {
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_snh_nntp_health_is_bracketed(messageId.c_str(), messageId.size()))
 	{
 		return messageId;
 	}
 	return "<" + messageId + ">";
-#else
-	if (!messageId.empty() && messageId.front() == '<' && messageId.back() == '>')
-	{
-		return messageId;
-	}
-	return "<" + messageId + ">";
-#endif
 }
 
 }
@@ -62,11 +52,7 @@ using Answer = DonorHealth::Answer;
 
 int NntpHealthServer::CapFor(int connections)
 {
-#ifdef NZBGET_USE_RUST
 	return nzbget_rs_snh_nntp_health_cap_for(connections, MaxCap);
-#else
-	return std::max(1, std::min(MaxCap, connections / 2));
-#endif
 }
 
 DonorHealth::ServerList NntpHealthServer::Servers()
@@ -79,34 +65,20 @@ DonorHealth::ServerList NntpHealthServer::Servers()
 	std::set<int> groups;
 	for (NewsServer* server : g_ServerPool->GetServers())
 	{
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_din_nntp_health_is_server_eligible(server->GetActive() ? 1 : 0, server->GetMaxConnections()) == 0)
 		{
 			continue;
 		}
-#else
-		if (!server->GetActive() || server->GetMaxConnections() == 0)
-		{
-			continue;
-		}
-#endif
 		if (server->GetGroup() > 0 && !groups.insert(server->GetGroup()).second)
 		{
 			continue;
 		}
 		std::shared_ptr<NntpHealthServer>& entry = known[server->GetId()];
-#ifdef NZBGET_USE_RUST
 		int wantedCap = CapFor(server->GetMaxConnections());
 		if (nzbget_rs_din_nntp_health_needs_entry_recreate(entry ? 1 : 0, entry ? entry->Cap() : 0, wantedCap) != 0)
 		{
 			entry = std::make_shared<NntpHealthServer>(server->GetId(), wantedCap);
 		}
-#else
-		if (!entry || entry->Cap() != CapFor(server->GetMaxConnections()))
-		{
-			entry = std::make_shared<NntpHealthServer>(server->GetId(), CapFor(server->GetMaxConnections()));
-		}
-#endif
 		list.push_back(entry);
 	}
 	return list;
@@ -123,13 +95,9 @@ std::vector<Answer> NntpHealthServer::Exchange(const std::vector<DonorHealth::Re
 	// a connection of the pool: it stays the server's, only borrowed
 	NntpConnection* connection = nullptr;
 	time_t waitStart = Util::CurrentTime();
-#ifdef NZBGET_USE_RUST
 	while (nzbget_rs_din_nntp_health_should_keep_waiting_for_conn(
 		connection ? 1 : 0, HttpGet::Stopped() ? 1 : 0,
 		(int64_t)Util::CurrentTime(), (int64_t)waitStart, ConnectionWaitSec) != 0)
-#else
-	while (!connection && !HttpGet::Stopped() && Util::CurrentTime() - waitStart <= ConnectionWaitSec)
-#endif
 	{
 		connection = g_ServerPool->GetConnection(server->GetNormLevel(), server, nullptr);
 		if (!connection)
@@ -170,20 +138,12 @@ std::vector<Answer> NntpHealthServer::Exchange(const std::vector<DonorHealth::Re
 		for (const std::string& group : *batch.front().groups)
 		{
 			joined = connection->JoinGroup(group.c_str());
-#ifdef NZBGET_USE_RUST
 			if (nzbget_rs_din_nntp_health_is_join_group_ok(joined) != 0)
-#else
-			if (joined && !strncmp(joined, "2", 1))
-#endif
 			{
 				break;
 			}
 		}
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_din_nntp_health_is_join_group_ok(joined) == 0)
-#else
-		if (!joined || strncmp(joined, "2", 1))
-#endif
 		{
 			release.broken = !joined;
 			throw DonorHealth::ExchangeError();
@@ -226,12 +186,8 @@ std::vector<Answer> NntpHealthServer::Exchange(const std::vector<DonorHealth::Re
 			error.answers = answers;
 			throw error;
 		}
-#ifdef NZBGET_USE_RUST
 		int statReply = nzbget_rs_snh_nntp_health_classify_stat_reply(line);
 		answers.push_back(statReply == 0 ? Answer::Present : statReply == 1 ? Answer::Missing : Answer::Error);
-#else
-		answers.push_back(!strncmp(line, "223", 3) ? Answer::Present : !strncmp(line, "430", 3) ? Answer::Missing : Answer::Error);
-#endif
 	}
 
 	// BODY for the articles that have a gate: one server at a time, verified
@@ -243,13 +199,9 @@ std::vector<Answer> NntpHealthServer::Exchange(const std::vector<DonorHealth::Re
             DonorHealth::ExchangeError error;
             error.answers = answers;
             for (size_t j = i; j < batch.size(); j++)
-#ifdef NZBGET_USE_RUST
                 if (nzbget_rs_din_nntp_health_should_reset_gated_present_to_error(
                     batch[j].gate ? 1 : 0, (int)error.answers[j], (int)Answer::Present) != 0)
                     error.answers[j] = Answer::Error;
-#else
-                if (batch[j].gate && error.answers[j] == Answer::Present) error.answers[j] = Answer::Error;
-#endif
             throw error;
         }
 		if (!batch[i].gate || answers[i] != Answer::Present)
@@ -270,7 +222,6 @@ std::vector<Answer> NntpHealthServer::Exchange(const std::vector<DonorHealth::Re
 					}
 					ArticleFetcher fetcher;
 					ArticleFetcher::FetchedArticle article = fetcher.FetchFromConnection(connection, Bracketed(batch[i].messageId).c_str(), groups);
-#ifdef NZBGET_USE_RUST
 					int throwError = 0;
 					int classified = nzbget_rs_din_nntp_health_classify_body_fetch_result(
 						article.Success ? 1 : 0, article.Transient ? 1 : 0,
@@ -280,18 +231,6 @@ std::vector<Answer> NntpHealthServer::Exchange(const std::vector<DonorHealth::Re
 						throw DonorHealth::ExchangeError();
 					}
 					return (Answer)classified;
-#else
-					if (article.Success)
-					{
-						return Answer::Present;
-					}
-					if (article.Transient)
-					{
-						// the connection broke mid-body
-						throw DonorHealth::ExchangeError();
-					}
-					return Answer::BodyBad;
-#endif
 				});
 		}
 		catch (DonorHealth::ExchangeError&)
@@ -303,12 +242,8 @@ std::vector<Answer> NntpHealthServer::Exchange(const std::vector<DonorHealth::Re
 			error.answers[i] = Answer::Error;
 			for (size_t j = i + 1; j < batch.size(); j++)
 			{
-#ifdef NZBGET_USE_RUST
 				if (nzbget_rs_din_nntp_health_should_reset_gated_present_to_error(
 					batch[j].gate ? 1 : 0, (int)answers[j], (int)Answer::Present) != 0)
-#else
-				if (batch[j].gate && answers[j] == Answer::Present)
-#endif
 				{
 					error.answers[j] = Answer::Error;
 				}

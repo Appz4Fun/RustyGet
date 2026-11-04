@@ -41,9 +41,7 @@
 #include "Options.h"
 #include "Log.h"
 #include "WorkState.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 namespace
 {
@@ -91,12 +89,8 @@ namespace
 Fleet::Result Fleet::Append(Request request)
 {
 	Result result;
-#ifdef NZBGET_USE_RUST
 	request.timeoutSec = nzbget_rs_dqh_fleet_clamp_timeout_sec(
 		request.timeoutSec, (int)MaxTimeoutSec);
-#else
-	request.timeoutSec = std::max(5, std::min(request.timeoutSec, (int)MaxTimeoutSec));
-#endif
 	if (request.members.empty())
 	{
 		result.reason = "NO_MEMBERS";
@@ -196,7 +190,6 @@ Fleet::Result Fleet::Append(Request request)
 				{
 					return;
 				}
-#ifdef NZBGET_USE_RUST
 				int64_t newTop = top;
 				nzbget_rs_dqh_fleet_update_key_score_bounds(
 					top, lowest, any ? 1 : 0, queued ? 1 : 0,
@@ -208,17 +201,6 @@ Fleet::Result Fleet::Append(Request request)
 					&newTop, &lowest, &runningId, &runningScore);
 				top = newTop;
 				any = true;
-#else
-				top = std::max(top, nzbInfo->GetDupeScore() + 1000LL);
-				lowest = any ? std::min(lowest, nzbInfo->GetDupeScore()) : nzbInfo->GetDupeScore();
-				any = true;
-				if (queued && !nzbInfo->GetDeleting() && nzbInfo->GetDeleteStatus() == NzbInfo::dsNone &&
-					(!runningId || nzbInfo->GetDupeScore() > runningScore))
-				{
-					runningId = nzbInfo->GetId();
-					runningScore = nzbInfo->GetDupeScore();
-				}
-#endif
 				// a merged item (GroupMerge) names its nzb-files joined with '|': each is
 				// one of its postings (F20: none was seen, and a resent fleet added them again)
 				std::string names = nzbInfo->GetQueuedFilename() ? nzbInfo->GetQueuedFilename() : "";
@@ -277,7 +259,6 @@ Fleet::Result Fleet::Append(Request request)
 		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
 		{
 			NzbInfo* item = historyInfo->GetKind() == HistoryInfo::hkNzb ? historyInfo->GetNzbInfo() : nullptr;
-#ifdef NZBGET_USE_RUST
 			if (!item || nzbget_rs_dqh_fleet_is_already_downloaded_history_item(
 				item != nullptr ? 1 : 0,
 				(int)item->GetDeleteStatus(),
@@ -286,10 +267,6 @@ Fleet::Result Fleet::Append(Request request)
 				(int)item->GetMarkStatus(),
 				(int)NzbInfo::ksBad) == 0 ||
 				!ReleaseName::Readable(item->GetName()))
-#else
-			if (!item || item->GetDeleteStatus() != NzbInfo::dsNone || !item->IsDupeSuccess() ||
-				item->GetMarkStatus() == NzbInfo::ksBad || !ReleaseName::Readable(item->GetName()))
-#endif
 			{
 				continue;
 			}
@@ -387,7 +364,6 @@ Fleet::Result Fleet::Append(Request request)
 		{
 			continue;
 		}
-#ifdef NZBGET_USE_RUST
 		int alivePct = -1, isDead = 0, memberComplete = 0;
 		nzbget_rs_df_eval_fleet_member_health(
 			candidate.checked ? 1 : 0, result.complete ? 1 : 0,
@@ -397,17 +373,6 @@ Fleet::Result Fleet::Append(Request request)
 		candidate.alive = alivePct;
 		candidate.dead = isDead != 0;
 		result.complete &= memberComplete != 0;
-#else
-		// cut short with nothing found present, a posting is unknown, not dead: its
-		// unsettled articles only count as missing at the limit (F7)
-		bool unknown = !candidate.checked || (!result.complete && candidate.health.present == 0);
-		double alive = unknown ? -1 : candidate.health.Alive();
-		candidate.alive = alive < 0 ? -1 : (int)std::lround(100 * alive);
-		candidate.dead = !unknown && (DonorHealth::DeadProbe(candidate.health) ||
-			(alive >= 0 && alive * 100 < g_Options->GetDupeMinAlive() &&
-			 candidate.health.missing >= DonorHealth::MinKnown));
-		result.complete &= candidate.checked && candidate.health.Answered() >= DonorHealth::MinKnown;
-#endif
 	}
 	for (Candidate& candidate : candidates)
 	{
@@ -420,7 +385,6 @@ Fleet::Result Fleet::Append(Request request)
 
 	// the wholest first; of equal health the size most of the fleet has (the
 	// release's own packaging), then the order the client sent them in
-#ifdef NZBGET_USE_RUST
 	std::vector<uint8_t> hasError(candidates.size());
 	std::vector<int> sameAs(candidates.size());
 	std::vector<uint8_t> isDeadArr(candidates.size());
@@ -451,47 +415,6 @@ Fleet::Result Fleet::Append(Request request)
 		}
 	}
 	auto tier = [](const Candidate& c) { return !c.error.empty() ? 3 : c.dead ? 2 : c.alive < 0 ? 1 : 0; };
-#else
-	std::vector<long long> sizes;
-	for (Candidate& candidate : candidates)
-	{
-		if (candidate.error.empty())
-		{
-			sizes.push_back(candidate.summary.totalBytes);
-		}
-	}
-	std::sort(sizes.begin(), sizes.end());
-	long long typical = sizes.empty() ? 0 : sizes[sizes.size() / 2];
-	auto distance = [typical](const Candidate& c) { return std::llabs(c.summary.totalBytes - typical); };
-	auto tier = [](const Candidate& c) { return !c.error.empty() ? 3 : c.dead ? 2 : c.alive < 0 ? 1 : 0; };
-	std::vector<Candidate*> order;
-	for (Candidate& candidate : candidates)
-	{
-		if (candidate.sameAs < 0)
-		{
-			order.push_back(&candidate);
-		}
-	}
-	std::stable_sort(order.begin(), order.end(), [&](const Candidate* a, const Candidate* b)
-		{
-			if (tier(*a) != tier(*b)) return tier(*a) < tier(*b);
-			if (a->alive != b->alive) return a->alive > b->alive;
-			return distance(*a) < distance(*b);
-		});
-	// a same posting follows the one it is a copy of
-	std::vector<Candidate*> ranked;
-	for (Candidate* candidate : order)
-	{
-		ranked.push_back(candidate);
-		for (Candidate& copy : candidates)
-		{
-			if (copy.sameAs == (int)candidate->index)
-			{
-				ranked.push_back(&copy);
-			}
-		}
-	}
-#endif
 
 	// nzbget shuts down: adding now would wait for the stopped scanner for good (as
 	// in B37); the client sends the fleet again after the restart
@@ -509,9 +432,6 @@ Fleet::Result Fleet::Append(Request request)
 	// holds, so the duplicate check queues the best and keeps the others as backups,
 	// tried in rank order
 	// at the int limit, members still rank below it in order, not tied at the limit
-#ifndef NZBGET_USE_RUST
-	long long base = runningId ? lowest : std::min<long long>(top, INT_MAX);
-#endif
 
 	bool anyAlive = std::any_of(order.begin(), order.end(),
 		[&](const Candidate* c) { return tier(*c) <= 1; });
@@ -563,12 +483,8 @@ Fleet::Result Fleet::Append(Request request)
 			{
 				name += ".nzb";
 			}
-#ifdef NZBGET_USE_RUST
 			int memberScore = nzbget_rs_dqh_fleet_calc_member_add_score(
 				runningId, lowest, top, entry.rank);
-#else
-			int memberScore = (int)std::clamp<long long>(base - rank, INT_MIN, INT_MAX);
-#endif
 			Scanner::EAddStatus status = g_Scanner->AddExternalFile(name.c_str(), request.category.c_str(),
 				false, request.priority, request.dupeKey.c_str(),
 				memberScore, dmScore, &parameters,
@@ -632,17 +548,12 @@ Fleet::Result Fleet::Append(Request request)
 		// below the floor is dead, though the check of the rest ran to the limit (F10)
 		bool anyUnknown = std::any_of(order.begin(), order.end(),
 			[&](const Candidate* c) { return c->error.empty() && c->alive < 0; });
-#ifdef NZBGET_USE_RUST
 		int reasonCode = nzbget_rs_df_eval_fleet_outcome_reason(
 			anyUsable ? 1 : 0, anyAlive ? 1 : 0, anyUnknown ? 1 : 0, onDisk ? 1 : 0);
 		static const char* const kReasons[] = {
 			"NO_USABLE_MEMBERS", "INCOMPLETE", "ALL_DEAD", "ALREADY_DOWNLOADED", "NOT_QUEUED"
 		};
 		result.reason = kReasons[(reasonCode >= 0 && reasonCode < 5) ? reasonCode : 4];
-#else
-		result.reason = !anyUsable ? "NO_USABLE_MEMBERS" : !anyAlive ? (anyUnknown ? "INCOMPLETE" : "ALL_DEAD") :
-			onDisk ? "ALREADY_DOWNLOADED" : "NOT_QUEUED";
-#endif
 	}
 	info("Fleet of %i nzb-file(s) for %s: %s%s", (int)request.members.size(), request.dupeKey.c_str(),
 		result.chosen ? ("queued #" + std::to_string(result.chosen)).c_str() : result.reason.c_str(),

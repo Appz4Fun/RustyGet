@@ -22,9 +22,7 @@
 
 #include <libxml/parser.h>
 #include "XmlReader.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 namespace
 {
@@ -37,14 +35,8 @@ struct Context
 
 std::string LocalName(const xmlChar* name)
 {
-#ifdef NZBGET_USE_RUST
 	const char* cstr = (const char*)name;
 	return std::string(cstr + nzbget_rs_snh_xml_reader_local_name_offset(cstr));
-#else
-	std::string text = (const char*)name;
-	size_t colon = text.rfind(':');
-	return colon == std::string::npos ? text : text.substr(colon + 1);
-#endif
 }
 
 void StartElement(void* ctx, const xmlChar* name, const xmlChar** atts)
@@ -108,11 +100,7 @@ bool XmlReader::Parse(const std::string& data, Handler& handler)
 	Context context;
 	context.handler = &handler;
 	int result = xmlSAXUserParseMemory(&sax, &context, data.data(), (int)data.size());
-#ifdef NZBGET_USE_RUST
 	return nzbget_rs_aws_xml_reader_is_parse_success(result, context.entityDeclared ? 1 : 0) != 0;
-#else
-	return result == 0 && !context.entityDeclared;
-#endif
 }
 
 std::string XmlReader::Attr(const Attrs& attrs, const char* name)

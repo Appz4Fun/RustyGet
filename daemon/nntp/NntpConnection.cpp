@@ -22,10 +22,8 @@
 #include "nzbget.h"
 #include "Log.h"
 #include "NntpConnection.h"
-#ifdef NZBGET_USE_RUST
 #include <exception>
 #include "nzbget_rs.h"
-#endif
 #include "Connection.h"
 #include "NewsServer.h"
 
@@ -36,23 +34,17 @@ NntpConnection::NntpConnection(NewsServer* newsServer) :
 {
 	m_lineBuf.Reserve(CONNECTION_LINEBUFFER_SIZE);
 	SetCipher(newsServer->GetCipher());
-#ifdef NZBGET_USE_RUST
 	SetIPVersion((Connection::EIPVersion)nzbget_rs_ntw_nntp_map_ip_version(
 		newsServer->GetIpVersion(),
 		(int)Connection::ipV4,
 		(int)Connection::ipV6,
 		(int)Connection::ipAuto));
-#else
-	SetIPVersion(newsServer->GetIpVersion() == 4 ? Connection::ipV4 :
-		newsServer->GetIpVersion() == 6 ? Connection::ipV6 : Connection::ipAuto);
-#endif
 	
 #ifndef DISABLE_TLS
 	SetCertVerifLevel(newsServer->GetCertVerificationLevel());
 #endif
 }
 
-#ifdef NZBGET_USE_RUST
 namespace
 {
 #ifdef DEBUG
@@ -61,9 +53,7 @@ constexpr bool RsDebugMessages = true;
 constexpr bool RsDebugMessages = false;
 #endif
 }
-#endif
 
-#ifdef NZBGET_USE_RUST
 // a callback that threw stops the exchange; the exception is rethrown after
 // Rust returned
 struct NntpConnection::RsExchange
@@ -129,9 +119,7 @@ int NntpConnection::RsCancelled(void* ctx, int* cancelled)
 	return RsExchange::Call(ctx, [cancelled](NntpConnection* c) { *cancelled = c->GetStatus() == csCancelled; });
 }
 
-#endif
 
-#ifdef NZBGET_USE_RUST
 const char* NntpConnection::Request(const char* req)
 {
 	if (!req)
@@ -150,43 +138,6 @@ const char* NntpConnection::Request(const char* req)
 	exchange.Rethrow();
 	return answer;
 }
-#else
-const char* NntpConnection::Request(const char* req)
-{
-	if (!req)
-	{
-		return nullptr;
-	}
-
-	m_authError = false;
-	m_authRejected = false;
-
-	WriteLine(req);
-
-	char* answer = ReadLine(m_lineBuf, m_lineBuf.Size(), nullptr);
-
-	if (!answer)
-	{
-		return nullptr;
-	}
-
-	if (!strncmp(answer, "480", 3))
-	{
-		debug("%s requested authorization", GetHost());
-
-		if (!Authenticate())
-		{
-			return nullptr;
-		}
-
-		//try again
-		WriteLine(req);
-		answer = ReadLine(m_lineBuf, m_lineBuf.Size(), nullptr);
-	}
-
-	return answer;
-}
-#endif
 
 bool NntpConnection::Authenticate()
 {
@@ -277,7 +228,6 @@ bool NntpConnection::AuthInfoPass(int recur)
 	return false;
 }
 
-#ifdef NZBGET_USE_RUST
 const char* NntpConnection::JoinGroup(const char* grp)
 {
 	if (!m_activeGroup.Empty() && !strcmp(m_activeGroup, grp))
@@ -303,33 +253,7 @@ const char* NntpConnection::JoinGroup(const char* grp)
 	}
 	return answer;
 }
-#else
-const char* NntpConnection::JoinGroup(const char* grp)
-{
-	if (!m_activeGroup.Empty() && !strcmp(m_activeGroup, grp))
-	{
-		// already in group
-		strcpy(m_lineBuf, "211 ");
-		return m_lineBuf;
-	}
 
-	const char* answer = Request(BString<1024>("GROUP %s\r\n", grp));
-
-	if (answer && !strncmp(answer, "2", 1))
-	{
-		debug("Changed group to %s on %s", grp, GetHost());
-		m_activeGroup = grp;
-	}
-	else
-	{
-		debug("Error changing group on %s to %s: %s.", GetHost(), grp, answer);
-	}
-
-	return answer;
-}
-#endif
-
-#ifdef NZBGET_USE_RUST
 bool NntpConnection::Connect()
 {
 	debug("Opening connection to %s", GetHost());
@@ -362,50 +286,6 @@ bool NntpConnection::Connect()
 	}
 	return result == 0;
 }
-#else
-bool NntpConnection::Connect()
-{
-	debug("Opening connection to %s", GetHost());
-
-	if (m_status == csConnected)
-	{
-		return true;
-	}
-	m_authRejected = false;
-	m_activeGroup = nullptr;
-
-	if (!Connection::Connect())
-	{
-		return false;
-	}
-
-	char* answer = ReadLine(m_lineBuf, m_lineBuf.Size(), nullptr);
-
-	if (!answer)
-	{
-		ReportErrorAnswer("Connection to %s (%s) failed: Connection closed by remote host", nullptr);
-		Disconnect();
-		return false;
-	}
-
-	if (strncmp(answer, "2", 1))
-	{
-		ReportErrorAnswer("Connection to %s (%s) failed: %s", answer);
-		Disconnect();
-		return false;
-	}
-
-	if ((strlen(m_newsServer->GetUser()) > 0 && strlen(m_newsServer->GetPassword()) > 0) &&
-		!Authenticate())
-	{
-		return false;
-	}
-
-	debug("Connection to %s established", GetHost());
-
-	return true;
-}
-#endif
 
 bool NntpConnection::Disconnect()
 {

@@ -35,9 +35,7 @@
 #include "Util.h"
 
 #include "DupeUtil.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 using DupeUtil::Lower;
 using DupeUtil::Trim;
@@ -113,12 +111,8 @@ public:
 			}
 			else if (name == "item")
 			{
-#ifdef NZBGET_USE_RUST
 				m_item.size = nzbget_rs_dsf_newznab_resolve_item_size(
 					m_attrSize, m_elementSize);
-#else
-				m_item.size = m_attrSize > 0 ? m_attrSize : m_elementSize;
-#endif
 				m_page.items.push_back(m_item);
 				m_inItem = false;
 			}
@@ -144,68 +138,24 @@ private:
 
 std::string UrlEncode(const std::string& text)
 {
-#ifdef NZBGET_USE_RUST
 	NzbgetRsBuf buf = nzbget_rs_df_url_encode(text.data(), text.size());
 	std::string out(buf.data ? buf.data : "", buf.len);
 	nzbget_rs_free(buf);
 	return out;
-#else
-	static const char* hex = "0123456789ABCDEF";
-	std::string out;
-	for (unsigned char ch : text)
-	{
-		if (isalnum(ch) || ch == '-' || ch == '_' || ch == '.' || ch == '~')
-		{
-			out += (char)ch;
-		}
-		else if (ch == ' ')
-		{
-			out += '+';
-		}
-		else
-		{
-			out += '%';
-			out += hex[ch >> 4];
-			out += hex[ch & 15];
-		}
-	}
-	return out;
-#endif
 }
 
 std::string DigitsOnly(const std::string& text)
 {
-#ifdef NZBGET_USE_RUST
 	NzbgetRsBuf buf = nzbget_rs_df_digits_only(text.data(), text.size());
 	std::string out(buf.data ? buf.data : "", buf.len);
 	nzbget_rs_free(buf);
 	return out;
-#else
-	std::string out;
-	for (char ch : text)
-	{
-		if (isdigit((unsigned char)ch))
-		{
-			out += ch;
-		}
-	}
-	return out;
-#endif
 }
 
 // days since 1970-01-01 of a civil date
 long long DaysFromCivil(long long year, int month, int day)
 {
-#ifdef NZBGET_USE_RUST
 	return nzbget_rs_df_days_from_civil(year, month, day);
-#else
-	year -= month <= 2;
-	long long era = (year >= 0 ? year : year - 399) / 400;
-	long long yoe = year - era * 400;
-	long long doy = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
-	long long doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-	return era * 146097 + doe - 719468;
-#endif
 }
 
 }
@@ -219,109 +169,7 @@ bool Newznab::ParseResponse(const std::string& xml, Page& page)
 
 time_t Newznab::ParseDate(const std::string& text)
 {
-#ifdef NZBGET_USE_RUST
 	return (time_t)nzbget_rs_df_parse_newznab_date(text.data(), text.size());
-#else
-	// no date is this long, and std::regex recurses per character (a run of a
-	// megabyte of spaces from an indexer ran the thread out of stack)
-	if (text.size() > 64)
-	{
-		return 0;
-	}
-	// ISO 8601: 2025-06-10T01:10:05Z, 2025-06-10T03:10:05+02:00, 2025-06-10 01:10:05 (UTC)
-	static const std::regex iso(
-		"^\\s*(\\d{4})-(\\d{2})-(\\d{2})[Tt ](\\d{2}):(\\d{2}):(\\d{2})(?:\\.\\d+)?\\s*(Z|z|[+-]\\d{2}:?\\d{2})?\\s*$");
-	// RFC 822/2822: [Tue, ]10 Jun 2025 01:10:05 +0000, also with a 2-digit year or a zone name
-	static const std::regex rfc(
-		"^\\s*(?:[A-Za-z]{3},\\s*)?(\\d{1,2})\\s+([A-Za-z]{3})[a-z]*\\s+(\\d{4}|\\d{2})\\s+(\\d{1,2}):(\\d{2}):(\\d{2})\\s*([+-]\\d{4}|[A-Za-z]+)?\\s*$");
-
-	int year, month, day, hour, minute, second;
-	std::string zone;
-	std::smatch match;
-	if (std::regex_match(text, match, iso))
-	{
-		year = atoi(match[1].str().c_str());
-		month = atoi(match[2].str().c_str());
-		day = atoi(match[3].str().c_str());
-		hour = atoi(match[4].str().c_str());
-		minute = atoi(match[5].str().c_str());
-		second = atoi(match[6].str().c_str());
-		zone = match[7].matched ? match[7].str() : "";
-		zone.erase(std::remove(zone.begin(), zone.end(), ':'), zone.end());
-		if (month < 1 || month > 12)
-		{
-			return 0;
-		}
-	}
-	else if (std::regex_match(text, match, rfc))
-	{
-		static const char* months[] = { "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec" };
-		std::string monthName = Lower(match[2].str());
-		month = 0;
-		for (int i = 0; i < 12; i++)
-		{
-			if (monthName == months[i])
-			{
-				month = i + 1;
-			}
-		}
-		if (!month)
-		{
-			return 0;
-		}
-		year = atoi(match[3].str().c_str());
-		if (match[3].length() == 2)
-		{
-			year += year < 50 ? 2000 : 1900;	// RFC 2822 section 4.3
-		}
-		day = atoi(match[1].str().c_str());
-		hour = atoi(match[4].str().c_str());
-		minute = atoi(match[5].str().c_str());
-		second = atoi(match[6].str().c_str());
-		zone = match[7].matched ? match[7].str() : "";
-	}
-	else
-	{
-		return 0;
-	}
-
-	if (day < 1 || day > 31 || hour > 23 || minute > 59 || second > 60)
-	{
-		return 0;
-	}
-
-	long long seconds = DaysFromCivil(year, month, day) * 86400 + hour * 3600 + minute * 60 + second;
-
-	// an offset like +0200, or a zone name (RFC 822 section 5.1); military letters
-	// count as UTC (RFC 2822 section 4.3); another name can't be placed
-	int offset = 0;
-	if (zone.size() == 5 && (zone[0] == '+' || zone[0] == '-'))
-	{
-		offset = (atoi(zone.substr(1, 2).c_str()) * 3600 + atoi(zone.substr(3, 2).c_str()) * 60) *
-			(zone[0] == '+' ? 1 : -1);
-	}
-	else if (!zone.empty())
-	{
-		std::string name = zone;
-		for (char& ch : name)
-		{
-			ch = (char)toupper((unsigned char)ch);
-		}
-		static const std::map<std::string, int> zones = { { "UT", 0 }, { "UTC", 0 }, { "GMT", 0 }, { "Z", 0 },
-			{ "EST", -5 }, { "EDT", -4 }, { "CST", -6 }, { "CDT", -5 }, { "MST", -7 }, { "MDT", -6 },
-			{ "PST", -8 }, { "PDT", -7 } };
-		auto it = zones.find(name);
-		if (it != zones.end())
-		{
-			offset = it->second * 3600;
-		}
-		else if (name.size() != 1 || name == "J")
-		{
-			return 0;
-		}
-	}
-	return (time_t)(seconds - offset);
-#endif
 }
 
 std::vector<Newznab::Params> Newznab::BuildQueries(const std::string& title, const std::string& imdb,
@@ -364,7 +212,6 @@ std::vector<Newznab::Params> Newznab::BuildQueries(const std::string& title, con
 
 std::string Newznab::BuildUrl(const std::string& base, const Params& params, const std::string& apiKey)
 {
-#ifdef NZBGET_USE_RUST
 	std::vector<const char*> keys(params.size());
 	std::vector<const char*> vals(params.size());
 	for (size_t i = 0; i < params.size(); i++)
@@ -377,46 +224,14 @@ std::string Newznab::BuildUrl(const std::string& base, const Params& params, con
 	std::string out(buf.data ? buf.data : "", buf.len);
 	nzbget_rs_free(buf);
 	return out;
-#else
-	std::string url = base;
-	// an address without a path ("http://host:5076") is the indexer's web page,
-	// which answers every search with HTML (B91: every search "isn't XML"): the
-	// api of a Newznab indexer is at "/api"
-	size_t scheme = url.find("://");
-	if (scheme != std::string::npos)
-	{
-		size_t hostEnd = std::min(url.find_first_of("/?", scheme + 3), url.size());
-		size_t queryStart = std::min(url.find('?', hostEnd), url.size());
-		std::string path = url.substr(hostEnd, queryStart - hostEnd);
-		if (path.empty() || path == "/")
-		{
-			url = url.substr(0, hostEnd) + "/api" + url.substr(queryStart);
-		}
-	}
-	url += url.find('?') == std::string::npos ? '?' : '&';
-	for (const auto& param : params)
-	{
-		url += UrlEncode(param.first) + "=" + UrlEncode(param.second) + "&";
-	}
-	url += "apikey=" + UrlEncode(apiKey);
-	return url;
-#endif
 }
 
 std::string Newznab::Mask(const std::string& text)
 {
-#ifdef NZBGET_USE_RUST
 	NzbgetRsBuf buf = nzbget_rs_df_mask_newznab_text(text.data(), text.size());
 	std::string out(buf.data ? buf.data : "", buf.len);
 	nzbget_rs_free(buf);
 	return out;
-#else
-	static const std::regex apiKey("(apikey=)[^&\\s]+", std::regex::icase);
-	static const std::regex credentials("//[^/@\\s:]+:[^/@\\s]+@");
-	// cut first: std::regex recurses per character of a match
-	std::string masked = std::regex_replace(text.substr(0, 1024), apiKey, "$1***");
-	return std::regex_replace(masked, credentials, "//***@");
-#endif
 }
 
 std::vector<Newznab::Result> Newznab::Search(const std::string& base, const std::string& apiKey,
@@ -449,7 +264,6 @@ std::vector<Newznab::Result> Newznab::Search(const std::string& base, const std:
 				params.emplace_back("limit", std::to_string(PageSize));
 				params.emplace_back("offset", std::to_string(page * PageSize));
 				std::string infoName = "DupeSearch " + label + " page " + std::to_string(page + 1);
-#ifdef NZBGET_USE_RUST
 				long long pageDeadlineMs = nzbget_rs_dsf_newznab_calc_page_deadline_ms(
 					DonorHealth::NowMs(), (int64_t)deadline, (int64_t)Util::CurrentTime());
 				HttpGet::Reply reply = HttpGet::Fetch(BuildUrl(base, params, apiKey), infoName, 16 * 1024 * 1024,
@@ -461,18 +275,6 @@ std::vector<Newznab::Result> Newznab::Search(const std::string& base, const std:
 					reply = HttpGet::Fetch(BuildUrl(base, params, apiKey), infoName, 16 * 1024 * 1024,
 						pageDeadlineMs);
 				}
-#else
-				long long deadlineMs = DonorHealth::NowMs() + (long long)(deadline - Util::CurrentTime()) * 1000;
-				HttpGet::Reply reply = HttpGet::Fetch(BuildUrl(base, params, apiKey), infoName, 16 * 1024 * 1024,
-					std::max(1LL, deadlineMs));
-				// no answer at all (a dropped connection) is asked once more: one
-				// lost query lost every result only it had
-				if (!reply.ok && reply.status == 0 && !HttpGet::Stopped() && Util::CurrentTime() < deadline)
-				{
-					reply = HttpGet::Fetch(BuildUrl(base, params, apiKey), infoName, 16 * 1024 * 1024,
-						std::max(1LL, deadlineMs));
-				}
-#endif
 				pages++;
 
 				Page result;
@@ -498,12 +300,8 @@ std::vector<Newznab::Result> Newznab::Search(const std::string& base, const std:
 				}
 
 				found[index].insert(found[index].end(), result.items.begin(), result.items.end());
-#ifdef NZBGET_USE_RUST
 				if (nzbget_rs_dsf_newznab_should_stop_pagination(
 					result.items.size(), PageSize) != 0)
-#else
-				if ((int)result.items.size() < PageSize)
-#endif
 				{
 					break;
 				}

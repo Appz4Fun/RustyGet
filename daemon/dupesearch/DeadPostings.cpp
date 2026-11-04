@@ -28,9 +28,7 @@
 #include "FileSystem.h"
 #include "Log.h"
 #include "Util.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 void DeadPostings::SetStatePath(const std::string& path)
 {
@@ -45,45 +43,12 @@ void DeadPostings::Load()
 	std::string line;
 	while (std::getline(file, line))
 	{
-#ifdef NZBGET_USE_RUST
 		nzbget_rs_deadpostings_parse(reinterpret_cast<const uint8_t*>(line.data()), line.size(), &m_dead,
 			[](void* context, int64_t stamp, const uint32_t* hashes, size_t count) noexcept
 			{
 				auto* entries = static_cast<decltype(m_dead)*>(context);
 				entries->emplace_back((time_t)stamp, Posting::Sketch(hashes, hashes + count));
 			});
-#else
-		std::stringstream stream(line);
-		std::string when, hashes;
-		if (!std::getline(stream, when, '\t') || !std::getline(stream, hashes, '\t'))
-		{
-			continue;
-		}
-		// a line that doesn't parse in full is skipped: a corrupt hash must not become 0
-		char* end = nullptr;
-		long long stamp = strtoll(when.c_str(), &end, 10);
-		if (when.empty() || *end)
-		{
-			continue;
-		}
-		Posting::Sketch sketch;
-		std::stringstream list(hashes);
-		std::string hash;
-		bool ok = true;
-		while (ok && std::getline(list, hash, ','))
-		{
-			unsigned long value = strtoul(hash.c_str(), &end, 10);
-			ok = !hash.empty() && !*end && value <= 0xFFFFFFFFUL;
-			sketch.push_back((uint32_t)value);
-		}
-		// SameSketch intersects sorted lists
-		std::sort(sketch.begin(), sketch.end());
-		sketch.erase(std::unique(sketch.begin(), sketch.end()), sketch.end());
-		if (ok && !sketch.empty())
-		{
-			m_dead.emplace_back((time_t)stamp, std::move(sketch));
-		}
-#endif
 	}
 	Prune(Util::CurrentTime());
 }

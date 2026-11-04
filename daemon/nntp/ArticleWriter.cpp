@@ -54,19 +54,11 @@ CachedSegmentData& CachedSegmentData::operator=(CachedSegmentData&& other)
 
 void ArticleWriter::SetWriteBuffer(DiskFile& outFile, int recSize)
 {
-#ifdef NZBGET_USE_RUST
 	int bufSize = nzbget_rs_qhp_calc_write_buffer_size(g_Options->GetWriteBuffer(), recSize);
 	if (bufSize > 0)
 	{
 		outFile.SetWriteBuffer(bufSize);
 	}
-#else
-	if (g_Options->GetWriteBuffer() > 0)
-	{
-		outFile.SetWriteBuffer(recSize > 0 && recSize < g_Options->GetWriteBuffer() * 1024 ?
-			recSize : g_Options->GetWriteBuffer() * 1024);
-	}
-#endif
 }
 
 void ArticleWriter::Prepare()
@@ -88,17 +80,12 @@ bool ArticleWriter::Start(Decoder::EFormat format, const char* filename, int64 f
 	m_outFile.Close();
 	m_format = format;
 	m_articleOffset = articleOffset;
-#ifdef NZBGET_USE_RUST
 	m_articleSize = nzbget_rs_cwp_article_writer_select_article_size(articleSize, m_articleInfo->GetSize());
-#else
-	m_articleSize = articleSize ? articleSize : m_articleInfo->GetSize();
-#endif
 	m_articlePtr = 0;
 
 	// prepare file for writing
 	if (m_format == Decoder::efYenc)
 	{
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_dad_article_writer_should_check_dupe_file(
 			(int)m_format,
 			(int)Decoder::efYenc,
@@ -106,11 +93,6 @@ bool ArticleWriter::Start(Decoder::EFormat format, const char* filename, int64 f
 			(int)m_fileInfo->GetNzbInfo()->GetDupeMode(),
 			(int)dmForce,
 			m_fileInfo->GetNzbInfo()->GetManyDupeFiles() ? 1 : 0) != 0)
-#else
-		if (g_Options->GetDupeCheck() &&
-			m_fileInfo->GetNzbInfo()->GetDupeMode() != dmForce &&
-			!m_fileInfo->GetNzbInfo()->GetManyDupeFiles())
-#endif
 		{
 			bool outputInitialized;
 			{
@@ -132,7 +114,6 @@ bool ArticleWriter::Start(Decoder::EFormat format, const char* filename, int64 f
 					 FileSystem::SameFilename(m_fileInfo->GetOutputFilename().c_str(), destFilePath));
 			}
 
-#ifdef NZBGET_USE_RUST
 			bool destExists = !outputInitialized && !isOwnOutputFile && filename &&
 				FileSystem::FileExists(destFilePath);
 			if (nzbget_rs_dad_article_writer_is_duplicate_dest(
@@ -140,10 +121,6 @@ bool ArticleWriter::Start(Decoder::EFormat format, const char* filename, int64 f
 				isOwnOutputFile ? 1 : 0,
 				filename ? 1 : 0,
 				destExists ? 1 : 0) != 0)
-#else
-			if (!outputInitialized && !isOwnOutputFile && filename &&
-				FileSystem::FileExists(destFilePath))
-#endif
 			{
 				m_duplicate = true;
 				return false;
@@ -153,16 +130,11 @@ bool ArticleWriter::Start(Decoder::EFormat format, const char* filename, int64 f
 		if (g_Options->GetDirectWrite() && !IsDupeFallbackArticle())
 		{
 			Guard guard = m_fileInfo->GuardOutputFile();
-#ifdef NZBGET_USE_RUST
 			bool outInit = m_fileInfo->GetOutputInitialized();
 			bool skipDisk = GetSkipDiskWrite();
 			bool outExists = (outInit && !skipDisk) ? FileSystem::FileExists(m_outputFilename.c_str()) : true;
 			if (nzbget_rs_aws_article_writer_should_init_direct_write_file(
 				1, 0, outInit ? 1 : 0, skipDisk ? 1 : 0, outExists ? 1 : 0) != 0)
-#else
-			if (!m_fileInfo->GetOutputInitialized() ||
-				(!GetSkipDiskWrite() && !FileSystem::FileExists(m_outputFilename.c_str())))
-#endif
 			{
 				if (!GetSkipDiskWrite() && !CreateOutputFile(fileSize))
 				{
@@ -180,7 +152,6 @@ bool ArticleWriter::Start(Decoder::EFormat format, const char* filename, int64 f
 	// allocate cache buffer; yEnc only: a cached article is written at its offset,
 	// and only yEnc tells it (uuencoded parts all have 0 and overwrote each other,
 	// uncached they're appended in order)
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_dad_article_writer_can_use_article_cache(
 		g_Options->GetArticleCache(),
 		g_Options->GetRawArticle() ? 1 : 0,
@@ -188,16 +159,9 @@ bool ArticleWriter::Start(Decoder::EFormat format, const char* filename, int64 f
 		(int)Decoder::efYenc,
 		IsDupeFallbackArticle() ? 1 : 0,
 		isCritical ? 1 : 0) != 0)
-#else
-	if (g_Options->GetArticleCache() > 0 && !g_Options->GetRawArticle() &&
-		m_format == Decoder::efYenc &&
-		!IsDupeFallbackArticle() &&
-		!isCritical)
-#endif
 	{
 		m_articleData = g_ArticleCache->Alloc(m_articleSize);
 
-#ifdef NZBGET_USE_RUST
 		while (nzbget_rs_aws_article_writer_should_wait_for_cache_flush(
 			m_articleData.GetData() ? 1 : 0,
 			g_ArticleCache->GetFlushing() ? 1 : 0,
@@ -206,17 +170,6 @@ bool ArticleWriter::Start(Decoder::EFormat format, const char* filename, int64 f
 			Util::Sleep(5);
 			m_articleData = g_ArticleCache->Alloc(m_articleSize);
 		}
-#else
-		while (!m_articleData.GetData() && g_ArticleCache->GetFlushing())
-		{
-			if (g_MemoryMonitor && g_MemoryMonitor->GetTier() == NZBGET_RS_PRESSURE_CRITICAL)
-			{
-				break;
-			}
-			Util::Sleep(5);
-			m_articleData = g_ArticleCache->Alloc(m_articleSize);
-		}
-#endif
 
 		if (!m_articleData.GetData())
 		{
@@ -231,17 +184,12 @@ bool ArticleWriter::Start(Decoder::EFormat format, const char* filename, int64 f
 			return true;
 		}
 
-#ifdef NZBGET_USE_RUST
 		bool directWrite = nzbget_rs_cwp_article_writer_is_direct_write_enabled(
 			g_Options->GetDirectWrite() ? 1 : 0,
 			m_fileInfo->GetForceDirectWrite() ? 1 : 0,
 			(int)m_format,
 			(int)Decoder::efYenc,
 			IsDupeFallbackArticle() ? 1 : 0) != 0;
-#else
-		bool directWrite = (g_Options->GetDirectWrite() || m_fileInfo->GetForceDirectWrite()) &&
-			m_format == Decoder::efYenc && !IsDupeFallbackArticle();
-#endif
 		const char* outFilename = directWrite ? m_outputFilename.c_str() : m_tempFilename.c_str();
 		if (!m_outFile.Open(outFilename, directWrite ? DiskFile::omReadWrite : DiskFile::omWrite))
 		{
@@ -263,25 +211,15 @@ bool ArticleWriter::Start(Decoder::EFormat format, const char* filename, int64 f
 
 bool ArticleWriter::GetSkipDiskWrite()
 {
-#ifdef NZBGET_USE_RUST
 	bool hasFileAndNzb = m_fileInfo && m_fileInfo->GetNzbInfo();
 	return nzbget_rs_cwp_article_writer_should_skip_disk_write(
 		hasFileAndNzb ? 1 : 0,
 		(hasFileAndNzb && m_fileInfo->GetNzbInfo()->GetSkipDiskWrite()) ? 1 : 0,
 		g_Options->GetSkipWrite() ? 1 : 0) != 0;
-#else
-	if (m_fileInfo && m_fileInfo->GetNzbInfo() && m_fileInfo->GetNzbInfo()->GetSkipDiskWrite())
-	{
-		return true;
-	}
-
-	return g_Options->GetSkipWrite();
-#endif
 }
 
 bool ArticleWriter::Write(char* buffer, int len)
 {
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_dad_article_writer_advance_and_check_range(
 		g_Options->GetRawArticle() ? 1 : 0,
 		&m_articlePtr,
@@ -290,28 +228,9 @@ bool ArticleWriter::Write(char* buffer, int len)
 	{
 		return true;
 	}
-#else
-	if (!g_Options->GetRawArticle())
-	{
-		m_articlePtr += len;
-	}
 
-	if (m_articlePtr > m_articleSize)
-	{
-		// An attempt to write beyond article border is detected.
-		// That's an error condition (damaged article).
-		// We return 'false' since this isn't a fatal disk error and
-		// article size mismatch will be detected in decoder check anyway.
-		return true;
-	}
-#endif
-
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_aws_article_writer_should_memcpy_cached_segment(
 		g_Options->GetRawArticle() ? 1 : 0, m_articleData.GetData() ? 1 : 0) != 0)
-#else
-	if (!g_Options->GetRawArticle() && m_articleData.GetData())
-#endif
 	{
 		memcpy(m_articleData.GetData() + m_articlePtr - len, buffer, len);
 		return true;
@@ -339,21 +258,15 @@ void ArticleWriter::Finish(bool success)
 		return;
 	}
 
-#ifdef NZBGET_USE_RUST
 	bool directWrite = nzbget_rs_cwp_article_writer_is_direct_write_enabled(
 		g_Options->GetDirectWrite() ? 1 : 0,
 		m_fileInfo->GetForceDirectWrite() ? 1 : 0,
 		(int)m_format,
 		(int)Decoder::efYenc,
 		IsDupeFallbackArticle() ? 1 : 0) != 0;
-#else
-	bool directWrite = (g_Options->GetDirectWrite() || m_fileInfo->GetForceDirectWrite()) &&
-		m_format == Decoder::efYenc && !IsDupeFallbackArticle();
-#endif
 
 	if (!g_Options->GetRawArticle())
 	{
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_aws_article_writer_should_move_temp_to_result(
 			directWrite ? 1 : 0, m_articleData.GetData() ? 1 : 0, GetSkipDiskWrite() ? 1 : 0) != 0)
 		{
@@ -365,29 +278,10 @@ void ArticleWriter::Finish(bool success)
 			}
 			FileSystem::DeleteFile(m_tempFilename.c_str());
 		}
-#else
-		if (!directWrite && !m_articleData.GetData())
-		{
-			if (!GetSkipDiskWrite())
-			{
-				if (!FileSystem::MoveFile(m_tempFilename.c_str(), m_resultFilename.c_str()))
-				{
-					m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError,
-						"Could not rename file %s to %s: %s", m_tempFilename.c_str(), m_resultFilename.c_str(),
-						*FileSystem::GetLastErrorMessage());
-				}
-				FileSystem::DeleteFile(m_tempFilename.c_str());
-			}
-		}
-#endif
 
 		if (m_articleData.GetData())
 		{
-#ifdef NZBGET_USE_RUST
 			if (nzbget_rs_aws_article_writer_should_realloc_cached_segment(m_articleSize, m_articlePtr) != 0)
-#else
-			if (m_articleSize != m_articlePtr)
-#endif
 			{
 				g_ArticleCache->Realloc(&m_articleData, m_articlePtr);
 			}
@@ -462,7 +356,6 @@ void ArticleWriter::BuildOutputFilename()
 	if (Util::EmptyStr(tmpDir) || Util::EmptyStr(destDir))
 		return;
 
-#ifdef NZBGET_USE_RUST
 	char fmtBuf[1024];
 	size_t fmtLen = nzbget_rs_awc_article_writer_format_result_filename(
 		tmpDir, PATH_SEPARATOR, m_fileInfo->GetId(), m_articleInfo->GetPartNumber(),
@@ -479,16 +372,6 @@ void ArticleWriter::BuildOutputFilename()
 			tmpDir, PATH_SEPARATOR, m_fileInfo->GetId(), m_articleInfo->GetPartNumber(),
 			filename.data(), fmtLen + 1);
 	}
-#else
-	std::stringstream ss;
-	ss << tmpDir;
-	ss << PATH_SEPARATOR;
-	ss << m_fileInfo->GetId();
-	ss << ".";
-	ss << std::setfill('0') << std::setw(3) << m_articleInfo->GetPartNumber();
-
-	std::string filename = ss.str();
-#endif
 
 	m_articleInfo->SetResultFilename(filename.c_str());
 	m_tempFilename = filename + ".tmp";
@@ -512,7 +395,6 @@ void ArticleWriter::BuildOutputFilename()
 			}
 			else
 			{
-#ifdef NZBGET_USE_RUST
 				size_t outLen = nzbget_rs_awc_article_writer_format_direct_out_tmp(
 					destDir, PATH_SEPARATOR, m_fileInfo->GetId(), fmtBuf, sizeof(fmtBuf));
 				if (outLen < sizeof(fmtBuf))
@@ -526,18 +408,6 @@ void ArticleWriter::BuildOutputFilename()
 						destDir, PATH_SEPARATOR, m_fileInfo->GetId(), filename.data(), outLen + 1);
 				}
 				m_fileInfo->SetOutputFilename(filename);
-#else
-				ss.str("");
-				ss.clear();
-
-				ss << destDir;
-				ss << PATH_SEPARATOR;
-				ss << m_fileInfo->GetId();
-				ss << ".out.tmp";
-
-				filename = ss.str();
-				m_fileInfo->SetOutputFilename(filename);
-#endif
 			}
 		}
 
@@ -567,7 +437,6 @@ bool ArticleWriter::CompleteFileParts()
 	{
 		m_outputFilename = m_fileInfo->GetOutputFilename();
 	}
-#ifdef NZBGET_USE_RUST
 	bool directWriteOpt = g_Options->GetDirectWrite();
 	bool forceDirectWrite = m_fileInfo->GetForceDirectWrite();
 	bool curOutputInit = m_fileInfo->GetOutputInitialized();
@@ -591,18 +460,6 @@ bool ArticleWriter::CompleteFileParts()
 	{
 		m_fileInfo->SetOutputInitialized(true);
 	}
-#else
-	if ((g_Options->GetDirectWrite() || m_fileInfo->GetForceDirectWrite()) && !m_fileInfo->GetOutputInitialized())
-	{
-		BString<1024> destPath("%s%c%s", nzbDestDir.c_str(), PATH_SEPARATOR, filename.c_str());
-		if ((!m_outputFilename.empty() && FileSystem::FileExists(m_outputFilename.c_str())) ||
-			(m_fileInfo->GetForceDirectWrite() && FileSystem::FileExists(destPath)))
-		{
-			m_fileInfo->SetOutputInitialized(true);
-		}
-	}
-	bool directWrite = (g_Options->GetDirectWrite() || m_fileInfo->GetForceDirectWrite()) && m_fileInfo->GetOutputInitialized();
-#endif
 	bool cached = m_fileInfo->GetCachedArticles() > 0;
 
 	std::string fullInfoPath = nzbName + PATH_SEPARATOR + filename;
@@ -683,7 +540,6 @@ bool ArticleWriter::CompleteFileParts()
 
 void ArticleWriter::LogStartMessage(std::string_view infoFilename, bool directWrite, bool cached)
 {
-#ifdef NZBGET_USE_RUST
 	int startMode = nzbget_rs_sap_article_writer_log_start_mode(
 		g_Options->GetRawArticle() ? 1 : 0, directWrite ? 1 : 0, cached ? 1 : 0);
 	if (startMode == 0)
@@ -702,24 +558,6 @@ void ArticleWriter::LogStartMessage(std::string_view infoFilename, bool directWr
 	{
 		detail("Joining articles for %s", infoFilename.data());
 	}
-#else
-	if (g_Options->GetRawArticle())
-	{
-		detail("Moving articles for %s", infoFilename.data());
-	}
-	else if (directWrite && cached)
-	{
-		detail("Writing articles for %s", infoFilename.data());
-	}
-	else if (directWrite)
-	{
-		detail("Checking articles for %s", infoFilename.data());
-	}
-	else
-	{
-		detail("Joining articles for %s", infoFilename.data());
-	}
-#endif
 }
 
 std::optional<ArticleWriter::OutputPaths>
@@ -758,15 +596,10 @@ ArticleWriter::SetupOutputFile(DiskFile &outfile,
 		}
 	}
 
-#ifdef NZBGET_USE_RUST
 	int setupScenario = nzbget_rs_aws_article_writer_classify_setup_output_scenario(
 		g_Options->GetRawArticle() ? 1 : 0, directWrite ? 1 : 0);
 	// Scenario A: Standard Assembly (Write to .tmp)
 	if (setupScenario == 1)
-#else
-	// Scenario A: Standard Assembly (Write to .tmp)
-	if (!g_Options->GetRawArticle() && !directWrite)
-#endif
 	{
 		FileSystem::DeleteFile(paths.tempPath.c_str());
 		if (!outfile.Open(paths.tempPath.c_str(), DiskFile::omWrite))
@@ -776,11 +609,7 @@ ArticleWriter::SetupOutputFile(DiskFile &outfile,
 		}
 	}
 	// Scenario B: Direct Write (Append/Modify existing)
-#ifdef NZBGET_USE_RUST
 	else if (setupScenario == 2)
-#else
-	else if (directWrite)
-#endif
 	{
 		const char* openPath = m_outputFilename.c_str();
 		if (!FileSystem::FileExists(openPath) && FileSystem::FileExists(paths.finalPath.c_str()))
@@ -799,11 +628,7 @@ ArticleWriter::SetupOutputFile(DiskFile &outfile,
 		paths.tempPath = m_outputFilename;
 	}
 	// Scenario C: Raw Mode (Directory creation)
-#ifdef NZBGET_USE_RUST
 	else if (setupScenario == 3)
-#else
-	else if (g_Options->GetRawArticle())
-#endif
 	{
 		FileSystem::DeleteFile(paths.tempPath.c_str());
 		if (!FileSystem::CreateDirectory(paths.finalPath.c_str()))
@@ -850,28 +675,18 @@ uint32 ArticleWriter::ProcessArticles(DiskFile& outfile,
 		if (pa->GetStatus() != ArticleInfo::aiFinished) continue;
 
 		// 1. Fill gaps (Direct Write)
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_dad_article_writer_need_gap_fill(
 			g_Options->GetRawArticle() ? 1 : 0,
 			directWrite ? 1 : 0,
 			pa->GetSegmentOffset(),
 			outfile.Position()) != 0)
-#else
-		if (!g_Options->GetRawArticle() && !directWrite && pa->GetSegmentOffset() > -1 &&
-			pa->GetSegmentOffset() > outfile.Position() && outfile.Position() > -1)
-#endif
 		{
 			memset(buffer, 0, static_cast<size_t>(buffer.Size()));
 			if (!GetSkipDiskWrite())
 			{
-#ifdef NZBGET_USE_RUST
 				while (pa->GetSegmentOffset() > outfile.Position() && outfile.Position() > -1 &&
 					outfile.Write(buffer, nzbget_rs_cwp_article_writer_calc_gap_fill_chunk(
 						pa->GetSegmentOffset(), outfile.Position(), static_cast<int64_t>(buffer.Size()))));
-#else
-				while (pa->GetSegmentOffset() > outfile.Position() && outfile.Position() > -1 &&
-					outfile.Write(buffer, std::min((pa->GetSegmentOffset() - outfile.Position()), static_cast<int64_t>(buffer.Size()))));
-#endif
 			}
 		}
 
@@ -898,14 +713,9 @@ uint32 ArticleWriter::ProcessArticles(DiskFile& outfile,
 			}
 			pa->DiscardSegment();
 		}
-#ifdef NZBGET_USE_RUST
 		else if (nzbget_rs_aws_article_writer_is_staged_dupe_commit_needed(
 			directWrite ? 1 : 0, pa->GetDupeFallbackRound(),
 			pa->GetResultFilename() ? 1 : 0, GetSkipDiskWrite() ? 1 : 0) != 0)
-#else
-		else if (directWrite && pa->GetDupeFallbackRound() > 0 &&
-			pa->GetResultFilename() && !GetSkipDiskWrite())
-#endif
 		{
 			// Duplicate articles are staged in their per-article temp file even
 			// when DirectWrite is enabled.  Copy only after the queue coordinator
@@ -954,12 +764,8 @@ uint32 ArticleWriter::ProcessArticles(DiskFile& outfile,
 				m_commitError = true;
 			}
 		}
-#ifdef NZBGET_USE_RUST
 		else if (nzbget_rs_aws_article_writer_is_standard_part_append_needed(
 			g_Options->GetRawArticle() ? 1 : 0, directWrite ? 1 : 0, GetSkipDiskWrite() ? 1 : 0) != 0)
-#else
-		else if (!g_Options->GetRawArticle() && !directWrite && !GetSkipDiskWrite())
-#endif
 		{
 			// Read from partial file and append to outfile
 			DiskFile infile;
@@ -1068,16 +874,10 @@ bool ArticleWriter::CleanupOldData(bool directWrite,
 		}
 
 		// Clean up old directory if empty
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_awc_article_writer_is_within_dest_dir(
 				nzbDestDir.data(), nzbDestDir.size(),
 				m_outputFilename.c_str(), m_outputFilename.size(),
 				PATH_SEPARATOR, ALT_PATH_SEPARATOR) == 0)
-#else
-		const size_t len = nzbDestDir.size();
-		if (!(!strncmp(nzbDestDir.data(), m_outputFilename.c_str(), len) &&
-			(m_outputFilename[len] == PATH_SEPARATOR || m_outputFilename[len] == ALT_PATH_SEPARATOR)))
-#endif
 		{
 			debug("Checking old dir for: %s", m_outputFilename.c_str());
 			BString<1024> oldDestDir;
@@ -1101,13 +901,9 @@ bool ArticleWriter::CleanupOldData(bool directWrite,
 		}
 	}
 
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_aws_article_writer_should_cleanup_hardlinked_temp(
 		finalOutputPath.empty() ? 1 : 0, m_fileInfo->IsHardLinked() ? 1 : 0,
 		Util::EmptyStr(g_Options->GetInterDir()) ? 1 : 0) != 0)
-#else
-	if (finalOutputPath.empty() && m_fileInfo->IsHardLinked() && Util::EmptyStr(g_Options->GetInterDir()))
-#endif
 	{
 		if (FileSystem::DeleteFile(m_outputFilename.c_str()))
 		{
@@ -1119,22 +915,14 @@ bool ArticleWriter::CleanupOldData(bool directWrite,
 
 void ArticleWriter::ReportCompletionStatus(std::string_view infoFilename)
 {
-#ifdef NZBGET_USE_RUST
 	const int completionKind = nzbget_rs_awc_article_writer_classify_completion_status(
 		m_fileInfo->GetTotalArticles(), m_fileInfo->GetSuccessArticles(),
 		m_fileInfo->GetMissedArticles(), m_fileInfo->GetFailedArticles());
 	if (completionKind == 1)
-#else
-	if (m_fileInfo->GetTotalArticles() == m_fileInfo->GetSuccessArticles())
-#endif
 	{
 		m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkInfo, "Successfully downloaded %s", infoFilename.data());
 	}
-#ifdef NZBGET_USE_RUST
 	else if (completionKind == 2)
-#else
-	else if (m_fileInfo->GetMissedArticles() + m_fileInfo->GetFailedArticles() > 0)
-#endif
 	{
 		m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkWarning, "%i of %i article downloads failed for \"%s\"",
 			m_fileInfo->GetMissedArticles() + m_fileInfo->GetFailedArticles(), m_fileInfo->GetTotalArticles(), infoFilename.data());
@@ -1194,15 +982,10 @@ void ArticleWriter::FlushCache()
 	// a file being retried writes into its existing output (ForceDirectWrite), as
 	// Start and Finish do: flushed to temporary files instead, its cached articles
 	// were never written to the file although marked done
-#ifdef NZBGET_USE_RUST
 	bool directWrite = nzbget_rs_sap_article_writer_flush_is_direct_write(
 		g_Options->GetDirectWrite() ? 1 : 0,
 		m_fileInfo->GetForceDirectWrite() ? 1 : 0,
 		m_fileInfo->GetOutputInitialized() ? 1 : 0) != 0;
-#else
-	bool directWrite = (g_Options->GetDirectWrite() || m_fileInfo->GetForceDirectWrite()) &&
-		m_fileInfo->GetOutputInitialized();
-#endif
 	DiskFile outfile;
 	bool needBufFile = false;
 	int flushedArticles = 0;
@@ -1235,13 +1018,9 @@ void ArticleWriter::FlushCache()
 
 		for (ArticleInfo* pa : cachedArticles)
 		{
-#ifdef NZBGET_USE_RUST
 			if (nzbget_rs_sap_article_writer_flush_should_abort_deleted(
 				m_fileInfo->GetDeleted() ? 1 : 0,
 				m_fileInfo->GetNzbInfo()->GetParking() ? 1 : 0))
-#else
-			if (m_fileInfo->GetDeleted() && !m_fileInfo->GetNzbInfo()->GetParking())
-#endif
 			{
 				// the file was deleted during flushing: stop flushing immediately
 				break;
@@ -1421,7 +1200,6 @@ bool ArticleWriter::MoveCompletedFiles(NzbInfo* nzbInfo, const char* oldDestDir)
 		{
 			if (pendingWrites) break;
 
-#ifdef NZBGET_USE_RUST
 			bool outInit = fileInfo->GetOutputInitialized();
 			bool outEmpty = fileInfo->GetOutputFilename().empty();
 			int activeDl = fileInfo->GetActiveDownloads();
@@ -1436,20 +1214,6 @@ bool ArticleWriter::MoveCompletedFiles(NzbInfo* nzbInfo, const char* oldDestDir)
 			{
 				pendingWrites = true;
 			}
-#else
-			if (fileInfo->GetOutputInitialized() && !fileInfo->GetOutputFilename().empty())
-			{
-				if (fileInfo->GetActiveDownloads() > 0)
-				{
-					Guard guard = fileInfo->GuardOutputFile();
-					if (fileInfo->GetOutputInitialized()) pendingWrites = true;
-				}
-				else
-				{
-					pendingWrites = true;
-				}
-			}
-#endif
 		}
 
 		if (!pendingWrites)
@@ -1470,7 +1234,6 @@ CachedSegmentData ArticleCache::Alloc(int size)
 		g_MemoryMonitor->GetEffectiveArticleCacheBytes() :
 		(size_t)g_Options->GetArticleCache() * 1024 * 1024;
 
-#ifdef NZBGET_USE_RUST
 	int wasEmpty = 0;
 	if (nzbget_rs_dad_article_cache_can_alloc(effectiveLimit, m_allocated, (size_t)size, &wasEmpty) != 0)
 	{
@@ -1490,26 +1253,6 @@ CachedSegmentData ArticleCache::Alloc(int size)
 			m_allocated += size;
 		}
 	}
-#else
-	if (effectiveLimit > 0 && (m_allocated + size <= effectiveLimit))
-	{
-		p = malloc(size);
-		if (p)
-		{
-			if (!m_allocated && g_Options->GetServerMode() && g_Options->GetContinuePartial()
-				&& !g_Options->GetSkipWrite())
-			{
-				g_DiskState->WriteCacheFlag();
-			}
-			if (!m_allocated)
-			{
-				// Resume Run(), the notification arrives later, after releasing m_allocMutex
-				m_allocCond.notify_all();
-			}
-			m_allocated += size;
-		}
-	}
-#endif
 
 	return CachedSegmentData((char*)p, p ? size : 0);
 }
@@ -1521,12 +1264,8 @@ bool ArticleCache::Realloc(CachedSegmentData* segment, int newSize)
 	void* p = realloc(segment->m_data, newSize);
 	if (p)
 	{
-#ifdef NZBGET_USE_RUST
 		m_allocated = (size_t)((ptrdiff_t)m_allocated +
 			nzbget_rs_cwp_article_cache_calc_realloc_delta(newSize, segment->m_size));
-#else
-		m_allocated += newSize - segment->m_size;
-#endif
 		segment->m_size = newSize;
 		segment->m_data = (char*)p;
 	}
@@ -1541,7 +1280,6 @@ void ArticleCache::Free(CachedSegmentData* segment)
 		free(segment->m_data);
 
 		std::lock_guard<std::mutex> guard(m_allocMutex);
-#ifdef NZBGET_USE_RUST
 		int deleteCacheFlag = 0;
 		m_allocated = nzbget_rs_sap_article_cache_free_eval(
 			segment->m_size, m_allocated,
@@ -1552,13 +1290,6 @@ void ArticleCache::Free(CachedSegmentData* segment)
 		{
 			g_DiskState->DeleteCacheFlag();
 		}
-#else
-		m_allocated -= segment->m_size;
-		if (!m_allocated && g_Options->GetServerMode() && g_Options->GetContinuePartial())
-		{
-			g_DiskState->DeleteCacheFlag();
-		}
-#endif
 	}
 }
 
@@ -1572,7 +1303,6 @@ void ArticleCache::Run()
 			g_MemoryMonitor->GetEffectiveArticleCacheBytes() :
 			(size_t)g_Options->GetArticleCache() * 1024 * 1024;
 
-#ifdef NZBGET_USE_RUST
 		int tier = g_MemoryMonitor ? (int)g_MemoryMonitor->GetTier() : (int)NZBGET_RS_PRESSURE_NORMAL;
 		int flushEverything = 0;
 		int needEmergencyFlush = 0;
@@ -1593,33 +1323,6 @@ void ArticleCache::Run()
 				Util::Sleep(5);
 			}
 		}
-#else
-		bool isCritical = g_MemoryMonitor &&
-			g_MemoryMonitor->GetTier() == NZBGET_RS_PRESSURE_CRITICAL;
-		bool isConstrained = g_MemoryMonitor &&
-			g_MemoryMonitor->GetTier() == NZBGET_RS_PRESSURE_CONSTRAINED;
-
-		size_t fillThreshold = (effectiveLimit > 0) ? (effectiveLimit / 100 * 90) : 0;
-		bool needEmergencyFlush = isCritical && (m_allocated > 0);
-		bool needConstrainedFlush = isConstrained && (m_allocated > effectiveLimit);
-
-		if ((justFlushed || resetCounter >= 1000 || IsStopped() || needEmergencyFlush || needConstrainedFlush ||
-			(g_Options->GetDirectWrite() && m_allocated >= fillThreshold)) &&
-			m_allocated > 0)
-		{
-			justFlushed = CheckFlush(IsStopped() || needEmergencyFlush || (m_allocated >= fillThreshold));
-			resetCounter = 0;
-
-			if (needEmergencyFlush && m_allocated == 0)
-			{
-				MemoryMonitor::TrimHeap();
-			}
-			else if (!justFlushed && !IsStopped())
-			{
-				Util::Sleep(5);
-			}
-		}
-#endif
 		else if (!m_allocated)
 		{
 			std::unique_lock<std::mutex> lk(m_allocMutex);
@@ -1660,16 +1363,10 @@ bool ArticleCache::CheckFlush(bool flushEverything)
 
 			for (FileInfo* fileInfo : nzbInfo->GetFileList())
 			{
-#ifdef NZBGET_USE_RUST
 				if (nzbget_rs_awc_article_cache_can_flush_file(
 						fileInfo->GetCachedArticles(), fileInfo->GetActiveDownloads(),
 						fileInfo->GetNzbInfo()->GetSkipDiskWrite() ? 1 : 0,
 						flushEverything ? 1 : 0) != 0)
-#else
-				if (fileInfo->GetCachedArticles() > 0 
-					&& (fileInfo->GetActiveDownloads() == 0 || flushEverything)
-					&& (!fileInfo->GetNzbInfo()->GetSkipDiskWrite() || flushEverything))
-#endif
 				{
 					m_fileInfo = fileInfo;
 					infoName.Format("%s%c%s", m_fileInfo->GetNzbInfo()->GetName(), PATH_SEPARATOR, m_fileInfo->GetFilename());
@@ -1748,14 +1445,7 @@ void MemoryMonitor::Run()
 		UpdateState();
 
 		int interval = g_Options ? g_Options->GetMemoryPressureInterval() : 500;
-#ifdef NZBGET_USE_RUST
 		interval = nzbget_rs_cwp_memory_monitor_clamp_interval(interval);
-#else
-		if (interval < 50)
-		{
-			interval = 50;
-		}
-#endif
 
 		int slept = 0;
 		while (!IsStopped() && slept < interval)
@@ -1775,18 +1465,8 @@ void MemoryMonitor::Stop()
 
 const char* MemoryMonitor::GetTierName() const
 {
-#ifdef NZBGET_USE_RUST
 	return nzbget_rs_awc_memory_monitor_tier_name(
 		(int)GetTier(), (int)NZBGET_RS_PRESSURE_CONSTRAINED, (int)NZBGET_RS_PRESSURE_CRITICAL);
-#else
-	switch (GetTier())
-	{
-		case NZBGET_RS_PRESSURE_CRITICAL: return "CRITICAL";
-		case NZBGET_RS_PRESSURE_CONSTRAINED: return "CONSTRAINED";
-		case NZBGET_RS_PRESSURE_NORMAL:
-		default: return "NORMAL";
-	}
-#endif
 }
 
 size_t MemoryMonitor::GetEffectiveArticleCacheBytes() const
@@ -1802,43 +1482,20 @@ int MemoryMonitor::GetEffectiveArticleCacheMB() const
 int MemoryMonitor::GetEffectiveParBufferMB(int configuredMB) const
 {
 	int tier = m_tier.load(std::memory_order_acquire);
-#ifdef NZBGET_USE_RUST
 	int mb = 0;
 	if (nzbget_rs_dad_memory_monitor_calc_critical_or_normal_par_buffer(
 		tier, configuredMB, (int)NZBGET_RS_PRESSURE_CRITICAL, (int)NZBGET_RS_PRESSURE_NORMAL, &mb) != 0)
 	{
 		return mb;
 	}
-#else
-	if (tier == NZBGET_RS_PRESSURE_CRITICAL)
-	{
-		return configuredMB == 0 ? 0 : std::max(8, std::min(configuredMB, 16));
-	}
-	else if (tier == NZBGET_RS_PRESSURE_NORMAL)
-	{
-		return configuredMB;
-	}
-#endif
 	return (int)nzbget_rs_memory_pressure_effective_par_buffer((uint32_t)configuredMB);
 }
 
 int MemoryMonitor::GetEffectiveDownloadsLimit(int configuredLimit) const
 {
 	int tier = m_tier.load(std::memory_order_acquire);
-#ifdef NZBGET_USE_RUST
 	return nzbget_rs_awc_memory_monitor_effective_downloads_limit(
 		tier, configuredLimit, (int)NZBGET_RS_PRESSURE_CONSTRAINED, (int)NZBGET_RS_PRESSURE_CRITICAL);
-#else
-	if (tier == NZBGET_RS_PRESSURE_CRITICAL)
-	{
-		return std::max(1, configuredLimit / 4);
-	}
-	else if (tier == NZBGET_RS_PRESSURE_CONSTRAINED)
-	{
-		return std::max(2, configuredLimit / 2);
-	}
-	return configuredLimit;
-#endif
 }
 
 void MemoryMonitor::TrimHeap()
@@ -1851,50 +1508,12 @@ void MemoryMonitor::UpdateState()
 	int rawSample = nzbget_rs_memory_pressure_sample();
 	int currentTier = m_tier.load(std::memory_order_relaxed);
 	int nextTier = currentTier;
-#ifdef NZBGET_USE_RUST
 	bool transitioned = nzbget_rs_qhp_memory_monitor_step(
 		rawSample, currentTier, &m_candidateTier, &m_consecutiveSamples, &nextTier) != 0;
-#else
-	bool transitioned = false;
-
-	if (rawSample > currentTier)
-	{
-		// Immediate escalation on higher pressure (1 sample)
-		nextTier = rawSample;
-		m_candidateTier = rawSample;
-		m_consecutiveSamples = 0;
-		transitioned = true;
-	}
-	else if (rawSample < currentTier)
-	{
-		// 2-sample hysteresis on de-escalation
-		if (rawSample == m_candidateTier)
-		{
-			m_consecutiveSamples++;
-			if (m_consecutiveSamples >= 2)
-			{
-				nextTier = rawSample;
-				m_consecutiveSamples = 0;
-				transitioned = true;
-			}
-		}
-		else
-		{
-			m_candidateTier = rawSample;
-			m_consecutiveSamples = 1;
-		}
-	}
-	else
-	{
-		m_candidateTier = rawSample;
-		m_consecutiveSamples = 0;
-	}
-#endif
 
 	uint32_t cfgCache = g_Options ? (uint32_t)g_Options->GetArticleCache() : 0;
 	uint32_t cfgPar = g_Options ? (uint32_t)g_Options->GetParBuffer() : 0;
 	uint32_t cfgLimit = 20;
-#ifdef NZBGET_USE_RUST
 	uint32_t rsEffCache = (nextTier != NZBGET_RS_PRESSURE_CRITICAL &&
 		nextTier != NZBGET_RS_PRESSURE_NORMAL && rawSample == nextTier) ?
 		nzbget_rs_memory_pressure_effective_cache(cfgCache) : 0;
@@ -1919,21 +1538,6 @@ void MemoryMonitor::UpdateState()
 	m_effectiveCacheMB.store(effCache, std::memory_order_release);
 	m_effectiveParBufferMB.store(effPar, std::memory_order_release);
 	m_effectiveDownloadsLimit.store(effLimit, std::memory_order_release);
-#else
-	uint32_t effCache = (nextTier == NZBGET_RS_PRESSURE_CRITICAL) ? 0 :
-		(nextTier == NZBGET_RS_PRESSURE_NORMAL) ? cfgCache :
-		(rawSample == nextTier ? nzbget_rs_memory_pressure_effective_cache(cfgCache) : (cfgCache / 2));
-	m_effectiveCacheMB.store(effCache, std::memory_order_release);
-
-	uint32_t effPar = (nextTier == NZBGET_RS_PRESSURE_CRITICAL) ? (cfgPar == 0 ? 0 : std::max(8u, std::min(cfgPar, 16u))) :
-		(nextTier == NZBGET_RS_PRESSURE_NORMAL) ? cfgPar :
-		(rawSample == nextTier ? nzbget_rs_memory_pressure_effective_par_buffer(cfgPar) : std::max(16u, cfgPar / 2));
-	m_effectiveParBufferMB.store(effPar, std::memory_order_release);
-
-	uint32_t effLimit = (nextTier == NZBGET_RS_PRESSURE_CRITICAL) ? std::max(1u, cfgLimit / 4) :
-		(nextTier == NZBGET_RS_PRESSURE_CONSTRAINED) ? std::max(2u, cfgLimit / 2) : cfgLimit;
-	m_effectiveDownloadsLimit.store(effLimit, std::memory_order_release);
-#endif
 
 	if (transitioned)
 	{
@@ -1944,7 +1548,6 @@ void MemoryMonitor::UpdateState()
 
 void MemoryMonitor::ApplyTierTransition(NzbgetRsPressureTier oldTier, NzbgetRsPressureTier newTier)
 {
-#ifdef NZBGET_USE_RUST
 	int action = nzbget_rs_aws_memory_monitor_classify_tier_transition_action(
 		(int)oldTier, (int)newTier,
 		(int)NZBGET_RS_PRESSURE_NORMAL,
@@ -1972,28 +1575,4 @@ void MemoryMonitor::ApplyTierTransition(NzbgetRsPressureTier oldTier, NzbgetRsPr
 		detail("System memory pressure returned to NORMAL: restoring cache and download capacity");
 		TrimHeap();
 	}
-#else
-	if (newTier == NZBGET_RS_PRESSURE_CRITICAL)
-	{
-		warn("System memory pressure CRITICAL (>=90%%): shedding article cache and throttling downloads");
-		if (g_ArticleCache)
-		{
-			g_ArticleCache->WakeupFlush();
-		}
-		TrimHeap();
-	}
-	else if (newTier == NZBGET_RS_PRESSURE_CONSTRAINED)
-	{
-		detail("System memory pressure CONSTRAINED: shrinking article cache ceiling");
-		if (g_ArticleCache)
-		{
-			g_ArticleCache->WakeupFlush();
-		}
-	}
-	else if (newTier == NZBGET_RS_PRESSURE_NORMAL && oldTier != NZBGET_RS_PRESSURE_NORMAL)
-	{
-		detail("System memory pressure returned to NORMAL: restoring cache and download capacity");
-		TrimHeap();
-	}
-#endif
 }

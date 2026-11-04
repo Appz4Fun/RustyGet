@@ -51,7 +51,6 @@ private:
 	bool Authenticate();
 	bool AuthInfoUser(int recur);
 	bool AuthInfoPass(int recur);
-#ifdef NZBGET_USE_RUST
 	// the connection as rust/src/nntp.rs drives it (NzbgetRsNntpIo)
 	struct RsExchange;
 	static int RsWriteLine(void* ctx, const char* line);
@@ -59,7 +58,6 @@ private:
 	static int RsReportError(void* ctx, const char* prefix, const char* arg);
 	static int RsDebug(void* ctx, const char* msg);
 	static int RsCancelled(void* ctx, int* cancelled);
-#endif
 };
 
 #endif

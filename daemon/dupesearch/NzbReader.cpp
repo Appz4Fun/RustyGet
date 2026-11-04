@@ -27,14 +27,10 @@
 #include "XmlReader.h"
 #include "NzbFile.h"
 #include "ParParser.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 #include "DupeUtil.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs_dupesearch_nzb.h"
-#endif
 
 using DupeUtil::Lower;
 using DupeUtil::Trim;
@@ -54,88 +50,20 @@ std::string NameOfSubject(const std::string& subject)
 			return Trim(subject.substr(open + 1, close - open - 1));
 		}
 	}
-#ifdef NZBGET_USE_RUST
 	NzbgetRsSubjectRange range = nzbget_rs_dupesearch_unquoted_subject((const uint8_t*)subject.data(), subject.size());
 	return subject.substr(range.start, range.len);
-#else
-    // Standard unquoted yEnc subjects decorate the filename with a part count.
-    // Strip only that terminal decoration, so volume-like media names stay data.
-    static const std::regex tail(R"(\s+yEnc(?:\s+\([0-9]+/[0-9]+\))?\s*$)", std::regex::icase);
-    std::smatch match;
-    if (std::regex_search(subject, match, tail))
-    {
-        return Trim(subject.substr(0, (size_t)match.position()));
-    }
-	return Trim(subject);
-#endif
 }
 
 bool ValidMessageId(const std::string& id)
 {
-#ifdef NZBGET_USE_RUST
 	return nzbget_rs_din_nzb_reader_valid_message_id(id.data(), id.size()) != 0;
-#else
-	if (id.empty() || id.size() > 250)
-	{
-		return false;
-	}
-	for (size_t i = 0; i < id.size(); i++)
-	{
-		unsigned char ch = (unsigned char)id[i];
-		bool edge = i == 0 || i + 1 == id.size();
-		if (ch <= ' ' || ch == 0x7f || ((ch == '<' || ch == '>') && !edge))
-		{
-			return false;
-		}
-	}
-	return true;
-#endif
 }
 
 bool IsParName(const std::string& name)
 {
-#ifdef NZBGET_USE_RUST
 	return nzbget_rs_dupesearch_par_name((const uint8_t*)name.data(), name.size()) != 0;
-#else
-	return name.size() >= 5 && Lower(name.substr(name.size() - 5)) == ".par2";
-#endif
 }
 
-#ifndef NZBGET_USE_RUST
-// Match the Rust summary policy, including conservative tail-inference guards.
-uint64_t DeclaredPartCount(const std::vector<std::pair<long long, long long>>& parts,
-    uint32_t declared, bool parity)
-{
-    const long long maxPart = 200000;
-    const uint64_t listed = parts.size();
-    const bool numbered = std::all_of(parts.begin(), parts.end(),
-        [maxPart](const auto& part) { return part.first > 0 && part.first <= maxPart; });
-    const auto last = std::max_element(parts.begin(), parts.end());
-    const uint64_t fallback = numbered && last != parts.end() ?
-        std::max(listed, (uint64_t)last->first) : listed;
-    if (parity || parts.size() < 2 || !numbered || declared == 0 || declared > maxPart ||
-        listed * 3 >= (uint64_t)declared * 2 ||
-        std::any_of(parts.begin(), parts.end(), [](const auto& part) { return part.second <= 0; }))
-        return fallback;
-    if ((long long)declared - last->first < 100) return fallback;
-
-    std::vector<long long> sizes;
-    sizes.reserve(parts.size());
-    for (const auto& part : parts) sizes.push_back(part.second);
-    std::sort(sizes.begin(), sizes.end());
-    long long common = sizes[0], previous = sizes[0];
-    size_t count = 0, run = 0;
-    for (const auto size : sizes)
-    {
-        if (size == previous) run++;
-        else { run = 1; previous = size; }
-        if (run > count) { common = size; count = run; }
-    }
-    const bool full = count * 2 > sizes.size() ? last->second == common :
-        (double)last->second >= 0.99 * (double)sizes[sizes.size() / 2];
-    return full ? declared : fallback;
-}
-#endif
 
 class Reader : public XmlReader::Handler
 {
@@ -200,13 +128,9 @@ public:
             for (size_t i = 0; i < m_segments.size(); i++)
             {
                 const Segment& segment = m_segments[i];
-#ifdef NZBGET_USE_RUST
                 if (nzbget_rs_din_nzb_reader_is_duplicate_segment_number(
                     i, m_segments.size(), segment.number,
                     i + 1 < m_segments.size() ? m_segments[i + 1].number : 0) != 0) continue;
-#else
-                if (i + 1 < m_segments.size() && m_segments[i + 1].number == segment.number) continue;
-#endif
                 m_parts.push_back({ segment.number, segment.bytes });
                 // Invalid retained data still makes geometry unknown. Never
                 // resurrect an earlier valid duplicate in place of this ID.
@@ -219,7 +143,6 @@ public:
                 ids.insert(segment.id);
                 if (!IsParName(m_name)) dataIds.insert(segment.id);
                 m_validParts++;
-#ifdef NZBGET_USE_RUST
                 int geomValid = geometryValid ? 1 : 0;
                 int pushArticleSize = 0;
                 m_fileBytes = nzbget_rs_din_nzb_reader_accum_segment_bytes(
@@ -227,26 +150,15 @@ public:
                     geomValid, &geomValid, &pushArticleSize);
                 geometryValid = geomValid != 0;
                 if (pushArticleSize != 0) articleSizes.push_back((uint64_t)segment.bytes);
-#else
-                if (!IsParName(m_name) && segment.bytes > 0) articleSizes.push_back((uint64_t)segment.bytes);
-                if (segment.bytes > 0 && m_fileBytes <= std::numeric_limits<long long>::max() - segment.bytes)
-                    m_fileBytes += segment.bytes;
-                else if (!IsParName(m_name)) geometryValid = false;
-#endif
                 if (segment.number == 1) m_firstId = segment.id;
             }
             uint64_t listed = m_parts.size(), declared = listed;
-#ifdef NZBGET_USE_RUST
             std::vector<NzbgetRsDupePart> raw;
             raw.reserve(m_parts.size());
             for (const auto& part : m_parts) raw.push_back({ part.first, part.second });
             int count = NzbFile::DeclaredParts(m_subject.c_str());
             nzbget_rs_dupe_part_counts(raw.data(), raw.size(), count > 0 ? (uint32_t)count : 0,
                 IsParName(m_name), &listed, &declared);
-#else
-            int count = NzbFile::DeclaredParts(m_subject.c_str());
-            declared = DeclaredPartCount(m_parts, count > 0 ? (uint32_t)count : 0, IsParName(m_name));
-#endif
             listedParts += m_validParts;
             declaredParts += declared;
             if (!IsParName(m_name))
@@ -254,7 +166,6 @@ public:
                 dataListedParts += m_validParts;
                 dataDeclaredParts += declared;
             }
-#ifdef NZBGET_USE_RUST
             int newDataFiles = dataFiles;
             int64_t newDataBytes = dataBytes;
             int newGeomValid = geometryValid ? 1 : 0;
@@ -269,19 +180,6 @@ public:
             geometryValid = newGeomValid != 0;
             if (pushParityHead != 0) parityHeads.push_back({ m_name, m_firstId, m_fileBytes });
             if (pushDataHead != 0) heads.push_back({ m_name, m_firstId, m_fileBytes });
-#else
-            if (IsParName(m_name) && m_fileBytes > 0 && !m_firstId.empty())
-                parityHeads.push_back({ m_name, m_firstId, m_fileBytes });
-
-			if (!IsParName(m_name) && m_fileBytes > 0)
-			{
-				dataFiles++;
-				if (dataBytes <= std::numeric_limits<long long>::max() - m_fileBytes) dataBytes += m_fileBytes;
-				else geometryValid = false;
-				if (!m_firstId.empty()) heads.push_back({ m_name, m_firstId, m_fileBytes });
-			}
-			else if (!IsParName(m_name)) geometryValid = false;
-#endif
 			m_inFile = false;
 		}
 		m_text.clear();
@@ -334,7 +232,6 @@ private:
 
 std::string NzbSummary::Fingerprint() const
 {
-#ifdef NZBGET_USE_RUST
 	std::vector<const char*> ptrs;
 	std::vector<size_t> lens;
 	ptrs.reserve(messageIds.size());
@@ -347,21 +244,6 @@ std::string NzbSummary::Fingerprint() const
 	char buffer[17] = {};
 	nzbget_rs_din_nzb_reader_fnv1a_fingerprint(ptrs.data(), lens.data(), ptrs.size(), buffer);
 	return std::string(buffer, 16);
-#else
-	// FNV-1a over the sorted message-ids
-	uint64_t hash = 1469598103934665603ULL;
-	for (const std::string& id : messageIds)
-	{
-		for (unsigned char ch : id)
-		{
-			hash = (hash ^ ch) * 1099511628211ULL;
-		}
-		hash = (hash ^ '\n') * 1099511628211ULL;
-	}
-	char buffer[32];
-	snprintf(buffer, sizeof(buffer), "%016llx", (unsigned long long)hash);
-	return buffer;
-#endif
 }
 
 bool NzbReader::Parse(const std::string& data, NzbSummary& summary)
@@ -386,12 +268,8 @@ bool NzbReader::Parse(const std::string& data, NzbSummary& summary)
     if (!reader.articleSizes.empty())
     {
         std::sort(reader.articleSizes.begin(), reader.articleSizes.end());
-#ifdef NZBGET_USE_RUST
         summary.articleBytes = nzbget_rs_din_nzb_reader_select_median_article_bytes(
             reader.articleSizes.data(), reader.articleSizes.size());
-#else
-        summary.articleBytes = reader.articleSizes[reader.articleSizes.size()/2];
-#endif
     }
     // File size does not identify a PAR2 index: an index can be larger than
     // a recovery volume. Use the shared filename parser and keep capacity
@@ -399,13 +277,8 @@ bool NzbReader::Parse(const std::string& data, NzbSummary& summary)
     for (const auto& head : reader.parityHeads)
     {
         int baseLen = 0;
-#ifdef NZBGET_USE_RUST
         bool parsedOk = ParParser::ParseParFilename(head.name.c_str(), true, &baseLen, nullptr);
         if (nzbget_rs_din_nzb_reader_is_par_index_length(parsedOk ? 1 : 0, baseLen, head.name.size()) != 0)
-#else
-        if (ParParser::ParseParFilename(head.name.c_str(), true, &baseLen, nullptr) &&
-            baseLen >= 0 && (size_t)baseLen + 5 == head.name.size())
-#endif
         {
             if (!summary.parIndex.messageId.empty() &&
                 !ParParser::SameParCollection(summary.parIndex.name.c_str(), head.name.c_str(), true))
@@ -423,15 +296,9 @@ bool NzbReader::Parse(const std::string& data, NzbSummary& summary)
         for (const auto& head : reader.parityHeads)
         {
             int baseLen = 0;
-#ifdef NZBGET_USE_RUST
             bool parsedOk = ParParser::ParseParFilename(head.name.c_str(), true, &baseLen, nullptr);
             if (nzbget_rs_din_nzb_reader_is_par_volume_length(parsedOk ? 1 : 0, baseLen, head.name.size()) != 0 &&
                 ParParser::SameParCollection(summary.parIndex.name.c_str(), head.name.c_str(), true))
-#else
-            if (ParParser::ParseParFilename(head.name.c_str(), true, &baseLen, nullptr) &&
-                baseLen >= 0 && (size_t)baseLen + 5 < head.name.size() &&
-                ParParser::SameParCollection(summary.parIndex.name.c_str(), head.name.c_str(), true))
-#endif
                 summary.recoveryBytes.push_back((uint64_t)head.bytes);
         }
     }

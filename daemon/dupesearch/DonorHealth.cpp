@@ -26,9 +26,7 @@
 #include <set>
 #include <thread>
 #include "DonorHealth.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 using Answer = DonorHealth::Answer;
 using Health = DonorHealth::Health;
@@ -41,11 +39,7 @@ long long DonorHealth::NowMs()
 
 double DonorHealth::Health::Alive() const
 {
-#ifdef NZBGET_USE_RUST
 	return nzbget_rs_df_donor_health_alive(present, missing, error, MinKnown);
-#else
-	return Answered() >= MinKnown ? (double)present / (double)Answered() : -1.0;
-#endif
 }
 
 DonorHealth::Health& DonorHealth::Health::operator+=(const Health& other)
@@ -61,11 +55,7 @@ DonorHealth::Health& DonorHealth::Health::operator+=(const Health& other)
 
 bool DonorHealth::DeadProbe(const Health& health)
 {
-#ifdef NZBGET_USE_RUST
 	return nzbget_rs_df_donor_health_dead_probe(health.present, health.missing, MinKnown) != 0;
-#else
-	return health.present == 0 && health.missing >= MinKnown;
-#endif
 }
 
 std::vector<std::string> DonorHealth::Sample(const std::vector<std::string>& ids, int percent, int minimum,
@@ -74,13 +64,7 @@ std::vector<std::string> DonorHealth::Sample(const std::vector<std::string>& ids
 	std::vector<std::string> sorted = ids;
 	std::sort(sorted.begin(), sorted.end());
 
-#ifdef NZBGET_USE_RUST
 	size_t count = nzbget_rs_df_donor_sample_count(sorted.size(), percent, minimum, maximum);
-#else
-	size_t wanted = (size_t)std::ceil((double)sorted.size() * percent / 100.0);
-	size_t count = std::min(sorted.size(), std::max((size_t)std::max(minimum, 0),
-		std::min((size_t)std::max(maximum, 0), wanted)));
-#endif
 
 	// a deterministic random pick: a partial shuffle
 	std::mt19937 random(seed);
@@ -185,18 +169,7 @@ std::vector<DonorHealth::Answer> DonorHealth::Server::Ask(const std::vector<Requ
 		answers = Exchange(batch);
 		// latency-bound servers gain from deeper batches, busy ones only hold a batch past the budget
 		long long took = NowMs() - start;
-#ifdef NZBGET_USE_RUST
 		m_depth = nzbget_rs_df_adjust_pipeline_depth(m_depth, took, PipelineMax);
-#else
-		if (took < 1000)
-		{
-			m_depth = std::min(PipelineMax, m_depth * 2);
-		}
-		else if (took > 2000)
-		{
-			m_depth = std::max(1, m_depth / 2);
-		}
-#endif
 		m_errors = 0;
 	}
 	catch (ExchangeError& error)
@@ -204,33 +177,18 @@ std::vector<DonorHealth::Answer> DonorHealth::Server::Ask(const std::vector<Requ
 		// a busy pool says nothing about the server: it doesn't count toward the pause
 		// that keeps a failing server out of the checks (F12: starved checks paused
 		// every server, and the next fleet measured nothing)
-#ifdef NZBGET_USE_RUST
 		m_errors += nzbget_rs_dqh_donor_health_error_increment(error.busy ? 1 : 0);
 		if (nzbget_rs_dqh_donor_health_should_pause_server(m_errors.load(), ServerGiveUp) != 0)
 		{
 			m_downUntilMs = NowMs() + m_retryAfterMs;
 		}
-#else
-		m_errors += error.busy ? 0 : 1;
-		if (m_errors >= ServerGiveUp)
-		{
-			m_downUntilMs = NowMs() + m_retryAfterMs;
-		}
-#endif
 		// the answers read before the connection broke stay
 		answers = std::move(error.answers);
 	}
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_dqh_donor_health_should_pause_server(m_errors.load(), ServerGiveUp) != 0)
 	{
 		m_errors = 0;
 	}
-#else
-	if (m_errors >= ServerGiveUp)
-	{
-		m_errors = 0;
-	}
-#endif
 	answers.resize(batch.size(), Answer::Error);
 	for (Answer& answer : answers)
 	{
@@ -352,7 +310,6 @@ void Walk(std::shared_ptr<CheckState> state, size_t serverIndex)
 			size_t index = todo[k];
 			state->votes[index][serverIndex] = answers[k];
 			state->soft[index] = state->soft[index] || answers[k] == Answer::BodyBad;
-#ifdef NZBGET_USE_RUST
 			std::vector<int> voteVals(state->votes[index].size());
 			for (size_t v = 0; v < state->votes[index].size(); v++)
 			{
@@ -363,25 +320,6 @@ void Walk(std::shared_ptr<CheckState> state, size_t serverIndex)
 			{
 				Settle(*state, index, verdict);
 			}
-#else
-			if (answers[k] == Answer::Present)
-			{
-				Settle(*state, index, fPresent);
-				continue;
-			}
-			// nobody had it: missing if any server said so definitively
-			bool all = true;
-			bool onlyErrors = true;
-			for (Answer vote : state->votes[index])
-			{
-				all &= vote != Answer::None;
-				onlyErrors &= vote == Answer::Error;
-			}
-			if (all)
-			{
-				Settle(*state, index, onlyErrors ? fError : fMissing);
-			}
-#endif
 		}
 	}
 }
@@ -448,7 +386,6 @@ Health DonorHealth::CheckItems(const ServerList& servers, const std::vector<Item
 			{
 				continue;
 			}
-#ifdef NZBGET_USE_RUST
 			std::vector<int> voteVals(state->votes[i].size());
 			for (size_t v = 0; v < state->votes[i].size(); v++)
 			{
@@ -459,35 +396,15 @@ Health DonorHealth::CheckItems(const ServerList& servers, const std::vector<Item
 			{
 				state->final[i] = resolved;
 			}
-#else
-			int misses = 0;
-			bool present = false;
-			for (Answer vote : state->votes[i])
-			{
-				misses += vote == Answer::Missing;
-				present |= vote == Answer::Present;
-			}
-			if (!present && 2 * misses >= (int)servers.size())
-			{
-				state->final[i] = fMissing;
-			}
-#endif
 		}
 
 		for (size_t i = 0; i < count; i++)
 		{
 			int verdict = state->final[i];
-#ifdef NZBGET_USE_RUST
 			nzbget_rs_dqh_donor_health_accum_verdict_counts(
 				verdict, (int)fPresent, (int)fMissing, (int)fError,
 				state->soft[i] != 0 ? 1 : 0,
 				&health.present, &health.missing, &health.error, &health.bodyBad);
-#else
-			health.present += verdict == fPresent;
-			health.missing += verdict == fMissing;
-			health.error += verdict == fError;
-			health.bodyBad += state->soft[i] && verdict != fPresent;
-#endif
 		}
 	}
 	return health;

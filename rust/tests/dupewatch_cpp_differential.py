@@ -484,7 +484,8 @@ def emit(directory, candidate):
     current=subprocess.check_output(['git','show',f'{current_revision}:daemon/dupesearch/DupeSearch.cpp'],cwd=root,text=True)
     new_start=current.index('bool DupeSearch::PrepareNative(')
     new_stop=current.index('    int score = std::max(pick->GetDupeScore(), BasePickScore);',new_start)
-    native_prefix=current[new_start:new_stop]+'    return true;\n#else\n return false;\n#endif\n}\n'
+    native_tail='    return true;\n#else\n return false;\n#endif\n}\n' if '#ifdef NZBGET_USE_RUST' in current[new_start:new_stop] else '    return true;\n}\n'
+    native_prefix=current[new_start:new_stop]+native_tail
     header=subprocess.check_output(['git','show',f'{current_revision}:rust/include/nzbget_rs.h'],cwd=root,text=True)
     header_start=header.rfind('enum',0,header.index('rsDupeEnabled'))
     header_stop=header.index('NzbgetRsBuf nzbget_rs_dupe_queries',header_start)

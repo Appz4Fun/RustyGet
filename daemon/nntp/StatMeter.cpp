@@ -22,9 +22,7 @@
 #include "nzbget.h"
 #include "StatMeter.h"
 
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 #include "Options.h"
 #include "WorkState.h"
 #include "ServerPool.h"
@@ -34,7 +32,6 @@
 static const int DAYS_UP_TO_2013_JAN_1 = 15706;
 static const int DAYS_IN_TWENTY_YEARS = 366*20;
 
-#ifdef NZBGET_USE_RUST
 void ServerVolume::CalcSlots(time_t locCurTime)
 {
 	// rust/src/statmeter.rs
@@ -58,40 +55,6 @@ void ServerVolume::CalcSlots(time_t locCurTime)
 		}
 	}
 }
-#else
-void ServerVolume::CalcSlots(time_t locCurTime)
-{
-	m_secSlot = (int)locCurTime % 60;
-	m_minSlot = ((int)locCurTime / 60) % 60;
-	m_hourSlot = ((int)locCurTime % 86400) / 3600;
-	int daysSince1970 = (int)locCurTime / 86400;
-	m_daySlot = daysSince1970 - DAYS_UP_TO_2013_JAN_1 + 1;
-	if (0 <= m_daySlot && m_daySlot < DAYS_IN_TWENTY_YEARS)
-	{
-		int curDay = daysSince1970;
-		if (m_firstDay == 0 || m_firstDay > curDay)
-		{
-			m_firstDay = curDay;
-		}
-		m_daySlot = curDay - m_firstDay;
-
-		size_t daySlot = Util::SafeIntCast<int, size_t>(m_daySlot + 1);
-		if (daySlot > m_bytesPerDays.size())
-		{
-			m_bytesPerDays.resize(daySlot);
-		}
-
-		if (daySlot > m_articlesPerDays.size())
-		{
-			m_articlesPerDays.resize(daySlot);
-		}
-	}
-	else
-	{
-		m_daySlot = -1;
-	}
-}
-#endif
 
 void ServerVolume::AddStats(Stats stats)
 {
@@ -105,70 +68,11 @@ void ServerVolume::AddStats(Stats stats)
 	CalcSlots(locCurTime);
 
 	int64 bytes = static_cast<int64>(stats.bytes);
-#ifdef NZBGET_USE_RUST
 	// rust/src/statmeter.rs: clear the slots passed, add to the current ones
 	NzbgetRsVolumeSlots slots{m_secSlot, m_minSlot, m_hourSlot, m_daySlot, 0};
 	nzbget_rs_volume_add(m_bytesPerSeconds.data(), m_bytesPerSeconds.size(), m_bytesPerMinutes.data(),
 		m_bytesPerMinutes.size(), m_bytesPerHours.data(), m_bytesPerHours.size(), &slots, lastMinSlot,
 		lastHourSlot, locCurTime, locDataTime, bytes);
-#else
-	if (locCurTime != locDataTime)
-	{
-		// clear seconds/minutes/hours slots if necessary
-		// also handle the backwards changes of system clock
-
-		int totalDelta = (int)(locCurTime - locDataTime);
-		int deltaSign = totalDelta >= 0 ? 1 : -1;
-		totalDelta = abs(totalDelta);
-
-		int secDelta = totalDelta;
-		if (deltaSign < 0) secDelta++;
-		if (secDelta >= 60) secDelta = 60;
-		for (int i = 0; i < secDelta; i++)
-		{
-			int nulSlot = m_secSlot - i * deltaSign;
-			if (nulSlot < 0) nulSlot += 60;
-			if (nulSlot >= 60) nulSlot -= 60;
-			if (nulSlot >= 0 && static_cast<size_t>(nulSlot) < m_bytesPerSeconds.size())
-				m_bytesPerSeconds[nulSlot] = 0;
-		}
-
-		int minDelta = totalDelta / 60;
-		if (deltaSign < 0) minDelta++;
-		if (abs(minDelta) >= 60) minDelta = 60;
-		if (minDelta == 0 && m_minSlot != lastMinSlot) minDelta = 1;
-		for (int i = 0; i < minDelta; i++)
-		{
-			int nulSlot = m_minSlot - i * deltaSign;
-			if (nulSlot < 0) nulSlot += 60;
-			if (nulSlot >= 60) nulSlot -= 60;
-			if (nulSlot >= 0 && static_cast<size_t>(nulSlot) < m_bytesPerMinutes.size())
-				m_bytesPerMinutes[nulSlot] = 0;
-		}
-
-		int hourDelta = totalDelta / (60 * 60);
-		if (deltaSign < 0) hourDelta++;
-		if (hourDelta >= 24) hourDelta = 24;
-		if (hourDelta == 0 && m_hourSlot != lastHourSlot) hourDelta = 1;
-		for (int i = 0; i < hourDelta; i++)
-		{
-			int nulSlot = m_hourSlot - i * deltaSign;
-			if (nulSlot < 0) nulSlot += 24;
-			if (nulSlot >= 24) nulSlot -= 24;
-			if (nulSlot >= 0 && static_cast<size_t>(nulSlot) < m_bytesPerHours.size())
-				m_bytesPerHours[nulSlot] = 0;
-		}
-	}
-
-	// A negative int time can produce negative slots. Match the Rust bounds checks.
-	if (m_secSlot >= 0 && static_cast<size_t>(m_secSlot) < m_bytesPerSeconds.size())
-		m_bytesPerSeconds[m_secSlot] += bytes;
-	if (m_minSlot >= 0 && static_cast<size_t>(m_minSlot) < m_bytesPerMinutes.size())
-		m_bytesPerMinutes[m_minSlot] += bytes;
-	if (m_hourSlot >= 0 && static_cast<size_t>(m_hourSlot) < m_bytesPerHours.size())
-		m_bytesPerHours[m_hourSlot] += bytes;
-#endif
-#ifdef NZBGET_USE_RUST
 	size_t daySlotIdx = m_daySlot >= 0 ? static_cast<size_t>(m_daySlot) : 0;
 	int64 curDayBytes = m_daySlot >= 0 ? m_bytesPerDays[daySlotIdx] : 0;
 	int curDayFailed = m_daySlot >= 0 ? m_articlesPerDays[daySlotIdx].failed : 0;
@@ -188,17 +92,6 @@ void ServerVolume::AddStats(Stats stats)
 	}
 	m_totalBytes = newTotalBytes;
 	m_customBytes = newCustomBytes;
-#else
-	if (m_daySlot >= 0)
-	{
-		size_t daySlot = static_cast<size_t>(m_daySlot);
-		m_bytesPerDays[daySlot] += bytes;
-		m_articlesPerDays[daySlot].failed += stats.articles.failed;
-		m_articlesPerDays[daySlot].success += stats.articles.success;
-	}
-	m_totalBytes += bytes;
-	m_customBytes += bytes;
-#endif
 
 	m_dataTime = curTime;
 }
@@ -299,7 +192,6 @@ void StatMeter::AdjustTimeOffset()
 	gmtime_r(&utcTime, &tmSplittedTime);
 	tmSplittedTime.tm_isdst = -1;
 	time_t locTime = mktime(&tmSplittedTime);
-#ifdef NZBGET_USE_RUST
 	int localDelta = 0;
 	int totalOffset = nzbget_rs_psp_statmeter_calc_local_time_offset(
 		(int64_t)utcTime, (int64_t)locTime, g_Options->GetTimeCorrection(), &localDelta);
@@ -307,13 +199,6 @@ void StatMeter::AdjustTimeOffset()
 	m_lastTimeOffset = utcTime;
 
 	debug("UTC delta: %i (%i+%i)", g_WorkState->GetLocalTimeOffset(), localDelta, g_Options->GetTimeCorrection());
-#else
-	time_t localTimeDelta = utcTime - locTime;
-	g_WorkState->SetLocalTimeOffset((int)localTimeDelta + g_Options->GetTimeCorrection());
-	m_lastTimeOffset = utcTime;
-
-	debug("UTC delta: %i (%i+%i)", g_WorkState->GetLocalTimeOffset(), (int)localTimeDelta, g_Options->GetTimeCorrection());
-#endif
 }
 
 /*
@@ -324,7 +209,6 @@ void StatMeter::AdjustTimeOffset()
 void StatMeter::IntervalCheck()
 {
 	time_t m_curTime = Util::CurrentTime();
-#ifdef NZBGET_USE_RUST
 	int64 clockDelta = 0;
 	int adjustDownload = 0;
 	int adjustTz = 0;
@@ -348,27 +232,6 @@ void StatMeter::IntervalCheck()
 	{
 		AdjustTimeOffset();
 	}
-#else
-	time_t diff = m_curTime - m_lastCheck;
-	if (diff > 60 || diff < 0)
-	{
-		m_startServer += diff + 1; // "1" because the method is called once per second
-		if (m_startDownload != 0 && !m_standBy)
-		{
-			m_startDownload += diff + 1;
-		}
-		AdjustTimeOffset();
-	}
-	else if (m_lastTimeOffset > m_curTime ||
-		m_curTime - m_lastTimeOffset > 60 * 60 * 3 ||
-		(m_curTime - m_lastTimeOffset > 60 && !m_standBy))
-	{
-		// checking time zone settings may prevent the device from entering sleep/hibernate mode
-		// check every minute if not in standby
-		// check at least every 3 hours even in standby
-		AdjustTimeOffset();
-	}
-#endif
 
 	m_lastCheck = m_curTime;
 
@@ -392,14 +255,10 @@ void StatMeter::EnterLeaveStandBy(bool enter)
 		time_t startDownload = 0;
 		if (!m_startDownload.compare_exchange_strong(startDownload, Util::CurrentTime()))
 		{
-#ifdef NZBGET_USE_RUST
 			m_startDownload = (time_t)nzbget_rs_psp_statmeter_calc_resumed_download_start(
 				(int64_t)m_startDownload.load(),
 				(int64_t)Util::CurrentTime(),
 				(int64_t)m_pausedFrom.load());
-#else
-			m_startDownload += Util::CurrentTime() - m_pausedFrom;
-#endif
 		}
 
 		m_pausedFrom = 0;
@@ -410,7 +269,6 @@ void StatMeter::EnterLeaveStandBy(bool enter)
 void StatMeter::CalcTotalStat(int* upTimeSec, int* dnTimeSec, int64* allBytes, bool* standBy)
 {
 	time_t startServer = m_startServer.load();
-#ifdef NZBGET_USE_RUST
 	*standBy = m_standBy;
 	nzbget_rs_sus_calc_total_stat(
 		static_cast<int64>(Util::CurrentTime()),
@@ -421,32 +279,11 @@ void StatMeter::CalcTotalStat(int* upTimeSec, int* dnTimeSec, int64* allBytes, b
 		upTimeSec,
 		dnTimeSec);
 	*allBytes = m_allBytes;
-#else
-	if (startServer > 0)
-	{
-		*upTimeSec = static_cast<int>(Util::CurrentTime() - startServer);
-	}
-	else
-	{
-		*upTimeSec = 0;
-	}
-	*standBy = m_standBy;
-	if (*standBy)
-	{
-		*dnTimeSec = static_cast<int>(m_pausedFrom - m_startDownload);
-	}
-	else
-	{
-		*dnTimeSec = static_cast<int>(Util::CurrentTime() - m_startDownload);
-	}
-	*allBytes = m_allBytes;
-#endif
 }
 
 // Average speed in last 30 seconds
 int64 StatMeter::CalcCurrentDownloadSpeed()
 {
-#ifdef NZBGET_USE_RUST
 	if (m_standBy)
 	{
 		return 0;
@@ -456,35 +293,16 @@ int64 StatMeter::CalcCurrentDownloadSpeed()
 		static_cast<int64>(Util::CurrentTime()),
 		m_speedStartTime.load(),
 		m_speedTotalBytes.load());
-#else
-	if (m_standBy)
-	{
-		return 0;
-	}
-
-	int64 timeDiff = static_cast<int64>(Util::CurrentTime()) - m_speedStartTime * SPEEDMETER_SLOTSIZE;
-	if (timeDiff == 0)
-	{
-		return 0;
-	}
-
-	return m_speedTotalBytes / timeDiff;
-#endif
 }
 
 // Amount of data downloaded in current second
 int64 StatMeter::CalcMomentaryDownloadSpeed()
 {
 	time_t curTime = Util::CurrentTime();
-#ifdef NZBGET_USE_RUST
 	return nzbget_rs_sus_calc_momentary_download_speed(
 		static_cast<int64>(curTime),
 		static_cast<int64>(m_curSecTime.load()),
 		m_curSecBytes.load());
-#else
-	int64 speed = curTime == m_curSecTime ? m_curSecBytes.load() : 0;
-	return speed;
-#endif
 }
 
 void StatMeter::AddSpeedReading(int bytes)
@@ -492,7 +310,6 @@ void StatMeter::AddSpeedReading(int bytes)
 	std::lock_guard<std::mutex> guard{m_speedTotalBytesMtx};
 
 	time_t curTime = Util::CurrentTime();
-#ifdef NZBGET_USE_RUST
 	int64 curSecTime = static_cast<int64>(m_curSecTime.load());
 	int64 curSecBytes = m_curSecBytes.load();
 	int32_t speedBytes[SPEEDMETER_SLOTS];
@@ -533,69 +350,13 @@ void StatMeter::AddSpeedReading(int bytes)
 	m_speedStartTime = speedStartTime;
 	m_speedCorrection = static_cast<time_t>(speedCorrection);
 	m_allBytes = allBytes;
-#else
-	int nowSlot = static_cast<int>(curTime) / SPEEDMETER_SLOTSIZE;
-
-	if (curTime != m_curSecTime)
-	{
-		m_curSecTime =	curTime;
-		m_curSecBytes = 0;
-	}
-	m_curSecBytes += bytes;
-
-	while (nowSlot > m_speedTime[m_speedBytesIndex])
-	{
-		//record bytes in next slot
-		++m_speedBytesIndex;
-		if (m_speedBytesIndex >= SPEEDMETER_SLOTS)
-		{
-			m_speedBytesIndex = 0;
-		}
-
-		//Adjust counters with outgoing information.
-		m_speedTotalBytes = m_speedTotalBytes - static_cast<int64>(m_speedBytes[m_speedBytesIndex]);
-
-		//Note we should really use the start time of the next slot
-		//but its easier to just use the outgoing slot time. This
-		//will result in a small error.
-		m_speedStartTime = m_speedTime[m_speedBytesIndex].load();
-
-		//Now reset.
-		m_speedBytes[m_speedBytesIndex] = 0;
-		m_speedTime[m_speedBytesIndex] = nowSlot;
-	}
-
-	// Once per second recalculate summary field "m_iSpeedTotalBytes" to recover from possible synchronisation errors
-	if (curTime > m_speedCorrection)
-	{
-		int64 speedTotalBytes = 0;
-		for (int i = 0; i < SPEEDMETER_SLOTS; i++)
-		{
-			speedTotalBytes += m_speedBytes[i];
-		}
-		m_speedTotalBytes = speedTotalBytes;
-		m_speedCorrection = curTime;
-	}
-
-	if (m_speedTotalBytes == 0)
-	{
-		m_speedStartTime = nowSlot;
-	}
-	m_speedBytes[m_speedBytesIndex] += bytes;
-	m_speedTotalBytes += bytes;
-	m_allBytes += bytes;
-#endif
 }
 
 void StatMeter::ResetSpeedStat()
 {
 	time_t curTime = Util::CurrentTime();
-#ifdef NZBGET_USE_RUST
 	m_speedStartTime = nzbget_rs_aws_statmeter_calc_initial_speed_start_slot(
 		(int64_t)curTime, SPEEDMETER_SLOTSIZE);
-#else
-	m_speedStartTime = (int)curTime / SPEEDMETER_SLOTSIZE;
-#endif
 	for (int i = 0; i < SPEEDMETER_SLOTS; i++)
 	{
 		m_speedBytes[i] = 0;
@@ -696,7 +457,6 @@ void StatMeter::CheckQuota()
 	int64 monthBytes, dayBytes;
 	CalcQuotaUsage(monthBytes, dayBytes);
 
-#ifdef NZBGET_USE_RUST
 	int action = 0;
 	bool quotaReached = nzbget_rs_sus_eval_quota_status(
 		g_Options->GetMonthlyQuota(),
@@ -718,25 +478,6 @@ void StatMeter::CheckQuota()
 		info("Quota lifted");
 	}
 	g_WorkState->SetQuotaReached(quotaReached);
-#else
-	bool monthlyQuotaReached = g_Options->GetMonthlyQuota() > 0 && monthBytes >= (int64)g_Options->GetMonthlyQuota() * 1024 * 1024;
-	bool dailyQuotaReached = g_Options->GetDailyQuota() > 0 && dayBytes >= (int64)g_Options->GetDailyQuota() * 1024 * 1024;
-
-	if (monthlyQuotaReached && !g_WorkState->GetQuotaReached())
-	{
-		warn("Monthly quota reached at %s", *Util::FormatSize(monthBytes));
-	}
-	else if (dailyQuotaReached && !g_WorkState->GetQuotaReached())
-	{
-		warn("Daily quota reached at %s", *Util::FormatSize(dayBytes));
-	}
-	else if (!monthlyQuotaReached && !dailyQuotaReached && g_WorkState->GetQuotaReached())
-	{
-		info("Quota lifted");
-	}
-
-	g_WorkState->SetQuotaReached(monthlyQuotaReached || dailyQuotaReached);
-#endif
 }
 
 void StatMeter::CalcQuotaUsage(int64& monthBytes, int64& dayBytes)
@@ -746,7 +487,6 @@ void StatMeter::CalcQuotaUsage(int64& monthBytes, int64& dayBytes)
 	ServerVolume totalVolume = m_serverVolumes[0];
 
 	time_t locTime = Util::CurrentTime() + g_WorkState->GetLocalTimeOffset();
-#ifdef NZBGET_USE_RUST
 	int elapsedSlots = CalcMonthSlots(totalVolume);
 	nzbget_rs_sus_calc_quota_usage(
 		static_cast<int64>(locTime),
@@ -757,30 +497,6 @@ void StatMeter::CalcQuotaUsage(int64& monthBytes, int64& dayBytes)
 		&monthBytes,
 		&dayBytes);
 	debug("month volume: %i MB", (int)(monthBytes / 1024 / 1024));
-#else
-	int daySlot = (int)(locTime / 86400) - totalVolume.GetFirstDay();
-
-	dayBytes = 0;
-	// negative after the clock went back past the first recorded day
-	if (daySlot >= 0 && daySlot < (int)totalVolume.BytesPerDays()->size())
-	{
-		dayBytes = totalVolume.BytesPerDays()->at(daySlot);
-	}
-
-	int elapsedSlots = CalcMonthSlots(totalVolume);
-	monthBytes = 0;
-	int endSlot = std::max(daySlot - elapsedSlots, -1);
-	for (int slot = daySlot; slot >= 0 && slot > endSlot; slot--)
-	{
-		if (slot < (int)totalVolume.BytesPerDays()->size())
-		{
-			monthBytes += totalVolume.BytesPerDays()->at(slot);
-			debug("adding slot %i: %i", slot, (int)(totalVolume.BytesPerDays()->at(slot) / 1024 / 1024));
-		}
-	}
-
-	debug("month volume: %i MB", (int)(monthBytes / 1024 / 1024));
-#endif
 }
 
 int StatMeter::CalcMonthSlots(const ServerVolume& volume)
@@ -804,21 +520,13 @@ int StatMeter::CalcMonthSlots(const ServerVolume& volume)
 			dayparts.tm_mon++;
 			prevMonth = Util::Timegm(&dayparts);
 		}
-#ifdef NZBGET_USE_RUST
 		elapsedDays = nzbget_rs_psp_statmeter_calc_month_slots_prev_month(
 			(int64_t)locCurTime, (int64_t)prevMonth);
-#else
-		elapsedDays = (int)(locCurTime - prevMonth) / 60 / 60 / 24 + 1;
-#endif
 	}
 	else
 	{
-#ifdef NZBGET_USE_RUST
 		elapsedDays = nzbget_rs_psp_statmeter_calc_month_slots_same_month(
 			dayparts.tm_mday, g_Options->GetQuotaStartDay());
-#else
-		elapsedDays = dayparts.tm_mday - g_Options->GetQuotaStartDay() + 1;
-#endif
 	}
 
 	return elapsedDays;

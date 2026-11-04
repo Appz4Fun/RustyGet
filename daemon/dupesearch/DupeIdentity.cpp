@@ -8,15 +8,12 @@
 #include "HttpGet.h"
 #include "ReleaseName.h"
 #include "Util.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 DupeIdentity::Identity DupeIdentity::FromArticle(const std::vector<char>& data, const std::string& name,
 	unsigned long long total, unsigned long long minimum)
 {
 	Identity identity;
-#ifdef NZBGET_USE_RUST
 	NzbgetRsBuf raw = nzbget_rs_dupe_inner(data.data(), data.size(), name.data(), name.size(), total, minimum);
 	uint64_t bytes = 0;
 	size_t extensionSize = 0;
@@ -30,7 +27,6 @@ DupeIdentity::Identity DupeIdentity::FromArticle(const std::vector<char>& data, 
 		identity.name.assign(raw.data + nameOffset, nameLen);
 	}
 	nzbget_rs_free(raw);
-#endif
 	return identity;
 }
 
@@ -38,7 +34,6 @@ ArticleFetcher::FetchedArticle DupeIdentity::FetchArticle(const NzbSummary::Head
     const std::vector<std::string>& names, time_t deadline, const FetchFunc& fetch)
 {
     ArticleFetcher::FetchedArticle article;
-#ifdef NZBGET_USE_RUST
     if (nzbget_rs_din_dupe_identity_should_abort_fetch_article(
         head.messageId.empty() ? 1 : 0, (int64_t)Util::CurrentTime(), (int64_t)deadline,
         HttpGet::Stopped() ? 1 : 0, DonorHealth::Stopping() ? 1 : 0) != 0) return article;
@@ -60,13 +55,11 @@ ArticleFetcher::FetchedArticle DupeIdentity::FetchArticle(const NzbSummary::Head
         (int64_t)Util::CurrentTime(), (int64_t)deadline,
         HttpGet::Stopped() ? 1 : 0, DonorHealth::Stopping() ? 1 : 0, article.Offset) != 0)
         return ArticleFetcher::FetchedArticle();
-#endif
     return article;
 }
 
 DupeIdentity::Identity DupeIdentity::Read(const NzbSummary& info, time_t deadline, const FetchFunc& fetch)
 {
-#ifdef NZBGET_USE_RUST
     unsigned long long minimum = nzbget_rs_din_dupe_identity_calc_min_inner_bytes((int64_t)info.dataBytes);
     for (const NzbSummary::Head& head : info.heads)
     {
@@ -79,51 +72,32 @@ DupeIdentity::Identity DupeIdentity::Read(const NzbSummary& info, time_t deadlin
         }
         if (Util::CurrentTime() >= deadline || HttpGet::Stopped() || DonorHealth::Stopping()) break;
     }
-#endif
     return Identity();
 }
 
 unsigned long long DupeIdentity::WholeBytes(const NzbSummary& info)
 {
     if (info.totalBytes <= 0) return 0;
-#ifdef NZBGET_USE_RUST
     return nzbget_rs_dupe_whole_bytes((uint64_t)info.totalBytes, info.listedParts, info.declaredParts);
-#else
-    return (unsigned long long)info.totalBytes;
-#endif
 }
 
 double DupeIdentity::Alive(const DonorHealth::Health& health, const NzbSummary& info)
 {
-#ifdef NZBGET_USE_RUST
     return nzbget_rs_dupe_effective_alive(health.present, health.missing, health.error, info.listedParts, info.declaredParts);
-#else
-    return health.Alive();
-#endif
 }
 
 bool DupeIdentity::IsDead(const DonorHealth::Health& health, const NzbSummary& info, int minimum)
 {
-#ifdef NZBGET_USE_RUST
     return nzbget_rs_dupe_is_dead(health.present, health.missing, health.error, info.listedParts, info.declaredParts, minimum) != 0;
-#else
-    double alive = health.Alive();
-    return alive >= 0 && alive * 100 < minimum && health.missing >= DonorHealth::MinKnown;
-#endif
 }
 
 int DupeIdentity::UnlistedMissing(const DonorHealth::Health& health, const NzbSummary& info)
 {
-#ifdef NZBGET_USE_RUST
     return nzbget_rs_dupe_unlisted_missing(health.Answered(), info.listedParts, info.declaredParts);
-#else
-    return 0;
-#endif
 }
 
 bool DupeIdentity::ParDoomed(const NzbSummary& info, double alive, time_t deadline)
 {
-#ifdef NZBGET_USE_RUST
     if (nzbget_rs_din_dupe_identity_can_check_par_doomed(
         info.parIndex.messageId.empty() ? 1 : 0, info.recoveryBytes.empty() ? 1 : 0,
         (int64_t)info.dataBytes, info.articleBytes) == 0) return false;
@@ -132,52 +106,33 @@ bool DupeIdentity::ParDoomed(const NzbSummary& info, double alive, time_t deadli
     uint64_t block = nzbget_rs_dupe_par_block(article.Data.data(), article.Data.size());
     return nzbget_rs_dupe_par_doomed((uint64_t)info.dataBytes, info.articleBytes,
         info.recoveryBytes.data(), info.recoveryBytes.size(), alive, block) != 0;
-#else
-    return false;
-#endif
 }
 
 bool DupeIdentity::OuterCompatible(const std::string& title, const std::string& name)
 {
-#ifdef NZBGET_USE_RUST
     return nzbget_rs_dupe_outer_ok(title.data(), title.size(), name.data(), name.size()) != 0;
-#else
-    return !ReleaseName::Readable(name) || ReleaseName::SameRelease(title, name);
-#endif
 }
 
 bool DupeIdentity::SameData(const NzbSummary& a, const NzbSummary& b)
 {
 	if (a.dataBytes <= 0 || b.dataBytes <= 0 || a.dataFiles <= 0 || b.dataFiles <= 0) return false;
-#ifdef NZBGET_USE_RUST
 	return nzbget_rs_dupe_same_data((uint64_t)a.dataBytes, (uint32_t)a.dataFiles,
 		(uint64_t)b.dataBytes, (uint32_t)b.dataFiles) != 0;
-#else
-	return a.dataBytes == b.dataBytes && a.dataFiles == b.dataFiles;
-#endif
 }
 
 bool DupeIdentity::Candidate(const std::string& title, long long bytes, const std::string& name, long long size)
 {
-#ifdef NZBGET_USE_RUST
 	return nzbget_rs_dupe_candidate(title.data(), title.size(), bytes > 0 ? bytes : 0,
 		name.data(), name.size(), size > 0 ? size : 0) != 0;
-#else
-	return ReleaseName::SameRelease(title, name);
-#endif
 }
 
 bool DupeIdentity::Matches(const std::string& title, const std::string& mainName,
 	const Identity& mine, const Identity& theirs)
 {
-#ifdef NZBGET_USE_RUST
 	NzbgetRsDupeIdentityInput a{ mine.bytes, mine.name.data(), mine.name.size(), mine.extension.data(), mine.extension.size() };
 	NzbgetRsDupeIdentityInput b{ theirs.bytes, theirs.name.data(), theirs.name.size(), theirs.extension.data(), theirs.extension.size() };
 	return nzbget_rs_dupe_lenient_ok(title.data(), title.size(), mainName.data(), mainName.size(),
 		mine ? &a : nullptr, theirs ? &b : nullptr) != 0;
-#else
-	return ReleaseName::Readable(mainName) && ReleaseName::SameRelease(title, mainName);
-#endif
 }
 
 std::vector<std::string> DupeIdentity::Hints(const NzbSummary& pick, const NzbSummary& donor, bool sameInner)

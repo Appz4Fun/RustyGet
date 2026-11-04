@@ -46,8 +46,12 @@ def bodies(src, which):
         out.append(src[i:src.index("\n}\n", i) + 3].replace("!Connection::Connect()", "!ScriptedConnection::Connect()")
                    .replace("return Connection::Disconnect()", "return ScriptedConnection::Disconnect()"))
     if which == "first":
-        h = src.index("#ifdef NZBGET_USE_RUST\n// a callback that threw")
-        out.insert(0, src[h:src.index("#endif\n", h) + 7])
+        if "#ifdef NZBGET_USE_RUST\n// a callback that threw" in src:
+            h = src.index("#ifdef NZBGET_USE_RUST\n// a callback that threw")
+            out.insert(0, src[h:src.index("#endif\n", h) + 7])
+        else:
+            h = src.index("// a callback that threw")
+            out.insert(0, src[h:src.index("const char* NntpConnection::Request(", h)])
     return "".join(out)
 
 
@@ -139,8 +143,13 @@ public:
 };
 '''
 
+FALLBACK_REFERENCE = "4cf19abdb8f084a384769a15cf57e56acf86f363"
 old_src = subprocess.check_output(["git", "show", f"{REFERENCE}:daemon/nntp/NntpConnection.cpp"], cwd=ROOT, text=True)
 new_src = (ROOT / "daemon/nntp/NntpConnection.cpp").read_text()
+fallback_src = (
+    new_src if "NZBGET_USE_RUST" in new_src
+    else subprocess.check_output(["git", "show", f"{FALLBACK_REFERENCE}:daemon/nntp/NntpConnection.cpp"], cwd=ROOT, text=True)
+)
 
 flags = (BUILD / "CMakeFiles/libnzbget.dir/flags.make").read_text()
 get = lambda k: re.search(rf"^{k} = (.*)$", flags, re.M).group(1)
@@ -182,7 +191,7 @@ namespace newimpl {
 }
 #undef NZBGET_USE_RUST
 namespace fallbackimpl {
-''' + STANDIN + bodies(new_src, "last") + r'''
+''' + STANDIN + bodies(fallback_src, "last") + r'''
 }
 
 static unsigned long long state = 0x9e3779b97f4a7c15ull;

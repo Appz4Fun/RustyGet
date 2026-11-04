@@ -21,9 +21,7 @@
 
 #include "nzbget.h"
 #include "NewsServer.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 NewsServer::NewsServer(int id, bool active, const char* name, const char* host, int port, int ipVersion,
 	const char* user, const char* pass, bool joinGroup, bool tls, const char* cipher,
@@ -33,17 +31,10 @@ NewsServer::NewsServer(int id, bool active, const char* name, const char* host, 
 		m_cipher(cipher ? cipher : ""), m_maxConnections(maxConnections), m_retention(retention),
 		m_level(level), m_normLevel(level), m_group(group), m_optional(optional), m_certVerificationfLevel(certVerificationfLevel)
 {
-#ifdef NZBGET_USE_RUST
 	if (m_name.Empty())
 	{
 		char buf[64];
 		nzbget_rs_awc_news_server_format_default_name(*m_name, id, buf, sizeof(buf));
 		m_name = buf;
 	}
-#else
-	if (m_name.Empty())
-	{
-		m_name.Format("server%i", id);
-	}
-#endif
 }

@@ -27788,6 +27788,365 @@ pub extern "C" fn nzbget_rs_dsf_nzb_fetcher_should_refuse_indexer(
     )
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_din_dupe_identity_decode_inner_buf(
+    raw_data: *const c_char,
+    raw_len: usize,
+    out_bytes: *mut u64,
+    out_ext_len: *mut usize,
+    out_name_offset: *mut usize,
+    out_name_len: *mut usize,
+) -> c_int {
+    let slice = if raw_data.is_null() || raw_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(raw_data.cast::<u8>(), raw_len)
+    };
+    if let Some((bytes, ext_len, name_offset, name_len)) =
+        crate::dupeidentnntpnzb::din_dupe_identity_decode_inner_buf(slice)
+    {
+        if !out_bytes.is_null() {
+            *out_bytes = bytes;
+        }
+        if !out_ext_len.is_null() {
+            *out_ext_len = ext_len;
+        }
+        if !out_name_offset.is_null() {
+            *out_name_offset = name_offset;
+        }
+        if !out_name_len.is_null() {
+            *out_name_len = name_len;
+        }
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_din_dupe_identity_should_abort_fetch_article(
+    msg_id_empty: c_int,
+    now: i64,
+    deadline: i64,
+    http_stopped: c_int,
+    health_stopping: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupeidentnntpnzb::din_dupe_identity_should_abort_fetch_article(
+            msg_id_empty != 0,
+            now,
+            deadline,
+            http_stopped != 0,
+            health_stopping != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_din_dupe_identity_should_discard_fetched_article(
+    now: i64,
+    deadline: i64,
+    http_stopped: c_int,
+    health_stopping: c_int,
+    offset: i64,
+) -> c_int {
+    i32::from(
+        crate::dupeidentnntpnzb::din_dupe_identity_should_discard_fetched_article(
+            now,
+            deadline,
+            http_stopped != 0,
+            health_stopping != 0,
+            offset,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_din_dupe_identity_calc_min_inner_bytes(data_bytes: i64) -> u64 {
+    crate::dupeidentnntpnzb::din_dupe_identity_calc_min_inner_bytes(data_bytes)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_din_dupe_identity_can_check_par_doomed(
+    par_index_id_empty: c_int,
+    recovery_bytes_empty: c_int,
+    data_bytes: i64,
+    article_bytes: u64,
+) -> c_int {
+    i32::from(
+        crate::dupeidentnntpnzb::din_dupe_identity_can_check_par_doomed(
+            par_index_id_empty != 0,
+            recovery_bytes_empty != 0,
+            data_bytes,
+            article_bytes,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_din_nntp_health_is_server_eligible(
+    active: c_int,
+    max_connections: c_int,
+) -> c_int {
+    i32::from(crate::dupeidentnntpnzb::din_nntp_health_is_server_eligible(
+        active != 0,
+        max_connections,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_din_nntp_health_needs_entry_recreate(
+    has_entry: c_int,
+    current_cap: c_int,
+    wanted_cap: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupeidentnntpnzb::din_nntp_health_needs_entry_recreate(
+            has_entry != 0,
+            current_cap,
+            wanted_cap,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_din_nntp_health_should_keep_waiting_for_conn(
+    has_conn: c_int,
+    http_stopped: c_int,
+    now: i64,
+    wait_start: i64,
+    wait_sec: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupeidentnntpnzb::din_nntp_health_should_keep_waiting_for_conn(
+            has_conn != 0,
+            http_stopped != 0,
+            now,
+            wait_start,
+            wait_sec,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_din_nntp_health_is_join_group_ok(
+    joined: *const c_char,
+) -> c_int {
+    let bytes = crate::diskstatepp::cstr_to_bytes(joined);
+    i32::from(crate::dupeidentnntpnzb::din_nntp_health_is_join_group_ok(
+        bytes,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_din_nntp_health_classify_body_fetch_result(
+    success: c_int,
+    transient: c_int,
+    ans_present: c_int,
+    ans_body_bad: c_int,
+    out_throw_error: *mut c_int,
+) -> c_int {
+    let (throw_err, ans) = crate::dupeidentnntpnzb::din_nntp_health_classify_body_fetch_result(
+        success != 0,
+        transient != 0,
+        ans_present,
+        ans_body_bad,
+    );
+    if !out_throw_error.is_null() {
+        *out_throw_error = i32::from(throw_err);
+    }
+    ans
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_din_nntp_health_should_reset_gated_present_to_error(
+    has_gate: c_int,
+    answer: c_int,
+    ans_present: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupeidentnntpnzb::din_nntp_health_should_reset_gated_present_to_error(
+            has_gate != 0,
+            answer,
+            ans_present,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_din_nzb_reader_valid_message_id(
+    id: *const c_char,
+    id_len: usize,
+) -> c_int {
+    let slice = if id.is_null() || id_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(id.cast::<u8>(), id_len)
+    };
+    i32::from(crate::dupeidentnntpnzb::din_nzb_reader_valid_message_id(
+        slice,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_din_nzb_reader_is_duplicate_segment_number(
+    index: usize,
+    total: usize,
+    cur_num: i64,
+    next_num: i64,
+) -> c_int {
+    i32::from(
+        crate::dupeidentnntpnzb::din_nzb_reader_is_duplicate_segment_number(
+            index, total, cur_num, next_num,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_din_nzb_reader_accum_segment_bytes(
+    file_bytes: i64,
+    seg_bytes: i64,
+    is_par: c_int,
+    geometry_valid: c_int,
+    out_geometry_valid: *mut c_int,
+    out_push_article_size: *mut c_int,
+) -> i64 {
+    let (new_bytes, new_geom, push_art) =
+        crate::dupeidentnntpnzb::din_nzb_reader_accum_segment_bytes(
+            file_bytes,
+            seg_bytes,
+            is_par != 0,
+            geometry_valid != 0,
+        );
+    if !out_geometry_valid.is_null() {
+        *out_geometry_valid = i32::from(new_geom);
+    }
+    if !out_push_article_size.is_null() {
+        *out_push_article_size = i32::from(push_art);
+    }
+    new_bytes
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_din_nzb_reader_accum_file_data_totals(
+    is_par: c_int,
+    file_bytes: i64,
+    first_id_empty: c_int,
+    data_files: c_int,
+    data_bytes: i64,
+    geometry_valid: c_int,
+    out_data_files: *mut c_int,
+    out_data_bytes: *mut i64,
+    out_geometry_valid: *mut c_int,
+    out_push_parity_head: *mut c_int,
+    out_push_data_head: *mut c_int,
+) {
+    let (nf, nb, ng, pph, pdh) =
+        crate::dupeidentnntpnzb::din_nzb_reader_accum_file_data_totals(
+            is_par != 0,
+            file_bytes,
+            first_id_empty != 0,
+            data_files,
+            data_bytes,
+            geometry_valid != 0,
+        );
+    if !out_data_files.is_null() {
+        *out_data_files = nf;
+    }
+    if !out_data_bytes.is_null() {
+        *out_data_bytes = nb;
+    }
+    if !out_geometry_valid.is_null() {
+        *out_geometry_valid = i32::from(ng);
+    }
+    if !out_push_parity_head.is_null() {
+        *out_push_parity_head = i32::from(pph);
+    }
+    if !out_push_data_head.is_null() {
+        *out_push_data_head = i32::from(pdh);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_din_nzb_reader_fnv1a_fingerprint(
+    ids: *const *const c_char,
+    id_lens: *const usize,
+    id_count: usize,
+    out_hex16: *mut c_char,
+) {
+    let mut slices: Vec<&[u8]> = Vec::with_capacity(id_count);
+    if !ids.is_null() && !id_lens.is_null() {
+        for i in 0..id_count {
+            let ptr = *ids.add(i);
+            let len = *id_lens.add(i);
+            let s = if ptr.is_null() || len == 0 {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(ptr.cast::<u8>(), len)
+            };
+            slices.push(s);
+        }
+    }
+    let hex = crate::dupeidentnntpnzb::din_nzb_reader_fnv1a_fingerprint(&slices);
+    if !out_hex16.is_null() {
+        std::ptr::copy_nonoverlapping(hex.as_ptr().cast::<c_char>(), out_hex16, 16);
+        *out_hex16.add(16) = 0;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_din_nzb_reader_is_par_index_length(
+    parsed_ok: c_int,
+    base_len: c_int,
+    name_len: usize,
+) -> c_int {
+    i32::from(
+        crate::dupeidentnntpnzb::din_nzb_reader_is_par_index_length(
+            parsed_ok != 0,
+            base_len,
+            name_len,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_din_nzb_reader_is_par_volume_length(
+    parsed_ok: c_int,
+    base_len: c_int,
+    name_len: usize,
+) -> c_int {
+    i32::from(
+        crate::dupeidentnntpnzb::din_nzb_reader_is_par_volume_length(
+            parsed_ok != 0,
+            base_len,
+            name_len,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_din_nzb_reader_select_median_article_bytes(
+    sorted_sizes: *const u64,
+    len: usize,
+) -> u64 {
+    let slice = if sorted_sizes.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(sorted_sizes, len)
+    };
+    crate::dupeidentnntpnzb::din_nzb_reader_select_median_article_bytes(slice)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_din_posting_should_clear_sketch_cache(
+    cache_len: usize,
+    max_entries: usize,
+) -> c_int {
+    i32::from(
+        crate::dupeidentnntpnzb::din_posting_should_clear_sketch_cache(cache_len, max_entries),
+    )
+}
+
 
 
 

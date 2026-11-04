@@ -4361,6 +4361,57 @@ int nzbget_rs_dsf_nzb_fetcher_can_pause_before_retry(
 int nzbget_rs_dsf_nzb_fetcher_should_refuse_indexer(
     int status, int indexer_empty);
 
+int nzbget_rs_din_dupe_identity_decode_inner_buf(
+    const char* raw_data, size_t raw_len, uint64_t* out_bytes,
+    size_t* out_ext_len, size_t* out_name_offset, size_t* out_name_len);
+int nzbget_rs_din_dupe_identity_should_abort_fetch_article(
+    int msg_id_empty, int64_t now, int64_t deadline, int http_stopped,
+    int health_stopping);
+int nzbget_rs_din_dupe_identity_should_discard_fetched_article(
+    int64_t now, int64_t deadline, int http_stopped, int health_stopping,
+    int64_t offset);
+uint64_t nzbget_rs_din_dupe_identity_calc_min_inner_bytes(
+    int64_t data_bytes);
+int nzbget_rs_din_dupe_identity_can_check_par_doomed(
+    int par_index_id_empty, int recovery_bytes_empty, int64_t data_bytes,
+    uint64_t article_bytes);
+int nzbget_rs_din_nntp_health_is_server_eligible(
+    int active, int max_connections);
+int nzbget_rs_din_nntp_health_needs_entry_recreate(
+    int has_entry, int current_cap, int wanted_cap);
+int nzbget_rs_din_nntp_health_should_keep_waiting_for_conn(
+    int has_conn, int http_stopped, int64_t now, int64_t wait_start,
+    int wait_sec);
+int nzbget_rs_din_nntp_health_is_join_group_ok(const char* joined);
+int nzbget_rs_din_nntp_health_classify_body_fetch_result(
+    int success, int transient, int ans_present, int ans_body_bad,
+    int* out_throw_error);
+int nzbget_rs_din_nntp_health_should_reset_gated_present_to_error(
+    int has_gate, int answer, int ans_present);
+int nzbget_rs_din_nzb_reader_valid_message_id(
+    const char* id, size_t id_len);
+int nzbget_rs_din_nzb_reader_is_duplicate_segment_number(
+    size_t index, size_t total, int64_t cur_num, int64_t next_num);
+int64_t nzbget_rs_din_nzb_reader_accum_segment_bytes(
+    int64_t file_bytes, int64_t seg_bytes, int is_par, int geometry_valid,
+    int* out_geometry_valid, int* out_push_article_size);
+void nzbget_rs_din_nzb_reader_accum_file_data_totals(
+    int is_par, int64_t file_bytes, int first_id_empty, int data_files,
+    int64_t data_bytes, int geometry_valid, int* out_data_files,
+    int64_t* out_data_bytes, int* out_geometry_valid,
+    int* out_push_parity_head, int* out_push_data_head);
+void nzbget_rs_din_nzb_reader_fnv1a_fingerprint(
+    const char* const* ids, const size_t* id_lens, size_t id_count,
+    char* out_hex16);
+int nzbget_rs_din_nzb_reader_is_par_index_length(
+    int parsed_ok, int base_len, size_t name_len);
+int nzbget_rs_din_nzb_reader_is_par_volume_length(
+    int parsed_ok, int base_len, size_t name_len);
+uint64_t nzbget_rs_din_nzb_reader_select_median_article_bytes(
+    const uint64_t* sorted_sizes, size_t len);
+int nzbget_rs_din_posting_should_clear_sketch_cache(
+    size_t cache_len, size_t max_entries);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

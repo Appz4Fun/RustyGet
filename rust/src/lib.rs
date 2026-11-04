@@ -93,6 +93,7 @@ pub mod streamrepairparcheck;
 pub mod streamrepaircontentmap;
 pub mod dupequeuehealth;
 pub mod dupesearchfetcher;
+pub mod dupeidentnntpnzb;
 
 pub mod deadpostings;
 pub mod dupewatch;

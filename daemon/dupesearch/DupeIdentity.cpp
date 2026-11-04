@@ -18,19 +18,16 @@ DupeIdentity::Identity DupeIdentity::FromArticle(const std::vector<char>& data, 
 	Identity identity;
 #ifdef NZBGET_USE_RUST
 	NzbgetRsBuf raw = nzbget_rs_dupe_inner(data.data(), data.size(), name.data(), name.size(), total, minimum);
-	if (raw.len >= 12)
+	uint64_t bytes = 0;
+	size_t extensionSize = 0;
+	size_t nameOffset = 0;
+	size_t nameLen = 0;
+	if (nzbget_rs_din_dupe_identity_decode_inner_buf(
+		raw.data, raw.len, &bytes, &extensionSize, &nameOffset, &nameLen) != 0)
 	{
-		const unsigned char* p = (const unsigned char*)raw.data;
-		unsigned long long bytes = 0;
-		for (int i = 0; i < 8; i++) bytes |= (unsigned long long)p[i] << (8 * i);
-		size_t extensionSize = 0;
-		for (int i = 0; i < 4; i++) extensionSize |= (size_t)p[8 + i] << (8 * i);
-		if (extensionSize > 0 && extensionSize <= 4 && extensionSize <= raw.len - 12)
-		{
-			identity.bytes = bytes;
-			identity.extension.assign(raw.data + 12, extensionSize);
-			identity.name.assign(raw.data + 12 + extensionSize, raw.len - 12 - extensionSize);
-		}
+		identity.bytes = bytes;
+		identity.extension.assign(raw.data + 12, extensionSize);
+		identity.name.assign(raw.data + nameOffset, nameLen);
 	}
 	nzbget_rs_free(raw);
 #endif
@@ -42,7 +39,9 @@ ArticleFetcher::FetchedArticle DupeIdentity::FetchArticle(const NzbSummary::Head
 {
     ArticleFetcher::FetchedArticle article;
 #ifdef NZBGET_USE_RUST
-    if (head.messageId.empty() || Util::CurrentTime() >= deadline || HttpGet::Stopped() || DonorHealth::Stopping()) return article;
+    if (nzbget_rs_din_dupe_identity_should_abort_fetch_article(
+        head.messageId.empty() ? 1 : 0, (int64_t)Util::CurrentTime(), (int64_t)deadline,
+        HttpGet::Stopped() ? 1 : 0, DonorHealth::Stopping() ? 1 : 0) != 0) return article;
     std::vector<CString> groups;
     for (const std::string& name : names) groups.emplace_back(name.c_str());
     ArticleFetcher fetcher;
@@ -57,7 +56,9 @@ ArticleFetcher::FetchedArticle DupeIdentity::FetchArticle(const NzbSummary::Head
     while (!done && Util::CurrentTime() < deadline && !HttpGet::Stopped() && !DonorHealth::Stopping()) Util::Sleep(20);
     if (!done) fetcher.Stop();
     worker.join();
-    if (Util::CurrentTime() >= deadline || HttpGet::Stopped() || DonorHealth::Stopping() || article.Offset != 0)
+    if (nzbget_rs_din_dupe_identity_should_discard_fetched_article(
+        (int64_t)Util::CurrentTime(), (int64_t)deadline,
+        HttpGet::Stopped() ? 1 : 0, DonorHealth::Stopping() ? 1 : 0, article.Offset) != 0)
         return ArticleFetcher::FetchedArticle();
 #endif
     return article;
@@ -66,8 +67,7 @@ ArticleFetcher::FetchedArticle DupeIdentity::FetchArticle(const NzbSummary::Head
 DupeIdentity::Identity DupeIdentity::Read(const NzbSummary& info, time_t deadline, const FetchFunc& fetch)
 {
 #ifdef NZBGET_USE_RUST
-    unsigned long long minimum = info.dataBytes > 0 ?
-        (unsigned long long)(info.dataBytes / 5) * 2 + (unsigned long long)(info.dataBytes % 5) * 2 / 5 : 0;
+    unsigned long long minimum = nzbget_rs_din_dupe_identity_calc_min_inner_bytes((int64_t)info.dataBytes);
     for (const NzbSummary::Head& head : info.heads)
     {
         auto article = FetchArticle(head, info.groups, deadline, fetch);
@@ -124,7 +124,9 @@ int DupeIdentity::UnlistedMissing(const DonorHealth::Health& health, const NzbSu
 bool DupeIdentity::ParDoomed(const NzbSummary& info, double alive, time_t deadline)
 {
 #ifdef NZBGET_USE_RUST
-    if (info.parIndex.messageId.empty() || info.recoveryBytes.empty() || info.dataBytes <= 0 || info.articleBytes == 0) return false;
+    if (nzbget_rs_din_dupe_identity_can_check_par_doomed(
+        info.parIndex.messageId.empty() ? 1 : 0, info.recoveryBytes.empty() ? 1 : 0,
+        (int64_t)info.dataBytes, info.articleBytes) == 0) return false;
     auto article = FetchArticle(info.parIndex, info.groups, deadline);
     if (!article.Success) return false;
     uint64_t block = nzbget_rs_dupe_par_block(article.Data.data(), article.Data.size());

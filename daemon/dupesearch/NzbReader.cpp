@@ -72,6 +72,9 @@ std::string NameOfSubject(const std::string& subject)
 
 bool ValidMessageId(const std::string& id)
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_din_nzb_reader_valid_message_id(id.data(), id.size()) != 0;
+#else
 	if (id.empty() || id.size() > 250)
 	{
 		return false;
@@ -86,6 +89,7 @@ bool ValidMessageId(const std::string& id)
 		}
 	}
 	return true;
+#endif
 }
 
 bool IsParName(const std::string& name)
@@ -196,7 +200,13 @@ public:
             for (size_t i = 0; i < m_segments.size(); i++)
             {
                 const Segment& segment = m_segments[i];
+#ifdef NZBGET_USE_RUST
+                if (nzbget_rs_din_nzb_reader_is_duplicate_segment_number(
+                    i, m_segments.size(), segment.number,
+                    i + 1 < m_segments.size() ? m_segments[i + 1].number : 0) != 0) continue;
+#else
                 if (i + 1 < m_segments.size() && m_segments[i + 1].number == segment.number) continue;
+#endif
                 m_parts.push_back({ segment.number, segment.bytes });
                 // Invalid retained data still makes geometry unknown. Never
                 // resurrect an earlier valid duplicate in place of this ID.
@@ -209,10 +219,20 @@ public:
                 ids.insert(segment.id);
                 if (!IsParName(m_name)) dataIds.insert(segment.id);
                 m_validParts++;
+#ifdef NZBGET_USE_RUST
+                int geomValid = geometryValid ? 1 : 0;
+                int pushArticleSize = 0;
+                m_fileBytes = nzbget_rs_din_nzb_reader_accum_segment_bytes(
+                    m_fileBytes, segment.bytes, IsParName(m_name) ? 1 : 0,
+                    geomValid, &geomValid, &pushArticleSize);
+                geometryValid = geomValid != 0;
+                if (pushArticleSize != 0) articleSizes.push_back((uint64_t)segment.bytes);
+#else
                 if (!IsParName(m_name) && segment.bytes > 0) articleSizes.push_back((uint64_t)segment.bytes);
                 if (segment.bytes > 0 && m_fileBytes <= std::numeric_limits<long long>::max() - segment.bytes)
                     m_fileBytes += segment.bytes;
                 else if (!IsParName(m_name)) geometryValid = false;
+#endif
                 if (segment.number == 1) m_firstId = segment.id;
             }
             uint64_t listed = m_parts.size(), declared = listed;
@@ -234,6 +254,22 @@ public:
                 dataListedParts += m_validParts;
                 dataDeclaredParts += declared;
             }
+#ifdef NZBGET_USE_RUST
+            int newDataFiles = dataFiles;
+            int64_t newDataBytes = dataBytes;
+            int newGeomValid = geometryValid ? 1 : 0;
+            int pushParityHead = 0;
+            int pushDataHead = 0;
+            nzbget_rs_din_nzb_reader_accum_file_data_totals(
+                IsParName(m_name) ? 1 : 0, m_fileBytes, m_firstId.empty() ? 1 : 0,
+                dataFiles, dataBytes, newGeomValid,
+                &newDataFiles, &newDataBytes, &newGeomValid, &pushParityHead, &pushDataHead);
+            dataFiles = newDataFiles;
+            dataBytes = newDataBytes;
+            geometryValid = newGeomValid != 0;
+            if (pushParityHead != 0) parityHeads.push_back({ m_name, m_firstId, m_fileBytes });
+            if (pushDataHead != 0) heads.push_back({ m_name, m_firstId, m_fileBytes });
+#else
             if (IsParName(m_name) && m_fileBytes > 0 && !m_firstId.empty())
                 parityHeads.push_back({ m_name, m_firstId, m_fileBytes });
 
@@ -245,6 +281,7 @@ public:
 				if (!m_firstId.empty()) heads.push_back({ m_name, m_firstId, m_fileBytes });
 			}
 			else if (!IsParName(m_name)) geometryValid = false;
+#endif
 			m_inFile = false;
 		}
 		m_text.clear();
@@ -297,6 +334,20 @@ private:
 
 std::string NzbSummary::Fingerprint() const
 {
+#ifdef NZBGET_USE_RUST
+	std::vector<const char*> ptrs;
+	std::vector<size_t> lens;
+	ptrs.reserve(messageIds.size());
+	lens.reserve(messageIds.size());
+	for (const std::string& id : messageIds)
+	{
+		ptrs.push_back(id.data());
+		lens.push_back(id.size());
+	}
+	char buffer[17] = {};
+	nzbget_rs_din_nzb_reader_fnv1a_fingerprint(ptrs.data(), lens.data(), ptrs.size(), buffer);
+	return std::string(buffer, 16);
+#else
 	// FNV-1a over the sorted message-ids
 	uint64_t hash = 1469598103934665603ULL;
 	for (const std::string& id : messageIds)
@@ -310,6 +361,7 @@ std::string NzbSummary::Fingerprint() const
 	char buffer[32];
 	snprintf(buffer, sizeof(buffer), "%016llx", (unsigned long long)hash);
 	return buffer;
+#endif
 }
 
 bool NzbReader::Parse(const std::string& data, NzbSummary& summary)
@@ -334,7 +386,12 @@ bool NzbReader::Parse(const std::string& data, NzbSummary& summary)
     if (!reader.articleSizes.empty())
     {
         std::sort(reader.articleSizes.begin(), reader.articleSizes.end());
+#ifdef NZBGET_USE_RUST
+        summary.articleBytes = nzbget_rs_din_nzb_reader_select_median_article_bytes(
+            reader.articleSizes.data(), reader.articleSizes.size());
+#else
         summary.articleBytes = reader.articleSizes[reader.articleSizes.size()/2];
+#endif
     }
     // File size does not identify a PAR2 index: an index can be larger than
     // a recovery volume. Use the shared filename parser and keep capacity
@@ -342,8 +399,13 @@ bool NzbReader::Parse(const std::string& data, NzbSummary& summary)
     for (const auto& head : reader.parityHeads)
     {
         int baseLen = 0;
+#ifdef NZBGET_USE_RUST
+        bool parsedOk = ParParser::ParseParFilename(head.name.c_str(), true, &baseLen, nullptr);
+        if (nzbget_rs_din_nzb_reader_is_par_index_length(parsedOk ? 1 : 0, baseLen, head.name.size()) != 0)
+#else
         if (ParParser::ParseParFilename(head.name.c_str(), true, &baseLen, nullptr) &&
             baseLen >= 0 && (size_t)baseLen + 5 == head.name.size())
+#endif
         {
             if (!summary.parIndex.messageId.empty() &&
                 !ParParser::SameParCollection(summary.parIndex.name.c_str(), head.name.c_str(), true))
@@ -361,9 +423,15 @@ bool NzbReader::Parse(const std::string& data, NzbSummary& summary)
         for (const auto& head : reader.parityHeads)
         {
             int baseLen = 0;
+#ifdef NZBGET_USE_RUST
+            bool parsedOk = ParParser::ParseParFilename(head.name.c_str(), true, &baseLen, nullptr);
+            if (nzbget_rs_din_nzb_reader_is_par_volume_length(parsedOk ? 1 : 0, baseLen, head.name.size()) != 0 &&
+                ParParser::SameParCollection(summary.parIndex.name.c_str(), head.name.c_str(), true))
+#else
             if (ParParser::ParseParFilename(head.name.c_str(), true, &baseLen, nullptr) &&
                 baseLen >= 0 && (size_t)baseLen + 5 < head.name.size() &&
                 ParParser::SameParCollection(summary.parIndex.name.c_str(), head.name.c_str(), true))
+#endif
                 summary.recoveryBytes.push_back((uint64_t)head.bytes);
         }
     }

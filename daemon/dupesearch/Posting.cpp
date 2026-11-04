@@ -137,7 +137,11 @@ bool Posting::SketchOfFile(const std::string& path, Sketch& sketch)
 	sketch = MakeSketch(summary.messageIds);
 
 	std::lock_guard<std::mutex> guard(mutex);
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_din_posting_should_clear_sketch_cache(cache.size(), 4096) != 0)
+#else
 	if (cache.size() > 4096)
+#endif
 	{
 		cache.clear();
 	}

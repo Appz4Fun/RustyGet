@@ -24,11 +24,7 @@
 #include "Options.h"
 #include "StackTrace.h"
 
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#else
-extern void Reload();
-#endif
 
 #include <atomic>
 #include <signal.h>
@@ -247,9 +243,7 @@ void SignalProc(int signum)
 				return;
 			}
 			g_SigHupPending.store(true, std::memory_order_seq_cst);
-#ifdef NZBGET_USE_RUST
 			nzbget_rs_signal_notify(signum);
-#endif
 			break;
 #endif
 
@@ -266,9 +260,7 @@ void SignalProc(int signum)
 			signal(SIGHUP, SIG_IGN);
 #endif
 			g_SigExitPending.store(true, std::memory_order_seq_cst);
-#ifdef NZBGET_USE_RUST
 			nzbget_rs_signal_notify(signum);
-#endif
 			break;
 		}
 

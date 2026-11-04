@@ -33,11 +33,9 @@
 #include "Options.h"
 #include "Util.h"
 #include "FileSystem.h"
-#ifdef NZBGET_USE_RUST
 #include <exception>
 #include <memory>
 #include "nzbget_rs.h"
-#endif
 
 class ParRenamerRepairer final : public Par2::Par2Repairer
 {
@@ -51,7 +49,6 @@ private:
 };
 
 
-#ifdef NZBGET_USE_RUST
 void ParRenamer::Execute()
 {
 	// rust/src/parrenamer.rs; an exception in a callback ends the run and is
@@ -287,47 +284,6 @@ void ParRenamer::Execute()
 	}
 }
 
-#else
-void ParRenamer::Execute()
-{
-	m_progressLabel.Format("Checking renamed files for %s", *m_infoName);
-	m_stageProgress = 0;
-	UpdateProgress();
-
-	BuildDirList(m_destDir);
-
-	for (CString& destDir : m_dirList)
-	{
-		debug("Checking %s", *destDir);
-		m_fileHashList.clear();
-		m_parInfoList.clear();
-		m_badParList.clear();
-		m_loadedParList.clear();
-
-		CheckFiles(destDir, true);
-		RenameParFiles(destDir);
-
-		LoadMainParFiles(destDir);
-		if (m_hasDamagedParFiles)
-		{
-			LoadExtraParFiles(destDir);
-		}
-
-		CheckFiles(destDir, false);
-
-		if (m_detectMissing)
-		{
-			CheckMissing();
-		}
-
-		if (m_renamedCount > 0 && !m_badParList.empty())
-		{
-			RenameBadParFiles();
-		}
-	}
-}
-
-#endif
 
 void ParRenamer::BuildDirList(const char* destDir)
 {

@@ -22,9 +22,7 @@
 #include "nzbget.h"
 #include "FileSystem.h"
 #include "ParParser.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 bool ParParser::FindMainPars(const char* path, ParFileList* fileList)
 {
@@ -63,7 +61,6 @@ bool ParParser::FindMainPars(const char* path, ParFileList* fileList)
 	return fileList && !fileList->empty();
 }
 
-#ifdef NZBGET_USE_RUST
 int ParParser::FilenameFold(int byte)
 {
 	// Use the C++ compiler's char signedness, including -funsigned-char.
@@ -97,85 +94,10 @@ bool ParParser::SameParCollection(const char* filename1, const char* filename2, 
 	return nzbget_rs_same_par_collection(filename1, filename2, confirmedFilenames, ParFilenameTable(), CHAR_MIN < 0,
 		FilenameFold) != 0;
 }
-#else
-bool ParParser::SameParCollection(const char* filename1, const char* filename2, bool confirmedFilenames)
-{
-	int baseLen1 = 0, baseLen2 = 0;
-	return ParseParFilename(filename1, confirmedFilenames, &baseLen1, nullptr) &&
-		ParseParFilename(filename2, confirmedFilenames, &baseLen2, nullptr) &&
-		baseLen1 == baseLen2 &&
-		!strncasecmp(filename1, filename2, baseLen1);
-}
-#endif
 
-#ifdef NZBGET_USE_RUST
 bool ParParser::ParseParFilename(const char* parFilename, bool confirmedFilename, int* baseNameLen, int* blocks)
 {
 	// rust/src/parparser.rs
 	return nzbget_rs_parse_par_filename(parFilename, confirmedFilename, baseNameLen, blocks, ParFilenameTable(), CHAR_MIN < 0,
 		FilenameFold) != 0;
 }
-#else
-bool ParParser::ParseParFilename(const char* parFilename, bool confirmedFilename, int* baseNameLen, int* blocks)
-{
-	BString<1024> filename = parFilename;
-	for (char* p = filename; *p; p++) *p = tolower(*p); // convert string to lowercase
-
-	int len = strlen(filename);
-	if (len < 6)
-	{
-		return false;
-	}
-
-	if (!confirmedFilename)
-	{
-		// find last occurence of ".par2" and trim filename after it
-		char* end = filename;
-		while (char* p = strstr(end, ".par2")) end = p + 5;
-		*end = '\0';
-	}
-
-	len = strlen(filename);
-	if (len < 6)
-	{
-		return false;
-	}
-
-	if (strcasecmp(filename + len - 5, ".par2"))
-	{
-		return false;
-	}
-	*(filename + len - 5) = '\0';
-
-	int blockcnt = 0;
-	char* p = strrchr(filename, '.');
-	if (p && !strncasecmp(p, ".vol", 4))
-	{
-		char* b = strchr(p, '+');
-		if (!b)
-		{
-			b = strchr(p, '-');
-		}
-		if (b)
-		{
-			// "name.vol-06.par2" (some posters number the volumes only): the
-			// number is the volume's, not a block count. The count is unknown
-			// (-1); it read as 6, and a set of such volumes added up to far fewer
-			// blocks than it holds, so none was ever requested
-			blockcnt = b == p + 4 ? -1 : atoi(b+1);
-			*p = '\0';
-		}
-	}
-
-	if (baseNameLen)
-	{
-		*baseNameLen = strlen(filename);
-	}
-	if (blocks)
-	{
-		*blocks = blockcnt;
-	}
-
-	return true;
-}
-#endif

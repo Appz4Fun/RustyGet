@@ -86,7 +86,7 @@ apply_sanitizers(libnzbget)
 
 if(NOT BUILD_ONLY_TESTS)
 	add_executable(${PACKAGE} ${CMAKE_SOURCE_DIR}/daemon/main/nzbget.cpp)
-	target_link_libraries(${PACKAGE} PRIVATE libnzbget)
+	target_link_libraries(${PACKAGE} PRIVATE nzbget-rs-entry libnzbget)
 	target_precompile_headers(${PACKAGE} REUSE_FROM libnzbget)
 	apply_compiler_flags(${PACKAGE})
 	apply_sanitizers(${PACKAGE})

@@ -20,18 +20,12 @@
 
 #include "nzbget.h"
 #include "WorkState.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 void WorkState::Changed()
 {
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_awc_work_state_should_notify() != 0)
 	{
 		Notify(nullptr);
 	}
-#else
-	Notify(nullptr);
-#endif
 }

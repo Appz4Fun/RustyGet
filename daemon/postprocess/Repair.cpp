@@ -30,9 +30,7 @@
 #include <fstream>
 #include <set>
 #include <iterator>
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 #ifndef DISABLE_PARCHECK
 bool RepairController::PostParChecker::RequestMorePars(int blockNeeded, int* blockFound)
@@ -95,11 +93,7 @@ bool RepairController::PostParChecker::IsParredFile(const char* filename)
 {
 	for (CString& parredFile : m_postInfo->GetParredFiles())
 	{
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_rrd_repair_ctrl_filename_eq_ignore_case(parredFile, filename) != 0)
-#else
-		if (!strcasecmp(parredFile, filename))
-#endif
 		{
 			return true;
 		}
@@ -121,11 +115,7 @@ ParChecker::EFileStatus RepairController::PostParChecker::FindFileCrc(const char
 		CompletedFile* completedFile = nullptr;
 		for (CompletedFile& completedFile2 : *m_postInfo->GetNzbInfo()->GetCompletedFiles())
 		{
-#ifdef NZBGET_USE_RUST
 			if (nzbget_rs_rrd_repair_ctrl_filename_eq_ignore_case(completedFile2.GetFilename(), filename) != 0)
-#else
-			if (!strcasecmp(completedFile2.GetFilename(), filename))
-#endif
 			{
 				completedFile = &completedFile2;
 				break;
@@ -143,12 +133,8 @@ ParChecker::EFileStatus RepairController::PostParChecker::FindFileCrc(const char
 
 	debug("Found completed file: %s, CRC: %.8x, Status: %i", filename, *crc, (int)status);
 
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_rrd_repair_ctrl_should_load_partial_segments(
 		(int)status, (int)CompletedFile::cfPartial, id, reprocess ? 1 : 0) != 0)
-#else
-	if (status == CompletedFile::cfPartial && id > 0 && !reprocess)
-#endif
 	{
 		FileInfo tmpFileInfo(id);
 
@@ -164,18 +150,11 @@ ParChecker::EFileStatus RepairController::PostParChecker::FindFileCrc(const char
 		}
 	}
 
-#ifdef NZBGET_USE_RUST
 	return (ParChecker::EFileStatus)nzbget_rs_dur_repair_ctrl_classify_file_crc_status(
 		(int)status, reprocess ? 1 : 0, !segments->empty() ? 1 : 0,
 		(int)CompletedFile::cfSuccess, (int)CompletedFile::cfFailure, (int)CompletedFile::cfPartial,
 		(int)ParChecker::fsSuccess, (int)ParChecker::fsFailure, (int)ParChecker::fsPartial,
 		(int)ParChecker::fsUnknown);
-#else
-	return status == CompletedFile::cfSuccess ? ParChecker::fsSuccess :
-		status == CompletedFile::cfFailure && !reprocess ? ParChecker::fsFailure :
-		status == CompletedFile::cfPartial && segments->size() > 0 && !reprocess ? ParChecker::fsPartial :
-		ParChecker::fsUnknown;
-#endif
 }
 
 const char* RepairController::PostParChecker::FindFileOrigname(const char* filename)
@@ -186,11 +165,7 @@ const char* RepairController::PostParChecker::FindFileOrigname(const char* filen
 	GuardedDownloadQueue guard = DownloadQueue::Guard();
 	for (CompletedFile& completedFile : *m_postInfo->GetNzbInfo()->GetCompletedFiles())
 	{
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_rrd_repair_ctrl_filename_eq_ignore_case(completedFile.GetFilename(), filename) != 0)
-#else
-		if (!strcasecmp(completedFile.GetFilename(), filename))
-#endif
 		{
 			if (!completedFile.GetOrigname())
 			{
@@ -221,13 +196,9 @@ void RepairController::PostParChecker::RequestDupeSources(DupeSourceList* dupeSo
 			{
 				PrintMessage(Message::mkInfo, "Checking %s for dupe scan usability", FileSystem::BaseFileName(dupeNzbInfo->GetDestDir()));
 			}
-#ifdef NZBGET_USE_RUST
 			bool useDupe = nzbget_rs_rrd_repair_ctrl_can_accept_dupe_without_content_match(
 				sizeComparisonPossible ? 1 : 0) != 0 ||
 				dupeMatcher.MatchDupeContent(dupeNzbInfo->GetDestDir());
-#else
-			bool useDupe = !sizeComparisonPossible || dupeMatcher.MatchDupeContent(dupeNzbInfo->GetDestDir());
-#endif
 			if (useDupe)
 			{
 				PrintMessage(Message::mkInfo, "Adding %s to dupe scan sources", FileSystem::BaseFileName(dupeNzbInfo->GetDestDir()));
@@ -295,7 +266,6 @@ std::string RepairController::PostParChecker::RequestTwinIndex()
 		NzbInfo* nzbInfo = m_postInfo->GetNzbInfo();
 		auto consider = [&](NzbInfo* other)
 			{
-#ifdef NZBGET_USE_RUST
 				bool sameNameOrKey = other != nzbInfo && other->GetKind() == NzbInfo::nkNzb &&
 					DupeCoordinator::SameNameOrKey(other->GetName(), other->GetDupeKey(),
 						nzbInfo->GetName(), nzbInfo->GetDupeKey());
@@ -312,20 +282,6 @@ std::string RepairController::PostParChecker::RequestTwinIndex()
 				{
 					return;
 				}
-#else
-				if (other == nzbInfo || other->GetKind() != NzbInfo::nkNzb ||
-					!DupeCoordinator::SameNameOrKey(other->GetName(), other->GetDupeKey(),
-						nzbInfo->GetName(), nzbInfo->GetDupeKey()) ||
-					strchr(other->GetQueuedFilename(), '|') || !FileSystem::FileExists(other->GetQueuedFilename()))
-				{
-					return;
-				}
-				NzbParameter* print = other->GetParameters()->Find(TwinCheck::FilesParam);
-				if (print && ownPrint != print->GetValue())
-				{
-					return;	// an alt, or no par2
-				}
-#endif
 				candidates.push_back({other->GetName(), other->GetQueuedFilename(), print != nullptr});
 			};
 		for (NzbInfo* queued : downloadQueue->GetQueue())
@@ -357,7 +313,6 @@ std::string RepairController::PostParChecker::RequestTwinIndex()
 		}
 		std::vector<TwinCheck::NzbEntry> entries = TwinCheck::ReadNzbEntries(candidate.nzbFilename.c_str());
 		const TwinCheck::NzbEntry* index = nullptr;
-#ifdef NZBGET_USE_RUST
 		for (const TwinCheck::NzbEntry& entry : entries)
 		{
 			if (nzbget_rs_sap_repair_ctrl_is_better_twin_par2_entry(
@@ -371,19 +326,6 @@ std::string RepairController::PostParChecker::RequestTwinIndex()
 		{
 			continue;
 		}
-#else
-		for (const TwinCheck::NzbEntry& entry : entries)
-		{
-			if (entry.par2 && (!index || entry.size < index->size))
-			{
-				index = &entry;
-			}
-		}
-		if (!index || index->size > TwinCheck::MaxIndexSize)
-		{
-			continue;
-		}
-#endif
 
 		std::vector<char> data;
 		std::string path = FetchTwinFile(*index, &data);
@@ -438,11 +380,7 @@ std::vector<std::string> RepairController::PostParChecker::RequestTwinVolumes(in
 		int blocks = TwinCheck::VolumeBlocks(entry.filename);
 		if (blocks < 0 && m_twinBlockSize > 0)
 		{
-#ifdef NZBGET_USE_RUST
 			blocks = nzbget_rs_dur_repair_ctrl_estimate_twin_vol_blocks(entry.size, m_twinBlockSize);
-#else
-			blocks = (int)(entry.size * 100 / 102 / (int64)(m_twinBlockSize + 68));
-#endif
 		}
 		if (blocks > 0)
 		{
@@ -451,7 +389,6 @@ std::vector<std::string> RepairController::PostParChecker::RequestTwinVolumes(in
 	}
 	std::sort(volumes.begin(), volumes.end(), [](const Volume& a, const Volume& b) { return a.blocks < b.blocks; });
 
-#ifdef NZBGET_USE_RUST
 	int available = 0;
 	std::vector<int> allVolBlocks;
 	allVolBlocks.reserve(volumes.size());
@@ -463,15 +400,6 @@ std::vector<std::string> RepairController::PostParChecker::RequestTwinVolumes(in
 		allVolBlocks.data(), allVolBlocks.size(), blockNeeded, &available) != 0;
 	std::vector<std::string> paths;
 	if (!hasEnoughTwinBlocks)
-#else
-	int available = 0;
-	for (const Volume& volume : volumes)
-	{
-		available += volume.blocks;
-	}
-	std::vector<std::string> paths;
-	if (available < blockNeeded)
-#endif
 	{
 		PrintMessage(Message::mkInfo, "Twin %s holds %i par-block(s), %i needed: not fetched",
 			m_twinName.c_str(), available, blockNeeded);
@@ -483,7 +411,6 @@ std::vector<std::string> RepairController::PostParChecker::RequestTwinVolumes(in
 	int left = blockNeeded;
 	while (left > 0 && !volumes.empty() && !IsStopped())
 	{
-#ifdef NZBGET_USE_RUST
 		std::vector<int> volBlocks;
 		volBlocks.reserve(volumes.size());
 		for (const Volume& v : volumes)
@@ -496,13 +423,6 @@ std::vector<std::string> RepairController::PostParChecker::RequestTwinVolumes(in
 			break;
 		}
 		auto it = volumes.begin() + idx;
-#else
-		auto it = std::find_if(volumes.begin(), volumes.end(), [left](const Volume& v) { return v.blocks >= left; });
-		if (it == volumes.end())
-		{
-			it = volumes.end() - 1;
-		}
-#endif
 		PrintMessage(Message::mkInfo, "Fetching %s of twin %s for par-repair (%i block(s))",
 			it->entry->filename.c_str(), m_twinName.c_str(), it->blocks);
 		std::string path = FetchTwinFile(*it->entry);
@@ -543,7 +463,6 @@ void RepairController::PostParChecker::StatDupeSources(DupeSourceList* dupeSourc
 				if (historyInfo->GetKind() == HistoryInfo::hkNzb &&
 					historyInfo->GetNzbInfo()->GetId() == dupeSource.GetId())
 				{
-#ifdef NZBGET_USE_RUST
 					int newHistExtra = 0;
 					int dummyTotal = totalExtraParBlocks;
 					nzbget_rs_hsr_repair_ctrl_calc_dupe_source_extra_blocks(
@@ -553,19 +472,12 @@ void RepairController::PostParChecker::StatDupeSources(DupeSourceList* dupeSourc
 						&newHistExtra,
 						&dummyTotal);
 					historyInfo->GetNzbInfo()->SetExtraParBlocks(newHistExtra);
-#else
-					historyInfo->GetNzbInfo()->SetExtraParBlocks(historyInfo->GetNzbInfo()->GetExtraParBlocks() - dupeSource.GetUsedBlocks());
-#endif
 				}
 			}
 		}
-#ifdef NZBGET_USE_RUST
 		int dummyHist = 0;
 		nzbget_rs_hsr_repair_ctrl_calc_dupe_source_extra_blocks(
 			0, dupeSource.GetUsedBlocks(), totalExtraParBlocks, &dummyHist, &totalExtraParBlocks);
-#else
-		totalExtraParBlocks += dupeSource.GetUsedBlocks();
-#endif
 	}
 
 	m_postInfo->GetNzbInfo()->SetExtraParBlocks(m_postInfo->GetNzbInfo()->GetExtraParBlocks() + totalExtraParBlocks);
@@ -638,15 +550,10 @@ void RepairController::Run()
 	// CRCs and segment states ParQuick judges files by: once it has written
 	// into the collection (live or in post-processing, before or after a
 	// restart), only a full verification sees the repaired bytes
-#ifdef NZBGET_USE_RUST
 	m_parChecker.SetParQuick(nzbget_rs_hsr_repair_ctrl_should_use_par_quick(
 		g_Options->GetParQuick() ? 1 : 0,
 		m_postInfo->GetForceParFull() ? 1 : 0,
 		dupeRepaired ? 1 : 0) != 0);
-#else
-	m_parChecker.SetParQuick(g_Options->GetParQuick() && !m_postInfo->GetForceParFull() &&
-		!dupeRepaired);
-#endif
 	m_parChecker.SetForceRepair(m_postInfo->GetForceRepair());
 
 	m_parChecker.PrintMessage(Message::mkInfo, "Checking pars for %s", *nzbName);
@@ -660,11 +567,7 @@ void RepairController::Run()
 bool RepairController::AddPar(FileInfo* fileInfo, bool deleted)
 {
 	bool sameCollection = fileInfo->GetNzbInfo() == m_parChecker.GetPostInfo()->GetNzbInfo();
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_rrd_repair_ctrl_should_add_par_file(sameCollection ? 1 : 0, deleted ? 1 : 0) != 0)
-#else
-	if (sameCollection && !deleted)
-#endif
 	{
 		BString<1024> fullFilename("%s%c%s", fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, fileInfo->GetFilename());
 		m_parChecker.AddParFile(fullFilename);
@@ -684,7 +587,6 @@ void RepairController::ParCheckCompleted()
 	PostInfo* postInfo = m_parChecker.GetPostInfo();
 
 	// Update ParStatus (accumulate result)
-#ifdef NZBGET_USE_RUST
 	int setParRepaired = 0, parRepairedVal = 0;
 	NzbInfo::EParStatus newParStatus = (NzbInfo::EParStatus)nzbget_rs_dur_repair_ctrl_resolve_par_status(
 		(int)m_parChecker.GetStatus(),
@@ -697,26 +599,7 @@ void RepairController::ParCheckCompleted()
 	{
 		postInfo->SetParRepaired(parRepairedVal != 0);
 	}
-#else
-	if ((m_parChecker.GetStatus() == ParChecker::psRepaired ||
-		m_parChecker.GetStatus() == ParChecker::psRepairNotNeeded) &&
-		postInfo->GetNzbInfo()->GetParStatus() <= NzbInfo::psSkipped)
-	{
-		postInfo->GetNzbInfo()->SetParStatus(NzbInfo::psSuccess);
-		postInfo->SetParRepaired(m_parChecker.GetStatus() == ParChecker::psRepaired);
-	}
-	else if (m_parChecker.GetStatus() == ParChecker::psRepairPossible &&
-		postInfo->GetNzbInfo()->GetParStatus() != NzbInfo::psFailure)
-	{
-		postInfo->GetNzbInfo()->SetParStatus(NzbInfo::psRepairPossible);
-	}
-	else
-	{
-		postInfo->GetNzbInfo()->SetParStatus(NzbInfo::psFailure);
-	}
-#endif
 
-#ifdef NZBGET_USE_RUST
 	int waitTime = 0, parSec = 0;
 	nzbget_rs_fuq_repair_ctrl_calc_par_check_times(
 		postInfo->GetNzbInfo()->GetDownloadSec(),
@@ -726,12 +609,6 @@ void RepairController::ParCheckCompleted()
 		&waitTime, &parSec);
 	postInfo->SetStartTime(postInfo->GetStartTime() + (time_t)waitTime);
 	postInfo->GetNzbInfo()->SetParSec(postInfo->GetNzbInfo()->GetParSec() + parSec);
-#else
-	int waitTime = postInfo->GetNzbInfo()->GetDownloadSec() - m_parChecker.GetDownloadSec();
-	postInfo->SetStartTime(postInfo->GetStartTime() + (time_t)waitTime);
-	int parSec = (int)(Util::CurrentTime() - m_parChecker.GetParTime()) - waitTime;
-	postInfo->GetNzbInfo()->SetParSec(postInfo->GetNzbInfo()->GetParSec() + parSec);
-#endif
 
 	postInfo->GetNzbInfo()->SetParFull(m_parChecker.GetParFull());
 
@@ -756,20 +633,12 @@ bool RepairController::RequestMorePars(NzbInfo* nzbInfo, const char* parFilename
 
 	FindPars(downloadQueue, nzbInfo, parFilename, availableBlocks, true, true, &curBlockFound);
 	blockFound += curBlockFound;
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_src_repair_ctrl_should_fetch_more_par_pass(blockFound, blockNeeded))
-#else
-	if (blockFound < blockNeeded)
-#endif
 	{
 		FindPars(downloadQueue, nzbInfo, parFilename, availableBlocks, true, false, &curBlockFound);
 		blockFound += curBlockFound;
 	}
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_src_repair_ctrl_should_fetch_more_par_pass(blockFound, blockNeeded))
-#else
-	if (blockFound < blockNeeded)
-#endif
 	{
 		FindPars(downloadQueue, nzbInfo, parFilename, availableBlocks, false, false, &curBlockFound);
 		blockFound += curBlockFound;
@@ -781,13 +650,8 @@ bool RepairController::RequestMorePars(NzbInfo* nzbInfo, const char* parFilename
 			return block1.m_blockCount < block2.m_blockCount;
 		});
 
-#ifdef NZBGET_USE_RUST
 	if (!nzbget_rs_src_repair_ctrl_should_fetch_more_par_pass(blockFound, blockNeeded))
-#else
-	if (blockFound >= blockNeeded)
-#endif
 	{
-#ifdef NZBGET_USE_RUST
 		std::vector<int> sortedCounts;
 		sortedCounts.reserve(availableBlocks.size());
 		for (const BlockInfo& b : availableBlocks)
@@ -804,30 +668,6 @@ bool RepairController::RequestMorePars(NzbInfo* nzbInfo, const char* parFilename
 		{
 			selectedBlocks.push_back(availableBlocks[selectedIdx[i]]);
 		}
-#else
-		// collect as much blocks as needed
-		for (Blocks::iterator it = availableBlocks.begin(); blockNeeded > 0 && it != availableBlocks.end(); ++it)
-		{
-			BlockInfo& blockInfo = *it;
-			selectedBlocks.push_front(blockInfo);
-			blockNeeded -= blockInfo.m_blockCount;
-		}
-
-		// discarding superfluous blocks
-		for (Blocks::iterator it = selectedBlocks.begin(); it != selectedBlocks.end(); )
-		{
-			BlockInfo& blockInfo = *it;
-			if (blockNeeded + blockInfo.m_blockCount <= 0)
-			{
-				blockNeeded += blockInfo.m_blockCount;
-				it = selectedBlocks.erase(it);
-			}
-			else
-			{
-				++it;
-			}
-		}
-#endif
 
 		// unpause files with blocks
 		for (BlockInfo& blockInfo : selectedBlocks)
@@ -856,12 +696,8 @@ bool RepairController::RequestMorePars(NzbInfo* nzbInfo, const char* parFilename
 		*blockFoundOut = blockFound;
 	}
 
-#ifdef NZBGET_USE_RUST
 	bool ok = nzbget_rs_rrd_repair_ctrl_is_request_more_pars_ok(
 		blockNeeded, hasUnpausedParFiles ? 1 : 0) != 0;
-#else
-	bool ok = blockNeeded <= 0 || hasUnpausedParFiles;
-#endif
 
 	return ok;
 }
@@ -893,18 +729,10 @@ void RepairController::FindPars(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, 
 			// a volume named without its block count ("vol-06"): estimated from
 			// its size (a recovery packet is a block and 68 bytes)
 			int64 blockSize = m_parChecker.GetBlockSize();
-#ifdef NZBGET_USE_RUST
 			blockCount = nzbget_rs_dur_repair_ctrl_estimate_par_blocks_from_size(
 				fileInfo->GetSize(), blockSize);
-#else
-			blockCount = blockSize > 0 ? (int)std::max<int64>(1, fileInfo->GetSize() / (blockSize + 68)) : 1;
-#endif
 		}
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_srp_repair_ctrl_is_usable_par_block_candidate(parsed ? 1 : 0, blockCount))
-#else
-		if (parsed && blockCount > 0)
-#endif
 		{
 			bool useFile = true;
 
@@ -918,20 +746,8 @@ void RepairController::FindPars(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, 
 				// the pFileInfo->GetFilename() may be not confirmed and may contain
 				// additional texts if Subject could not be parsed correctly
 
-#ifdef NZBGET_USE_RUST
 				useFile = nzbget_rs_dur_repair_ctrl_match_strict_par_name(
 					fileInfo->GetFilename(), mainBaseFilename) != 0;
-#else
-				BString<1024> loFileName = fileInfo->GetFilename();
-				for (char* p = loFileName; *p; p++) *p = tolower(*p); // convert string to lowercase
-
-				BString<1024> candidateFileName("%s.par2", *mainBaseFilename);
-				if (!strstr(loFileName, candidateFileName))
-				{
-					candidateFileName.Format("%s.vol", *mainBaseFilename);
-					useFile = strstr(loFileName, candidateFileName);
-				}
-#endif
 			}
 
 			bool alreadyAdded = false;
@@ -978,7 +794,6 @@ void RepairController::UpdateParCheckProgress()
 		PostInfo::EStage stage = StageKind[m_parChecker.GetStage()];
 		time_t current = Util::CurrentTime();
 
-#ifdef NZBGET_USE_RUST
 		int setRepairTime = 0;
 		int newRepairSec = postInfo->GetNzbInfo()->GetRepairSec();
 		if (nzbget_rs_hsr_repair_ctrl_eval_stage_transition(
@@ -1003,27 +818,10 @@ void RepairController::UpdateParCheckProgress()
 				postInfo->GetNzbInfo()->SetRepairSec(newRepairSec);
 			}
 		}
-#else
-		if (postInfo->GetStage() != stage)
-		{
-			postInfo->SetStage(stage);
-			postInfo->SetStageTime(current);
-			if (postInfo->GetStage() == PostInfo::ptRepairing)
-			{
-				m_parChecker.SetRepairTime(current);
-			}
-			else if (postInfo->GetStage() == PostInfo::ptVerifyingRepaired)
-			{
-				int repairSec = (int)(current - m_parChecker.GetRepairTime());
-				postInfo->GetNzbInfo()->SetRepairSec(postInfo->GetNzbInfo()->GetRepairSec() + repairSec);
-			}
-		}
-#endif
 
 		bool parCancel = false;
 		if (!IsStopped())
 		{
-#ifdef NZBGET_USE_RUST
 			int estimatedRepairTime = 0;
 			if (nzbget_rs_repair_check_par_time_limit(
 				g_Options->GetParTimeLimit(),
@@ -1036,25 +834,6 @@ void RepairController::UpdateParCheckProgress()
 				m_parChecker.PrintMessage(Message::mkWarning, "Cancelling par-repair for %s, estimated repair time (%i minutes) exceeds allowed repair time", m_parChecker.GetInfoName(), estimatedRepairTime / 60);
 				parCancel = true;
 			}
-#else
-			if ((g_Options->GetParTimeLimit() > 0) &&
-				m_parChecker.GetStage() == PostParChecker::ptRepairing &&
-				((g_Options->GetParTimeLimit() > 5 && current - postInfo->GetStageTime() > 5 * 60) ||
-					(g_Options->GetParTimeLimit() <= 5 && current - postInfo->GetStageTime() > 1 * 60)))
-			{
-				// first five (or one) minutes elapsed, now can check the estimated time: of
-				// the repair stage, whose progress this is (from the job's start, loading
-				// pars and verification counted against the limit, contrary to the option)
-				int estimatedRepairTime = (int)((current - postInfo->GetStageTime()) * 1000 /
-					(postInfo->GetStageProgress() > 0 ? postInfo->GetStageProgress() : 1));
-				if (estimatedRepairTime > g_Options->GetParTimeLimit() * 60)
-				{
-					debug("Estimated repair time %i seconds", estimatedRepairTime);
-					m_parChecker.PrintMessage(Message::mkWarning, "Cancelling par-repair for %s, estimated repair time (%i minutes) exceeds allowed repair time", m_parChecker.GetInfoName(), estimatedRepairTime / 60);
-					parCancel = true;
-				}
-			}
-#endif
 		}
 
 		if (parCancel)
@@ -1077,7 +856,6 @@ void RepairController::CheckPauseState(PostInfo* postInfo)
 		time_t waitTime = Util::CurrentTime();
 
 		// wait until Post-processor is unpaused
-#ifdef NZBGET_USE_RUST
 		while (nzbget_rs_rrd_repair_ctrl_is_post_process_paused(
 			g_WorkState->GetPausePostProcess() ? 1 : 0,
 			postInfo->GetNzbInfo()->GetForcePriority() ? 1 : 0,
@@ -1107,33 +885,6 @@ void RepairController::CheckPauseState(PostInfo* postInfo)
 				m_parChecker.SetRepairTime((time_t)newRepair);
 			}
 		}
-#else
-		while (g_WorkState->GetPausePostProcess() && !postInfo->GetNzbInfo()->GetForcePriority() && !IsStopped())
-		{
-			Util::Sleep(50);
-
-			// update time stamps
-
-			time_t delta = Util::CurrentTime() - waitTime;
-
-			if (stageTime > 0)
-			{
-				postInfo->SetStageTime(stageTime + delta);
-			}
-			if (startTime > 0)
-			{
-				postInfo->SetStartTime(startTime + delta);
-			}
-			if (parTime > 0)
-			{
-				m_parChecker.SetParTime(parTime + delta);
-			}
-			if (repairTime > 0)
-			{
-				m_parChecker.SetRepairTime(repairTime + delta);
-			}
-		}
-#endif
 	}
 }
 

@@ -22,9 +22,7 @@
 #include "nzbget.h"
 #include "DownloadInfo.h"
 #include "Cleanup.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 #include "Log.h"
 #include "Util.h"
 #include "FileSystem.h"
@@ -72,7 +70,6 @@ void MoveController::Run()
 		GuardedDownloadQueue guard = DownloadQueue::Guard();
 		if (m_postInfo && m_postInfo->GetNzbInfo())
 		{
-#ifdef NZBGET_USE_RUST
 			int moveStatus = 0;
 			int outcome = nzbget_rs_rco_move_controller_decide_outcome(
 				ok ? 1 : 0, IsStopped() ? 1 : 0, &moveStatus);
@@ -92,26 +89,6 @@ void MoveController::Run()
 				PrintMessage(Message::mkError, "%s failed", *infoName);
 				m_postInfo->GetNzbInfo()->SetMoveStatus((NzbInfo::EMoveStatus)moveStatus);
 			}
-#else
-			if (ok)
-			{
-				PrintMessage(Message::mkInfo, "%s successful", *infoName);
-				m_postInfo->GetNzbInfo()->SetDestDir(fs::u8string(m_destDir).c_str());
-				m_postInfo->GetNzbInfo()->SetFinalDir("");
-				m_postInfo->GetNzbInfo()->SetMoveStatus(NzbInfo::msSuccess);
-			}
-			else if (IsStopped())
-			{
-				// a shutdown stopped it: the move runs again after the restart (as a
-				// failure it was skipped then, the files split between both folders)
-				PrintMessage(Message::mkInfo, "%s interrupted, resumes after the restart", *infoName);
-			}
-			else
-			{
-				PrintMessage(Message::mkError, "%s failed", *infoName);
-				m_postInfo->GetNzbInfo()->SetMoveStatus(NzbInfo::msFailure);
-			}
-#endif
 			m_postInfo->SetWorking(false);
 		}
 	}
@@ -184,11 +161,7 @@ bool MoveController::MoveFiles(const fs::path& src, const fs::path& dest)
 		else 
 		{
 			std::string filename = fs::u8string(entry.path().filename());
-#ifdef NZBGET_USE_RUST
 			bool isDotFile = nzbget_rs_ucf_move_ctrl_is_dot_file(filename.c_str()) != 0;
-#else
-			bool isDotFile = !filename.empty() && filename[0] == '.';
-#endif
 
 			if (!isDotFile)
 			{
@@ -308,7 +281,6 @@ void CleanupController::Run()
 
 	infoName[0] = 'C'; // uppercase
 
-#ifdef NZBGET_USE_RUST
 	int cleanupStatus = 0;
 	int cleanupOutcome = nzbget_rs_rco_cleanup_controller_decide_outcome(
 		ok ? 1 : 0, deleted ? 1 : 0, &cleanupStatus);
@@ -325,23 +297,6 @@ void CleanupController::Run()
 		PrintMessage(Message::mkError, "%s failed", *infoName);
 	}
 	m_postInfo->GetNzbInfo()->SetCleanupStatus((NzbInfo::ECleanupStatus)cleanupStatus);
-#else
-	if (ok && deleted)
-	{
-		PrintMessage(Message::mkInfo, "%s successful", *infoName);
-		m_postInfo->GetNzbInfo()->SetCleanupStatus(NzbInfo::csSuccess);
-	}
-	else if (ok)
-	{
-		PrintMessage(Message::mkInfo, "Nothing to cleanup for %s", *nzbName);
-		m_postInfo->GetNzbInfo()->SetCleanupStatus(NzbInfo::csSuccess);
-	}
-	else
-	{
-		PrintMessage(Message::mkError, "%s failed", *infoName);
-		m_postInfo->GetNzbInfo()->SetCleanupStatus(NzbInfo::csFailure);
-	}
-#endif
 
 	m_postInfo->SetWorking(false);
 }
@@ -391,13 +346,9 @@ bool CleanupController::Cleanup(const char* destDir, bool *deleted)
 		}
 
 		// check file extension
-#ifdef NZBGET_USE_RUST
 		bool deleteIt = nzbget_rs_ucf_cleanup_ctrl_should_delete_entry(
 			isDir ? 1 : 0,
 			Util::MatchFileExt(filename, g_Options->GetExtCleanupDisk(), ",;") ? 1 : 0) != 0;
-#else
-		bool deleteIt = Util::MatchFileExt(filename, g_Options->GetExtCleanupDisk(), ",;") && !isDir;
-#endif
 
 		if (deleteIt)
 		{

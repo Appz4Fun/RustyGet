@@ -26,9 +26,7 @@
 #include "Deobfuscation.h"
 #include "Util.h"
 #include "Options.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 namespace PostDownloadRenamer
 {
@@ -82,7 +80,6 @@ namespace PostDownloadRenamer
 		CollectionAnalyzer::RenamePlan plan = CollectionAnalyzer::BuildPlan(
 			fs::u8path(dstDir), targetName, g_Options->GetRenameIgnoreExt());
 
-#ifdef NZBGET_USE_RUST
 		int planClass = nzbget_rs_snh_post_renamer_classify_plan(
 			plan.isDiscStructure ? 1 : 0,
 			plan.isAmbiguousCollection ? 1 : 0,
@@ -116,44 +113,6 @@ namespace PostDownloadRenamer
 			Finish();
 			return;
 		}
-#else
-		if (plan.isDiscStructure)
-		{
-			PrintMessage(Message::mkInfo, "Skipping Post-download renaming: disc structure detected");
-			Finish();
-			return;
-		}
-
-		if (plan.isAmbiguousCollection)
-		{
-			PrintMessage(Message::mkInfo, "Skipping Post-download renaming: ambiguous multi-file collection detected");
-			Finish();
-			return;
-		}
-
-		if (!plan.canRename)
-		{
-			PrintMessage(Message::mkInfo, "No qualifying media file found for Post-download renaming");
-			Finish();
-			return;
-		}
-
-		if (plan.actions.empty())
-		{
-			if (plan.targetNameObfuscated)
-			{
-				PrintMessage(Message::mkWarning,
-					"Skipping Post-download renaming. Obfuscated files found, but NZB filename %s is also obfuscated and no clean metadata was provided.",
-					targetName.c_str());
-			}
-			else
-			{
-				PrintMessage(Message::mkInfo, "No files needed renaming for %s", targetName.c_str());
-			}
-			Finish();
-			return;
-		}
-#endif
 
 		bool anyRenamed = false;
 		bool anyFailed = false;
@@ -182,7 +141,6 @@ namespace PostDownloadRenamer
 			}
 		}
 
-#ifdef NZBGET_USE_RUST
 		int finalDecision = nzbget_rs_snh_post_renamer_decide_final_status(
 			IsStopped() ? 1 : 0, anyFailed ? 1 : 0, anyRenamed ? 1 : 0);
 		if (finalDecision == 1)
@@ -206,30 +164,6 @@ namespace PostDownloadRenamer
 			PrintMessage(Message::mkInfo, "No files needed renaming for %s", *infoName);
 			finalStatus = NzbInfo::PostDownloadRenamingStatus::Skipped;
 		}
-#else
-		if (IsStopped())
-		{
-			PrintMessage(Message::mkWarning, "%s cancelled", *infoName);
-			Finish();
-			return;
-		}
-
-		if (anyFailed)
-		{
-			PrintMessage(Message::mkError, "%s finished with errors", *infoName);
-			finalStatus = NzbInfo::PostDownloadRenamingStatus::Failure;
-		}
-		else if (anyRenamed)
-		{
-			PrintMessage(Message::mkInfo, "%s successful", *infoName);
-			finalStatus = NzbInfo::PostDownloadRenamingStatus::Success;
-		}
-		else
-		{
-			PrintMessage(Message::mkInfo, "No files needed renaming for %s", *infoName);
-			finalStatus = NzbInfo::PostDownloadRenamingStatus::Skipped;
-		}
-#endif
 
 		Finish();
 	}

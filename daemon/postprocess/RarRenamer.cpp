@@ -21,10 +21,8 @@
 #include "nzbget.h"
 
 #include "RarRenamer.h"
-#ifdef NZBGET_USE_RUST
 #include <exception>
 #include "nzbget_rs.h"
-#endif
 #include "Log.h"
 #include "Util.h"
 #include "FileSystem.h"
@@ -79,11 +77,7 @@ void RarRenamer::CheckFiles(const char* destDir)
 			if (!FileSystem::DirectoryExists(fullFilename))
 			{
 				m_progressLabel.Format("Checking file %s", filename);
-#ifdef NZBGET_USE_RUST
 				m_stageProgress = nzbget_rs_psp_rar_renamer_calc_stage_progress(m_fileCount, m_curFile);
-#else
-				m_stageProgress = m_fileCount > 0 ? m_curFile * 1000 / m_fileCount : 1000;
-#endif
 				UpdateProgress();
 				m_curFile++;
 
@@ -133,7 +127,6 @@ void RarRenamer::RenameFile(const char* srcFilename, const char* destFileName)
 	RegisterRenamedFile(FileSystem::BaseFileName(srcFilename), FileSystem::BaseFileName(destFileName));
 }
 
-#ifdef NZBGET_USE_RUST
 void RarRenamer::RenameFiles(const char* destDir)
 {
 	// rust/src/rarrenamer.rs builds the sets and picks the new names; the
@@ -215,57 +208,6 @@ void RarRenamer::RenameFiles(const char* destDir)
 		std::rethrow_exception(context.error);
 	}
 }
-#else
-void RarRenamer::RenameFiles(const char* destDir)
-{
-	MakeSets();
-
-	for (RarVolumeSet& set : m_sets)
-	{
-		if (!IsSetProperlyNamed(set))
-		{
-			RarFile* mainFile = FindMainFile(set);
-			BString<1024> mainBasename = FileSystem::BaseFileName(mainFile->GetFilename());
-			char* ext = strrchr(mainBasename, '.');
-			// strip extension if its length is 3 chars
-			if (ext && strlen(ext) == 4)
-			{
-				*ext = '\0';
-			}
-
-			BString<1024> newBasename = *mainBasename;
-			int num = 0;
-			bool willOverwrite = true;
-			while (willOverwrite)
-			{
-				if (num++)
-				{
-					newBasename.Format("%s-%i", *mainBasename, num);
-				}
-
-				for (RarVolume* volume : set)
-				{
-					CString destfilename = GenNewVolumeFilename(destDir, newBasename, volume);
-					willOverwrite = strcmp(volume->GetFilename(), destfilename) && FileSystem::FileExists(destfilename);
-					if (willOverwrite)
-					{
-						break;
-					}
-				}
-			}
-
-			for (RarVolume* volume : set)
-			{
-				CString destfilename = GenNewVolumeFilename(destDir, newBasename, volume);
-				if (strcmp(volume->GetFilename(), destfilename))
-				{
-					RenameFile(volume->GetFilename(), destfilename);
-				}
-			}
-		}
-	}
-}
-#endif
 
 CString RarRenamer::GenNewVolumeFilename(const char* destDir, const char* newBasename, RarVolume* volume)
 {
@@ -286,15 +228,10 @@ CString RarRenamer::GenOldExtension(int volumeNo)
 	}
 	else
 	{
-#ifdef NZBGET_USE_RUST
 		uint8_t ch = 0;
 		int num = 0;
 		nzbget_rs_psp_rar_renamer_calc_old_extension_parts(volumeNo, &ch, &num);
 		return CString::FormatStr("%c%02d", ch, num);
-#else
-		unsigned char ch = 'r' + (volumeNo - 1) / 100;
-		return CString::FormatStr("%c%02d", ch, (volumeNo - 1) % 100);
-#endif
 	}
 }
 

@@ -39,9 +39,7 @@
 #include "FileSystem.h"
 #include "Unpack.h"
 #include "ParParser.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 namespace
 {
@@ -59,11 +57,7 @@ namespace
 
 ContentSource* DiskSourceSet::GetSource(int memberIndex)
 {
-#ifdef NZBGET_USE_RUST
 	if (!nzbget_rs_srp_stream_repair_is_member_index_in_bounds(memberIndex, m_entries.size()))
-#else
-	if (memberIndex < 0 || memberIndex >= (int)m_entries.size())
-#endif
 	{
 		return nullptr;
 	}
@@ -76,12 +70,8 @@ ContentSource* DiskSourceSet::GetSource(int memberIndex)
 		// a member's size may exceed the file on disk: a target joined from
 		// article files ends with its last downloaded article, and the ranges
 		// past it are declared holes (HoledSourceSet), never read from here
-#ifdef NZBGET_USE_RUST
 		int64 size = nzbget_rs_srp_stream_repair_max_disk_and_member_size(
 			FileSystem::FileSize(path), m_members[memberIndex].Size);
-#else
-		int64 size = std::max(FileSystem::FileSize(path), m_members[memberIndex].Size);
-#endif
 		if (size > 0 && entry.File.Open(path, DiskFile::omRead))
 		{
 			entry.Source = std::make_unique<DiskContentSource>(entry.File, size);
@@ -108,14 +98,10 @@ bool DonorMemberSource::EnsureInit()
 		return false;
 	}
 	const ArticleFetcher::FetchedArticle* first = FetchPart(0);
-#ifdef NZBGET_USE_RUST
 	if (!nzbget_rs_stq_stream_repair_is_first_donor_part_valid(
 		first != nullptr ? 1 : 0,
 		first && first->Success ? 1 : 0,
 		first ? first->Offset : -1))
-#else
-	if (!first || !first->Success || first->Offset != 0)
-#endif
 	{
 		m_bad = true;	// without article 0 neither headers nor size exist
 		return false;
@@ -136,12 +122,8 @@ bool DonorMemberSource::EnsureInit()
 
 const ArticleFetcher::FetchedArticle* DonorMemberSource::FetchPart(int partIndex)
 {
-#ifdef NZBGET_USE_RUST
 	if (!nzbget_rs_srp_stream_repair_donor_fetch_part_can_proceed(
 		partIndex, m_donorFile->GetArticles()->size(), m_bad ? 1 : 0))
-#else
-	if (partIndex < 0 || partIndex >= (int)m_donorFile->GetArticles()->size() || m_bad)
-#endif
 	{
 		return nullptr;
 	}
@@ -150,7 +132,6 @@ const ArticleFetcher::FetchedArticle* DonorMemberSource::FetchPart(int partIndex
 	{
 		return cached->second.Success ? &cached->second : nullptr;
 	}
-#ifdef NZBGET_USE_RUST
 	int newBudget = m_fetchBudget ? *m_fetchBudget : 0;
 	if (!nzbget_rs_srp_stream_repair_donor_consume_fetch_budget(
 		m_fetchBudget != nullptr ? 1 : 0, newBudget, &newBudget))
@@ -161,16 +142,6 @@ const ArticleFetcher::FetchedArticle* DonorMemberSource::FetchPart(int partIndex
 	{
 		*m_fetchBudget = newBudget;
 	}
-#else
-	if (m_fetchBudget && *m_fetchBudget <= 0)
-	{
-		return nullptr;
-	}
-	if (m_fetchBudget)
-	{
-		(*m_fetchBudget)--;
-	}
-#endif
 
 	ArticleInfo* article = (*m_donorFile->GetArticles())[partIndex].get();
 	return StoreFetched(partIndex, m_fetcher.Fetch(article->GetMessageId(), *m_donorFile->GetGroups()));
@@ -181,7 +152,6 @@ const ArticleFetcher::FetchedArticle* DonorMemberSource::StoreFetched(int partIn
 {
 	// consistency: every article of the member must declare the same
 	// decoded size and stay inside it, or the whole member is unusable
-#ifdef NZBGET_USE_RUST
 	int markBad = 0;
 	if (nzbget_rs_cdn_stream_repair_check_fetched_member_part(
 		fetched.Success ? 1 : 0, fetched.Data.size(), fetched.Offset,
@@ -190,23 +160,9 @@ const ArticleFetcher::FetchedArticle* DonorMemberSource::StoreFetched(int partIn
 		m_bad = markBad != 0;
 		fetched.Success = false;
 	}
-#else
-	if (fetched.Success &&
-		(fetched.Data.empty() || fetched.Offset < 0 ||
-		 fetched.Offset + (int64)fetched.Data.size() > fetched.FileSize ||
-		 (m_size >= 0 && fetched.FileSize != m_size)))
-	{
-		m_bad = m_size >= 0 && fetched.FileSize != m_size;
-		fetched.Success = false;
-	}
-#endif
 
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_sap_stream_repair_can_evict_donor_cache(
 		m_cache.size(), MaxCachedParts, m_cacheOrder.size()))
-#else
-	if ((int)m_cache.size() >= MaxCachedParts && !m_cacheOrder.empty())
-#endif
 	{
 		m_cache.erase(m_cacheOrder.front());
 		m_cacheOrder.pop_front();
@@ -220,19 +176,10 @@ const ArticleFetcher::FetchedArticle* DonorMemberSource::PartForOffset(int64 off
 	int& partIndex)
 {
 	// index guess from the estimates, corrected by the measured drift
-#ifdef NZBGET_USE_RUST
 	int index = nzbget_rs_sap_stream_repair_donor_index_for_offset(
 		offset, m_drift,
 		reinterpret_cast<const NzbgetRsByteRange*>(m_ranges.data()),
 		m_ranges.size());
-#else
-	int64 target = offset - m_drift;
-	int index = 0;
-	while (index + 1 < (int)m_ranges.size() && m_ranges[index].End() <= target)
-	{
-		index++;
-	}
-#endif
 
 	for (int step = 0; step < MaxResolveSteps; step++)
 	{
@@ -242,7 +189,6 @@ const ArticleFetcher::FetchedArticle* DonorMemberSource::PartForOffset(int64 off
 			return nullptr;
 		}
 		m_drift = fetched->Offset - m_ranges[index].Offset;
-#ifdef NZBGET_USE_RUST
 		int newIndex = index;
 		int stepStatus = nzbget_rs_stq_stream_repair_step_part_for_offset(
 			offset, fetched->Offset, fetched->Data.size(), index, m_ranges.size(), &newIndex);
@@ -259,45 +205,18 @@ const ArticleFetcher::FetchedArticle* DonorMemberSource::PartForOffset(int64 off
 			partIndex = index;
 			return fetched;
 		}
-#else
-		if (offset < fetched->Offset)
-		{
-			if (index == 0)
-			{
-				return nullptr;
-			}
-			index--;
-		}
-		else if (offset >= fetched->Offset + (int64)fetched->Data.size())
-		{
-			if (index + 1 >= (int)m_ranges.size())
-			{
-				return nullptr;
-			}
-			index++;
-		}
-		else
-		{
-			partIndex = index;
-			return fetched;
-		}
-#endif
 	}
 	return nullptr;
 }
 
 void DonorMemberSource::Prefetch(int64 offset, int64 size)
 {
-#ifdef NZBGET_USE_RUST
 	if (!nzbget_rs_srp_stream_repair_can_prefetch_donor_range(
 		m_batchFetcher != nullptr ? 1 : 0,
 		m_fetchBudget != nullptr ? 1 : 0,
 		m_bad ? 1 : 0,
 		m_ranges.empty() ? 1 : 0,
 		size))
-#else
-	if (!m_batchFetcher || m_fetchBudget || m_bad || m_ranges.empty() || size <= 0)
-#endif
 	{
 		return;
 	}
@@ -306,29 +225,14 @@ void DonorMemberSource::Prefetch(int64 offset, int64 size)
 	// range, one more on each side for estimation error
 	auto indexOf = [this](int64 offset)
 	{
-#ifdef NZBGET_USE_RUST
 		return nzbget_rs_sap_stream_repair_donor_index_for_offset(
 			offset, m_drift,
 			reinterpret_cast<const NzbgetRsByteRange*>(m_ranges.data()),
 			m_ranges.size());
-#else
-		int64 target = offset - m_drift;
-		int index = 0;
-		while (index + 1 < (int)m_ranges.size() && m_ranges[index].End() <= target)
-		{
-			index++;
-		}
-		return index;
-#endif
 	};
-#ifdef NZBGET_USE_RUST
 	int first = 0, last = 0;
 	nzbget_rs_stq_stream_repair_calc_prefetch_bounds(
 		indexOf(offset), indexOf(offset + size - 1), m_ranges.size(), &first, &last);
-#else
-	int first = std::max(0, indexOf(offset) - 1);
-	int last = std::min((int)m_ranges.size() - 1, indexOf(offset + size - 1) + 1);
-#endif
 
 	auto groups = std::make_shared<std::vector<CString>>();
 	for (const CString& group : *m_donorFile->GetGroups())
@@ -363,11 +267,7 @@ void DonorMemberSource::Prefetch(int64 offset, int64 size)
 
 bool DonorMemberSource::Read(int64 offset, void* buffer, int64 size)
 {
-#ifdef NZBGET_USE_RUST
 	if (!EnsureInit() || !nzbget_rs_cdn_content_source_range_valid(offset, size, m_size))
-#else
-	if (!EnsureInit() || offset < 0 || size < 0 || offset + size > m_size)
-#endif
 	{
 		return false;
 	}
@@ -384,14 +284,9 @@ bool DonorMemberSource::Read(int64 offset, void* buffer, int64 size)
 		{
 			return false;
 		}
-#ifdef NZBGET_USE_RUST
 		int64 from = 0, len = 0;
 		nzbget_rs_stq_stream_repair_calc_donor_read_chunk(
 			pos, fetched->Offset, fetched->Data.size(), offset + size, &from, &len);
-#else
-		int64 from = pos - fetched->Offset;
-		int64 len = std::min<int64>((int64)fetched->Data.size() - from, offset + size - pos);
-#endif
 		memcpy(out, fetched->Data.data() + from, len);
 		m_servedParts.insert(partIndex);
 		out += len;
@@ -412,11 +307,7 @@ DonorSetSources::DonorSetSources(ArticleFetcher& fetcher, NzbInfo* donorNzb) :
 
 DonorMemberSource* DonorSetSources::GetDonorSource(int memberIndex)
 {
-#ifdef NZBGET_USE_RUST
 	if (!nzbget_rs_srp_stream_repair_is_member_index_in_bounds(memberIndex, m_files.size()))
-#else
-	if (memberIndex < 0 || memberIndex >= (int)m_files.size())
-#endif
 	{
 		return nullptr;
 	}
@@ -576,12 +467,8 @@ void StreamRepairController::Run()
 		{
 			anyHoles |= target.NeedsRepair();
 		}
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_srp_stream_repair_should_run_cross_pack(
 			anyHoles ? 1 : 0, (anyHoles && IsStopped()) ? 1 : 0))
-#else
-		if (anyHoles && !IsStopped())
-#endif
 		{
 			ExecCrossPackRepair(destDir, targets, donors, memberNames);
 		}
@@ -666,12 +553,8 @@ void StreamRepairController::RunLive()
 		{
 			anyHoles |= target.PatchEligible && target.NeedsRepair();
 		}
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_srp_stream_repair_should_run_cross_pack(
 			anyHoles ? 1 : 0, (anyHoles && IsStopped()) ? 1 : 0))
-#else
-		if (anyHoles && !IsStopped())
-#endif
 		{
 			// completed files may have been renamed since the pass started
 			// (e.g. direct rename after its trigger par2 arrived): re-resolve
@@ -797,13 +680,9 @@ void StreamRepairController::RepairCompletedLive(std::vector<RepairTarget>& targ
 	}
 
 	nzbInfo->SetLiveRepairThread(nullptr);
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_srp_stream_repair_should_clear_post_working_after_live(
 		nzbInfo->GetPostInfo() != nullptr ? 1 : 0,
 		nzbInfo->GetUnpackThread() != nullptr ? 1 : 0))
-#else
-	if (nzbInfo->GetPostInfo() && !nzbInfo->GetUnpackThread())
-#endif
 	{
 		// the download completed while this pass ran and the post-processing
 		// job is waiting for it (see PrePostProcessor::NzbDownloaded). The
@@ -832,12 +711,8 @@ bool StreamRepairController::DonorDead(const DonorSource& donor, NzbInfo* donorN
 	{
 		for (FileInfo* fileInfo : donorNzb->GetFileList())
 		{
-#ifdef NZBGET_USE_RUST
 			if (nzbget_rs_srp_stream_repair_should_include_file_in_donor_dead_pass(
 				fileInfo->GetTotalArticles(), pass, fileInfo->GetParFile() ? 1 : 0))
-#else
-			if (fileInfo->GetTotalArticles() > 0 && (pass == 1 || !fileInfo->GetParFile()))
-#endif
 			{
 				files.push_back(fileInfo);
 			}
@@ -845,13 +720,9 @@ bool StreamRepairController::DonorDead(const DonorSource& donor, NzbInfo* donorN
 	}
 	bool dead = false;
 	std::vector<DupeProbe::Sample> samples = DupeProbe::SamplesOf(files);
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_srp_stream_repair_should_check_donor_dead_samples(
 		samples.size(), DupeProbe::MinArticles,
 		(samples.size() >= (size_t)DupeProbe::MinArticles && IsStopped()) ? 1 : 0))
-#else
-	if (samples.size() >= (size_t)DupeProbe::MinArticles && !IsStopped())
-#endif
 	{
 		// the check waits for connections too: not a lack of progress (B76)
 		m_checkingDonor++;
@@ -883,12 +754,8 @@ void StreamRepairController::StartWatchdog(const std::vector<RepairTarget>& targ
 	m_missingBytes = 0;
 	for (const RepairTarget& target : targets)
 	{
-#ifdef NZBGET_USE_RUST
 		m_missingBytes += nzbget_rs_sap_stream_repair_target_missing_bytes(
 			target.DecodedFileSize, DupeStreamRepair::TotalSize(target.Holes), target.EncodedSize);
-#else
-		m_missingBytes += target.DecodedFileSize > 0 ? DupeStreamRepair::TotalSize(target.Holes) : target.EncodedSize;
-#endif
 	}
 
 	// nzbget's average download speed
@@ -896,11 +763,7 @@ void StreamRepairController::StartWatchdog(const std::vector<RepairTarget>& targ
 	int64 allBytes = 0;
 	bool standBy = false;
 	g_StatMeter->CalcTotalStat(&upTimeSec, &downloadTimeSec, &allBytes, &standBy);
-#ifdef NZBGET_USE_RUST
 	int64 downloadRate = nzbget_rs_sap_stream_repair_watchdog_calc_download_rate(downloadTimeSec, allBytes);
-#else
-	int64 downloadRate = downloadTimeSec > 0 ? allBytes / downloadTimeSec : 0;
-#endif
 
 	m_watchdog = std::thread([this, timeout, downloadRate]()
 		{
@@ -953,7 +816,6 @@ void StreamRepairController::StartWatchdog(const std::vector<RepairTarget>& targ
 				double elapsed = std::chrono::duration<double>(now - start).count();
 				int64 recovered = progress - startProgress;
 				int64 remaining = std::max<int64>(0, m_missingBytes - recovered);
-#ifdef NZBGET_USE_RUST
 				double repairMbS = 0.0;
 				double remainingMb = 0.0;
 				double repairSec = 0.0;
@@ -967,21 +829,6 @@ void StreamRepairController::StartWatchdog(const std::vector<RepairTarget>& targ
 						remainingMb, repairSec, SlowRepairFactor, downloadMbS);
 					break;
 				}
-#else
-				if (downloadRate > 0 && recovered > 0 && remaining > 0 && elapsed >= timeout / 2.0)
-				{
-					double repairRate = recovered / elapsed;
-					double repairSec = remaining / repairRate;
-					double downloadSec = (double)remaining / downloadRate;
-					if (repairSec > SlowRepairFactor * downloadSec && repairSec > timeout)
-					{
-						m_slowReason.Format("at %.2f MB/s the %.1f MB left would take %.0f seconds, "
-							"more than %i times a download at %.2f MB/s", repairRate / 1024 / 1024,
-							remaining / 1024.0 / 1024.0, repairSec, SlowRepairFactor, downloadRate / 1024.0 / 1024.0);
-						break;
-					}
-				}
-#endif
 			}
 			if (!m_watchdogDone)
 			{
@@ -1084,12 +931,8 @@ void StreamRepairController::CollectTargets(NzbInfo* nzbInfo, std::vector<Repair
 			}
 		}
 
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_stq_stream_repair_is_par2_job_or_file(
 			target.IsParFile ? 1 : 0, target.Filename))
-#else
-		if (target.IsParFile || Util::EndsWith(target.Filename, ".par2", false))
-#endif
 		{
 			continue;
 		}
@@ -1105,7 +948,6 @@ void StreamRepairController::ComputePositionalRanks(const char* destDir,
 	// for positional pairing to fire (the set-signature check). Complete
 	// members' sizes come from disk (DirectWrite pre-allocates full size; a
 	// join-mode short file drops out of the window, degrading to later tiers)
-#ifdef NZBGET_USE_RUST
 	std::vector<const char*> names;
 	std::vector<int64_t> sizes;
 	names.reserve(memberNames.size());
@@ -1126,41 +968,6 @@ void StreamRepairController::ComputePositionalRanks(const char* destDir,
 		target.PositionalRank = rank;
 		target.PositionalWindow = windowSize;
 	}
-#else
-	std::vector<std::pair<const char*, int64>> memberSizes;
-	for (const CString& memberName : memberNames)
-	{
-		BString<1024> memberPath("%s%c%s", destDir, PATH_SEPARATOR, *memberName);
-		memberSizes.emplace_back(*memberName, FileSystem::FileSize(memberPath));
-	}
-
-	for (RepairTarget& target : targets)
-	{
-		int rank = 0;
-		int windowSize = 0;
-		bool selfSeen = false;
-		for (std::pair<const char*, int64>& member : memberSizes)
-		{
-			if (member.second <= 0 ||
-				!DupeArticleFallback::SizesMatch(member.second, target.DecodedFileSize, 8))
-			{
-				continue;
-			}
-			windowSize++;
-			if (!strcasecmp(member.first, target.Filename))
-			{
-				selfSeen = true;
-				continue;
-			}
-			if (strcasecmp(member.first, target.Filename) < 0)
-			{
-				rank++;
-			}
-		}
-		target.PositionalRank = selfSeen ? rank : -1;
-		target.PositionalWindow = selfSeen ? windowSize : 0;
-	}
-#endif
 }
 
 void StreamRepairController::CollectDonors(DownloadQueue* downloadQueue, NzbInfo* nzbInfo,
@@ -1170,20 +977,12 @@ void StreamRepairController::CollectDonors(DownloadQueue* downloadQueue, NzbInfo
 
 	for (NzbInfo* queuedNzbInfo : downloadQueue->GetQueue())
 	{
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_stq_stream_repair_is_donor_nzb_pre_eligible(
 				queuedNzbInfo == nzbInfo ? 1 : 0,
 				(int)queuedNzbInfo->GetKind(), (int)NzbInfo::nkNzb,
 				(int)queuedNzbInfo->GetDupeMode(), (int)dmForce) != 0 &&
 			DupeCoordinator::SameNameOrKey(queuedNzbInfo->GetName(), queuedNzbInfo->GetDupeKey(),
 				nzbInfo->GetName(), nzbInfo->GetDupeKey()))
-#else
-		if (queuedNzbInfo != nzbInfo &&
-			queuedNzbInfo->GetKind() == NzbInfo::nkNzb &&
-			queuedNzbInfo->GetDupeMode() != dmForce &&
-			DupeCoordinator::SameNameOrKey(queuedNzbInfo->GetName(), queuedNzbInfo->GetDupeKey(),
-				nzbInfo->GetName(), nzbInfo->GetDupeKey()))
-#endif
 		{
 			donorNzbs.push_back(queuedNzbInfo);
 		}
@@ -1191,19 +990,12 @@ void StreamRepairController::CollectDonors(DownloadQueue* downloadQueue, NzbInfo
 
 	for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
 	{
-#ifdef NZBGET_USE_RUST
 		if (historyInfo->GetKind() == HistoryInfo::hkNzb &&
 			nzbget_rs_stq_stream_repair_is_donor_nzb_pre_eligible(
 				0, (int)NzbInfo::nkNzb, (int)NzbInfo::nkNzb,
 				(int)historyInfo->GetNzbInfo()->GetDupeMode(), (int)dmForce) != 0 &&
 			DupeCoordinator::SameNameOrKey(historyInfo->GetNzbInfo()->GetName(),
 				historyInfo->GetNzbInfo()->GetDupeKey(), nzbInfo->GetName(), nzbInfo->GetDupeKey()))
-#else
-		if (historyInfo->GetKind() == HistoryInfo::hkNzb &&
-			historyInfo->GetNzbInfo()->GetDupeMode() != dmForce &&
-			DupeCoordinator::SameNameOrKey(historyInfo->GetNzbInfo()->GetName(),
-				historyInfo->GetNzbInfo()->GetDupeKey(), nzbInfo->GetName(), nzbInfo->GetDupeKey()))
-#endif
 		{
 			donorNzbs.push_back(historyInfo->GetNzbInfo());
 		}
@@ -1221,7 +1013,6 @@ void StreamRepairController::CollectDonors(DownloadQueue* downloadQueue, NzbInfo
 	{
 		// an exact copy of the same posting shares the message-ids and cannot
 		// supply articles that already failed everywhere
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_stq_stream_repair_should_skip_donor_candidate(
 			nzbInfo->GetFullContentHash(), donorNzbInfo->GetFullContentHash(),
 			donorNzbInfo->GetQueuedFilename()) != 0)
@@ -1229,16 +1020,6 @@ void StreamRepairController::CollectDonors(DownloadQueue* downloadQueue, NzbInfo
 			continue;
 		}
 		{
-#else
-		if (nzbInfo->GetFullContentHash() > 0 &&
-			nzbInfo->GetFullContentHash() == donorNzbInfo->GetFullContentHash())
-		{
-			continue;
-		}
-
-		if (!Util::EmptyStr(donorNzbInfo->GetQueuedFilename()))
-		{
-#endif
 			DonorSource donor;
 			donor.QueuedFilename = donorNzbInfo->GetQueuedFilename();
 			donor.InfoName = donorNzbInfo->GetName();
@@ -1262,12 +1043,8 @@ void StreamRepairController::ExecRepair(const char* destDir,
 	int primaryConnections = 0;
 	for (NewsServer* server : g_ServerPool->GetServers())
 	{
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_src_stream_repair_is_active_primary_server(
 			server->GetActive() ? 1 : 0, server->GetNormLevel()))
-#else
-		if (server->GetActive() && server->GetNormLevel() == 0)
-#endif
 		{
 			primaryConnections += server->GetMaxConnections();
 		}
@@ -1347,15 +1124,11 @@ void StreamRepairController::ExecRepair(const char* destDir,
 					break;
 				}
 				bool wholeFile = target.DecodedFileSize <= 0;
-#ifdef NZBGET_USE_RUST
 				if (!nzbget_rs_srp_stream_repair_is_eligible_target_for_round(
 					target.PatchEligible ? 1 : 0,
 					target.NeedsRepair() ? 1 : 0,
 					target.DecodedFileSize,
 					round))
-#else
-				if (!target.PatchEligible || !target.NeedsRepair() || wholeFile != (round == 1))
-#endif
 				{
 					continue;
 				}
@@ -1426,7 +1199,6 @@ void StreamRepairController::ExecRepair(const char* destDir,
 						}
 					}
 				}
-#ifdef NZBGET_USE_RUST
 				if (nzbget_rs_stq_stream_repair_eval_donor_outcome_bail(
 					(int)outcome, (int)roProductive, (int)roUnproductive,
 					donorProven ? 1 : 0, consecutiveFailures,
@@ -1438,21 +1210,6 @@ void StreamRepairController::ExecRepair(const char* destDir,
 					round = 2;
 					break;
 				}
-#else
-				if (outcome == roProductive)
-				{
-					consecutiveFailures = 0;
-				}
-				else if (outcome == roUnproductive &&
-					++consecutiveFailures >= (donorProven ? DonorFailureBail : UnprovenDonorBail))
-				{
-					PrintMessage(Message::mkInfo,
-						"Skipping remaining files for duplicate %s (%i consecutive files without a byte-identical match)",
-						*donor.InfoName, consecutiveFailures);
-					round = 2;
-					break;
-				}
-#endif
 			}
 		}
 	}
@@ -1497,12 +1254,8 @@ StreamRepairController::ERepairOutcome StreamRepairController::RepairFile(const 
 		}
 		// the wide sibling search is only for finding the target's twin; once
 		// one member verified, further members get the usual small budget
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_srp_stream_repair_should_stop_sibling_donor_probes(
 			verified ? 1 : 0, probed, DupeStreamRepair::MaxDonorCandidates))
-#else
-		if (verified && probed >= DupeStreamRepair::MaxDonorCandidates)
-#endif
 		{
 			break;
 		}
@@ -1533,13 +1286,9 @@ StreamRepairController::ERepairOutcome StreamRepairController::RepairFile(const 
 	}
 
 	file.Close();
-#ifdef NZBGET_USE_RUST
 	return (ERepairOutcome)nzbget_rs_stq_stream_repair_resolve_repair_file_outcome(
 		patched ? 1 : 0, spentFetches ? 1 : 0,
 		(int)roProductive, (int)roUnproductive, (int)roNoCost);
-#else
-	return patched ? roProductive : spentFetches ? roUnproductive : roNoCost;
-#endif
 }
 
 bool StreamRepairController::ProveDonorOnIntactFile(const char* destDir,
@@ -1553,12 +1302,8 @@ bool StreamRepairController::ProveDonorOnIntactFile(const char* destDir,
 	std::string targetSet = DupeStreamRepair::VolumeSetKey(wholeTarget.Filename);
 	FileInfo* standIn = DupeStreamRepair::SelectWholeFileDonor(FileSystem::BaseFileName(wholeTarget.Filename),
 		wholeTarget.EncodedSize, wholeTarget.ArticleCount, wholeTarget.StepsHash, donorNzb, &claimed, donorSet);
-#ifdef NZBGET_USE_RUST
 	if (!nzbget_rs_src_stream_repair_can_prove_donor_on_intact_file(
 		targetSet.empty() ? 1 : 0, donorSet.empty() ? 1 : 0, standIn != nullptr ? 1 : 0))
-#else
-	if (targetSet.empty() || donorSet.empty() || !standIn)
-#endif
 	{
 		return false;
 	}
@@ -1566,12 +1311,8 @@ bool StreamRepairController::ProveDonorOnIntactFile(const char* destDir,
 	int tried = 0;
 	for (const CString& memberName : memberNames)
 	{
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_src_stream_repair_should_stop_intact_proof_loop(
 			IsStopped() ? 1 : 0, tried, MaxIntactProofFiles))
-#else
-		if (IsStopped() || tried >= MaxIntactProofFiles)
-#endif
 		{
 			break;
 		}
@@ -1623,12 +1364,8 @@ bool StreamRepairController::ProveDonorOnIntactFile(const char* destDir,
 					continue;
 				}
 				bool sameNumber = DupeStreamRepair::VolumeKey(donorFile->GetFilename()) == volumeKey;
-#ifdef NZBGET_USE_RUST
 				if (nzbget_rs_src_stream_repair_matches_intact_candidate_pass(
 					sameNumber ? 1 : 0, pass))
-#else
-				if (sameNumber == (pass == 0))
-#endif
 				{
 					candidates.push_back(donorFile);
 				}
@@ -1688,13 +1425,9 @@ StreamRepairController::ERepairOutcome StreamRepairController::RepairWholeFile(c
 	std::set<size_t> probed;
 	for (size_t index : sizeProbes)
 	{
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_src_stream_repair_should_skip_size_probe_index(
 			sized ? 1 : 0, (!sized && IsStopped()) ? 1 : 0, index, donorArticles->size()) ||
 			!probed.insert(index).second)
-#else
-		if (sized || IsStopped() || index >= donorArticles->size() || !probed.insert(index).second)
-#endif
 		{
 			continue;
 		}
@@ -1725,11 +1458,7 @@ StreamRepairController::ERepairOutcome StreamRepairController::RepairWholeFile(c
 		// not written back): it is started over. Refused, it stayed a sparse, partly
 		// zero file that every later pass reported as "no duplicate could supply"
 		int64 existing = FileSystem::FileSize(filePath);
-#ifdef NZBGET_USE_RUST
 		if (!nzbget_rs_sap_stream_repair_whole_file_existing_reusable(existing, fetched.FileSize))
-#else
-		if (existing != fetched.FileSize && existing != 0)
-#endif
 		{
 			PrintMessage(Message::mkWarning, "Could not recreate %s: file already exists", *filePath);
 			return roNoCost;
@@ -1782,14 +1511,9 @@ void StreamRepairController::MarkRepaired(NzbInfo* nzbInfo, const RepairTarget& 
 {
 	for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
 	{
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_src_stream_repair_should_mark_completed_repaired(
 			completedFile.GetId(), target.FileId,
 			(int)completedFile.GetStatus(), (int)CompletedFile::cfSuccess))
-#else
-		if (completedFile.GetId() == target.FileId &&
-			completedFile.GetStatus() != CompletedFile::cfSuccess)
-#endif
 		{
 			completedFile.SetStatus(CompletedFile::cfSuccess);
 			// the article state kept for an incomplete file is no longer needed
@@ -1806,14 +1530,9 @@ void StreamRepairController::MarkRecreated(NzbInfo* nzbInfo, const RepairTarget&
 {
 	for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
 	{
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_src_stream_repair_should_mark_completed_recreated(
 			completedFile.GetId(), target.FileId,
 			(int)completedFile.GetStatus(), (int)CompletedFile::cfFailure))
-#else
-		if (completedFile.GetId() == target.FileId &&
-			completedFile.GetStatus() == CompletedFile::cfFailure)
-#endif
 		{
 			completedFile.SetStatus(CompletedFile::cfPartial);
 			break;
@@ -1884,13 +1603,8 @@ bool StreamRepairController::VerifyDonor(DiskFile& file, const RepairTarget& tar
 		int64 pooled = 0;
 		for (const std::pair<int64, int>& candidate : overlaps)
 		{
-#ifdef NZBGET_USE_RUST
 			if (nzbget_rs_sap_stream_repair_verify_donor_pool_stop(
 				probeParts.size(), DupeStreamRepair::ProbeCount, pooled, base))
-#else
-			if ((int)probeParts.size() >= DupeStreamRepair::ProbeCount &&
-				(pooled >= base || (int)probeParts.size() >= DupeStreamRepair::ProbeCount * 2))
-#endif
 			{
 				reserve.push_back(candidate.second);
 				continue;
@@ -1939,7 +1653,6 @@ bool StreamRepairController::VerifyDonor(DiskFile& file, const RepairTarget& tar
 		// Compared bytes accumulate ACROSS probes.
 		int64 requiredCompare = DupeStreamRepair::RequiredCompareFloor(
 			target.DecodedFileSize, target.Holes, donorRanges, attempted);
-#ifdef NZBGET_USE_RUST
 		int verifiedResult = 0;
 		if (nzbget_rs_src_stream_repair_verify_donor_completed(
 			IsStopped() ? 1 : 0, totalCompared, requiredCompare,
@@ -1947,18 +1660,9 @@ bool StreamRepairController::VerifyDonor(DiskFile& file, const RepairTarget& tar
 		{
 			return verifiedResult != 0;
 		}
-#else
-		if (IsStopped() || (totalCompared >= requiredCompare && sawVariedData))
-		{
-			// a stop ends Next() before the in-loop guard runs; never report a
-			// donor verified on the partial probe set delivered before the stop
-			return !IsStopped();
-		}
-#endif
 
 		// a repost misses articles of its own; replace each probe the donor
 		// could not supply, spread over the remaining eligible parts
-#ifdef NZBGET_USE_RUST
 		int replacements = nzbget_rs_stq_stream_repair_calc_probe_replacement_count(
 			missing, reserve.size(), DupeStreamRepair::MaxProbeFetches, attempted.size());
 		batch.clear();
@@ -1968,15 +1672,6 @@ bool StreamRepairController::VerifyDonor(DiskFile& file, const RepairTarget& tar
 				reserve.size(), k, replacements);
 			batch.push_back(reserve[rIdx]);
 		}
-#else
-		int replacements = std::min({missing, (int)reserve.size(),
-			DupeStreamRepair::MaxProbeFetches - (int)attempted.size()});
-		batch.clear();
-		for (int k = 0; k < replacements; k++)
-		{
-			batch.push_back(reserve[reserve.size() * (2 * k + 1) / (2 * replacements)]);
-		}
-#endif
 		for (int partIndex : batch)
 		{
 			reserve.erase(std::find(reserve.begin(), reserve.end(), partIndex));
@@ -1997,7 +1692,6 @@ bool StreamRepairController::CompareProbes(DiskFile& file, const RepairTarget& t
 			m_batchFetcher.CancelRemaining();
 			return false;
 		}
-#ifdef NZBGET_USE_RUST
 		int isMissing = 0;
 		if (!nzbget_rs_stq_stream_repair_is_probe_article_valid(
 			fetched.Success ? 1 : 0, fetched.Data.size(),
@@ -2011,21 +1705,6 @@ bool StreamRepairController::CompareProbes(DiskFile& file, const RepairTarget& t
 			m_batchFetcher.CancelRemaining();
 			return false;
 		}
-#else
-		if (!fetched.Success || fetched.Data.empty())
-		{
-			missing++;
-			continue; // inconclusive: the donor may simply miss this article
-		}
-
-		// the donor must declare exactly the same decoded file size
-		if (fetched.FileSize != target.DecodedFileSize ||
-			fetched.Offset + (int64)fetched.Data.size() > target.DecodedFileSize)
-		{
-			m_batchFetcher.CancelRemaining();
-			return false;
-		}
-#endif
 
 		// byte-compare the fetched article against the regions we downloaded
 		// ourselves (everything in the article's range that is not a hole)
@@ -2048,18 +1727,11 @@ bool StreamRepairController::CompareProbes(DiskFile& file, const RepairTarget& t
 			// constant-byte runs (zero padding, sparse regions) match ANY
 			// same-size sibling and prove nothing; identity needs at least
 			// one compared range with two distinct byte values
-#ifdef NZBGET_USE_RUST
 			if (!sawVariedData && range.Size > 1)
 			{
 				sawVariedData = nzbget_rs_stream_buffer_has_varied_data(
 					reinterpret_cast<const uint8_t*>(rangeData), (size_t)range.Size) != 0;
 			}
-#else
-			for (int64 i = 1; i < range.Size && !sawVariedData; i++)
-			{
-				sawVariedData = rangeData[i] != rangeData[0];
-			}
-#endif
 		}
 	}
 
@@ -2132,15 +1804,9 @@ int StreamRepairController::PatchFromDonor(DiskFile& file, RepairTarget& target,
 				m_batchFetcher.CancelRemaining();
 				break;
 			}
-#ifdef NZBGET_USE_RUST
 			if (!nzbget_rs_srp_stream_repair_is_patch_article_usable(
 				fetched.Success ? 1 : 0, fetched.FileSize, target.DecodedFileSize,
 				fetched.Data.size(), fetched.Offset))
-#else
-			if (!fetched.Success || fetched.FileSize != target.DecodedFileSize ||
-				fetched.Data.empty() ||
-				fetched.Offset + (int64)fetched.Data.size() > target.DecodedFileSize)
-#endif
 			{
 				continue; // the donor misses this article too - the hole stays for par2
 			}
@@ -2155,15 +1821,9 @@ int StreamRepairController::PatchFromDonor(DiskFile& file, RepairTarget& target,
 			StreamRangeList written;
 			for (const StreamRange& hole : target.Holes)
 			{
-#ifdef NZBGET_USE_RUST
 				int64 from = 0, to = 0;
 				if (nzbget_rs_stq_stream_repair_clip_hole_to_fetched(
 					hole.Offset, hole.Size, fetched.Offset, fetched.Data.size(), &from, &to) != 0)
-#else
-				int64 from = std::max(hole.Offset, fetchedRange.Offset);
-				int64 to = std::min(hole.End(), fetchedRange.End());
-				if (from < to)
-#endif
 				{
 					file.Seek(from);
 					if (file.Position() != from ||
@@ -2193,11 +1853,7 @@ int StreamRepairController::PatchFromDonor(DiskFile& file, RepairTarget& target,
 			}
 		}
 
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_sap_stream_repair_patch_should_break_pass2(fetchedAny ? 1 : 0, drift))
-#else
-		if (!fetchedAny || drift == 0)
-#endif
 		{
 			break; // nothing measured, or estimates were exact - pass 2 would repeat pass 1
 		}
@@ -2258,7 +1914,6 @@ void StreamRepairController::ReportRemainingHoles(std::vector<RepairTarget>& tar
 
 	for (RepairTarget& target : targets)
 	{
-#ifdef NZBGET_USE_RUST
 		int targetStatus = nzbget_rs_stq_stream_repair_classify_remaining_hole_target(
 			interrupted ? 1 : 0, target.DecodedFileSize, target.Holes.empty() ? 1 : 0,
 			target.IsParFile ? 1 : 0, target.FailedArticles, target.FailedSize, target.MissedSize,
@@ -2291,61 +1946,6 @@ void StreamRepairController::ReportRemainingHoles(std::vector<RepairTarget>& tar
 					(target.DecodedFileSize - missing) / 1024.0 / 1024.0);
 			}
 		}
-#else
-		if (interrupted && (target.DecodedFileSize <= 0 || !target.Holes.empty()))
-		{
-			continue;
-		}
-		if (target.DecodedFileSize <= 0)
-		{
-			// never sized: no duplicate carried the file (nothing was written)
-			m_holesRemain = true;
-			PrintMessage(Message::mkInfo,
-				"Stream repair of %s: no duplicate could supply the file (%s)",
-				*target.Filename, m_hasParFiles ? "left to par-repair" : "no par2 files to repair it");
-		}
-		else if (!target.Holes.empty())
-		{
-			m_holesRemain = true;
-			int64 missing = DupeStreamRepair::TotalSize(target.Holes);
-			PrintMessage(Message::mkInfo,
-				"Stream repair of %s: %.1f MB still missing after stream repair (%s)",
-				*target.Filename, missing / 1024.0 / 1024.0,
-				m_hasParFiles ? "left to par-repair" : "no par2 files to repair it");
-			// far more missing than the failed articles held: the yEnc headers
-			// declare a larger file than the nzb's articles add up to - the nzb
-			// lists only part of the file, and no article retry can fix that
-#ifdef NZBGET_USE_RUST
-			if (nzbget_rs_cdn_stream_repair_is_incomplete_nzb_hole(missing, target.EncodedSize) != 0)
-#else
-			if (missing > target.EncodedSize + target.EncodedSize / 10 + 1024 * 1024)
-#endif
-			{
-				PrintMessage(Message::mkWarning,
-					"%s is %.1f MB according to its articles, but the nzb's articles cover only "
-					"%.1f MB of it: the nzb is incomplete",
-					*target.Filename, target.DecodedFileSize / 1024.0 / 1024.0,
-					(target.DecodedFileSize - missing) / 1024.0 / 1024.0);
-			}
-		}
-		else
-		{
-			// Preserve the documented API unit: failed target articles repaired,
-			// never donor chunks, proactive cutover probes, or hole count.
-			m_recoveredArticles += target.FailedArticles;
-			// fully repaired (every hole filled): credit this file's ENCODED
-			// failed size back to health, exactly reversing its contribution to
-			// m_currentFailedSize (DownloadInfo.cpp:675) and, for a par2 file,
-			// m_parCurrentFailedSize (:687). A target with any remaining hole
-			// credits nothing, so a partial repair can never raise health -
-			// both correct and the safety guarantee.
-			m_recoveredFailedSize += target.FailedSize + target.MissedSize;
-			if (target.IsParFile)
-			{
-				m_recoveredFailedParSize += target.FailedSize + target.MissedSize;
-			}
-		}
-#endif
 	}
 }
 
@@ -2375,12 +1975,8 @@ void StreamRepairController::ExecCrossPackRepair(const char* destDir,
 				// a file joined from article files (DirectWrite=no) ends with
 				// its last downloaded article: holes at its end lie past the
 				// end of the file on disk, and they are declared holes anyway
-#ifdef NZBGET_USE_RUST
 				size = nzbget_rs_srp_stream_repair_max_disk_and_member_size(
 					size, targets[t].DecodedFileSize);
-#else
-				size = std::max(size, targets[t].DecodedFileSize);
-#endif
 				break;
 			}
 		}
@@ -2506,11 +2102,7 @@ void StreamRepairController::ExecCrossPackRepair(const char* destDir,
 					setTried[setIndex] = true;
 					// map building is fetch-budgeted; probing and patching are
 					// naturally bounded by the holes
-#ifdef NZBGET_USE_RUST
 					int mappingBudget = nzbget_rs_sap_stream_repair_mapping_budget(donorSet.Members.size());
-#else
-					int mappingBudget = 8 + 4 * (int)donorSet.Members.size();
-#endif
 					donorSources.SetFetchBudget(&mappingBudget);
 					setMaps[setIndex] = ContentMapper::BuildMap(donorMembers, donorSet,
 						donorSources, setSkips[setIndex]);
@@ -2519,23 +2111,13 @@ void StreamRepairController::ExecCrossPackRepair(const char* destDir,
 					// so the retry mostly re-parses); anything else stays skipped.
 					// The reasons are the constants BuildRarMap sets, so a reword
 					// there cannot silently disable this retry.
-#ifdef NZBGET_USE_RUST
 					if (nzbget_rs_srp_stream_repair_should_retry_donor_map_with_password(
 						setMaps[setIndex] != nullptr ? 1 : 0,
 						donor.Password.Empty() ? 1 : 0,
 						setSkips[setIndex] == ContentMapper::SkipEncryptedData ? 1 : 0,
 						setSkips[setIndex] == ContentMapper::SkipEncryptedHeaders ? 1 : 0))
-#else
-					if (!setMaps[setIndex] && !donor.Password.Empty() &&
-						(setSkips[setIndex] == ContentMapper::SkipEncryptedData ||
-						 setSkips[setIndex] == ContentMapper::SkipEncryptedHeaders))
-#endif
 					{
-#ifdef NZBGET_USE_RUST
 						mappingBudget = nzbget_rs_sap_stream_repair_mapping_budget(donorSet.Members.size());
-#else
-						mappingBudget = 8 + 4 * (int)donorSet.Members.size();
-#endif
 						setMaps[setIndex] = ContentMapper::BuildMap(donorMembers, donorSet,
 							donorSources, setSkips[setIndex], donor.Password);
 						if (!setMaps[setIndex])
@@ -2561,7 +2143,6 @@ void StreamRepairController::ExecCrossPackRepair(const char* destDir,
 					// live pass - materializing and extracting whole archives
 					// beside an active download is too disk/CPU-heavy; those
 					// holes wait for the post-processing pass
-#ifdef NZBGET_USE_RUST
 					bool canDecompress = nzbget_rs_src_stream_repair_can_try_decompress_fallback(
 						m_liveMode ? 1 : 0,
 						(!m_liveMode && g_Options->GetDupeStreamDecompress()) ? 1 : 0,
@@ -2571,13 +2152,6 @@ void StreamRepairController::ExecCrossPackRepair(const char* destDir,
 						decompressTried.emplace(&repairSet,
 							std::string(*donor.QueuedFilename) + "|" +
 							donorMembers[donorSet.Members[0]].Name).second)
-#else
-					if (!m_liveMode && g_Options->GetDupeStreamDecompress() &&
-						ContentMapper::IsCompressibleArchive(donorSet) &&
-						decompressTried.emplace(&repairSet,
-							std::string(*donor.QueuedFilename) + "|" +
-							donorMembers[donorSet.Members[0]].Name).second)
-#endif
 					{
 						// an encrypted target is a store-mode encrypted rar (a
 						// compressed archive never maps, so it is never a repair
@@ -2685,7 +2259,6 @@ std::vector<StreamRange> StreamRepairController::BuildProbeWindows(const RepairS
 	const StreamRangeList& holes = repairSet.InnerHoles;
 	const StreamRangeList& originalHoles = repairSet.OriginalInnerHoles;
 
-#ifdef NZBGET_USE_RUST
 	std::vector<NzbgetRsByteRange> out(DupeStreamRepair::ProbeCount * 2 + 1);
 	size_t count = nzbget_rs_stream_build_probe_windows(
 		repairSet.Map->GetInnerSize(),
@@ -2701,51 +2274,6 @@ std::vector<StreamRange> StreamRepairController::BuildProbeWindows(const RepairS
 		windows.push_back({out[i].offset, out[i].size});
 	}
 	return windows;
-#else
-	std::vector<StreamRange> windows;
-	for (const StreamRange& hole : holes)
-	{
-		if ((int)windows.size() >= DupeStreamRepair::ProbeCount * 2)
-		{
-			break;
-		}
-		int64 lowClip = 0;
-		int64 highClip = repairSet.Map->GetInnerSize();
-		for (const StreamRange& other : originalHoles)
-		{
-			// any original hole starting before the before-window's end
-			// bounds it from below; any one ending past the after-window's
-			// start bounds it from above (equivalent to the plain neighbor
-			// clip while no donor has written, since holes are disjoint)
-			if (other.Offset < hole.Offset)
-			{
-				lowClip = std::max(lowClip, other.End());
-			}
-			if (other.End() > hole.End())
-			{
-				highClip = std::min(highClip, other.Offset);
-			}
-		}
-		int64 beforeFrom = std::max(lowClip,
-			hole.Offset - DupeStreamRepair::MinProbeCompareBytes);
-		if (beforeFrom < hole.Offset)
-		{
-			windows.push_back({beforeFrom, hole.Offset - beforeFrom});
-		}
-		int64 afterTo = std::min(highClip,
-			hole.End() + DupeStreamRepair::MinProbeCompareBytes);
-		if (hole.End() < afterTo)
-		{
-			windows.push_back({hole.End(), afterTo - hole.End()});
-		}
-	}
-
-	// neighboring holes hugging a small present island produce windows over
-	// the SAME bytes (A's after-window == B's before-window): coalesce so
-	// shared bytes count once toward achievable and totalCompared, or the
-	// 64-byte identity floor silently weakens
-	return ContentMapper::CoalesceRanges(std::move(windows));
-#endif
 }
 
 /* the plaintext-target compare floor: everything reachable must match,
@@ -2757,7 +2285,6 @@ int64 StreamRepairController::PlainCompareFloor(RepairSetData& repairSet,
 	const std::vector<StreamRange>& windows)
 {
 	ContentMap& targetMap = *repairSet.Map;
-#ifdef NZBGET_USE_RUST
 	std::vector<NzbgetRsContentRun> rsRuns;
 	rsRuns.reserve(targetMap.GetRuns()->size());
 	for (const ContentRun& run : *targetMap.GetRuns())
@@ -2769,28 +2296,6 @@ int64 StreamRepairController::PlainCompareFloor(RepairSetData& repairSet,
 		reinterpret_cast<const NzbgetRsByteRange*>(repairSet.OriginalInnerHoles.data()),
 		repairSet.OriginalInnerHoles.size(),
 		reinterpret_cast<const NzbgetRsByteRange*>(windows.data()), windows.size());
-#else
-	int64 mappedBytes = 0;
-	for (const ContentRun& run : *targetMap.GetRuns())
-	{
-		mappedBytes += run.Size;
-	}
-	int64 base = DupeStreamRepair::BaseCompareFloor(
-		mappedBytes - DupeStreamRepair::TotalSize(repairSet.OriginalInnerHoles));
-	int64 achievable = 0;
-	for (const StreamRange& window : windows)
-	{
-		for (const MemberRange& piece : targetMap.MapFromInner(window))
-		{
-			achievable += piece.Range.Size;
-		}
-	}
-	if (achievable < 64)
-	{
-		return -1;
-	}
-	return std::min(base, achievable);
-#endif
 }
 
 bool StreamRepairController::VerifyDonorSet(RepairSetData& repairSet, ContentMap& donorMap,
@@ -2822,7 +2327,6 @@ bool StreamRepairController::VerifyDonorSet(RepairSetData& repairSet, ContentMap
 
 	for (const StreamRange& window : windows)
 	{
-#ifdef NZBGET_USE_RUST
 		int winStop = nzbget_rs_src_stream_repair_verify_window_loop_stop(
 			IsStopped() ? 1 : 0, totalCompared, required, sawVariedData ? 1 : 0);
 		if (winStop == 1)
@@ -2833,16 +2337,6 @@ bool StreamRepairController::VerifyDonorSet(RepairSetData& repairSet, ContentMap
 		{
 			break;
 		}
-#else
-		if (IsStopped())
-		{
-			return false;
-		}
-		if (totalCompared >= required && sawVariedData)
-		{
-			break;
-		}
-#endif
 		if (!ReadDonorInner(donorMap, donorSources, window, donorData))
 		{
 			continue;	// inconclusive: the donor may miss these articles
@@ -2861,18 +2355,11 @@ bool StreamRepairController::VerifyDonorSet(RepairSetData& repairSet, ContentMap
 				return false;	// same inner size but different bytes
 			}
 			totalCompared += piece.Range.Size;
-#ifdef NZBGET_USE_RUST
 			if (!sawVariedData && piece.Range.Size > 1)
 			{
 				sawVariedData = nzbget_rs_stream_buffer_has_varied_data(
 					reinterpret_cast<const uint8_t*>(pieceData), (size_t)piece.Range.Size) != 0;
 			}
-#else
-			for (int64 i = 1; i < piece.Range.Size && !sawVariedData; i++)
-			{
-				sawVariedData = pieceData[i] != pieceData[0];
-			}
-#endif
 		}
 	}
 
@@ -2987,15 +2474,10 @@ int64 StreamRepairController::PatchFromDonorSet(RepairSetData& repairSet, Conten
 		int failedPieces = 0;
 		while (pos < hole.End() && !IsStopped())
 		{
-#ifdef NZBGET_USE_RUST
 			int64 chunk = nzbget_rs_src_stream_repair_calc_patch_chunk_size(
 				hole.End(), pos, size);
-#else
-			int64 chunk = std::min<int64>(hole.End() - pos, size);
-#endif
 			if (!ReadDonorInner(donorMap, donorSources, {pos, chunk}, donorData))
 			{
-#ifdef NZBGET_USE_RUST
 				int stepAction = nzbget_rs_stq_stream_repair_patch_from_donor_set_step_failure(
 					chunk, MinChunk, &size, &pos, &failedPieces, MaxFailedPieces);
 				if (stepAction == 0)
@@ -3003,19 +2485,6 @@ int64 StreamRepairController::PatchFromDonorSet(RepairSetData& repairSet, Conten
 					break;
 				}
 				continue;
-#else
-				if (chunk > MinChunk)
-				{
-					size = std::max(MinChunk, chunk / 4);
-					continue;
-				}
-				if (++failedPieces >= MaxFailedPieces)
-				{
-					break;	// this donor cannot supply the rest of this hole
-				}
-				pos += chunk;
-				continue;
-#endif
 			}
 			failedPieces = 0;
 			size = FullChunk;
@@ -3051,12 +2520,8 @@ bool StreamRepairController::ReadTargetCipher(ContentMap& targetMap, TargetSetFi
 	const StreamRange& cipherRange, char* buffer)
 {
 	std::vector<MemberRange> pieces = targetMap.MapCipherRange(cipherRange);
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_src_content_map_is_empty_or_invalid_cipher_pieces(
 		pieces.empty() ? 1 : 0, cipherRange.Size))
-#else
-	if (pieces.empty() && cipherRange.Size > 0)
-#endif
 	{
 		return false;
 	}
@@ -3113,29 +2578,10 @@ bool StreamRepairController::VerifyEncryptedFromSource(RepairSetData& repairSet,
 	// window's head - fail toward less evidence, never toward trusting garbage
 	auto chainStart = [&originalHoles](const StreamRange& window, int64 windowEnd)
 	{
-#ifdef NZBGET_USE_RUST
 		return nzbget_rs_stream_encrypted_chain_start(
 			window.Offset, windowEnd, blockSize,
 			reinterpret_cast<const NzbgetRsByteRange*>(originalHoles.data()),
 			originalHoles.size());
-#else
-		int64 blockFrom = window.Offset / blockSize * blockSize;
-		while (blockFrom > 0 && blockFrom < windowEnd)
-		{
-			bool prevPresent = true;
-			for (const StreamRange& hole : originalHoles)
-			{
-				prevPresent &= hole.End() <= blockFrom - blockSize ||
-					hole.Offset >= blockFrom;
-			}
-			if (prevPresent)
-			{
-				break;
-			}
-			blockFrom += blockSize;
-		}
-		return blockFrom;
-#endif
 	};
 
 	// floor semantics as in the plain path, with the achievable evidence
@@ -3151,16 +2597,8 @@ bool StreamRepairController::VerifyEncryptedFromSource(RepairSetData& repairSet,
 	for (const StreamRange& window : windows)
 	{
 		int64 windowEnd = std::min(window.End(), lastComputable);
-#ifdef NZBGET_USE_RUST
 		achievable += nzbget_rs_sap_stream_repair_encrypted_achievable_bytes(
 			window.Offset, window.Size, lastComputable, chainStart(window, windowEnd));
-#else
-		int64 from = std::max(window.Offset, chainStart(window, windowEnd));
-		if (from < windowEnd)
-		{
-			achievable += windowEnd - from;
-		}
-#endif
 	}
 	if (achievable < 64)
 	{
@@ -3175,7 +2613,6 @@ bool StreamRepairController::VerifyEncryptedFromSource(RepairSetData& repairSet,
 
 	for (const StreamRange& window : windows)
 	{
-#ifdef NZBGET_USE_RUST
 		int winStop = nzbget_rs_src_stream_repair_verify_window_loop_stop(
 			IsStopped() ? 1 : 0, totalCompared, required, sawVariedData ? 1 : 0);
 		if (winStop == 1)
@@ -3186,16 +2623,6 @@ bool StreamRepairController::VerifyEncryptedFromSource(RepairSetData& repairSet,
 		{
 			break;
 		}
-#else
-		if (IsStopped())
-		{
-			return false;
-		}
-		if (totalCompared >= required && sawVariedData)
-		{
-			break;
-		}
-#endif
 		int64 windowEnd = std::min(window.End(), lastComputable);
 		int64 blockFrom = chainStart(window, windowEnd);
 		int64 from = std::max(window.Offset, blockFrom);
@@ -3249,18 +2676,11 @@ bool StreamRepairController::VerifyEncryptedFromSource(RepairSetData& repairSet,
 		// constant PLAINTEXT proves nothing even in cipher space (any
 		// zero-padded sibling matches): variedness is judged on the plaintext
 		const char* plainWindow = donorData.data() + (from - blockFrom);
-#ifdef NZBGET_USE_RUST
 		if (!sawVariedData && windowEnd - from > 1)
 		{
 			sawVariedData = nzbget_rs_stream_buffer_has_varied_data(
 				reinterpret_cast<const uint8_t*>(plainWindow), (size_t)(windowEnd - from)) != 0;
 		}
-#else
-		for (int64 i = 1; i < windowEnd - from && !sawVariedData; i++)
-		{
-			sawVariedData = plainWindow[i] != plainWindow[0];
-		}
-#endif
 	}
 
 	return totalCompared >= required && sawVariedData;
@@ -3303,7 +2723,6 @@ int64 StreamRepairController::PatchEncryptedFromSource(RepairSetData& repairSet,
 
 		// the live remainder: an earlier hole's block expansion may have
 		// already filled parts of this one
-#ifdef NZBGET_USE_RUST
 		int64 holeFrom = -1, patchTo = -1, blockFrom = 0, blockTo = 0;
 		if (!nzbget_rs_stq_stream_repair_encrypted_clip_live_hole(
 			hole.Offset, hole.Size,
@@ -3314,33 +2733,6 @@ int64 StreamRepairController::PatchEncryptedFromSource(RepairSetData& repairSet,
 		{
 			continue;
 		}
-#else
-		int64 holeFrom = -1;
-		int64 holeTo = -1;
-		for (const StreamRange& live : repairSet.InnerHoles)
-		{
-			int64 from = std::max(live.Offset, hole.Offset);
-			int64 to = std::min(live.End(), hole.End());
-			if (from < to)
-			{
-				holeFrom = holeFrom < 0 ? from : holeFrom;
-				holeTo = to;
-			}
-		}
-		if (holeFrom < 0)
-		{
-			continue;	// already covered
-		}
-		int64 patchTo = std::min(holeTo, lastComputable);
-		uncomputableTail += holeTo - std::max(patchTo, holeFrom);
-		if (patchTo <= holeFrom)
-		{
-			continue;
-		}
-
-		int64 blockFrom = holeFrom / blockSize * blockSize;
-		int64 blockTo = (patchTo + blockSize - 1) / blockSize * blockSize;
-#endif
 
 		// the chain input for the first block: the predecessor cipher block
 		// from the target's disk - REQUIRED to be outside every current hole
@@ -3351,19 +2743,10 @@ int64 StreamRepairController::PatchEncryptedFromSource(RepairSetData& repairSet,
 		bool havePrev = false;
 		if (blockFrom > 0)
 		{
-#ifdef NZBGET_USE_RUST
 			bool prevPresent = nzbget_rs_stq_stream_repair_encrypted_is_prev_block_present(
 				blockFrom, blockSize,
 				reinterpret_cast<const NzbgetRsByteRange*>(repairSet.InnerHoles.data()),
 				repairSet.InnerHoles.size()) != 0;
-#else
-			bool prevPresent = true;
-			for (const StreamRange& live : repairSet.InnerHoles)
-			{
-				prevPresent &= live.End() <= blockFrom - blockSize ||
-					live.Offset >= blockFrom;
-			}
-#endif
 			if (!prevPresent || !ReadTargetCipher(targetMap, targetFiles,
 				{blockFrom - blockSize, blockSize}, (char*)prev))
 			{
@@ -3715,15 +3098,10 @@ bool StreamRepairController::MaterializeDonorSet(NzbInfo* donorNzb,
 	int64 totalArticles = 0;
 	for (int memberIndex : set.Members)
 	{
-#ifdef NZBGET_USE_RUST
 		bool inBounds = memberIndex >= 0 && memberIndex < (int)files.size();
 		if (!nzbget_rs_src_stream_repair_is_member_valid_for_materialize(
 			memberIndex, files.size(),
 			inBounds && files[memberIndex]->GetArticles()->empty() ? 1 : 0))
-#else
-		if (memberIndex < 0 || memberIndex >= (int)files.size() ||
-			files[memberIndex]->GetArticles()->empty())
-#endif
 		{
 			return false;
 		}
@@ -3768,12 +3146,8 @@ bool StreamRepairController::MaterializeDonorSet(NzbInfo* donorNzb,
 					"Downloading duplicate %s (volume %i/%i, article %i/%i, %.1f MB)",
 					donorName, memberNumber, (int)set.Members.size(), deliveredArticles,
 					(int)donorFile->GetArticles()->size(), totalBytes / 1024.0 / 1024.0));
-#ifdef NZBGET_USE_RUST
 				m_postInfo->SetStageProgress(
 					nzbget_rs_sap_stream_repair_materialize_stage_progress(completedArticles, totalArticles));
-#else
-				m_postInfo->SetStageProgress((int)(completedArticles * 1000 / totalArticles));
-#endif
 			}
 		};
 		updateProgress();
@@ -3801,16 +3175,9 @@ bool StreamRepairController::MaterializeDonorSet(NzbInfo* donorNzb,
 				m_batchFetcher.CancelRemaining();
 				return false;
 			}
-#ifdef NZBGET_USE_RUST
 			if (!nzbget_rs_cdn_stream_repair_materialize_article_valid(
 				fetched.Success ? 1 : 0, fetched.Data.size(), fetched.Offset,
 				fetched.FileSize, memberSize))
-#else
-			if (!fetched.Success || fetched.Data.empty() || fetched.Offset < 0 ||
-				fetched.FileSize <= 0 || fetched.Offset > fetched.FileSize ||
-				(int64)fetched.Data.size() > fetched.FileSize - fetched.Offset ||
-				(memberSize >= 0 && fetched.FileSize != memberSize))
-#endif
 			{
 				m_batchFetcher.CancelRemaining();
 				PrintMessage(Message::mkInfo,
@@ -3865,12 +3232,8 @@ bool StreamRepairController::MaterializeDonorSet(NzbInfo* donorNzb,
 			m_batchFetcher.CancelRemaining();
 			return false;
 		}
-#ifdef NZBGET_USE_RUST
 		if (!nzbget_rs_src_stream_repair_is_materialized_member_complete(
 			memberSize, memberHoles.empty() ? 1 : 0))
-#else
-		if (memberSize < 0 || !memberHoles.empty())
-#endif
 		{
 			m_batchFetcher.CancelRemaining();
 			PrintMessage(Message::mkInfo,
@@ -3894,12 +3257,8 @@ bool StreamRepairController::VerifyDonorInnerFile(RepairSetData& repairSet,
 	DiskFile& donorInner, int64 donorInnerSize, TargetSetFiles& targetFiles)
 {
 	ContentMap& targetMap = *repairSet.Map;
-#ifdef NZBGET_USE_RUST
 	if (!nzbget_rs_srp_stream_repair_can_verify_donor_inner_file(
 		targetMap.GetEncrypted() ? 1 : 0, 0, donorInnerSize, targetMap.GetInnerSize()))
-#else
-	if (targetMap.GetEncrypted() || donorInnerSize != targetMap.GetInnerSize())
-#endif
 	{
 		return false;
 	}
@@ -3918,7 +3277,6 @@ bool StreamRepairController::VerifyDonorInnerFile(RepairSetData& repairSet,
 
 	for (const StreamRange& window : windows)
 	{
-#ifdef NZBGET_USE_RUST
 		int winStop = nzbget_rs_src_stream_repair_verify_window_loop_stop(
 			IsStopped() ? 1 : 0, totalCompared, required, sawVariedData ? 1 : 0);
 		if (winStop == 1)
@@ -3929,16 +3287,6 @@ bool StreamRepairController::VerifyDonorInnerFile(RepairSetData& repairSet,
 		{
 			break;
 		}
-#else
-		if (IsStopped())
-		{
-			return false;
-		}
-		if (totalCompared >= required && sawVariedData)
-		{
-			break;
-		}
-#endif
 		donorData.resize(window.Size);
 		if (!donorSource.Read(window.Offset, donorData.data(), window.Size))
 		{
@@ -3958,18 +3306,11 @@ bool StreamRepairController::VerifyDonorInnerFile(RepairSetData& repairSet,
 				return false;	// same inner size but different bytes - wrong donor
 			}
 			totalCompared += piece.Range.Size;
-#ifdef NZBGET_USE_RUST
 			if (!sawVariedData && piece.Range.Size > 1)
 			{
 				sawVariedData = nzbget_rs_stream_buffer_has_varied_data(
 					reinterpret_cast<const uint8_t*>(pieceData), (size_t)piece.Range.Size) != 0;
 			}
-#else
-			for (int64 i = 1; i < piece.Range.Size && !sawVariedData; i++)
-			{
-				sawVariedData = pieceData[i] != pieceData[0];
-			}
-#endif
 		}
 	}
 
@@ -3999,12 +3340,8 @@ int64 StreamRepairController::PatchFromDonorInnerFile(RepairSetData& repairSet,
 		int64 pos = hole.Offset;
 		while (pos < hole.End() && !IsStopped())
 		{
-#ifdef NZBGET_USE_RUST
 			int64 chunk = nzbget_rs_src_stream_repair_calc_patch_chunk_size(
 				hole.End(), pos, 4 * 1024 * 1024);
-#else
-			int64 chunk = std::min<int64>(hole.End() - pos, 4 * 1024 * 1024);
-#endif
 			donorData.resize(chunk);
 			if (!donorSource.Read(pos, donorData.data(), chunk))
 			{
@@ -4046,12 +3383,8 @@ bool StreamRepairController::VerifyDonorInnerFileEncrypted(RepairSetData& repair
 	DiskFile& donorInner, int64 donorInnerSize, TargetSetFiles& targetFiles)
 {
 	ContentMap& targetMap = *repairSet.Map;
-#ifdef NZBGET_USE_RUST
 	if (!nzbget_rs_srp_stream_repair_can_verify_donor_inner_file(
 		targetMap.GetEncrypted() ? 1 : 0, 1, donorInnerSize, targetMap.GetInnerSize()))
-#else
-	if (!targetMap.GetEncrypted() || donorInnerSize != targetMap.GetInnerSize())
-#endif
 	{
 		return false;
 	}
@@ -4108,7 +3441,6 @@ void StreamRepairController::RepairCompleted()
 	for (const RepairTarget& target : m_targets)
 	{
 		// exactly the targets ReportRemainingHoles credited back to health
-#ifdef NZBGET_USE_RUST
 		int markAction = nzbget_rs_srp_stream_repair_classify_completed_target_mark(
 			target.DecodedFileSize, target.Holes.empty() ? 1 : 0, target.Recreated ? 1 : 0);
 		if (markAction == 1)
@@ -4119,24 +3451,10 @@ void StreamRepairController::RepairCompleted()
 		{
 			MarkRecreated(nzbInfo, target);
 		}
-#else
-		if (target.DecodedFileSize > 0 && target.Holes.empty())
-		{
-			MarkRepaired(nzbInfo, target);
-		}
-		else if (target.Recreated)
-		{
-			MarkRecreated(nzbInfo, target);
-		}
-#endif
 	}
 
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_srp_stream_repair_has_any_recovered_stats(
 		m_recoveredArticles, m_recoveredBytes, m_recoveredHoles))
-#else
-	if (m_recoveredArticles > 0 || m_recoveredBytes > 0 || m_recoveredHoles > 0)
-#endif
 	{
 		nzbInfo->SetDupeRecoveredArticles(nzbInfo->GetDupeRecoveredArticles() + m_recoveredArticles);
 		nzbInfo->SetDupeRecoveredBytes(nzbInfo->GetDupeRecoveredBytes() + m_recoveredBytes);
@@ -4155,7 +3473,6 @@ void StreamRepairController::RepairCompleted()
 	// fully-repaired file, not per decoded byte, is the correctness and safety
 	// argument). Clamped at 0. When par2 exists SetRequestParCheck below stays
 	// authoritative.
-#ifdef NZBGET_USE_RUST
 	if (m_recoveredFailedSize > 0)
 	{
 		int64 failedSize = nzbInfo->GetFailedSize();
@@ -4179,28 +3496,6 @@ void StreamRepairController::RepairCompleted()
 		nzbInfo->SetParCurrentFailedSize(parCurFailedSize);
 		nzbInfo->SetParCurrentSuccessSize(parCurSuccessSize);
 	}
-#else
-	if (m_recoveredFailedSize > 0)
-	{
-		nzbInfo->SetFailedSize(std::max<int64>(0,
-			nzbInfo->GetFailedSize() - m_recoveredFailedSize));
-		nzbInfo->SetSuccessSize(nzbInfo->GetSuccessSize() + m_recoveredFailedSize);
-		nzbInfo->SetCurrentFailedSize(std::max<int64>(0,
-			nzbInfo->GetCurrentFailedSize() - m_recoveredFailedSize));
-		nzbInfo->SetCurrentSuccessSize(nzbInfo->GetCurrentSuccessSize() + m_recoveredFailedSize);
-		if (m_recoveredFailedParSize > 0)
-		{
-			nzbInfo->SetParFailedSize(std::max<int64>(0,
-				nzbInfo->GetParFailedSize() - m_recoveredFailedParSize));
-			nzbInfo->SetParSuccessSize(
-				nzbInfo->GetParSuccessSize() + m_recoveredFailedParSize);
-			nzbInfo->SetParCurrentFailedSize(std::max<int64>(0,
-				nzbInfo->GetParCurrentFailedSize() - m_recoveredFailedParSize));
-			nzbInfo->SetParCurrentSuccessSize(
-				nzbInfo->GetParCurrentSuccessSize() + m_recoveredFailedParSize);
-		}
-	}
-#endif
 
 	// Persist unfinished holes only when the controller is stopping so a
 	// restart can resume. During a normal run, unfinished targets are handed to
@@ -4219,7 +3514,6 @@ void StreamRepairController::RepairCompleted()
 			if (target.FileId == it->GetFileId())
 			{
 				matched = true;
-#ifdef NZBGET_USE_RUST
 				int updateJobSize = 0;
 				int jobAction = nzbget_rs_src_stream_repair_classify_interrupted_job_update(
 					target.Holes.empty() ? 1 : 0,
@@ -4239,21 +3533,6 @@ void StreamRepairController::RepairCompleted()
 					it->SetHoles(target.Holes);
 					++it;
 				}
-#else
-				if (target.Holes.empty() && target.DecodedFileSize > 0)
-				{
-					it = nzbInfo->GetStreamRepairJobs()->erase(it);
-				}
-				else
-				{
-					if (it->GetDecodedFileSize() <= 0 && target.DecodedFileSize > 0)
-					{
-						it->SetDecodedFileSize(target.DecodedFileSize);
-					}
-					it->SetHoles(target.Holes);
-					++it;
-				}
-#endif
 				break;
 			}
 		}
@@ -4273,7 +3552,6 @@ void StreamRepairController::RepairCompleted()
 
 	// whatever was written - and whatever is still missing - goes through
 	// par-check as final verification (a no-op when no par2 files exist)
-#ifdef NZBGET_USE_RUST
 	{
 		int resetParRename = 0, setParStatus = 0, newParStatus = 0;
 		int forceParFull = 0, setReqParCheckFalse = 0, checkMainPars = 0;
@@ -4306,51 +3584,6 @@ void StreamRepairController::RepairCompleted()
 			m_postInfo->SetRequestParCheck(false);
 		}
 	}
-#else
-	if (recovered || m_holesRemain)
-	{
-		if (m_recoveredBytes > 0 && nzbInfo->GetParRenameStatus() != NzbInfo::rsNone)
-		{
-			// A file whose first bytes were missing could not be identified by
-			// par-rename (it matches by the hash of the first 16 KiB), so it may
-			// still carry an obfuscated name the par-check below would report as
-			// missing. Its start may be repaired now: rename again first.
-			nzbInfo->SetParRenameStatus(NzbInfo::rsNone);
-		}
-		if (nzbInfo->GetParStatus() > NzbInfo::psSkipped)
-		{
-			// The initial PAR attempt ran before donor recovery. Its result
-			// and download-time CRCs no longer describe the repaired bytes.
-			// Recheck from disk, even when ParQuick is enabled. Nothing written
-			// leaves its result valid: a second full verification of a large
-			// collection would only repeat it.
-			if (recovered)
-			{
-				nzbInfo->SetParStatus(g_Options->GetParCheck() == Options::pcManual ?
-					NzbInfo::psManual : NzbInfo::psNone);
-				m_postInfo->SetForceParFull(true);
-				m_postInfo->SetRequestParCheck(false);
-			}
-		}
-		else
-		{
-			// without par2 files there is nothing to check; asking anyway
-			// would make ParCheck=manual report the repaired release as
-			// needing manual repair (WARNING/DAMAGED)
-			if (ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
-			{
-				m_postInfo->SetRequestParCheck(true);
-			}
-			// par-check had not run yet (the par2 files could not cover the
-			// damage): download-time CRCs don't describe the bytes written
-			// now either, so ParQuick must not judge the repaired files
-			if (recovered)
-			{
-				m_postInfo->SetForceParFull(true);
-			}
-		}
-	}
-#endif
 
 	// Persist repaired counters and any remaining holes before leaving the
 	// stage, so a graceful stop cannot lose the current repair state.

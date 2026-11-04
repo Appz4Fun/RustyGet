@@ -26,11 +26,9 @@
 #include "DownloadInfo.h"
 #include "FileSystem.h"
 #include "Util.h"
-#ifdef NZBGET_USE_RUST
 #include <exception>
 #include <stdexcept>
 #include "nzbget_rs.h"
-#endif
 
 #ifdef HAVE_GETOPT_LONG
 static struct option long_options[] =
@@ -66,7 +64,6 @@ static struct option long_options[] =
 static char short_options[] = "c:hno:psvAB:DCE:G:K:LPR:STUQOVW:";
 
 
-#ifdef NZBGET_USE_RUST
 // a callback that threw stops the parser; the exception is rethrown after
 // Rust returned
 struct CommandLineParser::RsSink
@@ -252,30 +249,6 @@ CommandLineParser::CommandLineParser(int argc, const char* argv[])
 		throw std::runtime_error("Command line parsing failed");
 	}
 }
-#else
-CommandLineParser::CommandLineParser(int argc, const char* argv[])
-{
-	InitCommandLine(argc, argv);
-
-	if (argc == 1)
-	{
-		m_printUsage = true;
-		return;
-	}
-
-	if (!m_printOptions && !m_printUsage && !m_printVersion)
-	{
-		// the arguments in getopt's order: optind counts in it (with an option
-		// after the file, "-A file.nzb -c conf", the original order gave "conf")
-		std::vector<const char*> args;
-		for (CString& arg : m_args)
-		{
-			args.push_back(arg);
-		}
-		InitFileArg(argc, args.data());
-	}
-}
-#endif
 
 void CommandLineParser::InitCommandLine(int argc, const char* const_argv[])
 {

@@ -26,9 +26,7 @@
 #include "Options.h"
 #include "ScriptController.h"
 #include "Thread.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 class RarLister : public Thread, public ScriptController
 {
@@ -110,7 +108,6 @@ void RarLister::Run()
 
 void RarLister::AddMessage(Message::EKind kind, const char* text)
 {
-#ifdef NZBGET_USE_RUST
 	int compressed = m_compressed ? 1 : 0;
 	int lastSizeMax = m_lastSizeMax ? 1 : 0;
 	int action = nzbget_rs_dupematcher_parse_rar_lister_line(
@@ -139,59 +136,12 @@ void RarLister::AddMessage(Message::EKind kind, const char* text)
 	{
 		Terminate();
 	}
-#else
-	if (!strncasecmp(text, "Archive: ", 9))
-	{
-		m_owner->PrintMessage(Message::mkDetail, "Reading file %s", text + 9);
-	}
-	else if (!strncasecmp(text, "        Name: ", 14))
-	{
-		m_lastFilename = text + 14;
-	}
-	else if (!strncasecmp(text, "        Size: ", 14))
-	{
-		m_lastSizeMax = false;
-		int64 size = atoll(text + 14);
-		if (size > m_maxSize)
-		{
-			m_maxSize = size;
-			m_lastSizeMax = true;
-			strncpy(m_filenameBuf, m_lastFilename, m_filenameBufLen);
-			m_filenameBuf[m_filenameBufLen-1] = '\0';
-		}
-		return;
-	}
-
-	if (m_lastSizeMax && !strncasecmp(text, " Compression: ", 14))
-	{
-		m_compressed = !strstr(text, " -m0");
-		if (m_maxSize > m_expectedSize ||
-			DupeMatcher::SizeDiffOK(m_maxSize, m_expectedSize, 20))
-		{
-			// alread found the largest file, aborting unrar
-			Terminate();
-		}
-	}
-#endif
 }
 
 
 bool DupeMatcher::SizeDiffOK(int64 size1, int64 size2, int maxDiffPercent)
 {
-#ifdef NZBGET_USE_RUST
 	return nzbget_rs_dupematcher_size_diff_ok(size1, size2, maxDiffPercent) != 0;
-#else
-	if (size1 == 0 || size2 == 0)
-	{
-		return false;
-	}
-
-	int64 diff = size1 - size2;
-	diff = diff > 0 ? diff : -diff;
-	int64 max = size1 > size2 ? size1 : size2;
-	int diffPercent = (int)(diff * 100 / max);
-	return diffPercent < maxDiffPercent;
-#endif
 }
 
 bool DupeMatcher::Prepare()
@@ -210,12 +160,8 @@ bool DupeMatcher::MatchDupeContent(const char* dupeDir)
 	bool dupeCompressed = false;
 	char filename[1024];
 	FindLargestFile(dupeDir, filename, sizeof(filename), &dupeMaxSize, &dupeCompressed);
-#ifdef NZBGET_USE_RUST
 	bool ok = nzbget_rs_psp_dupematcher_is_content_match(
 		dupeMaxSize, m_maxSize, dupeCompressed ? 1 : 0, m_compressed ? 1 : 0) != 0;
-#else
-	bool ok = dupeMaxSize == m_maxSize && dupeCompressed == m_compressed;
-#endif
 	PrintMessage(Message::mkDetail, "Found main file %s with size %" PRIi64 " bytes%s",
 		filename, m_maxSize, ok ? "" : ", size mismatch");
 	return ok;

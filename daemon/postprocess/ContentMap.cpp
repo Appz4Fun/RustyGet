@@ -27,19 +27,12 @@
 #include "RarReader.h"
 #include "StreamCrypto.h"
 #include "Util.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 bool DiskContentSource::Read(int64 offset, void* buffer, int64 size)
 {
-#ifdef NZBGET_USE_RUST
 	return nzbget_rs_cdn_content_source_range_valid(offset, size, m_size) != 0 &&
 		m_file.Seek(offset) && m_file.Read(buffer, size) == size;
-#else
-	return offset >= 0 && size >= 0 && offset + size <= m_size &&
-		m_file.Seek(offset) && m_file.Read(buffer, size) == size;
-#endif
 }
 
 CompositeSource::CompositeSource(ContentSourceSet& sources, std::vector<int> memberIndexes,
@@ -56,11 +49,7 @@ CompositeSource::CompositeSource(ContentSourceSet& sources, std::vector<int> mem
 
 bool CompositeSource::Read(int64 offset, void* buffer, int64 size)
 {
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_cdn_content_source_range_valid(offset, size, m_totalSize) == 0)
-#else
-	if (offset < 0 || size < 0 || offset + size > m_totalSize)
-#endif
 	{
 		return false;
 	}
@@ -79,7 +68,6 @@ bool CompositeSource::Read(int64 offset, void* buffer, int64 size)
 
 std::vector<MemberRange> CompositeSource::ToMembers(const StreamRange& logicalRange) const
 {
-#ifdef NZBGET_USE_RUST
 	std::vector<NzbgetRsMemberRange> rsPieces(m_memberIndexes.size());
 	NzbgetRsByteRange lr{logicalRange.Offset, logicalRange.Size};
 	size_t count = nzbget_rs_composite_to_members(
@@ -92,49 +80,22 @@ std::vector<MemberRange> CompositeSource::ToMembers(const StreamRange& logicalRa
 		pieces.push_back({rsPieces[i].member_index, {rsPieces[i].offset, rsPieces[i].size}});
 	}
 	return pieces;
-#else
-	std::vector<MemberRange> pieces;
-	for (size_t i = 0; i < m_memberIndexes.size(); i++)
-	{
-		int64 from = std::max(logicalRange.Offset, m_memberBases[i]);
-		int64 to = std::min(logicalRange.End(), m_memberBases[i] + m_memberSizes[i]);
-		if (from < to)
-		{
-			pieces.push_back({m_memberIndexes[i], {from - m_memberBases[i], to - from}});
-		}
-	}
-	return pieces;
-#endif
 }
 
 bool HoledSource::Read(int64 offset, void* buffer, int64 size)
 {
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_holed_source_intersects(
 		reinterpret_cast<const NzbgetRsByteRange*>(m_holes.data()),
 		m_holes.size(), offset, size) != 0)
 	{
 		return false;
 	}
-#else
-	for (const StreamRange& hole : m_holes)
-	{
-		if (offset < hole.End() && hole.Offset < offset + size)
-		{
-			return false;
-		}
-	}
-#endif
 	return m_inner.Read(offset, buffer, size);
 }
 
 ContentSource* HoledSourceSet::GetSource(int memberIndex)
 {
-#ifdef NZBGET_USE_RUST
 	if (!nzbget_rs_srp_stream_repair_is_member_index_in_bounds(memberIndex, m_wrapped.size()))
-#else
-	if (memberIndex < 0 || memberIndex >= (int)m_wrapped.size())
-#endif
 	{
 		return nullptr;
 	}
@@ -153,7 +114,6 @@ ContentSource* HoledSourceSet::GetSource(int memberIndex)
 
 StreamRangeList ContentMap::MapToInner(int memberIndex, const StreamRange& memberRange) const
 {
-#ifdef NZBGET_USE_RUST
 	std::vector<NzbgetRsContentRun> rsRuns;
 	rsRuns.reserve(m_runs.size());
 	for (const ContentRun& run : m_runs)
@@ -171,28 +131,10 @@ StreamRangeList ContentMap::MapToInner(int memberIndex, const StreamRange& membe
 		innerRanges.push_back({out[i].offset, out[i].size});
 	}
 	return innerRanges;
-#else
-	StreamRangeList innerRanges;
-	for (const ContentRun& run : m_runs)
-	{
-		if (run.MemberIndex != memberIndex)
-		{
-			continue;
-		}
-		int64 from = std::max(memberRange.Offset, run.MemberOffset);
-		int64 to = std::min(memberRange.End(), run.MemberOffset + run.Size);
-		if (from < to)
-		{
-			innerRanges.push_back({run.InnerOffset + (from - run.MemberOffset), to - from});
-		}
-	}
-	return innerRanges;
-#endif
 }
 
 std::vector<MemberRange> ContentMap::MapFromInner(const StreamRange& innerRange) const
 {
-#ifdef NZBGET_USE_RUST
 	std::vector<NzbgetRsContentRun> rsRuns;
 	rsRuns.reserve(m_runs.size());
 	for (const ContentRun& run : m_runs)
@@ -210,20 +152,6 @@ std::vector<MemberRange> ContentMap::MapFromInner(const StreamRange& innerRange)
 		pieces.push_back({out[i].member_index, {out[i].offset, out[i].size}});
 	}
 	return pieces;
-#else
-	std::vector<MemberRange> pieces;
-	for (const ContentRun& run : m_runs)
-	{
-		int64 from = std::max(innerRange.Offset, run.InnerOffset);
-		int64 to = std::min(innerRange.End(), run.InnerEnd());
-		if (from < to)
-		{
-			pieces.push_back({run.MemberIndex,
-				{run.MemberOffset + (from - run.InnerOffset), to - from}});
-		}
-	}
-	return pieces;
-#endif
 }
 
 int64 ContentMap::GetCipherStreamSize() const
@@ -238,7 +166,6 @@ int64 ContentMap::GetCipherStreamSize() const
 
 std::vector<MemberRange> ContentMap::MapCipherRange(const StreamRange& cipherRange) const
 {
-#ifdef NZBGET_USE_RUST
 	if (cipherRange.Offset < 0 || cipherRange.Size <= 0 ||
 		m_runCryptos.size() != m_runs.size())
 	{
@@ -267,44 +194,6 @@ std::vector<MemberRange> ContentMap::MapCipherRange(const StreamRange& cipherRan
 		pieces.push_back({out[i].member_index, {out[i].offset, out[i].size}});
 	}
 	return pieces;
-#else
-	std::vector<MemberRange> pieces;
-	if (cipherRange.Offset < 0 || cipherRange.Size <= 0 ||
-		m_runCryptos.size() != m_runs.size())
-	{
-		return {};
-	}
-	int64 covered = 0;
-	for (size_t i = 0; i < m_runs.size(); i++)
-	{
-		const RunCrypto& runCrypto = m_runCryptos[i];
-		if (!runCrypto.Crypto)
-		{
-			return {};	// a plaintext run has no place in a cipher space
-		}
-		// the slab's cipher-space base is the run's InnerOffset: plaintext and
-		// cipher positions coincide (one 1:1 CBC stream, no per-volume re-key)
-		int64 slabBase = m_runs[i].InnerOffset;
-		int64 from = std::max(cipherRange.Offset, slabBase);
-		int64 to = std::min(cipherRange.End(), slabBase + runCrypto.CipherSize);
-		if (from >= to)
-		{
-			continue;
-		}
-		if (from != cipherRange.Offset + covered)
-		{
-			return {};	// gapped or out-of-order coverage (excluded member) - fail closed
-		}
-		pieces.push_back({m_runs[i].MemberIndex,
-			{runCrypto.CipherDataOffset + (from - slabBase), to - from}});
-		covered += to - from;
-	}
-	if (covered != cipherRange.Size)
-	{
-		return {};	// the range runs past the cipher stream - fail closed
-	}
-	return pieces;
-#endif
 }
 
 bool ContentMap::ReadCipherRange(ContentSourceSet& sources, const StreamRange& cipherRange,
@@ -336,7 +225,6 @@ bool ContentMap::ReadInnerDecrypted(ContentSourceSet& sources, const StreamRange
 	char* buffer) const
 {
 	constexpr int64 blockSize = RarCryptoContext::CryptoBlockSize;
-#ifdef NZBGET_USE_RUST
 	int empty = 0;
 	int64 cipherFrom = 0;
 	int64 cipherTo = 0;
@@ -355,29 +243,6 @@ bool ContentMap::ReadInnerDecrypted(ContentSourceSet& sources, const StreamRange
 	{
 		return false;
 	}
-#else
-	if (innerRange.Offset < 0 || innerRange.Size < 0 || innerRange.End() > m_innerSize)
-	{
-		return false;
-	}
-	if (innerRange.Size == 0)
-	{
-		return true;
-	}
-	const RunCrypto* runCrypto = GetRunCrypto(0);
-	if (!runCrypto)
-	{
-		return false;
-	}
-	// cover the range with whole cipher blocks; the block straddling the
-	// plaintext end also pulls in the padding tail (decrypted then discarded)
-	int64 cipherFrom = innerRange.Offset / blockSize * blockSize;
-	int64 cipherTo = (innerRange.End() + blockSize - 1) / blockSize * blockSize;
-	if (cipherTo > GetCipherStreamSize())
-	{
-		return false;	// foreshortened map (excluded member) - fail closed
-	}
-#endif
 	// CBC random access: the predecessor cipher block seeds the chain (it may
 	// live in the previous member); the header IV seeds block 0
 	uint8 prev[RarCryptoContext::CryptoBlockSize];
@@ -407,7 +272,6 @@ void ContentMap::ExcludeMember(int memberIndex)
 	std::vector<RunCrypto> keptCryptos;
 	for (size_t i = 0; i < m_runs.size(); i++)
 	{
-#ifdef NZBGET_USE_RUST
 		int keepCrypto = 0;
 		if (!nzbget_rs_sap_content_map_exclude_member_step(
 			m_runs[i].MemberIndex, memberIndex, m_runCryptos.size(), m_runs.size(), &keepCrypto))
@@ -419,17 +283,6 @@ void ContentMap::ExcludeMember(int memberIndex)
 		{
 			keptCryptos.push_back(m_runCryptos[i]);
 		}
-#else
-		if (m_runs[i].MemberIndex == memberIndex)
-		{
-			continue;
-		}
-		keptRuns.push_back(m_runs[i]);
-		if (parallel)
-		{
-			keptCryptos.push_back(m_runCryptos[i]);
-		}
-#endif
 	}
 	m_runs = std::move(keptRuns);
 	if (parallel)
@@ -438,486 +291,15 @@ void ContentMap::ExcludeMember(int memberIndex)
 	}
 }
 
-#ifndef NZBGET_USE_RUST
-namespace
-{
-
-std::string Lowered(const std::string& name)
-{
-	std::string lowered = name;
-	for (char& ch : lowered)
-	{
-		ch = (char)tolower((unsigned char)ch);
-	}
-	return lowered;
-}
-
-bool AllDigits(const std::string& text)
-{
-	if (text.empty())
-	{
-		return false;
-	}
-	for (char ch : text)
-	{
-		if (!isdigit((unsigned char)ch))
-		{
-			return false;
-		}
-	}
-	return true;
-}
-
-bool EndsWith(const std::string& name, const char* suffix)
-{
-	size_t suffixLen = strlen(suffix);
-	return name.size() >= suffixLen &&
-		name.compare(name.size() - suffixLen, suffixLen, suffix) == 0;
-}
-
-uint16 GetLe16(const char* buffer)
-{
-	return (uint16)((uint8)buffer[0] | ((uint16)(uint8)buffer[1] << 8));
-}
-
-uint32 GetLe32(const char* buffer)
-{
-	return (uint32)(uint8)buffer[0] | ((uint32)(uint8)buffer[1] << 8) |
-		((uint32)(uint8)buffer[2] << 16) | ((uint32)(uint8)buffer[3] << 24);
-}
-
-uint64 GetLe64(const char* buffer)
-{
-	return (uint64)GetLe32(buffer) | ((uint64)GetLe32(buffer + 4) << 32);
-}
-
-// one member name parsed against the container naming schemes
-struct ParsedName
-{
-	enum EScheme { psNone, psRarNew, psRarOld, psRarOldFirst, psZipSpan,
-		psZipFinal, psSevenSplit, psSevenSingle, psSplit };
-	EScheme Scheme = psNone;
-	std::string Base;	// lowercased grouping key
-	int Volume = 0;		// data-order position within the scheme
-};
-
-ParsedName ParseMemberName(const std::string& name)
-{
-	ParsedName parsed;
-	std::string lowered = Lowered(name);
-
-	// base.partNN.rar (new rar naming, 1-based)
-	if (EndsWith(lowered, ".rar"))
-	{
-		std::string stem = lowered.substr(0, lowered.size() - 4);
-		size_t partPos = stem.rfind(".part");
-		if (partPos != std::string::npos && AllDigits(stem.substr(partPos + 5)))
-		{
-			parsed.Scheme = ParsedName::psRarNew;
-			parsed.Base = stem.substr(0, partPos);
-			parsed.Volume = atoi(stem.c_str() + partPos + 5);
-			return parsed;
-		}
-		// base.rar (old naming, first volume)
-		parsed.Scheme = ParsedName::psRarOldFirst;
-		parsed.Base = stem;
-		parsed.Volume = 0;
-		return parsed;
-	}
-
-	size_t dotPos = lowered.rfind('.');
-	if (dotPos == std::string::npos || dotPos == 0)
-	{
-		return parsed;
-	}
-	std::string extension = lowered.substr(dotPos + 1);
-	std::string stem = lowered.substr(0, dotPos);
-
-	// base.rNN / base.sNN (old rar naming continuations)
-	if (extension.size() == 3 && (extension[0] == 'r' || extension[0] == 's') &&
-		AllDigits(extension.substr(1)))
-	{
-		parsed.Scheme = ParsedName::psRarOld;
-		parsed.Base = stem;
-		parsed.Volume = 1 + atoi(extension.c_str() + 1) + (extension[0] == 's' ? 100 : 0);
-		return parsed;
-	}
-
-	// base.zip / base.zNN (spanned zip; the .zip file is the LAST volume)
-	if (extension == "zip")
-	{
-		parsed.Scheme = ParsedName::psZipFinal;
-		parsed.Base = stem;
-		return parsed;
-	}
-	if (extension.size() >= 3 && extension[0] == 'z' && AllDigits(extension.substr(1)))
-	{
-		parsed.Scheme = ParsedName::psZipSpan;
-		parsed.Base = stem;
-		parsed.Volume = atoi(extension.c_str() + 1);
-		return parsed;
-	}
-
-	// base.7z / base.7z.NNN
-	if (extension == "7z")
-	{
-		parsed.Scheme = ParsedName::psSevenSingle;
-		parsed.Base = stem;
-		return parsed;
-	}
-	if (AllDigits(extension) && extension.size() >= 2 && extension.size() <= 4)
-	{
-		if (EndsWith(stem, ".7z"))
-		{
-			parsed.Scheme = ParsedName::psSevenSplit;
-			parsed.Base = stem.substr(0, stem.size() - 3);
-			parsed.Volume = atoi(extension.c_str());
-			return parsed;
-		}
-		// raw splits require the stem to still carry an extension
-		if (stem.rfind('.') != std::string::npos)
-		{
-			parsed.Scheme = ParsedName::psSplit;
-			parsed.Base = stem;
-			parsed.Volume = atoi(extension.c_str());
-			return parsed;
-		}
-	}
-
-	return parsed;
-}
-
-struct SetBucket
-{
-	MemberSet::EFormat Format;
-	std::vector<std::pair<int, int>> Volumes;	// (volume, memberIndex)
-	bool HasFinal = false;	// old-naming .rar seen / spanned .zip seen
-	int FinalMember = -1;
-};
-
-// bounded reader over the 7z property stream; any overrun poisons Ok
-struct SevenZipReader
-{
-	// a pointer (not a reference) so the reader can be re-seated by assignment
-	// onto the unpacked bytes of a Copy-coded kEncodedHeader
-	const std::vector<char>* Buffer;
-	int64 Pos = 0;
-	bool Ok = true;
-
-	SevenZipReader(const std::vector<char>& buffer) : Buffer(&buffer) {}
-
-	uint8 ReadByte()
-	{
-		if (Pos >= (int64)Buffer->size())
-		{
-			Ok = false;
-			return 0;
-		}
-		return (uint8)(*Buffer)[Pos++];
-	}
-
-	uint64 ReadNumber()
-	{
-		uint8 firstByte = ReadByte();
-		uint64 value = 0;
-		uint8 mask = 0x80;
-		for (int i = 0; i < 8; i++)
-		{
-			if ((firstByte & mask) == 0)
-			{
-				value |= ((uint64)(firstByte & (mask - 1))) << (8 * i);
-				return value;
-			}
-			value |= (uint64)ReadByte() << (8 * i);
-			mask >>= 1;
-		}
-		return value;
-	}
-
-	void Skip(uint64 count)
-	{
-		// compare in unsigned space: a count >= 2^63 cast to int64 would go
-		// negative, pass a signed check and wrap Pos out of the buffer
-		if (count > (uint64)Buffer->size() - (uint64)Pos)
-		{
-			Ok = false;
-			return;
-		}
-		Pos += (int64)count;
-	}
-
-	std::vector<bool> ReadBitVector(uint64 count)
-	{
-		// bound the claimed count against the remaining bytes BEFORE sizing
-		// the vector: a lying count must poison, not allocate
-		if (count > ((uint64)Buffer->size() - (uint64)Pos) * 8)
-		{
-			Ok = false;
-			return std::vector<bool>();
-		}
-		std::vector<bool> bits(count);
-		uint8 currentByte = 0;
-		uint8 mask = 0;
-		for (uint64 i = 0; i < count; i++)
-		{
-			if (mask == 0)
-			{
-				currentByte = ReadByte();
-				mask = 0x80;
-			}
-			bits[i] = (currentByte & mask) != 0;
-			mask >>= 1;
-		}
-		return bits;
-	}
-
-	// the kCRC record: skip it, honoring the defined-entries bit vector
-	void SkipDigests(uint64 count)
-	{
-		uint64 defined = count;
-		if (ReadByte() == 0)
-		{
-			std::vector<bool> bits = ReadBitVector(count);
-			defined = 0;
-			for (bool bit : bits)
-			{
-				defined += bit ? 1 : 0;
-			}
-		}
-		Skip(defined * 4);
-	}
-};
-
-struct SevenZipStreams
-{
-	uint64 PackPos = 0;
-	std::vector<uint64> PackSizes;
-	std::vector<uint64> FolderUnpackSizes;
-	std::vector<bool> FolderCrcDefined;
-	std::vector<std::vector<uint64>> SubstreamSizes;	// per folder
-	bool CopyOnly = true;
-};
-
-// parses one StreamsInfo subtree (used for kMainStreamsInfo and, when the
-// header itself is packed, for kEncodedHeader)
-bool ParseSevenZipStreamsInfo(SevenZipReader& reader, SevenZipStreams& streams)
-{
-	uint64 recordId = reader.ReadNumber();
-
-	if (recordId == 0x06)	// kPackInfo
-	{
-		streams.PackPos = reader.ReadNumber();
-		uint64 packCount = reader.ReadNumber();
-		for (uint64 id = reader.ReadNumber(); reader.Ok && id != 0x00; id = reader.ReadNumber())
-		{
-			if (id == 0x09)			// kSize
-			{
-				// stop on poison: a lying count must not grow the list forever
-				for (uint64 i = 0; reader.Ok && i < packCount; i++)
-				{
-					streams.PackSizes.push_back(reader.ReadNumber());
-				}
-			}
-			else if (id == 0x0a)	// kCRC
-			{
-				reader.SkipDigests(packCount);
-			}
-			else
-			{
-				return false;
-			}
-		}
-		recordId = reader.ReadNumber();
-	}
-
-	if (recordId == 0x07)	// kUnPackInfo
-	{
-		if (reader.ReadNumber() != 0x0b)	// kFolder is mandatory
-		{
-			return false;
-		}
-		uint64 folderCount = reader.ReadNumber();
-		if (reader.ReadByte() != 0)			// external folders unsupported
-		{
-			return false;
-		}
-		for (uint64 f = 0; f < folderCount && reader.Ok; f++)
-		{
-			uint64 coderCount = reader.ReadNumber();
-			// the spec requires at least one coder; a zero-coder folder must
-			// not slip through the per-coder Copy gate below
-			streams.CopyOnly &= coderCount == 1;
-			for (uint64 c = 0; c < coderCount && reader.Ok; c++)
-			{
-				uint8 flags = reader.ReadByte();
-				uint8 idSize = flags & 0x0f;
-				bool copyCoder = idSize == 1 && !(flags & 0x30);
-				uint8 coderId = 0xff;
-				for (uint8 b = 0; b < idSize; b++)
-				{
-					coderId = reader.ReadByte();
-				}
-				copyCoder &= coderCount == 1 && coderId == 0x00;
-				streams.CopyOnly &= copyCoder;
-				if (flags & 0x10)	// complex: in/out stream counts follow
-				{
-					reader.ReadNumber();
-					reader.ReadNumber();
-				}
-				if (flags & 0x20)	// attributes follow
-				{
-					reader.Skip(reader.ReadNumber());
-				}
-			}
-			// bind pairs / packed-stream indexes only exist for complex
-			// folders, which CopyOnly already rejects - nothing to read here
-		}
-		if (reader.ReadNumber() != 0x0c)	// kCodersUnpackSize is mandatory
-		{
-			return false;
-		}
-		for (uint64 f = 0; reader.Ok && f < folderCount; f++)
-		{
-			streams.FolderUnpackSizes.push_back(reader.ReadNumber());
-		}
-		streams.FolderCrcDefined.assign(folderCount, false);
-		for (uint64 id = reader.ReadNumber(); reader.Ok && id != 0x00; id = reader.ReadNumber())
-		{
-			if (id == 0x0a)	// kCRC: remember which folders have one
-			{
-				uint64 defined = folderCount;
-				if (reader.ReadByte() == 0)
-				{
-					streams.FolderCrcDefined = reader.ReadBitVector(folderCount);
-					defined = 0;
-					for (bool bit : streams.FolderCrcDefined)
-					{
-						defined += bit ? 1 : 0;
-					}
-				}
-				else
-				{
-					streams.FolderCrcDefined.assign(folderCount, true);
-				}
-				reader.Skip(defined * 4);
-			}
-			else
-			{
-				return false;
-			}
-		}
-		recordId = reader.ReadNumber();
-	}
-
-	// default: one substream per folder
-	for (uint64 unpackSize : streams.FolderUnpackSizes)
-	{
-		streams.SubstreamSizes.push_back({unpackSize});
-	}
-
-	if (recordId == 0x08)	// kSubStreamsInfo
-	{
-		std::vector<uint64> streamCounts(streams.FolderUnpackSizes.size(), 1);
-		uint64 id = reader.ReadNumber();
-		if (id == 0x0d)		// kNumUnpackStream
-		{
-			for (uint64& count : streamCounts)
-			{
-				count = reader.ReadNumber();
-			}
-			id = reader.ReadNumber();
-		}
-		if (id == 0x09)		// kSize: all but the last substream per folder
-		{
-			streams.SubstreamSizes.clear();
-			for (size_t f = 0; f < streamCounts.size(); f++)
-			{
-				std::vector<uint64> sizes;
-				uint64 used = 0;
-				// stop on poison: a lying substream count must not grow the
-				// list forever
-				for (uint64 s = 0; reader.Ok && s + 1 < streamCounts[f]; s++)
-				{
-					sizes.push_back(reader.ReadNumber());
-					used += sizes.back();
-				}
-				if (streamCounts[f] > 0)
-				{
-					if (used > streams.FolderUnpackSizes[f])
-					{
-						return false;
-					}
-					sizes.push_back(streams.FolderUnpackSizes[f] - used);
-				}
-				streams.SubstreamSizes.push_back(std::move(sizes));
-			}
-			id = reader.ReadNumber();
-		}
-		else if (id != 0x00 && id != 0x0a)
-		{
-			return false;
-		}
-		else
-		{
-			// counts changed but no explicit sizes: only valid all-ones
-			streams.SubstreamSizes.clear();
-			for (size_t f = 0; f < streamCounts.size(); f++)
-			{
-				if (streamCounts[f] != 1)
-				{
-					return false;
-				}
-				streams.SubstreamSizes.push_back({streams.FolderUnpackSizes[f]});
-			}
-		}
-		if (id == 0x0a)		// kCRC
-		{
-			uint64 digestCount = 0;
-			for (size_t f = 0; f < streamCounts.size(); f++)
-			{
-				bool folderCovered = f < streams.FolderCrcDefined.size() &&
-					streams.FolderCrcDefined[f] && streamCounts[f] == 1;
-				digestCount += folderCovered ? 0 : streamCounts[f];
-			}
-			reader.SkipDigests(digestCount);
-			id = reader.ReadNumber();
-		}
-		if (id != 0x00)
-		{
-			return false;
-		}
-		recordId = reader.ReadNumber();
-	}
-
-	return reader.Ok && recordId == 0x00;	// kEnd of StreamsInfo
-}
-
-}
-#endif
 
 bool ContentMapper::IsCompressibleArchive(const MemberSet& set)
 {
-#ifdef NZBGET_USE_RUST
 	return nzbget_rs_cdn_content_mapper_is_compressible_archive(
 		(int)set.Format, (int)MemberSet::mfRar, (int)MemberSet::mfZip, (int)MemberSet::mfSevenZip) != 0;
-#else
-	switch (set.Format)
-	{
-		case MemberSet::mfRar:
-		case MemberSet::mfZip:
-		case MemberSet::mfSevenZip:
-			return true;
-		case MemberSet::mfBare:
-		case MemberSet::mfSplit:
-			return false;
-	}
-	return false;
-#endif
 }
 
 std::vector<MemberSet> ContentMapper::GroupSets(const std::vector<SetMember>& members)
 {
-#ifdef NZBGET_USE_RUST
 	std::vector<const char*> names;
 	names.reserve(members.size());
 	for (const SetMember& m : members)
@@ -936,162 +318,6 @@ std::vector<MemberSet> ContentMapper::GroupSets(const std::vector<SetMember>& me
 			out->push_back(std::move(s));
 		});
 	return sets;
-#else
-	// bucket keys: scheme family + lowercased base name
-	std::vector<std::pair<std::string, SetBucket>> buckets;
-	auto bucketFor = [&buckets](const std::string& key, MemberSet::EFormat format) -> SetBucket&
-	{
-		for (std::pair<std::string, SetBucket>& entry : buckets)
-		{
-			if (entry.first == key)
-			{
-				return entry.second;
-			}
-		}
-		buckets.emplace_back(key, SetBucket{format, {}, false, -1});
-		return buckets.back().second;
-	};
-
-	std::vector<bool> consumed(members.size(), false);
-
-	for (size_t i = 0; i < members.size(); i++)
-	{
-		ParsedName parsed = ParseMemberName(members[i].Name);
-		switch (parsed.Scheme)
-		{
-			case ParsedName::psRarNew:
-				bucketFor("rarnew:" + parsed.Base, MemberSet::mfRar)
-					.Volumes.emplace_back(parsed.Volume, (int)i);
-				consumed[i] = true;
-				break;
-
-			case ParsedName::psRarOldFirst:
-			{
-				SetBucket& bucket = bucketFor("rarold:" + parsed.Base, MemberSet::mfRar);
-				bucket.HasFinal = true;	// the .rar volume leads the old naming
-				bucket.Volumes.emplace_back(0, (int)i);
-				consumed[i] = true;
-				break;
-			}
-
-			case ParsedName::psRarOld:
-				bucketFor("rarold:" + parsed.Base, MemberSet::mfRar)
-					.Volumes.emplace_back(parsed.Volume, (int)i);
-				consumed[i] = true;
-				break;
-
-			case ParsedName::psZipSpan:
-				bucketFor("zip:" + parsed.Base, MemberSet::mfZip)
-					.Volumes.emplace_back(parsed.Volume, (int)i);
-				consumed[i] = true;
-				break;
-
-			case ParsedName::psZipFinal:
-			{
-				SetBucket& bucket = bucketFor("zip:" + parsed.Base, MemberSet::mfZip);
-				bucket.HasFinal = true;
-				bucket.FinalMember = (int)i;
-				consumed[i] = true;
-				break;
-			}
-
-			case ParsedName::psSevenSingle:
-				bucketFor("7z:" + parsed.Base, MemberSet::mfSevenZip)
-					.Volumes.emplace_back(1, (int)i);
-				consumed[i] = true;
-				break;
-
-			case ParsedName::psSevenSplit:
-				bucketFor("7zsplit:" + parsed.Base, MemberSet::mfSevenZip)
-					.Volumes.emplace_back(parsed.Volume, (int)i);
-				consumed[i] = true;
-				break;
-
-			case ParsedName::psSplit:
-				bucketFor("split:" + parsed.Base, MemberSet::mfSplit)
-					.Volumes.emplace_back(parsed.Volume, (int)i);
-				consumed[i] = true;
-				break;
-
-			case ParsedName::psNone:
-				break;
-		}
-	}
-
-	std::vector<MemberSet> sets;
-
-	for (std::pair<std::string, SetBucket>& entry : buckets)
-	{
-		SetBucket& bucket = entry.second;
-		std::sort(bucket.Volumes.begin(), bucket.Volumes.end());
-
-		// contiguity: old-naming rar starts at 0 (the .rar), everything else
-		// at its scheme's first number; gaps drop the whole set
-		bool contiguous = true;
-		for (size_t i = 1; i < bucket.Volumes.size(); i++)
-		{
-			contiguous &= bucket.Volumes[i].first == bucket.Volumes[i - 1].first + 1;
-		}
-		bool complete = contiguous && !bucket.Volumes.empty() &&
-			(bucket.Format != MemberSet::mfRar ||
-				(entry.first.compare(0, 7, "rarold:") == 0 ?
-					bucket.HasFinal && bucket.Volumes[0].first == 0 :
-					bucket.Volumes[0].first == 1)) &&
-			(bucket.Format != MemberSet::mfSplit || bucket.Volumes[0].first == 1) &&
-			(bucket.Format != MemberSet::mfSevenZip || bucket.Volumes[0].first == 1);
-
-		// a spanned zip needs its final .zip; a lone .zip is a set of one
-		if (bucket.Format == MemberSet::mfZip)
-		{
-			complete = bucket.HasFinal &&
-				(bucket.Volumes.empty() ||
-					(contiguous && bucket.Volumes[0].first == 1));
-		}
-
-		if (!complete)
-		{
-			continue;
-		}
-
-		MemberSet set;
-		set.Format = bucket.Format;
-		for (std::pair<int, int>& volume : bucket.Volumes)
-		{
-			set.Members.push_back(volume.second);
-		}
-		if (bucket.Format == MemberSet::mfZip)
-		{
-			set.Members.push_back(bucket.FinalMember);	// data order: zNN..., .zip last
-		}
-		sets.push_back(std::move(set));
-	}
-
-	// bare media singletons from whatever no scheme consumed: a media
-	// extension, or no extension at all - an obfuscated posting whose name
-	// par-rename could not restore yet (it needs the file's first 16 KB,
-	// which may be the missing part). The identity probes decide either way
-	for (size_t i = 0; i < members.size(); i++)
-	{
-		const char* baseName = FileSystem::BaseFileName(members[i].Name.c_str());
-		if (!consumed[i] && (DupeStreamRepair::IsStreamEligible(baseName) || !strchr(baseName, '.')))
-		{
-			MemberSet set;
-			set.Format = MemberSet::mfBare;
-			set.Members.push_back((int)i);
-			sets.push_back(std::move(set));
-		}
-	}
-
-	// deterministic order: by the listing position of each set's first member
-	std::sort(sets.begin(), sets.end(),
-		[](const MemberSet& set1, const MemberSet& set2)
-		{
-			return *std::min_element(set1.Members.begin(), set1.Members.end()) <
-				*std::min_element(set2.Members.begin(), set2.Members.end());
-		});
-
-	return sets;
-#endif
 }
 
 std::unique_ptr<ContentMap> ContentMapper::BuildMap(const std::vector<SetMember>& members,
@@ -1122,12 +348,8 @@ std::unique_ptr<ContentMap> ContentMapper::BuildBareMap(const std::vector<SetMem
 {
 	int memberIndex = set.Members[0];
 	ContentSource* source = sources.GetSource(memberIndex);
-#ifdef NZBGET_USE_RUST
 	if (!nzbget_rs_src_content_map_can_build_bare_or_split_member(
 		source != nullptr ? 1 : 0, source ? source->Size() : 0))
-#else
-	if (!source || source->Size() <= 0)
-#endif
 	{
 		skipReason = "member unreadable";
 		return nullptr;
@@ -1159,12 +381,8 @@ std::unique_ptr<ContentMap> ContentMapper::BuildSplitMap(const std::vector<SetMe
 	for (int memberIndex : set.Members)
 	{
 		ContentSource* source = sources.GetSource(memberIndex);
-#ifdef NZBGET_USE_RUST
 		if (!nzbget_rs_src_content_map_can_build_bare_or_split_member(
 			source != nullptr ? 1 : 0, source ? source->Size() : 0))
-#else
-		if (!source || source->Size() <= 0)
-#endif
 		{
 			// every member's size shapes the offsets after it - unlike rar
 			// volumes, a split set with an unreadable member cannot map at all
@@ -1321,14 +539,9 @@ std::unique_ptr<ContentMap> ContentMapper::BuildRarMap(const std::vector<SetMemb
 				return nullptr;
 			}
 			ContentSource* source = sources.GetSource(set.Members[i]);
-#ifdef NZBGET_USE_RUST
 			if (!nzbget_rs_src_content_map_rar_data_run_geometry_valid(
 				innerFile.GetDataOffset(), innerFile.GetPackedSize(),
 				source != nullptr ? 1 : 0, source ? source->Size() : 0))
-#else
-			if (innerFile.GetDataOffset() < 0 || innerFile.GetPackedSize() < 0 ||
-				!source || innerFile.GetDataOffset() + innerFile.GetPackedSize() > source->Size())
-#endif
 			{
 				skipReason = "implausible data run geometry";
 				return nullptr;
@@ -1471,12 +684,7 @@ std::unique_ptr<ContentMap> ContentMapper::BuildRarMap(const std::vector<SetMemb
 			}
 			cipherTotal += runs[v].PackedSize;
 		}
-#ifdef NZBGET_USE_RUST
 		if (!nzbget_rs_cdn_content_mapper_rar_cipher_geometry_valid(innerSize, cipherTotal))
-#else
-		if (innerSize <= 0 || cipherTotal < innerSize ||
-			cipherTotal - innerSize >= 16 || cipherTotal % 16 != 0)
-#endif
 		{
 			skipReason = "encrypted volume geometry does not fit store mode";
 			return nullptr;
@@ -1492,12 +700,8 @@ std::unique_ptr<ContentMap> ContentMapper::BuildRarMap(const std::vector<SetMemb
 			// plaintext position p == cipher position p; the run covers this
 			// volume's plaintext bytes, and only the LAST volume's slab may
 			// run past them (the CBC padding tail carries no plaintext)
-#ifdef NZBGET_USE_RUST
 			int64 plainChunk = nzbget_rs_cdn_content_mapper_rar_calc_plain_chunk(
 				runs[v].PackedSize, innerSize, cipherBase);
-#else
-			int64 plainChunk = std::min(runs[v].PackedSize, innerSize - cipherBase);
-#endif
 			if (plainChunk <= 0)
 			{
 				// a padding-only volume: no real RAR splits inside the padding
@@ -1518,7 +722,6 @@ std::unique_ptr<ContentMap> ContentMapper::BuildRarMap(const std::vector<SetMemb
 
 	// store mode means the packed bytes ARE the inner bytes: exact sum
 	// required (this is the strong gate even if a method byte lied)
-#ifdef NZBGET_USE_RUST
 	int64 inferredPacked = 0;
 	int inferStatus = nzbget_rs_cdn_content_mapper_rar_infer_unknown_packed(
 		unknownVolume, innerSize, knownPacked, &inferredPacked);
@@ -1537,24 +740,6 @@ std::unique_ptr<ContentMap> ContentMapper::BuildRarMap(const std::vector<SetMemb
 		runs[unknownVolume].PackedSize = inferredPacked;
 		runs[unknownVolume].DataOffset = -1;
 	}
-#else
-	if (unknownVolume >= 0)
-	{
-		int64 inferred = innerSize - knownPacked;
-		if (inferred < 0)
-		{
-			skipReason = "packed sizes exceed the inner file size";
-			return nullptr;
-		}
-		runs[unknownVolume].PackedSize = inferred;
-		runs[unknownVolume].DataOffset = -1;
-	}
-	else if (knownPacked != innerSize)
-	{
-		skipReason = "packed sizes do not sum to the inner file size";
-		return nullptr;
-	}
-#endif
 
 	std::unique_ptr<ContentMap> map = std::make_unique<ContentMap>();
 	map->SetInnerName(innerName.c_str());
@@ -1563,12 +748,8 @@ std::unique_ptr<ContentMap> ContentMapper::BuildRarMap(const std::vector<SetMemb
 	int64 innerOffset = 0;
 	for (size_t i = 0; i < set.Members.size(); i++)
 	{
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_src_content_map_rar_can_emit_plain_run(
 			runs[i].DataOffset, runs[i].PackedSize))
-#else
-		if (runs[i].DataOffset >= 0 && runs[i].PackedSize > 0)
-#endif
 		{
 			map->GetRuns()->push_back({innerOffset, set.Members[i],
 				runs[i].DataOffset, runs[i].PackedSize});
@@ -1583,7 +764,6 @@ std::unique_ptr<ContentMap> ContentMapper::BuildZipMap(const std::vector<SetMemb
 	const MemberSet& set, ContentSourceSet& sources, std::string& skipReason)
 {
 	(void)members;
-#ifdef NZBGET_USE_RUST
 	std::vector<int64_t> memberSizes;
 	memberSizes.reserve(set.Members.size());
 	for (int memberIndex : set.Members)
@@ -1630,254 +810,12 @@ std::unique_ptr<ContentMap> ContentMapper::BuildZipMap(const std::vector<SetMemb
 			*c->SkipReason = reason ? reason : "";
 		});
 	return std::move(ctx.Map);
-#else
-	// the logical zip stream: z01..zNN then the final .zip (set order);
-	// only directory and header regions are read - data holes don't block
-	std::vector<int64> memberSizes;
-	std::vector<int64> diskBases;
-	int64 totalSize = 0;
-	for (int memberIndex : set.Members)
-	{
-		ContentSource* source = sources.GetSource(memberIndex);
-		if (!source || source->Size() <= 0)
-		{
-			skipReason = "member unreadable";
-			return nullptr;
-		}
-		memberSizes.push_back(source->Size());
-		diskBases.push_back(totalSize);
-		totalSize += source->Size();
-	}
-	CompositeSource logical(sources, set.Members, memberSizes);
-
-	// find the end-of-central-directory record in the tail window
-	int64 windowSize = std::min<int64>(totalSize, 66000);
-	std::vector<char> window(windowSize);
-	if (windowSize < 22 ||
-		!logical.Read(totalSize - windowSize, window.data(), windowSize))
-	{
-		skipReason = "archive directory unreadable";
-		return nullptr;
-	}
-	int64 eocdPos = -1;
-	for (int64 i = windowSize - 22; i >= 0; i--)
-	{
-		if (GetLe32(window.data() + i) == 0x06054b50)
-		{
-			eocdPos = i;
-			break;
-		}
-	}
-	if (eocdPos < 0)
-	{
-		skipReason = "no zip end-of-directory record";
-		return nullptr;
-	}
-	const char* eocd = window.data() + eocdPos;
-	uint64 entryCount = GetLe16(eocd + 10);
-	uint32 cdDisk = GetLe16(eocd + 6);
-	uint64 cdOffset = GetLe32(eocd + 16);
-
-	// zip64: the locator sits immediately before the EOCD
-	if ((cdOffset == 0xffffffff || entryCount == 0xffff) && eocdPos >= 20 &&
-		GetLe32(window.data() + eocdPos - 20) == 0x07064b50)
-	{
-		uint32 eocd64Disk = GetLe32(window.data() + eocdPos - 20 + 4);
-		uint64 eocd64Offset = GetLe64(window.data() + eocdPos - 20 + 8);
-		char eocd64[56];
-		// bound the offset in unsigned space BEFORE the int64 cast: an
-		// adversarial zip64 value near 2^63 must not signed-overflow the sum
-		if (eocd64Disk >= diskBases.size() ||
-			eocd64Offset > (uint64)(totalSize - diskBases[eocd64Disk]) ||
-			!logical.Read(diskBases[eocd64Disk] + (int64)eocd64Offset, eocd64, sizeof(eocd64)) ||
-			GetLe32(eocd64) != 0x06064b50)
-		{
-			skipReason = "corrupt zip64 directory";
-			return nullptr;
-		}
-		cdDisk = GetLe32(eocd64 + 20);
-		entryCount = GetLe64(eocd64 + 32);
-		cdOffset = GetLe64(eocd64 + 48);
-	}
-	// same unsigned-space bound as above: cdOffset may be a 64-bit zip64 value
-	if (cdDisk >= diskBases.size() ||
-		cdOffset > (uint64)(totalSize - diskBases[cdDisk]))
-	{
-		skipReason = "corrupt zip directory";
-		return nullptr;
-	}
-	int64 cdPos = diskBases[cdDisk] + (int64)cdOffset;
-
-	// walk the central directory keeping the largest (primary) entry;
-	// the CD is authoritative for sizes even under data-descriptor flag 3
-	struct ZipEntry
-	{
-		std::string Name;
-		uint64 CompSize = 0;
-		uint64 UncompSize = 0;
-		uint64 LocalOffset = 0;
-		uint32 Disk = 0;
-		uint16 Method = 0;
-		uint16 Flags = 0;
-	};
-	ZipEntry primary;
-	bool found = false;
-
-	for (uint64 entryIndex = 0; entryIndex < entryCount; entryIndex++)
-	{
-		char fixed[46];
-		if (!logical.Read(cdPos, fixed, sizeof(fixed)) || GetLe32(fixed) != 0x02014b50)
-		{
-			skipReason = "corrupt zip directory";
-			return nullptr;
-		}
-		ZipEntry entry;
-		entry.Flags = GetLe16(fixed + 8);
-		entry.Method = GetLe16(fixed + 10);
-		entry.CompSize = GetLe32(fixed + 20);
-		entry.UncompSize = GetLe32(fixed + 24);
-		uint16 nameLen = GetLe16(fixed + 28);
-		uint16 extraLen = GetLe16(fixed + 30);
-		uint16 commentLen = GetLe16(fixed + 32);
-		entry.Disk = GetLe16(fixed + 34);
-		entry.LocalOffset = GetLe32(fixed + 42);
-
-		std::vector<char> nameBuffer(nameLen);
-		if (nameLen > 0 &&
-			!logical.Read(cdPos + 46, nameBuffer.data(), nameLen))
-		{
-			skipReason = "corrupt zip directory";
-			return nullptr;
-		}
-		entry.Name.assign(nameBuffer.data(), nameLen);
-
-		if (extraLen > 0)
-		{
-			std::vector<char> extra(extraLen);
-			if (!logical.Read(cdPos + 46 + nameLen, extra.data(), extraLen))
-			{
-				skipReason = "corrupt zip directory";
-				return nullptr;
-			}
-			// zip64 field 0x0001: 64-bit values for the maxed markers, in order
-			for (int64 fieldPos = 0; fieldPos + 4 <= extraLen; )
-			{
-				uint16 fieldId = GetLe16(&extra[fieldPos]);
-				uint16 fieldSize = GetLe16(&extra[fieldPos + 2]);
-				if (fieldId == 0x0001)
-				{
-					int64 valuePos = fieldPos + 4;
-					// clamp to extraLen: a corrupt/adversarial fieldSize must
-					// never let the reads below run past the extra buffer
-					int64 fieldEnd = std::min<int64>(fieldPos + 4 + fieldSize, extraLen);
-					if (entry.UncompSize == 0xffffffff && valuePos + 8 <= fieldEnd)
-					{
-						entry.UncompSize = GetLe64(&extra[valuePos]);
-						valuePos += 8;
-					}
-					if (entry.CompSize == 0xffffffff && valuePos + 8 <= fieldEnd)
-					{
-						entry.CompSize = GetLe64(&extra[valuePos]);
-						valuePos += 8;
-					}
-					if (entry.LocalOffset == 0xffffffff && valuePos + 8 <= fieldEnd)
-					{
-						entry.LocalOffset = GetLe64(&extra[valuePos]);
-						valuePos += 8;
-					}
-					if (entry.Disk == 0xffff && valuePos + 4 <= fieldEnd)
-					{
-						entry.Disk = GetLe32(&extra[valuePos]);
-					}
-				}
-				fieldPos += 4 + fieldSize;
-			}
-		}
-
-		cdPos += 46 + nameLen + extraLen + commentLen;
-
-		if (!found || entry.UncompSize > primary.UncompSize)
-		{
-			primary = std::move(entry);
-			found = true;
-		}
-	}
-	if (!found)
-	{
-		skipReason = "empty zip directory";
-		return nullptr;
-	}
-
-	size_t slashPos = primary.Name.rfind('/');
-	std::string innerName = slashPos == std::string::npos ?
-		primary.Name : primary.Name.substr(slashPos + 1);
-
-	if (primary.Method != 0)
-	{
-		skipReason = "compressed zip entry (only stored maps)";
-		return nullptr;
-	}
-	if (primary.Flags & 0x0001)
-	{
-		skipReason = "encrypted zip entry";
-		return nullptr;
-	}
-	if (primary.CompSize != primary.UncompSize)
-	{
-		skipReason = "stored entry sizes disagree";
-		return nullptr;
-	}
-	if (!DupeStreamRepair::IsStreamEligible(innerName.c_str()))
-	{
-		skipReason = "inner file is not a media file";
-		return nullptr;
-	}
-	if (primary.Disk >= diskBases.size())
-	{
-		skipReason = "corrupt zip directory";
-		return nullptr;
-	}
-
-	// the local header names the exact data start
-	int64 localPos = diskBases[primary.Disk] + (int64)primary.LocalOffset;
-	char local[30];
-	if (!logical.Read(localPos, local, sizeof(local)) || GetLe32(local) != 0x04034b50)
-	{
-		skipReason = "corrupt zip local header";
-		return nullptr;
-	}
-	int64 dataPos = localPos + 30 + GetLe16(local + 26) + GetLe16(local + 28);
-	// compare in unsigned 64-bit space: primary.UncompSize comes from a
-	// zip64 extra field and can be adversarially huge, so this must not
-	// narrow it to int64 before the check (that could wrap negative and
-	// let an implausible geometry through)
-	if (dataPos > totalSize || primary.UncompSize > (uint64)(totalSize - dataPos))
-	{
-		skipReason = "implausible data run geometry";
-		return nullptr;
-	}
-
-	std::unique_ptr<ContentMap> map = std::make_unique<ContentMap>();
-	map->SetInnerName(innerName.c_str());
-	map->SetInnerSize((int64)primary.UncompSize);
-
-	int64 innerOffset = 0;
-	for (const MemberRange& piece : logical.ToMembers({dataPos, (int64)primary.UncompSize}))
-	{
-		map->GetRuns()->push_back({innerOffset, piece.MemberIndex,
-			piece.Range.Offset, piece.Range.Size});
-		innerOffset += piece.Range.Size;
-	}
-
-	return map;
-#endif
 }
 
 std::unique_ptr<ContentMap> ContentMapper::BuildSevenZipMap(const std::vector<SetMember>& members,
 	const MemberSet& set, ContentSourceSet& sources, std::string& skipReason)
 {
 	(void)members;
-#ifdef NZBGET_USE_RUST
 	std::vector<int64_t> memberSizes;
 	memberSizes.reserve(set.Members.size());
 	for (int memberIndex : set.Members)
@@ -1924,277 +862,6 @@ std::unique_ptr<ContentMap> ContentMapper::BuildSevenZipMap(const std::vector<Se
 			*c->SkipReason = reason ? reason : "";
 		});
 	return std::move(ctx.Map);
-#else
-	std::vector<int64> memberSizes;
-	int64 totalSize = 0;
-	for (int memberIndex : set.Members)
-	{
-		ContentSource* source = sources.GetSource(memberIndex);
-		if (!source || source->Size() <= 0)
-		{
-			skipReason = "member unreadable";
-			return nullptr;
-		}
-		memberSizes.push_back(source->Size());
-		totalSize += source->Size();
-	}
-	CompositeSource logical(sources, set.Members, memberSizes);
-
-	char signatureHeader[32];
-	static const char signature[] = {'7', 'z', (char)0xbc, (char)0xaf, 0x27, 0x1c};
-	if (totalSize < 32 || !logical.Read(0, signatureHeader, sizeof(signatureHeader)) ||
-		memcmp(signatureHeader, signature, sizeof(signature)))
-	{
-		skipReason = "not a 7z archive";
-		return nullptr;
-	}
-	uint64 nextHeaderOffset = GetLe64(signatureHeader + 12);
-	uint64 nextHeaderSize = GetLe64(signatureHeader + 20);
-	if (nextHeaderSize == 0 || nextHeaderSize > 16 * 1024 * 1024 ||
-		32 + nextHeaderOffset + nextHeaderSize > (uint64)totalSize)
-	{
-		skipReason = "implausible 7z header";
-		return nullptr;
-	}
-
-	std::vector<char> headerBytes(nextHeaderSize);
-	if (!logical.Read(32 + (int64)nextHeaderOffset, headerBytes.data(), (int64)nextHeaderSize))
-	{
-		skipReason = "archive header unreadable";
-		return nullptr;
-	}
-
-	SevenZipReader reader(headerBytes);
-	uint64 headerId = reader.ReadNumber();
-
-	// a packed header is acceptable only when it is itself Copy-coded:
-	// then the real header bytes sit verbatim in the pack area
-	std::vector<char> unpackedHeader;
-	if (headerId == 0x17)	// kEncodedHeader
-	{
-		SevenZipStreams headerStreams;
-		if (!ParseSevenZipStreamsInfo(reader, headerStreams) || !headerStreams.CopyOnly ||
-			headerStreams.PackSizes.size() != 1)
-		{
-			skipReason = "compressed 7z header";
-			return nullptr;
-		}
-		// bound BEFORE the resize (a lying pack size must not allocate), with
-		// the same plausibility cap as the outer header; both operands are
-		// individually checked so the sum cannot wrap
-		if (headerStreams.PackSizes[0] == 0 ||
-			headerStreams.PackSizes[0] > 16 * 1024 * 1024 ||
-			headerStreams.PackPos > (uint64)totalSize ||
-			32 + headerStreams.PackPos + headerStreams.PackSizes[0] > (uint64)totalSize)
-		{
-			skipReason = "implausible 7z header";
-			return nullptr;
-		}
-		unpackedHeader.resize(headerStreams.PackSizes[0]);
-		if (!logical.Read(32 + (int64)headerStreams.PackPos, unpackedHeader.data(),
-				(int64)headerStreams.PackSizes[0]))
-		{
-			skipReason = "archive header unreadable";
-			return nullptr;
-		}
-		reader = SevenZipReader(unpackedHeader);
-		headerId = reader.ReadNumber();
-	}
-	if (headerId != 0x01)	// kHeader
-	{
-		skipReason = "unsupported 7z structure";
-		return nullptr;
-	}
-
-	SevenZipStreams streams;
-	std::vector<std::string> names;
-	std::vector<bool> emptyStream;
-	uint64 fileCount = 0;
-
-	for (uint64 id = reader.ReadNumber(); reader.Ok && id != 0x00; id = reader.ReadNumber())
-	{
-		if (id == 0x02)	// kArchiveProperties: typed records, skip them
-		{
-			for (uint64 propType = reader.ReadNumber(); reader.Ok && propType != 0x00;
-				propType = reader.ReadNumber())
-			{
-				reader.Skip(reader.ReadNumber());
-			}
-		}
-		else if (id == 0x04)	// kMainStreamsInfo
-		{
-			if (!ParseSevenZipStreamsInfo(reader, streams))
-			{
-				skipReason = "unsupported 7z structure";
-				return nullptr;
-			}
-		}
-		else if (id == 0x05)	// kFilesInfo
-		{
-			fileCount = reader.ReadNumber();
-			for (uint64 propType = reader.ReadNumber(); reader.Ok && propType != 0x00;
-				propType = reader.ReadNumber())
-			{
-				uint64 propSize = reader.ReadNumber();
-				int64 propEnd = reader.Pos + (int64)propSize;
-				if (propType == 0x0e)	// kEmptyStream
-				{
-					emptyStream = reader.ReadBitVector(fileCount);
-				}
-				else if (propType == 0x11)	// kName
-				{
-					if (reader.ReadByte() != 0)
-					{
-						skipReason = "unsupported 7z structure";
-						return nullptr;
-					}
-					std::string current;
-					while (reader.Ok && reader.Pos + 1 < propEnd)
-					{
-						uint8 low = reader.ReadByte();
-						uint8 high = reader.ReadByte();
-						if (low == 0 && high == 0)
-						{
-							names.push_back(std::move(current));
-							current.clear();
-						}
-						else
-						{
-							current += (high == 0 && low < 128) ? (char)low : '_';
-						}
-					}
-				}
-				if (reader.Pos > propEnd)
-				{
-					skipReason = "unsupported 7z structure";
-					return nullptr;
-				}
-				reader.Pos = propEnd;	// every record is size-delimited
-			}
-		}
-		else
-		{
-			skipReason = "unsupported 7z structure";
-			return nullptr;
-		}
-	}
-	if (!reader.Ok || streams.FolderUnpackSizes.empty())
-	{
-		skipReason = "unsupported 7z structure";
-		return nullptr;
-	}
-	if (!streams.CopyOnly)
-	{
-		skipReason = "non-Copy 7z coder (only copy mode maps)";
-		return nullptr;
-	}
-	if (streams.PackSizes.size() != streams.FolderUnpackSizes.size())
-	{
-		skipReason = "unsupported 7z structure";
-		return nullptr;
-	}
-	for (size_t f = 0; f < streams.PackSizes.size(); f++)
-	{
-		if (streams.PackSizes[f] != streams.FolderUnpackSizes[f])
-		{
-			skipReason = "7z pack/unpack sizes disagree (not copy mode?)";
-			return nullptr;
-		}
-	}
-
-	// bound the whole pack area inside the logical stream BEFORE any int64
-	// offset arithmetic: a pack position or size near 2^63 must not wrap the
-	// signed math below into a bogus mapping (totalSize >= 32 was checked)
-	uint64 packEnd = streams.PackPos;
-	if (packEnd > (uint64)totalSize - 32)
-	{
-		skipReason = "implausible data run geometry";
-		return nullptr;
-	}
-	packEnd += 32;
-	for (uint64 packSize : streams.PackSizes)
-	{
-		if (packSize > (uint64)totalSize - packEnd)
-		{
-			skipReason = "implausible data run geometry";
-			return nullptr;
-		}
-		packEnd += packSize;
-	}
-
-	// substreams in folder-major order own logical data regions
-	struct SevenZipFile
-	{
-		std::string Name;
-		int64 DataPos = 0;
-		int64 Size = 0;
-	};
-	std::vector<SevenZipFile> dataFiles;
-	int64 packBase = 32 + (int64)streams.PackPos;
-	int64 folderPos = packBase;
-	for (size_t f = 0; f < streams.SubstreamSizes.size(); f++)
-	{
-		int64 filePos = folderPos;
-		for (uint64 substreamSize : streams.SubstreamSizes[f])
-		{
-			dataFiles.push_back({"", filePos, (int64)substreamSize});
-			filePos += (int64)substreamSize;
-		}
-		folderPos += (int64)streams.PackSizes[f];
-	}
-
-	// align names to substreams: empty-stream files (dirs) own no data
-	size_t dataIndex = 0;
-	for (uint64 i = 0; i < fileCount && i < names.size(); i++)
-	{
-		bool hasStream = emptyStream.empty() || i >= emptyStream.size() || !emptyStream[i];
-		if (hasStream && dataIndex < dataFiles.size())
-		{
-			size_t slashPos = names[i].find_last_of("/\\");
-			dataFiles[dataIndex].Name = slashPos == std::string::npos ?
-				names[i] : names[i].substr(slashPos + 1);
-			dataIndex++;
-		}
-	}
-
-	const SevenZipFile* primary = nullptr;
-	for (const SevenZipFile& file : dataFiles)
-	{
-		if (!primary || file.Size > primary->Size)
-		{
-			primary = &file;
-		}
-	}
-	if (!primary || primary->Name.empty())
-	{
-		skipReason = "unsupported 7z structure";
-		return nullptr;
-	}
-	if (!DupeStreamRepair::IsStreamEligible(primary->Name.c_str()))
-	{
-		skipReason = "inner file is not a media file";
-		return nullptr;
-	}
-	if (primary->DataPos + primary->Size > totalSize)
-	{
-		skipReason = "implausible data run geometry";
-		return nullptr;
-	}
-
-	std::unique_ptr<ContentMap> map = std::make_unique<ContentMap>();
-	map->SetInnerName(primary->Name.c_str());
-	map->SetInnerSize(primary->Size);
-
-	int64 innerOffset = 0;
-	for (const MemberRange& piece : logical.ToMembers({primary->DataPos, primary->Size}))
-	{
-		map->GetRuns()->push_back({innerOffset, piece.MemberIndex,
-			piece.Range.Offset, piece.Range.Size});
-		innerOffset += piece.Range.Size;
-	}
-
-	return map;
-#endif
 }
 
 std::vector<RepairSetData> ContentMapper::BuildRepairSets(const std::vector<SetMember>& members,
@@ -2252,7 +919,6 @@ std::vector<RepairSetData> ContentMapper::BuildRepairSets(const std::vector<SetM
 
 StreamRangeList ContentMapper::CoalesceRanges(std::vector<StreamRange> ranges)
 {
-#ifdef NZBGET_USE_RUST
 	std::vector<NzbgetRsByteRange> out(ranges.size());
 	size_t count = nzbget_rs_content_mapper_coalesce_ranges(
 		reinterpret_cast<const NzbgetRsByteRange*>(ranges.data()), ranges.size(),
@@ -2264,26 +930,4 @@ StreamRangeList ContentMapper::CoalesceRanges(std::vector<StreamRange> ranges)
 		merged.push_back({out[i].offset, out[i].size});
 	}
 	return merged;
-#else
-	std::sort(ranges.begin(), ranges.end(),
-		[](const StreamRange& range1, const StreamRange& range2)
-		{
-			return range1.Offset < range2.Offset;
-		});
-
-	StreamRangeList merged;
-	for (const StreamRange& range : ranges)
-	{
-		if (!merged.empty() && range.Offset <= merged.back().End())
-		{
-			merged.back().Size =
-				std::max(merged.back().End(), range.End()) - merged.back().Offset;
-		}
-		else
-		{
-			merged.push_back(range);
-		}
-	}
-	return merged;
-#endif
 }

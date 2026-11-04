@@ -22,9 +22,7 @@
 
 #include "nzbget.h"
 #include "TlsCipherBackend.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 #include "ServerPool.h"
 #include "Log.h"
@@ -82,9 +80,6 @@
 
 #include <locale>
 
-// Prototypes
-void RunMain();
-
 // Globals
 Log* g_Log;
 Options* g_Options;
@@ -117,94 +112,10 @@ int g_ArgumentCount;
 char* (*g_EnvironmentVariables)[] = nullptr;
 char* (*g_Arguments)[] = nullptr;
 
-/*
- * Main entry point
- */
-int main(int argc, char *argv[], char *argp[])
-{
-#ifdef NZBGET_USE_RUST
-	static const NzbgetCLifecycleHooks hooks = {
-		nzbget_c_set_process_args,
-		nzbget_c_util_init,
-		nzbget_c_nserv_main,
-		nzbget_c_win_service_check,
-		nzbget_c_phase1_init,
-		nzbget_c_phase2_subsystems_create_and_recover,
-		nzbget_c_phase3_server_activate,
-		nzbget_c_phase4_shutdown,
-		nzbget_c_has_active_unpack,
-		nzbget_c_is_reloading,
-		nzbget_c_stop_server,
-		nzbget_c_reload,
-		nzbget_c_exit_proc
-	};
-	nzbget_rs_register_lifecycle_hooks(&hooks);
-	return nzbget_rs_main(argc, argv, argp);
-#else
-#ifdef WIN32
-#ifdef _DEBUG
-	_CrtSetReportMode(_CRT_WARN, _CRTDBG_MODE_FILE | _CRTDBG_MODE_DEBUG);
-	_CrtSetReportFile(_CRT_WARN, _CRTDBG_FILE_STDERR);
-	_CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF
-#ifdef DEBUG_CRTMEMLEAKS
-		| _CRTDBG_CHECK_CRT_DF | _CRTDBG_CHECK_ALWAYS_DF
-#endif
-		);
-#endif
-
-	SetConsoleOutputCP(CP_UTF8);
-#endif
-
-	setlocale(LC_CTYPE, "");
-
-	Util::Init();
-	rapidyenc_decode_init();
-	rapidyenc_crc_init();
-
-	g_ArgumentCount = argc;
-	g_Arguments = (char*(*)[])argv;
-	g_EnvironmentVariables = (char*(*)[])argp;
-
-	if (argc > 1 && (!strcmp(argv[1], "--nserv")))
-	{
-#ifndef DISABLE_NSERV
-		return NServMain(argc, argv);
-#else
-		printf("ERROR: Could not start NServ, the program was compiled without NServ\n");
-		return 1;
-#endif
-	}
-
-#ifdef WIN32
-	InstallUninstallServiceCheck(argc, argv);
-#endif
-
-	srand((unsigned int)Util::CurrentTime());
-
-#ifdef WIN32
-	for (int i=0; i < argc; i++)
-	{
-		if (!strcmp(argv[i], "-D"))
-		{
-			AllocConsole(); // needed for sending CTRL+BREAK signal to child processes
-			StartService(RunMain);
-			return 0;
-		}
-	}
-#endif
-
-	RunMain();
-
-	return 0;
-#endif
-}
-
-
 class NZBGet final : public Options::Extender
 {
 public:
 	~NZBGet() override;
-	void Run(bool reload);
 	void Stop(bool reload);
 	bool GetReloading() { return m_reloading; }
 	bool GetStopped() const { return m_stopped; }
@@ -275,7 +186,6 @@ private:
 	std::mutex m_waitMutex;
 	std::condition_variable m_waitCond;
 
-	void Init();
 	void Final();
 	void BootConfig();
 	void CreateGlobals();
@@ -338,11 +248,7 @@ int NZBGet::Phase1_Init(bool reload)
 
 #ifndef WIN32
 	mode_t uMask = static_cast<mode_t>(m_options->GetUMask());
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_ccm_nzbget_is_valid_umask((uint32_t)uMask) != 0)
-#else
-	if (uMask < 01000)
-#endif
 	{
 		/* set newly created file permissions */
 		FileSystem::uMask = uMask;
@@ -435,12 +341,6 @@ int NZBGet::Phase2_SubsystemsAndState(bool reload)
 		m_statMeter->Init();
 	}
 	return 0;
-}
-
-void NZBGet::Init()
-{
-	Phase1_Init(m_reloading);
-	Phase2_SubsystemsAndState(m_reloading);
 }
 
 void NZBGet::Final()
@@ -552,7 +452,6 @@ void NZBGet::BootConfig()
 	m_options->SetRemoteClientMode(m_commandLineParser->GetRemoteClientMode());
 	m_options->SetServerMode(m_commandLineParser->GetServerMode());
 	m_options->SetDaemonMode(m_commandLineParser->GetDaemonMode());
-#ifdef NZBGET_USE_RUST
 	int testBacktrace = 0;
 #ifdef DEBUG
 	testBacktrace = m_commandLineParser->GetTestBacktrace() ? 1 : 0;
@@ -564,16 +463,6 @@ void NZBGet::BootConfig()
 		(int)m_commandLineParser->GetClientOperation(),
 		(int)CommandLineParser::opClientNoOperation,
 		m_commandLineParser->GetPrintOptions() ? 1 : 0) != 0);
-#else
-	m_options->SetDirectClientMode(
-#ifdef DEBUG
-		m_commandLineParser->GetTestBacktrace() ||
-#endif
-		m_commandLineParser->GetWebGet() ||
-		m_commandLineParser->GetSigVerify() ||
-		m_commandLineParser->GetClientOperation() != CommandLineParser::opClientNoOperation ||
-		m_commandLineParser->GetPrintOptions());
-#endif
 	m_workState->SetPauseDownload(m_commandLineParser->GetPauseDownload());
 	m_workState->SetSpeedLimit(g_Options->GetDownloadRate());
 
@@ -583,15 +472,10 @@ void NZBGet::BootConfig()
 	{
 		exit(1);
 	}
-#ifdef NZBGET_USE_RUST
 	else if (nzbget_rs_roc_nzbget_boot_should_pause_on_config_errors(
 		m_options->GetConfigErrors() ? 1 : 0,
 		(int)m_commandLineParser->GetClientOperation(),
 		(int)CommandLineParser::opClientNoOperation))
-#else
-	else if (m_options->GetConfigErrors() &&
-		m_commandLineParser->GetClientOperation() == CommandLineParser::opClientNoOperation)
-#endif
 	{
 		info("Pausing all activities due to errors in configuration");
 		m_workState->SetPauseDownload(true);
@@ -695,7 +579,6 @@ void NZBGet::StartRemoteServer()
 	m_remoteServer = std::make_unique<RemoteServer>(false);
 	m_remoteServer->Start();
 
-#ifdef NZBGET_USE_RUST
 #ifdef WIN32
 	const int isUnix = 0;
 #else
@@ -703,13 +586,6 @@ void NZBGet::StartRemoteServer()
 #endif
 	if (nzbget_rs_ccm_nzbget_should_start_secure_server(
 		m_options->GetSecureControl() ? 1 : 0, isUnix, m_options->GetControlIp()) != 0)
-#else
-	if (m_options->GetSecureControl()
-#ifndef WIN32
-		&& !(m_options->GetControlIp() && m_options->GetControlIp()[0] == '/')
-#endif
-)
-#endif
 	{
 		m_remoteSecureServer = std::make_unique<RemoteServer>(true);
 		m_remoteSecureServer->Start();
@@ -912,18 +788,11 @@ void NZBGet::DoMainLoop()
 			Reload();
 		}
 
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_ccm_nzbget_should_stop_standalone(
 			m_options->GetServerMode() ? 1 : 0,
 			m_queueCoordinator->HasMoreJobs() ? 1 : 0,
 			m_urlCoordinator->HasMoreJobs() ? 1 : 0,
 			m_prePostProcessor->HasMoreJobs() ? 1 : 0) != 0)
-#else
-		if (!m_options->GetServerMode() &&
-			!m_queueCoordinator->HasMoreJobs() &&
-			!m_urlCoordinator->HasMoreJobs() &&
-			!m_prePostProcessor->HasMoreJobs())
-#endif
 		{
 			// Standalone-mode: download completed
 			if (!m_queueCoordinator->IsStopped())
@@ -1041,16 +910,6 @@ void NZBGet::Phase4_Shutdown(bool reload)
 bool NZBGet::HasActiveUnpack() const
 {
 	return m_prePostProcessor ? m_prePostProcessor->HasActiveUnpack(false) : false;
-}
-
-void NZBGet::Run(bool reload)
-{
-	m_reloading = reload;
-
-	Phase1_Init(reload);
-	Phase2_SubsystemsAndState(reload);
-	Phase3_ServerActivation();
-	Phase4_Shutdown(m_reloading);
 }
 
 void NZBGet::ProcessClientRequest()
@@ -1179,13 +1038,7 @@ void NZBGet::ProcessWebGet()
 	downloader.SetInfoName("WebGet");
 
 	WebDownloader::EStatus status = downloader.DownloadWithRedirects(5);
-#ifdef NZBGET_USE_RUST
 	exit(nzbget_rs_ccm_nzbget_webget_exit_code((int)status, (int)WebDownloader::adFinished));
-#else
-	bool ok = status == WebDownloader::adFinished;
-
-	exit(ok ? 0 : 1);
-#endif
 }
 
 void NZBGet::ProcessSigVerify()
@@ -1193,11 +1046,7 @@ void NZBGet::ProcessSigVerify()
 #ifndef DISABLE_TLS
 	bool ok = Maintenance::VerifySignature(m_commandLineParser->GetLastArg(),
 		m_commandLineParser->GetSigFilename(), m_commandLineParser->GetPubKeyFilename());
-#ifdef NZBGET_USE_RUST
 	exit(nzbget_rs_ccm_nzbget_sigverify_exit_code(ok ? 1 : 0));
-#else
-	exit(ok ? 93 : 1);
-#endif
 #else
 	printf("ERROR: Could not verify signature, the program was compiled without OpenSSL support\n");
 	exit(1);
@@ -1213,9 +1062,7 @@ void NZBGet::Stop(bool reload)
 			g_reloadPending = false;
 			g_reloadCond.notify_all();
 		}
-#if defined(NZBGET_USE_RUST) && !defined(WIN32)
 		nzbget_rs_signal_notify(SIGTERM);
-#endif
 	}
 
 	{
@@ -1245,9 +1092,7 @@ void NZBGet::Stop(bool reload)
 	if (g_SigExitPending.exchange(false))
 	{
 		m_reloading = false;
-#if defined(NZBGET_USE_RUST) && !defined(WIN32)
 		nzbget_rs_signal_notify(SIGTERM);
-#endif
 	}
 	if (m_commandLineParser->GetRemoteClientMode())
 	{
@@ -1435,23 +1280,6 @@ void NZBGet::SetupFirstStart()
 }
 #endif
 
-void RunMain()
-{
-	// exit() runs the static destructors with the daemon still alive, and its
-	// destructors lock file-scope mutexes: destroy it first
-	atexit([] { g_NZBGet.reset(); });
-
-	bool reload = false;
-	while (!g_NZBGet || g_NZBGet->GetReloading())
-	{
-		g_NZBGet = std::make_unique<NZBGet>();
-		g_NZBGet->Run(reload);
-		reload = true;
-	}
-
-	g_NZBGet.reset();
-}
-
 void Reload()
 {
 	if (!g_NZBGet || g_NZBGet->GetReloading() || g_NZBGet->GetStopped() || g_SigExitPending.load())
@@ -1567,16 +1395,10 @@ void Reload()
 	}
 	else
 	{
-#ifdef NZBGET_USE_RUST
 		int64 elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
 			now - g_reloadFirstRequestTime).count();
 		int64 clampedMs = nzbget_rs_roc_nzbget_reload_clamp_debounce_ms(elapsedMs, 100, 1500);
 		g_reloadTargetTime = g_reloadFirstRequestTime + std::chrono::milliseconds(clampedMs);
-#else
-		auto newTarget = now + DEBOUNCE_DELAY;
-		auto maxTarget = g_reloadFirstRequestTime + MAX_BURST_DELAY;
-		g_reloadTargetTime = (newTarget < maxTarget) ? newTarget : maxTarget;
-#endif
 		g_reloadCond.notify_one();
 		debug("Reload request debounced, target extended");
 	}
@@ -1589,9 +1411,7 @@ void ExitProc()
 		g_reloadPending = false;
 		g_reloadCond.notify_all();
 	}
-#if defined(NZBGET_USE_RUST) && !defined(WIN32)
 	nzbget_rs_signal_notify(SIGTERM);
-#endif
 
 	if (g_NZBGet)
 	{

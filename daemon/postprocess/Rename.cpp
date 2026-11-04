@@ -24,9 +24,7 @@
 #include "Log.h"
 #include "FileSystem.h"
 #include "Rename.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 #ifndef DISABLE_PARCHECK
 void RenameController::PostParRenamer::PrintMessage(Message::EKind kind, const char* format, ...)
@@ -129,7 +127,6 @@ void RenameController::ExecRename(const char* destDir, const char* finalDir, con
 	if (m_kind == jkPar)
 	{
 #ifndef DISABLE_PARCHECK
-#ifdef NZBGET_USE_RUST
 		int detectMissingInt = 0;
 		bool useFinal = nzbget_rs_psp_rename_ctrl_eval_par_rename_config(
 			(int)m_postInfo->GetNzbInfo()->GetUnpackStatus(),
@@ -140,12 +137,6 @@ void RenameController::ExecRename(const char* destDir, const char* finalDir, con
 		m_parRenamer.SetDestDir(useFinal ? finalDir : destDir);
 		m_parRenamer.SetInfoName(nzbName);
 		m_parRenamer.SetDetectMissing(detectMissingInt != 0);
-#else
-		m_parRenamer.SetDestDir(m_postInfo->GetNzbInfo()->GetUnpackStatus() == NzbInfo::usSuccess &&
-			!Util::EmptyStr(finalDir) ? finalDir : destDir);
-		m_parRenamer.SetInfoName(nzbName);
-		m_parRenamer.SetDetectMissing(m_postInfo->GetNzbInfo()->GetUnpackStatus() == NzbInfo::usNone);
-#endif
 		m_parRenamer.Execute();
 #endif
 	}
@@ -169,7 +160,7 @@ void RenameController::RenameCompleted()
 {
 	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
 
-#if defined(NZBGET_USE_RUST) && !defined(DISABLE_PARCHECK)
+#if !defined(DISABLE_PARCHECK)
 	int reqExtraPars = 0;
 	int reqParCheck = 0;
 	int initialStatus = nzbget_rs_rco_rename_controller_complete_action(

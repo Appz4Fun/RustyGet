@@ -23,10 +23,8 @@
 
 #include <algorithm>
 #include "RarReader.h"
-#ifdef NZBGET_USE_RUST
 #include <exception>
 #include "nzbget_rs.h"
-#endif
 #include "StreamCrypto.h"
 #include "Log.h"
 #include "Util.h"
@@ -81,7 +79,6 @@ static const uint8 RAR5_ENDARC_NEXTVOL = 0x01;
 
 int64 RarSourceCursor::Read(void* buffer, int64 size)
 {
-#ifdef NZBGET_USE_RUST
 	int eofInt = 0;
 	int64 newPos = m_position;
 	int64 available = nzbget_rs_rrd_rar_cursor_calc_read_window(
@@ -100,30 +97,12 @@ int64 RarSourceCursor::Read(void* buffer, int64 size)
 	}
 	m_position = newPos;
 	return available;
-#else
-	int64 available = std::min(size, std::max<int64>(0, (int64)((uint64)m_source.Size() - (uint64)m_position)));
-	if (available < size)
-	{
-		m_eof = true;	// mimic feof: only a read past the end raises it
-	}
-	if (available <= 0)
-	{
-		return 0;
-	}
-	if (!m_source.Read(m_position, buffer, available))
-	{
-		return 0;	// source refused (donor article missing / target hole)
-	}
-	m_position = (int64)((uint64)m_position + (uint64)available);
-	return available;
-#endif
 }
 
 bool RarSourceCursor::Seek(int64 position, DiskFile::ESeekOrigin origin)
 {
 	// Header sizes can wrap the cursor. Use unsigned arithmetic explicitly:
 	// signed overflow here is undefined even though the parser needs wrapping.
-#ifdef NZBGET_USE_RUST
 	int64 target = 0;
 	if (!nzbget_rs_rrd_rar_cursor_calc_seek_target(
 		m_position,
@@ -133,14 +112,6 @@ bool RarSourceCursor::Seek(int64 position, DiskFile::ESeekOrigin origin)
 	{
 		return false;
 	}
-#else
-	int64 target = origin == DiskFile::soCur ? (int64)((uint64)m_position + (uint64)position) :
-		origin == DiskFile::soEnd ? (int64)((uint64)m_source.Size() + (uint64)position) : position;
-	if (target < 0)
-	{
-		return false;
-	}
-#endif
 	m_position = target;
 	m_eof = false;	// like fseek clearing the eof indicator
 	return true;
@@ -171,7 +142,6 @@ bool RarVolume::Read()
 	return ok;
 }
 
-#ifdef NZBGET_USE_RUST
 namespace
 {
 	// the parse's C++ side (rust/src/rarreader.rs calls back into it)
@@ -201,9 +171,7 @@ namespace
 		}
 	}
 }
-#endif
 
-#ifdef NZBGET_USE_RUST
 bool RarVolume::ReadFrom(ContentSource& source)
 {
 	// rust/src/rarreader.rs parses the headers; the content source and the
@@ -332,57 +300,14 @@ bool RarVolume::ReadFrom(ContentSource& source)
 
 	return ok;
 }
-#else
-bool RarVolume::ReadFrom(ContentSource& source)
-{
-	RarSourceCursor file(source);
-
-	m_version = DetectRarVersion(file);
-	file.Seek(0);
-
-	bool ok = false;
-
-	switch (m_version)
-	{
-		case 3:
-			ok = ReadRar3Volume(file);
-			break;
-
-		case 5:
-			ok = ReadRar5Volume(file);
-			break;
-	}
-
-	DecryptFree();
-
-	LogDebugInfo();
-
-	return ok;
-}
-#endif
 
 int RarVolume::DetectRarVersion(RarSourceCursor& file)
 {
-#ifdef NZBGET_USE_RUST
 	uint8_t fileSignature[8]{};
 	int cnt = (int)file.Read(fileSignature, sizeof(fileSignature));
 	return cnt == (int)sizeof(fileSignature)
 		? nzbget_rs_unpack_detect_rar_signature(fileSignature, sizeof(fileSignature))
 		: 0;
-#else
-	static char RAR3_SIGNATURE[] = { 0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00 };
-	static char RAR5_SIGNATURE[] = { 0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x01, 0x00 };
-
-	char fileSignature[8];
-
-	int cnt = 0;
-	cnt = (int)file.Read(fileSignature, sizeof(fileSignature));
-
-	bool rar5 = cnt == sizeof(fileSignature) && !strcmp(RAR5_SIGNATURE, fileSignature);
-	bool rar3 = !rar5 && cnt == sizeof(fileSignature) && !strcmp(RAR3_SIGNATURE, fileSignature);
-
-	return rar3 ? 3 : rar5 ? 5 : 0;
-#endif
 }
 
 bool RarVolume::Read(RarSourceCursor& file, RarBlock* block, void* buffer, int64 size)

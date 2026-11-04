@@ -7,21 +7,16 @@ if(NZBGET_RUST_TARGET)
 	set(RUST_TARGET_EXPLICIT TRUE)
 endif()
 
-# Keep the original implementation for toolchains not yet covered by the port.
+# Require the Rust crate on all builds now that legacy C++ #else blocks are retired.
 # In particular, never link a host Cargo archive into a cross-compiled binary.
 if(CMAKE_CROSSCOMPILING AND NOT APPLE AND NOT NZBGET_RUST_TARGET)
-	message(STATUS "Cross build without NZBGET_RUST_TARGET: using C++ web encoders")
-	return()
+	message(FATAL_ERROR "Cross build requires NZBGET_RUST_TARGET")
 endif()
 
 find_program(CARGO cargo HINTS "$ENV{HOME}/.cargo/bin")
 find_program(RUSTC rustc HINTS "$ENV{HOME}/.cargo/bin")
 if(NOT CARGO OR NOT RUSTC)
-	if(RUST_TARGET_EXPLICIT)
-		message(FATAL_ERROR "Building the Rust encoders requires cargo and rustc")
-	endif()
-	message(STATUS "Cargo or rustc unavailable: using C++ web encoders")
-	return()
+	message(FATAL_ERROR "Building RustyGet requires cargo and rustc")
 endif()
 
 set(RUST_ENV)
@@ -45,8 +40,7 @@ if(NOT NZBGET_RUST_TARGET)
 		WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/rust"
 		ERROR_VARIABLE RUST_VERSION_ERROR RESULT_VARIABLE RUST_STATUS)
 	if(NOT RUST_STATUS EQUAL 0 OR NOT RUST_VERSION MATCHES "host: ([^\r\n]+)")
-		message(STATUS "Rust host toolchain unavailable: using C++ web encoders")
-		return()
+		message(FATAL_ERROR "Rust host toolchain unavailable: ${RUST_VERSION_ERROR}")
 	endif()
 	set(NZBGET_RUST_TARGET "${CMAKE_MATCH_1}")
 	# A native compiler invoked with -m32 is not a CMake cross build.
@@ -64,11 +58,7 @@ foreach(RUST_TOOL CARGO RUSTC)
 		ERROR_QUIET RESULT_VARIABLE RUST_TOOL_STATUS)
 	if(NOT RUST_TOOL_STATUS EQUAL 0 OR NOT RUST_TOOL_VERSION MATCHES "^[a-z]+ ([0-9]+\\.[0-9]+\\.[0-9]+)"
 		OR CMAKE_MATCH_1 VERSION_LESS 1.99)
-		if(RUST_TARGET_EXPLICIT)
-			message(FATAL_ERROR "Building the Rust encoders requires Cargo and rustc 1.99 or later")
-		endif()
-		message(STATUS "Cargo or rustc older than 1.99 or unusable: using C++ web encoders")
-		return()
+		message(FATAL_ERROR "Building RustyGet requires Cargo and rustc 1.99 or later")
 	endif()
 endforeach()
 list(APPEND RUST_ENV "RUSTC=${RUSTC}")
@@ -76,11 +66,7 @@ list(APPEND RUST_ENV "RUSTC=${RUSTC}")
 # Ninja Multi-Config before CMake 3.20 can't declare the per-configuration
 # archive as an output, so Ninja would stop on a missing input.
 if(CMAKE_CONFIGURATION_TYPES AND CMAKE_GENERATOR MATCHES "Ninja" AND CMAKE_VERSION VERSION_LESS 3.20)
-	if(RUST_TARGET_EXPLICIT)
-		message(FATAL_ERROR "Building the Rust encoders with ${CMAKE_GENERATOR} requires CMake 3.20 or later")
-	endif()
-	message(STATUS "${CMAKE_GENERATOR} with CMake older than 3.20: using C++ web encoders")
-	return()
+	message(FATAL_ERROR "Building RustyGet with ${CMAKE_GENERATOR} requires CMake 3.20 or later")
 endif()
 
 # Match the CRT selection to the final C++ link. Without this, GNU targets
@@ -105,11 +91,7 @@ execute_process(
 	WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/rust"
 )
 if(NOT RUST_STATUS EQUAL 0)
-	if(RUST_TARGET_EXPLICIT)
-		message(FATAL_ERROR "Rust target ${NZBGET_RUST_TARGET} is unavailable: ${RUST_NATIVE_ERROR}")
-	endif()
-	message(STATUS "Rust target ${NZBGET_RUST_TARGET} is unavailable: using C++ web encoders")
-	return()
+	message(FATAL_ERROR "Rust target ${NZBGET_RUST_TARGET} is unavailable: ${RUST_NATIVE_ERROR}")
 endif()
 if(NOT "${RUST_NATIVE_OUTPUT}${RUST_NATIVE_ERROR}" MATCHES "native-static-libs: ([^\r\n]+)")
 	message(FATAL_ERROR "Could not determine Rust native link libraries")
@@ -181,3 +163,21 @@ target_link_libraries(nzbget-rs INTERFACE ${RUST_NATIVE_LIBS})
 target_include_directories(nzbget-rs INTERFACE "${CMAKE_SOURCE_DIR}/rust/include")
 target_compile_definitions(nzbget-rs INTERFACE NZBGET_USE_RUST)
 list(APPEND LIBS nzbget-rs)
+
+set(RUST_ENTRY_OBJ "${CMAKE_BINARY_DIR}/rust/nzbget_rs_entry.o")
+add_custom_command(
+	OUTPUT "${RUST_ENTRY_OBJ}"
+	COMMAND "${CMAKE_COMMAND}" -E env ${RUST_ENV} "${RUSTC}"
+		--crate-name nzbget_rs_entry --crate-type lib --emit=obj -C panic=abort -C opt-level=2
+		${RUST_CODEGEN_ARGS}
+		--target "${NZBGET_RUST_TARGET}"
+		"${CMAKE_SOURCE_DIR}/rust/entry.rs" -o "${RUST_ENTRY_OBJ}"
+	DEPENDS "${CMAKE_SOURCE_DIR}/rust/entry.rs"
+	WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/rust"
+	COMMENT "Building Rust daemon entry point"
+	VERBATIM
+)
+add_custom_target(nzbget-rs-entry-build DEPENDS "${RUST_ENTRY_OBJ}")
+add_library(nzbget-rs-entry OBJECT IMPORTED)
+set_target_properties(nzbget-rs-entry PROPERTIES IMPORTED_OBJECTS "${RUST_ENTRY_OBJ}")
+add_dependencies(nzbget-rs-entry nzbget-rs-entry-build)

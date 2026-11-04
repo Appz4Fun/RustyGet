@@ -24,9 +24,7 @@
 
 #include "Util.h"
 #include "Options.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 #include "Log.h"
 #include "FileSystem.h"
 
@@ -62,39 +60,11 @@ void Options::OptEntry::SetValue(const char* value)
 	}
 }
 
-#ifdef NZBGET_USE_RUST
 bool Options::OptEntry::Restricted()
 {
 	// rust/src/options.rs
 	return nzbget_rs_option_restricted(m_name, (char)-1 < 0) != 0;
 }
-#else
-bool Options::OptEntry::Restricted()
-{
-	BString<1024> loName = *m_name;
-	for (char* p = loName; *p; p++) *p = tolower(*p); // convert string to lowercase
-
-	bool restricted = !strcasecmp(m_name, CONTROLIP.data()) ||
-		!strcasecmp(m_name, CONTROLPORT.data()) ||
-		!strcasecmp(m_name, FORMAUTH.data()) ||
-		!strcasecmp(m_name, JSONP.data()) ||
-		!strcasecmp(m_name, SECURECONTROL.data()) ||
-		!strcasecmp(m_name, SECUREPORT.data()) ||
-		!strcasecmp(m_name, SECURECERT.data()) ||
-		!strcasecmp(m_name, SECUREKEY.data()) ||
-		!strcasecmp(m_name, CERTSTORE.data()) ||
-		!strcasecmp(m_name, CERTCHECK.data()) ||
-		!strcasecmp(m_name, AUTHORIZEDIP.data()) ||
-		!strcasecmp(m_name, DAEMONUSERNAME.data()) ||
-		!strcasecmp(m_name, UMASK.data()) ||
-		strchr(m_name, ':') ||			// All extension script options
-		strstr(loName, "username") ||	// ServerX.Username, ControlUsername, etc.
-		strstr(loName, "password") ||	// ServerX.Password, ControlPassword, etc.
-		strstr(loName, "apikey");		// DupeSearchApiKey: it opens the indexer
-
-	return restricted;
-}
-#endif
 
 Options::OptEntry* Options::OptEntries::FindOption(const char* name)
 {
@@ -535,7 +505,6 @@ void Options::CheckDir(CString& dir, const char* optionName,
 		dir[dir.Length() - 1] = '\0';
 	}
 
-#ifdef NZBGET_USE_RUST
 	int joinMode = nzbget_rs_rol_options_check_dir_join_mode(
 		dir, parentDir, PATH_SEPARATOR, ALT_PATH_SEPARATOR);
 	if (joinMode != 0)
@@ -554,29 +523,6 @@ void Options::CheckDir(CString& dir, const char* optionName,
 		dir = usedir2;
 		SetOption(optionName, usedir2);
 	}
-#else
-	if (!(dir[0] == PATH_SEPARATOR || dir[0] == ALT_PATH_SEPARATOR ||
-		(dir[0] && dir[1] == ':')) &&
-		!Util::EmptyStr(parentDir))
-	{
-		// convert relative path to absolute path
-		int plen = strlen(parentDir);
-
-		BString<1024> usedir2;
-		if (parentDir[plen-1] == PATH_SEPARATOR || parentDir[plen-1] == ALT_PATH_SEPARATOR)
-		{
-			usedir2.Format("%s%s", parentDir, *dir);
-		}
-		else
-		{
-			usedir2.Format("%s%c%s", parentDir, PATH_SEPARATOR, *dir);
-		}
-
-		FileSystem::NormalizePathSeparators((char*)usedir2);
-		dir = usedir2;
-		SetOption(optionName, usedir2);
-	}
-#endif
 
 	// Ensure the dir is created
 	CString errmsg;
@@ -734,17 +680,8 @@ void Options::InitOptions()
 	m_parTimeLimit			= ParseIntValue(PARTIMELIMIT.data(), 10);
 	m_keepHistory			= ParseIntValue(KEEPHISTORY.data(), 10);
 	m_feedHistory			= ParseIntValue(FEEDHISTORY.data(), 10);
-#ifdef NZBGET_USE_RUST
 	m_timeCorrection = nzbget_rs_fuq_options_normalize_time_correction(
 		ParseIntValue(TIMECORRECTION.data(), 10));
-#else
-	m_timeCorrection		= ParseIntValue(TIMECORRECTION.data(), 10);
-	if (-24 <= m_timeCorrection && m_timeCorrection <= 24)
-	{
-		m_timeCorrection *= 60;
-	}
-	m_timeCorrection *= 60;
-#endif
 	m_propagationDelay		= ParseIntValue(PROPAGATIONDELAY.data(), 10) * 60;
 	m_articleCache			= ParseIntValue(ARTICLECACHE.data(), 10);
 	m_memoryPressurePath	= GetOption(MEMORYPRESSUREPATH.data());
@@ -819,7 +756,6 @@ void Options::InitOptions()
 	m_dupeArticleFallback = (EDupeArticleFallback)ParseEnumValue(DUPEARTICLEFALLBACK.data(),
 		DupeArticleFallbackCount, DupeArticleFallbackNames, DupeArticleFallbackValues);
 	m_dupeStreamDecompress	= (bool)ParseEnumValue(DUPESTREAMDECOMPRESS.data(), BoolCount, BoolNames, BoolValues);
-#ifdef NZBGET_USE_RUST
 	int rawStreamTimeout = ParseIntValue(DUPESTREAMTIMEOUT.data(), 10);
 	m_dupeSearch			= (bool)ParseEnumValue(DUPESEARCH.data(), BoolCount, BoolNames, BoolValues);
 	m_dupeSearchDryRun		= (bool)ParseEnumValue(DUPESEARCHDRYRUN.data(), BoolCount, BoolNames, BoolValues);
@@ -842,22 +778,6 @@ void Options::InitOptions()
 		&m_dupeSearchMaxDonors, &m_dupeHealthPercent, &m_dupeHealthMin,
 		&m_dupeHealthMax, &m_dupeBodyChecks, &m_dupeHealthBudget,
 		&m_dupeMinAlive, &m_dupeFastDonors);
-#else
-	m_dupeStreamTimeout		= std::max(0, ParseIntValue(DUPESTREAMTIMEOUT.data(), 10));
-	m_dupeSearch			= (bool)ParseEnumValue(DUPESEARCH.data(), BoolCount, BoolNames, BoolValues);
-	m_dupeSearchDryRun		= (bool)ParseEnumValue(DUPESEARCHDRYRUN.data(), BoolCount, BoolNames, BoolValues);
-	m_dupeSearchUrl			= GetOption(DUPESEARCHURL.data());
-	m_dupeSearchApiKey		= GetOption(DUPESEARCHAPIKEY.data());
-	m_dupeSearchDelay		= std::max(0, ParseIntValue(DUPESEARCHDELAY.data(), 10));
-	m_dupeSearchMaxDonors	= std::max(0, ParseIntValue(DUPESEARCHMAXDONORS.data(), 10));
-	m_dupeHealthPercent		= std::min(100, std::max(1, ParseIntValue(DUPEHEALTHPERCENT.data(), 10)));
-	m_dupeHealthMin			= std::max(1, ParseIntValue(DUPEHEALTHMIN.data(), 10));
-	m_dupeHealthMax			= std::max(m_dupeHealthMin, ParseIntValue(DUPEHEALTHMAX.data(), 10));
-	m_dupeBodyChecks		= std::max(0, ParseIntValue(DUPEBODYCHECKS.data(), 10));
-	m_dupeHealthBudget		= std::max(5, ParseIntValue(DUPEHEALTHBUDGET.data(), 10));
-	m_dupeMinAlive			= std::min(100, std::max(0, ParseIntValue(DUPEMINALIVE.data(), 10)));
-	m_dupeFastDonors		= std::max(0, ParseIntValue(DUPEFASTDONORS.data(), 10));
-#endif
 	if (m_dupeSearch && Util::EmptyStr(m_dupeSearchUrl))
 	{
 		warn("Option <%s> is enabled but option <%s> is empty: no duplicates will be searched",
@@ -993,7 +913,6 @@ void Options::SetOption(const char* optname, const char* value)
 	optEntry->SetLineNo(m_configLine);
 
 	// expand variables
-#ifdef NZBGET_USE_RUST
 	size_t dollarPos = 0;
 	size_t varLen = 0;
 	while (nzbget_rs_rco_options_find_var_reference(curvalue, &dollarPos, &varLen))
@@ -1010,31 +929,6 @@ void Options::SetOption(const char* optname, const char* value)
 			break;
 		}
 	}
-#else
-	while (const char* dollar = strstr(curvalue, "${"))
-	{
-		const char* end = strchr(dollar, '}');
-		if (end)
-		{
-			int varlen = (int)(end - dollar - 2);
-			BString<100> variable;
-			variable.Set(dollar + 2, varlen);
-			const char* varvalue = GetOption(variable);
-			if (varvalue)
-			{
-				curvalue.Replace((int)(dollar - curvalue), 2 + varlen + 1, varvalue);
-			}
-			else
-			{
-				break;
-			}
-		}
-		else
-		{
-			break;
-		}
-	}
-#endif
 
 	optEntry->SetValue(curvalue);
 }
@@ -1181,7 +1075,6 @@ void Options::InitServers()
 
 		bool definition = nactive || nname || nlevel || ngroup || nhost || nport || noptional ||
 			nusername || npassword || nconnections || njoingroup || ntls || ncipher || nretention;
-#ifdef NZBGET_USE_RUST
 		int serverDefState = nzbget_rs_rol_options_check_server_def(
 			definition ? 1 : 0, nhost != nullptr ? 1 : 0,
 			nport != nullptr ? 1 : 0, nconnections != nullptr ? 1 : 0);
@@ -1190,14 +1083,6 @@ void Options::InitServers()
 			break;
 		}
 		bool completed = serverDefState == 1;
-#else
-		bool completed = nhost && nport && nconnections;
-
-		if (!definition)
-		{
-			break;
-		}
-#endif
 
 		if (completed)
 		{
@@ -1244,7 +1129,6 @@ void Options::InitCategories()
 		const char* naliases = GetOption(BString<100>("Category%i.Aliases", n));
 
 		bool definition = nname || ndestdir || nunpack || nextensions || naliases;
-#ifdef NZBGET_USE_RUST
 		int catDefState = nzbget_rs_rol_options_check_category_or_feed_def(
 			definition ? 1 : 0, (nname && strlen(nname) > 0) ? 1 : 0);
 		if (catDefState == 0)
@@ -1252,14 +1136,6 @@ void Options::InitCategories()
 			break;
 		}
 		bool completed = catDefState == 1;
-#else
-		bool completed = nname && strlen(nname) > 0;
-
-		if (!definition)
-		{
-			break;
-		}
-#endif
 
 		if (completed)
 		{
@@ -1334,7 +1210,6 @@ void Options::InitFeeds()
 
 		bool definition = nname || nurl || nfilter || ncategory || nbacklog || npausenzb ||
 			ninterval || npriority || nextensions;
-#ifdef NZBGET_USE_RUST
 		int feedDefState = nzbget_rs_rol_options_check_category_or_feed_def(
 			definition ? 1 : 0, nurl != nullptr ? 1 : 0);
 		if (feedDefState == 0)
@@ -1342,14 +1217,6 @@ void Options::InitFeeds()
 			break;
 		}
 		bool completed = feedDefState == 1;
-#else
-		bool completed = nurl;
-
-		if (!definition)
-		{
-			break;
-		}
-#endif
 
 		if (completed)
 		{
@@ -1427,13 +1294,7 @@ void Options::InitScheduler()
 			scActivateServer, scActivateServer, scDeactivateServer,
 			scDeactivateServer, scFetchFeed, scFetchFeed };
 		const int CommandCount = 27;
-#ifdef NZBGET_USE_RUST
 		bool knownCommand = nzbget_rs_rco_options_lookup_scheduler_command(command) >= 0;
-#else
-		// an unknown command is an error, not the first command (pausedownload)
-		bool knownCommand = std::any_of(std::begin(CommandNames), std::end(CommandNames),
-			[command](const char* name) { return !strcasecmp(name, command); });
-#endif
 		ESchedulerCommand taskCommand = (ESchedulerCommand)ParseEnumValue(
 			BString<100>("Task%i.Command", n), CommandCount, CommandNames, CommandValues);
 		if (!knownCommand)
@@ -1441,7 +1302,6 @@ void Options::InitScheduler()
 			continue;
 		}
 
-#ifdef NZBGET_USE_RUST
 		bool splitCmdEmpty = (param && strlen(param) > 0 && taskCommand == scProcess)
 			? Util::SplitCommandLine(param).empty() : false;
 		int paramCheck = nzbget_rs_rco_options_validate_scheduler_param(
@@ -1461,44 +1321,6 @@ void Options::InitScheduler()
 			ConfigError("Task definition not complete for \"Task%i\". Option \"Task%i.Param\" is missing", n, n);
 			continue;
 		}
-#else
-		if (param && strlen(param) > 0 && taskCommand == scProcess &&
-			Util::SplitCommandLine(param).empty())
-		{
-			ConfigError("Invalid value for option \"Task%i.Param\"", n);
-			continue;
-		}
-
-		if (taskCommand == scDownloadRate)
-		{
-			if (param)
-			{
-				char* err;
-				int downloadRateVal = strtol(param, &err, 10);
-				if (!err || *err != '\0' || downloadRateVal < 0)
-				{
-					ConfigError("Invalid value for option \"Task%i.Param\": \"%s\"", n, downloadRate);
-					continue;
-				}
-			}
-			else
-			{
-				ConfigError("Task definition not complete for \"Task%i\". Option \"Task%i.Param\" is missing", n, n);
-				continue;
-			}
-		}
-
-		if ((taskCommand == scScript ||
-			 taskCommand == scProcess ||
-			 taskCommand == scActivateServer ||
-			 taskCommand == scDeactivateServer ||
-			 taskCommand == scFetchFeed) &&
-			Util::EmptyStr(param))
-		{
-			ConfigError("Task definition not complete for \"Task%i\". Option \"Task%i.Param\" is missing", n, n);
-			continue;
-		}
-#endif
 
 		CreateSchedulerTask(n, time, weekDays, taskCommand, param);
 	}
@@ -1546,133 +1368,17 @@ void Options::CreateSchedulerTask(int id, const char* time, const char* weekDays
 	}
 }
 
-#ifdef NZBGET_USE_RUST
 bool Options::ParseTime(const char* time, int* hours, int* minutes)
 {
 	// rust/src/options.rs
 	return nzbget_rs_parse_time(time, hours, minutes) != 0;
 }
-#else
-bool Options::ParseTime(const char* time, int* hours, int* minutes)
-{
-	if (!strcmp(time, "*"))
-	{
-		*hours = -1;
-		*minutes = 0;
-		return true;
-	}
 
-	int colons = 0;
-	const char* p = time;
-	while (*p)
-	{
-		if (!strchr("0123456789: *", *p))
-		{
-			return false;
-		}
-		if (*p == ':')
-		{
-			colons++;
-		}
-		p++;
-	}
-
-	if (colons != 1)
-	{
-		return false;
-	}
-
-	const char* colon = strchr(time, ':');
-	if (!colon)
-	{
-		return false;
-	}
-
-	if (time[0] == '*')
-	{
-		*hours = -2;
-	}
-	else
-	{
-		*hours = atoi(time);
-		if (*hours < 0 || *hours > 23)
-		{
-			return false;
-		}
-	}
-
-	if (colon[1] == '*')
-	{
-		return false;
-	}
-	*minutes = atoi(colon + 1);
-	if (*minutes < 0 || *minutes > 59)
-	{
-		return false;
-	}
-
-	return true;
-}
-#endif
-
-#ifdef NZBGET_USE_RUST
 bool Options::ParseWeekDays(const char* weekDays, int* weekDaysBits)
 {
 	// rust/src/options.rs
 	return nzbget_rs_parse_week_days(weekDays, weekDaysBits) != 0;
 }
-#else
-bool Options::ParseWeekDays(const char* weekDays, int* weekDaysBits)
-{
-	*weekDaysBits = 0;
-	const char* p = weekDays;
-	int firstDay = 0;
-	bool range = false;
-	while (*p)
-	{
-		if (strchr("1234567", *p))
-		{
-			int day = *p - '0';
-			if (range)
-			{
-				if (day <= firstDay || firstDay == 0)
-				{
-					return false;
-				}
-				for (int i = firstDay; i <= day; i++)
-				{
-					*weekDaysBits |= 1 << (i - 1);
-				}
-				firstDay = 0;
-			}
-			else
-			{
-				*weekDaysBits |= 1 << (day - 1);
-				firstDay = day;
-			}
-			range = false;
-		}
-		else if (*p == ',')
-		{
-			range = false;
-		}
-		else if (*p == '-')
-		{
-			range = true;
-		}
-		else if (*p == ' ')
-		{
-			// skip spaces
-		}
-		else
-		{
-			return false;
-		}
-		p++;
-	}
-	return true;
-}
-#endif
 
 void Options::LoadConfigFile()
 {
@@ -1696,26 +1402,10 @@ void Options::LoadConfigFile()
 	{
 		m_configLine = ++line;
 
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_rco_options_trim_and_check_config_line(buf))
 		{
 			continue;
 		}
-#else
-		if (buf[0] != 0 && buf[strlen(buf)-1] == '\n')
-		{
-			buf[strlen(buf)-1] = 0; // remove traling '\n'
-		}
-		if (buf[0] != 0 && buf[strlen(buf)-1] == '\r')
-		{
-			buf[strlen(buf)-1] = 0; // remove traling '\r' (for windows line endings)
-		}
-
-		if (buf[0] == 0 || buf[0] == '#' || strspn(buf, " ") == strlen(buf))
-		{
-			continue;
-		}
-#endif
 
 		SetOptionString(buf);
 	}
@@ -1778,7 +1468,6 @@ bool Options::SplitOptionString(const char* option, CString& optName, CString& o
 	return true;
 }
 
-#ifdef NZBGET_USE_RUST
 bool Options::ValidateOptionName(const char* optname, const char* optvalue)
 {
 	// rust/src/options.rs: the name's class; the messages are logged here
@@ -1811,142 +1500,7 @@ bool Options::ValidateOptionName(const char* optname, const char* optvalue)
 			return false;
 	}
 }
-#else
-bool Options::ValidateOptionName(const char* optname, const char* optvalue)
-{
-	if (!strcasecmp(optname, CONFIGFILE.data()) || !strcasecmp(optname, APPBIN.data()) ||
-		!strcasecmp(optname, APPDIR.data()) || !strcasecmp(optname, APPVERSION.data()))
-	{
-		// read-only options
-		return false;
-	}
 
-	const char* v = GetOption(optname);
-	if (v)
-	{
-		// it's predefined option, OK
-		return true;
-	}
-
-	if (!strncasecmp(optname, "server", 6))
-	{
-		const char* p = optname + 6;
-		while (*p >= '0' && *p <= '9') p++;
-		if ((!strcasecmp(p, ".active") || !strcasecmp(p, ".name") ||
-			!strcasecmp(p, ".level") || !strcasecmp(p, ".host") ||
-			!strcasecmp(p, ".port") || !strcasecmp(p, ".username") ||
-			!strcasecmp(p, ".password") || !strcasecmp(p, ".joingroup") ||
-			!strcasecmp(p, ".encryption") || !strcasecmp(p, ".connections") ||
-			!strcasecmp(p, ".cipher") || !strcasecmp(p, ".group") ||
-			!strcasecmp(p, ".retention") || !strcasecmp(p, ".optional") ||
-			!strcasecmp(p, ".notes") || !strcasecmp(p, ".ipversion") ||
-			!strcasecmp(p, ".certverification")))
-		{
-			return true;
-		}
-	}
-
-	if (!strncasecmp(optname, "task", 4))
-	{
-		const char* p = optname + 4;
-		while (*p >= '0' && *p <= '9') p++;
-		if (!strcasecmp(p, ".time") || !strcasecmp(p, ".weekdays") ||
-			!strcasecmp(p, ".command") || !strcasecmp(p, ".param") ||
-			!strcasecmp(p, ".downloadrate") || !strcasecmp(p, ".process"))
-		{
-			return true;
-		}
-	}
-
-	if (!strncasecmp(optname, "category", 8))
-	{
-		const char* p = optname + 8;
-		while (*p >= '0' && *p <= '9') p++;
-		if (!strcasecmp(p, ".name") || !strcasecmp(p, ".destdir") || !strcasecmp(p, ".extensions") ||
-			!strcasecmp(p, ".unpack") || !strcasecmp(p, ".aliases"))
-		{
-			return true;
-		}
-	}
-
-	if (!strncasecmp(optname, "feed", 4))
-	{
-		const char* p = optname + 4;
-		while (*p >= '0' && *p <= '9') p++;
-		if (!strcasecmp(p, ".name") || !strcasecmp(p, ".url") || !strcasecmp(p, ".interval") ||
-			 !strcasecmp(p, ".filter") || !strcasecmp(p, ".backlog") || !strcasecmp(p, ".pausenzb") ||
-			 !strcasecmp(p, ".category") || !strcasecmp(p, ".categorySource") || !strcasecmp(p, ".priority") || 
-			 !strcasecmp(p, ".extensions") || !strcasecmp(p, ".certverification"))
-		{
-			return true;
-		}
-	}
-
-	// scripts options
-	if (strchr(optname, ':'))
-	{
-		return true;
-	}
-
-	// print warning messages for obsolete options
-	if (!strcasecmp(optname, RETRYONCRCERROR.data()) ||
-		!strcasecmp(optname, ALLOWREPROCESS.data()) ||
-		!strcasecmp(optname, LOADPARS.data()) ||
-		!strcasecmp(optname, THREADLIMIT.data()) ||
-		!strcasecmp(optname, POSTLOGKIND.data()) ||
-		!strcasecmp(optname, NZBLOGKIND.data()) ||
-		!strcasecmp(optname, PROCESSLOGKIND.data()) ||
-		!strcasecmp(optname, APPENDNZBDIR.data()) ||
-		!strcasecmp(optname, RENAMEBROKEN.data()) ||
-		!strcasecmp(optname, MERGENZB.data()) ||
-		!strcasecmp(optname, STRICTPARNAME.data()) ||
-		!strcasecmp(optname, RELOADURLQUEUE.data()) ||
-		!strcasecmp(optname, RELOADPOSTQUEUE.data()) ||
-		!strcasecmp(optname, PARCLEANUPQUEUE.data()) ||
-		!strcasecmp(optname, DELETECLEANUPDISK.data()) ||
-		!strcasecmp(optname, HISTORYCLEANUPDISK.data()) ||
-		!strcasecmp(optname, SAVEQUEUE.data()) ||
-		!strcasecmp(optname, RELOADQUEUE.data()) ||
-		!strcasecmp(optname, TERMINATETIMEOUT.data()) ||
-		!strcasecmp(optname, ACCURATERATE.data()) ||
-		!strcasecmp(optname, CREATEBROKENLOG.data()) ||
-		!strcasecmp(optname, BROKENLOG.data()))
-	{
-		ConfigWarn("Option \"%s\" is obsolete, ignored", optname);
-		return true;
-	}
-
-	if (!strcasecmp(optname, POSTPROCESS.data()) ||
-		!strcasecmp(optname, NZBPROCESS.data()) ||
-		!strcasecmp(optname, NZBADDEDPROCESS.data()))
-	{
-		if (optvalue && strlen(optvalue) > 0)
-		{
-			ConfigError("Option \"%s\" is obsolete, ignored, use \"%s\" and \"%s\" instead",
-				optname, SCRIPTDIR.data(), EXTENSIONS.data());
-		}
-		return true;
-	}
-
-	if (!strcasecmp(optname, SCANSCRIPT.data()) ||
-		!strcasecmp(optname, QUEUESCRIPT.data()) ||
-		!strcasecmp(optname, FEEDSCRIPT.data()))
-	{
-		// will be automatically converted into "Extensions"
-		return true;
-	}
-
-	if (!strcasecmp(optname, CREATELOG.data()) || !strcasecmp(optname, RESETLOG.data()))
-	{
-		ConfigWarn("Option \"%s\" is obsolete, ignored, use \"%s\" instead", optname, WRITELOG.data());
-		return true;
-	}
-
-	return false;
-}
-#endif
-
-#ifdef NZBGET_USE_RUST
 void Options::ConvertOldOption(CString& option, CString& value)
 {
 	// rust/src/options.rs
@@ -1966,109 +1520,6 @@ void Options::ConvertOldOption(CString& option, CString& value)
 	nzbget_rs_free(newOption);
 	nzbget_rs_free(newValue);
 }
-#else
-void Options::ConvertOldOption(CString& option, CString& value)
-{
-	// for compatibility with older versions accept old option names
-
-	if (!strcasecmp(option, "$MAINDIR"))
-	{
-		option = "MainDir";
-	}
-
-	if (!strcasecmp(option, "ServerIP"))
-	{
-		option = "ControlIP";
-	}
-
-	if (!strcasecmp(option, "ServerPort"))
-	{
-		option = "ControlPort";
-	}
-
-	if (!strcasecmp(option, "ServerPassword"))
-	{
-		option = "ControlPassword";
-	}
-
-	if (!strcasecmp(option, "PostPauseQueue"))
-	{
-		option = "ScriptPauseQueue";
-	}
-
-	if (!strcasecmp(option, "ParCheck") && !strcasecmp(value, "yes"))
-	{
-		value = "always";
-	}
-
-	if (!strcasecmp(option, "ParCheck") && !strcasecmp(value, "no"))
-	{
-		value = "auto";
-	}
-
-	if (!strcasecmp(option, "ParScan") && !strcasecmp(value, "auto"))
-	{
-		value = "extended";
-	}
-
-	if (!strcasecmp(option, "DefScript") || !strcasecmp(option, "PostScript"))
-	{
-		option = "Extensions";
-	}
-
-	int nameLen = strlen(option);
-	if (!strncasecmp(option, "Category", 8) &&
-		((nameLen > 10 && !strcasecmp(option + nameLen - 10, ".DefScript")) ||
-		 (nameLen > 11 && !strcasecmp(option + nameLen - 11, ".PostScript"))))
-	{
-		option.Replace(".DefScript", ".Extensions");
-		option.Replace(".PostScript", ".Extensions");
-	}
-	if (!strncasecmp(option, "Feed", 4) && nameLen > 11 && !strcasecmp(option + nameLen - 11, ".FeedScript"))
-	{
-		option.Replace(".FeedScript", ".Extensions");
-	}
-
-	if (!strcasecmp(option, "WriteBufferSize"))
-	{
-		option = "WriteBuffer";
-		int val = strtol(value, nullptr, 10);
-		val = val == -1 ? 1024 : val / 1024;
-		value.Format("%i", val);
-	}
-
-	if (!strcasecmp(option, "ConnectionTimeout"))
-	{
-		option = "ArticleTimeout";
-	}
-
-	if (!strcasecmp(option, "Retries"))
-	{
-		option = "ArticleRetries";
-	}
-
-	if (!strcasecmp(option, "RetryInterval"))
-	{
-		option = "ArticleInterval";
-	}
-
-	if (!strcasecmp(option, "DumpCore"))
-	{
-		option = CRASHDUMP.data();
-	}
-
-	if (!strcasecmp(option, DECODE.data()))
-	{
-		option = RAWARTICLE.data();
-		value = !strcasecmp(value, "no") ? "yes" : "no";
-	}
-
-	if (!strcasecmp(option, "LogBufferSize"))
-	{
-		option = LOGBUFFER.data();
-	}
-}
-#endif
 
 void Options::CheckOptions()
 {
@@ -2130,7 +1581,6 @@ void Options::CheckOptions()
 		m_certCheck = false;
 	}
 
-#ifdef NZBGET_USE_RUST
 	int newDirectWrite = m_directWrite ? 1 : 0;
 	int newDirectRename = m_directRename ? 1 : 0;
 	nzbget_rs_rol_options_reconcile_write_flags(
@@ -2139,17 +1589,6 @@ void Options::CheckOptions()
 		&newDirectWrite, &newDirectRename);
 	m_directWrite = newDirectWrite != 0;
 	m_directRename = newDirectRename != 0;
-#else
-	if (m_rawArticle)
-	{
-		m_directWrite = false;
-	}
-
-	if (m_skipWrite)
-	{
-		m_directRename = false;
-	}
-#endif
 
 	// if option "ConfigTemplate" is not set, use "WebDir" as default location for template
 	// (for compatibility with versions 9 and 10).
@@ -2162,7 +1601,6 @@ void Options::CheckOptions()
 		}
 	}
 
-#ifdef NZBGET_USE_RUST
 	int origArticleCache = m_articleCache;
 	int origParBuffer = m_parBuffer;
 	int memErr = nzbget_rs_fuq_options_clamp_32bit_memory_limits(
@@ -2188,29 +1626,6 @@ void Options::CheckOptions()
 		}
 		ConfigError("Options \"ArticleCache\" and \"ParBuffer\" in total cannot use more than 1900MB of memory in 32-Bit mode. Changed to 1500 and 400");
 	}
-#else
-	if (m_articleCache < 0)
-	{
-		m_articleCache = 0;
-	}
-	else if (sizeof(void*) == 4 && m_articleCache > 1900)
-	{
-		ConfigError("Invalid value for option \"ArticleCache\": %i. Changed to 1900", m_articleCache);
-		m_articleCache = 1900;
-	}
-	else if (sizeof(void*) == 4 && m_parBuffer > 1900)
-	{
-		ConfigError("Invalid value for option \"ParBuffer\": %i. Changed to 1900", m_parBuffer);
-		m_parBuffer = 1900;
-	}
-
-	if (sizeof(void*) == 4 && m_parBuffer + m_articleCache > 1900)
-	{
-		ConfigError("Options \"ArticleCache\" and \"ParBuffer\" in total cannot use more than 1900MB of memory in 32-Bit mode. Changed to 1500 and 400");
-		m_articleCache = 1500;
-		m_parBuffer = 400;
-	}
-#endif
 
 	if (!m_unpackPassFile.Empty() && !FileSystem::FileExists(m_unpackPassFile))
 	{
@@ -2236,11 +1651,7 @@ void Options::CheckOptions()
 			tls = (bool)ParseEnumValue(encOpt, BoolCount, BoolNames, BoolValues);
 		}
 
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_roc_options_server_cipher_without_tls(tls ? 1 : 0, ncipher))
-#else
-		if (!tls && ncipher && ncipher[0] != '\0')
-#endif
 		{
 			LocateOptionSrcPos(cipherOpt);
 			ConfigWarn("Option %s ('%s') is ignored because %s is disabled for Server%i.",
@@ -2249,7 +1660,6 @@ void Options::CheckOptions()
 		}
 	}
 
-#ifdef NZBGET_USE_RUST
 	int disableDupeSearch = 0;
 	int enableFlushQueue = 0;
 	int enforceUnpackMutex = 0;
@@ -2282,34 +1692,6 @@ void Options::CheckOptions()
 		m_unpackMutexEnforced = true;
 		SetOption("_UnpackMutexEnforced", "yes");
 	}
-#else
-	// Rule 7.2: Disable DupeSearch if HealthCheck=park
-	if (m_dupeSearch && m_healthCheck == hcPark)
-	{
-		LocateOptionSrcPos(DUPESEARCH.data());
-		ConfigWarn("Option 'DupeSearch' automatically disabled: 'HealthCheck' is set to 'park', which suspends failed downloads without triggering duplicate donor resolution.");
-		m_dupeSearch = false;
-		SetOption(DUPESEARCH.data(), "no");
-	}
-
-	// Rule 7.3: Force FlushQueue=yes if DirectWrite=yes
-	if (!m_flushQueue && m_directWrite)
-	{
-		LocateOptionSrcPos(FLUSHQUEUE.data());
-		ConfigWarn("Option 'FlushQueue=no' is incompatible with 'DirectWrite=yes'. Automatically enabling 'FlushQueue=yes' to ensure queue crash-recovery and prevent duplicate file corruption.");
-		m_flushQueue = true;
-		SetOption(FLUSHQUEUE.data(), "yes");
-	}
-
-	// Rule 7.4: DirectUnpack=yes with UnpackPauseQueue=no enforces runtime unpack mutex
-	if (!m_unpackPauseQueue && m_directUnpack)
-	{
-		LocateOptionSrcPos(DIRECTUNPACK.data());
-		ConfigWarn("Option 'DirectUnpack=yes' with 'UnpackPauseQueue=no' can cause severe disk thrashing. Unpack concurrency will be serialized across jobs to protect I/O throughput.");
-		m_unpackMutexEnforced = true;
-		SetOption("_UnpackMutexEnforced", "yes");
-	}
-#endif
 }
 
 void Options::ConvertOldOptions(OptEntries* optEntries)
@@ -2373,56 +1755,14 @@ void Options::MergeOldScriptOption(OptEntries* optEntries, const char* optname, 
 	}
 }
 
-#ifdef NZBGET_USE_RUST
 bool Options::HasScript(const char* scriptList, const char* scriptName)
 {
 	// rust/src/options.rs
 	return nzbget_rs_has_script(scriptList, scriptName) != 0;
 }
-#else
-bool Options::HasScript(const char* scriptList, const char* scriptName)
-{
-	Tokenizer tok(scriptList, ",;");
-	while (const char* scriptName2 = tok.Next())
-	{
-		if (!strcasecmp(scriptName2, scriptName))
-		{
-			return true;
-		}
-	}
-	return false;
-}
-#endif
 
-#ifdef NZBGET_USE_RUST
 FeedInfo::CategorySource Options::ParseCategorySource(const char* value)
 {
 	// rust/src/options.rs
 	return static_cast<FeedInfo::CategorySource>(nzbget_rs_parse_category_source(value));
 }
-#else
-FeedInfo::CategorySource Options::ParseCategorySource(const char* value)
-{
-	if (!value)
-	{
-		return FeedInfo::CategorySource::NZBFile;
-	}
-
-	if (!strncasecmp(value, "auto", 4))
-	{
-		return FeedInfo::CategorySource::Auto;
-	}
-	else if (!strncasecmp(value, "nzbfile", 8))
-	{
-		return FeedInfo::CategorySource::NZBFile;
-	}
-	else if (!strncasecmp(value, "feedfile", 9))
-	{
-		return FeedInfo::CategorySource::FeedFile;
-	}
-	else
-	{
-		return FeedInfo::CategorySource::NZBFile;
-	}
-}
-#endif

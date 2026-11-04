@@ -30,9 +30,7 @@
 #include "FeedCoordinator.h"
 #include "SchedulerScript.h"
 
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 void Scheduler::AddTask(std::unique_ptr<Task> task)
 {
@@ -48,13 +46,8 @@ void Scheduler::FirstCheck()
 		std::sort(m_taskList.begin(), m_taskList.end(),
 			[](const std::unique_ptr<Task>& task1, const std::unique_ptr<Task>& task2)
 		{
-#ifdef NZBGET_USE_RUST
 			return nzbget_rs_sfw_scheduler_task_less(
 				task1->m_hours, task1->m_minutes, task2->m_hours, task2->m_minutes) != 0;
-#else
-			return (task1->m_hours < task2->m_hours) ||
-				((task1->m_hours == task2->m_hours) && (task1->m_minutes < task2->m_minutes));
-#endif
 		});
 	}
 
@@ -111,7 +104,6 @@ void Scheduler::CheckTasks()
 
 		time_t current = Util::CurrentTime();
 
-#ifdef NZBGET_USE_RUST
 		std::vector<NzbgetRsSchedTask> tasks;
 		tasks.reserve(m_taskList.size());
 		for (Task* task : &m_taskList)
@@ -162,81 +154,6 @@ void Scheduler::CheckTasks()
 			ExecuteTask(m_taskList[due[i]].get());
 		}
 		m_lastCheck = static_cast<time_t>(lastCheck);
-#else
-		if (!m_taskList.empty())
-		{
-			// Detect large step changes of system time
-			time_t diff = current - m_lastCheck;
-			if (diff > 60 * 90 || diff < 0)
-			{
-				debug("Reset scheduled tasks (detected clock change greater than 90 minutes or negative)");
-
-				// check all tasks for the last week
-				m_lastCheck = current - 60 * 60 * 24 * 7;
-				m_executeProcess = false;
-
-				for (Task* task : &m_taskList)
-				{
-					if (task->m_hours != Task::STARTUP_TASK)
-					{
-						task->m_lastExecuted = 0;
-					}
-				}
-			}
-
-			time_t localCurrent = current + g_WorkState->GetLocalTimeOffset();
-			time_t localLastCheck = m_lastCheck + g_WorkState->GetLocalTimeOffset();
-
-			tm tmCurrent;
-			gmtime_r(&localCurrent, &tmCurrent);
-			tm tmLastCheck;
-			gmtime_r(&localLastCheck, &tmLastCheck);
-
-			tm tmLoop;
-			memcpy(&tmLoop, &tmLastCheck, sizeof(tmLastCheck));
-			tmLoop.tm_hour = tmCurrent.tm_hour;
-			tmLoop.tm_min = tmCurrent.tm_min;
-			tmLoop.tm_sec = tmCurrent.tm_sec;
-			time_t loop = Util::Timegm(&tmLoop);
-
-			while (loop <= localCurrent)
-			{
-				for (Task* task : &m_taskList)
-				{
-					if (task->m_lastExecuted != loop)
-					{
-						tm tmAppoint;
-						memcpy(&tmAppoint, &tmLoop, sizeof(tmLoop));
-						tmAppoint.tm_hour = task->m_hours;
-						tmAppoint.tm_min = task->m_minutes;
-						tmAppoint.tm_sec = 0;
-
-						time_t appoint = Util::Timegm(&tmAppoint);
-
-						int weekDay = tmAppoint.tm_wday;
-						if (weekDay == 0)
-						{
-							weekDay = 7;
-						}
-
-						bool weekDayOK = task->m_weekDaysBits == 0 || (task->m_weekDaysBits & (1 << (weekDay - 1)));
-						bool doTask = (task->m_hours >= 0 && weekDayOK && localLastCheck < appoint && appoint <= localCurrent) ||
-							(task->m_hours == Task::STARTUP_TASK && task->m_lastExecuted == 0);
-
-						if (doTask)
-						{
-							ExecuteTask(task);
-							task->m_lastExecuted = loop;
-						}
-					}
-				}
-				loop += 60 * 60 * 24; // inc day
-				gmtime_r(&loop, &tmLoop);
-			}
-		}
-
-		m_lastCheck = current;
-#endif
 	}
 
 	PrintLog();
@@ -251,24 +168,16 @@ void Scheduler::ExecuteTask(Task* task)
 	debug("Executing scheduled command: %s", commandName[task->m_command]);
 #endif
 
-#ifdef NZBGET_USE_RUST
 	bool executeProcess = nzbget_rs_sfw_scheduler_should_execute_process(
 		m_executeProcess ? 1 : 0, task->m_hours, Task::STARTUP_TASK) != 0;
-#else
-	bool executeProcess = m_executeProcess || task->m_hours == Task::STARTUP_TASK;
-#endif
 
 	switch (task->m_command)
 	{
 		case scDownloadRate:
 			if (!task->m_param.empty())
 			{
-#ifdef NZBGET_USE_RUST
 				g_WorkState->SetSpeedLimit(
 					nzbget_rs_sfw_scheduler_calc_speed_limit_bytes(atoi(task->m_param.c_str())));
-#else
-				g_WorkState->SetSpeedLimit(atoi(task->m_param.c_str()) * 1024);
-#endif
 				m_downloadRateChanged = true;
 			}
 			break;
@@ -363,13 +272,8 @@ void Scheduler::EditServer(bool active, const char* serverList)
 		int id = atoi(serverRef);
 		for (NewsServer* server : g_ServerPool->GetServers())
 		{
-#ifdef NZBGET_USE_RUST
 			if (nzbget_rs_sfw_scheduler_matches_server_ref(
 				id, server->GetId(), server->GetName(), serverRef) != 0)
-#else
-			if ((id > 0 && server->GetId() == id) ||
-				!strcasecmp(server->GetName(), serverRef))
-#endif
 			{
 				if (!m_serverChanged)
 				{
@@ -397,7 +301,6 @@ void Scheduler::FetchFeed(const char* feedList)
 		int id = atoi(feedRef);
 		for (FeedInfo* feed : g_FeedCoordinator->GetFeeds())
 		{
-#ifdef NZBGET_USE_RUST
 			int targetFeedId = 0;
 			if (nzbget_rs_sfw_scheduler_matches_feed_ref(
 				id, feed->GetId(), feed->GetName(), feedRef, &targetFeedId) != 0)
@@ -405,15 +308,6 @@ void Scheduler::FetchFeed(const char* feedList)
 				g_FeedCoordinator->FetchFeed(targetFeedId);
 				break;
 			}
-#else
-			if (feed->GetId() == id ||
-				!strcasecmp(feed->GetName(), feedRef) ||
-				!strcasecmp("0", feedRef))
-			{
-				g_FeedCoordinator->FetchFeed(!strcasecmp("0", feedRef) ? 0 : feed->GetId());
-				break;
-			}
-#endif
 		}
 	}
 }
@@ -422,11 +316,7 @@ void Scheduler::CheckScheduledResume()
 {
 	time_t resumeTime = g_WorkState->GetResumeTime();
 	time_t currentTime = Util::CurrentTime();
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_sfw_scheduler_should_autoresume((int64_t)resumeTime, (int64_t)currentTime) != 0)
-#else
-	if (resumeTime > 0 && currentTime >= resumeTime)
-#endif
 	{
 		info("Autoresume");
 		g_WorkState->SetResumeTime(0);

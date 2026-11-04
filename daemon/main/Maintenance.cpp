@@ -23,9 +23,7 @@
 #include "FileSystem.h"
 #include "Maintenance.h"
 #include "Options.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 extern void ExitProc();
 extern int g_ArgumentCount;
@@ -159,7 +157,6 @@ bool Maintenance::ReadPackageInfoStr(const char* key, CString& value)
 		return false;
 	}
 
-#ifdef NZBGET_USE_RUST
 	size_t valStart = 0, valLen = 0;
 	if (!nzbget_rs_feh_maintenance_extract_package_info_str(
 		packageInfo, key, sizeof(fileName), &valStart, &valLen))
@@ -169,38 +166,6 @@ bool Maintenance::ReadPackageInfoStr(const char* key, CString& value)
 	}
 	const char* p = (const char*)packageInfo + valStart;
 	size_t len = valLen;
-#else
-	BString<100> keyStr("\"%s\"", key);
-
-	char* p = strstr(packageInfo, keyStr);
-	if (!p)
-	{
-		error("Could not parse file %s", *fileName);
-		return false;
-	}
-
-	p = strchr(p + strlen(keyStr), '"');
-	if (!p)
-	{
-		error("Could not parse file %s", *fileName);
-		return false;
-	}
-
-	p++;
-	char* pend = strchr(p, '"');
-	if (!pend)
-	{
-		error("Could not parse file %s", *fileName);
-		return false;
-	}
-
-	size_t len = pend - p;
-	if (len >= sizeof(fileName))
-	{
-		error("Could not parse file %s", *fileName);
-		return false;
-	}
-#endif
 
 	value.Reserve(len);
 	strncpy(value, p, len);
@@ -265,7 +230,6 @@ void UpdateScriptController::AddMessage(Message::EKind kind, const char* text)
 {
 	text = text + m_prefixLen;
 
-#ifdef NZBGET_USE_RUST
 	int msgKind = nzbget_rs_feh_maintenance_classify_update_message(text);
 	if (msgKind != 0)
 	{
@@ -285,26 +249,6 @@ void UpdateScriptController::AddMessage(Message::EKind kind, const char* text)
 		g_Maintenance->AddMessage(kind, Util::CurrentTime(), text);
 		ScriptController::AddMessage(kind, text);
 	}
-#else
-	if (!strncmp(text, "[NZB] ", 6))
-	{
-		debug("Command %s detected", text + 6);
-		if (!strcmp(text + 6, "QUIT"))
-		{
-			Detach();
-			ExitProc();
-		}
-		else
-		{
-			error("Invalid command \"%s\" received", text);
-		}
-	}
-	else
-	{
-		g_Maintenance->AddMessage(kind, Util::CurrentTime(), text);
-		ScriptController::AddMessage(kind, text);
-	}
-#endif
 }
 
 void UpdateInfoScriptController::ExecuteScript(const char* script, CString& updateInfo)
@@ -334,7 +278,6 @@ void UpdateInfoScriptController::AddMessage(Message::EKind kind, const char* tex
 {
 	text = text + m_prefixLen;
 
-#ifdef NZBGET_USE_RUST
 	int infoKind = nzbget_rs_feh_maintenance_classify_update_info_message(text);
 	if (infoKind != 0)
 	{
@@ -352,24 +295,6 @@ void UpdateInfoScriptController::AddMessage(Message::EKind kind, const char* tex
 	{
 		ScriptController::AddMessage(kind, text);
 	}
-#else
-	if (!strncmp(text, "[NZB] ", 6))
-	{
-		debug("Command %s detected", text + 6);
-		if (!strncmp(text + 6, "[UPDATEINFO]", 12))
-		{
-			m_updateInfo.Append(text + 6 + 12);
-		}
-		else
-		{
-			error("Invalid command \"%s\" received from %s", text, GetInfoName());
-		}
-	}
-	else
-	{
-		ScriptController::AddMessage(kind, text);
-	}
-#endif
 }
 
 #ifndef DISABLE_TLS
@@ -428,28 +353,8 @@ bool Signature::ReadSignature()
 		if (!strncmp(buf, sigTitle, titLen))
 		{
 			char* hexSig = buf + titLen;
-#ifdef NZBGET_USE_RUST
 			(void)output;
 			ok = nzbget_rs_feh_maintenance_decode_hex_signature(hexSig, m_signature) != 0;
-#else
-			int sigLen = strlen(hexSig);
-			if (sigLen > 2)
-			{
-				hexSig[sigLen - 2] = '\0'; // trim trailing ",
-			}
-			while (*hexSig && *(hexSig+1) && output != m_signature + sizeof(m_signature))
-			{
-				uchar c1 = *hexSig++;
-				uchar c2 = *hexSig++;
-				c1 = '0' <= c1 && c1 <= '9' ? c1 - '0' : 'A' <= c1 && c1 <= 'F' ? c1 - 'A' + 10 :
-					'a' <= c1 && c1 <= 'f' ? c1 - 'a' + 10 : 0;
-				c2 = '0' <= c2 && c2 <= '9' ? c2 - '0' : 'A' <= c2 && c2 <= 'F' ? c2 - 'A' + 10 :
-					'a' <= c2 && c2 <= 'f' ? c2 - 'a' + 10 : 0;
-				uchar ch = (c1 << 4) + c2;
-				*output++ = (char)ch;
-			}
-			ok = output == m_signature + sizeof(m_signature);
-#endif
 
 			break;
 		}

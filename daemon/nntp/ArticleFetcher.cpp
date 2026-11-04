@@ -460,6 +460,24 @@ ArticleFetcher::FetchedArticle ArticleFetcher::FetchFromConnection(NntpConnectio
 		return result;
 	}
 
+#ifdef NZBGET_USE_RUST
+	int64 decOffset = 0;
+	int64 decFileSize = 0;
+	int decSuccess = 0;
+	if (!nzbget_rs_cdn_article_fetcher_eval_decoded_yenc(
+		(int)decoder.Check(), (int)Decoder::dsFinished,
+		(int)decoder.GetFormat(), (int)Decoder::efYenc,
+		decoder.GetBeginPos(), decoder.GetEndPos(), decoder.GetSize(),
+		result.Data.size(), &decOffset, &decFileSize, &decSuccess))
+	{
+		detail("Stream repair: article %s from %s failed decoding",
+			messageId, connection->GetNewsServer()->GetName());
+		return result;
+	}
+	result.Offset = decOffset;
+	result.FileSize = decFileSize;
+	result.Success = decSuccess != 0;
+#else
 	if (decoder.Check() != Decoder::dsFinished ||
 		decoder.GetFormat() != Decoder::efYenc ||
 		decoder.GetBeginPos() <= 0 || decoder.GetEndPos() <= 0 ||
@@ -476,6 +494,7 @@ ArticleFetcher::FetchedArticle ArticleFetcher::FetchFromConnection(NntpConnectio
 	result.FileSize = decoder.GetSize();
 	result.Success = (int64)result.Data.size() ==
 		decoder.GetEndPos() - decoder.GetBeginPos() + 1;
+#endif
 
 	return result;
 }
@@ -543,10 +562,17 @@ void ArticleBatchFetcher::Begin(std::vector<Request> requests)
 bool ArticleBatchFetcher::ClaimNext(int batchId, size_t& index, Request& request)
 {
 	Guard guard(m_mutex);
+#ifdef NZBGET_USE_RUST
+	if (!nzbget_rs_cdn_article_batch_can_claim_next(
+		batchId, m_batchId, m_cancelled ? 1 : 0, m_stopped ? 1 : 0,
+		m_nextClaim, m_requests.size(), m_nextDeliver, GetWindowParts(),
+		m_bufferedBytes, MaxBufferedBytes))
+#else
 	if (batchId != m_batchId || m_cancelled || m_stopped ||
 		m_nextClaim >= m_requests.size() ||
 		m_nextClaim - m_nextDeliver >= (size_t)GetWindowParts() ||
 		m_bufferedBytes >= MaxBufferedBytes)
+#endif
 	{
 		return false;
 	}

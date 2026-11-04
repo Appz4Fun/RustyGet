@@ -17165,6 +17165,554 @@ pub extern "C" fn nzbget_rs_pup_history_coord_can_attempt_requeue_file(
     )
 }
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cdn_content_source_range_valid(
+    offset: i64,
+    size: i64,
+    total_size: i64,
+) -> c_int {
+    i32::from(crate::contentdupenntp::content_source_range_valid(
+        offset, size, total_size,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_cdn_content_map_calc_decrypt_cipher_bounds(
+    inner_offset: i64,
+    inner_size: i64,
+    inner_size_total: i64,
+    block_size: i64,
+    cipher_stream_size: i64,
+    out_empty: *mut c_int,
+    out_cipher_from: *mut i64,
+    out_cipher_to: *mut i64,
+) -> c_int {
+    let (valid, empty, from, to) =
+        crate::contentdupenntp::content_map_calc_decrypt_cipher_bounds(
+            inner_offset,
+            inner_size,
+            inner_size_total,
+            block_size,
+            cipher_stream_size,
+        );
+    if !out_empty.is_null() {
+        *out_empty = i32::from(empty);
+    }
+    if !out_cipher_from.is_null() {
+        *out_cipher_from = from;
+    }
+    if !out_cipher_to.is_null() {
+        *out_cipher_to = to;
+    }
+    i32::from(valid)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cdn_content_mapper_is_compressible_archive(
+    format: c_int,
+    mf_rar: c_int,
+    mf_zip: c_int,
+    mf_seven_zip: c_int,
+) -> c_int {
+    i32::from(
+        crate::contentdupenntp::content_mapper_is_compressible_archive(
+            format,
+            mf_rar,
+            mf_zip,
+            mf_seven_zip,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cdn_content_mapper_rar_cipher_geometry_valid(
+    inner_size: i64,
+    cipher_total: i64,
+) -> c_int {
+    i32::from(
+        crate::contentdupenntp::content_mapper_rar_cipher_geometry_valid(inner_size, cipher_total),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cdn_content_mapper_rar_calc_plain_chunk(
+    packed_size: i64,
+    inner_size: i64,
+    cipher_base: i64,
+) -> i64 {
+    crate::contentdupenntp::content_mapper_rar_calc_plain_chunk(
+        packed_size,
+        inner_size,
+        cipher_base,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_cdn_content_mapper_rar_infer_unknown_packed(
+    unknown_volume: c_int,
+    inner_size: i64,
+    known_packed: i64,
+    out_inferred_packed: *mut i64,
+) -> c_int {
+    let (status, inferred) = crate::contentdupenntp::content_mapper_rar_infer_unknown_packed(
+        unknown_volume,
+        inner_size,
+        known_packed,
+    );
+    if !out_inferred_packed.is_null() {
+        *out_inferred_packed = inferred;
+    }
+    status
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cdn_dupesearch_classify_search_retry_reason(
+    queries: c_int,
+    failed: c_int,
+    verified_empty: c_int,
+    fetched_empty: c_int,
+    refused: c_int,
+    fetch_err: c_int,
+    not_tried: c_int,
+) -> c_int {
+    crate::contentdupenntp::dupesearch_classify_search_retry_reason(
+        queries,
+        failed,
+        verified_empty != 0,
+        fetched_empty != 0,
+        refused,
+        fetch_err,
+        not_tried,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cdn_dupesearch_calc_fast_donor_count(
+    dupe_fast_donors: c_int,
+    live_count: usize,
+    cap: c_int,
+) -> usize {
+    crate::contentdupenntp::dupesearch_calc_fast_donor_count(dupe_fast_donors, live_count, cap)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cdn_dupesearch_alive_to_percent(alive: f64) -> c_int {
+    crate::contentdupenntp::dupesearch_alive_to_percent(alive)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cdn_dupesearch_fast_donor_alive_param(
+    is_dead: c_int,
+    alive: f64,
+) -> c_int {
+    crate::contentdupenntp::dupesearch_fast_donor_alive_param(is_dead != 0, alive)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_cdn_dupe_fallback_is_par_file(
+    par_file: c_int,
+    first_content: c_int,
+    fc_par2: c_int,
+    filename_confirmed: c_int,
+    filename: *const c_char,
+) -> c_int {
+    let fname = if filename.is_null() {
+        &b""[..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    i32::from(crate::contentdupenntp::dupe_fallback_is_par_file(
+        par_file != 0,
+        first_content,
+        fc_par2,
+        filename_confirmed != 0,
+        fname,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cdn_dupe_fallback_should_skip_first_content(
+    content: c_int,
+    fc_par2: c_int,
+    fc_unknown: c_int,
+    part_number: c_int,
+    has_extension: c_int,
+) -> c_int {
+    i32::from(
+        crate::contentdupenntp::dupe_fallback_should_skip_first_content(
+            content,
+            fc_par2,
+            fc_unknown,
+            part_number,
+            has_extension != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cdn_dupe_fallback_is_nzb_or_file_ineligible(
+    file_deleted: c_int,
+    nzb_deleting: c_int,
+    nzb_parking: c_int,
+    delete_status: c_int,
+    ds_none: c_int,
+    dupe_mode: c_int,
+    dm_force: c_int,
+) -> c_int {
+    i32::from(
+        crate::contentdupenntp::dupe_fallback_is_nzb_or_file_ineligible(
+            file_deleted != 0,
+            nzb_deleting != 0,
+            nzb_parking != 0,
+            delete_status,
+            ds_none,
+            dupe_mode,
+            dm_force,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_cdn_dupe_fallback_eval_par_defer(
+    par_defer: c_int,
+    part_number: c_int,
+    dupe_par_defer_state: c_int,
+    dp_deferred: c_int,
+    dp_lifted: c_int,
+    par_cannot_cover: c_int,
+    damage_certain: c_int,
+    damage_projected: c_int,
+    out_lift_defer_state: *mut c_int,
+    out_log_lifted: *mut c_int,
+) -> c_int {
+    let (defer, lift, log) = crate::contentdupenntp::dupe_fallback_eval_par_defer(
+        par_defer != 0,
+        part_number,
+        dupe_par_defer_state,
+        dp_deferred,
+        dp_lifted,
+        par_cannot_cover != 0,
+        damage_certain != 0,
+        damage_projected != 0,
+    );
+    if !out_lift_defer_state.is_null() {
+        *out_lift_defer_state = i32::from(lift);
+    }
+    if !out_log_lifted.is_null() {
+        *out_log_lifted = i32::from(log);
+    }
+    i32::from(defer)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_cdn_dupe_fallback_classify_first_head(
+    head_ptr: *const u8,
+    head_len: usize,
+) -> c_int {
+    if head_ptr.is_null() || head_len < 8 {
+        return 0;
+    }
+    let slice = std::slice::from_raw_parts(head_ptr, head_len);
+    crate::contentdupenntp::dupe_fallback_classify_first_head(slice)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cdn_stream_repair_is_nzb_eligible_for_job(
+    has_nzb: c_int,
+    delete_status: c_int,
+    ds_none: c_int,
+    ds_health: c_int,
+    deleting: c_int,
+    parking: c_int,
+    has_post_info: c_int,
+) -> c_int {
+    i32::from(
+        crate::contentdupenntp::stream_repair_is_nzb_eligible_for_job(
+            has_nzb != 0,
+            delete_status,
+            ds_none,
+            ds_health,
+            deleting != 0,
+            parking != 0,
+            has_post_info != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cdn_dupecoord_same_content_hash(
+    full1: u32,
+    filtered1: u32,
+    full2: u32,
+    filtered2: u32,
+) -> c_int {
+    i32::from(crate::contentdupenntp::dupecoord_same_content_hash(
+        full1, filtered1, full2, filtered2,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cdn_dupecoord_should_keep_returned_dupe(
+    health_check: c_int,
+    hc_dupe: c_int,
+    dupe_hint: c_int,
+    dh_redownload_auto: c_int,
+    current_success_articles: c_int,
+    health: c_int,
+    critical_health: c_int,
+) -> c_int {
+    i32::from(crate::contentdupenntp::dupecoord_should_keep_returned_dupe(
+        health_check,
+        hc_dupe,
+        dupe_hint,
+        dh_redownload_auto,
+        current_success_articles,
+        health,
+        critical_health,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_cdn_stream_repair_check_fetched_member_part(
+    success: c_int,
+    data_len: usize,
+    offset: i64,
+    fetched_file_size: i64,
+    member_size: i64,
+    out_mark_member_bad: *mut c_int,
+) -> c_int {
+    let (invalid, mark_bad) = crate::contentdupenntp::stream_repair_check_fetched_member_part(
+        success != 0,
+        data_len,
+        offset,
+        fetched_file_size,
+        member_size,
+    );
+    if !out_mark_member_bad.is_null() {
+        *out_mark_member_bad = i32::from(mark_bad);
+    }
+    i32::from(invalid)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_cdn_stream_repair_eval_slow_rate(
+    download_rate: i64,
+    recovered: i64,
+    remaining: i64,
+    elapsed_sec: f64,
+    timeout_sec: c_int,
+    slow_repair_factor: c_int,
+    out_repair_mb_s: *mut f64,
+    out_remaining_mb: *mut f64,
+    out_repair_sec: *mut f64,
+    out_download_mb_s: *mut f64,
+) -> c_int {
+    let (is_slow, repair_mb_s, rem_mb, repair_sec, dl_mb_s) =
+        crate::contentdupenntp::stream_repair_eval_slow_rate(
+            download_rate,
+            recovered,
+            remaining,
+            elapsed_sec,
+            timeout_sec,
+            slow_repair_factor,
+        );
+    if !out_repair_mb_s.is_null() {
+        *out_repair_mb_s = repair_mb_s;
+    }
+    if !out_remaining_mb.is_null() {
+        *out_remaining_mb = rem_mb;
+    }
+    if !out_repair_sec.is_null() {
+        *out_repair_sec = repair_sec;
+    }
+    if !out_download_mb_s.is_null() {
+        *out_download_mb_s = dl_mb_s;
+    }
+    i32::from(is_slow)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cdn_stream_repair_is_incomplete_nzb_hole(
+    missing: i64,
+    encoded_size: i64,
+) -> c_int {
+    i32::from(crate::contentdupenntp::stream_repair_is_incomplete_nzb_hole(
+        missing,
+        encoded_size,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cdn_stream_repair_materialize_article_valid(
+    success: c_int,
+    data_len: usize,
+    offset: i64,
+    fetched_file_size: i64,
+    member_size: i64,
+) -> c_int {
+    i32::from(
+        crate::contentdupenntp::stream_repair_materialize_article_valid(
+            success != 0,
+            data_len,
+            offset,
+            fetched_file_size,
+            member_size,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_cdn_stream_repair_credit_repaired_sizes(
+    recovered_failed_size: i64,
+    recovered_failed_par_size: i64,
+    inout_failed_size: *mut i64,
+    inout_success_size: *mut i64,
+    inout_cur_failed_size: *mut i64,
+    inout_cur_success_size: *mut i64,
+    inout_par_failed_size: *mut i64,
+    inout_par_success_size: *mut i64,
+    inout_par_cur_failed_size: *mut i64,
+    inout_par_cur_success_size: *mut i64,
+) {
+    if inout_failed_size.is_null()
+        || inout_success_size.is_null()
+        || inout_cur_failed_size.is_null()
+        || inout_cur_success_size.is_null()
+        || inout_par_failed_size.is_null()
+        || inout_par_success_size.is_null()
+        || inout_par_cur_failed_size.is_null()
+        || inout_par_cur_success_size.is_null()
+    {
+        return;
+    }
+    let (nf, ns, ncf, ncs, npf, nps, npcf, npcs) =
+        crate::contentdupenntp::stream_repair_credit_repaired_sizes(
+            recovered_failed_size,
+            recovered_failed_par_size,
+            *inout_failed_size,
+            *inout_success_size,
+            *inout_cur_failed_size,
+            *inout_cur_success_size,
+            *inout_par_failed_size,
+            *inout_par_success_size,
+            *inout_par_cur_failed_size,
+            *inout_par_cur_success_size,
+        );
+    *inout_failed_size = nf;
+    *inout_success_size = ns;
+    *inout_cur_failed_size = ncf;
+    *inout_cur_success_size = ncs;
+    *inout_par_failed_size = npf;
+    *inout_par_success_size = nps;
+    *inout_par_cur_failed_size = npcf;
+    *inout_par_cur_success_size = npcs;
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cdn_twin_check_eval_sample_verdict(
+    is_stopped: c_int,
+    compared: c_int,
+    differ: c_int,
+    sample_count: c_int,
+) -> c_int {
+    crate::contentdupenntp::twin_check_eval_sample_verdict(
+        is_stopped != 0,
+        compared,
+        differ,
+        sample_count,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cdn_par_damage_calc_queued_volume_blocks(
+    parsed_blocks: c_int,
+    file_size: i64,
+    block_size: u64,
+) -> c_int {
+    crate::contentdupenntp::par_damage_calc_queued_volume_blocks(
+        parsed_blocks,
+        file_size,
+        block_size,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cdn_par_damage_calc_completed_volume_blocks(
+    parsed_blocks: c_int,
+    disk_size: i64,
+    block_size: u64,
+) -> c_int {
+    crate::contentdupenntp::par_damage_calc_completed_volume_blocks(
+        parsed_blocks,
+        disk_size,
+        block_size,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_cdn_article_fetcher_eval_decoded_yenc(
+    check_status: c_int,
+    ds_finished: c_int,
+    format: c_int,
+    ef_yenc: c_int,
+    begin_pos: i64,
+    end_pos: i64,
+    size: i64,
+    data_len: usize,
+    out_offset: *mut i64,
+    out_file_size: *mut i64,
+    out_success: *mut c_int,
+) -> c_int {
+    let (valid, offset, file_size, success) =
+        crate::contentdupenntp::article_fetcher_eval_decoded_yenc(
+            check_status,
+            ds_finished,
+            format,
+            ef_yenc,
+            begin_pos,
+            end_pos,
+            size,
+            data_len,
+        );
+    if !out_offset.is_null() {
+        *out_offset = offset;
+    }
+    if !out_file_size.is_null() {
+        *out_file_size = file_size;
+    }
+    if !out_success.is_null() {
+        *out_success = i32::from(success);
+    }
+    i32::from(valid)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cdn_article_batch_can_claim_next(
+    batch_id: c_int,
+    cur_batch_id: c_int,
+    cancelled: c_int,
+    stopped: c_int,
+    next_claim: usize,
+    requests_len: usize,
+    next_deliver: usize,
+    window_parts: c_int,
+    buffered_bytes: i64,
+    max_buffered_bytes: i64,
+) -> c_int {
+    i32::from(crate::contentdupenntp::article_batch_can_claim_next(
+        batch_id,
+        cur_batch_id,
+        cancelled != 0,
+        stopped != 0,
+        next_claim,
+        requests_len,
+        next_deliver,
+        window_parts,
+        buffered_bytes,
+        max_buffered_bytes,
+    ))
+}
+
 
 
 

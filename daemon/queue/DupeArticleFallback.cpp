@@ -44,9 +44,18 @@
 
 bool DupeArticleFallback::IsParFile(FileInfo* fileInfo)
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_cdn_dupe_fallback_is_par_file(
+		fileInfo->GetParFile() ? 1 : 0,
+		(int)fileInfo->GetFirstContent(),
+		(int)FileInfo::fcPar2,
+		fileInfo->GetFilenameConfirmed() ? 1 : 0,
+		fileInfo->GetFilename()) != 0;
+#else
 	return fileInfo->GetParFile() || fileInfo->GetFirstContent() == FileInfo::fcPar2 ||
 		(fileInfo->GetFilenameConfirmed() &&
 		 Util::EndsWith(fileInfo->GetFilename(), ".par2", false));
+#endif
 }
 
 bool DupeArticleFallback::HasPar2(NzbInfo* nzbInfo)
@@ -163,15 +172,33 @@ bool DupeArticleFallback::TryFallback(DownloadQueue* downloadQueue, FileInfo* fi
 	// extension of its own isn't a par2-file posing as data, and making every
 	// file wait for its first article lost the articles failing before it
 	FileInfo::EFirstContent content = FirstContent(fileInfo);
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_cdn_dupe_fallback_should_skip_first_content(
+		(int)content, (int)FileInfo::fcPar2, (int)FileInfo::fcUnknown,
+		articleInfo->GetPartNumber(),
+		HasExtension(fileInfo->GetFilename()) ? 1 : 0) != 0)
+#else
 	if (content == FileInfo::fcPar2 ||
 		(content == FileInfo::fcUnknown && articleInfo->GetPartNumber() != 1 && !HasExtension(fileInfo->GetFilename())))
+#endif
 	{
 		return false;
 	}
 
 	NzbInfo* nzbInfo = fileInfo->GetNzbInfo();
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_cdn_dupe_fallback_is_nzb_or_file_ineligible(
+		fileInfo->GetDeleted() ? 1 : 0,
+		nzbInfo->GetDeleting() ? 1 : 0,
+		nzbInfo->GetParking() ? 1 : 0,
+		(int)nzbInfo->GetDeleteStatus(),
+		(int)NzbInfo::dsNone,
+		(int)nzbInfo->GetDupeMode(),
+		(int)dmForce) != 0)
+#else
 	if (fileInfo->GetDeleted() || nzbInfo->GetDeleting() || nzbInfo->GetParking() ||
 		nzbInfo->GetDeleteStatus() != NzbInfo::dsNone || nzbInfo->GetDupeMode() == dmForce)
+#endif
 	{
 		return false;
 	}
@@ -214,6 +241,32 @@ bool DupeArticleFallback::TryFallback(DownloadQueue* downloadQueue, FileInfo* fi
 		// par2 repairs whole blocks: the blocks the failed articles spoiled may
 		// be more than its volumes hold long before the bytes are (ParDamage);
 		// borrowing then starts, and the par-damage failover waits for it
+#ifdef NZBGET_USE_RUST
+		int liftDeferState = 0;
+		int logLifted = 0;
+		defer = nzbget_rs_cdn_dupe_fallback_eval_par_defer(
+			parDefer ? 1 : 0,
+			articleInfo->GetPartNumber(),
+			(int)nzbInfo->GetDupeParDeferState(),
+			(int)NzbInfo::dpDeferred,
+			(int)NzbInfo::dpLifted,
+			ParCannotCover(nzbInfo) ? 1 : 0,
+			damage.Certain() ? 1 : 0,
+			damage.Projected() ? 1 : 0,
+			&liftDeferState,
+			&logLifted) != 0;
+		if (liftDeferState)
+		{
+			if (logLifted)
+			{
+				nzbInfo->PrintMessage(Message::mkInfo,
+					"Damage of %s exceeds its par2 recovery data (or will, judged by the articles tried so far), "
+					"recovering missing articles from duplicates",
+					nzbInfo->GetName());
+			}
+			nzbInfo->SetDupeParDeferState(NzbInfo::dpLifted);
+		}
+#else
 		defer = parDefer && articleInfo->GetPartNumber() != 1 &&
 			nzbInfo->GetDupeParDeferState() != NzbInfo::dpLifted && !ParCannotCover(nzbInfo) &&
 			!damage.Certain() && !damage.Projected();
@@ -228,6 +281,7 @@ bool DupeArticleFallback::TryFallback(DownloadQueue* downloadQueue, FileInfo* fi
 			}
 			nzbInfo->SetDupeParDeferState(NzbInfo::dpLifted);
 		}
+#endif
 	}
 
 	int round = articleInfo->GetDupeFallbackRound();
@@ -1788,12 +1842,27 @@ FileInfo::EFirstContent DupeArticleFallback::FirstContent(FileInfo* fileInfo)
 	}
 	char head[8] = {0};
 	std::ifstream in(fs::u8path(fileInfo->GetOutputFilename()), std::ios::binary);
+#ifdef NZBGET_USE_RUST
+	if (!in.read(head, sizeof(head)))
+	{
+		return FileInfo::fcUnknown;	// not on disk yet (the article cache)
+	}
+	int headKind = nzbget_rs_cdn_dupe_fallback_classify_first_head(
+		reinterpret_cast<const uint8*>(head), sizeof(head));
+	if (headKind == 0)
+	{
+		return FileInfo::fcUnknown;	// not on disk yet (the article cache)
+	}
+	fileInfo->SetFirstContent(headKind == 1 ? FileInfo::fcPar2 : FileInfo::fcOther);
+	return fileInfo->GetFirstContent();
+#else
 	if (!in.read(head, sizeof(head)) || std::all_of(head, head + sizeof(head), [](char c) { return c == 0; }))
 	{
 		return FileInfo::fcUnknown;	// not on disk yet (the article cache)
 	}
 	fileInfo->SetFirstContent(memcmp(head, "PAR2\0PKT", 8) ? FileInfo::fcOther : FileInfo::fcPar2);
 	return fileInfo->GetFirstContent();
+#endif
 }
 
 bool DupeArticleFallback::HasExtension(const char* filename)

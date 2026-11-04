@@ -625,10 +625,21 @@ bool DupeStreamRepair::BuildRepairJob(FileInfo* fileInfo, const char* diskBasena
 	NzbInfo* nzbInfo = fileInfo->GetNzbInfo();
 	// a health cancel keeps the files for "Download remaining files": the file
 	// whose last article set it off still takes its job
+#ifdef NZBGET_USE_RUST
+	if (!nzbget_rs_cdn_stream_repair_is_nzb_eligible_for_job(
+		nzbInfo ? 1 : 0,
+		nzbInfo ? (int)nzbInfo->GetDeleteStatus() : 0,
+		(int)NzbInfo::dsNone,
+		(int)NzbInfo::dsHealth,
+		nzbInfo && nzbInfo->GetDeleting() ? 1 : 0,
+		nzbInfo && nzbInfo->GetParking() ? 1 : 0,
+		nzbInfo && nzbInfo->GetPostInfo() != nullptr ? 1 : 0))
+#else
 	bool healthCancel = nzbInfo && nzbInfo->GetDeleteStatus() == NzbInfo::dsHealth;
 	if (!nzbInfo || (!healthCancel && (nzbInfo->GetDeleting() || nzbInfo->GetParking() ||
 		nzbInfo->GetDeleteStatus() != NzbInfo::dsNone)) ||
 		nzbInfo->GetPostInfo() != nullptr)
+#endif
 	{
 		// the PostInfo check: files completing AFTER post-processing started
 		// (par-check unpauses par2 volumes mid-repair) must not re-arm the

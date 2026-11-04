@@ -33,8 +33,13 @@
 
 bool DiskContentSource::Read(int64 offset, void* buffer, int64 size)
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_cdn_content_source_range_valid(offset, size, m_size) != 0 &&
+		m_file.Seek(offset) && m_file.Read(buffer, size) == size;
+#else
 	return offset >= 0 && size >= 0 && offset + size <= m_size &&
 		m_file.Seek(offset) && m_file.Read(buffer, size) == size;
+#endif
 }
 
 CompositeSource::CompositeSource(ContentSourceSet& sources, std::vector<int> memberIndexes,
@@ -51,7 +56,11 @@ CompositeSource::CompositeSource(ContentSourceSet& sources, std::vector<int> mem
 
 bool CompositeSource::Read(int64 offset, void* buffer, int64 size)
 {
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_cdn_content_source_range_valid(offset, size, m_totalSize) == 0)
+#else
 	if (offset < 0 || size < 0 || offset + size > m_totalSize)
+#endif
 	{
 		return false;
 	}
@@ -323,6 +332,26 @@ bool ContentMap::ReadInnerDecrypted(ContentSourceSet& sources, const StreamRange
 	char* buffer) const
 {
 	constexpr int64 blockSize = RarCryptoContext::CryptoBlockSize;
+#ifdef NZBGET_USE_RUST
+	int empty = 0;
+	int64 cipherFrom = 0;
+	int64 cipherTo = 0;
+	if (!nzbget_rs_cdn_content_map_calc_decrypt_cipher_bounds(
+		innerRange.Offset, innerRange.Size, m_innerSize, blockSize, GetCipherStreamSize(),
+		&empty, &cipherFrom, &cipherTo))
+	{
+		return false;
+	}
+	if (empty)
+	{
+		return true;
+	}
+	const RunCrypto* runCrypto = GetRunCrypto(0);
+	if (!runCrypto)
+	{
+		return false;
+	}
+#else
 	if (innerRange.Offset < 0 || innerRange.Size < 0 || innerRange.End() > m_innerSize)
 	{
 		return false;
@@ -344,6 +373,7 @@ bool ContentMap::ReadInnerDecrypted(ContentSourceSet& sources, const StreamRange
 	{
 		return false;	// foreshortened map (excluded member) - fail closed
 	}
+#endif
 	// CBC random access: the predecessor cipher block seeds the chain (it may
 	// live in the previous member); the header IV seeds block 0
 	uint8 prev[RarCryptoContext::CryptoBlockSize];
@@ -849,6 +879,10 @@ bool ParseSevenZipStreamsInfo(SevenZipReader& reader, SevenZipStreams& streams)
 
 bool ContentMapper::IsCompressibleArchive(const MemberSet& set)
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_cdn_content_mapper_is_compressible_archive(
+		(int)set.Format, (int)MemberSet::mfRar, (int)MemberSet::mfZip, (int)MemberSet::mfSevenZip) != 0;
+#else
 	switch (set.Format)
 	{
 		case MemberSet::mfRar:
@@ -860,6 +894,7 @@ bool ContentMapper::IsCompressibleArchive(const MemberSet& set)
 			return false;
 	}
 	return false;
+#endif
 }
 
 std::vector<MemberSet> ContentMapper::GroupSets(const std::vector<SetMember>& members)
@@ -1402,8 +1437,12 @@ std::unique_ptr<ContentMap> ContentMapper::BuildRarMap(const std::vector<SetMemb
 			}
 			cipherTotal += runs[v].PackedSize;
 		}
+#ifdef NZBGET_USE_RUST
+		if (!nzbget_rs_cdn_content_mapper_rar_cipher_geometry_valid(innerSize, cipherTotal))
+#else
 		if (innerSize <= 0 || cipherTotal < innerSize ||
 			cipherTotal - innerSize >= 16 || cipherTotal % 16 != 0)
+#endif
 		{
 			skipReason = "encrypted volume geometry does not fit store mode";
 			return nullptr;
@@ -1419,7 +1458,12 @@ std::unique_ptr<ContentMap> ContentMapper::BuildRarMap(const std::vector<SetMemb
 			// plaintext position p == cipher position p; the run covers this
 			// volume's plaintext bytes, and only the LAST volume's slab may
 			// run past them (the CBC padding tail carries no plaintext)
+#ifdef NZBGET_USE_RUST
+			int64 plainChunk = nzbget_rs_cdn_content_mapper_rar_calc_plain_chunk(
+				runs[v].PackedSize, innerSize, cipherBase);
+#else
 			int64 plainChunk = std::min(runs[v].PackedSize, innerSize - cipherBase);
+#endif
 			if (plainChunk <= 0)
 			{
 				// a padding-only volume: no real RAR splits inside the padding
@@ -1440,6 +1484,26 @@ std::unique_ptr<ContentMap> ContentMapper::BuildRarMap(const std::vector<SetMemb
 
 	// store mode means the packed bytes ARE the inner bytes: exact sum
 	// required (this is the strong gate even if a method byte lied)
+#ifdef NZBGET_USE_RUST
+	int64 inferredPacked = 0;
+	int inferStatus = nzbget_rs_cdn_content_mapper_rar_infer_unknown_packed(
+		unknownVolume, innerSize, knownPacked, &inferredPacked);
+	if (inferStatus == 1)
+	{
+		skipReason = "packed sizes exceed the inner file size";
+		return nullptr;
+	}
+	if (inferStatus == 2)
+	{
+		skipReason = "packed sizes do not sum to the inner file size";
+		return nullptr;
+	}
+	if (unknownVolume >= 0)
+	{
+		runs[unknownVolume].PackedSize = inferredPacked;
+		runs[unknownVolume].DataOffset = -1;
+	}
+#else
 	if (unknownVolume >= 0)
 	{
 		int64 inferred = innerSize - knownPacked;
@@ -1456,6 +1520,7 @@ std::unique_ptr<ContentMap> ContentMapper::BuildRarMap(const std::vector<SetMemb
 		skipReason = "packed sizes do not sum to the inner file size";
 		return nullptr;
 	}
+#endif
 
 	std::unique_ptr<ContentMap> map = std::make_unique<ContentMap>();
 	map->SetInnerName(innerName.c_str());

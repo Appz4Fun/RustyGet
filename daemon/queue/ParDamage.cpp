@@ -202,8 +202,13 @@ ParDamage::Verdict ParDamage::Judge(NzbInfo* nzbInfo)
 		int blocks = 0;
 		if (ParParser::ParseParFilename(fileInfo->GetFilename(), fileInfo->GetFilenameConfirmed(), nullptr, &blocks))
 		{
+#ifdef NZBGET_USE_RUST
+			verdict.recoveryBlocks += nzbget_rs_cdn_par_damage_calc_queued_volume_blocks(
+				blocks, fileInfo->GetSize(), blockSize);
+#else
 			verdict.recoveryBlocks += blocks >= 0 ? blocks :
 				(int)(fileInfo->GetSize() * 100 / 102 / (int64)(blockSize + 68));
+#endif
 		}
 	}
 	for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
@@ -216,7 +221,11 @@ ParDamage::Verdict ParDamage::Judge(NzbInfo* nzbInfo)
 			{
 				BString<1024> path("%s%c%s", nzbInfo->GetDestDir(), PATH_SEPARATOR, completedFile.GetFilename());
 				int64 size = FileSystem::FileSize(path);
+#ifdef NZBGET_USE_RUST
+				blocks = nzbget_rs_cdn_par_damage_calc_completed_volume_blocks(blocks, size, blockSize);
+#else
 				blocks = size > 0 ? (int)(size / (int64)(blockSize + 68)) : 0;
+#endif
 			}
 			verdict.recoveryBlocks += blocks;
 		}

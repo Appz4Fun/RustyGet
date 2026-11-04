@@ -147,6 +147,16 @@ const ArticleFetcher::FetchedArticle* DonorMemberSource::StoreFetched(int partIn
 {
 	// consistency: every article of the member must declare the same
 	// decoded size and stay inside it, or the whole member is unusable
+#ifdef NZBGET_USE_RUST
+	int markBad = 0;
+	if (nzbget_rs_cdn_stream_repair_check_fetched_member_part(
+		fetched.Success ? 1 : 0, fetched.Data.size(), fetched.Offset,
+		fetched.FileSize, m_size, &markBad) != 0)
+	{
+		m_bad = markBad != 0;
+		fetched.Success = false;
+	}
+#else
 	if (fetched.Success &&
 		(fetched.Data.empty() || fetched.Offset < 0 ||
 		 fetched.Offset + (int64)fetched.Data.size() > fetched.FileSize ||
@@ -155,6 +165,7 @@ const ArticleFetcher::FetchedArticle* DonorMemberSource::StoreFetched(int partIn
 		m_bad = m_size >= 0 && fetched.FileSize != m_size;
 		fetched.Success = false;
 	}
+#endif
 
 	if ((int)m_cache.size() >= MaxCachedParts && !m_cacheOrder.empty())
 	{
@@ -265,7 +276,11 @@ void DonorMemberSource::Prefetch(int64 offset, int64 size)
 
 bool DonorMemberSource::Read(int64 offset, void* buffer, int64 size)
 {
+#ifdef NZBGET_USE_RUST
+	if (!EnsureInit() || !nzbget_rs_cdn_content_source_range_valid(offset, size, m_size))
+#else
 	if (!EnsureInit() || offset < 0 || size < 0 || offset + size > m_size)
+#endif
 	{
 		return false;
 	}
@@ -805,6 +820,21 @@ void StreamRepairController::StartWatchdog(const std::vector<RepairTarget>& targ
 				double elapsed = std::chrono::duration<double>(now - start).count();
 				int64 recovered = progress - startProgress;
 				int64 remaining = std::max<int64>(0, m_missingBytes - recovered);
+#ifdef NZBGET_USE_RUST
+				double repairMbS = 0.0;
+				double remainingMb = 0.0;
+				double repairSec = 0.0;
+				double downloadMbS = 0.0;
+				if (nzbget_rs_cdn_stream_repair_eval_slow_rate(
+					downloadRate, recovered, remaining, elapsed, timeout, SlowRepairFactor,
+					&repairMbS, &remainingMb, &repairSec, &downloadMbS) != 0)
+				{
+					m_slowReason.Format("at %.2f MB/s the %.1f MB left would take %.0f seconds, "
+						"more than %i times a download at %.2f MB/s", repairMbS,
+						remainingMb, repairSec, SlowRepairFactor, downloadMbS);
+					break;
+				}
+#else
 				if (downloadRate > 0 && recovered > 0 && remaining > 0 && elapsed >= timeout / 2.0)
 				{
 					double repairRate = recovered / elapsed;
@@ -818,6 +848,7 @@ void StreamRepairController::StartWatchdog(const std::vector<RepairTarget>& targ
 						break;
 					}
 				}
+#endif
 			}
 			if (!m_watchdogDone)
 			{
@@ -1950,7 +1981,11 @@ void StreamRepairController::ReportRemainingHoles(std::vector<RepairTarget>& tar
 			// far more missing than the failed articles held: the yEnc headers
 			// declare a larger file than the nzb's articles add up to - the nzb
 			// lists only part of the file, and no article retry can fix that
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_cdn_stream_repair_is_incomplete_nzb_hole(missing, target.EncodedSize) != 0)
+#else
 			if (missing > target.EncodedSize + target.EncodedSize / 10 + 1024 * 1024)
+#endif
 			{
 				PrintMessage(Message::mkWarning,
 					"%s is %.1f MB according to its articles, but the nzb's articles cover only "
@@ -3315,10 +3350,16 @@ bool StreamRepairController::MaterializeDonorSet(NzbInfo* donorNzb,
 				m_batchFetcher.CancelRemaining();
 				return false;
 			}
+#ifdef NZBGET_USE_RUST
+			if (!nzbget_rs_cdn_stream_repair_materialize_article_valid(
+				fetched.Success ? 1 : 0, fetched.Data.size(), fetched.Offset,
+				fetched.FileSize, memberSize))
+#else
 			if (!fetched.Success || fetched.Data.empty() || fetched.Offset < 0 ||
 				fetched.FileSize <= 0 || fetched.Offset > fetched.FileSize ||
 				(int64)fetched.Data.size() > fetched.FileSize - fetched.Offset ||
 				(memberSize >= 0 && fetched.FileSize != memberSize))
+#endif
 			{
 				m_batchFetcher.CancelRemaining();
 				PrintMessage(Message::mkInfo,
@@ -3612,6 +3653,31 @@ void StreamRepairController::RepairCompleted()
 	// fully-repaired file, not per decoded byte, is the correctness and safety
 	// argument). Clamped at 0. When par2 exists SetRequestParCheck below stays
 	// authoritative.
+#ifdef NZBGET_USE_RUST
+	if (m_recoveredFailedSize > 0)
+	{
+		int64 failedSize = nzbInfo->GetFailedSize();
+		int64 successSize = nzbInfo->GetSuccessSize();
+		int64 curFailedSize = nzbInfo->GetCurrentFailedSize();
+		int64 curSuccessSize = nzbInfo->GetCurrentSuccessSize();
+		int64 parFailedSize = nzbInfo->GetParFailedSize();
+		int64 parSuccessSize = nzbInfo->GetParSuccessSize();
+		int64 parCurFailedSize = nzbInfo->GetParCurrentFailedSize();
+		int64 parCurSuccessSize = nzbInfo->GetParCurrentSuccessSize();
+		nzbget_rs_cdn_stream_repair_credit_repaired_sizes(
+			m_recoveredFailedSize, m_recoveredFailedParSize,
+			&failedSize, &successSize, &curFailedSize, &curSuccessSize,
+			&parFailedSize, &parSuccessSize, &parCurFailedSize, &parCurSuccessSize);
+		nzbInfo->SetFailedSize(failedSize);
+		nzbInfo->SetSuccessSize(successSize);
+		nzbInfo->SetCurrentFailedSize(curFailedSize);
+		nzbInfo->SetCurrentSuccessSize(curSuccessSize);
+		nzbInfo->SetParFailedSize(parFailedSize);
+		nzbInfo->SetParSuccessSize(parSuccessSize);
+		nzbInfo->SetParCurrentFailedSize(parCurFailedSize);
+		nzbInfo->SetParCurrentSuccessSize(parCurSuccessSize);
+	}
+#else
 	if (m_recoveredFailedSize > 0)
 	{
 		nzbInfo->SetFailedSize(std::max<int64>(0,
@@ -3632,6 +3698,7 @@ void StreamRepairController::RepairCompleted()
 				nzbInfo->GetParCurrentSuccessSize() + m_recoveredFailedParSize);
 		}
 	}
+#endif
 
 	// Persist unfinished holes only when the controller is stopping so a
 	// restart can resume. During a normal run, unfinished targets are handed to

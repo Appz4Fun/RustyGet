@@ -131,10 +131,16 @@ void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 	// find duplicates in download queue with exactly same content
 	for (NzbInfo* queuedNzbInfo : downloadQueue->GetQueue())
 	{
+#ifdef NZBGET_USE_RUST
+		bool sameContent = nzbget_rs_cdn_dupecoord_same_content_hash(
+			nzbInfo->GetFullContentHash(), nzbInfo->GetFilteredContentHash(),
+			queuedNzbInfo->GetFullContentHash(), queuedNzbInfo->GetFilteredContentHash()) != 0;
+#else
 		bool sameContent = (nzbInfo->GetFullContentHash() > 0 &&
 			nzbInfo->GetFullContentHash() == queuedNzbInfo->GetFullContentHash()) ||
 			(nzbInfo->GetFilteredContentHash() > 0 &&
 			 nzbInfo->GetFilteredContentHash() == queuedNzbInfo->GetFilteredContentHash());
+#endif
 
 		// if there is a duplicate with exactly same content (via hash-check)
 		// in queue - the new item is skipped
@@ -226,10 +232,17 @@ void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 	for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
 	{
 		if (historyInfo->GetKind() == HistoryInfo::hkNzb &&
+#ifdef NZBGET_USE_RUST
+			nzbget_rs_cdn_dupecoord_same_content_hash(
+				nzbInfo->GetFullContentHash(), nzbInfo->GetFilteredContentHash(),
+				historyInfo->GetNzbInfo()->GetFullContentHash(),
+				historyInfo->GetNzbInfo()->GetFilteredContentHash()) != 0)
+#else
 			((nzbInfo->GetFullContentHash() > 0 &&
 			nzbInfo->GetFullContentHash() == historyInfo->GetNzbInfo()->GetFullContentHash()) ||
 			(nzbInfo->GetFilteredContentHash() > 0 &&
 			 nzbInfo->GetFilteredContentHash() == historyInfo->GetNzbInfo()->GetFilteredContentHash())))
+#endif
 		{
 			skip = true;
 			sameContent = true;
@@ -238,10 +251,17 @@ void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 		}
 
 		if (historyInfo->GetKind() == HistoryInfo::hkDup &&
+#ifdef NZBGET_USE_RUST
+			nzbget_rs_cdn_dupecoord_same_content_hash(
+				nzbInfo->GetFullContentHash(), nzbInfo->GetFilteredContentHash(),
+				historyInfo->GetDupInfo()->GetFullContentHash(),
+				historyInfo->GetDupInfo()->GetFilteredContentHash()) != 0)
+#else
 			((nzbInfo->GetFullContentHash() > 0 &&
 			  nzbInfo->GetFullContentHash() == historyInfo->GetDupInfo()->GetFullContentHash()) ||
 			 (nzbInfo->GetFilteredContentHash() > 0 &&
 			  nzbInfo->GetFilteredContentHash() == historyInfo->GetDupInfo()->GetFilteredContentHash())))
+#endif
 		{
 			skip = true;
 			sameContent = true;
@@ -289,8 +309,14 @@ void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 	{
 		auto same = [nzbInfo](uint32 fullHash, uint32 filteredHash)
 			{
+#ifdef NZBGET_USE_RUST
+				return nzbget_rs_cdn_dupecoord_same_content_hash(
+					nzbInfo->GetFullContentHash(), nzbInfo->GetFilteredContentHash(),
+					fullHash, filteredHash) != 0;
+#else
 				return (nzbInfo->GetFullContentHash() > 0 && nzbInfo->GetFullContentHash() == fullHash) ||
 					(nzbInfo->GetFilteredContentHash() > 0 && nzbInfo->GetFilteredContentHash() == filteredHash);
+#endif
 			};
 		bool succeeded = false;
 		bool failed = false;
@@ -425,10 +451,21 @@ void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 				// health (B73: Las Azules S02E01 4404 lost its progress to a duplicate
 				// a dupe tool appended, scored higher but no better): it is tried next
 				// if that backup fails too
+#ifdef NZBGET_USE_RUST
+				bool keepReturned = nzbget_rs_cdn_dupecoord_should_keep_returned_dupe(
+					(int)g_Options->GetHealthCheck(),
+					(int)Options::hcDupe,
+					(int)queuedNzbInfo->GetDupeHint(),
+					(int)NzbInfo::dhRedownloadAuto,
+					queuedNzbInfo->GetCurrentSuccessArticles(),
+					queuedNzbInfo->CalcHealth(),
+					queuedNzbInfo->CalcCriticalHealth(true)) != 0;
+#else
 				bool keepReturned = g_Options->GetHealthCheck() == Options::hcDupe &&
 					queuedNzbInfo->GetDupeHint() == NzbInfo::dhRedownloadAuto &&
 					queuedNzbInfo->GetCurrentSuccessArticles() > 0 &&
 					queuedNzbInfo->CalcHealth() >= queuedNzbInfo->CalcCriticalHealth(true);
+#endif
 				if (nzbInfo->GetDupeScore() <= queuedNzbInfo->GetDupeScore() || keepReturned)
 				{
 					// Flag saying QueueCoordinator to skip nzb-file

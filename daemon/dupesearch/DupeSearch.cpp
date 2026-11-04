@@ -1022,6 +1022,18 @@ void DupeSearch::Search(const Job& job)
 	// a search that learned nothing - a query failed and nothing came back, or no
 	// posting could be fetched (indexers refusing, the deadline) - doesn't hold the
 	// key for SearchWindowSec: the next add of the key, or a restart, searches it again
+#ifdef NZBGET_USE_RUST
+	int retryReason = nzbget_rs_cdn_dupesearch_classify_search_retry_reason(
+		stats.queries, stats.failed, verified.empty() ? 1 : 0, fetched.empty() ? 1 : 0,
+		fetchStats.refused, fetchStats.fetch, notTried);
+	if (retryReason > 0)
+	{
+		ForgetSearch(job.dupeKey, ReleaseName::Normalize(job.name));
+		Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: %s, the key may be searched again", job.name.c_str(),
+			retryReason == 1 ? "no indexer answered" : retryReason == 2 ? "an indexer query failed and nothing came back" :
+			"no posting could be fetched");
+	}
+#else
 	bool allFailed = stats.queries > 0 && stats.failed == stats.queries;
 	bool queriesFailed = stats.failed > 0 && verified.empty();
 	bool nothingFetched = fetched.empty() && fetchStats.refused + fetchStats.fetch + notTried > 0;
@@ -1032,6 +1044,7 @@ void DupeSearch::Search(const Job& job)
 			allFailed ? "no indexer answered" : queriesFailed ? "an indexer query failed and nothing came back" :
 			"no posting could be fetched");
 	}
+#endif
 
 	// what was fetched is kept until it is placed: a restart resumes from it
 	// without fetching again (every fetch costs a grab)
@@ -1226,18 +1239,29 @@ void DupeSearch::Place(const Job& job, const NzbSummary& pick, std::vector<NzbFe
 			}
 			added++;
 			placed[i] = { id, entryOf(i, score, alive), verified[i].listing.title };
+#ifdef NZBGET_USE_RUST
+			Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: added %s [%s] score=%i alive=%i%% (%s)", job.name.c_str(),
+				verified[i].listing.title.c_str(), verified[i].listing.indexer.c_str(), base + score,
+				nzbget_rs_cdn_dupesearch_alive_to_percent(alive), how);
+#else
 			Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: added %s [%s] score=%i alive=%i%% (%s)", job.name.c_str(),
 				verified[i].listing.title.c_str(), verified[i].listing.indexer.c_str(), base + score,
 				alive < 0 ? -1 : (int)std::lround(100 * alive), how);
+#endif
 		};
 
 	// the probe-alive postings go in at once, then each is rescored when its
 	// full sample lands; the rest are added as their samples finish
+#ifdef NZBGET_USE_RUST
+	size_t fast = nzbget_rs_cdn_dupesearch_calc_fast_donor_count(
+		g_Options->GetDupeFastDonors(), live.size(), cap);
+#else
 	size_t fast = std::min((size_t)g_Options->GetDupeFastDonors(), live.size());
 	if (cap > 0)
 	{
 		fast = std::min(fast, (size_t)cap);
 	}
+#endif
 	std::set<size_t> fastSet;
 	for (size_t n = 0; n < fast; n++)
 	{
@@ -1265,9 +1289,15 @@ void DupeSearch::Place(const Job& job, const NzbSummary& pick, std::vector<NzbFe
 				}
 				double alive = aliveOf(health, verified[i].info);
 				bool isDead = DupeIdentity::IsDead(health, verified[i].info, g_Options->GetDupeMinAlive());
+#ifdef NZBGET_USE_RUST
+				Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: %s [%s]: alive=%i%% (%i of %i articles)", job.name.c_str(),
+					verified[i].listing.title.c_str(), verified[i].listing.indexer.c_str(),
+					nzbget_rs_cdn_dupesearch_alive_to_percent(alive), health.present, health.Answered());
+#else
 				Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: %s [%s]: alive=%i%% (%i of %i articles)", job.name.c_str(),
 					verified[i].listing.title.c_str(), verified[i].listing.indexer.c_str(),
 					alive < 0 ? -1 : (int)std::lround(100 * alive), health.present, health.Answered());
+#endif
 
 				auto it = placed.find(i);
 				if (it != placed.end())
@@ -1276,7 +1306,12 @@ void DupeSearch::Place(const Job& job, const NzbSummary& pick, std::vector<NzbFe
 					Placed& donor = it->second;
 					ranks.Release(donor.entry.score);
 					int score = isDead ? DonorScore::Dead : ranks.Take(alive, donor.entry.twin);
+#ifdef NZBGET_USE_RUST
+					std::string param = std::string(AliveParam) + "=" + std::to_string(
+						nzbget_rs_cdn_dupesearch_fast_donor_alive_param(isDead ? 1 : 0, alive));
+#else
 					std::string param = std::string(AliveParam) + "=" + std::to_string(isDead ? 0 : alive < 0 ? 100 : (int)std::lround(100 * alive));
+#endif
 					if (alive < 0 || SetScore(donor.id, base + score,
 						param.empty() ? std::vector<std::string>() : std::vector<std::string>{ param }))
 					{
@@ -1653,9 +1688,15 @@ int DupeSearch::AddDonor(const Job& job, const NzbSummary& pick, const NzbFetche
 	}
 	if (g_Options->GetDupeSearchDryRun())
 	{
+#ifdef NZBGET_USE_RUST
+		Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: dry run, would add %s [%s] score=%i alive=%i%%", job.name.c_str(),
+			posting.listing.title.c_str(), posting.listing.indexer.c_str(), score,
+			nzbget_rs_cdn_dupesearch_alive_to_percent(alive));
+#else
 		Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: dry run, would add %s [%s] score=%i alive=%i%%", job.name.c_str(),
 			posting.listing.title.c_str(), posting.listing.indexer.c_str(), score,
 			alive < 0 ? -1 : (int)std::lround(100 * alive));
+#endif
 		return -1;
 	}
 	std::string fingerprint = posting.info.Fingerprint();

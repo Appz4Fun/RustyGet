@@ -2716,6 +2716,91 @@ int nzbget_rs_pup_file_info_blocks_download_completion(
 int nzbget_rs_pup_history_coord_can_attempt_requeue_file(
     int status, int cf_success, int cf_failure, int reset_failed, int file_id);
 
+int nzbget_rs_cdn_content_source_range_valid(
+    int64_t offset, int64_t size, int64_t total_size);
+int nzbget_rs_cdn_content_map_calc_decrypt_cipher_bounds(
+    int64_t inner_offset, int64_t inner_size, int64_t inner_size_total,
+    int64_t block_size, int64_t cipher_stream_size,
+    int* out_empty, int64_t* out_cipher_from, int64_t* out_cipher_to);
+int nzbget_rs_cdn_content_mapper_is_compressible_archive(
+    int format, int mf_rar, int mf_zip, int mf_seven_zip);
+int nzbget_rs_cdn_content_mapper_rar_cipher_geometry_valid(
+    int64_t inner_size, int64_t cipher_total);
+int64_t nzbget_rs_cdn_content_mapper_rar_calc_plain_chunk(
+    int64_t packed_size, int64_t inner_size, int64_t cipher_base);
+int nzbget_rs_cdn_content_mapper_rar_infer_unknown_packed(
+    int unknown_volume, int64_t inner_size, int64_t known_packed,
+    int64_t* out_inferred_packed);
+
+int nzbget_rs_cdn_dupesearch_classify_search_retry_reason(
+    int queries, int failed, int verified_empty, int fetched_empty,
+    int refused, int fetch_err, int not_tried);
+size_t nzbget_rs_cdn_dupesearch_calc_fast_donor_count(
+    int dupe_fast_donors, size_t live_count, int cap);
+int nzbget_rs_cdn_dupesearch_alive_to_percent(double alive);
+int nzbget_rs_cdn_dupesearch_fast_donor_alive_param(int is_dead, double alive);
+
+int nzbget_rs_cdn_dupe_fallback_is_par_file(
+    int par_file, int first_content, int fc_par2, int filename_confirmed,
+    const char* filename);
+int nzbget_rs_cdn_dupe_fallback_should_skip_first_content(
+    int content, int fc_par2, int fc_unknown, int part_number, int has_extension);
+int nzbget_rs_cdn_dupe_fallback_is_nzb_or_file_ineligible(
+    int file_deleted, int nzb_deleting, int nzb_parking, int delete_status,
+    int ds_none, int dupe_mode, int dm_force);
+int nzbget_rs_cdn_dupe_fallback_eval_par_defer(
+    int par_defer, int part_number, int dupe_par_defer_state,
+    int dp_deferred, int dp_lifted, int par_cannot_cover,
+    int damage_certain, int damage_projected,
+    int* out_lift_defer_state, int* out_log_lifted);
+int nzbget_rs_cdn_dupe_fallback_classify_first_head(
+    const uint8_t* head_ptr, size_t head_len);
+
+int nzbget_rs_cdn_stream_repair_is_nzb_eligible_for_job(
+    int has_nzb, int delete_status, int ds_none, int ds_health,
+    int deleting, int parking, int has_post_info);
+int nzbget_rs_cdn_dupecoord_same_content_hash(
+    uint32_t full1, uint32_t filtered1, uint32_t full2, uint32_t filtered2);
+int nzbget_rs_cdn_dupecoord_should_keep_returned_dupe(
+    int health_check, int hc_dupe, int dupe_hint, int dh_redownload_auto,
+    int current_success_articles, int health, int critical_health);
+
+int nzbget_rs_cdn_stream_repair_check_fetched_member_part(
+    int success, size_t data_len, int64_t offset, int64_t fetched_file_size,
+    int64_t member_size, int* out_mark_member_bad);
+int nzbget_rs_cdn_stream_repair_eval_slow_rate(
+    int64_t download_rate, int64_t recovered, int64_t remaining,
+    double elapsed_sec, int timeout_sec, int slow_repair_factor,
+    double* out_repair_mb_s, double* out_remaining_mb,
+    double* out_repair_sec, double* out_download_mb_s);
+int nzbget_rs_cdn_stream_repair_is_incomplete_nzb_hole(
+    int64_t missing, int64_t encoded_size);
+int nzbget_rs_cdn_stream_repair_materialize_article_valid(
+    int success, size_t data_len, int64_t offset, int64_t fetched_file_size,
+    int64_t member_size);
+void nzbget_rs_cdn_stream_repair_credit_repaired_sizes(
+    int64_t recovered_failed_size, int64_t recovered_failed_par_size,
+    int64_t* inout_failed_size, int64_t* inout_success_size,
+    int64_t* inout_cur_failed_size, int64_t* inout_cur_success_size,
+    int64_t* inout_par_failed_size, int64_t* inout_par_success_size,
+    int64_t* inout_par_cur_failed_size, int64_t* inout_par_cur_success_size);
+
+int nzbget_rs_cdn_twin_check_eval_sample_verdict(
+    int is_stopped, int compared, int differ, int sample_count);
+int nzbget_rs_cdn_par_damage_calc_queued_volume_blocks(
+    int parsed_blocks, int64_t file_size, uint64_t block_size);
+int nzbget_rs_cdn_par_damage_calc_completed_volume_blocks(
+    int parsed_blocks, int64_t disk_size, uint64_t block_size);
+
+int nzbget_rs_cdn_article_fetcher_eval_decoded_yenc(
+    int check_status, int ds_finished, int format, int ef_yenc,
+    int64_t begin_pos, int64_t end_pos, int64_t size, size_t data_len,
+    int64_t* out_offset, int64_t* out_file_size, int* out_success);
+int nzbget_rs_cdn_article_batch_can_claim_next(
+    int batch_id, int cur_batch_id, int cancelled, int stopped,
+    size_t next_claim, size_t requests_len, size_t next_deliver,
+    int window_parts, int64_t buffered_bytes, int64_t max_buffered_bytes);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

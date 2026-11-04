@@ -408,11 +408,21 @@ void TwinCheckJob::Sample()
 		}
 	}
 #endif
+#ifdef NZBGET_USE_RUST
+	int verdict = nzbget_rs_cdn_twin_check_eval_sample_verdict(
+		IsStopped() ? 1 : 0, compared, differ, TwinCheck::SampleCount);
+	if (verdict == 0)
+	{
+		return;	// too few arrived: asked again at a later round
+	}
+	Store(TwinCheck::SampledParam, verdict == 2 ? "alt" : "twin", TwinCheck::SampledOfParam, primaryId.c_str());
+#else
 	if (IsStopped() || (compared < TwinCheck::SampleCount / 2 && !differ))
 	{
 		return;	// too few arrived: asked again at a later round
 	}
 	Store(TwinCheck::SampledParam, differ ? "alt" : "twin", TwinCheck::SampledOfParam, primaryId.c_str());
+#endif
 }
 
 struct Item

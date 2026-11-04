@@ -63,6 +63,7 @@ pub mod extutilhealth;
 pub mod dlunpackrepair;
 pub mod artwritercore;
 pub mod connclientmain;
+pub mod nntptlsweb;
 
 pub mod deadpostings;
 pub mod dupewatch;

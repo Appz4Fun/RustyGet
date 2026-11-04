@@ -2515,6 +2515,61 @@ int nzbget_rs_ccm_ncurses_calc_group_name_len(
     int screen_width, int calc_col_width, int col_files, int col_total, int col_left);
 int nzbget_rs_ccm_ncurses_next_queue_win_pct(int cur_pct, int is_edit_queue);
 
+int nzbget_rs_ntw_nntp_map_ip_version(
+    int ip_version, int ip_v4, int ip_v6, int ip_auto);
+int nzbget_rs_ntw_tls_should_verify_peer(
+    int has_store, int cert_verif_level, int cv_none);
+int nzbget_rs_ntw_tls_is_explicit_handshake_rejection(
+    int err_lib, int err_lib_ssl, int reason, int r_handshake_fail,
+    int r_proto_ver, int r_no_shared_cipher, int r_unsupported_proto);
+int nzbget_rs_ntw_tls_should_check_host(
+    int cert_verif_level, int cv_minimal, int host_empty);
+int nzbget_rs_ntw_tls_classify_want_io(
+    int ssl_err, int want_read, int want_write,
+    int* out_want_read, int* out_want_write);
+
+void nzbget_rs_ntw_webdl_calc_initial_retries(
+    int url_retries, int retry_enabled, int* out_rem_dl, int* out_rem_conn);
+int nzbget_rs_ntw_webdl_should_wait_before_retry(
+    int status, int ad_failed, int ad_connect_error,
+    int rem_dl, int rem_conn, int is_stopped, int force, int pause_download);
+int nzbget_rs_ntw_webdl_is_default_http_port(const char* protocol, int port);
+int nzbget_rs_ntw_webdl_is_header_end_line(int first_ch);
+size_t nzbget_rs_ntw_webdl_strip_query_len(const char* url);
+
+int nzbget_rs_ntw_server_pool_can_advance_level(
+    int norm_level, int level, int active, int optional, int blocked);
+int nzbget_rs_ntw_server_pool_match_want_server(
+    int has_want, int cand_id, int want_id, int want_group, int cand_group);
+int nzbget_rs_ntw_server_pool_match_ignore_server(
+    int cand_id, int ign_id, int ign_group, int cand_group,
+    int ign_norm_level, int cand_norm_level);
+int nzbget_rs_ntw_server_pool_calc_remaining_block_sec(
+    int64_t block_time, int retry_interval, int64_t cur_time);
+
+int nzbget_rs_ntw_remote_server_select_port(
+    int tls, int secure_port, int control_port);
+int nzbget_rs_ntw_remote_server_should_warn_cap(
+    int active_count, int max_processors, int64_t now, int64_t last_warn,
+    int* out_should_warn);
+
+int nzbget_rs_ntw_web_proc_max_post_content_len(int authorized);
+int nzbget_rs_ntw_web_proc_is_content_len_valid(int content_len, int authorized);
+int nzbget_rs_ntw_web_proc_should_use_gzip(
+    int gzip_enabled, int body_len, int max_uncompressed_size);
+const char* nzbget_rs_ntw_web_proc_default_resource(const char* url);
+
+double nzbget_rs_ntw_xmlrpc_mib_per_sec(uint64_t bytes, double ms);
+int nzbget_rs_ntw_xmlrpc_check_user_access_denied(
+    int user_access, int ua_add, int ua_restricted, const char* method_name);
+const char* nzbget_rs_ntw_xmlrpc_ex_par_status(int extra_par_blocks);
+int nzbget_rs_ntw_xmlrpc_parse_dupe_mode(
+    const char* dupe_mode_str, int dm_score, int dm_all, int dm_force);
+int nzbget_rs_ntw_xmlrpc_is_http_url(const char* content);
+int nzbget_rs_ntw_xmlrpc_parse_category_source(
+    const char* cat_src_str, int cs_nzb_file, int cs_feed_file, int cs_auto);
+int nzbget_rs_ntw_xmlrpc_validate_reset_counter(const char* counter);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

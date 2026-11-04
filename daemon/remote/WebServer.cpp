@@ -142,8 +142,12 @@ void WebProcessor::Execute()
 		// a body of a size no request has: the buffer for it couldn't be allocated
 		// (its size + 1 overflowed at INT_MAX) and was written through anyway. A
 		// request without credentials (the login form) is small
+#ifdef NZBGET_USE_RUST
+		if (!nzbget_rs_ntw_web_proc_is_content_len_valid(m_contentLen, m_authorized ? 1 : 0))
+#else
 		int maxContentLen = m_authorized ? 768 * 1024 * 1024 : 64 * 1024;
 		if (m_contentLen < 0 || m_contentLen > maxContentLen)
+#endif
 		{
 			SendErrorResponse(ERR_HTTP_BAD_REQUEST, true);
 			return;
@@ -837,7 +841,12 @@ void WebProcessor::SendBodyResponse(const char* body, int bodyLen, const char* c
 
 #ifndef DISABLE_GZIP
 	CharBuffer gbuf;
+#ifdef NZBGET_USE_RUST
+	bool gzip = nzbget_rs_ntw_web_proc_should_use_gzip(
+		m_gzip ? 1 : 0, bodyLen, MAX_UNCOMPRESSED_SIZE) != 0;
+#else
 	bool gzip = m_gzip && bodyLen > MAX_UNCOMPRESSED_SIZE;
+#endif
 	if (gzip)
 	{
 		uint32 outLen = ZLib::GZipLen(bodyLen);
@@ -884,12 +893,16 @@ void WebProcessor::SendBodyResponse(const char* body, int bodyLen, const char* c
 
 void WebProcessor::SendSingleFileResponse()
 {
+#ifdef NZBGET_USE_RUST
+	const char* defRes = nzbget_rs_ntw_web_proc_default_resource(m_url);
+#else
 	const char *defRes = "";
 	if (m_url[strlen(m_url)-1] == '/')
 	{
 		// default file in directory (if not specified) is "index.html"
 		defRes = "index.html";
 	}
+#endif
 
 	BString<1024> filename("%s%s%s", g_Options->GetWebDir(), *m_url, defRes);
 

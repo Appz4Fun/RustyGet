@@ -36,8 +36,16 @@ NntpConnection::NntpConnection(NewsServer* newsServer) :
 {
 	m_lineBuf.Reserve(CONNECTION_LINEBUFFER_SIZE);
 	SetCipher(newsServer->GetCipher());
+#ifdef NZBGET_USE_RUST
+	SetIPVersion((Connection::EIPVersion)nzbget_rs_ntw_nntp_map_ip_version(
+		newsServer->GetIpVersion(),
+		(int)Connection::ipV4,
+		(int)Connection::ipV6,
+		(int)Connection::ipAuto));
+#else
 	SetIPVersion(newsServer->GetIpVersion() == 4 ? Connection::ipV4 :
 		newsServer->GetIpVersion() == 6 ? Connection::ipV6 : Connection::ipAuto);
+#endif
 	
 #ifndef DISABLE_TLS
 	SetCertVerifLevel(newsServer->GetCertVerificationLevel());

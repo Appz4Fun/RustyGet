@@ -63,6 +63,13 @@ void WebDownloader::Run()
 
 	SetStatus(adRunning);
 
+#ifdef NZBGET_USE_RUST
+	int remainedDownloadRetries = 1;
+	int remainedConnectRetries = 1;
+	nzbget_rs_ntw_webdl_calc_initial_retries(
+		g_Options->GetUrlRetries(), m_retry ? 1 : 0,
+		&remainedDownloadRetries, &remainedConnectRetries);
+#else
 	int remainedDownloadRetries = g_Options->GetUrlRetries() > 0 ? g_Options->GetUrlRetries() : 1;
 	int remainedConnectRetries = remainedDownloadRetries > 10 ? remainedDownloadRetries : 10;
 	if (!m_retry)
@@ -70,6 +77,7 @@ void WebDownloader::Run()
 		remainedDownloadRetries = 1;
 		remainedConnectRetries = 1;
 	}
+#endif
 
 	EStatus Status = adFailed;
 
@@ -79,9 +87,17 @@ void WebDownloader::Run()
 
 		Status = DownloadWithRedirects(5);
 
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_ntw_webdl_should_wait_before_retry(
+			(int)Status, (int)adFailed, (int)adConnectError,
+			remainedDownloadRetries, remainedConnectRetries,
+			IsStopped() ? 1 : 0, m_force ? 1 : 0,
+			g_WorkState->GetPauseDownload() ? 1 : 0) != 0)
+#else
 		if ((((Status == adFailed) && (remainedDownloadRetries > 1)) ||
 			((Status == adConnectError) && (remainedConnectRetries > 1)))
 			&& !IsStopped() && !(!m_force && g_WorkState->GetPauseDownload()))
+#endif
 		{
 			detail("Waiting %i sec to retry", g_Options->GetUrlInterval());
 			int msec = 0;
@@ -292,8 +308,12 @@ void WebDownloader::SendHeaders(URL *url)
 	m_connection->WriteLine(CString::FormatStr("GET %s HTTP/1.0\r\n", url->GetResource()));
 	m_connection->WriteLine(BString<1024>("User-Agent: nzbget/%s\r\n", Util::VersionRevision()));
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_ntw_webdl_is_default_http_port(url->GetProtocol(), url->GetPort()) != 0)
+#else
 	if ((!strcasecmp(url->GetProtocol(), "http") && (url->GetPort() == 80 || url->GetPort() == 0)) ||
 		(!strcasecmp(url->GetProtocol(), "https") && (url->GetPort() == 443 || url->GetPort() == 0)))
+#endif
 	{
 		m_connection->WriteLine(BString<1024>("Host: %s\r\n", url->GetHost()));
 	}
@@ -354,7 +374,11 @@ WebDownloader::EStatus WebDownloader::DownloadHeaders()
 		debug("Header: %s", line);
 
 		// detect body of response
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_ntw_webdl_is_header_end_line((unsigned char)*line) != 0)
+#else
 		if (*line == '\r' || *line == '\n')
+#endif
 		{
 			break;
 		}
@@ -661,7 +685,7 @@ void WebDownloader::ParseRedirect(const char* location)
 	nzbget_rs_free(buf);
 	// without the query: it carries api keys and passwords (indexer links do),
 	// and this went into the log
-	auto noQuery = [](const char* url) { return std::string(url, strcspn(url, "?")); };
+	auto noQuery = [](const char* url) { return std::string(url, nzbget_rs_ntw_webdl_strip_query_len(url)); };
 	detail("URL %s redirected to %s", noQuery(m_url).c_str(), noQuery(newLocation.c_str()).c_str());
 	SetUrl(newLocation.c_str());
 }

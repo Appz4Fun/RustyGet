@@ -70,8 +70,14 @@ void RemoteServer::Run()
 
 		if (!m_connection)
 		{
+#ifdef NZBGET_USE_RUST
+			int listenPort = nzbget_rs_ntw_remote_server_select_port(
+				m_tls ? 1 : 0, g_Options->GetSecurePort(), g_Options->GetControlPort());
+#else
+			int listenPort = m_tls ? g_Options->GetSecurePort() : g_Options->GetControlPort();
+#endif
 			m_connection = std::make_unique<Connection>(g_Options->GetControlIp(),
-				m_tls ? g_Options->GetSecurePort() : g_Options->GetControlPort(),
+				listenPort,
 				m_tls);
 			m_connection->SetTimeout(g_Options->GetRemoteTimeout());
 			m_connection->SetSuppressErrors(false);
@@ -114,6 +120,21 @@ void RemoteServer::Run()
 			Guard guard(m_processorsMutex);
 			// a thread per connection: past the cap a connection is closed at once
 			// (clients that connect and wait ran the program out of threads)
+#ifdef NZBGET_USE_RUST
+			time_t now = Util::CurrentTime();
+			int shouldWarn = 0;
+			if (nzbget_rs_ntw_remote_server_should_warn_cap(
+				(int)m_activeProcessors.size(), MaxProcessors,
+				(int64_t)now, (int64_t)m_lastCapWarning, &shouldWarn) != 0)
+			{
+				if (shouldWarn)
+				{
+					m_lastCapWarning = now;
+					warn("Too many connections to the web interface/API (%i); refusing new ones", MaxProcessors);
+				}
+				continue;
+			}
+#else
 			if ((int)m_activeProcessors.size() >= MaxProcessors)
 			{
 				time_t now = Util::CurrentTime();
@@ -124,6 +145,7 @@ void RemoteServer::Run()
 				}
 				continue;
 			}
+#endif
 			RequestProcessor* commandThread = new RequestProcessor();
 			commandThread->SetAutoDestroy(true);
 			commandThread->SetConnection(std::move(acceptedConnection));
@@ -310,7 +332,13 @@ void RequestProcessor::Execute()
 
 	if (!ok)
 	{
-		warn("Non-nzbget request received on port %i from %s", m_tls ? g_Options->GetSecurePort() : g_Options->GetControlPort(), m_connection->GetRemoteAddr());
+#ifdef NZBGET_USE_RUST
+		int warnPort = nzbget_rs_ntw_remote_server_select_port(
+			m_tls ? 1 : 0, g_Options->GetSecurePort(), g_Options->GetControlPort());
+#else
+		int warnPort = m_tls ? g_Options->GetSecurePort() : g_Options->GetControlPort();
+#endif
+		warn("Non-nzbget request received on port %i from %s", warnPort, m_connection->GetRemoteAddr());
 	}
 }
 

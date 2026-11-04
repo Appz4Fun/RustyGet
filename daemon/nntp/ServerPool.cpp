@@ -204,8 +204,16 @@ NntpConnection* ServerPool::GetConnection(int level, NewsServer* wantServer, Raw
 
 		for (NewsServer* newsServer : m_sortedServers)
 		{
+#ifdef NZBGET_USE_RUST
+			if (!nzbget_rs_ntw_server_pool_can_advance_level(
+				newsServer->GetNormLevel(), level,
+				newsServer->GetActive() ? 1 : 0,
+				newsServer->GetOptional() ? 1 : 0,
+				IsServerBlocked(newsServer) ? 1 : 0))
+#else
 			if (newsServer->GetNormLevel() == level && newsServer->GetActive() &&
 				!(newsServer->GetOptional() && IsServerBlocked(newsServer)))
+#endif
 			{
 				return nullptr;
 			}
@@ -231,8 +239,17 @@ NntpConnection* ServerPool::LockedGetConnection(int level, NewsServer* wantServe
 		NewsServer* candidateServer = candidateConnection->GetNewsServer();
 		if (!candidateConnection->GetInUse() && candidateServer->GetActive() &&
 			candidateServer->GetNormLevel() == level &&
+#ifdef NZBGET_USE_RUST
+			nzbget_rs_ntw_server_pool_match_want_server(
+				wantServer ? 1 : 0,
+				candidateServer->GetId(),
+				wantServer ? wantServer->GetId() : 0,
+				wantServer ? wantServer->GetGroup() : 0,
+				candidateServer->GetGroup()) != 0 &&
+#else
 			(!wantServer || candidateServer == wantServer ||
 			 (wantServer->GetGroup() > 0 && wantServer->GetGroup() == candidateServer->GetGroup())) &&
+#endif
 			(candidateConnection->GetStatus() == Connection::csConnected ||
 			 !IsServerBlocked(candidateServer)))
 		{
@@ -242,9 +259,19 @@ NntpConnection* ServerPool::LockedGetConnection(int level, NewsServer* wantServe
 			{
 				for (NewsServer* ignoreServer : ignoreServers)
 				{
+#ifdef NZBGET_USE_RUST
+					if (nzbget_rs_ntw_server_pool_match_ignore_server(
+						candidateServer->GetId(),
+						ignoreServer->GetId(),
+						ignoreServer->GetGroup(),
+						candidateServer->GetGroup(),
+						ignoreServer->GetNormLevel(),
+						candidateServer->GetNormLevel()) != 0)
+#else
 					if (ignoreServer == candidateServer ||
 						(ignoreServer->GetGroup() > 0 && ignoreServer->GetGroup() == candidateServer->GetGroup() &&
 						 ignoreServer->GetNormLevel() == candidateServer->GetNormLevel()))
+#endif
 					{
 						useConnection = false;
 						break;
@@ -445,10 +472,15 @@ void ServerPool::LogDebugInfo()
 	info("    Servers: %i", (int)m_servers.size());
 	for (NewsServer* newsServer : &m_servers)
 	{
+#ifdef NZBGET_USE_RUST
+		int blockSec = nzbget_rs_ntw_server_pool_calc_remaining_block_sec(
+			(int64_t)newsServer->GetBlockTime(), m_retryInterval, (int64_t)curTime);
+#else
+		int blockSec = newsServer->GetBlockTime() && newsServer->GetBlockTime() + m_retryInterval > curTime ?
+			(int)(newsServer->GetBlockTime() + m_retryInterval - curTime) : 0;
+#endif
 		info("      %i) %s (%s): Level=%i, NormLevel=%i, BlockSec=%i", newsServer->GetId(), newsServer->GetName(),
-			newsServer->GetHost(), newsServer->GetLevel(), newsServer->GetNormLevel(),
-			newsServer->GetBlockTime() && newsServer->GetBlockTime() + m_retryInterval > curTime ?
-				(int)(newsServer->GetBlockTime() + m_retryInterval - curTime) : 0);
+			newsServer->GetHost(), newsServer->GetLevel(), newsServer->GetNormLevel(), blockSec);
 	}
 
 	info("    Levels: %i", (int)m_levels.size());

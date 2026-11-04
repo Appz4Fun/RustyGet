@@ -15847,5 +15847,333 @@ pub extern "C" fn nzbget_rs_ccm_ncurses_next_queue_win_pct(
     crate::connclientmain::ncurses_next_queue_win_pct(cur_pct, is_edit_queue != 0)
 }
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ntw_nntp_map_ip_version(
+    ip_version: c_int,
+    ip_v4: c_int,
+    ip_v6: c_int,
+    ip_auto: c_int,
+) -> c_int {
+    crate::nntptlsweb::nntp_map_ip_version(ip_version, ip_v4, ip_v6, ip_auto)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ntw_tls_should_verify_peer(
+    has_store: c_int,
+    cert_verif_level: c_int,
+    cv_none: c_int,
+) -> c_int {
+    i32::from(crate::nntptlsweb::tls_should_verify_peer(
+        has_store != 0,
+        cert_verif_level,
+        cv_none,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ntw_tls_is_explicit_handshake_rejection(
+    err_lib: c_int,
+    err_lib_ssl: c_int,
+    reason: c_int,
+    r_handshake_fail: c_int,
+    r_proto_ver: c_int,
+    r_no_shared_cipher: c_int,
+    r_unsupported_proto: c_int,
+) -> c_int {
+    i32::from(crate::nntptlsweb::tls_is_explicit_handshake_rejection(
+        err_lib,
+        err_lib_ssl,
+        reason,
+        r_handshake_fail,
+        r_proto_ver,
+        r_no_shared_cipher,
+        r_unsupported_proto,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ntw_tls_should_check_host(
+    cert_verif_level: c_int,
+    cv_minimal: c_int,
+    host_empty: c_int,
+) -> c_int {
+    i32::from(crate::nntptlsweb::tls_should_check_host(
+        cert_verif_level,
+        cv_minimal,
+        host_empty != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ntw_tls_classify_want_io(
+    ssl_err: c_int,
+    want_read: c_int,
+    want_write: c_int,
+    out_want_read: *mut c_int,
+    out_want_write: *mut c_int,
+) -> c_int {
+    let (retry, r, w) = crate::nntptlsweb::tls_classify_want_io(ssl_err, want_read, want_write);
+    if !out_want_read.is_null() {
+        *out_want_read = i32::from(r);
+    }
+    if !out_want_write.is_null() {
+        *out_want_write = i32::from(w);
+    }
+    i32::from(retry)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ntw_webdl_calc_initial_retries(
+    url_retries: c_int,
+    retry_enabled: c_int,
+    out_rem_dl: *mut c_int,
+    out_rem_conn: *mut c_int,
+) {
+    let (dl, conn) = crate::nntptlsweb::webdl_calc_initial_retries(url_retries, retry_enabled != 0);
+    if !out_rem_dl.is_null() {
+        *out_rem_dl = dl;
+    }
+    if !out_rem_conn.is_null() {
+        *out_rem_conn = conn;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ntw_webdl_should_wait_before_retry(
+    status: c_int,
+    ad_failed: c_int,
+    ad_connect_error: c_int,
+    rem_dl: c_int,
+    rem_conn: c_int,
+    is_stopped: c_int,
+    force: c_int,
+    pause_download: c_int,
+) -> c_int {
+    i32::from(crate::nntptlsweb::webdl_should_wait_before_retry(
+        status,
+        ad_failed,
+        ad_connect_error,
+        rem_dl,
+        rem_conn,
+        is_stopped != 0,
+        force != 0,
+        pause_download != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ntw_webdl_is_default_http_port(
+    protocol: *const c_char,
+    port: c_int,
+) -> c_int {
+    i32::from(crate::nntptlsweb::webdl_is_default_http_port(
+        input(protocol),
+        port,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ntw_webdl_is_header_end_line(first_ch: c_int) -> c_int {
+    i32::from(crate::nntptlsweb::webdl_is_header_end_line(first_ch as u8))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ntw_webdl_strip_query_len(url: *const c_char) -> usize {
+    crate::nntptlsweb::webdl_strip_query_len(input(url))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ntw_server_pool_can_advance_level(
+    norm_level: c_int,
+    level: c_int,
+    active: c_int,
+    optional: c_int,
+    blocked: c_int,
+) -> c_int {
+    i32::from(crate::nntptlsweb::server_pool_can_advance_level(
+        norm_level,
+        level,
+        active != 0,
+        optional != 0,
+        blocked != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ntw_server_pool_match_want_server(
+    has_want: c_int,
+    cand_id: c_int,
+    want_id: c_int,
+    want_group: c_int,
+    cand_group: c_int,
+) -> c_int {
+    i32::from(crate::nntptlsweb::server_pool_match_want_server(
+        has_want != 0,
+        cand_id,
+        want_id,
+        want_group,
+        cand_group,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ntw_server_pool_match_ignore_server(
+    cand_id: c_int,
+    ign_id: c_int,
+    ign_group: c_int,
+    cand_group: c_int,
+    ign_norm_level: c_int,
+    cand_norm_level: c_int,
+) -> c_int {
+    i32::from(crate::nntptlsweb::server_pool_match_ignore_server(
+        cand_id,
+        ign_id,
+        ign_group,
+        cand_group,
+        ign_norm_level,
+        cand_norm_level,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ntw_server_pool_calc_remaining_block_sec(
+    block_time: i64,
+    retry_interval: c_int,
+    cur_time: i64,
+) -> c_int {
+    crate::nntptlsweb::server_pool_calc_remaining_block_sec(block_time, retry_interval, cur_time)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ntw_remote_server_select_port(
+    tls: c_int,
+    secure_port: c_int,
+    control_port: c_int,
+) -> c_int {
+    crate::nntptlsweb::remote_server_select_port(tls != 0, secure_port, control_port)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ntw_remote_server_should_warn_cap(
+    active_count: c_int,
+    max_processors: c_int,
+    now: i64,
+    last_warn: i64,
+    out_should_warn: *mut c_int,
+) -> c_int {
+    let (at_cap, should_warn) = crate::nntptlsweb::remote_server_should_warn_cap(
+        active_count,
+        max_processors,
+        now,
+        last_warn,
+    );
+    if !out_should_warn.is_null() {
+        *out_should_warn = i32::from(should_warn);
+    }
+    i32::from(at_cap)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ntw_web_proc_max_post_content_len(authorized: c_int) -> c_int {
+    crate::nntptlsweb::web_proc_max_post_content_len(authorized != 0)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ntw_web_proc_is_content_len_valid(
+    content_len: c_int,
+    authorized: c_int,
+) -> c_int {
+    i32::from(crate::nntptlsweb::web_proc_is_content_len_valid(
+        content_len,
+        authorized != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ntw_web_proc_should_use_gzip(
+    gzip_enabled: c_int,
+    body_len: c_int,
+    max_uncompressed_size: c_int,
+) -> c_int {
+    i32::from(crate::nntptlsweb::web_proc_should_use_gzip(
+        gzip_enabled != 0,
+        body_len,
+        max_uncompressed_size,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ntw_web_proc_default_resource(
+    url: *const c_char,
+) -> *const c_char {
+    crate::nntptlsweb::web_proc_default_resource(input(url))
+        .as_ptr()
+        .cast::<c_char>()
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ntw_xmlrpc_mib_per_sec(bytes: u64, ms: f64) -> f64 {
+    crate::nntptlsweb::xmlrpc_mib_per_sec(bytes, ms)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ntw_xmlrpc_check_user_access_denied(
+    user_access: c_int,
+    ua_add: c_int,
+    ua_restricted: c_int,
+    method_name: *const c_char,
+) -> c_int {
+    crate::nntptlsweb::xmlrpc_check_user_access_denied(
+        user_access,
+        ua_add,
+        ua_restricted,
+        input(method_name),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ntw_xmlrpc_ex_par_status(extra_par_blocks: c_int) -> *const c_char {
+    crate::nntptlsweb::xmlrpc_ex_par_status(extra_par_blocks)
+        .as_ptr()
+        .cast::<c_char>()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ntw_xmlrpc_parse_dupe_mode(
+    dupe_mode_str: *const c_char,
+    dm_score: c_int,
+    dm_all: c_int,
+    dm_force: c_int,
+) -> c_int {
+    crate::nntptlsweb::xmlrpc_parse_dupe_mode(input(dupe_mode_str), dm_score, dm_all, dm_force)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ntw_xmlrpc_is_http_url(content: *const c_char) -> c_int {
+    i32::from(crate::nntptlsweb::xmlrpc_is_http_url(input(content)))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ntw_xmlrpc_parse_category_source(
+    cat_src_str: *const c_char,
+    cs_nzb_file: c_int,
+    cs_feed_file: c_int,
+    cs_auto: c_int,
+) -> c_int {
+    crate::nntptlsweb::xmlrpc_parse_category_source(
+        input(cat_src_str),
+        cs_nzb_file,
+        cs_feed_file,
+        cs_auto,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ntw_xmlrpc_validate_reset_counter(
+    counter: *const c_char,
+) -> c_int {
+    crate::nntptlsweb::xmlrpc_validate_reset_counter(input(counter))
+}
+
 
 

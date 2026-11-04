@@ -89,7 +89,11 @@ namespace
 
 	double MiBPerSec(uint64_t bytes, double ms)
 	{
+#ifdef NZBGET_USE_RUST
+		return nzbget_rs_ntw_xmlrpc_mib_per_sec(bytes, ms);
+#else
 		return ms > 0.0 ? (static_cast<double>(bytes) / 1024.0 / 1024.0) / (ms / 1000.0) : 0.0;
+#endif
 	}
 }
 
@@ -982,6 +986,20 @@ std::unique_ptr<XmlCommand> XmlRpcProcessor::CreateCommand(const char* methodNam
 {
 	std::unique_ptr<XmlCommand> command;
 
+#ifdef NZBGET_USE_RUST
+	int accessDenied = nzbget_rs_ntw_xmlrpc_check_user_access_denied(
+		(int)m_userAccess, (int)uaAdd, (int)uaRestricted, methodName);
+	if (accessDenied == 1)
+	{
+		command = std::make_unique<ErrorXmlCommand>(401, "Access denied");
+		warn("Received request \"%s\" from add-user, access denied", methodName);
+	}
+	else if (accessDenied == 2)
+	{
+		command = std::make_unique<ErrorXmlCommand>(401, "Access denied");
+		warn("Received request \"%s\" from restricted user, access denied", methodName);
+	}
+#else
 	if (m_userAccess == uaAdd &&
 		!(!strcasecmp(methodName, "append") || !strcasecmp(methodName, "appendurl") ||
 		 !strcasecmp(methodName, "appendfleet") ||
@@ -996,6 +1014,7 @@ std::unique_ptr<XmlCommand> XmlRpcProcessor::CreateCommand(const char* methodNam
 		command = std::make_unique<ErrorXmlCommand>(401, "Access denied");
 		warn("Received request \"%s\" from restricted user, access denied", methodName);
 	}
+#endif
 	else if (!strcasecmp(methodName, "pause") || !strcasecmp(methodName, "pausedownload") ||
 		!strcasecmp(methodName, "pausedownload2"))
 	{
@@ -2440,7 +2459,11 @@ void NzbInfoXmlCommand::AppendNzbInfoFields(NzbInfo* nzbInfo)
 	int messageCount = nzbInfo->GetMessageCount() > 0 ? nzbInfo->GetMessageCount() : nzbInfo->GetCachedMessageCount();
 
 	CString xmlNzbNicename = EncodeStr(nzbInfo->GetName());
+#ifdef NZBGET_USE_RUST
+	const char* exParStatus = nzbget_rs_ntw_xmlrpc_ex_par_status(nzbInfo->GetExtraParBlocks());
+#else
 	const char* exParStatus = nzbInfo->GetExtraParBlocks() > 0 ? "RECIPIENT" : nzbInfo->GetExtraParBlocks() < 0 ? "DONOR" : "NONE";
+#endif
 
 	AppendFmtResponse(IsJson() ? JSON_NZB_ITEM_START : XML_NZB_ITEM_START,
 			nzbInfo->GetId(), *xmlNzbNicename, *xmlNzbNicename, kindName[nzbInfo->GetKind()],
@@ -2951,7 +2974,11 @@ void AppendFleetXmlCommand::Execute()
 		DecodeStr(content);
 		Fleet::Member member;
 		member.name = name;
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_ntw_xmlrpc_is_http_url(content) != 0)
+#else
 		if (!strncasecmp(content, "http://", 7) || !strncasecmp(content, "https://", 8))
+#endif
 		{
 			member.url = content;
 		}
@@ -3049,6 +3076,18 @@ void DownloadXmlCommand::Execute()
 			return;
 		}
 		char* dupeModeStr = nullptr;
+#ifdef NZBGET_USE_RUST
+		int parsedDupeMode = NextParamAsStr(&dupeModeStr)
+			? nzbget_rs_ntw_xmlrpc_parse_dupe_mode(
+				dupeModeStr, (int)dmScore, (int)dmAll, (int)dmForce)
+			: -1;
+		if (parsedDupeMode < 0)
+		{
+			BuildErrorResponse(2, "Invalid parameter (DupeMode)");
+			return;
+		}
+		dupeMode = (EDupeMode)parsedDupeMode;
+#else
 		if (!NextParamAsStr(&dupeModeStr) ||
 			(strcasecmp(dupeModeStr, "score") && strcasecmp(dupeModeStr, "all") && strcasecmp(dupeModeStr, "force")))
 		{
@@ -3057,6 +3096,7 @@ void DownloadXmlCommand::Execute()
 		}
 		dupeMode = !strcasecmp(dupeModeStr, "all") ? dmAll :
 			!strcasecmp(dupeModeStr, "force") ? dmForce : dmScore;
+#endif
 
 		NextParamAsBool(&autoCategory);
 	}
@@ -3086,7 +3126,11 @@ void DownloadXmlCommand::Execute()
 		}
 	}
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_ntw_xmlrpc_is_http_url(content) != 0)
+#else
 	if (!strncasecmp(content, "http://", 7) || !strncasecmp(content, "https://", 8))
+#endif
 	{
 		// add url
 		std::unique_ptr<NzbInfo> nzbInfo = std::make_unique<NzbInfo>();
@@ -4081,6 +4125,13 @@ void ViewFeedXmlCommand::Execute()
 		NextParamAsStr(&categorySourceStr);
 		if (categorySourceStr)
 		{
+#ifdef NZBGET_USE_RUST
+			categorySource = (FeedInfo::CategorySource)nzbget_rs_ntw_xmlrpc_parse_category_source(
+				categorySourceStr,
+				(int)FeedInfo::CategorySource::NZBFile,
+				(int)FeedInfo::CategorySource::FeedFile,
+				(int)FeedInfo::CategorySource::Auto);
+#else
 			if (!strcasecmp(categorySourceStr, "FeedFile"))
 			{
 				categorySource = FeedInfo::CategorySource::FeedFile;
@@ -4089,6 +4140,7 @@ void ViewFeedXmlCommand::Execute()
 			{
 				categorySource = FeedInfo::CategorySource::Auto;
 			}
+#endif
 		}
 
 		DecodeStr(name);
@@ -4590,6 +4642,15 @@ void ResetServerVolumeXmlCommand::Execute()
 		return;
 	}
 
+#ifdef NZBGET_USE_RUST
+	int counterKind = nzbget_rs_ntw_xmlrpc_validate_reset_counter(counter);
+	if (counterKind == 0)
+	{
+		BuildErrorResponse(3, "Invalid Counter");
+		return;
+	}
+	bool reset = counterKind == 1;
+#else
 	bool reset = strcmp(counter, "") == 0;
 	bool resetCustom = strcmp(counter, "CUSTOM") == 0;
 
@@ -4598,6 +4659,7 @@ void ResetServerVolumeXmlCommand::Execute()
 		BuildErrorResponse(3, "Invalid Counter");
 		return;
 	}
+#endif
 
 	bool ok = false;
 	int index = 0;

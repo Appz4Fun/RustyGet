@@ -23,6 +23,9 @@
 #include "nzbget.h"
 #include "ColoredFrontend.h"
 #include "Util.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 ColoredFrontend::ColoredFrontend()
 {
@@ -54,6 +57,15 @@ void ColoredFrontend::PrintStatus()
 	BString<100> timeString;
 	int64 currentDownloadSpeed = m_standBy ? 0 : m_currentDownloadSpeed;
 
+#ifdef NZBGET_USE_RUST
+	int h = 0, m = 0, s = 0;
+	if (nzbget_rs_feh_frontend_calc_remaining_hms(
+		m_remainingSize, m_currentDownloadSpeed, m_standBy ? 1 : 0, m_pauseDownload ? 1 : 0,
+		&h, &m, &s))
+	{
+		timeString.Format(" (~ %.2d:%.2d:%.2d)", h, m, s);
+	}
+#else
 	if (currentDownloadSpeed > 0 && !m_pauseDownload)
 	{
 		int64 remain_sec = (int64)(m_remainingSize / currentDownloadSpeed);
@@ -62,6 +74,7 @@ void ColoredFrontend::PrintStatus()
 		int s = (int)(remain_sec % 60);
 		timeString.Format(" (~ %.2d:%.2d:%.2d)", h, m, s);
 	}
+#endif
 
 	BString<100> downloadLimit;
 	if (m_downloadLimit > 0)

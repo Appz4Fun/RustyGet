@@ -21,6 +21,9 @@
 
 #include <fstream>
 #include "Validators.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 namespace SystemHealth
 {
@@ -65,6 +68,18 @@ Status UniquePath(
 
 Status CheckPassword(std::string_view password)
 {
+#ifdef NZBGET_USE_RUST
+	int pwCheck = nzbget_rs_feh_health_check_password(password.data(), password.size());
+	if (pwCheck == 1)
+	{
+		return Status::Warning("Password is set to empty");
+	}
+	if (pwCheck == 2)
+	{
+		return Status::Info("Password is too short (recommended minimum 8 characters)");
+	}
+	return Status::Ok();
+#else
 	if (password.empty())
 	{
 		return Status::Warning("Password is set to empty");
@@ -76,6 +91,7 @@ Status CheckPassword(std::string_view password)
 	}
 
 	return Status::Ok();
+#endif
 }
 
 Status CheckPositiveNum(std::string_view name, int value)
@@ -348,7 +364,11 @@ Status ValidHost(std::string_view hostname, Connection::EIPVersion ipv)
 
 Status ValidPort(int port)
 {
+#ifdef NZBGET_USE_RUST
+	if (!nzbget_rs_feh_health_valid_port(port)) return Status::Error("Port must be between 1 and 65535");
+#else
 	if (port < 1 || port > 65535) return Status::Error("Port must be between 1 and 65535");
+#endif
 
 	return Status::Ok();
 }

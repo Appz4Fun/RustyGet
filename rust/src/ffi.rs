@@ -13286,6 +13286,521 @@ pub unsafe extern "C" fn nzbget_rs_rco_string_builder_calc_reserve_capacity(
     )
 }
 
+// ============================================================================
+// Frontend, NCurses, Maintenance, ExtensionManager, NntpServer & SystemHealth FFI
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_frontend_is_any_ip(control_ip: *const c_char) -> c_int {
+    if control_ip.is_null() {
+        return 0;
+    }
+    let bytes = crate::diskstatepp::cstr_to_bytes(control_ip);
+    c_int::from(crate::frontexthealth::frontend_is_any_ip(bytes))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_frontend_calc_log_start_index(
+    needed_first_id: c_int,
+    first_msg_id: c_int,
+    out_skip: *mut c_int,
+) -> c_int {
+    let (start, skip) =
+        crate::frontexthealth::frontend_calc_log_start_index(needed_first_id, first_msg_id);
+    if !out_skip.is_null() {
+        *out_skip = c_int::from(skip);
+    }
+    start
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_frontend_calc_remaining_hms(
+    remaining_size: i64,
+    current_speed: i64,
+    stand_by: c_int,
+    pause_download: c_int,
+    out_h: *mut c_int,
+    out_m: *mut c_int,
+    out_s: *mut c_int,
+) -> c_int {
+    match crate::frontexthealth::frontend_calc_remaining_hms(
+        remaining_size,
+        current_speed,
+        stand_by != 0,
+        pause_download != 0,
+    ) {
+        Some((h, m, s)) => {
+            if !out_h.is_null() {
+                *out_h = h;
+            }
+            if !out_m.is_null() {
+                *out_m = m;
+            }
+            if !out_s.is_null() {
+                *out_s = s;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_ncurses_calc_window_sizes(
+    nr_rows: c_int,
+    nr_columns: c_int,
+    max_screen_width: c_int,
+    queue_win_pct: c_int,
+    queue_size: c_int,
+    out_clamped_cols: *mut c_int,
+    out_queue_win_height: *mut c_int,
+    out_queue_win_client_height: *mut c_int,
+    out_messages_win_top: *mut c_int,
+    out_messages_win_height: *mut c_int,
+    out_messages_win_client_height: *mut c_int,
+) {
+    let (cols, qh, qch, mtop, mh, mch) = crate::frontexthealth::ncurses_calc_window_sizes(
+        nr_rows,
+        nr_columns,
+        max_screen_width,
+        queue_win_pct,
+        queue_size,
+    );
+    if !out_clamped_cols.is_null() {
+        *out_clamped_cols = cols;
+    }
+    if !out_queue_win_height.is_null() {
+        *out_queue_win_height = qh;
+    }
+    if !out_queue_win_client_height.is_null() {
+        *out_queue_win_client_height = qch;
+    }
+    if !out_messages_win_top.is_null() {
+        *out_messages_win_top = mtop;
+    }
+    if !out_messages_win_height.is_null() {
+        *out_messages_win_height = mh;
+    }
+    if !out_messages_win_client_height.is_null() {
+        *out_messages_win_client_height = mch;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_ncurses_calc_scroll_and_selection(
+    entry: c_int,
+    queue_size: c_int,
+    scroll_offset: c_int,
+    client_height: c_int,
+    out_selected_entry: *mut c_int,
+    out_scroll_offset: *mut c_int,
+) {
+    let (sel, off) = crate::frontexthealth::ncurses_calc_scroll_and_selection(
+        entry,
+        queue_size,
+        scroll_offset,
+        client_height,
+    );
+    if !out_selected_entry.is_null() {
+        *out_selected_entry = sel;
+    }
+    if !out_scroll_offset.is_null() {
+        *out_scroll_offset = off;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_ncurses_calc_top_header_time(
+    time_sec: c_int,
+    out_d: *mut c_int,
+    out_h: *mut c_int,
+    out_m: *mut c_int,
+    out_s: *mut c_int,
+) {
+    let (d, h, m, s) = crate::frontexthealth::ncurses_calc_top_header_time(time_sec);
+    if !out_d.is_null() {
+        *out_d = d;
+    }
+    if !out_h.is_null() {
+        *out_h = h;
+    }
+    if !out_m.is_null() {
+        *out_m = m;
+    }
+    if !out_s.is_null() {
+        *out_s = s;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_ncurses_resolve_group_pause_action(
+    action: c_int,
+    remaining_size: i64,
+    paused_size: i64,
+    remaining_par_count: c_int,
+    last_pause_pars: c_int,
+    last_edit_entry: c_int,
+    selected_entry: c_int,
+    out_last_pause_pars: *mut c_int,
+) -> c_int {
+    let (resolved, new_last) = crate::frontexthealth::ncurses_resolve_group_pause_action(
+        action,
+        remaining_size,
+        paused_size,
+        remaining_par_count,
+        last_pause_pars != 0,
+        last_edit_entry,
+        selected_entry,
+    );
+    if !out_last_pause_pars.is_null() {
+        *out_last_pause_pars = c_int::from(new_last);
+    }
+    resolved
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_ncurses_step_rate_input(
+    key: c_int,
+    key_backspace: c_int,
+    inout_index: *mut c_int,
+    inout_value: *mut c_int,
+) -> c_int {
+    if inout_index.is_null() || inout_value.is_null() {
+        return 0;
+    }
+    let (step, new_idx, new_val) = crate::frontexthealth::ncurses_step_rate_input(
+        key,
+        key_backspace,
+        *inout_index,
+        *inout_value,
+    );
+    *inout_index = new_idx;
+    *inout_value = new_val;
+    step
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_maintenance_extract_package_info_str(
+    json: *const c_char,
+    key: *const c_char,
+    max_len: usize,
+    out_start: *mut usize,
+    out_len: *mut usize,
+) -> c_int {
+    if json.is_null() || key.is_null() {
+        return 0;
+    }
+    let json_bytes = crate::diskstatepp::cstr_to_bytes(json);
+    let key_bytes = crate::diskstatepp::cstr_to_bytes(key);
+    match crate::frontexthealth::maintenance_extract_package_info_str(
+        json_bytes,
+        key_bytes,
+        max_len,
+    ) {
+        Some((start, len)) => {
+            if !out_start.is_null() {
+                *out_start = start;
+            }
+            if !out_len.is_null() {
+                *out_len = len;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_maintenance_classify_update_message(
+    text: *const c_char,
+) -> c_int {
+    if text.is_null() {
+        return 0;
+    }
+    let bytes = crate::diskstatepp::cstr_to_bytes(text);
+    crate::frontexthealth::maintenance_classify_update_message(bytes)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_maintenance_classify_update_info_message(
+    text: *const c_char,
+) -> c_int {
+    if text.is_null() {
+        return 0;
+    }
+    let bytes = crate::diskstatepp::cstr_to_bytes(text);
+    crate::frontexthealth::maintenance_classify_update_info_message(bytes)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_maintenance_decode_hex_signature(
+    hex_sig: *const c_char,
+    out_sig: *mut u8,
+) -> c_int {
+    if hex_sig.is_null() || out_sig.is_null() {
+        return 0;
+    }
+    let bytes = crate::diskstatepp::cstr_to_bytes(hex_sig);
+    let out_arr = &mut *out_sig.cast::<[u8; 256]>();
+    c_int::from(crate::frontexthealth::maintenance_decode_hex_signature(
+        bytes, out_arr,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_ext_should_skip_dir_entry(
+    filename: *const c_char,
+) -> c_int {
+    if filename.is_null() {
+        return 1;
+    }
+    let bytes = crate::diskstatepp::cstr_to_bytes(filename);
+    c_int::from(crate::frontexthealth::ext_should_skip_dir_entry(bytes))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_ext_get_stem_len(
+    filename: *const c_char,
+    filename_len: usize,
+) -> usize {
+    if filename.is_null() || filename_len == 0 {
+        return 0;
+    }
+    let bytes = std::slice::from_raw_parts(filename.cast::<u8>(), filename_len);
+    crate::frontexthealth::ext_get_stem_len(bytes)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_ext_is_in_list(
+    extensions_list: *const c_char,
+    target_name: *const c_char,
+) -> c_int {
+    if extensions_list.is_null() || target_name.is_null() {
+        return 0;
+    }
+    let list_bytes = crate::diskstatepp::cstr_to_bytes(extensions_list);
+    let name_bytes = crate::diskstatepp::cstr_to_bytes(target_name);
+    c_int::from(crate::frontexthealth::ext_is_in_list(
+        list_bytes, name_bytes,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_nntp_classify_command(
+    line: *const c_char,
+    out_arg_offset: *mut usize,
+) -> c_int {
+    if line.is_null() {
+        return 0;
+    }
+    let bytes = crate::diskstatepp::cstr_to_bytes(line);
+    let (cmd, off) = crate::frontexthealth::nntp_classify_command(bytes);
+    if !out_arg_offset.is_null() {
+        *out_arg_offset = off;
+    }
+    cmd
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_nntp_parse_message_id(
+    msg_id: *const c_char,
+    out_name_len: *mut c_int,
+    out_part: *mut c_int,
+    out_offset: *mut i64,
+    out_size: *mut c_int,
+    out_serv_offset: *mut c_int,
+) -> c_int {
+    if msg_id.is_null() {
+        return 0;
+    }
+    let bytes = crate::diskstatepp::cstr_to_bytes(msg_id);
+    match crate::frontexthealth::nntp_parse_message_id(bytes) {
+        Some((name_len, part, offset, size, serv_off)) => {
+            if !out_name_len.is_null() {
+                *out_name_len = name_len;
+            }
+            if !out_part.is_null() {
+                *out_part = part;
+            }
+            if !out_offset.is_null() {
+                *out_offset = offset;
+            }
+            if !out_size.is_null() {
+                *out_size = size;
+            }
+            if !out_serv_offset.is_null() {
+                *out_serv_offset = serv_off;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_nntp_server_in_list(
+    serv_list: *const c_char,
+    server_id: c_int,
+) -> c_int {
+    if serv_list.is_null() {
+        return 0;
+    }
+    let bytes = crate::diskstatepp::cstr_to_bytes(serv_list);
+    c_int::from(crate::frontexthealth::nntp_server_in_list(bytes, server_id))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_nntp_calc_send_chunks(
+    size: c_int,
+    speed: c_int,
+    elapsed_ticks: i64,
+    out_expected_time: *mut i64,
+    out_chunk_num: *mut c_int,
+    out_chunk_size: *mut c_int,
+    out_pause: *mut c_int,
+) {
+    let (exp, cnum, csize, pause) =
+        crate::frontexthealth::nntp_calc_send_chunks(size, speed, elapsed_ticks);
+    if !out_expected_time.is_null() {
+        *out_expected_time = exp;
+    }
+    if !out_chunk_num.is_null() {
+        *out_chunk_num = cnum;
+    }
+    if !out_chunk_size.is_null() {
+        *out_chunk_size = csize;
+    }
+    if !out_pause.is_null() {
+        *out_pause = pause;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_health_check_password(
+    password: *const c_char,
+    password_len: usize,
+) -> c_int {
+    let bytes = if password.is_null() || password_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(password.cast::<u8>(), password_len)
+    };
+    crate::frontexthealth::health_check_password(bytes)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_health_valid_port(port: c_int) -> c_int {
+    c_int::from(crate::frontexthealth::health_valid_port(port))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_health_validate_control_ip(
+    ip: *const c_char,
+    ip_len: usize,
+    is_win32: c_int,
+) -> c_int {
+    let bytes = if ip.is_null() || ip_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(ip.cast::<u8>(), ip_len)
+    };
+    crate::frontexthealth::health_validate_control_ip(bytes, is_win32 != 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_health_validate_user_pass_pair(
+    user: *const c_char,
+    user_len: usize,
+    pass: *const c_char,
+    pass_len: usize,
+) -> c_int {
+    let u = if user.is_null() || user_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(user.cast::<u8>(), user_len)
+    };
+    let p = if pass.is_null() || pass_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(pass.cast::<u8>(), pass_len)
+    };
+    crate::frontexthealth::health_validate_user_pass_pair(u, p)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_health_validate_form_auth(
+    form_auth: c_int,
+    secure_control: c_int,
+    no_control_pass: c_int,
+    no_add_user: c_int,
+    no_restricted_user: c_int,
+) -> c_int {
+    crate::frontexthealth::health_validate_form_auth(
+        form_auth != 0,
+        secure_control != 0,
+        no_control_pass != 0,
+        no_add_user != 0,
+        no_restricted_user != 0,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_health_validate_article_cache(
+    val: c_int,
+    ptr_size: usize,
+    direct_write: c_int,
+) -> c_int {
+    crate::frontexthealth::health_validate_article_cache(val, ptr_size, direct_write != 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_health_validate_write_buffer(val: c_int) -> c_int {
+    crate::frontexthealth::health_validate_write_buffer(val)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_health_validate_server_port(
+    active: c_int,
+    port: c_int,
+    tls: c_int,
+) -> c_int {
+    crate::frontexthealth::health_validate_server_port(active != 0, port, tls != 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_health_validate_server_connections(
+    active: c_int,
+    max_conn: c_int,
+    dupe_search: c_int,
+) -> c_int {
+    crate::frontexthealth::health_validate_server_connections(
+        active != 0,
+        max_conn,
+        dupe_search != 0,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_health_validate_server_retention(
+    active: c_int,
+    retention: c_int,
+) -> c_int {
+    crate::frontexthealth::health_validate_server_retention(active != 0, retention)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_health_validate_article_read_chunk_size(
+    bytes: c_int,
+    out_kb_val: *mut c_int,
+) -> c_int {
+    let (code, kb) = crate::frontexthealth::health_validate_article_read_chunk_size(bytes);
+    if !out_kb_val.is_null() {
+        *out_kb_val = kb;
+    }
+    code
+}
+
+
 
 
 

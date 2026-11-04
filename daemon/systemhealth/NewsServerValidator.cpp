@@ -21,6 +21,9 @@
 
 #include "NewsServerValidator.h"
 #include "Options.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 namespace SystemHealth::NewsServer
 {
@@ -109,6 +112,17 @@ Status ServerHostValidator::Validate() const
 
 Status ServerPortValidator::Validate() const
 {
+#ifdef NZBGET_USE_RUST
+	int portCheck = nzbget_rs_feh_health_validate_server_port(
+		m_server.GetActive() ? 1 : 0, m_server.GetPort(), m_server.GetTls() ? 1 : 0);
+	if (portCheck == -1)
+		return Status::Error("Port must be between 1 and 65535");
+	if (portCheck == 1)
+		return Status::Info("Consider using a standard encrypted port (443 or 563)");
+	if (portCheck == 2)
+		return Status::Info("Consider using a standard unencrypted port (80 or 119)");
+	return Status::Ok();
+#else
 	if (!m_server.GetActive()) return Status::Ok();
 
 	return Network::ValidPort(m_server.GetPort())
@@ -126,6 +140,7 @@ Status ServerPortValidator::Validate() const
 
 				return Status::Ok();
 			});
+#endif
 }
 
 Status ServerUsernameValidator::Validate() const
@@ -175,6 +190,21 @@ Status ServerCipherValidator::Validate() const
 
 Status ServerConnectionsValidator::Validate() const
 {
+#ifdef NZBGET_USE_RUST
+	int connCheck = nzbget_rs_feh_health_validate_server_connections(
+		m_server.GetActive() ? 1 : 0, m_server.GetMaxConnections(),
+		(g_Options && g_Options->GetDupeSearch()) ? 1 : 0);
+	if (connCheck == 1)
+		return Status::Warning("'Connections' is set to '0'. The Server is disabled");
+	if (connCheck == -1)
+		return Status::Error("'Connections' value is invalid. It must be between 0 and 999");
+	if (connCheck == 2)
+		return Status::Warning("A low number of connections may impact download performance, and "
+			"DupeSearch's health checks get only 1 connection to this server (4 or more give them 2)");
+	if (connCheck == 3)
+		return Status::Warning("A low number of connections may impact download performance");
+	return Status::Ok();
+#else
 	if (!m_server.GetActive()) return Status::Ok();
 
 	int maxConnections = m_server.GetMaxConnections();
@@ -193,10 +223,31 @@ Status ServerConnectionsValidator::Validate() const
 		return Status::Warning("A low number of connections may impact download performance");
 
 	return Status::Ok();
+#endif
 }
 
 Status ServerRetentionValidator::Validate() const
 {
+#ifdef NZBGET_USE_RUST
+	int retention = m_server.GetRetention();
+	int retCheck = nzbget_rs_feh_health_validate_server_retention(
+		m_server.GetActive() ? 1 : 0, retention);
+	if (retCheck == 1)
+	{
+		std::stringstream ss;
+		ss << "Retention is set to " << retention << " days. "
+		   << "This low value may cause downloads to fail";
+		return Status::Warning(ss.str());
+	}
+	if (retCheck == 2)
+	{
+		std::stringstream ss;
+		ss << "Retention (" << retention << ") is unrealistically high "
+		   << "and will be limited by the server's actual retention";
+		return Status::Info(ss.str());
+	}
+	return Status::Ok();
+#else
 	if (!m_server.GetActive()) return Status::Ok();
 
 	int retention = m_server.GetRetention();
@@ -217,6 +268,7 @@ Status ServerRetentionValidator::Validate() const
 	}
 
 	return Status::Ok();
+#endif
 }
 
 Status ServerCertVerificationValidator::Validate() const

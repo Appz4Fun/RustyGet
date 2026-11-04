@@ -38,6 +38,9 @@
 #include "NCursesFrontend.h"
 #include "Options.h"
 #include "Util.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 #ifndef WIN32
 // curses.h on Solaris declares "clear()" via DEFINE. That causes problems, because
@@ -306,6 +309,31 @@ void NCursesFrontend::CalcWindowSizes()
 #endif
 	// the line buffers hold MAX_SCREEN_WIDTH columns (a wider terminal wrote past
 	// them), and messages wrap at the width less 8 (a divisor of zero at 8)
+#ifdef NZBGET_USE_RUST
+	int queueSize = CalcQueueSize();
+	int qh = 0, qch = 0, mtop = 0, mh = 0, mch = 0;
+	nzbget_rs_feh_ncurses_calc_window_sizes(
+		nrRows, nrColumns, MAX_SCREEN_WIDTH, m_queueWindowPercentage, queueSize,
+		&nrColumns, &qh, &qch, &mtop, &mh, &mch);
+	if (nrRows != m_screenHeight || nrColumns != m_screenWidth)
+	{
+#ifdef WIN32
+		int screenAreaSize = nrRows * nrColumns;
+		m_screenBuffer.resize(screenAreaSize);
+		m_oldScreenBuffer.resize(screenAreaSize);
+#else
+		curses_clear();
+#endif
+		m_screenHeight = nrRows;
+		m_screenWidth = nrColumns;
+	}
+	m_queueWinTop = 0;
+	m_queueWinHeight = qh;
+	m_queueWinClientHeight = qch;
+	m_messagesWinTop = mtop;
+	m_messagesWinHeight = mh;
+	m_messagesWinClientHeight = mch;
+#else
 	nrColumns = std::clamp(nrColumns, 9, MAX_SCREEN_WIDTH);
 	if (nrRows != m_screenHeight || nrColumns != m_screenWidth)
 	{
@@ -341,6 +369,7 @@ void NCursesFrontend::CalcWindowSizes()
 	{
 		m_messagesWinClientHeight = 0;
 	}
+#endif
 }
 
 int NCursesFrontend::CalcQueueSize()
@@ -803,10 +832,15 @@ void NCursesFrontend::PrintTopHeader(char* header, int lineNr, bool upTime)
 	int charsLeft = m_screenWidth - headerLen - 2;
 
 	int time = upTime ? m_upTimeSec : m_dnTimeSec;
+#ifdef NZBGET_USE_RUST
+	int d = 0, h = 0, m = 0, s = 0;
+	nzbget_rs_feh_ncurses_calc_top_header_time(time, &d, &h, &m, &s);
+#else
 	int d = time / 3600 / 24;
 	int h = (time % (3600 * 24)) / 3600;
 	int m = (time % 3600) / 60;
 	int s = time % 60;
+#endif
 	BString<100> timeStr;
 
 	if (d == 0)
@@ -1029,6 +1063,14 @@ bool NCursesFrontend::EditQueue(DownloadQueue::EEditAction action, int offset)
 		{
 			std::unique_ptr<NzbInfo>& nzbInfo = downloadQueue->GetQueue()->at(m_selectedQueueEntry);
 			ID = nzbInfo->GetId();
+#ifdef NZBGET_USE_RUST
+			int newLastPausePars = m_lastPausePars ? 1 : 0;
+			action = (DownloadQueue::EEditAction)nzbget_rs_feh_ncurses_resolve_group_pause_action(
+				(int)action, nzbInfo->GetRemainingSize(), nzbInfo->GetPausedSize(),
+				nzbInfo->GetRemainingParCount(), m_lastPausePars ? 1 : 0,
+				m_lastEditEntry, m_selectedQueueEntry, &newLastPausePars);
+			m_lastPausePars = newLastPausePars != 0;
+#else
 			if (action == DownloadQueue::eaFilePause)
 			{
 				if (nzbInfo->GetRemainingSize() == nzbInfo->GetPausedSize())
@@ -1047,6 +1089,7 @@ bool NCursesFrontend::EditQueue(DownloadQueue::EEditAction action, int offset)
 					m_lastPausePars = false;
 				}
 			}
+#endif
 		}
 
 		// map file-edit-actions to group-edit-actions
@@ -1101,6 +1144,11 @@ void NCursesFrontend::SetCurrentQueueEntry(int entry)
 {
 	int queueSize = CalcQueueSize();
 
+#ifdef NZBGET_USE_RUST
+	nzbget_rs_feh_ncurses_calc_scroll_and_selection(
+		entry, queueSize, m_queueScrollOffset, m_queueWinClientHeight,
+		&m_selectedQueueEntry, &m_queueScrollOffset);
+#else
 	if (entry < 0)
 	{
 		entry = 0;
@@ -1134,6 +1182,7 @@ void NCursesFrontend::SetCurrentQueueEntry(int entry)
 	}
 
 	m_selectedQueueEntry = entry;
+#endif
 }
 
 
@@ -1326,6 +1375,21 @@ void NCursesFrontend::UpdateInput(int initialKey)
 		// Edit download rate input mode
 		if (m_inputMode == downloadRate)
 		{
+#ifdef NZBGET_USE_RUST
+			int rateStep = nzbget_rs_feh_ncurses_step_rate_input(
+				key, KEY_BACKSPACE, &m_inputNumberIndex, &m_inputValue);
+			if (rateStep == 1)
+			{
+				ServerSetDownloadRate(m_inputValue * 1024);
+				m_inputMode = normal;
+				return;
+			}
+			else if (rateStep == 2)
+			{
+				m_inputMode = normal;
+				return;
+			}
+#else
 			// Numbers
 			if (m_inputNumberIndex < 5 && key >= '0' && key <= '9')
 			{
@@ -1353,6 +1417,7 @@ void NCursesFrontend::UpdateInput(int initialKey)
 				m_inputValue = (m_inputValue - remain) / 10;
 				m_inputNumberIndex--;
 			}
+#endif
 		}
 
 		key = ReadConsoleKey();

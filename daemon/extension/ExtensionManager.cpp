@@ -27,6 +27,9 @@
 #include "ExtensionManager.h"
 #include "Options.h"
 #include "FileSystem.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 #ifdef _WIN32
 #include "Utf8.h"
@@ -307,8 +310,13 @@ namespace ExtensionManager
 		DirBrowser dir(directory);
 		while (const char* filename = dir.Next())
 		{
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_feh_ext_should_skip_dir_entry(filename))
+				continue;
+#else
 			if (filename[0] == '.' || filename[0] == '_')
 				continue;
+#endif
 
 			const std::string entry = std::string(directory) + PATH_SEPARATOR + filename;
 			if (!FileSystem::DirectoryExists(entry.c_str()))
@@ -342,6 +350,18 @@ namespace ExtensionManager
 			{
 				continue;
 			}
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_feh_ext_is_in_list(g_Options->GetExtensions(), extension->GetName()))
+			{
+				g_Options->CreateSchedulerTask(
+					0,
+					extension->GetTaskTime(),
+					nullptr,
+					Options::scScript,
+					extension->GetName()
+				);
+			}
+#else
 			Tokenizer tok(g_Options->GetExtensions(), ",;");
 			while (const char* scriptName = tok.Next())
 			{
@@ -357,6 +377,7 @@ namespace ExtensionManager
 					break;
 				}
 			}
+#endif
 		}
 	}
 
@@ -436,6 +457,14 @@ namespace ExtensionManager
 
 	std::string Manager::GetExtensionName(const std::string& fileName) const
 	{
+#ifdef NZBGET_USE_RUST
+		size_t stemLen = nzbget_rs_feh_ext_get_stem_len(fileName.data(), fileName.size());
+		if (stemLen < fileName.size())
+		{
+			return fileName.substr(0, stemLen);
+		}
+		return fileName;
+#else
 		size_t lastIdx = fileName.find_last_of(".");
 		if (lastIdx != std::string::npos)
 		{
@@ -443,6 +472,7 @@ namespace ExtensionManager
 		}
 
 		return fileName;
+#endif
 	}
 
 	Extensions::const_iterator Manager::GetByName(const std::string& name) const

@@ -31,6 +31,9 @@
 #include "RemoteClient.h"
 #include "Util.h"
 #include "StatMeter.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 Frontend::Frontend()
 {
@@ -64,7 +67,11 @@ bool Frontend::PrepareData()
 		}
 		if (!RequestMessages() || ((m_summary || m_fileList) && !RequestFileList()))
 		{
+#ifdef NZBGET_USE_RUST
+			const char* controlIp = nzbget_rs_feh_frontend_is_any_ip(g_Options->GetControlIp()) ? "127.0.0.1" : g_Options->GetControlIp();
+#else
 			const char* controlIp = !strcmp(g_Options->GetControlIp(), "0.0.0.0") ? "127.0.0.1" : g_Options->GetControlIp();
+#endif
 			printf("\nUnable to send request to nzbget-server at %s (port %i)    \n", controlIp, g_Options->GetControlPort());
 			Stop();
 			return false;
@@ -170,7 +177,11 @@ void Frontend::InitMessageBase(SNzbRequestBase* messageBase, int request, int si
 
 bool Frontend::RequestMessages()
 {
+#ifdef NZBGET_USE_RUST
+	const char* controlIp = nzbget_rs_feh_frontend_is_any_ip(g_Options->GetControlIp()) ? "127.0.0.1" : g_Options->GetControlIp();
+#else
 	const char* controlIp = !strcmp(g_Options->GetControlIp(), "0.0.0.0") ? "127.0.0.1" : g_Options->GetControlIp();
+#endif
 	Connection connection(controlIp, g_Options->GetControlPort(), false);
 
 	bool OK = connection.Connect();
@@ -238,7 +249,11 @@ bool Frontend::RequestMessages()
 
 bool Frontend::RequestFileList()
 {
+#ifdef NZBGET_USE_RUST
+	const char* controlIp = nzbget_rs_feh_frontend_is_any_ip(g_Options->GetControlIp()) ? "127.0.0.1" : g_Options->GetControlIp();
+#else
 	const char* controlIp = !strcmp(g_Options->GetControlIp(), "0.0.0.0") ? "127.0.0.1" : g_Options->GetControlIp();
+#endif
 	Connection connection(controlIp, g_Options->GetControlPort(), false);
 
 	bool OK = connection.Connect();

@@ -2174,6 +2174,69 @@ size_t nzbget_rs_rco_wstring_decode_utf8_to_utf16(
 int nzbget_rs_rco_string_builder_calc_reserve_capacity(
     int old_capacity, int requested_capacity, int exact);
 
+int nzbget_rs_feh_frontend_is_any_ip(const char* control_ip);
+int nzbget_rs_feh_frontend_calc_log_start_index(
+    int needed_first_id, int first_msg_id, int* out_skip);
+int nzbget_rs_feh_frontend_calc_remaining_hms(
+    int64_t remaining_size, int64_t current_speed, int stand_by, int pause_download,
+    int* out_h, int* out_m, int* out_s);
+void nzbget_rs_feh_ncurses_calc_window_sizes(
+    int nr_rows, int nr_columns, int max_screen_width, int queue_win_pct, int queue_size,
+    int* out_clamped_cols, int* out_queue_win_height, int* out_queue_win_client_height,
+    int* out_messages_win_top, int* out_messages_win_height,
+    int* out_messages_win_client_height);
+void nzbget_rs_feh_ncurses_calc_scroll_and_selection(
+    int entry, int queue_size, int scroll_offset, int client_height,
+    int* out_selected_entry, int* out_scroll_offset);
+void nzbget_rs_feh_ncurses_calc_top_header_time(
+    int time_sec, int* out_d, int* out_h, int* out_m, int* out_s);
+int nzbget_rs_feh_ncurses_resolve_group_pause_action(
+    int action, int64_t remaining_size, int64_t paused_size, int remaining_par_count,
+    int last_pause_pars, int last_edit_entry, int selected_entry,
+    int* out_last_pause_pars);
+int nzbget_rs_feh_ncurses_step_rate_input(
+    int key, int key_backspace, int* inout_index, int* inout_value);
+
+int nzbget_rs_feh_maintenance_extract_package_info_str(
+    const char* json, const char* key, size_t max_len,
+    size_t* out_start, size_t* out_len);
+int nzbget_rs_feh_maintenance_classify_update_message(const char* text);
+int nzbget_rs_feh_maintenance_classify_update_info_message(const char* text);
+int nzbget_rs_feh_maintenance_decode_hex_signature(
+    const char* hex_sig, uint8_t* out_sig);
+
+int nzbget_rs_feh_ext_should_skip_dir_entry(const char* filename);
+size_t nzbget_rs_feh_ext_get_stem_len(const char* filename, size_t filename_len);
+int nzbget_rs_feh_ext_is_in_list(const char* extensions_list, const char* target_name);
+
+int nzbget_rs_feh_nntp_classify_command(const char* line, size_t* out_arg_offset);
+int nzbget_rs_feh_nntp_parse_message_id(
+    const char* msg_id, int* out_name_len, int* out_part, int64_t* out_offset,
+    int* out_size, int* out_serv_offset);
+int nzbget_rs_feh_nntp_server_in_list(const char* serv_list, int server_id);
+void nzbget_rs_feh_nntp_calc_send_chunks(
+    int size, int speed, int64_t elapsed_ticks, int64_t* out_expected_time,
+    int* out_chunk_num, int* out_chunk_size, int* out_pause);
+
+int nzbget_rs_feh_health_check_password(const char* password, size_t password_len);
+int nzbget_rs_feh_health_valid_port(int port);
+int nzbget_rs_feh_health_validate_control_ip(
+    const char* ip, size_t ip_len, int is_win32);
+int nzbget_rs_feh_health_validate_user_pass_pair(
+    const char* user, size_t user_len, const char* pass, size_t pass_len);
+int nzbget_rs_feh_health_validate_form_auth(
+    int form_auth, int secure_control, int no_control_pass, int no_add_user,
+    int no_restricted_user);
+int nzbget_rs_feh_health_validate_article_cache(
+    int val, size_t ptr_size, int direct_write);
+int nzbget_rs_feh_health_validate_write_buffer(int val);
+int nzbget_rs_feh_health_validate_server_port(int active, int port, int tls);
+int nzbget_rs_feh_health_validate_server_connections(
+    int active, int max_conn, int dupe_search);
+int nzbget_rs_feh_health_validate_server_retention(int active, int retention);
+int nzbget_rs_feh_health_validate_article_read_chunk_size(
+    int bytes, int* out_kb_val);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

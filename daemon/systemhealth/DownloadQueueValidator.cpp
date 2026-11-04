@@ -23,6 +23,9 @@
 #include "DownloadQueueValidator.h"
 #include "Options.h"
 #include "Validators.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 namespace SystemHealth::DownloadQueue
 {
@@ -77,6 +80,27 @@ Status PropagationDelayValidator::Validate() const
 Status ArticleCacheValidator::Validate() const
 {
 	int val = m_options.GetArticleCache();
+#ifdef NZBGET_USE_RUST
+	int cacheCheck = nzbget_rs_feh_health_validate_article_cache(
+		val, sizeof(void*), m_options.GetDirectWrite() ? 1 : 0);
+	if (cacheCheck == -1)
+		return Status::Error("'" + std::string(Options::ARTICLECACHE) + "' option must not be negative");
+	if (cacheCheck == 1)
+		return Status::Warning(
+			"'" + std::string(Options::ARTICLECACHE) +
+			"' is disabled. Enabling it is recommended to reduce disk fragmentation");
+	if (cacheCheck == -2)
+		return Status::Error("'" + std::string(Options::ARTICLECACHE) +
+							 "' cannot exceed 1900 MB on 32-bit systems");
+	if (cacheCheck == 2)
+		return Status::Warning("It's recommended to set '" +
+							   std::string(Options::ARTICLECACHE) + "' at least 50MB");
+	if (cacheCheck == 3)
+		return Status::Warning(
+			"A cache under 200 MB is likely too small to hold complete files, "
+			"forcing writes to the temporary directory and degrading performance");
+	return Status::Ok();
+#else
 	Status s = CheckPositiveNum(Options::ARTICLECACHE, val);
 	if (!s.IsOk()) return s;
 
@@ -110,6 +134,7 @@ Status ArticleCacheValidator::Validate() const
 	}
 
 	return Status::Ok();
+#endif
 }
 
 Status DirectWriteValidator::Validate() const
@@ -128,6 +153,26 @@ Status DirectWriteValidator::Validate() const
 Status WriteBufferValidator::Validate() const
 {
 	int val = m_options.GetWriteBuffer();
+#ifdef NZBGET_USE_RUST
+	int bufCheck = nzbget_rs_feh_health_validate_write_buffer(val);
+	if (bufCheck == -1)
+		return Status::Error("'" + std::string(Options::WRITEBUFFER) + "' option must not be negative");
+	if (bufCheck == 1)
+		return Status::Warning(
+			"'" + std::string(Options::WRITEBUFFER) +
+			"' is set to '0'. "
+			"This uses the default system buffer, which is often too small and inefficient");
+	if (bufCheck == 2)
+		return Status::Warning(
+			"'" + std::string(Options::WRITEBUFFER) +
+			"' is very low. "
+			"At least 1024 KB is recommended for systems with sufficient memory");
+	if (bufCheck == 3)
+		return Status::Warning(
+			"'" + std::string(Options::WRITEBUFFER) +
+			"' is very large (>100MB). This is per-connection and may exhaust memory");
+	return Status::Ok();
+#else
 	Status s = CheckPositiveNum(Options::WRITEBUFFER, val);
 	if (!s.IsOk()) return s;
 
@@ -155,6 +200,7 @@ Status WriteBufferValidator::Validate() const
 			"' is very large (>100MB). This is per-connection and may exhaust memory");
 	}
 	return Status::Ok();
+#endif
 }
 
 Status FileNamingValidator::Validate() const

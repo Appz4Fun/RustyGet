@@ -21,6 +21,9 @@
 
 #include "ConnectionValidator.h"
 #include "Validators.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 namespace SystemHealth::Connection
 {
@@ -104,6 +107,26 @@ Status ArticleTimeoutValidator::Validate() const
 Status ArticleReadChunkSizeValidator::Validate() const
 {
 	// Options stores bytes; these thresholds and messages use configured KB.
+#ifdef NZBGET_USE_RUST
+	int val = 0;
+	int chunkCheck = nzbget_rs_feh_health_validate_article_read_chunk_size(
+		m_options.GetArticleReadChunkSize(), &val);
+	if (chunkCheck == -1)
+		return Status::Error("'" + std::string(Options::ARTICLEREADCHUNKSIZE) + "' option must not be negative");
+	if (chunkCheck == 1)
+		return Status::Warning(
+			"'" + std::string(Options::ARTICLEREADCHUNKSIZE) + "' is set to " +
+			std::to_string(val) +
+			" KB. "
+			"This is very low and may reduce download speed due to network overhead");
+	if (chunkCheck == 2)
+		return Status::Info(
+			"'" + std::string(Options::ARTICLEREADCHUNKSIZE) + "' is set to " +
+			std::to_string(val) +
+			" KB. "
+			"This buffer is allocated per connection; ensure sufficient system RAM is available");
+	return Status::Ok();
+#else
 	int val = m_options.GetArticleReadChunkSize() / 1024;
 	Status s = CheckPositiveNum(Options::ARTICLEREADCHUNKSIZE, val);
 	if (!s.IsOk()) return s;
@@ -127,6 +150,7 @@ Status ArticleReadChunkSizeValidator::Validate() const
 	}
 
 	return Status::Ok();
+#endif
 }
 
 Status UrlRetriesValidator::Validate() const

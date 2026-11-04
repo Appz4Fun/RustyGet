@@ -23,6 +23,9 @@
 #include "Util.h"
 #include "LoggableFrontend.h"
 #include "Log.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 void LoggableFrontend::Run()
 {
@@ -56,12 +59,22 @@ void LoggableFrontend::Update()
 		if (!messages->empty())
 		{
 			Message& firstMessage = messages->front();
+#ifdef NZBGET_USE_RUST
+			int skip = 0;
+			int start = nzbget_rs_feh_frontend_calc_log_start_index(
+				m_neededLogFirstId, firstMessage.GetId(), &skip);
+			if (skip)
+			{
+				PrintSkip();
+			}
+#else
 			int start = m_neededLogFirstId - firstMessage.GetId() + 1;
 			if (start < 0)
 			{
 				PrintSkip();
 				start = 0;
 			}
+#endif
 			for (uint32 i = (uint32)start; i < messages->size(); i++)
 			{
 				PrintMessage(messages->at(i));

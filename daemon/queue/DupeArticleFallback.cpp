@@ -362,15 +362,30 @@ bool DupeArticleFallback::TryFallback(DownloadQueue* downloadQueue, FileInfo* fi
 		{
 			// say once per collection which way the par-first rule went, so a
 			// download that borrowed nothing can be told apart from one that tried
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_dqh_dupe_fallback_should_log_par_defer(
+				articleInfo->GetDupeProactive() ? 1 : 0,
+				(int)nzbInfo->GetDupeParDeferState(),
+				(int)NzbInfo::dpNone,
+				downloadQueue != nullptr ? 1 : 0) != 0 &&
+				!CollectDonors(downloadQueue, nzbInfo).empty())
+#else
 			if (!articleInfo->GetDupeProactive() && nzbInfo->GetDupeParDeferState() == NzbInfo::dpNone &&
 				downloadQueue && !CollectDonors(downloadQueue, nzbInfo).empty())
+#endif
 			{
 				nzbInfo->SetDupeParDeferState(NzbInfo::dpDeferred);
 				nzbInfo->PrintMessage(Message::mkInfo,
 					"Deferring duplicate recovery for %s to par-check (its par2 files may cover the damage)",
 					nzbInfo->GetName());
 			}
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_dqh_dupe_fallback_should_restore_original_msg_id(
+				pinnedRound,
+				Util::EmptyStr(articleInfo->GetDupeOriginalMessageId()) ? 1 : 0) != 0)
+#else
 			if (pinnedRound > 0 && !Util::EmptyStr(articleInfo->GetDupeOriginalMessageId()))
+#endif
 			{
 				articleInfo->SetMessageId(articleInfo->GetDupeOriginalMessageId());
 			}
@@ -1030,11 +1045,22 @@ RawNzbList DupeArticleFallback::CollectDonors(DownloadQueue* downloadQueue, NzbI
 
 	for (NzbInfo* queuedNzbInfo : downloadQueue->GetQueue())
 	{
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_dqh_dupe_fallback_is_queued_donor_eligible(
+			queuedNzbInfo == nzbInfo ? 1 : 0,
+			(int)queuedNzbInfo->GetKind(),
+			(int)NzbInfo::nkNzb,
+			(int)queuedNzbInfo->GetDupeMode(),
+			(int)dmForce) != 0 &&
+			DupeCoordinator::SameNameOrKey(queuedNzbInfo->GetName(), queuedNzbInfo->GetDupeKey(),
+				nzbInfo->GetName(), nzbInfo->GetDupeKey()))
+#else
 		if (queuedNzbInfo != nzbInfo &&
 			queuedNzbInfo->GetKind() == NzbInfo::nkNzb &&
 			queuedNzbInfo->GetDupeMode() != dmForce &&
 			DupeCoordinator::SameNameOrKey(queuedNzbInfo->GetName(), queuedNzbInfo->GetDupeKey(),
 				nzbInfo->GetName(), nzbInfo->GetDupeKey()))
+#endif
 		{
 			donors.push_back(queuedNzbInfo);
 		}
@@ -1042,10 +1068,21 @@ RawNzbList DupeArticleFallback::CollectDonors(DownloadQueue* downloadQueue, NzbI
 
 	for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
 	{
+#ifdef NZBGET_USE_RUST
+		if (historyInfo->GetKind() == HistoryInfo::hkNzb &&
+			nzbget_rs_dqh_dupe_fallback_is_history_donor_eligible(
+				(int)historyInfo->GetKind(),
+				(int)HistoryInfo::hkNzb,
+				(int)historyInfo->GetNzbInfo()->GetDupeMode(),
+				(int)dmForce) != 0 &&
+			DupeCoordinator::SameNameOrKey(historyInfo->GetNzbInfo()->GetName(),
+				historyInfo->GetNzbInfo()->GetDupeKey(), nzbInfo->GetName(), nzbInfo->GetDupeKey()))
+#else
 		if (historyInfo->GetKind() == HistoryInfo::hkNzb &&
 			historyInfo->GetNzbInfo()->GetDupeMode() != dmForce &&
 			DupeCoordinator::SameNameOrKey(historyInfo->GetNzbInfo()->GetName(),
 				historyInfo->GetNzbInfo()->GetDupeKey(), nzbInfo->GetName(), nzbInfo->GetDupeKey()))
+#endif
 		{
 			donors.push_back(historyInfo->GetNzbInfo());
 		}
@@ -1057,8 +1094,14 @@ RawNzbList DupeArticleFallback::CollectDonors(DownloadQueue* downloadQueue, NzbI
 	{
 		for (NzbInfo* donor : donors)
 		{
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_dqh_dupe_fallback_is_same_full_content_hash(
+				nzbInfo->GetFullContentHash(),
+				donor->GetFullContentHash()) != 0)
+#else
 			if (nzbInfo->GetFullContentHash() > 0 &&
 				nzbInfo->GetFullContentHash() == donor->GetFullContentHash())
+#endif
 			{
 				continue;
 			}
@@ -1139,8 +1182,14 @@ void DupeArticleFallback::PinSources(DownloadQueue* downloadQueue, FileInfo* fil
 		}
 
 		// an exact copy of the same posting shares the message-ids and cannot help
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_dqh_dupe_fallback_is_same_full_content_hash(
+			nzbInfo->GetFullContentHash(),
+			donorNzbInfo->GetFullContentHash()) != 0)
+#else
 		if (nzbInfo->GetFullContentHash() > 0 &&
 			nzbInfo->GetFullContentHash() == donorNzbInfo->GetFullContentHash())
+#endif
 		{
 			samePosting++;
 			continue;
@@ -1164,7 +1213,15 @@ void DupeArticleFallback::PinSources(DownloadQueue* downloadQueue, FileInfo* fil
 		}
 	}
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_dqh_dupe_fallback_should_log_no_source(
+		twinOnly ? 1 : 0,
+		candidates.empty() ? 1 : 0,
+		donors.empty() ? 1 : 0,
+		fileInfo->GetDupeNoSourceLogged() ? 1 : 0) != 0)
+#else
 	if (!twinOnly && candidates.empty() && !donors.empty() && !fileInfo->GetDupeNoSourceLogged())
+#endif
 	{
 		// the silent "did not even try" case: say why no duplicate could help,
 		// once per file (it was once per missing article: dozens a second)
@@ -1338,7 +1395,13 @@ FileInfo* DupeArticleFallback::MatchDonorFile(FileInfo* targetFile, NzbInfo* don
 	std::string byContent = donorNzbId && !ownIdentity.empty() && !Util::EmptyStr(donorPrint) ?
 		TwinCheck::MatchByContent(own->GetId(), ownIdentity.c_str(), targetFile->GetFilename(),
 			targetNzbFilename, donorNzbId, donorPrint) : "";
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_dqh_dupe_fallback_is_content_match_rejected(
+		byContent.c_str(),
+		twinOnly ? 1 : 0) != 0)
+#else
 	if (byContent == "-" || (twinOnly && byContent.empty()))
+#endif
 	{
 		return nullptr;
 	}
@@ -1389,9 +1452,16 @@ FileInfo* DupeArticleFallback::MatchDonorFile(FileInfo* targetFile, NzbInfo* don
 			continue;
 		}
 
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_dqh_dupe_fallback_is_donor_filename_match(
+			targetFile->GetFilename(),
+			targetNzbFilename,
+			donorFile->GetFilename()) != 0)
+#else
 		if (!strcasecmp(targetFile->GetFilename(), donorFile->GetFilename()) ||
 			(!Util::EmptyStr(targetNzbFilename) &&
 			 !strcasecmp(targetNzbFilename, donorFile->GetFilename())))
+#endif
 		{
 			if (filenameMatch)
 			{

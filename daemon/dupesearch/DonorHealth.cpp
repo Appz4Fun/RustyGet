@@ -204,18 +204,33 @@ std::vector<DonorHealth::Answer> DonorHealth::Server::Ask(const std::vector<Requ
 		// a busy pool says nothing about the server: it doesn't count toward the pause
 		// that keeps a failing server out of the checks (F12: starved checks paused
 		// every server, and the next fleet measured nothing)
+#ifdef NZBGET_USE_RUST
+		m_errors += nzbget_rs_dqh_donor_health_error_increment(error.busy ? 1 : 0);
+		if (nzbget_rs_dqh_donor_health_should_pause_server(m_errors.load(), ServerGiveUp) != 0)
+		{
+			m_downUntilMs = NowMs() + m_retryAfterMs;
+		}
+#else
 		m_errors += error.busy ? 0 : 1;
 		if (m_errors >= ServerGiveUp)
 		{
 			m_downUntilMs = NowMs() + m_retryAfterMs;
 		}
+#endif
 		// the answers read before the connection broke stay
 		answers = std::move(error.answers);
 	}
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_dqh_donor_health_should_pause_server(m_errors.load(), ServerGiveUp) != 0)
+	{
+		m_errors = 0;
+	}
+#else
 	if (m_errors >= ServerGiveUp)
 	{
 		m_errors = 0;
 	}
+#endif
 	answers.resize(batch.size(), Answer::Error);
 	for (Answer& answer : answers)
 	{
@@ -462,10 +477,17 @@ Health DonorHealth::CheckItems(const ServerList& servers, const std::vector<Item
 		for (size_t i = 0; i < count; i++)
 		{
 			int verdict = state->final[i];
+#ifdef NZBGET_USE_RUST
+			nzbget_rs_dqh_donor_health_accum_verdict_counts(
+				verdict, (int)fPresent, (int)fMissing, (int)fError,
+				state->soft[i] != 0 ? 1 : 0,
+				&health.present, &health.missing, &health.error, &health.bodyBad);
+#else
 			health.present += verdict == fPresent;
 			health.missing += verdict == fMissing;
 			health.error += verdict == fError;
 			health.bodyBad += state->soft[i] && verdict != fPresent;
+#endif
 		}
 	}
 	return health;

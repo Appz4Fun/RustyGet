@@ -27040,6 +27040,409 @@ pub extern "C" fn nzbget_rs_src_repair_ctrl_should_fetch_more_par_pass(
     )
 }
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupe_fallback_should_log_par_defer(
+    is_proactive: c_int,
+    par_defer_state: c_int,
+    dp_none_val: c_int,
+    has_download_queue: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_dupe_fallback_should_log_par_defer(
+            is_proactive != 0,
+            par_defer_state,
+            dp_none_val,
+            has_download_queue != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupe_fallback_should_restore_original_msg_id(
+    pinned_round: c_int,
+    orig_msg_id_empty: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_dupe_fallback_should_restore_original_msg_id(
+            pinned_round,
+            orig_msg_id_empty != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupe_fallback_is_queued_donor_eligible(
+    is_self: c_int,
+    kind: c_int,
+    nk_nzb_val: c_int,
+    dupe_mode: c_int,
+    dm_force_val: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_dupe_fallback_is_queued_donor_eligible(
+            is_self != 0,
+            kind,
+            nk_nzb_val,
+            dupe_mode,
+            dm_force_val,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupe_fallback_is_history_donor_eligible(
+    kind: c_int,
+    hk_nzb_val: c_int,
+    dupe_mode: c_int,
+    dm_force_val: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_dupe_fallback_is_history_donor_eligible(
+            kind,
+            hk_nzb_val,
+            dupe_mode,
+            dm_force_val,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupe_fallback_is_same_full_content_hash(
+    own_full_hash: u32,
+    donor_full_hash: u32,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_dupe_fallback_is_same_full_content_hash(
+            own_full_hash,
+            donor_full_hash,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupe_fallback_should_log_no_source(
+    twin_only: c_int,
+    candidates_empty: c_int,
+    donors_empty: c_int,
+    no_source_logged: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_dupe_fallback_should_log_no_source(
+            twin_only != 0,
+            candidates_empty != 0,
+            donors_empty != 0,
+            no_source_logged != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_dupe_fallback_is_content_match_rejected(
+    by_content: *const c_char,
+    twin_only: c_int,
+) -> c_int {
+    let bytes = crate::diskstatepp::cstr_to_bytes(by_content);
+    i32::from(
+        crate::dupequeuehealth::dqh_dupe_fallback_is_content_match_rejected(
+            bytes,
+            twin_only != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_dupe_fallback_is_donor_filename_match(
+    target_filename: *const c_char,
+    target_nzb_filename: *const c_char,
+    donor_filename: *const c_char,
+) -> c_int {
+    let tf = crate::diskstatepp::cstr_to_bytes(target_filename);
+    let tnf = crate::diskstatepp::cstr_to_bytes(target_nzb_filename);
+    let df = crate::diskstatepp::cstr_to_bytes(donor_filename);
+    i32::from(
+        crate::dupequeuehealth::dqh_dupe_fallback_is_donor_filename_match(tf, tnf, df),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupecoord_can_check_downloaded_on_disk(
+    kind: c_int,
+    nk_nzb_val: c_int,
+    dupe_mode: c_int,
+    dm_force_val: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_dupecoord_can_check_downloaded_on_disk(
+            kind,
+            nk_nzb_val,
+            dupe_mode,
+            dm_force_val,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupecoord_is_queued_same_content_dupe(
+    is_self: c_int,
+    same_content: c_int,
+    kind: c_int,
+    nk_nzb_val: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_dupecoord_is_queued_same_content_dupe(
+            is_self != 0,
+            same_content != 0,
+            kind,
+            nk_nzb_val,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupecoord_needs_dupe_prop_inheritance(
+    dupe_key_empty: c_int,
+    dupe_score: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_dupecoord_needs_dupe_prop_inheritance(
+            dupe_key_empty != 0,
+            dupe_score,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupecoord_should_inspect_same_content_history(
+    skip: c_int,
+    same_content: c_int,
+    health_check: c_int,
+    hc_dupe_val: c_int,
+    kind: c_int,
+    nk_nzb_val: c_int,
+    dupe_hint: c_int,
+    dh_none_val: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_dupecoord_should_inspect_same_content_history(
+            skip != 0,
+            same_content != 0,
+            health_check,
+            hc_dupe_val,
+            kind,
+            nk_nzb_val,
+            dupe_hint,
+            dh_none_val,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupecoord_is_queue_score_dupe_candidate(
+    is_self: c_int,
+    delete_status: c_int,
+    ds_none_val: c_int,
+    queued_kind: c_int,
+    own_kind: c_int,
+    nk_nzb_val: c_int,
+    nk_url_val: c_int,
+    queued_dupe_mode: c_int,
+    dm_force_val: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_dupecoord_is_queue_score_dupe_candidate(
+            is_self != 0,
+            delete_status,
+            ds_none_val,
+            queued_kind,
+            own_kind,
+            nk_nzb_val,
+            nk_url_val,
+            queued_dupe_mode,
+            dm_force_val,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupecoord_should_skip_mark_action(
+    dupe_check_enabled: c_int,
+    kind: c_int,
+    hk_nzb_val: c_int,
+    hk_dup_val: c_int,
+    item_dupe_mode: c_int,
+    dm_force_val: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_dupecoord_should_skip_mark_action(
+            dupe_check_enabled != 0,
+            kind,
+            hk_nzb_val,
+            hk_dup_val,
+            item_dupe_mode,
+            dm_force_val,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_fleet_clamp_timeout_sec(
+    timeout_sec: c_int,
+    max_timeout_sec: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_fleet_clamp_timeout_sec(timeout_sec, max_timeout_sec)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_fleet_update_key_score_bounds(
+    cur_top: i64,
+    cur_lowest: c_int,
+    any_seen: c_int,
+    queued: c_int,
+    deleting: c_int,
+    delete_status: c_int,
+    ds_none_val: c_int,
+    cur_running_id: c_int,
+    cur_running_score: c_int,
+    item_id: c_int,
+    item_score: c_int,
+    out_top: *mut i64,
+    out_lowest: *mut c_int,
+    out_running_id: *mut c_int,
+    out_running_score: *mut c_int,
+) {
+    let (new_top, new_lowest, new_run_id, new_run_score) =
+        crate::dupequeuehealth::dqh_fleet_update_key_score_bounds(
+            cur_top,
+            cur_lowest,
+            any_seen != 0,
+            queued != 0,
+            deleting != 0,
+            delete_status,
+            ds_none_val,
+            cur_running_id,
+            cur_running_score,
+            item_id,
+            item_score,
+        );
+    if !out_top.is_null() {
+        *out_top = new_top;
+    }
+    if !out_lowest.is_null() {
+        *out_lowest = new_lowest;
+    }
+    if !out_running_id.is_null() {
+        *out_running_id = new_run_id;
+    }
+    if !out_running_score.is_null() {
+        *out_running_score = new_run_score;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_fleet_is_already_downloaded_history_item(
+    has_item: c_int,
+    delete_status: c_int,
+    ds_none_val: c_int,
+    is_dupe_success: c_int,
+    mark_status: c_int,
+    ks_bad_val: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_fleet_is_already_downloaded_history_item(
+            has_item != 0,
+            delete_status,
+            ds_none_val,
+            is_dupe_success != 0,
+            mark_status,
+            ks_bad_val,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_fleet_calc_member_add_score(
+    running_id: c_int,
+    lowest: c_int,
+    top: i64,
+    rank: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_fleet_calc_member_add_score(running_id, lowest, top, rank)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_donor_health_error_increment(busy: c_int) -> c_int {
+    crate::dupequeuehealth::dqh_donor_health_error_increment(busy != 0)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_donor_health_should_pause_server(
+    errors: c_int,
+    server_give_up: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_donor_health_should_pause_server(errors, server_give_up),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_donor_health_record_exchange_error(
+    cur_errors: c_int,
+    busy: c_int,
+    server_give_up: c_int,
+    now_ms: i64,
+    retry_after_ms: i64,
+    cur_down_until_ms: i64,
+    out_errors: *mut c_int,
+    out_down_until_ms: *mut i64,
+) {
+    let (new_errors, new_down_until) =
+        crate::dupequeuehealth::dqh_donor_health_record_exchange_error(
+            cur_errors,
+            busy != 0,
+            server_give_up,
+            now_ms,
+            retry_after_ms,
+            cur_down_until_ms,
+        );
+    if !out_errors.is_null() {
+        *out_errors = new_errors;
+    }
+    if !out_down_until_ms.is_null() {
+        *out_down_until_ms = new_down_until;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_donor_health_accum_verdict_counts(
+    verdict: c_int,
+    f_present: c_int,
+    f_missing: c_int,
+    f_error: c_int,
+    soft: c_int,
+    io_present: *mut c_int,
+    io_missing: *mut c_int,
+    io_error: *mut c_int,
+    io_body_bad: *mut c_int,
+) {
+    if !io_present.is_null()
+        && !io_missing.is_null()
+        && !io_error.is_null()
+        && !io_body_bad.is_null()
+    {
+        crate::dupequeuehealth::dqh_donor_health_accum_verdict_counts(
+            verdict,
+            f_present,
+            f_missing,
+            f_error,
+            soft != 0,
+            &mut *io_present,
+            &mut *io_missing,
+            &mut *io_error,
+            &mut *io_body_bad,
+        );
+    }
+}
+
 
 
 

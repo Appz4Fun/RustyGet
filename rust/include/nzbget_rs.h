@@ -4249,6 +4249,65 @@ int nzbget_rs_src_parchecker_should_process_twin_missing_blocks(
 int nzbget_rs_src_repair_ctrl_should_fetch_more_par_pass(
     int block_found, int block_needed);
 
+int nzbget_rs_dqh_dupe_fallback_should_log_par_defer(
+    int is_proactive, int par_defer_state, int dp_none_val,
+    int has_download_queue);
+int nzbget_rs_dqh_dupe_fallback_should_restore_original_msg_id(
+    int pinned_round, int orig_msg_id_empty);
+int nzbget_rs_dqh_dupe_fallback_is_queued_donor_eligible(
+    int is_self, int kind, int nk_nzb_val, int dupe_mode, int dm_force_val);
+int nzbget_rs_dqh_dupe_fallback_is_history_donor_eligible(
+    int kind, int hk_nzb_val, int dupe_mode, int dm_force_val);
+int nzbget_rs_dqh_dupe_fallback_is_same_full_content_hash(
+    uint32_t own_full_hash, uint32_t donor_full_hash);
+int nzbget_rs_dqh_dupe_fallback_should_log_no_source(
+    int twin_only, int candidates_empty, int donors_empty,
+    int no_source_logged);
+int nzbget_rs_dqh_dupe_fallback_is_content_match_rejected(
+    const char* by_content, int twin_only);
+int nzbget_rs_dqh_dupe_fallback_is_donor_filename_match(
+    const char* target_filename, const char* target_nzb_filename,
+    const char* donor_filename);
+int nzbget_rs_dqh_dupecoord_can_check_downloaded_on_disk(
+    int kind, int nk_nzb_val, int dupe_mode, int dm_force_val);
+int nzbget_rs_dqh_dupecoord_is_queued_same_content_dupe(
+    int is_self, int same_content, int kind, int nk_nzb_val);
+int nzbget_rs_dqh_dupecoord_needs_dupe_prop_inheritance(
+    int dupe_key_empty, int dupe_score);
+int nzbget_rs_dqh_dupecoord_should_inspect_same_content_history(
+    int skip, int same_content, int health_check, int hc_dupe_val,
+    int kind, int nk_nzb_val, int dupe_hint, int dh_none_val);
+int nzbget_rs_dqh_dupecoord_is_queue_score_dupe_candidate(
+    int is_self, int delete_status, int ds_none_val, int queued_kind,
+    int own_kind, int nk_nzb_val, int nk_url_val, int queued_dupe_mode,
+    int dm_force_val);
+int nzbget_rs_dqh_dupecoord_should_skip_mark_action(
+    int dupe_check_enabled, int kind, int hk_nzb_val, int hk_dup_val,
+    int item_dupe_mode, int dm_force_val);
+int nzbget_rs_dqh_fleet_clamp_timeout_sec(
+    int timeout_sec, int max_timeout_sec);
+void nzbget_rs_dqh_fleet_update_key_score_bounds(
+    int64_t cur_top, int cur_lowest, int any_seen, int queued,
+    int deleting, int delete_status, int ds_none_val,
+    int cur_running_id, int cur_running_score, int item_id, int item_score,
+    int64_t* out_top, int* out_lowest, int* out_running_id,
+    int* out_running_score);
+int nzbget_rs_dqh_fleet_is_already_downloaded_history_item(
+    int has_item, int delete_status, int ds_none_val, int is_dupe_success,
+    int mark_status, int ks_bad_val);
+int nzbget_rs_dqh_fleet_calc_member_add_score(
+    int running_id, int lowest, int64_t top, int rank);
+int nzbget_rs_dqh_donor_health_error_increment(int busy);
+int nzbget_rs_dqh_donor_health_should_pause_server(
+    int errors, int server_give_up);
+void nzbget_rs_dqh_donor_health_record_exchange_error(
+    int cur_errors, int busy, int server_give_up, int64_t now_ms,
+    int64_t retry_after_ms, int64_t cur_down_until_ms,
+    int* out_errors, int64_t* out_down_until_ms);
+void nzbget_rs_dqh_donor_health_accum_verdict_counts(
+    int verdict, int f_present, int f_missing, int f_error, int soft,
+    int* io_present, int* io_missing, int* io_error, int* io_body_bad);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

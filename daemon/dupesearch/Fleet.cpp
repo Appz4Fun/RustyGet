@@ -91,7 +91,12 @@ namespace
 Fleet::Result Fleet::Append(Request request)
 {
 	Result result;
+#ifdef NZBGET_USE_RUST
+	request.timeoutSec = nzbget_rs_dqh_fleet_clamp_timeout_sec(
+		request.timeoutSec, (int)MaxTimeoutSec);
+#else
 	request.timeoutSec = std::max(5, std::min(request.timeoutSec, (int)MaxTimeoutSec));
+#endif
 	if (request.members.empty())
 	{
 		result.reason = "NO_MEMBERS";
@@ -191,6 +196,19 @@ Fleet::Result Fleet::Append(Request request)
 				{
 					return;
 				}
+#ifdef NZBGET_USE_RUST
+				int64_t newTop = top;
+				nzbget_rs_dqh_fleet_update_key_score_bounds(
+					top, lowest, any ? 1 : 0, queued ? 1 : 0,
+					nzbInfo->GetDeleting() ? 1 : 0,
+					(int)nzbInfo->GetDeleteStatus(),
+					(int)NzbInfo::dsNone,
+					runningId, runningScore,
+					nzbInfo->GetId(), nzbInfo->GetDupeScore(),
+					&newTop, &lowest, &runningId, &runningScore);
+				top = newTop;
+				any = true;
+#else
 				top = std::max(top, nzbInfo->GetDupeScore() + 1000LL);
 				lowest = any ? std::min(lowest, nzbInfo->GetDupeScore()) : nzbInfo->GetDupeScore();
 				any = true;
@@ -200,6 +218,7 @@ Fleet::Result Fleet::Append(Request request)
 					runningId = nzbInfo->GetId();
 					runningScore = nzbInfo->GetDupeScore();
 				}
+#endif
 				// a merged item (GroupMerge) names its nzb-files joined with '|': each is
 				// one of its postings (F20: none was seen, and a resent fleet added them again)
 				std::string names = nzbInfo->GetQueuedFilename() ? nzbInfo->GetQueuedFilename() : "";
@@ -258,8 +277,19 @@ Fleet::Result Fleet::Append(Request request)
 		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
 		{
 			NzbInfo* item = historyInfo->GetKind() == HistoryInfo::hkNzb ? historyInfo->GetNzbInfo() : nullptr;
+#ifdef NZBGET_USE_RUST
+			if (!item || nzbget_rs_dqh_fleet_is_already_downloaded_history_item(
+				item != nullptr ? 1 : 0,
+				(int)item->GetDeleteStatus(),
+				(int)NzbInfo::dsNone,
+				item->IsDupeSuccess() ? 1 : 0,
+				(int)item->GetMarkStatus(),
+				(int)NzbInfo::ksBad) == 0 ||
+				!ReleaseName::Readable(item->GetName()))
+#else
 			if (!item || item->GetDeleteStatus() != NzbInfo::dsNone || !item->IsDupeSuccess() ||
 				item->GetMarkStatus() == NzbInfo::ksBad || !ReleaseName::Readable(item->GetName()))
+#endif
 			{
 				continue;
 			}
@@ -479,7 +509,9 @@ Fleet::Result Fleet::Append(Request request)
 	// holds, so the duplicate check queues the best and keeps the others as backups,
 	// tried in rank order
 	// at the int limit, members still rank below it in order, not tied at the limit
+#ifndef NZBGET_USE_RUST
 	long long base = runningId ? lowest : std::min<long long>(top, INT_MAX);
+#endif
 
 	bool anyAlive = std::any_of(order.begin(), order.end(),
 		[&](const Candidate* c) { return tier(*c) <= 1; });
@@ -531,9 +563,15 @@ Fleet::Result Fleet::Append(Request request)
 			{
 				name += ".nzb";
 			}
+#ifdef NZBGET_USE_RUST
+			int memberScore = nzbget_rs_dqh_fleet_calc_member_add_score(
+				runningId, lowest, top, entry.rank);
+#else
+			int memberScore = (int)std::clamp<long long>(base - rank, INT_MIN, INT_MAX);
+#endif
 			Scanner::EAddStatus status = g_Scanner->AddExternalFile(name.c_str(), request.category.c_str(),
 				false, request.priority, request.dupeKey.c_str(),
-				(int)std::clamp<long long>(base - rank, INT_MIN, INT_MAX), dmScore, &parameters,
+				memberScore, dmScore, &parameters,
 				false, false, nullptr, nullptr, member.data.data(), (int)member.data.size(), &nzbId);
 			entry.nzbId = status == Scanner::asSuccess ? nzbId : 0;
 			added[candidate->index] = entry.nzbId;

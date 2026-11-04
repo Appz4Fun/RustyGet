@@ -23632,6 +23632,394 @@ pub extern "C" fn nzbget_rs_dps_diskstate_calc_first_day_reset_time(first_day: c
     crate::dlparstatedisk::diskstate_calc_first_day_reset_time(first_day)
 }
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cwp_queue_coord_is_nzb_paused(
+    file_list_size: c_int,
+    paused_file_count: c_int,
+) -> c_int {
+    crate::coorddlwriterpool::queue_coord_is_nzb_paused(file_list_size, paused_file_count)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cwp_queue_coord_should_try_proactive_cutover(
+    dupe_cutover: c_int,
+    dupe_fallback_round: c_int,
+) -> c_int {
+    crate::coorddlwriterpool::queue_coord_should_try_proactive_cutover(
+        dupe_cutover,
+        dupe_fallback_round,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_cwp_queue_coord_select_dupe_donor_id(
+    dupe_fallback_round: c_int,
+    donors_ptr: *const c_int,
+    donors_len: usize,
+    msg_id: *const c_char,
+    orig_msg_id: *const c_char,
+) -> c_int {
+    let donors = if donors_ptr.is_null() || donors_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(donors_ptr, donors_len)
+    };
+    crate::coorddlwriterpool::queue_coord_select_dupe_donor_id(
+        dupe_fallback_round,
+        donors,
+        crate::queuehotpath::cstr_to_bytes(msg_id),
+        crate::queuehotpath::cstr_to_bytes(orig_msg_id),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_cwp_queue_coord_apply_failed_article_counters(
+    part_number: c_int,
+    par_file: c_int,
+    article_size: c_int,
+    dupe_failed_run: c_int,
+    file_failed_size: i64,
+    nzb_cur_failed_size: i64,
+    nzb_par_cur_failed_size: i64,
+    file_failed_articles: c_int,
+    nzb_cur_failed_articles: c_int,
+    out_dupe_failed_run: *mut c_int,
+    out_file_failed_size: *mut i64,
+    out_nzb_cur_failed_size: *mut i64,
+    out_nzb_par_cur_failed_size: *mut i64,
+    out_file_failed_articles: *mut c_int,
+    out_nzb_cur_failed_articles: *mut c_int,
+) {
+    let (r, ffs, ncfs, npcfs, ffa, ncfa) =
+        crate::coorddlwriterpool::queue_coord_apply_failed_article_counters(
+            part_number,
+            par_file,
+            article_size,
+            dupe_failed_run,
+            file_failed_size,
+            nzb_cur_failed_size,
+            nzb_par_cur_failed_size,
+            file_failed_articles,
+            nzb_cur_failed_articles,
+        );
+    if !out_dupe_failed_run.is_null() {
+        *out_dupe_failed_run = r;
+    }
+    if !out_file_failed_size.is_null() {
+        *out_file_failed_size = ffs;
+    }
+    if !out_nzb_cur_failed_size.is_null() {
+        *out_nzb_cur_failed_size = ncfs;
+    }
+    if !out_nzb_par_cur_failed_size.is_null() {
+        *out_nzb_par_cur_failed_size = npcfs;
+    }
+    if !out_file_failed_articles.is_null() {
+        *out_file_failed_articles = ffa;
+    }
+    if !out_nzb_cur_failed_articles.is_null() {
+        *out_nzb_cur_failed_articles = ncfa;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_cwp_queue_coord_eval_delete_file_diskstate_flags(
+    file_status: c_int,
+    cf_success: c_int,
+    cf_partial: c_int,
+    file_deleted: c_int,
+    parking: c_int,
+    completed: c_int,
+    out_delete_data: *mut c_int,
+    out_save_partial: *mut c_int,
+) {
+    let (delete_data, save_partial) =
+        crate::coorddlwriterpool::queue_coord_eval_delete_file_diskstate_flags(
+            file_status,
+            cf_success,
+            cf_partial,
+            file_deleted,
+            parking,
+            completed,
+        );
+    if !out_delete_data.is_null() {
+        *out_delete_data = delete_data as c_int;
+    }
+    if !out_save_partial.is_null() {
+        *out_save_partial = save_partial as c_int;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cwp_queue_coord_should_start_live_stream_repair(
+    dupe_fallback_mode: c_int,
+    daf_live: c_int,
+    more_files_queued: c_int,
+    has_live_repair_thread: c_int,
+) -> c_int {
+    crate::coorddlwriterpool::queue_coord_should_start_live_stream_repair(
+        dupe_fallback_mode,
+        daf_live,
+        more_files_queued,
+        has_live_repair_thread,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cwp_queue_coord_is_neighbor_eligible_for_demotion(
+    status: c_int,
+    ai_finished: c_int,
+    dupe_fallback_round: c_int,
+    segment_size: c_int,
+) -> c_int {
+    crate::coorddlwriterpool::queue_coord_is_neighbor_eligible_for_demotion(
+        status,
+        ai_finished,
+        dupe_fallback_round,
+        segment_size,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cwp_queue_coord_is_file_tried(
+    success_articles: c_int,
+    failed_articles: c_int,
+) -> c_int {
+    crate::coorddlwriterpool::queue_coord_is_file_tried(success_articles, failed_articles)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cwp_queue_coord_is_dead_pick_probe_file_eligible(
+    deleted: c_int,
+    paused: c_int,
+    total_articles: c_int,
+    pass: c_int,
+    par_file: c_int,
+) -> c_int {
+    crate::coorddlwriterpool::queue_coord_is_dead_pick_probe_file_eligible(
+        deleted,
+        paused,
+        total_articles,
+        pass,
+        par_file,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cwp_queue_coord_select_merged_download_start_time(
+    dest_start: i64,
+    src_start: i64,
+) -> i64 {
+    crate::coorddlwriterpool::queue_coord_select_merged_download_start_time(dest_start, src_start)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_cwp_queue_coord_discard_downloaded_articles_counters(
+    nzb_rem_size: i64,
+    nzb_paused_size: i64,
+    nzb_cur_succ_art: c_int,
+    nzb_cur_succ_size: i64,
+    nzb_par_cur_succ_size: i64,
+    nzb_cur_fail_art: c_int,
+    nzb_cur_fail_size: i64,
+    nzb_par_cur_fail_size: i64,
+    file_paused: c_int,
+    file_succ_art: c_int,
+    file_succ_size: i64,
+    file_fail_art: c_int,
+    file_fail_size: i64,
+    file_size: i64,
+    file_missed_size: i64,
+    out_nzb_rem_size: *mut i64,
+    out_nzb_paused_size: *mut i64,
+    out_nzb_cur_succ_art: *mut c_int,
+    out_nzb_cur_succ_size: *mut i64,
+    out_nzb_par_cur_succ_size: *mut i64,
+    out_nzb_cur_fail_art: *mut c_int,
+    out_nzb_cur_fail_size: *mut i64,
+    out_nzb_par_cur_fail_size: *mut i64,
+    out_file_rem_size: *mut i64,
+) {
+    let (n_rem, n_pau, n_csa, n_css, n_pcss, n_cfa, n_cfs, n_pcfs, f_rem) =
+        crate::coorddlwriterpool::queue_coord_discard_downloaded_articles_counters(
+            nzb_rem_size,
+            nzb_paused_size,
+            nzb_cur_succ_art,
+            nzb_cur_succ_size,
+            nzb_par_cur_succ_size,
+            nzb_cur_fail_art,
+            nzb_cur_fail_size,
+            nzb_par_cur_fail_size,
+            file_paused,
+            file_succ_art,
+            file_succ_size,
+            file_fail_art,
+            file_fail_size,
+            file_size,
+            file_missed_size,
+        );
+    if !out_nzb_rem_size.is_null() {
+        *out_nzb_rem_size = n_rem;
+    }
+    if !out_nzb_paused_size.is_null() {
+        *out_nzb_paused_size = n_pau;
+    }
+    if !out_nzb_cur_succ_art.is_null() {
+        *out_nzb_cur_succ_art = n_csa;
+    }
+    if !out_nzb_cur_succ_size.is_null() {
+        *out_nzb_cur_succ_size = n_css;
+    }
+    if !out_nzb_par_cur_succ_size.is_null() {
+        *out_nzb_par_cur_succ_size = n_pcss;
+    }
+    if !out_nzb_cur_fail_art.is_null() {
+        *out_nzb_cur_fail_art = n_cfa;
+    }
+    if !out_nzb_cur_fail_size.is_null() {
+        *out_nzb_cur_fail_size = n_cfs;
+    }
+    if !out_nzb_par_cur_fail_size.is_null() {
+        *out_nzb_par_cur_fail_size = n_pcfs;
+    }
+    if !out_file_rem_size.is_null() {
+        *out_file_rem_size = f_rem;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_cwp_article_dl_handle_content_rejected(
+    content_rejected: c_int,
+    dupe_fallback_round: c_int,
+    cur_status: c_int,
+    ad_failed: c_int,
+    remained_retries: c_int,
+    out_should_break: *mut c_int,
+    out_status: *mut c_int,
+    out_content_rejected: *mut c_int,
+    out_remained_retries: *mut c_int,
+) -> c_int {
+    let (handled, should_break, next_status, next_cr, next_retries) =
+        crate::coorddlwriterpool::article_dl_handle_content_rejected(
+            content_rejected,
+            dupe_fallback_round,
+            cur_status,
+            ad_failed,
+            remained_retries,
+        );
+    if !out_should_break.is_null() {
+        *out_should_break = should_break as c_int;
+    }
+    if !out_status.is_null() {
+        *out_status = next_status;
+    }
+    if !out_content_rejected.is_null() {
+        *out_content_rejected = next_cr as c_int;
+    }
+    if !out_remained_retries.is_null() {
+        *out_remained_retries = next_retries;
+    }
+    handled as c_int
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cwp_article_dl_calc_line_buf_capacity(read_chunk: c_int) -> c_int {
+    crate::coorddlwriterpool::article_dl_calc_line_buf_capacity(read_chunk)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_cwp_article_dl_classify_write_failure(
+    local_write_error: c_int,
+    ad_fatal_error: c_int,
+    ad_failed: c_int,
+    out_content_rejected: *mut c_int,
+) -> c_int {
+    let (status, cr) = crate::coorddlwriterpool::article_dl_classify_write_failure(
+        local_write_error,
+        ad_fatal_error,
+        ad_failed,
+    );
+    if !out_content_rejected.is_null() {
+        *out_content_rejected = cr as c_int;
+    }
+    status
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cwp_article_writer_select_article_size(
+    article_size: c_int,
+    info_size: c_int,
+) -> c_int {
+    crate::coorddlwriterpool::article_writer_select_article_size(article_size, info_size)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cwp_article_writer_is_direct_write_enabled(
+    opt_direct_write: c_int,
+    force_direct_write: c_int,
+    format: c_int,
+    ef_yenc: c_int,
+    is_dupe_fallback: c_int,
+) -> c_int {
+    crate::coorddlwriterpool::article_writer_is_direct_write_enabled(
+        opt_direct_write,
+        force_direct_write,
+        format,
+        ef_yenc,
+        is_dupe_fallback,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cwp_article_writer_should_skip_disk_write(
+    has_file_and_nzb: c_int,
+    nzb_skip_disk_write: c_int,
+    opt_skip_write: c_int,
+) -> c_int {
+    crate::coorddlwriterpool::article_writer_should_skip_disk_write(
+        has_file_and_nzb,
+        nzb_skip_disk_write,
+        opt_skip_write,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cwp_article_writer_calc_gap_fill_chunk(
+    segment_offset: i64,
+    position: i64,
+    buffer_size: i64,
+) -> i64 {
+    crate::coorddlwriterpool::article_writer_calc_gap_fill_chunk(
+        segment_offset,
+        position,
+        buffer_size,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cwp_article_cache_calc_realloc_delta(
+    new_size: c_int,
+    old_size: c_int,
+) -> isize {
+    crate::coorddlwriterpool::article_cache_calc_realloc_delta(new_size, old_size)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cwp_memory_monitor_clamp_interval(interval: c_int) -> c_int {
+    crate::coorddlwriterpool::memory_monitor_clamp_interval(interval)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_cwp_server_pool_calc_missing_connections(
+    existing_connections: c_int,
+    max_connections: c_int,
+) -> c_int {
+    crate::coorddlwriterpool::server_pool_calc_missing_connections(
+        existing_connections,
+        max_connections,
+    )
+}
+
 
 
 

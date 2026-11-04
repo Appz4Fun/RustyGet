@@ -3701,6 +3701,67 @@ int nzbget_rs_dps_diskstate_hibernate_header_matches(
     int scan_cnt, int scanned_size, int expected_file_count);
 int64_t nzbget_rs_dps_diskstate_calc_first_day_reset_time(int first_day);
 
+// QueueCoordinator, ArticleDownloader, ArticleWriter & ServerPool Hot-Path C ABI (rust/src/coorddlwriterpool.rs)
+int nzbget_rs_cwp_queue_coord_is_nzb_paused(int file_list_size, int paused_file_count);
+int nzbget_rs_cwp_queue_coord_should_try_proactive_cutover(
+    int dupe_cutover, int dupe_fallback_round);
+int nzbget_rs_cwp_queue_coord_select_dupe_donor_id(
+    int dupe_fallback_round, const int* donors_ptr, size_t donors_len,
+    const char* msg_id, const char* orig_msg_id);
+void nzbget_rs_cwp_queue_coord_apply_failed_article_counters(
+    int part_number, int par_file, int article_size, int dupe_failed_run,
+    int64_t file_failed_size, int64_t nzb_cur_failed_size,
+    int64_t nzb_par_cur_failed_size, int file_failed_articles,
+    int nzb_cur_failed_articles, int* out_dupe_failed_run,
+    int64_t* out_file_failed_size, int64_t* out_nzb_cur_failed_size,
+    int64_t* out_nzb_par_cur_failed_size, int* out_file_failed_articles,
+    int* out_nzb_cur_failed_articles);
+void nzbget_rs_cwp_queue_coord_eval_delete_file_diskstate_flags(
+    int file_status, int cf_success, int cf_partial, int file_deleted,
+    int parking, int completed, int* out_delete_data, int* out_save_partial);
+int nzbget_rs_cwp_queue_coord_should_start_live_stream_repair(
+    int dupe_fallback_mode, int daf_live, int more_files_queued,
+    int has_live_repair_thread);
+int nzbget_rs_cwp_queue_coord_is_neighbor_eligible_for_demotion(
+    int status, int ai_finished, int dupe_fallback_round, int segment_size);
+int nzbget_rs_cwp_queue_coord_is_file_tried(int success_articles, int failed_articles);
+int nzbget_rs_cwp_queue_coord_is_dead_pick_probe_file_eligible(
+    int deleted, int paused, int total_articles, int pass, int par_file);
+int64_t nzbget_rs_cwp_queue_coord_select_merged_download_start_time(
+    int64_t dest_start, int64_t src_start);
+void nzbget_rs_cwp_queue_coord_discard_downloaded_articles_counters(
+    int64_t nzb_rem_size, int64_t nzb_paused_size, int nzb_cur_succ_art,
+    int64_t nzb_cur_succ_size, int64_t nzb_par_cur_succ_size,
+    int nzb_cur_fail_art, int64_t nzb_cur_fail_size,
+    int64_t nzb_par_cur_fail_size, int file_paused, int file_succ_art,
+    int64_t file_succ_size, int file_fail_art, int64_t file_fail_size,
+    int64_t file_size, int64_t file_missed_size,
+    int64_t* out_nzb_rem_size, int64_t* out_nzb_paused_size,
+    int* out_nzb_cur_succ_art, int64_t* out_nzb_cur_succ_size,
+    int64_t* out_nzb_par_cur_succ_size, int* out_nzb_cur_fail_art,
+    int64_t* out_nzb_cur_fail_size, int64_t* out_nzb_par_cur_fail_size,
+    int64_t* out_file_rem_size);
+int nzbget_rs_cwp_article_dl_handle_content_rejected(
+    int content_rejected, int dupe_fallback_round, int cur_status,
+    int ad_failed, int remained_retries, int* out_should_break,
+    int* out_status, int* out_content_rejected, int* out_remained_retries);
+int nzbget_rs_cwp_article_dl_calc_line_buf_capacity(int read_chunk);
+int nzbget_rs_cwp_article_dl_classify_write_failure(
+    int local_write_error, int ad_fatal_error, int ad_failed,
+    int* out_content_rejected);
+int nzbget_rs_cwp_article_writer_select_article_size(int article_size, int info_size);
+int nzbget_rs_cwp_article_writer_is_direct_write_enabled(
+    int opt_direct_write, int force_direct_write, int format, int ef_yenc,
+    int is_dupe_fallback);
+int nzbget_rs_cwp_article_writer_should_skip_disk_write(
+    int has_file_and_nzb, int nzb_skip_disk_write, int opt_skip_write);
+int64_t nzbget_rs_cwp_article_writer_calc_gap_fill_chunk(
+    int64_t segment_offset, int64_t position, int64_t buffer_size);
+ptrdiff_t nzbget_rs_cwp_article_cache_calc_realloc_delta(int new_size, int old_size);
+int nzbget_rs_cwp_memory_monitor_clamp_interval(int interval);
+int nzbget_rs_cwp_server_pool_calc_missing_connections(
+    int existing_connections, int max_connections);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

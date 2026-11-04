@@ -165,7 +165,13 @@ void ServerPool::InitConnections()
 					}
 				}
 
+#ifdef NZBGET_USE_RUST
+				int missingConns = nzbget_rs_cwp_server_pool_calc_missing_connections(
+					connections, newsServer->GetMaxConnections());
+				for (int i = 0; i < missingConns; i++)
+#else
 				for (int i = connections; i < newsServer->GetMaxConnections(); i++)
+#endif
 				{
 					std::unique_ptr<PooledConnection> connection = std::make_unique<PooledConnection>(newsServer);
 					connection->SetTimeout(m_timeout);

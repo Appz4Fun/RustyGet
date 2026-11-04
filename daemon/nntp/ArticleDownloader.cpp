@@ -240,6 +240,32 @@ void ArticleDownloader::Run()
 			AddServerStats();
 		}
 
+#ifdef NZBGET_USE_RUST
+		{
+			int shouldBreak = 0;
+			int statusInt = (int)status;
+			int crInt = m_contentRejected ? 1 : 0;
+			if (nzbget_rs_cwp_article_dl_handle_content_rejected(
+				crInt,
+				m_articleInfo->GetDupeFallbackRound(),
+				statusInt,
+				(int)adFailed,
+				remainedRetries,
+				&shouldBreak,
+				&statusInt,
+				&crInt,
+				&remainedRetries) != 0)
+			{
+				FreeConnection(false);
+				status = (EStatus)statusInt;
+				if (shouldBreak != 0)
+				{
+					break;
+				}
+				m_contentRejected = crInt != 0;
+			}
+		}
+#else
 		if (m_contentRejected)
 		{
 			// the abandoned body still occupies the connection, so it must not
@@ -258,6 +284,7 @@ void ArticleDownloader::Run()
 			m_contentRejected = false;
 			remainedRetries = 0;
 		}
+#endif
 
 		if (!connected && m_connection)
 		{
@@ -542,7 +569,11 @@ ArticleDownloader::EStatus ArticleDownloader::Download()
 	// (128 bytes past what is read into it: the decoder may write up to one uuencoded
 	// line's worth more than it was given)
 	int readChunk = g_Options->GetArticleReadChunkSize();
+#ifdef NZBGET_USE_RUST
+	CharBuffer lineBuf(nzbget_rs_cwp_article_dl_calc_line_buf_capacity(readChunk));
+#else
 	CharBuffer lineBuf(readChunk + 128);
+#endif
 
 	while (!IsStopped() && !m_decoder.GetEof())
 	{
@@ -621,6 +652,15 @@ ArticleDownloader::EStatus ArticleDownloader::Download()
 		// write to output file
 		if (len > 0 && !Write(buffer, len))
 		{
+#ifdef NZBGET_USE_RUST
+			int crInt = 0;
+			status = (EStatus)nzbget_rs_cwp_article_dl_classify_write_failure(
+				m_localWriteError ? 1 : 0, (int)adFatalError, (int)adFailed, &crInt);
+			if (crInt != 0)
+			{
+				m_contentRejected = true;
+			}
+#else
 			if (m_localWriteError)
 			{
 				status = adFatalError;
@@ -632,6 +672,7 @@ ArticleDownloader::EStatus ArticleDownloader::Download()
 				m_contentRejected = true;
 				status = adFailed;
 			}
+#endif
 			break;
 		}
 	}

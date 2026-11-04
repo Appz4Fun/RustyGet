@@ -80,6 +80,7 @@ pub mod schedfrontweb;
 pub mod rpcoptlogutil;
 pub mod utilfsscript;
 pub mod dlparstatedisk;
+pub mod coorddlwriterpool;
 
 pub mod deadpostings;
 pub mod dupewatch;

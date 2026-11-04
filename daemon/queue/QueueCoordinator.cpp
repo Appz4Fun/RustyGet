@@ -644,7 +644,12 @@ bool QueueCoordinator::GetNextArticle(DownloadQueue* downloadQueue, FileInfo* &f
 					(nzbInfo->HasExtraPriority() > fileInfo->GetNzbInfo()->HasExtraPriority()));
 #endif
 
+#ifdef NZBGET_USE_RUST
+			bool nzbPaused = nzbget_rs_cwp_queue_coord_is_nzb_paused(
+				(int)nzbInfo->GetFileList()->size(), nzbInfo->GetPausedFileCount()) != 0;
+#else
 			bool nzbPaused = nzbInfo->GetFileList()->size() - nzbInfo->GetPausedFileCount() <= 0;
+#endif
 
 			if ((!fileInfo || nzbHigherPriority) && !nzbPaused &&
 				!HasActiveDupe(downloadQueue, nzbInfo) &&
@@ -797,7 +802,12 @@ bool QueueCoordinator::GetNextArticle(DownloadQueue* downloadQueue, FileInfo* &f
 				articleInfo = article;
 				// once cut over, lead with the duplicate instead of spending a
 				// full server sweep failing on the primary first
+#ifdef NZBGET_USE_RUST
+				if (nzbget_rs_cwp_queue_coord_should_try_proactive_cutover(
+					fileInfo->GetDupeCutover() ? 1 : 0, article->GetDupeFallbackRound()) != 0)
+#else
 				if (fileInfo->GetDupeCutover() && article->GetDupeFallbackRound() == 0)
+#endif
 				{
 					// marked before the try: the try counts only articles that failed
 					article->SetDupeProactive(true);
@@ -1005,10 +1015,19 @@ void QueueCoordinator::ArticleCompleted(ArticleDownloader* articleDownloader)
 			// file's par2 checksums once the file is complete (B40)
 			{
 				std::vector<int>& sourceDonors = *articleInfo->GetDupeSourceDonors();
+#ifdef NZBGET_USE_RUST
+				articleInfo->SetDupeDonorId(nzbget_rs_cwp_queue_coord_select_dupe_donor_id(
+					articleInfo->GetDupeFallbackRound(),
+					sourceDonors.empty() ? nullptr : sourceDonors.data(),
+					sourceDonors.size(),
+					articleInfo->GetMessageId(),
+					articleInfo->GetDupeOriginalMessageId()));
+#else
 				int source = articleInfo->GetDupeFallbackRound() - 1;
 				articleInfo->SetDupeDonorId(source >= 0 && source < (int)sourceDonors.size() &&
 					strcmp(articleInfo->GetMessageId(), Util::EmptyStr(articleInfo->GetDupeOriginalMessageId()) ?
 						"" : articleInfo->GetDupeOriginalMessageId()) ? sourceDonors[source] : 0);
+#endif
 			}
 			// count only proven duplicate recoveries: the article was
 			// substituted after genuinely failing on the primary (reactive)
@@ -1095,6 +1114,36 @@ void QueueCoordinator::ArticleCompleted(ArticleDownloader* articleDownloader)
 		{
 			articleInfo->SetStatus(ArticleInfo::aiFailed);
 			// par2 volumes aside: a lost one says nothing about the data
+#ifdef NZBGET_USE_RUST
+			int nextFailedRun = nzbInfo->GetDupeFailedRun();
+			int64 nextFileFailedSize = fileInfo->GetFailedSize();
+			int64 nextNzbCurFailedSize = nzbInfo->GetCurrentFailedSize();
+			int64 nextNzbParCurFailedSize = nzbInfo->GetParCurrentFailedSize();
+			int nextFileFailedArticles = fileInfo->GetFailedArticles();
+			int nextNzbCurFailedArticles = nzbInfo->GetCurrentFailedArticles();
+			nzbget_rs_cwp_queue_coord_apply_failed_article_counters(
+				articleInfo->GetPartNumber(),
+				fileInfo->GetParFile() ? 1 : 0,
+				articleInfo->GetSize(),
+				nextFailedRun,
+				nextFileFailedSize,
+				nextNzbCurFailedSize,
+				nextNzbParCurFailedSize,
+				nextFileFailedArticles,
+				nextNzbCurFailedArticles,
+				&nextFailedRun,
+				&nextFileFailedSize,
+				&nextNzbCurFailedSize,
+				&nextNzbParCurFailedSize,
+				&nextFileFailedArticles,
+				&nextNzbCurFailedArticles);
+			nzbInfo->SetDupeFailedRun(nextFailedRun);
+			fileInfo->SetFailedSize(nextFileFailedSize);
+			nzbInfo->SetCurrentFailedSize(nextNzbCurFailedSize);
+			nzbInfo->SetParCurrentFailedSize(nextNzbParCurFailedSize);
+			fileInfo->SetFailedArticles(nextFileFailedArticles);
+			nzbInfo->SetCurrentFailedArticles(nextNzbCurFailedArticles);
+#else
 			if (articleInfo->GetPartNumber() != 1 && !fileInfo->GetParFile())
 			{
 				nzbInfo->SetDupeFailedRun(nzbInfo->GetDupeFailedRun() + 1);
@@ -1104,6 +1153,7 @@ void QueueCoordinator::ArticleCompleted(ArticleDownloader* articleDownloader)
 			nzbInfo->SetParCurrentFailedSize(nzbInfo->GetParCurrentFailedSize() + (fileInfo->GetParFile() ? articleInfo->GetSize() : 0));
 			fileInfo->SetFailedArticles(fileInfo->GetFailedArticles() + 1);
 			nzbInfo->SetCurrentFailedArticles(nzbInfo->GetCurrentFailedArticles() + 1);
+#endif
 		}
 		else if (articleDownloader->GetStatus() == ArticleDownloader::adRetry)
 		{
@@ -1481,11 +1531,29 @@ void QueueCoordinator::DeleteFileInfo(DownloadQueue* downloadQueue, FileInfo* fi
 
 	if (g_Options->GetServerMode())
 	{
+#ifdef NZBGET_USE_RUST
+		int deleteData = 0, savePartial = 0;
+		nzbget_rs_cwp_queue_coord_eval_delete_file_diskstate_flags(
+			(int)fileStatus,
+			(int)CompletedFile::cfSuccess,
+			(int)CompletedFile::cfPartial,
+			fileDeleted ? 1 : 0,
+			parking ? 1 : 0,
+			completed ? 1 : 0,
+			&deleteData,
+			&savePartial);
+		g_DiskState->DiscardFile(fileInfo->GetId(), deleteData != 0, true, false);
+		if (savePartial != 0)
+		{
+			g_DiskState->SaveFileState(fileInfo, true);
+		}
+#else
 		g_DiskState->DiscardFile(fileInfo->GetId(), fileStatus == CompletedFile::cfSuccess || (fileDeleted && !parking), true, false);
 		if (fileStatus == CompletedFile::cfPartial && (completed || parking))
 		{
 			g_DiskState->SaveFileState(fileInfo, true);
 		}
+#endif
 	}
 
 	if (!completed)
@@ -1576,8 +1644,16 @@ void QueueCoordinator::DeleteFileInfo(DownloadQueue* downloadQueue, FileInfo* fi
 					break;
 				}
 			}
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_cwp_queue_coord_should_start_live_stream_repair(
+				(int)g_Options->GetDupeArticleFallback(),
+				(int)Options::dafLive,
+				moreFilesQueued ? 1 : 0,
+				nzbInfo->GetLiveRepairThread() ? 1 : 0) != 0)
+#else
 			if (g_Options->GetDupeArticleFallback() == Options::dafLive &&
 				moreFilesQueued && !nzbInfo->GetLiveRepairThread())
+#endif
 			{
 				StreamRepairController::StartLive(nzbInfo);
 			}
@@ -1654,10 +1730,19 @@ void QueueCoordinator::DemoteMisalignedDupeNeighbors(FileInfo* fileInfo, Article
 		}
 
 		ArticleInfo* neighbor = (*articles)[neighborIndex].get();
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_cwp_queue_coord_is_neighbor_eligible_for_demotion(
+				(int)neighbor->GetStatus(),
+				(int)ArticleInfo::aiFinished,
+				neighbor->GetDupeFallbackRound(),
+				neighbor->GetSegmentSize()) == 0 ||
+			DupeArticleFallback::SegmentAligned(fileInfo, neighbor))
+#else
 		if (neighbor->GetStatus() != ArticleInfo::aiFinished ||
 			neighbor->GetDupeFallbackRound() == 0 ||
 			neighbor->GetSegmentSize() <= 0 ||
 			DupeArticleFallback::SegmentAligned(fileInfo, neighbor))
+#endif
 		{
 			continue;
 		}
@@ -2717,7 +2802,12 @@ int QueueCoordinator::FilesTried(NzbInfo* nzbInfo)
 	int files = (int)nzbInfo->GetCompletedFiles()->size();
 	for (FileInfo* fileInfo : nzbInfo->GetFileList())
 	{
+#ifdef NZBGET_USE_RUST
+		files += nzbget_rs_cwp_queue_coord_is_file_tried(
+			fileInfo->GetSuccessArticles(), fileInfo->GetFailedArticles());
+#else
 		files += fileInfo->GetSuccessArticles() + fileInfo->GetFailedArticles() > 0 ? 1 : 0;
+#endif
 	}
 	return files;
 }
@@ -2754,8 +2844,17 @@ void QueueCoordinator::StartDeadPickProbe(DownloadQueue* downloadQueue, NzbInfo*
 	{
 		for (FileInfo* fileInfo : nzbInfo->GetFileList())
 		{
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_cwp_queue_coord_is_dead_pick_probe_file_eligible(
+				fileInfo->GetDeleted() ? 1 : 0,
+				fileInfo->GetPaused() ? 1 : 0,
+				fileInfo->GetTotalArticles(),
+				pass,
+				fileInfo->GetParFile() ? 1 : 0) != 0)
+#else
 			if (!fileInfo->GetDeleted() && !fileInfo->GetPaused() && fileInfo->GetTotalArticles() > 0 &&
 				(pass == 1 || !fileInfo->GetParFile()))
+#endif
 			{
 				files.push_back(fileInfo);
 			}
@@ -3029,9 +3128,14 @@ bool QueueCoordinator::MergeQueueEntries(DownloadQueue* downloadQueue, NzbInfo* 
 
 	destNzbInfo->SetDownloadedSize(destNzbInfo->GetDownloadedSize() + srcNzbInfo->GetDownloadedSize());
 	destNzbInfo->SetDownloadSec(destNzbInfo->GetDownloadSec() + srcNzbInfo->GetDownloadSec());
+#ifdef NZBGET_USE_RUST
+	destNzbInfo->SetDownloadStartTime((time_t)nzbget_rs_cwp_queue_coord_select_merged_download_start_time(
+		(int64)destNzbInfo->GetDownloadStartTime(), (int64)srcNzbInfo->GetDownloadStartTime()));
+#else
 	destNzbInfo->SetDownloadStartTime((destNzbInfo->GetDownloadStartTime() > 0 &&
 		destNzbInfo->GetDownloadStartTime() < srcNzbInfo->GetDownloadStartTime()) || srcNzbInfo->GetDownloadStartTime() == 0 ?
 		destNzbInfo->GetDownloadStartTime() : srcNzbInfo->GetDownloadStartTime());
+#endif
 
 	// reattach completed file items to new NZBInfo-object
 	for (CompletedFile& completedFile : srcNzbInfo->GetCompletedFiles())
@@ -3321,6 +3425,58 @@ void QueueCoordinator::DiscardDirectRename(DownloadQueue* downloadQueue, NzbInfo
 
 void QueueCoordinator::DiscardDownloadedArticles(NzbInfo* nzbInfo, FileInfo* fileInfo)
 {
+#ifdef NZBGET_USE_RUST
+	int64 nextNzbRemSize = nzbInfo->GetRemainingSize();
+	int64 nextNzbPausedSize = nzbInfo->GetPausedSize();
+	int nextNzbCurSuccArt = nzbInfo->GetCurrentSuccessArticles();
+	int64 nextNzbCurSuccSize = nzbInfo->GetCurrentSuccessSize();
+	int64 nextNzbParCurSuccSize = nzbInfo->GetParCurrentSuccessSize();
+	int nextNzbCurFailArt = nzbInfo->GetCurrentFailedArticles();
+	int64 nextNzbCurFailSize = nzbInfo->GetCurrentFailedSize();
+	int64 nextNzbParCurFailSize = nzbInfo->GetParCurrentFailedSize();
+	int64 nextFileRemSize = fileInfo->GetRemainingSize();
+	nzbget_rs_cwp_queue_coord_discard_downloaded_articles_counters(
+		nextNzbRemSize,
+		nextNzbPausedSize,
+		nextNzbCurSuccArt,
+		nextNzbCurSuccSize,
+		nextNzbParCurSuccSize,
+		nextNzbCurFailArt,
+		nextNzbCurFailSize,
+		nextNzbParCurFailSize,
+		fileInfo->GetPaused() ? 1 : 0,
+		fileInfo->GetSuccessArticles(),
+		fileInfo->GetSuccessSize(),
+		fileInfo->GetFailedArticles(),
+		fileInfo->GetFailedSize(),
+		fileInfo->GetSize(),
+		fileInfo->GetMissedSize(),
+		&nextNzbRemSize,
+		&nextNzbPausedSize,
+		&nextNzbCurSuccArt,
+		&nextNzbCurSuccSize,
+		&nextNzbParCurSuccSize,
+		&nextNzbCurFailArt,
+		&nextNzbCurFailSize,
+		&nextNzbParCurFailSize,
+		&nextFileRemSize);
+	nzbInfo->SetRemainingSize(nextNzbRemSize);
+	nzbInfo->SetPausedSize(nextNzbPausedSize);
+	nzbInfo->GetCurrentServerStats()->ListOp(fileInfo->GetServerStats(), ServerStatList::soSubtract);
+	fileInfo->GetServerStats()->clear();
+	nzbInfo->SetCurrentSuccessArticles(nextNzbCurSuccArt);
+	nzbInfo->SetCurrentSuccessSize(nextNzbCurSuccSize);
+	nzbInfo->SetParCurrentSuccessSize(nextNzbParCurSuccSize);
+	fileInfo->SetSuccessSize(0);
+	fileInfo->SetSuccessArticles(0);
+	nzbInfo->SetCurrentFailedArticles(nextNzbCurFailArt);
+	nzbInfo->SetCurrentFailedSize(nextNzbCurFailSize);
+	nzbInfo->SetParCurrentFailedSize(nextNzbParCurFailSize);
+	fileInfo->SetFailedSize(0);
+	fileInfo->SetFailedArticles(0);
+	fileInfo->SetCompletedArticles(0);
+	fileInfo->SetRemainingSize(nextFileRemSize);
+#else
 	nzbInfo->SetRemainingSize(nzbInfo->GetRemainingSize() + fileInfo->GetSuccessSize() + fileInfo->GetFailedSize());
 	if (fileInfo->GetPaused())
 	{
@@ -3343,6 +3499,7 @@ void QueueCoordinator::DiscardDownloadedArticles(NzbInfo* nzbInfo, FileInfo* fil
 
 	fileInfo->SetCompletedArticles(0);
 	fileInfo->SetRemainingSize(fileInfo->GetSize() - fileInfo->GetMissedSize());
+#endif
 
 	// discard temporary files
 	DiscardTempFiles(fileInfo);

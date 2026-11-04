@@ -20394,6 +20394,601 @@ pub extern "C" fn nzbget_rs_hsr_prepost_classify_file_downloaded_direct_unpack(
     )
 }
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_stq_stream_repair_is_first_donor_part_valid(
+    has_first: c_int,
+    success: c_int,
+    offset: i64,
+) -> c_int {
+    i32::from(
+        crate::streamtwinqueue::stream_repair_is_first_donor_part_valid(
+            has_first != 0,
+            success != 0,
+            offset,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stq_stream_repair_step_part_for_offset(
+    offset: i64,
+    fetched_offset: i64,
+    fetched_len: usize,
+    index: c_int,
+    ranges_len: usize,
+    out_new_index: *mut c_int,
+) -> c_int {
+    let (status, new_idx) = crate::streamtwinqueue::stream_repair_step_part_for_offset(
+        offset,
+        fetched_offset,
+        fetched_len,
+        index,
+        ranges_len,
+    );
+    *out_new_index = new_idx;
+    status
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stq_stream_repair_calc_prefetch_bounds(
+    first_est: c_int,
+    last_est: c_int,
+    ranges_len: usize,
+    out_first: *mut c_int,
+    out_last: *mut c_int,
+) {
+    let (f, l) =
+        crate::streamtwinqueue::stream_repair_calc_prefetch_bounds(first_est, last_est, ranges_len);
+    *out_first = f;
+    *out_last = l;
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stq_stream_repair_calc_donor_read_chunk(
+    pos: i64,
+    fetched_offset: i64,
+    fetched_data_len: usize,
+    end_offset: i64,
+    out_from: *mut i64,
+    out_len: *mut i64,
+) {
+    let (from, len) = crate::streamtwinqueue::stream_repair_calc_donor_read_chunk(
+        pos,
+        fetched_offset,
+        fetched_data_len,
+        end_offset,
+    );
+    *out_from = from;
+    *out_len = len;
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stq_stream_repair_is_par2_job_or_file(
+    is_par_file: c_int,
+    filename: *const c_char,
+) -> c_int {
+    let fname = if filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    i32::from(crate::streamtwinqueue::stream_repair_is_par2_job_or_file(
+        is_par_file != 0,
+        fname,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_stq_stream_repair_is_donor_nzb_pre_eligible(
+    is_self: c_int,
+    kind: c_int,
+    nk_nzb: c_int,
+    dupe_mode: c_int,
+    dm_force: c_int,
+) -> c_int {
+    i32::from(
+        crate::streamtwinqueue::stream_repair_is_donor_nzb_pre_eligible(
+            is_self != 0,
+            kind,
+            nk_nzb,
+            dupe_mode,
+            dm_force,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stq_stream_repair_should_skip_donor_candidate(
+    own_full_hash: u32,
+    donor_full_hash: u32,
+    queued_filename: *const c_char,
+) -> c_int {
+    let qname = if queued_filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(queued_filename).to_bytes()
+    };
+    i32::from(
+        crate::streamtwinqueue::stream_repair_should_skip_donor_candidate(
+            own_full_hash,
+            donor_full_hash,
+            qname,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stq_stream_repair_eval_donor_outcome_bail(
+    outcome: c_int,
+    ro_productive: c_int,
+    ro_unproductive: c_int,
+    donor_proven: c_int,
+    cur_consecutive_failures: c_int,
+    donor_failure_bail: c_int,
+    unproven_donor_bail: c_int,
+    out_new_consecutive_failures: *mut c_int,
+) -> c_int {
+    let (next, bail) = crate::streamtwinqueue::stream_repair_eval_donor_outcome_bail(
+        outcome,
+        ro_productive,
+        ro_unproductive,
+        donor_proven != 0,
+        cur_consecutive_failures,
+        donor_failure_bail,
+        unproven_donor_bail,
+    );
+    *out_new_consecutive_failures = next;
+    i32::from(bail)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_stq_stream_repair_resolve_repair_file_outcome(
+    patched: c_int,
+    spent_fetches: c_int,
+    ro_productive: c_int,
+    ro_unproductive: c_int,
+    ro_no_cost: c_int,
+) -> c_int {
+    crate::streamtwinqueue::stream_repair_resolve_repair_file_outcome(
+        patched != 0,
+        spent_fetches != 0,
+        ro_productive,
+        ro_unproductive,
+        ro_no_cost,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_stq_stream_repair_calc_probe_replacement_count(
+    missing: c_int,
+    reserve_len: usize,
+    max_probe_fetches: c_int,
+    attempted_len: usize,
+) -> c_int {
+    crate::streamtwinqueue::stream_repair_calc_probe_replacement_count(
+        missing,
+        reserve_len,
+        max_probe_fetches,
+        attempted_len,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_stq_stream_repair_pick_replacement_index(
+    reserve_len: usize,
+    k: c_int,
+    replacements: c_int,
+) -> usize {
+    crate::streamtwinqueue::stream_repair_pick_replacement_index(reserve_len, k, replacements)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stq_stream_repair_is_probe_article_valid(
+    success: c_int,
+    data_len: usize,
+    file_size: i64,
+    offset: i64,
+    target_decoded_size: i64,
+    out_is_missing: *mut c_int,
+) -> c_int {
+    let (valid, missing) = crate::streamtwinqueue::stream_repair_is_probe_article_valid(
+        success != 0,
+        data_len,
+        file_size,
+        offset,
+        target_decoded_size,
+    );
+    *out_is_missing = i32::from(missing);
+    i32::from(valid)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stq_stream_repair_clip_hole_to_fetched(
+    hole_offset: i64,
+    hole_size: i64,
+    fetched_offset: i64,
+    fetched_len: usize,
+    out_from: *mut i64,
+    out_to: *mut i64,
+) -> c_int {
+    if let Some((from, to)) = crate::streamtwinqueue::stream_repair_clip_hole_to_fetched(
+        hole_offset,
+        hole_size,
+        fetched_offset,
+        fetched_len,
+    ) {
+        *out_from = from;
+        *out_to = to;
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stq_stream_repair_classify_remaining_hole_target(
+    interrupted: c_int,
+    decoded_file_size: i64,
+    holes_empty: c_int,
+    is_par_file: c_int,
+    failed_articles: c_int,
+    failed_size: i64,
+    missed_size: i64,
+    inout_recovered_articles: *mut c_int,
+    inout_recovered_failed_size: *mut i64,
+    inout_recovered_failed_par_size: *mut i64,
+) -> c_int {
+    let (status, rec_arts, rec_fsize, rec_pfsize) =
+        crate::streamtwinqueue::stream_repair_classify_remaining_hole_target(
+            interrupted != 0,
+            decoded_file_size,
+            holes_empty != 0,
+            is_par_file != 0,
+            failed_articles,
+            failed_size,
+            missed_size,
+            *inout_recovered_articles,
+            *inout_recovered_failed_size,
+            *inout_recovered_failed_par_size,
+        );
+    *inout_recovered_articles = rec_arts;
+    *inout_recovered_failed_size = rec_fsize;
+    *inout_recovered_failed_par_size = rec_pfsize;
+    status
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stq_stream_repair_patch_from_donor_set_step_failure(
+    chunk: i64,
+    min_chunk: i64,
+    inout_size: *mut i64,
+    inout_pos: *mut i64,
+    inout_failed_pieces: *mut c_int,
+    max_failed_pieces: c_int,
+) -> c_int {
+    let (action, new_sz, new_pos, new_failed) =
+        crate::streamtwinqueue::stream_repair_patch_from_donor_set_step_failure(
+            chunk,
+            min_chunk,
+            *inout_size,
+            *inout_pos,
+            *inout_failed_pieces,
+            max_failed_pieces,
+        );
+    *inout_size = new_sz;
+    *inout_pos = new_pos;
+    *inout_failed_pieces = new_failed;
+    action
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stq_stream_repair_encrypted_clip_live_hole(
+    hole_offset: i64,
+    hole_size: i64,
+    live_holes: *const crate::dupefallback::NzbgetRsByteRange,
+    live_holes_len: usize,
+    last_computable: i64,
+    block_size: i64,
+    inout_uncomputable_tail: *mut i64,
+    out_hole_from: *mut i64,
+    out_patch_to: *mut i64,
+    out_block_from: *mut i64,
+    out_block_to: *mut i64,
+) -> c_int {
+    let slice = if live_holes.is_null() || live_holes_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(live_holes, live_holes_len)
+    };
+    let (ok, new_tail, h_from, p_to, b_from, b_to) =
+        crate::streamtwinqueue::stream_repair_encrypted_clip_live_hole(
+            hole_offset,
+            hole_size,
+            slice,
+            last_computable,
+            block_size,
+            *inout_uncomputable_tail,
+        );
+    *inout_uncomputable_tail = new_tail;
+    *out_hole_from = h_from;
+    *out_patch_to = p_to;
+    *out_block_from = b_from;
+    *out_block_to = b_to;
+    i32::from(ok)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stq_stream_repair_encrypted_is_prev_block_present(
+    block_from: i64,
+    block_size: i64,
+    live_holes: *const crate::dupefallback::NzbgetRsByteRange,
+    live_holes_len: usize,
+) -> c_int {
+    let slice = if live_holes.is_null() || live_holes_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(live_holes, live_holes_len)
+    };
+    i32::from(
+        crate::streamtwinqueue::stream_repair_encrypted_is_prev_block_present(
+            block_from, block_size, slice,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stq_stream_repair_resolve_completion_par_action(
+    recovered_bytes: i64,
+    holes_remain: c_int,
+    par_rename_status: c_int,
+    rs_none: c_int,
+    par_status: c_int,
+    ps_skipped: c_int,
+    par_check_opt: c_int,
+    pc_manual: c_int,
+    ps_manual: c_int,
+    ps_none: c_int,
+    out_reset_par_rename: *mut c_int,
+    out_set_par_status: *mut c_int,
+    out_new_par_status: *mut c_int,
+    out_force_par_full: *mut c_int,
+    out_set_request_par_check_false: *mut c_int,
+    out_check_main_pars: *mut c_int,
+) {
+    let (rst_ren, set_ps, new_ps, force_full, req_false, chk_pars) =
+        crate::streamtwinqueue::stream_repair_resolve_completion_par_action(
+            recovered_bytes,
+            holes_remain != 0,
+            par_rename_status,
+            rs_none,
+            par_status,
+            ps_skipped,
+            par_check_opt,
+            pc_manual,
+            ps_manual,
+            ps_none,
+        );
+    *out_reset_par_rename = i32::from(rst_ren);
+    *out_set_par_status = i32::from(set_ps);
+    *out_new_par_status = new_ps;
+    *out_force_par_full = i32::from(force_full);
+    *out_set_request_par_check_false = i32::from(req_false);
+    *out_check_main_pars = i32::from(chk_pars);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stq_dupe_stream_repair_is_extracted_entry_valid(
+    entry_count: usize,
+    max_entries: usize,
+    size: i64,
+    max_bytes: i64,
+    inout_extracted_bytes: *mut i64,
+    inner_size: i64,
+    out_is_size_match: *mut c_int,
+) -> c_int {
+    let (valid, next_bytes, is_match) =
+        crate::streamtwinqueue::dupe_stream_repair_is_extracted_entry_valid(
+            entry_count,
+            max_entries,
+            size,
+            max_bytes,
+            *inout_extracted_bytes,
+            inner_size,
+        );
+    *inout_extracted_bytes = next_bytes;
+    *out_is_size_match = i32::from(is_match);
+    i32::from(valid)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_stq_dupe_stream_repair_calc_abs_size_diff(
+    size1: i64,
+    size2: i64,
+) -> i64 {
+    crate::streamtwinqueue::dupe_stream_repair_calc_abs_size_diff(size1, size2)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_stq_twin_check_eval_index_fetch_retry(
+    fetched: c_int,
+    known: c_int,
+    complete: c_int,
+    next_attempts: c_int,
+    max_attempts: c_int,
+) -> c_int {
+    i32::from(crate::streamtwinqueue::twin_check_eval_index_fetch_retry(
+        fetched != 0,
+        known != 0,
+        complete != 0,
+        next_attempts,
+        max_attempts,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stq_twin_check_is_fetched_entry_part_valid(
+    success: c_int,
+    offset: i64,
+    data_len: usize,
+    max_size: i64,
+    cur_data_len: usize,
+    out_new_data_len: *mut usize,
+) -> c_int {
+    let (valid, new_len) = crate::streamtwinqueue::twin_check_is_fetched_entry_part_valid(
+        success != 0,
+        offset,
+        data_len,
+        max_size,
+        cur_data_len,
+    );
+    *out_new_data_len = new_len;
+    i32::from(valid)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stq_twin_check_is_print_usable(print: *const c_char) -> c_int {
+    let bytes = if print.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(print).to_bytes()
+    };
+    i32::from(crate::streamtwinqueue::twin_check_is_print_usable(bytes))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_stq_twin_check_is_listless_from_counts(
+    has_sigs: c_int,
+    attempts: c_int,
+    max_attempts: c_int,
+) -> c_int {
+    i32::from(
+        crate::streamtwinqueue::twin_check_is_listless_from_counts(has_sigs, attempts, max_attempts),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stq_twin_check_eval_sampleable(
+    primary_ok: c_int,
+    is_primary: c_int,
+    is_dupe: c_int,
+    print_empty: c_int,
+    primary_print_empty: c_int,
+    by_par2: c_int,
+    has_sampled: c_int,
+    sampled_of: *const c_char,
+    primary_id: *const c_char,
+    out_sampled_now: *mut c_int,
+) -> c_int {
+    let s_of = if sampled_of.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(sampled_of).to_bytes())
+    };
+    let p_id = if primary_id.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(primary_id).to_bytes()
+    };
+    let (sampleable, sampled_now) = crate::streamtwinqueue::twin_check_eval_sampleable(
+        primary_ok != 0,
+        is_primary != 0,
+        is_dupe != 0,
+        print_empty != 0,
+        primary_print_empty != 0,
+        by_par2 != 0,
+        has_sampled != 0,
+        s_of,
+        p_id,
+    );
+    *out_sampled_now = i32::from(sampled_now);
+    i32::from(sampleable)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_stq_queue_editor_resolve_auto_sort_order(
+    sort_order: c_int,
+    so_auto: c_int,
+    so_descending: c_int,
+    sort_criteria: c_int,
+    sc_priority: c_int,
+) -> c_int {
+    crate::streamtwinqueue::queue_editor_resolve_auto_sort_order(
+        sort_order,
+        so_auto,
+        so_descending,
+        sort_criteria,
+        sc_priority,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_stq_queue_editor_flip_sort_order(
+    sort_order: c_int,
+    so_descending: c_int,
+    so_ascending: c_int,
+) -> c_int {
+    crate::streamtwinqueue::queue_editor_flip_sort_order(sort_order, so_descending, so_ascending)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_stq_queue_editor_resolve_prepare_list_offset(
+    action: c_int,
+    ea_file_move_top: c_int,
+    ea_group_move_top: c_int,
+    ea_file_move_bottom: c_int,
+    ea_group_move_bottom: c_int,
+    max_id: c_int,
+    cur_offset: c_int,
+) -> c_int {
+    crate::streamtwinqueue::queue_editor_resolve_prepare_list_offset(
+        action,
+        ea_file_move_top,
+        ea_group_move_top,
+        ea_file_move_bottom,
+        ea_group_move_bottom,
+        max_id,
+        cur_offset,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stq_queue_editor_calc_move_sweep_bounds(
+    nr_entries: c_int,
+    offset: c_int,
+    le_zero_forward: c_int,
+    out_start: *mut c_int,
+    out_end: *mut c_int,
+    out_step: *mut c_int,
+) {
+    let (s, e, st) = crate::streamtwinqueue::queue_editor_calc_move_sweep_bounds(
+        nr_entries,
+        offset,
+        le_zero_forward != 0,
+    );
+    *out_start = s;
+    *out_end = e;
+    *out_step = st;
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stq_queue_editor_eval_align_group_step(
+    selected: c_int,
+    has_last_nzb: c_int,
+    num: u32,
+    last_num: u32,
+    out_new_last_num: *mut u32,
+) -> c_int {
+    let (mv, new_last) = crate::streamtwinqueue::queue_editor_eval_align_group_step(
+        selected != 0,
+        has_last_nzb != 0,
+        num,
+        last_num,
+    );
+    *out_new_last_num = new_last;
+    i32::from(mv)
+}
+
+
 
 
 

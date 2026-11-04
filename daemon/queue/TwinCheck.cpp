@@ -229,10 +229,19 @@ void TwinCheckJob::Run()
 		// asked again at a later round, a few times; a partial list is kept
 		// meanwhile, and stays when the articles don't come
 		Guard guard(g_mutex);
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_stq_twin_check_eval_index_fetch_retry(
+			fetched ? 1 : 0, known ? 1 : 0, complete ? 1 : 0,
+			++g_failedAttempts[m_nzbId], MaxAttempts) != 0)
+		{
+			return;
+		}
+#else
 		if (++g_failedAttempts[m_nzbId] < MaxAttempts)
 		{
 			return;
 		}
+#endif
 	}
 	if (!known)
 	{
@@ -824,6 +833,19 @@ bool TwinCheck::FetchEntry(ArticleFetcher& fetcher, const NzbEntry& entry, int64
 			return false;
 		}
 		ArticleFetcher::FetchedArticle part = fetcher.Fetch(segment.second.c_str(), entry.groups);
+#ifdef NZBGET_USE_RUST
+		size_t newDataLen = data.size();
+		if (!nzbget_rs_stq_twin_check_is_fetched_entry_part_valid(
+			part.Success ? 1 : 0, part.Offset, part.Data.size(),
+			maxSize, data.size(), &newDataLen))
+		{
+			continue;
+		}
+		if (newDataLen > data.size())
+		{
+			data.resize(newDataLen);
+		}
+#else
 		if (!part.Success || part.Offset < 0 || part.Offset + (int64)part.Data.size() > maxSize)
 		{
 			// a lost article: what the others hold may still do
@@ -833,6 +855,7 @@ bool TwinCheck::FetchEntry(ArticleFetcher& fetcher, const NzbEntry& entry, int64
 		{
 			data.resize((size_t)(part.Offset + part.Data.size()));
 		}
+#endif
 		std::copy(part.Data.begin(), part.Data.end(), data.begin() + (size_t)part.Offset);
 	}
 	return !data.empty();
@@ -969,8 +992,15 @@ void TwinCheck::ServiceWork()
 				// and so do those whose file list isn't stored (a fingerprint from
 				// before the lists were kept, or the store file lost)
 				std::string print = fingerprintOf(nzbInfo);
+#ifdef NZBGET_USE_RUST
+				bool listless = nzbget_rs_stq_twin_check_is_print_usable(print.c_str()) != 0 &&
+					nzbget_rs_stq_twin_check_is_listless_from_counts(
+						HasSigs(nzbInfo->GetId(), Identity(nzbInfo).c_str()),
+						Attempts(nzbInfo->GetId()), MaxAttempts) != 0;
+#else
 				bool listless = print != "none" && print != "lost" && !print.empty() &&
 					HasSigs(nzbInfo->GetId(), Identity(nzbInfo).c_str()) < 2 && Attempts(nzbInfo->GetId()) < MaxAttempts;
+#endif
 				if ((print.empty() || listless) && !strchr(nzbInfo->GetQueuedFilename(), '|') &&
 					FileSystem::FileExists(nzbInfo->GetQueuedFilename()))
 				{
@@ -1047,6 +1077,25 @@ void TwinCheck::ServiceWork()
 			{
 				NzbInfo* nzbInfo = item.nzbInfo;
 				std::string print = fingerprintOf(nzbInfo);
+#ifdef NZBGET_USE_RUST
+				bool byPar2 = nzbget_rs_stq_twin_check_is_print_usable(primaryPrint.c_str()) != 0 &&
+					nzbget_rs_stq_twin_check_is_print_usable(print.c_str()) != 0;
+				NzbParameter* sampled = nzbInfo->GetParameters()->Find(SampledParam);
+				NzbParameter* sampledOf = nzbInfo->GetParameters()->Find(SampledOfParam);
+				int sampledNowInt = 0;
+				bool sampleable = nzbget_rs_stq_twin_check_eval_sampleable(
+					primaryOk ? 1 : 0,
+					nzbInfo == primary ? 1 : 0,
+					isDupe(item) ? 1 : 0,
+					print.empty() ? 1 : 0,
+					primaryPrint.empty() ? 1 : 0,
+					byPar2 ? 1 : 0,
+					sampled != nullptr ? 1 : 0,
+					sampledOf ? sampledOf->GetValue() : nullptr,
+					primaryId.c_str(),
+					&sampledNowInt) != 0;
+				bool sampledNow = sampledNowInt != 0;
+#else
 				auto usable = [](const std::string& value) { return !value.empty() && value != "none" && value != "lost"; };
 				bool byPar2 = usable(primaryPrint) && usable(print);
 				bool sampleable = primaryOk && nzbInfo != primary && isDupe(item) && !print.empty() &&
@@ -1054,6 +1103,7 @@ void TwinCheck::ServiceWork()
 				NzbParameter* sampled = nzbInfo->GetParameters()->Find(SampledParam);
 				NzbParameter* sampledOf = nzbInfo->GetParameters()->Find(SampledOfParam);
 				bool sampledNow = sampled && sampledOf && primaryId == sampledOf->GetValue();
+#endif
 				if (sampleable && !sampledNow && !strchr(nzbInfo->GetQueuedFilename(), '|') &&
 					FileSystem::FileExists(nzbInfo->GetQueuedFilename()))
 				{

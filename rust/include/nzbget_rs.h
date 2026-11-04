@@ -3204,6 +3204,94 @@ int nzbget_rs_hsr_prepost_classify_file_downloaded_direct_unpack(
     int skip_disk_write, int direct_unpack_status, int ns_none, int ns_running,
     int direct_rename_status, int ts_running, int has_unpack_thread);
 
+/* StreamRepair, DupeStreamRepair, TwinCheck & QueueEditor Hot-Path FFI (`streamtwinqueue.rs`) */
+int nzbget_rs_stq_stream_repair_is_first_donor_part_valid(
+    int has_first, int success, int64_t offset);
+int nzbget_rs_stq_stream_repair_step_part_for_offset(
+    int64_t offset, int64_t fetched_offset, size_t fetched_len,
+    int index, size_t ranges_len, int* out_new_index);
+void nzbget_rs_stq_stream_repair_calc_prefetch_bounds(
+    int first_est, int last_est, size_t ranges_len,
+    int* out_first, int* out_last);
+void nzbget_rs_stq_stream_repair_calc_donor_read_chunk(
+    int64_t pos, int64_t fetched_offset, size_t fetched_data_len, int64_t end_offset,
+    int64_t* out_from, int64_t* out_len);
+int nzbget_rs_stq_stream_repair_is_par2_job_or_file(
+    int is_par_file, const char* filename);
+int nzbget_rs_stq_stream_repair_is_donor_nzb_pre_eligible(
+    int is_self, int kind, int nk_nzb, int dupe_mode, int dm_force);
+int nzbget_rs_stq_stream_repair_should_skip_donor_candidate(
+    uint32_t own_full_hash, uint32_t donor_full_hash, const char* queued_filename);
+int nzbget_rs_stq_stream_repair_eval_donor_outcome_bail(
+    int outcome, int ro_productive, int ro_unproductive, int donor_proven,
+    int cur_consecutive_failures, int donor_failure_bail, int unproven_donor_bail,
+    int* out_new_consecutive_failures);
+int nzbget_rs_stq_stream_repair_resolve_repair_file_outcome(
+    int patched, int spent_fetches, int ro_productive, int ro_unproductive, int ro_no_cost);
+int nzbget_rs_stq_stream_repair_calc_probe_replacement_count(
+    int missing, size_t reserve_len, int max_probe_fetches, size_t attempted_len);
+size_t nzbget_rs_stq_stream_repair_pick_replacement_index(
+    size_t reserve_len, int k, int replacements);
+int nzbget_rs_stq_stream_repair_is_probe_article_valid(
+    int success, size_t data_len, int64_t file_size, int64_t offset,
+    int64_t target_decoded_size, int* out_is_missing);
+int nzbget_rs_stq_stream_repair_clip_hole_to_fetched(
+    int64_t hole_offset, int64_t hole_size, int64_t fetched_offset, size_t fetched_len,
+    int64_t* out_from, int64_t* out_to);
+int nzbget_rs_stq_stream_repair_classify_remaining_hole_target(
+    int interrupted, int64_t decoded_file_size, int holes_empty, int is_par_file,
+    int failed_articles, int64_t failed_size, int64_t missed_size,
+    int* inout_recovered_articles, int64_t* inout_recovered_failed_size,
+    int64_t* inout_recovered_failed_par_size);
+int nzbget_rs_stq_stream_repair_patch_from_donor_set_step_failure(
+    int64_t chunk, int64_t min_chunk, int64_t* inout_size, int64_t* inout_pos,
+    int* inout_failed_pieces, int max_failed_pieces);
+int nzbget_rs_stq_stream_repair_encrypted_clip_live_hole(
+    int64_t hole_offset, int64_t hole_size,
+    const NzbgetRsByteRange* live_holes, size_t live_holes_len,
+    int64_t last_computable, int64_t block_size,
+    int64_t* inout_uncomputable_tail, int64_t* out_hole_from,
+    int64_t* out_patch_to, int64_t* out_block_from, int64_t* out_block_to);
+int nzbget_rs_stq_stream_repair_encrypted_is_prev_block_present(
+    int64_t block_from, int64_t block_size,
+    const NzbgetRsByteRange* live_holes, size_t live_holes_len);
+void nzbget_rs_stq_stream_repair_resolve_completion_par_action(
+    int64_t recovered_bytes, int holes_remain, int par_rename_status, int rs_none,
+    int par_status, int ps_skipped, int par_check_opt, int pc_manual,
+    int ps_manual, int ps_none,
+    int* out_reset_par_rename, int* out_set_par_status, int* out_new_par_status,
+    int* out_force_par_full, int* out_set_request_par_check_false, int* out_check_main_pars);
+int nzbget_rs_stq_dupe_stream_repair_is_extracted_entry_valid(
+    size_t entry_count, size_t max_entries, int64_t size, int64_t max_bytes,
+    int64_t* inout_extracted_bytes, int64_t inner_size, int* out_is_size_match);
+int64_t nzbget_rs_stq_dupe_stream_repair_calc_abs_size_diff(
+    int64_t size1, int64_t size2);
+int nzbget_rs_stq_twin_check_eval_index_fetch_retry(
+    int fetched, int known, int complete, int next_attempts, int max_attempts);
+int nzbget_rs_stq_twin_check_is_fetched_entry_part_valid(
+    int success, int64_t offset, size_t data_len, int64_t max_size,
+    size_t cur_data_len, size_t* out_new_data_len);
+int nzbget_rs_stq_twin_check_is_print_usable(const char* print);
+int nzbget_rs_stq_twin_check_is_listless_from_counts(
+    int has_sigs, int attempts, int max_attempts);
+int nzbget_rs_stq_twin_check_eval_sampleable(
+    int primary_ok, int is_primary, int is_dupe, int print_empty,
+    int primary_print_empty, int by_par2, int has_sampled,
+    const char* sampled_of, const char* primary_id, int* out_sampled_now);
+int nzbget_rs_stq_queue_editor_resolve_auto_sort_order(
+    int sort_order, int so_auto, int so_descending, int sort_criteria, int sc_priority);
+int nzbget_rs_stq_queue_editor_flip_sort_order(
+    int sort_order, int so_descending, int so_ascending);
+int nzbget_rs_stq_queue_editor_resolve_prepare_list_offset(
+    int action, int ea_file_move_top, int ea_group_move_top,
+    int ea_file_move_bottom, int ea_group_move_bottom, int max_id, int cur_offset);
+void nzbget_rs_stq_queue_editor_calc_move_sweep_bounds(
+    int nr_entries, int offset, int le_zero_forward,
+    int* out_start, int* out_end, int* out_step);
+int nzbget_rs_stq_queue_editor_eval_align_group_step(
+    int selected, int has_last_nzb, uint32_t num, uint32_t last_num,
+    uint32_t* out_new_last_num);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

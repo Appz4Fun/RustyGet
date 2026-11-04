@@ -133,10 +133,16 @@ bool GroupSorter::Execute(const char* sort)
 	}
 
 	ESortOrder origSortOrder = m_sortOrder;
+#ifdef NZBGET_USE_RUST
+	m_sortOrder = (ESortOrder)nzbget_rs_stq_queue_editor_resolve_auto_sort_order(
+		(int)m_sortOrder, (int)soAuto, (int)soDescending,
+		(int)m_sortCriteria, (int)scPriority);
+#else
 	if (m_sortOrder == soAuto && m_sortCriteria == scPriority)
 	{
 		m_sortOrder = soDescending;
 	}
+#endif
 
 	std::stable_sort(m_nzbList->begin(), m_nzbList->end(), *this);
 
@@ -147,7 +153,12 @@ bool GroupSorter::Execute(const char* sort)
 			return nzbInfo1 == nzbInfo2.get();
 		}))
 	{
+#ifdef NZBGET_USE_RUST
+		m_sortOrder = (ESortOrder)nzbget_rs_stq_queue_editor_flip_sort_order(
+			(int)m_sortOrder, (int)soDescending, (int)soAscending);
+#else
 		m_sortOrder = m_sortOrder == soDescending ? soAscending : soDescending;
+#endif
 		std::stable_sort(m_nzbList->begin(), m_nzbList->end(), *this);
 	} 
 
@@ -539,6 +550,12 @@ void QueueEditor::PrepareList(ItemList* itemList, IdList* idList,
 		return;
 	}
 
+#ifdef NZBGET_USE_RUST
+	offset = nzbget_rs_stq_queue_editor_resolve_prepare_list_offset(
+		(int)action, (int)DownloadQueue::eaFileMoveTop, (int)DownloadQueue::eaGroupMoveTop,
+		(int)DownloadQueue::eaFileMoveBottom, (int)DownloadQueue::eaGroupMoveBottom,
+		MAX_ID, offset);
+#else
 	if (action == DownloadQueue::eaFileMoveTop || action == DownloadQueue::eaGroupMoveTop)
 	{
 		offset = -MAX_ID;
@@ -547,6 +564,7 @@ void QueueEditor::PrepareList(ItemList* itemList, IdList* idList,
 	{
 		offset = MAX_ID;
 	}
+#endif
 
 	itemList->reserve(idList->size());
 	if ((offset != 0) &&
@@ -558,6 +576,10 @@ void QueueEditor::PrepareList(ItemList* itemList, IdList* idList,
 			int nrEntries = (int)nzbInfo->GetFileList()->size();
 			int lastDestPos = -1;
 			int start, end, step;
+#ifdef NZBGET_USE_RUST
+			nzbget_rs_stq_queue_editor_calc_move_sweep_bounds(
+				nrEntries, offset, 0, &start, &end, &step);
+#else
 			if (offset < 0)
 			{
 				start = 0;
@@ -570,6 +592,7 @@ void QueueEditor::PrepareList(ItemList* itemList, IdList* idList,
 				end = -1;
 				step = -1;
 			}
+#endif
 			for (int index = start; index != end; index += step)
 			{
 				std::unique_ptr<FileInfo>& fileInfo = nzbInfo->GetFileList()->at(index);
@@ -619,6 +642,10 @@ void QueueEditor::PrepareList(ItemList* itemList, IdList* idList,
 		int nrEntries = (int)m_downloadQueue->GetQueue()->size();
 		int lastDestPos = -1;
 		int start, end, step;
+#ifdef NZBGET_USE_RUST
+		nzbget_rs_stq_queue_editor_calc_move_sweep_bounds(
+			nrEntries, offset, 1, &start, &end, &step);
+#else
 		if (offset <= 0)
 		{
 			start = 0;
@@ -631,6 +658,7 @@ void QueueEditor::PrepareList(ItemList* itemList, IdList* idList,
 			end = -1;
 			step = -1;
 		}
+#endif
 		for (int index = start; index != end; index += step)
 		{
 			std::unique_ptr<NzbInfo>& nzbInfo = m_downloadQueue->GetQueue()->at(index);
@@ -1228,6 +1256,18 @@ void QueueEditor::AlignGroups(ItemList* itemList)
 
 		if (selected)
 		{
+#ifdef NZBGET_USE_RUST
+			uint32 newLastNum = lastNum;
+			if (nzbget_rs_stq_queue_editor_eval_align_group_step(
+				selected ? 1 : 0, lastNzbInfo != nullptr ? 1 : 0,
+				num, lastNum, &newLastNum) != 0)
+			{
+				std::unique_ptr<NzbInfo> movedNzbInfo = std::move(*(nzbList->begin() + num));
+				nzbList->erase(nzbList->begin() + num);
+				nzbList->insert(nzbList->begin() + lastNum + 1, std::move(movedNzbInfo));
+			}
+			lastNum = newLastNum;
+#else
 			if (lastNzbInfo && num - lastNum > 1)
 			{
 				std::unique_ptr<NzbInfo> movedNzbInfo = std::move(*(nzbList->begin() + num));
@@ -1239,6 +1279,7 @@ void QueueEditor::AlignGroups(ItemList* itemList)
 			{
 				lastNum = num;
 			}
+#endif
 			lastNzbInfo = nzbInfo.get();
 		}
 		num++;

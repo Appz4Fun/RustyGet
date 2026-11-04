@@ -1019,11 +1019,19 @@ std::vector<FileInfo*> DupeStreamRepair::SelectDonorCandidates(const char* targe
 	std::sort(bySize.begin(), bySize.end(),
 		[targetDecodedFileSize](FileInfo* file1, FileInfo* file2)
 		{
+#ifdef NZBGET_USE_RUST
+			int64 diff1 = nzbget_rs_stq_dupe_stream_repair_calc_abs_size_diff(
+				file1->GetSize(), targetDecodedFileSize);
+			int64 diff2 = nzbget_rs_stq_dupe_stream_repair_calc_abs_size_diff(
+				file2->GetSize(), targetDecodedFileSize);
+			return diff1 < diff2;
+#else
 			int64 diff1 = file1->GetSize() > targetDecodedFileSize ?
 				file1->GetSize() - targetDecodedFileSize : targetDecodedFileSize - file1->GetSize();
 			int64 diff2 = file2->GetSize() > targetDecodedFileSize ?
 				file2->GetSize() - targetDecodedFileSize : targetDecodedFileSize - file2->GetSize();
 			return diff1 < diff2;
+#endif
 		});
 	for (FileInfo* donorFile : bySize)
 	{
@@ -1073,6 +1081,19 @@ std::string DupeStreamRepair::SelectExtractedInner(const char* dir, int64 innerS
 
 		std::string path = fs::u8string(it->path());
 		int64 size = FileSystem::FileSize(path.c_str());
+#ifdef NZBGET_USE_RUST
+		int isSizeMatch = 0;
+		if (!nzbget_rs_stq_dupe_stream_repair_is_extracted_entry_valid(
+			entryCount, MaxExtractedEntries, size, MaxExtractedBytes,
+			&extractedBytes, innerSize, &isSizeMatch))
+		{
+			return "";
+		}
+		if (isSizeMatch)
+		{
+			matches.push_back(std::move(path));
+		}
+#else
 		if (size < 0 || size > MaxExtractedBytes - extractedBytes)
 		{
 			return "";
@@ -1082,6 +1103,7 @@ std::string DupeStreamRepair::SelectExtractedInner(const char* dir, int64 innerS
 		{
 			matches.push_back(std::move(path));
 		}
+#endif
 	}
 
 	if (matches.empty())

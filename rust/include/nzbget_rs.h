@@ -5561,6 +5561,47 @@ void nzbget_rs_tpr_script_resolve_single_arg_executor(
     int32_t has_found, const char* found_executor, const char* arg0,
     int32_t* out_use_found, int32_t* out_prepend_arg);
 void nzbget_rs_tpr_nzbfile_trim_sax_error_in_place(char* buf);
+NzbgetRsBuf nzbget_rs_dqh_queue_coord_format_donor_id_list(
+    const int32_t* donor_ids_ptr, size_t len,
+    int32_t* out_unique_ids_ptr, size_t* out_unique_len);
+void nzbget_rs_dqh_queue_coord_eval_completed_file_repair_eligibility(
+    int32_t completed, int32_t file_status, int32_t cf_partial, int32_t cf_failure,
+    int32_t is_side_file, int32_t* out_side_file, int32_t* out_check_stream_repair);
+int32_t nzbget_rs_dqh_queue_coord_is_size_twin(
+    int32_t is_self, int32_t same_name_or_key, int64_t self_size, int64_t other_size,
+    int64_t other_par_size, int64_t largest_self_file,
+    const int64_t* other_file_sizes_ptr, size_t other_file_sizes_len);
+int32_t nzbget_rs_dqh_queue_coord_can_check_dead_download(
+    int32_t health_check, int32_t hc_dupe, int32_t dupe_check, int32_t fails_over,
+    int32_t kind, int32_t nk_nzb, int32_t deleting, int32_t parking,
+    int32_t delete_status, int32_t ds_none);
+int32_t nzbget_rs_dqh_queue_coord_is_active_unpaused_queued_dupe(
+    int32_t is_self, int64_t paused_size, int64_t remaining_size, int32_t same_name_or_key);
+int32_t nzbget_rs_dqh_queue_coord_can_fail_over_dead_pick(
+    int32_t has_nzb, int32_t deleting, int32_t parking, int32_t delete_status, int32_t ds_none);
+const char* nzbget_rs_dqh_queue_coord_download_debug_state_label(
+    int32_t pause_download, int32_t temp_pause_download);
+double nzbget_rs_dqh_prepost_permille_to_percent(int32_t permille);
+size_t nzbget_rs_tpr_queue_editor_dedup_id_list(
+    const int32_t* ids_ptr, size_t len, int32_t* out_ids_ptr);
+int32_t nzbget_rs_tpr_queue_editor_map_group_to_file_action(int32_t action);
+void nzbget_rs_tpr_queue_editor_resolve_move_groups_target(
+    int32_t target_id, const int32_t* queue_ids_ptr, size_t queue_len,
+    const int32_t* moved_ids_ptr, size_t moved_len, int32_t before, int32_t max_id,
+    int32_t* out_target_id, int32_t* out_before, int32_t* out_offset);
+size_t nzbget_rs_tpr_parchecker_strip_last_path_sep_len(const char* path, char sep);
+int32_t nzbget_rs_tpr_parchecker_next_valid_block_run(
+    const uint8_t* valid_blocks_ptr, size_t len, size_t start_idx,
+    size_t* out_block_start, size_t* out_block_end);
+int32_t nzbget_rs_tpr_unpack_ctrl_should_check_renamed_rar_sig(
+    int32_t has_renamed_archive_files, int32_t archive_kind, int32_t is_ignored_ext);
+int32_t nzbget_rs_tpr_unpack_should_auto_stop_on_error(
+    int32_t is_stopped, int32_t decrypt_error, int32_t password_error,
+    int32_t crc_or_volume_error);
+void nzbget_rs_tpr_history_coord_retry_action_labels(
+    int32_t reset_failed, int32_t reprocess,
+    const char** out_wrong_type_verb, const char** out_missing_dir_verb,
+    const char** out_start_msg_verb);
 
 #include "nzbget_tls_cipher.h"
 

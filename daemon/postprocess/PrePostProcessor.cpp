@@ -1134,7 +1134,9 @@ void PrePostProcessor::StartJob(DownloadQueue* downloadQueue, PostInfo* postInfo
 		nzbInfo->PrintMessage(Message::mkInfo,
 			"Par2 files of %s cannot cover its damage (health %.1f%%, critical %.1f%%), "
 			"recovering from duplicates before par-check",
-			nzbInfo->GetName(), nzbInfo->CalcHealth() / 10.0, nzbInfo->CalcCriticalHealth(false) / 10.0);
+			nzbInfo->GetName(),
+			nzbget_rs_dqh_prepost_permille_to_percent(nzbInfo->CalcHealth()),
+			nzbget_rs_dqh_prepost_permille_to_percent(nzbInfo->CalcCriticalHealth(false)));
 		postInfo->SetParCannotCover(true);
 		EnterStage(downloadQueue, postInfo, PostInfo::ptStreamRepairing);
 		StreamRepairController::StartJob(postInfo);
@@ -1163,7 +1165,9 @@ void PrePostProcessor::StartJob(DownloadQueue* downloadQueue, PostInfo* postInfo
 		nzbInfo->PrintMessage(Message::mkWarning,
 			"Skipping par-check for %s: its par2 files cannot cover the damage "
 			"(health %.1f%%, critical %.1f%%) and duplicates recovered nothing",
-			nzbInfo->GetName(), nzbInfo->CalcHealth() / 10.0, nzbInfo->CalcCriticalHealth(false) / 10.0);
+			nzbInfo->GetName(),
+			nzbget_rs_dqh_prepost_permille_to_percent(nzbInfo->CalcHealth()),
+			nzbget_rs_dqh_prepost_permille_to_percent(nzbInfo->CalcCriticalHealth(false)));
 		nzbInfo->SetParStatus(NzbInfo::psFailure);
 		return;
 	}
@@ -1271,7 +1275,8 @@ void PrePostProcessor::StartJob(DownloadQueue* downloadQueue, PostInfo* postInfo
 			nzbInfo->PrintMessage(Message::mkWarning,
 				"Skipping par-check for %s due to health %.1f%% below critical %.1f%%",
 				nzbInfo->GetName(),
-				nzbInfo->CalcHealth() / 10.0, nzbInfo->CalcCriticalHealth(false) / 10.0);
+				nzbget_rs_dqh_prepost_permille_to_percent(nzbInfo->CalcHealth()),
+				nzbget_rs_dqh_prepost_permille_to_percent(nzbInfo->CalcCriticalHealth(false)));
 		}
 		nzbInfo->SetParStatus(NzbInfo::psFailure);
 		return;
@@ -1281,7 +1286,8 @@ void PrePostProcessor::StartJob(DownloadQueue* downloadQueue, PostInfo* postInfo
 	{
 		nzbInfo->PrintMessage(Message::mkInfo,
 			"Collection %s with health %.1f%% needs par-check",
-			nzbInfo->GetName(), nzbInfo->CalcHealth() / 10.0);
+			nzbInfo->GetName(),
+			nzbget_rs_dqh_prepost_permille_to_percent(nzbInfo->CalcHealth()));
 		postInfo->SetRequestParCheck(true);
 		return;
 	}

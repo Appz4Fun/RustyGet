@@ -743,6 +743,136 @@ pub fn tpr_nzbfile_trim_sax_error_trailing(buf: &[u8]) -> usize {
     len
 }
 
+/// Deduplicates an ID list in-order while preserving the first occurrence of each ID
+/// (`QueueEditor::InternEditList`).
+pub fn tpr_queue_editor_dedup_id_list(ids: &[i32]) -> Vec<i32> {
+    let mut unique = Vec::with_capacity(ids.len());
+    for &id in ids {
+        if !unique.contains(&id) {
+            unique.push(id);
+        }
+    }
+    unique
+}
+
+/// Maps a `DownloadQueue::EEditAction` group edit action to its corresponding file edit action
+/// (`QueueEditor::EditGroup`).
+pub fn tpr_queue_editor_map_group_to_file_action(action: i32) -> i32 {
+    match action {
+        1 | 11 => 1,                  // eaFileMoveOffset / eaGroupMoveOffset -> eaFileMoveOffset
+        2 | 12 => 2,                  // eaFileMoveTop / eaGroupMoveTop -> eaFileMoveTop
+        3 | 13 => 3,                  // eaFileMoveBottom / eaGroupMoveBottom -> eaFileMoveBottom
+        4 | 16 => 4,                  // eaFilePause / eaGroupPause -> eaFilePause
+        5 | 17 => 5,                  // eaFileResume / eaGroupResume -> eaFileResume
+        6 | 18 | 19 | 20 | 21 => 6,   // eaFileDelete / eaGroup*Delete -> eaFileDelete
+        7 | 22 => 7,                  // eaFilePauseAllPars / eaGroupPauseAllPars -> eaFilePauseAllPars
+        8 | 23 => 8,                  // eaFilePauseExtraPars / eaGroupPauseExtraPars -> eaFilePauseExtraPars
+        9 => 9,                       // eaFileReorder
+        10 => 10,                     // eaFileSplit
+        _ => 0,
+    }
+}
+
+/// Resolves `(target_id, before, offset)` when moving groups relative to `target_id`
+/// (`QueueEditor::MoveGroupsTo`).
+pub fn tpr_queue_editor_resolve_move_groups_target(
+    target_id: i32,
+    queue_ids: &[i32],
+    moved_ids: &[i32],
+    before: bool,
+    max_id: i32,
+) -> (i32, bool, i32) {
+    if !moved_ids.contains(&target_id) {
+        return (target_id, before, 0);
+    }
+    let mut found = false;
+    for &qid in queue_ids {
+        if found {
+            if !moved_ids.contains(&qid) {
+                return (qid, true, 0);
+            }
+        } else if qid == target_id {
+            found = true;
+        }
+    }
+    (target_id, before, max_id)
+}
+
+/// Returns the byte length of `path` up to (and excluding) the last `sep` byte, or `path.len()`
+/// if `sep` does not appear (`ParChecker::AddDupeFiles`).
+pub fn tpr_parchecker_strip_last_path_sep_len(path: &[u8], sep: u8) -> usize {
+    path.iter().rposition(|&b| b == sep).unwrap_or(path.len())
+}
+
+/// Finds the next contiguous `[block_start, block_end]` inclusive run of non-zero entries
+/// in `valid_blocks` starting at `start_idx` (`ParChecker::VerifyPartialDataFile`).
+pub fn tpr_parchecker_next_valid_block_run(
+    valid_blocks: &[u8],
+    start_idx: usize,
+) -> Option<(usize, usize)> {
+    if start_idx >= valid_blocks.len() {
+        return None;
+    }
+    let rel_start = valid_blocks[start_idx..].iter().position(|&v| v != 0)?;
+    let block_start = start_idx + rel_start;
+    let rel_len = valid_blocks[block_start..]
+        .iter()
+        .position(|&v| v == 0)
+        .unwrap_or(valid_blocks.len() - block_start);
+    Some((block_start, block_start + rel_len - 1))
+}
+
+/// Evaluates whether a file is eligible for renamed RAR signature inspection
+/// (`UnpackController::CheckArchiveFiles`).
+pub fn tpr_unpack_ctrl_should_check_renamed_rar_sig(
+    has_renamed_archive_files: bool,
+    archive_kind: i32,
+    is_ignored_ext: bool,
+) -> bool {
+    !has_renamed_archive_files && (archive_kind == 0 || archive_kind == 6) && !is_ignored_ext
+}
+
+/// Evaluates whether an active unpack process should auto-terminate due to an error message
+/// (`UnpackController::AddMessage` and `DirectUnpack::AddMessage`).
+pub fn tpr_unpack_should_auto_stop_on_error(
+    is_stopped: bool,
+    decrypt_error: bool,
+    password_error: bool,
+    crc_or_volume_error: bool,
+) -> bool {
+    !is_stopped && (decrypt_error || password_error || crc_or_volume_error)
+}
+
+/// Returns the NUL-terminated `(wrong_type_verb, missing_dir_verb, start_msg_verb)` labels
+/// for `HistoryCoordinator::HistoryRetry`.
+pub fn tpr_history_coord_retry_action_labels(
+    reset_failed: bool,
+    reprocess: bool,
+) -> (&'static [u8], &'static [u8], &'static [u8]) {
+    let wrong_type = if reset_failed {
+        b"retry failed articles\0".as_slice()
+    } else {
+        b"download remaining files\0".as_slice()
+    };
+    let (missing_dir, start_msg) = if reset_failed {
+        (
+            b"retry failed articles for\0".as_slice(),
+            b"Retrying failed articles for\0".as_slice(),
+        )
+    } else if reprocess {
+        (
+            b"post-process again\0".as_slice(),
+            b"Post-processing again\0".as_slice(),
+        )
+    } else {
+        (
+            b"download remaining files for\0".as_slice(),
+            b"Downloading remaining files for\0".as_slice(),
+        )
+    };
+    (wrong_type, missing_dir, start_msg)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -987,5 +1117,59 @@ mod tests {
             (true, false)
         );
         assert_eq!(tpr_nzbfile_trim_sax_error_trailing(b"bad xml \r\n "), 7);
+
+        assert_eq!(
+            tpr_queue_editor_dedup_id_list(&[4, 2, 4, 1, 2, 3]),
+            vec![4, 2, 1, 3]
+        );
+        assert_eq!(tpr_queue_editor_map_group_to_file_action(16), 4);
+        assert_eq!(tpr_queue_editor_map_group_to_file_action(19), 6);
+        assert_eq!(tpr_queue_editor_map_group_to_file_action(25), 0);
+        assert_eq!(
+            tpr_queue_editor_resolve_move_groups_target(2, &[1, 2, 3, 4], &[2, 3], false, 999),
+            (4, true, 0)
+        );
+        assert_eq!(
+            tpr_queue_editor_resolve_move_groups_target(3, &[1, 2, 3], &[2, 3], false, 999),
+            (3, false, 999)
+        );
+        assert_eq!(
+            tpr_parchecker_strip_last_path_sep_len(b"/tmp/dir/file.par2", b'/'),
+            8
+        );
+        assert_eq!(tpr_parchecker_strip_last_path_sep_len(b"file.par2", b'/'), 9);
+        assert_eq!(
+            tpr_parchecker_next_valid_block_run(&[0, 1, 1, 0, 1], 0),
+            Some((1, 2))
+        );
+        assert_eq!(
+            tpr_parchecker_next_valid_block_run(&[0, 1, 1, 0, 1], 3),
+            Some((4, 4))
+        );
+        assert_eq!(tpr_parchecker_next_valid_block_run(&[0, 0], 0), None);
+        assert!(tpr_unpack_ctrl_should_check_renamed_rar_sig(false, 6, false));
+        assert!(!tpr_unpack_ctrl_should_check_renamed_rar_sig(true, 6, false));
+        assert!(tpr_unpack_should_auto_stop_on_error(
+            false, false, true, false
+        ));
+        assert!(!tpr_unpack_should_auto_stop_on_error(
+            true, false, true, false
+        ));
+        assert_eq!(
+            tpr_history_coord_retry_action_labels(true, false),
+            (
+                b"retry failed articles\0".as_slice(),
+                b"retry failed articles for\0".as_slice(),
+                b"Retrying failed articles for\0".as_slice(),
+            )
+        );
+        assert_eq!(
+            tpr_history_coord_retry_action_labels(false, true),
+            (
+                b"download remaining files\0".as_slice(),
+                b"post-process again\0".as_slice(),
+                b"Post-processing again\0".as_slice(),
+            )
+        );
     }
 }

@@ -429,7 +429,11 @@ void DirectUnpack::AddMessage(Message::EKind kind, const char* text)
 		m_extractedArchives.emplace_back(text + 23);
 	}
 
-	if (!IsStopped() && (info.decrypt_error != 0 || info.direct_password_error != 0 || info.crc_or_volume_error != 0))
+	if (nzbget_rs_tpr_unpack_should_auto_stop_on_error(
+		IsStopped() ? 1 : 0,
+		info.decrypt_error,
+		info.direct_password_error,
+		info.crc_or_volume_error) != 0)
 	{
 		Stop(downloadQueue, nzbInfo);
 	}

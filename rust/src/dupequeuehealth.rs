@@ -648,6 +648,126 @@ pub fn dqh_article_dl_is_server_available(
     active && max_connections != 0 && !(optional && is_blocked)
 }
 
+/// Deduplicates, sorts, and formats a comma-separated list of donor IDs
+/// (`QueueCoordinator::RejectBorrowedArticles`).
+pub fn dqh_queue_coord_format_donor_id_list(donor_ids: &[i32]) -> (Vec<i32>, Vec<u8>) {
+    let mut unique: Vec<i32> = donor_ids.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    let mut out = String::new();
+    for (i, id) in unique.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&id.to_string());
+    }
+    (unique, out.into_bytes())
+}
+
+/// Evaluates whether a completed file is an incomplete side file and whether it is
+/// eligible for stream repair job creation (`QueueCoordinator::DeleteFileInfo`).
+pub fn dqh_queue_coord_eval_completed_file_repair_eligibility(
+    completed: bool,
+    file_status: i32,
+    cf_partial: i32,
+    cf_failure: i32,
+    is_side_file: bool,
+) -> (bool, bool) {
+    let incomplete = completed && (file_status == cf_partial || file_status == cf_failure);
+    let side_file = incomplete && is_side_file;
+    let check_stream_repair = incomplete && !side_file;
+    (side_file, check_stream_repair)
+}
+
+/// Evaluates whether `other` is a size twin of `nzbInfo` (`QueueCoordinator::HasSizeTwin`).
+pub fn dqh_queue_coord_is_size_twin(
+    is_self: bool,
+    same_name_or_key: bool,
+    self_size: i64,
+    other_size: i64,
+    other_par_size: i64,
+    largest_self_file: i64,
+    other_file_sizes: &[i64],
+) -> bool {
+    if is_self || !same_name_or_key {
+        return false;
+    }
+    if crate::queuehotpath::size_near(self_size, other_size)
+        || (other_par_size > 0
+            && crate::queuehotpath::size_near(self_size, other_size - other_par_size))
+    {
+        return true;
+    }
+    other_file_sizes
+        .iter()
+        .any(|&fs| crate::queuehotpath::size_near(largest_self_file, fs))
+}
+
+/// Evaluates the entry guard for `QueueCoordinator::CheckDeadDownload`.
+#[allow(clippy::too_many_arguments)]
+pub fn dqh_queue_coord_can_check_dead_download(
+    health_check: i32,
+    hc_dupe: i32,
+    dupe_check: bool,
+    fails_over: bool,
+    kind: i32,
+    nk_nzb: i32,
+    deleting: bool,
+    parking: bool,
+    delete_status: i32,
+    ds_none: i32,
+) -> bool {
+    health_check == hc_dupe
+        && dupe_check
+        && fails_over
+        && kind == nk_nzb
+        && !deleting
+        && !parking
+        && delete_status == ds_none
+}
+
+/// Evaluates whether a queued item is an active unpaused duplicate of the current download
+/// (`QueueCoordinator::CheckParDamage`).
+pub fn dqh_queue_coord_is_active_unpaused_queued_dupe(
+    is_self: bool,
+    paused_size: i64,
+    remaining_size: i64,
+    same_name_or_key: bool,
+) -> bool {
+    !is_self && paused_size < remaining_size && same_name_or_key
+}
+
+/// Evaluates the entry guard for `QueueCoordinator::FailOverDeadPick`.
+pub fn dqh_queue_coord_can_fail_over_dead_pick(
+    has_nzb: bool,
+    deleting: bool,
+    parking: bool,
+    delete_status: i32,
+    ds_none: i32,
+) -> bool {
+    has_nzb && !deleting && !parking && delete_status == ds_none
+}
+
+/// Returns the NUL-terminated download state label (`"paused"`, `"temp-paused"`, or `"active"`)
+/// for `QueueCoordinator::LogDebugInfo`.
+pub fn dqh_queue_coord_download_debug_state_label(
+    pause_download: bool,
+    temp_pause_download: bool,
+) -> &'static [u8] {
+    if pause_download {
+        b"paused\0"
+    } else if temp_pause_download {
+        b"temp-paused\0"
+    } else {
+        b"active\0"
+    }
+}
+
+/// Converts a permille health value into percentage (`permille / 10.0`).
+pub fn dqh_prepost_permille_to_percent(permille: i32) -> f64 {
+    f64::from(permille) / 10.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -886,5 +1006,75 @@ mod tests {
         assert!(dqh_article_dl_is_server_available(true, 4, false, false));
         assert!(!dqh_article_dl_is_server_available(true, 0, false, false));
         assert!(!dqh_article_dl_is_server_available(true, 4, true, true));
+
+        let (uniq, formatted) = dqh_queue_coord_format_donor_id_list(&[12, 5, 12, 8]);
+        assert_eq!(uniq, vec![5, 8, 12]);
+        assert_eq!(formatted, b"5, 8, 12");
+        assert_eq!(
+            dqh_queue_coord_eval_completed_file_repair_eligibility(true, 2, 2, 3, true),
+            (true, false)
+        );
+        assert_eq!(
+            dqh_queue_coord_eval_completed_file_repair_eligibility(true, 2, 2, 3, false),
+            (false, true)
+        );
+        assert!(dqh_queue_coord_is_size_twin(
+            false,
+            true,
+            1_000_000,
+            1_100_000,
+            100_000,
+            500_000,
+            &[]
+        ));
+        assert!(dqh_queue_coord_is_size_twin(
+            false,
+            true,
+            1_000_000,
+            2_000_000,
+            0,
+            500_000,
+            &[100_000, 500_500]
+        ));
+        assert!(!dqh_queue_coord_is_size_twin(
+            true,
+            true,
+            1_000_000,
+            1_000_000,
+            0,
+            500_000,
+            &[]
+        ));
+        assert!(dqh_queue_coord_can_check_dead_download(
+            3, 3, true, true, 0, 0, false, false, 0, 0
+        ));
+        assert!(!dqh_queue_coord_can_check_dead_download(
+            3, 3, true, true, 0, 0, true, false, 0, 0
+        ));
+        assert!(dqh_queue_coord_is_active_unpaused_queued_dupe(
+            false, 100, 200, true
+        ));
+        assert!(!dqh_queue_coord_is_active_unpaused_queued_dupe(
+            false, 200, 200, true
+        ));
+        assert!(dqh_queue_coord_can_fail_over_dead_pick(
+            true, false, false, 0, 0
+        ));
+        assert!(!dqh_queue_coord_can_fail_over_dead_pick(
+            false, false, false, 0, 0
+        ));
+        assert_eq!(
+            dqh_queue_coord_download_debug_state_label(true, false),
+            b"paused\0"
+        );
+        assert_eq!(
+            dqh_queue_coord_download_debug_state_label(false, true),
+            b"temp-paused\0"
+        );
+        assert_eq!(
+            dqh_queue_coord_download_debug_state_label(false, false),
+            b"active\0"
+        );
+        assert_eq!(dqh_prepost_permille_to_percent(985), 98.5);
     }
 }

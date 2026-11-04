@@ -741,10 +741,17 @@ void HistoryCoordinator::HistoryProcess(DownloadQueue* downloadQueue, HistoryLis
 void HistoryCoordinator::HistoryRetry(DownloadQueue* downloadQueue, HistoryList::iterator itHistory,
 	HistoryInfo* historyInfo, bool resetFailed, bool reprocess)
 {
+	const char* wrongTypeVerb = nullptr;
+	const char* missingDirVerb = nullptr;
+	const char* startMsgVerb = nullptr;
+	nzbget_rs_tpr_history_coord_retry_action_labels(
+		resetFailed ? 1 : 0, reprocess ? 1 : 0,
+		&wrongTypeVerb, &missingDirVerb, &startMsgVerb);
+
 	if (historyInfo->GetKind() != HistoryInfo::hkNzb)
 	{
 		error("Could not %s for %s: history item has wrong type",
-			(resetFailed ? "retry failed articles" : "download remaining files"),
+			wrongTypeVerb,
 			historyInfo->GetName());
 		return;
 	}
@@ -754,13 +761,13 @@ void HistoryCoordinator::HistoryRetry(DownloadQueue* downloadQueue, HistoryList:
 	if (!FileSystem::DirectoryExists(nzbInfo->GetDestDir()))
 	{
 		error("Could not %s %s: destination directory %s doesn't exist",
-			(resetFailed ? "retry failed articles for" : reprocess ? "post-process again" : "download remaining files for"),
+			missingDirVerb,
 			historyInfo->GetName(), nzbInfo->GetDestDir());
 		return;
 	}
 
 	nzbInfo->PrintMessage(Message::mkInfo, "%s %s",
-		(resetFailed ? "Retrying failed articles for" : reprocess ? "Post-processing again" : "Downloading remaining files for"),
+		startMsgVerb,
 		nzbInfo->GetName());
 
 	// the files that download again: their repair jobs describe the old attempt

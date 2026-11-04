@@ -785,8 +785,11 @@ void UnpackController::CheckArchiveFiles()
 			{
 				m_hasSplittedFiles = true;
 			}
-			else if (!m_hasRenamedArchiveFiles && (archiveKind == 0 || archiveKind == 6) &&
-				!Util::MatchFileExt(filename, g_Options->GetUnpackIgnoreExt(), ",;") &&
+			else if (nzbget_rs_tpr_unpack_ctrl_should_check_renamed_rar_sig(
+				m_hasRenamedArchiveFiles ? 1 : 0,
+				archiveKind,
+				(!m_hasRenamedArchiveFiles && (archiveKind == 0 || archiveKind == 6) &&
+					Util::MatchFileExt(filename, g_Options->GetUnpackIgnoreExt(), ",;")) ? 1 : 0) != 0 &&
 				FileHasRarSignature(fullFilename))
 			{
 				m_hasRenamedArchiveFiles = true;
@@ -1012,7 +1015,11 @@ void UnpackController::AddMessage(Message::EKind kind, const char* text)
 		m_unpackPasswordError = true;
 	}
 
-	if (!IsStopped() && (m_unpackDecryptError || m_unpackPasswordError || info.crc_or_volume_error != 0))
+	if (nzbget_rs_tpr_unpack_should_auto_stop_on_error(
+		IsStopped() ? 1 : 0,
+		m_unpackDecryptError ? 1 : 0,
+		m_unpackPasswordError ? 1 : 0,
+		info.crc_or_volume_error) != 0)
 	{
 		if (m_postInfo && !WillRetryWithPass())
 		{

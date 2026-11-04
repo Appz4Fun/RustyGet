@@ -31709,6 +31709,332 @@ pub unsafe extern "C" fn nzbget_rs_tpr_nzbfile_trim_sax_error_in_place(buf: *mut
     }
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_queue_coord_format_donor_id_list(
+    donor_ids_ptr: *const i32,
+    len: usize,
+    out_unique_ids_ptr: *mut i32,
+    out_unique_len: *mut usize,
+) -> RsBuf {
+    let ids = if donor_ids_ptr.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(donor_ids_ptr, len)
+    };
+    let (uniq, formatted) = crate::dupequeuehealth::dqh_queue_coord_format_donor_id_list(ids);
+    if !out_unique_ids_ptr.is_null() && uniq.len() <= len {
+        std::ptr::copy_nonoverlapping(uniq.as_ptr(), out_unique_ids_ptr, uniq.len());
+    }
+    if !out_unique_len.is_null() {
+        *out_unique_len = uniq.len();
+    }
+    into_buf(formatted)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_queue_coord_eval_completed_file_repair_eligibility(
+    completed: i32,
+    file_status: i32,
+    cf_partial: i32,
+    cf_failure: i32,
+    is_side_file: i32,
+    out_side_file: *mut i32,
+    out_check_stream_repair: *mut i32,
+) {
+    let (side_file, check_stream_repair) =
+        crate::dupequeuehealth::dqh_queue_coord_eval_completed_file_repair_eligibility(
+            completed != 0,
+            file_status,
+            cf_partial,
+            cf_failure,
+            is_side_file != 0,
+        );
+    if !out_side_file.is_null() {
+        *out_side_file = if side_file { 1 } else { 0 };
+    }
+    if !out_check_stream_repair.is_null() {
+        *out_check_stream_repair = if check_stream_repair { 1 } else { 0 };
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_queue_coord_is_size_twin(
+    is_self: i32,
+    same_name_or_key: i32,
+    self_size: i64,
+    other_size: i64,
+    other_par_size: i64,
+    largest_self_file: i64,
+    other_file_sizes_ptr: *const i64,
+    other_file_sizes_len: usize,
+) -> i32 {
+    let other_files = if other_file_sizes_ptr.is_null() || other_file_sizes_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(other_file_sizes_ptr, other_file_sizes_len)
+    };
+    if crate::dupequeuehealth::dqh_queue_coord_is_size_twin(
+        is_self != 0,
+        same_name_or_key != 0,
+        self_size,
+        other_size,
+        other_par_size,
+        largest_self_file,
+        other_files,
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_queue_coord_can_check_dead_download(
+    health_check: i32,
+    hc_dupe: i32,
+    dupe_check: i32,
+    fails_over: i32,
+    kind: i32,
+    nk_nzb: i32,
+    deleting: i32,
+    parking: i32,
+    delete_status: i32,
+    ds_none: i32,
+) -> i32 {
+    if crate::dupequeuehealth::dqh_queue_coord_can_check_dead_download(
+        health_check,
+        hc_dupe,
+        dupe_check != 0,
+        fails_over != 0,
+        kind,
+        nk_nzb,
+        deleting != 0,
+        parking != 0,
+        delete_status,
+        ds_none,
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_queue_coord_is_active_unpaused_queued_dupe(
+    is_self: i32,
+    paused_size: i64,
+    remaining_size: i64,
+    same_name_or_key: i32,
+) -> i32 {
+    if crate::dupequeuehealth::dqh_queue_coord_is_active_unpaused_queued_dupe(
+        is_self != 0,
+        paused_size,
+        remaining_size,
+        same_name_or_key != 0,
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_queue_coord_can_fail_over_dead_pick(
+    has_nzb: i32,
+    deleting: i32,
+    parking: i32,
+    delete_status: i32,
+    ds_none: i32,
+) -> i32 {
+    if crate::dupequeuehealth::dqh_queue_coord_can_fail_over_dead_pick(
+        has_nzb != 0,
+        deleting != 0,
+        parking != 0,
+        delete_status,
+        ds_none,
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_queue_coord_download_debug_state_label(
+    pause_download: i32,
+    temp_pause_download: i32,
+) -> *const c_char {
+    crate::dupequeuehealth::dqh_queue_coord_download_debug_state_label(
+        pause_download != 0,
+        temp_pause_download != 0,
+    )
+    .as_ptr() as *const c_char
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_prepost_permille_to_percent(permille: i32) -> f64 {
+    crate::dupequeuehealth::dqh_prepost_permille_to_percent(permille)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_queue_editor_dedup_id_list(
+    ids_ptr: *const i32,
+    len: usize,
+    out_ids_ptr: *mut i32,
+) -> usize {
+    if ids_ptr.is_null() || len == 0 {
+        return 0;
+    }
+    let ids = std::slice::from_raw_parts(ids_ptr, len);
+    let uniq = crate::twinproberenhist::tpr_queue_editor_dedup_id_list(ids);
+    if !out_ids_ptr.is_null() && uniq.len() <= len {
+        std::ptr::copy_nonoverlapping(uniq.as_ptr(), out_ids_ptr, uniq.len());
+    }
+    uniq.len()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_queue_editor_map_group_to_file_action(action: i32) -> i32 {
+    crate::twinproberenhist::tpr_queue_editor_map_group_to_file_action(action)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_queue_editor_resolve_move_groups_target(
+    target_id: i32,
+    queue_ids_ptr: *const i32,
+    queue_len: usize,
+    moved_ids_ptr: *const i32,
+    moved_len: usize,
+    before: i32,
+    max_id: i32,
+    out_target_id: *mut i32,
+    out_before: *mut i32,
+    out_offset: *mut i32,
+) {
+    let queue_ids = if queue_ids_ptr.is_null() || queue_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(queue_ids_ptr, queue_len)
+    };
+    let moved_ids = if moved_ids_ptr.is_null() || moved_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(moved_ids_ptr, moved_len)
+    };
+    let (new_target, new_before, new_offset) =
+        crate::twinproberenhist::tpr_queue_editor_resolve_move_groups_target(
+            target_id,
+            queue_ids,
+            moved_ids,
+            before != 0,
+            max_id,
+        );
+    if !out_target_id.is_null() {
+        *out_target_id = new_target;
+    }
+    if !out_before.is_null() {
+        *out_before = if new_before { 1 } else { 0 };
+    }
+    if !out_offset.is_null() {
+        *out_offset = new_offset;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_parchecker_strip_last_path_sep_len(
+    path: *const c_char,
+    sep: c_char,
+) -> usize {
+    crate::twinproberenhist::tpr_parchecker_strip_last_path_sep_len(input(path), sep as u8)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_parchecker_next_valid_block_run(
+    valid_blocks_ptr: *const u8,
+    len: usize,
+    start_idx: usize,
+    out_block_start: *mut usize,
+    out_block_end: *mut usize,
+) -> i32 {
+    if valid_blocks_ptr.is_null() || len == 0 {
+        return 0;
+    }
+    let slice = std::slice::from_raw_parts(valid_blocks_ptr, len);
+    match crate::twinproberenhist::tpr_parchecker_next_valid_block_run(slice, start_idx) {
+        Some((b_start, b_end)) => {
+            if !out_block_start.is_null() {
+                *out_block_start = b_start;
+            }
+            if !out_block_end.is_null() {
+                *out_block_end = b_end;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_unpack_ctrl_should_check_renamed_rar_sig(
+    has_renamed_archive_files: i32,
+    archive_kind: i32,
+    is_ignored_ext: i32,
+) -> i32 {
+    if crate::twinproberenhist::tpr_unpack_ctrl_should_check_renamed_rar_sig(
+        has_renamed_archive_files != 0,
+        archive_kind,
+        is_ignored_ext != 0,
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_unpack_should_auto_stop_on_error(
+    is_stopped: i32,
+    decrypt_error: i32,
+    password_error: i32,
+    crc_or_volume_error: i32,
+) -> i32 {
+    if crate::twinproberenhist::tpr_unpack_should_auto_stop_on_error(
+        is_stopped != 0,
+        decrypt_error != 0,
+        password_error != 0,
+        crc_or_volume_error != 0,
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_history_coord_retry_action_labels(
+    reset_failed: i32,
+    reprocess: i32,
+    out_wrong_type_verb: *mut *const c_char,
+    out_missing_dir_verb: *mut *const c_char,
+    out_start_msg_verb: *mut *const c_char,
+) {
+    let (wrong_type, missing_dir, start_msg) =
+        crate::twinproberenhist::tpr_history_coord_retry_action_labels(
+            reset_failed != 0,
+            reprocess != 0,
+        );
+    if !out_wrong_type_verb.is_null() {
+        *out_wrong_type_verb = wrong_type.as_ptr() as *const c_char;
+    }
+    if !out_missing_dir_verb.is_null() {
+        *out_missing_dir_verb = missing_dir.as_ptr() as *const c_char;
+    }
+    if !out_start_msg_verb.is_null() {
+        *out_start_msg_verb = start_msg.as_ptr() as *const c_char;
+    }
+}
+
+
 
 
 

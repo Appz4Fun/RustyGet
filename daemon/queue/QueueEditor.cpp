@@ -278,13 +278,12 @@ bool QueueEditor::InternEditList(ItemList* itemList,
 	IdList uniqueIds;
 	if (idList)
 	{
-		for (int id : *idList)
-		{
-			if (std::find(uniqueIds.begin(), uniqueIds.end(), id) == uniqueIds.end())
-			{
-				uniqueIds.push_back(id);
-			}
-		}
+		uniqueIds.resize(idList->size(), 0);
+		size_t uniqueLen = nzbget_rs_tpr_queue_editor_dedup_id_list(
+			idList->empty() ? nullptr : idList->data(),
+			idList->size(),
+			uniqueIds.empty() ? nullptr : uniqueIds.data());
+		uniqueIds.resize(uniqueLen);
 		idList = &uniqueIds;
 	}
 
@@ -644,37 +643,9 @@ bool QueueEditor::EditGroup(NzbInfo* nzbInfo, DownloadQueue::EEditAction action,
 		nzbInfo->SetCleanupDisk(cleanupDisk != 0);
 	}
 
-	DownloadQueue::EEditAction GroupToFileMap[] = {
-		(DownloadQueue::EEditAction)0,
-		DownloadQueue::eaFileMoveOffset,
-		DownloadQueue::eaFileMoveTop,
-		DownloadQueue::eaFileMoveBottom,
-		DownloadQueue::eaFilePause,
-		DownloadQueue::eaFileResume,
-		DownloadQueue::eaFileDelete,
-		DownloadQueue::eaFilePauseAllPars,
-		DownloadQueue::eaFilePauseExtraPars,
-		DownloadQueue::eaFileReorder,
-		DownloadQueue::eaFileSplit,
-		DownloadQueue::eaFileMoveOffset,
-		DownloadQueue::eaFileMoveTop,
-		DownloadQueue::eaFileMoveBottom,
-		(DownloadQueue::EEditAction)0,
-		(DownloadQueue::EEditAction)0,
-		DownloadQueue::eaFilePause,
-		DownloadQueue::eaFileResume,
-		DownloadQueue::eaFileDelete,
-		DownloadQueue::eaFileDelete,
-		DownloadQueue::eaFileDelete,
-		DownloadQueue::eaFileDelete,
-		DownloadQueue::eaFilePauseAllPars,
-		DownloadQueue::eaFilePauseExtraPars,
-		(DownloadQueue::EEditAction)0,
-		(DownloadQueue::EEditAction)0,
-		(DownloadQueue::EEditAction)0,
-		(DownloadQueue::EEditAction)0 };
-
-	bool ok = InternEditList(&itemList, nullptr, GroupToFileMap[action], args);
+	DownloadQueue::EEditAction fileAction =
+		(DownloadQueue::EEditAction)nzbget_rs_tpr_queue_editor_map_group_to_file_action((int32_t)action);
+	bool ok = InternEditList(&itemList, nullptr, fileAction, args);
 
 	if (isGroupDel &&
 		// NZBInfo could have been destroyed already
@@ -980,33 +951,33 @@ bool QueueEditor::MoveGroupsTo(ItemList* itemList, IdList* idList, bool before, 
 	// check if target is in list of moved items
 	if (ItemListContainsItem(itemList, targetId))
 	{
-		// find the next item to use as target-before
-		bool found = false;
-		bool targetSet = false;
-
+		std::vector<int32_t> queueIds;
+		queueIds.reserve(m_downloadQueue->GetQueue()->size());
 		for (NzbInfo* nzbInfo : m_downloadQueue->GetQueue())
 		{
-			if (found)
-			{
-				if (!ItemListContainsItem(itemList, nzbInfo->GetId()))
-				{
-					targetId = nzbInfo->GetId();
-					before = true;
-					targetSet = true;
-					break;
-				}
-			}
-			else if (targetId == nzbInfo->GetId())
-			{
-				found = true;
-			}
+			queueIds.push_back(nzbInfo->GetId());
 		}
-
-		if (!targetSet)
+		std::vector<int32_t> movedIds;
+		movedIds.reserve(itemList->size());
+		for (const EditItem& item : *itemList)
 		{
-			// there are no next item; move to the bottom then
-			offset = MAX_ID;
+			movedIds.push_back(item.m_nzbInfo->GetId());
 		}
+		int32_t newTargetId = targetId, newBefore = before ? 1 : 0, newOffset = offset;
+		nzbget_rs_tpr_queue_editor_resolve_move_groups_target(
+			targetId,
+			queueIds.empty() ? nullptr : queueIds.data(),
+			queueIds.size(),
+			movedIds.empty() ? nullptr : movedIds.data(),
+			movedIds.size(),
+			before ? 1 : 0,
+			MAX_ID,
+			&newTargetId,
+			&newBefore,
+			&newOffset);
+		targetId = newTargetId;
+		before = newBefore != 0;
+		offset = newOffset;
 	}
 
 	AlignGroups(itemList);

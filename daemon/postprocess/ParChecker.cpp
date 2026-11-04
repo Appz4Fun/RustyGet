@@ -881,11 +881,10 @@ bool ParChecker::AddMissingFiles()
 bool ParChecker::AddDupeFiles()
 {
 	// the folder of the par2 file, not the file itself (which is no folder to scan)
-	BString<1024> directory = m_parFilename.c_str();
-	if (char* slash = strrchr(directory, PATH_SEPARATOR))
-	{
-		*slash = '\0';
-	}
+	BString<1024> directory;
+	size_t dirLen = nzbget_rs_tpr_parchecker_strip_last_path_sep_len(
+		m_parFilename.c_str(), PATH_SEPARATOR);
+	directory.Set(m_parFilename.c_str(), (int)dirLen);
 
 	bool added = AddExtraFiles(false, false, directory);
 
@@ -1431,49 +1430,49 @@ bool ParChecker::VerifyPartialDataFile(Par2::DiskFile&, Par2::Par2RepairerSource
 	//   overlap - read a little bit of data from the file and calculate its CRC;
 	// - compare two CRCs - they must match; if not - the file is more damaged than we thought -
 	//   let libpar2 do the full verification of the file in this case.
-	uint32 parCrc = 0;
-	int blockStart = -1;
-	validBlocks.push_back(false); // end marker
+	std::vector<uint8_t> validBlockFlags(validBlocks.size(), 0);
 	for (size_t i = 0; i < validBlocks.size(); ++i)
 	{
-		bool validBlock = validBlocks[i];
-		if (validBlock)
+		validBlockFlags[i] = validBlocks[i] ? 1 : 0;
+	}
+	size_t searchIdx = 0;
+	size_t runStart = 0, runEnd = 0;
+	while (nzbget_rs_tpr_parchecker_next_valid_block_run(
+		validBlockFlags.empty() ? nullptr : validBlockFlags.data(),
+		validBlockFlags.size(),
+		searchIdx,
+		&runStart,
+		&runEnd) != 0)
+	{
+		uint32 parCrc = 0;
+		for (size_t i = runStart; i <= runEnd; ++i)
 		{
-			if (blockStart == -1)
-			{
-				blockStart = i;
-			}
 			const Par2::FILEVERIFICATIONENTRY* entry = packet->VerificationEntry(i);
 			Par2::u32 blockCrc = entry->crc;
-			parCrc = blockStart == i ? blockCrc : Crc32::Combine(parCrc, blockCrc, (uint32)blocksize);
+			parCrc = i == runStart ? blockCrc : Crc32::Combine(parCrc, blockCrc, (uint32)blocksize);
 		}
-		else
+		int blockStart = (int)runStart;
+		int blockEnd = (int)runEnd;
+		int64 bytesStart = 0;
+		int64 bytesEnd = 0;
+		int64 clampedEnd = 0;
+		size_t padLen = 0;
+		nzbget_rs_psp_parchecker_calc_block_byte_range(
+			blockStart, blockEnd, blocksize, fileSize,
+			&bytesStart, &bytesEnd, &clampedEnd, &padLen);
+		uint32 downloadCrc = 0;
+		bool ok = SmartCalcFileRangeCrc(infile, bytesStart, clampedEnd, segments, downloadCrc);
+		if (ok && padLen > 0)
 		{
-			if (blockStart > -1)
-			{
-				int blockEnd = i - 1;
-				int64 bytesStart = 0;
-				int64 bytesEnd = 0;
-				int64 clampedEnd = 0;
-				size_t padLen = 0;
-				nzbget_rs_psp_parchecker_calc_block_byte_range(
-					blockStart, blockEnd, blocksize, fileSize,
-					&bytesStart, &bytesEnd, &clampedEnd, &padLen);
-				uint32 downloadCrc = 0;
-				bool ok = SmartCalcFileRangeCrc(infile, bytesStart, clampedEnd, segments, downloadCrc);
-				if (ok && padLen > 0)
-				{
-					downloadCrc = Par2::CRCUpdateBlock(downloadCrc ^ 0xFFFFFFFF, padLen) ^ 0xFFFFFFFF;
-				}
-
-				if (!ok || downloadCrc != parCrc)
-				{
-					infile.Close();
-					return false;
-				}
-			}
-			blockStart = -1;
+			downloadCrc = Par2::CRCUpdateBlock(downloadCrc ^ 0xFFFFFFFF, padLen) ^ 0xFFFFFFFF;
 		}
+
+		if (!ok || downloadCrc != parCrc)
+		{
+			infile.Close();
+			return false;
+		}
+		searchIdx = runEnd + 1;
 	}
 
 	infile.Close();

@@ -79,6 +79,7 @@ pub mod scriptfeedcfg;
 pub mod schedfrontweb;
 pub mod rpcoptlogutil;
 pub mod utilfsscript;
+pub mod dlparstatedisk;
 
 pub mod deadpostings;
 pub mod dupewatch;

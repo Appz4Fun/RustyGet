@@ -3642,6 +3642,65 @@ int nzbget_rs_ufs_script_config_same_cipher_file(
     int64_t a_csec, int64_t b_csec, int64_t a_cnsec, int64_t b_cnsec);
 int nzbget_rs_ufs_script_config_is_valid_cipher_size(int is_reg, int64_t size);
 
+// DownloadInfo, ParChecker & DiskState Hot-Path C ABI (rust/src/dlparstatedisk.rs)
+typedef struct NzbgetRsDpsCurrentStatsAcc {
+    int64_t remaining_size;
+    int64_t current_success_size;
+    int64_t current_failed_size;
+    int64_t paused_size;
+    int64_t par_current_success_size;
+    int64_t par_current_failed_size;
+    int32_t current_success_articles;
+    int32_t current_failed_articles;
+    int32_t extra_priority;
+    int32_t paused_file_count;
+    int32_t remaining_par_count;
+    int32_t _pad;
+} NzbgetRsDpsCurrentStatsAcc;
+
+int nzbget_rs_dps_dl_info_update_max_id(int id, int id_max);
+void nzbget_rs_dps_dl_info_reset_gen_id(
+    int max, int id_max, int* out_id_gen, int* out_id_max);
+void nzbget_rs_dps_dl_info_update_current_stats_step(
+    NzbgetRsDpsCurrentStatsAcc* acc, int64_t file_remaining_size,
+    int32_t file_success_articles, int32_t file_failed_articles,
+    int64_t file_success_size, int64_t file_failed_size,
+    int file_extra_priority, int file_paused, int file_par_file);
+void nzbget_rs_dps_dl_queue_calc_remaining_size_step(
+    int paused, int deleted, int force_priority, int64_t file_remaining_size,
+    int64_t remaining_size, int64_t remaining_forced_size,
+    int64_t* out_remaining_size, int64_t* out_remaining_forced_size);
+int nzbget_rs_dps_parchecker_should_quick_verify(
+    int stage, int pt_verifying_repaired, int par_full);
+int nzbget_rs_dps_parchecker_calc_files_to_repair(
+    uint32_t damaged_count, uint32_t missing_count);
+int nzbget_rs_dps_parchecker_classify_twin_repair_err(
+    int res, int e_repair_not_possible, int own_err_empty);
+int nzbget_rs_dps_parchecker_update_damaged_flag(int has_damaged, int ignore);
+int nzbget_rs_dps_parchecker_is_verify_hash_mismatch(
+    int has_hash_entry, int same_source_file, int is_already_set);
+uint64_t nzbget_rs_dps_parchecker_calc_block_offset(
+    uint32_t block_idx, uint64_t block_size);
+int nzbget_rs_dps_diskstate_inspect_read_line(
+    const char* buf, int* out_needs_scroll, size_t* out_new_len);
+int nzbget_rs_dps_diskstate_check_queue_format_version(
+    int format_version, int queue_version,
+    int* out_is_legacy, int* out_load_inline_history);
+int nzbget_rs_dps_diskstate_validate_bounded_count(
+    int scan_cnt, int count, int max_count);
+size_t nzbget_rs_dps_diskstate_extracted_archives_prefix_len(const char* s);
+int nzbget_rs_dps_diskstate_calc_persisted_post_stage(int has_post_info, int stage);
+int nzbget_rs_dps_diskstate_classify_param_header_items(int num_items);
+int nzbget_rs_dps_diskstate_parse_legacy_file_state_trailer(
+    const char* line, int64_t* out_decoded_size, int* out_output_initialized);
+int nzbget_rs_dps_diskstate_feed_status_matches(
+    const char* feed_url, const char* url, int format_version,
+    const char* feed_filter, const char* filter,
+    uint32_t feed_filter_hash, uint32_t filter_hash);
+int nzbget_rs_dps_diskstate_hibernate_header_matches(
+    int scan_cnt, int scanned_size, int expected_file_count);
+int64_t nzbget_rs_dps_diskstate_calc_first_day_reset_time(int first_day);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

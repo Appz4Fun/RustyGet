@@ -179,14 +179,23 @@ void ServerStatList::ListOp(ServerStatList* serverStats, EStatOperation statOper
 void NzbInfo::SetId(int id)
 {
 	m_id = id;
+#ifdef NZBGET_USE_RUST
+	m_idMax = nzbget_rs_dps_dl_info_update_max_id(m_id, m_idMax);
+#else
 	if (m_idMax < m_id)
 	{
 		m_idMax = m_id;
 	}
+#endif
 }
 
 void NzbInfo::ResetGenId(bool max)
 {
+#ifdef NZBGET_USE_RUST
+	int idGen = 0;
+	nzbget_rs_dps_dl_info_reset_gen_id(max ? 1 : 0, m_idMax, &idGen, &m_idMax);
+	m_idGen = idGen;
+#else
 	if (max)
 	{
 		m_idGen = m_idMax;
@@ -196,6 +205,7 @@ void NzbInfo::ResetGenId(bool max)
 		m_idGen = 0;
 		m_idMax = 0;
 	}
+#endif
 }
 
 int NzbInfo::GenerateId()
@@ -869,6 +879,43 @@ void NzbInfo::UpdateCurrentStats()
 
 	for (FileInfo* fileInfo : &m_fileList)
 	{
+#ifdef NZBGET_USE_RUST
+		NzbgetRsDpsCurrentStatsAcc acc{
+			m_remainingSize,
+			m_currentSuccessSize,
+			m_currentFailedSize,
+			m_pausedSize,
+			m_parCurrentSuccessSize,
+			m_parCurrentFailedSize,
+			m_currentSuccessArticles,
+			m_currentFailedArticles,
+			m_extraPriority,
+			m_pausedFileCount,
+			m_remainingParCount,
+			0
+		};
+		nzbget_rs_dps_dl_info_update_current_stats_step(
+			&acc,
+			fileInfo->GetRemainingSize(),
+			fileInfo->GetSuccessArticles(),
+			fileInfo->GetFailedArticles(),
+			fileInfo->GetSuccessSize(),
+			fileInfo->GetFailedSize(),
+			fileInfo->GetExtraPriority() ? 1 : 0,
+			fileInfo->GetPaused() ? 1 : 0,
+			fileInfo->GetParFile() ? 1 : 0);
+		m_remainingSize = acc.remaining_size;
+		m_currentSuccessArticles = acc.current_success_articles;
+		m_currentFailedArticles = acc.current_failed_articles;
+		m_currentSuccessSize = acc.current_success_size;
+		m_currentFailedSize = acc.current_failed_size;
+		m_extraPriority = acc.extra_priority;
+		m_pausedFileCount = acc.paused_file_count;
+		m_pausedSize = acc.paused_size;
+		m_remainingParCount = acc.remaining_par_count;
+		m_parCurrentSuccessSize = acc.par_current_success_size;
+		m_parCurrentFailedSize = acc.par_current_failed_size;
+#else
 		m_remainingSize += fileInfo->GetRemainingSize();
 		m_currentSuccessArticles += fileInfo->GetSuccessArticles();
 		m_currentFailedArticles += fileInfo->GetFailedArticles();
@@ -887,6 +934,7 @@ void NzbInfo::UpdateCurrentStats()
 			m_parCurrentSuccessSize += fileInfo->GetSuccessSize();
 			m_parCurrentFailedSize += fileInfo->GetFailedSize();
 		}
+#endif
 
 		m_currentServerStats.ListOp(fileInfo->GetServerStats(), ServerStatList::soAdd);
 	}
@@ -1042,14 +1090,23 @@ void ArticleInfo::DiscardSegment()
 void FileInfo::SetId(int id)
 {
 	m_id = id;
+#ifdef NZBGET_USE_RUST
+	m_idMax = nzbget_rs_dps_dl_info_update_max_id(m_id, m_idMax);
+#else
 	if (m_idMax < m_id)
 	{
 		m_idMax = m_id;
 	}
+#endif
 }
 
 void FileInfo::ResetGenId(bool max)
 {
+#ifdef NZBGET_USE_RUST
+	int idGen = 0;
+	nzbget_rs_dps_dl_info_reset_gen_id(max ? 1 : 0, m_idMax, &idGen, &m_idMax);
+	m_idGen = idGen;
+#else
 	if (max)
 	{
 		m_idGen = m_idMax;
@@ -1059,6 +1116,7 @@ void FileInfo::ResetGenId(bool max)
 		m_idGen = 0;
 		m_idMax = 0;
 	}
+#endif
 }
 
 void FileInfo::SetPaused(bool paused)
@@ -1147,10 +1205,14 @@ CompletedFile::CompletedFile(int id, std::string filename, std::string origname,
 	, m_hash16k(std::move(hash16k))
 	, m_parSetId(std::move(parSetId))
 {
+#ifdef NZBGET_USE_RUST
+	FileInfo::m_idMax = nzbget_rs_dps_dl_info_update_max_id(m_id, FileInfo::m_idMax);
+#else
 	if (FileInfo::m_idMax < m_id)
 	{
 		FileInfo::m_idMax = m_id;
 	}
+#endif
 }
 
 bool CompletedFile::SameFilename(const char* name) const
@@ -1177,10 +1239,14 @@ bool CompletedFile::SameFilename(const char* name) const
 void DupInfo::SetId(int id)
 {
 	m_id = id;
+#ifdef NZBGET_USE_RUST
+	NzbInfo::m_idMax = nzbget_rs_dps_dl_info_update_max_id(m_id, NzbInfo::m_idMax);
+#else
 	if (NzbInfo::m_idMax < m_id)
 	{
 		NzbInfo::m_idMax = m_id;
 	}
+#endif
 }
 
 
@@ -1234,6 +1300,17 @@ void DownloadQueue::CalcRemainingSize(int64* remaining, int64* remainingForced)
 	{
 		for (FileInfo* fileInfo : nzbInfo->GetFileList())
 		{
+#ifdef NZBGET_USE_RUST
+			nzbget_rs_dps_dl_queue_calc_remaining_size_step(
+				fileInfo->GetPaused() ? 1 : 0,
+				fileInfo->GetDeleted() ? 1 : 0,
+				nzbInfo->GetForcePriority() ? 1 : 0,
+				fileInfo->GetRemainingSize(),
+				remainingSize,
+				remainingForcedSize,
+				&remainingSize,
+				&remainingForcedSize);
+#else
 			if (!fileInfo->GetPaused() && !fileInfo->GetDeleted())
 			{
 				remainingSize += fileInfo->GetRemainingSize();
@@ -1242,6 +1319,7 @@ void DownloadQueue::CalcRemainingSize(int64* remaining, int64* remainingForced)
 					remainingForcedSize += fileInfo->GetRemainingSize();
 				}
 			}
+#endif
 		}
 	}
 

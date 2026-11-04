@@ -197,7 +197,12 @@ bool Repairer::ScanDataFile(
 
 		SigFilename(name);
 
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_dps_parchecker_should_quick_verify(
+			(int)m_owner->GetStage(), (int)ParChecker::ptVerifyingRepaired, m_owner->GetParFull() ? 1 : 0) != 0)
+#else
 		if (!(m_owner->GetStage() == ParChecker::ptVerifyingRepaired && m_owner->GetParFull()))
+#endif
 		{
 			int availableBlocks = static_cast<int>(sourcefile->BlockCount());
 			ParChecker::EFileStatus fileStatus = m_owner->VerifyDataFile(*diskfile, *sourcefile, availableBlocks);
@@ -533,7 +538,12 @@ ParChecker::EStatus ParChecker::RunParCheck(std::string parFilename)
 		m_stageProgress = 0;
 		m_processedCount = 0;
 		m_stage = ptRepairing;
+#ifdef NZBGET_USE_RUST
+		m_filesToRepair = nzbget_rs_dps_parchecker_calc_files_to_repair(
+			GetRepairer()->damagedfilecount, GetRepairer()->missingfilecount);
+#else
 		m_filesToRepair = static_cast<int>(GetRepairer()->damagedfilecount + GetRepairer()->missingfilecount);
+#endif
 		UpdateProgress();
 
 		res = GetRepairer()->Process(true);
@@ -924,10 +934,23 @@ int ParChecker::ProcessTwinSet()
 		}
 	}
 
+#ifdef NZBGET_USE_RUST
+	int twinErrAction = nzbget_rs_dps_parchecker_classify_twin_repair_err(
+		(int)res, (int)Par2::eRepairNotPossible, ownErrMsg.empty() ? 1 : 0);
+	if (twinErrAction == 1)
+	{
+		m_errMsg = "not enough par-blocks, the twin's included";
+	}
+	else if (twinErrAction == 2)
+	{
+		m_errMsg = ownErrMsg + "; the twin's didn't do either";
+	}
+#else
 	if (res == Par2::eRepairNotPossible)
 	{
 		m_errMsg = ownErrMsg.empty() ? "not enough par-blocks, the twin's included" : ownErrMsg + "; the twin's didn't do either";
 	}
+#endif
 	return res;
 }
 
@@ -1523,7 +1546,12 @@ void ParChecker::CheckEmptyFiles()
 			if (!filenameObj.empty() && !IsProcessedFile(filenameObj.c_str()))
 			{
 				bool ignore = Util::MatchFileExt(filenameObj.c_str(), g_Options->GetParIgnoreExt(), ",;");
+#ifdef NZBGET_USE_RUST
+				m_hasDamagedFiles = nzbget_rs_dps_parchecker_update_damaged_flag(
+					m_hasDamagedFiles ? 1 : 0, ignore ? 1 : 0) != 0;
+#else
 				m_hasDamagedFiles |= !ignore;
+#endif
 
 				uint32_t total = sourcefile->GetVerificationPacket() ? sourcefile->GetVerificationPacket()->BlockCount() : 0;
 				PrintMessage(Message::mkWarning, "File %s has %u bad block(s) of total %u block(s)%s",
@@ -1706,7 +1734,14 @@ ParChecker::EFileStatus ParChecker::VerifyDataFile(Par2::DiskFile& diskFile, Par
 
 			// Look for a match
 			const Par2::VerificationHashEntry* hashEntry = GetRepairer()->verificationhashtable.Lookup(blockCrc);
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_dps_parchecker_is_verify_hash_mismatch(
+				hashEntry ? 1 : 0,
+				(hashEntry && hashEntry->SourceFile() == &sourceFile) ? 1 : 0,
+				(hashEntry && hashEntry->IsSet()) ? 1 : 0) != 0)
+#else
 			if (!hashEntry || hashEntry->SourceFile() != &sourceFile || hashEntry->IsSet())
+#endif
 			{
 				// no match found, revert back the changes made by "pHashEntry->SetBlock"
 				for (const Par2::VerificationHashEntry* undoEntry : undoList)
@@ -1717,7 +1752,11 @@ ParChecker::EFileStatus ParChecker::VerifyDataFile(Par2::DiskFile& diskFile, Par
 			}
 
 			undoList.push_back(hashEntry);
+#ifdef NZBGET_USE_RUST
+			hashEntry->SetBlock(&diskFile, nzbget_rs_dps_parchecker_calc_block_offset(i, blocksize));
+#else
 			hashEntry->SetBlock(&diskFile, i * blocksize);
+#endif
 			++availableBlocks;
 		}
 	}

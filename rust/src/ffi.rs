@@ -23359,6 +23359,279 @@ pub extern "C" fn nzbget_rs_ufs_script_config_is_valid_cipher_size(
     crate::utilfsscript::script_config_is_valid_cipher_size(is_reg, size)
 }
 
+// ============================================================================
+// DownloadInfo, ParChecker & DiskState Hot-Path FFI (`rust/src/dlparstatedisk.rs`)
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dps_dl_info_update_max_id(id: c_int, id_max: c_int) -> c_int {
+    crate::dlparstatedisk::dl_info_update_max_id(id, id_max)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dps_dl_info_reset_gen_id(
+    max: c_int,
+    id_max: c_int,
+    out_id_gen: *mut c_int,
+    out_id_max: *mut c_int,
+) {
+    let (gen, mx) = crate::dlparstatedisk::dl_info_reset_gen_id(max, id_max);
+    if !out_id_gen.is_null() {
+        *out_id_gen = gen;
+    }
+    if !out_id_max.is_null() {
+        *out_id_max = mx;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dps_dl_info_update_current_stats_step(
+    acc: *mut crate::dlparstatedisk::NzbgetRsDpsCurrentStatsAcc,
+    file_remaining_size: i64,
+    file_success_articles: i32,
+    file_failed_articles: i32,
+    file_success_size: i64,
+    file_failed_size: i64,
+    file_extra_priority: c_int,
+    file_paused: c_int,
+    file_par_file: c_int,
+) {
+    if !acc.is_null() {
+        crate::dlparstatedisk::dl_info_update_current_stats_step(
+            &mut *acc,
+            file_remaining_size,
+            file_success_articles,
+            file_failed_articles,
+            file_success_size,
+            file_failed_size,
+            file_extra_priority,
+            file_paused,
+            file_par_file,
+        );
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dps_dl_queue_calc_remaining_size_step(
+    paused: c_int,
+    deleted: c_int,
+    force_priority: c_int,
+    file_remaining_size: i64,
+    remaining_size: i64,
+    remaining_forced_size: i64,
+    out_remaining_size: *mut i64,
+    out_remaining_forced_size: *mut i64,
+) {
+    let (rem, forced) = crate::dlparstatedisk::dl_queue_calc_remaining_size_step(
+        paused,
+        deleted,
+        force_priority,
+        file_remaining_size,
+        remaining_size,
+        remaining_forced_size,
+    );
+    if !out_remaining_size.is_null() {
+        *out_remaining_size = rem;
+    }
+    if !out_remaining_forced_size.is_null() {
+        *out_remaining_forced_size = forced;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dps_parchecker_should_quick_verify(
+    stage: c_int,
+    pt_verifying_repaired: c_int,
+    par_full: c_int,
+) -> c_int {
+    crate::dlparstatedisk::parchecker_should_quick_verify(stage, pt_verifying_repaired, par_full)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dps_parchecker_calc_files_to_repair(
+    damaged_count: u32,
+    missing_count: u32,
+) -> c_int {
+    crate::dlparstatedisk::parchecker_calc_files_to_repair(damaged_count, missing_count)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dps_parchecker_classify_twin_repair_err(
+    res: c_int,
+    e_repair_not_possible: c_int,
+    own_err_empty: c_int,
+) -> c_int {
+    crate::dlparstatedisk::parchecker_classify_twin_repair_err(
+        res,
+        e_repair_not_possible,
+        own_err_empty,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dps_parchecker_update_damaged_flag(
+    has_damaged: c_int,
+    ignore: c_int,
+) -> c_int {
+    crate::dlparstatedisk::parchecker_update_damaged_flag(has_damaged, ignore)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dps_parchecker_is_verify_hash_mismatch(
+    has_hash_entry: c_int,
+    same_source_file: c_int,
+    is_already_set: c_int,
+) -> c_int {
+    crate::dlparstatedisk::parchecker_is_verify_hash_mismatch(
+        has_hash_entry,
+        same_source_file,
+        is_already_set,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dps_parchecker_calc_block_offset(
+    block_idx: u32,
+    block_size: u64,
+) -> u64 {
+    crate::dlparstatedisk::parchecker_calc_block_offset(block_idx, block_size)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dps_diskstate_inspect_read_line(
+    buf: *const c_char,
+    out_needs_scroll: *mut c_int,
+    out_new_len: *mut usize,
+) -> c_int {
+    let bytes = crate::queuehotpath::cstr_to_bytes(buf);
+    if bytes.is_empty() {
+        if !out_needs_scroll.is_null() {
+            *out_needs_scroll = 0;
+        }
+        if !out_new_len.is_null() {
+            *out_new_len = 0;
+        }
+        0
+    } else {
+        let (needs_scroll, new_len) = crate::dlparstatedisk::diskstate_inspect_read_line(bytes);
+        if !out_needs_scroll.is_null() {
+            *out_needs_scroll = needs_scroll as c_int;
+        }
+        if !out_new_len.is_null() {
+            *out_new_len = new_len;
+        }
+        1
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dps_diskstate_check_queue_format_version(
+    format_version: c_int,
+    queue_version: c_int,
+    out_is_legacy: *mut c_int,
+    out_load_inline_history: *mut c_int,
+) -> c_int {
+    let (status, is_legacy, load_inline_history) =
+        crate::dlparstatedisk::diskstate_check_queue_format_version(format_version, queue_version);
+    if !out_is_legacy.is_null() {
+        *out_is_legacy = is_legacy as c_int;
+    }
+    if !out_load_inline_history.is_null() {
+        *out_load_inline_history = load_inline_history as c_int;
+    }
+    status
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dps_diskstate_validate_bounded_count(
+    scan_cnt: c_int,
+    count: c_int,
+    max_count: c_int,
+) -> c_int {
+    crate::dlparstatedisk::diskstate_validate_bounded_count(scan_cnt, count, max_count)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dps_diskstate_extracted_archives_prefix_len(
+    s: *const c_char,
+) -> usize {
+    crate::dlparstatedisk::diskstate_extracted_archives_prefix_len(
+        crate::queuehotpath::cstr_to_bytes(s),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dps_diskstate_calc_persisted_post_stage(
+    has_post_info: c_int,
+    stage: c_int,
+) -> c_int {
+    crate::dlparstatedisk::diskstate_calc_persisted_post_stage(has_post_info, stage)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dps_diskstate_classify_param_header_items(
+    num_items: c_int,
+) -> c_int {
+    crate::dlparstatedisk::diskstate_classify_param_header_items(num_items)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dps_diskstate_parse_legacy_file_state_trailer(
+    line: *const c_char,
+    out_decoded_size: *mut i64,
+    out_output_initialized: *mut c_int,
+) -> c_int {
+    let (kind, decoded, init) = crate::dlparstatedisk::diskstate_parse_legacy_file_state_trailer(
+        crate::queuehotpath::cstr_to_bytes(line),
+    );
+    if !out_decoded_size.is_null() {
+        *out_decoded_size = decoded;
+    }
+    if !out_output_initialized.is_null() {
+        *out_output_initialized = init;
+    }
+    kind
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dps_diskstate_feed_status_matches(
+    feed_url: *const c_char,
+    url: *const c_char,
+    format_version: c_int,
+    feed_filter: *const c_char,
+    filter: *const c_char,
+    feed_filter_hash: u32,
+    filter_hash: u32,
+) -> c_int {
+    crate::dlparstatedisk::diskstate_feed_status_matches(
+        crate::queuehotpath::cstr_to_bytes(feed_url),
+        crate::queuehotpath::cstr_to_bytes(url),
+        format_version,
+        crate::queuehotpath::cstr_to_bytes(feed_filter),
+        crate::queuehotpath::cstr_to_bytes(filter),
+        feed_filter_hash,
+        filter_hash,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dps_diskstate_hibernate_header_matches(
+    scan_cnt: c_int,
+    scanned_size: c_int,
+    expected_file_count: c_int,
+) -> c_int {
+    crate::dlparstatedisk::diskstate_hibernate_header_matches(
+        scan_cnt,
+        scanned_size,
+        expected_file_count,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dps_diskstate_calc_first_day_reset_time(first_day: c_int) -> i64 {
+    crate::dlparstatedisk::diskstate_calc_first_day_reset_time(first_day)
+}
+
 
 
 

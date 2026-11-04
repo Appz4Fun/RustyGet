@@ -30,6 +30,9 @@
 #include "WebDownloader.h"
 #include "FileSystem.h"
 #include "Options.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 namespace
 {
@@ -77,6 +80,16 @@ HttpGet::Reply HttpGet::Fetch(const std::string& url, const std::string& infoNam
 			std::unique_lock<std::mutex> lock(doneMutex);
 			while (!done)
 			{
+#ifdef NZBGET_USE_RUST
+				int64_t waitMs = 250;
+				if (nzbget_rs_snh_http_get_calc_watchdog_wait(
+					deadlineMs, DonorHealth::NowMs(), FileSystem::FileSize(path.c_str()), maxBytes, &waitMs))
+				{
+					downloader.Stop();
+					return;
+				}
+				doneCond.wait_for(lock, std::chrono::milliseconds(waitMs), [&]() { return done; });
+#else
 				long long left = deadlineMs > 0 ? deadlineMs - DonorHealth::NowMs() : 250;
 				if (left <= 0 || FileSystem::FileSize(path.c_str()) > (int64)maxBytes)
 				{
@@ -84,6 +97,7 @@ HttpGet::Reply HttpGet::Fetch(const std::string& url, const std::string& infoNam
 					return;
 				}
 				doneCond.wait_for(lock, std::chrono::milliseconds(std::min(left, 250LL)), [&]() { return done; });
+#endif
 			}
 		});
 	WebDownloader::EStatus status = downloader.DownloadWithRedirects(5);

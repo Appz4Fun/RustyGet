@@ -2237,6 +2237,63 @@ int nzbget_rs_feh_health_validate_server_retention(int active, int retention);
 int nzbget_rs_feh_health_validate_article_read_chunk_size(
     int bytes, int* out_kb_val);
 
+int nzbget_rs_snh_sys_extract_python_version(
+    const char* line, size_t len, size_t* out_start, size_t* out_len);
+int nzbget_rs_snh_sys_parse_unpacker_version(
+    const char* line, size_t len, size_t* out_start, size_t* out_len);
+int nzbget_rs_snh_sys_parse_par_version(
+    const char* line, size_t len, size_t* out_pos);
+void nzbget_rs_snh_os_trim_quotes(
+    const char* s, size_t len, size_t* out_start, size_t* out_len);
+int nzbget_rs_snh_os_parse_sw_vers_field(
+    const char* output, size_t output_len, const char* prefix, size_t prefix_len,
+    size_t* out_start, size_t* out_len);
+const char* nzbget_rs_snh_os_map_windows_build(int64_t build_num);
+const char* nzbget_rs_snh_cpu_canonical_arch(const char* arch, size_t len);
+int nzbget_rs_snh_cpu_parse_cpuinfo_line(
+    const char* line, size_t len, size_t* out_val_offset);
+
+int nzbget_rs_snh_yenc_validate_open_range(
+    int size, int64_t offset, int64_t file_size, int* out_eff_size);
+void nzbget_rs_snh_yenc_calc_segment_buffers(
+    int size, int* out_reserve, int* out_inbuf);
+int nzbget_rs_snh_nzbgen_is_nzb_file(const char* filename);
+void nzbget_rs_snh_nzbgen_calc_segment_count_and_size(
+    int64_t file_size, int segment_size, int64_t seg_offset,
+    int* out_seg_count, int* out_cur_seg_size);
+void nzbget_rs_snh_nserv_verbosity_flags(
+    int verbosity, int* out_mute_info_warn_err, int* out_mute_detail,
+    int* out_enable_debug);
+
+int nzbget_rs_snh_nntp_health_cap_for(int connections, int max_cap);
+int nzbget_rs_snh_nntp_health_is_bracketed(const char* msg_id, size_t len);
+int nzbget_rs_snh_nntp_health_classify_stat_reply(const char* line);
+int nzbget_rs_snh_http_get_calc_watchdog_wait(
+    int64_t deadline_ms, int64_t now_ms, int64_t file_size, size_t max_bytes,
+    int64_t* out_wait_ms);
+size_t nzbget_rs_snh_xml_reader_local_name_offset(const char* name);
+
+int nzbget_rs_snh_http_client_find_header_colon(
+    const char* line, size_t len, size_t* out_colon_pos);
+double nzbget_rs_snh_speed_test_calc_mbps(uint32_t bytes, double time_sec);
+int nzbget_rs_snh_speed_test_is_required_more(
+    size_t dataset_len, double curr_median, double prev_p25);
+int nzbget_rs_snh_speed_test_exceeded_max_failures(int failures, int iterations);
+
+int nzbget_rs_snh_post_renamer_classify_plan(
+    int is_disc, int is_ambiguous, int can_rename, int actions_empty,
+    int target_obfuscated);
+int nzbget_rs_snh_post_renamer_decide_final_status(
+    int is_stopped, int any_failed, int any_renamed);
+
+int nzbget_rs_snh_health_validate_par_buffer(int par_repair, int buffer_mb);
+int nzbget_rs_snh_health_validate_par_threads(
+    int par_repair, int threads, size_t hw_threads);
+int nzbget_rs_snh_health_validate_par_time_limit(int par_repair, int limit);
+int nzbget_rs_snh_health_validate_rotate_log(int is_rotate, int rotate_log);
+int nzbget_rs_snh_health_validate_time_correction(int val);
+int nzbget_rs_snh_health_validate_feed_url(const char* url, size_t len);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

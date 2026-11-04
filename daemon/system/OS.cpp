@@ -23,6 +23,9 @@
 #include "OS.h"
 #include "Log.h"
 #include "Util.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 namespace System
 {
@@ -68,6 +71,18 @@ namespace System
 			return;
 		}
 
+#ifdef NZBGET_USE_RUST
+		const char* mappedVer = nzbget_rs_snh_os_map_windows_build(buildNum);
+		if (mappedVer)
+		{
+			m_version = mappedVer;
+		}
+		else
+		{
+			debug("Unsupported Windows build number: %ld", buildNum);
+			return;
+		}
+#else
 		if (buildNum >= m_win11BuildVersion) m_version = "11";
 		else if (buildNum >= m_win10BuildVersion) m_version = "10";
 		else if (buildNum >= m_win8BuildVersion) m_version = "8";
@@ -78,6 +93,7 @@ namespace System
 			debug("Unsupported Windows build number: %ld", buildNum);
 			return;
 		}
+#endif
 
 		len = BUFFER_SIZE;
 		char updateBuffer[BUFFER_SIZE];
@@ -125,6 +141,12 @@ namespace System
 
 	void OS::TrimQuotes(std::string& str) const
 	{
+#ifdef NZBGET_USE_RUST
+		size_t start = 0;
+		size_t len = 0;
+		nzbget_rs_snh_os_trim_quotes(str.c_str(), str.size(), &start, &len);
+		str = str.substr(start, len);
+#else
 		// an empty value (NAME=, or NAME=" with the quote taken off) had no
 		// front or back to look at
 		if (!str.empty() && str.front() == '"')
@@ -136,6 +158,7 @@ namespace System
 		{
 			str = str.substr(0, str.size() - 1);
 		}
+#endif
 	}
 
 	void OS::Init()
@@ -245,6 +268,32 @@ namespace System
 		};
 
 		std::string productName = "ProductName:";
+#ifdef NZBGET_USE_RUST
+		size_t valStart = 0;
+		size_t valLen = 0;
+		if (nzbget_rs_snh_os_parse_sw_vers_field(
+			result.c_str(), result.size(), productName.c_str(), productName.size(), &valStart, &valLen))
+		{
+			m_name = result.substr(valStart, valLen);
+			Util::Trim(m_name);
+		}
+		else
+		{
+			debug("Failed to get OS name: 'ProductName' not found in sw_vers output");
+		}
+
+		std::string productVersion = "ProductVersion:";
+		if (nzbget_rs_snh_os_parse_sw_vers_field(
+			result.c_str(), result.size(), productVersion.c_str(), productVersion.size(), &valStart, &valLen))
+		{
+			m_version = result.substr(valStart, valLen);
+			Util::Trim(m_version);
+		}
+		else
+		{
+			debug("Failed to get OS version: 'ProductVersion' not found in sw_vers output");
+		}
+#else
 		size_t pos = result.find(productName);
 		if (pos != std::string::npos)
 		{
@@ -269,6 +318,7 @@ namespace System
 		{
 			debug("Failed to get OS version: 'ProductVersion' not found in sw_vers output");
 		}
+#endif
 	}
 #endif
 

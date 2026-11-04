@@ -22,6 +22,9 @@
 #include "FeedValidator.h"
 #include "FeedInfo.h"
 #include "Options.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 namespace SystemHealth::Feeds
 {
@@ -52,6 +55,18 @@ Status NameValidator::Validate() const
 Status UrlValidator::Validate() const
 {
 	std::string_view url = m_feed.GetUrl();
+#ifdef NZBGET_USE_RUST
+	int urlCheck = nzbget_rs_snh_health_validate_feed_url(url.data(), url.size());
+	if (urlCheck == 1)
+	{
+		return Status::Warning("URL is required");
+	}
+	if (urlCheck == 2)
+	{
+		return Status::Warning("URL does not start with 'http://' or 'https://'");
+	}
+	return Status::Ok();
+#else
 	if (url.empty())
 	{
 		return Status::Warning("URL is required");
@@ -64,6 +79,7 @@ Status UrlValidator::Validate() const
 	}
 
 	return Status::Ok();
+#endif
 }
 
 Status IntervalValidator::Validate() const

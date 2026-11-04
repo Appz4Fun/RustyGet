@@ -13800,6 +13800,459 @@ pub unsafe extern "C" fn nzbget_rs_feh_health_validate_article_read_chunk_size(
     code
 }
 
+// ============================================================================
+// System, NServ, DupeSearch, Connect, PostRenamer & SystemHealth Hot-Path FFI
+// (`rust/src/sysnservhealth.rs`)
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_sys_extract_python_version(
+    line: *const c_char,
+    len: usize,
+    out_start: *mut usize,
+    out_len: *mut usize,
+) -> c_int {
+    let s = if line.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(line.cast::<u8>(), len)
+    };
+    match crate::sysnservhealth::sys_extract_python_version(s) {
+        Some((st, ln)) => {
+            if !out_start.is_null() {
+                *out_start = st;
+            }
+            if !out_len.is_null() {
+                *out_len = ln;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_sys_parse_unpacker_version(
+    line: *const c_char,
+    len: usize,
+    out_start: *mut usize,
+    out_len: *mut usize,
+) -> c_int {
+    let s = if line.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(line.cast::<u8>(), len)
+    };
+    match crate::sysnservhealth::sys_parse_unpacker_version(s) {
+        Some((st, ln)) => {
+            if !out_start.is_null() {
+                *out_start = st;
+            }
+            if !out_len.is_null() {
+                *out_len = ln;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_sys_parse_par_version(
+    line: *const c_char,
+    len: usize,
+    out_pos: *mut usize,
+) -> c_int {
+    let s = if line.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(line.cast::<u8>(), len)
+    };
+    match crate::sysnservhealth::sys_parse_par_version(s) {
+        Some(pos) => {
+            if !out_pos.is_null() {
+                *out_pos = pos;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_os_trim_quotes(
+    s: *const c_char,
+    len: usize,
+    out_start: *mut usize,
+    out_len: *mut usize,
+) {
+    let bytes = if s.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(s.cast::<u8>(), len)
+    };
+    let (st, ln) = crate::sysnservhealth::os_trim_quotes(bytes);
+    if !out_start.is_null() {
+        *out_start = st;
+    }
+    if !out_len.is_null() {
+        *out_len = ln;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_os_parse_sw_vers_field(
+    output: *const c_char,
+    output_len: usize,
+    prefix: *const c_char,
+    prefix_len: usize,
+    out_start: *mut usize,
+    out_len: *mut usize,
+) -> c_int {
+    let out_bytes = if output.is_null() || output_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(output.cast::<u8>(), output_len)
+    };
+    let pre_bytes = if prefix.is_null() || prefix_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(prefix.cast::<u8>(), prefix_len)
+    };
+    match crate::sysnservhealth::os_parse_sw_vers_field(out_bytes, pre_bytes) {
+        Some((st, ln)) => {
+            if !out_start.is_null() {
+                *out_start = st;
+            }
+            if !out_len.is_null() {
+                *out_len = ln;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_os_map_windows_build(build_num: i64) -> *const c_char {
+    match crate::sysnservhealth::os_map_windows_build(build_num) {
+        Some(cstr) => cstr.as_ptr(),
+        None => std::ptr::null(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_cpu_canonical_arch(
+    arch: *const c_char,
+    len: usize,
+) -> *const c_char {
+    let bytes = if arch.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(arch.cast::<u8>(), len)
+    };
+    match crate::sysnservhealth::cpu_canonical_arch(bytes) {
+        Some(cstr) => cstr.as_ptr(),
+        None => std::ptr::null(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_cpu_parse_cpuinfo_line(
+    line: *const c_char,
+    len: usize,
+    out_val_offset: *mut usize,
+) -> c_int {
+    let bytes = if line.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(line.cast::<u8>(), len)
+    };
+    match crate::sysnservhealth::cpu_parse_cpuinfo_line(bytes) {
+        Some(off) => {
+            if !out_val_offset.is_null() {
+                *out_val_offset = off;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_yenc_validate_open_range(
+    size: c_int,
+    offset: i64,
+    file_size: i64,
+    out_eff_size: *mut c_int,
+) -> c_int {
+    let (ok, eff) = crate::sysnservhealth::yenc_validate_open_range(size, offset, file_size);
+    if !out_eff_size.is_null() {
+        *out_eff_size = eff;
+    }
+    ok
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_yenc_calc_segment_buffers(
+    size: c_int,
+    out_reserve: *mut c_int,
+    out_inbuf: *mut c_int,
+) {
+    let (res, inb) = crate::sysnservhealth::yenc_calc_segment_buffers(size);
+    if !out_reserve.is_null() {
+        *out_reserve = res;
+    }
+    if !out_inbuf.is_null() {
+        *out_inbuf = inb;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_nzbgen_is_nzb_file(filename: *const c_char) -> c_int {
+    let s = if filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    i32::from(crate::sysnservhealth::nzbgen_is_nzb_file(s))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_nzbgen_calc_segment_count_and_size(
+    file_size: i64,
+    segment_size: c_int,
+    seg_offset: i64,
+    out_seg_count: *mut c_int,
+    out_cur_seg_size: *mut c_int,
+) {
+    let (cnt, sz) = crate::sysnservhealth::nzbgen_calc_segment_count_and_size(
+        file_size,
+        segment_size,
+        seg_offset,
+    );
+    if !out_seg_count.is_null() {
+        *out_seg_count = cnt;
+    }
+    if !out_cur_seg_size.is_null() {
+        *out_cur_seg_size = sz;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_nserv_verbosity_flags(
+    verbosity: c_int,
+    out_mute_info_warn_err: *mut c_int,
+    out_mute_detail: *mut c_int,
+    out_enable_debug: *mut c_int,
+) {
+    let (m1, m2, dbg) = crate::sysnservhealth::nserv_verbosity_flags(verbosity);
+    if !out_mute_info_warn_err.is_null() {
+        *out_mute_info_warn_err = i32::from(m1);
+    }
+    if !out_mute_detail.is_null() {
+        *out_mute_detail = i32::from(m2);
+    }
+    if !out_enable_debug.is_null() {
+        *out_enable_debug = i32::from(dbg);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_nntp_health_cap_for(
+    connections: c_int,
+    max_cap: c_int,
+) -> c_int {
+    crate::sysnservhealth::nntp_health_cap_for(connections, max_cap)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_nntp_health_is_bracketed(
+    msg_id: *const c_char,
+    len: usize,
+) -> c_int {
+    let s = if msg_id.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(msg_id.cast::<u8>(), len)
+    };
+    i32::from(crate::sysnservhealth::nntp_health_is_bracketed(s))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_nntp_health_classify_stat_reply(
+    line: *const c_char,
+) -> c_int {
+    let s = if line.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(line).to_bytes()
+    };
+    crate::sysnservhealth::nntp_health_classify_stat_reply(s)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_http_get_calc_watchdog_wait(
+    deadline_ms: i64,
+    now_ms: i64,
+    file_size: i64,
+    max_bytes: usize,
+    out_wait_ms: *mut i64,
+) -> c_int {
+    let (stop, wait) = crate::sysnservhealth::http_get_calc_watchdog_wait(
+        deadline_ms,
+        now_ms,
+        file_size,
+        max_bytes,
+    );
+    if !out_wait_ms.is_null() {
+        *out_wait_ms = wait;
+    }
+    i32::from(stop)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_xml_reader_local_name_offset(name: *const c_char) -> usize {
+    let s = if name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(name).to_bytes()
+    };
+    crate::sysnservhealth::xml_reader_local_name_offset(s)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_http_client_find_header_colon(
+    line: *const c_char,
+    len: usize,
+    out_colon_pos: *mut usize,
+) -> c_int {
+    let s = if line.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(line.cast::<u8>(), len)
+    };
+    match crate::sysnservhealth::http_client_find_header_colon(s) {
+        Some(pos) => {
+            if !out_colon_pos.is_null() {
+                *out_colon_pos = pos;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_speed_test_calc_mbps(bytes: u32, time_sec: f64) -> f64 {
+    crate::sysnservhealth::speed_test_calc_mbps(bytes, time_sec)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_speed_test_is_required_more(
+    dataset_len: usize,
+    curr_median: f64,
+    prev_p25: f64,
+) -> c_int {
+    i32::from(crate::sysnservhealth::speed_test_is_required_more(
+        dataset_len,
+        curr_median,
+        prev_p25,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_speed_test_exceeded_max_failures(
+    failures: c_int,
+    iterations: c_int,
+) -> c_int {
+    i32::from(crate::sysnservhealth::speed_test_exceeded_max_failures(
+        failures, iterations,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_post_renamer_classify_plan(
+    is_disc: c_int,
+    is_ambiguous: c_int,
+    can_rename: c_int,
+    actions_empty: c_int,
+    target_obfuscated: c_int,
+) -> c_int {
+    crate::sysnservhealth::post_renamer_classify_plan(
+        is_disc != 0,
+        is_ambiguous != 0,
+        can_rename != 0,
+        actions_empty != 0,
+        target_obfuscated != 0,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_post_renamer_decide_final_status(
+    is_stopped: c_int,
+    any_failed: c_int,
+    any_renamed: c_int,
+) -> c_int {
+    crate::sysnservhealth::post_renamer_decide_final_status(
+        is_stopped != 0,
+        any_failed != 0,
+        any_renamed != 0,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_health_validate_par_buffer(
+    par_repair: c_int,
+    buffer_mb: c_int,
+) -> c_int {
+    crate::sysnservhealth::health_validate_par_buffer(par_repair != 0, buffer_mb)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_health_validate_par_threads(
+    par_repair: c_int,
+    threads: c_int,
+    hw_threads: usize,
+) -> c_int {
+    crate::sysnservhealth::health_validate_par_threads(par_repair != 0, threads, hw_threads)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_health_validate_par_time_limit(
+    par_repair: c_int,
+    limit: c_int,
+) -> c_int {
+    crate::sysnservhealth::health_validate_par_time_limit(par_repair != 0, limit)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_health_validate_rotate_log(
+    is_rotate: c_int,
+    rotate_log: c_int,
+) -> c_int {
+    crate::sysnservhealth::health_validate_rotate_log(is_rotate != 0, rotate_log)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_health_validate_time_correction(val: c_int) -> c_int {
+    i32::from(crate::sysnservhealth::health_validate_time_correction(val))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_health_validate_feed_url(
+    url: *const c_char,
+    len: usize,
+) -> c_int {
+    let s = if url.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(url.cast::<u8>(), len)
+    };
+    crate::sysnservhealth::health_validate_feed_url(s)
+}
+
+
 
 
 

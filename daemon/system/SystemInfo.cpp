@@ -28,6 +28,9 @@
 #include "Log.h"
 #include "Json.h"
 #include "Xml.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 #ifdef HAVE_NCURSES_H
 #include <ncurses.h>
@@ -303,6 +306,14 @@ namespace System
 				// e.g. Python 3.12.3
 				std::string version{ buffer };
 				Util::Trim(version);
+#ifdef NZBGET_USE_RUST
+				size_t start = 0;
+				size_t len = 0;
+				if (nzbget_rs_snh_sys_extract_python_version(version.c_str(), version.size(), &start, &len))
+				{
+					return version.substr(start, len);
+				}
+#else
 				size_t pos = version.find("Python");
 				if (pos != std::string::npos)
 				{
@@ -310,6 +321,7 @@ namespace System
 					Util::Trim(version);
 					return version;
 				}
+#endif
 			}
 		}
 
@@ -320,6 +332,15 @@ namespace System
 	{
 		// e.g. 7-Zip (a) 19.00 (x64) : Copyright (c) 1999-2018 Igor Pavlov : 2019-02-21
 		// e.g. UNRAR 5.70 x64 freeware      Copyright (c) 1993-2019 Alexander Roshal
+#ifdef NZBGET_USE_RUST
+		size_t start = 0;
+		size_t len = 0;
+		if (nzbget_rs_snh_sys_parse_unpacker_version(line.c_str(), line.size(), &start, &len))
+		{
+			return line.substr(start, len);
+		}
+		return "";
+#else
 		static const std::regex pattern(R"([0-9]+\.[0-9]+)"); // float number
 		std::smatch match;
 		if (std::regex_search(line, match, pattern))
@@ -328,17 +349,27 @@ namespace System
 		}
 
 		return "";
+#endif
 	}
 
 	std::string SystemInfo::ParseParVersion(const std::string& line) const
 	{
 		// e.g. par2cmdline-turbo version 1.1.1
+#ifdef NZBGET_USE_RUST
+		size_t pos = 0;
+		if (nzbget_rs_snh_sys_parse_par_version(line.c_str(), line.size(), &pos))
+		{
+			return line.substr(pos);
+		}
+		return "";
+#else
 		if (size_t pos = line.find_last_of(" "); pos != std::string::npos)
 		{
 			return line.substr(pos);
 		}
 
 		return "";
+#endif
 	}
 
 	std::ostream& operator<<(std::ostream& os, const SystemInfo& sysinfo)

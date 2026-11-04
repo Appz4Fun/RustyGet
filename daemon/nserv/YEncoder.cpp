@@ -23,6 +23,9 @@
 #include "Util.h"
 #include "FileSystem.h"
 #include "Log.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 bool YEncoder::OpenFile(CString& errmsg)
 {
@@ -39,6 +42,16 @@ bool YEncoder::OpenFile(CString& errmsg)
 	}
 
 	m_fileSize = m_diskfile.Position();
+#ifdef NZBGET_USE_RUST
+	int effSize = 0;
+	if (!nzbget_rs_snh_yenc_validate_open_range(m_size, m_offset, m_fileSize, &effSize))
+	{
+		m_size = effSize;
+		errmsg = "Invalid segment size";
+		return false;
+	}
+	m_size = effSize;
+#else
 	if (m_size == 0)
 	{
 		m_size = (int)(m_fileSize - m_offset + 1);
@@ -49,6 +62,7 @@ bool YEncoder::OpenFile(CString& errmsg)
 		errmsg = "Invalid segment size";
 		return false;
 	}
+#endif
 
 	if (!m_diskfile.Seek(m_offset))
 	{
@@ -62,6 +76,18 @@ bool YEncoder::OpenFile(CString& errmsg)
 void YEncoder::WriteSegment()
 {
 	StringBuilder outbuf;
+#ifdef NZBGET_USE_RUST
+	int reserveSize = 2048;
+	int inbufSize = 0;
+	nzbget_rs_snh_yenc_calc_segment_buffers(m_size, &reserveSize, &inbufSize);
+	outbuf.Reserve(reserveSize);
+
+	outbuf.Append(CString::FormatStr("=ybegin part=%i line=128 size=%" PRIi64 " name=%s\r\n", m_part, m_fileSize, FileSystem::BaseFileName(m_filename)));
+	outbuf.Append(CString::FormatStr("=ypart begin=%" PRIi64 " end=%" PRIi64 "\r\n", m_offset + 1, m_offset + m_size));
+
+	Crc32 crc;
+	CharBuffer inbuf(inbufSize);
+#else
 	outbuf.Reserve(std::max(2048, std::min((int)(m_size * 1.1), 16 * 1024 * 1024)));
 
 	outbuf.Append(CString::FormatStr("=ybegin part=%i line=128 size=%" PRIi64 " name=%s\r\n", m_part, m_fileSize, FileSystem::BaseFileName(m_filename)));
@@ -69,6 +95,7 @@ void YEncoder::WriteSegment()
 
 	Crc32 crc;
 	CharBuffer inbuf(std::min(m_size, 16 * 1024 * 1024));
+#endif
 	int lnsz = 0;
 	char* out = (char*)outbuf + outbuf.Length();
 

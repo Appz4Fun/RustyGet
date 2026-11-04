@@ -30,6 +30,9 @@
 #include "NntpConnection.h"
 #include "ServerPool.h"
 #include "Util.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 namespace
 {
@@ -38,11 +41,19 @@ namespace
 // list it without them
 std::string Bracketed(const std::string& messageId)
 {
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_snh_nntp_health_is_bracketed(messageId.c_str(), messageId.size()))
+	{
+		return messageId;
+	}
+	return "<" + messageId + ">";
+#else
 	if (!messageId.empty() && messageId.front() == '<' && messageId.back() == '>')
 	{
 		return messageId;
 	}
 	return "<" + messageId + ">";
+#endif
 }
 
 }
@@ -51,7 +62,11 @@ using Answer = DonorHealth::Answer;
 
 int NntpHealthServer::CapFor(int connections)
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_snh_nntp_health_cap_for(connections, MaxCap);
+#else
 	return std::max(1, std::min(MaxCap, connections / 2));
+#endif
 }
 
 DonorHealth::ServerList NntpHealthServer::Servers()
@@ -182,7 +197,12 @@ std::vector<Answer> NntpHealthServer::Exchange(const std::vector<DonorHealth::Re
 			error.answers = answers;
 			throw error;
 		}
+#ifdef NZBGET_USE_RUST
+		int statReply = nzbget_rs_snh_nntp_health_classify_stat_reply(line);
+		answers.push_back(statReply == 0 ? Answer::Present : statReply == 1 ? Answer::Missing : Answer::Error);
+#else
 		answers.push_back(!strncmp(line, "223", 3) ? Answer::Present : !strncmp(line, "430", 3) ? Answer::Missing : Answer::Error);
+#endif
 	}
 
 	// BODY for the articles that have a gate: one server at a time, verified

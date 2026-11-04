@@ -29,6 +29,9 @@
 #include "NntpServer.h"
 #include "NzbGenerator.h"
 #include "Options.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 struct NServOpts
 {
@@ -262,6 +265,26 @@ NServOpts::NServOpts(int argc, char* argv[], Options::CmdOptList& cmdOpts)
 		cmdOpts.push_back(logOpt);
 	}
 
+#ifdef NZBGET_USE_RUST
+	int muteInfoWarnErr = 0;
+	int muteDetail = 0;
+	int enableDebug = 0;
+	nzbget_rs_snh_nserv_verbosity_flags(verbosity, &muteInfoWarnErr, &muteDetail, &enableDebug);
+	if (muteInfoWarnErr)
+	{
+		cmdOpts.push_back("InfoTarget=none");
+		cmdOpts.push_back("WarningTarget=none");
+		cmdOpts.push_back("ErrorTarget=none");
+	}
+	if (muteDetail)
+	{
+		cmdOpts.push_back("DetailTarget=none");
+	}
+	if (enableDebug)
+	{
+		cmdOpts.push_back("DebugTarget=both");
+	}
+#else
 	if (verbosity < 1)
 	{
 		cmdOpts.push_back("InfoTarget=none");
@@ -276,4 +299,5 @@ NServOpts::NServOpts(int argc, char* argv[], Options::CmdOptList& cmdOpts)
 	{
 		cmdOpts.push_back("DebugTarget=both");
 	}
+#endif
 }

@@ -295,6 +295,24 @@ pub fn dqh_donor_health_accum_verdict_counts(
     }
 }
 
+/// Ensures `name` ends with `.nzb` (case-insensitive), appending `.nzb` if not (`Fleet::Add`).
+pub fn dqh_fleet_ensure_nzb_ext(name: &[u8]) -> Vec<u8> {
+    let mut out = name.to_vec();
+    if name.len() < 4 || !name[name.len() - 4..].eq_ignore_ascii_case(b".nzb") {
+        out.extend_from_slice(b".nzb");
+    }
+    out
+}
+
+/// Visits each non-empty `|`-separated segment of `names` (`Fleet::Add`).
+pub fn dqh_fleet_visit_pipe_names(names: &[u8], mut visit: impl FnMut(&[u8])) {
+    for part in names.split(|&b| b == b'|') {
+        if !part.is_empty() {
+            visit(part);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,5 +440,11 @@ mod tests {
         dqh_donor_health_accum_verdict_counts(2, 1, 2, 3, true, &mut p, &mut m, &mut e, &mut b);
         dqh_donor_health_accum_verdict_counts(3, 1, 2, 3, false, &mut p, &mut m, &mut e, &mut b);
         assert_eq!((p, m, e, b), (1, 1, 1, 1));
+
+        assert_eq!(dqh_fleet_ensure_nzb_ext(b"Movie.Release"), b"Movie.Release.nzb");
+        assert_eq!(dqh_fleet_ensure_nzb_ext(b"Movie.Release.NZB"), b"Movie.Release.NZB");
+        let mut parts = Vec::new();
+        dqh_fleet_visit_pipe_names(b"first.nzb||second.nzb|", |s| parts.push(s.to_vec()));
+        assert_eq!(parts, vec![b"first.nzb".to_vec(), b"second.nzb".to_vec()]);
     }
 }

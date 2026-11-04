@@ -132,12 +132,12 @@ Status ControlPortValidator::Validate() const
 Status ControlUsernameValidator::Validate() const
 {
 	std::string_view username = m_options.GetControlUsername();
-	if (username.empty())
+	int userCheck = nzbget_rs_feh_health_validate_control_username(username.data(), username.size());
+	if (userCheck == 1)
 	{
 		return Status::Info("Using an empty username is not recommended for security reasons");
 	}
-
-	if (username == "nzbget")
+	if (userCheck == 2)
 	{
 		return Status::Info("Using default username 'nzbget' is not recommended for security reasons");
 	}
@@ -163,7 +163,8 @@ Status AddUsernameValidator::Validate() const
 {
 	std::string_view addUser = m_options.GetAddUsername();
 	std::string_view controlUser = m_options.GetControlUsername();
-	if (!addUser.empty() && controlUser == "nzbget")
+	if (nzbget_rs_feh_health_is_default_control_user_with_subuser(
+		addUser.data(), addUser.size(), controlUser.data(), controlUser.size()) != 0)
 	{
 		return Status::Warning("'" + std::string(Options::ADDUSERNAME) + "' is enabled while '" +
 							   std::string(Options::CONTROLUSERNAME) +
@@ -201,7 +202,8 @@ Status RestrictedUsernameValidator::Validate() const
 
 	std::string_view controlUser = m_options.GetControlUsername();
 
-	if (!restrictedUser.empty() && controlUser == "nzbget")
+	if (nzbget_rs_feh_health_is_default_control_user_with_subuser(
+		restrictedUser.data(), restrictedUser.size(), controlUser.data(), controlUser.size()) != 0)
 	{
 		return Status::Warning("'" + std::string(Options::RESTRICTEDUSERNAME) +
 							   "' is enabled while '" + std::string(Options::CONTROLUSERNAME) +
@@ -215,14 +217,16 @@ Status RestrictedPasswordValidator::Validate() const
 {
 	std::string_view restrictedUser = m_options.GetRestrictedUsername();
 	std::string_view restrictedPass = m_options.GetRestrictedPassword();
-	if (!restrictedUser.empty() && restrictedPass.empty())
+	int pairCheck = nzbget_rs_feh_health_validate_user_pass_pair(
+		restrictedUser.data(), restrictedUser.size(), restrictedPass.data(), restrictedPass.size());
+	if (pairCheck == 1)
 	{
 		return Status::Warning("'" + std::string(Options::RESTRICTEDUSERNAME) +
 							   "' is enabled, but '" + std::string(Options::RESTRICTEDPASSWORD) +
 							   "' is empty. This allows restricted access without a password");
 	}
 
-	if (restrictedUser.empty() && !restrictedPass.empty())
+	if (pairCheck == 2)
 	{
 		return Status::Info("'" + std::string(Options::RESTRICTEDPASSWORD) + "' is set, but '" +
 							std::string(Options::RESTRICTEDUSERNAME) +

@@ -90,10 +90,9 @@ Status CategoryValidator::Validate() const
 
 Status FeedCertValidator::Validate() const
 {
-	const char* url = m_feed.GetUrl();
-	if (!url || strncasecmp(url, "https://", 8) != 0) return Status::Ok();
-
-	if (m_feed.GetCertVerificationLevel() == Options::ECertVerifLevel::cvNone)
+	if (nzbget_rs_feh_health_validate_feed_cert(
+		m_feed.GetUrl(),
+		m_feed.GetCertVerificationLevel() == Options::ECertVerifLevel::cvNone ? 1 : 0) != 0)
 	{
 		return Status::Warning("Certificate verification is 'None', "
 							   "making the TLS connection insecure");

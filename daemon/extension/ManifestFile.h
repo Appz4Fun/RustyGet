@@ -81,16 +81,6 @@ namespace ManifestFile
 	};
 
 	bool Load(Manifest& manifest, const char* directory);
-
-	bool ValidateAndSet(const Json::JsonObject& json, Manifest& manifest);
-	bool ValidateCommandsAndSet(const Json::JsonObject& json, std::vector<Command>& commands);
-	bool ValidateOptionsAndSet(const Json::JsonObject& json, std::vector<Option>& options);
-	bool ValidateSectionsAndSet(const Json::JsonObject& json, std::vector<Option>& options, std::vector<Command>& commands);
-	bool ValidateTxtAndSet(const Json::JsonObject& json, std::vector<std::string>& property, const char* propName);
-	bool CheckKeyAndSet(const Json::JsonObject& json, const char* key, std::string& property);
-	bool CheckKeyAndSet(const Json::JsonObject& json, const char* key, std::string& property, std::string defValue);
-	bool CheckKeyAndSet(const Json::JsonObject& json, const char* key, SelectOption& property);
-	bool CheckKeyAndSet(const Json::JsonObject& json, const char* key, bool& property);
 };
 
 #endif

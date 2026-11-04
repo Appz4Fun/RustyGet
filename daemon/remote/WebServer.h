@@ -79,7 +79,6 @@ private:
 	void SendBodyResponse(const char* body, int bodyLen, const char* contentType, bool cachable);
 	void SendRedirectResponse(const char* url);
 	const char* DetectContentType(const char* filename);
-	bool IsAuthorizedIp(const char* remoteAddr);
 	void ParseHeaders();
 	bool ParseUrl();
 	bool CheckCredentials();

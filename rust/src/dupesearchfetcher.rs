@@ -246,6 +246,50 @@ pub fn dsf_nzb_fetcher_should_refuse_indexer(status: i32, indexer_empty: bool) -
     (status == 403 || status == 429) && !indexer_empty
 }
 
+/// Parses a TSV cooldown state line (`indexer\tuntil\t...`) for `NzbFetcher::Load`,
+/// returning `Some((indexer, when))` when `when > now_sec`.
+pub fn dsf_nzb_fetcher_parse_cooldown_line(line: &[u8], now_sec: i64) -> Option<(Vec<u8>, i64)> {
+    let tab1 = line.iter().position(|&b| b == b'\t')?;
+    let indexer = &line[..tab1];
+    let rest = &line[tab1 + 1..];
+    let tab2 = rest.iter().position(|&b| b == b'\t')?;
+    let until_bytes = &rest[..tab2];
+    let s = std::str::from_utf8(until_bytes).ok()?.trim_start();
+    let mut len = 0usize;
+    for (i, b) in s.bytes().enumerate() {
+        if i == 0 && (b == b'+' || b == b'-') {
+            len += 1;
+        } else if b.is_ascii_digit() {
+            len += 1;
+        } else {
+            break;
+        }
+    }
+    let when: i64 = if len == 0 {
+        0
+    } else {
+        s[..len].parse::<i64>().unwrap_or(0)
+    };
+    if dsf_nzb_fetcher_is_cooldown_active(when, now_sec) {
+        Some((indexer.to_vec(), when))
+    } else {
+        None
+    }
+}
+
+/// Formats an active indexer cooldown entry (`indexer\twhen\t\n`) for `NzbFetcher::Save`.
+pub fn dsf_nzb_fetcher_format_cooldown_line(indexer: &[u8], when_sec: i64, now_sec: i64) -> Vec<u8> {
+    if !dsf_nzb_fetcher_is_cooldown_active(when_sec, now_sec) {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(indexer.len() + 24);
+    out.extend_from_slice(indexer);
+    out.push(b'\t');
+    out.extend_from_slice(when_sec.to_string().as_bytes());
+    out.extend_from_slice(b"\t\n");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,5 +404,14 @@ mod tests {
         assert!(dsf_nzb_fetcher_should_refuse_indexer(403, false));
         assert!(!dsf_nzb_fetcher_should_refuse_indexer(500, false));
         assert!(!dsf_nzb_fetcher_should_refuse_indexer(429, true));
+
+        let line = dsf_nzb_fetcher_format_cooldown_line(b"https://idx.example", 250, 100);
+        assert_eq!(line, b"https://idx.example\t250\t\n");
+        let parsed = dsf_nzb_fetcher_parse_cooldown_line(b"https://idx.example\t250\t", 100);
+        assert_eq!(parsed, Some((b"https://idx.example".to_vec(), 250)));
+        assert_eq!(
+            dsf_nzb_fetcher_parse_cooldown_line(b"https://idx.example\t90\t", 100),
+            None
+        );
     }
 }

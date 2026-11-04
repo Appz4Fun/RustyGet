@@ -325,6 +325,20 @@ pub fn feed_info_should_parse_season_episode(field_empty: bool, parsed: bool) ->
     field_empty && !parsed
 }
 
+/// Formats `Season` (`S%02d`) and `Episode` (`E` + `ep_raw` with `'-'` removed and
+/// ASCII letters uppercased) for `FeedItemInfo::ParseSeasonEpisode`.
+pub fn feed_info_format_season_episode(season_num: i32, ep_raw: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let season = format!("S{season_num:02}").into_bytes();
+    let mut episode = Vec::with_capacity(1 + ep_raw.len());
+    episode.push(b'E');
+    for &b in ep_raw {
+        if b != b'-' {
+            episode.push(b.to_ascii_uppercase());
+        }
+    }
+    (season, episode)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,5 +464,9 @@ mod tests {
         assert!(feed_info_should_parse_season_episode(true, false));
         assert!(!feed_info_should_parse_season_episode(false, false));
         assert!(!feed_info_should_parse_season_episode(true, true));
+
+        let (season, episode) = feed_info_format_season_episode(3, b"02-e03");
+        assert_eq!(season, b"S03");
+        assert_eq!(episode, b"E02E03");
     }
 }

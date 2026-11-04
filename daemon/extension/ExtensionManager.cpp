@@ -338,71 +338,27 @@ namespace ExtensionManager
 
 	void Manager::Sort(const char* orderStr)
 	{
-		auto comparator = [](const auto& a, const auto& b) -> bool
+		if (m_extensions.empty())
 		{
-			return strcmp(a->GetName(), b->GetName()) < 0;
-		};
-
-		if (Util::EmptyStr(orderStr))
-		{
-			std::sort(
-				std::begin(m_extensions),
-				std::end(m_extensions),
-				comparator
-			);
-			return;	
-		}
-
-		std::vector<std::string> order;
-		Tokenizer tokOrder(orderStr, ",;");
-		while (const char* extName = tokOrder.Next())
-		{	
-			auto pos = std::find(
-				std::begin(order), 
-				std::end(order), 
-				extName
-			);
-
-			if (pos == std::end(order))
-			{
-				order.push_back(extName);
-			}
-		}
-
-		if (order.empty())
-		{
-			std::sort(
-				std::begin(m_extensions),
-				std::end(m_extensions),
-				comparator
-			);
 			return;
 		}
 
-		size_t count = 0;
-		for (size_t i = 0; i < order.size(); ++i)
+		size_t count = m_extensions.size();
+		std::vector<const char*> names(count);
+		for (size_t i = 0; i < count; ++i)
 		{
-			const std::string& name = order[i];
-			auto it = std::find_if(
-				std::begin(m_extensions),
-				std::end(m_extensions),
-				[&name](const auto& ext)
-				{
-					return name == ext->GetName();
-				}
-			);
-			if (it != std::end(m_extensions))
-			{
-				std::iter_swap(std::begin(m_extensions) + count, it);
-				++count;
-			}
+			names[i] = m_extensions[i]->GetName();
 		}
+		std::vector<size_t> sortedIndices(count);
+		nzbget_rs_feh_ext_sort_indices(names.data(), count, orderStr ? orderStr : "", sortedIndices.data());
 
-		std::sort(
-			std::begin(m_extensions) + count,
-			std::end(m_extensions),
-			comparator
-		);
+		Extensions sorted;
+		sorted.reserve(count);
+		for (size_t idx : sortedIndices)
+		{
+			sorted.push_back(std::move(m_extensions[idx]));
+		}
+		m_extensions = std::move(sorted);
 	}
 
 	std::string Manager::GetExtensionName(const std::string& fileName) const

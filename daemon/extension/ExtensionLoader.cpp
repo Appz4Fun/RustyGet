@@ -28,37 +28,8 @@
 #include <memory>
 #include "nzbget_rs.h"
 
-namespace
-{
-	// the text after a signature; a line that is the signature alone ends there
-	// (substr past the end threw, and an extension file ended the daemon at start)
-	std::string TextAfter(const std::string& line, size_t pos)
-	{
-		return line.size() > pos ? line.substr(pos) : std::string();
-	}
-}
-
 namespace ExtensionLoader
 {
-	const char* DEFAULT_SECTION_NAME = "options";
-	const char* BEGIN_SCRIPT_SIGNATURE = "### NZBGET ";
-	const char* BEGIN_SCRIPT_COMMANDS_AND_OTPIONS = "### OPTIONS";
-	const char* POST_SCRIPT_SIGNATURE = "POST-PROCESSING";
-	const char* SCAN_SCRIPT_SIGNATURE = "SCAN";
-	const char* QUEUE_SCRIPT_SIGNATURE = "QUEUE";
-	const char* SCHEDULER_SCRIPT_SIGNATURE = "SCHEDULER";
-	const char* FEED_SCRIPT_SIGNATURE = "FEED";
-	const char* END_SCRIPT_SIGNATURE = " SCRIPT";
-	const char* QUEUE_EVENTS_SIGNATURE = "### QUEUE EVENTS:";
-	const char* TASK_TIME_SIGNATURE = "### TASK TIME:";
-	const char* DEFINITION_SIGNATURE = "###";
-
-	const int BEGIN_SCRIPT_COMMANDS_AND_OTPIONS_LEN = strlen(BEGIN_SCRIPT_COMMANDS_AND_OTPIONS);
-	const int BEGIN_SINGNATURE_LEN = strlen(BEGIN_SCRIPT_SIGNATURE);
-	const int QUEUE_EVENTS_SIGNATURE_LEN = strlen(QUEUE_EVENTS_SIGNATURE);
-	const int TASK_TIME_SIGNATURE_LEN = strlen(TASK_TIME_SIGNATURE);
-	const int DEFINITION_SIGNATURE_LEN = strlen(DEFINITION_SIGNATURE);
-
 	namespace V1
 	{
 		bool Load(Extension::Script& script, const char* location, const char* rootDir)
@@ -198,17 +169,6 @@ namespace ExtensionLoader
 			return true;
 		}
 
-
-		void RemoveTailAndTrim(std::string& str, const char* tail)
-		{
-			size_t tailIdx = str.find(tail);
-			if (tailIdx != std::string::npos)
-			{
-				str.erase(tailIdx);
-			}
-			Util::TrimRight(str);
-		}
-
 		void BuildDisplayName(Extension::Script& script)
 		{
 			BString<1024> shortName = script.GetName();
@@ -217,223 +177,6 @@ namespace ExtensionLoader
 			const char* displayName = FileSystem::BaseFileName(shortName);
 
 			script.SetDisplayName(displayName);
-		}
-
-		void ParseOptionsAndCommands(
-			std::ifstream& file,
-			std::vector<ManifestFile::Option>& options,
-			std::vector<ManifestFile::Command>& commands)
-		{
-			std::vector<ManifestFile::SelectOption> selectOpts;
-			std::vector<std::string> description;
-			std::string currSectionName = DEFAULT_SECTION_NAME;
-
-			std::string line;
-			while (std::getline(file, line))
-			{
-				if (strstr(line.c_str(), END_SCRIPT_SIGNATURE))
-				{
-					break;
-				}
-
-				if (line.empty())
-				{
-					continue;
-				}
-
-				if (!strncmp(line.c_str(), DEFINITION_SIGNATURE, DEFINITION_SIGNATURE_LEN))
-				{
-					currSectionName = TextAfter(line, DEFINITION_SIGNATURE_LEN + 1);
-					RemoveTailAndTrim(currSectionName, "###");
-					continue;
-				}
-
-				size_t selectStartIdx = line.rfind("(");
-				size_t selectEndIdx = line.rfind(")");
-				bool hasSelectOptions = description.empty()
-					&& !strncmp(line.c_str(), "# ", 2)
-					&& selectStartIdx != std::string::npos
-					&& selectEndIdx != std::string::npos
-					&& selectEndIdx == line.length() - 2;
-
-				// e.g. # Description (Always, OnFailure) or # Description (1-65535) or # Description (1, 2-5, 10).
-				if (hasSelectOptions)
-				{
-					std::string selectOptionsStr = line.substr(selectStartIdx + 1, selectEndIdx - selectStartIdx - 1);
-					auto result = ExtractElements(selectOptionsStr);
-					auto& selectOptions = result.first;
-					auto& delimiter = result.second;
-					bool canBeNum = delimiter == "-";
-
-					if (delimiter.empty()) // doesn't have
-					{
-						description.push_back(line.substr(2));
-						continue;
-					}
-
-					if (canBeNum)
-					{
-						description.push_back(line.substr(2));
-					}
-					else
-					{
-						description.push_back(line.substr(2, selectStartIdx - 3) + ".");
-					}
-
-					selectOpts = GetSelectOptions(selectOptions, canBeNum);
-					continue;
-				}
-
-				if (!strncmp(line.c_str(), "# ", 2))
-				{
-					description.push_back(line.substr(2));
-					continue;
-				}
-
-				if (strncmp(line.c_str(), "# ", 2))
-				{
-					// if option, e.g. #ConnectionTest=Send
-					size_t eqPos = line.find("=");
-					// if command, e.g. #ConnectionTest@Send Test E-Mail
-					size_t atPos = line.find("@");
-
-					if (atPos != std::string::npos && eqPos == std::string::npos)
-					{
-						ManifestFile::Command command{};
-						command.action = line.substr(atPos + 1);
-						Util::Trim(command.action);
-						ParseSectionAndSet<ManifestFile::Command>(command, currSectionName, line, atPos);
-						command.description = std::move(description);
-						commands.push_back(std::move(command));
-						description.clear();
-						selectOpts.clear();
-						continue;
-					}
-
-					if (eqPos != std::string::npos)
-					{
-						ManifestFile::Option option{};
-						ParseSectionAndSet<ManifestFile::Option>(option, currSectionName, line, eqPos);
-						bool canBeNum = !selectOpts.empty() && std::get_if<double>(&selectOpts[0]);
-						std::string value = line.substr(eqPos + 1);
-						Util::Trim(value);
-						option.value = GetSelectOpt(value, canBeNum);
-						option.description = std::move(description);
-						option.select = std::move(selectOpts);
-						options.push_back(std::move(option));
-						description.clear();
-						selectOpts.clear();
-						continue;
-					}
-				}
-			}
-		}
-
-		std::vector<ManifestFile::SelectOption>
-		GetSelectOptions(const std::vector<std::string>& opts, bool canBeNum)
-		{
-			std::vector<ManifestFile::SelectOption> selectOpts;
-
-			for (const auto& option : opts)
-			{
-				selectOpts.push_back(GetSelectOpt(option, canBeNum));
-			}
-			return selectOpts;
-		}
-
-		ManifestFile::SelectOption GetSelectOpt(const std::string& val, bool canBeNum)
-		{
-			if (!canBeNum)
-			{
-				return ManifestFile::SelectOption(val);
-			}
-
-			auto result = Util::StrToNum<double>(val);
-			if (result.has_value())
-			{
-				return ManifestFile::SelectOption(result.value());
-			}
-
-			return ManifestFile::SelectOption(val);
-		}
-
-		std::pair<std::vector<std::string>, std::string>
-		ExtractElements(const std::string& str)
-		{
-			std::vector<std::string> elements;
-			std::string word;
-
-			for (size_t i = 0; i < str.size(); ++i)
-			{
-				if (i == (str.size() - 1))
-				{
-					word += str[i];
-					elements.push_back(std::move(word));
-					break;
-				}
-
-				if (str[i] == ',')
-				{
-					elements.push_back(std::move(word));
-					word.clear();
-					continue;
-				}
-
-				if (str[i] == ' ' && word.empty())
-				{
-					continue;
-				}
-
-				if (str[i] == ' ' && !word.empty())
-				{
-					elements.clear();
-					elements.push_back(str);
-					return std::make_pair(std::move(elements), "");
-				}
-
-				if (str[i] == '-' && elements.empty())
-				{
-					std::string restWord;
-					for (size_t j = i + 1; j < str.size(); ++j)
-					{
-						if (j >= str.size() - 1)
-						{
-							restWord += str[j];
-							elements.push_back(std::move(word));
-							elements.push_back(std::move(restWord));
-							return std::make_pair(std::move(elements), "-");
-						}
-
-						if (str[j] == ' ')
-						{
-							elements.push_back(str);
-							return std::make_pair(std::move(elements), "");
-						}
-
-						if (str[j] == ',')
-						{
-							word += '-' + restWord;
-							elements.push_back(std::move(word));
-							word.clear();
-							i = j;
-							break;
-						}
-
-						restWord += str[j];
-					}
-
-					continue;
-				}
-
-				word += str[i];
-			}
-
-			if (elements.size() == 1)
-			{
-				return std::make_pair(std::move(elements), "");
-			}
-
-			return std::make_pair(std::move(elements), ",");
 		}
 	}
 
@@ -467,12 +210,13 @@ namespace ExtensionLoader
 
 	Extension::Kind GetScriptKind(const std::string& line)
 	{
+		int kindBits = nzbget_rs_ext_script_kind(line.data(), line.size());
 		Extension::Kind kind;
-		kind.post = strstr(line.c_str(), POST_SCRIPT_SIGNATURE) != nullptr;
-		kind.scan = strstr(line.c_str(), SCAN_SCRIPT_SIGNATURE) != nullptr;
-		kind.queue = strstr(line.c_str(), QUEUE_SCRIPT_SIGNATURE) != nullptr;
-		kind.scheduler = strstr(line.c_str(), SCHEDULER_SCRIPT_SIGNATURE) != nullptr;
-		kind.feed = strstr(line.c_str(), FEED_SCRIPT_SIGNATURE) != nullptr;
+		kind.post = (kindBits & 1) != 0;
+		kind.scan = (kindBits & 2) != 0;
+		kind.queue = (kindBits & 4) != 0;
+		kind.scheduler = (kindBits & 8) != 0;
+		kind.feed = (kindBits & 16) != 0;
 		return kind;
 	}
 }

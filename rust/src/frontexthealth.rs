@@ -648,6 +648,223 @@ pub fn health_validate_article_read_chunk_size(bytes: i32) -> (i32, i32) {
     }
 }
 
+/// Computes the sorted index permutation for `ExtensionManager::Manager::Sort`.
+/// Parses `,;` tokens from `order_str` (trimming ASCII control/whitespace `<= b' '`),
+/// deduplicates tokens in first-seen order, places matching extension indices first
+/// using the exact iterative swap order of `ExtensionManager::Manager::Sort`, and sorts
+/// the remaining indices lexicographically by extension name.
+pub fn ext_sort_indices(names: &[&[u8]], order_str: &[u8]) -> Vec<usize> {
+    let mut indices: Vec<usize> = (0..names.len()).collect();
+    fn trim_tok(mut s: &[u8]) -> &[u8] {
+        while let Some(&b) = s.first() {
+            if b <= b' ' {
+                s = &s[1..];
+            } else {
+                break;
+            }
+        }
+        while let Some(&b) = s.last() {
+            if b <= b' ' {
+                s = &s[..s.len() - 1];
+            } else {
+                break;
+            }
+        }
+        s
+    }
+
+    let mut order: Vec<&[u8]> = Vec::new();
+    for raw in order_str.split(|&b| b == b',' || b == b';') {
+        let tok = trim_tok(raw);
+        if !tok.is_empty() && !order.contains(&tok) {
+            order.push(tok);
+        }
+    }
+
+    if order.is_empty() {
+        indices.sort_by(|&a, &b| names[a].cmp(names[b]));
+        return indices;
+    }
+
+    let mut count = 0usize;
+    for target in &order {
+        if let Some(pos) = indices.iter().position(|&idx| names[idx] == *target) {
+            indices.swap(count, pos);
+            count += 1;
+        }
+    }
+
+    indices[count..].sort_by(|&a, &b| names[a].cmp(names[b]));
+    indices
+}
+
+/// Checks whether `path` is `/dev/null`, `/dev/stdout`, or `/dev/stderr`
+/// (`SystemHealth::File::NullOrConsoleDevice`).
+pub fn health_is_null_or_console_device(path: &[u8]) -> bool {
+    matches!(path, b"/dev/null" | b"/dev/stdout" | b"/dev/stderr")
+}
+
+/// Extracts the inner IP slice from `hostname` when bracketed (`[ip]`), returning
+/// `(has_brackets, ip_offset, ip_len)`.
+pub fn health_extract_host_ip_slice(hostname: &[u8]) -> (bool, usize, usize) {
+    if hostname.len() >= 2 && hostname.first() == Some(&b'[') && hostname.last() == Some(&b']') {
+        (true, 1, hostname.len() - 2)
+    } else {
+        (false, 0, hostname.len())
+    }
+}
+
+/// Validates RFC-like hostname syntax (labels separated by `.`, each 1..=63 bytes,
+/// `[a-zA-Z0-9_]` at label ends and `[a-zA-Z0-9_-]` inside).
+pub fn health_is_valid_hostname_syntax(hostname: &[u8]) -> bool {
+    if hostname.is_empty() {
+        return false;
+    }
+    let is_end_char = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let is_mid_char = |b: u8| is_end_char(b) || b == b'-';
+    for label in hostname.split(|&b| b == b'.') {
+        if label.is_empty() || label.len() > 63 {
+            return false;
+        }
+        if !is_end_char(label[0]) || !is_end_char(label[label.len() - 1]) {
+            return false;
+        }
+        if label.len() > 2 && !label[1..label.len() - 1].iter().all(|&b| is_mid_char(b)) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Evaluates `SystemHealth::Network::ValidHost`, returning `(status_code, ip_offset, ip_len)`:
+/// - `0`: Ok
+/// - `1`: Error ("Hostname or IP address is empty")
+/// - `2`: Error ("Hostname is too long (maximum 255 characters)")
+/// - `3`: Error ("IPv6 address '<ip>' is provided, but connection mode is set to IPv4")
+/// - `4`: Error ("IPv4 address '<ip>' is provided, but connection mode is set to IPv6")
+/// - `5`: Error ("Remove brackets from the IP address, e.g., '<ip>'")
+/// - `6`: Error ("Invalid hostname or IP address: '<hostname>'")
+pub fn health_validate_host(
+    hostname: &[u8],
+    ipv: i32,
+    ip_v4_mode: i32,
+    ip_v6_mode: i32,
+    is_v4: bool,
+    is_v6: bool,
+) -> (i32, usize, usize) {
+    if hostname.is_empty() {
+        return (1, 0, 0);
+    }
+    if hostname.len() > 255 {
+        return (2, 0, 0);
+    }
+    let (has_brackets, ip_off, ip_len) = health_extract_host_ip_slice(hostname);
+    if is_v4 || is_v6 {
+        if ipv == ip_v4_mode && is_v6 {
+            return (3, ip_off, ip_len);
+        }
+        if ipv == ip_v6_mode && is_v4 {
+            return (4, ip_off, ip_len);
+        }
+        if has_brackets {
+            return (5, ip_off, ip_len);
+        }
+        return (0, ip_off, ip_len);
+    }
+    if !has_brackets && health_is_valid_hostname_syntax(hostname) {
+        return (0, ip_off, ip_len);
+    }
+    (6, ip_off, ip_len)
+}
+
+/// Evaluates `ControlUsernameValidator::Validate`:
+/// - `1`: empty (`Info`)
+/// - `2`: `"nzbget"` (`Info`)
+/// - `0`: `Ok`
+pub fn health_validate_control_username(username: &[u8]) -> i32 {
+    if username.is_empty() {
+        1
+    } else if username == b"nzbget" {
+        2
+    } else {
+        0
+    }
+}
+
+/// Returns whether a secondary username (`AddUsername` or `RestrictedUsername`) is enabled
+/// while `ControlUsername` is still set to the default `"nzbget"`.
+pub fn health_is_default_control_user_with_subuser(sub_user: &[u8], control_user: &[u8]) -> bool {
+    !sub_user.is_empty() && control_user == b"nzbget"
+}
+
+/// Evaluates `ArticleRetriesValidator::Validate`, returning `(status_code, warning_msg)`:
+/// - `-1`: `val < 0 || val > 99` (`Error`)
+/// - `1`: `val < 3` (`Warning` with formatted message in `warning_msg`)
+/// - `0`: `Ok`
+pub fn health_validate_article_retries(
+    opt_name: &[u8],
+    val: i32,
+    hc_dupe: bool,
+    dupe_search: bool,
+) -> (i32, Vec<u8>) {
+    if !(0..=99).contains(&val) {
+        return (-1, Vec::new());
+    }
+    if val < 3 {
+        let name_str = String::from_utf8_lossy(opt_name);
+        let mut msg = format!(
+            "'{name_str}' is set to {val}. This is very low; temporary connection drops may cause permanent download failures"
+        );
+        let decisions = match (hc_dupe, dupe_search) {
+            (true, true) => "HealthCheck=dupe and DupeSearch",
+            (true, false) => "HealthCheck=dupe",
+            (false, true) => "DupeSearch",
+            (false, false) => "",
+        };
+        if !decisions.is_empty() {
+            msg.push_str(", and ");
+            msg.push_str(decisions);
+            msg.push_str(
+                " may then take a good download for a bad one (fail over from it, rank its duplicates above it)",
+            );
+        }
+        return (1, msg.into_bytes());
+    }
+    (0, Vec::new())
+}
+
+/// Evaluates `ServerCipherValidator::Validate`:
+/// - `0`: `Ok`
+/// - `1`: `Warning` ("Cipher specified but TLS is disabled")
+/// - `2`: `Info` ("Using custom cipher suite")
+pub fn health_validate_server_cipher(active: bool, cipher: &[u8], tls: bool) -> i32 {
+    if !active || cipher.is_empty() {
+        0
+    } else if !tls {
+        1
+    } else {
+        2
+    }
+}
+
+/// Evaluates `ServerIpVersionValidator::Validate`:
+/// - `0`: `Ok` (`0` or `4`)
+/// - `1`: `Info` (`6`)
+/// - `-1`: `Error` (other)
+pub fn health_validate_server_ip_version(ip_version: i32) -> i32 {
+    match ip_version {
+        0 | 4 => 0,
+        6 => 1,
+        _ => -1,
+    }
+}
+
+/// Evaluates `FeedCertValidator::Validate`: returns `true` when `url` starts with
+/// `"https://"` (case-insensitive) and `cert_none` is true.
+pub fn health_validate_feed_cert(url: &[u8], cert_none: bool) -> bool {
+    cert_none && url.len() >= 8 && url[..8].eq_ignore_ascii_case(b"https://")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -813,5 +1030,51 @@ mod tests {
 
         assert_eq!(health_validate_article_read_chunk_size(2048), (1, 2));
         assert_eq!(health_validate_article_read_chunk_size(65536), (0, 64));
+
+        let names: [&[u8]; 4] = [b"zebra", b"Extension1", b"email", b"Extension2"];
+        assert_eq!(
+            ext_sort_indices(&names, b"Extension2, Extension1, email; Extension1; Extension1"),
+            vec![3, 1, 2, 0]
+        );
+        assert_eq!(ext_sort_indices(&names, b""), vec![1, 3, 2, 0]);
+
+        assert!(health_is_null_or_console_device(b"/dev/null"));
+        assert!(health_is_null_or_console_device(b"/dev/stdout"));
+        assert!(!health_is_null_or_console_device(b"/tmp/nzbget.log"));
+
+        assert_eq!(health_extract_host_ip_slice(b"[::1]"), (true, 1, 3));
+        assert_eq!(health_extract_host_ip_slice(b"news.example.com"), (false, 0, 16));
+        assert!(health_is_valid_hostname_syntax(b"news.example-1.com"));
+        assert!(!health_is_valid_hostname_syntax(b"-bad.example.com"));
+        assert!(!health_is_valid_hostname_syntax(b"bad..example.com"));
+        assert_eq!(health_validate_host(b"", 0, 1, 2, false, false).0, 1);
+        assert_eq!(health_validate_host(b"::1", 1, 1, 2, false, true).0, 3);
+        assert_eq!(health_validate_host(b"127.0.0.1", 2, 1, 2, true, false).0, 4);
+        assert_eq!(health_validate_host(b"[127.0.0.1]", 0, 1, 2, true, false).0, 5);
+        assert_eq!(health_validate_host(b"news.example.com", 0, 1, 2, false, false).0, 0);
+
+        assert_eq!(health_validate_control_username(b""), 1);
+        assert_eq!(health_validate_control_username(b"nzbget"), 2);
+        assert_eq!(health_validate_control_username(b"admin"), 0);
+        assert!(health_is_default_control_user_with_subuser(b"guest", b"nzbget"));
+        assert!(!health_is_default_control_user_with_subuser(b"", b"nzbget"));
+
+        let (code, msg) = health_validate_article_retries(b"ArticleRetries", 1, true, true);
+        assert_eq!(code, 1);
+        assert!(String::from_utf8_lossy(&msg).contains("HealthCheck=dupe and DupeSearch"));
+        assert_eq!(health_validate_article_retries(b"ArticleRetries", 3, true, true).0, 0);
+        assert_eq!(health_validate_article_retries(b"ArticleRetries", 100, false, false).0, -1);
+
+        assert_eq!(health_validate_server_cipher(true, b"AES128", false), 1);
+        assert_eq!(health_validate_server_cipher(true, b"AES128", true), 2);
+        assert_eq!(health_validate_server_cipher(true, b"", false), 0);
+
+        assert_eq!(health_validate_server_ip_version(0), 0);
+        assert_eq!(health_validate_server_ip_version(6), 1);
+        assert_eq!(health_validate_server_ip_version(9), -1);
+
+        assert!(health_validate_feed_cert(b"HTTPS://indexer.example/rss", true));
+        assert!(!health_validate_feed_cert(b"http://indexer.example/rss", true));
+        assert!(!health_validate_feed_cert(b"https://indexer.example/rss", false));
     }
 }

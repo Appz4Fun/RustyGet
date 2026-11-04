@@ -47,34 +47,25 @@ ConnectionValidator::ConnectionValidator(const Options& options) : m_options(opt
 Status ArticleRetriesValidator::Validate() const
 {
 	int val = m_options.GetArticleRetries();
+	NzbgetRsBuf msgBuf{};
+	int check = nzbget_rs_feh_health_validate_article_retries(
+		Options::ARTICLERETRIES.data(),
+		Options::ARTICLERETRIES.size(),
+		val,
+		m_options.GetHealthCheck() == Options::hcDupe ? 1 : 0,
+		m_options.GetDupeSearch() ? 1 : 0,
+		&msgBuf);
+	std::string msg(msgBuf.data ? msgBuf.data : "", msgBuf.len);
+	nzbget_rs_free(msgBuf);
 
-	if (val < 0 || val > 99)
+	if (check == -1)
 	{
 		return Status::Error("'" + std::string(Options::ARTICLERETRIES) +
 							 "' must be between 0 and 99");
 	}
-
-	if (val < 3)
+	if (check == 1)
 	{
-		std::string message = "'" + std::string(Options::ARTICLERETRIES) + "' is set to " +
-			std::to_string(val) + ". This is very low; temporary connection drops may cause permanent download failures";
-		// duplicate handling judges a posting by its article results: an article
-		// lost to one timeout reads as missing
-		std::string decisions;
-		if (m_options.GetHealthCheck() == Options::hcDupe)
-		{
-			decisions = "HealthCheck=dupe";
-		}
-		if (m_options.GetDupeSearch())
-		{
-			decisions += std::string(decisions.empty() ? "" : " and ") + "DupeSearch";
-		}
-		if (!decisions.empty())
-		{
-			message += ", and " + decisions + " may then take a good download for a bad one "
-				"(fail over from it, rank its duplicates above it)";
-		}
-		return Status::Warning(message);
+		return Status::Warning(msg);
 	}
 
 	return Status::Ok();

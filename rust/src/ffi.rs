@@ -30007,5 +30007,305 @@ pub unsafe extern "C" fn nzbget_rs_ufs_util_resolve_path_from_env(
     }
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ext_script_kind(
+    line_ptr: *const c_char,
+    line_len: usize,
+) -> i32 {
+    let slice = if line_ptr.is_null() || line_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(line_ptr.cast::<u8>(), line_len)
+    };
+    crate::extload::script_kind(slice)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_ext_sort_indices(
+    names: *const *const c_char,
+    count: usize,
+    order_str: *const c_char,
+    out_indices: *mut usize,
+) {
+    if names.is_null() || count == 0 || out_indices.is_null() {
+        return;
+    }
+    let mut name_slices: Vec<&[u8]> = Vec::with_capacity(count);
+    for i in 0..count {
+        name_slices.push(input(*names.add(i)));
+    }
+    let sorted = crate::frontexthealth::ext_sort_indices(&name_slices, input(order_str));
+    let out = std::slice::from_raw_parts_mut(out_indices, count);
+    out.copy_from_slice(&sorted);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_health_is_null_or_console_device(
+    path_ptr: *const c_char,
+    path_len: usize,
+) -> i32 {
+    let slice = if path_ptr.is_null() || path_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(path_ptr.cast::<u8>(), path_len)
+    };
+    i32::from(crate::frontexthealth::health_is_null_or_console_device(slice))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_health_extract_host_ip_slice(
+    hostname_ptr: *const c_char,
+    hostname_len: usize,
+    out_ip_off: *mut usize,
+    out_ip_len: *mut usize,
+) -> i32 {
+    let slice = if hostname_ptr.is_null() || hostname_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(hostname_ptr.cast::<u8>(), hostname_len)
+    };
+    let (has_brackets, off, len) = crate::frontexthealth::health_extract_host_ip_slice(slice);
+    if !out_ip_off.is_null() {
+        *out_ip_off = off;
+    }
+    if !out_ip_len.is_null() {
+        *out_ip_len = len;
+    }
+    i32::from(has_brackets)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_health_validate_host(
+    hostname_ptr: *const c_char,
+    hostname_len: usize,
+    ipv: i32,
+    ip_v4_mode: i32,
+    ip_v6_mode: i32,
+    is_v4: i32,
+    is_v6: i32,
+    out_ip_off: *mut usize,
+    out_ip_len: *mut usize,
+) -> i32 {
+    let slice = if hostname_ptr.is_null() || hostname_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(hostname_ptr.cast::<u8>(), hostname_len)
+    };
+    let (code, off, len) = crate::frontexthealth::health_validate_host(
+        slice,
+        ipv,
+        ip_v4_mode,
+        ip_v6_mode,
+        is_v4 != 0,
+        is_v6 != 0,
+    );
+    if !out_ip_off.is_null() {
+        *out_ip_off = off;
+    }
+    if !out_ip_len.is_null() {
+        *out_ip_len = len;
+    }
+    code
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_health_validate_control_username(
+    username_ptr: *const c_char,
+    username_len: usize,
+) -> i32 {
+    let slice = if username_ptr.is_null() || username_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(username_ptr.cast::<u8>(), username_len)
+    };
+    crate::frontexthealth::health_validate_control_username(slice)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_health_is_default_control_user_with_subuser(
+    sub_ptr: *const c_char,
+    sub_len: usize,
+    ctrl_ptr: *const c_char,
+    ctrl_len: usize,
+) -> i32 {
+    let sub = if sub_ptr.is_null() || sub_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(sub_ptr.cast::<u8>(), sub_len)
+    };
+    let ctrl = if ctrl_ptr.is_null() || ctrl_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(ctrl_ptr.cast::<u8>(), ctrl_len)
+    };
+    i32::from(crate::frontexthealth::health_is_default_control_user_with_subuser(sub, ctrl))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_health_validate_article_retries(
+    opt_ptr: *const c_char,
+    opt_len: usize,
+    val: i32,
+    hc_dupe: i32,
+    dupe_search: i32,
+    out_msg: *mut RsBuf,
+) -> i32 {
+    let opt = if opt_ptr.is_null() || opt_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(opt_ptr.cast::<u8>(), opt_len)
+    };
+    let (code, msg) = crate::frontexthealth::health_validate_article_retries(
+        opt,
+        val,
+        hc_dupe != 0,
+        dupe_search != 0,
+    );
+    if !out_msg.is_null() {
+        *out_msg = into_buf(msg);
+    }
+    code
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_health_validate_server_cipher(
+    active: i32,
+    cipher_ptr: *const c_char,
+    cipher_len: usize,
+    tls: i32,
+) -> i32 {
+    let cipher = if cipher_ptr.is_null() || cipher_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(cipher_ptr.cast::<u8>(), cipher_len)
+    };
+    crate::frontexthealth::health_validate_server_cipher(active != 0, cipher, tls != 0)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_feh_health_validate_server_ip_version(ip_version: i32) -> i32 {
+    crate::frontexthealth::health_validate_server_ip_version(ip_version)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feh_health_validate_feed_cert(
+    url: *const c_char,
+    cert_none: i32,
+) -> i32 {
+    i32::from(crate::frontexthealth::health_validate_feed_cert(
+        input(url),
+        cert_none != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sfc_feed_info_format_season_episode(
+    season_num: i32,
+    ep_ptr: *const c_char,
+    ep_len: usize,
+    out_season: *mut RsBuf,
+    out_episode: *mut RsBuf,
+) {
+    let ep_slice = if ep_ptr.is_null() || ep_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(ep_ptr.cast::<u8>(), ep_len)
+    };
+    let (season, episode) =
+        crate::scriptfeedcfg::feed_info_format_season_episode(season_num, ep_slice);
+    if !out_season.is_null() {
+        *out_season = into_buf(season);
+    }
+    if !out_episode.is_null() {
+        *out_episode = into_buf(episode);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dsf_nzb_fetcher_parse_cooldown_line(
+    line_ptr: *const c_char,
+    line_len: usize,
+    now_sec: i64,
+    out_indexer: *mut RsBuf,
+    out_when: *mut i64,
+) -> i32 {
+    let slice = if line_ptr.is_null() || line_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(line_ptr.cast::<u8>(), line_len)
+    };
+    match crate::dupesearchfetcher::dsf_nzb_fetcher_parse_cooldown_line(slice, now_sec) {
+        Some((indexer, when)) => {
+            if !out_indexer.is_null() {
+                *out_indexer = into_buf(indexer);
+            }
+            if !out_when.is_null() {
+                *out_when = when;
+            }
+            1
+        }
+        None => {
+            if !out_indexer.is_null() {
+                *out_indexer = into_buf(Vec::new());
+            }
+            if !out_when.is_null() {
+                *out_when = 0;
+            }
+            0
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dsf_nzb_fetcher_format_cooldown_line(
+    indexer_ptr: *const c_char,
+    indexer_len: usize,
+    when_sec: i64,
+    now_sec: i64,
+) -> RsBuf {
+    let slice = if indexer_ptr.is_null() || indexer_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(indexer_ptr.cast::<u8>(), indexer_len)
+    };
+    into_buf(crate::dupesearchfetcher::dsf_nzb_fetcher_format_cooldown_line(
+        slice, when_sec, now_sec,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_fleet_ensure_nzb_ext(
+    name_ptr: *const c_char,
+    name_len: usize,
+) -> RsBuf {
+    let slice = if name_ptr.is_null() || name_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(name_ptr.cast::<u8>(), name_len)
+    };
+    into_buf(crate::dupequeuehealth::dqh_fleet_ensure_nzb_ext(slice))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_fleet_visit_pipe_names(
+    names_ptr: *const c_char,
+    names_len: usize,
+    ctx: *mut std::ffi::c_void,
+    visit: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, usize)>,
+) {
+    let Some(cb) = visit else {
+        return;
+    };
+    let slice = if names_ptr.is_null() || names_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(names_ptr.cast::<u8>(), names_len)
+    };
+    crate::dupequeuehealth::dqh_fleet_visit_pipe_names(slice, |part| {
+        cb(ctx, part.as_ptr().cast::<c_char>(), part.len());
+    });
+}
+
+
 
 

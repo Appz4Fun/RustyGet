@@ -156,16 +156,15 @@ void FeedItemInfo::ParseSeasonEpisode()
 	{
 		const char* season = m_title.c_str() + regEx->GetMatchStart(1);
 		int seasonNum = Util::StrToNum<int>(season).value_or(0);
-		SetSeason(BString<100>("S%02d", seasonNum));
-
-		BString<100> regValue;
 		const char* val = m_title.c_str() + regEx->GetMatchStart(2);
-		regValue.Set(val, regEx->GetMatchLen(2));
-
-		BString<100> episode("E%s", *regValue);
-		Util::ReduceStr(episode, "-", "");
-		for (char* p = episode; *p; p++) *p = toupper(*p); // convert string to uppercase e02 -> E02
-		SetEpisode(episode);
+		size_t valLen = (size_t)regEx->GetMatchLen(2);
+		NzbgetRsBuf seasonBuf{};
+		NzbgetRsBuf episodeBuf{};
+		nzbget_rs_sfc_feed_info_format_season_episode(seasonNum, val, valLen, &seasonBuf, &episodeBuf);
+		SetSeason(seasonBuf.data ? seasonBuf.data : "");
+		SetEpisode(episodeBuf.data ? episodeBuf.data : "");
+		nzbget_rs_free(seasonBuf);
+		nzbget_rs_free(episodeBuf);
 	}
 }
 

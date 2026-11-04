@@ -33,8 +33,6 @@
 #include <openssl/rand.h>
 #endif
 
-static const char* ERR_HTTP_OK = "200 OK";
-static const char* ERR_HTTP_NOT_MODIFIED = "304 Not Modified";
 static const char* ERR_HTTP_BAD_REQUEST = "400 Bad Request";
 static const char* ERR_HTTP_NOT_FOUND = "404 Not Found";
 static const char* ERR_HTTP_SERVICE_UNAVAILABLE = "503 Service Unavailable";
@@ -309,18 +307,6 @@ bool WebProcessor::CheckCredentials()
 			m_authInfo);
 	}
 	return check.authorized != 0;
-}
-
-bool WebProcessor::IsAuthorizedIp(const char* remoteAddr)
-{
-	// rust/src/webserver.rs
-#ifdef __GLIBC__
-	const int* table = reinterpret_cast<const int*>(*__ctype_tolower_loc());
-#else
-	const int* table = nullptr;
-#endif
-	return nzbget_rs_web_authorized_ip(g_Options->GetAuthorizedIp(), m_connection->GetRemoteAddr(), table,
-		CHAR_MIN < 0, WebFold) != 0;
 }
 
 void WebProcessor::Dispatch()

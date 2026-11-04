@@ -21,7 +21,6 @@
 #include "nzbget.h"
 
 #include <fstream>
-#include <sstream>
 #include "NzbFetcher.h"
 #include "DupeUtil.h"
 #include "HttpGet.h"
@@ -70,17 +69,14 @@ void NzbFetcher::Load()
 	time_t now = Util::CurrentTime();
 	while (std::getline(file, line))
 	{
-		std::stringstream stream(line);
-		std::string indexer, until;
-		if (std::getline(stream, indexer, '\t') && std::getline(stream, until, '\t'))
+		NzbgetRsBuf idxBuf{};
+		int64_t when = 0;
+		if (nzbget_rs_dsf_nzb_fetcher_parse_cooldown_line(
+			line.data(), line.size(), (int64_t)now, &idxBuf, &when) != 0)
 		{
-			time_t when = (time_t)atoll(until.c_str());
-			if (nzbget_rs_dsf_nzb_fetcher_is_cooldown_active(
-				(int64_t)when, (int64_t)now) != 0)
-			{
-				m_refusedUntil[indexer] = when;
-			}
+			m_refusedUntil[std::string(idxBuf.data ? idxBuf.data : "", idxBuf.len)] = (time_t)when;
 		}
+		nzbget_rs_free(idxBuf);
 	}
 }
 
@@ -92,17 +88,19 @@ void NzbFetcher::Save()
 	{
 		return;
 	}
-	std::ostringstream text;
+	std::string text;
 	time_t now = Util::CurrentTime();
 	for (const auto& entry : m_refusedUntil)
 	{
-		if (nzbget_rs_dsf_nzb_fetcher_is_cooldown_active(
-			(int64_t)entry.second, (int64_t)now) != 0)
+		NzbgetRsBuf lineBuf = nzbget_rs_dsf_nzb_fetcher_format_cooldown_line(
+			entry.first.data(), entry.first.size(), (int64_t)entry.second, (int64_t)now);
+		if (lineBuf.data && lineBuf.len > 0)
 		{
-			text << entry.first << '\t' << (long long)entry.second << "\t\n";
+			text.append(lineBuf.data, lineBuf.len);
 		}
+		nzbget_rs_free(lineBuf);
 	}
-	if (!DupeUtil::WriteAtomic(m_statePath, text.str()))
+	if (!DupeUtil::WriteAtomic(m_statePath, text))
 	{
 		warn("Could not save the DupeSearch indexer state to %s", m_statePath.c_str());
 	}

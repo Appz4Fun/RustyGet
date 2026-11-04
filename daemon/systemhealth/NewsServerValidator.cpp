@@ -155,15 +155,12 @@ Status ServerEncryptionValidator::Validate() const
 
 Status ServerCipherValidator::Validate() const
 {
-	if (!m_server.GetActive()) return Status::Ok();
-
 	std::string_view cipher = m_server.GetCipher();
-	if (cipher.empty()) return Status::Ok();
-
-	bool tls = m_server.GetTls();
-	if (!tls) return Status::Warning("Cipher specified but TLS is disabled");
-
-	return Status::Info("Using custom cipher suite");
+	int check = nzbget_rs_feh_health_validate_server_cipher(
+		m_server.GetActive() ? 1 : 0, cipher.data(), cipher.size(), m_server.GetTls() ? 1 : 0);
+	if (check == 1) return Status::Warning("Cipher specified but TLS is disabled");
+	if (check == 2) return Status::Info("Using custom cipher suite");
+	return Status::Ok();
 }
 
 Status ServerConnectionsValidator::Validate() const
@@ -223,16 +220,11 @@ Status ServerCertVerificationValidator::Validate() const
 
 Status ServerIpVersionValidator::Validate() const
 {
-	// Auto: 0,
-	// V4: 4,
-	// V6: 6
-	int ipVersion = m_server.GetIpVersion();
-	if (ipVersion == 0 || ipVersion == 4)
+	int check = nzbget_rs_feh_health_validate_server_ip_version(m_server.GetIpVersion());
+	if (check == 0)
 		return Status::Ok();
-
-	if (ipVersion == 6)
+	if (check == 1)
 		return Status::Info("Using IPv6 - ensure your network supports IPv6");
-
 	return Status::Error("Invalid value. Available options are: Auto, IpV4, IpV6");
 }
 

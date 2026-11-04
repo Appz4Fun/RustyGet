@@ -5307,6 +5307,38 @@ size_t nzbget_rs_fuq_queue_coord_find_dupe_file_indices(
 NzbgetRsBuf nzbget_rs_ufs_util_resolve_path_from_env(
     const char* path_ptr, size_t path_len, const char* env_path);
 
+int32_t nzbget_rs_ext_script_kind(const char* line_ptr, size_t line_len);
+void nzbget_rs_feh_ext_sort_indices(
+    const char* const* names, size_t count, const char* order_str, size_t* out_indices);
+int32_t nzbget_rs_feh_health_is_null_or_console_device(const char* path_ptr, size_t path_len);
+int32_t nzbget_rs_feh_health_extract_host_ip_slice(
+    const char* hostname_ptr, size_t hostname_len, size_t* out_ip_off, size_t* out_ip_len);
+int32_t nzbget_rs_feh_health_validate_host(
+    const char* hostname_ptr, size_t hostname_len,
+    int32_t ipv, int32_t ip_v4_mode, int32_t ip_v6_mode, int32_t is_v4, int32_t is_v6,
+    size_t* out_ip_off, size_t* out_ip_len);
+int32_t nzbget_rs_feh_health_validate_control_username(const char* username_ptr, size_t username_len);
+int32_t nzbget_rs_feh_health_is_default_control_user_with_subuser(
+    const char* sub_ptr, size_t sub_len, const char* ctrl_ptr, size_t ctrl_len);
+int32_t nzbget_rs_feh_health_validate_article_retries(
+    const char* opt_ptr, size_t opt_len, int32_t val, int32_t hc_dupe, int32_t dupe_search, NzbgetRsBuf* out_msg);
+int32_t nzbget_rs_feh_health_validate_server_cipher(
+    int32_t active, const char* cipher_ptr, size_t cipher_len, int32_t tls);
+int32_t nzbget_rs_feh_health_validate_server_ip_version(int32_t ip_version);
+int32_t nzbget_rs_feh_health_validate_feed_cert(const char* url, int32_t cert_none);
+void nzbget_rs_sfc_feed_info_format_season_episode(
+    int32_t season_num, const char* ep_ptr, size_t ep_len,
+    NzbgetRsBuf* out_season, NzbgetRsBuf* out_episode);
+int32_t nzbget_rs_dsf_nzb_fetcher_parse_cooldown_line(
+    const char* line_ptr, size_t line_len, int64_t now_sec,
+    NzbgetRsBuf* out_indexer, int64_t* out_when);
+NzbgetRsBuf nzbget_rs_dsf_nzb_fetcher_format_cooldown_line(
+    const char* indexer_ptr, size_t indexer_len, int64_t when_sec, int64_t now_sec);
+NzbgetRsBuf nzbget_rs_dqh_fleet_ensure_nzb_ext(const char* name_ptr, size_t name_len);
+void nzbget_rs_dqh_fleet_visit_pipe_names(
+    const char* names_ptr, size_t names_len, void* ctx,
+    void (*visit)(void* ctx, const char* part_ptr, size_t part_len));
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

@@ -166,7 +166,7 @@ bool NullOrConsoleDevice(const fs::path& path)
 	if (path.empty()) return false;
 
 	std::string p = path.string();
-	return p == "/dev/null" || p == "/dev/stdout" || p == "/dev/stderr";
+	return nzbget_rs_feh_health_is_null_or_console_device(p.data(), p.size()) != 0;
 }
 
 }  // namespace File
@@ -268,54 +268,46 @@ namespace Network
 
 Status ValidHost(std::string_view hostname, Connection::EIPVersion ipv)
 {
-	if (hostname.empty())
-	{
-		return Status::Error("Hostname or IP address is empty");
-	}
-
-	if (hostname.size() > 255)
-	{
-		return Status::Error("Hostname is too long (maximum 255 characters)");
-	}
-
-	bool hasBrackets = (hostname.size() >= 2 && hostname.front() == '[' && hostname.back() == ']');
-	std::string_view ip = hasBrackets ? hostname.substr(1, hostname.size() - 2) : hostname;
+	size_t ipOff = 0, ipLen = 0;
+	nzbget_rs_feh_health_extract_host_ip_slice(hostname.data(), hostname.size(), &ipOff, &ipLen);
+	std::string_view ip = hostname.substr(ipOff, ipLen);
 
 	boost::system::error_code ecv4, ecv6;
-	boost::asio::ip::make_address_v4(ip, ecv4);
-	boost::asio::ip::make_address_v6(ip, ecv6);
-
-	bool isV4 = !ecv4;
-	bool isV6 = !ecv6;
-
-	if (isV4 || isV6)
+	if (!hostname.empty() && hostname.size() <= 255)
 	{
-		if (ipv == Connection::EIPVersion::ipV4 && isV6)
-		{
+		boost::asio::ip::make_address_v4(ip, ecv4);
+		boost::asio::ip::make_address_v6(ip, ecv6);
+	}
+	else
+	{
+		ecv4 = boost::asio::error::invalid_argument;
+		ecv6 = boost::asio::error::invalid_argument;
+	}
+
+	int code = nzbget_rs_feh_health_validate_host(
+		hostname.data(), hostname.size(),
+		(int)ipv, (int)Connection::EIPVersion::ipV4, (int)Connection::EIPVersion::ipV6,
+		!ecv4 ? 1 : 0, !ecv6 ? 1 : 0,
+		&ipOff, &ipLen);
+	ip = hostname.substr(ipOff, ipLen);
+
+	switch (code)
+	{
+		case 0:
+			return Status::Ok();
+		case 1:
+			return Status::Error("Hostname or IP address is empty");
+		case 2:
+			return Status::Error("Hostname is too long (maximum 255 characters)");
+		case 3:
 			return Status::Error("IPv6 address '" + std::string(ip) + "' is provided, but connection mode is set to IPv4");
-		}
-		if (ipv == Connection::EIPVersion::ipV6 && isV4)
-		{
+		case 4:
 			return Status::Error("IPv4 address '" + std::string(ip) + "' is provided, but connection mode is set to IPv6");
-		}
-
-		if (hasBrackets)
-		{
+		case 5:
 			return Status::Error("Remove brackets from the IP address, e.g., '" + std::string(ip) + "'");
-		}
-		return Status::Ok();
+		default:
+			return Status::Error("Invalid hostname or IP address: '" + std::string(hostname) + "'");
 	}
-
-	static const std::regex regex(
-		R"(^([a-zA-Z0-9_]|[a-zA-Z0-9_][a-zA-Z0-9_\-]{0,61}[a-zA-Z0-9_])(\.([a-zA-Z0-9_]|[a-zA-Z0-9_][a-zA-Z0-9_\-]{0,61}[a-zA-Z0-9_]))*$)"
-	);
-
-	if (!hasBrackets && std::regex_match(hostname.begin(), hostname.end(), regex))
-	{
-		return Status::Ok();
-	}
-
-	return Status::Error("Invalid hostname or IP address: '" + std::string(hostname) + "'");
 }
 
 Status ValidPort(int port)

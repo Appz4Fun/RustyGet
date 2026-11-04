@@ -46,11 +46,6 @@ private:
 	bool m_authError = false;
 	bool m_authRejected = false;
 
-	void Clear();
-	void ReportErrorAnswer(const char* msgPrefix, const char* answer);
-	bool Authenticate();
-	bool AuthInfoUser(int recur);
-	bool AuthInfoPass(int recur);
 	// the connection as rust/src/nntp.rs drives it (NzbgetRsNntpIo)
 	struct RsExchange;
 	static int RsWriteLine(void* ctx, const char* line);

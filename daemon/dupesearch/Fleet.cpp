@@ -204,15 +204,18 @@ Fleet::Result Fleet::Append(Request request)
 				// a merged item (GroupMerge) names its nzb-files joined with '|': each is
 				// one of its postings (F20: none was seen, and a resent fleet added them again)
 				std::string names = nzbInfo->GetQueuedFilename() ? nzbInfo->GetQueuedFilename() : "";
-				for (size_t start = 0; start < names.size(); )
+				struct PipeCtx
 				{
-					size_t end = std::min(names.find('|', start), names.size());
-					if (end > start)
+					std::vector<std::pair<int, std::string>>& existing;
+					int id;
+				} pipeCtx{existing, nzbInfo->GetId()};
+				nzbget_rs_dqh_fleet_visit_pipe_names(
+					names.data(), names.size(), &pipeCtx,
+					[](void* ctx, const char* partPtr, size_t partLen)
 					{
-						existing.emplace_back(nzbInfo->GetId(), names.substr(start, end - start));
-					}
-					start = end + 1;
-				}
+						auto* c = static_cast<PipeCtx*>(ctx);
+						c->existing.emplace_back(c->id, std::string(partPtr, partLen));
+					});
 			};
 		for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
 		{
@@ -478,11 +481,9 @@ Fleet::Result Fleet::Append(Request request)
 					std::to_string(candidate->alive).c_str());
 			}
 			int nzbId = 0;
-			std::string name = member.name;
-			if (name.size() < 4 || strcasecmp(name.c_str() + name.size() - 4, ".nzb"))
-			{
-				name += ".nzb";
-			}
+			NzbgetRsBuf nameBuf = nzbget_rs_dqh_fleet_ensure_nzb_ext(member.name.data(), member.name.size());
+			std::string name(nameBuf.data ? nameBuf.data : "", nameBuf.len);
+			nzbget_rs_free(nameBuf);
 			int memberScore = nzbget_rs_dqh_fleet_calc_member_add_score(
 				runningId, lowest, top, entry.rank);
 			Scanner::EAddStatus status = g_Scanner->AddExternalFile(name.c_str(), request.category.c_str(),

@@ -174,7 +174,12 @@ const ArticleFetcher::FetchedArticle* DonorMemberSource::StoreFetched(int partIn
 	}
 #endif
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_sap_stream_repair_can_evict_donor_cache(
+		m_cache.size(), MaxCachedParts, m_cacheOrder.size()))
+#else
 	if ((int)m_cache.size() >= MaxCachedParts && !m_cacheOrder.empty())
+#endif
 	{
 		m_cache.erase(m_cacheOrder.front());
 		m_cacheOrder.pop_front();
@@ -188,12 +193,19 @@ const ArticleFetcher::FetchedArticle* DonorMemberSource::PartForOffset(int64 off
 	int& partIndex)
 {
 	// index guess from the estimates, corrected by the measured drift
+#ifdef NZBGET_USE_RUST
+	int index = nzbget_rs_sap_stream_repair_donor_index_for_offset(
+		offset, m_drift,
+		reinterpret_cast<const NzbgetRsByteRange*>(m_ranges.data()),
+		m_ranges.size());
+#else
 	int64 target = offset - m_drift;
 	int index = 0;
 	while (index + 1 < (int)m_ranges.size() && m_ranges[index].End() <= target)
 	{
 		index++;
 	}
+#endif
 
 	for (int step = 0; step < MaxResolveSteps; step++)
 	{
@@ -258,6 +270,12 @@ void DonorMemberSource::Prefetch(int64 offset, int64 size)
 	// range, one more on each side for estimation error
 	auto indexOf = [this](int64 offset)
 	{
+#ifdef NZBGET_USE_RUST
+		return nzbget_rs_sap_stream_repair_donor_index_for_offset(
+			offset, m_drift,
+			reinterpret_cast<const NzbgetRsByteRange*>(m_ranges.data()),
+			m_ranges.size());
+#else
 		int64 target = offset - m_drift;
 		int index = 0;
 		while (index + 1 < (int)m_ranges.size() && m_ranges[index].End() <= target)
@@ -265,6 +283,7 @@ void DonorMemberSource::Prefetch(int64 offset, int64 size)
 			index++;
 		}
 		return index;
+#endif
 	};
 #ifdef NZBGET_USE_RUST
 	int first = 0, last = 0;
@@ -797,7 +816,12 @@ void StreamRepairController::StartWatchdog(const std::vector<RepairTarget>& targ
 	m_missingBytes = 0;
 	for (const RepairTarget& target : targets)
 	{
+#ifdef NZBGET_USE_RUST
+		m_missingBytes += nzbget_rs_sap_stream_repair_target_missing_bytes(
+			target.DecodedFileSize, DupeStreamRepair::TotalSize(target.Holes), target.EncodedSize);
+#else
 		m_missingBytes += target.DecodedFileSize > 0 ? DupeStreamRepair::TotalSize(target.Holes) : target.EncodedSize;
+#endif
 	}
 
 	// nzbget's average download speed
@@ -805,7 +829,11 @@ void StreamRepairController::StartWatchdog(const std::vector<RepairTarget>& targ
 	int64 allBytes = 0;
 	bool standBy = false;
 	g_StatMeter->CalcTotalStat(&upTimeSec, &downloadTimeSec, &allBytes, &standBy);
+#ifdef NZBGET_USE_RUST
+	int64 downloadRate = nzbget_rs_sap_stream_repair_watchdog_calc_download_rate(downloadTimeSec, allBytes);
+#else
 	int64 downloadRate = downloadTimeSec > 0 ? allBytes / downloadTimeSec : 0;
+#endif
 
 	m_watchdog = std::thread([this, timeout, downloadRate]()
 		{
@@ -1591,7 +1619,11 @@ StreamRepairController::ERepairOutcome StreamRepairController::RepairWholeFile(c
 		// not written back): it is started over. Refused, it stayed a sparse, partly
 		// zero file that every later pass reported as "no duplicate could supply"
 		int64 existing = FileSystem::FileSize(filePath);
+#ifdef NZBGET_USE_RUST
+		if (!nzbget_rs_sap_stream_repair_whole_file_existing_reusable(existing, fetched.FileSize))
+#else
 		if (existing != fetched.FileSize && existing != 0)
+#endif
 		{
 			PrintMessage(Message::mkWarning, "Could not recreate %s: file already exists", *filePath);
 			return roNoCost;
@@ -1734,8 +1766,13 @@ bool StreamRepairController::VerifyDonor(DiskFile& file, const RepairTarget& tar
 		int64 pooled = 0;
 		for (const std::pair<int64, int>& candidate : overlaps)
 		{
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_sap_stream_repair_verify_donor_pool_stop(
+				probeParts.size(), DupeStreamRepair::ProbeCount, pooled, base))
+#else
 			if ((int)probeParts.size() >= DupeStreamRepair::ProbeCount &&
 				(pooled >= base || (int)probeParts.size() >= DupeStreamRepair::ProbeCount * 2))
+#endif
 			{
 				reserve.push_back(candidate.second);
 				continue;
@@ -2022,7 +2059,11 @@ int StreamRepairController::PatchFromDonor(DiskFile& file, RepairTarget& target,
 			}
 		}
 
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_sap_stream_repair_patch_should_break_pass2(fetchedAny ? 1 : 0, drift))
+#else
 		if (!fetchedAny || drift == 0)
+#endif
 		{
 			break; // nothing measured, or estimates were exact - pass 2 would repeat pass 1
 		}
@@ -2326,7 +2367,11 @@ void StreamRepairController::ExecCrossPackRepair(const char* destDir,
 					setTried[setIndex] = true;
 					// map building is fetch-budgeted; probing and patching are
 					// naturally bounded by the holes
+#ifdef NZBGET_USE_RUST
+					int mappingBudget = nzbget_rs_sap_stream_repair_mapping_budget(donorSet.Members.size());
+#else
 					int mappingBudget = 8 + 4 * (int)donorSet.Members.size();
+#endif
 					donorSources.SetFetchBudget(&mappingBudget);
 					setMaps[setIndex] = ContentMapper::BuildMap(donorMembers, donorSet,
 						donorSources, setSkips[setIndex]);
@@ -2339,7 +2384,11 @@ void StreamRepairController::ExecCrossPackRepair(const char* destDir,
 						(setSkips[setIndex] == ContentMapper::SkipEncryptedData ||
 						 setSkips[setIndex] == ContentMapper::SkipEncryptedHeaders))
 					{
+#ifdef NZBGET_USE_RUST
+						mappingBudget = nzbget_rs_sap_stream_repair_mapping_budget(donorSet.Members.size());
+#else
 						mappingBudget = 8 + 4 * (int)donorSet.Members.size();
+#endif
 						setMaps[setIndex] = ContentMapper::BuildMap(donorMembers, donorSet,
 							donorSources, setSkips[setIndex], donor.Password);
 						if (!setMaps[setIndex])
@@ -2920,11 +2969,16 @@ bool StreamRepairController::VerifyEncryptedFromSource(RepairSetData& repairSet,
 	for (const StreamRange& window : windows)
 	{
 		int64 windowEnd = std::min(window.End(), lastComputable);
+#ifdef NZBGET_USE_RUST
+		achievable += nzbget_rs_sap_stream_repair_encrypted_achievable_bytes(
+			window.Offset, window.Size, lastComputable, chainStart(window, windowEnd));
+#else
 		int64 from = std::max(window.Offset, chainStart(window, windowEnd));
 		if (from < windowEnd)
 		{
 			achievable += windowEnd - from;
 		}
+#endif
 	}
 	if (achievable < 64)
 	{
@@ -3512,7 +3566,12 @@ bool StreamRepairController::MaterializeDonorSet(NzbInfo* donorNzb,
 					"Downloading duplicate %s (volume %i/%i, article %i/%i, %.1f MB)",
 					donorName, memberNumber, (int)set.Members.size(), deliveredArticles,
 					(int)donorFile->GetArticles()->size(), totalBytes / 1024.0 / 1024.0));
+#ifdef NZBGET_USE_RUST
+				m_postInfo->SetStageProgress(
+					nzbget_rs_sap_stream_repair_materialize_stage_progress(completedArticles, totalArticles));
+#else
 				m_postInfo->SetStageProgress((int)(completedArticles * 1000 / totalArticles));
+#endif
 			}
 		};
 		updateProgress();

@@ -357,6 +357,21 @@ std::string RepairController::PostParChecker::RequestTwinIndex()
 		}
 		std::vector<TwinCheck::NzbEntry> entries = TwinCheck::ReadNzbEntries(candidate.nzbFilename.c_str());
 		const TwinCheck::NzbEntry* index = nullptr;
+#ifdef NZBGET_USE_RUST
+		for (const TwinCheck::NzbEntry& entry : entries)
+		{
+			if (nzbget_rs_sap_repair_ctrl_is_better_twin_par2_entry(
+				entry.par2 ? 1 : 0, entry.size, index != nullptr ? 1 : 0,
+				index ? index->size : 0, TwinCheck::MaxIndexSize))
+			{
+				index = &entry;
+			}
+		}
+		if (!index)
+		{
+			continue;
+		}
+#else
 		for (const TwinCheck::NzbEntry& entry : entries)
 		{
 			if (entry.par2 && (!index || entry.size < index->size))
@@ -368,6 +383,7 @@ std::string RepairController::PostParChecker::RequestTwinIndex()
 		{
 			continue;
 		}
+#endif
 
 		std::vector<char> data;
 		std::string path = FetchTwinFile(*index, &data);

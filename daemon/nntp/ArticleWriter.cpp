@@ -641,6 +641,26 @@ bool ArticleWriter::CompleteFileParts()
 
 void ArticleWriter::LogStartMessage(std::string_view infoFilename, bool directWrite, bool cached)
 {
+#ifdef NZBGET_USE_RUST
+	int startMode = nzbget_rs_sap_article_writer_log_start_mode(
+		g_Options->GetRawArticle() ? 1 : 0, directWrite ? 1 : 0, cached ? 1 : 0);
+	if (startMode == 0)
+	{
+		detail("Moving articles for %s", infoFilename.data());
+	}
+	else if (startMode == 1)
+	{
+		detail("Writing articles for %s", infoFilename.data());
+	}
+	else if (startMode == 2)
+	{
+		detail("Checking articles for %s", infoFilename.data());
+	}
+	else
+	{
+		detail("Joining articles for %s", infoFilename.data());
+	}
+#else
 	if (g_Options->GetRawArticle())
 	{
 		detail("Moving articles for %s", infoFilename.data());
@@ -657,6 +677,7 @@ void ArticleWriter::LogStartMessage(std::string_view infoFilename, bool directWr
 	{
 		detail("Joining articles for %s", infoFilename.data());
 	}
+#endif
 }
 
 std::optional<ArticleWriter::OutputPaths>
@@ -1099,8 +1120,15 @@ void ArticleWriter::FlushCache()
 	// a file being retried writes into its existing output (ForceDirectWrite), as
 	// Start and Finish do: flushed to temporary files instead, its cached articles
 	// were never written to the file although marked done
+#ifdef NZBGET_USE_RUST
+	bool directWrite = nzbget_rs_sap_article_writer_flush_is_direct_write(
+		g_Options->GetDirectWrite() ? 1 : 0,
+		m_fileInfo->GetForceDirectWrite() ? 1 : 0,
+		m_fileInfo->GetOutputInitialized() ? 1 : 0) != 0;
+#else
 	bool directWrite = (g_Options->GetDirectWrite() || m_fileInfo->GetForceDirectWrite()) &&
 		m_fileInfo->GetOutputInitialized();
+#endif
 	DiskFile outfile;
 	bool needBufFile = false;
 	int flushedArticles = 0;
@@ -1133,7 +1161,13 @@ void ArticleWriter::FlushCache()
 
 		for (ArticleInfo* pa : cachedArticles)
 		{
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_sap_article_writer_flush_should_abort_deleted(
+				m_fileInfo->GetDeleted() ? 1 : 0,
+				m_fileInfo->GetNzbInfo()->GetParking() ? 1 : 0))
+#else
 			if (m_fileInfo->GetDeleted() && !m_fileInfo->GetNzbInfo()->GetParking())
+#endif
 			{
 				// the file was deleted during flushing: stop flushing immediately
 				break;
@@ -1416,11 +1450,24 @@ void ArticleCache::Free(CachedSegmentData* segment)
 		free(segment->m_data);
 
 		std::lock_guard<std::mutex> guard(m_allocMutex);
+#ifdef NZBGET_USE_RUST
+		int deleteCacheFlag = 0;
+		m_allocated = nzbget_rs_sap_article_cache_free_eval(
+			segment->m_size, m_allocated,
+			g_Options->GetServerMode() ? 1 : 0,
+			g_Options->GetContinuePartial() ? 1 : 0,
+			&deleteCacheFlag);
+		if (deleteCacheFlag)
+		{
+			g_DiskState->DeleteCacheFlag();
+		}
+#else
 		m_allocated -= segment->m_size;
 		if (!m_allocated && g_Options->GetServerMode() && g_Options->GetContinuePartial())
 		{
 			g_DiskState->DeleteCacheFlag();
 		}
+#endif
 	}
 }
 

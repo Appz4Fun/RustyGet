@@ -403,6 +403,19 @@ void ContentMap::ExcludeMember(int memberIndex)
 	std::vector<RunCrypto> keptCryptos;
 	for (size_t i = 0; i < m_runs.size(); i++)
 	{
+#ifdef NZBGET_USE_RUST
+		int keepCrypto = 0;
+		if (!nzbget_rs_sap_content_map_exclude_member_step(
+			m_runs[i].MemberIndex, memberIndex, m_runCryptos.size(), m_runs.size(), &keepCrypto))
+		{
+			continue;
+		}
+		keptRuns.push_back(m_runs[i]);
+		if (keepCrypto)
+		{
+			keptCryptos.push_back(m_runCryptos[i]);
+		}
+#else
 		if (m_runs[i].MemberIndex == memberIndex)
 		{
 			continue;
@@ -412,6 +425,7 @@ void ContentMap::ExcludeMember(int memberIndex)
 		{
 			keptCryptos.push_back(m_runCryptos[i]);
 		}
+#endif
 	}
 	m_runs = std::move(keptRuns);
 	if (parallel)

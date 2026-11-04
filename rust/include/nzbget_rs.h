@@ -3964,6 +3964,53 @@ int64_t nzbget_rs_roc_remote_client_calc_group_unpaused_remaining(
     int64_t remaining_size, int64_t paused_size, int active_downloads,
     int* out_has_threads, int* out_threads_plural);
 
+/* Batch 37: streamarticleparrepair (sap_*) */
+int nzbget_rs_sap_stream_repair_donor_index_for_offset(
+    int64_t offset, int64_t drift,
+    const NzbgetRsByteRange* ranges, size_t num_ranges);
+int nzbget_rs_sap_stream_repair_can_evict_donor_cache(
+    size_t cache_len, int max_cached_parts, size_t order_len);
+int64_t nzbget_rs_sap_stream_repair_target_missing_bytes(
+    int64_t decoded_file_size, int64_t holes_total_size, int64_t encoded_size);
+int64_t nzbget_rs_sap_stream_repair_watchdog_calc_download_rate(
+    int download_time_sec, int64_t all_bytes);
+int nzbget_rs_sap_stream_repair_whole_file_existing_reusable(
+    int64_t existing_size, int64_t fetched_file_size);
+int nzbget_rs_sap_stream_repair_verify_donor_pool_stop(
+    size_t probe_count, int min_probe_count, int64_t pooled, int64_t base_floor);
+int nzbget_rs_sap_stream_repair_patch_should_break_pass2(
+    int fetched_any, int64_t drift);
+int nzbget_rs_sap_stream_repair_mapping_budget(size_t member_count);
+int64_t nzbget_rs_sap_stream_repair_encrypted_achievable_bytes(
+    int64_t window_offset, int64_t window_size,
+    int64_t last_computable, int64_t chain_start);
+int nzbget_rs_sap_stream_repair_materialize_stage_progress(
+    int64_t completed_articles, int64_t total_articles);
+int nzbget_rs_sap_content_map_exclude_member_step(
+    int run_member_index, int exclude_member_index,
+    size_t cryptos_len, size_t runs_len, int* out_keep_crypto);
+int nzbget_rs_sap_article_writer_log_start_mode(
+    int raw_article, int direct_write, int cached);
+int nzbget_rs_sap_article_writer_flush_is_direct_write(
+    int direct_write_opt, int force_direct_write, int output_initialized);
+int nzbget_rs_sap_article_writer_flush_should_abort_deleted(
+    int file_deleted, int nzb_parking);
+size_t nzbget_rs_sap_article_cache_free_eval(
+    int segment_size, size_t allocated_before,
+    int server_mode, int continue_partial, int* out_delete_cache_flag);
+int nzbget_rs_sap_parchecker_should_mark_verifying_repaired(
+    int stage, int pt_repairing);
+int nzbget_rs_sap_parchecker_should_record_processed_file(
+    int stage, int pt_loading_pars, int pt_verifying_sources);
+int nzbget_rs_sap_repair_ctrl_is_better_twin_par2_entry(
+    int is_par2, int64_t entry_size, int has_current_best,
+    int64_t current_best_size, int64_t max_index_size);
+void nzbget_rs_sap_binrpc_log_slice_bounds(
+    int lines, uint32_t id_from, size_t messages_len, uint32_t first_msg_id,
+    int* out_start, int* out_nr_entries);
+int nzbget_rs_sap_binrpc_edit_queue_use_offset_str(
+    int action, int ea_file_move_offset, int ea_group_move_offset);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

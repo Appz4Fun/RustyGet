@@ -1333,7 +1333,11 @@ void ParChecker::SignalFilename(std::string str)
 {
 	std::lock_guard guard{ m_signalMtx };
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_sap_parchecker_should_mark_verifying_repaired((int)m_stage, (int)ptRepairing))
+#else
 	if (m_stage == ptRepairing)
+#endif
 	{
 		m_stage = ptVerifyingRepaired;
 	}
@@ -1352,7 +1356,12 @@ void ParChecker::SignalFilename(std::string str)
 
 	m_progressLabel = Par2StageMessage[m_stage] + (" " + str);
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_sap_parchecker_should_record_processed_file(
+		(int)m_stage, (int)ptLoadingPars, (int)ptVerifyingSources))
+#else
 	if (m_stage == ptLoadingPars || m_stage == ptVerifyingSources)
+#endif
 	{
 		m_processedFiles.push_back(std::move(str));
 	}

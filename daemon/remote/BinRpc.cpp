@@ -1125,35 +1125,13 @@ void LogBinCommand::Execute()
 	{
 		GuardedMessageList messages = g_Log->GuardMessages();
 
-		nrEntries = ntohl(LogRequest.m_lines);
-		// a negative count asks for no entries
-		if (nrEntries < 0)
-		{
-			nrEntries = 0;
-		}
-		uint32 idFrom = ntohl(LogRequest.m_idFrom);
-		int start = messages->size();
-		if (nrEntries > 0)
-		{
-			if (nrEntries > (int)messages->size())
-			{
-				nrEntries = messages->size();
-			}
-			start = messages->size() - nrEntries;
-		}
-		if (idFrom > 0 && !messages->empty())
-		{
-			start = idFrom - messages->front().GetId();
-			if (start < 0)
-			{
-				start = 0;
-			}
-			nrEntries = messages->size() - start;
-			if (nrEntries < 0)
-			{
-				nrEntries = 0;
-			}
-		}
+		int start = 0;
+		nzbget_rs_sap_binrpc_log_slice_bounds(
+			ntohl(LogRequest.m_lines),
+			ntohl(LogRequest.m_idFrom),
+			messages->size(),
+			messages->empty() ? 0 : (uint32)messages->front().GetId(),
+			&start, &nrEntries);
 
 		// the messages from start on, collected under the lock for rust/src/binrpc.rs
 		RsBatch<NzbgetRsBinLog, 32> log;
@@ -1391,7 +1369,12 @@ void EditQueueBinCommand::Execute()
 		nrIdEntries > 0 ? &cIdList : nullptr,
 		nrNameEntries > 0 ? &cNameList : nullptr,
 		(DownloadQueue::EMatchMode)matchMode, (DownloadQueue::EEditAction)action,
+#ifdef NZBGET_USE_RUST
+		nzbget_rs_sap_binrpc_edit_queue_use_offset_str(
+			action, (int)DownloadQueue::eaFileMoveOffset, (int)DownloadQueue::eaGroupMoveOffset) ?
+#else
 		action == DownloadQueue::eaFileMoveOffset || action == DownloadQueue::eaGroupMoveOffset ?
+#endif
 		*CString::FormatStr("%i", offset) : text);
 
 	if (ok)

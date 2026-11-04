@@ -25173,6 +25173,313 @@ pub unsafe extern "C" fn nzbget_rs_roc_remote_client_calc_group_unpaused_remaini
     }
 }
 
+// ============================================================================
+// Batch 37: streamarticleparrepair (sap_*)
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sap_stream_repair_donor_index_for_offset(
+    offset: i64,
+    drift: i64,
+    ranges: *const crate::dupefallback::NzbgetRsByteRange,
+    num_ranges: usize,
+) -> c_int {
+    let slice = if ranges.is_null() || num_ranges == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(ranges, num_ranges) }
+    };
+    crate::streamarticleparrepair::sap_stream_repair_donor_index_for_offset(offset, drift, slice)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sap_stream_repair_can_evict_donor_cache(
+    cache_len: usize,
+    max_cached_parts: c_int,
+    order_len: usize,
+) -> c_int {
+    i32::from(
+        crate::streamarticleparrepair::sap_stream_repair_can_evict_donor_cache(
+            cache_len,
+            max_cached_parts,
+            order_len,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sap_stream_repair_target_missing_bytes(
+    decoded_file_size: i64,
+    holes_total_size: i64,
+    encoded_size: i64,
+) -> i64 {
+    crate::streamarticleparrepair::sap_stream_repair_target_missing_bytes(
+        decoded_file_size,
+        holes_total_size,
+        encoded_size,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sap_stream_repair_watchdog_calc_download_rate(
+    download_time_sec: c_int,
+    all_bytes: i64,
+) -> i64 {
+    crate::streamarticleparrepair::sap_stream_repair_watchdog_calc_download_rate(
+        download_time_sec,
+        all_bytes,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sap_stream_repair_whole_file_existing_reusable(
+    existing_size: i64,
+    fetched_file_size: i64,
+) -> c_int {
+    i32::from(
+        crate::streamarticleparrepair::sap_stream_repair_whole_file_existing_reusable(
+            existing_size,
+            fetched_file_size,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sap_stream_repair_verify_donor_pool_stop(
+    probe_count: usize,
+    min_probe_count: c_int,
+    pooled: i64,
+    base_floor: i64,
+) -> c_int {
+    i32::from(
+        crate::streamarticleparrepair::sap_stream_repair_verify_donor_pool_stop(
+            probe_count,
+            min_probe_count,
+            pooled,
+            base_floor,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sap_stream_repair_patch_should_break_pass2(
+    fetched_any: c_int,
+    drift: i64,
+) -> c_int {
+    i32::from(
+        crate::streamarticleparrepair::sap_stream_repair_patch_should_break_pass2(
+            fetched_any != 0,
+            drift,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sap_stream_repair_mapping_budget(member_count: usize) -> c_int {
+    crate::streamarticleparrepair::sap_stream_repair_mapping_budget(member_count)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sap_stream_repair_encrypted_achievable_bytes(
+    window_offset: i64,
+    window_size: i64,
+    last_computable: i64,
+    chain_start: i64,
+) -> i64 {
+    crate::streamarticleparrepair::sap_stream_repair_encrypted_achievable_bytes(
+        window_offset,
+        window_size,
+        last_computable,
+        chain_start,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sap_stream_repair_materialize_stage_progress(
+    completed_articles: i64,
+    total_articles: i64,
+) -> c_int {
+    crate::streamarticleparrepair::sap_stream_repair_materialize_stage_progress(
+        completed_articles,
+        total_articles,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sap_content_map_exclude_member_step(
+    run_member_index: c_int,
+    exclude_member_index: c_int,
+    cryptos_len: usize,
+    runs_len: usize,
+    out_keep_crypto: *mut c_int,
+) -> c_int {
+    let (keep_run, keep_crypto) =
+        crate::streamarticleparrepair::sap_content_map_exclude_member_step(
+            run_member_index,
+            exclude_member_index,
+            cryptos_len,
+            runs_len,
+        );
+    if !out_keep_crypto.is_null() {
+        unsafe {
+            *out_keep_crypto = i32::from(keep_crypto);
+        }
+    }
+    i32::from(keep_run)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sap_article_writer_log_start_mode(
+    raw_article: c_int,
+    direct_write: c_int,
+    cached: c_int,
+) -> c_int {
+    crate::streamarticleparrepair::sap_article_writer_log_start_mode(
+        raw_article != 0,
+        direct_write != 0,
+        cached != 0,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sap_article_writer_flush_is_direct_write(
+    direct_write_opt: c_int,
+    force_direct_write: c_int,
+    output_initialized: c_int,
+) -> c_int {
+    i32::from(
+        crate::streamarticleparrepair::sap_article_writer_flush_is_direct_write(
+            direct_write_opt != 0,
+            force_direct_write != 0,
+            output_initialized != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sap_article_writer_flush_should_abort_deleted(
+    file_deleted: c_int,
+    nzb_parking: c_int,
+) -> c_int {
+    i32::from(
+        crate::streamarticleparrepair::sap_article_writer_flush_should_abort_deleted(
+            file_deleted != 0,
+            nzb_parking != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sap_article_cache_free_eval(
+    segment_size: c_int,
+    allocated_before: usize,
+    server_mode: c_int,
+    continue_partial: c_int,
+    out_delete_cache_flag: *mut c_int,
+) -> usize {
+    let (new_allocated, delete_flag) = crate::streamarticleparrepair::sap_article_cache_free_eval(
+        segment_size,
+        allocated_before,
+        server_mode != 0,
+        continue_partial != 0,
+    );
+    if !out_delete_cache_flag.is_null() {
+        unsafe {
+            *out_delete_cache_flag = i32::from(delete_flag);
+        }
+    }
+    new_allocated
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sap_parchecker_should_mark_verifying_repaired(
+    stage: c_int,
+    pt_repairing: c_int,
+) -> c_int {
+    i32::from(
+        crate::streamarticleparrepair::sap_parchecker_should_mark_verifying_repaired(
+            stage,
+            pt_repairing,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sap_parchecker_should_record_processed_file(
+    stage: c_int,
+    pt_loading_pars: c_int,
+    pt_verifying_sources: c_int,
+) -> c_int {
+    i32::from(
+        crate::streamarticleparrepair::sap_parchecker_should_record_processed_file(
+            stage,
+            pt_loading_pars,
+            pt_verifying_sources,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sap_repair_ctrl_is_better_twin_par2_entry(
+    is_par2: c_int,
+    entry_size: i64,
+    has_current_best: c_int,
+    current_best_size: i64,
+    max_index_size: i64,
+) -> c_int {
+    i32::from(
+        crate::streamarticleparrepair::sap_repair_ctrl_is_better_twin_par2_entry(
+            is_par2 != 0,
+            entry_size,
+            has_current_best != 0,
+            current_best_size,
+            max_index_size,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sap_binrpc_log_slice_bounds(
+    lines: c_int,
+    id_from: u32,
+    messages_len: usize,
+    first_msg_id: u32,
+    out_start: *mut c_int,
+    out_nr_entries: *mut c_int,
+) {
+    let (start, nr_entries) = crate::streamarticleparrepair::sap_binrpc_log_slice_bounds(
+        lines,
+        id_from,
+        messages_len,
+        first_msg_id,
+    );
+    if !out_start.is_null() {
+        unsafe {
+            *out_start = start;
+        }
+    }
+    if !out_nr_entries.is_null() {
+        unsafe {
+            *out_nr_entries = nr_entries;
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sap_binrpc_edit_queue_use_offset_str(
+    action: c_int,
+    ea_file_move_offset: c_int,
+    ea_group_move_offset: c_int,
+) -> c_int {
+    i32::from(
+        crate::streamarticleparrepair::sap_binrpc_edit_queue_use_offset_str(
+            action,
+            ea_file_move_offset,
+            ea_group_move_offset,
+        ),
+    )
+}
+
 
 
 

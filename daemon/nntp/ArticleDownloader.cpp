@@ -91,7 +91,11 @@ void ArticleDownloader::Run()
 	m_articleWriter.Prepare();
 
 	EStatus status = adFailed;
+#ifdef NZBGET_USE_RUST
+	int retries = nzbget_rs_rrd_article_dl_resolve_initial_retries(g_Options->GetArticleRetries());
+#else
 	int retries = g_Options->GetArticleRetries() > 0 ? g_Options->GetArticleRetries() : 1;
+#endif
 	int remainedRetries = retries;
 	ServerPool::RawServerList failedServers;
 	failedServers.reserve(g_ServerPool->GetServers()->size());
@@ -260,6 +264,15 @@ void ArticleDownloader::Run()
 			detail("Article %s @ %s failed: could not establish connection", *m_infoName, *m_connectionName);
 		}
 
+#ifdef NZBGET_USE_RUST
+		int connInt = connected ? 1 : 0;
+		int statusInt = (int)status;
+		nzbget_rs_rrd_article_dl_normalize_connect_and_decrement_retries(
+			connInt, statusInt, (int)adConnectError, (int)adFailed, remainedRetries,
+			&connInt, &statusInt, &remainedRetries);
+		connected = connInt != 0;
+		status = (EStatus)statusInt;
+#else
 		if (status == adConnectError)
 		{
 			connected = false;
@@ -270,6 +283,7 @@ void ArticleDownloader::Run()
 		{
 			remainedRetries--;
 		}
+#endif
 
 		bool optionalBlocked = false;
 		if (!connected && m_connection && !IsStopped())
@@ -493,7 +507,11 @@ ArticleDownloader::EStatus ArticleDownloader::Download()
 		for (CString& group : m_fileInfo->GetGroups())
 		{
 			response = m_connection->JoinGroup(group);
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_rrd_article_dl_is_join_group_ok(response) != 0)
+#else
 			if (response && !strncmp(response, "2", 1))
+#endif
 			{
 				break;
 			}
@@ -970,7 +988,14 @@ void ArticleDownloader::FreeConnection(bool keepConnected)
 	{
 		debug("Releasing connection");
 		Guard guard(m_connectionMutex);
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_rrd_article_dl_should_disconnect_on_free(
+			keepConnected ? 1 : 0,
+			(int)m_connection->GetStatus(),
+			(int)Connection::csCancelled) != 0)
+#else
 		if (!keepConnected || m_connection->GetStatus() == Connection::csCancelled)
+#endif
 		{
 			m_connection->Disconnect();
 		}

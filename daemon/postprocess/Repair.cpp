@@ -95,7 +95,11 @@ bool RepairController::PostParChecker::IsParredFile(const char* filename)
 {
 	for (CString& parredFile : m_postInfo->GetParredFiles())
 	{
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_rrd_repair_ctrl_filename_eq_ignore_case(parredFile, filename) != 0)
+#else
 		if (!strcasecmp(parredFile, filename))
+#endif
 		{
 			return true;
 		}
@@ -117,7 +121,11 @@ ParChecker::EFileStatus RepairController::PostParChecker::FindFileCrc(const char
 		CompletedFile* completedFile = nullptr;
 		for (CompletedFile& completedFile2 : *m_postInfo->GetNzbInfo()->GetCompletedFiles())
 		{
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_rrd_repair_ctrl_filename_eq_ignore_case(completedFile2.GetFilename(), filename) != 0)
+#else
 			if (!strcasecmp(completedFile2.GetFilename(), filename))
+#endif
 			{
 				completedFile = &completedFile2;
 				break;
@@ -135,7 +143,12 @@ ParChecker::EFileStatus RepairController::PostParChecker::FindFileCrc(const char
 
 	debug("Found completed file: %s, CRC: %.8x, Status: %i", filename, *crc, (int)status);
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_rrd_repair_ctrl_should_load_partial_segments(
+		(int)status, (int)CompletedFile::cfPartial, id, reprocess ? 1 : 0) != 0)
+#else
 	if (status == CompletedFile::cfPartial && id > 0 && !reprocess)
+#endif
 	{
 		FileInfo tmpFileInfo(id);
 
@@ -173,7 +186,11 @@ const char* RepairController::PostParChecker::FindFileOrigname(const char* filen
 	GuardedDownloadQueue guard = DownloadQueue::Guard();
 	for (CompletedFile& completedFile : *m_postInfo->GetNzbInfo()->GetCompletedFiles())
 	{
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_rrd_repair_ctrl_filename_eq_ignore_case(completedFile.GetFilename(), filename) != 0)
+#else
 		if (!strcasecmp(completedFile.GetFilename(), filename))
+#endif
 		{
 			if (!completedFile.GetOrigname())
 			{
@@ -204,7 +221,13 @@ void RepairController::PostParChecker::RequestDupeSources(DupeSourceList* dupeSo
 			{
 				PrintMessage(Message::mkInfo, "Checking %s for dupe scan usability", FileSystem::BaseFileName(dupeNzbInfo->GetDestDir()));
 			}
+#ifdef NZBGET_USE_RUST
+			bool useDupe = nzbget_rs_rrd_repair_ctrl_can_accept_dupe_without_content_match(
+				sizeComparisonPossible ? 1 : 0) != 0 ||
+				dupeMatcher.MatchDupeContent(dupeNzbInfo->GetDestDir());
+#else
 			bool useDupe = !sizeComparisonPossible || dupeMatcher.MatchDupeContent(dupeNzbInfo->GetDestDir());
+#endif
 			if (useDupe)
 			{
 				PrintMessage(Message::mkInfo, "Adding %s to dupe scan sources", FileSystem::BaseFileName(dupeNzbInfo->GetDestDir()));
@@ -621,7 +644,11 @@ void RepairController::Run()
 bool RepairController::AddPar(FileInfo* fileInfo, bool deleted)
 {
 	bool sameCollection = fileInfo->GetNzbInfo() == m_parChecker.GetPostInfo()->GetNzbInfo();
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_rrd_repair_ctrl_should_add_par_file(sameCollection ? 1 : 0, deleted ? 1 : 0) != 0)
+#else
 	if (sameCollection && !deleted)
+#endif
 	{
 		BString<1024> fullFilename("%s%c%s", fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, fileInfo->GetFilename());
 		m_parChecker.AddParFile(fullFilename);
@@ -801,7 +828,12 @@ bool RepairController::RequestMorePars(NzbInfo* nzbInfo, const char* parFilename
 		*blockFoundOut = blockFound;
 	}
 
+#ifdef NZBGET_USE_RUST
+	bool ok = nzbget_rs_rrd_repair_ctrl_is_request_more_pars_ok(
+		blockNeeded, hasUnpausedParFiles ? 1 : 0) != 0;
+#else
 	bool ok = blockNeeded <= 0 || hasUnpausedParFiles;
+#endif
 
 	return ok;
 }
@@ -1013,6 +1045,37 @@ void RepairController::CheckPauseState(PostInfo* postInfo)
 		time_t waitTime = Util::CurrentTime();
 
 		// wait until Post-processor is unpaused
+#ifdef NZBGET_USE_RUST
+		while (nzbget_rs_rrd_repair_ctrl_is_post_process_paused(
+			g_WorkState->GetPausePostProcess() ? 1 : 0,
+			postInfo->GetNzbInfo()->GetForcePriority() ? 1 : 0,
+			IsStopped() ? 1 : 0) != 0)
+		{
+			Util::Sleep(50);
+
+			int64 newStage = 0, newStart = 0, newPar = 0, newRepair = 0;
+			nzbget_rs_rrd_repair_ctrl_calc_paused_timestamps(
+				(int64)Util::CurrentTime(), (int64)waitTime,
+				(int64)stageTime, (int64)startTime, (int64)parTime, (int64)repairTime,
+				&newStage, &newStart, &newPar, &newRepair);
+			if (stageTime > 0)
+			{
+				postInfo->SetStageTime((time_t)newStage);
+			}
+			if (startTime > 0)
+			{
+				postInfo->SetStartTime((time_t)newStart);
+			}
+			if (parTime > 0)
+			{
+				m_parChecker.SetParTime((time_t)newPar);
+			}
+			if (repairTime > 0)
+			{
+				m_parChecker.SetRepairTime((time_t)newRepair);
+			}
+		}
+#else
 		while (g_WorkState->GetPausePostProcess() && !postInfo->GetNzbInfo()->GetForcePriority() && !IsStopped())
 		{
 			Util::Sleep(50);
@@ -1038,6 +1101,7 @@ void RepairController::CheckPauseState(PostInfo* postInfo)
 				m_parChecker.SetRepairTime(repairTime + delta);
 			}
 		}
+#endif
 	}
 }
 

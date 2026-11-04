@@ -122,7 +122,12 @@ std::string DirectParLoader::GetSafeLocalFilename(std::string filename)
 
 void DirectParLoader::StartLoader(DirectRenamer* owner, NzbInfo* nzbInfo)
 {
+#ifdef NZBGET_USE_RUST
+	if (!nzbget_rs_rrd_direct_renamer_can_write_par_loader(
+		1, nzbInfo->GetSkipDiskWrite() ? 1 : 0, g_Options->GetSkipWrite() ? 1 : 0))
+#else
 	if (nzbInfo->GetSkipDiskWrite() || g_Options->GetSkipWrite())
+#endif
 	{
 		return;
 	}
@@ -158,7 +163,14 @@ void DirectParLoader::Run()
 	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
 
 	NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_nzbId);
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_rrd_direct_renamer_can_write_par_loader(
+		nzbInfo != nullptr ? 1 : 0,
+		nzbInfo ? (nzbInfo->GetSkipDiskWrite() ? 1 : 0) : 0,
+		g_Options->GetSkipWrite() ? 1 : 0) != 0)
+#else
 	if (nzbInfo && !nzbInfo->GetSkipDiskWrite() && !g_Options->GetSkipWrite())
+#endif
 	{
 		// nzb is still in queue
 		m_owner->RenameFiles(downloadQueue, nzbInfo, &m_parHashes);
@@ -335,8 +347,15 @@ void DirectRenamer::CheckState(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 	// check if all first articles are successfully downloaded (1)
 	for (FileInfo* fileInfo : nzbInfo->GetFileList())
 	{
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_rrd_direct_renamer_is_file_missing_state_hash(
+			fileInfo->GetHash16k(),
+			fileInfo->GetParFile() ? 1 : 0,
+			fileInfo->GetParSetId()) != 0)
+#else
 		if (Util::EmptyStr(fileInfo->GetHash16k()) ||
 			(fileInfo->GetParFile() && Util::EmptyStr(fileInfo->GetParSetId())))
+#endif
 		{
 			return;
 		}
@@ -345,8 +364,15 @@ void DirectRenamer::CheckState(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 	// check if all first articles are successfully downloaded (2)
 	for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
 	{
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_rrd_direct_renamer_is_file_missing_state_hash(
+			completedFile.GetHash16k(),
+			completedFile.GetParFile() ? 1 : 0,
+			completedFile.GetParSetId()) != 0)
+#else
 		if (Util::EmptyStr(completedFile.GetHash16k()) ||
 			(completedFile.GetParFile() && Util::EmptyStr(completedFile.GetParSetId())))
+#endif
 		{
 			return;
 		}
@@ -361,7 +387,13 @@ void DirectRenamer::CheckState(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 		downloadQueue->SaveChanged();
 	}
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_rrd_direct_renamer_should_check_extra_priority(
+		nzbInfo->GetWaitingPar() ? 1 : 0,
+		nzbInfo->GetLoadingPar() ? 1 : 0) != 0)
+#else
 	if (nzbInfo->GetWaitingPar() && !nzbInfo->GetLoadingPar())
+#endif
 	{
 		// check if all par2-files scheduled for downloading already completed
 		FileList::iterator pos = std::find_if(
@@ -536,6 +568,20 @@ int DirectRenamer::RenameFilesInProgress(NzbInfo* nzbInfo, FileHashList* parHash
 			newName = BuildNewRegularName(fileInfo->GetFilename(), parHashes, fileInfo->GetHash16k());
 		}
 
+#ifdef NZBGET_USE_RUST
+		int emptyAct = nzbget_rs_rrd_direct_renamer_resolve_empty_new_name_action(
+			newName.empty() ? 1 : 0,
+			fileInfo->GetParFile() ? 1 : 0,
+			g_Options->GetHardLinking() ? 1 : 0);
+		if (emptyAct == 1)
+		{
+			newName = fileInfo->GetFilename();
+		}
+		else if (emptyAct == 2)
+		{
+			continue;
+		}
+#else
 		if (newName.empty() && !fileInfo->GetParFile() && g_Options->GetHardLinking())
 		{
 			// Force rename if file is not par file and hardlinking is on
@@ -545,6 +591,7 @@ int DirectRenamer::RenameFilesInProgress(NzbInfo* nzbInfo, FileHashList* parHash
 		{
 			continue;
 		}
+#endif
 
 		const std::string& currOutputFilename = fileInfo->GetOutputFilename();
 		const std::string nzbDestDir = fileInfo->GetNzbInfo()->GetDestDir();
@@ -624,6 +671,20 @@ int DirectRenamer::RenameCompletedFiles(NzbInfo* nzbInfo, FileHashList* parHashe
 			newName = BuildNewRegularName(completedFile.GetFilename(), parHashes, completedFile.GetHash16k());
 		}
 
+#ifdef NZBGET_USE_RUST
+		int emptyAct = nzbget_rs_rrd_direct_renamer_resolve_empty_new_name_action(
+			newName.empty() ? 1 : 0,
+			completedFile.GetParFile() ? 1 : 0,
+			g_Options->GetHardLinking() ? 1 : 0);
+		if (emptyAct == 1)
+		{
+			newName = completedFile.GetFilename();
+		}
+		else if (emptyAct == 2)
+		{
+			continue;
+		}
+#else
 		if (newName.empty() && !completedFile.GetParFile() && g_Options->GetHardLinking())
 		{
 			// Force rename if file is not par file and hardlinking is on
@@ -633,6 +694,7 @@ int DirectRenamer::RenameCompletedFiles(NzbInfo* nzbInfo, FileHashList* parHashe
 		{
 			continue;
 		}
+#endif
 
 		const std::string destDir = nzbInfo->GetDestDir();
 		const std::string oldOutputFilename = destDir + PATH_SEPARATOR + completedFile.GetFilename();

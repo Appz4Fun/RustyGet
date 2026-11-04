@@ -73,6 +73,7 @@ pub mod pardupenzb;
 pub mod histscanrepair;
 pub mod streamtwinqueue;
 pub mod unpackcleanurlfeed;
+pub mod renamerarrepdl;
 
 pub mod deadpostings;
 pub mod dupewatch;

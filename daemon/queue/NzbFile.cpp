@@ -698,6 +698,15 @@ void NzbFile::Parse_StartElement(const char *name, const char **atts)
 
 		for (int i = 0; atts[i] && atts[i + 1]; i += 2)
 		{
+#ifdef NZBGET_USE_RUST
+			switch (nzbget_rs_rrd_nzbfile_classify_meta_type(atts[i], atts[i + 1]))
+			{
+				case 1: m_hasPassword = true; break;
+				case 2: m_hasCategory = true; break;
+				case 3: m_hasName = true; break;
+				case 4: m_hasTitle = true; break;
+			}
+#else
 			if (!strcasecmp("type", atts[i]))
 			{
 				if (!strcasecmp("password", atts[i + 1])) m_hasPassword = true;
@@ -705,6 +714,7 @@ void NzbFile::Parse_StartElement(const char *name, const char **atts)
 				else if (!strcasecmp("name", atts[i + 1])) m_hasName = true;
 				else if (!strcasecmp("title", atts[i + 1])) m_hasTitle = true;
 			}
+#endif
 		}
 	}
 }

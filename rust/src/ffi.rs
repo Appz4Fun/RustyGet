@@ -21463,6 +21463,374 @@ pub extern "C" fn nzbget_rs_ucf_remote_server_is_accept_busy_retry(
     )
 }
 
+// ---------------------------------------------------------------------------
+// DirectRenamer, RarReader, Repair, ArticleDownloader, WebDownloader & NzbFile
+// Hot-Path FFI (`renamerarrepdl.rs`)
+// ---------------------------------------------------------------------------
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_rrd_direct_renamer_can_write_par_loader(
+    has_nzb: c_int,
+    skip_disk_write: c_int,
+    opt_skip_write: c_int,
+) -> c_int {
+    i32::from(crate::renamerarrepdl::direct_renamer_can_write_par_loader(
+        has_nzb != 0,
+        skip_disk_write != 0,
+        opt_skip_write != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rrd_direct_renamer_is_file_missing_state_hash(
+    hash16k: *const c_char,
+    is_par_file: c_int,
+    par_set_id: *const c_char,
+) -> c_int {
+    let h = if hash16k.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(hash16k).to_bytes()
+    };
+    let pid = if par_set_id.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(par_set_id).to_bytes()
+    };
+    i32::from(
+        crate::renamerarrepdl::direct_renamer_is_file_missing_state_hash(h, is_par_file != 0, pid),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_rrd_direct_renamer_should_check_extra_priority(
+    waiting_par: c_int,
+    loading_par: c_int,
+) -> c_int {
+    i32::from(
+        crate::renamerarrepdl::direct_renamer_should_check_extra_priority(
+            waiting_par != 0,
+            loading_par != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_rrd_direct_renamer_resolve_empty_new_name_action(
+    new_name_empty: c_int,
+    is_par_file: c_int,
+    hard_linking: c_int,
+) -> c_int {
+    crate::renamerarrepdl::direct_renamer_resolve_empty_new_name_action(
+        new_name_empty != 0,
+        is_par_file != 0,
+        hard_linking != 0,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rrd_rar_cursor_calc_read_window(
+    source_size: i64,
+    cur_pos: i64,
+    req_size: i64,
+    out_eof: *mut c_int,
+    out_new_pos: *mut i64,
+) -> i64 {
+    let (avail, eof, new_pos) =
+        crate::renamerarrepdl::rar_cursor_calc_read_window(source_size, cur_pos, req_size);
+    if !out_eof.is_null() {
+        *out_eof = i32::from(eof);
+    }
+    if !out_new_pos.is_null() {
+        *out_new_pos = new_pos;
+    }
+    avail
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rrd_rar_cursor_calc_seek_target(
+    cur_pos: i64,
+    source_size: i64,
+    offset: i64,
+    origin: c_int,
+    so_cur: c_int,
+    so_end: c_int,
+    out_target: *mut i64,
+) -> c_int {
+    let (ok, target) = crate::renamerarrepdl::rar_cursor_calc_seek_target(
+        cur_pos,
+        source_size,
+        offset,
+        origin,
+        so_cur,
+        so_end,
+    );
+    if !out_target.is_null() {
+        *out_target = target;
+    }
+    i32::from(ok)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rrd_repair_ctrl_filename_eq_ignore_case(
+    a: *const c_char,
+    b: *const c_char,
+) -> c_int {
+    let sa = if a.is_null() { c"" } else { CStr::from_ptr(a) };
+    let sb = if b.is_null() { c"" } else { CStr::from_ptr(b) };
+    i32::from(crate::renamerarrepdl::repair_ctrl_filename_eq_ignore_case(
+        sa, sb,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_rrd_repair_ctrl_should_load_partial_segments(
+    status: c_int,
+    cf_partial: c_int,
+    id: c_int,
+    reprocess: c_int,
+) -> c_int {
+    i32::from(
+        crate::renamerarrepdl::repair_ctrl_should_load_partial_segments(
+            status,
+            cf_partial,
+            id,
+            reprocess != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_rrd_repair_ctrl_can_accept_dupe_without_content_match(
+    size_comparison_possible: c_int,
+) -> c_int {
+    i32::from(
+        crate::renamerarrepdl::repair_ctrl_can_accept_dupe_without_content_match(
+            size_comparison_possible != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_rrd_repair_ctrl_should_add_par_file(
+    same_collection: c_int,
+    deleted: c_int,
+) -> c_int {
+    i32::from(crate::renamerarrepdl::repair_ctrl_should_add_par_file(
+        same_collection != 0,
+        deleted != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_rrd_repair_ctrl_is_request_more_pars_ok(
+    block_needed: c_int,
+    has_unpaused_par_files: c_int,
+) -> c_int {
+    i32::from(crate::renamerarrepdl::repair_ctrl_is_request_more_pars_ok(
+        block_needed,
+        has_unpaused_par_files != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_rrd_repair_ctrl_is_post_process_paused(
+    pause_post_process: c_int,
+    force_priority: c_int,
+    is_stopped: c_int,
+) -> c_int {
+    i32::from(crate::renamerarrepdl::repair_ctrl_is_post_process_paused(
+        pause_post_process != 0,
+        force_priority != 0,
+        is_stopped != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rrd_repair_ctrl_calc_paused_timestamps(
+    cur_time: i64,
+    wait_time: i64,
+    stage_time: i64,
+    start_time: i64,
+    par_time: i64,
+    repair_time: i64,
+    out_stage: *mut i64,
+    out_start: *mut i64,
+    out_par: *mut i64,
+    out_repair: *mut i64,
+) {
+    let (st, sr, pr, rp) = crate::renamerarrepdl::repair_ctrl_calc_paused_timestamps(
+        cur_time,
+        wait_time,
+        stage_time,
+        start_time,
+        par_time,
+        repair_time,
+    );
+    if !out_stage.is_null() {
+        *out_stage = st;
+    }
+    if !out_start.is_null() {
+        *out_start = sr;
+    }
+    if !out_par.is_null() {
+        *out_par = pr;
+    }
+    if !out_repair.is_null() {
+        *out_repair = rp;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_rrd_article_dl_resolve_initial_retries(
+    opt_article_retries: c_int,
+) -> c_int {
+    crate::renamerarrepdl::article_dl_resolve_initial_retries(opt_article_retries)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rrd_article_dl_normalize_connect_and_decrement_retries(
+    connected: c_int,
+    status: c_int,
+    ad_connect_error: c_int,
+    ad_failed: c_int,
+    remained_retries: c_int,
+    out_connected: *mut c_int,
+    out_status: *mut c_int,
+    out_retries: *mut c_int,
+) {
+    let (nc, ns, nr) = crate::renamerarrepdl::article_dl_normalize_connect_and_decrement_retries(
+        connected != 0,
+        status,
+        ad_connect_error,
+        ad_failed,
+        remained_retries,
+    );
+    if !out_connected.is_null() {
+        *out_connected = i32::from(nc);
+    }
+    if !out_status.is_null() {
+        *out_status = ns;
+    }
+    if !out_retries.is_null() {
+        *out_retries = nr;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rrd_article_dl_is_join_group_ok(
+    response: *const c_char,
+) -> c_int {
+    let opt = if response.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(response).to_bytes())
+    };
+    i32::from(crate::renamerarrepdl::article_dl_is_join_group_ok(opt))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_rrd_article_dl_should_disconnect_on_free(
+    keep_connected: c_int,
+    conn_status: c_int,
+    cs_cancelled: c_int,
+) -> c_int {
+    i32::from(crate::renamerarrepdl::article_dl_should_disconnect_on_free(
+        keep_connected != 0,
+        conn_status,
+        cs_cancelled,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_rrd_webdl_should_abort_retry_loop(
+    is_stopped: c_int,
+    force: c_int,
+    pause_download: c_int,
+) -> c_int {
+    i32::from(crate::renamerarrepdl::webdl_should_abort_retry_loop(
+        is_stopped != 0,
+        force != 0,
+        pause_download != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rrd_webdl_step_retry_counters(
+    status: c_int,
+    ad_connect_error: c_int,
+    rem_dl: c_int,
+    rem_conn: c_int,
+    out_rem_dl: *mut c_int,
+    out_rem_conn: *mut c_int,
+) {
+    let (nd, nc) = crate::renamerarrepdl::webdl_step_retry_counters(
+        status,
+        ad_connect_error,
+        rem_dl,
+        rem_conn,
+    );
+    if !out_rem_dl.is_null() {
+        *out_rem_dl = nd;
+    }
+    if !out_rem_conn.is_null() {
+        *out_rem_conn = nc;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_rrd_webdl_resolve_final_loop_status(
+    status: c_int,
+    ad_finished: c_int,
+    ad_retry: c_int,
+    ad_failed: c_int,
+) -> c_int {
+    crate::renamerarrepdl::webdl_resolve_final_loop_status(status, ad_finished, ad_retry, ad_failed)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rrd_webdl_resolve_body_end_status(
+    end: c_int,
+    status: c_int,
+    is_stopped: c_int,
+    ad_running: c_int,
+    ad_failed: c_int,
+    ad_finished: c_int,
+    out_warn_incomplete: *mut c_int,
+) -> c_int {
+    let (final_status, warn) = crate::renamerarrepdl::webdl_resolve_body_end_status(
+        end != 0,
+        status,
+        is_stopped != 0,
+        ad_running,
+        ad_failed,
+        ad_finished,
+    );
+    if !out_warn_incomplete.is_null() {
+        *out_warn_incomplete = i32::from(warn);
+    }
+    final_status
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rrd_nzbfile_classify_meta_type(
+    attr_name: *const c_char,
+    attr_val: *const c_char,
+) -> c_int {
+    let n = if attr_name.is_null() {
+        c""
+    } else {
+        CStr::from_ptr(attr_name)
+    };
+    let v = if attr_val.is_null() {
+        c""
+    } else {
+        CStr::from_ptr(attr_val)
+    };
+    crate::renamerarrepdl::nzbfile_classify_meta_type(n, v)
+}
+
+
 
 
 

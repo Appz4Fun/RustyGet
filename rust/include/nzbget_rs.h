@@ -3354,6 +3354,57 @@ int nzbget_rs_ucf_feed_coord_resolve_preview_item_status(
 int nzbget_rs_ucf_remote_server_is_accept_busy_retry(
     int bind, int has_accepted_conn, int accept_busy, int is_stopped);
 
+/* DirectRenamer, RarReader, Repair, ArticleDownloader, WebDownloader & NzbFile Hot-Path FFI (`renamerarrepdl.rs`) */
+int nzbget_rs_rrd_direct_renamer_can_write_par_loader(
+    int has_nzb, int skip_disk_write, int opt_skip_write);
+int nzbget_rs_rrd_direct_renamer_is_file_missing_state_hash(
+    const char* hash16k, int is_par_file, const char* par_set_id);
+int nzbget_rs_rrd_direct_renamer_should_check_extra_priority(
+    int waiting_par, int loading_par);
+int nzbget_rs_rrd_direct_renamer_resolve_empty_new_name_action(
+    int new_name_empty, int is_par_file, int hard_linking);
+int64_t nzbget_rs_rrd_rar_cursor_calc_read_window(
+    int64_t source_size, int64_t cur_pos, int64_t req_size,
+    int* out_eof, int64_t* out_new_pos);
+int nzbget_rs_rrd_rar_cursor_calc_seek_target(
+    int64_t cur_pos, int64_t source_size, int64_t offset,
+    int origin, int so_cur, int so_end, int64_t* out_target);
+int nzbget_rs_rrd_repair_ctrl_filename_eq_ignore_case(
+    const char* a, const char* b);
+int nzbget_rs_rrd_repair_ctrl_should_load_partial_segments(
+    int status, int cf_partial, int id, int reprocess);
+int nzbget_rs_rrd_repair_ctrl_can_accept_dupe_without_content_match(
+    int size_comparison_possible);
+int nzbget_rs_rrd_repair_ctrl_should_add_par_file(
+    int same_collection, int deleted);
+int nzbget_rs_rrd_repair_ctrl_is_request_more_pars_ok(
+    int block_needed, int has_unpaused_par_files);
+int nzbget_rs_rrd_repair_ctrl_is_post_process_paused(
+    int pause_post_process, int force_priority, int is_stopped);
+void nzbget_rs_rrd_repair_ctrl_calc_paused_timestamps(
+    int64_t cur_time, int64_t wait_time,
+    int64_t stage_time, int64_t start_time, int64_t par_time, int64_t repair_time,
+    int64_t* out_stage, int64_t* out_start, int64_t* out_par, int64_t* out_repair);
+int nzbget_rs_rrd_article_dl_resolve_initial_retries(int opt_article_retries);
+void nzbget_rs_rrd_article_dl_normalize_connect_and_decrement_retries(
+    int connected, int status, int ad_connect_error, int ad_failed, int remained_retries,
+    int* out_connected, int* out_status, int* out_retries);
+int nzbget_rs_rrd_article_dl_is_join_group_ok(const char* response);
+int nzbget_rs_rrd_article_dl_should_disconnect_on_free(
+    int keep_connected, int conn_status, int cs_cancelled);
+int nzbget_rs_rrd_webdl_should_abort_retry_loop(
+    int is_stopped, int force, int pause_download);
+void nzbget_rs_rrd_webdl_step_retry_counters(
+    int status, int ad_connect_error, int rem_dl, int rem_conn,
+    int* out_rem_dl, int* out_rem_conn);
+int nzbget_rs_rrd_webdl_resolve_final_loop_status(
+    int status, int ad_finished, int ad_retry, int ad_failed);
+int nzbget_rs_rrd_webdl_resolve_body_end_status(
+    int end, int status, int is_stopped,
+    int ad_running, int ad_failed, int ad_finished, int* out_warn_incomplete);
+int nzbget_rs_rrd_nzbfile_classify_meta_type(
+    const char* attr_name, const char* attr_val);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

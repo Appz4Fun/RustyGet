@@ -112,6 +112,28 @@ void WebDownloader::Run()
 			}
 		}
 
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_rrd_webdl_should_abort_retry_loop(
+			IsStopped() ? 1 : 0, m_force ? 1 : 0, g_WorkState->GetPauseDownload() ? 1 : 0) != 0)
+		{
+			Status = adRetry;
+			break;
+		}
+
+		if (Status == adFinished || Status == adFatalError || Status == adNotFound)
+		{
+			break;
+		}
+
+		nzbget_rs_rrd_webdl_step_retry_counters(
+			(int)Status, (int)adConnectError,
+			remainedDownloadRetries, remainedConnectRetries,
+			&remainedDownloadRetries, &remainedConnectRetries);
+	}
+
+	Status = (EStatus)nzbget_rs_rrd_webdl_resolve_final_loop_status(
+		(int)Status, (int)adFinished, (int)adRetry, (int)adFailed);
+#else
 		if (IsStopped() || (!m_force && g_WorkState->GetPauseDownload()))
 		{
 			Status = adRetry;
@@ -137,6 +159,7 @@ void WebDownloader::Run()
 	{
 		Status = adFailed;
 	}
+#endif
 
 	if (Status == adFailed)
 	{
@@ -500,6 +523,16 @@ WebDownloader::EStatus WebDownloader::DownloadBody()
 
 	m_outFile.Close();
 
+#ifdef NZBGET_USE_RUST
+	int warnIncomplete = 0;
+	Status = (EStatus)nzbget_rs_rrd_webdl_resolve_body_end_status(
+		end ? 1 : 0, (int)Status, IsStopped() ? 1 : 0,
+		(int)adRunning, (int)adFailed, (int)adFinished, &warnIncomplete);
+	if (warnIncomplete)
+	{
+		warn("URL %s failed: file incomplete", *m_infoName);
+	}
+#else
 	if (!end && Status == adRunning && !IsStopped())
 	{
 		warn("URL %s failed: file incomplete", *m_infoName);
@@ -510,6 +543,7 @@ WebDownloader::EStatus WebDownloader::DownloadBody()
 	{
 		Status = adFinished;
 	}
+#endif
 
 	return Status;
 }

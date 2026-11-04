@@ -81,6 +81,26 @@ static const uint8 RAR5_ENDARC_NEXTVOL = 0x01;
 
 int64 RarSourceCursor::Read(void* buffer, int64 size)
 {
+#ifdef NZBGET_USE_RUST
+	int eofInt = 0;
+	int64 newPos = m_position;
+	int64 available = nzbget_rs_rrd_rar_cursor_calc_read_window(
+		m_source.Size(), m_position, size, &eofInt, &newPos);
+	if (eofInt != 0)
+	{
+		m_eof = true;	// mimic feof: only a read past the end raises it
+	}
+	if (available <= 0)
+	{
+		return 0;
+	}
+	if (!m_source.Read(m_position, buffer, available))
+	{
+		return 0;	// source refused (donor article missing / target hole)
+	}
+	m_position = newPos;
+	return available;
+#else
 	int64 available = std::min(size, std::max<int64>(0, (int64)((uint64)m_source.Size() - (uint64)m_position)));
 	if (available < size)
 	{
@@ -96,18 +116,31 @@ int64 RarSourceCursor::Read(void* buffer, int64 size)
 	}
 	m_position = (int64)((uint64)m_position + (uint64)available);
 	return available;
+#endif
 }
 
 bool RarSourceCursor::Seek(int64 position, DiskFile::ESeekOrigin origin)
 {
 	// Header sizes can wrap the cursor. Use unsigned arithmetic explicitly:
 	// signed overflow here is undefined even though the parser needs wrapping.
+#ifdef NZBGET_USE_RUST
+	int64 target = 0;
+	if (!nzbget_rs_rrd_rar_cursor_calc_seek_target(
+		m_position,
+		origin == DiskFile::soEnd ? m_source.Size() : 0,
+		position, (int)origin, (int)DiskFile::soCur, (int)DiskFile::soEnd,
+		&target))
+	{
+		return false;
+	}
+#else
 	int64 target = origin == DiskFile::soCur ? (int64)((uint64)m_position + (uint64)position) :
 		origin == DiskFile::soEnd ? (int64)((uint64)m_source.Size() + (uint64)position) : position;
 	if (target < 0)
 	{
 		return false;
 	}
+#endif
 	m_position = target;
 	m_eof = false;	// like fseek clearing the eof indicator
 	return true;

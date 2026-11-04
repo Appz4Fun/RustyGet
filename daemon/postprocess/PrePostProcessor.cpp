@@ -227,7 +227,14 @@ bool PrePostProcessor::HasActiveUnpack(DownloadQueue* downloadQueue, bool includ
 		if (nzbInfo->GetUnpackThread())
 		{
 			DirectUnpack* directUnpack = (DirectUnpack*)nzbInfo->GetUnpackThread();
+#ifdef NZBGET_USE_RUST
+			bool isUnpacking = !includeWaitingVolume && directUnpack->IsUnpacking();
+			bool isWaitingVolume = (!includeWaitingVolume && isUnpacking) ? directUnpack->IsWaitingVolume() : false;
+			if (nzbget_rs_psp_prepost_is_direct_unpack_active(
+				includeWaitingVolume ? 1 : 0, isUnpacking ? 1 : 0, isWaitingVolume ? 1 : 0) != 0)
+#else
 			if (includeWaitingVolume || (directUnpack->IsUnpacking() && !directUnpack->IsWaitingVolume()))
+#endif
 			{
 				return true;
 			}
@@ -347,10 +354,18 @@ void PrePostProcessor::DownloadQueueUpdate(void* aspect)
 		g_QueueScriptCoordinator->EnqueueScript(queueAspect->nzbInfo, QueueScriptCoordinator::qeNzbNamed);
 		CheckDownloadCompleted(queueAspect->downloadQueue, queueAspect->nzbInfo);
 	}
+#ifdef NZBGET_USE_RUST
+	else if (queueAspect->action == DownloadQueue::eaNzbDeleted &&
+		nzbget_rs_psp_prepost_is_empty_deleting_nzb_event(
+			queueAspect->nzbInfo->GetDeleting() ? 1 : 0,
+			queueAspect->nzbInfo->GetPostInfo() != nullptr ? 1 : 0,
+			queueAspect->nzbInfo->GetFileList()->empty() ? 1 : 0) != 0)
+#else
 	else if (queueAspect->action == DownloadQueue::eaNzbDeleted &&
 		queueAspect->nzbInfo->GetDeleting() &&
 		!queueAspect->nzbInfo->GetPostInfo() &&
 		queueAspect->nzbInfo->GetFileList()->empty())
+#endif
 	{
 		// the deleting of nzbs is usually handled via eaFileDeleted-event, but when deleting nzb without
 		// any files left the eaFileDeleted-event is not fired and we need to process eaNzbDeleted-event instead
@@ -379,12 +394,26 @@ void PrePostProcessor::DownloadQueueUpdate(void* aspect)
 			std::lock_guard<std::recursive_mutex> guard(m_activeJobsMutex);
 			for (NzbInfo* postJob : m_activeJobs)
 			{
+#ifdef NZBGET_USE_RUST
+				PostInfo* pjInfo = postJob ? postJob->GetPostInfo() : nullptr;
+				if (nzbget_rs_psp_prepost_can_try_add_par_to_active_repair(
+					postJob != nullptr ? 1 : 0,
+					(postJob && queueAspect->fileInfo->GetNzbInfo() == postJob) ? 1 : 0,
+					pjInfo != nullptr ? 1 : 0,
+					(pjInfo && pjInfo->GetPostThread()) ? 1 : 0,
+					pjInfo ? (int)pjInfo->GetStage() : 0,
+					(int)PostInfo::ptLoadingPars,
+					(int)PostInfo::ptVerifyingRepaired) != 0 &&
+					((RepairController*)pjInfo->GetPostThread())->AddPar(
+						queueAspect->fileInfo, queueAspect->action == DownloadQueue::eaFileDeleted))
+#else
 				if (postJob && queueAspect->fileInfo->GetNzbInfo() == postJob &&
 					postJob->GetPostInfo() && postJob->GetPostInfo()->GetPostThread() &&
 					postJob->GetPostInfo()->GetStage() >= PostInfo::ptLoadingPars &&
 					postJob->GetPostInfo()->GetStage() <= PostInfo::ptVerifyingRepaired &&
 					((RepairController*)postJob->GetPostInfo()->GetPostThread())->AddPar(
 						queueAspect->fileInfo, queueAspect->action == DownloadQueue::eaFileDeleted))
+#endif
 				{
 					return;
 				}
@@ -1024,6 +1053,53 @@ void PrePostProcessor::CleanupJobs(DownloadQueue* downloadQueue)
 		[processor = this, downloadQueue](NzbInfo* postJob)
 		{
 			PostInfo* postInfo = postJob->GetPostInfo();
+#ifdef NZBGET_USE_RUST
+			bool hasRunningThread = postInfo->GetPostThread() && postInfo->GetPostThread()->IsRunning();
+			int64_t curTime = (!postInfo->GetWorking() && !hasRunningThread && postInfo->GetStartTime() > 0)
+				? (int64_t)Util::CurrentTime()
+				: 0;
+			int updateTotalSec = 0;
+			int isCompleted = 0;
+			int newTotalSec = postJob->GetPostTotalSec();
+			if (nzbget_rs_psp_prepost_eval_cleanup_job_state(
+				postInfo->GetWorking() ? 1 : 0,
+				hasRunningThread ? 1 : 0,
+				(int)postInfo->GetStage(),
+				(int)PostInfo::ptFinished,
+				postInfo->GetDeleted() ? 1 : 0,
+				(int64_t)postInfo->GetStartTime(),
+				curTime,
+				postJob->GetPostTotalSec(),
+				&updateTotalSec,
+				&isCompleted,
+				&newTotalSec) != 0)
+			{
+				delete postInfo->GetPostThread();
+				postInfo->SetPostThread(nullptr);
+
+				postInfo->SetStageTime(0);
+				postInfo->SetStageProgress(0);
+				postInfo->SetFileProgress(0);
+				postInfo->SetProgressLabel("");
+
+				if (updateTotalSec != 0)
+				{
+					postJob->SetPostTotalSec(newTotalSec);
+					postInfo->SetStartTime(0);
+				}
+
+				if (isCompleted != 0)
+				{
+					processor->JobCompleted(downloadQueue, postInfo);
+				}
+				else
+				{
+					postInfo->SetStage(PostInfo::ptQueued);
+				}
+				return true;
+			}
+			return false;
+#else
 			if (!postInfo->GetWorking() &&
 				!(postInfo->GetPostThread() && postInfo->GetPostThread()->IsRunning()))
 			{
@@ -1053,6 +1129,7 @@ void PrePostProcessor::CleanupJobs(DownloadQueue* downloadQueue)
 				return true;
 			}
 			return false;
+#endif
 		}),
 		m_activeJobs.end());
 }
@@ -1364,18 +1441,36 @@ void PrePostProcessor::StartJob(DownloadQueue* downloadQueue, PostInfo* postInfo
 	postInfo->SetFileProgress(0);
 	postInfo->SetProgressLabel("");
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_psp_prepost_should_start_par_rename(
+		(int)nzbInfo->GetParRenameStatus(),
+		(int)NzbInfo::rsNone,
+		(int)nzbInfo->GetDeleteStatus(),
+		(int)NzbInfo::dsNone,
+		g_Options->GetParRename() ? 1 : 0) != 0)
+#else
 	if (nzbInfo->GetParRenameStatus() == NzbInfo::rsNone &&
 		nzbInfo->GetDeleteStatus() == NzbInfo::dsNone &&
 		g_Options->GetParRename())
+#endif
 	{
 		EnterStage(downloadQueue, postInfo, PostInfo::ptParRenaming);
 		RenameController::StartJob(postInfo, RenameController::jkPar);
 		return;
 	}
 
+#ifdef NZBGET_USE_RUST
+	bool streamRepair = nzbget_rs_psp_prepost_is_stream_repair_enabled(
+		(int)g_Options->GetDupeArticleFallback(),
+		(int)Options::dafStream,
+		nzbInfo->GetStreamRepairJobs()->empty() ? 1 : 0,
+		(int)nzbInfo->GetDeleteStatus(),
+		(int)NzbInfo::dsNone) != 0;
+#else
 	bool streamRepair = g_Options->GetDupeArticleFallback() >= Options::dafStream &&
 		!nzbInfo->GetStreamRepairJobs()->empty() &&
 		nzbInfo->GetDeleteStatus() == NzbInfo::dsNone;
+#endif
 
 	// stream repair is the last option (B78): it can take longer than downloading
 	// a good backup whole, so with HealthCheck=dupe and a backup still untried in
@@ -1459,15 +1554,39 @@ void PrePostProcessor::StartJob(DownloadQueue* downloadQueue, PostInfo* postInfo
 	// damaged, and the par2-files downloaded so far all failed (a lost index file):
 	// any par2-volume carries the set's description too, so the smallest one held
 	// back is fetched, and the job waits for it (it isn't picked while files download)
+#ifdef NZBGET_USE_RUST
+	int healthForParIndex = ((nzbInfo->GetParStatus() == NzbInfo::psNone ||
+		nzbInfo->GetParStatus() == NzbInfo::psSkipped) &&
+		nzbInfo->GetDeleteStatus() == NzbInfo::dsNone) ? nzbInfo->CalcHealth() : 1000;
+	if (nzbget_rs_psp_prepost_should_check_unpaused_par_for_missing_index(
+		(int)nzbInfo->GetParStatus(),
+		(int)NzbInfo::psNone,
+		(int)NzbInfo::psSkipped,
+		(int)nzbInfo->GetDeleteStatus(),
+		(int)NzbInfo::dsNone,
+		healthForParIndex) != 0 &&
+		!ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
+#else
 	if ((nzbInfo->GetParStatus() == NzbInfo::psNone || nzbInfo->GetParStatus() == NzbInfo::psSkipped) &&
 		nzbInfo->GetDeleteStatus() == NzbInfo::dsNone && nzbInfo->CalcHealth() < 1000 &&
 		!ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
+#endif
 	{
 		FileInfo* smallest = nullptr;
 		for (FileInfo* fileInfo : nzbInfo->GetFileList())
 		{
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_psp_prepost_is_better_paused_par_candidate(
+				fileInfo->GetParFile() ? 1 : 0,
+				fileInfo->GetPaused() ? 1 : 0,
+				fileInfo->GetDeleted() ? 1 : 0,
+				smallest != nullptr ? 1 : 0,
+				fileInfo->GetSize(),
+				smallest ? smallest->GetSize() : 0) != 0)
+#else
 			if (fileInfo->GetParFile() && fileInfo->GetPaused() && !fileInfo->GetDeleted() &&
 				(!smallest || fileInfo->GetSize() < smallest->GetSize()))
+#endif
 			{
 				smallest = fileInfo;
 			}

@@ -277,11 +277,21 @@ void StatMeter::AdjustTimeOffset()
 	gmtime_r(&utcTime, &tmSplittedTime);
 	tmSplittedTime.tm_isdst = -1;
 	time_t locTime = mktime(&tmSplittedTime);
+#ifdef NZBGET_USE_RUST
+	int localDelta = 0;
+	int totalOffset = nzbget_rs_psp_statmeter_calc_local_time_offset(
+		(int64_t)utcTime, (int64_t)locTime, g_Options->GetTimeCorrection(), &localDelta);
+	g_WorkState->SetLocalTimeOffset(totalOffset);
+	m_lastTimeOffset = utcTime;
+
+	debug("UTC delta: %i (%i+%i)", g_WorkState->GetLocalTimeOffset(), localDelta, g_Options->GetTimeCorrection());
+#else
 	time_t localTimeDelta = utcTime - locTime;
 	g_WorkState->SetLocalTimeOffset((int)localTimeDelta + g_Options->GetTimeCorrection());
 	m_lastTimeOffset = utcTime;
 
 	debug("UTC delta: %i (%i+%i)", g_WorkState->GetLocalTimeOffset(), (int)localTimeDelta, g_Options->GetTimeCorrection());
+#endif
 }
 
 /*
@@ -360,7 +370,14 @@ void StatMeter::EnterLeaveStandBy(bool enter)
 		time_t startDownload = 0;
 		if (!m_startDownload.compare_exchange_strong(startDownload, Util::CurrentTime()))
 		{
+#ifdef NZBGET_USE_RUST
+			m_startDownload = (time_t)nzbget_rs_psp_statmeter_calc_resumed_download_start(
+				(int64_t)m_startDownload.load(),
+				(int64_t)Util::CurrentTime(),
+				(int64_t)m_pausedFrom.load());
+#else
 			m_startDownload += Util::CurrentTime() - m_pausedFrom;
+#endif
 		}
 
 		m_pausedFrom = 0;
@@ -760,11 +777,21 @@ int StatMeter::CalcMonthSlots(const ServerVolume& volume)
 			dayparts.tm_mon++;
 			prevMonth = Util::Timegm(&dayparts);
 		}
+#ifdef NZBGET_USE_RUST
+		elapsedDays = nzbget_rs_psp_statmeter_calc_month_slots_prev_month(
+			(int64_t)locCurTime, (int64_t)prevMonth);
+#else
 		elapsedDays = (int)(locCurTime - prevMonth) / 60 / 60 / 24 + 1;
+#endif
 	}
 	else
 	{
+#ifdef NZBGET_USE_RUST
+		elapsedDays = nzbget_rs_psp_statmeter_calc_month_slots_same_month(
+			dayparts.tm_mday, g_Options->GetQuotaStartDay());
+#else
 		elapsedDays = dayparts.tm_mday - g_Options->GetQuotaStartDay() + 1;
+#endif
 	}
 
 	return elapsedDays;

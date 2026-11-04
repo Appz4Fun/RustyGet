@@ -321,7 +321,13 @@ void ServerPool::FreeConnection(NntpConnection* connection, bool used)
 		((PooledConnection*)connection)->SetFreeTimeNow();
 	}
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_psp_server_pool_should_increment_level_on_free(
+		connection->GetNewsServer()->GetNormLevel(),
+		connection->GetNewsServer()->GetActive() ? 1 : 0) != 0)
+#else
 	if (connection->GetNewsServer()->GetNormLevel() > -1 && connection->GetNewsServer()->GetActive())
+#endif
 	{
 		m_levels[connection->GetNewsServer()->GetNormLevel()]++;
 	}
@@ -329,6 +335,26 @@ void ServerPool::FreeConnection(NntpConnection* connection, bool used)
 
 void ServerPool::BlockServer(NewsServer* newsServer)
 {
+#ifdef NZBGET_USE_RUST
+	int newBlockInt = 0;
+	int shouldWarnInt = 0;
+	{
+		Guard guard(m_connectionsMutex);
+		time_t curTime = Util::CurrentTime();
+		nzbget_rs_psp_server_pool_eval_block_server(
+			(int64_t)newsServer->GetBlockTime(),
+			(int64_t)curTime,
+			m_retryInterval,
+			&newBlockInt,
+			&shouldWarnInt);
+		newsServer->SetBlockTime(curTime);
+	}
+
+	if (shouldWarnInt != 0)
+	{
+		warn("Blocking %s (%s) for %i sec", newsServer->GetName(), newsServer->GetHost(), m_retryInterval);
+	}
+#else
 	bool newBlock = false;
 	{
 		Guard guard(m_connectionsMutex);
@@ -341,6 +367,7 @@ void ServerPool::BlockServer(NewsServer* newsServer)
 	{
 		warn("Blocking %s (%s) for %i sec", newsServer->GetName(), newsServer->GetHost(), m_retryInterval);
 	}
+#endif
 }
 
 bool ServerPool::IsServerBlocked(NewsServer* newsServer)
@@ -370,9 +397,16 @@ void ServerPool::CloseUnusedConnections()
 	m_connections.erase(std::remove_if(m_connections.begin(), m_connections.end(),
 		[](std::unique_ptr<PooledConnection>& connection)
 		{
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_psp_server_pool_should_erase_disabled_connection(
+				connection->GetInUse() ? 1 : 0,
+				connection->GetNewsServer()->GetNormLevel(),
+				connection->GetNewsServer()->GetActive() ? 1 : 0) != 0)
+#else
 			if (!connection->GetInUse() &&
 				(connection->GetNewsServer()->GetNormLevel() == -1 ||
 				 !connection->GetNewsServer()->GetActive()))
+#endif
 			{
 				debug("Closing (and deleting) unused connection to server%i", connection->GetNewsServer()->GetId());
 				if (connection->GetStatus() == Connection::csConnected)

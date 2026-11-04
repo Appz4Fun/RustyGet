@@ -3405,6 +3405,63 @@ int nzbget_rs_rrd_webdl_resolve_body_end_status(
 int nzbget_rs_rrd_nzbfile_classify_meta_type(
     const char* attr_name, const char* attr_val);
 
+/* ServerPool, StatMeter, PrePostProcessor, RarRenamer, DupeMatcher, Rename & ParChecker Hot-Path FFI (`poolstatprepost.rs`) */
+int nzbget_rs_psp_server_pool_should_increment_level_on_free(
+    int norm_level, int active);
+void nzbget_rs_psp_server_pool_eval_block_server(
+    int64_t prev_block_time, int64_t cur_time, int retry_interval,
+    int* out_new_block, int* out_should_warn);
+int nzbget_rs_psp_server_pool_should_erase_disabled_connection(
+    int in_use, int norm_level, int active);
+int nzbget_rs_psp_statmeter_calc_local_time_offset(
+    int64_t utc_time, int64_t loc_time, int time_correction,
+    int* out_local_delta);
+int64_t nzbget_rs_psp_statmeter_calc_resumed_download_start(
+    int64_t prev_start_download, int64_t cur_time, int64_t paused_from);
+int nzbget_rs_psp_statmeter_calc_month_slots_prev_month(
+    int64_t loc_cur_time, int64_t prev_month_time);
+int nzbget_rs_psp_statmeter_calc_month_slots_same_month(
+    int tm_mday, int quota_start_day);
+int nzbget_rs_psp_prepost_is_direct_unpack_active(
+    int include_waiting_volume, int is_unpacking, int is_waiting_volume);
+int nzbget_rs_psp_prepost_is_empty_deleting_nzb_event(
+    int deleting, int has_post_info, int file_list_empty);
+int nzbget_rs_psp_prepost_can_try_add_par_to_active_repair(
+    int has_post_job, int same_nzb, int has_post_info, int has_post_thread,
+    int stage, int pt_loading_pars, int pt_verifying_repaired);
+int nzbget_rs_psp_prepost_eval_cleanup_job_state(
+    int working, int has_running_thread, int stage, int pt_finished, int deleted,
+    int64_t start_time, int64_t cur_time, int prev_post_total_sec,
+    int* out_update_total_sec, int* out_is_completed, int* out_new_total_sec);
+int nzbget_rs_psp_prepost_should_start_par_rename(
+    int par_rename_status, int rs_none, int delete_status, int ds_none, int opt_par_rename);
+int nzbget_rs_psp_prepost_is_stream_repair_enabled(
+    int dupe_article_fallback, int daf_stream, int jobs_empty, int delete_status, int ds_none);
+int nzbget_rs_psp_prepost_should_check_unpaused_par_for_missing_index(
+    int par_status, int ps_none, int ps_skipped, int delete_status, int ds_none, int health);
+int nzbget_rs_psp_prepost_is_better_paused_par_candidate(
+    int is_par_file, int paused, int deleted, int has_smallest,
+    int64_t file_size, int64_t smallest_size);
+int nzbget_rs_psp_rar_renamer_calc_stage_progress(
+    int file_count, int cur_file);
+void nzbget_rs_psp_rar_renamer_calc_old_extension_parts(
+    int volume_no, uint8_t* out_ch, int* out_num);
+int nzbget_rs_psp_dupematcher_is_content_match(
+    int64_t dupe_max_size, int64_t max_size, int dupe_compressed, int compressed);
+int nzbget_rs_psp_rename_ctrl_eval_par_rename_config(
+    int unpack_status, int us_success, int us_none, int final_dir_empty,
+    int* out_detect_missing);
+int nzbget_rs_psp_parchecker_calc_twin_blocks_needed(
+    size_t missing_block_count, size_t recovery_packet_count);
+int nzbget_rs_psp_parchecker_should_check_original_splitted_fragment(
+    const char* original, const char* current);
+void nzbget_rs_psp_parchecker_calc_block_byte_range(
+    int block_start, int block_end, int64_t block_size, int64_t file_size,
+    int64_t* out_bytes_start, int64_t* out_bytes_end,
+    int64_t* out_clamped_end, size_t* out_pad_len);
+size_t nzbget_rs_psp_parchecker_calc_creator_packet_payload_len(
+    uint64_t packet_length, size_t header_size);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

@@ -902,7 +902,12 @@ int ParChecker::ProcessTwinSet()
 	res = GetRepairer()->Process(false);
 	if (res == Par2::eRepairNotPossible && !IsStopped())
 	{
+#ifdef NZBGET_USE_RUST
+		int blockNeeded = nzbget_rs_psp_parchecker_calc_twin_blocks_needed(
+			GetRepairer()->missingblockcount, GetRepairer()->recoverypacketmap.size());
+#else
 		int blockNeeded = static_cast<int>(GetRepairer()->missingblockcount - GetRepairer()->recoverypacketmap.size());
+#endif
 		PrintMessage(Message::mkInfo, "Need %i par-block(s) of the twin's set for %s", blockNeeded, m_infoName.c_str());
 		std::vector<std::string> volumes = RequestTwinVolumes(blockNeeded);
 		for (const std::string& volume : volumes)
@@ -981,9 +986,15 @@ bool ParChecker::AddSplittedFragments()
 				// if file was renamed by par-renamer we also check the original filename
 				const char* original = FindFileOrigname(current);
 
+#ifdef NZBGET_USE_RUST
+				if (MaybeSplittedFragement(filename, current) ||
+					(nzbget_rs_psp_parchecker_should_check_original_splitted_fragment(original, current) != 0 &&
+					MaybeSplittedFragement(filename, original)))
+#else
 				if (MaybeSplittedFragement(filename, current) ||
 					(!Util::EmptyStr(original) && strcasecmp(original, current) &&
 					MaybeSplittedFragement(filename, original)))
+#endif
 				{
 					detail("Found splitted fragment %s", filename);
 					extrafiles.push_back(m_destDir + PATH_SEPARATOR + filename);
@@ -1846,6 +1857,21 @@ bool ParChecker::VerifyPartialDataFile(Par2::DiskFile&, Par2::Par2RepairerSource
 			if (blockStart > -1)
 			{
 				int blockEnd = i - 1;
+#ifdef NZBGET_USE_RUST
+				int64 bytesStart = 0;
+				int64 bytesEnd = 0;
+				int64 clampedEnd = 0;
+				size_t padLen = 0;
+				nzbget_rs_psp_parchecker_calc_block_byte_range(
+					blockStart, blockEnd, blocksize, fileSize,
+					&bytesStart, &bytesEnd, &clampedEnd, &padLen);
+				uint32 downloadCrc = 0;
+				bool ok = SmartCalcFileRangeCrc(infile, bytesStart, clampedEnd, segments, downloadCrc);
+				if (ok && padLen > 0)
+				{
+					downloadCrc = Par2::CRCUpdateBlock(downloadCrc ^ 0xFFFFFFFF, padLen) ^ 0xFFFFFFFF;
+				}
+#else
 				int64 bytesStart = blockStart * blocksize;
 				int64 bytesEnd = blockEnd * blocksize + blocksize - 1;
 				uint32 downloadCrc = 0;
@@ -1856,6 +1882,7 @@ bool ParChecker::VerifyPartialDataFile(Par2::DiskFile&, Par2::Par2RepairerSource
 					// for the last block: extend lDownloadCrc to block size
 					downloadCrc = Par2::CRCUpdateBlock(downloadCrc ^ 0xFFFFFFFF, (size_t)(bytesEnd - (fileSize - 1))) ^ 0xFFFFFFFF;
 				}
+#endif
 
 				if (!ok || downloadCrc != parCrc)
 				{
@@ -2001,7 +2028,12 @@ std::string ParChecker::GetPacketCreator()
 	if (GetRepairer()->creatorpacket &&
 		(creatorpacket = (Par2::CREATORPACKET*)(((RepairCreatorPacket*)GetRepairer()->creatorpacket)->packetdata)))
 	{
+#ifdef NZBGET_USE_RUST
+		size_t len = nzbget_rs_psp_parchecker_calc_creator_packet_payload_len(
+			creatorpacket->header.length, sizeof(Par2::PACKET_HEADER));
+#else
 		size_t len = (creatorpacket->header.length - sizeof(Par2::PACKET_HEADER));
+#endif
 		if (len > 0)
 		{
 			return std::string((const char*)creatorpacket->client);

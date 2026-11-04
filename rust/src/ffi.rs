@@ -21830,6 +21830,380 @@ pub unsafe extern "C" fn nzbget_rs_rrd_nzbfile_classify_meta_type(
     crate::renamerarrepdl::nzbfile_classify_meta_type(n, v)
 }
 
+// ============================================================================
+// ServerPool, StatMeter, PrePostProcessor, RarRenamer, DupeMatcher, Rename & ParChecker Hot-Path FFI (`poolstatprepost.rs`)
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_psp_server_pool_should_increment_level_on_free(
+    norm_level: c_int,
+    active: c_int,
+) -> c_int {
+    i32::from(crate::poolstatprepost::server_pool_should_increment_level_on_free(
+        norm_level,
+        active != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_psp_server_pool_eval_block_server(
+    prev_block_time: i64,
+    cur_time: i64,
+    retry_interval: c_int,
+    out_new_block: *mut c_int,
+    out_should_warn: *mut c_int,
+) {
+    let (nb, warn) = crate::poolstatprepost::server_pool_eval_block_server(
+        prev_block_time,
+        cur_time,
+        retry_interval,
+    );
+    if !out_new_block.is_null() {
+        *out_new_block = i32::from(nb);
+    }
+    if !out_should_warn.is_null() {
+        *out_should_warn = i32::from(warn);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_psp_server_pool_should_erase_disabled_connection(
+    in_use: c_int,
+    norm_level: c_int,
+    active: c_int,
+) -> c_int {
+    i32::from(crate::poolstatprepost::server_pool_should_erase_disabled_connection(
+        in_use != 0,
+        norm_level,
+        active != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_psp_statmeter_calc_local_time_offset(
+    utc_time: i64,
+    loc_time: i64,
+    time_correction: c_int,
+    out_local_delta: *mut c_int,
+) -> c_int {
+    let (delta, total) = crate::poolstatprepost::statmeter_calc_local_time_offset(
+        utc_time,
+        loc_time,
+        time_correction,
+    );
+    if !out_local_delta.is_null() {
+        *out_local_delta = delta;
+    }
+    total
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_psp_statmeter_calc_resumed_download_start(
+    prev_start_download: i64,
+    cur_time: i64,
+    paused_from: i64,
+) -> i64 {
+    crate::poolstatprepost::statmeter_calc_resumed_download_start(
+        prev_start_download,
+        cur_time,
+        paused_from,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_psp_statmeter_calc_month_slots_prev_month(
+    loc_cur_time: i64,
+    prev_month_time: i64,
+) -> c_int {
+    crate::poolstatprepost::statmeter_calc_month_slots_prev_month(loc_cur_time, prev_month_time)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_psp_statmeter_calc_month_slots_same_month(
+    tm_mday: c_int,
+    quota_start_day: c_int,
+) -> c_int {
+    crate::poolstatprepost::statmeter_calc_month_slots_same_month(tm_mday, quota_start_day)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_psp_prepost_is_direct_unpack_active(
+    include_waiting_volume: c_int,
+    is_unpacking: c_int,
+    is_waiting_volume: c_int,
+) -> c_int {
+    i32::from(crate::poolstatprepost::prepost_is_direct_unpack_active(
+        include_waiting_volume != 0,
+        is_unpacking != 0,
+        is_waiting_volume != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_psp_prepost_is_empty_deleting_nzb_event(
+    deleting: c_int,
+    has_post_info: c_int,
+    file_list_empty: c_int,
+) -> c_int {
+    i32::from(crate::poolstatprepost::prepost_is_empty_deleting_nzb_event(
+        deleting != 0,
+        has_post_info != 0,
+        file_list_empty != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_psp_prepost_can_try_add_par_to_active_repair(
+    has_post_job: c_int,
+    same_nzb: c_int,
+    has_post_info: c_int,
+    has_post_thread: c_int,
+    stage: c_int,
+    pt_loading_pars: c_int,
+    pt_verifying_repaired: c_int,
+) -> c_int {
+    i32::from(crate::poolstatprepost::prepost_can_try_add_par_to_active_repair(
+        has_post_job != 0,
+        same_nzb != 0,
+        has_post_info != 0,
+        has_post_thread != 0,
+        stage,
+        pt_loading_pars,
+        pt_verifying_repaired,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_psp_prepost_eval_cleanup_job_state(
+    working: c_int,
+    has_running_thread: c_int,
+    stage: c_int,
+    pt_finished: c_int,
+    deleted: c_int,
+    start_time: i64,
+    cur_time: i64,
+    prev_post_total_sec: c_int,
+    out_update_total_sec: *mut c_int,
+    out_is_completed: *mut c_int,
+    out_new_total_sec: *mut c_int,
+) -> c_int {
+    let (ready, upd, comp, new_sec) = crate::poolstatprepost::prepost_eval_cleanup_job_state(
+        working != 0,
+        has_running_thread != 0,
+        stage,
+        pt_finished,
+        deleted != 0,
+        start_time,
+        cur_time,
+        prev_post_total_sec,
+    );
+    if !out_update_total_sec.is_null() {
+        *out_update_total_sec = i32::from(upd);
+    }
+    if !out_is_completed.is_null() {
+        *out_is_completed = i32::from(comp);
+    }
+    if !out_new_total_sec.is_null() {
+        *out_new_total_sec = new_sec;
+    }
+    i32::from(ready)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_psp_prepost_should_start_par_rename(
+    par_rename_status: c_int,
+    rs_none: c_int,
+    delete_status: c_int,
+    ds_none: c_int,
+    opt_par_rename: c_int,
+) -> c_int {
+    i32::from(crate::poolstatprepost::prepost_should_start_par_rename(
+        par_rename_status,
+        rs_none,
+        delete_status,
+        ds_none,
+        opt_par_rename != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_psp_prepost_is_stream_repair_enabled(
+    dupe_article_fallback: c_int,
+    daf_stream: c_int,
+    jobs_empty: c_int,
+    delete_status: c_int,
+    ds_none: c_int,
+) -> c_int {
+    i32::from(crate::poolstatprepost::prepost_is_stream_repair_enabled(
+        dupe_article_fallback,
+        daf_stream,
+        jobs_empty != 0,
+        delete_status,
+        ds_none,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_psp_prepost_should_check_unpaused_par_for_missing_index(
+    par_status: c_int,
+    ps_none: c_int,
+    ps_skipped: c_int,
+    delete_status: c_int,
+    ds_none: c_int,
+    health: c_int,
+) -> c_int {
+    i32::from(
+        crate::poolstatprepost::prepost_should_check_unpaused_par_for_missing_index(
+            par_status,
+            ps_none,
+            ps_skipped,
+            delete_status,
+            ds_none,
+            health,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_psp_prepost_is_better_paused_par_candidate(
+    is_par_file: c_int,
+    paused: c_int,
+    deleted: c_int,
+    has_smallest: c_int,
+    file_size: i64,
+    smallest_size: i64,
+) -> c_int {
+    i32::from(crate::poolstatprepost::prepost_is_better_paused_par_candidate(
+        is_par_file != 0,
+        paused != 0,
+        deleted != 0,
+        has_smallest != 0,
+        file_size,
+        smallest_size,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_psp_rar_renamer_calc_stage_progress(
+    file_count: c_int,
+    cur_file: c_int,
+) -> c_int {
+    crate::poolstatprepost::rar_renamer_calc_stage_progress(file_count, cur_file)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_psp_rar_renamer_calc_old_extension_parts(
+    volume_no: c_int,
+    out_ch: *mut u8,
+    out_num: *mut c_int,
+) {
+    let (ch, num) = crate::poolstatprepost::rar_renamer_calc_old_extension_parts(volume_no);
+    if !out_ch.is_null() {
+        *out_ch = ch;
+    }
+    if !out_num.is_null() {
+        *out_num = num;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_psp_dupematcher_is_content_match(
+    dupe_max_size: i64,
+    max_size: i64,
+    dupe_compressed: c_int,
+    compressed: c_int,
+) -> c_int {
+    i32::from(crate::poolstatprepost::dupematcher_is_content_match(
+        dupe_max_size,
+        max_size,
+        dupe_compressed != 0,
+        compressed != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_psp_rename_ctrl_eval_par_rename_config(
+    unpack_status: c_int,
+    us_success: c_int,
+    us_none: c_int,
+    final_dir_empty: c_int,
+    out_detect_missing: *mut c_int,
+) -> c_int {
+    let (use_final, detect_missing) = crate::poolstatprepost::rename_ctrl_eval_par_rename_config(
+        unpack_status,
+        us_success,
+        us_none,
+        final_dir_empty != 0,
+    );
+    if !out_detect_missing.is_null() {
+        *out_detect_missing = i32::from(detect_missing);
+    }
+    i32::from(use_final)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_psp_parchecker_calc_twin_blocks_needed(
+    missing_block_count: usize,
+    recovery_packet_count: usize,
+) -> c_int {
+    crate::poolstatprepost::parchecker_calc_twin_blocks_needed(
+        missing_block_count,
+        recovery_packet_count,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_psp_parchecker_should_check_original_splitted_fragment(
+    original: *const c_char,
+    current: *const c_char,
+) -> c_int {
+    i32::from(
+        crate::poolstatprepost::parchecker_should_check_original_splitted_fragment(
+            original, current,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_psp_parchecker_calc_block_byte_range(
+    block_start: c_int,
+    block_end: c_int,
+    block_size: i64,
+    file_size: i64,
+    out_bytes_start: *mut i64,
+    out_bytes_end: *mut i64,
+    out_clamped_end: *mut i64,
+    out_pad_len: *mut usize,
+) {
+    let (bs, be, ce, pl) = crate::poolstatprepost::parchecker_calc_block_byte_range(
+        block_start,
+        block_end,
+        block_size,
+        file_size,
+    );
+    if !out_bytes_start.is_null() {
+        *out_bytes_start = bs;
+    }
+    if !out_bytes_end.is_null() {
+        *out_bytes_end = be;
+    }
+    if !out_clamped_end.is_null() {
+        *out_clamped_end = ce;
+    }
+    if !out_pad_len.is_null() {
+        *out_pad_len = pl;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_psp_parchecker_calc_creator_packet_payload_len(
+    packet_length: u64,
+    header_size: usize,
+) -> usize {
+    crate::poolstatprepost::parchecker_calc_creator_packet_payload_len(packet_length, header_size)
+}
+
+
 
 
 

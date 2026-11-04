@@ -210,7 +210,12 @@ bool DupeMatcher::MatchDupeContent(const char* dupeDir)
 	bool dupeCompressed = false;
 	char filename[1024];
 	FindLargestFile(dupeDir, filename, sizeof(filename), &dupeMaxSize, &dupeCompressed);
+#ifdef NZBGET_USE_RUST
+	bool ok = nzbget_rs_psp_dupematcher_is_content_match(
+		dupeMaxSize, m_maxSize, dupeCompressed ? 1 : 0, m_compressed ? 1 : 0) != 0;
+#else
 	bool ok = dupeMaxSize == m_maxSize && dupeCompressed == m_compressed;
+#endif
 	PrintMessage(Message::mkDetail, "Found main file %s with size %" PRIi64 " bytes%s",
 		filename, m_maxSize, ok ? "" : ", size mismatch");
 	return ok;

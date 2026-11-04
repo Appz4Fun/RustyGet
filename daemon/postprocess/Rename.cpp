@@ -129,10 +129,23 @@ void RenameController::ExecRename(const char* destDir, const char* finalDir, con
 	if (m_kind == jkPar)
 	{
 #ifndef DISABLE_PARCHECK
+#ifdef NZBGET_USE_RUST
+		int detectMissingInt = 0;
+		bool useFinal = nzbget_rs_psp_rename_ctrl_eval_par_rename_config(
+			(int)m_postInfo->GetNzbInfo()->GetUnpackStatus(),
+			(int)NzbInfo::usSuccess,
+			(int)NzbInfo::usNone,
+			Util::EmptyStr(finalDir) ? 1 : 0,
+			&detectMissingInt) != 0;
+		m_parRenamer.SetDestDir(useFinal ? finalDir : destDir);
+		m_parRenamer.SetInfoName(nzbName);
+		m_parRenamer.SetDetectMissing(detectMissingInt != 0);
+#else
 		m_parRenamer.SetDestDir(m_postInfo->GetNzbInfo()->GetUnpackStatus() == NzbInfo::usSuccess &&
 			!Util::EmptyStr(finalDir) ? finalDir : destDir);
 		m_parRenamer.SetInfoName(nzbName);
 		m_parRenamer.SetDetectMissing(m_postInfo->GetNzbInfo()->GetUnpackStatus() == NzbInfo::usNone);
+#endif
 		m_parRenamer.Execute();
 #endif
 	}

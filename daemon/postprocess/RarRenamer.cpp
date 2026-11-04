@@ -79,7 +79,11 @@ void RarRenamer::CheckFiles(const char* destDir)
 			if (!FileSystem::DirectoryExists(fullFilename))
 			{
 				m_progressLabel.Format("Checking file %s", filename);
+#ifdef NZBGET_USE_RUST
+				m_stageProgress = nzbget_rs_psp_rar_renamer_calc_stage_progress(m_fileCount, m_curFile);
+#else
 				m_stageProgress = m_fileCount > 0 ? m_curFile * 1000 / m_fileCount : 1000;
+#endif
 				UpdateProgress();
 				m_curFile++;
 
@@ -282,8 +286,15 @@ CString RarRenamer::GenOldExtension(int volumeNo)
 	}
 	else
 	{
+#ifdef NZBGET_USE_RUST
+		uint8_t ch = 0;
+		int num = 0;
+		nzbget_rs_psp_rar_renamer_calc_old_extension_parts(volumeNo, &ch, &num);
+		return CString::FormatStr("%c%02d", ch, num);
+#else
 		unsigned char ch = 'r' + (volumeNo - 1) / 100;
 		return CString::FormatStr("%c%02d", ch, (volumeNo - 1) % 100);
+#endif
 	}
 }
 

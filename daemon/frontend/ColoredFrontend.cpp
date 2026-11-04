@@ -28,9 +28,6 @@
 ColoredFrontend::ColoredFrontend()
 {
 	m_summary = true;
-#ifdef WIN32
-	m_console = GetStdHandle(STD_OUTPUT_HANDLE);
-#endif
 }
 
 void ColoredFrontend::BeforePrint()
@@ -38,119 +35,45 @@ void ColoredFrontend::BeforePrint()
 	if (m_needGoBack)
 	{
 		// go back one line
-#ifdef WIN32
-		CONSOLE_SCREEN_BUFFER_INFO BufInfo;
-		GetConsoleScreenBufferInfo(m_console, &BufInfo);
-		BufInfo.dwCursorPosition.Y--;
-		SetConsoleCursorPosition(m_console, BufInfo.dwCursorPosition);
-#else
 		printf("\r\033[1A");
-#endif
 		m_needGoBack = false;
 	}
 }
 
 void ColoredFrontend::PrintStatus()
 {
-	BString<100> timeString;
-	int64 currentDownloadSpeed = m_standBy ? 0 : m_currentDownloadSpeed;
-
-	int h = 0, m = 0, s = 0;
-	if (nzbget_rs_feh_frontend_calc_remaining_hms(
-		m_remainingSize, m_currentDownloadSpeed, m_standBy ? 1 : 0, m_pauseDownload ? 1 : 0,
-		&h, &m, &s))
-	{
-		timeString.Format(" (~ %.2d:%.2d:%.2d)", h, m, s);
-	}
-
-	BString<100> downloadLimit;
-	if (m_downloadLimit > 0)
-	{
-		downloadLimit.Format(", Limit %i KB/s", nzbget_rs_sfw_frontend_calc_limit_kb(m_downloadLimit));
-	}
-
-	BString<100> postStatus;
-	if (m_postJobCount > 0)
-	{
-		postStatus.Format(", %i post-job%s", m_postJobCount, m_postJobCount > 1 ? "s" : "");
-	}
-
-#ifdef WIN32
-	const char* controlSeq = "";
-#else
 	printf("\033[s");
-	const char* controlSeq = "\033[K";
-#endif
-
-	BString<1024> status(" %d threads, %s, %s remaining%s%s%s%s%s\n",
-		m_threadCount, *Util::FormatSpeed(currentDownloadSpeed),
-		*Util::FormatSize(m_remainingSize), *timeString, *postStatus,
-		nzbget_rs_sfw_frontend_select_pause_status_suffix(m_pauseDownload ? 1 : 0, m_standBy ? 1 : 0),
-		*downloadLimit, controlSeq);
-	printf("%s", *status);
+	NzbgetRsBuf status = nzbget_rs_colored_frontend_format_status_bar(
+		m_standBy ? 1 : 0,
+		m_pauseDownload ? 1 : 0,
+		m_currentDownloadSpeed,
+		m_remainingSize,
+		m_downloadLimit,
+		m_postJobCount,
+		m_threadCount,
+		"\033[K");
+	if (status.data)
+	{
+		fwrite(status.data, 1, status.len, stdout);
+	}
+	nzbget_rs_free(status);
 	m_needGoBack = true;
 }
 
 void ColoredFrontend::PrintMessage(Message& message)
 {
-#ifdef WIN32
-	switch (message.GetKind())
+	NzbgetRsBuf line = nzbget_rs_frontend_format_log_message(
+		1, (int)message.GetKind(), message.GetText());
+	if (line.data)
 	{
-		case Message::mkDebug:
-			SetConsoleTextAttribute(m_console, 8);
-			printf("[DEBUG]");
-			break;
-		case Message::mkError:
-			SetConsoleTextAttribute(m_console, 4);
-			printf("[ERROR]");
-			break;
-		case Message::mkWarning:
-			SetConsoleTextAttribute(m_console, 5);
-			printf("[WARNING]");
-			break;
-		case Message::mkInfo:
-			SetConsoleTextAttribute(m_console, 2);
-			printf("[INFO]");
-			break;
-		case Message::mkDetail:
-			SetConsoleTextAttribute(m_console, 2);
-			printf("[DETAIL]");
-			break;
+		fwrite(line.data, 1, line.len, stdout);
 	}
-	SetConsoleTextAttribute(m_console, 7);
-	CString msg = message.GetText();
-	CharToOem(msg, msg);
-	printf(" %s\n", *msg);
-#else
-	const char* msg = message.GetText();
-	switch (message.GetKind())
-	{
-		case Message::mkDebug:
-			printf("[DEBUG] %s\033[K\n", msg);
-			break;
-		case Message::mkError:
-			printf("\033[31m[ERROR]\033[39m %s\033[K\n", msg);
-			break;
-		case Message::mkWarning:
-			printf("\033[35m[WARNING]\033[39m %s\033[K\n", msg);
-			break;
-		case Message::mkInfo:
-			printf("\033[32m[INFO]\033[39m %s\033[K\n", msg);
-			break;
-		case Message::mkDetail:
-			printf("\033[32m[DETAIL]\033[39m %s\033[K\n", msg);
-			break;
-	}
-#endif
+	nzbget_rs_free(line);
 }
 
 void ColoredFrontend::PrintSkip()
 {
-#ifdef WIN32
-	printf(".....\n");
-#else
 	printf(".....\033[K\n");
-#endif
 }
 
 void ColoredFrontend::BeforeExit()

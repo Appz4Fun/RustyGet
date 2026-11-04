@@ -105,29 +105,11 @@ void NzbGenerator::AppendFile(DiskFile& outfile, const char* filename, const cha
 	int64 fileSize = FileSystem::FileSize(filename);
 	time_t timestamp = Util::CurrentTime();
 
-	int segmentCount = 0;
-	nzbget_rs_snh_nzbgen_calc_segment_count_and_size(fileSize, m_segmentSize, 0, &segmentCount, nullptr);
-
-	outfile.Print("<file poster=\"nserv\" date=\"%i\" subject=\"&quot;%s&quot; yEnc (1/%i)\">\n",
-		(int)timestamp, FileSystem::BaseFileName(filename), segmentCount);
-	outfile.Print("<groups>\n");
-	outfile.Print("<group>alt.binaries.test</group>\n");
-	outfile.Print("</groups>\n");
-	outfile.Print("<segments>\n");
-
-	int64 segOffset = 0;
-	for (int segno = 1; segno <= segmentCount; segno++)
+	NzbgetRsBuf buf = nzbget_rs_nserv_format_nzb_file(
+		fileSize, m_segmentSize, (int)timestamp, FileSystem::BaseFileName(filename), relativePath);
+	if (buf.data)
 	{
-		int segSize = 0;
-		nzbget_rs_snh_nzbgen_calc_segment_count_and_size(fileSize, m_segmentSize, segOffset, nullptr, &segSize);
-		outfile.Print("<segment bytes=\"%i\" number=\"%i\">%s%s%s?%i=%" PRIi64 ":%i</segment>\n",
-			segSize, segno,
-			relativePath ? relativePath : "",
-			relativePath ? "/" : "",
-			FileSystem::BaseFileName(filename), segno, segOffset, segSize);
-		segOffset += segSize;
+		outfile.Write(buf.data, buf.len);
 	}
-
-	outfile.Print("</segments>\n");
-	outfile.Print("</file>\n");
+	nzbget_rs_free(buf);
 }

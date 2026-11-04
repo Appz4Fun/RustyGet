@@ -682,6 +682,307 @@ pub unsafe extern "C" fn nzbget_rs_diskstate_format_volume_stat_item(
     into_buf(out)
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_diskstate_format_unpack_trailer_item(
+    id: c_int,
+    direct_unpack_status: c_int,
+    unpack_tried: c_int,
+    par_repaired: c_int,
+    last_unpack_status: c_int,
+    archives: *const *const c_char,
+    archives_len: usize,
+) -> RsBuf {
+    let mut out = Vec::with_capacity(128);
+    let unpack_tried_flags = crate::diskstatepp::pack_unpack_tried_flags(
+        unpack_tried != 0,
+        par_repaired != 0,
+    );
+    let _ = writeln!(out, "{}", id);
+    let _ = writeln!(out, "DirectUnpackStatus={}", direct_unpack_status);
+    let _ = writeln!(out, "UnpackTried={}", unpack_tried_flags);
+    let _ = writeln!(out, "LastUnpackStatus={}", last_unpack_status);
+    out.extend_from_slice(b"ExtractedArchives=");
+    let slice = if archives.is_null() || archives_len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(archives, archives_len) }
+    };
+    for (idx, &arc_ptr) in slice.iter().enumerate() {
+        if idx > 0 {
+            out.push(b',');
+        }
+        write_sanitized_bytes(unsafe { input(arc_ptr) }, &mut out);
+    }
+    out.push(b'\n');
+    into_buf(out)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_diskstate_format_feed_status(
+    urls: *const *const c_char,
+    filter_hashes: *const u32,
+    last_updates: *const c_int,
+    len: usize,
+) -> RsBuf {
+    let mut out = Vec::with_capacity(len.saturating_mul(64) + 16);
+    let _ = writeln!(out, "{}", len as c_int);
+    if !urls.is_null() && !filter_hashes.is_null() && !last_updates.is_null() && len > 0 {
+        let u_slice = unsafe { std::slice::from_raw_parts(urls, len) };
+        let h_slice = unsafe { std::slice::from_raw_parts(filter_hashes, len) };
+        let t_slice = unsafe { std::slice::from_raw_parts(last_updates, len) };
+        for i in 0..len {
+            write_sanitized_line(unsafe { input(u_slice[i]) }, &mut out);
+            let _ = writeln!(out, "{}", h_slice[i]);
+            let _ = writeln!(out, "{}", t_slice[i]);
+        }
+    }
+    into_buf(out)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_diskstate_format_feed_history(
+    statuses: *const c_int,
+    last_seens: *const c_int,
+    urls: *const *const c_char,
+    len: usize,
+) -> RsBuf {
+    let mut out = Vec::with_capacity(len.saturating_mul(64) + 16);
+    let _ = writeln!(out, "{}", len as c_int);
+    if !statuses.is_null() && !last_seens.is_null() && !urls.is_null() && len > 0 {
+        let s_slice = unsafe { std::slice::from_raw_parts(statuses, len) };
+        let t_slice = unsafe { std::slice::from_raw_parts(last_seens, len) };
+        let u_slice = unsafe { std::slice::from_raw_parts(urls, len) };
+        for i in 0..len {
+            let _ = writeln!(out, "{},{}", s_slice[i], t_slice[i]);
+            write_sanitized_line(unsafe { input(u_slice[i]) }, &mut out);
+        }
+    }
+    into_buf(out)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_diskstate_format_server_info(
+    names: *const *const c_char,
+    hosts: *const *const c_char,
+    ports: *const c_int,
+    users: *const *const c_char,
+    len: usize,
+) -> RsBuf {
+    let mut out = Vec::with_capacity(len.saturating_mul(64) + 16);
+    let _ = writeln!(out, "{}", len as c_int);
+    if !names.is_null() && !hosts.is_null() && !ports.is_null() && !users.is_null() && len > 0 {
+        let n_slice = unsafe { std::slice::from_raw_parts(names, len) };
+        let h_slice = unsafe { std::slice::from_raw_parts(hosts, len) };
+        let p_slice = unsafe { std::slice::from_raw_parts(ports, len) };
+        let u_slice = unsafe { std::slice::from_raw_parts(users, len) };
+        for i in 0..len {
+            write_sanitized_line(unsafe { input(n_slice[i]) }, &mut out);
+            write_sanitized_line(unsafe { input(h_slice[i]) }, &mut out);
+            let _ = writeln!(out, "{}", p_slice[i]);
+            write_sanitized_line(unsafe { input(u_slice[i]) }, &mut out);
+        }
+    }
+    into_buf(out)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_diskstate_format_nzb_message_line(
+    time_str: *const c_char,
+    tm: c_int,
+    kind: c_int,
+    text: *const c_char,
+    line_ending: *const c_char,
+) -> RsBuf {
+    const MESSAGE_TYPES: [&[u8]; 5] = [b"INFO", b"WARNING", b"ERROR", b"DEBUG", b"DETAIL"];
+    let kind_bytes = if (0..5).contains(&kind) {
+        MESSAGE_TYPES[kind as usize]
+    } else {
+        b"INFO"
+    };
+    let mut clean_text = unsafe { input(text) }.to_vec();
+    if clean_text.len() > 1023 {
+        clean_text.truncate(1023);
+    }
+    crate::diskstatepp::sanitize_log_text_in_place(&mut clean_text);
+    let mut out = Vec::with_capacity(clean_text.len() + 64);
+    out.extend_from_slice(unsafe { input(time_str) });
+    out.push(b'\t');
+    let _ = write!(out, "{}", tm as u32);
+    out.push(b'\t');
+    out.extend_from_slice(kind_bytes);
+    out.push(b'\t');
+    out.extend_from_slice(&clean_text);
+    out.extend_from_slice(unsafe { input(line_ending) });
+    into_buf(out)
+}
+
+fn parse_c_int_field(field: &[u8]) -> Option<c_int> {
+    let s = std::str::from_utf8(field).ok()?.trim_start();
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        c_int::from_str_radix(hex, 16).ok()
+    } else {
+        s.parse::<c_int>().ok()
+    }
+}
+
+fn parse_u32_field(field: &[u8]) -> Option<u32> {
+    let s = std::str::from_utf8(field).ok()?.trim_start();
+    s.parse::<u32>().ok()
+}
+
+/// Parses a completed-file line in `DiskState::LoadNzbInfo` (mutating `buf` in place
+/// for `format_version >= 60` comma-separated `hash16k` and `parSetId` fields).
+/// Returns `1` on success, `0` on parse error.
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_diskstate_parse_completed_file_line(
+    buf: *mut c_char,
+    format_version: c_int,
+    out_id: *mut c_int,
+    out_status: *mut c_int,
+    out_crc: *mut u32,
+    out_par_file: *mut c_int,
+    out_hash16k: *mut *const c_char,
+    out_par_set_id: *mut *const c_char,
+    out_file_name: *mut *const c_char,
+) -> c_int {
+    if buf.is_null() {
+        return 0;
+    }
+    let mut id: c_int = 0;
+    let mut status: c_int = 0;
+    let mut crc: u32 = 0;
+    let mut par_file: c_int = 0;
+    let mut hash16k: *const c_char = std::ptr::null();
+    let mut par_set_id: *const c_char = std::ptr::null();
+    let mut file_name: *const c_char = buf;
+
+    let len = unsafe { std::ffi::CStr::from_ptr(buf).to_bytes().len() };
+    let bytes = unsafe { std::slice::from_raw_parts_mut(buf.cast::<u8>(), len) };
+
+    if format_version >= 49 {
+        if format_version >= 60 {
+            let mut commas = [0usize; 6];
+            let mut c_count = 0usize;
+            for (idx, &b) in bytes.iter().enumerate() {
+                if b == b',' && c_count < 6 {
+                    commas[c_count] = idx;
+                    c_count += 1;
+                }
+            }
+            if c_count < 3 {
+                return 0;
+            }
+            let f0 = &bytes[..commas[0]];
+            let f1 = &bytes[commas[0] + 1..commas[1]];
+            let f2 = &bytes[commas[1] + 1..commas[2]];
+            let f3_end = if c_count >= 4 { commas[3] } else { len };
+            let f3 = &bytes[commas[2] + 1..f3_end];
+            let (Some(p_id), Some(p_status), Some(p_crc), Some(p_par)) = (
+                parse_c_int_field(f0),
+                parse_c_int_field(f1),
+                parse_u32_field(f2),
+                parse_c_int_field(f3),
+            ) else {
+                return 0;
+            };
+            id = p_id;
+            status = p_status;
+            crc = p_crc;
+            par_file = p_par;
+            if c_count >= 4 {
+                hash16k = unsafe { buf.add(commas[3] + 1) };
+                if c_count >= 5 {
+                    bytes[commas[4]] = 0;
+                    par_set_id = unsafe { buf.add(commas[4] + 1) };
+                    if c_count >= 6 {
+                        bytes[commas[5]] = 0;
+                        file_name = unsafe { buf.add(commas[5] + 1) };
+                    } else {
+                        file_name = std::ptr::null();
+                    }
+                } else {
+                    file_name = unsafe { buf.add(1) };
+                }
+            } else {
+                file_name = unsafe { buf.add(1) };
+            }
+        } else if format_version >= 50 {
+            let mut commas = [0usize; 3];
+            let mut c_count = 0usize;
+            for (idx, &b) in bytes.iter().enumerate() {
+                if b == b',' && c_count < 3 {
+                    commas[c_count] = idx;
+                    c_count += 1;
+                }
+            }
+            if c_count < 2 {
+                return 0;
+            }
+            let f0 = &bytes[..commas[0]];
+            let f1 = &bytes[commas[0] + 1..commas[1]];
+            let f2_end = if c_count >= 3 { commas[2] } else { len };
+            let f2 = &bytes[commas[1] + 1..f2_end];
+            let (Some(p_id), Some(p_status), Some(p_crc)) = (
+                parse_c_int_field(f0),
+                parse_c_int_field(f1),
+                parse_u32_field(f2),
+            ) else {
+                return 0;
+            };
+            id = p_id;
+            status = p_status;
+            crc = p_crc;
+            file_name = if c_count >= 3 {
+                unsafe { buf.add(commas[2] + 1) }
+            } else {
+                std::ptr::null()
+            };
+        } else {
+            let Some(c0) = bytes.iter().position(|&b| b == b',') else {
+                return 0;
+            };
+            let rest = &bytes[c0 + 1..];
+            let f1_end = rest.iter().position(|&b| b == b',').unwrap_or(rest.len());
+            let (Some(p_status), Some(p_crc)) = (
+                parse_c_int_field(&bytes[..c0]),
+                parse_u32_field(&rest[..f1_end]),
+            ) else {
+                return 0;
+            };
+            status = p_status;
+            crc = p_crc;
+            let search_start = 2.min(len);
+            file_name = match bytes[search_start..].iter().position(|&b| b == b',') {
+                Some(pos) => unsafe { buf.add(search_start + pos + 1) },
+                None => std::ptr::null(),
+            };
+        }
+    }
+
+    if !out_id.is_null() {
+        unsafe { *out_id = id };
+    }
+    if !out_status.is_null() {
+        unsafe { *out_status = status };
+    }
+    if !out_crc.is_null() {
+        unsafe { *out_crc = crc };
+    }
+    if !out_par_file.is_null() {
+        unsafe { *out_par_file = par_file };
+    }
+    if !out_hash16k.is_null() {
+        unsafe { *out_hash16k = hash16k };
+    }
+    if !out_par_set_id.is_null() {
+        unsafe { *out_par_set_id = par_set_id };
+    }
+    if !out_file_name.is_null() {
+        unsafe { *out_file_name = file_name };
+    }
+    1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -746,6 +1047,93 @@ mod tests {
             let s = buf_to_string(nzbget_rs_diskstate_format_file_state(&inp, &stat, 1, &art, 1));
             assert!(s.contains("10,1\n0,1024,0,2048,0,512\npart01.rar\ndeadbeef\nparset1\n0\n"));
             assert!(s.contains("#decoded 0,4096\nOutputInitialized=1\n"));
+        }
+    }
+
+    #[test]
+    fn test_parse_completed_file_line_and_formatters() {
+        unsafe {
+            let mut line = b"42,1,305419896,0,deadbeef,set1,movie.mkv\0".to_vec();
+            let mut id = 0;
+            let mut status = 0;
+            let mut crc = 0u32;
+            let mut par = 0;
+            let mut h16k: *const c_char = std::ptr::null();
+            let mut pset: *const c_char = std::ptr::null();
+            let mut fname: *const c_char = std::ptr::null();
+            assert_eq!(
+                nzbget_rs_diskstate_parse_completed_file_line(
+                    line.as_mut_ptr().cast(),
+                    61,
+                    &mut id,
+                    &mut status,
+                    &mut crc,
+                    &mut par,
+                    &mut h16k,
+                    &mut pset,
+                    &mut fname,
+                ),
+                1
+            );
+            assert_eq!((id, status, crc, par), (42, 1, 305419896, 0));
+            assert_eq!(std::ffi::CStr::from_ptr(h16k).to_bytes(), b"deadbeef");
+            assert_eq!(std::ffi::CStr::from_ptr(pset).to_bytes(), b"set1");
+            assert_eq!(std::ffi::CStr::from_ptr(fname).to_bytes(), b"movie.mkv");
+
+            let a1 = CString::new("a\n.rar").unwrap();
+            let a2 = CString::new("b\r.rar").unwrap();
+            let arcs = [a1.as_ptr(), a2.as_ptr()];
+            let trailer = buf_to_string(nzbget_rs_diskstate_format_unpack_trailer_item(
+                7,
+                2,
+                1,
+                1,
+                3,
+                arcs.as_ptr(),
+                2,
+            ));
+            assert_eq!(
+                trailer,
+                "7\nDirectUnpackStatus=2\nUnpackTried=3\nLastUnpackStatus=3\nExtractedArchives=a .rar,b .rar\n"
+            );
+
+            let url = CString::new("https://example.invalid/feed\n1\r2").unwrap();
+            let urls = [url.as_ptr()];
+            let hashes = [12345u32];
+            let updates = [1700000000];
+            let feed_status = buf_to_string(nzbget_rs_diskstate_format_feed_status(
+                urls.as_ptr(),
+                hashes.as_ptr(),
+                updates.as_ptr(),
+                1,
+            ));
+            assert_eq!(feed_status, "1\nhttps://example.invalid/feed 1 2\n12345\n1700000000\n");
+
+            let statuses = [2];
+            let seens = [1700000001];
+            let feed_hist = buf_to_string(nzbget_rs_diskstate_format_feed_history(
+                statuses.as_ptr(),
+                seens.as_ptr(),
+                urls.as_ptr(),
+                1,
+            ));
+            assert_eq!(feed_hist, "1\n2,1700000001\nhttps://example.invalid/feed 1 2\n");
+
+            let srv_name = CString::new("Server\n1").unwrap();
+            let srv_host = CString::new("news.example\r.com").unwrap();
+            let srv_user = CString::new("user\nname").unwrap();
+            let names = [srv_name.as_ptr()];
+            let hosts = [srv_host.as_ptr()];
+            let ports = [563];
+            let users = [srv_user.as_ptr()];
+            let srv_info = buf_to_string(nzbget_rs_diskstate_format_server_info(
+                names.as_ptr(),
+                hosts.as_ptr(),
+                ports.as_ptr(),
+                users.as_ptr(),
+                1,
+            ));
+            assert_eq!(srv_info, "1\nServer 1\nnews.example .com\n563\nuser name\n");
         }
     }
 }

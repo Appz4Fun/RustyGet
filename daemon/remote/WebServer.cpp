@@ -429,118 +429,69 @@ void WebProcessor::Dispatch()
 
 void WebProcessor::SendAuthResponse()
 {
-	const char* AUTH_RESPONSE_HEADER =
-		"HTTP/1.1 401 Unauthorized\r\n"
-		"%s"
-		"Connection: %s\r\n"
-		"Content-Type: text/plain\r\n"
-		"Content-Length: 0\r\n"
-		"Server: nzbget-%s\r\n"
-		"\r\n";
-
-	BString<1024> responseHeader(AUTH_RESPONSE_HEADER,
-		g_Options->GetFormAuth() ? "" : "WWW-Authenticate: Basic realm=\"NZBGet\"\r\n",
-		m_keepAlive ? "keep-alive" : "close", Util::VersionRevision());
-
-	// Send the response answer
-	debug("ResponseHeader=%s", *responseHeader);
-	m_connection->Send(responseHeader, responseHeader.Length());
+	NzbgetRsBuf hdr = nzbget_rs_web_format_auth_response(
+		g_Options->GetFormAuth() ? 1 : 0, m_keepAlive ? 1 : 0, Util::VersionRevision());
+	debug("ResponseHeader=%s", hdr.data ? hdr.data : "");
+	if (hdr.data)
+	{
+		m_connection->Send(hdr.data, (int)hdr.len);
+	}
+	nzbget_rs_free(hdr);
 }
 
 void WebProcessor::SendOptionsResponse()
 {
-	const char* OPTIONS_RESPONSE_HEADER =
-		"HTTP/1.1 200 OK\r\n"
-		"Connection: %s\r\n"
-		//"Content-Type: plain/text\r\n"
-		"Content-Length: 0\r\n"
-		"Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
-		"Access-Control-Allow-Origin: %s\r\n"
-		"Access-Control-Allow-Credentials: true\r\n"
-		"Access-Control-Max-Age: 86400\r\n"
-		"Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
-		"Server: nzbget-%s\r\n"
-		"\r\n";
-	BString<1024> responseHeader(OPTIONS_RESPONSE_HEADER,
-		m_keepAlive ? "keep-alive" : "close", 
-		m_origin.Str(), Util::VersionRevision());
-
-	// Send the response answer
-	debug("ResponseHeader=%s", *responseHeader);
-	m_connection->Send(responseHeader, responseHeader.Length());
+	NzbgetRsBuf hdr = nzbget_rs_web_format_options_response(
+		m_keepAlive ? 1 : 0, m_origin.Str(), Util::VersionRevision());
+	debug("ResponseHeader=%s", hdr.data ? hdr.data : "");
+	if (hdr.data)
+	{
+		m_connection->Send(hdr.data, (int)hdr.len);
+	}
+	nzbget_rs_free(hdr);
 }
 
 void WebProcessor::SendErrorResponse(const char* errCode, bool printWarning)
 {
-	const char* RESPONSE_HEADER =
-		"HTTP/1.1 %s\r\n"
-		"Connection: %s\r\n"
-		"Content-Length: %i\r\n"
-		"Content-Type: text/html\r\n"
-		"Server: nzbget-%s\r\n"
-		"\r\n";
-
 	if (printWarning)
 	{
 		warn("Web-Server: %s, Resource: %s", errCode, *m_url);
 	}
 
-	BString<1024> responseBody("<html><head><title>%s</title></head><body>Error: %s</body></html>",
-		errCode, errCode);
-	int pageContentLen = responseBody.Length();
-
-	BString<1024> responseHeader(RESPONSE_HEADER, errCode,
-		m_keepAlive ? "keep-alive" : "close",
-		pageContentLen, Util::VersionRevision());
-
-	// Send the response answer
-	m_connection->Send(responseHeader, responseHeader.Length());
-	m_connection->Send(responseBody, pageContentLen);
+	NzbgetRsBuf body{};
+	NzbgetRsBuf hdr = nzbget_rs_web_format_error_response(
+		errCode, m_keepAlive ? 1 : 0, Util::VersionRevision(), &body);
+	if (hdr.data)
+	{
+		m_connection->Send(hdr.data, (int)hdr.len);
+	}
+	if (body.data)
+	{
+		m_connection->Send(body.data, (int)body.len);
+	}
+	nzbget_rs_free(hdr);
+	nzbget_rs_free(body);
 }
 
 void WebProcessor::SendRedirectResponse(const char* url)
 {
-	const char* REDIRECT_RESPONSE_HEADER =
-		"HTTP/1.1 301 Moved Permanently\r\n"
-		"Location: %s\r\n"
-		"Connection: %s\r\n"
-		"Content-Length: 0\r\n"
-		"Server: nzbget-%s\r\n"
-		"\r\n";
-	BString<1024> responseHeader(REDIRECT_RESPONSE_HEADER, url,
-		m_keepAlive ? "keep-alive" : "close", Util::VersionRevision());
-
-	// Send the response answer
-	debug("ResponseHeader=%s", *responseHeader);
-	m_connection->Send(responseHeader, responseHeader.Length());
+	NzbgetRsBuf hdr = nzbget_rs_web_format_redirect_response(
+		url, m_keepAlive ? 1 : 0, Util::VersionRevision());
+	debug("ResponseHeader=%s", hdr.data ? hdr.data : "");
+	if (hdr.data)
+	{
+		m_connection->Send(hdr.data, (int)hdr.len);
+	}
+	nzbget_rs_free(hdr);
 }
 
 void WebProcessor::SendBodyResponse(const char* body, int bodyLen, const char* contentType, bool cachable)
 {
-	const char* RESPONSE_HEADER =
-		"HTTP/1.1 %s\r\n"
-		"Connection: %s\r\n"
-		"Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
-		"Access-Control-Allow-Origin: %s\r\n"
-		"Access-Control-Allow-Credentials: true\r\n"
-		"Access-Control-Max-Age: 86400\r\n"
-		"Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
-		"Set-Cookie: Auth-Type=%s; SameSite=Lax\r\n"
-		"Set-Cookie: Auth-Token=%s; HttpOnly; SameSite=Lax\r\n"
-		"Content-Length: %i\r\n"
-		"%s"					// Content-Type: xxx
-		"%s"					// Content-Encoding: gzip
-		"%s"					// ETag
-		"Server: nzbget-%s\r\n"
-		"\r\n";
-
-	BString<1024> eTagHeader;
+	BString<1024> newETag;
 	bool unchanged = false;
 
 	if (cachable)
 	{
-		BString<1024> newETag;
-
 		// over the whole body: as a C string it ended at the first zero byte, and
 		// every image (PNG, ICO...) had the same ETag - a changed one was answered
 		// "not modified"
@@ -553,7 +504,6 @@ void WebProcessor::SendBodyResponse(const char* body, int bodyLen, const char* c
 			body = "";
 			bodyLen = 0;
 		}
-		eTagHeader.Format("ETag: %s\r\n", *newETag);
 	}
 
 #ifndef DISABLE_GZIP
@@ -579,28 +529,26 @@ void WebProcessor::SendBodyResponse(const char* body, int bodyLen, const char* c
 	bool gzip = false;
 #endif
 
-	BString<1024> contentTypeHeader;
-	if (contentType)
-	{
-		contentTypeHeader.Format("Content-Type: %s\r\n", contentType);
-	}
-
-	BString<1024> responseHeader(RESPONSE_HEADER,
-		unchanged ? ERR_HTTP_NOT_MODIFIED : ERR_HTTP_OK,
-		m_keepAlive ? "keep-alive" : "close",
+	NzbgetRsBuf hdr = nzbget_rs_web_format_body_response_header(
+		unchanged ? 1 : 0,
+		m_keepAlive ? 1 : 0,
 		m_origin.Str(),
-		g_Options->GetFormAuth() ? "form" : "http",
+		g_Options->GetFormAuth() ? 1 : 0,
 		m_authorized ? m_serverAuthToken[m_userAccess] : "",
 		bodyLen,
-		*contentTypeHeader,
-		gzip ? "Content-Encoding: gzip\r\n" : "",
-		cachable ? *eTagHeader : "",
+		contentType,
+		gzip ? 1 : 0,
+		cachable ? *newETag : nullptr,
 		Util::VersionRevision());
 
-	debug("[%s] (%s) %s", *m_url, *m_oldETag, *responseHeader);
+	debug("[%s] (%s) %s", *m_url, *m_oldETag, hdr.data ? hdr.data : "");
 
 	// Send the request answer
-	m_connection->Send(responseHeader, responseHeader.Length());
+	if (hdr.data)
+	{
+		m_connection->Send(hdr.data, (int)hdr.len);
+	}
+	nzbget_rs_free(hdr);
 	m_connection->Send(body, bodyLen);
 }
 

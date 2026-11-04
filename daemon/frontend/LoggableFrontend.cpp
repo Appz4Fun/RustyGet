@@ -81,31 +81,13 @@ void LoggableFrontend::Update()
 
 void LoggableFrontend::PrintMessage(Message& message)
 {
-#ifdef WIN32
-	CString cmsg = message.GetText();
-	CharToOem(cmsg, cmsg);
-	const char* msg = cmsg;
-#else
-	const char* msg = message.GetText();
-#endif
-	switch (message.GetKind())
+	NzbgetRsBuf line = nzbget_rs_frontend_format_log_message(
+		0, (int)message.GetKind(), message.GetText());
+	if (line.data)
 	{
-		case Message::mkDebug:
-			printf("[DEBUG] %s\n", msg);
-			break;
-		case Message::mkError:
-			printf("[ERROR] %s\n", msg);
-			break;
-		case Message::mkWarning:
-			printf("[WARNING] %s\n", msg);
-			break;
-		case Message::mkInfo:
-			printf("[INFO] %s\n", msg);
-			break;
-		case Message::mkDetail:
-			printf("[DETAIL] %s\n", msg);
-			break;
+		fwrite(line.data, 1, line.len, stdout);
 	}
+	nzbget_rs_free(line);
 }
 
 void LoggableFrontend::PrintSkip()

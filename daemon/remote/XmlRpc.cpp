@@ -497,73 +497,12 @@ class TestDiskSpeedXmlCommand final : public XmlCommand
 {
 public:
 	void Execute() override;
-
-	std::string ToJsonStr(const Benchmark::Result& res)
-	{
-		Json::JsonObject json;
-
-		json["SizeMB"] = res.writeBytes / 1024ull / 1024ull;
-		json["DurationMS"] = res.writeMs;
-		json["ReadSizeMB"] = res.readBytes / 1024ull / 1024ull;
-		json["ReadDurationMS"] = res.readMs;
-
-		return Json::Serialize(json);
-	}
-
-	std::string ToXmlStr(const Benchmark::Result& res)
-	{
-		xmlNodePtr rootNode = xmlNewNode(nullptr, BAD_CAST "value");
-		xmlNodePtr structNode = xmlNewNode(nullptr, BAD_CAST "struct");
-
-		std::string sizeMB = std::to_string(res.writeBytes / 1024ull / 1024ull);
-		std::string durationMS = std::to_string(res.writeMs);
-		std::string readSizeMB = std::to_string(res.readBytes / 1024ull / 1024ull);
-		std::string readDurationMS = std::to_string(res.readMs);
-
-		Xml::AddNewNode(structNode, "SizeMB", "i4", sizeMB.c_str());
-		Xml::AddNewNode(structNode, "DurationMS", "double", durationMS.c_str());
-		Xml::AddNewNode(structNode, "ReadSizeMB", "i4", readSizeMB.c_str());
-		Xml::AddNewNode(structNode, "ReadDurationMS", "double", readDurationMS.c_str());
-
-		xmlAddChild(rootNode, structNode);
-		std::string result = Xml::Serialize(rootNode);
-
-		xmlFreeNode(rootNode);
-
-		return result;
-	}
 };
 
 class TestNetworkSpeedXmlCommand final : public XmlCommand
 {
 public:
 	void Execute() override;
-
-	std::string ToJsonStr(double speedMbps)
-	{
-		Json::JsonObject json;
-
-		json["SpeedMbps"] = speedMbps;
-
-		return Json::Serialize(json);
-	}
-
-	std::string ToXmlStr(double speedMbps)
-	{
-		xmlNodePtr rootNode = xmlNewNode(nullptr, BAD_CAST "value");
-		xmlNodePtr structNode = xmlNewNode(nullptr, BAD_CAST "struct");
-
-		std::string speedMbpsStr = std::to_string(speedMbps);
-
-		Xml::AddNewNode(structNode, "SpeedMbps", "double", speedMbpsStr.c_str());
-
-		xmlAddChild(rootNode, structNode);
-		std::string result = Xml::Serialize(rootNode);
-
-		xmlFreeNode(rootNode);
-
-		return result;
-	}
 };
 
 class StartScriptXmlCommand final : public XmlCommand
@@ -943,41 +882,6 @@ void XmlCommand::PrepareParams()
 	}
 }
 
-char* XmlCommand::XmlNextValue(char* xml, const char* tag, int* valueLength)
-{
-	int valueLen;
-	const char* value = WebUtil::XmlFindTag(xml, "value", &valueLen);
-	if (value)
-	{
-		char* tagContent = (char*)WebUtil::XmlFindTag(value, tag, valueLength);
-		if (tagContent <= value + valueLen)
-		{
-			return tagContent;
-		}
-	}
-	return nullptr;
-}
-
-int XmlCommand::JsonStep(const char* param, int len)
-{
-	return nzbget_rs_rol_xmlrpc_json_step(*(param + len));
-}
-
-// an integer parameter: a number out of the int range is no valid value; it wrapped
-// around before (F16: DupeScore 2147483648 was stored as -2147483648)
-static bool ParseIntParam(const char* text, int* value)
-{
-	errno = 0;
-	char* end = nullptr;
-	long long number = strtoll(text, &end, 10);
-	if (end == text || errno == ERANGE || number < INT_MIN || number > INT_MAX)
-	{
-		return false;
-	}
-	*value = (int)number;
-	return true;
-}
-
 bool XmlCommand::NextParamAsInt(int* value)
 {
 	return nzbget_rs_rpc_next_param(&m_requestPtr, m_httpMethod == XmlRpcProcessor::hmGet, IsJson(), 0, value, nullptr);
@@ -997,11 +901,6 @@ bool XmlCommand::NextParamAsBool(bool* value)
 bool XmlCommand::NextParamAsStr(char** value)
 {
 	return nzbget_rs_rpc_next_param(&m_requestPtr, m_httpMethod == XmlRpcProcessor::hmGet, IsJson(), 2, nullptr, value);
-}
-
-const char* XmlCommand::BoolToStr(bool value)
-{
-	return nzbget_rs_rol_xmlrpc_bool_to_str(IsJson() ? 1 : 0, value ? 1 : 0);
 }
 
 CString XmlCommand::EncodeStr(const char* str)
@@ -1584,9 +1483,7 @@ void EditQueueXmlCommand::Execute()
 	// a number past the int range wrapped around (F27: a score of 2147483648 was
 	// stored as -2147483648, the lowest), a parameter needs a name and a value,
 	// and a dupe mode is one of three (the edit refused others, but the call said true)
-	int number = 0;
-	bool parsedIntOk = ParseIntParam(args, &number);
-	if (!nzbget_rs_rco_rpc_validate_edit_queue_args(action, args, parsedIntOk ? 1 : 0))
+	if (!nzbget_rs_rco_rpc_validate_edit_queue_args(action, args, 1))
 	{
 		BuildErrorResponse(2, "Invalid parameter");
 		return;
@@ -2413,50 +2310,23 @@ void SaveConfigXmlCommand::Execute()
 		return;
 	}
 
-	// Helper lambda to parse boolean option strings
-	auto parseBool = [](const char* val, bool defVal) -> bool
-	{
-		return nzbget_rs_rco_rpc_save_config_parse_bool(val, defVal ? 1 : 0) != 0;
-	};
-
 	// Configuration Conflict Validation (R7)
 	// Rule 7.1: ServerX.Encryption=no with ServerX.Cipher configured
-	std::set<int> checkedServers;
+	std::vector<const char*> optNames;
+	std::vector<const char*> optValues;
+	optNames.reserve(optEntries.size());
+	optValues.reserve(optEntries.size());
 	for (const auto& entry : optEntries)
 	{
-		const char* entryName = entry.GetName();
-		if (entryName && !strncasecmp(entryName, "Server", 6))
-		{
-			int sIndex = 0;
-			if (sscanf(entryName + 6, "%d.", &sIndex) == 1 && sIndex > 0)
-			{
-				if (!checkedServers.insert(sIndex).second) continue;
-
-				BString<100> cipherOpt("Server%i.Cipher", sIndex);
-				BString<100> encOpt("Server%i.Encryption", sIndex);
-
-				const char* cipherVal = nullptr;
-				if (Options::OptEntry* cEntry = optEntries.FindOption(*cipherOpt))
-				{
-					cipherVal = cEntry->GetValue();
-				}
-
-				if (cipherVal && cipherVal[0] != '\0')
-				{
-					bool encDisabled = true;
-					if (Options::OptEntry* eEntry = optEntries.FindOption(*encOpt))
-					{
-						encDisabled = !parseBool(eEntry->GetValue(), false);
-					}
-
-					if (encDisabled)
-					{
-						BuildErrorResponse(3, "Configuration conflict: Server%i.Cipher cannot be configured when Server%i.Encryption is disabled. Clear the cipher suite or enable encryption.", sIndex, sIndex);
-						return;
-					}
-				}
-			}
-		}
+		optNames.push_back(entry.GetName() ? entry.GetName() : "");
+		optValues.push_back(entry.GetValue() ? entry.GetValue() : "");
+	}
+	int cipherConflictServer = nzbget_rs_rco_rpc_save_config_find_cipher_conflict(
+		optNames.data(), optValues.data(), optNames.size());
+	if (cipherConflictServer > 0)
+	{
+		BuildErrorResponse(3, "Configuration conflict: Server%i.Cipher cannot be configured when Server%i.Encryption is disabled. Clear the cipher suite or enable encryption.", cipherConflictServer, cipherConflictServer);
+		return;
 	}
 
 	auto optVal = [&optEntries](const char* name) -> const char*
@@ -3242,9 +3112,8 @@ void TestDiskSpeedXmlCommand::Execute()
 		info("Disk speed test for %s: write %.1f MiB/s, read %.1f MiB/s",
 			dirPath, MiBPerSec(res.writeBytes, res.writeMs), MiBPerSec(res.readBytes, res.readMs));
 
-		std::string jsonStr = IsJson() ? ToJsonStr(res) : ToXmlStr(res);
-
-		AppendResponse(jsonStr.c_str());
+		AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_disk_speed(
+			IsJson() ? 1 : 0, res.writeBytes, res.writeMs, res.readBytes, res.readMs));
 	}
 	catch (const std::exception& e)
 	{
@@ -3261,11 +3130,8 @@ void TestNetworkSpeedXmlCommand::Execute()
 	{
 		Network::SpeedTest sp;
 		double speedMbps = sp.RunTest();
-		std::string respStr = IsJson() ?
-			ToJsonStr(speedMbps) :
-			ToXmlStr(speedMbps);
-
-		AppendResponse(respStr.c_str());
+		AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_network_speed(
+			IsJson() ? 1 : 0, speedMbps));
 	}
 	catch (const std::exception& e)
 	{

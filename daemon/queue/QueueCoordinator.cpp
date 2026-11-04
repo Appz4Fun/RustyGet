@@ -2592,6 +2592,72 @@ bool QueueCoordinator::SetQueueEntryName(DownloadQueue* downloadQueue, NzbInfo* 
 	return ok;
 }
 
+static NzbgetRsNzbMergeSplitCounters ReadNzbMergeSplitCounters(NzbInfo* nzbInfo)
+{
+	NzbgetRsNzbMergeSplitCounters c{};
+	c.file_count = nzbInfo->GetFileCount();
+	c.active_downloads = nzbInfo->GetActiveDownloads();
+	c.full_content_hash = nzbInfo->GetFullContentHash();
+	c.filtered_content_hash = nzbInfo->GetFilteredContentHash();
+	c.size = nzbInfo->GetSize();
+	c.remaining_size = nzbInfo->GetRemainingSize();
+	c.paused_file_count = nzbInfo->GetPausedFileCount();
+	c.paused_size = nzbInfo->GetPausedSize();
+	c.success_size = nzbInfo->GetSuccessSize();
+	c.current_success_size = nzbInfo->GetCurrentSuccessSize();
+	c.failed_size = nzbInfo->GetFailedSize();
+	c.current_failed_size = nzbInfo->GetCurrentFailedSize();
+	c.par_size = nzbInfo->GetParSize();
+	c.par_success_size = nzbInfo->GetParSuccessSize();
+	c.par_current_success_size = nzbInfo->GetParCurrentSuccessSize();
+	c.par_failed_size = nzbInfo->GetParFailedSize();
+	c.par_current_failed_size = nzbInfo->GetParCurrentFailedSize();
+	c.remaining_par_count = nzbInfo->GetRemainingParCount();
+	c.total_articles = nzbInfo->GetTotalArticles();
+	c.success_articles = nzbInfo->GetSuccessArticles();
+	c.failed_articles = nzbInfo->GetFailedArticles();
+	c.current_success_articles = nzbInfo->GetCurrentSuccessArticles();
+	c.current_failed_articles = nzbInfo->GetCurrentFailedArticles();
+	c.min_time = (int64)nzbInfo->GetMinTime();
+	c.max_time = (int64)nzbInfo->GetMaxTime();
+	c.downloaded_size = nzbInfo->GetDownloadedSize();
+	c.download_sec = nzbInfo->GetDownloadSec();
+	c.download_start_time = (int64)nzbInfo->GetDownloadStartTime();
+	return c;
+}
+
+static void WriteNzbMergeSplitCounters(NzbInfo* nzbInfo, const NzbgetRsNzbMergeSplitCounters& c)
+{
+	nzbInfo->SetFileCount(c.file_count);
+	nzbInfo->SetActiveDownloads(c.active_downloads);
+	nzbInfo->SetFullContentHash(c.full_content_hash);
+	nzbInfo->SetFilteredContentHash(c.filtered_content_hash);
+	nzbInfo->SetSize(c.size);
+	nzbInfo->SetRemainingSize(c.remaining_size);
+	nzbInfo->SetPausedFileCount(c.paused_file_count);
+	nzbInfo->SetPausedSize(c.paused_size);
+	nzbInfo->SetSuccessSize(c.success_size);
+	nzbInfo->SetCurrentSuccessSize(c.current_success_size);
+	nzbInfo->SetFailedSize(c.failed_size);
+	nzbInfo->SetCurrentFailedSize(c.current_failed_size);
+	nzbInfo->SetParSize(c.par_size);
+	nzbInfo->SetParSuccessSize(c.par_success_size);
+	nzbInfo->SetParCurrentSuccessSize(c.par_current_success_size);
+	nzbInfo->SetParFailedSize(c.par_failed_size);
+	nzbInfo->SetParCurrentFailedSize(c.par_current_failed_size);
+	nzbInfo->SetRemainingParCount(c.remaining_par_count);
+	nzbInfo->SetTotalArticles(c.total_articles);
+	nzbInfo->SetSuccessArticles(c.success_articles);
+	nzbInfo->SetFailedArticles(c.failed_articles);
+	nzbInfo->SetCurrentSuccessArticles(c.current_success_articles);
+	nzbInfo->SetCurrentFailedArticles(c.current_failed_articles);
+	nzbInfo->SetMinTime((time_t)c.min_time);
+	nzbInfo->SetMaxTime((time_t)c.max_time);
+	nzbInfo->SetDownloadedSize(c.downloaded_size);
+	nzbInfo->SetDownloadSec(c.download_sec);
+	nzbInfo->SetDownloadStartTime((time_t)c.download_start_time);
+}
+
 bool QueueCoordinator::MergeQueueEntries(DownloadQueue* downloadQueue, NzbInfo* destNzbInfo, NzbInfo* srcNzbInfo)
 {
 	if (destNzbInfo->GetPostInfo() || srcNzbInfo->GetPostInfo())
@@ -2625,52 +2691,12 @@ bool QueueCoordinator::MergeQueueEntries(DownloadQueue* downloadQueue, NzbInfo* 
 	}
 	srcNzbInfo->GetFileList()->clear();
 
-	destNzbInfo->SetFileCount(destNzbInfo->GetFileCount() + srcNzbInfo->GetFileCount());
-	destNzbInfo->SetActiveDownloads(destNzbInfo->GetActiveDownloads() + srcNzbInfo->GetActiveDownloads());
-	destNzbInfo->SetFullContentHash(0);
-	destNzbInfo->SetFilteredContentHash(0);
-
-	destNzbInfo->SetSize(destNzbInfo->GetSize() + srcNzbInfo->GetSize());
-	destNzbInfo->SetRemainingSize(destNzbInfo->GetRemainingSize() + srcNzbInfo->GetRemainingSize());
-	destNzbInfo->SetPausedFileCount(destNzbInfo->GetPausedFileCount() + srcNzbInfo->GetPausedFileCount());
-	destNzbInfo->SetPausedSize(destNzbInfo->GetPausedSize() + srcNzbInfo->GetPausedSize());
-
-	destNzbInfo->SetSuccessSize(destNzbInfo->GetSuccessSize() + srcNzbInfo->GetSuccessSize());
-	destNzbInfo->SetCurrentSuccessSize(destNzbInfo->GetCurrentSuccessSize() + srcNzbInfo->GetCurrentSuccessSize());
-	destNzbInfo->SetFailedSize(destNzbInfo->GetFailedSize() + srcNzbInfo->GetFailedSize());
-	destNzbInfo->SetCurrentFailedSize(destNzbInfo->GetCurrentFailedSize() + srcNzbInfo->GetCurrentFailedSize());
-
-	destNzbInfo->SetParSize(destNzbInfo->GetParSize() + srcNzbInfo->GetParSize());
-	destNzbInfo->SetParSuccessSize(destNzbInfo->GetParSuccessSize() + srcNzbInfo->GetParSuccessSize());
-	destNzbInfo->SetParCurrentSuccessSize(destNzbInfo->GetParCurrentSuccessSize() + srcNzbInfo->GetParCurrentSuccessSize());
-	destNzbInfo->SetParFailedSize(destNzbInfo->GetParFailedSize() + srcNzbInfo->GetParFailedSize());
-	destNzbInfo->SetParCurrentFailedSize(destNzbInfo->GetParCurrentFailedSize() + srcNzbInfo->GetParCurrentFailedSize());
-	destNzbInfo->SetRemainingParCount(destNzbInfo->GetRemainingParCount() + srcNzbInfo->GetRemainingParCount());
-
-	destNzbInfo->SetTotalArticles(destNzbInfo->GetTotalArticles() + srcNzbInfo->GetTotalArticles());
-	destNzbInfo->SetSuccessArticles(destNzbInfo->GetSuccessArticles() + srcNzbInfo->GetSuccessArticles());
-	destNzbInfo->SetFailedArticles(destNzbInfo->GetFailedArticles() + srcNzbInfo->GetFailedArticles());
-	destNzbInfo->SetCurrentSuccessArticles(destNzbInfo->GetCurrentSuccessArticles() + srcNzbInfo->GetCurrentSuccessArticles());
-	destNzbInfo->SetCurrentFailedArticles(destNzbInfo->GetCurrentFailedArticles() + srcNzbInfo->GetCurrentFailedArticles());
+	NzbgetRsNzbMergeSplitCounters destCounters = ReadNzbMergeSplitCounters(destNzbInfo);
+	NzbgetRsNzbMergeSplitCounters srcCounters = ReadNzbMergeSplitCounters(srcNzbInfo);
+	nzbget_rs_qci_queue_coord_merge_counters(&destCounters, &srcCounters);
+	WriteNzbMergeSplitCounters(destNzbInfo, destCounters);
 	destNzbInfo->GetServerStats()->ListOp(srcNzbInfo->GetServerStats(), ServerStatList::soAdd);
 	destNzbInfo->GetCurrentServerStats()->ListOp(srcNzbInfo->GetCurrentServerStats(), ServerStatList::soAdd);
-
-	int64 mergedMinTime = (int64)destNzbInfo->GetMinTime();
-	int64 mergedMaxTime = (int64)destNzbInfo->GetMaxTime();
-	nzbget_rs_qcf_queue_coord_merge_min_max_time(
-		mergedMinTime,
-		(int64)srcNzbInfo->GetMinTime(),
-		mergedMaxTime,
-		(int64)srcNzbInfo->GetMaxTime(),
-		&mergedMinTime,
-		&mergedMaxTime);
-	destNzbInfo->SetMinTime((time_t)mergedMinTime);
-	destNzbInfo->SetMaxTime((time_t)mergedMaxTime);
-
-	destNzbInfo->SetDownloadedSize(destNzbInfo->GetDownloadedSize() + srcNzbInfo->GetDownloadedSize());
-	destNzbInfo->SetDownloadSec(destNzbInfo->GetDownloadSec() + srcNzbInfo->GetDownloadSec());
-	destNzbInfo->SetDownloadStartTime((time_t)nzbget_rs_cwp_queue_coord_select_merged_download_start_time(
-		(int64)destNzbInfo->GetDownloadStartTime(), (int64)srcNzbInfo->GetDownloadStartTime()));
 
 	// reattach completed file items to new NZBInfo-object
 	for (CompletedFile& completedFile : srcNzbInfo->GetCompletedFiles())
@@ -2755,6 +2781,9 @@ bool QueueCoordinator::SplitQueueEntries(DownloadQueue* downloadQueue, RawFileLi
 	srcNzbInfo->SetFullContentHash(0);
 	srcNzbInfo->SetFilteredContentHash(0);
 
+	NzbgetRsNzbMergeSplitCounters srcCounters = ReadNzbMergeSplitCounters(srcNzbInfo);
+	NzbgetRsNzbMergeSplitCounters dstCounters = ReadNzbMergeSplitCounters(nzbInfo.get());
+
 	for (FileInfo* fileInfo : fileList)
 	{
 		DownloadQueue::Aspect aspect = { DownloadQueue::eaFileDeleted, downloadQueue, fileInfo->GetNzbInfo(), fileInfo };
@@ -2763,50 +2792,26 @@ bool QueueCoordinator::SplitQueueEntries(DownloadQueue* downloadQueue, RawFileLi
 		nzbInfo->GetFileList()->Add(srcNzbInfo->GetFileList()->Remove(fileInfo));
 		fileInfo->SetNzbInfo(nzbInfo.get());
 
-		srcNzbInfo->SetFileCount(srcNzbInfo->GetFileCount() - 1);
-		srcNzbInfo->SetSize(srcNzbInfo->GetSize() - fileInfo->GetSize());
-		srcNzbInfo->SetRemainingSize(srcNzbInfo->GetRemainingSize() - fileInfo->GetRemainingSize());
-		srcNzbInfo->SetCurrentSuccessSize(srcNzbInfo->GetCurrentSuccessSize() - fileInfo->GetSuccessSize());
-		srcNzbInfo->SetCurrentFailedSize(srcNzbInfo->GetCurrentFailedSize() - fileInfo->GetFailedSize() - fileInfo->GetMissedSize());
-		srcNzbInfo->SetTotalArticles(srcNzbInfo->GetTotalArticles() - fileInfo->GetTotalArticles());
-		srcNzbInfo->SetFailedArticles(srcNzbInfo->GetFailedArticles() - fileInfo->GetMissedArticles());
-		srcNzbInfo->SetCurrentSuccessArticles(srcNzbInfo->GetCurrentSuccessArticles() - fileInfo->GetSuccessArticles());
-		srcNzbInfo->SetCurrentFailedArticles(srcNzbInfo->GetCurrentFailedArticles() - fileInfo->GetFailedArticles() - fileInfo->GetMissedArticles());
+		NzbgetRsSplitFileCounters fc{};
+		fc.size = fileInfo->GetSize();
+		fc.remaining_size = fileInfo->GetRemainingSize();
+		fc.success_size = fileInfo->GetSuccessSize();
+		fc.failed_size = fileInfo->GetFailedSize();
+		fc.missed_size = fileInfo->GetMissedSize();
+		fc.total_articles = fileInfo->GetTotalArticles();
+		fc.missed_articles = fileInfo->GetMissedArticles();
+		fc.success_articles = fileInfo->GetSuccessArticles();
+		fc.failed_articles = fileInfo->GetFailedArticles();
+		fc.par_file = fileInfo->GetParFile() ? 1 : 0;
+		fc.paused = fileInfo->GetPaused() ? 1 : 0;
+
+		nzbget_rs_qci_queue_coord_split_transfer_file(&srcCounters, &dstCounters, &fc);
 		srcNzbInfo->GetCurrentServerStats()->ListOp(fileInfo->GetServerStats(), ServerStatList::soSubtract);
-
-		nzbInfo->SetFileCount(nzbInfo->GetFileCount() + 1);
-		nzbInfo->SetSize(nzbInfo->GetSize() + fileInfo->GetSize());
-		nzbInfo->SetRemainingSize(nzbInfo->GetRemainingSize() + fileInfo->GetRemainingSize());
-		nzbInfo->SetCurrentSuccessSize(nzbInfo->GetCurrentSuccessSize() + fileInfo->GetSuccessSize());
-		nzbInfo->SetCurrentFailedSize(nzbInfo->GetCurrentFailedSize() + fileInfo->GetFailedSize() + fileInfo->GetMissedSize());
-		nzbInfo->SetTotalArticles(nzbInfo->GetTotalArticles() + fileInfo->GetTotalArticles());
-		nzbInfo->SetFailedArticles(nzbInfo->GetFailedArticles() + fileInfo->GetMissedArticles());
-		nzbInfo->SetCurrentSuccessArticles(nzbInfo->GetCurrentSuccessArticles() + fileInfo->GetSuccessArticles());
-		nzbInfo->SetCurrentFailedArticles(nzbInfo->GetCurrentFailedArticles() + fileInfo->GetFailedArticles() + fileInfo->GetMissedArticles());
 		nzbInfo->GetCurrentServerStats()->ListOp(fileInfo->GetServerStats(), ServerStatList::soAdd);
-
-		if (fileInfo->GetParFile())
-		{
-			srcNzbInfo->SetParSize(srcNzbInfo->GetParSize() - fileInfo->GetSize());
-			srcNzbInfo->SetParCurrentSuccessSize(srcNzbInfo->GetParCurrentSuccessSize() - fileInfo->GetSuccessSize());
-			srcNzbInfo->SetParCurrentFailedSize(srcNzbInfo->GetParCurrentFailedSize() - fileInfo->GetFailedSize() - fileInfo->GetMissedSize());
-			srcNzbInfo->SetRemainingParCount(srcNzbInfo->GetRemainingParCount() - 1);
-
-			nzbInfo->SetParSize(nzbInfo->GetParSize() + fileInfo->GetSize());
-			nzbInfo->SetParCurrentSuccessSize(nzbInfo->GetParCurrentSuccessSize() + fileInfo->GetSuccessSize());
-			nzbInfo->SetParCurrentFailedSize(nzbInfo->GetParCurrentFailedSize() + fileInfo->GetFailedSize() + fileInfo->GetMissedSize());
-			nzbInfo->SetRemainingParCount(nzbInfo->GetRemainingParCount() + 1);
-		}
-
-		if (fileInfo->GetPaused())
-		{
-			srcNzbInfo->SetPausedFileCount(srcNzbInfo->GetPausedFileCount() - 1);
-			srcNzbInfo->SetPausedSize(srcNzbInfo->GetPausedSize() - fileInfo->GetRemainingSize());
-
-			nzbInfo->SetPausedFileCount(nzbInfo->GetPausedFileCount() + 1);
-			nzbInfo->SetPausedSize(nzbInfo->GetPausedSize() + fileInfo->GetRemainingSize());
-		}
 	}
+
+	WriteNzbMergeSplitCounters(srcNzbInfo, srcCounters);
+	WriteNzbMergeSplitCounters(nzbInfo.get(), dstCounters);
 
 	nzbInfo->UpdateMinMaxTime();
 	if (srcNzbInfo->GetCompletedFiles()->empty())

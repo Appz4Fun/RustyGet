@@ -5033,6 +5033,130 @@ NzbgetRsBuf nzbget_rs_ncurses_format_group_row(
     const NzbgetRsNcursesGroupRowSpec* spec,
     int* inout_col_files, int* inout_col_total, int* inout_col_left, int* out_color);
 
+NzbgetRsBuf nzbget_rs_colored_frontend_format_status_bar(
+    int stand_by, int pause_download, int64_t current_download_speed,
+    int64_t remaining_size, int64_t download_limit, int post_job_count,
+    int thread_count, const char* control_seq);
+NzbgetRsBuf nzbget_rs_frontend_format_log_message(
+    int colored, int kind, const char* text);
+
+NzbgetRsBuf nzbget_rs_web_format_auth_response(
+    int form_auth, int keep_alive, const char* version);
+NzbgetRsBuf nzbget_rs_web_format_options_response(
+    int keep_alive, const char* origin, const char* version);
+NzbgetRsBuf nzbget_rs_web_format_error_response(
+    const char* err_code, int keep_alive, const char* version, NzbgetRsBuf* out_body);
+NzbgetRsBuf nzbget_rs_web_format_redirect_response(
+    const char* url, int keep_alive, const char* version);
+NzbgetRsBuf nzbget_rs_web_format_body_response_header(
+    int unchanged, int keep_alive, const char* origin, int form_auth,
+    const char* auth_token, int body_len, const char* content_type,
+    int gzip, const char* etag, const char* version);
+
+NzbgetRsBuf nzbget_rs_diskstate_format_unpack_trailer_item(
+    int id, int direct_unpack_status, int unpack_tried, int par_repaired,
+    int last_unpack_status, const char* const* archives, size_t archives_len);
+NzbgetRsBuf nzbget_rs_diskstate_format_feed_status(
+    const char* const* urls, const uint32_t* filter_hashes,
+    const int* last_updates, size_t len);
+NzbgetRsBuf nzbget_rs_diskstate_format_feed_history(
+    const int* statuses, const int* last_seens,
+    const char* const* urls, size_t len);
+NzbgetRsBuf nzbget_rs_diskstate_format_server_info(
+    const char* const* names, const char* const* hosts,
+    const int* ports, const char* const* users, size_t len);
+NzbgetRsBuf nzbget_rs_diskstate_format_nzb_message_line(
+    const char* time_str, int tm, int kind, const char* text, const char* line_ending);
+int nzbget_rs_diskstate_parse_completed_file_line(
+    char* buf, int format_version, int* out_id, int* out_status,
+    uint32_t* out_crc, int* out_par_file, const char** out_hash16k,
+    const char** out_par_set_id, const char** out_file_name);
+
+NzbgetRsBuf nzbget_rs_xmlrpc_format_disk_speed(
+    int is_json, uint64_t write_bytes, double write_ms,
+    uint64_t read_bytes, double read_ms);
+NzbgetRsBuf nzbget_rs_xmlrpc_format_network_speed(
+    int is_json, double speed_mbps);
+int nzbget_rs_rco_rpc_save_config_find_cipher_conflict(
+    const char* const* names, const char* const* values, size_t len);
+
+int nzbget_rs_options_parse_enum_value(
+    const char* val, const char* def_val, int argc,
+    const char* const* argn, const int* argv,
+    int* out_value, int* out_norm_idx);
+int nzbget_rs_options_parse_int_value(
+    const char* val, const char* def_val, int base, int* out_value);
+int nzbget_rs_options_is_category_extensions_opt(const char* optname);
+
+uint32_t nzbget_rs_dupe_watch_build_item_flags(
+    int kind, int in_history, int dupe_success, int deleting,
+    int delete_status, int has_post_info, int dupe_mode,
+    int is_donor, int dupe_hint, int has_dupe_fleet);
+int nzbget_rs_dupe_watch_is_live_fleet_peer(
+    const char* peer_key, size_t peer_key_len,
+    const char* pick_key, size_t pick_key_len, uint32_t peer_flags);
+NzbgetRsBuf nzbget_rs_dupe_watch_format_searched_state_line(
+    int64_t now, int64_t state_ttl_sec, const char* key, int score,
+    int64_t searched_time, const char* title, int retryable);
+
+typedef struct {
+    int file_count;
+    int active_downloads;
+    uint32_t full_content_hash;
+    uint32_t filtered_content_hash;
+    int64_t size;
+    int64_t remaining_size;
+    int paused_file_count;
+    int64_t paused_size;
+    int64_t success_size;
+    int64_t current_success_size;
+    int64_t failed_size;
+    int64_t current_failed_size;
+    int64_t par_size;
+    int64_t par_success_size;
+    int64_t par_current_success_size;
+    int64_t par_failed_size;
+    int64_t par_current_failed_size;
+    int remaining_par_count;
+    int total_articles;
+    int success_articles;
+    int failed_articles;
+    int current_success_articles;
+    int current_failed_articles;
+    int64_t min_time;
+    int64_t max_time;
+    int64_t downloaded_size;
+    int download_sec;
+    int64_t download_start_time;
+} NzbgetRsNzbMergeSplitCounters;
+
+typedef struct {
+    int64_t size;
+    int64_t remaining_size;
+    int64_t success_size;
+    int64_t failed_size;
+    int64_t missed_size;
+    int total_articles;
+    int missed_articles;
+    int success_articles;
+    int failed_articles;
+    int par_file;
+    int paused;
+} NzbgetRsSplitFileCounters;
+
+void nzbget_rs_qci_queue_coord_merge_counters(
+    NzbgetRsNzbMergeSplitCounters* dest, const NzbgetRsNzbMergeSplitCounters* src);
+void nzbget_rs_qci_queue_coord_split_transfer_file(
+    NzbgetRsNzbMergeSplitCounters* src, NzbgetRsNzbMergeSplitCounters* dst,
+    const NzbgetRsSplitFileCounters* file);
+NzbgetRsBuf nzbget_rs_qci_queue_editor_diff_category_extensions(
+    const char* old_ext, const char* new_ext);
+
+NzbgetRsBuf nzbget_rs_nserv_format_usage(const char* base_name);
+NzbgetRsBuf nzbget_rs_nserv_format_nzb_file(
+    int64_t file_size, int segment_size, int timestamp,
+    const char* base_name, const char* relative_path);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

@@ -234,6 +234,165 @@ pub fn check_credentials(
     r
 }
 
+fn truncate_bstring_1024(mut v: Vec<u8>) -> Vec<u8> {
+    if v.len() > 1023 {
+        v.truncate(1023);
+    }
+    v
+}
+
+/// Formats the HTTP 401 Unauthorized response header (`WebProcessor::SendAuthResponse`).
+pub fn format_auth_response(form_auth: bool, keep_alive: bool, version: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(256);
+    out.extend_from_slice(b"HTTP/1.1 401 Unauthorized\r\n");
+    if !form_auth {
+        out.extend_from_slice(b"WWW-Authenticate: Basic realm=\"NZBGet\"\r\n");
+    }
+    out.extend_from_slice(b"Connection: ");
+    out.extend_from_slice(if keep_alive { b"keep-alive" } else { b"close" });
+    out.extend_from_slice(
+        b"\r\n\
+Content-Type: text/plain\r\n\
+Content-Length: 0\r\n\
+Server: nzbget-",
+    );
+    out.extend_from_slice(version);
+    out.extend_from_slice(b"\r\n\r\n");
+    truncate_bstring_1024(out)
+}
+
+/// Formats the HTTP 200 OK CORS preflight response header (`WebProcessor::SendOptionsResponse`).
+pub fn format_options_response(keep_alive: bool, origin: &[u8], version: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(320);
+    out.extend_from_slice(b"HTTP/1.1 200 OK\r\nConnection: ");
+    out.extend_from_slice(if keep_alive { b"keep-alive" } else { b"close" });
+    out.extend_from_slice(
+        b"\r\n\
+Content-Length: 0\r\n\
+Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
+Access-Control-Allow-Origin: ",
+    );
+    out.extend_from_slice(origin);
+    out.extend_from_slice(
+        b"\r\n\
+Access-Control-Allow-Credentials: true\r\n\
+Access-Control-Max-Age: 86400\r\n\
+Access-Control-Allow-Headers: Content-Type, Authorization\r\n\
+Server: nzbget-",
+    );
+    out.extend_from_slice(version);
+    out.extend_from_slice(b"\r\n\r\n");
+    truncate_bstring_1024(out)
+}
+
+/// Formats the HTTP error response header and HTML body (`WebProcessor::SendErrorResponse`).
+pub fn format_error_response(
+    err_code: &[u8],
+    keep_alive: bool,
+    version: &[u8],
+) -> (Vec<u8>, Vec<u8>) {
+    let mut body = Vec::with_capacity(128);
+    body.extend_from_slice(b"<html><head><title>");
+    body.extend_from_slice(err_code);
+    body.extend_from_slice(b"</title></head><body>Error: ");
+    body.extend_from_slice(err_code);
+    body.extend_from_slice(b"</body></html>");
+    body = truncate_bstring_1024(body);
+
+    let mut header = Vec::with_capacity(256);
+    header.extend_from_slice(b"HTTP/1.1 ");
+    header.extend_from_slice(err_code);
+    header.extend_from_slice(b"\r\nConnection: ");
+    header.extend_from_slice(if keep_alive { b"keep-alive" } else { b"close" });
+    header.extend_from_slice(b"\r\nContent-Length: ");
+    header.extend_from_slice((body.len() as i32).to_string().as_bytes());
+    header.extend_from_slice(b"\r\nContent-Type: text/html\r\nServer: nzbget-");
+    header.extend_from_slice(version);
+    header.extend_from_slice(b"\r\n\r\n");
+    header = truncate_bstring_1024(header);
+
+    (header, body)
+}
+
+/// Formats the HTTP 301 redirect response header (`WebProcessor::SendRedirectResponse`).
+pub fn format_redirect_response(url: &[u8], keep_alive: bool, version: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(256);
+    out.extend_from_slice(b"HTTP/1.1 301 Moved Permanently\r\nLocation: ");
+    out.extend_from_slice(url);
+    out.extend_from_slice(b"\r\nConnection: ");
+    out.extend_from_slice(if keep_alive { b"keep-alive" } else { b"close" });
+    out.extend_from_slice(b"\r\nContent-Length: 0\r\nServer: nzbget-");
+    out.extend_from_slice(version);
+    out.extend_from_slice(b"\r\n\r\n");
+    truncate_bstring_1024(out)
+}
+
+/// Formats the HTTP response header for `WebProcessor::SendBodyResponse`.
+#[allow(clippy::too_many_arguments)]
+pub fn format_body_response_header(
+    unchanged: bool,
+    keep_alive: bool,
+    origin: &[u8],
+    form_auth: bool,
+    auth_token: &[u8],
+    body_len: i32,
+    content_type: Option<&[u8]>,
+    gzip: bool,
+    etag: Option<&[u8]>,
+    version: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(512);
+    out.extend_from_slice(if unchanged {
+        b"HTTP/1.1 304 Not Modified\r\n"
+    } else {
+        b"HTTP/1.1 200 OK\r\n"
+    });
+    out.extend_from_slice(b"Connection: ");
+    out.extend_from_slice(if keep_alive { b"keep-alive" } else { b"close" });
+    out.extend_from_slice(
+        b"\r\n\
+Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
+Access-Control-Allow-Origin: ",
+    );
+    out.extend_from_slice(origin);
+    out.extend_from_slice(
+        b"\r\n\
+Access-Control-Allow-Credentials: true\r\n\
+Access-Control-Max-Age: 86400\r\n\
+Access-Control-Allow-Headers: Content-Type, Authorization\r\n\
+Set-Cookie: Auth-Type=",
+    );
+    out.extend_from_slice(if form_auth { b"form" } else { b"http" });
+    out.extend_from_slice(b"; SameSite=Lax\r\nSet-Cookie: Auth-Token=");
+    out.extend_from_slice(auth_token);
+    out.extend_from_slice(b"; HttpOnly; SameSite=Lax\r\nContent-Length: ");
+    out.extend_from_slice(body_len.to_string().as_bytes());
+    out.extend_from_slice(b"\r\n");
+    if let Some(ct) = content_type {
+        let mut ct_hdr = Vec::with_capacity(ct.len() + 18);
+        ct_hdr.extend_from_slice(b"Content-Type: ");
+        ct_hdr.extend_from_slice(ct);
+        ct_hdr.extend_from_slice(b"\r\n");
+        let ct_hdr = truncate_bstring_1024(ct_hdr);
+        out.extend_from_slice(&ct_hdr);
+    }
+    if gzip {
+        out.extend_from_slice(b"Content-Encoding: gzip\r\n");
+    }
+    if let Some(et) = etag {
+        let mut et_hdr = Vec::with_capacity(et.len() + 10);
+        et_hdr.extend_from_slice(b"ETag: ");
+        et_hdr.extend_from_slice(et);
+        et_hdr.extend_from_slice(b"\r\n");
+        let et_hdr = truncate_bstring_1024(et_hdr);
+        out.extend_from_slice(&et_hdr);
+    }
+    out.extend_from_slice(b"Server: nzbget-");
+    out.extend_from_slice(version);
+    out.extend_from_slice(b"\r\n\r\n");
+    truncate_bstring_1024(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,5 +438,36 @@ mod tests {
         assert_eq!((c.authorized, c.access, c.auth_cut), (true, Some(0), Some(6)));
         assert!(check_credentials(&o, b"10.0.0.1", b"nzbget:wrong", b"", tokens, &l).warn);
         assert_eq!(check_credentials(&o, b"10.0.0.1", b"", b"t2", tokens, &l).access, Some(2));
+    }
+
+    #[test]
+    fn response_headers() {
+        let auth = format_auth_response(false, true, b"26.0");
+        assert!(auth.starts_with(b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"NZBGet\"\r\nConnection: keep-alive\r\n"));
+        assert!(auth.ends_with(b"Server: nzbget-26.0\r\n\r\n"));
+
+        let (err_hdr, err_body) = format_error_response(b"404 Not Found", false, b"26.0");
+        assert_eq!(
+            err_body,
+            b"<html><head><title>404 Not Found</title></head><body>Error: 404 Not Found</body></html>"
+        );
+        assert!(err_hdr.starts_with(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 87\r\n"));
+
+        let body_hdr = format_body_response_header(
+            false,
+            true,
+            b"*",
+            true,
+            b"tok123",
+            42,
+            Some(b"application/json"),
+            true,
+            Some(b"\"abc\""),
+            b"26.0",
+        );
+        let text = String::from_utf8(body_hdr).unwrap();
+        assert!(text.contains("Set-Cookie: Auth-Type=form; SameSite=Lax\r\n"));
+        assert!(text.contains("Set-Cookie: Auth-Token=tok123; HttpOnly; SameSite=Lax\r\n"));
+        assert!(text.contains("Content-Type: application/json\r\nContent-Encoding: gzip\r\nETag: \"abc\"\r\n"));
     }
 }

@@ -35,12 +35,8 @@ namespace System
 	private:
 		void Init();
 		std::optional<std::string> GetCPUArch() const;
-		std::optional<std::string> GetCPUModel() const;
 		std::string GetCanonicalCPUArch(const std::string& arch) const;
-
-#ifndef WIN32
 		std::optional<std::string> GetCPUModelFromCPUInfo() const;
-#endif
 
 		std::string m_model;
 		std::string m_arch;

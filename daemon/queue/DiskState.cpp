@@ -948,26 +948,24 @@ void DiskState::SaveDupeTrailer(const std::vector<NzbInfo*>& nzbs, StateDiskFile
 	outfile.PrintLine("%i", (int)nzbs.size());
 	for (NzbInfo* nzbInfo : nzbs)
 	{
-		outfile.PrintLine("%i", nzbInfo->GetId());
-		outfile.PrintLine("DirectUnpackStatus=%i", static_cast<int>(nzbInfo->GetDirectUnpackStatus()));
-		int unpackTriedFlags = nzbget_rs_dsp_pack_unpack_tried_flags(
-			nzbInfo->GetUnpackTried() ? 1 : 0, nzbInfo->GetParRepaired() ? 1 : 0);
-		outfile.PrintLine("UnpackTried=%i", unpackTriedFlags);
-		outfile.PrintLine("LastUnpackStatus=%i", nzbInfo->GetLastUnpackStatus());
-		std::string extractedArchives;
+		std::vector<const char*> archivePtrs;
 		std::vector<CString>* archives = nzbInfo->GetExtractedArchives();
-		if (archives && !archives->empty())
+		if (archives)
 		{
-			for (size_t i = 0; i < archives->size(); i++)
+			archivePtrs.reserve(archives->size());
+			for (const CString& arc : *archives)
 			{
-				if (i > 0)
-				{
-					extractedArchives.push_back(',');
-				}
-				extractedArchives.append((*archives)[i]);
+				archivePtrs.push_back(*arc ? *arc : "");
 			}
 		}
-		outfile.PrintLine("ExtractedArchives=%s", extractedArchives.c_str());
+		WriteRsBuf(outfile, nzbget_rs_diskstate_format_unpack_trailer_item(
+			nzbInfo->GetId(),
+			static_cast<int>(nzbInfo->GetDirectUnpackStatus()),
+			nzbInfo->GetUnpackTried() ? 1 : 0,
+			nzbInfo->GetParRepaired() ? 1 : 0,
+			nzbInfo->GetLastUnpackStatus(),
+			archivePtrs.data(),
+			archivePtrs.size()));
 	}
 }
 
@@ -1392,57 +1390,25 @@ bool DiskState::LoadNzbInfo(NzbInfo* nzbInfo, Servers* servers, StateDiskFile& i
 		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
 
 		int id = 0;
-		char* fileName = buf;
+		const char* fileName = buf;
 		int status = 0;
 		uint32 crc = 0;
 		int parFile = 0;
-		char* hash16k = nullptr;
-		char* parSetId = nullptr;
+		const char* hash16k = nullptr;
+		const char* parSetId = nullptr;
 		char filenameBuf[1024];
 		char origName[1024] = {};
 
-		if (formatVersion >= 49)
+		if (!nzbget_rs_diskstate_parse_completed_file_line(
+			buf, formatVersion, &id, &status, &crc, &parFile, &hash16k, &parSetId, &fileName))
 		{
-			if (formatVersion >= 60)
-			{
-				if (sscanf(buf, "%i,%i,%u,%i", &id, &status, &crc, &parFile) != 4) goto error;
-				hash16k = strchr(buf, ',');
-				if (hash16k) hash16k = strchr(hash16k+1, ',');
-				if (hash16k) hash16k = strchr(hash16k+1, ',');
-				if (hash16k) hash16k = strchr(hash16k+1, ',');
-				if (hash16k)
-				{
-					parSetId = strchr(++hash16k, ',');
-					if (parSetId)
-					{
-						*parSetId++ = '\0';
-						fileName = strchr(parSetId, ',');
-						if (fileName) *fileName = '\0';
-					}
-				}
-			}
-			else if (formatVersion >= 50)
-			{
-				if (sscanf(buf, "%i,%i,%u", &id, &status, &crc) != 3) goto error;
-				fileName = strchr(buf, ',');
-				if (fileName) fileName = strchr(fileName+1, ',');
-				if (fileName) fileName = strchr(fileName+1, ',');
-			}
-			else
-			{
-				if (sscanf(buf, "%i,%u", &status, &crc) != 2) goto error;
-				fileName = strchr(buf + 2, ',');
-			}
-			if (fileName)
-			{
-				fileName++;
-			}
-			if (formatVersion >= 62)
-			{
-				if (!infile.ReadLine(filenameBuf, sizeof(filenameBuf))) goto error;
-				fileName = filenameBuf;
-				if (!infile.ReadLine(origName, sizeof(origName))) goto error;
-			}
+			goto error;
+		}
+		if (formatVersion >= 62)
+		{
+			if (!infile.ReadLine(filenameBuf, sizeof(filenameBuf))) goto error;
+			fileName = filenameBuf;
+			if (!infile.ReadLine(origName, sizeof(origName))) goto error;
 		}
 
 		nzbInfo->GetCompletedFiles()->emplace_back(
@@ -2531,13 +2497,20 @@ bool DiskState::SaveFeedStatus(Feeds* feeds, StateDiskFile& outfile)
 {
 	debug("Saving feed status to disk");
 
-	outfile.PrintLine("%i", (int)feeds->size());
+	std::vector<const char*> urls;
+	std::vector<uint32_t> filterHashes;
+	std::vector<int> lastUpdates;
+	urls.reserve(feeds->size());
+	filterHashes.reserve(feeds->size());
+	lastUpdates.reserve(feeds->size());
 	for (FeedInfo* feedInfo : feeds)
 	{
-		outfile.PrintLine("%s", feedInfo->GetUrl());
-		outfile.PrintLine("%u", feedInfo->GetFilterHash());
-		outfile.PrintLine("%i", (int)feedInfo->GetLastUpdate());
+		urls.push_back(feedInfo->GetUrl());
+		filterHashes.push_back(feedInfo->GetFilterHash());
+		lastUpdates.push_back((int)feedInfo->GetLastUpdate());
 	}
+	WriteRsBuf(outfile, nzbget_rs_diskstate_format_feed_status(
+		urls.data(), filterHashes.data(), lastUpdates.data(), urls.size()));
 
 	return true;
 }
@@ -2595,12 +2568,20 @@ bool DiskState::SaveFeedHistory(FeedHistory* feedHistory, StateDiskFile& outfile
 {
 	debug("Saving feed history to disk");
 
-	outfile.PrintLine("%i", (int)feedHistory->size());
+	std::vector<int> statuses;
+	std::vector<int> lastSeens;
+	std::vector<const char*> urls;
+	statuses.reserve(feedHistory->size());
+	lastSeens.reserve(feedHistory->size());
+	urls.reserve(feedHistory->size());
 	for (FeedHistoryInfo& feedHistoryInfo : feedHistory)
 	{
-		outfile.PrintLine("%i,%i", (int)feedHistoryInfo.GetStatus(), (int)feedHistoryInfo.GetLastSeen());
-		outfile.PrintLine("%s", feedHistoryInfo.GetUrl());
+		statuses.push_back((int)feedHistoryInfo.GetStatus());
+		lastSeens.push_back((int)feedHistoryInfo.GetLastSeen());
+		urls.push_back(feedHistoryInfo.GetUrl());
 	}
+	WriteRsBuf(outfile, nzbget_rs_diskstate_format_feed_history(
+		statuses.data(), lastSeens.data(), urls.data(), urls.size()));
 
 	return true;
 }
@@ -2896,14 +2877,23 @@ bool DiskState::SaveServerInfo(Servers* servers, StateDiskFile& outfile)
 {
 	debug("Saving server info to disk");
 
-	outfile.PrintLine("%i", (int)servers->size());
+	std::vector<const char*> names;
+	std::vector<const char*> hosts;
+	std::vector<int> ports;
+	std::vector<const char*> users;
+	names.reserve(servers->size());
+	hosts.reserve(servers->size());
+	ports.reserve(servers->size());
+	users.reserve(servers->size());
 	for (NewsServer* newsServer : servers)
 	{
-		outfile.PrintLine("%s", newsServer->GetName());
-		outfile.PrintLine("%s", newsServer->GetHost());
-		outfile.PrintLine("%i", newsServer->GetPort());
-		outfile.PrintLine("%s", newsServer->GetUser());
+		names.push_back(newsServer->GetName());
+		hosts.push_back(newsServer->GetHost());
+		ports.push_back(newsServer->GetPort());
+		users.push_back(newsServer->GetUser());
 	}
+	WriteRsBuf(outfile, nzbget_rs_diskstate_format_server_info(
+		names.data(), hosts.data(), ports.data(), users.data(), names.size()));
 
 	return true;
 }
@@ -3194,21 +3184,14 @@ void DiskState::AppendNzbMessage(int nzbId, Message::EKind kind, const char* tex
 		return;
 	}
 
-	const char* messageType[] = { "INFO", "WARNING", "ERROR", "DEBUG", "DETAIL"};
-
-	BString<1024> tmp2;
-	tmp2 = text;
-
-	// replace bad chars
-	nzbget_rs_dsp_sanitize_log_text(tmp2, strlen(tmp2));
-
 	time_t tm = Util::CurrentTime();
 	time_t rawtime = tm + g_Options->GetTimeCorrection();
 
 	BString<100> time;
 	Util::FormatTime(rawtime, time, 100);
 
-	outfile.Print("%s\t%u\t%s\t%s%s", *time, (int)tm, messageType[kind], *tmp2, LINE_ENDING);
+	WriteRsBuf(outfile, nzbget_rs_diskstate_format_nzb_message_line(
+		*time, (int)tm, (int)kind, text, LINE_ENDING));
 
 	outfile.Close();
 }

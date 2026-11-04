@@ -34,10 +34,6 @@ private:
 	uint32 m_neededLogFirstId = 0;
 	bool m_needGoBack = false;
 
-#ifdef WIN32
-	HANDLE m_console;
-#endif
-
 	void Run();
 	void Update();
 	void BeforePrint();

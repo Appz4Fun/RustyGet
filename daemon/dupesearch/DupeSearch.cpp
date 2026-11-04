@@ -390,22 +390,17 @@ bool DupeSearch::PrepareNative(DownloadQueue* downloadQueue, int nzbId, Job& job
         }
     }
     auto flags = [&](NzbInfo* item, bool inHistory) -> uint32_t {
-        uint32_t value = rsDupeEnabled | rsDupeCheck | rsDupePresent;
-        if (item->GetKind() == NzbInfo::nkNzb) value |= rsDupeNzb;
-        if (inHistory) value |= rsDupeHistory;
-        if (item->IsDupeSuccess()) value |= rsDupeSuccess;
-        if (item->GetDeleting()) value |= rsDupeDeleting;
-        if (item->GetDeleteStatus() == NzbInfo::dsNone) value |= rsDupeDeleteNone;
-        if (item->GetDeleteStatus() == NzbInfo::dsManual) value |= rsDupeDeleteManual;
-        if (item->GetDeleteStatus() == NzbInfo::dsDupe) value |= rsDupeDeleteDupe;
-        if (item->GetDeleteStatus() == NzbInfo::dsCopy) value |= rsDupeDeleteCopy;
-        if (item->GetDeleteStatus() == NzbInfo::dsGood) value |= rsDupeDeleteGood;
-        if (item->GetPostInfo()) value |= rsDupePostProcess;
-        if (item->GetDupeMode() == dmScore) value |= rsDupeScoreMode;
-        if (IsDonor(item)) value |= rsDupeDonor;
-        if (item->GetDupeHint() == NzbInfo::dhRedownloadAuto) value |= rsDupeAutoRedownload;
-        if (item->GetParameters()->Find("DupeFleet")) value |= rsDupeManagedFleet;
-        return value;
+        return nzbget_rs_dupe_watch_build_item_flags(
+            (int)item->GetKind(),
+            inHistory ? 1 : 0,
+            item->IsDupeSuccess() ? 1 : 0,
+            item->GetDeleting() ? 1 : 0,
+            (int)item->GetDeleteStatus(),
+            item->GetPostInfo() ? 1 : 0,
+            (int)item->GetDupeMode(),
+            IsDonor(item) ? 1 : 0,
+            (int)item->GetDupeHint(),
+            item->GetParameters()->Find("DupeFleet") ? 1 : 0);
     };
     uint32_t pickFlags = flags(pick, history);
     time_t now = Util::CurrentTime();
@@ -445,9 +440,8 @@ bool DupeSearch::PrepareNative(DownloadQueue* downloadQueue, int nzbId, Job& job
         uint32_t f = flags(others[i], histories[i]);
         // Only a live eligible fleet member represents current management;
         // retired history/deleting entries must not poison future plain picks.
-        if (keys[i] == lowerKey && (f & rsDupeManagedFleet) && !(f & rsDupeHistory) &&
-            (f & (rsDupePresent | rsDupeNzb | rsDupeDeleteNone)) == (rsDupePresent | rsDupeNzb | rsDupeDeleteNone) &&
-            !(f & (rsDupeDeleting | rsDupeDeleteManual | rsDupeDeleteCopy | rsDupeDeleteGood | rsDupeSuccess)))
+        if (nzbget_rs_dupe_watch_is_live_fleet_peer(
+            keys[i].data(), keys[i].size(), lowerKey.data(), lowerKey.size(), f))
             pickFlags |= rsDupeManagedFleet;
         peers.push_back({ others[i]->GetId(), others[i]->GetDupeScore(), f, keys[i].data(), keys[i].size() });
     }
@@ -1944,8 +1938,12 @@ bool DupeSearch::SaveState()
 		std::lock_guard<std::mutex> guard(m_mutex);
 		time_t now = Util::CurrentTime();
         auto append = [&](const std::string& key, const Searched& searched) {
-            if (now - searched.time < StateTtlSec)
-                text << key << '\t' << searched.score << '\t' << (long long)searched.time << '\t' << searched.title << '\t' << (searched.retryable ? 1 : 0) << "\t\n";
+            NzbgetRsBuf line = nzbget_rs_dupe_watch_format_searched_state_line(
+                (int64_t)now, StateTtlSec, key.c_str(), searched.score,
+                (int64_t)searched.time, searched.title.c_str(), searched.retryable ? 1 : 0);
+            if (line.data && line.len > 0)
+                text.write(line.data, (std::streamsize)line.len);
+            nzbget_rs_free(line);
         };
         for (const auto& entry : m_titleSearched) append(entry.first.first, entry.second);
         for (const auto& entry : m_searched)

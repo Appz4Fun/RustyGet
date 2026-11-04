@@ -824,38 +824,25 @@ int Options::ParseEnumValue(const char* OptName, int argc, const char * argn[], 
 		return argv[0];
 	}
 
-	int defNum = 0;
-
-	for (int i = 0; i < argc; i++)
+	int parsedVal = argv[0];
+	int normIdx = -1;
+	if (nzbget_rs_options_parse_enum_value(
+		optEntry->GetValue(), optEntry->GetDefValue(), argc, argn, argv, &parsedVal, &normIdx))
 	{
-		if (!strcasecmp(optEntry->GetValue(), argn[i]))
+		if (normIdx >= 0 && normIdx < argc)
 		{
-			// normalizing option value in option list, for example "NO" -> "no"
-			for (int j = 0; j < argc; j++)
-			{
-				if (argv[j] == argv[i])
-				{
-					if (strcmp(argn[j], optEntry->GetValue()))
-					{
-						optEntry->SetValue(argn[j]);
-					}
-					break;
-				}
-			}
-
-			return argv[i];
+			optEntry->SetValue(argn[normIdx]);
 		}
-
-		if (!strcasecmp(optEntry->GetDefValue(), argn[i]))
-		{
-			defNum = i;
-		}
+		return parsedVal;
 	}
 
 	m_configLine = optEntry->GetLineNo();
 	ConfigError("Invalid value for option \"%s\": \"%s\"", OptName, optEntry->GetValue());
-	optEntry->SetValue(argn[defNum]);
-	return argv[defNum];
+	if (normIdx >= 0 && normIdx < argc)
+	{
+		optEntry->SetValue(argn[normIdx]);
+	}
+	return parsedVal;
 }
 
 int Options::ParseIntValue(const char* OptName, int base)
@@ -867,15 +854,13 @@ int Options::ParseIntValue(const char* OptName, int base)
 		return 0;
 	}
 
-	char *endptr;
-	int val = strtol(optEntry->GetValue(), &endptr, base);
-
-	if (endptr && *endptr != '\0')
+	int val = 0;
+	if (!nzbget_rs_options_parse_int_value(
+		optEntry->GetValue(), optEntry->GetDefValue(), base, &val))
 	{
 		m_configLine = optEntry->GetLineNo();
 		ConfigError("Invalid value for option \"%s\": \"%s\"", OptName, optEntry->GetValue());
 		optEntry->SetValue(optEntry->GetDefValue());
-		val = strtol(optEntry->GetDefValue(), nullptr, base);
 	}
 
 	return val;
@@ -892,20 +877,11 @@ void Options::SetOption(const char* optname, const char* value)
 
 	CString curvalue;
 
-#ifndef WIN32
-	if (value && strncmp(value, "~/", 2) == 0)
+	if (value && strncmp(value, "~/", 2) == 0 && !m_noDiskAccess)
 	{
-		if (m_noDiskAccess)
-		{
-			curvalue = value;
-		}
-		else
-		{
-			curvalue = FileSystem::ExpandHomePath(value);
-		}
+		curvalue = FileSystem::ExpandHomePath(value);
 	}
 	else
-#endif
 	{
 		curvalue = value;
 	}
@@ -1736,18 +1712,12 @@ void Options::MergeOldScriptOption(OptEntries* optEntries, const char* optname, 
 		{
 			for (OptEntry& opt : optEntries)
 			{
-				const char* catoptname = opt.GetName();
-				if (!strncasecmp(catoptname, "category", 8))
+				if (nzbget_rs_options_is_category_extensions_opt(opt.GetName()) != 0)
 				{
-				const char* p = catoptname + 8;
-				while (*p >= '0' && *p <= '9') p++;
-				if (!strcasecmp(p, ".extensions"))
+					if (!opt.m_value.Empty() && !HasScript(opt.m_value, scriptName))
 					{
-						if (!opt.m_value.Empty() && !HasScript(opt.m_value, scriptName))
-						{
-							opt.m_value.Append(",");
-							opt.m_value.Append(scriptName);
-						}
+						opt.m_value.Append(",");
+						opt.m_value.Append(scriptName);
 					}
 				}
 			}

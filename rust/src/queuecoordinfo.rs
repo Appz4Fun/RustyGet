@@ -578,6 +578,216 @@ pub fn group_sorter_compare_values(
     }
 }
 
+/// Counter bundle for `QueueCoordinator::MergeQueueEntries` and `QueueCoordinator::SplitQueueEntries`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NzbgetRsNzbMergeSplitCounters {
+    pub file_count: i32,
+    pub active_downloads: i32,
+    pub full_content_hash: u32,
+    pub filtered_content_hash: u32,
+    pub size: i64,
+    pub remaining_size: i64,
+    pub paused_file_count: i32,
+    pub paused_size: i64,
+    pub success_size: i64,
+    pub current_success_size: i64,
+    pub failed_size: i64,
+    pub current_failed_size: i64,
+    pub par_size: i64,
+    pub par_success_size: i64,
+    pub par_current_success_size: i64,
+    pub par_failed_size: i64,
+    pub par_current_failed_size: i64,
+    pub remaining_par_count: i32,
+    pub total_articles: i32,
+    pub success_articles: i32,
+    pub failed_articles: i32,
+    pub current_success_articles: i32,
+    pub current_failed_articles: i32,
+    pub min_time: i64,
+    pub max_time: i64,
+    pub downloaded_size: i64,
+    pub download_sec: i32,
+    pub download_start_time: i64,
+}
+
+/// File counter snapshot for `QueueCoordinator::SplitQueueEntries`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NzbgetRsSplitFileCounters {
+    pub size: i64,
+    pub remaining_size: i64,
+    pub success_size: i64,
+    pub failed_size: i64,
+    pub missed_size: i64,
+    pub total_articles: i32,
+    pub missed_articles: i32,
+    pub success_articles: i32,
+    pub failed_articles: i32,
+    pub par_file: i32,
+    pub paused: i32,
+}
+
+/// Accumulates `src` counters into `dest` for `QueueCoordinator::MergeQueueEntries`.
+pub fn queue_coord_merge_counters(
+    dest: &mut NzbgetRsNzbMergeSplitCounters,
+    src: &NzbgetRsNzbMergeSplitCounters,
+) {
+    dest.file_count = dest.file_count.wrapping_add(src.file_count);
+    dest.active_downloads = dest.active_downloads.wrapping_add(src.active_downloads);
+    dest.full_content_hash = 0;
+    dest.filtered_content_hash = 0;
+
+    dest.size = dest.size.wrapping_add(src.size);
+    dest.remaining_size = dest.remaining_size.wrapping_add(src.remaining_size);
+    dest.paused_file_count = dest.paused_file_count.wrapping_add(src.paused_file_count);
+    dest.paused_size = dest.paused_size.wrapping_add(src.paused_size);
+
+    dest.success_size = dest.success_size.wrapping_add(src.success_size);
+    dest.current_success_size = dest.current_success_size.wrapping_add(src.current_success_size);
+    dest.failed_size = dest.failed_size.wrapping_add(src.failed_size);
+    dest.current_failed_size = dest.current_failed_size.wrapping_add(src.current_failed_size);
+
+    dest.par_size = dest.par_size.wrapping_add(src.par_size);
+    dest.par_success_size = dest.par_success_size.wrapping_add(src.par_success_size);
+    dest.par_current_success_size = dest
+        .par_current_success_size
+        .wrapping_add(src.par_current_success_size);
+    dest.par_failed_size = dest.par_failed_size.wrapping_add(src.par_failed_size);
+    dest.par_current_failed_size = dest
+        .par_current_failed_size
+        .wrapping_add(src.par_current_failed_size);
+    dest.remaining_par_count = dest.remaining_par_count.wrapping_add(src.remaining_par_count);
+
+    dest.total_articles = dest.total_articles.wrapping_add(src.total_articles);
+    dest.success_articles = dest.success_articles.wrapping_add(src.success_articles);
+    dest.failed_articles = dest.failed_articles.wrapping_add(src.failed_articles);
+    dest.current_success_articles = dest
+        .current_success_articles
+        .wrapping_add(src.current_success_articles);
+    dest.current_failed_articles = dest
+        .current_failed_articles
+        .wrapping_add(src.current_failed_articles);
+
+    let (min_t, max_t) = crate::queuecoordfallbackhist::qcf_queue_coord_merge_min_max_time(
+        dest.min_time,
+        src.min_time,
+        dest.max_time,
+        src.max_time,
+    );
+    dest.min_time = min_t;
+    dest.max_time = max_t;
+
+    dest.downloaded_size = dest.downloaded_size.wrapping_add(src.downloaded_size);
+    dest.download_sec = dest.download_sec.wrapping_add(src.download_sec);
+    dest.download_start_time =
+        crate::coorddlwriterpool::queue_coord_select_merged_download_start_time(
+            dest.download_start_time,
+            src.download_start_time,
+        );
+}
+
+/// Transfers one file's counters from `src` to `dst` in `QueueCoordinator::SplitQueueEntries`.
+pub fn queue_coord_split_transfer_file(
+    src: &mut NzbgetRsNzbMergeSplitCounters,
+    dst: &mut NzbgetRsNzbMergeSplitCounters,
+    f: &NzbgetRsSplitFileCounters,
+) {
+    let failed_and_missed_size = f.failed_size.wrapping_add(f.missed_size);
+    let failed_and_missed_articles = f.failed_articles.wrapping_add(f.missed_articles);
+
+    src.file_count = src.file_count.wrapping_sub(1);
+    src.size = src.size.wrapping_sub(f.size);
+    src.remaining_size = src.remaining_size.wrapping_sub(f.remaining_size);
+    src.current_success_size = src.current_success_size.wrapping_sub(f.success_size);
+    src.current_failed_size = src.current_failed_size.wrapping_sub(failed_and_missed_size);
+    src.total_articles = src.total_articles.wrapping_sub(f.total_articles);
+    src.failed_articles = src.failed_articles.wrapping_sub(f.missed_articles);
+    src.current_success_articles = src
+        .current_success_articles
+        .wrapping_sub(f.success_articles);
+    src.current_failed_articles = src
+        .current_failed_articles
+        .wrapping_sub(failed_and_missed_articles);
+
+    dst.file_count = dst.file_count.wrapping_add(1);
+    dst.size = dst.size.wrapping_add(f.size);
+    dst.remaining_size = dst.remaining_size.wrapping_add(f.remaining_size);
+    dst.current_success_size = dst.current_success_size.wrapping_add(f.success_size);
+    dst.current_failed_size = dst.current_failed_size.wrapping_add(failed_and_missed_size);
+    dst.total_articles = dst.total_articles.wrapping_add(f.total_articles);
+    dst.failed_articles = dst.failed_articles.wrapping_add(f.missed_articles);
+    dst.current_success_articles = dst
+        .current_success_articles
+        .wrapping_add(f.success_articles);
+    dst.current_failed_articles = dst
+        .current_failed_articles
+        .wrapping_add(failed_and_missed_articles);
+
+    if f.par_file != 0 {
+        src.par_size = src.par_size.wrapping_sub(f.size);
+        src.par_current_success_size = src.par_current_success_size.wrapping_sub(f.success_size);
+        src.par_current_failed_size = src
+            .par_current_failed_size
+            .wrapping_sub(failed_and_missed_size);
+        src.remaining_par_count = src.remaining_par_count.wrapping_sub(1);
+
+        dst.par_size = dst.par_size.wrapping_add(f.size);
+        dst.par_current_success_size = dst.par_current_success_size.wrapping_add(f.success_size);
+        dst.par_current_failed_size = dst
+            .par_current_failed_size
+            .wrapping_add(failed_and_missed_size);
+        dst.remaining_par_count = dst.remaining_par_count.wrapping_add(1);
+    }
+
+    if f.paused != 0 {
+        src.paused_file_count = src.paused_file_count.wrapping_sub(1);
+        src.paused_size = src.paused_size.wrapping_sub(f.remaining_size);
+
+        dst.paused_file_count = dst.paused_file_count.wrapping_add(1);
+        dst.paused_size = dst.paused_size.wrapping_add(f.remaining_size);
+    }
+}
+
+/// Computes the post-process script parameter diffs (`<script>:\tyes|no\n`) when changing categories
+/// in `QueueEditor::SetNzbCategory`.
+pub fn queue_editor_diff_category_extensions(old_ext: &[u8], new_ext: &[u8]) -> Vec<u8> {
+    if old_ext.eq_ignore_ascii_case(new_ext) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for new_script in crate::util::tokens(new_ext, b",;") {
+        let found = crate::util::tokens(old_ext, b",;")
+            .any(|old_script| new_script.eq_ignore_ascii_case(old_script));
+        if !found {
+            let mut key = Vec::with_capacity(new_script.len() + 1);
+            key.extend_from_slice(new_script);
+            key.push(b':');
+            if key.len() > 1023 {
+                key.truncate(1023);
+            }
+            out.extend_from_slice(&key);
+            out.extend_from_slice(b"\tyes\n");
+        }
+    }
+    for old_script in crate::util::tokens(old_ext, b",;") {
+        let found = crate::util::tokens(new_ext, b",;")
+            .any(|new_script| new_script.eq_ignore_ascii_case(old_script));
+        if !found {
+            let mut key = Vec::with_capacity(old_script.len() + 1);
+            key.extend_from_slice(old_script);
+            key.push(b':');
+            if key.len() > 1023 {
+                key.truncate(1023);
+            }
+            out.extend_from_slice(&key);
+            out.extend_from_slice(b"\tno\n");
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -702,5 +912,25 @@ mod tests {
         assert!(!group_sorter_compare_values(
             1, 1, 1, 0, 100, 200, 0, 0, 0, 0, 0, 0, 0
         ));
+
+        let mut d = NzbgetRsNzbMergeSplitCounters {
+            file_count: 2,
+            size: 100,
+            min_time: 50,
+            max_time: 60,
+            ..Default::default()
+        };
+        let s = NzbgetRsNzbMergeSplitCounters {
+            file_count: 3,
+            size: 200,
+            min_time: 40,
+            max_time: 80,
+            ..Default::default()
+        };
+        queue_coord_merge_counters(&mut d, &s);
+        assert_eq!((d.file_count, d.size, d.min_time, d.max_time), (5, 300, 40, 80));
+
+        let diff = queue_editor_diff_category_extensions(b"a.py, b.py", b"B.PY, c.py");
+        assert_eq!(diff, b"c.py:\tyes\na.py:\tno\n");
     }
 }

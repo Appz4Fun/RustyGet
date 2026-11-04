@@ -151,26 +151,6 @@ Status Writable(const fs::path& path)
 
 Status Executable(const fs::path& path)
 {
-#ifdef _WIN32
-	if (!path.has_extension())
-	{
-		std::stringstream ss;
-		ss << path << " is not executable: missing file extension";
-		return Status::Error(ss.str());
-	}
-
-	std::string ext = fs::u8string(path.extension());
-	std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-	if (ext == ".exe" || ext == ".bat" || ext == ".cmd" || ext == ".com")
-	{
-		return Status::Ok();
-	}
-
-	std::stringstream ss;
-	ss << path << " is not executable: invalid extension (" << ext << ")";
-	return Status::Error(ss.str());
-
-#else
 	if (access(path.c_str(), X_OK) == 0)
 	{
 		return Status::Ok();
@@ -179,22 +159,14 @@ Status Executable(const fs::path& path)
 	std::stringstream ss;
 	ss << path << " is not executable: " << std::strerror(errno);
 	return Status::Error(ss.str());
-#endif
 }
 
 bool NullOrConsoleDevice(const fs::path& path)
 {
 	if (path.empty()) return false;
 
-#ifdef _WIN32
-	std::string name = fs::u8string(path.filename());
-	return strcasecmp(name.c_str(), "NUL") == 0 ||
-		   strcasecmp(name.c_str(), "CON") == 0 ||
-		   strcasecmp(name.c_str(), "CONOUT$") == 0;
-#else
 	std::string p = path.string();
 	return p == "/dev/null" || p == "/dev/stdout" || p == "/dev/stderr";
-#endif
 }
 
 }  // namespace File

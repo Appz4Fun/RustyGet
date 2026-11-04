@@ -322,6 +322,64 @@ pub fn option_restricted(name: &CStr, signed_char: bool) -> bool {
         .any(|needle| lower.windows(needle.len()).any(|w| w == *needle))
 }
 
+/// Options::ParseEnumValue: returns `(valid, enum_value, normalized_argn_index)`.
+pub fn parse_enum_value(
+    val: &CStr,
+    def_val: &CStr,
+    argn: &[&CStr],
+    argv: &[i32],
+) -> (bool, i32, Option<usize>) {
+    let count = argn.len().min(argv.len());
+    if count == 0 {
+        return (false, 0, None);
+    }
+    let mut def_num = 0usize;
+    for i in 0..count {
+        if eq(val, argn[i]) {
+            let mut norm_idx = None;
+            for j in 0..count {
+                if argv[j] == argv[i] {
+                    if argn[j].to_bytes() != val.to_bytes() {
+                        norm_idx = Some(j);
+                    }
+                    break;
+                }
+            }
+            return (true, argv[i], norm_idx);
+        }
+        if eq(def_val, argn[i]) {
+            def_num = i;
+        }
+    }
+    (false, argv[def_num], Some(def_num))
+}
+
+/// Options::ParseIntValue: parses `val` with `strtol(val, &endptr, base)` (truncated to `i32`).
+/// If `*endptr != '\0'`, returns `(false, strtol(def_val, null, base) as i32)`.
+pub fn parse_int_value(val: &CStr, def_val: &CStr, base: i32) -> (bool, i32) {
+    let mut endptr: *mut c_char = std::ptr::null_mut();
+    let parsed = unsafe { strtol(val.as_ptr(), &mut endptr, base) } as i32;
+    if !endptr.is_null() && unsafe { *endptr } != 0 {
+        let fallback = unsafe { strtol(def_val.as_ptr(), std::ptr::null_mut(), base) } as i32;
+        (false, fallback)
+    } else {
+        (true, parsed)
+    }
+}
+
+/// Options::MergeOldScriptOption category extension option name matcher (`category<digits>.extensions`).
+pub fn is_category_extensions_opt(optname: &CStr) -> bool {
+    if !eq_n(optname, c"category", 8) {
+        return false;
+    }
+    let bytes = optname.to_bytes();
+    let mut idx = 8;
+    while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+        idx += 1;
+    }
+    eq(from(optname, idx), c".extensions")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,5 +457,21 @@ mod tests {
         assert!(!option_restricted(&CString::new(long.clone()).unwrap(), c_char::MIN < 0));
         long.push(b':');
         assert!(option_restricted(&CString::new(long).unwrap(), c_char::MIN < 0));
+    }
+
+    #[test]
+    fn enum_and_int_and_cat_extensions() {
+        let names = [c"yes", c"no", c"true", c"false"];
+        let vals = [1, 0, 1, 0];
+        assert_eq!(parse_enum_value(c"TRUE", c"no", &names, &vals), (true, 1, Some(0)));
+        assert_eq!(parse_enum_value(c"yes", c"no", &names, &vals), (true, 1, None));
+        assert_eq!(parse_enum_value(c"bogus", c"no", &names, &vals), (false, 0, Some(1)));
+
+        assert_eq!(parse_int_value(c"42", c"10", 10), (true, 42));
+        assert_eq!(parse_int_value(c"42abc", c"10", 10), (false, 10));
+
+        assert!(is_category_extensions_opt(c"Category12.Extensions"));
+        assert!(is_category_extensions_opt(c"category.extensions"));
+        assert!(!is_category_extensions_opt(c"Category12.Name"));
     }
 }

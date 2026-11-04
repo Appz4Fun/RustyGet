@@ -822,42 +822,27 @@ void QueueEditor::SetNzbCategory(NzbInfo* nzbInfo, const char* category, bool ap
 		nzbInfo->GetParameters()->SetParameter("*Unpack:", newUnpack ? "yes" : "no");
 	}
 
-	if (strcasecmp(oldExtensions, newExtensions))
+	NzbgetRsBuf extDiff = nzbget_rs_qci_queue_editor_diff_category_extensions(oldExtensions, newExtensions);
+	if (extDiff.data && extDiff.len > 0)
 	{
-		// add new params not existed in old category
-		Tokenizer tokNew(newExtensions, ",;");
-		while (const char* newScriptName = tokNew.Next())
+		std::string_view lines(extDiff.data, extDiff.len);
+		size_t pos = 0;
+		while (pos < lines.size())
 		{
-			bool found = false;
-			const char* oldScriptName;
-			Tokenizer tokOld(oldExtensions, ",;");
-			while ((oldScriptName = tokOld.Next()) && !found)
+			size_t nl = lines.find('\n', pos);
+			if (nl == std::string_view::npos) break;
+			std::string_view line = lines.substr(pos, nl - pos);
+			size_t tab = line.find('\t');
+			if (tab != std::string_view::npos)
 			{
-				found = !strcasecmp(newScriptName, oldScriptName);
+				std::string paramName(line.substr(0, tab));
+				std::string paramVal(line.substr(tab + 1));
+				nzbInfo->GetParameters()->SetParameter(paramName.c_str(), paramVal.c_str());
 			}
-			if (!found)
-			{
-				nzbInfo->GetParameters()->SetParameter(BString<1024>("%s:", newScriptName), "yes");
-			}
-		}
-
-		// remove old params not existed in new category
-		Tokenizer tokOld(oldExtensions, ",;");
-		while (const char* oldScriptName = tokOld.Next())
-		{
-			bool found = false;
-			const char* newScriptName;
-			Tokenizer tokNew(newExtensions, ",;");
-			while ((newScriptName = tokNew.Next()) && !found)
-			{
-				found = !strcasecmp(newScriptName, oldScriptName);
-			}
-			if (!found)
-			{
-				nzbInfo->GetParameters()->SetParameter(BString<1024>("%s:", oldScriptName), "no");
-			}
+			pos = nl + 1;
 		}
 	}
+	nzbget_rs_free(extDiff);
 }
 
 void QueueEditor::SetNzbName(NzbInfo* nzbInfo, const char* name)

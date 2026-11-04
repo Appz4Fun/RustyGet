@@ -132,23 +132,8 @@ protected:
 	bool NextParamAsInt(int* value);
 	bool NextParamAsBool(bool* value);
 	bool NextParamAsStr(char** valueBuf);
-	char* XmlNextValue(char* xml, const char* tag, int* valueLength);
-	const char* BoolToStr(bool value);
 	CString EncodeStr(const char* str);
 	void DecodeStr(char* str);
-
-	/**
-	 * @brief Determines the cursor step size after parsing a JSON value.
-	 *
-	 * Stops at the closing bracket ']' or end of string, but advances past
-	 * other delimiters like ',' or '}' to prepare for the next read.
-	 *
-	 * @param param  Pointer to the start of the parsed JSON value.
-	 * @param len    Length of the parsed JSON value.
-	 *
-	 * @return 0 if the next character is ']' or '\0', 1 otherwise.
-	 */
-	int JsonStep(const char* param, int len);
 };
 
 #endif

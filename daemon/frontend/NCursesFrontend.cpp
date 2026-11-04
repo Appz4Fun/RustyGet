@@ -40,7 +40,6 @@
 #include "Util.h"
 #include "nzbget_rs.h"
 
-#ifndef WIN32
 // curses.h on Solaris declares "clear()" via DEFINE. That causes problems, because
 // it also affects calls to deque's method "clear()", producing compiler errors.
 // We use function "curses_clear()" to call macro "clear" of curses, then
@@ -50,7 +49,6 @@ void curses_clear()
 	clear();
 }
 #undef clear
-#endif
 
 extern void ExitProc();
 
@@ -69,34 +67,7 @@ const int NCURSES_COLORPAIR_HINT		= 12;
 
 const int MAX_SCREEN_WIDTH				= 512;
 
-#ifdef WIN32
-
-#include "Utf8.h"
-
-static const int COLOR_BLACK	= 0;
-static const int COLOR_BLUE		= FOREGROUND_BLUE;
-static const int COLOR_RED		= FOREGROUND_RED;
-static const int COLOR_GREEN	= FOREGROUND_GREEN;
-static const int COLOR_WHITE	= FOREGROUND_BLUE | FOREGROUND_RED | FOREGROUND_GREEN;
-static const int COLOR_MAGENTA	= FOREGROUND_RED | FOREGROUND_BLUE;
-static const int COLOR_CYAN		= FOREGROUND_BLUE | FOREGROUND_GREEN;
-static const int COLOR_YELLOW	= FOREGROUND_RED | FOREGROUND_GREEN;
-
-static const int READKEY_EMPTY = 0;
-
-#define KEY_DOWN VK_DOWN
-#define KEY_UP VK_UP
-#define KEY_PPAGE VK_PRIOR
-#define KEY_NPAGE VK_NEXT
-#define KEY_END VK_END
-#define KEY_HOME VK_HOME
-#define KEY_BACKSPACE VK_BACK
-
-#else
-
 static const int READKEY_EMPTY = ERR;
-
-#endif
 
 NCursesFrontend::NCursesFrontend()
 	: m_startHint(0)
@@ -113,22 +84,6 @@ NCursesFrontend::NCursesFrontend()
 	m_groupFiles = g_Options->GetCursesGroup();
 
 	// Setup curses
-#ifdef WIN32
-	HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
-
-	CONSOLE_CURSOR_INFO ConsoleCursorInfo;
-	GetConsoleCursorInfo(hConsole, &ConsoleCursorInfo);
-	ConsoleCursorInfo.bVisible = false;
-	SetConsoleCursorInfo(hConsole, &ConsoleCursorInfo);
-	if (IsRemoteMode())
-	{
-		SetConsoleTitle("NZBGet - remote mode");
-	}
-	else
-	{
-		SetConsoleTitle("NZBGet");
-	}
-#else
 	m_window = initscr();
 	if (m_window == nullptr)
 	{
@@ -140,13 +95,10 @@ NCursesFrontend::NCursesFrontend()
 	noecho();
 	curs_set(0);
 	m_useColor = has_colors();
-#endif
 
 	if (m_useColor)
 	{
-#ifndef WIN32
 		start_color();
-#endif
 		init_pair(0,							COLOR_WHITE,	COLOR_BLUE);
 		init_pair(NCURSES_COLORPAIR_TEXT,		COLOR_WHITE,	COLOR_BLACK);
 		init_pair(NCURSES_COLORPAIR_INFO,		COLOR_GREEN,	COLOR_BLACK);
@@ -165,18 +117,10 @@ NCursesFrontend::NCursesFrontend()
 
 NCursesFrontend::~NCursesFrontend()
 {
-#ifdef WIN32
-	HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
-	CONSOLE_CURSOR_INFO ConsoleCursorInfo;
-	GetConsoleCursorInfo(hConsole, &ConsoleCursorInfo);
-	ConsoleCursorInfo.bVisible = true;
-	SetConsoleCursorInfo(hConsole, &ConsoleCursorInfo);
-#else
 	keypad(stdscr, false);
 	echo();
 	curs_set(1);
 	endwin();
-#endif
 	printf("\n");
 	SetHint(nullptr);
 }
@@ -283,15 +227,7 @@ void NCursesFrontend::Update(int key)
 void NCursesFrontend::CalcWindowSizes()
 {
 	int nrRows, nrColumns;
-#ifdef WIN32
-	HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
-	CONSOLE_SCREEN_BUFFER_INFO BufInfo;
-	GetConsoleScreenBufferInfo(hConsole, &BufInfo);
-	nrRows = BufInfo.srWindow.Bottom - BufInfo.srWindow.Top + 1;
-	nrColumns = BufInfo.srWindow.Right - BufInfo.srWindow.Left + 1;
-#else
 	getmaxyx(stdscr, nrRows, nrColumns);
-#endif
 	// the line buffers hold MAX_SCREEN_WIDTH columns (a wider terminal wrote past
 	// them), and messages wrap at the width less 8 (a divisor of zero at 8)
 	int queueSize = CalcQueueSize();
@@ -301,13 +237,7 @@ void NCursesFrontend::CalcWindowSizes()
 		&nrColumns, &qh, &qch, &mtop, &mh, &mch);
 	if (nrRows != m_screenHeight || nrColumns != m_screenWidth)
 	{
-#ifdef WIN32
-		int screenAreaSize = nrRows * nrColumns;
-		m_screenBuffer.resize(screenAreaSize);
-		m_oldScreenBuffer.resize(screenAreaSize);
-#else
 		curses_clear();
-#endif
 		m_screenHeight = nrRows;
 		m_screenWidth = nrColumns;
 	}
@@ -336,8 +266,6 @@ int NCursesFrontend::CalcQueueSize()
 	}
 	return queueSize;
 }
-
-#ifndef WIN32
 
 void NCursesFrontend::PlotLine(const char* str, int row, int pos, int colorPair)
 {
@@ -375,89 +303,14 @@ void NCursesFrontend::PlotText(const char * string, int row, int pos, int colorP
 	}
 }
 
-#else
-
-void NCursesFrontend::PlotLine(const char* str, int row, int pos, int colorPair)
-{
-	auto res = Utf8::Utf8ToWide(str);
-	if (!res)
-	{
-		warn("Failed to convert %s to wide string", str);
-		return;
-	}
-
-	size_t size = Util::SafeIntCast<int, size_t>(m_screenWidth + 1);
-	std::wstring buffer(size, L'\0');
-	swprintf(buffer.data(), size, L"%-*s", m_screenWidth, res->c_str());
-
-	if (Util::CmpGreater(size, m_screenWidth - pos) && m_screenWidth - pos < MAX_SCREEN_WIDTH)
-	{
-		size = Util::SafeIntCast<int, size_t>(m_screenWidth - pos);
-		buffer.resize(size);
-	}
-
-	PlotText(buffer.c_str(), row, pos, colorPair, false);
-}
-
-void NCursesFrontend::PlotText(const wchar_t* wstr, int row, int pos, int colorPair, bool blink)
-{
-	int bufPos = row * m_screenWidth + pos;
-	size_t len = wcslen(wstr);
-	for (size_t i = 0; i < len; ++i)
-	{
-		m_screenBuffer[bufPos + i].Char.UnicodeChar = wstr[i];
-		m_screenBuffer[bufPos + i].Attributes = m_colorAttr[colorPair];
-	}
-}
-
-#endif
-
 void NCursesFrontend::RefreshScreen()
 {
-#ifdef WIN32
-	bool bufChanged = !std::equal(m_screenBuffer.begin(), m_screenBuffer.end(), m_oldScreenBuffer.begin(), m_oldScreenBuffer.end(),
-		[](CHAR_INFO& a, CHAR_INFO& b)
-		{
-			return a.Char.UnicodeChar == b.Char.UnicodeChar && a.Attributes == b.Attributes;
-		});
-
-	if (bufChanged)
-	{
-		COORD BufSize;
-		BufSize.X = m_screenWidth;
-		BufSize.Y = m_screenHeight;
-
-		COORD BufCoord;
-		BufCoord.X = 0;
-		BufCoord.Y = 0;
-
-		HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
-		CONSOLE_SCREEN_BUFFER_INFO BufInfo;
-		GetConsoleScreenBufferInfo(hConsole, &BufInfo);
-		WriteConsoleOutputW(hConsole, m_screenBuffer.data(), BufSize, BufCoord, &BufInfo.srWindow);
-
-		BufInfo.dwCursorPosition.X = BufInfo.srWindow.Right;
-		BufInfo.dwCursorPosition.Y = BufInfo.srWindow.Bottom;
-		SetConsoleCursorPosition(hConsole, BufInfo.dwCursorPosition);
-
-		m_oldScreenBuffer = m_screenBuffer;
-	}
-#else
 	// Cursor placement
 	wmove((WINDOW*)m_window, m_screenHeight, m_screenWidth);
 
 	// NCurses refresh
 	refresh();
-#endif
 }
-
-#ifdef WIN32
-void NCursesFrontend::init_pair(int colorNumber, WORD wForeColor, WORD wBackColor)
-{
-	m_colorAttr.resize(colorNumber + 1);
-	m_colorAttr[colorNumber] = wForeColor | (wBackColor << 4);
-}
-#endif
 
 void NCursesFrontend::PrintMessages()
 {
@@ -528,11 +381,7 @@ int NCursesFrontend::PrintMessage(Message& msg, int row, int maxLines)
 		}
 		else
 		{
-#ifdef WIN32
-  			PlotText(L"        ", r, 0, m_messageColorTypes[msg.GetKind()], false);
-#else
-  			PlotText("        ", r, 0, m_messageColorTypes[msg.GetKind()], false);
-#endif
+			PlotText("        ", r, 0, m_messageColorTypes[msg.GetKind()], false);
 		}
 		lines++;
 	}
@@ -602,12 +451,7 @@ void NCursesFrontend::PrintKeyInputBar()
 		PlotLine(hint.c_str(), inputBarRow, 0, NCURSES_COLORPAIR_KEYBAR);
 
 		// Print the cursor
-#ifdef WIN32
-		PlotText(L" ", inputBarRow, 15 + m_inputNumberIndex, NCURSES_COLORPAIR_CURSOR, true);
-#else
-		
 		PlotText(" ", inputBarRow, 15 + m_inputNumberIndex, NCURSES_COLORPAIR_CURSOR, true);
-#endif
 		break;
 	}
 }
@@ -1094,35 +938,7 @@ void NCursesFrontend::UpdateInput(int initialKey)
 
 int NCursesFrontend::ReadConsoleKey()
 {
-#ifdef WIN32
-	HANDLE hConsole = GetStdHandle(STD_INPUT_HANDLE);
-	DWORD NumberOfEvents;
-	BOOL ok = GetNumberOfConsoleInputEvents(hConsole, &NumberOfEvents);
-	if (ok && NumberOfEvents > 0)
-	{
-		while (NumberOfEvents--)
-		{
-			INPUT_RECORD InputRecord;
-			DWORD NumberOfEventsRead;
-			if (ReadConsoleInput(hConsole, &InputRecord, 1, &NumberOfEventsRead) &&
-				NumberOfEventsRead > 0 &&
-				InputRecord.EventType == KEY_EVENT &&
-				InputRecord.Event.KeyEvent.bKeyDown)
-			{
-				char c = tolower(InputRecord.Event.KeyEvent.wVirtualKeyCode);
-				if (bool(InputRecord.Event.KeyEvent.dwControlKeyState & CAPSLOCK_ON) ^
-					bool(InputRecord.Event.KeyEvent.dwControlKeyState & SHIFT_PRESSED))
-				{
-					c = toupper(c);
-				}
-				return c;
-			}
-		}
-	}
-	return READKEY_EMPTY;
-#else
 	return getch();
-#endif
 }
 
 #endif

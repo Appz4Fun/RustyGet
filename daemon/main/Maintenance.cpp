@@ -109,11 +109,7 @@ bool Maintenance::StartUpdate(EBranch branch)
 	}
 
 	// make absolute path
-	if (m_updateScript[0] != PATH_SEPARATOR
-#ifdef WIN32
-		&& !(strlen(m_updateScript) > 2 && m_updateScript[1] == ':')
-#endif
-		)
+	if (m_updateScript[0] != PATH_SEPARATOR)
 	{
 		m_updateScript = CString::FormatStr("%s%c%s", g_Options->GetAppDir(), PATH_SEPARATOR, *m_updateScript);
 	}
@@ -208,11 +204,7 @@ void UpdateScriptController::Run()
 		SetEnvVar(envName, (*g_Arguments)[i]);
 	}
 
-#ifdef WIN32
-	int pid = (int)GetCurrentProcessId();
-#else
 	int pid = (int)getpid();
-#endif
 
 	SetEnvVar("NZBUP_PROCESSID", BString<100>("%i", pid));
 

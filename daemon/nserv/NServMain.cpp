@@ -89,9 +89,7 @@ int NServMain(int argc, char* argv[])
 	TlsSocket::Init();
 #endif
 
-#ifndef WIN32
 	signal(SIGPIPE, SIG_IGN);
-#endif
 
 	NServFrontend frontend;
 	frontend.Start();
@@ -148,23 +146,12 @@ int NServMain(int argc, char* argv[])
 
 void NServPrintUsage(const char* com)
 {
-	printf("Usage:\n"
-		" %s --nserv -d <data-dir> [optional switches] \n"
-		"    -d <data-dir>   - directory whose files will be served\n"
-		"  Optional switches:\n"
-		"    -c <cache-dir>  - directory to store encoded articles\n"
-		"    -m              - in-memory cache (unlimited, use with care)\n"
-		"    -l <log-file>   - write into log-file (disabled by default)\n"
-		"    -i <instances>  - number of server instances (default is 1)\n"
-		"    -b <address>    - ip address to bind to (default is 0.0.0.0)\n"
-		"    -p <port>       - port number for the first instance (default is 6791)\n"
-		"    -s <cert> <key> - paths to SSL certificate and key files\n"
-		"    -v <verbose>    - verbosity level 0..3 (default is 2)\n"
-		"    -w <msec>       - response latency (in milliseconds)\n"
-		"    -r <KB/s>       - speed throttling (in kilobytes per second)\n"
-		"    -z <seg-size>   - generate nzbs for all files in data-dir (size in bytes)\n"
-		"    -q              - quit after generating nzbs (in combination with -z)\n"
-		, FileSystem::BaseFileName(com));
+	NzbgetRsBuf buf = nzbget_rs_nserv_format_usage(FileSystem::BaseFileName(com));
+	if (buf.data)
+	{
+		fwrite(buf.data, 1, buf.len, stdout);
+	}
+	nzbget_rs_free(buf);
 }
 
 NServOpts::NServOpts(int argc, char* argv[], Options::CmdOptList& cmdOpts)

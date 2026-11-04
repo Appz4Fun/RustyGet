@@ -85,15 +85,6 @@ private:
 	// Inputting numbers
 	int m_inputNumberIndex = 0;
 	int m_inputValue;
-#ifdef WIN32
-	const wchar_t* m_messageTypes[5] = {
-		L"INFO    ",
-		L"WARNING ",
-		L"ERROR   ",
-		L"DEBUG   ",
-		L"DETAIL  "
-	};
-#else
 	const char* m_messageTypes[5] = {
 		"INFO    ",
 		"WARNING ",
@@ -101,7 +92,6 @@ private:
 		"DEBUG   ",
 		"DETAIL  "
 	};
-#endif
 	const int m_messageColorTypes[5] = { 
 		NCURSES_COLORPAIR_INFO, 
 		NCURSES_COLORPAIR_WARNING,
@@ -110,13 +100,7 @@ private:
 		NCURSES_COLORPAIR_DETAIL 
 	};
 
-#ifdef WIN32
-	std::vector<CHAR_INFO> m_screenBuffer;
-	std::vector<CHAR_INFO> m_oldScreenBuffer;
-	std::vector<WORD> m_colorAttr;
-#else
 	void* m_window; // WINDOW*
-#endif
 
 	EInputMode m_inputMode = normal;
 	bool m_showNzbname;
@@ -124,12 +108,7 @@ private:
 	bool m_groupFiles;
 	int m_queueWindowPercentage = 50;
 
-#ifdef WIN32
-	void init_pair(int colorNumber, WORD wForeColor, WORD wBackColor);
-	void PlotText(const wchar_t* string, int row, int pos, int colorPair, bool blink);
-#else
 	void PlotText(const char*  string, int row, int pos, int colorPair, bool blink);
-#endif
 	void PlotLine(const char*  string, int row, int pos, int colorPair);
 	void PrintMessages();
 	void PrintQueue();

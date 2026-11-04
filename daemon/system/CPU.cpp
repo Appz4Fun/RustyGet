@@ -20,9 +20,7 @@
 
 #include "nzbget.h"
 
-#ifndef WIN32
 #include <sys/utsname.h>
-#endif
 
 #include "CPU.h"
 #include "Log.h"
@@ -53,69 +51,6 @@ namespace System
 		const char* canonical = nzbget_rs_snh_cpu_canonical_arch(arch.c_str(), arch.size());
 		return canonical ? std::string(canonical) : arch;
 	}
-
-#ifdef WIN32
-	void CPU::Init()
-	{
-		auto result = GetCPUModel();
-		if (result.has_value())
-		{
-			m_model = std::move(result.value());
-		}
-		else
-		{
-			debug("Failed to get CPU model from Windows Registry");
-		}
-
-		result = GetCPUArch();
-		if (result.has_value())
-		{
-			m_arch = std::move(result.value());
-		}
-		else
-		{
-			debug("Failed to get CPU arch from Windows Registry");
-		}
-	}
-
-	std::optional<std::string> CPU::GetCPUModel() const
-	{
-		int len = BUFFER_SIZE;
-		char buffer[BUFFER_SIZE];
-		if (Util::RegReadStr(
-			HKEY_LOCAL_MACHINE,
-			"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
-			"ProcessorNameString",
-			buffer,
-			&len))
-		{
-			std::string model{ buffer };
-			Util::Trim(model);
-			return model;
-		}
-
-		return std::nullopt;
-	}
-
-	std::optional<std::string> CPU::GetCPUArch() const
-	{
-		int len = BUFFER_SIZE;
-		char buffer[BUFFER_SIZE];
-		if (Util::RegReadStr(
-			HKEY_LOCAL_MACHINE,
-			"SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment",
-			"PROCESSOR_ARCHITECTURE",
-			buffer,
-			&len))
-		{
-			std::string arch{ buffer };
-			Util::Trim(arch);
-			return GetCanonicalCPUArch(arch);
-		}
-
-		return std::nullopt;
-	}
-#endif	
 
 #ifdef __linux__
 #include <fstream>
@@ -219,7 +154,6 @@ namespace System
 	}
 #endif
 
-#ifndef WIN32
 	std::optional<std::string> CPU::GetCPUArch() const
 	{
 		struct utsname uts;
@@ -230,5 +164,4 @@ namespace System
 
 		return std::nullopt;
 	}
-#endif
 }

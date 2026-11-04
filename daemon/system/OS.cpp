@@ -44,62 +44,6 @@ namespace System
 		return m_version;
 	}
 
-#ifdef WIN32
-	void OS::Init()
-	{
-		m_name = "Windows";
-
-		int len = BUFFER_SIZE;
-		char buildBuffer[BUFFER_SIZE];
-		if (!Util::RegReadStr(
-			HKEY_LOCAL_MACHINE,
-			"SOFTWARE\\MICROSOFT\\Windows NT\\CurrentVersion",
-			"CurrentBuild",
-			buildBuffer,
-			&len))
-		{
-			debug("Failed to get OS version: couldn't read CurrentBuild from Windows Registry");
-			return;
-		}
-
-		long buildNum = std::atol(buildBuffer);
-		if (buildNum == 0)
-		{
-			debug("Got invalid Windows build number: %s", buildBuffer);
-			return;
-		}
-
-		const char* mappedVer = nzbget_rs_snh_os_map_windows_build(buildNum);
-		if (mappedVer)
-		{
-			m_version = mappedVer;
-		}
-		else
-		{
-			debug("Unsupported Windows build number: %ld", buildNum);
-			return;
-		}
-
-		len = BUFFER_SIZE;
-		char updateBuffer[BUFFER_SIZE];
-		if (Util::RegReadStr(
-			HKEY_LOCAL_MACHINE,
-			"SOFTWARE\\MICROSOFT\\Windows NT\\CurrentVersion",
-			"DisplayVersion",
-			updateBuffer,
-			&len))
-		{
-			m_version += std::string(" ") + updateBuffer;
-		}
-		else
-		{
-			debug("Failed to get OS display version from Windows Registry");
-		}
-
-		m_version += std::string(" (") + buildBuffer + ")";
-	}
-#endif	
-
 #ifdef __linux__
 #include <fstream>
 #include <sys/utsname.h>

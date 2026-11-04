@@ -28,12 +28,6 @@
 #include "FileSystem.h"
 #include "NString.h"
 
-#ifdef WIN32
-extern int optind, opterr;
-extern char *optarg;
-int getopt(int argc, char *argv[], char *optstring);
-#endif
-
 class Util
 {
 public:
@@ -224,10 +218,6 @@ public:
 
 	static const char* NULL_OUTPUT;
 	static const char* FIND_CMD;
-
-#ifdef WIN32
-	static bool RegReadStr(HKEY keyRoot, const char* keyName, const char* valueName, char* buffer, int* bufLen);
-#endif
 
 	static void SetStandByMode(bool standBy);
 

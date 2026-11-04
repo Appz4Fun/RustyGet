@@ -215,10 +215,49 @@ pub fn rpc_lookup_edit_command(edit_command: &[u8]) -> i32 {
     -1
 }
 
+/// Parses an integer prefix like `strtoll(text, &end, 10)` and checks `INT_MIN..=INT_MAX`.
+pub fn rpc_parse_int_param(text: &[u8]) -> Option<i32> {
+    let mut i = 0;
+    while i < text.len() && matches!(text[i], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+        i += 1;
+    }
+    let rest = &text[i..];
+    if rest.is_empty() {
+        return None;
+    }
+    let (neg, digits_slice) = if rest[0] == b'-' {
+        (true, &rest[1..])
+    } else if rest[0] == b'+' {
+        (false, &rest[1..])
+    } else {
+        (false, rest)
+    };
+    let d_len = digits_slice
+        .iter()
+        .take_while(|b| b.is_ascii_digit())
+        .count();
+    if d_len == 0 {
+        return None;
+    }
+    let mut acc: i64 = 0;
+    for &b in &digits_slice[..d_len] {
+        let digit = (b - b'0') as i64;
+        acc = acc.checked_mul(10)?;
+        acc = if neg {
+            acc.checked_sub(digit)?
+        } else {
+            acc.checked_add(digit)?
+        };
+    }
+    i32::try_from(acc).ok()
+}
+
 /// Validates `EditQueueXmlCommand::Execute` arguments for score/priority, parameter, and dupe mode actions.
 pub fn rpc_validate_edit_queue_args(action: i32, args: &[u8], parsed_int_ok: bool) -> bool {
     // eaGroupSetPriority = 24, eaGroupSetDupeScore = 31, eaHistorySetDupeScore = 44
-    if (action == 24 || action == 31 || action == 44) && !parsed_int_ok {
+    if (action == 24 || action == 31 || action == 44)
+        && !(parsed_int_ok && rpc_parse_int_param(args).is_some())
+    {
         return false;
     }
     // eaGroupSetParameter = 28, eaHistorySetParameter = 42
@@ -351,6 +390,77 @@ pub fn rpc_save_config_check_global_conflicts(
         }
     }
 
+    0
+}
+
+fn parse_server_dot_index(after_server: &[u8]) -> Option<i32> {
+    let mut i = 0;
+    while i < after_server.len()
+        && matches!(after_server[i], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
+    {
+        i += 1;
+    }
+    let rest = &after_server[i..];
+    if rest.is_empty() {
+        return None;
+    }
+    let (neg, digits) = if rest[0] == b'-' {
+        (true, &rest[1..])
+    } else if rest[0] == b'+' {
+        (false, &rest[1..])
+    } else {
+        (false, rest)
+    };
+    let d_len = digits.iter().take_while(|b| b.is_ascii_digit()).count();
+    if d_len == 0 || digits.get(d_len) != Some(&b'.') || neg {
+        return None;
+    }
+    let s_idx = std::str::from_utf8(&digits[..d_len]).ok()?.parse::<i32>().ok()?;
+    if s_idx > 0 {
+        Some(s_idx)
+    } else {
+        None
+    }
+}
+
+/// Evaluates Rule 7.1 in `SaveConfigXmlCommand::Execute`: returns the positive server index `sIndex`
+/// if `Server<sIndex>.Cipher` is non-empty while `Server<sIndex>.Encryption` is disabled, or `0` if valid.
+pub fn rpc_save_config_find_cipher_conflict(names: &[&[u8]], values: &[&[u8]]) -> i32 {
+    let count = names.len().min(values.len());
+    let mut checked = Vec::new();
+    for i in 0..count {
+        let entry_name = names[i];
+        if entry_name.len() > 6 && entry_name[..6].eq_ignore_ascii_case(b"Server") {
+            if let Some(s_index) = parse_server_dot_index(&entry_name[6..]) {
+                if checked.contains(&s_index) {
+                    continue;
+                }
+                checked.push(s_index);
+
+                let cipher_opt = format!("Server{}.Cipher", s_index);
+                let enc_opt = format!("Server{}.Encryption", s_index);
+
+                let cipher_val = (0..count)
+                    .find(|&j| names[j].eq_ignore_ascii_case(cipher_opt.as_bytes()))
+                    .map(|j| values[j]);
+
+                if let Some(cv) = cipher_val {
+                    if !cv.is_empty() {
+                        let enc_val = (0..count)
+                            .find(|&j| names[j].eq_ignore_ascii_case(enc_opt.as_bytes()))
+                            .map(|j| values[j]);
+                        let enc_disabled = match enc_val {
+                            Some(ev) => !rpc_save_config_parse_bool(Some(ev), false),
+                            None => true,
+                        };
+                        if enc_disabled {
+                            return s_index;
+                        }
+                    }
+                }
+            }
+        }
+    }
     0
 }
 
@@ -897,12 +1007,28 @@ mod tests {
         assert_eq!(rpc_lookup_edit_command(b"UnknownCommand"), -1);
 
         assert!(rpc_validate_edit_queue_args(31, b"100", true));
+        assert!(!rpc_validate_edit_queue_args(31, b"999999999999", true));
         assert!(!rpc_validate_edit_queue_args(31, b"999999999999", false));
         assert!(rpc_validate_edit_queue_args(28, b"*Unpack:Password=secret", true));
         assert!(!rpc_validate_edit_queue_args(28, b"=secret", true));
         assert!(!rpc_validate_edit_queue_args(28, b"noequals", true));
         assert!(rpc_validate_edit_queue_args(32, b"score", false));
         assert!(!rpc_validate_edit_queue_args(32, b"invalid", false));
+
+        assert_eq!(
+            rpc_save_config_find_cipher_conflict(
+                &[b"Server2.Cipher", b"Server2.Encryption"],
+                &[b"TLS_AES_128_GCM_SHA256", b"no"],
+            ),
+            2
+        );
+        assert_eq!(
+            rpc_save_config_find_cipher_conflict(
+                &[b"Server2.Cipher", b"Server2.Encryption"],
+                &[b"TLS_AES_128_GCM_SHA256", b"yes"],
+            ),
+            0
+        );
     }
 
     #[test]

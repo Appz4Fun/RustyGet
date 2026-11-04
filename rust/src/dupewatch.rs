@@ -342,6 +342,101 @@ impl FetchBudget {
     }
 }
 
+/// Builds the `rsDupe*` bitmask for `DupeSearch::PrepareNative`.
+#[allow(clippy::too_many_arguments)]
+pub fn build_item_flags(
+    kind: i32,
+    in_history: bool,
+    dupe_success: bool,
+    deleting: bool,
+    delete_status: i32,
+    has_post_info: bool,
+    dupe_mode: i32,
+    is_donor: bool,
+    dupe_hint: i32,
+    has_dupe_fleet: bool,
+) -> u32 {
+    let mut value = ENABLED | DUPE_CHECK | PRESENT;
+    // NzbInfo::nkNzb = 0
+    if kind == 0 {
+        value |= NZB;
+    }
+    if in_history {
+        value |= HISTORY;
+    }
+    if dupe_success {
+        value |= SUCCESS;
+    }
+    if deleting {
+        value |= DELETING;
+    }
+    // dsNone = 0, dsManual = 1, dsDupe = 3, dsGood = 5, dsCopy = 6
+    match delete_status {
+        0 => value |= DELETE_NONE,
+        1 => value |= DELETE_MANUAL,
+        3 => value |= DELETE_DUPE,
+        6 => value |= DELETE_COPY,
+        5 => value |= DELETE_GOOD,
+        _ => {}
+    }
+    if has_post_info {
+        value |= POST_PROCESS;
+    }
+    // dmScore = 0
+    if dupe_mode == 0 {
+        value |= SCORE_MODE;
+    }
+    if is_donor {
+        value |= DONOR;
+    }
+    // dhRedownloadAuto = 2
+    if dupe_hint == 2 {
+        value |= AUTO_REDOWNLOAD;
+    }
+    if has_dupe_fleet {
+        value |= MANAGED_FLEET;
+    }
+    value
+}
+
+/// Evaluates whether a peer with `peer_flags` and `peer_key` is a live eligible fleet member
+/// for `pick_key` in `DupeSearch::PrepareNative`.
+pub fn is_live_fleet_peer(peer_key: &[u8], pick_key: &[u8], peer_flags: u32) -> bool {
+    peer_key == pick_key
+        && (peer_flags & MANAGED_FLEET) != 0
+        && (peer_flags & HISTORY) == 0
+        && (peer_flags & (PRESENT | NZB | DELETE_NONE)) == (PRESENT | NZB | DELETE_NONE)
+        && (peer_flags & (DELETING | DELETE_MANUAL | DELETE_COPY | DELETE_GOOD | SUCCESS)) == 0
+}
+
+/// Formats a non-expired `DupeSearch::SaveState` line (`key\tscore\ttime\ttitle\tretryable\t\n`),
+/// or returns an empty `Vec<u8>` if `now - searched_time >= state_ttl_sec`.
+pub fn format_searched_state_line(
+    now: i64,
+    state_ttl_sec: i64,
+    key: &[u8],
+    score: i32,
+    searched_time: i64,
+    title: &[u8],
+    retryable: bool,
+) -> Vec<u8> {
+    if now - searched_time >= state_ttl_sec {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(key.len() + title.len() + 36);
+    out.extend_from_slice(key);
+    out.push(b'\t');
+    out.extend_from_slice(score.to_string().as_bytes());
+    out.push(b'\t');
+    out.extend_from_slice(searched_time.to_string().as_bytes());
+    out.push(b'\t');
+    out.extend_from_slice(title);
+    out.push(b'\t');
+    out.push(if retryable { b'1' } else { b'0' });
+    out.extend_from_slice(b"\t\n");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -631,5 +726,18 @@ mod tests {
         );
         assert!(shared.spent());
         assert_eq!(shared.used(), 127);
+    }
+
+    #[test]
+    fn item_flags_and_state_line() {
+        let f = build_item_flags(0, false, false, false, 0, false, 0, false, 0, true);
+        assert_eq!(f, LIVE | MANAGED_FLEET);
+        assert!(is_live_fleet_peer(b"k1", b"k1", f));
+        assert!(!is_live_fleet_peer(b"k1", b"k1", f | HISTORY));
+
+        let line = format_searched_state_line(1000, 3600, b"key1", 500, 900, b"Release.1", true);
+        assert_eq!(line, b"key1\t500\t900\tRelease.1\t1\t\n");
+        let expired = format_searched_state_line(5000, 3600, b"key1", 500, 900, b"Release.1", true);
+        assert!(expired.is_empty());
     }
 }

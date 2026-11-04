@@ -112,6 +112,104 @@ pub fn format_status_bar(spec: &NcursesStatusSpec) -> Vec<u8> {
     truncate_bstring_1024(out)
 }
 
+/// Format the colored console status bar (`ColoredFrontend::PrintStatus`).
+#[allow(clippy::too_many_arguments)]
+pub fn format_colored_status_bar(
+    stand_by: i32,
+    pause_download: i32,
+    current_download_speed: i64,
+    remaining_size: i64,
+    download_limit: i64,
+    post_job_count: i32,
+    thread_count: i32,
+    control_seq: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(160);
+    let cur_speed = if stand_by != 0 {
+        0
+    } else {
+        current_download_speed
+    };
+
+    out.push(b' ');
+    out.extend_from_slice(thread_count.to_string().as_bytes());
+    out.extend_from_slice(b" threads, ");
+    out.extend_from_slice(&crate::util::format_speed(cur_speed));
+    out.extend_from_slice(b", ");
+    crate::util::format_size_into(&mut out, remaining_size);
+    out.extend_from_slice(b" remaining");
+
+    if let Some((h, m, s)) = crate::frontexthealth::frontend_calc_remaining_hms(
+        remaining_size,
+        current_download_speed,
+        stand_by != 0,
+        pause_download != 0,
+    ) {
+        out.extend_from_slice(b" (~ ");
+        push_hms(&mut out, h, m, s);
+        out.push(b')');
+    }
+
+    if post_job_count > 0 {
+        out.extend_from_slice(b", ");
+        out.extend_from_slice(post_job_count.to_string().as_bytes());
+        out.extend_from_slice(if post_job_count > 1 {
+            b" post-jobs"
+        } else {
+            b" post-job"
+        });
+    }
+
+    let pause_suffix = crate::schedfrontweb::frontend_select_pause_status_suffix(
+        pause_download != 0,
+        stand_by != 0,
+    );
+    out.extend_from_slice(pause_suffix.to_bytes());
+
+    if download_limit > 0 {
+        let limit_kb = crate::schedfrontweb::frontend_calc_limit_kb(download_limit as i32);
+        out.extend_from_slice(b", Limit ");
+        out.extend_from_slice(limit_kb.to_string().as_bytes());
+        out.extend_from_slice(b" KB/s");
+    }
+
+    out.extend_from_slice(control_seq);
+    out.push(b'\n');
+
+    truncate_bstring_1024(out)
+}
+
+/// Format a log message line for `ColoredFrontend::PrintMessage`, `NServFrontend::PrintMessage`,
+/// or `LoggableFrontend::PrintMessage`.
+/// `kind`: `0` = `mkInfo`, `1` = `mkWarning`, `2` = `mkError`, `3` = `mkDebug`, `4` = `mkDetail`.
+pub fn format_log_message_line(colored: bool, kind: i32, text: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len() + 32);
+    if colored {
+        match kind {
+            0 => out.extend_from_slice(b"\x1b[32m[INFO]\x1b[39m "),
+            1 => out.extend_from_slice(b"\x1b[35m[WARNING]\x1b[39m "),
+            2 => out.extend_from_slice(b"\x1b[31m[ERROR]\x1b[39m "),
+            3 => out.extend_from_slice(b"[DEBUG] "),
+            4 => out.extend_from_slice(b"\x1b[32m[DETAIL]\x1b[39m "),
+            _ => return out,
+        }
+        out.extend_from_slice(text);
+        out.extend_from_slice(b"\x1b[K\n");
+    } else {
+        match kind {
+            0 => out.extend_from_slice(b"[INFO] "),
+            1 => out.extend_from_slice(b"[WARNING] "),
+            2 => out.extend_from_slice(b"[ERROR] "),
+            3 => out.extend_from_slice(b"[DEBUG] "),
+            4 => out.extend_from_slice(b"[DETAIL] "),
+            _ => return out,
+        }
+        out.extend_from_slice(text);
+        out.push(b'\n');
+    }
+    out
+}
+
 /// Format the top header bar with right-aligned uptime or download-time (`NCursesFrontend::PrintTopHeader`).
 pub fn format_top_header(header: &[u8], screen_width: i32, up_time: bool, time_sec: i32) -> Vec<u8> {
     let width = screen_width.max(0) as usize;
@@ -608,5 +706,29 @@ mod tests {
         assert_eq!(gtext.len(), 80);
         assert!(gtext.starts_with("[5] * Ubuntu.ISO"));
         assert!(gtext.ends_with("10/2  100.00 MB  40.00 MB  00:00:40"));
+    }
+
+    #[test]
+    fn test_format_colored_status_and_log_messages() {
+        let bar = format_colored_status_bar(
+            0,
+            0,
+            1024 * 1024,
+            10 * 1024 * 1024,
+            2048 * 1024,
+            1,
+            2,
+            b"\x1b[K",
+        );
+        assert_eq!(
+            String::from_utf8(bar).unwrap(),
+            " 2 threads, 1.00 MB/s, 10.00 MB remaining (~ 00:00:10), 1 post-job, Limit 2048 KB/s\x1b[K\n"
+        );
+
+        let colored_err = format_log_message_line(true, 2, b"disk full");
+        assert_eq!(colored_err, b"\x1b[31m[ERROR]\x1b[39m disk full\x1b[K\n");
+
+        let plain_info = format_log_message_line(false, 0, b"started");
+        assert_eq!(plain_info, b"[INFO] started\n");
     }
 }

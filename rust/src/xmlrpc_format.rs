@@ -2263,6 +2263,66 @@ pub unsafe extern "C" fn nzbget_rs_xmlrpc_format_fleet_result(
     into_buf(out)
 }
 
+fn format_json_f64(val: f64) -> String {
+    if !val.is_finite() {
+        return "0.0".to_string();
+    }
+    let s = val.to_string();
+    if s.contains('.') || s.contains('e') || s.contains('E') {
+        s
+    } else {
+        format!("{}.0", s)
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_xmlrpc_format_disk_speed(
+    is_json: c_int,
+    write_bytes: u64,
+    write_ms: f64,
+    read_bytes: u64,
+    read_ms: f64,
+) -> RsBuf {
+    let size_mb = write_bytes / 1024 / 1024;
+    let read_size_mb = read_bytes / 1024 / 1024;
+    let mut out = Vec::with_capacity(256);
+    if is_json != 0 {
+        let _ = write!(
+            out,
+            "{{\"SizeMB\":{},\"DurationMS\":{},\"ReadSizeMB\":{},\"ReadDurationMS\":{}}}",
+            size_mb,
+            format_json_f64(write_ms),
+            read_size_mb,
+            format_json_f64(read_ms),
+        );
+    } else {
+        let _ = write!(
+            out,
+            "<value><struct><member><name>SizeMB</name><value><i4>{}</i4></value></member><member><name>DurationMS</name><value><double>{:.6}</double></value></member><member><name>ReadSizeMB</name><value><i4>{}</i4></value></member><member><name>ReadDurationMS</name><value><double>{:.6}</double></value></member></struct></value>",
+            size_mb, write_ms, read_size_mb, read_ms
+        );
+    }
+    into_buf(out)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_xmlrpc_format_network_speed(
+    is_json: c_int,
+    speed_mbps: f64,
+) -> RsBuf {
+    let mut out = Vec::with_capacity(128);
+    if is_json != 0 {
+        let _ = write!(out, "{{\"SpeedMbps\":{}}}", format_json_f64(speed_mbps));
+    } else {
+        let _ = write!(
+            out,
+            "<value><struct><member><name>SpeedMbps</name><value><double>{:.6}</double></value></member></struct></value>",
+            speed_mbps
+        );
+    }
+    into_buf(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2366,6 +2426,23 @@ mod tests {
                 status.as_ptr(),
             ));
             assert!(dup_xml.ends_with("<member><name>Status</name><value><string>DUPE</string></value></member>\n"));
+
+            let d_json = buf_to_string(nzbget_rs_xmlrpc_format_disk_speed(
+                1,
+                100 * 1024 * 1024,
+                250.5,
+                200 * 1024 * 1024,
+                125.0,
+            ));
+            assert_eq!(
+                d_json,
+                "{\"SizeMB\":100,\"DurationMS\":250.5,\"ReadSizeMB\":200,\"ReadDurationMS\":125.0}"
+            );
+            let n_xml = buf_to_string(nzbget_rs_xmlrpc_format_network_speed(0, 940.25));
+            assert_eq!(
+                n_xml,
+                "<value><struct><member><name>SpeedMbps</name><value><double>940.250000</double></value></member></struct></value>"
+            );
         }
     }
 }

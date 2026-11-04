@@ -252,13 +252,8 @@ CommandLineParser::CommandLineParser(int argc, const char* argv[])
 
 void CommandLineParser::PrintUsage(const char* com)
 {
-#ifdef WIN32
-	const int includeDaemon = 0;
-#else
-	const int includeDaemon = 1;
-#endif
 	NzbgetRsBuf buf = nzbget_rs_cmdline_format_usage(
-		FileSystem::BaseFileName(com), PATH_SEPARATOR, includeDaemon);
+		FileSystem::BaseFileName(com), PATH_SEPARATOR, 1);
 	if (buf.data)
 	{
 		printf("%s", buf.data);

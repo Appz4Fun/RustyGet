@@ -83,13 +83,6 @@ void NntpServer::Run()
 
 	info("%s Listening on port %i", *Util::FormatTime(Util::CurrentTime()), m_port);
 
-#ifdef WIN32
-	if (m_speed > 0)
-	{
-		timeBeginPeriod(1);
-	}
-#endif
-
 	int num = 1;
 
 	while (!IsStopped())
@@ -144,9 +137,6 @@ void NntpServer::Stop()
 	{
 		m_connection->SetSuppressErrors(true);
 		m_connection->Cancel();
-#ifdef WIN32
-		m_connection->Disconnect();
-#endif
 	}
 }
 

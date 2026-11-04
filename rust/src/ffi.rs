@@ -22735,6 +22735,377 @@ pub unsafe extern "C" fn nzbget_rs_sfw_web_proc_is_etag_unchanged(
     ))
 }
 
+// ============================================================================
+// XmlRpc, Options, Log & NString Hot-Path FFI (rust/src/rpcoptlogutil.rs)
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_rol_xmlrpc_json_step(next_char: c_char) -> c_int {
+    crate::rpcoptlogutil::xmlrpc_json_step(next_char as u8)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_rol_xmlrpc_bool_to_str(
+    is_json: c_int,
+    value: c_int,
+) -> *const c_char {
+    crate::rpcoptlogutil::xmlrpc_bool_to_str(is_json != 0, value != 0)
+        .as_ptr()
+        .cast::<c_char>()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rol_xmlrpc_validate_download_rate(
+    rate: c_int,
+    out_bytes_per_sec: *mut c_int,
+) -> c_int {
+    let (ok, bps) = crate::rpcoptlogutil::xmlrpc_validate_download_rate(rate);
+    if !out_bytes_per_sec.is_null() {
+        *out_bytes_per_sec = bps;
+    }
+    i32::from(ok)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_rol_xmlrpc_calc_average_download_rate(
+    download_time_sec: c_int,
+    all_bytes: i64,
+) -> i64 {
+    crate::rpcoptlogutil::xmlrpc_calc_average_download_rate(download_time_sec, all_bytes)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rol_xmlrpc_nzb_message_and_post_time(
+    message_count: c_int,
+    cached_message_count: c_int,
+    post_total_sec: c_int,
+    has_post_start_time: c_int,
+    cur_time: i64,
+    post_start_time: i64,
+    out_message_count: *mut c_int,
+    out_post_total_time_sec: *mut c_int,
+) {
+    let (msg_cnt, post_sec) = crate::rpcoptlogutil::xmlrpc_nzb_message_and_post_time(
+        message_count,
+        cached_message_count,
+        post_total_sec,
+        has_post_start_time != 0,
+        cur_time,
+        post_start_time,
+    );
+    if !out_message_count.is_null() {
+        *out_message_count = msg_cnt;
+    }
+    if !out_post_total_time_sec.is_null() {
+        *out_post_total_time_sec = post_sec;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rol_xmlrpc_post_info_log_slice(
+    log_entries: c_int,
+    messages_size: c_int,
+    out_start: *mut c_int,
+    out_clamped_entries: *mut c_int,
+) -> c_int {
+    let (ok, start, clamped) =
+        crate::rpcoptlogutil::xmlrpc_post_info_log_slice(log_entries, messages_size);
+    if !out_start.is_null() {
+        *out_start = start;
+    }
+    if !out_clamped_entries.is_null() {
+        *out_clamped_entries = clamped;
+    }
+    i32::from(ok)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rol_xmlrpc_save_config_check_json_keys(
+    key1: *const c_char,
+    key2: *const c_char,
+) -> c_int {
+    crate::rpcoptlogutil::xmlrpc_save_config_check_json_keys(key1, key2)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rol_xmlrpc_save_config_raw_baseline_valid(
+    raw_value: *const c_char,
+) -> c_int {
+    i32::from(crate::rpcoptlogutil::xmlrpc_save_config_raw_baseline_valid(
+        input(raw_value),
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rol_xmlrpc_save_config_decoded_baseline_valid(
+    has_cipher_baseline: c_int,
+    decoded_value: *const c_char,
+) -> c_int {
+    i32::from(
+        crate::rpcoptlogutil::xmlrpc_save_config_decoded_baseline_valid(
+            has_cipher_baseline != 0,
+            input(decoded_value),
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rol_xmlrpc_view_feed_should_include(
+    include_non_matching: c_int,
+    match_status: c_int,
+    ms_accepted: c_int,
+    size_bytes: i64,
+    out_size_mb: *mut c_int,
+) -> c_int {
+    let (inc, size_mb) = crate::rpcoptlogutil::xmlrpc_view_feed_should_include(
+        include_non_matching != 0,
+        match_status,
+        ms_accepted,
+        size_bytes,
+    );
+    if !out_size_mb.is_null() {
+        *out_size_mb = size_mb;
+    }
+    i32::from(inc)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_rol_xmlrpc_test_server_effective_timeout(
+    param_timeout: c_int,
+    article_timeout: c_int,
+) -> c_int {
+    crate::rpcoptlogutil::xmlrpc_test_server_effective_timeout(param_timeout, article_timeout)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rol_xmlrpc_test_server_response_ok(
+    response: *const c_char,
+) -> c_int {
+    if response.is_null() {
+        return 0;
+    }
+    i32::from(crate::rpcoptlogutil::xmlrpc_test_server_response_ok(
+        true,
+        *response.cast::<u8>(),
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rol_options_check_dir_join_mode(
+    dir: *const c_char,
+    parent_dir: *const c_char,
+    path_sep: c_char,
+    alt_path_sep: c_char,
+) -> c_int {
+    crate::rpcoptlogutil::options_check_dir_join_mode(
+        input(dir),
+        input(parent_dir),
+        path_sep as u8,
+        alt_path_sep as u8,
+    )
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn nzbget_rs_rol_options_normalize_dupe_and_mem_options(
+    mem_pressure_interval: c_int,
+    dupe_stream_timeout: c_int,
+    dupe_search_delay: c_int,
+    dupe_search_max_donors: c_int,
+    dupe_health_percent: c_int,
+    dupe_health_min: c_int,
+    dupe_health_max: c_int,
+    dupe_body_checks: c_int,
+    dupe_health_budget: c_int,
+    dupe_min_alive: c_int,
+    dupe_fast_donors: c_int,
+    out_mem_pressure_interval: *mut c_int,
+    out_dupe_stream_timeout: *mut c_int,
+    out_dupe_search_delay: *mut c_int,
+    out_dupe_search_max_donors: *mut c_int,
+    out_dupe_health_percent: *mut c_int,
+    out_dupe_health_min: *mut c_int,
+    out_dupe_health_max: *mut c_int,
+    out_dupe_body_checks: *mut c_int,
+    out_dupe_health_budget: *mut c_int,
+    out_dupe_min_alive: *mut c_int,
+    out_dupe_fast_donors: *mut c_int,
+) {
+    let (v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10) =
+        crate::rpcoptlogutil::options_normalize_dupe_and_mem_options(
+            mem_pressure_interval,
+            dupe_stream_timeout,
+            dupe_search_delay,
+            dupe_search_max_donors,
+            dupe_health_percent,
+            dupe_health_min,
+            dupe_health_max,
+            dupe_body_checks,
+            dupe_health_budget,
+            dupe_min_alive,
+            dupe_fast_donors,
+        );
+    if !out_mem_pressure_interval.is_null() {
+        *out_mem_pressure_interval = v0;
+    }
+    if !out_dupe_stream_timeout.is_null() {
+        *out_dupe_stream_timeout = v1;
+    }
+    if !out_dupe_search_delay.is_null() {
+        *out_dupe_search_delay = v2;
+    }
+    if !out_dupe_search_max_donors.is_null() {
+        *out_dupe_search_max_donors = v3;
+    }
+    if !out_dupe_health_percent.is_null() {
+        *out_dupe_health_percent = v4;
+    }
+    if !out_dupe_health_min.is_null() {
+        *out_dupe_health_min = v5;
+    }
+    if !out_dupe_health_max.is_null() {
+        *out_dupe_health_max = v6;
+    }
+    if !out_dupe_body_checks.is_null() {
+        *out_dupe_body_checks = v7;
+    }
+    if !out_dupe_health_budget.is_null() {
+        *out_dupe_health_budget = v8;
+    }
+    if !out_dupe_min_alive.is_null() {
+        *out_dupe_min_alive = v9;
+    }
+    if !out_dupe_fast_donors.is_null() {
+        *out_dupe_fast_donors = v10;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_rol_options_check_server_def(
+    has_any_field: c_int,
+    has_host: c_int,
+    has_port: c_int,
+    has_connections: c_int,
+) -> c_int {
+    crate::rpcoptlogutil::options_check_server_def(
+        has_any_field != 0,
+        has_host != 0,
+        has_port != 0,
+        has_connections != 0,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_rol_options_check_category_or_feed_def(
+    has_any_field: c_int,
+    has_required: c_int,
+) -> c_int {
+    crate::rpcoptlogutil::options_check_category_or_feed_def(has_any_field != 0, has_required != 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rol_options_reconcile_write_flags(
+    raw_article: c_int,
+    skip_write: c_int,
+    direct_write: c_int,
+    direct_rename: c_int,
+    out_direct_write: *mut c_int,
+    out_direct_rename: *mut c_int,
+) {
+    let (dw, dr) = crate::rpcoptlogutil::options_reconcile_write_flags(
+        raw_article != 0,
+        skip_write != 0,
+        direct_write != 0,
+        direct_rename != 0,
+    );
+    if !out_direct_write.is_null() {
+        *out_direct_write = i32::from(dw);
+    }
+    if !out_direct_rename.is_null() {
+        *out_direct_rename = i32::from(dr);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_rol_log_should_close_idle(
+    cur_time: i64,
+    last_written: i64,
+) -> c_int {
+    i32::from(crate::rpcoptlogutil::log_should_close_idle(
+        cur_time,
+        last_written,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_rol_log_should_delete_old_rotated(
+    file_day: c_int,
+    cur_day: c_int,
+    rotate_log: c_int,
+) -> c_int {
+    i32::from(crate::rpcoptlogutil::log_should_delete_old_rotated(
+        file_day, cur_day, rotate_log,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_rol_nstring_bstring_set_len(size: c_int, len: c_int) -> c_int {
+    crate::rpcoptlogutil::nstring_bstring_set_len(size, len)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_rol_nstring_bstring_append_len(
+    size: c_int,
+    cur_len: c_int,
+    str_len: c_int,
+) -> c_int {
+    crate::rpcoptlogutil::nstring_bstring_append_len(size, cur_len, str_len)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rol_nstring_cstring_replace_bounds(
+    pos: c_int,
+    len: c_int,
+    cur_len: c_int,
+    raw_str_len: c_int,
+    str_len_param: c_int,
+    out_add_len: *mut c_int,
+    out_del_len: *mut c_int,
+    out_new_len: *mut c_int,
+) -> c_int {
+    let (ok, add_len, del_len, new_len) = crate::rpcoptlogutil::nstring_cstring_replace_bounds(
+        pos,
+        len,
+        cur_len,
+        raw_str_len,
+        str_len_param,
+    );
+    if !out_add_len.is_null() {
+        *out_add_len = add_len;
+    }
+    if !out_del_len.is_null() {
+        *out_del_len = del_len;
+    }
+    if !out_new_len.is_null() {
+        *out_new_len = new_len;
+    }
+    i32::from(ok)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rol_nstring_cstring_trim_right_len(
+    s: *const c_char,
+    len: usize,
+) -> usize {
+    if s.is_null() || len == 0 {
+        return 0;
+    }
+    crate::rpcoptlogutil::nstring_cstring_trim_right_len(std::slice::from_raw_parts(
+        s.cast::<u8>(),
+        len,
+    ))
+}
+
 
 
 

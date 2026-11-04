@@ -1385,8 +1385,12 @@ char* XmlCommand::XmlNextValue(char* xml, const char* tag, int* valueLength)
 
 int XmlCommand::JsonStep(const char* param, int len)
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_rol_xmlrpc_json_step(*(param + len));
+#else
 	char nextChar = *(param + len);
 	return (nextChar == ']' || nextChar == '\0') ? 0 : 1;
+#endif
 }
 
 // an integer parameter: a number out of the int range is no valid value; it wrapped
@@ -1606,7 +1610,11 @@ bool XmlCommand::NextParamAsStr(char** value)
 
 const char* XmlCommand::BoolToStr(bool value)
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_rol_xmlrpc_bool_to_str(IsJson() ? 1 : 0, value ? 1 : 0);
+#else
 	return IsJson() ? (value ? "true" : "false") : (value ? "1" : "0");
+#endif
 }
 
 CString XmlCommand::EncodeStr(const char* str)
@@ -1724,6 +1732,17 @@ void SetDownloadRateXmlCommand::Execute()
 {
 	int rate = 0;
 	// in KB/s: a rate past INT_MAX / 1024 wrapped around to a tiny limit
+#ifdef NZBGET_USE_RUST
+	int bytesPerSec = 0;
+	if (!NextParamAsInt(&rate) ||
+		!nzbget_rs_rol_xmlrpc_validate_download_rate(rate, &bytesPerSec))
+	{
+		BuildErrorResponse(2, "Invalid parameter");
+		return;
+	}
+
+	g_WorkState->SetSpeedLimit(bytesPerSec);
+#else
 	if (!NextParamAsInt(&rate) || rate < 0 || rate > INT_MAX / 1024)
 	{
 		BuildErrorResponse(2, "Invalid parameter");
@@ -1731,6 +1750,7 @@ void SetDownloadRateXmlCommand::Execute()
 	}
 
 	g_WorkState->SetSpeedLimit(rate * 1024);
+#endif
 	BuildBoolResponse(true);
 }
 
@@ -1927,7 +1947,11 @@ void StatusXmlCommand::Execute()
 	int downloadedMBytes = (int)(allBytes / 1024 / 1024);
 	Util::SplitInt64(allBytes, &downloadedSizeHi, &downloadedSizeLo);
 
+#ifdef NZBGET_USE_RUST
+	int64 averageDownloadRate = nzbget_rs_rol_xmlrpc_calc_average_download_rate(downloadTimeSec, allBytes);
+#else
 	int64 averageDownloadRate = downloadTimeSec > 0 ? allBytes / downloadTimeSec : 0;
+#endif
 	uint32 averageDownloadRateHi, averageDownloadRateLo;
 	Util::SplitInt64(averageDownloadRate, &averageDownloadRateHi, &averageDownloadRateLo);
 
@@ -2456,7 +2480,21 @@ void NzbInfoXmlCommand::AppendNzbInfoFields(NzbInfo* nzbInfo)
 	uint32 dupeRecoveredBytesHi, dupeRecoveredBytesLo;
 	Util::SplitInt64(nzbInfo->GetDupeRecoveredBytes(), &dupeRecoveredBytesHi, &dupeRecoveredBytesLo);
 
+#ifdef NZBGET_USE_RUST
+	int messageCount = 0;
+	int postTotalTimeSec = 0;
+	time_t postStartTime = nzbInfo->GetPostInfo() ? nzbInfo->GetPostInfo()->GetStartTime() : 0;
+	time_t curTime = postStartTime ? Util::CurrentTime() : 0;
+	nzbget_rs_rol_xmlrpc_nzb_message_and_post_time(
+		nzbInfo->GetMessageCount(), nzbInfo->GetCachedMessageCount(),
+		nzbInfo->GetPostTotalSec(), postStartTime != 0 ? 1 : 0,
+		(int64)curTime, (int64)postStartTime,
+		&messageCount, &postTotalTimeSec);
+#else
 	int messageCount = nzbInfo->GetMessageCount() > 0 ? nzbInfo->GetMessageCount() : nzbInfo->GetCachedMessageCount();
+	int postTotalTimeSec = (int)(nzbInfo->GetPostTotalSec() + (nzbInfo->GetPostInfo() && nzbInfo->GetPostInfo()->GetStartTime() ?
+		Util::CurrentTime() - nzbInfo->GetPostInfo()->GetStartTime() : 0));
+#endif
 
 	CString xmlNzbNicename = EncodeStr(nzbInfo->GetName());
 #ifdef NZBGET_USE_RUST
@@ -2484,8 +2522,7 @@ void NzbInfoXmlCommand::AppendNzbInfoFields(NzbInfo* nzbInfo)
 			*EncodeStr(nzbInfo->GetDupeKey()), nzbInfo->GetDupeScore(), dupeModeName[nzbInfo->GetDupeMode()],
 			BoolToStr(nzbInfo->GetDeleteStatus() != NzbInfo::dsNone),
 			downloadedSizeLo, downloadedSizeHi, downloadedSizeMB, nzbInfo->GetDownloadSec(),
-			(int)(nzbInfo->GetPostTotalSec() + (nzbInfo->GetPostInfo() && nzbInfo->GetPostInfo()->GetStartTime() ?
-				Util::CurrentTime() - nzbInfo->GetPostInfo()->GetStartTime() : 0)),
+			postTotalTimeSec,
 			nzbInfo->GetParSec(), nzbInfo->GetRepairSec(), nzbInfo->GetUnpackSec(), messageCount, nzbInfo->GetExtraParBlocks());
 
 	// Post-processing parameters
@@ -2600,6 +2637,11 @@ void NzbInfoXmlCommand::AppendPostInfoFields(PostInfo* postInfo, int logEntries,
 	if (logEntries > 0 && postInfo)
 	{
 		GuardedMessageList messages = postInfo->GetNzbInfo()->GuardCachedMessages();
+#ifdef NZBGET_USE_RUST
+		int start = 0;
+		if (nzbget_rs_rol_xmlrpc_post_info_log_slice(
+			logEntries, (int)messages->size(), &start, &logEntries))
+#else
 		if (!messages->empty())
 		{
 			if (logEntries > (int)messages->size())
@@ -2607,6 +2649,10 @@ void NzbInfoXmlCommand::AppendPostInfoFields(PostInfo* postInfo, int logEntries,
 				logEntries = messages->size();
 			}
 			int start = messages->size() - logEntries;
+#endif
+#ifdef NZBGET_USE_RUST
+		{
+#endif
 
 			int index = 0;
 			for (uint32 i = (uint32)start; i < messages->size(); i++)
@@ -3817,6 +3863,18 @@ void SaveConfigXmlCommand::Execute()
 				malformed = true;
 				break;
 			}
+#ifdef NZBGET_USE_RUST
+			int keyKind = nzbget_rs_rol_xmlrpc_save_config_check_json_keys(key1, key2);
+			if (keyKind == 2)
+			{
+				std::swap(name, value);
+			}
+			else if (keyKind != 1)
+			{
+				malformed = true;
+				break;
+			}
+#else
 			if (!strcasecmp(key1, "Value") && !strcasecmp(key2, "Name"))
 			{
 				std::swap(name, value);
@@ -3826,6 +3884,7 @@ void SaveConfigXmlCommand::Execute()
 				malformed = true;
 				break;
 			}
+#endif
 		}
 		else
 		{
@@ -3843,6 +3902,26 @@ void SaveConfigXmlCommand::Execute()
 		bool baselineEntry = !strcmp(name, "_TlsCipherBaseline");
 		// The token contains only ASCII field names and hex-encoded UTF-8.
 		// Reject encoded NUL rather than accepting a decoder-truncated token.
+#ifdef NZBGET_USE_RUST
+		if (baselineEntry && !nzbget_rs_rol_xmlrpc_save_config_raw_baseline_valid(value))
+		{
+			malformed = true;
+			break;
+		}
+		DecodeStr(value);
+		if (baselineEntry)
+		{
+			if (!nzbget_rs_rol_xmlrpc_save_config_decoded_baseline_valid(
+				hasCipherBaseline ? 1 : 0, value))
+			{
+				malformed = true;
+				break;
+			}
+			hasCipherBaseline = true;
+			cipherBaseline = value;
+			continue; // RPC metadata is never a configuration option.
+		}
+#else
 		if (baselineEntry && (strstr(value, "\\u0000") || strstr(value, "&#"))) { malformed = true; break; }
 		DecodeStr(value);
 		if (baselineEntry)
@@ -3851,6 +3930,7 @@ void SaveConfigXmlCommand::Execute()
 			hasCipherBaseline = true; cipherBaseline = value;
 			continue; // RPC metadata is never a configuration option.
 		}
+#endif
 		optEntries.emplace_back(name, value);
 	}
 
@@ -4239,11 +4319,21 @@ void ViewFeedXmlCommand::Execute()
 
 	for (FeedItemInfo& feedItemInfo : feedItems.get())
 	{
+#ifdef NZBGET_USE_RUST
+		int sizeMB = 0;
+		if (nzbget_rs_rol_xmlrpc_view_feed_should_include(
+			includeNonMatching ? 1 : 0, (int)feedItemInfo.GetMatchStatus(),
+			(int)FeedItemInfo::msAccepted, feedItemInfo.GetSize(), &sizeMB))
+		{
+			uint32 sizeHi, sizeLo;
+			Util::SplitInt64(feedItemInfo.GetSize(), &sizeHi, &sizeLo);
+#else
 		if (includeNonMatching || feedItemInfo.GetMatchStatus() == FeedItemInfo::msAccepted)
 		{
 			uint32 sizeHi, sizeLo;
 			Util::SplitInt64(feedItemInfo.GetSize(), &sizeHi, &sizeLo);
 			int sizeMB = (int)(feedItemInfo.GetSize() / 1024 / 1024);
+#endif
 
 			AppendCondResponse(",\n", IsJson() && index++ > 0);
 			AppendFmtResponse(IsJson() ? JSON_FEED_ITEM : XML_FEED_ITEM,
@@ -4855,7 +4945,12 @@ void TestServerXmlCommand::Execute()
 		params.certVerifLevel
 	);
 	TestConnection connection(&server, this);
+#ifdef NZBGET_USE_RUST
+	connection.SetTimeout(nzbget_rs_rol_xmlrpc_test_server_effective_timeout(
+		params.timeout, g_Options->GetArticleTimeout()));
+#else
 	connection.SetTimeout(params.timeout == 0 ? g_Options->GetArticleTimeout() : params.timeout);
+#endif
 	connection.SetSuppressErrors(false);
 
 	bool ok = connection.Connect();
@@ -4868,7 +4963,11 @@ void TestServerXmlCommand::Execute()
 			id.AppendFmt("%i", rand());
 		}
 		const char* response = connection.Request(BString<1024>("ARTICLE <%s@nzbget.com>\r\n", *id));
+#ifdef NZBGET_USE_RUST
+		ok = nzbget_rs_rol_xmlrpc_test_server_response_ok(response) != 0;
+#else
 		ok = response && (*response == '4' || *response == '2');
+#endif
 	}
 
 	BString<1024> content(IsJson() ? JSON_RESPONSE_STR_BODY : XML_RESPONSE_STR_BODY,

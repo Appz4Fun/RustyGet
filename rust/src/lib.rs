@@ -77,6 +77,7 @@ pub mod renamerarrepdl;
 pub mod poolstatprepost;
 pub mod scriptfeedcfg;
 pub mod schedfrontweb;
+pub mod rpcoptlogutil;
 
 pub mod deadpostings;
 pub mod dupewatch;

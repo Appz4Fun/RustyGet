@@ -535,6 +535,26 @@ void Options::CheckDir(CString& dir, const char* optionName,
 		dir[dir.Length() - 1] = '\0';
 	}
 
+#ifdef NZBGET_USE_RUST
+	int joinMode = nzbget_rs_rol_options_check_dir_join_mode(
+		dir, parentDir, PATH_SEPARATOR, ALT_PATH_SEPARATOR);
+	if (joinMode != 0)
+	{
+		BString<1024> usedir2;
+		if (joinMode == 1)
+		{
+			usedir2.Format("%s%s", parentDir, *dir);
+		}
+		else
+		{
+			usedir2.Format("%s%c%s", parentDir, PATH_SEPARATOR, *dir);
+		}
+
+		FileSystem::NormalizePathSeparators((char*)usedir2);
+		dir = usedir2;
+		SetOption(optionName, usedir2);
+	}
+#else
 	if (!(dir[0] == PATH_SEPARATOR || dir[0] == ALT_PATH_SEPARATOR ||
 		(dir[0] && dir[1] == ':')) &&
 		!Util::EmptyStr(parentDir))
@@ -556,6 +576,7 @@ void Options::CheckDir(CString& dir, const char* optionName,
 		dir = usedir2;
 		SetOption(optionName, usedir2);
 	}
+#endif
 
 	// Ensure the dir is created
 	CString errmsg;
@@ -798,6 +819,30 @@ void Options::InitOptions()
 	m_dupeArticleFallback = (EDupeArticleFallback)ParseEnumValue(DUPEARTICLEFALLBACK.data(),
 		DupeArticleFallbackCount, DupeArticleFallbackNames, DupeArticleFallbackValues);
 	m_dupeStreamDecompress	= (bool)ParseEnumValue(DUPESTREAMDECOMPRESS.data(), BoolCount, BoolNames, BoolValues);
+#ifdef NZBGET_USE_RUST
+	int rawStreamTimeout = ParseIntValue(DUPESTREAMTIMEOUT.data(), 10);
+	m_dupeSearch			= (bool)ParseEnumValue(DUPESEARCH.data(), BoolCount, BoolNames, BoolValues);
+	m_dupeSearchDryRun		= (bool)ParseEnumValue(DUPESEARCHDRYRUN.data(), BoolCount, BoolNames, BoolValues);
+	m_dupeSearchUrl			= GetOption(DUPESEARCHURL.data());
+	m_dupeSearchApiKey		= GetOption(DUPESEARCHAPIKEY.data());
+	int rawSearchDelay = ParseIntValue(DUPESEARCHDELAY.data(), 10);
+	int rawSearchMaxDonors = ParseIntValue(DUPESEARCHMAXDONORS.data(), 10);
+	int rawHealthPercent = ParseIntValue(DUPEHEALTHPERCENT.data(), 10);
+	int rawHealthMin = ParseIntValue(DUPEHEALTHMIN.data(), 10);
+	int rawHealthMax = ParseIntValue(DUPEHEALTHMAX.data(), 10);
+	int rawBodyChecks = ParseIntValue(DUPEBODYCHECKS.data(), 10);
+	int rawHealthBudget = ParseIntValue(DUPEHEALTHBUDGET.data(), 10);
+	int rawMinAlive = ParseIntValue(DUPEMINALIVE.data(), 10);
+	int rawFastDonors = ParseIntValue(DUPEFASTDONORS.data(), 10);
+	nzbget_rs_rol_options_normalize_dupe_and_mem_options(
+		memoryPressureInterval, rawStreamTimeout, rawSearchDelay,
+		rawSearchMaxDonors, rawHealthPercent, rawHealthMin, rawHealthMax,
+		rawBodyChecks, rawHealthBudget, rawMinAlive, rawFastDonors,
+		&m_memoryPressureInterval, &m_dupeStreamTimeout, &m_dupeSearchDelay,
+		&m_dupeSearchMaxDonors, &m_dupeHealthPercent, &m_dupeHealthMin,
+		&m_dupeHealthMax, &m_dupeBodyChecks, &m_dupeHealthBudget,
+		&m_dupeMinAlive, &m_dupeFastDonors);
+#else
 	m_dupeStreamTimeout		= std::max(0, ParseIntValue(DUPESTREAMTIMEOUT.data(), 10));
 	m_dupeSearch			= (bool)ParseEnumValue(DUPESEARCH.data(), BoolCount, BoolNames, BoolValues);
 	m_dupeSearchDryRun		= (bool)ParseEnumValue(DUPESEARCHDRYRUN.data(), BoolCount, BoolNames, BoolValues);
@@ -812,6 +857,7 @@ void Options::InitOptions()
 	m_dupeHealthBudget		= std::max(5, ParseIntValue(DUPEHEALTHBUDGET.data(), 10));
 	m_dupeMinAlive			= std::min(100, std::max(0, ParseIntValue(DUPEMINALIVE.data(), 10)));
 	m_dupeFastDonors		= std::max(0, ParseIntValue(DUPEFASTDONORS.data(), 10));
+#endif
 	if (m_dupeSearch && Util::EmptyStr(m_dupeSearchUrl))
 	{
 		warn("Option <%s> is enabled but option <%s> is empty: no duplicates will be searched",
@@ -1135,12 +1181,23 @@ void Options::InitServers()
 
 		bool definition = nactive || nname || nlevel || ngroup || nhost || nport || noptional ||
 			nusername || npassword || nconnections || njoingroup || ntls || ncipher || nretention;
+#ifdef NZBGET_USE_RUST
+		int serverDefState = nzbget_rs_rol_options_check_server_def(
+			definition ? 1 : 0, nhost != nullptr ? 1 : 0,
+			nport != nullptr ? 1 : 0, nconnections != nullptr ? 1 : 0);
+		if (serverDefState == 0)
+		{
+			break;
+		}
+		bool completed = serverDefState == 1;
+#else
 		bool completed = nhost && nport && nconnections;
 
 		if (!definition)
 		{
 			break;
 		}
+#endif
 
 		if (completed)
 		{
@@ -1187,12 +1244,22 @@ void Options::InitCategories()
 		const char* naliases = GetOption(BString<100>("Category%i.Aliases", n));
 
 		bool definition = nname || ndestdir || nunpack || nextensions || naliases;
+#ifdef NZBGET_USE_RUST
+		int catDefState = nzbget_rs_rol_options_check_category_or_feed_def(
+			definition ? 1 : 0, (nname && strlen(nname) > 0) ? 1 : 0);
+		if (catDefState == 0)
+		{
+			break;
+		}
+		bool completed = catDefState == 1;
+#else
 		bool completed = nname && strlen(nname) > 0;
 
 		if (!definition)
 		{
 			break;
 		}
+#endif
 
 		if (completed)
 		{
@@ -1267,12 +1334,22 @@ void Options::InitFeeds()
 
 		bool definition = nname || nurl || nfilter || ncategory || nbacklog || npausenzb ||
 			ninterval || npriority || nextensions;
+#ifdef NZBGET_USE_RUST
+		int feedDefState = nzbget_rs_rol_options_check_category_or_feed_def(
+			definition ? 1 : 0, nurl != nullptr ? 1 : 0);
+		if (feedDefState == 0)
+		{
+			break;
+		}
+		bool completed = feedDefState == 1;
+#else
 		bool completed = nurl;
 
 		if (!definition)
 		{
 			break;
 		}
+#endif
 
 		if (completed)
 		{
@@ -2053,6 +2130,16 @@ void Options::CheckOptions()
 		m_certCheck = false;
 	}
 
+#ifdef NZBGET_USE_RUST
+	int newDirectWrite = m_directWrite ? 1 : 0;
+	int newDirectRename = m_directRename ? 1 : 0;
+	nzbget_rs_rol_options_reconcile_write_flags(
+		m_rawArticle ? 1 : 0, m_skipWrite ? 1 : 0,
+		newDirectWrite, newDirectRename,
+		&newDirectWrite, &newDirectRename);
+	m_directWrite = newDirectWrite != 0;
+	m_directRename = newDirectRename != 0;
+#else
 	if (m_rawArticle)
 	{
 		m_directWrite = false;
@@ -2062,6 +2149,7 @@ void Options::CheckOptions()
 	{
 		m_directRename = false;
 	}
+#endif
 
 	// if option "ConfigTemplate" is not set, use "WebDir" as default location for template
 	// (for compatibility with versions 9 and 10).

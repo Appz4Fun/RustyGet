@@ -143,7 +143,11 @@ void Log::IntervalCheck()
 	if (m_logFile)
 	{
 		time_t curTime = Util::CurrentTime() + g_Options->GetTimeCorrection();
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_rol_log_should_close_idle((int64)curTime, (int64)m_lastWritten.load()))
+#else
 		if (std::abs(curTime - m_lastWritten) > 1)
+#endif
 		{
 			m_logFile.reset();
 		}
@@ -362,7 +366,11 @@ void Log::RotateLog()
 			time_t fileTime = Util::Timegm(&tm);
 			int fileDay = (int)fileTime / 86400;
 
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_rol_log_should_delete_old_rotated(fileDay, curDay, g_Options->GetRotateLog()))
+#else
 			if (fileDay <= curDay - g_Options->GetRotateLog())
+#endif
 			{
 				BString<1024> message("Deleting old log-file %s\n", filename);
 				g_Log->AddMessage(Message::mkInfo, message);

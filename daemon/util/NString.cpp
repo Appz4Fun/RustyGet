@@ -38,7 +38,11 @@ template <int size>
 void BString<size>::Set(const char* str, int len)
 {
 	m_data[0] = '\0';
+#ifdef NZBGET_USE_RUST
+	int addLen = nzbget_rs_rol_nstring_bstring_set_len(size, len);
+#else
 	int addLen = len > 0 ? std::min(size - 1, len) : size - 1;
+#endif
 	strncpy(m_data, str, addLen);
 	m_data[addLen] = '\0';
 }
@@ -52,8 +56,12 @@ void BString<size>::Append(const char* str, int len)
 	}
 
 	int curLen = strlen(m_data);
+#ifdef NZBGET_USE_RUST
+	int addLen = nzbget_rs_rol_nstring_bstring_append_len(size, curLen, len);
+#else
 	int avail = size - curLen - 1;
 	int addLen = std::min(avail, len);
+#endif
 	if (addLen > 0)
 	{
 		strncpy(m_data + curLen, str, addLen);
@@ -248,6 +256,18 @@ int CString::Find(const char* str, int pos)
 
 void CString::Replace(int pos, int len, const char* str, int strLen)
 {
+#ifdef NZBGET_USE_RUST
+	int curLen = Length();
+	int addLen = 0;
+	int delLen = 0;
+	int newLen = 0;
+	if (!nzbget_rs_rol_nstring_cstring_replace_bounds(
+		pos, len, curLen, (int)strlen(str), strLen,
+		&addLen, &delLen, &newLen))
+	{
+		return; // bad argument
+	}
+#else
 	int addLen = strlen(str);
 	if (strLen > 0)
 	{
@@ -258,6 +278,7 @@ void CString::Replace(int pos, int len, const char* str, int strLen)
 	int newLen = curLen - delLen + addLen;
 
 	if (pos > curLen) return; // bad argument
+#endif
 
 	char* newvalue = static_cast<char*>(malloc(static_cast<size_t>(newLen + 1)));
 	if (!newvalue) return;
@@ -330,12 +351,20 @@ void CString::TrimRight()
 		return;
 	}
 
+#ifdef NZBGET_USE_RUST
+	size_t newLen = nzbget_rs_rol_nstring_cstring_trim_right_len(m_data, (size_t)len);
+	for (size_t i = newLen; i < (size_t)len; i++)
+	{
+		m_data[i] = '\0';
+	}
+#else
 	char* end = m_data + len - 1;
 	while (end >= m_data && (*end == '\n' || *end == '\r' || *end == ' ' || *end == '\t'))
 	{
 		*end = '\0';
 		end--;
 	}
+#endif
 }
 
 

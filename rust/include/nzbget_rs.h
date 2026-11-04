@@ -3546,6 +3546,63 @@ int nzbget_rs_sfw_web_proc_should_send_auth_response(
 int nzbget_rs_sfw_web_proc_is_etag_unchanged(
     const char* old_etag, const char* new_etag);
 
+// XmlRpc, Options, Log & NString Hot-Path C ABI (rust/src/rpcoptlogutil.rs)
+int nzbget_rs_rol_xmlrpc_json_step(char next_char);
+const char* nzbget_rs_rol_xmlrpc_bool_to_str(int is_json, int value);
+int nzbget_rs_rol_xmlrpc_validate_download_rate(
+    int rate, int* out_bytes_per_sec);
+int64_t nzbget_rs_rol_xmlrpc_calc_average_download_rate(
+    int download_time_sec, int64_t all_bytes);
+void nzbget_rs_rol_xmlrpc_nzb_message_and_post_time(
+    int message_count, int cached_message_count, int post_total_sec,
+    int has_post_start_time, int64_t cur_time, int64_t post_start_time,
+    int* out_message_count, int* out_post_total_time_sec);
+int nzbget_rs_rol_xmlrpc_post_info_log_slice(
+    int log_entries, int messages_size, int* out_start, int* out_clamped_entries);
+int nzbget_rs_rol_xmlrpc_save_config_check_json_keys(
+    const char* key1, const char* key2);
+int nzbget_rs_rol_xmlrpc_save_config_raw_baseline_valid(
+    const char* raw_value);
+int nzbget_rs_rol_xmlrpc_save_config_decoded_baseline_valid(
+    int has_cipher_baseline, const char* decoded_value);
+int nzbget_rs_rol_xmlrpc_view_feed_should_include(
+    int include_non_matching, int match_status, int ms_accepted,
+    int64_t size_bytes, int* out_size_mb);
+int nzbget_rs_rol_xmlrpc_test_server_effective_timeout(
+    int param_timeout, int article_timeout);
+int nzbget_rs_rol_xmlrpc_test_server_response_ok(const char* response);
+int nzbget_rs_rol_options_check_dir_join_mode(
+    const char* dir, const char* parent_dir, char path_sep, char alt_path_sep);
+void nzbget_rs_rol_options_normalize_dupe_and_mem_options(
+    int mem_pressure_interval, int dupe_stream_timeout, int dupe_search_delay,
+    int dupe_search_max_donors, int dupe_health_percent, int dupe_health_min,
+    int dupe_health_max, int dupe_body_checks, int dupe_health_budget,
+    int dupe_min_alive, int dupe_fast_donors,
+    int* out_mem_pressure_interval, int* out_dupe_stream_timeout,
+    int* out_dupe_search_delay, int* out_dupe_search_max_donors,
+    int* out_dupe_health_percent, int* out_dupe_health_min,
+    int* out_dupe_health_max, int* out_dupe_body_checks,
+    int* out_dupe_health_budget, int* out_dupe_min_alive,
+    int* out_dupe_fast_donors);
+int nzbget_rs_rol_options_check_server_def(
+    int has_any_field, int has_host, int has_port, int has_connections);
+int nzbget_rs_rol_options_check_category_or_feed_def(
+    int has_any_field, int has_required);
+void nzbget_rs_rol_options_reconcile_write_flags(
+    int raw_article, int skip_write, int direct_write, int direct_rename,
+    int* out_direct_write, int* out_direct_rename);
+int nzbget_rs_rol_log_should_close_idle(int64_t cur_time, int64_t last_written);
+int nzbget_rs_rol_log_should_delete_old_rotated(
+    int file_day, int cur_day, int rotate_log);
+int nzbget_rs_rol_nstring_bstring_set_len(int size, int len);
+int nzbget_rs_rol_nstring_bstring_append_len(
+    int size, int cur_len, int str_len);
+int nzbget_rs_rol_nstring_cstring_replace_bounds(
+    int pos, int len, int cur_len, int raw_str_len, int str_len_param,
+    int* out_add_len, int* out_del_len, int* out_new_len);
+size_t nzbget_rs_rol_nstring_cstring_trim_right_len(
+    const char* s, size_t len);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

@@ -243,21 +243,31 @@ NntpConnection* ServerPool::LockedGetConnection(int level, NewsServer* wantServe
 	for (PooledConnection* candidateConnection : &m_connections)
 	{
 		NewsServer* candidateServer = candidateConnection->GetNewsServer();
+#ifdef NZBGET_USE_RUST
+		int matchWant = nzbget_rs_ntw_server_pool_match_want_server(
+			wantServer ? 1 : 0,
+			candidateServer->GetId(),
+			wantServer ? wantServer->GetId() : 0,
+			wantServer ? wantServer->GetGroup() : 0,
+			candidateServer->GetGroup());
+		bool isConn = candidateConnection->GetStatus() == Connection::csConnected;
+		bool isBlocked = !isConn && IsServerBlocked(candidateServer);
+		if (nzbget_rs_aws_server_pool_is_candidate_connection_eligible(
+			candidateConnection->GetInUse() ? 1 : 0,
+			candidateServer->GetActive() ? 1 : 0,
+			candidateServer->GetNormLevel(),
+			level,
+			matchWant,
+			isConn ? 1 : 0,
+			isBlocked ? 1 : 0) != 0)
+#else
 		if (!candidateConnection->GetInUse() && candidateServer->GetActive() &&
 			candidateServer->GetNormLevel() == level &&
-#ifdef NZBGET_USE_RUST
-			nzbget_rs_ntw_server_pool_match_want_server(
-				wantServer ? 1 : 0,
-				candidateServer->GetId(),
-				wantServer ? wantServer->GetId() : 0,
-				wantServer ? wantServer->GetGroup() : 0,
-				candidateServer->GetGroup()) != 0 &&
-#else
 			(!wantServer || candidateServer == wantServer ||
 			 (wantServer->GetGroup() > 0 && wantServer->GetGroup() == candidateServer->GetGroup())) &&
-#endif
 			(candidateConnection->GetStatus() == Connection::csConnected ||
 			 !IsServerBlocked(candidateServer)))
+#endif
 		{
 			// free connection found, check if it's not from the server which should be ignored
 			bool useConnection = true;

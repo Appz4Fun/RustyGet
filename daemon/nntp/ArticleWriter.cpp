@@ -153,8 +153,16 @@ bool ArticleWriter::Start(Decoder::EFormat format, const char* filename, int64 f
 		if (g_Options->GetDirectWrite() && !IsDupeFallbackArticle())
 		{
 			Guard guard = m_fileInfo->GuardOutputFile();
+#ifdef NZBGET_USE_RUST
+			bool outInit = m_fileInfo->GetOutputInitialized();
+			bool skipDisk = GetSkipDiskWrite();
+			bool outExists = (outInit && !skipDisk) ? FileSystem::FileExists(m_outputFilename.c_str()) : true;
+			if (nzbget_rs_aws_article_writer_should_init_direct_write_file(
+				1, 0, outInit ? 1 : 0, skipDisk ? 1 : 0, outExists ? 1 : 0) != 0)
+#else
 			if (!m_fileInfo->GetOutputInitialized() ||
 				(!GetSkipDiskWrite() && !FileSystem::FileExists(m_outputFilename.c_str())))
+#endif
 			{
 				if (!GetSkipDiskWrite() && !CreateOutputFile(fileSize))
 				{
@@ -189,6 +197,16 @@ bool ArticleWriter::Start(Decoder::EFormat format, const char* filename, int64 f
 	{
 		m_articleData = g_ArticleCache->Alloc(m_articleSize);
 
+#ifdef NZBGET_USE_RUST
+		while (nzbget_rs_aws_article_writer_should_wait_for_cache_flush(
+			m_articleData.GetData() ? 1 : 0,
+			g_ArticleCache->GetFlushing() ? 1 : 0,
+			(g_MemoryMonitor && g_MemoryMonitor->GetTier() == NZBGET_RS_PRESSURE_CRITICAL) ? 1 : 0) != 0)
+		{
+			Util::Sleep(5);
+			m_articleData = g_ArticleCache->Alloc(m_articleSize);
+		}
+#else
 		while (!m_articleData.GetData() && g_ArticleCache->GetFlushing())
 		{
 			if (g_MemoryMonitor && g_MemoryMonitor->GetTier() == NZBGET_RS_PRESSURE_CRITICAL)
@@ -198,6 +216,7 @@ bool ArticleWriter::Start(Decoder::EFormat format, const char* filename, int64 f
 			Util::Sleep(5);
 			m_articleData = g_ArticleCache->Alloc(m_articleSize);
 		}
+#endif
 
 		if (!m_articleData.GetData())
 		{
@@ -287,7 +306,12 @@ bool ArticleWriter::Write(char* buffer, int len)
 	}
 #endif
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_aws_article_writer_should_memcpy_cached_segment(
+		g_Options->GetRawArticle() ? 1 : 0, m_articleData.GetData() ? 1 : 0) != 0)
+#else
 	if (!g_Options->GetRawArticle() && m_articleData.GetData())
+#endif
 	{
 		memcpy(m_articleData.GetData() + m_articlePtr - len, buffer, len);
 		return true;
@@ -329,6 +353,19 @@ void ArticleWriter::Finish(bool success)
 
 	if (!g_Options->GetRawArticle())
 	{
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_aws_article_writer_should_move_temp_to_result(
+			directWrite ? 1 : 0, m_articleData.GetData() ? 1 : 0, GetSkipDiskWrite() ? 1 : 0) != 0)
+		{
+			if (!FileSystem::MoveFile(m_tempFilename.c_str(), m_resultFilename.c_str()))
+			{
+				m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError,
+					"Could not rename file %s to %s: %s", m_tempFilename.c_str(), m_resultFilename.c_str(),
+					*FileSystem::GetLastErrorMessage());
+			}
+			FileSystem::DeleteFile(m_tempFilename.c_str());
+		}
+#else
 		if (!directWrite && !m_articleData.GetData())
 		{
 			if (!GetSkipDiskWrite())
@@ -342,10 +379,15 @@ void ArticleWriter::Finish(bool success)
 				FileSystem::DeleteFile(m_tempFilename.c_str());
 			}
 		}
+#endif
 
 		if (m_articleData.GetData())
 		{
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_aws_article_writer_should_realloc_cached_segment(m_articleSize, m_articlePtr) != 0)
+#else
 			if (m_articleSize != m_articlePtr)
+#endif
 			{
 				g_ArticleCache->Realloc(&m_articleData, m_articlePtr);
 			}
@@ -716,8 +758,15 @@ ArticleWriter::SetupOutputFile(DiskFile &outfile,
 		}
 	}
 
+#ifdef NZBGET_USE_RUST
+	int setupScenario = nzbget_rs_aws_article_writer_classify_setup_output_scenario(
+		g_Options->GetRawArticle() ? 1 : 0, directWrite ? 1 : 0);
+	// Scenario A: Standard Assembly (Write to .tmp)
+	if (setupScenario == 1)
+#else
 	// Scenario A: Standard Assembly (Write to .tmp)
 	if (!g_Options->GetRawArticle() && !directWrite)
+#endif
 	{
 		FileSystem::DeleteFile(paths.tempPath.c_str());
 		if (!outfile.Open(paths.tempPath.c_str(), DiskFile::omWrite))
@@ -727,7 +776,11 @@ ArticleWriter::SetupOutputFile(DiskFile &outfile,
 		}
 	}
 	// Scenario B: Direct Write (Append/Modify existing)
+#ifdef NZBGET_USE_RUST
+	else if (setupScenario == 2)
+#else
 	else if (directWrite)
+#endif
 	{
 		const char* openPath = m_outputFilename.c_str();
 		if (!FileSystem::FileExists(openPath) && FileSystem::FileExists(paths.finalPath.c_str()))
@@ -746,7 +799,11 @@ ArticleWriter::SetupOutputFile(DiskFile &outfile,
 		paths.tempPath = m_outputFilename;
 	}
 	// Scenario C: Raw Mode (Directory creation)
+#ifdef NZBGET_USE_RUST
+	else if (setupScenario == 3)
+#else
 	else if (g_Options->GetRawArticle())
+#endif
 	{
 		FileSystem::DeleteFile(paths.tempPath.c_str());
 		if (!FileSystem::CreateDirectory(paths.finalPath.c_str()))
@@ -841,8 +898,14 @@ uint32 ArticleWriter::ProcessArticles(DiskFile& outfile,
 			}
 			pa->DiscardSegment();
 		}
+#ifdef NZBGET_USE_RUST
+		else if (nzbget_rs_aws_article_writer_is_staged_dupe_commit_needed(
+			directWrite ? 1 : 0, pa->GetDupeFallbackRound(),
+			pa->GetResultFilename() ? 1 : 0, GetSkipDiskWrite() ? 1 : 0) != 0)
+#else
 		else if (directWrite && pa->GetDupeFallbackRound() > 0 &&
 			pa->GetResultFilename() && !GetSkipDiskWrite())
+#endif
 		{
 			// Duplicate articles are staged in their per-article temp file even
 			// when DirectWrite is enabled.  Copy only after the queue coordinator
@@ -891,7 +954,12 @@ uint32 ArticleWriter::ProcessArticles(DiskFile& outfile,
 				m_commitError = true;
 			}
 		}
+#ifdef NZBGET_USE_RUST
+		else if (nzbget_rs_aws_article_writer_is_standard_part_append_needed(
+			g_Options->GetRawArticle() ? 1 : 0, directWrite ? 1 : 0, GetSkipDiskWrite() ? 1 : 0) != 0)
+#else
 		else if (!g_Options->GetRawArticle() && !directWrite && !GetSkipDiskWrite())
+#endif
 		{
 			// Read from partial file and append to outfile
 			DiskFile infile;
@@ -1033,7 +1101,13 @@ bool ArticleWriter::CleanupOldData(bool directWrite,
 		}
 	}
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_aws_article_writer_should_cleanup_hardlinked_temp(
+		finalOutputPath.empty() ? 1 : 0, m_fileInfo->IsHardLinked() ? 1 : 0,
+		Util::EmptyStr(g_Options->GetInterDir()) ? 1 : 0) != 0)
+#else
 	if (finalOutputPath.empty() && m_fileInfo->IsHardLinked() && Util::EmptyStr(g_Options->GetInterDir()))
+#endif
 	{
 		if (FileSystem::DeleteFile(m_outputFilename.c_str()))
 		{
@@ -1347,6 +1421,22 @@ bool ArticleWriter::MoveCompletedFiles(NzbInfo* nzbInfo, const char* oldDestDir)
 		{
 			if (pendingWrites) break;
 
+#ifdef NZBGET_USE_RUST
+			bool outInit = fileInfo->GetOutputInitialized();
+			bool outEmpty = fileInfo->GetOutputFilename().empty();
+			int activeDl = fileInfo->GetActiveDownloads();
+			bool guardedInit = false;
+			if (outInit && !outEmpty && activeDl > 0)
+			{
+				Guard guard = fileInfo->GuardOutputFile();
+				guardedInit = fileInfo->GetOutputInitialized();
+			}
+			if (nzbget_rs_aws_article_writer_has_pending_file_writes(
+				outInit ? 1 : 0, outEmpty ? 1 : 0, activeDl, guardedInit ? 1 : 0) != 0)
+			{
+				pendingWrites = true;
+			}
+#else
 			if (fileInfo->GetOutputInitialized() && !fileInfo->GetOutputFilename().empty())
 			{
 				if (fileInfo->GetActiveDownloads() > 0)
@@ -1359,6 +1449,7 @@ bool ArticleWriter::MoveCompletedFiles(NzbInfo* nzbInfo, const char* oldDestDir)
 					pendingWrites = true;
 				}
 			}
+#endif
 		}
 
 		if (!pendingWrites)
@@ -1853,6 +1944,35 @@ void MemoryMonitor::UpdateState()
 
 void MemoryMonitor::ApplyTierTransition(NzbgetRsPressureTier oldTier, NzbgetRsPressureTier newTier)
 {
+#ifdef NZBGET_USE_RUST
+	int action = nzbget_rs_aws_memory_monitor_classify_tier_transition_action(
+		(int)oldTier, (int)newTier,
+		(int)NZBGET_RS_PRESSURE_NORMAL,
+		(int)NZBGET_RS_PRESSURE_CONSTRAINED,
+		(int)NZBGET_RS_PRESSURE_CRITICAL);
+	if (action == 1)
+	{
+		warn("System memory pressure CRITICAL (>=90%%): shedding article cache and throttling downloads");
+		if (g_ArticleCache)
+		{
+			g_ArticleCache->WakeupFlush();
+		}
+		TrimHeap();
+	}
+	else if (action == 2)
+	{
+		detail("System memory pressure CONSTRAINED: shrinking article cache ceiling");
+		if (g_ArticleCache)
+		{
+			g_ArticleCache->WakeupFlush();
+		}
+	}
+	else if (action == 3)
+	{
+		detail("System memory pressure returned to NORMAL: restoring cache and download capacity");
+		TrimHeap();
+	}
+#else
 	if (newTier == NZBGET_RS_PRESSURE_CRITICAL)
 	{
 		warn("System memory pressure CRITICAL (>=90%%): shedding article cache and throttling downloads");
@@ -1875,4 +1995,5 @@ void MemoryMonitor::ApplyTierTransition(NzbgetRsPressureTier oldTier, NzbgetRsPr
 		detail("System memory pressure returned to NORMAL: restoring cache and download capacity");
 		TrimHeap();
 	}
+#endif
 }

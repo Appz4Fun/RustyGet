@@ -110,7 +110,12 @@ void ArticleDownloader::Run()
 		status = adFailed;
 
 		SetStatus(adWaiting);
+#ifdef NZBGET_USE_RUST
+		while (nzbget_rs_aws_article_dl_should_wait_for_connection(
+			m_connection ? 1 : 0, IsStopped() ? 1 : 0, serverConfigGeneration, g_ServerPool->GetGeneration()) != 0)
+#else
 		while (!m_connection && !(IsStopped() || serverConfigGeneration != g_ServerPool->GetGeneration()))
+#endif
 		{
 			m_connection = g_ServerPool->GetConnection(level, wantServer, &failedServers);
 			Util::Sleep(5);
@@ -192,7 +197,13 @@ void ArticleDownloader::Run()
 		// a server that refuses the login for good (502) can't serve this article: it
 		// counts as tried. Waited for, a server with a broken account stalled every
 		// download that had failed on the other servers of its level
+#ifdef NZBGET_USE_RUST
+		bool authRejected = nzbget_rs_aws_article_dl_eval_auth_rejected(
+			connected ? 1 : 0, m_connection ? 1 : 0,
+			(m_connection && m_connection->GetAuthRejected()) ? 1 : 0) != 0;
+#else
 		bool authRejected = !connected && m_connection && m_connection->GetAuthRejected();
+#endif
 		if (connected && !IsStopped())
 		{
 			NewsServer* newsServer = m_connection->GetNewsServer();
@@ -313,7 +324,12 @@ void ArticleDownloader::Run()
 #endif
 
 		bool optionalBlocked = false;
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_aws_article_dl_should_block_failed_server(
+			connected ? 1 : 0, m_connection ? 1 : 0, IsStopped() ? 1 : 0) != 0)
+#else
 		if (!connected && m_connection && !IsStopped())
+#endif
 		{
 			g_ServerPool->BlockServer(lastServer);
 			optionalBlocked = lastServer->GetOptional();
@@ -335,7 +351,12 @@ void ArticleDownloader::Run()
 		}
 		else
 		{
+#ifdef NZBGET_USE_RUST
+			FreeConnection(nzbget_rs_aws_article_dl_keep_conn_on_no_retry(
+				(int)status, (int)adFinished, (int)adNotFound) != 0);
+#else
 			FreeConnection(status == adFinished || status == adNotFound);
+#endif
 		}
 
 		if (status == adFinished || status == adFatalError)
@@ -450,6 +471,25 @@ void ArticleDownloader::Run()
 			}
 #endif
 
+#ifdef NZBGET_USE_RUST
+			int advanceLevel = 0;
+			int newLevel = level;
+			int breakAllFailed = 0;
+			nzbget_rs_aws_article_dl_eval_level_exhaustion(
+				allServersOnLevelFailed ? 1 : 0, level, g_ServerPool->GetMaxNormLevel(),
+				&advanceLevel, &newLevel, &breakAllFailed);
+			if (advanceLevel != 0)
+			{
+				detail("Article %s @ all level %i servers failed, increasing level", *m_infoName, level);
+				level = newLevel;
+			}
+			else if (breakAllFailed != 0)
+			{
+				detail("Article %s @ all servers failed", *m_infoName);
+				status = adFailed;
+				break;
+			}
+#else
 			if (allServersOnLevelFailed)
 			{
 				if (level < g_ServerPool->GetMaxNormLevel())
@@ -464,6 +504,7 @@ void ArticleDownloader::Run()
 					break;
 				}
 			}
+#endif
 
 			remainedRetries = retries;
 		}

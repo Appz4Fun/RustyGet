@@ -28147,6 +28147,352 @@ pub extern "C" fn nzbget_rs_din_posting_should_clear_sketch_cache(
     )
 }
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_aws_article_dl_should_wait_for_connection(
+    has_conn: c_int,
+    is_stopped: c_int,
+    config_gen: c_int,
+    pool_gen: c_int,
+) -> c_int {
+    i32::from(
+        crate::articledlwriterstat::aws_article_dl_should_wait_for_connection(
+            has_conn != 0,
+            is_stopped != 0,
+            config_gen,
+            pool_gen,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_aws_article_dl_eval_auth_rejected(
+    connected: c_int,
+    has_conn: c_int,
+    conn_auth_rejected: c_int,
+) -> c_int {
+    i32::from(
+        crate::articledlwriterstat::aws_article_dl_eval_auth_rejected(
+            connected != 0,
+            has_conn != 0,
+            conn_auth_rejected != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_aws_article_dl_should_block_failed_server(
+    connected: c_int,
+    has_conn: c_int,
+    is_stopped: c_int,
+) -> c_int {
+    i32::from(
+        crate::articledlwriterstat::aws_article_dl_should_block_failed_server(
+            connected != 0,
+            has_conn != 0,
+            is_stopped != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_aws_article_dl_keep_conn_on_no_retry(
+    status: c_int,
+    ad_finished: c_int,
+    ad_not_found: c_int,
+) -> c_int {
+    i32::from(
+        crate::articledlwriterstat::aws_article_dl_keep_conn_on_no_retry(
+            status,
+            ad_finished,
+            ad_not_found,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_aws_article_dl_eval_level_exhaustion(
+    all_failed: c_int,
+    level: c_int,
+    max_norm_level: c_int,
+    out_advance_level: *mut c_int,
+    out_new_level: *mut c_int,
+    out_break_all_failed: *mut c_int,
+) {
+    let (adv, nl, brk) = crate::articledlwriterstat::aws_article_dl_eval_level_exhaustion(
+        all_failed != 0,
+        level,
+        max_norm_level,
+    );
+    if !out_advance_level.is_null() {
+        *out_advance_level = i32::from(adv);
+    }
+    if !out_new_level.is_null() {
+        *out_new_level = nl;
+    }
+    if !out_break_all_failed.is_null() {
+        *out_break_all_failed = i32::from(brk);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_aws_article_writer_should_init_direct_write_file(
+    direct_write: c_int,
+    is_dupe_fallback: c_int,
+    output_initialized: c_int,
+    skip_disk_write: c_int,
+    file_exists: c_int,
+) -> c_int {
+    i32::from(
+        crate::articledlwriterstat::aws_article_writer_should_init_direct_write_file(
+            direct_write != 0,
+            is_dupe_fallback != 0,
+            output_initialized != 0,
+            skip_disk_write != 0,
+            file_exists != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_aws_article_writer_should_wait_for_cache_flush(
+    has_data: c_int,
+    cache_flushing: c_int,
+    is_critical: c_int,
+) -> c_int {
+    i32::from(
+        crate::articledlwriterstat::aws_article_writer_should_wait_for_cache_flush(
+            has_data != 0,
+            cache_flushing != 0,
+            is_critical != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_aws_article_writer_should_memcpy_cached_segment(
+    raw_article: c_int,
+    has_cached_data: c_int,
+) -> c_int {
+    i32::from(
+        crate::articledlwriterstat::aws_article_writer_should_memcpy_cached_segment(
+            raw_article != 0,
+            has_cached_data != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_aws_article_writer_should_move_temp_to_result(
+    direct_write: c_int,
+    has_cached_data: c_int,
+    skip_disk_write: c_int,
+) -> c_int {
+    i32::from(
+        crate::articledlwriterstat::aws_article_writer_should_move_temp_to_result(
+            direct_write != 0,
+            has_cached_data != 0,
+            skip_disk_write != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_aws_article_writer_should_realloc_cached_segment(
+    article_size: c_int,
+    article_ptr: c_int,
+) -> c_int {
+    i32::from(
+        crate::articledlwriterstat::aws_article_writer_should_realloc_cached_segment(
+            article_size,
+            article_ptr,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_aws_article_writer_classify_setup_output_scenario(
+    raw_article: c_int,
+    direct_write: c_int,
+) -> c_int {
+    crate::articledlwriterstat::aws_article_writer_classify_setup_output_scenario(
+        raw_article != 0,
+        direct_write != 0,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_aws_article_writer_is_staged_dupe_commit_needed(
+    direct_write: c_int,
+    dupe_fallback_round: c_int,
+    has_result_filename: c_int,
+    skip_disk_write: c_int,
+) -> c_int {
+    i32::from(
+        crate::articledlwriterstat::aws_article_writer_is_staged_dupe_commit_needed(
+            direct_write != 0,
+            dupe_fallback_round,
+            has_result_filename != 0,
+            skip_disk_write != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_aws_article_writer_is_standard_part_append_needed(
+    raw_article: c_int,
+    direct_write: c_int,
+    skip_disk_write: c_int,
+) -> c_int {
+    i32::from(
+        crate::articledlwriterstat::aws_article_writer_is_standard_part_append_needed(
+            raw_article != 0,
+            direct_write != 0,
+            skip_disk_write != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_aws_article_writer_should_cleanup_hardlinked_temp(
+    final_path_empty: c_int,
+    is_hard_linked: c_int,
+    inter_dir_empty: c_int,
+) -> c_int {
+    i32::from(
+        crate::articledlwriterstat::aws_article_writer_should_cleanup_hardlinked_temp(
+            final_path_empty != 0,
+            is_hard_linked != 0,
+            inter_dir_empty != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_aws_article_writer_has_pending_file_writes(
+    output_initialized: c_int,
+    output_filename_empty: c_int,
+    active_downloads: c_int,
+    guarded_output_initialized: c_int,
+) -> c_int {
+    i32::from(
+        crate::articledlwriterstat::aws_article_writer_has_pending_file_writes(
+            output_initialized != 0,
+            output_filename_empty != 0,
+            active_downloads,
+            guarded_output_initialized != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_aws_memory_monitor_classify_tier_transition_action(
+    old_tier: c_int,
+    new_tier: c_int,
+    tier_normal: c_int,
+    tier_constrained: c_int,
+    tier_critical: c_int,
+) -> c_int {
+    crate::articledlwriterstat::aws_memory_monitor_classify_tier_transition_action(
+        old_tier,
+        new_tier,
+        tier_normal,
+        tier_constrained,
+        tier_critical,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_aws_statmeter_accum_day_and_total_volume(
+    day_slot: c_int,
+    cur_day_bytes: i64,
+    cur_day_failed: c_int,
+    cur_day_success: c_int,
+    cur_total_bytes: i64,
+    cur_custom_bytes: i64,
+    add_bytes: i64,
+    add_failed: c_int,
+    add_success: c_int,
+    out_update_day: *mut c_int,
+    out_day_bytes: *mut i64,
+    out_day_failed: *mut c_int,
+    out_day_success: *mut c_int,
+    out_total_bytes: *mut i64,
+    out_custom_bytes: *mut i64,
+) {
+    let (upd, db, df, ds, tb, cb) =
+        crate::articledlwriterstat::aws_statmeter_accum_day_and_total_volume(
+            day_slot,
+            cur_day_bytes,
+            cur_day_failed,
+            cur_day_success,
+            cur_total_bytes,
+            cur_custom_bytes,
+            add_bytes,
+            add_failed,
+            add_success,
+        );
+    if !out_update_day.is_null() {
+        *out_update_day = i32::from(upd);
+    }
+    if !out_day_bytes.is_null() {
+        *out_day_bytes = db;
+    }
+    if !out_day_failed.is_null() {
+        *out_day_failed = df;
+    }
+    if !out_day_success.is_null() {
+        *out_day_success = ds;
+    }
+    if !out_total_bytes.is_null() {
+        *out_total_bytes = tb;
+    }
+    if !out_custom_bytes.is_null() {
+        *out_custom_bytes = cb;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_aws_statmeter_calc_initial_speed_start_slot(
+    cur_time: i64,
+    slot_size: c_int,
+) -> c_int {
+    crate::articledlwriterstat::aws_statmeter_calc_initial_speed_start_slot(cur_time, slot_size)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_aws_server_pool_is_candidate_connection_eligible(
+    in_use: c_int,
+    server_active: c_int,
+    server_norm_level: c_int,
+    level: c_int,
+    match_want_server: c_int,
+    is_connected: c_int,
+    server_blocked: c_int,
+) -> c_int {
+    i32::from(
+        crate::articledlwriterstat::aws_server_pool_is_candidate_connection_eligible(
+            in_use != 0,
+            server_active != 0,
+            server_norm_level,
+            level,
+            match_want_server != 0,
+            is_connected != 0,
+            server_blocked != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_aws_xml_reader_is_parse_success(
+    sax_result: c_int,
+    entity_declared: c_int,
+) -> c_int {
+    i32::from(crate::articledlwriterstat::aws_xml_reader_is_parse_success(
+        sax_result,
+        entity_declared != 0,
+    ))
+}
+
 
 
 

@@ -168,6 +168,27 @@ void ServerVolume::AddStats(Stats stats)
 	if (m_hourSlot >= 0 && static_cast<size_t>(m_hourSlot) < m_bytesPerHours.size())
 		m_bytesPerHours[m_hourSlot] += bytes;
 #endif
+#ifdef NZBGET_USE_RUST
+	size_t daySlotIdx = m_daySlot >= 0 ? static_cast<size_t>(m_daySlot) : 0;
+	int64 curDayBytes = m_daySlot >= 0 ? m_bytesPerDays[daySlotIdx] : 0;
+	int curDayFailed = m_daySlot >= 0 ? m_articlesPerDays[daySlotIdx].failed : 0;
+	int curDaySuccess = m_daySlot >= 0 ? m_articlesPerDays[daySlotIdx].success : 0;
+	int updateDay = 0;
+	int64 newDayBytes = 0, newTotalBytes = 0, newCustomBytes = 0;
+	int newDayFailed = 0, newDaySuccess = 0;
+	nzbget_rs_aws_statmeter_accum_day_and_total_volume(
+		m_daySlot, curDayBytes, curDayFailed, curDaySuccess,
+		m_totalBytes, m_customBytes, bytes, stats.articles.failed, stats.articles.success,
+		&updateDay, &newDayBytes, &newDayFailed, &newDaySuccess, &newTotalBytes, &newCustomBytes);
+	if (updateDay != 0)
+	{
+		m_bytesPerDays[daySlotIdx] = newDayBytes;
+		m_articlesPerDays[daySlotIdx].failed = newDayFailed;
+		m_articlesPerDays[daySlotIdx].success = newDaySuccess;
+	}
+	m_totalBytes = newTotalBytes;
+	m_customBytes = newCustomBytes;
+#else
 	if (m_daySlot >= 0)
 	{
 		size_t daySlot = static_cast<size_t>(m_daySlot);
@@ -177,6 +198,7 @@ void ServerVolume::AddStats(Stats stats)
 	}
 	m_totalBytes += bytes;
 	m_customBytes += bytes;
+#endif
 
 	m_dataTime = curTime;
 }
@@ -568,7 +590,12 @@ void StatMeter::AddSpeedReading(int bytes)
 void StatMeter::ResetSpeedStat()
 {
 	time_t curTime = Util::CurrentTime();
+#ifdef NZBGET_USE_RUST
+	m_speedStartTime = nzbget_rs_aws_statmeter_calc_initial_speed_start_slot(
+		(int64_t)curTime, SPEEDMETER_SLOTSIZE);
+#else
 	m_speedStartTime = (int)curTime / SPEEDMETER_SLOTSIZE;
+#endif
 	for (int i = 0; i < SPEEDMETER_SLOTS; i++)
 	{
 		m_speedBytes[i] = 0;

@@ -4412,6 +4412,57 @@ uint64_t nzbget_rs_din_nzb_reader_select_median_article_bytes(
 int nzbget_rs_din_posting_should_clear_sketch_cache(
     size_t cache_len, size_t max_entries);
 
+int nzbget_rs_aws_article_dl_should_wait_for_connection(
+    int has_conn, int is_stopped, int config_gen, int pool_gen);
+int nzbget_rs_aws_article_dl_eval_auth_rejected(
+    int connected, int has_conn, int conn_auth_rejected);
+int nzbget_rs_aws_article_dl_should_block_failed_server(
+    int connected, int has_conn, int is_stopped);
+int nzbget_rs_aws_article_dl_keep_conn_on_no_retry(
+    int status, int ad_finished, int ad_not_found);
+void nzbget_rs_aws_article_dl_eval_level_exhaustion(
+    int all_failed, int level, int max_norm_level,
+    int* out_advance_level, int* out_new_level, int* out_break_all_failed);
+int nzbget_rs_aws_article_writer_should_init_direct_write_file(
+    int direct_write, int is_dupe_fallback, int output_initialized,
+    int skip_disk_write, int file_exists);
+int nzbget_rs_aws_article_writer_should_wait_for_cache_flush(
+    int has_data, int cache_flushing, int is_critical);
+int nzbget_rs_aws_article_writer_should_memcpy_cached_segment(
+    int raw_article, int has_cached_data);
+int nzbget_rs_aws_article_writer_should_move_temp_to_result(
+    int direct_write, int has_cached_data, int skip_disk_write);
+int nzbget_rs_aws_article_writer_should_realloc_cached_segment(
+    int article_size, int article_ptr);
+int nzbget_rs_aws_article_writer_classify_setup_output_scenario(
+    int raw_article, int direct_write);
+int nzbget_rs_aws_article_writer_is_staged_dupe_commit_needed(
+    int direct_write, int dupe_fallback_round, int has_result_filename,
+    int skip_disk_write);
+int nzbget_rs_aws_article_writer_is_standard_part_append_needed(
+    int raw_article, int direct_write, int skip_disk_write);
+int nzbget_rs_aws_article_writer_should_cleanup_hardlinked_temp(
+    int final_path_empty, int is_hard_linked, int inter_dir_empty);
+int nzbget_rs_aws_article_writer_has_pending_file_writes(
+    int output_initialized, int output_filename_empty, int active_downloads,
+    int guarded_output_initialized);
+int nzbget_rs_aws_memory_monitor_classify_tier_transition_action(
+    int old_tier, int new_tier, int tier_normal, int tier_constrained,
+    int tier_critical);
+void nzbget_rs_aws_statmeter_accum_day_and_total_volume(
+    int day_slot, int64_t cur_day_bytes, int cur_day_failed,
+    int cur_day_success, int64_t cur_total_bytes, int64_t cur_custom_bytes,
+    int64_t add_bytes, int add_failed, int add_success,
+    int* out_update_day, int64_t* out_day_bytes, int* out_day_failed,
+    int* out_day_success, int64_t* out_total_bytes, int64_t* out_custom_bytes);
+int nzbget_rs_aws_statmeter_calc_initial_speed_start_slot(
+    int64_t cur_time, int slot_size);
+int nzbget_rs_aws_server_pool_is_candidate_connection_eligible(
+    int in_use, int server_active, int server_norm_level, int level,
+    int match_want_server, int is_connected, int server_blocked);
+int nzbget_rs_aws_xml_reader_is_parse_success(
+    int sax_result, int entity_declared);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

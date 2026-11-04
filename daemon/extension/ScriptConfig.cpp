@@ -26,6 +26,9 @@
 #include "Options.h"
 #include "Log.h"
 #include "ScriptConfig.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 #if defined(__APPLE__) || defined(__linux__)
 #define NZBGET_CIPHER_ATOMIC_CONFIG
 #include <sys/stat.h>
@@ -246,6 +249,22 @@ bool ScriptConfig::LoadConfigUnlocked(Options::OptEntries* optEntries)
 // Missing fields differ from present empty fields; duplicate keys are last-wins.
 std::string ScriptConfig::CipherBaseline(const Options::OptEntries& optEntries)
 {
+#ifdef NZBGET_USE_RUST
+	std::vector<const char*> names;
+	std::vector<const char*> values;
+	names.reserve(optEntries.size());
+	values.reserve(optEntries.size());
+	for (const auto& entry : optEntries)
+	{
+		if (!entry.GetName() || !entry.GetValue()) continue;
+		names.push_back(entry.GetName());
+		values.push_back(entry.GetValue());
+	}
+	NzbgetRsBuf buf = nzbget_rs_sus_build_cipher_baseline(names.data(), values.data(), names.size());
+	std::string token(buf.data ? buf.data : "", buf.len);
+	nzbget_rs_free(buf);
+	return token;
+#else
 	std::map<std::string, std::string> fields;
 	constexpr char hex[] = "0123456789abcdef";
 	for (const auto& entry : optEntries)
@@ -266,6 +285,7 @@ std::string ScriptConfig::CipherBaseline(const Options::OptEntries& optEntries)
 	std::string token = "v1\n";
 	for (const auto& [name, value] : fields) { token += name; token += '='; token += value; token += '\n'; }
 	return token;
+#endif
 }
 
 bool ScriptConfig::SaveConfig(Options::OptEntries* optEntries, const char* cipherBaseline, bool* conflict)

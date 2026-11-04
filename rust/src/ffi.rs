@@ -12107,6 +12107,677 @@ pub unsafe extern "C" fn nzbget_rs_df_extract_size_from_description(
     crate::dupefeed::extract_size_from_description(crate::diskstatepp::cstr_to_bytes(description))
 }
 
+// ============================================================================
+// StatMeter, WebProcessor, UrlCoordinator, DirectRenamer, NzbFile,
+// QueueScript, PostScript, ScanScript, ScriptConfig & ScriptController FFI
+// (`rust/src/scripturlstat.rs`)
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_eval_interval_check(
+    cur_time: i64,
+    last_check: i64,
+    last_time_offset: i64,
+    start_download: i64,
+    stand_by: c_int,
+    out_clock_delta: *mut i64,
+    out_adjust_download: *mut c_int,
+    out_adjust_time_offset: *mut c_int,
+) -> c_int {
+    let (adj_clocks, delta, adj_dl, adj_tz) = crate::scripturlstat::eval_interval_check(
+        cur_time,
+        last_check,
+        last_time_offset,
+        start_download,
+        stand_by != 0,
+    );
+    if !out_clock_delta.is_null() {
+        *out_clock_delta = delta;
+    }
+    if !out_adjust_download.is_null() {
+        *out_adjust_download = if adj_dl { 1 } else { 0 };
+    }
+    if !out_adjust_time_offset.is_null() {
+        *out_adjust_time_offset = if adj_tz { 1 } else { 0 };
+    }
+    if adj_clocks {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_calc_total_stat(
+    cur_time: i64,
+    start_server: i64,
+    start_download: i64,
+    paused_from: i64,
+    stand_by: c_int,
+    out_up_time_sec: *mut c_int,
+    out_dn_time_sec: *mut c_int,
+) {
+    let (up, dn) = crate::scripturlstat::calc_total_stat(
+        cur_time,
+        start_server,
+        start_download,
+        paused_from,
+        stand_by != 0,
+    );
+    if !out_up_time_sec.is_null() {
+        *out_up_time_sec = up;
+    }
+    if !out_dn_time_sec.is_null() {
+        *out_dn_time_sec = dn;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_calc_current_download_speed(
+    stand_by: c_int,
+    cur_time: i64,
+    speed_start_time: c_int,
+    speed_total_bytes: i64,
+) -> i64 {
+    crate::scripturlstat::calc_current_download_speed(
+        stand_by != 0,
+        cur_time,
+        speed_start_time,
+        speed_total_bytes,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_calc_momentary_download_speed(
+    cur_time: i64,
+    cur_sec_time: i64,
+    cur_sec_bytes: i64,
+) -> i64 {
+    crate::scripturlstat::calc_momentary_download_speed(cur_time, cur_sec_time, cur_sec_bytes)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_add_speed_reading(
+    bytes: c_int,
+    cur_time: i64,
+    cur_sec_time: *mut i64,
+    cur_sec_bytes: *mut i64,
+    speed_bytes: *mut i32,
+    speed_time: *mut i32,
+    speed_bytes_index: *mut c_int,
+    speed_total_bytes: *mut i64,
+    speed_start_time: *mut c_int,
+    speed_correction: *mut i64,
+    all_bytes: *mut i64,
+) {
+    if cur_sec_time.is_null()
+        || cur_sec_bytes.is_null()
+        || speed_bytes.is_null()
+        || speed_time.is_null()
+        || speed_bytes_index.is_null()
+        || speed_total_bytes.is_null()
+        || speed_start_time.is_null()
+        || speed_correction.is_null()
+        || all_bytes.is_null()
+    {
+        return;
+    }
+    let sb = &mut *(speed_bytes as *mut [i32; crate::scripturlstat::SPEEDMETER_SLOTS]);
+    let st = &mut *(speed_time as *mut [i32; crate::scripturlstat::SPEEDMETER_SLOTS]);
+    crate::scripturlstat::add_speed_reading(
+        bytes,
+        cur_time,
+        &mut *cur_sec_time,
+        &mut *cur_sec_bytes,
+        sb,
+        st,
+        &mut *speed_bytes_index,
+        &mut *speed_total_bytes,
+        &mut *speed_start_time,
+        &mut *speed_correction,
+        &mut *all_bytes,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_calc_quota_usage(
+    loc_time: i64,
+    first_day: c_int,
+    bytes_per_days: *const i64,
+    days_len: usize,
+    elapsed_slots: c_int,
+    out_month_bytes: *mut i64,
+    out_day_bytes: *mut i64,
+) {
+    let slice = if bytes_per_days.is_null() || days_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(bytes_per_days, days_len)
+    };
+    let (month_b, day_b) =
+        crate::scripturlstat::calc_quota_usage(loc_time, first_day, slice, elapsed_slots);
+    if !out_month_bytes.is_null() {
+        *out_month_bytes = month_b;
+    }
+    if !out_day_bytes.is_null() {
+        *out_day_bytes = day_b;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_eval_quota_status(
+    monthly_quota_mb: c_int,
+    daily_quota_mb: c_int,
+    month_bytes: i64,
+    day_bytes: i64,
+    was_quota_reached: c_int,
+    out_action: *mut c_int,
+) -> c_int {
+    let (reached, action) = crate::scripturlstat::eval_quota_status(
+        monthly_quota_mb,
+        daily_quota_mb,
+        month_bytes,
+        day_bytes,
+        was_quota_reached != 0,
+    );
+    if !out_action.is_null() {
+        *out_action = action;
+    }
+    if reached {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_web_classify_get_dispatch(url: *const c_char) -> c_int {
+    crate::scripturlstat::web_classify_get_dispatch(crate::diskstatepp::cstr_to_bytes(url))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_web_is_ignorable_404(base_name: *const c_char) -> c_int {
+    if crate::scripturlstat::web_is_ignorable_404(crate::diskstatepp::cstr_to_bytes(base_name)) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_web_detect_content_type(
+    filename: *const c_char,
+) -> *const c_char {
+    match crate::scripturlstat::web_detect_content_type(crate::diskstatepp::cstr_to_bytes(filename))
+    {
+        Some(ct) => ct.as_ptr() as *const c_char,
+        None => std::ptr::null(),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_select_next_url(
+    kinds: *const c_int,
+    url_statuses: *const c_int,
+    delete_statuses: *const c_int,
+    priorities: *const c_int,
+    count: usize,
+    nk_url: c_int,
+    ls_none: c_int,
+    ds_none: c_int,
+) -> c_int {
+    if count == 0
+        || kinds.is_null()
+        || url_statuses.is_null()
+        || delete_statuses.is_null()
+        || priorities.is_null()
+    {
+        return -1;
+    }
+    crate::scripturlstat::select_next_url(
+        std::slice::from_raw_parts(kinds, count),
+        std::slice::from_raw_parts(url_statuses, count),
+        std::slice::from_raw_parts(delete_statuses, count),
+        std::slice::from_raw_parts(priorities, count),
+        nk_url,
+        ls_none,
+        ds_none,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_is_hanging_url_download(
+    now: i64,
+    last_update_time: i64,
+    url_timeout: c_int,
+    status: c_int,
+    ad_running: c_int,
+) -> c_int {
+    if crate::scripturlstat::is_hanging_url_download(
+        now,
+        last_update_time,
+        url_timeout,
+        status,
+        ad_running,
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_eval_direct_rename_article(
+    article_size: c_int,
+    article_count: usize,
+    old_par_file: c_int,
+    new_par_file: c_int,
+    file_paused: c_int,
+    file_size: i64,
+    file_success_size: i64,
+    file_failed_size: i64,
+    file_missed_size: i64,
+    par_size: i64,
+    par_current_success_size: i64,
+    par_current_failed_size: i64,
+    par_failed_size: i64,
+    remaining_par_count: c_int,
+    out_delta: *mut crate::scripturlstat::RsDirectRenameParDelta,
+) {
+    if out_delta.is_null() {
+        return;
+    }
+    *out_delta = crate::scripturlstat::eval_direct_rename_article(
+        article_size,
+        article_count,
+        old_par_file != 0,
+        new_par_file != 0,
+        file_paused != 0,
+        file_size,
+        file_success_size,
+        file_failed_size,
+        file_missed_size,
+        par_size,
+        par_current_success_size,
+        par_current_failed_size,
+        par_failed_size,
+        remaining_par_count,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_select_pars_to_unpause(
+    ids: *const c_int,
+    set_ids: *const *const c_char,
+    completed: *const u8,
+    in_file_list: *const u8,
+    sizes: *const i64,
+    count: usize,
+    out_file_ids: *mut c_int,
+) -> usize {
+    if count == 0
+        || ids.is_null()
+        || set_ids.is_null()
+        || completed.is_null()
+        || in_file_list.is_null()
+        || sizes.is_null()
+        || out_file_ids.is_null()
+    {
+        return 0;
+    }
+    let mut set_id_slices: Vec<&[u8]> = Vec::with_capacity(count);
+    for i in 0..count {
+        set_id_slices.push(crate::diskstatepp::cstr_to_bytes(*set_ids.add(i)));
+    }
+    crate::scripturlstat::select_pars_to_unpause(
+        std::slice::from_raw_parts(ids, count),
+        &set_id_slices,
+        std::slice::from_raw_parts(completed, count),
+        std::slice::from_raw_parts(in_file_list, count),
+        std::slice::from_raw_parts(sizes, count),
+        std::slice::from_raw_parts_mut(out_file_ids, count),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_extract_password_from_filename(
+    filename: *const c_char,
+    out_start: *mut usize,
+    out_len: *mut usize,
+) -> c_int {
+    let bytes = crate::diskstatepp::cstr_to_bytes(filename);
+    if let Some(pw) = crate::scripturlstat::extract_password_from_filename(bytes) {
+        let start = (pw.as_ptr() as usize) - (bytes.as_ptr() as usize);
+        if !out_start.is_null() {
+            *out_start = start;
+        }
+        if !out_len.is_null() {
+            *out_len = pw.len();
+        }
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_sanitize_segment_message_id(
+    tag_content: *const c_char,
+) -> RsBuf {
+    into_buf(crate::scripturlstat::sanitize_segment_message_id(
+        crate::diskstatepp::cstr_to_bytes(tag_content),
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_calc_nzb_hashes(
+    skip_flags: *const u8,
+    article_counts: *const usize,
+    file_count: usize,
+    message_ids: *const *const c_char,
+    total_articles: usize,
+    out_full_hash: *mut u32,
+    out_filtered_hash: *mut u32,
+) {
+    let mut msg_slices: Vec<&[u8]> = Vec::with_capacity(total_articles);
+    if !message_ids.is_null() {
+        for i in 0..total_articles {
+            msg_slices.push(crate::diskstatepp::cstr_to_bytes(*message_ids.add(i)));
+        }
+    }
+    let skips = if skip_flags.is_null() || file_count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(skip_flags, file_count)
+    };
+    let counts = if article_counts.is_null() || file_count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(article_counts, file_count)
+    };
+    let (full, filt) =
+        crate::scripturlstat::calc_nzb_hashes(skips, counts, &msg_slices);
+    if !out_full_hash.is_null() {
+        *out_full_hash = full;
+    }
+    if !out_filtered_hash.is_null() {
+        *out_filtered_hash = filt;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_parse_queue_script_cmd(
+    msg_text: *const c_char,
+    event: c_int,
+    qe_nzb_downloaded: c_int,
+    out_cmd: *mut crate::scripturlstat::RsQueueScriptCmd,
+) -> c_int {
+    let cmd = crate::scripturlstat::parse_queue_script_cmd(
+        crate::diskstatepp::cstr_to_bytes(msg_text),
+        event,
+        qe_nzb_downloaded,
+    );
+    let kind = cmd.kind;
+    if !out_cmd.is_null() {
+        *out_cmd = cmd;
+    }
+    kind
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_should_skip_queue_event_interval(
+    event: c_int,
+    qe_file_downloaded: c_int,
+    event_interval: c_int,
+    cur_time: i64,
+    queue_script_time: i64,
+) -> c_int {
+    if crate::scripturlstat::should_skip_queue_event_interval(
+        event,
+        qe_file_downloaded,
+        event_interval,
+        cur_time,
+        queue_script_time,
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_is_usable_queue_script(
+    is_queue_script: c_int,
+    queue_events: *const c_char,
+    script_name: *const c_char,
+    event: c_int,
+    qe_url_completed: c_int,
+    param_names: *const *const c_char,
+    param_values: *const *const c_char,
+    param_count: usize,
+    url_extensions: *const c_char,
+) -> c_int {
+    let mut pnames: Vec<&[u8]> = Vec::with_capacity(param_count);
+    let mut pvals: Vec<&[u8]> = Vec::with_capacity(param_count);
+    if !param_names.is_null() && !param_values.is_null() {
+        for i in 0..param_count {
+            pnames.push(crate::diskstatepp::cstr_to_bytes(*param_names.add(i)));
+            pvals.push(crate::diskstatepp::cstr_to_bytes(*param_values.add(i)));
+        }
+    }
+    if crate::scripturlstat::is_usable_queue_script(
+        is_queue_script != 0,
+        crate::diskstatepp::cstr_to_bytes(queue_events),
+        crate::diskstatepp::cstr_to_bytes(script_name),
+        event,
+        qe_url_completed,
+        &pnames,
+        &pvals,
+        crate::diskstatepp::cstr_to_bytes(url_extensions),
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_should_ignore_queued_script_event(
+    has_nzb_info: c_int,
+    delete_status: c_int,
+    ds_none: c_int,
+    mark_status: c_int,
+    ks_bad: c_int,
+    event: c_int,
+    qe_nzb_deleted: c_int,
+    qe_nzb_marked: c_int,
+) -> c_int {
+    if crate::scripturlstat::should_ignore_queued_script_event(
+        has_nzb_info != 0,
+        delete_status,
+        ds_none,
+        mark_status,
+        ks_bad,
+        event,
+        qe_nzb_deleted,
+        qe_nzb_marked,
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_build_enabled_script_comma_list(
+    param_names: *const *const c_char,
+    param_values: *const *const c_char,
+    param_count: usize,
+) -> RsBuf {
+    let mut pnames: Vec<&[u8]> = Vec::with_capacity(param_count);
+    let mut pvals: Vec<&[u8]> = Vec::with_capacity(param_count);
+    if !param_names.is_null() && !param_values.is_null() {
+        for i in 0..param_count {
+            pnames.push(crate::diskstatepp::cstr_to_bytes(*param_names.add(i)));
+            pvals.push(crate::diskstatepp::cstr_to_bytes(*param_values.add(i)));
+        }
+    }
+    into_buf(crate::scripturlstat::build_enabled_script_comma_list(
+        &pnames, &pvals,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_analyse_post_script_exit_code(
+    exit_code: c_int,
+    par_status: c_int,
+    ps_skipped: c_int,
+    parcheck_enabled: c_int,
+    sr_none: c_int,
+    sr_failure: c_int,
+    sr_success: c_int,
+    out_message_action: *mut c_int,
+    out_request_par_check: *mut c_int,
+) -> c_int {
+    let (status, action, req_par) = crate::scripturlstat::analyse_post_script_exit_code(
+        exit_code,
+        par_status,
+        ps_skipped,
+        parcheck_enabled != 0,
+        sr_none,
+        sr_failure,
+        sr_success,
+    );
+    if !out_message_action.is_null() {
+        *out_message_action = action;
+    }
+    if !out_request_par_check.is_null() {
+        *out_request_par_check = if req_par { 1 } else { 0 };
+    }
+    status
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_parse_post_script_cmd(
+    msg_text: *const c_char,
+    out_cmd: *mut crate::scripturlstat::RsPostScriptCmd,
+) -> c_int {
+    let cmd = crate::scripturlstat::parse_post_script_cmd(crate::diskstatepp::cstr_to_bytes(
+        msg_text,
+    ));
+    let kind = cmd.kind;
+    if !out_cmd.is_null() {
+        *out_cmd = cmd;
+    }
+    kind
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_parse_scan_script_cmd(
+    msg_text: *const c_char,
+    out_cmd: *mut crate::scripturlstat::RsScanScriptCmd,
+) -> c_int {
+    let cmd = crate::scripturlstat::parse_scan_script_cmd(crate::diskstatepp::cstr_to_bytes(
+        msg_text,
+    ));
+    let kind = cmd.kind;
+    if !out_cmd.is_null() {
+        *out_cmd = cmd;
+    }
+    kind
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_build_cipher_baseline(
+    names: *const *const c_char,
+    values: *const *const c_char,
+    count: usize,
+) -> RsBuf {
+    let mut name_slices: Vec<&[u8]> = Vec::with_capacity(count);
+    let mut val_slices: Vec<&[u8]> = Vec::with_capacity(count);
+    if !names.is_null() && !values.is_null() {
+        for i in 0..count {
+            name_slices.push(crate::diskstatepp::cstr_to_bytes(*names.add(i)));
+            val_slices.push(crate::diskstatepp::cstr_to_bytes(*values.add(i)));
+        }
+    }
+    into_buf(crate::scripturlstat::build_cipher_baseline(
+        &name_slices,
+        &val_slices,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_is_nzbget_internal_env_var(var: *const c_char) -> c_int {
+    if crate::scripturlstat::is_nzbget_internal_env_var(crate::diskstatepp::cstr_to_bytes(var)) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_normalize_special_env_var_name(
+    varname: *const c_char,
+) -> RsBuf {
+    into_buf(crate::scripturlstat::normalize_special_env_var_name(
+        crate::diskstatepp::cstr_to_bytes(varname),
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_classify_script_output_line(
+    line: *mut c_char,
+    out_kind: *mut c_int,
+    out_offset: *mut usize,
+) -> c_int {
+    if line.is_null() {
+        return 0;
+    }
+    let bytes = crate::diskstatepp::cstr_to_bytes(line);
+    let (trimmed_len, kind, offset) = crate::scripturlstat::classify_script_output_line(bytes);
+    *line.add(trimmed_len) = 0;
+    if trimmed_len == 0 {
+        return 0;
+    }
+    if !out_kind.is_null() {
+        *out_kind = kind;
+    }
+    if !out_offset.is_null() {
+        *out_offset = offset;
+    }
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sus_check_env_size_limit(
+    env_vars: *const *const c_char,
+    count: usize,
+    ptr_size: usize,
+    limit: usize,
+    out_exceeded_total: *mut usize,
+) -> c_int {
+    if env_vars.is_null() || count == 0 || limit == 0 {
+        return 0;
+    }
+    let mut lens: Vec<usize> = Vec::with_capacity(count);
+    for i in 0..count {
+        let p = *env_vars.add(i);
+        if !p.is_null() {
+            lens.push(crate::diskstatepp::cstr_to_bytes(p).len());
+        }
+    }
+    if let Some(total) = crate::scripturlstat::check_env_size_limit(&lens, ptr_size, limit) {
+        if !out_exceeded_total.is_null() {
+            *out_exceeded_total = total;
+        }
+        1
+    } else {
+        0
+    }
+}
+
+
 
 
 

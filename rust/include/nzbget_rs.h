@@ -1968,6 +1968,142 @@ NzbgetRsBuf nzbget_rs_df_build_feed_dupe_key(
 NzbgetRsBuf nzbget_rs_df_parse_feed_subject(const char* title);
 int64_t nzbget_rs_df_extract_size_from_description(const char* description);
 
+// ============================================================================
+// StatMeter, WebProcessor, UrlCoordinator, DirectRenamer, NzbFile,
+// QueueScript, PostScript, ScanScript, ScriptConfig & ScriptController FFI
+// (`rust/src/scripturlstat.rs`)
+// ============================================================================
+
+typedef struct NzbgetRsDirectRenameParDelta {
+    int32_t apply_hash16k;
+    int32_t par_flag_changed;
+    int64_t par_size;
+    int64_t par_current_success_size;
+    int64_t par_current_failed_size;
+    int64_t par_failed_size;
+    int32_t remaining_par_count;
+    int32_t unpause_non_par;
+} NzbgetRsDirectRenameParDelta;
+
+typedef struct NzbgetRsQueueScriptCmd {
+    int32_t kind;
+    size_t key_offset;
+    size_t key_len;
+    size_t val_offset;
+    size_t val_len;
+} NzbgetRsQueueScriptCmd;
+
+typedef struct NzbgetRsPostScriptCmd {
+    int32_t kind;
+    size_t key_offset;
+    size_t key_len;
+    size_t val_offset;
+    size_t val_len;
+} NzbgetRsPostScriptCmd;
+
+typedef struct NzbgetRsScanScriptCmd {
+    int32_t kind;
+    size_t key_offset;
+    size_t key_len;
+    size_t val_offset;
+    size_t val_len;
+    int32_t int_val;
+} NzbgetRsScanScriptCmd;
+
+int nzbget_rs_sus_eval_interval_check(
+    int64_t cur_time, int64_t last_check, int64_t last_time_offset,
+    int64_t start_download, int stand_by,
+    int64_t* out_clock_delta, int* out_adjust_download, int* out_adjust_time_offset);
+void nzbget_rs_sus_calc_total_stat(
+    int64_t cur_time, int64_t start_server, int64_t start_download,
+    int64_t paused_from, int stand_by,
+    int* out_up_time_sec, int* out_dn_time_sec);
+int64_t nzbget_rs_sus_calc_current_download_speed(
+    int stand_by, int64_t cur_time, int speed_start_time, int64_t speed_total_bytes);
+int64_t nzbget_rs_sus_calc_momentary_download_speed(
+    int64_t cur_time, int64_t cur_sec_time, int64_t cur_sec_bytes);
+void nzbget_rs_sus_add_speed_reading(
+    int bytes, int64_t cur_time, int64_t* cur_sec_time, int64_t* cur_sec_bytes,
+    int32_t* speed_bytes, int32_t* speed_time, int* speed_bytes_index,
+    int64_t* speed_total_bytes, int* speed_start_time,
+    int64_t* speed_correction, int64_t* all_bytes);
+void nzbget_rs_sus_calc_quota_usage(
+    int64_t loc_time, int first_day, const int64_t* bytes_per_days, size_t days_len,
+    int elapsed_slots, int64_t* out_month_bytes, int64_t* out_day_bytes);
+int nzbget_rs_sus_eval_quota_status(
+    int monthly_quota_mb, int daily_quota_mb, int64_t month_bytes, int64_t day_bytes,
+    int was_quota_reached, int* out_action);
+
+int nzbget_rs_sus_web_classify_get_dispatch(const char* url);
+int nzbget_rs_sus_web_is_ignorable_404(const char* base_name);
+const char* nzbget_rs_sus_web_detect_content_type(const char* filename);
+
+int nzbget_rs_sus_select_next_url(
+    const int* kinds, const int* url_statuses, const int* delete_statuses,
+    const int* priorities, size_t count, int nk_url, int ls_none, int ds_none);
+int nzbget_rs_sus_is_hanging_url_download(
+    int64_t now, int64_t last_update_time, int url_timeout, int status, int ad_running);
+
+void nzbget_rs_sus_eval_direct_rename_article(
+    int article_size, size_t article_count, int old_par_file, int new_par_file,
+    int file_paused, int64_t file_size, int64_t file_success_size,
+    int64_t file_failed_size, int64_t file_missed_size,
+    int64_t par_size, int64_t par_current_success_size,
+    int64_t par_current_failed_size, int64_t par_failed_size,
+    int remaining_par_count, NzbgetRsDirectRenameParDelta* out_delta);
+size_t nzbget_rs_sus_select_pars_to_unpause(
+    const int* ids, const char* const* set_ids, const uint8_t* completed,
+    const uint8_t* in_file_list, const int64_t* sizes, size_t count,
+    int* out_file_ids);
+
+int nzbget_rs_sus_extract_password_from_filename(
+    const char* filename, size_t* out_start, size_t* out_len);
+NzbgetRsBuf nzbget_rs_sus_sanitize_segment_message_id(const char* tag_content);
+void nzbget_rs_sus_calc_nzb_hashes(
+    const uint8_t* skip_flags, const size_t* article_counts, size_t file_count,
+    const char* const* message_ids, size_t total_articles,
+    uint32_t* out_full_hash, uint32_t* out_filtered_hash);
+
+int nzbget_rs_sus_parse_queue_script_cmd(
+    const char* msg_text, int event, int qe_nzb_downloaded,
+    NzbgetRsQueueScriptCmd* out_cmd);
+int nzbget_rs_sus_should_skip_queue_event_interval(
+    int event, int qe_file_downloaded, int event_interval,
+    int64_t cur_time, int64_t queue_script_time);
+int nzbget_rs_sus_is_usable_queue_script(
+    int is_queue_script, const char* queue_events, const char* script_name,
+    int event, int qe_url_completed,
+    const char* const* param_names, const char* const* param_values,
+    size_t param_count, const char* url_extensions);
+int nzbget_rs_sus_should_ignore_queued_script_event(
+    int has_nzb_info, int delete_status, int ds_none,
+    int mark_status, int ks_bad, int event,
+    int qe_nzb_deleted, int qe_nzb_marked);
+
+NzbgetRsBuf nzbget_rs_sus_build_enabled_script_comma_list(
+    const char* const* param_names, const char* const* param_values,
+    size_t param_count);
+int nzbget_rs_sus_analyse_post_script_exit_code(
+    int exit_code, int par_status, int ps_skipped, int parcheck_enabled,
+    int sr_none, int sr_failure, int sr_success,
+    int* out_message_action, int* out_request_par_check);
+int nzbget_rs_sus_parse_post_script_cmd(
+    const char* msg_text, NzbgetRsPostScriptCmd* out_cmd);
+
+int nzbget_rs_sus_parse_scan_script_cmd(
+    const char* msg_text, NzbgetRsScanScriptCmd* out_cmd);
+
+NzbgetRsBuf nzbget_rs_sus_build_cipher_baseline(
+    const char* const* names, const char* const* values, size_t count);
+
+int nzbget_rs_sus_is_nzbget_internal_env_var(const char* var);
+NzbgetRsBuf nzbget_rs_sus_normalize_special_env_var_name(const char* varname);
+int nzbget_rs_sus_classify_script_output_line(
+    char* line, int* out_kind, size_t* out_offset);
+int nzbget_rs_sus_check_env_size_limit(
+    const char* const* env_vars, size_t count, size_t ptr_size, size_t limit,
+    size_t* out_exceeded_total);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

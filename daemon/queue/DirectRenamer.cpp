@@ -228,6 +228,54 @@ void DirectRenamer::ArticleDownloaded(DownloadQueue* downloadQueue, FileInfo* fi
 
 	NzbInfo* nzbInfo = fileInfo->GetNzbInfo();
 
+#ifdef NZBGET_USE_RUST
+	NzbgetRsDirectRenameParDelta parDelta{};
+	nzbget_rs_sus_eval_direct_rename_article(
+		articleInfo->GetSize(),
+		fileInfo->GetArticles()->size(),
+		fileInfo->GetParFile() ? 1 : 0,
+		contentAnalyzer->GetParFile() ? 1 : 0,
+		fileInfo->GetPaused() ? 1 : 0,
+		fileInfo->GetSize(),
+		fileInfo->GetSuccessSize(),
+		fileInfo->GetFailedSize(),
+		fileInfo->GetMissedSize(),
+		nzbInfo->GetParSize(),
+		nzbInfo->GetParCurrentSuccessSize(),
+		nzbInfo->GetParCurrentFailedSize(),
+		nzbInfo->GetParFailedSize(),
+		nzbInfo->GetRemainingParCount(),
+		&parDelta);
+
+	if (parDelta.apply_hash16k)
+	{
+		fileInfo->SetHash16k(contentAnalyzer->GetHash16k());
+		debug("file: %s; article-hash16k: %s", fileInfo->GetFilename(), fileInfo->GetHash16k());
+	}
+
+	fileInfo->GetNzbInfo()->PrintMessage(Message::mkDetail, "Detected %s %s", (contentAnalyzer->GetParFile() ? "par2-file" : "non-par2-file"), fileInfo->GetFilename());
+
+	if (parDelta.par_flag_changed)
+	{
+		debug("Changing par2-flag for %s", fileInfo->GetFilename());
+		fileInfo->SetParFile(contentAnalyzer->GetParFile());
+
+		nzbInfo->SetParSize(parDelta.par_size);
+		nzbInfo->SetParCurrentSuccessSize(parDelta.par_current_success_size);
+		nzbInfo->SetParCurrentFailedSize(parDelta.par_current_failed_size);
+		nzbInfo->SetParFailedSize(parDelta.par_failed_size);
+		nzbInfo->SetRemainingParCount(parDelta.remaining_par_count);
+
+		if (parDelta.unpause_non_par)
+		{
+			fileInfo->GetNzbInfo()->PrintMessage(Message::mkInfo, "Resuming non-par2-file %s", fileInfo->GetFilename());
+			fileInfo->SetPaused(false);
+		}
+
+		nzbInfo->SetChanged(true);
+		downloadQueue->SaveChanged();
+	}
+#else
 	// we don't support analyzing of files split into articles smaller than 16KB
 	if (articleInfo->GetSize() >= 16 * 1024 || fileInfo->GetArticles()->size() == 1)
 	{
@@ -260,6 +308,7 @@ void DirectRenamer::ArticleDownloaded(DownloadQueue* downloadQueue, FileInfo* fi
 		nzbInfo->SetChanged(true);
 		downloadQueue->SaveChanged();
 	}
+#endif
 
 	if (fileInfo->GetParFile())
 	{
@@ -339,6 +388,51 @@ void DirectRenamer::UnpausePars(NzbInfo* nzbInfo)
 	ParFileList parFiles;
 	CollectPars(nzbInfo, &parFiles);
 
+#ifdef NZBGET_USE_RUST
+	size_t n = parFiles.size();
+	if (n == 0)
+	{
+		return;
+	}
+	std::vector<int> ids;
+	std::vector<const char*> setIds;
+	std::vector<uint8_t> completed;
+	std::vector<uint8_t> inFileList;
+	std::vector<int64> sizes;
+	std::vector<int> outFileIds(n, 0);
+	ids.reserve(n);
+	setIds.reserve(n);
+	completed.reserve(n);
+	inFileList.reserve(n);
+	sizes.reserve(n);
+	for (ParFile& parFile : parFiles)
+	{
+		FileInfo* fileInfo = nzbInfo->GetFileList()->Find(parFile.GetId());
+		ids.push_back(parFile.GetId());
+		setIds.push_back(parFile.GetSetId());
+		completed.push_back(parFile.GetCompleted() ? 1 : 0);
+		inFileList.push_back(fileInfo ? 1 : 0);
+		sizes.push_back(fileInfo ? fileInfo->GetSize() : 0);
+	}
+	size_t selected = nzbget_rs_sus_select_pars_to_unpause(
+		ids.data(),
+		setIds.data(),
+		completed.data(),
+		inFileList.data(),
+		sizes.data(),
+		n,
+		outFileIds.data());
+	for (size_t i = 0; i < selected; i++)
+	{
+		FileInfo* fileInfo = nzbInfo->GetFileList()->Find(outFileIds[i]);
+		if (fileInfo)
+		{
+			nzbInfo->PrintMessage(Message::mkInfo, "Increasing priority for par2-file %s", fileInfo->GetFilename());
+			fileInfo->SetPaused(false);
+			fileInfo->SetExtraPriority(true);
+		}
+	}
+#else
 	std::vector<CString> parsets;
 
 	// sort by size
@@ -378,6 +472,7 @@ void DirectRenamer::UnpausePars(NzbInfo* nzbInfo)
 			}
 		}
 	}
+#endif
 }
 
 void DirectRenamer::CollectPars(NzbInfo* nzbInfo, ParFileList* parFiles)

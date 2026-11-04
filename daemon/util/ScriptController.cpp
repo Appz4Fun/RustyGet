@@ -25,6 +25,9 @@
 #include "Util.h"
 #include "FileSystem.h"
 #include "Options.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 // System global variable holding environments variables
 extern char** environ;
@@ -96,7 +99,11 @@ void EnvironmentStrings::InitFromCurrentProcess()
 		// This is to avoid the passing of env vars after program update (when NZBGet is
 		// started from a script which was started by a previous instance of NZBGet).
 		// Format: NZBXX_YYYY (XX are any two characters, YYYY are any number of any characters).
+#ifdef NZBGET_USE_RUST
+		if (!nzbget_rs_sus_is_nzbget_internal_env_var(var))
+#else
 		if (!(!strncmp(var, "NZB", 3) && strlen(var) > 5 && var[5] == '_'))
+#endif
 		{
 			Append(var);
 		}
@@ -238,6 +245,14 @@ void ScriptController::SetEnvVarSpecial(const char* prefix, const char* name, co
 	// Original name
 	SetEnvVar(varname, value);
 
+#ifdef NZBGET_USE_RUST
+	NzbgetRsBuf normBuf = nzbget_rs_sus_normalize_special_env_var_name(varname);
+	if (normBuf.data && strcmp(varname, normBuf.data))
+	{
+		SetEnvVar(normBuf.data, value);
+	}
+	nzbget_rs_free(normBuf);
+#else
 	BString<1024> normVarname = *varname;
 
 	// Replace special characters  with "_" and convert to upper case
@@ -252,6 +267,7 @@ void ScriptController::SetEnvVarSpecial(const char* prefix, const char* name, co
 	{
 		SetEnvVar(normVarname, value);
 	}
+#endif
 }
 
 #ifdef WIN32
@@ -970,6 +986,24 @@ void ScriptController::ProcessOutput(char* text)
 {
 	debug("Processing output received from script");
 
+#ifdef NZBGET_USE_RUST
+	int msgKind = 0;
+	size_t msgOffset = 0;
+	if (!nzbget_rs_sus_classify_script_output_line(text, &msgKind, &msgOffset))
+	{
+		return;
+	}
+	Message::EKind kind = Message::mkInfo;
+	switch (msgKind)
+	{
+		case 1: kind = Message::mkWarning; break;
+		case 2: kind = Message::mkError; break;
+		case 3: kind = Message::mkDetail; break;
+		case 4: kind = Message::mkDebug; break;
+		default: kind = Message::mkInfo; break;
+	}
+	PrintMessage(kind, "%s", text + msgOffset);
+#else
 	for (char* pend = text + strlen(text) - 1; pend >= text && (*pend == '\n' || *pend == '\r' || *pend == ' '); pend--) *pend = '\0';
 
 	if (text[0] == '\0')
@@ -1002,6 +1036,7 @@ void ScriptController::ProcessOutput(char* text)
 	{
 		PrintMessage(Message::mkInfo, "%s", text);
 	}
+#endif
 
 	debug("Processing output received from script - completed");
 }
@@ -1063,6 +1098,20 @@ void ScriptController::CheckEnvSize(const std::vector<char*>& envs)
 	if (ARGS_LIMIT_SIZE <= 0) return;
 
 	size_t limit = static_cast<size_t>(ARGS_LIMIT_SIZE);
+#ifdef NZBGET_USE_RUST
+	size_t exceededTotal = 0;
+	if (nzbget_rs_sus_check_env_size_limit(
+		reinterpret_cast<const char* const*>(envs.data()),
+		envs.size(),
+		sizeof(void*),
+		limit,
+		&exceededTotal))
+	{
+		PrintMessage(Message::EKind::mkWarning,
+					 "Total environment size (%zu bytes) exceeds OS limit (%zu bytes): %s",
+					 exceededTotal, limit, "This may cause process creation to fail");
+	}
+#else
 	size_t total = 0;
 	for (const char* envVar : envs)
 	{
@@ -1076,4 +1125,5 @@ void ScriptController::CheckEnvSize(const std::vector<char*>& envs)
 			break;
 		}
 	}
+#endif
 }

@@ -25,6 +25,9 @@
 #include "Util.h"
 #include "Options.h"
 #include "WorkState.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 static const int POSTPROCESS_PARCHECK = 92;
 static const int POSTPROCESS_SUCCESS = 93;
@@ -59,6 +62,24 @@ void PostScriptController::Run()
 
 	{
 		GuardedDownloadQueue guard = DownloadQueue::Guard();
+#ifdef NZBGET_USE_RUST
+		size_t pcount = m_postInfo->GetNzbInfo()->GetParameters()->size();
+		std::vector<const char*> pnames;
+		std::vector<const char*> pvals;
+		pnames.reserve(pcount);
+		pvals.reserve(pcount);
+		for (NzbParameter& parameter : m_postInfo->GetNzbInfo()->GetParameters())
+		{
+			pnames.push_back(parameter.GetName());
+			pvals.push_back(parameter.GetValue());
+		}
+		NzbgetRsBuf listBuf = nzbget_rs_sus_build_enabled_script_comma_list(pnames.data(), pvals.data(), pcount);
+		if (listBuf.data)
+		{
+			scriptCommaList.Append(listBuf.data);
+		}
+		nzbget_rs_free(listBuf);
+#else
 		for (NzbParameter& parameter : m_postInfo->GetNzbInfo()->GetParameters())
 		{
 			const char* varname = parameter.GetName();
@@ -71,6 +92,7 @@ void PostScriptController::Run()
 				scriptCommaList.Append(",");
 			}
 		}
+#endif
 		m_postInfo->GetNzbInfo()->GetScriptStatuses()->clear();
 	}
 
@@ -195,6 +217,52 @@ ScriptStatus::EStatus PostScriptController::AnalyseExitCode(int exitCode, const 
 	// The ScriptStatus is accumulated for all scripts:
 	// If any script has failed the status is "failure", etc.
 
+#ifdef NZBGET_USE_RUST
+#ifndef DISABLE_PARCHECK
+	constexpr int parcheckEnabled = 1;
+#else
+	constexpr int parcheckEnabled = 0;
+#endif
+	int msgAction = 0;
+	int reqParCheck = 0;
+	int status = nzbget_rs_sus_analyse_post_script_exit_code(
+		exitCode,
+		static_cast<int>(m_postInfo->GetNzbInfo()->GetParStatus()),
+		static_cast<int>(NzbInfo::psSkipped),
+		parcheckEnabled,
+		static_cast<int>(ScriptStatus::srNone),
+		static_cast<int>(ScriptStatus::srFailure),
+		static_cast<int>(ScriptStatus::srSuccess),
+		&msgAction,
+		&reqParCheck);
+	switch (msgAction)
+	{
+		case 1:
+			PrintMessage(Message::mkInfo, "%s successful", upInfoName);
+			break;
+		case 2:
+			PrintMessage(Message::mkError, "%s failed", upInfoName);
+			break;
+		case 3:
+			PrintMessage(Message::mkInfo, "%s skipped", upInfoName);
+			break;
+		case 4:
+			PrintMessage(Message::mkError, "%s requested par-check/repair, but the collection was already checked", upInfoName);
+			break;
+		case 5:
+			PrintMessage(Message::mkInfo, "%s requested par-check/repair", upInfoName);
+			break;
+		default:
+			PrintMessage(Message::mkError, "%s failed (terminated with unknown status)", upInfoName);
+			break;
+	}
+	if (reqParCheck)
+	{
+		m_postInfo->SetRequestParCheck(true);
+		m_postInfo->SetForceRepair(true);
+	}
+	return static_cast<ScriptStatus::EStatus>(status);
+#else
 	switch (exitCode)
 	{
 		case POSTPROCESS_SUCCESS:
@@ -230,12 +298,50 @@ ScriptStatus::EStatus PostScriptController::AnalyseExitCode(int exitCode, const 
 			PrintMessage(Message::mkError, "%s failed (terminated with unknown status)", upInfoName);
 			return ScriptStatus::srFailure;
 	}
+#endif
 }
 
 void PostScriptController::AddMessage(Message::EKind kind, const char* text)
 {
 	const char* msgText = text + m_prefixLen;
 
+#ifdef NZBGET_USE_RUST
+	NzbgetRsPostScriptCmd cmd{};
+	int cmdKind = nzbget_rs_sus_parse_post_script_cmd(msgText, &cmd);
+	if (cmdKind != 0)
+	{
+		debug("Command %s detected", msgText + 6);
+		if (cmdKind == 1)
+		{
+			GuardedDownloadQueue guard = DownloadQueue::Guard();
+			m_postInfo->GetNzbInfo()->SetFinalDir(msgText + cmd.val_offset);
+		}
+		else if (cmdKind == 2)
+		{
+			GuardedDownloadQueue guard = DownloadQueue::Guard();
+			m_postInfo->GetNzbInfo()->SetDestDir(msgText + cmd.val_offset);
+		}
+		else if (cmdKind == 3)
+		{
+			std::string param(msgText + cmd.key_offset, cmd.key_len);
+			GuardedDownloadQueue guard = DownloadQueue::Guard();
+			m_postInfo->GetNzbInfo()->GetParameters()->SetParameter(param.c_str(), msgText + cmd.val_offset);
+		}
+		else if (cmdKind == 4)
+		{
+			SetLogPrefix(nullptr);
+			PrintMessage(Message::mkWarning, "Marking %s as bad", m_postInfo->GetNzbInfo()->GetName());
+			SetLogPrefix(m_script->GetDisplayName());
+			m_postInfo->GetNzbInfo()->SetMarkStatus(NzbInfo::ksBad);
+		}
+		else
+		{
+			m_postInfo->GetNzbInfo()->PrintMessage(Message::mkError,
+				"Invalid command \"%s\" received from %s", msgText, GetInfoName());
+		}
+	}
+	else
+#else
 	if (!strncmp(msgText, "[NZB] ", 6))
 	{
 		debug("Command %s detected", msgText + 6);
@@ -279,6 +385,7 @@ void PostScriptController::AddMessage(Message::EKind kind, const char* text)
 		}
 	}
 	else
+#endif
 	{
 		m_postInfo->GetNzbInfo()->AddMessage(kind, text);
 		GuardedDownloadQueue guard = DownloadQueue::Guard();

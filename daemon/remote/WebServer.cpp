@@ -541,6 +541,83 @@ void WebProcessor::Dispatch()
 		return;
 	}
 
+#ifdef NZBGET_USE_RUST
+	int getRoute = nzbget_rs_sus_web_classify_get_dispatch(m_url);
+	if (getRoute == 0)
+	{
+		SendErrorResponse(ERR_HTTP_NOT_FOUND, true);
+		return;
+	}
+	if (getRoute == 1 || getRoute == 2)
+	{
+		if (!m_authorized)
+		{
+			SendAuthResponse();
+			return;
+		}
+
+		const auto& scriptDirs = g_Options->GetScriptDirPaths();
+		if (scriptDirs.empty())
+		{
+			SendErrorResponse(ERR_HTTP_SERVICE_UNAVAILABLE, true);
+			return;
+		}
+
+		if (getRoute == 1)
+		{
+			SendErrorResponse(ERR_HTTP_NOT_FOUND, false);
+			return;
+		}
+
+		std::string_view extUrl = m_url + 12;
+		bool found = false;
+		for (const auto& scriptDir : scriptDirs)
+		{
+			fs::path filePath = scriptDir / extUrl;
+			fs::error_code ec;
+			auto resolvedDir = fs::canonical(scriptDir, ec);
+			if (ec) continue;
+
+			auto resolvedPath = fs::canonical(filePath, ec);
+			if (ec) continue;
+
+			auto rel = resolvedPath.lexically_relative(resolvedDir);
+			if (rel.empty() || rel.native().front() == '.') continue;
+
+			CharBuffer body;
+			std::string filePathStr = fs::u8string(resolvedPath);
+			if (FileSystem::LoadFileIntoBuffer(filePathStr.c_str(), body, true))
+			{
+				const char* contentType = DetectContentType(filePathStr.c_str());
+				int len = body.Size() - 1;
+				SendBodyResponse(body, len, contentType, true);
+				found = true;
+				break;
+			}
+		}
+
+		if (!found)
+		{
+			SendErrorResponse(ERR_HTTP_NOT_FOUND, false);
+		}
+		return;
+	}
+
+	if (Util::EmptyStr(g_Options->GetWebDir()))
+	{
+		SendErrorResponse(ERR_HTTP_SERVICE_UNAVAILABLE, true);
+		return;
+	}
+
+	if (getRoute == 3)
+	{
+		SendMultiFileResponse();
+	}
+	else
+	{
+		SendSingleFileResponse();
+	}
+#else
 	// for security reasons we allow only characters "0..9 A..Z a..z . - + _ / ?" in the URLs
 	// we also don't allow ".." in the URLs
 	for (char *p = m_url; *p; p++)
@@ -626,6 +703,7 @@ void WebProcessor::Dispatch()
 	{
 		SendSingleFileResponse();
 	}
+#endif
 }
 
 void WebProcessor::SendAuthResponse()
@@ -824,9 +902,13 @@ void WebProcessor::SendSingleFileResponse()
 		// name: the full path never matched them; and the flag passed on is
 		// "print warning", so no missing file was ever warned about)
 		const char* baseName = FileSystem::BaseFileName(filename);
+#ifdef NZBGET_USE_RUST
+		bool ignorable = nzbget_rs_sus_web_is_ignorable_404(baseName) != 0;
+#else
 		bool ignorable = !strcmp(baseName, "package-info.json") ||
 			!strcmp(baseName, "favicon.ico") ||
 			!strncmp(baseName, "apple-touch-icon", 16);
+#endif
 
 		SendErrorResponse(ERR_HTTP_NOT_FOUND, !ignorable);
 		return;
@@ -878,6 +960,9 @@ void WebProcessor::SendMultiFileResponse()
 
 const char* WebProcessor::DetectContentType(const char* filename)
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_sus_web_detect_content_type(filename);
+#else
 	if (const char *ext = strrchr(filename, '.'))
 	{
 		if (!strcasecmp(ext, ".css"))
@@ -914,4 +999,5 @@ const char* WebProcessor::DetectContentType(const char* filename)
 		}
 	}
 	return nullptr;
+#endif
 }

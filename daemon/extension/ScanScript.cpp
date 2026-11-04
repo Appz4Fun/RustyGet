@@ -25,6 +25,9 @@
 #include "Options.h"
 #include "Log.h"
 #include "FileSystem.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 class ScanScriptCheck : public NzbScriptController
 {
@@ -148,6 +151,57 @@ void ScanScriptController::AddMessage(Message::EKind kind, const char* text)
 {
 	const char* msgText = text + m_prefixLen;
 
+#ifdef NZBGET_USE_RUST
+	NzbgetRsScanScriptCmd cmd{};
+	int cmdKind = nzbget_rs_sus_parse_scan_script_cmd(msgText, &cmd);
+	if (cmdKind != 0)
+	{
+		debug("Command %s detected", msgText + 6);
+		switch (cmdKind)
+		{
+			case 1:
+				m_nzbName = msgText + cmd.val_offset;
+				break;
+			case 2:
+				m_category = msgText + cmd.val_offset;
+				g_Scanner->InitPPParameters(m_category.c_str(), m_parameters, true);
+				break;
+			case 3:
+			{
+				std::string param(msgText + cmd.key_offset, cmd.key_len);
+				m_parameters->SetParameter(param.c_str(), msgText + cmd.val_offset);
+				break;
+			}
+			case 4:
+				*m_priority = cmd.int_val;
+				break;
+			case 5:
+				*m_addTop = cmd.int_val != 0;
+				break;
+			case 6:
+				*m_addPaused = cmd.int_val != 0;
+				break;
+			case 7:
+				m_dupeKey = msgText + cmd.val_offset;
+				break;
+			case 8:
+				*m_dupeScore = cmd.int_val;
+				break;
+			case 9:
+				*m_dupeMode = cmd.int_val == 1 ? dmAll : (cmd.int_val == 2 ? dmForce : dmScore);
+				break;
+			case -2:
+				error("Invalid value \"%s\" for command \"DUPEMODE\" received from %s",
+					msgText + cmd.val_offset, GetInfoName());
+				break;
+			default:
+				error("Invalid command \"%s\" received from %s", msgText, GetInfoName());
+				break;
+		}
+		return;
+	}
+	ScriptController::AddMessage(kind, text);
+#else
 	if (!strncmp(msgText, "[NZB] ", 6))
 	{
 		debug("Command %s detected", msgText + 6);
@@ -214,4 +268,5 @@ void ScanScriptController::AddMessage(Message::EKind kind, const char* text)
 	{
 		ScriptController::AddMessage(kind, text);
 	}
+#endif
 }

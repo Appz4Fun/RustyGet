@@ -236,8 +236,17 @@ void UrlCoordinator::ResetHangingDownloads()
 
 	for (UrlDownloader* urlDownloader : m_activeDownloads)
 	{
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_sus_is_hanging_url_download(
+			static_cast<int64>(tm),
+			static_cast<int64>(urlDownloader->GetLastUpdateTime()),
+			g_Options->GetUrlTimeout(),
+			static_cast<int>(urlDownloader->GetStatus()),
+			static_cast<int>(UrlDownloader::adRunning)))
+#else
 		if (tm - urlDownloader->GetLastUpdateTime() > g_Options->GetUrlTimeout() + 10 &&
 			urlDownloader->GetStatus() == UrlDownloader::adRunning)
+#endif
 		{
 			error("Cancelling hanging url download %s", urlDownloader->GetInfoName());
 			urlDownloader->Stop();
@@ -262,6 +271,41 @@ void UrlCoordinator::LogDebugInfo()
  */
 NzbInfo* UrlCoordinator::GetNextUrl(DownloadQueue* downloadQueue)
 {
+#ifdef NZBGET_USE_RUST
+	size_t n = downloadQueue->GetQueue()->size();
+	if (n == 0)
+	{
+		return nullptr;
+	}
+	std::vector<NzbInfo*> items;
+	std::vector<int> kinds;
+	std::vector<int> urlStatuses;
+	std::vector<int> deleteStatuses;
+	std::vector<int> priorities;
+	items.reserve(n);
+	kinds.reserve(n);
+	urlStatuses.reserve(n);
+	deleteStatuses.reserve(n);
+	priorities.reserve(n);
+	for (NzbInfo* nzbInfo1 : downloadQueue->GetQueue())
+	{
+		items.push_back(nzbInfo1);
+		kinds.push_back(static_cast<int>(nzbInfo1->GetKind()));
+		urlStatuses.push_back(static_cast<int>(nzbInfo1->GetUrlStatus()));
+		deleteStatuses.push_back(static_cast<int>(nzbInfo1->GetDeleteStatus()));
+		priorities.push_back(nzbInfo1->GetPriority());
+	}
+	int idx = nzbget_rs_sus_select_next_url(
+		kinds.data(),
+		urlStatuses.data(),
+		deleteStatuses.data(),
+		priorities.data(),
+		n,
+		static_cast<int>(NzbInfo::nkUrl),
+		static_cast<int>(NzbInfo::lsNone),
+		static_cast<int>(NzbInfo::dsNone));
+	return idx >= 0 && static_cast<size_t>(idx) < items.size() ? items[idx] : nullptr;
+#else
 	NzbInfo* nzbInfo = nullptr;
 
 	for (NzbInfo* nzbInfo1 : downloadQueue->GetQueue())
@@ -275,6 +319,7 @@ NzbInfo* UrlCoordinator::GetNextUrl(DownloadQueue* downloadQueue)
 	}
 
 	return nzbInfo;
+#endif
 }
 
 void UrlCoordinator::StartUrlDownload(NzbInfo* nzbInfo)

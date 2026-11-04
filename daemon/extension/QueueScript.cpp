@@ -27,6 +27,9 @@
 #include "Log.h"
 #include "Util.h"
 #include "FileSystem.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 static const char* QUEUE_EVENT_NAMES[] = {
 	"FILE_DOWNLOADED",
@@ -183,6 +186,53 @@ void QueueScriptController::AddMessage(Message::EKind kind, const char* text)
 {
 	const char* msgText = text + m_prefixLen;
 
+#ifdef NZBGET_USE_RUST
+	NzbgetRsQueueScriptCmd cmd{};
+	int cmdKind = nzbget_rs_sus_parse_queue_script_cmd(
+		msgText,
+		static_cast<int>(m_event),
+		static_cast<int>(QueueScriptCoordinator::qeNzbDownloaded),
+		&cmd);
+	if (cmdKind != 0)
+	{
+		debug("Command %s detected", msgText + 6);
+		if (cmdKind == 1)
+		{
+			std::string param(msgText + cmd.key_offset, cmd.key_len);
+			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+			NzbInfo* nzbInfo = QueueScriptCoordinator::FindNzbInfo(downloadQueue, m_id);
+			if (nzbInfo)
+			{
+				nzbInfo->GetParameters()->SetParameter(param.c_str(), msgText + cmd.val_offset);
+			}
+		}
+		else if (cmdKind == 2)
+		{
+			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+			NzbInfo* nzbInfo = QueueScriptCoordinator::FindNzbInfo(downloadQueue, m_id);
+			if (nzbInfo)
+			{
+				nzbInfo->SetFinalDir(msgText + cmd.val_offset);
+			}
+		}
+		else if (cmdKind == 3)
+		{
+			m_markBad = true;
+			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+			NzbInfo* nzbInfo = QueueScriptCoordinator::FindNzbInfo(downloadQueue, m_id);
+			if (nzbInfo)
+			{
+				nzbInfo->PrintMessage(Message::mkWarning, "Marking %s as bad", *m_nzbName);
+				nzbInfo->SetMarkStatus(NzbInfo::ksBad);
+			}
+		}
+		else
+		{
+			error("Invalid command \"%s\" received from %s", msgText, GetInfoName());
+		}
+		return;
+	}
+#else
 	if (!strncmp(msgText, "[NZB] ", 6))
 	{
 		debug("Command %s detected", msgText + 6);
@@ -232,6 +282,7 @@ void QueueScriptController::AddMessage(Message::EKind kind, const char* text)
 		}
 	}
 	else
+#endif
 	{
 		NzbInfo* nzbInfo = nullptr;
 		{
@@ -284,10 +335,19 @@ void QueueScriptCoordinator::EnqueueScript(NzbInfo* nzbInfo, EEvent event)
 
 	// respect option "EventInterval"
 	time_t curTime = Util::CurrentTime();
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_sus_should_skip_queue_event_interval(
+		static_cast<int>(event),
+		static_cast<int>(qeFileDownloaded),
+		g_Options->GetEventInterval(),
+		static_cast<int64>(curTime),
+		static_cast<int64>(nzbInfo->GetQueueScriptTime())))
+#else
 	if (event == qeFileDownloaded &&
 		(g_Options->GetEventInterval() == -1 ||
 		 (g_Options->GetEventInterval() > 0 && curTime - nzbInfo->GetQueueScriptTime() > 0 &&
 		 (int)(curTime - nzbInfo->GetQueueScriptTime()) < g_Options->GetEventInterval())))
+#endif
 	{
 		return;
 	}
@@ -332,6 +392,41 @@ void QueueScriptCoordinator::EnqueueScript(NzbInfo* nzbInfo, EEvent event)
 
 bool QueueScriptCoordinator::UsableScript(std::shared_ptr<const Extension::Script> script, NzbInfo* nzbInfo, EEvent event)
 {
+#ifdef NZBGET_USE_RUST
+	size_t pcount = nzbInfo->GetParameters()->size();
+	std::vector<const char*> pnames;
+	std::vector<const char*> pvals;
+	pnames.reserve(pcount);
+	pvals.reserve(pcount);
+	for (NzbParameter& parameter : nzbInfo->GetParameters())
+	{
+		pnames.push_back(parameter.GetName());
+		pvals.push_back(parameter.GetValue());
+	}
+	const char* postScript = nullptr;
+	if (event == qeUrlCompleted)
+	{
+		postScript = g_Options->GetExtensions();
+		if (!Util::EmptyStr(nzbInfo->GetCategory()))
+		{
+			Options::Category* categoryObj = g_Options->FindCategory(nzbInfo->GetCategory(), false);
+			if (categoryObj && !Util::EmptyStr(categoryObj->GetExtensions()))
+			{
+				postScript = categoryObj->GetExtensions();
+			}
+		}
+	}
+	return nzbget_rs_sus_is_usable_queue_script(
+		script->GetQueueScript() ? 1 : 0,
+		script->GetQueueEvents(),
+		script->GetName(),
+		static_cast<int>(event),
+		static_cast<int>(qeUrlCompleted),
+		pnames.data(),
+		pvals.data(),
+		pcount,
+		postScript) != 0;
+#else
 	if (!script->GetQueueScript())
 	{
 		return false;
@@ -388,6 +483,7 @@ bool QueueScriptCoordinator::UsableScript(std::shared_ptr<const Extension::Scrip
 	}
 
 	return false;
+#endif
 }
 
 NzbInfo* QueueScriptCoordinator::FindNzbInfo(DownloadQueue* downloadQueue, int nzbId)
@@ -430,9 +526,21 @@ void QueueScriptCoordinator::CheckQueue()
 
 		// in a case this nzb must not be processed further - delete queue script from queue
 		EEvent event = queueItem->GetEvent();
+#ifdef NZBGET_USE_RUST
+		bool ignoreEvent = nzbget_rs_sus_should_ignore_queued_script_event(
+			nzbInfo ? 1 : 0,
+			nzbInfo ? static_cast<int>(nzbInfo->GetDeleteStatus()) : 0,
+			static_cast<int>(NzbInfo::dsNone),
+			nzbInfo ? static_cast<int>(nzbInfo->GetMarkStatus()) : 0,
+			static_cast<int>(NzbInfo::ksBad),
+			static_cast<int>(event),
+			static_cast<int>(qeNzbDeleted),
+			static_cast<int>(qeNzbMarked)) != 0;
+#else
 		bool ignoreEvent = !nzbInfo ||
 			(nzbInfo->GetDeleteStatus() != NzbInfo::dsNone && event != qeNzbDeleted && event != qeNzbMarked) ||
 			(nzbInfo->GetMarkStatus() == NzbInfo::ksBad && event != qeNzbMarked);
+#endif
 
 		if (ignoreEvent)
 		{

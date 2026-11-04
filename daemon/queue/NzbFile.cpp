@@ -383,6 +383,40 @@ void NzbFile::CalcHashes()
 			return strcmp(first->GetFilename(), second->GetFilename()) > 0;
 		});
 
+#ifdef NZBGET_USE_RUST
+	size_t fileCount = sortedFiles.size();
+	std::vector<uint8_t> skipFlags;
+	std::vector<size_t> articleCounts;
+	std::vector<const char*> messageIds;
+	skipFlags.reserve(fileCount);
+	articleCounts.reserve(fileCount);
+
+	for (FileInfo* fileInfo : sortedFiles)
+	{
+		bool skip = !fileInfo->GetParFile() &&
+			Util::MatchFileExt(fileInfo->GetFilename(), g_Options->GetParIgnoreExt(), ",;");
+		skipFlags.push_back(skip ? 1 : 0);
+		articleCounts.push_back(fileInfo->GetArticles()->size());
+		for (ArticleInfo* article : fileInfo->GetArticles())
+		{
+			messageIds.push_back(article->GetMessageId());
+		}
+	}
+
+	uint32 fullContentHash = 0;
+	uint32 filteredContentHash = 0;
+	nzbget_rs_sus_calc_nzb_hashes(
+		skipFlags.data(),
+		articleCounts.data(),
+		fileCount,
+		messageIds.data(),
+		messageIds.size(),
+		&fullContentHash,
+		&filteredContentHash);
+
+	m_nzbInfo->SetFullContentHash(fullContentHash);
+	m_nzbInfo->SetFilteredContentHash(filteredContentHash);
+#else
 	uint32 fullContentHash = 0;
 	uint32 filteredContentHash = 0;
 	int useForFilteredCount = 0;
@@ -413,6 +447,7 @@ void NzbFile::CalcHashes()
 
 	m_nzbInfo->SetFullContentHash(fullContentHash);
 	m_nzbInfo->SetFilteredContentHash(filteredContentHash);
+#endif
 }
 
 void NzbFile::ProcessFiles()
@@ -486,6 +521,13 @@ void NzbFile::ProcessFiles()
 */
 void NzbFile::ReadPasswordFromFilename()
 {
+#ifdef NZBGET_USE_RUST
+	size_t start = 0, len = 0;
+	if (nzbget_rs_sus_extract_password_from_filename(m_fileName.c_str(), &start, &len))
+	{
+		m_password = m_fileName.substr(start, len);
+	}
+#else
 	size_t start = m_fileName.find("{{");
 	if (start == std::string::npos) return;
 	
@@ -496,6 +538,7 @@ void NzbFile::ReadPasswordFromFilename()
 
 	if (start < end)
 	    m_password = m_fileName.substr(start, end - start);
+#endif
 }
 
 bool NzbFile::Parse()
@@ -659,6 +702,11 @@ void NzbFile::Parse_EndElement(const char *name)
 		// in it would send a command of the nzb's choosing on our connection.
 		// Spaces and control characters can't be in a message-id: replaced, the
 		// article is simply not found
+#ifdef NZBGET_USE_RUST
+		NzbgetRsBuf idBuf = nzbget_rs_sus_sanitize_segment_message_id(*m_tagContent);
+		m_article->SetMessageId(idBuf.data ? idBuf.data : "");
+		nzbget_rs_free(idBuf);
+#else
 		BString<1024> id("<%s>", *m_tagContent);
 		for (char* p = id; *p; p++)
 		{
@@ -668,6 +716,7 @@ void NzbFile::Parse_EndElement(const char *name)
 			}
 		}
 		m_article->SetMessageId(id);
+#endif
 		m_article = nullptr;
 	}
 	else if (!strcmp("meta", name) && m_hasPassword)

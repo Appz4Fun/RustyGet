@@ -292,6 +292,31 @@ void StatMeter::AdjustTimeOffset()
 void StatMeter::IntervalCheck()
 {
 	time_t m_curTime = Util::CurrentTime();
+#ifdef NZBGET_USE_RUST
+	int64 clockDelta = 0;
+	int adjustDownload = 0;
+	int adjustTz = 0;
+	if (nzbget_rs_sus_eval_interval_check(
+		static_cast<int64>(m_curTime),
+		static_cast<int64>(m_lastCheck),
+		static_cast<int64>(m_lastTimeOffset),
+		static_cast<int64>(m_startDownload.load()),
+		m_standBy ? 1 : 0,
+		&clockDelta,
+		&adjustDownload,
+		&adjustTz))
+	{
+		m_startServer += static_cast<time_t>(clockDelta);
+		if (adjustDownload)
+		{
+			m_startDownload += static_cast<time_t>(clockDelta);
+		}
+	}
+	if (adjustTz)
+	{
+		AdjustTimeOffset();
+	}
+#else
 	time_t diff = m_curTime - m_lastCheck;
 	if (diff > 60 || diff < 0)
 	{
@@ -311,6 +336,7 @@ void StatMeter::IntervalCheck()
 		// check at least every 3 hours even in standby
 		AdjustTimeOffset();
 	}
+#endif
 
 	m_lastCheck = m_curTime;
 
@@ -345,6 +371,18 @@ void StatMeter::EnterLeaveStandBy(bool enter)
 void StatMeter::CalcTotalStat(int* upTimeSec, int* dnTimeSec, int64* allBytes, bool* standBy)
 {
 	time_t startServer = m_startServer.load();
+#ifdef NZBGET_USE_RUST
+	*standBy = m_standBy;
+	nzbget_rs_sus_calc_total_stat(
+		static_cast<int64>(Util::CurrentTime()),
+		static_cast<int64>(startServer),
+		static_cast<int64>(m_startDownload.load()),
+		static_cast<int64>(m_pausedFrom.load()),
+		*standBy ? 1 : 0,
+		upTimeSec,
+		dnTimeSec);
+	*allBytes = m_allBytes;
+#else
 	if (startServer > 0)
 	{
 		*upTimeSec = static_cast<int>(Util::CurrentTime() - startServer);
@@ -363,11 +401,23 @@ void StatMeter::CalcTotalStat(int* upTimeSec, int* dnTimeSec, int64* allBytes, b
 		*dnTimeSec = static_cast<int>(Util::CurrentTime() - m_startDownload);
 	}
 	*allBytes = m_allBytes;
+#endif
 }
 
 // Average speed in last 30 seconds
 int64 StatMeter::CalcCurrentDownloadSpeed()
 {
+#ifdef NZBGET_USE_RUST
+	if (m_standBy)
+	{
+		return 0;
+	}
+	return nzbget_rs_sus_calc_current_download_speed(
+		0,
+		static_cast<int64>(Util::CurrentTime()),
+		m_speedStartTime.load(),
+		m_speedTotalBytes.load());
+#else
 	if (m_standBy)
 	{
 		return 0;
@@ -380,14 +430,22 @@ int64 StatMeter::CalcCurrentDownloadSpeed()
 	}
 
 	return m_speedTotalBytes / timeDiff;
+#endif
 }
 
 // Amount of data downloaded in current second
 int64 StatMeter::CalcMomentaryDownloadSpeed()
 {
 	time_t curTime = Util::CurrentTime();
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_sus_calc_momentary_download_speed(
+		static_cast<int64>(curTime),
+		static_cast<int64>(m_curSecTime.load()),
+		m_curSecBytes.load());
+#else
 	int64 speed = curTime == m_curSecTime ? m_curSecBytes.load() : 0;
 	return speed;
+#endif
 }
 
 void StatMeter::AddSpeedReading(int bytes)
@@ -395,6 +453,48 @@ void StatMeter::AddSpeedReading(int bytes)
 	std::lock_guard<std::mutex> guard{m_speedTotalBytesMtx};
 
 	time_t curTime = Util::CurrentTime();
+#ifdef NZBGET_USE_RUST
+	int64 curSecTime = static_cast<int64>(m_curSecTime.load());
+	int64 curSecBytes = m_curSecBytes.load();
+	int32_t speedBytes[SPEEDMETER_SLOTS];
+	int32_t speedTime[SPEEDMETER_SLOTS];
+	for (int i = 0; i < SPEEDMETER_SLOTS; i++)
+	{
+		speedBytes[i] = m_speedBytes[i].load();
+		speedTime[i] = m_speedTime[i].load();
+	}
+	int speedBytesIndex = m_speedBytesIndex.load();
+	int64 speedTotalBytes = m_speedTotalBytes.load();
+	int speedStartTime = m_speedStartTime.load();
+	int64 speedCorrection = static_cast<int64>(m_speedCorrection);
+	int64 allBytes = m_allBytes.load();
+
+	nzbget_rs_sus_add_speed_reading(
+		bytes,
+		static_cast<int64>(curTime),
+		&curSecTime,
+		&curSecBytes,
+		speedBytes,
+		speedTime,
+		&speedBytesIndex,
+		&speedTotalBytes,
+		&speedStartTime,
+		&speedCorrection,
+		&allBytes);
+
+	m_curSecTime = static_cast<time_t>(curSecTime);
+	m_curSecBytes = curSecBytes;
+	for (int i = 0; i < SPEEDMETER_SLOTS; i++)
+	{
+		m_speedBytes[i] = speedBytes[i];
+		m_speedTime[i] = speedTime[i];
+	}
+	m_speedBytesIndex = speedBytesIndex;
+	m_speedTotalBytes = speedTotalBytes;
+	m_speedStartTime = speedStartTime;
+	m_speedCorrection = static_cast<time_t>(speedCorrection);
+	m_allBytes = allBytes;
+#else
 	int nowSlot = static_cast<int>(curTime) / SPEEDMETER_SLOTSIZE;
 
 	if (curTime != m_curSecTime)
@@ -445,6 +545,7 @@ void StatMeter::AddSpeedReading(int bytes)
 	m_speedBytes[m_speedBytesIndex] += bytes;
 	m_speedTotalBytes += bytes;
 	m_allBytes += bytes;
+#endif
 }
 
 void StatMeter::ResetSpeedStat()
@@ -551,6 +652,29 @@ void StatMeter::CheckQuota()
 	int64 monthBytes, dayBytes;
 	CalcQuotaUsage(monthBytes, dayBytes);
 
+#ifdef NZBGET_USE_RUST
+	int action = 0;
+	bool quotaReached = nzbget_rs_sus_eval_quota_status(
+		g_Options->GetMonthlyQuota(),
+		g_Options->GetDailyQuota(),
+		monthBytes,
+		dayBytes,
+		g_WorkState->GetQuotaReached() ? 1 : 0,
+		&action) != 0;
+	if (action == 1)
+	{
+		warn("Monthly quota reached at %s", *Util::FormatSize(monthBytes));
+	}
+	else if (action == 2)
+	{
+		warn("Daily quota reached at %s", *Util::FormatSize(dayBytes));
+	}
+	else if (action == 3)
+	{
+		info("Quota lifted");
+	}
+	g_WorkState->SetQuotaReached(quotaReached);
+#else
 	bool monthlyQuotaReached = g_Options->GetMonthlyQuota() > 0 && monthBytes >= (int64)g_Options->GetMonthlyQuota() * 1024 * 1024;
 	bool dailyQuotaReached = g_Options->GetDailyQuota() > 0 && dayBytes >= (int64)g_Options->GetDailyQuota() * 1024 * 1024;
 
@@ -568,6 +692,7 @@ void StatMeter::CheckQuota()
 	}
 
 	g_WorkState->SetQuotaReached(monthlyQuotaReached || dailyQuotaReached);
+#endif
 }
 
 void StatMeter::CalcQuotaUsage(int64& monthBytes, int64& dayBytes)
@@ -577,6 +702,18 @@ void StatMeter::CalcQuotaUsage(int64& monthBytes, int64& dayBytes)
 	ServerVolume totalVolume = m_serverVolumes[0];
 
 	time_t locTime = Util::CurrentTime() + g_WorkState->GetLocalTimeOffset();
+#ifdef NZBGET_USE_RUST
+	int elapsedSlots = CalcMonthSlots(totalVolume);
+	nzbget_rs_sus_calc_quota_usage(
+		static_cast<int64>(locTime),
+		totalVolume.GetFirstDay(),
+		totalVolume.BytesPerDays()->data(),
+		totalVolume.BytesPerDays()->size(),
+		elapsedSlots,
+		&monthBytes,
+		&dayBytes);
+	debug("month volume: %i MB", (int)(monthBytes / 1024 / 1024));
+#else
 	int daySlot = (int)(locTime / 86400) - totalVolume.GetFirstDay();
 
 	dayBytes = 0;
@@ -599,6 +736,7 @@ void StatMeter::CalcQuotaUsage(int64& monthBytes, int64& dayBytes)
 	}
 
 	debug("month volume: %i MB", (int)(monthBytes / 1024 / 1024));
+#endif
 }
 
 int StatMeter::CalcMonthSlots(const ServerVolume& volume)

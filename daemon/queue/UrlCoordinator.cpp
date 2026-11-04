@@ -226,7 +226,14 @@ void UrlCoordinator::DownloadQueueUpdate(Subject*, void* aspect)
 	debug("Notification from download queue received");
 
 	DownloadQueue::Aspect* queueAspect = (DownloadQueue::Aspect*)aspect;
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_ucf_url_coord_is_wake_action(
+		(int)queueAspect->action,
+		(int)DownloadQueue::eaUrlAdded,
+		(int)DownloadQueue::eaUrlReturned) != 0)
+#else
 	if (queueAspect->action == DownloadQueue::eaUrlAdded || queueAspect->action == DownloadQueue::eaUrlReturned)
+#endif
 	{
 		// Resume Run()
 		std::lock_guard<std::mutex> guard(m_waitMutex);
@@ -552,8 +559,13 @@ bool UrlCoordinator::DeleteQueueEntry(DownloadQueue* downloadQueue, NzbInfo* nzb
 
 	info("Deleting URL %s", nzbInfo->GetName());
 
+#ifdef NZBGET_USE_RUST
+	nzbInfo->SetDeleteStatus((NzbInfo::EDeleteStatus)nzbget_rs_ucf_url_coord_resolve_delete_status(
+		(int)nzbInfo->GetDeleteStatus(), (int)NzbInfo::dsNone, (int)NzbInfo::dsManual));
+#else
 	nzbInfo->SetDeleteStatus(nzbInfo->GetDeleteStatus() == NzbInfo::dsNone ? NzbInfo::dsManual
 																		   : nzbInfo->GetDeleteStatus());
+#endif
 	nzbInfo->SetUrlStatus(NzbInfo::lsNone);
 
 	DownloadQueue::Aspect deletedAspect = {DownloadQueue::eaUrlDeleted, downloadQueue, nzbInfo, nullptr};

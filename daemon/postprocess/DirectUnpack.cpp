@@ -199,7 +199,13 @@ void DirectUnpack::Run()
 		// <DupeArticleFallback> value "live"): while that thread is attached
 		// it must keep holding the post-processing job, so it clears the flag
 		// itself when it detaches
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_ucf_direct_unpack_should_clear_working(
+			nzbInfo->GetPostInfo() != nullptr ? 1 : 0,
+			nzbInfo->GetLiveRepairThread() != nullptr ? 1 : 0) != 0)
+#else
 		if (nzbInfo->GetPostInfo() && !nzbInfo->GetLiveRepairThread())
+#endif
 		{
 			nzbInfo->GetPostInfo()->SetWorking(false);
 		}
@@ -318,7 +324,12 @@ void DirectUnpack::CreateUnpackDir()
 
 	m_finalDirCreated = useInterDir && !FileSystem::DirectoryExists(m_finalDir);
 
+#ifdef NZBGET_USE_RUST
+	const char* destDir = nzbget_rs_ucf_direct_unpack_use_final_dir(
+		useInterDir ? 1 : 0, *m_finalDir) != 0 ? *m_finalDir : *m_destDir;
+#else
 	const char* destDir = useInterDir && !m_finalDir.Empty() ? *m_finalDir : *m_destDir;
+#endif
 
 	if (g_Options->GetUseTempUnpackDir())
 	{
@@ -424,7 +435,11 @@ bool DirectUnpack::ReadLine(char* buf, int bufSize, FILE* stream)
 	}
 
 	// skip unnecessary progress messages
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_ucf_direct_unpack_is_progress_dots_line(buf) != 0)
+#else
 	if (!strncmp(buf, "...", 3))
+#endif
 	{
 		buf[0] = '\0';
 	}
@@ -549,7 +564,13 @@ void DirectUnpack::AddMessage(Message::EKind kind, const char* text)
 void DirectUnpack::Stop(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 {
 	debug("Stopping %s", *m_infoName);
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_ucf_direct_unpack_should_set_cancelled(
+		g_PrePostProcessor != nullptr ? 1 : 0,
+		(g_PrePostProcessor && g_PrePostProcessor->IsStopped()) ? 1 : 0) != 0)
+#else
 	if (!(g_PrePostProcessor && g_PrePostProcessor->IsStopped()))
+#endif
 	{
 		m_cancelled = true;
 	}
@@ -569,7 +590,13 @@ void DirectUnpack::Stop(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 		AddExtraTime(nzbInfo);
 		// shared with a live stream-repair pass, which clears it itself (see
 		// the Run() epilogue)
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_ucf_direct_unpack_should_clear_working(
+			nzbInfo->GetPostInfo() != nullptr ? 1 : 0,
+			nzbInfo->GetLiveRepairThread() != nullptr ? 1 : 0) != 0)
+#else
 		if (nzbInfo->GetPostInfo() && !nzbInfo->GetLiveRepairThread())
+#endif
 		{
 			nzbInfo->GetPostInfo()->SetWorking(false);
 		}
@@ -578,7 +605,12 @@ void DirectUnpack::Stop(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 	bool isExecThread = std::this_thread::get_id() == m_execThreadId.load();
 	if (m_unpacking)
 	{
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_ucf_direct_unpack_should_try_break(
+			isExecThread ? 1 : 0, m_cancelled ? 1 : 0, HasActiveProcess() ? 1 : 0) != 0 && Break())
+#else
 		if (!isExecThread && !m_cancelled && HasActiveProcess() && Break())
+#endif
 		{
 			for (int i = 0; i < 50 && m_unpacking && HasActiveProcess(); ++i)
 			{
@@ -600,8 +632,13 @@ void DirectUnpack::WaitNextVolume(const char* filename)
 	{
 		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
 		NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_nzbId);
+#ifdef NZBGET_USE_RUST
+		if (nzbInfo && nzbget_rs_ucf_direct_unpack_has_dest_changed(
+			1, m_destDir, nzbInfo->GetDestDir(), m_finalDir, nzbInfo->BuildFinalDirName()) != 0)
+#else
 		if (nzbInfo && (strcmp(m_destDir, nzbInfo->GetDestDir()) ||
 			strcmp(m_finalDir, nzbInfo->BuildFinalDirName())))
+#endif
 		{
 			nzbInfo->AddMessage(Message::mkWarning, BString<1024>("Destination directory changed for %s", nzbInfo->GetName()));
 			Stop(downloadQueue, nzbInfo);
@@ -648,7 +685,12 @@ void DirectUnpack::FileDownloaded(DownloadQueue* downloadQueue, FileInfo* fileIn
 	}
 
 	Guard guard(m_volumeMutex);
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_ucf_direct_unpack_matches_waiting_file(
+		m_waitingFile, fileInfo->GetFilename()) != 0)
+#else
 	if (m_waitingFile && !strcasecmp(fileInfo->GetFilename(), m_waitingFile))
+#endif
 	{
 		m_waitingFile = nullptr;
 		m_waitingVolume = false;
@@ -663,10 +705,16 @@ void DirectUnpack::FileDownloaded(DownloadQueue* downloadQueue, FileInfo* fileIn
 
 bool DirectUnpack::CanProceed(FileInfo* fileInfo) const
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_ucf_direct_unpack_can_proceed(
+		IsArchiveFilename(fileInfo->GetFilename()) ? 1 : 0,
+		fileInfo->GetFailedArticles()) != 0;
+#else
 	if (!IsArchiveFilename(fileInfo->GetFilename())) 
 		return true;
 
 	return fileInfo->GetFailedArticles() == 0;
+#endif
 }
 
 void DirectUnpack::NzbDownloaded(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
@@ -732,6 +780,19 @@ void DirectUnpack::SetProgressLabel(NzbInfo* nzbInfo, const char* progressLabel)
 
 void DirectUnpack::AddExtraTime(NzbInfo* nzbInfo)
 {
+#ifdef NZBGET_USE_RUST
+	int newUnpackSec = 0;
+	int newPostTotalSec = 0;
+	if (m_extraStartTime && nzbget_rs_ucf_direct_unpack_calc_extra_time(
+		(int64_t)m_extraStartTime, (int64_t)Util::CurrentTime(),
+		nzbInfo->GetUnpackSec(), nzbInfo->GetPostTotalSec(),
+		&newUnpackSec, &newPostTotalSec) != 0)
+	{
+		nzbInfo->SetUnpackSec(newUnpackSec);
+		nzbInfo->SetPostTotalSec(newPostTotalSec);
+		m_extraStartTime = 0;
+	}
+#else
 	if (m_extraStartTime)
 	{
 		int extraTime = (int)(Util::CurrentTime() - m_extraStartTime);
@@ -739,6 +800,7 @@ void DirectUnpack::AddExtraTime(NzbInfo* nzbInfo)
 		nzbInfo->SetPostTotalSec(nzbInfo->GetPostTotalSec() + extraTime);
 		m_extraStartTime = 0;
 	}
+#endif
 }
 
 bool DirectUnpack::IsArchiveFilename(const char* filename)

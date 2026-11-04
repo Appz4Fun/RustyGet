@@ -171,7 +171,14 @@ void FeedCoordinator::Run()
 	while (!IsStopped())
 	{
 		// this code should not be called too often, once per second is OK
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_ucf_feed_coord_can_check_feeds(
+			g_WorkState->GetPauseDownload() ? 1 : 0,
+			m_force ? 1 : 0,
+			g_Options->GetUrlForce() ? 1 : 0) != 0)
+#else
 		if (!g_WorkState->GetPauseDownload() || m_force || g_Options->GetUrlForce())
+#endif
 		{
 			std::lock_guard<std::mutex> guard(m_downloadsMutex);
 
@@ -357,7 +364,12 @@ void FeedCoordinator::StartFeedDownload(FeedInfo* feedInfo, bool force)
 	// a preview of a configured feed must not share the file of that feed's own fetch
 	static std::atomic<int> previewNum{0};
 	BString<1024> outFilename;
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_ucf_feed_coord_use_feed_id_temp_file(
+		feedInfo->GetId(), feedInfo->GetPreview() ? 1 : 0) != 0)
+#else
 	if (feedInfo->GetId() > 0 && !feedInfo->GetPreview())
+#endif
 	{
 		outFilename.Format("%s%cfeed-%i.tmp", g_Options->GetTempDir(), PATH_SEPARATOR, feedInfo->GetId());
 	}
@@ -644,7 +656,11 @@ std::shared_ptr<FeedItemList> FeedCoordinator::PreviewFeed(int id,
 
 	std::shared_ptr<FeedItemList> feedItems;
 	bool hasCache = false;
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_ucf_feed_coord_can_use_cache(cacheTimeSec, cacheId) != 0)
+#else
 	if (cacheTimeSec > 0 && *cacheId != '\0')
+#endif
 	{
 		std::lock_guard<std::mutex> guard(m_downloadsMutex);
 		for (FeedCacheItem& feedCacheItem : m_feedCache)
@@ -668,9 +684,16 @@ std::shared_ptr<FeedItemList> FeedCoordinator::PreviewFeed(int id,
 
 			for (FeedInfo* feedInfo2 : &m_feeds)
 			{
+#ifdef NZBGET_USE_RUST
+				if (nzbget_rs_ucf_feed_coord_matches_existing_feed(
+					feedInfo2->GetUrl(), feedInfo->GetUrl(),
+					feedInfo2->GetFilter(), feedInfo->GetFilter(),
+					(int64_t)feedInfo2->GetLastUpdate()) != 0)
+#else
 				if (!strcmp(feedInfo2->GetUrl(), feedInfo->GetUrl()) &&
 					!strcmp(feedInfo2->GetFilter(), feedInfo->GetFilter()) &&
 					feedInfo2->GetLastUpdate() > 0)
+#endif
 				{
 					firstFetch = false;
 					break;
@@ -713,19 +736,33 @@ std::shared_ptr<FeedItemList> FeedCoordinator::PreviewFeed(int id,
 		std::lock_guard<std::mutex> guard(m_downloadsMutex);
 		for (FeedItemInfo& feedItemInfo : feedItems.get())
 		{
-			feedItemInfo.SetStatus(firstFetch && feedInfo->GetBacklog() ? FeedItemInfo::isBacklog : FeedItemInfo::isNew);
 			FeedHistoryInfo* feedHistoryInfo = m_feedHistory.Find(feedItemInfo.GetUrl());
+#ifdef NZBGET_USE_RUST
+			feedItemInfo.SetStatus((FeedItemInfo::EStatus)nzbget_rs_ucf_feed_coord_resolve_preview_item_status(
+				feedHistoryInfo != nullptr ? 1 : 0,
+				feedHistoryInfo ? (int)feedHistoryInfo->GetStatus() : 0,
+				firstFetch ? 1 : 0,
+				feedInfo->GetBacklog() ? 1 : 0,
+				(int)FeedItemInfo::isBacklog,
+				(int)FeedItemInfo::isNew));
+#else
+			feedItemInfo.SetStatus(firstFetch && feedInfo->GetBacklog() ? FeedItemInfo::isBacklog : FeedItemInfo::isNew);
 			if (feedHistoryInfo)
 			{
 				feedItemInfo.SetStatus((FeedItemInfo::EStatus)feedHistoryInfo->GetStatus());
 			}
+#endif
 		}
 	}
 
 	FilterFeed(feedInfo.get(), feedItems.get());
 	feedInfo.reset();
 
+#ifdef NZBGET_USE_RUST
+	if (!hasCache && nzbget_rs_ucf_feed_coord_can_use_cache(cacheTimeSec, cacheId) != 0)
+#else
 	if (cacheTimeSec > 0 && *cacheId != '\0' && !hasCache)
+#endif
 	{
 		std::lock_guard<std::mutex> guard(m_downloadsMutex);
 		m_feedCache.emplace_back(url, cacheTimeSec, cacheId, Util::CurrentTime(), feedItems);

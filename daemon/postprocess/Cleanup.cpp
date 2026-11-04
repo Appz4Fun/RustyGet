@@ -184,7 +184,11 @@ bool MoveController::MoveFiles(const fs::path& src, const fs::path& dest)
 		else 
 		{
 			std::string filename = fs::u8string(entry.path().filename());
+#ifdef NZBGET_USE_RUST
+			bool isDotFile = nzbget_rs_ucf_move_ctrl_is_dot_file(filename.c_str()) != 0;
+#else
 			bool isDotFile = !filename.empty() && filename[0] == '.';
+#endif
 
 			if (!isDotFile)
 			{
@@ -387,7 +391,13 @@ bool CleanupController::Cleanup(const char* destDir, bool *deleted)
 		}
 
 		// check file extension
+#ifdef NZBGET_USE_RUST
+		bool deleteIt = nzbget_rs_ucf_cleanup_ctrl_should_delete_entry(
+			isDir ? 1 : 0,
+			Util::MatchFileExt(filename, g_Options->GetExtCleanupDisk(), ",;") ? 1 : 0) != 0;
+#else
 		bool deleteIt = Util::MatchFileExt(filename, g_Options->GetExtCleanupDisk(), ",;") && !isDir;
+#endif
 
 		if (deleteIt)
 		{

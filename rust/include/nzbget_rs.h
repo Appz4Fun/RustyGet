@@ -3292,6 +3292,68 @@ int nzbget_rs_stq_queue_editor_eval_align_group_step(
     int selected, int has_last_nzb, uint32_t num, uint32_t last_num,
     uint32_t* out_new_last_num);
 
+/* DirectUnpack, Cleanup, UnpackController, UrlCoordinator, FeedCoordinator & RemoteServer Hot-Path FFI (`unpackcleanurlfeed.rs`) */
+int nzbget_rs_ucf_direct_unpack_should_clear_working(
+    int has_post_info, int has_live_repair_thread);
+int nzbget_rs_ucf_direct_unpack_use_final_dir(
+    int use_inter_dir, const char* final_dir);
+int nzbget_rs_ucf_direct_unpack_is_progress_dots_line(const char* buf);
+int nzbget_rs_ucf_direct_unpack_should_set_cancelled(
+    int has_prepost, int prepost_stopped);
+int nzbget_rs_ucf_direct_unpack_should_try_break(
+    int is_exec_thread, int cancelled_or_auto_terminated, int has_active_process);
+int nzbget_rs_ucf_direct_unpack_has_dest_changed(
+    int has_nzb, const char* cur_dest, const char* nzb_dest,
+    const char* cur_final, const char* nzb_final);
+int nzbget_rs_ucf_direct_unpack_matches_waiting_file(
+    const char* waiting_file, const char* downloaded_filename);
+int nzbget_rs_ucf_direct_unpack_can_proceed(
+    int is_archive, int failed_articles);
+int nzbget_rs_ucf_direct_unpack_calc_extra_time(
+    int64_t extra_start_time, int64_t cur_time,
+    int cur_unpack_sec, int cur_post_total_sec,
+    int* out_new_unpack_sec, int* out_new_post_total_sec);
+int nzbget_rs_ucf_move_ctrl_is_dot_file(const char* filename);
+int nzbget_rs_ucf_cleanup_ctrl_should_delete_entry(
+    int is_dir, int matches_ext);
+int nzbget_rs_ucf_unpack_ctrl_eval_unpack_param(const char* param_val);
+int nzbget_rs_ucf_unpack_ctrl_has_any_archive_files(
+    int has_rar, int has_7z, int has_7z_multi, int has_splitted);
+int nzbget_rs_ucf_unpack_ctrl_can_continue_password_loop(
+    int unpack_ok, int start_err, int space_err, int decrypt_err, int password_err);
+int nzbget_rs_ucf_unpack_ctrl_should_resume_before_password_try(
+    int is_stopped, int auto_terminated);
+int nzbget_rs_ucf_unpack_ctrl_eval_pass_list_tried(
+    int is_stopped, int auto_terminated);
+int nzbget_rs_ucf_unpack_ctrl_is_split_first_piece(const char* filename);
+int nzbget_rs_ucf_unpack_ctrl_calc_join_progress(
+    int64_t cur_written, int cnt, int64_t total_size, int64_t* out_new_written);
+int nzbget_rs_ucf_unpack_ctrl_is_join_size_mismatch(
+    int ok, int64_t written, int64_t total_size);
+int nzbget_rs_ucf_unpack_ctrl_is_downloaded_file_allowed(
+    int use_temp_unpack_dir, int downloaded_empty);
+int nzbget_rs_ucf_unpack_ctrl_should_move_from_temp_unpack(
+    int unpack_ok, int use_temp_unpack_dir);
+int nzbget_rs_ucf_unpack_ctrl_should_cleanup_archive_disks(
+    int unpack_ok, int move_ok, int unpack_cleanup_disk);
+int nzbget_rs_ucf_url_coord_is_wake_action(
+    int action, int ea_url_added, int ea_url_returned);
+int nzbget_rs_ucf_url_coord_resolve_delete_status(
+    int cur_delete_status, int ds_none, int ds_manual);
+int nzbget_rs_ucf_feed_coord_can_check_feeds(
+    int pause_download, int force, int url_force);
+int nzbget_rs_ucf_feed_coord_use_feed_id_temp_file(int id, int preview);
+int nzbget_rs_ucf_feed_coord_can_use_cache(
+    int cache_time_sec, const char* cache_id);
+int nzbget_rs_ucf_feed_coord_matches_existing_feed(
+    const char* url1, const char* url2, const char* filter1, const char* filter2,
+    int64_t last_update);
+int nzbget_rs_ucf_feed_coord_resolve_preview_item_status(
+    int has_history, int history_status, int first_fetch, int backlog,
+    int is_backlog, int is_new);
+int nzbget_rs_ucf_remote_server_is_accept_busy_retry(
+    int bind, int has_accepted_conn, int accept_busy, int is_stopped);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

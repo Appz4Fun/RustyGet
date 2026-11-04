@@ -20988,6 +20988,482 @@ pub unsafe extern "C" fn nzbget_rs_stq_queue_editor_eval_align_group_step(
     i32::from(mv)
 }
 
+// ============================================================================
+// DirectUnpack, Cleanup, UnpackController, UrlCoordinator, FeedCoordinator & RemoteServer Hot-Path FFI (`unpackcleanurlfeed.rs`)
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ucf_direct_unpack_should_clear_working(
+    has_post_info: c_int,
+    has_live_repair_thread: c_int,
+) -> c_int {
+    i32::from(
+        crate::unpackcleanurlfeed::direct_unpack_should_clear_working(
+            has_post_info != 0,
+            has_live_repair_thread != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ucf_direct_unpack_use_final_dir(
+    use_inter_dir: c_int,
+    final_dir: *const c_char,
+) -> c_int {
+    let bytes = if final_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(final_dir).to_bytes()
+    };
+    i32::from(crate::unpackcleanurlfeed::direct_unpack_use_final_dir(
+        use_inter_dir != 0,
+        bytes,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ucf_direct_unpack_is_progress_dots_line(
+    buf: *const c_char,
+) -> c_int {
+    let bytes = if buf.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(buf).to_bytes()
+    };
+    i32::from(crate::unpackcleanurlfeed::direct_unpack_is_progress_dots_line(bytes))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ucf_direct_unpack_should_set_cancelled(
+    has_prepost: c_int,
+    prepost_stopped: c_int,
+) -> c_int {
+    i32::from(
+        crate::unpackcleanurlfeed::direct_unpack_should_set_cancelled(
+            has_prepost != 0,
+            prepost_stopped != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ucf_direct_unpack_should_try_break(
+    is_exec_thread: c_int,
+    cancelled_or_auto_terminated: c_int,
+    has_active_process: c_int,
+) -> c_int {
+    i32::from(crate::unpackcleanurlfeed::direct_unpack_should_try_break(
+        is_exec_thread != 0,
+        cancelled_or_auto_terminated != 0,
+        has_active_process != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ucf_direct_unpack_has_dest_changed(
+    has_nzb: c_int,
+    cur_dest: *const c_char,
+    nzb_dest: *const c_char,
+    cur_final: *const c_char,
+    nzb_final: *const c_char,
+) -> c_int {
+    let cd = if cur_dest.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(cur_dest).to_bytes()
+    };
+    let nd = if nzb_dest.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(nzb_dest).to_bytes()
+    };
+    let cf = if cur_final.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(cur_final).to_bytes()
+    };
+    let nf = if nzb_final.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(nzb_final).to_bytes()
+    };
+    i32::from(crate::unpackcleanurlfeed::direct_unpack_has_dest_changed(
+        has_nzb != 0,
+        cd,
+        nd,
+        cf,
+        nf,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ucf_direct_unpack_matches_waiting_file(
+    waiting_file: *const c_char,
+    downloaded_filename: *const c_char,
+) -> c_int {
+    let wf = if waiting_file.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(waiting_file).to_bytes())
+    };
+    let df = if downloaded_filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(downloaded_filename).to_bytes()
+    };
+    i32::from(crate::unpackcleanurlfeed::direct_unpack_matches_waiting_file(wf, df))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ucf_direct_unpack_can_proceed(
+    is_archive: c_int,
+    failed_articles: c_int,
+) -> c_int {
+    i32::from(crate::unpackcleanurlfeed::direct_unpack_can_proceed(
+        is_archive != 0,
+        failed_articles,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ucf_direct_unpack_calc_extra_time(
+    extra_start_time: i64,
+    cur_time: i64,
+    cur_unpack_sec: c_int,
+    cur_post_total_sec: c_int,
+    out_new_unpack_sec: *mut c_int,
+    out_new_post_total_sec: *mut c_int,
+) -> c_int {
+    let (applied, u, p) = crate::unpackcleanurlfeed::direct_unpack_calc_extra_time(
+        extra_start_time,
+        cur_time,
+        cur_unpack_sec,
+        cur_post_total_sec,
+    );
+    *out_new_unpack_sec = u;
+    *out_new_post_total_sec = p;
+    i32::from(applied)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ucf_move_ctrl_is_dot_file(
+    filename: *const c_char,
+) -> c_int {
+    let bytes = if filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    i32::from(crate::unpackcleanurlfeed::move_ctrl_is_dot_file(bytes))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ucf_cleanup_ctrl_should_delete_entry(
+    is_dir: c_int,
+    matches_ext: c_int,
+) -> c_int {
+    i32::from(crate::unpackcleanurlfeed::cleanup_ctrl_should_delete_entry(
+        is_dir != 0,
+        matches_ext != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ucf_unpack_ctrl_eval_unpack_param(
+    param_val: *const c_char,
+) -> c_int {
+    let pv = if param_val.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(param_val).to_bytes())
+    };
+    i32::from(crate::unpackcleanurlfeed::unpack_ctrl_eval_unpack_param(pv))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ucf_unpack_ctrl_has_any_archive_files(
+    has_rar: c_int,
+    has_7z: c_int,
+    has_7z_multi: c_int,
+    has_splitted: c_int,
+) -> c_int {
+    i32::from(
+        crate::unpackcleanurlfeed::unpack_ctrl_has_any_archive_files(
+            has_rar != 0,
+            has_7z != 0,
+            has_7z_multi != 0,
+            has_splitted != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ucf_unpack_ctrl_can_continue_password_loop(
+    unpack_ok: c_int,
+    start_err: c_int,
+    space_err: c_int,
+    decrypt_err: c_int,
+    password_err: c_int,
+) -> c_int {
+    i32::from(
+        crate::unpackcleanurlfeed::unpack_ctrl_can_continue_password_loop(
+            unpack_ok != 0,
+            start_err != 0,
+            space_err != 0,
+            decrypt_err != 0,
+            password_err != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ucf_unpack_ctrl_should_resume_before_password_try(
+    is_stopped: c_int,
+    auto_terminated: c_int,
+) -> c_int {
+    i32::from(
+        crate::unpackcleanurlfeed::unpack_ctrl_should_resume_before_password_try(
+            is_stopped != 0,
+            auto_terminated != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ucf_unpack_ctrl_eval_pass_list_tried(
+    is_stopped: c_int,
+    auto_terminated: c_int,
+) -> c_int {
+    i32::from(crate::unpackcleanurlfeed::unpack_ctrl_eval_pass_list_tried(
+        is_stopped != 0,
+        auto_terminated != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ucf_unpack_ctrl_is_split_first_piece(
+    filename: *const c_char,
+) -> c_int {
+    let bytes = if filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    i32::from(crate::unpackcleanurlfeed::unpack_ctrl_is_split_first_piece(
+        bytes,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ucf_unpack_ctrl_calc_join_progress(
+    cur_written: i64,
+    cnt: c_int,
+    total_size: i64,
+    out_new_written: *mut i64,
+) -> c_int {
+    let (w, p) = crate::unpackcleanurlfeed::unpack_ctrl_calc_join_progress(
+        cur_written,
+        cnt,
+        total_size,
+    );
+    *out_new_written = w;
+    p
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ucf_unpack_ctrl_is_join_size_mismatch(
+    ok: c_int,
+    written: i64,
+    total_size: i64,
+) -> c_int {
+    i32::from(crate::unpackcleanurlfeed::unpack_ctrl_is_join_size_mismatch(
+        ok != 0,
+        written,
+        total_size,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ucf_unpack_ctrl_is_downloaded_file_allowed(
+    use_temp_unpack_dir: c_int,
+    downloaded_empty: c_int,
+) -> c_int {
+    i32::from(
+        crate::unpackcleanurlfeed::unpack_ctrl_is_downloaded_file_allowed(
+            use_temp_unpack_dir != 0,
+            downloaded_empty != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ucf_unpack_ctrl_should_move_from_temp_unpack(
+    unpack_ok: c_int,
+    use_temp_unpack_dir: c_int,
+) -> c_int {
+    i32::from(
+        crate::unpackcleanurlfeed::unpack_ctrl_should_move_from_temp_unpack(
+            unpack_ok != 0,
+            use_temp_unpack_dir != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ucf_unpack_ctrl_should_cleanup_archive_disks(
+    unpack_ok: c_int,
+    move_ok: c_int,
+    unpack_cleanup_disk: c_int,
+) -> c_int {
+    i32::from(
+        crate::unpackcleanurlfeed::unpack_ctrl_should_cleanup_archive_disks(
+            unpack_ok != 0,
+            move_ok != 0,
+            unpack_cleanup_disk != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ucf_url_coord_is_wake_action(
+    action: c_int,
+    ea_url_added: c_int,
+    ea_url_returned: c_int,
+) -> c_int {
+    i32::from(crate::unpackcleanurlfeed::url_coord_is_wake_action(
+        action,
+        ea_url_added,
+        ea_url_returned,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ucf_url_coord_resolve_delete_status(
+    cur_delete_status: c_int,
+    ds_none: c_int,
+    ds_manual: c_int,
+) -> c_int {
+    crate::unpackcleanurlfeed::url_coord_resolve_delete_status(
+        cur_delete_status,
+        ds_none,
+        ds_manual,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ucf_feed_coord_can_check_feeds(
+    pause_download: c_int,
+    force: c_int,
+    url_force: c_int,
+) -> c_int {
+    i32::from(crate::unpackcleanurlfeed::feed_coord_can_check_feeds(
+        pause_download != 0,
+        force != 0,
+        url_force != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ucf_feed_coord_use_feed_id_temp_file(
+    id: c_int,
+    preview: c_int,
+) -> c_int {
+    i32::from(crate::unpackcleanurlfeed::feed_coord_use_feed_id_temp_file(
+        id,
+        preview != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ucf_feed_coord_can_use_cache(
+    cache_time_sec: c_int,
+    cache_id: *const c_char,
+) -> c_int {
+    let bytes = if cache_id.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(cache_id).to_bytes()
+    };
+    i32::from(crate::unpackcleanurlfeed::feed_coord_can_use_cache(
+        cache_time_sec,
+        bytes,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ucf_feed_coord_matches_existing_feed(
+    url1: *const c_char,
+    url2: *const c_char,
+    filter1: *const c_char,
+    filter2: *const c_char,
+    last_update: i64,
+) -> c_int {
+    let u1 = if url1.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(url1).to_bytes()
+    };
+    let u2 = if url2.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(url2).to_bytes()
+    };
+    let f1 = if filter1.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filter1).to_bytes()
+    };
+    let f2 = if filter2.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filter2).to_bytes()
+    };
+    i32::from(crate::unpackcleanurlfeed::feed_coord_matches_existing_feed(
+        u1,
+        u2,
+        f1,
+        f2,
+        last_update,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ucf_feed_coord_resolve_preview_item_status(
+    has_history: c_int,
+    history_status: c_int,
+    first_fetch: c_int,
+    backlog: c_int,
+    is_backlog: c_int,
+    is_new: c_int,
+) -> c_int {
+    crate::unpackcleanurlfeed::feed_coord_resolve_preview_item_status(
+        has_history != 0,
+        history_status,
+        first_fetch != 0,
+        backlog != 0,
+        is_backlog,
+        is_new,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ucf_remote_server_is_accept_busy_retry(
+    bind: c_int,
+    has_accepted_conn: c_int,
+    accept_busy: c_int,
+    is_stopped: c_int,
+) -> c_int {
+    i32::from(
+        crate::unpackcleanurlfeed::remote_server_is_accept_busy_retry(
+            bind != 0,
+            has_accepted_conn != 0,
+            accept_busy != 0,
+            is_stopped != 0,
+        ),
+    )
+}
+
+
 
 
 

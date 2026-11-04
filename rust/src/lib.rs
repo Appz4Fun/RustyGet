@@ -72,6 +72,7 @@ pub mod queuecoordinfo;
 pub mod pardupenzb;
 pub mod histscanrepair;
 pub mod streamtwinqueue;
+pub mod unpackcleanurlfeed;
 
 pub mod deadpostings;
 pub mod dupewatch;

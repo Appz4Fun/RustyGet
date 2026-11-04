@@ -29,9 +29,7 @@
 #include "Util.h"
 #include "FileSystem.h"
 #include "Deobfuscation.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 NzbFile::NzbFile(const char* fileName, const char* category) 
 	: m_fileName{ fileName ? fileName : "" }
@@ -58,7 +56,6 @@ ArticleInfo* NzbFile::AddArticle(FileInfo* fileInfo, std::unique_ptr<ArticleInfo
 	return fileInfo->GetArticles()->back().get();
 }
 
-#ifdef NZBGET_USE_RUST
 // The C library's character classes and lower case under the daemon's
 // locale, as the C++ took them (isspace, isdigit, tolower)
 static NzbgetRsCtype RsCtype()
@@ -134,142 +131,6 @@ void NzbFile::AddFileInfo(std::unique_ptr<FileInfo> fileInfo)
 	fileInfo->SetMissedArticles(totals.missedArticles);
 	m_nzbInfo->GetFileList()->Add(std::move(fileInfo));
 }
-#else
-int NzbFile::DeclaredParts(const char* subject)
-{
-	// the part count posters put at the very end of the subject: "(1/N)"
-	if (Util::EmptyStr(subject))
-	{
-		return 0;
-	}
-	const char* end = subject + strlen(subject);
-	while (end > subject && isspace((unsigned char)end[-1])) end--;
-	if (end == subject || end[-1] != ')')
-	{
-		return 0;
-	}
-	const char* p = end - 1;
-	int64 total = 0;
-	int64 scale = 1;
-	while (p > subject && isdigit((unsigned char)p[-1]) && scale <= 1000000)
-	{
-		p--;
-		total += (*p - '0') * scale;
-		scale *= 10;
-	}
-	if (scale == 1 || p == subject || p[-1] != '/')
-	{
-		return 0;
-	}
-	p--;
-	const char* digits = p;
-	while (p > subject && isdigit((unsigned char)p[-1])) p--;
-	if (p == digits || p == subject || p[-1] != '(')
-	{
-		return 0;
-	}
-	// a bound against nonsense, not a limit for real postings
-	return total <= 1000000 ? (int)total : 0;
-}
-
-int NzbFile::DeclaredTail(FileInfo* fileInfo)
-{
-	// "... yEnc (1/3709)" with segments 1..1510 only: without the tail a file
-	// the nzb lists only partly looked complete until it was downloaded. But
-	// posters pad N: whole releases list 137 parts of a declared 139-165, or
-	// 20 of 34-48, and counting that as missing would fail healthy downloads
-	// as they're added. Checked on ~4,900 real nzbs, N counts only when the
-	// nzb plainly stops short:
-	// - two or more segments listed, under two thirds of N, and at least 100
-	//   parts missing past the last one (padding is off by tens of parts, a
-	//   cut-short listing by thousands);
-	// - the last listed segment is full-size, where a file that really ends
-	//   there has a short last one (exactly the common size when the nzb
-	//   gives one size for most segments, else within 1 %);
-	// - not a par2 file: their last segments are often nearly full.
-	ArticleList* articles = fileInfo->GetArticles();
-	int listed = (int)articles->size();
-	int last = articles->back()->GetPartNumber();
-	int declared = DeclaredParts(fileInfo->GetSubject());
-	if (listed < 2 || declared - last < 100 || (int64)listed * 3 >= (int64)declared * 2)
-	{
-		return 0;
-	}
-
-	BString<1024> subject = fileInfo->GetSubject();
-	for (char* p = subject; *p; p++) *p = tolower(*p);
-	if (strstr(subject, ".par2"))
-	{
-		return 0;
-	}
-
-	std::vector<int64> sizes;
-	sizes.reserve(listed);
-	for (std::unique_ptr<ArticleInfo>& article : *articles)
-	{
-		sizes.push_back(article->GetSize());
-	}
-	std::nth_element(sizes.begin(), sizes.begin() + listed / 2, sizes.end());
-	int64 median = sizes[listed / 2];
-	int64 lastSize = articles->back()->GetSize();
-	int sameSize = (int)std::count(sizes.begin(), sizes.end(), median);
-	bool full = sameSize * 2 >= listed ? lastSize == median : lastSize * 100 >= median * 99;
-
-	return median > 0 && full ? declared : 0;
-}
-
-void NzbFile::AddFileInfo(std::unique_ptr<FileInfo> fileInfo)
-{
-	// calculate file size and delete empty articles
-
-	// part-number order; of two segments with one number the later counts
-	ArticleList* articles = fileInfo->GetArticles();
-	std::stable_sort(articles->begin(), articles->end(),
-		[](const std::unique_ptr<ArticleInfo>& a, const std::unique_ptr<ArticleInfo>& b)
-		{
-			return a->GetPartNumber() < b->GetPartNumber();
-		});
-	for (size_t i = 0; i + 1 < articles->size(); i++)
-	{
-		if ((*articles)[i]->GetPartNumber() == (*articles)[i + 1]->GetPartNumber())
-		{
-			(*articles)[i].reset();
-		}
-	}
-	articles->erase(std::remove(articles->begin(), articles->end(), nullptr), articles->end());
-
-	if (articles->empty())
-	{
-		return;
-	}
-
-	// every missing number counts with the size of the first segment present;
-	// so do the parts past the last one listed that the subject declares, when
-	// it's plain the nzb cut the file short (see DeclaredTail)
-	int totalArticles = articles->back()->GetPartNumber();
-	if (int declared = DeclaredTail(fileInfo.get()))
-	{
-		totalArticles = declared;
-		m_cutShortFiles.insert(fileInfo.get());
-	}
-	int missedArticles = totalArticles - (int)articles->size();
-	int64 oneSize = articles->front()->GetSize();
-	int64 size = 0;
-	for (std::unique_ptr<ArticleInfo>& article : *articles)
-	{
-		size += article->GetSize();
-	}
-	int64 missedSize = missedArticles * oneSize;
-	size += missedSize;
-	fileInfo->SetNzbInfo(m_nzbInfo.get());
-	fileInfo->SetSize(size);
-	fileInfo->SetRemainingSize(size - missedSize);
-	fileInfo->SetMissedSize(missedSize);
-	fileInfo->SetTotalArticles(totalArticles);
-	fileInfo->SetMissedArticles(missedArticles);
-	m_nzbInfo->GetFileList()->Add(std::move(fileInfo));
-}
-#endif
 
 void NzbFile::ParseSubject(FileInfo* fileInfo, bool TryQuotes)
 {
@@ -291,7 +152,6 @@ void NzbFile::ParseSubject(FileInfo* fileInfo, bool TryQuotes)
 	fileInfo->SetFilename(std::move(filename));
 }
 
-#ifdef NZBGET_USE_RUST
 bool NzbFile::HasDuplicateFilenames()
 {
 	// rust/src/nzbfile.rs: one pass, counting each name's and each name and
@@ -307,38 +167,6 @@ bool NzbFile::HasDuplicateFilenames()
 	}
 	return nzbget_rs_nzb_duplicate_filenames(names.data(), subjects.data(), names.size()) != 0;
 }
-#else
-bool NzbFile::HasDuplicateFilenames()
-{
-	for (FileList::iterator it = m_nzbInfo->GetFileList()->begin(); it != m_nzbInfo->GetFileList()->end(); ++it)
-	{
-		FileInfo* fileInfo1 = (*it).get();
-		int dupe = 1;
-		for (FileList::iterator it2 = it + 1; it2 != m_nzbInfo->GetFileList()->end(); ++it2)
-		{
-			FileInfo* fileInfo2 = (*it2).get();
-			if (!strcmp(fileInfo1->GetFilename(), fileInfo2->GetFilename()) &&
-				strcmp(fileInfo1->GetSubject(), fileInfo2->GetSubject()))
-			{
-				dupe++;
-			}
-		}
-
-		// If more than two files have the same parsed filename but different subjects,
-		// this means, that the parsing was not correct.
-		// in this case we take subjects as filenames to prevent
-		// false "duplicate files"-alarm.
-		// It's Ok for just two files to have the same filename, this is
-		// an often case by posting-errors to repost bad files
-		if (dupe > 2 || (dupe == 2 && m_nzbInfo->GetFileList()->size() == 2))
-		{
-			return true;
-		}
-	}
-
-	return false;
-}
-#endif
 
 /**
  * Generate filenames from subjects and check if the parsing of subject was correct
@@ -383,7 +211,6 @@ void NzbFile::CalcHashes()
 			return strcmp(first->GetFilename(), second->GetFilename()) > 0;
 		});
 
-#ifdef NZBGET_USE_RUST
 	size_t fileCount = sortedFiles.size();
 	std::vector<uint8_t> skipFlags;
 	std::vector<size_t> articleCounts;
@@ -416,38 +243,6 @@ void NzbFile::CalcHashes()
 
 	m_nzbInfo->SetFullContentHash(fullContentHash);
 	m_nzbInfo->SetFilteredContentHash(filteredContentHash);
-#else
-	uint32 fullContentHash = 0;
-	uint32 filteredContentHash = 0;
-	int useForFilteredCount = 0;
-
-	for (FileInfo* fileInfo : sortedFiles)
-	{
-		// check file extension
-		bool skip = !fileInfo->GetParFile() &&
-			Util::MatchFileExt(fileInfo->GetFilename(), g_Options->GetParIgnoreExt(), ",;");
-
-		for (ArticleInfo* article: fileInfo->GetArticles())
-		{
-			int len = strlen(article->GetMessageId());
-			fullContentHash = Util::HashBJ96(article->GetMessageId(), len, fullContentHash);
-			if (!skip)
-			{
-				filteredContentHash = Util::HashBJ96(article->GetMessageId(), len, filteredContentHash);
-				useForFilteredCount++;
-			}
-		}
-	}
-
-	// if filtered hash is based on less than a half of files - do not use filtered hash at all
-	if (useForFilteredCount < (int)sortedFiles.size() / 2)
-	{
-		filteredContentHash = 0;
-	}
-
-	m_nzbInfo->SetFullContentHash(fullContentHash);
-	m_nzbInfo->SetFilteredContentHash(filteredContentHash);
-#endif
 }
 
 void NzbFile::ProcessFiles()
@@ -458,7 +253,6 @@ void NzbFile::ProcessFiles()
 	{
 		fileInfo->MakeValidFilename();
 
-#ifdef NZBGET_USE_RUST
 		int fileCount = m_nzbInfo->GetFileCount();
 		int totalArticles = m_nzbInfo->GetTotalArticles();
 		int failedArticles = m_nzbInfo->GetFailedArticles();
@@ -494,29 +288,6 @@ void NzbFile::ProcessFiles()
 		m_nzbInfo->SetParFailedSize(parFailedSize);
 		m_nzbInfo->SetParCurrentFailedSize(parCurFailedSize);
 		m_nzbInfo->SetRemainingParCount(remParCount);
-#else
-		BString<1024> loFileName = fileInfo->GetFilename();
-		for (char* p = loFileName; *p; p++) *p = tolower(*p); // convert string to lowercase
-		bool parFile = strstr(loFileName, ".par2");
-
-		m_nzbInfo->SetFileCount(m_nzbInfo->GetFileCount() + 1);
-		m_nzbInfo->SetTotalArticles(m_nzbInfo->GetTotalArticles() + fileInfo->GetTotalArticles());
-		m_nzbInfo->SetFailedArticles(m_nzbInfo->GetFailedArticles() + fileInfo->GetMissedArticles());
-		m_nzbInfo->SetCurrentFailedArticles(m_nzbInfo->GetCurrentFailedArticles() + fileInfo->GetMissedArticles());
-		m_nzbInfo->SetSize(m_nzbInfo->GetSize() + fileInfo->GetSize());
-		m_nzbInfo->SetRemainingSize(m_nzbInfo->GetRemainingSize() + fileInfo->GetRemainingSize());
-		m_nzbInfo->SetFailedSize(m_nzbInfo->GetFailedSize() + fileInfo->GetMissedSize());
-		m_nzbInfo->SetCurrentFailedSize(m_nzbInfo->GetFailedSize());
-
-		fileInfo->SetParFile(parFile);
-		if (parFile)
-		{
-			m_nzbInfo->SetParSize(m_nzbInfo->GetParSize() + fileInfo->GetSize());
-			m_nzbInfo->SetParFailedSize(m_nzbInfo->GetParFailedSize() + fileInfo->GetMissedSize());
-			m_nzbInfo->SetParCurrentFailedSize(m_nzbInfo->GetParFailedSize());
-			m_nzbInfo->SetRemainingParCount(m_nzbInfo->GetRemainingParCount() + 1);
-		}
-#endif
 	}
 
 	m_nzbInfo->UpdateMinMaxTime();
@@ -540,12 +311,8 @@ void NzbFile::ProcessFiles()
 	m_metaName = FileSystem::SanitizePathSegment(m_metaName);
 	m_metaTitle = FileSystem::SanitizePathSegment(m_metaTitle);
 
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_dcf_nzbfile_should_fallback_meta_name_to_title(
 		m_metaName.empty() ? 1 : 0, m_metaTitle.empty() ? 1 : 0) != 0)
-#else
-	if (m_metaName.empty() && !m_metaTitle.empty())
-#endif
 	{
 		m_metaName = m_metaTitle;
 	}
@@ -564,24 +331,11 @@ void NzbFile::ProcessFiles()
 */
 void NzbFile::ReadPasswordFromFilename()
 {
-#ifdef NZBGET_USE_RUST
 	size_t start = 0, len = 0;
 	if (nzbget_rs_sus_extract_password_from_filename(m_fileName.c_str(), &start, &len))
 	{
 		m_password = m_fileName.substr(start, len);
 	}
-#else
-	size_t start = m_fileName.find("{{");
-	if (start == std::string::npos) return;
-	
-	start += 2;
-
-	size_t end = m_fileName.find("}}", start);
-	if (end == std::string::npos) return;
-
-	if (start < end)
-	    m_password = m_fileName.substr(start, end - start);
-#endif
 }
 
 bool NzbFile::Parse()
@@ -703,7 +457,6 @@ void NzbFile::Parse_StartElement(const char *name, const char **atts)
 
 		for (int i = 0; atts[i] && atts[i + 1]; i += 2)
 		{
-#ifdef NZBGET_USE_RUST
 			switch (nzbget_rs_rrd_nzbfile_classify_meta_type(atts[i], atts[i + 1]))
 			{
 				case 1: m_hasPassword = true; break;
@@ -711,15 +464,6 @@ void NzbFile::Parse_StartElement(const char *name, const char **atts)
 				case 3: m_hasName = true; break;
 				case 4: m_hasTitle = true; break;
 			}
-#else
-			if (!strcasecmp("type", atts[i]))
-			{
-				if (!strcasecmp("password", atts[i + 1])) m_hasPassword = true;
-				else if (!strcasecmp("category", atts[i + 1])) m_hasCategory = true;
-				else if (!strcasecmp("name", atts[i + 1])) m_hasName = true;
-				else if (!strcasecmp("title", atts[i + 1])) m_hasTitle = true;
-			}
-#endif
 		}
 	}
 }
@@ -755,21 +499,9 @@ void NzbFile::Parse_EndElement(const char *name)
 		// in it would send a command of the nzb's choosing on our connection.
 		// Spaces and control characters can't be in a message-id: replaced, the
 		// article is simply not found
-#ifdef NZBGET_USE_RUST
 		NzbgetRsBuf idBuf = nzbget_rs_sus_sanitize_segment_message_id(*m_tagContent);
 		m_article->SetMessageId(idBuf.data ? idBuf.data : "");
 		nzbget_rs_free(idBuf);
-#else
-		BString<1024> id("<%s>", *m_tagContent);
-		for (char* p = id; *p; p++)
-		{
-			if ((unsigned char)*p <= ' ' || *p == 0x7f)
-			{
-				*p = '_';
-			}
-		}
-		m_article->SetMessageId(id);
-#endif
 		m_article = nullptr;
 	}
 	else if (!strcmp("meta", name) && m_hasPassword)

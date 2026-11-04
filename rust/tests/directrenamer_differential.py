@@ -58,13 +58,25 @@ public:
 };
 ''' + definitions(old_parser, ("bool ParParser::SameParCollection(", "bool ParParser::ParseParFilename(")) + definitions(
     old_util, ("bool Util::EndsWith(std::string_view", "bool Util::EndsWith(const char*", "bool Util::StrCaseCmp("))
+FALLBACK_REFERENCE = "4cf19abdb8f084a384769a15cf57e56acf86f363"
 new_src = (ROOT / "daemon/queue/DirectRenamer.cpp").read_text()
-start = new_src.index("#ifdef NZBGET_USE_RUST\nstd::string DirectRenamer::BuildNewRegularName(")
-middle = new_src.index("\n#else\n", start)
-end = new_src.index("\n#endif\n", middle)
-collect = new_src[new_src.index(FUNCTIONS[3]):]
-rust_src = new_src[start:middle] + "\n" + collect
-fallback_src = new_src[middle:end] + "\n" + collect
+if "#ifdef NZBGET_USE_RUST\nstd::string DirectRenamer::BuildNewRegularName(" in new_src:
+    start = new_src.index("#ifdef NZBGET_USE_RUST\nstd::string DirectRenamer::BuildNewRegularName(")
+    middle = new_src.index("\n#else\n", start)
+    end = new_src.index("\n#endif\n", middle)
+    collect = new_src[new_src.index(FUNCTIONS[3]):]
+    rust_src = new_src[start:middle] + "\n" + collect
+    fallback_src = new_src[middle:end] + "\n" + collect
+else:
+    rust_src = new_src[new_src.index(FUNCTIONS[0]):]
+    preserved_src = subprocess.check_output(
+        ["git", "show", f"{FALLBACK_REFERENCE}:daemon/queue/DirectRenamer.cpp"], cwd=ROOT, text=True
+    )
+    start = preserved_src.index("#ifdef NZBGET_USE_RUST\nstd::string DirectRenamer::BuildNewRegularName(")
+    middle = preserved_src.index("\n#else\n", start)
+    end = preserved_src.index("\n#endif\n", middle)
+    collect = preserved_src[preserved_src.index(FUNCTIONS[3]):]
+    fallback_src = preserved_src[middle:end] + "\n" + collect
 
 STAND_IN = r'''
 class DirectRenamer

@@ -212,7 +212,13 @@ reference_label = f"{REFERENCE} blob {REFERENCE_BLOB} sha256 {reference_artifact
 old_src = reference_bytes.decode("utf-8")
 if evidence:
     (evidence / "reference.binding.json").write_text(json.dumps(reference_binding, indent=2) + "\n")
+FALLBACK_REFERENCE = "4cf19abdb8f084a384769a15cf57e56acf86f363"
 new_src = (ROOT / "daemon/queue/DirectRenamer.cpp").read_text()
+fallback_source_text = (
+    new_src
+    if "#ifdef NZBGET_RS_RENAME_ANALYZER" in new_src
+    else checked(["git", "show", f"{FALLBACK_REFERENCE}:daemon/queue/DirectRenamer.cpp"], cwd=ROOT, output_text=True)
+)
 
 
 def new_first(src):
@@ -220,8 +226,9 @@ def new_first(src):
     return extract(src)
 
 
-def new_fallback(src):
+def new_fallback(_src):
     # the class declaration is shared; the fallback's methods are the last definitions
+    src = fallback_source_text
     i = src.index("class RenameContentAnalyzer : public ArticleContentAnalyzer")
     decl = src[i:src.index("\n};", i) + 3]
     parts = [decl]

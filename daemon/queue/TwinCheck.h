@@ -119,11 +119,7 @@ public:
 	/* the twin check runs on the Rust parts (rust/src/twin.rs) */
 	static bool Available()
 	{
-#ifdef NZBGET_USE_RUST
 		return true;
-#else
-		return false;
-#endif
 	}
 
 	/* shutdown: cancels running checks and refuses new ones; WaitAll() returns when they ended */

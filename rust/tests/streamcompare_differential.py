@@ -64,7 +64,14 @@ if a.tag:
     name += '-' + a.tag
 out = ROOT / 'evidence' / name
 out.mkdir(parents=True, exist_ok=True)
+FALLBACK_REF = '4cf19abdb8f084a384769a15cf57e56acf86f363'
 source = Path(entry['file'])
+if a.fallback and 'NZBGET_USE_RUST' not in source.read_text():
+    preserved = out / 'DupeStreamRepair-fallback.cpp'
+    preserved.write_text(
+        subprocess.check_output(['git', 'show', f'{FALLBACK_REF}:daemon/queue/DupeStreamRepair.cpp'], cwd=ROOT, text=True)
+    )
+    source = preserved
 if a.mutation:
     text = source.read_text()
     # Mutation of the actual production adapter changes the returned floor.
@@ -75,7 +82,7 @@ if a.mutation:
 if a.mutation_cpp_threshold:
     text = source.read_text()
     start = text.index('int64 DupeStreamRepair::RequiredCompareFloor(')
-    stop = text.index('#else', start)
+    stop = text.index('#else', start) if '#else' in text[start:] else text.index('\n}\n', start) + 3
     active = text[start:stop]
     needle = 'achievable >= 64'
     assert active.count(needle) == 2

@@ -51,7 +51,8 @@ STATUS_START = "\t\tretry = urlDownloader->GetStatus() == WebDownloader::adRetry
 STATUS_END = "\t\tif (!retry)\n"
 old_status = old_src[old_src.index(STATUS_START):old_src.index(STATUS_END)]
 rs_start = new_src.index("\t\t// rust/src/urlcoord.rs\n\t\tint urlStatus")
-new_status = new_src[rs_start:new_src.index("#else", rs_start)]
+rs_end = new_src.index("#else", rs_start) if "#else" in new_src[rs_start:] else new_src.index(STATUS_END, rs_start)
+new_status = new_src[rs_start:rs_end]
 assert "WebUtil::Latin1ToUtf8(value)" in body(old_src, "void UrlDownloader::ProcessHeader(const char* line)")
 
 flags = (BUILD / "CMakeFiles/libnzbget.dir/flags.make").read_text()

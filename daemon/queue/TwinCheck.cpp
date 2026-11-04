@@ -34,14 +34,11 @@
 #include <sstream>
 #include <mutex>
 #include <atomic>
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 namespace
 {
 
-#ifdef NZBGET_USE_RUST
 // the result of a Rust call, copied and released
 std::string RsString(NzbgetRsBuf buf)
 {
@@ -102,7 +99,6 @@ std::vector<TwinCheck::FileSig> SigLines(const std::string& text)
 	}
 	return sigs;
 }
-#endif
 
 class TwinCheckJob;
 
@@ -171,27 +167,19 @@ bool TwinCheckJob::IndexData(std::vector<char>& data, bool& fetched)
 	const TwinCheck::NzbEntry* index = nullptr;
 	for (const TwinCheck::NzbEntry& entry : entries)
 	{
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_tpr_twin_check_job_should_replace_min_index(
 			entry.par2 ? 1 : 0,
 			index != nullptr ? 1 : 0,
 			entry.size,
 			index ? index->size : 0) != 0)
-#else
-		if (entry.par2 && (!index || entry.size < index->size))
-#endif
 		{
 			index = &entry;
 		}
 	}
-#ifdef NZBGET_USE_RUST
 	if (!nzbget_rs_tpr_twin_check_job_is_index_size_within_max(
 		index != nullptr ? 1 : 0,
 		index ? index->size : 0,
 		TwinCheck::MaxIndexSize))
-#else
-	if (!index || index->size > TwinCheck::MaxIndexSize)
-#endif
 	{
 		return false;
 	}
@@ -244,21 +232,13 @@ void TwinCheckJob::Run()
 		// asked again at a later round, a few times; a partial list is kept
 		// meanwhile, and stays when the articles don't come
 		Guard guard(g_mutex);
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_stq_twin_check_eval_index_fetch_retry(
 			fetched ? 1 : 0, known ? 1 : 0, complete ? 1 : 0,
 			++g_failedAttempts[m_nzbId], MaxAttempts) != 0)
 		{
 			return;
 		}
-#else
-		if (++g_failedAttempts[m_nzbId] < MaxAttempts)
-		{
-			return;
-		}
-#endif
 	}
-#ifdef NZBGET_USE_RUST
 	int fallbackFp = nzbget_rs_tpr_twin_check_job_fallback_fingerprint(
 		known ? 1 : 0, fetched ? 1 : 0);
 	if (fallbackFp == 1)
@@ -269,17 +249,7 @@ void TwinCheckJob::Run()
 	{
 		fingerprint = "none";
 	}
-#else
-	if (!known)
-	{
-		fingerprint = fetched ? "lost" : "none";
-	}
-#endif
-#ifdef NZBGET_USE_RUST
 	int files = known ? nzbget_rs_ccm_twin_check_parse_fingerprint_files(fingerprint.c_str()) : 0;
-#else
-	int files = known ? atoi(fingerprint.c_str() + fingerprint.rfind('-') + 1) : 0;
-#endif
 
 	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
 	NzbInfo* nzbInfo = nullptr;
@@ -361,7 +331,6 @@ void TwinCheckJob::Sample()
 	std::vector<TwinCheck::NzbEntry> dupe = dataFiles(m_nzbFilename);
 	std::string primaryId = std::to_string(m_primaryId);
 
-#ifdef NZBGET_USE_RUST
 	std::vector<size_t> pSegCounts;
 	std::vector<int64> pSegBytes;
 	pSegCounts.reserve(primary.size());
@@ -416,41 +385,6 @@ void TwinCheckJob::Sample()
 			&compared,
 			&differ);
 	}
-#else
-	std::vector<std::pair<size_t, size_t>> places;	// file, segment
-	bool sameLayout = !primary.empty() && primary.size() == dupe.size();
-	for (size_t i = 0; sameLayout && i < primary.size(); i++)
-	{
-		sameLayout = primary[i].segments.size() == dupe[i].segments.size();
-		for (size_t k = 0; sameLayout && k < primary[i].segments.size(); k++)
-		{
-			sameLayout = primary[i].segments[k].first == dupe[i].segments[k].first;
-			places.emplace_back(i, k);
-		}
-	}
-	if (!sameLayout || places.empty())
-	{
-		Store(TwinCheck::SampledParam, "none", TwinCheck::SampledOfParam, primaryId.c_str());
-		return;
-	}
-
-	int compared = 0;
-	int differ = 0;
-	for (int n = 0; n < TwinCheck::SampleCount && !IsStopped(); n++)
-	{
-		const auto& place = places[((2 * n + 1) * places.size()) / (2 * TwinCheck::SampleCount)];
-		const TwinCheck::NzbEntry& a = primary[place.first];
-		const TwinCheck::NzbEntry& b = dupe[place.first];
-		ArticleFetcher::FetchedArticle partA = m_fetcher.Fetch(a.segments[place.second].second.c_str(), a.groups);
-		ArticleFetcher::FetchedArticle partB = m_fetcher.Fetch(b.segments[place.second].second.c_str(), b.groups);
-		if (partA.Success && partB.Success)
-		{
-			compared++;
-			differ += partA.Offset != partB.Offset || partA.Data != partB.Data;
-		}
-	}
-#endif
-#ifdef NZBGET_USE_RUST
 	int verdict = nzbget_rs_cdn_twin_check_eval_sample_verdict(
 		IsStopped() ? 1 : 0, compared, differ, TwinCheck::SampleCount);
 	if (verdict == 0)
@@ -458,13 +392,6 @@ void TwinCheckJob::Sample()
 		return;	// too few arrived: asked again at a later round
 	}
 	Store(TwinCheck::SampledParam, verdict == 2 ? "alt" : "twin", TwinCheck::SampledOfParam, primaryId.c_str());
-#else
-	if (IsStopped() || (compared < TwinCheck::SampleCount / 2 && !differ))
-	{
-		return;	// too few arrived: asked again at a later round
-	}
-	Store(TwinCheck::SampledParam, differ ? "alt" : "twin", TwinCheck::SampledOfParam, primaryId.c_str());
-#endif
 }
 
 struct Item
@@ -476,7 +403,6 @@ struct Item
 
 }
 
-#ifdef NZBGET_USE_RUST
 std::vector<TwinCheck::NzbEntry> TwinCheck::ReadNzbEntries(const char* filename)
 {
 	// "F\tsize\tpar2\tfilename\tsubject", then its "G\tgroup" and "S\tbytes\tmessage-id" lines
@@ -620,241 +546,6 @@ std::string TwinCheck::Fingerprint(const std::vector<FileSig>& sigs)
 	}
 	return RsString(nzbget_rs_twin_fingerprint(md5s.data(), lengths.data(), sigs.size()));
 }
-#else
-// Without the Rust parts the twin check (labels, content matching) doesn't run,
-// but par-repair with a twin's par2 set (Repair.cpp) works as before: these
-// are the C++ helpers it had, kept for builds without cargo.
-namespace
-{
-
-uint64 ReadLe64(const uchar* p)
-{
-	uint64 value = 0;
-	for (int i = 7; i >= 0; i--)
-	{
-		value = (value << 8) | p[i];
-	}
-	return value;
-}
-
-std::string Hex(const uchar* p, int len)
-{
-	static const char* digits = "0123456789abcdef";
-	std::string hex;
-	for (int i = 0; i < len; i++)
-	{
-		hex += digits[p[i] >> 4];
-		hex += digits[p[i] & 15];
-	}
-	return hex;
-}
-
-std::string XmlText(std::string text)
-{
-	static const std::pair<const char*, const char*> entities[] =
-		{ {"&lt;", "<"}, {"&gt;", ">"}, {"&quot;", "\""}, {"&apos;", "'"}, {"&amp;", "&"} };
-	for (const auto& entity : entities)
-	{
-		for (size_t at = text.find(entity.first); at != std::string::npos; at = text.find(entity.first, at + 1))
-		{
-			text.replace(at, strlen(entity.first), entity.second);
-		}
-	}
-	return text;
-}
-
-}
-
-std::vector<TwinCheck::NzbEntry> TwinCheck::ReadNzbEntries(const char* filename)
-{
-	std::vector<NzbEntry> entries;
-	std::ifstream in(fs::u8path(filename), std::ios::binary);
-	std::string xml((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-	size_t pos = 0;
-	while ((pos = xml.find("<file", pos)) != std::string::npos)
-	{
-		size_t end = xml.find("</file>", pos);
-		if (end == std::string::npos)
-		{
-			break;
-		}
-		std::string file = xml.substr(pos, end - pos);
-		pos = end + 7;
-
-		NzbEntry entry;
-		size_t at = file.find("subject=\"");
-		if (at != std::string::npos)
-		{
-			size_t close = file.find('"', at + 9);
-			entry.subject = XmlText(file.substr(at + 9, close == std::string::npos ? 0 : close - at - 9));
-		}
-		size_t open = entry.subject.find('"');
-		size_t close = open == std::string::npos ? std::string::npos : entry.subject.find('"', open + 1);
-		if (close != std::string::npos)
-		{
-			entry.filename = entry.subject.substr(open + 1, close - open - 1);
-			// a name, not a path
-			std::replace(entry.filename.begin(), entry.filename.end(), '/', '_');
-			std::replace(entry.filename.begin(), entry.filename.end(), '\\', '_');
-		}
-		for (at = file.find("<group>"); at != std::string::npos; at = file.find("<group>", at + 1))
-		{
-			size_t groupEnd = file.find("</group>", at);
-			if (groupEnd != std::string::npos)
-			{
-				entry.groups.emplace_back(XmlText(file.substr(at + 7, groupEnd - at - 7)).c_str());
-			}
-		}
-		for (at = file.find("<segment"); at != std::string::npos; at = file.find("<segment", at + 1))
-		{
-			size_t bodyStart = file.find('>', at);
-			size_t segmentEnd = file.find("</segment>", at);
-			if (bodyStart == std::string::npos || segmentEnd == std::string::npos || bodyStart > segmentEnd)
-			{
-				continue;
-			}
-			std::string tag = file.substr(at, bodyStart - at);
-			size_t bytesAt = tag.find("bytes=\"");
-			int64 bytes = bytesAt != std::string::npos ? atoll(tag.c_str() + bytesAt + 7) : 0;
-			std::string id = XmlText(file.substr(bodyStart + 1, segmentEnd - bodyStart - 1)).substr(0, 1000);
-			// it goes into NNTP commands as is (see NzbFile): no line breaks, spaces
-			// or control characters
-			for (char& c : id)
-			{
-				if ((unsigned char)c <= ' ' || c == 0x7f)
-				{
-					c = '_';
-				}
-			}
-			entry.segments.emplace_back(bytes, "<" + id + ">");
-			entry.size += bytes;
-		}
-		if (!entry.segments.empty())
-		{
-			std::string name = entry.filename.empty() ? entry.subject : entry.filename;
-			std::transform(name.begin(), name.end(), name.begin(), ::tolower);
-			entry.par2 = name.find(".par2") != std::string::npos;
-			entries.push_back(std::move(entry));
-		}
-	}
-	return entries;
-}
-
-uint64 TwinCheck::BlockSize(const char* data, size_t size)
-{
-	const uchar* p = (const uchar*)data;
-	for (size_t pos = 0; pos + 64 + 8 <= size; pos += 4)
-	{
-		if (!memcmp(p + pos, "PAR2\0PKT", 8) && !memcmp(p + pos + 48, "PAR 2.0\0Main\0\0\0\0", 16))
-		{
-			return ReadLe64(p + pos + 64);
-		}
-	}
-	return 0;
-}
-
-int TwinCheck::VolumeBlocks(const std::string& filename)
-{
-	std::string name = filename;
-	std::transform(name.begin(), name.end(), name.begin(), ::tolower);
-	size_t at = name.rfind(".vol");
-	if (at == std::string::npos)
-	{
-		return -1;
-	}
-	size_t plus = name.find('+', at);
-	if (plus == std::string::npos || !isdigit((uchar)name[plus + 1]))
-	{
-		return -1;
-	}
-	return atoi(name.c_str() + plus + 1);
-}
-
-std::vector<TwinCheck::FileSig> TwinCheck::ParsePar2(const char* data, size_t size)
-{
-	std::map<std::string, FileSig> files;	// by file id: volumes repeat the packets
-	const uchar* p = (const uchar*)data;
-	size_t pos = 0;
-	while (pos + 64 <= size)
-	{
-		if (memcmp(p + pos, "PAR2\0PKT", 8))
-		{
-			// a lost article leaves a gap: find the next packet
-			pos += 4;
-			continue;
-		}
-		uint64 length = ReadLe64(p + pos + 8);
-		if (length < 64 || length % 4 || length > size - pos)
-		{
-			pos += 4;
-			continue;
-		}
-		if (!memcmp(p + pos + 48, "PAR 2.0\0FileDesc", 16) && length >= 64 + 56)
-		{
-			// file id, MD5 of the file, MD5 of its first 16 KB, length, name
-			const uchar* body = p + pos + 64;
-			FileSig& sig = files[Hex(body, 16)];
-			sig.md5 = Hex(body + 16, 16);
-			sig.hash16k = Hex(body + 32, 16);
-			sig.length = ReadLe64(body + 48);
-			sig.name.assign((const char*)body + 56, (size_t)(length - 64 - 56));
-			sig.name = sig.name.substr(0, sig.name.find('\0'));
-		}
-		pos += (size_t)length;
-	}
-
-	std::vector<FileSig> sigs;
-	for (auto& entry : files)
-	{
-		sigs.push_back(std::move(entry.second));
-	}
-	return sigs;
-}
-
-std::string TwinCheck::Posting(NzbInfo*) { return ""; }
-std::string TwinCheck::Identity(NzbInfo*) { return ""; }
-std::string TwinCheck::PutPar2(int, const char*, const char*, size_t, bool* complete)
-{
-	if (complete)
-	{
-		*complete = false;
-	}
-	return "";
-}
-int TwinCheck::HasSigs(int, const char*) { return 0; }
-void TwinCheck::Prune(const std::string&) {}
-std::string TwinCheck::Kind(int, const char*, int, const char*) { return ""; }
-std::string TwinCheck::MatchByContent(int, const char*, const char*, const char*, int, const char*) { return ""; }
-
-std::string TwinCheck::Fingerprint(const std::vector<FileSig>& sigs)
-{
-	// by content only: names may differ between postings
-	std::vector<std::string> files;
-	for (const FileSig& sig : sigs)
-	{
-		files.push_back(sig.md5 + ":" + std::to_string(sig.length));
-	}
-	if (files.empty())
-	{
-		return "";
-	}
-	std::sort(files.begin(), files.end());
-	files.erase(std::unique(files.begin(), files.end()), files.end());
-
-	// FNV-1a, 64 bits: kept in the queue, so it mustn't vary between builds
-	uint64 hash = 14695981039346656037ULL;
-	for (const std::string& file : files)
-	{
-		for (char c : file + "\n")
-		{
-			hash ^= (uchar)c;
-			hash *= 1099511628211ULL;
-		}
-	}
-	BString<1024> hex("%016llx-%i", (unsigned long long)hash, (int)files.size());
-	return *hex;
-}
-#endif
 
 bool TwinCheck::FetchEntry(ArticleFetcher& fetcher, const NzbEntry& entry, int64 maxSize,
 	const std::function<bool()>& stopped, std::vector<char>& data)
@@ -867,7 +558,6 @@ bool TwinCheck::FetchEntry(ArticleFetcher& fetcher, const NzbEntry& entry, int64
 			return false;
 		}
 		ArticleFetcher::FetchedArticle part = fetcher.Fetch(segment.second.c_str(), entry.groups);
-#ifdef NZBGET_USE_RUST
 		size_t newDataLen = data.size();
 		if (!nzbget_rs_stq_twin_check_is_fetched_entry_part_valid(
 			part.Success ? 1 : 0, part.Offset, part.Data.size(),
@@ -879,17 +569,6 @@ bool TwinCheck::FetchEntry(ArticleFetcher& fetcher, const NzbEntry& entry, int64
 		{
 			data.resize(newDataLen);
 		}
-#else
-		if (!part.Success || part.Offset < 0 || part.Offset + (int64)part.Data.size() > maxSize)
-		{
-			// a lost article: what the others hold may still do
-			continue;
-		}
-		if ((size_t)(part.Offset + part.Data.size()) > data.size())
-		{
-			data.resize((size_t)(part.Offset + part.Data.size()));
-		}
-#endif
 		std::copy(part.Data.begin(), part.Data.end(), data.begin() + (size_t)part.Offset);
 	}
 	return !data.empty();
@@ -919,12 +598,8 @@ void TwinCheck::ServiceWork()
 	// (not while a fingerprint job runs: it may store a list its posting doesn't
 	// carry the fingerprint of yet)
 	static time_t lastPrune = 0;
-#ifdef NZBGET_USE_RUST
 	bool prune = nzbget_rs_tpr_twin_check_should_prune_store(
 		(int64)Util::CurrentTime(), (int64)lastPrune, 60 * 60, (int)g_jobCount) != 0;
-#else
-	bool prune = Util::CurrentTime() - lastPrune >= 60 * 60 && g_jobCount == 0;
-#endif
 	{
 		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
 		if (prune)
@@ -985,7 +660,6 @@ void TwinCheck::ServiceWork()
 		auto isDupe = [](const Item& item)
 			{
 				NzbInfo* nzbInfo = item.nzbInfo;
-#ifdef NZBGET_USE_RUST
 				return nzbget_rs_ccm_twin_check_is_dupe_item(
 					item.queued ? 1 : 0,
 					nzbInfo->GetRemainingSize(),
@@ -993,11 +667,6 @@ void TwinCheck::ServiceWork()
 					(int)nzbInfo->GetDeleteStatus(),
 					(int)NzbInfo::dsDupe,
 					(int)NzbInfo::dsCopy) != 0;
-#else
-				return item.queued ?
-					nzbInfo->GetRemainingSize() > 0 && nzbInfo->GetPausedSize() >= nzbInfo->GetRemainingSize() :
-					nzbInfo->GetDeleteStatus() == NzbInfo::dsDupe || nzbInfo->GetDeleteStatus() == NzbInfo::dsCopy;
-#endif
 			};
 		auto fingerprintOf = [](NzbInfo* nzbInfo)
 			{
@@ -1031,27 +700,17 @@ void TwinCheck::ServiceWork()
 				// and so do those whose file list isn't stored (a fingerprint from
 				// before the lists were kept, or the store file lost)
 				std::string print = fingerprintOf(nzbInfo);
-#ifdef NZBGET_USE_RUST
 				bool listless = nzbget_rs_stq_twin_check_is_print_usable(print.c_str()) != 0 &&
 					nzbget_rs_stq_twin_check_is_listless_from_counts(
 						HasSigs(nzbInfo->GetId(), Identity(nzbInfo).c_str()),
 						Attempts(nzbInfo->GetId()), MaxAttempts) != 0;
-#else
-				bool listless = print != "none" && print != "lost" && !print.empty() &&
-					HasSigs(nzbInfo->GetId(), Identity(nzbInfo).c_str()) < 2 && Attempts(nzbInfo->GetId()) < MaxAttempts;
-#endif
 				if ((print.empty() || listless) && !strchr(nzbInfo->GetQueuedFilename(), '|') &&
 					FileSystem::FileExists(nzbInfo->GetQueuedFilename()))
 				{
 					// the dupe tool's hints of a twin go first; they prove nothing
-#ifdef NZBGET_USE_RUST
 					bool hinted = nzbget_rs_tpr_twin_check_is_job_hinted(
 						nzbInfo->GetParameters()->Find("DupeSameSize") != nullptr ? 1 : 0,
 						nzbInfo->GetParameters()->Find("DupeSameInner") != nullptr ? 1 : 0) != 0;
-#else
-					bool hinted = nzbInfo->GetParameters()->Find("DupeSameSize") ||
-						nzbInfo->GetParameters()->Find("DupeSameInner");
-#endif
 					Job job{nzbInfo->GetId(), nzbInfo->GetQueuedFilename(), hinted};
 					job.posting = Posting(nzbInfo);
 					jobs.push_back(std::move(job));
@@ -1062,7 +721,6 @@ void TwinCheck::ServiceWork()
 			// ones not held back as duplicates), else the newest one in history
 			// that wasn't deleted as a duplicate, else the queued one to run first
 			NzbInfo* primary = nullptr;
-#ifdef NZBGET_USE_RUST
 			{
 				std::vector<uint8_t> itemQueued;
 				std::vector<uint8_t> itemIsDupe;
@@ -1083,34 +741,6 @@ void TwinCheck::ServiceWork()
 					primary = items[(size_t)primaryIdx].nzbInfo;
 				}
 			}
-#else
-			for (Item& item : items)
-			{
-				if (item.queued && !isDupe(item) && (!primary || item.nzbInfo->GetDupeScore() > primary->GetDupeScore()))
-				{
-					primary = item.nzbInfo;
-				}
-			}
-			for (Item& item : items)
-			{
-				if (!primary && !item.queued && !isDupe(item))
-				{
-					primary = item.nzbInfo;	// history: newest first
-				}
-			}
-			// every queued one paused and none done yet: the one to run first, so its
-			// duplicates are labelled before anything downloads
-			if (!primary)
-			{
-				for (Item& item : items)
-				{
-					if (item.queued && (!primary || item.nzbInfo->GetDupeScore() > primary->GetDupeScore()))
-					{
-						primary = item.nzbInfo;
-					}
-				}
-			}
-#endif
 
 			// the labels: of the primary's twins and alts, by their par2 fingerprints,
 			// else by articles sampled at the same places (none without either)
@@ -1122,7 +752,6 @@ void TwinCheck::ServiceWork()
 			{
 				NzbInfo* nzbInfo = item.nzbInfo;
 				std::string print = fingerprintOf(nzbInfo);
-#ifdef NZBGET_USE_RUST
 				bool byPar2 = nzbget_rs_stq_twin_check_is_print_usable(primaryPrint.c_str()) != 0 &&
 					nzbget_rs_stq_twin_check_is_print_usable(print.c_str()) != 0;
 				NzbParameter* sampled = nzbInfo->GetParameters()->Find(SampledParam);
@@ -1140,22 +769,12 @@ void TwinCheck::ServiceWork()
 					primaryId.c_str(),
 					&sampledNowInt) != 0;
 				bool sampledNow = sampledNowInt != 0;
-#else
-				auto usable = [](const std::string& value) { return !value.empty() && value != "none" && value != "lost"; };
-				bool byPar2 = usable(primaryPrint) && usable(print);
-				bool sampleable = primaryOk && nzbInfo != primary && isDupe(item) && !print.empty() &&
-					!primaryPrint.empty() && !byPar2;
-				NzbParameter* sampled = nzbInfo->GetParameters()->Find(SampledParam);
-				NzbParameter* sampledOf = nzbInfo->GetParameters()->Find(SampledOfParam);
-				bool sampledNow = sampled && sampledOf && primaryId == sampledOf->GetValue();
-#endif
 				if (sampleable && !sampledNow && !strchr(nzbInfo->GetQueuedFilename(), '|') &&
 					FileSystem::FileExists(nzbInfo->GetQueuedFilename()))
 				{
 					jobs.push_back({nzbInfo->GetId(), nzbInfo->GetQueuedFilename(), false,
 						primary->GetId(), primary->GetQueuedFilename()});
 				}
-#ifdef NZBGET_USE_RUST
 				std::string byFiles;
 				bool listed = false;
 				if (nzbInfo != primary && isDupe(item) && byPar2)
@@ -1176,25 +795,6 @@ void TwinCheck::ServiceWork()
 					sampledNow ? 1 : 0,
 					sampled ? sampled->GetValue() : ""));
 				const char* kind = kindResolved.c_str();
-#else
-				// by the files of both par2 sets: a re-packed archive header (7z, rar) makes a
-				// near-twin, most files the same; else by their fingerprints
-				std::string kindText;
-				if (nzbInfo != primary && isDupe(item) && byPar2)
-				{
-					std::string byFiles = Kind(primary->GetId(), Identity(primary).c_str(), nzbInfo->GetId(),
-						Identity(nzbInfo).c_str());
-					// no lists at all (fingerprints from before they were kept): the
-					// fingerprints decide; a partial list leaves it unknown
-					bool listed = HasSigs(primary->GetId(), Identity(primary).c_str()) > 0 ||
-						HasSigs(nzbInfo->GetId(), Identity(nzbInfo).c_str()) > 0;
-					kindText = !byFiles.empty() || listed ? byFiles : print == primaryPrint ? "twin" : "alt";
-				}
-				const char* kind = nzbInfo == primary || !isDupe(item) ? "" :
-					byPar2 ? kindText.c_str() :
-					sampleable && sampledNow && !strcmp(sampled->GetValue(), "twin") ? "twin" :
-					sampleable && sampledNow && !strcmp(sampled->GetValue(), "alt") ? "alt" : "";
-#endif
 				NzbParameter* old = nzbInfo->GetParameters()->Find(KindParam);
 				if (strcmp(old ? old->GetValue() : "", kind))
 				{
@@ -1241,26 +841,17 @@ void TwinCheck::ServiceWork()
 		}
 	}
 
-#ifdef NZBGET_USE_RUST
 	std::stable_sort(jobs.begin(), jobs.end(), [](const Job& a, const Job& b)
 		{
 			return nzbget_rs_tpr_twin_check_job_less(
 				a.rank, a.hinted ? 1 : 0, b.rank, b.hinted ? 1 : 0) != 0;
 		});
-#else
-	std::stable_sort(jobs.begin(), jobs.end(), [](const Job& a, const Job& b)
-		{ return a.rank != b.rank ? a.rank < b.rank : a.hinted > b.hinted; });
-#endif
 
 	Guard guard(g_mutex);
 	for (Job& job : jobs)
 	{
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_tpr_twin_check_should_stop_launching_jobs(
 			g_stopping ? 1 : 0, (int)g_jobs.size(), MaxRunning) != 0)
-#else
-		if (g_stopping || (int)g_jobs.size() >= MaxRunning)
-#endif
 		{
 			break;
 		}
@@ -1327,11 +918,7 @@ int TwinCheck::ServiceInterval()
 {
 	// nudged: within a second, not at once: a fetch that fails at once is retried
 	// at most once a second
-#ifdef NZBGET_USE_RUST
 	return nzbget_rs_ccm_twin_check_service_interval(g_nudged ? 1 : 0);
-#else
-	return g_nudged ? 1 : 15;
-#endif
 }
 
 void TwinCheck::Nudge()

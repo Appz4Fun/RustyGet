@@ -31,11 +31,8 @@
 #include "Scanner.h"
 #include "DiskState.h"
 #include "QueueScript.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
-#ifdef NZBGET_USE_RUST
 void UrlDownloader::ProcessHeader(const char* line)
 {
 	WebDownloader::ProcessHeader(line);
@@ -65,38 +62,6 @@ void UrlDownloader::ProcessHeader(const char* line)
 			break;
 	}
 }
-#else
-void UrlDownloader::ProcessHeader(const char* line)
-{
-	WebDownloader::ProcessHeader(line);
-
-	if (!strncmp(line, "X-DNZB-Category:", 16))
-	{
-		m_category = Util::Trim(CString(line + 16));
-
-		debug("Category: %s", *m_category);
-	}
-	else if (!strncmp(line, "X-DNZB-", 7))
-	{
-		CString modLine = line;
-		char* value = strchr(modLine, ':');
-		if (value)
-		{
-			*value = '\0';
-			value++;
-			while (*value == ' ') value++;
-			Util::Trim(value);
-
-			debug("X-DNZB: %s", *modLine);
-			debug("Value: %s", value);
-
-			BString<100> paramName("*DNZB:%s", modLine + 7);
-			CString paramValue = WebUtil::Latin1ToUtf8(value);
-			m_nzbInfo->GetParameters()->SetParameter(paramName, paramValue);
-		}
-	}
-}
-#endif
 
 UrlCoordinator::UrlCoordinator()
 {
@@ -137,25 +102,17 @@ void UrlCoordinator::Run()
 			if ((int)m_activeDownloads.size() < g_Options->GetUrlConnections())
 			{
 				nzbInfo = GetNextUrl(downloadQueue);
-#ifdef NZBGET_USE_RUST
 				if (nzbget_rs_fuq_url_coord_should_start_download(
 					nzbInfo != nullptr ? 1 : 0,
 					g_WorkState->GetPauseDownload() ? 1 : 0,
 					g_Options->GetUrlForce() ? 1 : 0) != 0)
-#else
-				if (nzbInfo && (!g_WorkState->GetPauseDownload() || g_Options->GetUrlForce()))
-#endif
 				{
 					StartUrlDownload(nzbInfo);
 					downloadStarted = true;
 				}
 			}
-#ifdef NZBGET_USE_RUST
 			m_hasMoreJobs = nzbget_rs_uqs_url_coord_has_more_jobs(
 				m_activeDownloads.empty() ? 1 : 0, nzbInfo != nullptr ? 1 : 0) != 0;
-#else
-			m_hasMoreJobs = !m_activeDownloads.empty() || nzbInfo;
-#endif
 		}
 
 		if (lastReset != Util::CurrentTime())
@@ -172,11 +129,7 @@ void UrlCoordinator::Run()
 		}
 		else
 		{
-#ifdef NZBGET_USE_RUST
 			int sleepInterval = nzbget_rs_fuq_url_coord_calc_sleep_interval(downloadStarted ? 1 : 0);
-#else
-			int sleepInterval = downloadStarted ? 0 : 100;
-#endif
 			Util::Sleep(sleepInterval);
 		}
 	}
@@ -231,14 +184,10 @@ void UrlCoordinator::DownloadQueueUpdate(Subject*, void* aspect)
 	debug("Notification from download queue received");
 
 	DownloadQueue::Aspect* queueAspect = (DownloadQueue::Aspect*)aspect;
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_ucf_url_coord_is_wake_action(
 		(int)queueAspect->action,
 		(int)DownloadQueue::eaUrlAdded,
 		(int)DownloadQueue::eaUrlReturned) != 0)
-#else
-	if (queueAspect->action == DownloadQueue::eaUrlAdded || queueAspect->action == DownloadQueue::eaUrlReturned)
-#endif
 	{
 		// Resume Run()
 		std::lock_guard<std::mutex> guard(m_waitMutex);
@@ -259,17 +208,12 @@ void UrlCoordinator::ResetHangingDownloads()
 
 	for (UrlDownloader* urlDownloader : m_activeDownloads)
 	{
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_sus_is_hanging_url_download(
 			static_cast<int64>(tm),
 			static_cast<int64>(urlDownloader->GetLastUpdateTime()),
 			g_Options->GetUrlTimeout(),
 			static_cast<int>(urlDownloader->GetStatus()),
 			static_cast<int>(UrlDownloader::adRunning)))
-#else
-		if (tm - urlDownloader->GetLastUpdateTime() > g_Options->GetUrlTimeout() + 10 &&
-			urlDownloader->GetStatus() == UrlDownloader::adRunning)
-#endif
 		{
 			error("Cancelling hanging url download %s", urlDownloader->GetInfoName());
 			urlDownloader->Stop();
@@ -294,7 +238,6 @@ void UrlCoordinator::LogDebugInfo()
  */
 NzbInfo* UrlCoordinator::GetNextUrl(DownloadQueue* downloadQueue)
 {
-#ifdef NZBGET_USE_RUST
 	size_t n = downloadQueue->GetQueue()->size();
 	if (n == 0)
 	{
@@ -328,21 +271,6 @@ NzbInfo* UrlCoordinator::GetNextUrl(DownloadQueue* downloadQueue)
 		static_cast<int>(NzbInfo::lsNone),
 		static_cast<int>(NzbInfo::dsNone));
 	return idx >= 0 && static_cast<size_t>(idx) < items.size() ? items[idx] : nullptr;
-#else
-	NzbInfo* nzbInfo = nullptr;
-
-	for (NzbInfo* nzbInfo1 : downloadQueue->GetQueue())
-	{
-		if (nzbInfo1->GetKind() == NzbInfo::nkUrl && nzbInfo1->GetUrlStatus() == NzbInfo::lsNone &&
-			nzbInfo1->GetDeleteStatus() == NzbInfo::dsNone &&
-			(!nzbInfo || nzbInfo1->GetPriority() > nzbInfo->GetPriority()))
-		{
-			nzbInfo = nzbInfo1;
-		}
-	}
-
-	return nzbInfo;
-#endif
 }
 
 void UrlCoordinator::StartUrlDownload(NzbInfo* nzbInfo)
@@ -371,17 +299,11 @@ void UrlCoordinator::Update(Subject* caller, void*)
 	debug("Notification from UrlDownloader received");
 
 	UrlDownloader* urlDownloader = (UrlDownloader*)caller;
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_fuq_url_coord_is_completed_status(
 		(int)urlDownloader->GetStatus(),
 		(int)WebDownloader::adFinished,
 		(int)WebDownloader::adFailed,
 		(int)WebDownloader::adRetry) != 0)
-#else
-	if ((urlDownloader->GetStatus() == WebDownloader::adFinished) ||
-		(urlDownloader->GetStatus() == WebDownloader::adFailed) ||
-		(urlDownloader->GetStatus() == WebDownloader::adRetry))
-#endif
 	{
 		UrlCompleted(urlDownloader);
 	}
@@ -417,7 +339,6 @@ void UrlCoordinator::UrlCompleted(UrlDownloader* urlDownloader)
 		// remove downloader from downloader list
 		m_activeDownloads.erase(std::find(m_activeDownloads.begin(), m_activeDownloads.end(), urlDownloader));
 
-#ifdef NZBGET_USE_RUST
 		// rust/src/urlcoord.rs
 		int urlStatus = nzbInfo->GetUrlStatus();
 		int deleteStatus = nzbInfo->GetDeleteStatus();
@@ -431,30 +352,6 @@ void UrlCoordinator::UrlCompleted(UrlDownloader* urlDownloader)
 		}
 		nzbInfo->SetUrlStatus((NzbInfo::EUrlStatus)urlStatus);
 
-#else
-		retry = urlDownloader->GetStatus() == WebDownloader::adRetry && !nzbInfo->GetDeleting();
-
-		if (nzbInfo->GetDeleting())
-		{
-			nzbInfo->SetDeleteStatus(nzbInfo->GetDeleteStatus() == NzbInfo::dsNone ? NzbInfo::dsManual
-																				   : nzbInfo->GetDeleteStatus());
-			nzbInfo->SetUrlStatus(NzbInfo::lsNone);
-			nzbInfo->SetDeleting(false);
-		}
-		else if (urlDownloader->GetStatus() == WebDownloader::adFinished)
-		{
-			nzbInfo->SetUrlStatus(NzbInfo::lsFinished);
-		}
-		else if (urlDownloader->GetStatus() == WebDownloader::adFailed)
-		{
-			nzbInfo->SetUrlStatus(NzbInfo::lsFailed);
-		}
-		else if (urlDownloader->GetStatus() == WebDownloader::adRetry)
-		{
-			nzbInfo->SetUrlStatus(NzbInfo::lsNone);
-		}
-
-#endif
 		if (!retry)
 		{
 			DownloadQueue::Aspect aspect = {DownloadQueue::eaUrlCompleted, downloadQueue, nzbInfo, nullptr};
@@ -470,15 +367,10 @@ void UrlCoordinator::UrlCompleted(UrlDownloader* urlDownloader)
 
 	if (nzbInfo->GetUrlStatus() == NzbInfo::lsFinished)
 	{
-#ifdef NZBGET_USE_RUST
 		const char* name = nzbget_rs_uqs_url_coord_use_primary_str(nzbInfo->GetFilename()) != 0
 			? nzbInfo->GetFilename() : *filename;
 		const char* category = nzbget_rs_uqs_url_coord_use_primary_str(nzbInfo->GetCategory()) != 0
 			? nzbInfo->GetCategory() : urlDownloader->GetCategory();
-#else
-		const char* name = !Util::EmptyStr(nzbInfo->GetFilename()) ? nzbInfo->GetFilename() : *filename;
-		const char* category =!Util::EmptyStr(nzbInfo->GetCategory()) ? nzbInfo->GetCategory() : urlDownloader->GetCategory();
-#endif
 
 		Scanner::EAddStatus addStatus;
 		if (Unpack::IsArchive(name))
@@ -526,13 +418,9 @@ void UrlCoordinator::UrlCompleted(UrlDownloader* urlDownloader)
 			return;
 		}
 
-#ifdef NZBGET_USE_RUST
 		nzbInfo->SetUrlStatus((NzbInfo::EUrlStatus)nzbget_rs_fuq_url_coord_resolve_scan_fail_status(
 			(int)addStatus, (int)Scanner::asFailed,
 			(int)NzbInfo::lsScanFailed, (int)NzbInfo::lsScanSkipped));
-#else
-		nzbInfo->SetUrlStatus(addStatus == Scanner::asFailed ? NzbInfo::lsScanFailed : NzbInfo::lsScanSkipped);
-#endif
 	}
 
 	// the rest of function is only for failed URLs or for failed scans
@@ -571,13 +459,8 @@ bool UrlCoordinator::DeleteQueueEntry(DownloadQueue* downloadQueue, NzbInfo* nzb
 
 	info("Deleting URL %s", nzbInfo->GetName());
 
-#ifdef NZBGET_USE_RUST
 	nzbInfo->SetDeleteStatus((NzbInfo::EDeleteStatus)nzbget_rs_ucf_url_coord_resolve_delete_status(
 		(int)nzbInfo->GetDeleteStatus(), (int)NzbInfo::dsNone, (int)NzbInfo::dsManual));
-#else
-	nzbInfo->SetDeleteStatus(nzbInfo->GetDeleteStatus() == NzbInfo::dsNone ? NzbInfo::dsManual
-																		   : nzbInfo->GetDeleteStatus());
-#endif
 	nzbInfo->SetUrlStatus(NzbInfo::lsNone);
 
 	DownloadQueue::Aspect deletedAspect = {DownloadQueue::eaUrlDeleted, downloadQueue, nzbInfo, nullptr};

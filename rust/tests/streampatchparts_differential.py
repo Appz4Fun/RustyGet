@@ -16,6 +16,7 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
 BASE = 'c2316ef5e5ac7d5fb1c309e52de9e40dbc76c63e'
+FALLBACK_REF = '4cf19abdb8f084a384769a15cf57e56acf86f363'
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('build', type=Path)
 p.add_argument('--bench', action='store_true')
@@ -53,20 +54,28 @@ def get(key): return shlex.split(re.search(rf'^{key} = (.*)$',flags,re.M).group(
 includes = get('CXX_INCLUDES')
 defines = get('CXX_DEFINES')
 assert '-DNZBGET_USE_RUST' in defines
-if a.cpp_fallback: defines.remove('-DNZBGET_USE_RUST')
+target_cpp = ROOT / 'daemon/queue/DupeStreamRepair.cpp'
+if a.cpp_fallback:
+    defines.remove('-DNZBGET_USE_RUST')
+    if 'NZBGET_USE_RUST' not in target_cpp.read_text():
+        fallback_cpp = work / 'DupeStreamRepair-fallback.cpp'
+        fallback_cpp.write_text(
+            subprocess.check_output(['git', 'show', f'{FALLBACK_REF}:daemon/queue/DupeStreamRepair.cpp'], cwd=ROOT, text=True)
+        )
+        target_cpp = fallback_cpp
 lib = next(build.glob('rust/**/release/libnzbget_rs.a'))
 mode = ('bench' if a.bench else 'parity') + ('-cpp' if a.cpp_fallback else '-rust')
 exe = work/mode
 cmd = ['g++','-std=c++17','-O3','-g','-ffunction-sections','-fdata-sections']
 if not a.bench: cmd += ['-fsanitize=address,undefined','-fno-omit-frame-pointer','-fno-sanitize-recover=all','-no-pie']
-cmd += includes + defines + [str(cpp),str(ROOT/'daemon/queue/DupeStreamRepair.cpp'),str(lib),'-Wl,--gc-sections','-ldl','-lpthread','-lm','-o',str(exe)]
+cmd += includes + defines + [str(cpp),str(target_cpp),str(lib),'-Wl,--gc-sections','-ldl','-lpthread','-lm','-o',str(exe)]
 (work/(mode+'-command.txt')).write_text(shlex.join(cmd)+'\n')
 (work/'reference-manifest.txt').write_text(BASE+'\n'+hashlib.sha256(old.encode()).hexdigest()+' DupeStreamRepair.cpp\n'+hashlib.sha256(hdr.encode()).hexdigest()+' DupeStreamRepair.h\n')
 subprocess.run(cmd,check=True)
 (work/(mode+'-manifest.json')).write_text(json.dumps({
     'base': BASE, 'command': cmd,
     'sha256': {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in (
-        exe, lib, ROOT/'rust/src/streampatchparts.rs', ROOT/'daemon/queue/DupeStreamRepair.cpp', cpp)},
+        exe, lib, ROOT/'rust/src/streampatchparts.rs', target_cpp, cpp)},
     'compiler': subprocess.check_output(['g++','--version'],text=True).splitlines()[0],
     'rustc': subprocess.check_output(['rustc','--version'],text=True).strip(),
     'kernel': subprocess.check_output(['uname','-a'],text=True).strip(),

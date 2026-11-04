@@ -26,9 +26,7 @@
 #include "DupeArticleFallback.h"
 #include "ParParser.h"
 #include "FileSystem.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 namespace
 {
@@ -82,11 +80,7 @@ void ParDamage::FileCompleted(NzbInfo* nzbInfo, FileInfo* fileInfo, const std::s
 	else if (fileInfo->GetSuccessArticles() == 0)
 	{
 		// nothing arrived: the whole file (its length comes from par2 if named there)
-#ifdef NZBGET_USE_RUST
 		damage.holes = { { 0, nzbget_rs_dcf_par_damage_estimate_unarrived_decoded_size(fileInfo->GetSize()) } };
-#else
-		damage.holes = { { 0, fileInfo->GetSize() * 100 / 102 } };
-#endif
 	}
 	else
 	{
@@ -102,7 +96,6 @@ void ParDamage::FileCompleted(NzbInfo* nzbInfo, FileInfo* fileInfo, const std::s
 
 int ParDamage::BlocksTouched(const StreamRangeList& holes, uint64 blockSize)
 {
-#ifdef NZBGET_USE_RUST
 	static_assert(sizeof(StreamRange) == sizeof(NzbgetRsByteRange) &&
 		offsetof(StreamRange, Offset) == offsetof(NzbgetRsByteRange, offset) &&
 		offsetof(StreamRange, Size) == offsetof(NzbgetRsByteRange, size),
@@ -110,35 +103,6 @@ int ParDamage::BlocksTouched(const StreamRangeList& holes, uint64 blockSize)
 	return nzbget_rs_par_damage_blocks_touched(
 		holes.empty() ? nullptr : reinterpret_cast<const NzbgetRsByteRange*>(holes.data()),
 		holes.size(), blockSize);
-#else
-	if (blockSize == 0)
-	{
-		return 0;
-	}
-
-	std::vector<std::pair<int64, int64>> spans;	// first and last block of each hole
-	for (const StreamRange& hole : holes)
-	{
-		if (hole.Size > 0)
-		{
-			spans.emplace_back(hole.Offset / (int64)blockSize, (hole.Offset + hole.Size - 1) / (int64)blockSize);
-		}
-	}
-	std::sort(spans.begin(), spans.end());
-
-	int64 count = 0;
-	int64 coveredTo = -1;	// last block counted
-	for (const auto& span : spans)
-	{
-		int64 from = std::max(span.first, coveredTo + 1);
-		if (span.second >= from)
-		{
-			count += span.second - from + 1;
-			coveredTo = span.second;
-		}
-	}
-	return (int)std::min<int64>(count, INT_MAX);
-#endif
 }
 
 ParDamage::Verdict ParDamage::Judge(NzbInfo* nzbInfo)
@@ -165,17 +129,10 @@ ParDamage::Verdict ParDamage::Judge(NzbInfo* nzbInfo)
 		for (const DupeArticleFallback::Par2Desc& desc : state.par2)
 		{
 			// a block size no real set uses (a damaged or crafted packet) isn't trusted
-#ifdef NZBGET_USE_RUST
 			if (nzbget_rs_dcf_par_damage_desc_matches_file_damage(
 				desc.blockSize, (uint64)DupeArticleFallback::MaxPar2BlockSize,
 				desc.name.c_str(), damage.name.c_str(),
 				damage.size, desc.length) != 0)
-#else
-			if (desc.blockSize > 0 && desc.blockSize % 4 == 0 &&
-				desc.blockSize <= (uint64)DupeArticleFallback::MaxPar2BlockSize &&
-				(desc.name == damage.name ||
-				(damage.size > 0 && (int64)desc.length == damage.size)))
-#endif
 			{
 				match = &desc;
 				break;
@@ -213,13 +170,8 @@ ParDamage::Verdict ParDamage::Judge(NzbInfo* nzbInfo)
 		int blocks = 0;
 		if (ParParser::ParseParFilename(fileInfo->GetFilename(), fileInfo->GetFilenameConfirmed(), nullptr, &blocks))
 		{
-#ifdef NZBGET_USE_RUST
 			verdict.recoveryBlocks += nzbget_rs_cdn_par_damage_calc_queued_volume_blocks(
 				blocks, fileInfo->GetSize(), blockSize);
-#else
-			verdict.recoveryBlocks += blocks >= 0 ? blocks :
-				(int)(fileInfo->GetSize() * 100 / 102 / (int64)(blockSize + 68));
-#endif
 		}
 	}
 	for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
@@ -232,11 +184,7 @@ ParDamage::Verdict ParDamage::Judge(NzbInfo* nzbInfo)
 			{
 				BString<1024> path("%s%c%s", nzbInfo->GetDestDir(), PATH_SEPARATOR, completedFile.GetFilename());
 				int64 size = FileSystem::FileSize(path);
-#ifdef NZBGET_USE_RUST
 				blocks = nzbget_rs_cdn_par_damage_calc_completed_volume_blocks(blocks, size, blockSize);
-#else
-				blocks = size > 0 ? (int)(size / (int64)(blockSize + 68)) : 0;
-#endif
 			}
 			verdict.recoveryBlocks += blocks;
 		}
@@ -244,15 +192,9 @@ ParDamage::Verdict ParDamage::Judge(NzbInfo* nzbInfo)
 
 	verdict.doneBytes = state.doneBytes;
 	verdict.totalBytes = std::max<int64>(0, nzbInfo->GetSize() - nzbInfo->GetParSize());
-#ifdef NZBGET_USE_RUST
 	nzbget_rs_par_damage_project(verdict.known ? 1 : 0, verdict.damagedBlocks,
 		verdict.recoveryBlocks, verdict.doneBytes, verdict.totalBytes,
 		&verdict.projectedBlocks, nullptr, nullptr);
-#else
-	verdict.projectedBlocks = verdict.doneBytes > 0 ?
-		(int)std::min<int64>(INT_MAX, (int64)verdict.damagedBlocks * verdict.totalBytes / verdict.doneBytes) :
-		verdict.damagedBlocks;
-#endif
 	return verdict;
 }
 

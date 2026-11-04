@@ -35,9 +35,7 @@
 #include "Util.h"
 #include "FileSystem.h"
 #include "Unpack.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 #ifdef _WIN32
 #include "Utf8.h"
@@ -107,16 +105,9 @@ void Scanner::InitOptions()
 
 int Scanner::ServiceInterval()
 {
-#ifdef NZBGET_USE_RUST
 	return nzbget_rs_pup_scanner_select_service_interval(
 		m_requestedNzbDirScan ? 1 : 0, g_Options->GetNzbDirInterval(),
 		m_nzbDirInterval, Service::Now, Service::Sleep);
-#else
-	return m_requestedNzbDirScan ? Service::Now :
-		g_Options->GetNzbDirInterval() <= 0 ? Service::Sleep :
-		// g_Options->GetPauseScan() ? Service::Sleep :   // for that to work we need to react on changing of pause-state
-		m_nzbDirInterval;
-#endif
 }
 
 void Scanner::ServiceWork()
@@ -130,12 +121,8 @@ void Scanner::ServiceWork()
 
 	m_nzbDirInterval = g_Options->GetNzbDirInterval();
 
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_uqs_scanner_should_pause_scan(
 		g_WorkState->GetPauseScan() ? 1 : 0, m_requestedNzbDirScan ? 1 : 0) != 0)
-#else
-	if (g_WorkState->GetPauseScan() && !m_requestedNzbDirScan)
-#endif
 	{
 		return;
 	}
@@ -155,12 +142,8 @@ void Scanner::ServiceWork()
 	}
 
 	CheckIncomingNzbs(g_Options->GetNzbDir(), "", checkStat);
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_uqs_scanner_needs_second_immediate_scan(
 		checkStat ? 1 : 0, m_scanScript ? 1 : 0) != 0)
-#else
-	if (!checkStat && m_scanScript)
-#endif
 	{
 		// if immediate scan requested, we need second scan to process files extracted by scan-scripts
 		CheckIncomingNzbs(g_Options->GetNzbDir(), "", checkStat);
@@ -172,7 +155,6 @@ void Scanner::ServiceWork()
 	//   - one additional scan is necessary to check sizes of detected files;
 	//   - another scan is required to check files which were extracted by scan-scripts;
 	//   - third scan is needed to check sizes of extracted files.
-#ifdef NZBGET_USE_RUST
 	nzbget_rs_dsp_scanner_next_pass(
 		g_Options->GetNzbDirInterval(),
 		g_Options->GetNzbDirFileAge(),
@@ -180,22 +162,6 @@ void Scanner::ServiceWork()
 		m_pass,
 		&m_nzbDirInterval,
 		&m_pass);
-#else
-	if (g_Options->GetNzbDirInterval() > 0 && g_Options->GetNzbDirFileAge() < g_Options->GetNzbDirInterval())
-	{
-		int maxPass = m_scanScript ? 3 : 1;
-		if (m_pass < maxPass)
-		{
-			// scheduling another scan of incoming directory in NzbDirFileAge seconds.
-			m_nzbDirInterval = g_Options->GetNzbDirFileAge();
-			m_pass++;
-		}
-		else
-		{
-			m_pass = 0;
-		}
-	}
-#endif
 
 	DropOldFiles();
 	m_queueList.clear();
@@ -327,21 +293,10 @@ void Scanner::ProcessSubdirectory(const char* fullPath, const char* filename, co
  */
 bool Scanner::CanProcessFile(const char* fullFilename, bool checkStat)
 {
-#ifdef NZBGET_USE_RUST
 	if (!nzbget_rs_dsp_can_process_extension(fullFilename))
 	{
 		return false;
 	}
-#else
-	const char* extension = strrchr(fullFilename, '.');
-	if (!extension ||
-		!strcasecmp(extension, ".queued") ||
-		!strcasecmp(extension, ".error") ||
-		!strcasecmp(extension, ".processed"))
-	{
-		return false;
-	}
-#endif
 
 	if (!checkStat)
 	{
@@ -359,7 +314,6 @@ bool Scanner::CanProcessFile(const char* fullFilename, bool checkStat)
 		if (!strcmp(fileData.GetFilename(), fullFilename))
 		{
 			inList = true;
-#ifdef NZBGET_USE_RUST
 			int64 updatedSize = fileData.GetSize();
 			int64 updatedLastChange = (int64)fileData.GetLastChange();
 			if (nzbget_rs_dsp_eval_file_age(
@@ -374,24 +328,6 @@ bool Scanner::CanProcessFile(const char* fullFilename, bool checkStat)
 				fileData.SetSize(updatedSize);
 				fileData.SetLastChange((time_t)updatedLastChange);
 			}
-#else
-			if (fileData.GetSize() == size &&
-				current - fileData.GetLastChange() >= g_Options->GetNzbDirFileAge())
-			{
-				canProcess = true;
-				m_fileList.erase(it);
-			}
-			else
-			{
-				// a size change restarts the wait (the check came after the
-				// new size was set, so it never did)
-				if (fileData.GetSize() != size)
-				{
-					fileData.SetSize(size);
-					fileData.SetLastChange(current);
-				}
-			}
-#endif
 			break;
 		}
 	}
@@ -418,16 +354,9 @@ void Scanner::DropOldFiles()
 	m_fileList.erase(std::remove_if(m_fileList.begin(), m_fileList.end(),
 		[current](FileData& fileData)
 		{
-#ifdef NZBGET_USE_RUST
 			if (nzbget_rs_dsp_should_drop_scan_file(
 				(int64)fileData.GetLastChange(), (int64)current,
 				g_Options->GetNzbDirInterval(), g_Options->GetNzbDirFileAge()))
-#else
-			if ((current - fileData.GetLastChange() >=
-				(g_Options->GetNzbDirInterval() + g_Options->GetNzbDirFileAge()) * 2) ||
-				// can occur if the system clock was adjusted
-				current < fileData.GetLastChange())
-#endif
 			{
 				debug("Removing file %s from scan file list", fileData.GetFilename());
 				return true;
@@ -439,16 +368,11 @@ void Scanner::DropOldFiles()
 
 bool Scanner::ShouldSkipItem(std::string_view filename)
 {
-#ifdef NZBGET_USE_RUST
 	std::string nameStr(filename);
 	std::string procStr(PROCESSED_DIR);
 	std::string brokStr(BROKEN_DIR);
 	return nzbget_rs_pup_scanner_should_skip_item(
 		nameStr.c_str(), procStr.c_str(), brokStr.c_str()) != 0;
-#else
-	if (filename.empty()) return false;
-	return filename[0] == '.' || filename == PROCESSED_DIR || filename == BROKEN_DIR;
-#endif
 }
 
 void Scanner::ProcessIncomingFile(
@@ -502,7 +426,6 @@ void Scanner::ProcessIncomingFile(
 
 	bool exists = true;
 
-#ifdef NZBGET_USE_RUST
 	bool ranScanScript = nzbget_rs_hsr_scanner_should_run_scan_script(
 		m_scanScript ? 1 : 0, extension) != 0;
 	if (ranScanScript)
@@ -584,85 +507,6 @@ void Scanner::ProcessIncomingFile(
 		);
 		addStatus = added ? asSuccess : asFailed;
 	}
-#else
-	if (m_scanScript && strcasecmp(extension, ".nzb_processed"))
-	{
-		ScanScriptController::ExecuteScripts(fullFilename,
-			nzbInfo, 
-			directory,
-			nzbName,
-			nzbCategory,
-			&priority,
-			&parameters,
-			&addTop,
-			&addPaused,
-			dupeKey,
-			&dupeScore,
-			&dupeMode
-		);
-		exists = FileSystem::FileExists(fullFilename);
-		if (exists && strcasecmp(extension, ".nzb"))
-		{
-			CString bakname2;
-			bool renameOK = FileSystem::RenameBak(fullFilename, "processed", false, bakname2);
-			if (!renameOK)
-			{
-				error("Could not rename file %s to %s: %s", fullFilename, *bakname2,
-					*FileSystem::GetLastErrorMessage());
-			}
-		}
-	}
-
-	if (!strcasecmp(extension, ".nzb_processed"))
-	{
-		CString renamedName;
-		bool renameOK = FileSystem::RenameBak(fullFilename, "nzb", true, renamedName);
-		if (renameOK)
-		{
-			bool added = AddFileToQueue(
-				renamedName,
-				nzbName.c_str(),
-				nzbCategory.c_str(),
-				autoCategory,
-				priority,
-				dupeKey.c_str(),
-				dupeScore,
-				dupeMode,
-				&parameters,
-				addTop,
-				addPaused,
-				nzbInfo,
-				&nzbId
-			);
-			addStatus = added ? asSuccess : asFailed;
-		}
-		else
-		{
-			error("Could not rename file %s to %s: %s", fullFilename, *renamedName,
-				*FileSystem::GetLastErrorMessage());
-			addStatus = asFailed;
-		}
-	}
-	else if (exists && !strcasecmp(extension, ".nzb"))
-	{
-		bool added = AddFileToQueue(
-			fullFilename,
-			nzbName.c_str(),
-			nzbCategory.c_str(),
-			autoCategory,
-			priority,
-			dupeKey.c_str(),
-			dupeScore,
-			dupeMode,
-			&parameters,
-			addTop,
-			addPaused,
-			nzbInfo,
-			&nzbId
-		);
-		addStatus = added ? asSuccess : asFailed;
-	}
-#endif
 
 	if (queueData)
 	{
@@ -715,15 +559,10 @@ void Scanner::InitPPParameters(const char* category, NzbParameterList* parameter
 					if (strcmp(scriptName, script->GetName()) != 0) continue;
 
 					BString<1024> paramName("%s:", scriptName);
-#ifdef NZBGET_USE_RUST
 					if (nzbget_rs_uqs_scanner_script_qualifies_for_pp_param(
 						script->GetPostScript() ? 1 : 0,
 						script->GetQueueScript() ? 1 : 0,
 						parameters->Find(paramName) != nullptr ? 1 : 0) != 0)
-#else
-					if ((script->GetPostScript() || script->GetQueueScript()) &&
-						!parameters->Find(paramName))
-#endif
 					{
 						parameters->SetParameter(paramName, "yes");
 					}
@@ -794,12 +633,8 @@ bool Scanner::AddFileToQueue(
 	}
 
 	CString bakname2;
-#ifdef NZBGET_USE_RUST
 	const char* bakSuffix = nzbget_rs_uqs_scanner_select_rename_bak_queued(ok ? 1 : 0) != 0 ? "queued" : "error";
 	if (!FileSystem::RenameBak(filename, bakSuffix, false, bakname2))
-#else
-	if (!FileSystem::RenameBak(filename, ok ? "queued" : "error", false, bakname2))
-#endif
 	{
 		ok = false;
 		error("Could not rename file %s to %s: %s", filename, *bakname2,
@@ -832,15 +667,9 @@ bool Scanner::AddFileToQueue(
 			if (fileInfo->GetMissedArticles() > 0)
 			{
 				bool cutShort = nzbFile.GetCutShortFiles().count(fileInfo) > 0;
-#ifdef NZBGET_USE_RUST
 				int sev = nzbget_rs_dsp_classify_missed_articles(
 					fileInfo->GetMissedArticles(), fileInfo->GetTotalArticles(), cutShort ? 1 : 0);
 				nzbInfo->PrintMessage(sev >= 2 ? Message::mkWarning : Message::mkDetail,
-#else
-				int missed = fileInfo->GetMissedArticles();
-				bool large = missed >= 100 || missed * 10 >= fileInfo->GetTotalArticles();
-				nzbInfo->PrintMessage(cutShort || large ? Message::mkWarning : Message::mkDetail,
-#endif
 					"Collection %s lists only %i of the %i articles of %s: the missing ones count as failed",
 					nzbInfo->GetName(), fileInfo->GetTotalArticles() - fileInfo->GetMissedArticles(),
 					fileInfo->GetTotalArticles(), fileInfo->GetFilename());
@@ -877,7 +706,6 @@ bool Scanner::AddFileToQueue(
 
 	NzbInfo* addedNzb = nullptr;
 
-#ifdef NZBGET_USE_RUST
 	int outcome = nzbget_rs_hsr_scanner_classify_add_file_outcome(ok ? 1 : 0, urlInfo ? 1 : 0);
 	if (outcome == 1)
 	{
@@ -895,24 +723,6 @@ bool Scanner::AddFileToQueue(
 		nzbInfo->SetDeleteStatus(NzbInfo::dsScan);
 		addedNzb = g_QueueCoordinator->AddNzbFileToQueue(std::move(nzbInfo), std::move(urlInfo), addTop);
 	}
-#else
-	if (ok)
-	{
-		addedNzb = g_QueueCoordinator->AddNzbFileToQueue(std::move(nzbInfo), std::move(urlInfo), addTop);
-	}
-	else if (urlInfo)
-	{
-		for (Message& message : nzbInfo->GuardCachedMessages())
-		{
-			urlInfo->AddMessage(message.GetKind(), message.GetText(), false);
-		}
-	}
-	else
-	{
-		nzbInfo->SetDeleteStatus(NzbInfo::dsScan);
-		addedNzb = g_QueueCoordinator->AddNzbFileToQueue(std::move(nzbInfo), std::move(urlInfo), addTop);
-	}
-#endif
 
 	if (nzbId)
 	{
@@ -1051,7 +861,6 @@ Scanner::EAddStatus Scanner::AddArchive(const char* filename, const char* catego
 
 	ScanNzbDir(true);
 
-#ifdef NZBGET_USE_RUST
 	std::vector<int> statusInts;
 	statusInts.reserve(statuses.size());
 	for (EAddStatus st : statuses)
@@ -1064,17 +873,6 @@ Scanner::EAddStatus Scanner::AddArchive(const char* filename, const char* catego
 		statusInts.size(),
 		(int)EAddStatus::asSuccess,
 		(int)EAddStatus::asSkipped);
-#else
-	// a url item stays queued unless its nzb was added: report that one's
-	// result, else the item was taken as done and stuck in the queue for good
-	if (urlInfo)
-	{
-		return statuses[0];
-	}
-	bool anyAdded = std::any_of(statuses.begin(), statuses.end(),
-		[](EAddStatus status) { return status == EAddStatus::asSuccess; });
-	return anyAdded ? EAddStatus::asSuccess : statuses[0];
-#endif
 }
 
 Scanner::EAddStatus Scanner::AddArchive(
@@ -1166,62 +964,21 @@ Scanner::EAddStatus Scanner::AddExternalFile(
 			return asFailed;
 		}
 
-#ifdef NZBGET_USE_RUST
 		nzb = nzbget_rs_dsp_is_nzb_xml_prefix((const uint8_t*)buffer, (size_t)std::max(0, bufSize)) != 0;
-#else
-		// "buffer" doesn't end with nullptr, therefore we can't search in it with "strstr"
-		BString<1024> buf;
-		buf.Set(buffer, bufSize);
-		nzb = !strncmp(buf, "<?xml", 5) && strstr(buf, "<nzb");
-#endif
 	}
 
 	// move file into NzbDir, make sure the file name is unique
 	// a name that is a full path (a client passing its file) drops the folder; any
 	// other "/" belongs to the name (indexers post "[hash] [16/22] - Title"), and it
 	// lost everything up to it ("22] - Title"). MakeValidFilename makes it safe
-#ifdef NZBGET_USE_RUST
 	bool absolutePath = nzbget_rs_pup_scanner_is_absolute_nzb_name(nzbName) != 0;
-#else
-	bool absolutePath = nzbName[0] == '/' || nzbName[0] == '\\' ||
-		(isalpha((unsigned char)nzbName[0]) && nzbName[1] == ':' && (nzbName[2] == '\\' || nzbName[2] == '/'));
-#endif
 	CString validNzbName = FileSystem::MakeValidFilename(absolutePath ? FileSystem::BaseFileName(nzbName) : nzbName);
-#ifdef NZBGET_USE_RUST
 	{
 		NzbgetRsBuf normBuf = nzbget_rs_dsp_normalize_external_nzb_name(nzbName, validNzbName, nzb ? 1 : 0);
 		std::string normStr(normBuf.data ? normBuf.data : "", normBuf.len);
 		nzbget_rs_free(normBuf);
 		validNzbName = normStr.c_str();
 	}
-#else
-	// a file name starting with "." is hidden, and the scanner skips it ("../x.nzb")
-	if (validNzbName[0] == '.')
-	{
-		validNzbName = CString::FormatStr("_%s", *validNzbName);
-	}
-	// a name past what a file system takes (255 bytes) couldn't be created, and the
-	// nzb-file was refused; the file is named by its first 200 bytes (cut on a whole
-	// UTF-8 character), the download keeps its full name
-	if (strlen(validNzbName) > 200)
-	{
-		std::string name = *validNzbName;
-		const char* dot = strrchr(*validNzbName, '.');
-		std::string extension = dot && strlen(dot) <= 16 ? dot : "";
-		size_t cut = 200 - extension.size();
-		while (cut > 0 && ((unsigned char)name[cut] & 0xC0) == 0x80)
-		{
-			cut--;
-		}
-		validNzbName = (name.substr(0, cut) + extension).c_str();
-	}
-
-	const char* extension = strrchr(nzbName, '.');
-	if (nzb && (!extension || strcasecmp(extension, ".nzb")))
-	{
-		validNzbName.Append(".nzb");
-	}
-#endif
 
 	BString<1024> scanFileName("%s%c%s", g_Options->GetNzbDir(), PATH_SEPARATOR, *validNzbName);
 

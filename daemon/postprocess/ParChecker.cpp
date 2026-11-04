@@ -190,7 +190,14 @@ bool Repairer::ScanDataFile(
 	Par2::MD5Hash &hash16k, 
 	Par2::u32 &count)
 {
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_srp_parchecker_can_quick_scan_data_file(
+		m_owner->GetParQuick() ? 1 : 0,
+		sourcefile != nullptr ? 1 : 0,
+		diskfile != nullptr ? 1 : 0))
+#else
 	if (m_owner->GetParQuick() && sourcefile && diskfile)
+#endif
 	{
 		std::string name;
 		Par2::DiskFile::SplitFilename(diskfile->FileName(), basepath, name);
@@ -777,12 +784,23 @@ bool ParChecker::LoadMainParBak()
 			m_queuedParFilesChanged = false;
 		}
 
+#ifdef NZBGET_USE_RUST
+		int waitAction = nzbget_rs_srp_parchecker_should_wait_for_queued_pars(
+			requested ? 1 : 0, hasMorePars ? 1 : 0);
+		if (waitAction == 0)
+		{
+			return false;
+		}
+
+		if (waitAction == 1)
+#else
 		if (!requested && !hasMorePars)
 		{
 			return false;
 		}
 
 		if (!hasMorePars)
+#endif
 		{
 			// wait until new files are added by "AddParFile" or a change is signaled by "QueueChanged"
 			bool queuedParFilesChanged = false;
@@ -846,6 +864,21 @@ int ParChecker::ProcessMorePars()
 				m_queuedParFilesChanged = false;
 			}
 
+#ifdef NZBGET_USE_RUST
+			int waitAction = nzbget_rs_srp_parchecker_should_wait_for_queued_pars(
+				requested ? 1 : 0, hasMorePars ? 1 : 0);
+			if (waitAction == 0)
+			{
+				m_errMsg = std::string("not enough par-blocks, ") 
+					+ std::to_string(missingblockcount) 
+					+ " block(s) needed, but "
+					+ std::to_string(blockFound)
+					+ " block(s) available";
+				break;
+			}
+
+			if (waitAction == 1)
+#else
 			if (!requested && !hasMorePars)
 			{
 				m_errMsg = std::string("not enough par-blocks, ") 
@@ -857,6 +890,7 @@ int ParChecker::ProcessMorePars()
 			}
 
 			if (!hasMorePars)
+#endif
 			{
 				// wait until new files are added by "AddParFile" or a change is signaled by "QueueChanged"
 				bool queuedParFilesChanged = false;
@@ -1202,10 +1236,23 @@ void ParChecker::FindExtraFiles(std::vector<std::string>& extrafiles, const char
 		{
 			FindExtraFiles(extrafiles, fullFilename, externalDir);
 		}
+#ifdef NZBGET_USE_RUST
+		else
+		{
+			bool isParred = !externalDir && IsParredFile(filename);
+			bool isProcessed = !externalDir && !isParred && IsProcessedFile(filename);
+			if (nzbget_rs_srp_parchecker_should_add_extra_file_entry(
+				externalDir ? 1 : 0, isParred ? 1 : 0, isProcessed ? 1 : 0))
+			{
+				extrafiles.push_back(std::string(directory) + PATH_SEPARATOR + filename);
+			}
+		}
+#else
 		else if (externalDir || (!IsParredFile(filename) && !IsProcessedFile(filename)))
 		{
 			extrafiles.push_back(std::string(directory) + PATH_SEPARATOR + filename);
 		}
+#endif
 	}
 }
 

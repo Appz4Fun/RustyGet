@@ -130,7 +130,11 @@ bool HoledSource::Read(int64 offset, void* buffer, int64 size)
 
 ContentSource* HoledSourceSet::GetSource(int memberIndex)
 {
+#ifdef NZBGET_USE_RUST
+	if (!nzbget_rs_srp_stream_repair_is_member_index_in_bounds(memberIndex, m_wrapped.size()))
+#else
 	if (memberIndex < 0 || memberIndex >= (int)m_wrapped.size())
+#endif
 	{
 		return nullptr;
 	}

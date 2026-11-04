@@ -4157,6 +4157,52 @@ int nzbget_rs_pur_unpack_ctrl_should_add_default_overwrite_flag(
 int nzbget_rs_pur_direct_unpack_should_log_unrar_exit_error(
     int unpack_ok, int exit_code, int interrupted);
 
+/* Batch 41: streamrepairparcheck (srp_*) */
+int nzbget_rs_srp_stream_repair_is_member_index_in_bounds(
+    int member_index, size_t entries_len);
+int64_t nzbget_rs_srp_stream_repair_max_disk_and_member_size(
+    int64_t disk_size, int64_t member_size);
+int nzbget_rs_srp_stream_repair_donor_fetch_part_can_proceed(
+    int part_index, size_t articles_len, int is_bad);
+int nzbget_rs_srp_stream_repair_donor_consume_fetch_budget(
+    int has_budget, int current_budget, int* out_new_budget);
+int nzbget_rs_srp_stream_repair_can_prefetch_donor_range(
+    int has_batch_fetcher, int has_fetch_budget, int is_bad,
+    int ranges_empty, int64_t size);
+int nzbget_rs_srp_stream_repair_should_run_cross_pack(
+    int any_holes, int is_stopped);
+int nzbget_rs_srp_stream_repair_should_clear_post_working_after_live(
+    int has_post_info, int has_unpack_thread);
+int nzbget_rs_srp_stream_repair_should_include_file_in_donor_dead_pass(
+    int total_articles, int pass, int is_par_file);
+int nzbget_rs_srp_stream_repair_should_check_donor_dead_samples(
+    size_t samples_len, int min_articles, int is_stopped);
+int nzbget_rs_srp_stream_repair_is_eligible_target_for_round(
+    int patch_eligible, int needs_repair, int64_t decoded_file_size, int round);
+int nzbget_rs_srp_stream_repair_should_stop_sibling_donor_probes(
+    int verified, int probed, int max_donor_candidates);
+int nzbget_rs_srp_stream_repair_is_patch_article_usable(
+    int success, int64_t fetched_file_size, int64_t target_decoded_size,
+    size_t data_len, int64_t fetched_offset);
+int nzbget_rs_srp_stream_repair_should_retry_donor_map_with_password(
+    int has_map, int password_empty, int skip_is_encrypted_data,
+    int skip_is_encrypted_headers);
+int nzbget_rs_srp_stream_repair_can_verify_donor_inner_file(
+    int is_encrypted, int expect_encrypted, int64_t donor_inner_size,
+    int64_t target_inner_size);
+int nzbget_rs_srp_stream_repair_classify_completed_target_mark(
+    int64_t decoded_file_size, int holes_empty, int recreated);
+int nzbget_rs_srp_stream_repair_has_any_recovered_stats(
+    int recovered_articles, int64_t recovered_bytes, int recovered_holes);
+int nzbget_rs_srp_parchecker_can_quick_scan_data_file(
+    int par_quick, int has_sourcefile, int has_diskfile);
+int nzbget_rs_srp_parchecker_should_wait_for_queued_pars(
+    int requested, int has_more_pars);
+int nzbget_rs_srp_parchecker_should_add_extra_file_entry(
+    int external_dir, int is_parred, int is_processed);
+int nzbget_rs_srp_repair_ctrl_is_usable_par_block_candidate(
+    int parsed, int block_count);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

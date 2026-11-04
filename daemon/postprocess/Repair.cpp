@@ -888,7 +888,11 @@ void RepairController::FindPars(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, 
 			blockCount = blockSize > 0 ? (int)std::max<int64>(1, fileInfo->GetSize() / (blockSize + 68)) : 1;
 #endif
 		}
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_srp_repair_ctrl_is_usable_par_block_candidate(parsed ? 1 : 0, blockCount))
+#else
 		if (parsed && blockCount > 0)
+#endif
 		{
 			bool useFile = true;
 

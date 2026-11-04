@@ -137,6 +137,22 @@ void ArticleDownloader::Run()
 		// check server retention
 		// a file without a date (none in the nzb) has time 0: its age isn't known,
 		// and counting from 1970 failed every article on a server with a retention
+#ifdef NZBGET_USE_RUST
+		int fileAgeDays = 0;
+		bool retentionFailure = nzbget_rs_dur_article_dl_is_retention_failure(
+			m_connection->GetNewsServer()->GetRetention(),
+			(int64)m_fileInfo->GetTime(),
+			(int64)Util::CurrentTime(),
+			&fileAgeDays) != 0;
+		if (retentionFailure)
+		{
+			detail("Article %s @ %s failed: out of server retention (file age: %i, configured retention: %i)",
+				*m_infoName, *m_connectionName, fileAgeDays,
+				m_connection->GetNewsServer()->GetRetention());
+			status = adFailed;
+			FreeConnection(true);
+		}
+#else
 		bool retentionFailure = m_connection->GetNewsServer()->GetRetention() > 0 &&
 			m_fileInfo->GetTime() > 0 &&
 			(Util::CurrentTime() - m_fileInfo->GetTime()) / 86400 > m_connection->GetNewsServer()->GetRetention();
@@ -149,6 +165,7 @@ void ArticleDownloader::Run()
 			status = adFailed;
 			FreeConnection(true);
 		}
+#endif
 
 		if (m_connection && !IsStopped())
 		{
@@ -268,6 +285,33 @@ void ArticleDownloader::Run()
 			// if all servers from current level were tried, increase level
 			// if all servers from all levels were tried, break the loop with failure status
 
+#ifdef NZBGET_USE_RUST
+			size_t candCount = g_ServerPool->GetServers()->size();
+			std::vector<int32_t> candIds(candCount), candLevels(candCount), candGroups(candCount);
+			std::vector<uint8_t> candAvail(candCount);
+			size_t ci = 0;
+			for (NewsServer* candidateServer : g_ServerPool->GetServers())
+			{
+				candIds[ci] = candidateServer->GetId();
+				candLevels[ci] = candidateServer->GetNormLevel();
+				candGroups[ci] = candidateServer->GetGroup();
+				bool unavail = !candidateServer->GetActive() || candidateServer->GetMaxConnections() == 0 ||
+					(candidateServer->GetOptional() && g_ServerPool->IsServerBlocked(candidateServer));
+				candAvail[ci] = unavail ? 0 : 1;
+				++ci;
+			}
+			size_t failCount = failedServers.size();
+			std::vector<int32_t> failIds(failCount), failLevels(failCount), failGroups(failCount);
+			for (size_t fi = 0; fi < failCount; ++fi)
+			{
+				failIds[fi] = failedServers[fi]->GetId();
+				failLevels[fi] = failedServers[fi]->GetNormLevel();
+				failGroups[fi] = failedServers[fi]->GetGroup();
+			}
+			bool allServersOnLevelFailed = nzbget_rs_dur_article_dl_all_servers_on_level_failed(
+				level, candIds.data(), candLevels.data(), candGroups.data(), candAvail.data(), candCount,
+				failIds.data(), failLevels.data(), failGroups.data(), failCount) != 0;
+#else
 			bool allServersOnLevelFailed = true;
 			for (NewsServer* candidateServer : g_ServerPool->GetServers())
 			{
@@ -295,6 +339,7 @@ void ArticleDownloader::Run()
 					}
 				}
 			}
+#endif
 
 			if (allServersOnLevelFailed)
 			{
@@ -317,6 +362,18 @@ void ArticleDownloader::Run()
 
 	FreeConnection(status == adFinished);
 
+#ifdef NZBGET_USE_RUST
+	bool stopped = IsStopped();
+	status = (EStatus)nzbget_rs_dur_article_dl_resolve_final_status(
+		(int)status,
+		m_articleWriter.GetDuplicate() ? 1 : 0,
+		stopped ? 1 : 0,
+		(int)adFinished, (int)adFailed, (int)adRetry, (int)adFatalError);
+	if (stopped)
+	{
+		detail("Download %s cancelled", *m_infoName);
+	}
+#else
 	if (m_articleWriter.GetDuplicate())
 	{
 		status = adFinished;
@@ -332,6 +389,7 @@ void ArticleDownloader::Run()
 		detail("Download %s cancelled", *m_infoName);
 		status = adRetry;
 	}
+#endif
 
 	if (status == adFailed)
 	{
@@ -413,9 +471,17 @@ ArticleDownloader::EStatus ArticleDownloader::Download()
 		}
 
 		// throttle the bandwidth
+#ifdef NZBGET_USE_RUST
+		while (nzbget_rs_dur_article_dl_should_throttle_bandwidth(
+			IsStopped() ? 1 : 0,
+			g_WorkState->GetSpeedLimit(),
+			g_StatMeter->CalcCurrentDownloadSpeed(),
+			g_StatMeter->CalcMomentaryDownloadSpeed()) != 0)
+#else
 		while (!IsStopped() && (g_WorkState->GetSpeedLimit() > 0.0f) &&
 			(g_StatMeter->CalcCurrentDownloadSpeed() > g_WorkState->GetSpeedLimit() ||
 			g_StatMeter->CalcMomentaryDownloadSpeed() > g_WorkState->GetSpeedLimit()))
+#endif
 		{
 			SetLastUpdateTimeNow();
 			Util::Sleep(10);
@@ -694,6 +760,48 @@ bool ArticleDownloader::Write(char* buffer, int len)
 
 ArticleDownloader::EStatus ArticleDownloader::DecodeCheck()
 {
+#ifdef NZBGET_USE_RUST
+	bool rawArticle = g_Options->GetRawArticle();
+	if (rawArticle)
+	{
+		return adFinished;
+	}
+	Decoder::EStatus status = m_decoder.Check();
+	bool isYenc = m_decoder.GetFormat() == Decoder::efYenc;
+	switch (nzbget_rs_dur_article_dl_classify_decode_status(
+		0, (int)status, isYenc ? 1 : 0, m_articleWriter.GetRangeExceeded() ? 1 : 0))
+	{
+		case 1:
+			if (m_decoder.GetArticleFilename())
+			{
+				m_articleFilename = m_decoder.GetArticleFilename();
+			}
+			if (isYenc)
+			{
+				m_articleInfo->SetCrc(g_Options->GetCrcCheck() ?
+					m_decoder.GetCalculatedCrc() : m_decoder.GetExpectedCrc());
+			}
+			return adFinished;
+		case 2:
+			detail("Decoding %s failed: more data than its range", *m_infoName);
+			return adFailed;
+		case 3:
+			detail("Decoding %s failed: CRC-Error", *m_infoName);
+			return adCrcError;
+		case 4:
+			detail("Decoding %s failed: article incomplete", *m_infoName);
+			return adFailed;
+		case 5:
+			detail("Decoding %s failed: size mismatch", *m_infoName);
+			return adFailed;
+		case 6:
+			detail("Decoding %s failed: no binary data found", *m_infoName);
+			return adFailed;
+		default:
+			detail("Decoding %s failed", *m_infoName);
+			return adFailed;
+	}
+#else
 	if (!g_Options->GetRawArticle())
 	{
 		Decoder::EStatus status = m_decoder.Check();
@@ -753,6 +861,7 @@ ArticleDownloader::EStatus ArticleDownloader::DecodeCheck()
 	{
 		return adFinished;
 	}
+#endif
 }
 
 void ArticleDownloader::SetLastUpdateTimeNow()

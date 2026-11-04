@@ -108,8 +108,17 @@ void UnpackController::Run()
 
 	bool hasFiles = m_hasRarFiles || m_hasSevenZipFiles || m_hasSevenZipMultiFiles || m_hasSplittedFiles;
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_dur_unpack_ctrl_should_skip_second_attempt(
+		m_postInfo->GetUnpackTried() ? 1 : 0,
+		m_postInfo->GetParRepaired() ? 1 : 0,
+		m_password.Empty() ? 1 : 0,
+		Util::EmptyStr(g_Options->GetUnpackPassFile()) ? 1 : 0,
+		m_postInfo->GetPassListTried() ? 1 : 0) != 0)
+#else
 	if (m_postInfo->GetUnpackTried() && !m_postInfo->GetParRepaired() &&
 		(!m_password.Empty() || Util::EmptyStr(g_Options->GetUnpackPassFile()) || m_postInfo->GetPassListTried()))
+#endif
 	{
 		PrintMessage(Message::mkInfo, "Second unpack attempt skipped for %s due to par-check not repaired anything", *m_name);
 		PrintMessage(Message::mkError,
@@ -332,10 +341,22 @@ void UnpackController::ExecuteUnrar(const char* password)
 	SetLogPrefix(nullptr);
 	SetProgressLabel("");
 
+#ifdef NZBGET_USE_RUST
+	int okFlag = 0, startErr = 0, spaceErr = 0, passErr = 0;
+	nzbget_rs_dur_unpack_ctrl_eval_unrar_exit(
+		exitCode, m_allOkMessageReceived ? 1 : 0, GetTerminated() ? 1 : 0,
+		m_autoTerminated ? 1 : 0, m_unpackPasswordError ? 1 : 0,
+		&okFlag, &startErr, &spaceErr, &passErr);
+	m_unpackOk = okFlag != 0;
+	m_unpackStartError = startErr != 0;
+	m_unpackSpaceError = spaceErr != 0;
+	m_unpackPasswordError = passErr != 0;
+#else
 	m_unpackOk = exitCode == 0 && m_allOkMessageReceived && !GetTerminated();
 	m_unpackStartError = exitCode == -1 && !m_autoTerminated;
 	m_unpackSpaceError = exitCode == 5;
 	m_unpackPasswordError |= exitCode == 11; // only for rar5-archives
+#endif
 
 	if (!m_unpackOk && exitCode > 0 && !WillRetryWithPass() && !IsStopped() && !GetTerminated())
 	{
@@ -669,10 +690,17 @@ void UnpackController::Completed()
 #endif
 		{
 			PrintMessage(Message::mkError, "%s failed", *m_infoNameUp);
+#ifdef NZBGET_USE_RUST
+			m_postInfo->GetNzbInfo()->SetUnpackStatus(
+				(NzbInfo::EPostUnpackStatus)nzbget_rs_dur_unpack_ctrl_resolve_fail_status(
+					m_unpackSpaceError ? 1 : 0, m_unpackPasswordError ? 1 : 0, m_unpackDecryptError ? 1 : 0,
+					(int)NzbInfo::usSpace, (int)NzbInfo::usPassword, (int)NzbInfo::usFailure));
+#else
 			m_postInfo->GetNzbInfo()->SetUnpackStatus(
 				m_unpackSpaceError ? NzbInfo::usSpace :
 				m_unpackPasswordError || m_unpackDecryptError ? NzbInfo::usPassword :
 				NzbInfo::usFailure);
+#endif
 		}
 	}
 }
@@ -685,17 +713,28 @@ void UnpackController::RequestParCheck(bool forceRepair)
 	m_postInfo->SetForceRepair(forceRepair);
 	m_postInfo->SetUnpackTried(true);
 	m_postInfo->SetPassListTried(m_passListTried);
+#ifdef NZBGET_USE_RUST
+	m_postInfo->SetLastUnpackStatus(nzbget_rs_dur_unpack_ctrl_resolve_fail_status(
+		m_unpackSpaceError ? 1 : 0, m_unpackPasswordError ? 1 : 0, m_unpackDecryptError ? 1 : 0,
+		(int)NzbInfo::usSpace, (int)NzbInfo::usPassword, (int)NzbInfo::usFailure));
+#else
 	m_postInfo->SetLastUnpackStatus((int)(m_unpackSpaceError ? NzbInfo::usSpace :
 		m_unpackPasswordError || m_unpackDecryptError ? NzbInfo::usPassword :
 		NzbInfo::usFailure));
+#endif
 }
 #endif
 
 void UnpackController::CreateUnpackDir()
 {
+#ifdef NZBGET_USE_RUST
+	bool useInterDir = nzbget_rs_dur_direct_unpack_use_inter_dir(
+		m_postInfo->GetNzbInfo()->GetDestDir(), g_Options->GetInterDir(), PATH_SEPARATOR) != 0;
+#else
 	bool useInterDir = !Util::EmptyStr(g_Options->GetInterDir()) &&
 		!strncmp(m_postInfo->GetNzbInfo()->GetDestDir(), g_Options->GetInterDir(), strlen(g_Options->GetInterDir())) &&
 		m_postInfo->GetNzbInfo()->GetDestDir()[strlen(g_Options->GetInterDir())] == PATH_SEPARATOR;
+#endif
 
 	if (useInterDir && m_finalDir.Empty())
 	{
@@ -733,11 +772,13 @@ void UnpackController::CreateUnpackDir()
 
 void UnpackController::CheckArchiveFiles()
 {
+#ifndef NZBGET_USE_RUST
 	RegEx regExRar(".*\\.rar$");
 	RegEx regExRarMultiSeq(".*\\.[r-z][0-9][0-9]$");
 	RegEx regExSevenZip(".*\\.7z$");
 	RegEx regExSevenZipMulti(".*\\.7z\\.[0-9]+$");
 	RegEx regExSplitExt(".*\\.[a-z,0-9]{3}\\.[0-9]{3}$");
+#endif
 
 	DirBrowser dir(m_destDir);
 	while (const char* filename = dir.Next())
@@ -746,6 +787,34 @@ void UnpackController::CheckArchiveFiles()
 
 		if (!FileSystem::DirectoryExists(fullFilename) && IsDownloadedFile(filename))
 		{
+#ifdef NZBGET_USE_RUST
+			const int archiveKind = nzbget_rs_dur_unpack_ctrl_classify_archive_file(filename);
+			if (archiveKind == 1)
+			{
+				const auto begin = m_postInfo->GetExtractedArchives()->cbegin();
+				const auto end = m_postInfo->GetExtractedArchives()->cend();
+				m_hasRarFiles = true;
+				m_hasNotUnpackedRarFiles |= std::find(begin, end, filename) == end;
+			}
+			else if (archiveKind == 2)
+			{
+				m_hasSevenZipFiles = true;
+			}
+			else if (archiveKind == 3)
+			{
+				m_hasSevenZipMultiFiles = true;
+			}
+			else if (archiveKind == 4)
+			{
+				m_hasSplittedFiles = true;
+			}
+			else if (!m_hasRenamedArchiveFiles && (archiveKind == 0 || archiveKind == 6) &&
+				!Util::MatchFileExt(filename, g_Options->GetUnpackIgnoreExt(), ",;") &&
+				FileHasRarSignature(fullFilename))
+			{
+				m_hasRenamedArchiveFiles = true;
+			}
+#else
 			const char* ext = strrchr(filename, '.');
 			int extNum = ext ? atoi(ext + 1) : -1;
 
@@ -774,6 +843,7 @@ void UnpackController::CheckArchiveFiles()
 			{
 				m_hasRenamedArchiveFiles = true;
 			}
+#endif
 		}
 	}
 }
@@ -1161,6 +1231,16 @@ void UnpackController::SetProgressLabel(const char* progressLabel)
 
 bool UnpackController::HasCompletedArchiveFiles(NzbInfo* nzbInfo)
 {
+#ifdef NZBGET_USE_RUST
+	for (CompletedFile& completedFile: nzbInfo->GetCompletedFiles())
+	{
+		if (nzbget_rs_dur_unpack_ctrl_has_completed_archive_ext(completedFile.GetFilename()) != 0)
+		{
+			return true;
+		}
+	}
+	return false;
+#else
 	RegEx regExRar(".*\\.rar$");
 	RegEx regExSevenZip(".*\\.7z$");
 	RegEx regExSevenZipMulti(".*\\.7z\\.[0-9]+$");
@@ -1177,4 +1257,5 @@ bool UnpackController::HasCompletedArchiveFiles(NzbInfo* nzbInfo)
 	}
 
 	return false;
+#endif
 }

@@ -143,7 +143,14 @@ void DirectUnpack::Run()
 		}
 
 		nzbInfo->SetUnpackThread(nullptr);
+#ifdef NZBGET_USE_RUST
+		nzbInfo->SetDirectUnpackStatus(
+			(NzbInfo::EDirectUnpackStatus)nzbget_rs_dur_direct_unpack_resolve_final_status(
+				m_processed ? 1 : 0, m_unpackOk ? 1 : 0, interrupted ? 1 : 0, m_cancelled ? 1 : 0,
+				(int)NzbInfo::nsNone, (int)NzbInfo::nsSuccess, (int)NzbInfo::nsFailure));
+#else
 		nzbInfo->SetDirectUnpackStatus(m_processed ? (m_unpackOk && !interrupted && !m_cancelled ? NzbInfo::nsSuccess : (interrupted ? NzbInfo::nsNone : NzbInfo::nsFailure)) : NzbInfo::nsNone);
+#endif
 
 		if (interrupted)
 		{
@@ -269,9 +276,14 @@ bool DirectUnpack::PrepareCmdParams(const char* command, ParamList* params, cons
 
 void DirectUnpack::CreateUnpackDir()
 {
+#ifdef NZBGET_USE_RUST
+	bool useInterDir = nzbget_rs_dur_direct_unpack_use_inter_dir(
+		m_destDir, g_Options->GetInterDir(), PATH_SEPARATOR) != 0;
+#else
 	bool useInterDir = !Util::EmptyStr(g_Options->GetInterDir()) &&
 		!strncmp(m_destDir, g_Options->GetInterDir(), strlen(g_Options->GetInterDir())) &&
 		m_destDir[strlen(g_Options->GetInterDir())] == PATH_SEPARATOR;
+#endif
 
 	m_finalDirCreated = useInterDir && !FileSystem::DirectoryExists(m_finalDir);
 
@@ -326,8 +338,12 @@ bool DirectUnpack::IsMainArchive(const char* filename)
 		return false;
 	}
 
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_dur_direct_unpack_is_main_archive(filename) != 0;
+#else
 	RegEx regExRarPart(".*\\.part([0-9]+)\\.rar$");
 	return !regExRarPart.Match(filename) || atoi(filename + regExRarPart.GetMatchStart(1)) == 1;
+#endif
 }
 
 /**
@@ -346,6 +362,9 @@ bool DirectUnpack::ReadLine(char* buf, int bufSize, FILE* stream)
 		if (ch == '\b')
 		{
 			backspace = true;
+#ifdef NZBGET_USE_RUST
+			buf[i] = '\0';
+#endif
 		}
 		if (!backspace)
 		{
@@ -361,8 +380,12 @@ bool DirectUnpack::ReadLine(char* buf, int bufSize, FILE* stream)
 			i++;
 			break;
 		}
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_dur_direct_unpack_is_insert_disk_prompt(buf, (size_t)i, ch) != 0)
+#else
 		if (i > 35 && ch == ' ' &&
 			!strncmp(buf, "Insert disk with", 16) && strstr(buf, " [C]ontinue, [Q]uit "))
+#endif
 		{
 			i++;
 			break;

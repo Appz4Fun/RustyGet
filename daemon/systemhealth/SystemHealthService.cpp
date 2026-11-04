@@ -38,6 +38,9 @@
 #include "Status.h"
 #include "Json.h"
 #include "Xml.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 namespace SystemHealth
 {
@@ -96,7 +99,17 @@ void Service::ReportAlert(Alert alert)
 
 	auto it = std::find_if(
 		m_alerts.begin(), m_alerts.end(), [&](const Alert& existing)
-		{ return existing.GetSource() == alert.GetSource() && existing.GetCategory() == alert.GetCategory(); });
+		{
+#ifdef NZBGET_USE_RUST
+			return nzbget_rs_dur_health_alert_matches(
+				existing.GetSource().data(), existing.GetSource().size(),
+				existing.GetCategory().data(), existing.GetCategory().size(),
+				alert.GetSource().data(), alert.GetSource().size(),
+				alert.GetCategory().data(), alert.GetCategory().size()) != 0;
+#else
+			return existing.GetSource() == alert.GetSource() && existing.GetCategory() == alert.GetCategory();
+#endif
+		});
 
 	if (alert.GetSeverity() == Severity::Ok)
 	{

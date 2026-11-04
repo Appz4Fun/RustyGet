@@ -2340,6 +2340,76 @@ int nzbget_rs_euh_health_validate_scheduler_weekdays(int bits);
 int nzbget_rs_euh_health_validate_category_unpack(int global_unpack, int cat_unpack);
 const char* nzbget_rs_euh_health_severity_to_str(int severity);
 
+int nzbget_rs_dur_article_dl_is_retention_failure(
+    int retention_days, int64_t file_time, int64_t cur_time, int* out_age_days);
+int nzbget_rs_dur_article_dl_all_servers_on_level_failed(
+    int level, const int32_t* cand_ids, const int32_t* cand_levels,
+    const int32_t* cand_groups, const uint8_t* cand_avail, size_t cand_count,
+    const int32_t* failed_ids, const int32_t* failed_levels,
+    const int32_t* failed_groups, size_t failed_count);
+int nzbget_rs_dur_article_dl_resolve_final_status(
+    int status, int is_duplicate, int is_stopped, int ad_finished,
+    int ad_failed, int ad_retry, int ad_fatal_error);
+int nzbget_rs_dur_article_dl_should_throttle_bandwidth(
+    int is_stopped, float speed_limit, float cur_speed, float mom_speed);
+int nzbget_rs_dur_article_dl_classify_decode_status(
+    int raw_article, int decoder_status, int is_yenc, int range_exceeded);
+
+int nzbget_rs_dur_direct_unpack_resolve_final_status(
+    int processed, int unpack_ok, int interrupted, int cancelled,
+    int ns_none, int ns_success, int ns_failure);
+int nzbget_rs_dur_direct_unpack_use_inter_dir(
+    const char* dest_dir, const char* inter_dir, char sep);
+int nzbget_rs_dur_direct_unpack_is_main_archive(const char* filename);
+int nzbget_rs_dur_direct_unpack_is_insert_disk_prompt(
+    const char* buf, size_t i, int ch);
+
+int nzbget_rs_dur_unpack_ctrl_should_skip_second_attempt(
+    int unpack_tried, int par_repaired, int password_empty,
+    int pass_file_empty, int pass_list_tried);
+void nzbget_rs_dur_unpack_ctrl_eval_unrar_exit(
+    int exit_code, int all_ok_received, int terminated, int auto_terminated,
+    int prev_password_error, int* out_unpack_ok, int* out_start_error,
+    int* out_space_error, int* out_password_error);
+int nzbget_rs_dur_unpack_ctrl_classify_archive_file(const char* filename);
+int nzbget_rs_dur_unpack_ctrl_resolve_fail_status(
+    int space_error, int password_error, int decrypt_error,
+    int us_space, int us_password, int us_failure);
+int nzbget_rs_dur_unpack_ctrl_has_completed_archive_ext(const char* filename);
+
+int nzbget_rs_dur_repair_ctrl_classify_file_crc_status(
+    int cf_status, int reprocess, int has_segments,
+    int cf_success, int cf_failure, int cf_partial,
+    int fs_success, int fs_failure, int fs_partial, int fs_unknown);
+int nzbget_rs_dur_repair_ctrl_estimate_twin_vol_blocks(
+    int64_t entry_size, uint64_t twin_block_size);
+int nzbget_rs_dur_repair_ctrl_estimate_par_blocks_from_size(
+    int64_t file_size, int64_t block_size);
+int nzbget_rs_dur_repair_ctrl_match_strict_par_name(
+    const char* filename, const char* main_base);
+int nzbget_rs_dur_repair_ctrl_resolve_par_status(
+    int checker_status, int cur_par_status,
+    int ps_repaired, int ps_repair_not_needed, int ps_repair_possible,
+    int nzb_ps_skipped, int nzb_ps_success, int nzb_ps_repair_possible,
+    int nzb_ps_failure, int* out_set_par_repaired, int* out_par_repaired_val);
+
+void nzbget_rs_dur_parchecker_calc_threads_and_mem(
+    int par_threads, int cpu_cores, int effective_mem_mb,
+    int* out_threads, int* out_mem);
+uint64_t nzbget_rs_dur_parchecker_calc_pad_bytes(
+    uint64_t block_size, uint32_t block_count, uint64_t file_size);
+int nzbget_rs_dur_parchecker_compare_extra_file_stems(
+    const char* base_name1, const char* base_name2, const char* par_stem);
+
+int nzbget_rs_dur_health_classify_log_file_mode(
+    int write_log, int wl_none, int wl_rotate, int wl_reset,
+    int path_empty, int is_null_or_console, int has_parent_path);
+int nzbget_rs_dur_health_classify_cert_store(int path_empty, int cert_check);
+int nzbget_rs_dur_health_classify_lock_file(int path_empty, int daemon_mode);
+int nzbget_rs_dur_health_alert_matches(
+    const char* src1, size_t src1_len, const char* cat1, size_t cat1_len,
+    const char* src2, size_t src2_len, const char* cat2, size_t cat2_len);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

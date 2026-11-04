@@ -14612,3 +14612,526 @@ pub unsafe extern "C" fn nzbget_rs_euh_health_severity_to_str(
     crate::extutilhealth::health_severity_to_str(severity).as_ptr()
 }
 
+// ============================================================================
+// ArticleDownloader, DirectUnpack, UnpackController, Repair & ParChecker Hot-Path FFI
+// (`rust/src/dlunpackrepair.rs`)
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dur_article_dl_is_retention_failure(
+    retention_days: c_int,
+    file_time: i64,
+    cur_time: i64,
+    out_age_days: *mut c_int,
+) -> c_int {
+    let (fail, age) = crate::dlunpackrepair::article_dl_is_retention_failure(
+        retention_days,
+        file_time,
+        cur_time,
+    );
+    if !out_age_days.is_null() {
+        *out_age_days = age;
+    }
+    i32::from(fail)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dur_article_dl_all_servers_on_level_failed(
+    level: c_int,
+    cand_ids: *const i32,
+    cand_levels: *const i32,
+    cand_groups: *const i32,
+    cand_avail: *const u8,
+    cand_count: usize,
+    failed_ids: *const i32,
+    failed_levels: *const i32,
+    failed_groups: *const i32,
+    failed_count: usize,
+) -> c_int {
+    let c_ids = if cand_ids.is_null() || cand_count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(cand_ids, cand_count)
+    };
+    let c_lvls = if cand_levels.is_null() || cand_count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(cand_levels, cand_count)
+    };
+    let c_grps = if cand_groups.is_null() || cand_count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(cand_groups, cand_count)
+    };
+    let c_avl = if cand_avail.is_null() || cand_count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(cand_avail, cand_count)
+    };
+    let f_ids = if failed_ids.is_null() || failed_count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(failed_ids, failed_count)
+    };
+    let f_lvls = if failed_levels.is_null() || failed_count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(failed_levels, failed_count)
+    };
+    let f_grps = if failed_groups.is_null() || failed_count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(failed_groups, failed_count)
+    };
+    i32::from(crate::dlunpackrepair::article_dl_all_servers_on_level_failed(
+        level, c_ids, c_lvls, c_grps, c_avl, f_ids, f_lvls, f_grps,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dur_article_dl_resolve_final_status(
+    status: c_int,
+    is_duplicate: c_int,
+    is_stopped: c_int,
+    ad_finished: c_int,
+    ad_failed: c_int,
+    ad_retry: c_int,
+    ad_fatal_error: c_int,
+) -> c_int {
+    crate::dlunpackrepair::article_dl_resolve_final_status(
+        status,
+        is_duplicate != 0,
+        is_stopped != 0,
+        ad_finished,
+        ad_failed,
+        ad_retry,
+        ad_fatal_error,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dur_article_dl_should_throttle_bandwidth(
+    is_stopped: c_int,
+    speed_limit: f32,
+    cur_speed: f32,
+    mom_speed: f32,
+) -> c_int {
+    i32::from(crate::dlunpackrepair::article_dl_should_throttle_bandwidth(
+        is_stopped != 0,
+        speed_limit,
+        cur_speed,
+        mom_speed,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dur_article_dl_classify_decode_status(
+    raw_article: c_int,
+    decoder_status: c_int,
+    is_yenc: c_int,
+    range_exceeded: c_int,
+) -> c_int {
+    crate::dlunpackrepair::article_dl_classify_decode_status(
+        raw_article != 0,
+        decoder_status,
+        is_yenc != 0,
+        range_exceeded != 0,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dur_direct_unpack_resolve_final_status(
+    processed: c_int,
+    unpack_ok: c_int,
+    interrupted: c_int,
+    cancelled: c_int,
+    ns_none: c_int,
+    ns_success: c_int,
+    ns_failure: c_int,
+) -> c_int {
+    crate::dlunpackrepair::direct_unpack_resolve_final_status(
+        processed != 0,
+        unpack_ok != 0,
+        interrupted != 0,
+        cancelled != 0,
+        ns_none,
+        ns_success,
+        ns_failure,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dur_direct_unpack_use_inter_dir(
+    dest_dir: *const c_char,
+    inter_dir: *const c_char,
+    sep: c_char,
+) -> c_int {
+    let d = if dest_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(dest_dir).to_bytes()
+    };
+    let i = if inter_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(inter_dir).to_bytes()
+    };
+    i32::from(crate::dlunpackrepair::direct_unpack_use_inter_dir(
+        d,
+        i,
+        sep as u8,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dur_direct_unpack_is_main_archive(
+    filename: *const c_char,
+) -> c_int {
+    let s = if filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    i32::from(crate::dlunpackrepair::direct_unpack_is_main_archive(s))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dur_direct_unpack_is_insert_disk_prompt(
+    buf: *const c_char,
+    i: usize,
+    ch: c_int,
+) -> c_int {
+    if i <= 35 || ch != c_int::from(b' ') || buf.is_null() {
+        return 0;
+    }
+    let len = i.saturating_add(1);
+    let raw = std::slice::from_raw_parts(buf.cast::<u8>(), len);
+    let s = match raw.iter().position(|&b| b == 0) {
+        Some(pos) => &raw[..pos],
+        None => raw,
+    };
+    i32::from(crate::dlunpackrepair::direct_unpack_is_insert_disk_prompt(
+        s, i, ch,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dur_unpack_ctrl_should_skip_second_attempt(
+    unpack_tried: c_int,
+    par_repaired: c_int,
+    password_empty: c_int,
+    pass_file_empty: c_int,
+    pass_list_tried: c_int,
+) -> c_int {
+    i32::from(
+        crate::dlunpackrepair::unpack_ctrl_should_skip_second_attempt(
+            unpack_tried != 0,
+            par_repaired != 0,
+            password_empty != 0,
+            pass_file_empty != 0,
+            pass_list_tried != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dur_unpack_ctrl_eval_unrar_exit(
+    exit_code: c_int,
+    all_ok_received: c_int,
+    terminated: c_int,
+    auto_terminated: c_int,
+    prev_password_error: c_int,
+    out_unpack_ok: *mut c_int,
+    out_start_error: *mut c_int,
+    out_space_error: *mut c_int,
+    out_password_error: *mut c_int,
+) {
+    let (ok, start_err, space_err, pass_err) = crate::dlunpackrepair::unpack_ctrl_eval_unrar_exit(
+        exit_code,
+        all_ok_received != 0,
+        terminated != 0,
+        auto_terminated != 0,
+        prev_password_error != 0,
+    );
+    if !out_unpack_ok.is_null() {
+        *out_unpack_ok = i32::from(ok);
+    }
+    if !out_start_error.is_null() {
+        *out_start_error = i32::from(start_err);
+    }
+    if !out_space_error.is_null() {
+        *out_space_error = i32::from(space_err);
+    }
+    if !out_password_error.is_null() {
+        *out_password_error = i32::from(pass_err);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dur_unpack_ctrl_classify_archive_file(
+    filename: *const c_char,
+) -> c_int {
+    let s = if filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    crate::dlunpackrepair::unpack_ctrl_classify_archive_file(s)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dur_unpack_ctrl_resolve_fail_status(
+    space_error: c_int,
+    password_error: c_int,
+    decrypt_error: c_int,
+    us_space: c_int,
+    us_password: c_int,
+    us_failure: c_int,
+) -> c_int {
+    crate::dlunpackrepair::unpack_ctrl_resolve_fail_status(
+        space_error != 0,
+        password_error != 0,
+        decrypt_error != 0,
+        us_space,
+        us_password,
+        us_failure,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dur_unpack_ctrl_has_completed_archive_ext(
+    filename: *const c_char,
+) -> c_int {
+    let s = if filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    i32::from(crate::dlunpackrepair::unpack_ctrl_has_completed_archive_ext(s))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dur_repair_ctrl_classify_file_crc_status(
+    cf_status: c_int,
+    reprocess: c_int,
+    has_segments: c_int,
+    cf_success: c_int,
+    cf_failure: c_int,
+    cf_partial: c_int,
+    fs_success: c_int,
+    fs_failure: c_int,
+    fs_partial: c_int,
+    fs_unknown: c_int,
+) -> c_int {
+    crate::dlunpackrepair::repair_ctrl_classify_file_crc_status(
+        cf_status,
+        reprocess != 0,
+        has_segments != 0,
+        cf_success,
+        cf_failure,
+        cf_partial,
+        fs_success,
+        fs_failure,
+        fs_partial,
+        fs_unknown,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dur_repair_ctrl_estimate_twin_vol_blocks(
+    entry_size: i64,
+    twin_block_size: u64,
+) -> c_int {
+    crate::dlunpackrepair::repair_ctrl_estimate_twin_vol_blocks(entry_size, twin_block_size)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dur_repair_ctrl_estimate_par_blocks_from_size(
+    file_size: i64,
+    block_size: i64,
+) -> c_int {
+    crate::dlunpackrepair::repair_ctrl_estimate_par_blocks_from_size(file_size, block_size)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dur_repair_ctrl_match_strict_par_name(
+    filename: *const c_char,
+    main_base: *const c_char,
+) -> c_int {
+    let f = if filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    let b = if main_base.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(main_base).to_bytes()
+    };
+    i32::from(crate::dlunpackrepair::repair_ctrl_match_strict_par_name(
+        f, b,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dur_repair_ctrl_resolve_par_status(
+    checker_status: c_int,
+    cur_par_status: c_int,
+    ps_repaired: c_int,
+    ps_repair_not_needed: c_int,
+    ps_repair_possible: c_int,
+    nzb_ps_skipped: c_int,
+    nzb_ps_success: c_int,
+    nzb_ps_repair_possible: c_int,
+    nzb_ps_failure: c_int,
+    out_set_par_repaired: *mut c_int,
+    out_par_repaired_val: *mut c_int,
+) -> c_int {
+    let (status, set_rep, rep_val) = crate::dlunpackrepair::repair_ctrl_resolve_par_status(
+        checker_status,
+        cur_par_status,
+        ps_repaired,
+        ps_repair_not_needed,
+        ps_repair_possible,
+        nzb_ps_skipped,
+        nzb_ps_success,
+        nzb_ps_repair_possible,
+        nzb_ps_failure,
+    );
+    if !out_set_par_repaired.is_null() {
+        *out_set_par_repaired = i32::from(set_rep);
+    }
+    if !out_par_repaired_val.is_null() {
+        *out_par_repaired_val = i32::from(rep_val);
+    }
+    status
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dur_parchecker_calc_threads_and_mem(
+    par_threads: c_int,
+    cpu_cores: c_int,
+    effective_mem_mb: c_int,
+    out_threads: *mut c_int,
+    out_mem: *mut c_int,
+) {
+    let (t, m) = crate::dlunpackrepair::parchecker_calc_threads_and_mem(
+        par_threads,
+        cpu_cores,
+        effective_mem_mb,
+    );
+    if !out_threads.is_null() {
+        *out_threads = t;
+    }
+    if !out_mem.is_null() {
+        *out_mem = m;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dur_parchecker_calc_pad_bytes(
+    block_size: u64,
+    block_count: u32,
+    file_size: u64,
+) -> u64 {
+    crate::dlunpackrepair::parchecker_calc_pad_bytes(block_size, block_count, file_size)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dur_parchecker_compare_extra_file_stems(
+    base_name1: *const c_char,
+    base_name2: *const c_char,
+    par_stem: *const c_char,
+) -> c_int {
+    let b1 = if base_name1.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(base_name1).to_bytes()
+    };
+    let b2 = if base_name2.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(base_name2).to_bytes()
+    };
+    let ps = if par_stem.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(par_stem).to_bytes()
+    };
+    i32::from(crate::dlunpackrepair::parchecker_compare_extra_file_stems(
+        b1, b2, ps,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dur_health_classify_log_file_mode(
+    write_log: c_int,
+    wl_none: c_int,
+    wl_rotate: c_int,
+    wl_reset: c_int,
+    path_empty: c_int,
+    is_null_or_console: c_int,
+    has_parent_path: c_int,
+) -> c_int {
+    crate::dlunpackrepair::health_classify_log_file_mode(
+        write_log,
+        wl_none,
+        wl_rotate,
+        wl_reset,
+        path_empty != 0,
+        is_null_or_console != 0,
+        has_parent_path != 0,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dur_health_classify_cert_store(
+    path_empty: c_int,
+    cert_check: c_int,
+) -> c_int {
+    crate::dlunpackrepair::health_classify_cert_store(path_empty != 0, cert_check != 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dur_health_classify_lock_file(
+    path_empty: c_int,
+    daemon_mode: c_int,
+) -> c_int {
+    crate::dlunpackrepair::health_classify_lock_file(path_empty != 0, daemon_mode != 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dur_health_alert_matches(
+    src1: *const c_char,
+    src1_len: usize,
+    cat1: *const c_char,
+    cat1_len: usize,
+    src2: *const c_char,
+    src2_len: usize,
+    cat2: *const c_char,
+    cat2_len: usize,
+) -> c_int {
+    let s1 = if src1.is_null() || src1_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(src1.cast::<u8>(), src1_len)
+    };
+    let c1 = if cat1.is_null() || cat1_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(cat1.cast::<u8>(), cat1_len)
+    };
+    let s2 = if src2.is_null() || src2_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(src2.cast::<u8>(), src2_len)
+    };
+    let c2 = if cat2.is_null() || cat2_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(cat2.cast::<u8>(), cat2_len)
+    };
+    i32::from(crate::dlunpackrepair::health_alert_matches(s1, c1, s2, c2))
+}
+
+

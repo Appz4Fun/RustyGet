@@ -67,18 +67,25 @@ public:
 		, m_owner(owner)
 		, m_commandLine() 
 	{
+		int configuredParBuffer = g_Options->GetParBuffer();
+		int effectiveMem = g_MemoryMonitor
+			? g_MemoryMonitor->GetEffectiveParBufferMB(configuredParBuffer)
+			: (configuredParBuffer > 0 ? configuredParBuffer : 16);
+#ifdef NZBGET_USE_RUST
+		nzbget_rs_dur_parchecker_calc_threads_and_mem(
+			g_Options->GetParThreads(), Util::NumberOfCpuCores(), effectiveMem,
+			&m_threadsToUse, &m_memToUse);
+#else
 		m_threadsToUse = g_Options->GetParThreads() > 0 
 			? g_Options->GetParThreads() 
 			: Util::NumberOfCpuCores();
 		m_threadsToUse = m_threadsToUse > 0 ? m_threadsToUse : 1;
-		int configuredParBuffer = g_Options->GetParBuffer();
-		m_memToUse = g_MemoryMonitor
-			? g_MemoryMonitor->GetEffectiveParBufferMB(configuredParBuffer)
-			: (configuredParBuffer > 0 ? configuredParBuffer : 16);
+		m_memToUse = effectiveMem;
 		if (m_memToUse < 16)
 		{
 			m_memToUse = 16;
 		}
+#endif
 	}
 	Par2::Result PreProcess(const std::string& parFilename);
 	Par2::Result Process(bool dorepair);
@@ -975,6 +982,12 @@ void ParChecker::SortExtraFiles(std::vector<std::string>& extrafiles)
 		end(extrafiles),
 		[&baseParFilename](const std::string& a, const std::string& b)
 		{
+#ifdef NZBGET_USE_RUST
+			return nzbget_rs_dur_parchecker_compare_extra_file_stems(
+				FileSystem::BaseFileName(a.c_str()),
+				FileSystem::BaseFileName(b.c_str()),
+				baseParFilename.c_str()) != 0;
+#else
 			std::string name1 = FileSystem::BaseFileName(a.c_str());
 			if (char* ext = strrchr(name1.data(), '.')) *ext = '\0'; // trim extension
 
@@ -982,6 +995,7 @@ void ParChecker::SortExtraFiles(std::vector<std::string>& extrafiles)
 			if (char* ext = strrchr(name2.data(), '.')) *ext = '\0'; // trim extension
 
 			return strcmp(name1.c_str(), baseParFilename.c_str()) == 0 && strcmp(name1.c_str(), name2.c_str()) != 0;
+#endif
 		}
 	);
 }
@@ -1442,10 +1456,16 @@ bool ParChecker::VerifySuccessDataFile(Par2::DiskFile&, Par2::Par2RepairerSource
 	Par2::VerificationPacket* packet = sourceFile.GetVerificationPacket();
 
 	// extend lDownloadCrc to block size
+#ifdef NZBGET_USE_RUST
+	uint64_t padBytes = nzbget_rs_dur_parchecker_calc_pad_bytes(
+		blocksize, packet->BlockCount(), sourceFile.GetTargetFile()->FileSize());
+	downloadCrc = Par2::CRCUpdateBlock(downloadCrc ^ 0xFFFFFFFF, padBytes) ^ 0xFFFFFFFF;
+#else
 	downloadCrc = Par2::CRCUpdateBlock(downloadCrc ^ 0xFFFFFFFF,
 		(blocksize * packet->BlockCount() > sourceFile.GetTargetFile()->FileSize() ?
 			blocksize * packet->BlockCount() - sourceFile.GetTargetFile()->FileSize() : 0)
 		) ^ 0xFFFFFFFF;
+#endif
 	debug("Download-CRC: %.8x", downloadCrc);
 
 	// compute file CRC using CRCs of blocks

@@ -60,6 +60,7 @@ pub mod rpcconnopt;
 pub mod frontexthealth;
 pub mod sysnservhealth;
 pub mod extutilhealth;
+pub mod dlunpackrepair;
 
 pub mod deadpostings;
 pub mod dupewatch;

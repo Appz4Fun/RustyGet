@@ -287,6 +287,50 @@ pub fn fingerprint(sigs: &[FileSig]) -> String {
     fingerprint_of(sigs.iter().map(|s| (s.md5.as_str(), s.length)))
 }
 
+/// Compares a candidate twin's PAR2 bytes (`twin_data`) against our PAR2 set's
+/// `own_names`, `own_md5s`, and `own_print` for `RepairController::PostParChecker::RequestTwinIndex`:
+/// - `0`: exact twin PAR2 set match (same fingerprint and identical `name/md5` set)
+/// - `1`: `"describes other files"` (`fingerprint(sigs) != own_print`)
+/// - `2`: `"names the files otherwise"` (`fingerprint(sigs) == own_print`, but `name/md5` set differs)
+pub fn compare_twin_par2_data(
+    own_names: &[&[u8]],
+    own_md5s: &[&[u8]],
+    own_print: &[u8],
+    twin_data: &[u8],
+) -> i32 {
+    let sigs = par2_sigs(twin_data);
+    let twin_print = fingerprint(&sigs);
+    if twin_print.as_bytes() != own_print {
+        return 1;
+    }
+    let count = own_names.len().min(own_md5s.len());
+    let mut own_set: std::collections::BTreeSet<Vec<u8>> = std::collections::BTreeSet::new();
+    for i in 0..count {
+        let mut entry = Vec::with_capacity(own_names[i].len() + 1 + own_md5s[i].len());
+        entry.extend_from_slice(own_names[i]);
+        entry.push(b'/');
+        entry.extend_from_slice(own_md5s[i]);
+        own_set.insert(entry);
+    }
+    let mut twin_set: std::collections::BTreeSet<Vec<u8>> = std::collections::BTreeSet::new();
+    for sig in &sigs {
+        let mut entry = Vec::with_capacity(sig.name.len() + 1 + sig.md5.len());
+        entry.extend(
+            sig.name
+                .bytes()
+                .map(|b| if matches!(b, b'\n' | b'\t' | b'\r') { b'_' } else { b }),
+        );
+        entry.push(b'/');
+        entry.extend_from_slice(sig.md5.as_bytes());
+        twin_set.insert(entry);
+    }
+    if twin_set != own_set {
+        2
+    } else {
+        0
+    }
+}
+
 /// `fingerprint` over (md5, length) pairs: the sorted, distinct "md5:length"
 /// lines hashed, without a string for each.
 pub fn fingerprint_of<'a>(files: impl Iterator<Item = (&'a str, u64)>) -> String {

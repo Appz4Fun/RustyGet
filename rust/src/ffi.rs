@@ -30577,7 +30577,144 @@ pub unsafe extern "C" fn nzbget_rs_rol_xmlrpc_multicall_locate_parts(
     }
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_twin_compare_par2_data(
+    own_names_ptr: *const *const c_char,
+    own_md5s_ptr: *const *const c_char,
+    own_count: usize,
+    own_print_ptr: *const c_char,
+    twin_data_ptr: *const u8,
+    twin_data_len: usize,
+) -> i32 {
+    let mut own_names = Vec::with_capacity(own_count);
+    let mut own_md5s = Vec::with_capacity(own_count);
+    if !own_names_ptr.is_null() && !own_md5s_ptr.is_null() {
+        for i in 0..own_count {
+            own_names.push(input(*own_names_ptr.add(i)));
+            own_md5s.push(input(*own_md5s_ptr.add(i)));
+        }
+    }
+    let own_print = input(own_print_ptr);
+    let twin_data = if twin_data_ptr.is_null() || twin_data_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(twin_data_ptr, twin_data_len)
+    };
+    crate::twin::compare_twin_par2_data(&own_names, &own_md5s, own_print, twin_data)
+}
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_repair_ctrl_build_twin_filename(
+    entry_filename: *const c_char,
+    twin_files_count: usize,
+) -> RsBuf {
+    into_buf(crate::twinproberenhist::repair_ctrl_build_twin_filename(
+        input(entry_filename),
+        twin_files_count,
+    ))
+}
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_twin_check_format_live_identity_line(
+    nzb_id: i32,
+    identity: *const c_char,
+) -> RsBuf {
+    into_buf(crate::twinproberenhist::twin_check_format_live_identity_line(
+        nzb_id,
+        input(identity),
+    ))
+}
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_dupe_probe_select_server_order(
+    active_ptr: *const u8,
+    groups_ptr: *const i32,
+    norm_levels_ptr: *const i32,
+    ids_ptr: *const i32,
+    count: usize,
+    out_ids_ptr: *mut i32,
+    out_cap: usize,
+) -> usize {
+    if active_ptr.is_null()
+        || groups_ptr.is_null()
+        || norm_levels_ptr.is_null()
+        || ids_ptr.is_null()
+        || count == 0
+    {
+        return 0;
+    }
+    let active = std::slice::from_raw_parts(active_ptr, count);
+    let groups = std::slice::from_raw_parts(groups_ptr, count);
+    let norm_levels = std::slice::from_raw_parts(norm_levels_ptr, count);
+    let ids = std::slice::from_raw_parts(ids_ptr, count);
+    let order = crate::twinproberenhist::dupe_probe_select_server_order(
+        active,
+        groups,
+        norm_levels,
+        ids,
+    );
+    let n = order.len().min(out_cap);
+    if !out_ids_ptr.is_null() && n > 0 {
+        std::ptr::copy_nonoverlapping(order.as_ptr(), out_ids_ptr, n);
+    }
+    n
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_direct_unpack_readline_step(
+    buf_ptr: *mut u8,
+    buf_len: usize,
+    i: usize,
+    ch: i32,
+    backspace_ptr: *mut i32,
+    out_idx_ptr: *mut usize,
+) -> i32 {
+    if buf_ptr.is_null() || buf_len == 0 || backspace_ptr.is_null() {
+        return 1;
+    }
+    let buf = std::slice::from_raw_parts_mut(buf_ptr, buf_len);
+    let mut bs = *backspace_ptr != 0;
+    let (next_i, should_break) =
+        crate::twinproberenhist::direct_unpack_readline_step(buf, i, ch, &mut bs);
+    *backspace_ptr = i32::from(bs);
+    if !out_idx_ptr.is_null() {
+        *out_idx_ptr = next_i;
+    }
+    i32::from(should_break)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_composite_compute_member_bases(
+    member_sizes_ptr: *const i64,
+    out_bases_ptr: *mut i64,
+    count: usize,
+) -> i64 {
+    if member_sizes_ptr.is_null() || out_bases_ptr.is_null() || count == 0 {
+        return 0;
+    }
+    let member_sizes = std::slice::from_raw_parts(member_sizes_ptr, count);
+    let out_bases = std::slice::from_raw_parts_mut(out_bases_ptr, count);
+    crate::streamrepair::composite_compute_member_bases(member_sizes, out_bases)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_content_map_sum_cipher_sizes(
+    cipher_sizes_ptr: *const i64,
+    count: usize,
+) -> i64 {
+    if cipher_sizes_ptr.is_null() || count == 0 {
+        return 0;
+    }
+    let cipher_sizes = std::slice::from_raw_parts(cipher_sizes_ptr, count);
+    crate::streamrepair::content_map_sum_cipher_sizes(cipher_sizes)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_content_mapper_split_inner_name(
+    first_name: *const c_char,
+) -> RsBuf {
+    into_buf(crate::streamrepair::content_mapper_split_inner_name(input(
+        first_name,
+    )))
+}
 

@@ -5378,6 +5378,38 @@ int32_t nzbget_rs_rol_xmlrpc_multicall_find_struct_end(
     const char* request_ptr, size_t* out_struct_off);
 int32_t nzbget_rs_rol_xmlrpc_multicall_locate_parts(
     const char* request_ptr, size_t request_len, size_t* out_name_off, size_t* out_params_off);
+int32_t nzbget_rs_twin_compare_par2_data(
+    const char* const* own_names_ptr,
+    const char* const* own_md5s_ptr,
+    size_t own_count,
+    const char* own_print_ptr,
+    const uint8_t* twin_data_ptr,
+    size_t twin_data_len);
+NzbgetRsBuf nzbget_rs_tpr_repair_ctrl_build_twin_filename(
+    const char* entry_filename, size_t twin_files_count);
+NzbgetRsBuf nzbget_rs_tpr_twin_check_format_live_identity_line(
+    int32_t nzb_id, const char* identity);
+size_t nzbget_rs_tpr_dupe_probe_select_server_order(
+    const uint8_t* active_ptr,
+    const int32_t* groups_ptr,
+    const int32_t* norm_levels_ptr,
+    const int32_t* ids_ptr,
+    size_t count,
+    int32_t* out_ids_ptr,
+    size_t out_cap);
+int32_t nzbget_rs_tpr_direct_unpack_readline_step(
+    uint8_t* buf_ptr,
+    size_t buf_len,
+    size_t i,
+    int32_t ch,
+    int32_t* backspace_ptr,
+    size_t* out_idx_ptr);
+int64_t nzbget_rs_stream_composite_compute_member_bases(
+    const int64_t* member_sizes_ptr, int64_t* out_bases_ptr, size_t count);
+int64_t nzbget_rs_stream_content_map_sum_cipher_sizes(
+    const int64_t* cipher_sizes_ptr, size_t count);
+NzbgetRsBuf nzbget_rs_stream_content_mapper_split_inner_name(
+    const char* first_name);
 
 #include "nzbget_tls_cipher.h"
 

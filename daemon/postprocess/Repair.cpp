@@ -28,7 +28,6 @@
 #include "Log.h"
 #include "FileSystem.h"
 #include <fstream>
-#include <set>
 #include <iterator>
 #include "nzbget_rs.h"
 
@@ -220,7 +219,10 @@ std::string RepairController::PostParChecker::FetchTwinFile(const TwinCheck::Nzb
 		return "";
 	}
 	// a name of its own: the twin's par2-files may be named like ours
-	std::string name = "_twin." + (entry.filename.empty() ? std::to_string(m_twinFiles.size()) + ".par2" : entry.filename);
+	NzbgetRsBuf nameBuf = nzbget_rs_tpr_repair_ctrl_build_twin_filename(
+		entry.filename.c_str(), m_twinFiles.size());
+	std::string name(nameBuf.data ? nameBuf.data : "", nameBuf.len);
+	nzbget_rs_free(nameBuf);
 	BString<1024> path("%s%c%s", GetDestDir(), PATH_SEPARATOR, name.c_str());
 	{
 		std::ofstream out(fs::u8path(*path), std::ios::binary | std::ios::trunc);
@@ -299,10 +301,14 @@ std::string RepairController::PostParChecker::RequestTwinIndex()
 	std::stable_sort(candidates.begin(), candidates.end(),
 		[](const Candidate& a, const Candidate& b) { return a.known > b.known; });
 
-	std::set<std::string> ownFiles;
+	std::vector<const char*> ownNames;
+	std::vector<const char*> ownMd5s;
+	ownNames.reserve(own.size());
+	ownMd5s.reserve(own.size());
 	for (const TwinCheck::FileSig& sig : own)
 	{
-		ownFiles.insert(sig.name + "/" + sig.md5);
+		ownNames.push_back(sig.name.c_str());
+		ownMd5s.push_back(sig.md5.c_str());
 	}
 
 	for (const Candidate& candidate : candidates)
@@ -333,18 +339,16 @@ std::string RepairController::PostParChecker::RequestTwinIndex()
 		{
 			continue;
 		}
-		std::vector<TwinCheck::FileSig> sigs = TwinCheck::ParsePar2(data.data(), data.size());
-		std::set<std::string> twinFiles;
-		for (const TwinCheck::FileSig& sig : sigs)
-		{
-			twinFiles.insert(sig.name + "/" + sig.md5);
-		}
-		if (TwinCheck::Fingerprint(sigs) != ownPrint || twinFiles != ownFiles)
+		int cmp = nzbget_rs_twin_compare_par2_data(
+			ownNames.data(), ownMd5s.data(), own.size(),
+			ownPrint.c_str(),
+			reinterpret_cast<const uint8_t*>(data.data()), data.size());
+		if (cmp != 0)
 		{
 			// another encode, or the same files under other names (par2 would rename
 			// ours to them): not used
 			PrintMessage(Message::mkDetail, "%s: its par2 set %s", candidate.name.c_str(),
-				TwinCheck::Fingerprint(sigs) != ownPrint ? "describes other files" : "names the files otherwise");
+				cmp == 1 ? "describes other files" : "names the files otherwise");
 			FileSystem::DeleteFile(path.c_str());
 			m_twinFiles.pop_back();
 			continue;

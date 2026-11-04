@@ -2538,6 +2538,38 @@ pub fn build_donor_key(
     key
 }
 
+/// Computes `m_memberBases` and `m_totalSize` for `CompositeSource::CompositeSource`.
+pub fn composite_compute_member_bases(member_sizes: &[i64], out_bases: &mut [i64]) -> i64 {
+    let n = member_sizes.len().min(out_bases.len());
+    let mut total_size: i64 = 0;
+    for i in 0..n {
+        out_bases[i] = total_size;
+        total_size = total_size.wrapping_add(member_sizes[i]);
+    }
+    total_size
+}
+
+/// Sums `RunCrypto::CipherSize` values for `ContentMap::GetCipherStreamSize`.
+pub fn content_map_sum_cipher_sizes(cipher_sizes: &[i64]) -> i64 {
+    cipher_sizes
+        .iter()
+        .fold(0i64, |acc, &sz| acc.wrapping_add(sz))
+}
+
+/// Extracts the inner name for `ContentMapper::BuildSplitMap`:
+/// returns `first_name[..rfind('.')]` if `is_stream_eligible(inner_name)` is true, else empty.
+pub fn content_mapper_split_inner_name(first_name: &[u8]) -> Vec<u8> {
+    let stem = match first_name.iter().rposition(|&b| b == b'.') {
+        Some(pos) => &first_name[..pos],
+        None => first_name,
+    };
+    if is_stream_eligible(stem) {
+        stem.to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2731,5 +2763,20 @@ mod tests {
             key,
             b"6:secret1:116:movie.part01.rar4:10244:data1:117:alt.binaries.test1:11:13:51211:<msg1@news>"
         );
+
+        let mut bases = [0i64; 3];
+        assert_eq!(
+            composite_compute_member_bases(&[100, 250, 50], &mut bases),
+            400
+        );
+        assert_eq!(bases, [0, 100, 350]);
+
+        assert_eq!(content_map_sum_cipher_sizes(&[16, 32, 64]), 112);
+
+        assert_eq!(
+            content_mapper_split_inner_name(b"movie.mkv.001"),
+            b"movie.mkv"
+        );
+        assert!(content_mapper_split_inner_name(b"archive.rar.001").is_empty());
     }
 }

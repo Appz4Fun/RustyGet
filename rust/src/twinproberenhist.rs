@@ -348,6 +348,100 @@ pub fn history_coord_should_restore_paused_on_redownload(
     }
 }
 
+/// Builds the `_twin.` filename in `RepairController::PostParChecker::FetchTwinFile`:
+/// `"_twin." + (entry_filename.is_empty() ? format!("{twin_files_count}.par2") : entry_filename)`.
+pub fn repair_ctrl_build_twin_filename(entry_filename: &[u8], twin_files_count: usize) -> Vec<u8> {
+    let mut out = b"_twin.".to_vec();
+    if entry_filename.is_empty() {
+        out.extend_from_slice(format!("{twin_files_count}.par2").as_bytes());
+    } else {
+        out.extend_from_slice(entry_filename);
+    }
+    out
+}
+
+/// Formats a live store prune entry in `TwinCheck::ServiceWork`:
+/// returns `format!("{nzb_id}\t") + identity + b"\n"` when `!identity.is_empty()`, else empty.
+pub fn twin_check_format_live_identity_line(nzb_id: i32, identity: &[u8]) -> Vec<u8> {
+    if identity.is_empty() {
+        return Vec::new();
+    }
+    let mut out = format!("{nzb_id}\t").into_bytes();
+    out.extend_from_slice(identity);
+    out.push(b'\n');
+    out
+}
+
+/// Selects and sorts active servers for `DupeProbe::Measure`:
+/// filters to `active[i] != 0`, deduplicates positive `groups[i]` in iteration order,
+/// sorts by `(norm_levels[i], ids[i])`, and returns the sorted server `ids`.
+pub fn dupe_probe_select_server_order(
+    active: &[u8],
+    groups: &[i32],
+    norm_levels: &[i32],
+    ids: &[i32],
+) -> Vec<i32> {
+    let n = active
+        .len()
+        .min(groups.len())
+        .min(norm_levels.len())
+        .min(ids.len());
+    let mut seen_groups: Vec<i32> = Vec::new();
+    let mut order: Vec<(i32, i32)> = Vec::new();
+    for i in 0..n {
+        if active[i] == 0 {
+            continue;
+        }
+        let g = groups[i];
+        if g > 0 {
+            if seen_groups.contains(&g) {
+                continue;
+            }
+            seen_groups.push(g);
+        }
+        order.push((norm_levels[i], ids[i]));
+    }
+    order.sort_unstable();
+    order.into_iter().map(|(_, id)| id).collect()
+}
+
+/// Executes one character step of `DirectUnpack::ReadLine`:
+/// updates `buf` and `backspace`, and returns `(final_i_if_break, should_break)`.
+pub fn direct_unpack_readline_step(
+    buf: &mut [u8],
+    i: usize,
+    ch: i32,
+    backspace: &mut bool,
+) -> (usize, bool) {
+    if i + 1 >= buf.len() {
+        return (i, true);
+    }
+    if ch == i32::from(b'\x08') {
+        *backspace = true;
+        buf[i] = 0;
+    }
+    if !*backspace {
+        buf[i] = ch as u8;
+        buf[i + 1] = 0;
+    }
+    if ch == -1 {
+        return (i, true);
+    }
+    if ch == i32::from(b'\n') {
+        return (i + 1, true);
+    }
+    if i > 35 && ch == i32::from(b' ') {
+        let nul_end = buf[..=i + 1]
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(i + 1);
+        if crate::dlunpackrepair::direct_unpack_is_insert_disk_prompt(&buf[..nul_end], i, ch) {
+            return (i + 1, true);
+        }
+    }
+    (i, false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,5 +535,39 @@ mod tests {
         assert_eq!(history_coord_reverse_delete_index(10, 2), 7);
         assert_eq!(history_coord_should_restore_paused_on_redownload(1, 1), 1);
         assert_eq!(history_coord_should_restore_paused_on_redownload(1, 0), 0);
+
+        assert_eq!(
+            repair_ctrl_build_twin_filename(b"movie.vol00+01.par2", 3),
+            b"_twin.movie.vol00+01.par2"
+        );
+        assert_eq!(repair_ctrl_build_twin_filename(b"", 3), b"_twin.3.par2");
+
+        assert_eq!(
+            twin_check_format_live_identity_line(42, b"fp\tpost"),
+            b"42\tfp\tpost\n"
+        );
+        assert!(twin_check_format_live_identity_line(42, b"").is_empty());
+
+        assert_eq!(
+            dupe_probe_select_server_order(
+                &[1, 0, 1, 1, 1],
+                &[1, 0, 1, 0, 2],
+                &[2, 0, 0, 1, 0],
+                &[10, 20, 30, 40, 50],
+            ),
+            vec![50, 40, 10]
+        );
+
+        let mut buf = [0u8; 64];
+        let mut bs = false;
+        assert_eq!(
+            direct_unpack_readline_step(&mut buf, 0, i32::from(b'A'), &mut bs),
+            (0, false)
+        );
+        assert_eq!(buf[0], b'A');
+        assert_eq!(
+            direct_unpack_readline_step(&mut buf, 1, i32::from(b'\n'), &mut bs),
+            (2, true)
+        );
     }
 }

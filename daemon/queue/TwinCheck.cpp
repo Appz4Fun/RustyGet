@@ -22,8 +22,6 @@
 #include <map>
 #include <set>
 #include <climits>
-#include <fstream>
-#include <iterator>
 #include "TwinCheck.h"
 #include "ArticleFetcher.h"
 #include "DupeCoordinator.h"
@@ -31,7 +29,6 @@
 #include "Thread.h"
 #include "Util.h"
 #include "FileSystem.h"
-#include <sstream>
 #include <mutex>
 #include <atomic>
 #include "nzbget_rs.h"
@@ -582,11 +579,8 @@ void TwinCheck::ServiceWork()
 			lastPrune = Util::CurrentTime();
 			auto add = [&live](NzbInfo* nzbInfo)
 				{
-					std::string identity = Identity(nzbInfo);
-					if (!identity.empty())
-					{
-						live += std::to_string(nzbInfo->GetId()) + "\t" + identity + "\n";
-					}
+					live += RsString(nzbget_rs_tpr_twin_check_format_live_identity_line(
+						nzbInfo->GetId(), Identity(nzbInfo).c_str()));
 				};
 			for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
 			{

@@ -20,13 +20,9 @@
 
 #include "nzbget.h"
 
-#include <algorithm>
-#include <cctype>
 #include "ContentMap.h"
-#include "DupeStreamRepair.h"
 #include "RarReader.h"
 #include "StreamCrypto.h"
-#include "Util.h"
 #include "nzbget_rs.h"
 
 bool DiskContentSource::Read(int64 offset, void* buffer, int64 size)
@@ -40,11 +36,9 @@ CompositeSource::CompositeSource(ContentSourceSet& sources, std::vector<int> mem
 	m_sources(sources), m_memberIndexes(std::move(memberIndexes)),
 	m_memberSizes(std::move(memberSizes))
 {
-	for (int64 memberSize : m_memberSizes)
-	{
-		m_memberBases.push_back(m_totalSize);
-		m_totalSize += memberSize;
-	}
+	m_memberBases.resize(m_memberSizes.size());
+	m_totalSize = nzbget_rs_stream_composite_compute_member_bases(
+		m_memberSizes.data(), m_memberBases.data(), m_memberSizes.size());
 }
 
 bool CompositeSource::Read(int64 offset, void* buffer, int64 size)
@@ -156,12 +150,13 @@ std::vector<MemberRange> ContentMap::MapFromInner(const StreamRange& innerRange)
 
 int64 ContentMap::GetCipherStreamSize() const
 {
-	int64 total = 0;
+	std::vector<int64_t> cipherSizes;
+	cipherSizes.reserve(m_runCryptos.size());
 	for (const RunCrypto& runCrypto : m_runCryptos)
 	{
-		total += runCrypto.CipherSize;
+		cipherSizes.push_back(runCrypto.CipherSize);
 	}
-	return total;
+	return nzbget_rs_stream_content_map_sum_cipher_sizes(cipherSizes.data(), cipherSizes.size());
 }
 
 std::vector<MemberRange> ContentMap::MapCipherRange(const StreamRange& cipherRange) const
@@ -367,8 +362,10 @@ std::unique_ptr<ContentMap> ContentMapper::BuildSplitMap(const std::vector<SetMe
 {
 	// inner name: the shared stem without the numeric suffix
 	const std::string& firstName = members[set.Members[0]].Name;
-	std::string innerName = firstName.substr(0, firstName.rfind('.'));
-	if (!DupeStreamRepair::IsStreamEligible(innerName.c_str()))
+	NzbgetRsBuf innerBuf = nzbget_rs_stream_content_mapper_split_inner_name(firstName.c_str());
+	std::string innerName(innerBuf.data ? innerBuf.data : "", innerBuf.len);
+	nzbget_rs_free(innerBuf);
+	if (innerName.empty())
 	{
 		skipReason = "inner file is not a media file";
 		return nullptr;

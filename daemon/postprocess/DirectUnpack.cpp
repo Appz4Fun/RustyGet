@@ -360,34 +360,16 @@ bool DirectUnpack::IsMainArchive(const char* filename)
 bool DirectUnpack::ReadLine(char* buf, int bufSize, FILE* stream)
 {
 	int i = 0;
-	bool backspace = false;
+	int backspace = 0;
 
 	for (; i < bufSize - 1; i++)
 	{
 		int ch = fgetc(stream);
-
-		if (ch == '\b')
+		size_t outIdx = (size_t)i;
+		if (nzbget_rs_tpr_direct_unpack_readline_step(
+			reinterpret_cast<uint8_t*>(buf), (size_t)bufSize, (size_t)i, ch, &backspace, &outIdx) != 0)
 		{
-			backspace = true;
-			buf[i] = '\0';
-		}
-		if (!backspace)
-		{
-			buf[i] = ch;
-			buf[i+1] = '\0';
-		}
-		if (ch == EOF)
-		{
-			break;
-		}
-		if (ch == '\n')
-		{
-			i++;
-			break;
-		}
-		if (nzbget_rs_dur_direct_unpack_is_insert_disk_prompt(buf, (size_t)i, ch) != 0)
-		{
-			i++;
+			i = (int)outIdx;
 			break;
 		}
 	}

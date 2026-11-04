@@ -356,28 +356,34 @@ bool DupeProbe::ProbeServer(int serverId, std::set<int>& probed, ServerResult& r
 DupeProbe::Verdict DupeProbe::Measure(int limitSec)
 {
 	// the servers to ask: every active one, one per server group
-	std::vector<std::pair<int, int>> order;	// level, id
-	std::set<int> groups;
 	Verdict verdict;
-	for (NewsServer* server : g_ServerPool->GetServers())
+	Servers* servers = g_ServerPool->GetServers();
+	std::vector<uint8_t> srvActive;
+	std::vector<int32_t> srvGroups;
+	std::vector<int32_t> srvLevels;
+	std::vector<int32_t> srvIds;
+	srvActive.reserve(servers->size());
+	srvGroups.reserve(servers->size());
+	srvLevels.reserve(servers->size());
+	srvIds.reserve(servers->size());
+	for (NewsServer* server : servers)
 	{
-		if (!server->GetActive())
-		{
-			continue;
-		}
-		if (server->GetGroup() > 0 && !groups.insert(server->GetGroup()).second)
-		{
-			continue;
-		}
-		verdict.ActiveServers++;
-		order.emplace_back(server->GetNormLevel(), server->GetId());
+		srvActive.push_back(server->GetActive() ? 1 : 0);
+		srvGroups.push_back(server->GetGroup());
+		srvLevels.push_back(server->GetNormLevel());
+		srvIds.push_back(server->GetId());
 	}
-	std::sort(order.begin(), order.end());
+	std::vector<int32_t> order(servers->size());
+	size_t orderLen = nzbget_rs_tpr_dupe_probe_select_server_order(
+		srvActive.data(), srvGroups.data(), srvLevels.data(), srvIds.data(),
+		servers->size(), order.data(), order.size());
+	order.resize(orderLen);
+	verdict.ActiveServers = (int)orderLen;
 
 	std::set<int> probed;
 	time_t start = Util::CurrentTime();
 
-	for (const std::pair<int, int>& entry : order)
+	for (int serverId : order)
 	{
 		if (IsStopped() || Util::CurrentTime() - start > limitSec)
 		{
@@ -386,7 +392,7 @@ DupeProbe::Verdict DupeProbe::Measure(int limitSec)
 		}
 
 		ServerResult result;
-		bool reached = ProbeServer(entry.second, probed, result);
+		bool reached = ProbeServer(serverId, probed, result);
 		if (result.Unreachable)
 		{
 			verdict.ActiveServers--;

@@ -156,6 +156,11 @@ bool IsSampleFile(std::string_view filename)
 	return nzbget_rs_file_type(24, filename.data(), filename.size()) != 0;
 }
 
+bool IsKnownCollectionExt(std::string_view ext)
+{
+	return nzbget_rs_file_type(25, ext.data(), ext.size()) != 0;
+}
+
 std::string_view SniffExtension(std::span<const uint8_t> header)
 {
 	size_t len = 0;

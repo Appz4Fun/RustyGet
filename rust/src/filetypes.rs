@@ -182,6 +182,22 @@ pub fn is_sample_file(name: &[u8]) -> bool {
     is_sample_stem(strip_last_ext(basename(name)))
 }
 
+pub fn is_known_collection_ext(ext: &[u8]) -> bool {
+    !ext.is_empty()
+        && (is_video_ext(ext)
+            || is_audio_ext(ext)
+            || is_subtitle_ext(ext)
+            || is_nfo_ext(ext)
+            || is_book_ext(ext)
+            || is_image_ext(ext)
+            || is_archive_ext(ext)
+            || is_parity_ext(ext)
+            || is_disc_structure_ext(ext)
+            || is_disc_image_ext(ext)
+            || is_disc_descriptor_ext(ext)
+            || is_generic_disc_image_ext(ext))
+}
+
 fn at(h: &[u8], offset: usize, lit: &[u8]) -> bool {
     h.len() >= offset + lit.len() && &h[offset..offset + lit.len()] == lit
 }
@@ -312,6 +328,10 @@ mod tests {
         assert!(is_sample_file(b"/a/Movie-sample.mkv"));
         assert!(is_clutter_file(b"._Movie.mkv"));
         assert!(!is_archive_file(b"x.mkv"));
+        assert!(is_known_collection_ext(b".mkv"));
+        assert!(is_known_collection_ext(b".par2"));
+        assert!(!is_known_collection_ext(b""));
+        assert!(!is_known_collection_ext(b".xyz123"));
     }
 
     #[test]

@@ -276,6 +276,34 @@ pub fn http_client_find_header_colon(line: &[u8]) -> Option<usize> {
     line.iter().position(|&b| b == b':')
 }
 
+/// Port of HTTP status-line version validation in `HttpClient::ReadStatusCode`.
+pub fn http_client_validate_version(http_version: &[u8], stream_ok: bool) -> bool {
+    stream_ok && http_version.windows(5).any(|w| w == b"HTTP/")
+}
+
+/// Port of `HttpClient::GetHeaders`.
+pub fn http_client_build_headers(
+    method: &[u8],
+    host: &[u8],
+    version: &[u8],
+    include_gzip: bool,
+) -> Vec<u8> {
+    let mut headers = Vec::with_capacity(
+        method.len() + host.len() + version.len() + 112,
+    );
+    headers.extend_from_slice(method);
+    headers.extend_from_slice(b" / HTTP/1.1\r\nHost: ");
+    headers.extend_from_slice(host);
+    headers.extend_from_slice(b"\r\nUser-Agent: nzbget/");
+    headers.extend_from_slice(version);
+    headers.extend_from_slice(b"\r\n");
+    if include_gzip {
+        headers.extend_from_slice(b"Accept-Encoding: gzip\r\n");
+    }
+    headers.extend_from_slice(b"Accept: */*\r\nConnection: close\r\n\r\n");
+    headers
+}
+
 /// Port of `SpeedTest::CalculateSpeedInMbps`.
 pub fn speed_test_calc_mbps(bytes: u32, time_sec: f64) -> f64 {
     let bits = (bytes as f64) * 8.0;
@@ -294,6 +322,38 @@ pub fn speed_test_is_required_more(dataset_len: usize, curr_median: f64, prev_p2
 /// Port of `SpeedTest::HasExceededMaxFailures`.
 pub fn speed_test_exceeded_max_failures(failures: i32, iterations: i32) -> bool {
     failures > (iterations / 2).max(2)
+}
+
+/// Port of `SpeedTest::GetFinalSpeed`.
+pub fn speed_test_final_speed(first_median: f64, p90s: &[f64]) -> f64 {
+    let mut max_speed = first_median;
+    for &speed in p90s {
+        if max_speed < speed {
+            max_speed = speed;
+        }
+    }
+    max_speed
+}
+
+/// Port of `SpeedTest::MakeRequest`.
+pub fn speed_test_make_request(
+    path: &[u8],
+    query: &[u8],
+    filesize: u32,
+    host: &[u8],
+) -> Vec<u8> {
+    let size_str = filesize.to_string();
+    let mut req = Vec::with_capacity(
+        path.len() + query.len() + size_str.len() + host.len() + 56,
+    );
+    req.extend_from_slice(b"GET /");
+    req.extend_from_slice(path);
+    req.extend_from_slice(query);
+    req.extend_from_slice(size_str.as_bytes());
+    req.extend_from_slice(b" HTTP/1.1\r\nHost: ");
+    req.extend_from_slice(host);
+    req.extend_from_slice(b"\r\nConnection: close\r\n\r\n");
+    req
 }
 
 /// Port of pre-loop plan classification in `PostDownloadRenamer::Controller::Run`
@@ -520,12 +580,24 @@ mod tests {
         assert_eq!(xml_reader_local_name_offset(b"newznab:attr"), 8);
         assert_eq!(xml_reader_local_name_offset(b"item"), 0);
         assert_eq!(http_client_find_header_colon(b"Content-Type: text/plain"), Some(12));
+        assert!(http_client_validate_version(b"HTTP/1.1", true));
+        assert!(!http_client_validate_version(b"HTTP/1.1", false));
+        assert!(!http_client_validate_version(b"FTP/1.0", true));
+        assert_eq!(
+            http_client_build_headers(b"GET", b"example.com", b"24.0", true),
+            b"GET / HTTP/1.1\r\nHost: example.com\r\nUser-Agent: nzbget/24.0\r\nAccept-Encoding: gzip\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+        );
 
         assert!((speed_test_calc_mbps(1_000_000, 1.0) - 8.0).abs() < 1e-9);
         assert!(speed_test_is_required_more(1, 10.0, 20.0));
         assert!(!speed_test_is_required_more(2, 10.0, 20.0));
         assert!(speed_test_exceeded_max_failures(3, 4));
         assert!(!speed_test_exceeded_max_failures(2, 4));
+        assert!((speed_test_final_speed(50.0, &[40.0, 85.5, 70.0]) - 85.5).abs() < 1e-9);
+        assert_eq!(
+            speed_test_make_request(b"__down", b"?bytes=", 1000, b"speed.cloudflare.com"),
+            b"GET /__down?bytes=1000 HTTP/1.1\r\nHost: speed.cloudflare.com\r\nConnection: close\r\n\r\n"
+        );
 
         assert_eq!(post_renamer_classify_plan(true, false, true, false, false), 1);
         assert_eq!(post_renamer_classify_plan(false, false, true, true, true), 4);

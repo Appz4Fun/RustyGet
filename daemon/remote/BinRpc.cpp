@@ -37,11 +37,6 @@
 extern void ExitProc();
 extern void Reload();
 
-const char* g_MessageRequestNames[] =
-	{ "N/A", "Download", "Pause/Unpause", "List", "Set download rate", "Dump debug",
-		"Edit queue", "Log", "Quit", "Reload", "Version", "Post-queue", "Write log", "Scan",
-		"History" };
-
 const uint32 g_MessageRequestSizes[] =
 	{ 0,
 		sizeof(SNzbDownloadRequest),
@@ -60,7 +55,6 @@ const uint32 g_MessageRequestSizes[] =
 		sizeof(SNzbHistoryRequest)
 	};
 
-static_assert(sizeof(g_MessageRequestNames) / sizeof(g_MessageRequestNames[0]) == rrHistory + 1);
 static_assert(sizeof(g_MessageRequestSizes) / sizeof(g_MessageRequestSizes[0]) == rrHistory + 1);
 
 

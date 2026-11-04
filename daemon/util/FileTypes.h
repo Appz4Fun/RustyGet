@@ -56,6 +56,7 @@ namespace FileTypes
 	bool IsRarFile(std::string_view filename);
 	bool IsArchiveFile(std::string_view filename);
 	bool IsSampleFile(std::string_view filename);
+	bool IsKnownCollectionExt(std::string_view ext);
 
 	std::string_view SniffExtension(std::span<const uint8_t> header);
 	std::string_view SniffExtension(const std::filesystem::path& filePath);

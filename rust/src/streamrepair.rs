@@ -2477,6 +2477,67 @@ pub fn select_extracted_inner(
     (matches.into_iter().next().unwrap(), false)
 }
 
+/// Port of `DupeStreamRepair::BuildDonorKey`: builds a length-prefixed canonical key for a donor NZB
+/// and password, preserving parser order of files, groups, and articles.
+#[allow(clippy::too_many_arguments)]
+pub fn build_donor_key(
+    password: &[u8],
+    file_names: &[&[u8]],
+    file_sizes: &[i64],
+    file_is_par: &[u8],
+    file_group_counts: &[usize],
+    groups: &[&[u8]],
+    file_article_counts: &[usize],
+    article_part_numbers: &[i32],
+    article_sizes: &[i32],
+    article_message_ids: &[&[u8]],
+) -> Vec<u8> {
+    let mut key = Vec::new();
+    let append = |out: &mut Vec<u8>, val: &[u8]| {
+        let len_str = val.len().to_string();
+        out.extend_from_slice(len_str.as_bytes());
+        out.push(b':');
+        out.extend_from_slice(val);
+    };
+    append(&mut key, password);
+    let file_count = file_names
+        .len()
+        .min(file_sizes.len())
+        .min(file_is_par.len())
+        .min(file_group_counts.len())
+        .min(file_article_counts.len());
+    append(&mut key, file_count.to_string().as_bytes());
+    let mut grp_idx = 0usize;
+    let mut art_idx = 0usize;
+    for i in 0..file_count {
+        append(&mut key, file_names[i]);
+        append(&mut key, file_sizes[i].to_string().as_bytes());
+        append(&mut key, if file_is_par[i] != 0 { b"par" } else { b"data" });
+        let g_cnt = file_group_counts[i];
+        append(&mut key, g_cnt.to_string().as_bytes());
+        for _ in 0..g_cnt {
+            if grp_idx < groups.len() {
+                append(&mut key, groups[grp_idx]);
+                grp_idx += 1;
+            }
+        }
+        let a_cnt = file_article_counts[i];
+        append(&mut key, a_cnt.to_string().as_bytes());
+        for _ in 0..a_cnt {
+            if art_idx < article_part_numbers.len()
+                && art_idx < article_sizes.len()
+                && art_idx < article_message_ids.len()
+            {
+                append(&mut key, article_part_numbers[art_idx].to_string().as_bytes());
+                append(&mut key, article_sizes[art_idx].to_string().as_bytes());
+                append(&mut key, article_message_ids[art_idx]);
+                art_idx += 1;
+            }
+        }
+    }
+    key
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2652,6 +2713,23 @@ mod tests {
                 offset: 100,
                 size: 100
             }
+        );
+
+        let key = build_donor_key(
+            b"secret",
+            &[b"movie.part01.rar"],
+            &[1024],
+            &[0],
+            &[1],
+            &[b"alt.binaries.test"],
+            &[1],
+            &[1],
+            &[512],
+            &[b"<msg1@news>"],
+        );
+        assert_eq!(
+            key,
+            b"6:secret1:116:movie.part01.rar4:10244:data1:117:alt.binaries.test1:11:13:51211:<msg1@news>"
         );
     }
 }

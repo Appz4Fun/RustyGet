@@ -19,7 +19,6 @@
 
 #include "nzbget.h"
 
-#include <sstream>
 #include "Util.h"
 #include "NetworkSpeedTest.h"
 #include "Connection.h"
@@ -141,30 +140,25 @@ namespace Network
 	double SpeedTest::GetFinalSpeed() const
 	{
 		const auto& dataAnalytics = m_dataset.front();
-
-		double maxSpeed = dataAnalytics.GetMedian();
+		std::vector<double> p90s;
+		p90s.reserve(m_dataset.size());
 		for (const auto& analytics : m_dataset)
 		{
-			double speed = analytics.GetPercentile90();
-			if (maxSpeed < speed)
-			{
-				maxSpeed = speed;
-			}
+			p90s.push_back(analytics.GetPercentile90());
 		}
-
-		return maxSpeed;
+		return nzbget_rs_snh_speed_test_final_speed(
+			dataAnalytics.GetMedian(), p90s.data(), p90s.size());
 	}
 
 	std::string SpeedTest::MakeRequest(uint32_t filesize) const
 	{
-		std::ostringstream request;
-
-		request << "GET /" << m_path;
-		request << m_query << std::to_string(filesize);
-		request << " HTTP/1.1\r\n";
-		request << "Host: " << m_host << "\r\n";
-		request << "Connection: close\r\n\r\n";
-
-		return request.str();
+		NzbgetRsBuf buf = nzbget_rs_snh_speed_test_make_request(
+			m_path.data(), m_path.size(),
+			m_query.data(), m_query.size(),
+			filesize,
+			m_host.data(), m_host.size());
+		std::string req(buf.data ? buf.data : "", buf.len);
+		nzbget_rs_free(buf);
+		return req;
 	}
 }

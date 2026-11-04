@@ -86,13 +86,7 @@ namespace CollectionAnalyzer
 					fe.ext = fs::u8string(entryPath.extension());
 					fe.size = size;
 
-					bool isKnown = !fe.ext.empty() && (
-						FileTypes::IsVideoExt(fe.ext) || FileTypes::IsAudioExt(fe.ext) ||
-						FileTypes::IsSubtitleExt(fe.ext) || FileTypes::IsNfoExt(fe.ext) ||
-						FileTypes::IsBookExt(fe.ext) || FileTypes::IsImageExt(fe.ext) ||
-						FileTypes::IsArchiveExt(fe.ext) || FileTypes::IsParityExt(fe.ext) ||
-						FileTypes::IsDiscStructureExt(fe.ext) || FileTypes::IsDiscImageExt(fe.ext) ||
-						FileTypes::IsDiscDescriptorExt(fe.ext) || FileTypes::IsGenericDiscImageExt(fe.ext));
+					bool isKnown = FileTypes::IsKnownCollectionExt(fe.ext);
 
 					if (!isKnown)
 					{

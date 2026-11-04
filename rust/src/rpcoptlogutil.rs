@@ -373,6 +373,59 @@ pub fn nstring_cstring_trim_right_len(s: &[u8]) -> usize {
     end
 }
 
+/// Finds the byte offset of `"</struct>"` in `req` for `XmlRpcProcessor::MutliCall`.
+pub fn xmlrpc_multicall_find_struct_end(req: &[u8]) -> Option<usize> {
+    req.windows(9).position(|w| w == b"</struct>")
+}
+
+/// Scans a NUL-terminated C string linearly until `"</struct>"` is matched or NUL is reached,
+/// avoiding a full-buffer `strlen` on each multicall iteration.
+///
+/// # Safety
+/// `request_ptr` must be null or point to a valid NUL-terminated C string.
+pub unsafe fn xmlrpc_multicall_find_struct_end_cstr(
+    request_ptr: *const c_char,
+) -> Option<usize> {
+    if request_ptr.is_null() {
+        return None;
+    }
+    const NEEDLE: &[u8; 9] = b"</struct>";
+    let base = request_ptr.cast::<u8>();
+    let mut i = 0usize;
+    loop {
+        let mut matched = 0usize;
+        while matched < NEEDLE.len() {
+            let b = *base.add(i + matched);
+            if b == 0 {
+                return None;
+            }
+            if b != NEEDLE[matched] {
+                break;
+            }
+            matched += 1;
+        }
+        if matched == NEEDLE.len() {
+            return Some(i);
+        }
+        if *base.add(i) == 0 {
+            return None;
+        }
+        i += 1;
+    }
+}
+
+/// Locates `"</name>"` and optional `"params</name>"` within a `<struct>` slice for
+/// `XmlRpcProcessor::MutliCall`. Returns `(name_end_off, params_start_off_or_zero)`.
+pub fn xmlrpc_multicall_locate_parts(call_slice: &[u8]) -> Option<(usize, usize)> {
+    let name_off = call_slice.windows(7).position(|w| w == b"</name>")?;
+    let params_off = call_slice[name_off..]
+        .windows(13)
+        .position(|w| w == b"params</name>")
+        .map(|rel| name_off + rel)
+        .unwrap_or(0);
+    Some((name_off, params_off))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,5 +599,24 @@ mod tests {
         assert_eq!(nstring_cstring_trim_right_len(b"hello \t\r\n"), 5);
         assert_eq!(nstring_cstring_trim_right_len(b"   \n"), 0);
         assert_eq!(nstring_cstring_trim_right_len(b"abc"), 3);
+
+        let xml = b"<struct><member><name>methodName</name><value><string>version</string></value></member><member><name>params</name><value><array/></value></member></struct>";
+        assert_eq!(xmlrpc_multicall_find_struct_end(xml), Some(146));
+        let c_xml = CString::new(&xml[..]).unwrap();
+        unsafe {
+            assert_eq!(
+                xmlrpc_multicall_find_struct_end_cstr(c_xml.as_ptr()),
+                Some(146)
+            );
+            assert_eq!(
+                xmlrpc_multicall_find_struct_end_cstr(std::ptr::null()),
+                None
+            );
+        }
+        assert_eq!(
+            xmlrpc_multicall_locate_parts(&xml[..146]),
+            Some((32, 101))
+        );
+        assert_eq!(xmlrpc_multicall_locate_parts(b"<struct></struct>"), None);
     }
 }

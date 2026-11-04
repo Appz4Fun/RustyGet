@@ -36,8 +36,6 @@
 #include "Options.h"
 #include "Log.h"
 #include "Util.h"
-#include <type_traits>
-#include "nzbget_rs.h"
 
 bool DupeStreamRepair::IsStreamEligible(const char* filename)
 {
@@ -515,35 +513,54 @@ bool DupeStreamRepair::ExceedsDecompressCap(int64 totalBytes, int64 addBytes,
 
 std::string DupeStreamRepair::BuildDonorKey(NzbInfo* donorNzb, const char* password)
 {
-	std::string key;
-	// Length-prefix every field: neither separator characters in names nor a
-	// hash collision may cause a different donor to be discarded. Preserve
-	// parser order because candidate and newsgroup selection can depend on it.
-	auto append = [&key](const std::string& value)
-	{
-		key += std::to_string(value.size());
-		key += ':';
-		key += value;
-	};
-	append(password ? password : "");
-	append(std::to_string(donorNzb->GetFileList()->size()));
+	size_t fileCount = donorNzb->GetFileList()->size();
+	std::vector<const char*> fileNames;
+	std::vector<int64_t> fileSizes;
+	std::vector<uint8_t> fileIsPar;
+	std::vector<size_t> fileGroupCounts;
+	std::vector<const char*> groups;
+	std::vector<size_t> fileArticleCounts;
+	std::vector<int32_t> artPartNumbers;
+	std::vector<int32_t> artSizes;
+	std::vector<const char*> artMessageIds;
+	fileNames.reserve(fileCount);
+	fileSizes.reserve(fileCount);
+	fileIsPar.reserve(fileCount);
+	fileGroupCounts.reserve(fileCount);
+	fileArticleCounts.reserve(fileCount);
 	for (FileInfo* file : donorNzb->GetFileList())
 	{
-		append(file->GetFilename());
-		append(std::to_string(file->GetSize()));
-		append(file->GetParFile() ? "par" : "data");
-		append(std::to_string(file->GetGroups()->size()));
+		fileNames.push_back(file->GetFilename());
+		fileSizes.push_back(file->GetSize());
+		fileIsPar.push_back(file->GetParFile() ? 1 : 0);
+		fileGroupCounts.push_back(file->GetGroups()->size());
 		for (const CString& group : *file->GetGroups())
 		{
-			append(*group);
+			groups.push_back(*group);
 		}
-		append(std::to_string(file->GetArticles()->size()));
+		fileArticleCounts.push_back(file->GetArticles()->size());
 		for (const std::unique_ptr<ArticleInfo>& article : *file->GetArticles())
 		{
-			append(std::to_string(article->GetPartNumber()));
-			append(std::to_string(article->GetSize()));
-			append(article->GetMessageId());
+			artPartNumbers.push_back(article->GetPartNumber());
+			artSizes.push_back(article->GetSize());
+			artMessageIds.push_back(article->GetMessageId());
 		}
 	}
+	NzbgetRsBuf buf = nzbget_rs_stream_build_donor_key(
+		password,
+		fileNames.data(),
+		fileSizes.data(),
+		fileIsPar.data(),
+		fileGroupCounts.data(),
+		fileCount,
+		groups.data(),
+		groups.size(),
+		fileArticleCounts.data(),
+		artPartNumbers.data(),
+		artSizes.data(),
+		artMessageIds.data(),
+		artMessageIds.size());
+	std::string key(buf.data ? buf.data : "", buf.len);
+	nzbget_rs_free(buf);
 	return key;
 }

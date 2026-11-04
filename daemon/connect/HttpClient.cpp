@@ -151,7 +151,8 @@ namespace Network
 		stream >> httpVersion;
 		stream >> statusCode;
 
-		if (!stream || httpVersion.find("HTTP/") == std::string::npos)
+		if (!nzbget_rs_snh_http_client_validate_version(
+			httpVersion.data(), httpVersion.size(), stream ? 1 : 0))
 		{
 			throw std::runtime_error("Invalid response");
 		}
@@ -161,15 +162,18 @@ namespace Network
 
 	std::string HttpClient::GetHeaders(const std::string& method, const std::string& host) const
 	{
-		std::string headers = method + " / HTTP/1.1\r\n";
-		headers += "Host: " + host + "\r\n";
-		headers += std::string("User-Agent: nzbget/") + Util::VersionRevision() + "\r\n";
 #ifndef DISABLE_GZIP
-		headers += "Accept-Encoding: gzip\r\n";
+		int includeGzip = 1;
+#else
+		int includeGzip = 0;
 #endif
-		headers += "Accept: */*\r\n";
-		headers += "Connection: close\r\n\r\n";
-
+		NzbgetRsBuf buf = nzbget_rs_snh_http_client_build_headers(
+			method.data(), method.size(),
+			host.data(), host.size(),
+			Util::VersionRevision(),
+			includeGzip);
+		std::string headers(buf.data ? buf.data : "", buf.len);
+		nzbget_rs_free(buf);
 		return headers;
 	}
 

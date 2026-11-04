@@ -627,17 +627,20 @@ void XmlRpcProcessor::MutliCall()
 	response.Append("<array><data>");
 
 	char* requestPtr = m_request;
-	char* callEnd = strstr(requestPtr, "</struct>");
-	while (callEnd)
+	size_t structOff = 0;
+	while (nzbget_rs_rol_xmlrpc_multicall_find_struct_end(requestPtr, &structOff))
 	{
+		char* callEnd = requestPtr + structOff;
 		*callEnd = '\0';
 		debug("MutliCall, request=%s", requestPtr);
-		char* nameEnd = strstr(requestPtr, "</name>");
-		if (!nameEnd)
+		size_t nameOff = 0;
+		size_t paramsOff = 0;
+		if (!nzbget_rs_rol_xmlrpc_multicall_locate_parts(requestPtr, structOff, &nameOff, &paramsOff))
 		{
 			error = true;
 			break;
 		}
+		char* nameEnd = requestPtr + nameOff;
 
 		char methodName[100];
 		methodName[0] = '\0';
@@ -651,8 +654,7 @@ void XmlRpcProcessor::MutliCall()
 		command->SetProtocol(m_protocol);
 		command->SetHttpMethod(m_httpMethod);
 		command->SetUserAccess(m_userAccess);
-		char* paramsStart = strstr(nameEnd, "params</name>");
-		command->SetRequest(paramsStart ? paramsStart : requestPtr);
+		command->SetRequest(requestPtr + paramsOff);
 		m_safeMethod |= command->IsSafeMethod();
 		command->Execute();
 
@@ -672,7 +674,6 @@ void XmlRpcProcessor::MutliCall()
 		}
 
 		requestPtr = callEnd + 9; //strlen("</struct>")
-		callEnd = strstr(requestPtr, "</struct>");
 	}
 
 	if (error)

@@ -29,9 +29,6 @@
 #include "DiskState.h"
 #include "Util.h"
 
-static const int DAYS_UP_TO_2013_JAN_1 = 15706;
-static const int DAYS_IN_TWENTY_YEARS = 366*20;
-
 void ServerVolume::CalcSlots(time_t locCurTime)
 {
 	// rust/src/statmeter.rs

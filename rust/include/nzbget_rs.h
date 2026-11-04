@@ -215,7 +215,7 @@ int nzbget_rs_is_excessively_obfuscated(const char* str, size_t len);
 NzbgetRsBuf nzbget_rs_deobfuscate(const char* str, size_t len);
 
 // FileTypes (rust/src/filetypes.rs): name checks by number, in FileTypes.h's
-// order (IsSevenZipExt 0 ... IsSampleFile 24); a sniffed extension is static
+// order (IsSevenZipExt 0 ... IsKnownCollectionExt 25); a sniffed extension is static
 // ("" for none), its length in outLen. Inputs are borrowed byte spans; NULL
 // means empty regardless of len. outLen may be NULL. Returned strings have
 // static lifetime and must not be freed. Panics abort at the ABI boundary.
@@ -5338,6 +5338,46 @@ NzbgetRsBuf nzbget_rs_dqh_fleet_ensure_nzb_ext(const char* name_ptr, size_t name
 void nzbget_rs_dqh_fleet_visit_pipe_names(
     const char* names_ptr, size_t names_len, void* ctx,
     void (*visit)(void* ctx, const char* part_ptr, size_t part_len));
+
+int32_t nzbget_rs_srp_streamcrypto_fill_rar3_seed(
+    const uint32_t* wchars_ptr, size_t wchars_len, const uint8_t* salt_ptr,
+    uint8_t* out_seed_ptr, size_t out_seed_len);
+int32_t nzbget_rs_srp_streamcrypto_rar5_iterations(
+    uint8_t kdf_count, int32_t add_psw_check_offset, int32_t* out_iterations);
+void nzbget_rs_srp_streamcrypto_next_batch(
+    int64_t done_blocks, int64_t total_blocks, int64_t block_size,
+    int64_t* out_batch, int32_t* out_len);
+int32_t nzbget_rs_snh_http_client_validate_version(
+    const char* version_ptr, size_t version_len, int32_t stream_ok);
+NzbgetRsBuf nzbget_rs_snh_http_client_build_headers(
+    const char* method_ptr, size_t method_len,
+    const char* host_ptr, size_t host_len,
+    const char* version_cstr, int32_t include_gzip);
+double nzbget_rs_snh_speed_test_final_speed(
+    double first_median, const double* p90s_ptr, size_t p90s_len);
+NzbgetRsBuf nzbget_rs_snh_speed_test_make_request(
+    const char* path_ptr, size_t path_len,
+    const char* query_ptr, size_t query_len,
+    uint32_t filesize,
+    const char* host_ptr, size_t host_len);
+NzbgetRsBuf nzbget_rs_stream_build_donor_key(
+    const char* password,
+    const char* const* file_names_ptr,
+    const int64_t* file_sizes_ptr,
+    const uint8_t* file_is_par_ptr,
+    const size_t* file_group_counts_ptr,
+    size_t file_count,
+    const char* const* groups_ptr,
+    size_t total_groups,
+    const size_t* file_article_counts_ptr,
+    const int32_t* art_part_numbers_ptr,
+    const int32_t* art_sizes_ptr,
+    const char* const* art_message_ids_ptr,
+    size_t total_articles);
+int32_t nzbget_rs_rol_xmlrpc_multicall_find_struct_end(
+    const char* request_ptr, size_t* out_struct_off);
+int32_t nzbget_rs_rol_xmlrpc_multicall_locate_parts(
+    const char* request_ptr, size_t request_len, size_t* out_name_off, size_t* out_params_off);
 
 #include "nzbget_tls_cipher.h"
 

@@ -219,6 +219,59 @@ pub fn srp_repair_ctrl_is_usable_par_block_candidate(
     parsed && block_count > 0
 }
 
+/// Builds the RAR3 KDF seed (`len * 2` bytes of UTF-16LE low-16-bit code units from `wchars`
+/// followed by the 8-byte `salt`). Returns `false` if `wchars` is empty or `out_seed` is too small.
+pub fn srp_streamcrypto_fill_rar3_seed(
+    wchars: &[u32],
+    salt: &[u8; 8],
+    out_seed: &mut [u8],
+) -> bool {
+    if wchars.is_empty() {
+        return false;
+    }
+    let needed = wchars.len() * 2 + 8;
+    if out_seed.len() < needed {
+        return false;
+    }
+    for (i, &ch) in wchars.iter().enumerate() {
+        out_seed[i * 2] = (ch & 0xFF) as u8;
+        out_seed[i * 2 + 1] = ((ch & 0xFF00) >> 8) as u8;
+    }
+    out_seed[wchars.len() * 2..needed].copy_from_slice(salt);
+    true
+}
+
+/// Computes the RAR5 PBKDF2-HMAC-SHA256 iteration count for `kdf_count` (must be `<= 24`),
+/// optionally adding `32` for `DeriveRar5PswCheck`.
+pub fn srp_streamcrypto_rar5_iterations(
+    kdf_count: u8,
+    add_psw_check_offset: bool,
+) -> Option<i32> {
+    if kdf_count > 24 {
+        return None;
+    }
+    let base = 1i32 << kdf_count;
+    Some(if add_psw_check_offset {
+        base + 32
+    } else {
+        base
+    })
+}
+
+/// Computes the next batch block count (capped at `1 << 16` blocks = 1 MiB) and byte length
+/// for `RarCryptoContext::Crypt`.
+pub fn srp_streamcrypto_next_batch(
+    done_blocks: i64,
+    total_blocks: i64,
+    block_size: i64,
+) -> (i64, i32) {
+    const BATCH_BLOCKS: i64 = 1 << 16;
+    let rem = total_blocks.saturating_sub(done_blocks);
+    let batch = if rem < BATCH_BLOCKS { rem } else { BATCH_BLOCKS };
+    let len = (batch * block_size) as i32;
+    (batch, len)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,5 +386,28 @@ mod tests {
         assert!(srp_repair_ctrl_is_usable_par_block_candidate(true, 4));
         assert!(!srp_repair_ctrl_is_usable_par_block_candidate(true, 0));
         assert!(!srp_repair_ctrl_is_usable_par_block_candidate(false, 4));
+
+        let mut seed = [0u8; 12];
+        assert!(srp_streamcrypto_fill_rar3_seed(
+            &[0x0061, 0x03A9],
+            &[1, 2, 3, 4, 5, 6, 7, 8],
+            &mut seed
+        ));
+        assert_eq!(seed, [0x61, 0x00, 0xA9, 0x03, 1, 2, 3, 4, 5, 6, 7, 8]);
+        assert!(!srp_streamcrypto_fill_rar3_seed(
+            &[],
+            &[1, 2, 3, 4, 5, 6, 7, 8],
+            &mut seed
+        ));
+
+        assert_eq!(srp_streamcrypto_rar5_iterations(15, false), Some(32768));
+        assert_eq!(srp_streamcrypto_rar5_iterations(15, true), Some(32800));
+        assert_eq!(srp_streamcrypto_rar5_iterations(25, false), None);
+
+        assert_eq!(srp_streamcrypto_next_batch(0, 100, 16), (100, 1600));
+        assert_eq!(
+            srp_streamcrypto_next_batch(0, 70_000, 16),
+            (65_536, 1_048_576)
+        );
     }
 }

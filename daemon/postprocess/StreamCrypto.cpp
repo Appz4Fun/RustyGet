@@ -41,16 +41,16 @@ bool StreamCrypto::DeriveRar3(const char* password, const uint8 salt[8],
 {
 	WString wstr(password ? password : "");
 	int len = wstr.Length();
-	if (len == 0) return false;
+	if (len <= 0) return false;
 
+	static_assert(sizeof(wchar_t) == sizeof(uint32_t), "wchar_t ABI size");
 	CharBuffer seed(len * 2 + 8);
-	for (int i = 0; i < len; i++)
+	if (!nzbget_rs_srp_streamcrypto_fill_rar3_seed(
+		reinterpret_cast<const uint32_t*>(*wstr), (size_t)len, salt,
+		reinterpret_cast<uint8_t*>(*seed), (size_t)seed.Size()))
 	{
-		wchar_t ch = wstr[i];
-		seed[i * 2] = ch & 0xFF;
-		seed[i * 2 + 1] = (ch & 0xFF00) >> 8;
+		return false;
 	}
-	memcpy(seed + len * 2, salt, 8);
 
 #ifndef DISABLE_TLS
 	OpenSSL::EVPMdCtxPtr context{ EVP_MD_CTX_new(), &EVP_MD_CTX_free };
@@ -101,9 +101,11 @@ bool StreamCrypto::DeriveRar3(const char* password, const uint8 salt[8],
 bool StreamCrypto::DeriveRar5(const char* password, uint8 kdfCount,
 	const uint8 salt[16], uint8 keyOut[32])
 {
-	if (kdfCount > 24) return false;
-
-	int iterations = 1 << kdfCount;
+	int iterations = 0;
+	if (!nzbget_rs_srp_streamcrypto_rar5_iterations(kdfCount, 0, &iterations))
+	{
+		return false;
+	}
 
 #ifndef DISABLE_TLS
 	const char* pwd = password ? password : "";
@@ -125,10 +127,11 @@ bool StreamCrypto::DeriveRar5(const char* password, uint8 kdfCount,
 bool StreamCrypto::DeriveRar5PswCheck(const char* password, uint8 kdfCount,
 	const uint8 salt[16], uint8 checkOut[8])
 {
-	if (kdfCount > 24) return false;
-
-	// 2^kdfCount fits well within int for kdfCount <= 24, and +32 cannot overflow
-	int iterations = (1 << kdfCount) + 32;
+	int iterations = 0;
+	if (!nzbget_rs_srp_streamcrypto_rar5_iterations(kdfCount, 1, &iterations))
+	{
+		return false;
+	}
 
 #ifndef DISABLE_TLS
 	const char* pwd = password ? password : "";
@@ -220,12 +223,12 @@ bool RarCryptoContext::Crypt(bool encrypt, const uint8* prevCipherBlock,
 
 	// process in batches so the EVP int length argument never overflows on a
 	// large range; CBC chaining is preserved across Update calls on one context
-	const int64 batchBlocks = 1 << 16;	// 64 Ki blocks = 1 MiB per pass
 	int64 done = 0;
 	while (done < blocks)
 	{
-		int64 batch = blocks - done < batchBlocks ? blocks - done : batchBlocks;
-		int len = (int)(batch * CryptoBlockSize);
+		int64 batch = 0;
+		int len = 0;
+		nzbget_rs_srp_streamcrypto_next_batch(done, blocks, CryptoBlockSize, &batch, &len);
 		int outlen = 0;
 		int step = encrypt
 			? EVP_EncryptUpdate(ctx.get(), out + done * CryptoBlockSize, &outlen,

@@ -1015,12 +1015,12 @@ pub unsafe extern "C" fn nzbget_rs_deobfuscate(s: *const c_char, len: usize) -> 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_file_type(which: c_int, s: *const c_char, len: usize) -> c_int {
     use crate::filetypes::*;
-    const CHECKS: [fn(&[u8]) -> bool; 25] = [
+    const CHECKS: [fn(&[u8]) -> bool; 26] = [
         is_seven_zip_ext, is_rar_ext, is_rar_volume_ext, is_numeric_volume_ext, is_all_digits_ext, is_archive_ext,
         is_disc_structure_ext, is_disc_structure_dir, is_disc_descriptor_ext, is_disc_image_ext,
         is_generic_disc_image_ext, is_clutter_dir, is_clutter_file, is_parity_ext, is_video_ext, is_audio_ext,
         is_subtitle_ext, is_nfo_ext, is_book_ext, is_image_ext, is_sample_stem, is_seven_zip_file, is_rar_file,
-        is_archive_file, is_sample_file,
+        is_archive_file, is_sample_file, is_known_collection_ext,
     ];
     match usize::try_from(which).ok().and_then(|w| CHECKS.get(w)) {
         Some(check) => check(bytes(s, len)) as c_int,
@@ -5770,7 +5770,7 @@ mod tests {
     fn filetypes_nulls_lengths_and_static_results() {
         unsafe {
             for len in [0, 42, usize::MAX] {
-                for which in -1..=25 {
+                for which in -1..=26 {
                     assert_eq!(nzbget_rs_file_type(which, std::ptr::null(), len), 0);
                 }
                 let mut out_len = usize::MAX;
@@ -30305,6 +30305,278 @@ pub unsafe extern "C" fn nzbget_rs_dqh_fleet_visit_pipe_names(
         cb(ctx, part.as_ptr().cast::<c_char>(), part.len());
     });
 }
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_srp_streamcrypto_fill_rar3_seed(
+    wchars_ptr: *const u32,
+    wchars_len: usize,
+    salt_ptr: *const u8,
+    out_seed_ptr: *mut u8,
+    out_seed_len: usize,
+) -> i32 {
+    if wchars_ptr.is_null() || salt_ptr.is_null() || out_seed_ptr.is_null() || wchars_len == 0 {
+        return 0;
+    }
+    let wchars = std::slice::from_raw_parts(wchars_ptr, wchars_len);
+    let salt: &[u8; 8] = &*(salt_ptr as *const [u8; 8]);
+    let out_seed = std::slice::from_raw_parts_mut(out_seed_ptr, out_seed_len);
+    i32::from(crate::streamrepairparcheck::srp_streamcrypto_fill_rar3_seed(
+        wchars, salt, out_seed,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_srp_streamcrypto_rar5_iterations(
+    kdf_count: u8,
+    add_psw_check_offset: i32,
+    out_iterations: *mut i32,
+) -> i32 {
+    match crate::streamrepairparcheck::srp_streamcrypto_rar5_iterations(
+        kdf_count,
+        add_psw_check_offset != 0,
+    ) {
+        Some(iters) => {
+            if !out_iterations.is_null() {
+                *out_iterations = iters;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_srp_streamcrypto_next_batch(
+    done_blocks: i64,
+    total_blocks: i64,
+    block_size: i64,
+    out_batch: *mut i64,
+    out_len: *mut i32,
+) {
+    let (batch, len) = crate::streamrepairparcheck::srp_streamcrypto_next_batch(
+        done_blocks,
+        total_blocks,
+        block_size,
+    );
+    if !out_batch.is_null() {
+        *out_batch = batch;
+    }
+    if !out_len.is_null() {
+        *out_len = len;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_http_client_validate_version(
+    version_ptr: *const c_char,
+    version_len: usize,
+    stream_ok: i32,
+) -> i32 {
+    let slice = if version_ptr.is_null() || version_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(version_ptr.cast::<u8>(), version_len)
+    };
+    i32::from(crate::sysnservhealth::http_client_validate_version(
+        slice,
+        stream_ok != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_http_client_build_headers(
+    method_ptr: *const c_char,
+    method_len: usize,
+    host_ptr: *const c_char,
+    host_len: usize,
+    version_cstr: *const c_char,
+    include_gzip: i32,
+) -> RsBuf {
+    let method = if method_ptr.is_null() || method_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(method_ptr.cast::<u8>(), method_len)
+    };
+    let host = if host_ptr.is_null() || host_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(host_ptr.cast::<u8>(), host_len)
+    };
+    let version = input(version_cstr);
+    into_buf(crate::sysnservhealth::http_client_build_headers(
+        method,
+        host,
+        version,
+        include_gzip != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_speed_test_final_speed(
+    first_median: f64,
+    p90s_ptr: *const f64,
+    p90s_len: usize,
+) -> f64 {
+    let p90s = if p90s_ptr.is_null() || p90s_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(p90s_ptr, p90s_len)
+    };
+    crate::sysnservhealth::speed_test_final_speed(first_median, p90s)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_snh_speed_test_make_request(
+    path_ptr: *const c_char,
+    path_len: usize,
+    query_ptr: *const c_char,
+    query_len: usize,
+    filesize: u32,
+    host_ptr: *const c_char,
+    host_len: usize,
+) -> RsBuf {
+    let path = if path_ptr.is_null() || path_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(path_ptr.cast::<u8>(), path_len)
+    };
+    let query = if query_ptr.is_null() || query_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(query_ptr.cast::<u8>(), query_len)
+    };
+    let host = if host_ptr.is_null() || host_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(host_ptr.cast::<u8>(), host_len)
+    };
+    into_buf(crate::sysnservhealth::speed_test_make_request(
+        path, query, filesize, host,
+    ))
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn nzbget_rs_stream_build_donor_key(
+    password: *const c_char,
+    file_names_ptr: *const *const c_char,
+    file_sizes_ptr: *const i64,
+    file_is_par_ptr: *const u8,
+    file_group_counts_ptr: *const usize,
+    file_count: usize,
+    groups_ptr: *const *const c_char,
+    total_groups: usize,
+    file_article_counts_ptr: *const usize,
+    art_part_numbers_ptr: *const i32,
+    art_sizes_ptr: *const i32,
+    art_message_ids_ptr: *const *const c_char,
+    total_articles: usize,
+) -> RsBuf {
+    let pwd = input(password);
+    let mut file_names = Vec::with_capacity(file_count);
+    if !file_names_ptr.is_null() {
+        for i in 0..file_count {
+            file_names.push(input(*file_names_ptr.add(i)));
+        }
+    }
+    let file_sizes = if file_sizes_ptr.is_null() || file_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(file_sizes_ptr, file_count)
+    };
+    let file_is_par = if file_is_par_ptr.is_null() || file_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(file_is_par_ptr, file_count)
+    };
+    let file_group_counts = if file_group_counts_ptr.is_null() || file_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(file_group_counts_ptr, file_count)
+    };
+    let mut groups = Vec::with_capacity(total_groups);
+    if !groups_ptr.is_null() {
+        for i in 0..total_groups {
+            groups.push(input(*groups_ptr.add(i)));
+        }
+    }
+    let file_article_counts = if file_article_counts_ptr.is_null() || file_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(file_article_counts_ptr, file_count)
+    };
+    let art_part_numbers = if art_part_numbers_ptr.is_null() || total_articles == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(art_part_numbers_ptr, total_articles)
+    };
+    let art_sizes = if art_sizes_ptr.is_null() || total_articles == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(art_sizes_ptr, total_articles)
+    };
+    let mut art_message_ids = Vec::with_capacity(total_articles);
+    if !art_message_ids_ptr.is_null() {
+        for i in 0..total_articles {
+            art_message_ids.push(input(*art_message_ids_ptr.add(i)));
+        }
+    }
+    into_buf(crate::streamrepair::build_donor_key(
+        pwd,
+        &file_names,
+        file_sizes,
+        file_is_par,
+        file_group_counts,
+        &groups,
+        file_article_counts,
+        art_part_numbers,
+        art_sizes,
+        &art_message_ids,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rol_xmlrpc_multicall_find_struct_end(
+    request_ptr: *const c_char,
+    out_struct_off: *mut usize,
+) -> i32 {
+    match crate::rpcoptlogutil::xmlrpc_multicall_find_struct_end_cstr(request_ptr) {
+        Some(off) => {
+            if !out_struct_off.is_null() {
+                *out_struct_off = off;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rol_xmlrpc_multicall_locate_parts(
+    request_ptr: *const c_char,
+    request_len: usize,
+    out_name_off: *mut usize,
+    out_params_off: *mut usize,
+) -> i32 {
+    let slice = if request_ptr.is_null() || request_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(request_ptr.cast::<u8>(), request_len)
+    };
+    match crate::rpcoptlogutil::xmlrpc_multicall_locate_parts(slice) {
+        Some((name_off, params_off)) => {
+            if !out_name_off.is_null() {
+                *out_name_off = name_off;
+            }
+            if !out_params_off.is_null() {
+                *out_params_off = params_off;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
 
 
 

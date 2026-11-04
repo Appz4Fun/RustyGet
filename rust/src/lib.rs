@@ -59,6 +59,7 @@ pub mod scripturlstat;
 pub mod rpcconnopt;
 pub mod frontexthealth;
 pub mod sysnservhealth;
+pub mod extutilhealth;
 
 pub mod deadpostings;
 pub mod dupewatch;

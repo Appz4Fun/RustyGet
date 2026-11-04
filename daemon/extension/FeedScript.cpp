@@ -23,6 +23,9 @@
 #include "Options.h"
 #include "Log.h"
 #include "Util.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 static const int FEED_SUCCESS = 93;
 
@@ -59,7 +62,11 @@ void FeedScriptController::ExecuteScript(std::shared_ptr<const Extension::Script
 
 	int exitCode = Execute();
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_euh_feed_script_is_success(exitCode) == 0)
+#else
 	if (exitCode != FEED_SUCCESS)
+#endif
 	{
 		infoName[0] = 'F'; // uppercase
 		PrintMessage(Message::mkError, "%s failed", *infoName);

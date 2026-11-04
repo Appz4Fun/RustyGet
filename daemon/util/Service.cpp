@@ -26,6 +26,9 @@
 #include "Options.h"
 #include "Log.h"
 #include "Util.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 Service::Service()
 {
@@ -59,8 +62,15 @@ void ServiceCoordinator::Run()
 		for (Service* service : m_services)
 		{
 			int serviceInterval = service->ServiceInterval();
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_euh_service_should_work_now(
+					serviceInterval, Service::Now,
+					static_cast<int64_t>(Util::CurrentTime()),
+					static_cast<int64_t>(service->m_lastWork)) != 0)
+#else
 			if (serviceInterval >= Service::Now &&
 				abs(Util::CurrentTime() - service->m_lastWork) >= serviceInterval)
+#endif
 			{
 				service->ServiceWork();
 				service->m_lastWork = Util::CurrentTime();
@@ -74,6 +84,13 @@ void ServiceCoordinator::Run()
 		{
 			int serviceInterval = service->ServiceInterval();
 			int remaining = Service::Sleep;
+#ifdef NZBGET_USE_RUST
+			nzbget_rs_euh_service_calc_remaining_wait(
+				serviceInterval, Service::Now, Service::Sleep,
+				static_cast<int64_t>(curTime),
+				static_cast<int64_t>(service->m_lastWork),
+				waitInterval, &remaining, &waitInterval);
+#else
 			if (serviceInterval >= Service::Now)
 			{
 				// never longer than the interval: after the clock is set back the
@@ -83,6 +100,7 @@ void ServiceCoordinator::Run()
 					serviceInterval - static_cast<int>(curTime - service->m_lastWork));
 				waitInterval = std::min(waitInterval, remaining);
 			}
+#endif
 			debug("serviceInterval: %i, remaining: %i", serviceInterval, remaining);
 		}
 

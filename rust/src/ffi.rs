@@ -14252,12 +14252,363 @@ pub unsafe extern "C" fn nzbget_rs_snh_health_validate_feed_url(
     crate::sysnservhealth::health_validate_feed_url(s)
 }
 
+// ============================================================================
+// Extension, Utility, NServ & SystemHealth Hot-Path FFI (`rust/src/extutilhealth.rs`)
+// ============================================================================
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_data_analytics_compute(
+    measurements: *mut f64,
+    len: usize,
+    out_min: *mut f64,
+    out_max: *mut f64,
+    out_avg: *mut f64,
+    out_median: *mut f64,
+    out_p25: *mut f64,
+    out_p75: *mut f64,
+    out_p90: *mut f64,
+) -> c_int {
+    if measurements.is_null() || len == 0 {
+        return 0;
+    }
+    let slice = std::slice::from_raw_parts_mut(measurements, len);
+    match crate::extutilhealth::data_analytics_compute(slice) {
+        Some((min, max, avg, med, p25, p75, p90)) => {
+            if !out_min.is_null() {
+                *out_min = min;
+            }
+            if !out_max.is_null() {
+                *out_max = max;
+            }
+            if !out_avg.is_null() {
+                *out_avg = avg;
+            }
+            if !out_median.is_null() {
+                *out_median = med;
+            }
+            if !out_p25.is_null() {
+                *out_p25 = p25;
+            }
+            if !out_p75.is_null() {
+                *out_p75 = p75;
+            }
+            if !out_p90.is_null() {
+                *out_p90 = p90;
+            }
+            1
+        }
+        None => 0,
+    }
+}
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_data_analytics_percentile(
+    sorted: *const f64,
+    len: usize,
+    percentile: f64,
+) -> f64 {
+    let slice = if sorted.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(sorted, len)
+    };
+    crate::extutilhealth::data_analytics_percentile(slice, percentile)
+}
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_benchmark_limit_by_free_space(
+    requested: u64,
+    available: u64,
+    reserve: u64,
+) -> u64 {
+    crate::extutilhealth::benchmark_limit_by_free_space(requested, available, reserve)
+}
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_benchmark_calc_write_chunk(
+    block_size: usize,
+    max_bytes: u64,
+    write_bytes: u64,
+) -> usize {
+    crate::extutilhealth::benchmark_calc_write_chunk(block_size, max_bytes, write_bytes)
+}
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_unrar_overwrite_switch(mode: c_int) -> *const c_char {
+    crate::extutilhealth::unrar_overwrite_switch(mode).as_ptr()
+}
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_unrar_is_part1_or_unsplit_rar(
+    filename: *const c_char,
+    len: usize,
+) -> c_int {
+    let s = if filename.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(filename.cast::<u8>(), len)
+    };
+    i32::from(crate::extutilhealth::unrar_is_part1_or_unsplit_rar(s))
+}
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_unrar_decode_exit_code(
+    ec: c_int,
+    out_msg: *mut *const c_char,
+) -> c_int {
+    let (ok, msg) = crate::extutilhealth::unrar_decode_exit_code(ec);
+    if !out_msg.is_null() {
+        *out_msg = msg.as_ptr();
+    }
+    i32::from(ok)
+}
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_sevenzip_overwrite_switch(mode: c_int) -> *const c_char {
+    crate::extutilhealth::sevenzip_overwrite_switch(mode).as_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_sevenzip_decode_exit_code(
+    ec: c_int,
+    out_msg: *mut *const c_char,
+) -> c_int {
+    let (ok, msg) = crate::extutilhealth::sevenzip_decode_exit_code(ec);
+    if !out_msg.is_null() {
+        *out_msg = msg.as_ptr();
+    }
+    i32::from(ok)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_service_should_work_now(
+    service_interval: c_int,
+    service_now: c_int,
+    cur_time: i64,
+    last_work: i64,
+) -> c_int {
+    i32::from(crate::extutilhealth::service_should_work_now(
+        service_interval,
+        service_now,
+        cur_time,
+        last_work,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_service_calc_remaining_wait(
+    service_interval: c_int,
+    service_now: c_int,
+    service_sleep: c_int,
+    cur_time: i64,
+    last_work: i64,
+    cur_wait_interval: c_int,
+    out_remaining: *mut c_int,
+    out_wait_interval: *mut c_int,
+) {
+    let (rem, wait) = crate::extutilhealth::service_calc_remaining_wait(
+        service_interval,
+        service_now,
+        service_sleep,
+        cur_time,
+        last_work,
+        cur_wait_interval,
+    );
+    if !out_remaining.is_null() {
+        *out_remaining = rem;
+    }
+    if !out_wait_interval.is_null() {
+        *out_wait_interval = wait;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_disk_service_interval(
+    waiting_required_dir: c_int,
+    disk_space_mb: c_int,
+    downloading: c_int,
+    sleep_val: c_int,
+) -> c_int {
+    crate::extutilhealth::disk_service_interval(
+        waiting_required_dir != 0,
+        disk_space_mb,
+        downloading != 0,
+        sleep_val,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_disk_service_is_low_space(
+    available_bytes: i64,
+    disk_space_mb: c_int,
+) -> c_int {
+    i32::from(crate::extutilhealth::disk_service_is_low_space(
+        available_bytes,
+        disk_space_mb,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_nserv_frontend_calc_start_index(
+    needed_first_id: c_int,
+    first_msg_id: c_int,
+    out_need_skip: *mut c_int,
+) -> c_int {
+    let (start, skip) =
+        crate::extutilhealth::nserv_frontend_calc_start_index(needed_first_id, first_msg_id);
+    if !out_need_skip.is_null() {
+        *out_need_skip = i32::from(skip);
+    }
+    start
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_cmd_script_classify_exit_code(exit_code: c_int) -> c_int {
+    crate::extutilhealth::cmd_script_classify_exit_code(exit_code)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_sched_script_strip_ext_len(
+    base_name: *const c_char,
+    len: usize,
+) -> usize {
+    let s = if base_name.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(base_name.cast::<u8>(), len)
+    };
+    crate::extutilhealth::sched_script_strip_ext_len(s)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_nzb_script_match_param_prefix(
+    param_name: *const c_char,
+    strip_prefix: *const c_char,
+    out_offset: *mut usize,
+) -> c_int {
+    let pname = if param_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(param_name).to_bytes()
+    };
+    let sprefix = if strip_prefix.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(strip_prefix).to_bytes())
+    };
+    match crate::extutilhealth::nzb_script_match_param_prefix(pname, sprefix) {
+        Some(off) => {
+            if !out_offset.is_null() {
+                *out_offset = off;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_feed_script_is_success(exit_code: c_int) -> c_int {
+    i32::from(crate::extutilhealth::feed_script_is_success(exit_code))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_health_validate_nzb_dir_interval(
+    interval: c_int,
+) -> c_int {
+    crate::extutilhealth::health_validate_nzb_dir_interval(interval)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_health_validate_nzb_dir_file_age(age: c_int) -> c_int {
+    crate::extutilhealth::health_validate_nzb_dir_file_age(age)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_health_validate_dupe_search(
+    dupe_search: c_int,
+    dupe_check: c_int,
+    health_check_is_dupe: c_int,
+) -> c_int {
+    crate::extutilhealth::health_validate_dupe_search(
+        dupe_search != 0,
+        dupe_check != 0,
+        health_check_is_dupe != 0,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_health_validate_ext_list_len(len: usize) -> c_int {
+    i32::from(crate::extutilhealth::health_validate_ext_list_len(len))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_health_strip_script_ext_len(
+    name: *const c_char,
+    len: usize,
+) -> usize {
+    let s = if name.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(name.cast::<u8>(), len)
+    };
+    crate::extutilhealth::health_strip_script_ext_len(s)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_health_validate_event_interval(val: c_int) -> c_int {
+    i32::from(crate::extutilhealth::health_validate_event_interval(val))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_health_validate_primary_server(
+    levels: *const i32,
+    actives: *const u8,
+    count: usize,
+) -> c_int {
+    let lvls = if levels.is_null() || count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(levels, count)
+    };
+    let acts = if actives.is_null() || count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(actives, count)
+    };
+    crate::extutilhealth::health_validate_primary_server(lvls, acts)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_health_validate_update_interval(v: c_int) -> c_int {
+    i32::from(crate::extutilhealth::health_validate_update_interval(v))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_health_validate_scheduler_time(
+    h: c_int,
+    m: c_int,
+) -> c_int {
+    crate::extutilhealth::health_validate_scheduler_time(h, m)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_health_validate_scheduler_weekdays(bits: c_int) -> c_int {
+    i32::from(crate::extutilhealth::health_validate_scheduler_weekdays(bits))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_health_validate_category_unpack(
+    global_unpack: c_int,
+    cat_unpack: c_int,
+) -> c_int {
+    crate::extutilhealth::health_validate_category_unpack(global_unpack != 0, cat_unpack != 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_health_severity_to_str(
+    severity: c_int,
+) -> *const c_char {
+    crate::extutilhealth::health_severity_to_str(severity).as_ptr()
+}
 

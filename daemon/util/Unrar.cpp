@@ -26,6 +26,9 @@
 #include "Unpack.h"
 #include "FileTypes.h"
 #include "Util.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 using namespace Unpack;
 
@@ -47,6 +50,9 @@ ScriptController::ArgList Unrar::MakeArgs() const
 	args.push_back("-y");
 	args.push_back("-ai");
 
+#ifdef NZBGET_USE_RUST
+	args.push_back(nzbget_rs_euh_unrar_overwrite_switch(static_cast<int>(m_mode)));
+#else
 	switch (m_mode)
 	{
 		case OverwriteMode::Skip:
@@ -59,6 +65,7 @@ ScriptController::ArgList Unrar::MakeArgs() const
 			args.push_back("-or");
 			break;
 	}
+#endif
 
 	args.push_back(MakePassword().c_str());
 	args.push_back(fs::u8string(m_archive).c_str());
@@ -79,6 +86,9 @@ bool Unrar::IsSupported(const fs::path& path)
 		return false;
 	}
 
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_euh_unrar_is_part1_or_unsplit_rar(filename.data(), filename.size()) != 0;
+#else
 	static const std::regex part1Rar("\\.part0*1\\.rar$", std::regex_constants::icase);
 
 	std::string lowerFilename = filename;
@@ -90,10 +100,27 @@ bool Unrar::IsSupported(const fs::path& path)
 	}
 
 	return true;
+#endif
 }
 
 bool Unrar::DecodeExitCode(int ec) const
 {
+#ifdef NZBGET_USE_RUST
+	const char* msg = nullptr;
+	if (nzbget_rs_euh_unrar_decode_exit_code(ec, &msg) != 0)
+	{
+		return true;
+	}
+	if (msg && *msg)
+	{
+		error("%s", msg);
+	}
+	else
+	{
+		error("Unknown error %d", ec);
+	}
+	return false;
+#else
 	switch (ec)
 	{
 		case ExitCode::Success:
@@ -135,4 +162,5 @@ bool Unrar::DecodeExitCode(int ec) const
 			error("Unknown error %d", ec);
 			return false;
 	}
+#endif
 }

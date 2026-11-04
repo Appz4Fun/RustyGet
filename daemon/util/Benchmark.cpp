@@ -26,6 +26,9 @@
 #include <vector>
 #include "FileSystem.h"
 #include "Benchmark.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 namespace Benchmark
 {
@@ -90,11 +93,15 @@ namespace Benchmark
 
 	uint64_t DiskBenchmark::LimitByFreeSpace(uint64_t requested, uint64_t available)
 	{
+#ifdef NZBGET_USE_RUST
+		return nzbget_rs_euh_benchmark_limit_by_free_space(requested, available, FREE_SPACE_RESERVE);
+#else
 		if (available <= FREE_SPACE_RESERVE)
 		{
 			return 0;
 		}
 		return std::min(requested, available - FREE_SPACE_RESERVE);
+#endif
 	}
 
 	Result DiskBenchmark::Run(
@@ -137,7 +144,12 @@ namespace Benchmark
 			auto start = steady_clock::now();
 			while (result.writeBytes < maxBytes && steady_clock::now() - start < timeoutNS)
 			{
+#ifdef NZBGET_USE_RUST
+				const size_t bytesToWrite = nzbget_rs_euh_benchmark_calc_write_chunk(
+					blockSize, maxBytes, result.writeBytes);
+#else
 				const size_t bytesToWrite = static_cast<size_t>(std::min<uint64_t>(blockSize, maxBytes - result.writeBytes));
+#endif
 				if (!file.write(buffer.data(), bytesToWrite))
 				{
 					throw std::runtime_error("Failed to write data to the test file");

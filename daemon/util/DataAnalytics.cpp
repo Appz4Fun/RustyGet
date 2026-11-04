@@ -21,6 +21,9 @@
 #include "nzbget.h"
 
 #include "DataAnalytics.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 double DataAnalytics::GetMin() const { return m_min; }
 double DataAnalytics::GetMax() const { return m_max; }
@@ -37,6 +40,12 @@ void DataAnalytics::Compute()
 		return;
 	}
 
+#ifdef NZBGET_USE_RUST
+	nzbget_rs_euh_data_analytics_compute(
+		m_measurements.data(), m_measurements.size(),
+		&m_min, &m_max, &m_avg, &m_median,
+		&m_percentile25, &m_percentile75, &m_percentile90);
+#else
 	std::sort(begin(m_measurements), end(m_measurements));
 
 	m_min = m_measurements.front();
@@ -46,6 +55,7 @@ void DataAnalytics::Compute()
 	m_percentile25 = CalculatePercentile(0.25);
 	m_percentile75 = CalculatePercentile(0.75);
 	m_percentile90 = CalculatePercentile(0.90);
+#endif
 }
 
 void DataAnalytics::AddMeasurement(double measuremen)
@@ -55,6 +65,10 @@ void DataAnalytics::AddMeasurement(double measuremen)
 
 double DataAnalytics::CalculatePercentile(double percentile)
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_euh_data_analytics_percentile(
+		m_measurements.data(), m_measurements.size(), percentile);
+#else
 	if (m_measurements.empty())
 	{
 		return 0.0;
@@ -79,4 +93,5 @@ double DataAnalytics::CalculatePercentile(double percentile)
 	}
 
 	return m_measurements[idx];
+#endif
 }

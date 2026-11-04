@@ -26,6 +26,9 @@
 #include "Log.h"
 #include "Util.h"
 #include "FileSystem.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 DiskService::DiskService()
 {
@@ -39,11 +42,19 @@ void DiskService::Update(Subject* caller, void* aspect)
 
 int DiskService::ServiceInterval()
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_euh_disk_service_interval(
+		m_waitingRequiredDir ? 1 : 0,
+		g_Options->GetDiskSpace(),
+		g_WorkState->GetDownloading() ? 1 : 0,
+		Service::Sleep);
+#else
 	return m_waitingRequiredDir ? 1 :
 		g_Options->GetDiskSpace() <= 0 ? Service::Sleep :
 		// notifications from 'WorkState' are not 100% reliable due to race conditions
 		!g_WorkState->GetDownloading() ? 10 :
 		1;
+#endif
 }
 
 void DiskService::ServiceWork()
@@ -70,7 +81,11 @@ void DiskService::CheckDiskSpace()
 	if (res.has_value() && g_Options->GetDiskSpace() >= 0)
 	{
 		const auto& value = res.value();
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_euh_disk_service_is_low_space(value.available, g_Options->GetDiskSpace()) != 0)
+#else
 		if (value.available / 1024 / 1024 < g_Options->GetDiskSpace())
+#endif
 		{
 			warn("Low disk space on %s. Pausing download", g_Options->GetDestDir());
 			g_WorkState->SetPauseDownload(true);
@@ -83,7 +98,11 @@ void DiskService::CheckDiskSpace()
 		if (res.has_value() && g_Options->GetDiskSpace() >= 0)
 		{
 			const auto& value = res.value();
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_euh_disk_service_is_low_space(value.available, g_Options->GetDiskSpace()) != 0)
+#else
 			if (value.available / 1024 / 1024 < g_Options->GetDiskSpace())
+#endif
 			{
 				warn("Low disk space on %s. Pausing download", g_Options->GetInterDir());
 				g_WorkState->SetPauseDownload(true);

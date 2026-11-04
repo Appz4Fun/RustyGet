@@ -21,6 +21,9 @@
 
 #include "NewsServersValidator.h"
 #include "Validators.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 namespace SystemHealth::NewsServers
 {
@@ -67,6 +70,27 @@ Status AnyServerActiveValidator::Validate() const
 
 Status AnyPrimaryServerExistsValidator::Validate() const
 {
+#ifdef NZBGET_USE_RUST
+	std::vector<int32_t> levels;
+	std::vector<uint8_t> actives;
+	levels.reserve(m_servers.size());
+	actives.reserve(m_servers.size());
+	for (const auto& server : m_servers)
+	{
+		levels.push_back(server->GetLevel());
+		actives.push_back(server->GetActive() ? 1 : 0);
+	}
+	switch (nzbget_rs_euh_health_validate_primary_server(
+		levels.data(), actives.data(), levels.size()))
+	{
+		case 1:
+			return Status::Error("At least one server must be configured");
+		case 2:
+			return Status::Error("At least one primary server must be active");
+		default:
+			return Status::Ok();
+	}
+#else
 	if (m_servers.empty())
 	{
 		return Status::Error("At least one server must be configured");
@@ -90,6 +114,7 @@ Status AnyPrimaryServerExistsValidator::Validate() const
 	}
 
 	return Status::Ok();
+#endif
 }
 
 }  // namespace SystemHealth::NewsServers

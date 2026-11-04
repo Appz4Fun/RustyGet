@@ -22,6 +22,9 @@
 #include "Unpack.h"
 #include "FileTypes.h"
 #include "Util.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 using namespace Unpack;
 
@@ -42,6 +45,9 @@ ScriptController::ArgList SevenZip::MakeArgs() const
 	args.push_back("x");
 	args.push_back("-y");
 
+#ifdef NZBGET_USE_RUST
+	args.push_back(nzbget_rs_euh_sevenzip_overwrite_switch(static_cast<int>(m_mode)));
+#else
 	switch (m_mode)
 	{
 		case OverwriteMode::Skip:
@@ -54,6 +60,7 @@ ScriptController::ArgList SevenZip::MakeArgs() const
 			args.push_back("-aou");
 			break;
 	}
+#endif
 
 	args.push_back(MakePassword().c_str());
 	args.push_back(("-o" + fs::u8string(m_outputDir)).c_str());
@@ -71,6 +78,22 @@ bool SevenZip::IsSupported(const fs::path& path)
 
 bool SevenZip::DecodeExitCode(int ec) const
 {
+#ifdef NZBGET_USE_RUST
+	const char* msg = nullptr;
+	if (nzbget_rs_euh_sevenzip_decode_exit_code(ec, &msg) != 0)
+	{
+		return true;
+	}
+	if (msg && *msg)
+	{
+		error("%s", msg);
+	}
+	else
+	{
+		error("Unknown 7-Zip error (%d)", ec);
+	}
+	return false;
+#else
 	switch (ec)
 	{
 		case ExitCode::Success:
@@ -94,4 +117,5 @@ bool SevenZip::DecodeExitCode(int ec) const
 			error("Unknown 7-Zip error (%d)", ec);
 			return false;
 	};
+#endif
 }

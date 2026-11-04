@@ -21,6 +21,9 @@
 
 #include "DisplayValidator.h"
 #include "Status.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 namespace SystemHealth::Display
 {
@@ -51,10 +54,16 @@ Status OutputModeValidator::Validate() const
 Status UpdateIntervalValidator::Validate() const
 {
 	int v = m_options.GetUpdateInterval();
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_euh_health_validate_update_interval(v) == 0)
+		return Status::Error("'" + std::string(Options::UPDATEINTERVAL) + "' must be >= 25 ms.");
+	return Status::Ok();
+#else
 	if (v == 0) return Status::Ok();
 	if (v < 25)
 		return Status::Error("'" + std::string(Options::UPDATEINTERVAL) + "' must be >= 25 ms.");
 	return Status::Ok();
+#endif
 }
 
 Status CursesNzbNameValidator::Validate() const

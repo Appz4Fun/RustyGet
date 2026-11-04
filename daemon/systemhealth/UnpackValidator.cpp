@@ -23,6 +23,9 @@
 #include "UnpackValidator.h"
 #include "Options.h"
 #include "Validators.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 namespace SystemHealth::Unpack
 {
@@ -131,7 +134,11 @@ Status ExtensionCleanupValidator::Validate() const
 {
 	std::string_view ext = m_options->GetExtCleanupDisk();
 	if (ext.empty()) return Status::Ok();
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_euh_health_validate_ext_list_len(ext.size()) == 0)
+#else
 	if (ext.size() > 512)
+#endif
 	{
 		return Status::Warning("'" + std::string(Options::EXTCLEANUPDISK) +
 							   "' value is unusually long");
@@ -156,7 +163,11 @@ Status UnpackIgnoreExtValidator::Validate() const
 {
 	std::string_view val = m_options->GetUnpackIgnoreExt();
 	if (val.empty()) return Status::Ok();
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_euh_health_validate_ext_list_len(val.size()) == 0)
+#else
 	if (val.size() > 512)
+#endif
 	{
 		return Status::Warning("'" + std::string(Options::UNPACKIGNOREEXT) + "' is unusually long");
 	}

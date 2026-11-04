@@ -25,6 +25,9 @@
 #include "Log.h"
 #include "Util.h"
 #include "FileSystem.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 static const int COMMANDPROCESS_SUCCESS = 93;
 static const int COMMANDPROCESS_ERROR = 94;
@@ -73,6 +76,20 @@ void CommandScriptController::ExecuteScript(std::shared_ptr<const Extension::Scr
 	infoName[0] = 'S'; // uppercase
 	SetLogPrefix(nullptr);
 
+#ifdef NZBGET_USE_RUST
+	switch (nzbget_rs_euh_cmd_script_classify_exit_code(exitCode))
+	{
+		case 0:
+			PrintMessage(Message::mkInfo, "%s successful", *infoName);
+			break;
+		case 1:
+			PrintMessage(Message::mkError, "%s failed", *infoName);
+			break;
+		default:
+			PrintMessage(Message::mkError, "%s failed (terminated with unknown status)", *infoName);
+			break;
+	}
+#else
 	switch (exitCode)
 	{
 		case COMMANDPROCESS_SUCCESS:
@@ -88,6 +105,7 @@ void CommandScriptController::ExecuteScript(std::shared_ptr<const Extension::Scr
 			PrintMessage(Message::mkError, "%s failed (terminated with unknown status)", *infoName);
 			break;
 	}
+#endif
 }
 
 void CommandScriptController::PrepareParams(const char* scriptName)

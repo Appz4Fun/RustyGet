@@ -114,9 +114,20 @@ void ArticleDownloader::Run()
 		SetLastUpdateTimeNow();
 		SetStatus(adRunning);
 
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_dad_article_dl_should_abort_for_work_state(
+			IsStopped() ? 1 : 0,
+			g_WorkState->GetPauseDownload() ? 1 : 0,
+			g_WorkState->GetQuotaReached() ? 1 : 0,
+			force ? 1 : 0,
+			g_WorkState->GetDownloadHeld() ? 1 : 0,
+			m_fileInfo->GetExtraPriority() ? 1 : 0,
+			serverConfigGeneration != g_ServerPool->GetGeneration() ? 1 : 0) != 0)
+#else
 		if (IsStopped() || ((g_WorkState->GetPauseDownload() || g_WorkState->GetQuotaReached()) && !force) ||
 			(g_WorkState->GetDownloadHeld() && !m_fileInfo->GetExtraPriority()) ||
 			serverConfigGeneration != g_ServerPool->GetGeneration())
+#endif
 		{
 			status = adRetry;
 			break;
@@ -185,6 +196,26 @@ void ArticleDownloader::Run()
 			// Download article
 			status = Download();
 
+#ifdef NZBGET_USE_RUST
+			int success = 0, failed = 0;
+			if (nzbget_rs_dad_article_dl_classify_attempt_stat(
+				(int)status,
+				(int)adFinished,
+				(int)adFailed,
+				(int)adNotFound,
+				(int)adCrcError,
+				&success,
+				&failed) != 0)
+			{
+				int serverId = newsServer->GetId();
+				m_serverStats.StatOp(serverId, success, failed, ServerStatList::soSet);
+				ServerVolume::Stats stats;
+				stats.bytes = 0;
+				stats.articles.failed = failed;
+				stats.articles.success = success;
+				g_StatMeter->AddServerStats(stats, serverId);
+			}
+#else
 			if (status == adFinished || status == adFailed || status == adNotFound || status == adCrcError)
 			{
 				int serverId = newsServer->GetId();
@@ -197,6 +228,7 @@ void ArticleDownloader::Run()
 				stats.articles.success = success;
 				g_StatMeter->AddServerStats(stats, serverId);
 			}
+#endif
 		}
 
 		if (m_connection)
@@ -247,7 +279,16 @@ void ArticleDownloader::Run()
 		}
 
 		wantServer = nullptr;
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_dad_article_dl_should_retry_same_server(
+			connected ? 1 : 0,
+			(int)status,
+			(int)adFailed,
+			remainedRetries,
+			retentionFailure ? 1 : 0) != 0)
+#else
 		if (connected && status == adFailed && remainedRetries > 0 && !retentionFailure)
+#endif
 		{
 			wantServer = lastServer;
 		}
@@ -261,9 +302,20 @@ void ArticleDownloader::Run()
 			break;
 		}
 
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_dad_article_dl_should_abort_for_work_state(
+			IsStopped() ? 1 : 0,
+			g_WorkState->GetPauseDownload() ? 1 : 0,
+			g_WorkState->GetQuotaReached() ? 1 : 0,
+			force ? 1 : 0,
+			g_WorkState->GetDownloadHeld() ? 1 : 0,
+			m_fileInfo->GetExtraPriority() ? 1 : 0,
+			serverConfigGeneration != g_ServerPool->GetGeneration() ? 1 : 0) != 0)
+#else
 		if (IsStopped() || ((g_WorkState->GetPauseDownload() || g_WorkState->GetQuotaReached()) && !force) ||
 			(g_WorkState->GetDownloadHeld() && !m_fileInfo->GetExtraPriority()) ||
 			serverConfigGeneration != g_ServerPool->GetGeneration())
+#endif
 		{
 			status = adRetry;
 			break;
@@ -275,12 +327,28 @@ void ArticleDownloader::Run()
 			break;
 		}
 
+#ifdef NZBGET_USE_RUST
+		int pushFailedServer = 0;
+		if (nzbget_rs_dad_article_dl_should_advance_server_list(
+			wantServer ? 1 : 0,
+			connected ? 1 : 0,
+			retentionFailure ? 1 : 0,
+			optionalBlocked ? 1 : 0,
+			authRejected ? 1 : 0,
+			&pushFailedServer) != 0)
+		{
+			if (pushFailedServer)
+			{
+				failedServers.push_back(lastServer);
+			}
+#else
 		if (!wantServer && (connected || retentionFailure || optionalBlocked || authRejected))
 		{
 			if (!optionalBlocked)
 			{
 				failedServers.push_back(lastServer);
 			}
+#endif
 
 			// if all servers from current level were tried, increase level
 			// if all servers from all levels were tried, break the loop with failure status
@@ -463,9 +531,17 @@ ArticleDownloader::EStatus ArticleDownloader::Download()
 		// Memory pressure throttling: pace uncached network reads if memory is Critical and cache is flushing.
 		// Never block an article that already allocated a cache buffer before pressure turned Critical,
 		// as its buffer only becomes flushable after Download() finishes and calls ArticleWriter::Finish().
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_dad_article_dl_should_pace_critical_uncached(
+			IsStopped() ? 1 : 0,
+			m_articleWriter.HasCachedBuffer() ? 1 : 0,
+			(g_MemoryMonitor && g_MemoryMonitor->GetTier() == NZBGET_RS_PRESSURE_CRITICAL) ? 1 : 0,
+			(g_ArticleCache && g_ArticleCache->GetFlushing()) ? 1 : 0) != 0)
+#else
 		if (!IsStopped() && !m_articleWriter.HasCachedBuffer() && g_MemoryMonitor &&
 			g_MemoryMonitor->GetTier() == NZBGET_RS_PRESSURE_CRITICAL &&
 			g_ArticleCache && g_ArticleCache->GetFlushing())
+#endif
 		{
 			Util::Sleep(10);
 		}

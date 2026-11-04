@@ -2801,6 +2801,85 @@ int nzbget_rs_cdn_article_batch_can_claim_next(
     size_t next_claim, size_t requests_len, size_t next_deliver,
     int window_parts, int64_t buffered_bytes, int64_t max_buffered_bytes);
 
+int nzbget_rs_dad_diskstate_validate_dupe_extras_header(
+    int scan_cnt, int recovered_articles, int recovered_holes);
+int nzbget_rs_dad_diskstate_validate_repair_job_header(
+    int scan_cnt, int expected_cnt, int file_id, int par_file, int failed_articles);
+int nzbget_rs_dad_diskstate_should_apply_url_status(
+    int kind, int nk_nzb, int url_status, int ls_failed);
+int nzbget_rs_dad_diskstate_normalize_script_status(
+    int status, int format_version);
+int nzbget_rs_dad_diskstate_eval_restored_output_init(
+    int output_initialized, int direct_write, int force_direct_write,
+    int has_own_out_file, int has_out_tmp, int has_force_dest);
+int nzbget_rs_dad_diskstate_calc_staged_fallback(
+    int completed, int article_status, int ai_finished,
+    int dupe_fallback_round, int has_result_filename,
+    int ai_undefined, int* out_saved_status);
+int nzbget_rs_dad_diskstate_validate_article_count(
+    int size, int has_articles, int articles_len);
+int nzbget_rs_dad_diskstate_need_staged_file_check(
+    int completed, int format_version, int status_int, int ai_finished,
+    int64_t segment_offset, int segment_size, int staged_fallback,
+    int part_number, int direct_write, int force_direct_write);
+int nzbget_rs_dad_diskstate_is_digits_only_filename(const char* filename);
+int nzbget_rs_dad_diskstate_should_load_file_state(
+    char suffix, int continue_partial, int cache_was_active);
+int nzbget_rs_dad_diskstate_calc_volume_slot_size(
+    int slot_index, int arr_size, int* out_target_size);
+
+int nzbget_rs_dad_article_writer_should_check_dupe_file(
+    int format, int ef_yenc, int dupe_check, int dupe_mode,
+    int dm_force, int many_dupe_files);
+int nzbget_rs_dad_article_writer_is_duplicate_dest(
+    int output_initialized, int is_own_output_file,
+    int has_filename, int dest_exists);
+int nzbget_rs_dad_article_writer_can_use_article_cache(
+    int article_cache_mb, int raw_article, int format, int ef_yenc,
+    int is_dupe_fallback, int is_critical);
+int nzbget_rs_dad_article_writer_advance_and_check_range(
+    int raw_article, int* inout_ptr, int len, int article_size);
+int nzbget_rs_dad_article_writer_resolve_direct_write_ready(
+    int direct_write_opt, int force_direct_write, int output_initialized,
+    int has_own_out, int has_force_dest, int* out_output_initialized);
+int nzbget_rs_dad_article_writer_need_gap_fill(
+    int raw_article, int direct_write, int64_t segment_offset, int64_t out_pos);
+int nzbget_rs_dad_article_cache_can_alloc(
+    size_t effective_limit, size_t allocated, size_t size, int* out_was_empty);
+int nzbget_rs_dad_memory_monitor_calc_critical_or_normal_par_buffer(
+    int tier, int configured_mb, int tier_critical, int tier_normal, int* out_mb);
+void nzbget_rs_dad_memory_monitor_resolve_tier_limits(
+    int next_tier, int raw_sample, uint32_t cfg_cache, uint32_t cfg_par,
+    uint32_t cfg_limit, int tier_normal, int tier_constrained, int tier_critical,
+    uint32_t rs_eff_cache, uint32_t rs_eff_par,
+    uint32_t* out_eff_cache, uint32_t* out_eff_par, uint32_t* out_eff_limit);
+
+int nzbget_rs_dad_article_dl_should_abort_for_work_state(
+    int is_stopped, int pause_download, int quota_reached, int force,
+    int download_held, int extra_priority, int gen_changed);
+int nzbget_rs_dad_article_dl_classify_attempt_stat(
+    int status, int ad_finished, int ad_failed, int ad_not_found, int ad_crc_error,
+    int* out_success, int* out_failed);
+int nzbget_rs_dad_article_dl_should_retry_same_server(
+    int connected, int status, int ad_failed, int remained_retries, int retention_failure);
+int nzbget_rs_dad_article_dl_should_advance_server_list(
+    int has_want_server, int connected, int retention_failure,
+    int optional_blocked, int auth_rejected, int* out_push_failed_server);
+int nzbget_rs_dad_article_dl_should_pace_critical_uncached(
+    int is_stopped, int has_cached_buffer, int is_critical, int is_flushing);
+
+int nzbget_rs_dad_direct_unpack_eval_post_run_actions(
+    int unpack_ok, int cancelled, int is_stopped, int terminated,
+    int* out_should_cleanup);
+int nzbget_rs_dad_direct_unpack_should_commit_extracted_archives(
+    int has_archives, int status, int ns_success, int interrupted);
+
+int nzbget_rs_dad_prepost_should_complete_interrupted_download(
+    int has_post_info, int kind, int nk_nzb, int completed_files_empty,
+    int delete_status, int ds_none, int download_completed);
+int nzbget_rs_dad_prepost_is_skipped_delete_status(
+    int delete_status, int ds_dupe, int ds_copy, int ds_good, int ds_scan);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

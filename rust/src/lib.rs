@@ -67,6 +67,7 @@ pub mod nntptlsweb;
 pub mod feedurlqueue;
 pub mod parunpackpost;
 pub mod contentdupenntp;
+pub mod diskartdlpost;
 
 pub mod deadpostings;
 pub mod dupewatch;

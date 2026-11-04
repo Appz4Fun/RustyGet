@@ -126,11 +126,25 @@ void DirectUnpack::Run()
 	m_unpacking = false;
 	m_waitingVolume = false;
 
+#ifdef NZBGET_USE_RUST
+	int shouldCleanup = 0;
+	bool interrupted = nzbget_rs_dad_direct_unpack_eval_post_run_actions(
+		m_unpackOk ? 1 : 0,
+		m_cancelled ? 1 : 0,
+		IsStopped() ? 1 : 0,
+		GetTerminated() ? 1 : 0,
+		&shouldCleanup) != 0;
+	if (shouldCleanup)
+	{
+		Cleanup();
+	}
+#else
 	bool interrupted = !m_cancelled && (IsStopped() || GetTerminated());
 	if (!m_unpackOk && !interrupted)
 	{
 		Cleanup();
 	}
+#endif
 
 	{
 		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
@@ -165,7 +179,15 @@ void DirectUnpack::Run()
 			nzbInfo->AddMessage(Message::mkWarning, BString<1024>("%s failed", *m_infoNameUp));
 		}
 
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_dad_direct_unpack_should_commit_extracted_archives(
+			nzbInfo->GetExtractedArchives() ? 1 : 0,
+			(int)nzbInfo->GetDirectUnpackStatus(),
+			(int)NzbInfo::nsSuccess,
+			interrupted ? 1 : 0) != 0)
+#else
 		if (nzbInfo->GetExtractedArchives() && (nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsSuccess || interrupted))
+#endif
 		{
 			std::move(m_extractedArchives.begin(), m_extractedArchives.end(),
 				std::back_inserter(*nzbInfo->GetExtractedArchives()));

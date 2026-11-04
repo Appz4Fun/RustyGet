@@ -876,10 +876,18 @@ void DiskState::SaveDupeExtras(NzbInfo* nzbInfo, StateDiskFile& outfile)
 bool DiskState::LoadDupeExtras(NzbInfo* nzbInfo, StateDiskFile& infile, int formatVersion)
 {
 	char buf[1024];
-	uint32 recoveredHigh, recoveredLow;
-	int recoveredArticles, recoveredHoles;
+	uint32 recoveredHigh = 0, recoveredLow = 0;
+	int recoveredArticles = 0, recoveredHoles = 0;
+#ifdef NZBGET_USE_RUST
+	int headerScanCnt;
+	headerScanCnt = infile.ScanLine("%i,%u,%u,%i", &recoveredArticles, &recoveredHigh, &recoveredLow,
+		&recoveredHoles);
+	if (headerScanCnt != 4 || !nzbget_rs_dad_diskstate_validate_dupe_extras_header(
+		headerScanCnt, recoveredArticles, recoveredHoles)) goto error;
+#else
 	if (infile.ScanLine("%i,%u,%u,%i", &recoveredArticles, &recoveredHigh, &recoveredLow,
 		&recoveredHoles) != 4 || recoveredArticles < 0 || recoveredHoles < 0) goto error;
+#endif
 	nzbInfo->SetDupeRecoveredArticles(recoveredArticles);
 	nzbInfo->SetDupeRecoveredBytes(Util::JoinInt64(recoveredHigh, recoveredLow));
 	nzbInfo->SetDupeRecoveredHoles(recoveredHoles);
@@ -888,9 +896,21 @@ bool DiskState::LoadDupeExtras(NzbInfo* nzbInfo, StateDiskFile& infile, int form
 	if (infile.ScanLine("%i", &repairCount) != 1 || repairCount < 0 || repairCount > 100000) goto error;
 	for (int i = 0; i < repairCount; i++)
 	{
-		int fileId, parFile, failedArticles;
-		uint32 decodedHigh, decodedLow, failedHigh, failedLow, missedHigh, missedLow;
+		int fileId = 0, parFile = 0, failedArticles = 0;
+		uint32 decodedHigh = 0, decodedLow = 0, failedHigh = 0, failedLow = 0, missedHigh = 0, missedLow = 0;
 		uint32 stepsHigh = 0, stepsLow = 0;
+#ifdef NZBGET_USE_RUST
+		int expectedJobFields = formatVersion >= 66 ? 11 : 9;
+		int jobScanCnt = formatVersion >= 66 ?
+			infile.ScanLine("%i,%u,%u,%u,%u,%u,%u,%i,%i,%u,%u", &fileId, &decodedHigh,
+				&decodedLow, &failedHigh, &failedLow, &missedHigh, &missedLow, &parFile,
+				&failedArticles, &stepsHigh, &stepsLow) :
+			infile.ScanLine("%i,%u,%u,%u,%u,%u,%u,%i,%i", &fileId, &decodedHigh,
+				&decodedLow, &failedHigh, &failedLow, &missedHigh, &missedLow, &parFile,
+				&failedArticles);
+		if (jobScanCnt != expectedJobFields || !nzbget_rs_dad_diskstate_validate_repair_job_header(
+			jobScanCnt, expectedJobFields, fileId, parFile, failedArticles)) goto error;
+#else
 		if (formatVersion >= 66)
 		{
 			if (infile.ScanLine("%i,%u,%u,%u,%u,%u,%u,%i,%i,%u,%u", &fileId, &decodedHigh,
@@ -901,6 +921,7 @@ bool DiskState::LoadDupeExtras(NzbInfo* nzbInfo, StateDiskFile& infile, int form
 			&decodedLow, &failedHigh, &failedLow, &missedHigh, &missedLow, &parFile,
 			&failedArticles) != 9 || failedArticles < 0) goto error;
 		if (fileId <= 0 || parFile < 0 || parFile > 1) goto error;
+#endif
 		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
 		int holeCount;
 		if (infile.ScanLine("%i", &holeCount) != 1 || holeCount < 0 || holeCount > 1000000) goto error;
@@ -1323,7 +1344,12 @@ bool DiskState::LoadNzbInfo(NzbInfo* nzbInfo, Servers* servers, StateDiskFile& i
 	nzbInfo->SetDirectRenameStatus((NzbInfo::EDirectRenameStatus)directRenameStatus);
 	nzbInfo->SetDeleteStatus((NzbInfo::EDeleteStatus)deleteStatus);
 	nzbInfo->SetMarkStatus((NzbInfo::EMarkStatus)markStatus);
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_dad_diskstate_should_apply_url_status(
+		(int)nzbInfo->GetKind(), (int)NzbInfo::nkNzb, urlStatus, (int)NzbInfo::lsFailed) != 0)
+#else
 	if (nzbInfo->GetKind() == NzbInfo::nkNzb || (NzbInfo::EUrlStatus)urlStatus >= NzbInfo::lsFailed)
+#endif
 	{
 		nzbInfo->SetUrlStatus((NzbInfo::EUrlStatus)urlStatus);
 	}
@@ -1543,8 +1569,12 @@ bool DiskState::LoadNzbInfo(NzbInfo* nzbInfo, Servers* servers, StateDiskFile& i
 		if (scriptName)
 		{
 			scriptName++;
+#ifdef NZBGET_USE_RUST
+			int status = nzbget_rs_dad_diskstate_normalize_script_status(atoi(buf), formatVersion);
+#else
 			int status = atoi(buf);
 			if (status > 1 && formatVersion < 25) status--;
+#endif
 			nzbInfo->GetScriptStatuses()->emplace_back(scriptName, (ScriptStatus::EStatus)status);
 		}
 	}
@@ -1806,6 +1836,31 @@ bool DiskState::LoadFileInfo(FileInfo* fileInfo, StateDiskFile& infile, int form
 		if (fileSummary) fileInfo->SetTime(static_cast<time_t>(time));
 		if (fileSummary && cnt >= 3)
 		{
+#ifdef NZBGET_USE_RUST
+			bool directWriteOpt = g_Options && g_Options->GetDirectWrite();
+			bool forceDirectWrite = fileInfo->GetForceDirectWrite();
+			bool hasOwnOutFile = false;
+			bool hasOutTmp = false;
+			bool hasForceDest = false;
+			if (outputInitialized != 0 && (directWriteOpt || forceDirectWrite))
+			{
+				const char* destDir = fileInfo->GetNzbInfo() ? fileInfo->GetNzbInfo()->GetDestDir() : nullptr;
+				hasOwnOutFile = !fileInfo->GetOutputFilename().empty() &&
+					FileSystem::FileExists(fileInfo->GetOutputFilename().c_str());
+				hasOutTmp = destDir && !Util::EmptyStr(destDir) &&
+					FileSystem::FileExists(BString<1024>("%s%c%i.out.tmp", destDir, PATH_SEPARATOR, fileInfo->GetId()));
+				hasForceDest = forceDirectWrite && destDir &&
+					!Util::EmptyStr(destDir) && !Util::EmptyStr(fileInfo->GetFilename()) &&
+					FileSystem::FileExists(BString<1024>("%s%c%s", destDir, PATH_SEPARATOR, fileInfo->GetFilename()));
+			}
+			bool restoredOutputInit = nzbget_rs_dad_diskstate_eval_restored_output_init(
+				outputInitialized,
+				directWriteOpt ? 1 : 0,
+				forceDirectWrite ? 1 : 0,
+				hasOwnOutFile ? 1 : 0,
+				hasOutTmp ? 1 : 0,
+				hasForceDest ? 1 : 0) != 0;
+#else
 			bool restoredOutputInit = outputInitialized != 0;
 			if (restoredOutputInit && g_Options &&
 				(g_Options->GetDirectWrite() || fileInfo->GetForceDirectWrite()))
@@ -1820,6 +1875,7 @@ bool DiskState::LoadFileInfo(FileInfo* fileInfo, StateDiskFile& infile, int form
 					FileSystem::FileExists(BString<1024>("%s%c%s", destDir, PATH_SEPARATOR, fileInfo->GetFilename()));
 				restoredOutputInit = hasOwnOutFile || hasOutTmp || hasForceDest;
 			}
+#endif
 			fileInfo->SetOutputInitialized(restoredOutputInit);
 		}
 	}
@@ -1922,6 +1978,24 @@ bool DiskState::SaveFileState(FileInfo* fileInfo, StateDiskFile& outfile, bool c
 		// format 7 reads, which ignores it. Upstream finds a staged article's bytes in
 		// the output file with direct write on, where they aren't yet: it reads the
 		// article as not downloaded and downloads it again
+#ifdef NZBGET_USE_RUST
+		int savedStatus = 0;
+		int stagedFallback = nzbget_rs_dad_diskstate_calc_staged_fallback(
+			completed ? 1 : 0,
+			(int)articleInfo->GetStatus(),
+			(int)ArticleInfo::aiFinished,
+			articleInfo->GetDupeFallbackRound(),
+			articleInfo->GetResultFilename() ? 1 : 0,
+			(int)ArticleInfo::aiUndefined,
+			&savedStatus);
+		outfile.PrintLine("%i,%" PRIi64 ",%i,%u,%i",
+			savedStatus,
+			articleInfo->GetSegmentOffset(),
+			articleInfo->GetSegmentSize(), 
+			articleInfo->GetCrc(),
+			stagedFallback
+		);
+#else
 		int stagedFallback = !completed && articleInfo->GetStatus() == ArticleInfo::aiFinished &&
 			articleInfo->GetDupeFallbackRound() > 0 && articleInfo->GetResultFilename() ? 1 : 0;
 		outfile.PrintLine("%i,%" PRIi64 ",%i,%u,%i",
@@ -1931,6 +2005,7 @@ bool DiskState::SaveFileState(FileInfo* fileInfo, StateDiskFile& outfile, bool c
 			articleInfo->GetCrc(),
 			stagedFallback
 		);
+#endif
 	}
 
 	// after upstream's data, which upstream stops reading before
@@ -2013,7 +2088,12 @@ bool DiskState::LoadFileState(FileInfo* fileInfo, Servers* servers, StateDiskFil
 	// the state of a file with its articles loaded can't list more (a stale or
 	// damaged state file did: at() threw out of the queue coordinator). Fewer is
 	// fine, as upstream has it: older queues saved some states with none
+#ifdef NZBGET_USE_RUST
+	if (!nzbget_rs_dad_diskstate_validate_article_count(
+		size, hasArticles ? 1 : 0, (int)fileInfo->GetArticles()->size()))
+#else
 	if (size < 0 || (hasArticles && size > (int)fileInfo->GetArticles()->size()) || size > 10000000)
+#endif
 	{
 		goto error;
 	}
@@ -2025,7 +2105,7 @@ bool DiskState::LoadFileState(FileInfo* fileInfo, Servers* servers, StateDiskFil
 		}
 		std::unique_ptr<ArticleInfo>& pa = fileInfo->GetArticles()->at(i);
 
-		int statusInt;
+		int statusInt = 0;
 
 #ifdef NZBGET_USE_RUST
 		int64 segmentOffset = 0;
@@ -2042,14 +2122,17 @@ bool DiskState::LoadFileState(FileInfo* fileInfo, Servers* servers, StateDiskFil
 		{
 			fields = infile.ScanLine("%i", &statusInt);
 		}
-		bool rangeValid = completed || (segmentOffset >= 0 && segmentSize >= 0 &&
-			segmentSize <= 1024*1024*1024);
-		bool effectiveFinished = statusInt == ArticleInfo::aiFinished &&
-			(formatVersion < 2 || rangeValid);
-		bool needStagedCheck = pa->GetPartNumber() > 0 &&
-			((formatVersion >= 2 && stagedFallback == 1 && rangeValid) ||
-			 (!completed && formatVersion < 9 && effectiveFinished &&
-			  (g_Options->GetDirectWrite() || fileInfo->GetForceDirectWrite())));
+		bool needStagedCheck = nzbget_rs_dad_diskstate_need_staged_file_check(
+			completed ? 1 : 0,
+			formatVersion,
+			statusInt,
+			(int)ArticleInfo::aiFinished,
+			segmentOffset,
+			segmentSize,
+			stagedFallback,
+			pa->GetPartNumber(),
+			g_Options->GetDirectWrite() ? 1 : 0,
+			fileInfo->GetForceDirectWrite() ? 1 : 0) != 0;
 		bool stagedFileExists = needStagedCheck &&
 			FileSystem::FileExists(BString<1024>("%s%c%i.%03i", g_Options->GetTempDir(),
 				PATH_SEPARATOR, fileInfo->GetId(), pa->GetPartNumber()));
@@ -2439,6 +2522,9 @@ void DiskState::DiscardDownloadQueue()
 	while (const char* filename = dir.Next())
 	{
 		// delete all files whose names have only characters '0'..'9'
+#ifdef NZBGET_USE_RUST
+		bool onlyNums = nzbget_rs_dad_diskstate_is_digits_only_filename(filename) != 0;
+#else
 		bool onlyNums = true;
 		for (const char* p = filename; *p != '\0'; p++)
 		{
@@ -2448,6 +2534,7 @@ void DiskState::DiscardDownloadQueue()
 				break;
 			}
 		}
+#endif
 		if (onlyNums)
 		{
 			fullFilename.Format("%s%c%s", g_Options->GetQueueDir(), PATH_SEPARATOR, filename);
@@ -2941,7 +3028,12 @@ bool DiskState::LoadAllFileStates(DownloadQueue* downloadQueue, Servers* servers
 		char suffix;
 		if (sscanf(filename, "%i%c", &id, &suffix) == 2)
 		{
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_dad_diskstate_should_load_file_state(
+				suffix, g_Options->GetContinuePartial() ? 1 : 0, cacheWasActive ? 1 : 0) != 0)
+#else
 			if (suffix == 'c' || (suffix == 's' && g_Options->GetContinuePartial() && !cacheWasActive))
+#endif
 			{
 				for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
 				{
@@ -3457,11 +3549,17 @@ bool DiskState::LoadVolumeStat(Servers* servers, ServerVolumes* serverVolumes, S
 			// index them by the clock), the days one grows: a count from the file
 			// sized them, and a wrong one (damaged file) threw at every start or
 			// left them too short for the counters
-			static const int fixedSize[] = { 60, 60, 24, 0 };
 			int arrSize;
 			if (infile.ScanLine("%i", &arrSize) != 1) goto error;
+#ifdef NZBGET_USE_RUST
+			int targetVolumeSize = 0;
+			if (!nzbget_rs_dad_diskstate_calc_volume_slot_size(k, arrSize, &targetVolumeSize)) goto error;
+			if (volumeArray) volumeArray->assign(targetVolumeSize, 0);
+#else
+			static const int fixedSize[] = { 60, 60, 24, 0 };
 			if (arrSize < 0 || arrSize > 100000) goto error;
 			if (volumeArray) volumeArray->assign(fixedSize[k] > 0 ? fixedSize[k] : arrSize, 0);
+#endif
 
 			for (int j = 0; j < arrSize; j++)
 			{

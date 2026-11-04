@@ -252,8 +252,21 @@ void PrePostProcessor::SanitisePostQueue()
 			nzbInfo->SetDirectUnpackStatus(NzbInfo::nsNone);
 		}
 		PostInfo* postInfo = nzbInfo->GetPostInfo();
+#ifdef NZBGET_USE_RUST
+		bool canCheckComplete = !postInfo && nzbInfo->GetKind() == NzbInfo::nkNzb &&
+			!nzbInfo->GetCompletedFiles()->empty() && nzbInfo->GetDeleteStatus() == NzbInfo::dsNone;
+		if (nzbget_rs_dad_prepost_should_complete_interrupted_download(
+			postInfo ? 1 : 0,
+			(int)nzbInfo->GetKind(),
+			(int)NzbInfo::nkNzb,
+			nzbInfo->GetCompletedFiles()->empty() ? 1 : 0,
+			(int)nzbInfo->GetDeleteStatus(),
+			(int)NzbInfo::dsNone,
+			(canCheckComplete && nzbInfo->IsDownloadCompleted(true)) ? 1 : 0) != 0)
+#else
 		if (!postInfo && nzbInfo->GetKind() == NzbInfo::nkNzb && !nzbInfo->GetCompletedFiles()->empty() &&
 			nzbInfo->GetDeleteStatus() == NzbInfo::dsNone && nzbInfo->IsDownloadCompleted(true))
+#endif
 		{
 			// its last file finished while the program stopped (a reload, a
 			// shutdown): the event that queues it for post-processing was
@@ -450,10 +463,19 @@ void PrePostProcessor::NzbAdded(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 		downloadQueue->EditEntry(nzbInfo->GetId(), DownloadQueue::eaGroupSortFiles, nullptr);
 	}
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_dad_prepost_is_skipped_delete_status(
+		(int)nzbInfo->GetDeleteStatus(),
+		(int)NzbInfo::dsDupe,
+		(int)NzbInfo::dsCopy,
+		(int)NzbInfo::dsGood,
+		(int)NzbInfo::dsScan) != 0)
+#else
 	if (nzbInfo->GetDeleteStatus() == NzbInfo::dsDupe ||
 		nzbInfo->GetDeleteStatus() == NzbInfo::dsCopy ||
 		nzbInfo->GetDeleteStatus() == NzbInfo::dsGood ||
 		nzbInfo->GetDeleteStatus() == NzbInfo::dsScan)
+#endif
 	{
 		NzbCompleted(downloadQueue, nzbInfo, false);
 	}

@@ -17713,6 +17713,557 @@ pub extern "C" fn nzbget_rs_cdn_article_batch_can_claim_next(
     ))
 }
 
+// ============================================================================
+// DiskState, ArticleWriter, ArticleDownloader & PostProcess FFI (`diskartdlpost.rs`)
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dad_diskstate_validate_dupe_extras_header(
+    scan_cnt: c_int,
+    recovered_articles: c_int,
+    recovered_holes: c_int,
+) -> c_int {
+    i32::from(crate::diskartdlpost::diskstate_validate_dupe_extras_header(
+        scan_cnt,
+        recovered_articles,
+        recovered_holes,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dad_diskstate_validate_repair_job_header(
+    scan_cnt: c_int,
+    expected_cnt: c_int,
+    file_id: c_int,
+    par_file: c_int,
+    failed_articles: c_int,
+) -> c_int {
+    i32::from(crate::diskartdlpost::diskstate_validate_repair_job_header(
+        scan_cnt,
+        expected_cnt,
+        file_id,
+        par_file,
+        failed_articles,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dad_diskstate_should_apply_url_status(
+    kind: c_int,
+    nk_nzb: c_int,
+    url_status: c_int,
+    ls_failed: c_int,
+) -> c_int {
+    i32::from(crate::diskartdlpost::diskstate_should_apply_url_status(
+        kind, nk_nzb, url_status, ls_failed,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dad_diskstate_normalize_script_status(
+    status: c_int,
+    format_version: c_int,
+) -> c_int {
+    crate::diskartdlpost::diskstate_normalize_script_status(status, format_version)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dad_diskstate_eval_restored_output_init(
+    output_initialized: c_int,
+    direct_write: c_int,
+    force_direct_write: c_int,
+    has_own_out_file: c_int,
+    has_out_tmp: c_int,
+    has_force_dest: c_int,
+) -> c_int {
+    i32::from(crate::diskartdlpost::diskstate_eval_restored_output_init(
+        output_initialized,
+        direct_write != 0,
+        force_direct_write != 0,
+        has_own_out_file != 0,
+        has_out_tmp != 0,
+        has_force_dest != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dad_diskstate_calc_staged_fallback(
+    completed: c_int,
+    article_status: c_int,
+    ai_finished: c_int,
+    dupe_fallback_round: c_int,
+    has_result_filename: c_int,
+    ai_undefined: c_int,
+    out_saved_status: *mut c_int,
+) -> c_int {
+    let (staged, saved_status) = crate::diskartdlpost::diskstate_calc_staged_fallback(
+        completed != 0,
+        article_status,
+        ai_finished,
+        dupe_fallback_round,
+        has_result_filename != 0,
+        ai_undefined,
+    );
+    if !out_saved_status.is_null() {
+        *out_saved_status = saved_status;
+    }
+    staged
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dad_diskstate_validate_article_count(
+    size: c_int,
+    has_articles: c_int,
+    articles_len: c_int,
+) -> c_int {
+    i32::from(crate::diskartdlpost::diskstate_validate_article_count(
+        size,
+        has_articles != 0,
+        articles_len,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dad_diskstate_need_staged_file_check(
+    completed: c_int,
+    format_version: c_int,
+    status_int: c_int,
+    ai_finished: c_int,
+    segment_offset: i64,
+    segment_size: c_int,
+    staged_fallback: c_int,
+    part_number: c_int,
+    direct_write: c_int,
+    force_direct_write: c_int,
+) -> c_int {
+    i32::from(crate::diskartdlpost::diskstate_need_staged_file_check(
+        completed != 0,
+        format_version,
+        status_int,
+        ai_finished,
+        segment_offset,
+        segment_size,
+        staged_fallback,
+        part_number,
+        direct_write != 0,
+        force_direct_write != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dad_diskstate_is_digits_only_filename(
+    filename: *const c_char,
+) -> c_int {
+    let bytes = if filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    i32::from(crate::diskartdlpost::diskstate_is_digits_only_filename(
+        bytes,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dad_diskstate_should_load_file_state(
+    suffix: c_char,
+    continue_partial: c_int,
+    cache_was_active: c_int,
+) -> c_int {
+    i32::from(crate::diskartdlpost::diskstate_should_load_file_state(
+        suffix as u8,
+        continue_partial != 0,
+        cache_was_active != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dad_diskstate_calc_volume_slot_size(
+    slot_index: c_int,
+    arr_size: c_int,
+    out_target_size: *mut c_int,
+) -> c_int {
+    let (valid, target_size) =
+        crate::diskartdlpost::diskstate_calc_volume_slot_size(slot_index, arr_size);
+    if !out_target_size.is_null() {
+        *out_target_size = target_size;
+    }
+    i32::from(valid)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dad_article_writer_should_check_dupe_file(
+    format: c_int,
+    ef_yenc: c_int,
+    dupe_check: c_int,
+    dupe_mode: c_int,
+    dm_force: c_int,
+    many_dupe_files: c_int,
+) -> c_int {
+    i32::from(
+        crate::diskartdlpost::article_writer_should_check_dupe_file(
+            format,
+            ef_yenc,
+            dupe_check != 0,
+            dupe_mode,
+            dm_force,
+            many_dupe_files != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dad_article_writer_is_duplicate_dest(
+    output_initialized: c_int,
+    is_own_output_file: c_int,
+    has_filename: c_int,
+    dest_exists: c_int,
+) -> c_int {
+    i32::from(crate::diskartdlpost::article_writer_is_duplicate_dest(
+        output_initialized != 0,
+        is_own_output_file != 0,
+        has_filename != 0,
+        dest_exists != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dad_article_writer_can_use_article_cache(
+    article_cache_mb: c_int,
+    raw_article: c_int,
+    format: c_int,
+    ef_yenc: c_int,
+    is_dupe_fallback: c_int,
+    is_critical: c_int,
+) -> c_int {
+    i32::from(crate::diskartdlpost::article_writer_can_use_article_cache(
+        article_cache_mb,
+        raw_article != 0,
+        format,
+        ef_yenc,
+        is_dupe_fallback != 0,
+        is_critical != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dad_article_writer_advance_and_check_range(
+    raw_article: c_int,
+    inout_ptr: *mut c_int,
+    len: c_int,
+    article_size: c_int,
+) -> c_int {
+    if inout_ptr.is_null() {
+        return 0;
+    }
+    let (new_ptr, exceeded) = crate::diskartdlpost::article_writer_advance_and_check_range(
+        raw_article != 0,
+        *inout_ptr,
+        len,
+        article_size,
+    );
+    *inout_ptr = new_ptr;
+    i32::from(exceeded)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dad_article_writer_resolve_direct_write_ready(
+    direct_write_opt: c_int,
+    force_direct_write: c_int,
+    output_initialized: c_int,
+    has_own_out: c_int,
+    has_force_dest: c_int,
+    out_output_initialized: *mut c_int,
+) -> c_int {
+    let (new_init, direct_write) =
+        crate::diskartdlpost::article_writer_resolve_direct_write_ready(
+            direct_write_opt != 0,
+            force_direct_write != 0,
+            output_initialized != 0,
+            has_own_out != 0,
+            has_force_dest != 0,
+        );
+    if !out_output_initialized.is_null() {
+        *out_output_initialized = i32::from(new_init);
+    }
+    i32::from(direct_write)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dad_article_writer_need_gap_fill(
+    raw_article: c_int,
+    direct_write: c_int,
+    segment_offset: i64,
+    out_pos: i64,
+) -> c_int {
+    i32::from(crate::diskartdlpost::article_writer_need_gap_fill(
+        raw_article != 0,
+        direct_write != 0,
+        segment_offset,
+        out_pos,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dad_article_cache_can_alloc(
+    effective_limit: usize,
+    allocated: usize,
+    size: usize,
+    out_was_empty: *mut c_int,
+) -> c_int {
+    let (can_alloc, was_empty) =
+        crate::diskartdlpost::article_cache_can_alloc(effective_limit, allocated, size);
+    if !out_was_empty.is_null() {
+        *out_was_empty = i32::from(was_empty);
+    }
+    i32::from(can_alloc)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dad_memory_monitor_calc_critical_or_normal_par_buffer(
+    tier: c_int,
+    configured_mb: c_int,
+    tier_critical: c_int,
+    tier_normal: c_int,
+    out_mb: *mut c_int,
+) -> c_int {
+    let (handled, mb) =
+        crate::diskartdlpost::memory_monitor_calc_critical_or_normal_par_buffer(
+            tier,
+            configured_mb,
+            tier_critical,
+            tier_normal,
+        );
+    if !out_mb.is_null() {
+        *out_mb = mb;
+    }
+    i32::from(handled)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dad_memory_monitor_resolve_tier_limits(
+    next_tier: c_int,
+    raw_sample: c_int,
+    cfg_cache: u32,
+    cfg_par: u32,
+    cfg_limit: u32,
+    tier_normal: c_int,
+    tier_constrained: c_int,
+    tier_critical: c_int,
+    rs_eff_cache: u32,
+    rs_eff_par: u32,
+    out_eff_cache: *mut u32,
+    out_eff_par: *mut u32,
+    out_eff_limit: *mut u32,
+) {
+    let (eff_cache, eff_par, eff_limit) =
+        crate::diskartdlpost::memory_monitor_resolve_tier_limits(
+            next_tier,
+            raw_sample,
+            cfg_cache,
+            cfg_par,
+            cfg_limit,
+            tier_normal,
+            tier_constrained,
+            tier_critical,
+            rs_eff_cache,
+            rs_eff_par,
+        );
+    if !out_eff_cache.is_null() {
+        *out_eff_cache = eff_cache;
+    }
+    if !out_eff_par.is_null() {
+        *out_eff_par = eff_par;
+    }
+    if !out_eff_limit.is_null() {
+        *out_eff_limit = eff_limit;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dad_article_dl_should_abort_for_work_state(
+    is_stopped: c_int,
+    pause_download: c_int,
+    quota_reached: c_int,
+    force: c_int,
+    download_held: c_int,
+    extra_priority: c_int,
+    gen_changed: c_int,
+) -> c_int {
+    i32::from(
+        crate::diskartdlpost::article_dl_should_abort_for_work_state(
+            is_stopped != 0,
+            pause_download != 0,
+            quota_reached != 0,
+            force != 0,
+            download_held != 0,
+            extra_priority != 0,
+            gen_changed != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dad_article_dl_classify_attempt_stat(
+    status: c_int,
+    ad_finished: c_int,
+    ad_failed: c_int,
+    ad_not_found: c_int,
+    ad_crc_error: c_int,
+    out_success: *mut c_int,
+    out_failed: *mut c_int,
+) -> c_int {
+    let (record, success, failed) = crate::diskartdlpost::article_dl_classify_attempt_stat(
+        status,
+        ad_finished,
+        ad_failed,
+        ad_not_found,
+        ad_crc_error,
+    );
+    if !out_success.is_null() {
+        *out_success = success;
+    }
+    if !out_failed.is_null() {
+        *out_failed = failed;
+    }
+    i32::from(record)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dad_article_dl_should_retry_same_server(
+    connected: c_int,
+    status: c_int,
+    ad_failed: c_int,
+    remained_retries: c_int,
+    retention_failure: c_int,
+) -> c_int {
+    i32::from(crate::diskartdlpost::article_dl_should_retry_same_server(
+        connected != 0,
+        status,
+        ad_failed,
+        remained_retries,
+        retention_failure != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dad_article_dl_should_advance_server_list(
+    has_want_server: c_int,
+    connected: c_int,
+    retention_failure: c_int,
+    optional_blocked: c_int,
+    auth_rejected: c_int,
+    out_push_failed_server: *mut c_int,
+) -> c_int {
+    let (advance, push_failed) = crate::diskartdlpost::article_dl_should_advance_server_list(
+        has_want_server != 0,
+        connected != 0,
+        retention_failure != 0,
+        optional_blocked != 0,
+        auth_rejected != 0,
+    );
+    if !out_push_failed_server.is_null() {
+        *out_push_failed_server = i32::from(push_failed);
+    }
+    i32::from(advance)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dad_article_dl_should_pace_critical_uncached(
+    is_stopped: c_int,
+    has_cached_buffer: c_int,
+    is_critical: c_int,
+    is_flushing: c_int,
+) -> c_int {
+    i32::from(
+        crate::diskartdlpost::article_dl_should_pace_critical_uncached(
+            is_stopped != 0,
+            has_cached_buffer != 0,
+            is_critical != 0,
+            is_flushing != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dad_direct_unpack_eval_post_run_actions(
+    unpack_ok: c_int,
+    cancelled: c_int,
+    is_stopped: c_int,
+    terminated: c_int,
+    out_should_cleanup: *mut c_int,
+) -> c_int {
+    let (interrupted, should_cleanup) =
+        crate::diskartdlpost::direct_unpack_eval_post_run_actions(
+            unpack_ok != 0,
+            cancelled != 0,
+            is_stopped != 0,
+            terminated != 0,
+        );
+    if !out_should_cleanup.is_null() {
+        *out_should_cleanup = i32::from(should_cleanup);
+    }
+    i32::from(interrupted)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dad_direct_unpack_should_commit_extracted_archives(
+    has_archives: c_int,
+    status: c_int,
+    ns_success: c_int,
+    interrupted: c_int,
+) -> c_int {
+    i32::from(
+        crate::diskartdlpost::direct_unpack_should_commit_extracted_archives(
+            has_archives != 0,
+            status,
+            ns_success,
+            interrupted != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dad_prepost_should_complete_interrupted_download(
+    has_post_info: c_int,
+    kind: c_int,
+    nk_nzb: c_int,
+    completed_files_empty: c_int,
+    delete_status: c_int,
+    ds_none: c_int,
+    download_completed: c_int,
+) -> c_int {
+    i32::from(
+        crate::diskartdlpost::prepost_should_complete_interrupted_download(
+            has_post_info != 0,
+            kind,
+            nk_nzb,
+            completed_files_empty != 0,
+            delete_status,
+            ds_none,
+            download_completed != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dad_prepost_is_skipped_delete_status(
+    delete_status: c_int,
+    ds_dupe: c_int,
+    ds_copy: c_int,
+    ds_good: c_int,
+    ds_scan: c_int,
+) -> c_int {
+    i32::from(crate::diskartdlpost::prepost_is_skipped_delete_status(
+        delete_status,
+        ds_dupe,
+        ds_copy,
+        ds_good,
+        ds_scan,
+    ))
+}
+
+
 
 
 

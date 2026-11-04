@@ -338,7 +338,11 @@ int NZBGet::Phase1_Init(bool reload)
 
 #ifndef WIN32
 	mode_t uMask = static_cast<mode_t>(m_options->GetUMask());
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_ccm_nzbget_is_valid_umask((uint32_t)uMask) != 0)
+#else
 	if (uMask < 01000)
+#endif
 	{
 		/* set newly created file permissions */
 		FileSystem::uMask = uMask;
@@ -670,11 +674,21 @@ void NZBGet::StartRemoteServer()
 	m_remoteServer = std::make_unique<RemoteServer>(false);
 	m_remoteServer->Start();
 
+#ifdef NZBGET_USE_RUST
+#ifdef WIN32
+	const int isUnix = 0;
+#else
+	const int isUnix = 1;
+#endif
+	if (nzbget_rs_ccm_nzbget_should_start_secure_server(
+		m_options->GetSecureControl() ? 1 : 0, isUnix, m_options->GetControlIp()) != 0)
+#else
 	if (m_options->GetSecureControl()
 #ifndef WIN32
 		&& !(m_options->GetControlIp() && m_options->GetControlIp()[0] == '/')
 #endif
 )
+#endif
 	{
 		m_remoteSecureServer = std::make_unique<RemoteServer>(true);
 		m_remoteSecureServer->Start();
@@ -877,10 +891,18 @@ void NZBGet::DoMainLoop()
 			Reload();
 		}
 
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_ccm_nzbget_should_stop_standalone(
+			m_options->GetServerMode() ? 1 : 0,
+			m_queueCoordinator->HasMoreJobs() ? 1 : 0,
+			m_urlCoordinator->HasMoreJobs() ? 1 : 0,
+			m_prePostProcessor->HasMoreJobs() ? 1 : 0) != 0)
+#else
 		if (!m_options->GetServerMode() &&
 			!m_queueCoordinator->HasMoreJobs() &&
 			!m_urlCoordinator->HasMoreJobs() &&
 			!m_prePostProcessor->HasMoreJobs())
+#endif
 		{
 			// Standalone-mode: download completed
 			if (!m_queueCoordinator->IsStopped())
@@ -1136,9 +1158,13 @@ void NZBGet::ProcessWebGet()
 	downloader.SetInfoName("WebGet");
 
 	WebDownloader::EStatus status = downloader.DownloadWithRedirects(5);
+#ifdef NZBGET_USE_RUST
+	exit(nzbget_rs_ccm_nzbget_webget_exit_code((int)status, (int)WebDownloader::adFinished));
+#else
 	bool ok = status == WebDownloader::adFinished;
 
 	exit(ok ? 0 : 1);
+#endif
 }
 
 void NZBGet::ProcessSigVerify()
@@ -1146,7 +1172,11 @@ void NZBGet::ProcessSigVerify()
 #ifndef DISABLE_TLS
 	bool ok = Maintenance::VerifySignature(m_commandLineParser->GetLastArg(),
 		m_commandLineParser->GetSigFilename(), m_commandLineParser->GetPubKeyFilename());
+#ifdef NZBGET_USE_RUST
+	exit(nzbget_rs_ccm_nzbget_sigverify_exit_code(ok ? 1 : 0));
+#else
 	exit(ok ? 93 : 1);
+#endif
 #else
 	printf("ERROR: Could not verify signature, the program was compiled without OpenSSL support\n");
 	exit(1);

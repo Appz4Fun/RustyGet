@@ -240,7 +240,11 @@ bool Connection::Bind()
 	int errcode = 0;
 
 #ifndef WIN32
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_ccm_conn_is_unix_domain_path(m_host.c_str()) != 0)
+#else
 	if (!m_host.empty() && m_host.front() == '/')
+#endif
 	{
 		struct sockaddr_un addr;
 		addr.sun_family = AF_UNIX;
@@ -277,7 +281,12 @@ bool Connection::Bind()
 		struct addrinfo addr_hints, *addr_list, *addr;
 
 		memset(&addr_hints, 0, sizeof(addr_hints));
+#ifdef NZBGET_USE_RUST
+		addr_hints.ai_family = nzbget_rs_ccm_conn_select_ai_family(
+			(int)m_ipVersion, (int)ipV4, (int)ipV6, AF_INET, AF_INET6, AF_UNSPEC);
+#else
 		addr_hints.ai_family = m_ipVersion == ipV4 ? AF_INET : m_ipVersion == ipV6 ? AF_INET6 : AF_UNSPEC;
+#endif
 		addr_hints.ai_socktype = SOCK_STREAM;
 		addr_hints.ai_flags = AI_PASSIVE;    // For wildcard IP address
 
@@ -627,7 +636,11 @@ bool Connection::Recv(char * buffer, int size)
 
 	if (m_bufAvail > 0)
 	{
+#ifdef NZBGET_USE_RUST
+		int len = nzbget_rs_ccm_conn_recv_buffered_chunk_len(size, m_bufAvail);
+#else
 		int len = size > m_bufAvail ? m_bufAvail : size;
+#endif
 		memcpy(bufPtr, m_bufPtr, len);
 		bufPtr += len;
 		m_bufPtr += len;
@@ -660,7 +673,11 @@ bool Connection::DoConnect()
 	m_socket = INVALID_SOCKET;
 
 #ifndef WIN32
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_ccm_conn_is_unix_domain_path(m_host.c_str()) != 0)
+#else
 	if (!m_host.empty() && m_host.front() == '/')
+#endif
 	{
 		struct sockaddr_un addr;
 		addr.sun_family = AF_UNIX;
@@ -696,7 +713,12 @@ bool Connection::DoConnect()
 		struct addrinfo addr_hints, *addr_list, *addr;
 
 		memset(&addr_hints, 0, sizeof(addr_hints));
+#ifdef NZBGET_USE_RUST
+		addr_hints.ai_family = nzbget_rs_ccm_conn_select_ai_family(
+			(int)m_ipVersion, (int)ipV4, (int)ipV6, AF_INET, AF_INET6, AF_UNSPEC);
+#else
 		addr_hints.ai_family = m_ipVersion == ipV4 ? AF_INET : m_ipVersion == ipV6 ? AF_INET6 : AF_UNSPEC;
+#endif
 		addr_hints.ai_socktype = SOCK_STREAM;
 
 		BString<100> portStr("%d", m_port);
@@ -960,7 +982,11 @@ bool Connection::ConnectWithTimeout(void* address, int address_len)
 			ret = m_deadline->Wait(m_socket, true, true) ? 1 : 0;
 			pfd.revents = POLLIN | POLLOUT;
 		}
+#ifdef NZBGET_USE_RUST
+		else ret = poll(&pfd, 1, nzbget_rs_ccm_conn_poll_timeout_ms(m_timeout));
+#else
 		else ret = poll(&pfd, 1, m_timeout ? m_timeout * 1000 : -1);
+#endif
 #endif
 		//we are waiting for connect to complete now
 		if (ret < 0)
@@ -984,7 +1010,11 @@ bool Connection::ConnectWithTimeout(void* address, int address_len)
 			return false;
 		}
 #else
+#ifdef NZBGET_USE_RUST
+		if (!nzbget_rs_ccm_conn_poll_revents_ready(pfd.revents, POLLIN | POLLOUT | POLLERR | POLLHUP))
+#else
 		if (!(pfd.revents & (POLLIN | POLLOUT | POLLERR | POLLHUP)))
+#endif
 		{
 			return false;
 		}
@@ -1034,8 +1064,13 @@ void Connection::DoDisconnect()
 #ifndef WIN32
 		int is_listening;
 		socklen_t len = sizeof(is_listening);
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_ccm_conn_is_unix_domain_path(m_host.c_str()) != 0
+			&& getsockopt(m_socket, SOL_SOCKET, SO_ACCEPTCONN, &is_listening, &len) == 0 && is_listening)
+#else
 		if (!m_host.empty() && m_host.front() == '/'
 			&& getsockopt(m_socket, SOL_SOCKET, SO_ACCEPTCONN, &is_listening, &len) == 0 && is_listening)
+#endif
 		{
 			unlink(m_host.c_str());
 		}

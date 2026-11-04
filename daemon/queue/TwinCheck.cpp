@@ -238,7 +238,11 @@ void TwinCheckJob::Run()
 	{
 		fingerprint = fetched ? "lost" : "none";
 	}
+#ifdef NZBGET_USE_RUST
+	int files = known ? nzbget_rs_ccm_twin_check_parse_fingerprint_files(fingerprint.c_str()) : 0;
+#else
 	int files = known ? atoi(fingerprint.c_str() + fingerprint.rfind('-') + 1) : 0;
+#endif
 
 	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
 	NzbInfo* nzbInfo = nullptr;
@@ -487,12 +491,12 @@ std::string TwinCheck::Posting(NzbInfo* nzbInfo)
 std::string TwinCheck::Identity(NzbInfo* nzbInfo)
 {
 	NzbParameter* print = nzbInfo->GetParameters()->Find(FilesParam);
-	if (!print || Util::EmptyStr(print->GetValue()) || !strcmp(print->GetValue(), "none") ||
-		!strcmp(print->GetValue(), "lost"))
+	if (!print)
 	{
 		return "";
 	}
-	return std::string(print->GetValue()) + "#" + Posting(nzbInfo);
+	return RsString(nzbget_rs_ccm_twin_check_format_identity(
+		print->GetValue(), Posting(nzbInfo).c_str()));
 }
 
 std::string TwinCheck::PutPar2(int nzbId, const char* posting, const char* data, size_t size,
@@ -909,9 +913,19 @@ void TwinCheck::ServiceWork()
 		auto isDupe = [](const Item& item)
 			{
 				NzbInfo* nzbInfo = item.nzbInfo;
+#ifdef NZBGET_USE_RUST
+				return nzbget_rs_ccm_twin_check_is_dupe_item(
+					item.queued ? 1 : 0,
+					nzbInfo->GetRemainingSize(),
+					nzbInfo->GetPausedSize(),
+					(int)nzbInfo->GetDeleteStatus(),
+					(int)NzbInfo::dsDupe,
+					(int)NzbInfo::dsCopy) != 0;
+#else
 				return item.queued ?
 					nzbInfo->GetRemainingSize() > 0 && nzbInfo->GetPausedSize() >= nzbInfo->GetRemainingSize() :
 					nzbInfo->GetDeleteStatus() == NzbInfo::dsDupe || nzbInfo->GetDeleteStatus() == NzbInfo::dsCopy;
+#endif
 			};
 		auto fingerprintOf = [](NzbInfo* nzbInfo)
 			{
@@ -1195,7 +1209,11 @@ int TwinCheck::ServiceInterval()
 {
 	// nudged: within a second, not at once: a fetch that fails at once is retried
 	// at most once a second
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_ccm_twin_check_service_interval(g_nudged ? 1 : 0);
+#else
 	return g_nudged ? 1 : 15;
+#endif
 }
 
 void TwinCheck::Nudge()

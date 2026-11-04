@@ -166,13 +166,13 @@ mod tests {
         let donors = [r(0, 10), r(10, 10), r(20, 0), r(20, 10)];
         assert_eq!(picked(&donors, &[r(9, 11)], 0), [0, 1]);
         assert_eq!(picked(&donors, &[r(19, 2)], 0), [1, 2, 3]);
-        assert_eq!(picked(&donors, &[r(20, 0)], 0), []);
+        assert_eq!(picked(&donors, &[r(20, 0)], 0), [0i32; 0]);
     }
     #[test]
     fn negative_size_and_negative_margin() {
         assert_eq!(picked(&[r(10, -2)], &[r(7, 4)], 0), [0]);
-        assert_eq!(picked(&[r(10, 2)], &[r(11, -2)], 0), []);
-        assert_eq!(picked(&[r(0, 20)], &[r(2, 5)], -1), []);
+        assert_eq!(picked(&[r(10, 2)], &[r(11, -2)], 0), [0i32; 0]);
+        assert_eq!(picked(&[r(0, 20)], &[r(2, 5)], -1), [0i32; 0]);
     }
     #[test]
     fn shuffled_nested_duplicate_holes_preserve_indices() {
@@ -193,8 +193,8 @@ mod tests {
     }
     #[test]
     fn empty_and_extreme_defined_endpoints() {
-        assert_eq!(picked(&[], &[r(0, 1)], 2), []);
-        assert_eq!(picked(&[r(0, 1)], &[], 2), []);
+        assert_eq!(picked(&[], &[r(0, 1)], 2), [0i32; 0]);
+        assert_eq!(picked(&[r(0, 1)], &[], 2), [0i32; 0]);
         assert_eq!(
             picked(
                 &[r(i64::MIN, 1), r(i64::MAX - 2, 2)],
@@ -230,7 +230,7 @@ mod tests {
     fn sorted_fast_path_strict_and_reversed_hole_boundaries() {
         let donors: Vec<_> = (0..40).map(|i| r(i * 10, 10)).collect();
         assert_eq!(picked(&donors, &[r(100, 10)], 0), [10]);
-        assert_eq!(picked(&donors, &[r(100, 0)], 0), []);
+        assert_eq!(picked(&donors, &[r(100, 0)], 0), [0i32; 0]);
         let nested: Vec<_> = (0..40).map(|i| r(i * 100, 1000)).collect();
         assert_eq!(picked(&nested, &[r(400, -10)], 0), [0, 1, 2, 3]);
         assert_eq!(

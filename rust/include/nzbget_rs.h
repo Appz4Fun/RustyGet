@@ -2458,6 +2458,63 @@ size_t nzbget_rs_awc_news_server_format_default_name(
 int nzbget_rs_awc_openssl_should_stop_thread(int is_libressl);
 int nzbget_rs_awc_utf8_is_empty_len(size_t len);
 
+int nzbget_rs_ccm_conn_select_ai_family(
+    int ip_version, int ip_v4, int ip_v6,
+    int af_inet, int af_inet6, int af_unspec);
+int nzbget_rs_ccm_conn_is_unix_domain_path(const char* host);
+int nzbget_rs_ccm_conn_recv_buffered_chunk_len(int size, int buf_avail);
+int nzbget_rs_ccm_conn_poll_timeout_ms(int timeout_sec);
+int nzbget_rs_ccm_conn_poll_revents_ready(int revents, int mask);
+
+int nzbget_rs_ccm_remote_client_is_wildcard_control_ip(const char* control_ip);
+int nzbget_rs_ccm_remote_client_is_http_url(const char* nzb_content);
+int nzbget_rs_ccm_remote_client_calc_file_completed_pct(
+    int64_t remaining_size, int64_t total_size);
+void nzbget_rs_ccm_remote_client_calc_hms(
+    int64_t sec, int* out_h, int* out_m, int* out_s);
+int nzbget_rs_ccm_remote_client_calc_avg_speed(
+    int64_t all_bytes, int64_t download_time_sec);
+size_t nzbget_rs_ccm_remote_client_format_server_state(
+    int download_paused, int download2_paused, int download_standby,
+    uint32_t post_job_count, int post_paused, char* out_buf, size_t out_cap);
+int nzbget_rs_ccm_remote_client_align4(int len);
+
+int nzbget_rs_ccm_nzbget_is_valid_umask(uint32_t umask_val);
+int nzbget_rs_ccm_nzbget_should_start_secure_server(
+    int secure_control, int is_unix, const char* control_ip);
+int nzbget_rs_ccm_nzbget_should_stop_standalone(
+    int server_mode, int queue_more, int url_more, int post_more);
+int nzbget_rs_ccm_nzbget_webget_exit_code(int status, int ad_finished);
+int nzbget_rs_ccm_nzbget_sigverify_exit_code(int ok);
+
+int nzbget_rs_ccm_twin_check_parse_fingerprint_files(const char* fingerprint);
+NzbgetRsBuf nzbget_rs_ccm_twin_check_format_identity(
+    const char* files_param, const char* posting);
+int nzbget_rs_ccm_twin_check_is_dupe_item(
+    int queued, int64_t remaining_size, int64_t paused_size,
+    int delete_status, int ds_dupe, int ds_copy);
+int nzbget_rs_ccm_twin_check_service_interval(int nudged);
+
+int nzbget_rs_ccm_queue_editor_clamp_move_target(
+    int entry, int offset, int size, int* out_new_entry);
+void nzbget_rs_ccm_queue_editor_eval_group_delete_flags(
+    int action, int ea_park_delete, int ea_dupe_delete, int ea_final_delete,
+    int keep_history, int unpack_cleaned_up_disk, int current_success_articles,
+    int* out_parking, int* out_avoid_history, int* out_set_dupe_status,
+    int* out_cleanup_disk);
+int nzbget_rs_ccm_queue_editor_calc_move_groups_to_offset(
+    const int* queue_ids, size_t queue_len, int target_id, int move_id,
+    int before, size_t item_list_size);
+
+void nzbget_rs_ccm_ncurses_calc_msg_lines(
+    int text_len, int screen_width, int* out_win_width, int* out_msg_lines);
+void nzbget_rs_ccm_ncurses_sanitize_message_chars(char* buf, size_t len);
+const char* nzbget_rs_ccm_ncurses_select_edit_queue_keybar(
+    int selected_entry, int queue_size);
+int nzbget_rs_ccm_ncurses_calc_group_name_len(
+    int screen_width, int calc_col_width, int col_files, int col_total, int col_left);
+int nzbget_rs_ccm_ncurses_next_queue_win_pct(int cur_pct, int is_edit_queue);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

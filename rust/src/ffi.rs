@@ -15471,5 +15471,381 @@ pub unsafe extern "C" fn nzbget_rs_awc_utf8_is_empty_len(len: usize) -> c_int {
     i32::from(crate::artwritercore::utf8_is_empty_len(len))
 }
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ccm_conn_select_ai_family(
+    ip_version: c_int,
+    ip_v4: c_int,
+    ip_v6: c_int,
+    af_inet: c_int,
+    af_inet6: c_int,
+    af_unspec: c_int,
+) -> c_int {
+    crate::connclientmain::conn_select_ai_family(
+        ip_version, ip_v4, ip_v6, af_inet, af_inet6, af_unspec,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ccm_conn_is_unix_domain_path(host: *const c_char) -> c_int {
+    let h = if host.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(host).to_bytes()
+    };
+    i32::from(crate::connclientmain::conn_is_unix_domain_path(h))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ccm_conn_recv_buffered_chunk_len(
+    size: c_int,
+    buf_avail: c_int,
+) -> c_int {
+    crate::connclientmain::conn_recv_buffered_chunk_len(size, buf_avail)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ccm_conn_poll_timeout_ms(timeout_sec: c_int) -> c_int {
+    crate::connclientmain::conn_poll_timeout_ms(timeout_sec)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ccm_conn_poll_revents_ready(revents: c_int, mask: c_int) -> c_int {
+    i32::from(crate::connclientmain::conn_poll_revents_ready(
+        revents, mask,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ccm_remote_client_is_wildcard_control_ip(
+    control_ip: *const c_char,
+) -> c_int {
+    let ip = if control_ip.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(control_ip).to_bytes()
+    };
+    i32::from(crate::connclientmain::remote_client_is_wildcard_control_ip(
+        ip,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ccm_remote_client_is_http_url(
+    nzb_content: *const c_char,
+) -> c_int {
+    let s = if nzb_content.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(nzb_content).to_bytes()
+    };
+    i32::from(crate::connclientmain::remote_client_is_http_url(s))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ccm_remote_client_calc_file_completed_pct(
+    remaining_size: i64,
+    total_size: i64,
+) -> c_int {
+    crate::connclientmain::remote_client_calc_file_completed_pct(remaining_size, total_size)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ccm_remote_client_calc_hms(
+    sec: i64,
+    out_h: *mut c_int,
+    out_m: *mut c_int,
+    out_s: *mut c_int,
+) {
+    let (h, m, s) = crate::connclientmain::remote_client_calc_hms(sec);
+    if !out_h.is_null() {
+        *out_h = h;
+    }
+    if !out_m.is_null() {
+        *out_m = m;
+    }
+    if !out_s.is_null() {
+        *out_s = s;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ccm_remote_client_calc_avg_speed(
+    all_bytes: i64,
+    download_time_sec: i64,
+) -> c_int {
+    crate::connclientmain::remote_client_calc_avg_speed(all_bytes, download_time_sec)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ccm_remote_client_format_server_state(
+    download_paused: c_int,
+    download2_paused: c_int,
+    download_standby: c_int,
+    post_job_count: u32,
+    post_paused: c_int,
+    out_buf: *mut c_char,
+    out_cap: usize,
+) -> usize {
+    let formatted = crate::connclientmain::remote_client_format_server_state(
+        download_paused != 0,
+        download2_paused != 0,
+        download_standby != 0,
+        post_job_count,
+        post_paused != 0,
+    );
+    write_bytes_to_c_buf(&formatted, out_buf, out_cap)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ccm_remote_client_align4(len: c_int) -> c_int {
+    crate::connclientmain::remote_client_align4(len)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ccm_nzbget_is_valid_umask(umask_val: u32) -> c_int {
+    i32::from(crate::connclientmain::nzbget_is_valid_umask(umask_val))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ccm_nzbget_should_start_secure_server(
+    secure_control: c_int,
+    is_unix: c_int,
+    control_ip: *const c_char,
+) -> c_int {
+    let ip = if control_ip.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(control_ip).to_bytes()
+    };
+    i32::from(crate::connclientmain::nzbget_should_start_secure_server(
+        secure_control != 0,
+        is_unix != 0,
+        ip,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ccm_nzbget_should_stop_standalone(
+    server_mode: c_int,
+    queue_more: c_int,
+    url_more: c_int,
+    post_more: c_int,
+) -> c_int {
+    i32::from(crate::connclientmain::nzbget_should_stop_standalone(
+        server_mode != 0,
+        queue_more != 0,
+        url_more != 0,
+        post_more != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ccm_nzbget_webget_exit_code(
+    status: c_int,
+    ad_finished: c_int,
+) -> c_int {
+    crate::connclientmain::nzbget_webget_exit_code(status, ad_finished)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ccm_nzbget_sigverify_exit_code(ok: c_int) -> c_int {
+    crate::connclientmain::nzbget_sigverify_exit_code(ok != 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ccm_twin_check_parse_fingerprint_files(
+    fingerprint: *const c_char,
+) -> c_int {
+    let fp = if fingerprint.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(fingerprint).to_bytes()
+    };
+    crate::connclientmain::twin_check_parse_fingerprint_files(fp)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ccm_twin_check_format_identity(
+    files_param: *const c_char,
+    posting: *const c_char,
+) -> RsBuf {
+    let fp = if files_param.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(files_param).to_bytes()
+    };
+    let post = if posting.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(posting).to_bytes()
+    };
+    into_buf(crate::connclientmain::twin_check_format_identity(fp, post))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ccm_twin_check_is_dupe_item(
+    queued: c_int,
+    remaining_size: i64,
+    paused_size: i64,
+    delete_status: c_int,
+    ds_dupe: c_int,
+    ds_copy: c_int,
+) -> c_int {
+    i32::from(crate::connclientmain::twin_check_is_dupe_item(
+        queued != 0,
+        remaining_size,
+        paused_size,
+        delete_status,
+        ds_dupe,
+        ds_copy,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ccm_twin_check_service_interval(nudged: c_int) -> c_int {
+    crate::connclientmain::twin_check_service_interval(nudged != 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ccm_queue_editor_clamp_move_target(
+    entry: c_int,
+    offset: c_int,
+    size: c_int,
+    out_new_entry: *mut c_int,
+) -> c_int {
+    if let Some(target) = crate::connclientmain::queue_editor_clamp_move_target(entry, offset, size)
+    {
+        if !out_new_entry.is_null() {
+            *out_new_entry = target;
+        }
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ccm_queue_editor_eval_group_delete_flags(
+    action: c_int,
+    ea_park_delete: c_int,
+    ea_dupe_delete: c_int,
+    ea_final_delete: c_int,
+    keep_history: c_int,
+    unpack_cleaned_up_disk: c_int,
+    current_success_articles: c_int,
+    out_parking: *mut c_int,
+    out_avoid_history: *mut c_int,
+    out_set_dupe_status: *mut c_int,
+    out_cleanup_disk: *mut c_int,
+) {
+    let (park, avoid, dupe, clean) = crate::connclientmain::queue_editor_eval_group_delete_flags(
+        action,
+        ea_park_delete,
+        ea_dupe_delete,
+        ea_final_delete,
+        keep_history,
+        unpack_cleaned_up_disk != 0,
+        current_success_articles,
+    );
+    if !out_parking.is_null() {
+        *out_parking = i32::from(park);
+    }
+    if !out_avoid_history.is_null() {
+        *out_avoid_history = i32::from(avoid);
+    }
+    if !out_set_dupe_status.is_null() {
+        *out_set_dupe_status = i32::from(dupe);
+    }
+    if !out_cleanup_disk.is_null() {
+        *out_cleanup_disk = i32::from(clean);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ccm_queue_editor_calc_move_groups_to_offset(
+    queue_ids: *const c_int,
+    queue_len: usize,
+    target_id: c_int,
+    move_id: c_int,
+    before: c_int,
+    item_list_size: usize,
+) -> c_int {
+    let ids = if queue_ids.is_null() || queue_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(queue_ids, queue_len)
+    };
+    crate::connclientmain::queue_editor_calc_move_groups_to_offset(
+        ids,
+        target_id,
+        move_id,
+        before != 0,
+        item_list_size,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ccm_ncurses_calc_msg_lines(
+    text_len: c_int,
+    screen_width: c_int,
+    out_win_width: *mut c_int,
+    out_msg_lines: *mut c_int,
+) {
+    let (ww, ml) = crate::connclientmain::ncurses_calc_msg_lines(text_len, screen_width);
+    if !out_win_width.is_null() {
+        *out_win_width = ww;
+    }
+    if !out_msg_lines.is_null() {
+        *out_msg_lines = ml;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ccm_ncurses_sanitize_message_chars(
+    buf: *mut c_char,
+    len: usize,
+) {
+    if buf.is_null() || len == 0 {
+        return;
+    }
+    let slice = std::slice::from_raw_parts_mut(buf.cast::<u8>(), len);
+    crate::connclientmain::ncurses_sanitize_message_chars(slice);
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ccm_ncurses_select_edit_queue_keybar(
+    selected_entry: c_int,
+    queue_size: c_int,
+) -> *const c_char {
+    crate::connclientmain::ncurses_select_edit_queue_keybar(selected_entry, queue_size)
+        .as_ptr()
+        .cast::<c_char>()
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ccm_ncurses_calc_group_name_len(
+    screen_width: c_int,
+    calc_col_width: c_int,
+    col_files: c_int,
+    col_total: c_int,
+    col_left: c_int,
+) -> c_int {
+    crate::connclientmain::ncurses_calc_group_name_len(
+        screen_width,
+        calc_col_width != 0,
+        col_files,
+        col_total,
+        col_left,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ccm_ncurses_next_queue_win_pct(
+    cur_pct: c_int,
+    is_edit_queue: c_int,
+) -> c_int {
+    crate::connclientmain::ncurses_next_queue_win_pct(cur_pct, is_edit_queue != 0)
+}
+
 
 

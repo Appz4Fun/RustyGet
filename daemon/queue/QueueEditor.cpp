@@ -255,8 +255,12 @@ void QueueEditor::MoveEntry(FileInfo* fileInfo, int offset)
 		entry++;
 	}
 
-	int newEntry = entry + offset;
 	int size = (int)fileInfo->GetNzbInfo()->GetFileList()->size();
+#ifdef NZBGET_USE_RUST
+	int newEntry = 0;
+	if (nzbget_rs_ccm_queue_editor_clamp_move_target(entry, offset, size, &newEntry) != 0)
+#else
+	int newEntry = entry + offset;
 
 	if (newEntry < 0)
 	{
@@ -268,6 +272,7 @@ void QueueEditor::MoveEntry(FileInfo* fileInfo, int offset)
 	}
 
 	if (newEntry >= 0 && newEntry <= size - 1)
+#endif
 	{
 		std::unique_ptr<FileInfo> movedFileInfo = std::move(*(fileInfo->GetNzbInfo()->GetFileList()->begin() + entry));
 		fileInfo->GetNzbInfo()->GetFileList()->erase(fileInfo->GetNzbInfo()->GetFileList()->begin() + entry);
@@ -287,8 +292,12 @@ void QueueEditor::MoveGroup(NzbInfo* nzbInfo, int offset)
 		entry++;
 	}
 
-	int newEntry = entry + offset;
 	int size = (int)m_downloadQueue->GetQueue()->size();
+#ifdef NZBGET_USE_RUST
+	int newEntry = 0;
+	if (nzbget_rs_ccm_queue_editor_clamp_move_target(entry, offset, size, &newEntry) != 0)
+#else
+	int newEntry = entry + offset;
 
 	if (newEntry < 0)
 	{
@@ -300,6 +309,7 @@ void QueueEditor::MoveGroup(NzbInfo* nzbInfo, int offset)
 	}
 
 	if (newEntry >= 0 && newEntry <= size - 1)
+#endif
 	{
 		std::unique_ptr<NzbInfo> movedNzbInfo = std::move(*(m_downloadQueue->GetQueue()->begin() + entry));
 		m_downloadQueue->GetQueue()->erase(m_downloadQueue->GetQueue()->begin() + entry);
@@ -791,6 +801,26 @@ bool QueueEditor::EditGroup(NzbInfo* nzbInfo, DownloadQueue::EEditAction action,
 		action == DownloadQueue::eaGroupFinalDelete)
 	{
 		nzbInfo->SetDeleting(true);
+#ifdef NZBGET_USE_RUST
+		int parking = 0, avoidHistory = 0, setDupeStatus = 0, cleanupDisk = 0;
+		nzbget_rs_ccm_queue_editor_eval_group_delete_flags(
+			(int)action,
+			(int)DownloadQueue::eaGroupParkDelete,
+			(int)DownloadQueue::eaGroupDupeDelete,
+			(int)DownloadQueue::eaGroupFinalDelete,
+			g_Options->GetKeepHistory(),
+			nzbInfo->GetUnpackCleanedUpDisk() ? 1 : 0,
+			nzbInfo->GetCurrentSuccessArticles(),
+			&parking, &avoidHistory, &setDupeStatus, &cleanupDisk);
+		nzbInfo->SetParking(parking != 0);
+		nzbInfo->SetAvoidHistory(avoidHistory != 0);
+		nzbInfo->SetDeletePaused(allPaused);
+		if (setDupeStatus)
+		{
+			nzbInfo->SetDeleteStatus(NzbInfo::dsDupe);
+		}
+		nzbInfo->SetCleanupDisk(cleanupDisk != 0);
+#else
 		nzbInfo->SetParking(action == DownloadQueue::eaGroupParkDelete &&
 			g_Options->GetKeepHistory() > 0 &&
 			!nzbInfo->GetUnpackCleanedUpDisk() &&
@@ -802,6 +832,7 @@ bool QueueEditor::EditGroup(NzbInfo* nzbInfo, DownloadQueue::EEditAction action,
 			nzbInfo->SetDeleteStatus(NzbInfo::dsDupe);
 		}
 		nzbInfo->SetCleanupDisk(action != DownloadQueue::eaGroupParkDelete || !nzbInfo->GetParking());
+#endif
 	}
 
 	DownloadQueue::EEditAction GroupToFileMap[] = {
@@ -1254,6 +1285,17 @@ bool QueueEditor::MoveGroupsTo(ItemList* itemList, IdList* idList, bool before, 
 	{
 		// calculate offset between first moving item and target
 		int moveId = itemList->at(0).m_nzbInfo->GetId();
+#ifdef NZBGET_USE_RUST
+		std::vector<int> queueIds;
+		queueIds.reserve(m_downloadQueue->GetQueue()->size());
+		for (NzbInfo* nzbInfo : m_downloadQueue->GetQueue())
+		{
+			queueIds.push_back(nzbInfo->GetId());
+		}
+		offset = nzbget_rs_ccm_queue_editor_calc_move_groups_to_offset(
+			queueIds.data(), queueIds.size(), targetId, moveId,
+			before ? 1 : 0, itemList->size());
+#else
 		bool progress = false;
 		int step = 0;
 		for (NzbInfo* nzbInfo : m_downloadQueue->GetQueue())
@@ -1278,6 +1320,7 @@ bool QueueEditor::MoveGroupsTo(ItemList* itemList, IdList* idList, bool before, 
 				offset += step;
 			}
 		}
+#endif
 	}
 
 	return InternEditList(nullptr, idList, DownloadQueue::eaGroupMoveOffset,

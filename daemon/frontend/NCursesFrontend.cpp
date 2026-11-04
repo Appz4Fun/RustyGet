@@ -565,6 +565,12 @@ int NCursesFrontend::PrintMessage(Message& msg, int row, int maxLines)
 	}
 
 	// replace some special characters with spaces
+#ifdef NZBGET_USE_RUST
+	int len = (int)strlen(text);
+	nzbget_rs_ccm_ncurses_sanitize_message_chars((char*)text, (size_t)len);
+	int winWidth = 0, msgLines = 0;
+	nzbget_rs_ccm_ncurses_calc_msg_lines(len, m_screenWidth, &winWidth, &msgLines);
+#else
 	for (char* p = (char*)text; *p; p++)
 	{
 		if (*p == '\n' || *p == '\r' || *p == '\b')
@@ -580,6 +586,7 @@ int NCursesFrontend::PrintMessage(Message& msg, int row, int maxLines)
 	{
 		msgLines++;
 	}
+#endif
 
 	int lines = 0;
 	for (int i = msgLines - 1; i >= 0 && lines < maxLines; i--)
@@ -614,9 +621,14 @@ void NCursesFrontend::PrintStatus()
 	if (currentDownloadSpeed > 0 && !m_pauseDownload)
 	{
 		int64 remain_sec = m_remainingSize / currentDownloadSpeed;
+#ifdef NZBGET_USE_RUST
+		int h = 0, m = 0, s = 0;
+		nzbget_rs_ccm_remote_client_calc_hms(remain_sec, &h, &m, &s);
+#else
 		int h = (int)(remain_sec / 3600);
 		int m = (int)((remain_sec % 3600) / 60);
 		int s = (int)(remain_sec % 60);
+#endif
 		timeString.Format(" (~ %.2d:%.2d:%.2d)", h, m, s);
 	}
 
@@ -675,6 +687,10 @@ void NCursesFrontend::PrintKeyInputBar()
 		break;
 	case editQueue:
 	{
+#ifdef NZBGET_USE_RUST
+		const char* status = nzbget_rs_ccm_ncurses_select_edit_queue_keybar(
+			m_selectedQueueEntry, queueSize);
+#else
 		const char* status = nullptr;
 		if (m_selectedQueueEntry > 0 && queueSize > 1 && m_selectedQueueEntry == queueSize - 1)
 		{
@@ -692,6 +708,7 @@ void NCursesFrontend::PrintKeyInputBar()
 		{
 			status = "(Q)uit | (E)xit | (P)ause | (D)elete";
 		}
+#endif
 
 		PlotLine(status, inputBarRow, 0, NCURSES_COLORPAIR_KEYBAR);
 		break;
@@ -806,10 +823,19 @@ void NCursesFrontend::PrintFilename(FileInfo * fileInfo, int row, bool selected)
 	}
 
 	BString<100> completed;
+#ifdef NZBGET_USE_RUST
+	int completedPct = nzbget_rs_ccm_remote_client_calc_file_completed_pct(
+		fileInfo->GetRemainingSize(), fileInfo->GetSize());
+	if (completedPct >= 0)
+	{
+		completed.Format(", %i%%", completedPct);
+	}
+#else
 	if (fileInfo->GetRemainingSize() < fileInfo->GetSize())
 	{
 		completed.Format(", %i%%", (int)(100 - fileInfo->GetRemainingSize() * 100 / fileInfo->GetSize()));
 	}
+#endif
 
 	BString<1024> nzbNiceName;
 	if (m_showNzbname)
@@ -975,6 +1001,10 @@ void NCursesFrontend::PrintGroupname(NzbInfo* nzbInfo, int row, bool selected, b
 	// [1-2] Nzb-name             999/999 999.99 MB 999.99 MB 00:00:00
 
 	int nameLen = 0;
+#ifdef NZBGET_USE_RUST
+	nameLen = nzbget_rs_ccm_ncurses_calc_group_name_len(
+		m_screenWidth, calcColWidth ? 1 : 0, m_colWidthFiles, m_colWidthTotal, m_colWidthLeft);
+#else
 	if (calcColWidth)
 	{
 		nameLen = m_screenWidth - 1 - 9 - 11 - 11 - 9;
@@ -983,6 +1013,7 @@ void NCursesFrontend::PrintGroupname(NzbInfo* nzbInfo, int row, bool selected, b
 	{
 		nameLen = m_screenWidth - 1 - m_colWidthFiles - 2 - m_colWidthTotal - 2 - m_colWidthLeft - 2 - 9;
 	}
+#endif
 
 	BString<1024> buffer;
 
@@ -1212,6 +1243,10 @@ void NCursesFrontend::UpdateInput(int initialKey)
 				break;
 			case 'w':
 				// swicth window sizes
+#ifdef NZBGET_USE_RUST
+				m_queueWindowPercentage = nzbget_rs_ccm_ncurses_next_queue_win_pct(
+					m_queueWindowPercentage, m_inputMode == editQueue ? 1 : 0);
+#else
 				if (m_queueWindowPercentage == 50)
 				{
 					m_queueWindowPercentage = 100;
@@ -1224,6 +1259,7 @@ void NCursesFrontend::UpdateInput(int initialKey)
 				{
 					m_queueWindowPercentage = 50;
 				}
+#endif
 				CalcWindowSizes();
 				SetCurrentQueueEntry(m_selectedQueueEntry);
 				break;

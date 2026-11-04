@@ -480,7 +480,14 @@ public:
 	explicit TlsCipherXmlCommand(int operation) : m_operation(operation) {}
 	void Execute() override
 	{
+#ifdef NZBGET_USE_RUST
+		if (!nzbget_rs_roc_xmlrpc_tls_cipher_access_allowed(
+			(int)m_userAccess, (int)XmlRpcProcessor::uaControl,
+			(int)m_protocol, (int)XmlRpcProcessor::rpJsonRpc,
+			(int)m_httpMethod, (int)XmlRpcProcessor::hmPost))
+#else
 		if (m_userAccess != XmlRpcProcessor::uaControl || m_protocol != XmlRpcProcessor::rpJsonRpc || m_httpMethod != XmlRpcProcessor::hmPost)
+#endif
 		{
 			BuildErrorResponse(401, "TLS cipher optimization requires control-account JSON-RPC POST access"); return;
 		}
@@ -491,6 +498,17 @@ public:
 		}
 		const auto& params = request->as_object().at("params").as_array();
 		std::string id;
+#ifdef NZBGET_USE_RUST
+		bool firstIsStr = !params.empty() && params[0].is_string();
+		const char* firstPtr = firstIsStr ? params[0].as_string().data() : nullptr;
+		size_t firstLen = firstIsStr ? params[0].as_string().size() : 0;
+		if (!nzbget_rs_roc_xmlrpc_tls_cipher_validate_job_id(
+			m_operation, params.size(), firstIsStr ? 1 : 0, firstPtr, firstLen))
+		{
+			BuildErrorResponse(2, "Invalid cipher job ID"); return;
+		}
+		if (!params.empty()) id = Json::value_to<std::string>(params[0]);
+#else
 		if ((m_operation == 0 && !params.empty()) || (m_operation == 1 && params.size() > 1) || (m_operation == 2 && params.size() != 1) ||
 			(!params.empty() && (!params[0].is_string() || params[0].as_string().size() > 128)))
 		{
@@ -501,6 +519,7 @@ public:
 		{
 			BuildErrorResponse(2, "Invalid cipher job ID"); return;
 		}
+#endif
 		std::string response = m_operation == 0 ? TlsCipherBackend::Start() :
 			m_operation == 1 ? TlsCipherBackend::Status(id.empty() ? nullptr : id.c_str()) : TlsCipherBackend::Cancel(id.c_str());
 		auto parsed = Json::Deserialize(response);
@@ -869,6 +888,20 @@ void XmlRpcProcessor::MutliCall()
 
 		debug("MutliCall, Response=%s", command->GetResponse());
 
+#ifdef NZBGET_USE_RUST
+		bool wrapArray = nzbget_rs_roc_xmlrpc_multicall_needs_array_wrap(command->GetResponse()) != 0;
+		if (wrapArray)
+		{
+			response.Append("<array><data>");
+		}
+		response.Append("<value>");
+		response.Append(command->GetResponse());
+		response.Append("</value>");
+		if (wrapArray)
+		{
+			response.Append("</data></array>");
+		}
+#else
 		bool fault = !strncmp(command->GetResponse(), "<fault>", 7);
 		bool array = !fault && !strncmp(command->GetResponse(), "<array>", 7);
 		if (!fault && !array)
@@ -882,6 +915,7 @@ void XmlRpcProcessor::MutliCall()
 		{
 			response.Append("</data></array>");
 		}
+#endif
 
 		requestPtr = callEnd + 9; //strlen("</struct>")
 		callEnd = strstr(requestPtr, "</struct>");
@@ -1913,16 +1947,13 @@ void StatusXmlCommand::Execute()
 
 	uint32 remainingSizeHi, remainingSizeLo;
 	Util::SplitInt64(remainingSize, &remainingSizeHi, &remainingSizeLo);
-	int remainingMBytes = (int)(remainingSize / 1024 / 1024);
 
 	uint32 forcedSizeHi, forcedSizeLo;
 	Util::SplitInt64(forcedSize, &forcedSizeHi, &forcedSizeLo);
-	int forcedMBytes = (int)(forcedSize / 1024 / 1024);
 
 	int64 articleCache = g_ArticleCache->GetAllocated();
 	uint32 articleCacheHi, articleCacheLo;
 	Util::SplitInt64(articleCache, &articleCacheHi, &articleCacheLo);
-	int articleCacheMBytes = (int)(articleCache / 1024 / 1024);
 
 	const char* memoryPressure = g_MemoryMonitor ? g_MemoryMonitor->GetTierName() : "NORMAL";
 	int effectiveArticleCacheMB = g_MemoryMonitor ? g_MemoryMonitor->GetEffectiveArticleCacheMB() : g_Options->GetArticleCache();
@@ -1944,7 +1975,6 @@ void StatusXmlCommand::Execute()
 	int64 allBytes;
 	bool serverStandBy;
 	g_StatMeter->CalcTotalStat(&upTimeSec, &downloadTimeSec, &allBytes, &serverStandBy);
-	int downloadedMBytes = (int)(allBytes / 1024 / 1024);
 	Util::SplitInt64(allBytes, &downloadedSizeHi, &downloadedSizeLo);
 
 #ifdef NZBGET_USE_RUST
@@ -1958,12 +1988,26 @@ void StatusXmlCommand::Execute()
 	int64 monthBytes, dayBytes;
 	g_StatMeter->CalcQuotaUsage(monthBytes, dayBytes);
 	uint32 monthSizeHi, monthSizeLo;
-	int monthMBytes = (int)(monthBytes / 1024 / 1024);
 	Util::SplitInt64(monthBytes, &monthSizeHi, &monthSizeLo);
 
 	uint32 daySizeHi, daySizeLo;
-	int dayMBytes = (int)(dayBytes / 1024 / 1024);
 	Util::SplitInt64(dayBytes, &daySizeHi, &daySizeLo);
+
+#ifdef NZBGET_USE_RUST
+	int remainingMBytes = 0, forcedMBytes = 0, articleCacheMBytes = 0;
+	int downloadedMBytes = 0, monthMBytes = 0, dayMBytes = 0;
+	nzbget_rs_roc_xmlrpc_status_calc_mbytes(
+		remainingSize, forcedSize, articleCache, allBytes, monthBytes, dayBytes,
+		&remainingMBytes, &forcedMBytes, &articleCacheMBytes,
+		&downloadedMBytes, &monthMBytes, &dayMBytes);
+#else
+	int remainingMBytes = (int)(remainingSize / 1024 / 1024);
+	int forcedMBytes = (int)(forcedSize / 1024 / 1024);
+	int articleCacheMBytes = (int)(articleCache / 1024 / 1024);
+	int downloadedMBytes = (int)(allBytes / 1024 / 1024);
+	int monthMBytes = (int)(monthBytes / 1024 / 1024);
+	int dayMBytes = (int)(dayBytes / 1024 / 1024);
+#endif
 
 	uint32 freeDiskSpaceHi, freeDiskSpaceLo;
 	uint32 totalDiskSpaceHi, totalDiskSpaceLo;
@@ -1991,12 +2035,8 @@ void StatusXmlCommand::Execute()
 		}
 	}
 
-	if (Util::EmptyStr(g_Options->GetInterDir()))
-	{
-		freeInterDiskSpace = freeDiskSpace;
-		totalInterDiskSpace = totalDiskSpace;
-	}
-	else
+	bool interDirEmpty = Util::EmptyStr(g_Options->GetInterDir());
+	if (!interDirEmpty)
 	{
 		auto res = FileSystem::GetDiskState(g_Options->GetInterDir());
 		if (res.has_value())
@@ -2007,15 +2047,32 @@ void StatusXmlCommand::Execute()
 		}
 	}
 
-	Util::SplitInt64(freeDiskSpace, &freeDiskSpaceHi, &freeDiskSpaceLo);
-	Util::SplitInt64(totalDiskSpace, &totalDiskSpaceHi, &totalDiskSpaceLo);
-	Util::SplitInt64(freeInterDiskSpace, &freeInterDiskSpaceHi, &freeInterDiskSpaceLo);
-	Util::SplitInt64(totalInterDiskSpace, &totalInterDiskSpaceHi, &totalInterDiskSpaceLo);
+#ifdef NZBGET_USE_RUST
+	int freeDiskSpaceMB = 0, totalDiskSpaceMB = 0;
+	int freeInterDiskSpaceMB = 0, totalInterDiskSpaceMB = 0;
+	nzbget_rs_roc_xmlrpc_status_calc_disk_space_mb(
+		freeDiskSpace, totalDiskSpace, interDirEmpty ? 1 : 0,
+		freeInterDiskSpace, totalInterDiskSpace,
+		&freeInterDiskSpace, &totalInterDiskSpace,
+		&freeDiskSpaceMB, &totalDiskSpaceMB,
+		&freeInterDiskSpaceMB, &totalInterDiskSpaceMB);
+#else
+	if (interDirEmpty)
+	{
+		freeInterDiskSpace = freeDiskSpace;
+		totalInterDiskSpace = totalDiskSpace;
+	}
 
 	int freeDiskSpaceMB = static_cast<int>(freeDiskSpace / 1024 / 1024);
 	int totalDiskSpaceMB = static_cast<int>(totalDiskSpace / 1024 / 1024);
 	int freeInterDiskSpaceMB = static_cast<int>(freeInterDiskSpace / 1024 / 1024);
 	int totalInterDiskSpaceMB = static_cast<int>(totalInterDiskSpace / 1024 / 1024);
+#endif
+
+	Util::SplitInt64(freeDiskSpace, &freeDiskSpaceHi, &freeDiskSpaceLo);
+	Util::SplitInt64(totalDiskSpace, &totalDiskSpaceHi, &totalDiskSpaceLo);
+	Util::SplitInt64(freeInterDiskSpace, &freeInterDiskSpaceHi, &freeInterDiskSpaceLo);
+	Util::SplitInt64(totalInterDiskSpace, &totalInterDiskSpaceHi, &totalInterDiskSpaceLo);
 
 	int serverTime = (int)Util::CurrentTime();
 	int resumeTime = (int)g_WorkState->GetResumeTime();
@@ -2097,7 +2154,12 @@ void LogXmlCommand::Execute()
 {
 	m_idFrom = 0;
 	m_nrEntries = 0;
+#ifdef NZBGET_USE_RUST
+	if (!NextParamAsInt(&m_idFrom) || !NextParamAsInt(&m_nrEntries) ||
+		!nzbget_rs_roc_xmlrpc_log_params_valid(m_idFrom, m_nrEntries))
+#else
 	if (!NextParamAsInt(&m_idFrom) || !NextParamAsInt(&m_nrEntries) || (m_nrEntries > 0 && m_idFrom > 0))
+#endif
 	{
 		BuildErrorResponse(2, "Invalid parameter");
 		return;
@@ -2180,6 +2242,25 @@ void ListFilesXmlCommand::Execute()
 {
 	int idStart = 0;
 	int idEnd = 0;
+#ifdef NZBGET_USE_RUST
+	bool hasIdStart = NextParamAsInt(&idStart);
+	bool hasIdEnd = hasIdStart ? NextParamAsInt(&idEnd) : false;
+	if (!nzbget_rs_roc_xmlrpc_list_files_params_valid(hasIdStart ? 1 : 0, hasIdEnd ? 1 : 0, idStart, idEnd, 0))
+	{
+		BuildErrorResponse(2, "Invalid parameter");
+		return;
+	}
+
+	// For backward compatibility with 0.8 parameter "NZBID" is optional (error checking omitted)
+	int nzbId = 0;
+	NextParamAsInt(&nzbId);
+
+	if (!nzbget_rs_roc_xmlrpc_list_files_params_valid(hasIdStart ? 1 : 0, hasIdEnd ? 1 : 0, idStart, idEnd, nzbId))
+	{
+		BuildErrorResponse(2, "Invalid parameter");
+		return;
+	}
+#else
 	if (NextParamAsInt(&idStart) && (!NextParamAsInt(&idEnd) || idEnd < idStart))
 	{
 		BuildErrorResponse(2, "Invalid parameter");
@@ -2195,6 +2276,7 @@ void ListFilesXmlCommand::Execute()
 		BuildErrorResponse(2, "Invalid parameter");
 		return;
 	}
+#endif
 
 	debug("iIDStart=%i", idStart);
 	debug("iIDEnd=%i", idEnd);
@@ -2621,10 +2703,20 @@ void NzbInfoXmlCommand::AppendPostInfoFields(PostInfo* postInfo, int logEntries,
 	{
 		time_t curTime = Util::CurrentTime();
 
+#ifdef NZBGET_USE_RUST
+		int stageSec = 0;
+		int totalSec = 0;
+		nzbget_rs_roc_xmlrpc_post_info_elapsed_sec(
+			(int64)curTime, (int64)postInfo->GetStageTime(), (int64)postInfo->GetStartTime(),
+			&stageSec, &totalSec);
+		AppendFmtResponse(itemStart, *EncodeStr(postInfo->GetProgressLabel()),
+			postInfo->GetStageProgress(), stageSec, totalSec);
+#else
 		AppendFmtResponse(itemStart, *EncodeStr(postInfo->GetProgressLabel()),
 			postInfo->GetStageProgress(),
 			(int)(postInfo->GetStageTime() ? curTime - postInfo->GetStageTime() : 0),
 			(int)(postInfo->GetStartTime() ? curTime - postInfo->GetStartTime() : 0));
+#endif
 	}
 	else
 	{
@@ -2726,9 +2818,17 @@ void ListGroupsXmlCommand::Execute()
 		uint32 remainingSizeLo, remainingSizeHi, remainingSizeMB;
 		uint32 pausedSizeLo, pausedSizeHi, pausedSizeMB;
 		Util::SplitInt64(nzbInfo->GetRemainingSize(), &remainingSizeHi, &remainingSizeLo);
-		remainingSizeMB = (int)(nzbInfo->GetRemainingSize() / 1024 / 1024);
 		Util::SplitInt64(nzbInfo->GetPausedSize(), &pausedSizeHi, &pausedSizeLo);
+#ifdef NZBGET_USE_RUST
+		int remMB = 0, pMB = 0;
+		nzbget_rs_roc_xmlrpc_list_groups_calc_mb(
+			nzbInfo->GetRemainingSize(), nzbInfo->GetPausedSize(), &remMB, &pMB);
+		remainingSizeMB = (uint32)remMB;
+		pausedSizeMB = (uint32)pMB;
+#else
+		remainingSizeMB = (int)(nzbInfo->GetRemainingSize() / 1024 / 1024);
 		pausedSizeMB = (int)(nzbInfo->GetPausedSize() / 1024 / 1024);
+#endif
 		const char* status = DetectStatus(nzbInfo);
 
 		AppendCondResponse(",\n", IsJson() && index++ > 0);
@@ -3472,7 +3572,12 @@ void HistoryXmlCommand::Execute()
 	GuardedDownloadQueue guard = DownloadQueue::Guard();
 	for (HistoryInfo* historyInfo : guard->GetHistory())
 	{
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_roc_xmlrpc_history_should_skip_dup(
+			(int)historyInfo->GetKind(), (int)HistoryInfo::hkDup, dup ? 1 : 0))
+#else
 		if (historyInfo->GetKind() == HistoryInfo::hkDup && !dup)
+#endif
 		{
 			continue;
 		}
@@ -3606,8 +3711,14 @@ void ConfigXmlCommand::Execute()
 
 	for (Options::OptEntry& optEntry : g_Options->GuardOptEntries())
 	{
+#ifdef NZBGET_USE_RUST
+		CString xmlValue = EncodeStr(nzbget_rs_roc_xmlrpc_config_should_mask_value(
+			(int)m_userAccess, (int)XmlRpcProcessor::uaRestricted, optEntry.Restricted() ? 1 : 0) ?
+			"***" : optEntry.GetValue());
+#else
 		CString xmlValue = EncodeStr(m_userAccess == XmlRpcProcessor::uaRestricted &&
 			optEntry.Restricted() ? "***" : optEntry.GetValue());
+#endif
 
 		AppendCondResponse(",\n", IsJson() && index++ > 0);
 		AppendFmtResponse(IsJson() ? JSON_CONFIG_ITEM : XML_CONFIG_ITEM,
@@ -3645,8 +3756,14 @@ void LoadConfigXmlCommand::Execute()
 
 	for (Options::OptEntry& optEntry: optEntries)
 	{
+#ifdef NZBGET_USE_RUST
+		CString xmlValue = EncodeStr(nzbget_rs_roc_xmlrpc_config_should_mask_value(
+			(int)m_userAccess, (int)XmlRpcProcessor::uaRestricted, optEntry.Restricted() ? 1 : 0) ?
+			"***" : optEntry.GetValue());
+#else
 		CString xmlValue = EncodeStr(m_userAccess == XmlRpcProcessor::uaRestricted &&
 			optEntry.Restricted() ? "***" : optEntry.GetValue());
+#endif
 
 		AppendCondResponse(",\n", IsJson() && index++ > 0);
 		AppendFmtResponse(IsJson() ? JSON_CONFIG_ITEM : XML_CONFIG_ITEM,
@@ -4637,11 +4754,16 @@ void ServerVolumesXmlCommand::Execute()
 	{
 		uint32 totalSizeHi, totalSizeLo, totalSizeMB;
 		Util::SplitInt64(serverVolume.GetTotalBytes(), &totalSizeHi, &totalSizeLo);
-		totalSizeMB = (int)(serverVolume.GetTotalBytes() / 1024 / 1024);
 
 		uint32 customSizeHi, customSizeLo, customSizeMB;
 		Util::SplitInt64(serverVolume.GetCustomBytes(), &customSizeHi, &customSizeLo);
+#ifdef NZBGET_USE_RUST
+		nzbget_rs_roc_xmlrpc_server_volumes_calc_mb(
+			serverVolume.GetTotalBytes(), serverVolume.GetCustomBytes(), &totalSizeMB, &customSizeMB);
+#else
+		totalSizeMB = (int)(serverVolume.GetTotalBytes() / 1024 / 1024);
 		customSizeMB = (int)(serverVolume.GetCustomBytes() / 1024 / 1024);
+#endif
 
 		AppendCondResponse(",\n", IsJson() && index > 0);
 		AppendFmtResponse(IsJson() ? JSON_VOLUME_ITEM_START : XML_VOLUME_ITEM_START,
@@ -5002,6 +5124,18 @@ void TestServerSpeedXmlCommand::Execute()
 	}
 
 	NewsServer* server = g_ServerPool->GetServerById(serverId);
+#ifdef NZBGET_USE_RUST
+	int serverErr = nzbget_rs_roc_xmlrpc_test_server_speed_check_server(
+		server != nullptr ? 1 : 0,
+		server && server->GetActive() ? 1 : 0,
+		server ? server->GetMaxConnections() : 0);
+	if (serverErr != 0)
+	{
+		BuildErrorResponse(2, serverErr == 1 ? "Server not found" :
+			serverErr == 2 ? "Server is not active" : "Server has no connections configured");
+		return;
+	}
+#else
 	if (!server)
 	{
 		BuildErrorResponse(2, "Server not found");
@@ -5017,6 +5151,7 @@ void TestServerSpeedXmlCommand::Execute()
 		BuildErrorResponse(2, "Server has no connections configured");
 		return;
 	}
+#endif
 
 	std::unique_ptr<NzbInfo> nzbInfo = std::make_unique<NzbInfo>();
 	nzbInfo->SetKind(NzbInfo::nkUrl);
@@ -5087,8 +5222,19 @@ void TestDiskSpeedXmlCommand::Execute()
 
 	try
 	{
+#ifdef NZBGET_USE_RUST
+		size_t bufferSizeBytes = 0;
+		uint64_t maxFileSizeBytes = 0;
+		if (nzbget_rs_roc_xmlrpc_test_disk_speed_validate_params(
+			writeBufferKiB, maxFileSizeGiB, timeoutSec, &bufferSizeBytes, &maxFileSizeBytes) != 0)
+		{
+			BuildErrorResponse(2, "Invalid parameter");
+			return;
+		}
+#else
 		size_t bufferSizeBytes = static_cast<size_t>(writeBufferKiB) * size_t{1024};
 		uint64_t maxFileSizeBytes = static_cast<uint64_t>(maxFileSizeGiB) * 1024ull * 1024ull * 1024ull;
+#endif
 
 		PauseGuard pauseGuard;
 

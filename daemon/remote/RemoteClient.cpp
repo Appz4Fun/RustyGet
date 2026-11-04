@@ -574,7 +574,15 @@ bool RemoteClient::RequestServerList(bool files, bool groups, const char* patter
 			{
 				nrFileEntries += nzbInfo->GetFileList()->size();
 
+#ifdef NZBGET_USE_RUST
+				int hasThreads = 0;
+				int threadsPlural = 0;
+				int64 unpausedRemainingSize = nzbget_rs_roc_remote_client_calc_group_unpaused_remaining(
+					nzbInfo->GetRemainingSize(), nzbInfo->GetPausedSize(),
+					nzbInfo->GetActiveDownloads(), &hasThreads, &threadsPlural);
+#else
 				int64 unpausedRemainingSize = nzbInfo->GetRemainingSize() - nzbInfo->GetPausedSize();
+#endif
 				remaining += unpausedRemainingSize;
 
 				CString remainingStr = Util::FormatSize(unpausedRemainingSize);
@@ -599,10 +607,17 @@ bool RemoteClient::RequestServerList(bool files, bool groups, const char* patter
 				}
 
 				BString<100> threads;
+#ifdef NZBGET_USE_RUST
+				if (hasThreads)
+				{
+					threads.Format(", %i thread%s", nzbInfo->GetActiveDownloads(), (threadsPlural ? "s" : ""));
+				}
+#else
 				if (nzbInfo->GetActiveDownloads() > 0)
 				{
 					threads.Format(", %i thread%s", nzbInfo->GetActiveDownloads(), (nzbInfo->GetActiveDownloads() > 1 ? "s" : ""));
 				}
+#endif
 
 				BString<1024> parameters;
 				for (NzbParameter& nzbParameter : nzbInfo->GetParameters())

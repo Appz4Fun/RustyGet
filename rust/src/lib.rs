@@ -84,6 +84,7 @@ pub mod coorddlwriterpool;
 pub mod dupecoordfallbackstream;
 pub mod twinproberenhist;
 pub mod urlqueuescanfeedpost;
+pub mod rpcoptclient;
 
 pub mod deadpostings;
 pub mod dupewatch;

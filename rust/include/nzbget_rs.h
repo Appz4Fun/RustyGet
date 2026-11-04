@@ -3904,6 +3904,66 @@ int nzbget_rs_uqs_prepost_should_request_par_without_archives(
     int par_status, int ps_skipped, int delete_status, int ds_none,
     int par_check, int pc_auto);
 
+// XmlRpc, Options, NZBGet & RemoteClient Hot-Path C ABI (rust/src/rpcoptclient.rs)
+int nzbget_rs_roc_xmlrpc_multicall_needs_array_wrap(const char* resp);
+int nzbget_rs_roc_xmlrpc_tls_cipher_access_allowed(
+    int user_access, int ua_control, int protocol, int rp_json_rpc,
+    int http_method, int hm_post);
+int nzbget_rs_roc_xmlrpc_tls_cipher_validate_job_id(
+    int operation, size_t param_count, int first_is_string,
+    const char* id_ptr, size_t id_len);
+void nzbget_rs_roc_xmlrpc_status_calc_mbytes(
+    int64_t remaining_size, int64_t forced_size, int64_t article_cache,
+    int64_t all_bytes, int64_t month_bytes, int64_t day_bytes,
+    int* out_remaining_mb, int* out_forced_mb, int* out_cache_mb,
+    int* out_downloaded_mb, int* out_month_mb, int* out_day_mb);
+void nzbget_rs_roc_xmlrpc_status_calc_disk_space_mb(
+    int64_t free_disk, int64_t total_disk, int inter_dir_empty,
+    int64_t free_inter, int64_t total_inter,
+    int64_t* out_free_inter, int64_t* out_total_inter,
+    int* out_free_disk_mb, int* out_total_disk_mb,
+    int* out_free_inter_mb, int* out_total_inter_mb);
+int nzbget_rs_roc_xmlrpc_log_params_valid(int id_from, int nr_entries);
+int nzbget_rs_roc_xmlrpc_list_files_params_valid(
+    int has_id_start, int has_id_end, int id_start, int id_end, int nzb_id);
+void nzbget_rs_roc_xmlrpc_post_info_elapsed_sec(
+    int64_t cur_time, int64_t stage_time, int64_t start_time,
+    int* out_stage_sec, int* out_total_sec);
+void nzbget_rs_roc_xmlrpc_list_groups_calc_mb(
+    int64_t remaining_size, int64_t paused_size,
+    int* out_remaining_mb, int* out_paused_mb);
+int nzbget_rs_roc_xmlrpc_history_should_skip_dup(
+    int kind, int hk_dup, int include_dup);
+int nzbget_rs_roc_xmlrpc_config_should_mask_value(
+    int user_access, int ua_restricted, int opt_restricted);
+void nzbget_rs_roc_xmlrpc_server_volumes_calc_mb(
+    int64_t total_bytes, int64_t custom_bytes,
+    uint32_t* out_total_mb, uint32_t* out_custom_mb);
+int nzbget_rs_roc_xmlrpc_test_server_speed_check_server(
+    int has_server, int is_active, int max_connections);
+int nzbget_rs_roc_xmlrpc_test_disk_speed_validate_params(
+    int write_buffer_kib, int max_file_size_gib, int timeout_sec,
+    size_t* out_buffer_bytes, uint64_t* out_max_file_bytes);
+int nzbget_rs_roc_options_server_cipher_without_tls(
+    int tls_enabled, const char* cipher);
+void nzbget_rs_roc_options_reconcile_conflict_rules(
+    int dupe_search, int health_check, int hc_park,
+    int flush_queue, int direct_write,
+    int unpack_pause_queue, int direct_unpack,
+    int* out_disable_dupe_search, int* out_enable_flush_queue,
+    int* out_enforce_unpack_mutex);
+int nzbget_rs_roc_nzbget_boot_is_direct_client_mode(
+    int test_backtrace, int web_get, int sig_verify,
+    int client_op, int op_no_operation, int print_options);
+int nzbget_rs_roc_nzbget_boot_should_pause_on_config_errors(
+    int config_errors, int client_op, int op_no_operation);
+int64_t nzbget_rs_roc_nzbget_reload_clamp_debounce_ms(
+    int64_t elapsed_since_first_ms, int64_t debounce_delay_ms,
+    int64_t max_burst_delay_ms);
+int64_t nzbget_rs_roc_remote_client_calc_group_unpaused_remaining(
+    int64_t remaining_size, int64_t paused_size, int active_downloads,
+    int* out_has_threads, int* out_threads_plural);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

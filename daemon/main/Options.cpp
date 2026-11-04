@@ -2236,7 +2236,11 @@ void Options::CheckOptions()
 			tls = (bool)ParseEnumValue(encOpt, BoolCount, BoolNames, BoolValues);
 		}
 
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_roc_options_server_cipher_without_tls(tls ? 1 : 0, ncipher))
+#else
 		if (!tls && ncipher && ncipher[0] != '\0')
+#endif
 		{
 			LocateOptionSrcPos(cipherOpt);
 			ConfigWarn("Option %s ('%s') is ignored because %s is disabled for Server%i.",
@@ -2245,6 +2249,40 @@ void Options::CheckOptions()
 		}
 	}
 
+#ifdef NZBGET_USE_RUST
+	int disableDupeSearch = 0;
+	int enableFlushQueue = 0;
+	int enforceUnpackMutex = 0;
+	nzbget_rs_roc_options_reconcile_conflict_rules(
+		m_dupeSearch ? 1 : 0, (int)m_healthCheck, (int)hcPark,
+		m_flushQueue ? 1 : 0, m_directWrite ? 1 : 0,
+		m_unpackPauseQueue ? 1 : 0, m_directUnpack ? 1 : 0,
+		&disableDupeSearch, &enableFlushQueue, &enforceUnpackMutex);
+
+	if (disableDupeSearch)
+	{
+		LocateOptionSrcPos(DUPESEARCH.data());
+		ConfigWarn("Option 'DupeSearch' automatically disabled: 'HealthCheck' is set to 'park', which suspends failed downloads without triggering duplicate donor resolution.");
+		m_dupeSearch = false;
+		SetOption(DUPESEARCH.data(), "no");
+	}
+
+	if (enableFlushQueue)
+	{
+		LocateOptionSrcPos(FLUSHQUEUE.data());
+		ConfigWarn("Option 'FlushQueue=no' is incompatible with 'DirectWrite=yes'. Automatically enabling 'FlushQueue=yes' to ensure queue crash-recovery and prevent duplicate file corruption.");
+		m_flushQueue = true;
+		SetOption(FLUSHQUEUE.data(), "yes");
+	}
+
+	if (enforceUnpackMutex)
+	{
+		LocateOptionSrcPos(DIRECTUNPACK.data());
+		ConfigWarn("Option 'DirectUnpack=yes' with 'UnpackPauseQueue=no' can cause severe disk thrashing. Unpack concurrency will be serialized across jobs to protect I/O throughput.");
+		m_unpackMutexEnforced = true;
+		SetOption("_UnpackMutexEnforced", "yes");
+	}
+#else
 	// Rule 7.2: Disable DupeSearch if HealthCheck=park
 	if (m_dupeSearch && m_healthCheck == hcPark)
 	{
@@ -2271,6 +2309,7 @@ void Options::CheckOptions()
 		m_unpackMutexEnforced = true;
 		SetOption("_UnpackMutexEnforced", "yes");
 	}
+#endif
 }
 
 void Options::ConvertOldOptions(OptEntries* optEntries)

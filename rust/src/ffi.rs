@@ -24831,6 +24831,349 @@ pub extern "C" fn nzbget_rs_uqs_prepost_should_request_par_without_archives(
     )
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_roc_xmlrpc_multicall_needs_array_wrap(
+    resp: *const c_char,
+) -> c_int {
+    unsafe { crate::rpcoptclient::roc_xmlrpc_multicall_needs_array_wrap(resp) }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_roc_xmlrpc_tls_cipher_access_allowed(
+    user_access: c_int,
+    ua_control: c_int,
+    protocol: c_int,
+    rp_json_rpc: c_int,
+    http_method: c_int,
+    hm_post: c_int,
+) -> c_int {
+    crate::rpcoptclient::roc_xmlrpc_tls_cipher_access_allowed(
+        user_access,
+        ua_control,
+        protocol,
+        rp_json_rpc,
+        http_method,
+        hm_post,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_roc_xmlrpc_tls_cipher_validate_job_id(
+    operation: c_int,
+    param_count: usize,
+    first_is_string: c_int,
+    id_ptr: *const c_char,
+    id_len: usize,
+) -> c_int {
+    unsafe {
+        crate::rpcoptclient::roc_xmlrpc_tls_cipher_validate_job_id(
+            operation,
+            param_count,
+            first_is_string,
+            id_ptr,
+            id_len,
+        )
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_roc_xmlrpc_status_calc_mbytes(
+    remaining_size: i64,
+    forced_size: i64,
+    article_cache: i64,
+    all_bytes: i64,
+    month_bytes: i64,
+    day_bytes: i64,
+    out_remaining_mb: *mut c_int,
+    out_forced_mb: *mut c_int,
+    out_cache_mb: *mut c_int,
+    out_downloaded_mb: *mut c_int,
+    out_month_mb: *mut c_int,
+    out_day_mb: *mut c_int,
+) {
+    unsafe {
+        crate::rpcoptclient::roc_xmlrpc_status_calc_mbytes(
+            remaining_size,
+            forced_size,
+            article_cache,
+            all_bytes,
+            month_bytes,
+            day_bytes,
+            out_remaining_mb,
+            out_forced_mb,
+            out_cache_mb,
+            out_downloaded_mb,
+            out_month_mb,
+            out_day_mb,
+        )
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_roc_xmlrpc_status_calc_disk_space_mb(
+    free_disk: i64,
+    total_disk: i64,
+    inter_dir_empty: c_int,
+    free_inter: i64,
+    total_inter: i64,
+    out_free_inter: *mut i64,
+    out_total_inter: *mut i64,
+    out_free_disk_mb: *mut c_int,
+    out_total_disk_mb: *mut c_int,
+    out_free_inter_mb: *mut c_int,
+    out_total_inter_mb: *mut c_int,
+) {
+    unsafe {
+        crate::rpcoptclient::roc_xmlrpc_status_calc_disk_space_mb(
+            free_disk,
+            total_disk,
+            inter_dir_empty,
+            free_inter,
+            total_inter,
+            out_free_inter,
+            out_total_inter,
+            out_free_disk_mb,
+            out_total_disk_mb,
+            out_free_inter_mb,
+            out_total_inter_mb,
+        )
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_roc_xmlrpc_log_params_valid(
+    id_from: c_int,
+    nr_entries: c_int,
+) -> c_int {
+    crate::rpcoptclient::roc_xmlrpc_log_params_valid(id_from, nr_entries)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_roc_xmlrpc_list_files_params_valid(
+    has_id_start: c_int,
+    has_id_end: c_int,
+    id_start: c_int,
+    id_end: c_int,
+    nzb_id: c_int,
+) -> c_int {
+    crate::rpcoptclient::roc_xmlrpc_list_files_params_valid(
+        has_id_start,
+        has_id_end,
+        id_start,
+        id_end,
+        nzb_id,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_roc_xmlrpc_post_info_elapsed_sec(
+    cur_time: i64,
+    stage_time: i64,
+    start_time: i64,
+    out_stage_sec: *mut c_int,
+    out_total_sec: *mut c_int,
+) {
+    unsafe {
+        crate::rpcoptclient::roc_xmlrpc_post_info_elapsed_sec(
+            cur_time,
+            stage_time,
+            start_time,
+            out_stage_sec,
+            out_total_sec,
+        )
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_roc_xmlrpc_list_groups_calc_mb(
+    remaining_size: i64,
+    paused_size: i64,
+    out_remaining_mb: *mut c_int,
+    out_paused_mb: *mut c_int,
+) {
+    unsafe {
+        crate::rpcoptclient::roc_xmlrpc_list_groups_calc_mb(
+            remaining_size,
+            paused_size,
+            out_remaining_mb,
+            out_paused_mb,
+        )
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_roc_xmlrpc_history_should_skip_dup(
+    kind: c_int,
+    hk_dup: c_int,
+    include_dup: c_int,
+) -> c_int {
+    crate::rpcoptclient::roc_xmlrpc_history_should_skip_dup(kind, hk_dup, include_dup)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_roc_xmlrpc_config_should_mask_value(
+    user_access: c_int,
+    ua_restricted: c_int,
+    opt_restricted: c_int,
+) -> c_int {
+    crate::rpcoptclient::roc_xmlrpc_config_should_mask_value(
+        user_access,
+        ua_restricted,
+        opt_restricted,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_roc_xmlrpc_server_volumes_calc_mb(
+    total_bytes: i64,
+    custom_bytes: i64,
+    out_total_mb: *mut u32,
+    out_custom_mb: *mut u32,
+) {
+    unsafe {
+        crate::rpcoptclient::roc_xmlrpc_server_volumes_calc_mb(
+            total_bytes,
+            custom_bytes,
+            out_total_mb,
+            out_custom_mb,
+        )
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_roc_xmlrpc_test_server_speed_check_server(
+    has_server: c_int,
+    is_active: c_int,
+    max_connections: c_int,
+) -> c_int {
+    crate::rpcoptclient::roc_xmlrpc_test_server_speed_check_server(
+        has_server,
+        is_active,
+        max_connections,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_roc_xmlrpc_test_disk_speed_validate_params(
+    write_buffer_kib: c_int,
+    max_file_size_gib: c_int,
+    timeout_sec: c_int,
+    out_buffer_bytes: *mut usize,
+    out_max_file_bytes: *mut u64,
+) -> c_int {
+    unsafe {
+        crate::rpcoptclient::roc_xmlrpc_test_disk_speed_validate_params(
+            write_buffer_kib,
+            max_file_size_gib,
+            timeout_sec,
+            out_buffer_bytes,
+            out_max_file_bytes,
+        )
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_roc_options_server_cipher_without_tls(
+    tls_enabled: c_int,
+    cipher: *const c_char,
+) -> c_int {
+    unsafe { crate::rpcoptclient::roc_options_server_cipher_without_tls(tls_enabled, cipher) }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_roc_options_reconcile_conflict_rules(
+    dupe_search: c_int,
+    health_check: c_int,
+    hc_park: c_int,
+    flush_queue: c_int,
+    direct_write: c_int,
+    unpack_pause_queue: c_int,
+    direct_unpack: c_int,
+    out_disable_dupe_search: *mut c_int,
+    out_enable_flush_queue: *mut c_int,
+    out_enforce_unpack_mutex: *mut c_int,
+) {
+    unsafe {
+        crate::rpcoptclient::roc_options_reconcile_conflict_rules(
+            dupe_search,
+            health_check,
+            hc_park,
+            flush_queue,
+            direct_write,
+            unpack_pause_queue,
+            direct_unpack,
+            out_disable_dupe_search,
+            out_enable_flush_queue,
+            out_enforce_unpack_mutex,
+        )
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_roc_nzbget_boot_is_direct_client_mode(
+    test_backtrace: c_int,
+    web_get: c_int,
+    sig_verify: c_int,
+    client_op: c_int,
+    op_no_operation: c_int,
+    print_options: c_int,
+) -> c_int {
+    crate::rpcoptclient::roc_nzbget_boot_is_direct_client_mode(
+        test_backtrace,
+        web_get,
+        sig_verify,
+        client_op,
+        op_no_operation,
+        print_options,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_roc_nzbget_boot_should_pause_on_config_errors(
+    config_errors: c_int,
+    client_op: c_int,
+    op_no_operation: c_int,
+) -> c_int {
+    crate::rpcoptclient::roc_nzbget_boot_should_pause_on_config_errors(
+        config_errors,
+        client_op,
+        op_no_operation,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_roc_nzbget_reload_clamp_debounce_ms(
+    elapsed_since_first_ms: i64,
+    debounce_delay_ms: i64,
+    max_burst_delay_ms: i64,
+) -> i64 {
+    crate::rpcoptclient::roc_nzbget_reload_clamp_debounce_ms(
+        elapsed_since_first_ms,
+        debounce_delay_ms,
+        max_burst_delay_ms,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_roc_remote_client_calc_group_unpaused_remaining(
+    remaining_size: i64,
+    paused_size: i64,
+    active_downloads: c_int,
+    out_has_threads: *mut c_int,
+    out_threads_plural: *mut c_int,
+) -> i64 {
+    unsafe {
+        crate::rpcoptclient::roc_remote_client_calc_group_unpaused_remaining(
+            remaining_size,
+            paused_size,
+            active_downloads,
+            out_has_threads,
+            out_threads_plural,
+        )
+    }
+}
+
+
 
 
 

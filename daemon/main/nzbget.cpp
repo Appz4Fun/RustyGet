@@ -552,6 +552,19 @@ void NZBGet::BootConfig()
 	m_options->SetRemoteClientMode(m_commandLineParser->GetRemoteClientMode());
 	m_options->SetServerMode(m_commandLineParser->GetServerMode());
 	m_options->SetDaemonMode(m_commandLineParser->GetDaemonMode());
+#ifdef NZBGET_USE_RUST
+	int testBacktrace = 0;
+#ifdef DEBUG
+	testBacktrace = m_commandLineParser->GetTestBacktrace() ? 1 : 0;
+#endif
+	m_options->SetDirectClientMode(nzbget_rs_roc_nzbget_boot_is_direct_client_mode(
+		testBacktrace,
+		m_commandLineParser->GetWebGet() ? 1 : 0,
+		m_commandLineParser->GetSigVerify() ? 1 : 0,
+		(int)m_commandLineParser->GetClientOperation(),
+		(int)CommandLineParser::opClientNoOperation,
+		m_commandLineParser->GetPrintOptions() ? 1 : 0) != 0);
+#else
 	m_options->SetDirectClientMode(
 #ifdef DEBUG
 		m_commandLineParser->GetTestBacktrace() ||
@@ -560,6 +573,7 @@ void NZBGet::BootConfig()
 		m_commandLineParser->GetSigVerify() ||
 		m_commandLineParser->GetClientOperation() != CommandLineParser::opClientNoOperation ||
 		m_commandLineParser->GetPrintOptions());
+#endif
 	m_workState->SetPauseDownload(m_commandLineParser->GetPauseDownload());
 	m_workState->SetSpeedLimit(g_Options->GetDownloadRate());
 
@@ -569,8 +583,15 @@ void NZBGet::BootConfig()
 	{
 		exit(1);
 	}
+#ifdef NZBGET_USE_RUST
+	else if (nzbget_rs_roc_nzbget_boot_should_pause_on_config_errors(
+		m_options->GetConfigErrors() ? 1 : 0,
+		(int)m_commandLineParser->GetClientOperation(),
+		(int)CommandLineParser::opClientNoOperation))
+#else
 	else if (m_options->GetConfigErrors() &&
 		m_commandLineParser->GetClientOperation() == CommandLineParser::opClientNoOperation)
+#endif
 	{
 		info("Pausing all activities due to errors in configuration");
 		m_workState->SetPauseDownload(true);
@@ -1546,9 +1567,16 @@ void Reload()
 	}
 	else
 	{
+#ifdef NZBGET_USE_RUST
+		int64 elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+			now - g_reloadFirstRequestTime).count();
+		int64 clampedMs = nzbget_rs_roc_nzbget_reload_clamp_debounce_ms(elapsedMs, 100, 1500);
+		g_reloadTargetTime = g_reloadFirstRequestTime + std::chrono::milliseconds(clampedMs);
+#else
 		auto newTarget = now + DEBOUNCE_DELAY;
 		auto maxTarget = g_reloadFirstRequestTime + MAX_BURST_DELAY;
 		g_reloadTargetTime = (newTarget < maxTarget) ? newTarget : maxTarget;
+#endif
 		g_reloadCond.notify_one();
 		debug("Reload request debounced, target extended");
 	}

@@ -21,15 +21,8 @@
 #include "nzbget.h"
 
 #include <algorithm>
-#include <regex>
 #include "ReleaseName.h"
-
-#include "DupeUtil.h"
 #include "nzbget_rs.h"
-#include <cstring>
-
-using DupeUtil::Lower;
-using DupeUtil::Trim;
 
 // rust/src/releasename.rs
 namespace

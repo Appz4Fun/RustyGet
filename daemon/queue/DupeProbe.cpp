@@ -322,7 +322,10 @@ bool DupeProbe::ProbeServer(int serverId, std::set<int>& probed, ServerResult& r
 					m_found[index] = 1;
 					if (m_foundOn.empty())
 					{
-						m_foundOn = std::string(server->GetName()) + " (" + *sample.MessageId + ")";
+						NzbgetRsBuf foundBuf = nzbget_rs_tpr_dupe_probe_format_found_on(
+							server->GetName(), *sample.MessageId);
+						m_foundOn.assign(foundBuf.data ? foundBuf.data : "", foundBuf.len);
+						nzbget_rs_free(foundBuf);
 					}
 					break;
 				case daMissing:
@@ -333,7 +336,9 @@ bool DupeProbe::ProbeServer(int serverId, std::set<int>& probed, ServerResult& r
 					break;
 			}
 
-			if (!m_countAll && std::count(m_found.begin(), m_found.end(), 1) >= MinAliveSamples)
+			if (!m_countAll &&
+				nzbget_rs_tpr_dupe_probe_count_found_samples(
+					reinterpret_cast<const uint8_t*>(m_found.data()), m_found.size()) >= MinAliveSamples)
 			{
 				break;	// alive: no need to ask further
 			}
@@ -405,7 +410,8 @@ DupeProbe::Verdict DupeProbe::Measure(int limitSec)
 		}
 		verdict.ReachedServers++;
 
-		verdict.Existing = (int)std::count(m_found.begin(), m_found.end(), 1);
+		verdict.Existing = nzbget_rs_tpr_dupe_probe_count_found_samples(
+			reinterpret_cast<const uint8_t*>(m_found.data()), m_found.size());
 		verdict.FoundOn = m_foundOn;
 		if (m_countAll)
 		{
@@ -504,10 +510,12 @@ namespace
 BString<100> Unreachable(const DupeProbe::Verdict& verdict)
 {
 	BString<100> text;
-	if (verdict.UnreachableServers > 0)
+	NzbgetRsBuf buf = nzbget_rs_tpr_dupe_probe_format_unreachable_suffix(verdict.UnreachableServers);
+	if (buf.len > 0 && buf.data)
 	{
-		text.Format(", %i unreachable left out", verdict.UnreachableServers);
+		text.Set(buf.data, (int)buf.len);
 	}
+	nzbget_rs_free(buf);
 	return text;
 }
 }

@@ -20,12 +20,7 @@
 
 #include "nzbget.h"
 
-#include <algorithm>
-#include <cmath>
 #include <map>
-#include <set>
-#include <zlib.h>
-#include <fstream>
 #include <mutex>
 #include "Posting.h"
 #include "DupeUtil.h"

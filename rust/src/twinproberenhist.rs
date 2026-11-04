@@ -442,6 +442,76 @@ pub fn direct_unpack_readline_step(
     (i, false)
 }
 
+/// Compares two NZB entries by `(filename.is_empty() ? subject : filename)` (`TwinCheckJob::Sample`).
+pub fn twin_check_compare_entry_names(
+    a_filename: &[u8],
+    a_subject: &[u8],
+    b_filename: &[u8],
+    b_subject: &[u8],
+) -> bool {
+    let ka = if a_filename.is_empty() {
+        a_subject
+    } else {
+        a_filename
+    };
+    let kb = if b_filename.is_empty() {
+        b_subject
+    } else {
+        b_filename
+    };
+    ka < kb
+}
+
+/// Splits the `"fingerprint\tcomplete"` output of `nzbget_rs_twin_put_par2` (`TwinCheck::PutPar2`).
+pub fn twin_check_split_put_par2_result(result: &[u8]) -> (&[u8], bool) {
+    match result.iter().position(|&b| b == b'\t') {
+        Some(tab) => (
+            &result[..tab],
+            twin_check_put_par2_is_complete_flag(&result[tab + 1..]) != 0,
+        ),
+        None => (result, false),
+    }
+}
+
+/// Returns whether `queued_filename` represents a merged download containing `|` (`TwinCheck::ServiceWork`).
+pub fn twin_check_is_merged_queued_filename(queued_filename: &[u8]) -> bool {
+    queued_filename.contains(&b'|')
+}
+
+/// Checks whether a queue observer event should nudge `TwinCheck` (`TwinCheck::DownloadQueueObserver::Update`).
+pub fn twin_check_should_nudge_on_queue_event(
+    action: i32,
+    ea_nzb_added: i32,
+    has_nzb_info: bool,
+    dupe_key: &[u8],
+) -> bool {
+    action == ea_nzb_added && has_nzb_info && !dupe_key.is_empty()
+}
+
+/// Formats `"{server_name} ({message_id})"` for `DupeProbe::ProbeServer`.
+pub fn dupe_probe_format_found_on(server_name: &[u8], message_id: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(server_name.len() + message_id.len() + 3);
+    out.extend_from_slice(server_name);
+    out.extend_from_slice(b" (");
+    out.extend_from_slice(message_id);
+    out.push(b')');
+    out
+}
+
+/// Counts how many entries in `found` equal `1` (`DupeProbe::ProbeServer`, `DupeProbe::Measure`).
+pub fn dupe_probe_count_found_samples(found: &[u8]) -> i32 {
+    found.iter().filter(|&&v| v == 1).count() as i32
+}
+
+/// Formats `", {unreachable_servers} unreachable left out"` when `unreachable_servers > 0`, else empty (`DupeProbe::Run`).
+pub fn dupe_probe_format_unreachable_suffix(unreachable_servers: i32) -> Vec<u8> {
+    if unreachable_servers > 0 {
+        format!(", {unreachable_servers} unreachable left out").into_bytes()
+    } else {
+        Vec::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,5 +639,35 @@ mod tests {
             direct_unpack_readline_step(&mut buf, 1, i32::from(b'\n'), &mut bs),
             (2, true)
         );
+
+        assert!(twin_check_compare_entry_names(
+            b"a.rar", b"subjB", b"b.rar", b"subjA"
+        ));
+        assert!(twin_check_compare_entry_names(
+            b"", b"subjA", b"", b"subjB"
+        ));
+        assert_eq!(
+            twin_check_split_put_par2_result(b"abc123\t1"),
+            (&b"abc123"[..], true)
+        );
+        assert_eq!(
+            twin_check_split_put_par2_result(b"abc123\t0"),
+            (&b"abc123"[..], false)
+        );
+        assert!(twin_check_is_merged_queued_filename(b"a.nzb|b.nzb"));
+        assert!(!twin_check_is_merged_queued_filename(b"a.nzb"));
+        assert!(twin_check_should_nudge_on_queue_event(1, 1, true, b"key"));
+        assert!(!twin_check_should_nudge_on_queue_event(1, 1, true, b""));
+
+        assert_eq!(
+            dupe_probe_format_found_on(b"News1", b"<msg@id>"),
+            b"News1 (<msg@id>)"
+        );
+        assert_eq!(dupe_probe_count_found_samples(&[0, 1, 1, 0, 1]), 3);
+        assert_eq!(
+            dupe_probe_format_unreachable_suffix(2),
+            b", 2 unreachable left out"
+        );
+        assert!(dupe_probe_format_unreachable_suffix(0).is_empty());
     }
 }

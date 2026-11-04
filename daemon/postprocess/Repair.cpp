@@ -721,8 +721,10 @@ void RepairController::FindPars(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, 
 		return;
 	}
 	BString<1024> mainBaseFilename;
-	mainBaseFilename.Set(baseParFilename, mainBaseLen);
-	for (char* p = mainBaseFilename; *p; p++) *p = tolower(*p); // convert string to lowercase
+	if (mainBaseLen > 0)
+	{
+		mainBaseFilename.Set(baseParFilename, mainBaseLen);
+	}
 
 	for (FileInfo* fileInfo : nzbInfo->GetFileList())
 	{

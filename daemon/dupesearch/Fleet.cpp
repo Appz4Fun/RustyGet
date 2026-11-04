@@ -21,7 +21,6 @@
 #include "nzbget.h"
 
 #include <algorithm>
-#include <cmath>
 #include <map>
 #include <chrono>
 #include <mutex>
@@ -151,8 +150,9 @@ Fleet::Result Fleet::Append(Request request)
 			HttpGet::Reply& reply = fetched[i];
 			if (!reply.ok)
 			{
-				candidate.error = reply.status ? "the nzb-file could not be fetched (HTTP " + std::to_string(reply.status) + ")" :
-					std::string("the nzb-file could not be fetched (connection failed)");
+				NzbgetRsBuf errBuf = nzbget_rs_dqh_fleet_format_fetch_error(reply.status);
+				candidate.error.assign(errBuf.data ? errBuf.data : "", errBuf.len);
+				nzbget_rs_free(errBuf);
 				continue;
 			}
 			member.data = std::move(reply.body);
@@ -327,15 +327,16 @@ Fleet::Result Fleet::Append(Request request)
 		DonorHealth::Options options;
 		options.sample.percent = g_Options->GetDupeHealthPercent();
 		options.sample.minimum = g_Options->GetDupeHealthMin();
-		// ranking a few copies needs less than measuring a donor: the sample of each
-		// posting is capped (F7: 5% of a 100,000-article posting took about 8 s each)
-		options.sample.maximum = std::min(g_Options->GetDupeHealthMax(), FleetSampleMax);
 		options.sample.maxBody = g_Options->GetDupeBodyChecks();
 		// every posting at once, each with the time left: the check ends by the deadline
 		// (one after another, each with its own budget, it took 57 s for a 45 s limit)
 		long long checkStart = DonorHealth::NowMs();
-		options.budgetMs = (int)std::max(1000LL, deadlineMs - checkStart - FinishReserveMs);
-		options.deadlineMs = checkStart + options.budgetMs;
+		int64_t checkDeadlineMs = 0;
+		nzbget_rs_dqh_fleet_calc_check_budget_and_deadline(
+			g_Options->GetDupeHealthMax(), FleetSampleMax,
+			deadlineMs, checkStart, FinishReserveMs,
+			&options.sample.maximum, &options.budgetMs, &checkDeadlineMs);
+		options.deadlineMs = checkDeadlineMs;
 		std::mutex mutex;
 		// downloads hold off meanwhile: a download keeps taking the connections back
 		// after each article, and the check got none (F7: with a download running,
@@ -417,7 +418,11 @@ Fleet::Result Fleet::Append(Request request)
 			order.push_back(c);
 		}
 	}
-	auto tier = [](const Candidate& c) { return !c.error.empty() ? 3 : c.dead ? 2 : c.alive < 0 ? 1 : 0; };
+	auto tier = [](const Candidate& c)
+	{
+		return nzbget_rs_dqh_fleet_candidate_tier(
+			!c.error.empty() ? 1 : 0, c.dead ? 1 : 0, c.alive);
+	};
 
 	// nzbget shuts down: adding now would wait for the stopped scanner for good (as
 	// in B37); the client sends the fleet again after the restart
@@ -556,8 +561,10 @@ Fleet::Result Fleet::Append(Request request)
 		};
 		result.reason = kReasons[(reasonCode >= 0 && reasonCode < 5) ? reasonCode : 4];
 	}
-	info("Fleet of %i nzb-file(s) for %s: %s%s", (int)request.members.size(), request.dupeKey.c_str(),
-		result.chosen ? ("queued #" + std::to_string(result.chosen)).c_str() : result.reason.c_str(),
-		result.complete ? "" : " (not every posting checked in time)");
+	NzbgetRsBuf sumBuf = nzbget_rs_dqh_fleet_format_summary_log(
+		(int)request.members.size(), request.dupeKey.c_str(),
+		result.chosen, result.reason.c_str(), result.complete ? 1 : 0);
+	info("%s", sumBuf.data ? sumBuf.data : "");
+	nzbget_rs_free(sumBuf);
 	return result;
 }

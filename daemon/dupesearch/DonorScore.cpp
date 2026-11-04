@@ -20,9 +20,6 @@
 
 #include "nzbget.h"
 
-#include <algorithm>
-#include <cmath>
-#include <numeric>
 #include "DonorScore.h"
 #include "nzbget_rs.h"
 

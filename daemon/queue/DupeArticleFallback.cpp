@@ -357,16 +357,17 @@ std::vector<CString> DupeArticleFallback::OrderSources(const std::vector<CString
 
 void DupeArticleFallback::RotateToLead(RawNzbList& donors, int leadNzbId)
 {
-	if (leadNzbId == 0)
+	std::vector<int32_t> donorIds;
+	donorIds.reserve(donors.size());
+	for (NzbInfo* donor : donors)
 	{
-		return;
+		donorIds.push_back(donor->GetId());
 	}
-
-	RawNzbList::iterator lead = std::find_if(donors.begin(), donors.end(),
-		[leadNzbId](NzbInfo* donor) { return donor->GetId() == leadNzbId; });
-	if (lead != donors.end())
+	ptrdiff_t idx = nzbget_rs_dqh_dupe_fallback_find_lead_index(
+		donorIds.data(), donorIds.size(), leadNzbId);
+	if (idx > 0 && (size_t)idx < donors.size())
 	{
-		std::rotate(donors.begin(), lead, donors.end());
+		std::rotate(donors.begin(), donors.begin() + idx, donors.end());
 	}
 }
 
@@ -458,9 +459,10 @@ bool DupeArticleFallback::RegisterLeadFailure(FileInfo* fileInfo, ArticleInfo* a
 
 void DupeArticleFallback::RegisterLeadSuccess(FileInfo* fileInfo, ArticleInfo* articleInfo)
 {
-	if (articleInfo->GetDupeFallbackRound() != 1 ||
-		articleInfo->GetDupeLeadSnapshot() == 0 ||
-		articleInfo->GetDupeLeadSnapshot() != fileInfo->GetDupeLeadDonorId())
+	if (!nzbget_rs_dqh_dupe_fallback_can_register_lead_success(
+		articleInfo->GetDupeFallbackRound(),
+		articleInfo->GetDupeLeadSnapshot(),
+		fileInfo->GetDupeLeadDonorId()))
 	{
 		return;
 	}
@@ -587,9 +589,10 @@ RawNzbList DupeArticleFallback::CollectDonors(DownloadQueue* downloadQueue, NzbI
 				continue;
 			}
 			std::string donorIdentity = TwinCheck::Identity(donor);
-			if (!donorIdentity.empty() &&
-				!strncmp(TwinCheck::Kind(nzbInfo->GetId(), ownIdentity.c_str(), donor->GetId(),
-					donorIdentity.c_str()).c_str(), "twin", 4))
+			std::string kind = !donorIdentity.empty() ?
+				TwinCheck::Kind(nzbInfo->GetId(), ownIdentity.c_str(), donor->GetId(), donorIdentity.c_str()) : "";
+			if (nzbget_rs_dqh_dupe_fallback_is_twin_kind(
+				ownIdentity.c_str(), donorIdentity.c_str(), kind.c_str()) != 0)
 			{
 				twinDonors.insert(donor);
 			}
@@ -623,9 +626,10 @@ void DupeArticleFallback::PinSources(DownloadQueue* downloadQueue, FileInfo* fil
 		auto it = std::find_if(donors.begin(), donors.end(),
 			[leadId](NzbInfo* donor) { return donor->GetId() == leadId; });
 		std::string leadIdentity = it != donors.end() ? TwinCheck::Identity(*it) : "";
-		if (ownIdentity.empty() || leadIdentity.empty() ||
-			strncmp(TwinCheck::Kind(nzbInfo->GetId(), ownIdentity.c_str(), leadId,
-				leadIdentity.c_str()).c_str(), "twin", 4) != 0)
+		std::string leadKind = (!ownIdentity.empty() && !leadIdentity.empty()) ?
+			TwinCheck::Kind(nzbInfo->GetId(), ownIdentity.c_str(), leadId, leadIdentity.c_str()) : "";
+		if (nzbget_rs_dqh_dupe_fallback_should_reset_non_twin_lead(
+			twinOnly ? 1 : 0, leadId, ownIdentity.c_str(), leadIdentity.c_str(), leadKind.c_str()) != 0)
 		{
 			fileInfo->SetDupeLeadDonorId(0);
 			fileInfo->SetDupeLeadFailures(0);
@@ -840,8 +844,10 @@ FileInfo* DupeArticleFallback::MatchDonorFile(FileInfo* targetFile, NzbInfo* don
 	std::string ownIdentity = own ? TwinCheck::Identity(own) : "";
 	if (twinOnly)
 	{
-		if (!donorNzbId || ownIdentity.empty() || Util::EmptyStr(donorPrint) ||
-			strncmp(TwinCheck::Kind(own->GetId(), ownIdentity.c_str(), donorNzbId, donorPrint).c_str(), "twin", 4) != 0)
+		std::string kind = (donorNzbId && !ownIdentity.empty() && !Util::EmptyStr(donorPrint)) ?
+			TwinCheck::Kind(own->GetId(), ownIdentity.c_str(), donorNzbId, donorPrint) : "";
+		if (!donorNzbId || !nzbget_rs_dqh_dupe_fallback_is_twin_kind(
+			ownIdentity.c_str(), donorPrint, kind.c_str()))
 		{
 			return nullptr;
 		}
@@ -1144,14 +1150,13 @@ ArticleInfo* DupeArticleFallback::FirstUntiledArticle(FileInfo* fileInfo)
 
 bool DupeArticleFallback::HasDonorArticles(FileInfo* fileInfo)
 {
-	for (ArticleInfo* article : fileInfo->GetArticles())
+	ArticleList* articles = fileInfo->GetArticles();
+	std::vector<int32_t> rounds(articles->size());
+	for (size_t i = 0; i < articles->size(); i++)
 	{
-		if (article->GetDupeFallbackRound() > 0)
-		{
-			return true;
-		}
+		rounds[i] = (*articles)[i]->GetDupeFallbackRound();
 	}
-	return false;
+	return nzbget_rs_dqh_dupe_fallback_has_donor_articles(rounds.data(), rounds.size()) != 0;
 }
 
 bool DupeArticleFallback::MergeDecodedFileSize(FileInfo* fileInfo, int64 articleFileSize)
@@ -1188,8 +1193,12 @@ FileInfo::EFirstContent DupeArticleFallback::FirstContent(FileInfo* fileInfo)
 
 	// after a restart: the first article was written already, its bytes tell
 	ArticleList* articles = fileInfo->GetArticles();
-	if (articles->empty() || articles->front()->GetPartNumber() != 1 ||
-		articles->front()->GetStatus() != ArticleInfo::aiFinished || fileInfo->GetOutputFilename().empty())
+	if (!nzbget_rs_dqh_dupe_fallback_can_read_first_content_from_disk(
+		!articles->empty() ? 1 : 0,
+		!articles->empty() ? articles->front()->GetPartNumber() : 0,
+		!articles->empty() ? (int)articles->front()->GetStatus() : 0,
+		(int)ArticleInfo::aiFinished,
+		fileInfo->GetOutputFilename().c_str()))
 	{
 		return FileInfo::fcUnknown;
 	}

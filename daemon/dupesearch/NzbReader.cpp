@@ -21,8 +21,6 @@
 #include "nzbget.h"
 
 #include <algorithm>
-#include <regex>
-#include <limits>
 #include "NzbReader.h"
 #include "XmlReader.h"
 #include "NzbFile.h"

@@ -30869,4 +30869,311 @@ pub unsafe extern "C" fn nzbget_rs_stream_is_intact_proof_member_eligible(
     )
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_twin_check_compare_entry_names(
+    a_filename: *const c_char,
+    a_subject: *const c_char,
+    b_filename: *const c_char,
+    b_subject: *const c_char,
+) -> i32 {
+    i32::from(crate::twinproberenhist::twin_check_compare_entry_names(
+        input(a_filename),
+        input(a_subject),
+        input(b_filename),
+        input(b_subject),
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_twin_check_split_put_par2_result(
+    result_str: *const c_char,
+    out_complete: *mut i32,
+) -> RsBuf {
+    let (fp, complete) =
+        crate::twinproberenhist::twin_check_split_put_par2_result(input(result_str));
+    if !out_complete.is_null() {
+        *out_complete = i32::from(complete);
+    }
+    into_buf(fp.to_vec())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_twin_check_is_merged_queued_filename(
+    queued_filename: *const c_char,
+) -> i32 {
+    i32::from(
+        crate::twinproberenhist::twin_check_is_merged_queued_filename(input(queued_filename)),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_twin_check_should_nudge_on_queue_event(
+    action: i32,
+    ea_nzb_added: i32,
+    has_nzb_info: i32,
+    dupe_key: *const c_char,
+) -> i32 {
+    i32::from(
+        crate::twinproberenhist::twin_check_should_nudge_on_queue_event(
+            action,
+            ea_nzb_added,
+            has_nzb_info != 0,
+            input(dupe_key),
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_dupe_probe_format_found_on(
+    server_name: *const c_char,
+    message_id: *const c_char,
+) -> RsBuf {
+    into_buf(crate::twinproberenhist::dupe_probe_format_found_on(
+        input(server_name),
+        input(message_id),
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_dupe_probe_count_found_samples(
+    found_ptr: *const u8,
+    count: usize,
+) -> i32 {
+    let slice = if found_ptr.is_null() || count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(found_ptr, count)
+    };
+    crate::twinproberenhist::dupe_probe_count_found_samples(slice)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_tpr_dupe_probe_format_unreachable_suffix(
+    unreachable_servers: i32,
+) -> RsBuf {
+    into_buf(crate::twinproberenhist::dupe_probe_format_unreachable_suffix(unreachable_servers))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_dupe_fallback_find_lead_index(
+    donor_ids_ptr: *const i32,
+    count: usize,
+    lead_nzb_id: i32,
+) -> isize {
+    let slice = if donor_ids_ptr.is_null() || count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(donor_ids_ptr, count)
+    };
+    crate::dupequeuehealth::dqh_dupe_fallback_find_lead_index(slice, lead_nzb_id)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupe_fallback_can_register_lead_success(
+    fallback_round: i32,
+    lead_snapshot: i32,
+    file_lead_donor_id: i32,
+) -> i32 {
+    i32::from(
+        crate::dupequeuehealth::dqh_dupe_fallback_can_register_lead_success(
+            fallback_round,
+            lead_snapshot,
+            file_lead_donor_id,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_dupe_fallback_has_donor_articles(
+    fallback_rounds_ptr: *const i32,
+    count: usize,
+) -> i32 {
+    let slice = if fallback_rounds_ptr.is_null() || count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(fallback_rounds_ptr, count)
+    };
+    i32::from(crate::dupequeuehealth::dqh_dupe_fallback_has_donor_articles(slice))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_dupe_fallback_can_read_first_content_from_disk(
+    has_articles: i32,
+    first_part_number: i32,
+    first_status: i32,
+    ai_finished: i32,
+    output_filename: *const c_char,
+) -> i32 {
+    i32::from(
+        crate::dupequeuehealth::dqh_dupe_fallback_can_read_first_content_from_disk(
+            has_articles != 0,
+            first_part_number,
+            first_status,
+            ai_finished,
+            input(output_filename),
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_dupe_fallback_is_twin_kind(
+    own_identity: *const c_char,
+    donor_identity: *const c_char,
+    kind: *const c_char,
+) -> i32 {
+    i32::from(crate::dupequeuehealth::dqh_dupe_fallback_is_twin_kind(
+        input(own_identity),
+        input(donor_identity),
+        input(kind),
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_dupe_fallback_should_reset_non_twin_lead(
+    twin_only: i32,
+    lead_id: i32,
+    own_identity: *const c_char,
+    lead_identity: *const c_char,
+    kind: *const c_char,
+) -> i32 {
+    i32::from(
+        crate::dupequeuehealth::dqh_dupe_fallback_should_reset_non_twin_lead(
+            twin_only != 0,
+            lead_id,
+            input(own_identity),
+            input(lead_identity),
+            input(kind),
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_donor_health_accum_health(
+    checked: *mut i32,
+    present: *mut i32,
+    missing: *mut i32,
+    error: *mut i32,
+    body_checked: *mut i32,
+    body_bad: *mut i32,
+    add_checked: i32,
+    add_present: i32,
+    add_missing: i32,
+    add_error: i32,
+    add_body_checked: i32,
+    add_body_bad: i32,
+) {
+    if checked.is_null()
+        || present.is_null()
+        || missing.is_null()
+        || error.is_null()
+        || body_checked.is_null()
+        || body_bad.is_null()
+    {
+        return;
+    }
+    crate::dupequeuehealth::dqh_donor_health_accum_health(
+        &mut *checked,
+        &mut *present,
+        &mut *missing,
+        &mut *error,
+        &mut *body_checked,
+        &mut *body_bad,
+        add_checked,
+        add_present,
+        add_missing,
+        add_error,
+        add_body_checked,
+        add_body_bad,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_donor_health_calc_worker_budget_ms(
+    deadline_ms: i64,
+    now_ms: i64,
+    cur_budget_ms: i32,
+    out_budget_ms: *mut i32,
+) -> i32 {
+    let mut b = cur_budget_ms;
+    let ok = crate::dupequeuehealth::dqh_donor_health_calc_worker_budget_ms(
+        deadline_ms,
+        now_ms,
+        cur_budget_ms,
+        &mut b,
+    );
+    if !out_budget_ms.is_null() {
+        *out_budget_ms = b;
+    }
+    i32::from(ok)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_donor_health_calc_thread_count(
+    postings_len: usize,
+    concurrency: i32,
+) -> usize {
+    crate::dupequeuehealth::dqh_donor_health_calc_thread_count(postings_len, concurrency)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_fleet_format_fetch_error(status: i32) -> RsBuf {
+    into_buf(crate::dupequeuehealth::dqh_fleet_format_fetch_error(status))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_fleet_calc_check_budget_and_deadline(
+    opt_max: i32,
+    fleet_sample_max: i32,
+    deadline_ms: i64,
+    check_start_ms: i64,
+    finish_reserve_ms: i64,
+    out_sample_max: *mut i32,
+    out_budget_ms: *mut i32,
+    out_check_deadline_ms: *mut i64,
+) {
+    let (smax, bms, dl) = crate::dupequeuehealth::dqh_fleet_calc_check_budget_and_deadline(
+        opt_max,
+        fleet_sample_max,
+        deadline_ms,
+        check_start_ms,
+        finish_reserve_ms,
+    );
+    if !out_sample_max.is_null() {
+        *out_sample_max = smax;
+    }
+    if !out_budget_ms.is_null() {
+        *out_budget_ms = bms;
+    }
+    if !out_check_deadline_ms.is_null() {
+        *out_check_deadline_ms = dl;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_fleet_candidate_tier(
+    has_error: i32,
+    dead: i32,
+    alive: i32,
+) -> i32 {
+    crate::dupequeuehealth::dqh_fleet_candidate_tier(has_error != 0, dead != 0, alive)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_fleet_format_summary_log(
+    members_count: i32,
+    dupe_key: *const c_char,
+    chosen: i32,
+    reason: *const c_char,
+    complete: i32,
+) -> RsBuf {
+    into_buf(crate::dupequeuehealth::dqh_fleet_format_summary_log(
+        members_count,
+        input(dupe_key),
+        chosen,
+        input(reason),
+        complete != 0,
+    ))
+}
+
+
 

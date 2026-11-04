@@ -5431,6 +5431,58 @@ size_t nzbget_rs_stream_order_donor_indices(
 int32_t nzbget_rs_stream_is_intact_proof_member_eligible(
     const char* base_name, const char* member_name, const char* target_set,
     const char* const* target_filenames_ptr, size_t target_count);
+int32_t nzbget_rs_tpr_twin_check_compare_entry_names(
+    const char* a_filename, const char* a_subject,
+    const char* b_filename, const char* b_subject);
+NzbgetRsBuf nzbget_rs_tpr_twin_check_split_put_par2_result(
+    const char* result_str, int32_t* out_complete);
+int32_t nzbget_rs_tpr_twin_check_is_merged_queued_filename(
+    const char* queued_filename);
+int32_t nzbget_rs_tpr_twin_check_should_nudge_on_queue_event(
+    int32_t action, int32_t ea_nzb_added, int32_t has_nzb_info,
+    const char* dupe_key);
+NzbgetRsBuf nzbget_rs_tpr_dupe_probe_format_found_on(
+    const char* server_name, const char* message_id);
+int32_t nzbget_rs_tpr_dupe_probe_count_found_samples(
+    const uint8_t* found_ptr, size_t count);
+NzbgetRsBuf nzbget_rs_tpr_dupe_probe_format_unreachable_suffix(
+    int32_t unreachable_servers);
+ptrdiff_t nzbget_rs_dqh_dupe_fallback_find_lead_index(
+    const int32_t* donor_ids_ptr, size_t count, int32_t lead_nzb_id);
+int32_t nzbget_rs_dqh_dupe_fallback_can_register_lead_success(
+    int32_t fallback_round, int32_t lead_snapshot, int32_t file_lead_donor_id);
+int32_t nzbget_rs_dqh_dupe_fallback_has_donor_articles(
+    const int32_t* fallback_rounds_ptr, size_t count);
+int32_t nzbget_rs_dqh_dupe_fallback_can_read_first_content_from_disk(
+    int32_t has_articles, int32_t first_part_number,
+    int32_t first_status, int32_t ai_finished,
+    const char* output_filename);
+int32_t nzbget_rs_dqh_dupe_fallback_is_twin_kind(
+    const char* own_identity, const char* donor_identity, const char* kind);
+int32_t nzbget_rs_dqh_dupe_fallback_should_reset_non_twin_lead(
+    int32_t twin_only, int32_t lead_id,
+    const char* own_identity, const char* lead_identity, const char* kind);
+void nzbget_rs_dqh_donor_health_accum_health(
+    int32_t* checked, int32_t* present, int32_t* missing, int32_t* error,
+    int32_t* body_checked, int32_t* body_bad,
+    int32_t add_checked, int32_t add_present, int32_t add_missing,
+    int32_t add_error, int32_t add_body_checked, int32_t add_body_bad);
+int32_t nzbget_rs_dqh_donor_health_calc_worker_budget_ms(
+    int64_t deadline_ms, int64_t now_ms, int32_t cur_budget_ms,
+    int32_t* out_budget_ms);
+size_t nzbget_rs_dqh_donor_health_calc_thread_count(
+    size_t postings_len, int32_t concurrency);
+NzbgetRsBuf nzbget_rs_dqh_fleet_format_fetch_error(int32_t status);
+void nzbget_rs_dqh_fleet_calc_check_budget_and_deadline(
+    int32_t opt_max, int32_t fleet_sample_max, int64_t deadline_ms,
+    int64_t check_start_ms, int64_t finish_reserve_ms,
+    int32_t* out_sample_max, int32_t* out_budget_ms,
+    int64_t* out_check_deadline_ms);
+int32_t nzbget_rs_dqh_fleet_candidate_tier(
+    int32_t has_error, int32_t dead, int32_t alive);
+NzbgetRsBuf nzbget_rs_dqh_fleet_format_summary_log(
+    int32_t members_count, const char* dupe_key, int32_t chosen,
+    const char* reason, int32_t complete);
 
 #include "nzbget_tls_cipher.h"
 

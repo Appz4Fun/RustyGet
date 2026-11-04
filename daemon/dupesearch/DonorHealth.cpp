@@ -21,7 +21,6 @@
 #include "nzbget.h"
 
 #include <algorithm>
-#include <cmath>
 #include <random>
 #include <set>
 #include <thread>
@@ -44,12 +43,9 @@ double DonorHealth::Health::Alive() const
 
 DonorHealth::Health& DonorHealth::Health::operator+=(const Health& other)
 {
-	checked += other.checked;
-	present += other.present;
-	missing += other.missing;
-	error += other.error;
-	bodyChecked += other.bodyChecked;
-	bodyBad += other.bodyBad;
+	nzbget_rs_dqh_donor_health_accum_health(
+		&checked, &present, &missing, &error, &bodyChecked, &bodyBad,
+		other.checked, other.present, other.missing, other.error, other.bodyChecked, other.bodyBad);
 	return *this;
 }
 
@@ -465,14 +461,10 @@ void DonorHealth::CheckPostings(const ServerList& servers, const std::vector<Pos
 			// checks of a wide fleet added up past its limit (F30: 48 postings, 30 s
 			// limit, 85 s); one not started by the deadline stays unmeasured
 			Options own = options;
-			if (options.deadlineMs > 0)
+			if (!nzbget_rs_dqh_donor_health_calc_worker_budget_ms(
+				options.deadlineMs, NowMs(), own.budgetMs, &own.budgetMs))
 			{
-				long long left = options.deadlineMs - NowMs();
-				if (left <= 0)
-				{
-					continue;
-				}
-				own.budgetMs = (int)std::min<long long>(own.budgetMs, left);
+				continue;
 			}
 			const Posting& posting = postings[index];
 			emit(posting.key, CheckPosting(servers, posting.ids, posting.groups, own, full));
@@ -480,7 +472,7 @@ void DonorHealth::CheckPostings(const ServerList& servers, const std::vector<Pos
 	};
 
 	std::vector<std::thread> threads;
-	size_t count = std::min(postings.size(), (size_t)std::max(1, concurrency));
+	size_t count = nzbget_rs_dqh_donor_health_calc_thread_count(postings.size(), concurrency);
 	for (size_t i = 0; i < count; i++)
 	{
 		threads.emplace_back(worker);

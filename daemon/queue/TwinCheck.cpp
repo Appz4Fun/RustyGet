@@ -289,7 +289,11 @@ void TwinCheckJob::Sample()
 				}
 			}
 			std::sort(files.begin(), files.end(), [](const TwinCheck::NzbEntry& a, const TwinCheck::NzbEntry& b)
-				{ return (a.filename.empty() ? a.subject : a.filename) < (b.filename.empty() ? b.subject : b.filename); });
+				{
+					return nzbget_rs_tpr_twin_check_compare_entry_names(
+						a.filename.c_str(), a.subject.c_str(),
+						b.filename.c_str(), b.subject.c_str()) != 0;
+				});
 			return files;
 		};
 	std::vector<TwinCheck::NzbEntry> primary = dataFiles(m_primaryNzbFilename);
@@ -463,13 +467,14 @@ std::string TwinCheck::PutPar2(int nzbId, const char* posting, const char* data,
 	// "fingerprint\tcomplete" from Rust (twin.rs), which keeps the file list
 	std::string result = RsString(nzbget_rs_twin_put_par2(nzbId, posting ? posting : "",
 		(const unsigned char*)data, size));
-	size_t tab = result.find('\t');
+	int32_t completeFlag = 0;
+	std::string fp = RsString(nzbget_rs_tpr_twin_check_split_put_par2_result(
+		result.c_str(), &completeFlag));
 	if (complete)
 	{
-		*complete = tab != std::string::npos &&
-			nzbget_rs_tpr_twin_check_put_par2_is_complete_flag(result.c_str() + tab + 1) != 0;
+		*complete = completeFlag != 0;
 	}
-	return result.substr(0, tab);
+	return fp;
 }
 
 int TwinCheck::HasSigs(int nzbId, const char* print)
@@ -649,7 +654,11 @@ void TwinCheck::ServiceWork()
 			// merged downloads (their nzb-file is two) aren't compared: no fingerprint
 			// stands for them
 			items.erase(std::remove_if(items.begin(), items.end(),
-				[](const Item& item) { return strchr(item.nzbInfo->GetQueuedFilename(), '|') != nullptr; }),
+				[](const Item& item)
+				{
+					return nzbget_rs_tpr_twin_check_is_merged_queued_filename(
+						item.nzbInfo->GetQueuedFilename()) != 0;
+				}),
 				items.end());
 			if (items.size() < 2)
 			{
@@ -673,7 +682,8 @@ void TwinCheck::ServiceWork()
 					nzbget_rs_stq_twin_check_is_listless_from_counts(
 						HasSigs(nzbInfo->GetId(), Identity(nzbInfo).c_str()),
 						Attempts(nzbInfo->GetId()), MaxAttempts) != 0;
-				if ((print.empty() || listless) && !strchr(nzbInfo->GetQueuedFilename(), '|') &&
+				if ((print.empty() || listless) &&
+					!nzbget_rs_tpr_twin_check_is_merged_queued_filename(nzbInfo->GetQueuedFilename()) &&
 					FileSystem::FileExists(nzbInfo->GetQueuedFilename()))
 				{
 					// the dupe tool's hints of a twin go first; they prove nothing
@@ -714,7 +724,8 @@ void TwinCheck::ServiceWork()
 			// the labels: of the primary's twins and alts, by their par2 fingerprints,
 			// else by articles sampled at the same places (none without either)
 			std::string primaryPrint = primary ? fingerprintOf(primary) : "";
-			bool primaryOk = primary && !strchr(primary->GetQueuedFilename(), '|') &&
+			bool primaryOk = primary &&
+				!nzbget_rs_tpr_twin_check_is_merged_queued_filename(primary->GetQueuedFilename()) &&
 				FileSystem::FileExists(primary->GetQueuedFilename());
 			std::string primaryId = primary ? std::to_string(primary->GetId()) : "";
 			for (Item& item : items)
@@ -738,7 +749,8 @@ void TwinCheck::ServiceWork()
 					primaryId.c_str(),
 					&sampledNowInt) != 0;
 				bool sampledNow = sampledNowInt != 0;
-				if (sampleable && !sampledNow && !strchr(nzbInfo->GetQueuedFilename(), '|') &&
+				if (sampleable && !sampledNow &&
+					!nzbget_rs_tpr_twin_check_is_merged_queued_filename(nzbInfo->GetQueuedFilename()) &&
 					FileSystem::FileExists(nzbInfo->GetQueuedFilename()))
 				{
 					jobs.push_back({nzbInfo->GetId(), nzbInfo->GetQueuedFilename(), false,
@@ -906,8 +918,11 @@ void TwinCheck::DownloadQueueObserver::Update(Subject* caller, void* aspect)
 	// called with the queue locked: no g_mutex here (jobs ending take it, then
 	// may wait for the queue)
 	DownloadQueue::Aspect* queueAspect = (DownloadQueue::Aspect*)aspect;
-	if (queueAspect->action == DownloadQueue::eaNzbAdded && queueAspect->nzbInfo &&
-		!Util::EmptyStr(queueAspect->nzbInfo->GetDupeKey()))
+	if (nzbget_rs_tpr_twin_check_should_nudge_on_queue_event(
+		(int)queueAspect->action,
+		(int)DownloadQueue::eaNzbAdded,
+		queueAspect->nzbInfo != nullptr ? 1 : 0,
+		queueAspect->nzbInfo ? queueAspect->nzbInfo->GetDupeKey() : nullptr) != 0)
 	{
 		g_nudged = true;
 		m_owner->WakeUp();

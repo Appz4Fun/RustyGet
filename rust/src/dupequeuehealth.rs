@@ -313,6 +313,174 @@ pub fn dqh_fleet_visit_pipe_names(names: &[u8], mut visit: impl FnMut(&[u8])) {
     }
 }
 
+/// Finds the index of `lead_nzb_id` in `donor_ids` for `DupeArticleFallback::RotateToLead`
+/// (`-1` if `lead_nzb_id == 0` or not found).
+pub fn dqh_dupe_fallback_find_lead_index(donor_ids: &[i32], lead_nzb_id: i32) -> isize {
+    if lead_nzb_id == 0 {
+        return -1;
+    }
+    donor_ids
+        .iter()
+        .position(|&id| id == lead_nzb_id)
+        .map(|p| p as isize)
+        .unwrap_or(-1)
+}
+
+/// Checks whether `DupeArticleFallback::RegisterLeadSuccess` should proceed.
+pub fn dqh_dupe_fallback_can_register_lead_success(
+    fallback_round: i32,
+    lead_snapshot: i32,
+    file_lead_donor_id: i32,
+) -> bool {
+    fallback_round == 1 && lead_snapshot != 0 && lead_snapshot == file_lead_donor_id
+}
+
+/// Checks whether any article in `fallback_rounds` has `round > 0` (`DupeArticleFallback::HasDonorArticles`).
+pub fn dqh_dupe_fallback_has_donor_articles(fallback_rounds: &[i32]) -> bool {
+    fallback_rounds.iter().any(|&r| r > 0)
+}
+
+/// Checks whether `DupeArticleFallback::FirstContent` can inspect the first article on disk.
+pub fn dqh_dupe_fallback_can_read_first_content_from_disk(
+    has_articles: bool,
+    first_part_number: i32,
+    first_status: i32,
+    ai_finished: i32,
+    output_filename: &[u8],
+) -> bool {
+    has_articles
+        && first_part_number == 1
+        && first_status == ai_finished
+        && !output_filename.is_empty()
+}
+
+/// Checks whether both identities are non-empty and `kind` starts with `"twin"`
+/// (`DupeArticleFallback::CollectDonors`, `DupeArticleFallback::MatchDonorFile`).
+pub fn dqh_dupe_fallback_is_twin_kind(
+    own_identity: &[u8],
+    donor_identity: &[u8],
+    kind: &[u8],
+) -> bool {
+    !own_identity.is_empty() && !donor_identity.is_empty() && kind.starts_with(b"twin")
+}
+
+/// Checks whether `DupeArticleFallback::PinSources` should reset a non-twin lead donor when `twin_only` is active.
+pub fn dqh_dupe_fallback_should_reset_non_twin_lead(
+    twin_only: bool,
+    lead_id: i32,
+    own_identity: &[u8],
+    lead_identity: &[u8],
+    kind: &[u8],
+) -> bool {
+    twin_only && lead_id != 0 && !dqh_dupe_fallback_is_twin_kind(own_identity, lead_identity, kind)
+}
+
+/// Accumulates `DonorHealth::Health::operator+=` counters.
+#[allow(clippy::too_many_arguments)]
+pub fn dqh_donor_health_accum_health(
+    checked: &mut i32,
+    present: &mut i32,
+    missing: &mut i32,
+    error: &mut i32,
+    body_checked: &mut i32,
+    body_bad: &mut i32,
+    add_checked: i32,
+    add_present: i32,
+    add_missing: i32,
+    add_error: i32,
+    add_body_checked: i32,
+    add_body_bad: i32,
+) {
+    *checked = checked.wrapping_add(add_checked);
+    *present = present.wrapping_add(add_present);
+    *missing = missing.wrapping_add(add_missing);
+    *error = error.wrapping_add(add_error);
+    *body_checked = body_checked.wrapping_add(add_body_checked);
+    *body_bad = body_bad.wrapping_add(add_body_bad);
+}
+
+/// Computes a worker's remaining budget in `DonorHealth::CheckPostings`; returns `false` if the deadline has passed.
+pub fn dqh_donor_health_calc_worker_budget_ms(
+    deadline_ms: i64,
+    now_ms: i64,
+    cur_budget_ms: i32,
+    out_budget_ms: &mut i32,
+) -> bool {
+    if deadline_ms > 0 {
+        let left = deadline_ms.saturating_sub(now_ms);
+        if left <= 0 {
+            return false;
+        }
+        *out_budget_ms = i64::from(cur_budget_ms).min(left) as i32;
+    } else {
+        *out_budget_ms = cur_budget_ms;
+    }
+    true
+}
+
+/// Computes the worker thread count for `DonorHealth::CheckPostings`.
+pub fn dqh_donor_health_calc_thread_count(postings_len: usize, concurrency: i32) -> usize {
+    postings_len.min(1i32.max(concurrency) as usize)
+}
+
+/// Formats the HTTP fetch error message for `Fleet::Append`.
+pub fn dqh_fleet_format_fetch_error(status: i32) -> Vec<u8> {
+    if status != 0 {
+        format!("the nzb-file could not be fetched (HTTP {status})").into_bytes()
+    } else {
+        b"the nzb-file could not be fetched (connection failed)".to_vec()
+    }
+}
+
+/// Computes `(sample_maximum, budget_ms, check_deadline_ms)` for `Fleet::Append`.
+pub fn dqh_fleet_calc_check_budget_and_deadline(
+    opt_max: i32,
+    fleet_sample_max: i32,
+    deadline_ms: i64,
+    check_start_ms: i64,
+    finish_reserve_ms: i64,
+) -> (i32, i32, i64) {
+    let sample_maximum = opt_max.min(fleet_sample_max);
+    let budget_ms = 1000i64.max(deadline_ms - check_start_ms - finish_reserve_ms) as i32;
+    let check_deadline_ms = check_start_ms + i64::from(budget_ms);
+    (sample_maximum, budget_ms, check_deadline_ms)
+}
+
+/// Computes the candidate tier (`0..=3`) in `Fleet::Append`.
+pub fn dqh_fleet_candidate_tier(has_error: bool, dead: bool, alive: i32) -> i32 {
+    if has_error {
+        3
+    } else if dead {
+        2
+    } else if alive < 0 {
+        1
+    } else {
+        0
+    }
+}
+
+/// Formats the final `Fleet of ...` summary log message in `Fleet::Append`.
+pub fn dqh_fleet_format_summary_log(
+    members_count: i32,
+    dupe_key: &[u8],
+    chosen: i32,
+    reason: &[u8],
+    complete: bool,
+) -> Vec<u8> {
+    let mut out = format!("Fleet of {members_count} nzb-file(s) for ").into_bytes();
+    out.extend_from_slice(dupe_key);
+    out.extend_from_slice(b": ");
+    if chosen != 0 {
+        out.extend_from_slice(format!("queued #{chosen}").as_bytes());
+    } else {
+        out.extend_from_slice(reason);
+    }
+    if !complete {
+        out.extend_from_slice(b" (not every posting checked in time)");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,5 +614,42 @@ mod tests {
         let mut parts = Vec::new();
         dqh_fleet_visit_pipe_names(b"first.nzb||second.nzb|", |s| parts.push(s.to_vec()));
         assert_eq!(parts, vec![b"first.nzb".to_vec(), b"second.nzb".to_vec()]);
+
+        assert_eq!(dqh_dupe_fallback_find_lead_index(&[10, 20, 30], 20), 1);
+        assert_eq!(dqh_dupe_fallback_find_lead_index(&[10, 20, 30], 0), -1);
+        assert!(dqh_dupe_fallback_can_register_lead_success(1, 5, 5));
+        assert!(!dqh_dupe_fallback_can_register_lead_success(2, 5, 5));
+        assert!(dqh_dupe_fallback_has_donor_articles(&[0, 0, 2]));
+        assert!(!dqh_dupe_fallback_has_donor_articles(&[0, 0]));
+        assert!(dqh_dupe_fallback_can_read_first_content_from_disk(
+            true, 1, 2, 2, b"/tmp/out"
+        ));
+        assert!(dqh_dupe_fallback_is_twin_kind(b"fp1", b"fp2", b"twin 16/18"));
+        assert!(!dqh_dupe_fallback_is_twin_kind(b"fp1", b"fp2", b"alt"));
+        assert!(dqh_dupe_fallback_should_reset_non_twin_lead(
+            true, 3, b"fp1", b"fp2", b"alt"
+        ));
+
+        let mut b_ms = 0;
+        assert!(dqh_donor_health_calc_worker_budget_ms(5000, 3000, 4000, &mut b_ms));
+        assert_eq!(b_ms, 2000);
+        assert!(!dqh_donor_health_calc_worker_budget_ms(3000, 3000, 4000, &mut b_ms));
+        assert_eq!(dqh_donor_health_calc_thread_count(10, 4), 4);
+        assert_eq!(
+            dqh_fleet_format_fetch_error(503),
+            b"the nzb-file could not be fetched (HTTP 503)"
+        );
+        assert_eq!(
+            dqh_fleet_calc_check_budget_and_deadline(500, 200, 10000, 2000, 2000),
+            (200, 6000, 8000)
+        );
+        assert_eq!(dqh_fleet_candidate_tier(false, false, 95), 0);
+        assert_eq!(dqh_fleet_candidate_tier(false, false, -1), 1);
+        assert_eq!(dqh_fleet_candidate_tier(false, true, 10), 2);
+        assert_eq!(dqh_fleet_candidate_tier(true, false, -1), 3);
+        assert_eq!(
+            dqh_fleet_format_summary_log(3, b"show.s01e01", 12, b"", false),
+            b"Fleet of 3 nzb-file(s) for show.s01e01: queued #12 (not every posting checked in time)"
+        );
     }
 }

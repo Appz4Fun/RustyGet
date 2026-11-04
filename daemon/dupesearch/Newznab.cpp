@@ -113,7 +113,12 @@ public:
 			}
 			else if (name == "item")
 			{
+#ifdef NZBGET_USE_RUST
+				m_item.size = nzbget_rs_dsf_newznab_resolve_item_size(
+					m_attrSize, m_elementSize);
+#else
 				m_item.size = m_attrSize > 0 ? m_attrSize : m_elementSize;
+#endif
 				m_page.items.push_back(m_item);
 				m_inItem = false;
 			}
@@ -444,6 +449,19 @@ std::vector<Newznab::Result> Newznab::Search(const std::string& base, const std:
 				params.emplace_back("limit", std::to_string(PageSize));
 				params.emplace_back("offset", std::to_string(page * PageSize));
 				std::string infoName = "DupeSearch " + label + " page " + std::to_string(page + 1);
+#ifdef NZBGET_USE_RUST
+				long long pageDeadlineMs = nzbget_rs_dsf_newznab_calc_page_deadline_ms(
+					DonorHealth::NowMs(), (int64_t)deadline, (int64_t)Util::CurrentTime());
+				HttpGet::Reply reply = HttpGet::Fetch(BuildUrl(base, params, apiKey), infoName, 16 * 1024 * 1024,
+					pageDeadlineMs);
+				if (nzbget_rs_dsf_newznab_should_retry_dropped_fetch(
+					reply.ok ? 1 : 0, reply.status, HttpGet::Stopped() ? 1 : 0,
+					(int64_t)Util::CurrentTime(), (int64_t)deadline) != 0)
+				{
+					reply = HttpGet::Fetch(BuildUrl(base, params, apiKey), infoName, 16 * 1024 * 1024,
+						pageDeadlineMs);
+				}
+#else
 				long long deadlineMs = DonorHealth::NowMs() + (long long)(deadline - Util::CurrentTime()) * 1000;
 				HttpGet::Reply reply = HttpGet::Fetch(BuildUrl(base, params, apiKey), infoName, 16 * 1024 * 1024,
 					std::max(1LL, deadlineMs));
@@ -454,6 +472,7 @@ std::vector<Newznab::Result> Newznab::Search(const std::string& base, const std:
 					reply = HttpGet::Fetch(BuildUrl(base, params, apiKey), infoName, 16 * 1024 * 1024,
 						std::max(1LL, deadlineMs));
 				}
+#endif
 				pages++;
 
 				Page result;
@@ -479,7 +498,12 @@ std::vector<Newznab::Result> Newznab::Search(const std::string& base, const std:
 				}
 
 				found[index].insert(found[index].end(), result.items.begin(), result.items.end());
+#ifdef NZBGET_USE_RUST
+				if (nzbget_rs_dsf_newznab_should_stop_pagination(
+					result.items.size(), PageSize) != 0)
+#else
 				if ((int)result.items.size() < PageSize)
+#endif
 				{
 					break;
 				}

@@ -92,6 +92,7 @@ pub mod postunpackrenamehist;
 pub mod streamrepairparcheck;
 pub mod streamrepaircontentmap;
 pub mod dupequeuehealth;
+pub mod dupesearchfetcher;
 
 pub mod deadpostings;
 pub mod dupewatch;

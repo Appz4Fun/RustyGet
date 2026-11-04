@@ -4308,6 +4308,59 @@ void nzbget_rs_dqh_donor_health_accum_verdict_counts(
     int verdict, int f_present, int f_missing, int f_error, int soft,
     int* io_present, int* io_missing, int* io_error, int* io_body_bad);
 
+int nzbget_rs_dsf_dupesearch_should_schedule_queue_event(
+    int action, int ea_nzb_added, int ea_nzb_named, int has_nzb_info,
+    int dupe_search_opt, int is_stopped);
+int nzbget_rs_dsf_dupesearch_is_recent_failed_history_item(
+    int kind, int hk_nzb_val, int64_t item_time, int64_t recent_cutoff,
+    int is_dupe_success);
+int nzbget_rs_dsf_dupesearch_can_add_known_file(
+    int kind, int nk_nzb_val, int queued_filename_empty, int delete_status,
+    int ds_manual_val);
+int nzbget_rs_dsf_dupesearch_is_rank_only_queued_member(
+    int rank_only, int is_self, int kind, int nk_nzb_val, int dupe_mode,
+    int dm_score_val, int has_post_info, int delete_status, int ds_none_val,
+    int ds_dupe_val, int item_score, int pick_score);
+int nzbget_rs_dsf_dupesearch_calc_expand_budget_ms(
+    int budget_sec, int64_t deadline, int64_t now);
+int nzbget_rs_dsf_dupesearch_should_check_data_doomed(
+    double alive, int data_msg_ids_empty, int par_index_msg_id_empty,
+    int recovery_bytes_empty);
+int nzbget_rs_dsf_dupesearch_should_eval_par_doomed(
+    double data_alive, int64_t data_missing, int min_known);
+int nzbget_rs_dsf_dupesearch_should_stop_fetch_loop(
+    int is_stopped, int64_t now, int64_t deadline, int budget_spent);
+int nzbget_rs_dsf_dupesearch_is_other_release_rejected(
+    int lenient, int main_name_readable, int same_release);
+int nzbget_rs_dsf_dupesearch_should_reschedule_retry_or_rank(
+    int retry_discovery, int rank_incomplete, int is_stopped);
+int nzbget_rs_dsf_dupesearch_is_current_pick_eligible_for_retry(
+    int has_current, int deleting, int delete_status, int ds_none_val,
+    int has_post_info);
+int nzbget_rs_dsf_dupesearch_is_add_external_success(
+    int status, int as_success_val, int nzb_id);
+int64_t nzbget_rs_dsf_newznab_resolve_item_size(
+    int64_t attr_size, int64_t element_size);
+int nzbget_rs_dsf_newznab_should_retry_dropped_fetch(
+    int reply_ok, int reply_status, int http_stopped, int64_t now,
+    int64_t deadline);
+int64_t nzbget_rs_dsf_newznab_calc_page_deadline_ms(
+    int64_t now_ms, int64_t deadline, int64_t now_sec);
+int nzbget_rs_dsf_newznab_should_stop_pagination(
+    size_t items_count, int page_size);
+void nzbget_rs_dsf_nzb_fetcher_accum_stats(
+    int* io_ok, int* io_fetch, int* io_parse, int* io_refused,
+    int* io_relisted, int* io_listing_mismatch, int* io_budget,
+    int add_ok, int add_fetch, int add_parse, int add_refused,
+    int add_relisted, int add_listing_mismatch, int add_budget);
+int nzbget_rs_dsf_nzb_fetcher_is_cooldown_active(
+    int64_t until_sec, int64_t now_sec);
+int nzbget_rs_dsf_nzb_fetcher_can_pause_before_retry(
+    int attempt, int retries, int64_t now_sec, int retry_delay_sec,
+    int64_t deadline_sec);
+int nzbget_rs_dsf_nzb_fetcher_should_refuse_indexer(
+    int status, int indexer_empty);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

@@ -27443,6 +27443,351 @@ pub unsafe extern "C" fn nzbget_rs_dqh_donor_health_accum_verdict_counts(
     }
 }
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dsf_dupesearch_should_schedule_queue_event(
+    action: c_int,
+    ea_nzb_added: c_int,
+    ea_nzb_named: c_int,
+    has_nzb_info: c_int,
+    dupe_search_opt: c_int,
+    is_stopped: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupesearchfetcher::dsf_dupesearch_should_schedule_queue_event(
+            action,
+            ea_nzb_added,
+            ea_nzb_named,
+            has_nzb_info != 0,
+            dupe_search_opt != 0,
+            is_stopped != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dsf_dupesearch_is_recent_failed_history_item(
+    kind: c_int,
+    hk_nzb_val: c_int,
+    item_time: i64,
+    recent_cutoff: i64,
+    is_dupe_success: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupesearchfetcher::dsf_dupesearch_is_recent_failed_history_item(
+            kind,
+            hk_nzb_val,
+            item_time,
+            recent_cutoff,
+            is_dupe_success != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dsf_dupesearch_can_add_known_file(
+    kind: c_int,
+    nk_nzb_val: c_int,
+    queued_filename_empty: c_int,
+    delete_status: c_int,
+    ds_manual_val: c_int,
+) -> c_int {
+    i32::from(crate::dupesearchfetcher::dsf_dupesearch_can_add_known_file(
+        kind,
+        nk_nzb_val,
+        queued_filename_empty != 0,
+        delete_status,
+        ds_manual_val,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dsf_dupesearch_is_rank_only_queued_member(
+    rank_only: c_int,
+    is_self: c_int,
+    kind: c_int,
+    nk_nzb_val: c_int,
+    dupe_mode: c_int,
+    dm_score_val: c_int,
+    has_post_info: c_int,
+    delete_status: c_int,
+    ds_none_val: c_int,
+    ds_dupe_val: c_int,
+    item_score: c_int,
+    pick_score: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupesearchfetcher::dsf_dupesearch_is_rank_only_queued_member(
+            rank_only != 0,
+            is_self != 0,
+            kind,
+            nk_nzb_val,
+            dupe_mode,
+            dm_score_val,
+            has_post_info != 0,
+            delete_status,
+            ds_none_val,
+            ds_dupe_val,
+            item_score,
+            pick_score,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dsf_dupesearch_calc_expand_budget_ms(
+    budget_sec: c_int,
+    deadline: i64,
+    now: i64,
+) -> c_int {
+    crate::dupesearchfetcher::dsf_dupesearch_calc_expand_budget_ms(budget_sec, deadline, now)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dsf_dupesearch_should_check_data_doomed(
+    alive: f64,
+    data_msg_ids_empty: c_int,
+    par_index_msg_id_empty: c_int,
+    recovery_bytes_empty: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupesearchfetcher::dsf_dupesearch_should_check_data_doomed(
+            alive,
+            data_msg_ids_empty != 0,
+            par_index_msg_id_empty != 0,
+            recovery_bytes_empty != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dsf_dupesearch_should_eval_par_doomed(
+    data_alive: f64,
+    data_missing: i64,
+    min_known: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupesearchfetcher::dsf_dupesearch_should_eval_par_doomed(
+            data_alive,
+            data_missing,
+            min_known,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dsf_dupesearch_should_stop_fetch_loop(
+    is_stopped: c_int,
+    now: i64,
+    deadline: i64,
+    budget_spent: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupesearchfetcher::dsf_dupesearch_should_stop_fetch_loop(
+            is_stopped != 0,
+            now,
+            deadline,
+            budget_spent != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dsf_dupesearch_is_other_release_rejected(
+    lenient: c_int,
+    main_name_readable: c_int,
+    same_release: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupesearchfetcher::dsf_dupesearch_is_other_release_rejected(
+            lenient != 0,
+            main_name_readable != 0,
+            same_release != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dsf_dupesearch_should_reschedule_retry_or_rank(
+    retry_discovery: c_int,
+    rank_incomplete: c_int,
+    is_stopped: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupesearchfetcher::dsf_dupesearch_should_reschedule_retry_or_rank(
+            retry_discovery != 0,
+            rank_incomplete != 0,
+            is_stopped != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dsf_dupesearch_is_current_pick_eligible_for_retry(
+    has_current: c_int,
+    deleting: c_int,
+    delete_status: c_int,
+    ds_none_val: c_int,
+    has_post_info: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupesearchfetcher::dsf_dupesearch_is_current_pick_eligible_for_retry(
+            has_current != 0,
+            deleting != 0,
+            delete_status,
+            ds_none_val,
+            has_post_info != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dsf_dupesearch_is_add_external_success(
+    status: c_int,
+    as_success_val: c_int,
+    nzb_id: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupesearchfetcher::dsf_dupesearch_is_add_external_success(
+            status,
+            as_success_val,
+            nzb_id,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dsf_newznab_resolve_item_size(
+    attr_size: i64,
+    element_size: i64,
+) -> i64 {
+    crate::dupesearchfetcher::dsf_newznab_resolve_item_size(attr_size, element_size)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dsf_newznab_should_retry_dropped_fetch(
+    reply_ok: c_int,
+    reply_status: c_int,
+    http_stopped: c_int,
+    now: i64,
+    deadline: i64,
+) -> c_int {
+    i32::from(
+        crate::dupesearchfetcher::dsf_newznab_should_retry_dropped_fetch(
+            reply_ok != 0,
+            reply_status,
+            http_stopped != 0,
+            now,
+            deadline,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dsf_newznab_calc_page_deadline_ms(
+    now_ms: i64,
+    deadline: i64,
+    now_sec: i64,
+) -> i64 {
+    crate::dupesearchfetcher::dsf_newznab_calc_page_deadline_ms(now_ms, deadline, now_sec)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dsf_newznab_should_stop_pagination(
+    items_count: usize,
+    page_size: c_int,
+) -> c_int {
+    i32::from(crate::dupesearchfetcher::dsf_newznab_should_stop_pagination(
+        items_count,
+        page_size,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dsf_nzb_fetcher_accum_stats(
+    io_ok: *mut c_int,
+    io_fetch: *mut c_int,
+    io_parse: *mut c_int,
+    io_refused: *mut c_int,
+    io_relisted: *mut c_int,
+    io_listing_mismatch: *mut c_int,
+    io_budget: *mut c_int,
+    add_ok: c_int,
+    add_fetch: c_int,
+    add_parse: c_int,
+    add_refused: c_int,
+    add_relisted: c_int,
+    add_listing_mismatch: c_int,
+    add_budget: c_int,
+) {
+    if !io_ok.is_null()
+        && !io_fetch.is_null()
+        && !io_parse.is_null()
+        && !io_refused.is_null()
+        && !io_relisted.is_null()
+        && !io_listing_mismatch.is_null()
+        && !io_budget.is_null()
+    {
+        crate::dupesearchfetcher::dsf_nzb_fetcher_accum_stats(
+            &mut *io_ok,
+            &mut *io_fetch,
+            &mut *io_parse,
+            &mut *io_refused,
+            &mut *io_relisted,
+            &mut *io_listing_mismatch,
+            &mut *io_budget,
+            add_ok,
+            add_fetch,
+            add_parse,
+            add_refused,
+            add_relisted,
+            add_listing_mismatch,
+            add_budget,
+        );
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dsf_nzb_fetcher_is_cooldown_active(
+    until_sec: i64,
+    now_sec: i64,
+) -> c_int {
+    i32::from(crate::dupesearchfetcher::dsf_nzb_fetcher_is_cooldown_active(
+        until_sec, now_sec,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dsf_nzb_fetcher_can_pause_before_retry(
+    attempt: c_int,
+    retries: c_int,
+    now_sec: i64,
+    retry_delay_sec: c_int,
+    deadline_sec: i64,
+) -> c_int {
+    i32::from(
+        crate::dupesearchfetcher::dsf_nzb_fetcher_can_pause_before_retry(
+            attempt,
+            retries,
+            now_sec,
+            retry_delay_sec,
+            deadline_sec,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dsf_nzb_fetcher_should_refuse_indexer(
+    status: c_int,
+    indexer_empty: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupesearchfetcher::dsf_nzb_fetcher_should_refuse_indexer(
+            status,
+            indexer_empty != 0,
+        ),
+    )
+}
+
 
 
 

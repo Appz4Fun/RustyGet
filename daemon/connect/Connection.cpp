@@ -405,7 +405,11 @@ int Connection::WriteLine(const char* buffer)
 	}
 
 	int res = send(m_socket, buffer, strlen(buffer), 0);
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_dds_conn_write_line_marks_broken(res) != 0)
+#else
 	if (res <= 0)
+#endif
 	{
 		m_status = csBroken;
 	}
@@ -426,7 +430,11 @@ bool Connection::Send(const char* buffer, int size)
 	while (bytesSent < size)
 	{
 		int res = send(m_socket, buffer + bytesSent, size-bytesSent, 0);
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_dds_conn_write_line_marks_broken(res) != 0)
+#else
 		if (res <= 0)
+#endif
 		{
 			m_status = csBroken;
 			return false;

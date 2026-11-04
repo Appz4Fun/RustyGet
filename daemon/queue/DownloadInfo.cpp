@@ -548,7 +548,12 @@ void NzbInfo::AddMessage(Message::EKind kind, const char * text, bool print)
 		m_messageCount.fetch_add(1, std::memory_order_relaxed);
 	}
 
+#ifdef NZBGET_USE_RUST
+	while (nzbget_rs_dds_dl_info_should_trim_message_buffer(
+		m_messages.size(), g_Options->GetLogBuffer()) != 0)
+#else
 	while (m_messages.size() > (uint32)g_Options->GetLogBuffer())
+#endif
 	{
 		m_messages.pop_front();
 	}
@@ -1178,6 +1183,18 @@ void FileInfo::SetActiveDownloads(int activeDownloads)
 {
 	m_activeDownloads = activeDownloads;
 
+#ifdef NZBGET_USE_RUST
+	int mutexAction = nzbget_rs_dds_file_info_eval_output_mutex_action(
+		m_activeDownloads, m_outputFileMutex ? 1 : 0);
+	if (mutexAction == 1)
+	{
+		m_outputFileMutex = std::make_unique<Mutex>();
+	}
+	else if (mutexAction == 2)
+	{
+		m_outputFileMutex.reset();
+	}
+#else
 	if (m_activeDownloads > 0 && !m_outputFileMutex)
 	{
 		m_outputFileMutex = std::make_unique<Mutex>();
@@ -1186,6 +1203,7 @@ void FileInfo::SetActiveDownloads(int activeDownloads)
 	{
 		m_outputFileMutex.reset();
 	}
+#endif
 }
 
 bool FileInfo::IsHardLinked()

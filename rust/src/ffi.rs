@@ -25480,6 +25480,296 @@ pub extern "C" fn nzbget_rs_sap_binrpc_edit_queue_use_offset_str(
     )
 }
 
+// ============================================================================
+// Batch 38: dupedlstateconn (dds_*)
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dds_dupesearch_parallel_fetch_count(
+    max_donors: c_int,
+    fetch_parallel: usize,
+    remaining: usize,
+    out_parallel: *mut usize,
+) -> usize {
+    let (parallel, count) = crate::dupedlstateconn::dds_dupesearch_parallel_fetch_count(
+        max_donors,
+        fetch_parallel,
+        remaining,
+    );
+    if !out_parallel.is_null() {
+        unsafe {
+            *out_parallel = parallel;
+        }
+    }
+    count
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dds_dupesearch_slot_counts_as_used(
+    is_member: c_int,
+    is_valid: c_int,
+    score: c_int,
+    dead_score: c_int,
+    id: c_int,
+    dry_run: c_int,
+    placement_available: c_int,
+) -> c_int {
+    i32::from(crate::dupedlstateconn::dds_dupesearch_slot_counts_as_used(
+        is_member != 0,
+        is_valid != 0,
+        score,
+        dead_score,
+        id,
+        dry_run != 0,
+        placement_available != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dds_dupesearch_should_defer_checked_donor(
+    cap: c_int,
+    slots_used: c_int,
+) -> c_int {
+    i32::from(crate::dupedlstateconn::dds_dupesearch_should_defer_checked_donor(cap, slots_used))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dds_dupesearch_member_initial_score(
+    is_dead: c_int,
+    dead_score: c_int,
+) -> c_int {
+    crate::dupedlstateconn::dds_dupesearch_member_initial_score(is_dead != 0, dead_score)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dds_dupesearch_is_usable_whole_backup(
+    is_valid: c_int,
+    score: c_int,
+    dead_score: c_int,
+    alive: f64,
+    id: c_int,
+    dry_run: c_int,
+    placement_available: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupedlstateconn::dds_dupesearch_is_usable_whole_backup(
+            is_valid != 0,
+            score,
+            dead_score,
+            alive,
+            id,
+            dry_run != 0,
+            placement_available != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dds_dupesearch_eval_post_place_retry(
+    rank_only: c_int,
+    state_retryable: c_int,
+    usable_backup: c_int,
+    unchecked_members_len: usize,
+    out_retry_discovery: *mut c_int,
+    out_rank_incomplete: *mut c_int,
+) -> c_int {
+    let (retry_wanted, retry_discovery, rank_incomplete) =
+        crate::dupedlstateconn::dds_dupesearch_eval_post_place_retry(
+            rank_only != 0,
+            state_retryable != 0,
+            usable_backup != 0,
+            unchecked_members_len,
+        );
+    if !out_retry_discovery.is_null() {
+        unsafe {
+            *out_retry_discovery = i32::from(retry_discovery);
+        }
+    }
+    if !out_rank_incomplete.is_null() {
+        unsafe {
+            *out_rank_incomplete = i32::from(rank_incomplete);
+        }
+    }
+    i32::from(retry_wanted)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dds_dupesearch_needs_nzb_ext(
+    name_ptr: *const c_char,
+    name_len: usize,
+) -> c_int {
+    let slice = if name_ptr.is_null() || name_len == 0 {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(name_ptr as *const u8, name_len) }
+    };
+    i32::from(crate::dupedlstateconn::dds_dupesearch_needs_nzb_ext(slice))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dds_dupesearch_classify_pending_phase(
+    phase_ptr: *const c_char,
+    phase_len: usize,
+    out_fetched: *mut c_int,
+    out_ranking: *mut c_int,
+) {
+    let slice = if phase_ptr.is_null() || phase_len == 0 {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(phase_ptr as *const u8, phase_len) }
+    };
+    let (fetched, ranking) = crate::dupedlstateconn::dds_dupesearch_classify_pending_phase(slice);
+    if !out_fetched.is_null() {
+        unsafe {
+            *out_fetched = i32::from(fetched);
+        }
+    }
+    if !out_ranking.is_null() {
+        unsafe {
+            *out_ranking = i32::from(ranking);
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dds_diskstate_should_load_dupe_trailer(
+    format_version: c_int,
+    min_version: c_int,
+    max_version: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupedlstateconn::dds_diskstate_should_load_dupe_trailer(
+            format_version,
+            min_version,
+            max_version,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dds_diskstate_should_load_inline_dupe_extras(
+    format_version: c_int,
+) -> c_int {
+    i32::from(crate::dupedlstateconn::dds_diskstate_should_load_inline_dupe_extras(format_version))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dds_diskstate_should_discard_completed_file(
+    status: c_int,
+    cf_success: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupedlstateconn::dds_diskstate_should_discard_completed_file(status, cf_success),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dds_diskstate_history_has_nzb_info(
+    kind: c_int,
+    hk_nzb: c_int,
+    hk_url: c_int,
+) -> c_int {
+    i32::from(crate::dupedlstateconn::dds_diskstate_history_has_nzb_info(
+        kind, hk_nzb, hk_url,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dds_diskstate_should_save_updated_file_state_version(
+    last_version: c_int,
+    current_version: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupedlstateconn::dds_diskstate_should_save_updated_file_state_version(
+            last_version,
+            current_version,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dds_diskstate_select_partial_state(
+    suffix: c_char,
+    ps_completed: c_int,
+    ps_partial: c_int,
+) -> c_int {
+    crate::dupedlstateconn::dds_diskstate_select_partial_state(
+        suffix as u8,
+        ps_completed,
+        ps_partial,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dds_diskstate_validate_articles_per_day_count(
+    arr_size: u32,
+    max_size: u32,
+) -> c_int {
+    i32::from(
+        crate::dupedlstateconn::dds_diskstate_validate_articles_per_day_count(arr_size, max_size),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dds_dl_info_should_trim_message_buffer(
+    messages_len: usize,
+    log_buffer_limit: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupedlstateconn::dds_dl_info_should_trim_message_buffer(
+            messages_len,
+            log_buffer_limit,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dds_file_info_eval_output_mutex_action(
+    active_downloads: c_int,
+    has_mutex: c_int,
+) -> c_int {
+    crate::dupedlstateconn::dds_file_info_eval_output_mutex_action(
+        active_downloads,
+        has_mutex != 0,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dds_article_dl_should_join_group(
+    join_group_opt: c_int,
+    groups_empty: c_int,
+) -> c_int {
+    i32::from(crate::dupedlstateconn::dds_article_dl_should_join_group(
+        join_group_opt != 0,
+        groups_empty != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dds_conn_write_line_marks_broken(send_res: c_int) -> c_int {
+    i32::from(crate::dupedlstateconn::dds_conn_write_line_marks_broken(
+        send_res,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dds_webdl_redirect_loop_step(
+    status: c_int,
+    ad_redirect: c_int,
+    max_redirects: c_int,
+    out_too_many: *mut c_int,
+) -> c_int {
+    let (should_continue, too_many) =
+        crate::dupedlstateconn::dds_webdl_redirect_loop_step(status, ad_redirect, max_redirects);
+    if !out_too_many.is_null() {
+        unsafe {
+            *out_too_many = i32::from(too_many);
+        }
+    }
+    i32::from(should_continue)
+}
+
+
 
 
 

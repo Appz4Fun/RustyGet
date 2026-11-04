@@ -4011,6 +4011,53 @@ void nzbget_rs_sap_binrpc_log_slice_bounds(
 int nzbget_rs_sap_binrpc_edit_queue_use_offset_str(
     int action, int ea_file_move_offset, int ea_group_move_offset);
 
+/* Batch 38: dupedlstateconn (dds_*) */
+size_t nzbget_rs_dds_dupesearch_parallel_fetch_count(
+    int max_donors, size_t fetch_parallel, size_t remaining,
+    size_t* out_parallel);
+int nzbget_rs_dds_dupesearch_slot_counts_as_used(
+    int is_member, int is_valid, int score, int dead_score,
+    int id, int dry_run, int placement_available);
+int nzbget_rs_dds_dupesearch_should_defer_checked_donor(
+    int cap, int slots_used);
+int nzbget_rs_dds_dupesearch_member_initial_score(
+    int is_dead, int dead_score);
+int nzbget_rs_dds_dupesearch_is_usable_whole_backup(
+    int is_valid, int score, int dead_score, double alive,
+    int id, int dry_run, int placement_available);
+int nzbget_rs_dds_dupesearch_eval_post_place_retry(
+    int rank_only, int state_retryable, int usable_backup,
+    size_t unchecked_members_len, int* out_retry_discovery,
+    int* out_rank_incomplete);
+int nzbget_rs_dds_dupesearch_needs_nzb_ext(
+    const char* name_ptr, size_t name_len);
+void nzbget_rs_dds_dupesearch_classify_pending_phase(
+    const char* phase_ptr, size_t phase_len,
+    int* out_fetched, int* out_ranking);
+int nzbget_rs_dds_diskstate_should_load_dupe_trailer(
+    int format_version, int min_version, int max_version);
+int nzbget_rs_dds_diskstate_should_load_inline_dupe_extras(
+    int format_version);
+int nzbget_rs_dds_diskstate_should_discard_completed_file(
+    int status, int cf_success);
+int nzbget_rs_dds_diskstate_history_has_nzb_info(
+    int kind, int hk_nzb, int hk_url);
+int nzbget_rs_dds_diskstate_should_save_updated_file_state_version(
+    int last_version, int current_version);
+int nzbget_rs_dds_diskstate_select_partial_state(
+    char suffix, int ps_completed, int ps_partial);
+int nzbget_rs_dds_diskstate_validate_articles_per_day_count(
+    uint32_t arr_size, uint32_t max_size);
+int nzbget_rs_dds_dl_info_should_trim_message_buffer(
+    size_t messages_len, int log_buffer_limit);
+int nzbget_rs_dds_file_info_eval_output_mutex_action(
+    int active_downloads, int has_mutex);
+int nzbget_rs_dds_article_dl_should_join_group(
+    int join_group_opt, int groups_empty);
+int nzbget_rs_dds_conn_write_line_marks_broken(int send_res);
+int nzbget_rs_dds_webdl_redirect_loop_step(
+    int status, int ad_redirect, int max_redirects, int* out_too_many);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

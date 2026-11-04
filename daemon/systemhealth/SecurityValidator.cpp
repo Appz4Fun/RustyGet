@@ -22,9 +22,7 @@
 #include "Options.h"
 #include "Status.h"
 #include "SecurityValidator.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 namespace SystemHealth::Security
 {
@@ -64,7 +62,6 @@ Status ControlIpValidator::Validate() const
 	if (!s.IsOk()) return s;
 
 	std::string_view ip = m_options.GetControlIp();
-#ifdef NZBGET_USE_RUST
 #ifdef _WIN32
 	int isWin32 = 1;
 #else
@@ -87,29 +84,6 @@ Status ControlIpValidator::Validate() const
 							"' is set to a path, activating Unix domain socket mode");
 	}
 	return Status::Ok();
-#else
-	if (ip == "0.0.0.0")
-	{
-		return Status::Info("'" + std::string(Options::CONTROLIP) +
-							"' is '0.0.0.0', allowing connections from any IP. Client mode will "
-							"default to 127.0.0.1 to connect");
-	}
-
-	if (ip == "127.0.0.1") return Status::Ok();
-	if (!ip.empty() && (ip[0] == '/' || ip[0] == '.'))
-
-	{
-#ifdef _WIN32
-		return Status::Error("Using Unix domain sockets is not supported on Windows");
-#else
-
-		return Status::Info("'" + std::string(Options::CONTROLIP) +
-							"' is set to a path, activating Unix domain socket mode");
-#endif
-	}
-
-	return Status::Ok();
-#endif
 }
 
 Status SecureKeyValidator::Validate() const
@@ -210,7 +184,6 @@ Status AddPasswordValidator::Validate() const
 {
 	std::string_view addUser = m_options.GetAddUsername();
 	std::string_view addPass = m_options.GetAddPassword();
-#ifdef NZBGET_USE_RUST
 	int pairCheck = nzbget_rs_feh_health_validate_user_pass_pair(
 		addUser.data(), addUser.size(), addPass.data(), addPass.size());
 	if (pairCheck == 1)
@@ -226,23 +199,6 @@ Status AddPasswordValidator::Validate() const
 							"' is empty. The add-user is currently disabled");
 	}
 	return Status::Ok();
-#else
-	if (!addUser.empty() && addPass.empty())
-	{
-		return Status::Warning("'" + std::string(Options::ADDUSERNAME) + "' is enabled, but '" +
-							   std::string(Options::ADDPASSWORD) +
-							   "' is empty. This allows add-only access without a password");
-	}
-
-	if (addUser.empty() && !addPass.empty())
-	{
-		return Status::Info("'" + std::string(Options::ADDPASSWORD) + "' is set, but '" +
-							std::string(Options::ADDUSERNAME) +
-							"' is empty. The add-user is currently disabled");
-	}
-
-	return Status::Ok();
-#endif
 }
 
 Status RestrictedUsernameValidator::Validate() const
@@ -307,7 +263,6 @@ Status UpdateCheckValidator::Validate() const { return Status::Ok(); }
 
 Status FormAuthValidator::Validate() const
 {
-#ifdef NZBGET_USE_RUST
 	const bool noControl = Util::EmptyStr(m_options.GetControlPassword());
 	const bool noAdd = Util::EmptyStr(m_options.GetAddUsername());
 	const bool noRestricted = Util::EmptyStr(m_options.GetRestrictedUsername());
@@ -328,31 +283,6 @@ Status FormAuthValidator::Validate() const
 			"' is enabled but no form users are configured. Users cannot log in via forms");
 	}
 	return Status::Ok();
-#else
-	if (!m_options.GetFormAuth()) return Status::Ok();
-
-	if (!m_options.GetSecureControl())
-	{
-		return Status::Warning("'" + std::string(Options::FORMAUTH) + "' is enabled but '" +
-							   std::string(Options::SECURECONTROL) +
-							   "' is disabled. Form "
-							   "credentials may be transmitted in plaintext");
-	}
-
-	// the control user logs in by form too (with an empty username any name
-	// goes); without its password there is no login at all
-	const bool noControl = Util::EmptyStr(m_options.GetControlPassword());
-	const bool noAdd = Util::EmptyStr(m_options.GetAddUsername());
-	const bool noRestricted = Util::EmptyStr(m_options.GetRestrictedUsername());
-	if (noControl && noAdd && noRestricted)
-	{
-		return Status::Warning(
-			"'" + std::string(Options::FORMAUTH) +
-			"' is enabled but no form users are configured. Users cannot log in via forms");
-	}
-
-	return Status::Ok();
-#endif
 }
 
 Status SecureControlValidator::Validate() const

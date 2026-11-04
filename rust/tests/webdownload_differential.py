@@ -25,6 +25,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 REFERENCE = "02c80b7b"
+FALLBACK_REFERENCE = "4cf19abdb8f084a384769a15cf57e56acf86f363"
 BUILD = Path(sys.argv[1]).resolve()
 ROUNDS = sys.argv[2] if len(sys.argv) > 2 else "200000"
 
@@ -85,6 +86,11 @@ public:
 
 old_src = subprocess.check_output(["git", "show", f"{REFERENCE}:daemon/connect/WebDownloader.cpp"], cwd=ROOT, text=True)
 new_src = (ROOT / "daemon/connect/WebDownloader.cpp").read_text()
+fallback_src = (
+    new_src
+    if "#ifdef NZBGET_USE_RUST" in new_src
+    else subprocess.check_output(["git", "show", f"{FALLBACK_REFERENCE}:daemon/connect/WebDownloader.cpp"], cwd=ROOT, text=True)
+)
 
 # Use the actual C++ URL parser for the oracle. Linking every stand-in to
 # the build's Rust-backed URL class would mask shared parsing mistakes.
@@ -128,7 +134,7 @@ namespace newimpl {
 }
 namespace fallbackimpl {
 using oldimpl::URL;
-''' + STANDIN + bodies(new_src, "last") + r'''
+''' + STANDIN + bodies(fallback_src, "last") + r'''
 }
 
 static unsigned long long state = 0x9e3779b97f4a7c15ull;

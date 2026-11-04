@@ -21,9 +21,7 @@
 
 #include <boost/test/unit_test.hpp>
 #include "FeedInfo.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 BOOST_AUTO_TEST_SUITE(FeedTest)
 
@@ -100,7 +98,6 @@ BOOST_AUTO_TEST_CASE(BuildDupeKeyUsesSeriesIdentifierPriority)
 	BOOST_CHECK_EQUAL(tvmazeEpisode.GetDupeKey(), "tvmazeid=123456-S02-E69");
 }
 
-#ifdef NZBGET_USE_RUST
 BOOST_AUTO_TEST_CASE(RustDupeFeedFfiBoundaryTest)
 {
 	NzbgetRsBuf norm = nzbget_rs_df_normalize_feed_nzb_name("Release.Name.NZB");
@@ -136,6 +133,5 @@ BOOST_AUTO_TEST_CASE(RustDupeFeedFfiBoundaryTest)
 	BOOST_CHECK_EQUAL(nzbget_rs_df_parse_newznab_date("Tue, 10 Jun 2025 01:10:05+0000", 30), 1749517805LL);
 	BOOST_CHECK_EQUAL(nzbget_rs_df_extract_size_from_description("Size: 1e3 MB"), 1000LL * 1024LL * 1024LL);
 }
-#endif
 
 BOOST_AUTO_TEST_SUITE_END()

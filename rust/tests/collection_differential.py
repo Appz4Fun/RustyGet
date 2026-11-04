@@ -20,6 +20,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 REFERENCE = "c46b4523"
+FALLBACK_REFERENCE = "4cf19abdb8f084a384769a15cf57e56acf86f363"
 BUILD = Path(sys.argv[1]).resolve()
 ROUNDS = sys.argv[2] if len(sys.argv) > 2 else "3000"
 
@@ -154,7 +155,13 @@ with tempfile.TemporaryDirectory(prefix="nzbget-collection-") as temp:
     helper_sources = []
     for relative in ("daemon/util/FileTypes.cpp", "daemon/queue/Deobfuscation.cpp"):
         source = temp / Path(relative).name
-        source.write_text(legacy + (ROOT / relative).read_text())
+        live_helper = (ROOT / relative).read_text()
+        helper_src = (
+            live_helper
+            if "#ifdef NZBGET_USE_RUST" in live_helper
+            else subprocess.check_output(["git", "show", f"{FALLBACK_REFERENCE}:{relative}"], cwd=ROOT, text=True)
+        )
+        source.write_text(legacy + helper_src)
         helper_sources.append(str(source))
     (temp / "main.cpp").write_text(harness)
     binary = temp / "collection"

@@ -26,6 +26,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 REFERENCE = "02c80b7b"
+FALLBACK_REFERENCE = "4cf19abdb8f084a384769a15cf57e56acf86f363"
 BUILD = Path(sys.argv[1]).resolve()
 ROUNDS = sys.argv[2] if len(sys.argv) > 2 else "200000"
 
@@ -97,6 +98,11 @@ public:
 old_src = subprocess.check_output(["git", "show", f"{REFERENCE}:daemon/main/Options.cpp"], cwd=ROOT, text=True)
 old_src = old_src.replace("optname, SCRIPTDIR, EXTENSIONS);", "optname, SCRIPTDIR.data(), EXTENSIONS.data());")
 new_src = (ROOT / "daemon/main/Options.cpp").read_text()
+fallback_src = (
+    new_src
+    if "#ifdef NZBGET_USE_RUST" in new_src
+    else subprocess.check_output(["git", "show", f"{FALLBACK_REFERENCE}:daemon/main/Options.cpp"], cwd=ROOT, text=True)
+)
 
 flags = (BUILD / "CMakeFiles/libnzbget.dir/flags.make").read_text()
 get = lambda k: re.search(rf"^{k} = (.*)$", flags, re.M).group(1)
@@ -123,7 +129,7 @@ namespace newimpl {
 ''' + STANDIN + bodies(new_src, "first") + r'''
 }
 namespace fallbackimpl {
-''' + STANDIN + bodies(new_src, "last") + r'''
+''' + STANDIN + bodies(fallback_src, "last") + r'''
 }
 
 static unsigned long long state = 0x9e3779b97f4a7c15ull;

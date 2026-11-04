@@ -22,9 +22,7 @@
 #include "Status.h"
 #include "Validators.h"
 #include "PathsValidator.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 namespace SystemHealth::Paths
 {
@@ -240,7 +238,6 @@ Status LogFileValidator::Validate() const
 
 Status LogFileValidator::Validate(const fs::path& path, Options::EWriteLog writeLog)
 {
-#ifdef NZBGET_USE_RUST
 	switch (nzbget_rs_dur_health_classify_log_file_mode(
 		static_cast<int>(writeLog),
 		static_cast<int>(Options::EWriteLog::wlNone),
@@ -263,25 +260,6 @@ Status LogFileValidator::Validate(const fs::path& path, Options::EWriteLog write
 		default:
 			return File::Exists(path).And(&File::Writable, path);
 	}
-#else
-	if (writeLog == Options::EWriteLog::wlNone) return Status::Ok();
-
-	if (path.empty())
-	{
-		return Status::Warning("Logging is enabled, but '" + std::string(Options::LOGFILE) +
-							 "' is set to empty");
-	}
-
-	if (File::NullOrConsoleDevice(path)) return Status::Ok();
-
-	if ((writeLog == Options::EWriteLog::wlRotate || writeLog == Options::EWriteLog::wlReset) && path.has_parent_path())
-	{
-		const auto&& parent = path.parent_path();
-		return Directory::Exists(parent).And(&Directory::Writable, parent);
-	}
-
-	return File::Exists(path).And(&File::Writable, path);
-#endif
 }
 
 Status CertStoreValidator::Validate() const
@@ -306,7 +284,6 @@ Status CertStoreValidator::Validate() const
 
 Status CertStoreValidator::Validate(const fs::path& path, bool certCheck)
 {
-#ifdef NZBGET_USE_RUST
 	switch (nzbget_rs_dur_health_classify_cert_store(path.empty() ? 1 : 0, certCheck ? 1 : 0))
 	{
 		case 0:
@@ -318,14 +295,6 @@ Status CertStoreValidator::Validate(const fs::path& path, bool certCheck)
 		default:
 			break;
 	}
-#else
-	if (path.empty() && !certCheck) return Status::Ok();
-
-	if (path.empty() && certCheck)
-		return Status::Error("'" + std::string(Options::CERTCHECK) +
-							 "' requires proper configuration of option '" +
-							 std::string(Options::CERTSTORE) + "'");
-#endif
 
 	const auto file = File::Exists(path);
 	if (!file.IsError()) return File::Readable(path);
@@ -356,7 +325,6 @@ Status LockFileValidator::Validate() const
 
 Status LockFileValidator::Validate(const fs::path& path, bool daemonMode)
 {
-#ifdef NZBGET_USE_RUST
 	switch (nzbget_rs_dur_health_classify_lock_file(path.empty() ? 1 : 0, daemonMode ? 1 : 0))
 	{
 		case 0:
@@ -368,19 +336,6 @@ Status LockFileValidator::Validate(const fs::path& path, bool daemonMode)
 		default:
 			break;
 	}
-#else
-	if (!daemonMode)
-	{
-		return Status::Ok();
-	}
-
-	if (path.empty())
-	{
-		return Status::Warning(
-			"'" + std::string(Options::LOCKFILE) +
-			"' is set to empty. The check for another running instance is disabled");
-	}
-#endif
 
 	if (File::Exists(path).IsOk())
 	{

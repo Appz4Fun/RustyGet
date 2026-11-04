@@ -25,9 +25,7 @@
 #include "Options.h"
 #include "Log.h"
 #include "FileSystem.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 class ScanScriptCheck : public NzbScriptController
 {
@@ -110,11 +108,7 @@ void ScanScriptController::ExecuteScript(std::shared_ptr<const Extension::Script
 	SetInfoName(infoName);
 
 	SetLogPrefix(script->GetDisplayName());
-#ifdef NZBGET_USE_RUST
 	m_prefixLen = nzbget_rs_sfc_script_ctrl_calc_prefix_len(strlen(script->GetDisplayName()));
-#else
-	m_prefixLen = strlen(script->GetDisplayName()) + 2; // 2 = strlen(": ");
-#endif
 	PrepareParams(script->GetName());
 
 	Execute();
@@ -141,16 +135,8 @@ void ScanScriptController::PrepareParams(const char* scriptName)
 
 	// remove trailing slash
 	BString<1024> dir = m_directory;
-#ifdef NZBGET_USE_RUST
 	size_t trimmedLen = nzbget_rs_sfc_scan_script_trim_trailing_sep_len(dir, PATH_SEPARATOR);
 	dir[trimmedLen] = '\0';
-#else
-	int len = strlen(dir);
-	if (dir[len-1] == PATH_SEPARATOR)
-	{
-		dir[len-1] = '\0';
-	}
-#endif
 	SetEnvVar("NZBNP_DIRECTORY", dir);
 
 	PrepareEnvScript(m_parameters, scriptName);
@@ -160,7 +146,6 @@ void ScanScriptController::AddMessage(Message::EKind kind, const char* text)
 {
 	const char* msgText = text + m_prefixLen;
 
-#ifdef NZBGET_USE_RUST
 	NzbgetRsScanScriptCmd cmd{};
 	int cmdKind = nzbget_rs_sus_parse_scan_script_cmd(msgText, &cmd);
 	if (cmdKind != 0)
@@ -210,72 +195,4 @@ void ScanScriptController::AddMessage(Message::EKind kind, const char* text)
 		return;
 	}
 	ScriptController::AddMessage(kind, text);
-#else
-	if (!strncmp(msgText, "[NZB] ", 6))
-	{
-		debug("Command %s detected", msgText + 6);
-		if (!strncmp(msgText + 6, "NZBNAME=", 8))
-		{
-			m_nzbName = msgText + 6 + 8;
-		}
-		else if (!strncmp(msgText + 6, "CATEGORY=", 9))
-		{
-			m_category = msgText + 6 + 9;
-			g_Scanner->InitPPParameters(m_category.c_str(), m_parameters, true);
-		}
-		else if (!strncmp(msgText + 6, "NZBPR_", 6))
-		{
-			CString param = msgText + 6 + 6;
-			char* value = strchr(param, '=');
-			if (value)
-			{
-				*value = '\0';
-				m_parameters->SetParameter(param, value + 1);
-			}
-			else
-			{
-				error("Invalid command \"%s\" received from %s", msgText, GetInfoName());
-			}
-		}
-		else if (!strncmp(msgText + 6, "PRIORITY=", 9))
-		{
-			*m_priority = atoi(msgText + 6 + 9);
-		}
-		else if (!strncmp(msgText + 6, "TOP=", 4))
-		{
-			*m_addTop = atoi(msgText + 6 + 4) != 0;
-		}
-		else if (!strncmp(msgText + 6, "PAUSED=", 7))
-		{
-			*m_addPaused = atoi(msgText + 6 + 7) != 0;
-		}
-		else if (!strncmp(msgText + 6, "DUPEKEY=", 8))
-		{
-			m_dupeKey = msgText + 6 + 8;
-		}
-		else if (!strncmp(msgText + 6, "DUPESCORE=", 10))
-		{
-			*m_dupeScore = atoi(msgText + 6 + 10);
-		}
-		else if (!strncmp(msgText + 6, "DUPEMODE=", 9))
-		{
-			const char* dupeMode = msgText + 6 + 9;
-			if (strcasecmp(dupeMode, "score") && strcasecmp(dupeMode, "all") && strcasecmp(dupeMode, "force"))
-			{
-				error("Invalid value \"%s\" for command \"DUPEMODE\" received from %s", dupeMode, GetInfoName());
-				return;
-			}
-			*m_dupeMode = !strcasecmp(dupeMode, "all") ? dmAll :
-				!strcasecmp(dupeMode, "force") ? dmForce : dmScore;
-		}
-		else
-		{
-			error("Invalid command \"%s\" received from %s", msgText, GetInfoName());
-		}
-	}
-	else
-	{
-		ScriptController::AddMessage(kind, text);
-	}
-#endif
 }

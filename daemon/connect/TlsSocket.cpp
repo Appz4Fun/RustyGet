@@ -28,9 +28,7 @@
 #include "Util.h"
 #include "Options.h"
 #include <openssl/sslerr.h>
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 OpenSSL::X509StorePtr TlsSocket::m_X509Store{ nullptr, &X509_STORE_free };
 
@@ -142,12 +140,8 @@ bool TlsSocket::Start()
 	{
 		SSL_CTX_set1_cert_store(m_context.get(), m_X509Store.get());
 
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_ntw_tls_should_verify_peer(
 			1, (int)m_certVerifLevel, (int)Options::ECertVerifLevel::cvNone) != 0)
-#else
-		if (m_certVerifLevel > Options::ECertVerifLevel::cvNone)
-#endif
 		{
 			SSL_CTX_set_verify(m_context.get(), SSL_VERIFY_PEER, nullptr);
 		}
@@ -192,29 +186,20 @@ bool TlsSocket::Start()
 		if (m_deadline && m_deadline->Stopped()) { Close(); return false; }
 		ec = m_isClient ? SSL_connect(m_session.get()) : SSL_accept(m_session.get());
 	} while (ec < 1 && RetryIo(ec));
-#ifdef NZBGET_USE_RUST
 	bool shouldVerify = nzbget_rs_ntw_tls_should_verify_peer(
 		m_X509Store ? 1 : 0, (int)m_certVerifLevel, (int)Options::ECertVerifLevel::cvNone) != 0;
-#else
-	bool shouldVerify = m_X509Store && m_certVerifLevel > Options::ECertVerifLevel::cvNone;
-#endif
 	if (ec < 1)
 	{
 		if (m_deadline)
 		{
 			unsigned long code = ERR_peek_last_error();
 			int reason = ERR_GET_REASON(code);
-#ifdef NZBGET_USE_RUST
 			if (nzbget_rs_ntw_tls_is_explicit_handshake_rejection(
 				ERR_GET_LIB(code), ERR_LIB_SSL, reason,
 				SSL_R_SSLV3_ALERT_HANDSHAKE_FAILURE,
 				SSL_R_TLSV1_ALERT_PROTOCOL_VERSION,
 				SSL_R_NO_SHARED_CIPHER,
 				SSL_R_UNSUPPORTED_PROTOCOL) != 0)
-#else
-			if (ERR_GET_LIB(code) == ERR_LIB_SSL && (reason == SSL_R_SSLV3_ALERT_HANDSHAKE_FAILURE ||
-				reason == SSL_R_TLSV1_ALERT_PROTOCOL_VERSION || reason == SSL_R_NO_SHARED_CIPHER || reason == SSL_R_UNSUPPORTED_PROTOCOL))
-#endif
 				m_probeFailure = 0; // Explicit rejection of this single-suite handshake.
 		}
 		if (m_isClient && shouldVerify)
@@ -263,7 +248,6 @@ bool TlsSocket::SetCipherSuite(std::string_view cipher)
 	// A single modern suite is an exact pin. Without a protocol bound, setting
 	// only a TLS 1.2 list leaves the default TLS 1.3 suites usable (and vice versa).
 	// Empty values and custom lists retain their historical negotiation behavior.
-#ifdef NZBGET_USE_RUST
 	if (cipher.find(':') == std::string_view::npos)
 	{
 		const auto* ciphers = SSL_get_ciphers(m_session.get());
@@ -287,7 +271,6 @@ bool TlsSocket::SetCipherSuite(std::string_view cipher)
 				SSL_set_cipher_list(m_session.get(), m_cipher.c_str()) == 1;
 		}
 	}
-#endif
 
 	bool tls13 = SSL_set_ciphersuites(m_session.get(), cipher.data());
 	bool legacy = SSL_set_cipher_list(m_session.get(), cipher.data());
@@ -311,13 +294,9 @@ bool TlsSocket::ValidateCert()
 
 #ifdef HAVE_X509_CHECK_HOST
 	// hostname verification
-#ifdef NZBGET_USE_RUST
 	bool shouldCheckHost = nzbget_rs_ntw_tls_should_check_host(
 		(int)m_certVerifLevel, (int)Options::ECertVerifLevel::cvMinimal, m_host.empty() ? 1 : 0) != 0;
 	if (shouldCheckHost && !X509_check_host(cert.get(), m_host.c_str(), m_host.size(), 0, nullptr))
-#else
-	if (m_certVerifLevel > Options::ECertVerifLevel::cvMinimal && !m_host.empty() && !X509_check_host(cert.get(), m_host.c_str(), m_host.size(), 0, nullptr))
-#endif
 	{
 		const unsigned char* certHost = nullptr;
 		// Find the position of the CN field in the Subject field of the certificate
@@ -411,17 +390,12 @@ bool TlsSocket::RetryIo(int result)
 {
 	if (!m_deadline) return false;
 	int error = SSL_get_error(m_session.get(), result);
-#ifdef NZBGET_USE_RUST
 	int wantRead = 0;
 	int wantWrite = 0;
 	if (!nzbget_rs_ntw_tls_classify_want_io(
 		error, SSL_ERROR_WANT_READ, SSL_ERROR_WANT_WRITE, &wantRead, &wantWrite))
 		return false;
 	return m_deadline->Wait(m_socket, wantRead != 0, wantWrite != 0);
-#else
-	if (error != SSL_ERROR_WANT_READ && error != SSL_ERROR_WANT_WRITE) return false;
-	return m_deadline->Wait(m_socket, error == SSL_ERROR_WANT_READ, error == SSL_ERROR_WANT_WRITE);
-#endif
 }
 
 #endif

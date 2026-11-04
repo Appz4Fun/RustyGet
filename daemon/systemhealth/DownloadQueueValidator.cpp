@@ -23,9 +23,7 @@
 #include "DownloadQueueValidator.h"
 #include "Options.h"
 #include "Validators.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 namespace SystemHealth::DownloadQueue
 {
@@ -80,7 +78,6 @@ Status PropagationDelayValidator::Validate() const
 Status ArticleCacheValidator::Validate() const
 {
 	int val = m_options.GetArticleCache();
-#ifdef NZBGET_USE_RUST
 	int cacheCheck = nzbget_rs_feh_health_validate_article_cache(
 		val, sizeof(void*), m_options.GetDirectWrite() ? 1 : 0);
 	if (cacheCheck == -1)
@@ -100,41 +97,6 @@ Status ArticleCacheValidator::Validate() const
 			"A cache under 200 MB is likely too small to hold complete files, "
 			"forcing writes to the temporary directory and degrading performance");
 	return Status::Ok();
-#else
-	Status s = CheckPositiveNum(Options::ARTICLECACHE, val);
-	if (!s.IsOk()) return s;
-
-	if (val == 0)
-		return Status::Warning(
-			"'" + std::string(Options::ARTICLECACHE) +
-			"' is disabled. Enabling it is recommended to reduce disk fragmentation");
-
-	// Check for 32-bit architecture limit (1900 MB)
-	if (sizeof(void*) == 4 && val > 1900)
-		return Status::Error("'" + std::string(Options::ARTICLECACHE) +
-							 "' cannot exceed 1900 MB on 32-bit systems");
-
-	if (m_options.GetDirectWrite())
-	{
-		if (val < 50)
-		{
-			return Status::Warning("It's recommended to set '" +
-								   std::string(Options::ARTICLECACHE) + "' at least 50MB");
-		}
-		else
-		{
-			return Status::Ok();
-		}
-	}
-	else if (val < 200)
-	{
-		return Status::Warning(
-			"A cache under 200 MB is likely too small to hold complete files, "
-			"forcing writes to the temporary directory and degrading performance");
-	}
-
-	return Status::Ok();
-#endif
 }
 
 Status DirectWriteValidator::Validate() const
@@ -153,7 +115,6 @@ Status DirectWriteValidator::Validate() const
 Status WriteBufferValidator::Validate() const
 {
 	int val = m_options.GetWriteBuffer();
-#ifdef NZBGET_USE_RUST
 	int bufCheck = nzbget_rs_feh_health_validate_write_buffer(val);
 	if (bufCheck == -1)
 		return Status::Error("'" + std::string(Options::WRITEBUFFER) + "' option must not be negative");
@@ -172,35 +133,6 @@ Status WriteBufferValidator::Validate() const
 			"'" + std::string(Options::WRITEBUFFER) +
 			"' is very large (>100MB). This is per-connection and may exhaust memory");
 	return Status::Ok();
-#else
-	Status s = CheckPositiveNum(Options::WRITEBUFFER, val);
-	if (!s.IsOk()) return s;
-
-	if (val == 0)
-	{
-		return Status::Warning(
-			"'" + std::string(Options::WRITEBUFFER) +
-			"' is set to '0'. "
-			"This uses the default system buffer, which is often too small and inefficient");
-	}
-
-	if (val < 1024)
-	{
-		return Status::Warning(
-			"'" + std::string(Options::WRITEBUFFER) +
-			"' is very low. "
-			"At least 1024 KB is recommended for systems with sufficient memory");
-	}
-
-	// Warn if buffer is excessively large (e.g., > 100MB per connection)
-	if (val > 102400)
-	{
-		return Status::Warning(
-			"'" + std::string(Options::WRITEBUFFER) +
-			"' is very large (>100MB). This is per-connection and may exhaust memory");
-	}
-	return Status::Ok();
-#endif
 }
 
 Status FileNamingValidator::Validate() const

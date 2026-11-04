@@ -25,9 +25,7 @@
 #include "Validators.h"
 #include "Options.h"
 #include "Util.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 namespace SystemHealth::ExtensionScripts
 {
@@ -54,16 +52,8 @@ Status ExtensionListValidator::Validate() const
 	{
 		// Strip file extension from script name (e.g., "QueueSort.py" -> "QueueSort")
 		std::string scriptName(scriptNameRaw);
-#ifdef NZBGET_USE_RUST
 		scriptName.resize(
 			nzbget_rs_euh_health_strip_script_ext_len(scriptName.data(), scriptName.size()));
-#else
-		size_t dotPos = scriptName.find_last_of('.');
-		if (dotPos != std::string::npos && dotPos > 0)
-		{
-			scriptName.resize(dotPos);
-		}
-#endif
 
 		const auto extension =
 			m_extensionManager.FindIf([&](const auto ext) 
@@ -135,11 +125,7 @@ Status ShellOverrideValidator::Validate() const
 Status EventIntervalValidator::Validate() const
 {
 	int val = m_options.GetEventInterval();
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_euh_health_validate_event_interval(val) == 0)
-#else
-	if (val < -1)
-#endif
 	{
 		return Status::Error("'" + std::string(Options::EVENTINTERVAL) +
 							 "' cannot be less than -1");

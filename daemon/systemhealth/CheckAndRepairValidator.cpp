@@ -22,9 +22,7 @@
 #include "CheckAndRepairValidator.h"
 #include "Options.h"
 #include "Validators.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 namespace SystemHealth::CheckAndRepair
 {
@@ -118,7 +116,6 @@ Status ParQuickValidator::Validate() const
 
 Status ParBufferValidator::Validate() const
 {
-#ifdef NZBGET_USE_RUST
 	const int buffer = m_options.GetParBuffer();
 	int check = nzbget_rs_snh_health_validate_par_buffer(m_options.GetParRepair() ? 1 : 0, buffer);
 	if (check == 1) return CheckPositiveNum(Options::PARBUFFER, buffer);
@@ -130,28 +127,10 @@ Status ParBufferValidator::Validate() const
 			"Increasing to 250 MB or higher is recommended to speed up verification and repair");
 	}
 	return Status::Ok();
-#else
-	if (!m_options.GetParRepair()) return Status::Ok();
-
-	Status s = CheckPositiveNum(Options::PARBUFFER, m_options.GetParBuffer());
-	if (!s.IsOk()) return s;
-
-	const int buffer = m_options.GetParBuffer();
-	if (buffer < 250)
-	{
-		return Status::Info(
-			"'" + std::string(Options::PARBUFFER) + "' is set to " + std::to_string(buffer) +
-			" MB. "
-			"Increasing to 250 MB or higher is recommended to speed up verification and repair");
-	}
-
-	return Status::Ok();
-#endif
 }
 
 Status ParThreadsValidator::Validate() const
 {
-#ifdef NZBGET_USE_RUST
 	const int rawThreads = m_options.GetParThreads();
 	const size_t hwThreads = std::thread::hardware_concurrency();
 	int check = nzbget_rs_snh_health_validate_par_threads(
@@ -167,27 +146,6 @@ Status ParThreadsValidator::Validate() const
 							   "This may slow down repair due to excessive context switching");
 	}
 	return Status::Ok();
-#else
-	if (!m_options.GetParRepair()) return Status::Ok();
-
-	Status s = CheckPositiveNum(Options::PARTHREADS, m_options.GetParThreads());
-	if (!s.IsOk()) return s;
-
-	const size_t threads = static_cast<size_t>(m_options.GetParThreads());
-	if (threads == 0) return Status::Ok();
-
-	const size_t hwThreads = std::thread::hardware_concurrency();
-	if (hwThreads > 0 && threads > hwThreads)
-	{
-		return Status::Warning("'" + std::string(Options::PARTHREADS) + "' (" +
-							   std::to_string(threads) + ") exceeds the number of CPU cores (" +
-							   std::to_string(hwThreads) +
-							   "). "
-							   "This may slow down repair due to excessive context switching");
-	}
-
-	return Status::Ok();
-#endif
 }
 
 Status ParIgnoreExtValidator::Validate() const { return Status::Ok(); }
@@ -249,7 +207,6 @@ Status HealthCheckValidator::Validate() const
 
 Status ParTimeLimitValidator::Validate() const
 {
-#ifdef NZBGET_USE_RUST
 	const int limit = m_options.GetParTimeLimit();
 	int check = nzbget_rs_snh_health_validate_par_time_limit(m_options.GetParRepair() ? 1 : 0, limit);
 	if (check == 1) return CheckPositiveNum(Options::PARTIMELIMIT, limit);
@@ -261,24 +218,6 @@ Status ParTimeLimitValidator::Validate() const
 							"Large repairs often take longer, risking premature cancellation");
 	}
 	return Status::Ok();
-#else
-	if (!m_options.GetParRepair()) return Status::Ok();
-
-	Status s = CheckPositiveNum(Options::PARTIMELIMIT, m_options.GetParTimeLimit());
-	if (!s.IsOk()) return s;
-
-	const int limit = m_options.GetParTimeLimit();
-	if (limit == 0) return Status::Ok();
-	if (limit < 5)
-	{
-		return Status::Info("'" + std::string(Options::PARTIMELIMIT) + "' is set to " +
-							std::to_string(limit) +
-							" minutes. "
-							"Large repairs often take longer, risking premature cancellation");
-	}
-
-	return Status::Ok();
-#endif
 }
 
 Status ParPauseQueueValidator::Validate() const { return Status::Ok(); }

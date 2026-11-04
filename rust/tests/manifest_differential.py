@@ -24,11 +24,17 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 REFERENCE = "02c80b7b"
+FALLBACK_REFERENCE = "4cf19abdb8f084a384769a15cf57e56acf86f363"
 BUILD = Path(sys.argv[1]).resolve()
 ROUNDS = sys.argv[2] if len(sys.argv) > 2 else "20000"
 
 old_src = subprocess.check_output(["git", "show", f"{REFERENCE}:daemon/extension/ManifestFile.cpp"], cwd=ROOT, text=True)
 new_src = (ROOT / "daemon/extension/ManifestFile.cpp").read_text()
+fallback_src = (
+    new_src
+    if "#ifdef NZBGET_USE_RUST" in new_src
+    else subprocess.check_output(["git", "show", f"{FALLBACK_REFERENCE}:daemon/extension/ManifestFile.cpp"], cwd=ROOT, text=True)
+)
 header = (ROOT / "daemon/extension/ManifestFile.h").read_text()
 declarations = header[header.index("	bool Load(Manifest& manifest"):header.rindex("};")]
 
@@ -101,7 +107,7 @@ static void TestError(const char* format, ...)
 	logged += buf;
 	logged += "\n";
 }
-''' + wrap("oldimpl", old_src) + wrap("newimpl", new_src) + wrap("fallbackimpl", new_src, True) + r'''
+''' + wrap("oldimpl", old_src) + wrap("newimpl", new_src) + wrap("fallbackimpl", fallback_src, True) + r'''
 static unsigned long long state = 88172645463325252ull;
 static unsigned long long next() { state ^= state << 13; state ^= state >> 7; state ^= state << 17; return state; }
 static int below(int n) { return (int)(next() % n); }

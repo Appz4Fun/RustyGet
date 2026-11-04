@@ -20,9 +20,7 @@
 #include "nzbget.h"
 
 #include "Status.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 namespace SystemHealth
 {
@@ -55,21 +53,6 @@ Xml::XmlNodePtr ToXml(const Status& status)
 
 std::string_view SeverityToStr(Severity severity)
 {
-#ifdef NZBGET_USE_RUST
 	return nzbget_rs_euh_health_severity_to_str(static_cast<int>(severity));
-#else
-	switch (severity)
-	{
-		case Severity::Ok:
-			return "Ok";
-		case Severity::Info:
-			return "Info";
-		case Severity::Warning:
-			return "Warning";
-		case Severity::Error:
-			return "Error";
-	}
-	return "Ok";
-#endif
 }
 }  // namespace SystemHealth

@@ -24,9 +24,7 @@
 #include "Log.h"
 #include "Util.h"
 #include "FileSystem.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 void SchedulerScriptController::StartScript(const char* param, bool externalProcess, int taskId)
 {
@@ -73,11 +71,7 @@ void SchedulerScriptController::ExecuteScript(std::shared_ptr<const Extension::S
 	}
 
 	BString<1024> taskName(" for Task%i", m_taskId);
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_sfc_sched_script_should_format_task_suffix(m_taskId) == 0)
-#else
-	if (m_taskId == 0)
-#endif
 	{
 		taskName = "";
 	}
@@ -114,12 +108,8 @@ void SchedulerScriptController::ExecuteExternalProcess()
 	SetInfoName(infoName);
 
 	BString<1024> logPrefix = FileSystem::BaseFileName(GetScript());
-#ifdef NZBGET_USE_RUST
 	size_t stemLen = nzbget_rs_euh_sched_script_strip_ext_len(logPrefix, strlen(logPrefix));
 	logPrefix[stemLen] = '\0';
-#else
-	if (char* ext = strrchr(logPrefix, '.')) *ext = '\0'; // strip file extension
-#endif
 	SetLogPrefix(logPrefix);
 
 	Execute();

@@ -27,9 +27,7 @@
 #include "DupeArticleFallback.h"
 #include "TwinCheck.h"
 #include "Options.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 #ifndef DISABLE_PARCHECK
 #include <par2/libpar2.h>
 #include <par2/md5.h>
@@ -1459,7 +1457,7 @@ BOOST_AUTO_TEST_CASE(DupeArticleFallbackHasDonorArticlesTest)
 	BOOST_CHECK(DupeArticleFallback::HasDonorArticles(file.get()));
 }
 
-#if defined(NZBGET_USE_RUST) && !defined(DISABLE_PARCHECK)
+#ifndef DISABLE_PARCHECK
 namespace
 {
 

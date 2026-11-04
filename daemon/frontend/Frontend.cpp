@@ -31,9 +31,7 @@
 #include "RemoteClient.h"
 #include "Util.h"
 #include "StatMeter.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 Frontend::Frontend()
 {
@@ -67,11 +65,7 @@ bool Frontend::PrepareData()
 		}
 		if (!RequestMessages() || ((m_summary || m_fileList) && !RequestFileList()))
 		{
-#ifdef NZBGET_USE_RUST
 			const char* controlIp = nzbget_rs_feh_frontend_is_any_ip(g_Options->GetControlIp()) ? "127.0.0.1" : g_Options->GetControlIp();
-#else
-			const char* controlIp = !strcmp(g_Options->GetControlIp(), "0.0.0.0") ? "127.0.0.1" : g_Options->GetControlIp();
-#endif
 			printf("\nUnable to send request to nzbget-server at %s (port %i)    \n", controlIp, g_Options->GetControlPort());
 			Stop();
 			return false;
@@ -177,11 +171,7 @@ void Frontend::InitMessageBase(SNzbRequestBase* messageBase, int request, int si
 
 bool Frontend::RequestMessages()
 {
-#ifdef NZBGET_USE_RUST
 	const char* controlIp = nzbget_rs_feh_frontend_is_any_ip(g_Options->GetControlIp()) ? "127.0.0.1" : g_Options->GetControlIp();
-#else
-	const char* controlIp = !strcmp(g_Options->GetControlIp(), "0.0.0.0") ? "127.0.0.1" : g_Options->GetControlIp();
-#endif
 	Connection connection(controlIp, g_Options->GetControlPort(), false);
 
 	bool OK = connection.Connect();
@@ -193,19 +183,8 @@ bool Frontend::RequestMessages()
 	SNzbLogRequest LogRequest = {};
 	InitMessageBase(&LogRequest.m_messageBase, rrLog, sizeof(LogRequest));
 	LogRequest.m_lines = htonl(m_neededLogEntries);
-#ifdef NZBGET_USE_RUST
 	LogRequest.m_idFrom = htonl(nzbget_rs_sfw_frontend_resolve_log_id_from(
 		m_neededLogEntries, m_neededLogFirstId));
-#else
-	if (m_neededLogEntries == 0)
-	{
-		LogRequest.m_idFrom = htonl(m_neededLogFirstId > 0 ? m_neededLogFirstId : 1);
-	}
-	else
-	{
-		LogRequest.m_idFrom = 0;
-	}
-#endif
 
 	if (!connection.Send((char*)(&LogRequest), sizeof(LogRequest)))
 	{
@@ -215,18 +194,12 @@ bool Frontend::RequestMessages()
 	// Now listen for the returned log
 	SNzbLogResponse LogResponse;
 	bool read = connection.Recv((char*) &LogResponse, sizeof(LogResponse));
-#ifdef NZBGET_USE_RUST
 	if (!nzbget_rs_sfw_rpc_is_response_header_valid(
 		read ? 1 : 0,
 		ntohl(LogResponse.m_messageBase.m_signature),
 		(uint32_t)NZBMESSAGE_SIGNATURE,
 		ntohl(LogResponse.m_messageBase.m_structSize),
 		(uint32_t)sizeof(LogResponse)))
-#else
-	if (!read ||
-		(int)ntohl(LogResponse.m_messageBase.m_signature) != (int)NZBMESSAGE_SIGNATURE ||
-		ntohl(LogResponse.m_messageBase.m_structSize) != sizeof(LogResponse))
-#endif
 	{
 		return false;
 	}
@@ -263,11 +236,7 @@ bool Frontend::RequestMessages()
 
 bool Frontend::RequestFileList()
 {
-#ifdef NZBGET_USE_RUST
 	const char* controlIp = nzbget_rs_feh_frontend_is_any_ip(g_Options->GetControlIp()) ? "127.0.0.1" : g_Options->GetControlIp();
-#else
-	const char* controlIp = !strcmp(g_Options->GetControlIp(), "0.0.0.0") ? "127.0.0.1" : g_Options->GetControlIp();
-#endif
 	Connection connection(controlIp, g_Options->GetControlPort(), false);
 
 	bool OK = connection.Connect();
@@ -289,18 +258,12 @@ bool Frontend::RequestFileList()
 	// Now listen for the returned list
 	SNzbListResponse ListResponse;
 	bool read = connection.Recv((char*) &ListResponse, sizeof(ListResponse));
-#ifdef NZBGET_USE_RUST
 	if (!nzbget_rs_sfw_rpc_is_response_header_valid(
 		read ? 1 : 0,
 		ntohl(ListResponse.m_messageBase.m_signature),
 		(uint32_t)NZBMESSAGE_SIGNATURE,
 		ntohl(ListResponse.m_messageBase.m_structSize),
 		(uint32_t)sizeof(ListResponse)))
-#else
-	if (!read ||
-		(int)ntohl(ListResponse.m_messageBase.m_signature) != (int)NZBMESSAGE_SIGNATURE ||
-		ntohl(ListResponse.m_messageBase.m_structSize) != sizeof(ListResponse))
-#endif
 	{
 		return false;
 	}

@@ -38,9 +38,7 @@
 #include "NCursesFrontend.h"
 #include "Options.h"
 #include "Util.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 #ifndef WIN32
 // curses.h on Solaris declares "clear()" via DEFINE. That causes problems, because
@@ -197,30 +195,10 @@ void NCursesFrontend::Run()
 		bool updateNow = false;
 		int key = ReadConsoleKey();
 
-#ifdef NZBGET_USE_RUST
 		int updateNext = m_updateNextTime ? 1 : 0;
 		updateNow = nzbget_rs_sfw_ncurses_decide_loop_update(
 			key != READKEY_EMPTY ? 1 : 0, &updateNext, m_dataUpdatePos) != 0;
 		m_updateNextTime = updateNext != 0;
-#else
-		if (key != READKEY_EMPTY)
-		{
-			// Update now and next if a key is pressed.
-			updateNow = true;
-			m_updateNextTime = true;
-		}
-		else if (m_updateNextTime)
-		{
-			// Update due to key being pressed during previous call.
-			updateNow = true;
-			m_updateNextTime = false;
-		}
-		else if (m_dataUpdatePos <= 0)
-		{
-			updateNow = true;
-			m_updateNextTime = false;
-		}
-#endif
 
 		if (updateNow)
 		{
@@ -233,11 +211,7 @@ void NCursesFrontend::Run()
 		}
 
 		// update more often (sleep shorter) if need faster reaction on user input
-#ifdef NZBGET_USE_RUST
 		int sleepInterval = nzbget_rs_sfw_ncurses_select_sleep_interval(m_inputMode == normal ? 1 : 0);
-#else
-		int sleepInterval = m_inputMode == normal ? 100 : 10;
-#endif
 		Wait(sleepInterval);
 		m_dataUpdatePos -= sleepInterval;
 	}
@@ -320,7 +294,6 @@ void NCursesFrontend::CalcWindowSizes()
 #endif
 	// the line buffers hold MAX_SCREEN_WIDTH columns (a wider terminal wrote past
 	// them), and messages wrap at the width less 8 (a divisor of zero at 8)
-#ifdef NZBGET_USE_RUST
 	int queueSize = CalcQueueSize();
 	int qh = 0, qch = 0, mtop = 0, mh = 0, mch = 0;
 	nzbget_rs_feh_ncurses_calc_window_sizes(
@@ -344,43 +317,6 @@ void NCursesFrontend::CalcWindowSizes()
 	m_messagesWinTop = mtop;
 	m_messagesWinHeight = mh;
 	m_messagesWinClientHeight = mch;
-#else
-	nrColumns = std::clamp(nrColumns, 9, MAX_SCREEN_WIDTH);
-	if (nrRows != m_screenHeight || nrColumns != m_screenWidth)
-	{
-#ifdef WIN32
-		int screenAreaSize = nrRows * nrColumns;
-		m_screenBuffer.resize(screenAreaSize);
-		m_oldScreenBuffer.resize(screenAreaSize);
-#else
-		curses_clear();
-#endif
-		m_screenHeight = nrRows;
-		m_screenWidth = nrColumns;
-	}
-
-	int queueSize = CalcQueueSize();
-
-	m_queueWinTop = 0;
-	m_queueWinHeight = (m_screenHeight - 2) * m_queueWindowPercentage / 100;
-	if (m_queueWinHeight - 1 > queueSize)
-	{
-		m_queueWinHeight = queueSize > 0 ? queueSize + 1 : 1 + 1;
-	}
-	m_queueWinClientHeight = m_queueWinHeight - 1;
-	if (m_queueWinClientHeight < 0)
-	{
-		m_queueWinClientHeight = 0;
-	}
-
-	m_messagesWinTop = m_queueWinTop + m_queueWinHeight;
-	m_messagesWinHeight = m_screenHeight - m_queueWinHeight - 2;
-	m_messagesWinClientHeight = m_messagesWinHeight - 1;
-	if (m_messagesWinClientHeight < 0)
-	{
-		m_messagesWinClientHeight = 0;
-	}
-#endif
 }
 
 int NCursesFrontend::CalcQueueSize()
@@ -576,28 +512,10 @@ int NCursesFrontend::PrintMessage(Message& msg, int row, int maxLines)
 	}
 
 	// replace some special characters with spaces
-#ifdef NZBGET_USE_RUST
 	int len = (int)strlen(text);
 	nzbget_rs_ccm_ncurses_sanitize_message_chars((char*)text, (size_t)len);
 	int winWidth = 0, msgLines = 0;
 	nzbget_rs_ccm_ncurses_calc_msg_lines(len, m_screenWidth, &winWidth, &msgLines);
-#else
-	for (char* p = (char*)text; *p; p++)
-	{
-		if (*p == '\n' || *p == '\r' || *p == '\b')
-		{
-			*p = ' ';
-		}
-	}
-
-	int len = strlen(text);
-	int winWidth = m_screenWidth - 8;
-	int msgLines = len / winWidth;
-	if (len % winWidth > 0)
-	{
-		msgLines++;
-	}
-#endif
 
 	int lines = 0;
 	for (int i = msgLines - 1; i >= 0 && lines < maxLines; i--)
@@ -632,25 +550,15 @@ void NCursesFrontend::PrintStatus()
 	if (currentDownloadSpeed > 0 && !m_pauseDownload)
 	{
 		int64 remain_sec = m_remainingSize / currentDownloadSpeed;
-#ifdef NZBGET_USE_RUST
 		int h = 0, m = 0, s = 0;
 		nzbget_rs_ccm_remote_client_calc_hms(remain_sec, &h, &m, &s);
-#else
-		int h = (int)(remain_sec / 3600);
-		int m = (int)((remain_sec % 3600) / 60);
-		int s = (int)(remain_sec % 60);
-#endif
 		timeString.Format(" (~ %.2d:%.2d:%.2d)", h, m, s);
 	}
 
 	BString<100> downloadLimit;
 	if (m_downloadLimit > 0)
 	{
-#ifdef NZBGET_USE_RUST
 		downloadLimit.Format(", Limit %i KB/s", nzbget_rs_sfw_frontend_calc_limit_kb(m_downloadLimit));
-#else
-		downloadLimit.Format(", Limit %i KB/s", m_downloadLimit / 1024);
-#endif
 	}
 
 	BString<100> postStatus;
@@ -664,12 +572,8 @@ void NCursesFrontend::PrintStatus()
 	BString<1024> status(" %d threads, %s, %s remaining%s%s%s%s, Avg. %s",
 		m_threadCount, *Util::FormatSpeed(currentDownloadSpeed),
 		*Util::FormatSize(m_remainingSize),
-#ifdef NZBGET_USE_RUST
 		*timeString, *postStatus,
 		nzbget_rs_sfw_frontend_select_pause_status_suffix(m_pauseDownload ? 1 : 0, m_standBy ? 1 : 0),
-#else
-		*timeString, *postStatus, m_pauseDownload ? (m_standBy ? ", Paused" : ", Pausing") : "",
-#endif
 		*downloadLimit, *Util::FormatSpeed(averageSpeed));
 	PlotLine(status, statusRow, 0, NCURSES_COLORPAIR_STATUS);
 }
@@ -682,11 +586,7 @@ void NCursesFrontend::PrintKeyInputBar()
 	if (!m_hint.empty())
 	{
 		time_t time = Util::CurrentTime();
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_sfw_ncurses_is_hint_active((int64_t)time, (int64_t)m_startHint) != 0)
-#else
-		if (time - m_startHint < 5)
-#endif
 		{
 			PlotLine(m_hint.c_str(), inputBarRow, 0, NCURSES_COLORPAIR_HINT);
 			return;
@@ -700,45 +600,14 @@ void NCursesFrontend::PrintKeyInputBar()
 	switch (m_inputMode)
 	{
 	case normal:
-#ifdef NZBGET_USE_RUST
 		PlotLine(
 			nzbget_rs_sfw_ncurses_select_normal_keybar(m_groupFiles ? 1 : 0),
 			inputBarRow, 0, NCURSES_COLORPAIR_KEYBAR);
-#else
-		if (m_groupFiles)
-		{
-			PlotLine("(Q)uit | (E)dit | (P)ause | (R)ate | (W)indow | (G)roup | (T)ime", inputBarRow, 0, NCURSES_COLORPAIR_KEYBAR);
-		}
-		else
-		{
-			PlotLine("(Q)uit | (E)dit | (P)ause | (R)ate | (W)indow | (G)roup | (T)ime | n(Z)b", inputBarRow, 0, NCURSES_COLORPAIR_KEYBAR);
-		}
-#endif
 		break;
 	case editQueue:
 	{
-#ifdef NZBGET_USE_RUST
 		const char* status = nzbget_rs_ccm_ncurses_select_edit_queue_keybar(
 			m_selectedQueueEntry, queueSize);
-#else
-		const char* status = nullptr;
-		if (m_selectedQueueEntry > 0 && queueSize > 1 && m_selectedQueueEntry == queueSize - 1)
-		{
-			status = "(Q)uit | (E)xit | (P)ause | (D)elete | (U)p/(T)op";
-		}
-		else if (queueSize > 1 && m_selectedQueueEntry == 0)
-		{
-			status = "(Q)uit | (E)xit | (P)ause | (D)elete | dow(N)/(B)ottom";
-		}
-		else if (queueSize > 1)
-		{
-			status = "(Q)uit | (E)xit | (P)ause | (D)elete | (U)p/dow(N)/(T)op/(B)ottom";
-		}
-		else
-		{
-			status = "(Q)uit | (E)xit | (P)ause | (D)elete";
-		}
-#endif
 
 		PlotLine(status, inputBarRow, 0, NCURSES_COLORPAIR_KEYBAR);
 		break;
@@ -824,30 +693,12 @@ void NCursesFrontend::PrintFileQueue()
 void NCursesFrontend::PrintFilename(FileInfo * fileInfo, int row, bool selected)
 {
 	int color = 0;
-#ifdef NZBGET_USE_RUST
 	char chB1 = '[', chB2 = ']';
 	color = nzbget_rs_sfw_ncurses_select_row_highlight(
 		m_inputMode == editQueue ? 1 : 0, selected ? 1 : 0, m_useColor ? 1 : 0,
 		NCURSES_COLORPAIR_TEXTHIGHL, NCURSES_COLORPAIR_TEXT, &chB1, &chB2);
 	const char* Brace1 = chB1 == '<' ? "<" : "[";
 	const char* Brace2 = chB2 == '>' ? ">" : "]";
-#else
-	const char* Brace1 = "[";
-	const char* Brace2 = "]";
-	if (m_inputMode == editQueue && selected)
-	{
-		color = NCURSES_COLORPAIR_TEXTHIGHL;
-		if (!m_useColor)
-		{
-			Brace1 = "<";
-			Brace2 = ">";
-		}
-	}
-	else
-	{
-		color = NCURSES_COLORPAIR_TEXT;
-	}
-#endif
 
 	const char* downloading = "";
 	if (fileInfo->GetActiveDownloads() > 0)
@@ -862,19 +713,12 @@ void NCursesFrontend::PrintFilename(FileInfo * fileInfo, int row, bool selected)
 	}
 
 	BString<100> completed;
-#ifdef NZBGET_USE_RUST
 	int completedPct = nzbget_rs_ccm_remote_client_calc_file_completed_pct(
 		fileInfo->GetRemainingSize(), fileInfo->GetSize());
 	if (completedPct >= 0)
 	{
 		completed.Format(", %i%%", completedPct);
 	}
-#else
-	if (fileInfo->GetRemainingSize() < fileInfo->GetSize())
-	{
-		completed.Format(", %i%%", (int)(100 - fileInfo->GetRemainingSize() * 100 / fileInfo->GetSize()));
-	}
-#endif
 
 	BString<1024> nzbNiceName;
 	if (m_showNzbname)
@@ -897,15 +741,8 @@ void NCursesFrontend::PrintTopHeader(char* header, int lineNr, bool upTime)
 	int charsLeft = m_screenWidth - headerLen - 2;
 
 	int time = upTime ? m_upTimeSec : m_dnTimeSec;
-#ifdef NZBGET_USE_RUST
 	int d = 0, h = 0, m = 0, s = 0;
 	nzbget_rs_feh_ncurses_calc_top_header_time(time, &d, &h, &m, &s);
-#else
-	int d = time / 3600 / 24;
-	int h = (time % (3600 * 24)) / 3600;
-	int m = (time % 3600) / 60;
-	int s = time % 60;
-#endif
 	BString<100> timeStr;
 
 	if (d == 0)
@@ -936,7 +773,6 @@ void NCursesFrontend::PrintTopHeader(char* header, int lineNr, bool upTime)
 	int shortCapLen = strlen(shortCap);
 	int longCapLen = strlen(longCap);
 
-#ifdef NZBGET_USE_RUST
 	int capMode = nzbget_rs_sfw_ncurses_select_top_header_caption(
 		charsLeft, timeLen, longCapLen, shortCapLen);
 	if (capMode == 2)
@@ -951,20 +787,6 @@ void NCursesFrontend::PrintTopHeader(char* header, int lineNr, bool upTime)
 	{
 		snprintf(buffer + m_screenWidth - timeLen, MAX_SCREEN_WIDTH - (m_screenWidth - timeLen), "%s", *timeStr);
 	}
-#else
-	if (charsLeft - timeLen - longCapLen >= 0)
-	{
-		snprintf(buffer + m_screenWidth - timeLen - longCapLen, MAX_SCREEN_WIDTH - (m_screenWidth - timeLen - longCapLen), "%s%s", longCap, *timeStr);
-	}
-	else if (charsLeft - timeLen - shortCapLen >= 0)
-	{
-		snprintf(buffer + m_screenWidth - timeLen - shortCapLen, MAX_SCREEN_WIDTH - (m_screenWidth - timeLen - shortCapLen), "%s%s", shortCap, *timeStr);
-	}
-	else if (charsLeft - timeLen >= 0)
-	{
-		snprintf(buffer + m_screenWidth - timeLen, MAX_SCREEN_WIDTH - (m_screenWidth - timeLen), "%s", *timeStr);
-	}
-#endif
 
 	PlotLine(buffer, lineNr, 0, NCURSES_COLORPAIR_INFOLINE);
 }
@@ -1057,19 +879,8 @@ void NCursesFrontend::PrintGroupname(NzbInfo* nzbInfo, int row, bool selected, b
 	// [1-2] Nzb-name             999/999 999.99 MB 999.99 MB 00:00:00
 
 	int nameLen = 0;
-#ifdef NZBGET_USE_RUST
 	nameLen = nzbget_rs_ccm_ncurses_calc_group_name_len(
 		m_screenWidth, calcColWidth ? 1 : 0, m_colWidthFiles, m_colWidthTotal, m_colWidthLeft);
-#else
-	if (calcColWidth)
-	{
-		nameLen = m_screenWidth - 1 - 9 - 11 - 11 - 9;
-	}
-	else
-	{
-		nameLen = m_screenWidth - 1 - m_colWidthFiles - 2 - m_colWidthTotal - 2 - m_colWidthLeft - 2 - 9;
-	}
-#endif
 
 	BString<1024> buffer;
 
@@ -1092,7 +903,6 @@ void NCursesFrontend::PrintGroupname(NzbInfo* nzbInfo, int row, bool selected, b
 			time = "[paused]";
 			remaining = Util::FormatSize(nzbInfo->GetRemainingSize());
 		}
-#ifdef NZBGET_USE_RUST
 		else
 		{
 			int h = 0, m = 0, s = 0;
@@ -1103,23 +913,6 @@ void NCursesFrontend::PrintGroupname(NzbInfo* nzbInfo, int row, bool selected, b
 				time.Format("%.2d:%.2d:%.2d", h, m, s);
 			}
 		}
-#else
-		else if (currentDownloadSpeed > 0 && !m_pauseDownload)
-		{
-			int64 remain_sec = unpausedRemainingSize / currentDownloadSpeed;
-			int h = (int)(remain_sec / 3600);
-			int m = (int)((remain_sec % 3600) / 60);
-			int s = (int)(remain_sec % 60);
-			if (h < 100)
-			{
-				time.Format("%.2d:%.2d:%.2d", h, m, s);
-			}
-			else
-			{
-				time.Format("99:99:99");
-			}
-		}
-#endif
 
 		if (calcColWidth)
 		{
@@ -1163,33 +956,12 @@ bool NCursesFrontend::EditQueue(DownloadQueue::EEditAction action, int offset)
 		{
 			std::unique_ptr<NzbInfo>& nzbInfo = downloadQueue->GetQueue()->at(m_selectedQueueEntry);
 			ID = nzbInfo->GetId();
-#ifdef NZBGET_USE_RUST
 			int newLastPausePars = m_lastPausePars ? 1 : 0;
 			action = (DownloadQueue::EEditAction)nzbget_rs_feh_ncurses_resolve_group_pause_action(
 				(int)action, nzbInfo->GetRemainingSize(), nzbInfo->GetPausedSize(),
 				nzbInfo->GetRemainingParCount(), m_lastPausePars ? 1 : 0,
 				m_lastEditEntry, m_selectedQueueEntry, &newLastPausePars);
 			m_lastPausePars = newLastPausePars != 0;
-#else
-			if (action == DownloadQueue::eaFilePause)
-			{
-				if (nzbInfo->GetRemainingSize() == nzbInfo->GetPausedSize())
-				{
-					action = DownloadQueue::eaFileResume;
-				}
-				else if (nzbInfo->GetPausedSize() == 0 && (nzbInfo->GetRemainingParCount() > 0) &&
-					!(m_lastPausePars && m_lastEditEntry == m_selectedQueueEntry))
-				{
-					action = DownloadQueue::eaFilePauseExtraPars;
-					m_lastPausePars = true;
-				}
-				else
-				{
-					action = DownloadQueue::eaFilePause;
-					m_lastPausePars = false;
-				}
-			}
-#endif
 		}
 
 		// map file-edit-actions to group-edit-actions
@@ -1244,45 +1016,9 @@ void NCursesFrontend::SetCurrentQueueEntry(int entry)
 {
 	int queueSize = CalcQueueSize();
 
-#ifdef NZBGET_USE_RUST
 	nzbget_rs_feh_ncurses_calc_scroll_and_selection(
 		entry, queueSize, m_queueScrollOffset, m_queueWinClientHeight,
 		&m_selectedQueueEntry, &m_queueScrollOffset);
-#else
-	if (entry < 0)
-	{
-		entry = 0;
-	}
-	else if (entry > queueSize - 1)
-	{
-		entry = queueSize - 1;
-	}
-
-	if (entry > m_queueScrollOffset + m_queueWinClientHeight ||
-	   entry < m_queueScrollOffset - m_queueWinClientHeight)
-	{
-		m_queueScrollOffset = entry - m_queueWinClientHeight / 2;
-	}
-	else if (entry < m_queueScrollOffset)
-	{
-		m_queueScrollOffset -= m_queueWinClientHeight;
-	}
-	else if (entry >= m_queueScrollOffset + m_queueWinClientHeight)
-	{
-		m_queueScrollOffset += m_queueWinClientHeight;
-	}
-
-	if (m_queueScrollOffset > queueSize - m_queueWinClientHeight)
-	{
-		m_queueScrollOffset = queueSize - m_queueWinClientHeight;
-	}
-	if (m_queueScrollOffset < 0)
-	{
-		m_queueScrollOffset = 0;
-	}
-
-	m_selectedQueueEntry = entry;
-#endif
 }
 
 
@@ -1312,23 +1048,8 @@ void NCursesFrontend::UpdateInput(int initialKey)
 				break;
 			case 'w':
 				// swicth window sizes
-#ifdef NZBGET_USE_RUST
 				m_queueWindowPercentage = nzbget_rs_ccm_ncurses_next_queue_win_pct(
 					m_queueWindowPercentage, m_inputMode == editQueue ? 1 : 0);
-#else
-				if (m_queueWindowPercentage == 50)
-				{
-					m_queueWindowPercentage = 100;
-				}
-				else if (m_queueWindowPercentage == 100 && m_inputMode != editQueue)
-				{
-					m_queueWindowPercentage = 0;
-				}
-				else
-				{
-					m_queueWindowPercentage = 50;
-				}
-#endif
 				CalcWindowSizes();
 				SetCurrentQueueEntry(m_selectedQueueEntry);
 				break;
@@ -1480,7 +1201,6 @@ void NCursesFrontend::UpdateInput(int initialKey)
 		// Edit download rate input mode
 		if (m_inputMode == downloadRate)
 		{
-#ifdef NZBGET_USE_RUST
 			int rateStep = nzbget_rs_feh_ncurses_step_rate_input(
 				key, KEY_BACKSPACE, &m_inputNumberIndex, &m_inputValue);
 			if (rateStep == 1)
@@ -1494,35 +1214,6 @@ void NCursesFrontend::UpdateInput(int initialKey)
 				m_inputMode = normal;
 				return;
 			}
-#else
-			// Numbers
-			if (m_inputNumberIndex < 5 && key >= '0' && key <= '9')
-			{
-				m_inputValue = (m_inputValue * 10) + (key - '0');
-				m_inputNumberIndex++;
-			}
-			// Enter
-			else if (key == 10 || key == 13)
-			{
-				ServerSetDownloadRate(m_inputValue * 1024);
-				m_inputMode = normal;
-				return;
-			}
-			// Escape
-			else if (key == 27)
-			{
-				m_inputMode = normal;
-				return;
-			}
-			// Backspace
-			else if (m_inputNumberIndex > 0 && key == KEY_BACKSPACE)
-			{
-				int remain = m_inputValue % 10;
-
-				m_inputValue = (m_inputValue - remain) / 10;
-				m_inputNumberIndex--;
-			}
-#endif
 		}
 
 		key = ReadConsoleKey();

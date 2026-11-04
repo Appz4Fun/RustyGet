@@ -23,6 +23,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 REFERENCE = "02c80b7b"
+FALLBACK_REFERENCE = "4cf19abdb8f084a384769a15cf57e56acf86f363"
 BUILD = Path(sys.argv[1]).resolve()
 ROUNDS = sys.argv[2] if len(sys.argv) > 2 else "100000"
 # Also exercise the HAVE_GETOPT_LONG=0 build, against the same host libc.
@@ -42,6 +43,16 @@ def renamed(src, hdr, name, fallback=False):
 
 old_src = subprocess.check_output(["git", "show", f"{REFERENCE}:daemon/main/CommandLineParser.cpp"], cwd=ROOT, text=True)
 new_src = (ROOT / "daemon/main/CommandLineParser.cpp").read_text()
+fallback_src = (
+    new_src
+    if "#ifdef NZBGET_USE_RUST" in new_src
+    else subprocess.check_output(["git", "show", f"{FALLBACK_REFERENCE}:daemon/main/CommandLineParser.cpp"], cwd=ROOT, text=True)
+)
+fallback_header = (
+    header
+    if "#ifdef NZBGET_USE_RUST" in header
+    else subprocess.check_output(["git", "show", f"{FALLBACK_REFERENCE}:daemon/main/CommandLineParser.h"], cwd=ROOT, text=True)
+)
 
 flags = (BUILD / "CMakeFiles/libnzbget.dir/flags.make").read_text()
 get = lambda k: re.search(rf"^{k} = (.*)$", flags, re.M).group(1)
@@ -57,7 +68,7 @@ tests_main = (ROOT / "tests/main.cpp").read_text()
 globals_block = tests_main[tests_main.index('#include "ServerPool.h"'):tests_main.index("void ExitProc(){}") + len("void ExitProc(){}")]
 
 decls = "\n".join(renamed("", h, n)[0:0] + h.replace("private:", "public:").replace("COMMANDLINEPARSER_H", n.upper() + "_H").replace("CommandLineParser", n)
-                  for h, n in ((old_header, "OldCommandLineParser"), (header, "FallbackCommandLineParser")))
+                  for h, n in ((old_header, "OldCommandLineParser"), (fallback_header, "FallbackCommandLineParser")))
 rust_decl = header.replace("private:", "public:").replace("COMMANDLINEPARSER_H", "RUSTCOMMANDLINEPARSER_H").replace("CommandLineParser", "RustCommandLineParser")
 
 main = r'''
@@ -283,7 +294,7 @@ void TestSinkExceptions()
     # application's CommandLineParser.o from libnzbget, causing duplicate symbols.
     (temp / "new.cpp").write_text(renamed(instrumented, header, "RustCommandLineParser"))
     (temp / "old.cpp").write_text(renamed(old_src, old_header, "OldCommandLineParser"))
-    (temp / "fallback.cpp").write_text(renamed(new_src, header, "FallbackCommandLineParser", fallback=True))
+    (temp / "fallback.cpp").write_text(renamed(fallback_src, fallback_header, "FallbackCommandLineParser", fallback=True))
     binary = temp / "cmdline"
     # -R nan exercises the host's float-to-int conversion on purpose (see the
     # comment at the sink); clang's "undefined" group includes float-cast-overflow.

@@ -26,7 +26,6 @@
 
 BOOST_AUTO_TEST_SUITE(FeedTest)
 
-#ifdef NZBGET_USE_RUST
 BOOST_AUTO_TEST_CASE(FeedFilterAgeOverflow)
 {
 	if (std::numeric_limits<time_t>::is_signed)
@@ -50,7 +49,6 @@ BOOST_AUTO_TEST_CASE(FeedFilterOptionOverflow)
 	BOOST_CHECK_EQUAL(item.GetPriority(), (-2147483647 - 1));
 	BOOST_CHECK_EQUAL(item.GetDupeScore(), 2147483647);
 }
-#endif
 
 void TestFilter(FeedItemInfo* feedItemInfo, const char* filterDef, FeedItemInfo::EMatchStatus expectedMatch)
 {

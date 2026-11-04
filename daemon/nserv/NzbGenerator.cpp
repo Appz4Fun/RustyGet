@@ -23,9 +23,7 @@
 #include "Util.h"
 #include "FileSystem.h"
 #include "Log.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 void NzbGenerator::Execute()
 {
@@ -36,20 +34,11 @@ void NzbGenerator::Execute()
 	{
 		BString<1024> fullFilename("%s%c%s", *m_dataDir, PATH_SEPARATOR, filename);
 
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_snh_nzbgen_is_nzb_file(filename))
 		{
 			// skip nzb-files
 			continue;
 		}
-#else
-		int len = strlen(filename);
-		if (len > 4 && !strcasecmp(filename + len - 4, ".nzb"))
-		{
-			// skip nzb-files
-			continue;
-		}
-#endif
 
 		GenerateNzb(fullFilename);
 	}
@@ -116,12 +105,8 @@ void NzbGenerator::AppendFile(DiskFile& outfile, const char* filename, const cha
 	int64 fileSize = FileSystem::FileSize(filename);
 	time_t timestamp = Util::CurrentTime();
 
-#ifdef NZBGET_USE_RUST
 	int segmentCount = 0;
 	nzbget_rs_snh_nzbgen_calc_segment_count_and_size(fileSize, m_segmentSize, 0, &segmentCount, nullptr);
-#else
-	int segmentCount = (int)((fileSize + m_segmentSize - 1) / m_segmentSize);
-#endif
 
 	outfile.Print("<file poster=\"nserv\" date=\"%i\" subject=\"&quot;%s&quot; yEnc (1/%i)\">\n",
 		(int)timestamp, FileSystem::BaseFileName(filename), segmentCount);
@@ -133,12 +118,8 @@ void NzbGenerator::AppendFile(DiskFile& outfile, const char* filename, const cha
 	int64 segOffset = 0;
 	for (int segno = 1; segno <= segmentCount; segno++)
 	{
-#ifdef NZBGET_USE_RUST
 		int segSize = 0;
 		nzbget_rs_snh_nzbgen_calc_segment_count_and_size(fileSize, m_segmentSize, segOffset, nullptr, &segSize);
-#else
-		int segSize = (int)(segOffset + m_segmentSize < fileSize ? m_segmentSize : fileSize - segOffset);
-#endif
 		outfile.Print("<segment bytes=\"%i\" number=\"%i\">%s%s%s?%i=%" PRIi64 ":%i</segment>\n",
 			segSize, segno,
 			relativePath ? relativePath : "",

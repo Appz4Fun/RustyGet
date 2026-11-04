@@ -26,6 +26,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 REFERENCE = "02c80b7b"
+FALLBACK_REFERENCE = "4cf19abdb8f084a384769a15cf57e56acf86f363"
 BUILD = Path(sys.argv[1]).resolve()
 ROUNDS = sys.argv[2] if len(sys.argv) > 2 else "1500"
 
@@ -33,6 +34,11 @@ old_cpp = subprocess.check_output(["git", "show", f"{REFERENCE}:daemon/postproce
 old_h = subprocess.check_output(["git", "show", f"{REFERENCE}:daemon/postprocess/ParRenamer.h"], cwd=ROOT, text=True)
 new_cpp = (ROOT / "daemon/postprocess/ParRenamer.cpp").read_text()
 new_h = (ROOT / "daemon/postprocess/ParRenamer.h").read_text()
+fallback_cpp = (
+    new_cpp
+    if "#ifdef NZBGET_USE_RUST" in new_cpp
+    else subprocess.check_output(["git", "show", f"{FALLBACK_REFERENCE}:daemon/postprocess/ParRenamer.cpp"], cwd=ROOT, text=True)
+)
 
 
 def impl(name, header, cpp, fallback=False):
@@ -82,7 +88,7 @@ static void BeforeTranslate()
 	if (translateAfter == 0) throw std::runtime_error("translation failed");
 	if (translateAfter > 0) --translateAfter;
 }
-''' + globals_block + impl("oldimpl", old_h, old_cpp) + impl("newimpl", new_h, new_cpp) + impl("fallbackimpl", new_h, new_cpp, True) + r'''
+''' + globals_block + impl("oldimpl", old_h, old_cpp) + impl("newimpl", new_h, new_cpp) + impl("fallbackimpl", new_h, fallback_cpp, True) + r'''
 namespace stdfs = std::filesystem;
 
 struct Plan

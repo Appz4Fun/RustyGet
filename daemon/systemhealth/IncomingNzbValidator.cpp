@@ -21,9 +21,7 @@
 #include "nzbget.h"
 
 #include "IncomingNzbValidator.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 namespace SystemHealth::IncomingNzb
 {
@@ -50,7 +48,6 @@ Status AppendCategoryDirValidator::Validate() const
 Status NzbDirIntervalValidator::Validate() const
 {
 	int interval = m_options.GetNzbDirInterval();
-#ifdef NZBGET_USE_RUST
 	switch (nzbget_rs_euh_health_validate_nzb_dir_interval(interval))
 	{
 		case 1:
@@ -67,28 +64,11 @@ Status NzbDirIntervalValidator::Validate() const
 		default:
 			return Status::Ok();
 	}
-#else
-	Status s = CheckPositiveNum(Options::NZBDIRINTERVAL, interval);
-	if (!s.IsOk()) return s;
-
-	if (interval == 0) return Status::Warning("Automatic NZB directory scanning is disabled");
-
-	if (interval < 3)
-	{
-		std::stringstream ss;
-		ss << "'" << Options::NZBDIRINTERVAL << "' is set to " << interval << " seconds. "
-		   << "Very frequent scanning may cause high CPU/Disk usage";
-		return Status::Warning(ss.str());
-	}
-
-	return Status::Ok();
-#endif
 }
 
 Status NzbDirFileAgeValidator::Validate() const
 {
 	int age = m_options.GetNzbDirFileAge();
-#ifdef NZBGET_USE_RUST
 	switch (nzbget_rs_euh_health_validate_nzb_dir_file_age(age))
 	{
 		case 1:
@@ -103,20 +83,6 @@ Status NzbDirFileAgeValidator::Validate() const
 		default:
 			return Status::Ok();
 	}
-#else
-	Status s = CheckPositiveNum(Options::NZBDIRFILEAGE, age);
-	if (!s.IsOk()) return s;
-
-	if (age > 3600)	 // 1 Hour
-	{
-		std::stringstream ss;
-		ss << "'" << Options::NZBDIRFILEAGE << "' is set to " << age << " seconds (> 1 hour). "
-		   << "New NZB files will not be picked up until they are at least this old";
-		return Status::Warning(ss.str());
-	}
-
-	return Status::Ok();
-#endif
 }
 
 Status NzbDirArchiveScanValidator::Validate() const
@@ -152,7 +118,6 @@ Status DupeCheckValidator::Validate() const
 
 Status DupeSearchValidator::Validate() const
 {
-#ifdef NZBGET_USE_RUST
 	switch (nzbget_rs_euh_health_validate_dupe_search(
 		m_options.GetDupeSearch() ? 1 : 0,
 		m_options.GetDupeCheck() ? 1 : 0,
@@ -168,23 +133,5 @@ Status DupeSearchValidator::Validate() const
 		default:
 			return Status::Ok();
 	}
-#else
-	if (!m_options.GetDupeSearch()) return Status::Ok();
-
-	if (!m_options.GetDupeCheck())
-	{
-		return Status::Warning("'DupeSearch' is enabled while '" + std::string(Options::DUPECHECK) +
-			"' is disabled. Nothing is searched: duplicates need duplicate handling");
-	}
-
-	if (m_options.GetHealthCheck() != Options::EHealthCheck::hcDupe)
-	{
-		return Status::Warning("'DupeSearch' is enabled while '" + std::string(Options::HEALTHCHECK) +
-			"' isn't 'Dupe'. The duplicates it finds are only fetched once a download has failed, "
-			"not as soon as it turns out dead");
-	}
-
-	return Status::Ok();
-#endif
 }
 }  // namespace SystemHealth::IncomingNzb

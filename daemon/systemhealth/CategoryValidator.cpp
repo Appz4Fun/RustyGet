@@ -21,9 +21,7 @@
 
 #include "CategoryValidator.h"
 #include "Options.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 namespace SystemHealth::Category
 {
@@ -52,7 +50,6 @@ Status UnpackValidator::Validate() const
 	bool globalUnpack = m_options.GetUnpack();
 	bool catUnpack = m_category.GetUnpack();
 
-#ifdef NZBGET_USE_RUST
 	switch (nzbget_rs_euh_health_validate_category_unpack(
 		globalUnpack ? 1 : 0, catUnpack ? 1 : 0))
 	{
@@ -64,19 +61,5 @@ Status UnpackValidator::Validate() const
 		default:
 			return Status::Ok();
 	}
-#else
-	if (globalUnpack && !catUnpack)
-	{
-		return Status::Info(
-			"Unpack is disabled. Files will remain packed after download");
-	}
-
-	if (!globalUnpack && catUnpack)
-	{
-		return Status::Info("Global Unpack is disabled, so this category setting has no effect");
-	}
-
-	return Status::Ok();
-#endif
 }
 }  // namespace SystemHealth::Category

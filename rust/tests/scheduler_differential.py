@@ -20,6 +20,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 REFERENCE = "02c80b7b"
+FALLBACK_REFERENCE = "4cf19abdb8f084a384769a15cf57e56acf86f363"
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--debug", action="store_true")
 args = parser.parse_args()
@@ -32,6 +33,11 @@ def check_tasks(source):
 
 old = subprocess.check_output(["git", "show", f"{REFERENCE}:daemon/main/Scheduler.cpp"], cwd=ROOT, text=True)
 new = (ROOT / "daemon/main/Scheduler.cpp").read_text()
+fallback = (
+    new
+    if "#ifdef NZBGET_USE_RUST" in new
+    else subprocess.check_output(["git", "show", f"{FALLBACK_REFERENCE}:daemon/main/Scheduler.cpp"], cwd=ROOT, text=True)
+)
 util = subprocess.check_output(["git", "show", f"{REFERENCE}:daemon/util/Util.cpp"], cwd=ROOT, text=True)
 timegm = util[util.index("/* From boost */"):util.index("time_t Util::Timegm")]
 
@@ -102,7 +108,7 @@ namespace newimpl {
 #undef NZBGET_USE_RUST
 }
 namespace fallbackimpl {
-''' + scheduler + check_tasks(new) + r'''
+''' + scheduler + check_tasks(fallback) + r'''
 }
 
 static unsigned long long state = 0x9e3779b97f4a7c15ull;

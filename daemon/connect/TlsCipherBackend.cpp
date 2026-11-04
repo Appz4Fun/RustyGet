@@ -1,6 +1,6 @@
 #include "nzbget.h"
 #include "TlsCipherBackend.h"
-#if defined(NZBGET_USE_RUST) && !defined(DISABLE_TLS) && (defined(__APPLE__) || defined(__linux__))
+#if !defined(DISABLE_TLS) && (defined(__APPLE__) || defined(__linux__))
 #include "nzbget_rs.h"
 #include "ScriptConfig.h"
 #include "TlsSocket.h"
@@ -235,7 +235,5 @@ std::string TlsCipherBackend::Status(const char*) { return R"({"Available":false
 std::string TlsCipherBackend::Start() { return Status(nullptr); }
 std::string TlsCipherBackend::Cancel(const char*) { return Status(nullptr); }
 void TlsCipherBackend::Shutdown() {}
-#ifdef NZBGET_USE_RUST
 NzbgetTlsBackend TlsCipherBackend::Create() { return {}; }
-#endif
 #endif

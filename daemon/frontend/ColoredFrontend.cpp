@@ -23,9 +23,7 @@
 #include "nzbget.h"
 #include "ColoredFrontend.h"
 #include "Util.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 ColoredFrontend::ColoredFrontend()
 {
@@ -57,7 +55,6 @@ void ColoredFrontend::PrintStatus()
 	BString<100> timeString;
 	int64 currentDownloadSpeed = m_standBy ? 0 : m_currentDownloadSpeed;
 
-#ifdef NZBGET_USE_RUST
 	int h = 0, m = 0, s = 0;
 	if (nzbget_rs_feh_frontend_calc_remaining_hms(
 		m_remainingSize, m_currentDownloadSpeed, m_standBy ? 1 : 0, m_pauseDownload ? 1 : 0,
@@ -65,25 +62,11 @@ void ColoredFrontend::PrintStatus()
 	{
 		timeString.Format(" (~ %.2d:%.2d:%.2d)", h, m, s);
 	}
-#else
-	if (currentDownloadSpeed > 0 && !m_pauseDownload)
-	{
-		int64 remain_sec = (int64)(m_remainingSize / currentDownloadSpeed);
-		int h = (int)(remain_sec / 3600);
-		int m = (int)((remain_sec % 3600) / 60);
-		int s = (int)(remain_sec % 60);
-		timeString.Format(" (~ %.2d:%.2d:%.2d)", h, m, s);
-	}
-#endif
 
 	BString<100> downloadLimit;
 	if (m_downloadLimit > 0)
 	{
-#ifdef NZBGET_USE_RUST
 		downloadLimit.Format(", Limit %i KB/s", nzbget_rs_sfw_frontend_calc_limit_kb(m_downloadLimit));
-#else
-		downloadLimit.Format(", Limit %i KB/s", m_downloadLimit / 1024);
-#endif
 	}
 
 	BString<100> postStatus;
@@ -102,11 +85,7 @@ void ColoredFrontend::PrintStatus()
 	BString<1024> status(" %d threads, %s, %s remaining%s%s%s%s%s\n",
 		m_threadCount, *Util::FormatSpeed(currentDownloadSpeed),
 		*Util::FormatSize(m_remainingSize), *timeString, *postStatus,
-#ifdef NZBGET_USE_RUST
 		nzbget_rs_sfw_frontend_select_pause_status_suffix(m_pauseDownload ? 1 : 0, m_standBy ? 1 : 0),
-#else
-		m_pauseDownload ? (m_standBy ? ", Paused" : ", Pausing") : "",
-#endif
 		*downloadLimit, controlSeq);
 	printf("%s", *status);
 	m_needGoBack = true;

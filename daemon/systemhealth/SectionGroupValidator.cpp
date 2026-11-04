@@ -20,9 +20,7 @@
 #include "nzbget.h"
 
 #include "SectionGroupValidator.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 namespace SystemHealth
 {
@@ -48,11 +46,7 @@ SectionReport SectionGroupValidator::Validate() const
 	for (const auto& validator : m_validators)
 	{
 		Status status = validator->Validate();
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_awc_health_status_should_include(status.IsOk() ? 1 : 0) != 0)
-#else
-		if (!status.IsOk())
-#endif
 			report.issues.push_back(std::move(status));
 	}
 

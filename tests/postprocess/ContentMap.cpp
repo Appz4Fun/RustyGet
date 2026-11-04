@@ -29,9 +29,7 @@
 #include "ContentMap.h"
 #include "RarReader.h"
 #include "StreamCrypto.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 BOOST_AUTO_TEST_SUITE(PostprocessTest)
 
@@ -2281,7 +2279,6 @@ BOOST_AUTO_TEST_CASE(ContentMapperIsCompressibleArchiveTest)
 	BOOST_CHECK(!ContentMapper::IsCompressibleArchive(MemberSet{MemberSet::mfSplit, {0, 1}}));
 }
 
-#ifdef NZBGET_USE_RUST
 BOOST_AUTO_TEST_CASE(ContentMapRustFfiBoundaryTest)
 {
 	int32_t mIds[2] = {10, 20};
@@ -2336,6 +2333,5 @@ BOOST_AUTO_TEST_CASE(ContentMapRustFfiBoundaryTest)
 		[](void* ctx, const char* r) { *static_cast<std::string*>(ctx) = r ? r : ""; });
 	BOOST_CHECK(!reason.empty());
 }
-#endif
 
 BOOST_AUTO_TEST_SUITE_END()

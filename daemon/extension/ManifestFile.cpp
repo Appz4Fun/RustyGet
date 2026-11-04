@@ -23,14 +23,11 @@
 #include "Json.h"
 #include "FileSystem.h"
 #include "Log.h"
-#ifdef NZBGET_USE_RUST
 #include <exception>
 #include "nzbget_rs.h"
-#endif
 
 namespace ManifestFile
 {
-#ifdef NZBGET_USE_RUST
 	namespace
 	{
 		std::string Str(const NzbgetRsStr& str)
@@ -201,55 +198,6 @@ namespace ManifestFile
 		return loaded == 1;
 	}
 
-#else
-	bool Load(Manifest& manifest, const char* directory)
-	{
-		std::string path = std::string(directory) + PATH_SEPARATOR + MANIFEST_FILE;
-		DiskFile file;
-		if (!file.Open(path.c_str(), DiskFile::omRead)) return false;
-
-		std::string jsonStr;
-		char buffer[BUFFER_SIZE];
-		while (file.ReadLine(buffer, BUFFER_SIZE))
-		{
-			jsonStr += buffer;
-		}
-		
-		auto desRes = Json::Deserialize(jsonStr);
-		if (!desRes.has_value())
-		{
-			error("Failed to parse %s. Syntax error.", path.c_str());
-			return false;
-		}
-
-		// a value of another type than expected ("[]" for the whole file, a
-		// string among the commands) threw out of the extension loading and
-		// ended the daemon at start: the extension is refused instead
-		try
-		{
-			Json::JsonValue jsonValue = std::move(desRes.value());
-			if (!jsonValue.is_object())
-			{
-				error("Failed to parse %s. The manifest isn't a JSON object.", path.c_str());
-				return false;
-			}
-			Json::JsonObject json = jsonValue.as_object();
-
-			if (!ValidateAndSet(json, manifest))
-				return false;
-
-			CheckKeyAndSet(json, "nzbgetMinVersion", manifest.nzbgetMinVersion);
-		}
-		catch (const std::exception& e)
-		{
-			error("Failed to parse %s: %s", path.c_str(), e.what());
-			return false;
-		}
-
-		return true;
-	}
-
-#endif
 
 	bool ValidateAndSet(const Json::JsonObject& json, Manifest& manifest)
 	{

@@ -24,9 +24,7 @@
 #include "Options.h"
 #include "Log.h"
 #include "FileSystem.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 /**
  * If szStripPrefix is not nullptr, only pp-parameters, whose names start with the prefix
@@ -35,7 +33,6 @@
  */
 void NzbScriptController::PrepareEnvParameters(NzbParameterList* parameters, const char* stripPrefix)
 {
-#ifdef NZBGET_USE_RUST
 	for (NzbParameter& parameter : parameters)
 	{
 		size_t offset = 0;
@@ -45,23 +42,6 @@ void NzbScriptController::PrepareEnvParameters(NzbParameterList* parameters, con
 			SetEnvVarSpecial("NZBPR", parameter.GetName() + offset, parameter.GetValue());
 		}
 	}
-#else
-	int prefixLen = stripPrefix ? strlen(stripPrefix) : 0;
-
-	for (NzbParameter& parameter : parameters)
-	{
-		const char* value = parameter.GetValue();
-
-		if (stripPrefix && !strncmp(parameter.GetName(), stripPrefix, prefixLen) && (int)strlen(parameter.GetName()) > prefixLen)
-		{
-			SetEnvVarSpecial("NZBPR", parameter.GetName() + prefixLen, value);
-		}
-		else if (!stripPrefix)
-		{
-			SetEnvVarSpecial("NZBPR", parameter.GetName(), value);
-		}
-	}
-#endif
 }
 
 void NzbScriptController::PrepareEnvScript(NzbParameterList* parameters, const char* scriptName)

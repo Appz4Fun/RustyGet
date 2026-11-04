@@ -26,9 +26,7 @@
 #include "Options.h"
 #include "Log.h"
 #include "ScriptConfig.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 #if defined(__APPLE__) || defined(__linux__)
 #define NZBGET_CIPHER_ATOMIC_CONFIG
 #include <sys/stat.h>
@@ -54,7 +52,6 @@ struct CipherDescriptor
 
 bool SameCipherFile(const struct stat& a, const struct stat& b)
 {
-#ifdef NZBGET_USE_RUST
 #ifdef __APPLE__
 	return nzbget_rs_ufs_script_config_same_cipher_file(
 		(uint64_t)a.st_dev, (uint64_t)b.st_dev,
@@ -80,30 +77,15 @@ bool SameCipherFile(const struct stat& a, const struct stat& b)
 		(int64_t)a.st_ctim.tv_sec, (int64_t)b.st_ctim.tv_sec,
 		(int64_t)a.st_ctim.tv_nsec, (int64_t)b.st_ctim.tv_nsec) != 0;
 #endif
-#else
-	bool same = a.st_dev == b.st_dev && a.st_ino == b.st_ino && a.st_size == b.st_size &&
-		a.st_mode == b.st_mode && a.st_uid == b.st_uid && a.st_gid == b.st_gid;
-#ifdef __APPLE__
-	return same && a.st_mtimespec.tv_sec == b.st_mtimespec.tv_sec && a.st_mtimespec.tv_nsec == b.st_mtimespec.tv_nsec &&
-		a.st_ctimespec.tv_sec == b.st_ctimespec.tv_sec && a.st_ctimespec.tv_nsec == b.st_ctimespec.tv_nsec;
-#else
-	return same && a.st_mtim.tv_sec == b.st_mtim.tv_sec && a.st_mtim.tv_nsec == b.st_mtim.tv_nsec &&
-		a.st_ctim.tv_sec == b.st_ctim.tv_sec && a.st_ctim.tv_nsec == b.st_ctim.tv_nsec;
-#endif
-#endif
 }
 
 bool ReadCipherDescriptor(int fd, std::string& output, struct stat& before)
 {
-#ifdef NZBGET_USE_RUST
 	if (fstat(fd, &before) != 0 ||
 		nzbget_rs_ufs_script_config_is_valid_cipher_size(S_ISREG(before.st_mode) ? 1 : 0, (int64_t)before.st_size) == 0)
 	{
 		return false;
 	}
-#else
-	if (fstat(fd, &before) != 0 || !S_ISREG(before.st_mode) || before.st_size < 0 || before.st_size > 16 * 1024 * 1024) return false;
-#endif
 	output.resize(static_cast<size_t>(before.st_size));
 	size_t used = 0;
 	while (used < output.size())
@@ -261,11 +243,7 @@ bool ScriptConfig::LoadConfigUnlocked(Options::OptEntries* optEntries)
 		Util::TrimRight(buf);
 
 		// skip comments and empty lines
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_sfc_script_config_is_comment_or_blank_line(buf) != 0)
-#else
-		if (buf[0] == 0 || buf[0] == '#' || strspn(buf, " ") == strlen(buf))
-#endif
 		{
 			continue;
 		}
@@ -289,7 +267,6 @@ bool ScriptConfig::LoadConfigUnlocked(Options::OptEntries* optEntries)
 // Missing fields differ from present empty fields; duplicate keys are last-wins.
 std::string ScriptConfig::CipherBaseline(const Options::OptEntries& optEntries)
 {
-#ifdef NZBGET_USE_RUST
 	std::vector<const char*> names;
 	std::vector<const char*> values;
 	names.reserve(optEntries.size());
@@ -304,28 +281,6 @@ std::string ScriptConfig::CipherBaseline(const Options::OptEntries& optEntries)
 	std::string token(buf.data ? buf.data : "", buf.len);
 	nzbget_rs_free(buf);
 	return token;
-#else
-	std::map<std::string, std::string> fields;
-	constexpr char hex[] = "0123456789abcdef";
-	for (const auto& entry : optEntries)
-	{
-		if (!entry.GetName() || !entry.GetValue()) continue;
-		std::string name(entry.GetName());
-		for (char& c : name) if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
-		if (!name.starts_with("server")) continue;
-		size_t dot = name.find('.', 6);
-		if (dot == std::string::npos || dot == 6 || name[6] == '0' ||
-			!std::all_of(name.begin() + 6, name.begin() + dot, [](char c) { return c >= '0' && c <= '9'; })) continue;
-		std::string suffix = name.substr(dot + 1);
-		if (suffix != "host" && suffix != "port" && suffix != "cipher") continue;
-		std::string value;
-		for (unsigned char c : std::string_view(entry.GetValue())) { value += hex[c >> 4]; value += hex[c & 15]; }
-		fields[name] = std::move(value);
-	}
-	std::string token = "v1\n";
-	for (const auto& [name, value] : fields) { token += name; token += '='; token += value; token += '\n'; }
-	return token;
-#endif
 }
 
 bool ScriptConfig::SaveConfig(Options::OptEntries* optEntries, const char* cipherBaseline, bool* conflict)
@@ -390,12 +345,7 @@ bool ScriptConfig::SaveConfig(Options::OptEntries* optEntries, const char* ciphe
 	infile.Seek(0);
 	for (CString& buf : config)
 	{
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_sfc_script_config_is_editable_option_line(buf) != 0)
-#else
-		const char* eq = strchr(buf, '=');
-		if (eq && buf[0] != '#')
-#endif
 		{
 			// remove trailing '\n' and '\r' and spaces
 			buf.TrimRight();
@@ -417,12 +367,7 @@ bool ScriptConfig::SaveConfig(Options::OptEntries* optEntries, const char* ciphe
 		{
 			// every line ends: a last line without a line end (a comment, typically)
 			// had the first new option glued onto it, and that option was lost
-#ifdef NZBGET_USE_RUST
 			infile.Print("%s%s", *buf, nzbget_rs_sfc_script_config_line_has_trailing_lf(buf) != 0 ? "" : "\n");
-#else
-			int len = buf.Length();
-			infile.Print("%s%s", *buf, len > 0 && buf[len - 1] == '\n' ? "" : "\n");
-#endif
 		}
 	}
 

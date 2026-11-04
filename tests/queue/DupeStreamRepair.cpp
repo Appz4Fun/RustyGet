@@ -32,9 +32,7 @@
 #include "DupeArticleFallback.h"
 #include "FileSystem.h"
 #include "Options.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 BOOST_AUTO_TEST_SUITE(QueueTest)
 
@@ -1021,7 +1019,6 @@ BOOST_AUTO_TEST_CASE(ParDamageBlocksTouchedTest)
 	BOOST_CHECK_EQUAL(ParDamage::BlocksTouched({ { 0, 10 } }, 0), 0);
 }
 
-#ifdef NZBGET_USE_RUST
 BOOST_AUTO_TEST_CASE(StreamRepairRustFfiBoundaryTest)
 {
 	BOOST_CHECK_EQUAL(nzbget_rs_stream_is_eligible("movie.mkv"), 1);
@@ -1083,6 +1080,5 @@ BOOST_AUTO_TEST_CASE(StreamRepairRustFfiBoundaryTest)
 	BOOST_CHECK_EQUAL(rank, 1);
 	BOOST_CHECK_EQUAL(window, 2);
 }
-#endif
 
 BOOST_AUTO_TEST_SUITE_END()

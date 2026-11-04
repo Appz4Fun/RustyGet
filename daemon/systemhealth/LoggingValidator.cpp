@@ -22,9 +22,7 @@
 #include "LoggingValidator.h"
 #include "Options.h"
 #include "Validators.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 namespace SystemHealth::Logging
 {
@@ -60,7 +58,6 @@ Status WriteLogValidator::Validate() const
 
 Status RotateLogValidator::Validate() const
 {
-#ifdef NZBGET_USE_RUST
 	int rotateLog = m_options.GetRotateLog();
 	int check = nzbget_rs_snh_health_validate_rotate_log(
 		m_options.GetWriteLog() == Options::EWriteLog::wlRotate ? 1 : 0, rotateLog);
@@ -69,19 +66,6 @@ Status RotateLogValidator::Validate() const
 		return Status::Warning("'" + std::string(Options::ROTATELOG) +
 							   "' is very high (>365). This may consume significant disk space");
 	return Status::Ok();
-#else
-	if (m_options.GetWriteLog() != Options::EWriteLog::wlRotate) return Status::Ok();
-
-	Status s = CheckPositiveNum(Options::ROTATELOG, m_options.GetRotateLog());
-	if (!s.IsOk()) return s;
-
-	int rotateLog = m_options.GetRotateLog();
-	if (rotateLog > 365)
-		return Status::Warning("'" + std::string(Options::ROTATELOG) +
-							   "' is very high (>365). This may consume significant disk space");
-
-	return Status::Ok();
-#endif
 }
 Status LogBufferValidator::Validate() const
 {
@@ -112,15 +96,9 @@ Status TimeCorrectionValidator::Validate() const
 
 	// Config says: -24..+24 are hours, others are minutes.
 	// If someone sets 10000 (minutes), that's ~7 days offset, likely a mistake.
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_snh_health_validate_time_correction(val))
 		return Status::Warning("'" + std::string(Options::TIMECORRECTION) +
 							   "' value is very large (interpreted as minutes)");
-#else
-	if (std::abs(val) > 1440 && std::abs(val) < 1000000)  // 1440 mins = 24 hours
-		return Status::Warning("'" + std::string(Options::TIMECORRECTION) +
-							   "' value is very large (interpreted as minutes)");
-#endif
 
 	return Status::Ok();
 }

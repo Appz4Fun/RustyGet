@@ -20,9 +20,7 @@
 #include "nzbget.h"
 
 #include "SchedulerTaskValidator.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 namespace SystemHealth::Scheduler
 {
@@ -41,7 +39,6 @@ Status TimeValidator::Validate() const
 	int h = m_task.GetHours();
 	int m = m_task.GetMinutes();
 
-#ifdef NZBGET_USE_RUST
 	switch (nzbget_rs_euh_health_validate_scheduler_time(h, m))
 	{
 		case 1:
@@ -51,32 +48,13 @@ Status TimeValidator::Validate() const
 		default:
 			return Status::Ok();
 	}
-#else
-	// Assumption: -1 might represent a wildcard '*' in your internal logic
-	// If not, remove the (< -1) check.
-	if (h < -1 || h > 23)
-	{
-		return Status::Error("Invalid hour: " + std::to_string(h));
-	}
-
-	if (m < 0 || m > 59)
-	{
-		return Status::Error("Invalid minute: " + std::to_string(m));
-	}
-
-	return Status::Ok();
-#endif
 }
 
 Status WeekDaysValidator::Validate() const
 {
 	int bits = m_task.GetWeeDaysBits();
 
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_euh_health_validate_scheduler_weekdays(bits) == 0)
-#else
-	if (bits < 0 || bits > 127)	 // Bits 1-7 (1<<0 to 1<<6) = max 127
-#endif
 	{
 		return Status::Error("Invalid weekdays configuration");
 	}

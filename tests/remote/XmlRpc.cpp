@@ -496,7 +496,7 @@ BOOST_AUTO_TEST_CASE(TlsCipherStatusIsStructuredAndReportsUnavailableBackend)
 	const auto& result = document->as_object().at("result");
 	BOOST_REQUIRE(result.is_object());
 	BOOST_REQUIRE(result.as_object().contains("Available"));
-#if defined(NZBGET_USE_RUST) && !defined(DISABLE_TLS) && (defined(__APPLE__) || defined(__linux__))
+#if !defined(DISABLE_TLS) && (defined(__APPLE__) || defined(__linux__))
 	BOOST_CHECK(result.as_object().at("Available").as_bool());
 	std::string stale = RpcReply("/jsonrpc", XmlRpcProcessor::hmPost, R"({"method":"tlscipherstatus","params":["unknown-fixture-job"],"id":1})");
 	BOOST_CHECK(stale.find("unknown cipher job") != std::string::npos);

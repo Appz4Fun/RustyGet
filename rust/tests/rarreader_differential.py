@@ -31,6 +31,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 REFERENCE = "02c80b7b"
+FALLBACK_REFERENCE = "4cf19abdb8f084a384769a15cf57e56acf86f363"
 BUILD = Path(sys.argv[1]).resolve()
 ROUNDS = sys.argv[2] if len(sys.argv) > 2 else "100"
 
@@ -63,6 +64,16 @@ old_src = "struct NonAdvancing {};\nstruct Rar3SizeOverflow {};\n" + old_src.rep
     seek, seek + "\n\t\tif (file.Position() <= blockStart) throw NonAdvancing{};").replace(
     addition, "\t\tif ((uint64)blocksize + block.addsize > 0xffffffffULL) throw Rar3SizeOverflow{};\n" + addition)
 new_src = (ROOT / "daemon/postprocess/RarReader.cpp").read_text()
+fallback_src = (
+    new_src
+    if "#ifdef NZBGET_USE_RUST" in new_src
+    else subprocess.check_output(["git", "show", f"{FALLBACK_REFERENCE}:daemon/postprocess/RarReader.cpp"], cwd=ROOT, text=True)
+)
+fallback_header = (
+    header
+    if "#ifdef NZBGET_USE_RUST" in header
+    else subprocess.check_output(["git", "show", f"{FALLBACK_REFERENCE}:daemon/postprocess/RarReader.h"], cwd=ROOT, text=True).replace("\nprivate:", "\npublic:")
+)
 
 flags = (BUILD / "CMakeFiles/libnzbget.dir/flags.make").read_text()
 get = lambda k: re.search(rf"^{k} = (.*)$", flags, re.M).group(1)
@@ -75,7 +86,7 @@ globals_block = tests_main[tests_main.index('#include "ServerPool.h"'):tests_mai
 volumes = sorted(str(p) for p in (ROOT / "tests/testdata").rglob("*") if re.search(r"\.(rar|r\d\d)$", p.name))
 
 decls = "\n".join(renamed("", h, p)[0:0] + re.sub(r"\b(RarSourceCursor|RarVolume|RarFile)\b", lambda m: p + m.group(1), h)
-                  .replace("RARREADER_H", p.upper() + "RARREADER_H") for h, p in ((old_header, "Old"), (header, "Fallback"), (header, "Port")))
+                  .replace("RARREADER_H", p.upper() + "RARREADER_H") for h, p in ((old_header, "Old"), (fallback_header, "Fallback"), (header, "Port")))
 
 main = r'''
 #include "nzbget.h"
@@ -460,7 +471,7 @@ with tempfile.TemporaryDirectory(prefix="nzbget-rarreader-") as temp:
     temp = Path(temp)
     (temp / "main.cpp").write_text(main)
     (temp / "old.cpp").write_text(renamed(old_src, old_header, "Old"))
-    (temp / "fallback.cpp").write_text(renamed(new_src, header, "Fallback", fallback=True))
+    (temp / "fallback.cpp").write_text(renamed(fallback_src, fallback_header, "Fallback", fallback=True))
     (temp / "port.cpp").write_text(renamed(new_src, header, "Port"))
     for i, data in enumerate(synthetic_volumes()):
         path = temp / f"synthetic-{i}.rar"

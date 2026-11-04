@@ -27,9 +27,7 @@
 #include "CPU.h"
 #include "Log.h"
 #include "Util.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 namespace System
 {
@@ -52,26 +50,8 @@ namespace System
 
 	std::string CPU::GetCanonicalCPUArch(const std::string& arch) const
 	{
-#ifdef NZBGET_USE_RUST
 		const char* canonical = nzbget_rs_snh_cpu_canonical_arch(arch.c_str(), arch.size());
 		return canonical ? std::string(canonical) : arch;
-#else
-		if (arch == "i386" || arch == "x86")
-			return "i686";
-
-		if (arch == "amd64" || arch == "AMD64")
-			return "x86_64";
-
-		if (arch.find("armv5") != std::string::npos ||
-			arch.find("armv6") != std::string::npos)
-			return "armel";
-
-		if (arch.find("armv7") != std::string::npos ||
-			arch.find("armv8") != std::string::npos)
-			return "armhf";
-
-		return arch;
-#endif
 	}
 
 #ifdef WIN32
@@ -173,7 +153,6 @@ namespace System
 		std::string line;
 		while (std::getline(cpuinfo, line))
 		{
-#ifdef NZBGET_USE_RUST
 			size_t valOffset = 0;
 			if (nzbget_rs_snh_cpu_parse_cpuinfo_line(line.c_str(), line.size(), &valOffset))
 			{
@@ -184,25 +163,6 @@ namespace System
 					return model;
 				}
 			}
-#else
-			if (line.find("model name") != std::string::npos ||
-				line.find("Processor") != std::string::npos ||
-				line.find("cpu model") != std::string::npos ||
-				line.find("Hardware") != std::string::npos ||
-				line.find("system type") != std::string::npos)
-			{
-				auto colonPos = line.find(":");
-				if (colonPos != std::string::npos)
-				{
-					std::string model = line.substr(colonPos + 1);
-					Util::Trim(model);
-					if (!model.empty())
-					{
-						return model;
-					}
-				}
-			}
-#endif
 		}
 
 		return std::nullopt;

@@ -2,7 +2,7 @@
 #include <boost/test/unit_test.hpp>
 #include "TlsCipherBackend.h"
 
-#if defined(NZBGET_USE_RUST) && !defined(DISABLE_TLS) && (defined(__APPLE__) || defined(__linux__))
+#if !defined(DISABLE_TLS) && (defined(__APPLE__) || defined(__linux__))
 #include <openssl/rand.h>
 #include <set>
 #include <thread>
@@ -15,7 +15,7 @@
 
 BOOST_AUTO_TEST_SUITE(ConnectTest)
 
-#if defined(NZBGET_USE_RUST) && !defined(DISABLE_TLS) && (defined(__APPLE__) || defined(__linux__))
+#if !defined(DISABLE_TLS) && (defined(__APPLE__) || defined(__linux__))
 
 namespace
 {

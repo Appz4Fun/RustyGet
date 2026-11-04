@@ -22,9 +22,7 @@
 
 #include "HttpClient.h"
 #include "Util.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 namespace Network
 {
@@ -128,7 +126,6 @@ namespace Network
 		std::string line;
 		while (std::getline(stream, line) && line != "\r")
 		{
-#ifdef NZBGET_USE_RUST
 			size_t colonPos = 0;
 			if (nzbget_rs_snh_http_client_find_header_colon(line.c_str(), line.size(), &colonPos))
 			{
@@ -137,16 +134,6 @@ namespace Network
 				Util::Trim(value);
 				headers.emplace(std::move(key), std::move(value));
 			}
-#else
-			size_t colonPos = line.find(":");
-			if (colonPos != std::string::npos)
-			{
-				std::string key = line.substr(0, colonPos);
-				std::string value = line.substr(colonPos + 1);
-				Util::Trim(value);
-				headers.emplace(std::move(key), std::move(value));
-			}
-#endif
 		}
 
 		return headers;

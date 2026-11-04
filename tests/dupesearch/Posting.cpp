@@ -157,7 +157,6 @@ BOOST_AUTO_TEST_CASE(NativeIdentityHintTest)
     donor.dataFiles++;
     BOOST_CHECK(!DupeIdentity::SameData(pick, donor));
     BOOST_CHECK(DupeIdentity::Hints(pick, donor, false).empty());
-#ifdef NZBGET_USE_RUST
     std::vector<char> body{ 'v', 'i', 'd', 'e', 'o' };
     DupeIdentity::Identity mine = DupeIdentity::FromArticle(body, "Show.S01E01.1080p.WEB.H264-GRP.mkv", 100000, 100);
     BOOST_REQUIRE((bool)mine);
@@ -169,7 +168,6 @@ BOOST_AUTO_TEST_CASE(NativeIdentityHintTest)
     renamed.name = "Other.S01E01.1080p.WEB.H264-GRP.mkv";
     BOOST_CHECK(!DupeIdentity::Matches("Show.S01E01.1080p.WEB.H264-GRP", "hash.rar", mine, renamed));
     BOOST_CHECK(!DupeIdentity::FromArticle(body, "sample.mkv", 100000, 100));
-#endif
 }
 
 BOOST_AUTO_TEST_CASE(NativeIdentityDuplicateFileGeometryTest)
@@ -183,7 +181,6 @@ BOOST_AUTO_TEST_CASE(NativeIdentityDuplicateFileGeometryTest)
     BOOST_CHECK_NE(separate.heads[0].messageId, separate.heads[1].messageId);
 }
 
-#ifdef NZBGET_USE_RUST
 BOOST_AUTO_TEST_CASE(NativeIdentityFetchExceptionTest)
 {
     NzbSummary info;
@@ -203,7 +200,6 @@ BOOST_AUTO_TEST_CASE(NativeIdentityFetchExceptionTest)
     BOOST_CHECK((bool)found);
     BOOST_CHECK_EQUAL(found.bytes, 1000);
 }
-#endif
 
 BOOST_AUTO_TEST_CASE(NativeFetchBudgetChargesRetriesTest)
 {
@@ -256,7 +252,6 @@ BOOST_AUTO_TEST_CASE(NativeFetchBudgetConcurrentTest)
     BOOST_CHECK(!unlimited.Spent());
 }
 
-#ifdef NZBGET_USE_RUST
 BOOST_AUTO_TEST_CASE(NativePartialNzbHealthTest)
 {
     NzbSummary info;
@@ -286,7 +281,6 @@ BOOST_AUTO_TEST_CASE(NativePartialNzbHealthTest)
     fractional.declaredParts=5;
     BOOST_CHECK(!DupeIdentity::IsDead(health,fractional,10));
 }
-#endif
 
 BOOST_AUTO_TEST_CASE(NativeDataArticleIdsExcludeParityTest)
 {

@@ -26,9 +26,7 @@
 #include "Options.h"
 #include "ParChecker.h"
 #include "FileSystem.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 BOOST_AUTO_TEST_SUITE(PostprocessTest)
 
@@ -350,7 +348,6 @@ BOOST_AUTO_TEST_CASE(ParFilenameBlockCountTest)
 	BOOST_CHECK_EQUAL(blocks, 0);
 }
 
-#ifdef NZBGET_USE_RUST
 BOOST_AUTO_TEST_CASE(RustPostRepairFfiParityTest)
 {
 	BOOST_CHECK_NE(nzbget_rs_parchecker_maybe_splitted_fragment("video.mkv.001", "video.mkv"), 0);
@@ -378,6 +375,5 @@ BOOST_AUTO_TEST_CASE(RustPostRepairFfiParityTest)
 	BOOST_CHECK_EQUAL(nzbget_rs_unpack_detect_rar_signature(rar3Sig, 8), 3);
 	BOOST_CHECK_EQUAL(nzbget_rs_unpack_detect_rar_signature(rar5Sig, 8), 5);
 }
-#endif
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -21,9 +21,7 @@
 #include "nzbget.h"
 #include "NServFrontend.h"
 #include "Util.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 NServFrontend::NServFrontend()
 {
@@ -52,7 +50,6 @@ void NServFrontend::Update()
 		if (!messages->empty())
 		{
 			Message& firstMessage = messages->front();
-#ifdef NZBGET_USE_RUST
 			int needSkip = 0;
 			int start = nzbget_rs_euh_nserv_frontend_calc_start_index(
 				m_neededLogFirstId, firstMessage.GetId(), &needSkip);
@@ -60,14 +57,6 @@ void NServFrontend::Update()
 			{
 				PrintSkip();
 			}
-#else
-			int start = m_neededLogFirstId - firstMessage.GetId() + 1;
-			if (start < 0)
-			{
-				PrintSkip();
-				start = 0;
-			}
-#endif
 			for (uint32 i = (uint32)start; i < messages->size(); i++)
 			{
 				PrintMessage(messages->at(i));

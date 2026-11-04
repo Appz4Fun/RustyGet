@@ -24,9 +24,7 @@
 #include "NetworkSpeedTest.h"
 #include "Connection.h"
 #include "Log.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 using namespace std::chrono;
 
@@ -121,19 +119,11 @@ namespace Network
 
 	double SpeedTest::CalculateSpeedInMbps(uint32_t bytes, double timeSec) const
 	{
-#ifdef NZBGET_USE_RUST
 		return nzbget_rs_snh_speed_test_calc_mbps(bytes, timeSec);
-#else
-		double bits = bytes * 8.0;
-		double speed = bits / timeSec;
-		double mbps = speed / 1000000.0;
-		return mbps;
-#endif
 	}
 
 	bool SpeedTest::IsRequiredMoreTests() const
 	{
-#ifdef NZBGET_USE_RUST
 		if (m_dataset.size() < 2)
 			return nzbget_rs_snh_speed_test_is_required_more(m_dataset.size(), 0.0, 0.0) != 0;
 
@@ -141,29 +131,11 @@ namespace Network
 		const DataAnalytics& prev = m_dataset[m_dataset.size() - 2];
 		return nzbget_rs_snh_speed_test_is_required_more(
 			m_dataset.size(), curr.GetMedian(), prev.GetPercentile25()) != 0;
-#else
-		if (m_dataset.size() < 2)
-			return true;
-
-		const DataAnalytics& curr = m_dataset.back();
-		const DataAnalytics& prev = m_dataset[m_dataset.size() - 2];
-
-		if (curr.GetMedian() > prev.GetPercentile25())
-		{
-			return true;
-		}
-
-		return false;
-#endif
 	}
 
 	bool SpeedTest::HasExceededMaxFailures(int failures, int iterations) const
 	{
-#ifdef NZBGET_USE_RUST
 		return nzbget_rs_snh_speed_test_exceeded_max_failures(failures, iterations) != 0;
-#else
-		return failures > std::max(iterations / 2, 2);
-#endif
 	}
 
 	double SpeedTest::GetFinalSpeed() const

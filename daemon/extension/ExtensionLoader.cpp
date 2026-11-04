@@ -24,11 +24,9 @@
 #include "ManifestFile.h"
 #include "ScriptConfig.h"
 #include "FileSystem.h"
-#ifdef NZBGET_USE_RUST
 #include <exception>
 #include <memory>
 #include "nzbget_rs.h"
-#endif
 
 namespace
 {
@@ -63,7 +61,6 @@ namespace ExtensionLoader
 
 	namespace V1
 	{
-#ifdef NZBGET_USE_RUST
 		bool Load(Extension::Script& script, const char* location, const char* rootDir)
 		{
 			std::ifstream file(script.GetEntry());
@@ -200,145 +197,6 @@ namespace ExtensionLoader
 
 			return true;
 		}
-#else
-		bool Load(Extension::Script& script, const char* location, const char* rootDir)
-		{
-			std::ifstream file(script.GetEntry());
-			if (!file.is_open())
-			{
-				return false;
-			}
-
-			std::string queueEvents;
-			std::string taskTime;
-			std::string about;
-
-			Extension::Kind kind;
-			std::vector<std::string> description;
-			std::vector<std::string> requirements;
-			std::vector<ManifestFile::Option> options;
-			std::vector<ManifestFile::Command> commands;
-
-			bool inBeforeConfig = false;
-			bool inConfig = false;
-			bool inAbout = false;
-			bool inDescription = false;
-
-			// Declarations "QUEUE EVENT:" and "TASK TIME:" can be placed:
-			// - in script definition body (between opening and closing script signatures);
-			// - immediately before script definition (before opening script signature);
-			// - immediately after script definition (after closing script signature).
-			// The last two pissibilities are provided to increase compatibility of scripts with older
-			// nzbget versions which do not expect the extra declarations in the script defintion body.
-			std::string line;
-			while (std::getline(file, line))
-			{
-				if (line.empty())
-				{
-					continue;
-				}
-
-				if (!inBeforeConfig && !strncmp(line.c_str(), DEFINITION_SIGNATURE, DEFINITION_SIGNATURE_LEN))
-				{
-					inBeforeConfig = true;
-				}
-
-				if (!inBeforeConfig && !inConfig)
-				{
-					continue;
-				}
-
-				// if TASK TIME, e.g. ### TASK TIME: *;*:00;*:30	###
-				if (!strncmp(line.c_str(), TASK_TIME_SIGNATURE, TASK_TIME_SIGNATURE_LEN))
-				{
-					taskTime = TextAfter(line, TASK_TIME_SIGNATURE_LEN + 1);
-					RemoveTailAndTrim(taskTime, "###");
-					continue;
-				}
-
-				if (!strncmp(line.c_str(), BEGIN_SCRIPT_SIGNATURE, BEGIN_SINGNATURE_LEN) && strstr(line.c_str(), END_SCRIPT_SIGNATURE))
-				{
-					if (inConfig)
-					{
-						break;
-					}
-					inBeforeConfig = false;
-					inConfig = true;
-					kind = GetScriptKind(line);
-					continue;
-				}
-
-				// if QUEUE EVENTS, e.g. ### QUEUE EVENTS: NZB_ADDED, NZB_DOWNLOADED	###
-				if (!strncmp(line.c_str(), QUEUE_EVENTS_SIGNATURE, QUEUE_EVENTS_SIGNATURE_LEN))
-				{
-					queueEvents = TextAfter(line, QUEUE_EVENTS_SIGNATURE_LEN + 1);
-					RemoveTailAndTrim(queueEvents, "###");
-					continue;
-				}
-
-				// if about, e.g. # Sorts movies and tv shows.
-				if (inConfig && !strncmp(line.c_str(), "# ", 2) && !inDescription)
-				{
-					inAbout = true;
-					about.append(line.substr(2)).push_back('\n');
-					continue;
-				}
-
-				if (inConfig && !strncmp(line.c_str(), "#", 1) && inAbout)
-				{
-					inAbout = false;
-					inDescription = true;
-					continue;
-				}
-
-				// if requirements: e.g. NOTE: This script requires Python to be installed on your system.
-				if (inConfig && !strncmp(line.c_str(), "# NOTE: ", 8) && inDescription)
-				{
-					requirements.push_back(line.substr(strlen("# NOTE: ")));
-					continue;
-				}
-
-				// if description: e.g # This is a script for downloaded TV shows and movies...
-				if (inConfig && !strncmp(line.c_str(), "# ", 2) && inDescription)
-				{
-					description.push_back(line.substr(2));
-					continue;
-				}
-
-				// if "OPTIONS" and other sections, e.g.: ### OPTIONS or ### CATEGORIES
-				if (!strncmp(line.c_str(), BEGIN_SCRIPT_COMMANDS_AND_OTPIONS, BEGIN_SCRIPT_COMMANDS_AND_OTPIONS_LEN))
-				{
-					ParseOptionsAndCommands(file, options, commands);
-					break;
-				}
-			}
-
-			if (!(kind.post || kind.scan || kind.queue || kind.scheduler || kind.feed))
-			{
-				return false;
-			}
-
-			BuildDisplayName(script);
-			Util::TrimRight(about);
-
-			requirements.shrink_to_fit();
-			options.shrink_to_fit();
-			commands.shrink_to_fit();
-
-			script.SetLocation(location);
-			script.SetRootDir(rootDir);
-			script.SetRequirements(std::move(requirements));
-			script.SetKind(std::move(kind));
-			script.SetQueueEvents(std::move(queueEvents));
-			script.SetAbout(std::move(about));
-			script.SetDescription(std::move(description));
-			script.SetTaskTime(std::move(taskTime));
-			script.SetOptions(std::move(options));
-			script.SetCommands(std::move(commands));
-
-			return true;
-		}
-#endif
 
 
 		void RemoveTailAndTrim(std::string& str, const char* tail)

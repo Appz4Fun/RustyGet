@@ -24,9 +24,7 @@
 #include "Log.h"
 #include "Util.h"
 #include "YEncoder.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 #ifndef DISABLE_TLS
 #include "OpenSSL.h"
@@ -175,7 +173,6 @@ void NntpProcessor::Run()
 		line.TrimRight();
 		detail("%s [%i] Received: %s", *Util::FormatTime(Util::CurrentTime()), m_id, *line);
 
-#ifdef NZBGET_USE_RUST
 		size_t argOffset = 0;
 		int cmdKind = nzbget_rs_feh_nntp_classify_command(line, &argOffset);
 		if (cmdKind == 1)
@@ -222,52 +219,6 @@ void NntpProcessor::Run()
 			warn("[%i] Unknown command: %s", m_id, *line);
 			m_connection->WriteLine("500 Unknown command\r\n");
 		}
-#else
-		if (!strncasecmp(line, "ARTICLE ", 8))
-		{
-			m_messageid = line + 8;
-			m_sendHeaders = true;
-			m_sendStat = false;
-			ServArticle();
-		}
-		else if (!strncasecmp(line, "BODY ", 5))
-		{
-			m_messageid = line + 5;
-			m_sendHeaders = false;
-			m_sendStat = false;
-			ServArticle();
-		}
-		else if (!strncasecmp(line, "STAT ", 5))
-		{
-			m_messageid = line + 5;
-			m_sendHeaders = false;
-			m_sendStat = true;
-			ServArticle();
-		}
-		else if (!strncasecmp(line, "GROUP ", 6))
-		{
-			m_connection->WriteLine(CString::FormatStr("211 0 0 0 %s\r\n", line + 6));
-		}
-		else if (!strncasecmp(line, "AUTHINFO USER", 13))
-		{
-			m_connection->WriteLine("381 Enter passphrase\r\n");
-		}
-		else if (!strncasecmp(line, "AUTHINFO PASS", 13))
-		{
-			m_connection->WriteLine("281 Authentication accepted\r\n");
-		}
-		else if (!strcasecmp(line, "QUIT"))
-		{
-			detail("%s [%i] Closing connection", *Util::FormatTime(Util::CurrentTime()), m_id);
-			m_connection->WriteLine("205 Connection closing\r\n");
-			break;
-		}
-		else
-		{
-			warn("[%i] Unknown command: %s", m_id, *line);
-			m_connection->WriteLine("500 Unknown command\r\n");
-		}
-#endif
 	}
 
 	m_connection->SetGracefull(true);
@@ -300,7 +251,6 @@ void NntpProcessor::ServArticle()
 
 	bool ok = false;
 
-#ifdef NZBGET_USE_RUST
 	int nameLen = 0, part = 0, size = 0, servOff = -1;
 	int64 offset = 0;
 	if (nzbget_rs_feh_nntp_parse_message_id(
@@ -325,52 +275,11 @@ void NntpProcessor::ServArticle()
 	{
 		m_connection->WriteLine("430 No Such Article Found (invalid message id format)\r\n");
 	}
-#else
-	const char* from = strchr(m_messageid, '?');
-	const char* off = strchr(m_messageid, '=');
-	const char* to = strchr(m_messageid, ':');
-	const char* end = strchr(m_messageid, '>');
-	const char* serv = strchr(m_messageid, '!');
-
-	if (from && off && to && end)
-	{
-		m_filename.Set(m_messageid + 1, (int)(from - m_messageid - 1));
-		m_part = atoi(from + 1);
-		m_offset = atoll(off + 1);
-		m_size = atoi(to + 1);
-
-		ok = !serv || ServerInList(serv + 1);
-
-		if (ok)
-		{
-			SendSegment();
-			return;
-		}
-
-		m_connection->WriteLine("430 No Such Article Found\r\n");
-	}
-	else
-	{
-		m_connection->WriteLine("430 No Such Article Found (invalid message id format)\r\n");
-	}
-#endif
 }
 
 bool NntpProcessor::ServerInList(const char* servList)
 {
-#ifdef NZBGET_USE_RUST
 	return nzbget_rs_feh_nntp_server_in_list(servList, m_serverId) != 0;
-#else
-	Tokenizer tok(servList, ",");
-	while (const char* servid = tok.Next())
-	{
-		if (atoi(servid) == m_serverId)
-		{
-			return true;
-		}
-	}
-	return false;
-#endif
 }
 
 void NntpProcessor::SendSegment()
@@ -498,26 +407,11 @@ void NntpProcessor::SendData(const char* buffer, int size)
 		return;
 	}
 
-#ifdef NZBGET_USE_RUST
 	int64 expectedTime = 0;
 	int chunkNum = 0, chunkSize = 0, pause = 0;
 	nzbget_rs_feh_nntp_calc_send_chunks(
 		size, m_speed, Util::CurrentTicks() - m_start,
 		&expectedTime, &chunkNum, &chunkSize, &pause);
-#else
-	int64 expectedTime = (int64)1000 * size / (m_speed * 1024) - (Util::CurrentTicks() - m_start) / 1000;
-
-	int chunkNum = 21;
-	int chunkSize = size;
-	int pause = 0;
-
-	while (pause < 1 && chunkNum > 1)
-	{
-		chunkNum--;
-		chunkSize = size / chunkNum;
-		pause = (int)(expectedTime / chunkNum);
-	}
-#endif
 
 	int sent = 0;
 	for (int i = 0; i < chunkNum; i++)

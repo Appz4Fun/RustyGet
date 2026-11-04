@@ -25,9 +25,7 @@
 #include "Util.h"
 #include "Options.h"
 #include "WorkState.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 static const int POSTPROCESS_PARCHECK = 92;
 static const int POSTPROCESS_SUCCESS = 93;
@@ -62,7 +60,6 @@ void PostScriptController::Run()
 
 	{
 		GuardedDownloadQueue guard = DownloadQueue::Guard();
-#ifdef NZBGET_USE_RUST
 		size_t pcount = m_postInfo->GetNzbInfo()->GetParameters()->size();
 		std::vector<const char*> pnames;
 		std::vector<const char*> pvals;
@@ -79,20 +76,6 @@ void PostScriptController::Run()
 			scriptCommaList.Append(listBuf.data);
 		}
 		nzbget_rs_free(listBuf);
-#else
-		for (NzbParameter& parameter : m_postInfo->GetNzbInfo()->GetParameters())
-		{
-			const char* varname = parameter.GetName();
-			if (strlen(varname) > 0 && varname[0] != '*' && varname[strlen(varname) - 1] == ':' &&
-				(!strcasecmp(parameter.GetValue(), "yes") || !strcasecmp(parameter.GetValue(), "on") || !strcasecmp(parameter.GetValue(), "1")))
-			{
-				CString scriptName(varname);
-				scriptName[strlen(scriptName) - 1] = '\0'; // remove trailing ':'
-				scriptCommaList.Append(scriptName);
-				scriptCommaList.Append(",");
-			}
-		}
-#endif
 		m_postInfo->GetNzbInfo()->GetScriptStatuses()->clear();
 	}
 
@@ -105,13 +88,9 @@ void PostScriptController::Run()
 void PostScriptController::ExecuteScript(std::shared_ptr<const Extension::Script> script)
 {
 	// if any script has requested par-check, do not execute other scripts
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_sfc_post_script_should_skip_execute(
 		script->GetPostScript() ? 1 : 0,
 		m_postInfo->GetRequestParCheck() ? 1 : 0) != 0)
-#else
-	if (!script->GetPostScript() || m_postInfo->GetRequestParCheck())
-#endif
 	{
 		return;
 	}
@@ -134,11 +113,7 @@ void PostScriptController::ExecuteScript(std::shared_ptr<const Extension::Script
 
 	
 	SetLogPrefix(m_script->GetDisplayName());
-#ifdef NZBGET_USE_RUST
 	m_prefixLen = nzbget_rs_sfc_script_ctrl_calc_prefix_len(strlen(m_script->GetDisplayName()));
-#else
-	m_prefixLen = strlen(m_script->GetDisplayName()) + 2; // 2 = strlen(": ");
-#endif
 	PrepareParams(m_script->GetName());
 
 	int exitCode = Execute();
@@ -189,7 +164,6 @@ void PostScriptController::PrepareParams(const char* scriptName)
 
 	// deprecated
 	int parStatusCodes[] = { 0, 0, 1, 2, 3, 4 };
-#ifdef NZBGET_USE_RUST
 	NzbInfo::EParStatus parStatus = (NzbInfo::EParStatus)nzbget_rs_sfc_post_script_resolve_compat_par_status(
 		(int)m_postInfo->GetNzbInfo()->GetParStatus(),
 		(int)NzbInfo::psFailure,
@@ -197,16 +171,6 @@ void PostScriptController::PrepareParams(const char* scriptName)
 		(int)NzbInfo::dsNone,
 		(int)m_postInfo->GetNzbInfo()->GetMarkStatus(),
 		(int)NzbInfo::ksBad);
-#else
-	NzbInfo::EParStatus parStatus = m_postInfo->GetNzbInfo()->GetParStatus();
-	// for downloads marked as bad and for deleted downloads pass par status "Failure"
-	// for compatibility with older scripts which don't check "NZBPP_TOTALSTATUS"
-	if (m_postInfo->GetNzbInfo()->GetDeleteStatus() != NzbInfo::dsNone ||
-		m_postInfo->GetNzbInfo()->GetMarkStatus() == NzbInfo::ksBad)
-	{
-		parStatus = NzbInfo::psFailure;
-	}
-#endif
 	SetIntEnvVar("NZBPP_PARSTATUS", parStatusCodes[parStatus]);
 
 	// deprecated
@@ -237,7 +201,6 @@ ScriptStatus::EStatus PostScriptController::AnalyseExitCode(int exitCode, const 
 	// The ScriptStatus is accumulated for all scripts:
 	// If any script has failed the status is "failure", etc.
 
-#ifdef NZBGET_USE_RUST
 #ifndef DISABLE_PARCHECK
 	constexpr int parcheckEnabled = 1;
 #else
@@ -282,50 +245,12 @@ ScriptStatus::EStatus PostScriptController::AnalyseExitCode(int exitCode, const 
 		m_postInfo->SetForceRepair(true);
 	}
 	return static_cast<ScriptStatus::EStatus>(status);
-#else
-	switch (exitCode)
-	{
-		case POSTPROCESS_SUCCESS:
-			PrintMessage(Message::mkInfo, "%s successful", upInfoName);
-			return ScriptStatus::srSuccess;
-
-		case POSTPROCESS_ERROR:
-		case -1: // Execute() returns -1 if the process could not be started (file not found or other problem)
-			PrintMessage(Message::mkError, "%s failed", upInfoName);
-			return ScriptStatus::srFailure;
-
-		case POSTPROCESS_NONE:
-			PrintMessage(Message::mkInfo, "%s skipped", upInfoName);
-			return ScriptStatus::srNone;
-
-#ifndef DISABLE_PARCHECK
-		case POSTPROCESS_PARCHECK:
-			if (m_postInfo->GetNzbInfo()->GetParStatus() > NzbInfo::psSkipped)
-			{
-				PrintMessage(Message::mkError, "%s requested par-check/repair, but the collection was already checked", upInfoName);
-				return ScriptStatus::srFailure;
-			}
-			else
-			{
-				PrintMessage(Message::mkInfo, "%s requested par-check/repair", upInfoName);
-				m_postInfo->SetRequestParCheck(true);
-				m_postInfo->SetForceRepair(true);
-				return ScriptStatus::srSuccess;
-			}
-#endif
-
-		default:
-			PrintMessage(Message::mkError, "%s failed (terminated with unknown status)", upInfoName);
-			return ScriptStatus::srFailure;
-	}
-#endif
 }
 
 void PostScriptController::AddMessage(Message::EKind kind, const char* text)
 {
 	const char* msgText = text + m_prefixLen;
 
-#ifdef NZBGET_USE_RUST
 	NzbgetRsPostScriptCmd cmd{};
 	int cmdKind = nzbget_rs_sus_parse_post_script_cmd(msgText, &cmd);
 	if (cmdKind != 0)
@@ -361,58 +286,12 @@ void PostScriptController::AddMessage(Message::EKind kind, const char* text)
 		}
 	}
 	else
-#else
-	if (!strncmp(msgText, "[NZB] ", 6))
-	{
-		debug("Command %s detected", msgText + 6);
-		if (!strncmp(msgText + 6, "FINALDIR=", 9))
-		{
-			GuardedDownloadQueue guard = DownloadQueue::Guard();
-			m_postInfo->GetNzbInfo()->SetFinalDir(msgText + 6 + 9);
-		}
-		else if (!strncmp(msgText + 6, "DIRECTORY=", 10))
-		{
-			GuardedDownloadQueue guard = DownloadQueue::Guard();
-			m_postInfo->GetNzbInfo()->SetDestDir(msgText + 6 + 10);
-		}
-		else if (!strncmp(msgText + 6, "NZBPR_", 6))
-		{
-			CString param = msgText + 6 + 6;
-			char* value = strchr(param, '=');
-			if (value)
-			{
-				*value = '\0';
-				GuardedDownloadQueue guard = DownloadQueue::Guard();
-				m_postInfo->GetNzbInfo()->GetParameters()->SetParameter(param, value + 1);
-			}
-			else
-			{
-				m_postInfo->GetNzbInfo()->PrintMessage(Message::mkError,
-					"Invalid command \"%s\" received from %s", msgText, GetInfoName());
-			}
-		}
-		else if (!strncmp(msgText + 6, "MARK=BAD", 8))
-		{
-			SetLogPrefix(nullptr);
-			PrintMessage(Message::mkWarning, "Marking %s as bad", m_postInfo->GetNzbInfo()->GetName());
-			SetLogPrefix(m_script->GetDisplayName());
-			m_postInfo->GetNzbInfo()->SetMarkStatus(NzbInfo::ksBad);
-		}
-		else
-		{
-			m_postInfo->GetNzbInfo()->PrintMessage(Message::mkError,
-				"Invalid command \"%s\" received from %s", msgText, GetInfoName());
-		}
-	}
-	else
-#endif
 	{
 		m_postInfo->GetNzbInfo()->AddMessage(kind, text);
 		GuardedDownloadQueue guard = DownloadQueue::Guard();
 		m_postInfo->SetProgressLabel(text);
 	}
 
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_sfc_post_script_is_paused_wait_active(
 		g_WorkState->GetPausePostProcess() ? 1 : 0,
 		m_postInfo->GetNzbInfo()->GetForcePriority() ? 1 : 0,
@@ -445,34 +324,6 @@ void PostScriptController::AddMessage(Message::EKind kind, const char* text)
 			}
 		}
 	}
-#else
-	if (g_WorkState->GetPausePostProcess() && !m_postInfo->GetNzbInfo()->GetForcePriority())
-	{
-		time_t stageTime = m_postInfo->GetStageTime();
-		time_t startTime = m_postInfo->GetStartTime();
-		time_t waitTime = Util::CurrentTime();
-
-		// wait until Post-processor is unpaused
-		while (g_WorkState->GetPausePostProcess() && !m_postInfo->GetNzbInfo()->GetForcePriority() && !IsStopped())
-		{
-			Util::Sleep(100);
-
-			// update time stamps
-
-			time_t delta = Util::CurrentTime() - waitTime;
-
-			if (stageTime > 0)
-			{
-				m_postInfo->SetStageTime(stageTime + delta);
-			}
-
-			if (startTime > 0)
-			{
-				m_postInfo->SetStartTime(startTime + delta);
-			}
-		}
-	}
-#endif
 }
 
 void PostScriptController::Stop()

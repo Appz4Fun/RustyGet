@@ -25,9 +25,7 @@
 #include "Log.h"
 #include "Util.h"
 #include "FileSystem.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 static const int COMMANDPROCESS_SUCCESS = 93;
 static const int COMMANDPROCESS_ERROR = 94;
@@ -76,7 +74,6 @@ void CommandScriptController::ExecuteScript(std::shared_ptr<const Extension::Scr
 	infoName[0] = 'S'; // uppercase
 	SetLogPrefix(nullptr);
 
-#ifdef NZBGET_USE_RUST
 	switch (nzbget_rs_euh_cmd_script_classify_exit_code(exitCode))
 	{
 		case 0:
@@ -89,23 +86,6 @@ void CommandScriptController::ExecuteScript(std::shared_ptr<const Extension::Scr
 			PrintMessage(Message::mkError, "%s failed (terminated with unknown status)", *infoName);
 			break;
 	}
-#else
-	switch (exitCode)
-	{
-		case COMMANDPROCESS_SUCCESS:
-			PrintMessage(Message::mkInfo, "%s successful", *infoName);
-			break;
-
-		case COMMANDPROCESS_ERROR:
-		case -1: // Execute() returns -1 if the process could not be started (file not found or other problem)
-			PrintMessage(Message::mkError, "%s failed", *infoName);
-			break;
-
-		default:
-			PrintMessage(Message::mkError, "%s failed (terminated with unknown status)", *infoName);
-			break;
-	}
-#endif
 }
 
 void CommandScriptController::PrepareParams(const char* scriptName)
@@ -142,11 +122,7 @@ void CommandScriptLog::AddMessage(int scriptId, Message::EKind kind, const char 
 	Guard guard(m_logMutex);
 
 	// save only messages from the last started script
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_sfc_cmd_script_should_append_log_message(scriptId, m_idScriptGen) != 0)
-#else
-	if (scriptId == m_idScriptGen)
-#endif
 	{
 		m_messages.emplace_back(++m_idMessageGen, kind, Util::CurrentTime(), text);
 	}

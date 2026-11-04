@@ -21,9 +21,7 @@
 
 #include "FeedsValidator.h"
 #include "FeedValidator.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 namespace SystemHealth::Feeds
 {
@@ -49,7 +47,6 @@ Status DuplicateFeedsValidator::Validate() const
 {
 	if (m_feeds.empty()) return Status::Ok();
 
-#ifdef NZBGET_USE_RUST
 	std::vector<const char*> ptrs(m_feeds.size());
 	std::vector<size_t> lens(m_feeds.size());
 	for (size_t i = 0; i < m_feeds.size(); ++i)
@@ -67,28 +64,5 @@ Status DuplicateFeedsValidator::Validate() const
 							   std::string(m_feeds[dupIdx]->GetName()) + "' have the same URL");
 	}
 	return Status::Ok();
-#else
-	std::map<std::string_view, std::string_view> seenUrls;
-
-	for (const auto& feed : m_feeds)
-	{
-		std::string_view url = feed->GetUrl();
-		if (url.empty()) continue;
-
-		auto it = seenUrls.find(url);
-		if (it != seenUrls.end())
-		{
-			std::string_view firstFeedName = it->second;
-			std::string_view currentFeedName = feed->GetName();
-
-			return Status::Warning("Feeds '" + std::string(firstFeedName) + "' and '" +
-								   std::string(currentFeedName) + "' have the same URL");
-		}
-
-		seenUrls.emplace(url, feed->GetName());
-	}
-
-	return Status::Ok();
-#endif
 }
 }  // namespace SystemHealth::Feeds

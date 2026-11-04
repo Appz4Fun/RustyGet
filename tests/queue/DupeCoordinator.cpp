@@ -25,9 +25,7 @@
 #include "DupeCoordinator.h"
 #include "FileSystem.h"
 #include "Options.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 BOOST_AUTO_TEST_SUITE(QueueTest)
 
@@ -223,7 +221,6 @@ BOOST_AUTO_TEST_CASE(DupeCoordinatorFindDupeBackupTest)
 	BOOST_CHECK(coordinator.FindDupeBackup(&queue, item, item->GetName(), item->GetDupeKey()) == nullptr);
 }
 
-#ifdef NZBGET_USE_RUST
 BOOST_AUTO_TEST_CASE(RustDupeCoordinatorFfiParity)
 {
 	BOOST_CHECK_NE(nzbget_rs_dupecoord_same_name_or_key("Movie.A", "imdb:123", "Movie.B", "IMDB:123"), 0);
@@ -278,6 +275,5 @@ BOOST_AUTO_TEST_CASE(RustDupeCoordinatorFfiParity)
 	BOOST_CHECK_EQUAL(nzbget_rs_dsp_classify_missed_articles(2, 50, 0), 1);
 	BOOST_CHECK_EQUAL(nzbget_rs_dsp_classify_missed_articles(10, 50, 0), 2);
 }
-#endif
 
 BOOST_AUTO_TEST_SUITE_END()

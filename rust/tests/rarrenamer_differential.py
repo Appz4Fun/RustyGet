@@ -22,6 +22,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 REFERENCE = "02c80b7b"
+FALLBACK_REFERENCE = "4cf19abdb8f084a384769a15cf57e56acf86f363"
 BUILD = Path(sys.argv[1]).resolve()
 ROUNDS = sys.argv[2] if len(sys.argv) > 2 else "200"
 
@@ -38,6 +39,16 @@ def renamed(src, hdr, prefix, fallback=False):
 
 old_src = subprocess.check_output(["git", "show", f"{REFERENCE}:daemon/postprocess/RarRenamer.cpp"], cwd=ROOT, text=True)
 new_src = (ROOT / "daemon/postprocess/RarRenamer.cpp").read_text()
+fallback_src = (
+    new_src
+    if "#ifdef NZBGET_USE_RUST" in new_src
+    else subprocess.check_output(["git", "show", f"{FALLBACK_REFERENCE}:daemon/postprocess/RarRenamer.cpp"], cwd=ROOT, text=True)
+)
+fallback_header = (
+    header
+    if "#ifdef NZBGET_USE_RUST" in header
+    else subprocess.check_output(["git", "show", f"{FALLBACK_REFERENCE}:daemon/postprocess/RarRenamer.h"], cwd=ROOT, text=True)
+)
 
 flags = (BUILD / "CMakeFiles/libnzbget.dir/flags.make").read_text()
 get = lambda k: re.search(rf"^{k} = (.*)$", flags, re.M).group(1)
@@ -50,7 +61,7 @@ globals_block = tests_main[tests_main.index('#include "ServerPool.h"'):tests_mai
 volumes = sorted(str(p) for p in (ROOT / "tests/testdata").rglob("*") if re.search(r"\.(rar|r\d\d)$", p.name))
 
 decls = "\n".join(re.sub(r"\bRarRenamer\b", p + "RarRenamer", h).replace("RARRENAMER_H", p.upper() + "RARRENAMER_H")
-                  for h, p in ((old_header, "Old"), (header, "Fallback")))
+                  for h, p in ((old_header, "Old"), (fallback_header, "Fallback")))
 
 main = r'''
 #include "nzbget.h"
@@ -222,7 +233,7 @@ def instrument(src, hdr, prefix, fallback=False):
 
 probe_source = (probe_prelude + instrument(old_src, old_header, "ProbeOld")
                 + instrument(new_src, header, "ProbeRust")
-                + instrument(new_src, header, "ProbeFallback", fallback=True)
+                + instrument(fallback_src, fallback_header, "ProbeFallback", fallback=True)
                 + (ROOT / "rust/tests/rarrenamer_metadata.cpp").read_text())
 
 with tempfile.TemporaryDirectory(prefix="nzbget-rarrenamer-") as temp:
@@ -230,7 +241,7 @@ with tempfile.TemporaryDirectory(prefix="nzbget-rarrenamer-") as temp:
     (temp / "main.cpp").write_text(main)
     (temp / "metadata.cpp").write_text(probe_source)
     (temp / "old.cpp").write_text(renamed(old_src, old_header, "Old"))
-    (temp / "fallback.cpp").write_text(renamed(new_src, header, "Fallback", fallback=True))
+    (temp / "fallback.cpp").write_text(renamed(fallback_src, fallback_header, "Fallback", fallback=True))
     binary = temp / "rarrenamer"
     for extra, rounds in ((["-O1", "-g", "-fsanitize=address,undefined", "-fno-sanitize-recover=all"], str(max(1, int(ROUNDS) // 4))), ([], ROUNDS)):
         subprocess.run([*shlex.split(os.environ.get("CXX", "c++")), *shlex.split(get("CXX_FLAGS")), *shlex.split(get("CXX_DEFINES")),

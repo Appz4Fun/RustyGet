@@ -21,9 +21,7 @@
 
 #include "nzbget.h"
 #include "WebDownloader.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 #include "Log.h"
 #include "Options.h"
 #include "WorkState.h"
@@ -63,21 +61,11 @@ void WebDownloader::Run()
 
 	SetStatus(adRunning);
 
-#ifdef NZBGET_USE_RUST
 	int remainedDownloadRetries = 1;
 	int remainedConnectRetries = 1;
 	nzbget_rs_ntw_webdl_calc_initial_retries(
 		g_Options->GetUrlRetries(), m_retry ? 1 : 0,
 		&remainedDownloadRetries, &remainedConnectRetries);
-#else
-	int remainedDownloadRetries = g_Options->GetUrlRetries() > 0 ? g_Options->GetUrlRetries() : 1;
-	int remainedConnectRetries = remainedDownloadRetries > 10 ? remainedDownloadRetries : 10;
-	if (!m_retry)
-	{
-		remainedDownloadRetries = 1;
-		remainedConnectRetries = 1;
-	}
-#endif
 
 	EStatus Status = adFailed;
 
@@ -87,17 +75,11 @@ void WebDownloader::Run()
 
 		Status = DownloadWithRedirects(5);
 
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_ntw_webdl_should_wait_before_retry(
 			(int)Status, (int)adFailed, (int)adConnectError,
 			remainedDownloadRetries, remainedConnectRetries,
 			IsStopped() ? 1 : 0, m_force ? 1 : 0,
 			g_WorkState->GetPauseDownload() ? 1 : 0) != 0)
-#else
-		if ((((Status == adFailed) && (remainedDownloadRetries > 1)) ||
-			((Status == adConnectError) && (remainedConnectRetries > 1)))
-			&& !IsStopped() && !(!m_force && g_WorkState->GetPauseDownload()))
-#endif
 		{
 			detail("Waiting %i sec to retry", g_Options->GetUrlInterval());
 			int msec = 0;
@@ -112,7 +94,6 @@ void WebDownloader::Run()
 			}
 		}
 
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_rrd_webdl_should_abort_retry_loop(
 			IsStopped() ? 1 : 0, m_force ? 1 : 0, g_WorkState->GetPauseDownload() ? 1 : 0) != 0)
 		{
@@ -133,33 +114,6 @@ void WebDownloader::Run()
 
 	Status = (EStatus)nzbget_rs_rrd_webdl_resolve_final_loop_status(
 		(int)Status, (int)adFinished, (int)adRetry, (int)adFailed);
-#else
-		if (IsStopped() || (!m_force && g_WorkState->GetPauseDownload()))
-		{
-			Status = adRetry;
-			break;
-		}
-
-		if (Status == adFinished || Status == adFatalError || Status == adNotFound)
-		{
-			break;
-		}
-
-		if (Status != adConnectError)
-		{
-			remainedDownloadRetries--;
-		}
-		else
-		{
-			remainedConnectRetries--;
-		}
-	}
-
-	if (Status != adFinished && Status != adRetry)
-	{
-		Status = adFailed;
-	}
-#endif
 
 	if (Status == adFailed)
 	{
@@ -238,7 +192,6 @@ WebDownloader::EStatus WebDownloader::DownloadWithRedirects(int maxRedirects)
 {
 	// do sync download, following redirects
 	EStatus status = adRedirect;
-#ifdef NZBGET_USE_RUST
 	int tooManyRedirects = 0;
 	while (nzbget_rs_dds_webdl_redirect_loop_step(
 		(int)status, (int)adRedirect, maxRedirects, &tooManyRedirects) != 0)
@@ -252,26 +205,12 @@ WebDownloader::EStatus WebDownloader::DownloadWithRedirects(int maxRedirects)
 		warn("Too many redirects for %s", *m_infoName);
 		status = adFailed;
 	}
-#else
-	while (status == adRedirect && maxRedirects >= 0)
-	{
-		maxRedirects--;
-		status = Download();
-	}
-
-	if (status == adRedirect && maxRedirects < 0)
-	{
-		warn("Too many redirects for %s", *m_infoName);
-		status = adFailed;
-	}
-#endif
 
 	return status;
 }
 
 WebDownloader::EStatus WebDownloader::CreateConnection(URL *url)
 {
-#ifdef NZBGET_USE_RUST
 	int tlsDisabled = 0;
 #ifdef DISABLE_TLS
 	tlsDisabled = 1;
@@ -297,39 +236,6 @@ WebDownloader::EStatus WebDownloader::CreateConnection(URL *url)
 		return adFatalError;
 	}
 	bool tls = tlsInt != 0;
-#else
-	if (!url->IsValid())
-	{
-		error("URL is not valid: %s", url->GetAddress());
-		return adFatalError;
-	}
-
-	int port = url->GetPort();
-	if (port == 0 && !strcasecmp(url->GetProtocol(), "http"))
-	{
-		port = 80;
-	}
-	if (port == 0 && !strcasecmp(url->GetProtocol(), "https"))
-	{
-		port = 443;
-	}
-
-	if (strcasecmp(url->GetProtocol(), "http") && strcasecmp(url->GetProtocol(), "https"))
-	{
-		error("Unsupported protocol in URL: %s", url->GetAddress());
-		return adFatalError;
-	}
-
-#ifdef DISABLE_TLS
-	if (!strcasecmp(url->GetProtocol(), "https"))
-	{
-		error("Program was compiled without TLS/SSL-support. Cannot download using https protocol. URL: %s", url->GetAddress());
-		return adFatalError;
-	}
-#endif
-
-	bool tls = !strcasecmp(url->GetProtocol(), "https");
-#endif
 
 	m_connection = std::make_unique<Connection>(url->GetHost(), port, tls);
 
@@ -347,12 +253,7 @@ void WebDownloader::SendHeaders(URL *url)
 	m_connection->WriteLine(CString::FormatStr("GET %s HTTP/1.0\r\n", url->GetResource()));
 	m_connection->WriteLine(BString<1024>("User-Agent: nzbget/%s\r\n", Util::VersionRevision()));
 
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_ntw_webdl_is_default_http_port(url->GetProtocol(), url->GetPort()) != 0)
-#else
-	if ((!strcasecmp(url->GetProtocol(), "http") && (url->GetPort() == 80 || url->GetPort() == 0)) ||
-		(!strcasecmp(url->GetProtocol(), "https") && (url->GetPort() == 443 || url->GetPort() == 0)))
-#endif
 	{
 		m_connection->WriteLine(BString<1024>("Host: %s\r\n", url->GetHost()));
 	}
@@ -413,11 +314,7 @@ WebDownloader::EStatus WebDownloader::DownloadHeaders()
 		debug("Header: %s", line);
 
 		// detect body of response
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_ntw_webdl_is_header_end_line((unsigned char)*line) != 0)
-#else
-		if (*line == '\r' || *line == '\n')
-#endif
 		{
 			break;
 		}
@@ -466,7 +363,6 @@ WebDownloader::EStatus WebDownloader::DownloadBody()
 			buffer = lineBuf;
 		}
 
-#ifdef NZBGET_USE_RUST
 		if (len <= 0)
 		{
 			if (nzbget_rs_rco_webdl_check_body_chunk(
@@ -498,39 +394,6 @@ WebDownloader::EStatus WebDownloader::DownloadBody()
 			end = true;
 			break;
 		}
-#else
-		// Connection closed or timeout?
-		if (len <= 0)
-		{
-			if (len == 0 && m_contentLen == -1 && writtenLen > 0)
-			{
-				end = true;
-				break;
-			}
-
-			if (!IsStopped())
-			{
-				warn("URL %s failed: Unexpected end of file", *m_infoName);
-			}
-			Status = adFailed;
-			break;
-		}
-
-		// write to output file
-		if (!Write(buffer, len))
-		{
-			Status = adFatalError;
-			break;
-		}
-		writtenLen += len;
-
-		//detect end of file
-		if (writtenLen == m_contentLen || (m_contentLen == -1 && m_gzip && m_confirmedLength))
-		{
-			end = true;
-			break;
-		}
-#endif
 	}
 
 #ifndef DISABLE_GZIP
@@ -539,7 +402,6 @@ WebDownloader::EStatus WebDownloader::DownloadBody()
 
 	m_outFile.Close();
 
-#ifdef NZBGET_USE_RUST
 	int warnIncomplete = 0;
 	Status = (EStatus)nzbget_rs_rrd_webdl_resolve_body_end_status(
 		end ? 1 : 0, (int)Status, IsStopped() ? 1 : 0,
@@ -548,23 +410,10 @@ WebDownloader::EStatus WebDownloader::DownloadBody()
 	{
 		warn("URL %s failed: file incomplete", *m_infoName);
 	}
-#else
-	if (!end && Status == adRunning && !IsStopped())
-	{
-		warn("URL %s failed: file incomplete", *m_infoName);
-		Status = adFailed;
-	}
-
-	if (end)
-	{
-		Status = adFinished;
-	}
-#endif
 
 	return Status;
 }
 
-#ifdef NZBGET_USE_RUST
 WebDownloader::EStatus WebDownloader::CheckResponse(const char* response)
 {
 	// rust/src/webdownload.rs decides; the warnings are logged here
@@ -610,60 +459,7 @@ WebDownloader::EStatus WebDownloader::CheckResponse(const char* response)
 			return adFailed;
 	}
 }
-#else
-WebDownloader::EStatus WebDownloader::CheckResponse(const char* response)
-{
-	if (!response)
-	{
-		if (!IsStopped())
-		{
-			warn("URL %s: Connection closed by remote host", *m_infoName);
-		}
-		return adConnectError;
-	}
 
-	const char* hTTPResponse = strchr(response, ' ');
-	if (strncmp(response, "HTTP", 4) || !hTTPResponse)
-	{
-		warn("URL %s failed: %s", *m_infoName, response);
-		return adFailed;
-	}
-
-	hTTPResponse++;
-	m_httpStatus = atoi(hTTPResponse);
-
-	if (!strncmp(hTTPResponse, "400", 3) || !strncmp(hTTPResponse, "499", 3))
-	{
-		warn("URL %s failed: %s", *m_infoName, hTTPResponse);
-		return adConnectError;
-	}
-	else if (!strncmp(hTTPResponse, "404", 3))
-	{
-		warn("URL %s failed: %s", *m_infoName, hTTPResponse);
-		return adNotFound;
-	}
-	else if (!strncmp(hTTPResponse, "301", 3) || !strncmp(hTTPResponse, "302", 3) ||
-		 !strncmp(hTTPResponse, "303", 3) || !strncmp(hTTPResponse, "307", 3) ||
-		 !strncmp(hTTPResponse, "308", 3))
-	{
-		m_redirecting = true;
-		return adRunning;
-	}
-	else if (!strncmp(hTTPResponse, "200", 3))
-	{
-		// OK
-		return adRunning;
-	}
-	else
-	{
-		// unknown error, no special handling
-		warn("URL %s failed: %s", *m_infoName, response);
-		return adFailed;
-	}
-}
-#endif
-
-#ifdef NZBGET_USE_RUST
 void WebDownloader::ProcessHeader(const char* line)
 {
 	// rust/src/webdownload.rs
@@ -689,29 +485,6 @@ void WebDownloader::ProcessHeader(const char* line)
 			break;
 	}
 }
-#else
-void WebDownloader::ProcessHeader(const char* line)
-{
-	if (!strncasecmp(line, "Content-Length: ", 16))
-	{
-		m_contentLen = atoi(line + 16);
-		m_confirmedLength = true;
-	}
-	else if (!strncasecmp(line, "Content-Encoding: gzip", 22))
-	{
-		m_gzip = true;
-	}
-	else if (!strncasecmp(line, "Content-Disposition: ", 21))
-	{
-		ParseFilename(line);
-	}
-	else if (m_redirecting && !strncasecmp(line, "Location: ", 10))
-	{
-		ParseRedirect(line + 10);
-		m_redirected = true;
-	}
-}
-#endif
 
 void WebDownloader::ParseFilename(const char* contentDisposition)
 {
@@ -726,7 +499,6 @@ void WebDownloader::ParseFilename(const char* contentDisposition)
 	debug("OriginalFilename: %s", *m_originalFilename);
 }
 
-#ifdef NZBGET_USE_RUST
 void WebDownloader::ParseRedirect(const char* location)
 {
 	// rust/src/webdownload.rs resolves the address
@@ -739,73 +511,6 @@ void WebDownloader::ParseRedirect(const char* location)
 	detail("URL %s redirected to %s", noQuery(m_url).c_str(), noQuery(newLocation.c_str()).c_str());
 	SetUrl(newLocation.c_str());
 }
-#else
-void WebDownloader::ParseRedirect(const char* location)
-{
-	const char* newLocation = location;
-	CString urlBuf;
-	URL newUrl(newLocation);
-	if (!newUrl.IsValid() && !strncmp(location, "//", 2))
-	{
-		// protocol-relative: another host, same protocol
-		URL oldUrl(m_url);
-		// Preserve the legacy CRT's "(null)" text without passing null to %s.
-		urlBuf.Format("%s:%s", oldUrl.GetProtocol() ? oldUrl.GetProtocol() : "(null)", location);
-		newLocation = urlBuf;
-	}
-	else if (!newUrl.IsValid())
-	{
-		// redirect within host
-
-		CString resource;
-		URL oldUrl(m_url);
-
-		if (*location == '/')
-		{
-			// absolute path within host
-			resource = location;
-		}
-		else
-		{
-			// relative path within host
-			// An invalid base has a null resource. Treat it as empty, as the
-			// Rust path does, instead of passing nullptr to strchr/strrchr.
-			resource = oldUrl.GetResource() ? oldUrl.GetResource() : "";
-
-			char* p = strchr(resource, '?');
-			if (p)
-			{
-				*p = '\0';
-			}
-
-			p = strrchr(resource, '/');
-			if (p)
-			{
-				p[1] = '\0';
-			}
-
-			resource.Append(location);
-		}
-
-		const char* protocol = oldUrl.GetProtocol() ? oldUrl.GetProtocol() : "(null)";
-		const char* host = oldUrl.GetHost() ? oldUrl.GetHost() : "(null)";
-		if (oldUrl.GetPort() > 0)
-		{
-			urlBuf.Format("%s://%s:%i%s", protocol, host, oldUrl.GetPort(), *resource);
-		}
-		else
-		{
-			urlBuf.Format("%s://%s%s", protocol, host, *resource);
-		}
-		newLocation = urlBuf;
-	}
-	// without the query: it carries api keys and passwords (indexer links do),
-	// and this went into the log
-	auto noQuery = [](const char* url) { return std::string(url, strcspn(url, "?")); };
-	detail("URL %s redirected to %s", noQuery(m_url).c_str(), noQuery(newLocation).c_str());
-	SetUrl(newLocation);
-}
-#endif
 
 bool WebDownloader::Write(void* buffer, int len)
 {

@@ -1644,8 +1644,6 @@ pub mod entrypoint {
         fn setlocale(category: c_int, locale: *const c_char) -> *mut c_char;
         fn time(tloc: *mut i64) -> i64;
         fn srand(seed: std::ffi::c_uint);
-        fn rapidyenc_decode_init();
-        fn rapidyenc_crc_init();
     }
 
     #[cfg(target_os = "macos")]
@@ -1691,8 +1689,6 @@ pub mod entrypoint {
         #[cfg(unix)]
         {
             setlocale(LC_CTYPE, c"".as_ptr());
-            rapidyenc_decode_init();
-            rapidyenc_crc_init();
         }
 
         let hooks = get_hooks().or_else(resolve_hooks);

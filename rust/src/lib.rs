@@ -90,6 +90,7 @@ pub mod dupedlstateconn;
 pub mod queuecoordfallbackhist;
 pub mod postunpackrenamehist;
 pub mod streamrepairparcheck;
+pub mod streamrepaircontentmap;
 
 pub mod deadpostings;
 pub mod dupewatch;

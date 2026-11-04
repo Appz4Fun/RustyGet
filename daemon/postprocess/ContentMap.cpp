@@ -1122,7 +1122,12 @@ std::unique_ptr<ContentMap> ContentMapper::BuildBareMap(const std::vector<SetMem
 {
 	int memberIndex = set.Members[0];
 	ContentSource* source = sources.GetSource(memberIndex);
+#ifdef NZBGET_USE_RUST
+	if (!nzbget_rs_src_content_map_can_build_bare_or_split_member(
+		source != nullptr ? 1 : 0, source ? source->Size() : 0))
+#else
 	if (!source || source->Size() <= 0)
+#endif
 	{
 		skipReason = "member unreadable";
 		return nullptr;
@@ -1154,7 +1159,12 @@ std::unique_ptr<ContentMap> ContentMapper::BuildSplitMap(const std::vector<SetMe
 	for (int memberIndex : set.Members)
 	{
 		ContentSource* source = sources.GetSource(memberIndex);
+#ifdef NZBGET_USE_RUST
+		if (!nzbget_rs_src_content_map_can_build_bare_or_split_member(
+			source != nullptr ? 1 : 0, source ? source->Size() : 0))
+#else
 		if (!source || source->Size() <= 0)
+#endif
 		{
 			// every member's size shapes the offsets after it - unlike rar
 			// volumes, a split set with an unreadable member cannot map at all
@@ -1311,8 +1321,14 @@ std::unique_ptr<ContentMap> ContentMapper::BuildRarMap(const std::vector<SetMemb
 				return nullptr;
 			}
 			ContentSource* source = sources.GetSource(set.Members[i]);
+#ifdef NZBGET_USE_RUST
+			if (!nzbget_rs_src_content_map_rar_data_run_geometry_valid(
+				innerFile.GetDataOffset(), innerFile.GetPackedSize(),
+				source != nullptr ? 1 : 0, source ? source->Size() : 0))
+#else
 			if (innerFile.GetDataOffset() < 0 || innerFile.GetPackedSize() < 0 ||
 				!source || innerFile.GetDataOffset() + innerFile.GetPackedSize() > source->Size())
+#endif
 			{
 				skipReason = "implausible data run geometry";
 				return nullptr;
@@ -1547,7 +1563,12 @@ std::unique_ptr<ContentMap> ContentMapper::BuildRarMap(const std::vector<SetMemb
 	int64 innerOffset = 0;
 	for (size_t i = 0; i < set.Members.size(); i++)
 	{
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_src_content_map_rar_can_emit_plain_run(
+			runs[i].DataOffset, runs[i].PackedSize))
+#else
 		if (runs[i].DataOffset >= 0 && runs[i].PackedSize > 0)
+#endif
 		{
 			map->GetRuns()->push_back({innerOffset, set.Members[i],
 				runs[i].DataOffset, runs[i].PackedSize});

@@ -4203,6 +4203,52 @@ int nzbget_rs_srp_parchecker_should_add_extra_file_entry(
 int nzbget_rs_srp_repair_ctrl_is_usable_par_block_candidate(
     int parsed, int block_count);
 
+/* Batch 42: streamrepaircontentmap (src_*) */
+int nzbget_rs_src_stream_repair_is_active_primary_server(
+    int active, int norm_level);
+int nzbget_rs_src_stream_repair_can_prove_donor_on_intact_file(
+    int target_set_empty, int donor_set_empty, int has_stand_in);
+int nzbget_rs_src_stream_repair_should_stop_intact_proof_loop(
+    int is_stopped, int tried, int max_intact_proof_files);
+int nzbget_rs_src_stream_repair_matches_intact_candidate_pass(
+    int same_number, int pass);
+int nzbget_rs_src_stream_repair_should_skip_size_probe_index(
+    int sized, int is_stopped, size_t index, size_t articles_len);
+int nzbget_rs_src_stream_repair_should_mark_completed_repaired(
+    int file_id, int target_file_id, int status, int cf_success);
+int nzbget_rs_src_stream_repair_should_mark_completed_recreated(
+    int file_id, int target_file_id, int status, int cf_failure);
+int nzbget_rs_src_stream_repair_verify_donor_completed(
+    int is_stopped, int64_t total_compared, int64_t required_compare,
+    int saw_varied_data, int* out_verified);
+int nzbget_rs_src_stream_repair_can_try_decompress_fallback(
+    int live_mode, int decompress_opt, int is_compressible);
+int nzbget_rs_src_stream_repair_verify_window_loop_stop(
+    int is_stopped, int64_t total_compared, int64_t required,
+    int saw_varied_data);
+int64_t nzbget_rs_src_stream_repair_calc_patch_chunk_size(
+    int64_t hole_end, int64_t pos, int64_t max_chunk);
+int nzbget_rs_src_stream_repair_is_member_valid_for_materialize(
+    int member_index, size_t files_len, int articles_empty);
+int nzbget_rs_src_stream_repair_is_materialized_member_complete(
+    int64_t member_size, int holes_empty);
+int nzbget_rs_src_stream_repair_classify_interrupted_job_update(
+    int target_holes_empty, int64_t target_decoded_size,
+    int64_t job_decoded_size, int* out_update_job_size);
+int nzbget_rs_src_content_map_is_empty_or_invalid_cipher_pieces(
+    int pieces_empty, int64_t cipher_range_size);
+int nzbget_rs_src_content_map_can_build_bare_or_split_member(
+    int has_source, int64_t source_size);
+int nzbget_rs_src_content_map_rar_data_run_geometry_valid(
+    int64_t data_offset, int64_t packed_size, int has_source,
+    int64_t source_size);
+int nzbget_rs_src_content_map_rar_can_emit_plain_run(
+    int64_t data_offset, int64_t packed_size);
+int nzbget_rs_src_parchecker_should_process_twin_missing_blocks(
+    int res, int e_repair_not_possible, int is_stopped);
+int nzbget_rs_src_repair_ctrl_should_fetch_more_par_pass(
+    int block_found, int block_needed);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

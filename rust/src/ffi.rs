@@ -26734,6 +26734,313 @@ pub extern "C" fn nzbget_rs_srp_repair_ctrl_is_usable_par_block_candidate(
     )
 }
 
+// --- Batch 42: streamrepaircontentmap (src_*) ---
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_src_stream_repair_is_active_primary_server(
+    active: c_int,
+    norm_level: c_int,
+) -> c_int {
+    i32::from(
+        crate::streamrepaircontentmap::src_stream_repair_is_active_primary_server(
+            active != 0,
+            norm_level,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_src_stream_repair_can_prove_donor_on_intact_file(
+    target_set_empty: c_int,
+    donor_set_empty: c_int,
+    has_stand_in: c_int,
+) -> c_int {
+    i32::from(
+        crate::streamrepaircontentmap::src_stream_repair_can_prove_donor_on_intact_file(
+            target_set_empty != 0,
+            donor_set_empty != 0,
+            has_stand_in != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_src_stream_repair_should_stop_intact_proof_loop(
+    is_stopped: c_int,
+    tried: c_int,
+    max_intact_proof_files: c_int,
+) -> c_int {
+    i32::from(
+        crate::streamrepaircontentmap::src_stream_repair_should_stop_intact_proof_loop(
+            is_stopped != 0,
+            tried,
+            max_intact_proof_files,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_src_stream_repair_matches_intact_candidate_pass(
+    same_number: c_int,
+    pass: c_int,
+) -> c_int {
+    i32::from(
+        crate::streamrepaircontentmap::src_stream_repair_matches_intact_candidate_pass(
+            same_number != 0,
+            pass,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_src_stream_repair_should_skip_size_probe_index(
+    sized: c_int,
+    is_stopped: c_int,
+    index: usize,
+    articles_len: usize,
+) -> c_int {
+    i32::from(
+        crate::streamrepaircontentmap::src_stream_repair_should_skip_size_probe_index(
+            sized != 0,
+            is_stopped != 0,
+            index,
+            articles_len,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_src_stream_repair_should_mark_completed_repaired(
+    file_id: c_int,
+    target_file_id: c_int,
+    status: c_int,
+    cf_success: c_int,
+) -> c_int {
+    i32::from(
+        crate::streamrepaircontentmap::src_stream_repair_should_mark_completed_repaired(
+            file_id,
+            target_file_id,
+            status,
+            cf_success,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_src_stream_repair_should_mark_completed_recreated(
+    file_id: c_int,
+    target_file_id: c_int,
+    status: c_int,
+    cf_failure: c_int,
+) -> c_int {
+    i32::from(
+        crate::streamrepaircontentmap::src_stream_repair_should_mark_completed_recreated(
+            file_id,
+            target_file_id,
+            status,
+            cf_failure,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_src_stream_repair_verify_donor_completed(
+    is_stopped: c_int,
+    total_compared: i64,
+    required_compare: i64,
+    saw_varied_data: c_int,
+    out_verified: *mut c_int,
+) -> c_int {
+    let mut verified = false;
+    let done = crate::streamrepaircontentmap::src_stream_repair_verify_donor_completed(
+        is_stopped != 0,
+        total_compared,
+        required_compare,
+        saw_varied_data != 0,
+        &mut verified,
+    );
+    if !out_verified.is_null() {
+        *out_verified = i32::from(verified);
+    }
+    i32::from(done)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_src_stream_repair_can_try_decompress_fallback(
+    live_mode: c_int,
+    decompress_opt: c_int,
+    is_compressible: c_int,
+) -> c_int {
+    i32::from(
+        crate::streamrepaircontentmap::src_stream_repair_can_try_decompress_fallback(
+            live_mode != 0,
+            decompress_opt != 0,
+            is_compressible != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_src_stream_repair_verify_window_loop_stop(
+    is_stopped: c_int,
+    total_compared: i64,
+    required: i64,
+    saw_varied_data: c_int,
+) -> c_int {
+    crate::streamrepaircontentmap::src_stream_repair_verify_window_loop_stop(
+        is_stopped != 0,
+        total_compared,
+        required,
+        saw_varied_data != 0,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_src_stream_repair_calc_patch_chunk_size(
+    hole_end: i64,
+    pos: i64,
+    max_chunk: i64,
+) -> i64 {
+    crate::streamrepaircontentmap::src_stream_repair_calc_patch_chunk_size(
+        hole_end,
+        pos,
+        max_chunk,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_src_stream_repair_is_member_valid_for_materialize(
+    member_index: c_int,
+    files_len: usize,
+    articles_empty: c_int,
+) -> c_int {
+    i32::from(
+        crate::streamrepaircontentmap::src_stream_repair_is_member_valid_for_materialize(
+            member_index,
+            files_len,
+            articles_empty != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_src_stream_repair_is_materialized_member_complete(
+    member_size: i64,
+    holes_empty: c_int,
+) -> c_int {
+    i32::from(
+        crate::streamrepaircontentmap::src_stream_repair_is_materialized_member_complete(
+            member_size,
+            holes_empty != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_src_stream_repair_classify_interrupted_job_update(
+    target_holes_empty: c_int,
+    target_decoded_size: i64,
+    job_decoded_size: i64,
+    out_update_job_size: *mut c_int,
+) -> c_int {
+    let mut update_job_size = false;
+    let action = crate::streamrepaircontentmap::src_stream_repair_classify_interrupted_job_update(
+        target_holes_empty != 0,
+        target_decoded_size,
+        job_decoded_size,
+        &mut update_job_size,
+    );
+    if !out_update_job_size.is_null() {
+        *out_update_job_size = i32::from(update_job_size);
+    }
+    action
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_src_content_map_is_empty_or_invalid_cipher_pieces(
+    pieces_empty: c_int,
+    cipher_range_size: i64,
+) -> c_int {
+    i32::from(
+        crate::streamrepaircontentmap::src_content_map_is_empty_or_invalid_cipher_pieces(
+            pieces_empty != 0,
+            cipher_range_size,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_src_content_map_can_build_bare_or_split_member(
+    has_source: c_int,
+    source_size: i64,
+) -> c_int {
+    i32::from(
+        crate::streamrepaircontentmap::src_content_map_can_build_bare_or_split_member(
+            has_source != 0,
+            source_size,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_src_content_map_rar_data_run_geometry_valid(
+    data_offset: i64,
+    packed_size: i64,
+    has_source: c_int,
+    source_size: i64,
+) -> c_int {
+    i32::from(
+        crate::streamrepaircontentmap::src_content_map_rar_data_run_geometry_valid(
+            data_offset,
+            packed_size,
+            has_source != 0,
+            source_size,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_src_content_map_rar_can_emit_plain_run(
+    data_offset: i64,
+    packed_size: i64,
+) -> c_int {
+    i32::from(
+        crate::streamrepaircontentmap::src_content_map_rar_can_emit_plain_run(
+            data_offset,
+            packed_size,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_src_parchecker_should_process_twin_missing_blocks(
+    res: c_int,
+    e_repair_not_possible: c_int,
+    is_stopped: c_int,
+) -> c_int {
+    i32::from(
+        crate::streamrepaircontentmap::src_parchecker_should_process_twin_missing_blocks(
+            res,
+            e_repair_not_possible,
+            is_stopped != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_src_repair_ctrl_should_fetch_more_par_pass(
+    block_found: c_int,
+    block_needed: c_int,
+) -> c_int {
+    i32::from(
+        crate::streamrepaircontentmap::src_repair_ctrl_should_fetch_more_par_pass(
+            block_found,
+            block_needed,
+        ),
+    )
+}
+
+
 
 
 

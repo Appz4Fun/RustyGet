@@ -496,7 +496,12 @@ ParChecker::EStatus ParChecker::RunParCheck(std::string parFilename)
 		if (AddDupeFiles())
 		{
 			res = GetRepairer()->Process(false);
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_src_parchecker_should_process_twin_missing_blocks(
+				(int)res, (int)Par2::eRepairNotPossible, IsStopped() ? 1 : 0))
+#else
 			if (!IsStopped() && res == Par2::eRepairNotPossible)
+#endif
 			{
 				res = static_cast<Par2::Result>(ProcessMorePars());
 			}
@@ -944,7 +949,13 @@ int ParChecker::ProcessTwinSet()
 	}
 
 	res = GetRepairer()->Process(false);
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_src_parchecker_should_process_twin_missing_blocks(
+		(int)res, (int)Par2::eRepairNotPossible,
+		(res == Par2::eRepairNotPossible && IsStopped()) ? 1 : 0))
+#else
 	if (res == Par2::eRepairNotPossible && !IsStopped())
+#endif
 	{
 #ifdef NZBGET_USE_RUST
 		int blockNeeded = nzbget_rs_psp_parchecker_calc_twin_blocks_needed(

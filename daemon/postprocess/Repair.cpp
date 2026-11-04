@@ -756,12 +756,20 @@ bool RepairController::RequestMorePars(NzbInfo* nzbInfo, const char* parFilename
 
 	FindPars(downloadQueue, nzbInfo, parFilename, availableBlocks, true, true, &curBlockFound);
 	blockFound += curBlockFound;
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_src_repair_ctrl_should_fetch_more_par_pass(blockFound, blockNeeded))
+#else
 	if (blockFound < blockNeeded)
+#endif
 	{
 		FindPars(downloadQueue, nzbInfo, parFilename, availableBlocks, true, false, &curBlockFound);
 		blockFound += curBlockFound;
 	}
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_src_repair_ctrl_should_fetch_more_par_pass(blockFound, blockNeeded))
+#else
 	if (blockFound < blockNeeded)
+#endif
 	{
 		FindPars(downloadQueue, nzbInfo, parFilename, availableBlocks, false, false, &curBlockFound);
 		blockFound += curBlockFound;
@@ -773,7 +781,11 @@ bool RepairController::RequestMorePars(NzbInfo* nzbInfo, const char* parFilename
 			return block1.m_blockCount < block2.m_blockCount;
 		});
 
+#ifdef NZBGET_USE_RUST
+	if (!nzbget_rs_src_repair_ctrl_should_fetch_more_par_pass(blockFound, blockNeeded))
+#else
 	if (blockFound >= blockNeeded)
+#endif
 	{
 #ifdef NZBGET_USE_RUST
 		std::vector<int> sortedCounts;

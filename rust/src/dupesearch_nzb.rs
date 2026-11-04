@@ -112,6 +112,37 @@ unsafe fn bytes<'a>(data: *const u8, len: usize) -> Option<&'a [u8]> {
     Some(unsafe { std::slice::from_raw_parts(data, len) })
 }
 
+/// Extracts the file name of a subject (`NameOfSubject` in `NzbReader.cpp`):
+/// the first quoted non-empty string (trimmed of ASCII whitespace), else
+/// `unquoted_subject_range(subject)`.
+pub fn name_of_subject_range(subject: &[u8]) -> (usize, usize) {
+    if let Some(open) = subject.iter().position(|&b| b == b'"') {
+        if let Some(rel_close) = subject[open + 1..].iter().position(|&b| b == b'"') {
+            let close = open + 1 + rel_close;
+            if close > open + 1 {
+                return trim_range(subject, open + 1, close);
+            }
+        }
+    }
+    unquoted_subject_range(subject)
+}
+
+/// # Safety
+/// data must point to len readable bytes (or be null for zero len).
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupesearch_name_of_subject(
+    data: *const u8,
+    len: usize,
+) -> SubjectRange {
+    let (start, end) = unsafe { bytes(data, len) }
+        .map(name_of_subject_range)
+        .unwrap_or((0, 0));
+    SubjectRange {
+        start,
+        len: end - start,
+    }
+}
+
 /// # Safety
 /// data must point to len readable bytes (or be null for zero len).
 #[no_mangle]

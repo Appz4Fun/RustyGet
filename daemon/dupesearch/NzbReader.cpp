@@ -41,16 +41,8 @@ namespace
 // the file name of a subject: the first quoted string, else the whole subject
 std::string NameOfSubject(const std::string& subject)
 {
-	size_t open = subject.find('"');
-	if (open != std::string::npos)
-	{
-		size_t close = subject.find('"', open + 1);
-		if (close != std::string::npos && close > open + 1)
-		{
-			return Trim(subject.substr(open + 1, close - open - 1));
-		}
-	}
-	NzbgetRsSubjectRange range = nzbget_rs_dupesearch_unquoted_subject((const uint8_t*)subject.data(), subject.size());
+	NzbgetRsSubjectRange range = nzbget_rs_dupesearch_name_of_subject(
+		(const uint8_t*)subject.data(), subject.size());
 	return subject.substr(range.start, range.len);
 }
 
@@ -303,34 +295,45 @@ bool NzbReader::Parse(const std::string& data, NzbSummary& summary)
         }
     }
 
-	std::string mainName;
-	long long mainSize = -1;
-	std::string anyName;
-	long long anySize = -1;
+	std::vector<const std::string*> sizeNames;
+	std::vector<int64_t> sizeVals;
+	std::vector<uint8_t> sizeIsPar;
+	sizeNames.reserve(reader.sizes.size());
+	sizeVals.reserve(reader.sizes.size());
+	sizeIsPar.reserve(reader.sizes.size());
 	for (const auto& entry : reader.sizes)
 	{
-		summary.totalBytes += entry.second;
 		summary.filenames.insert(Lower(entry.first));
-		if (entry.second > anySize)
-		{
-			anySize = entry.second;
-			anyName = entry.first;
-		}
-		if (!IsParName(entry.first) && entry.second > mainSize)
-		{
-			mainSize = entry.second;
-			mainName = entry.first;
-		}
+		sizeNames.push_back(&entry.first);
+		sizeVals.push_back(entry.second);
+		sizeIsPar.push_back(IsParName(entry.first) ? 1 : 0);
 	}
-	summary.mainName = mainSize >= 0 ? mainName : anyName;
+	int64_t totalBytes = 0;
+	ptrdiff_t mainIdx = nzbget_rs_din_nzb_reader_select_main_file(
+		sizeVals.data(), sizeIsPar.data(), sizeVals.size(), &totalBytes);
+	summary.totalBytes = totalBytes;
+	if (mainIdx >= 0 && (size_t)mainIdx < sizeNames.size())
+	{
+		summary.mainName = *sizeNames[(size_t)mainIdx];
+	}
 	if (reader.geometryValid)
 	{
 		summary.dataBytes = reader.dataBytes;
 		summary.dataFiles = reader.dataFiles;
-		summary.heads = std::move(reader.heads);
+		std::vector<int64_t> headBytes;
+		headBytes.reserve(reader.heads.size());
+		for (const auto& h : reader.heads)
+		{
+			headBytes.push_back(h.bytes);
+		}
+		size_t topIndices[3] = {};
+		size_t topCount = nzbget_rs_din_nzb_reader_select_top_heads(
+			headBytes.data(), headBytes.size(), topIndices, 3);
+		summary.heads.reserve(topCount);
+		for (size_t i = 0; i < topCount; i++)
+		{
+			summary.heads.push_back(std::move(reader.heads[topIndices[i]]));
+		}
 	}
-	std::stable_sort(summary.heads.begin(), summary.heads.end(),
-		[](const NzbSummary::Head& a, const NzbSummary::Head& b) { return a.bytes > b.bytes; });
-	if (summary.heads.size() > 3) summary.heads.resize(3);
 	return true;
 }

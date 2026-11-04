@@ -65,6 +65,49 @@ pub fn parse_line(line: &[u8], ulong_bits: u32) -> Option<(i64, Vec<u32>)> {
     Some((stamp, sketch))
 }
 
+/// Default dead-posting TTL in seconds (`DeadPostings::DeadTtlSec = 3 * 24 * 3600`).
+pub const DEAD_TTL_SEC: u64 = 3 * 24 * 3600;
+/// Maximum allowed forward clock skew in seconds (`24 * 3600`).
+pub const FUTURE_SKEW_SEC: u64 = 24 * 3600;
+
+/// Returns whether a dead-posting timestamp `recorded` is stale at time `now`
+/// (`DeadPostings::Prune` in `daemon/dupesearch/DeadPostings.cpp`).
+pub fn is_stale_timestamp(now: i64, recorded: i64) -> bool {
+    let current = now as u64;
+    let rec = recorded as u64;
+    if now >= recorded {
+        current.wrapping_sub(rec) >= DEAD_TTL_SEC
+    } else {
+        rec.wrapping_sub(current) > FUTURE_SKEW_SEC
+    }
+}
+
+/// Returns whether a dead-posting entry (`recorded`, `entry_sketch`) is still active at
+/// time `now` and matches `query_sketch` (`DeadPostings::IsDead` in `DeadPostings.cpp`).
+pub fn is_active_entry_match(
+    now: i64,
+    recorded: i64,
+    query_sketch: &[u32],
+    entry_sketch: &[u32],
+) -> bool {
+    let active = now < recorded || (now as u64).wrapping_sub(recorded as u64) < DEAD_TTL_SEC;
+    active && crate::posting::same_sketch(query_sketch, entry_sketch)
+}
+
+/// Formats one persisted dead-posting line (`"{stamp}\t{h0},{h1},...\t\n"`,
+/// `DeadPostings::Save` in `DeadPostings.cpp`).
+pub fn format_deadpostings_line(stamp: i64, hashes: &[u32]) -> Vec<u8> {
+    let mut out = format!("{stamp}\t");
+    for (i, &h) in hashes.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&h.to_string());
+    }
+    out.push_str("\t\n");
+    out.into_bytes()
+}
+
 /// Parse one persisted line and visit its complete sorted sketch once.
 ///
 /// # Safety
@@ -85,6 +128,20 @@ pub unsafe extern "C" fn nzbget_rs_deadpostings_parse(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn test_stale_active_and_format_line() {
+        let now = 1_000_000i64;
+        assert!(!is_stale_timestamp(now, now));
+        assert!(!is_stale_timestamp(now + DEAD_TTL_SEC as i64 - 1, now));
+        assert!(is_stale_timestamp(now + DEAD_TTL_SEC as i64, now));
+        assert!(!is_stale_timestamp(now, now + FUTURE_SKEW_SEC as i64));
+        assert!(is_stale_timestamp(now, now + FUTURE_SKEW_SEC as i64 + 1));
+
+        let s1 = [1u32, 2, 3, 4, 5, 6, 7, 8];
+        assert!(is_active_entry_match(now, now, &s1, &s1));
+        assert!(!is_active_entry_match(now + DEAD_TTL_SEC as i64, now, &s1, &s1));
+        assert_eq!(format_deadpostings_line(12345, &[1, 2, 9]), b"12345\t1,2,9\t\n");
+    }
     #[test]
     fn sorted_unique_and_trailing_delimiters() {
         assert_eq!(parse_line(b"123\t9,2,9,1,\tignored",64),Some((123,vec![1,2,9])));

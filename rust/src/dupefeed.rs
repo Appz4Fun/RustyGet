@@ -957,6 +957,87 @@ pub fn mask_newznab_text(text: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Finds the first dot-separated token in `normalized` matching `(?:^|\.)s(\d+)e(\d+)(?:\.|$)`
+/// and returns `(season, episode)` converted with C `atoi` semantics (`Newznab::BuildQueries`).
+fn find_normalized_episode(normalized: &[u8]) -> Option<(i32, i32)> {
+    for tok in normalized.split(|&b| b == b'.') {
+        if tok.first() != Some(&b's') {
+            continue;
+        }
+        let s_digits = tok[1..].iter().take_while(|&&b| b.is_ascii_digit()).count();
+        if s_digits == 0 || tok.get(1 + s_digits) != Some(&b'e') {
+            continue;
+        }
+        let ep_part = &tok[2 + s_digits..];
+        if !ep_part.is_empty() && ep_part.iter().all(|b| b.is_ascii_digit()) {
+            let season = c_atoi_bytes(&tok[1..1 + s_digits]);
+            let ep = c_atoi_bytes(ep_part);
+            return Some((season, ep));
+        }
+    }
+    None
+}
+
+/// `Newznab::BuildQueries` in `daemon/dupesearch/Newznab.cpp`: builds the ordered list
+/// of Newznab `(key, value)` query parameter sets for a release `title`, `imdb`, and `tvdb`.
+pub fn build_newznab_queries(
+    title: &[u8],
+    imdb: &[u8],
+    tvdb: &[u8],
+) -> Vec<Vec<(Vec<u8>, Vec<u8>)>> {
+    let normalized = crate::releasename::normalize(title);
+    let full: Vec<u8> = normalized
+        .iter()
+        .map(|&b| if b == b'.' { b' ' } else { b })
+        .collect();
+    let short_query = crate::releasename::short_query(title);
+    let group = crate::releasename::parse(title).group;
+
+    let mut queries: Vec<Vec<(Vec<u8>, Vec<u8>)>> = Vec::new();
+    queries.push(vec![
+        (b"t".to_vec(), b"search".to_vec()),
+        (b"q".to_vec(), full.clone()),
+    ]);
+    if !short_query.is_empty() && short_query != full {
+        queries.push(vec![
+            (b"t".to_vec(), b"search".to_vec()),
+            (b"q".to_vec(), short_query.clone()),
+        ]);
+    }
+    if !short_query.is_empty() && !group.is_empty() {
+        let mut q_with_group = Vec::with_capacity(short_query.len() + 1 + group.len());
+        q_with_group.extend_from_slice(&short_query);
+        q_with_group.push(b' ');
+        q_with_group.extend_from_slice(&group);
+        queries.push(vec![
+            (b"t".to_vec(), b"search".to_vec()),
+            (b"q".to_vec(), q_with_group),
+        ]);
+    }
+
+    let imdb_id = digits_only(imdb);
+    if !imdb_id.is_empty() {
+        queries.push(vec![
+            (b"t".to_vec(), b"movie".to_vec()),
+            (b"imdbid".to_vec(), imdb_id),
+        ]);
+    }
+
+    let tvdb_id = digits_only(tvdb);
+    if !tvdb_id.is_empty() {
+        if let Some((season, ep)) = find_normalized_episode(&normalized) {
+            queries.push(vec![
+                (b"t".to_vec(), b"tvsearch".to_vec()),
+                (b"tvdbid".to_vec(), tvdb_id),
+                (b"season".to_vec(), season.to_string().into_bytes()),
+                (b"ep".to_vec(), ep.to_string().into_bytes()),
+            ]);
+        }
+    }
+
+    queries
+}
+
 // ============================================================================
 // 5. FeedCoordinator, FeedInfo, and FeedFile (`daemon/feed/*.cpp`)
 // ============================================================================

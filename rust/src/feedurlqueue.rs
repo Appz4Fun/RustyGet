@@ -160,6 +160,40 @@ pub fn queue_coord_is_smaller_dupe_file(size1: i64, idx1: i32, size2: i64, idx2:
     size1 < size2 || (size1 == size2 && idx2 < idx1)
 }
 
+/// Identifies indices of files in `filenames` (`0..filenames.len()`) whose filename
+/// appears exactly twice and which lose the size/index tie-breaker
+/// (`QueueCoordinator::CheckDupeFileInfos` in `daemon/queue/QueueCoordinator.cpp`).
+pub fn queue_coord_find_dupe_file_indices(
+    filenames: &[&[u8]],
+    sizes: &[i64],
+    out_dupe_indices: &mut [usize],
+) -> usize {
+    let n = filenames.len().min(sizes.len());
+    let mut by_name: std::collections::HashMap<&[u8], Vec<(i32, usize)>> =
+        std::collections::HashMap::with_capacity(n);
+    for (idx, &name) in filenames.iter().enumerate().take(n) {
+        by_name.entry(name).or_default().push(((idx + 1) as i32, idx));
+    }
+    let mut written = 0usize;
+    for (idx, &name) in filenames.iter().enumerate().take(n) {
+        let Some(same) = by_name.get(name) else {
+            continue;
+        };
+        if same.len() != 2 {
+            continue;
+        }
+        let (self_pos, self_idx) = if same[0].1 == idx { same[0] } else { same[1] };
+        let (other_pos, other_idx) = if same[0].1 == idx { same[1] } else { same[0] };
+        if queue_coord_is_smaller_dupe_file(sizes[self_idx], self_pos, sizes[other_idx], other_pos)
+            && written < out_dupe_indices.len()
+        {
+            out_dupe_indices[written] = idx;
+            written += 1;
+        }
+    }
+    written
+}
+
 /// `QueueCoordinator`: whether `nzb` has strictly higher priority than `file_nzb`.
 pub fn queue_coord_is_higher_nzb_priority(
     has_file: bool,

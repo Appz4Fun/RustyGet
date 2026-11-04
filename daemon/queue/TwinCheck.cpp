@@ -68,38 +68,6 @@ bool OpenStore()
 	return true;
 }
 
-std::vector<TwinCheck::FileSig> SigLines(const std::string& text)
-{
-	// "length\tmd5\tname" lines
-	std::vector<TwinCheck::FileSig> sigs;
-	const char* p = text.c_str();
-	const char* end = p + text.size();
-	while (p < end)
-	{
-		const char* eol = (const char*)memchr(p, '\n', end - p);
-		const char* lineEnd = eol ? eol : end;
-		const char* a = (const char*)memchr(p, '\t', lineEnd - p);
-		const char* b = a ? (const char*)memchr(a + 1, '\t', lineEnd - a - 1) : nullptr;
-		if (a && b)
-		{
-			TwinCheck::FileSig sig;
-			char* numberEnd;
-			sig.length = strtoull(p, &numberEnd, 10);
-			// getline used to terminate a whitespace-only line before the next
-			// line's number. strtoull can otherwise skip across that newline.
-			if (numberEnd > lineEnd)
-			{
-				sig.length = 0;
-			}
-			sig.md5.assign(a + 1, b);
-			sig.name.assign(b + 1, lineEnd);
-			sigs.push_back(std::move(sig));
-		}
-		p = lineEnd + 1;
-	}
-	return sigs;
-}
-
 class TwinCheckJob;
 
 Mutex g_mutex;
@@ -405,44 +373,38 @@ struct Item
 
 std::vector<TwinCheck::NzbEntry> TwinCheck::ReadNzbEntries(const char* filename)
 {
-	// "F\tsize\tpar2\tfilename\tsubject", then its "G\tgroup" and "S\tbytes\tmessage-id" lines
 	std::vector<NzbEntry> entries;
-	std::istringstream lines(RsString(nzbget_rs_nzb_entries(filename)));
-	std::string line;
-	while (std::getline(lines, line))
-	{
-		if (line.size() < 2 || line[1] != '\t')
+	nzbget_rs_twin_visit_nzb_entries(
+		filename,
+		&entries,
+		[](void* ctx, int64_t size, int32_t par2,
+		   const char* fnamePtr, size_t fnameLen,
+		   const char* subjPtr, size_t subjLen) noexcept
 		{
-			continue;
-		}
-		std::string rest = line.substr(2);
-		if (line[0] == 'F')
-		{
+			auto* out = static_cast<std::vector<NzbEntry>*>(ctx);
 			NzbEntry entry;
-			size_t a = rest.find('\t'), b = rest.find('\t', a + 1), c = rest.find('\t', b + 1);
-			if (c == std::string::npos)
-			{
-				continue;
-			}
-			entry.size = atoll(rest.c_str());
-			entry.par2 = rest[a + 1] == '1';
-			entry.filename = rest.substr(b + 1, c - b - 1);
-			entry.subject = rest.substr(c + 1);
-			entries.push_back(std::move(entry));
-		}
-		else if (line[0] == 'G' && !entries.empty())
+			entry.size = size;
+			entry.par2 = par2 != 0;
+			entry.filename.assign(fnamePtr, fnameLen);
+			entry.subject.assign(subjPtr, subjLen);
+			out->push_back(std::move(entry));
+		},
+		[](void* ctx, const char* groupPtr, size_t groupLen) noexcept
 		{
-			entries.back().groups.emplace_back(rest.c_str());
-		}
-		else if (line[0] == 'S' && !entries.empty())
-		{
-			size_t a = rest.find('\t');
-			if (a != std::string::npos)
+			auto* out = static_cast<std::vector<NzbEntry>*>(ctx);
+			if (!out->empty())
 			{
-				entries.back().segments.emplace_back(atoll(rest.c_str()), rest.substr(a + 1));
+				out->back().groups.emplace_back(std::string(groupPtr, groupLen).c_str());
 			}
-		}
-	}
+		},
+		[](void* ctx, int64_t bytes, const char* idPtr, size_t idLen) noexcept
+		{
+			auto* out = static_cast<std::vector<NzbEntry>*>(ctx);
+			if (!out->empty())
+			{
+				out->back().segments.emplace_back(bytes, std::string(idPtr, idLen));
+			}
+		});
 	return entries;
 }
 
@@ -458,7 +420,20 @@ int TwinCheck::VolumeBlocks(const std::string& filename)
 
 std::vector<TwinCheck::FileSig> TwinCheck::ParsePar2(const char* data, size_t size)
 {
-	return SigLines(RsString(nzbget_rs_twin_par2_sigs((const unsigned char*)data, size)));
+	std::vector<FileSig> sigs;
+	nzbget_rs_twin_visit_par2_sigs(
+		(const uint8_t*)data, size, &sigs,
+		[](void* ctx, uint64_t length, const char* md5Ptr, size_t md5Len,
+		   const char* namePtr, size_t nameLen) noexcept
+		{
+			auto* out = static_cast<std::vector<FileSig>*>(ctx);
+			FileSig sig;
+			sig.length = length;
+			sig.md5.assign(md5Ptr, md5Len);
+			sig.name.assign(namePtr, nameLen);
+			out->push_back(std::move(sig));
+		});
+	return sigs;
 }
 
 std::string TwinCheck::Posting(NzbInfo* nzbInfo)
@@ -802,13 +777,9 @@ void TwinCheck::ServiceWork()
 					changed = true;
 					if (*kind)
 					{
-						nzbInfo->PrintMessage(Message::mkInfo, "%s is %s%s of %s (%s)", nzbInfo->GetName(),
-							*kind == 't' ? (strchr(kind, ':') ? "a near-twin (files the same: " : "a twin") : "an alt",
-							strchr(kind, ':') ? (std::string(strchr(kind, ':') + 1) + ")").c_str() : "", primary->GetName(),
-							!byPar2 ? (*kind == 't' ? "the articles sampled are identical" :
-								"another encode: the articles sampled differ") :
-							*kind == 't' ? "byte-identical files by their par2 checksums" :
-							"another encode: its files' par2 checksums differ");
+						std::string msg = RsString(nzbget_rs_twin_format_kind_message(
+							nzbInfo->GetName(), primary->GetName(), kind, byPar2 ? 1 : 0));
+						nzbInfo->PrintMessage(Message::mkInfo, "%s", msg.c_str());
 					}
 				}
 			}

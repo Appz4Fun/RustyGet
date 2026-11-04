@@ -492,37 +492,28 @@ void QueueCoordinator::CheckDupeFileInfos(NzbInfo* nzbInfo)
 {
 	debug("CheckDupeFileInfos");
 
-	// the files of each name, in list order: comparing every pair, and counting the
-	// name over the whole list for each, took 24 s for 2,000 files of one name (F15)
-	std::unordered_map<std::string, std::vector<std::pair<int, FileInfo*>>> byName;
-	int index = 0;
+	std::vector<FileInfo*> files;
+	std::vector<const char*> filenames;
+	std::vector<int64_t> sizes;
+	files.reserve(nzbInfo->GetFileList()->size());
+	filenames.reserve(nzbInfo->GetFileList()->size());
+	sizes.reserve(nzbInfo->GetFileList()->size());
 	for (FileInfo* fileInfo : nzbInfo->GetFileList())
 	{
-		byName[fileInfo->GetFilename()].emplace_back(++index, fileInfo);
+		files.push_back(fileInfo);
+		filenames.push_back(fileInfo->GetFilename());
+		sizes.push_back(fileInfo->GetSize());
 	}
 
-	RawFileList dupeList;
-	for (FileInfo* fileInfo : nzbInfo->GetFileList())
-	{
-		const auto& same = byName[fileInfo->GetFilename()];
-		// If more than two files have same filename we don't filter them out since that
-		// naming might be intentional and correct filenames must be read from article bodies.
-		if (same.size() != 2)
-		{
-			continue;
-		}
-		const auto& self = same[0].second == fileInfo ? same[0] : same[1];
-		const auto& other = same[0].second == fileInfo ? same[1] : same[0];
-		if (nzbget_rs_fuq_queue_coord_is_smaller_dupe_file(
-			fileInfo->GetSize(), self.first, other.second->GetSize(), other.first) != 0)
-		{
-			warn("File \"%s\" appears twice in collection, adding only the biggest file", fileInfo->GetFilename());
-			dupeList.push_back(fileInfo);
-		}
-	}
+	std::vector<size_t> dupeIndices(files.size(), 0);
+	size_t dupeCount = nzbget_rs_fuq_queue_coord_find_dupe_file_indices(
+		filenames.data(), sizes.data(), files.size(),
+		dupeIndices.data(), dupeIndices.size());
 
-	for (FileInfo* fileInfo : dupeList)
+	for (size_t i = 0; i < dupeCount; i++)
 	{
+		FileInfo* fileInfo = files[dupeIndices[i]];
+		warn("File \"%s\" appears twice in collection, adding only the biggest file", fileInfo->GetFilename());
 		int fileId = fileInfo->GetId();
 		nzbInfo->UpdateDeletedStats(fileInfo);
 		nzbInfo->GetFileList()->Remove(fileInfo);

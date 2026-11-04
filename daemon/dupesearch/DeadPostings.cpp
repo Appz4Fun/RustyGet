@@ -56,17 +56,9 @@ void DeadPostings::Load()
 // with m_mutex held
 void DeadPostings::Prune(time_t now)
 {
-	// expired, or dated more than a day ahead (clock skew or a corrupt time, which
-	// would otherwise never expire)
-	using UnsignedTime = std::make_unsigned_t<time_t>;
 	auto stale = [now](const std::pair<time_t, Posting::Sketch>& entry)
 		{
-			// Choose the subtraction order first; unsigned distances also cover
-			// timestamps spanning the complete signed time_t range.
-			const UnsignedTime current = static_cast<UnsignedTime>(now);
-			const UnsignedTime recorded = static_cast<UnsignedTime>(entry.first);
-			return now >= entry.first ? current - recorded >= DeadTtlSec :
-				recorded - current > 24 * 3600;
+			return nzbget_rs_deadpostings_is_stale((int64_t)now, (int64_t)entry.first) != 0;
 		};
 	m_dead.erase(std::remove_if(m_dead.begin(), m_dead.end(), stale), m_dead.end());
 	m_unsaved.erase(std::remove_if(m_unsaved.begin(), m_unsaved.end(), stale), m_unsaved.end());
@@ -79,17 +71,18 @@ void DeadPostings::Save()
 	{
 		return;
 	}
-	std::ostringstream text;
+	std::string text;
 	for (const auto& entry : m_dead)
 	{
-		text << (long long)entry.first << '\t';
-		for (size_t i = 0; i < entry.second.size(); i++)
+		NzbgetRsBuf buf = nzbget_rs_deadpostings_format_line(
+			(int64_t)entry.first, entry.second.data(), entry.second.size());
+		if (buf.data && buf.len > 0)
 		{
-			text << (i ? "," : "") << entry.second[i];
+			text.append(buf.data, buf.len);
 		}
-		text << "\t\n";
+		nzbget_rs_free(buf);
 	}
-	if (!DupeUtil::WriteAtomic(m_statePath, text.str()))
+	if (!DupeUtil::WriteAtomic(m_statePath, text))
 	{
 		warn("Could not save the DupeSearch dead postings to %s", m_statePath.c_str());
 	}
@@ -103,10 +96,10 @@ bool DeadPostings::IsDead(const Posting::Sketch& sketch, time_t now)
 	{
 		for (const auto& entry : *list)
 		{
-			using UnsignedTime = std::make_unsigned_t<time_t>;
-			if ((now < entry.first || static_cast<UnsignedTime>(now) -
-				static_cast<UnsignedTime>(entry.first) < DeadTtlSec) &&
-				Posting::SameSketch(sketch, entry.second))
+			if (nzbget_rs_deadpostings_entry_matches(
+				(int64_t)now, (int64_t)entry.first,
+				sketch.data(), sketch.size(),
+				entry.second.data(), entry.second.size()) != 0)
 			{
 				return true;
 			}

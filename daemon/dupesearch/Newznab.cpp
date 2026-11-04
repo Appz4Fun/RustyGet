@@ -23,7 +23,6 @@
 #include <algorithm>
 #include <atomic>
 #include <map>
-#include <regex>
 #include <set>
 #include <thread>
 #include "Newznab.h"
@@ -136,28 +135,6 @@ private:
 	long long m_elementSize = 0;
 };
 
-std::string UrlEncode(const std::string& text)
-{
-	NzbgetRsBuf buf = nzbget_rs_df_url_encode(text.data(), text.size());
-	std::string out(buf.data ? buf.data : "", buf.len);
-	nzbget_rs_free(buf);
-	return out;
-}
-
-std::string DigitsOnly(const std::string& text)
-{
-	NzbgetRsBuf buf = nzbget_rs_df_digits_only(text.data(), text.size());
-	std::string out(buf.data ? buf.data : "", buf.len);
-	nzbget_rs_free(buf);
-	return out;
-}
-
-// days since 1970-01-01 of a civil date
-long long DaysFromCivil(long long year, int month, int day)
-{
-	return nzbget_rs_df_days_from_civil(year, month, day);
-}
-
 }
 
 bool Newznab::ParseResponse(const std::string& xml, Page& page)
@@ -175,38 +152,24 @@ time_t Newznab::ParseDate(const std::string& text)
 std::vector<Newznab::Params> Newznab::BuildQueries(const std::string& title, const std::string& imdb,
 	const std::string& tvdb)
 {
-	std::string normalized = ReleaseName::Normalize(title);
-	std::string full = normalized;
-	std::replace(full.begin(), full.end(), '.', ' ');
-	std::string shortQuery = ReleaseName::ShortQuery(title);
-	std::string group = ReleaseName::Parse(title).group;
-
 	std::vector<Params> queries;
-	queries.push_back({ { "t", "search" }, { "q", full } });
-	if (!shortQuery.empty() && shortQuery != full)
-	{
-		queries.push_back({ { "t", "search" }, { "q", shortQuery } });
-	}
-	if (!shortQuery.empty() && !group.empty())
-	{
-		queries.push_back({ { "t", "search" }, { "q", shortQuery + " " + group } });
-	}
-
-	std::string imdbId = DigitsOnly(imdb);
-	if (!imdbId.empty())
-	{
-		queries.push_back({ { "t", "movie" }, { "imdbid", imdbId } });
-	}
-
-	std::string tvdbId = DigitsOnly(tvdb);
-	std::smatch match;
-	static const std::regex episode("(?:^|\\.)s(\\d+)e(\\d+)(?:\\.|$)");
-	if (!tvdbId.empty() && std::regex_search(normalized, match, episode))
-	{
-		queries.push_back({ { "t", "tvsearch" }, { "tvdbid", tvdbId },
-			{ "season", std::to_string(atoi(match[1].str().c_str())) },
-			{ "ep", std::to_string(atoi(match[2].str().c_str())) } });
-	}
+	nzbget_rs_df_build_newznab_queries(
+		title.data(), title.size(),
+		imdb.data(), imdb.size(),
+		tvdb.data(), tvdb.size(),
+		&queries,
+		[](void* ctx, const char* const* keys, const size_t* keyLens,
+		   const char* const* vals, const size_t* valLens, size_t count) noexcept
+		{
+			auto* out = static_cast<std::vector<Params>*>(ctx);
+			Params p;
+			p.reserve(count);
+			for (size_t i = 0; i < count; i++)
+			{
+				p.emplace_back(std::string(keys[i], keyLens[i]), std::string(vals[i], valLens[i]));
+			}
+			out->push_back(std::move(p));
+		});
 	return queries;
 }
 

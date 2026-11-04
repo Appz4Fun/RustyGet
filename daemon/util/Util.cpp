@@ -128,27 +128,13 @@ Util::FindShellOverriddenExecutor(const std::string& fileExt, const std::string&
 
 std::optional<fs::path> Util::ResolvePathFromEnv(std::string_view path)
 {
-	if (path.empty()) return std::nullopt;
-
 	const char* envPath = std::getenv("PATH");
 	if (!envPath) return std::nullopt;
-	std::string dir;
-	std::stringstream ss(envPath);
-	char delimiter = ':';
-
-	while (std::getline(ss, dir, delimiter))
-	{
-		if (dir.empty()) continue;
-
-		auto p = fs::path(dir) / path;
-		fs::error_code ec;
-		if (fs::exists(p, ec) && fs::is_regular_file(p, ec))
-		{
-			return p;
-		}
-	}
-
-	return std::nullopt;	
+	NzbgetRsBuf buf = nzbget_rs_ufs_util_resolve_path_from_env(path.data(), path.size(), envPath);
+	std::string resolved(buf.data ? buf.data : "", buf.len);
+	nzbget_rs_free(buf);
+	if (resolved.empty()) return std::nullopt;
+	return fs::path(resolved);
 }
 
 std::optional<std::string> Util::FindPython()

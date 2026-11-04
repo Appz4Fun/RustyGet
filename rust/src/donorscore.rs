@@ -21,6 +21,16 @@ pub fn target(alive: f64, twin: bool) -> i32 {
     TOP.min(9 + (80.0 * share).round_ties_even() as i32 + i32::from(twin))
 }
 
+/// `DonorScore::Ranks::Take`: starts at `target(alive, twin)` and counts down
+/// while the score is above `DEAD + 1` and already in `used`.
+pub fn take_rank(alive: f64, twin: bool, used: &[i32]) -> i32 {
+    let mut score = target(alive, twin);
+    while score > DEAD + 1 && used.contains(&score) {
+        score -= 1;
+    }
+    score
+}
+
 /// One duplicate as Rerank sees it.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Entry {

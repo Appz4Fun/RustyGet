@@ -42,6 +42,31 @@ pub fn util_match_shell_overridden_token(shellover: &[u8], file_ext: &[u8]) -> O
     }
 }
 
+/// Resolves `path` against colon-separated directories in `env_path`, returning the
+/// first directory entry where `dir/path` exists and is a regular file
+/// (`Util::ResolvePathFromEnv` in `daemon/util/Util.cpp`).
+pub fn util_resolve_path_from_env(path: &[u8], env_path: &[u8]) -> Option<Vec<u8>> {
+    if path.is_empty() || env_path.is_empty() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let rel = std::path::Path::new(std::ffi::OsStr::from_bytes(path));
+        for dir in env_path.split(|&b| b == b':') {
+            if dir.is_empty() {
+                continue;
+            }
+            let base = std::path::Path::new(std::ffi::OsStr::from_bytes(dir));
+            let candidate = base.join(rel);
+            if candidate.exists() && candidate.is_file() {
+                return Some(candidate.as_os_str().as_bytes().to_vec());
+            }
+        }
+    }
+    None
+}
+
 #[inline]
 fn is_leap(year: i32) -> usize {
     if year % 400 == 0 {

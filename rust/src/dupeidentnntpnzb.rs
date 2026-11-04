@@ -254,6 +254,45 @@ pub fn din_nzb_reader_select_median_article_bytes(sorted_sizes: &[u64]) -> u64 {
     }
 }
 
+/// Sums `total_bytes` across `sizes` and selects the index of `mainName`
+/// (the largest non-PAR2 file, or the largest file overall when all files are PAR2;
+/// `-1` when `sizes` is empty, `NzbReader::Parse` in `NzbReader.cpp`).
+pub fn din_nzb_reader_select_main_file(sizes: &[i64], is_par: &[u8]) -> (i64, isize) {
+    let n = sizes.len().min(is_par.len());
+    let mut total_bytes: i64 = 0;
+    let mut main_size: i64 = -1;
+    let mut main_idx: isize = -1;
+    let mut any_size: i64 = -1;
+    let mut any_idx: isize = -1;
+    for i in 0..n {
+        let sz = sizes[i];
+        total_bytes = total_bytes.wrapping_add(sz);
+        if sz > any_size {
+            any_size = sz;
+            any_idx = i as isize;
+        }
+        if is_par[i] == 0 && sz > main_size {
+            main_size = sz;
+            main_idx = i as isize;
+        }
+    }
+    let chosen = if main_size >= 0 { main_idx } else { any_idx };
+    (total_bytes, chosen)
+}
+
+/// Stably sorts head indices by `head_bytes` descending and writes at most 3
+/// top head indices into `out_indices` (`NzbReader::Parse` in `NzbReader.cpp`).
+pub fn din_nzb_reader_select_top_heads(
+    head_bytes: &[i64],
+    out_indices: &mut [usize],
+) -> usize {
+    let mut order: Vec<usize> = (0..head_bytes.len()).collect();
+    order.sort_by(|&a, &b| head_bytes[b].cmp(&head_bytes[a]));
+    let count = order.len().min(3).min(out_indices.len());
+    out_indices[..count].copy_from_slice(&order[..count]);
+    count
+}
+
 /// Returns whether the `Posting::SketchOfFile` cache exceeds `max_entries` and
 /// should be cleared (`Posting::SketchOfFile`).
 pub fn din_posting_should_clear_sketch_cache(cache_len: usize, max_entries: usize) -> bool {

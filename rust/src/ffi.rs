@@ -29712,4 +29712,300 @@ pub unsafe extern "C" fn nzbget_rs_dupe_fallback_borrowed_par2_mismatches(
     n
 }
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_deadpostings_is_stale(now: i64, recorded: i64) -> i32 {
+    i32::from(crate::deadpostings::is_stale_timestamp(now, recorded))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_deadpostings_entry_matches(
+    now: i64,
+    recorded: i64,
+    query_ptr: *const u32,
+    query_len: usize,
+    entry_ptr: *const u32,
+    entry_len: usize,
+) -> i32 {
+    let query = if query_ptr.is_null() || query_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(query_ptr, query_len)
+    };
+    let entry = if entry_ptr.is_null() || entry_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(entry_ptr, entry_len)
+    };
+    i32::from(crate::deadpostings::is_active_entry_match(
+        now, recorded, query, entry,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_deadpostings_format_line(
+    stamp: i64,
+    hashes_ptr: *const u32,
+    hashes_len: usize,
+) -> RsBuf {
+    let hashes = if hashes_ptr.is_null() || hashes_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(hashes_ptr, hashes_len)
+    };
+    into_buf(crate::deadpostings::format_deadpostings_line(stamp, hashes))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_donorscore_take_rank(
+    alive: f64,
+    twin: i32,
+    used_ptr: *const i32,
+    used_len: usize,
+) -> i32 {
+    let used = if used_ptr.is_null() || used_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(used_ptr, used_len)
+    };
+    crate::donorscore::take_rank(alive, twin != 0, used)
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn nzbget_rs_df_build_newznab_queries(
+    title_ptr: *const c_char,
+    title_len: usize,
+    imdb_ptr: *const c_char,
+    imdb_len: usize,
+    tvdb_ptr: *const c_char,
+    tvdb_len: usize,
+    ctx: *mut std::ffi::c_void,
+    visit: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            *const *const c_char,
+            *const usize,
+            *const *const c_char,
+            *const usize,
+            usize,
+        ),
+    >,
+) {
+    let Some(cb) = visit else { return };
+    let title = if title_ptr.is_null() || title_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(title_ptr.cast::<u8>(), title_len)
+    };
+    let imdb = if imdb_ptr.is_null() || imdb_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(imdb_ptr.cast::<u8>(), imdb_len)
+    };
+    let tvdb = if tvdb_ptr.is_null() || tvdb_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(tvdb_ptr.cast::<u8>(), tvdb_len)
+    };
+    for query in crate::dupefeed::build_newznab_queries(title, imdb, tvdb) {
+        let mut key_ptrs = Vec::with_capacity(query.len());
+        let mut key_lens = Vec::with_capacity(query.len());
+        let mut val_ptrs = Vec::with_capacity(query.len());
+        let mut val_lens = Vec::with_capacity(query.len());
+        for (k, v) in &query {
+            key_ptrs.push(k.as_ptr().cast::<c_char>());
+            key_lens.push(k.len());
+            val_ptrs.push(v.as_ptr().cast::<c_char>());
+            val_lens.push(v.len());
+        }
+        cb(
+            ctx,
+            key_ptrs.as_ptr(),
+            key_lens.as_ptr(),
+            val_ptrs.as_ptr(),
+            val_lens.as_ptr(),
+            query.len(),
+        );
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_din_nzb_reader_select_main_file(
+    sizes: *const i64,
+    is_par: *const u8,
+    count: usize,
+    out_total_bytes: *mut i64,
+) -> isize {
+    let s_slice = if sizes.is_null() || count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(sizes, count)
+    };
+    let p_slice = if is_par.is_null() || count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(is_par, count)
+    };
+    let (total, idx) = crate::dupeidentnntpnzb::din_nzb_reader_select_main_file(s_slice, p_slice);
+    if !out_total_bytes.is_null() {
+        *out_total_bytes = total;
+    }
+    idx
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_din_nzb_reader_select_top_heads(
+    head_bytes: *const i64,
+    count: usize,
+    out_indices: *mut usize,
+    out_cap: usize,
+) -> usize {
+    if head_bytes.is_null() || count == 0 || out_indices.is_null() || out_cap == 0 {
+        return 0;
+    }
+    crate::dupeidentnntpnzb::din_nzb_reader_select_top_heads(
+        std::slice::from_raw_parts(head_bytes, count),
+        std::slice::from_raw_parts_mut(out_indices, out_cap),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_twin_visit_par2_sigs(
+    data: *const u8,
+    len: usize,
+    ctx: *mut std::ffi::c_void,
+    visit: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            u64,
+            *const c_char,
+            usize,
+            *const c_char,
+            usize,
+        ),
+    >,
+) {
+    let Some(cb) = visit else { return };
+    for s in crate::twin::par2_sigs(bytes_arg(data, len)) {
+        let name: Vec<u8> = s
+            .name
+            .bytes()
+            .map(|b| if matches!(b, b'\n' | b'\t' | b'\r') { b'_' } else { b })
+            .collect();
+        cb(
+            ctx,
+            s.length,
+            s.md5.as_ptr().cast::<c_char>(),
+            s.md5.len(),
+            name.as_ptr().cast::<c_char>(),
+            name.len(),
+        );
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_twin_visit_nzb_entries(
+    path: *const c_char,
+    ctx: *mut std::ffi::c_void,
+    on_entry: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            i64,
+            i32,
+            *const c_char,
+            usize,
+            *const c_char,
+            usize,
+        ),
+    >,
+    on_group: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, usize)>,
+    on_segment: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i64, *const c_char, usize)>,
+) {
+    let xml = std::fs::read(path_arg(path)).unwrap_or_default();
+    let clean = |s: &str| s.replace(['\n', '\t', '\r'], "_");
+    for e in crate::twin::read_nzb(&xml) {
+        let fname = clean(&e.filename);
+        let subj = clean(&e.subject);
+        if let Some(cb) = on_entry {
+            cb(
+                ctx,
+                e.size() as i64,
+                i32::from(e.is_par2()),
+                fname.as_ptr().cast::<c_char>(),
+                fname.len(),
+                subj.as_ptr().cast::<c_char>(),
+                subj.len(),
+            );
+        }
+        if let Some(cb) = on_group {
+            for g in &e.groups {
+                let g_clean = clean(g);
+                cb(ctx, g_clean.as_ptr().cast::<c_char>(), g_clean.len());
+            }
+        }
+        if let Some(cb) = on_segment {
+            for (bytes, id) in &e.segments {
+                let id_clean = clean(id);
+                cb(ctx, *bytes as i64, id_clean.as_ptr().cast::<c_char>(), id_clean.len());
+            }
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_twin_format_kind_message(
+    nzb_name: *const c_char,
+    primary_name: *const c_char,
+    kind: *const c_char,
+    by_par2: i32,
+) -> RsBuf {
+    into_buf(crate::twin::format_twin_kind_message(
+        input(nzb_name),
+        input(primary_name),
+        input(kind),
+        by_par2 != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fuq_queue_coord_find_dupe_file_indices(
+    filenames: *const *const c_char,
+    sizes: *const i64,
+    count: usize,
+    out_dupe_indices: *mut usize,
+    out_cap: usize,
+) -> usize {
+    if filenames.is_null() || sizes.is_null() || count == 0 || out_dupe_indices.is_null() || out_cap == 0 {
+        return 0;
+    }
+    let mut name_slices: Vec<&[u8]> = Vec::with_capacity(count);
+    for i in 0..count {
+        name_slices.push(input(*filenames.add(i)));
+    }
+    crate::feedurlqueue::queue_coord_find_dupe_file_indices(
+        &name_slices,
+        std::slice::from_raw_parts(sizes, count),
+        std::slice::from_raw_parts_mut(out_dupe_indices, out_cap),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ufs_util_resolve_path_from_env(
+    path_ptr: *const c_char,
+    path_len: usize,
+    env_path: *const c_char,
+) -> RsBuf {
+    let path_slice = if path_ptr.is_null() || path_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(path_ptr.cast::<u8>(), path_len)
+    };
+    let env_slice = input(env_path);
+    match crate::utilfsscript::util_resolve_path_from_env(path_slice, env_slice) {
+        Some(found) => into_buf(found),
+        None => into_buf(Vec::new()),
+    }
+}
+
+
 

@@ -39,11 +39,8 @@ int DonorScore::Target(double alive, bool twin)
 
 int DonorScore::Ranks::Take(double alive, bool twin)
 {
-	int score = Target(alive, twin);
-	while (score > Dead + 1 && m_used.count(score))
-	{
-		score--;
-	}
+	std::vector<int32_t> used(m_used.begin(), m_used.end());
+	int score = nzbget_rs_donorscore_take_rank(alive, twin ? 1 : 0, used.data(), used.size());
 	m_used.insert(score);
 	return score;
 }

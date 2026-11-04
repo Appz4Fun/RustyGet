@@ -671,6 +671,58 @@ fn message_id(raw: &str) -> String {
     format!("<{id}>")
 }
 
+/// Formats the log message emitted when a duplicate's `kind` (`"twin"`, `"twin:N/M"`,
+/// or `"alt"`) against `primary_name` changes (`TwinCheck::ServiceWork` in `TwinCheck.cpp`).
+pub fn format_twin_kind_message(
+    nzb_name: &[u8],
+    primary_name: &[u8],
+    kind: &[u8],
+    by_par2: bool,
+) -> Vec<u8> {
+    if kind.is_empty() {
+        return Vec::new();
+    }
+    let is_twin = kind[0] == b't';
+    let colon_pos = kind.iter().position(|&b| b == b':');
+    let label: &[u8] = if is_twin {
+        if colon_pos.is_some() {
+            b"a near-twin (files the same: "
+        } else {
+            b"a twin"
+        }
+    } else {
+        b"an alt"
+    };
+    let reason: &[u8] = if !by_par2 {
+        if is_twin {
+            b"the articles sampled are identical"
+        } else {
+            b"another encode: the articles sampled differ"
+        }
+    } else if is_twin {
+        b"byte-identical files by their par2 checksums"
+    } else {
+        b"another encode: its files' par2 checksums differ"
+    };
+
+    let mut out = Vec::with_capacity(
+        nzb_name.len() + primary_name.len() + label.len() + reason.len() + 32,
+    );
+    out.extend_from_slice(nzb_name);
+    out.extend_from_slice(b" is ");
+    out.extend_from_slice(label);
+    if let Some(colon) = colon_pos {
+        out.extend_from_slice(&kind[colon + 1..]);
+        out.push(b')');
+    }
+    out.extend_from_slice(b" of ");
+    out.extend_from_slice(primary_name);
+    out.extend_from_slice(b" (");
+    out.extend_from_slice(reason);
+    out.push(b')');
+    out
+}
+
 /// The crate's parser, as par2_set and block_size used it before the walk
 /// (the comparison tests below).
 #[cfg(test)]

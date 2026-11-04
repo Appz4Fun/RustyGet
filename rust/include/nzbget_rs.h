@@ -5262,6 +5262,51 @@ size_t nzbget_rs_dupe_fallback_borrowed_par2_mismatches(
     uint32_t (*crc_cb)(const uint8_t* data, size_t len),
     int32_t* out_indices, size_t out_cap);
 
+int32_t nzbget_rs_deadpostings_is_stale(int64_t now, int64_t recorded);
+int32_t nzbget_rs_deadpostings_entry_matches(
+    int64_t now, int64_t recorded,
+    const uint32_t* query_ptr, size_t query_len,
+    const uint32_t* entry_ptr, size_t entry_len);
+NzbgetRsBuf nzbget_rs_deadpostings_format_line(
+    int64_t stamp, const uint32_t* hashes_ptr, size_t hashes_len);
+int32_t nzbget_rs_donorscore_take_rank(
+    double alive, int32_t twin, const int32_t* used_ptr, size_t used_len);
+void nzbget_rs_df_build_newznab_queries(
+    const char* title_ptr, size_t title_len,
+    const char* imdb_ptr, size_t imdb_len,
+    const char* tvdb_ptr, size_t tvdb_len,
+    void* ctx,
+    void (*visit)(
+        void* ctx,
+        const char* const* keys, const size_t* key_lens,
+        const char* const* vals, const size_t* val_lens,
+        size_t param_count));
+ptrdiff_t nzbget_rs_din_nzb_reader_select_main_file(
+    const int64_t* sizes, const uint8_t* is_par, size_t count, int64_t* out_total_bytes);
+size_t nzbget_rs_din_nzb_reader_select_top_heads(
+    const int64_t* head_bytes, size_t count, size_t* out_indices, size_t out_cap);
+void nzbget_rs_twin_visit_par2_sigs(
+    const uint8_t* data, size_t len, void* ctx,
+    void (*visit)(
+        void* ctx, uint64_t length,
+        const char* md5_ptr, size_t md5_len,
+        const char* name_ptr, size_t name_len));
+void nzbget_rs_twin_visit_nzb_entries(
+    const char* path, void* ctx,
+    void (*on_entry)(
+        void* ctx, int64_t size, int32_t par2,
+        const char* fname_ptr, size_t fname_len,
+        const char* subj_ptr, size_t subj_len),
+    void (*on_group)(void* ctx, const char* group_ptr, size_t group_len),
+    void (*on_segment)(void* ctx, int64_t bytes, const char* id_ptr, size_t id_len));
+NzbgetRsBuf nzbget_rs_twin_format_kind_message(
+    const char* nzb_name, const char* primary_name, const char* kind, int32_t by_par2);
+size_t nzbget_rs_fuq_queue_coord_find_dupe_file_indices(
+    const char* const* filenames, const int64_t* sizes, size_t count,
+    size_t* out_dupe_indices, size_t out_cap);
+NzbgetRsBuf nzbget_rs_ufs_util_resolve_path_from_env(
+    const char* path_ptr, size_t path_len, const char* env_path);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

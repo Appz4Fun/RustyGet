@@ -87,6 +87,7 @@ pub mod urlqueuescanfeedpost;
 pub mod rpcoptclient;
 pub mod streamarticleparrepair;
 pub mod dupedlstateconn;
+pub mod queuecoordfallbackhist;
 
 pub mod deadpostings;
 pub mod dupewatch;

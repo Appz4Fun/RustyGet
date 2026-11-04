@@ -1295,7 +1295,12 @@ NzbInfo* DupeArticleFallback::GetParsedDonor(NzbInfo* donorNzbInfo)
 		return nullptr;
 	}
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_qcf_dupe_fallback_should_evict_parsed_donor_cache(
+		m_parsedDonors.size(), MaxCachedDonors) != 0)
+#else
 	if ((int)m_parsedDonors.size() >= MaxCachedDonors)
+#endif
 	{
 		m_parsedDonors.erase(m_parsedDonors.begin());
 	}
@@ -1404,6 +1409,24 @@ FileInfo* DupeArticleFallback::MatchDonorFile(FileInfo* targetFile, NzbInfo* don
 
 	// An exact filename is preferred only when it is unique.  Choosing the
 	// first exact match is nondeterministic for multi-file duplicate NZBs.
+#ifdef NZBGET_USE_RUST
+	int structOrNameAction = nzbget_rs_qcf_dupe_fallback_resolve_structural_or_filename_match(
+		filenameAmbiguous ? 1 : 0,
+		filenameMatch != nullptr ? 1 : 0,
+		structuralMatches.size());
+	if (structOrNameAction == -1)
+	{
+		return nullptr;
+	}
+	if (structOrNameAction == 1)
+	{
+		return filenameMatch;
+	}
+	if (structOrNameAction == 2)
+	{
+		return structuralMatches[0];
+	}
+#else
 	if (filenameAmbiguous)
 	{
 		return nullptr;
@@ -1416,6 +1439,7 @@ FileInfo* DupeArticleFallback::MatchDonorFile(FileInfo* targetFile, NzbInfo* don
 	{
 		return structuralMatches[0];
 	}
+#endif
 
 	// Equal-size volumes of an obfuscated repost all match structurally;
 	// the identical member is the only one whose article sizes step exactly

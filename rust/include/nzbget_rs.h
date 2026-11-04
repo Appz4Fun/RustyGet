@@ -4058,6 +4058,63 @@ int nzbget_rs_dds_conn_write_line_marks_broken(int send_res);
 int nzbget_rs_dds_webdl_redirect_loop_step(
     int status, int ad_redirect, int max_redirects, int* out_too_many);
 
+/* Batch 39: queuecoordfallbackhist (qcf_*) */
+void nzbget_rs_qcf_queue_coord_apply_success_article_counters(
+    int64_t article_size, int is_par_file, int64_t file_success_size,
+    int64_t nzb_cur_success_size, int64_t nzb_par_cur_success_size,
+    int file_success_articles, int nzb_cur_success_articles,
+    int64_t* out_file_success_size, int64_t* out_nzb_cur_success_size,
+    int64_t* out_nzb_par_cur_success_size, int* out_file_success_articles,
+    int* out_nzb_cur_success_articles);
+int nzbget_rs_qcf_queue_coord_has_more_jobs(
+    int has_more_articles, int active_downloads_running);
+int nzbget_rs_qcf_queue_coord_can_proceed_downloads(
+    int is_stopped, size_t active_count, int effective_limit);
+int nzbget_rs_qcf_queue_coord_should_run_check_dupe_file_infos(
+    int delete_status, int ds_none, int dupe_check, int dupe_mode, int dm_force);
+int nzbget_rs_qcf_queue_coord_should_notify_nzb_added(
+    int delete_status, int ds_manual);
+int nzbget_rs_qcf_queue_coord_should_revalidate_dupe_neighbors(
+    int dupe_recovered_articles, int64_t decoded_file_size);
+int nzbget_rs_qcf_queue_coord_should_account_attempt_server_stats(
+    int dl_status, int ad_retry);
+uint32_t nzbget_rs_qcf_queue_coord_completed_file_crc(
+    int status, int cf_success, uint32_t crc);
+int nzbget_rs_qcf_queue_coord_should_discard_direct_rename_on_complete(
+    int direct_rename_status, int ts_running, int deleting,
+    int download_completed);
+int nzbget_rs_qcf_queue_coord_select_file_removed_event(
+    int completed, int file_deleted, int ea_file_completed,
+    int ea_file_deleted);
+void nzbget_rs_qcf_queue_coord_discard_segment_actions(
+    int fallback_round, int has_result_filename, int has_segment_content,
+    int flush_locked, int* out_delete_result_file,
+    int* out_discard_cached_segment);
+int nzbget_rs_qcf_queue_coord_should_delete_direct_write_output(
+    int direct_write, int output_filename_empty, int force_direct_write);
+int nzbget_rs_qcf_queue_coord_has_active_dupe_self_exempt(
+    int has_extra_priority, int has_post_info, int post_working,
+    int post_stage, int pt_queued);
+int nzbget_rs_qcf_queue_coord_par_damage_failover_allowed(
+    int certain, int backup_alive, int failover_warranted);
+int nzbget_rs_qcf_queue_coord_start_dead_pick_probe_eligible(
+    int hc_is_dupe, int dupe_check, int dead_pick_probed, int fails_over,
+    int is_nzb_kind, int deleting, int parking, int delete_status,
+    int ds_none, int current_success_articles, int* out_mark_probed);
+void nzbget_rs_qcf_queue_coord_merge_min_max_time(
+    int64_t dest_min, int64_t src_min, int64_t dest_max, int64_t src_max,
+    int64_t* out_min, int64_t* out_max);
+int nzbget_rs_qcf_dupecoord_is_dupe_health_mode(
+    int health_check, int hc_dupe, int hc_park);
+void nzbget_rs_qcf_dupecoord_same_content_history_outcome(
+    int succeeded, int failed, int* out_clear_skip,
+    int* out_check_return_backup);
+int nzbget_rs_qcf_dupe_fallback_should_evict_parsed_donor_cache(
+    size_t cache_len, int max_cached_donors);
+int nzbget_rs_qcf_dupe_fallback_resolve_structural_or_filename_match(
+    int filename_ambiguous, int has_filename_match,
+    size_t structural_matches_len);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

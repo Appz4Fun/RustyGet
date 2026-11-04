@@ -85,8 +85,15 @@ bool DupeCoordinator::FilesOnDisk(NzbInfo* nzbInfo)
 
 NzbInfo* DupeCoordinator::DownloadedOnDisk(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 {
+#ifdef NZBGET_USE_RUST
+	bool dupeHealth = nzbget_rs_qcf_dupecoord_is_dupe_health_mode(
+		(int)g_Options->GetHealthCheck(),
+		(int)Options::hcDupe,
+		(int)Options::hcPark) != 0;
+#else
 	bool dupeHealth = g_Options->GetHealthCheck() == Options::hcDupe ||
 		g_Options->GetHealthCheck() == Options::hcPark;
+#endif
 	if (!dupeHealth || Util::EmptyStr(nzbInfo->GetDupeKey()))
 	{
 		return nullptr;
@@ -428,6 +435,30 @@ void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 			}
 #endif
 		}
+#ifdef NZBGET_USE_RUST
+		int clearSkipAndSameContent = 0;
+		int checkReturnBackup = 0;
+		nzbget_rs_qcf_dupecoord_same_content_history_outcome(
+			succeeded ? 1 : 0,
+			failed ? 1 : 0,
+			&clearSkipAndSameContent,
+			&checkReturnBackup);
+		if (clearSkipAndSameContent)
+		{
+			info("Adding %s: the same content waits in history only as an untried backup", nzbInfo->GetName());
+			skip = false;
+			sameContent = false;
+		}
+		else if (checkReturnBackup)
+		{
+			returnBackup = !std::any_of(downloadQueue->GetQueue()->begin(), downloadQueue->GetQueue()->end(),
+				[nzbInfo](std::unique_ptr<NzbInfo>& queued)
+				{
+					return queued.get() != nzbInfo && queued->GetDeleteStatus() == NzbInfo::dsNone &&
+						SameNameOrKey(queued->GetName(), queued->GetDupeKey(), nzbInfo->GetName(), nzbInfo->GetDupeKey());
+				});
+		}
+#else
 		if (!succeeded && !failed)
 		{
 			info("Adding %s: the same content waits in history only as an untried backup", nzbInfo->GetName());
@@ -443,6 +474,7 @@ void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 						SameNameOrKey(queued->GetName(), queued->GetDupeKey(), nzbInfo->GetName(), nzbInfo->GetDupeKey());
 				});
 		}
+#endif
 	}
 
 	if (!sameContent && nzbInfo->GetDupeHint() != NzbInfo::dhNone)
@@ -631,8 +663,15 @@ void DupeCoordinator::NzbCompleted(DownloadQueue* downloadQueue, NzbInfo* nzbInf
 	// one copy is downloaded and on disk: the others of its key still downloading,
 	// repairing or checking are stopped and kept as backups (B77: Sugar S01E01 - a
 	// copy kept repairing for minutes after another one had succeeded, then failed)
+#ifdef NZBGET_USE_RUST
+	bool dupeHealth = nzbget_rs_qcf_dupecoord_is_dupe_health_mode(
+		(int)g_Options->GetHealthCheck(),
+		(int)Options::hcDupe,
+		(int)Options::hcPark) != 0;
+#else
 	bool dupeHealth = g_Options->GetHealthCheck() == Options::hcDupe ||
 		g_Options->GetHealthCheck() == Options::hcPark;
+#endif
 	if (dupeHealth && !Util::EmptyStr(nzbInfo->GetDupeKey()) &&
 		nzbInfo->GetDeleteStatus() == NzbInfo::dsNone && nzbInfo->IsDupeSuccess() && FilesOnDisk(nzbInfo))
 	{

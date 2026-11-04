@@ -1062,13 +1062,11 @@ void QueueEditor::SetNzbParameter(NzbInfo* nzbInfo, const char* paramString)
 {
 	debug("QueueEditor: setting nzb parameter '%s' for '%s'", paramString, FileSystem::BaseFileName(nzbInfo->GetFilename()));
 
-	CString str = paramString;
-	char* value = strchr(str, '=');
-	if (value)
+	size_t nameLen = 0, valOff = 0;
+	if (paramString && nzbget_rs_tpr_split_param_assignment(paramString, &nameLen, &valOff) != 0)
 	{
-		*value = '\0';
-		value++;
-		nzbInfo->GetParameters()->SetParameter(str, value);
+		std::string name(paramString, nameLen);
+		nzbInfo->GetParameters()->SetParameter(name.c_str(), paramString + valOff);
 	}
 	else
 	{

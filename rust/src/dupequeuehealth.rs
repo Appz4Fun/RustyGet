@@ -481,6 +481,121 @@ pub fn dqh_fleet_format_summary_log(
     out
 }
 
+/// Evaluates whether `DupeSearch::PrepareNative` generated the download's key (`DupeSearch::PrepareNative`).
+pub fn dqh_dupesearch_is_generated_key(
+    dupe_key_empty: bool,
+    has_owner: bool,
+    owner_value: &[u8],
+    nzb_id: i32,
+    key: &[u8],
+) -> bool {
+    if dupe_key_empty {
+        return true;
+    }
+    if !has_owner || !key.starts_with(b"dupes:") {
+        return false;
+    }
+    let mut expected = format!("{nzb_id}:").into_bytes();
+    expected.extend_from_slice(key);
+    owner_value == expected.as_slice()
+}
+
+/// Evaluates whether `DupeSearch::DownloadQueueUpdate` should inspect the queue to schedule
+/// rank-only re-scoring for an existing parent download (`DupeSearch::DownloadQueueUpdate`).
+pub fn dqh_dupesearch_should_check_added_for_parent_rank(
+    action: i32,
+    ea_nzb_added: i32,
+    is_donor: bool,
+    dupe_mode: i32,
+    dm_score: i32,
+    has_dupe_fleet_param: bool,
+) -> bool {
+    action == ea_nzb_added && !is_donor && dupe_mode == dm_score && !has_dupe_fleet_param
+}
+
+/// Evaluates whether a queued item is a better parent candidate for rank-only scheduling
+/// when a lower-scored external backup is added (`DupeSearch::DownloadQueueUpdate`).
+#[allow(clippy::too_many_arguments)]
+pub fn dqh_dupesearch_is_better_parent_candidate(
+    is_same_item: bool,
+    kind: i32,
+    nk_nzb: i32,
+    deleting: bool,
+    delete_status: i32,
+    ds_none: i32,
+    has_post_info: bool,
+    same_lower_key: bool,
+    item_score: i32,
+    added_score: i32,
+    has_parent: bool,
+    parent_score: i32,
+) -> bool {
+    !is_same_item
+        && kind == nk_nzb
+        && !deleting
+        && delete_status == ds_none
+        && !has_post_info
+        && same_lower_key
+        && item_score > added_score
+        && (!has_parent || item_score > parent_score)
+}
+
+/// Evaluates whether another queue/history item should be retained in the peer list
+/// for `DupeSearch::PrepareNative`.
+pub fn dqh_dupesearch_should_retain_peer(
+    is_same_item: bool,
+    item_score: i32,
+    pick_score: i32,
+    has_dupe_fleet_param: bool,
+) -> bool {
+    !is_same_item && (item_score > pick_score || has_dupe_fleet_param)
+}
+
+/// Formats comma-separated `"key: count"` rejection entries for `DupeSearch::Place`.
+pub fn dqh_dupesearch_format_rejected_outcome(keys: &[&[u8]], counts: &[i32]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (k, &c) in keys.iter().zip(counts.iter()) {
+        if c > 0 {
+            if !out.is_empty() {
+                out.extend_from_slice(b", ");
+            }
+            out.extend_from_slice(k);
+            out.extend_from_slice(b": ");
+            out.extend_from_slice(c.to_string().as_bytes());
+        }
+    }
+    out
+}
+
+/// Evaluates whether a directory entry name is a positive canonical integer ID (`DupeSearch::ResumePending`).
+pub fn dqh_dupesearch_parse_pending_dir_id(name: &[u8]) -> i32 {
+    if name.is_empty() || name[0] == b'0' || !name.iter().all(|b| b.is_ascii_digit()) {
+        return 0;
+    }
+    std::str::from_utf8(name)
+        .ok()
+        .and_then(|s| s.parse::<i32>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(0)
+}
+
+/// Evaluates whether the saved `pick-title`, `pick-key`, and `pick-posting` files match
+/// the current pick's normalized identity (`DupeSearch::ResumePending`).
+pub fn dqh_dupesearch_pending_identity_matches(
+    has_pick_title_file: bool,
+    saved_title: &[u8],
+    cur_norm_title: &[u8],
+    saved_key: &[u8],
+    cur_lower_key: &[u8],
+    saved_posting: &[u8],
+    cur_fingerprint: &[u8],
+) -> bool {
+    has_pick_title_file
+        && saved_title == cur_norm_title
+        && saved_key == cur_lower_key
+        && saved_posting == cur_fingerprint
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -651,5 +766,49 @@ mod tests {
             dqh_fleet_format_summary_log(3, b"show.s01e01", 12, b"", false),
             b"Fleet of 3 nzb-file(s) for show.s01e01: queued #12 (not every posting checked in time)"
         );
+
+        assert!(dqh_dupesearch_is_generated_key(true, false, b"", 5, b""));
+        assert!(dqh_dupesearch_is_generated_key(
+            false,
+            true,
+            b"5:dupes:movie",
+            5,
+            b"dupes:movie"
+        ));
+        assert!(!dqh_dupesearch_is_generated_key(
+            false,
+            true,
+            b"6:dupes:movie",
+            5,
+            b"dupes:movie"
+        ));
+        assert!(dqh_dupesearch_should_check_added_for_parent_rank(
+            1, 1, false, 0, 0, false
+        ));
+        assert!(!dqh_dupesearch_should_check_added_for_parent_rank(
+            1, 1, true, 0, 0, false
+        ));
+        assert!(dqh_dupesearch_is_better_parent_candidate(
+            false, 0, 0, false, 0, 0, false, true, 1000, 500, false, 0
+        ));
+        assert!(dqh_dupesearch_should_retain_peer(false, 600, 500, false));
+        assert!(dqh_dupesearch_should_retain_peer(false, 400, 500, true));
+        assert!(!dqh_dupesearch_should_retain_peer(true, 600, 500, true));
+        assert_eq!(
+            dqh_dupesearch_format_rejected_outcome(
+                &[b"dead", b"fetch", b"over-cap"],
+                &[2, 0, 1]
+            ),
+            b"dead: 2, over-cap: 1"
+        );
+        assert_eq!(dqh_dupesearch_parse_pending_dir_id(b"42"), 42);
+        assert_eq!(dqh_dupesearch_parse_pending_dir_id(b"042"), 0);
+        assert_eq!(dqh_dupesearch_parse_pending_dir_id(b"abc"), 0);
+        assert!(dqh_dupesearch_pending_identity_matches(
+            true, b"title", b"title", b"key", b"key", b"fp", b"fp"
+        ));
+        assert!(!dqh_dupesearch_pending_identity_matches(
+            false, b"title", b"title", b"key", b"key", b"fp", b"fp"
+        ));
     }
 }

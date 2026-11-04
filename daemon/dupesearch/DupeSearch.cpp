@@ -175,17 +175,36 @@ void DupeSearch::DownloadQueueUpdate(DownloadQueue* downloadQueue, void* aspect)
         // An external lower-scored backup can arrive after the initial search.
         // Queue notifications run under the queue lock; only schedule work here.
         NzbInfo* added = queueAspect->nzbInfo;
-        if (queueAspect->action == DownloadQueue::eaNzbAdded && !IsDonor(added) &&
-            added->GetDupeMode() == dmScore &&
-            !added->GetParameters()->Find("DupeFleet"))
+        if (nzbget_rs_dqh_dupesearch_should_check_added_for_parent_rank(
+            (int)queueAspect->action,
+            (int)DownloadQueue::eaNzbAdded,
+            IsDonor(added) ? 1 : 0,
+            (int)added->GetDupeMode(),
+            (int)dmScore,
+            added->GetParameters()->Find("DupeFleet") != nullptr ? 1 : 0) != 0)
         {
             NzbInfo* parent = nullptr;
+            std::string addedKey = LowerKey(EffectiveKey(added));
             for (NzbInfo* item : downloadQueue->GetQueue())
-                if (item != added && item->GetKind() == NzbInfo::nkNzb && !item->GetDeleting() &&
-                    item->GetDeleteStatus() == NzbInfo::dsNone && !item->GetPostInfo() &&
-                    LowerKey(EffectiveKey(item)) == LowerKey(EffectiveKey(added)) &&
-                    item->GetDupeScore() > added->GetDupeScore() &&
-                    (!parent || item->GetDupeScore() > parent->GetDupeScore())) parent = item;
+            {
+                bool sameLowerKey = item != added && LowerKey(EffectiveKey(item)) == addedKey;
+                if (nzbget_rs_dqh_dupesearch_is_better_parent_candidate(
+                    item == added ? 1 : 0,
+                    (int)item->GetKind(),
+                    (int)NzbInfo::nkNzb,
+                    item->GetDeleting() ? 1 : 0,
+                    (int)item->GetDeleteStatus(),
+                    (int)NzbInfo::dsNone,
+                    item->GetPostInfo() != nullptr ? 1 : 0,
+                    sameLowerKey ? 1 : 0,
+                    item->GetDupeScore(),
+                    added->GetDupeScore(),
+                    parent != nullptr ? 1 : 0,
+                    parent ? parent->GetDupeScore() : 0) != 0)
+                {
+                    parent = item;
+                }
+            }
             if (parent)
             {
                 std::lock_guard<std::mutex> guard(m_mutex);
@@ -330,8 +349,12 @@ bool DupeSearch::PrepareNative(DownloadQueue* downloadQueue, int nzbId, Job& job
     std::string lowerKey = LowerKey(key);
     const std::string ownerPrefix = std::to_string(nzbId) + ":";
     NzbParameter* owner = pick->GetParameters()->Find(OwnedKeyParam);
-    bool generatedKey = Util::EmptyStr(pick->GetDupeKey()) ||
-        (owner && ownerPrefix + key == owner->GetValue() && key.compare(0, 6, "dupes:") == 0);
+    bool generatedKey = nzbget_rs_dqh_dupesearch_is_generated_key(
+        Util::EmptyStr(pick->GetDupeKey()) ? 1 : 0,
+        owner != nullptr ? 1 : 0,
+        owner ? owner->GetValue() : nullptr,
+        nzbId,
+        key.c_str()) != 0;
     std::string title;
     Searched previous;
     bool havePrevious = false, changedIdentity = false, rankOnly = false, cachedName = false, rankRequested = false;
@@ -425,7 +448,11 @@ bool DupeSearch::PrepareNative(DownloadQueue* downloadQueue, int nzbId, Job& job
     auto retain = [&](NzbInfo* item, bool inHistory) {
         // Lower/equal ordinary peers cannot affect the Rust highest-score rule.
         // Fleet markers still matter at any score, including history entries.
-        if (item != pick && (item->GetDupeScore() > pick->GetDupeScore() || item->GetParameters()->Find("DupeFleet")))
+        if (nzbget_rs_dqh_dupesearch_should_retain_peer(
+            item == pick ? 1 : 0,
+            item->GetDupeScore(),
+            pick->GetDupeScore(),
+            item->GetParameters()->Find("DupeFleet") != nullptr ? 1 : 0) != 0)
         { others.push_back(item); histories.push_back(inHistory); }
     };
     for (NzbInfo* item : downloadQueue->GetQueue()) retain(item, false);
@@ -514,12 +541,12 @@ void DupeSearch::Collect(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, Job& jo
 		if (LowerKey(EffectiveKey(item)) == lowerKey || ReleaseName::SameRelease(nzbInfo->GetName(), item->GetName()))
 		{
 			// the file of a merged group names several, separated by "|"
-			std::stringstream names(item->GetQueuedFilename());
-			std::string name;
-			while (std::getline(names, name, '|'))
-			{
-				job.knownFiles.push_back(name);
-			}
+			const char* qf = item->GetQueuedFilename() ? item->GetQueuedFilename() : "";
+			nzbget_rs_dqh_fleet_visit_pipe_names(qf, strlen(qf), &job.knownFiles,
+				[](void* ctx, const char* namePtr, size_t nameLen)
+				{
+					static_cast<std::vector<std::string>*>(ctx)->emplace_back(namePtr, nameLen);
+				});
 		}
 	};
 	for (NzbInfo* item : downloadQueue->GetQueue())
@@ -543,7 +570,8 @@ void DupeSearch::Collect(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, Job& jo
             nzbInfo->GetDupeScore()) != 0 &&
             LowerKey(EffectiveKey(item))==lowerKey &&
             ReleaseName::SameRelease(nzbInfo->GetName(),item->GetName()) &&
-            !Util::EmptyStr(item->GetQueuedFilename()) && !strchr(item->GetQueuedFilename(),'|'))
+            !Util::EmptyStr(item->GetQueuedFilename()) &&
+            nzbget_rs_tpr_twin_check_is_merged_queued_filename(item->GetQueuedFilename()) == 0)
         {
             job.members.emplace_back(item->GetId(),item->GetQueuedFilename());
             job.memberScores.push_back(item->GetDupeScore());
@@ -560,7 +588,8 @@ void DupeSearch::Collect(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, Job& jo
 			bool backup = SavedHistoryBackup(nzbInfo, item);
 			if (item != nzbInfo && backup && LowerKey(EffectiveKey(item)) == lowerKey &&
 				ReleaseName::SameRelease(nzbInfo->GetName(), item->GetName()) &&
-				!Util::EmptyStr(item->GetQueuedFilename()) && !strchr(item->GetQueuedFilename(), '|'))
+				!Util::EmptyStr(item->GetQueuedFilename()) &&
+				nzbget_rs_tpr_twin_check_is_merged_queued_filename(item->GetQueuedFilename()) == 0)
 			{
 				job.members.emplace_back(item->GetId(), item->GetQueuedFilename());
 				job.memberScores.push_back(item->GetDupeScore());
@@ -1356,14 +1385,19 @@ void DupeSearch::Place(const Job& job, const NzbSummary& pick, std::vector<NzbFe
 	rejected["dead"] += dead;
 	rejected["over-cap"] += overCap;
 	rejected["rescore"] += rescoreFailed;
-	std::string outcome;
+	std::vector<const char*> rejKeys;
+	std::vector<int> rejCounts;
+	rejKeys.reserve(rejected.size());
+	rejCounts.reserve(rejected.size());
 	for (const auto& entry : rejected)
 	{
-		if (entry.second > 0)
-		{
-			outcome += (outcome.empty() ? "" : ", ") + entry.first + ": " + std::to_string(entry.second);
-		}
+		rejKeys.push_back(entry.first.c_str());
+		rejCounts.push_back(entry.second);
 	}
+	NzbgetRsBuf outcomeBuf = nzbget_rs_dqh_dupesearch_format_rejected_outcome(
+		rejKeys.data(), rejCounts.data(), rejected.size());
+	std::string outcome(outcomeBuf.data ? outcomeBuf.data : "", outcomeBuf.len);
+	nzbget_rs_free(outcomeBuf);
 	Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: results=%i candidates=%i postings=%i verified=%i added=%i rejected={%s}",
 		job.name.c_str(), results, candidates, postings, (int)verified.size(), added, outcome.c_str());
 	RemovePending(job.nzbId);
@@ -1504,8 +1538,11 @@ int DupeSearch::AddDonor(const Job& job, const NzbSummary& pick, const NzbFetche
 	parameters.SetParameter(DonorParam, "yes");
 	for (const std::string& hint : DupeIdentity::Hints(pick, posting.info, posting.sameInner))
 	{
-		size_t equals = hint.find('=');
-		parameters.SetParameter(hint.substr(0, equals).c_str(), hint.substr(equals + 1).c_str());
+		size_t nameLen = 0, valOff = 0;
+		if (nzbget_rs_tpr_split_param_assignment(hint.c_str(), &nameLen, &valOff) != 0)
+		{
+			parameters.SetParameter(hint.substr(0, nameLen).c_str(), hint.c_str() + valOff);
+		}
 	}
 	if (alive >= 0)
 	{
@@ -1703,9 +1740,10 @@ void DupeSearch::ResumePending()
 	DirBrowser dirBrowser(PendingDir(0).c_str());
 	while (const char* name = dirBrowser.Next())
 	{
-		if (atoi(name) > 0 && std::to_string(atoi(name)) == name)
+		int parsedId = nzbget_rs_dqh_dupesearch_parse_pending_dir_id(name);
+		if (parsedId > 0)
 		{
-			ids.push_back(atoi(name));
+			ids.push_back(parsedId);
 		}
 	}
 
@@ -1775,10 +1813,21 @@ void DupeSearch::ResumePending()
 		NzbReader::Parse(DupeUtil::ReadAll(job.queuedFile), pick);
         // Proof belongs to the original pick. Old state without that binding is
         // searched again rather than assigning its donors to an unknown release.
-        if (!FileSystem::FileExists((dir + PATH_SEPARATOR + "pick-title").c_str()) ||
-            DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-title") != ReleaseName::Normalize(job.name) ||
-            DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-key") != LowerKey(job.dupeKey) ||
-            DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-posting") != pick.Fingerprint())
+        bool titleExists = FileSystem::FileExists((dir + PATH_SEPARATOR + "pick-title").c_str());
+        std::string savedTitle = titleExists ? DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-title") : std::string();
+        std::string savedKey = titleExists ? DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-key") : std::string();
+        std::string savedPosting = titleExists ? DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-posting") : std::string();
+        std::string currentTitle = ReleaseName::Normalize(job.name);
+        std::string currentKey = LowerKey(job.dupeKey);
+        std::string currentPosting = pick.Fingerprint();
+        if (nzbget_rs_dqh_dupesearch_pending_identity_matches(
+            titleExists ? 1 : 0,
+            (const uint8_t*)savedTitle.data(), savedTitle.size(),
+            (const uint8_t*)currentTitle.data(), currentTitle.size(),
+            (const uint8_t*)savedKey.data(), savedKey.size(),
+            (const uint8_t*)currentKey.data(), currentKey.size(),
+            (const uint8_t*)savedPosting.data(), savedPosting.size(),
+            (const uint8_t*)currentPosting.data(), currentPosting.size()) == 0)
         {
             Note(job.nzbId, Message::mkInfo, "DupeSearch: saved search identity changed; searching the current pick again");
             std::string oldKey = DupeUtil::ReadAll(dir + PATH_SEPARATOR + "pick-key");

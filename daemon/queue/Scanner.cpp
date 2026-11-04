@@ -21,7 +21,6 @@
 
 #include "nzbget.h"
 
-#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -978,25 +977,25 @@ Scanner::EAddStatus Scanner::AddExternalFile(
 
 	BString<1024> scanFileName("%s%c%s", g_Options->GetNzbDir(), PATH_SEPARATOR, *validNzbName);
 
-	char *ext = strrchr(validNzbName, '.');
-	if (ext)
-	{
-		*ext = '\0';
-		ext++;
-	}
+	const char* validCStr = validNzbName ? *validNzbName : "";
+	size_t validLen = strlen(validCStr);
+	ptrdiff_t dotOff = nzbget_rs_file_extension(validCStr, validLen);
+	bool hasExt = dotOff >= 0;
+	std::string basePart(validCStr, hasExt ? (size_t)dotOff : validLen);
+	std::string extPart = hasExt ? std::string(validCStr + dotOff + 1) : std::string();
 
 	int num = 2;
 	while (FileSystem::FileExists(scanFileName))
 	{
-		if (ext)
+		if (hasExt)
 		{
 			scanFileName.Format("%s%c%s_%i.%s", g_Options->GetNzbDir(),
-				PATH_SEPARATOR, *validNzbName, num, ext);
+				PATH_SEPARATOR, basePart.c_str(), num, extPart.c_str());
 		}
 		else
 		{
 			scanFileName.Format("%s%c%s_%i", g_Options->GetNzbDir(),
-				PATH_SEPARATOR, *validNzbName, num);
+				PATH_SEPARATOR, basePart.c_str(), num);
 		}
 		num++;
 	}

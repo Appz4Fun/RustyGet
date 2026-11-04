@@ -23,7 +23,6 @@
 #include <map>
 #include <set>
 
-#include <algorithm>
 #include "ArticleFetcher.h"
 #include "NntpConnection.h"
 #include "NewsServer.h"
@@ -76,14 +75,22 @@ ArticleFetcher::FetchedArticle ArticleFetcher::Fetch(const char* messageId,
 		// (the pool also skips a server of the same group and level as a failed
 		// one - the same account - so such a server isn't worth waiting for)
 		int eligible = 0;
+		std::vector<int> failedIds, failedGroups, failedLevels;
+		failedIds.reserve(failedServers.size());
+		failedGroups.reserve(failedServers.size());
+		failedLevels.reserve(failedServers.size());
+		for (NewsServer* failed : failedServers)
+		{
+			failedIds.push_back(failed->GetId());
+			failedGroups.push_back(failed->GetGroup());
+			failedLevels.push_back(failed->GetNormLevel());
+		}
 		for (NewsServer* server : g_ServerPool->GetServers())
 		{
-			if (server->GetActive() && server->GetNormLevel() == level &&
-				std::none_of(failedServers.begin(), failedServers.end(), [server](NewsServer* failed)
-					{
-						return failed == server || (failed->GetGroup() > 0 &&
-							failed->GetGroup() == server->GetGroup() && failed->GetNormLevel() == server->GetNormLevel());
-					}))
+			if (nzbget_rs_tpr_article_fetcher_is_server_eligible_on_level(
+				server->GetActive() ? 1 : 0, server->GetNormLevel(), level,
+				server->GetId(), server->GetGroup(),
+				failedIds.data(), failedGroups.data(), failedLevels.data(), failedServers.size()) != 0)
 			{
 				eligible++;
 			}
@@ -170,7 +177,8 @@ ArticleFetcher::FetchedArticle ArticleFetcher::Fetch(const char* messageId,
 			// dropping every connection of the account) says nothing about the
 			// server, and it is closed now, so it can't fail this way again:
 			// it doesn't use up an attempt
-			if (reused && ++staleConnections[server] <= server->GetMaxConnections())
+			if (reused && nzbget_rs_tpr_article_fetcher_is_reused_stale_within_max(
+				reused ? 1 : 0, ++staleConnections[server], server->GetMaxConnections()) != 0)
 			{
 				continue;
 			}
@@ -291,12 +299,12 @@ ArticleFetcher::FetchedArticle ArticleFetcher::FetchFromConnection(NntpConnectio
 		for (const CString& group : groups)
 		{
 			response = connection->JoinGroup(group);
-			if (response && !strncmp(response, "2", 1))
+			if (nzbget_rs_rrd_article_dl_is_join_group_ok(response) != 0)
 			{
 				break;
 			}
 		}
-		if (!response || strncmp(response, "2", 1))
+		if (nzbget_rs_rrd_article_dl_is_join_group_ok(response) == 0)
 		{
 			detail("Stream repair: could not join groups on %s for %s",
 				connection->GetNewsServer()->GetName(), messageId);
@@ -319,7 +327,7 @@ ArticleFetcher::FetchedArticle ArticleFetcher::FetchFromConnection(NntpConnectio
 		result.Transient = true;
 		return result;
 	}
-	if (strncmp(response, "2", 1))
+	if (nzbget_rs_rrd_article_dl_is_join_group_ok(response) == 0)
 	{
 		detail("Stream repair: article %s not available on %s",
 			messageId, connection->GetNewsServer()->GetName());
@@ -350,10 +358,12 @@ ArticleFetcher::FetchedArticle ArticleFetcher::FetchFromConnection(NntpConnectio
 			result.Retry = true;
 			return result;
 		}
-		while (!m_stopped && !g_WorkState->GetQuotaReached() &&
-			g_WorkState->GetSpeedLimit() > 0 &&
-			(g_StatMeter->CalcCurrentDownloadSpeed() > g_WorkState->GetSpeedLimit() ||
-			g_StatMeter->CalcMomentaryDownloadSpeed() > g_WorkState->GetSpeedLimit()))
+		while (nzbget_rs_tpr_article_fetcher_should_throttle_bandwidth(
+			m_stopped ? 1 : 0,
+			g_WorkState->GetQuotaReached() ? 1 : 0,
+			g_WorkState->GetSpeedLimit(),
+			g_StatMeter->CalcCurrentDownloadSpeed(),
+			g_StatMeter->CalcMomentaryDownloadSpeed()) != 0)
 		{
 			Util::Sleep(10);
 		}
@@ -399,8 +409,8 @@ ArticleFetcher::FetchedArticle ArticleFetcher::FetchFromConnection(NntpConnectio
 		}
 
 		int decodedLen = decoder.DecodeBuffer(buffer, len);
-		bool declaredRangeKnown = decoder.GetBeginPos() > 0 &&
-			decoder.GetEndPos() >= decoder.GetBeginPos() && decoder.GetSize() > 0;
+		bool declaredRangeKnown = nzbget_rs_tpr_article_fetcher_is_declared_range_known(
+			decoder.GetBeginPos(), decoder.GetEndPos(), decoder.GetSize()) != 0;
 		if (!limits.HeaderWithinLimit(declaredRangeKnown))
 		{
 			detail("Stream repair: article %s from %s exceeded the yEnc-header limit",

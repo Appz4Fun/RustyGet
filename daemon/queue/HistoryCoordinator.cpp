@@ -32,7 +32,6 @@
 #include "DupeCoordinator.h"
 #include "ParParser.h"
 #include "PrePostProcessor.h"
-#include "DupeCoordinator.h"
 #include "ServerPool.h"
 #include "DupeProbe.h"
 #include "ParDamage.h"
@@ -117,20 +116,17 @@ void HistoryCoordinator::DeleteDiskFiles(NzbInfo* nzbInfo)
 
 	// QueuedFile may contain one filename or several filenames separated
 	// with "|"-character (for merged groups)
-	CString filename = nzbInfo->GetQueuedFilename();
-	char* end = filename - 1;
-	while (end)
-	{
-		char* name1 = end + 1;
-		end = strchr(name1, '|');
-		if (end) *end = '\0';
-
-		if (FileSystem::FileExists(name1))
+	const char* filename = nzbInfo->GetQueuedFilename() ? nzbInfo->GetQueuedFilename() : "";
+	nzbget_rs_dqh_fleet_visit_pipe_names(filename, strlen(filename), nullptr,
+		[](void*, const char* namePtr, size_t nameLen)
 		{
-			info("Deleting file %s", name1);
-			FileSystem::DeleteFile(name1);
-		}
-	}
+			std::string name1(namePtr ? namePtr : "", nameLen);
+			if (FileSystem::FileExists(name1.c_str()))
+			{
+				info("Deleting file %s", name1.c_str());
+				FileSystem::DeleteFile(name1.c_str());
+			}
+		});
 }
 
 void HistoryCoordinator::AddToHistory(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
@@ -1026,13 +1022,11 @@ bool HistoryCoordinator::HistorySetParameter(HistoryInfo* historyInfo, const cha
 		return false;
 	}
 
-	CString str = text;
-	char* value = strchr(str, '=');
-	if (value)
+	size_t nameLen = 0, valOff = 0;
+	if (text && nzbget_rs_tpr_split_param_assignment(text, &nameLen, &valOff) != 0)
 	{
-		*value = '\0';
-		value++;
-		historyInfo->GetNzbInfo()->GetParameters()->SetParameter(str, value);
+		std::string name(text, nameLen);
+		historyInfo->GetNzbInfo()->GetParameters()->SetParameter(name.c_str(), text + valOff);
 	}
 	else
 	{

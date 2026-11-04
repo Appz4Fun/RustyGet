@@ -399,7 +399,10 @@ void DirectUnpack::AddMessage(Message::EKind kind, const char* text)
 	if (info.is_insert_disk != 0)
 	{
 		BString<1024> filename;
-		filename.Set(text + info.insert_disk_name_offset, (int)info.insert_disk_name_len);
+		if (info.insert_disk_name_len > 0)
+		{
+			filename.Set(text + info.insert_disk_name_offset, (int)info.insert_disk_name_len);
+		}
 		WaitNextVolume(filename);
 		return;
 	}

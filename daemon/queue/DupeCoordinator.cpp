@@ -20,8 +20,6 @@
 
 #include "nzbget.h"
 
-#include <cmath>
-
 #include <algorithm>
 #include "Options.h"
 #include "Log.h"
@@ -30,7 +28,6 @@
 #include "NzbFile.h"
 #include "HistoryCoordinator.h"
 #include "DupeCoordinator.h"
-#include <set>
 #include "QueueScript.h"
 #include "QueueCoordinator.h"
 #include "nzbget_rs.h"

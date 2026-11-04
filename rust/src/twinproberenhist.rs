@@ -512,6 +512,78 @@ pub fn dupe_probe_format_unreachable_suffix(unreachable_servers: i32) -> Vec<u8>
     }
 }
 
+/// Splits a `"name=value"` parameter assignment at the first `'='`.
+/// Returns `Some((name, value))` if `'='` is present, else `None`
+/// (`HistoryCoordinator::HistorySetParameter`, `QueueEditor::SetNzbParameter`).
+pub fn tpr_split_param_assignment(text: &[u8]) -> Option<(&[u8], &[u8])> {
+    text.iter()
+        .position(|&b| b == b'=')
+        .map(|eq| (&text[..eq], &text[eq + 1..]))
+}
+
+/// Evaluates whether an article fetch server on `level` is eligible to try (`ArticleFetcher::Fetch`).
+pub fn tpr_article_fetcher_is_server_eligible_on_level(
+    server_active: bool,
+    server_norm_level: i32,
+    target_level: i32,
+    server_id: i32,
+    server_group: i32,
+    failed_ids: &[i32],
+    failed_groups: &[i32],
+    failed_levels: &[i32],
+) -> bool {
+    if !server_active || server_norm_level != target_level {
+        return false;
+    }
+    let count = failed_ids
+        .len()
+        .min(failed_groups.len())
+        .min(failed_levels.len());
+    for i in 0..count {
+        if failed_ids[i] == server_id
+            || (failed_groups[i] > 0
+                && failed_groups[i] == server_group
+                && failed_levels[i] == server_norm_level)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// Evaluates whether a transient failure on a reused connection should retry immediately
+/// without consuming a transient attempt (`ArticleFetcher::Fetch`).
+pub fn tpr_article_fetcher_is_reused_stale_within_max(
+    reused: bool,
+    stale_count_after_inc: i32,
+    max_connections: i32,
+) -> bool {
+    reused && stale_count_after_inc <= max_connections
+}
+
+/// Evaluates whether `ArticleFetcher::FetchFromConnection` has a known valid declared yEnc range.
+pub fn tpr_article_fetcher_is_declared_range_known(
+    begin_pos: i64,
+    end_pos: i64,
+    size: i64,
+) -> bool {
+    begin_pos > 0 && end_pos >= begin_pos && size > 0
+}
+
+/// Evaluates whether `ArticleFetcher::FetchFromConnection` should throttle bandwidth.
+pub fn tpr_article_fetcher_should_throttle_bandwidth(
+    stopped: bool,
+    quota_reached: bool,
+    speed_limit: i64,
+    cur_speed: i64,
+    momentary_speed: i64,
+) -> bool {
+    !stopped
+        && !quota_reached
+        && speed_limit > 0
+        && (cur_speed > speed_limit || momentary_speed > speed_limit)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,5 +741,41 @@ mod tests {
             b", 2 unreachable left out"
         );
         assert!(dupe_probe_format_unreachable_suffix(0).is_empty());
+
+        assert_eq!(
+            tpr_split_param_assignment(b"*Unpack:Password=secret=1"),
+            Some((&b"*Unpack:Password"[..], &b"secret=1"[..]))
+        );
+        assert_eq!(tpr_split_param_assignment(b"invalid"), None);
+        assert!(tpr_article_fetcher_is_server_eligible_on_level(
+            true,
+            0,
+            0,
+            2,
+            1,
+            &[1],
+            &[2],
+            &[0]
+        ));
+        assert!(!tpr_article_fetcher_is_server_eligible_on_level(
+            true,
+            0,
+            0,
+            2,
+            1,
+            &[1],
+            &[1],
+            &[0]
+        ));
+        assert!(tpr_article_fetcher_is_reused_stale_within_max(true, 4, 4));
+        assert!(!tpr_article_fetcher_is_reused_stale_within_max(true, 5, 4));
+        assert!(tpr_article_fetcher_is_declared_range_known(1, 100, 1000));
+        assert!(!tpr_article_fetcher_is_declared_range_known(0, 100, 1000));
+        assert!(tpr_article_fetcher_should_throttle_bandwidth(
+            false, false, 1000, 1200, 800
+        ));
+        assert!(!tpr_article_fetcher_should_throttle_bandwidth(
+            false, true, 1000, 1200, 800
+        ));
     }
 }

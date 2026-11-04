@@ -5483,6 +5483,45 @@ int32_t nzbget_rs_dqh_fleet_candidate_tier(
 NzbgetRsBuf nzbget_rs_dqh_fleet_format_summary_log(
     int32_t members_count, const char* dupe_key, int32_t chosen,
     const char* reason, int32_t complete);
+int32_t nzbget_rs_dqh_dupesearch_is_generated_key(
+    int32_t dupe_key_empty, int32_t has_owner, const char* owner_value,
+    int32_t nzb_id, const char* key);
+int32_t nzbget_rs_dqh_dupesearch_should_check_added_for_parent_rank(
+    int32_t action, int32_t ea_nzb_added, int32_t is_donor,
+    int32_t dupe_mode, int32_t dm_score, int32_t has_dupe_fleet_param);
+int32_t nzbget_rs_dqh_dupesearch_is_better_parent_candidate(
+    int32_t is_same_item, int32_t kind, int32_t nk_nzb, int32_t deleting,
+    int32_t delete_status, int32_t ds_none, int32_t has_post_info,
+    int32_t same_lower_key, int32_t item_score, int32_t added_score,
+    int32_t has_parent, int32_t parent_score);
+int32_t nzbget_rs_dqh_dupesearch_should_retain_peer(
+    int32_t is_same_item, int32_t item_score, int32_t pick_score,
+    int32_t has_dupe_fleet_param);
+NzbgetRsBuf nzbget_rs_dqh_dupesearch_format_rejected_outcome(
+    const char* const* keys_ptr, const int32_t* counts_ptr, size_t len);
+int32_t nzbget_rs_dqh_dupesearch_parse_pending_dir_id(const char* name);
+int32_t nzbget_rs_dqh_dupesearch_pending_identity_matches(
+    int32_t has_pick_title_file,
+    const uint8_t* saved_title_ptr, size_t saved_title_len,
+    const uint8_t* cur_norm_title_ptr, size_t cur_norm_title_len,
+    const uint8_t* saved_key_ptr, size_t saved_key_len,
+    const uint8_t* cur_lower_key_ptr, size_t cur_lower_key_len,
+    const uint8_t* saved_posting_ptr, size_t saved_posting_len,
+    const uint8_t* cur_fingerprint_ptr, size_t cur_fingerprint_len);
+int32_t nzbget_rs_tpr_split_param_assignment(
+    const char* text, size_t* out_name_len, size_t* out_value_offset);
+int32_t nzbget_rs_tpr_article_fetcher_is_server_eligible_on_level(
+    int32_t server_active, int32_t server_norm_level, int32_t target_level,
+    int32_t server_id, int32_t server_group,
+    const int32_t* failed_ids_ptr, const int32_t* failed_groups_ptr,
+    const int32_t* failed_levels_ptr, size_t failed_count);
+int32_t nzbget_rs_tpr_article_fetcher_is_reused_stale_within_max(
+    int32_t reused, int32_t stale_count_after_inc, int32_t max_connections);
+int32_t nzbget_rs_tpr_article_fetcher_is_declared_range_known(
+    int64_t begin_pos, int64_t end_pos, int64_t size);
+int32_t nzbget_rs_tpr_article_fetcher_should_throttle_bandwidth(
+    int32_t stopped, int32_t quota_reached, int64_t speed_limit,
+    int64_t cur_speed, int64_t momentary_speed);
 
 #include "nzbget_tls_cipher.h"
 

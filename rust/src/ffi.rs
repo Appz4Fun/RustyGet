@@ -31175,5 +31175,273 @@ pub unsafe extern "C" fn nzbget_rs_dqh_fleet_format_summary_log(
     ))
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_dupesearch_is_generated_key(
+    dupe_key_empty: i32,
+    has_owner: i32,
+    owner_value: *const c_char,
+    nzb_id: i32,
+    key: *const c_char,
+) -> i32 {
+    if crate::dupequeuehealth::dqh_dupesearch_is_generated_key(
+        dupe_key_empty != 0,
+        has_owner != 0,
+        input(owner_value),
+        nzb_id,
+        input(key),
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupesearch_should_check_added_for_parent_rank(
+    action: i32,
+    ea_nzb_added: i32,
+    is_donor: i32,
+    dupe_mode: i32,
+    dm_score: i32,
+    has_dupe_fleet_param: i32,
+) -> i32 {
+    if crate::dupequeuehealth::dqh_dupesearch_should_check_added_for_parent_rank(
+        action,
+        ea_nzb_added,
+        is_donor != 0,
+        dupe_mode,
+        dm_score,
+        has_dupe_fleet_param != 0,
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupesearch_is_better_parent_candidate(
+    is_same_item: i32,
+    kind: i32,
+    nk_nzb: i32,
+    deleting: i32,
+    delete_status: i32,
+    ds_none: i32,
+    has_post_info: i32,
+    same_lower_key: i32,
+    item_score: i32,
+    added_score: i32,
+    has_parent: i32,
+    parent_score: i32,
+) -> i32 {
+    if crate::dupequeuehealth::dqh_dupesearch_is_better_parent_candidate(
+        is_same_item != 0,
+        kind,
+        nk_nzb,
+        deleting != 0,
+        delete_status,
+        ds_none,
+        has_post_info != 0,
+        same_lower_key != 0,
+        item_score,
+        added_score,
+        has_parent != 0,
+        parent_score,
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupesearch_should_retain_peer(
+    is_same_item: i32,
+    item_score: i32,
+    pick_score: i32,
+    has_dupe_fleet_param: i32,
+) -> i32 {
+    if crate::dupequeuehealth::dqh_dupesearch_should_retain_peer(
+        is_same_item != 0,
+        item_score,
+        pick_score,
+        has_dupe_fleet_param != 0,
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_dupesearch_format_rejected_outcome(
+    keys_ptr: *const *const c_char,
+    counts_ptr: *const i32,
+    len: usize,
+) -> RsBuf {
+    if keys_ptr.is_null() || counts_ptr.is_null() || len == 0 {
+        return into_buf(Vec::new());
+    }
+    let raw_keys = std::slice::from_raw_parts(keys_ptr, len);
+    let counts = std::slice::from_raw_parts(counts_ptr, len);
+    let mut keys = Vec::with_capacity(len);
+    for &k in raw_keys {
+        keys.push(input(k));
+    }
+    into_buf(crate::dupequeuehealth::dqh_dupesearch_format_rejected_outcome(&keys, counts))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_dupesearch_parse_pending_dir_id(name: *const c_char) -> i32 {
+    crate::dupequeuehealth::dqh_dupesearch_parse_pending_dir_id(input(name))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_dupesearch_pending_identity_matches(
+    has_pick_title_file: i32,
+    saved_title_ptr: *const u8,
+    saved_title_len: usize,
+    cur_norm_title_ptr: *const u8,
+    cur_norm_title_len: usize,
+    saved_key_ptr: *const u8,
+    saved_key_len: usize,
+    cur_lower_key_ptr: *const u8,
+    cur_lower_key_len: usize,
+    saved_posting_ptr: *const u8,
+    saved_posting_len: usize,
+    cur_fingerprint_ptr: *const u8,
+    cur_fingerprint_len: usize,
+) -> i32 {
+    let slice = |p: *const u8, n: usize| -> &[u8] {
+        if p.is_null() || n == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(p, n) }
+        }
+    };
+    if crate::dupequeuehealth::dqh_dupesearch_pending_identity_matches(
+        has_pick_title_file != 0,
+        slice(saved_title_ptr, saved_title_len),
+        slice(cur_norm_title_ptr, cur_norm_title_len),
+        slice(saved_key_ptr, saved_key_len),
+        slice(cur_lower_key_ptr, cur_lower_key_len),
+        slice(saved_posting_ptr, saved_posting_len),
+        slice(cur_fingerprint_ptr, cur_fingerprint_len),
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_split_param_assignment(
+    text: *const c_char,
+    out_name_len: *mut usize,
+    out_value_offset: *mut usize,
+) -> i32 {
+    let s = input(text);
+    match crate::twinproberenhist::tpr_split_param_assignment(s) {
+        Some((name, _)) => {
+            if !out_name_len.is_null() {
+                *out_name_len = name.len();
+            }
+            if !out_value_offset.is_null() {
+                *out_value_offset = name.len() + 1;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_article_fetcher_is_server_eligible_on_level(
+    server_active: i32,
+    server_norm_level: i32,
+    target_level: i32,
+    server_id: i32,
+    server_group: i32,
+    failed_ids_ptr: *const i32,
+    failed_groups_ptr: *const i32,
+    failed_levels_ptr: *const i32,
+    failed_count: usize,
+) -> i32 {
+    let slice = |p: *const i32, n: usize| -> &[i32] {
+        if p.is_null() || n == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(p, n) }
+        }
+    };
+    if crate::twinproberenhist::tpr_article_fetcher_is_server_eligible_on_level(
+        server_active != 0,
+        server_norm_level,
+        target_level,
+        server_id,
+        server_group,
+        slice(failed_ids_ptr, failed_count),
+        slice(failed_groups_ptr, failed_count),
+        slice(failed_levels_ptr, failed_count),
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_tpr_article_fetcher_is_reused_stale_within_max(
+    reused: i32,
+    stale_count_after_inc: i32,
+    max_connections: i32,
+) -> i32 {
+    if crate::twinproberenhist::tpr_article_fetcher_is_reused_stale_within_max(
+        reused != 0,
+        stale_count_after_inc,
+        max_connections,
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_tpr_article_fetcher_is_declared_range_known(
+    begin_pos: i64,
+    end_pos: i64,
+    size: i64,
+) -> i32 {
+    if crate::twinproberenhist::tpr_article_fetcher_is_declared_range_known(begin_pos, end_pos, size)
+    {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_tpr_article_fetcher_should_throttle_bandwidth(
+    stopped: i32,
+    quota_reached: i32,
+    speed_limit: i64,
+    cur_speed: i64,
+    momentary_speed: i64,
+) -> i32 {
+    if crate::twinproberenhist::tpr_article_fetcher_should_throttle_bandwidth(
+        stopped != 0,
+        quota_reached != 0,
+        speed_limit,
+        cur_speed,
+        momentary_speed,
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+
 
 

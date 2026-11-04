@@ -942,6 +942,24 @@ void Options::SetOption(const char* optname, const char* value)
 	optEntry->SetLineNo(m_configLine);
 
 	// expand variables
+#ifdef NZBGET_USE_RUST
+	size_t dollarPos = 0;
+	size_t varLen = 0;
+	while (nzbget_rs_rco_options_find_var_reference(curvalue, &dollarPos, &varLen))
+	{
+		BString<100> variable;
+		variable.Set((const char*)curvalue + dollarPos + 2, (int)varLen);
+		const char* varvalue = GetOption(variable);
+		if (varvalue)
+		{
+			curvalue.Replace((int)dollarPos, 2 + (int)varLen + 1, varvalue);
+		}
+		else
+		{
+			break;
+		}
+	}
+#else
 	while (const char* dollar = strstr(curvalue, "${"))
 	{
 		const char* end = strchr(dollar, '}');
@@ -965,6 +983,7 @@ void Options::SetOption(const char* optname, const char* value)
 			break;
 		}
 	}
+#endif
 
 	optEntry->SetValue(curvalue);
 }
@@ -1326,9 +1345,13 @@ void Options::InitScheduler()
 			scActivateServer, scActivateServer, scDeactivateServer,
 			scDeactivateServer, scFetchFeed, scFetchFeed };
 		const int CommandCount = 27;
+#ifdef NZBGET_USE_RUST
+		bool knownCommand = nzbget_rs_rco_options_lookup_scheduler_command(command) >= 0;
+#else
 		// an unknown command is an error, not the first command (pausedownload)
 		bool knownCommand = std::any_of(std::begin(CommandNames), std::end(CommandNames),
 			[command](const char* name) { return !strcasecmp(name, command); });
+#endif
 		ESchedulerCommand taskCommand = (ESchedulerCommand)ParseEnumValue(
 			BString<100>("Task%i.Command", n), CommandCount, CommandNames, CommandValues);
 		if (!knownCommand)
@@ -1336,6 +1359,27 @@ void Options::InitScheduler()
 			continue;
 		}
 
+#ifdef NZBGET_USE_RUST
+		bool splitCmdEmpty = (param && strlen(param) > 0 && taskCommand == scProcess)
+			? Util::SplitCommandLine(param).empty() : false;
+		int paramCheck = nzbget_rs_rco_options_validate_scheduler_param(
+			(int)taskCommand, param, splitCmdEmpty ? 1 : 0);
+		if (paramCheck == 1)
+		{
+			ConfigError("Invalid value for option \"Task%i.Param\"", n);
+			continue;
+		}
+		if (paramCheck == 2)
+		{
+			ConfigError("Invalid value for option \"Task%i.Param\": \"%s\"", n, downloadRate);
+			continue;
+		}
+		if (paramCheck == 3)
+		{
+			ConfigError("Task definition not complete for \"Task%i\". Option \"Task%i.Param\" is missing", n, n);
+			continue;
+		}
+#else
 		if (param && strlen(param) > 0 && taskCommand == scProcess &&
 			Util::SplitCommandLine(param).empty())
 		{
@@ -1372,6 +1416,7 @@ void Options::InitScheduler()
 			ConfigError("Task definition not complete for \"Task%i\". Option \"Task%i.Param\" is missing", n, n);
 			continue;
 		}
+#endif
 
 		CreateSchedulerTask(n, time, weekDays, taskCommand, param);
 	}
@@ -1569,6 +1614,12 @@ void Options::LoadConfigFile()
 	{
 		m_configLine = ++line;
 
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_rco_options_trim_and_check_config_line(buf))
+		{
+			continue;
+		}
+#else
 		if (buf[0] != 0 && buf[strlen(buf)-1] == '\n')
 		{
 			buf[strlen(buf)-1] = 0; // remove traling '\n'
@@ -1582,6 +1633,7 @@ void Options::LoadConfigFile()
 		{
 			continue;
 		}
+#endif
 
 		SetOptionString(buf);
 	}

@@ -216,6 +216,33 @@ WebDownloader::EStatus WebDownloader::DownloadWithRedirects(int maxRedirects)
 
 WebDownloader::EStatus WebDownloader::CreateConnection(URL *url)
 {
+#ifdef NZBGET_USE_RUST
+	int tlsDisabled = 0;
+#ifdef DISABLE_TLS
+	tlsDisabled = 1;
+#endif
+	int port = 0;
+	int tlsInt = 0;
+	int rc = nzbget_rs_rco_webdl_resolve_protocol_port(
+		url->IsValid() ? 1 : 0, url->GetProtocol(), url->GetPort(),
+		tlsDisabled, &port, &tlsInt);
+	if (rc == -1)
+	{
+		error("URL is not valid: %s", url->GetAddress());
+		return adFatalError;
+	}
+	if (rc == -2)
+	{
+		error("Unsupported protocol in URL: %s", url->GetAddress());
+		return adFatalError;
+	}
+	if (rc == -3)
+	{
+		error("Program was compiled without TLS/SSL-support. Cannot download using https protocol. URL: %s", url->GetAddress());
+		return adFatalError;
+	}
+	bool tls = tlsInt != 0;
+#else
 	if (!url->IsValid())
 	{
 		error("URL is not valid: %s", url->GetAddress());
@@ -247,6 +274,7 @@ WebDownloader::EStatus WebDownloader::CreateConnection(URL *url)
 #endif
 
 	bool tls = !strcasecmp(url->GetProtocol(), "https");
+#endif
 
 	m_connection = std::make_unique<Connection>(url->GetHost(), port, tls);
 
@@ -375,6 +403,39 @@ WebDownloader::EStatus WebDownloader::DownloadBody()
 			buffer = lineBuf;
 		}
 
+#ifdef NZBGET_USE_RUST
+		if (len <= 0)
+		{
+			if (nzbget_rs_rco_webdl_check_body_chunk(
+				len, m_contentLen, writtenLen, m_gzip ? 1 : 0, m_confirmedLength ? 1 : 0) == 1)
+			{
+				end = true;
+				break;
+			}
+			if (!IsStopped())
+			{
+				warn("URL %s failed: Unexpected end of file", *m_infoName);
+			}
+			Status = adFailed;
+			break;
+		}
+
+		// write to output file
+		if (!Write(buffer, len))
+		{
+			Status = adFatalError;
+			break;
+		}
+		int bodyStep = nzbget_rs_rco_webdl_check_body_chunk(
+			len, m_contentLen, writtenLen, m_gzip ? 1 : 0, m_confirmedLength ? 1 : 0);
+		writtenLen += len;
+
+		if (bodyStep == 2)
+		{
+			end = true;
+			break;
+		}
+#else
 		// Connection closed or timeout?
 		if (len <= 0)
 		{
@@ -406,6 +467,7 @@ WebDownloader::EStatus WebDownloader::DownloadBody()
 			end = true;
 			break;
 		}
+#endif
 	}
 
 #ifndef DISABLE_GZIP

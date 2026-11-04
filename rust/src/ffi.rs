@@ -12777,6 +12777,516 @@ pub unsafe extern "C" fn nzbget_rs_sus_check_env_size_limit(
     }
 }
 
+// ============================================================================
+// XmlRpc, RemoteServer, Connection, WebDownloader, Options, Cleanup, Rename,
+// ArchiveProcessor, Log & NString hot-path FFI (rpcconnopt.rs)
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_rpc_is_rpc_request(url: *const c_char) -> c_int {
+    if crate::rpcconnopt::rpc_is_rpc_request(crate::diskstatepp::cstr_to_bytes(url)) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_rpc_log_slice_range(
+    messages_len: c_int,
+    front_id: c_int,
+    id_from: c_int,
+    nr_entries: c_int,
+    out_start: *mut c_int,
+    out_nr_entries: *mut c_int,
+) {
+    let (start, eff) =
+        crate::rpcconnopt::rpc_log_slice_range(messages_len, front_id, id_from, nr_entries);
+    if !out_start.is_null() {
+        *out_start = start;
+    }
+    if !out_nr_entries.is_null() {
+        *out_nr_entries = eff;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_rpc_list_files_match_and_progress(
+    nzb_id: c_int,
+    file_nzb_id: c_int,
+    file_id: c_int,
+    id_start: c_int,
+    id_end: c_int,
+    size: i64,
+    remaining_size: i64,
+    missed_size: i64,
+    failed_size: i64,
+    success_size: i64,
+    out_progress: *mut c_int,
+) -> c_int {
+    if let Some(progress) = crate::rpcconnopt::rpc_list_files_match_and_progress(
+        nzb_id,
+        file_nzb_id,
+        file_id,
+        id_start,
+        id_end,
+        size,
+        remaining_size,
+        missed_size,
+        failed_size,
+        success_size,
+    ) {
+        if !out_progress.is_null() {
+            *out_progress = progress;
+        }
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_rpc_detect_group_status(
+    has_post_info: c_int,
+    post_stage: c_int,
+    has_queue_script_job: c_int,
+    queue_script_active: c_int,
+    direct_unpack_status: c_int,
+    active_downloads: c_int,
+    kind: c_int,
+    paused_size: i64,
+    remaining_size: i64,
+) -> *const c_char {
+    crate::rpcconnopt::rpc_detect_group_status(
+        has_post_info != 0,
+        post_stage,
+        has_queue_script_job != 0,
+        queue_script_active != 0,
+        direct_unpack_status,
+        active_downloads,
+        kind,
+        paused_size,
+        remaining_size,
+    )
+    .as_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_rpc_lookup_edit_command(
+    edit_command: *const c_char,
+) -> c_int {
+    crate::rpcconnopt::rpc_lookup_edit_command(crate::diskstatepp::cstr_to_bytes(edit_command))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_rpc_validate_edit_queue_args(
+    action: c_int,
+    args: *const c_char,
+    parsed_int_ok: c_int,
+) -> c_int {
+    if crate::rpcconnopt::rpc_validate_edit_queue_args(
+        action,
+        crate::diskstatepp::cstr_to_bytes(args),
+        parsed_int_ok != 0,
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_rpc_parse_write_log_kind(kind: *const c_char) -> c_int {
+    crate::rpcconnopt::rpc_parse_write_log_kind(crate::diskstatepp::cstr_to_bytes(kind))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_rpc_detect_history_dup_status(
+    dup_status: c_int,
+) -> *const c_char {
+    crate::rpcconnopt::rpc_detect_history_dup_status(dup_status).as_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_rpc_parse_update_branch(
+    branch_name: *const c_char,
+) -> c_int {
+    crate::rpcconnopt::rpc_parse_update_branch(crate::diskstatepp::cstr_to_bytes(branch_name))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_rpc_save_config_parse_bool(
+    val: *const c_char,
+    def_val: c_int,
+) -> c_int {
+    let opt = if val.is_null() {
+        None
+    } else {
+        Some(crate::diskstatepp::cstr_to_bytes(val))
+    };
+    if crate::rpcconnopt::rpc_save_config_parse_bool(opt, def_val != 0) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_rpc_save_config_check_global_conflicts(
+    dupe_search_val: *const c_char,
+    health_check_val: *const c_char,
+    flush_queue_val: *const c_char,
+    direct_write_val: *const c_char,
+    unpack_pause_queue_val: *const c_char,
+    direct_unpack_val: *const c_char,
+) -> c_int {
+    let opt = |p: *const c_char| {
+        if p.is_null() {
+            None
+        } else {
+            Some(crate::diskstatepp::cstr_to_bytes(p))
+        }
+    };
+    crate::rpcconnopt::rpc_save_config_check_global_conflicts(
+        opt(dupe_search_val),
+        opt(health_check_val),
+        opt(flush_queue_val),
+        opt(direct_write_val),
+        opt(unpack_pause_queue_val),
+        opt(direct_unpack_val),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_remote_classify_signature(
+    sig_ptr: *const c_char,
+    nzb_magic_be: u32,
+) -> c_int {
+    if sig_ptr.is_null() {
+        return 0;
+    }
+    let slice = std::slice::from_raw_parts(sig_ptr.cast::<u8>(), 4);
+    let arr: [u8; 4] = [slice[0], slice[1], slice[2], slice[3]];
+    crate::rpcconnopt::remote_classify_signature(&arr, nzb_magic_be)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_remote_parse_web_request_line(
+    sig_ptr: *const c_char,
+    line: *const c_char,
+    out_http_method: *mut c_int,
+    out_url_offset: *mut usize,
+    out_url_len: *mut usize,
+) -> c_int {
+    if sig_ptr.is_null() || line.is_null() {
+        return 0;
+    }
+    let slice = std::slice::from_raw_parts(sig_ptr.cast::<u8>(), 4);
+    let arr: [u8; 4] = [slice[0], slice[1], slice[2], slice[3]];
+    let line_bytes = crate::diskstatepp::cstr_to_bytes(line);
+    if let Some((method, offset, len)) =
+        crate::rpcconnopt::remote_parse_web_request_line(&arr, line_bytes)
+    {
+        if !out_http_method.is_null() {
+            *out_http_method = method;
+        }
+        if !out_url_offset.is_null() {
+            *out_url_offset = offset;
+        }
+        if !out_url_len.is_null() {
+            *out_url_len = len;
+        }
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_conn_read_line_chunk(
+    buf_ptr: *const c_char,
+    buf_avail: c_int,
+    max_out: c_int,
+    out_found_newline: *mut c_int,
+) -> c_int {
+    if buf_ptr.is_null() || buf_avail <= 0 || max_out <= 0 {
+        if !out_found_newline.is_null() {
+            *out_found_newline = 0;
+        }
+        return 0;
+    }
+    let slice = std::slice::from_raw_parts(buf_ptr.cast::<u8>(), buf_avail as usize);
+    let (copy_len, found) = crate::rpcconnopt::conn_read_line_chunk(slice, max_out as usize);
+    if !out_found_newline.is_null() {
+        *out_found_newline = if found { 1 } else { 0 };
+    }
+    copy_len as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_conn_classify_accept_errno(
+    err: c_int,
+    eintr: c_int,
+    econnaborted: c_int,
+    eproto: c_int,
+    enetdown: c_int,
+    enoprotoopt: c_int,
+    ehostdown: c_int,
+    ehostunreach: c_int,
+    eopnotsupp: c_int,
+    enetunreach: c_int,
+    enonet: c_int,
+    emfile: c_int,
+    enfile: c_int,
+    enobufs: c_int,
+    enomem: c_int,
+) -> c_int {
+    crate::rpcconnopt::conn_classify_accept_errno(
+        err,
+        eintr,
+        econnaborted,
+        eproto,
+        enetdown,
+        enoprotoopt,
+        ehostdown,
+        ehostunreach,
+        eopnotsupp,
+        enetunreach,
+        enonet,
+        emfile,
+        enfile,
+        enobufs,
+        enomem,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_webdl_resolve_protocol_port(
+    is_valid: c_int,
+    protocol: *const c_char,
+    port: c_int,
+    tls_disabled: c_int,
+    out_port: *mut c_int,
+    out_tls: *mut c_int,
+) -> c_int {
+    let (code, resolved_port, is_tls) = crate::rpcconnopt::webdl_resolve_protocol_port(
+        is_valid != 0,
+        crate::diskstatepp::cstr_to_bytes(protocol),
+        port,
+        tls_disabled != 0,
+    );
+    if !out_port.is_null() {
+        *out_port = resolved_port;
+    }
+    if !out_tls.is_null() {
+        *out_tls = if is_tls { 1 } else { 0 };
+    }
+    code
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_webdl_check_body_chunk(
+    chunk_len: c_int,
+    content_len: c_int,
+    written_len: c_int,
+    gzip: c_int,
+    confirmed_length: c_int,
+) -> c_int {
+    crate::rpcconnopt::webdl_check_body_chunk(
+        chunk_len,
+        content_len,
+        written_len,
+        gzip != 0,
+        confirmed_length != 0,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_options_find_var_reference(
+    s: *const c_char,
+    out_dollar_pos: *mut usize,
+    out_var_len: *mut usize,
+) -> c_int {
+    if let Some((pos, len)) =
+        crate::rpcconnopt::options_find_var_reference(crate::diskstatepp::cstr_to_bytes(s))
+    {
+        if !out_dollar_pos.is_null() {
+            *out_dollar_pos = pos;
+        }
+        if !out_var_len.is_null() {
+            *out_var_len = len;
+        }
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_options_trim_and_check_config_line(
+    line: *mut c_char,
+) -> c_int {
+    if line.is_null() {
+        return 1;
+    }
+    let bytes = crate::diskstatepp::cstr_to_bytes(line);
+    let (new_len, skip) = crate::rpcconnopt::options_trim_and_check_config_line(bytes);
+    *line.add(new_len) = 0;
+    if skip { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_options_lookup_scheduler_command(
+    cmd: *const c_char,
+) -> c_int {
+    crate::rpcconnopt::options_lookup_scheduler_command(crate::diskstatepp::cstr_to_bytes(cmd))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_options_validate_scheduler_param(
+    task_command: c_int,
+    param: *const c_char,
+    split_cmd_empty: c_int,
+) -> c_int {
+    let opt = if param.is_null() {
+        None
+    } else {
+        Some(crate::diskstatepp::cstr_to_bytes(param))
+    };
+    crate::rpcconnopt::options_validate_scheduler_param(task_command, opt, split_cmd_empty != 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_move_controller_decide_outcome(
+    ok: c_int,
+    is_stopped: c_int,
+    out_move_status: *mut c_int,
+) -> c_int {
+    let (action, status) =
+        crate::rpcconnopt::move_controller_decide_outcome(ok != 0, is_stopped != 0);
+    if !out_move_status.is_null() {
+        *out_move_status = status;
+    }
+    action
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_cleanup_controller_decide_outcome(
+    ok: c_int,
+    deleted: c_int,
+    out_cleanup_status: *mut c_int,
+) -> c_int {
+    let (action, status) =
+        crate::rpcconnopt::cleanup_controller_decide_outcome(ok != 0, deleted != 0);
+    if !out_cleanup_status.is_null() {
+        *out_cleanup_status = status;
+    }
+    action
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_rename_controller_complete_action(
+    kind: c_int,
+    renamed_count: c_int,
+    has_damaged_pars: c_int,
+    remaining_par_count: c_int,
+    has_missed_files: c_int,
+    par_status: c_int,
+    out_request_extra_pars: *mut c_int,
+    out_request_par_check: *mut c_int,
+) -> c_int {
+    let (initial_status, req_extra, req_par) =
+        crate::rpcconnopt::rename_controller_complete_action(
+            kind,
+            renamed_count,
+            has_damaged_pars != 0,
+            remaining_par_count,
+            has_missed_files != 0,
+            par_status,
+        );
+    if !out_request_extra_pars.is_null() {
+        *out_request_extra_pars = if req_extra { 1 } else { 0 };
+    }
+    if !out_request_par_check.is_null() {
+        *out_request_par_check = if req_par { 1 } else { 0 };
+    }
+    initial_status
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_archive_is_nzb_extension(ext: *const c_char) -> c_int {
+    if crate::rpcconnopt::archive_is_nzb_extension(crate::diskstatepp::cstr_to_bytes(ext)) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_archive_decide_dispose_action(
+    config_action: c_int,
+    non_nzb_file_count: c_int,
+) -> c_int {
+    crate::rpcconnopt::archive_decide_dispose_action(config_action, non_nzb_file_count)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_log_should_rotate(
+    rawtime: i64,
+    last_written: i64,
+    write_log_mode: c_int,
+) -> c_int {
+    if crate::rpcconnopt::log_should_rotate(rawtime, last_written, write_log_mode) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_log_init_message_disposition(
+    target: c_int,
+    out_write_to_file: *mut c_int,
+    out_keep_in_screen: *mut c_int,
+) {
+    let (write_to_file, keep_in_screen) =
+        crate::rpcconnopt::log_init_message_disposition(target);
+    if !out_write_to_file.is_null() {
+        *out_write_to_file = if write_to_file { 1 } else { 0 };
+    }
+    if !out_keep_in_screen.is_null() {
+        *out_keep_in_screen = if keep_in_screen { 1 } else { 0 };
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_wstring_decode_utf8_to_utf16(
+    utf8: *const c_char,
+    out: *mut u16,
+    out_cap: usize,
+) -> usize {
+    if utf8.is_null() || out.is_null() || out_cap == 0 {
+        return 0;
+    }
+    let bytes = crate::diskstatepp::cstr_to_bytes(utf8);
+    let out_slice = std::slice::from_raw_parts_mut(out, out_cap);
+    crate::rpcconnopt::wstring_decode_utf8_to_utf16(bytes, out_slice)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_rco_string_builder_calc_reserve_capacity(
+    old_capacity: c_int,
+    requested_capacity: c_int,
+    exact: c_int,
+) -> c_int {
+    crate::rpcconnopt::string_builder_calc_reserve_capacity(
+        old_capacity,
+        requested_capacity,
+        exact != 0,
+    )
+}
+
+
 
 
 

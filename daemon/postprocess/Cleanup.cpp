@@ -22,6 +22,9 @@
 #include "nzbget.h"
 #include "DownloadInfo.h"
 #include "Cleanup.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 #include "Log.h"
 #include "Util.h"
 #include "FileSystem.h"
@@ -69,6 +72,27 @@ void MoveController::Run()
 		GuardedDownloadQueue guard = DownloadQueue::Guard();
 		if (m_postInfo && m_postInfo->GetNzbInfo())
 		{
+#ifdef NZBGET_USE_RUST
+			int moveStatus = 0;
+			int outcome = nzbget_rs_rco_move_controller_decide_outcome(
+				ok ? 1 : 0, IsStopped() ? 1 : 0, &moveStatus);
+			if (outcome == 1)
+			{
+				PrintMessage(Message::mkInfo, "%s successful", *infoName);
+				m_postInfo->GetNzbInfo()->SetDestDir(fs::u8string(m_destDir).c_str());
+				m_postInfo->GetNzbInfo()->SetFinalDir("");
+				m_postInfo->GetNzbInfo()->SetMoveStatus((NzbInfo::EMoveStatus)moveStatus);
+			}
+			else if (outcome == 2)
+			{
+				PrintMessage(Message::mkInfo, "%s interrupted, resumes after the restart", *infoName);
+			}
+			else
+			{
+				PrintMessage(Message::mkError, "%s failed", *infoName);
+				m_postInfo->GetNzbInfo()->SetMoveStatus((NzbInfo::EMoveStatus)moveStatus);
+			}
+#else
 			if (ok)
 			{
 				PrintMessage(Message::mkInfo, "%s successful", *infoName);
@@ -87,6 +111,7 @@ void MoveController::Run()
 				PrintMessage(Message::mkError, "%s failed", *infoName);
 				m_postInfo->GetNzbInfo()->SetMoveStatus(NzbInfo::msFailure);
 			}
+#endif
 			m_postInfo->SetWorking(false);
 		}
 	}
@@ -279,6 +304,24 @@ void CleanupController::Run()
 
 	infoName[0] = 'C'; // uppercase
 
+#ifdef NZBGET_USE_RUST
+	int cleanupStatus = 0;
+	int cleanupOutcome = nzbget_rs_rco_cleanup_controller_decide_outcome(
+		ok ? 1 : 0, deleted ? 1 : 0, &cleanupStatus);
+	if (cleanupOutcome == 1)
+	{
+		PrintMessage(Message::mkInfo, "%s successful", *infoName);
+	}
+	else if (cleanupOutcome == 2)
+	{
+		PrintMessage(Message::mkInfo, "Nothing to cleanup for %s", *nzbName);
+	}
+	else
+	{
+		PrintMessage(Message::mkError, "%s failed", *infoName);
+	}
+	m_postInfo->GetNzbInfo()->SetCleanupStatus((NzbInfo::ECleanupStatus)cleanupStatus);
+#else
 	if (ok && deleted)
 	{
 		PrintMessage(Message::mkInfo, "%s successful", *infoName);
@@ -294,6 +337,7 @@ void CleanupController::Run()
 		PrintMessage(Message::mkError, "%s failed", *infoName);
 		m_postInfo->GetNzbInfo()->SetCleanupStatus(NzbInfo::csFailure);
 	}
+#endif
 
 	m_postInfo->SetWorking(false);
 }

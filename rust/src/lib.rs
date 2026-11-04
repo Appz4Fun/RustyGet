@@ -56,6 +56,7 @@ pub mod queuehotpath;
 pub mod diskstatepp;
 pub mod dupefeed;
 pub mod scripturlstat;
+pub mod rpcconnopt;
 
 pub mod deadpostings;
 pub mod dupewatch;

@@ -20,6 +20,10 @@
 
 #include "nzbget.h"
 #include "NString.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#include <vector>
+#endif
 
 template <int size>
 BString<size>::BString(const char* format, ...)
@@ -337,11 +341,22 @@ void CString::TrimRight()
 
 WString::WString(const char* utfstr)
 {
-	wchar_t* data = static_cast<wchar_t*>(malloc((strlen(utfstr) * 2 + 1) * sizeof(wchar_t)));
+	size_t maxUnits = strlen(utfstr) * 2;
+	wchar_t* data = static_cast<wchar_t*>(malloc((maxUnits + 1) * sizeof(wchar_t)));
 	if (!data) return;
 
 	m_data = data;
 
+#ifdef NZBGET_USE_RUST
+	std::vector<uint16_t> tmp(maxUnits + 1, 0);
+	size_t written = nzbget_rs_rco_wstring_decode_utf8_to_utf16(
+		utfstr, tmp.data(), maxUnits);
+	for (size_t i = 0; i < written; ++i)
+	{
+		m_data[i] = (wchar_t)tmp[i];
+	}
+	m_data[written] = '\0';
+#else
 	wchar_t* out = m_data;
 	unsigned int codepoint = 0;
 	while (*utfstr != 0)
@@ -370,6 +385,7 @@ WString::WString(const char* utfstr)
 		}
 	}
 	*out = '\0';
+#endif
 }
 
 
@@ -393,6 +409,23 @@ char* StringBuilder::Unbind()
 void StringBuilder::Reserve(int capacity, bool exact)
 {
 	int oldCapacity = Capacity();
+#ifdef NZBGET_USE_RUST
+	int newCapacity = nzbget_rs_rco_string_builder_calc_reserve_capacity(
+		oldCapacity, capacity, exact ? 1 : 0);
+	if (newCapacity >= 0)
+	{
+		char* oldData = m_data;
+		char* data = static_cast<char*>(realloc(m_data, static_cast<size_t>(newCapacity + 1)));
+		if (!data) return;
+
+		m_capacity = newCapacity;
+		m_data = data;
+		if (!oldData)
+		{
+			m_data[0] = '\0';
+		}
+	}
+#else
 	if (capacity > oldCapacity || oldCapacity == 0)
 	{
 		char* oldData = m_data;
@@ -414,6 +447,7 @@ void StringBuilder::Reserve(int capacity, bool exact)
 			m_data[0] = '\0';
 		}
 	}
+#endif
 }
 
 void StringBuilder::Append(const char* str, int len)

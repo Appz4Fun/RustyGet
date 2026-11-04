@@ -22,6 +22,9 @@
 #include "nzbget.h"
 #include "Options.h"
 #include "Log.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 #include "Util.h"
 #include "FileSystem.h"
 
@@ -74,9 +77,14 @@ void Log::Filelog(const char* msg, ...)
 	char time[50];
 	Util::FormatTime(rawtime, time, 50);
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_rco_log_should_rotate(
+		(int64)rawtime, (int64)m_lastWritten.load(), (int)g_Options->GetWriteLog()))
+#else
 	const int day = 86400;
 	if (static_cast<int>(rawtime) / day != static_cast<int>(m_lastWritten.load()) / day 
 		&& g_Options->GetWriteLog() == Options::wlRotate)
+#endif
 	{
 		if (m_logFile)
 		{
@@ -421,6 +429,25 @@ void Log::InitOptions()
 				break;
 		}
 
+#ifdef NZBGET_USE_RUST
+		int writeToFile = 0;
+		int keepInScreen = 0;
+		nzbget_rs_rco_log_init_message_disposition((int)target, &writeToFile, &keepInScreen);
+		if (writeToFile)
+		{
+			Filelog("%s\t%s", messageType[message.GetKind()], message.GetText());
+		}
+
+		if (!keepInScreen)
+		{
+			m_messages.erase(m_messages.begin() + i);
+		}
+		else
+		{
+			message.m_id = ++m_idGen;
+			i++;
+		}
+#else
 		if (target == Options::mtLog || target == Options::mtBoth)
 		{
 			Filelog("%s\t%s", messageType[message.GetKind()], message.GetText());
@@ -435,6 +462,7 @@ void Log::InitOptions()
 			message.m_id = ++m_idGen;
 			i++;
 		}
+#endif
 	}
 
 	m_optInit = true;

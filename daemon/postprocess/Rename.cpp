@@ -24,6 +24,9 @@
 #include "Log.h"
 #include "FileSystem.h"
 #include "Rename.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 #ifndef DISABLE_PARCHECK
 void RenameController::PostParRenamer::PrintMessage(Message::EKind kind, const char* format, ...)
@@ -153,6 +156,40 @@ void RenameController::RenameCompleted()
 {
 	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
 
+#if defined(NZBGET_USE_RUST) && !defined(DISABLE_PARCHECK)
+	int reqExtraPars = 0;
+	int reqParCheck = 0;
+	int initialStatus = nzbget_rs_rco_rename_controller_complete_action(
+		(int)m_kind, m_renamedCount,
+		m_parRenamer.HasDamagedParFiles() ? 1 : 0,
+		m_postInfo->GetNzbInfo()->GetRemainingParCount(),
+		m_parRenamer.HasMissedFiles() ? 1 : 0,
+		(int)m_postInfo->GetNzbInfo()->GetParStatus(),
+		&reqExtraPars, &reqParCheck);
+	if (m_kind == jkPar)
+	{
+		m_postInfo->GetNzbInfo()->SetParRenameStatus((NzbInfo::EPostRenameStatus)initialStatus);
+		if (reqExtraPars)
+		{
+			m_parRenamer.PrintMessage(Message::mkInfo, "Requesting extra par2-files for %s to perform par-rename", m_parRenamer.GetInfoName());
+			downloadQueue->EditEntry(m_postInfo->GetNzbInfo()->GetId(), DownloadQueue::eaGroupResume, nullptr);
+			downloadQueue->EditEntry(m_postInfo->GetNzbInfo()->GetId(), DownloadQueue::eaGroupPauseExtraPars, nullptr);
+			if (m_postInfo->GetNzbInfo()->GetRemainingSize() > 0)
+			{
+				m_postInfo->GetNzbInfo()->SetParRenameStatus(NzbInfo::rsNone);
+			}
+		}
+	}
+	else if (m_kind == jkRar)
+	{
+		m_postInfo->GetNzbInfo()->SetRarRenameStatus((NzbInfo::EPostRenameStatus)initialStatus);
+	}
+	if (reqParCheck)
+	{
+		m_parRenamer.PrintMessage(Message::mkInfo, "Requesting par-check/repair for %s to restore missing files ", m_parRenamer.GetInfoName());
+		m_postInfo->SetRequestParCheck(true);
+	}
+#else
 	if (m_kind == jkPar)
 	{
 		m_postInfo->GetNzbInfo()->SetParRenameStatus(m_renamedCount > 0 ? NzbInfo::rsSuccess : NzbInfo::rsNothing);
@@ -183,6 +220,7 @@ void RenameController::RenameCompleted()
 		m_parRenamer.PrintMessage(Message::mkInfo, "Requesting par-check/repair for %s to restore missing files ", m_parRenamer.GetInfoName());
 		m_postInfo->SetRequestParCheck(true);
 	}
+#endif
 #endif
 
 	m_postInfo->SetWorking(false);

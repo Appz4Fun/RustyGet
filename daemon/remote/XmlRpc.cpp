@@ -618,9 +618,13 @@ void XmlRpcProcessor::SetUrl(const char* url)
 
 bool XmlRpcProcessor::IsRpcRequest(const char* url)
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_rco_rpc_is_rpc_request(url) != 0;
+#else
 	return !strcmp(url, "/xmlrpc") || !strncmp(url, "/xmlrpc/", 8) ||
 		!strcmp(url, "/jsonrpc") || !strncmp(url, "/jsonrpc/", 9) ||
 		!strcmp(url, "/jsonprpc") || !strncmp(url, "/jsonprpc/", 10);
+#endif
 }
 
 void XmlRpcProcessor::Execute()
@@ -2064,6 +2068,12 @@ void LogXmlCommand::Execute()
 	GuardedMessageList messages = GuardMessages();
 
 	int start = messages->size();
+#ifdef NZBGET_USE_RUST
+	nzbget_rs_rco_rpc_log_slice_range(
+		(int)messages->size(),
+		messages->empty() ? 0 : (int)messages->front().GetId(),
+		m_idFrom, m_nrEntries, &start, &m_nrEntries);
+#else
 	if (m_nrEntries > 0)
 	{
 		if (m_nrEntries > (int)messages->size())
@@ -2081,6 +2091,7 @@ void LogXmlCommand::Execute()
 			start = 0;
 		}
 	}
+#endif
 
 	const char* XML_LOG_ITEM =
 		"<value><struct>\n"
@@ -2200,6 +2211,20 @@ void ListFilesXmlCommand::Execute()
 	{
 		for (FileInfo* fileInfo : nzbInfo->GetFileList())
 		{
+#ifdef NZBGET_USE_RUST
+			int progress = 0;
+			if (nzbget_rs_rco_rpc_list_files_match_and_progress(
+				nzbId, fileInfo->GetNzbInfo()->GetId(), fileInfo->GetId(),
+				idStart, idEnd, fileInfo->GetSize(), fileInfo->GetRemainingSize(),
+				fileInfo->GetMissedSize(), fileInfo->GetFailedSize(),
+				fileInfo->GetSuccessSize(), &progress))
+			{
+				uint32 fileSizeHi, fileSizeLo;
+				uint32 remainingSizeLo, remainingSizeHi;
+				Util::SplitInt64(fileInfo->GetSize(), &fileSizeHi, &fileSizeLo);
+				Util::SplitInt64(fileInfo->GetRemainingSize(), &remainingSizeHi, &remainingSizeLo);
+				CString xmlNzbNicename = EncodeStr(fileInfo->GetNzbInfo()->GetName());
+#else
 			if ((nzbId > 0 && nzbId == fileInfo->GetNzbInfo()->GetId()) ||
 				(nzbId == 0 && (idStart == 0 || (idStart <= fileInfo->GetId() && fileInfo->GetId() <= idEnd))))
 			{
@@ -2211,6 +2236,7 @@ void ListFilesXmlCommand::Execute()
 
 				int progress = fileInfo->GetFailedSize() == 0 && fileInfo->GetSuccessSize() == 0 ? 0 :
 					(int)(1000 - fileInfo->GetRemainingSize() * 1000 / (fileInfo->GetSize() - fileInfo->GetMissedSize()));
+#endif
 
 				AppendCondResponse(",\n", IsJson() && index++ > 0);
 				AppendFmtResponse(IsJson() ? JSON_LIST_ITEM : XML_LIST_ITEM,
@@ -2655,6 +2681,23 @@ void ListGroupsXmlCommand::Execute()
 
 const char* ListGroupsXmlCommand::DetectStatus(NzbInfo* nzbInfo)
 {
+#ifdef NZBGET_USE_RUST
+	bool hasPostInfo = nzbInfo->GetPostInfo() != nullptr;
+	int postStage = hasPostInfo ? (int)nzbInfo->GetPostInfo()->GetStage() : 0;
+	bool queueScriptActive = false;
+	bool hasQueueScriptJob = hasPostInfo && postStage == (int)PostInfo::ptQueued &&
+		g_QueueScriptCoordinator->HasJob(nzbInfo->GetId(), &queueScriptActive);
+	return nzbget_rs_rco_rpc_detect_group_status(
+		hasPostInfo ? 1 : 0,
+		postStage,
+		hasQueueScriptJob ? 1 : 0,
+		queueScriptActive ? 1 : 0,
+		(int)nzbInfo->GetDirectUnpackStatus(),
+		nzbInfo->GetActiveDownloads(),
+		(int)nzbInfo->GetKind(),
+		nzbInfo->GetPausedSize(),
+		nzbInfo->GetRemainingSize());
+#else
 	const char* postStageName[] = { "PP_QUEUED", "LOADING_PARS", "VERIFYING_SOURCES", "REPAIRING",
 		"VERIFYING_REPAIRED", "RENAMING", "RENAMING", "UNPACKING", "MOVING", "MOVING", "POST_UNPACK_RENAMING",
 		"EXECUTING_SCRIPT", "PP_FINISHED", "POST_DOWNLOAD_RENAMING",
@@ -2693,6 +2736,7 @@ const char* ListGroupsXmlCommand::DetectStatus(NzbInfo* nzbInfo)
 	}
 
 	return status;
+#endif
 }
 
 struct EditCommandEntry
@@ -2770,6 +2814,9 @@ void EditQueueXmlCommand::Execute()
 	}
 	debug("EditCommand=%s", editCommand);
 
+#ifdef NZBGET_USE_RUST
+	int action = nzbget_rs_rco_rpc_lookup_edit_command(editCommand);
+#else
 	int action = -1;
 	for (int i = 0; const char* name = EditCommandNameMap[i].actionName; i++)
 	{
@@ -2779,6 +2826,7 @@ void EditQueueXmlCommand::Execute()
 			break;
 		}
 	}
+#endif
 
 	if (action == -1)
 	{
@@ -2803,12 +2851,17 @@ void EditQueueXmlCommand::Execute()
 	// stored as -2147483648, the lowest), a parameter needs a name and a value,
 	// and a dupe mode is one of three (the edit refused others, but the call said true)
 	int number = 0;
+#ifdef NZBGET_USE_RUST
+	bool parsedIntOk = ParseIntParam(args, &number);
+	if (!nzbget_rs_rco_rpc_validate_edit_queue_args(action, args, parsedIntOk ? 1 : 0))
+#else
 	if (((action == DownloadQueue::eaGroupSetDupeScore || action == DownloadQueue::eaHistorySetDupeScore ||
 		action == DownloadQueue::eaGroupSetPriority) && !ParseIntParam(args, &number)) ||
 		((action == DownloadQueue::eaGroupSetParameter || action == DownloadQueue::eaHistorySetParameter) &&
 		 (!*args || *args == '=' || !strchr(args, '='))) ||
 		((action == DownloadQueue::eaGroupSetDupeMode || action == DownloadQueue::eaHistorySetDupeMode) &&
 		 strcasecmp(args, "SCORE") && strcasecmp(args, "ALL") && strcasecmp(args, "FORCE")))
+#endif
 	{
 		BuildErrorResponse(2, "Invalid parameter");
 		return;
@@ -3194,6 +3247,19 @@ void WriteLogXmlCommand::Execute()
 
 	debug("Kind=%s, Text=%s", kind, text);
 
+#ifdef NZBGET_USE_RUST
+	switch (nzbget_rs_rco_rpc_parse_write_log_kind(kind))
+	{
+		case 0: info("%s", text); break;
+		case 1: warn("%s", text); break;
+		case 2: error("%s", text); break;
+		case 4: detail("%s", text); break;
+		case 3: debug("%s", text); break;
+		default:
+			BuildErrorResponse(3, "Invalid Kind");
+			return;
+	}
+#else
 	if (!strcmp(kind, "INFO"))
 	{
 		info("%s", text);
@@ -3219,6 +3285,7 @@ void WriteLogXmlCommand::Execute()
 		BuildErrorResponse(3, "Invalid Kind");
 		return;
 	}
+#endif
 
 	BuildBoolResponse(true);
 }
@@ -3374,9 +3441,13 @@ const char* HistoryXmlCommand::DetectStatus(HistoryInfo* historyInfo)
 	else if (historyInfo->GetKind() == HistoryInfo::hkDup)
 	{
 		DupInfo* dupInfo = historyInfo->GetDupInfo();
+#ifdef NZBGET_USE_RUST
+		status = nzbget_rs_rco_rpc_detect_history_dup_status((int)dupInfo->GetStatus());
+#else
 		const char* dupStatusName[] = { "FAILURE/INTERNAL_ERROR", "SUCCESS/HIDDEN", "FAILURE/HIDDEN",
 			"DELETED/MANUAL", "DELETED/DUPE", "FAILURE/BAD", "SUCCESS/GOOD" };
 		status = dupStatusName[dupInfo->GetStatus()];
+#endif
 	}
 
 	return status;
@@ -3748,6 +3819,9 @@ void SaveConfigXmlCommand::Execute()
 	// Helper lambda to parse boolean option strings
 	auto parseBool = [](const char* val, bool defVal) -> bool
 	{
+#ifdef NZBGET_USE_RUST
+		return nzbget_rs_rco_rpc_save_config_parse_bool(val, defVal ? 1 : 0) != 0;
+#else
 		if (!val) return defVal;
 		if (!strcasecmp(val, "yes") || !strcasecmp(val, "true") || !strcmp(val, "1") ||
 			!strcasecmp(val, "on") || !strcasecmp(val, "enable") || !strcasecmp(val, "enabled"))
@@ -3760,6 +3834,7 @@ void SaveConfigXmlCommand::Execute()
 			return false;
 		}
 		return defVal;
+#endif
 	};
 
 	// Configuration Conflict Validation (R7)
@@ -3802,6 +3877,35 @@ void SaveConfigXmlCommand::Execute()
 		}
 	}
 
+#ifdef NZBGET_USE_RUST
+	auto optVal = [&optEntries](const char* name) -> const char*
+	{
+		if (Options::OptEntry* entry = optEntries.FindOption(name))
+		{
+			return entry->GetValue() ? entry->GetValue() : "";
+		}
+		return nullptr;
+	};
+	int conflictRule = nzbget_rs_rco_rpc_save_config_check_global_conflicts(
+		optVal("DupeSearch"), optVal("HealthCheck"),
+		optVal("FlushQueue"), optVal("DirectWrite"),
+		optVal("UnpackPauseQueue"), optVal("DirectUnpack"));
+	if (conflictRule == 2)
+	{
+		BuildErrorResponse(3, "Configuration conflict: 'DupeSearch=yes' is incompatible with 'HealthCheck=park'. DupeSearch requires 'HealthCheck=dupe' to fetch alternative donor releases when an NZB fails.");
+		return;
+	}
+	if (conflictRule == 3)
+	{
+		BuildErrorResponse(3, "Configuration conflict: 'DirectWrite=yes' requires 'FlushQueue=yes'. Disabling queue flushing during direct disk writes causes disk state desynchronization and corruption upon unexpected shutdown.");
+		return;
+	}
+	if (conflictRule == 4)
+	{
+		BuildErrorResponse(3, "Configuration conflict: 'DirectUnpack=yes' requires 'UnpackPauseQueue=yes'. Disabling queue pause during direct unpack causes concurrent unpack disk thrashing.");
+		return;
+	}
+#else
 	// Rule 7.2: DupeSearch=yes with HealthCheck=park
 	bool hasDupeSearch = (optEntries.FindOption("DupeSearch") != nullptr);
 	bool hasHealthCheck = (optEntries.FindOption("HealthCheck") != nullptr);
@@ -3873,6 +3977,7 @@ void SaveConfigXmlCommand::Execute()
 			return;
 		}
 	}
+#endif
 
 	// save to config file
 	bool conflict = false;
@@ -4249,6 +4354,15 @@ void StartUpdateXmlCommand::Execute()
 	DecodeStr(branchName);
 
 	Maintenance::EBranch branch;
+#ifdef NZBGET_USE_RUST
+	int branchCode = nzbget_rs_rco_rpc_parse_update_branch(branchName);
+	if (branchCode < 0)
+	{
+		BuildErrorResponse(2, "Invalid parameter (Branch)");
+		return;
+	}
+	branch = (Maintenance::EBranch)branchCode;
+#else
 	if (!strcasecmp(branchName, "stable"))
 	{
 		branch = Maintenance::brStable;
@@ -4266,6 +4380,7 @@ void StartUpdateXmlCommand::Execute()
 		BuildErrorResponse(2, "Invalid parameter (Branch)");
 		return;
 	}
+#endif
 
 	bool ok = g_Maintenance->StartUpdate(branch);
 

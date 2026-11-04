@@ -2104,6 +2104,76 @@ int nzbget_rs_sus_check_env_size_limit(
     const char* const* env_vars, size_t count, size_t ptr_size, size_t limit,
     size_t* out_exceeded_total);
 
+int nzbget_rs_rco_rpc_is_rpc_request(const char* url);
+void nzbget_rs_rco_rpc_log_slice_range(
+    int messages_len, int front_id, int id_from, int nr_entries,
+    int* out_start, int* out_nr_entries);
+int nzbget_rs_rco_rpc_list_files_match_and_progress(
+    int nzb_id, int file_nzb_id, int file_id, int id_start, int id_end,
+    int64_t size, int64_t remaining_size, int64_t missed_size,
+    int64_t failed_size, int64_t success_size, int* out_progress);
+const char* nzbget_rs_rco_rpc_detect_group_status(
+    int has_post_info, int post_stage, int has_queue_script_job,
+    int queue_script_active, int direct_unpack_status, int active_downloads,
+    int kind, int64_t paused_size, int64_t remaining_size);
+int nzbget_rs_rco_rpc_lookup_edit_command(const char* edit_command);
+int nzbget_rs_rco_rpc_validate_edit_queue_args(
+    int action, const char* args, int parsed_int_ok);
+int nzbget_rs_rco_rpc_parse_write_log_kind(const char* kind);
+const char* nzbget_rs_rco_rpc_detect_history_dup_status(int dup_status);
+int nzbget_rs_rco_rpc_parse_update_branch(const char* branch_name);
+int nzbget_rs_rco_rpc_save_config_parse_bool(const char* val, int def_val);
+int nzbget_rs_rco_rpc_save_config_check_global_conflicts(
+    const char* dupe_search_val, const char* health_check_val,
+    const char* flush_queue_val, const char* direct_write_val,
+    const char* unpack_pause_queue_val, const char* direct_unpack_val);
+
+int nzbget_rs_rco_remote_classify_signature(
+    const char* sig_ptr, uint32_t nzb_magic_be);
+int nzbget_rs_rco_remote_parse_web_request_line(
+    const char* sig_ptr, const char* line, int* out_http_method,
+    size_t* out_url_offset, size_t* out_url_len);
+
+int nzbget_rs_rco_conn_read_line_chunk(
+    const char* buf_ptr, int buf_avail, int max_out, int* out_found_newline);
+int nzbget_rs_rco_conn_classify_accept_errno(
+    int err, int eintr, int econnaborted, int eproto, int enetdown,
+    int enoprotoopt, int ehostdown, int ehostunreach, int eopnotsupp,
+    int enetunreach, int enonet, int emfile, int enfile, int enobufs, int enomem);
+
+int nzbget_rs_rco_webdl_resolve_protocol_port(
+    int is_valid, const char* protocol, int port, int tls_disabled,
+    int* out_port, int* out_tls);
+int nzbget_rs_rco_webdl_check_body_chunk(
+    int chunk_len, int content_len, int written_len, int gzip, int confirmed_length);
+
+int nzbget_rs_rco_options_find_var_reference(
+    const char* s, size_t* out_dollar_pos, size_t* out_var_len);
+int nzbget_rs_rco_options_trim_and_check_config_line(char* line);
+int nzbget_rs_rco_options_lookup_scheduler_command(const char* cmd);
+int nzbget_rs_rco_options_validate_scheduler_param(
+    int task_command, const char* param, int split_cmd_empty);
+
+int nzbget_rs_rco_move_controller_decide_outcome(
+    int ok, int is_stopped, int* out_move_status);
+int nzbget_rs_rco_cleanup_controller_decide_outcome(
+    int ok, int deleted, int* out_cleanup_status);
+int nzbget_rs_rco_rename_controller_complete_action(
+    int kind, int renamed_count, int has_damaged_pars, int remaining_par_count,
+    int has_missed_files, int par_status,
+    int* out_request_extra_pars, int* out_request_par_check);
+int nzbget_rs_rco_archive_is_nzb_extension(const char* ext);
+int nzbget_rs_rco_archive_decide_dispose_action(
+    int config_action, int non_nzb_file_count);
+int nzbget_rs_rco_log_should_rotate(
+    int64_t rawtime, int64_t last_written, int write_log_mode);
+void nzbget_rs_rco_log_init_message_disposition(
+    int target, int* out_write_to_file, int* out_keep_in_screen);
+size_t nzbget_rs_rco_wstring_decode_utf8_to_utf16(
+    const char* utf8, uint16_t* out, size_t out_cap);
+int nzbget_rs_rco_string_builder_calc_reserve_capacity(
+    int old_capacity, int requested_capacity, int exact);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

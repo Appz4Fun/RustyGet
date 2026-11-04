@@ -22,6 +22,9 @@
 
 #include "nzbget.h"
 #include "Connection.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 #include "Log.h"
 #include "FileSystem.h"
 #include "Options.h"
@@ -460,6 +463,10 @@ char* Connection::ReadLine(char* buffer, int size, int* bytesReadOut)
 			m_readBuf[bufAvail] = '\0';
 		}
 
+#ifdef NZBGET_USE_RUST
+		int foundNewline = 0;
+		int len = nzbget_rs_rco_conn_read_line_chunk(bufPtr, bufAvail, size, &foundNewline);
+#else
 		int len = 0;
 		char* p = (char*)memchr(bufPtr, '\n', bufAvail);
 		if (p)
@@ -475,6 +482,7 @@ char* Connection::ReadLine(char* buffer, int size, int* bytesReadOut)
 		{
 			len = size;
 		}
+#endif
 
 		memcpy(inpBuffer, bufPtr, len);
 		inpBuffer += len;
@@ -483,7 +491,11 @@ char* Connection::ReadLine(char* buffer, int size, int* bytesReadOut)
 		bytesRead += len;
 		size -= len;
 
+#ifdef NZBGET_USE_RUST
+		if (foundNewline)
+#else
 		if (p)
+#endif
 		{
 			break;
 		}
@@ -533,6 +545,21 @@ std::unique_ptr<Connection> Connection::Accept()
 			// a connection that failed before it was taken: take the next one
 			// (the listener was torn down and rebound for each of these)
 			int err = errno;
+#ifdef NZBGET_USE_RUST
+			int enonetVal = 0;
+#ifdef ENONET
+			enonetVal = ENONET;
+#endif
+			int acceptClass = nzbget_rs_rco_conn_classify_accept_errno(
+				err, EINTR, ECONNABORTED, EPROTO, ENETDOWN,
+				ENOPROTOOPT, EHOSTDOWN, EHOSTUNREACH, EOPNOTSUPP,
+				ENETUNREACH, enonetVal, EMFILE, ENFILE, ENOBUFS, ENOMEM);
+			if (acceptClass == 1)
+			{
+				continue;
+			}
+			m_acceptBusy = (acceptClass == 2);
+#else
 			if (err == EINTR || err == ECONNABORTED || err == EPROTO || err == ENETDOWN ||
 				err == ENOPROTOOPT || err == EHOSTDOWN || err == EHOSTUNREACH ||
 				err == EOPNOTSUPP || err == ENETUNREACH
@@ -545,6 +572,7 @@ std::unique_ptr<Connection> Connection::Accept()
 			}
 			// out of descriptors or memory: the listener is fine, the caller waits
 			m_acceptBusy = err == EMFILE || err == ENFILE || err == ENOBUFS || err == ENOMEM;
+#endif
 		}
 #endif
 		break;

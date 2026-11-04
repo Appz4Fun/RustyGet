@@ -24,6 +24,9 @@
 
 #include <system_error>
 #include "RemoteServer.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 #include "BinRpc.h"
 #include "WebServer.h"
 #include "Log.h"
@@ -264,6 +267,19 @@ void RequestProcessor::Execute()
 		return;
 	}
 
+#ifdef NZBGET_USE_RUST
+	int sigKind = nzbget_rs_rco_remote_classify_signature(
+		(const char*)&signature, (uint32)NZBMESSAGE_SIGNATURE);
+	if (sigKind == 1)
+	{
+		// binary request received
+		ok = true;
+		BinRpcProcessor processor;
+		processor.SetConnection(m_connection.get());
+		processor.Execute();
+	}
+	else if (sigKind == 2)
+#else
 	if ((int)ntohl(signature) == (int)NZBMESSAGE_SIGNATURE)
 	{
 		// binary request received
@@ -275,6 +291,7 @@ void RequestProcessor::Execute()
 	else if (!strncmp((char*)&signature, "POST", 4) ||
 		!strncmp((char*)&signature, "GET ", 4) ||
 		!strncmp((char*)&signature, "OPTI", 4))
+#endif
 	{
 		// HTTP request received
 		ok = true;
@@ -308,6 +325,19 @@ bool RequestProcessor::ServWebRequest(const char* signature)
 
 	WebProcessor::EHttpMethod httpMethod = WebProcessor::hmGet;
 	char* url = buffer;
+#ifdef NZBGET_USE_RUST
+	int rsMethod = 0;
+	size_t urlOffset = 0;
+	size_t urlLen = 0;
+	if (!nzbget_rs_rco_remote_parse_web_request_line(
+		signature, buffer, &rsMethod, &urlOffset, &urlLen))
+	{
+		return false;
+	}
+	httpMethod = (WebProcessor::EHttpMethod)rsMethod;
+	url = buffer + urlOffset;
+	url[urlLen] = '\0';
+#else
 	if (!strncmp(signature, "POST", 4))
 	{
 		httpMethod = WebProcessor::hmPost;
@@ -327,6 +357,7 @@ bool RequestProcessor::ServWebRequest(const char* signature)
 	{
 		*p = '\0';
 	}
+#endif
 
 	debug("url: %s", url);
 

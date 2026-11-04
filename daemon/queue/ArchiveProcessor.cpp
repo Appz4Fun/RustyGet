@@ -23,6 +23,9 @@
 #include "Unpack.h"
 #include "Log.h"
 #include "ArchiveProcessor.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 namespace Incoming
 {
@@ -124,7 +127,11 @@ bool ArchiveProcessor::Extract(const fs::path& archiveFile, const fs::path& unpa
 bool ArchiveProcessor::IsNzbFile(const fs::path& filename) const
 {
 	auto ext = fs::u8string(filename.extension());
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_rco_archive_is_nzb_extension(ext.c_str()) != 0;
+#else
 	return strcasecmp(ext.c_str(), ".nzb") == 0;
+#endif
 }
 
 ArchiveProcessor::ScanResult ArchiveProcessor::ScanUnpackDir(const fs::path& unpackDir) const
@@ -195,6 +202,46 @@ void ArchiveProcessor::DisposeArchive(const fs::path& archiveFile, int nonNzbFil
 
 	fs::error_code ec;
 
+#ifdef NZBGET_USE_RUST
+	int disposeAction = nzbget_rs_rco_archive_decide_dispose_action(
+		(int)m_config.action, nonNzbFileCount);
+	if (disposeAction == 1)
+	{
+		info("%s Archive '%s' contains %d non-NZB file(s). Moving to '%s' instead of deleting to prevent data loss", 
+			 LOG_PREFIX, filenameStr.c_str(), nonNzbFileCount, processedDirName.c_str());
+		
+		fs::create_directories(m_config.processedDir, ec);
+		fs::move_file(archiveFile, fs::make_unique_filename(m_config.processedDir / archiveFile.filename()), ec);
+		if (ec)
+		{
+			warn("%s Failed to move archive '%s' to '%s': %s (code: %d)", 
+				 LOG_PREFIX, filenameStr.c_str(), processedDirName.c_str(), ec.message().c_str(), ec.value());
+		}
+	}
+	else if (disposeAction == 2)
+	{
+		if (fs::remove(archiveFile, ec) && !ec)
+		{
+			info("%s Deleted archive '%s'", LOG_PREFIX, filenameStr.c_str());
+		}
+		else if (ec)
+		{
+			warn("%s Failed to delete archive '%s': %s (code: %d)", 
+				 LOG_PREFIX, filenameStr.c_str(), ec.message().c_str(), ec.value());
+		}
+	}
+	else
+	{
+		info("%s Moving archive '%s' to '%s'", LOG_PREFIX, filenameStr.c_str(), processedDirName.c_str());
+		fs::create_directories(m_config.processedDir, ec);
+		fs::move_file(archiveFile, fs::make_unique_filename(m_config.processedDir / archiveFile.filename()), ec);
+		if (ec)
+		{
+			warn("%s Failed to move archive '%s' to '%s': %s (code: %d)", 
+				 LOG_PREFIX, filenameStr.c_str(), processedDirName.c_str(), ec.message().c_str(), ec.value());
+		}
+	}
+#else
 	if (m_config.action == Options::ENzbDirArchiveAction::Delete)
 	{
 		if (nonNzbFileCount > 0)
@@ -234,6 +281,7 @@ void ArchiveProcessor::DisposeArchive(const fs::path& archiveFile, int nonNzbFil
 				 LOG_PREFIX, filenameStr.c_str(), processedDirName.c_str(), ec.message().c_str(), ec.value());
 		}
 	}
+#endif
 }
 
 }

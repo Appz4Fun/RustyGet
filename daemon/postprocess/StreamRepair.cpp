@@ -900,7 +900,8 @@ void StreamRepairController::CollectTargets(NzbInfo* nzbInfo, std::vector<Repair
 	{
 		// Older queue states may contain PAR2 jobs captured before duplicate
 		// recovery excluded them. Never use another release to patch parity.
-		if (job.GetParFile() || Util::EndsWith(job.GetFilename(), ".par2", false))
+		if (nzbget_rs_stq_stream_repair_is_par2_job_or_file(
+			job.GetParFile() ? 1 : 0, job.GetFilename()) != 0)
 		{
 			continue;
 		}
@@ -1001,13 +1002,28 @@ void StreamRepairController::CollectDonors(DownloadQueue* downloadQueue, NzbInfo
 		}
 	}
 
-	std::sort(donorNzbs.begin(), donorNzbs.end(),
-		[](NzbInfo* donor1, NzbInfo* donor2)
+	if (!donorNzbs.empty())
+	{
+		std::vector<int32_t> dupeScores;
+		std::vector<int32_t> donorIds;
+		std::vector<size_t> order(donorNzbs.size());
+		dupeScores.reserve(donorNzbs.size());
+		donorIds.reserve(donorNzbs.size());
+		for (NzbInfo* d : donorNzbs)
 		{
-			return donor1->GetDupeScore() > donor2->GetDupeScore() ||
-				(donor1->GetDupeScore() == donor2->GetDupeScore() &&
-				 donor1->GetId() < donor2->GetId());
-		});
+			dupeScores.push_back(d->GetDupeScore());
+			donorIds.push_back(d->GetId());
+		}
+		size_t n = nzbget_rs_stream_order_donor_indices(
+			dupeScores.data(), donorIds.data(), donorNzbs.size(), order.data());
+		RawNzbList sortedDonors;
+		sortedDonors.reserve(n);
+		for (size_t i = 0; i < n; i++)
+		{
+			sortedDonors.push_back(donorNzbs[order[i]]);
+		}
+		donorNzbs = std::move(sortedDonors);
+	}
 
 	for (NzbInfo* donorNzbInfo : donorNzbs)
 	{
@@ -1308,6 +1324,13 @@ bool StreamRepairController::ProveDonorOnIntactFile(const char* destDir,
 		return false;
 	}
 
+	std::vector<const char*> targetFilenames;
+	targetFilenames.reserve(targets.size());
+	for (const RepairTarget& target : targets)
+	{
+		targetFilenames.push_back(target.Filename);
+	}
+
 	int tried = 0;
 	for (const CString& memberName : memberNames)
 	{
@@ -1317,10 +1340,9 @@ bool StreamRepairController::ProveDonorOnIntactFile(const char* destDir,
 			break;
 		}
 		const char* baseName = FileSystem::BaseFileName(memberName);
-		if (Util::EndsWith(baseName, ".par2", false) ||
-			DupeStreamRepair::VolumeSetKey(baseName) != targetSet ||
-			std::any_of(targets.begin(), targets.end(),
-				[&memberName](const RepairTarget& target) { return !strcasecmp(target.Filename, memberName); }))
+		if (nzbget_rs_stream_is_intact_proof_member_eligible(
+			baseName, memberName, targetSet.c_str(),
+			targetFilenames.data(), targetFilenames.size()) == 0)
 		{
 			continue;
 		}

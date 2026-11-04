@@ -19,7 +19,6 @@
 #include "nzbget.h"
 
 #include <algorithm>
-#include <climits>
 #include <map>
 #include <vector>
 #include "ParDamage.h"

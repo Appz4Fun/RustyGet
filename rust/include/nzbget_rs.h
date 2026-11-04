@@ -5410,6 +5410,27 @@ int64_t nzbget_rs_stream_content_map_sum_cipher_sizes(
     const int64_t* cipher_sizes_ptr, size_t count);
 NzbgetRsBuf nzbget_rs_stream_content_mapper_split_inner_name(
     const char* first_name);
+int32_t nzbget_rs_pup_unpack_ctrl_trim_password_line(char* line);
+int32_t nzbget_rs_pup_unpack_ctrl_matches_split_piece_name(
+    const char* filename, const char* dest_base_name);
+int32_t nzbget_rs_pup_unpack_ctrl_readline_step(
+    uint8_t* buf_ptr, size_t buf_len, size_t* idx_ptr, int32_t ch,
+    int32_t* printed_ptr, ptrdiff_t* last_bs_ptr,
+    ptrdiff_t* out_process_len_ptr, int32_t* out_progress_ptr);
+uint32_t nzbget_rs_pup_parchecker_combine_block_crcs(
+    const uint32_t* block_crcs_ptr, size_t count, uint64_t block_size);
+NzbgetRsBuf nzbget_rs_pup_parchecker_extract_base_par_stem(
+    const char* par_filename);
+NzbgetRsBuf nzbget_rs_pup_parchecker_format_not_enough_blocks_errmsg(
+    int32_t missing_blocks, int32_t block_found);
+NzbgetRsBuf nzbget_rs_pup_parchecker_build_wildcard_param(
+    const char* par_filename);
+size_t nzbget_rs_stream_order_donor_indices(
+    const int32_t* dupe_scores_ptr, const int32_t* ids_ptr,
+    size_t count, size_t* out_indices_ptr);
+int32_t nzbget_rs_stream_is_intact_proof_member_eligible(
+    const char* base_name, const char* member_name, const char* target_set,
+    const char* const* target_filenames_ptr, size_t target_count);
 
 #include "nzbget_tls_cipher.h"
 

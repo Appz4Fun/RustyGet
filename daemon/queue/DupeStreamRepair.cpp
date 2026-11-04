@@ -21,8 +21,6 @@
 #include "nzbget.h"
 
 #include <algorithm>
-#include <cctype>
-#include <functional>
 #include <array>
 #include <bit>
 #include <cstdlib>

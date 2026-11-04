@@ -1344,9 +1344,8 @@ void PrePostProcessor::StartJob(DownloadQueue* downloadQueue, PostInfo* postInfo
 	}
 #endif
 
-	bool inInterDir = !Util::EmptyStr(g_Options->GetInterDir()) &&
-		!strncmp(nzbInfo->GetDestDir(), g_Options->GetInterDir(), strlen(g_Options->GetInterDir())) &&
-		nzbInfo->GetDestDir()[strlen(g_Options->GetInterDir())] == PATH_SEPARATOR;
+	bool inInterDir = nzbget_rs_dur_direct_unpack_use_inter_dir(
+		nzbInfo->GetDestDir(), g_Options->GetInterDir(), PATH_SEPARATOR) != 0;
 	NzbgetRsPostStageDecision stageDec{};
 	nzbget_rs_dsp_eval_post_stages(
 		wantUnpack ? 1 : 0,
@@ -1586,7 +1585,8 @@ void PrePostProcessor::FileDownloaded(DownloadQueue* downloadQueue, NzbInfo* nzb
 			!HasActiveUnpack(downloadQueue))
 		{
 			NzbParameter* unpackParameter = nzbInfo->GetParameters()->Find("*Unpack:");
-			bool wantUnpack = !(unpackParameter && !strcasecmp(unpackParameter->GetValue(), "no"));
+			bool wantUnpack = nzbget_rs_ucf_unpack_ctrl_eval_unpack_param(
+				unpackParameter ? unpackParameter->GetValue() : nullptr) != 0;
 			if (nzbget_rs_pur_prepost_should_start_direct_unpack_job(
 				wantUnpack ? 1 : 0,
 				nzbInfo->GetFailedArticles()) != 0)

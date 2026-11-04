@@ -21,7 +21,6 @@
 
 #include "nzbget.h"
 
-#include <algorithm>
 #include "RarReader.h"
 #include <exception>
 #include "nzbget_rs.h"

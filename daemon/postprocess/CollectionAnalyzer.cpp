@@ -21,10 +21,7 @@
 #include "nzbget.h"
 #include "CollectionAnalyzer.h"
 #include "FileTypes.h"
-#include "Deobfuscation.h"
 #include "Util.h"
-#include <algorithm>
-#include <cctype>
 
 #include "nzbget_rs.h"
 

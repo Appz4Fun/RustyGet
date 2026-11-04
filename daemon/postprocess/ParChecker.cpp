@@ -120,13 +120,12 @@ Par2::Result Repairer::PreProcess(const std::string& parFilename)
 	if (g_Options->GetParScan() == Options::psFull)
 	{
 		// the path is the text, not a format (a "%" in a name)
+		NzbgetRsBuf wildcardBuf = nzbget_rs_pup_parchecker_build_wildcard_param(parFilename.c_str());
 		BString<1024> wildcardParam;
-		wildcardParam.Set(parFilename.c_str());
-		char* basename = FileSystem::BaseFileName(wildcardParam);
-		if (basename != wildcardParam && strlen(basename) > 0)
+		if (wildcardBuf.data)
 		{
-			basename[0] = '*';
-			basename[1] = '\0';
+			wildcardParam.Set(wildcardBuf.data, static_cast<int>(wildcardBuf.len));
+			nzbget_rs_free(wildcardBuf);
 		}
 
 		const char* argv[] = { "par2", "r", "-v", memParam.c_str(), threadsParam.c_str(), fileThreadsParam.c_str(), parFilename.c_str(), wildcardParam };
@@ -691,11 +690,10 @@ int ParChecker::ProcessMorePars()
 				requested ? 1 : 0, hasMorePars ? 1 : 0);
 			if (waitAction == 0)
 			{
-				m_errMsg = std::string("not enough par-blocks, ") 
-					+ std::to_string(missingblockcount) 
-					+ " block(s) needed, but "
-					+ std::to_string(blockFound)
-					+ " block(s) available";
+				NzbgetRsBuf errBuf = nzbget_rs_pup_parchecker_format_not_enough_blocks_errmsg(
+					missingblockcount, blockFound);
+				m_errMsg = errBuf.data ? std::string(errBuf.data, errBuf.len) : std::string();
+				nzbget_rs_free(errBuf);
 				break;
 			}
 
@@ -934,8 +932,9 @@ bool ParChecker::AddDupeFiles()
 */
 void ParChecker::SortExtraFiles(std::vector<std::string>& extrafiles)
 {
-	std::string baseParFilename = FileSystem::BaseFileName(m_parFilename.c_str());
-	if (char* ext = strrchr(baseParFilename.data(), '.')) *ext = '\0'; // trim extension
+	NzbgetRsBuf stemBuf = nzbget_rs_pup_parchecker_extract_base_par_stem(m_parFilename.c_str());
+	std::string baseParFilename = stemBuf.data ? std::string(stemBuf.data, stemBuf.len) : std::string();
+	nzbget_rs_free(stemBuf);
 
 	std::sort(
 		begin(extrafiles),
@@ -1377,13 +1376,15 @@ bool ParChecker::VerifySuccessDataFile(Par2::DiskFile&, Par2::Par2RepairerSource
 	debug("Download-CRC: %.8x", downloadCrc);
 
 	// compute file CRC using CRCs of blocks
-	uint32 parCrc = 0;
+	std::vector<uint32_t> blockCrcs;
+	blockCrcs.reserve(packet->BlockCount());
 	for (uint32 i = 0; i < packet->BlockCount(); i++)
 	{
 		const Par2::FILEVERIFICATIONENTRY* entry = packet->VerificationEntry(i);
-		Par2::u32 blockCrc = entry->crc;
-		parCrc = i == 0 ? blockCrc : Crc32::Combine(parCrc, blockCrc, (uint32)blocksize);
+		blockCrcs.push_back(entry->crc);
 	}
+	uint32 parCrc = nzbget_rs_pup_parchecker_combine_block_crcs(
+		blockCrcs.data(), blockCrcs.size(), blocksize);
 	std::string fileName = sourceFile.GetTargetFile()->FileName();
 	debug("Block-CRC: %x, filename: %s", parCrc, FileSystem::BaseFileName(fileName.c_str()));
 

@@ -405,6 +405,135 @@ pub fn history_coord_can_attempt_requeue_file(
     status != cf_success && (status != cf_failure || reset_failed) && file_id > 0
 }
 
+/// Trims trailing `\n` and `\r` bytes in a NUL-terminated password line buffer in-place
+/// (replacing them with `0`), and returns `true` if the trimmed string is non-empty.
+pub fn unpack_ctrl_trim_password_line(line: &mut [u8]) -> bool {
+    let mut len = line.iter().position(|&b| b == 0).unwrap_or(line.len());
+    while len > 0 && (line[len - 1] == b'\n' || line[len - 1] == b'\r') {
+        len -= 1;
+        line[len] = 0;
+    }
+    len > 0
+}
+
+/// Checks whether `filename` has length `dest_base_name.len() + 4` and starts with `dest_base_name`
+/// case-insensitively (`UnpackController::JoinFile`).
+pub fn unpack_ctrl_matches_split_piece_name(filename: &[u8], dest_base_name: &[u8]) -> bool {
+    let base_len = dest_base_name.len();
+    filename.len() == base_len + 4 && filename[..base_len].eq_ignore_ascii_case(dest_base_name)
+}
+
+/// Executes one character step of `UnpackController::ReadLine`:
+/// updates `buf`, `idx`, `printed`, and `last_bs` (`-1` if no `\b` seen yet),
+/// and reports:
+/// - `process_output_len`: `>= 0` when `ProcessOutput` should be called with `buf[..process_output_len]` (`-1` otherwise)
+/// - `progress`: `>= 0` when `SetStageProgress(progress)` should be called (`-1` otherwise)
+/// - returns `true` when the character loop should break (`EOF` or `\n`).
+pub fn unpack_ctrl_readline_step(
+    buf: &mut [u8],
+    idx: &mut usize,
+    ch: i32,
+    printed: &mut bool,
+    last_bs: &mut isize,
+    process_output_len: &mut isize,
+    progress: &mut i32,
+) -> bool {
+    *process_output_len = -1;
+    *progress = -1;
+    let i = *idx;
+    if i + 1 >= buf.len() {
+        return true;
+    }
+    buf[i] = ch as u8;
+    buf[i + 1] = 0;
+    if ch == -1 {
+        return true;
+    }
+    if ch == i32::from(b'\n') {
+        *idx = i + 1;
+        return true;
+    }
+    if buf[i] == b'\x08' {
+        *last_bs = i as isize;
+    } else if buf[i] == 0 {
+        let nul_end = buf[..=i].iter().position(|&b| b == 0).unwrap_or(i + 1);
+        *last_bs = buf[..nul_end]
+            .iter()
+            .rposition(|&b| b == b'\x08')
+            .map(|p| p as isize)
+            .unwrap_or(-1);
+    }
+    if *last_bs >= 0 {
+        let bs_pos = *last_bs as usize;
+        let nul_end = buf[..=i].iter().position(|&b| b == 0).unwrap_or(i + 1);
+        if bs_pos < nul_end {
+            if !*printed {
+                let line = &buf[..nul_end];
+                if !crate::unpackcleanurlfeed::direct_unpack_is_progress_dots_line(line) {
+                    *process_output_len = bs_pos.min(1023) as isize;
+                }
+                *printed = true;
+            }
+            if let Some(p) =
+                crate::utilfsscript::unpack_ctrl_parse_backspace_progress(&buf[bs_pos..nul_end])
+            {
+                *progress = p;
+            }
+        }
+    }
+    *idx = i + 1;
+    false
+}
+
+/// Combines per-block CRCs into a file-level PAR2 CRC in `ParChecker::VerifySuccessDataFile`.
+pub fn parchecker_combine_block_crcs(block_crcs: &[u32], block_size: u64) -> u32 {
+    let mut par_crc = 0u32;
+    let len2 = block_size as u32;
+    for (i, &block_crc) in block_crcs.iter().enumerate() {
+        par_crc = if i == 0 {
+            block_crc
+        } else {
+            crate::crc::combine(par_crc, block_crc, len2)
+        };
+    }
+    par_crc
+}
+
+/// Extracts the base filename of `par_filename` with its last `.ext` stripped (`ParChecker::SortExtraFiles`).
+pub fn parchecker_extract_base_par_stem(par_filename: &[u8]) -> Vec<u8> {
+    let base = &par_filename[crate::paths::base_file_name(par_filename)..];
+    match base.iter().rposition(|&b| b == b'.') {
+        Some(dot) => base[..dot].to_vec(),
+        None => base.to_vec(),
+    }
+}
+
+/// Formats `"not enough par-blocks, {missing_blocks} block(s) needed, but {block_found} block(s) available"`
+/// (`ParChecker::ProcessMorePars`).
+pub fn parchecker_format_not_enough_blocks_errmsg(
+    missing_blocks: i32,
+    block_found: i32,
+) -> Vec<u8> {
+    format!(
+        "not enough par-blocks, {missing_blocks} block(s) needed, but {block_found} block(s) available"
+    )
+    .into_bytes()
+}
+
+/// Builds the `wildcardParam` (`<dir>/*`) in `Repairer::PreProcess` when `ParScan == psFull`,
+/// preserving `BString<1024>`'s 1023-byte truncation before `FileSystem::BaseFileName`.
+pub fn parchecker_build_wildcard_param(par_filename: &[u8]) -> Vec<u8> {
+    let truncated = &par_filename[..par_filename.len().min(1023)];
+    let base_idx = crate::paths::base_file_name(truncated);
+    if base_idx > 0 && base_idx < truncated.len() {
+        let mut out = truncated[..base_idx].to_vec();
+        out.push(b'*');
+        out
+    } else {
+        truncated.to_vec()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,5 +683,74 @@ mod tests {
 
         assert!(history_coord_can_attempt_requeue_file(2, 1, 3, false, 10));
         assert!(!history_coord_can_attempt_requeue_file(3, 1, 3, false, 10));
+
+        let mut pw = *b"secret\r\n\0\0";
+        assert!(unpack_ctrl_trim_password_line(&mut pw));
+        assert_eq!(&pw[..7], b"secret\0");
+        let mut empty_pw = *b"\r\n\0";
+        assert!(!unpack_ctrl_trim_password_line(&mut empty_pw));
+
+        assert!(unpack_ctrl_matches_split_piece_name(b"MOVIE.MKV.001", b"movie.mkv"));
+        assert!(!unpack_ctrl_matches_split_piece_name(b"movie.mkv.01", b"movie.mkv"));
+
+        let mut rbuf = [0u8; 64];
+        let mut idx = 0usize;
+        let mut printed = false;
+        let mut last_bs = -1isize;
+        let mut out_len = -1isize;
+        let mut prog = -1i32;
+        for &c in b"Extracting a.mkv \x08\x08\x08\x08 25%" {
+            assert!(!unpack_ctrl_readline_step(
+                &mut rbuf,
+                &mut idx,
+                i32::from(c),
+                &mut printed,
+                &mut last_bs,
+                &mut out_len,
+                &mut prog
+            ));
+        }
+        assert!(printed);
+        assert_eq!(prog, 250);
+
+        let mut rbuf2 = [0u8; 64];
+        let mut idx2 = 0usize;
+        let mut printed2 = false;
+        let mut last_bs2 = -1isize;
+        let mut out_len2 = -1isize;
+        let mut prog2 = -1i32;
+        assert!(!unpack_ctrl_readline_step(
+            &mut rbuf2,
+            &mut idx2,
+            i32::from(b'\x08'),
+            &mut printed2,
+            &mut last_bs2,
+            &mut out_len2,
+            &mut prog2
+        ));
+        assert!(printed2);
+        assert_eq!(out_len2, 0);
+
+        let c1 = 0x1234_5678u32;
+        let c2 = 0x9abc_def0u32;
+        assert_eq!(
+            parchecker_combine_block_crcs(&[c1, c2], 1024),
+            crate::crc::combine(c1, c2, 1024)
+        );
+        assert_eq!(parchecker_combine_block_crcs(&[], 1024), 0);
+
+        assert_eq!(
+            parchecker_extract_base_par_stem(b"/tmp/dir/Archive.vol00+01.par2"),
+            b"Archive.vol00+01"
+        );
+        assert_eq!(
+            parchecker_format_not_enough_blocks_errmsg(5, 2),
+            b"not enough par-blocks, 5 block(s) needed, but 2 block(s) available"
+        );
+        assert_eq!(
+            parchecker_build_wildcard_param(b"/tmp/dir/movie.par2"),
+            b"/tmp/dir/*"
+        );
+        assert_eq!(parchecker_build_wildcard_param(b"movie.par2"), b"movie.par2");
     }
 }

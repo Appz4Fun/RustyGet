@@ -260,11 +260,7 @@ void UnpackController::UnpackArchives(EUnpacker unpacker, bool multiVolumes)
 			infile.ReadLine(password, sizeof(password) - 1))
 		{
 			debug("Password line: %s", password);
-			// trim trailing <CR> and <LF>
-			char* end = password + strlen(password) - 1;
-			while (end >= password && (*end == '\n' || *end == '\r')) *end-- = '\0';
-
-			if (!Util::EmptyStr(password))
+			if (nzbget_rs_pup_unpack_ctrl_trim_password_line(password) != 0)
 			{
 				if (nzbget_rs_ucf_unpack_ctrl_should_resume_before_password_try(
 					IsStopped() ? 1 : 0, m_autoTerminated ? 1 : 0) != 0)
@@ -478,8 +474,6 @@ void UnpackController::JoinSplittedFiles()
 
 	// determine groups
 
-	FileList groups;
-
 	DirBrowser dir(m_destDir);
 	while (const char* filename = dir.Next())
 	{
@@ -530,9 +524,8 @@ bool UnpackController::JoinFile(const char* fragBaseName)
 		// only this file's pieces (its name plus ".NNN"): with a second set of split
 		// files in the folder, their pieces were counted and compared too, and the join
 		// failed for "missing fragments"
-		size_t baseLen = strlen(destBaseName);
 		if (!FileSystem::DirectoryExists(fullFilename) &&
-			strlen(filename) == baseLen + 4 && !strncasecmp(filename, destBaseName, baseLen))
+			nzbget_rs_pup_unpack_ctrl_matches_split_piece_name(filename, destBaseName) != 0)
 		{
 			int64 segmentSize = FileSystem::FileSize(fullFilename);
 			nzbget_rs_pnd_unpack_ctrl_accumulate_split_piece(
@@ -929,58 +922,49 @@ bool UnpackController::Cleanup()
  */
 bool UnpackController::ReadLine(char* buf, int bufSize, FILE* stream)
 {
-	bool printed = false;
+	if (bufSize <= 0)
+	{
+		return false;
+	}
+	int32_t printed = 0;
+	size_t idx = 0;
+	ptrdiff_t lastBs = -1;
 
-	int i = 0;
-
-	for (; i < bufSize - 1; i++)
+	while (idx + 1 < (size_t)bufSize)
 	{
 		int ch = fgetc(stream);
-		buf[i] = ch;
-		buf[i+1] = '\0';
-		if (ch == EOF)
+		ptrdiff_t procLen = -1;
+		int32_t progress = -1;
+		int32_t shouldBreak = nzbget_rs_pup_unpack_ctrl_readline_step(
+			reinterpret_cast<uint8_t*>(buf), (size_t)bufSize, &idx, ch,
+			&printed, &lastBs, &procLen, &progress);
+		if (procLen >= 0)
+		{
+			BString<1024> tmp;
+			if (procLen > 0)
+			{
+				tmp.Set(buf, (int)procLen);
+			}
+			ProcessOutput(tmp);
+		}
+		if (progress >= 0)
+		{
+			m_postInfo->SetStageProgress(progress);
+		}
+		if (shouldBreak != 0)
 		{
 			break;
-		}
-		if (ch == '\n')
-		{
-			i++;
-			break;
-		}
-
-		char* backspace = strrchr(buf, '\b');
-		if (backspace)
-		{
-			if (!printed)
-			{
-				BString<1024> tmp = buf;
-				char* tmpPercent = strrchr(tmp, '\b');
-				if (tmpPercent)
-				{
-					*tmpPercent = '\0';
-				}
-				if (nzbget_rs_ucf_direct_unpack_is_progress_dots_line(buf) == 0)
-				{
-					ProcessOutput(tmp);
-				}
-				printed = true;
-			}
-			int progress = 0;
-			if (nzbget_rs_ufs_unpack_ctrl_parse_backspace_progress(backspace, &progress) != 0)
-			{
-				m_postInfo->SetStageProgress(progress);
-			}
 		}
 	}
 
-	buf[i] = '\0';
+	buf[idx] = '\0';
 
-	if (printed)
+	if (printed != 0)
 	{
 		buf[0] = '\0';
 	}
 
-	return i > 0;
+	return idx > 0;
 }
 
 void UnpackController::AddMessage(Message::EKind kind, const char* text)

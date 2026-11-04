@@ -23,8 +23,6 @@
 #include "PostDownloadRenamer.h"
 #include "CollectionAnalyzer.h"
 #include "FileSystem.h"
-#include "Deobfuscation.h"
-#include "Util.h"
 #include "Options.h"
 #include "nzbget_rs.h"
 

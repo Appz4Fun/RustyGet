@@ -30718,3 +30718,155 @@ pub unsafe extern "C" fn nzbget_rs_stream_content_mapper_split_inner_name(
     )))
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_pup_unpack_ctrl_trim_password_line(
+    line: *mut c_char,
+) -> i32 {
+    if line.is_null() {
+        return 0;
+    }
+    let len = std::ffi::CStr::from_ptr(line).to_bytes_with_nul().len();
+    let slice = std::slice::from_raw_parts_mut(line as *mut u8, len);
+    i32::from(crate::parunpackpost::unpack_ctrl_trim_password_line(slice))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_pup_unpack_ctrl_matches_split_piece_name(
+    filename: *const c_char,
+    dest_base_name: *const c_char,
+) -> i32 {
+    i32::from(crate::parunpackpost::unpack_ctrl_matches_split_piece_name(
+        input(filename),
+        input(dest_base_name),
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_pup_unpack_ctrl_readline_step(
+    buf_ptr: *mut u8,
+    buf_len: usize,
+    idx_ptr: *mut usize,
+    ch: i32,
+    printed_ptr: *mut i32,
+    last_bs_ptr: *mut isize,
+    out_process_len_ptr: *mut isize,
+    out_progress_ptr: *mut i32,
+) -> i32 {
+    if buf_ptr.is_null()
+        || buf_len == 0
+        || idx_ptr.is_null()
+        || printed_ptr.is_null()
+        || last_bs_ptr.is_null()
+    {
+        return 1;
+    }
+    let buf = std::slice::from_raw_parts_mut(buf_ptr, buf_len);
+    let mut printed = *printed_ptr != 0;
+    let mut proc_len = -1isize;
+    let mut prog = -1i32;
+    let should_break = crate::parunpackpost::unpack_ctrl_readline_step(
+        buf,
+        &mut *idx_ptr,
+        ch,
+        &mut printed,
+        &mut *last_bs_ptr,
+        &mut proc_len,
+        &mut prog,
+    );
+    *printed_ptr = i32::from(printed);
+    if !out_process_len_ptr.is_null() {
+        *out_process_len_ptr = proc_len;
+    }
+    if !out_progress_ptr.is_null() {
+        *out_progress_ptr = prog;
+    }
+    i32::from(should_break)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_pup_parchecker_combine_block_crcs(
+    block_crcs_ptr: *const u32,
+    count: usize,
+    block_size: u64,
+) -> u32 {
+    let crcs = if block_crcs_ptr.is_null() || count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(block_crcs_ptr, count)
+    };
+    crate::parunpackpost::parchecker_combine_block_crcs(crcs, block_size)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_pup_parchecker_extract_base_par_stem(
+    par_filename: *const c_char,
+) -> RsBuf {
+    into_buf(crate::parunpackpost::parchecker_extract_base_par_stem(input(
+        par_filename,
+    )))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pup_parchecker_format_not_enough_blocks_errmsg(
+    missing_blocks: i32,
+    block_found: i32,
+) -> RsBuf {
+    into_buf(crate::parunpackpost::parchecker_format_not_enough_blocks_errmsg(
+        missing_blocks,
+        block_found,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_pup_parchecker_build_wildcard_param(
+    par_filename: *const c_char,
+) -> RsBuf {
+    into_buf(crate::parunpackpost::parchecker_build_wildcard_param(input(
+        par_filename,
+    )))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_order_donor_indices(
+    dupe_scores_ptr: *const i32,
+    ids_ptr: *const i32,
+    count: usize,
+    out_indices_ptr: *mut usize,
+) -> usize {
+    if dupe_scores_ptr.is_null() || ids_ptr.is_null() || out_indices_ptr.is_null() || count == 0 {
+        return 0;
+    }
+    let scores = std::slice::from_raw_parts(dupe_scores_ptr, count);
+    let ids = std::slice::from_raw_parts(ids_ptr, count);
+    let order = crate::streamrepair::stream_repair_order_donor_indices(scores, ids);
+    let n = order.len().min(count);
+    std::ptr::copy_nonoverlapping(order.as_ptr(), out_indices_ptr, n);
+    n
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_is_intact_proof_member_eligible(
+    base_name: *const c_char,
+    member_name: *const c_char,
+    target_set: *const c_char,
+    target_filenames_ptr: *const *const c_char,
+    target_count: usize,
+) -> i32 {
+    let mut targets: Vec<&[u8]> = Vec::with_capacity(target_count);
+    if !target_filenames_ptr.is_null() {
+        let ptrs = std::slice::from_raw_parts(target_filenames_ptr, target_count);
+        for &p in ptrs {
+            targets.push(input(p));
+        }
+    }
+    i32::from(
+        crate::streamrepair::stream_repair_is_intact_proof_member_eligible(
+            input(base_name),
+            input(member_name),
+            input(target_set),
+            &targets,
+        ),
+    )
+}
+
+

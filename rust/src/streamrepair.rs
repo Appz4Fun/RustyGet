@@ -2570,6 +2570,34 @@ pub fn content_mapper_split_inner_name(first_name: &[u8]) -> Vec<u8> {
     }
 }
 
+/// Orders donor indices for `StreamRepairController::CollectDonors` by descending `dupe_scores`
+/// and ascending `ids` on ties.
+pub fn stream_repair_order_donor_indices(dupe_scores: &[i32], ids: &[i32]) -> Vec<usize> {
+    let n = dupe_scores.len().min(ids.len());
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| {
+        dupe_scores[b]
+            .cmp(&dupe_scores[a])
+            .then_with(|| ids[a].cmp(&ids[b]))
+    });
+    order
+}
+
+/// Checks whether a completed member in `StreamRepairController::ProveDonorOnIntactFile` is an
+/// intact non-PAR2 member of `target_set` that is not in `target_filenames`.
+pub fn stream_repair_is_intact_proof_member_eligible(
+    base_name: &[u8],
+    member_name: &[u8],
+    target_set: &[u8],
+    target_filenames: &[&[u8]],
+) -> bool {
+    !ends_with_par2_ci(base_name)
+        && volume_set_key(base_name) == target_set
+        && !target_filenames
+            .iter()
+            .any(|t| locale_casecmp(t, member_name) == std::cmp::Ordering::Equal)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2778,5 +2806,23 @@ mod tests {
             b"movie.mkv"
         );
         assert!(content_mapper_split_inner_name(b"archive.rar.001").is_empty());
+
+        assert_eq!(
+            stream_repair_order_donor_indices(&[100, 200, 200], &[5, 9, 2]),
+            vec![2, 1, 0]
+        );
+        let target_set = volume_set_key(b"Show.part01.rar");
+        assert!(stream_repair_is_intact_proof_member_eligible(
+            b"Show.part02.rar",
+            b"Show.part02.rar",
+            &target_set,
+            &[b"Show.part01.rar"]
+        ));
+        assert!(!stream_repair_is_intact_proof_member_eligible(
+            b"Show.part01.rar",
+            b"Show.part01.rar",
+            &target_set,
+            &[b"Show.part01.rar"]
+        ));
     }
 }

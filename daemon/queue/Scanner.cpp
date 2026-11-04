@@ -130,7 +130,12 @@ void Scanner::ServiceWork()
 
 	m_nzbDirInterval = g_Options->GetNzbDirInterval();
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_uqs_scanner_should_pause_scan(
+		g_WorkState->GetPauseScan() ? 1 : 0, m_requestedNzbDirScan ? 1 : 0) != 0)
+#else
 	if (g_WorkState->GetPauseScan() && !m_requestedNzbDirScan)
+#endif
 	{
 		return;
 	}
@@ -150,7 +155,12 @@ void Scanner::ServiceWork()
 	}
 
 	CheckIncomingNzbs(g_Options->GetNzbDir(), "", checkStat);
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_uqs_scanner_needs_second_immediate_scan(
+		checkStat ? 1 : 0, m_scanScript ? 1 : 0) != 0)
+#else
 	if (!checkStat && m_scanScript)
+#endif
 	{
 		// if immediate scan requested, we need second scan to process files extracted by scan-scripts
 		CheckIncomingNzbs(g_Options->GetNzbDir(), "", checkStat);
@@ -705,8 +715,15 @@ void Scanner::InitPPParameters(const char* category, NzbParameterList* parameter
 					if (strcmp(scriptName, script->GetName()) != 0) continue;
 
 					BString<1024> paramName("%s:", scriptName);
+#ifdef NZBGET_USE_RUST
+					if (nzbget_rs_uqs_scanner_script_qualifies_for_pp_param(
+						script->GetPostScript() ? 1 : 0,
+						script->GetQueueScript() ? 1 : 0,
+						parameters->Find(paramName) != nullptr ? 1 : 0) != 0)
+#else
 					if ((script->GetPostScript() || script->GetQueueScript()) &&
 						!parameters->Find(paramName))
+#endif
 					{
 						parameters->SetParameter(paramName, "yes");
 					}
@@ -777,7 +794,12 @@ bool Scanner::AddFileToQueue(
 	}
 
 	CString bakname2;
+#ifdef NZBGET_USE_RUST
+	const char* bakSuffix = nzbget_rs_uqs_scanner_select_rename_bak_queued(ok ? 1 : 0) != 0 ? "queued" : "error";
+	if (!FileSystem::RenameBak(filename, bakSuffix, false, bakname2))
+#else
 	if (!FileSystem::RenameBak(filename, ok ? "queued" : "error", false, bakname2))
+#endif
 	{
 		ok = false;
 		error("Could not rename file %s to %s: %s", filename, *bakname2,

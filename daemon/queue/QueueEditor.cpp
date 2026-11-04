@@ -709,6 +709,9 @@ void QueueEditor::PrepareList(ItemList* itemList, IdList* idList,
 			for (FileInfo* fileInfo : nzbInfo->GetFileList())
 			{
 				int ID = fileInfo->GetId();
+#ifdef NZBGET_USE_RUST
+				nzbget_rs_uqs_queue_editor_update_min_max_id(ID, minId, maxId, &minId, &maxId);
+#else
 				if (ID > maxId)
 				{
 					maxId = ID;
@@ -717,13 +720,18 @@ void QueueEditor::PrepareList(ItemList* itemList, IdList* idList,
 				{
 					minId = ID;
 				}
+#endif
 			}
 		}
 
 		//add IDs to list in order they were transmitted in command
 		for (int id : *idList)
 		{
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_uqs_queue_editor_is_id_in_bounds(id, minId, maxId) != 0)
+#else
 			if (minId <= id && id <= maxId)
+#endif
 			{
 				FileInfo* fileInfo = FindFileInfo(id);
 				if (fileInfo)
@@ -741,6 +749,9 @@ void QueueEditor::PrepareList(ItemList* itemList, IdList* idList,
 		for (NzbInfo* nzbInfo : m_downloadQueue->GetQueue())
 		{
 			int ID = nzbInfo->GetId();
+#ifdef NZBGET_USE_RUST
+			nzbget_rs_uqs_queue_editor_update_min_max_id(ID, minId, maxId, &minId, &maxId);
+#else
 			if (ID > maxId)
 			{
 				maxId = ID;
@@ -749,12 +760,17 @@ void QueueEditor::PrepareList(ItemList* itemList, IdList* idList,
 			{
 				minId = ID;
 			}
+#endif
 		}
 
 		//add IDs to list in order they were transmitted in command
 		for (int id : *idList)
 		{
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_uqs_queue_editor_is_id_in_bounds(id, minId, maxId) != 0)
+#else
 			if (minId <= id && id <= maxId)
+#endif
 			{
 				for (NzbInfo* nzbInfo : m_downloadQueue->GetQueue())
 				{
@@ -801,8 +817,17 @@ bool QueueEditor::BuildIdListFromNameList(IdList* idList, NameList* nameList, Do
 				{
 					// file action
 					BString<1024> filename("%s/%s", fileInfo->GetNzbInfo()->GetName(), FileSystem::BaseFileName(fileInfo->GetFilename()));
+#ifdef NZBGET_USE_RUST
+					if (nzbget_rs_uqs_queue_editor_matches_name_filter(
+						regEx != nullptr ? 1 : 0,
+						regEx ? (regEx->Match(filename) ? 1 : 0) : 0,
+						filename,
+						name,
+						uniqueIds.find(fileInfo->GetId()) != uniqueIds.end() ? 1 : 0) != 0)
+#else
 					if (((!regEx && !strcmp(filename, name)) || (regEx && regEx->Match(filename))) &&
 						(uniqueIds.find(fileInfo->GetId()) == uniqueIds.end()))
+#endif
 					{
 						uniqueIds.insert(fileInfo->GetId());
 						idList->push_back(fileInfo->GetId());
@@ -815,8 +840,17 @@ bool QueueEditor::BuildIdListFromNameList(IdList* idList, NameList* nameList, Do
 			{
 				// group action
 				const char *filename = nzbInfo->GetName();
+#ifdef NZBGET_USE_RUST
+				if (nzbget_rs_uqs_queue_editor_matches_name_filter(
+					regEx != nullptr ? 1 : 0,
+					regEx ? (regEx->Match(filename) ? 1 : 0) : 0,
+					filename,
+					name,
+					uniqueIds.find(nzbInfo->GetId()) != uniqueIds.end() ? 1 : 0) != 0)
+#else
 				if (((!regEx && !strcmp(filename, name)) || (regEx && regEx->Match(filename))) &&
 					(uniqueIds.find(nzbInfo->GetId()) == uniqueIds.end()))
+#endif
 				{
 					uniqueIds.insert(nzbInfo->GetId());
 					idList->push_back(nzbInfo->GetId());
@@ -847,10 +881,20 @@ bool QueueEditor::EditGroup(NzbInfo* nzbInfo, DownloadQueue::EEditAction action,
 		allPaused &= fileInfo->GetPaused();
 	}
 
+#ifdef NZBGET_USE_RUST
+	bool isGroupDel = nzbget_rs_uqs_queue_editor_is_group_delete_action(
+		(int)action,
+		(int)DownloadQueue::eaGroupDelete,
+		(int)DownloadQueue::eaGroupParkDelete,
+		(int)DownloadQueue::eaGroupDupeDelete,
+		(int)DownloadQueue::eaGroupFinalDelete) != 0;
+	if (isGroupDel)
+#else
 	if (action == DownloadQueue::eaGroupDelete ||
 		action == DownloadQueue::eaGroupParkDelete ||
 		action == DownloadQueue::eaGroupDupeDelete ||
 		action == DownloadQueue::eaGroupFinalDelete)
+#endif
 	{
 		nzbInfo->SetDeleting(true);
 #ifdef NZBGET_USE_RUST
@@ -919,12 +963,18 @@ bool QueueEditor::EditGroup(NzbInfo* nzbInfo, DownloadQueue::EEditAction action,
 
 	bool ok = InternEditList(&itemList, nullptr, GroupToFileMap[action], args);
 
+#ifdef NZBGET_USE_RUST
+	if (isGroupDel &&
+		// NZBInfo could have been destroyed already
+		m_downloadQueue->GetQueue()->Find(id))
+#else
 	if ((action == DownloadQueue::eaGroupDelete ||
 		action == DownloadQueue::eaGroupParkDelete ||
 		action == DownloadQueue::eaGroupDupeDelete ||
 		action == DownloadQueue::eaGroupFinalDelete) &&
 		// NZBInfo could have been destroyed already
 		m_downloadQueue->GetQueue()->Find(id))
+#endif
 	{
 		DownloadQueue::Aspect deleteAspect = { DownloadQueue::eaNzbDeleted, m_downloadQueue, nzbInfo, nullptr };
 		m_downloadQueue->Notify(&deleteAspect);

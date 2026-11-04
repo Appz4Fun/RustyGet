@@ -150,7 +150,12 @@ void UrlCoordinator::Run()
 					downloadStarted = true;
 				}
 			}
+#ifdef NZBGET_USE_RUST
+			m_hasMoreJobs = nzbget_rs_uqs_url_coord_has_more_jobs(
+				m_activeDownloads.empty() ? 1 : 0, nzbInfo != nullptr ? 1 : 0) != 0;
+#else
 			m_hasMoreJobs = !m_activeDownloads.empty() || nzbInfo;
+#endif
 		}
 
 		if (lastReset != Util::CurrentTime())
@@ -465,8 +470,15 @@ void UrlCoordinator::UrlCompleted(UrlDownloader* urlDownloader)
 
 	if (nzbInfo->GetUrlStatus() == NzbInfo::lsFinished)
 	{
+#ifdef NZBGET_USE_RUST
+		const char* name = nzbget_rs_uqs_url_coord_use_primary_str(nzbInfo->GetFilename()) != 0
+			? nzbInfo->GetFilename() : *filename;
+		const char* category = nzbget_rs_uqs_url_coord_use_primary_str(nzbInfo->GetCategory()) != 0
+			? nzbInfo->GetCategory() : urlDownloader->GetCategory();
+#else
 		const char* name = !Util::EmptyStr(nzbInfo->GetFilename()) ? nzbInfo->GetFilename() : *filename;
 		const char* category =!Util::EmptyStr(nzbInfo->GetCategory()) ? nzbInfo->GetCategory() : urlDownloader->GetCategory();
+#endif
 
 		Scanner::EAddStatus addStatus;
 		if (Unpack::IsArchive(name))

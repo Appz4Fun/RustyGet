@@ -3863,6 +3863,47 @@ int nzbget_rs_tpr_history_coord_reverse_delete_index(
 int nzbget_rs_tpr_history_coord_should_restore_paused_on_redownload(
     int restore_pause_state, int delete_paused);
 
+// UrlCoordinator, QueueEditor, Scanner, FeedCoordinator & PrePostProcessor Hot-Path C ABI (rust/src/urlqueuescanfeedpost.rs)
+int nzbget_rs_uqs_url_coord_has_more_jobs(int active_empty, int has_nzb_info);
+int nzbget_rs_uqs_url_coord_use_primary_str(const char* primary);
+void nzbget_rs_uqs_queue_editor_update_min_max_id(
+    int id, int in_min_id, int in_max_id, int* out_min_id, int* out_max_id);
+int nzbget_rs_uqs_queue_editor_is_id_in_bounds(int id, int min_id, int max_id);
+int nzbget_rs_uqs_queue_editor_matches_name_filter(
+    int has_regex, int regex_matched, const char* candidate,
+    const char* pattern, int already_in_unique);
+int nzbget_rs_uqs_queue_editor_is_group_delete_action(
+    int action, int ea_group_delete, int ea_group_park_delete,
+    int ea_group_dupe_delete, int ea_group_final_delete);
+int nzbget_rs_uqs_scanner_should_pause_scan(
+    int pause_scan, int requested_nzb_dir_scan);
+int nzbget_rs_uqs_scanner_needs_second_immediate_scan(
+    int check_stat, int scan_script);
+int nzbget_rs_uqs_scanner_script_qualifies_for_pp_param(
+    int is_post_script, int is_queue_script, int already_has_param);
+int nzbget_rs_uqs_scanner_select_rename_bak_queued(int ok);
+int nzbget_rs_uqs_feed_coord_is_completed_status(
+    int status, int ad_finished, int ad_failed, int ad_retry);
+int nzbget_rs_uqs_feed_coord_is_valid_feed_id(int id, int feeds_len);
+int nzbget_rs_uqs_feed_coord_matches_fetch_feed_id(int feed_id, int target_id);
+int nzbget_rs_uqs_prepost_is_within_graceful_wait(
+    int64_t cur_time, int64_t wait_start, int64_t timeout_sec);
+int nzbget_rs_uqs_prepost_should_reorder_added_nzb(
+    int reorder_files, int delete_status, int ds_none);
+int nzbget_rs_uqs_prepost_is_better_main_par_file(
+    int64_t size, int64_t best_size);
+int nzbget_rs_uqs_prepost_should_defer_stream_repair_to_backup(
+    int stream_repair, int stream_repair_done, int health_check, int hc_dupe,
+    int fails_over);
+int nzbget_rs_uqs_prepost_should_stream_repair_before_par(
+    int stream_repair, int stream_repair_done, int par_status, int ps_skipped,
+    int par_check, int pc_auto);
+int nzbget_rs_uqs_prepost_can_enter_final_stream_repair(
+    int stream_repair, int par_status, int ps_repair_possible, int ps_manual);
+int nzbget_rs_uqs_prepost_should_request_par_without_archives(
+    int par_status, int ps_skipped, int delete_status, int ds_none,
+    int par_check, int pc_auto);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

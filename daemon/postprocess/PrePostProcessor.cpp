@@ -103,7 +103,12 @@ void PrePostProcessor::WaitJobs()
 
 	// wait 5 seconds until all post-processing jobs gracefully finish
 	time_t waitStart = Util::CurrentTime();
+#ifdef NZBGET_USE_RUST
+	while (nzbget_rs_uqs_prepost_is_within_graceful_wait(
+		(int64)Util::CurrentTime(), (int64)waitStart, 5) != 0)
+#else
 	while (Util::CurrentTime() < waitStart + 5)
+#endif
 	{
 		{
 			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
@@ -136,7 +141,12 @@ void PrePostProcessor::WaitJobs()
 
 	// wait 5 seconds until direct unpack and live repair threads gracefully finish
 	waitStart = Util::CurrentTime();
+#ifdef NZBGET_USE_RUST
+	while (nzbget_rs_uqs_prepost_is_within_graceful_wait(
+		(int64)Util::CurrentTime(), (int64)waitStart, 5) != 0)
+#else
 	while (Util::CurrentTime() < waitStart + 5)
+#endif
 	{
 		{
 			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
@@ -486,7 +496,14 @@ void PrePostProcessor::NzbAdded(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 		downloadQueue->EditEntry(nzbInfo->GetId(), DownloadQueue::eaGroupPauseExtraPars, nullptr);
 	}
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_uqs_prepost_should_reorder_added_nzb(
+		g_Options->GetReorderFiles() ? 1 : 0,
+		(int)nzbInfo->GetDeleteStatus(),
+		(int)NzbInfo::dsNone) != 0)
+#else
 	if (g_Options->GetReorderFiles() && nzbInfo->GetDeleteStatus() == NzbInfo::dsNone)
+#endif
 	{
 		nzbInfo->PrintMessage(Message::mkInfo, "Reordering files for %s", nzbInfo->GetName());
 		downloadQueue->EditEntry(nzbInfo->GetId(), DownloadQueue::eaGroupSortFiles, nullptr);
@@ -1356,7 +1373,11 @@ static bool ParCannotCover(NzbInfo* nzbInfo)
 		{
 			BString<1024> path("%s%c%s", nzbInfo->GetDestDir(), PATH_SEPARATOR, filename);
 			int64 size = FileSystem::FileSize(path);
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_uqs_prepost_is_better_main_par_file(size, parFileSize) != 0)
+#else
 			if (size > 0 && (parFileSize < 0 || size < parFileSize))
+#endif
 			{
 				parPath = *path;
 				parFileSize = size;
@@ -1475,9 +1496,20 @@ void PrePostProcessor::StartJob(DownloadQueue* downloadQueue, PostInfo* postInfo
 	// stream repair is the last option (B78): it can take longer than downloading
 	// a good backup whole, so with HealthCheck=dupe and a backup still untried in
 	// history the download fails over instead (par2 still gets its turn)
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_uqs_prepost_should_defer_stream_repair_to_backup(
+		streamRepair ? 1 : 0,
+		postInfo->GetStreamRepairDone() ? 1 : 0,
+		(int)g_Options->GetHealthCheck(),
+		(int)Options::hcDupe,
+		(streamRepair && !postInfo->GetStreamRepairDone() && g_Options->GetHealthCheck() == Options::hcDupe &&
+			DupeCoordinator::FailsOver(nzbInfo)) ? 1 : 0) != 0 &&
+		g_DupeCoordinator->FindDupeBackup(downloadQueue, nzbInfo, nzbInfo->GetName(), nzbInfo->GetDupeKey()))
+#else
 	if (streamRepair && !postInfo->GetStreamRepairDone() && g_Options->GetHealthCheck() == Options::hcDupe &&
 		DupeCoordinator::FailsOver(nzbInfo) &&
 		g_DupeCoordinator->FindDupeBackup(downloadQueue, nzbInfo, nzbInfo->GetName(), nzbInfo->GetDupeKey()))
+#endif
 	{
 		nzbInfo->PrintMessage(Message::mkInfo,
 			"Not repairing %s from duplicates: a backup in history is tried first", nzbInfo->GetName());
@@ -1488,11 +1520,23 @@ void PrePostProcessor::StartJob(DownloadQueue* downloadQueue, PostInfo* postInfo
 	// A par-check that cannot succeed still reads the whole collection (and
 	// waits for every remaining par2-file): recover from duplicates first,
 	// par-check afterwards only if that wrote anything
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_uqs_prepost_should_stream_repair_before_par(
+		streamRepair ? 1 : 0,
+		postInfo->GetStreamRepairDone() ? 1 : 0,
+		(int)nzbInfo->GetParStatus(),
+		(int)NzbInfo::psSkipped,
+		(int)g_Options->GetParCheck(),
+		(int)Options::pcAuto) != 0 &&
+		ParCannotCover(nzbInfo) &&
+		ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
+#else
 	if (streamRepair && !postInfo->GetStreamRepairDone() &&
 		nzbInfo->GetParStatus() <= NzbInfo::psSkipped &&
 		g_Options->GetParCheck() == Options::pcAuto &&
 		ParCannotCover(nzbInfo) &&
 		ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
+#endif
 	{
 		nzbInfo->PrintMessage(Message::mkInfo,
 			"Par2 files of %s cannot cover its damage (health %.1f%%, critical %.1f%%), "
@@ -1704,9 +1748,17 @@ void PrePostProcessor::StartJob(DownloadQueue* downloadQueue, PostInfo* postInfo
 	// Successful PAR sets remove the holes they actually protect. Remaining
 	// jobs may belong to unprotected files, or to a set that could not repair.
 	// Manual repair and sufficient parity with ParRepair=no remain user choices.
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_uqs_prepost_can_enter_final_stream_repair(
+		streamRepair ? 1 : 0,
+		(int)nzbInfo->GetParStatus(),
+		(int)NzbInfo::psRepairPossible,
+		(int)NzbInfo::psManual) != 0)
+#else
 	if (streamRepair &&
 		nzbInfo->GetParStatus() != NzbInfo::psRepairPossible &&
 		nzbInfo->GetParStatus() != NzbInfo::psManual)
+#endif
 	{
 		EnterStage(downloadQueue, postInfo, PostInfo::ptStreamRepairing);
 		StreamRepairController::StartJob(postInfo);
@@ -1747,11 +1799,23 @@ void PrePostProcessor::StartJob(DownloadQueue* downloadQueue, PostInfo* postInfo
 	}
 
 #ifndef DISABLE_PARCHECK
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_uqs_prepost_should_request_par_without_archives(
+		(int)nzbInfo->GetParStatus(),
+		(int)NzbInfo::psSkipped,
+		(int)nzbInfo->GetDeleteStatus(),
+		(int)NzbInfo::dsNone,
+		(int)g_Options->GetParCheck(),
+		(int)Options::pcAuto) != 0 &&
+		!UnpackController::HasCompletedArchiveFiles(nzbInfo) &&
+		ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
+#else
 	if (nzbInfo->GetParStatus() == NzbInfo::psSkipped &&
 		nzbInfo->GetDeleteStatus() == NzbInfo::dsNone &&
 		g_Options->GetParCheck() == Options::pcAuto &&
 		!UnpackController::HasCompletedArchiveFiles(nzbInfo) &&
 		ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
+#endif
 	{
 		nzbInfo->PrintMessage(Message::mkInfo,
 			"Requesting par-check for collection %s without archive files",

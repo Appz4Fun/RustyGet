@@ -24590,6 +24590,247 @@ pub extern "C" fn nzbget_rs_tpr_history_coord_should_restore_paused_on_redownloa
     )
 }
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_uqs_url_coord_has_more_jobs(
+    active_empty: c_int,
+    has_nzb_info: c_int,
+) -> c_int {
+    crate::urlqueuescanfeedpost::url_coord_has_more_jobs(active_empty, has_nzb_info)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_uqs_url_coord_use_primary_str(primary: *const c_char) -> c_int {
+    crate::urlqueuescanfeedpost::url_coord_use_primary_str(crate::queuehotpath::cstr_to_bytes(
+        primary,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_uqs_queue_editor_update_min_max_id(
+    id: c_int,
+    in_min_id: c_int,
+    in_max_id: c_int,
+    out_min_id: *mut c_int,
+    out_max_id: *mut c_int,
+) {
+    let (min_id, max_id) =
+        crate::urlqueuescanfeedpost::queue_editor_update_min_max_id(id, in_min_id, in_max_id);
+    if !out_min_id.is_null() {
+        *out_min_id = min_id;
+    }
+    if !out_max_id.is_null() {
+        *out_max_id = max_id;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_uqs_queue_editor_is_id_in_bounds(
+    id: c_int,
+    min_id: c_int,
+    max_id: c_int,
+) -> c_int {
+    crate::urlqueuescanfeedpost::queue_editor_is_id_in_bounds(id, min_id, max_id)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_uqs_queue_editor_matches_name_filter(
+    has_regex: c_int,
+    regex_matched: c_int,
+    candidate: *const c_char,
+    pattern: *const c_char,
+    already_in_unique: c_int,
+) -> c_int {
+    crate::urlqueuescanfeedpost::queue_editor_matches_name_filter(
+        has_regex,
+        regex_matched,
+        crate::queuehotpath::cstr_to_bytes(candidate),
+        crate::queuehotpath::cstr_to_bytes(pattern),
+        already_in_unique,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_uqs_queue_editor_is_group_delete_action(
+    action: c_int,
+    ea_group_delete: c_int,
+    ea_group_park_delete: c_int,
+    ea_group_dupe_delete: c_int,
+    ea_group_final_delete: c_int,
+) -> c_int {
+    crate::urlqueuescanfeedpost::queue_editor_is_group_delete_action(
+        action,
+        ea_group_delete,
+        ea_group_park_delete,
+        ea_group_dupe_delete,
+        ea_group_final_delete,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_uqs_scanner_should_pause_scan(
+    pause_scan: c_int,
+    requested_nzb_dir_scan: c_int,
+) -> c_int {
+    crate::urlqueuescanfeedpost::scanner_should_pause_scan(pause_scan, requested_nzb_dir_scan)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_uqs_scanner_needs_second_immediate_scan(
+    check_stat: c_int,
+    scan_script: c_int,
+) -> c_int {
+    crate::urlqueuescanfeedpost::scanner_needs_second_immediate_scan(check_stat, scan_script)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_uqs_scanner_script_qualifies_for_pp_param(
+    is_post_script: c_int,
+    is_queue_script: c_int,
+    already_has_param: c_int,
+) -> c_int {
+    crate::urlqueuescanfeedpost::scanner_script_qualifies_for_pp_param(
+        is_post_script,
+        is_queue_script,
+        already_has_param,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_uqs_scanner_select_rename_bak_queued(ok: c_int) -> c_int {
+    crate::urlqueuescanfeedpost::scanner_select_rename_bak_queued(ok)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_uqs_feed_coord_is_completed_status(
+    status: c_int,
+    ad_finished: c_int,
+    ad_failed: c_int,
+    ad_retry: c_int,
+) -> c_int {
+    crate::urlqueuescanfeedpost::feed_coord_is_completed_status(
+        status,
+        ad_finished,
+        ad_failed,
+        ad_retry,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_uqs_feed_coord_is_valid_feed_id(
+    id: c_int,
+    feeds_len: c_int,
+) -> c_int {
+    crate::urlqueuescanfeedpost::feed_coord_is_valid_feed_id(id, feeds_len)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_uqs_feed_coord_matches_fetch_feed_id(
+    feed_id: c_int,
+    target_id: c_int,
+) -> c_int {
+    crate::urlqueuescanfeedpost::feed_coord_matches_fetch_feed_id(feed_id, target_id)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_uqs_prepost_is_within_graceful_wait(
+    cur_time: i64,
+    wait_start: i64,
+    timeout_sec: i64,
+) -> c_int {
+    crate::urlqueuescanfeedpost::prepost_is_within_graceful_wait(cur_time, wait_start, timeout_sec)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_uqs_prepost_should_reorder_added_nzb(
+    reorder_files: c_int,
+    delete_status: c_int,
+    ds_none: c_int,
+) -> c_int {
+    crate::urlqueuescanfeedpost::prepost_should_reorder_added_nzb(
+        reorder_files,
+        delete_status,
+        ds_none,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_uqs_prepost_is_better_main_par_file(
+    size: i64,
+    best_size: i64,
+) -> c_int {
+    crate::urlqueuescanfeedpost::prepost_is_better_main_par_file(size, best_size)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_uqs_prepost_should_defer_stream_repair_to_backup(
+    stream_repair: c_int,
+    stream_repair_done: c_int,
+    health_check: c_int,
+    hc_dupe: c_int,
+    fails_over: c_int,
+) -> c_int {
+    crate::urlqueuescanfeedpost::prepost_should_defer_stream_repair_to_backup(
+        stream_repair,
+        stream_repair_done,
+        health_check,
+        hc_dupe,
+        fails_over,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_uqs_prepost_should_stream_repair_before_par(
+    stream_repair: c_int,
+    stream_repair_done: c_int,
+    par_status: c_int,
+    ps_skipped: c_int,
+    par_check: c_int,
+    pc_auto: c_int,
+) -> c_int {
+    crate::urlqueuescanfeedpost::prepost_should_stream_repair_before_par(
+        stream_repair,
+        stream_repair_done,
+        par_status,
+        ps_skipped,
+        par_check,
+        pc_auto,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_uqs_prepost_can_enter_final_stream_repair(
+    stream_repair: c_int,
+    par_status: c_int,
+    ps_repair_possible: c_int,
+    ps_manual: c_int,
+) -> c_int {
+    crate::urlqueuescanfeedpost::prepost_can_enter_final_stream_repair(
+        stream_repair,
+        par_status,
+        ps_repair_possible,
+        ps_manual,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_uqs_prepost_should_request_par_without_archives(
+    par_status: c_int,
+    ps_skipped: c_int,
+    delete_status: c_int,
+    ds_none: c_int,
+    par_check: c_int,
+    pc_auto: c_int,
+) -> c_int {
+    crate::urlqueuescanfeedpost::prepost_should_request_par_without_archives(
+        par_status,
+        ps_skipped,
+        delete_status,
+        ds_none,
+        par_check,
+        pc_auto,
+    )
+}
+
 
 
 

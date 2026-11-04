@@ -393,9 +393,17 @@ void FeedCoordinator::Update(Subject* caller, void* aspect)
 	debug("Notification from FeedDownloader received");
 
 	FeedDownloader* feedDownloader = (FeedDownloader*) caller;
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_uqs_feed_coord_is_completed_status(
+		(int)feedDownloader->GetStatus(),
+		(int)WebDownloader::adFinished,
+		(int)WebDownloader::adFailed,
+		(int)WebDownloader::adRetry) != 0)
+#else
 	if ((feedDownloader->GetStatus() == WebDownloader::adFinished) ||
 		(feedDownloader->GetStatus() == WebDownloader::adFailed) ||
 		(feedDownloader->GetStatus() == WebDownloader::adRetry))
+#endif
 	{
 		FeedCompleted(feedDownloader);
 	}
@@ -625,7 +633,11 @@ std::vector<std::unique_ptr<NzbInfo>> FeedCoordinator::ProcessFeed(FeedInfo* fee
 
 std::shared_ptr<FeedItemList> FeedCoordinator::ViewFeed(int id)
 {
+#ifdef NZBGET_USE_RUST
+	if (!nzbget_rs_uqs_feed_coord_is_valid_feed_id(id, static_cast<int>(m_feeds.size())))
+#else
 	if (id < 1 || id > static_cast<int>(m_feeds.size()))
+#endif
 	{
 		return nullptr;
 	}
@@ -645,7 +657,11 @@ std::shared_ptr<FeedItemList> FeedCoordinator::PreviewFeed(int id,
 	debug("Preview feed %s", name);
 
 	unsigned int certVerifLevel = Options::ECertVerifLevel::cvStrict;
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_uqs_feed_coord_is_valid_feed_id(id, static_cast<int>(m_feeds.size())) != 0)
+#else
 	if (id >= 1 && id <= static_cast<int>(m_feeds.size()))
+#endif
 	{
 		certVerifLevel = m_feeds[static_cast<size_t>(id - 1)]->GetCertVerificationLevel();
 	}
@@ -778,7 +794,11 @@ void FeedCoordinator::FetchFeed(int id)
 	std::lock_guard<std::mutex> guard(m_downloadsMutex);
 	for (FeedInfo* feedInfo : &m_feeds)
 	{
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_uqs_feed_coord_matches_fetch_feed_id(feedInfo->GetId(), id) != 0)
+#else
 		if (feedInfo->GetId() == id || id == 0)
+#endif
 		{
 			feedInfo->SetFetch(true);
 			m_force = true;

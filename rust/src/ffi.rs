@@ -23106,6 +23106,260 @@ pub unsafe extern "C" fn nzbget_rs_rol_nstring_cstring_trim_right_len(
     ))
 }
 
+// ============================================================================
+// Util, FileSystem, ScriptController, UnpackController & ScriptConfig Hot-Path FFI (`rust/src/utilfsscript.rs`)
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ufs_util_join_int64(hi: u32, lo: u32) -> i64 {
+    crate::utilfsscript::util_join_int64(hi, lo)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ufs_util_split_int64(
+    int64_val: i64,
+    out_hi: *mut u32,
+    out_lo: *mut u32,
+) {
+    let (hi, lo) = crate::utilfsscript::util_split_int64(int64_val);
+    if !out_hi.is_null() {
+        *out_hi = hi;
+    }
+    if !out_lo.is_null() {
+        *out_lo = lo;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ufs_util_match_shell_overridden_token(
+    shellover: *const c_char,
+    file_ext: *const c_char,
+    file_ext_len: usize,
+    out_cmd_offset: *mut usize,
+) -> c_int {
+    let ext_slice = if file_ext.is_null() || file_ext_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(file_ext.cast::<u8>(), file_ext_len)
+    };
+    if let Some(off) = crate::utilfsscript::util_match_shell_overridden_token(
+        crate::queuehotpath::cstr_to_bytes(shellover),
+        ext_slice,
+    ) {
+        if !out_cmd_offset.is_null() {
+            *out_cmd_offset = off;
+        }
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ufs_util_internal_timegm(
+    tm_year: c_int,
+    tm_mon: c_int,
+    tm_mday: c_int,
+    tm_hour: c_int,
+    tm_min: c_int,
+    tm_sec: c_int,
+) -> i64 {
+    crate::utilfsscript::util_internal_timegm(tm_year, tm_mon, tm_mday, tm_hour, tm_min, tm_sec)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ufs_webutil_xml_calc_copy_len(
+    value_len: c_int,
+    value_buf_size: c_int,
+) -> c_int {
+    crate::utilfsscript::webutil_xml_calc_copy_len(value_len, value_buf_size)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ufs_regex_calc_match_len(rm_so: c_int, rm_eo: c_int) -> c_int {
+    crate::utilfsscript::regex_calc_match_len(rm_so, rm_eo)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ufs_tokenizer_fits_short_string(len: c_int, capacity: c_int) -> c_int {
+    crate::utilfsscript::tokenizer_fits_short_string(len, capacity)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ufs_fs_validate_load_file_size(
+    file_size: i64,
+    add_trailing_null: c_int,
+    out_size: *mut c_int,
+    out_buf_size: *mut c_int,
+) -> c_int {
+    if let Some((size, buf_size)) =
+        crate::utilfsscript::fs_validate_load_file_size(file_size, add_trailing_null)
+    {
+        if !out_size.is_null() {
+            *out_size = size;
+        }
+        if !out_buf_size.is_null() {
+            *out_buf_size = buf_size;
+        }
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ufs_fs_calc_allocate_chunk_size(
+    remaining: i64,
+    zeros_size: i64,
+) -> i64 {
+    crate::utilfsscript::fs_calc_allocate_chunk_size(remaining, zeros_size)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ufs_fs_classify_expand_file_name(
+    filename: *const c_char,
+    out_skip_dot_slash: *mut usize,
+) -> c_int {
+    let (is_rel, skip) = crate::utilfsscript::fs_classify_expand_file_name(
+        crate::queuehotpath::cstr_to_bytes(filename),
+    );
+    if !out_skip_dot_slash.is_null() {
+        *out_skip_dot_slash = skip;
+    }
+    is_rel
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ufs_dir_browser_is_dot_or_dotdot(
+    filename: *const c_char,
+) -> c_int {
+    crate::utilfsscript::dir_browser_is_dot_or_dotdot(crate::queuehotpath::cstr_to_bytes(filename))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ufs_disk_file_select_seek_origin(
+    origin: c_int,
+    so_cur: c_int,
+    so_end: c_int,
+    seek_set: c_int,
+    seek_cur: c_int,
+    seek_end: c_int,
+) -> c_int {
+    crate::utilfsscript::disk_file_select_seek_origin(
+        origin, so_cur, so_end, seek_set, seek_cur, seek_end,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ufs_script_ctrl_matches_env_prefix(
+    opt_name: *const c_char,
+    strip_prefix: *const c_char,
+    prefix_len: c_int,
+) -> c_int {
+    let prefix = if strip_prefix.is_null() {
+        None
+    } else {
+        Some(crate::queuehotpath::cstr_to_bytes(strip_prefix))
+    };
+    crate::utilfsscript::script_ctrl_matches_env_prefix(
+        crate::queuehotpath::cstr_to_bytes(opt_name),
+        prefix,
+        prefix_len,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ufs_script_ctrl_is_fork_start_error_line(
+    first_line: c_int,
+    buf: *const c_char,
+) -> c_int {
+    crate::utilfsscript::script_ctrl_is_fork_start_error_line(
+        first_line,
+        crate::queuehotpath::cstr_to_bytes(buf),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ufs_script_ctrl_normalize_fork_exit_code(
+    exit_code: c_int,
+    fork_error_exit_code: c_int,
+    start_error: c_int,
+) -> c_int {
+    crate::utilfsscript::script_ctrl_normalize_fork_exit_code(
+        exit_code,
+        fork_error_exit_code,
+        start_error,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ufs_script_ctrl_calc_signal_exit_code(term_sig: c_int) -> c_int {
+    crate::utilfsscript::script_ctrl_calc_signal_exit_code(term_sig)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ufs_script_ctrl_select_kill_pid(
+    child_pid: c_int,
+    child_pgid: c_int,
+) -> c_int {
+    crate::utilfsscript::script_ctrl_select_kill_pid(child_pid, child_pgid)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ufs_unpack_ctrl_parse_backspace_progress(
+    backspace: *const c_char,
+    out_progress: *mut c_int,
+) -> c_int {
+    if let Some(p) = crate::utilfsscript::unpack_ctrl_parse_backspace_progress(
+        crate::queuehotpath::cstr_to_bytes(backspace),
+    ) {
+        if !out_progress.is_null() {
+            *out_progress = p;
+        }
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ufs_script_config_same_cipher_file(
+    a_dev: u64,
+    b_dev: u64,
+    a_ino: u64,
+    b_ino: u64,
+    a_size: i64,
+    b_size: i64,
+    a_mode: u32,
+    b_mode: u32,
+    a_uid: u32,
+    b_uid: u32,
+    a_gid: u32,
+    b_gid: u32,
+    a_msec: i64,
+    b_msec: i64,
+    a_mnsec: i64,
+    b_mnsec: i64,
+    a_csec: i64,
+    b_csec: i64,
+    a_cnsec: i64,
+    b_cnsec: i64,
+) -> c_int {
+    crate::utilfsscript::script_config_same_cipher_file(
+        a_dev, b_dev, a_ino, b_ino, a_size, b_size, a_mode, b_mode, a_uid, b_uid, a_gid, b_gid,
+        a_msec, b_msec, a_mnsec, b_mnsec, a_csec, b_csec, a_cnsec, b_cnsec,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ufs_script_config_is_valid_cipher_size(
+    is_reg: c_int,
+    size: i64,
+) -> c_int {
+    crate::utilfsscript::script_config_is_valid_cipher_size(is_reg, size)
+}
+
+
 
 
 

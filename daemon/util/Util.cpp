@@ -202,6 +202,14 @@ Util::FindShellOverriddenExecutor(const std::string& fileExt, const std::string&
 	Tokenizer tok(customPath.c_str(), ",;");
 	while (char* shellover = tok.Next())
 	{
+#ifdef NZBGET_USE_RUST
+		size_t cmdOffset = 0;
+		if (nzbget_rs_ufs_util_match_shell_overridden_token(
+			shellover, fileExt.data(), fileExt.size(), &cmdOffset) != 0)
+		{
+			return std::string(shellover + cmdOffset);
+		}
+#else
 		char* shellcmd = strchr(shellover, '=');
 		if (shellcmd)
 		{
@@ -213,6 +221,7 @@ Util::FindShellOverriddenExecutor(const std::string& fileExt, const std::string&
 				return std::string(shellcmd);
 			}
 		}
+#endif
 	}
 
 	return std::nullopt;
@@ -269,13 +278,21 @@ std::optional<std::string> Util::FindPython()
  
 int64 Util::JoinInt64(uint32 Hi, uint32 Lo)
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_ufs_util_join_int64(Hi, Lo);
+#else
 	return (((int64)Hi) << 32) + Lo;
+#endif
 }
 
 void Util::SplitInt64(int64 Int64, uint32* Hi, uint32* Lo)
 {
+#ifdef NZBGET_USE_RUST
+	nzbget_rs_ufs_util_split_int64(Int64, Hi, Lo);
+#else
 	*Hi = (uint32)(Int64 >> 32);
 	*Lo = (uint32)(Int64 & 0xFFFFFFFF);
+#endif
 }
 
 /* Base64 decryption is taken from
@@ -1035,7 +1052,12 @@ inline time_t internal_timegm(tm const *t)
 
 time_t Util::Timegm(tm const *t)
 {
+#ifdef NZBGET_USE_RUST
+	return (time_t)nzbget_rs_ufs_util_internal_timegm(
+		t->tm_year, t->tm_mon, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec);
+#else
 	return internal_timegm(t);
+#endif
 }
 
 bool Util::StrCaseCmp(std::string_view a, std::string_view b)
@@ -1480,7 +1502,11 @@ bool WebUtil::XmlParseTagValue(const char* xml, const char* tag, char* valueBuf,
 	{
 		return false;
 	}
+#ifdef NZBGET_USE_RUST
+	int len = nzbget_rs_ufs_webutil_xml_calc_copy_len(valueLen, valueBufSize);
+#else
 	int len = valueLen < valueBufSize ? valueLen : valueBufSize - 1;
+#endif
 	strncpy(valueBuf, value, len);
 	valueBuf[len] = '\0';
 	if (tagEnd)
@@ -2510,7 +2536,11 @@ int RegEx::GetMatchStart(int index)
 int RegEx::GetMatchLen(int index)
 {
 #ifdef HAVE_REGEX_H
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_ufs_regex_calc_match_len(m_matches[index].rm_so, m_matches[index].rm_eo);
+#else
 	return m_matches[index].rm_eo - m_matches[index].rm_so;
+#endif
 #else
 	return 0;
 #endif
@@ -2828,7 +2858,11 @@ Tokenizer::Tokenizer(const char* dataString, const char* separators) :
 {
 	// an optimization to avoid memory allocation for short data string
 	int len = strlen(dataString);
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_ufs_tokenizer_fits_short_string(len, m_shortString.Capacity()) != 0)
+#else
 	if (len < m_shortString.Capacity())
+#endif
 	{
 		m_shortString.Set(dataString);
 		m_dataString = m_shortString;

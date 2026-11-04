@@ -3603,6 +3603,45 @@ int nzbget_rs_rol_nstring_cstring_replace_bounds(
 size_t nzbget_rs_rol_nstring_cstring_trim_right_len(
     const char* s, size_t len);
 
+// Util, FileSystem, ScriptController, UnpackController & ScriptConfig Hot-Path C ABI (rust/src/utilfsscript.rs)
+int64_t nzbget_rs_ufs_util_join_int64(uint32_t hi, uint32_t lo);
+void nzbget_rs_ufs_util_split_int64(
+    int64_t int64_val, uint32_t* out_hi, uint32_t* out_lo);
+int nzbget_rs_ufs_util_match_shell_overridden_token(
+    const char* shellover, const char* file_ext, size_t file_ext_len,
+    size_t* out_cmd_offset);
+int64_t nzbget_rs_ufs_util_internal_timegm(
+    int tm_year, int tm_mon, int tm_mday, int tm_hour, int tm_min, int tm_sec);
+int nzbget_rs_ufs_webutil_xml_calc_copy_len(int value_len, int value_buf_size);
+int nzbget_rs_ufs_regex_calc_match_len(int rm_so, int rm_eo);
+int nzbget_rs_ufs_tokenizer_fits_short_string(int len, int capacity);
+int nzbget_rs_ufs_fs_validate_load_file_size(
+    int64_t file_size, int add_trailing_null, int* out_size, int* out_buf_size);
+int64_t nzbget_rs_ufs_fs_calc_allocate_chunk_size(
+    int64_t remaining, int64_t zeros_size);
+int nzbget_rs_ufs_fs_classify_expand_file_name(
+    const char* filename, size_t* out_skip_dot_slash);
+int nzbget_rs_ufs_dir_browser_is_dot_or_dotdot(const char* filename);
+int nzbget_rs_ufs_disk_file_select_seek_origin(
+    int origin, int so_cur, int so_end, int seek_set, int seek_cur, int seek_end);
+int nzbget_rs_ufs_script_ctrl_matches_env_prefix(
+    const char* opt_name, const char* strip_prefix, int prefix_len);
+int nzbget_rs_ufs_script_ctrl_is_fork_start_error_line(
+    int first_line, const char* buf);
+int nzbget_rs_ufs_script_ctrl_normalize_fork_exit_code(
+    int exit_code, int fork_error_exit_code, int start_error);
+int nzbget_rs_ufs_script_ctrl_calc_signal_exit_code(int term_sig);
+int nzbget_rs_ufs_script_ctrl_select_kill_pid(int child_pid, int child_pgid);
+int nzbget_rs_ufs_unpack_ctrl_parse_backspace_progress(
+    const char* backspace, int* out_progress);
+int nzbget_rs_ufs_script_config_same_cipher_file(
+    uint64_t a_dev, uint64_t b_dev, uint64_t a_ino, uint64_t b_ino,
+    int64_t a_size, int64_t b_size, uint32_t a_mode, uint32_t b_mode,
+    uint32_t a_uid, uint32_t b_uid, uint32_t a_gid, uint32_t b_gid,
+    int64_t a_msec, int64_t b_msec, int64_t a_mnsec, int64_t b_mnsec,
+    int64_t a_csec, int64_t b_csec, int64_t a_cnsec, int64_t b_cnsec);
+int nzbget_rs_ufs_script_config_is_valid_cipher_size(int is_reg, int64_t size);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

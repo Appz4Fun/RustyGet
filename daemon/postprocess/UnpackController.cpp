@@ -1286,11 +1286,19 @@ bool UnpackController::ReadLine(char* buf, int bufSize, FILE* stream)
 				}
 				printed = true;
 			}
+#ifdef NZBGET_USE_RUST
+			int progress = 0;
+			if (nzbget_rs_ufs_unpack_ctrl_parse_backspace_progress(backspace, &progress) != 0)
+			{
+				m_postInfo->SetStageProgress(progress);
+			}
+#else
 			if (strchr(backspace, '%'))
 			{
 				int percent = atoi(backspace + 1);
 				m_postInfo->SetStageProgress(percent * 10);
 			}
+#endif
 		}
 	}
 

@@ -54,6 +54,33 @@ struct CipherDescriptor
 
 bool SameCipherFile(const struct stat& a, const struct stat& b)
 {
+#ifdef NZBGET_USE_RUST
+#ifdef __APPLE__
+	return nzbget_rs_ufs_script_config_same_cipher_file(
+		(uint64_t)a.st_dev, (uint64_t)b.st_dev,
+		(uint64_t)a.st_ino, (uint64_t)b.st_ino,
+		(int64_t)a.st_size, (int64_t)b.st_size,
+		(uint32_t)a.st_mode, (uint32_t)b.st_mode,
+		(uint32_t)a.st_uid, (uint32_t)b.st_uid,
+		(uint32_t)a.st_gid, (uint32_t)b.st_gid,
+		(int64_t)a.st_mtimespec.tv_sec, (int64_t)b.st_mtimespec.tv_sec,
+		(int64_t)a.st_mtimespec.tv_nsec, (int64_t)b.st_mtimespec.tv_nsec,
+		(int64_t)a.st_ctimespec.tv_sec, (int64_t)b.st_ctimespec.tv_sec,
+		(int64_t)a.st_ctimespec.tv_nsec, (int64_t)b.st_ctimespec.tv_nsec) != 0;
+#else
+	return nzbget_rs_ufs_script_config_same_cipher_file(
+		(uint64_t)a.st_dev, (uint64_t)b.st_dev,
+		(uint64_t)a.st_ino, (uint64_t)b.st_ino,
+		(int64_t)a.st_size, (int64_t)b.st_size,
+		(uint32_t)a.st_mode, (uint32_t)b.st_mode,
+		(uint32_t)a.st_uid, (uint32_t)b.st_uid,
+		(uint32_t)a.st_gid, (uint32_t)b.st_gid,
+		(int64_t)a.st_mtim.tv_sec, (int64_t)b.st_mtim.tv_sec,
+		(int64_t)a.st_mtim.tv_nsec, (int64_t)b.st_mtim.tv_nsec,
+		(int64_t)a.st_ctim.tv_sec, (int64_t)b.st_ctim.tv_sec,
+		(int64_t)a.st_ctim.tv_nsec, (int64_t)b.st_ctim.tv_nsec) != 0;
+#endif
+#else
 	bool same = a.st_dev == b.st_dev && a.st_ino == b.st_ino && a.st_size == b.st_size &&
 		a.st_mode == b.st_mode && a.st_uid == b.st_uid && a.st_gid == b.st_gid;
 #ifdef __APPLE__
@@ -63,11 +90,20 @@ bool SameCipherFile(const struct stat& a, const struct stat& b)
 	return same && a.st_mtim.tv_sec == b.st_mtim.tv_sec && a.st_mtim.tv_nsec == b.st_mtim.tv_nsec &&
 		a.st_ctim.tv_sec == b.st_ctim.tv_sec && a.st_ctim.tv_nsec == b.st_ctim.tv_nsec;
 #endif
+#endif
 }
 
 bool ReadCipherDescriptor(int fd, std::string& output, struct stat& before)
 {
+#ifdef NZBGET_USE_RUST
+	if (fstat(fd, &before) != 0 ||
+		nzbget_rs_ufs_script_config_is_valid_cipher_size(S_ISREG(before.st_mode) ? 1 : 0, (int64_t)before.st_size) == 0)
+	{
+		return false;
+	}
+#else
 	if (fstat(fd, &before) != 0 || !S_ISREG(before.st_mode) || before.st_size < 0 || before.st_size > 16 * 1024 * 1024) return false;
+#endif
 	output.resize(static_cast<size_t>(before.st_size));
 	size_t used = 0;
 	while (used < output.size())

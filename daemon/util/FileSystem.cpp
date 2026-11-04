@@ -366,6 +366,15 @@ bool FileSystem::LoadFileIntoBuffer(const char* filename, CharBuffer& buffer, bo
 	file.Seek(0, DiskFile::soEnd);
 	int64 fileSize = file.Position();
 	file.Seek(0);
+#ifdef NZBGET_USE_RUST
+	int size = 0;
+	int bufSize = 0;
+	if (nzbget_rs_ufs_fs_validate_load_file_size(
+		fileSize, addTrailingNull ? 1 : 0, &size, &bufSize) == 0)
+	{
+		return false;
+	}
+#else
 	if (fileSize < 0 || fileSize > INT_MAX - 1)
 	{
 		return false;
@@ -374,6 +383,7 @@ bool FileSystem::LoadFileIntoBuffer(const char* filename, CharBuffer& buffer, bo
 
 	// allocate memory to contain the whole file.
 	int bufSize = size + (addTrailingNull ? 1 : 0);
+#endif
 	buffer.Reserve(bufSize);
 	if (bufSize > 0 && !buffer)
 	{
@@ -469,7 +479,11 @@ bool FileSystem::AllocateFile(const char* filename, int64 size, [[maybe_unused]]
 		memset(zeros, 0, zeros.Size());
 		for (int64 remaining = size; remaining > 0;)
 		{
+#ifdef NZBGET_USE_RUST
+			int64 needbytes = nzbget_rs_ufs_fs_calc_allocate_chunk_size(remaining, (int64)zeros.Size());
+#else
 			int64 needbytes = std::min(remaining, (int64)zeros.Size());
+#endif
 			int64 written = file.Write(zeros, needbytes);
 			if (written != needbytes)
 			{
@@ -1692,6 +1706,19 @@ CString FileSystem::ExpandFileName(const char* filename)
 #else
 	CString result;
 	result.Reserve(1024 - 1);
+#ifdef NZBGET_USE_RUST
+	size_t skipDotSlash = 0;
+	if (nzbget_rs_ufs_fs_classify_expand_file_name(filename, &skipDotSlash) != 0)
+	{
+		char curDir[MAX_PATH + 1];
+		getcwd(curDir, sizeof(curDir) - 1); // 1 char reserved for adding backslash
+		result.Format("%s/%s", curDir, filename + skipDotSlash);
+	}
+	else
+	{
+		result = filename;
+	}
+#else
 	if (filename[0] != '\0' && filename[0] != '/')
 	{
 		char curDir[MAX_PATH + 1];
@@ -1707,6 +1734,7 @@ CString FileSystem::ExpandFileName(const char* filename)
 	{
 		result = filename;
 	}
+#endif
 	return result;
 #endif
 }
@@ -2103,7 +2131,11 @@ const char* DirBrowser::InternNext()
 const char* DirBrowser::Next()
 {
 	const char* filename = nullptr;
+#ifdef NZBGET_USE_RUST
+	for (filename = InternNext(); filename && nzbget_rs_ufs_dir_browser_is_dot_or_dotdot(filename) != 0; )
+#else
 	for (filename = InternNext(); filename && (!strcmp(filename, ".") || !strcmp(filename, "..")); )
+#endif
 	{
 		filename = InternNext();
 	}
@@ -2192,9 +2224,15 @@ int64 DiskFile::Position()
 
 bool DiskFile::Seek(int64 position, ESeekOrigin origin)
 {
+#ifdef NZBGET_USE_RUST
+	return fseek(m_file, position,
+		nzbget_rs_ufs_disk_file_select_seek_origin(
+			(int)origin, (int)soCur, (int)soEnd, SEEK_SET, SEEK_CUR, SEEK_END)) == 0;
+#else
 	return fseek(m_file, position,
 		origin == soCur ? SEEK_CUR :
 		origin == soEnd ? SEEK_END : SEEK_SET) == 0;
+#endif
 }
 
 bool DiskFile::Eof()

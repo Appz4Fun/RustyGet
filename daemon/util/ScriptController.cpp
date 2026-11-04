@@ -226,8 +226,12 @@ void ScriptController::PrepareEnvOptions(const char* stripPrefix)
 	for (Options::OptEntry& optEntry : g_Options->GuardOptEntries())
 	{
 		const char* value = GetOptValue(optEntry.GetName(), optEntry.GetValue());
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_ufs_script_ctrl_matches_env_prefix(optEntry.GetName(), stripPrefix, prefixLen) != 0)
+#else
 		if (stripPrefix && !strncmp(optEntry.GetName(), stripPrefix, prefixLen) &&
 			(int)strlen(optEntry.GetName()) > prefixLen)
+#endif
 		{
 			SetEnvVarSpecial("NZBPO", optEntry.GetName() + prefixLen, value);
 		}
@@ -419,7 +423,11 @@ int ScriptController::Execute()
 				continue;
 			}
 #endif
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_ufs_script_ctrl_is_fork_start_error_line(firstLine ? 1 : 0, buf) != 0)
+#else
 			if (firstLine && !strncmp(buf, "[ERROR] Could not start ", 24))
+#endif
 			{
 				startError = true;
 			}
@@ -462,10 +470,15 @@ int ScriptController::Execute()
 	{
 		exitCode = WaitProcess();
 #ifndef WIN32
+#ifdef NZBGET_USE_RUST
+		exitCode = nzbget_rs_ufs_script_ctrl_normalize_fork_exit_code(
+			exitCode, FORK_ERROR_EXIT_CODE, startError ? 1 : 0);
+#else
 		if (exitCode == FORK_ERROR_EXIT_CODE && startError)
 		{
 			exitCode = -1;
 		}
+#endif
 #endif
 	}
 
@@ -864,7 +877,11 @@ int ScriptController::WaitProcess()
 		{
 			PrintMessage(Message::mkWarning, "%s was killed by signal %i", *m_infoName, WTERMSIG(status));
 		}
+#ifdef NZBGET_USE_RUST
+		return nzbget_rs_ufs_script_ctrl_calc_signal_exit_code(WTERMSIG(status));
+#else
 		return 128 + WTERMSIG(status);
+#endif
 	}
 	return -1;
 #endif
@@ -890,12 +907,17 @@ void ScriptController::Terminate()
 	BOOL ok = !m_processId || TerminateProcess(m_processId, -1) || m_completed;
 #else
 	pid_t childPid = m_processId.load();
+#ifdef NZBGET_USE_RUST
+	pid_t killId = (pid_t)nzbget_rs_ufs_script_ctrl_select_kill_pid(
+		(int)childPid, childPid > 0 ? (int)getpgid(childPid) : 0);
+#else
 	pid_t killId = childPid;
 	if (childPid > 0 && getpgid(childPid) == childPid)
 	{
 		// if the child process has its own group (setsid() was successful), kill the whole group
 		killId = -childPid;
 	}
+#endif
 	bool ok = childPid <= 0 || kill(killId, SIGKILL) == 0 || m_completed;
 #endif
 

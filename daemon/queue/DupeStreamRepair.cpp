@@ -616,8 +616,17 @@ int64 DupeStreamRepair::RequiredCompareFloor(int64 decodedFileSize, const Stream
 
 bool DupeStreamRepair::BuildRepairJob(FileInfo* fileInfo, const char* diskBasename)
 {
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_dcf_stream_repair_should_skip_build_job(
+		(int)g_Options->GetDupeArticleFallback(),
+		(int)Options::dafStream,
+		g_Options->GetRawArticle() ? 1 : 0,
+		DupeArticleFallback::IsParFile(fileInfo) ? 1 : 0,
+		diskBasename) != 0)
+#else
 	if (g_Options->GetDupeArticleFallback() < Options::dafStream || g_Options->GetRawArticle() ||
 		DupeArticleFallback::IsParFile(fileInfo) || Util::EndsWith(diskBasename, ".par2", false))
+#endif
 	{
 		return false;
 	}
@@ -937,9 +946,17 @@ std::vector<FileInfo*> DupeStreamRepair::SelectDonorCandidates(const char* targe
 	std::vector<FileInfo*> candidates;
 	auto add = [&candidates, maxCandidates, claimed](FileInfo* donorFile)
 	{
+#ifdef NZBGET_USE_RUST
+		bool isClaimed = claimed && claimed->count(donorFile);
+		bool alreadyPresent = !isClaimed &&
+			std::find(candidates.begin(), candidates.end(), donorFile) != candidates.end();
+		if (nzbget_rs_dcf_stream_repair_can_add_candidate(
+			candidates.size(), maxCandidates, isClaimed ? 1 : 0, alreadyPresent ? 1 : 0) != 0)
+#else
 		if ((int)candidates.size() < maxCandidates &&
 			(!claimed || !claimed->count(donorFile)) &&
 			std::find(candidates.begin(), candidates.end(), donorFile) == candidates.end())
+#endif
 		{
 			candidates.push_back(donorFile);
 		}
@@ -1002,8 +1019,13 @@ std::vector<FileInfo*> DupeStreamRepair::SelectDonorCandidates(const char* targe
 	// 3. fully obfuscated reposts keep file count and sizes: pair the
 	// rank-th window member by donor filename order, but only when the
 	// window cardinality matches the target side's (the set signature)
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_dcf_stream_repair_is_positional_rank_applicable(
+		positionalRank, positionalWindow, window.size()) != 0)
+#else
 	if (positionalRank >= 0 && positionalWindow == (int)window.size() &&
 		positionalRank < (int)window.size())
+#endif
 	{
 		std::vector<FileInfo*> byName = window;
 		std::sort(byName.begin(), byName.end(),

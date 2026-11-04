@@ -81,6 +81,7 @@ pub mod rpcoptlogutil;
 pub mod utilfsscript;
 pub mod dlparstatedisk;
 pub mod coorddlwriterpool;
+pub mod dupecoordfallbackstream;
 
 pub mod deadpostings;
 pub mod dupewatch;

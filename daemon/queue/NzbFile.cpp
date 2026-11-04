@@ -540,7 +540,12 @@ void NzbFile::ProcessFiles()
 	m_metaName = FileSystem::SanitizePathSegment(m_metaName);
 	m_metaTitle = FileSystem::SanitizePathSegment(m_metaTitle);
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_dcf_nzbfile_should_fallback_meta_name_to_title(
+		m_metaName.empty() ? 1 : 0, m_metaTitle.empty() ? 1 : 0) != 0)
+#else
 	if (m_metaName.empty() && !m_metaTitle.empty())
+#endif
 	{
 		m_metaName = m_metaTitle;
 	}

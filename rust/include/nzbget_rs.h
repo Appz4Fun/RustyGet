@@ -3762,6 +3762,62 @@ int nzbget_rs_cwp_memory_monitor_clamp_interval(int interval);
 int nzbget_rs_cwp_server_pool_calc_missing_connections(
     int existing_connections, int max_connections);
 
+// DupeCoordinator, DupeArticleFallback, DupeStreamRepair, ParDamage & NzbFile Hot-Path C ABI (rust/src/dupecoordfallbackstream.rs)
+int nzbget_rs_dcf_dupecoord_is_downloaded_on_disk_candidate(
+    int is_self, int delete_status, int ds_none, int is_dupe_success,
+    int mark_status, int ks_bad, const char* item_dupe_key,
+    const char* nzb_dupe_key);
+int nzbget_rs_dcf_dupecoord_should_inherit_dupe_props(
+    const char* cand_name, const char* nzb_name, const char* cand_dupe_key,
+    int cand_dupe_score);
+int nzbget_rs_dcf_dupecoord_is_recent_history_score_duplicate(
+    int kind, int hk_nzb, int hk_url, int item_dupe_mode, int dm_force,
+    int same_name_or_key, int nzb_dupe_score, int item_dupe_score,
+    int is_dupe_success);
+int nzbget_rs_dcf_dupecoord_calc_post_delete_index(
+    int index, int old_size, int new_size);
+int nzbget_rs_dcf_dupecoord_should_stop_other_queued_dupe(
+    int is_self, int kind, int nk_nzb, int deleting, int delete_status,
+    int ds_none, int dupe_mode, int dm_force, const char* queued_dupe_key,
+    const char* nzb_dupe_key);
+int nzbget_rs_dcf_dupecoord_map_mark_to_dup_status(
+    int mark_status, int ks_good, int ks_success, int ds_good,
+    int ds_success, int ds_bad);
+int nzbget_rs_dcf_dupecoord_should_hide_history_dupe(
+    int kind, int hk_nzb, int hk_url, int dupe_mode, int dm_force,
+    int delete_status, int ds_dupe, int is_self, int same_name_or_key);
+int nzbget_rs_dcf_dupe_fallback_completed_file_is_par2(
+    int par_file, const char* filename);
+int nzbget_rs_dcf_dupe_fallback_should_abort_deferred_try(
+    int defer, int round, int has_download_queue, int source_donors_empty);
+int nzbget_rs_dcf_dupe_fallback_is_reactive_first_round(
+    int pinned_round, int dupe_proactive);
+int nzbget_rs_dcf_dupe_fallback_par2_sums_entry_matches(
+    uint64_t entry_length, int64_t file_size, int crcs_empty,
+    const char* entry_hash16k, const char* hash16k, const char* entry_name,
+    const char* filename);
+int nzbget_rs_dcf_dupe_fallback_own_article_matches(
+    int own_part_number, int part_number, const char* own_msg_id,
+    const char* msg_id);
+int nzbget_rs_dcf_dupe_fallback_is_bad_donor_in_cooldown(
+    int64_t cur_time, int64_t bad_time, int retry_sec);
+int nzbget_rs_dcf_dupe_fallback_select_named_content_match(
+    size_t exact_count, size_t folded_count);
+int nzbget_rs_dcf_stream_repair_should_skip_build_job(
+    int fallback_mode, int daf_stream, int raw_article, int is_par_file,
+    const char* disk_basename);
+int nzbget_rs_dcf_stream_repair_can_add_candidate(
+    size_t candidates_len, int max_candidates, int is_claimed,
+    int already_present);
+int nzbget_rs_dcf_stream_repair_is_positional_rank_applicable(
+    int positional_rank, int positional_window, size_t window_len);
+int64_t nzbget_rs_dcf_par_damage_estimate_unarrived_decoded_size(int64_t file_size);
+int nzbget_rs_dcf_par_damage_desc_matches_file_damage(
+    uint64_t block_size, uint64_t max_par2_block_size, const char* desc_name,
+    const char* damage_name, int64_t damage_size, uint64_t desc_length);
+int nzbget_rs_dcf_nzbfile_should_fallback_meta_name_to_title(
+    int meta_name_empty, int meta_title_empty);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

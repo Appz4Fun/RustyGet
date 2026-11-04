@@ -82,7 +82,11 @@ void ParDamage::FileCompleted(NzbInfo* nzbInfo, FileInfo* fileInfo, const std::s
 	else if (fileInfo->GetSuccessArticles() == 0)
 	{
 		// nothing arrived: the whole file (its length comes from par2 if named there)
+#ifdef NZBGET_USE_RUST
+		damage.holes = { { 0, nzbget_rs_dcf_par_damage_estimate_unarrived_decoded_size(fileInfo->GetSize()) } };
+#else
 		damage.holes = { { 0, fileInfo->GetSize() * 100 / 102 } };
+#endif
 	}
 	else
 	{
@@ -161,10 +165,17 @@ ParDamage::Verdict ParDamage::Judge(NzbInfo* nzbInfo)
 		for (const DupeArticleFallback::Par2Desc& desc : state.par2)
 		{
 			// a block size no real set uses (a damaged or crafted packet) isn't trusted
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_dcf_par_damage_desc_matches_file_damage(
+				desc.blockSize, (uint64)DupeArticleFallback::MaxPar2BlockSize,
+				desc.name.c_str(), damage.name.c_str(),
+				damage.size, desc.length) != 0)
+#else
 			if (desc.blockSize > 0 && desc.blockSize % 4 == 0 &&
 				desc.blockSize <= (uint64)DupeArticleFallback::MaxPar2BlockSize &&
 				(desc.name == damage.name ||
 				(damage.size > 0 && (int64)desc.length == damage.size)))
+#endif
 			{
 				match = &desc;
 				break;

@@ -24020,6 +24020,326 @@ pub extern "C" fn nzbget_rs_cwp_server_pool_calc_missing_connections(
     )
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dcf_dupecoord_is_downloaded_on_disk_candidate(
+    is_self: c_int,
+    delete_status: c_int,
+    ds_none: c_int,
+    is_dupe_success: c_int,
+    mark_status: c_int,
+    ks_bad: c_int,
+    item_dupe_key: *const c_char,
+    nzb_dupe_key: *const c_char,
+) -> c_int {
+    crate::dupecoordfallbackstream::dupecoord_is_downloaded_on_disk_candidate(
+        is_self,
+        delete_status,
+        ds_none,
+        is_dupe_success,
+        mark_status,
+        ks_bad,
+        crate::queuehotpath::cstr_to_bytes(item_dupe_key),
+        crate::queuehotpath::cstr_to_bytes(nzb_dupe_key),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dcf_dupecoord_should_inherit_dupe_props(
+    cand_name: *const c_char,
+    nzb_name: *const c_char,
+    cand_dupe_key: *const c_char,
+    cand_dupe_score: c_int,
+) -> c_int {
+    crate::dupecoordfallbackstream::dupecoord_should_inherit_dupe_props(
+        crate::queuehotpath::cstr_to_bytes(cand_name),
+        crate::queuehotpath::cstr_to_bytes(nzb_name),
+        crate::queuehotpath::cstr_to_bytes(cand_dupe_key),
+        cand_dupe_score,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dcf_dupecoord_is_recent_history_score_duplicate(
+    kind: c_int,
+    hk_nzb: c_int,
+    hk_url: c_int,
+    item_dupe_mode: c_int,
+    dm_force: c_int,
+    same_name_or_key: c_int,
+    nzb_dupe_score: c_int,
+    item_dupe_score: c_int,
+    is_dupe_success: c_int,
+) -> c_int {
+    crate::dupecoordfallbackstream::dupecoord_is_recent_history_score_duplicate(
+        kind,
+        hk_nzb,
+        hk_url,
+        item_dupe_mode,
+        dm_force,
+        same_name_or_key,
+        nzb_dupe_score,
+        item_dupe_score,
+        is_dupe_success,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dcf_dupecoord_calc_post_delete_index(
+    index: c_int,
+    old_size: c_int,
+    new_size: c_int,
+) -> c_int {
+    crate::dupecoordfallbackstream::dupecoord_calc_post_delete_index(index, old_size, new_size)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dcf_dupecoord_should_stop_other_queued_dupe(
+    is_self: c_int,
+    kind: c_int,
+    nk_nzb: c_int,
+    deleting: c_int,
+    delete_status: c_int,
+    ds_none: c_int,
+    dupe_mode: c_int,
+    dm_force: c_int,
+    queued_dupe_key: *const c_char,
+    nzb_dupe_key: *const c_char,
+) -> c_int {
+    crate::dupecoordfallbackstream::dupecoord_should_stop_other_queued_dupe(
+        is_self,
+        kind,
+        nk_nzb,
+        deleting,
+        delete_status,
+        ds_none,
+        dupe_mode,
+        dm_force,
+        crate::queuehotpath::cstr_to_bytes(queued_dupe_key),
+        crate::queuehotpath::cstr_to_bytes(nzb_dupe_key),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dcf_dupecoord_map_mark_to_dup_status(
+    mark_status: c_int,
+    ks_good: c_int,
+    ks_success: c_int,
+    ds_good: c_int,
+    ds_success: c_int,
+    ds_bad: c_int,
+) -> c_int {
+    crate::dupecoordfallbackstream::dupecoord_map_mark_to_dup_status(
+        mark_status,
+        ks_good,
+        ks_success,
+        ds_good,
+        ds_success,
+        ds_bad,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dcf_dupecoord_should_hide_history_dupe(
+    kind: c_int,
+    hk_nzb: c_int,
+    hk_url: c_int,
+    dupe_mode: c_int,
+    dm_force: c_int,
+    delete_status: c_int,
+    ds_dupe: c_int,
+    is_self: c_int,
+    same_name_or_key: c_int,
+) -> c_int {
+    crate::dupecoordfallbackstream::dupecoord_should_hide_history_dupe(
+        kind,
+        hk_nzb,
+        hk_url,
+        dupe_mode,
+        dm_force,
+        delete_status,
+        ds_dupe,
+        is_self,
+        same_name_or_key,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dcf_dupe_fallback_completed_file_is_par2(
+    par_file: c_int,
+    filename: *const c_char,
+) -> c_int {
+    crate::dupecoordfallbackstream::dupe_fallback_completed_file_is_par2(
+        par_file,
+        crate::queuehotpath::cstr_to_bytes(filename),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dcf_dupe_fallback_should_abort_deferred_try(
+    defer: c_int,
+    round: c_int,
+    has_download_queue: c_int,
+    source_donors_empty: c_int,
+) -> c_int {
+    crate::dupecoordfallbackstream::dupe_fallback_should_abort_deferred_try(
+        defer,
+        round,
+        has_download_queue,
+        source_donors_empty,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dcf_dupe_fallback_is_reactive_first_round(
+    pinned_round: c_int,
+    dupe_proactive: c_int,
+) -> c_int {
+    crate::dupecoordfallbackstream::dupe_fallback_is_reactive_first_round(
+        pinned_round,
+        dupe_proactive,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dcf_dupe_fallback_par2_sums_entry_matches(
+    entry_length: u64,
+    file_size: i64,
+    crcs_empty: c_int,
+    entry_hash16k: *const c_char,
+    hash16k: *const c_char,
+    entry_name: *const c_char,
+    filename: *const c_char,
+) -> c_int {
+    crate::dupecoordfallbackstream::dupe_fallback_par2_sums_entry_matches(
+        entry_length,
+        file_size,
+        crcs_empty,
+        crate::queuehotpath::cstr_to_bytes(entry_hash16k),
+        crate::queuehotpath::cstr_to_bytes(hash16k),
+        crate::queuehotpath::cstr_to_bytes(entry_name),
+        crate::queuehotpath::cstr_to_bytes(filename),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dcf_dupe_fallback_own_article_matches(
+    own_part_number: c_int,
+    part_number: c_int,
+    own_msg_id: *const c_char,
+    msg_id: *const c_char,
+) -> c_int {
+    crate::dupecoordfallbackstream::dupe_fallback_own_article_matches(
+        own_part_number,
+        part_number,
+        crate::queuehotpath::cstr_to_bytes(own_msg_id),
+        crate::queuehotpath::cstr_to_bytes(msg_id),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dcf_dupe_fallback_is_bad_donor_in_cooldown(
+    cur_time: i64,
+    bad_time: i64,
+    retry_sec: c_int,
+) -> c_int {
+    crate::dupecoordfallbackstream::dupe_fallback_is_bad_donor_in_cooldown(
+        cur_time, bad_time, retry_sec,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dcf_dupe_fallback_select_named_content_match(
+    exact_count: usize,
+    folded_count: usize,
+) -> c_int {
+    crate::dupecoordfallbackstream::dupe_fallback_select_named_content_match(
+        exact_count,
+        folded_count,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dcf_stream_repair_should_skip_build_job(
+    fallback_mode: c_int,
+    daf_stream: c_int,
+    raw_article: c_int,
+    is_par_file: c_int,
+    disk_basename: *const c_char,
+) -> c_int {
+    crate::dupecoordfallbackstream::stream_repair_should_skip_build_job(
+        fallback_mode,
+        daf_stream,
+        raw_article,
+        is_par_file,
+        crate::queuehotpath::cstr_to_bytes(disk_basename),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dcf_stream_repair_can_add_candidate(
+    candidates_len: usize,
+    max_candidates: c_int,
+    is_claimed: c_int,
+    already_present: c_int,
+) -> c_int {
+    crate::dupecoordfallbackstream::stream_repair_can_add_candidate(
+        candidates_len,
+        max_candidates,
+        is_claimed,
+        already_present,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dcf_stream_repair_is_positional_rank_applicable(
+    positional_rank: c_int,
+    positional_window: c_int,
+    window_len: usize,
+) -> c_int {
+    crate::dupecoordfallbackstream::stream_repair_is_positional_rank_applicable(
+        positional_rank,
+        positional_window,
+        window_len,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dcf_par_damage_estimate_unarrived_decoded_size(
+    file_size: i64,
+) -> i64 {
+    crate::dupecoordfallbackstream::par_damage_estimate_unarrived_decoded_size(file_size)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dcf_par_damage_desc_matches_file_damage(
+    block_size: u64,
+    max_par2_block_size: u64,
+    desc_name: *const c_char,
+    damage_name: *const c_char,
+    damage_size: i64,
+    desc_length: u64,
+) -> c_int {
+    crate::dupecoordfallbackstream::par_damage_desc_matches_file_damage(
+        block_size,
+        max_par2_block_size,
+        crate::queuehotpath::cstr_to_bytes(desc_name),
+        crate::queuehotpath::cstr_to_bytes(damage_name),
+        damage_size,
+        desc_length,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dcf_nzbfile_should_fallback_meta_name_to_title(
+    meta_name_empty: c_int,
+    meta_title_empty: c_int,
+) -> c_int {
+    crate::dupecoordfallbackstream::nzbfile_should_fallback_meta_name_to_title(
+        meta_name_empty,
+        meta_title_empty,
+    )
+}
+
 
 
 

@@ -73,7 +73,12 @@ bool DupeArticleFallback::HasPar2(NzbInfo* nzbInfo)
 	}
 	for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
 	{
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_dcf_dupe_fallback_completed_file_is_par2(
+			completedFile.GetParFile() ? 1 : 0, completedFile.GetFilename()) != 0)
+#else
 		if (completedFile.GetParFile() || Util::EndsWith(completedFile.GetFilename(), ".par2", false))
+#endif
 		{
 			return true;
 		}
@@ -127,7 +132,12 @@ bool DupeArticleFallback::ShouldDeferToPar(NzbInfo* nzbInfo)
 	}
 	for (CompletedFile& fileInfo : nzbInfo->GetCompletedFiles())
 	{
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_dcf_dupe_fallback_completed_file_is_par2(
+			fileInfo.GetParFile() ? 1 : 0, fileInfo.GetFilename()) != 0)
+#else
 		if (fileInfo.GetParFile() || Util::EndsWith(fileInfo.GetFilename(), ".par2", false))
+#endif
 		{
 			return true;
 		}
@@ -300,7 +310,13 @@ bool DupeArticleFallback::TryFallback(DownloadQueue* downloadQueue, FileInfo* fi
 	}
 
 	int round = articleInfo->GetDupeFallbackRound();
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_dcf_dupe_fallback_should_abort_deferred_try(
+		defer ? 1 : 0, round, downloadQueue ? 1 : 0,
+		articleInfo->GetDupeSourceDonors()->empty() ? 1 : 0) != 0)
+#else
 	if (defer && (round == 0 ? !downloadQueue : articleInfo->GetDupeSourceDonors()->empty()))
+#endif
 	{
 		return false;
 	}
@@ -360,7 +376,12 @@ bool DupeArticleFallback::TryFallback(DownloadQueue* downloadQueue, FileInfo* fi
 			}
 			return false;
 		}
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_dcf_dupe_fallback_is_reactive_first_round(
+			pinnedRound, articleInfo->GetDupeProactive() ? 1 : 0) != 0)
+#else
 		if (pinnedRound == 0 && !articleInfo->GetDupeProactive())
+#endif
 		{
 			// no duplicate carries this article's file at all (an article asked of a
 			// duplicate first, after the cutover, hasn't failed: counted, every fresh
@@ -382,7 +403,12 @@ bool DupeArticleFallback::TryFallback(DownloadQueue* downloadQueue, FileInfo* fi
 	// success when it is only an attempt - the recovery is counted on success.
 	// A duplicate asked first after the cutover isn't an attempt on a missing article:
 	// counted, it read as "recovered 11 of 2853 missing" for a file missing ~20
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_dcf_dupe_fallback_is_reactive_first_round(
+		pinnedRound, articleInfo->GetDupeProactive() ? 1 : 0) != 0)
+#else
 	if (pinnedRound == 0 && !articleInfo->GetDupeProactive())
+#endif
 	{
 		fileInfo->SetDupeAttemptedArticles(fileInfo->GetDupeAttemptedArticles() + 1);
 		nzbInfo->SetDupeAttemptedArticles(nzbInfo->GetDupeAttemptedArticles() + 1);
@@ -658,9 +684,16 @@ std::vector<ArticleInfo*> DupeArticleFallback::BorrowedPar2Mismatches(FileInfo* 
 	const Par2FileSums* sums = nullptr;
 	for (auto& entry : files)
 	{
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_dcf_dupe_fallback_par2_sums_entry_matches(
+			entry.second.length, fileSize, entry.second.crcs.empty() ? 1 : 0,
+			entry.second.hash16k.c_str(), hash16k.c_str(),
+			entry.second.name.c_str(), filename) != 0)
+#else
 		if ((int64)entry.second.length == fileSize && !entry.second.crcs.empty() &&
 			(!strcasecmp(entry.second.hash16k.c_str(), hash16k.c_str()) ||
 			 !strcmp(entry.second.name.c_str(), filename)))
+#endif
 		{
 			sums = &entry.second;
 			break;
@@ -975,8 +1008,14 @@ CString DupeArticleFallback::NzbFilenameOf(FileInfo* fileInfo)
 			const char* messageId = !Util::EmptyStr(article->GetDupeOriginalMessageId()) ?
 				article->GetDupeOriginalMessageId() : article->GetMessageId();
 			ArticleInfo* ownArticle = (*ownArticles)[i].get();
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_dcf_dupe_fallback_own_article_matches(
+				ownArticle->GetPartNumber(), article->GetPartNumber(),
+				ownArticle->GetMessageId(), messageId) != 0)
+#else
 			if (ownArticle->GetPartNumber() == article->GetPartNumber() &&
 				!Util::EmptyStr(messageId) && !strcmp(ownArticle->GetMessageId(), messageId))
+#endif
 			{
 				return CString(ownFile->GetFilename());
 			}
@@ -1231,7 +1270,12 @@ NzbInfo* DupeArticleFallback::GetParsedDonor(NzbInfo* donorNzbInfo)
 	// a duplicate whose nzb-file couldn't be read is asked again after a while: the
 	// failure may have been passing (review item 9)
 	auto bad = m_badDonors.find(donorId);
+#ifdef NZBGET_USE_RUST
+	if (bad != m_badDonors.end() && nzbget_rs_dcf_dupe_fallback_is_bad_donor_in_cooldown(
+		(int64)Util::CurrentTime(), (int64)bad->second, BadDonorRetrySec) != 0)
+#else
 	if (bad != m_badDonors.end() && Util::CurrentTime() - bad->second < BadDonorRetrySec)
+#endif
 	{
 		return nullptr;
 	}
@@ -1316,7 +1360,13 @@ FileInfo* DupeArticleFallback::MatchDonorFile(FileInfo* targetFile, NzbInfo* don
 				folded.push_back(donorFile);
 			}
 		}
+#ifdef NZBGET_USE_RUST
+		int matchKind = nzbget_rs_dcf_dupe_fallback_select_named_content_match(
+			exact.size(), folded.size());
+		FileInfo* named = matchKind == 1 ? exact[0] : matchKind == 2 ? folded[0] : nullptr;
+#else
 		FileInfo* named = exact.size() == 1 ? exact[0] : exact.empty() && folded.size() == 1 ? folded[0] : nullptr;
+#endif
 		if (named || twinOnly)
 		{
 			return named && StructureMatches(targetFile, named) ? named : nullptr;

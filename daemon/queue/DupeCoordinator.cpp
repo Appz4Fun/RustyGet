@@ -99,9 +99,22 @@ NzbInfo* DupeCoordinator::DownloadedOnDisk(DownloadQueue* downloadQueue, NzbInfo
 		}
 		NzbInfo* item = historyInfo->GetNzbInfo();
 		// a success the user deleted (or marked bad) from disk no longer counts
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_dcf_dupecoord_is_downloaded_on_disk_candidate(
+				item == nzbInfo ? 1 : 0,
+				(int)item->GetDeleteStatus(),
+				(int)NzbInfo::dsNone,
+				item->IsDupeSuccess() ? 1 : 0,
+				(int)item->GetMarkStatus(),
+				(int)NzbInfo::ksBad,
+				item->GetDupeKey(),
+				nzbInfo->GetDupeKey()) != 0 &&
+			FilesOnDisk(item))
+#else
 		if (item != nzbInfo && item->GetDeleteStatus() == NzbInfo::dsNone && item->IsDupeSuccess() &&
 			item->GetMarkStatus() != NzbInfo::ksBad &&
 			!strcasecmp(item->GetDupeKey(), nzbInfo->GetDupeKey()) && FilesOnDisk(item))
+#endif
 		{
 			return item;
 		}
@@ -181,8 +194,14 @@ void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 	{
 		for (NzbInfo* queuedNzbInfo : downloadQueue->GetQueue())
 		{
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_dcf_dupecoord_should_inherit_dupe_props(
+				queuedNzbInfo->GetName(), nzbInfo->GetName(),
+				queuedNzbInfo->GetDupeKey(), queuedNzbInfo->GetDupeScore()) != 0)
+#else
 			if (!strcmp(queuedNzbInfo->GetName(), nzbInfo->GetName()) &&
 				(!Util::EmptyStr(queuedNzbInfo->GetDupeKey()) || queuedNzbInfo->GetDupeScore() != 0))
+#endif
 			{
 				nzbInfo->SetDupeKey(queuedNzbInfo->GetDupeKey());
 				nzbInfo->SetDupeScore(queuedNzbInfo->GetDupeScore());
@@ -196,9 +215,16 @@ void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 	{
 		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
 		{
+#ifdef NZBGET_USE_RUST
+			if (historyInfo->GetKind() == HistoryInfo::hkNzb &&
+				nzbget_rs_dcf_dupecoord_should_inherit_dupe_props(
+					historyInfo->GetNzbInfo()->GetName(), nzbInfo->GetName(),
+					historyInfo->GetNzbInfo()->GetDupeKey(), historyInfo->GetNzbInfo()->GetDupeScore()) != 0)
+#else
 			if (historyInfo->GetKind() == HistoryInfo::hkNzb &&
 				!strcmp(historyInfo->GetNzbInfo()->GetName(), nzbInfo->GetName()) &&
 				(!Util::EmptyStr(historyInfo->GetNzbInfo()->GetDupeKey()) || historyInfo->GetNzbInfo()->GetDupeScore() != 0))
+#endif
 			{
 				nzbInfo->SetDupeKey(historyInfo->GetNzbInfo()->GetDupeKey());
 				nzbInfo->SetDupeScore(historyInfo->GetNzbInfo()->GetDupeScore());
@@ -206,9 +232,16 @@ void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 					 nzbInfo->GetDupeKey(), nzbInfo->GetDupeScore(), nzbInfo->GetName());
 				break;
 			}
+#ifdef NZBGET_USE_RUST
+			if (historyInfo->GetKind() == HistoryInfo::hkDup &&
+				nzbget_rs_dcf_dupecoord_should_inherit_dupe_props(
+					historyInfo->GetDupInfo()->GetName(), nzbInfo->GetName(),
+					historyInfo->GetDupInfo()->GetDupeKey(), historyInfo->GetDupInfo()->GetDupeScore()) != 0)
+#else
 			if (historyInfo->GetKind() == HistoryInfo::hkDup &&
 				!strcmp(historyInfo->GetDupInfo()->GetName(), nzbInfo->GetName()) &&
 				(!Util::EmptyStr(historyInfo->GetDupInfo()->GetDupeKey()) || historyInfo->GetDupInfo()->GetDupeScore() != 0))
+#endif
 			{
 				nzbInfo->SetDupeKey(historyInfo->GetDupInfo()->GetDupeKey());
 				nzbInfo->SetDupeScore(historyInfo->GetDupInfo()->GetDupeScore());
@@ -423,6 +456,21 @@ void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 		// nzb-files having success-duplicates in recent history (with different content) are added to history for backup
 		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
 		{
+#ifdef NZBGET_USE_RUST
+			bool isNzbOrUrl = historyInfo->GetKind() == HistoryInfo::hkNzb ||
+				historyInfo->GetKind() == HistoryInfo::hkUrl;
+			NzbInfo* hItem = isNzbOrUrl ? historyInfo->GetNzbInfo() : nullptr;
+			if (hItem && nzbget_rs_dcf_dupecoord_is_recent_history_score_duplicate(
+				(int)historyInfo->GetKind(),
+				(int)HistoryInfo::hkNzb,
+				(int)HistoryInfo::hkUrl,
+				(int)hItem->GetDupeMode(),
+				(int)dmForce,
+				SameNameOrKey(hItem->GetName(), hItem->GetDupeKey(), nzbInfo->GetName(), nzbInfo->GetDupeKey()) ? 1 : 0,
+				nzbInfo->GetDupeScore(),
+				hItem->GetDupeScore(),
+				hItem->IsDupeSuccess() ? 1 : 0) != 0)
+#else
 			if ((historyInfo->GetKind() == HistoryInfo::hkNzb ||
 				 historyInfo->GetKind() == HistoryInfo::hkUrl) &&
 				historyInfo->GetNzbInfo()->GetDupeMode() != dmForce &&
@@ -430,6 +478,7 @@ void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 					nzbInfo->GetName(), nzbInfo->GetDupeKey()) &&
 				nzbInfo->GetDupeScore() <= historyInfo->GetNzbInfo()->GetDupeScore() &&
 				historyInfo->GetNzbInfo()->IsDupeSuccess())
+#endif
 			{
 				// Flag saying QueueCoordinator to skip nzb-file
 				nzbInfo->SetDeleteStatus(NzbInfo::dsDupe);
@@ -552,7 +601,11 @@ void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 					downloadQueue->EditEntry(queuedNzbInfo->GetId(),
 						DownloadQueue::eaGroupDelete, nullptr);
 					int newSize = downloadQueue->GetQueue()->size();
+#ifdef NZBGET_USE_RUST
+					index = nzbget_rs_dcf_dupecoord_calc_post_delete_index(index, oldSize, newSize);
+#else
 					index += oldSize == newSize ? 1 : 0;
+#endif
 					it = downloadQueue->GetQueue()->begin() + index;
 					index--;
 				}
@@ -588,9 +641,23 @@ void DupeCoordinator::NzbCompleted(DownloadQueue* downloadQueue, NzbInfo* nzbInf
 		std::vector<std::pair<int, bool>> others;	// id, in post-processing
 		for (NzbInfo* queued : downloadQueue->GetQueue())
 		{
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_dcf_dupecoord_should_stop_other_queued_dupe(
+				queued == nzbInfo ? 1 : 0,
+				(int)queued->GetKind(),
+				(int)NzbInfo::nkNzb,
+				queued->GetDeleting() ? 1 : 0,
+				(int)queued->GetDeleteStatus(),
+				(int)NzbInfo::dsNone,
+				(int)queued->GetDupeMode(),
+				(int)dmForce,
+				queued->GetDupeKey(),
+				nzbInfo->GetDupeKey()) != 0)
+#else
 			if (queued != nzbInfo && queued->GetKind() == NzbInfo::nkNzb && !queued->GetDeleting() &&
 				queued->GetDeleteStatus() == NzbInfo::dsNone && queued->GetDupeMode() != dmForce &&
 				!strcasecmp(queued->GetDupeKey(), nzbInfo->GetDupeKey()))
+#endif
 			{
 				queued->PrintMessage(Message::mkInfo, "Stopping %s: %s is downloaded and on disk",
 					queued->GetName(), nzbInfo->GetName());
@@ -909,10 +976,21 @@ void DupeCoordinator::HistoryMark(DownloadQueue* downloadQueue, HistoryInfo* his
 	}
 	else if (historyInfo->GetKind() == HistoryInfo::hkDup)
 	{
+#ifdef NZBGET_USE_RUST
+		historyInfo->GetDupInfo()->SetStatus(
+			(DupInfo::EStatus)nzbget_rs_dcf_dupecoord_map_mark_to_dup_status(
+				(int)markStatus,
+				(int)NzbInfo::ksGood,
+				(int)NzbInfo::ksSuccess,
+				(int)DupInfo::dsGood,
+				(int)DupInfo::dsSuccess,
+				(int)DupInfo::dsBad));
+#else
 		historyInfo->GetDupInfo()->SetStatus(
 			markStatus == NzbInfo::ksGood ? DupInfo::dsGood :
 			markStatus == NzbInfo::ksSuccess ? DupInfo::dsSuccess :
 			DupInfo::dsBad);
+#endif
 	}
 	else
 	{
@@ -962,12 +1040,27 @@ void DupeCoordinator::HistoryCleanup(DownloadQueue* downloadQueue, HistoryInfo* 
 	{
 		HistoryInfo* historyInfo = (*it).get();
 
+#ifdef NZBGET_USE_RUST
+		bool isNzbOrUrl = historyInfo->GetKind() == HistoryInfo::hkNzb ||
+			historyInfo->GetKind() == HistoryInfo::hkUrl;
+		if (isNzbOrUrl && nzbget_rs_dcf_dupecoord_should_hide_history_dupe(
+			(int)historyInfo->GetKind(),
+			(int)HistoryInfo::hkNzb,
+			(int)HistoryInfo::hkUrl,
+			(int)historyInfo->GetNzbInfo()->GetDupeMode(),
+			(int)dmForce,
+			(int)historyInfo->GetNzbInfo()->GetDeleteStatus(),
+			(int)NzbInfo::dsDupe,
+			historyInfo == markHistoryInfo ? 1 : 0,
+			SameNameOrKey(historyInfo->GetNzbInfo()->GetName(), historyInfo->GetNzbInfo()->GetDupeKey(), nzbName, dupeKey) ? 1 : 0) != 0)
+#else
 		if ((historyInfo->GetKind() == HistoryInfo::hkNzb ||
 			 historyInfo->GetKind() == HistoryInfo::hkUrl) &&
 			historyInfo->GetNzbInfo()->GetDupeMode() != dmForce &&
 			historyInfo->GetNzbInfo()->GetDeleteStatus() == NzbInfo::dsDupe &&
 			historyInfo != markHistoryInfo &&
 			SameNameOrKey(historyInfo->GetNzbInfo()->GetName(), historyInfo->GetNzbInfo()->GetDupeKey(), nzbName, dupeKey))
+#endif
 		{
 			g_HistoryCoordinator->HistoryHide(downloadQueue, historyInfo, index);
 			index++;

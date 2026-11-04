@@ -88,6 +88,7 @@ pub mod rpcoptclient;
 pub mod streamarticleparrepair;
 pub mod dupedlstateconn;
 pub mod queuecoordfallbackhist;
+pub mod postunpackrenamehist;
 
 pub mod deadpostings;
 pub mod dupewatch;

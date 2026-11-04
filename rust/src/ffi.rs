@@ -26139,6 +26139,300 @@ pub extern "C" fn nzbget_rs_qcf_dupe_fallback_resolve_structural_or_filename_mat
     )
 }
 
+// ============================================================================
+// Batch 40: postunpackrenamehist (`pur_*`)
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pur_prepost_is_nzb_or_url_found_action(
+    action: c_int,
+    ea_nzb_found: c_int,
+    ea_url_found: c_int,
+) -> c_int {
+    i32::from(
+        crate::postunpackrenamehist::pur_prepost_is_nzb_or_url_found_action(
+            action,
+            ea_nzb_found,
+            ea_url_found,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pur_prepost_is_nzb_or_url_added_action(
+    action: c_int,
+    ea_nzb_added: c_int,
+    ea_url_added: c_int,
+) -> c_int {
+    i32::from(
+        crate::postunpackrenamehist::pur_prepost_is_nzb_or_url_added_action(
+            action,
+            ea_nzb_added,
+            ea_url_added,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pur_prepost_is_file_completed_or_deleted_action(
+    action: c_int,
+    ea_file_completed: c_int,
+    ea_file_deleted: c_int,
+) -> c_int {
+    i32::from(
+        crate::postunpackrenamehist::pur_prepost_is_file_completed_or_deleted_action(
+            action,
+            ea_file_completed,
+            ea_file_deleted,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pur_prepost_should_run_dupe_found(
+    dupe_check: c_int,
+    dupe_mode: c_int,
+    dm_force: c_int,
+) -> c_int {
+    i32::from(
+        crate::postunpackrenamehist::pur_prepost_should_run_dupe_found(
+            dupe_check != 0,
+            dupe_mode,
+            dm_force,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pur_prepost_can_start_queued_post_job(
+    stage: c_int,
+    pt_queued: c_int,
+    pause_post_process: c_int,
+    force_priority: c_int,
+) -> c_int {
+    i32::from(
+        crate::postunpackrenamehist::pur_prepost_can_start_queued_post_job(
+            stage,
+            pt_queued,
+            pause_post_process != 0,
+            force_priority != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pur_prepost_should_request_par_for_skipped_stream_repair(
+    stream_repair: c_int,
+    par_status: c_int,
+    ps_skipped: c_int,
+) -> c_int {
+    i32::from(
+        crate::postunpackrenamehist::pur_prepost_should_request_par_for_skipped_stream_repair(
+            stream_repair != 0,
+            par_status,
+            ps_skipped,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pur_prepost_is_par_none_and_not_deleted(
+    par_status: c_int,
+    ps_none: c_int,
+    delete_status: c_int,
+    ds_none: c_int,
+) -> c_int {
+    i32::from(
+        crate::postunpackrenamehist::pur_prepost_is_par_none_and_not_deleted(
+            par_status,
+            ps_none,
+            delete_status,
+            ds_none,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pur_prepost_eval_temp_pause_download_transition(
+    need_pause: c_int,
+    temp_pause_download: c_int,
+) -> c_int {
+    crate::postunpackrenamehist::pur_prepost_eval_temp_pause_download_transition(
+        need_pause != 0,
+        temp_pause_download != 0,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pur_prepost_should_start_direct_unpack_job(
+    want_unpack: c_int,
+    failed_articles: c_int,
+) -> c_int {
+    i32::from(
+        crate::postunpackrenamehist::pur_prepost_should_start_direct_unpack_job(
+            want_unpack != 0,
+            failed_articles,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pur_history_coord_should_skip_recheck_for_dupe_backup(
+    dupe_check: c_int,
+    dupe_mode: c_int,
+    dm_score: c_int,
+) -> c_int {
+    i32::from(
+        crate::postunpackrenamehist::pur_history_coord_should_skip_recheck_for_dupe_backup(
+            dupe_check != 0,
+            dupe_mode,
+            dm_score,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pur_history_coord_should_keep_recorded_filename(
+    temporary_name: c_int,
+    file_filename_empty: c_int,
+) -> c_int {
+    i32::from(
+        crate::postunpackrenamehist::pur_history_coord_should_keep_recorded_filename(
+            temporary_name != 0,
+            file_filename_empty != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pur_history_coord_should_delete_empty_or_zero_success_output(
+    success_articles: c_int,
+    file_size: i64,
+) -> c_int {
+    i32::from(
+        crate::postunpackrenamehist::pur_history_coord_should_delete_empty_or_zero_success_output(
+            success_articles,
+            file_size,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pur_history_coord_should_pause_health_on_remaining_retry(
+    reset_failed: c_int,
+    reprocess: c_int,
+) -> c_int {
+    i32::from(
+        crate::postunpackrenamehist::pur_history_coord_should_pause_health_on_remaining_retry(
+            reset_failed != 0,
+            reprocess != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pur_history_coord_is_nzb_or_url_kind(
+    kind: c_int,
+    hk_nzb: c_int,
+    hk_url: c_int,
+) -> c_int {
+    i32::from(
+        crate::postunpackrenamehist::pur_history_coord_is_nzb_or_url_kind(
+            kind,
+            hk_nzb,
+            hk_url,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pur_history_coord_should_notify_dupe_search_name_changed(
+    kind: c_int,
+    hk_nzb: c_int,
+    has_dupe_search: c_int,
+    name_changed: c_int,
+) -> c_int {
+    i32::from(
+        crate::postunpackrenamehist::pur_history_coord_should_notify_dupe_search_name_changed(
+            kind,
+            hk_nzb,
+            has_dupe_search != 0,
+            name_changed != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pur_history_coord_is_valid_dupe_backup_delete_status(
+    delete_status: c_int,
+    ds_dupe: c_int,
+    ds_manual: c_int,
+) -> c_int {
+    i32::from(
+        crate::postunpackrenamehist::pur_history_coord_is_valid_dupe_backup_delete_status(
+            delete_status,
+            ds_dupe,
+            ds_manual,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pur_unpack_ctrl_should_execute_initial_unpack(
+    unpack_tried: c_int,
+    par_repaired: c_int,
+) -> c_int {
+    i32::from(
+        crate::postunpackrenamehist::pur_unpack_ctrl_should_execute_initial_unpack(
+            unpack_tried != 0,
+            par_repaired != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pur_unpack_ctrl_should_add_extract_cmd_flag(
+    has_x: c_int,
+    has_e: c_int,
+) -> c_int {
+    i32::from(
+        crate::postunpackrenamehist::pur_unpack_ctrl_should_add_extract_cmd_flag(
+            has_x != 0,
+            has_e != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pur_unpack_ctrl_should_add_default_overwrite_flag(
+    has_o_plus: c_int,
+    has_o_minus: c_int,
+    has_or: c_int,
+) -> c_int {
+    i32::from(
+        crate::postunpackrenamehist::pur_unpack_ctrl_should_add_default_overwrite_flag(
+            has_o_plus != 0,
+            has_o_minus != 0,
+            has_or != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pur_direct_unpack_should_log_unrar_exit_error(
+    unpack_ok: c_int,
+    exit_code: c_int,
+    interrupted: c_int,
+) -> c_int {
+    i32::from(
+        crate::postunpackrenamehist::pur_direct_unpack_should_log_unrar_exit_error(
+            unpack_ok != 0,
+            exit_code,
+            interrupted != 0,
+        ),
+    )
+}
+
 
 
 

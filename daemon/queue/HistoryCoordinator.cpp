@@ -332,8 +332,16 @@ void HistoryCoordinator::RecheckFailedArticles(DownloadQueue* downloadQueue, Nzb
 		}
 	}
 	// a duplicate waits in history: nzbget fetches it in its place (B39)
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_pur_history_coord_should_skip_recheck_for_dupe_backup(
+		g_Options->GetDupeCheck() ? 1 : 0,
+		(int)nzbInfo->GetDupeMode(),
+		(int)dmScore) != 0 &&
+		g_DupeCoordinator->FindDupeBackup(downloadQueue, nzbInfo, nzbInfo->GetName(), nzbInfo->GetDupeKey()))
+#else
 	if (g_Options->GetDupeCheck() && nzbInfo->GetDupeMode() == dmScore &&
 		g_DupeCoordinator->FindDupeBackup(downloadQueue, nzbInfo, nzbInfo->GetName(), nzbInfo->GetDupeKey()))
+#endif
 	{
 		return;
 	}
@@ -1013,11 +1021,14 @@ void HistoryCoordinator::HistoryRetry(DownloadQueue* downloadQueue, HistoryList:
 #ifdef NZBGET_USE_RUST
 				bool temporaryName = nzbget_rs_pup_history_coord_is_temporary_output_name(
 					recordedName.c_str()) != 0;
+				if (nzbget_rs_pur_history_coord_should_keep_recorded_filename(
+					temporaryName ? 1 : 0,
+					Util::EmptyStr(fileInfo->GetFilename()) ? 1 : 0) != 0)
 #else
 				bool temporaryName = recordedName.size() > 8 &&
 					recordedName.compare(recordedName.size() - 8, 8, ".out.tmp") == 0;
-#endif
 				if (!temporaryName || Util::EmptyStr(fileInfo->GetFilename()))
+#endif
 				{
 					fileInfo->SetFilename(recordedName.c_str());
 				}
@@ -1025,7 +1036,13 @@ void HistoryCoordinator::HistoryRetry(DownloadQueue* downloadQueue, HistoryList:
 
 				BString<1024> outputFilename("%s%c%s", nzbInfo->GetDestDir(), PATH_SEPARATOR, recordedName.c_str());
 
+#ifdef NZBGET_USE_RUST
+				int64 outFileSize = fileInfo->GetSuccessArticles() == 0 ? 0 : FileSystem::FileSize(outputFilename);
+				if (nzbget_rs_pur_history_coord_should_delete_empty_or_zero_success_output(
+					fileInfo->GetSuccessArticles(), outFileSize) != 0)
+#else
 				if (fileInfo->GetSuccessArticles() == 0 || FileSystem::FileSize(outputFilename) == 0)
+#endif
 				{
 					FileSystem::DeleteFile(outputFilename);
 				}
@@ -1106,7 +1123,13 @@ void HistoryCoordinator::HistoryRetry(DownloadQueue* downloadQueue, HistoryList:
 		[&requeued](const StreamRepairJob& job) { return requeued.count(job.GetFileId()) > 0; }), jobs->end());
 
 	nzbInfo->UpdateCurrentStats();
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_pur_history_coord_should_pause_health_on_remaining_retry(
+		resetFailed ? 1 : 0,
+		reprocess ? 1 : 0) != 0)
+#else
 	if (!resetFailed && !reprocess)
+#endif
 	{
 		// The user explicitly requested the remaining files; do not park the
 		// download again because of the health failure being overridden.
@@ -1284,7 +1307,14 @@ bool HistoryCoordinator::HistorySetParameter(HistoryInfo* historyInfo, const cha
 {
 	debug("Setting post-process-parameter '%s' for '%s'", text, historyInfo->GetName());
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_pur_history_coord_is_nzb_or_url_kind(
+		(int)historyInfo->GetKind(),
+		(int)HistoryInfo::hkNzb,
+		(int)HistoryInfo::hkUrl) == 0)
+#else
 	if (!(historyInfo->GetKind() == HistoryInfo::hkNzb || historyInfo->GetKind() == HistoryInfo::hkUrl))
+#endif
 	{
 		error("Could not set post-process-parameter for %s: history item has wrong type", historyInfo->GetName());
 		return false;
@@ -1310,7 +1340,14 @@ bool HistoryCoordinator::HistorySetCategory(HistoryInfo* historyInfo, const char
 {
 	debug("Setting category '%s' for '%s'", text, historyInfo->GetName());
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_pur_history_coord_is_nzb_or_url_kind(
+		(int)historyInfo->GetKind(),
+		(int)HistoryInfo::hkNzb,
+		(int)HistoryInfo::hkUrl) == 0)
+#else
 	if (!(historyInfo->GetKind() == HistoryInfo::hkNzb || historyInfo->GetKind() == HistoryInfo::hkUrl))
+#endif
 	{
 		error("Could not set category for %s: history item has wrong type", historyInfo->GetName());
 		return false;
@@ -1331,12 +1368,27 @@ bool HistoryCoordinator::HistorySetName(HistoryInfo* historyInfo, const char* te
 		return false;
 	}
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_pur_history_coord_is_nzb_or_url_kind(
+		(int)historyInfo->GetKind(),
+		(int)HistoryInfo::hkNzb,
+		(int)HistoryInfo::hkUrl) != 0)
+#else
 	if (historyInfo->GetKind() == HistoryInfo::hkNzb || historyInfo->GetKind() == HistoryInfo::hkUrl)
+#endif
 	{
 		std::string previous = historyInfo->GetNzbInfo()->GetName();
 		historyInfo->GetNzbInfo()->SetName(text);
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_pur_history_coord_should_notify_dupe_search_name_changed(
+			(int)historyInfo->GetKind(),
+			(int)HistoryInfo::hkNzb,
+			g_DupeSearch != nullptr ? 1 : 0,
+			previous != historyInfo->GetNzbInfo()->GetName() ? 1 : 0) != 0)
+#else
         if (historyInfo->GetKind()==HistoryInfo::hkNzb && g_DupeSearch &&
             previous != historyInfo->GetNzbInfo()->GetName())
+#endif
             g_DupeSearch->NotifyNameChanged(historyInfo->GetNzbInfo()->GetId());
 	}
 	else if (historyInfo->GetKind() == HistoryInfo::hkDup)
@@ -1383,7 +1435,14 @@ void HistoryCoordinator::HistorySetDupeParam(HistoryInfo* historyInfo, DownloadQ
 #endif
 	}
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_pur_history_coord_is_nzb_or_url_kind(
+		(int)historyInfo->GetKind(),
+		(int)HistoryInfo::hkNzb,
+		(int)HistoryInfo::hkUrl) != 0)
+#else
 	if (historyInfo->GetKind() == HistoryInfo::hkNzb || historyInfo->GetKind() == HistoryInfo::hkUrl)
+#endif
 	{
 		switch (action)
 		{
@@ -1406,8 +1465,15 @@ void HistoryCoordinator::HistorySetDupeParam(HistoryInfo* historyInfo, DownloadQ
 					error("Could not set duplicate parameter for %s: history item has wrong type", historyInfo->GetName());
 					return;
 				}
+#ifdef NZBGET_USE_RUST
+				else if (nzbget_rs_pur_history_coord_is_valid_dupe_backup_delete_status(
+					(int)historyInfo->GetNzbInfo()->GetDeleteStatus(),
+					(int)NzbInfo::dsDupe,
+					(int)NzbInfo::dsManual) == 0)
+#else
 				else if (historyInfo->GetNzbInfo()->GetDeleteStatus() != NzbInfo::dsDupe &&
 					historyInfo->GetNzbInfo()->GetDeleteStatus() != NzbInfo::dsManual)
+#endif
 				{
 					error("Could not set duplicate parameter for %s: history item has wrong delete status", historyInfo->GetName());
 					return;

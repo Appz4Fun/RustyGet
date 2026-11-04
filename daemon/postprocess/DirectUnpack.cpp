@@ -225,7 +225,13 @@ void DirectUnpack::ExecuteUnrar(const char* archiveName)
 		return;
 	}
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_pur_unpack_ctrl_should_add_extract_cmd_flag(
+		params.Exists("x") ? 1 : 0,
+		params.Exists("e") ? 1 : 0) != 0)
+#else
 	if (!params.Exists("x") && !params.Exists("e"))
+#endif
 	{
 		params.emplace_back("x");
 	}
@@ -241,7 +247,14 @@ void DirectUnpack::ExecuteUnrar(const char* archiveName)
 		params.emplace_back("-p-");
 	}
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_pur_unpack_ctrl_should_add_default_overwrite_flag(
+		params.Exists("-o+") ? 1 : 0,
+		params.Exists("-o-") ? 1 : 0,
+		params.Exists("-or") ? 1 : 0) != 0)
+#else
 	if (!params.Exists("-o+") && !params.Exists("-o-") && !params.Exists("-or"))
+#endif
 	{
 		params.emplace_back("-o+");
 	}
@@ -279,12 +292,16 @@ void DirectUnpack::ExecuteUnrar(const char* archiveName)
 		m_cancelled ? 1 : 0, IsStopped() ? 1 : 0, &unpackOkInt, &interruptedInt);
 	m_unpackOk = unpackOkInt != 0;
 	bool interrupted = interruptedInt != 0;
+	if (nzbget_rs_pur_direct_unpack_should_log_unrar_exit_error(
+		m_unpackOk ? 1 : 0,
+		exitCode,
+		interrupted ? 1 : 0) != 0)
 #else
 	m_unpackOk = exitCode == 0 && m_allOkMessageReceived && !GetTerminated() && !m_cancelled;
 
 	bool interrupted = !m_cancelled && (IsStopped() || GetTerminated());
-#endif
 	if (!m_unpackOk && exitCode > 0 && !interrupted)
+#endif
 	{
 		PrintMessage(Message::mkError, "Unrar error code: %i", exitCode);
 	}

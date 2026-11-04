@@ -319,7 +319,13 @@ void UnpackController::Run()
 
 void UnpackController::UnpackArchives(EUnpacker unpacker, bool multiVolumes)
 {
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_pur_unpack_ctrl_should_execute_initial_unpack(
+		m_postInfo->GetUnpackTried() ? 1 : 0,
+		m_postInfo->GetParRepaired() ? 1 : 0) != 0)
+#else
 	if (!m_postInfo->GetUnpackTried() || m_postInfo->GetParRepaired())
+#endif
 	{
 		ExecuteUnpack(unpacker, m_password, multiVolumes);
 #ifdef NZBGET_USE_RUST
@@ -433,7 +439,13 @@ void UnpackController::ExecuteUnrar(const char* password)
 		return;
 	}
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_pur_unpack_ctrl_should_add_extract_cmd_flag(
+		params.Exists("x") ? 1 : 0,
+		params.Exists("e") ? 1 : 0) != 0)
+#else
 	if (!params.Exists("x") && !params.Exists("e"))
+#endif
 	{
 		params.emplace_back("x");
 	}
@@ -449,7 +461,14 @@ void UnpackController::ExecuteUnrar(const char* password)
 		params.emplace_back("-p-");
 	}
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_pur_unpack_ctrl_should_add_default_overwrite_flag(
+		params.Exists("-o+") ? 1 : 0,
+		params.Exists("-o-") ? 1 : 0,
+		params.Exists("-or") ? 1 : 0) != 0)
+#else
 	if (!params.Exists("-o+") && !params.Exists("-o-") && !params.Exists("-or"))
+#endif
 	{
 		params.emplace_back("-o+");
 	}
@@ -516,7 +535,13 @@ void UnpackController::ExecuteSevenZip(const char* password, bool multiVolumes)
 		return;
 	}
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_pur_unpack_ctrl_should_add_extract_cmd_flag(
+		params.Exists("x") ? 1 : 0,
+		params.Exists("e") ? 1 : 0) != 0)
+#else
 	if (!params.Exists("x") && !params.Exists("e"))
+#endif
 	{
 		params.emplace_back("x");
 	}

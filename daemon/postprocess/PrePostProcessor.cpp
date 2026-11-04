@@ -349,13 +349,27 @@ void PrePostProcessor::DownloadQueueUpdate(void* aspect)
 	}
 
 	DownloadQueue::Aspect* queueAspect = (DownloadQueue::Aspect*)aspect;
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_pur_prepost_is_nzb_or_url_found_action(
+		(int)queueAspect->action,
+		(int)DownloadQueue::eaNzbFound,
+		(int)DownloadQueue::eaUrlFound) != 0)
+#else
 	if (queueAspect->action == DownloadQueue::eaNzbFound ||
 		queueAspect->action == DownloadQueue::eaUrlFound)
+#endif
 	{
 		NzbFound(queueAspect->downloadQueue, queueAspect->nzbInfo);
 	}
+#ifdef NZBGET_USE_RUST
+	else if (nzbget_rs_pur_prepost_is_nzb_or_url_added_action(
+		(int)queueAspect->action,
+		(int)DownloadQueue::eaNzbAdded,
+		(int)DownloadQueue::eaUrlAdded) != 0)
+#else
 	else if (queueAspect->action == DownloadQueue::eaNzbAdded ||
 		queueAspect->action == DownloadQueue::eaUrlAdded)
+#endif
 	{
 		NzbAdded(queueAspect->downloadQueue, queueAspect->nzbInfo);
 	}
@@ -391,8 +405,15 @@ void PrePostProcessor::DownloadQueueUpdate(void* aspect)
 	{
 		NzbCompleted(queueAspect->downloadQueue, queueAspect->nzbInfo, true);
 	}
+#ifdef NZBGET_USE_RUST
+	else if (nzbget_rs_pur_prepost_is_file_completed_or_deleted_action(
+		(int)queueAspect->action,
+		(int)DownloadQueue::eaFileCompleted,
+		(int)DownloadQueue::eaFileDeleted) != 0)
+#else
 	else if ((queueAspect->action == DownloadQueue::eaFileCompleted ||
 		queueAspect->action == DownloadQueue::eaFileDeleted))
+#endif
 	{
 		if (queueAspect->action == DownloadQueue::eaFileCompleted)
 		{
@@ -483,7 +504,14 @@ void PrePostProcessor::DownloadQueueUpdate(void* aspect)
 
 void PrePostProcessor::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 {
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_pur_prepost_should_run_dupe_found(
+		g_Options->GetDupeCheck() ? 1 : 0,
+		(int)nzbInfo->GetDupeMode(),
+		(int)dmForce) != 0)
+#else
 	if (g_Options->GetDupeCheck() && nzbInfo->GetDupeMode() != dmForce)
+#endif
 	{
 		g_DupeCoordinator->NzbFound(downloadQueue, nzbInfo);
 	}
@@ -1311,8 +1339,16 @@ void PrePostProcessor::CheckPostQueue()
 		}
 
 		PostInfo* postInfo = postJob->GetPostInfo();
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_pur_prepost_can_start_queued_post_job(
+			(int)postInfo->GetStage(),
+			(int)PostInfo::ptQueued,
+			g_WorkState->GetPausePostProcess() ? 1 : 0,
+			postInfo->GetNzbInfo()->GetForcePriority() ? 1 : 0) != 0)
+#else
 		if (postInfo->GetStage() == PostInfo::ptQueued &&
 			(!g_WorkState->GetPausePostProcess() || postInfo->GetNzbInfo()->GetForcePriority()))
+#endif
 		{
 			StartJob(downloadQueue, postInfo, allowPar);
 			CheckRequestPar(downloadQueue);
@@ -1588,8 +1624,16 @@ void PrePostProcessor::StartJob(DownloadQueue* downloadQueue, PostInfo* postInfo
 	// Captured holes are a fallback, not evidence that donor data is needed.
 	// Let the current PAR set verify and repair first, including auto mode
 	// which initially marks the check as skipped until damage is known.
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_pur_prepost_should_request_par_for_skipped_stream_repair(
+		streamRepair ? 1 : 0,
+		(int)nzbInfo->GetParStatus(),
+		(int)NzbInfo::psSkipped) != 0 &&
+		ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
+#else
 	if (streamRepair && nzbInfo->GetParStatus() == NzbInfo::psSkipped &&
 		ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
+#endif
 	{
 		postInfo->SetRequestParCheck(true);
 		return;
@@ -1647,8 +1691,16 @@ void PrePostProcessor::StartJob(DownloadQueue* downloadQueue, PostInfo* postInfo
 		}
 	}
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_pur_prepost_is_par_none_and_not_deleted(
+		(int)nzbInfo->GetParStatus(),
+		(int)NzbInfo::psNone,
+		(int)nzbInfo->GetDeleteStatus(),
+		(int)NzbInfo::dsNone) != 0)
+#else
 	if (nzbInfo->GetParStatus() == NzbInfo::psNone &&
 		nzbInfo->GetDeleteStatus() == NzbInfo::dsNone)
+#endif
 	{
 		if (ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
 		{
@@ -2040,6 +2092,19 @@ void PrePostProcessor::UpdatePauseState()
 	}
 #endif
 
+#ifdef NZBGET_USE_RUST
+	int pauseTrans = nzbget_rs_pur_prepost_eval_temp_pause_download_transition(
+		needPause ? 1 : 0,
+		g_WorkState->GetTempPauseDownload() ? 1 : 0);
+	if (pauseTrans == 1)
+	{
+		info("Pausing download before post-processing");
+	}
+	else if (pauseTrans == 2)
+	{
+		info("Unpausing download after post-processing");
+	}
+#else
 	if (needPause && !g_WorkState->GetTempPauseDownload())
 	{
 		info("Pausing download before post-processing");
@@ -2048,6 +2113,7 @@ void PrePostProcessor::UpdatePauseState()
 	{
 		info("Unpausing download after post-processing");
 	}
+#endif
 
 	g_WorkState->SetTempPauseDownload(needPause);
 }
@@ -2170,7 +2236,9 @@ void PrePostProcessor::FileDownloaded(DownloadQueue* downloadQueue, NzbInfo* nzb
 		{
 			NzbParameter* unpackParameter = nzbInfo->GetParameters()->Find("*Unpack:");
 			bool wantUnpack = !(unpackParameter && !strcasecmp(unpackParameter->GetValue(), "no"));
-			if (wantUnpack && nzbInfo->GetFailedArticles() == 0)
+			if (nzbget_rs_pur_prepost_should_start_direct_unpack_job(
+				wantUnpack ? 1 : 0,
+				nzbInfo->GetFailedArticles()) != 0)
 			{
 				DirectUnpack::StartJob(nzbInfo);
 			}

@@ -4115,6 +4115,48 @@ int nzbget_rs_qcf_dupe_fallback_resolve_structural_or_filename_match(
     int filename_ambiguous, int has_filename_match,
     size_t structural_matches_len);
 
+/* Batch 40: postunpackrenamehist (pur_*) */
+int nzbget_rs_pur_prepost_is_nzb_or_url_found_action(
+    int action, int ea_nzb_found, int ea_url_found);
+int nzbget_rs_pur_prepost_is_nzb_or_url_added_action(
+    int action, int ea_nzb_added, int ea_url_added);
+int nzbget_rs_pur_prepost_is_file_completed_or_deleted_action(
+    int action, int ea_file_completed, int ea_file_deleted);
+int nzbget_rs_pur_prepost_should_run_dupe_found(
+    int dupe_check, int dupe_mode, int dm_force);
+int nzbget_rs_pur_prepost_can_start_queued_post_job(
+    int stage, int pt_queued, int pause_post_process, int force_priority);
+int nzbget_rs_pur_prepost_should_request_par_for_skipped_stream_repair(
+    int stream_repair, int par_status, int ps_skipped);
+int nzbget_rs_pur_prepost_is_par_none_and_not_deleted(
+    int par_status, int ps_none, int delete_status, int ds_none);
+int nzbget_rs_pur_prepost_eval_temp_pause_download_transition(
+    int need_pause, int temp_pause_download);
+int nzbget_rs_pur_prepost_should_start_direct_unpack_job(
+    int want_unpack, int failed_articles);
+int nzbget_rs_pur_history_coord_should_skip_recheck_for_dupe_backup(
+    int dupe_check, int dupe_mode, int dm_score);
+int nzbget_rs_pur_history_coord_should_keep_recorded_filename(
+    int temporary_name, int file_filename_empty);
+int nzbget_rs_pur_history_coord_should_delete_empty_or_zero_success_output(
+    int success_articles, int64_t file_size);
+int nzbget_rs_pur_history_coord_should_pause_health_on_remaining_retry(
+    int reset_failed, int reprocess);
+int nzbget_rs_pur_history_coord_is_nzb_or_url_kind(
+    int kind, int hk_nzb, int hk_url);
+int nzbget_rs_pur_history_coord_should_notify_dupe_search_name_changed(
+    int kind, int hk_nzb, int has_dupe_search, int name_changed);
+int nzbget_rs_pur_history_coord_is_valid_dupe_backup_delete_status(
+    int delete_status, int ds_dupe, int ds_manual);
+int nzbget_rs_pur_unpack_ctrl_should_execute_initial_unpack(
+    int unpack_tried, int par_repaired);
+int nzbget_rs_pur_unpack_ctrl_should_add_extract_cmd_flag(
+    int has_x, int has_e);
+int nzbget_rs_pur_unpack_ctrl_should_add_default_overwrite_flag(
+    int has_o_plus, int has_o_minus, int has_or);
+int nzbget_rs_pur_direct_unpack_should_log_unrar_exit_error(
+    int unpack_ok, int exit_code, int interrupted);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

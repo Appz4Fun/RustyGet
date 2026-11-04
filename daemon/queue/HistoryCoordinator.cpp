@@ -50,7 +50,12 @@ void HistoryCoordinator::ServiceWork()
 
 	// in 64 bits: past 24,855 days the int product went negative, and every item was
 	// hidden as too old
+#ifdef NZBGET_USE_RUST
+	time_t minTime = (time_t)nzbget_rs_pup_history_coord_calc_min_time(
+		(int64)Util::CurrentTime(), g_Options->GetKeepHistory());
+#else
 	time_t minTime = Util::CurrentTime() - (time_t)g_Options->GetKeepHistory() * 60*60*24;
+#endif
 	bool changed = false;
 	int index = 0;
 
@@ -205,10 +210,16 @@ void HistoryCoordinator::AddToHistory(DownloadQueue* downloadQueue, NzbInfo* nzb
 	nzbInfo->SetParkedFileCount(0);
 	for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
 	{
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_pup_history_coord_should_count_parked_file(
+			(int)completedFile.GetStatus(), (int)CompletedFile::cfNone, (int)CompletedFile::cfPartial,
+			&completedFile == &*nzbInfo->GetCompletedFiles()->rbegin() ? 1 : 0) != 0)
+#else
 		if (completedFile.GetStatus() == CompletedFile::cfNone ||
 			// consider last completed file with partial status not completely tried
 			(completedFile.GetStatus() == CompletedFile::cfPartial &&
 			 &completedFile == &*nzbInfo->GetCompletedFiles()->rbegin()))
+#endif
 		{
 			nzbInfo->PrintMessage(Message::mkDetail, "Parking file %s", completedFile.GetFilename());
 			nzbInfo->SetParkedFileCount(nzbInfo->GetParkedFileCount() + 1);
@@ -246,10 +257,20 @@ void HistoryCoordinator::AddToHistory(DownloadQueue* downloadQueue, NzbInfo* nzb
  */
 void HistoryCoordinator::RecheckFailedArticles(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 {
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_pup_history_coord_should_recheck_failed_articles(
+		g_Options->GetDupeArticleFallback() == Options::dafNone ? 1 : 0,
+		g_Options->GetHealthCheck() == Options::hcDupe ? 1 : 0,
+		nzbInfo->GetKind() == NzbInfo::nkNzb ? 1 : 0,
+		nzbInfo->GetFailedArticles(),
+		nzbInfo->MakeTextStatus(true),
+		nzbInfo->GetParameters()->Find("*DupeRecheck") != nullptr ? 1 : 0) == 0)
+#else
 	if ((g_Options->GetDupeArticleFallback() == Options::dafNone && g_Options->GetHealthCheck() != Options::hcDupe) ||
 		nzbInfo->GetKind() != NzbInfo::nkNzb || nzbInfo->GetFailedArticles() <= 0 ||
 		strncmp(nzbInfo->MakeTextStatus(true), "FAILURE", 7) || !strcmp(nzbInfo->MakeTextStatus(true), "FAILURE/BAD") ||
 		nzbInfo->GetParameters()->Find("*DupeRecheck"))
+#endif
 	{
 		return;
 	}
@@ -477,12 +498,23 @@ void HistoryCoordinator::HistoryDelete(DownloadQueue* downloadQueue, HistoryList
 		DeleteDiskFiles(historyInfo->GetNzbInfo());
 	}
 
+#ifdef NZBGET_USE_RUST
+	bool isNzb = historyInfo->GetKind() == HistoryInfo::hkNzb;
+	if (isNzb && nzbget_rs_pup_history_coord_should_delete_dest_dir(
+		1,
+		(int)historyInfo->GetNzbInfo()->GetDeleteStatus(), (int)NzbInfo::dsNone,
+		(int)historyInfo->GetNzbInfo()->GetParStatus(), (int)NzbInfo::psFailure,
+		(int)historyInfo->GetNzbInfo()->GetUnpackStatus(), (int)NzbInfo::usFailure,
+		(int)NzbInfo::usPassword,
+		FileSystem::DirectoryExists(historyInfo->GetNzbInfo()->GetDestDir()) ? 1 : 0) != 0)
+#else
 	if (historyInfo->GetKind() == HistoryInfo::hkNzb &&
 		(historyInfo->GetNzbInfo()->GetDeleteStatus() != NzbInfo::dsNone ||
 		historyInfo->GetNzbInfo()->GetParStatus() == NzbInfo::psFailure ||
 		historyInfo->GetNzbInfo()->GetUnpackStatus() == NzbInfo::usFailure ||
 		historyInfo->GetNzbInfo()->GetUnpackStatus() == NzbInfo::usPassword) &&
 		FileSystem::DirectoryExists(historyInfo->GetNzbInfo()->GetDestDir()))
+#endif
 	{
 		info("Deleting %s", historyInfo->GetNzbInfo()->GetDestDir());
 		CString errmsg;
@@ -492,7 +524,13 @@ void HistoryCoordinator::HistoryDelete(DownloadQueue* downloadQueue, HistoryList
 		}
 	}
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_pup_history_coord_should_erase_on_delete(
+		final ? 1 : 0, g_Options->GetDupeCheck() ? 1 : 0,
+		historyInfo->GetKind() == HistoryInfo::hkUrl ? 1 : 0) != 0)
+#else
 	if (final || !g_Options->GetDupeCheck() || historyInfo->GetKind() == HistoryInfo::hkUrl)
+#endif
 	{
 		downloadQueue->GetHistory()->erase(itHistory);
 	}
@@ -771,9 +809,15 @@ void HistoryCoordinator::HistoryRetry(DownloadQueue* downloadQueue, HistoryList:
 	for (CompletedFileList::iterator it = nzbInfo->GetCompletedFiles()->begin(); it != nzbInfo->GetCompletedFiles()->end(); )
 	{
 		CompletedFile& completedFile = *it;
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_pup_history_coord_can_attempt_requeue_file(
+			(int)completedFile.GetStatus(), (int)CompletedFile::cfSuccess,
+			(int)CompletedFile::cfFailure, resetFailed ? 1 : 0, completedFile.GetId()) != 0)
+#else
 		if (completedFile.GetStatus() != CompletedFile::cfSuccess &&
 			(completedFile.GetStatus() != CompletedFile::cfFailure || resetFailed) &&
 			completedFile.GetId() > 0)
+#endif
 		{
 			std::unique_ptr<FileInfo> fileInfo = std::make_unique<FileInfo>();
 			fileInfo->SetId(completedFile.GetId());
@@ -788,8 +832,13 @@ void HistoryCoordinator::HistoryRetry(DownloadQueue* downloadQueue, HistoryList:
 				// name ("<id>.out.tmp"): its data is there, but it keeps the name its
 				// nzb-file gives it, which a recreation from a duplicate pairs by
 				std::string recordedName = completedFile.GetFilename();
+#ifdef NZBGET_USE_RUST
+				bool temporaryName = nzbget_rs_pup_history_coord_is_temporary_output_name(
+					recordedName.c_str()) != 0;
+#else
 				bool temporaryName = recordedName.size() > 8 &&
 					recordedName.compare(recordedName.size() - 8, 8, ".out.tmp") == 0;
+#endif
 				if (!temporaryName || Util::EmptyStr(fileInfo->GetFilename()))
 				{
 					fileInfo->SetFilename(recordedName.c_str());
@@ -1073,8 +1122,14 @@ void HistoryCoordinator::HistorySetDupeParam(HistoryInfo* historyInfo, DownloadQ
 					error("Could not set duplicate parameter for %s: history item has wrong delete status", historyInfo->GetName());
 					return;
 				}
+#ifdef NZBGET_USE_RUST
+				historyInfo->GetNzbInfo()->SetDeleteStatus(
+					(NzbInfo::EDeleteStatus)nzbget_rs_pup_history_coord_parse_dupe_backup_flag(
+						text, (int)NzbInfo::dsDupe, (int)NzbInfo::dsManual));
+#else
 				historyInfo->GetNzbInfo()->SetDeleteStatus(!strcasecmp(text, "YES") ||
 					!strcasecmp(text, "TRUE") || !strcasecmp(text, "1") ? NzbInfo::dsDupe : NzbInfo::dsManual);
+#endif
 				break;
 
 			default:

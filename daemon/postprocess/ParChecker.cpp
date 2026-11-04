@@ -205,8 +205,14 @@ bool Repairer::ScanDataFile(
 			{
 				SigDone(name, availableBlocks, static_cast<int>(sourcefile->BlockCount()));
 				SigProgress(1000);
+#ifdef NZBGET_USE_RUST
+				matchtype = (Par2::MatchType)nzbget_rs_pup_parchecker_select_match_type(
+					(int)fileStatus, (int)ParChecker::fsSuccess, (int)ParChecker::fsPartial,
+					(int)Par2::eFullMatch, (int)Par2::ePartialMatch, (int)Par2::eNoMatch);
+#else
 				matchtype = fileStatus == ParChecker::fsSuccess ? Par2::eFullMatch :
 					fileStatus == ParChecker::fsPartial ? Par2::ePartialMatch : Par2::eNoMatch;
+#endif
 				m_owner->SetParFull(false);
 				return true;
 			}
@@ -312,7 +318,13 @@ void ParChecker::Execute()
 	m_verifiedFiles.clear();
 	m_status = RunParCheckAll();
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_pup_parchecker_should_run_forced_full_check(
+		(int)m_status, (int)psRepairNotNeeded, m_parQuick ? 1 : 0,
+		m_forceRepair ? 1 : 0, IsStopped() ? 1 : 0) != 0)
+#else
 	if (m_status == psRepairNotNeeded && m_parQuick && m_forceRepair && !IsStopped())
+#endif
 	{
 		PrintMessage(Message::mkInfo, "Performing full par-check for %s", m_nzbName.c_str());
 		m_parQuick = false;
@@ -421,10 +433,17 @@ ParChecker::EStatus ParChecker::RunParCheck(std::string parFilename)
 		}
 	}
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_pup_parchecker_should_add_missing_files(
+		m_hasDamagedFiles ? 1 : 0, IsStopped() ? 1 : 0, GetRepairer()->missingfilecount,
+		addedSplittedFragments ? 1 : 0, (int)res, (int)Par2::eRepairPossible,
+		(int)g_Options->GetParScan(), (int)Options::psExtended, (int)Options::psDupe) != 0)
+#else
 	if (m_hasDamagedFiles && !IsStopped() && GetRepairer()->missingfilecount > 0 &&
 		!(addedSplittedFragments && res == Par2::eRepairPossible) &&
 		(g_Options->GetParScan() == Options::psExtended ||
 		 g_Options->GetParScan() == Options::psDupe))
+#endif
 	{
 		if (AddMissingFiles())
 		{
@@ -672,7 +691,12 @@ int ParChecker::ProcessMorePars()
 	bool moreFilesLoaded = true;
 	while (!IsStopped() && res == Par2::eRepairNotPossible)
 	{
+#ifdef NZBGET_USE_RUST
+		int missingblockcount = nzbget_rs_pup_parchecker_calc_missing_blocks(
+			GetRepairer()->missingblockcount, GetRepairer()->recoverypacketmap.size());
+#else
 		int missingblockcount = static_cast<int>(GetRepairer()->missingblockcount - GetRepairer()->recoverypacketmap.size());
+#endif
 		if (missingblockcount <= 0)
 		{
 			return Par2::eRepairPossible;
@@ -1072,6 +1096,20 @@ bool ParChecker::AddExtraFiles(bool onlyMissing, bool externalDir, const char* d
 
 			filesAdded |= fileAdded | blockAdded;
 
+#ifdef NZBGET_USE_RUST
+			int abortReason = nzbget_rs_pup_parchecker_should_abort_extra_scan(
+				onlyMissing ? 1 : 0, GetRepairer()->missingfilecount, GetRepairer()->missingblockcount);
+			if (abortReason == 1)
+			{
+				PrintMessage(Message::mkInfo, "All missing files found, aborting par-scan");
+				break;
+			}
+			if (abortReason == 2)
+			{
+				PrintMessage(Message::mkInfo, "All missing blocks found, aborting par-scan");
+				break;
+			}
+#else
 			if (onlyMissing && GetRepairer()->missingfilecount == 0)
 			{
 				PrintMessage(Message::mkInfo, "All missing files found, aborting par-scan");
@@ -1083,6 +1121,7 @@ bool ParChecker::AddExtraFiles(bool onlyMissing, bool externalDir, const char* d
 				PrintMessage(Message::mkInfo, "All missing blocks found, aborting par-scan");
 				break;
 			}
+#endif
 		}
 
 		m_verifyingExtraFiles = false;
@@ -1115,7 +1154,12 @@ void ParChecker::SignalFilename(std::string str)
 
 	// don't print progress messages when verifying repaired files in quick verification mode,
 	// because repaired files are not verified in this mode
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_pup_parchecker_should_print_stage_msg(
+		(int)m_stage, (int)ptVerifyingRepaired, m_parQuick ? 1 : 0) != 0)
+#else
 	if (!(m_stage == ptVerifyingRepaired && m_parQuick))
+#endif
 	{
 		PrintMessage(Message::mkInfo, "%s %s", Par2StageMessage[m_stage], str.c_str());
 	}

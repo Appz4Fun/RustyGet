@@ -328,8 +328,15 @@ bool QueueEditor::EditEntry(DownloadQueue* downloadQueue, int ID, DownloadQueue:
 bool QueueEditor::EditList(DownloadQueue* downloadQueue, IdList* idList, NameList* nameList, DownloadQueue::EMatchMode matchMode,
 	DownloadQueue::EEditAction action, const char* args)
 {
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_pup_queue_editor_is_history_or_post_without_ids(
+		(int)action, (int)DownloadQueue::eaPostDelete,
+		(int)DownloadQueue::eaHistoryDelete, (int)DownloadQueue::eaHistorySetName,
+		idList != nullptr ? 1 : 0) != 0)
+#else
 	if ((action == DownloadQueue::eaPostDelete ||
 		(DownloadQueue::eaHistoryDelete <= action && action <= DownloadQueue::eaHistorySetName)) && !idList)
+#endif
 	{
 		// by name (no ids) these never had a way to match and used the missing
 		// id list; take names for the queue only

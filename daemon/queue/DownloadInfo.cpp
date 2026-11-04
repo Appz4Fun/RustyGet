@@ -217,10 +217,19 @@ CString NzbInfo::MakeNiceNzbName(const char * nzbFilename, bool removeExt)
 	// only a full path drops its folder: other "/" belong to the name (indexers
 	// post "[hash] [16/22] - Title", which became "22] - Title"); the sanitizing
 	// below makes them safe
+#ifdef NZBGET_USE_RUST
+	bool absolutePath = nzbget_rs_pup_scanner_is_absolute_nzb_name(nzbFilename) != 0;
+#else
 	bool absolutePath = nzbFilename[0] == '/' || nzbFilename[0] == '\\' ||
 		(isalpha((unsigned char)nzbFilename[0]) && nzbFilename[1] == ':' &&
 		 (nzbFilename[2] == '\\' || nzbFilename[2] == '/'));
+#endif
 	std::string nicename = absolutePath ? FileSystem::BaseFileName(nzbFilename) : nzbFilename;
+#ifdef NZBGET_USE_RUST
+	size_t strippedLen = nzbget_rs_pup_nzb_info_strip_nzb_ext_len(
+		nicename.c_str(), removeExt ? 1 : 0);
+	nicename.resize(strippedLen);
+#else
 	if (removeExt)
 	{
 		// wipe out ".nzb"
@@ -230,6 +239,7 @@ CString NzbInfo::MakeNiceNzbName(const char * nzbFilename, bool removeExt)
 			nicename.erase(dotpos);
 		}
 	}
+#endif
 	std::string validname = FileSystem::SanitizePathSegment(nicename);
 	if (validname.empty())
 	{
@@ -594,6 +604,23 @@ void NzbInfo::LeavePostProcess()
 
 void NzbInfo::SetActiveDownloads(int activeDownloads)
 {
+#ifdef NZBGET_USE_RUST
+	int outSec = m_downloadSec;
+	int64 outStartTime = (int64)m_downloadStartTime;
+	int outStartSec = m_downloadStartSec;
+	int outChanged = 0;
+	nzbget_rs_pup_nzb_info_calc_active_downloads_sec(
+		m_activeDownloads, activeDownloads, m_kind == NzbInfo::nkNzb ? 1 : 0,
+		(int64)Util::CurrentTime(), m_downloadSec, (int64)m_downloadStartTime,
+		m_downloadStartSec, &outSec, &outStartTime, &outStartSec, &outChanged);
+	m_downloadSec = outSec;
+	m_downloadStartTime = (time_t)outStartTime;
+	m_downloadStartSec = outStartSec;
+	if (outChanged)
+	{
+		m_changed = true;
+	}
+#else
 	if (((m_activeDownloads == 0 && activeDownloads > 0) ||
 		 (m_activeDownloads > 0 && activeDownloads == 0)) &&
 		m_kind == NzbInfo::nkNzb)
@@ -615,6 +642,7 @@ void NzbInfo::SetActiveDownloads(int activeDownloads)
 		m_downloadSec = m_downloadStartSec + (int)(Util::CurrentTime() - m_downloadStartTime);
 		m_changed = true;
 	}
+#endif
 	m_activeDownloads = activeDownloads;
 }
 
@@ -910,8 +938,14 @@ bool NzbInfo::IsDownloadCompleted(bool ignorePausedPars)
 
 	for (FileInfo* fileInfo : &m_fileList)
 	{
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_pup_file_info_blocks_download_completion(
+			fileInfo->GetPaused() ? 1 : 0, ignorePausedPars ? 1 : 0,
+			fileInfo->GetParFile() ? 1 : 0, fileInfo->GetDeleted() ? 1 : 0) != 0)
+#else
 		if ((!fileInfo->GetPaused() || !ignorePausedPars || !fileInfo->GetParFile()) &&
 			!fileInfo->GetDeleted())
+#endif
 		{
 			return false;
 		}

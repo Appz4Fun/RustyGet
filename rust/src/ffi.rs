@@ -16644,6 +16644,528 @@ pub unsafe extern "C" fn nzbget_rs_fuq_direct_unpack_eval_unrar_result(
     }
 }
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pup_parchecker_select_match_type(
+    file_status: c_int,
+    fs_success: c_int,
+    fs_partial: c_int,
+    match_full: c_int,
+    match_partial: c_int,
+    match_none: c_int,
+) -> c_int {
+    crate::parunpackpost::parchecker_select_match_type(
+        file_status,
+        fs_success,
+        fs_partial,
+        match_full,
+        match_partial,
+        match_none,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pup_parchecker_should_run_forced_full_check(
+    status: c_int,
+    ps_repair_not_needed: c_int,
+    par_quick: c_int,
+    force_repair: c_int,
+    is_stopped: c_int,
+) -> c_int {
+    i32::from(crate::parunpackpost::parchecker_should_run_forced_full_check(
+        status,
+        ps_repair_not_needed,
+        par_quick != 0,
+        force_repair != 0,
+        is_stopped != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pup_parchecker_should_add_missing_files(
+    has_damaged: c_int,
+    is_stopped: c_int,
+    missing_file_count: u32,
+    added_split: c_int,
+    res: c_int,
+    e_repair_possible: c_int,
+    par_scan: c_int,
+    ps_extended: c_int,
+    ps_dupe: c_int,
+) -> c_int {
+    i32::from(crate::parunpackpost::parchecker_should_add_missing_files(
+        has_damaged != 0,
+        is_stopped != 0,
+        missing_file_count,
+        added_split != 0,
+        res,
+        e_repair_possible,
+        par_scan,
+        ps_extended,
+        ps_dupe,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pup_parchecker_calc_missing_blocks(
+    missing_block_count: u32,
+    recovery_packet_count: usize,
+) -> c_int {
+    crate::parunpackpost::parchecker_calc_missing_blocks(
+        missing_block_count,
+        recovery_packet_count,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pup_parchecker_should_abort_extra_scan(
+    only_missing: c_int,
+    missing_file_count: u32,
+    missing_block_count: u32,
+) -> c_int {
+    crate::parunpackpost::parchecker_should_abort_extra_scan(
+        only_missing != 0,
+        missing_file_count,
+        missing_block_count,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pup_parchecker_should_print_stage_msg(
+    stage: c_int,
+    pt_verifying_repaired: c_int,
+    par_quick: c_int,
+) -> c_int {
+    i32::from(crate::parunpackpost::parchecker_should_print_stage_msg(
+        stage,
+        pt_verifying_repaired,
+        par_quick != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pup_unpack_ctrl_should_try_par_before_pass_file(
+    unpack_ok: c_int,
+    has_par_files: c_int,
+    password_err: c_int,
+    par_status: c_int,
+    ps_skipped: c_int,
+) -> c_int {
+    i32::from(
+        crate::parunpackpost::unpack_ctrl_should_try_par_before_pass_file(
+            unpack_ok != 0,
+            has_par_files != 0,
+            password_err != 0,
+            par_status,
+            ps_skipped,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pup_unpack_ctrl_should_try_password_file(
+    unpack_ok: c_int,
+    start_err: c_int,
+    space_err: c_int,
+    decrypt_err: c_int,
+    password_err: c_int,
+    terminated: c_int,
+    auto_terminated: c_int,
+    password_empty: c_int,
+    pass_file_empty: c_int,
+) -> c_int {
+    i32::from(crate::parunpackpost::unpack_ctrl_should_try_password_file(
+        unpack_ok != 0,
+        start_err != 0,
+        space_err != 0,
+        decrypt_err != 0,
+        password_err != 0,
+        terminated != 0,
+        auto_terminated != 0,
+        password_empty != 0,
+        pass_file_empty != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_pup_unpack_ctrl_eval_sevenzip_exit(
+    exit_code: c_int,
+    all_ok_msg: c_int,
+    terminated: c_int,
+    auto_terminated: c_int,
+    out_unpack_ok: *mut c_int,
+    out_start_err: *mut c_int,
+) {
+    let (ok, start_err) = crate::parunpackpost::unpack_ctrl_eval_sevenzip_exit(
+        exit_code,
+        all_ok_msg != 0,
+        terminated != 0,
+        auto_terminated != 0,
+    );
+    if !out_unpack_ok.is_null() {
+        *out_unpack_ok = i32::from(ok);
+    }
+    if !out_start_err.is_null() {
+        *out_start_err = i32::from(start_err);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pup_unpack_ctrl_will_retry_with_pass(
+    decrypt_err: c_int,
+    password_err: c_int,
+    password_empty: c_int,
+    pass_file_not_empty: c_int,
+) -> c_int {
+    i32::from(crate::parunpackpost::unpack_ctrl_will_retry_with_pass(
+        decrypt_err != 0,
+        password_err != 0,
+        password_empty != 0,
+        pass_file_not_empty != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pup_unpack_ctrl_is_stopped_for_reload(
+    auto_terminated: c_int,
+    post_deleted: c_int,
+    is_stopped: c_int,
+    terminated: c_int,
+) -> c_int {
+    i32::from(crate::parunpackpost::unpack_ctrl_is_stopped_for_reload(
+        auto_terminated != 0,
+        post_deleted != 0,
+        is_stopped != 0,
+        terminated != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pup_unpack_ctrl_should_request_par_after_fail(
+    unpack_ok: c_int,
+    par_status: c_int,
+    ps_skipped: c_int,
+    par_full: c_int,
+    start_err: c_int,
+    space_err: c_int,
+    password_err: c_int,
+    terminated: c_int,
+    is_stopped: c_int,
+    auto_terminated: c_int,
+    has_par_files: c_int,
+) -> c_int {
+    i32::from(
+        crate::parunpackpost::unpack_ctrl_should_request_par_after_fail(
+            unpack_ok != 0,
+            par_status,
+            ps_skipped,
+            par_full != 0,
+            start_err != 0,
+            space_err != 0,
+            password_err != 0,
+            terminated != 0,
+            is_stopped != 0,
+            auto_terminated != 0,
+            has_par_files != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pup_unpack_ctrl_calc_force_repair_on_request(
+    password_empty: c_int,
+    pass_file_empty: c_int,
+    pass_list_tried: c_int,
+    decrypt_err: c_int,
+    password_err: c_int,
+    par_status: c_int,
+    ps_skipped: c_int,
+) -> c_int {
+    i32::from(
+        crate::parunpackpost::unpack_ctrl_calc_force_repair_on_request(
+            password_empty != 0,
+            pass_file_empty != 0,
+            pass_list_tried != 0,
+            decrypt_err != 0,
+            password_err != 0,
+            par_status,
+            ps_skipped,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pup_history_coord_calc_min_time(
+    cur_time: i64,
+    keep_history_days: c_int,
+) -> i64 {
+    crate::parunpackpost::history_coord_calc_min_time(cur_time, keep_history_days)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pup_history_coord_should_count_parked_file(
+    status: c_int,
+    cf_none: c_int,
+    cf_partial: c_int,
+    is_last: c_int,
+) -> c_int {
+    i32::from(crate::parunpackpost::history_coord_should_count_parked_file(
+        status,
+        cf_none,
+        cf_partial,
+        is_last != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_pup_history_coord_should_recheck_failed_articles(
+    daf_none: c_int,
+    hc_dupe: c_int,
+    kind_nzb: c_int,
+    failed_articles: c_int,
+    text_status: *const c_char,
+    has_dupe_recheck_param: c_int,
+) -> c_int {
+    let ts = if text_status.is_null() {
+        &b""[..]
+    } else {
+        CStr::from_ptr(text_status).to_bytes()
+    };
+    i32::from(
+        crate::parunpackpost::history_coord_should_recheck_failed_articles(
+            daf_none != 0,
+            hc_dupe != 0,
+            kind_nzb != 0,
+            failed_articles,
+            ts,
+            has_dupe_recheck_param != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pup_history_coord_should_delete_dest_dir(
+    is_nzb: c_int,
+    delete_status: c_int,
+    ds_none: c_int,
+    par_status: c_int,
+    ps_failure: c_int,
+    unpack_status: c_int,
+    us_failure: c_int,
+    us_password: c_int,
+    dir_exists: c_int,
+) -> c_int {
+    i32::from(crate::parunpackpost::history_coord_should_delete_dest_dir(
+        is_nzb != 0,
+        delete_status,
+        ds_none,
+        par_status,
+        ps_failure,
+        unpack_status,
+        us_failure,
+        us_password,
+        dir_exists != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pup_history_coord_should_erase_on_delete(
+    final_delete: c_int,
+    dupe_check: c_int,
+    is_url: c_int,
+) -> c_int {
+    i32::from(crate::parunpackpost::history_coord_should_erase_on_delete(
+        final_delete != 0,
+        dupe_check != 0,
+        is_url != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_pup_history_coord_is_temporary_output_name(
+    filename: *const c_char,
+) -> c_int {
+    let s = if filename.is_null() {
+        &b""[..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    i32::from(crate::parunpackpost::history_coord_is_temporary_output_name(s))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_pup_history_coord_parse_dupe_backup_flag(
+    text: *const c_char,
+    ds_dupe: c_int,
+    ds_manual: c_int,
+) -> c_int {
+    let s = if text.is_null() {
+        &b""[..]
+    } else {
+        CStr::from_ptr(text).to_bytes()
+    };
+    crate::parunpackpost::history_coord_parse_dupe_backup_flag(s, ds_dupe, ds_manual)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pup_scanner_select_service_interval(
+    requested_scan: c_int,
+    nzb_dir_interval_opt: c_int,
+    cur_interval: c_int,
+    now_val: c_int,
+    sleep_val: c_int,
+) -> c_int {
+    crate::parunpackpost::scanner_select_service_interval(
+        requested_scan != 0,
+        nzb_dir_interval_opt,
+        cur_interval,
+        now_val,
+        sleep_val,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_pup_scanner_should_skip_item(
+    filename: *const c_char,
+    processed_dir: *const c_char,
+    broken_dir: *const c_char,
+) -> c_int {
+    let f = if filename.is_null() {
+        &b""[..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    let p = if processed_dir.is_null() {
+        &b""[..]
+    } else {
+        CStr::from_ptr(processed_dir).to_bytes()
+    };
+    let b = if broken_dir.is_null() {
+        &b""[..]
+    } else {
+        CStr::from_ptr(broken_dir).to_bytes()
+    };
+    i32::from(crate::parunpackpost::scanner_should_skip_item(f, p, b))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_pup_scanner_is_absolute_nzb_name(
+    nzb_name: *const c_char,
+) -> c_int {
+    let s = if nzb_name.is_null() {
+        &b""[..]
+    } else {
+        CStr::from_ptr(nzb_name).to_bytes()
+    };
+    i32::from(crate::parunpackpost::scanner_is_absolute_nzb_name(s))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pup_queue_editor_is_history_or_post_without_ids(
+    action: c_int,
+    ea_post_delete: c_int,
+    ea_history_delete: c_int,
+    ea_history_set_name: c_int,
+    has_id_list: c_int,
+) -> c_int {
+    i32::from(
+        crate::parunpackpost::queue_editor_is_history_or_post_without_ids(
+            action,
+            ea_post_delete,
+            ea_history_delete,
+            ea_history_set_name,
+            has_id_list != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_pup_nzb_info_strip_nzb_ext_len(
+    nicename: *const c_char,
+    remove_ext: c_int,
+) -> usize {
+    let s = if nicename.is_null() {
+        &b""[..]
+    } else {
+        CStr::from_ptr(nicename).to_bytes()
+    };
+    crate::parunpackpost::nzb_info_strip_nzb_ext(s, remove_ext != 0).len()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_pup_nzb_info_calc_active_downloads_sec(
+    old_active: c_int,
+    new_active: c_int,
+    is_nzb_kind: c_int,
+    cur_time: i64,
+    download_sec: c_int,
+    download_start_time: i64,
+    download_start_sec: c_int,
+    out_download_sec: *mut c_int,
+    out_download_start_time: *mut i64,
+    out_download_start_sec: *mut c_int,
+    out_changed: *mut c_int,
+) {
+    let (sec, start_time, start_sec, changed) =
+        crate::parunpackpost::nzb_info_calc_active_downloads_sec(
+            old_active,
+            new_active,
+            is_nzb_kind != 0,
+            cur_time,
+            download_sec,
+            download_start_time,
+            download_start_sec,
+        );
+    if !out_download_sec.is_null() {
+        *out_download_sec = sec;
+    }
+    if !out_download_start_time.is_null() {
+        *out_download_start_time = start_time;
+    }
+    if !out_download_start_sec.is_null() {
+        *out_download_start_sec = start_sec;
+    }
+    if !out_changed.is_null() {
+        *out_changed = i32::from(changed);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pup_file_info_blocks_download_completion(
+    paused: c_int,
+    ignore_paused_pars: c_int,
+    par_file: c_int,
+    deleted: c_int,
+) -> c_int {
+    i32::from(
+        crate::parunpackpost::file_info_blocks_download_completion(
+            paused != 0,
+            ignore_paused_pars != 0,
+            par_file != 0,
+            deleted != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pup_history_coord_can_attempt_requeue_file(
+    status: c_int,
+    cf_success: c_int,
+    cf_failure: c_int,
+    reset_failed: c_int,
+    file_id: c_int,
+) -> c_int {
+    i32::from(
+        crate::parunpackpost::history_coord_can_attempt_requeue_file(
+            status,
+            cf_success,
+            cf_failure,
+            reset_failed != 0,
+            file_id,
+        ),
+    )
+}
+
+
 
 
 

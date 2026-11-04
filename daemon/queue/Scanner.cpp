@@ -107,10 +107,16 @@ void Scanner::InitOptions()
 
 int Scanner::ServiceInterval()
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_pup_scanner_select_service_interval(
+		m_requestedNzbDirScan ? 1 : 0, g_Options->GetNzbDirInterval(),
+		m_nzbDirInterval, Service::Now, Service::Sleep);
+#else
 	return m_requestedNzbDirScan ? Service::Now :
 		g_Options->GetNzbDirInterval() <= 0 ? Service::Sleep :
 		// g_Options->GetPauseScan() ? Service::Sleep :   // for that to work we need to react on changing of pause-state
 		m_nzbDirInterval;
+#endif
 }
 
 void Scanner::ServiceWork()
@@ -423,8 +429,16 @@ void Scanner::DropOldFiles()
 
 bool Scanner::ShouldSkipItem(std::string_view filename)
 {
+#ifdef NZBGET_USE_RUST
+	std::string nameStr(filename);
+	std::string procStr(PROCESSED_DIR);
+	std::string brokStr(BROKEN_DIR);
+	return nzbget_rs_pup_scanner_should_skip_item(
+		nameStr.c_str(), procStr.c_str(), brokStr.c_str()) != 0;
+#else
 	if (filename.empty()) return false;
 	return filename[0] == '.' || filename == PROCESSED_DIR || filename == BROKEN_DIR;
+#endif
 }
 
 void Scanner::ProcessIncomingFile(
@@ -1025,8 +1039,12 @@ Scanner::EAddStatus Scanner::AddExternalFile(
 	// a name that is a full path (a client passing its file) drops the folder; any
 	// other "/" belongs to the name (indexers post "[hash] [16/22] - Title"), and it
 	// lost everything up to it ("22] - Title"). MakeValidFilename makes it safe
+#ifdef NZBGET_USE_RUST
+	bool absolutePath = nzbget_rs_pup_scanner_is_absolute_nzb_name(nzbName) != 0;
+#else
 	bool absolutePath = nzbName[0] == '/' || nzbName[0] == '\\' ||
 		(isalpha((unsigned char)nzbName[0]) && nzbName[1] == ':' && (nzbName[2] == '\\' || nzbName[2] == '/'));
+#endif
 	CString validNzbName = FileSystem::MakeValidFilename(absolutePath ? FileSystem::BaseFileName(nzbName) : nzbName);
 #ifdef NZBGET_USE_RUST
 	{

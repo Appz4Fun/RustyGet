@@ -220,8 +220,14 @@ void UnpackController::UnpackArchives(EUnpacker unpacker, bool multiVolumes)
 	if (!m_postInfo->GetUnpackTried() || m_postInfo->GetParRepaired())
 	{
 		ExecuteUnpack(unpacker, m_password, multiVolumes);
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_pup_unpack_ctrl_should_try_par_before_pass_file(
+			m_unpackOk ? 1 : 0, m_hasParFiles ? 1 : 0, m_unpackPasswordError ? 1 : 0,
+			(int)m_postInfo->GetNzbInfo()->GetParStatus(), (int)NzbInfo::psSkipped) != 0)
+#else
 		if (!m_unpackOk && m_hasParFiles && !m_unpackPasswordError &&
 			m_postInfo->GetNzbInfo()->GetParStatus() <= NzbInfo::psSkipped)
+#endif
 		{
 			debug("For rar4- or 7z-archives try par-check first, before trying password file");
 			return;
@@ -233,10 +239,18 @@ void UnpackController::UnpackArchives(EUnpacker unpacker, bool multiVolumes)
 		m_unpackDecryptError = m_postInfo->GetLastUnpackStatus() == (int)NzbInfo::usPassword;
 	}
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_pup_unpack_ctrl_should_try_password_file(
+		m_unpackOk ? 1 : 0, m_unpackStartError ? 1 : 0, m_unpackSpaceError ? 1 : 0,
+		m_unpackDecryptError ? 1 : 0, m_unpackPasswordError ? 1 : 0,
+		GetTerminated() ? 1 : 0, m_autoTerminated ? 1 : 0,
+		m_password.Empty() ? 1 : 0, Util::EmptyStr(g_Options->GetUnpackPassFile()) ? 1 : 0) != 0)
+#else
 	if (!m_unpackOk && !m_unpackStartError && !m_unpackSpaceError &&
 		(m_unpackDecryptError || m_unpackPasswordError) &&
 		(!GetTerminated() || m_autoTerminated) &&
 		m_password.Empty() && !Util::EmptyStr(g_Options->GetUnpackPassFile()))
+#endif
 	{
 		DiskFile infile;
 		if (!infile.Open(g_Options->GetUnpackPassFile(), DiskFile::omRead))
@@ -413,8 +427,17 @@ void UnpackController::ExecuteSevenZip(const char* password, bool multiVolumes)
 	SetLogPrefix(nullptr);
 	SetProgressLabel("");
 
+#ifdef NZBGET_USE_RUST
+	int okFlag = 0, startErr = 0;
+	nzbget_rs_pup_unpack_ctrl_eval_sevenzip_exit(
+		exitCode, m_allOkMessageReceived ? 1 : 0, GetTerminated() ? 1 : 0,
+		m_autoTerminated ? 1 : 0, &okFlag, &startErr);
+	m_unpackOk = okFlag != 0;
+	m_unpackStartError = startErr != 0;
+#else
 	m_unpackOk = exitCode == 0 && m_allOkMessageReceived && !GetTerminated();
 	m_unpackStartError = exitCode == -1 && !m_autoTerminated;
+#endif
 
 	if (!m_unpackOk && exitCode > 0 && !WillRetryWithPass() && !IsStopped() && !GetTerminated())
 	{
@@ -424,8 +447,14 @@ void UnpackController::ExecuteSevenZip(const char* password, bool multiVolumes)
 
 bool UnpackController::WillRetryWithPass()
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_pup_unpack_ctrl_will_retry_with_pass(
+		m_unpackDecryptError ? 1 : 0, m_unpackPasswordError ? 1 : 0,
+		m_password.Empty() ? 1 : 0, !g_Options->GetUnpackPassFilePath().empty() ? 1 : 0) != 0;
+#else
 	return (m_unpackDecryptError || m_unpackPasswordError) &&
 		m_password.Empty() && !g_Options->GetUnpackPassFilePath().empty();
+#endif
 }
 
 bool UnpackController::PrepareCmdParams(const char* command, ParamList* params, const char* infoName)
@@ -650,8 +679,14 @@ bool UnpackController::JoinFile(const char* fragBaseName)
 
 void UnpackController::Completed()
 {
+#ifdef NZBGET_USE_RUST
+	bool stopped = nzbget_rs_pup_unpack_ctrl_is_stopped_for_reload(
+		m_autoTerminated ? 1 : 0, (m_postInfo && m_postInfo->GetDeleted()) ? 1 : 0,
+		IsStopped() ? 1 : 0, GetTerminated() ? 1 : 0) != 0;
+#else
 	bool stopped = !m_autoTerminated && (!m_postInfo || !m_postInfo->GetDeleted()) &&
 		(IsStopped() || GetTerminated());
+#endif
 	if (stopped)
 	{
 		debug("Unpack stopped due to reload/shutdown, preserving _unpack directory");
@@ -674,6 +709,24 @@ void UnpackController::Completed()
 	else
 	{
 #ifndef DISABLE_PARCHECK
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_pup_unpack_ctrl_should_request_par_after_fail(
+			m_unpackOk ? 1 : 0, (int)m_postInfo->GetNzbInfo()->GetParStatus(),
+			(int)NzbInfo::psSkipped, m_postInfo->GetNzbInfo()->GetParFull() ? 1 : 0,
+			m_unpackStartError ? 1 : 0, m_unpackSpaceError ? 1 : 0, m_unpackPasswordError ? 1 : 0,
+			GetTerminated() ? 1 : 0, IsStopped() ? 1 : 0, m_autoTerminated ? 1 : 0,
+			m_hasParFiles ? 1 : 0) != 0)
+		{
+			RequestParCheck(nzbget_rs_pup_unpack_ctrl_calc_force_repair_on_request(
+				m_password.Empty() ? 1 : 0,
+				Util::EmptyStr(g_Options->GetUnpackPassFile()) ? 1 : 0,
+				m_passListTried ? 1 : 0,
+				m_unpackDecryptError ? 1 : 0,
+				m_unpackPasswordError ? 1 : 0,
+				(int)m_postInfo->GetNzbInfo()->GetParStatus(),
+				(int)NzbInfo::psSkipped) != 0);
+		}
+#else
 		if (!m_unpackOk &&
 			(m_postInfo->GetNzbInfo()->GetParStatus() <= NzbInfo::psSkipped ||
 			 !m_postInfo->GetNzbInfo()->GetParFull()) &&
@@ -686,6 +739,7 @@ void UnpackController::Completed()
 				!(m_unpackDecryptError || m_unpackPasswordError) ||
 				m_postInfo->GetNzbInfo()->GetParStatus() > NzbInfo::psSkipped);
 		}
+#endif
 		else
 #endif
 		{

@@ -2640,6 +2640,82 @@ void nzbget_rs_fuq_direct_unpack_eval_unrar_result(
     int exit_code, int all_ok_msg, int terminated, int cancelled, int stopped,
     int* out_unpack_ok, int* out_interrupted);
 
+int nzbget_rs_pup_parchecker_select_match_type(
+    int file_status, int fs_success, int fs_partial,
+    int match_full, int match_partial, int match_none);
+int nzbget_rs_pup_parchecker_should_run_forced_full_check(
+    int status, int ps_repair_not_needed, int par_quick,
+    int force_repair, int is_stopped);
+int nzbget_rs_pup_parchecker_should_add_missing_files(
+    int has_damaged, int is_stopped, uint32_t missing_file_count,
+    int added_split, int res, int e_repair_possible,
+    int par_scan, int ps_extended, int ps_dupe);
+int nzbget_rs_pup_parchecker_calc_missing_blocks(
+    uint32_t missing_block_count, size_t recovery_packet_count);
+int nzbget_rs_pup_parchecker_should_abort_extra_scan(
+    int only_missing, uint32_t missing_file_count, uint32_t missing_block_count);
+int nzbget_rs_pup_parchecker_should_print_stage_msg(
+    int stage, int pt_verifying_repaired, int par_quick);
+
+int nzbget_rs_pup_unpack_ctrl_should_try_par_before_pass_file(
+    int unpack_ok, int has_par_files, int password_err, int par_status, int ps_skipped);
+int nzbget_rs_pup_unpack_ctrl_should_try_password_file(
+    int unpack_ok, int start_err, int space_err, int decrypt_err, int password_err,
+    int terminated, int auto_terminated, int password_empty, int pass_file_empty);
+void nzbget_rs_pup_unpack_ctrl_eval_sevenzip_exit(
+    int exit_code, int all_ok_msg, int terminated, int auto_terminated,
+    int* out_unpack_ok, int* out_start_err);
+int nzbget_rs_pup_unpack_ctrl_will_retry_with_pass(
+    int decrypt_err, int password_err, int password_empty, int pass_file_not_empty);
+int nzbget_rs_pup_unpack_ctrl_is_stopped_for_reload(
+    int auto_terminated, int post_deleted, int is_stopped, int terminated);
+int nzbget_rs_pup_unpack_ctrl_should_request_par_after_fail(
+    int unpack_ok, int par_status, int ps_skipped, int par_full,
+    int start_err, int space_err, int password_err,
+    int terminated, int is_stopped, int auto_terminated, int has_par_files);
+int nzbget_rs_pup_unpack_ctrl_calc_force_repair_on_request(
+    int password_empty, int pass_file_empty, int pass_list_tried,
+    int decrypt_err, int password_err, int par_status, int ps_skipped);
+
+int64_t nzbget_rs_pup_history_coord_calc_min_time(
+    int64_t cur_time, int keep_history_days);
+int nzbget_rs_pup_history_coord_should_count_parked_file(
+    int status, int cf_none, int cf_partial, int is_last);
+int nzbget_rs_pup_history_coord_should_recheck_failed_articles(
+    int daf_none, int hc_dupe, int kind_nzb, int failed_articles,
+    const char* text_status, int has_dupe_recheck_param);
+int nzbget_rs_pup_history_coord_should_delete_dest_dir(
+    int is_nzb, int delete_status, int ds_none,
+    int par_status, int ps_failure, int unpack_status,
+    int us_failure, int us_password, int dir_exists);
+int nzbget_rs_pup_history_coord_should_erase_on_delete(
+    int final_delete, int dupe_check, int is_url);
+int nzbget_rs_pup_history_coord_is_temporary_output_name(const char* filename);
+int nzbget_rs_pup_history_coord_parse_dupe_backup_flag(
+    const char* text, int ds_dupe, int ds_manual);
+
+int nzbget_rs_pup_scanner_select_service_interval(
+    int requested_scan, int nzb_dir_interval_opt, int cur_interval,
+    int now_val, int sleep_val);
+int nzbget_rs_pup_scanner_should_skip_item(
+    const char* filename, const char* processed_dir, const char* broken_dir);
+int nzbget_rs_pup_scanner_is_absolute_nzb_name(const char* nzb_name);
+
+int nzbget_rs_pup_queue_editor_is_history_or_post_without_ids(
+    int action, int ea_post_delete, int ea_history_delete,
+    int ea_history_set_name, int has_id_list);
+size_t nzbget_rs_pup_nzb_info_strip_nzb_ext_len(
+    const char* nicename, int remove_ext);
+void nzbget_rs_pup_nzb_info_calc_active_downloads_sec(
+    int old_active, int new_active, int is_nzb_kind, int64_t cur_time,
+    int download_sec, int64_t download_start_time, int download_start_sec,
+    int* out_download_sec, int64_t* out_download_start_time,
+    int* out_download_start_sec, int* out_changed);
+int nzbget_rs_pup_file_info_blocks_download_completion(
+    int paused, int ignore_paused_pars, int par_file, int deleted);
+int nzbget_rs_pup_history_coord_can_attempt_requeue_file(
+    int status, int cf_success, int cf_failure, int reset_failed, int file_id);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

@@ -95,6 +95,8 @@ pub mod dupequeuehealth;
 pub mod dupesearchfetcher;
 pub mod dupeidentnntpnzb;
 pub mod articledlwriterstat;
+pub mod xmlrpc_format;
+pub mod diskstate_format;
 
 pub mod deadpostings;
 pub mod dupewatch;

@@ -102,7 +102,6 @@ private:
 	void CalcFileStats(DownloadQueue* downloadQueue, int formatVersion);
 	bool LoadAllFileInfos(DownloadQueue* downloadQueue);
 	bool LoadAllFileStates(DownloadQueue* downloadQueue, Servers* servers);
-	void SaveServerStats(ServerStatList* serverStatList, StateDiskFile& outfile);
 	bool LoadServerStats(ServerStatList* serverStatList, Servers* servers, StateDiskFile& infile);
 	void CleanupQueueDir(DownloadQueue* downloadQueue);
 };

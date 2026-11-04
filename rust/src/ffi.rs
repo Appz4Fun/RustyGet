@@ -101,14 +101,14 @@ pub struct RsBuf {
     cap: usize,
 }
 
-fn into_buf(mut v: Vec<u8>) -> RsBuf {
+pub(crate) fn into_buf(mut v: Vec<u8>) -> RsBuf {
     v.push(0);
     let len = v.len() - 1;
     let mut v = std::mem::ManuallyDrop::new(v);
     RsBuf { data: v.as_mut_ptr() as *mut c_char, len, cap: v.capacity() }
 }
 
-unsafe fn input<'a>(raw: *const c_char) -> &'a [u8] {
+pub(crate) unsafe fn input<'a>(raw: *const c_char) -> &'a [u8] {
     if raw.is_null() { &[] } else { CStr::from_ptr(raw).to_bytes() }
 }
 

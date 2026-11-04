@@ -89,6 +89,15 @@ namespace
 	{
 		return nzbget_rs_ntw_xmlrpc_mib_per_sec(bytes, ms);
 	}
+
+	void AppendRsBuf(StringBuilder& response, NzbgetRsBuf buf)
+	{
+		if (buf.data && buf.len > 0)
+		{
+			response.Append(buf.data, static_cast<int>(buf.len));
+		}
+		nzbget_rs_free(buf);
+	}
 }
 
 extern void ExitProc();
@@ -434,38 +443,6 @@ private:
 	};
 
 	void PrintError(const char* errMsg);
-
-	std::optional<ServerParams> ParseRequestParams(const Json::value& value)
-	{
-		if (!value.is_object())
-			return std::nullopt;
-
-		const Json::object& obj = value.as_object();
-		if (!obj.contains("params") || !obj.at("params").is_array())
-			return std::nullopt;
-
-		const Json::array& paramsArray = obj.at("params").as_array();
-		if (paramsArray.size() < 8)
-			return std::nullopt;
-
-		try
-		{
-			ServerParams p;
-			p.host = Json::value_to<std::string>(paramsArray.at(0));
-			p.port = Json::value_to<int>(paramsArray.at(1));
-			p.username = Json::value_to<std::string>(paramsArray.at(2));
-			p.password = Json::value_to<std::string>(paramsArray.at(3));
-			p.encryption = Json::value_to<bool>(paramsArray.at(4));
-			p.cipher = Json::value_to<std::string>(paramsArray.at(5));
-			p.timeout = Json::value_to<int>(paramsArray.at(6));
-			p.certVerifLevel = Json::value_to<int>(paramsArray.at(7));
-			return p;
-		}
-		catch (const std::exception&)
-		{
-			return std::nullopt;
-		}
-	}
 };
 
 class TlsCipherXmlCommand final : public XmlCommand
@@ -809,252 +786,79 @@ void XmlRpcProcessor::BuildJsonPRefusal(XmlCommand* command, int errCode, const 
 
 std::unique_ptr<XmlCommand> XmlRpcProcessor::CreateCommand(const char* methodName)
 {
-	std::unique_ptr<XmlCommand> command;
-
 	int accessDenied = nzbget_rs_ntw_xmlrpc_check_user_access_denied(
 		(int)m_userAccess, (int)uaAdd, (int)uaRestricted, methodName);
 	if (accessDenied == 1)
 	{
-		command = std::make_unique<ErrorXmlCommand>(401, "Access denied");
 		warn("Received request \"%s\" from add-user, access denied", methodName);
+		return std::make_unique<ErrorXmlCommand>(401, "Access denied");
 	}
-	else if (accessDenied == 2)
+	if (accessDenied == 2)
 	{
-		command = std::make_unique<ErrorXmlCommand>(401, "Access denied");
 		warn("Received request \"%s\" from restricted user, access denied", methodName);
-	}
-	else if (!strcasecmp(methodName, "pause") || !strcasecmp(methodName, "pausedownload") ||
-		!strcasecmp(methodName, "pausedownload2"))
-	{
-		command = std::make_unique<PauseUnpauseXmlCommand>(true, PauseUnpauseXmlCommand::paDownload);
-	}
-	else if (!strcasecmp(methodName, "resume") || !strcasecmp(methodName, "resumedownload") ||
-		!strcasecmp(methodName, "resumedownload2"))
-	{
-		command = std::make_unique<PauseUnpauseXmlCommand>(false, PauseUnpauseXmlCommand::paDownload);
-	}
-	else if (!strcasecmp(methodName, "shutdown"))
-	{
-		command = std::make_unique<ShutdownXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "reload"))
-	{
-		command = std::make_unique<ReloadXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "version"))
-	{
-		command = std::make_unique<VersionXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "dump"))
-	{
-		command = std::make_unique<DumpDebugXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "rate"))
-	{
-		command = std::make_unique<SetDownloadRateXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "status"))
-	{
-		command = std::make_unique<StatusXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "sysinfo"))
-	{
-		command = std::make_unique<SysInfoXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "systemhealth"))
-	{
-		command = std::make_unique<SystemHealthXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "log"))
-	{
-		command = std::make_unique<LogXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "listfiles"))
-	{
-		command = std::make_unique<ListFilesXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "listgroups"))
-	{
-		command = std::make_unique<ListGroupsXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "editqueue"))
-	{
-		command = std::make_unique<EditQueueXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "append") || !strcasecmp(methodName, "appendurl"))
-	{
-		command = std::make_unique<DownloadXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "appendfleet"))
-	{
-		command = std::make_unique<AppendFleetXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "postqueue"))
-	{
-		command = std::make_unique<PostQueueXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "writelog"))
-	{
-		command = std::make_unique<WriteLogXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "clearlog"))
-	{
-		command = std::make_unique<ClearLogXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "loadlog"))
-	{
-		command = std::make_unique<LoadLogXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "scan"))
-	{
-		command = std::make_unique<ScanXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "pausepost"))
-	{
-		command = std::make_unique<PauseUnpauseXmlCommand>(true, PauseUnpauseXmlCommand::paPostProcess);
-	}
-	else if (!strcasecmp(methodName, "resumepost"))
-	{
-		command = std::make_unique<PauseUnpauseXmlCommand>(false, PauseUnpauseXmlCommand::paPostProcess);
-	}
-	else if (!strcasecmp(methodName, "pausescan"))
-	{
-		command = std::make_unique<PauseUnpauseXmlCommand>(true, PauseUnpauseXmlCommand::paScan);
-	}
-	else if (!strcasecmp(methodName, "resumescan"))
-	{
-		command = std::make_unique<PauseUnpauseXmlCommand>(false, PauseUnpauseXmlCommand::paScan);
-	}
-	else if (!strcasecmp(methodName, "scheduleresume"))
-	{
-		command = std::make_unique<ScheduleResumeXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "history"))
-	{
-		command = std::make_unique<HistoryXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "urlqueue"))
-	{
-		command = std::make_unique<UrlQueueXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "config"))
-	{
-		command = std::make_unique<ConfigXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "loadconfig"))
-	{
-		command = std::make_unique<LoadConfigXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "loadextensions"))
-	{
-		command = std::make_unique<LoadExtensionsXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "downloadextension"))
-	{
-		command = std::make_unique<DownloadExtensionXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "updateextension"))
-	{
-		command = std::make_unique<UpdateExtensionXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "deleteextension"))
-	{
-		command = std::make_unique<DeleteExtensionXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "testextension"))
-	{
-		command = std::make_unique<TestExtensionXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "saveconfig"))
-	{
-		command = std::make_unique<SaveConfigXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "configtemplates"))
-	{
-		command = std::make_unique<ConfigTemplatesXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "viewfeed"))
-	{
-		command = std::make_unique<ViewFeedXmlCommand>(false);
-	}
-	else if (!strcasecmp(methodName, "previewfeed"))
-	{
-		command = std::make_unique<ViewFeedXmlCommand>(true);
-	}
-	else if (!strcasecmp(methodName, "fetchfeed"))
-	{
-		command = std::make_unique<FetchFeedXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "editserver"))
-	{
-		command = std::make_unique<EditServerXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "readurl"))
-	{
-		command = std::make_unique<ReadUrlXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "checkupdates"))
-	{
-		command = std::make_unique<CheckUpdatesXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "startupdate"))
-	{
-		command = std::make_unique<StartUpdateXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "logupdate"))
-	{
-		command = std::make_unique<LogUpdateXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "servervolumes"))
-	{
-		command = std::make_unique<ServerVolumesXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "resetservervolume"))
-	{
-		command = std::make_unique<ResetServerVolumeXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "tlscipherstart"))
-	{
-		command = std::make_unique<TlsCipherXmlCommand>(0);
-	}
-	else if (!strcasecmp(methodName, "tlscipherstatus"))
-	{
-		command = std::make_unique<TlsCipherXmlCommand>(1);
-	}
-	else if (!strcasecmp(methodName, "tlsciphercancel"))
-	{
-		command = std::make_unique<TlsCipherXmlCommand>(2);
-	}
-	else if (!strcasecmp(methodName, "testserver"))
-	{
-		command = std::make_unique<TestServerXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "testserverspeed"))
-	{
-		command = std::make_unique<TestServerSpeedXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "testdiskspeed"))
-	{
-		command = std::make_unique<TestDiskSpeedXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "testnetworkspeed"))
-	{
-		command = std::make_unique<TestNetworkSpeedXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "startscript"))
-	{
-		command = std::make_unique<StartScriptXmlCommand>();
-	}
-	else if (!strcasecmp(methodName, "logscript"))
-	{
-		command = std::make_unique<LogScriptXmlCommand>();
-	}
-	else
-	{
-		command = std::make_unique<ErrorXmlCommand>(1, "Invalid procedure");
+		return std::make_unique<ErrorXmlCommand>(401, "Access denied");
 	}
 
-	return command;
+	switch (nzbget_rs_xmlrpc_match_command(methodName))
+	{
+		case 1: return std::make_unique<PauseUnpauseXmlCommand>(true, PauseUnpauseXmlCommand::paDownload);
+		case 2: return std::make_unique<PauseUnpauseXmlCommand>(false, PauseUnpauseXmlCommand::paDownload);
+		case 3: return std::make_unique<ShutdownXmlCommand>();
+		case 4: return std::make_unique<ReloadXmlCommand>();
+		case 5: return std::make_unique<VersionXmlCommand>();
+		case 6: return std::make_unique<DumpDebugXmlCommand>();
+		case 7: return std::make_unique<SetDownloadRateXmlCommand>();
+		case 8: return std::make_unique<StatusXmlCommand>();
+		case 9: return std::make_unique<SysInfoXmlCommand>();
+		case 10: return std::make_unique<SystemHealthXmlCommand>();
+		case 11: return std::make_unique<LogXmlCommand>();
+		case 12: return std::make_unique<ListFilesXmlCommand>();
+		case 13: return std::make_unique<ListGroupsXmlCommand>();
+		case 14: return std::make_unique<EditQueueXmlCommand>();
+		case 15: return std::make_unique<DownloadXmlCommand>();
+		case 16: return std::make_unique<AppendFleetXmlCommand>();
+		case 17: return std::make_unique<PostQueueXmlCommand>();
+		case 18: return std::make_unique<WriteLogXmlCommand>();
+		case 19: return std::make_unique<ClearLogXmlCommand>();
+		case 20: return std::make_unique<LoadLogXmlCommand>();
+		case 21: return std::make_unique<ScanXmlCommand>();
+		case 22: return std::make_unique<PauseUnpauseXmlCommand>(true, PauseUnpauseXmlCommand::paPostProcess);
+		case 23: return std::make_unique<PauseUnpauseXmlCommand>(false, PauseUnpauseXmlCommand::paPostProcess);
+		case 24: return std::make_unique<PauseUnpauseXmlCommand>(true, PauseUnpauseXmlCommand::paScan);
+		case 25: return std::make_unique<PauseUnpauseXmlCommand>(false, PauseUnpauseXmlCommand::paScan);
+		case 26: return std::make_unique<ScheduleResumeXmlCommand>();
+		case 27: return std::make_unique<HistoryXmlCommand>();
+		case 28: return std::make_unique<UrlQueueXmlCommand>();
+		case 29: return std::make_unique<ConfigXmlCommand>();
+		case 30: return std::make_unique<LoadConfigXmlCommand>();
+		case 31: return std::make_unique<LoadExtensionsXmlCommand>();
+		case 32: return std::make_unique<DownloadExtensionXmlCommand>();
+		case 33: return std::make_unique<UpdateExtensionXmlCommand>();
+		case 34: return std::make_unique<DeleteExtensionXmlCommand>();
+		case 35: return std::make_unique<TestExtensionXmlCommand>();
+		case 36: return std::make_unique<SaveConfigXmlCommand>();
+		case 37: return std::make_unique<ConfigTemplatesXmlCommand>();
+		case 38: return std::make_unique<ViewFeedXmlCommand>(false);
+		case 39: return std::make_unique<ViewFeedXmlCommand>(true);
+		case 40: return std::make_unique<FetchFeedXmlCommand>();
+		case 41: return std::make_unique<EditServerXmlCommand>();
+		case 42: return std::make_unique<ReadUrlXmlCommand>();
+		case 43: return std::make_unique<CheckUpdatesXmlCommand>();
+		case 44: return std::make_unique<StartUpdateXmlCommand>();
+		case 45: return std::make_unique<LogUpdateXmlCommand>();
+		case 46: return std::make_unique<ServerVolumesXmlCommand>();
+		case 47: return std::make_unique<ResetServerVolumeXmlCommand>();
+		case 48: return std::make_unique<TlsCipherXmlCommand>(0);
+		case 49: return std::make_unique<TlsCipherXmlCommand>(1);
+		case 50: return std::make_unique<TlsCipherXmlCommand>(2);
+		case 51: return std::make_unique<TestServerXmlCommand>();
+		case 52: return std::make_unique<TestServerSpeedXmlCommand>();
+		case 53: return std::make_unique<TestDiskSpeedXmlCommand>();
+		case 54: return std::make_unique<TestNetworkSpeedXmlCommand>();
+		case 55: return std::make_unique<StartScriptXmlCommand>();
+		case 56: return std::make_unique<LogScriptXmlCommand>();
+		default: return std::make_unique<ErrorXmlCommand>(1, "Invalid procedure");
+	}
 }
 
 
@@ -1102,19 +906,6 @@ void XmlCommand::AppendCondResponse(const char* part, bool cond)
 
 void XmlCommand::BuildErrorResponse(int errCode, const char* errText, ...)
 {
-	const char* XML_RESPONSE_ERROR_BODY =
-		"<struct>\n"
-		"<member><name>faultCode</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>faultString</name><value><string>%s</string></value></member>\n"
-		"</struct>\n";
-
-	const char* JSON_RESPONSE_ERROR_BODY =
-		"{\n"
-		"\"name\" : \"JSONRPCError\",\n"
-		"\"code\" : %i,\n"
-		"\"message\" : \"%s\"\n"
-		"}";
-
 	char fullText[1024];
 
 	va_list ap;
@@ -1123,33 +914,19 @@ void XmlCommand::BuildErrorResponse(int errCode, const char* errText, ...)
 	fullText[1024-1] = '\0';
 	va_end(ap);
 
-	BString<1024> content(IsJson() ? JSON_RESPONSE_ERROR_BODY : XML_RESPONSE_ERROR_BODY,
-		errCode, *EncodeStr(fullText));
-
-	AppendResponse(content);
+	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_error(IsJson() ? 1 : 0, errCode, fullText));
 
 	m_fault = true;
 }
 
 void XmlCommand::BuildBoolResponse(bool ok)
 {
-	const char* XML_RESPONSE_BOOL_BODY = "<boolean>%s</boolean>";
-	const char* JSON_RESPONSE_BOOL_BODY = "%s";
-
-	BString<1024> content(IsJson() ? JSON_RESPONSE_BOOL_BODY : XML_RESPONSE_BOOL_BODY,
-		BoolToStr(ok));
-
-	AppendResponse(content);
+	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_bool(IsJson() ? 1 : 0, ok ? 1 : 0));
 }
 
 void XmlCommand::BuildIntResponse(int value)
 {
-	const char* XML_RESPONSE_INT_BODY = "<i4>%i</i4>";
-	const char* JSON_RESPONSE_INT_BODY = "%i";
-
-	BString<1024> content(IsJson() ? JSON_RESPONSE_INT_BODY : XML_RESPONSE_INT_BODY, value);
-
-	AppendResponse(content);
+	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_int(IsJson() ? 1 : 0, value));
 }
 
 void XmlCommand::PrepareParams()
@@ -1324,12 +1101,7 @@ void ReloadXmlCommand::Execute()
 
 void VersionXmlCommand::Execute()
 {
-	const char* XML_RESPONSE_STRING_BODY = "<string>%s</string>";
-	const char* JSON_RESPONSE_STRING_BODY = "\"%s\"";
-
-	BString<1024> content(IsJson() ? JSON_RESPONSE_STRING_BODY : XML_RESPONSE_STRING_BODY, Util::VersionRevision());
-
-	AppendResponse(content);
+	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_string(IsJson() ? 1 : 0, Util::VersionRevision(), 0, 1023));
 }
 
 void DumpDebugXmlCommand::Execute()
@@ -1356,148 +1128,6 @@ void SetDownloadRateXmlCommand::Execute()
 
 void StatusXmlCommand::Execute()
 {
-	const char* XML_STATUS_START =
-		"<struct>\n"
-		"<member><name>RemainingSizeLo</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>RemainingSizeHi</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>RemainingSizeMB</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>ForcedSizeLo</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>ForcedSizeHi</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>ForcedSizeMB</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>DownloadedSizeLo</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>DownloadedSizeHi</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>DownloadedSizeMB</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>MonthSizeLo</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>MonthSizeHi</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>MonthSizeMB</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>DaySizeLo</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>DaySizeHi</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>DaySizeMB</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>ArticleCacheLo</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>ArticleCacheHi</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>ArticleCacheMB</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>MemoryPressure</name><value><string>%s</string></value></member>\n"
-		"<member><name>EffectiveArticleCacheMB</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>EffectiveParBufferMB</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>DownloadRate</name><value><i4>%i</i4></value></member>\n"				// deprecated
-		"<member><name>DownloadRateLo</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>DownloadRateHi</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>AverageDownloadRate</name><value><i4>%i</i4></value></member>\n"			// deprecated
-		"<member><name>AverageDownloadRateLo</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>AverageDownloadRateHi</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>DownloadLimit</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>ThreadCount</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>ParJobCount</name><value><i4>%i</i4></value></member>\n"					// deprecated (renamed to PostJobCount)
-		"<member><name>PostJobCount</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>UrlCount</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>UpTimeSec</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>DownloadTimeSec</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>ServerPaused</name><value><boolean>%s</boolean></value></member>\n"		// deprecated (renamed to DownloadPaused)
-		"<member><name>DownloadPaused</name><value><boolean>%s</boolean></value></member>\n"
-		"<member><name>Download2Paused</name><value><boolean>%s</boolean></value></member>\n"	// deprecated (same as DownloadPaused)
-		"<member><name>ServerStandBy</name><value><boolean>%s</boolean></value></member>\n"
-		"<member><name>PostPaused</name><value><boolean>%s</boolean></value></member>\n"
-		"<member><name>ScanPaused</name><value><boolean>%s</boolean></value></member>\n"
-		"<member><name>QuotaReached</name><value><boolean>%s</boolean></value></member>\n"
-		"<member><name>FreeDiskSpaceLo</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>FreeDiskSpaceHi</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>FreeDiskSpaceMB</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>TotalDiskSpaceLo</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>TotalDiskSpaceHi</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>TotalDiskSpaceMB</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>FreeInterDiskSpaceLo</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>FreeInterDiskSpaceHi</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>FreeInterDiskSpaceMB</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>TotalInterDiskSpaceLo</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>TotalInterDiskSpaceHi</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>TotalInterDiskSpaceMB</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>ServerTime</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>ResumeTime</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>FeedActive</name><value><boolean>%s</boolean></value></member>\n"
-		"<member><name>QueueScriptCount</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>NewsServers</name><value><array><data>\n";
-
-	const char* XML_STATUS_END =
-		"</data></array></value></member>\n"
-		"</struct>\n";
-
-	const char* JSON_STATUS_START =
-		"{\n"
-		"\"RemainingSizeLo\" : %u,\n"
-		"\"RemainingSizeHi\" : %u,\n"
-		"\"RemainingSizeMB\" : %i,\n"
-		"\"ForcedSizeLo\" : %u,\n"
-		"\"ForcedSizeHi\" : %u,\n"
-		"\"ForcedSizeMB\" : %i,\n"
-		"\"DownloadedSizeLo\" : %u,\n"
-		"\"DownloadedSizeHi\" : %u,\n"
-		"\"DownloadedSizeMB\" : %i,\n"
-		"\"MonthSizeLo\" : %u,\n"
-		"\"MonthSizeHi\" : %u,\n"
-		"\"MonthSizeMB\" : %i,\n"
-		"\"DaySizeLo\" : %u,\n"
-		"\"DaySizeHi\" : %u,\n"
-		"\"DaySizeMB\" : %i,\n"
-		"\"ArticleCacheLo\" : %u,\n"
-		"\"ArticleCacheHi\" : %u,\n"
-		"\"ArticleCacheMB\" : %i,\n"
-		"\"MemoryPressure\" : \"%s\",\n"
-		"\"EffectiveArticleCacheMB\" : %i,\n"
-		"\"EffectiveParBufferMB\" : %i,\n"
-		"\"DownloadRate\" : %i,\n"				// deprecated
-		"\"DownloadRateLo\" : %u,\n"
-		"\"DownloadRateHi\" : %u,\n"
-		"\"AverageDownloadRate\" : %i,\n"		// deprecated
-		"\"AverageDownloadRateLo\" : %u,\n"
-		"\"AverageDownloadRateHi\" : %u,\n"
-		"\"DownloadLimit\" : %i,\n"
-		"\"ThreadCount\" : %u,\n"
-		"\"ParJobCount\" : %i,\n"				// deprecated (renamed to PostJobCount)
-		"\"PostJobCount\" : %i,\n"
-		"\"UrlCount\" : %i,\n"
-		"\"UpTimeSec\" : %i,\n"
-		"\"DownloadTimeSec\" : %i,\n"
-		"\"ServerPaused\" : %s,\n"				// deprecated (renamed to DownloadPaused)
-		"\"DownloadPaused\" : %s,\n"
-		"\"Download2Paused\" : %s,\n"			// deprecated (same as DownloadPaused)
-		"\"ServerStandBy\" : %s,\n"
-		"\"PostPaused\" : %s,\n"
-		"\"ScanPaused\" : %s,\n"
-		"\"QuotaReached\" : %s,\n"
-		"\"FreeDiskSpaceLo\" : %u,\n"
-		"\"FreeDiskSpaceHi\" : %u,\n"
-		"\"FreeDiskSpaceMB\" : %i,\n"
-		"\"TotalDiskSpaceLo\" : %u,\n"
-		"\"TotalDiskSpaceHi\" : %u,\n"
-		"\"TotalDiskSpaceMB\" : %i,\n"
-		"\"FreeInterDiskSpaceLo\" : %u,\n"
-		"\"FreeInterDiskSpaceHi\" : %u,\n"
-		"\"FreeInterDiskSpaceMB\" : %i,\n"
-		"\"TotalInterDiskSpaceLo\" : %u,\n"
-		"\"TotalInterDiskSpaceHi\" : %u,\n"
-		"\"TotalInterDiskSpaceMB\" : %i,\n"
-		"\"ServerTime\" : %i,\n"
-		"\"ResumeTime\" : %i,\n"
-		"\"FeedActive\" : %s,\n"
-		"\"QueueScriptCount\" : %i,\n"
-		"\"NewsServers\" : [\n";
-
-	const char* JSON_STATUS_END =
-		"]\n"
-		"}";
-
-	const char* XML_NEWSSERVER_ITEM =
-		"<value><struct>\n"
-		"<member><name>ID</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>Active</name><value><boolean>%s</boolean></value></member>\n"
-		"</struct></value>\n";
-
-	const char* JSON_NEWSSERVER_ITEM =
-		"{\n"
-		"\"ID\" : %i,\n"
-		"\"Active\" : %s\n"
-		"}";
-
 	int postJobCount = 0;
 	int urlCount = 0;
 	int64 remainingSize, forcedSize;
@@ -1511,73 +1141,25 @@ void StatusXmlCommand::Execute()
 		downloadQueue->CalcRemainingSize(&remainingSize, &forcedSize);
 	}
 
-	uint32 remainingSizeHi, remainingSizeLo;
-	Util::SplitInt64(remainingSize, &remainingSizeHi, &remainingSizeLo);
-
-	uint32 forcedSizeHi, forcedSizeLo;
-	Util::SplitInt64(forcedSize, &forcedSizeHi, &forcedSizeLo);
-
 	int64 articleCache = g_ArticleCache->GetAllocated();
-	uint32 articleCacheHi, articleCacheLo;
-	Util::SplitInt64(articleCache, &articleCacheHi, &articleCacheLo);
-
 	const char* memoryPressure = g_MemoryMonitor ? g_MemoryMonitor->GetTierName() : "NORMAL";
 	int effectiveArticleCacheMB = g_MemoryMonitor ? g_MemoryMonitor->GetEffectiveArticleCacheMB() : g_Options->GetArticleCache();
 	int effectiveParBufferMB = g_MemoryMonitor ? g_MemoryMonitor->GetEffectiveParBufferMB(g_Options->GetParBuffer()) : g_Options->GetParBuffer();
 
-	int64 downloadRate = g_StatMeter->CalcCurrentDownloadSpeed();
-	uint32 downloadRateHi, downloadRateLo;
-	Util::SplitInt64(downloadRate, &downloadRateHi, &downloadRateLo);
-
-	int downloadLimit = (int)(g_WorkState->GetSpeedLimit());
-	bool downloadPaused = g_WorkState->GetPauseDownload();
-	bool postPaused = g_WorkState->GetPausePostProcess();
-	bool scanPaused = g_WorkState->GetPauseScan();
-	bool quotaReached = g_WorkState->GetQuotaReached();
-	int threadCount = Thread::GetThreadCount() - 1; // not counting itself
-
-	uint32 downloadedSizeHi, downloadedSizeLo;
 	int upTimeSec, downloadTimeSec;
 	int64 allBytes;
 	bool serverStandBy;
 	g_StatMeter->CalcTotalStat(&upTimeSec, &downloadTimeSec, &allBytes, &serverStandBy);
-	Util::SplitInt64(allBytes, &downloadedSizeHi, &downloadedSizeLo);
-
-	int64 averageDownloadRate = nzbget_rs_rol_xmlrpc_calc_average_download_rate(downloadTimeSec, allBytes);
-	uint32 averageDownloadRateHi, averageDownloadRateLo;
-	Util::SplitInt64(averageDownloadRate, &averageDownloadRateHi, &averageDownloadRateLo);
 
 	int64 monthBytes, dayBytes;
 	g_StatMeter->CalcQuotaUsage(monthBytes, dayBytes);
-	uint32 monthSizeHi, monthSizeLo;
-	Util::SplitInt64(monthBytes, &monthSizeHi, &monthSizeLo);
-
-	uint32 daySizeHi, daySizeLo;
-	Util::SplitInt64(dayBytes, &daySizeHi, &daySizeLo);
-
-	int remainingMBytes = 0, forcedMBytes = 0, articleCacheMBytes = 0;
-	int downloadedMBytes = 0, monthMBytes = 0, dayMBytes = 0;
-	nzbget_rs_roc_xmlrpc_status_calc_mbytes(
-		remainingSize, forcedSize, articleCache, allBytes, monthBytes, dayBytes,
-		&remainingMBytes, &forcedMBytes, &articleCacheMBytes,
-		&downloadedMBytes, &monthMBytes, &dayMBytes);
-
-	uint32 freeDiskSpaceHi, freeDiskSpaceLo;
-	uint32 totalDiskSpaceHi, totalDiskSpaceLo;
-	uint32 freeInterDiskSpaceHi, freeInterDiskSpaceLo;
-	uint32 totalInterDiskSpaceHi, totalInterDiskSpaceLo;
 
 	int64 freeDiskSpace = 0;
 	int64 totalDiskSpace = 0;
 	int64 freeInterDiskSpace = 0;
 	int64 totalInterDiskSpace = 0;
 
-	if (Util::EmptyStr(g_Options->GetDestDir()))
-	{
-		freeDiskSpace = 0;
-		totalDiskSpace = 0;
-	}
-	else
+	if (!Util::EmptyStr(g_Options->GetDestDir()))
 	{
 		auto res = FileSystem::GetDiskState(g_Options->GetDestDir());
 		if (res.has_value())
@@ -1600,68 +1182,47 @@ void StatusXmlCommand::Execute()
 		}
 	}
 
-	int freeDiskSpaceMB = 0, totalDiskSpaceMB = 0;
-	int freeInterDiskSpaceMB = 0, totalInterDiskSpaceMB = 0;
-	nzbget_rs_roc_xmlrpc_status_calc_disk_space_mb(
-		freeDiskSpace, totalDiskSpace, interDirEmpty ? 1 : 0,
-		freeInterDiskSpace, totalInterDiskSpace,
-		&freeInterDiskSpace, &totalInterDiskSpace,
-		&freeDiskSpaceMB, &totalDiskSpaceMB,
-		&freeInterDiskSpaceMB, &totalInterDiskSpaceMB);
+	NzbgetRsRpcStatusInput statusFields{};
+	statusFields.remaining_size = remainingSize;
+	statusFields.forced_size = forcedSize;
+	statusFields.article_cache = articleCache;
+	statusFields.all_bytes = allBytes;
+	statusFields.month_bytes = monthBytes;
+	statusFields.day_bytes = dayBytes;
+	statusFields.memory_pressure = memoryPressure;
+	statusFields.effective_article_cache_mb = effectiveArticleCacheMB;
+	statusFields.effective_par_buffer_mb = effectiveParBufferMB;
+	statusFields.download_rate = g_StatMeter->CalcCurrentDownloadSpeed();
+	statusFields.download_limit = (int)(g_WorkState->GetSpeedLimit());
+	statusFields.thread_count = Thread::GetThreadCount() - 1; // not counting itself
+	statusFields.post_job_count = postJobCount;
+	statusFields.url_count = urlCount;
+	statusFields.up_time_sec = upTimeSec;
+	statusFields.download_time_sec = downloadTimeSec;
+	statusFields.download_paused = g_WorkState->GetPauseDownload() ? 1 : 0;
+	statusFields.server_stand_by = serverStandBy ? 1 : 0;
+	statusFields.post_paused = g_WorkState->GetPausePostProcess() ? 1 : 0;
+	statusFields.scan_paused = g_WorkState->GetPauseScan() ? 1 : 0;
+	statusFields.quota_reached = g_WorkState->GetQuotaReached() ? 1 : 0;
+	statusFields.free_disk_space = freeDiskSpace;
+	statusFields.total_disk_space = totalDiskSpace;
+	statusFields.inter_dir_empty = interDirEmpty ? 1 : 0;
+	statusFields.free_inter_disk_space = freeInterDiskSpace;
+	statusFields.total_inter_disk_space = totalInterDiskSpace;
+	statusFields.server_time = (int)Util::CurrentTime();
+	statusFields.resume_time = (int)g_WorkState->GetResumeTime();
+	statusFields.feed_active = g_FeedCoordinator->HasActiveDownloads() ? 1 : 0;
+	statusFields.queued_scripts = g_QueueScriptCoordinator->GetQueueSize();
 
-	Util::SplitInt64(freeDiskSpace, &freeDiskSpaceHi, &freeDiskSpaceLo);
-	Util::SplitInt64(totalDiskSpace, &totalDiskSpaceHi, &totalDiskSpaceLo);
-	Util::SplitInt64(freeInterDiskSpace, &freeInterDiskSpaceHi, &freeInterDiskSpaceLo);
-	Util::SplitInt64(totalInterDiskSpace, &totalInterDiskSpaceHi, &totalInterDiskSpaceLo);
-
-	int serverTime = (int)Util::CurrentTime();
-	int resumeTime = (int)g_WorkState->GetResumeTime();
-	bool feedActive = g_FeedCoordinator->HasActiveDownloads();
-	int queuedScripts = g_QueueScriptCoordinator->GetQueueSize();
-
-	AppendFmtResponse(IsJson() ? JSON_STATUS_START : XML_STATUS_START,
-		remainingSizeLo, remainingSizeHi, remainingMBytes, forcedSizeLo,
-		forcedSizeHi, forcedMBytes, downloadedSizeLo, downloadedSizeHi, downloadedMBytes,
-		monthSizeLo, monthSizeHi, monthMBytes, daySizeLo, daySizeHi, dayMBytes,
-		articleCacheLo, articleCacheHi, articleCacheMBytes,
-		memoryPressure, effectiveArticleCacheMB, effectiveParBufferMB,
-		Util::SafeIntCast<int64, int32>(downloadRate),
-		downloadRateLo,
-		downloadRateHi,
-		Util::SafeIntCast<int64, int32>(averageDownloadRate),
-		averageDownloadRateLo,
-		averageDownloadRateHi,
-		downloadLimit, threadCount,
-		postJobCount, postJobCount, urlCount, upTimeSec, downloadTimeSec,
-		BoolToStr(downloadPaused), BoolToStr(downloadPaused), BoolToStr(downloadPaused),
-		BoolToStr(serverStandBy), BoolToStr(postPaused), BoolToStr(scanPaused), BoolToStr(quotaReached),
-		freeDiskSpaceLo,
-		freeDiskSpaceHi,
-		freeDiskSpaceMB,
-		totalDiskSpaceLo,
-		totalDiskSpaceHi,
-		totalDiskSpaceMB,
-		freeInterDiskSpaceLo,
-		freeInterDiskSpaceHi,
-		freeInterDiskSpaceMB,
-		totalInterDiskSpaceLo,
-		totalInterDiskSpaceHi,
-		totalInterDiskSpaceMB,
-		serverTime,
-		resumeTime,
-		BoolToStr(feedActive),
-		queuedScripts
-	);
-
-	int index = 0;
+	std::vector<NzbgetRsRpcServerStatus> servers;
+	servers.reserve(g_ServerPool->GetServers()->size());
 	for (NewsServer* server : g_ServerPool->GetServers())
 	{
-		AppendCondResponse(",\n", IsJson() && index++ > 0);
-		AppendFmtResponse(IsJson() ? JSON_NEWSSERVER_ITEM : XML_NEWSSERVER_ITEM,
-			server->GetId(), BoolToStr(server->GetActive()));
+		servers.push_back(NzbgetRsRpcServerStatus{ server->GetId(), server->GetActive() ? 1 : 0 });
 	}
 
-	AppendResponse(IsJson() ? JSON_STATUS_END : XML_STATUS_END);
+	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_status(
+		IsJson() ? 1 : 0, &statusFields, servers.data(), servers.size()));
 }
 
 void SysInfoXmlCommand::Execute()
@@ -1704,8 +1265,6 @@ void LogXmlCommand::Execute()
 	debug("iIDFrom=%i", m_idFrom);
 	debug("iNrEntries=%i", m_nrEntries);
 
-	AppendResponse(IsJson() ? "[\n" : "<array><data>\n");
-
 	GuardedMessageList messages = GuardMessages();
 
 	int start = messages->size();
@@ -1714,37 +1273,24 @@ void LogXmlCommand::Execute()
 		messages->empty() ? 0 : (int)messages->front().GetId(),
 		m_idFrom, m_nrEntries, &start, &m_nrEntries);
 
-	const char* XML_LOG_ITEM =
-		"<value><struct>\n"
-		"<member><name>ID</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>Kind</name><value><string>%s</string></value></member>\n"
-		"<member><name>Time</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>Text</name><value><string>%s</string></value></member>\n"
-		"</struct></value>\n";
-
-	const char* JSON_LOG_ITEM =
-		"{\n"
-		"\"ID\" : %i,\n"
-		"\"Kind\" : \"%s\",\n"
-		"\"Time\" : %i,\n"
-		"\"Text\" : \"%s\"\n"
-		"}";
-
-	const char* messageType[] = { "INFO", "WARNING", "ERROR", "DEBUG", "DETAIL" };
-
-	int index = 0;
-
-	for (uint32 i = (uint32)start; i < messages->size(); i++)
+	std::vector<NzbgetRsRpcLogEntry> entries;
+	if ((uint32)start < messages->size())
 	{
-		Message& message = messages->at(i);
-
-		AppendCondResponse(",\n", IsJson() && index++ > 0);
-		AppendFmtResponse(IsJson() ? JSON_LOG_ITEM : XML_LOG_ITEM,
-			message.GetId(), messageType[message.GetKind()], (int)message.GetTime(),
-			*EncodeStr(message.GetText()));
+		entries.reserve(messages->size() - (uint32)start);
+		for (uint32 i = (uint32)start; i < messages->size(); i++)
+		{
+			Message& message = messages->at(i);
+			entries.push_back(NzbgetRsRpcLogEntry{
+				(int)message.GetId(),
+				(int)message.GetKind(),
+				(int)message.GetTime(),
+				message.GetText()
+			});
+		}
 	}
 
-	AppendResponse(IsJson() ? "\n]" : "</data></array>\n");
+	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_log_list(
+		IsJson() ? 1 : 0, entries.data(), entries.size()));
 }
 
 GuardedMessageList LogXmlCommand::GuardMessages()
@@ -1781,52 +1327,6 @@ void ListFilesXmlCommand::Execute()
 
 	AppendResponse(IsJson() ? "[\n" : "<array><data>\n");
 
-	const char* XML_LIST_ITEM =
-		"<value><struct>\n"
-		"<member><name>ID</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>FileSizeLo</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>FileSizeHi</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>RemainingSizeLo</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>RemainingSizeHi</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>PostTime</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>FilenameConfirmed</name><value><boolean>%s</boolean></value></member>\n"
-		"<member><name>Paused</name><value><boolean>%s</boolean></value></member>\n"
-		"<member><name>NZBID</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>NZBName</name><value><string>%s</string></value></member>\n"
-		"<member><name>NZBNicename</name><value><string>%s</string></value></member>\n"	// deprecated, use "NZBName" instead
-		"<member><name>NZBFilename</name><value><string>%s</string></value></member>\n"
-		"<member><name>Subject</name><value><string>%s</string></value></member>\n"
-		"<member><name>Filename</name><value><string>%s</string></value></member>\n"
-		"<member><name>DestDir</name><value><string>%s</string></value></member>\n"
-		"<member><name>Category</name><value><string>%s</string></value></member>\n"
-		"<member><name>Priority</name><value><i4>%i</i4></value></member>\n"			// deprecated, use "Priority" of group instead
-		"<member><name>ActiveDownloads</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>Progress</name><value><i4>%u</i4></value></member>\n"
-		"</struct></value>\n";
-
-	const char* JSON_LIST_ITEM =
-		"{\n"
-		"\"ID\" : %i,\n"
-		"\"FileSizeLo\" : %u,\n"
-		"\"FileSizeHi\" : %u,\n"
-		"\"RemainingSizeLo\" : %u,\n"
-		"\"RemainingSizeHi\" : %u,\n"
-		"\"PostTime\" : %i,\n"
-		"\"FilenameConfirmed\" : %s,\n"
-		"\"Paused\" : %s,\n"
-		"\"NZBID\" : %i,\n"
-		"\"NZBName\" : \"%s\",\n"
-		"\"NZBNicename\" : \"%s\",\n" 		// deprecated, use "NZBName" instead
-		"\"NZBFilename\" : \"%s\",\n"
-		"\"Subject\" : \"%s\",\n"
-		"\"Filename\" : \"%s\",\n"
-		"\"DestDir\" : \"%s\",\n"
-		"\"Category\" : \"%s\",\n"
-		"\"Priority\" : %i,\n"				// deprecated, use "Priority" of group instead
-		"\"ActiveDownloads\" : %i,\n"
-		"\"Progress\" : %i\n"
-		"}";
-
 	int index = 0;
 
 	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
@@ -1841,21 +1341,26 @@ void ListFilesXmlCommand::Execute()
 				fileInfo->GetMissedSize(), fileInfo->GetFailedSize(),
 				fileInfo->GetSuccessSize(), &progress))
 			{
-				uint32 fileSizeHi, fileSizeLo;
-				uint32 remainingSizeLo, remainingSizeHi;
-				Util::SplitInt64(fileInfo->GetSize(), &fileSizeHi, &fileSizeLo);
-				Util::SplitInt64(fileInfo->GetRemainingSize(), &remainingSizeHi, &remainingSizeLo);
-				CString xmlNzbNicename = EncodeStr(fileInfo->GetNzbInfo()->GetName());
+				NzbgetRsRpcFileItem item{};
+				item.id = fileInfo->GetId();
+				item.file_size = fileInfo->GetSize();
+				item.remaining_size = fileInfo->GetRemainingSize();
+				item.post_time = (int)fileInfo->GetTime();
+				item.filename_confirmed = fileInfo->GetFilenameConfirmed() ? 1 : 0;
+				item.paused = fileInfo->GetPaused() ? 1 : 0;
+				item.nzb_id = fileInfo->GetNzbInfo()->GetId();
+				item.nzb_name = fileInfo->GetNzbInfo()->GetName();
+				item.nzb_filename = fileInfo->GetNzbInfo()->GetFilename();
+				item.subject = fileInfo->GetSubject();
+				item.filename = fileInfo->GetFilename();
+				item.dest_dir = fileInfo->GetNzbInfo()->GetDestDir();
+				item.category = fileInfo->GetNzbInfo()->GetCategory();
+				item.priority = fileInfo->GetNzbInfo()->GetPriority();
+				item.active_downloads = fileInfo->GetActiveDownloads();
+				item.progress = progress;
 
-				AppendCondResponse(",\n", IsJson() && index++ > 0);
-				AppendFmtResponse(IsJson() ? JSON_LIST_ITEM : XML_LIST_ITEM,
-					fileInfo->GetId(), fileSizeLo, fileSizeHi, remainingSizeLo, remainingSizeHi,
-					(int)fileInfo->GetTime(), BoolToStr(fileInfo->GetFilenameConfirmed()),
-					BoolToStr(fileInfo->GetPaused()), fileInfo->GetNzbInfo()->GetId(),
-					*xmlNzbNicename, *xmlNzbNicename, *EncodeStr(fileInfo->GetNzbInfo()->GetFilename()),
-					*EncodeStr(fileInfo->GetSubject()), *EncodeStr(fileInfo->GetFilename()),
-					*EncodeStr(fileInfo->GetNzbInfo()->GetDestDir()), *EncodeStr(fileInfo->GetNzbInfo()->GetCategory()),
-					fileInfo->GetNzbInfo()->GetPriority(), fileInfo->GetActiveDownloads(), progress);
+				AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_file_item(
+					IsJson() ? 1 : 0, index++ > 0 ? 1 : 0, &item));
 			}
 		}
 	}
@@ -1865,356 +1370,124 @@ void ListFilesXmlCommand::Execute()
 
 void NzbInfoXmlCommand::AppendNzbInfoFields(NzbInfo* nzbInfo)
 {
-	const char* XML_NZB_ITEM_START =
-		"<member><name>NZBID</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>NZBName</name><value><string>%s</string></value></member>\n"
-		"<member><name>NZBNicename</name><value><string>%s</string></value></member>\n"	// deprecated, use "NZBName" instead
-		"<member><name>Kind</name><value><string>%s</string></value></member>\n"
-		"<member><name>URL</name><value><string>%s</string></value></member>\n"
-		"<member><name>NZBFilename</name><value><string>%s</string></value></member>\n"
-		"<member><name>DestDir</name><value><string>%s</string></value></member>\n"
-		"<member><name>FinalDir</name><value><string>%s</string></value></member>\n"
-		"<member><name>Category</name><value><string>%s</string></value></member>\n"
-		"<member><name>ParStatus</name><value><string>%s</string></value></member>\n"
-		"<member><name>ExParStatus</name><value><string>%s</string></value></member>\n"
-		"<member><name>UnpackStatus</name><value><string>%s</string></value></member>\n"
-		"<member><name>MoveStatus</name><value><string>%s</string></value></member>\n"
-		"<member><name>ScriptStatus</name><value><string>%s</string></value></member>\n"
-		"<member><name>DeleteStatus</name><value><string>%s</string></value></member>\n"
-		"<member><name>MarkStatus</name><value><string>%s</string></value></member>\n"
-		"<member><name>UrlStatus</name><value><string>%s</string></value></member>\n"
-		"<member><name>FileSizeLo</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>FileSizeHi</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>FileSizeMB</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>FileCount</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>MinPostTime</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>MaxPostTime</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>TotalArticles</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>SuccessArticles</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>FailedArticles</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>DupeRecoveredArticles</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>DupeRecoveredBytesLo</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>DupeRecoveredBytesHi</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>DupeRecoveredHoles</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>LiveRepairing</name><value><boolean>%s</boolean></value></member>\n"
-		"<member><name>Health</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>CriticalHealth</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>DupeKey</name><value><string>%s</string></value></member>\n"
-		"<member><name>DupeScore</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>DupeMode</name><value><string>%s</string></value></member>\n"
-		"<member><name>Deleted</name><value><boolean>%s</boolean></value></member>\n"	 // deprecated, use "DeleteStatus" instead
-		"<member><name>DownloadedSizeLo</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>DownloadedSizeHi</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>DownloadedSizeMB</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>DownloadTimeSec</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>PostTotalTimeSec</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>ParTimeSec</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>RepairTimeSec</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>UnpackTimeSec</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>MessageCount</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>ExtraParBlocks</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>Parameters</name><value><array><data>\n";
-
-	const char* XML_NZB_ITEM_SCRIPT_START =
-		"</data></array></value></member>\n"
-		"<member><name>ScriptStatuses</name><value><array><data>\n";
-
-	const char* XML_NZB_ITEM_STATS_START =
-		"</data></array></value></member>\n"
-		"<member><name>ServerStats</name><value><array><data>\n";
-
-	const char* XML_NZB_ITEM_END =
-		"</data></array></value></member>\n";
-
-	const char* JSON_NZB_ITEM_START =
-		"\"NZBID\" : %i,\n"
-		"\"NZBName\" : \"%s\",\n"
-		"\"NZBNicename\" : \"%s\",\n"		// deprecated, use NZBName instead
-		"\"Kind\" : \"%s\",\n"
-		"\"URL\" : \"%s\",\n"
-		"\"NZBFilename\" : \"%s\",\n"
-		"\"DestDir\" : \"%s\",\n"
-		"\"FinalDir\" : \"%s\",\n"
-		"\"Category\" : \"%s\",\n"
-		"\"ParStatus\" : \"%s\",\n"
-		"\"ExParStatus\" : \"%s\",\n"
-		"\"UnpackStatus\" : \"%s\",\n"
-		"\"MoveStatus\" : \"%s\",\n"
-		"\"ScriptStatus\" : \"%s\",\n"
-		"\"DeleteStatus\" : \"%s\",\n"
-		"\"MarkStatus\" : \"%s\",\n"
-		"\"UrlStatus\" : \"%s\",\n"
-		"\"FileSizeLo\" : %u,\n"
-		"\"FileSizeHi\" : %u,\n"
-		"\"FileSizeMB\" : %i,\n"
-		"\"FileCount\" : %i,\n"
-		"\"MinPostTime\" : %i,\n"
-		"\"MaxPostTime\" : %i,\n"
-		"\"TotalArticles\" : %i,\n"
-		"\"SuccessArticles\" : %i,\n"
-		"\"FailedArticles\" : %i,\n"
-		"\"DupeRecoveredArticles\" : %i,\n"
-		"\"DupeRecoveredBytesLo\" : %u,\n"
-		"\"DupeRecoveredBytesHi\" : %u,\n"
-		"\"DupeRecoveredHoles\" : %i,\n"
-		"\"LiveRepairing\" : %s,\n"
-		"\"Health\" : %i,\n"
-		"\"CriticalHealth\" : %i,\n"
-		"\"DupeKey\" : \"%s\",\n"
-		"\"DupeScore\" : %i,\n"
-		"\"DupeMode\" : \"%s\",\n"
-		"\"Deleted\" : %s,\n"			  // deprecated, use "DeleteStatus" instead
-		"\"DownloadedSizeLo\" : %u,\n"
-		"\"DownloadedSizeHi\" : %u,\n"
-		"\"DownloadedSizeMB\" : %i,\n"
-		"\"DownloadTimeSec\" : %i,\n"
-		"\"PostTotalTimeSec\" : %i,\n"
-		"\"ParTimeSec\" : %i,\n"
-		"\"RepairTimeSec\" : %i,\n"
-		"\"UnpackTimeSec\" : %i,\n"
-		"\"MessageCount\" : %i,\n"
-		"\"ExtraParBlocks\" : %i,\n"
-		"\"Parameters\" : [\n";
-
-	const char* JSON_NZB_ITEM_SCRIPT_START =
-		"],\n"
-		"\"ScriptStatuses\" : [\n";
-
-	const char* JSON_NZB_ITEM_STATS_START =
-		"],\n"
-		"\"ServerStats\" : [\n";
-
-	const char* JSON_NZB_ITEM_END =
-		"]\n";
-
-	const char* XML_PARAMETER_ITEM =
-		"<value><struct>\n"
-		"<member><name>Name</name><value><string>%s</string></value></member>\n"
-		"<member><name>Value</name><value><string>%s</string></value></member>\n"
-		"</struct></value>\n";
-
-	const char* JSON_PARAMETER_ITEM =
-		"{\n"
-		"\"Name\" : \"%s\",\n"
-		"\"Value\" : \"%s\"\n"
-		"}";
-
-	const char* XML_SCRIPT_ITEM =
-		"<value><struct>\n"
-		"<member><name>Name</name><value><string>%s</string></value></member>\n"
-		"<member><name>Status</name><value><string>%s</string></value></member>\n"
-		"</struct></value>\n";
-
-	const char* JSON_SCRIPT_ITEM =
-		"{\n"
-		"\"Name\" : \"%s\",\n"
-		"\"Status\" : \"%s\"\n"
-		"}";
-
-	const char* XML_STAT_ITEM =
-		"<value><struct>\n"
-		"<member><name>ServerID</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>SuccessArticles</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>FailedArticles</name><value><i4>%i</i4></value></member>\n"
-		"</struct></value>\n";
-
-	const char* JSON_STAT_ITEM =
-		"{\n"
-		"\"ServerID\" : %i,\n"
-		"\"SuccessArticles\" : %i,\n"
-		"\"FailedArticles\" : %i\n"
-		"}";
-
-	const char* kindName[] = { "NZB", "URL" };
-	const char* parStatusName[] = { "NONE", "NONE", "FAILURE", "SUCCESS", "REPAIR_POSSIBLE", "MANUAL" };
-	const char* unpackStatusName[] = { "NONE", "NONE", "FAILURE", "SUCCESS", "SPACE", "PASSWORD" };
-	const char* moveStatusName[] = { "NONE", "FAILURE", "SUCCESS" };
-	const char* scriptStatusName[] = { "NONE", "FAILURE", "SUCCESS" };
-	const char* deleteStatusName[] = { "NONE", "MANUAL", "HEALTH", "DUPE", "BAD", "GOOD", "COPY", "SCAN" };
-	const char* markStatusName[] = { "NONE", "BAD", "GOOD", "SUCCESS" };
-	const char* urlStatusName[] = { "NONE", "UNKNOWN", "SUCCESS", "FAILURE", "UNKNOWN", "SCAN_SKIPPED", "SCAN_FAILURE" };
-	const char* dupeModeName[] = { "SCORE", "ALL", "FORCE" };
-
-	uint32 fileSizeHi, fileSizeLo, fileSizeMB;
-	Util::SplitInt64(nzbInfo->GetSize(), &fileSizeHi, &fileSizeLo);
-	fileSizeMB = (int)(nzbInfo->GetSize() / 1024 / 1024);
-
-	uint32 downloadedSizeHi, downloadedSizeLo, downloadedSizeMB;
-	Util::SplitInt64(nzbInfo->GetDownloadedSize(), &downloadedSizeHi, &downloadedSizeLo);
-	downloadedSizeMB = (int)(nzbInfo->GetDownloadedSize() / 1024 / 1024);
-
-	uint32 dupeRecoveredBytesHi, dupeRecoveredBytesLo;
-	Util::SplitInt64(nzbInfo->GetDupeRecoveredBytes(), &dupeRecoveredBytesHi, &dupeRecoveredBytesLo);
-
-	int messageCount = 0;
-	int postTotalTimeSec = 0;
 	time_t postStartTime = nzbInfo->GetPostInfo() ? nzbInfo->GetPostInfo()->GetStartTime() : 0;
 	time_t curTime = postStartTime ? Util::CurrentTime() : 0;
-	nzbget_rs_rol_xmlrpc_nzb_message_and_post_time(
-		nzbInfo->GetMessageCount(), nzbInfo->GetCachedMessageCount(),
-		nzbInfo->GetPostTotalSec(), postStartTime != 0 ? 1 : 0,
-		(int64)curTime, (int64)postStartTime,
-		&messageCount, &postTotalTimeSec);
 
-	CString xmlNzbNicename = EncodeStr(nzbInfo->GetName());
-	const char* exParStatus = nzbget_rs_ntw_xmlrpc_ex_par_status(nzbInfo->GetExtraParBlocks());
+	NzbgetRsRpcNzbInfoInput fields{};
+	fields.id = nzbInfo->GetId();
+	fields.name = nzbInfo->GetName();
+	fields.kind = (int)nzbInfo->GetKind();
+	fields.url = nzbInfo->GetUrl();
+	fields.filename = nzbInfo->GetFilename();
+	fields.dest_dir = nzbInfo->GetDestDir();
+	fields.final_dir = nzbInfo->GetFinalDir();
+	fields.category = nzbInfo->GetCategory();
+	fields.par_status = (int)nzbInfo->GetParStatus();
+	fields.extra_par_blocks = nzbInfo->GetExtraParBlocks();
+	fields.unpack_status = (int)nzbInfo->GetUnpackStatus();
+	fields.move_status = (int)nzbInfo->GetMoveStatus();
+	fields.script_status = (int)nzbInfo->GetScriptStatuses()->CalcTotalStatus();
+	fields.delete_status = (int)nzbInfo->GetDeleteStatus();
+	fields.mark_status = (int)nzbInfo->GetMarkStatus();
+	fields.url_status = (int)nzbInfo->GetUrlStatus();
+	fields.size = nzbInfo->GetSize();
+	fields.file_count = nzbInfo->GetFileCount();
+	fields.min_time = (int)nzbInfo->GetMinTime();
+	fields.max_time = (int)nzbInfo->GetMaxTime();
+	fields.total_articles = nzbInfo->GetTotalArticles();
+	fields.current_success_articles = nzbInfo->GetCurrentSuccessArticles();
+	fields.current_failed_articles = nzbInfo->GetCurrentFailedArticles();
+	fields.dupe_recovered_articles = nzbInfo->GetDupeRecoveredArticles();
+	fields.dupe_recovered_bytes = nzbInfo->GetDupeRecoveredBytes();
+	fields.dupe_recovered_holes = nzbInfo->GetDupeRecoveredHoles();
+	fields.live_repairing = nzbInfo->GetLiveRepairThread() != nullptr ? 1 : 0;
+	fields.health = nzbInfo->CalcHealth();
+	fields.critical_health = nzbInfo->CalcCriticalHealth(false);
+	fields.dupe_key = nzbInfo->GetDupeKey();
+	fields.dupe_score = nzbInfo->GetDupeScore();
+	fields.dupe_mode = (int)nzbInfo->GetDupeMode();
+	fields.downloaded_size = nzbInfo->GetDownloadedSize();
+	fields.download_sec = nzbInfo->GetDownloadSec();
+	fields.post_total_sec = nzbInfo->GetPostTotalSec();
+	fields.has_post_start_time = postStartTime != 0 ? 1 : 0;
+	fields.cur_time = (int64)curTime;
+	fields.post_start_time = (int64)postStartTime;
+	fields.par_sec = nzbInfo->GetParSec();
+	fields.repair_sec = nzbInfo->GetRepairSec();
+	fields.unpack_sec = nzbInfo->GetUnpackSec();
+	fields.message_count = nzbInfo->GetMessageCount();
+	fields.cached_message_count = nzbInfo->GetCachedMessageCount();
 
-	AppendFmtResponse(IsJson() ? JSON_NZB_ITEM_START : XML_NZB_ITEM_START,
-			nzbInfo->GetId(), *xmlNzbNicename, *xmlNzbNicename, kindName[nzbInfo->GetKind()],
-			*EncodeStr(nzbInfo->GetUrl()), *EncodeStr(nzbInfo->GetFilename()),
-			*EncodeStr(nzbInfo->GetDestDir()), *EncodeStr(nzbInfo->GetFinalDir()),
-			*EncodeStr(nzbInfo->GetCategory()), parStatusName[nzbInfo->GetParStatus()], exParStatus,
-			unpackStatusName[nzbInfo->GetUnpackStatus()], moveStatusName[nzbInfo->GetMoveStatus()],
-			scriptStatusName[nzbInfo->GetScriptStatuses()->CalcTotalStatus()],
-			deleteStatusName[nzbInfo->GetDeleteStatus()], markStatusName[nzbInfo->GetMarkStatus()],
-			urlStatusName[nzbInfo->GetUrlStatus()],
-			fileSizeLo, fileSizeHi, fileSizeMB, nzbInfo->GetFileCount(),
-			(int)nzbInfo->GetMinTime(), (int)nzbInfo->GetMaxTime(),
-			nzbInfo->GetTotalArticles(), nzbInfo->GetCurrentSuccessArticles(), nzbInfo->GetCurrentFailedArticles(),
-			nzbInfo->GetDupeRecoveredArticles(),
-			dupeRecoveredBytesLo, dupeRecoveredBytesHi, nzbInfo->GetDupeRecoveredHoles(),
-			BoolToStr(nzbInfo->GetLiveRepairThread() != nullptr),
-			nzbInfo->CalcHealth(), nzbInfo->CalcCriticalHealth(false),
-			*EncodeStr(nzbInfo->GetDupeKey()), nzbInfo->GetDupeScore(), dupeModeName[nzbInfo->GetDupeMode()],
-			BoolToStr(nzbInfo->GetDeleteStatus() != NzbInfo::dsNone),
-			downloadedSizeLo, downloadedSizeHi, downloadedSizeMB, nzbInfo->GetDownloadSec(),
-			postTotalTimeSec,
-			nzbInfo->GetParSec(), nzbInfo->GetRepairSec(), nzbInfo->GetUnpackSec(), messageCount, nzbInfo->GetExtraParBlocks());
-
-	// Post-processing parameters
-	int paramIndex = 0;
+	std::vector<NzbgetRsRpcParamItem> params;
+	params.reserve(nzbInfo->GetParameters()->size());
 	for (NzbParameter& parameter : nzbInfo->GetParameters())
 	{
-		AppendCondResponse(",\n", IsJson() && paramIndex++ > 0);
-		AppendFmtResponse(IsJson() ? JSON_PARAMETER_ITEM : XML_PARAMETER_ITEM,
-			*EncodeStr(parameter.GetName()), *EncodeStr(parameter.GetValue()));
+		params.push_back(NzbgetRsRpcParamItem{ parameter.GetName(), parameter.GetValue() });
 	}
 
-	AppendResponse(IsJson() ? JSON_NZB_ITEM_SCRIPT_START : XML_NZB_ITEM_SCRIPT_START);
-
-	// Script statuses
-	int scriptIndex = 0;
+	std::vector<NzbgetRsRpcScriptItem> scripts;
+	scripts.reserve(nzbInfo->GetScriptStatuses()->size());
 	for (ScriptStatus& scriptStatus : nzbInfo->GetScriptStatuses())
 	{
-		AppendCondResponse(",\n", IsJson() && scriptIndex++ > 0);
-		AppendFmtResponse(IsJson() ? JSON_SCRIPT_ITEM : XML_SCRIPT_ITEM,
-			*EncodeStr(scriptStatus.GetName()), *EncodeStr(scriptStatusName[scriptStatus.GetStatus()]));
+		scripts.push_back(NzbgetRsRpcScriptItem{ scriptStatus.GetName(), (int)scriptStatus.GetStatus() });
 	}
 
-	AppendResponse(IsJson() ? JSON_NZB_ITEM_STATS_START : XML_NZB_ITEM_STATS_START);
-
-	// Server stats
-	int statIndex = 0;
+	std::vector<NzbgetRsRpcServerStatItem> stats;
+	stats.reserve(nzbInfo->GetCurrentServerStats()->size());
 	for (ServerStat& serverStat : nzbInfo->GetCurrentServerStats())
 	{
-		AppendCondResponse(",\n", IsJson() && statIndex++ > 0);
-		AppendFmtResponse(IsJson() ? JSON_STAT_ITEM : XML_STAT_ITEM,
-				 serverStat.GetServerId(), serverStat.GetSuccessArticles(), serverStat.GetFailedArticles());
+		stats.push_back(NzbgetRsRpcServerStatItem{
+			serverStat.GetServerId(),
+			serverStat.GetSuccessArticles(),
+			serverStat.GetFailedArticles()
+		});
 	}
 
-	AppendResponse(IsJson() ? JSON_NZB_ITEM_END : XML_NZB_ITEM_END);
+	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_nzb_info_fields(
+		IsJson() ? 1 : 0, &fields,
+		params.data(), params.size(),
+		scripts.data(), scripts.size(),
+		stats.data(), stats.size()));
 }
 
 void NzbInfoXmlCommand::AppendPostInfoFields(PostInfo* postInfo, int logEntries, bool postQueue)
 {
-	const char* XML_GROUPQUEUE_ITEM_START =
-		"<member><name>PostInfoText</name><value><string>%s</string></value></member>\n"
-		"<member><name>PostStageProgress</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>PostStageTimeSec</name><value><i4>%i</i4></value></member>\n";
-		// PostTotalTimeSec is printed by method "AppendNZBInfoFields"
+	time_t curTime = postInfo ? Util::CurrentTime() : 0;
 
-	const char* XML_POSTQUEUE_ITEM_START =
-		"<member><name>ProgressLabel</name><value><string>%s</string></value></member>\n"
-		"<member><name>StageProgress</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>StageTimeSec</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>TotalTimeSec</name><value><i4>%i</i4></value></member>\n";
-
-	const char* XML_LOG_START =
-		"<member><name>Log</name><value><array><data>\n";
-
-	const char* XML_POSTQUEUE_ITEM_END =
-		"</data></array></value></member>\n";
-
-	const char* JSON_GROUPQUEUE_ITEM_START =
-		"\"PostInfoText\" : \"%s\",\n"
-		"\"PostStageProgress\" : %i,\n"
-		"\"PostStageTimeSec\" : %i,\n";
-
-	const char* JSON_POSTQUEUE_ITEM_START =
-		"\"ProgressLabel\" : \"%s\",\n"
-		"\"StageProgress\" : %i,\n"
-		"\"StageTimeSec\" : %i,\n"
-		"\"TotalTimeSec\" : %i,\n";
-
-	const char* JSON_LOG_START =
-		"\"Log\" : [\n";
-
-	const char* JSON_POSTQUEUE_ITEM_END =
-		"]\n";
-
-	const char* XML_LOG_ITEM =
-		"<value><struct>\n"
-		"<member><name>ID</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>Kind</name><value><string>%s</string></value></member>\n"
-		"<member><name>Time</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>Text</name><value><string>%s</string></value></member>\n"
-		"</struct></value>\n";
-
-	const char* JSON_LOG_ITEM =
-		"{\n"
-		"\"ID\" : %i,\n"
-		"\"Kind\" : \"%s\",\n"
-		"\"Time\" : %i,\n"
-		"\"Text\" : \"%s\"\n"
-		"}";
-
-	const char* messageType[] = { "INFO", "WARNING", "ERROR", "DEBUG", "DETAIL"};
-
-	const char* itemStart = postQueue ? IsJson() ? JSON_POSTQUEUE_ITEM_START : XML_POSTQUEUE_ITEM_START :
-		IsJson() ? JSON_GROUPQUEUE_ITEM_START : XML_GROUPQUEUE_ITEM_START;
-
-	if (postInfo)
-	{
-		time_t curTime = Util::CurrentTime();
-
-		int stageSec = 0;
-		int totalSec = 0;
-		nzbget_rs_roc_xmlrpc_post_info_elapsed_sec(
-			(int64)curTime, (int64)postInfo->GetStageTime(), (int64)postInfo->GetStartTime(),
-			&stageSec, &totalSec);
-		AppendFmtResponse(itemStart, *EncodeStr(postInfo->GetProgressLabel()),
-			postInfo->GetStageProgress(), stageSec, totalSec);
-	}
-	else
-	{
-		// (the progress is a number: "" in its place printed a pointer's bits)
-		AppendFmtResponse(itemStart, "NONE", 0, 0, 0);
-	}
-
-	AppendResponse(IsJson() ? JSON_LOG_START : XML_LOG_START);
-
+	std::optional<GuardedMessageList> messages;
+	std::vector<NzbgetRsRpcLogEntry> entries;
 	if (logEntries > 0 && postInfo)
 	{
-		GuardedMessageList messages = postInfo->GetNzbInfo()->GuardCachedMessages();
+		messages.emplace(postInfo->GetNzbInfo()->GuardCachedMessages());
 		int start = 0;
 		if (nzbget_rs_rol_xmlrpc_post_info_log_slice(
-			logEntries, (int)messages->size(), &start, &logEntries))
+			logEntries, (int)(*messages)->size(), &start, &logEntries))
 		{
-
-			int index = 0;
-			for (uint32 i = (uint32)start; i < messages->size(); i++)
+			entries.reserve((*messages)->size() - (uint32)start);
+			for (uint32 i = (uint32)start; i < (*messages)->size(); i++)
 			{
-				Message& message = messages->at(i);
-
-				AppendCondResponse(",\n", IsJson() && index++ > 0);
-				AppendFmtResponse(IsJson() ? JSON_LOG_ITEM : XML_LOG_ITEM,
-					message.GetId(), messageType[message.GetKind()], (int)message.GetTime(),
-					*EncodeStr(message.GetText()));
+				Message& message = (*messages)->at(i);
+				entries.push_back(NzbgetRsRpcLogEntry{
+					(int)message.GetId(),
+					(int)message.GetKind(),
+					(int)message.GetTime(),
+					message.GetText()
+				});
 			}
 		}
 	}
 
-	AppendResponse(IsJson() ? JSON_POSTQUEUE_ITEM_END : XML_POSTQUEUE_ITEM_END);
+	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_post_info_fields(
+		IsJson() ? 1 : 0,
+		postQueue ? 1 : 0,
+		postInfo ? 1 : 0,
+		postInfo ? postInfo->GetProgressLabel() : nullptr,
+		postInfo ? postInfo->GetStageProgress() : 0,
+		(int64)curTime,
+		postInfo ? (int64)postInfo->GetStageTime() : 0,
+		postInfo ? (int64)postInfo->GetStartTime() : 0,
+		entries.data(),
+		entries.size()));
 }
 
 // struct[] listgroups(int NumberOfLogEntries)
@@ -2225,74 +1498,30 @@ void ListGroupsXmlCommand::Execute()
 
 	AppendResponse(IsJson() ? "[\n" : "<array><data>\n");
 
-	const char* XML_LIST_ITEM_START =
-		"<value><struct>\n"
-		"<member><name>FirstID</name><value><i4>%i</i4></value></member>\n"				// deprecated, use "NZBID" instead
-		"<member><name>LastID</name><value><i4>%i</i4></value></member>\n"				// deprecated, use "NZBID" instead
-		"<member><name>RemainingSizeLo</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>RemainingSizeHi</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>RemainingSizeMB</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>PausedSizeLo</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>PausedSizeHi</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>PausedSizeMB</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>RemainingFileCount</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>RemainingParCount</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>MinPriority</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>MaxPriority</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>ActiveDownloads</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>Status</name><value><string>%s</string></value></member>\n";
-
-	const char* XML_LIST_ITEM_END =
-		"</struct></value>\n";
-
-	const char* JSON_LIST_ITEM_START =
-		"{\n"
-		"\"FirstID\" : %i,\n"					// deprecated, use "NZBID" instead
-		"\"LastID\" : %i,\n"					// deprecated, use "NZBID" instead
-		"\"RemainingSizeLo\" : %u,\n"
-		"\"RemainingSizeHi\" : %u,\n"
-		"\"RemainingSizeMB\" : %i,\n"
-		"\"PausedSizeLo\" : %u,\n"
-		"\"PausedSizeHi\" : %u,\n"
-		"\"PausedSizeMB\" : %i,\n"
-		"\"RemainingFileCount\" : %i,\n"
-		"\"RemainingParCount\" : %i,\n"
-		"\"MinPriority\" : %i,\n"
-		"\"MaxPriority\" : %i,\n"
-		"\"ActiveDownloads\" : %i,\n"
-		"\"Status\" : \"%s\",\n";
-
-	const char* JSON_LIST_ITEM_END =
-		"}";
-
 	int index = 0;
 
 	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
 	for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
 	{
-		uint32 remainingSizeLo, remainingSizeHi, remainingSizeMB;
-		uint32 pausedSizeLo, pausedSizeHi, pausedSizeMB;
-		Util::SplitInt64(nzbInfo->GetRemainingSize(), &remainingSizeHi, &remainingSizeLo);
-		Util::SplitInt64(nzbInfo->GetPausedSize(), &pausedSizeHi, &pausedSizeLo);
-		int remMB = 0, pMB = 0;
-		nzbget_rs_roc_xmlrpc_list_groups_calc_mb(
-			nzbInfo->GetRemainingSize(), nzbInfo->GetPausedSize(), &remMB, &pMB);
-		remainingSizeMB = (uint32)remMB;
-		pausedSizeMB = (uint32)pMB;
 		const char* status = DetectStatus(nzbInfo);
 
-		AppendCondResponse(",\n", IsJson() && index++ > 0);
-		AppendFmtResponse(IsJson() ? JSON_LIST_ITEM_START : XML_LIST_ITEM_START,
-			nzbInfo->GetId(), nzbInfo->GetId(), remainingSizeLo, remainingSizeHi, remainingSizeMB,
-			pausedSizeLo, pausedSizeHi, pausedSizeMB, (int)nzbInfo->GetFileList()->size(),
-			nzbInfo->GetRemainingParCount(), nzbInfo->GetPriority(), nzbInfo->GetPriority(),
-			nzbInfo->GetActiveDownloads(), status);
+		AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_group_item_start(
+			IsJson() ? 1 : 0,
+			index++ > 0 ? 1 : 0,
+			nzbInfo->GetId(),
+			nzbInfo->GetRemainingSize(),
+			nzbInfo->GetPausedSize(),
+			(int)nzbInfo->GetFileList()->size(),
+			nzbInfo->GetRemainingParCount(),
+			nzbInfo->GetPriority(),
+			nzbInfo->GetActiveDownloads(),
+			status));
 
 		AppendNzbInfoFields(nzbInfo);
 		AppendCondResponse(",\n", IsJson());
 		AppendPostInfoFields(nzbInfo->GetPostInfo(), nrEntries, false);
 
-		AppendResponse(IsJson() ? JSON_LIST_ITEM_END : XML_LIST_ITEM_END);
+		AppendResponse(IsJson() ? "}" : "</struct></value>\n");
 	}
 
 	AppendResponse(IsJson() ? "\n]" : "</data></array>\n");
@@ -2316,67 +1545,6 @@ const char* ListGroupsXmlCommand::DetectStatus(NzbInfo* nzbInfo)
 		nzbInfo->GetPausedSize(),
 		nzbInfo->GetRemainingSize());
 }
-
-struct EditCommandEntry
-{
-	int actionId;
-	const char* actionName;
-};
-
-EditCommandEntry EditCommandNameMap[] = {
-	{ DownloadQueue::eaFileMoveOffset, "FileMoveOffset" },
-	{ DownloadQueue::eaFileMoveTop, "FileMoveTop" },
-	{ DownloadQueue::eaFileMoveBottom, "FileMoveBottom" },
-	{ DownloadQueue::eaFilePause, "FilePause" },
-	{ DownloadQueue::eaFileResume, "FileResume" },
-	{ DownloadQueue::eaFileDelete, "FileDelete" },
-	{ DownloadQueue::eaFilePauseAllPars, "FilePauseAllPars" },
-	{ DownloadQueue::eaFilePauseExtraPars, "FilePauseExtraPars" },
-	{ DownloadQueue::eaFileReorder, "FileReorder" },
-	{ DownloadQueue::eaFileSplit, "FileSplit" },
-	{ DownloadQueue::eaGroupMoveOffset, "GroupMoveOffset" },
-	{ DownloadQueue::eaGroupMoveTop, "GroupMoveTop" },
-	{ DownloadQueue::eaGroupMoveBottom, "GroupMoveBottom" },
-	{ DownloadQueue::eaGroupMoveBefore, "GroupMoveBefore" },
-	{ DownloadQueue::eaGroupMoveAfter, "GroupMoveAfter" },
-	{ DownloadQueue::eaGroupPause, "GroupPause" },
-	{ DownloadQueue::eaGroupResume, "GroupResume" },
-	{ DownloadQueue::eaGroupDelete, "GroupDelete" },
-	{ DownloadQueue::eaGroupParkDelete, "GroupParkDelete" },
-	{ DownloadQueue::eaGroupDupeDelete, "GroupDupeDelete" },
-	{ DownloadQueue::eaGroupFinalDelete, "GroupFinalDelete" },
-	{ DownloadQueue::eaGroupPauseAllPars, "GroupPauseAllPars" },
-	{ DownloadQueue::eaGroupPauseExtraPars, "GroupPauseExtraPars" },
-	{ DownloadQueue::eaGroupSetPriority, "GroupSetPriority" },
-	{ DownloadQueue::eaGroupSetCategory, "GroupSetCategory" },
-	{ DownloadQueue::eaGroupApplyCategory, "GroupApplyCategory" },
-	{ DownloadQueue::eaGroupMerge, "GroupMerge" },
-	{ DownloadQueue::eaGroupSetParameter, "GroupSetParameter" },
-	{ DownloadQueue::eaGroupSetName, "GroupSetName" },
-	{ DownloadQueue::eaGroupSetDupeKey, "GroupSetDupeKey" },
-	{ DownloadQueue::eaGroupSetDupeScore, "GroupSetDupeScore" },
-	{ DownloadQueue::eaGroupSetDupeMode, "GroupSetDupeMode" },
-	{ DownloadQueue::eaGroupSort, "GroupSort" },
-	{ DownloadQueue::eaGroupSortFiles, "GroupSortFiles" },
-	{ DownloadQueue::eaPostDelete, "PostDelete" },
-	{ DownloadQueue::eaHistoryDelete, "HistoryDelete" },
-	{ DownloadQueue::eaHistoryFinalDelete, "HistoryFinalDelete" },
-	{ DownloadQueue::eaHistoryReturn, "HistoryReturn" },
-	{ DownloadQueue::eaHistoryProcess, "HistoryProcess" },
-	{ DownloadQueue::eaHistoryRedownload, "HistoryRedownload" },
-	{ DownloadQueue::eaHistoryRetryFailed, "HistoryRetryFailed" },
-	{ DownloadQueue::eaHistorySetParameter, "HistorySetParameter" },
-	{ DownloadQueue::eaHistorySetDupeKey, "HistorySetDupeKey" },
-	{ DownloadQueue::eaHistorySetDupeScore, "HistorySetDupeScore" },
-	{ DownloadQueue::eaHistorySetDupeMode, "HistorySetDupeMode" },
-	{ DownloadQueue::eaHistorySetDupeBackup, "HistorySetDupeBackup" },
-	{ DownloadQueue::eaHistoryMarkBad, "HistoryMarkBad" },
-	{ DownloadQueue::eaHistoryMarkGood, "HistoryMarkGood" },
-	{ DownloadQueue::eaHistoryMarkSuccess, "HistoryMarkSuccess" },
-	{ DownloadQueue::eaHistorySetCategory, "HistorySetCategory" },
-	{ DownloadQueue::eaHistorySetName, "HistorySetName" },
-	{ 0, nullptr }
-};
 
 // v18:
 //    bool editqueue(string Command, string Args, int[] IDs)
@@ -2522,20 +1690,25 @@ void AppendFleetXmlCommand::Execute()
 
 	Fleet::Result result = Fleet::Append(std::move(request));
 
-	BString<1024> head("{\"Chosen\" : %i, \"Complete\" : %s, \"Reason\" : \"%s\", \"Members\" : [",
-		result.chosen, result.complete ? "true" : "false", *EncodeStr(result.reason.c_str()));
-	AppendResponse(head);
-	for (size_t i = 0; i < result.members.size(); i++)
+	std::vector<NzbgetRsRpcFleetMember> entries;
+	entries.reserve(result.members.size());
+	for (const Fleet::Entry& entry : result.members)
 	{
-		const Fleet::Entry& entry = result.members[i];
-		CString item;
-		item.Format("%s{\"NZBID\" : %i, \"Name\" : \"%s\", \"Rank\" : %i, \"Alive\" : %i, "
-			"\"Status\" : \"%s\", \"SameAs\" : %i, \"SameAsRank\" : %i, \"Reason\" : \"%s\"}",
-			i ? ", " : "", entry.nzbId, *EncodeStr(entry.name.c_str()), entry.rank, entry.alive,
-			entry.status.c_str(), entry.sameAs, entry.sameAsRank, *EncodeStr(entry.reason.c_str()));
-		AppendResponse(item);
+		entries.push_back(NzbgetRsRpcFleetMember{
+			entry.nzbId,
+			entry.name.c_str(),
+			entry.rank,
+			entry.alive,
+			entry.status.c_str(),
+			entry.sameAs,
+			entry.sameAsRank,
+			entry.reason.c_str()
+		});
 	}
-	AppendResponse("]}");
+
+	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_fleet_result(
+		result.chosen, result.complete ? 1 : 0, result.reason.c_str(),
+		entries.data(), entries.size()));
 }
 
 void DownloadXmlCommand::Execute()
@@ -2739,33 +1912,6 @@ void PostQueueXmlCommand::Execute()
 
 	AppendResponse(IsJson() ? "[\n" : "<array><data>\n");
 
-	const char* XML_POSTQUEUE_ITEM_START =
-		"<value><struct>\n"
-		"<member><name>ID</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>InfoName</name><value><string>%s</string></value></member>\n"
-		"<member><name>ParFilename</name><value><string></string></value></member>\n"		// deprecated, always empty
-		"<member><name>Stage</name><value><string>%s</string></value></member>\n"
-		"<member><name>FileProgress</name><value><i4>%i</i4></value></member>\n";
-
-	const char* XML_POSTQUEUE_ITEM_END =
-		"</struct></value>\n";
-
-	const char* JSON_POSTQUEUE_ITEM_START =
-		"{\n"
-		"\"ID\" : %i,\n"
-		"\"InfoName\" : \"%s\",\n"
-		"\"ParFilename\" : \"\",\n"		// deprecated, always empty
-		"\"Stage\" : \"%s\",\n"
-		"\"FileProgress\" : %i,\n";
-
-	const char* JSON_POSTQUEUE_ITEM_END =
-		"}";
-
-	const char* postStageName[] = { "QUEUED", "LOADING_PARS", "VERIFYING_SOURCES", "REPAIRING",
-		"VERIFYING_REPAIRED", "RENAMING", "RENAMING", "UNPACKING", "MOVING", "MOVING", "POST_UNPACK_RENAMING",
-		"EXECUTING_SCRIPT", "FINISHED", "POST_DOWNLOAD_RENAMING",
-		"STREAM_REPAIRING" };
-
 	int index = 0;
 
 	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
@@ -2777,16 +1923,19 @@ void PostQueueXmlCommand::Execute()
 			continue;
 		}
 
-		AppendCondResponse(",\n", IsJson() && index++ > 0);
-		AppendFmtResponse(IsJson() ? JSON_POSTQUEUE_ITEM_START : XML_POSTQUEUE_ITEM_START,
-			nzbInfo->GetId(), *EncodeStr(postInfo->GetNzbInfo()->GetName()),
-			postStageName[postInfo->GetStage()], postInfo->GetFileProgress());
+		AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_postqueue_item_start(
+			IsJson() ? 1 : 0,
+			index++ > 0 ? 1 : 0,
+			nzbInfo->GetId(),
+			postInfo->GetNzbInfo()->GetName(),
+			(int)postInfo->GetStage(),
+			postInfo->GetFileProgress()));
 
 		AppendNzbInfoFields(postInfo->GetNzbInfo());
 		AppendCondResponse(",\n", IsJson());
 		AppendPostInfoFields(postInfo, nrEntries, true);
 
-		AppendResponse(IsJson() ? JSON_POSTQUEUE_ITEM_END : XML_POSTQUEUE_ITEM_END);
+		AppendResponse(IsJson() ? "}" : "</struct></value>\n");
 	}
 
 	AppendResponse(IsJson() ? "\n]" : "</data></array>\n");
@@ -2844,67 +1993,6 @@ void HistoryXmlCommand::Execute()
 {
 	AppendResponse(IsJson() ? "[\n" : "<array><data>\n");
 
-	const char* XML_HISTORY_ITEM_START =
-		"<value><struct>\n"
-		"<member><name>ID</name><value><i4>%i</i4></value></member>\n"					// Deprecated, use "NZBID" instead
-		"<member><name>Name</name><value><string>%s</string></value></member>\n"
-		"<member><name>RemainingFileCount</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>RetryData</name><value><boolean>%s</boolean></value></member>\n"
-		"<member><name>HistoryTime</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>Status</name><value><string>%s</string></value></member>\n"
-		"<member><name>Log</name><value><array><data></data></array></value></member>\n";	// Deprected, always empty
-
-	const char* JSON_HISTORY_ITEM_START =
-		"{\n"
-		"\"ID\" : %i,\n"								// Deprecated, use "NZBID" instead
-		"\"Name\" : \"%s\",\n"
-		"\"RemainingFileCount\" : %i,\n"
-		"\"RetryData\" : %s,\n"
-		"\"HistoryTime\" : %i,\n"
-		"\"Status\" : \"%s\",\n"
-		"\"Log\" : [],\n";								// Deprected, always empty
-
-	const char* XML_HISTORY_ITEM_END =
-		"</struct></value>";
-
-	const char* JSON_HISTORY_ITEM_END =
-		"}";
-
-	const char* XML_HISTORY_DUP_ITEM =
-		"<value><struct>\n"
-		"<member><name>ID</name><value><i4>%i</i4></value></member>\n"				// Deprecated, use "NZBID" instead
-		"<member><name>NZBID</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>Kind</name><value><string>%s</string></value></member>\n"
-		"<member><name>Name</name><value><string>%s</string></value></member>\n"
-		"<member><name>HistoryTime</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>FileSizeLo</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>FileSizeHi</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>FileSizeMB</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>DupeKey</name><value><string>%s</string></value></member>\n"
-		"<member><name>DupeScore</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>DupeMode</name><value><string>%s</string></value></member>\n"
-		"<member><name>DupStatus</name><value><string>%s</string></value></member>\n"
-		"<member><name>Status</name><value><string>%s</string></value></member>\n";
-
-	const char* JSON_HISTORY_DUP_ITEM =
-		"{\n"
-		"\"ID\" : %i,\n"							// Deprecated, use "NZBID" instead
-		"\"NZBID\" : %i,\n"
-		"\"Kind\" : \"%s\",\n"
-		"\"Name\" : \"%s\",\n"
-		"\"HistoryTime\" : %i,\n"
-		"\"FileSizeLo\" : %u,\n"
-		"\"FileSizeHi\" : %u,\n"
-		"\"FileSizeMB\" : %i,\n"
-		"\"DupeKey\" : \"%s\",\n"
-		"\"DupeScore\" : %i,\n"
-		"\"DupeMode\" : \"%s\",\n"
-		"\"DupStatus\" : \"%s\",\n"
-		"\"Status\" : \"%s\"\n";
-
-	const char* dupStatusName[] = { "UNKNOWN", "SUCCESS", "FAILURE", "DELETED", "DUPE", "BAD", "GOOD" };
-	const char* dupeModeName[] = { "SCORE", "ALL", "FORCE" };
-
 	bool dup = false;
 	NextParamAsBool(&dup);
 
@@ -2920,34 +2008,40 @@ void HistoryXmlCommand::Execute()
 		}
 
 		NzbInfo* nzbInfo = nullptr;
-
 		const char* status = DetectStatus(historyInfo);
-
-		AppendCondResponse(",\n", IsJson() && index++ > 0);
+		int hasComma = index++ > 0 ? 1 : 0;
 
 		if (historyInfo->GetKind() == HistoryInfo::hkNzb ||
 			historyInfo->GetKind() == HistoryInfo::hkUrl)
 		{
 			nzbInfo = historyInfo->GetNzbInfo();
 
-			AppendFmtResponse(IsJson() ? JSON_HISTORY_ITEM_START : XML_HISTORY_ITEM_START,
-				historyInfo->GetId(), *EncodeStr(historyInfo->GetName()), nzbInfo->GetParkedFileCount(),
-				BoolToStr(nzbInfo->GetCompletedFiles()->size()), (int)historyInfo->GetTime(), status);
+			AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_history_nzb_start(
+				IsJson() ? 1 : 0,
+				hasComma,
+				historyInfo->GetId(),
+				historyInfo->GetName(),
+				nzbInfo->GetParkedFileCount(),
+				!nzbInfo->GetCompletedFiles()->empty() ? 1 : 0,
+				(int)historyInfo->GetTime(),
+				status));
 		}
 		else if (historyInfo->GetKind() == HistoryInfo::hkDup)
 		{
 			DupInfo* dupInfo = historyInfo->GetDupInfo();
 
-			uint32 fileSizeHi, fileSizeLo, fileSizeMB;
-			Util::SplitInt64(dupInfo->GetSize(), &fileSizeHi, &fileSizeLo);
-			fileSizeMB = (int)(dupInfo->GetSize() / 1024 / 1024);
-
-			AppendFmtResponse(IsJson() ? JSON_HISTORY_DUP_ITEM : XML_HISTORY_DUP_ITEM,
-				historyInfo->GetId(), historyInfo->GetId(), "DUP", *EncodeStr(historyInfo->GetName()),
-				(int)historyInfo->GetTime(), fileSizeLo, fileSizeHi, fileSizeMB,
-				*EncodeStr(dupInfo->GetDupeKey()), dupInfo->GetDupeScore(),
-				dupeModeName[dupInfo->GetDupeMode()], dupStatusName[dupInfo->GetStatus()],
-				status);
+			AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_history_dup_item(
+				IsJson() ? 1 : 0,
+				hasComma,
+				historyInfo->GetId(),
+				historyInfo->GetName(),
+				(int)historyInfo->GetTime(),
+				dupInfo->GetSize(),
+				dupInfo->GetDupeKey(),
+				dupInfo->GetDupeScore(),
+				(int)dupInfo->GetDupeMode(),
+				(int)dupInfo->GetStatus(),
+				status));
 		}
 
 		if (nzbInfo)
@@ -2955,7 +2049,7 @@ void HistoryXmlCommand::Execute()
 			AppendNzbInfoFields(nzbInfo);
 		}
 
-		AppendResponse(IsJson() ? JSON_HISTORY_ITEM_END : XML_HISTORY_ITEM_END);
+		AppendResponse(IsJson() ? "}" : "</struct></value>");
 	}
 
 	AppendResponse(IsJson() ? "\n]" : "</data></array>\n");
@@ -2984,26 +2078,6 @@ void UrlQueueXmlCommand::Execute()
 {
 	AppendResponse(IsJson() ? "[\n" : "<array><data>\n");
 
-	const char* XML_URLQUEUE_ITEM =
-		"<value><struct>\n"
-		"<member><name>ID</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>NZBFilename</name><value><string>%s</string></value></member>\n"
-		"<member><name>URL</name><value><string>%s</string></value></member>\n"
-		"<member><name>Name</name><value><string>%s</string></value></member>\n"
-		"<member><name>Category</name><value><string>%s</string></value></member>\n"
-		"<member><name>Priority</name><value><i4>%i</i4></value></member>\n"
-		"</struct></value>\n";
-
-	const char* JSON_URLQUEUE_ITEM =
-		"{\n"
-		"\"ID\" : %i,\n"
-		"\"NZBFilename\" : \"%s\",\n"
-		"\"URL\" : \"%s\",\n"
-		"\"Name\" : \"%s\",\n"
-		"\"Category\" : \"%s\",\n"
-		"\"Priority\" : %i\n"
-		"}";
-
 	int index = 0;
 
 	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
@@ -3011,10 +2085,15 @@ void UrlQueueXmlCommand::Execute()
 	{
 		if (nzbInfo->GetKind() == NzbInfo::nkUrl)
 		{
-			AppendCondResponse(",\n", IsJson() && index++ > 0);
-			AppendFmtResponse(IsJson() ? JSON_URLQUEUE_ITEM : XML_URLQUEUE_ITEM,
-				nzbInfo->GetId(), *EncodeStr(nzbInfo->GetFilename()), *EncodeStr(nzbInfo->GetUrl()),
-				*EncodeStr(nzbInfo->GetName()), *EncodeStr(nzbInfo->GetCategory()), nzbInfo->GetPriority());
+			AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_urlqueue_item(
+				IsJson() ? 1 : 0,
+				index++ > 0 ? 1 : 0,
+				nzbInfo->GetId(),
+				nzbInfo->GetFilename(),
+				nzbInfo->GetUrl(),
+				nzbInfo->GetName(),
+				nzbInfo->GetCategory(),
+				nzbInfo->GetPriority()));
 		}
 	}
 
@@ -3024,51 +2103,29 @@ void UrlQueueXmlCommand::Execute()
 // struct[] config()
 void ConfigXmlCommand::Execute()
 {
-	const char* XML_CONFIG_ITEM =
-		"<value><struct>\n"
-		"<member><name>Name</name><value><string>%s</string></value></member>\n"
-		"<member><name>Value</name><value><string>%s</string></value></member>\n"
-		"</struct></value>\n";
-
-	const char* JSON_CONFIG_ITEM =
-		"{\n"
-		"\"Name\" : \"%s\",\n"
-		"\"Value\" : \"%s\"\n"
-		"}";
-
-	AppendResponse(IsJson() ? "[\n" : "<array><data>\n");
-
-	int index = 0;
-
-	for (Options::OptEntry& optEntry : g_Options->GuardOptEntries())
+	Options::GuardedOptEntries optEntries = g_Options->GuardOptEntries();
+	std::vector<NzbgetRsRpcConfigItem> entries;
+	entries.reserve(optEntries->size());
+	for (Options::OptEntry& optEntry : optEntries)
 	{
-		CString xmlValue = EncodeStr(nzbget_rs_roc_xmlrpc_config_should_mask_value(
-			(int)m_userAccess, (int)XmlRpcProcessor::uaRestricted, optEntry.Restricted() ? 1 : 0) ?
-			"***" : optEntry.GetValue());
-
-		AppendCondResponse(",\n", IsJson() && index++ > 0);
-		AppendFmtResponse(IsJson() ? JSON_CONFIG_ITEM : XML_CONFIG_ITEM,
-			*EncodeStr(optEntry.GetName()), *xmlValue);
+		entries.push_back(NzbgetRsRpcConfigItem{
+			optEntry.GetName(),
+			optEntry.GetValue(),
+			optEntry.Restricted() ? 1 : 0
+		});
 	}
 
-	AppendResponse(IsJson() ? "\n]" : "</data></array>\n");
+	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_config_list(
+		IsJson() ? 1 : 0,
+		(int)m_userAccess,
+		(int)XmlRpcProcessor::uaRestricted,
+		entries.data(),
+		entries.size()));
 }
 
 // struct[] loadconfig()
 void LoadConfigXmlCommand::Execute()
 {
-	const char* XML_CONFIG_ITEM =
-		"<value><struct>\n"
-		"<member><name>Name</name><value><string>%s</string></value></member>\n"
-		"<member><name>Value</name><value><string>%s</string></value></member>\n"
-		"</struct></value>\n";
-
-	const char* JSON_CONFIG_ITEM =
-		"{\n"
-		"\"Name\" : \"%s\",\n"
-		"\"Value\" : \"%s\"\n"
-		"}";
-
 	Options::OptEntries optEntries;
 	if (!g_ScriptConfig->LoadConfig(&optEntries))
 	{
@@ -3076,22 +2133,23 @@ void LoadConfigXmlCommand::Execute()
 		return;
 	}
 
-	AppendResponse(IsJson() ? "[\n" : "<array><data>\n");
-
-	int index = 0;
-
-	for (Options::OptEntry& optEntry: optEntries)
+	std::vector<NzbgetRsRpcConfigItem> entries;
+	entries.reserve(optEntries.size());
+	for (Options::OptEntry& optEntry : optEntries)
 	{
-		CString xmlValue = EncodeStr(nzbget_rs_roc_xmlrpc_config_should_mask_value(
-			(int)m_userAccess, (int)XmlRpcProcessor::uaRestricted, optEntry.Restricted() ? 1 : 0) ?
-			"***" : optEntry.GetValue());
-
-		AppendCondResponse(",\n", IsJson() && index++ > 0);
-		AppendFmtResponse(IsJson() ? JSON_CONFIG_ITEM : XML_CONFIG_ITEM,
-			*EncodeStr(optEntry.GetName()), *xmlValue);
+		entries.push_back(NzbgetRsRpcConfigItem{
+			optEntry.GetName(),
+			optEntry.GetValue(),
+			optEntry.Restricted() ? 1 : 0
+		});
 	}
 
-	AppendResponse(IsJson() ? "\n]" : "</data></array>\n");
+	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_config_list(
+		IsJson() ? 1 : 0,
+		(int)m_userAccess,
+		(int)XmlRpcProcessor::uaRestricted,
+		entries.data(),
+		entries.size()));
 }
 
 void LoadExtensionsXmlCommand::Execute()
@@ -3445,16 +2503,6 @@ void SaveConfigXmlCommand::Execute()
 // parameter "loadFromDisk" is optional (new in v14)
 void ConfigTemplatesXmlCommand::Execute()
 {
-	const char* XML_CONFIG_ITEM =
-		"<value><struct>\n"
-		"<member><name>Template</name><value><string>%s</string></value></member>\n"
-		"</struct></value>\n";
-
-	const char* JSON_CONFIG_ITEM =
-		"{\n"
-		"\"Template\" : \"%s\"\n"
-		"}";
-
 	bool loadFromDisk = false;
 	NextParamAsBool(&loadFromDisk);
 
@@ -3471,18 +2519,15 @@ void ConfigTemplatesXmlCommand::Execute()
 		configTemplates = &loadedConfigTemplates;
 	}
 
-	AppendResponse(IsJson() ? "[\n" : "<array><data>\n");
-
-	int index = 0;
-
+	std::vector<const char*> templates;
+	templates.reserve(configTemplates->size());
 	for (ScriptConfig::ConfigTemplate& configTemplate : configTemplates)
 	{
-		AppendCondResponse(",\n", IsJson() && index++ > 0);
-		AppendFmtResponse(IsJson() ? JSON_CONFIG_ITEM : XML_CONFIG_ITEM,
-			*EncodeStr(configTemplate.GetTemplate()));
+		templates.push_back(configTemplate.GetTemplate());
 	}
 
-	AppendResponse(IsJson() ? "\n]" : "</data></array>\n");
+	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_config_templates(
+		IsJson() ? 1 : 0, templates.data(), templates.size()));
 }
 
 // struct[] viewfeed(int id)
@@ -3583,52 +2628,6 @@ void ViewFeedXmlCommand::Execute()
 		return;
 	}
 
-	const char* XML_FEED_ITEM =
-		"<value><struct>\n"
-		"<member><name>Title</name><value><string>%s</string></value></member>\n"
-		"<member><name>Filename</name><value><string>%s</string></value></member>\n"
-		"<member><name>URL</name><value><string>%s</string></value></member>\n"
-		"<member><name>SizeLo</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>SizeHi</name><value><i4>%u</i4></value></member>\n"
-		"<member><name>SizeMB</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>Category</name><value><string>%s</string></value></member>\n"
-		"<member><name>AddCategory</name><value><string>%s</string></value></member>\n"
-		"<member><name>PauseNzb</name><value><boolean>%s</boolean></value></member>\n"
-		"<member><name>Priority</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>Time</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>Match</name><value><string>%s</string></value></member>\n"
-		"<member><name>Rule</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>DupeKey</name><value><string>%s</string></value></member>\n"
-		"<member><name>DupeScore</name><value><i4>%i</i4></value></member>\n"
-		"<member><name>DupeMode</name><value><string>%s</string></value></member>\n"
-		"<member><name>Status</name><value><string>%s</string></value></member>\n"
-		"</struct></value>\n";
-
-	const char* JSON_FEED_ITEM =
-		"{\n"
-		"\"Title\" : \"%s\",\n"
-		"\"Filename\" : \"%s\",\n"
-		"\"URL\" : \"%s\",\n"
-		"\"SizeLo\" : %u,\n"
-		"\"SizeHi\" : %u,\n"
-		"\"SizeMB\" : %i,\n"
-		"\"Category\" : \"%s\",\n"
-		"\"AddCategory\" : \"%s\",\n"
-		"\"PauseNzb\" : %s,\n"
-		"\"Priority\" : %i,\n"
-		"\"Time\" : %i,\n"
-		"\"Match\" : \"%s\",\n"
-		"\"Rule\" : %i,\n"
-		"\"DupeKey\" : \"%s\",\n"
-		"\"DupeScore\" : %i,\n"
-		"\"DupeMode\" : \"%s\",\n"
-		"\"Status\" : \"%s\"\n"
-		"}";
-
-	const char* statusType[] = { "UNKNOWN", "BACKLOG", "FETCHED", "NEW" };
-	const char* matchStatusType[] = { "IGNORED", "ACCEPTED", "REJECTED" };
-	const char* dupeModeType[] = { "SCORE", "ALL", "FORCE" };
-
 	AppendResponse(IsJson() ? "[\n" : "<array><data>\n");
 	int index = 0;
 
@@ -3639,18 +2638,26 @@ void ViewFeedXmlCommand::Execute()
 			includeNonMatching ? 1 : 0, (int)feedItemInfo.GetMatchStatus(),
 			(int)FeedItemInfo::msAccepted, feedItemInfo.GetSize(), &sizeMB))
 		{
-			uint32 sizeHi, sizeLo;
-			Util::SplitInt64(feedItemInfo.GetSize(), &sizeHi, &sizeLo);
+			NzbgetRsRpcFeedItem item{};
+			item.title = feedItemInfo.GetTitle();
+			item.filename = feedItemInfo.GetFilename();
+			item.url = feedItemInfo.GetUrl();
+			item.size = feedItemInfo.GetSize();
+			item.size_mb = sizeMB;
+			item.category = feedItemInfo.GetCategory();
+			item.add_category = feedItemInfo.GetAddCategory().c_str();
+			item.pause_nzb = feedItemInfo.GetPauseNzb() ? 1 : 0;
+			item.priority = feedItemInfo.GetPriority();
+			item.time = (int)feedItemInfo.GetTime();
+			item.match_status = (int)feedItemInfo.GetMatchStatus();
+			item.match_rule = feedItemInfo.GetMatchRule();
+			item.dupe_key = feedItemInfo.GetDupeKey();
+			item.dupe_score = feedItemInfo.GetDupeScore();
+			item.dupe_mode = (int)feedItemInfo.GetDupeMode();
+			item.status = (int)feedItemInfo.GetStatus();
 
-			AppendCondResponse(",\n", IsJson() && index++ > 0);
-			AppendFmtResponse(IsJson() ? JSON_FEED_ITEM : XML_FEED_ITEM,
-				*EncodeStr(feedItemInfo.GetTitle()), *EncodeStr(feedItemInfo.GetFilename()),
-				*EncodeStr(feedItemInfo.GetUrl()), sizeLo, sizeHi, sizeMB,
-				*EncodeStr(feedItemInfo.GetCategory()), *EncodeStr(feedItemInfo.GetAddCategory().c_str()),
-				BoolToStr(feedItemInfo.GetPauseNzb()), feedItemInfo.GetPriority(), (int)feedItemInfo.GetTime(),
-				matchStatusType[feedItemInfo.GetMatchStatus()], feedItemInfo.GetMatchRule(),
-				*EncodeStr(feedItemInfo.GetDupeKey()), feedItemInfo.GetDupeScore(),
-				dupeModeType[feedItemInfo.GetDupeMode()], statusType[feedItemInfo.GetStatus()]);
+			AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_feed_item(
+				IsJson() ? 1 : 0, index++ > 0 ? 1 : 0, &item));
 		}
 	}
 
@@ -3759,10 +2766,7 @@ void ReadUrlXmlCommand::Execute()
 	{
 		CharBuffer fileContent;
 		FileSystem::LoadFileIntoBuffer(tempFileName, fileContent, true);
-		CString xmlContent = EncodeStr(fileContent);
-		AppendResponse(IsJson() ? "\"" : "<string>");
-		AppendResponse(xmlContent);
-		AppendResponse(IsJson() ? "\"" : "</string>");
+		AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_string(IsJson() ? 1 : 0, fileContent, 1, 0));
 	}
 	else
 	{
@@ -3780,10 +2784,7 @@ void CheckUpdatesXmlCommand::Execute()
 
 	if (ok)
 	{
-		CString xmlContent = EncodeStr(updateInfo);
-		AppendResponse(IsJson() ? "\"" : "<string>");
-		AppendResponse(xmlContent);
-		AppendResponse(IsJson() ? "\"" : "</string>");
+		AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_string(IsJson() ? 1 : 0, updateInfo, 1, 0));
 	}
 	else
 	{
@@ -3825,88 +2826,6 @@ GuardedMessageList LogUpdateXmlCommand::GuardMessages()
 // struct[] servervolumes(bool BytesPerSeconds, bool BytesPerMinutes, bool BytesPerHours, bool BytesPerDays, bool ArticlesPerDays)
 void ServerVolumesXmlCommand::Execute()
 {
-	const char* XML_VOLUME_ITEM_START =
-	"<value><struct>\n"
-	"<member><name>ServerID</name><value><i4>%i</i4></value></member>\n"
-	"<member><name>DataTime</name><value><i4>%i</i4></value></member>\n"
-	"<member><name>FirstDay</name><value><i4>%i</i4></value></member>\n"
-	"<member><name>TotalSizeLo</name><value><i4>%u</i4></value></member>\n"
-	"<member><name>TotalSizeHi</name><value><i4>%u</i4></value></member>\n"
-	"<member><name>TotalSizeMB</name><value><i4>%i</i4></value></member>\n"
-	"<member><name>CustomSizeLo</name><value><i4>%u</i4></value></member>\n"
-	"<member><name>CustomSizeHi</name><value><i4>%u</i4></value></member>\n"
-	"<member><name>CustomSizeMB</name><value><i4>%i</i4></value></member>\n"
-	"<member><name>CustomTime</name><value><i4>%i</i4></value></member>\n"
-	"<member><name>CountersResetTime</name><value><i4>%i</i4></value></member>\n"
-	"<member><name>SecSlot</name><value><i4>%i</i4></value></member>\n"
-	"<member><name>MinSlot</name><value><i4>%i</i4></value></member>\n"
-	"<member><name>HourSlot</name><value><i4>%i</i4></value></member>\n"
-	"<member><name>DaySlot</name><value><i4>%i</i4></value></member>\n";
-
-	const char* XML_ARRAY_START =
-	"<member><name>%s</name><value><array><data>\n";
-
-	const char* XML_BYTES_ARRAY_ITEM =
-	"<value><struct>\n"
-	"<member><name>SizeLo</name><value><i4>%u</i4></value></member>\n"
-	"<member><name>SizeHi</name><value><i4>%u</i4></value></member>\n"
-	"<member><name>SizeMB</name><value><i4>%i</i4></value></member>\n"
-	"</struct></value>\n";
-
-	const char* XML_ARTICLES_ARRAY_ITEM =
-	"<value><struct>\n"
-	"<member><name>Failed</name><value><i4>%u</i4></value></member>\n"
-	"<member><name>Success</name><value><i4>%u</i4></value></member>\n"
-	"</struct></value>\n";
-
-	const char* XML_ARRAY_END =
-	"</data></array></value></member>\n";
-
-	const char* XML_VOLUME_ITEM_END =
-	"</struct></value>\n";
-
-	const char* JSON_VOLUME_ITEM_START =
-	"{\n"
-	"\"ServerID\" : %i,\n"
-	"\"DataTime\" : %i,\n"
-	"\"FirstDay\" : %i,\n"
-	"\"TotalSizeLo\" : %u,\n"
-	"\"TotalSizeHi\" : %u,\n"
-	"\"TotalSizeMB\" : %i,\n"
-	"\"CustomSizeLo\" : %u,\n"
-	"\"CustomSizeHi\" : %u,\n"
-	"\"CustomSizeMB\" : %i,\n"
-	"\"CustomTime\" : %i,\n"
-	"\"CountersResetTime\" : %i,\n"
-	"\"SecSlot\" : %i,\n"
-	"\"MinSlot\" : %i,\n"
-	"\"HourSlot\" : %i,\n"
-	"\"DaySlot\" : %i\n";
-
-	// (every optional array is preceded by its comma: with one turned off, the
-	// fields ended in a stray comma or two commas in a row - invalid JSON)
-	const char* JSON_ARRAY_START =
-	",\n\"%s\" : [\n";
-
-	const char* JSON_BYTES_ARRAY_ITEM =
-	"{\n"
-	"\"SizeLo\" : %u,\n"
-	"\"SizeHi\" : %u,\n"
-	"\"SizeMB\" : %i\n"
-	"}";
-
-	const char* JSON_ARTICLES_ARRAY_ITEM =
-	"{\n"\
-	"\"Failed\" : %u,\n"
-	"\"Success\" : %u\n"
-	"}";
-
-	const char* JSON_ARRAY_END =
-	"]\n";
-
-	const char* JSON_VOLUME_ITEM_END =
-	"}\n";
-
 	AppendResponse(IsJson() ? "[\n" : "<array><data>\n");
 
 	bool BytesPer[] = {true, true, true, true};
@@ -3922,86 +2841,55 @@ void ServerVolumesXmlCommand::Execute()
 
 	for (ServerVolume& serverVolume : g_StatMeter->GuardServerVolumes())
 	{
-		uint32 totalSizeHi, totalSizeLo, totalSizeMB;
-		Util::SplitInt64(serverVolume.GetTotalBytes(), &totalSizeHi, &totalSizeLo);
-
-		uint32 customSizeHi, customSizeLo, customSizeMB;
-		Util::SplitInt64(serverVolume.GetCustomBytes(), &customSizeHi, &customSizeLo);
-		nzbget_rs_roc_xmlrpc_server_volumes_calc_mb(
-			serverVolume.GetTotalBytes(), serverVolume.GetCustomBytes(), &totalSizeMB, &customSizeMB);
-
-		AppendCondResponse(",\n", IsJson() && index > 0);
-		AppendFmtResponse(IsJson() ? JSON_VOLUME_ITEM_START : XML_VOLUME_ITEM_START,
-			index,
-			static_cast<int>(serverVolume.GetDataTime()),
-			serverVolume.GetFirstDay(),
-			totalSizeLo, totalSizeHi, totalSizeMB,
-			customSizeLo, customSizeHi, customSizeMB,
-			static_cast<int>(serverVolume.GetCustomTime()),
-			static_cast<int>(serverVolume.GetCountersResetTime()),
-			serverVolume.GetSecSlot(),
-			serverVolume.GetMinSlot(),
-			serverVolume.GetHourSlot(),
-			serverVolume.GetDaySlot()
-		);
-
-		ServerVolume::VolumeArray* VolumeArrays[] = {
-			serverVolume.BytesPerSeconds(),
-			serverVolume.BytesPerMinutes(),
-			serverVolume.BytesPerHours(),
-			serverVolume.BytesPerDays()
-		};
-		const char* VolumeNames[] = {
-			"BytesPerSeconds",
-			"BytesPerMinutes",
-			"BytesPerHours",
-			"BytesPerDays"
-		};
-
-		for (size_t i = 0; i < 4; ++i)
-		{
-			if (BytesPer[i])
-			{
-				ServerVolume::VolumeArray* volumeArray = VolumeArrays[i];
-				const char* arrayName = VolumeNames[i];
-
-				AppendFmtResponse(IsJson() ? JSON_ARRAY_START : XML_ARRAY_START, arrayName);
-
-				int index2 = 0;
-				for (int64 bytes : *volumeArray)
-				{
-					uint32 sizeHi, sizeLo, sizeMB;
-					Util::SplitInt64(bytes, &sizeHi, &sizeLo);
-					sizeMB = (int)(bytes / 1024 / 1024);
-
-					AppendCondResponse(",\n", IsJson() && index2++ > 0);
-					AppendFmtResponse(IsJson() ? JSON_BYTES_ARRAY_ITEM : XML_BYTES_ARRAY_ITEM,
-							 sizeLo, sizeHi, sizeMB);
-				}
-
-				AppendResponse(IsJson() ? JSON_ARRAY_END : XML_ARRAY_END);
-			}
-		}
-
+		const auto& articles = serverVolume.GetArticlesPerDays();
+		std::vector<NzbgetRsRpcArticlePair> articleEntries;
 		if (articlesPerDays)
 		{
-			AppendFmtResponse(IsJson() ? JSON_ARRAY_START : XML_ARRAY_START, "ArticlesPerDays");
-
-			const auto& articles = serverVolume.GetArticlesPerDays();
-			for (size_t i = 0; i < articles.size(); ++i)
+			articleEntries.reserve(articles.size());
+			for (const auto& art : articles)
 			{
-				AppendFmtResponse(IsJson() ? JSON_ARTICLES_ARRAY_ITEM : XML_ARTICLES_ARRAY_ITEM,
-					articles[i].failed,
-					articles[i].success
-				);
-
-				AppendCondResponse(",\n", IsJson() && i < articles.size() - 1);
+				articleEntries.push_back(NzbgetRsRpcArticlePair{ art.failed, art.success });
 			}
-
-			AppendResponse(IsJson() ? JSON_ARRAY_END : XML_ARRAY_END);
 		}
 
-		AppendResponse(IsJson() ? JSON_VOLUME_ITEM_END : XML_VOLUME_ITEM_END);
+		const ServerVolume::VolumeArray* bps = serverVolume.BytesPerSeconds();
+		const ServerVolume::VolumeArray* bpm = serverVolume.BytesPerMinutes();
+		const ServerVolume::VolumeArray* bph = serverVolume.BytesPerHours();
+		const ServerVolume::VolumeArray* bpd = serverVolume.BytesPerDays();
+
+		NzbgetRsRpcServerVolumeItem volFields{};
+		volFields.server_id = index;
+		volFields.data_time = static_cast<int>(serverVolume.GetDataTime());
+		volFields.first_day = serverVolume.GetFirstDay();
+		volFields.total_bytes = serverVolume.GetTotalBytes();
+		volFields.custom_bytes = serverVolume.GetCustomBytes();
+		volFields.custom_time = static_cast<int>(serverVolume.GetCustomTime());
+		volFields.counters_reset_time = static_cast<int>(serverVolume.GetCountersResetTime());
+		volFields.sec_slot = serverVolume.GetSecSlot();
+		volFields.min_slot = serverVolume.GetMinSlot();
+		volFields.hour_slot = serverVolume.GetHourSlot();
+		volFields.day_slot = serverVolume.GetDaySlot();
+		volFields.include_seconds = BytesPer[0] ? 1 : 0;
+		volFields.bytes_per_seconds = bps->data();
+		volFields.bytes_per_seconds_len = bps->size();
+		volFields.include_minutes = BytesPer[1] ? 1 : 0;
+		volFields.bytes_per_minutes = bpm->data();
+		volFields.bytes_per_minutes_len = bpm->size();
+		volFields.include_hours = BytesPer[2] ? 1 : 0;
+		volFields.bytes_per_hours = bph->data();
+		volFields.bytes_per_hours_len = bph->size();
+		volFields.include_days = BytesPer[3] ? 1 : 0;
+		volFields.bytes_per_days = bpd->data();
+		volFields.bytes_per_days_len = bpd->size();
+		volFields.include_articles = articlesPerDays ? 1 : 0;
+		volFields.articles_per_days = articleEntries.data();
+		volFields.articles_per_days_len = articleEntries.size();
+
+		AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_server_volume_item(
+			IsJson() ? 1 : 0,
+			index,
+			&volFields));
+
 		index++;
 	}
 
@@ -4098,9 +2986,6 @@ GuardedMessageList LoadLogXmlCommand::GuardMessages()
 // string testserver(string host, int port, string username, string password, bool encryption, string cipher, int timeout, int certVerifLevel);
 void TestServerXmlCommand::Execute()
 {
-	const char* XML_RESPONSE_STR_BODY = "<string>%s</string>";
-	const char* JSON_RESPONSE_STR_BODY = "\"%s\"";
-
 	TestServerXmlCommand::ServerParams params;
 	char* host;
 	int port;
@@ -4222,10 +3107,11 @@ void TestServerXmlCommand::Execute()
 		ok = nzbget_rs_rol_xmlrpc_test_server_response_ok(response) != 0;
 	}
 
-	BString<1024> content(IsJson() ? JSON_RESPONSE_STR_BODY : XML_RESPONSE_STR_BODY,
-		ok ? "" : m_errText.Empty() ? "Unknown error" : *m_errText);
-
-	AppendResponse(content);
+	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_string(
+		IsJson() ? 1 : 0,
+		ok ? "" : m_errText.Empty() ? "Unknown error" : *m_errText,
+		0,
+		1023));
 }
 
 void TestServerXmlCommand::PrintError(const char* errMsg)

@@ -4463,6 +4463,454 @@ int nzbget_rs_aws_server_pool_is_candidate_connection_eligible(
 int nzbget_rs_aws_xml_reader_is_parse_success(
     int sax_result, int entity_declared);
 
+typedef struct {
+    int64_t remaining_size;
+    int64_t forced_size;
+    int64_t article_cache;
+    const char* memory_pressure;
+    int effective_article_cache_mb;
+    int effective_par_buffer_mb;
+    int64_t download_rate;
+    int download_limit;
+    int thread_count;
+    int post_job_count;
+    int url_count;
+    int up_time_sec;
+    int download_time_sec;
+    int64_t all_bytes;
+    int64_t month_bytes;
+    int64_t day_bytes;
+    int download_paused;
+    int server_stand_by;
+    int post_paused;
+    int scan_paused;
+    int quota_reached;
+    int64_t free_disk_space;
+    int64_t total_disk_space;
+    int inter_dir_empty;
+    int64_t free_inter_disk_space;
+    int64_t total_inter_disk_space;
+    int server_time;
+    int resume_time;
+    int feed_active;
+    int queued_scripts;
+} NzbgetRsRpcStatusInput;
+
+typedef struct {
+    int id;
+    int active;
+} NzbgetRsRpcServerStatus;
+
+typedef struct {
+    int id;
+    int kind;
+    int time;
+    const char* text;
+} NzbgetRsRpcLogEntry;
+
+typedef struct {
+    int id;
+    int64_t file_size;
+    int64_t remaining_size;
+    int post_time;
+    int filename_confirmed;
+    int paused;
+    int nzb_id;
+    const char* nzb_name;
+    const char* nzb_filename;
+    const char* subject;
+    const char* filename;
+    const char* dest_dir;
+    const char* category;
+    int priority;
+    int active_downloads;
+    int progress;
+} NzbgetRsRpcFileItem;
+
+typedef struct {
+    int id;
+    int kind;
+    const char* name;
+    const char* url;
+    const char* filename;
+    const char* dest_dir;
+    const char* final_dir;
+    const char* category;
+    int par_status;
+    int unpack_status;
+    int move_status;
+    int script_status;
+    int delete_status;
+    int mark_status;
+    int url_status;
+    int64_t size;
+    int file_count;
+    int min_time;
+    int max_time;
+    int total_articles;
+    int current_success_articles;
+    int current_failed_articles;
+    int dupe_recovered_articles;
+    int64_t dupe_recovered_bytes;
+    int dupe_recovered_holes;
+    int live_repairing;
+    int health;
+    int critical_health;
+    const char* dupe_key;
+    int dupe_score;
+    int dupe_mode;
+    int64_t downloaded_size;
+    int download_sec;
+    int post_total_sec;
+    int has_post_start_time;
+    int64_t cur_time;
+    int64_t post_start_time;
+    int par_sec;
+    int repair_sec;
+    int unpack_sec;
+    int message_count;
+    int cached_message_count;
+    int extra_par_blocks;
+} NzbgetRsRpcNzbInfoInput;
+
+typedef struct {
+    const char* name;
+    const char* value;
+} NzbgetRsRpcParamItem;
+
+typedef struct {
+    const char* name;
+    int status;
+} NzbgetRsRpcScriptItem;
+
+typedef struct {
+    int server_id;
+    int success_articles;
+    int failed_articles;
+} NzbgetRsRpcServerStatItem;
+
+typedef struct {
+    const char* name;
+    const char* value;
+    int restricted;
+} NzbgetRsRpcConfigItem;
+
+typedef struct {
+    const char* title;
+    const char* filename;
+    const char* url;
+    int64_t size;
+    int size_mb;
+    const char* category;
+    const char* add_category;
+    int pause_nzb;
+    int priority;
+    int time;
+    int match_status;
+    int match_rule;
+    const char* dupe_key;
+    int dupe_score;
+    int dupe_mode;
+    int status;
+} NzbgetRsRpcFeedItem;
+
+typedef struct {
+    uint32_t failed;
+    uint32_t success;
+} NzbgetRsRpcArticlePair;
+
+typedef struct {
+    int server_id;
+    int data_time;
+    int first_day;
+    int64_t total_bytes;
+    int64_t custom_bytes;
+    int custom_time;
+    int counters_reset_time;
+    int sec_slot;
+    int min_slot;
+    int hour_slot;
+    int day_slot;
+    int include_seconds;
+    const int64_t* bytes_per_seconds;
+    size_t bytes_per_seconds_len;
+    int include_minutes;
+    const int64_t* bytes_per_minutes;
+    size_t bytes_per_minutes_len;
+    int include_hours;
+    const int64_t* bytes_per_hours;
+    size_t bytes_per_hours_len;
+    int include_days;
+    const int64_t* bytes_per_days;
+    size_t bytes_per_days_len;
+    int include_articles;
+    const NzbgetRsRpcArticlePair* articles_per_days;
+    size_t articles_per_days_len;
+} NzbgetRsRpcServerVolumeItem;
+
+typedef struct {
+    int nzb_id;
+    const char* name;
+    int rank;
+    int alive;
+    const char* status;
+    int same_as;
+    int same_as_rank;
+    const char* reason;
+} NzbgetRsRpcFleetMember;
+
+int nzbget_rs_xmlrpc_match_command(const char* method_name);
+NzbgetRsBuf nzbget_rs_xmlrpc_format_error(int is_json, int err_code, const char* err_text);
+NzbgetRsBuf nzbget_rs_xmlrpc_format_bool(int is_json, int ok);
+NzbgetRsBuf nzbget_rs_xmlrpc_format_int(int is_json, int value);
+NzbgetRsBuf nzbget_rs_xmlrpc_format_string(int is_json, const char* raw_str, int encode, size_t max_len);
+NzbgetRsBuf nzbget_rs_xmlrpc_format_status(
+    int is_json, const NzbgetRsRpcStatusInput* inp,
+    const NzbgetRsRpcServerStatus* servers, size_t servers_len);
+NzbgetRsBuf nzbget_rs_xmlrpc_format_log_list(
+    int is_json, const NzbgetRsRpcLogEntry* entries, size_t len);
+NzbgetRsBuf nzbget_rs_xmlrpc_format_file_item(
+    int is_json, int index, const NzbgetRsRpcFileItem* item);
+NzbgetRsBuf nzbget_rs_xmlrpc_format_nzb_info_fields(
+    int is_json, const NzbgetRsRpcNzbInfoInput* info,
+    const NzbgetRsRpcParamItem* params, size_t params_len,
+    const NzbgetRsRpcScriptItem* scripts, size_t scripts_len,
+    const NzbgetRsRpcServerStatItem* stats, size_t stats_len);
+NzbgetRsBuf nzbget_rs_xmlrpc_format_post_info_fields(
+    int is_json, int post_queue, int has_post_info, const char* progress_label,
+    int stage_progress, int64_t cur_time, int64_t stage_time, int64_t start_time,
+    const NzbgetRsRpcLogEntry* logs, size_t logs_len);
+NzbgetRsBuf nzbget_rs_xmlrpc_format_group_item_start(
+    int is_json, int index, int nzb_id, int64_t remaining_size, int64_t paused_size,
+    int remaining_file_count, int remaining_par_count, int priority,
+    int active_downloads, const char* status);
+NzbgetRsBuf nzbget_rs_xmlrpc_format_postqueue_item_start(
+    int is_json, int index, int nzb_id, const char* info_name, int stage, int file_progress);
+NzbgetRsBuf nzbget_rs_xmlrpc_format_history_nzb_start(
+    int is_json, int index, int id, const char* name, int remaining_file_count,
+    int retry_data, int history_time, const char* status);
+NzbgetRsBuf nzbget_rs_xmlrpc_format_history_dup_item(
+    int is_json, int index, int id, const char* name, int history_time, int64_t size,
+    const char* dupe_key, int dupe_score, int dupe_mode, int dup_status, const char* status);
+NzbgetRsBuf nzbget_rs_xmlrpc_format_urlqueue_item(
+    int is_json, int index, int id, const char* filename, const char* url,
+    const char* name, const char* category, int priority);
+NzbgetRsBuf nzbget_rs_xmlrpc_format_config_list(
+    int is_json, int user_access, int ua_restricted,
+    const NzbgetRsRpcConfigItem* entries, size_t len);
+NzbgetRsBuf nzbget_rs_xmlrpc_format_config_templates(
+    int is_json, const char* const* templates, size_t len);
+NzbgetRsBuf nzbget_rs_xmlrpc_format_feed_item(
+    int is_json, int index, const NzbgetRsRpcFeedItem* item);
+NzbgetRsBuf nzbget_rs_xmlrpc_format_server_volume_item(
+    int is_json, int index, const NzbgetRsRpcServerVolumeItem* item);
+NzbgetRsBuf nzbget_rs_xmlrpc_format_fleet_result(
+    int chosen, int complete, const char* reason,
+    const NzbgetRsRpcFleetMember* members, size_t members_len);
+
+typedef struct {
+    int id;
+    int status;
+    uint32_t crc;
+    int par_file;
+    const char* hash16k;
+    const char* par_set_id;
+    const char* filename;
+    const char* origname;
+} NzbgetRsDiskCompletedFile;
+
+typedef struct {
+    const char* name;
+    const char* value;
+} NzbgetRsDiskParam;
+
+typedef struct {
+    int status;
+    const char* name;
+} NzbgetRsDiskScriptStatus;
+
+typedef struct {
+    int server_id;
+    int success_articles;
+    int failed_articles;
+} NzbgetRsDiskServerStat;
+
+typedef struct {
+    int id;
+    int paused;
+    int extra_priority;
+} NzbgetRsDiskFileStub;
+
+typedef struct {
+    int id;
+    int kind;
+    const char* url;
+    const char* filename;
+    const char* dest_dir;
+    const char* final_dir;
+    const char* hard_link_path;
+    const char* meta_name;
+    const char* queued_filename;
+    const char* name;
+    const char* category;
+    int priority;
+    int has_post_info;
+    int post_stage;
+    int delete_paused;
+    int many_dupe_files;
+    int feed_id;
+    int par_status;
+    int unpack_status;
+    int move_status;
+    int par_rename_status;
+    int rar_rename_status;
+    int direct_rename_status;
+    int delete_status;
+    int mark_status;
+    int url_status;
+    int unpack_cleaned_up_disk;
+    int health_paused;
+    int add_url_paused;
+    int file_count;
+    int parked_file_count;
+    int message_count;
+    int min_time;
+    int max_time;
+    int par_full;
+    int force_par_full;
+    int force_repair;
+    int extra_par_blocks;
+    uint32_t full_content_hash;
+    uint32_t filtered_content_hash;
+    int64_t size;
+    int64_t success_size;
+    int64_t failed_size;
+    int64_t par_size;
+    int64_t par_success_size;
+    int64_t par_failed_size;
+    int total_articles;
+    int success_articles;
+    int failed_articles;
+    const char* dupe_key;
+    int dupe_mode;
+    int dupe_score;
+    int dupe_hint;
+    int64_t downloaded_size;
+    int download_sec;
+    int post_total_sec;
+    int par_sec;
+    int repair_sec;
+    int unpack_sec;
+    int skip_script_processing;
+    int skip_disk_write;
+    int desired_server_id;
+} NzbgetRsDiskNzbInfoInput;
+
+typedef struct {
+    int part_number;
+    int size;
+    const char* message_id;
+} NzbgetRsDiskArticleInfo;
+
+typedef struct {
+    const char* subject;
+    const char* filename;
+    const char* origname;
+    const char* output_filename;
+    int filename_confirmed;
+    int time;
+    int output_initialized;
+    int64_t size;
+    int64_t missed_size;
+    int par_file;
+    int total_articles;
+    int missed_articles;
+} NzbgetRsDiskFileInfoInput;
+
+typedef struct {
+    int saved_status;
+    int64_t segment_offset;
+    int segment_size;
+    uint32_t crc;
+    int staged_fallback;
+} NzbgetRsDiskArticleState;
+
+typedef struct {
+    int success_articles;
+    int failed_articles;
+    int64_t remaining_size;
+    int64_t success_size;
+    int64_t failed_size;
+    const char* filename;
+    const char* hash16k;
+    const char* par_set_id;
+    int par_file;
+    int64_t decoded_file_size;
+    int output_initialized;
+} NzbgetRsDiskFileStateInput;
+
+typedef struct {
+    int64_t offset;
+    int64_t size;
+} NzbgetRsDiskStreamHole;
+
+typedef struct {
+    int file_id;
+    int64_t decoded_file_size;
+    int64_t failed_size;
+    int64_t missed_size;
+    int par_file;
+    int failed_articles;
+    uint64_t steps_hash;
+    const char* filename;
+    const NzbgetRsDiskStreamHole* holes;
+    size_t holes_len;
+} NzbgetRsDiskRepairJob;
+
+typedef struct {
+    int first_day;
+    int data_time;
+    int custom_time;
+    int counters_reset_time;
+    int64_t total_bytes;
+    int64_t custom_bytes;
+    const int64_t* bytes_per_seconds;
+    size_t bytes_per_seconds_len;
+    const int64_t* bytes_per_minutes;
+    size_t bytes_per_minutes_len;
+    const int64_t* bytes_per_hours;
+    size_t bytes_per_hours_len;
+    const int64_t* bytes_per_days;
+    size_t bytes_per_days_len;
+    const NzbgetRsRpcArticlePair* articles_per_days;
+    size_t articles_per_days_len;
+} NzbgetRsDiskVolumeStatInput;
+
+NzbgetRsBuf nzbget_rs_diskstate_format_nzb_info(
+    const NzbgetRsDiskNzbInfoInput* inp,
+    const NzbgetRsDiskCompletedFile* completed, size_t completed_len,
+    const NzbgetRsDiskParam* params, size_t params_len,
+    const NzbgetRsDiskScriptStatus* scripts, size_t scripts_len,
+    const NzbgetRsDiskServerStat* stats, size_t stats_len,
+    const NzbgetRsDiskFileStub* files, size_t files_len);
+NzbgetRsBuf nzbget_rs_diskstate_format_dupe_extras(
+    int recovered_articles, int64_t recovered_bytes, int recovered_holes,
+    const NzbgetRsDiskRepairJob* jobs, size_t jobs_len);
+NzbgetRsBuf nzbget_rs_diskstate_format_file_info(
+    const NzbgetRsDiskFileInfoInput* inp,
+    const char* const* groups, size_t groups_len,
+    int include_articles,
+    const NzbgetRsDiskArticleInfo* articles, size_t articles_len);
+NzbgetRsBuf nzbget_rs_diskstate_format_file_state(
+    const NzbgetRsDiskFileStateInput* inp,
+    const NzbgetRsDiskServerStat* stats, size_t stats_len,
+    const NzbgetRsDiskArticleState* articles, size_t articles_len);
+NzbgetRsBuf nzbget_rs_diskstate_format_dup_info(
+    int status, int64_t size, uint32_t full_content_hash, uint32_t filtered_content_hash,
+    int dupe_score, int dupe_mode, const char* name, const char* dupe_key);
+NzbgetRsBuf nzbget_rs_diskstate_format_volume_stat_item(
+    const NzbgetRsDiskVolumeStatInput* inp);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

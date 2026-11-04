@@ -73,7 +73,11 @@ void SchedulerScriptController::ExecuteScript(std::shared_ptr<const Extension::S
 	}
 
 	BString<1024> taskName(" for Task%i", m_taskId);
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_sfc_sched_script_should_format_task_suffix(m_taskId) == 0)
+#else
 	if (m_taskId == 0)
+#endif
 	{
 		taskName = "";
 	}

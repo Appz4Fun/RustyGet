@@ -22203,6 +22203,277 @@ pub extern "C" fn nzbget_rs_psp_parchecker_calc_creator_packet_payload_len(
     crate::poolstatprepost::parchecker_calc_creator_packet_payload_len(packet_length, header_size)
 }
 
+// ============================================================================
+// QueueScript, PostScript, ScriptConfig, ScanScript, CommandScript, SchedulerScript, FeedFile & FeedInfo Hot-Path FFI (`scriptfeedcfg.rs`)
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sfc_queue_script_can_start_or_enqueue(
+    has_queue_scripts: c_int,
+    has_nzb: c_int,
+    skip_script_processing: c_int,
+) -> c_int {
+    i32::from(crate::scriptfeedcfg::queue_script_can_start_or_enqueue(
+        has_queue_scripts != 0,
+        has_nzb != 0,
+        skip_script_processing != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sfc_script_ctrl_calc_prefix_len(display_name_len: usize) -> c_int {
+    crate::scriptfeedcfg::script_ctrl_calc_prefix_len(display_name_len)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sfc_queue_script_is_better_queued_item(
+    has_cur_nzb: c_int,
+    item_event: c_int,
+    max_event: c_int,
+) -> c_int {
+    i32::from(crate::scriptfeedcfg::queue_script_is_better_queued_item(
+        has_cur_nzb != 0,
+        item_event,
+        max_event,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sfc_queue_script_calc_queue_size(
+    queue_len: usize,
+    has_cur_item: c_int,
+) -> c_int {
+    crate::scriptfeedcfg::queue_script_calc_queue_size(queue_len, has_cur_item != 0)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sfc_post_script_should_skip_execute(
+    is_post_script: c_int,
+    request_par_check: c_int,
+) -> c_int {
+    i32::from(crate::scriptfeedcfg::post_script_should_skip_execute(
+        is_post_script != 0,
+        request_par_check != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sfc_post_script_resolve_compat_par_status(
+    par_status: c_int,
+    ps_failure: c_int,
+    delete_status: c_int,
+    ds_none: c_int,
+    mark_status: c_int,
+    ks_bad: c_int,
+) -> c_int {
+    crate::scriptfeedcfg::post_script_resolve_compat_par_status(
+        par_status,
+        ps_failure,
+        delete_status,
+        ds_none,
+        mark_status,
+        ks_bad,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sfc_post_script_is_paused_wait_active(
+    pause_post_process: c_int,
+    force_priority: c_int,
+    is_stopped: c_int,
+) -> c_int {
+    i32::from(crate::scriptfeedcfg::post_script_is_paused_wait_active(
+        pause_post_process != 0,
+        force_priority != 0,
+        is_stopped != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sfc_post_script_calc_paused_timestamps(
+    cur_time: i64,
+    wait_time: i64,
+    stage_time: i64,
+    start_time: i64,
+    out_stage_time: *mut i64,
+    out_start_time: *mut i64,
+) {
+    let (st, sr) = crate::scriptfeedcfg::post_script_calc_paused_timestamps(
+        cur_time, wait_time, stage_time, start_time,
+    );
+    if !out_stage_time.is_null() {
+        *out_stage_time = st;
+    }
+    if !out_start_time.is_null() {
+        *out_start_time = sr;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sfc_script_config_is_comment_or_blank_line(
+    line: *const c_char,
+) -> c_int {
+    let s = if line.is_null() {
+        c""
+    } else {
+        CStr::from_ptr(line)
+    };
+    i32::from(crate::scriptfeedcfg::script_config_is_comment_or_blank_line(s))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sfc_script_config_is_editable_option_line(
+    line: *const c_char,
+) -> c_int {
+    let s = if line.is_null() {
+        c""
+    } else {
+        CStr::from_ptr(line)
+    };
+    i32::from(crate::scriptfeedcfg::script_config_is_editable_option_line(s))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sfc_script_config_line_has_trailing_lf(
+    line: *const c_char,
+) -> c_int {
+    let s = if line.is_null() {
+        c""
+    } else {
+        CStr::from_ptr(line)
+    };
+    i32::from(crate::scriptfeedcfg::script_config_line_has_trailing_lf(s))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sfc_scan_script_trim_trailing_sep_len(
+    dir: *const c_char,
+    sep: c_char,
+) -> usize {
+    let s = if dir.is_null() {
+        c""
+    } else {
+        CStr::from_ptr(dir)
+    };
+    crate::scriptfeedcfg::scan_script_trim_trailing_sep_len(s, sep as u8)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sfc_cmd_script_should_append_log_message(
+    script_id: c_int,
+    id_script_gen: c_int,
+) -> c_int {
+    i32::from(crate::scriptfeedcfg::cmd_script_should_append_log_message(
+        script_id,
+        id_script_gen,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sfc_sched_script_should_format_task_suffix(task_id: c_int) -> c_int {
+    i32::from(crate::scriptfeedcfg::sched_script_should_format_task_suffix(
+        task_id,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sfc_feed_file_classify_enclosure_attr(
+    attr_name: *const c_char,
+) -> c_int {
+    let s = if attr_name.is_null() {
+        c""
+    } else {
+        CStr::from_ptr(attr_name)
+    };
+    crate::scriptfeedcfg::feed_file_classify_enclosure_attr(s)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sfc_feed_file_is_newznab_attr_element(
+    elem_name: *const c_char,
+    att0: *const c_char,
+    att1: *const c_char,
+    att2: *const c_char,
+    att3: *const c_char,
+) -> c_int {
+    i32::from(crate::scriptfeedcfg::feed_file_is_newznab_attr_element(
+        elem_name, att0, att1, att2, att3,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sfc_feed_file_classify_newznab_attr_key(
+    key: *const c_char,
+    cur_size: i64,
+) -> c_int {
+    let s = if key.is_null() {
+        c""
+    } else {
+        CStr::from_ptr(key)
+    };
+    crate::scriptfeedcfg::feed_file_classify_newznab_attr_key(s, cur_size)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sfc_feed_file_classify_end_element(
+    elem_name: *const c_char,
+    has_item: c_int,
+    url_empty: c_int,
+) -> c_int {
+    let s = if elem_name.is_null() {
+        c""
+    } else {
+        CStr::from_ptr(elem_name)
+    };
+    crate::scriptfeedcfg::feed_file_classify_end_element(s, has_item != 0, url_empty != 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sfc_feed_file_trim_trailing_crlf_space_len(
+    err_msg: *const c_char,
+) -> usize {
+    let s = if err_msg.is_null() {
+        c""
+    } else {
+        CStr::from_ptr(err_msg)
+    };
+    crate::scriptfeedcfg::feed_file_trim_trailing_crlf_space_len(s)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sfc_feed_info_attr_name_eq_ignore_case(
+    attr_name: *const c_char,
+    target_name: *const c_char,
+) -> c_int {
+    i32::from(crate::scriptfeedcfg::feed_info_attr_name_eq_ignore_case(
+        attr_name,
+        target_name,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sfc_feed_info_should_append_dupe_key(
+    dupe_key_empty: c_int,
+    extra_dupe_key: *const c_char,
+) -> c_int {
+    i32::from(crate::scriptfeedcfg::feed_info_should_append_dupe_key(
+        dupe_key_empty != 0,
+        extra_dupe_key,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sfc_feed_info_should_parse_season_episode(
+    field_empty: c_int,
+    parsed: c_int,
+) -> c_int {
+    i32::from(crate::scriptfeedcfg::feed_info_should_parse_season_episode(
+        field_empty != 0,
+        parsed != 0,
+    ))
+}
+
+
 
 
 

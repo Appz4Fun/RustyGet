@@ -208,6 +208,20 @@ void FeedFile::Parse_StartElement(const char* name, const char **atts)
 		// <enclosure url="http://myindexer.com/fetch/9eeb264aecce961a6e0d" length="150263340" type="application/x-nzb" />
 		for (; *atts; atts+=2)
 		{
+#ifdef NZBGET_USE_RUST
+			int encKind = nzbget_rs_sfc_feed_file_classify_enclosure_attr(atts[0]);
+			if (encKind == 1)
+			{
+				CString url = atts[1];
+				WebUtil::XmlDecode(url);
+				m_feedItemInfo->SetUrl(url);
+			}
+			else if (encKind == 2)
+			{
+				int64 size = atoll(atts[1]);
+				m_feedItemInfo->SetSize(size);
+			}
+#else
 			if (!strcmp("url", atts[0]))
 			{
 				CString url = atts[1];
@@ -219,6 +233,7 @@ void FeedFile::Parse_StartElement(const char* name, const char **atts)
 				int64 size = atoll(atts[1]);
 				m_feedItemInfo->SetSize(size);
 			}
+#endif
 			if (m_feedItemInfo->GetSize() == 0)
 			{
 				int64 size = ExtractSizeFromDescription(m_feedItemInfo->GetDescription());
@@ -227,12 +242,50 @@ void FeedFile::Parse_StartElement(const char* name, const char **atts)
 		}
 	}
 	else if (m_feedItemInfo && 
+#ifdef NZBGET_USE_RUST
+		atts[0] && atts[1] && atts[2] && atts[3] &&
+		nzbget_rs_sfc_feed_file_is_newznab_attr_element(name, atts[0], atts[1], atts[2], atts[3]) != 0
+#else
 		(!strcmp("newznab:attr", name) || !strcmp("nZEDb:attr", name)) &&
 		atts[0] && atts[1] && atts[2] && atts[3] &&
-		!strcmp("name", atts[0]) && !strcmp("value", atts[2]))
+		!strcmp("name", atts[0]) && !strcmp("value", atts[2])
+#endif
+	)
 	{
 		m_feedItemInfo->GetAttributes()->emplace_back(atts[1], atts[3]);
 
+#ifdef NZBGET_USE_RUST
+		int attrKind = nzbget_rs_sfc_feed_file_classify_newznab_attr_key(atts[1], m_feedItemInfo->GetSize());
+		if (attrKind == 1)
+		{
+			int64 size = atoll(atts[3]);
+			m_feedItemInfo->SetSize(size);
+		}
+		else if (attrKind == 2)
+		{
+			m_feedItemInfo->SetImdbId(atoi(atts[3]));
+		}
+		else if (attrKind == 3)
+		{
+			m_feedItemInfo->SetRageId(atoi(atts[3]));
+		}
+		else if (attrKind == 4)
+		{
+			m_feedItemInfo->SetTvdbId(atoi(atts[3]));
+		}
+		else if (attrKind == 5)
+		{
+			m_feedItemInfo->SetTvmazeId(atoi(atts[3]));
+		}
+		else if (attrKind == 6)
+		{
+			m_feedItemInfo->SetEpisode(atts[3]);
+		}
+		else if (attrKind == 7)
+		{
+			m_feedItemInfo->SetSeason(atts[3]);
+		}
+#else
 		// <newznab:attr name="size" value="5423523453534" />
 		if (m_feedItemInfo->GetSize() == 0 &&
 			!strcmp("size", atts[1]))
@@ -278,6 +331,7 @@ void FeedFile::Parse_StartElement(const char* name, const char **atts)
 		{
 			m_feedItemInfo->SetSeason(atts[3]);
 		}
+#endif
 	}
 }
 
@@ -289,6 +343,46 @@ void FeedFile::Parse_EndElement(const char* name)
 	// Trim the collected content once after all chunks (text + CDATA) are merged
 	Util::Trim(m_tagContent);
 
+#ifdef NZBGET_USE_RUST
+	int endKind = m_feedItemInfo
+		? nzbget_rs_sfc_feed_file_classify_end_element(name, 1, m_feedItemInfo->GetUrl()[0] == '\0' ? 1 : 0)
+		: 0;
+	if (endKind == 1)
+	{
+		m_feedItemInfo->SetTitle(m_tagContent.c_str());
+		ResetTagContent();
+		ParseSubject(*m_feedItemInfo);
+	}
+	else if (endKind == 2)
+	{
+		m_feedItemInfo->SetUrl(m_tagContent.c_str());
+		ResetTagContent();
+	}
+	else if (endKind == 3)
+	{
+		m_feedItemInfo->SetCategory(m_tagContent.c_str());
+		ResetTagContent();
+	}
+	else if (endKind == 4)
+	{
+		// cleanup CDATA
+		CString description = m_tagContent.c_str();
+		WebUtil::XmlStripTags(description);
+		WebUtil::XmlDecode(description);
+		WebUtil::XmlRemoveEntities(description);
+		m_feedItemInfo->SetDescription(description);
+		ResetTagContent();
+	}
+	else if (endKind == 5)
+	{
+		time_t unixtime = WebUtil::ParseRfc822DateTime(m_tagContent.c_str());
+		if (unixtime > 0)
+		{
+			m_feedItemInfo->SetTime(unixtime);
+		}
+		ResetTagContent();
+	}
+#else
 	if (!strcmp("title", name) && m_feedItemInfo)
 	{
 		m_feedItemInfo->SetTitle(m_tagContent.c_str());
@@ -324,6 +418,7 @@ void FeedFile::Parse_EndElement(const char* name)
 		}
 		ResetTagContent();
 	}
+#endif
 
 	m_currentElement.clear();
 }
@@ -391,6 +486,10 @@ void FeedFile::SAX_error(FeedFile* file, const char *msg, ...)
 	va_end(argp);
 
 	// remove trailing CRLF
+#ifdef NZBGET_USE_RUST
+	errMsg[nzbget_rs_sfc_feed_file_trim_trailing_crlf_space_len(errMsg)] = '\0';
+#else
 	for (char* pend = errMsg + strlen(errMsg) - 1; pend >= errMsg && (*pend == '\n' || *pend == '\r' || *pend == ' '); pend--) *pend = '\0';
+#endif
 	error("Error parsing rss feed %s: %s", file->m_infoName.c_str(), errMsg);
 }

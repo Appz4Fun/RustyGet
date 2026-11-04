@@ -225,7 +225,11 @@ bool ScriptConfig::LoadConfigUnlocked(Options::OptEntries* optEntries)
 		Util::TrimRight(buf);
 
 		// skip comments and empty lines
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_sfc_script_config_is_comment_or_blank_line(buf) != 0)
+#else
 		if (buf[0] == 0 || buf[0] == '#' || strspn(buf, " ") == strlen(buf))
+#endif
 		{
 			continue;
 		}
@@ -350,8 +354,12 @@ bool ScriptConfig::SaveConfig(Options::OptEntries* optEntries, const char* ciphe
 	infile.Seek(0);
 	for (CString& buf : config)
 	{
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_sfc_script_config_is_editable_option_line(buf) != 0)
+#else
 		const char* eq = strchr(buf, '=');
 		if (eq && buf[0] != '#')
+#endif
 		{
 			// remove trailing '\n' and '\r' and spaces
 			buf.TrimRight();
@@ -373,8 +381,12 @@ bool ScriptConfig::SaveConfig(Options::OptEntries* optEntries, const char* ciphe
 		{
 			// every line ends: a last line without a line end (a comment, typically)
 			// had the first new option glued onto it, and that option was lost
+#ifdef NZBGET_USE_RUST
+			infile.Print("%s%s", *buf, nzbget_rs_sfc_script_config_line_has_trailing_lf(buf) != 0 ? "" : "\n");
+#else
 			int len = buf.Length();
 			infile.Print("%s%s", *buf, len > 0 && buf[len - 1] == '\n' ? "" : "\n");
+#endif
 		}
 	}
 

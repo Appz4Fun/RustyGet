@@ -142,7 +142,11 @@ void CommandScriptLog::AddMessage(int scriptId, Message::EKind kind, const char 
 	Guard guard(m_logMutex);
 
 	// save only messages from the last started script
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_sfc_cmd_script_should_append_log_message(scriptId, m_idScriptGen) != 0)
+#else
 	if (scriptId == m_idScriptGen)
+#endif
 	{
 		m_messages.emplace_back(++m_idMessageGen, kind, Util::CurrentTime(), text);
 	}

@@ -77,7 +77,12 @@ private:
 
 void QueueScriptController::StartScript(NzbInfo* nzbInfo, std::shared_ptr<const Extension::Script> script, QueueScriptCoordinator::EEvent event)
 {
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_sfc_queue_script_can_start_or_enqueue(
+		1, nzbInfo != nullptr ? 1 : 0, nzbInfo ? (nzbInfo->GetSkipScriptProcessing() ? 1 : 0) : 0) == 0)
+#else
 	if (!nzbInfo || nzbInfo->GetSkipScriptProcessing())
+#endif
 	{
 		return;
 	}
@@ -140,7 +145,11 @@ void QueueScriptController::ExecuteScript(std::shared_ptr<const Extension::Scrip
 	SetInfoName(infoName);
 
 	SetLogPrefix(script->GetDisplayName());
+#ifdef NZBGET_USE_RUST
+	m_prefixLen = nzbget_rs_sfc_script_ctrl_calc_prefix_len(strlen(script->GetDisplayName()));
+#else
 	m_prefixLen = strlen(script->GetDisplayName()) + 2; // 2 = strlen(": ");
+#endif
 	PrepareParams(script->GetName());
 
 	Execute();
@@ -315,7 +324,14 @@ void QueueScriptCoordinator::InitOptions()
 
 void QueueScriptCoordinator::EnqueueScript(NzbInfo* nzbInfo, EEvent event)
 {
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_sfc_queue_script_can_start_or_enqueue(
+		m_hasQueueScripts ? 1 : 0,
+		nzbInfo != nullptr ? 1 : 0,
+		nzbInfo ? (nzbInfo->GetSkipScriptProcessing() ? 1 : 0) : 0) == 0)
+#else
 	if (!m_hasQueueScripts || !nzbInfo || nzbInfo->GetSkipScriptProcessing())
+#endif
 	{
 		return;
 	}
@@ -554,7 +570,14 @@ void QueueScriptCoordinator::CheckQueue()
 			continue;
 		}
 
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_sfc_queue_script_is_better_queued_item(
+			curNzbInfo != nullptr ? 1 : 0,
+			(int)queueItem->GetEvent(),
+			(int)maxEvent) != 0)
+#else
 		if (!curNzbInfo || queueItem->GetEvent() > maxEvent)
+#endif
 		{
 			itCurItem = it;
 			curNzbInfo = nzbInfo;
@@ -600,6 +623,9 @@ int QueueScriptCoordinator::GetQueueSize()
 {
 	Guard guard(m_queueMutex);
 
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_sfc_queue_script_calc_queue_size(m_queue.size(), m_curItem ? 1 : 0);
+#else
 	int queuedCount = m_queue.size();
 	if (m_curItem)
 	{
@@ -607,4 +633,5 @@ int QueueScriptCoordinator::GetQueueSize()
 	}
 
 	return queuedCount;
+#endif
 }

@@ -3462,6 +3462,47 @@ void nzbget_rs_psp_parchecker_calc_block_byte_range(
 size_t nzbget_rs_psp_parchecker_calc_creator_packet_payload_len(
     uint64_t packet_length, size_t header_size);
 
+/* QueueScript, PostScript, ScriptConfig, ScanScript, CommandScript, SchedulerScript, FeedFile & FeedInfo Hot-Path FFI (`scriptfeedcfg.rs`) */
+int nzbget_rs_sfc_queue_script_can_start_or_enqueue(
+    int has_queue_scripts, int has_nzb, int skip_script_processing);
+int nzbget_rs_sfc_script_ctrl_calc_prefix_len(size_t display_name_len);
+int nzbget_rs_sfc_queue_script_is_better_queued_item(
+    int has_cur_nzb, int item_event, int max_event);
+int nzbget_rs_sfc_queue_script_calc_queue_size(
+    size_t queue_len, int has_cur_item);
+int nzbget_rs_sfc_post_script_should_skip_execute(
+    int is_post_script, int request_par_check);
+int nzbget_rs_sfc_post_script_resolve_compat_par_status(
+    int par_status, int ps_failure, int delete_status, int ds_none,
+    int mark_status, int ks_bad);
+int nzbget_rs_sfc_post_script_is_paused_wait_active(
+    int pause_post_process, int force_priority, int is_stopped);
+void nzbget_rs_sfc_post_script_calc_paused_timestamps(
+    int64_t cur_time, int64_t wait_time, int64_t stage_time, int64_t start_time,
+    int64_t* out_stage_time, int64_t* out_start_time);
+int nzbget_rs_sfc_script_config_is_comment_or_blank_line(const char* line);
+int nzbget_rs_sfc_script_config_is_editable_option_line(const char* line);
+int nzbget_rs_sfc_script_config_line_has_trailing_lf(const char* line);
+size_t nzbget_rs_sfc_scan_script_trim_trailing_sep_len(const char* dir, char sep);
+int nzbget_rs_sfc_cmd_script_should_append_log_message(
+    int script_id, int id_script_gen);
+int nzbget_rs_sfc_sched_script_should_format_task_suffix(int task_id);
+int nzbget_rs_sfc_feed_file_classify_enclosure_attr(const char* attr_name);
+int nzbget_rs_sfc_feed_file_is_newznab_attr_element(
+    const char* elem_name, const char* att0, const char* att1,
+    const char* att2, const char* att3);
+int nzbget_rs_sfc_feed_file_classify_newznab_attr_key(
+    const char* key, int64_t cur_size);
+int nzbget_rs_sfc_feed_file_classify_end_element(
+    const char* elem_name, int has_item, int url_empty);
+size_t nzbget_rs_sfc_feed_file_trim_trailing_crlf_space_len(const char* err_msg);
+int nzbget_rs_sfc_feed_info_attr_name_eq_ignore_case(
+    const char* attr_name, const char* target_name);
+int nzbget_rs_sfc_feed_info_should_append_dupe_key(
+    int dupe_key_empty, const char* extra_dupe_key);
+int nzbget_rs_sfc_feed_info_should_parse_season_episode(
+    int field_empty, int parsed);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

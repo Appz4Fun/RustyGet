@@ -110,7 +110,11 @@ void ScanScriptController::ExecuteScript(std::shared_ptr<const Extension::Script
 	SetInfoName(infoName);
 
 	SetLogPrefix(script->GetDisplayName());
+#ifdef NZBGET_USE_RUST
+	m_prefixLen = nzbget_rs_sfc_script_ctrl_calc_prefix_len(strlen(script->GetDisplayName()));
+#else
 	m_prefixLen = strlen(script->GetDisplayName()) + 2; // 2 = strlen(": ");
+#endif
 	PrepareParams(script->GetName());
 
 	Execute();
@@ -137,11 +141,16 @@ void ScanScriptController::PrepareParams(const char* scriptName)
 
 	// remove trailing slash
 	BString<1024> dir = m_directory;
+#ifdef NZBGET_USE_RUST
+	size_t trimmedLen = nzbget_rs_sfc_scan_script_trim_trailing_sep_len(dir, PATH_SEPARATOR);
+	dir[trimmedLen] = '\0';
+#else
 	int len = strlen(dir);
 	if (dir[len-1] == PATH_SEPARATOR)
 	{
 		dir[len-1] = '\0';
 	}
+#endif
 	SetEnvVar("NZBNP_DIRECTORY", dir);
 
 	PrepareEnvScript(m_parameters, scriptName);

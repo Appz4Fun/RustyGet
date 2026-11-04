@@ -105,7 +105,13 @@ void PostScriptController::Run()
 void PostScriptController::ExecuteScript(std::shared_ptr<const Extension::Script> script)
 {
 	// if any script has requested par-check, do not execute other scripts
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_sfc_post_script_should_skip_execute(
+		script->GetPostScript() ? 1 : 0,
+		m_postInfo->GetRequestParCheck() ? 1 : 0) != 0)
+#else
 	if (!script->GetPostScript() || m_postInfo->GetRequestParCheck())
+#endif
 	{
 		return;
 	}
@@ -128,7 +134,11 @@ void PostScriptController::ExecuteScript(std::shared_ptr<const Extension::Script
 
 	
 	SetLogPrefix(m_script->GetDisplayName());
+#ifdef NZBGET_USE_RUST
+	m_prefixLen = nzbget_rs_sfc_script_ctrl_calc_prefix_len(strlen(m_script->GetDisplayName()));
+#else
 	m_prefixLen = strlen(m_script->GetDisplayName()) + 2; // 2 = strlen(": ");
+#endif
 	PrepareParams(m_script->GetName());
 
 	int exitCode = Execute();
@@ -179,6 +189,15 @@ void PostScriptController::PrepareParams(const char* scriptName)
 
 	// deprecated
 	int parStatusCodes[] = { 0, 0, 1, 2, 3, 4 };
+#ifdef NZBGET_USE_RUST
+	NzbInfo::EParStatus parStatus = (NzbInfo::EParStatus)nzbget_rs_sfc_post_script_resolve_compat_par_status(
+		(int)m_postInfo->GetNzbInfo()->GetParStatus(),
+		(int)NzbInfo::psFailure,
+		(int)m_postInfo->GetNzbInfo()->GetDeleteStatus(),
+		(int)NzbInfo::dsNone,
+		(int)m_postInfo->GetNzbInfo()->GetMarkStatus(),
+		(int)NzbInfo::ksBad);
+#else
 	NzbInfo::EParStatus parStatus = m_postInfo->GetNzbInfo()->GetParStatus();
 	// for downloads marked as bad and for deleted downloads pass par status "Failure"
 	// for compatibility with older scripts which don't check "NZBPP_TOTALSTATUS"
@@ -187,6 +206,7 @@ void PostScriptController::PrepareParams(const char* scriptName)
 	{
 		parStatus = NzbInfo::psFailure;
 	}
+#endif
 	SetIntEnvVar("NZBPP_PARSTATUS", parStatusCodes[parStatus]);
 
 	// deprecated
@@ -392,6 +412,40 @@ void PostScriptController::AddMessage(Message::EKind kind, const char* text)
 		m_postInfo->SetProgressLabel(text);
 	}
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_sfc_post_script_is_paused_wait_active(
+		g_WorkState->GetPausePostProcess() ? 1 : 0,
+		m_postInfo->GetNzbInfo()->GetForcePriority() ? 1 : 0,
+		0) != 0)
+	{
+		time_t stageTime = m_postInfo->GetStageTime();
+		time_t startTime = m_postInfo->GetStartTime();
+		time_t waitTime = Util::CurrentTime();
+
+		while (nzbget_rs_sfc_post_script_is_paused_wait_active(
+			g_WorkState->GetPausePostProcess() ? 1 : 0,
+			m_postInfo->GetNzbInfo()->GetForcePriority() ? 1 : 0,
+			IsStopped() ? 1 : 0) != 0)
+		{
+			Util::Sleep(100);
+
+			int64_t newStage = 0;
+			int64_t newStart = 0;
+			nzbget_rs_sfc_post_script_calc_paused_timestamps(
+				(int64_t)Util::CurrentTime(), (int64_t)waitTime,
+				(int64_t)stageTime, (int64_t)startTime,
+				&newStage, &newStart);
+			if (stageTime > 0)
+			{
+				m_postInfo->SetStageTime((time_t)newStage);
+			}
+			if (startTime > 0)
+			{
+				m_postInfo->SetStartTime((time_t)newStart);
+			}
+		}
+	}
+#else
 	if (g_WorkState->GetPausePostProcess() && !m_postInfo->GetNzbInfo()->GetForcePriority())
 	{
 		time_t stageTime = m_postInfo->GetStageTime();
@@ -418,6 +472,7 @@ void PostScriptController::AddMessage(Message::EKind kind, const char* text)
 			}
 		}
 	}
+#endif
 }
 
 void PostScriptController::Stop()

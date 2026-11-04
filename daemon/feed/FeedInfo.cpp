@@ -64,7 +64,11 @@ FeedItemInfo::Attr* FeedItemInfo::Attributes::Find(const char* name)
 {
 	for (Attr& attr : this)
 	{
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_sfc_feed_info_attr_name_eq_ignore_case(attr.GetName(), name) != 0)
+#else
 		if (!strcasecmp(attr.GetName(), name))
+#endif
 		{
 			return &attr;
 		}
@@ -102,7 +106,11 @@ int FeedItemInfo::ParsePrefixedInt(const char *value)
 
 void FeedItemInfo::AppendDupeKey(const char* extraDupeKey)
 {
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_sfc_feed_info_should_append_dupe_key(m_dupeKey.empty() ? 1 : 0, extraDupeKey) != 0)
+#else
 	if (!m_dupeKey.empty() && !Util::EmptyStr(extraDupeKey))
+#endif
 	{
 		m_dupeKey += "-";
 		m_dupeKey += extraDupeKey;
@@ -161,7 +169,11 @@ void FeedItemInfo::BuildDupeKey(const char* rageId, const char* tvdbId, const ch
 
 int FeedItemInfo::GetSeasonNum()
 {
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_sfc_feed_info_should_parse_season_episode(m_season.empty() ? 1 : 0, m_seasonEpisodeParsed ? 1 : 0) != 0)
+#else
 	if (m_season.empty() && !m_seasonEpisodeParsed)
+#endif
 	{
 		ParseSeasonEpisode();
 	}
@@ -171,7 +183,11 @@ int FeedItemInfo::GetSeasonNum()
 
 int FeedItemInfo::GetEpisodeNum()
 {
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_sfc_feed_info_should_parse_season_episode(m_episode.empty() ? 1 : 0, m_seasonEpisodeParsed ? 1 : 0) != 0)
+#else
 	if (m_episode.empty() && !m_seasonEpisodeParsed)
+#endif
 	{
 		ParseSeasonEpisode();
 	}

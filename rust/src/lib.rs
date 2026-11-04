@@ -75,6 +75,7 @@ pub mod streamtwinqueue;
 pub mod unpackcleanurlfeed;
 pub mod renamerarrepdl;
 pub mod poolstatprepost;
+pub mod scriptfeedcfg;
 
 pub mod deadpostings;
 pub mod dupewatch;

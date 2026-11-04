@@ -313,9 +313,11 @@ void ArticleDownloader::Run()
 				candIds[ci] = candidateServer->GetId();
 				candLevels[ci] = candidateServer->GetNormLevel();
 				candGroups[ci] = candidateServer->GetGroup();
-				bool unavail = !candidateServer->GetActive() || candidateServer->GetMaxConnections() == 0 ||
-					(candidateServer->GetOptional() && g_ServerPool->IsServerBlocked(candidateServer));
-				candAvail[ci] = unavail ? 0 : 1;
+				candAvail[ci] = (uint8_t)nzbget_rs_dqh_article_dl_is_server_available(
+					candidateServer->GetActive() ? 1 : 0,
+					candidateServer->GetMaxConnections(),
+					candidateServer->GetOptional() ? 1 : 0,
+					(candidateServer->GetOptional() && g_ServerPool->IsServerBlocked(candidateServer)) ? 1 : 0);
 				++ci;
 			}
 			size_t failCount = failedServers.size();

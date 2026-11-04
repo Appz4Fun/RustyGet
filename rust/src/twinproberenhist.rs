@@ -584,6 +584,165 @@ pub fn tpr_article_fetcher_should_throttle_bandwidth(
         && (cur_speed > speed_limit || momentary_speed > speed_limit)
 }
 
+/// Validates a BinRPC response header (`RemoteClient::ReceiveBoolResponse`, `RequestServerList`,
+/// `RequestServerLog`, `RequestPostQueue`, `RequestHistory`).
+pub fn tpr_binrpc_is_valid_response_header(
+    read_ok: bool,
+    host_signature: i32,
+    expected_signature: i32,
+    host_struct_size: u32,
+    expected_struct_size: u32,
+) -> bool {
+    read_ok && host_signature == expected_signature && host_struct_size == expected_struct_size
+}
+
+/// Computes elapsed seconds from `start_time` to `cur_time` when `start_time != 0`
+/// (`PostQueueBinCommand::Execute`).
+pub fn tpr_binrpc_calc_elapsed_sec(cur_time: i64, start_time: i64) -> u32 {
+    if start_time != 0 {
+        (cur_time.wrapping_sub(start_time) as i32) as u32
+    } else {
+        0
+    }
+}
+
+/// Evaluates whether a history item should be included in `HistoryBinCommand::Execute`.
+pub fn tpr_binrpc_should_include_history_entry(
+    kind: i32,
+    hk_dup: i32,
+    show_hidden: bool,
+) -> bool {
+    kind != hk_dup || show_hidden
+}
+
+/// Maps a file-level edit action to its corresponding group-level edit action
+/// (`NCursesFrontend::EditQueue`).
+pub fn tpr_ncurses_map_file_to_group_action(action: i32) -> i32 {
+    match action {
+        1 => 11, // eaFileMoveOffset -> eaGroupMoveOffset
+        2 => 12, // eaFileMoveTop -> eaGroupMoveTop
+        3 => 13, // eaFileMoveBottom -> eaGroupMoveBottom
+        4 => 16, // eaFilePause -> eaGroupPause
+        5 => 17, // eaFileResume -> eaGroupResume
+        6 => 18, // eaFileDelete -> eaGroupDelete
+        7 => 22, // eaFilePauseAllPars -> eaGroupPauseAllPars
+        8 => 23, // eaFilePauseExtraPars -> eaGroupPauseExtraPars
+        _ => 0,
+    }
+}
+
+/// Resolves whether a file pause action should pause or resume the selected file
+/// (`NCursesFrontend::EditQueue`).
+pub fn tpr_ncurses_resolve_file_pause_action(
+    action: i32,
+    ea_file_pause: i32,
+    ea_file_resume: i32,
+    file_paused: bool,
+) -> i32 {
+    if action == ea_file_pause {
+        if !file_paused {
+            ea_file_pause
+        } else {
+            ea_file_resume
+        }
+    } else {
+        action
+    }
+}
+
+/// Computes the new `queue_scroll_offset` and target `entry` for `KEY_PPAGE` / `KEY_NPAGE`
+/// in `NCursesFrontend::UpdateInput`.
+pub fn tpr_ncurses_calc_page_nav(
+    is_page_down: bool,
+    selected: i32,
+    queue_size: i32,
+    scroll_offset: i32,
+    win_height: i32,
+) -> Option<(i32, i32)> {
+    if !is_page_down {
+        if selected > 0 {
+            if selected == scroll_offset {
+                Some((
+                    scroll_offset.wrapping_sub(win_height),
+                    selected.wrapping_sub(win_height),
+                ))
+            } else {
+                Some((scroll_offset, scroll_offset))
+            }
+        } else {
+            None
+        }
+    } else if selected < queue_size.wrapping_sub(1) {
+        let bottom = scroll_offset.wrapping_add(win_height).wrapping_sub(1);
+        if selected == bottom {
+            Some((
+                scroll_offset.wrapping_add(win_height),
+                selected.wrapping_add(win_height),
+            ))
+        } else {
+            Some((scroll_offset, bottom))
+        }
+    } else {
+        None
+    }
+}
+
+/// Resolves the fallback `param` source (`0=param, 1=process, 2=downloadRate`) and
+/// `(definition, completed)` flags for `Options::InitScheduler`.
+pub fn tpr_options_resolve_scheduler_task_state(
+    has_time: bool,
+    has_weekdays: bool,
+    has_command: bool,
+    has_download_rate: bool,
+    has_param_ptr: bool,
+    param_empty: bool,
+    process_empty: bool,
+    download_rate_empty: bool,
+) -> (i32, bool, bool) {
+    let param_source = if param_empty && !process_empty {
+        1
+    } else if param_empty && !download_rate_empty {
+        2
+    } else {
+        0
+    };
+    let has_effective_param = (param_source != 0) || has_param_ptr;
+    let definition =
+        has_time || has_weekdays || has_command || has_download_rate || has_effective_param;
+    let completed = has_time && has_command;
+    (param_source, definition, completed)
+}
+
+/// Splits an `option=value` string at the first `=` where the option name is non-empty
+/// (`Options::SplitOptionString`).
+pub fn tpr_options_split_option_string(option: &[u8]) -> Option<(&[u8], &[u8])> {
+    option
+        .iter()
+        .position(|&b| b == b'=')
+        .filter(|&eq| eq > 0)
+        .map(|eq| (&option[..eq], &option[eq + 1..]))
+}
+
+/// Resolves whether a single-argument script should use `found_executor` as `m_cmdLine`
+/// and whether to prepend `found_executor` to `m_cmdArgs` (`ScriptController::PrepareArgs`).
+pub fn tpr_script_resolve_single_arg_executor(
+    has_found: bool,
+    found_executor: &[u8],
+    arg0: &[u8],
+) -> (bool, bool) {
+    (has_found, has_found && found_executor != arg0)
+}
+
+/// Computes the trimmed length of an XML/SAX error message after stripping trailing
+/// `\n`, `\r`, and `' '` (`NzbFile::SAX_error`).
+pub fn tpr_nzbfile_trim_sax_error_trailing(buf: &[u8]) -> usize {
+    let mut len = buf.len();
+    while len > 0 && matches!(buf[len - 1], b'\n' | b'\r' | b' ') {
+        len -= 1;
+    }
+    len
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -777,5 +936,56 @@ mod tests {
         assert!(!tpr_article_fetcher_should_throttle_bandwidth(
             false, true, 1000, 1200, 800
         ));
+
+        assert!(tpr_binrpc_is_valid_response_header(true, 123, 123, 64, 64));
+        assert!(!tpr_binrpc_is_valid_response_header(false, 123, 123, 64, 64));
+        assert!(!tpr_binrpc_is_valid_response_header(true, 124, 123, 64, 64));
+        assert_eq!(tpr_binrpc_calc_elapsed_sec(150, 100), 50);
+        assert_eq!(tpr_binrpc_calc_elapsed_sec(150, 0), 0);
+        assert!(tpr_binrpc_should_include_history_entry(1, 3, false));
+        assert!(!tpr_binrpc_should_include_history_entry(3, 3, false));
+        assert!(tpr_binrpc_should_include_history_entry(3, 3, true));
+        assert_eq!(tpr_ncurses_map_file_to_group_action(1), 11);
+        assert_eq!(tpr_ncurses_map_file_to_group_action(4), 16);
+        assert_eq!(tpr_ncurses_map_file_to_group_action(8), 23);
+        assert_eq!(tpr_ncurses_map_file_to_group_action(99), 0);
+        assert_eq!(tpr_ncurses_resolve_file_pause_action(4, 4, 5, false), 4);
+        assert_eq!(tpr_ncurses_resolve_file_pause_action(4, 4, 5, true), 5);
+        assert_eq!(
+            tpr_ncurses_calc_page_nav(false, 5, 20, 5, 10),
+            Some((-5, -5))
+        );
+        assert_eq!(
+            tpr_ncurses_calc_page_nav(false, 8, 20, 5, 10),
+            Some((5, 5))
+        );
+        assert_eq!(
+            tpr_ncurses_calc_page_nav(true, 14, 20, 5, 10),
+            Some((15, 24))
+        );
+        assert_eq!(
+            tpr_ncurses_calc_page_nav(true, 8, 20, 5, 10),
+            Some((5, 14))
+        );
+        assert_eq!(
+            tpr_options_resolve_scheduler_task_state(
+                true, false, true, false, false, true, false, true
+            ),
+            (1, true, true)
+        );
+        assert_eq!(
+            tpr_options_split_option_string(b"Server1.Host=news.example.com"),
+            Some((&b"Server1.Host"[..], &b"news.example.com"[..]))
+        );
+        assert_eq!(tpr_options_split_option_string(b"=value"), None);
+        assert_eq!(
+            tpr_script_resolve_single_arg_executor(true, b"/bin/sh", b"script.sh"),
+            (true, true)
+        );
+        assert_eq!(
+            tpr_script_resolve_single_arg_executor(true, b"script.sh", b"script.sh"),
+            (true, false)
+        );
+        assert_eq!(tpr_nzbfile_trim_sax_error_trailing(b"bad xml \r\n "), 7);
     }
 }

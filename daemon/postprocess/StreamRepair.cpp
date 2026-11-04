@@ -860,14 +860,14 @@ void StreamRepairController::StopWatchdog(const char* nzbName, const std::vector
 			missing += DupeStreamRepair::TotalSize(target.Holes);
 			unsized += target.DecodedFileSize <= 0 ? 1 : 0;
 		}
-		BString<100> wholeFiles;
-		if (unsized > 0)
-		{
-			wholeFiles.Format(" and %i whole file(s)", unsized);
-		}
+		NzbgetRsBuf wholeFilesBuf = nzbget_rs_dqh_stream_repair_format_whole_files_suffix(unsized);
 		PrintMessage(Message::mkWarning,
 			"Stream repair of %s stopped: %s (option DupeStreamTimeout); %.1f MB recovered, %.1f MB%s still missing",
-			nzbName, *m_slowReason, m_recoveredBytes / 1024.0 / 1024.0, missing / 1024.0 / 1024.0, *wholeFiles);
+			nzbName, *m_slowReason,
+			nzbget_rs_dqh_stream_repair_bytes_to_mb(m_recoveredBytes),
+			nzbget_rs_dqh_stream_repair_bytes_to_mb(missing),
+			wholeFilesBuf.data ? wholeFilesBuf.data : "");
+		nzbget_rs_free(wholeFilesBuf);
 	}
 }
 
@@ -2341,7 +2341,8 @@ bool StreamRepairController::VerifyDonorSet(RepairSetData& repairSet, ContentMap
 		}
 	}
 
-	return totalCompared >= required && sawVariedData;
+	return nzbget_rs_dqh_stream_repair_is_verification_satisfied(
+		totalCompared, required, sawVariedData ? 1 : 0) != 0;
 }
 
 /* writes `data` (the bytes of innerRange, index 0 = innerRange.Offset) through
@@ -2657,7 +2658,8 @@ bool StreamRepairController::VerifyEncryptedFromSource(RepairSetData& repairSet,
 		}
 	}
 
-	return totalCompared >= required && sawVariedData;
+	return nzbget_rs_dqh_stream_repair_is_verification_satisfied(
+		totalCompared, required, sawVariedData ? 1 : 0) != 0;
 }
 
 /* the encrypted-target patch (M3): per hole, expand to whole cipher blocks,
@@ -3294,7 +3296,8 @@ bool StreamRepairController::VerifyDonorInnerFile(RepairSetData& repairSet,
 		}
 	}
 
-	return totalCompared >= required && sawVariedData;
+	return nzbget_rs_dqh_stream_repair_is_verification_satisfied(
+		totalCompared, required, sawVariedData ? 1 : 0) != 0;
 }
 
 /* patches every inner hole with bytes read from the extracted donor file.

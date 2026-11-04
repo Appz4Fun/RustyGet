@@ -209,19 +209,18 @@ void ScriptController::PrepareArgs()
 	if (m_args.size() == 1)
 	{
 		const auto found = Util::FindExecutorProgram(m_args[0].Str(), g_Options->GetShellOverride());
-		if (!found)
+		int useFound = 0, prependArg = 0;
+		nzbget_rs_tpr_script_resolve_single_arg_executor(
+			found.has_value() ? 1 : 0,
+			found ? found.value().c_str() : nullptr,
+			m_args[0].Str(),
+			&useFound, &prependArg);
+		strncpy(m_cmdLine, useFound ? found.value().c_str() : (const char*)m_args[0], sizeof(m_cmdLine) - 1);
+		// an interpreter goes before the script; a script run directly is
+		// argv[0] already (m_args), not its own first argument too
+		if (prependArg)
 		{
-			strncpy(m_cmdLine, m_args[0], sizeof(m_cmdLine) - 1);
-		}
-		else
-		{
-			strncpy(m_cmdLine, found.value().c_str(), sizeof(m_cmdLine) - 1);
-			// an interpreter goes before the script; a script run directly is
-			// argv[0] already (m_args), not its own first argument too
-			if (found.value() != m_args[0].Str())
-			{
-				m_cmdArgs.emplace_back(found.value().c_str());
-			}
+			m_cmdArgs.emplace_back(found.value().c_str());
 		}
 
 		debug("CmdLine: %s", m_cmdLine);

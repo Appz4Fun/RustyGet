@@ -958,8 +958,8 @@ void PostQueueBinCommand::Execute()
 			NrEntries++;
 			jobs.Add({(uint32)nzbInfo->GetId(), (uint32)postInfo->GetStage(), (uint32)postInfo->GetStageProgress(),
 				(uint32)postInfo->GetFileProgress(),
-				(uint32)(int)(postInfo->GetStartTime() ? curTime - postInfo->GetStartTime() : 0),
-				(uint32)(int)(postInfo->GetStageTime() ? curTime - postInfo->GetStageTime() : 0),
+				nzbget_rs_tpr_binrpc_calc_elapsed_sec((int64_t)curTime, (int64_t)postInfo->GetStartTime()),
+				nzbget_rs_tpr_binrpc_calc_elapsed_sec((int64_t)curTime, (int64_t)postInfo->GetStageTime()),
 				RsText(postInfo->GetNzbInfo()->GetFilename()), RsText(postInfo->GetNzbInfo()->GetName()),
 				RsText(postInfo->GetNzbInfo()->GetDestDir()), RsText(postInfo->GetProgressLabel())});
 		}
@@ -1056,7 +1056,8 @@ void HistoryBinCommand::Execute()
 		history.Reserve(downloadQueue->GetHistory()->size());
 		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
 		{
-			if (historyInfo->GetKind() != HistoryInfo::hkDup || showHidden)
+			if (nzbget_rs_tpr_binrpc_should_include_history_entry(
+				(int)historyInfo->GetKind(), (int)HistoryInfo::hkDup, showHidden ? 1 : 0))
 			{
 				nrEntries++;
 				// fields a kind doesn't set are 0

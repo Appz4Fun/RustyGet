@@ -586,7 +586,7 @@ void NzbFile::SAX_error(NzbFile* file, const char *msg, ...)
 	va_end(argp);
 
 	// remove trailing CRLF
-	for (char* pend = errMsg + strlen(errMsg) - 1; pend >= errMsg && (*pend == '\n' || *pend == '\r' || *pend == ' '); pend--) *pend = '\0';
+	nzbget_rs_tpr_nzbfile_trim_sax_error_in_place(errMsg);
 
 	file->m_nzbInfo->AddMessage(Message::mkError, BString<1024>("Error parsing nzb-file: %s", errMsg));
 }

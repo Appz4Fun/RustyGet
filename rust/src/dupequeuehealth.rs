@@ -596,6 +596,58 @@ pub fn dqh_dupesearch_pending_identity_matches(
         && saved_posting == cur_fingerprint
 }
 
+/// Evaluates whether `DupeArticleFallback::OrderSources` should append the primary message ID
+/// after the donor candidates.
+pub fn dqh_dupe_fallback_should_append_primary_on_order(
+    cutover: bool,
+    donors_len: usize,
+) -> bool {
+    cutover && donors_len > 0
+}
+
+/// Formats the optional `" and N whole file(s)"` suffix for `StreamRepairController::StopWatchdog`.
+pub fn dqh_stream_repair_format_whole_files_suffix(unsized_count: i32) -> Vec<u8> {
+    if unsized_count > 0 {
+        format!(" and {unsized_count} whole file(s)").into_bytes()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Converts a byte count into megabytes (`bytes / 1024.0 / 1024.0`).
+pub fn dqh_stream_repair_bytes_to_mb(bytes: i64) -> f64 {
+    (bytes as f64) / 1024.0 / 1024.0
+}
+
+/// Evaluates whether stream repair donor verification succeeded (`totalCompared >= required && sawVariedData`).
+pub fn dqh_stream_repair_is_verification_satisfied(
+    total_compared: i64,
+    required: i64,
+    saw_varied_data: bool,
+) -> bool {
+    total_compared >= required && saw_varied_data
+}
+
+/// Evaluates whether `ArticleWriter::SetupOutputFile` should use `targetPath` directly instead of `MakeUniqueFilename`.
+pub fn dqh_article_writer_use_target_path_directly(
+    force_direct_write: bool,
+    direct_write: bool,
+    output_filename_empty: bool,
+    same_filename: bool,
+) -> bool {
+    force_direct_write || (direct_write && !output_filename_empty && same_filename)
+}
+
+/// Evaluates whether a candidate news server is available for article download (`ArticleDownloader::Run`).
+pub fn dqh_article_dl_is_server_available(
+    active: bool,
+    max_connections: i32,
+    optional: bool,
+    is_blocked: bool,
+) -> bool {
+    active && max_connections != 0 && !(optional && is_blocked)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -810,5 +862,29 @@ mod tests {
         assert!(!dqh_dupesearch_pending_identity_matches(
             false, b"title", b"title", b"key", b"key", b"fp", b"fp"
         ));
+        assert!(dqh_dupe_fallback_should_append_primary_on_order(true, 2));
+        assert!(!dqh_dupe_fallback_should_append_primary_on_order(false, 2));
+        assert!(!dqh_dupe_fallback_should_append_primary_on_order(true, 0));
+        assert_eq!(
+            dqh_stream_repair_format_whole_files_suffix(3),
+            b" and 3 whole file(s)"
+        );
+        assert!(dqh_stream_repair_format_whole_files_suffix(0).is_empty());
+        assert_eq!(dqh_stream_repair_bytes_to_mb(1048576), 1.0);
+        assert!(dqh_stream_repair_is_verification_satisfied(64, 64, true));
+        assert!(!dqh_stream_repair_is_verification_satisfied(63, 64, true));
+        assert!(!dqh_stream_repair_is_verification_satisfied(64, 64, false));
+        assert!(dqh_article_writer_use_target_path_directly(
+            true, false, true, false
+        ));
+        assert!(dqh_article_writer_use_target_path_directly(
+            false, true, false, true
+        ));
+        assert!(!dqh_article_writer_use_target_path_directly(
+            false, true, true, true
+        ));
+        assert!(dqh_article_dl_is_server_available(true, 4, false, false));
+        assert!(!dqh_article_dl_is_server_available(true, 0, false, false));
+        assert!(!dqh_article_dl_is_server_available(true, 4, true, true));
     }
 }

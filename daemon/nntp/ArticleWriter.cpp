@@ -570,8 +570,11 @@ ArticleWriter::SetupOutputFile(DiskFile &outfile,
 {
 	OutputPaths paths;
 	std::string targetPath = std::string(destDir) + PATH_SEPARATOR + std::string(filename);
-	if (m_fileInfo->GetForceDirectWrite() ||
-		(directWrite && !m_outputFilename.empty() && FileSystem::SameFilename(m_outputFilename.c_str(), targetPath.c_str())))
+	if (nzbget_rs_dqh_article_writer_use_target_path_directly(
+		m_fileInfo->GetForceDirectWrite() ? 1 : 0,
+		directWrite ? 1 : 0,
+		m_outputFilename.empty() ? 1 : 0,
+		(!m_outputFilename.empty() && FileSystem::SameFilename(m_outputFilename.c_str(), targetPath.c_str())) ? 1 : 0))
 	{
 		paths.finalPath = targetPath;
 	}
@@ -1109,15 +1112,16 @@ void ArticleWriter::FlushCache()
 		}
 	}
 
+	double flushedMb = nzbget_rs_dqh_stream_repair_bytes_to_mb(flushedSize);
 	if (GetSkipDiskWrite())
 	{
 		detail("Discarded %i articles (%.2f MB) from cache (SkipWrite) for %s", flushedArticles,
-			static_cast<double>(flushedSize / 1024.0 / 1024.0), m_infoName.c_str());
+			flushedMb, m_infoName.c_str());
 	}
 	else
 	{
 		detail("Saved %i articles (%.2f MB) from cache into disk for %s", flushedArticles,
-			static_cast<double>(flushedSize / 1024.0 / 1024.0), m_infoName.c_str());
+			flushedMb, m_infoName.c_str());
 	}
 }
 

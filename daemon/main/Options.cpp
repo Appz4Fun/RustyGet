@@ -1188,17 +1188,23 @@ void Options::InitScheduler()
 		const char* process = GetOption(BString<100>("Task%i.Process", n));
 		const char* param = GetOption(BString<100>("Task%i.Param", n));
 
-		if (Util::EmptyStr(param) && !Util::EmptyStr(process))
+		int paramSource = 0, definition = 0, completed = 0;
+		nzbget_rs_tpr_options_resolve_scheduler_task_state(
+			time != nullptr ? 1 : 0, weekDays != nullptr ? 1 : 0,
+			command != nullptr ? 1 : 0, downloadRate != nullptr ? 1 : 0,
+			param != nullptr ? 1 : 0,
+			Util::EmptyStr(param) ? 1 : 0,
+			Util::EmptyStr(process) ? 1 : 0,
+			Util::EmptyStr(downloadRate) ? 1 : 0,
+			&paramSource, &definition, &completed);
+		if (paramSource == 1)
 		{
 			param = process;
 		}
-		if (Util::EmptyStr(param) && !Util::EmptyStr(downloadRate))
+		else if (paramSource == 2)
 		{
 			param = downloadRate;
 		}
-
-		bool definition = time || weekDays || command || downloadRate || param;
-		bool completed = time && command;
 
 		if (!definition)
 		{
@@ -1384,14 +1390,14 @@ bool Options::SetOptionString(const char* option)
  */
 bool Options::SplitOptionString(const char* option, CString& optName, CString& optValue)
 {
-	const char* eq = strchr(option, '=');
-	if (!eq || eq == option)
+	size_t nameLen = 0, valOffset = 0;
+	if (!nzbget_rs_tpr_options_split_option_string(option, &nameLen, &valOffset))
 	{
 		return false;
 	}
 
-	optName.Set(option, (int)(eq - option));
-	optValue.Set(eq + 1);
+	optName.Set(option, (int)nameLen);
+	optValue.Set(option + valOffset);
 
 	ConvertOldOption(optName, optValue);
 

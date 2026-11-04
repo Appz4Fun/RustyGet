@@ -681,17 +681,7 @@ bool NCursesFrontend::EditQueue(DownloadQueue::EEditAction action, int offset)
 		}
 
 		// map file-edit-actions to group-edit-actions
-		 DownloadQueue::EEditAction FileToGroupMap[] = {
-			(DownloadQueue::EEditAction)0,
-			DownloadQueue::eaGroupMoveOffset,
-			DownloadQueue::eaGroupMoveTop,
-			DownloadQueue::eaGroupMoveBottom,
-			DownloadQueue::eaGroupPause,
-			DownloadQueue::eaGroupResume,
-			DownloadQueue::eaGroupDelete,
-			DownloadQueue::eaGroupPauseAllPars,
-			DownloadQueue::eaGroupPauseExtraPars };
-		action = FileToGroupMap[action];
+		action = (DownloadQueue::EEditAction)nzbget_rs_tpr_ncurses_map_file_to_group_action((int)action);
 	}
 	else
 	{
@@ -704,10 +694,9 @@ bool NCursesFrontend::EditQueue(DownloadQueue::EEditAction action, int offset)
 				if (m_selectedQueueEntry == fileNum)
 				{
 					ID = fileInfo->GetId();
-					if (action == DownloadQueue::eaFilePause)
-					{
-						action = !fileInfo->GetPaused() ? DownloadQueue::eaFilePause : DownloadQueue::eaFileResume;
-					}
+					action = (DownloadQueue::EEditAction)nzbget_rs_tpr_ncurses_resolve_file_pause_action(
+						(int)action, (int)DownloadQueue::eaFilePause,
+						(int)DownloadQueue::eaFileResume, fileInfo->GetPaused() ? 1 : 0);
 				}
 				fileNum++;
 			}
@@ -840,33 +829,19 @@ void NCursesFrontend::UpdateInput(int initialKey)
 				}
 				break;
 			case KEY_PPAGE:
-				if (m_selectedQueueEntry > 0)
-				{
-					if (m_selectedQueueEntry == m_queueScrollOffset)
-					{
-						m_queueScrollOffset -= m_queueWinClientHeight;
-						SetCurrentQueueEntry(m_selectedQueueEntry - m_queueWinClientHeight);
-					}
-					else
-					{
-						SetCurrentQueueEntry(m_queueScrollOffset);
-					}
-				}
-				break;
 			case KEY_NPAGE:
-				if (m_selectedQueueEntry < queueSize - 1)
+			{
+				int newScroll = m_queueScrollOffset;
+				int newEntry = m_selectedQueueEntry;
+				if (nzbget_rs_tpr_ncurses_calc_page_nav(
+					key == KEY_NPAGE ? 1 : 0, m_selectedQueueEntry, queueSize,
+					m_queueScrollOffset, m_queueWinClientHeight, &newScroll, &newEntry))
 				{
-					if (m_selectedQueueEntry == m_queueScrollOffset + m_queueWinClientHeight - 1)
-					{
-						m_queueScrollOffset += m_queueWinClientHeight;
-						SetCurrentQueueEntry(m_selectedQueueEntry + m_queueWinClientHeight);
-					}
-					else
-					{
-						SetCurrentQueueEntry(m_queueScrollOffset + m_queueWinClientHeight - 1);
-					}
+					m_queueScrollOffset = newScroll;
+					SetCurrentQueueEntry(newEntry);
 				}
 				break;
+			}
 			case KEY_HOME:
 				SetCurrentQueueEntry(0);
 				break;

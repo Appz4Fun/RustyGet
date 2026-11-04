@@ -31442,6 +31442,274 @@ pub extern "C" fn nzbget_rs_tpr_article_fetcher_should_throttle_bandwidth(
     }
 }
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupe_fallback_should_append_primary_on_order(
+    cutover: i32,
+    donors_len: usize,
+) -> i32 {
+    if crate::dupequeuehealth::dqh_dupe_fallback_should_append_primary_on_order(
+        cutover != 0,
+        donors_len,
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_stream_repair_format_whole_files_suffix(
+    unsized_count: i32,
+) -> RsBuf {
+    into_buf(
+        crate::dupequeuehealth::dqh_stream_repair_format_whole_files_suffix(unsized_count),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_stream_repair_bytes_to_mb(bytes: i64) -> f64 {
+    crate::dupequeuehealth::dqh_stream_repair_bytes_to_mb(bytes)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_stream_repair_is_verification_satisfied(
+    total_compared: i64,
+    required: i64,
+    saw_varied_data: i32,
+) -> i32 {
+    if crate::dupequeuehealth::dqh_stream_repair_is_verification_satisfied(
+        total_compared,
+        required,
+        saw_varied_data != 0,
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_article_writer_use_target_path_directly(
+    force_direct_write: i32,
+    direct_write: i32,
+    output_filename_empty: i32,
+    same_filename: i32,
+) -> i32 {
+    if crate::dupequeuehealth::dqh_article_writer_use_target_path_directly(
+        force_direct_write != 0,
+        direct_write != 0,
+        output_filename_empty != 0,
+        same_filename != 0,
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_article_dl_is_server_available(
+    active: i32,
+    max_connections: i32,
+    optional: i32,
+    is_blocked: i32,
+) -> i32 {
+    if crate::dupequeuehealth::dqh_article_dl_is_server_available(
+        active != 0,
+        max_connections,
+        optional != 0,
+        is_blocked != 0,
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_tpr_binrpc_is_valid_response_header(
+    read_ok: i32,
+    host_signature: i32,
+    expected_signature: i32,
+    host_struct_size: u32,
+    expected_struct_size: u32,
+) -> i32 {
+    if crate::twinproberenhist::tpr_binrpc_is_valid_response_header(
+        read_ok != 0,
+        host_signature,
+        expected_signature,
+        host_struct_size,
+        expected_struct_size,
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_tpr_binrpc_calc_elapsed_sec(cur_time: i64, start_time: i64) -> u32 {
+    crate::twinproberenhist::tpr_binrpc_calc_elapsed_sec(cur_time, start_time)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_tpr_binrpc_should_include_history_entry(
+    kind: i32,
+    hk_dup: i32,
+    show_hidden: i32,
+) -> i32 {
+    if crate::twinproberenhist::tpr_binrpc_should_include_history_entry(
+        kind,
+        hk_dup,
+        show_hidden != 0,
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_tpr_ncurses_map_file_to_group_action(action: i32) -> i32 {
+    crate::twinproberenhist::tpr_ncurses_map_file_to_group_action(action)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_tpr_ncurses_resolve_file_pause_action(
+    action: i32,
+    ea_file_pause: i32,
+    ea_file_resume: i32,
+    file_paused: i32,
+) -> i32 {
+    crate::twinproberenhist::tpr_ncurses_resolve_file_pause_action(
+        action,
+        ea_file_pause,
+        ea_file_resume,
+        file_paused != 0,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_ncurses_calc_page_nav(
+    is_page_down: i32,
+    selected: i32,
+    queue_size: i32,
+    scroll_offset: i32,
+    win_height: i32,
+    out_scroll_offset: *mut i32,
+    out_entry: *mut i32,
+) -> i32 {
+    match crate::twinproberenhist::tpr_ncurses_calc_page_nav(
+        is_page_down != 0,
+        selected,
+        queue_size,
+        scroll_offset,
+        win_height,
+    ) {
+        Some((new_scroll, new_entry)) => {
+            if !out_scroll_offset.is_null() {
+                *out_scroll_offset = new_scroll;
+            }
+            if !out_entry.is_null() {
+                *out_entry = new_entry;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_options_resolve_scheduler_task_state(
+    has_time: i32,
+    has_weekdays: i32,
+    has_command: i32,
+    has_download_rate: i32,
+    has_param_ptr: i32,
+    param_empty: i32,
+    process_empty: i32,
+    download_rate_empty: i32,
+    out_param_source: *mut i32,
+    out_definition: *mut i32,
+    out_completed: *mut i32,
+) {
+    let (src, def, comp) = crate::twinproberenhist::tpr_options_resolve_scheduler_task_state(
+        has_time != 0,
+        has_weekdays != 0,
+        has_command != 0,
+        has_download_rate != 0,
+        has_param_ptr != 0,
+        param_empty != 0,
+        process_empty != 0,
+        download_rate_empty != 0,
+    );
+    if !out_param_source.is_null() {
+        *out_param_source = src;
+    }
+    if !out_definition.is_null() {
+        *out_definition = if def { 1 } else { 0 };
+    }
+    if !out_completed.is_null() {
+        *out_completed = if comp { 1 } else { 0 };
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_options_split_option_string(
+    option: *const c_char,
+    out_name_len: *mut usize,
+    out_value_offset: *mut usize,
+) -> i32 {
+    let s = input(option);
+    match crate::twinproberenhist::tpr_options_split_option_string(s) {
+        Some((name, _)) => {
+            if !out_name_len.is_null() {
+                *out_name_len = name.len();
+            }
+            if !out_value_offset.is_null() {
+                *out_value_offset = name.len() + 1;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_script_resolve_single_arg_executor(
+    has_found: i32,
+    found_executor: *const c_char,
+    arg0: *const c_char,
+    out_use_found: *mut i32,
+    out_prepend_arg: *mut i32,
+) {
+    let (use_found, prepend) = crate::twinproberenhist::tpr_script_resolve_single_arg_executor(
+        has_found != 0,
+        input(found_executor),
+        input(arg0),
+    );
+    if !out_use_found.is_null() {
+        *out_use_found = if use_found { 1 } else { 0 };
+    }
+    if !out_prepend_arg.is_null() {
+        *out_prepend_arg = if prepend { 1 } else { 0 };
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_nzbfile_trim_sax_error_in_place(buf: *mut c_char) {
+    if buf.is_null() {
+        return;
+    }
+    let len = std::ffi::CStr::from_ptr(buf).to_bytes().len();
+    let slice = std::slice::from_raw_parts_mut(buf as *mut u8, len);
+    let new_len = crate::twinproberenhist::tpr_nzbfile_trim_sax_error_trailing(slice);
+    for b in &mut slice[new_len..] {
+        *b = 0;
+    }
+}
+
+
 
 
 

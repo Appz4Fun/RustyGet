@@ -5522,6 +5522,45 @@ int32_t nzbget_rs_tpr_article_fetcher_is_declared_range_known(
 int32_t nzbget_rs_tpr_article_fetcher_should_throttle_bandwidth(
     int32_t stopped, int32_t quota_reached, int64_t speed_limit,
     int64_t cur_speed, int64_t momentary_speed);
+int32_t nzbget_rs_dqh_dupe_fallback_should_append_primary_on_order(
+    int32_t cutover, size_t donors_len);
+NzbgetRsBuf nzbget_rs_dqh_stream_repair_format_whole_files_suffix(
+    int32_t unsized);
+double nzbget_rs_dqh_stream_repair_bytes_to_mb(int64_t bytes);
+int32_t nzbget_rs_dqh_stream_repair_is_verification_satisfied(
+    int64_t total_compared, int64_t required, int32_t saw_varied_data);
+int32_t nzbget_rs_dqh_article_writer_use_target_path_directly(
+    int32_t force_direct_write, int32_t direct_write,
+    int32_t output_filename_empty, int32_t same_filename);
+int32_t nzbget_rs_dqh_article_dl_is_server_available(
+    int32_t active, int32_t max_connections, int32_t optional,
+    int32_t is_blocked);
+int32_t nzbget_rs_tpr_binrpc_is_valid_response_header(
+    int32_t read_ok, int32_t host_signature, int32_t expected_signature,
+    uint32_t host_struct_size, uint32_t expected_struct_size);
+uint32_t nzbget_rs_tpr_binrpc_calc_elapsed_sec(
+    int64_t cur_time, int64_t start_time);
+int32_t nzbget_rs_tpr_binrpc_should_include_history_entry(
+    int32_t kind, int32_t hk_dup, int32_t show_hidden);
+int32_t nzbget_rs_tpr_ncurses_map_file_to_group_action(int32_t action);
+int32_t nzbget_rs_tpr_ncurses_resolve_file_pause_action(
+    int32_t action, int32_t ea_file_pause, int32_t ea_file_resume,
+    int32_t file_paused);
+int32_t nzbget_rs_tpr_ncurses_calc_page_nav(
+    int32_t is_page_down, int32_t selected, int32_t queue_size,
+    int32_t scroll_offset, int32_t win_height,
+    int32_t* out_scroll_offset, int32_t* out_entry);
+void nzbget_rs_tpr_options_resolve_scheduler_task_state(
+    int32_t has_time, int32_t has_weekdays, int32_t has_command,
+    int32_t has_download_rate, int32_t has_param_ptr,
+    int32_t param_empty, int32_t process_empty, int32_t download_rate_empty,
+    int32_t* out_param_source, int32_t* out_definition, int32_t* out_completed);
+int32_t nzbget_rs_tpr_options_split_option_string(
+    const char* option, size_t* out_name_len, size_t* out_value_offset);
+void nzbget_rs_tpr_script_resolve_single_arg_executor(
+    int32_t has_found, const char* found_executor, const char* arg0,
+    int32_t* out_use_found, int32_t* out_prepend_arg);
+void nzbget_rs_tpr_nzbfile_trim_sax_error_in_place(char* buf);
 
 #include "nzbget_tls_cipher.h"
 

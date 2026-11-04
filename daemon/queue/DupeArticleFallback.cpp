@@ -326,32 +326,25 @@ std::vector<CString> DupeArticleFallback::OrderSources(const std::vector<CString
 	bool cutover, const char* primaryMessageId)
 {
 	std::vector<CString> sources;
-
-	if (!cutover || donorCandidates.empty())
-	{
-		// reactive: the primary was already tried via the normal path; offer
-		// the donor candidates only (empty if none, so the article just fails)
-		for (const CString& candidate : donorCandidates)
-		{
-			sources.emplace_back((const char*)candidate);
-		}
-		return sources;
-	}
-
-	// cut over: lead with the top donor, then the remaining donors, then the
-	// primary as the final fallback. The file cut over precisely because the
-	// primary is missing many articles, so on a lead-donor miss the other
-	// duplicates are better bets than paying a (likely failing) full server
-	// sweep on the primary; the primary still backstops parts every duplicate
-	// misses. NOTE: proactive fetches must never count as "recovered"
-	// regardless of round (see QueueCoordinator::ArticleCompleted) - with the
-	// primary last, no donor round proves the primary was missing the part
-	sources.reserve(donorCandidates.size() + 1);
+	bool appendPrimary = nzbget_rs_dqh_dupe_fallback_should_append_primary_on_order(
+		cutover ? 1 : 0, donorCandidates.size()) != 0;
+	sources.reserve(donorCandidates.size() + (appendPrimary ? 1 : 0));
 	for (const CString& candidate : donorCandidates)
 	{
 		sources.emplace_back((const char*)candidate);
 	}
-	sources.emplace_back(primaryMessageId);
+	if (appendPrimary)
+	{
+		// cut over: lead with the top donor, then the remaining donors, then the
+		// primary as the final fallback. The file cut over precisely because the
+		// primary is missing many articles, so on a lead-donor miss the other
+		// duplicates are better bets than paying a (likely failing) full server
+		// sweep on the primary; the primary still backstops parts every duplicate
+		// misses. NOTE: proactive fetches must never count as "recovered"
+		// regardless of round (see QueueCoordinator::ArticleCompleted) - with the
+		// primary last, no donor round proves the primary was missing the part
+		sources.emplace_back(primaryMessageId);
+	}
 	return sources;
 }
 

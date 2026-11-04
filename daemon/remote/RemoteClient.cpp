@@ -118,9 +118,12 @@ bool RemoteClient::ReceiveBoolResponse()
 	memset(&BoolResponse, 0, sizeof(BoolResponse));
 
 	bool read = m_connection->Recv((char*)&BoolResponse, sizeof(BoolResponse));
-	if (!read ||
-		(int)ntohl(BoolResponse.m_messageBase.m_signature) != (int)NZBMESSAGE_SIGNATURE ||
-		ntohl(BoolResponse.m_messageBase.m_structSize) != sizeof(BoolResponse))
+	if (!nzbget_rs_tpr_binrpc_is_valid_response_header(
+		read ? 1 : 0,
+		(int)ntohl(BoolResponse.m_messageBase.m_signature),
+		(int)NZBMESSAGE_SIGNATURE,
+		(uint32)ntohl(BoolResponse.m_messageBase.m_structSize),
+		(uint32)sizeof(BoolResponse)))
 	{
 		printf("No response or invalid response (timeout, not nzbget-server or wrong nzbget-server version)\n");
 		return false;
@@ -308,9 +311,12 @@ bool RemoteClient::RequestServerList(bool files, bool groups, const char* patter
 	// Now listen for the returned list
 	SNzbListResponse ListResponse;
 	bool read = m_connection->Recv((char*) &ListResponse, sizeof(ListResponse));
-	if (!read ||
-		(int)ntohl(ListResponse.m_messageBase.m_signature) != (int)NZBMESSAGE_SIGNATURE ||
-		ntohl(ListResponse.m_messageBase.m_structSize) != sizeof(ListResponse))
+	if (!nzbget_rs_tpr_binrpc_is_valid_response_header(
+		read ? 1 : 0,
+		(int)ntohl(ListResponse.m_messageBase.m_signature),
+		(int)NZBMESSAGE_SIGNATURE,
+		(uint32)ntohl(ListResponse.m_messageBase.m_structSize),
+		(uint32)sizeof(ListResponse)))
 	{
 		printf("No response or invalid response (timeout, not nzbget-server or wrong nzbget-server version)\n");
 		return false;
@@ -426,9 +432,12 @@ bool RemoteClient::RequestServerLog(int lines)
 	// Now listen for the returned log
 	SNzbLogResponse LogResponse;
 	bool read = m_connection->Recv((char*) &LogResponse, sizeof(LogResponse));
-	if (!read ||
-		(int)ntohl(LogResponse.m_messageBase.m_signature) != (int)NZBMESSAGE_SIGNATURE ||
-		ntohl(LogResponse.m_messageBase.m_structSize) != sizeof(LogResponse))
+	if (!nzbget_rs_tpr_binrpc_is_valid_response_header(
+		read ? 1 : 0,
+		(int)ntohl(LogResponse.m_messageBase.m_signature),
+		(int)NZBMESSAGE_SIGNATURE,
+		(uint32)ntohl(LogResponse.m_messageBase.m_structSize),
+		(uint32)sizeof(LogResponse)))
 	{
 		printf("No response or invalid response (timeout, not nzbget-server or wrong nzbget-server version)\n");
 		return false;
@@ -672,9 +681,12 @@ bool RemoteClient::RequestPostQueue()
 	// Now listen for the returned list
 	SNzbPostQueueResponse PostQueueResponse;
 	bool read = m_connection->Recv((char*) &PostQueueResponse, sizeof(PostQueueResponse));
-	if (!read ||
-		(int)ntohl(PostQueueResponse.m_messageBase.m_signature) != (int)NZBMESSAGE_SIGNATURE ||
-		ntohl(PostQueueResponse.m_messageBase.m_structSize) != sizeof(PostQueueResponse))
+	if (!nzbget_rs_tpr_binrpc_is_valid_response_header(
+		read ? 1 : 0,
+		(int)ntohl(PostQueueResponse.m_messageBase.m_signature),
+		(int)NZBMESSAGE_SIGNATURE,
+		(uint32)ntohl(PostQueueResponse.m_messageBase.m_structSize),
+		(uint32)sizeof(PostQueueResponse)))
 	{
 		printf("No response or invalid response (timeout, not nzbget-server or wrong nzbget-server version)\n");
 		return false;
@@ -774,9 +786,12 @@ bool RemoteClient::RequestHistory(bool withHidden)
 	// Now listen for the returned list
 	SNzbHistoryResponse HistoryResponse;
 	bool read = m_connection->Recv((char*) &HistoryResponse, sizeof(HistoryResponse));
-	if (!read ||
-		(int)ntohl(HistoryResponse.m_messageBase.m_signature) != (int)NZBMESSAGE_SIGNATURE ||
-		ntohl(HistoryResponse.m_messageBase.m_structSize) != sizeof(HistoryResponse))
+	if (!nzbget_rs_tpr_binrpc_is_valid_response_header(
+		read ? 1 : 0,
+		(int)ntohl(HistoryResponse.m_messageBase.m_signature),
+		(int)NZBMESSAGE_SIGNATURE,
+		(uint32)ntohl(HistoryResponse.m_messageBase.m_structSize),
+		(uint32)sizeof(HistoryResponse)))
 	{
 		printf("No response or invalid response (timeout, not nzbget-server or wrong nzbget-server version)\n");
 		return false;

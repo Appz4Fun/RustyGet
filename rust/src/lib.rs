@@ -68,6 +68,7 @@ pub mod feedurlqueue;
 pub mod parunpackpost;
 pub mod contentdupenntp;
 pub mod diskartdlpost;
+pub mod queuecoordinfo;
 
 pub mod deadpostings;
 pub mod dupewatch;

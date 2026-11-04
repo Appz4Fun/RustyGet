@@ -177,6 +177,22 @@ bool GroupSorter::operator()(const std::unique_ptr<NzbInfo>& refNzbInfo1, const 
 
 	bool ret = false;
 
+#ifdef NZBGET_USE_RUST
+	ret = nzbget_rs_qci_group_sorter_compare_values(
+		(int)m_sortCriteria,
+		(int)m_sortOrder,
+		(int)soDescending,
+		strcmp(nzbInfo1->GetName(), nzbInfo2->GetName()),
+		nzbInfo1->GetSize(),
+		nzbInfo2->GetSize(),
+		nzbInfo1->GetRemainingSize() - nzbInfo1->GetPausedSize(),
+		nzbInfo2->GetRemainingSize() - nzbInfo2->GetPausedSize(),
+		(int64)nzbInfo1->GetMinTime(),
+		(int64)nzbInfo2->GetMinTime(),
+		strcmp(nzbInfo1->GetCategory(), nzbInfo2->GetCategory()),
+		nzbInfo1->GetPriority(),
+		nzbInfo2->GetPriority()) != 0;
+#else
 	if (m_sortOrder == soDescending)
 	{
 		std::swap(nzbInfo1, nzbInfo2);
@@ -209,6 +225,7 @@ bool GroupSorter::operator()(const std::unique_ptr<NzbInfo>& refNzbInfo1, const 
 			ret = nzbInfo1->GetPriority() < nzbInfo2->GetPriority();
 			break;
 	}
+#endif
 
 	return ret;
 }

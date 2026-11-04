@@ -2880,6 +2880,111 @@ int nzbget_rs_dad_prepost_should_complete_interrupted_download(
 int nzbget_rs_dad_prepost_is_skipped_delete_status(
     int delete_status, int ds_dupe, int ds_copy, int ds_good, int ds_scan);
 
+void nzbget_rs_qci_server_stat_apply_op(
+    int cur_success, int cur_failed, int delta_success, int delta_failed,
+    int stat_op, int so_set, int so_add, int so_subtract,
+    int* out_success, int* out_failed);
+void nzbget_rs_qci_nzb_info_update_completed_stats(
+    int64_t file_success_size, int64_t file_failed_size,
+    int file_failed_articles, int file_success_articles,
+    int file_extra_priority, int file_par_file, int file_paused,
+    int64_t* inout_success_size, int64_t* inout_failed_size,
+    int* inout_failed_articles, int* inout_success_articles,
+    int* inout_extra_priority, int64_t* inout_par_success_size,
+    int64_t* inout_par_failed_size, int* inout_remaining_par_count,
+    int* inout_paused_file_count);
+void nzbget_rs_qci_nzb_info_update_deleted_stats(
+    int64_t file_size, int64_t file_success_size, int64_t file_failed_size,
+    int64_t file_missed_size, int file_total_articles, int file_success_articles,
+    int file_failed_articles, int file_missed_articles, int64_t file_remaining_size,
+    int file_extra_priority, int file_par_file, int file_paused,
+    int* inout_file_count, int64_t* inout_size, int64_t* inout_cur_success_size,
+    int64_t* inout_failed_size, int* inout_failed_articles, int64_t* inout_cur_failed_size,
+    int* inout_total_articles, int* inout_cur_success_articles, int* inout_cur_failed_articles,
+    int64_t* inout_remaining_size, int* inout_extra_priority, int* inout_remaining_par_count,
+    int64_t* inout_par_size, int64_t* inout_par_cur_success_size,
+    int64_t* inout_par_failed_size, int64_t* inout_par_cur_failed_size,
+    int* inout_paused_file_count, int64_t* inout_paused_size);
+int nzbget_rs_qci_file_info_calc_paused_delta(
+    int cur_paused, int new_paused, int has_nzb,
+    int cur_paused_count, int64_t cur_paused_size, int64_t remaining_size,
+    int* out_paused_count, int64_t* out_paused_size);
+int nzbget_rs_qci_file_info_calc_extra_priority_delta(
+    int cur_extra, int new_extra, int has_nzb, int cur_nzb_extra, int* out_nzb_extra);
+
+int nzbget_rs_qci_queue_coord_should_resave_completed_file_state(
+    int status, int cf_partial, int cf_failure, int file_id);
+int nzbget_rs_qci_queue_coord_resolve_desired_server_level(
+    int has_desired_server, int has_server_obj, int is_active, int norm_level, int* out_level);
+void nzbget_rs_qci_queue_coord_calc_propagation_wait_log_mins(
+    int64_t file_time, int propagation_delay, int64_t cur_date,
+    int* out_posted_min, int* out_start_min);
+int nzbget_rs_qci_queue_coord_should_fetch_first_article_for_rename(
+    int direct_rename, int direct_rename_status, int ts_running, int all_first);
+int nzbget_rs_qci_queue_coord_is_misplaced_donor_article(
+    int status, int ad_finished, int dupe_fallback_round,
+    int64_t decoded_file_size, int segment_aligned);
+int nzbget_rs_qci_queue_coord_should_reset_dupe_failed_run(
+    int dupe_fallback_round, const char* msg_id, const char* orig_msg_id);
+int nzbget_rs_qci_queue_coord_eval_dupe_recovery_and_cutover(
+    int dupe_fallback_round, int dupe_proactive,
+    const char* msg_id, const char* orig_msg_id,
+    int cur_file_recovered, int cur_nzb_recovered,
+    int dupe_cutover, int cutover_threshold,
+    int* out_file_recovered, int* out_nzb_recovered, int* out_trigger_cutover);
+int nzbget_rs_qci_queue_coord_advance_article_completion_counters(
+    int64_t rem_file_size, int64_t rem_nzb_size, int64_t paused_size,
+    int article_size, int is_paused, int completed_articles, int total_articles,
+    int64_t* out_rem_file_size, int64_t* out_rem_nzb_size,
+    int64_t* out_paused_size, int* out_completed_articles);
+int nzbget_rs_qci_queue_coord_eval_file_completion_and_assembly(
+    int file_completed, int parking, int active_downloads,
+    int dupe_deleted, int file_deleted, int finished_before_cancel,
+    int* out_file_completed);
+void nzbget_rs_qci_queue_coord_apply_assembly_failure_counters(
+    int success_articles, int64_t success_size, int is_par_file,
+    int* inout_file_failed_articles, int64_t* inout_file_failed_size,
+    int* inout_nzb_cur_failed_articles, int* inout_nzb_cur_success_articles,
+    int64_t* inout_nzb_cur_failed_size, int64_t* inout_nzb_cur_success_size,
+    int64_t* inout_nzb_par_cur_failed_size, int64_t* inout_nzb_par_cur_success_size);
+void nzbget_rs_qci_queue_coord_demote_article_counters(
+    int article_size, int is_par_file, int dupe_proactive,
+    const char* msg_id, const char* orig_msg_id,
+    int64_t* inout_file_success_size, int64_t* inout_file_failed_size,
+    int* inout_file_success_articles, int* inout_file_failed_articles,
+    int64_t* inout_nzb_cur_success_size, int64_t* inout_nzb_cur_failed_size,
+    int64_t* inout_nzb_par_cur_success_size, int64_t* inout_nzb_par_cur_failed_size,
+    int* inout_nzb_cur_success_articles, int* inout_nzb_cur_failed_articles,
+    int* inout_file_dupe_recovered, int* inout_nzb_dupe_recovered);
+int nzbget_rs_qci_queue_coord_should_delete_temp_article_file(
+    int has_result_filename, int direct_write, int force_direct_write, int dupe_fallback_round);
+int nzbget_rs_qci_queue_coord_should_defer_dupe_failover(
+    int fallback_enabled, int attempted, int recovered, int failover_sample,
+    int defer_state, int dp_deferred, int par_cannot_cover,
+    int failed_articles, int failover_checked, int* out_update_checked);
+int nzbget_rs_qci_queue_coord_should_park_dead_without_backup(
+    int fallback_enabled, int defer_state, int dp_deferred,
+    int attempted, int recovered, int tried, int projected_sample,
+    int files_tried, int far_below, int below);
+int nzbget_rs_qci_queue_coord_is_partly_alive_failover_ready(
+    int backup_alive, int projected, int backup_lead, int critical,
+    int failover_warranted, int* out_projected_below_critical);
+int nzbget_rs_qci_queue_coord_should_wait_for_borrowing_on_par_damage(
+    int fallback_enabled, int raw_article, int dupe_mode, int dm_force,
+    int has_par2, int defer_state, int dp_deferred,
+    int attempted, int failover_sample, int recovered);
+int nzbget_rs_qci_queue_coord_eval_discard_direct_rename_file(
+    int is_par_file, int completed_articles, int active_downloads,
+    int server_mode, int has_articles, int continue_partial, int cached_articles,
+    int* out_discard_infos);
+int nzbget_rs_qci_queue_coord_validate_split_file_state(
+    int active_downloads, int completed_articles, int has_post_info, int same_nzb);
+int nzbget_rs_qci_group_sorter_compare_values(
+    int sort_criteria, int sort_order, int so_descending,
+    int cmp_name, int64_t size1, int64_t size2,
+    int64_t rem1, int64_t rem2, int64_t min_time1, int64_t min_time2,
+    int cmp_cat, int prio1, int prio2);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

@@ -130,6 +130,23 @@ void ServerStatList::StatOp(int serverId, int successArticles, int failedArticle
 		serverStat = &back();
 	}
 
+#ifdef NZBGET_USE_RUST
+	int newSuccess = serverStat->GetSuccessArticles();
+	int newFailed = serverStat->GetFailedArticles();
+	nzbget_rs_qci_server_stat_apply_op(
+		newSuccess,
+		newFailed,
+		successArticles,
+		failedArticles,
+		(int)statOperation,
+		(int)soSet,
+		(int)soAdd,
+		(int)soSubtract,
+		&newSuccess,
+		&newFailed);
+	serverStat->SetSuccessArticles(newSuccess);
+	serverStat->SetFailedArticles(newFailed);
+#else
 	switch (statOperation)
 	{
 		case soSet:
@@ -147,6 +164,7 @@ void ServerStatList::StatOp(int serverId, int successArticles, int failedArticle
 			serverStat->SetFailedArticles(serverStat->GetFailedArticles() - failedArticles);
 			break;
 	}
+#endif
 }
 
 void ServerStatList::ListOp(ServerStatList* serverStats, EStatOperation statOperation)
@@ -876,6 +894,25 @@ void NzbInfo::UpdateCurrentStats()
 
 void NzbInfo::UpdateCompletedStats(FileInfo* fileInfo)
 {
+#ifdef NZBGET_USE_RUST
+	nzbget_rs_qci_nzb_info_update_completed_stats(
+		fileInfo->GetSuccessSize(),
+		fileInfo->GetFailedSize(),
+		fileInfo->GetFailedArticles(),
+		fileInfo->GetSuccessArticles(),
+		fileInfo->GetExtraPriority() ? 1 : 0,
+		fileInfo->GetParFile() ? 1 : 0,
+		fileInfo->GetPaused() ? 1 : 0,
+		&m_successSize,
+		&m_failedSize,
+		&m_failedArticles,
+		&m_successArticles,
+		&m_extraPriority,
+		&m_parSuccessSize,
+		&m_parFailedSize,
+		&m_remainingParCount,
+		&m_pausedFileCount);
+#else
 	m_successSize += fileInfo->GetSuccessSize();
 	m_failedSize += fileInfo->GetFailedSize();
 	m_failedArticles += fileInfo->GetFailedArticles();
@@ -893,12 +930,46 @@ void NzbInfo::UpdateCompletedStats(FileInfo* fileInfo)
 	{
 		m_pausedFileCount--;
 	}
+#endif
 
 	m_serverStats.ListOp(fileInfo->GetServerStats(), ServerStatList::soAdd);
 }
 
 void NzbInfo::UpdateDeletedStats(FileInfo* fileInfo)
 {
+#ifdef NZBGET_USE_RUST
+	nzbget_rs_qci_nzb_info_update_deleted_stats(
+		fileInfo->GetSize(),
+		fileInfo->GetSuccessSize(),
+		fileInfo->GetFailedSize(),
+		fileInfo->GetMissedSize(),
+		fileInfo->GetTotalArticles(),
+		fileInfo->GetSuccessArticles(),
+		fileInfo->GetFailedArticles(),
+		fileInfo->GetMissedArticles(),
+		fileInfo->GetRemainingSize(),
+		fileInfo->GetExtraPriority() ? 1 : 0,
+		fileInfo->GetParFile() ? 1 : 0,
+		fileInfo->GetPaused() ? 1 : 0,
+		&m_fileCount,
+		&m_size,
+		&m_currentSuccessSize,
+		&m_failedSize,
+		&m_failedArticles,
+		&m_currentFailedSize,
+		&m_totalArticles,
+		&m_currentSuccessArticles,
+		&m_currentFailedArticles,
+		&m_remainingSize,
+		&m_extraPriority,
+		&m_remainingParCount,
+		&m_parSize,
+		&m_parCurrentSuccessSize,
+		&m_parFailedSize,
+		&m_parCurrentFailedSize,
+		&m_pausedFileCount,
+		&m_pausedSize);
+#else
 	m_fileCount--;
 	m_size -= fileInfo->GetSize();
 	m_currentSuccessSize -= fileInfo->GetSuccessSize();
@@ -925,6 +996,7 @@ void NzbInfo::UpdateDeletedStats(FileInfo* fileInfo)
 		m_pausedFileCount--;
 		m_pausedSize -= fileInfo->GetRemainingSize();
 	}
+#endif
 
 	m_currentServerStats.ListOp(fileInfo->GetServerStats(), ServerStatList::soSubtract);
 }
@@ -991,20 +1063,51 @@ void FileInfo::ResetGenId(bool max)
 
 void FileInfo::SetPaused(bool paused)
 {
+#ifdef NZBGET_USE_RUST
+	int newPausedCount = m_nzbInfo ? m_nzbInfo->GetPausedFileCount() : 0;
+	int64 newPausedSize = m_nzbInfo ? m_nzbInfo->GetPausedSize() : 0;
+	if (nzbget_rs_qci_file_info_calc_paused_delta(
+		m_paused ? 1 : 0,
+		paused ? 1 : 0,
+		m_nzbInfo ? 1 : 0,
+		newPausedCount,
+		newPausedSize,
+		m_remainingSize,
+		&newPausedCount,
+		&newPausedSize) != 0)
+	{
+		m_nzbInfo->SetPausedFileCount(newPausedCount);
+		m_nzbInfo->SetPausedSize(newPausedSize);
+	}
+#else
 	if (m_paused != paused && m_nzbInfo)
 	{
 		m_nzbInfo->SetPausedFileCount(m_nzbInfo->GetPausedFileCount() + (paused ? 1 : -1));
 		m_nzbInfo->SetPausedSize(m_nzbInfo->GetPausedSize() + (paused ? m_remainingSize : - m_remainingSize));
 	}
+#endif
 	m_paused = paused;
 }
 
 void FileInfo::SetExtraPriority(bool extraPriority)
 {
+#ifdef NZBGET_USE_RUST
+	int newExtra = m_nzbInfo ? m_nzbInfo->GetExtraPriority() : 0;
+	if (nzbget_rs_qci_file_info_calc_extra_priority_delta(
+		m_extraPriority ? 1 : 0,
+		extraPriority ? 1 : 0,
+		m_nzbInfo ? 1 : 0,
+		newExtra,
+		&newExtra) != 0)
+	{
+		m_nzbInfo->SetExtraPriority(newExtra);
+	}
+#else
 	if (m_extraPriority != extraPriority && m_nzbInfo)
 	{
 		m_nzbInfo->SetExtraPriority(m_nzbInfo->GetExtraPriority() + (extraPriority ? 1 : -1));
 	}
+#endif
 	m_extraPriority = extraPriority;
 }
 

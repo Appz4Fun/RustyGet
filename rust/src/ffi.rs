@@ -18263,6 +18263,760 @@ pub extern "C" fn nzbget_rs_dad_prepost_is_skipped_delete_status(
     ))
 }
 
+// ============================================================================
+// DownloadInfo, QueueCoordinator & QueueEditor Hot-Path FFI (`queuecoordinfo.rs`)
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qci_server_stat_apply_op(
+    cur_success: c_int,
+    cur_failed: c_int,
+    delta_success: c_int,
+    delta_failed: c_int,
+    stat_op: c_int,
+    so_set: c_int,
+    so_add: c_int,
+    so_subtract: c_int,
+    out_success: *mut c_int,
+    out_failed: *mut c_int,
+) {
+    let (new_succ, new_fail) = crate::queuecoordinfo::server_stat_apply_op(
+        cur_success,
+        cur_failed,
+        delta_success,
+        delta_failed,
+        stat_op,
+        so_set,
+        so_add,
+        so_subtract,
+    );
+    if !out_success.is_null() {
+        *out_success = new_succ;
+    }
+    if !out_failed.is_null() {
+        *out_failed = new_fail;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qci_nzb_info_update_completed_stats(
+    file_success_size: i64,
+    file_failed_size: i64,
+    file_failed_articles: c_int,
+    file_success_articles: c_int,
+    file_extra_priority: c_int,
+    file_par_file: c_int,
+    file_paused: c_int,
+    inout_success_size: *mut i64,
+    inout_failed_size: *mut i64,
+    inout_failed_articles: *mut c_int,
+    inout_success_articles: *mut c_int,
+    inout_extra_priority: *mut c_int,
+    inout_par_success_size: *mut i64,
+    inout_par_failed_size: *mut i64,
+    inout_remaining_par_count: *mut c_int,
+    inout_paused_file_count: *mut c_int,
+) {
+    if inout_success_size.is_null()
+        || inout_failed_size.is_null()
+        || inout_failed_articles.is_null()
+        || inout_success_articles.is_null()
+        || inout_extra_priority.is_null()
+        || inout_par_success_size.is_null()
+        || inout_par_failed_size.is_null()
+        || inout_remaining_par_count.is_null()
+        || inout_paused_file_count.is_null()
+    {
+        return;
+    }
+    crate::queuecoordinfo::nzb_info_update_completed_stats(
+        file_success_size,
+        file_failed_size,
+        file_failed_articles,
+        file_success_articles,
+        file_extra_priority != 0,
+        file_par_file != 0,
+        file_paused != 0,
+        &mut *inout_success_size,
+        &mut *inout_failed_size,
+        &mut *inout_failed_articles,
+        &mut *inout_success_articles,
+        &mut *inout_extra_priority,
+        &mut *inout_par_success_size,
+        &mut *inout_par_failed_size,
+        &mut *inout_remaining_par_count,
+        &mut *inout_paused_file_count,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qci_nzb_info_update_deleted_stats(
+    file_size: i64,
+    file_success_size: i64,
+    file_failed_size: i64,
+    file_missed_size: i64,
+    file_total_articles: c_int,
+    file_success_articles: c_int,
+    file_failed_articles: c_int,
+    file_missed_articles: c_int,
+    file_remaining_size: i64,
+    file_extra_priority: c_int,
+    file_par_file: c_int,
+    file_paused: c_int,
+    inout_file_count: *mut c_int,
+    inout_size: *mut i64,
+    inout_cur_success_size: *mut i64,
+    inout_failed_size: *mut i64,
+    inout_failed_articles: *mut c_int,
+    inout_cur_failed_size: *mut i64,
+    inout_total_articles: *mut c_int,
+    inout_cur_success_articles: *mut c_int,
+    inout_cur_failed_articles: *mut c_int,
+    inout_remaining_size: *mut i64,
+    inout_extra_priority: *mut c_int,
+    inout_remaining_par_count: *mut c_int,
+    inout_par_size: *mut i64,
+    inout_par_cur_success_size: *mut i64,
+    inout_par_failed_size: *mut i64,
+    inout_par_cur_failed_size: *mut i64,
+    inout_paused_file_count: *mut c_int,
+    inout_paused_size: *mut i64,
+) {
+    if inout_file_count.is_null()
+        || inout_size.is_null()
+        || inout_cur_success_size.is_null()
+        || inout_failed_size.is_null()
+        || inout_failed_articles.is_null()
+        || inout_cur_failed_size.is_null()
+        || inout_total_articles.is_null()
+        || inout_cur_success_articles.is_null()
+        || inout_cur_failed_articles.is_null()
+        || inout_remaining_size.is_null()
+        || inout_extra_priority.is_null()
+        || inout_remaining_par_count.is_null()
+        || inout_par_size.is_null()
+        || inout_par_cur_success_size.is_null()
+        || inout_par_failed_size.is_null()
+        || inout_par_cur_failed_size.is_null()
+        || inout_paused_file_count.is_null()
+        || inout_paused_size.is_null()
+    {
+        return;
+    }
+    crate::queuecoordinfo::nzb_info_update_deleted_stats(
+        file_size,
+        file_success_size,
+        file_failed_size,
+        file_missed_size,
+        file_total_articles,
+        file_success_articles,
+        file_failed_articles,
+        file_missed_articles,
+        file_remaining_size,
+        file_extra_priority != 0,
+        file_par_file != 0,
+        file_paused != 0,
+        &mut *inout_file_count,
+        &mut *inout_size,
+        &mut *inout_cur_success_size,
+        &mut *inout_failed_size,
+        &mut *inout_failed_articles,
+        &mut *inout_cur_failed_size,
+        &mut *inout_total_articles,
+        &mut *inout_cur_success_articles,
+        &mut *inout_cur_failed_articles,
+        &mut *inout_remaining_size,
+        &mut *inout_extra_priority,
+        &mut *inout_remaining_par_count,
+        &mut *inout_par_size,
+        &mut *inout_par_cur_success_size,
+        &mut *inout_par_failed_size,
+        &mut *inout_par_cur_failed_size,
+        &mut *inout_paused_file_count,
+        &mut *inout_paused_size,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qci_file_info_calc_paused_delta(
+    cur_paused: c_int,
+    new_paused: c_int,
+    has_nzb: c_int,
+    cur_paused_count: c_int,
+    cur_paused_size: i64,
+    remaining_size: i64,
+    out_paused_count: *mut c_int,
+    out_paused_size: *mut i64,
+) -> c_int {
+    let (changed, new_cnt, new_sz) = crate::queuecoordinfo::file_info_calc_paused_delta(
+        cur_paused != 0,
+        new_paused != 0,
+        has_nzb != 0,
+        cur_paused_count,
+        cur_paused_size,
+        remaining_size,
+    );
+    if !out_paused_count.is_null() {
+        *out_paused_count = new_cnt;
+    }
+    if !out_paused_size.is_null() {
+        *out_paused_size = new_sz;
+    }
+    i32::from(changed)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qci_file_info_calc_extra_priority_delta(
+    cur_extra: c_int,
+    new_extra: c_int,
+    has_nzb: c_int,
+    cur_nzb_extra: c_int,
+    out_nzb_extra: *mut c_int,
+) -> c_int {
+    let (changed, new_extra_cnt) = crate::queuecoordinfo::file_info_calc_extra_priority_delta(
+        cur_extra != 0,
+        new_extra != 0,
+        has_nzb != 0,
+        cur_nzb_extra,
+    );
+    if !out_nzb_extra.is_null() {
+        *out_nzb_extra = new_extra_cnt;
+    }
+    i32::from(changed)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_qci_queue_coord_should_resave_completed_file_state(
+    status: c_int,
+    cf_partial: c_int,
+    cf_failure: c_int,
+    file_id: c_int,
+) -> c_int {
+    i32::from(
+        crate::queuecoordinfo::queue_coord_should_resave_completed_file_state(
+            status, cf_partial, cf_failure, file_id,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_resolve_desired_server_level(
+    has_desired_server: c_int,
+    has_server_obj: c_int,
+    is_active: c_int,
+    norm_level: c_int,
+    out_level: *mut c_int,
+) -> c_int {
+    let (use_specific, level) = crate::queuecoordinfo::queue_coord_resolve_desired_server_level(
+        has_desired_server != 0,
+        has_server_obj != 0,
+        is_active != 0,
+        norm_level,
+    );
+    if !out_level.is_null() {
+        *out_level = level;
+    }
+    i32::from(use_specific)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_calc_propagation_wait_log_mins(
+    file_time: i64,
+    propagation_delay: c_int,
+    cur_date: i64,
+    out_posted_min: *mut c_int,
+    out_start_min: *mut c_int,
+) {
+    let (posted_min, start_min) = crate::queuecoordinfo::queue_coord_calc_propagation_wait_log_mins(
+        file_time,
+        propagation_delay,
+        cur_date,
+    );
+    if !out_posted_min.is_null() {
+        *out_posted_min = posted_min;
+    }
+    if !out_start_min.is_null() {
+        *out_start_min = start_min;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_qci_queue_coord_should_fetch_first_article_for_rename(
+    direct_rename: c_int,
+    direct_rename_status: c_int,
+    ts_running: c_int,
+    all_first: c_int,
+) -> c_int {
+    i32::from(
+        crate::queuecoordinfo::queue_coord_should_fetch_first_article_for_rename(
+            direct_rename != 0,
+            direct_rename_status,
+            ts_running,
+            all_first != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_qci_queue_coord_is_misplaced_donor_article(
+    status: c_int,
+    ad_finished: c_int,
+    dupe_fallback_round: c_int,
+    decoded_file_size: i64,
+    segment_aligned: c_int,
+) -> c_int {
+    i32::from(
+        crate::queuecoordinfo::queue_coord_is_misplaced_donor_article(
+            status,
+            ad_finished,
+            dupe_fallback_round,
+            decoded_file_size,
+            segment_aligned != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_should_reset_dupe_failed_run(
+    dupe_fallback_round: c_int,
+    msg_id: *const c_char,
+    orig_msg_id: *const c_char,
+) -> c_int {
+    let m = if msg_id.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(msg_id).to_bytes()
+    };
+    let o = if orig_msg_id.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(orig_msg_id).to_bytes()
+    };
+    i32::from(
+        crate::queuecoordinfo::queue_coord_should_reset_dupe_failed_run(dupe_fallback_round, m, o),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_eval_dupe_recovery_and_cutover(
+    dupe_fallback_round: c_int,
+    dupe_proactive: c_int,
+    msg_id: *const c_char,
+    orig_msg_id: *const c_char,
+    cur_file_recovered: c_int,
+    cur_nzb_recovered: c_int,
+    dupe_cutover: c_int,
+    cutover_threshold: c_int,
+    out_file_recovered: *mut c_int,
+    out_nzb_recovered: *mut c_int,
+    out_trigger_cutover: *mut c_int,
+) -> c_int {
+    let m = if msg_id.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(msg_id).to_bytes()
+    };
+    let o = if orig_msg_id.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(orig_msg_id).to_bytes()
+    };
+    let (recovered, next_file_rec, next_nzb_rec, trigger_cutover) =
+        crate::queuecoordinfo::queue_coord_eval_dupe_recovery_and_cutover(
+            dupe_fallback_round,
+            dupe_proactive != 0,
+            m,
+            o,
+            cur_file_recovered,
+            cur_nzb_recovered,
+            dupe_cutover != 0,
+            cutover_threshold,
+        );
+    if !out_file_recovered.is_null() {
+        *out_file_recovered = next_file_rec;
+    }
+    if !out_nzb_recovered.is_null() {
+        *out_nzb_recovered = next_nzb_rec;
+    }
+    if !out_trigger_cutover.is_null() {
+        *out_trigger_cutover = i32::from(trigger_cutover);
+    }
+    i32::from(recovered)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_advance_article_completion_counters(
+    rem_file_size: i64,
+    rem_nzb_size: i64,
+    paused_size: i64,
+    article_size: c_int,
+    is_paused: c_int,
+    completed_articles: c_int,
+    total_articles: c_int,
+    out_rem_file_size: *mut i64,
+    out_rem_nzb_size: *mut i64,
+    out_paused_size: *mut i64,
+    out_completed_articles: *mut c_int,
+) -> c_int {
+    let (rf, rn, ps, ca, fc) =
+        crate::queuecoordinfo::queue_coord_advance_article_completion_counters(
+            rem_file_size,
+            rem_nzb_size,
+            paused_size,
+            article_size,
+            is_paused != 0,
+            completed_articles,
+            total_articles,
+        );
+    if !out_rem_file_size.is_null() {
+        *out_rem_file_size = rf;
+    }
+    if !out_rem_nzb_size.is_null() {
+        *out_rem_nzb_size = rn;
+    }
+    if !out_paused_size.is_null() {
+        *out_paused_size = ps;
+    }
+    if !out_completed_articles.is_null() {
+        *out_completed_articles = ca;
+    }
+    i32::from(fc)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_eval_file_completion_and_assembly(
+    file_completed: c_int,
+    parking: c_int,
+    active_downloads: c_int,
+    dupe_deleted: c_int,
+    file_deleted: c_int,
+    finished_before_cancel: c_int,
+    out_file_completed: *mut c_int,
+) -> c_int {
+    let (fc, complete_parts) =
+        crate::queuecoordinfo::queue_coord_eval_file_completion_and_assembly(
+            file_completed != 0,
+            parking != 0,
+            active_downloads,
+            dupe_deleted != 0,
+            file_deleted != 0,
+            finished_before_cancel != 0,
+        );
+    if !out_file_completed.is_null() {
+        *out_file_completed = i32::from(fc);
+    }
+    i32::from(complete_parts)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_apply_assembly_failure_counters(
+    success_articles: c_int,
+    success_size: i64,
+    is_par_file: c_int,
+    inout_file_failed_articles: *mut c_int,
+    inout_file_failed_size: *mut i64,
+    inout_nzb_cur_failed_articles: *mut c_int,
+    inout_nzb_cur_success_articles: *mut c_int,
+    inout_nzb_cur_failed_size: *mut i64,
+    inout_nzb_cur_success_size: *mut i64,
+    inout_nzb_par_cur_failed_size: *mut i64,
+    inout_nzb_par_cur_success_size: *mut i64,
+) {
+    if inout_file_failed_articles.is_null()
+        || inout_file_failed_size.is_null()
+        || inout_nzb_cur_failed_articles.is_null()
+        || inout_nzb_cur_success_articles.is_null()
+        || inout_nzb_cur_failed_size.is_null()
+        || inout_nzb_cur_success_size.is_null()
+        || inout_nzb_par_cur_failed_size.is_null()
+        || inout_nzb_par_cur_success_size.is_null()
+    {
+        return;
+    }
+    crate::queuecoordinfo::queue_coord_apply_assembly_failure_counters(
+        success_articles,
+        success_size,
+        is_par_file != 0,
+        &mut *inout_file_failed_articles,
+        &mut *inout_file_failed_size,
+        &mut *inout_nzb_cur_failed_articles,
+        &mut *inout_nzb_cur_success_articles,
+        &mut *inout_nzb_cur_failed_size,
+        &mut *inout_nzb_cur_success_size,
+        &mut *inout_nzb_par_cur_failed_size,
+        &mut *inout_nzb_par_cur_success_size,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_demote_article_counters(
+    article_size: c_int,
+    is_par_file: c_int,
+    dupe_proactive: c_int,
+    msg_id: *const c_char,
+    orig_msg_id: *const c_char,
+    inout_file_success_size: *mut i64,
+    inout_file_failed_size: *mut i64,
+    inout_file_success_articles: *mut c_int,
+    inout_file_failed_articles: *mut c_int,
+    inout_nzb_cur_success_size: *mut i64,
+    inout_nzb_cur_failed_size: *mut i64,
+    inout_nzb_par_cur_success_size: *mut i64,
+    inout_nzb_par_cur_failed_size: *mut i64,
+    inout_nzb_cur_success_articles: *mut c_int,
+    inout_nzb_cur_failed_articles: *mut c_int,
+    inout_file_dupe_recovered: *mut c_int,
+    inout_nzb_dupe_recovered: *mut c_int,
+) {
+    if inout_file_success_size.is_null()
+        || inout_file_failed_size.is_null()
+        || inout_file_success_articles.is_null()
+        || inout_file_failed_articles.is_null()
+        || inout_nzb_cur_success_size.is_null()
+        || inout_nzb_cur_failed_size.is_null()
+        || inout_nzb_par_cur_success_size.is_null()
+        || inout_nzb_par_cur_failed_size.is_null()
+        || inout_nzb_cur_success_articles.is_null()
+        || inout_nzb_cur_failed_articles.is_null()
+        || inout_file_dupe_recovered.is_null()
+        || inout_nzb_dupe_recovered.is_null()
+    {
+        return;
+    }
+    let m = if msg_id.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(msg_id).to_bytes()
+    };
+    let o = if orig_msg_id.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(orig_msg_id).to_bytes()
+    };
+    crate::queuecoordinfo::queue_coord_demote_article_counters(
+        article_size,
+        is_par_file != 0,
+        dupe_proactive != 0,
+        m,
+        o,
+        &mut *inout_file_success_size,
+        &mut *inout_file_failed_size,
+        &mut *inout_file_success_articles,
+        &mut *inout_file_failed_articles,
+        &mut *inout_nzb_cur_success_size,
+        &mut *inout_nzb_cur_failed_size,
+        &mut *inout_nzb_par_cur_success_size,
+        &mut *inout_nzb_par_cur_failed_size,
+        &mut *inout_nzb_cur_success_articles,
+        &mut *inout_nzb_cur_failed_articles,
+        &mut *inout_file_dupe_recovered,
+        &mut *inout_nzb_dupe_recovered,
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_qci_queue_coord_should_delete_temp_article_file(
+    has_result_filename: c_int,
+    direct_write: c_int,
+    force_direct_write: c_int,
+    dupe_fallback_round: c_int,
+) -> c_int {
+    i32::from(
+        crate::queuecoordinfo::queue_coord_should_delete_temp_article_file(
+            has_result_filename != 0,
+            direct_write != 0,
+            force_direct_write != 0,
+            dupe_fallback_round,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_should_defer_dupe_failover(
+    fallback_enabled: c_int,
+    attempted: c_int,
+    recovered: c_int,
+    failover_sample: c_int,
+    defer_state: c_int,
+    dp_deferred: c_int,
+    par_cannot_cover: c_int,
+    failed_articles: c_int,
+    failover_checked: c_int,
+    out_update_checked: *mut c_int,
+) -> c_int {
+    let (defer, update_checked) = crate::queuecoordinfo::queue_coord_should_defer_dupe_failover(
+        fallback_enabled != 0,
+        attempted,
+        recovered,
+        failover_sample,
+        defer_state,
+        dp_deferred,
+        par_cannot_cover != 0,
+        failed_articles,
+        failover_checked,
+    );
+    if !out_update_checked.is_null() {
+        *out_update_checked = i32::from(update_checked);
+    }
+    i32::from(defer)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_qci_queue_coord_should_park_dead_without_backup(
+    fallback_enabled: c_int,
+    defer_state: c_int,
+    dp_deferred: c_int,
+    attempted: c_int,
+    recovered: c_int,
+    tried: c_int,
+    projected_sample: c_int,
+    files_tried: c_int,
+    far_below: c_int,
+    below: c_int,
+) -> c_int {
+    i32::from(
+        crate::queuecoordinfo::queue_coord_should_park_dead_without_backup(
+            fallback_enabled != 0,
+            defer_state,
+            dp_deferred,
+            attempted,
+            recovered,
+            tried,
+            projected_sample,
+            files_tried,
+            far_below != 0,
+            below != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_is_partly_alive_failover_ready(
+    backup_alive: c_int,
+    projected: c_int,
+    backup_lead: c_int,
+    critical: c_int,
+    failover_warranted: c_int,
+    out_projected_below_critical: *mut c_int,
+) -> c_int {
+    let (ready, below_crit) = crate::queuecoordinfo::queue_coord_is_partly_alive_failover_ready(
+        backup_alive,
+        projected,
+        backup_lead,
+        critical,
+        failover_warranted != 0,
+    );
+    if !out_projected_below_critical.is_null() {
+        *out_projected_below_critical = i32::from(below_crit);
+    }
+    i32::from(ready)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_qci_queue_coord_should_wait_for_borrowing_on_par_damage(
+    fallback_enabled: c_int,
+    raw_article: c_int,
+    dupe_mode: c_int,
+    dm_force: c_int,
+    has_par2: c_int,
+    defer_state: c_int,
+    dp_deferred: c_int,
+    attempted: c_int,
+    failover_sample: c_int,
+    recovered: c_int,
+) -> c_int {
+    i32::from(
+        crate::queuecoordinfo::queue_coord_should_wait_for_borrowing_on_par_damage(
+            fallback_enabled != 0,
+            raw_article != 0,
+            dupe_mode,
+            dm_force,
+            has_par2 != 0,
+            defer_state,
+            dp_deferred,
+            attempted,
+            failover_sample,
+            recovered,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_eval_discard_direct_rename_file(
+    is_par_file: c_int,
+    completed_articles: c_int,
+    active_downloads: c_int,
+    server_mode: c_int,
+    has_articles: c_int,
+    continue_partial: c_int,
+    cached_articles: c_int,
+    out_discard_infos: *mut c_int,
+) -> c_int {
+    let (discard_par, discard_infos) =
+        crate::queuecoordinfo::queue_coord_eval_discard_direct_rename_file(
+            is_par_file != 0,
+            completed_articles,
+            active_downloads,
+            server_mode != 0,
+            has_articles != 0,
+            continue_partial != 0,
+            cached_articles,
+        );
+    if !out_discard_infos.is_null() {
+        *out_discard_infos = i32::from(discard_infos);
+    }
+    i32::from(discard_par)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_qci_queue_coord_validate_split_file_state(
+    active_downloads: c_int,
+    completed_articles: c_int,
+    has_post_info: c_int,
+    same_nzb: c_int,
+) -> c_int {
+    crate::queuecoordinfo::queue_coord_validate_split_file_state(
+        active_downloads,
+        completed_articles,
+        has_post_info != 0,
+        same_nzb != 0,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_qci_group_sorter_compare_values(
+    sort_criteria: c_int,
+    sort_order: c_int,
+    so_descending: c_int,
+    cmp_name: c_int,
+    size1: i64,
+    size2: i64,
+    rem1: i64,
+    rem2: i64,
+    min_time1: i64,
+    min_time2: i64,
+    cmp_cat: c_int,
+    prio1: c_int,
+    prio2: c_int,
+) -> c_int {
+    i32::from(crate::queuecoordinfo::group_sorter_compare_values(
+        sort_criteria,
+        sort_order,
+        so_descending,
+        cmp_name,
+        size1,
+        size2,
+        rem1,
+        rem2,
+        min_time1,
+        min_time2,
+        cmp_cat,
+        prio1,
+        prio2,
+    ))
+}
+
+
 
 
 

@@ -69,6 +69,7 @@ pub mod parunpackpost;
 pub mod contentdupenntp;
 pub mod diskartdlpost;
 pub mod queuecoordinfo;
+pub mod pardupenzb;
 
 pub mod deadpostings;
 pub mod dupewatch;

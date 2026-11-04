@@ -2985,6 +2985,111 @@ int nzbget_rs_qci_group_sorter_compare_values(
     int64_t rem1, int64_t rem2, int64_t min_time1, int64_t min_time2,
     int cmp_cat, int prio1, int prio2);
 
+int nzbget_rs_pnd_parchecker_accumulate_worst_status(int all_status, int set_status);
+int nzbget_rs_pnd_parchecker_should_try_more_recovery(
+    int has_damaged_files, int is_stopped, int res, int e_repair_not_possible,
+    int require_dupe_scan, int par_scan, int ps_dupe);
+int nzbget_rs_pnd_parchecker_eval_post_verify_action(
+    int res, int e_success, int e_repair_possible, int has_damaged_files,
+    int par_repair, int ps_failed, int ps_repair_not_needed, int ps_repair_possible,
+    int* out_action_code);
+int nzbget_rs_pnd_parchecker_eval_cancel_or_fail_outcome(
+    int is_stopped, int stage, int pt_repairing, int cur_status,
+    int ps_failed, int ps_repair_possible, int err_msg_empty, int res,
+    int* out_outcome_kind, int* out_use_cmd_err);
+int nzbget_rs_pnd_parchecker_is_verified_complete_target(
+    int status, int ps_repaired, int ps_repair_not_needed,
+    int has_complete_file, int complete_eq_target);
+int nzbget_rs_pnd_parchecker_calc_dupe_blocks_delta(
+    int prev_used_blocks, uint32_t was_blocks_missing2,
+    uint32_t blocks_missing2, uint32_t was_blocks_missing_total,
+    uint32_t* out_total_found);
+int nzbget_rs_pnd_parchecker_eval_extra_file_step(
+    uint32_t was_files_missing, uint32_t now_files_missing,
+    uint32_t was_blocks_missing, uint32_t now_blocks_missing,
+    int external_dir, int prev_files_added,
+    int* out_file_added, int* out_block_added,
+    uint32_t* out_blocks_delta, int* out_register_parred);
+int nzbget_rs_pnd_parchecker_eval_signal_done(
+    int stage, int pt_verifying_sources, int available, int total,
+    int verifying_extra_files, int ignore, int prev_has_damaged_files,
+    int* out_has_damaged_files, int* out_bad_blocks);
+int nzbget_rs_pnd_parchecker_check_verify_data_file_preconditions(
+    int stage, int pt_verifying_sources, int target_exists,
+    int has_verification_packet, int64_t file_size, uint64_t block_count);
+int nzbget_rs_pnd_parchecker_calc_dumb_crc_read_size(
+    int cnt, int buffer_size, int64_t start, int64_t end);
+
+int nzbget_rs_pnd_unpack_ctrl_classify_run_branch(
+    int unpack, int has_files, int par_status, int ps_skipped,
+    int par_rename_status, int rs_skipped, int has_par_files,
+    int has_renamed_archive_files);
+int nzbget_rs_pnd_unpack_ctrl_eval_rar_unpack_mode(
+    int has_not_unpacked_rar_files, int unpack_dir_created,
+    int direct_unpack_status, int ns_success, int* out_log_kind);
+int nzbget_rs_pnd_unpack_ctrl_should_log_exit_error(
+    int unpack_ok, int exit_code, int will_retry_with_pass,
+    int is_stopped, int is_terminated);
+int nzbget_rs_pnd_unpack_ctrl_accumulate_split_piece(
+    const char* filename, const char* dest_base_name,
+    int64_t segment_size, int64_t first_segment_size,
+    int* inout_count, int* inout_min, int* inout_max, int* inout_dif_size_min);
+int nzbget_rs_pnd_unpack_ctrl_classify_cleanup_archive_file(
+    int is_dir, int inter_dir, int in_extracted_files, int is_downloaded_file,
+    int has_splitted_files, int in_joined_files, const char* filename);
+
+int nzbget_rs_pnd_dupe_fallback_should_defer_to_par_header(
+    int has_nzb_info, int direct_rename_status, int ts_running,
+    int all_first, int par_status, int ps_failure, int64_t par_size);
+int nzbget_rs_pnd_dupe_fallback_is_borrowed_article(
+    int donor_id, int fallback_round);
+int nzbget_rs_pnd_dupe_fallback_is_valid_par2_block_spec(
+    int has_sums, uint64_t block_size, uint64_t max_par2_block_size,
+    size_t crc_count, int64_t file_size);
+void nzbget_rs_pnd_dupe_fallback_calc_article_block_range(
+    int64_t segment_offset, int segment_size, uint64_t block_size,
+    int64_t* out_first, int64_t* out_last);
+void nzbget_rs_pnd_dupe_fallback_compute_pin_lead_state(
+    const int* contributors, size_t contributors_len, int cur_file_lead_donor_id,
+    int* out_lead_snapshot, int* out_next_lead,
+    int* out_donor_count, int* out_new_file_lead);
+int nzbget_rs_pnd_dupe_fallback_should_vacate_ghost_lead(
+    int lead_nzb_id, int is_barred, int in_donors);
+int nzbget_rs_pnd_dupe_fallback_compare_donors(
+    int twin1, int score1, int id1, int twin2, int score2, int id2);
+
+int nzbget_rs_pnd_dupecoord_check_history_good_or_score_skip(
+    int is_hk_nzb, int is_hk_dup, int hist_dupe_mode, int dm_force,
+    int hist_mark_status, int ks_good, int hist_dup_status, int ds_good,
+    int ds_success, int nzb_dupe_mode, int dm_score,
+    int nzb_dupe_score, int hist_dupe_score, int same_name_or_key,
+    int* out_good);
+int nzbget_rs_pnd_dupecoord_classify_same_content_history_item(
+    int is_hk_nzb, int is_hk_dup, int same_hash, int delete_status,
+    int ds_dupe, int ds_copy, int ds_manual, int is_dupe_success,
+    int dup_status, int dup_ds_success, int dup_ds_good,
+    int dup_ds_failed, int dup_ds_bad, int* out_failed);
+int nzbget_rs_pnd_dupecoord_resolve_skip_action(
+    int feed_id, int dupe_hint, int dh_none, int same_content,
+    int ds_manual, int ds_copy, int ds_good, int* out_delete_disk);
+int nzbget_rs_pnd_dupecoord_accum_queue_dupe_status(
+    int cur_statuses, int same_name_or_key, int success_articles,
+    int failed_articles, int ds_downloading, int ds_queued);
+int nzbget_rs_pnd_dupecoord_accum_dup_history_status(
+    int cur_statuses, int same_name_or_key, int dup_status,
+    int dup_ds_success, int dup_ds_good, int dup_ds_failed,
+    int dup_ds_bad, int ds_success, int ds_failure);
+
+int nzbget_rs_pnd_nzbfile_accumulate_file_stats(
+    const char* filename, int file_total_articles, int file_missed_articles,
+    int64_t file_size, int64_t file_remaining_size, int64_t file_missed_size,
+    int* inout_nzb_file_count, int* inout_nzb_total_articles,
+    int* inout_nzb_failed_articles, int* inout_nzb_cur_failed_articles,
+    int64_t* inout_nzb_size, int64_t* inout_nzb_remaining_size,
+    int64_t* inout_nzb_failed_size, int64_t* inout_nzb_cur_failed_size,
+    int64_t* inout_nzb_par_size, int64_t* inout_nzb_par_failed_size,
+    int64_t* inout_nzb_par_cur_failed_size, int* inout_nzb_remaining_par_count);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

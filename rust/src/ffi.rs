@@ -19016,6 +19016,681 @@ pub extern "C" fn nzbget_rs_qci_group_sorter_compare_values(
     ))
 }
 
+// ============================================================================
+// ParChecker, UnpackController, DupeArticleFallback, DupeCoordinator & NzbFile
+// Hot-Path C ABI (rust/src/pardupenzb.rs)
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pnd_parchecker_accumulate_worst_status(
+    all_status: c_int,
+    set_status: c_int,
+) -> c_int {
+    crate::pardupenzb::parchecker_accumulate_worst_status(all_status, set_status)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pnd_parchecker_should_try_more_recovery(
+    has_damaged_files: c_int,
+    is_stopped: c_int,
+    res: c_int,
+    e_repair_not_possible: c_int,
+    require_dupe_scan: c_int,
+    par_scan: c_int,
+    ps_dupe: c_int,
+) -> c_int {
+    i32::from(crate::pardupenzb::parchecker_should_try_more_recovery(
+        has_damaged_files != 0,
+        is_stopped != 0,
+        res,
+        e_repair_not_possible,
+        require_dupe_scan != 0,
+        par_scan,
+        ps_dupe,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_pnd_parchecker_eval_post_verify_action(
+    res: c_int,
+    e_success: c_int,
+    e_repair_possible: c_int,
+    has_damaged_files: c_int,
+    par_repair: c_int,
+    ps_failed: c_int,
+    ps_repair_not_needed: c_int,
+    ps_repair_possible: c_int,
+    out_action_code: *mut c_int,
+) -> c_int {
+    let (status, action) = crate::pardupenzb::parchecker_eval_post_verify_action(
+        res,
+        e_success,
+        e_repair_possible,
+        has_damaged_files != 0,
+        par_repair != 0,
+        ps_failed,
+        ps_repair_not_needed,
+        ps_repair_possible,
+    );
+    if !out_action_code.is_null() {
+        *out_action_code = action;
+    }
+    status
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_pnd_parchecker_eval_cancel_or_fail_outcome(
+    is_stopped: c_int,
+    stage: c_int,
+    pt_repairing: c_int,
+    cur_status: c_int,
+    ps_failed: c_int,
+    ps_repair_possible: c_int,
+    err_msg_empty: c_int,
+    res: c_int,
+    out_outcome_kind: *mut c_int,
+    out_use_cmd_err: *mut c_int,
+) -> c_int {
+    let (status, kind, use_cmd) = crate::pardupenzb::parchecker_eval_cancel_or_fail_outcome(
+        is_stopped != 0,
+        stage,
+        pt_repairing,
+        cur_status,
+        ps_failed,
+        ps_repair_possible,
+        err_msg_empty != 0,
+        res,
+    );
+    if !out_outcome_kind.is_null() {
+        *out_outcome_kind = kind;
+    }
+    if !out_use_cmd_err.is_null() {
+        *out_use_cmd_err = i32::from(use_cmd);
+    }
+    status
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pnd_parchecker_is_verified_complete_target(
+    status: c_int,
+    ps_repaired: c_int,
+    ps_repair_not_needed: c_int,
+    has_complete_file: c_int,
+    complete_eq_target: c_int,
+) -> c_int {
+    i32::from(crate::pardupenzb::parchecker_is_verified_complete_target(
+        status,
+        ps_repaired,
+        ps_repair_not_needed,
+        has_complete_file != 0,
+        complete_eq_target != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_pnd_parchecker_calc_dupe_blocks_delta(
+    prev_used_blocks: c_int,
+    was_blocks_missing2: u32,
+    blocks_missing2: u32,
+    was_blocks_missing_total: u32,
+    out_total_found: *mut u32,
+) -> c_int {
+    let (new_used, total_found) = crate::pardupenzb::parchecker_calc_dupe_blocks_delta(
+        prev_used_blocks,
+        was_blocks_missing2,
+        blocks_missing2,
+        was_blocks_missing_total,
+    );
+    if !out_total_found.is_null() {
+        *out_total_found = total_found;
+    }
+    new_used
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_pnd_parchecker_eval_extra_file_step(
+    was_files_missing: u32,
+    now_files_missing: u32,
+    was_blocks_missing: u32,
+    now_blocks_missing: u32,
+    external_dir: c_int,
+    prev_files_added: c_int,
+    out_file_added: *mut c_int,
+    out_block_added: *mut c_int,
+    out_blocks_delta: *mut u32,
+    out_register_parred: *mut c_int,
+) -> c_int {
+    let (fa, ba, nfa, delta, reg) = crate::pardupenzb::parchecker_eval_extra_file_step(
+        was_files_missing,
+        now_files_missing,
+        was_blocks_missing,
+        now_blocks_missing,
+        external_dir != 0,
+        prev_files_added != 0,
+    );
+    if !out_file_added.is_null() {
+        *out_file_added = i32::from(fa);
+    }
+    if !out_block_added.is_null() {
+        *out_block_added = i32::from(ba);
+    }
+    if !out_blocks_delta.is_null() {
+        *out_blocks_delta = delta;
+    }
+    if !out_register_parred.is_null() {
+        *out_register_parred = i32::from(reg);
+    }
+    i32::from(nfa)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_pnd_parchecker_eval_signal_done(
+    stage: c_int,
+    pt_verifying_sources: c_int,
+    available: c_int,
+    total: c_int,
+    verifying_extra_files: c_int,
+    ignore: c_int,
+    prev_has_damaged_files: c_int,
+    out_has_damaged_files: *mut c_int,
+    out_bad_blocks: *mut c_int,
+) -> c_int {
+    let (report, has_damaged, bad_blocks) = crate::pardupenzb::parchecker_eval_signal_done(
+        stage,
+        pt_verifying_sources,
+        available,
+        total,
+        verifying_extra_files != 0,
+        ignore != 0,
+        prev_has_damaged_files != 0,
+    );
+    if !out_has_damaged_files.is_null() {
+        *out_has_damaged_files = i32::from(has_damaged);
+    }
+    if !out_bad_blocks.is_null() {
+        *out_bad_blocks = bad_blocks;
+    }
+    i32::from(report)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pnd_parchecker_check_verify_data_file_preconditions(
+    stage: c_int,
+    pt_verifying_sources: c_int,
+    target_exists: c_int,
+    has_verification_packet: c_int,
+    file_size: i64,
+    block_count: u64,
+) -> c_int {
+    crate::pardupenzb::parchecker_check_verify_data_file_preconditions(
+        stage,
+        pt_verifying_sources,
+        target_exists != 0,
+        has_verification_packet != 0,
+        file_size,
+        block_count,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pnd_parchecker_calc_dumb_crc_read_size(
+    cnt: c_int,
+    buffer_size: c_int,
+    start: i64,
+    end: i64,
+) -> c_int {
+    crate::pardupenzb::parchecker_calc_dumb_crc_read_size(cnt, buffer_size, start, end)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pnd_unpack_ctrl_classify_run_branch(
+    unpack: c_int,
+    has_files: c_int,
+    par_status: c_int,
+    ps_skipped: c_int,
+    par_rename_status: c_int,
+    rs_skipped: c_int,
+    has_par_files: c_int,
+    has_renamed_archive_files: c_int,
+) -> c_int {
+    crate::pardupenzb::unpack_ctrl_classify_run_branch(
+        unpack != 0,
+        has_files != 0,
+        par_status,
+        ps_skipped,
+        par_rename_status,
+        rs_skipped,
+        has_par_files != 0,
+        has_renamed_archive_files != 0,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_pnd_unpack_ctrl_eval_rar_unpack_mode(
+    has_not_unpacked_rar_files: c_int,
+    unpack_dir_created: c_int,
+    direct_unpack_status: c_int,
+    ns_success: c_int,
+    out_log_kind: *mut c_int,
+) -> c_int {
+    let (run_unrar, log_kind) = crate::pardupenzb::unpack_ctrl_eval_rar_unpack_mode(
+        has_not_unpacked_rar_files != 0,
+        unpack_dir_created != 0,
+        direct_unpack_status,
+        ns_success,
+    );
+    if !out_log_kind.is_null() {
+        *out_log_kind = log_kind;
+    }
+    i32::from(run_unrar)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pnd_unpack_ctrl_should_log_exit_error(
+    unpack_ok: c_int,
+    exit_code: c_int,
+    will_retry_with_pass: c_int,
+    is_stopped: c_int,
+    is_terminated: c_int,
+) -> c_int {
+    i32::from(crate::pardupenzb::unpack_ctrl_should_log_exit_error(
+        unpack_ok != 0,
+        exit_code,
+        will_retry_with_pass != 0,
+        is_stopped != 0,
+        is_terminated != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_pnd_unpack_ctrl_accumulate_split_piece(
+    filename: *const c_char,
+    dest_base_name: *const c_char,
+    segment_size: i64,
+    first_segment_size: i64,
+    inout_count: *mut c_int,
+    inout_min: *mut c_int,
+    inout_max: *mut c_int,
+    inout_dif_size_min: *mut c_int,
+) -> c_int {
+    let f = if filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    let b = if dest_base_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(dest_base_name).to_bytes()
+    };
+    i32::from(crate::pardupenzb::unpack_ctrl_accumulate_split_piece(
+        f,
+        b,
+        segment_size,
+        first_segment_size,
+        &mut *inout_count,
+        &mut *inout_min,
+        &mut *inout_max,
+        &mut *inout_dif_size_min,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_pnd_unpack_ctrl_classify_cleanup_archive_file(
+    is_dir: c_int,
+    inter_dir: c_int,
+    in_extracted_files: c_int,
+    is_downloaded_file: c_int,
+    has_splitted_files: c_int,
+    in_joined_files: c_int,
+    filename: *const c_char,
+) -> c_int {
+    let f = if filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    crate::pardupenzb::unpack_ctrl_classify_cleanup_archive_file(
+        is_dir != 0,
+        inter_dir != 0,
+        in_extracted_files != 0,
+        is_downloaded_file != 0,
+        has_splitted_files != 0,
+        in_joined_files != 0,
+        f,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pnd_dupe_fallback_should_defer_to_par_header(
+    has_nzb_info: c_int,
+    direct_rename_status: c_int,
+    ts_running: c_int,
+    all_first: c_int,
+    par_status: c_int,
+    ps_failure: c_int,
+    par_size: i64,
+) -> c_int {
+    crate::pardupenzb::dupe_fallback_should_defer_to_par_header(
+        has_nzb_info != 0,
+        direct_rename_status,
+        ts_running,
+        all_first != 0,
+        par_status,
+        ps_failure,
+        par_size,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pnd_dupe_fallback_is_borrowed_article(
+    donor_id: c_int,
+    fallback_round: c_int,
+) -> c_int {
+    i32::from(crate::pardupenzb::dupe_fallback_is_borrowed_article(
+        donor_id,
+        fallback_round,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pnd_dupe_fallback_is_valid_par2_block_spec(
+    has_sums: c_int,
+    block_size: u64,
+    max_par2_block_size: u64,
+    crc_count: usize,
+    file_size: i64,
+) -> c_int {
+    i32::from(crate::pardupenzb::dupe_fallback_is_valid_par2_block_spec(
+        has_sums != 0,
+        block_size,
+        max_par2_block_size,
+        crc_count,
+        file_size,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_pnd_dupe_fallback_calc_article_block_range(
+    segment_offset: i64,
+    segment_size: c_int,
+    block_size: u64,
+    out_first: *mut i64,
+    out_last: *mut i64,
+) {
+    let (first, last) = crate::pardupenzb::dupe_fallback_calc_article_block_range(
+        segment_offset,
+        segment_size,
+        block_size,
+    );
+    if !out_first.is_null() {
+        *out_first = first;
+    }
+    if !out_last.is_null() {
+        *out_last = last;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_pnd_dupe_fallback_compute_pin_lead_state(
+    contributors: *const c_int,
+    contributors_len: usize,
+    cur_file_lead_donor_id: c_int,
+    out_lead_snapshot: *mut c_int,
+    out_next_lead: *mut c_int,
+    out_donor_count: *mut c_int,
+    out_new_file_lead: *mut c_int,
+) {
+    let slice = if contributors.is_null() || contributors_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(contributors, contributors_len)
+    };
+    let (lead, next, cnt, file_lead) =
+        crate::pardupenzb::dupe_fallback_compute_pin_lead_state(slice, cur_file_lead_donor_id);
+    if !out_lead_snapshot.is_null() {
+        *out_lead_snapshot = lead;
+    }
+    if !out_next_lead.is_null() {
+        *out_next_lead = next;
+    }
+    if !out_donor_count.is_null() {
+        *out_donor_count = cnt;
+    }
+    if !out_new_file_lead.is_null() {
+        *out_new_file_lead = file_lead;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pnd_dupe_fallback_should_vacate_ghost_lead(
+    lead_nzb_id: c_int,
+    is_barred: c_int,
+    in_donors: c_int,
+) -> c_int {
+    i32::from(crate::pardupenzb::dupe_fallback_should_vacate_ghost_lead(
+        lead_nzb_id,
+        is_barred != 0,
+        in_donors != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pnd_dupe_fallback_compare_donors(
+    twin1: c_int,
+    score1: c_int,
+    id1: c_int,
+    twin2: c_int,
+    score2: c_int,
+    id2: c_int,
+) -> c_int {
+    i32::from(crate::pardupenzb::dupe_fallback_compare_donors(
+        twin1 != 0,
+        score1,
+        id1,
+        twin2 != 0,
+        score2,
+        id2,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_pnd_dupecoord_check_history_good_or_score_skip(
+    is_hk_nzb: c_int,
+    is_hk_dup: c_int,
+    hist_dupe_mode: c_int,
+    dm_force: c_int,
+    hist_mark_status: c_int,
+    ks_good: c_int,
+    hist_dup_status: c_int,
+    ds_good: c_int,
+    ds_success: c_int,
+    nzb_dupe_mode: c_int,
+    dm_score: c_int,
+    nzb_dupe_score: c_int,
+    hist_dupe_score: c_int,
+    same_name_or_key: c_int,
+    out_good: *mut c_int,
+) -> c_int {
+    let (skip, good) = crate::pardupenzb::dupecoord_check_history_good_or_score_skip(
+        is_hk_nzb != 0,
+        is_hk_dup != 0,
+        hist_dupe_mode,
+        dm_force,
+        hist_mark_status,
+        ks_good,
+        hist_dup_status,
+        ds_good,
+        ds_success,
+        nzb_dupe_mode,
+        dm_score,
+        nzb_dupe_score,
+        hist_dupe_score,
+        same_name_or_key != 0,
+    );
+    if !out_good.is_null() {
+        *out_good = i32::from(good);
+    }
+    i32::from(skip)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_pnd_dupecoord_classify_same_content_history_item(
+    is_hk_nzb: c_int,
+    is_hk_dup: c_int,
+    same_hash: c_int,
+    delete_status: c_int,
+    ds_dupe: c_int,
+    ds_copy: c_int,
+    ds_manual: c_int,
+    is_dupe_success: c_int,
+    dup_status: c_int,
+    dup_ds_success: c_int,
+    dup_ds_good: c_int,
+    dup_ds_failed: c_int,
+    dup_ds_bad: c_int,
+    out_failed: *mut c_int,
+) -> c_int {
+    let (succeeded, failed) = crate::pardupenzb::dupecoord_classify_same_content_history_item(
+        is_hk_nzb != 0,
+        is_hk_dup != 0,
+        same_hash != 0,
+        delete_status,
+        ds_dupe,
+        ds_copy,
+        ds_manual,
+        is_dupe_success != 0,
+        dup_status,
+        dup_ds_success,
+        dup_ds_good,
+        dup_ds_failed,
+        dup_ds_bad,
+    );
+    if !out_failed.is_null() {
+        *out_failed = i32::from(failed);
+    }
+    i32::from(succeeded)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_pnd_dupecoord_resolve_skip_action(
+    feed_id: c_int,
+    dupe_hint: c_int,
+    dh_none: c_int,
+    same_content: c_int,
+    ds_manual: c_int,
+    ds_copy: c_int,
+    ds_good: c_int,
+    out_delete_disk: *mut c_int,
+) -> c_int {
+    let (del_status, del_disk) = crate::pardupenzb::dupecoord_resolve_skip_action(
+        feed_id,
+        dupe_hint,
+        dh_none,
+        same_content != 0,
+        ds_manual,
+        ds_copy,
+        ds_good,
+    );
+    if !out_delete_disk.is_null() {
+        *out_delete_disk = i32::from(del_disk);
+    }
+    del_status
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pnd_dupecoord_accum_queue_dupe_status(
+    cur_statuses: c_int,
+    same_name_or_key: c_int,
+    success_articles: c_int,
+    failed_articles: c_int,
+    ds_downloading: c_int,
+    ds_queued: c_int,
+) -> c_int {
+    crate::pardupenzb::dupecoord_accum_queue_dupe_status(
+        cur_statuses,
+        same_name_or_key != 0,
+        success_articles,
+        failed_articles,
+        ds_downloading,
+        ds_queued,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_pnd_dupecoord_accum_dup_history_status(
+    cur_statuses: c_int,
+    same_name_or_key: c_int,
+    dup_status: c_int,
+    dup_ds_success: c_int,
+    dup_ds_good: c_int,
+    dup_ds_failed: c_int,
+    dup_ds_bad: c_int,
+    ds_success: c_int,
+    ds_failure: c_int,
+) -> c_int {
+    crate::pardupenzb::dupecoord_accum_dup_history_status(
+        cur_statuses,
+        same_name_or_key != 0,
+        dup_status,
+        dup_ds_success,
+        dup_ds_good,
+        dup_ds_failed,
+        dup_ds_bad,
+        ds_success,
+        ds_failure,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_pnd_nzbfile_accumulate_file_stats(
+    filename: *const c_char,
+    file_total_articles: c_int,
+    file_missed_articles: c_int,
+    file_size: i64,
+    file_remaining_size: i64,
+    file_missed_size: i64,
+    inout_nzb_file_count: *mut c_int,
+    inout_nzb_total_articles: *mut c_int,
+    inout_nzb_failed_articles: *mut c_int,
+    inout_nzb_cur_failed_articles: *mut c_int,
+    inout_nzb_size: *mut i64,
+    inout_nzb_remaining_size: *mut i64,
+    inout_nzb_failed_size: *mut i64,
+    inout_nzb_cur_failed_size: *mut i64,
+    inout_nzb_par_size: *mut i64,
+    inout_nzb_par_failed_size: *mut i64,
+    inout_nzb_par_cur_failed_size: *mut i64,
+    inout_nzb_remaining_par_count: *mut c_int,
+) -> c_int {
+    let f = if filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    i32::from(crate::pardupenzb::nzbfile_accumulate_file_stats(
+        f,
+        file_total_articles,
+        file_missed_articles,
+        file_size,
+        file_remaining_size,
+        file_missed_size,
+        &mut *inout_nzb_file_count,
+        &mut *inout_nzb_total_articles,
+        &mut *inout_nzb_failed_articles,
+        &mut *inout_nzb_cur_failed_articles,
+        &mut *inout_nzb_size,
+        &mut *inout_nzb_remaining_size,
+        &mut *inout_nzb_failed_size,
+        &mut *inout_nzb_cur_failed_size,
+        &mut *inout_nzb_par_size,
+        &mut *inout_nzb_par_failed_size,
+        &mut *inout_nzb_par_cur_failed_size,
+        &mut *inout_nzb_remaining_par_count,
+    ))
+}
+
+
 
 
 

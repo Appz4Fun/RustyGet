@@ -83,6 +83,20 @@ bool DupeArticleFallback::HasPar2(NzbInfo* nzbInfo)
 
 bool DupeArticleFallback::ShouldDeferToPar(NzbInfo* nzbInfo)
 {
+#ifdef NZBGET_USE_RUST
+	int headerVerdict = nzbget_rs_pnd_dupe_fallback_should_defer_to_par_header(
+		nzbInfo ? 1 : 0,
+		nzbInfo ? (int)nzbInfo->GetDirectRenameStatus() : 0,
+		(int)NzbInfo::tsRunning,
+		(nzbInfo && nzbInfo->GetAllFirst()) ? 1 : 0,
+		nzbInfo ? (int)nzbInfo->GetParStatus() : 0,
+		(int)NzbInfo::psFailure,
+		nzbInfo ? nzbInfo->GetParSize() : 0);
+	if (headerVerdict != 0)
+	{
+		return headerVerdict > 0;
+	}
+#else
 	if (!nzbInfo)
 	{
 		return false;
@@ -103,6 +117,7 @@ bool DupeArticleFallback::ShouldDeferToPar(NzbInfo* nzbInfo)
 	{
 		return true;
 	}
+#endif
 	for (FileInfo* fileInfo : nzbInfo->GetFileList())
 	{
 		if (!fileInfo->GetDeleted() && IsParFile(fileInfo))
@@ -616,8 +631,16 @@ std::vector<ArticleInfo*> DupeArticleFallback::BorrowedPar2Mismatches(FileInfo* 
 	// state, which keeps the fallback round but not the duplicate) it was fetched
 	// in a fallback round - after a restart, with the donor unknown, none counted
 	// and the check was skipped. An own article in the list just passes the check.
+#ifdef NZBGET_USE_RUST
+	auto borrowed = [](ArticleInfo* article)
+		{
+			return nzbget_rs_pnd_dupe_fallback_is_borrowed_article(
+				article->GetDupeDonorId(), article->GetDupeFallbackRound()) != 0;
+		};
+#else
 	auto borrowed = [](ArticleInfo* article)
 		{ return article->GetDupeDonorId() > 0 || article->GetDupeFallbackRound() > 0; };
+#endif
 	if (std::none_of(articles->begin(), articles->end(), [&borrowed](std::unique_ptr<ArticleInfo>& article)
 		{ return article->GetStatus() == ArticleInfo::aiFinished && borrowed(article.get()); }))
 	{
@@ -647,8 +670,14 @@ std::vector<ArticleInfo*> DupeArticleFallback::BorrowedPar2Mismatches(FileInfo* 
 	blockSize = sums ? sums->blockSize : 0;
 	// a par2 block size no real set uses (a damaged packet) isn't trusted: the buffer
 	// for it would be too large to allocate
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_pnd_dupe_fallback_is_valid_par2_block_spec(
+		sums ? 1 : 0, blockSize, (uint64)MaxPar2BlockSize,
+		sums ? sums->crcs.size() : 0, fileSize) == 0)
+#else
 	if (!sums || blockSize == 0 || blockSize % 4 != 0 || blockSize > (uint64)MaxPar2BlockSize ||
 		sums->crcs.size() < (size_t)((fileSize + blockSize - 1) / blockSize))
+#endif
 	{
 		return mismatches;
 	}
@@ -706,8 +735,15 @@ std::vector<ArticleInfo*> DupeArticleFallback::BorrowedPar2Mismatches(FileInfo* 
 		{
 			continue;
 		}
+#ifdef NZBGET_USE_RUST
+		int64 first = 0;
+		int64 last = -1;
+		nzbget_rs_pnd_dupe_fallback_calc_article_block_range(
+			article->GetSegmentOffset(), article->GetSegmentSize(), blockSize, &first, &last);
+#else
 		int64 first = article->GetSegmentOffset() / (int64)blockSize;
 		int64 last = (article->GetSegmentOffset() + article->GetSegmentSize() - 1) / (int64)blockSize;
+#endif
 		bool bad = false;
 		for (int64 block = first; block <= last && !bad; block++)
 		{
@@ -744,6 +780,21 @@ void DupeArticleFallback::FinishPin(FileInfo* fileInfo, ArticleInfo* articleInfo
 	const std::vector<CString>& candidates, const std::vector<int>& contributors,
 	bool cutover, const char* primaryMessageId)
 {
+#ifdef NZBGET_USE_RUST
+	int leadSnapshot = 0;
+	int nextLead = 0;
+	int donorCount = 0;
+	int newFileLead = fileInfo->GetDupeLeadDonorId();
+	nzbget_rs_pnd_dupe_fallback_compute_pin_lead_state(
+		contributors.empty() ? nullptr : contributors.data(),
+		contributors.size(),
+		fileInfo->GetDupeLeadDonorId(),
+		&leadSnapshot, &nextLead, &donorCount, &newFileLead);
+	articleInfo->SetDupeLeadSnapshot(leadSnapshot);
+	articleInfo->SetDupeNextLead(nextLead);
+	articleInfo->SetDupeDonorCount(donorCount);
+	fileInfo->SetDupeLeadDonorId(newFileLead);
+#else
 	// the distinct donors behind the candidates, in candidate order: [0] is
 	// the donor whose article the pinned slot 0 fetches, [1] the donor a
 	// demotion would rotate the lead to
@@ -767,6 +818,7 @@ void DupeArticleFallback::FinishPin(FileInfo* fileInfo, ArticleInfo* articleInfo
 	{
 		fileInfo->SetDupeLeadDonorId(donorIds[0]);
 	}
+#endif
 
 	*articleInfo->GetDupeSources() = OrderSources(candidates, cutover, primaryMessageId);
 	// OrderSources keeps the candidates' order (the primary goes last)
@@ -868,12 +920,23 @@ void DupeArticleFallback::VacateGhostLead(FileInfo* fileInfo, const RawNzbList& 
 	// pinned, so no article's lead matched it again and the lead rotation froze
 	int leadNzbId = fileInfo->GetDupeLeadDonorId();
 	bool barred = fileInfo->GetNzbInfo() && fileInfo->GetNzbInfo()->GetDupeBlockedDonors()->count(leadNzbId);
+#ifdef NZBGET_USE_RUST
+	bool inDonors = (leadNzbId != 0 && !barred) &&
+		std::find_if(donors.begin(), donors.end(),
+			[leadNzbId](NzbInfo* donor) { return donor->GetId() == leadNzbId; }) != donors.end();
+	if (nzbget_rs_pnd_dupe_fallback_should_vacate_ghost_lead(
+		leadNzbId, barred ? 1 : 0, inDonors ? 1 : 0) == 0)
+	{
+		return;
+	}
+#else
 	if (leadNzbId == 0 || (!barred &&
 		std::find_if(donors.begin(), donors.end(),
 			[leadNzbId](NzbInfo* donor) { return donor->GetId() == leadNzbId; }) != donors.end()))
 	{
 		return;
 	}
+#endif
 
 	fileInfo->SetDupeLeadDonorId(0);
 	fileInfo->SetDupeLeadFailures(0);
@@ -975,6 +1038,11 @@ RawNzbList DupeArticleFallback::CollectDonors(DownloadQueue* downloadQueue, NzbI
 		{
 			bool twin1 = twinDonors.count(donor1) > 0;
 			bool twin2 = twinDonors.count(donor2) > 0;
+#ifdef NZBGET_USE_RUST
+			return nzbget_rs_pnd_dupe_fallback_compare_donors(
+				twin1 ? 1 : 0, donor1->GetDupeScore(), donor1->GetId(),
+				twin2 ? 1 : 0, donor2->GetDupeScore(), donor2->GetId()) != 0;
+#else
 			if (twin1 != twin2)
 			{
 				return twin1;
@@ -982,6 +1050,7 @@ RawNzbList DupeArticleFallback::CollectDonors(DownloadQueue* downloadQueue, NzbI
 			return donor1->GetDupeScore() > donor2->GetDupeScore() ||
 				(donor1->GetDupeScore() == donor2->GetDupeScore() &&
 				 donor1->GetId() < donor2->GetId());
+#endif
 		});
 
 	return donors;

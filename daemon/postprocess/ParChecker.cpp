@@ -374,10 +374,14 @@ ParChecker::EStatus ParChecker::RunParCheckAll()
 			EStatus status = RunParCheck(std::move(fullParFilename));
 
 			// accumulate total status, the worst status has priority
+#ifdef NZBGET_USE_RUST
+			allStatus = (EStatus)nzbget_rs_pnd_parchecker_accumulate_worst_status((int)allStatus, (int)status);
+#else
 			if (allStatus > status)
 			{
 				allStatus = status;
 			}
+#endif
 		}
 	}
 
@@ -424,7 +428,13 @@ ParChecker::EStatus ParChecker::RunParCheck(std::string parFilename)
 	}
 
 	bool addedSplittedFragments = false;
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_pnd_parchecker_should_try_more_recovery(
+		m_hasDamagedFiles ? 1 : 0, IsStopped() ? 1 : 0, (int)res,
+		(int)Par2::eRepairNotPossible, 0, 0, 0) != 0)
+#else
 	if (m_hasDamagedFiles && !IsStopped() && res == Par2::eRepairNotPossible)
+#endif
 	{
 		addedSplittedFragments = AddSplittedFragments();
 		if (addedSplittedFragments)
@@ -451,13 +461,25 @@ ParChecker::EStatus ParChecker::RunParCheck(std::string parFilename)
 		}
 	}
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_pnd_parchecker_should_try_more_recovery(
+		m_hasDamagedFiles ? 1 : 0, IsStopped() ? 1 : 0, (int)res,
+		(int)Par2::eRepairNotPossible, 0, 0, 0) != 0)
+#else
 	if (m_hasDamagedFiles && !IsStopped() && res == Par2::eRepairNotPossible)
+#endif
 	{
 		res = static_cast<Par2::Result>(ProcessMorePars());
 	}
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_pnd_parchecker_should_try_more_recovery(
+		m_hasDamagedFiles ? 1 : 0, IsStopped() ? 1 : 0, (int)res,
+		(int)Par2::eRepairNotPossible, 1, (int)g_Options->GetParScan(), (int)Options::psDupe) != 0)
+#else
 	if (m_hasDamagedFiles && !IsStopped() && res == Par2::eRepairNotPossible &&
 		g_Options->GetParScan() == Options::psDupe)
+#endif
 	{
 		if (AddDupeFiles())
 		{
@@ -471,7 +493,13 @@ ParChecker::EStatus ParChecker::RunParCheck(std::string parFilename)
 
 	// a twin's par2 set (other block size, other parity level, same files) may hold
 	// the recovery blocks its own lacks
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_pnd_parchecker_should_try_more_recovery(
+		m_hasDamagedFiles ? 1 : 0, IsStopped() ? 1 : 0, (int)res,
+		(int)Par2::eRepairNotPossible, 0, 0, 0) != 0)
+#else
 	if (m_hasDamagedFiles && !IsStopped() && res == Par2::eRepairNotPossible)
+#endif
 	{
 		res = static_cast<Par2::Result>(ProcessTwinSet());
 	}
@@ -484,6 +512,48 @@ ParChecker::EStatus ParChecker::RunParCheck(std::string parFilename)
 
 	status = psFailed;
 
+#ifdef NZBGET_USE_RUST
+	int postVerifyAction = 0;
+	status = (EStatus)nzbget_rs_pnd_parchecker_eval_post_verify_action(
+		(int)res, (int)Par2::eSuccess, (int)Par2::eRepairPossible,
+		m_hasDamagedFiles ? 1 : 0, g_Options->GetParRepair() ? 1 : 0,
+		(int)psFailed, (int)psRepairNotNeeded, (int)psRepairPossible,
+		&postVerifyAction);
+	if (postVerifyAction == 0)
+	{
+		PrintMessage(Message::mkInfo, "Repair not needed for %s", m_infoName.c_str());
+	}
+	else if (postVerifyAction == 1)
+	{
+		PrintMessage(Message::mkInfo, "Repairing %s", m_infoName.c_str());
+
+		SaveSourceList();
+		m_progressLabel = std::string("Repairing ") + m_infoName.c_str();
+		m_fileProgress = 0;
+		m_stageProgress = 0;
+		m_processedCount = 0;
+		m_stage = ptRepairing;
+		m_filesToRepair = static_cast<int>(GetRepairer()->damagedfilecount + GetRepairer()->missingfilecount);
+		UpdateProgress();
+
+		res = GetRepairer()->Process(true);
+		if (res == Par2::eSuccess)
+		{
+			PrintMessage(Message::mkInfo, "Successfully repaired %s", m_infoName.c_str());
+			status = psRepaired;
+			StatDupeSources(&m_dupeSources);
+			DeleteLeftovers();
+		}
+		else
+		{
+			status = psFailed;
+		}
+	}
+	else if (postVerifyAction == 2)
+	{
+		PrintMessage(Message::mkInfo, "Repair possible for %s", m_infoName.c_str());
+	}
+#else
 	if (res == Par2::eSuccess || !m_hasDamagedFiles)
 	{
 		PrintMessage(Message::mkInfo, "Repair not needed for %s", m_infoName.c_str());
@@ -523,7 +593,35 @@ ParChecker::EStatus ParChecker::RunParCheck(std::string parFilename)
 			PrintMessage(Message::mkInfo, "Repair possible for %s", m_infoName.c_str());
 		}
 	}
+#endif
 
+#ifdef NZBGET_USE_RUST
+	int outcomeKind = 0;
+	int useCmdErr = 0;
+	status = (EStatus)nzbget_rs_pnd_parchecker_eval_cancel_or_fail_outcome(
+		IsStopped() ? 1 : 0, (int)m_stage, (int)ptRepairing, (int)status,
+		(int)psFailed, (int)psRepairPossible, m_errMsg.empty() ? 1 : 0, (int)res,
+		&outcomeKind, &useCmdErr);
+	if (outcomeKind == 1)
+	{
+		PrintMessage(Message::mkWarning, "Repair cancelled for %s", m_infoName.c_str());
+		m_errMsg = "repair cancelled";
+	}
+	else if (outcomeKind == 2)
+	{
+		PrintMessage(Message::mkWarning, "Par-check cancelled for %s", m_infoName.c_str());
+		m_errMsg = "par-check cancelled";
+	}
+	else if (outcomeKind == 3)
+	{
+		if (useCmdErr != 0)
+		{
+			m_errMsg = Par2CmdLineErrStr[res];
+		}
+		PrintMessage(Message::mkError, "Repair failed for %s: %s. Recovery files created by: %s",
+			m_infoName.c_str(), m_errMsg.c_str(), creator.empty() ? "<unknown program>" : creator.c_str());
+	}
+#else
 	if (IsStopped())
 	{
 		if (m_stage >= ptRepairing)
@@ -548,6 +646,7 @@ ParChecker::EStatus ParChecker::RunParCheck(std::string parFilename)
 		PrintMessage(Message::mkError, "Repair failed for %s: %s. Recovery files created by: %s",
 			m_infoName.c_str(), m_errMsg.c_str(), creator.empty() ? "<unknown program>" : creator.c_str());
 	}
+#endif
 
 	// A successful set does not cover unrelated files, and ignored damage
 	// can also produce psRepairNotNeeded. Keep only complete final targets
@@ -566,9 +665,16 @@ ParChecker::EStatus ParChecker::RunParCheck(std::string parFilename)
 			{
 				return FileSystem::SameFilename(previous.c_str(), targetName.c_str());
 			}), m_verifiedFiles.end());
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_pnd_parchecker_is_verified_complete_target(
+			(int)status, (int)psRepaired, (int)psRepairNotNeeded,
+			sourcefile->GetCompleteFile() ? 1 : 0,
+			sourcefile->GetCompleteFile() == sourcefile->GetTargetFile() ? 1 : 0) != 0)
+#else
 		if ((status == psRepaired || status == psRepairNotNeeded) &&
 			sourcefile->GetCompleteFile() &&
 			sourcefile->GetCompleteFile() == sourcefile->GetTargetFile())
+#endif
 		{
 			m_verifiedFiles.push_back(sourcefile->GetTargetFile()->FileName());
 		}
@@ -964,7 +1070,31 @@ bool ParChecker::AddDupeFiles()
 		if (!m_dupeSources.empty())
 		{
 			uint32_t wasBlocksMissing = GetRepairer()->missingblockcount;
+#ifdef NZBGET_USE_RUST
+			uint32_t totalExtraBlocksFound = 0;
+			for (DupeSource& dupeSource : m_dupeSources)
+			{
+				if (GetRepairer()->missingblockcount > 0 && FileSystem::DirectoryExists(dupeSource.GetDirectory()))
+				{
+					uint32_t wasBlocksMissing2 = GetRepairer()->missingblockcount;
+					bool oneAdded = AddExtraFiles(false, true, dupeSource.GetDirectory());
+					added |= oneAdded;
+					uint32_t blocksMissing2 = GetRepairer()->missingblockcount;
+					dupeSource.SetUsedBlocks(nzbget_rs_pnd_parchecker_calc_dupe_blocks_delta(
+						dupeSource.GetUsedBlocks(), wasBlocksMissing2, blocksMissing2,
+						wasBlocksMissing, &totalExtraBlocksFound));
+				}
+			}
 
+			if (totalExtraBlocksFound > 0)
+			{
+				PrintMessage(Message::mkInfo, "Found extra %u blocks in dupe sources", totalExtraBlocksFound);
+			}
+			else
+			{
+				PrintMessage(Message::mkInfo, "No extra blocks found in dupe sources");
+			}
+#else
 			for (DupeSource& dupeSource : m_dupeSources)
 			{
 				if (GetRepairer()->missingblockcount > 0 && FileSystem::DirectoryExists(dupeSource.GetDirectory()))
@@ -986,6 +1116,7 @@ bool ParChecker::AddDupeFiles()
 			{
 				PrintMessage(Message::mkInfo, "No extra blocks found in dupe sources");
 			}
+#endif
 		}
 	}
 
@@ -1081,6 +1212,26 @@ bool ParChecker::AddExtraFiles(bool onlyMissing, bool externalDir, const char* d
 			GetRepairer()->VerifyExtraFiles({ extraFile }, m_destDir, false);
 			GetRepairer()->UpdateVerificationResults();
 
+#ifdef NZBGET_USE_RUST
+			int fileAdded = 0;
+			int blockAdded = 0;
+			uint32_t blocksDelta = 0;
+			int registerParred = 0;
+			filesAdded = nzbget_rs_pnd_parchecker_eval_extra_file_step(
+				wasFilesMissing, GetRepairer()->missingfilecount,
+				wasBlocksMissing, GetRepairer()->missingblockcount,
+				externalDir ? 1 : 0, filesAdded ? 1 : 0,
+				&fileAdded, &blockAdded, &blocksDelta, &registerParred) != 0;
+			if (registerParred != 0)
+			{
+				PrintMessage(Message::mkInfo, "Found missing file %s", FileSystem::BaseFileName(extraFile.c_str()));
+				RegisterParredFile(FileSystem::BaseFileName(extraFile.c_str()));
+			}
+			else if (blockAdded != 0)
+			{
+				PrintMessage(Message::mkInfo, "Found %u missing blocks", blocksDelta);
+			}
+#else
 			bool fileAdded = wasFilesMissing > GetRepairer()->missingfilecount;
 			bool blockAdded = wasBlocksMissing > GetRepairer()->missingblockcount;
 
@@ -1095,6 +1246,7 @@ bool ParChecker::AddExtraFiles(bool onlyMissing, bool externalDir, const char* d
 			}
 
 			filesAdded |= fileAdded | blockAdded;
+#endif
 
 #ifdef NZBGET_USE_RUST
 			int abortReason = nzbget_rs_pup_parchecker_should_abort_extra_scan(
@@ -1251,6 +1403,51 @@ void ParChecker::SignalDone(std::string fileName, int available, int total)
 
 	++m_processedCount;
 
+#ifdef NZBGET_USE_RUST
+	bool ignore = (m_stage == ptVerifyingSources && available < total && !m_verifyingExtraFiles)
+		? Util::MatchFileExt(fileName.c_str(), g_Options->GetParIgnoreExt(), ",;")
+		: false;
+	int newHasDamaged = m_hasDamagedFiles ? 1 : 0;
+	int badBlocks = 0;
+	if (nzbget_rs_pnd_parchecker_eval_signal_done(
+		(int)m_stage, (int)ptVerifyingSources, available, total,
+		m_verifyingExtraFiles ? 1 : 0, ignore ? 1 : 0,
+		m_hasDamagedFiles ? 1 : 0, &newHasDamaged, &badBlocks) != 0)
+	{
+		m_hasDamagedFiles = newHasDamaged != 0;
+		bool fileExists = true;
+		for (Par2::Par2RepairerSourceFile* sourcefile : GetRepairer()->sourcefiles)
+		{
+			if (!sourcefile) 
+			{
+				continue;
+			}
+
+			std::string targetFileName = sourcefile->TargetFileName();
+			if (!sourcefile->GetTargetExists() && fileName == FileSystem::BaseFileName(targetFileName.c_str()))
+			{
+				fileExists = false;
+				break;
+			}
+		}
+
+		if (fileExists)
+		{
+			PrintMessage(Message::mkWarning, "File %s has %i bad block(s) of total %i block(s)%s",
+				fileName.c_str(), badBlocks, total, ignore ? ", ignoring" : "");
+		}
+		else
+		{
+			PrintMessage(Message::mkWarning, "File %s with %i block(s) is missing%s",
+				fileName.c_str(), total, ignore ? ", ignoring" : "");
+		}
+
+		if (!IsProcessedFile(fileName.c_str()))
+		{
+			m_processedFiles.push_back(std::move(fileName));
+		}
+	}
+#else
 	if (m_stage == ptVerifyingSources)
 	{
 		if (available < total && !m_verifyingExtraFiles)
@@ -1291,6 +1488,7 @@ void ParChecker::SignalDone(std::string fileName, int available, int total)
 			}
 		}
 	}
+#endif
 }
 
 /*
@@ -1414,6 +1612,31 @@ void ParChecker::DeleteLeftovers()
  */
 ParChecker::EFileStatus ParChecker::VerifyDataFile(Par2::DiskFile& diskFile, Par2::Par2RepairerSourceFile& sourceFile, int& availableBlocks)
 {
+#ifdef NZBGET_USE_RUST
+	Par2::VerificationPacket* packet = (m_stage == ptVerifyingSources && sourceFile.GetTargetExists())
+		? sourceFile.GetVerificationPacket()
+		: nullptr;
+	std::string filename = (packet && sourceFile.GetTargetFile())
+		? sourceFile.GetTargetFile()->FileName()
+		: std::string();
+	int64 fileSize = (!filename.empty()) ? FileSystem::FileSize(filename.c_str()) : -1;
+	int precond = nzbget_rs_pnd_parchecker_check_verify_data_file_preconditions(
+		(int)m_stage, (int)ptVerifyingSources, sourceFile.GetTargetExists() ? 1 : 0,
+		packet ? 1 : 0, fileSize, sourceFile.BlockCount());
+	if (precond == 1)
+	{
+		return fsSuccess;
+	}
+	if (precond == 2)
+	{
+		return fsUnknown;
+	}
+	if (precond == 3)
+	{
+		availableBlocks = 0;
+		return fsFailure;
+	}
+#else
 	if (m_stage != ptVerifyingSources)
 	{
 		// skipping verification for repaired files, assuming the files were correctly repaired,
@@ -1439,6 +1662,7 @@ ParChecker::EFileStatus ParChecker::VerifyDataFile(Par2::DiskFile& diskFile, Par
 		availableBlocks = 0;
 		return fsFailure;
 	}
+#endif
 
 	// find file status and CRC computed during download
 	uint32 downloadCrc;
@@ -1749,6 +1973,15 @@ bool ParChecker::DumbCalcFileRangeCrc(DiskFile& file, int64 start, int64 end, ui
 	Crc32 downloadCrc;
 
 	int cnt = buffer.Size();
+#ifdef NZBGET_USE_RUST
+	while (int needBytes = nzbget_rs_pnd_parchecker_calc_dumb_crc_read_size(
+		cnt, buffer.Size(), start, end))
+	{
+		cnt = (int)file.Read(buffer, needBytes);
+		downloadCrc.Append((uchar*)(char*)buffer, cnt);
+		start += cnt;
+	}
+#else
 	while (cnt == buffer.Size() && start < end)
 	{
 		int needBytes = end - start + 1 > buffer.Size() ? buffer.Size() : (int)(end - start + 1);
@@ -1756,6 +1989,7 @@ bool ParChecker::DumbCalcFileRangeCrc(DiskFile& file, int64 start, int64 end, ui
 		downloadCrc.Append((uchar*)(char*)buffer, cnt);
 		start += cnt;
 	}
+#endif
 
 	downloadCrcOut = downloadCrc.Finish();
 	return true;

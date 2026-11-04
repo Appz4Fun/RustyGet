@@ -458,6 +458,43 @@ void NzbFile::ProcessFiles()
 	{
 		fileInfo->MakeValidFilename();
 
+#ifdef NZBGET_USE_RUST
+		int fileCount = m_nzbInfo->GetFileCount();
+		int totalArticles = m_nzbInfo->GetTotalArticles();
+		int failedArticles = m_nzbInfo->GetFailedArticles();
+		int curFailedArticles = m_nzbInfo->GetCurrentFailedArticles();
+		int64 size = m_nzbInfo->GetSize();
+		int64 remSize = m_nzbInfo->GetRemainingSize();
+		int64 failedSize = m_nzbInfo->GetFailedSize();
+		int64 curFailedSize = m_nzbInfo->GetCurrentFailedSize();
+		int64 parSize = m_nzbInfo->GetParSize();
+		int64 parFailedSize = m_nzbInfo->GetParFailedSize();
+		int64 parCurFailedSize = m_nzbInfo->GetParCurrentFailedSize();
+		int remParCount = m_nzbInfo->GetRemainingParCount();
+		bool parFile = nzbget_rs_pnd_nzbfile_accumulate_file_stats(
+			fileInfo->GetFilename(),
+			fileInfo->GetTotalArticles(),
+			fileInfo->GetMissedArticles(),
+			fileInfo->GetSize(),
+			fileInfo->GetRemainingSize(),
+			fileInfo->GetMissedSize(),
+			&fileCount, &totalArticles, &failedArticles, &curFailedArticles,
+			&size, &remSize, &failedSize, &curFailedSize,
+			&parSize, &parFailedSize, &parCurFailedSize, &remParCount) != 0;
+		m_nzbInfo->SetFileCount(fileCount);
+		m_nzbInfo->SetTotalArticles(totalArticles);
+		m_nzbInfo->SetFailedArticles(failedArticles);
+		m_nzbInfo->SetCurrentFailedArticles(curFailedArticles);
+		m_nzbInfo->SetSize(size);
+		m_nzbInfo->SetRemainingSize(remSize);
+		m_nzbInfo->SetFailedSize(failedSize);
+		m_nzbInfo->SetCurrentFailedSize(curFailedSize);
+		fileInfo->SetParFile(parFile);
+		m_nzbInfo->SetParSize(parSize);
+		m_nzbInfo->SetParFailedSize(parFailedSize);
+		m_nzbInfo->SetParCurrentFailedSize(parCurFailedSize);
+		m_nzbInfo->SetRemainingParCount(remParCount);
+#else
 		BString<1024> loFileName = fileInfo->GetFilename();
 		for (char* p = loFileName; *p; p++) *p = tolower(*p); // convert string to lowercase
 		bool parFile = strstr(loFileName, ".par2");
@@ -479,6 +516,7 @@ void NzbFile::ProcessFiles()
 			m_nzbInfo->SetParCurrentFailedSize(m_nzbInfo->GetParFailedSize());
 			m_nzbInfo->SetRemainingParCount(m_nzbInfo->GetRemainingParCount() + 1);
 		}
+#endif
 	}
 
 	m_nzbInfo->UpdateMinMaxTime();

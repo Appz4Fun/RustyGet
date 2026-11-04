@@ -269,6 +269,32 @@ void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 			break;
 		}
 
+#ifdef NZBGET_USE_RUST
+		if (historyInfo->GetKind() == HistoryInfo::hkNzb || historyInfo->GetKind() == HistoryInfo::hkDup)
+		{
+			bool isHkNzb = historyInfo->GetKind() == HistoryInfo::hkNzb;
+			const char* hName = isHkNzb ? historyInfo->GetNzbInfo()->GetName() : historyInfo->GetDupInfo()->GetName();
+			const char* hKey = isHkNzb ? historyInfo->GetNzbInfo()->GetDupeKey() : historyInfo->GetDupInfo()->GetDupeKey();
+			int hDupeMode = isHkNzb ? (int)historyInfo->GetNzbInfo()->GetDupeMode() : (int)historyInfo->GetDupInfo()->GetDupeMode();
+			int hMarkStatus = isHkNzb ? (int)historyInfo->GetNzbInfo()->GetMarkStatus() : 0;
+			int hDupStatus = isHkNzb ? 0 : (int)historyInfo->GetDupInfo()->GetStatus();
+			int hDupeScore = isHkNzb ? historyInfo->GetNzbInfo()->GetDupeScore() : historyInfo->GetDupInfo()->GetDupeScore();
+			int outGood = 0;
+			if (nzbget_rs_pnd_dupecoord_check_history_good_or_score_skip(
+				isHkNzb ? 1 : 0, isHkNzb ? 0 : 1, hDupeMode, (int)dmForce,
+				hMarkStatus, (int)NzbInfo::ksGood, hDupStatus, (int)DupInfo::dsGood,
+				(int)DupInfo::dsSuccess, (int)nzbInfo->GetDupeMode(), (int)dmScore,
+				nzbInfo->GetDupeScore(), hDupeScore,
+				SameNameOrKey(hName, hKey, nzbInfo->GetName(), nzbInfo->GetDupeKey()) ? 1 : 0,
+				&outGood) != 0)
+			{
+				skip = true;
+				good = outGood != 0;
+				dupeName = hName;
+				break;
+			}
+		}
+#else
 		if (historyInfo->GetKind() == HistoryInfo::hkNzb &&
 			historyInfo->GetNzbInfo()->GetDupeMode() != dmForce &&
 			historyInfo->GetNzbInfo()->GetMarkStatus() == NzbInfo::ksGood &&
@@ -295,6 +321,7 @@ void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 			dupeName = historyInfo->GetDupInfo()->GetName();
 			break;
 		}
+#endif
 	}
 
 	// With HealthCheck=dupe (B43) the same content in history decides by what became
@@ -322,6 +349,26 @@ void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 		bool failed = false;
 		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
 		{
+#ifdef NZBGET_USE_RUST
+			bool isHkNzb = historyInfo->GetKind() == HistoryInfo::hkNzb;
+			bool isHkDup = historyInfo->GetKind() == HistoryInfo::hkDup;
+			if (isHkNzb || isHkDup)
+			{
+				uint32 fullH = isHkNzb ? historyInfo->GetNzbInfo()->GetFullContentHash() : historyInfo->GetDupInfo()->GetFullContentHash();
+				uint32 filtH = isHkNzb ? historyInfo->GetNzbInfo()->GetFilteredContentHash() : historyInfo->GetDupInfo()->GetFilteredContentHash();
+				int delStat = isHkNzb ? (int)historyInfo->GetNzbInfo()->GetDeleteStatus() : 0;
+				bool isDupeSucc = isHkNzb ? historyInfo->GetNzbInfo()->IsDupeSuccess() : false;
+				int dupStat = isHkDup ? (int)historyInfo->GetDupInfo()->GetStatus() : 0;
+				int itemFailed = 0;
+				int itemSucc = nzbget_rs_pnd_dupecoord_classify_same_content_history_item(
+					isHkNzb ? 1 : 0, isHkDup ? 1 : 0, same(fullH, filtH) ? 1 : 0,
+					delStat, (int)NzbInfo::dsDupe, (int)NzbInfo::dsCopy, (int)NzbInfo::dsManual,
+					isDupeSucc ? 1 : 0, dupStat, (int)DupInfo::dsSuccess, (int)DupInfo::dsGood,
+					(int)DupInfo::dsFailed, (int)DupInfo::dsBad, &itemFailed);
+				succeeded |= itemSucc != 0;
+				failed |= itemFailed != 0;
+			}
+#else
 			if (historyInfo->GetKind() == HistoryInfo::hkNzb)
 			{
 				NzbInfo* item = historyInfo->GetNzbInfo();
@@ -346,6 +393,7 @@ void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 					failed = true;
 				}
 			}
+#endif
 		}
 		if (!succeeded && !failed)
 		{
@@ -406,6 +454,23 @@ void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 				sameContent ? "exactly same content (the same posting, no new articles)" : good ? "good status" : "success status");
 		}
 
+#ifdef NZBGET_USE_RUST
+		int deleteDisk = 0;
+		int delStatus = nzbget_rs_pnd_dupecoord_resolve_skip_action(
+			nzbInfo->GetFeedId(), (int)nzbInfo->GetDupeHint(), (int)NzbInfo::dhNone,
+			sameContent ? 1 : 0, (int)NzbInfo::dsManual, (int)NzbInfo::dsCopy,
+			(int)NzbInfo::dsGood, &deleteDisk);
+		nzbInfo->SetDeleteStatus((NzbInfo::EDeleteStatus)delStatus);
+		if (deleteDisk != 0)
+		{
+			warn("%s", *message);
+			g_HistoryCoordinator->DeleteDiskFiles(nzbInfo);
+		}
+		else
+		{
+			nzbInfo->AddMessage(Message::mkWarning, message);
+		}
+#else
 		if (nzbInfo->GetFeedId() && nzbInfo->GetDupeHint() == NzbInfo::dhNone)
 		{
 			warn("%s", *message);
@@ -418,6 +483,7 @@ void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 			nzbInfo->SetDeleteStatus(sameContent ? NzbInfo::dsCopy : NzbInfo::dsGood);
 			nzbInfo->AddMessage(Message::mkWarning, message);
 		}
+#endif
 
 		if (returnBackup)
 		{
@@ -930,6 +996,15 @@ DupeCoordinator::EDupeStatus DupeCoordinator::GetDupeStatus(DownloadQueue* downl
 	// find duplicates in download queue
 	for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
 	{
+#ifdef NZBGET_USE_RUST
+		statuses = (EDupeStatus)nzbget_rs_pnd_dupecoord_accum_queue_dupe_status(
+			(int)statuses,
+			SameNameOrKey(name, dupeKey, nzbInfo->GetName(), nzbInfo->GetDupeKey()) ? 1 : 0,
+			nzbInfo->GetSuccessArticles(),
+			nzbInfo->GetFailedArticles(),
+			(int)dsDownloading,
+			(int)dsQueued);
+#else
 		if (SameNameOrKey(name, dupeKey, nzbInfo->GetName(), nzbInfo->GetDupeKey()))
 		{
 			if (nzbInfo->GetSuccessArticles() + nzbInfo->GetFailedArticles() > 0)
@@ -941,6 +1016,7 @@ DupeCoordinator::EDupeStatus DupeCoordinator::GetDupeStatus(DownloadQueue* downl
 				statuses = (EDupeStatus)(statuses | dsQueued);
 			}
 		}
+#endif
 	}
 
 	// find duplicates in history
@@ -968,6 +1044,18 @@ DupeCoordinator::EDupeStatus DupeCoordinator::GetDupeStatus(DownloadQueue* downl
 #endif
 		}
 
+#ifdef NZBGET_USE_RUST
+		if (historyInfo->GetKind() == HistoryInfo::hkDup)
+		{
+			statuses = (EDupeStatus)nzbget_rs_pnd_dupecoord_accum_dup_history_status(
+				(int)statuses,
+				SameNameOrKey(name, dupeKey, historyInfo->GetDupInfo()->GetName(), historyInfo->GetDupInfo()->GetDupeKey()) ? 1 : 0,
+				(int)historyInfo->GetDupInfo()->GetStatus(),
+				(int)DupInfo::dsSuccess, (int)DupInfo::dsGood,
+				(int)DupInfo::dsFailed, (int)DupInfo::dsBad,
+				(int)dsSuccess, (int)dsFailure);
+		}
+#else
 		if (historyInfo->GetKind() == HistoryInfo::hkDup &&
 			SameNameOrKey(name, dupeKey, historyInfo->GetDupInfo()->GetName(), historyInfo->GetDupInfo()->GetDupeKey()))
 		{
@@ -982,6 +1070,7 @@ DupeCoordinator::EDupeStatus DupeCoordinator::GetDupeStatus(DownloadQueue* downl
 				statuses = (EDupeStatus)(statuses | dsFailure);
 			}
 		}
+#endif
 	}
 
 	return statuses;

@@ -35,15 +35,10 @@ static std::string CopyRustPathText(NzbgetRsBuf buf)
 #include "Util.h"
 #include "Log.h"
 
-#ifdef WIN32
-#include "utf8.h"
-#endif
-
 const char* RESERVED_DEVICE_NAMES[] = { "CON", "PRN", "AUX", "NUL",
 	"COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
 	"LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", NULL };
 
-#ifndef WIN32
 // Keep the platform's stat ABI and errno behavior (Rust metadata can use
 // statx, whose availability probe changes errno, and different time widths).
 static int RustStat(const char* path)
@@ -64,22 +59,6 @@ CString FileSystem::GetLastErrorMessage()
 	nzbget_rs_error_message(errno, msg);
 	return *msg;
 }
-#else
-CString FileSystem::GetLastErrorMessage()
-{
-	BString<1024> msg;
-	strerror_r(errno, msg, msg.Capacity());
-
-	if (!errno)
-	{
-		FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-			nullptr, GetLastError(), MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-			msg, 1024, nullptr);
-	}
-
-	return *msg;
-}
-#endif
 
 void FileSystem::NormalizePathSeparators(char* path)
 {
@@ -91,110 +70,16 @@ std::optional<std::string> FileSystem::GetRealPath(const std::string& path)
 {
 	if (path.empty()) return std::nullopt;
 
-#ifdef WIN32
-	auto res = Utf8::Utf8ToWide(path);
-	if (!res.has_value()) return std::nullopt;
-
-	std::wstring wpath = std::move(res.value());
-
-	if (wpath.size() > MAX_DIR_PATH && std::wcsncmp(wpath.c_str(), L"\\\\", 2) == 0)
-	{
-		wpath = L"\\\\?\\UNC" + wpath;
-	}
-	else if (wpath.size() > MAX_DIR_PATH)
-	{
-		wpath = L"\\\\?\\" + wpath;
-	}
-
-	DWORD len = GetFullPathNameW(wpath.c_str(), 0, nullptr, nullptr);
-	if (len == 0) return std::nullopt;
-
-	std::wstring buffer(len, '\0');
-	len = GetFullPathNameW(wpath.c_str(), len, &buffer[0], nullptr);
-	if (len == 0) return std::nullopt;
-
-	return Utf8::WideToUtf8(buffer);
-#else
 	if (char* realPath = realpath(path.c_str(), nullptr))
 	{
 		std::string res = realPath;
 		free(realPath);
 		return res;
 	}
-#endif
 
 	return std::nullopt;
 }
 
-#ifdef WIN32
-
-const size_t FileSystem::MAX_DIR_PATH = 248;
-
-bool FileSystem::ForceDirectories(const char* path, CString& errmsg)
-{
-	errmsg.Clear();
-	BString<1024> normPath = path;
-	NormalizePathSeparators(normPath);
-	int len = strlen(normPath);
-	if (len > 3 && normPath[len - 1] == PATH_SEPARATOR)
-	{
-		normPath[len - 1] = '\0';
-	}
-
-	if (DirectoryExists(normPath))
-	{
-		return true;
-	}
-		
-	if (FileExists(normPath))
-	{
-		errmsg.Format("path %s is not a directory", *normPath);
-		return false;
-	}
-
-	if (strlen(normPath) > 2)
-	{
-		BString<1024> parentPath = *normPath;
-		char* p = (char*)strrchr(parentPath, PATH_SEPARATOR);
-		// a directory right under "/" has the root as its parent, which exists
-		if (p && p != (char*)parentPath)
-		{
-			if (p - parentPath == 2 && parentPath[1] == ':' && strlen(parentPath) > 2)
-			{
-				parentPath[3] = '\0';
-			}
-			else
-			{
-				*p = '\0';
-			}
-			if (strlen(parentPath) != strlen(path) && !ForceDirectories(parentPath, errmsg))
-			{
-				return false;
-			}
-		}
-
-		if (_wmkdir(UtfPathToWidePath(normPath)) != 0 && errno != EEXIST)
-		{
-			errmsg.Format("could not create directory %s: %s", *normPath, *GetLastErrorMessage());
-			return false;
-		}
-
-		if (DirectoryExists(normPath))
-		{
-			return true;
-		}
-
-		if (FileExists(normPath))
-		{
-			errmsg.Format("path %s is not a directory", *normPath);
-			return false;
-		}
-	}
-
-	errmsg.Format("path %s does not exist and could not be created", *normPath);
-	return false;
-}
-#else
 bool FileSystem::ForceDirectories(const char* path, CString& errmsg)
 {
 	// rust/src/fsops.rs
@@ -208,7 +93,6 @@ bool FileSystem::ForceDirectories(const char* path, CString& errmsg)
 	nzbget_rs_free(msg);
 	return ok;
 }
-#endif
 
 bool FileSystem::CreateHardLink(const char *from, const char *to, CString& errmsg)
 {
@@ -218,43 +102,25 @@ bool FileSystem::CreateHardLink(const char *from, const char *to, CString& errms
 		return false;
 	}
 
-#ifdef WIN32
-	if (!CreateHardLinkW(UtfPathToWidePath(to), UtfPathToWidePath(from), nullptr))
-	{
-		errmsg = GetLastErrorMessage();
-		return false;
-	}
-#else
 	if (link(from, to) != 0)
 	{
 		errmsg = GetLastErrorMessage();
 		return false;
 	}
-#endif
 
 	return true;
 }
 
 CString FileSystem::GetCurrentDirectory()
 {
-#ifdef WIN32
-	wchar_t unistr[1024];
-	::GetCurrentDirectoryW(1024, unistr);
-	return WidePathToUtfPath(unistr);
-#else
 	char str[1024];
 	getcwd(str, 1024);
 	return str;
-#endif
 }
 
 bool FileSystem::SetCurrentDirectory(const char* dirFilename)
 {
-#ifdef WIN32
-	return ::SetCurrentDirectoryW(UtfPathToWidePath(dirFilename));
-#else
 	return chdir(dirFilename) == 0;
-#endif
 }
 
 bool FileSystem::DirEmpty(const char* dirFilename)
@@ -329,29 +195,6 @@ bool FileSystem::AllocateFile(const char* filename, int64 size, [[maybe_unused]]
 {
 	errmsg.Clear();
 	bool ok = false;
-#ifdef WIN32
-	HANDLE hFile = CreateFileW(UtfPathToWidePath(filename), GENERIC_WRITE, FILE_SHARE_READ, 0, CREATE_NEW, 0, nullptr);
-	if (hFile == INVALID_HANDLE_VALUE)
-	{
-		errno = 0; // wanting error message from WinAPI instead of C-lib 
-		errmsg = GetLastErrorMessage();
-		return false;
-	}
-
-	if (sparse)
-	{
-		// try to create sparse file (supported only on NTFS partitions); it may fail but that's OK.
-		DWORD dwBytesReturned;
-		DeviceIoControl(hFile, FSCTL_SET_SPARSE, nullptr, 0, nullptr, 0, &dwBytesReturned, nullptr);
-	}
-
-	LARGE_INTEGER size64;
-	size64.QuadPart = size;
-	SetFilePointerEx(hFile, size64, nullptr, FILE_END);
-	SetEndOfFile(hFile);
-	CloseHandle(hFile);
-	ok = true;
-#else
 	// create file; DiskFile opens it close-on-exec, so a script started by
 	// another thread at this moment does not inherit the descriptor
 	{
@@ -403,21 +246,12 @@ bool FileSystem::AllocateFile(const char* filename, int64 size, [[maybe_unused]]
 			errmsg = "created file has wrong size";
 		}
 	}
-#endif
 	return ok;
 }
 
 bool FileSystem::TruncateFile(const char* filename, int size)
 {
-#ifdef WIN32
-	FILE* file = _wfopen(UtfPathToWidePath(filename), WString(FOPEN_RBP));
-	fseek(file, size, SEEK_SET);
-	bool ok = SetEndOfFile((HANDLE)_get_osfhandle(_fileno(file))) != 0;
-	fclose(file);
-	return ok;
-#else
 	return truncate(filename, size) == 0;
-#endif
 }
 
 char* FileSystem::BaseFileName(const char* filename)
@@ -465,7 +299,6 @@ std::string FileSystem::SanitizeRelativePath(std::string_view path)
 	return CopyRustPathText(nzbget_rs_path_text(2, path.data(), path.size(), 0));
 }
 
-#ifndef WIN32
 CString FileSystem::MakeUniqueFilename(const char* destDir, const char* basename)
 {
 	// rust/src/fsops.rs
@@ -474,61 +307,15 @@ CString FileSystem::MakeUniqueFilename(const char* destDir, const char* basename
 	nzbget_rs_free(buf);
 	return result;
 }
-#else
-CString FileSystem::MakeUniqueFilename(const char* destDir, const char* basename)
-{
-	CString result;
-	result.Format("%s%c%s", destDir, PATH_SEPARATOR, basename);
-
-	int dupeNumber = 0;
-	while (FileExists(result))
-	{
-		dupeNumber++;
-
-		const char* extension = strrchr(basename, '.');
-		if (extension && extension != basename)
-		{
-			BString<1024> filenameWithoutExt = basename;
-			int end = (int)(extension - basename);
-			filenameWithoutExt[end < 1024 ? end : 1024-1] = '\0';
-
-			if (!strcasecmp(extension, ".par2"))
-			{
-				char* volExtension = strrchr(filenameWithoutExt, '.');
-				if (volExtension && volExtension != filenameWithoutExt &&
-					!strncasecmp(volExtension, ".vol", 4))
-				{
-					*volExtension = '\0';
-					extension = basename + (volExtension - filenameWithoutExt);
-				}
-			}
-
-			result.Format("%s%c%s.duplicate%d%s", destDir, PATH_SEPARATOR,
-				*filenameWithoutExt, dupeNumber, extension);
-		}
-		else
-		{
-			result.Format("%s%c%s.duplicate%d", destDir, PATH_SEPARATOR,
-				basename, dupeNumber);
-		}
-	}
-
-	return result;
-}
-#endif
 
 bool FileSystem::MoveFile(const char* srcFilename, const char* dstFilename)
 {
-#ifdef WIN32
-	return _wrename(UtfPathToWidePath(srcFilename), UtfPathToWidePath(dstFilename)) == 0;
-#else
 	bool ok = rename(srcFilename, dstFilename) == 0;
 	if (!ok && errno == EXDEV)
 	{
 		ok = CopyFile(srcFilename, dstFilename) && DeleteFile(srcFilename);
 	}
 	return ok;
-#endif
 }
 
 bool FileSystem::CopyFile(const char* srcFilename, const char* dstFilename)
@@ -579,91 +366,35 @@ bool FileSystem::CopyFile(const char* srcFilename, const char* dstFilename)
 
 bool FileSystem::DeleteFile(const char* filename)
 {
-#ifdef WIN32
-	SetFileAttributesW(UtfPathToWidePath(filename), FILE_ATTRIBUTE_NORMAL);
-	return _wremove(UtfPathToWidePath(filename)) == 0;
-#else
 	return remove(filename) == 0;
-#endif
 }
 
-#ifndef WIN32
 bool FileSystem::FileExists(const char* filename)
 {
 	// rust/src/fsops.rs (stat, a regular file)
 	return nzbget_rs_file_exists(filename, RustStat) != 0;
 }
-#else
-bool FileSystem::FileExists(const char* filename)
-{
-	// we use a native windows call because c-lib function "stat" fails on windows if file date is invalid
-	WIN32_FIND_DATAW findData;
-	HANDLE handle = FindFirstFileW(UtfPathToWidePath(filename), &findData);
-	if (handle != INVALID_HANDLE_VALUE)
-	{
-		bool exists = (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
-		FindClose(handle);
-		return exists;
-	}
-	return false;
-}
-#endif
 
-#ifndef WIN32
 bool FileSystem::DirectoryExists(const char* dirFilename)
 {
 	// rust/src/fsops.rs (stat, a directory)
 	return nzbget_rs_directory_exists(dirFilename, RustStat) != 0;
 }
-#else
-bool FileSystem::DirectoryExists(const char* dirFilename)
-{
-	WIN32_FIND_DATAW findData;
-	HANDLE handle = FindFirstFileW(UtfPathToWidePath(
-		BString<1024>(dirFilename && dirFilename[strlen(dirFilename) - 1] == PATH_SEPARATOR ? "%s*" : "%s\\*", dirFilename)),
-		&findData);
-	if (handle != INVALID_HANDLE_VALUE)
-	{
-		bool exists = ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) ||
-			(dirFilename[0] != '\0' && dirFilename[1] == ':' && (dirFilename[2] == '\0' || dirFilename[3] == '\0'));
-		FindClose(handle);
-		return exists;
-	}
-	if (GetLastError() == ERROR_FILE_NOT_FOUND)
-	{
-		// path exists but doesn't have any file/directory entries - possible only for root paths (e. g. "C:\")
-		return true;
-	}
-	return false;
-}
-#endif
 
 bool FileSystem::CreateDirectory(const char* dirFilename)
 {
-#ifdef WIN32
-	_wmkdir(UtfPathToWidePath(dirFilename));
-#else
 	mkdir(dirFilename, S_DIRMODE);
-#endif
 	return DirectoryExists(dirFilename);
 }
 
 bool FileSystem::CreateDirectoryExclusive(const char* dirFilename)
 {
-#ifdef WIN32
-	return _wmkdir(UtfPathToWidePath(dirFilename)) == 0;
-#else
 	return mkdir(dirFilename, S_DIRMODE) == 0;
-#endif
 }
 
 bool FileSystem::RemoveDirectory(const char* dirFilename)
 {
-#ifdef WIN32
-	return _wrmdir(UtfPathToWidePath(dirFilename)) == 0;
-#else
 	return rmdir(dirFilename) == 0;
-#endif
 }
 
 
@@ -702,20 +433,6 @@ enum class PathType
 
 PathType GetPathTypeNoFollow(const char* filename)
 {
-#ifdef WIN32
-	DWORD attributes = GetFileAttributesW(FileSystem::UtfPathToWidePath(filename));
-	if (attributes == INVALID_FILE_ATTRIBUTES)
-	{
-		return PathType::Error;
-	}
-
-	const bool directory = (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-	if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
-	{
-		return directory ? PathType::DirectoryLink : PathType::Link;
-	}
-	return directory ? PathType::Directory : PathType::File;
-#else
 	struct stat buffer;
 	if (lstat(filename, &buffer) != 0)
 	{
@@ -726,19 +443,11 @@ PathType GetPathTypeNoFollow(const char* filename)
 		return PathType::Link;
 	}
 	return S_ISDIR(buffer.st_mode) ? PathType::Directory : PathType::File;
-#endif
 }
 
 bool DeleteLink(const char* filename, PathType pathType)
 {
-#ifdef WIN32
-	if (pathType == PathType::DirectoryLink)
-	{
-		return FileSystem::RemoveDirectory(filename);
-	}
-#else
 	(void)pathType;
-#endif
 	return FileSystem::DeleteFile(filename);
 }
 
@@ -886,38 +595,14 @@ bool FileSystem::DeleteDirectoryWithContent(const char* dirFilename, CString& er
 
 int64 FileSystem::FileSize(const char* filename)
 {
-#ifdef WIN32
-	// we use a native windows call because c-lib function "stat" fails on windows if file date is invalid
-	WIN32_FIND_DATAW findData;
-	HANDLE handle = FindFirstFileW(UtfPathToWidePath(filename), &findData);
-	if (handle != INVALID_HANDLE_VALUE)
-	{
-		int64 size = ((int64)(findData.nFileSizeHigh) << 32) + findData.nFileSizeLow;
-		FindClose(handle);
-		return size;
-	}
-	return -1;
-#else
 	struct stat buffer;
 	// stat does not promise usable output on failure. A watchdog checking an
 	// output file before it exists must not mistake that data for a huge file.
 	return stat(filename, &buffer) == 0 ? buffer.st_size : -1;
-#endif
 }
 
 std::optional<FileSystem::DiskState> FileSystem::GetDiskState(const char* path)
 {
-#ifdef WIN32
-	ULARGE_INTEGER freeBytesAvailable;
-	ULARGE_INTEGER totalNumberOfBytes;
-
-	if (GetDiskFreeSpaceExW(UtfPathToWidePath(path), &freeBytesAvailable, &totalNumberOfBytes, nullptr))
-	{
-		int64 available = Util::SafeIntCast<uint64, int64>(freeBytesAvailable.QuadPart);
-		int64 total = Util::SafeIntCast<uint64, int64>(totalNumberOfBytes.QuadPart);
-		return FileSystem::DiskState{ available, total };
-	}
-#else
 	struct statvfs diskdata;
 	if (!statvfs(path, &diskdata))
 	{
@@ -925,7 +610,6 @@ std::optional<FileSystem::DiskState> FileSystem::GetDiskState(const char* path)
 		int64 total = Util::SafeIntCast<uint64, int64>(diskdata.f_blocks * diskdata.f_frsize);
 		return FileSystem::DiskState{ available, total };
 	}
-#endif
 	return std::nullopt;
 }
 
@@ -966,7 +650,6 @@ bool FileSystem::RenameBak(const char* filename, const char* bakPart, bool remov
 	return MoveFile(filename, newName);
 }
 
-#ifndef WIN32
 CString FileSystem::ExpandHomePath(const char* filename)
 {
 	// rust/src/fsops.rs; the home directory looked up as before
@@ -988,15 +671,9 @@ CString FileSystem::ExpandHomePath(const char* filename)
 	nzbget_rs_free(buf);
 	return result;
 }
-#endif
 
 CString FileSystem::ExpandFileName(const char* filename)
 {
-#ifdef WIN32
-	wchar_t unistr[1024];
-	_wfullpath(unistr, UtfPathToWidePath(filename), 1024);
-	return WidePathToUtfPath(unistr);
-#else
 	CString result;
 	result.Reserve(1024 - 1);
 	size_t skipDotSlash = 0;
@@ -1011,7 +688,6 @@ CString FileSystem::ExpandFileName(const char* filename)
 		result = filename;
 	}
 	return result;
-#endif
 }
 
 CString FileSystem::GetExeFileName(const char* argv0)
@@ -1020,9 +696,6 @@ CString FileSystem::GetExeFileName(const char* argv0)
 	exename.Reserve(1024 - 1);
 	exename[1024 - 1] = '\0';
 
-#ifdef WIN32
-	GetModuleFileName(nullptr, exename, 1024);
-#else
 	// Linux
 	int r = readlink("/proc/self/exe", exename, 1024 - 1);
 	if (r > 0)
@@ -1039,91 +712,17 @@ CString FileSystem::GetExeFileName(const char* argv0)
 	}
 
 	exename = ExpandFileName(argv0);
-#endif
 
 	return exename;
 }
 
 bool FileSystem::SameFilename(const char* filename1, const char* filename2)
 {
-#ifdef WIN32
-	return strcasecmp(filename1, filename2) == 0;
-#else
 	return strcmp(filename1, filename2) == 0;
-#endif
 }
-
-#ifdef WIN32
-CString FileSystem::MakeCanonicalPath(const char* path)
-{
-	int len = strlen(path);
-
-	if (!strncmp("\\\\?\\", path, 4) || len == 0)
-	{
-		return path;
-	}
-
-	std::vector<CString> components = Util::SplitStr(path, "\\/");
-	for (uint32 i = 1; i < components.size(); i++)
-	{
-		if (!strcmp(components[i], ".."))
-		{
-			components.erase(components.begin() + i - 1, components.begin() + i + 1);
-			i -= 2;
-		}
-		else if (!strcmp(components[i], "."))
-		{
-			components.erase(components.begin() + i);
-			i--;
-		}
-	}
-
-	StringBuilder result;
-	result.Reserve(strlen(path));
-
-	if (!strncmp("\\\\", path, 2))
-	{
-		result.Append("\\\\");
-	}
-
-	bool first = true;
-	for (CString& comp : components)
-	{
-		if (comp.Length() > 0)
-		{
-			if (!first)
-			{
-				result.Append("\\");
-			}
-			result.Append(comp);
-			first = false;
-		}
-	}
-
-	if ((path[len - 1] == '\\' || path[len - 1] == '/' ||
-		(len > 3 && !strcmp(path + len - 3, "\\..")) ||
-		(len > 2 && !strcmp(path + len - 2, "\\.")))
-		&&
-		result[result.Length() - 1] != '\\')
-	{
-		result.Append("\\");
-	}
-
-	return *result;
-}
-#endif
 
 bool FileSystem::FlushFileBuffers(int fileDescriptor, CString& errmsg)
 {
-#ifdef WIN32
-	BOOL ok = ::FlushFileBuffers((HANDLE)_get_osfhandle(fileDescriptor));
-	if (!ok)
-	{
-		errno = 0; // wanting error message from WinAPI instead of C-lib 
-		errmsg = GetLastErrorMessage();
-	}
-	return ok;
-#else
 #ifdef HAVE_FULLFSYNC
 	int ret = fcntl(fileDescriptor, F_FULLFSYNC) == -1 ? 1 : 0;
 #elif HAVE_FDATASYNC
@@ -1136,22 +735,10 @@ bool FileSystem::FlushFileBuffers(int fileDescriptor, CString& errmsg)
 		errmsg = GetLastErrorMessage();
 	}
 	return ret == 0;
-#endif
 }
 
 bool FileSystem::FlushDirBuffers(const char* filename, CString& errmsg)
 {
-#ifdef WIN32
-	FILE* file = _wfopen(UtfPathToWidePath(filename), WString(FOPEN_RBP));
-	if (!file)
-	{
-		errmsg = GetLastErrorMessage();
-		return false;
-	}
-	bool ok = FlushFileBuffers(fileno(file), errmsg);
-	fclose(file);
-	return ok;
-#else
 	BString<1024> parentPath = filename;
 	char* p = (char*)strrchr(parentPath, PATH_SEPARATOR);
 	if (p)
@@ -1169,10 +756,7 @@ bool FileSystem::FlushDirBuffers(const char* filename, CString& errmsg)
 	bool ok = FlushFileBuffers(dir.GetFileDescriptor(), errmsg);
 	dir.Close();
 	return ok;
-#endif
 }
-
-#ifndef WIN32
 
 mode_t FileSystem::uMask;
 
@@ -1242,88 +826,10 @@ bool FileSystem::RestorePermissions(const char* filename, mode_t mode)
 	return false;
 }
 
-#endif
-
-#ifdef WIN32
-bool FileSystem::NeedLongPath(const char* path)
-{
-	bool alreadyLongPath = !strncmp(path, "\\\\?\\", 4);
-	if (alreadyLongPath)
-	{
-		return false;
-	}
-
-	if (strlen(path) > 260 - 14)
-	{
-		return true;
-	}
-
-	Tokenizer tok(path, "\\/");
-	for (int partNo = 0; const char* part = tok.Next(); partNo++)
-	{
-		// check if the file part starts with a reserved device name
-		for (const char** ptr = RESERVED_DEVICE_NAMES; const char* reserved = *ptr; ptr++)
-		{
-			int len = strlen(reserved);
-			if (!strncasecmp(part, reserved, len) && (part[len] == '.' || part[len] == '\0'))
-			{
-				return true;
-			}
-		}			
-
-		// check if the file part contains reserved characters
-		for (const char* p = part; *p; p++)
-		{
-			if (ReservedChar(*p) && !(partNo == 0 && p == part + 1 && *p == ':'))
-			{
-				return true;
-			}
-		}
-	}
-
-	return false;
-}
-#endif
-
 CString FileSystem::MakeExtendedPath(const char* path, [[maybe_unused]] bool force)
 {
-#ifdef WIN32
-	if (force || NeedLongPath(path))
-	{
-		CString canonicalPath = MakeCanonicalPath(path);
-		BString<1024> longpath;
-		if (canonicalPath[0] == '\\' && canonicalPath[1] == '\\')
-		{
-			// UNC path
-			longpath.Format("\\\\?\\UNC\\%s", canonicalPath + 2);
-		}
-		else
-		{
-			// local path
-			longpath.Format("\\\\?\\%s", std::move(canonicalPath));
-		}
-		return *longpath;
-	}
-	else
-#endif
-	{
-		return path;
-	}
+	return path;
 }
-
-#ifdef WIN32
-WString FileSystem::UtfPathToWidePath(const char* utfpath)
-{
-	return *FileSystem::MakeExtendedPath(utfpath, false);
-}
-
-CString FileSystem::WidePathToUtfPath(const wchar_t* wpath)
-{
-	char utfstr[1024];
-	int copied = WideCharToMultiByte(CP_UTF8, 0, wpath, -1, utfstr, 1024, nullptr, nullptr);
-	return utfstr;
-}
-#endif
 
 
 DirBrowser::DirBrowser(const char* path, bool snapshot) :
@@ -1340,29 +846,16 @@ DirBrowser::DirBrowser(const char* path, bool snapshot) :
 	}
 	else
 	{
-#ifdef WIN32
-		BString<1024> mask("%s%c*.*", path, PATH_SEPARATOR);
-		m_file = FindFirstFileW(FileSystem::UtfPathToWidePath(mask), &m_findData);
-		m_first = true;
-#else
 		m_dir = opendir(path);
-#endif
 	}
 }
 
 DirBrowser::~DirBrowser()
 {
-#ifdef WIN32
-	if (m_file != INVALID_HANDLE_VALUE)
-	{
-		FindClose(m_file);
-	}
-#else
 	if (m_dir)
 	{
 		closedir(m_dir);
 	}
-#endif
 }
 
 const char* DirBrowser::InternNext()
@@ -1373,23 +866,6 @@ const char* DirBrowser::InternNext()
 	}
 	else
 	{
-#ifdef WIN32
-		bool ok = false;
-		if (m_first)
-		{
-			ok = m_file != INVALID_HANDLE_VALUE;
-			m_first = false;
-		}
-		else
-		{
-			ok = FindNextFileW(m_file, &m_findData) != 0;
-		}
-		if (ok)
-		{
-			m_filename = FileSystem::WidePathToUtfPath(m_findData.cFileName);
-			return m_filename;
-		}
-#else
 		if (m_dir)
 		{
 			m_findData = readdir(m_dir);
@@ -1398,7 +874,6 @@ const char* DirBrowser::InternNext()
 				return m_findData->d_name;
 			}
 		}
-#endif
 		return nullptr;
 	}
 }
@@ -1426,9 +901,6 @@ bool DiskFile::Open(const char* filename, EOpenMode mode)
 {
 	const char* strmode = mode == omRead ? FOPEN_RB : mode == omReadWrite ?
 		FOPEN_RBP : mode == omWrite ? FOPEN_WB : FOPEN_AB;
-#ifdef WIN32
-	m_file = _wfopen(FileSystem::UtfPathToWidePath(filename), WString(strmode));
-#else
 	// Close-on-exec from the start: the scripts nzbget starts don't inherit
 	// the log, the queue state files and the articles being written. (The
 	// "e" letter of fopen does that on glibc, while macOS ignores it.)
@@ -1446,7 +918,6 @@ bool DiskFile::Open(const char* filename, EOpenMode mode)
 		close(fd);
 		errno = error;
 	}
-#endif
 	return m_file;
 }
 

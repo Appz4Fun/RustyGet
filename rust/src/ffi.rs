@@ -29027,3 +29027,148 @@ pub unsafe extern "C" fn nzbget_rs_nserv_format_nzb_file(
     ))
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_binrpc_init_message_base(
+    out: *mut u8,
+    request_type: c_int,
+    struct_size: c_int,
+    username: *const c_char,
+    password: *const c_char,
+) {
+    if out.is_null() {
+        return;
+    }
+    let slice = &mut *out.cast::<[u8; crate::binrpc::BASE_SIZE]>();
+    crate::binrpc::init_message_base(
+        slice,
+        request_type,
+        struct_size,
+        input(username),
+        input(password),
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_binrpc_init_download_request(
+    out: *mut u8,
+    username: *const c_char,
+    password: *const c_char,
+    nzb_filename: *const c_char,
+    nzb_content: *const c_char,
+    is_url: c_int,
+    category: *const c_char,
+    add_first: c_int,
+    add_paused: c_int,
+    priority: c_int,
+    dupe_score: c_int,
+    dupe_mode: c_int,
+    dupe_key: *const c_char,
+    trailing_len: c_int,
+    auto_category: c_int,
+) {
+    if out.is_null() {
+        return;
+    }
+    let slice = &mut *out.cast::<[u8; crate::binrpc::DOWNLOAD_REQUEST_SIZE]>();
+    crate::binrpc::init_download_request(
+        slice,
+        input(username),
+        input(password),
+        input(nzb_filename),
+        input(nzb_content),
+        is_url != 0,
+        input(category),
+        add_first != 0,
+        add_paused != 0,
+        priority,
+        dupe_score,
+        dupe_mode,
+        input(dupe_key),
+        trailing_len,
+        auto_category != 0,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_binrpc_encode_edit_queue_trailing(
+    text: *const c_char,
+    ids: *const i32,
+    ids_len: usize,
+    names: *const *const c_char,
+    names_len: usize,
+    out_text_len: *mut c_int,
+    out_names_len: *mut c_int,
+) -> RsBuf {
+    let text_opt = if text.is_null() {
+        None
+    } else {
+        Some(input(text))
+    };
+    let ids_slice = if ids.is_null() || ids_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(ids, ids_len)
+    };
+    let mut name_slices = Vec::with_capacity(if names.is_null() { 0 } else { names_len });
+    if !names.is_null() {
+        for i in 0..names_len {
+            name_slices.push(input(*names.add(i)));
+        }
+    }
+    let (buf, tlen, nlen) =
+        crate::binrpc::encode_edit_queue_trailing(text_opt, ids_slice, &name_slices);
+    if !out_text_len.is_null() {
+        *out_text_len = tlen;
+    }
+    if !out_names_len.is_null() {
+        *out_names_len = nlen;
+    }
+    into_buf(buf)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_binrpc_file_listing_from_wire(
+    data: *const c_char,
+    len: usize,
+    nr_nzb: u32,
+    nr_ppp: u32,
+    nr_files: u32,
+    has_pattern: c_int,
+) -> RsBuf {
+    let slice = if data.is_null() || len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(data.cast::<u8>(), len)
+    };
+    into_buf(crate::binrpc::file_listing_from_wire(
+        slice,
+        nr_nzb,
+        nr_ppp,
+        nr_files,
+        has_pattern != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_binrpc_group_listing_from_wire(
+    data: *const c_char,
+    len: usize,
+    nr_nzb: u32,
+    nr_ppp: u32,
+    nr_files: u32,
+    has_pattern: c_int,
+) -> RsBuf {
+    let slice = if data.is_null() || len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(data.cast::<u8>(), len)
+    };
+    into_buf(crate::binrpc::group_listing_from_wire(
+        slice,
+        nr_nzb,
+        nr_ppp,
+        nr_files,
+        has_pattern != 0,
+    ))
+}
+

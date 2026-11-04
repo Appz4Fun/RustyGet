@@ -101,15 +101,12 @@ bool RemoteClient::InitConnection()
 
 void RemoteClient::InitMessageBase(SNzbRequestBase* messageBase, int request, int size)
 {
-	messageBase->m_signature	= htonl(NZBMESSAGE_SIGNATURE);
-	messageBase->m_type = htonl(request);
-	messageBase->m_structSize = htonl(size);
-
-	strncpy(messageBase->m_username, g_Options->GetControlUsername(), NZBREQUESTPASSWORDSIZE - 1);
-	messageBase->m_username[NZBREQUESTPASSWORDSIZE - 1] = '\0';
-
-	strncpy(messageBase->m_password, g_Options->GetControlPassword(), NZBREQUESTPASSWORDSIZE - 1);
-	messageBase->m_password[NZBREQUESTPASSWORDSIZE - 1] = '\0';
+	nzbget_rs_binrpc_init_message_base(
+		(uint8_t*)messageBase,
+		request,
+		size,
+		g_Options->GetControlUsername(),
+		g_Options->GetControlPassword());
 }
 
 bool RemoteClient::ReceiveBoolResponse()
@@ -172,39 +169,22 @@ bool RemoteClient::RequestServerDownload(const char* nzbFilename, const char* nz
 	if (OK)
 	{
 		SNzbDownloadRequest DownloadRequest;
-		InitMessageBase(&DownloadRequest.m_messageBase, rrDownload, sizeof(DownloadRequest));
-		DownloadRequest.m_addFirst = htonl(addFirst);
-		DownloadRequest.m_addPaused = htonl(addPaused);
-		DownloadRequest.m_priority = htonl(priority);
-		DownloadRequest.m_dupeMode = htonl(dupeMode);
-		DownloadRequest.m_dupeScore = htonl(dupeScore);
-		DownloadRequest.m_trailingDataLength = htonl(length);
-		DownloadRequest.m_autoCategory = htonl(autoCategory);
-
-		DownloadRequest.m_nzbFilename[0] = '\0';
-		if (!Util::EmptyStr(nzbFilename))
-		{
-			strncpy(DownloadRequest.m_nzbFilename, nzbFilename, NZBREQUESTFILENAMESIZE - 1);
-		}
-		else if (!isUrl)
-		{
-			strncpy(DownloadRequest.m_nzbFilename, nzbContent, NZBREQUESTFILENAMESIZE - 1);
-		}
-		DownloadRequest.m_nzbFilename[NZBREQUESTFILENAMESIZE-1] = '\0';
-
-		DownloadRequest.m_category[0] = '\0';
-		if (category)
-		{
-			strncpy(DownloadRequest.m_category, category, NZBREQUESTFILENAMESIZE - 1);
-		}
-		DownloadRequest.m_category[NZBREQUESTFILENAMESIZE-1] = '\0';
-
-		DownloadRequest.m_dupeKey[0] = '\0';
-		if (!Util::EmptyStr(dupeKey))
-		{
-			strncpy(DownloadRequest.m_dupeKey, dupeKey, NZBREQUESTFILENAMESIZE - 1);
-		}
-		DownloadRequest.m_dupeKey[NZBREQUESTFILENAMESIZE-1] = '\0';
+		nzbget_rs_binrpc_init_download_request(
+			(uint8_t*)&DownloadRequest,
+			g_Options->GetControlUsername(),
+			g_Options->GetControlPassword(),
+			nzbFilename,
+			nzbContent,
+			isUrl ? 1 : 0,
+			category,
+			addFirst ? 1 : 0,
+			addPaused ? 1 : 0,
+			priority,
+			dupeScore,
+			dupeMode,
+			dupeKey,
+			length,
+			autoCategory ? 1 : 0);
 
 		if (!m_connection->Send((char*)(&DownloadRequest), sizeof(DownloadRequest)))
 		{
@@ -362,29 +342,13 @@ bool RemoteClient::RequestServerList(bool files, bool groups, const char* patter
 		}
 		else
 		{
-			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-			BuildFileList(&ListResponse, buf, downloadQueue);
-
-			std::vector<NzbgetRsBinRpcFileListingEntry> entries;
-			for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-			{
-				for (FileInfo* fileInfo : nzbInfo->GetFileList())
-				{
-					NzbgetRsBinRpcFileListingEntry entry{};
-					entry.id = fileInfo->GetId();
-					entry.nzb_name = fileInfo->GetNzbInfo()->GetName();
-					entry.filename = fileInfo->GetFilename();
-					entry.size = fileInfo->GetSize();
-					entry.remaining_size = fileInfo->GetRemainingSize();
-					entry.active_downloads = fileInfo->GetActiveDownloads();
-					entry.paused = fileInfo->GetPaused() ? 1 : 0;
-					entry.matched = (!pattern || ((MatchedFileInfo*)fileInfo)->m_match) ? 1 : 0;
-					entries.push_back(entry);
-				}
-			}
-
-			NzbgetRsBuf formatted = nzbget_rs_binrpc_file_listing(
-				entries.data(), entries.size(), pattern ? 1 : 0);
+			NzbgetRsBuf formatted = nzbget_rs_binrpc_file_listing_from_wire(
+				buf,
+				buf.Size(),
+				ntohl(ListResponse.m_nrTrailingNzbEntries),
+				ntohl(ListResponse.m_nrTrailingPPPEntries),
+				ntohl(ListResponse.m_nrTrailingFileEntries),
+				pattern ? 1 : 0);
 			if (formatted.data)
 			{
 				fwrite(formatted.data, 1, formatted.len, stdout);
@@ -401,45 +365,13 @@ bool RemoteClient::RequestServerList(bool files, bool groups, const char* patter
 		}
 		else
 		{
-			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-			BuildFileList(&ListResponse, buf, downloadQueue);
-
-			std::vector<std::vector<NzbgetRsBinRpcGroupParamEntry>> paramLists;
-			paramLists.reserve(downloadQueue->GetQueue()->size());
-			std::vector<NzbgetRsBinRpcGroupListingEntry> entries;
-			entries.reserve(downloadQueue->GetQueue()->size());
-
-			for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
-			{
-				std::vector<NzbgetRsBinRpcGroupParamEntry> params;
-				for (NzbParameter& nzbParameter : nzbInfo->GetParameters())
-				{
-					NzbgetRsBinRpcGroupParamEntry p{};
-					p.name = nzbParameter.GetName();
-					p.value = nzbParameter.GetValue();
-					params.push_back(p);
-				}
-				paramLists.push_back(std::move(params));
-				const auto& storedParams = paramLists.back();
-
-				NzbgetRsBinRpcGroupListingEntry entry{};
-				entry.id = nzbInfo->GetId();
-				entry.kind = (int)nzbInfo->GetKind();
-				entry.priority = nzbInfo->GetPriority();
-				entry.name = nzbInfo->GetName();
-				entry.category = nzbInfo->GetCategory();
-				entry.file_count = (int)nzbInfo->GetFileList()->size();
-				entry.remaining_size = nzbInfo->GetRemainingSize();
-				entry.paused_size = nzbInfo->GetPausedSize();
-				entry.active_downloads = nzbInfo->GetActiveDownloads();
-				entry.matched = (!pattern || ((MatchedNzbInfo*)nzbInfo)->m_match) ? 1 : 0;
-				entry.params = storedParams.data();
-				entry.param_count = storedParams.size();
-				entries.push_back(entry);
-			}
-
-			NzbgetRsBuf formatted = nzbget_rs_binrpc_group_listing(
-				entries.data(), entries.size(), pattern ? 1 : 0);
+			NzbgetRsBuf formatted = nzbget_rs_binrpc_group_listing_from_wire(
+				buf,
+				buf.Size(),
+				ntohl(ListResponse.m_nrTrailingNzbEntries),
+				ntohl(ListResponse.m_nrTrailingPPPEntries),
+				ntohl(ListResponse.m_nrTrailingFileEntries),
+				pattern ? 1 : 0);
 			if (formatted.data)
 			{
 				fwrite(formatted.data, 1, formatted.len, stdout);
@@ -606,26 +538,27 @@ bool RemoteClient::RequestServerEditQueue(DownloadQueue::EEditAction action, int
 
 	if (!InitConnection()) return false;
 
-	int idLength = sizeof(int32) * idList->size();
-
-	int nameCount = 0;
-	int nameLength = 0;
-	if (nameList && nameList->size() > 0)
+	std::vector<const char*> namePtrs;
+	if (nameList && !nameList->empty())
 	{
+		namePtrs.reserve(nameList->size());
 		for (CString& name : nameList)
 		{
-			nameLength += strlen(name) + 1;
-			nameCount++;
+			namePtrs.push_back(*name);
 		}
-		// align size to 4-bytes, needed by ARM-processor (and may be others)
-		nameLength = nzbget_rs_ccm_remote_client_align4(nameLength);
 	}
 
-	int textLen = text ? strlen(text) + 1 : 0;
-	// align size to 4-bytes, needed by ARM-processor (and may be others)
-	textLen = nzbget_rs_ccm_remote_client_align4(textLen);
-
-	int length = textLen + idLength + nameLength;
+	int textLen = 0;
+	int nameLength = 0;
+	NzbgetRsBuf trailingBuf = nzbget_rs_binrpc_encode_edit_queue_trailing(
+		text,
+		idList && !idList->empty() ? idList->data() : nullptr,
+		idList ? idList->size() : 0,
+		namePtrs.empty() ? nullptr : namePtrs.data(),
+		namePtrs.size(),
+		&textLen,
+		&nameLength);
+	int length = (int)trailingBuf.len;
 
 	SNzbEditQueueRequest EditQueueRequest = {};
 	InitMessageBase(&EditQueueRequest.m_messageBase, rrEditQueue, sizeof(EditQueueRequest));
@@ -633,36 +566,10 @@ bool RemoteClient::RequestServerEditQueue(DownloadQueue::EEditAction action, int
 	EditQueueRequest.m_matchMode = htonl(matchMode);
 	EditQueueRequest.m_offset = htonl((int)offset);
 	EditQueueRequest.m_textLen = htonl(textLen);
-	EditQueueRequest.m_nrTrailingIdEntries = htonl(idList->size());
-	EditQueueRequest.m_nrTrailingNameEntries = htonl(nameCount);
+	EditQueueRequest.m_nrTrailingIdEntries = htonl(idList ? idList->size() : 0);
+	EditQueueRequest.m_nrTrailingNameEntries = htonl((int)namePtrs.size());
 	EditQueueRequest.m_trailingNameEntriesLen = htonl(nameLength);
 	EditQueueRequest.m_trailingDataLength = htonl(length);
-
-	CharBuffer trailingData(length);
-
-	if (textLen > 0)
-	{
-		strncpy(trailingData, text, textLen);
-	}
-
-	int32* ids = (int32*)(trailingData + textLen);
-
-	for (int i = 0; i < (int)idList->size(); i++)
-	{
-		ids[i] = htonl(idList->at(i));
-	}
-
-	if (nameCount > 0)
-	{
-		char *names = trailingData + textLen + idLength;
-		for (CString& name : nameList)
-		{
-			// "len" must be less or equal than: "buffer size" - "already used buffer" - "ending \0"
-			size_t len = strnlen(name, length - (names - trailingData) - 1);
-			strncpy(names, name, len + 1);
-			names += len + 1;
-		}
-	}
 
 	bool OK = false;
 	if (!m_connection->Send((char*)(&EditQueueRequest), sizeof(EditQueueRequest)))
@@ -671,11 +578,15 @@ bool RemoteClient::RequestServerEditQueue(DownloadQueue::EEditAction action, int
 	}
 	else
 	{
-		m_connection->Send(trailingData, length);
+		if (length > 0 && trailingBuf.data)
+		{
+			m_connection->Send(trailingBuf.data, length);
+		}
 		OK = ReceiveBoolResponse();
 		m_connection->Disconnect();
 	}
 
+	nzbget_rs_free(trailingBuf);
 	m_connection->Disconnect();
 	return OK;
 }

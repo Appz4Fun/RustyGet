@@ -29,10 +29,6 @@
 #include "FileSystem.h"
 #include "nzbget_rs.h"
 
-#ifdef _WIN32
-#include "Utf8.h"
-#endif
-
 namespace ExtensionManager
 {
 	void Manager::ForEach(std::function<void(const ExtensionPtr)> callback) const
@@ -126,20 +122,8 @@ namespace ExtensionManager
 
 			return moveAsideError;
 		}
-#ifdef _WIN32
-		const auto wRootDir = Utf8::Utf8ToWide((*extensionIt)->GetRootDir());
-		if (!wRootDir)
-		{
-			fs::error_code ec;
-			fs::rename(backupPath, targetPath, ec);
-			return std::string("Failed to install ") + extName +
-				   ": couldn't convert path to wide string.";
-		}
-		const auto installExtError = InstallExtension(filename, *wRootDir);
-#else
 		const auto rootDir = (*extensionIt)->GetRootDir();
 		const auto installExtError = InstallExtension(filename, rootDir);
-#endif
 		if (installExtError)
 		{
 			fs::error_code ec;
@@ -278,16 +262,7 @@ namespace ExtensionManager
 			location = extension.GetEntry();
 		}
 
-#ifdef _WIN32
-		const auto wlocation = Utf8::Utf8ToWide(location);
-		if (!wlocation) 
-		{
-			return std::string("Failed to delete ") + location + ": couldn't convert path to wide string";
-		}
-		fs::path targetPath(*wlocation);
-#else
 		fs::path targetPath(location);
-#endif
 
 		path = std::move(targetPath);
 		return std::nullopt;

@@ -34,11 +34,7 @@ public:
 	void InitFromCurrentProcess();
 	void Append(const char* envstr);
 	void Append(CString&& envstr);
-#ifdef WIN32
-	std::unique_ptr<wchar_t[]> GetStrings();
-#else
 	std::vector<char*> GetStrings();
-#endif
 
 private:
 	typedef std::vector<CString> Strings;
@@ -63,10 +59,6 @@ public:
 	const char* GetScript() { return !m_args.empty() ? *m_args[0] : nullptr; }
 	void SetWorkingDir(const char* workingDir) { m_workingDir = workingDir; }
 	void SetArgs(ArgList&& args) { m_args = std::move(args); }
-#ifdef WIN32
-	std::string BuildCommandLine();
-	void BuildCommandLine(char* cmdLineBuf, int bufSize);
-#endif
 	void SetInfoName(const char* infoName) { m_infoName = infoName; }
 	const char* GetInfoName() { return m_infoName; }
 	void SetLogPrefix(const char* logPrefix) { m_logPrefix = logPrefix; }
@@ -94,9 +86,6 @@ protected:
 
 private:
 	void CheckEnvSize(const std::vector<char*>& envs);
-#ifdef WIN32
-	void SetProcess(HANDLE processId, DWORD dwProcessId);
-#endif
 
 	ArgList m_args;
 	ArgList m_cmdArgs;
@@ -113,21 +102,11 @@ private:
 	std::atomic<FILE*> m_readpipe{nullptr};
 	FILE* m_writepipe = 0;
 	char m_cmdLine[2048];
-#ifdef WIN32
-	std::mutex m_processMutex;
-	HANDLE m_processId = 0;
-	DWORD m_dwProcessId = 0;
-#else
 	std::atomic<pid_t> m_processId{0};
-#endif
 
 	inline static const long ARGS_LIMIT_SIZE = []() -> long
 	{
-#ifdef _WIN32
-		return 32 * 1024;
-#else
 		return sysconf(_SC_ARG_MAX);
-#endif
 	}();
 
 	typedef std::vector<ScriptController*> RunningScripts;

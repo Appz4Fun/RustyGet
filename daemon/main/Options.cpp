@@ -28,15 +28,10 @@
 #include "Log.h"
 #include "FileSystem.h"
 
-#ifdef _WIN32
-#include "Utf8.h"
-#endif
-
 const char* BoolNames[] = { "yes", "no", "true", "false", "1", "0", "on", "off", "enable", "disable", "enabled", "disabled" };
 const int BoolValues[] = { 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0 };
 const int BoolCount = 12;
 
-#ifndef WIN32
 const char* PossibleConfigLocations[] =
 	{
 		"~/.nzbget",
@@ -49,7 +44,6 @@ const char* PossibleConfigLocations[] =
 		"~/usr/etc/nzbget.conf",
 		nullptr
 	};
-#endif
 
 void Options::OptEntry::SetValue(const char* value)
 {
@@ -176,16 +170,12 @@ void Options::Init(const char* exeName, const char* configFilename, bool noConfi
 	if (!m_configFilename && !noConfig)
 	{
 		printf("No configuration-file found\n");
-#ifdef WIN32
-		printf("Please put configuration-file \"nzbget.conf\" into the directory with exe-file\n");
-#else
 		printf("Please use option \"-c\" or put configuration-file in one of the following locations:\n");
 		int p = 0;
 		while (const char* filename = PossibleConfigLocations[p++])
 		{
 			printf("%s\n", filename);
 		}
-#endif
 		m_fatalError = true;
 		return;
 	}
@@ -253,15 +243,9 @@ void Options::LocateOptionSrcPos(const char *optionName)
 
 void Options::InitDefaults()
 {
-#ifdef WIN32
-	SetOption(MAINDIR.data(), "${AppDir}");
-	SetOption(WEBDIR.data(), "${AppDir}\\webui");
-	SetOption(CONFIGTEMPLATE.data(), "${AppDir}\\nzbget.conf.template");
-#else
 	SetOption(MAINDIR.data(), "~/downloads");
 	SetOption(WEBDIR.data(), "");
 	SetOption(CONFIGTEMPLATE.data(), "");
-#endif
 	SetOption(TEMPDIR.data(), "${MainDir}/tmp");
 	SetOption(DESTDIR.data(), "${MainDir}/dst");
 	SetOption(INTERDIR.data(), "");
@@ -379,13 +363,8 @@ void Options::InitDefaults()
 	SetOption(DIRECTUNPACK.data(), "no");
 	SetOption(USETEMPUNPACKDIR.data(), "yes");
 	SetOption(UNPACKCLEANUPDISK.data(), "no");
-#ifdef WIN32
-	SetOption(UNRARCMD.data(), "unrar.exe");
-	SetOption(SEVENZIPCMD.data(), "7z.exe");
-#else
 	SetOption(UNRARCMD.data(), "unrar");
 	SetOption(SEVENZIPCMD.data(), "7z");
-#endif
 	SetOption(UNPACKPASSFILE.data(), "");
 	SetOption(UNPACKPAUSEQUEUE.data(), "no");
 	SetOption(EXTCLEANUPDISK.data(), "");
@@ -412,26 +391,6 @@ void Options::InitOptFile()
 	if (!m_configFilename && !m_noConfig)
 	{
 		// search for config file in default locations
-#ifdef WIN32
-		BString<1024> filename("%s\\nzbget.conf", *m_appDir);
-
-		if (!FileSystem::FileExists(filename))
-		{
-			char appDataPath[MAX_PATH];
-			SHGetFolderPath(nullptr, CSIDL_COMMON_APPDATA, nullptr, 0, appDataPath);
-			filename.Format("%s\\NZBGet\\nzbget.conf", appDataPath);
-
-			if (m_extender && !FileSystem::FileExists(filename))
-			{
-				m_extender->SetupFirstStart();
-			}
-		}
-
-		if (FileSystem::FileExists(filename))
-		{
-			m_configFilename = filename;
-		}
-#else
 		// look in the exe-directory first
 		BString<1024> filename("%s/nzbget.conf", *m_appDir);
 
@@ -454,7 +413,6 @@ void Options::InitOptFile()
 				}
 			}
 		}
-#endif
 	}
 
 	if (m_configFilename)
@@ -462,10 +420,8 @@ void Options::InitOptFile()
 		// normalize path in filename
 		CString filename = FileSystem::ExpandFileName(m_configFilename);
 
-#ifndef WIN32
 		// substitute HOME-variable
 		filename = FileSystem::ExpandHomePath(filename);
-#endif
 
 		m_configFilename = *filename;
 		m_configFilePath = fs::u8path(*m_configFilename);
@@ -534,7 +490,6 @@ void Options::CheckDir(CString& dir, const char* optionName,
 			return;
 		}
 
-#ifndef WIN32
 		if (getuid() == 0 || geteuid() == 0)
 		{
 			struct passwd* pwd = getpwnam(GetOption(DAEMONUSERNAME.data()));
@@ -543,7 +498,6 @@ void Options::CheckDir(CString& dir, const char* optionName,
 				chown(dir, pwd->pw_uid, pwd->pw_gid);
 			}
 		}
-#endif
 	}
 }
 

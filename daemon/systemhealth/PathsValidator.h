@@ -198,7 +198,7 @@ public:
 private:
 	const Options& m_options;
 };
-#ifndef _WIN32
+
 class LockFileValidator final : public Validator
 {
 public:
@@ -214,7 +214,6 @@ private:
 	const Options& m_options;
 	const ::Log& m_log;
 };
-#endif
 }  // namespace SystemHealth::Paths
 
 #endif

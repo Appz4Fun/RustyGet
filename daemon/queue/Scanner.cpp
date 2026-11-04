@@ -37,10 +37,6 @@
 #include "Unpack.h"
 #include "nzbget_rs.h"
 
-#ifdef _WIN32
-#include "Utf8.h"
-#endif
-
 int Scanner::m_idGen = 0;
 
 Scanner::QueueData::QueueData(

@@ -227,15 +227,9 @@ protected:
 
 #ifdef DEBUG
 // helper declarations to identify incorrect calls to "free" at compile time
-#ifdef WIN32
-void _free_dbg(CString str, int ignore);
-void _free_dbg(StringBuilder str, int ignore);
-void _free_dbg(CharBuffer str, int ignore);
-#else
 void free(CString str);
 void free(StringBuilder str);
 void free(CharBuffer str);
-#endif
 #endif
 
 #endif

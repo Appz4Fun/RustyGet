@@ -89,11 +89,7 @@ BOOST_AUTO_TEST_CASE(OptionsInitWithoutConfigurationFileTest)
 	Options options(nullptr, nullptr);
 
 	BOOST_CHECK(options.GetConfigFilename() == nullptr);
-#ifdef WIN32
-	BOOST_CHECK(strcmp(options.GetTempDir(), "nzbget/tmp") == 0);
-#else
 	BOOST_CHECK(strcmp(options.GetTempDir(), "~/downloads/tmp") == 0);
-#endif
 }
 
 BOOST_AUTO_TEST_CASE(PassingCommandLineOptions)

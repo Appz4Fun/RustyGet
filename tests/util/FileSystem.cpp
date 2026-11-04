@@ -25,15 +25,12 @@
 
 #include "FileSystem.h"
 
-#ifndef WIN32
 #include <sys/resource.h>
 #include <csignal>
 #include <fstream>
-#endif
 
 BOOST_AUTO_TEST_SUITE(UtilTest)
 
-#ifndef WIN32
 BOOST_AUTO_TEST_CASE(FileSizeRejectsFailedStat)
 {
 	const fs::path path = fs::temp_directory_path() / fs::make_unique_filename();
@@ -48,34 +45,6 @@ BOOST_AUTO_TEST_CASE(FileSizeRejectsFailedStat)
 	BOOST_CHECK_EQUAL(FileSystem::FileSize((path / "not-a-directory").string().c_str()), -1);
 	fs::remove(path);
 }
-#endif
-
-#ifdef WIN32
-BOOST_AUTO_TEST_CASE(FileSystemTest)
-{
-	BOOST_CHECK(!strcmp(FileSystem::MakeCanonicalPath("C:\\Program Files\\NZBGet"), "C:\\Program Files\\NZBGet"));
-	BOOST_CHECK(!strcmp(FileSystem::MakeCanonicalPath("C:\\Program Files\\NZBGet\\"), "C:\\Program Files\\NZBGet\\"));
-	BOOST_CHECK(!strcmp(FileSystem::MakeCanonicalPath("C:\\\\Program Files\\\\NZBGet"), "C:\\Program Files\\NZBGet"));
-	BOOST_CHECK(!strcmp(FileSystem::MakeCanonicalPath("C:\\Program Files\\NZBGet\\scripts\\.."), "C:\\Program Files\\NZBGet\\"));
-	BOOST_CHECK(!strcmp(FileSystem::MakeCanonicalPath("C:\\Program Files\\NZBGet\\scripts\\email\\..\\.."), "C:\\Program Files\\NZBGet\\"));
-	BOOST_CHECK(!strcmp(FileSystem::MakeCanonicalPath("C:\\Program Files\\NZBGet\\scripts\\email\\..\\..\\"), "C:\\Program Files\\NZBGet\\"));
-	BOOST_CHECK(!strcmp(FileSystem::MakeCanonicalPath("C:\\Program Files\\NZBGet\\."), "C:\\Program Files\\NZBGet\\"));
-	BOOST_CHECK(!strcmp(FileSystem::MakeCanonicalPath("\\\\server\\Program Files\\NZBGet\\scripts\\email\\..\\..\\"), "\\\\server\\Program Files\\NZBGet\\"));
-}
-
-BOOST_AUTO_TEST_CASE(ExtractFilePathCmdTest)
-{
-	BOOST_CHECK(FileSystem::ExtractFilePathFromCmd("C:\\Program Files\\NZBGet\\unrar.exe") == "C:\\Program Files\\NZBGet\\unrar.exe");
-	BOOST_CHECK(FileSystem::ExtractFilePathFromCmd("C:\\Program Files\\NZBGet\\unrar.exe -ai") == "C:\\Program Files\\NZBGet\\unrar.exe");
-	BOOST_CHECK(FileSystem::ExtractFilePathFromCmd("") == "");
-}
-
-BOOST_AUTO_TEST_CASE(EscapePathForShellTest)
-{
-	BOOST_CHECK(FileSystem::EscapePathForShell("C:\\Program Files\\NZBGet\\unrar.exe") == "\"C:\\Program Files\\NZBGet\\unrar.exe\"");
-	BOOST_CHECK(FileSystem::EscapePathForShell("") == "");
-}
-#else
 
 BOOST_AUTO_TEST_CASE(ExtractFilePathCmdTest)
 {
@@ -275,7 +244,6 @@ BOOST_AUTO_TEST_CASE(AllocateAndFlushDirBuffersTest)
 
 	fs::remove_all(dir);
 }
-#endif
 
 BOOST_AUTO_TEST_CASE(CreateDirectoryExclusiveCreatesOnce)
 {

@@ -863,18 +863,14 @@ bool UnpackController::Cleanup()
 				ok = false;
 			}
 
-#ifndef WIN32
 			// Fixing file or directory permissions overridden by the unpacker
 			FileSystem::RestoreFileOrDirPermissions(dstFile.Str());
-#endif
 
 			extractedFiles.push_back(filename);
 		}
 
-#ifndef WIN32
 		// Fixing directory permissions overridden by the unpacker
 		FileSystem::RestoreDirPermissions(destDir);
-#endif
 
 	}
 

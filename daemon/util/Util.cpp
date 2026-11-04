@@ -130,19 +130,11 @@ std::optional<fs::path> Util::ResolvePathFromEnv(std::string_view path)
 {
 	if (path.empty()) return std::nullopt;
 
-#ifdef _WIN32
-	const wchar_t* envPath = _wgetenv(L"PATH");
-	if (!envPath) return std::nullopt;
-	std::wstring dir;
-	std::wstringstream ss(envPath);
-	wchar_t delimiter = ';';
-#else
 	const char* envPath = std::getenv("PATH");
 	if (!envPath) return std::nullopt;
 	std::string dir;
 	std::stringstream ss(envPath);
 	char delimiter = ':';
-#endif
 
 	while (std::getline(ss, dir, delimiter))
 	{

@@ -47,13 +47,11 @@ SecurityValidator::SecurityValidator(const Options& options) : m_options(options
 	m_validators.push_back(std::make_unique<CertCheckValidator>(options));
 	m_validators.push_back(std::make_unique<UpdateCheckValidator>(options));
 
-#ifndef _WIN32
 	if (options.GetDaemonMode())
 	{
 		m_validators.push_back(std::make_unique<DaemonUsernameValidator>(options));
 	}
 	m_validators.push_back(std::make_unique<UmaskValidator>(options));
-#endif
 }
 
 Status ControlIpValidator::Validate() const
@@ -62,12 +60,7 @@ Status ControlIpValidator::Validate() const
 	if (!s.IsOk()) return s;
 
 	std::string_view ip = m_options.GetControlIp();
-#ifdef _WIN32
-	int isWin32 = 1;
-#else
-	int isWin32 = 0;
-#endif
-	int ipCheck = nzbget_rs_feh_health_validate_control_ip(ip.data(), ip.size(), isWin32);
+	int ipCheck = nzbget_rs_feh_health_validate_control_ip(ip.data(), ip.size(), 0);
 	if (ipCheck == 1)
 	{
 		return Status::Info("'" + std::string(Options::CONTROLIP) +
@@ -305,7 +298,6 @@ Status CertCheckValidator::Validate() const
 	return Status::Ok();
 }
 
-#ifndef _WIN32
 Status DaemonUsernameValidator::Validate() const
 {
 	if (!m_options.GetDaemonMode()) return Status::Ok();
@@ -325,6 +317,5 @@ Status UmaskValidator::Validate() const
 							   "' is set to 0, files will be created with full permissions");
 	return Status::Ok();
 }
-#endif
 
 }  // namespace SystemHealth::Security

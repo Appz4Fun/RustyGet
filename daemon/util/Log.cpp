@@ -97,7 +97,6 @@ void Log::Filelog(const char* msg, ...)
 			return;
 		}
 
-#ifndef WIN32
 		if (getuid() == 0 || geteuid() == 0)
 		{
 			struct passwd* pwd = getpwnam(g_Options->GetDaemonUsername());
@@ -107,19 +106,13 @@ void Log::Filelog(const char* msg, ...)
 				fchown(fileDescriptor, pwd->pw_uid, pwd->pw_gid);
 			}
 		}
-#endif
 	}
 
 	m_logFile->Seek(0, DiskFile::soEnd);
 
 #ifdef DEBUG
-#ifdef WIN32
-	uint64 processId = GetCurrentProcessId();
-	uint64 threadId = GetCurrentThreadId();
-#else
 	uint64 processId = (uint64)getpid();
 	uint64 threadId = (uint64)pthread_self();
-#endif
 	m_logFile->Print("%s\t%" PRIu64 "\t%" PRIu64 "\t%s%s", time, processId, threadId, tmp2, LINE_ENDING);
 #else
 	m_logFile->Print("%s\t%s%s", time, tmp2, LINE_ENDING);

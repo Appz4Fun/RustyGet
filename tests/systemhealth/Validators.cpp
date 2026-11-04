@@ -25,9 +25,7 @@
 #include "FileSystem.h"
 #include "Validators.h"
 
-#ifndef _WIN32
 #include <sys/stat.h>
-#endif
 
 BOOST_AUTO_TEST_SUITE(SystemHealthTest)
 
@@ -225,19 +223,9 @@ BOOST_AUTO_TEST_CASE(TestFileNullOrConsoleDevice)
 	fs::create_directory(d);
 	BOOST_CHECK(!SystemHealth::File::NullOrConsoleDevice(d));
 
-#ifdef _WIN32
-	BOOST_CHECK(SystemHealth::File::NullOrConsoleDevice("NUL"));
-	BOOST_CHECK(SystemHealth::File::NullOrConsoleDevice("nul"));
-	BOOST_CHECK(SystemHealth::File::NullOrConsoleDevice("CON"));
-	BOOST_CHECK(SystemHealth::File::NullOrConsoleDevice("con"));
-	BOOST_CHECK(SystemHealth::File::NullOrConsoleDevice("CONOUT$"));
-	BOOST_CHECK(SystemHealth::File::NullOrConsoleDevice("C:\\path\\NUL"));
-	BOOST_CHECK(!SystemHealth::File::NullOrConsoleDevice("C:\\path\\random.txt"));
-#else
 	BOOST_CHECK(SystemHealth::File::NullOrConsoleDevice("/dev/null"));
 	BOOST_CHECK(SystemHealth::File::NullOrConsoleDevice("/dev/stdout"));
 	BOOST_CHECK(SystemHealth::File::NullOrConsoleDevice("/dev/stderr"));
-#endif
 }
 
 BOOST_AUTO_TEST_CASE(TestFileReadable)
@@ -265,24 +253,6 @@ BOOST_AUTO_TEST_CASE(TestFileWritable)
 
 BOOST_AUTO_TEST_CASE(TestFileExecutable)
 {
-#ifdef _WIN32
-	fs::path exe = tempPath / "program.exe";
-	fs::path bat = tempPath / "script.bat";
-	fs::path txt = tempPath / "readme.txt";
-	fs::path noext = tempPath / "binary";
-
-	BOOST_CHECK(SystemHealth::File::Executable(exe).IsOk());
-	BOOST_CHECK(SystemHealth::File::Executable(bat).IsOk());
-
-	Status s1 = SystemHealth::File::Executable(txt);
-	BOOST_CHECK(s1.IsError());
-	BOOST_CHECK(s1.GetMessage().find("invalid extension") != std::string::npos);
-
-	Status s2 = SystemHealth::File::Executable(noext);
-	BOOST_CHECK(s2.IsError());
-	BOOST_CHECK(s2.GetMessage().find("missing file extension") != std::string::npos);
-
-#else
 	fs::path script = tempPath / "script.sh";
 	{
 		std::ofstream(script.c_str()) << "#!/bin/bash";
@@ -293,7 +263,6 @@ BOOST_AUTO_TEST_CASE(TestFileExecutable)
 
 	fs::permissions(script, fs::perms::owner_exec, fs::perm_options::add);
 	BOOST_CHECK(SystemHealth::File::Executable(script).IsOk());
-#endif
 }
 
 BOOST_AUTO_TEST_CASE(TestDirectoryExists)
@@ -321,11 +290,9 @@ BOOST_AUTO_TEST_CASE(TestDirectoryWritable)
 
 	BOOST_CHECK(SystemHealth::Directory::Writable(d).IsOk());
 	BOOST_CHECK(!fs::exists(d / "nzbget_write_test.tmp"));
-#ifndef _WIN32
 	fs::permissions(d, fs::perms::owner_write, fs::perm_options::remove);
 	BOOST_CHECK(SystemHealth::Directory::Writable(d).IsError());
 	fs::permissions(d, fs::perms::owner_write, fs::perm_options::add);
-#endif
 }
 
 BOOST_AUTO_TEST_CASE(TestDirectoryReadable)
@@ -335,11 +302,9 @@ BOOST_AUTO_TEST_CASE(TestDirectoryReadable)
 
 	BOOST_CHECK(SystemHealth::Directory::Readable(d).IsOk());
 
-#ifndef _WIN32
 	fs::permissions(d, fs::perms::owner_read, fs::perm_options::remove);
 	BOOST_CHECK(SystemHealth::Directory::Readable(d).IsError());
 	fs::permissions(d, fs::perms::owner_read, fs::perm_options::add);
-#endif
 }
 
 BOOST_AUTO_TEST_SUITE_END()

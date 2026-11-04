@@ -25,11 +25,6 @@
 #include <optional>
 #include <chrono>
 #include "NString.h"
-
-#ifdef _WIN32
-#include "Utf8.h"
-#endif
-
 #include <filesystem>
 
 namespace fs
@@ -40,22 +35,12 @@ using errc = std::errc;
 
 inline fs::path u8path(std::string_view pathStr)
 {
-#ifdef _WIN32
-	if (auto wstr = Utf8::Utf8ToWide(pathStr))
-		return fs::path(*wstr);
 	return fs::path(pathStr);
-#else
-	return fs::path(pathStr);
-#endif
 }
 
 inline std::string u8string(const path& p)
 {
-#ifdef _WIN32
-	return Utf8::WideToUtf8(p.native()).value_or("");
-#else
 	return p.string();
-#endif
 }
 }
 
@@ -179,7 +164,6 @@ public:
 	static std::optional<DiskState> GetDiskState(const char* path);
 	static bool DirEmpty(const char* dirFilename);
 	static bool RenameBak(const char* filename, const char* bakPart, bool removeOldExtension, CString& newName);
-#ifndef WIN32
 	static CString ExpandHomePath(const char* filename);
 	static void FixExecPermission(const char* filename);
 	static bool RestoreFileOrDirPermissions(const char* filename);
@@ -187,7 +171,6 @@ public:
 	static bool RestoreDirPermissions(const char* filename);
 	static bool RestorePermissions(const char* filename, mode_t mode);
 	static mode_t uMask;
-#endif
 	static CString ExpandFileName(const char* filename);
 	static CString GetExeFileName(const char* argv0);
 
@@ -198,15 +181,6 @@ public:
 	static bool FlushDirBuffers(const char* filename, CString& errmsg);
 
 	static CString MakeExtendedPath(const char* path, bool force);
-
-#ifdef WIN32
-	static WString UtfPathToWidePath(const char* utfpath);
-	static CString WidePathToUtfPath(const wchar_t* wpath);
-	static CString MakeCanonicalPath(const char* filename);
-	static bool NeedLongPath(const char* path);
-
-	static const size_t MAX_DIR_PATH;
-#endif
 };
 
 class DirBrowser
@@ -217,15 +191,8 @@ public:
 	const char* Next();
 
 private:
-#ifdef WIN32
-	WIN32_FIND_DATAW m_findData;
-	HANDLE m_file = INVALID_HANDLE_VALUE;
-	bool m_first;
-	CString m_filename;
-#else
 	DIR* m_dir = nullptr;
 	struct dirent* m_findData;
-#endif
 
 	bool m_snapshot;
 	typedef std::deque<CString> FileList;

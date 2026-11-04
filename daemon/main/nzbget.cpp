@@ -63,12 +63,6 @@
 #include "SystemInfo.h"
 #include "SystemHealth.h"
 
-#ifdef WIN32
-#include "WinService.h"
-#include "WinConsole.h"
-#include "WebDownloader.h"
-#include "Utf8.h"
-#endif
 #ifndef DISABLE_NSERV
 #include "NServMain.h"
 #endif
@@ -104,10 +98,6 @@ ExtensionManager::Manager* g_ExtensionManager;
 System::SystemInfo* g_SystemInfo;
 SystemHealth::Service* g_SystemHealth;
 
-#ifdef WIN32
-WinConsole* g_WinConsole;
-#endif
-
 int g_ArgumentCount;
 char* (*g_EnvironmentVariables)[] = nullptr;
 char* (*g_Arguments)[] = nullptr;
@@ -137,9 +127,6 @@ public:
 		unsigned int certVerifLevel) override;
 	void AddTask(int id, int hours, int minutes, int weekDaysBits,
 		Options::ESchedulerCommand command, const char* param) override;
-#ifdef WIN32
-	void SetupFirstStart() override;
-#endif
 
 private:
 	// globals
@@ -169,10 +156,6 @@ private:
 	std::unique_ptr<SystemHealth::Service> m_systemHealth;
 	std::unique_ptr<MemoryMonitor> m_memoryMonitor;
 
-#ifdef WIN32
-	std::unique_ptr<WinConsole> m_winConsole;
-#endif
-
 	// non-globals
 	std::unique_ptr<Thread> m_frontend;
 	std::unique_ptr<RemoteServer> m_remoteServer;
@@ -201,9 +184,7 @@ private:
 	void StopFrontend();
 	void ProcessStandalone();
 	void DoMainLoop();
-#ifndef WIN32
 	void Daemonize();
-#endif
 };
 
 std::unique_ptr<NZBGet> g_NZBGet;
@@ -235,10 +216,6 @@ int NZBGet::Phase1_Init(bool reload)
 
 	CreateGlobals();
 
-#ifdef WIN32
-	m_winConsole->InitAppMode();
-#endif
-
 	BootConfig();
 
 	if (m_memoryMonitor)
@@ -246,7 +223,6 @@ int NZBGet::Phase1_Init(bool reload)
 		m_memoryMonitor->InitOptions();
 	}
 
-#ifndef WIN32
 	mode_t uMask = static_cast<mode_t>(m_options->GetUMask());
 	if (nzbget_rs_ccm_nzbget_is_valid_umask((uint32_t)uMask) != 0)
 	{
@@ -262,8 +238,6 @@ int NZBGet::Phase1_Init(bool reload)
 
 #ifdef DEBUG
 	debug("Using %o umask", FileSystem::uMask);
-#endif
-
 #endif
 
 	m_scanner->InitOptions();
@@ -290,15 +264,11 @@ int NZBGet::Phase1_Init(bool reload)
 
 	if (m_commandLineParser->GetDaemonMode())
 	{
-#ifdef WIN32
-		info("nzbget %s service-mode", Util::VersionRevision());
-#else
 		if (!m_reloading)
 		{
 			Daemonize();
 		}
 		info("nzbget %s daemon-mode", Util::VersionRevision());
-#endif
 	}
 	else if (m_options->GetServerMode())
 	{
@@ -357,11 +327,6 @@ void NZBGet::Final()
 
 void NZBGet::CreateGlobals()
 {
-#ifdef WIN32
-	m_winConsole = std::make_unique<WinConsole>();
-	g_WinConsole = m_winConsole.get();
-#endif
-
 	m_workState = std::make_unique<WorkState>();
 	g_WorkState = m_workState.get();
 
@@ -531,10 +496,6 @@ void NZBGet::Cleanup()
 	g_StatMeter = nullptr;
 	g_CommandScriptLog = nullptr;
 	g_ExtensionManager = nullptr;
-
-#ifdef WIN32
-	g_WinConsole = nullptr;
-#endif
 }
 
 void NZBGet::ProcessDirect()
@@ -579,13 +540,8 @@ void NZBGet::StartRemoteServer()
 	m_remoteServer = std::make_unique<RemoteServer>(false);
 	m_remoteServer->Start();
 
-#ifdef WIN32
-	const int isUnix = 0;
-#else
-	const int isUnix = 1;
-#endif
 	if (nzbget_rs_ccm_nzbget_should_start_secure_server(
-		m_options->GetSecureControl() ? 1 : 0, isUnix, m_options->GetControlIp()) != 0)
+		m_options->GetSecureControl() ? 1 : 0, 1, m_options->GetControlIp()) != 0)
 	{
 		m_remoteSecureServer = std::make_unique<RemoteServer>(true);
 		m_remoteSecureServer->Start();
@@ -748,9 +704,6 @@ void NZBGet::DoMainLoop()
 {
 	debug("Entering main program loop");
 
-#ifdef WIN32
-	m_winConsole->Start();
-#endif
 	m_queueCoordinator->Start();
 	m_urlCoordinator->Start();
 	m_dupeSearch->Start();
@@ -773,9 +726,6 @@ void NZBGet::DoMainLoop()
 		m_prePostProcessor->IsRunning() ||
 		m_feedCoordinator->IsRunning() ||
 		m_serviceCoordinator->IsRunning() ||
-#ifdef WIN32
-		m_winConsole->IsRunning() ||
-#endif
 		(m_memoryMonitor && m_memoryMonitor->IsRunning()) ||
 		m_articleCache->IsRunning())
 	{
@@ -1119,9 +1069,6 @@ void NZBGet::Stop(bool reload)
 				m_memoryMonitor->Stop();
 			}
 			m_queueScriptCoordinator->Stop();
-#ifdef WIN32
-			m_winConsole->Stop();
-#endif
 		}
 	}
 
@@ -1140,7 +1087,6 @@ void NZBGet::PrintOptions()
 	exit(0);
 }
 
-#ifndef WIN32
 void NZBGet::Daemonize()
 {
 	int f = fork();
@@ -1247,7 +1193,6 @@ void NZBGet::Daemonize()
 	signal(SIGTTOU, SIG_IGN);
 	signal(SIGTTIN, SIG_IGN);
 }
-#endif
 
 void NZBGet::AddNewsServer(int id, bool active, const char* name, const char* host,
 	int port, int ipVersion, const char* user, const char* pass, bool joinGroup, bool tls,
@@ -1272,13 +1217,6 @@ void NZBGet::AddTask(int id, int hours, int minutes, int weekDaysBits,
 	m_scheduler->AddTask(std::make_unique<Scheduler::Task>(id, hours, minutes, weekDaysBits,
 		(Scheduler::ECommand)command, param));
 }
-
-#ifdef WIN32
-void NZBGet::SetupFirstStart()
-{
-	m_winConsole->SetupFirstStart();
-}
-#endif
 
 void Reload()
 {
@@ -1448,11 +1386,7 @@ int nzbget_c_nserv_main(int argc, char* argv[])
 
 int nzbget_c_win_service_check(int argc, char* argv[])
 {
-#ifdef WIN32
-	InstallUninstallServiceCheck(argc, argv);
-#else
 	(void)argc; (void)argv;
-#endif
 	return 0;
 }
 

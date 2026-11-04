@@ -1104,6 +1104,256 @@ pub fn status_summary(spec: &StatusSummarySpec) -> Vec<u8> {
     out
 }
 
+/// sizeof(SNzbDownloadRequest): SNzbRequestBase (76) + 3*512-byte strings + 7 int32 fields.
+pub const DOWNLOAD_REQUEST_SIZE: usize = BASE_SIZE + 512 + 512 + 20 + 512 + 8;
+
+/// Populate an `SNzbRequestBase` header in network byte order (`RemoteClient::InitMessageBase`).
+pub fn init_message_base(
+    out: &mut [u8; BASE_SIZE],
+    request_type: i32,
+    struct_size: i32,
+    username: &[u8],
+    password: &[u8],
+) {
+    out.fill(0);
+    out[0..4].copy_from_slice(&(SIGNATURE as u32).to_be_bytes());
+    out[4..8].copy_from_slice(&(struct_size as u32).to_be_bytes());
+    out[8..12].copy_from_slice(&(request_type as u32).to_be_bytes());
+    let ulen = username.len().min(PASSWORD_SIZE - 1);
+    out[USER_AT..USER_AT + ulen].copy_from_slice(&username[..ulen]);
+    let plen = password.len().min(PASSWORD_SIZE - 1);
+    out[PASSWORD_AT..PASSWORD_AT + plen].copy_from_slice(&password[..plen]);
+}
+
+/// Populate an `SNzbDownloadRequest` packet in network byte order (`RemoteClient::RequestServerDownload`).
+#[allow(clippy::too_many_arguments)]
+pub fn init_download_request(
+    out: &mut [u8; DOWNLOAD_REQUEST_SIZE],
+    username: &[u8],
+    password: &[u8],
+    nzb_filename: &[u8],
+    nzb_content: &[u8],
+    is_url: bool,
+    category: &[u8],
+    add_first: bool,
+    add_paused: bool,
+    priority: i32,
+    dupe_score: i32,
+    dupe_mode: i32,
+    dupe_key: &[u8],
+    trailing_len: i32,
+    auto_category: bool,
+) {
+    out.fill(0);
+    let base_slice: &mut [u8; BASE_SIZE] = (&mut out[..BASE_SIZE]).try_into().unwrap();
+    init_message_base(base_slice, 1, DOWNLOAD_REQUEST_SIZE as i32, username, password);
+    let fname_src = if !nzb_filename.is_empty() {
+        nzb_filename
+    } else if !is_url {
+        nzb_content
+    } else {
+        b""
+    };
+    let flen = fname_src.len().min(511);
+    out[76..76 + flen].copy_from_slice(&fname_src[..flen]);
+    let clen = category.len().min(511);
+    out[588..588 + clen].copy_from_slice(&category[..clen]);
+    out[1100..1104].copy_from_slice(&(add_first as u32).to_be_bytes());
+    out[1104..1108].copy_from_slice(&(add_paused as u32).to_be_bytes());
+    out[1108..1112].copy_from_slice(&(priority as u32).to_be_bytes());
+    out[1112..1116].copy_from_slice(&(dupe_score as u32).to_be_bytes());
+    out[1116..1120].copy_from_slice(&(dupe_mode as u32).to_be_bytes());
+    let klen = dupe_key.len().min(511);
+    out[1120..1120 + klen].copy_from_slice(&dupe_key[..klen]);
+    out[1632..1636].copy_from_slice(&(trailing_len as u32).to_be_bytes());
+    out[1636..1640].copy_from_slice(&(auto_category as u32).to_be_bytes());
+}
+
+/// Encode the trailing payload of `RemoteClient::RequestServerEditQueue`:
+/// 4-byte aligned `text`, followed by big-endian `ids`, followed by 4-byte aligned NUL-separated `names`.
+/// Returns `(payload, aligned_text_len, aligned_names_len)`.
+pub fn encode_edit_queue_trailing(
+    text: Option<&[u8]>,
+    ids: &[i32],
+    names: &[&[u8]],
+) -> (Vec<u8>, i32, i32) {
+    let text_len = match text {
+        Some(t) => (t.len() + 1 + 3) & !3,
+        None => 0,
+    };
+    let id_length = ids.len() * 4;
+    let names_len = if names.is_empty() {
+        0
+    } else {
+        (names.iter().map(|n| n.len() + 1).sum::<usize>() + 3) & !3
+    };
+    let total = text_len + id_length + names_len;
+    let mut buf = vec![0u8; total];
+    if let Some(t) = text {
+        buf[..t.len()].copy_from_slice(t);
+    }
+    for (i, &id) in ids.iter().enumerate() {
+        let off = text_len + i * 4;
+        buf[off..off + 4].copy_from_slice(&(id as u32).to_be_bytes());
+    }
+    let mut off = text_len + id_length;
+    for n in names {
+        buf[off..off + n.len()].copy_from_slice(n);
+        off += n.len() + 1;
+    }
+    crate::util::reserve_bytes(&mut buf, 1);
+    (buf, text_len as i32, names_len as i32)
+}
+
+struct WireNzb {
+    id: i32,
+    kind: i32,
+    priority: i32,
+    name: *const u8,
+    category: *const u8,
+    remaining_size: i64,
+    paused_size: i64,
+    active_downloads: i32,
+    matched: i32,
+    params: Vec<GroupParamEntry>,
+    files: Vec<FileListingEntry>,
+}
+
+fn parse_wire_queue(
+    data: &[u8],
+    nr_nzb: u32,
+    nr_ppp: u32,
+    nr_files: u32,
+    has_pattern: bool,
+) -> Vec<WireNzb> {
+    if data.is_empty() {
+        return Vec::new();
+    }
+    let mut at = 0usize;
+    let mut nzbs = Vec::new();
+    for _ in 0..nr_nzb {
+        let Some((e, next)) = read::<NzbEntry, false>(data, at) else {
+            return nzbs;
+        };
+        at = next;
+        nzbs.push(WireNzb {
+            id: e.id as i32,
+            kind: e.kind as i32,
+            priority: e.priority as i32,
+            name: e.texts[1].data,
+            category: e.texts[3].data,
+            remaining_size: ((e.remaining_size_hi as i64) << 32) | (e.remaining_size_lo as u32 as i64),
+            paused_size: ((e.paused_size_hi as i64) << 32) | (e.paused_size_lo as u32 as i64),
+            active_downloads: 0,
+            matched: if !has_pattern || e.matched != 0 { 1 } else { 0 },
+            params: Vec::new(),
+            files: Vec::new(),
+        });
+    }
+    for _ in 0..nr_ppp {
+        let Some((e, next)) = read::<ParamEntry, false>(data, at) else {
+            return nzbs;
+        };
+        at = next;
+        let Some(nzb) = (e.nzb_index as usize)
+            .checked_sub(1)
+            .and_then(|idx| nzbs.get_mut(idx))
+        else {
+            continue;
+        };
+        let name_ptr = e.texts[0].data;
+        let value_ptr = e.texts[1].data;
+        let name_bytes = unsafe { cstr_bytes(name_ptr) };
+        let value_bytes = unsafe { cstr_bytes(value_ptr) };
+        let empty_val = value_bytes.is_empty();
+        let pos = nzb.params.iter().position(|p| {
+            unsafe { cstr_bytes(p.name) }.eq_ignore_ascii_case(name_bytes)
+        });
+        if empty_val {
+            if let Some(idx) = pos {
+                nzb.params.remove(idx);
+            }
+        } else if let Some(idx) = pos {
+            nzb.params[idx].value = value_ptr;
+        } else {
+            nzb.params.push(GroupParamEntry {
+                name: name_ptr,
+                value: value_ptr,
+            });
+        }
+    }
+    for _ in 0..nr_files {
+        let Some((e, next)) = read::<FileEntry, false>(data, at) else {
+            return nzbs;
+        };
+        at = next;
+        let Some(nzb) = (e.nzb_index as usize)
+            .checked_sub(1)
+            .and_then(|idx| nzbs.get_mut(idx))
+        else {
+            continue;
+        };
+        nzb.active_downloads = nzb.active_downloads.wrapping_add(e.active_downloads as i32);
+        nzb.files.push(FileListingEntry {
+            id: e.id as i32,
+            nzb_name: nzb.name,
+            filename: e.texts[1].data,
+            size: ((e.size_hi as i64) << 32) | (e.size_lo as u32 as i64),
+            remaining_size: ((e.remaining_size_hi as i64) << 32) | (e.remaining_size_lo as u32 as i64),
+            active_downloads: e.active_downloads as i32,
+            paused: if e.paused != 0 { 1 } else { 0 },
+            matched: if !has_pattern || e.matched != 0 { 1 } else { 0 },
+        });
+    }
+    nzbs
+}
+
+/// Decode `SNzbListResponse` trailing wire bytes and format the `files` section of `RemoteClient::RequestServerList`.
+pub fn file_listing_from_wire(
+    data: &[u8],
+    nr_nzb: u32,
+    nr_ppp: u32,
+    nr_files: u32,
+    has_pattern: bool,
+) -> Vec<u8> {
+    let nzbs = parse_wire_queue(data, nr_nzb, nr_ppp, nr_files, has_pattern);
+    let files: Vec<FileListingEntry> = nzbs.into_iter().flat_map(|n| n.files).collect();
+    file_listing(&files, has_pattern)
+}
+
+/// Decode `SNzbListResponse` trailing wire bytes and format the `groups` section of `RemoteClient::RequestServerList`.
+pub fn group_listing_from_wire(
+    data: &[u8],
+    nr_nzb: u32,
+    nr_ppp: u32,
+    nr_files: u32,
+    has_pattern: bool,
+) -> Vec<u8> {
+    let nzbs = parse_wire_queue(data, nr_nzb, nr_ppp, nr_files, has_pattern);
+    let groups: Vec<GroupListingEntry> = nzbs
+        .iter()
+        .map(|n| GroupListingEntry {
+            id: n.id,
+            kind: n.kind,
+            priority: n.priority,
+            name: n.name,
+            category: n.category,
+            file_count: n.files.len() as i32,
+            remaining_size: n.remaining_size,
+            paused_size: n.paused_size,
+            active_downloads: n.active_downloads,
+            matched: n.matched,
+            params: if n.params.is_empty() {
+                std::ptr::null()
+            } else {
+                n.params.as_ptr()
+            },
+            param_count: n.params.len(),
+        })
+        .collect();
+    group_listing(&groups, has_pattern)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1803,5 +2053,113 @@ mod tests {
         assert!(ss.contains("Post-jobs: 2\n"));
         assert!(ss.contains("Scan state: Paused\n"));
         assert!(ss.contains("Server state: Downloading, Post-Processing\n"));
+
+        let mut base_buf = [0u8; BASE_SIZE];
+        init_message_base(&mut base_buf, 3, 100, b"nzbget", b"secret");
+        assert!(credentials_ok(&base_buf, b"nzbget", b"secret"));
+        assert_eq!(request_type(&base_buf), 3);
+
+        let mut dl_buf = [0u8; DOWNLOAD_REQUEST_SIZE];
+        init_download_request(
+            &mut dl_buf,
+            b"nzbget",
+            b"secret",
+            b"",
+            b"/tmp/test.nzb",
+            false,
+            b"movies",
+            true,
+            false,
+            10,
+            100,
+            2,
+            b"key1",
+            42,
+            true,
+        );
+        let dl_base: &[u8; BASE_SIZE] = (&dl_buf[..BASE_SIZE]).try_into().unwrap();
+        assert!(credentials_ok(dl_base, b"nzbget", b"secret"));
+        assert_eq!(request_type(dl_base), 1);
+        assert_eq!(&dl_buf[76..76 + 13], b"/tmp/test.nzb");
+        assert_eq!(&dl_buf[588..588 + 6], b"movies");
+
+        let (trail, tlen, nlen) =
+            encode_edit_queue_trailing(Some(b"hi"), &[7, 8], &[b"a", b"bc"]);
+        assert_eq!((tlen, nlen), (4, 8));
+        let mut parsed_ids = [0u32; 2];
+        assert!(edit_sizes_ok(2, 2, nlen, tlen, trail.len() as u32));
+        assert!(edit_split(&trail, tlen as usize, &mut parsed_ids, 2));
+        assert_eq!(parsed_ids, [7, 8]);
+
+        let nzb_wire = encode_all(&[NzbEntry {
+            id: 10,
+            kind: 0,
+            size_lo: 200 * 1024 * 1024,
+            size_hi: 0,
+            remaining_size_lo: 150 * 1024 * 1024,
+            remaining_size_hi: 0,
+            paused_size_lo: 100 * 1024 * 1024,
+            paused_size_hi: 0,
+            paused_count: 1,
+            remaining_par_count: 0,
+            priority: 50,
+            matched: 1,
+            texts: [
+                Text::new(b"MyNzb.nzb"),
+                Text::new(b"MyNzb"),
+                Text::new(b"/dst"),
+                Text::new(b"movies"),
+                Text::new(b""),
+            ],
+        }]);
+        let ppp_wire = encode_all(&[
+            ParamEntry {
+                nzb_index: 1,
+                texts: [Text::new(b"*Unpack:"), Text::new(b"no")],
+            },
+            ParamEntry {
+                nzb_index: 1,
+                texts: [Text::new(b"*unpack:"), Text::new(b"yes")],
+            },
+        ]);
+        let files_wire = encode_all(&[
+            FileEntry {
+                id: 1,
+                nzb_index: 1,
+                size_lo: 100 * 1024 * 1024,
+                size_hi: 0,
+                remaining_size_lo: 50 * 1024 * 1024,
+                remaining_size_hi: 0,
+                paused: 0,
+                filename_confirmed: 1,
+                active_downloads: 1,
+                matched: 1,
+                texts: [Text::new(b"subj1"), Text::new(b"part1.rar")],
+            },
+            FileEntry {
+                id: 2,
+                nzb_index: 1,
+                size_lo: 100 * 1024 * 1024,
+                size_hi: 0,
+                remaining_size_lo: 100 * 1024 * 1024,
+                remaining_size_hi: 0,
+                paused: 1,
+                filename_confirmed: 1,
+                active_downloads: 0,
+                matched: 0,
+                texts: [Text::new(b"subj2"), Text::new(b"part2.rar")],
+            },
+        ]);
+        let mut full_wire = Vec::new();
+        full_wire.extend_from_slice(&nzb_wire);
+        full_wire.extend_from_slice(&ppp_wire);
+        full_wire.extend_from_slice(&files_wire);
+
+        let fl_wire = String::from_utf8(file_listing_from_wire(&full_wire, 1, 2, 2, true)).unwrap();
+        assert!(fl_wire.contains("[1] MyNzb/part1.rar (100.00 MB, 50%, 1 thread)\n"));
+        assert!(!fl_wire.contains("part2.rar"));
+
+        let gl_wire = String::from_utf8(group_listing_from_wire(&full_wire, 1, 2, 2, false)).unwrap();
+        assert_eq!(gl_wire, gl);
     }
 }

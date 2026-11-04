@@ -72,11 +72,6 @@ ExtensionManager::Manager* g_ExtensionManager;
 System::SystemInfo* g_SystemInfo;
 SystemHealth::Service* g_SystemHealth;
 
-#ifdef _WIN32
-#include "WinConsole.h"
-WinConsole* g_WinConsole;
-#endif
-
 void Reload(){}
 void ExitProc(){}
 
@@ -103,9 +98,6 @@ struct InitGlobals
 		g_ServiceCoordinator = new ServiceCoordinator();
 		g_Scanner = new Scanner();
 		g_ExtensionManager = new ExtensionManager::Manager();
-#ifdef _WIN32
-		WinConsole* g_WinConsole = new WinConsole();
-#endif
 	}
 
 	~InitGlobals()
@@ -118,9 +110,6 @@ struct InitGlobals
 		delete g_Scanner;
 		delete g_ServiceCoordinator;
 		delete g_ExtensionManager;
-#ifdef _WIN32
-		delete g_WinConsole;
-#endif
 	}
 };
 

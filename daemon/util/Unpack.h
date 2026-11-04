@@ -25,10 +25,6 @@
 #include "ScriptController.h"
 #include "FileSystem.h"
 
-#ifdef _WIN32
-#include "Utf8.h"
-#endif
-
 namespace Unpack
 {
 enum class OverwriteMode

@@ -5157,6 +5157,26 @@ NzbgetRsBuf nzbget_rs_nserv_format_nzb_file(
     int64_t file_size, int segment_size, int timestamp,
     const char* base_name, const char* relative_path);
 
+void nzbget_rs_binrpc_init_message_base(
+    uint8_t* out, int request_type, int struct_size,
+    const char* username, const char* password);
+void nzbget_rs_binrpc_init_download_request(
+    uint8_t* out, const char* username, const char* password,
+    const char* nzb_filename, const char* nzb_content, int is_url,
+    const char* category, int add_first, int add_paused, int priority,
+    int dupe_score, int dupe_mode, const char* dupe_key,
+    int trailing_len, int auto_category);
+NzbgetRsBuf nzbget_rs_binrpc_encode_edit_queue_trailing(
+    const char* text, const int32_t* ids, size_t ids_len,
+    const char* const* names, size_t names_len,
+    int* out_text_len, int* out_names_len);
+NzbgetRsBuf nzbget_rs_binrpc_file_listing_from_wire(
+    const char* data, size_t len, uint32_t nr_nzb, uint32_t nr_ppp,
+    uint32_t nr_files, int has_pattern);
+NzbgetRsBuf nzbget_rs_binrpc_group_listing_from_wire(
+    const char* data, size_t len, uint32_t nr_nzb, uint32_t nr_ppp,
+    uint32_t nr_files, int has_pattern);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

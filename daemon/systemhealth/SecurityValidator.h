@@ -213,7 +213,6 @@ private:
 	const Options& m_options;
 };
 
-#ifndef _WIN32
 class DaemonUsernameValidator final : public Validator
 {
 public:
@@ -235,7 +234,6 @@ public:
 private:
 	const Options& m_options;
 };
-#endif
 
 }  // namespace SystemHealth::Security
 

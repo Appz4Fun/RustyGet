@@ -43,9 +43,7 @@ PathsValidator::PathsValidator(const Options& options, const ::Log& log)
 	m_validators.push_back(std::make_unique<LogFileValidator>(options, log));
 	m_validators.push_back(std::make_unique<CertStoreValidator>(options, log));
 	m_validators.push_back(std::make_unique<RequiredDirValidator>(options));
-#ifndef _WIN32
 	m_validators.push_back(std::make_unique<LockFileValidator>(options, log));
-#endif
 }
 
 Status MainDirValidator::Validate() const { return Validate(m_options.GetMainDirPath()); }
@@ -307,7 +305,6 @@ Status CertStoreValidator::Validate(const fs::path& path, bool certCheck)
 
 Status RequiredDirValidator::Validate() const { return Status::Ok(); }
 
-#ifndef _WIN32
 Status LockFileValidator::Validate() const
 {
 	return Validate(m_options.GetLockFilePath(), m_options.GetDaemonMode())
@@ -350,5 +347,4 @@ Status LockFileValidator::Validate(const fs::path& path, bool daemonMode)
 
 	return Directory::Exists(parent).And(&Directory::Writable, parent);
 }
-#endif
 }  // namespace SystemHealth::Paths

@@ -544,38 +544,23 @@ void NCursesFrontend::PrintStatus()
 {
 	int statusRow = m_screenHeight - 2;
 
-	BString<100> timeString;
+	NzbgetRsNcursesStatusSpec spec{};
+	spec.stand_by = m_standBy ? 1 : 0;
+	spec.pause_download = m_pauseDownload ? 1 : 0;
+	spec.current_download_speed = m_currentDownloadSpeed;
+	spec.remaining_size = m_remainingSize;
+	spec.download_limit = m_downloadLimit;
+	spec.post_job_count = m_postJobCount;
+	spec.dn_time_sec = m_dnTimeSec;
+	spec.all_bytes = m_allBytes;
+	spec.thread_count = m_threadCount;
 
-	int64 currentDownloadSpeed = m_standBy ? 0 : m_currentDownloadSpeed;
-	if (currentDownloadSpeed > 0 && !m_pauseDownload)
+	NzbgetRsBuf buf = nzbget_rs_ncurses_format_status_bar(&spec);
+	if (buf.data)
 	{
-		int64 remain_sec = m_remainingSize / currentDownloadSpeed;
-		int h = 0, m = 0, s = 0;
-		nzbget_rs_ccm_remote_client_calc_hms(remain_sec, &h, &m, &s);
-		timeString.Format(" (~ %.2d:%.2d:%.2d)", h, m, s);
+		PlotLine(buf.data, statusRow, 0, NCURSES_COLORPAIR_STATUS);
 	}
-
-	BString<100> downloadLimit;
-	if (m_downloadLimit > 0)
-	{
-		downloadLimit.Format(", Limit %i KB/s", nzbget_rs_sfw_frontend_calc_limit_kb(m_downloadLimit));
-	}
-
-	BString<100> postStatus;
-	if (m_postJobCount > 0)
-	{
-		postStatus.Format(", %i post-job%s", m_postJobCount, m_postJobCount > 1 ? "s" : "");
-	}
-
-	int64 averageSpeed = m_dnTimeSec > 0 ? (m_allBytes / m_dnTimeSec) : 0;
-
-	BString<1024> status(" %d threads, %s, %s remaining%s%s%s%s, Avg. %s",
-		m_threadCount, *Util::FormatSpeed(currentDownloadSpeed),
-		*Util::FormatSize(m_remainingSize),
-		*timeString, *postStatus,
-		nzbget_rs_sfw_frontend_select_pause_status_suffix(m_pauseDownload ? 1 : 0, m_standBy ? 1 : 0),
-		*downloadLimit, *Util::FormatSpeed(averageSpeed));
-	PlotLine(status, statusRow, 0, NCURSES_COLORPAIR_STATUS);
+	nzbget_rs_free(buf);
 }
 
 void NCursesFrontend::PrintKeyInputBar()
@@ -673,122 +658,66 @@ void NCursesFrontend::PrintFileQueue()
 		}
 	}
 
+	NzbgetRsBuf headerBuf = nzbget_rs_ncurses_format_file_queue_header(
+		m_useColor ? 1 : 0, fileNum, pausedFiles, remaining, paused);
 	if (fileNum > 0)
 	{
-		BString<1024> header(" %sFiles for downloading - %i / %i files in queue - %s / %s",
-			m_useColor ? "" : "*** ", fileNum,
-			fileNum - pausedFiles,
-			*Util::FormatSize(remaining), *Util::FormatSize(remaining - paused));
-		PrintTopHeader(header, m_queueWinTop, true);
+		if (headerBuf.data)
+		{
+			PrintTopHeader(headerBuf.data, m_queueWinTop, true);
+		}
+		nzbget_rs_free(headerBuf);
 	}
 	else
 	{
 		lineNr--;
-		BString<1024> header("%s Files for downloading", m_useColor ? "" : "*** ");
-		PrintTopHeader(header, lineNr++, true);
+		if (headerBuf.data)
+		{
+			PrintTopHeader(headerBuf.data, lineNr++, true);
+		}
+		nzbget_rs_free(headerBuf);
 		PlotLine("Ready to receive nzb-job", lineNr++, 0, NCURSES_COLORPAIR_TEXT);
 	}
 }
 
 void NCursesFrontend::PrintFilename(FileInfo * fileInfo, int row, bool selected)
 {
-	int color = 0;
-	char chB1 = '[', chB2 = ']';
-	color = nzbget_rs_sfw_ncurses_select_row_highlight(
-		m_inputMode == editQueue ? 1 : 0, selected ? 1 : 0, m_useColor ? 1 : 0,
-		NCURSES_COLORPAIR_TEXTHIGHL, NCURSES_COLORPAIR_TEXT, &chB1, &chB2);
-	const char* Brace1 = chB1 == '<' ? "<" : "[";
-	const char* Brace2 = chB2 == '>' ? ">" : "]";
+	NzbgetRsNcursesFileRowSpec spec{};
+	spec.edit_queue_mode = m_inputMode == editQueue ? 1 : 0;
+	spec.selected = selected ? 1 : 0;
+	spec.use_color = m_useColor ? 1 : 0;
+	spec.color_highl = NCURSES_COLORPAIR_TEXTHIGHL;
+	spec.color_text = NCURSES_COLORPAIR_TEXT;
+	spec.id = fileInfo->GetId();
+	spec.priority = fileInfo->GetNzbInfo()->GetPriority();
+	spec.active_downloads = fileInfo->GetActiveDownloads();
+	spec.paused = fileInfo->GetPaused() ? 1 : 0;
+	spec.show_nzbname = m_showNzbname ? 1 : 0;
+	spec.path_sep = (uint8_t)PATH_SEPARATOR;
+	spec.nzb_name = fileInfo->GetNzbInfo()->GetName();
+	spec.filename = fileInfo->GetFilename();
+	spec.size = fileInfo->GetSize();
+	spec.remaining_size = fileInfo->GetRemainingSize();
 
-	const char* downloading = "";
-	if (fileInfo->GetActiveDownloads() > 0)
+	int color = NCURSES_COLORPAIR_TEXT;
+	NzbgetRsBuf buf = nzbget_rs_ncurses_format_file_row(&spec, &color);
+	if (buf.data)
 	{
-		downloading = " *";
+		PlotLine(buf.data, row, 0, color);
 	}
-
-	BString<100> priority;
-	if (fileInfo->GetNzbInfo()->GetPriority() != 0)
-	{
-		priority.Format(" [%+i]", fileInfo->GetNzbInfo()->GetPriority());
-	}
-
-	BString<100> completed;
-	int completedPct = nzbget_rs_ccm_remote_client_calc_file_completed_pct(
-		fileInfo->GetRemainingSize(), fileInfo->GetSize());
-	if (completedPct >= 0)
-	{
-		completed.Format(", %i%%", completedPct);
-	}
-
-	BString<1024> nzbNiceName;
-	if (m_showNzbname)
-	{
-		nzbNiceName.Format("%s%c", fileInfo->GetNzbInfo()->GetName(), PATH_SEPARATOR);
-	}
-
-	BString<1024> text("%s%i%s%s%s %s%s (%s%s)%s", Brace1, fileInfo->GetId(),
-		Brace2, *priority, downloading, *nzbNiceName, fileInfo->GetFilename(),
-		*Util::FormatSize(fileInfo->GetSize()),
-		*completed, fileInfo->GetPaused() ? " (paused)" : "");
-
-	PlotLine(text, row, 0, color);
+	nzbget_rs_free(buf);
 }
 
 void NCursesFrontend::PrintTopHeader(char* header, int lineNr, bool upTime)
 {
-	BString<1024> buffer("%-*s", m_screenWidth, header);
-	int headerLen = strlen(header);
-	int charsLeft = m_screenWidth - headerLen - 2;
-
 	int time = upTime ? m_upTimeSec : m_dnTimeSec;
-	int d = 0, h = 0, m = 0, s = 0;
-	nzbget_rs_feh_ncurses_calc_top_header_time(time, &d, &h, &m, &s);
-	BString<100> timeStr;
-
-	if (d == 0)
+	NzbgetRsBuf buf = nzbget_rs_ncurses_format_top_header(
+		header, m_screenWidth, upTime ? 1 : 0, time);
+	if (buf.data)
 	{
-		timeStr.Format("%.2d:%.2d:%.2d", h, m, s);
-		if ((int)strlen(timeStr) > charsLeft)
-		{
-			timeStr.Format("%.2d:%.2d", h, m);
-		}
+		PlotLine(buf.data, lineNr, 0, NCURSES_COLORPAIR_INFOLINE);
 	}
-	else
-	{
-		timeStr.Format("%i %s %.2d:%.2d:%.2d", d, (d == 1 ? "day" : "days"), h, m, s);
-		if ((int)strlen(timeStr) > charsLeft)
-		{
-			timeStr.Format("%id %.2d:%.2d:%.2d", d, h, m, s);
-		}
-		if ((int)strlen(timeStr) > charsLeft)
-		{
-			timeStr.Format("%id %.2d:%.2d", d, h, m);
-		}
-	}
-
-	const char* shortCap = upTime ? " Up " : "Dn ";
-	const char* longCap = upTime ? " Uptime " : " Download-time ";
-
-	int timeLen = strlen(timeStr);
-	int shortCapLen = strlen(shortCap);
-	int longCapLen = strlen(longCap);
-
-	int capMode = nzbget_rs_sfw_ncurses_select_top_header_caption(
-		charsLeft, timeLen, longCapLen, shortCapLen);
-	if (capMode == 2)
-	{
-		snprintf(buffer + m_screenWidth - timeLen - longCapLen, MAX_SCREEN_WIDTH - (m_screenWidth - timeLen - longCapLen), "%s%s", longCap, *timeStr);
-	}
-	else if (capMode == 1)
-	{
-		snprintf(buffer + m_screenWidth - timeLen - shortCapLen, MAX_SCREEN_WIDTH - (m_screenWidth - timeLen - shortCapLen), "%s%s", shortCap, *timeStr);
-	}
-	else if (capMode == 0)
-	{
-		snprintf(buffer + m_screenWidth - timeLen, MAX_SCREEN_WIDTH - (m_screenWidth - timeLen), "%s", *timeStr);
-	}
-
-	PlotLine(buffer, lineNr, 0, NCURSES_COLORPAIR_INFOLINE);
+	nzbget_rs_free(buf);
 }
 
 void NCursesFrontend::PrintGroupQueue()
@@ -799,8 +728,13 @@ void NCursesFrontend::PrintGroupQueue()
 
 	if (downloadQueue->GetQueue()->empty())
 	{
-		BString<1024> buffer("%s NZBs for downloading", m_useColor ? "" : "*** ");
-		PrintTopHeader(buffer, lineNr++, false);
+		NzbgetRsBuf headerBuf = nzbget_rs_ncurses_format_group_queue_header(
+			m_useColor ? 1 : 0, 0, 0, 0);
+		if (headerBuf.data)
+		{
+			PrintTopHeader(headerBuf.data, lineNr++, false);
+		}
+		nzbget_rs_free(headerBuf);
 		PlotLine("Ready to receive nzb-job", lineNr++, 0, NCURSES_COLORPAIR_TEXT);
 	}
 	else
@@ -833,10 +767,13 @@ void NCursesFrontend::PrintGroupQueue()
 			paused += nzbInfo->GetPausedSize();
 		}
 
-		BString<1024> buffer(" %sNZBs for downloading - %i NZBs in queue - %s / %s",
-			m_useColor ? "" : "*** ", (int)downloadQueue->GetQueue()->size(),
-			*Util::FormatSize(remaining), *Util::FormatSize(remaining - paused));
-		PrintTopHeader(buffer, m_queueWinTop, false);
+		NzbgetRsBuf headerBuf = nzbget_rs_ncurses_format_group_queue_header(
+			m_useColor ? 1 : 0, (int)downloadQueue->GetQueue()->size(), remaining, paused);
+		if (headerBuf.data)
+		{
+			PrintTopHeader(headerBuf.data, m_queueWinTop, false);
+		}
+		nzbget_rs_free(headerBuf);
 	}
 }
 
@@ -849,100 +786,35 @@ void NCursesFrontend::ResetColWidths()
 
 void NCursesFrontend::PrintGroupname(NzbInfo* nzbInfo, int row, bool selected, bool calcColWidth)
 {
+	NzbgetRsNcursesGroupRowSpec spec{};
+	spec.edit_queue_mode = m_inputMode == editQueue ? 1 : 0;
+	spec.selected = selected ? 1 : 0;
+	spec.use_color = m_useColor ? 1 : 0;
+	spec.color_highl = NCURSES_COLORPAIR_TEXTHIGHL;
+	spec.color_text = NCURSES_COLORPAIR_TEXT;
+	spec.screen_width = m_screenWidth;
+	spec.calc_col_width = calcColWidth ? 1 : 0;
+	spec.id = nzbInfo->GetId();
+	spec.priority = nzbInfo->GetPriority();
+	spec.active_downloads = nzbInfo->GetActiveDownloads();
+	spec.name = nzbInfo->GetName();
+	spec.file_count = (int)nzbInfo->GetFileList()->size();
+	spec.paused_file_count = nzbInfo->GetPausedFileCount();
+	spec.size = nzbInfo->GetSize();
+	spec.remaining_size = nzbInfo->GetRemainingSize();
+	spec.paused_size = nzbInfo->GetPausedSize();
+	spec.stand_by = m_standBy ? 1 : 0;
+	spec.pause_download = m_pauseDownload ? 1 : 0;
+	spec.current_download_speed = m_currentDownloadSpeed;
+
 	int color = NCURSES_COLORPAIR_TEXT;
-	char chBrace1 = '[';
-	char chBrace2 = ']';
-	if (m_inputMode == editQueue && selected)
+	NzbgetRsBuf buf = nzbget_rs_ncurses_format_group_row(
+		&spec, &m_colWidthFiles, &m_colWidthTotal, &m_colWidthLeft, &color);
+	if (!calcColWidth && buf.data)
 	{
-		color = NCURSES_COLORPAIR_TEXTHIGHL;
-		if (!m_useColor)
-		{
-			chBrace1 = '<';
-			chBrace2 = '>';
-		}
+		PlotLine(buf.data, row, 0, color);
 	}
-
-	const char* downloading = "";
-	if (nzbInfo->GetActiveDownloads() > 0)
-	{
-		downloading = " *";
-	}
-
-	BString<100> priority;
-	if (nzbInfo->GetPriority() != 0)
-	{
-		priority.Format(" [%+i]", nzbInfo->GetPriority());
-	}
-
-	// Format:
-	// [id - id] Name   Left-Files/Paused     Total      Left     Time
-	// [1-2] Nzb-name             999/999 999.99 MB 999.99 MB 00:00:00
-
-	int nameLen = 0;
-	nameLen = nzbget_rs_ccm_ncurses_calc_group_name_len(
-		m_screenWidth, calcColWidth ? 1 : 0, m_colWidthFiles, m_colWidthTotal, m_colWidthLeft);
-
-	BString<1024> buffer;
-
-	bool printFormatted = nameLen > 20;
-
-	if (printFormatted)
-	{
-		BString<100> files("%i/%i", (int)nzbInfo->GetFileList()->size(), nzbInfo->GetPausedFileCount());
-		BString<1024> nameWithIds("%c%i%c%s%s %s", chBrace1, nzbInfo->GetId(), chBrace2,
-			*priority, downloading, nzbInfo->GetName());
-
-		int64 unpausedRemainingSize = nzbInfo->GetRemainingSize() - nzbInfo->GetPausedSize();
-		CString remaining = Util::FormatSize(unpausedRemainingSize);
-		CString total = Util::FormatSize(nzbInfo->GetSize());
-
-		BString<100> time;
-		int64 currentDownloadSpeed = m_standBy ? 0 : m_currentDownloadSpeed;
-		if (nzbInfo->GetPausedSize() > 0 && unpausedRemainingSize == 0)
-		{
-			time = "[paused]";
-			remaining = Util::FormatSize(nzbInfo->GetRemainingSize());
-		}
-		else
-		{
-			int h = 0, m = 0, s = 0;
-			if (nzbget_rs_sfw_ncurses_calc_group_remain_hms_capped(
-				unpausedRemainingSize, currentDownloadSpeed, m_pauseDownload ? 1 : 0,
-				&h, &m, &s) != 0)
-			{
-				time.Format("%.2d:%.2d:%.2d", h, m, s);
-			}
-		}
-
-		if (calcColWidth)
-		{
-			int colWidthFiles = strlen(files);
-			m_colWidthFiles = colWidthFiles > m_colWidthFiles ? colWidthFiles : m_colWidthFiles;
-
-			int colWidthTotal = strlen(total);
-			m_colWidthTotal = colWidthTotal > m_colWidthTotal ? colWidthTotal : m_colWidthTotal;
-
-			int colWidthLeft = strlen(remaining);
-			m_colWidthLeft = colWidthLeft > m_colWidthLeft ? colWidthLeft : m_colWidthLeft;
-		}
-		else
-		{
-			// the name cut to its column: longer, it pushed the size and time
-			// columns past the screen's edge
-			buffer.Format("%-*.*s  %*s  %*s  %*s  %8s", nameLen, nameLen, *nameWithIds,
-				m_colWidthFiles, *files, m_colWidthTotal, *total, m_colWidthLeft, *remaining, *time);
-		}
-	}
-	else
-	{
-		buffer.Format("%c%i%c%s %s", chBrace1, nzbInfo->GetId(),
-			chBrace2, downloading, nzbInfo->GetName());
-	}
-
-	if (!calcColWidth)
-	{
-		PlotLine(buffer, row, 0, color);
-	}
+	nzbget_rs_free(buf);
 }
 
 bool NCursesFrontend::EditQueue(DownloadQueue::EEditAction action, int offset)

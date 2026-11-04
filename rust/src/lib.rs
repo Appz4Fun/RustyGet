@@ -97,6 +97,7 @@ pub mod dupeidentnntpnzb;
 pub mod articledlwriterstat;
 pub mod xmlrpc_format;
 pub mod diskstate_format;
+pub mod ncurses_format;
 
 pub mod deadpostings;
 pub mod dupewatch;

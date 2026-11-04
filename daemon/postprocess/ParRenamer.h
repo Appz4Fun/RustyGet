@@ -61,35 +61,6 @@ private:
 	NullStreamBuf m_nullbuf;
 	std::ostream m_nout{&m_nullbuf};
 
-	class FileHash
-	{
-	public:
-		FileHash(const char* filename, const char* hash) :
-			m_filename(filename), m_hash(hash) {}
-		const char* GetFilename() { return m_filename; }
-		const char* GetHash() { return m_hash; }
-		bool GetFileExists() { return m_fileExists; }
-		void SetFileExists(bool fileExists) { m_fileExists = fileExists; }
-	private:
-		CString m_filename;
-		CString m_hash;
-		bool m_fileExists = false;
-	};
-
-	class ParInfo
-	{
-	public:
-		ParInfo(const char* filename, const char* setId) :
-			m_filename(filename), m_setId(setId) {}
-		const char* GetFilename() { return m_filename; }
-		const char* GetSetId() { return m_setId; }
-	private:
-		CString m_filename;
-		CString m_setId;
-	};
-
-	typedef std::deque<FileHash> FileHashList;
-	typedef std::deque<ParInfo> ParInfoList;
 	typedef std::deque<CString> NameList;
 
 	CString m_infoName;
@@ -97,10 +68,6 @@ private:
 	CString m_progressLabel;
 	int m_stageProgress = 0;
 	NameList m_dirList;
-	FileHashList m_fileHashList;
-	ParInfoList m_parInfoList;
-	NameList m_badParList;
-	NameList m_loadedParList;
 	int m_fileCount = 0;
 	int m_curFile = 0;
 	int m_renamedCount = 0;
@@ -108,20 +75,7 @@ private:
 	bool m_detectMissing = false;
 	bool m_hasDamagedParFiles = false;
 
-	void BuildDirList(const char* destDir);
-	void LoadMainParFiles(const char* destDir);
-	void LoadExtraParFiles(const char* destDir);
-	void LoadParFile(const char* parFilename);
-	void CheckFiles(const char* destDir, bool checkPars);
-	void CheckRegularFile(const char* destDir, const char* filename);
-	void CheckParFile(const char* destDir, const char* filename);
-	bool IsSplittedFragment(const char* filename, const char* correctName);
-	void CheckMissing();
-	void RenameParFiles(const char* destDir);
-	void RenameParFile(const char* destDir, const char* filename, const char* setId);
-	bool NeedRenameParFiles();
 	void RenameFile(const char* srcFilename, const char* destFileName);
-	void RenameBadParFiles();
 	std::string MakeRelativeName(const char* fullFilename);
 };
 

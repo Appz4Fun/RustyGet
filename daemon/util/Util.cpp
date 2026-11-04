@@ -270,75 +270,6 @@ void Util::SplitInt64(int64 Int64, uint32* Hi, uint32* Lo)
 	nzbget_rs_ufs_util_split_int64(Int64, Hi, Lo);
 }
 
-/* Base64 decryption is taken from
-*  Article "BASE 64 Decoding and Encoding Class 2003" by Jan Raddatz
-*  http://www.codeguru.com/cpp/cpp/algorithms/article.php/c5099/
-*/
-
-const static char BASE64_DEALPHABET [128] =
-{
-	0,  0,  0,  0,  0,  0,  0,  0,  0,  0, //   0 -   9
-	0,  0,  0,  0,  0,  0,  0,  0,  0,  0, //  10 -  19
-	0,  0,  0,  0,  0,  0,  0,  0,  0,  0, //  20 -  29
-	0,  0,  0,  0,  0,  0,  0,  0,  0,  0, //  30 -  39
-	0,  0,  0, 62,  0,  0,  0, 63, 52, 53, //  40 -  49
-	54, 55, 56, 57, 58, 59, 60, 61,  0,  0, //  50 -  59
-	0, 61,  0,  0,  0,  0,  1,  2,  3,  4, //  60 -  69
-	5,  6,  7,  8,  9, 10, 11, 12, 13, 14, //  70 -  79
-	15, 16, 17, 18, 19, 20, 21, 22, 23, 24, //  80 -  89
-	25,  0,  0,  0,  0,  0,  0, 26, 27, 28, //  90 -  99
-	29, 30, 31, 32, 33, 34, 35, 36, 37, 38, // 100 - 109
-	39, 40, 41, 42, 43, 44, 45, 46, 47, 48, // 110 - 119
-	49, 50, 51,  0,  0,  0,  0,  0			// 120 - 127
-};
-
-uint32 DecodeByteQuartet(char* inputBuffer, char* outputBuffer)
-{
-	uint32 buffer = 0;
-
-	if (inputBuffer[3] == '=')
-	{
-		if (inputBuffer[2] == '=')
-		{
-			buffer = (buffer | BASE64_DEALPHABET [(int)inputBuffer[0]]) << 6;
-			buffer = (buffer | BASE64_DEALPHABET [(int)inputBuffer[1]]) << 6;
-			buffer = buffer << 14;
-
-			outputBuffer [0] = (char)(buffer >> 24);
-
-			return 1;
-		}
-		else
-		{
-			buffer = (buffer | BASE64_DEALPHABET [(int)inputBuffer[0]]) << 6;
-			buffer = (buffer | BASE64_DEALPHABET [(int)inputBuffer[1]]) << 6;
-			buffer = (buffer | BASE64_DEALPHABET [(int)inputBuffer[2]]) << 6;
-			buffer = buffer << 8;
-
-			outputBuffer [0] = (char)(buffer >> 24);
-			outputBuffer [1] = (char)(buffer >> 16);
-
-			return 2;
-		}
-	}
-	else
-	{
-		buffer = (buffer | BASE64_DEALPHABET [(int)inputBuffer[0]]) << 6;
-		buffer = (buffer | BASE64_DEALPHABET [(int)inputBuffer[1]]) << 6;
-		buffer = (buffer | BASE64_DEALPHABET [(int)inputBuffer[2]]) << 6;
-		buffer = (buffer | BASE64_DEALPHABET [(int)inputBuffer[3]]) << 6;
-		buffer = buffer << 2;
-
-		outputBuffer [0] = (char)(buffer >> 24);
-		outputBuffer [1] = (char)(buffer >> 16);
-		outputBuffer [2] = (char)(buffer >> 8);
-
-		return 3;
-	}
-
-	return 0;
-}
-
 CString Util::FormatSize(int64 fileSize)
 {
 	// rust/src/util.rs
@@ -540,71 +471,6 @@ bool Util::AlphaNum(const char* str)
 	return nzbget_rs_alpha_num(str) != 0;
 }
 
-/* Calculate Hash using Bob Jenkins (1996) algorithm
- * http://burtleburtle.net/bob/c/lookup2.c
- */
-
-#define hashsize(n) ((uint32)1<<(n))
-#define hashmask(n) (hashsize(n)-1)
-
-#define mix(a,b,c) \
-{ \
-a -= b; a -= c; a ^= (c>>13); \
-b -= c; b -= a; b ^= (a<<8); \
-c -= a; c -= b; c ^= (b>>13); \
-a -= b; a -= c; a ^= (c>>12);  \
-b -= c; b -= a; b ^= (a<<16); \
-c -= a; c -= b; c ^= (b>>5); \
-a -= b; a -= c; a ^= (c>>3);  \
-b -= c; b -= a; b ^= (a<<10); \
-c -= a; c -= b; c ^= (b>>15); \
-}
-
-uint32 hash(uint8 *k, uint32 length, uint32 initval)
-// register uint8 *k;        /* the key */
-// register uint32  length;   /* the length of the key */
-// register uint32  initval;    /* the previous hash, or an arbitrary value */
-{
-	uint32 a,b,c,len;
-
-	/* Set up the internal state */
-	len = length;
-	a = b = 0x9e3779b9;  /* the golden ratio; an arbitrary value */
-	c = initval;           /* the previous hash value */
-
-	/*---------------------------------------- handle most of the key */
-	while (len >= 12)
-	{
-		a += (k[0] +((uint32)k[1]<<8) +((uint32)k[2]<<16) +((uint32)k[3]<<24));
-		b += (k[4] +((uint32)k[5]<<8) +((uint32)k[6]<<16) +((uint32)k[7]<<24));
-		c += (k[8] +((uint32)k[9]<<8) +((uint32)k[10]<<16)+((uint32)k[11]<<24));
-		mix(a,b,c);
-		k += 12; len -= 12;
-	}
-
-	/*------------------------------------- handle the last 11 bytes */
-	c += length;
-	switch(len)              /* all the case statements fall through */
-	{
-		case 11: c+=((uint32)k[10]<<24);
-		case 10: c+=((uint32)k[9]<<16);
-		case 9 : c+=((uint32)k[8]<<8);
-			/* the first byte of c is reserved for the length */
-		case 8 : b+=((uint32)k[7]<<24);
-		case 7 : b+=((uint32)k[6]<<16);
-		case 6 : b+=((uint32)k[5]<<8);
-		case 5 : b+=k[4];
-		case 4 : a+=((uint32)k[3]<<24);
-		case 3 : a+=((uint32)k[2]<<16);
-		case 2 : a+=((uint32)k[1]<<8);
-		case 1 : a+=k[0];
-			/* case 0: nothing left to add */
-	}
-	mix(a,b,c);
-	/*-------------------------------------------- report the result */
-	return c;
-}
-
 uint32 Util::HashBJ96(const char* buffer, int bufSize, uint32 initValue)
 {
 	// rust/src/util.rs
@@ -671,64 +537,6 @@ time_t Util::CurrentTime()
 #else
 	return ::time(nullptr);
 #endif
-}
-
-/* From boost */
-
-inline int is_leap(int year)
-{
-  if(year % 400 == 0)
-  return 1;
-  if(year % 100 == 0)
-  return 0;
-  if(year % 4 == 0)
-  return 1;
-  return 0;
-}
-inline int days_from_0(int year)
-{
-  year--;
-  return 365 * year + (year / 400) - (year/100) + (year / 4);
-}
-inline int days_from_1970(int year)
-{
-  static const int days_from_0_to_1970 = 719162; // days_from_0(1970);
-  return days_from_0(year) - days_from_0_to_1970;
-}
-inline int days_from_1jan(int year,int month,int day)
-{
-  static const int days[2][12] =
-  {
-	{ 0,31,59,90,120,151,181,212,243,273,304,334},
-	{ 0,31,60,91,121,152,182,213,244,274,305,335}
-  };
-  return days[is_leap(year)][month-1] + day - 1;
-}
-
-inline time_t internal_timegm(tm const *t)
-{
-  int year = t->tm_year + 1900;
-  int month = t->tm_mon;
-  if(month > 11)
-  {
-	year += month/12;
-	month %= 12;
-  }
-  else if(month < 0)
-  {
-	int years_diff = (-month + 11)/12;
-	year -= years_diff;
-	month+=12 * years_diff;
-  }
-  month++;
-  int day = t->tm_mday;
-  int day_of_year = days_from_1jan(year,month,day);
-  int days_since_epoch = days_from_1970(year) + day_of_year;
-
-  time_t seconds_in_day = 3600 * 24;
-  time_t result = seconds_in_day * days_since_epoch + 3600 * t->tm_hour + 60 * t->tm_min + t->tm_sec;
-
-  return result;
 }
 
 time_t Util::Timegm(tm const *t)
@@ -806,57 +614,6 @@ CString WebUtil::XmlEncode(const char* raw)
 	CString result(buf.data, static_cast<int>(buf.len));
 	nzbget_rs_free(buf);
 	return result;
-}
-
-namespace
-{
-	// a code point as UTF-8 (never longer than the escape it stands for: the
-	// decoders write in place); a NUL or a value past Unicode becomes U+FFFD
-	char* AppendUtf8(char* output, uint32 code)
-	{
-		if (code == 0 || code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF))
-		{
-			code = 0xFFFD;
-		}
-		if (code < 0x80)
-		{
-			*output++ = (char)code;
-		}
-		else if (code < 0x800)
-		{
-			*output++ = (char)(0xC0 | (code >> 6));
-			*output++ = (char)(0x80 | (code & 0x3F));
-		}
-		else if (code < 0x10000)
-		{
-			*output++ = (char)(0xE0 | (code >> 12));
-			*output++ = (char)(0x80 | ((code >> 6) & 0x3F));
-			*output++ = (char)(0x80 | (code & 0x3F));
-		}
-		else
-		{
-			*output++ = (char)(0xF0 | (code >> 18));
-			*output++ = (char)(0x80 | ((code >> 12) & 0x3F));
-			*output++ = (char)(0x80 | ((code >> 6) & 0x3F));
-			*output++ = (char)(0x80 | (code & 0x3F));
-		}
-		return output;
-	}
-
-	// four hex digits at p, or -1
-	int Hex4(const char* p)
-	{
-		int code = 0;
-		for (int i = 0; i < 4; i++)
-		{
-			if (!isxdigit((unsigned char)p[i]))
-			{
-				return -1;
-			}
-			code = code * 16 + (isdigit((unsigned char)p[i]) ? p[i] - '0' : (tolower((unsigned char)p[i]) - 'a' + 10));
-		}
-		return code;
-	}
 }
 
 namespace

@@ -723,6 +723,387 @@ pub fn history_listing(data: &[u8], count: u32) -> Vec<u8> {
     })
 }
 
+/// FFI descriptor for a single file entry in `RemoteClient::RequestServerList(files=true)`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FileListingEntry {
+    pub id: i32,
+    pub nzb_name: *const u8,
+    pub filename: *const u8,
+    pub size: i64,
+    pub remaining_size: i64,
+    pub active_downloads: i32,
+    pub paused: i32,
+    pub matched: i32,
+}
+
+/// FFI descriptor for a group parameter (`name=value`) in `RemoteClient::RequestServerList(groups=true)`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GroupParamEntry {
+    pub name: *const u8,
+    pub value: *const u8,
+}
+
+/// FFI descriptor for a group (NZB/URL) entry in `RemoteClient::RequestServerList(groups=true)`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GroupListingEntry {
+    pub id: i32,
+    pub kind: i32,
+    pub priority: i32,
+    pub name: *const u8,
+    pub category: *const u8,
+    pub file_count: i32,
+    pub remaining_size: i64,
+    pub paused_size: i64,
+    pub active_downloads: i32,
+    pub matched: i32,
+    pub params: *const GroupParamEntry,
+    pub param_count: usize,
+}
+
+/// FFI descriptor for the server status summary tail of `RemoteClient::RequestServerList`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct StatusSummarySpec {
+    pub include_remaining_size: i32,
+    pub remaining_size: i64,
+    pub download_rate: u32,
+    pub download_paused: u32,
+    pub download2_paused: u32,
+    pub download_stand_by: u32,
+    pub downloaded_bytes: i64,
+    pub download_time_sec: u32,
+    pub download_limit: u32,
+    pub up_time_sec: u32,
+    pub thread_count: u32,
+    pub post_job_count: u32,
+    pub scan_paused: u32,
+    pub post_paused: u32,
+}
+
+fn push_two_digits(out: &mut Vec<u8>, value: i32) {
+    if (0..10).contains(&value) {
+        push_listing(out, b'0');
+    }
+    push_int(out, value);
+}
+
+fn push_hms(out: &mut Vec<u8>, total_sec: i64) {
+    let (h, m, s) = crate::connclientmain::remote_client_calc_hms(total_sec);
+    push_two_digits(out, h);
+    push_listing(out, b':');
+    push_two_digits(out, m);
+    push_listing(out, b':');
+    push_two_digits(out, s);
+}
+
+unsafe fn cstr_bytes<'a>(ptr: *const u8) -> &'a [u8] {
+    if ptr.is_null() {
+        b""
+    } else {
+        std::ffi::CStr::from_ptr(ptr.cast()).to_bytes()
+    }
+}
+
+/// Format the `files` section of `RemoteClient::RequestServerList`.
+pub fn file_listing(entries: &[FileListingEntry], has_pattern: bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(entries.len().saturating_mul(80).saturating_add(160).min(MAX_LISTING_INITIAL_CAPACITY));
+    append_listing(&mut out, b"Queue List\n-----------------------------------\n");
+
+    let mut remaining: i64 = 0;
+    let mut paused: i64 = 0;
+    let mut matches: i32 = 0;
+    let nr_file_entries = entries.len() as i32;
+
+    for e in entries {
+        let completed_pct = crate::connclientmain::remote_client_calc_file_completed_pct(
+            e.remaining_size,
+            e.size,
+        );
+        if e.paused != 0 {
+            paused = paused.wrapping_add(e.remaining_size);
+        } else {
+            remaining = remaining.wrapping_add(e.remaining_size);
+        }
+
+        if !has_pattern || e.matched != 0 {
+            push_listing(&mut out, b'[');
+            push_int(&mut out, e.id);
+            append_listing(&mut out, b"] ");
+            append_listing(&mut out, unsafe { cstr_bytes(e.nzb_name) });
+            push_listing(&mut out, b'/');
+            append_listing(&mut out, unsafe { cstr_bytes(e.filename) });
+            append_listing(&mut out, b" (");
+            crate::util::format_size_into(&mut out, e.size);
+            if completed_pct >= 0 {
+                append_listing(&mut out, b", ");
+                push_int(&mut out, completed_pct);
+                push_listing(&mut out, b'%');
+            }
+            if e.active_downloads > 0 {
+                append_listing(&mut out, b", ");
+                push_int(&mut out, e.active_downloads);
+                append_listing(
+                    &mut out,
+                    if e.active_downloads > 1 {
+                        b" threads"
+                    } else {
+                        b" thread"
+                    },
+                );
+            }
+            push_listing(&mut out, b')');
+            if e.paused != 0 {
+                append_listing(&mut out, b" (paused)");
+            }
+            push_listing(&mut out, b'\n');
+            matches += 1;
+        }
+    }
+
+    if matches == 0 {
+        append_listing(&mut out, b"No matches founds\n");
+    }
+
+    append_listing(&mut out, b"-----------------------------------\nFiles: ");
+    push_int(&mut out, nr_file_entries);
+    push_listing(&mut out, b'\n');
+    if has_pattern {
+        append_listing(&mut out, b"Matches: ");
+        push_int(&mut out, matches);
+        push_listing(&mut out, b'\n');
+    }
+
+    append_listing(&mut out, b"Remaining size: ");
+    crate::util::format_size_into(&mut out, remaining);
+    if paused > 0 {
+        append_listing(&mut out, b" (+");
+        crate::util::format_size_into(&mut out, paused);
+        append_listing(&mut out, b" paused)\n");
+    } else {
+        push_listing(&mut out, b'\n');
+    }
+    crate::util::reserve_bytes(&mut out, 1);
+    out
+}
+
+/// Format the `groups` section of `RemoteClient::RequestServerList`.
+pub fn group_listing(entries: &[GroupListingEntry], has_pattern: bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(entries.len().saturating_mul(96).saturating_add(160).min(MAX_LISTING_INITIAL_CAPACITY));
+    append_listing(&mut out, b"Queue List\n-----------------------------------\n");
+
+    let mut remaining: i64 = 0;
+    let mut paused: i64 = 0;
+    let mut matches: i32 = 0;
+    let mut nr_file_entries: i32 = 0;
+
+    for e in entries {
+        nr_file_entries = nr_file_entries.wrapping_add(e.file_count);
+        let mut has_th = 0;
+        let mut th_pl = 0;
+        let unpaused_rem = unsafe {
+            crate::rpcoptclient::roc_remote_client_calc_group_unpaused_remaining(
+                e.remaining_size,
+                e.paused_size,
+                e.active_downloads,
+                &mut has_th,
+                &mut th_pl,
+            )
+        };
+        let has_threads = has_th != 0;
+        let threads_plural = th_pl != 0;
+        remaining = remaining.wrapping_add(unpaused_rem);
+        if e.paused_size > 0 {
+            paused = paused.wrapping_add(e.paused_size);
+        }
+
+        if !has_pattern || e.matched != 0 {
+            push_listing(&mut out, b'[');
+            push_int(&mut out, e.id);
+            append_listing(&mut out, b"] ");
+            if e.priority != 0 {
+                push_listing(&mut out, b'[');
+                if e.priority > 0 {
+                    push_listing(&mut out, b'+');
+                }
+                push_int(&mut out, e.priority);
+                append_listing(&mut out, b"] ");
+            }
+            append_listing(&mut out, unsafe { cstr_bytes(e.name) });
+            append_listing(&mut out, b" (");
+            if e.kind == 1 {
+                // NzbInfo::nkUrl == 1
+                append_listing(&mut out, b"URL");
+            } else {
+                push_int(&mut out, e.file_count);
+                append_listing(
+                    &mut out,
+                    if e.file_count > 1 {
+                        b" files"
+                    } else {
+                        b" file"
+                    },
+                );
+            }
+            append_listing(&mut out, b", ");
+            crate::util::format_size_into(&mut out, unpaused_rem);
+            if e.paused_size > 0 {
+                append_listing(&mut out, b" + ");
+                crate::util::format_size_into(&mut out, e.paused_size);
+                append_listing(&mut out, b" paused");
+            }
+            if has_threads {
+                append_listing(&mut out, b", ");
+                push_int(&mut out, e.active_downloads);
+                append_listing(
+                    &mut out,
+                    if threads_plural {
+                        b" threads"
+                    } else {
+                        b" thread"
+                    },
+                );
+            }
+            push_listing(&mut out, b')');
+            let cat = unsafe { cstr_bytes(e.category) };
+            if !cat.is_empty() {
+                append_listing(&mut out, b" (");
+                append_listing(&mut out, cat);
+                push_listing(&mut out, b')');
+            }
+            if !e.params.is_null() && e.param_count > 0 {
+                let params = unsafe { std::slice::from_raw_parts(e.params, e.param_count) };
+                let mut param_buf = Vec::new();
+                for (idx, p) in params.iter().enumerate() {
+                    param_buf.extend_from_slice(if idx == 0 { b" (" } else { b", " });
+                    param_buf.extend_from_slice(unsafe { cstr_bytes(p.name) });
+                    param_buf.push(b'=');
+                    param_buf.extend_from_slice(unsafe { cstr_bytes(p.value) });
+                }
+                // Match BString<1024> truncation semantics for parameters
+                if param_buf.len() > 1023 {
+                    param_buf.truncate(1023);
+                }
+                if param_buf.len() < 1023 {
+                    param_buf.push(b')');
+                }
+                append_listing(&mut out, &param_buf);
+            }
+            push_listing(&mut out, b'\n');
+            matches += 1;
+        }
+    }
+
+    if matches == 0 {
+        append_listing(&mut out, b"No matches founds\n");
+    }
+
+    append_listing(&mut out, b"-----------------------------------\nGroups: ");
+    push_int(&mut out, entries.len() as i32);
+    push_listing(&mut out, b'\n');
+    if has_pattern {
+        append_listing(&mut out, b"Matches: ");
+        push_int(&mut out, matches);
+        push_listing(&mut out, b'\n');
+    }
+    append_listing(&mut out, b"Files: ");
+    push_int(&mut out, nr_file_entries);
+    push_listing(&mut out, b'\n');
+
+    append_listing(&mut out, b"Remaining size: ");
+    crate::util::format_size_into(&mut out, remaining);
+    if paused > 0 {
+        append_listing(&mut out, b" (+");
+        crate::util::format_size_into(&mut out, paused);
+        append_listing(&mut out, b" paused)\n");
+    } else {
+        push_listing(&mut out, b'\n');
+    }
+    crate::util::reserve_bytes(&mut out, 1);
+    out
+}
+
+/// Format the server status summary section at the end of `RemoteClient::RequestServerList`.
+pub fn status_summary(spec: &StatusSummarySpec) -> Vec<u8> {
+    let mut out = Vec::with_capacity(512);
+    if spec.include_remaining_size != 0 {
+        append_listing(&mut out, b"Remaining size: ");
+        crate::util::format_size_into(&mut out, spec.remaining_size);
+        push_listing(&mut out, b'\n');
+    }
+
+    if crate::schedfrontweb::remote_client_should_print_remaining_time(
+        spec.download_rate,
+        spec.download_paused,
+        spec.download2_paused,
+        spec.download_stand_by,
+    ) {
+        let remain_sec = spec.remaining_size / (spec.download_rate as i64);
+        append_listing(&mut out, b"Remaining time: ");
+        push_hms(&mut out, remain_sec);
+        push_listing(&mut out, b'\n');
+    }
+
+    append_listing(&mut out, b"Current download rate: ");
+    append_listing(&mut out, &crate::util::format_speed(spec.download_rate as i64));
+    push_listing(&mut out, b'\n');
+
+    let avg_speed = crate::connclientmain::remote_client_calc_avg_speed(
+        spec.downloaded_bytes,
+        spec.download_time_sec as i64,
+    );
+    append_listing(&mut out, b"Session download rate: ");
+    append_listing(&mut out, &crate::util::format_speed(avg_speed as i64));
+    push_listing(&mut out, b'\n');
+
+    if spec.download_limit > 0 {
+        append_listing(&mut out, b"Speed limit: ");
+        append_listing(&mut out, &crate::util::format_speed(spec.download_limit as i64));
+        push_listing(&mut out, b'\n');
+    }
+
+    append_listing(&mut out, b"Up time: ");
+    push_hms(&mut out, spec.up_time_sec as i64);
+    push_listing(&mut out, b'\n');
+
+    append_listing(&mut out, b"Download time: ");
+    push_hms(&mut out, spec.download_time_sec as i64);
+    push_listing(&mut out, b'\n');
+
+    append_listing(&mut out, b"Downloaded: ");
+    crate::util::format_size_into(&mut out, spec.downloaded_bytes);
+    push_listing(&mut out, b'\n');
+
+    append_listing(&mut out, b"Threads running: ");
+    push_int(&mut out, spec.thread_count as i32);
+    push_listing(&mut out, b'\n');
+
+    if spec.post_job_count > 0 {
+        append_listing(&mut out, b"Post-jobs: ");
+        push_int(&mut out, spec.post_job_count as i32);
+        push_listing(&mut out, b'\n');
+    }
+
+    if spec.scan_paused != 0 {
+        append_listing(&mut out, b"Scan state: Paused\n");
+    }
+
+    let server_state = crate::connclientmain::remote_client_format_server_state(
+        spec.download_paused != 0,
+        spec.download2_paused != 0,
+        spec.download_stand_by != 0,
+        spec.post_job_count,
+        spec.post_paused != 0,
+    );
+    append_listing(&mut out, b"Server state: ");
+    append_listing(&mut out, &server_state);
+    push_listing(&mut out, b'\n');
+    crate::util::reserve_bytes(&mut out, 1);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1346,5 +1727,81 @@ mod tests {
         assert!(!trailing_ok(i64::MIN, i64::MAX));
         assert!(trailing_ok(i64::MAX, i64::MAX));
         assert!(!trailing_ok(i64::MAX, i64::MAX - 1));
+    }
+
+    #[test]
+    fn test_file_and_group_and_status_listings() {
+        let entries = [
+            FileListingEntry {
+                id: 1,
+                nzb_name: c"MyNzb".as_ptr().cast(),
+                filename: c"part1.rar".as_ptr().cast(),
+                size: 100 * 1024 * 1024,
+                remaining_size: 50 * 1024 * 1024,
+                active_downloads: 2,
+                paused: 0,
+                matched: 1,
+            },
+            FileListingEntry {
+                id: 2,
+                nzb_name: c"MyNzb".as_ptr().cast(),
+                filename: c"part2.rar".as_ptr().cast(),
+                size: 100 * 1024 * 1024,
+                remaining_size: 100 * 1024 * 1024,
+                active_downloads: 0,
+                paused: 1,
+                matched: 0,
+            },
+        ];
+        let fl = String::from_utf8(file_listing(&entries, true)).unwrap();
+        assert!(fl.contains("[1] MyNzb/part1.rar (100.00 MB, 50%, 2 threads)\n"));
+        assert!(!fl.contains("part2.rar"));
+        assert!(fl.contains("Files: 2\nMatches: 1\nRemaining size: 50.00 MB (+100.00 MB paused)\n"));
+
+        let params = [GroupParamEntry {
+            name: c"*Unpack:".as_ptr().cast(),
+            value: c"yes".as_ptr().cast(),
+        }];
+        let groups = [GroupListingEntry {
+            id: 10,
+            kind: 0,
+            priority: 50,
+            name: c"MyNzb".as_ptr().cast(),
+            category: c"movies".as_ptr().cast(),
+            file_count: 2,
+            remaining_size: 150 * 1024 * 1024,
+            paused_size: 100 * 1024 * 1024,
+            active_downloads: 1,
+            matched: 1,
+            params: params.as_ptr(),
+            param_count: params.len(),
+        }];
+        let gl = String::from_utf8(group_listing(&groups, false)).unwrap();
+        assert!(gl.contains("[10] [+50] MyNzb (2 files, 50.00 MB + 100.00 MB paused, 1 thread) (movies) (*Unpack:=yes)\n"));
+        assert!(gl.contains("Groups: 1\nFiles: 2\nRemaining size: 50.00 MB (+100.00 MB paused)\n"));
+
+        let status = StatusSummarySpec {
+            include_remaining_size: 1,
+            remaining_size: 1024 * 1024,
+            download_rate: 512 * 1024,
+            download_paused: 0,
+            download2_paused: 0,
+            download_stand_by: 0,
+            downloaded_bytes: 10 * 1024 * 1024,
+            download_time_sec: 10,
+            download_limit: 1024 * 1024,
+            up_time_sec: 3661,
+            thread_count: 4,
+            post_job_count: 2,
+            scan_paused: 1,
+            post_paused: 0,
+        };
+        let ss = String::from_utf8(status_summary(&status)).unwrap();
+        assert!(ss.contains("Remaining size: 1.00 MB\n"));
+        assert!(ss.contains("Remaining time: 00:00:02\n"));
+        assert!(ss.contains("Up time: 01:01:01\n"));
+        assert!(ss.contains("Post-jobs: 2\n"));
+        assert!(ss.contains("Scan state: Paused\n"));
+        assert!(ss.contains("Server state: Downloading, Post-Processing\n"));
     }
 }

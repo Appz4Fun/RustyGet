@@ -28493,6 +28493,188 @@ pub extern "C" fn nzbget_rs_aws_xml_reader_is_parse_success(
     ))
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_cmdline_format_usage(
+    base_name: *const c_char,
+    path_sep: c_char,
+    include_daemon: c_int,
+) -> RsBuf {
+    let name = if base_name.is_null() {
+        b""
+    } else {
+        CStr::from_ptr(base_name).to_bytes()
+    };
+    into_buf(crate::cmdline::format_usage(
+        name,
+        path_sep as u8,
+        include_daemon != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_binrpc_file_listing(
+    entries: *const crate::binrpc::FileListingEntry,
+    len: usize,
+    has_pattern: c_int,
+) -> RsBuf {
+    let slice = if entries.is_null() || len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(entries, len)
+    };
+    into_buf(crate::binrpc::file_listing(slice, has_pattern != 0))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_binrpc_group_listing(
+    entries: *const crate::binrpc::GroupListingEntry,
+    len: usize,
+    has_pattern: c_int,
+) -> RsBuf {
+    let slice = if entries.is_null() || len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(entries, len)
+    };
+    into_buf(crate::binrpc::group_listing(slice, has_pattern != 0))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_binrpc_status_summary(
+    spec: *const crate::binrpc::StatusSummarySpec,
+) -> RsBuf {
+    if spec.is_null() {
+        return into_buf(Vec::new());
+    }
+    into_buf(crate::binrpc::status_summary(&*spec))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ncurses_format_status_bar(
+    spec: *const crate::ncurses_format::NcursesStatusSpec,
+) -> RsBuf {
+    if spec.is_null() {
+        return into_buf(Vec::new());
+    }
+    into_buf(crate::ncurses_format::format_status_bar(&*spec))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ncurses_format_top_header(
+    header: *const c_char,
+    screen_width: c_int,
+    up_time: c_int,
+    time_sec: c_int,
+) -> RsBuf {
+    let hdr = if header.is_null() {
+        b""
+    } else {
+        CStr::from_ptr(header).to_bytes()
+    };
+    into_buf(crate::ncurses_format::format_top_header(
+        hdr,
+        screen_width,
+        up_time != 0,
+        time_sec,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ncurses_format_file_queue_header(
+    use_color: c_int,
+    file_num: c_int,
+    paused_files: c_int,
+    remaining: i64,
+    paused: i64,
+) -> RsBuf {
+    into_buf(crate::ncurses_format::format_file_queue_header(
+        use_color != 0,
+        file_num,
+        paused_files,
+        remaining,
+        paused,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_ncurses_format_group_queue_header(
+    use_color: c_int,
+    group_count: c_int,
+    remaining: i64,
+    paused: i64,
+) -> RsBuf {
+    into_buf(crate::ncurses_format::format_group_queue_header(
+        use_color != 0,
+        group_count,
+        remaining,
+        paused,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ncurses_format_file_row(
+    spec: *const crate::ncurses_format::NcursesFileRowSpec,
+    out_color: *mut c_int,
+) -> RsBuf {
+    if spec.is_null() {
+        if !out_color.is_null() {
+            *out_color = 0;
+        }
+        return into_buf(Vec::new());
+    }
+    let (row, color) = crate::ncurses_format::format_file_row(&*spec);
+    if !out_color.is_null() {
+        *out_color = color;
+    }
+    into_buf(row)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ncurses_format_group_row(
+    spec: *const crate::ncurses_format::NcursesGroupRowSpec,
+    inout_col_files: *mut c_int,
+    inout_col_total: *mut c_int,
+    inout_col_left: *mut c_int,
+    out_color: *mut c_int,
+) -> RsBuf {
+    if spec.is_null() {
+        if !out_color.is_null() {
+            *out_color = 0;
+        }
+        return into_buf(Vec::new());
+    }
+    let mut wf = if inout_col_files.is_null() {
+        0
+    } else {
+        *inout_col_files
+    };
+    let mut wt = if inout_col_total.is_null() {
+        0
+    } else {
+        *inout_col_total
+    };
+    let mut wl = if inout_col_left.is_null() {
+        0
+    } else {
+        *inout_col_left
+    };
+    let (row, color) = crate::ncurses_format::format_group_row(&*spec, &mut wf, &mut wt, &mut wl);
+    if !inout_col_files.is_null() {
+        *inout_col_files = wf;
+    }
+    if !inout_col_total.is_null() {
+        *inout_col_total = wt;
+    }
+    if !inout_col_left.is_null() {
+        *inout_col_left = wl;
+    }
+    if !out_color.is_null() {
+        *out_color = color;
+    }
+    into_buf(row)
+}
+
+
 
 
 

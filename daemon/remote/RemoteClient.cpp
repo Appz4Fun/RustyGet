@@ -362,80 +362,34 @@ bool RemoteClient::RequestServerList(bool files, bool groups, const char* patter
 		}
 		else
 		{
-			printf("Queue List\n");
-			printf("-----------------------------------\n");
-
 			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-
 			BuildFileList(&ListResponse, buf, downloadQueue);
 
-			int64 remaining = 0;
-			int64 paused = 0;
-			int matches = 0;
-			int nrFileEntries = 0;
-
+			std::vector<NzbgetRsBinRpcFileListingEntry> entries;
 			for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
 			{
 				for (FileInfo* fileInfo : nzbInfo->GetFileList())
 				{
-					nrFileEntries++;
-
-					BString<100> completed;
-					int completedPct = nzbget_rs_ccm_remote_client_calc_file_completed_pct(
-						fileInfo->GetRemainingSize(), fileInfo->GetSize());
-					if (completedPct >= 0)
-					{
-						completed.Format(", %i%s", completedPct, "%");
-					}
-
-					BString<100> threads;
-					if (fileInfo->GetActiveDownloads() > 0)
-					{
-						threads.Format(", %i thread%s", fileInfo->GetActiveDownloads(), (fileInfo->GetActiveDownloads() > 1 ? "s" : ""));
-					}
-
-					BString<100> status;
-					if (fileInfo->GetPaused())
-					{
-						status = " (paused)";
-						paused += fileInfo->GetRemainingSize();
-					}
-					else
-					{
-						remaining += fileInfo->GetRemainingSize();
-					}
-
-					if (!pattern || ((MatchedFileInfo*)fileInfo)->m_match)
-					{
-						printf("[%i] %s/%s (%s%s%s)%s\n", fileInfo->GetId(), fileInfo->GetNzbInfo()->GetName(),
-							fileInfo->GetFilename(), *Util::FormatSize(fileInfo->GetSize()),
-							*completed, *threads, *status);
-						matches++;
-					}
+					NzbgetRsBinRpcFileListingEntry entry{};
+					entry.id = fileInfo->GetId();
+					entry.nzb_name = fileInfo->GetNzbInfo()->GetName();
+					entry.filename = fileInfo->GetFilename();
+					entry.size = fileInfo->GetSize();
+					entry.remaining_size = fileInfo->GetRemainingSize();
+					entry.active_downloads = fileInfo->GetActiveDownloads();
+					entry.paused = fileInfo->GetPaused() ? 1 : 0;
+					entry.matched = (!pattern || ((MatchedFileInfo*)fileInfo)->m_match) ? 1 : 0;
+					entries.push_back(entry);
 				}
 			}
 
-			if (matches == 0)
+			NzbgetRsBuf formatted = nzbget_rs_binrpc_file_listing(
+				entries.data(), entries.size(), pattern ? 1 : 0);
+			if (formatted.data)
 			{
-				printf("No matches founds\n");
+				fwrite(formatted.data, 1, formatted.len, stdout);
 			}
-
-			printf("-----------------------------------\n");
-			printf("Files: %i\n", nrFileEntries);
-			if (pattern)
-			{
-				printf("Matches: %i\n", matches);
-			}
-
-			if (paused > 0)
-			{
-				printf("Remaining size: %s (+%s paused)\n",
-					*Util::FormatSize(remaining), *Util::FormatSize(paused));
-			}
-			else
-			{
-				printf("Remaining size: %s\n", *Util::FormatSize(remaining));
-			}
+			nzbget_rs_free(formatted);
 		}
 	}
 
@@ -447,175 +401,75 @@ bool RemoteClient::RequestServerList(bool files, bool groups, const char* patter
 		}
 		else
 		{
-			printf("Queue List\n");
-			printf("-----------------------------------\n");
-
 			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-
 			BuildFileList(&ListResponse, buf, downloadQueue);
 
-			int64 remaining = 0;
-			int64 paused = 0;
-			int matches = 0;
-			int nrFileEntries = 0;
+			std::vector<std::vector<NzbgetRsBinRpcGroupParamEntry>> paramLists;
+			paramLists.reserve(downloadQueue->GetQueue()->size());
+			std::vector<NzbgetRsBinRpcGroupListingEntry> entries;
+			entries.reserve(downloadQueue->GetQueue()->size());
 
 			for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
 			{
-				nrFileEntries += nzbInfo->GetFileList()->size();
-
-				int hasThreads = 0;
-				int threadsPlural = 0;
-				int64 unpausedRemainingSize = nzbget_rs_roc_remote_client_calc_group_unpaused_remaining(
-					nzbInfo->GetRemainingSize(), nzbInfo->GetPausedSize(),
-					nzbInfo->GetActiveDownloads(), &hasThreads, &threadsPlural);
-				remaining += unpausedRemainingSize;
-
-				CString remainingStr = Util::FormatSize(unpausedRemainingSize);
-
-				BString<100> priority;
-				if (nzbInfo->GetPriority() != 0)
-				{
-					priority.Format( "[%+i] ", nzbInfo->GetPriority());
-				}
-
-				BString<100> pausedStr;
-				if (nzbInfo->GetPausedSize() > 0)
-				{
-					pausedStr.Format(" + %s paused", *Util::FormatSize(nzbInfo->GetPausedSize()));
-					paused += nzbInfo->GetPausedSize();
-				}
-
-				BString<1024> category;
-				if (nzbInfo->GetCategory() && strlen(nzbInfo->GetCategory()) > 0)
-				{
-					category.Format(" (%s)", nzbInfo->GetCategory());
-				}
-
-				BString<100> threads;
-				if (hasThreads)
-				{
-					threads.Format(", %i thread%s", nzbInfo->GetActiveDownloads(), (threadsPlural ? "s" : ""));
-				}
-
-				BString<1024> parameters;
+				std::vector<NzbgetRsBinRpcGroupParamEntry> params;
 				for (NzbParameter& nzbParameter : nzbInfo->GetParameters())
 				{
-					parameters.Append(parameters.Empty() ? " (" : ", ");
-					parameters.AppendFmt("%s=%s", nzbParameter.GetName(), nzbParameter.GetValue());
+					NzbgetRsBinRpcGroupParamEntry p{};
+					p.name = nzbParameter.GetName();
+					p.value = nzbParameter.GetValue();
+					params.push_back(p);
 				}
-				if (!parameters.Empty())
-				{
-					parameters.Append(")");
-				}
+				paramLists.push_back(std::move(params));
+				const auto& storedParams = paramLists.back();
 
-				BString<100> urlOrFile;
-				if (nzbInfo->GetKind() == NzbInfo::nkUrl)
-				{
-					urlOrFile = "URL";
-				}
-				else
-				{
-					urlOrFile.Format("%i file%s", (int)nzbInfo->GetFileList()->size(),
-						nzbInfo->GetFileList()->size() > 1 ? "s" : "");
-				}
-
-				if (!pattern || ((MatchedNzbInfo*)nzbInfo)->m_match)
-				{
-					printf("[%i] %s%s (%s, %s%s%s)%s%s\n", nzbInfo->GetId(), *priority,
-						nzbInfo->GetName(), *urlOrFile, *remainingStr,
-						*pausedStr, *threads, *category, *parameters);
-					matches++;
-				}
+				NzbgetRsBinRpcGroupListingEntry entry{};
+				entry.id = nzbInfo->GetId();
+				entry.kind = (int)nzbInfo->GetKind();
+				entry.priority = nzbInfo->GetPriority();
+				entry.name = nzbInfo->GetName();
+				entry.category = nzbInfo->GetCategory();
+				entry.file_count = (int)nzbInfo->GetFileList()->size();
+				entry.remaining_size = nzbInfo->GetRemainingSize();
+				entry.paused_size = nzbInfo->GetPausedSize();
+				entry.active_downloads = nzbInfo->GetActiveDownloads();
+				entry.matched = (!pattern || ((MatchedNzbInfo*)nzbInfo)->m_match) ? 1 : 0;
+				entry.params = storedParams.data();
+				entry.param_count = storedParams.size();
+				entries.push_back(entry);
 			}
 
-			if (matches == 0)
+			NzbgetRsBuf formatted = nzbget_rs_binrpc_group_listing(
+				entries.data(), entries.size(), pattern ? 1 : 0);
+			if (formatted.data)
 			{
-				printf("No matches founds\n");
+				fwrite(formatted.data, 1, formatted.len, stdout);
 			}
-
-			printf("-----------------------------------\n");
-			printf("Groups: %i\n", (int)downloadQueue->GetQueue()->size());
-			if (pattern)
-			{
-				printf("Matches: %i\n", matches);
-			}
-			printf("Files: %i\n", nrFileEntries);
-
-			if (paused > 0)
-			{
-				printf("Remaining size: %s (+%s paused)\n",
-					*Util::FormatSize(remaining), *Util::FormatSize(paused));
-			}
-			else
-			{
-				printf("Remaining size: %s\n", *Util::FormatSize(remaining));
-			}
+			nzbget_rs_free(formatted);
 		}
 	}
 
-	int64 remaining = Util::JoinInt64(ntohl(ListResponse.m_remainingSizeHi), ntohl(ListResponse.m_remainingSizeLo));
+	NzbgetRsBinRpcStatusSummarySpec statusSpec{};
+	statusSpec.include_remaining_size = (!files && !groups) ? 1 : 0;
+	statusSpec.remaining_size = Util::JoinInt64(ntohl(ListResponse.m_remainingSizeHi), ntohl(ListResponse.m_remainingSizeLo));
+	statusSpec.download_rate = ntohl(ListResponse.m_downloadRate);
+	statusSpec.download_paused = ntohl(ListResponse.m_downloadPaused);
+	statusSpec.download2_paused = ntohl(ListResponse.m_download2Paused);
+	statusSpec.download_stand_by = ntohl(ListResponse.m_downloadStandBy);
+	statusSpec.downloaded_bytes = Util::JoinInt64(ntohl(ListResponse.m_downloadedBytesHi), ntohl(ListResponse.m_downloadedBytesLo));
+	statusSpec.download_time_sec = ntohl(ListResponse.m_downloadTimeSec);
+	statusSpec.download_limit = ntohl(ListResponse.m_downloadLimit);
+	statusSpec.up_time_sec = ntohl(ListResponse.m_upTimeSec);
+	statusSpec.thread_count = ntohl(ListResponse.m_threadCount);
+	statusSpec.post_job_count = ntohl(ListResponse.m_postJobCount);
+	statusSpec.scan_paused = ntohl(ListResponse.m_scanPaused);
+	statusSpec.post_paused = ntohl(ListResponse.m_postPaused);
 
-	if (!files && !groups)
+	NzbgetRsBuf statusBuf = nzbget_rs_binrpc_status_summary(&statusSpec);
+	if (statusBuf.data)
 	{
-		printf("Remaining size: %s\n", *Util::FormatSize(remaining));
+		fwrite(statusBuf.data, 1, statusBuf.len, stdout);
 	}
-
-	if (nzbget_rs_sfw_remote_client_should_print_remaining_time(
-		ntohl(ListResponse.m_downloadRate),
-		ntohl(ListResponse.m_downloadPaused),
-		ntohl(ListResponse.m_download2Paused),
-		ntohl(ListResponse.m_downloadStandBy)) != 0)
-	{
-		int64 remain_sec = (int64)(remaining / ntohl(ListResponse.m_downloadRate));
-		int h = 0, m = 0, s = 0;
-		nzbget_rs_ccm_remote_client_calc_hms(remain_sec, &h, &m, &s);
-		printf("Remaining time: %.2d:%.2d:%.2d\n", h, m, s);
-	}
-
-	printf("Current download rate: %s\n", *Util::FormatSpeed(ntohl(ListResponse.m_downloadRate)));
-
-	int64 allBytes = Util::JoinInt64(ntohl(ListResponse.m_downloadedBytesHi), ntohl(ListResponse.m_downloadedBytesLo));
-	int averageSpeed = nzbget_rs_ccm_remote_client_calc_avg_speed(allBytes, (int64)ntohl(ListResponse.m_downloadTimeSec));
-	printf("Session download rate: %s\n", *Util::FormatSpeed(averageSpeed));
-
-	if (ntohl(ListResponse.m_downloadLimit) > 0)
-	{
-		printf("Speed limit: %s\n", *Util::FormatSpeed(ntohl(ListResponse.m_downloadLimit)));
-	}
-
-	int sec = ntohl(ListResponse.m_upTimeSec);
-	int h = 0, m = 0, s = 0;
-	nzbget_rs_ccm_remote_client_calc_hms(sec, &h, &m, &s);
-	printf("Up time: %.2d:%.2d:%.2d\n", h, m, s);
-
-	sec = ntohl(ListResponse.m_downloadTimeSec);
-	nzbget_rs_ccm_remote_client_calc_hms(sec, &h, &m, &s);
-	printf("Download time: %.2d:%.2d:%.2d\n", h, m, s);
-
-	printf("Downloaded: %s\n", *Util::FormatSize(allBytes));
-	printf("Threads running: %i\n", ntohl(ListResponse.m_threadCount));
-
-	if (ntohl(ListResponse.m_postJobCount) > 0)
-	{
-		printf("Post-jobs: %i\n", (int)ntohl(ListResponse.m_postJobCount));
-	}
-
-	if (ntohl(ListResponse.m_scanPaused))
-	{
-		printf("Scan state: Paused\n");
-	}
-
-	BString<100> serverState;
-	nzbget_rs_ccm_remote_client_format_server_state(
-		ntohl(ListResponse.m_downloadPaused) != 0 ? 1 : 0,
-		ntohl(ListResponse.m_download2Paused) != 0 ? 1 : 0,
-		ntohl(ListResponse.m_downloadStandBy) != 0 ? 1 : 0,
-		ntohl(ListResponse.m_postJobCount),
-		ntohl(ListResponse.m_postPaused) != 0 ? 1 : 0,
-		serverState,
-		serverState.Capacity());
-
-	printf("Server state: %s\n", *serverState);
+	nzbget_rs_free(statusBuf);
 
 	return true;
 }

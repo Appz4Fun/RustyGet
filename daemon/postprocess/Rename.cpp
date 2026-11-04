@@ -160,19 +160,26 @@ void RenameController::RenameCompleted()
 {
 	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
 
-#if !defined(DISABLE_PARCHECK)
 	int reqExtraPars = 0;
 	int reqParCheck = 0;
+#ifndef DISABLE_PARCHECK
+	int hasDamagedParFiles = m_parRenamer.HasDamagedParFiles() ? 1 : 0;
+	int hasMissedFiles = m_parRenamer.HasMissedFiles() ? 1 : 0;
+#else
+	int hasDamagedParFiles = 0;
+	int hasMissedFiles = 0;
+#endif
 	int initialStatus = nzbget_rs_rco_rename_controller_complete_action(
 		(int)m_kind, m_renamedCount,
-		m_parRenamer.HasDamagedParFiles() ? 1 : 0,
+		hasDamagedParFiles,
 		m_postInfo->GetNzbInfo()->GetRemainingParCount(),
-		m_parRenamer.HasMissedFiles() ? 1 : 0,
+		hasMissedFiles,
 		(int)m_postInfo->GetNzbInfo()->GetParStatus(),
 		&reqExtraPars, &reqParCheck);
 	if (m_kind == jkPar)
 	{
 		m_postInfo->GetNzbInfo()->SetParRenameStatus((NzbInfo::EPostRenameStatus)initialStatus);
+#ifndef DISABLE_PARCHECK
 		if (reqExtraPars)
 		{
 			m_parRenamer.PrintMessage(Message::mkInfo, "Requesting extra par2-files for %s to perform par-rename", m_parRenamer.GetInfoName());
@@ -183,48 +190,18 @@ void RenameController::RenameCompleted()
 				m_postInfo->GetNzbInfo()->SetParRenameStatus(NzbInfo::rsNone);
 			}
 		}
+#endif
 	}
 	else if (m_kind == jkRar)
 	{
 		m_postInfo->GetNzbInfo()->SetRarRenameStatus((NzbInfo::EPostRenameStatus)initialStatus);
 	}
+#ifndef DISABLE_PARCHECK
 	if (reqParCheck)
 	{
 		m_parRenamer.PrintMessage(Message::mkInfo, "Requesting par-check/repair for %s to restore missing files ", m_parRenamer.GetInfoName());
 		m_postInfo->SetRequestParCheck(true);
 	}
-#else
-	if (m_kind == jkPar)
-	{
-		m_postInfo->GetNzbInfo()->SetParRenameStatus(m_renamedCount > 0 ? NzbInfo::rsSuccess : NzbInfo::rsNothing);
-#ifndef DISABLE_PARCHECK
-		// request another par2-file if the renaming has failed due to damaged par2-files
-		if (m_renamedCount == 0 && m_parRenamer.HasDamagedParFiles() &&
-			m_postInfo->GetNzbInfo()->GetRemainingParCount() > 0)
-		{
-			m_parRenamer.PrintMessage(Message::mkInfo, "Requesting extra par2-files for %s to perform par-rename", m_parRenamer.GetInfoName());
-			downloadQueue->EditEntry(m_postInfo->GetNzbInfo()->GetId(), DownloadQueue::eaGroupResume, nullptr);
-			downloadQueue->EditEntry(m_postInfo->GetNzbInfo()->GetId(), DownloadQueue::eaGroupPauseExtraPars, nullptr);
-			if (m_postInfo->GetNzbInfo()->GetRemainingSize() > 0)
-			{
-				// reset rename status to execute renamer again, after the new par2-file is downloaded
-				m_postInfo->GetNzbInfo()->SetParRenameStatus(NzbInfo::rsNone);
-			}
-		}
-#endif
-	}
-	else if (m_kind == jkRar)
-	{
-		m_postInfo->GetNzbInfo()->SetRarRenameStatus(m_renamedCount > 0 ? NzbInfo::rsSuccess : NzbInfo::rsNothing);
-	}
-
-#ifndef DISABLE_PARCHECK
-	if (m_parRenamer.HasMissedFiles() && m_postInfo->GetNzbInfo()->GetParStatus() <= NzbInfo::psSkipped)
-	{
-		m_parRenamer.PrintMessage(Message::mkInfo, "Requesting par-check/repair for %s to restore missing files ", m_parRenamer.GetInfoName());
-		m_postInfo->SetRequestParCheck(true);
-	}
-#endif
 #endif
 
 	m_postInfo->SetWorking(false);

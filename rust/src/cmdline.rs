@@ -818,3 +818,142 @@ pub unsafe fn parse(argc: c_int, argv: *mut *mut c_char, use_long: bool, sink: &
     }
     Ok(())
 }
+
+/// Format the command-line `--help` usage message (`CommandLineParser::PrintUsage`).
+pub fn format_usage(base_name: &[u8], path_sep: u8, include_daemon: bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4096);
+    out.extend_from_slice(b"Usage:\n  ");
+    out.extend_from_slice(base_name);
+    out.extend_from_slice(
+        b" [switches]\n\n\
+Switches:\n\
+  -h, --help                Print this help-message\n\
+  -v, --version             Print version and exit\n\
+  -c, --configfile <file>   Filename of configuration-file\n\
+  -n, --noconfigfile        Prevent loading of configuration-file\n\
+                            (required options must be passed with --option)\n\
+  -p, --printconfig         Print configuration and exit\n\
+  -o, --option <name=value> Set or override option in configuration-file\n\
+  -s, --server              Start nzbget as a server in console-mode\n",
+    );
+    if include_daemon {
+        out.extend_from_slice(
+            b"  -D, --daemon              Start nzbget as a server in daemon-mode\n",
+        );
+    }
+    out.extend_from_slice(
+        b"  -V, --serverversion       Print server's version and exit\n\
+  -Q, --quit                Shutdown server\n\
+  -O, --reload              Reload config and restart all services\n\
+  -A, --append [<options>] <nzb-file/url> Send file/url to server's\n\
+                            download queue\n\
+    <options> are (multiple options must be separated with space):\n\
+       T                    Add file to the top (beginning) of queue\n\
+       P                    Pause added files\n\
+       C <name>             Assign category to nzb-file\n\
+       N <name>             Use this name as nzb-filename\n\
+       I <priority>         Set priority (signed integer)\n\
+       DK <dupekey>         Set duplicate key (string)\n\
+       DS <dupescore>       Set duplicate score (signed integer)\n\
+       DM (score|all|force) Set duplicate mode\n\
+  -C, --connect             Attach client to server\n\
+  -L, --list    [F|FR|G|GR|O|H|S] [RegEx] Request list of items from server\n\
+                 F          List individual files and server status (default)\n\
+                 FR         Like \"F\" but apply regular expression filter\n\
+                 G          List groups (nzb-files) and server status\n\
+                 GR         Like \"G\" but apply regular expression filter\n\
+                 O          List post-processor-queue\n\
+                 H          List history\n\
+                 HA         List history, all records (incl. hidden)\n\
+                 S          Print only server status\n\
+    <RegEx>                 Regular expression (only with options \"FR\", \"GR\")\n\
+                            using POSIX Extended Regular Expression Syntax\n\
+  -P, --pause   [D|O|S]     Pause server\n\
+                 D          Pause download queue (default)\n\
+                 O          Pause post-processor queue\n\
+                 S          Pause scan of incoming nzb-directory\n\
+  -U, --unpause [D|O|S]     Unpause server\n\
+                 D          Unpause download queue (default)\n\
+                 O          Unpause post-processor queue\n\
+                 S          Unpause scan of incoming nzb-directory\n\
+  -R, --rate <speed>        Set download rate on server, in KB/s\n\
+  -G, --log <lines>         Request last <lines> lines from server's screen-log\n\
+  -W, --write <D|I|W|E|G> \"Text\" Send text to server's log\n\
+  -S, --scan    [W]         Scan incoming nzb-directory on server\n\
+                 W          Wait until scan completes (synchronous mode)\n\
+  -E, --edit [F|FN|FR|G|GN|GR|O|H] <action> <IDs/Names/RegExs> Edit items\n\
+                            on server\n\
+              F             Edit individual files (default)\n\
+              FN            Like \"F\" but uses names (as \"group/file\")\n\
+                            instead of IDs\n\
+              FR            Like \"FN\" but with regular expressions\n\
+              G             Edit all files in the group (same nzb-file)\n\
+              GN            Like \"G\" but uses group names instead of IDs\n\
+              GR            Like \"GN\" but with regular expressions\n\
+              O             Edit post-processor-queue\n\
+              H             Edit history\n\
+    <action> is one of:\n\
+    - for files (F) and groups (G):\n\
+       <+offset|-offset>    Move in queue relative to current position,\n\
+                            offset is an integer value\n\
+       T                    Move to top of queue\n\
+       B                    Move to bottom of queue\n\
+       D                    Delete\n\
+       P                    Pause\n\
+       U                    Resume (unpause)\n\
+    - for groups (G):\n\
+       A                    Pause all pars\n\
+       R                    Pause extra pars\n\
+       DP                   Delete but keep downloaded files\n\
+       I <priority>         Set priority (signed integer)\n\
+       C <name>             Set category\n\
+       CP <name>            Set category and apply post-process parameters\n\
+       N <name>             Rename\n\
+       M                    Merge\n\
+       SF                   Sort inner files for optimal order\n\
+       S <name>             Split - create new group from selected files\n\
+       O <name>=<value>     Set post-process parameter\n\
+    - for post-jobs (O):\n\
+       D                    Delete (cancel post-processing)\n\
+    - for history (H):\n\
+       D                    Delete\n\
+       P                    Post-process again\n\
+       R                    Download remaining files\n\
+       A                    Download again\n\
+       F                    Retry download of failed articles\n\
+       O <name>=<value>     Set post-process parameter\n\
+       B                    Mark as bad\n\
+       G                    Mark as good\n\
+       S                    Mark as success\n\
+    <IDs>                   Comma-separated list of file- or group- ids or\n\
+                            ranges of file-ids, e. g.: 1-5,3,10-22\n\
+    <Names>                 List of names (with options \"FN\" and \"GN\"),\n\
+                            e. g.: \"my nzb download",
+    );
+    out.push(path_sep);
+    out.extend_from_slice(
+        b"myfile.nfo\" \"another nzb\"\n\
+    <RegExs>                List of regular expressions (options \"FR\", \"GR\")\n\
+                            using POSIX Extended Regular Expression Syntax\n",
+    );
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_usage() {
+        let out = format_usage(b"nzbget", b'/', true);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.starts_with("Usage:\n  nzbget [switches]\n\nSwitches:\n"));
+        assert!(text.contains("  -D, --daemon              Start nzbget as a server in daemon-mode\n"));
+        assert!(text.contains("e. g.: \"my nzb download/myfile.nfo\" \"another nzb\"\n"));
+
+        let out_no_daemon = format_usage(b"nzbget.exe", b'\\', false);
+        let text_no_daemon = String::from_utf8(out_no_daemon).unwrap();
+        assert!(!text_no_daemon.contains("--daemon"));
+        assert!(text_no_daemon.contains("e. g.: \"my nzb download\\myfile.nfo\" \"another nzb\"\n"));
+    }
+}

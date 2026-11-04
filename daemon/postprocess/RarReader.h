@@ -131,16 +131,6 @@ public:
 	FileList* GetFiles() { return &m_files; }
 
 private:
-	struct RarBlock
-	{
-		uint32 crc;
-		uint8 type;
-		uint16 flags;
-		uint64 addsize;
-		uint64 trailsize;
-		uint64 datasize;
-	};
-
 	FileList m_files;
 
 	std::string m_filename;
@@ -162,27 +152,12 @@ private:
 	OpenSSL::EVPCipherCtxPtr m_context;
 #endif
 
-	int DetectRarVersion(RarSourceCursor& file);
 	void LogDebugInfo();
-	bool Skip(RarSourceCursor& file, RarBlock* block, int64 size);
-	bool Read(RarSourceCursor& file, RarBlock* block, void* buffer, int64 size);
-	bool Read16(RarSourceCursor& file, RarBlock* block, uint16* result);
-	bool Read32(RarSourceCursor& file, RarBlock* block, uint32* result);
-	bool ReadV(RarSourceCursor& file, RarBlock* block, uint64* result);
-	bool ReadRar3Volume(RarSourceCursor& file);
-	bool ReadRar5Volume(RarSourceCursor& file);
-	RarBlock ReadRar3Block(RarSourceCursor& file);
-	RarBlock ReadRar5Block(RarSourceCursor& file);
-	bool ReadRar3File(RarSourceCursor& file, RarBlock& block, RarFile& innerFile);
-	bool ReadRar5File(RarSourceCursor& file, RarBlock& block, RarFile& innerFile);
-	bool ReadRar5Crypt(RarSourceCursor& file, RarBlock& block, RarFile& innerFile, uint64 contentLen);
-	bool ReadVLimited(RarSourceCursor& file, RarBlock* block, uint64* result, uint64& avail);
 	bool DecryptRar3Prepare(const uint8 salt[8]);
 	bool DecryptRar5Prepare(uint8 kdfCount, const uint8 salt[16]);
 	bool DecryptInit(int keyLength);
 	bool DecryptBuf(const uint8 in[16], uint8 out[16]);
 	void DecryptFree();
-	bool DecryptRead(RarSourceCursor& file, void* buffer, int64 size);
 };
 
 #endif

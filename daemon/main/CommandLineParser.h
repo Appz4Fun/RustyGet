@@ -154,10 +154,6 @@ private:
 	bool m_pauseDownload = false;
 
 	std::vector<CString> m_args;
-	void InitCommandLine(int argc, const char* argv[]);
-	void InitFileArg(int argc, const char* argv[]);
-	void ParseFileIdList(int argc, const char* argv[], int optind);
-	void ParseFileNameList(int argc, const char* argv[], int optind);
 	void ReportError(const char* errMessage);
 	// the fields as rust/src/cmdline.rs sets them (NzbgetRsCmdlineSink)
 	struct RsSink;

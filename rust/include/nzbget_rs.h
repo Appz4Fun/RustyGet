@@ -4911,6 +4911,128 @@ NzbgetRsBuf nzbget_rs_diskstate_format_dup_info(
 NzbgetRsBuf nzbget_rs_diskstate_format_volume_stat_item(
     const NzbgetRsDiskVolumeStatInput* inp);
 
+typedef struct {
+    int id;
+    const char* nzb_name;
+    const char* filename;
+    int64_t size;
+    int64_t remaining_size;
+    int active_downloads;
+    int paused;
+    int matched;
+} NzbgetRsBinRpcFileListingEntry;
+
+typedef struct {
+    const char* name;
+    const char* value;
+} NzbgetRsBinRpcGroupParamEntry;
+
+typedef struct {
+    int id;
+    int kind;
+    int priority;
+    const char* name;
+    const char* category;
+    int file_count;
+    int64_t remaining_size;
+    int64_t paused_size;
+    int active_downloads;
+    int matched;
+    const NzbgetRsBinRpcGroupParamEntry* params;
+    size_t param_count;
+} NzbgetRsBinRpcGroupListingEntry;
+
+typedef struct {
+    int include_remaining_size;
+    int64_t remaining_size;
+    uint32_t download_rate;
+    uint32_t download_paused;
+    uint32_t download2_paused;
+    uint32_t download_stand_by;
+    int64_t downloaded_bytes;
+    uint32_t download_time_sec;
+    uint32_t download_limit;
+    uint32_t up_time_sec;
+    uint32_t thread_count;
+    uint32_t post_job_count;
+    uint32_t scan_paused;
+    uint32_t post_paused;
+} NzbgetRsBinRpcStatusSummarySpec;
+
+typedef struct {
+    int stand_by;
+    int pause_download;
+    int64_t current_download_speed;
+    int64_t remaining_size;
+    int64_t download_limit;
+    int post_job_count;
+    int dn_time_sec;
+    int64_t all_bytes;
+    int thread_count;
+} NzbgetRsNcursesStatusSpec;
+
+typedef struct {
+    int edit_queue_mode;
+    int selected;
+    int use_color;
+    int color_highl;
+    int color_text;
+    int id;
+    int priority;
+    int active_downloads;
+    int paused;
+    int show_nzbname;
+    uint8_t path_sep;
+    const char* nzb_name;
+    const char* filename;
+    int64_t size;
+    int64_t remaining_size;
+} NzbgetRsNcursesFileRowSpec;
+
+typedef struct {
+    int edit_queue_mode;
+    int selected;
+    int use_color;
+    int color_highl;
+    int color_text;
+    int screen_width;
+    int calc_col_width;
+    int id;
+    int priority;
+    int active_downloads;
+    const char* name;
+    int file_count;
+    int paused_file_count;
+    int64_t size;
+    int64_t remaining_size;
+    int64_t paused_size;
+    int stand_by;
+    int pause_download;
+    int64_t current_download_speed;
+} NzbgetRsNcursesGroupRowSpec;
+
+NzbgetRsBuf nzbget_rs_cmdline_format_usage(
+    const char* base_name, char path_sep, int include_daemon);
+NzbgetRsBuf nzbget_rs_binrpc_file_listing(
+    const NzbgetRsBinRpcFileListingEntry* entries, size_t len, int has_pattern);
+NzbgetRsBuf nzbget_rs_binrpc_group_listing(
+    const NzbgetRsBinRpcGroupListingEntry* entries, size_t len, int has_pattern);
+NzbgetRsBuf nzbget_rs_binrpc_status_summary(
+    const NzbgetRsBinRpcStatusSummarySpec* spec);
+NzbgetRsBuf nzbget_rs_ncurses_format_status_bar(
+    const NzbgetRsNcursesStatusSpec* spec);
+NzbgetRsBuf nzbget_rs_ncurses_format_top_header(
+    const char* header, int screen_width, int up_time, int time_sec);
+NzbgetRsBuf nzbget_rs_ncurses_format_file_queue_header(
+    int use_color, int file_num, int paused_files, int64_t remaining, int64_t paused);
+NzbgetRsBuf nzbget_rs_ncurses_format_group_queue_header(
+    int use_color, int group_count, int64_t remaining, int64_t paused);
+NzbgetRsBuf nzbget_rs_ncurses_format_file_row(
+    const NzbgetRsNcursesFileRowSpec* spec, int* out_color);
+NzbgetRsBuf nzbget_rs_ncurses_format_group_row(
+    const NzbgetRsNcursesGroupRowSpec* spec,
+    int* inout_col_files, int* inout_col_total, int* inout_col_left, int* out_color);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

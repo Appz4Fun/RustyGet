@@ -36,7 +36,7 @@ def body(src, sig, cls):
     return src[start:src.index("\n}\n", start) + 3].replace("WebProcessor::", cls + "::")
 
 
-new_rust = new_src[new_src.index("#ifdef NZBGET_USE_RUST\nvoid WebProcessor::ParseHeaders()"):]
+new_rust = new_src[new_src.index("void WebProcessor::ParseHeaders()"):]
 fold = new_src[new_src.index("namespace\n{\n\t// tolower as WildMask's C++ code did"):]
 fold = fold[:fold.index("\n}\n") + 3]
 

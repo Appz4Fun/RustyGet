@@ -26,12 +26,10 @@
 #include <array>
 #include <algorithm>
 #include "Util.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
 #include <climits>
 #include <stdexcept>
 #include <limits>
-#endif
 
 #ifdef WIN32
 #include "utf8.h"
@@ -202,26 +200,12 @@ Util::FindShellOverriddenExecutor(const std::string& fileExt, const std::string&
 	Tokenizer tok(customPath.c_str(), ",;");
 	while (char* shellover = tok.Next())
 	{
-#ifdef NZBGET_USE_RUST
 		size_t cmdOffset = 0;
 		if (nzbget_rs_ufs_util_match_shell_overridden_token(
 			shellover, fileExt.data(), fileExt.size(), &cmdOffset) != 0)
 		{
 			return std::string(shellover + cmdOffset);
 		}
-#else
-		char* shellcmd = strchr(shellover, '=');
-		if (shellcmd)
-		{
-			*shellcmd = '\0';
-			++shellcmd;
-
-			if (fileExt == shellover)
-			{
-				return std::string(shellcmd);
-			}
-		}
-#endif
 	}
 
 	return std::nullopt;
@@ -278,21 +262,12 @@ std::optional<std::string> Util::FindPython()
  
 int64 Util::JoinInt64(uint32 Hi, uint32 Lo)
 {
-#ifdef NZBGET_USE_RUST
 	return nzbget_rs_ufs_util_join_int64(Hi, Lo);
-#else
-	return (((int64)Hi) << 32) + Lo;
-#endif
 }
 
 void Util::SplitInt64(int64 Int64, uint32* Hi, uint32* Lo)
 {
-#ifdef NZBGET_USE_RUST
 	nzbget_rs_ufs_util_split_int64(Int64, Hi, Lo);
-#else
-	*Hi = (uint32)(Int64 >> 32);
-	*Lo = (uint32)(Int64 & 0xFFFFFFFF);
-#endif
 }
 
 /* Base64 decryption is taken from
@@ -364,7 +339,6 @@ uint32 DecodeByteQuartet(char* inputBuffer, char* outputBuffer)
 	return 0;
 }
 
-#ifdef NZBGET_USE_RUST
 CString Util::FormatSize(int64 fileSize)
 {
 	// rust/src/util.rs
@@ -373,36 +347,7 @@ CString Util::FormatSize(int64 fileSize)
 	nzbget_rs_free(buf);
 	return result;
 }
-#else
-CString Util::FormatSize(int64 fileSize)
-{
-	CString result;
 
-	if (fileSize > 1024 * 1024 * 1000)
-	{
-		result.Format("%.2f GB", (float)((float)fileSize / 1024 / 1024 / 1024));
-	}
-	else if (fileSize > 1024 * 1000)
-	{
-		result.Format("%.2f MB", (float)((float)fileSize / 1024 / 1024));
-	}
-	else if (fileSize > 1000)
-	{
-		result.Format("%.2f KB", (float)((float)fileSize / 1024));
-	}
-	else if (fileSize == 0)
-	{
-		result = "0 MB";
-	}
-	else
-	{
-		result.Format("%i B", (int)fileSize);
-	}
-	return result;
-}
-#endif
-
-#ifdef NZBGET_USE_RUST
 CString Util::FormatSpeed(int64 bytesPerSecond)
 {
 	// rust/src/util.rs
@@ -411,43 +356,6 @@ CString Util::FormatSpeed(int64 bytesPerSecond)
 	nzbget_rs_free(buf);
 	return result;
 }
-#else
-CString Util::FormatSpeed(int64 bytesPerSecond)
-{
-	CString result;
-
-	if (bytesPerSecond >= 100ll * 1024 * 1024 * 1024)
-	{
-		result.Format("%" PRId64 " GB/s", bytesPerSecond / 1024 / 1024 / 1024);
-	}
-	else if (bytesPerSecond >= 10ll * 1024 * 1024 * 1024)
-	{
-		result.Format("%0.1f GB/s", static_cast<double>(bytesPerSecond) / 1024 / 1024 / 1024);
-	}
-	else if (bytesPerSecond >= 1024 * 1024 * 1024)
-	{
-		result.Format("%0.2f GB/s", static_cast<double>(bytesPerSecond) / 1024 / 1024 / 1024);
-	}
-	else if (bytesPerSecond >= 100 * 1024 * 1024)
-	{
-		result.Format("%" PRId64 " MB/s", bytesPerSecond / 1024 / 1024);
-	}
-	else if (bytesPerSecond >= 10 * 1024 * 1024)
-	{
-		result.Format("%0.1f MB/s", static_cast<double>(bytesPerSecond) / 1024 / 1024);
-	}
-	else if (bytesPerSecond >= 1024 * 1000)
-	{
-		result.Format("%0.2f MB/s", static_cast<double>(bytesPerSecond) / 1024 / 1024);
-	}
-	else
-	{
-		result.Format("%" PRId64 " KB/s", bytesPerSecond / 1024);
-	}
-
-	return result;
-}
-#endif
 
 void Util::FormatTime(time_t timeSec, char* buffer, int bufsize)
 {
@@ -470,7 +378,6 @@ CString Util::FormatTime(time_t timeSec)
 	return result;
 }
 
-#ifdef NZBGET_USE_RUST
 CString Util::FormatBuffer(const char* buf, int len)
 {
 	// rust/src/util.rs
@@ -479,20 +386,7 @@ CString Util::FormatBuffer(const char* buf, int len)
 	nzbget_rs_free(out);
 	return result;
 }
-#else
-CString Util::FormatBuffer(const char* buf, int len)
-{
-	CString result;
-	result.Reserve(len * 3 + 1);
-	while (len--)
-	{
-		result.AppendFmt("%02x ", (int)(uchar)*buf++);
-	}
-	return result;
-}
-#endif
 
-#ifdef NZBGET_USE_RUST
 namespace
 {
 	// tolower as strcasecmp applies it (an unsigned byte), and as WildMask's
@@ -524,34 +418,7 @@ bool Util::MatchFileExt(const char* filename, const char* extensionList, const c
 	return nzbget_rs_match_file_ext(filename, extensionList, listSeparator, table, CHAR_MIN < 0,
 		FileExtCaseFold, FileExtMaskFold) != 0;
 }
-#else
-bool Util::MatchFileExt(const char* filename, const char* extensionList, const char* listSeparator)
-{
-	int filenameLen = strlen(filename);
 
-	Tokenizer tok(extensionList, listSeparator);
-	while (const char* ext = tok.Next())
-	{
-		int extLen = strlen(ext);
-		if (filenameLen >= extLen && !strcasecmp(ext, filename + filenameLen - extLen))
-		{
-			return true;
-		}
-		if (strchr(ext, '*') || strchr(ext, '?'))
-		{
-			WildMask mask(ext);
-			if (mask.Match(filename))
-			{
-				return true;
-			}
-		}
-	}
-
-	return false;
-}
-#endif
-
-#ifdef NZBGET_USE_RUST
 std::vector<CString> Util::SplitCommandLine(const char* commandLine)
 {
 	// rust/src/util.rs: the words back to back, each NUL-terminated
@@ -572,93 +439,12 @@ std::vector<CString> Util::SplitCommandLine(const char* commandLine)
 	nzbget_rs_free(words);
 	return result;
 }
-#else
-std::vector<CString> Util::SplitCommandLine(const char* commandLine)
-{
-	std::vector<CString> result;
-	char buf[1024];
-	uint32 len = 0;
-	bool escaping = false;
-	bool space = true;
-	for (const char* p = commandLine; ; p++)
-	{
-		if (*p)
-		{
-			const char c = *p;
-			if (escaping)
-			{
-				if (c == '\'')
-				{
-					if (p[1] == '\'' && len < sizeof(buf) - 1)
-					{
-						buf[len++] = c;
-						p++;
-					}
-					else
-					{
-						escaping = false;
-						space = true;
-					}
-				}
-				else if (len < sizeof(buf) - 1)
-				{
-					buf[len++] = c;
-				}
-			}
-			else
-			{
-				if (c == ' ')
-				{
-					space = true;
-				}
-				else if (c == '\'' && space)
-				{
-					escaping = true;
-					space = false;
-				}
-				else if (len < sizeof(buf) - 1)
-				{
-					buf[len++] = c;
-					space = false;
-				}
-			}
-		}
 
-		if ((space || !*p) && len > 0)
-		{
-			//add token
-			buf[len] = '\0';
-			result.emplace_back(buf);
-			len = 0;
-		}
-
-		if (!*p)
-		{
-			break;
-		}
-	}
-
-	return result;
-}
-#endif
-
-#ifdef NZBGET_USE_RUST
 void Util::TrimRight(char* str)
 {
 	// rust/src/util.rs
 	nzbget_rs_trim_line(str, 1);
 }
-#else
-void Util::TrimRight(char* str)
-{
-	if (!str) return;
-	char* end = str + strlen(str);
-	while (end > str && (end[-1] == '\n' || end[-1] == '\r' || end[-1] == ' ' || end[-1] == '\t'))
-	{
-		*--end = '\0';
-	}
-}
-#endif
 
 namespace
 {
@@ -676,24 +462,13 @@ namespace
 	}
 }
 
-#ifdef NZBGET_USE_RUST
 void Util::TrimRight(std::string& str)
 {
 	// rust/src/util.rs
 	size_t start;
 	str.resize(nzbget_rs_trim_string(str.data(), str.size(), 0, 1, 0, &start, TextRightSpace));
 }
-#else
-void Util::TrimRight(std::string& str)
-{
-	while (!str.empty() && TextRightSpace(static_cast<unsigned char>(str.back())))
-	{
-		str.pop_back();
-	}
-}
-#endif
 
-#ifdef NZBGET_USE_RUST
 void Util::TrimLeft(std::string& str)
 {
 	// rust/src/util.rs
@@ -701,37 +476,12 @@ void Util::TrimLeft(std::string& str)
 	nzbget_rs_trim_string(str.data(), str.size(), 1, 0, 0, &start, TextRightSpace);
 	str.erase(0, start);
 }
-#else
-void Util::TrimLeft(std::string& str)
-{
-	str.erase(
-		std::begin(str),
-		std::find_if(
-			std::begin(str),
-			std::end(str),
-			[](unsigned char ch){ return !std::isspace(ch); })
-	);
-}
-#endif
 
-#ifdef NZBGET_USE_RUST
 char* Util::Trim(char* str)
 {
 	// rust/src/util.rs
 	return nzbget_rs_trim_line(str, 0);
 }
-#else
-char* Util::Trim(char* str)
-{
-	if (!str) return str;
-	TrimRight(str);
-	while (*str == '\n' || *str == '\r' || *str == ' ' || *str == '\t')
-	{
-		str++;
-	}
-	return str;
-}
-#endif
 
 void Util::Trim(std::string& str)
 {
@@ -739,7 +489,6 @@ void Util::Trim(std::string& str)
 	TrimRight(str);
 }
 
-#ifdef NZBGET_USE_RUST
 void Util::SanitizeLine(std::string& str)
 {
 	// rust/src/util.rs
@@ -747,40 +496,13 @@ void Util::SanitizeLine(std::string& str)
 	str.resize(nzbget_rs_trim_string(str.data(), str.size(), 1, 1, 1, &start, TextRightSpace));
 	str.erase(0, start);
 }
-#else
-void Util::SanitizeLine(std::string& str)
-{
-	std::replace_if(str.begin(), str.end(), IsControlChar, ' ');
-	Trim(str);
-}
-#endif
 
-#ifdef NZBGET_USE_RUST
 char* Util::ReduceStr(char* str, const char* from, const char* to)
 {
 	// rust/src/util.rs
 	nzbget_rs_reduce_str(str, from, to);
 	return str;
 }
-#else
-char* Util::ReduceStr(char* str, const char* from, const char* to)
-{
-	int lenFrom = strlen(from);
-	int lenTo = strlen(to);
-	// assert(iLenTo < iLenFrom);
-
-	while (char* p = strstr(str, from))
-	{
-		const char* src = to;
-		while ((*p++ = *src++)) ;
-
-		src = --p - lenTo + lenFrom;
-		while ((*p++ = *src++)) ;
-	}
-
-	return str;
-}
-#endif
 
 std::vector<CString> Util::SplitStr(const char* str, const char* separators)
 {
@@ -793,30 +515,11 @@ std::vector<CString> Util::SplitStr(const char* str, const char* separators)
 	return result;
 }
 
-#ifdef NZBGET_USE_RUST
 bool Util::EndsWith(std::string_view str, std::string_view suffix, bool caseSensitive)
 {
 	// rust/src/util.rs
 	return nzbget_rs_ends_with(str.data(), str.size(), suffix.data(), suffix.size(), caseSensitive) != 0;
 }
-#else
-bool Util::EndsWith(std::string_view str, std::string_view suffix, bool caseSensitive)
-{
-	if (suffix.empty())
-	{
-		return true;
-	}
-	if (str.size() < suffix.size())
-	{
-		return false;
-	}
-	if (caseSensitive)
-	{
-		return str.ends_with(suffix);
-	}
-	return StrCaseCmp(str.substr(str.size() - suffix.size()), suffix);
-}
-#endif
 
 bool Util::EndsWith(const char* str, const char* suffix, bool caseSensitive)
 {
@@ -831,26 +534,11 @@ bool Util::EndsWith(const char* str, const char* suffix, bool caseSensitive)
 	return EndsWith(std::string_view(str), std::string_view(suffix), caseSensitive);
 }
 
-#ifdef NZBGET_USE_RUST
 bool Util::AlphaNum(const char* str)
 {
 	// rust/src/util.rs
 	return nzbget_rs_alpha_num(str) != 0;
 }
-#else
-bool Util::AlphaNum(const char* str)
-{
-	for (const char* p = str; *p; p++)
-	{
-		char ch = *p;
-		if (!((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')))
-		{
-			return false;
-		}
-	}
-	return true;
-}
-#endif
 
 /* Calculate Hash using Bob Jenkins (1996) algorithm
  * http://burtleburtle.net/bob/c/lookup2.c
@@ -917,18 +605,11 @@ uint32 hash(uint8 *k, uint32 length, uint32 initval)
 	return c;
 }
 
-#ifdef NZBGET_USE_RUST
 uint32 Util::HashBJ96(const char* buffer, int bufSize, uint32 initValue)
 {
 	// rust/src/util.rs
 	return nzbget_rs_hash_bj96(buffer, bufSize, initValue);
 }
-#else
-uint32 Util::HashBJ96(const char* buffer, int bufSize, uint32 initValue)
-{
-	return (uint32)hash((uint8*)buffer, (uint32)bufSize, (uint32)initValue);
-}
-#endif
 
 std::unique_ptr<FILE, std::function<void(FILE*)>> Util::MakePipe(const std::string& cmd)
 {
@@ -1052,12 +733,8 @@ inline time_t internal_timegm(tm const *t)
 
 time_t Util::Timegm(tm const *t)
 {
-#ifdef NZBGET_USE_RUST
 	return (time_t)nzbget_rs_ufs_util_internal_timegm(
 		t->tm_year, t->tm_mon, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec);
-#else
-	return internal_timegm(t);
-#endif
 }
 
 bool Util::StrCaseCmp(std::string_view a, std::string_view b)
@@ -1107,56 +784,17 @@ void Util::Sleep(int ms)
 	std::this_thread::sleep_for(std::chrono::milliseconds(ms));
 }
 
-#ifdef NZBGET_USE_RUST
 uint32 WebUtil::DecodeBase64(char* inputBuffer, int inputBufferLength, char* outputBuffer)
 {
 	// rust/src/decode.rs
 	return nzbget_rs_decode_base64(inputBuffer, inputBufferLength, outputBuffer);
 }
-#else
-uint32 WebUtil::DecodeBase64(char* inputBuffer, int inputBufferLength, char* outputBuffer)
-{
-	uint32 InputBufferIndex  = 0;
-	uint32 OutputBufferIndex = 0;
-	uint32 InputBufferLength = inputBufferLength > 0 ? inputBufferLength : strlen(inputBuffer);
-
-	char ByteQuartet [4];
-	int i = 0;
-	while (InputBufferIndex < InputBufferLength)
-	{
-		// Ignore all characters except the ones in BASE64_ALPHABET
-		if ((inputBuffer [InputBufferIndex] >= 48 && inputBuffer [InputBufferIndex] <=  57) ||
-			(inputBuffer [InputBufferIndex] >= 65 && inputBuffer [InputBufferIndex] <=  90) ||
-			(inputBuffer [InputBufferIndex] >= 97 && inputBuffer [InputBufferIndex] <= 122) ||
-			inputBuffer [InputBufferIndex] == '+' ||
-			inputBuffer [InputBufferIndex] == '/' ||
-			inputBuffer [InputBufferIndex] == '=')
-		{
-			ByteQuartet [i] = inputBuffer [InputBufferIndex];
-			i++;
-		}
-
-		InputBufferIndex++;
-
-		if (i == 4) {
-			OutputBufferIndex += DecodeByteQuartet(ByteQuartet, outputBuffer + OutputBufferIndex);
-			i = 0;
-		}
-	}
-
-	// OutputBufferIndex gives us the next position of the next decoded character
-	// inside our output buffer and thus represents the number of decoded characters
-	// in our buffer.
-	return OutputBufferIndex;
-}
-#endif
 
 /* END - Base64
 */
 
 CString WebUtil::XmlEncode(const char* raw)
 {
-#ifdef NZBGET_USE_RUST
 	// rust/src/escape.rs
 	NzbgetRsBuf buf = nzbget_rs_xml_encode(raw);
 	// CString adds one to an int length before allocating.
@@ -1168,125 +806,6 @@ CString WebUtil::XmlEncode(const char* raw)
 	CString result(buf.data, static_cast<int>(buf.len));
 	nzbget_rs_free(buf);
 	return result;
-#else
-	// calculate the required outputstring-size based on number of xml-entities and their sizes
-	int reqSize = strlen(raw);
-	for (const char* p = raw; *p; p++)
-	{
-		uchar ch = *p;
-		switch (ch)
-		{
-			case '>':
-			case '<':
-				reqSize += 4;
-				break;
-			case '&':
-				reqSize += 5;
-				break;
-			case '\'':
-			case '\"':
-				reqSize += 6;
-				break;
-			default:
-				if (ch < 0x20 || ch >= 0x80)
-				{
-					reqSize += 10;
-					break;
-				}
-		}
-	}
-
-	CString result;
-	result.Reserve(reqSize);
-
-	// copy string
-	char* output = result;
-	for (const char* p = raw; ; p++)
-	{
-		uchar ch = *p;
-		switch (ch)
-		{
-			case '\0':
-				goto BreakLoop;
-			case '<':
-				strcpy(output, "&lt;");
-				output += 4;
-				break;
-			case '>':
-				strcpy(output, "&gt;");
-				output += 4;
-				break;
-			case '&':
-				strcpy(output, "&amp;");
-				output += 5;
-				break;
-			case '\'':
-				strcpy(output, "&apos;");
-				output += 6;
-				break;
-			case '\"':
-				strcpy(output, "&quot;");
-				output += 6;
-				break;
-			default:
-				if (ch < 0x20 || ch >= 0x80)
-				{
-					uint32 cp = ch;
-
-					// decode utf8
-					if ((cp >> 5) == 0x6 && (p[1] & 0xc0) == 0x80)
-					{
-						// 2 bytes
-						if (!(ch = *++p)) goto BreakLoop; // read next char
-						cp = ((cp << 6) & 0x7ff) + (ch & 0x3f);
-					}
-					else if ((cp >> 4) == 0xe && (p[1] & 0xc0) == 0x80)
-					{
-						// 3 bytes
-						if (!(ch = *++p)) goto BreakLoop; // read next char
-						cp = ((cp << 12) & 0xffff) + ((ch << 6) & 0xfff);
-						if (!(ch = *++p)) goto BreakLoop; // read next char
-						cp += ch & 0x3f;
-					}
-					else if ((cp >> 3) == 0x1e && (p[1] & 0xc0) == 0x80)
-					{
-						// 4 bytes
-						if (!(ch = *++p)) goto BreakLoop; // read next char
-						cp = ((cp << 18) & 0x1fffff) + ((ch << 12) & 0x3ffff);
-						if (!(ch = *++p)) goto BreakLoop; // read next char
-						cp += (ch << 6) & 0xfff;
-						if (!(ch = *++p)) goto BreakLoop; // read next char
-						cp += ch & 0x3f;
-					}
-
-					// accept only valid XML 1.0 characters
-					if (cp == 0x9 || cp == 0xA || cp == 0xD ||
-						(0x20 <= cp && cp <= 0xD7FF) ||
-						(0xE000 <= cp && cp <= 0xFFFD) ||
-						(0x10000 <= cp && cp <= 0x10FFFF))
-					{
-						sprintf(output, "&#x%06x;", cp);
-						output += 10;
-					}
-					else
-					{
-						// replace invalid characters with dots
-						*output++ = '.';
-					}
-				}
-				else
-				{
-					*output++ = ch;
-				}
-				break;
-		}
-	}
-BreakLoop:
-
-	*output = '\0';
-
-	return result;
-#endif
 }
 
 namespace
@@ -1340,7 +859,6 @@ namespace
 	}
 }
 
-#ifdef NZBGET_USE_RUST
 namespace
 {
 	// Numeric XML references use the caller's locale-specific case mapping.
@@ -1355,144 +873,12 @@ void WebUtil::XmlDecode(char* raw)
 	// rust/src/text.rs
 	nzbget_rs_xml_decode(raw, XmlDigitLower);
 }
-#else
-void WebUtil::XmlDecode(char* raw)
-{
-	char* output = raw;
-	for (char* p = raw;;)
-	{
-		switch (*p)
-		{
-			case '\0':
-				goto BreakLoop;
-			case '<':
-				// a CDATA section (some XML-RPC clients wrap strings in one) is its
-				// text as is: it was kept with its markers
-				if (!strncmp(p, "<![CDATA[", 9))
-				{
-					p += 9;
-					char* end = strstr(p, "]]>");
-					char* stop = end ? end : p + strlen(p);
-					while (p < stop)
-					{
-						*output++ = *p++;
-					}
-					p = end ? end + 3 : stop;
-				}
-				else
-				{
-					*output++ = *p++;
-				}
-				break;
-			case '&':
-				{
-					p++;
-					if (!strncmp(p, "lt;", 3))
-					{
-						*output++ = '<';
-						p += 3;
-					}
-					else if (!strncmp(p, "gt;", 3))
-					{
-						*output++ = '>';
-						p += 3;
-					}
-					else if (!strncmp(p, "amp;", 4))
-					{
-						*output++ = '&';
-						p += 4;
-					}
-					else if (!strncmp(p, "apos;", 5))
-					{
-						*output++ = '\'';
-						p += 5;
-					}
-					else if (!strncmp(p, "quot;", 5))
-					{
-						*output++ = '\"';
-						p += 5;
-					}
-					else if (*p == '#')
-					{
-						// decimal or (with "x") hex, written as UTF-8: as one byte it was
-						// wrong past 127, a hex entity became a NUL that cut the text off,
-						// and digits after the ";" were swallowed (strchr also finds the
-						// terminating NUL: "&#12" at the end read past it)
-						p++;
-						bool hex = *p == 'x' || *p == 'X';
-						p += hex ? 1 : 0;
-						uint32 code = 0;
-						bool any = false;
-						while (hex ? isxdigit((unsigned char)*p) : isdigit((unsigned char)*p))
-						{
-							code = std::min<uint32>(code * (hex ? 16 : 10) +
-								(isdigit((unsigned char)*p) ? *p - '0' : tolower((unsigned char)*p) - 'a' + 10), 0x110000);
-							any = true;
-							p++;
-						}
-						if (*p == ';')
-						{
-							p++;
-						}
-						output = any ? AppendUtf8(output, code) : output;
-					}
-					else if (*p == '\0')
-					{
-						// an "&" at the end: past it lay memory that isn't the text's
-						*output++ = '&';
-						goto BreakLoop;
-					}
-					else
-					{
-						// unknown entity, keep as is
-						*output++ = *(p-1);
-						*output++ = *p++;
-					}
-					break;
-				}
-			default:
-				*output++ = *p++;
-				break;
-		}
-	}
-BreakLoop:
 
-	*output = '\0';
-}
-#endif
-
-#ifdef NZBGET_USE_RUST
 const char* WebUtil::XmlFindTag(const char* xml, const char* tag, int* valueLength)
 {
 	// rust/src/webutil.rs
 	return nzbget_rs_xml_find_tag(xml, tag, valueLength);
 }
-#else
-const char* WebUtil::XmlFindTag(const char* xml, const char* tag, int* valueLength)
-{
-	BString<100> openTag("<%s>", tag);
-	BString<100> closeTag("</%s>", tag);
-	BString<100> openCloseTag("<%s/>", tag);
-
-	const char* pstart = strstr(xml, openTag);
-	const char* pstartend = strstr(xml, openCloseTag);
-	if (!pstart && !pstartend) return nullptr;
-
-	if (pstartend && (!pstart || pstartend < pstart))
-	{
-		*valueLength = 0;
-		return pstartend;
-	}
-
-	const char* pend = strstr(pstart, closeTag);
-	if (!pend) return nullptr;
-
-	int tagLen = strlen(openTag);
-	*valueLength = (int)(pend - pstart - tagLen);
-
-	return pstart + tagLen;
-}
-#endif
 
 bool WebUtil::XmlParseTagValue(const char* xml, const char* tag, char* valueBuf, int valueBufSize, const char** tagEnd)
 {
@@ -1502,11 +888,7 @@ bool WebUtil::XmlParseTagValue(const char* xml, const char* tag, char* valueBuf,
 	{
 		return false;
 	}
-#ifdef NZBGET_USE_RUST
 	int len = nzbget_rs_ufs_webutil_xml_calc_copy_len(valueLen, valueBufSize);
-#else
-	int len = valueLen < valueBufSize ? valueLen : valueBufSize - 1;
-#endif
 	strncpy(valueBuf, value, len);
 	valueBuf[len] = '\0';
 	if (tagEnd)
@@ -1516,29 +898,12 @@ bool WebUtil::XmlParseTagValue(const char* xml, const char* tag, char* valueBuf,
 	return true;
 }
 
-#ifdef NZBGET_USE_RUST
 void WebUtil::XmlStripTags(char* xml)
 {
 	// rust/src/text.rs
 	nzbget_rs_xml_strip_tags(xml);
 }
-#else
-void WebUtil::XmlStripTags(char* xml)
-{
-	while (char *start = strchr(xml, '<'))
-	{
-		char *end = strchr(start, '>');
-		if (!end)
-		{
-			break;
-		}
-		memset(start, ' ', end - start + 1);
-		xml = end + 1;
-	}
-}
-#endif
 
-#ifdef NZBGET_USE_RUST
 namespace
 {
 	// Classify the byte as the caller's char, preserving glibc's legacy
@@ -1561,46 +926,9 @@ void WebUtil::XmlRemoveEntities(char* raw)
 	// rust/src/text.rs
 	nzbget_rs_xml_remove_entities(raw, XmlEntityAlpha);
 }
-#else
-void WebUtil::XmlRemoveEntities(char* raw)
-{
-	char* output = raw;
-	for (char* p = raw;;)
-	{
-		switch (*p)
-		{
-			case '\0':
-				goto BreakLoop;
-			case '&':
-			{
-				char* p2 = p+1;
-				// strchr finds the terminator too: stop at the end of the string
-				while (*p2 && (isalpha(*p2) || strchr("0123456789#", *p2))) p2++;
-				if (*p2 == ';')
-				{
-					*output++ = ' ';
-					p = p2+1;
-				}
-				else
-				{
-					*output++ = *p++;
-				}
-				break;
-			}
-			default:
-				*output++ = *p++;
-				break;
-		}
-	}
-BreakLoop:
-
-	*output = '\0';
-}
-#endif
 
 CString WebUtil::JsonEncode(const char* raw)
 {
-#ifdef NZBGET_USE_RUST
 	// rust/src/escape.rs
 	NzbgetRsBuf buf = nzbget_rs_json_encode(raw);
 	// CString adds one to an int length before allocating.
@@ -1612,354 +940,32 @@ CString WebUtil::JsonEncode(const char* raw)
 	CString result(buf.data, static_cast<int>(buf.len));
 	nzbget_rs_free(buf);
 	return result;
-#else
-	// calculate the required outputstring-size based on number of escape-entities and their sizes
-	int reqSize = strlen(raw);
-	for (const char* p = raw; *p; p++)
-	{
-		uchar ch = *p;
-		switch (ch)
-		{
-			case '\"':
-			case '\\':
-			case '/':
-			case '\b':
-			case '\f':
-			case '\n':
-			case '\r':
-			case '\t':
-				reqSize++;
-				break;
-			default:
-				if (ch < 0x20 || ch >= 0x80)
-				{
-					reqSize += 6;
-					break;
-				}
-		}
-	}
-
-	CString result;
-	result.Reserve(reqSize);
-
-	// copy string
-	char* output = result;
-	for (const char* p = raw; ; p++)
-	{
-		uchar ch = *p;
-		switch (ch)
-		{
-			case '\0':
-				goto BreakLoop;
-			case '"':
-				strcpy(output, "\\\"");
-				output += 2;
-				break;
-			case '\\':
-				strcpy(output, "\\\\");
-				output += 2;
-				break;
-			case '/':
-				strcpy(output, "\\/");
-				output += 2;
-				break;
-			case '\b':
-				strcpy(output, "\\b");
-				output += 2;
-				break;
-			case '\f':
-				strcpy(output, "\\f");
-				output += 2;
-				break;
-			case '\n':
-				strcpy(output, "\\n");
-				output += 2;
-				break;
-			case '\r':
-				strcpy(output, "\\r");
-				output += 2;
-				break;
-			case '\t':
-				strcpy(output, "\\t");
-				output += 2;
-				break;
-			default:
-				if (ch < 0x20 || ch >= 0x80)
-				{
-					uint32 cp = ch;
-
-					// decode utf8
-					if ((cp >> 5) == 0x6 && (p[1] & 0xc0) == 0x80)
-					{
-						// 2 bytes
-						if (!(ch = *++p)) goto BreakLoop; // read next char
-						cp = ((cp << 6) & 0x7ff) + (ch & 0x3f);
-					}
-					else if ((cp >> 4) == 0xe && (p[1] & 0xc0) == 0x80)
-					{
-						// 3 bytes
-						if (!(ch = *++p)) goto BreakLoop; // read next char
-						cp = ((cp << 12) & 0xffff) + ((ch << 6) & 0xfff);
-						if (!(ch = *++p)) goto BreakLoop; // read next char
-						cp += ch & 0x3f;
-					}
-					else if ((cp >> 3) == 0x1e && (p[1] & 0xc0) == 0x80)
-					{
-						// 4 bytes
-						if (!(ch = *++p)) goto BreakLoop; // read next char
-						cp = ((cp << 18) & 0x1fffff) + ((ch << 12) & 0x3ffff);
-						if (!(ch = *++p)) goto BreakLoop; // read next char
-						cp += (ch << 6) & 0xfff;
-						if (!(ch = *++p)) goto BreakLoop; // read next char
-						cp += ch & 0x3f;
-					}
-
-					if (cp <= 0xFFFF)
-					{
-						sprintf(output, "\\u%04x", cp);
-						output += 6;
-					}
-					else
-					{
-						// past U+FFFF (an emoji, CJK extension B): a UTF-16 surrogate pair,
-						// the JSON form - written as "." it lost the character
-						cp -= 0x10000;
-						sprintf(output, "\\u%04x\\u%04x", 0xD800 + (cp >> 10), 0xDC00 + (cp & 0x3FF));
-						output += 12;
-					}
-				}
-				else
-				{
-					*output++ = ch;
-				}
-				break;
-		}
-	}
-BreakLoop:
-
-	*output = '\0';
-
-	return result;
-#endif
 }
 
-#ifdef NZBGET_USE_RUST
 void WebUtil::JsonDecode(char* raw)
 {
 	// rust/src/decode.rs
 	nzbget_rs_json_decode(raw);
 }
-#else
-void WebUtil::JsonDecode(char* raw)
-{
-	char* output = raw;
-	for (char* p = raw;;)
-	{
-		switch (*p)
-		{
-			case '\0':
-				goto BreakLoop;
-			case '\\':
-				{
-					p++;
-					// a backslash or a short \u-escape at the end of the text: past it lay
-					// memory that isn't the text's (P0-b)
-					if (*p == '\0')
-					{
-						goto BreakLoop;
-					}
-					switch (*p)
-					{
-						case '"':
-							*output++ = '"';
-							break;
-						case '\\':
-							*output++ = '\\';
-							break;
-						case '/':
-							*output++ = '/';
-							break;
-						case 'b':
-							*output++ = '\b';
-							break;
-						case 'f':
-							*output++ = '\f';
-							break;
-						case 'n':
-							*output++ = '\n';
-							break;
-						case 'r':
-							*output++ = '\r';
-							break;
-						case 't':
-							*output++ = '\t';
-							break;
-						case 'u':
-							{
-								// written as UTF-8, a surrogate pair as one character: as one
-								// byte it was wrong past 127, and a NUL cut the text off
-								int code = Hex4(p + 1);
-								if (code < 0)
-								{
-									// not four hex digits (a short one at the end too): skip
-									// what is there of them
-									while (p[1] && isxdigit((unsigned char)p[1]))
-									{
-										p++;
-									}
-									break;
-								}
-								p += 4;
-								if (code >= 0xD800 && code <= 0xDBFF && p[1] == '\\' && p[2] == 'u')
-								{
-									int low = Hex4(p + 3);
-									if (low >= 0xDC00 && low <= 0xDFFF)
-									{
-										code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
-										p += 6;
-									}
-								}
-								output = AppendUtf8(output, (uint32)code);
-							}
-							break;
-						default:
-							// unknown escape-sequence, should never occur
-							*output++ = *p;
-							break;
-					}
-					p++;
-					break;
-				}
-			default:
-				*output++ = *p++;
-				break;
-		}
-	}
-BreakLoop:
 
-	*output = '\0';
-}
-#endif
-
-#ifdef NZBGET_USE_RUST
 const char* WebUtil::JsonFindField(const char* jsonText, const char* fieldName, int* valueLength)
 {
 	// rust/src/webutil.rs
 	return nzbget_rs_json_find_field(jsonText, fieldName, valueLength);
 }
-#else
-const char* WebUtil::JsonFindField(const char* jsonText, const char* fieldName, int* valueLength)
-{
-	BString<100> openTag("\"%s\"", fieldName);
 
-	const char* pstart = strstr(jsonText, openTag);
-	if (!pstart) return nullptr;
-
-	pstart += strlen(openTag);
-
-	return JsonNextValue(pstart, valueLength);
-}
-#endif
-
-#ifdef NZBGET_USE_RUST
 const char* WebUtil::JsonNextValue(const char* jsonText, int* valueLength)
 {
 	// rust/src/decode.rs
 	return nzbget_rs_json_next_value(jsonText, valueLength);
 }
-#else
-const char* WebUtil::JsonNextValue(const char* jsonText, int* valueLength)
-{
-	if (!jsonText || !valueLength)
-	{
-		return nullptr;
-	}
 
-	const char* pstart = jsonText;
-
-	while (*pstart && strchr(" ,[{:\r\n\t\f", *pstart)) pstart++;
-	if (!*pstart) return nullptr;
-
-	const char* pend = pstart;
-
-	char ch = *pend;
-	bool str = ch == '"';
-	if (str)
-	{
-		ch = *++pend;
-	}
-	while (ch)
-	{
-		if (str && ch == '\\')
-		{
-			if (!*++pend) return nullptr;
-			if (!*++pend) return nullptr;
-
-			ch = *pend;
-			continue;
-		}
-
-		if (str && ch == '"')
-		{
-			pend++;
-			break;
-		}
-		else if (!str && strchr(" ,]}\r\n\t\f", ch))
-		{
-			break;
-		}
-
-		ch = *++pend;
-	}
-
-	*valueLength = static_cast<int>(pend - pstart);
-	return pstart;
-}
-#endif
-
-#ifdef NZBGET_USE_RUST
 void WebUtil::HttpUnquote(char* raw)
 {
 	// rust/src/text.rs
 	nzbget_rs_http_unquote(raw);
 }
-#else
-void WebUtil::HttpUnquote(char* raw)
-{
-	if (*raw != '"')
-	{
-		return;
-	}
 
-	char *output = raw;
-	for (char *p = raw+1;;)
-	{
-		switch (*p)
-		{
-			case '\0':
-			case '"':
-				goto BreakLoop;
-			case '\\':
-				// the escaped character is taken once and skipped (it was read
-				// again: an escaped quote ended the string, others came twice)
-				p++;
-				if (*p)
-				{
-					*output++ = *p++;
-				}
-				break;
-			default:
-				*output++ = *p++;
-				break;
-		}
-	}
-BreakLoop:
-
-	*output = '\0';
-}
-#endif
-
-#ifdef NZBGET_USE_RUST
 namespace
 {
 	// tolower as strncasecmp applies it: to an unsigned byte
@@ -1992,144 +998,13 @@ CString WebUtil::ParseContentDispositionFilename(const char* contentDisposition)
 	nzbget_rs_free(buf);
 	return result;
 }
-#else
-CString WebUtil::ParseContentDispositionFilename(const char* contentDisposition)
-{
-	// Examples:
-	// Content-Disposition: attachment; filename="fname.ext"
-	// Content-Disposition: attachement;filename=fname.ext
-	// Content-Disposition: attachement;filename=fname.ext;
-	// Content-Disposition: attachment; filename=fname.ext; filename*=UTF-8''fname.ext
-	CString filename;
-	CString extFilename;
 
-	for (const char* p = contentDisposition; *p; )
-	{
-		while (*p == ';' || *p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
-		if (!*p) break;
-
-		const char* nameStart = p;
-		while (*p && *p != '=' && *p != ';') p++;
-		int nameLen = (int)(p - nameStart);
-		while (nameLen > 0 && (nameStart[nameLen-1] == ' ' || nameStart[nameLen-1] == '\t')) nameLen--;
-
-		if (*p != '=')
-		{
-			// disposition type ("attachment") or a parameter without value
-			continue;
-		}
-
-		p++;
-		while (*p == ' ' || *p == '\t') p++;
-
-		const char* valueStart = p;
-		int valueLen;
-		bool quoted = *p == '"';
-		if (quoted)
-		{
-			p++;
-			while (*p && *p != '"')
-			{
-				p += *p == '\\' && p[1] ? 2 : 1;
-			}
-			if (*p == '"') p++;
-			valueLen = (int)(p - valueStart);
-			while (*p && *p != ';') p++;
-		}
-		else
-		{
-			while (*p && *p != ';') p++;
-			valueLen = (int)(p - valueStart);
-			while (valueLen > 0 && (valueStart[valueLen-1] == ' ' || valueStart[valueLen-1] == '\t' ||
-				valueStart[valueLen-1] == '\r' || valueStart[valueLen-1] == '\n')) valueLen--;
-		}
-
-		if (valueLen == 0)
-		{
-			continue;
-		}
-
-		if (nameLen == 8 && !strncasecmp(nameStart, "filename", 8))
-		{
-			filename.Set(valueStart, valueLen);
-			if (quoted)
-			{
-				HttpUnquote(filename);
-			}
-		}
-		else if (nameLen == 9 && !strncasecmp(nameStart, "filename*", 9))
-		{
-			// ext-value = charset "'" [ language ] "'" value-chars (RFC 5987)
-			CString value(valueStart, valueLen);
-			char* apo1 = strchr(value, '\'');
-			char* apo2 = apo1 ? strchr(apo1 + 1, '\'') : nullptr;
-			if (apo2 && apo2[1])
-			{
-				extFilename = apo2 + 1;
-				UrlDecode(extFilename);
-				if (apo1 - value == 10 && !strncasecmp(value, "ISO-8859-1", 10))
-				{
-					extFilename = Latin1ToUtf8(extFilename);
-				}
-			}
-		}
-	}
-
-	if (!extFilename.Empty())
-	{
-		return extFilename;
-	}
-	return filename;
-}
-#endif
-
-#ifdef NZBGET_USE_RUST
 void WebUtil::UrlDecode(char* raw)
 {
 	// rust/src/text.rs
 	nzbget_rs_url_decode(raw);
 }
-#else
-void WebUtil::UrlDecode(char* raw)
-{
-	char* output = raw;
-	for (char* p = raw;;)
-	{
-		switch (*p)
-		{
-			case '\0':
-				goto BreakLoop;
-			case '%':
-				{
-					if (!p[1] || !p[2])
-					{
-						// truncated escape sequence, keep it as is
-						*output++ = *p++;
-						break;
-					}
-					p++;
-					uchar c1 = *p++;
-					uchar c2 = *p++;
-					c1 = '0' <= c1 && c1 <= '9' ? c1 - '0' : 'A' <= c1 && c1 <= 'F' ? c1 - 'A' + 10 :
-						'a' <= c1 && c1 <= 'f' ? c1 - 'a' + 10 : 0;
-					c2 = '0' <= c2 && c2 <= '9' ? c2 - '0' : 'A' <= c2 && c2 <= 'F' ? c2 - 'A' + 10 :
-						'a' <= c2 && c2 <= 'f' ? c2 - 'a' + 10 : 0;
-					uchar ch = (c1 << 4) + c2;
-					*output++ = (char)ch;
-					break;
-				}
-			default:
-				*output++ = *p++;
-				break;
-		}
-	}
-BreakLoop:
 
-	*output = '\0';
-}
-#endif
-
-#ifdef NZBGET_USE_RUST
 CString WebUtil::UrlEncode(const char* raw)
 {
 	// rust/src/text.rs
@@ -2143,48 +1018,7 @@ CString WebUtil::UrlEncode(const char* raw)
 	nzbget_rs_free(buf);
 	return result;
 }
-#else
-CString WebUtil::UrlEncode(const char* raw)
-{
-	// calculate the required outputstring-size based on number of spaces
-	int reqSize = strlen(raw);
-	for (const char* p = raw; *p; p++)
-	{
-		if (*p == ' ')
-		{
-			reqSize += 3; // length of "%20"
-		}
-	}
 
-	CString result;
-	result.Reserve(reqSize);
-
-	// copy string
-	char* output = result;
-	for (const char* p = raw; ; p++)
-	{
-		uchar ch = *p;
-		switch (ch)
-		{
-			case '\0':
-				goto BreakLoop;
-			case ' ':
-				strcpy(output, "%20");
-				output += 3;
-				break;
-			default:
-				*output++ = ch;
-		}
-	}
-BreakLoop:
-
-	*output = '\0';
-
-	return result;
-}
-#endif
-
-#ifdef NZBGET_USE_RUST
 namespace
 {
 	// Caller-owned bounded encodings; Reserve allocates bound+1 bytes and
@@ -2209,9 +1043,7 @@ namespace
 	}
 
 }
-#endif
 
-#ifdef NZBGET_USE_RUST
 CString WebUtil::Latin1ToUtf8(const char* str)
 {
 	// rust/src/text.rs
@@ -2220,29 +1052,6 @@ CString WebUtil::Latin1ToUtf8(const char* str)
 		return nzbget_rs_latin1_to_utf8_n(str, inputLen, out, cap);
 	});
 }
-#else
-CString WebUtil::Latin1ToUtf8(const char* str)
-{
-	CString res;
-	res.Reserve(strlen(str) * 2);
-	const uchar *in = (const uchar*)str;
-	uchar *out = (uchar*)(char*)res;
-	while (*in)
-	{
-		if (*in < 128)
-		{
-			*out++ = *in++;
-		}
-		else
-		{
-			*out++ = 0xc2 + (*in > 0xbf);
-			*out++ = (*in++ & 0x3f) + 0x80;
-		}
-	}
-	*out = '\0';
-	return res;
-}
-#endif
 
 /*
  The date/time can be formatted according to RFC822 in different ways. Examples:
@@ -2256,96 +1065,11 @@ CString WebUtil::Latin1ToUtf8(const char* str)
  unknown names count as UTC. Only the first format was read before: the others
  (GMT is common in feeds) gave no time at all.
 */
-#ifdef NZBGET_USE_RUST
 time_t WebUtil::ParseRfc822DateTime(const char* dateTimeStr)
 {
 	// rust/src/util.rs
 	return static_cast<time_t>(nzbget_rs_parse_rfc822_date_time(dateTimeStr));
 }
-#else
-time_t WebUtil::ParseRfc822DateTime(const char* dateTimeStr)
-{
-	const char* p = dateTimeStr;
-	while (*p == ' ') p++;
-
-	// optional day name ("Wed,")
-	if (isalpha((unsigned char)*p))
-	{
-		while (*p && *p != ',' && *p != ' ') p++;
-		if (*p == ',') p++;
-	}
-
-	char month[4] = "";
-	int day, year, hours, minutes, seconds = 0;
-	int len = 0;
-	if (sscanf(p, "%d %3s %d %d:%d%n", &day, month, &year, &hours, &minutes, &len) != 5)
-	{
-		return 0;
-	}
-	p += len;
-	if (*p == ':')
-	{
-		int secLen = 0;
-		if (sscanf(p + 1, "%d%n", &seconds, &secLen) != 1)
-		{
-			return 0;
-		}
-		p += 1 + secLen;
-	}
-	while (*p == ' ') p++;
-
-	int zoneOffset = 0; // minutes east of UTC
-	if ((*p == '+' || *p == '-') && isdigit((unsigned char)p[1]))
-	{
-		int zone = atoi(p + 1);
-		zoneOffset = (zone / 100) * 60 + zone % 100;
-		if (*p == '-') zoneOffset = -zoneOffset;
-	}
-	else
-	{
-		struct { const char* name; int hours; } zones[] = {
-			{"EST", -5}, {"EDT", -4}, {"CST", -6}, {"CDT", -5},
-			{"MST", -7}, {"MDT", -6}, {"PST", -8}, {"PDT", -7}};
-		for (auto& zone : zones)
-		{
-			if (!strncasecmp(p, zone.name, 3))
-			{
-				zoneOffset = zone.hours * 60;
-				break;
-			}
-		}
-	}
-
-	int mon = 0;
-	if (!strcasecmp(month, "Jan")) mon = 0;
-	else if (!strcasecmp(month, "Feb")) mon = 1;
-	else if (!strcasecmp(month, "Mar")) mon = 2;
-	else if (!strcasecmp(month, "Apr")) mon = 3;
-	else if (!strcasecmp(month, "May")) mon = 4;
-	else if (!strcasecmp(month, "Jun")) mon = 5;
-	else if (!strcasecmp(month, "Jul")) mon = 6;
-	else if (!strcasecmp(month, "Aug")) mon = 7;
-	else if (!strcasecmp(month, "Sep")) mon = 8;
-	else if (!strcasecmp(month, "Oct")) mon = 9;
-	else if (!strcasecmp(month, "Nov")) mon = 10;
-	else if (!strcasecmp(month, "Dec")) mon = 11;
-
-	struct tm rawtime;
-	memset(&rawtime, 0, sizeof(rawtime));
-
-	rawtime.tm_year = year - 1900;
-	rawtime.tm_mon = mon;
-	rawtime.tm_mday = day;
-	rawtime.tm_hour = hours;
-	rawtime.tm_min = minutes;
-	rawtime.tm_sec = seconds;
-
-	time_t enctime = Util::Timegm(&rawtime);
-	enctime -= zoneOffset * 60;
-
-	return enctime;
-}
-#endif
 
 
 URL::URL(const char* address) :
@@ -2357,7 +1081,6 @@ URL::URL(const char* address) :
 	}
 }
 
-#ifdef NZBGET_USE_RUST
 void URL::ParseUrl()
 {
 	// rust/src/url.rs
@@ -2383,94 +1106,6 @@ void URL::ParseUrl()
 	m_port = r.port;
 	m_valid = true;
 }
-#else
-void URL::ParseUrl()
-{
-	// Examples:
-	// http://user:password@host:port/path/to/resource?param
-	// http://user@host:port/path/to/resource?param
-	// http://host:port/path/to/resource?param
-	// http://host/path/to/resource?param
-	// http://host
-
-	char* protEnd = strstr(m_address, "://");
-	if (!protEnd)
-	{
-		// Bad URL
-		return;
-	}
-
-	// a scheme is letters, digits, "+", "-" and "."; a "://" further on (a
-	// relative "/get?u=https://...") doesn't make an absolute URL
-	if (protEnd == *m_address || !isalpha((unsigned char)m_address[0]))
-	{
-		return;
-	}
-	for (const char* p = m_address; p < protEnd; p++)
-	{
-		if (!isalnum((unsigned char)*p) && !strchr("+-.", *p))
-		{
-			return;
-		}
-	}
-
-	m_protocol.Set(m_address, (int)(protEnd - m_address));
-
-	char* hostStart = protEnd + 3;
-	char* slash = strchr(hostStart, '/');
-	char* hostEnd = nullptr;
-	char* amp = strchr(hostStart, '@');
-
-	if (amp && (!slash || amp < slash))
-	{
-		// parse user/password
-		char* userend = amp - 1;
-		char* pass = strchr(hostStart, ':');
-		if (pass && pass < amp)
-		{
-			int len = (int)(amp - pass - 1);
-			if (len > 0)
-			{
-				m_password.Set(pass + 1, len);
-			}
-			userend = pass - 1;
-		}
-
-		int len = (int)(userend - hostStart + 1);
-		if (len > 0)
-		{
-			m_user.Set(hostStart, len);
-		}
-
-		hostStart = amp + 1;
-	}
-
-	if (slash)
-	{
-		char* resEnd = m_address + strlen(m_address);
-		m_resource.Set(slash, (int)(resEnd - slash + 1));
-
-		hostEnd = slash - 1;
-	}
-	else
-	{
-		m_resource = "/";
-
-		hostEnd = m_address + strlen(m_address);
-	}
-
-	char* colon = strchr(hostStart, ':');
-	if (colon && colon < hostEnd)
-	{
-		hostEnd = colon - 1;
-		m_port = atoi(colon + 1);
-	}
-
-	m_host.Set(hostStart, (int)(hostEnd - hostStart + 1));
-
-	m_valid = true;
-}
-#endif
 
 
 RegEx::RegEx(const char *pattern, int matchBufSize) :
@@ -2536,18 +1171,13 @@ int RegEx::GetMatchStart(int index)
 int RegEx::GetMatchLen(int index)
 {
 #ifdef HAVE_REGEX_H
-#ifdef NZBGET_USE_RUST
 	return nzbget_rs_ufs_regex_calc_match_len(m_matches[index].rm_so, m_matches[index].rm_eo);
-#else
-	return m_matches[index].rm_eo - m_matches[index].rm_so;
-#endif
 #else
 	return 0;
 #endif
 }
 
 
-#ifdef NZBGET_USE_RUST
 namespace
 {
 	// tolower of a byte as WildMask's C++ code saw it: a char (signed or not, as
@@ -2612,156 +1242,6 @@ bool WildMask::Match(const char* text)
 	}
 	return result.matched != 0;
 }
-#else
-void WildMask::ExpandArray()
-{
-	m_wildCount++;
-	m_wildStart.resize(m_wildCount);
-	m_wildLen.resize(m_wildCount);
-}
-
-// Based on code from http://bytes.com/topic/c/answers/212179-string-matching
-// Extended to save positions of matches.
-bool WildMask::Match(const char* text)
-{
-	m_wildCount = 0;
-	m_wildStart.clear();
-	m_wildStart.reserve(100);
-	m_wildLen.clear();
-	m_wildLen.reserve(100);
-
-	const char* pat = m_pattern;
-	const char* str = text;
-	const char *spos, *wpos;
-	bool qmark = false;
-	bool star = false;
-
-	spos = wpos = str;
-	while (*str && *pat != '*')
-	{
-		if (m_wantsPositions && (*pat == '?' || *pat == '#'))
-		{
-			if (!qmark)
-			{
-				ExpandArray();
-				m_wildStart[m_wildCount-1] = (int)(str - text);
-				m_wildLen[m_wildCount-1] = 0;
-				qmark = true;
-			}
-		}
-		else if (m_wantsPositions && qmark)
-		{
-			m_wildLen[m_wildCount-1] = (int)(str - (text + m_wildStart[m_wildCount-1]));
-			qmark = false;
-		}
-
-		if (!(tolower(*pat) == tolower(*str) || *pat == '?' ||
-			(*pat == '#' && strchr("0123456789", *str))))
-		{
-			return false;
-		}
-		str++;
-		pat++;
-	}
-
-	if (m_wantsPositions && qmark)
-	{
-		m_wildLen[m_wildCount-1] = (int)(str - (text + m_wildStart[m_wildCount-1]));
-		qmark = false;
-	}
-
-	while (*str)
-	{
-		if (*pat == '*')
-		{
-			if (m_wantsPositions && qmark)
-			{
-				m_wildLen[m_wildCount-1] = (int)(str - (text + m_wildStart[m_wildCount-1]));
-				qmark = false;
-			}
-			if (m_wantsPositions && !star)
-			{
-				ExpandArray();
-				m_wildStart[m_wildCount-1] = (int)(str - text);
-				m_wildLen[m_wildCount-1] = 0;
-				star = true;
-			}
-
-			if (*++pat == '\0')
-			{
-				if (m_wantsPositions && star)
-				{
-					m_wildLen[m_wildCount-1] = strlen(str);
-				}
-
-				return true;
-			}
-			wpos = pat;
-			spos = str + 1;
-		}
-		else if (*pat == '?' || (*pat == '#' && strchr("0123456789", *str)))
-		{
-			if (m_wantsPositions && !qmark)
-			{
-				ExpandArray();
-				m_wildStart[m_wildCount-1] = (int)(str - text);
-				m_wildLen[m_wildCount-1] = 0;
-				qmark = true;
-			}
-
-			pat++;
-			str++;
-		}
-		else if (tolower(*pat) == tolower(*str))
-		{
-			if (m_wantsPositions && qmark)
-			{
-				m_wildLen[m_wildCount-1] = (int)(str - (text + m_wildStart[m_wildCount-1]));
-				qmark = false;
-			}
-			else if (m_wantsPositions && star)
-			{
-				m_wildLen[m_wildCount-1] = (int)(str - (text + m_wildStart[m_wildCount-1]));
-				star = false;
-			}
-
-			pat++;
-			str++;
-		}
-		else
-		{
-			if (m_wantsPositions && qmark)
-			{
-				m_wildCount--;
-				qmark = false;
-			}
-
-			pat = wpos;
-			str = spos++;
-			star = true;
-		}
-	}
-
-	if (m_wantsPositions && qmark)
-	{
-		m_wildLen[m_wildCount-1] = (int)(str - (text + m_wildStart[m_wildCount-1]));
-	}
-
-	if (*pat == '*' && m_wantsPositions && !star)
-	{
-		ExpandArray();
-		m_wildStart[m_wildCount-1] = (int)(str - text);
-		m_wildLen[m_wildCount-1] = strlen(str);
-	}
-
-	while (*pat == '*')
-	{
-		pat++;
-	}
-
-	return *pat == '\0';
-}
-#endif
 
 
 #ifndef DISABLE_GZIP
@@ -2858,11 +1338,7 @@ Tokenizer::Tokenizer(const char* dataString, const char* separators) :
 {
 	// an optimization to avoid memory allocation for short data string
 	int len = strlen(dataString);
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_ufs_tokenizer_fits_short_string(len, m_shortString.Capacity()) != 0)
-#else
-	if (len < m_shortString.Capacity())
-#endif
 	{
 		m_shortString.Set(dataString);
 		m_dataString = m_shortString;
@@ -2923,91 +1399,8 @@ uint32 Crc32::Finish()
 	return *currentCrc;
 }
 
-#ifdef NZBGET_USE_RUST
 uint32 Crc32::Combine(uint32 crc1, uint32 crc2, uint32 len2)
 {
 	// rust/src/crc.rs
 	return nzbget_rs_crc32_combine(crc1, crc2, len2);
 }
-#else
-/* From zlib/crc32.c (http://www.zlib.net/)
- * Copyright (C) 1995-2006, 2010, 2011, 2012 Mark Adler
- */
-
-#define GF2_DIM 32      /* dimension of GF(2) vectors (length of CRC) */
-
-uint32 gf2_matrix_times(uint32 *mat, uint32 vec)
-{
-	uint32 sum;
-
-	sum = 0;
-	while (vec) {
-		if (vec & 1)
-			sum ^= *mat;
-		vec >>= 1;
-		mat++;
-	}
-	return sum;
-}
-
-void gf2_matrix_square(uint32 *square, uint32 *mat)
-{
-	int n;
-
-	for (n = 0; n < GF2_DIM; n++)
-		square[n] = gf2_matrix_times(mat, mat[n]);
-}
-
-uint32 Crc32::Combine(uint32 crc1, uint32 crc2, uint32 len2)
-{
-	int n;
-	uint32 row;
-	uint32 even[GF2_DIM];    /* even-power-of-two zeros operator */
-	uint32 odd[GF2_DIM];     /* odd-power-of-two zeros operator */
-
-	/* degenerate case (also disallow negative lengths) */
-	if (len2 <= 0)
-		return crc1;
-
-	/* put operator for one zero bit in odd */
-	odd[0] = 0xedb88320UL;          /* CRC-32 polynomial */
-	row = 1;
-	for (n = 1; n < GF2_DIM; n++) {
-		odd[n] = row;
-		row <<= 1;
-	}
-
-	/* put operator for two zero bits in even */
-	gf2_matrix_square(even, odd);
-
-	/* put operator for four zero bits in odd */
-	gf2_matrix_square(odd, even);
-
-	/* apply len2 zeros to crc1 (first square will put the operator for one
-	   zero byte, eight zero bits, in even) */
-	do {
-		/* apply zeros operator for this bit of len2 */
-		gf2_matrix_square(even, odd);
-		if (len2 & 1)
-			crc1 = gf2_matrix_times(even, crc1);
-		len2 >>= 1;
-
-		/* if no more bits set, then done */
-		if (len2 == 0)
-			break;
-
-		/* another iteration of the loop with odd and even swapped */
-		gf2_matrix_square(odd, even);
-		if (len2 & 1)
-			crc1 = gf2_matrix_times(odd, crc1);
-		len2 >>= 1;
-
-		/* if no more bits set, then done */
-	} while (len2 != 0);
-
-	/* return combined crc */
-	crc1 ^= crc2;
-
-	return crc1;
-}
-#endif

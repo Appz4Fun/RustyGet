@@ -27,11 +27,8 @@
 #include "Log.h"
 #include "Util.h"
 #include "FileSystem.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
-#ifdef NZBGET_USE_RUST
 // One entry of a list response, read by rust/src/binrpc.rs: its ints (host
 // order) and strings; Next is false at an entry that doesn't fit the data,
 // which ends the listing
@@ -58,7 +55,6 @@ struct RsEntry
 
 // A listing from rust/src/binrpc.rs: the printed lines of a response's entries as one string, freed after
 #define RS_PRINT_LISTING(buf) do { NzbgetRsBuf rsListing = (buf); printf("%s", rsListing.data); nzbget_rs_free(rsListing); } while (0)
-#endif
 
 void RemoteClient::printf(const char * msg,...)
 {
@@ -81,12 +77,8 @@ void RemoteClient::perror(const char * msg)
 
 bool RemoteClient::InitConnection()
 {
-#ifdef NZBGET_USE_RUST
 	const char* controlIp = nzbget_rs_ccm_remote_client_is_wildcard_control_ip(g_Options->GetControlIp()) ?
 		"127.0.0.1" : g_Options->GetControlIp();
-#else
-	const char* controlIp = !strcmp(g_Options->GetControlIp(), "0.0.0.0") ? "127.0.0.1" : g_Options->GetControlIp();
-#endif
 
 	// Create a connection to the server (retry briefly if server is mid-reload)
 	bool OK = false;
@@ -161,11 +153,7 @@ bool RemoteClient::RequestServerDownload(const char* nzbFilename, const char* nz
 	// Read the file into the buffer
 	CharBuffer buffer;
 	int length = 0;
-#ifdef NZBGET_USE_RUST
 	bool isUrl = nzbget_rs_ccm_remote_client_is_http_url(nzbContent) != 0;
-#else
-	bool isUrl = !strncasecmp(nzbContent, "http://", 6) || !strncasecmp(nzbContent, "https://", 7);
-#endif
 	if (isUrl)
 	{
 		length = strlen(nzbContent) + 1;
@@ -234,7 +222,6 @@ bool RemoteClient::RequestServerDownload(const char* nzbFilename, const char* nz
 	return OK;
 }
 
-#ifdef NZBGET_USE_RUST
 void RemoteClient::BuildFileList(SNzbListResponse* listResponse, const char* trailingData, DownloadQueue* downloadQueue)
 {
 	size_t len = ntohl(listResponse->m_trailingDataLength);
@@ -313,97 +300,6 @@ void RemoteClient::BuildFileList(SNzbListResponse* listResponse, const char* tra
 		nzbInfo->GetFileList()->Add(std::move(fileInfo));
 	}
 }
-#else
-void RemoteClient::BuildFileList(SNzbListResponse* listResponse, const char* trailingData, DownloadQueue* downloadQueue)
-{
-	if (ntohl(listResponse->m_trailingDataLength) > 0)
-	{
-		const char* bufPtr = trailingData;
-
-		// read nzb entries
-		for (uint32 i = 0; i < ntohl(listResponse->m_nrTrailingNzbEntries); i++)
-		{
-			SNzbListResponseNzbEntry* listAnswer = (SNzbListResponseNzbEntry*) bufPtr;
-
-			const char* fileName = bufPtr + sizeof(SNzbListResponseNzbEntry);
-			const char* name = bufPtr + sizeof(SNzbListResponseNzbEntry) + ntohl(listAnswer->m_filenameLen);
-			const char* destDir = bufPtr + sizeof(SNzbListResponseNzbEntry) + ntohl(listAnswer->m_filenameLen) +
-				ntohl(listAnswer->m_nameLen);
-			const char* category = bufPtr + sizeof(SNzbListResponseNzbEntry) + ntohl(listAnswer->m_filenameLen) +
-				ntohl(listAnswer->m_nameLen) + ntohl(listAnswer->m_destDirLen);
-			const char* m_queuedFilename = bufPtr + sizeof(SNzbListResponseNzbEntry) + ntohl(listAnswer->m_filenameLen) +
-				ntohl(listAnswer->m_nameLen) + ntohl(listAnswer->m_destDirLen) + ntohl(listAnswer->m_categoryLen);
-
-			std::unique_ptr<MatchedNzbInfo> nzbInfo = std::make_unique<MatchedNzbInfo>();
-			nzbInfo->SetId(ntohl(listAnswer->m_id));
-			nzbInfo->SetKind((NzbInfo::EKind)ntohl(listAnswer->m_kind));
-			nzbInfo->SetSize(Util::JoinInt64(ntohl(listAnswer->m_sizeHi), ntohl(listAnswer->m_sizeLo)));
-			nzbInfo->SetRemainingSize(Util::JoinInt64(ntohl(listAnswer->m_remainingSizeHi), ntohl(listAnswer->m_remainingSizeLo)));
-			nzbInfo->SetPausedSize(Util::JoinInt64(ntohl(listAnswer->m_pausedSizeHi), ntohl(listAnswer->m_pausedSizeLo)));
-			nzbInfo->SetPausedFileCount(ntohl(listAnswer->m_pausedCount));
-			nzbInfo->SetRemainingParCount(ntohl(listAnswer->m_remainingParCount));
-			nzbInfo->SetFilename(fileName);
-			nzbInfo->SetName(name);
-			nzbInfo->SetDestDir(destDir);
-			nzbInfo->SetCategory(category);
-			nzbInfo->SetQueuedFilename(m_queuedFilename);
-			nzbInfo->SetPriority(ntohl(listAnswer->m_priority));
-			nzbInfo->m_match = ntohl(listAnswer->m_match);
-
-			downloadQueue->GetQueue()->Add(std::move(nzbInfo));
-
-			bufPtr += sizeof(SNzbListResponseNzbEntry) + ntohl(listAnswer->m_filenameLen) +
-				ntohl(listAnswer->m_nameLen) + ntohl(listAnswer->m_destDirLen) +
-				ntohl(listAnswer->m_categoryLen) + ntohl(listAnswer->m_queuedFilenameLen);
-		}
-
-		//read ppp entries
-		for (uint32 i = 0; i < ntohl(listResponse->m_nrTrailingPPPEntries); i++)
-		{
-			SNzbListResponsePPPEntry* listAnswer = (SNzbListResponsePPPEntry*) bufPtr;
-
-			const char* name = bufPtr + sizeof(SNzbListResponsePPPEntry);
-			const char* value = bufPtr + sizeof(SNzbListResponsePPPEntry) + ntohl(listAnswer->m_nameLen);
-
-			std::unique_ptr<NzbInfo>& nzbInfo = downloadQueue->GetQueue()->at(ntohl(listAnswer->m_nzbIndex) - 1);
-			nzbInfo->GetParameters()->SetParameter(name, value);
-
-			bufPtr += sizeof(SNzbListResponsePPPEntry) + ntohl(listAnswer->m_nameLen) +
-				ntohl(listAnswer->m_valueLen);
-		}
-
-		//read file entries
-		for (uint32 i = 0; i < ntohl(listResponse->m_nrTrailingFileEntries); i++)
-		{
-			SNzbListResponseFileEntry* listAnswer = (SNzbListResponseFileEntry*) bufPtr;
-
-			const char* subject = bufPtr + sizeof(SNzbListResponseFileEntry);
-			const char* fileName = bufPtr + sizeof(SNzbListResponseFileEntry) + ntohl(listAnswer->m_subjectLen);
-
-			std::unique_ptr<MatchedFileInfo> fileInfo = std::make_unique<MatchedFileInfo>();
-			fileInfo->SetId(ntohl(listAnswer->m_id));
-			fileInfo->SetSize(Util::JoinInt64(ntohl(listAnswer->m_fileSizeHi), ntohl(listAnswer->m_fileSizeLo)));
-			fileInfo->SetRemainingSize(Util::JoinInt64(ntohl(listAnswer->m_remainingSizeHi), ntohl(listAnswer->m_remainingSizeLo)));
-			fileInfo->SetPaused(ntohl(listAnswer->m_paused));
-			fileInfo->SetSubject(subject);
-			fileInfo->SetFilename(fileName);
-			fileInfo->SetFilenameConfirmed(ntohl(listAnswer->m_filenameConfirmed));
-			fileInfo->SetActiveDownloads(ntohl(listAnswer->m_activeDownloads));
-			fileInfo->m_match = ntohl(listAnswer->m_match);
-
-			std::unique_ptr<NzbInfo>& nzbInfo = downloadQueue->GetQueue()->at(ntohl(listAnswer->m_nzbIndex) - 1);
-			// the group's count is its files' (the answer has none per group): it
-			// stayed 0, and -L G never showed the threads of a downloading group
-			nzbInfo->SetActiveDownloads(nzbInfo->GetActiveDownloads() + fileInfo->GetActiveDownloads());
-			fileInfo->SetNzbInfo(nzbInfo.get());
-			nzbInfo->GetFileList()->Add(std::move(fileInfo));
-
-			bufPtr += sizeof(SNzbListResponseFileEntry) + ntohl(listAnswer->m_subjectLen) +
-				ntohl(listAnswer->m_filenameLen);
-		}
-	}
-}
-#endif
 
 bool RemoteClient::RequestServerList(bool files, bool groups, const char* pattern)
 {
@@ -485,19 +381,12 @@ bool RemoteClient::RequestServerList(bool files, bool groups, const char* patter
 					nrFileEntries++;
 
 					BString<100> completed;
-#ifdef NZBGET_USE_RUST
 					int completedPct = nzbget_rs_ccm_remote_client_calc_file_completed_pct(
 						fileInfo->GetRemainingSize(), fileInfo->GetSize());
 					if (completedPct >= 0)
 					{
 						completed.Format(", %i%s", completedPct, "%");
 					}
-#else
-					if (fileInfo->GetRemainingSize() < fileInfo->GetSize())
-					{
-						completed.Format(", %i%s", (int)(100 - fileInfo->GetRemainingSize() * 100 / fileInfo->GetSize()), "%");
-					}
-#endif
 
 					BString<100> threads;
 					if (fileInfo->GetActiveDownloads() > 0)
@@ -574,15 +463,11 @@ bool RemoteClient::RequestServerList(bool files, bool groups, const char* patter
 			{
 				nrFileEntries += nzbInfo->GetFileList()->size();
 
-#ifdef NZBGET_USE_RUST
 				int hasThreads = 0;
 				int threadsPlural = 0;
 				int64 unpausedRemainingSize = nzbget_rs_roc_remote_client_calc_group_unpaused_remaining(
 					nzbInfo->GetRemainingSize(), nzbInfo->GetPausedSize(),
 					nzbInfo->GetActiveDownloads(), &hasThreads, &threadsPlural);
-#else
-				int64 unpausedRemainingSize = nzbInfo->GetRemainingSize() - nzbInfo->GetPausedSize();
-#endif
 				remaining += unpausedRemainingSize;
 
 				CString remainingStr = Util::FormatSize(unpausedRemainingSize);
@@ -607,17 +492,10 @@ bool RemoteClient::RequestServerList(bool files, bool groups, const char* patter
 				}
 
 				BString<100> threads;
-#ifdef NZBGET_USE_RUST
 				if (hasThreads)
 				{
 					threads.Format(", %i thread%s", nzbInfo->GetActiveDownloads(), (threadsPlural ? "s" : ""));
 				}
-#else
-				if (nzbInfo->GetActiveDownloads() > 0)
-				{
-					threads.Format(", %i thread%s", nzbInfo->GetActiveDownloads(), (nzbInfo->GetActiveDownloads() > 1 ? "s" : ""));
-				}
-#endif
 
 				BString<1024> parameters;
 				for (NzbParameter& nzbParameter : nzbInfo->GetParameters())
@@ -682,39 +560,22 @@ bool RemoteClient::RequestServerList(bool files, bool groups, const char* patter
 		printf("Remaining size: %s\n", *Util::FormatSize(remaining));
 	}
 
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_sfw_remote_client_should_print_remaining_time(
 		ntohl(ListResponse.m_downloadRate),
 		ntohl(ListResponse.m_downloadPaused),
 		ntohl(ListResponse.m_download2Paused),
 		ntohl(ListResponse.m_downloadStandBy)) != 0)
-#else
-	if (ntohl(ListResponse.m_downloadRate) > 0 &&
-		!ntohl(ListResponse.m_downloadPaused) &&
-		!ntohl(ListResponse.m_download2Paused) &&
-		!ntohl(ListResponse.m_downloadStandBy))
-#endif
 	{
 		int64 remain_sec = (int64)(remaining / ntohl(ListResponse.m_downloadRate));
-#ifdef NZBGET_USE_RUST
 		int h = 0, m = 0, s = 0;
 		nzbget_rs_ccm_remote_client_calc_hms(remain_sec, &h, &m, &s);
-#else
-		int h = (int)(remain_sec / 3600);
-		int m = (int)((remain_sec % 3600) / 60);
-		int s = (int)(remain_sec % 60);
-#endif
 		printf("Remaining time: %.2d:%.2d:%.2d\n", h, m, s);
 	}
 
 	printf("Current download rate: %s\n", *Util::FormatSpeed(ntohl(ListResponse.m_downloadRate)));
 
 	int64 allBytes = Util::JoinInt64(ntohl(ListResponse.m_downloadedBytesHi), ntohl(ListResponse.m_downloadedBytesLo));
-#ifdef NZBGET_USE_RUST
 	int averageSpeed = nzbget_rs_ccm_remote_client_calc_avg_speed(allBytes, (int64)ntohl(ListResponse.m_downloadTimeSec));
-#else
-	int averageSpeed = (int)(ntohl(ListResponse.m_downloadTimeSec) > 0 ? allBytes / ntohl(ListResponse.m_downloadTimeSec) : 0);
-#endif
 	printf("Session download rate: %s\n", *Util::FormatSpeed(averageSpeed));
 
 	if (ntohl(ListResponse.m_downloadLimit) > 0)
@@ -723,7 +584,6 @@ bool RemoteClient::RequestServerList(bool files, bool groups, const char* patter
 	}
 
 	int sec = ntohl(ListResponse.m_upTimeSec);
-#ifdef NZBGET_USE_RUST
 	int h = 0, m = 0, s = 0;
 	nzbget_rs_ccm_remote_client_calc_hms(sec, &h, &m, &s);
 	printf("Up time: %.2d:%.2d:%.2d\n", h, m, s);
@@ -731,18 +591,6 @@ bool RemoteClient::RequestServerList(bool files, bool groups, const char* patter
 	sec = ntohl(ListResponse.m_downloadTimeSec);
 	nzbget_rs_ccm_remote_client_calc_hms(sec, &h, &m, &s);
 	printf("Download time: %.2d:%.2d:%.2d\n", h, m, s);
-#else
-	int h = sec / 3600;
-	int m = (sec % 3600) / 60;
-	int s = sec % 60;
-	printf("Up time: %.2d:%.2d:%.2d\n", h, m, s);
-
-	sec = ntohl(ListResponse.m_downloadTimeSec);
-	h = sec / 3600;
-	m = (sec % 3600) / 60;
-	s = sec % 60;
-	printf("Download time: %.2d:%.2d:%.2d\n", h, m, s);
-#endif
 
 	printf("Downloaded: %s\n", *Util::FormatSize(allBytes));
 	printf("Threads running: %i\n", ntohl(ListResponse.m_threadCount));
@@ -758,7 +606,6 @@ bool RemoteClient::RequestServerList(bool files, bool groups, const char* patter
 	}
 
 	BString<100> serverState;
-#ifdef NZBGET_USE_RUST
 	nzbget_rs_ccm_remote_client_format_server_state(
 		ntohl(ListResponse.m_downloadPaused) != 0 ? 1 : 0,
 		ntohl(ListResponse.m_download2Paused) != 0 ? 1 : 0,
@@ -767,33 +614,6 @@ bool RemoteClient::RequestServerList(bool files, bool groups, const char* patter
 		ntohl(ListResponse.m_postPaused) != 0 ? 1 : 0,
 		serverState,
 		serverState.Capacity());
-#else
-	if (ntohl(ListResponse.m_downloadPaused) || ntohl(ListResponse.m_download2Paused))
-	{
-		serverState.Format("%s%s",
-			ntohl(ListResponse.m_downloadStandBy) ? "Paused" : "Pausing",
-			ntohl(ListResponse.m_downloadPaused) && ntohl(ListResponse.m_download2Paused) ?
-			" (+2)" : ntohl(ListResponse.m_download2Paused) ? " (2)" : "");
-	}
-	else
-	{
-		serverState.Format("%s", ntohl(ListResponse.m_downloadStandBy) ? "" : "Downloading");
-	}
-
-	if (ntohl(ListResponse.m_postJobCount) > 0 || ntohl(ListResponse.m_postPaused))
-	{
-		serverState.Append(serverState.Length() > 0 ? ", Post-Processing" : "Post-Processing");
-		if (ntohl(ListResponse.m_postPaused))
-		{
-			serverState.Append(" paused");
-		}
-	}
-
-	if (serverState.Empty())
-	{
-		serverState = "Stand-By";
-	}
-#endif
 
 	printf("Server state: %s\n", *serverState);
 
@@ -849,38 +669,8 @@ bool RemoteClient::RequestServerLog(int lines)
 		printf("Log (last %i entries)\n", ntohl(LogResponse.m_nrTrailingEntries));
 		printf("-----------------------------------\n");
 
-#ifdef NZBGET_USE_RUST
 		// rust/src/binrpc.rs: the lines of all the entries that fit the data
 		RS_PRINT_LISTING(nzbget_rs_binrpc_log_listing(buf, buf.Size(), ntohl(LogResponse.m_nrTrailingEntries)));
-#else
-		char* bufPtr = (char*)buf;
-		for (uint32 i = 0; i < ntohl(LogResponse.m_nrTrailingEntries); i++)
-		{
-			SNzbLogResponseEntry* logAnswer = (SNzbLogResponseEntry*) bufPtr;
-
-			char* text = bufPtr + sizeof(SNzbLogResponseEntry);
-			switch (ntohl(logAnswer->m_kind))
-			{
-				case Message::mkDebug:
-					printf("[DEBUG] %s\n", text);
-					break;
-				case Message::mkError:
-					printf("[ERROR] %s\n", text);
-					break;
-				case Message::mkWarning:
-					printf("[WARNING] %s\n", text);
-					break;
-				case Message::mkInfo:
-					printf("[INFO] %s\n", text);
-					break;
-				case Message::mkDetail:
-					printf("[DETAIL] %s\n", text);
-					break;
-			}
-
-			bufPtr += sizeof(SNzbLogResponseEntry) + ntohl(logAnswer->m_textLen);
-		}
-#endif
 
 		printf("-----------------------------------\n");
 	}
@@ -974,20 +764,12 @@ bool RemoteClient::RequestServerEditQueue(DownloadQueue::EEditAction action, int
 			nameCount++;
 		}
 		// align size to 4-bytes, needed by ARM-processor (and may be others)
-#ifdef NZBGET_USE_RUST
 		nameLength = nzbget_rs_ccm_remote_client_align4(nameLength);
-#else
-		nameLength += nameLength % 4 > 0 ? 4 - nameLength % 4 : 0;
-#endif
 	}
 
 	int textLen = text ? strlen(text) + 1 : 0;
 	// align size to 4-bytes, needed by ARM-processor (and may be others)
-#ifdef NZBGET_USE_RUST
 	textLen = nzbget_rs_ccm_remote_client_align4(textLen);
-#else
-	textLen += textLen % 4 > 0 ? 4 - textLen % 4 : 0;
-#endif
 
 	int length = textLen + idLength + nameLength;
 
@@ -1154,36 +936,8 @@ bool RemoteClient::RequestPostQueue()
 		printf("Post-Processing List\n");
 		printf("-----------------------------------\n");
 
-#ifdef NZBGET_USE_RUST
 		// rust/src/binrpc.rs: the lines of all the entries that fit the data
 		RS_PRINT_LISTING(nzbget_rs_binrpc_post_queue_listing(buf, buf.Size(), ntohl(PostQueueResponse.m_nrTrailingEntries)));
-#else
-		char* bufPtr = (char*)buf;
-		for (uint32 i = 0; i < ntohl(PostQueueResponse.m_nrTrailingEntries); i++)
-		{
-			SNzbPostQueueResponseEntry* postQueueAnswer = (SNzbPostQueueResponseEntry*) bufPtr;
-
-			int stageProgress = ntohl(postQueueAnswer->m_stageProgress);
-
-			BString<100> completed;
-			if (stageProgress > 0 && (int)ntohl(postQueueAnswer->m_stage) != (int)PostInfo::ptExecutingScript)
-			{
-				completed.Format(", %i%s", (int)(stageProgress / 10), "%");
-			}
-
-			const char* postStageName[] = { "", ", Loading Pars", ", Verifying source files", ", Repairing",
-				", Verifying repaired files", ", Par-Renaming", ", Rar-Renaming", ", Unpacking", ", Cleaning up",
-				", Moving", ", Post-unpack renaming", ", Executing postprocess-script", "",
-				", Post-download renaming", ", Repairing from duplicates" };
-			char* infoName = bufPtr + sizeof(SNzbPostQueueResponseEntry) + ntohl(postQueueAnswer->m_nzbFilenameLen);
-
-			printf("[%i] %s%s%s\n", ntohl(postQueueAnswer->m_id), infoName, postStageName[ntohl(postQueueAnswer->m_stage)], *completed);
-
-			bufPtr += sizeof(SNzbPostQueueResponseEntry) + ntohl(postQueueAnswer->m_nzbFilenameLen) +
-				ntohl(postQueueAnswer->m_infoNameLen) + ntohl(postQueueAnswer->m_destDirLen) +
-				ntohl(postQueueAnswer->m_progressLabelLen);
-		}
-#endif
 
 		printf("-----------------------------------\n");
 	}
@@ -1284,45 +1038,8 @@ bool RemoteClient::RequestHistory(bool withHidden)
 		printf("History (most recent first)\n");
 		printf("-----------------------------------\n");
 
-#ifdef NZBGET_USE_RUST
 		// rust/src/binrpc.rs: the lines of all the entries that fit the data
 		RS_PRINT_LISTING(nzbget_rs_binrpc_history_listing(buf, buf.Size(), ntohl(HistoryResponse.m_nrTrailingEntries)));
-#else
-		char* bufPtr = (char*)buf;
-		for (uint32 i = 0; i < ntohl(HistoryResponse.m_nrTrailingEntries); i++)
-		{
-			SNzbHistoryResponseEntry* listAnswer = (SNzbHistoryResponseEntry*) bufPtr;
-
-			HistoryInfo::EKind kind = (HistoryInfo::EKind)ntohl(listAnswer->m_kind);
-			const char* nicename = bufPtr + sizeof(SNzbHistoryResponseEntry);
-
-			if (kind == HistoryInfo::hkNzb || kind == HistoryInfo::hkDup)
-			{
-				BString<100> files("%i files, ", ntohl(listAnswer->m_fileCount));
-				int64 size = Util::JoinInt64(ntohl(listAnswer->m_sizeHi), ntohl(listAnswer->m_sizeLo));
-
-				const char* parStatusText[] = { "", "", ", Par failed", ", Par successful", ", Repair possible", ", Repair needed" };
-				const char* scriptStatusText[] = { "", ", Script status unknown", ", Script failed", ", Script successful" };
-				int parStatus = ntohl(listAnswer->m_parStatus);
-				int scriptStatus = ntohl(listAnswer->m_scriptStatus);
-
-				printf("[%i] %s (%s%s%s%s%s)\n", ntohl(listAnswer->m_id), nicename,
-					(kind == HistoryInfo::hkDup ? "Hidden, " : ""),
-					(kind == HistoryInfo::hkDup ? "" : *files), *Util::FormatSize(size),
-					(kind == HistoryInfo::hkDup ? "" : parStatusText[parStatus]),
-					(kind == HistoryInfo::hkDup ? "" : scriptStatusText[scriptStatus]));
-			}
-			else if (kind == HistoryInfo::hkUrl)
-			{
-				const char* urlStatusText[] = { "", "", "Url download successful", "Url download failed", "", "Nzb scan skipped", "Nzb scan failed" };
-
-				printf("[%i] %s (URL, %s)\n", ntohl(listAnswer->m_id), nicename,
-					urlStatusText[ntohl(listAnswer->m_urlStatus)]);
-			}
-
-			bufPtr += sizeof(SNzbHistoryResponseEntry) + ntohl(listAnswer->m_nicenameLen);
-		}
-#endif
 
 		printf("-----------------------------------\n");
 		printf("Items: %i\n", ntohl(HistoryResponse.m_nrTrailingEntries));

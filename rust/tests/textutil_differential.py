@@ -84,8 +84,13 @@ public:
 };
 '''
 
+FALLBACK_REFERENCE = "4cf19abdb8f084a384769a15cf57e56acf86f363"
 old_src = subprocess.check_output(["git", "show", f"{REFERENCE}:daemon/util/Util.cpp"], cwd=ROOT, text=True)
 new_src = (ROOT / "daemon/util/Util.cpp").read_text()
+fallback_src = (
+    new_src if "NZBGET_USE_RUST" in new_src
+    else subprocess.check_output(["git", "show", f"{FALLBACK_REFERENCE}:daemon/util/Util.cpp"], cwd=ROOT, text=True)
+)
 
 flags = (BUILD / "CMakeFiles/libnzbget.dir/flags.make").read_text()
 get = lambda k: re.search(rf"^{k} = (.*)$", flags, re.M).group(1)
@@ -106,7 +111,7 @@ namespace oldimpl {
 ''' + STANDIN + bodies(old_src) + r'''
 }
 namespace fallbackimpl {
-''' + STANDIN + bodies(new_src) + r'''
+''' + STANDIN + bodies(fallback_src) + r'''
 }
 namespace portimpl {
 ''' + STANDIN + bodies(new_src, rust=True) + r'''

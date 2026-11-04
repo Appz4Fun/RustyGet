@@ -26,9 +26,7 @@
 #include "Unpack.h"
 #include "FileTypes.h"
 #include "Util.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 using namespace Unpack;
 
@@ -50,22 +48,7 @@ ScriptController::ArgList Unrar::MakeArgs() const
 	args.push_back("-y");
 	args.push_back("-ai");
 
-#ifdef NZBGET_USE_RUST
 	args.push_back(nzbget_rs_euh_unrar_overwrite_switch(static_cast<int>(m_mode)));
-#else
-	switch (m_mode)
-	{
-		case OverwriteMode::Skip:
-			args.push_back("-o-");
-			break;
-		case OverwriteMode::Overwrite:
-			args.push_back("-o+");
-			break;
-		case OverwriteMode::AutoRename:
-			args.push_back("-or");
-			break;
-	}
-#endif
 
 	args.push_back(MakePassword().c_str());
 	args.push_back(fs::u8string(m_archive).c_str());
@@ -86,26 +69,11 @@ bool Unrar::IsSupported(const fs::path& path)
 		return false;
 	}
 
-#ifdef NZBGET_USE_RUST
 	return nzbget_rs_euh_unrar_is_part1_or_unsplit_rar(filename.data(), filename.size()) != 0;
-#else
-	static const std::regex part1Rar("\\.part0*1\\.rar$", std::regex_constants::icase);
-
-	std::string lowerFilename = filename;
-	std::transform(lowerFilename.begin(), lowerFilename.end(), lowerFilename.begin(),
-		[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-	if (lowerFilename.find(".part") != std::string::npos)
-	{
-		return std::regex_search(filename, part1Rar);
-	}
-
-	return true;
-#endif
 }
 
 bool Unrar::DecodeExitCode(int ec) const
 {
-#ifdef NZBGET_USE_RUST
 	const char* msg = nullptr;
 	if (nzbget_rs_euh_unrar_decode_exit_code(ec, &msg) != 0)
 	{
@@ -120,47 +88,4 @@ bool Unrar::DecodeExitCode(int ec) const
 		error("Unknown error %d", ec);
 	}
 	return false;
-#else
-	switch (ec)
-	{
-		case ExitCode::Success:
-			return true;
-		case ExitCode::NonFatalError:
-			error("Extraction finished, but some files might be missing or incomplete");
-			return false;
-		case ExitCode::FatalError:
-			error("The process could not start or was interrupted unexpectedly");
-			return false;
-		case ExitCode::InvalidChecksum:
-			error("The archive is damaged. The extracted files are likely corrupt");
-			return false;
-		case ExitCode::LockedArchive:
-			error("This archive is locked and cannot be modified or unpacked");
-			return false;
-		case ExitCode::WriteError:
-			error("Could not write files to the destination. Please check your permissions and disk space");
-			return false;
-		case ExitCode::FileOpenError:
-			error("Couldn't open the archive. The file may be missing or you don't have permission to read it");
-			return false;
-		case ExitCode::CommandLineError:
-			error("An internal program error occurred");
-			return false;
-		case ExitCode::NotEnoughMemory:
-			error("Your computer ran out of memory. Please try closing other applications first");
-			return false;
-		case ExitCode::FileCreateError:
-			error("Couldn't create files in the destination folder. Please check your permissions");
-			return false;
-		case ExitCode::NoFilesFound:
-			error("There were no files inside the archive to extract");
-			return false;
-		case ExitCode::WrongPassword:
-			error("The password you entered was incorrect");
-			return false;
-		default:
-			error("Unknown error %d", ec);
-			return false;
-	}
-#endif
 }

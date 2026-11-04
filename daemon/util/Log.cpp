@@ -22,9 +22,7 @@
 #include "nzbget.h"
 #include "Options.h"
 #include "Log.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 #include "Util.h"
 #include "FileSystem.h"
 
@@ -77,14 +75,8 @@ void Log::Filelog(const char* msg, ...)
 	char time[50];
 	Util::FormatTime(rawtime, time, 50);
 
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_rco_log_should_rotate(
 		(int64)rawtime, (int64)m_lastWritten.load(), (int)g_Options->GetWriteLog()))
-#else
-	const int day = 86400;
-	if (static_cast<int>(rawtime) / day != static_cast<int>(m_lastWritten.load()) / day 
-		&& g_Options->GetWriteLog() == Options::wlRotate)
-#endif
 	{
 		if (m_logFile)
 		{
@@ -143,11 +135,7 @@ void Log::IntervalCheck()
 	if (m_logFile)
 	{
 		time_t curTime = Util::CurrentTime() + g_Options->GetTimeCorrection();
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_rol_log_should_close_idle((int64)curTime, (int64)m_lastWritten.load()))
-#else
-		if (std::abs(curTime - m_lastWritten) > 1)
-#endif
 		{
 			m_logFile.reset();
 		}
@@ -366,11 +354,7 @@ void Log::RotateLog()
 			time_t fileTime = Util::Timegm(&tm);
 			int fileDay = (int)fileTime / 86400;
 
-#ifdef NZBGET_USE_RUST
 			if (nzbget_rs_rol_log_should_delete_old_rotated(fileDay, curDay, g_Options->GetRotateLog()))
-#else
-			if (fileDay <= curDay - g_Options->GetRotateLog())
-#endif
 			{
 				BString<1024> message("Deleting old log-file %s\n", filename);
 				g_Log->AddMessage(Message::mkInfo, message);
@@ -437,7 +421,6 @@ void Log::InitOptions()
 				break;
 		}
 
-#ifdef NZBGET_USE_RUST
 		int writeToFile = 0;
 		int keepInScreen = 0;
 		nzbget_rs_rco_log_init_message_disposition((int)target, &writeToFile, &keepInScreen);
@@ -455,22 +438,6 @@ void Log::InitOptions()
 			message.m_id = ++m_idGen;
 			i++;
 		}
-#else
-		if (target == Options::mtLog || target == Options::mtBoth)
-		{
-			Filelog("%s\t%s", messageType[message.GetKind()], message.GetText());
-		}
-
-		if (target == Options::mtLog || target == Options::mtNone)
-		{
-			m_messages.erase(m_messages.begin() + i);
-		}
-		else
-		{
-			message.m_id = ++m_idGen;
-			i++;
-		}
-#endif
 	}
 
 	m_optInit = true;

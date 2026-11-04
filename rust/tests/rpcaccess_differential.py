@@ -68,8 +68,17 @@ def enums(header):
     return "".join(m.group() + "\n" for m in re.finditer(r"\tenum \w+\n\t\{\n.*?\n\t\};", header, re.S))
 
 
+FALLBACK_REFERENCE = "4cf19abdb8f084a384769a15cf57e56acf86f363"
 old_rpc, new_rpc = show("daemon/remote/XmlRpc.cpp"), (ROOT / "daemon/remote/XmlRpc.cpp").read_text()
 old_opt, new_opt = show("daemon/main/Options.cpp"), (ROOT / "daemon/main/Options.cpp").read_text()
+fallback_rpc = (
+    new_rpc if "NZBGET_USE_RUST" in new_rpc
+    else subprocess.check_output(["git", "show", f"{FALLBACK_REFERENCE}:daemon/remote/XmlRpc.cpp"], cwd=ROOT, text=True)
+)
+fallback_opt = (
+    new_opt if "NZBGET_USE_RUST" in new_opt
+    else subprocess.check_output(["git", "show", f"{FALLBACK_REFERENCE}:daemon/main/Options.cpp"], cwd=ROOT, text=True)
+)
 old_enums, new_enums = enums(show("daemon/remote/XmlRpc.h")), enums((ROOT / "daemon/remote/XmlRpc.h").read_text())
 old_execute = definition(old_rpc, "void XmlRpcProcessor::Execute()", "last")
 new_execute = definition(new_rpc, "void XmlRpcProcessor::Execute()", "last")
@@ -102,16 +111,16 @@ DECIDE_SIG = ("XmlRpcProcessor::EDispatch XmlRpcProcessor::Decide(ERpcProtocol p
               "\tbool safeMethod, bool error, bool jsonP, int* errCode, const char** errText)")
 RESTRICTED_SIG = "bool Options::OptEntry::Restricted()"
 
-for src, sig, symbol in ((new_rpc, ACCESS_SIG, "nzbget_rs_rpc_access"),
-                         (new_rpc, DECIDE_SIG, "nzbget_rs_rpc_decide"),
-                         (new_opt, RESTRICTED_SIG, "nzbget_rs_option_restricted")):
-    if (src.count(sig + "\n{") != 2 or symbol not in definition(src, sig, "first")
-            or "nzbget_rs_" in definition(src, sig, "last")):
+for src, fb_src, sig, symbol in ((new_rpc, fallback_rpc, ACCESS_SIG, "nzbget_rs_rpc_access"),
+                                 (new_rpc, fallback_rpc, DECIDE_SIG, "nzbget_rs_rpc_decide"),
+                                 (new_opt, fallback_opt, RESTRICTED_SIG, "nzbget_rs_option_restricted")):
+    if symbol not in definition(src, sig, "first") or "nzbget_rs_" in definition(fb_src, sig, "last"):
         sys.exit(f"expected a Rust wrapper and a separate C++ fallback for {sig}")
-    guarded = ("#ifdef NZBGET_USE_RUST\n" + definition(src, sig, "first")
-               + "#else\n" + definition(src, sig, "last") + "#endif")
-    if guarded not in src:
-        sys.exit(f"expected NZBGET_USE_RUST to select the Rust wrapper for {sig}")
+    if "NZBGET_USE_RUST" in src:
+        guarded = ("#ifdef NZBGET_USE_RUST\n" + definition(src, sig, "first")
+                   + "#else\n" + definition(src, sig, "last") + "#endif")
+        if guarded not in src:
+            sys.exit(f"expected NZBGET_USE_RUST to select the Rust wrapper for {sig}")
 
 header = (ROOT / "daemon/main/Options.h").read_text()
 names = re.findall(r"static constexpr std::string_view (\w+) =", header)
@@ -248,7 +257,7 @@ template <class P> struct CommandOf
     for ns in ("oldimpl", "newimpl", "fallbackimpl")) + (
     impl("oldimpl", old_enums, False, old_access, old_decision, old_rpc, "last", old_opt)
     + impl("newimpl", new_enums, True, new_access, new_decision, new_rpc, "first", new_opt)
-    + impl("fallbackimpl", new_enums, True, new_access, new_decision, new_rpc, "last", new_opt)) + r'''
+    + impl("fallbackimpl", new_enums, True, new_access, new_decision, fallback_rpc, "last", fallback_opt)) + r'''
 
 static unsigned long long state = 0x9e3779b97f4a7c15ull;
 static unsigned long long next() { state ^= state << 13; state ^= state >> 7; state ^= state << 17; return state; }

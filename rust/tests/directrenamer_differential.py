@@ -68,7 +68,7 @@ if "#ifdef NZBGET_USE_RUST\nstd::string DirectRenamer::BuildNewRegularName(" in 
     rust_src = new_src[start:middle] + "\n" + collect
     fallback_src = new_src[middle:end] + "\n" + collect
 else:
-    rust_src = new_src[new_src.index(FUNCTIONS[0]):]
+    rust_src = new_src[new_src.index(FUNCTIONS[0]):] + "\n" + new_src[new_src.index(FUNCTIONS[3]):]
     preserved_src = subprocess.check_output(
         ["git", "show", f"{FALLBACK_REFERENCE}:daemon/queue/DirectRenamer.cpp"], cwd=ROOT, text=True
     )

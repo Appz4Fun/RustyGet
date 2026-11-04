@@ -21,7 +21,6 @@
 
 #include "nzbget.h"
 #include "FileSystem.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
 #include <exception>
 #include <memory>
@@ -33,7 +32,6 @@ static std::string CopyRustPathText(NzbgetRsBuf buf)
 	const std::unique_ptr<char, decltype(release)> owner(buf.data, release);
 	return std::string(buf.data, buf.len);
 }
-#endif
 #include "Util.h"
 #include "Log.h"
 
@@ -45,7 +43,7 @@ const char* RESERVED_DEVICE_NAMES[] = { "CON", "PRN", "AUX", "NUL",
 	"COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
 	"LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", NULL };
 
-#if defined(NZBGET_USE_RUST) && !defined(WIN32)
+#ifndef WIN32
 // Keep the platform's stat ABI and errno behavior (Rust metadata can use
 // statx, whose availability probe changes errno, and different time widths).
 static int RustStat(const char* path)
@@ -57,9 +55,7 @@ static int RustStat(const char* path)
 	}
 	return S_ISREG(buffer.st_mode) ? 1 : S_ISDIR(buffer.st_mode) ? 2 : 0;
 }
-#endif
 
-#if defined(NZBGET_USE_RUST) && !defined(WIN32)
 CString FileSystem::GetLastErrorMessage()
 {
 	// rust/src/fsops.rs: the XSI strerror_r (glibc's GNU strerror_r left the
@@ -74,37 +70,22 @@ CString FileSystem::GetLastErrorMessage()
 	BString<1024> msg;
 	strerror_r(errno, msg, msg.Capacity());
 
-#ifdef WIN32
 	if (!errno)
 	{
 		FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
 			nullptr, GetLastError(), MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
 			msg, 1024, nullptr);
 	}
-#endif
 
 	return *msg;
 }
 #endif
 
-#ifdef NZBGET_USE_RUST
 void FileSystem::NormalizePathSeparators(char* path)
 {
 	// rust/src/paths.rs
 	nzbget_rs_normalize_path_separators(path);
 }
-#else
-void FileSystem::NormalizePathSeparators(char* path)
-{
-	for (char* p = path; *p; p++)
-	{
-		if (*p == ALT_PATH_SEPARATOR)
-		{
-			*p = PATH_SEPARATOR;
-		}
-	}
-}
-#endif
 
 std::optional<std::string> FileSystem::GetRealPath(const std::string& path)
 {
@@ -214,7 +195,6 @@ bool FileSystem::ForceDirectories(const char* path, CString& errmsg)
 	return false;
 }
 #else
-#ifdef NZBGET_USE_RUST
 bool FileSystem::ForceDirectories(const char* path, CString& errmsg)
 {
 	// rust/src/fsops.rs
@@ -228,69 +208,6 @@ bool FileSystem::ForceDirectories(const char* path, CString& errmsg)
 	nzbget_rs_free(msg);
 	return ok;
 }
-#else
-bool FileSystem::ForceDirectories(const char* path, CString& errmsg)
-{
-	errmsg.Clear();
-	BString<1024> normPath = path;
-	NormalizePathSeparators(normPath);
-	int len = strlen(normPath);
-	if ((len > 0) && normPath[len - 1] == PATH_SEPARATOR)
-	{
-		normPath[len - 1] = '\0';
-	}
-
-	struct stat buffer;
-	bool ok = !stat(normPath, &buffer);
-	if (!ok && errno != ENOENT)
-	{
-		errmsg.Format("could not read information for directory %s: errno %i, %s",
-			*normPath, errno, *GetLastErrorMessage());
-		return false;
-	}
-
-	if (ok && !S_ISDIR(buffer.st_mode))
-	{
-		errmsg.Format("path %s is not a directory", *normPath);
-		return false;
-	}
-
-	if (!ok)
-	{
-		BString<1024> parentPath = *normPath;
-		char* p = (char*)strrchr(parentPath, PATH_SEPARATOR);
-		if (p)
-		{
-			*p = '\0';
-			if (strlen(parentPath) != strlen(path) && !ForceDirectories(parentPath, errmsg))
-			{
-				return false;
-			}
-		}
-
-		if (mkdir(normPath, S_DIRMODE) != 0 && errno != EEXIST)
-		{
-			errmsg.Format("could not create directory %s: %s", *normPath, *GetLastErrorMessage());
-			return false;
-		}
-
-		if (stat(normPath, &buffer) != 0)
-		{
-			errmsg.Format("could not read information for directory %s: %s",
-				*normPath, *GetLastErrorMessage());
-			return false;
-		}
-
-		if (!S_ISDIR(buffer.st_mode))
-		{
-			errmsg.Format("path %s is not a directory", *normPath);
-			return false;
-		}
-	}
-
-	return true;
-}
-#endif
 #endif
 
 bool FileSystem::CreateHardLink(const char *from, const char *to, CString& errmsg)
@@ -366,7 +283,6 @@ bool FileSystem::LoadFileIntoBuffer(const char* filename, CharBuffer& buffer, bo
 	file.Seek(0, DiskFile::soEnd);
 	int64 fileSize = file.Position();
 	file.Seek(0);
-#ifdef NZBGET_USE_RUST
 	int size = 0;
 	int bufSize = 0;
 	if (nzbget_rs_ufs_fs_validate_load_file_size(
@@ -374,16 +290,6 @@ bool FileSystem::LoadFileIntoBuffer(const char* filename, CharBuffer& buffer, bo
 	{
 		return false;
 	}
-#else
-	if (fileSize < 0 || fileSize > INT_MAX - 1)
-	{
-		return false;
-	}
-	int size = (int)fileSize;
-
-	// allocate memory to contain the whole file.
-	int bufSize = size + (addTrailingNull ? 1 : 0);
-#endif
 	buffer.Reserve(bufSize);
 	if (bufSize > 0 && !buffer)
 	{
@@ -479,11 +385,7 @@ bool FileSystem::AllocateFile(const char* filename, int64 size, [[maybe_unused]]
 		memset(zeros, 0, zeros.Size());
 		for (int64 remaining = size; remaining > 0;)
 		{
-#ifdef NZBGET_USE_RUST
 			int64 needbytes = nzbget_rs_ufs_fs_calc_allocate_chunk_size(remaining, (int64)zeros.Size());
-#else
-			int64 needbytes = std::min(remaining, (int64)zeros.Size());
-#endif
 			int64 written = file.Write(zeros, needbytes);
 			if (written != needbytes)
 			{
@@ -518,36 +420,12 @@ bool FileSystem::TruncateFile(const char* filename, int size)
 #endif
 }
 
-#ifdef NZBGET_USE_RUST
 char* FileSystem::BaseFileName(const char* filename)
 {
 	// rust/src/paths.rs
 	return const_cast<char*>(filename) + nzbget_rs_path_position(0, filename, strlen(filename));
 }
-#else
-char* FileSystem::BaseFileName(const char* filename)
-{
-	char* p = (char*)strrchr(filename, PATH_SEPARATOR);
-	char* p1 = (char*)strrchr(filename, ALT_PATH_SEPARATOR);
-	if (p1)
-	{
-		if ((p && p < p1) || !p)
-		{
-			p = p1;
-		}
-	}
-	if (p)
-	{
-		return p + 1;
-	}
-	else
-	{
-		return (char*)filename;
-	}
-}
-#endif
 
-#ifdef NZBGET_USE_RUST
 std::pair<std::string, std::string> FileSystem::SplitPathAndFilename(const std::string& fullPath)
 {
 	// rust/src/paths.rs
@@ -558,59 +436,14 @@ std::pair<std::string, std::string> FileSystem::SplitPathAndFilename(const std::
 	}
 	return std::make_pair(fullPath.substr(0, slash), fullPath.substr(slash + 1));
 }
-#else
-std::pair<std::string, std::string> FileSystem::SplitPathAndFilename(const std::string& fullPath)
-{
-	size_t lastSlashPos = fullPath.find_last_of("/\\");
 
-	if (lastSlashPos == std::string::npos)
-	{
-		return std::make_pair(fullPath, "");
-	}
-
-	std::string path = fullPath.substr(0, lastSlashPos);
-	std::string filename = fullPath.substr(lastSlashPos + 1);
-
-	return std::make_pair(std::move(path), std::move(filename));
-}
-#endif
-
-#ifdef NZBGET_USE_RUST
 bool FileSystem::ReservedChar(char ch)
 {
 	// rust/src/paths.rs
 	return nzbget_rs_reserved_char(ch) != 0;
 }
-#else
-bool FileSystem::ReservedChar(char ch)
-{
-	if (Util::IsControlChar(ch))
-	{
-		return true;
-	}
-	else
-	{
-		switch (ch)
-		{
-			case '"':
-			case '*':
-			case '/':
-			case ':':
-			case '<':
-			case '>':
-			case '?':
-			case '\\':
-			case '|':
-				return true;
-		}
-	}
-
-	return false;
-}
-#endif
 
 //replace bad chars in filename
-#ifdef NZBGET_USE_RUST
 CString FileSystem::MakeValidFilename(const char* filename, bool allowSlashes)
 {
 	// rust/src/paths.rs
@@ -619,178 +452,20 @@ CString FileSystem::MakeValidFilename(const char* filename, bool allowSlashes)
 	nzbget_rs_free(buf);
 	return result;
 }
-#else
-CString FileSystem::MakeValidFilename(const char* filename, bool allowSlashes)
-{
-	CString result = filename;
 
-	for (char* p = result; *p; p++)
-	{
-		if (ReservedChar(*p))
-		{
-			if (allowSlashes && (*p == PATH_SEPARATOR || *p == ALT_PATH_SEPARATOR))
-			{
-				*p = PATH_SEPARATOR;
-				continue;
-			}
-			*p = '_';
-		}
-	}
-
-	// remove trailing dots and spaces. they are not allowed in directory names on windows,
-	// but we remove them on posix too, in a case the directory is accessed from windows via samba.
-	for (int len = strlen(result); len > 0 && (result[len - 1] == '.' || result[len - 1] == ' '); len--)
-	{
-		result[len - 1] = '\0';
-	}
-
-	// check if the filename starts with a reserved device name.
-	// although these names are reserved only on Windows we adjust them on posix too,
-	// in a case the directory is accessed from windows via samba.
-	for (const char** ptr = RESERVED_DEVICE_NAMES; const char* reserved = *ptr; ptr++)
-	{
-		int len = strlen(reserved);
-		if (!strncasecmp(result, reserved, len) && (result[len] == '.' || result[len] == '\0'))
-		{
-			result = CString::FormatStr("_%s", *result);
-			break;
-		}
-	}			
-
-	return result;
-}
-#endif
-
-#ifdef NZBGET_USE_RUST
 std::string FileSystem::SanitizePathSegment(std::string_view name)
 {
 	// rust/src/paths.rs
 	return CopyRustPathText(nzbget_rs_path_text(1, name.data(), name.size(), 0));
 }
-#else
-std::string FileSystem::SanitizePathSegment(std::string_view name)
-{
-	// Bound input length to prevent excessive allocations from untrusted metadata
-	if (name.size() > 1024)
-	{
-		size_t cut = 1024;
-		// Back up over any trailing UTF-8 continuation bytes (10xxxxxx) to avoid
-		// splitting a multi-byte sequence
-		while (cut > 0 && (static_cast<unsigned char>(name[cut]) & 0xC0) == 0x80)
-		{
-			--cut;
-		}
-		name = name.substr(0, cut);
-	}
 
-	// 1. Trim leading whitespace
-	while (!name.empty() && (name.front() == ' ' || name.front() == '\t'))
-	{
-		name.remove_prefix(1);
-	}
-	
-	// 2. Trim trailing whitespace and dots
-	while (!name.empty() && (name.back() == ' ' || name.back() == '\t' || name.back() == '.'))
-	{
-		name.remove_suffix(1);
-	}
-
-	if (name.empty())
-	{
-		return "";
-	}
-
-	// 3. Remove illegal filesystem characters
-	std::string result = MakeValidFilename(std::string(name).c_str(), false).Str();
-
-	// 4. Safely collapse consecutive dots to normalize relative paths.
-	std::string collapsed;
-	collapsed.reserve(result.size());
-	size_t dotRun = 0;
-	for (char c : result)
-	{
-		if (c == '.')
-		{
-			dotRun++;
-		}
-		else
-		{
-			if (dotRun >= 2)
-			{
-				collapsed += '_';
-			}
-			else if (dotRun == 1)
-			{
-				collapsed += '.';
-			}
-			dotRun = 0;
-			collapsed += c;
-		}
-	}
-	if (dotRun >= 2)
-	{
-		collapsed += '_';
-	}
-	else if (dotRun == 1)
-	{
-		collapsed += '.';
-	}
-	result = std::move(collapsed);
-
-	// 5. Trim trailing dots/spaces that might have been exposed by MakeValidFilename or replacement
-	while (!result.empty() && (result.back() == '.' || result.back() == ' '))
-	{
-		result.pop_back();
-	}
-
-	// 6. Final safety check against Windows reserved names or empty path segments
-	if (result.empty() || result == "." || result == "..")
-	{
-		return "";
-	}
-
-	return result;
-}
-#endif
-
-#ifdef NZBGET_USE_RUST
 std::string FileSystem::SanitizeRelativePath(std::string_view path)
 {
 	// rust/src/paths.rs
 	return CopyRustPathText(nzbget_rs_path_text(2, path.data(), path.size(), 0));
 }
-#else
-std::string FileSystem::SanitizeRelativePath(std::string_view path)
-{
-	std::string clean;
-	size_t start = 0;
-	while (start < path.size())
-	{
-		size_t end = path.find_first_of("/\\", start);
-		size_t len = (end == std::string_view::npos) ? (path.size() - start) : (end - start);
-		if (len > 0)
-		{
-			std::string_view seg = path.substr(start, len);
-			std::string cleanSeg = SanitizePathSegment(seg);
-			if (!cleanSeg.empty())
-			{
-				if (!clean.empty())
-				{
-					clean += PATH_SEPARATOR;
-				}
-				clean += cleanSeg;
-			}
-		}
 
-		if (end == std::string_view::npos) break;
-		start = end + 1;
-	}
-
-	return clean;
-}
-#endif
-
-#if defined(NZBGET_USE_RUST) && !defined(WIN32)
+#ifndef WIN32
 CString FileSystem::MakeUniqueFilename(const char* destDir, const char* basename)
 {
 	// rust/src/fsops.rs
@@ -912,7 +587,7 @@ bool FileSystem::DeleteFile(const char* filename)
 #endif
 }
 
-#if defined(NZBGET_USE_RUST) && !defined(WIN32)
+#ifndef WIN32
 bool FileSystem::FileExists(const char* filename)
 {
 	// rust/src/fsops.rs (stat, a regular file)
@@ -921,7 +596,6 @@ bool FileSystem::FileExists(const char* filename)
 #else
 bool FileSystem::FileExists(const char* filename)
 {
-#ifdef WIN32
 	// we use a native windows call because c-lib function "stat" fails on windows if file date is invalid
 	WIN32_FIND_DATAW findData;
 	HANDLE handle = FindFirstFileW(UtfPathToWidePath(filename), &findData);
@@ -932,15 +606,10 @@ bool FileSystem::FileExists(const char* filename)
 		return exists;
 	}
 	return false;
-#else
-	struct stat buffer;
-	bool exists = !stat(filename, &buffer) && S_ISREG(buffer.st_mode);
-	return exists;
-#endif
 }
 #endif
 
-#if defined(NZBGET_USE_RUST) && !defined(WIN32)
+#ifndef WIN32
 bool FileSystem::DirectoryExists(const char* dirFilename)
 {
 	// rust/src/fsops.rs (stat, a directory)
@@ -949,7 +618,6 @@ bool FileSystem::DirectoryExists(const char* dirFilename)
 #else
 bool FileSystem::DirectoryExists(const char* dirFilename)
 {
-#ifdef WIN32
 	WIN32_FIND_DATAW findData;
 	HANDLE handle = FindFirstFileW(UtfPathToWidePath(
 		BString<1024>(dirFilename && dirFilename[strlen(dirFilename) - 1] == PATH_SEPARATOR ? "%s*" : "%s\\*", dirFilename)),
@@ -967,11 +635,6 @@ bool FileSystem::DirectoryExists(const char* dirFilename)
 		return true;
 	}
 	return false;
-#else
-	struct stat buffer;
-	bool exists = !stat(dirFilename, &buffer) && S_ISDIR(buffer.st_mode);
-	return exists;
-#endif
 }
 #endif
 
@@ -1004,54 +667,18 @@ bool FileSystem::RemoveDirectory(const char* dirFilename)
 }
 
 
-#ifdef NZBGET_USE_RUST
 std::string FileSystem::ExtractFilePathFromCmd(const std::string& path)
 {
 	// rust/src/paths.rs
 	return path.substr(0, nzbget_rs_path_position(2, path.data(), path.size()));
 }
-#else
-std::string FileSystem::ExtractFilePathFromCmd(const std::string& path)
-{
-	if (path.empty())
-	{
-		return path;
-	}
 
-	size_t lastSeparatorPos = path.find_last_of(PATH_SEPARATOR);
-	if (lastSeparatorPos != std::string::npos)
-	{
-		size_t possibleKeysPos = path.find(" ", lastSeparatorPos);
-
-		if (possibleKeysPos != std::string::npos)
-		{
-			return path.substr(0, possibleKeysPos);
-		}
-	}
-
-	return path;
-}
-#endif
-
-#ifdef NZBGET_USE_RUST
 std::string FileSystem::EscapePathForShell(const std::string& path)
 {
 	// rust/src/paths.rs
 	return CopyRustPathText(nzbget_rs_path_text(3, path.data(), path.size(), 0));
 }
-#else
-std::string FileSystem::EscapePathForShell(const std::string& path)
-{
-	if (path.empty())
-	{
-		return path;
-	}
 
-	return "\"" + path + "\"";
-}
-#endif
-
-#ifdef NZBGET_USE_RUST
 std::optional<std::string> FileSystem::GetFileExtension(std::string_view filename)
 {
 	// rust/src/fsdelete.rs
@@ -1061,16 +688,6 @@ std::optional<std::string> FileSystem::GetFileExtension(std::string_view filenam
 
 	return std::string(filename.substr(extIdx));
 }
-#else
-std::optional<std::string> FileSystem::GetFileExtension(std::string_view filename)
-{
-	size_t extIdx = filename.rfind(".");
-	if (extIdx == std::string_view::npos)
-		return std::nullopt;
-
-	return std::string(filename.substr(extIdx));
-}
-#endif
 
 namespace
 {
@@ -1125,7 +742,6 @@ bool DeleteLink(const char* filename, PathType pathType)
 	return FileSystem::DeleteFile(filename);
 }
 
-#if defined(NZBGET_USE_RUST) && !defined(WIN32)
 // The calls rust/src/fsdelete.rs makes. errno is kept between the calls as
 // the C++ kept it (Rust's own allocations don't touch it) and restored when
 // the operation returns; an exception ends the operation and is rethrown.
@@ -1220,7 +836,6 @@ private:
 		}
 	}
 };
-#endif
 }
 
 bool FileSystem::IsLink(const char* filename)
@@ -1229,7 +844,6 @@ bool FileSystem::IsLink(const char* filename)
 	return type == PathType::Link || type == PathType::DirectoryLink;
 }
 
-#if defined(NZBGET_USE_RUST) && !defined(WIN32)
 /* Delete directory which is empty or contains only hidden files or directories (whose names start with dot) */
 bool FileSystem::DeleteDirectory(const char* dirFilename)
 {
@@ -1269,283 +883,6 @@ bool FileSystem::DeleteDirectoryWithContent(const char* dirFilename, CString& er
 	nzbget_rs_free(text);
 	return ops.Finish(result) == 1;
 }
-
-#else
-namespace
-{
-// Delete roots without trailing separators or trailing "." components; roots
-// and the paths below them longer than the path buffers are refused, never cut.
-#ifdef WIN32
-// room for the listing mask ("\\*.*") and the long-path prefix ("\\\\?\\UNC\\")
-// the Windows calls add to a path in their own 1024-byte buffers
-constexpr size_t MaxDeletePath = 1023 - 10;
-#else
-constexpr size_t MaxDeletePath = 1023;
-#endif
-
-bool DeleteSeparator(char c)
-{
-#ifdef WIN32
-	return c == PATH_SEPARATOR || c == ALT_PATH_SEPARATOR;
-#else
-	return c == PATH_SEPARATOR;
-#endif
-}
-
-std::string DeleteRoot(const char* dirFilename)
-{
-	std::string root = dirFilename;
-	size_t minimum = 1;
-#ifdef WIN32
-	// Preserve rooted drive paths, including extended drive and volume roots.
-	if (root.size() >= 3 && root[1] == ':' && DeleteSeparator(root[2]))
-	{
-		minimum = 3;
-	}
-	else if (root.size() >= 2 && DeleteSeparator(root[0]) && DeleteSeparator(root[1]))
-	{
-		minimum = 2;
-		if (root.size() >= 4 && (root[2] == '?' || root[2] == '.') && DeleteSeparator(root[3]))
-		{
-			size_t end = root.find_first_of("\\/", 4);
-			if (end != std::string::npos &&
-				(root[end - 1] == ':' || (root.size() >= 11 && !strncasecmp(root.c_str() + 4, "Volume{", 7))))
-			{
-				minimum = end + 1;
-			}
-		}
-	}
-#endif
-	for (;;)
-	{
-		if (root.size() > minimum && DeleteSeparator(root.back()))
-		{
-			root.pop_back();
-		}
-		else if (root.size() > minimum && root.size() >= 2 && DeleteSeparator(root[root.size() - 2]) && root.back() == '.')
-		{
-			root.pop_back();
-		}
-		else
-		{
-			return root;
-		}
-	}
-}
-
-bool DeletePathFits(const char* dirFilename, const char* filename)
-{
-	size_t dirLength = strlen(dirFilename);
-	return dirLength < MaxDeletePath && strlen(filename) <= MaxDeletePath - dirLength - 1;
-}
-
-// strerror_r returns either a status or the message, depending on the libc.
-[[maybe_unused]] const char* DeleteErrorText(int, const char* buffer)
-{
-	return buffer;
-}
-
-[[maybe_unused]] const char* DeleteErrorText(char* message, const char*)
-{
-	return message;
-}
-
-CString DeleteLengthError()
-{
-	BString<1024> message;
-	return DeleteErrorText(strerror_r(ENAMETOOLONG, message, message.Capacity()), message);
-}
-
-bool DeleteDirectoryWithContentImpl(const char* givenDirFilename, CString& errmsg, bool& tooLong);
-
-/* Delete directory which is empty or contains only hidden files or directories (whose names start with dot) */
-bool DeleteDirectoryImpl(const char* givenDirFilename, bool& tooLong)
-{
-	std::string root = DeleteRoot(givenDirFilename);
-	const char* dirFilename = root.c_str();
-	if (root.size() > MaxDeletePath)
-	{
-		tooLong = true;
-		errno = ENAMETOOLONG;
-		return false;
-	}
-
-	if (FileSystem::RemoveDirectory(dirFilename))
-	{
-		return true;
-	}
-
-	// a link is never followed: the folder it points to isn't this one's to clean
-	PathType rootType = GetPathTypeNoFollow(dirFilename);
-	if (rootType == PathType::Link || rootType == PathType::DirectoryLink)
-	{
-		return false;
-	}
-
-	// check if directory contains only hidden files (whose names start with dot)
-	{
-		DirBrowser dir(dirFilename);
-		while (const char* filename = dir.Next())
-		{
-			if (!DeletePathFits(dirFilename, filename))
-			{
-				tooLong = true;
-				errno = ENAMETOOLONG;
-			}
-			else
-			{
-				BString<1024> fullFilename("%s%c%s", dirFilename, PATH_SEPARATOR, filename);
-
-				// Recursivly remove empty folder, useful in case of abort with direct rename and hardlinking
-				// lstat: a link to a folder elsewhere (from an archive) was followed and
-				// that folder's empty subfolders and hidden files deleted
-				if (GetPathTypeNoFollow(fullFilename) == PathType::Directory && DeleteDirectoryImpl(fullFilename, tooLong))
-				{
-					continue;
-				}
-			}
-
-			if (*filename != '.')
-			{
-				// calling RemoveDirectory to set correct errno
-				return FileSystem::RemoveDirectory(dirFilename);
-			}
-		}
-	} // make sure "DirBrowser dir" is destroyed (and has closed its handle) before we trying to delete the directory
-
-	CString errmsg;
-	if (!DeleteDirectoryWithContentImpl(dirFilename, errmsg, tooLong))
-	{
-		// calling RemoveDirectory to set correct errno
-		return FileSystem::RemoveDirectory(dirFilename);
-	}
-
-	return true;
-}
-
-bool DeleteDirectoryWithContentImpl(const char* givenDirFilename, CString& errmsg, bool& tooLong)
-{
-	errmsg.Clear();
-	std::string root = DeleteRoot(givenDirFilename);
-	const char* dirFilename = root.c_str();
-	if (root.size() > MaxDeletePath)
-	{
-		tooLong = true;
-		errno = ENAMETOOLONG;
-		errmsg.Format("could not delete %s: %s", givenDirFilename, *DeleteLengthError());
-		return false;
-	}
-	PathType rootType = GetPathTypeNoFollow(dirFilename);
-	if (rootType == PathType::Link || rootType == PathType::DirectoryLink)
-	{
-		if (DeleteLink(dirFilename, rootType))
-		{
-			return true;
-		}
-		errmsg.Format("could not delete %s: %s", givenDirFilename, *FileSystem::GetLastErrorMessage());
-		return false;
-	}
-	if (rootType != PathType::Directory)
-	{
-		errmsg.Format("could not delete %s: %s", givenDirFilename, *FileSystem::GetLastErrorMessage());
-		return false;
-	}
-
-	bool del = false;
-	bool ok = true;
-
-	{
-		DirBrowser dir(dirFilename);
-		while (const char* filename = dir.Next())
-		{
-			if (!DeletePathFits(dirFilename, filename))
-			{
-				tooLong = true;
-				errno = ENAMETOOLONG;
-				ok = false;
-				if (errmsg.Empty())
-				{
-					errmsg.Format("could not delete %s%c%s: %s", dirFilename, PATH_SEPARATOR, filename, *DeleteLengthError());
-				}
-				continue;
-			}
-			BString<1024> fullFilename("%s%c%s", dirFilename, PATH_SEPARATOR, filename);
-			PathType pathType = GetPathTypeNoFollow(fullFilename);
-
-			if (pathType == PathType::Directory)
-			{
-				if (tooLong && !errmsg.Empty())
-				{
-					CString nestedError;
-					del = DeleteDirectoryWithContentImpl(fullFilename, nestedError, tooLong);
-				}
-				else
-				{
-					del = DeleteDirectoryWithContentImpl(fullFilename, errmsg, tooLong);
-				}
-			}
-			else if (pathType == PathType::Link || pathType == PathType::DirectoryLink)
-			{
-				del = DeleteLink(fullFilename, pathType);
-			}
-			else
-			{
-				del = pathType == PathType::File && FileSystem::DeleteFile(fullFilename);
-			}
-			ok &= del;
-			if (!del && errmsg.Empty())
-			{
-				errmsg.Format("could not delete %s: %s", *fullFilename, *FileSystem::GetLastErrorMessage());
-			}
-		}
-	} // make sure "DirBrowser dir" is destroyed (and has closed its handle) before we trying to delete the directory
-
-	del = FileSystem::RemoveDirectory(dirFilename);
-	ok &= del;
-	if (!del && errmsg.Empty())
-	{
-		errmsg = FileSystem::GetLastErrorMessage();
-	}
-	return ok;
-}
-
-}
-
-bool FileSystem::DeleteDirectory(const char* dirFilename)
-{
-	if (!dirFilename)
-	{
-		errno = EFAULT;
-		return false;
-	}
-	bool tooLong = false;
-	bool result = DeleteDirectoryImpl(dirFilename, tooLong);
-	if (tooLong)
-	{
-		errno = ENAMETOOLONG;
-	}
-	return result && !tooLong;
-}
-
-bool FileSystem::DeleteDirectoryWithContent(const char* dirFilename, CString& errmsg)
-{
-	if (!dirFilename)
-	{
-		errmsg.Clear();
-		errno = EFAULT;
-		errmsg.Format("could not delete (null): %s", *GetLastErrorMessage());
-		return false;
-	}
-	bool tooLong = false;
-	bool result = DeleteDirectoryWithContentImpl(dirFilename, errmsg, tooLong);
-	if (tooLong)
-	{
-		errno = ENAMETOOLONG;
-	}
-	return result && !tooLong;
-}
-
-#endif
 
 int64 FileSystem::FileSize(const char* filename)
 {
@@ -1594,7 +931,6 @@ std::optional<FileSystem::DiskState> FileSystem::GetDiskState(const char* path)
 
 bool FileSystem::RenameBak(const char* filename, const char* bakPart, bool removeOldExtension, CString& newName)
 {
-#if defined(NZBGET_USE_RUST) && !defined(WIN32)
 	// The Rust ABI treats NULL strings as empty. Preserve the platform C
 	// library's original formatting/syscall behavior for NULL arguments.
 	if (filename && bakPart)
@@ -1607,7 +943,6 @@ bool FileSystem::RenameBak(const char* filename, const char* bakPart, bool remov
 		nzbget_rs_free(name);
 		return ops.Finish(result) == 1;
 	}
-#endif
 	BString<1024> changedFilename;
 
 	if (removeOldExtension)
@@ -1632,7 +967,6 @@ bool FileSystem::RenameBak(const char* filename, const char* bakPart, bool remov
 }
 
 #ifndef WIN32
-#ifdef NZBGET_USE_RUST
 CString FileSystem::ExpandHomePath(const char* filename)
 {
 	// rust/src/fsops.rs; the home directory looked up as before
@@ -1654,47 +988,6 @@ CString FileSystem::ExpandHomePath(const char* filename)
 	nzbget_rs_free(buf);
 	return result;
 }
-#else
-CString FileSystem::ExpandHomePath(const char* filename)
-{
-	CString result;
-
-	if (filename && (filename[0] == '~') && (filename[1] == '/'))
-	{
-		// expand home-dir
-
-		char* home = getenv("HOME");
-		if (!home)
-		{
-			struct passwd *pw = getpwuid(getuid());
-			if (pw)
-			{
-				home = pw->pw_dir;
-			}
-		}
-
-		if (!home)
-		{
-			return filename;
-		}
-
-		if (home[0] && home[strlen(home)-1] == '/')
-		{
-			result.Format("%s%s", home, filename + 2);
-		}
-		else
-		{
-			result.Format("%s/%s", home, filename + 2);
-		}
-	}
-	else
-	{
-		result.Append(filename ? filename : "");
-	}
-
-	return result;
-}
-#endif
 #endif
 
 CString FileSystem::ExpandFileName(const char* filename)
@@ -1706,7 +999,6 @@ CString FileSystem::ExpandFileName(const char* filename)
 #else
 	CString result;
 	result.Reserve(1024 - 1);
-#ifdef NZBGET_USE_RUST
 	size_t skipDotSlash = 0;
 	if (nzbget_rs_ufs_fs_classify_expand_file_name(filename, &skipDotSlash) != 0)
 	{
@@ -1718,23 +1010,6 @@ CString FileSystem::ExpandFileName(const char* filename)
 	{
 		result = filename;
 	}
-#else
-	if (filename[0] != '\0' && filename[0] != '/')
-	{
-		char curDir[MAX_PATH + 1];
-		getcwd(curDir, sizeof(curDir) - 1); // 1 char reserved for adding backslash
-		int offset = 0;
-		if (filename[0] == '.' && filename[1] == '/')
-		{
-			offset += 2;
-		}
-		result.Format("%s/%s", curDir, filename + offset);
-	}
-	else
-	{
-		result = filename;
-	}
-#endif
 	return result;
 #endif
 }
@@ -2131,11 +1406,7 @@ const char* DirBrowser::InternNext()
 const char* DirBrowser::Next()
 {
 	const char* filename = nullptr;
-#ifdef NZBGET_USE_RUST
 	for (filename = InternNext(); filename && nzbget_rs_ufs_dir_browser_is_dot_or_dotdot(filename) != 0; )
-#else
-	for (filename = InternNext(); filename && (!strcmp(filename, ".") || !strcmp(filename, "..")); )
-#endif
 	{
 		filename = InternNext();
 	}
@@ -2224,15 +1495,9 @@ int64 DiskFile::Position()
 
 bool DiskFile::Seek(int64 position, ESeekOrigin origin)
 {
-#ifdef NZBGET_USE_RUST
 	return fseek(m_file, position,
 		nzbget_rs_ufs_disk_file_select_seek_origin(
 			(int)origin, (int)soCur, (int)soEnd, SEEK_SET, SEEK_CUR, SEEK_END)) == 0;
-#else
-	return fseek(m_file, position,
-		origin == soCur ? SEEK_CUR :
-		origin == soEnd ? SEEK_END : SEEK_SET) == 0;
-#endif
 }
 
 bool DiskFile::Eof()

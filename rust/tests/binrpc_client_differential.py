@@ -48,12 +48,17 @@ def old_loop(name, end):
 
 def new_loop(listing):
     start = new_src.index(f"RS_PRINT_LISTING(nzbget_rs_binrpc_{listing}_listing(")
-    start = new_src.rindex("#ifdef NZBGET_USE_RUST\n", 0, start) + len("#ifdef NZBGET_USE_RUST\n")
-    return new_src[start:new_src.index("#else\n", start)]
+    if "#ifdef NZBGET_USE_RUST\n" in new_src[:start]:
+        start = new_src.rindex("#ifdef NZBGET_USE_RUST\n", 0, start) + len("#ifdef NZBGET_USE_RUST\n")
+        return new_src[start:new_src.index("#else\n", start)]
+    start = new_src.rindex("\t\t// rust/src/binrpc.rs", 0, start)
+    return new_src[start:new_src.index(");\n", start) + 3]
 
 
 helper_at = new_src.index("// One entry of a list response")
-helper = new_src[helper_at:new_src.index("#endif", helper_at)]
+helper_end = (new_src.index("#endif", helper_at) if "#endif" in new_src[helper_at:]
+              else new_src.index("\nvoid RemoteClient::printf(", helper_at))
+helper = new_src[helper_at:helper_end]
 loops = {
     "Log": (old_loop("LogResponse", "\t\t\tbufPtr += sizeof(SNzbLogResponseEntry) + ntohl(logAnswer->m_textLen);\n\t\t}\n"), new_loop("log")),
     "PostQueue": (old_loop("PostQueueResponse", "\t\t\t\tntohl(postQueueAnswer->m_progressLabelLen);\n\t\t}\n"), new_loop("post_queue")),

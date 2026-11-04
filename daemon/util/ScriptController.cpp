@@ -25,9 +25,7 @@
 #include "Util.h"
 #include "FileSystem.h"
 #include "Options.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 // System global variable holding environments variables
 extern char** environ;
@@ -99,11 +97,7 @@ void EnvironmentStrings::InitFromCurrentProcess()
 		// This is to avoid the passing of env vars after program update (when NZBGet is
 		// started from a script which was started by a previous instance of NZBGet).
 		// Format: NZBXX_YYYY (XX are any two characters, YYYY are any number of any characters).
-#ifdef NZBGET_USE_RUST
 		if (!nzbget_rs_sus_is_nzbget_internal_env_var(var))
-#else
-		if (!(!strncmp(var, "NZB", 3) && strlen(var) > 5 && var[5] == '_'))
-#endif
 		{
 			Append(var);
 		}
@@ -226,12 +220,7 @@ void ScriptController::PrepareEnvOptions(const char* stripPrefix)
 	for (Options::OptEntry& optEntry : g_Options->GuardOptEntries())
 	{
 		const char* value = GetOptValue(optEntry.GetName(), optEntry.GetValue());
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_ufs_script_ctrl_matches_env_prefix(optEntry.GetName(), stripPrefix, prefixLen) != 0)
-#else
-		if (stripPrefix && !strncmp(optEntry.GetName(), stripPrefix, prefixLen) &&
-			(int)strlen(optEntry.GetName()) > prefixLen)
-#endif
 		{
 			SetEnvVarSpecial("NZBPO", optEntry.GetName() + prefixLen, value);
 		}
@@ -249,29 +238,12 @@ void ScriptController::SetEnvVarSpecial(const char* prefix, const char* name, co
 	// Original name
 	SetEnvVar(varname, value);
 
-#ifdef NZBGET_USE_RUST
 	NzbgetRsBuf normBuf = nzbget_rs_sus_normalize_special_env_var_name(varname);
 	if (normBuf.data && strcmp(varname, normBuf.data))
 	{
 		SetEnvVar(normBuf.data, value);
 	}
 	nzbget_rs_free(normBuf);
-#else
-	BString<1024> normVarname = *varname;
-
-	// Replace special characters  with "_" and convert to upper case
-	for (char* ptr = normVarname; *ptr; ptr++)
-	{
-		if (strchr(".:*!\"$%&/()=`+~#'{}[]@- ", *ptr)) *ptr = '_';
-		*ptr = toupper(*ptr);
-	}
-
-	// Another env var with normalized name (replaced special chars and converted to upper case)
-	if (strcmp(varname, normVarname))
-	{
-		SetEnvVar(normVarname, value);
-	}
-#endif
 }
 
 #ifdef WIN32
@@ -423,11 +395,7 @@ int ScriptController::Execute()
 				continue;
 			}
 #endif
-#ifdef NZBGET_USE_RUST
 			if (nzbget_rs_ufs_script_ctrl_is_fork_start_error_line(firstLine ? 1 : 0, buf) != 0)
-#else
-			if (firstLine && !strncmp(buf, "[ERROR] Could not start ", 24))
-#endif
 			{
 				startError = true;
 			}
@@ -470,15 +438,8 @@ int ScriptController::Execute()
 	{
 		exitCode = WaitProcess();
 #ifndef WIN32
-#ifdef NZBGET_USE_RUST
 		exitCode = nzbget_rs_ufs_script_ctrl_normalize_fork_exit_code(
 			exitCode, FORK_ERROR_EXIT_CODE, startError ? 1 : 0);
-#else
-		if (exitCode == FORK_ERROR_EXIT_CODE && startError)
-		{
-			exitCode = -1;
-		}
-#endif
 #endif
 	}
 
@@ -877,11 +838,7 @@ int ScriptController::WaitProcess()
 		{
 			PrintMessage(Message::mkWarning, "%s was killed by signal %i", *m_infoName, WTERMSIG(status));
 		}
-#ifdef NZBGET_USE_RUST
 		return nzbget_rs_ufs_script_ctrl_calc_signal_exit_code(WTERMSIG(status));
-#else
-		return 128 + WTERMSIG(status);
-#endif
 	}
 	return -1;
 #endif
@@ -907,17 +864,8 @@ void ScriptController::Terminate()
 	BOOL ok = !m_processId || TerminateProcess(m_processId, -1) || m_completed;
 #else
 	pid_t childPid = m_processId.load();
-#ifdef NZBGET_USE_RUST
 	pid_t killId = (pid_t)nzbget_rs_ufs_script_ctrl_select_kill_pid(
 		(int)childPid, childPid > 0 ? (int)getpgid(childPid) : 0);
-#else
-	pid_t killId = childPid;
-	if (childPid > 0 && getpgid(childPid) == childPid)
-	{
-		// if the child process has its own group (setsid() was successful), kill the whole group
-		killId = -childPid;
-	}
-#endif
 	bool ok = childPid <= 0 || kill(killId, SIGKILL) == 0 || m_completed;
 #endif
 
@@ -1008,7 +956,6 @@ void ScriptController::ProcessOutput(char* text)
 {
 	debug("Processing output received from script");
 
-#ifdef NZBGET_USE_RUST
 	int msgKind = 0;
 	size_t msgOffset = 0;
 	if (!nzbget_rs_sus_classify_script_output_line(text, &msgKind, &msgOffset))
@@ -1025,40 +972,6 @@ void ScriptController::ProcessOutput(char* text)
 		default: kind = Message::mkInfo; break;
 	}
 	PrintMessage(kind, "%s", text + msgOffset);
-#else
-	for (char* pend = text + strlen(text) - 1; pend >= text && (*pend == '\n' || *pend == '\r' || *pend == ' '); pend--) *pend = '\0';
-
-	if (text[0] == '\0')
-	{
-		// skip empty lines
-		return;
-	}
-
-	if (!strncmp(text, "[INFO] ", 7))
-	{
-		PrintMessage(Message::mkInfo, "%s", text + 7);
-	}
-	else if (!strncmp(text, "[WARNING] ", 10))
-	{
-		PrintMessage(Message::mkWarning, "%s", text + 10);
-	}
-	else if (!strncmp(text, "[ERROR] ", 8))
-	{
-		PrintMessage(Message::mkError, "%s", text + 8);
-	}
-	else if (!strncmp(text, "[DETAIL] ", 9))
-	{
-		PrintMessage(Message::mkDetail, "%s", text + 9);
-	}
-	else if (!strncmp(text, "[DEBUG] ", 8))
-	{
-		PrintMessage(Message::mkDebug, "%s", text + 8);
-	}
-	else
-	{
-		PrintMessage(Message::mkInfo, "%s", text);
-	}
-#endif
 
 	debug("Processing output received from script - completed");
 }
@@ -1120,7 +1033,6 @@ void ScriptController::CheckEnvSize(const std::vector<char*>& envs)
 	if (ARGS_LIMIT_SIZE <= 0) return;
 
 	size_t limit = static_cast<size_t>(ARGS_LIMIT_SIZE);
-#ifdef NZBGET_USE_RUST
 	size_t exceededTotal = 0;
 	if (nzbget_rs_sus_check_env_size_limit(
 		reinterpret_cast<const char* const*>(envs.data()),
@@ -1133,19 +1045,4 @@ void ScriptController::CheckEnvSize(const std::vector<char*>& envs)
 					 "Total environment size (%zu bytes) exceeds OS limit (%zu bytes): %s",
 					 exceededTotal, limit, "This may cause process creation to fail");
 	}
-#else
-	size_t total = 0;
-	for (const char* envVar : envs)
-	{
-		if (!envVar) continue;
-		total += strlen(envVar) + 1 + sizeof(void*);
-		if (total > limit)
-		{
-			PrintMessage(Message::EKind::mkWarning,
-						 "Total environment size (%zu bytes) exceeds OS limit (%zu bytes): %s",
-						 total, limit, "This may cause process creation to fail");
-			break;
-		}
-	}
-#endif
 }

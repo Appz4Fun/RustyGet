@@ -24,8 +24,13 @@ REFERENCE = "02c80b7b"
 BUILD = Path(sys.argv[1]).resolve()
 ROUNDS = sys.argv[2] if len(sys.argv) > 2 else "3000"
 
+FALLBACK_REFERENCE = "4cf19abdb8f084a384769a15cf57e56acf86f363"
 old_src = subprocess.check_output(["git", "show", f"{REFERENCE}:daemon/util/FileSystem.cpp"], cwd=ROOT, text=True)
 new_src = (ROOT / "daemon/util/FileSystem.cpp").read_text()
+fallback_full_src = (
+    new_src if "NZBGET_USE_RUST" in new_src
+    else subprocess.check_output(["git", "show", f"{FALLBACK_REFERENCE}:daemon/util/FileSystem.cpp"], cwd=ROOT, text=True)
+)
 
 
 def region(src, start, end_marker):
@@ -35,11 +40,12 @@ def region(src, start, end_marker):
 
 
 old_region = region(old_src, "std::optional<std::string> FileSystem::GetFileExtension", "return MoveFile(filename, newName);\n}\n")
-new_region = region(new_src, "#ifdef NZBGET_USE_RUST\nstd::optional<std::string> FileSystem::GetFileExtension", "return MoveFile(filename, newName);\n}\n")
-win_roots = new_src[new_src.index("#ifdef WIN32\n// room for the listing mask"):new_src.index("// strerror_r returns")]
+new_region = region(new_src, "std::optional<std::string> FileSystem::GetFileExtension", "return MoveFile(filename, newName);\n}\n")
+preserved_region = region(fallback_full_src, "#ifdef NZBGET_USE_RUST\nstd::optional<std::string> FileSystem::GetFileExtension", "return MoveFile(filename, newName);\n}\n")
+win_roots = fallback_full_src[fallback_full_src.index("#ifdef WIN32\n// room for the listing mask"):fallback_full_src.index("// strerror_r returns")]
 win_roots = win_roots.replace("#ifdef WIN32", "#if 1").replace("ALT_PATH_SEPARATOR", "'/'").replace("PATH_SEPARATOR", "'\\\\'")
 
-fallback_region = new_region.replace("#if defined(NZBGET_USE_RUST) && !defined(WIN32)", "#if 0").replace(
+fallback_region = preserved_region.replace("#if defined(NZBGET_USE_RUST) && !defined(WIN32)", "#if 0").replace(
     "#ifdef NZBGET_USE_RUST\nstd::optional", "#if 0\nstd::optional")
 
 STAND_IN = r'''

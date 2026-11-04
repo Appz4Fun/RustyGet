@@ -70,7 +70,7 @@ def function(src, name):
 def extract(src):
     # the command classes, the helpers and the four list commands
     parts = [src[src.index("class BinCommand\n{"):src.index("BinRpcProcessor::BinRpcProcessor()")]]
-    helper = "#ifdef NZBGET_USE_RUST\n// The entries of one kind of a list response"
+    helper = "// The entries of one kind of a list response"
     i = src.index(helper) if helper in src else src.index("//*****************************************************************\n// Commands")
     parts.append(src[i:src.index("void PauseUnpauseBinCommand::Execute()")])
     for name in ("ListBinCommand", "LogBinCommand", "PostQueueBinCommand", "HistoryBinCommand"):

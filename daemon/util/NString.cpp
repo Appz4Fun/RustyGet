@@ -20,10 +20,8 @@
 
 #include "nzbget.h"
 #include "NString.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
 #include <vector>
-#endif
 
 template <int size>
 BString<size>::BString(const char* format, ...)
@@ -38,11 +36,7 @@ template <int size>
 void BString<size>::Set(const char* str, int len)
 {
 	m_data[0] = '\0';
-#ifdef NZBGET_USE_RUST
 	int addLen = nzbget_rs_rol_nstring_bstring_set_len(size, len);
-#else
-	int addLen = len > 0 ? std::min(size - 1, len) : size - 1;
-#endif
 	strncpy(m_data, str, addLen);
 	m_data[addLen] = '\0';
 }
@@ -56,12 +50,7 @@ void BString<size>::Append(const char* str, int len)
 	}
 
 	int curLen = strlen(m_data);
-#ifdef NZBGET_USE_RUST
 	int addLen = nzbget_rs_rol_nstring_bstring_append_len(size, curLen, len);
-#else
-	int avail = size - curLen - 1;
-	int addLen = std::min(avail, len);
-#endif
 	if (addLen > 0)
 	{
 		strncpy(m_data + curLen, str, addLen);
@@ -256,7 +245,6 @@ int CString::Find(const char* str, int pos)
 
 void CString::Replace(int pos, int len, const char* str, int strLen)
 {
-#ifdef NZBGET_USE_RUST
 	int curLen = Length();
 	int addLen = 0;
 	int delLen = 0;
@@ -267,18 +255,6 @@ void CString::Replace(int pos, int len, const char* str, int strLen)
 	{
 		return; // bad argument
 	}
-#else
-	int addLen = strlen(str);
-	if (strLen > 0)
-	{
-		addLen = std::min(addLen, strLen);
-	}
-	int curLen = Length();
-	int delLen = pos + len <= curLen ? len : curLen - pos;
-	int newLen = curLen - delLen + addLen;
-
-	if (pos > curLen) return; // bad argument
-#endif
 
 	char* newvalue = static_cast<char*>(malloc(static_cast<size_t>(newLen + 1)));
 	if (!newvalue) return;
@@ -351,20 +327,11 @@ void CString::TrimRight()
 		return;
 	}
 
-#ifdef NZBGET_USE_RUST
 	size_t newLen = nzbget_rs_rol_nstring_cstring_trim_right_len(m_data, (size_t)len);
 	for (size_t i = newLen; i < (size_t)len; i++)
 	{
 		m_data[i] = '\0';
 	}
-#else
-	char* end = m_data + len - 1;
-	while (end >= m_data && (*end == '\n' || *end == '\r' || *end == ' ' || *end == '\t'))
-	{
-		*end = '\0';
-		end--;
-	}
-#endif
 }
 
 
@@ -376,7 +343,6 @@ WString::WString(const char* utfstr)
 
 	m_data = data;
 
-#ifdef NZBGET_USE_RUST
 	std::vector<uint16_t> tmp(maxUnits + 1, 0);
 	size_t written = nzbget_rs_rco_wstring_decode_utf8_to_utf16(
 		utfstr, tmp.data(), maxUnits);
@@ -385,36 +351,6 @@ WString::WString(const char* utfstr)
 		m_data[i] = (wchar_t)tmp[i];
 	}
 	m_data[written] = '\0';
-#else
-	wchar_t* out = m_data;
-	unsigned int codepoint = 0;
-	while (*utfstr != 0)
-	{
-		unsigned char ch = (unsigned char)*utfstr;
-		if (ch <= 0x7f)
-			codepoint = ch;
-		else if (ch <= 0xbf)
-			codepoint = (codepoint << 6) | (ch & 0x3f);
-		else if (ch <= 0xdf)
-			codepoint = ch & 0x1f;
-		else if (ch <= 0xef)
-			codepoint = ch & 0x0f;
-		else
-			codepoint = ch & 0x07;
-		++utfstr;
-		if (((*utfstr & 0xc0) != 0x80) && (codepoint <= 0x10ffff))
-		{
-			if (codepoint > 0xffff)
-			{
-				*out++ = (wchar_t)(0xd800 + (codepoint >> 10));
-				*out++ = (wchar_t)(0xdc00 + (codepoint & 0x03ff));
-			}
-			else if (codepoint < 0xd800 || codepoint >= 0xe000)
-				*out++ = (wchar_t)(codepoint);
-		}
-	}
-	*out = '\0';
-#endif
 }
 
 
@@ -438,7 +374,6 @@ char* StringBuilder::Unbind()
 void StringBuilder::Reserve(int capacity, bool exact)
 {
 	int oldCapacity = Capacity();
-#ifdef NZBGET_USE_RUST
 	int newCapacity = nzbget_rs_rco_string_builder_calc_reserve_capacity(
 		oldCapacity, capacity, exact ? 1 : 0);
 	if (newCapacity >= 0)
@@ -454,29 +389,6 @@ void StringBuilder::Reserve(int capacity, bool exact)
 			m_data[0] = '\0';
 		}
 	}
-#else
-	if (capacity > oldCapacity || oldCapacity == 0)
-	{
-		char* oldData = m_data;
-
-		// we may grow more than requested
-		int smartCapacity = exact ? 0 : (int)(oldCapacity * 1.5);
-
-		int newCapacity = smartCapacity > capacity ? smartCapacity : capacity;
-
-		char* data = static_cast<char*>(realloc(m_data, static_cast<size_t>(newCapacity + 1)));
-		if (!data) return;
-
-		// only now: a failed realloc kept the old block, and appends trusted
-		// the larger capacity
-		m_capacity = newCapacity;
-		m_data = data;
-		if (!oldData)
-		{
-			m_data[0] = '\0';
-		}
-	}
-#endif
 }
 
 void StringBuilder::Append(const char* str, int len)

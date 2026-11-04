@@ -23,19 +23,13 @@
 
 #include <windows.h>
 #include "Utf8.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 namespace Utf8
 {
 	std::optional<std::wstring> Utf8ToWide(std::string_view str)
 	{
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_awc_utf8_is_empty_len(str.size()) != 0) return L"";
-#else
-		if (str.empty()) return L"";
-#endif
 
 		int requiredSize = MultiByteToWideChar(CP_UTF8, 0, str.data(), -1, nullptr, 0);
 		if (requiredSize <= 0) return std::nullopt;

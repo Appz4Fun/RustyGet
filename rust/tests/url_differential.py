@@ -25,8 +25,7 @@ def block(source, marker):
 
 old = subprocess.check_output(["git", "show", f"{REFERENCE}:daemon/util/Util.cpp"], cwd=ROOT, text=True)
 new = (ROOT / "daemon/util/Util.cpp").read_text()
-new_parse = new[new.index("#ifdef NZBGET_USE_RUST\nvoid URL::ParseUrl()"):]
-new_parse = new_parse[len("#ifdef NZBGET_USE_RUST\n"):new_parse.index("\n#else\n") + 1]
+new_parse = block(new, "void URL::ParseUrl()\n{") + "\n"
 
 harness = r'''
 #include <cctype>

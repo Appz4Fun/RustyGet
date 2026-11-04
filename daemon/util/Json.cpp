@@ -20,9 +20,7 @@
 #include "nzbget.h"
 
 #include "Json.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 
 #ifdef NZBGET_BOOST_JSON_SOURCE
 #include <boost/json/src.hpp>
@@ -53,11 +51,7 @@ namespace Json
 		ErrorCode ec;
 		JsonValue value = parse(jsonStr, ec);
 
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_awc_json_has_error(ec ? 1 : 0) != 0) return std::nullopt;
-#else
-		if (ec) return std::nullopt;
-#endif
 
 		return value;
 	}

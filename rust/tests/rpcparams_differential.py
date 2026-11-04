@@ -31,8 +31,13 @@ def methods(src):
     return src[start:end]
 
 
+FALLBACK_REFERENCE = "4cf19abdb8f084a384769a15cf57e56acf86f363"
 old_src = subprocess.check_output(["git", "show", f"{REFERENCE}:daemon/remote/XmlRpc.cpp"], cwd=ROOT, text=True)
 new_src = (ROOT / "daemon/remote/XmlRpc.cpp").read_text()
+fallback_src = (
+    new_src if "NZBGET_USE_RUST" in new_src
+    else subprocess.check_output(["git", "show", f"{FALLBACK_REFERENCE}:daemon/remote/XmlRpc.cpp"], cwd=ROOT, text=True)
+)
 old_util = subprocess.check_output(["git", "show", f"{REFERENCE}:daemon/util/Util.cpp"], cwd=ROOT, text=True)
 
 
@@ -107,7 +112,7 @@ namespace newimpl {
 }
 #undef NZBGET_USE_RUST
 namespace fallbackimpl {
-''' + helpers + command + methods(new_src) + r'''
+''' + helpers + command + methods(fallback_src) + r'''
 }
 
 static unsigned long long state = 0x9e3779b97f4a7c15ull;

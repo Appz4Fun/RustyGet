@@ -24,8 +24,13 @@ REFERENCE = "02c80b7b"
 BUILD = Path(sys.argv[1]).resolve()
 ROUNDS = sys.argv[2] if len(sys.argv) > 2 else "200000"
 
+FALLBACK_REFERENCE = "4cf19abdb8f084a384769a15cf57e56acf86f363"
 old_src = subprocess.check_output(["git", "show", f"{REFERENCE}:daemon/remote/XmlRpc.cpp"], cwd=ROOT, text=True)
 new_src = (ROOT / "daemon/remote/XmlRpc.cpp").read_text()
+fallback_src = (
+    new_src if "NZBGET_USE_RUST" in new_src
+    else subprocess.check_output(["git", "show", f"{FALLBACK_REFERENCE}:daemon/remote/XmlRpc.cpp"], cwd=ROOT, text=True)
+)
 
 
 def between(src, start, end, include_start=True):
@@ -36,8 +41,11 @@ def between(src, start, end, include_start=True):
 
 parse_params = between(old_src, "	std::optional<ServerParams> ParseRequestParams(const Json::value& value)", "\n};\n")
 old_block = between(old_src, "		const auto jsonResult = Json::Deserialize(m_request);", "\n	}\n	else if")
-rust_block = between(new_src, "#ifdef NZBGET_USE_RUST\n		// rust/src/rpcparams.rs", "#else\n")[len("#ifdef NZBGET_USE_RUST\n"):]
-fallback_block = between(new_src, "#else\n		const auto jsonResult = Json::Deserialize(m_request);", "#endif\n	}\n	else if")[len("#else\n"):]
+if "#ifdef NZBGET_USE_RUST\n		// rust/src/rpcparams.rs" in new_src:
+    rust_block = between(new_src, "#ifdef NZBGET_USE_RUST\n		// rust/src/rpcparams.rs", "#else\n")[len("#ifdef NZBGET_USE_RUST\n"):]
+else:
+    rust_block = between(new_src, "		// rust/src/rpcparams.rs", "\n	}\n	else if") + "\n"
+fallback_block = between(fallback_src, "#else\n		const auto jsonResult = Json::Deserialize(m_request);", "#endif\n	}\n	else if")[len("#else\n"):]
 
 
 def impl(name, block):

@@ -24,9 +24,7 @@
 
 #include <system_error>
 #include "RemoteServer.h"
-#ifdef NZBGET_USE_RUST
 #include "nzbget_rs.h"
-#endif
 #include "BinRpc.h"
 #include "WebServer.h"
 #include "Log.h"
@@ -70,12 +68,8 @@ void RemoteServer::Run()
 
 		if (!m_connection)
 		{
-#ifdef NZBGET_USE_RUST
 			int listenPort = nzbget_rs_ntw_remote_server_select_port(
 				m_tls ? 1 : 0, g_Options->GetSecurePort(), g_Options->GetControlPort());
-#else
-			int listenPort = m_tls ? g_Options->GetSecurePort() : g_Options->GetControlPort();
-#endif
 			m_connection = std::make_unique<Connection>(g_Options->GetControlIp(),
 				listenPort,
 				m_tls);
@@ -96,15 +90,11 @@ void RemoteServer::Run()
 		{
 			acceptedConnection = m_connection->Accept();
 		}
-#ifdef NZBGET_USE_RUST
 		if (nzbget_rs_ucf_remote_server_is_accept_busy_retry(
 			bind ? 1 : 0,
 			acceptedConnection != nullptr ? 1 : 0,
 			(m_connection && m_connection->GetAcceptBusy()) ? 1 : 0,
 			IsStopped() ? 1 : 0) != 0)
-#else
-		if (bind && !acceptedConnection && m_connection->GetAcceptBusy() && !IsStopped())
-#endif
 		{
 			// out of descriptors or memory: the listener is fine, and tearing it
 			// down dropped the clients waiting in its backlog
@@ -128,7 +118,6 @@ void RemoteServer::Run()
 			Guard guard(m_processorsMutex);
 			// a thread per connection: past the cap a connection is closed at once
 			// (clients that connect and wait ran the program out of threads)
-#ifdef NZBGET_USE_RUST
 			time_t now = Util::CurrentTime();
 			int shouldWarn = 0;
 			if (nzbget_rs_ntw_remote_server_should_warn_cap(
@@ -142,18 +131,6 @@ void RemoteServer::Run()
 				}
 				continue;
 			}
-#else
-			if ((int)m_activeProcessors.size() >= MaxProcessors)
-			{
-				time_t now = Util::CurrentTime();
-				if (now - m_lastCapWarning >= 60)
-				{
-					m_lastCapWarning = now;
-					warn("Too many connections to the web interface/API (%i); refusing new ones", MaxProcessors);
-				}
-				continue;
-			}
-#endif
 			RequestProcessor* commandThread = new RequestProcessor();
 			commandThread->SetAutoDestroy(true);
 			commandThread->SetConnection(std::move(acceptedConnection));
@@ -297,7 +274,6 @@ void RequestProcessor::Execute()
 		return;
 	}
 
-#ifdef NZBGET_USE_RUST
 	int sigKind = nzbget_rs_rco_remote_classify_signature(
 		(const char*)&signature, (uint32)NZBMESSAGE_SIGNATURE);
 	if (sigKind == 1)
@@ -309,19 +285,6 @@ void RequestProcessor::Execute()
 		processor.Execute();
 	}
 	else if (sigKind == 2)
-#else
-	if ((int)ntohl(signature) == (int)NZBMESSAGE_SIGNATURE)
-	{
-		// binary request received
-		ok = true;
-		BinRpcProcessor processor;
-		processor.SetConnection(m_connection.get());
-		processor.Execute();
-	}
-	else if (!strncmp((char*)&signature, "POST", 4) ||
-		!strncmp((char*)&signature, "GET ", 4) ||
-		!strncmp((char*)&signature, "OPTI", 4))
-#endif
 	{
 		// HTTP request received
 		ok = true;
@@ -340,12 +303,8 @@ void RequestProcessor::Execute()
 
 	if (!ok)
 	{
-#ifdef NZBGET_USE_RUST
 		int warnPort = nzbget_rs_ntw_remote_server_select_port(
 			m_tls ? 1 : 0, g_Options->GetSecurePort(), g_Options->GetControlPort());
-#else
-		int warnPort = m_tls ? g_Options->GetSecurePort() : g_Options->GetControlPort();
-#endif
 		warn("Non-nzbget request received on port %i from %s", warnPort, m_connection->GetRemoteAddr());
 	}
 }
@@ -361,7 +320,6 @@ bool RequestProcessor::ServWebRequest(const char* signature)
 
 	WebProcessor::EHttpMethod httpMethod = WebProcessor::hmGet;
 	char* url = buffer;
-#ifdef NZBGET_USE_RUST
 	int rsMethod = 0;
 	size_t urlOffset = 0;
 	size_t urlLen = 0;
@@ -373,27 +331,6 @@ bool RequestProcessor::ServWebRequest(const char* signature)
 	httpMethod = (WebProcessor::EHttpMethod)rsMethod;
 	url = buffer + urlOffset;
 	url[urlLen] = '\0';
-#else
-	if (!strncmp(signature, "POST", 4))
-	{
-		httpMethod = WebProcessor::hmPost;
-		url++;
-	}
-	else if (!strncmp(signature, "OPTI", 4) && strlen(url) > 4)
-	{
-		httpMethod = WebProcessor::hmOptions;
-		url += 4;
-	}
-	else if (!(!strncmp(signature, "GET ", 4)))
-	{
-		return false;
-	}
-
-	if (char* p = strchr(url, ' '))
-	{
-		*p = '\0';
-	}
-#endif
 
 	debug("url: %s", url);
 

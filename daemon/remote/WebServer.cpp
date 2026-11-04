@@ -21,10 +21,8 @@
 
 #include "nzbget.h"
 #include "WebServer.h"
-#ifdef NZBGET_USE_RUST
 #include <climits>
 #include "nzbget_rs.h"
-#endif
 #include "XmlRpc.h"
 #include "Log.h"
 #include "Options.h"
@@ -131,12 +129,8 @@ void WebProcessor::Execute()
 	m_rpcRequest = XmlRpcProcessor::IsRpcRequest(m_url);
 	m_authorized = CheckCredentials();
 
-#ifdef NZBGET_USE_RUST
 	if (nzbget_rs_sfw_web_proc_should_send_auth_response(
 		g_Options->GetFormAuth() ? 1 : 0, m_rpcRequest ? 1 : 0, m_authorized ? 1 : 0) != 0)
-#else
-	if ((!g_Options->GetFormAuth() || m_rpcRequest) && !m_authorized)
-#endif
 	{
 		SendAuthResponse();
 		return;
@@ -147,12 +141,7 @@ void WebProcessor::Execute()
 		// a body of a size no request has: the buffer for it couldn't be allocated
 		// (its size + 1 overflowed at INT_MAX) and was written through anyway. A
 		// request without credentials (the login form) is small
-#ifdef NZBGET_USE_RUST
 		if (!nzbget_rs_ntw_web_proc_is_content_len_valid(m_contentLen, m_authorized ? 1 : 0))
-#else
-		int maxContentLen = m_authorized ? 768 * 1024 * 1024 : 64 * 1024;
-		if (m_contentLen < 0 || m_contentLen > maxContentLen)
-#endif
 		{
 			SendErrorResponse(ERR_HTTP_BAD_REQUEST, true);
 			return;
@@ -181,7 +170,6 @@ void WebProcessor::Execute()
 	Dispatch();
 }
 
-#ifdef NZBGET_USE_RUST
 void WebProcessor::ParseHeaders()
 {
 	// Keep the entire initialized buffer: in unusual locales strncasecmp can
@@ -235,83 +223,8 @@ void WebProcessor::ParseHeaders()
 
 	debug("URL=%s", *m_url);
 }
-#else
-void WebProcessor::ParseHeaders()
-{
-	// reading http header
-	char buffer[1024];
-	m_contentLen = 0;
-	while (char* p = m_connection->ReadLine(buffer, sizeof(buffer), nullptr))
-	{
-		if (char* pe = strrchr(p, '\r')) *pe = '\0';
-		debug("header=%s", p);
-
-		if (!strncasecmp(p, "Content-Length: ", 16))
-		{
-			m_contentLen = atoi(p + 16);
-		}
-		else if (!strncasecmp(p, "Authorization: Basic ", 21) && Util::EmptyStr(m_authInfo))
-		{
-			char* authInfo64 = p + 21;
-			if (strlen(authInfo64) > sizeof(m_authInfo))
-			{
-				error("Invalid-request: auth-info too big");
-				return;
-			}
-			m_authInfo[WebUtil::DecodeBase64(authInfo64, 0, m_authInfo)] = '\0';
-		}
-		else if (!strncasecmp(p, "X-Authorization: Basic ", 23))
-		{
-			char* authInfo64 = p + 23;
-			if (strlen(authInfo64) > sizeof(m_authInfo))
-			{
-				error("Invalid-request: auth-info too big");
-				return;
-			}
-			m_authInfo[WebUtil::DecodeBase64(authInfo64, 0, m_authInfo)] = '\0';
-		}
-		else if (!strncasecmp(p, "Accept-Encoding: ", 17))
-		{
-			m_gzip = strstr(p, "gzip");
-		}
-		else if (!strncasecmp(p, "Origin: ", 8))
-		{
-			m_origin = p + 8;
-		}
-		else if (!strncasecmp(p, "Cookie: ", 8))
-		{
-			debug("%s", p);
-			const char* tok = strstr(p, "Auth-Token=");
-			if (tok && tok[11] != ';' && tok[11] != '\0')
-			{
-				strncpy(m_authToken, tok + 11, sizeof(m_authToken)-1);
-				m_authToken[sizeof(m_authToken)-1] = '\0';
-			}
-		}
-		else if (!strncasecmp(p, "X-Forwarded-For: ", 17))
-		{
-			m_forwardedFor = p + 17;
-		}
-		else if (!strncasecmp(p, "If-None-Match: ", 15))
-		{
-			m_oldETag = p + 15;
-		}
-		else if (!strncasecmp(p, "Connection: keep-alive", 22))
-		{
-			m_keepAlive = true;
-		}
-		else if (*p == '\0')
-		{
-			break;
-		}
-	}
-
-	debug("URL=%s", *m_url);
-}
-#endif
 
 // false when it answered the request itself (a redirect)
-#ifdef NZBGET_USE_RUST
 bool WebProcessor::ParseUrl()
 {
 	// rust/src/webserver.rs
@@ -339,43 +252,7 @@ bool WebProcessor::ParseUrl()
 	debug("Final URL=%s", *m_url);
 	return true;
 }
-#else
-bool WebProcessor::ParseUrl()
-{
-	// remove subfolder "nzbget" from the path (if exists)
-	// http://localhost:6789/nzbget/username:password/jsonrpc -> http://localhost:6789/username:password/jsonrpc
-	if (!strncmp(m_url, "/nzbget/", 8))
-	{
-		m_url = CString(m_url + 7);
-	}
-	// http://localhost:6789/nzbget -> http://localhost:6789
-	if (!strcmp(m_url, "/nzbget"))
-	{
-		SendRedirectResponse(BString<1024>("%s/", *m_url));
-		return false;
-	}
 
-	// authorization via URL in format:
-	// http://localhost:6789/username:password/jsonrpc
-	char* pauth1 = strchr(m_url + 1, ':');
-	char* pauth2 = strchr(m_url + 1, '/');
-	if (pauth1 && pauth1 < pauth2)
-	{
-		char* pstart = m_url + 1;
-		char* pend = pauth2;
-		int len = std::min((int)(pend - pstart), (int)sizeof(m_authInfo) - 1);
-		strncpy(m_authInfo, pstart, len);
-		m_authInfo[len] = '\0';
-		WebUtil::UrlDecode(m_authInfo);
-		m_url = CString(pend);
-	}
-
-	debug("Final URL=%s", *m_url);
-	return true;
-}
-#endif
-
-#ifdef NZBGET_USE_RUST
 namespace
 {
 	// tolower as WildMask's C++ code did: on a char, signed or not
@@ -433,63 +310,7 @@ bool WebProcessor::CheckCredentials()
 	}
 	return check.authorized != 0;
 }
-#else
-bool WebProcessor::CheckCredentials()
-{
-	if (!Util::EmptyStr(g_Options->GetControlPassword()) &&
-		!(!Util::EmptyStr(g_Options->GetAuthorizedIp()) && IsAuthorizedIp(m_connection->GetRemoteAddr())))
-	{
-		if (Util::EmptyStr(m_authInfo))
-		{
-			// Authorization via X-Auth-Token
-			for (int j = uaControl; j <= uaAdd; j++)
-			{
-				if (!strcmp(m_authToken, m_serverAuthToken[j]))
-				{
-					m_userAccess = (EUserAccess)j;
-					return true;
-				}
-			}
-			return false;
-		}
 
-		// Authorization via username:password
-		char* pw = strchr(m_authInfo, ':');
-		if (pw) *pw++ = '\0';
-
-		if ((Util::EmptyStr(g_Options->GetControlUsername()) ||
-			 !strcmp(m_authInfo, g_Options->GetControlUsername())) &&
-			pw && !strcmp(pw, g_Options->GetControlPassword()))
-		{
-			m_userAccess = uaControl;
-		}
-		else if (!Util::EmptyStr(g_Options->GetRestrictedUsername()) &&
-			!strcmp(m_authInfo, g_Options->GetRestrictedUsername()) &&
-			pw && !strcmp(pw, g_Options->GetRestrictedPassword()))
-		{
-			m_userAccess = uaRestricted;
-		}
-		else if (!Util::EmptyStr(g_Options->GetAddUsername()) &&
-			!strcmp(m_authInfo, g_Options->GetAddUsername()) &&
-			pw && !strcmp(pw, g_Options->GetAddPassword()))
-		{
-			m_userAccess = uaAdd;
-		}
-		else
-		{
-			warn("Request received on port %i from %s%s, but username (%s) or password invalid",
-				g_Options->GetControlPort(), m_connection->GetRemoteAddr(),
-				!m_forwardedFor.Empty() ? (char*)BString<1024>(" (forwarded for: %s)", *m_forwardedFor) : "",
-				m_authInfo);
-			return false;
-		}
-	}
-
-	return true;
-}
-#endif
-
-#ifdef NZBGET_USE_RUST
 bool WebProcessor::IsAuthorizedIp(const char* remoteAddr)
 {
 	// rust/src/webserver.rs
@@ -501,27 +322,6 @@ bool WebProcessor::IsAuthorizedIp(const char* remoteAddr)
 	return nzbget_rs_web_authorized_ip(g_Options->GetAuthorizedIp(), m_connection->GetRemoteAddr(), table,
 		CHAR_MIN < 0, WebFold) != 0;
 }
-#else
-bool WebProcessor::IsAuthorizedIp(const char* remoteAddr)
-{
-	const char* remoteIp = m_connection->GetRemoteAddr();
-
-	// split option AuthorizedIP into tokens and check each token
-	bool authorized = false;
-	Tokenizer tok(g_Options->GetAuthorizedIp(), ",;");
-	while (const char* ip = tok.Next())
-	{
-		WildMask mask(ip);
-		if (mask.Match(remoteIp))
-		{
-			authorized = true;
-			break;
-		}
-	}
-
-	return authorized;
-}
-#endif
 
 void WebProcessor::Dispatch()
 {
@@ -550,7 +350,6 @@ void WebProcessor::Dispatch()
 		return;
 	}
 
-#ifdef NZBGET_USE_RUST
 	int getRoute = nzbget_rs_sus_web_classify_get_dispatch(m_url);
 	if (getRoute == 0)
 	{
@@ -626,93 +425,6 @@ void WebProcessor::Dispatch()
 	{
 		SendSingleFileResponse();
 	}
-#else
-	// for security reasons we allow only characters "0..9 A..Z a..z . - + _ / ?" in the URLs
-	// we also don't allow ".." in the URLs
-	for (char *p = m_url; *p; p++)
-	{
-		if (!((*p >= '0' && *p <= '9') || (*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
-			*p == '.' || *p == '-' || *p == '+' || *p == '?' || *p == '_' || *p == '/') || (*p == '.' && p[1] == '.'))
-		{
-			SendErrorResponse(ERR_HTTP_NOT_FOUND, true);
-			return;
-		}
-	}
-
-	if (!strncmp(m_url, "/extensions/", 12))
-	{
-		if (!m_authorized)
-		{
-			SendAuthResponse();
-			return;
-		}
-
-		const auto& scriptDirs = g_Options->GetScriptDirPaths();
-		if (scriptDirs.empty())
-		{
-			SendErrorResponse(ERR_HTTP_SERVICE_UNAVAILABLE, true);
-			return;
-		}
-
-		// URL format: /extensions/{extname}/{path}
-		// maps to: {ScriptDir}/{extname}/{path}
-		std::string_view extUrl = m_url + 12;
-		auto slash = extUrl.find('/');
-		// reject missing path separator and reject absolute extUrl (e.g. //etc/passwd)
-		if (slash == std::string_view::npos || slash == 0)
-		{
-			SendErrorResponse(ERR_HTTP_NOT_FOUND, false);
-			return;
-		}
-
-		bool found = false;
-		for (const auto& scriptDir : scriptDirs)
-		{
-			fs::path filePath = scriptDir / extUrl;
-			fs::error_code ec;
-			auto resolvedDir = fs::canonical(scriptDir, ec);
-			if (ec) continue;
-
-			auto resolvedPath = fs::canonical(filePath, ec);
-			if (ec) continue;
-
-			auto rel = resolvedPath.lexically_relative(resolvedDir);
-			if (rel.empty() || rel.native().front() == '.') continue;
-
-			CharBuffer body;
-			std::string filePathStr = fs::u8string(resolvedPath);
-			if (FileSystem::LoadFileIntoBuffer(filePathStr.c_str(), body, true))
-			{
-				const char* contentType = DetectContentType(filePathStr.c_str());
-				int len = body.Size() - 1;
-				SendBodyResponse(body, len, contentType, true);
-				found = true;
-				break;
-			}
-		}
-
-		if (!found)
-		{
-			SendErrorResponse(ERR_HTTP_NOT_FOUND, false);
-		}
-		return;
-	}
-
-	if (Util::EmptyStr(g_Options->GetWebDir()))
-	{
-		SendErrorResponse(ERR_HTTP_SERVICE_UNAVAILABLE, true);
-		return;
-	}
-
-	if (!strncmp(m_url, "/combined.", 10) && strchr(m_url, '?'))
-	{
-		SendMultiFileResponse();
-	}
-	else
-	{
-		SendSingleFileResponse();
-	}
-#endif
 }
 
 void WebProcessor::SendAuthResponse()
@@ -835,11 +547,7 @@ void WebProcessor::SendBodyResponse(const char* body, int bodyLen, const char* c
 		size_t hash = m_hasher(std::string_view(body, bodyLen));
 		newETag.Format("\"%zx\"", hash);
 
-#ifdef NZBGET_USE_RUST
 		unchanged = nzbget_rs_sfw_web_proc_is_etag_unchanged(m_oldETag, newETag) != 0;
-#else
-		unchanged = m_oldETag && !strcmp(newETag, m_oldETag);
-#endif
 		if (unchanged)
 		{
 			body = "";
@@ -850,12 +558,8 @@ void WebProcessor::SendBodyResponse(const char* body, int bodyLen, const char* c
 
 #ifndef DISABLE_GZIP
 	CharBuffer gbuf;
-#ifdef NZBGET_USE_RUST
 	bool gzip = nzbget_rs_ntw_web_proc_should_use_gzip(
 		m_gzip ? 1 : 0, bodyLen, MAX_UNCOMPRESSED_SIZE) != 0;
-#else
-	bool gzip = m_gzip && bodyLen > MAX_UNCOMPRESSED_SIZE;
-#endif
 	if (gzip)
 	{
 		uint32 outLen = ZLib::GZipLen(bodyLen);
@@ -902,16 +606,7 @@ void WebProcessor::SendBodyResponse(const char* body, int bodyLen, const char* c
 
 void WebProcessor::SendSingleFileResponse()
 {
-#ifdef NZBGET_USE_RUST
 	const char* defRes = nzbget_rs_ntw_web_proc_default_resource(m_url);
-#else
-	const char *defRes = "";
-	if (m_url[strlen(m_url)-1] == '/')
-	{
-		// default file in directory (if not specified) is "index.html"
-		defRes = "index.html";
-	}
-#endif
 
 	BString<1024> filename("%s%s%s", g_Options->GetWebDir(), *m_url, defRes);
 
@@ -924,13 +619,7 @@ void WebProcessor::SendSingleFileResponse()
 		// name: the full path never matched them; and the flag passed on is
 		// "print warning", so no missing file was ever warned about)
 		const char* baseName = FileSystem::BaseFileName(filename);
-#ifdef NZBGET_USE_RUST
 		bool ignorable = nzbget_rs_sus_web_is_ignorable_404(baseName) != 0;
-#else
-		bool ignorable = !strcmp(baseName, "package-info.json") ||
-			!strcmp(baseName, "favicon.ico") ||
-			!strncmp(baseName, "apple-touch-icon", 16);
-#endif
 
 		SendErrorResponse(ERR_HTTP_NOT_FOUND, !ignorable);
 		return;
@@ -982,44 +671,5 @@ void WebProcessor::SendMultiFileResponse()
 
 const char* WebProcessor::DetectContentType(const char* filename)
 {
-#ifdef NZBGET_USE_RUST
 	return nzbget_rs_sus_web_detect_content_type(filename);
-#else
-	if (const char *ext = strrchr(filename, '.'))
-	{
-		if (!strcasecmp(ext, ".css"))
-		{
-			return "text/css";
-		}
-		else if (!strcasecmp(ext, ".html"))
-		{
-			return "text/html";
-		}
-		else if (!strcasecmp(ext, ".js"))
-		{
-			return "application/javascript";
-		}
-		else if (!strcasecmp(ext, ".png"))
-		{
-			return "image/png";
-		}
-		else if (!strcasecmp(ext, ".jpeg"))
-		{
-			return "image/jpeg";
-		}
-		else if (!strcasecmp(ext, ".gif"))
-		{
-			return "image/gif";
-		}
-		else if (!strcasecmp(ext, ".svg"))
-		{
-			return "image/svg+xml";
-		}
-		else if (!strcasecmp(ext, ".json"))
-		{
-			return "application/json";
-		}
-	}
-	return nullptr;
-#endif
 }

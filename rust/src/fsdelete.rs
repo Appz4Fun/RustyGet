@@ -42,19 +42,54 @@ pub trait Ops {
 }
 
 const BSTRING: usize = 1023;
+const WIN_MAX_DELETE_PATH: usize = BSTRING - 10;
+
+fn max_delete_path(sep: u8) -> usize {
+    if sep == b'\\' { WIN_MAX_DELETE_PATH } else { BSTRING }
+}
+
+fn is_delete_sep(c: u8, sep: u8) -> bool {
+    c == sep || (sep == b'\\' && c == b'/')
+}
 
 /// A path joined below a delete root; None when it would not fit the C++
 /// path buffers (it is refused, never cut).
 fn join_checked(dir: &[u8], sep: u8, name: &[u8]) -> Option<Vec<u8>> {
+    let max = max_delete_path(sep);
     let v = [dir, &[sep], name].concat();
-    (v.len() <= BSTRING).then_some(v)
+    (dir.len() < max && v.len() <= max).then_some(v)
 }
 
 /// A delete root without trailing separators or trailing "." components.
 pub fn normalize_root(dir: &[u8], sep: u8) -> &[u8] {
+    let mut minimum = 1usize;
+    if sep == b'\\' {
+        // Preserve rooted drive paths, including extended drive and volume roots.
+        if dir.len() >= 3 && dir[1] == b':' && is_delete_sep(dir[2], sep) {
+            minimum = 3;
+        } else if dir.len() >= 2 && is_delete_sep(dir[0], sep) && is_delete_sep(dir[1], sep) {
+            minimum = 2;
+            if dir.len() >= 4 && (dir[2] == b'?' || dir[2] == b'.') && is_delete_sep(dir[3], sep) {
+                if let Some(rel_end) = dir[4..].iter().position(|&c| c == b'\\' || c == b'/') {
+                    let end = 4 + rel_end;
+                    if dir[end - 1] == b':'
+                        || (dir.len() >= 11 && dir[4..11].eq_ignore_ascii_case(b"Volume{"))
+                    {
+                        minimum = end + 1;
+                    }
+                }
+            }
+        }
+    }
     let mut d = dir;
     loop {
-        if d.len() > 1 && (d.ends_with(&[sep]) || d.ends_with(&[sep, b'.'])) {
+        if d.len() > minimum && is_delete_sep(d[d.len() - 1], sep) {
+            d = &d[..d.len() - 1];
+        } else if d.len() > minimum
+            && d.len() >= 2
+            && is_delete_sep(d[d.len() - 2], sep)
+            && d[d.len() - 1] == b'.'
+        {
             d = &d[..d.len() - 1];
         } else {
             return d;
@@ -84,7 +119,7 @@ pub fn delete_directory<O: Ops>(ops: &mut O, dir: &[u8], sep: u8) -> R<bool> {
 
 fn delete_directory_inner<O: Ops>(ops: &mut O, dir: &[u8], sep: u8, too_long: &mut bool) -> R<bool> {
     let dir = normalize_root(dir, sep);
-    if dir.len() > BSTRING {
+    if dir.len() > max_delete_path(sep) {
         *too_long = true;
         ops.too_long()?;
         return Ok(false);
@@ -136,7 +171,7 @@ fn delete_directory_with_content_inner<O: Ops>(ops: &mut O, dir: &[u8], sep: u8,
     errmsg.clear();
     let given = dir;
     let dir = normalize_root(dir, sep);
-    if dir.len() > BSTRING {
+    if dir.len() > max_delete_path(sep) {
         *too_long = true;
         ops.too_long()?;
         *errmsg = could_not_delete(ops, given)?;
@@ -351,6 +386,26 @@ mod tests {
         assert_eq!(normalize_root(b"/", b'/'), b"/");
         assert_eq!(normalize_root(b"/.//./", b'/'), b"/");
         assert_eq!(normalize_root(b"x/.", b'/'), b"x");
+        for (input, expected) in [
+            (&b"C:\\"[..], &b"C:\\"[..]),
+            (b"C:\\.\\", b"C:\\"),
+            (b"C:/./", b"C:/"),
+            (b"C:\\dir\\.\\", b"C:\\dir"),
+            (b"C:/dir/./", b"C:/dir"),
+            (b"\\\\?\\C:\\.\\", b"\\\\?\\C:\\"),
+            (b"\\\\server\\share\\.\\", b"\\\\server\\share"),
+            (b"\\\\?\\Volume{abc}\\.\\", b"\\\\?\\Volume{abc}\\"),
+            (b"\\\\?\\volume{abc}\\.\\", b"\\\\?\\volume{abc}\\"),
+            (b"\\\\?\\VOLUME{abc}\\", b"\\\\?\\VOLUME{abc}\\"),
+            (b"/.", b"/"),
+            (b"\\.\\", b"\\"),
+        ] {
+            assert_eq!(normalize_root(input, b'\\'), expected);
+        }
+        for len in [1012usize, 1013, 1014] {
+            let dir = vec![b'd'; len - 2];
+            assert_eq!(join_checked(&dir, b'\\', b"f").is_some(), len <= 1013);
+        }
         let mut t = Tree::new(&[("/l", Link)]);
         let mut err = Vec::new();
         assert!(delete_directory_with_content(&mut t, b"/l/", b'/', &mut err).unwrap());

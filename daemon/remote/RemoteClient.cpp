@@ -667,10 +667,18 @@ bool RemoteClient::RequestServerList(bool files, bool groups, const char* patter
 		printf("Remaining size: %s\n", *Util::FormatSize(remaining));
 	}
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_sfw_remote_client_should_print_remaining_time(
+		ntohl(ListResponse.m_downloadRate),
+		ntohl(ListResponse.m_downloadPaused),
+		ntohl(ListResponse.m_download2Paused),
+		ntohl(ListResponse.m_downloadStandBy)) != 0)
+#else
 	if (ntohl(ListResponse.m_downloadRate) > 0 &&
 		!ntohl(ListResponse.m_downloadPaused) &&
 		!ntohl(ListResponse.m_download2Paused) &&
 		!ntohl(ListResponse.m_downloadStandBy))
+#endif
 	{
 		int64 remain_sec = (int64)(remaining / ntohl(ListResponse.m_downloadRate));
 #ifdef NZBGET_USE_RUST

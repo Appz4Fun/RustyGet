@@ -48,8 +48,13 @@ void Scheduler::FirstCheck()
 		std::sort(m_taskList.begin(), m_taskList.end(),
 			[](const std::unique_ptr<Task>& task1, const std::unique_ptr<Task>& task2)
 		{
+#ifdef NZBGET_USE_RUST
+			return nzbget_rs_sfw_scheduler_task_less(
+				task1->m_hours, task1->m_minutes, task2->m_hours, task2->m_minutes) != 0;
+#else
 			return (task1->m_hours < task2->m_hours) ||
 				((task1->m_hours == task2->m_hours) && (task1->m_minutes < task2->m_minutes));
+#endif
 		});
 	}
 
@@ -246,14 +251,24 @@ void Scheduler::ExecuteTask(Task* task)
 	debug("Executing scheduled command: %s", commandName[task->m_command]);
 #endif
 
+#ifdef NZBGET_USE_RUST
+	bool executeProcess = nzbget_rs_sfw_scheduler_should_execute_process(
+		m_executeProcess ? 1 : 0, task->m_hours, Task::STARTUP_TASK) != 0;
+#else
 	bool executeProcess = m_executeProcess || task->m_hours == Task::STARTUP_TASK;
+#endif
 
 	switch (task->m_command)
 	{
 		case scDownloadRate:
 			if (!task->m_param.empty())
 			{
+#ifdef NZBGET_USE_RUST
+				g_WorkState->SetSpeedLimit(
+					nzbget_rs_sfw_scheduler_calc_speed_limit_bytes(atoi(task->m_param.c_str())));
+#else
 				g_WorkState->SetSpeedLimit(atoi(task->m_param.c_str()) * 1024);
+#endif
 				m_downloadRateChanged = true;
 			}
 			break;
@@ -348,8 +363,13 @@ void Scheduler::EditServer(bool active, const char* serverList)
 		int id = atoi(serverRef);
 		for (NewsServer* server : g_ServerPool->GetServers())
 		{
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_sfw_scheduler_matches_server_ref(
+				id, server->GetId(), server->GetName(), serverRef) != 0)
+#else
 			if ((id > 0 && server->GetId() == id) ||
 				!strcasecmp(server->GetName(), serverRef))
+#endif
 			{
 				if (!m_serverChanged)
 				{
@@ -377,6 +397,15 @@ void Scheduler::FetchFeed(const char* feedList)
 		int id = atoi(feedRef);
 		for (FeedInfo* feed : g_FeedCoordinator->GetFeeds())
 		{
+#ifdef NZBGET_USE_RUST
+			int targetFeedId = 0;
+			if (nzbget_rs_sfw_scheduler_matches_feed_ref(
+				id, feed->GetId(), feed->GetName(), feedRef, &targetFeedId) != 0)
+			{
+				g_FeedCoordinator->FetchFeed(targetFeedId);
+				break;
+			}
+#else
 			if (feed->GetId() == id ||
 				!strcasecmp(feed->GetName(), feedRef) ||
 				!strcasecmp("0", feedRef))
@@ -384,6 +413,7 @@ void Scheduler::FetchFeed(const char* feedList)
 				g_FeedCoordinator->FetchFeed(!strcasecmp("0", feedRef) ? 0 : feed->GetId());
 				break;
 			}
+#endif
 		}
 	}
 }
@@ -392,7 +422,11 @@ void Scheduler::CheckScheduledResume()
 {
 	time_t resumeTime = g_WorkState->GetResumeTime();
 	time_t currentTime = Util::CurrentTime();
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_sfw_scheduler_should_autoresume((int64_t)resumeTime, (int64_t)currentTime) != 0)
+#else
 	if (resumeTime > 0 && currentTime >= resumeTime)
+#endif
 	{
 		info("Autoresume");
 		g_WorkState->SetResumeTime(0);

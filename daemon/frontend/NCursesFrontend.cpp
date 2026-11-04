@@ -197,6 +197,12 @@ void NCursesFrontend::Run()
 		bool updateNow = false;
 		int key = ReadConsoleKey();
 
+#ifdef NZBGET_USE_RUST
+		int updateNext = m_updateNextTime ? 1 : 0;
+		updateNow = nzbget_rs_sfw_ncurses_decide_loop_update(
+			key != READKEY_EMPTY ? 1 : 0, &updateNext, m_dataUpdatePos) != 0;
+		m_updateNextTime = updateNext != 0;
+#else
 		if (key != READKEY_EMPTY)
 		{
 			// Update now and next if a key is pressed.
@@ -214,6 +220,7 @@ void NCursesFrontend::Run()
 			updateNow = true;
 			m_updateNextTime = false;
 		}
+#endif
 
 		if (updateNow)
 		{
@@ -226,7 +233,11 @@ void NCursesFrontend::Run()
 		}
 
 		// update more often (sleep shorter) if need faster reaction on user input
+#ifdef NZBGET_USE_RUST
+		int sleepInterval = nzbget_rs_sfw_ncurses_select_sleep_interval(m_inputMode == normal ? 1 : 0);
+#else
 		int sleepInterval = m_inputMode == normal ? 100 : 10;
+#endif
 		Wait(sleepInterval);
 		m_dataUpdatePos -= sleepInterval;
 	}
@@ -635,7 +646,11 @@ void NCursesFrontend::PrintStatus()
 	BString<100> downloadLimit;
 	if (m_downloadLimit > 0)
 	{
+#ifdef NZBGET_USE_RUST
+		downloadLimit.Format(", Limit %i KB/s", nzbget_rs_sfw_frontend_calc_limit_kb(m_downloadLimit));
+#else
 		downloadLimit.Format(", Limit %i KB/s", m_downloadLimit / 1024);
+#endif
 	}
 
 	BString<100> postStatus;
@@ -649,7 +664,12 @@ void NCursesFrontend::PrintStatus()
 	BString<1024> status(" %d threads, %s, %s remaining%s%s%s%s, Avg. %s",
 		m_threadCount, *Util::FormatSpeed(currentDownloadSpeed),
 		*Util::FormatSize(m_remainingSize),
+#ifdef NZBGET_USE_RUST
+		*timeString, *postStatus,
+		nzbget_rs_sfw_frontend_select_pause_status_suffix(m_pauseDownload ? 1 : 0, m_standBy ? 1 : 0),
+#else
 		*timeString, *postStatus, m_pauseDownload ? (m_standBy ? ", Paused" : ", Pausing") : "",
+#endif
 		*downloadLimit, *Util::FormatSpeed(averageSpeed));
 	PlotLine(status, statusRow, 0, NCURSES_COLORPAIR_STATUS);
 }
@@ -662,7 +682,11 @@ void NCursesFrontend::PrintKeyInputBar()
 	if (!m_hint.empty())
 	{
 		time_t time = Util::CurrentTime();
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_sfw_ncurses_is_hint_active((int64_t)time, (int64_t)m_startHint) != 0)
+#else
 		if (time - m_startHint < 5)
+#endif
 		{
 			PlotLine(m_hint.c_str(), inputBarRow, 0, NCURSES_COLORPAIR_HINT);
 			return;
@@ -676,6 +700,11 @@ void NCursesFrontend::PrintKeyInputBar()
 	switch (m_inputMode)
 	{
 	case normal:
+#ifdef NZBGET_USE_RUST
+		PlotLine(
+			nzbget_rs_sfw_ncurses_select_normal_keybar(m_groupFiles ? 1 : 0),
+			inputBarRow, 0, NCURSES_COLORPAIR_KEYBAR);
+#else
 		if (m_groupFiles)
 		{
 			PlotLine("(Q)uit | (E)dit | (P)ause | (R)ate | (W)indow | (G)roup | (T)ime", inputBarRow, 0, NCURSES_COLORPAIR_KEYBAR);
@@ -684,6 +713,7 @@ void NCursesFrontend::PrintKeyInputBar()
 		{
 			PlotLine("(Q)uit | (E)dit | (P)ause | (R)ate | (W)indow | (G)roup | (T)ime | n(Z)b", inputBarRow, 0, NCURSES_COLORPAIR_KEYBAR);
 		}
+#endif
 		break;
 	case editQueue:
 	{
@@ -794,6 +824,14 @@ void NCursesFrontend::PrintFileQueue()
 void NCursesFrontend::PrintFilename(FileInfo * fileInfo, int row, bool selected)
 {
 	int color = 0;
+#ifdef NZBGET_USE_RUST
+	char chB1 = '[', chB2 = ']';
+	color = nzbget_rs_sfw_ncurses_select_row_highlight(
+		m_inputMode == editQueue ? 1 : 0, selected ? 1 : 0, m_useColor ? 1 : 0,
+		NCURSES_COLORPAIR_TEXTHIGHL, NCURSES_COLORPAIR_TEXT, &chB1, &chB2);
+	const char* Brace1 = chB1 == '<' ? "<" : "[";
+	const char* Brace2 = chB2 == '>' ? ">" : "]";
+#else
 	const char* Brace1 = "[";
 	const char* Brace2 = "]";
 	if (m_inputMode == editQueue && selected)
@@ -809,6 +847,7 @@ void NCursesFrontend::PrintFilename(FileInfo * fileInfo, int row, bool selected)
 	{
 		color = NCURSES_COLORPAIR_TEXT;
 	}
+#endif
 
 	const char* downloading = "";
 	if (fileInfo->GetActiveDownloads() > 0)
@@ -897,6 +936,22 @@ void NCursesFrontend::PrintTopHeader(char* header, int lineNr, bool upTime)
 	int shortCapLen = strlen(shortCap);
 	int longCapLen = strlen(longCap);
 
+#ifdef NZBGET_USE_RUST
+	int capMode = nzbget_rs_sfw_ncurses_select_top_header_caption(
+		charsLeft, timeLen, longCapLen, shortCapLen);
+	if (capMode == 2)
+	{
+		snprintf(buffer + m_screenWidth - timeLen - longCapLen, MAX_SCREEN_WIDTH - (m_screenWidth - timeLen - longCapLen), "%s%s", longCap, *timeStr);
+	}
+	else if (capMode == 1)
+	{
+		snprintf(buffer + m_screenWidth - timeLen - shortCapLen, MAX_SCREEN_WIDTH - (m_screenWidth - timeLen - shortCapLen), "%s%s", shortCap, *timeStr);
+	}
+	else if (capMode == 0)
+	{
+		snprintf(buffer + m_screenWidth - timeLen, MAX_SCREEN_WIDTH - (m_screenWidth - timeLen), "%s", *timeStr);
+	}
+#else
 	if (charsLeft - timeLen - longCapLen >= 0)
 	{
 		snprintf(buffer + m_screenWidth - timeLen - longCapLen, MAX_SCREEN_WIDTH - (m_screenWidth - timeLen - longCapLen), "%s%s", longCap, *timeStr);
@@ -909,6 +964,7 @@ void NCursesFrontend::PrintTopHeader(char* header, int lineNr, bool upTime)
 	{
 		snprintf(buffer + m_screenWidth - timeLen, MAX_SCREEN_WIDTH - (m_screenWidth - timeLen), "%s", *timeStr);
 	}
+#endif
 
 	PlotLine(buffer, lineNr, 0, NCURSES_COLORPAIR_INFOLINE);
 }
@@ -1036,6 +1092,18 @@ void NCursesFrontend::PrintGroupname(NzbInfo* nzbInfo, int row, bool selected, b
 			time = "[paused]";
 			remaining = Util::FormatSize(nzbInfo->GetRemainingSize());
 		}
+#ifdef NZBGET_USE_RUST
+		else
+		{
+			int h = 0, m = 0, s = 0;
+			if (nzbget_rs_sfw_ncurses_calc_group_remain_hms_capped(
+				unpausedRemainingSize, currentDownloadSpeed, m_pauseDownload ? 1 : 0,
+				&h, &m, &s) != 0)
+			{
+				time.Format("%.2d:%.2d:%.2d", h, m, s);
+			}
+		}
+#else
 		else if (currentDownloadSpeed > 0 && !m_pauseDownload)
 		{
 			int64 remain_sec = unpausedRemainingSize / currentDownloadSpeed;
@@ -1051,6 +1119,7 @@ void NCursesFrontend::PrintGroupname(NzbInfo* nzbInfo, int row, bool selected, b
 				time.Format("99:99:99");
 			}
 		}
+#endif
 
 		if (calcColWidth)
 		{

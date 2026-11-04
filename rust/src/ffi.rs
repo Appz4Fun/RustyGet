@@ -22473,6 +22473,269 @@ pub extern "C" fn nzbget_rs_sfc_feed_info_should_parse_season_episode(
     ))
 }
 
+// ============================================================================
+// Scheduler, Frontend, ColoredFrontend, NCursesFrontend, RemoteClient &
+// WebServer Hot-Path C ABI (rust/src/schedfrontweb.rs)
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sfw_scheduler_task_less(
+    hours1: c_int,
+    minutes1: c_int,
+    hours2: c_int,
+    minutes2: c_int,
+) -> c_int {
+    i32::from(crate::schedfrontweb::scheduler_task_less(
+        hours1, minutes1, hours2, minutes2,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sfw_scheduler_should_execute_process(
+    execute_process: c_int,
+    task_hours: c_int,
+    startup_task: c_int,
+) -> c_int {
+    i32::from(crate::schedfrontweb::scheduler_should_execute_process(
+        execute_process != 0,
+        task_hours,
+        startup_task,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sfw_scheduler_calc_speed_limit_bytes(kb_per_sec: c_int) -> c_int {
+    crate::schedfrontweb::scheduler_calc_speed_limit_bytes(kb_per_sec)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sfw_scheduler_matches_server_ref(
+    id: c_int,
+    server_id: c_int,
+    server_name: *const c_char,
+    server_ref: *const c_char,
+) -> c_int {
+    i32::from(crate::schedfrontweb::scheduler_matches_server_ref(
+        id,
+        server_id,
+        server_name,
+        server_ref,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sfw_scheduler_matches_feed_ref(
+    id: c_int,
+    feed_id: c_int,
+    feed_name: *const c_char,
+    feed_ref: *const c_char,
+    out_target_id: *mut c_int,
+) -> c_int {
+    let (matched, target_id) =
+        crate::schedfrontweb::scheduler_matches_feed_ref(id, feed_id, feed_name, feed_ref);
+    if !out_target_id.is_null() {
+        *out_target_id = target_id;
+    }
+    i32::from(matched)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sfw_scheduler_should_autoresume(
+    resume_time: i64,
+    current_time: i64,
+) -> c_int {
+    i32::from(crate::schedfrontweb::scheduler_should_autoresume(
+        resume_time,
+        current_time,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sfw_frontend_resolve_log_id_from(
+    needed_log_entries: u32,
+    needed_log_first_id: u32,
+) -> u32 {
+    crate::schedfrontweb::frontend_resolve_log_id_from(needed_log_entries, needed_log_first_id)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sfw_rpc_is_response_header_valid(
+    read_ok: c_int,
+    resp_sig_host: u32,
+    expected_sig: u32,
+    resp_struct_size_host: u32,
+    expected_struct_size: u32,
+) -> c_int {
+    i32::from(crate::schedfrontweb::rpc_is_response_header_valid(
+        read_ok != 0,
+        resp_sig_host,
+        expected_sig,
+        resp_struct_size_host,
+        expected_struct_size,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sfw_frontend_select_pause_status_suffix(
+    pause_download: c_int,
+    stand_by: c_int,
+) -> *const c_char {
+    crate::schedfrontweb::frontend_select_pause_status_suffix(pause_download != 0, stand_by != 0)
+        .as_ptr()
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sfw_frontend_calc_limit_kb(download_limit: c_int) -> c_int {
+    crate::schedfrontweb::frontend_calc_limit_kb(download_limit)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sfw_ncurses_decide_loop_update(
+    key_pressed: c_int,
+    update_next_time: *mut c_int,
+    data_update_pos: c_int,
+) -> c_int {
+    if update_next_time.is_null() {
+        return 0;
+    }
+    let (update_now, new_next) = crate::schedfrontweb::ncurses_decide_loop_update(
+        key_pressed != 0,
+        *update_next_time != 0,
+        data_update_pos,
+    );
+    *update_next_time = i32::from(new_next);
+    i32::from(update_now)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sfw_ncurses_select_sleep_interval(is_normal_mode: c_int) -> c_int {
+    crate::schedfrontweb::ncurses_select_sleep_interval(is_normal_mode != 0)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sfw_ncurses_is_hint_active(time: i64, start_hint: i64) -> c_int {
+    i32::from(crate::schedfrontweb::ncurses_is_hint_active(
+        time, start_hint,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sfw_ncurses_select_normal_keybar(group_files: c_int) -> *const c_char {
+    crate::schedfrontweb::ncurses_select_normal_keybar(group_files != 0).as_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sfw_ncurses_select_row_highlight(
+    is_edit_queue: c_int,
+    selected: c_int,
+    use_color: c_int,
+    highl_color: c_int,
+    text_color: c_int,
+    out_brace1: *mut c_char,
+    out_brace2: *mut c_char,
+) -> c_int {
+    let (color, b1, b2) = crate::schedfrontweb::ncurses_select_row_highlight(
+        is_edit_queue != 0,
+        selected != 0,
+        use_color != 0,
+        highl_color,
+        text_color,
+    );
+    if !out_brace1.is_null() {
+        *out_brace1 = b1 as c_char;
+    }
+    if !out_brace2.is_null() {
+        *out_brace2 = b2 as c_char;
+    }
+    color
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sfw_ncurses_select_top_header_caption(
+    chars_left: c_int,
+    time_len: c_int,
+    long_cap_len: c_int,
+    short_cap_len: c_int,
+) -> c_int {
+    crate::schedfrontweb::ncurses_select_top_header_caption(
+        chars_left,
+        time_len,
+        long_cap_len,
+        short_cap_len,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sfw_ncurses_calc_group_remain_hms_capped(
+    unpaused_remaining_size: i64,
+    current_download_speed: i64,
+    pause_download: c_int,
+    out_h: *mut c_int,
+    out_m: *mut c_int,
+    out_s: *mut c_int,
+) -> c_int {
+    match crate::schedfrontweb::ncurses_calc_group_remain_hms_capped(
+        unpaused_remaining_size,
+        current_download_speed,
+        pause_download != 0,
+    ) {
+        Some((h, m, s)) => {
+            if !out_h.is_null() {
+                *out_h = h;
+            }
+            if !out_m.is_null() {
+                *out_m = m;
+            }
+            if !out_s.is_null() {
+                *out_s = s;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sfw_remote_client_should_print_remaining_time(
+    download_rate: u32,
+    download_paused: u32,
+    download2_paused: u32,
+    download_standby: u32,
+) -> c_int {
+    i32::from(
+        crate::schedfrontweb::remote_client_should_print_remaining_time(
+            download_rate,
+            download_paused,
+            download2_paused,
+            download_standby,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_sfw_web_proc_should_send_auth_response(
+    form_auth: c_int,
+    rpc_request: c_int,
+    authorized: c_int,
+) -> c_int {
+    i32::from(crate::schedfrontweb::web_proc_should_send_auth_response(
+        form_auth != 0,
+        rpc_request != 0,
+        authorized != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sfw_web_proc_is_etag_unchanged(
+    old_etag: *const c_char,
+    new_etag: *const c_char,
+) -> c_int {
+    i32::from(crate::schedfrontweb::web_proc_is_etag_unchanged(
+        old_etag, new_etag,
+    ))
+}
+
+
 
 
 

@@ -131,7 +131,12 @@ void WebProcessor::Execute()
 	m_rpcRequest = XmlRpcProcessor::IsRpcRequest(m_url);
 	m_authorized = CheckCredentials();
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_sfw_web_proc_should_send_auth_response(
+		g_Options->GetFormAuth() ? 1 : 0, m_rpcRequest ? 1 : 0, m_authorized ? 1 : 0) != 0)
+#else
 	if ((!g_Options->GetFormAuth() || m_rpcRequest) && !m_authorized)
+#endif
 	{
 		SendAuthResponse();
 		return;
@@ -830,7 +835,11 @@ void WebProcessor::SendBodyResponse(const char* body, int bodyLen, const char* c
 		size_t hash = m_hasher(std::string_view(body, bodyLen));
 		newETag.Format("\"%zx\"", hash);
 
+#ifdef NZBGET_USE_RUST
+		unchanged = nzbget_rs_sfw_web_proc_is_etag_unchanged(m_oldETag, newETag) != 0;
+#else
 		unchanged = m_oldETag && !strcmp(newETag, m_oldETag);
+#endif
 		if (unchanged)
 		{
 			body = "";

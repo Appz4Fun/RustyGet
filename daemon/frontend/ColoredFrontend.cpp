@@ -79,7 +79,11 @@ void ColoredFrontend::PrintStatus()
 	BString<100> downloadLimit;
 	if (m_downloadLimit > 0)
 	{
+#ifdef NZBGET_USE_RUST
+		downloadLimit.Format(", Limit %i KB/s", nzbget_rs_sfw_frontend_calc_limit_kb(m_downloadLimit));
+#else
 		downloadLimit.Format(", Limit %i KB/s", m_downloadLimit / 1024);
+#endif
 	}
 
 	BString<100> postStatus;
@@ -98,7 +102,11 @@ void ColoredFrontend::PrintStatus()
 	BString<1024> status(" %d threads, %s, %s remaining%s%s%s%s%s\n",
 		m_threadCount, *Util::FormatSpeed(currentDownloadSpeed),
 		*Util::FormatSize(m_remainingSize), *timeString, *postStatus,
+#ifdef NZBGET_USE_RUST
+		nzbget_rs_sfw_frontend_select_pause_status_suffix(m_pauseDownload ? 1 : 0, m_standBy ? 1 : 0),
+#else
 		m_pauseDownload ? (m_standBy ? ", Paused" : ", Pausing") : "",
+#endif
 		*downloadLimit, controlSeq);
 	printf("%s", *status);
 	m_needGoBack = true;

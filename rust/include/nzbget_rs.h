@@ -3503,6 +3503,49 @@ int nzbget_rs_sfc_feed_info_should_append_dupe_key(
 int nzbget_rs_sfc_feed_info_should_parse_season_episode(
     int field_empty, int parsed);
 
+// Scheduler, Frontend, ColoredFrontend, NCursesFrontend, RemoteClient &
+// WebServer Hot-Path C ABI (rust/src/schedfrontweb.rs)
+int nzbget_rs_sfw_scheduler_task_less(
+    int hours1, int minutes1, int hours2, int minutes2);
+int nzbget_rs_sfw_scheduler_should_execute_process(
+    int execute_process, int task_hours, int startup_task);
+int nzbget_rs_sfw_scheduler_calc_speed_limit_bytes(int kb_per_sec);
+int nzbget_rs_sfw_scheduler_matches_server_ref(
+    int id, int server_id, const char* server_name, const char* server_ref);
+int nzbget_rs_sfw_scheduler_matches_feed_ref(
+    int id, int feed_id, const char* feed_name, const char* feed_ref,
+    int* out_target_id);
+int nzbget_rs_sfw_scheduler_should_autoresume(
+    int64_t resume_time, int64_t current_time);
+uint32_t nzbget_rs_sfw_frontend_resolve_log_id_from(
+    uint32_t needed_log_entries, uint32_t needed_log_first_id);
+int nzbget_rs_sfw_rpc_is_response_header_valid(
+    int read_ok, uint32_t resp_sig_host, uint32_t expected_sig,
+    uint32_t resp_struct_size_host, uint32_t expected_struct_size);
+const char* nzbget_rs_sfw_frontend_select_pause_status_suffix(
+    int pause_download, int stand_by);
+int nzbget_rs_sfw_frontend_calc_limit_kb(int download_limit);
+int nzbget_rs_sfw_ncurses_decide_loop_update(
+    int key_pressed, int* update_next_time, int data_update_pos);
+int nzbget_rs_sfw_ncurses_select_sleep_interval(int is_normal_mode);
+int nzbget_rs_sfw_ncurses_is_hint_active(int64_t time, int64_t start_hint);
+const char* nzbget_rs_sfw_ncurses_select_normal_keybar(int group_files);
+int nzbget_rs_sfw_ncurses_select_row_highlight(
+    int is_edit_queue, int selected, int use_color,
+    int highl_color, int text_color, char* out_brace1, char* out_brace2);
+int nzbget_rs_sfw_ncurses_select_top_header_caption(
+    int chars_left, int time_len, int long_cap_len, int short_cap_len);
+int nzbget_rs_sfw_ncurses_calc_group_remain_hms_capped(
+    int64_t unpaused_remaining_size, int64_t current_download_speed,
+    int pause_download, int* out_h, int* out_m, int* out_s);
+int nzbget_rs_sfw_remote_client_should_print_remaining_time(
+    uint32_t download_rate, uint32_t download_paused,
+    uint32_t download2_paused, uint32_t download_standby);
+int nzbget_rs_sfw_web_proc_should_send_auth_response(
+    int form_auth, int rpc_request, int authorized);
+int nzbget_rs_sfw_web_proc_is_etag_unchanged(
+    const char* old_etag, const char* new_etag);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

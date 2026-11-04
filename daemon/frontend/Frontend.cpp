@@ -193,6 +193,10 @@ bool Frontend::RequestMessages()
 	SNzbLogRequest LogRequest = {};
 	InitMessageBase(&LogRequest.m_messageBase, rrLog, sizeof(LogRequest));
 	LogRequest.m_lines = htonl(m_neededLogEntries);
+#ifdef NZBGET_USE_RUST
+	LogRequest.m_idFrom = htonl(nzbget_rs_sfw_frontend_resolve_log_id_from(
+		m_neededLogEntries, m_neededLogFirstId));
+#else
 	if (m_neededLogEntries == 0)
 	{
 		LogRequest.m_idFrom = htonl(m_neededLogFirstId > 0 ? m_neededLogFirstId : 1);
@@ -201,6 +205,7 @@ bool Frontend::RequestMessages()
 	{
 		LogRequest.m_idFrom = 0;
 	}
+#endif
 
 	if (!connection.Send((char*)(&LogRequest), sizeof(LogRequest)))
 	{
@@ -210,9 +215,18 @@ bool Frontend::RequestMessages()
 	// Now listen for the returned log
 	SNzbLogResponse LogResponse;
 	bool read = connection.Recv((char*) &LogResponse, sizeof(LogResponse));
+#ifdef NZBGET_USE_RUST
+	if (!nzbget_rs_sfw_rpc_is_response_header_valid(
+		read ? 1 : 0,
+		ntohl(LogResponse.m_messageBase.m_signature),
+		(uint32_t)NZBMESSAGE_SIGNATURE,
+		ntohl(LogResponse.m_messageBase.m_structSize),
+		(uint32_t)sizeof(LogResponse)))
+#else
 	if (!read ||
 		(int)ntohl(LogResponse.m_messageBase.m_signature) != (int)NZBMESSAGE_SIGNATURE ||
 		ntohl(LogResponse.m_messageBase.m_structSize) != sizeof(LogResponse))
+#endif
 	{
 		return false;
 	}
@@ -275,9 +289,18 @@ bool Frontend::RequestFileList()
 	// Now listen for the returned list
 	SNzbListResponse ListResponse;
 	bool read = connection.Recv((char*) &ListResponse, sizeof(ListResponse));
+#ifdef NZBGET_USE_RUST
+	if (!nzbget_rs_sfw_rpc_is_response_header_valid(
+		read ? 1 : 0,
+		ntohl(ListResponse.m_messageBase.m_signature),
+		(uint32_t)NZBMESSAGE_SIGNATURE,
+		ntohl(ListResponse.m_messageBase.m_structSize),
+		(uint32_t)sizeof(ListResponse)))
+#else
 	if (!read ||
 		(int)ntohl(ListResponse.m_messageBase.m_signature) != (int)NZBMESSAGE_SIGNATURE ||
 		ntohl(ListResponse.m_messageBase.m_structSize) != sizeof(ListResponse))
+#endif
 	{
 		return false;
 	}

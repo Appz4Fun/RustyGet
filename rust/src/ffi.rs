@@ -29172,3 +29172,544 @@ pub unsafe extern "C" fn nzbget_rs_binrpc_group_listing_from_wire(
     ))
 }
 
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn nzbget_rs_stream_select_whole_file_donor(
+    target_filename: *const c_char,
+    target_encoded_size: i64,
+    target_article_count: c_int,
+    target_steps_hash: u64,
+    donor_set: *const c_char,
+    donor_filenames: *const *const c_char,
+    donor_sizes: *const i64,
+    donor_is_par: *const u8,
+    donor_has_articles: *const u8,
+    donor_is_claimed: *const u8,
+    donor_steps_hashes: *const u64,
+    donor_count: usize,
+) -> c_int {
+    if donor_count == 0
+        || donor_filenames.is_null()
+        || donor_sizes.is_null()
+        || donor_is_par.is_null()
+        || donor_has_articles.is_null()
+        || donor_is_claimed.is_null()
+        || donor_steps_hashes.is_null()
+    {
+        return -1;
+    }
+    let mut names = Vec::with_capacity(donor_count);
+    for i in 0..donor_count {
+        names.push(input(*donor_filenames.add(i)));
+    }
+    crate::streamrepair::select_whole_file_donor(
+        input(target_filename),
+        target_encoded_size,
+        target_article_count,
+        target_steps_hash,
+        input(donor_set),
+        &names,
+        std::slice::from_raw_parts(donor_sizes, donor_count),
+        std::slice::from_raw_parts(donor_is_par, donor_count),
+        std::slice::from_raw_parts(donor_has_articles, donor_count),
+        std::slice::from_raw_parts(donor_is_claimed, donor_count),
+        std::slice::from_raw_parts(donor_steps_hashes, donor_count),
+    )
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn nzbget_rs_stream_select_donor_candidates(
+    target_filename: *const c_char,
+    target_decoded_file_size: i64,
+    positional_rank: c_int,
+    positional_window: c_int,
+    max_candidates: c_int,
+    target_steps_hash: u64,
+    donor_filenames: *const *const c_char,
+    donor_sizes: *const i64,
+    donor_is_par: *const u8,
+    donor_has_articles: *const u8,
+    donor_is_claimed: *const u8,
+    donor_steps_hashes: *const u64,
+    donor_count: usize,
+    out_indices: *mut i32,
+    out_cap: usize,
+) -> usize {
+    if donor_count == 0
+        || donor_filenames.is_null()
+        || donor_sizes.is_null()
+        || donor_is_par.is_null()
+        || donor_has_articles.is_null()
+        || donor_is_claimed.is_null()
+        || donor_steps_hashes.is_null()
+        || out_indices.is_null()
+        || out_cap == 0
+    {
+        return 0;
+    }
+    let mut names = Vec::with_capacity(donor_count);
+    for i in 0..donor_count {
+        names.push(input(*donor_filenames.add(i)));
+    }
+    let cands = crate::streamrepair::select_donor_candidates(
+        input(target_filename),
+        target_decoded_file_size,
+        positional_rank,
+        positional_window,
+        max_candidates,
+        target_steps_hash,
+        &names,
+        std::slice::from_raw_parts(donor_sizes, donor_count),
+        std::slice::from_raw_parts(donor_is_par, donor_count),
+        std::slice::from_raw_parts(donor_has_articles, donor_count),
+        std::slice::from_raw_parts(donor_is_claimed, donor_count),
+        std::slice::from_raw_parts(donor_steps_hashes, donor_count),
+    );
+    let n = cands.len().min(out_cap);
+    std::ptr::copy_nonoverlapping(cands.as_ptr(), out_indices, n);
+    n
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn nzbget_rs_stream_select_intact_proof_candidates(
+    intact_basename: *const c_char,
+    intact_size: i64,
+    donor_set: *const c_char,
+    stand_in_index: c_int,
+    max_candidates: c_int,
+    donor_filenames: *const *const c_char,
+    donor_sizes: *const i64,
+    donor_has_articles: *const u8,
+    donor_is_claimed: *const u8,
+    donor_count: usize,
+    out_indices: *mut i32,
+    out_cap: usize,
+) -> usize {
+    if donor_count == 0
+        || donor_filenames.is_null()
+        || donor_sizes.is_null()
+        || donor_has_articles.is_null()
+        || donor_is_claimed.is_null()
+        || out_indices.is_null()
+        || out_cap == 0
+    {
+        return 0;
+    }
+    let mut names = Vec::with_capacity(donor_count);
+    for i in 0..donor_count {
+        names.push(input(*donor_filenames.add(i)));
+    }
+    let cands = crate::streamrepair::select_intact_proof_candidates(
+        input(intact_basename),
+        intact_size,
+        input(donor_set),
+        stand_in_index,
+        max_candidates,
+        &names,
+        std::slice::from_raw_parts(donor_sizes, donor_count),
+        std::slice::from_raw_parts(donor_has_articles, donor_count),
+        std::slice::from_raw_parts(donor_is_claimed, donor_count),
+    );
+    let n = cands.len().min(out_cap);
+    std::ptr::copy_nonoverlapping(cands.as_ptr(), out_indices, n);
+    n
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn nzbget_rs_stream_select_verify_donor_probes(
+    donor_ranges: *const crate::dupefallback::NzbgetRsByteRange,
+    donor_count: usize,
+    holes: *const crate::dupefallback::NzbgetRsByteRange,
+    hole_count: usize,
+    decoded_file_size: i64,
+    probe_count: c_int,
+    out_probes: *mut i32,
+    probes_cap: usize,
+    out_probes_len: *mut usize,
+    out_reserve: *mut i32,
+    reserve_cap: usize,
+    out_reserve_len: *mut usize,
+) {
+    let donors_slice = if donor_ranges.is_null() || donor_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(donor_ranges, donor_count)
+    };
+    let holes_slice = if holes.is_null() || hole_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(holes, hole_count)
+    };
+    let (probes, reserve) = crate::streamrepair::select_verify_donor_probes(
+        donors_slice,
+        holes_slice,
+        decoded_file_size,
+        probe_count,
+    );
+    let plen = probes.len().min(probes_cap);
+    if !out_probes.is_null() && plen > 0 {
+        std::ptr::copy_nonoverlapping(probes.as_ptr(), out_probes, plen);
+    }
+    if !out_probes_len.is_null() {
+        *out_probes_len = plen;
+    }
+    let rlen = reserve.len().min(reserve_cap);
+    if !out_reserve.is_null() && rlen > 0 {
+        std::ptr::copy_nonoverlapping(reserve.as_ptr(), out_reserve, rlen);
+    }
+    if !out_reserve_len.is_null() {
+        *out_reserve_len = rlen;
+    }
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn nzbget_rs_stream_encrypted_compare_floor(
+    inner_size: i64,
+    block_size: i64,
+    runs: *const crate::streamrepair::NzbgetRsContentRun,
+    run_count: usize,
+    original_holes: *const crate::dupefallback::NzbgetRsByteRange,
+    original_hole_count: usize,
+    windows: *const crate::dupefallback::NzbgetRsByteRange,
+    window_count: usize,
+) -> i64 {
+    let runs_slice = if runs.is_null() || run_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(runs, run_count)
+    };
+    let orig_slice = if original_holes.is_null() || original_hole_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(original_holes, original_hole_count)
+    };
+    let win_slice = if windows.is_null() || window_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(windows, window_count)
+    };
+    crate::streamrepair::encrypted_compare_floor(
+        inner_size,
+        block_size,
+        runs_slice,
+        orig_slice,
+        win_slice,
+    )
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn nzbget_rs_stream_partition_encrypted_chunk(
+    block_from: i64,
+    chunk_end: i64,
+    live_holes: *const crate::dupefallback::NzbgetRsByteRange,
+    live_hole_count: usize,
+    out_hole_parts: *mut crate::dupefallback::NzbgetRsByteRange,
+    hole_parts_cap: usize,
+    out_hole_parts_len: *mut usize,
+    out_present_parts: *mut crate::dupefallback::NzbgetRsByteRange,
+    present_parts_cap: usize,
+    out_present_parts_len: *mut usize,
+) {
+    let holes_slice = if live_holes.is_null() || live_hole_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(live_holes, live_hole_count)
+    };
+    let (hole_parts, present_parts) =
+        crate::streamrepair::partition_encrypted_chunk(block_from, chunk_end, holes_slice);
+    let hlen = hole_parts.len().min(hole_parts_cap);
+    if !out_hole_parts.is_null() && hlen > 0 {
+        std::ptr::copy_nonoverlapping(hole_parts.as_ptr(), out_hole_parts, hlen);
+    }
+    if !out_hole_parts_len.is_null() {
+        *out_hole_parts_len = hlen;
+    }
+    let plen = present_parts.len().min(present_parts_cap);
+    if !out_present_parts.is_null() && plen > 0 {
+        std::ptr::copy_nonoverlapping(present_parts.as_ptr(), out_present_parts, plen);
+    }
+    if !out_present_parts_len.is_null() {
+        *out_present_parts_len = plen;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_content_mapper_collect_inner_holes(
+    runs: *const crate::streamrepair::NzbgetRsContentRun,
+    run_count: usize,
+    hole_member_indices: *const i32,
+    holes: *const crate::dupefallback::NzbgetRsByteRange,
+    hole_count: usize,
+    ctx: *mut std::ffi::c_void,
+    on_holes_cb: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            *const crate::dupefallback::NzbgetRsByteRange,
+            usize,
+        ),
+    >,
+) {
+    if runs.is_null()
+        || run_count == 0
+        || hole_member_indices.is_null()
+        || holes.is_null()
+        || hole_count == 0
+    {
+        return;
+    }
+    let res = crate::streamrepair::content_mapper_collect_inner_holes(
+        std::slice::from_raw_parts(runs, run_count),
+        std::slice::from_raw_parts(hole_member_indices, hole_count),
+        std::slice::from_raw_parts(holes, hole_count),
+    );
+    if let Some(cb) = on_holes_cb {
+        if !res.is_empty() {
+            cb(ctx, res.as_ptr(), res.len());
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct NzbgetRsRarFileEntry {
+    pub volume_index: i32,
+    pub filename: *const c_char,
+    pub size: i64,
+    pub packed_size: i64,
+    pub data_offset: i64,
+    pub stored: u8,
+    pub encrypted_data: u8,
+    pub has_salt: u8,
+    pub salt: [u8; 8],
+    pub has_crypt: u8,
+    pub crypt_version: i32,
+    pub crypt_kdf_count: i32,
+    pub crypt_salt: [u8; 16],
+    pub crypt_iv: [u8; 16],
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn nzbget_rs_content_mapper_build_rar_map(
+    unknown_volume: c_int,
+    has_password: c_int,
+    vol_readable: *const u8,
+    vol_versions: *const i32,
+    vol_member_indices: *const i32,
+    vol_has_source: *const u8,
+    vol_source_sizes: *const i64,
+    vol_count: usize,
+    entries: *const NzbgetRsRarFileEntry,
+    entry_count: usize,
+    ctx: *mut std::ffi::c_void,
+    make_crypto_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, usize, c_int) -> c_int>,
+    on_map_cb: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            *const c_char,
+            i64,
+            *const crate::streamrepair::NzbgetRsContentRun,
+            usize,
+            c_int,
+            *const i64,
+            *const i64,
+        ),
+    >,
+    on_skip_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
+) {
+    let readable_slice = if vol_readable.is_null() || vol_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(vol_readable, vol_count)
+    };
+    let versions_slice = if vol_versions.is_null() || vol_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(vol_versions, vol_count)
+    };
+    let member_idx_slice = if vol_member_indices.is_null() || vol_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(vol_member_indices, vol_count)
+    };
+    let has_src_slice = if vol_has_source.is_null() || vol_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(vol_has_source, vol_count)
+    };
+    let src_sizes_slice = if vol_source_sizes.is_null() || vol_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(vol_source_sizes, vol_count)
+    };
+    let raw_entries = if entries.is_null() || entry_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(entries, entry_count)
+    };
+    let mut entry_inputs = Vec::with_capacity(raw_entries.len());
+    for e in raw_entries {
+        entry_inputs.push(crate::streamrepair::RarFileEntryInput {
+            volume_index: e.volume_index,
+            filename: input(e.filename),
+            size: e.size,
+            packed_size: e.packed_size,
+            data_offset: e.data_offset,
+            stored: e.stored != 0,
+            encrypted_data: e.encrypted_data != 0,
+            has_salt: e.has_salt != 0,
+            salt: e.salt,
+            has_crypt: e.has_crypt != 0,
+            crypt_version: e.crypt_version,
+            crypt_kdf_count: e.crypt_kdf_count,
+            crypt_salt: e.crypt_salt,
+            crypt_iv: e.crypt_iv,
+        });
+    }
+    match crate::streamrepair::content_mapper_build_rar_map(
+        unknown_volume,
+        has_password != 0,
+        readable_slice,
+        versions_slice,
+        member_idx_slice,
+        has_src_slice,
+        src_sizes_slice,
+        &entry_inputs,
+        |first_vol, ver| {
+            make_crypto_cb.map_or(false, |cb| cb(ctx, first_vol, ver) != 0)
+        },
+    ) {
+        Ok(out) => {
+            if let Some(cb) = on_map_cb {
+                let mut name_c = out.inner_name;
+                name_c.push(0);
+                cb(
+                    ctx,
+                    name_c.as_ptr().cast(),
+                    out.inner_size,
+                    out.runs.as_ptr(),
+                    out.runs.len(),
+                    if out.encrypted { 1 } else { 0 },
+                    if out.cipher_data_offsets.is_empty() {
+                        std::ptr::null()
+                    } else {
+                        out.cipher_data_offsets.as_ptr()
+                    },
+                    if out.cipher_sizes.is_empty() {
+                        std::ptr::null()
+                    } else {
+                        out.cipher_sizes.as_ptr()
+                    },
+                );
+            }
+        }
+        Err(reason) => {
+            if let Some(cb) = on_skip_cb {
+                let mut reason_c = reason.as_bytes().to_vec();
+                reason_c.push(0);
+                cb(ctx, reason_c.as_ptr().cast());
+            }
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_select_extracted_inner(
+    dir: *const c_char,
+    inner_size: i64,
+    inner_name: *const c_char,
+    out_found_symlink: *mut c_int,
+) -> RsBuf {
+    let (selected, found_link) = crate::streamrepair::select_extracted_inner(
+        input(dir),
+        inner_size,
+        input(inner_name),
+    );
+    if !out_found_symlink.is_null() {
+        *out_found_symlink = if found_link { 1 } else { 0 };
+    }
+    into_buf(selected)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_list_par2_files(
+    dir: *const c_char,
+    ctx: *mut std::ffi::c_void,
+    on_entry: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, usize, u64, u64)>,
+) {
+    let dir_bytes = input(dir);
+    if dir_bytes.is_empty() {
+        return;
+    }
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::path::Path::new(OsStr::from_bytes(dir_bytes));
+    let entries = crate::dupefallback::list_par2_files(path);
+    if let Some(cb) = on_entry {
+        for (mut name, length, block_size) in entries {
+            let name_len = name.len();
+            name.push(0);
+            cb(ctx, name.as_ptr().cast(), name_len, length, block_size);
+        }
+    }
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_borrowed_par2_mismatches(
+    path: *const c_char,
+    dest_dir: *const c_char,
+    filename: *const c_char,
+    statuses: *const i32,
+    donor_ids: *const i32,
+    fallback_rounds: *const i32,
+    segment_offsets: *const i64,
+    segment_sizes: *const i32,
+    article_count: usize,
+    crc_cb: Option<unsafe extern "C" fn(*const u8, usize) -> u32>,
+    out_indices: *mut i32,
+    out_cap: usize,
+) -> usize {
+    if article_count == 0
+        || statuses.is_null()
+        || donor_ids.is_null()
+        || fallback_rounds.is_null()
+        || segment_offsets.is_null()
+        || segment_sizes.is_null()
+        || out_indices.is_null()
+        || out_cap == 0
+    {
+        return 0;
+    }
+    let path_bytes = input(path);
+    let dest_bytes = input(dest_dir);
+    if path_bytes.is_empty() || dest_bytes.is_empty() {
+        return 0;
+    }
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let mismatches = crate::dupefallback::borrowed_par2_mismatches_with_crc(
+        std::path::Path::new(OsStr::from_bytes(path_bytes)),
+        std::path::Path::new(OsStr::from_bytes(dest_bytes)),
+        input(filename),
+        std::slice::from_raw_parts(statuses, article_count),
+        std::slice::from_raw_parts(donor_ids, article_count),
+        std::slice::from_raw_parts(fallback_rounds, article_count),
+        std::slice::from_raw_parts(segment_offsets, article_count),
+        std::slice::from_raw_parts(segment_sizes, article_count),
+        |buf| match crc_cb {
+            Some(cb) => cb(buf.as_ptr(), buf.len()),
+            None => crate::dupefallback::crc32_ieee(buf),
+        },
+    );
+    let n = mismatches.len().min(out_cap);
+    std::ptr::copy_nonoverlapping(mismatches.as_ptr(), out_indices, n);
+    n
+}
+
+

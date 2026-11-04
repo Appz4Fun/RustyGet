@@ -383,65 +383,36 @@ FileInfo* DupeStreamRepair::SelectWholeFileDonor(const char* targetFilename, int
 	int targetArticleCount, uint64 targetStepsHash, NzbInfo* donorNzb,
 	const std::set<FileInfo*>* claimed, const std::string& donorSet)
 {
-	if (Util::EmptyStr(targetFilename) || Util::EndsWith(targetFilename, ".par2", false) ||
-		targetEncodedSize <= 0 || targetArticleCount <= 0)
-	{
-		return nullptr;
-	}
-
-	// both sides are nzb-declared encoded sizes here, so the tight tolerance
-	// of the download-time article pairing applies; the article count may
-	// differ (a repost cut into other article sizes still names its volumes)
-	std::vector<FileInfo*> pool;
+	std::vector<FileInfo*> files;
+	std::vector<const char*> names;
+	std::vector<int64_t> sizes;
+	std::vector<uint8_t> isPar;
+	std::vector<uint8_t> hasArticles;
+	std::vector<uint8_t> isClaimed;
+	std::vector<uint64_t> stepsHashes;
+	size_t n = donorNzb->GetFileList()->size();
+	files.reserve(n);
+	names.reserve(n);
+	sizes.reserve(n);
+	isPar.reserve(n);
+	hasArticles.reserve(n);
+	isClaimed.reserve(n);
+	stepsHashes.reserve(n);
 	for (FileInfo* donorFile : donorNzb->GetFileList())
 	{
-		if (!DupeArticleFallback::IsParFile(donorFile) &&
-			!donorFile->GetArticles()->empty() &&
-			(!claimed || !claimed->count(donorFile)) &&
-			(donorSet.empty() || VolumeSetKey(donorFile->GetFilename()) == donorSet) &&
-			DupeArticleFallback::SizesMatch(donorFile->GetSize(), targetEncodedSize, WholeFileSizeToleranceDiv))
-		{
-			pool.push_back(donorFile);
-		}
+		files.push_back(donorFile);
+		names.push_back(donorFile->GetFilename());
+		sizes.push_back(donorFile->GetSize());
+		isPar.push_back(DupeArticleFallback::IsParFile(donorFile) ? 1 : 0);
+		hasArticles.push_back(!donorFile->GetArticles()->empty() ? 1 : 0);
+		isClaimed.push_back((claimed && claimed->count(donorFile)) ? 1 : 0);
+		stepsHashes.push_back(targetStepsHash != 0 ? DupeArticleFallback::ArticleSizeStepsHash(donorFile) : 0);
 	}
-
-	auto unique = [&pool](std::function<bool(FileInfo*)> matches) -> FileInfo*
-	{
-		FileInfo* match = nullptr;
-		for (FileInfo* donorFile : pool)
-		{
-			if (matches(donorFile))
-			{
-				if (match)
-				{
-					return nullptr;
-				}
-				match = donorFile;
-			}
-		}
-		return match;
-	};
-
-	if (targetStepsHash != 0)
-	{
-		if (FileInfo* match = unique([targetStepsHash](FileInfo* donorFile)
-			{ return DupeArticleFallback::ArticleSizeStepsHash(donorFile) == targetStepsHash; }))
-		{
-			return match;
-		}
-	}
-	if (FileInfo* match = unique([targetFilename](FileInfo* donorFile)
-		{ return !strcasecmp(donorFile->GetFilename(), targetFilename); }))
-	{
-		return match;
-	}
-	std::string targetKey = VolumeKey(targetFilename);
-	if (!targetKey.empty())
-	{
-		return unique([&targetKey](FileInfo* donorFile)
-			{ return VolumeKey(donorFile->GetFilename()) == targetKey; });
-	}
-	return nullptr;
+	int idx = nzbget_rs_stream_select_whole_file_donor(
+		targetFilename, targetEncodedSize, targetArticleCount, targetStepsHash,
+		donorSet.c_str(), names.data(), sizes.data(), isPar.data(),
+		hasArticles.data(), isClaimed.data(), stepsHashes.data(), files.size());
+	return (idx >= 0 && (size_t)idx < files.size()) ? files[idx] : nullptr;
 }
 
 std::string DupeStreamRepair::VolumeSetKey(const char* filename)
@@ -478,198 +449,61 @@ std::vector<FileInfo*> DupeStreamRepair::SelectDonorCandidates(const char* targe
 	NzbInfo* donorNzb, int maxCandidates, uint64 targetStepsHash,
 	const std::set<FileInfo*>* claimed)
 {
-	if (Util::EmptyStr(targetFilename) || Util::EndsWith(targetFilename, ".par2", false))
-	{
-		return {};
-	}
-
-	// the window: donor files whose nzb-declared ENCODED size is near the
-	// target's decoded size (yEnc overhead is ~1-3%; div 8 tolerates ~12.5%)
-	// and which still carry an article list (EstimateDonorRanges needs it)
-	std::vector<FileInfo*> window;
+	std::vector<FileInfo*> files;
+	std::vector<const char*> names;
+	std::vector<int64_t> sizes;
+	std::vector<uint8_t> isPar;
+	std::vector<uint8_t> hasArticles;
+	std::vector<uint8_t> isClaimed;
+	std::vector<uint64_t> stepsHashes;
+	size_t n = donorNzb->GetFileList()->size();
+	files.reserve(n);
+	names.reserve(n);
+	sizes.reserve(n);
+	isPar.reserve(n);
+	hasArticles.reserve(n);
+	isClaimed.reserve(n);
+	stepsHashes.reserve(n);
 	for (FileInfo* donorFile : donorNzb->GetFileList())
 	{
-		if (!DupeArticleFallback::IsParFile(donorFile) && !donorFile->GetArticles()->empty() &&
-			DupeArticleFallback::SizesMatch(donorFile->GetSize(), targetDecodedFileSize, 8))
-		{
-			window.push_back(donorFile);
-		}
+		files.push_back(donorFile);
+		names.push_back(donorFile->GetFilename());
+		sizes.push_back(donorFile->GetSize());
+		isPar.push_back(DupeArticleFallback::IsParFile(donorFile) ? 1 : 0);
+		hasArticles.push_back(!donorFile->GetArticles()->empty() ? 1 : 0);
+		isClaimed.push_back((claimed && claimed->count(donorFile)) ? 1 : 0);
+		stepsHashes.push_back(targetStepsHash != 0 ? DupeArticleFallback::ArticleSizeStepsHash(donorFile) : 0);
 	}
-
+	std::vector<int32_t> outIndices(files.size());
+	size_t count = nzbget_rs_stream_select_donor_candidates(
+		targetFilename, targetDecodedFileSize, positionalRank, positionalWindow,
+		maxCandidates, targetStepsHash, names.data(), sizes.data(),
+		isPar.data(), hasArticles.data(), isClaimed.data(), stepsHashes.data(),
+		files.size(), outIndices.data(), outIndices.size());
 	std::vector<FileInfo*> candidates;
-	auto add = [&candidates, maxCandidates, claimed](FileInfo* donorFile)
+	candidates.reserve(count);
+	for (size_t i = 0; i < count; i++)
 	{
-		bool isClaimed = claimed && claimed->count(donorFile);
-		bool alreadyPresent = !isClaimed &&
-			std::find(candidates.begin(), candidates.end(), donorFile) != candidates.end();
-		if (nzbget_rs_dcf_stream_repair_can_add_candidate(
-			candidates.size(), maxCandidates, isClaimed ? 1 : 0, alreadyPresent ? 1 : 0) != 0)
+		int32_t idx = outIndices[i];
+		if (idx >= 0 && (size_t)idx < files.size())
 		{
-			candidates.push_back(donorFile);
-		}
-	};
-
-	// 0. a byte-identical repost, whatever its names: the only donor member
-	// whose article sizes step exactly like the target's posting did
-	if (targetStepsHash != 0)
-	{
-		FileInfo* stepMatch = nullptr;
-		bool ambiguous = false;
-		for (FileInfo* donorFile : donorNzb->GetFileList())
-		{
-			if (!DupeArticleFallback::IsParFile(donorFile) &&
-				DupeArticleFallback::ArticleSizeStepsHash(donorFile) == targetStepsHash)
-			{
-				ambiguous = stepMatch != nullptr;
-				stepMatch = donorFile;
-			}
-		}
-		if (stepMatch && !ambiguous)
-		{
-			add(stepMatch);
+			candidates.push_back(files[idx]);
 		}
 	}
-
-	// 1. a repost that kept its filenames
-	for (FileInfo* donorFile : window)
-	{
-		if (!strcasecmp(donorFile->GetFilename(), targetFilename))
-		{
-			add(donorFile);
-		}
-	}
-
-	// 2. same suffix key, but only when it identifies EXACTLY ONE donor
-	// member: volume schemes ("part03.rar", "r00") are
-	// unique per member, while shared keys (a same-extension episode pack,
-	// digit-bearing or not: "mkv", "mp4") would flood the cap in file-list
-	// order and evict the better-ranked tiers below
-	std::string targetKey = VolumeKey(targetFilename);
-	if (!targetKey.empty())
-	{
-		FileInfo* keyMatch = nullptr;
-		bool ambiguous = false;
-		for (FileInfo* donorFile : window)
-		{
-			if (VolumeKey(donorFile->GetFilename()) == targetKey)
-			{
-				ambiguous = keyMatch != nullptr;
-				keyMatch = donorFile;
-			}
-		}
-		if (keyMatch && !ambiguous)
-		{
-			add(keyMatch);
-		}
-	}
-
-	// 3. fully obfuscated reposts keep file count and sizes: pair the
-	// rank-th window member by donor filename order, but only when the
-	// window cardinality matches the target side's (the set signature)
-	if (nzbget_rs_dcf_stream_repair_is_positional_rank_applicable(
-		positionalRank, positionalWindow, window.size()) != 0)
-	{
-		std::vector<FileInfo*> byName = window;
-		std::sort(byName.begin(), byName.end(),
-			[](FileInfo* file1, FileInfo* file2)
-			{
-				return strcasecmp(file1->GetFilename(), file2->GetFilename()) < 0;
-			});
-		add(byName[positionalRank]);
-	}
-
-	// 4. closest encoded size (the pre-M1 heuristic; catches renamed singles)
-	std::vector<FileInfo*> bySize = window;
-	std::sort(bySize.begin(), bySize.end(),
-		[targetDecodedFileSize](FileInfo* file1, FileInfo* file2)
-		{
-			int64 diff1 = nzbget_rs_stq_dupe_stream_repair_calc_abs_size_diff(
-				file1->GetSize(), targetDecodedFileSize);
-			int64 diff2 = nzbget_rs_stq_dupe_stream_repair_calc_abs_size_diff(
-				file2->GetSize(), targetDecodedFileSize);
-			return diff1 < diff2;
-		});
-	for (FileInfo* donorFile : bySize)
-	{
-		add(donorFile);
-	}
-
 	return candidates;
 }
 
 std::string DupeStreamRepair::SelectExtractedInner(const char* dir, int64 innerSize, const char* innerName)
 {
-	if (Util::EmptyStr(dir) || innerSize < 0)
+	int foundSymlink = 0;
+	NzbgetRsBuf buf = nzbget_rs_stream_select_extracted_inner(dir, innerSize, innerName, &foundSymlink);
+	if (foundSymlink)
 	{
-		return "";
+		info("Stream repair: archive contains link");
 	}
-
-	std::vector<std::string> matches;
-	constexpr size_t MaxExtractedEntries = 10000;
-	constexpr int64 MaxExtractedBytes = MaxDecompressBytes;
-	size_t entryCount = 0;
-	int64 extractedBytes = 0;
-
-	fs::error_code dirEc;
-	for (auto it = fs::recursive_directory_iterator(dir, fs::directory_options::skip_permission_denied, dirEc);
-		!dirEc && it != fs::recursive_directory_iterator();
-		it.increment(dirEc))
-	{
-		if (++entryCount > MaxExtractedEntries)
-		{
-			return "";
-		}
-		// skip symlinks WITHOUT following them: a hostile donor archive could
-		// contain a link escaping the scratch dir (e.g. to the target's own
-		// file), which would trivially "verify" and defeat real donors
-		fs::error_code linkEc;
-		if (fs::is_symlink(it->symlink_status(linkEc)) || linkEc)
-		{
-			info("Stream repair: archive contains link");
-			return "";
-		}
-
-		fs::error_code fileEc;
-		if (!it->is_regular_file(fileEc) || fileEc)
-		{
-			continue;
-		}
-
-		std::string path = fs::u8string(it->path());
-		int64 size = FileSystem::FileSize(path.c_str());
-		int isSizeMatch = 0;
-		if (!nzbget_rs_stq_dupe_stream_repair_is_extracted_entry_valid(
-			entryCount, MaxExtractedEntries, size, MaxExtractedBytes,
-			&extractedBytes, innerSize, &isSizeMatch))
-		{
-			return "";
-		}
-		if (isSizeMatch)
-		{
-			matches.push_back(std::move(path));
-		}
-	}
-
-	if (matches.empty())
-	{
-		return "";
-	}
-
-	std::sort(matches.begin(), matches.end());
-
-	if (!Util::EmptyStr(innerName))
-	{
-		for (const std::string& match : matches)
-		{
-			std::string basename = fs::u8string(fs::path(match).filename());
-			if (!strcasecmp(basename.c_str(), innerName))
-			{
-				return match;
-			}
-		}
-	}
-
-	return matches.front();
+	std::string res(buf.data ? buf.data : "", buf.len);
+	nzbget_rs_free(buf);
+	return res;
 }
 
 bool DupeStreamRepair::ExceedsDecompressCap(int64 totalBytes, int64 addBytes,

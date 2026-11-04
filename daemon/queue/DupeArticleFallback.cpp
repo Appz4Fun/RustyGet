@@ -35,10 +35,6 @@
 #include "FileSystem.h"
 #include <fstream>
 #include "nzbget_rs.h"
-#ifndef DISABLE_PARCHECK
-#include <par2/libpar2.h>
-#include <par2/md5.h>
-#endif
 
 bool DupeArticleFallback::IsParFile(FileInfo* fileInfo)
 {
@@ -374,211 +370,49 @@ void DupeArticleFallback::RotateToLead(RawNzbList& donors, int leadNzbId)
 	}
 }
 
-namespace
-{
-
-// the block checksums par2 records for one file (packets Main, FileDesc, IFSC)
-struct Par2FileSums
-{
-	std::string hash16k;	// hex
-	std::string name;
-	uint64 length = 0;
-	std::vector<uint32> crcs;
-	std::string setId;		// hex: the recovery set the file belongs to
-	uint64 blockSize = 0;	// that set's block size
-};
-
-
-// the par2 data of every par2 file in <dir> (recognized by its packet magic, so
-// obfuscated names count too); recovery packets are skipped, not read
-std::map<std::string, Par2FileSums> LoadPar2Sums(const char* dir, uint64& blockSize)
-{
-	std::map<std::string, Par2FileSums> files;
-	// every set's own block size: a folder can hold several par2 sets (a season
-	// pack, one per episode), and one block size for all of them judged a file
-	// with another set's blocks (B40 rejected right borrowed articles, or let
-	// wrong ones through)
-	std::map<std::string, uint64> setBlockSizes;
-	blockSize = 0;
-	DirBrowser browser(dir);
-	while (const char* filename = browser.Next())
-	{
-		BString<1024> path("%s%c%s", dir, PATH_SEPARATOR, filename);
-		struct ScanCtx
-		{
-			std::map<std::string, Par2FileSums>* files;
-			std::map<std::string, uint64>* setBlockSizes;
-			uint64* blockSize;
-		} scanCtx{ &files, &setBlockSizes, &blockSize };
-		nzbget_rs_par2_scan_file(
-			*path, &scanCtx,
-			[](void* ctx, const char* setId, uint64_t bs)
-			{
-				auto* s = static_cast<ScanCtx*>(ctx);
-				*s->blockSize = bs;
-				(*s->setBlockSizes)[setId] = bs;
-			},
-			[](void* ctx, const char* setId, const char* fileId, const char* hash16k,
-			   uint64_t length, const char* name, size_t nameLen)
-			{
-				auto* s = static_cast<ScanCtx*>(ctx);
-				Par2FileSums& sums = (*s->files)[fileId];
-				sums.setId = setId;
-				sums.hash16k = hash16k;
-				sums.length = length;
-				sums.name.assign(name, nameLen);
-			},
-			[](void* ctx, const char* setId, const char* fileId,
-			   const uint32_t* crcs, size_t crcCount)
-			{
-				auto* s = static_cast<ScanCtx*>(ctx);
-				Par2FileSums& sums = (*s->files)[fileId];
-				sums.setId = setId;
-				sums.crcs.assign(crcs, crcs + crcCount);
-			});
-	}
-	for (auto& entry : files)
-	{
-		auto it = setBlockSizes.find(entry.second.setId);
-		entry.second.blockSize = it != setBlockSizes.end() ? it->second : 0;
-	}
-	return files;
-}
-
-std::string Hash16kOf(const char* path)
-{
-#ifndef DISABLE_PARCHECK
-	std::ifstream in(fs::u8path(path), std::ios::binary);
-	std::vector<char> buffer(16 * 1024);
-	in.read(buffer.data(), (std::streamsize)buffer.size());
-	Par2::MD5Context context;
-	context.Update(buffer.data(), (size_t)in.gcount());
-	Par2::MD5Hash hash;
-	context.Final(hash);
-	return hash.print();
-#else
-	return "";
-#endif
-}
-
-}
-
 std::vector<ArticleInfo*> DupeArticleFallback::BorrowedPar2Mismatches(FileInfo* fileInfo, const char* path,
 	const char* destDir, const char* filename)
 {
-	std::vector<ArticleInfo*> mismatches;
 	ArticleList* articles = fileInfo->GetArticles();
-	// borrowed: the duplicate it came from is known, or (restored from the saved
-	// state, which keeps the fallback round but not the duplicate) it was fetched
-	// in a fallback round - after a restart, with the donor unknown, none counted
-	// and the check was skipped. An own article in the list just passes the check.
-	auto borrowed = [](ArticleInfo* article)
-		{
-			return nzbget_rs_pnd_dupe_fallback_is_borrowed_article(
-				article->GetDupeDonorId(), article->GetDupeFallbackRound()) != 0;
-		};
-	if (std::none_of(articles->begin(), articles->end(), [&borrowed](std::unique_ptr<ArticleInfo>& article)
-		{ return article->GetStatus() == ArticleInfo::aiFinished && borrowed(article.get()); }))
+	size_t n = articles->size();
+	if (n == 0)
 	{
-		return mismatches;
+		return {};
 	}
-
-	uint64 blockSize = 0;
-	std::map<std::string, Par2FileSums> files = LoadPar2Sums(destDir, blockSize);
-	if (files.empty())
+	std::vector<int32_t> statuses(n);
+	std::vector<int32_t> donorIds(n);
+	std::vector<int32_t> fallbackRounds(n);
+	std::vector<int64_t> segmentOffsets(n);
+	std::vector<int32_t> segmentSizes(n);
+	for (size_t i = 0; i < n; i++)
 	{
-		return mismatches;
+		ArticleInfo* a = (*articles)[i].get();
+		statuses[i] = (int32_t)a->GetStatus();
+		donorIds[i] = a->GetDupeDonorId();
+		fallbackRounds[i] = a->GetDupeFallbackRound();
+		segmentOffsets[i] = a->GetSegmentOffset();
+		segmentSizes[i] = a->GetSegmentSize();
 	}
-	int64 fileSize = FileSystem::FileSize(path);
-	std::string hash16k = Hash16kOf(path);
-	const Par2FileSums* sums = nullptr;
-	for (auto& entry : files)
+	std::vector<int32_t> outIndices(n);
+	size_t count = nzbget_rs_dupe_fallback_borrowed_par2_mismatches(
+		path, destDir, filename, statuses.data(), donorIds.data(),
+		fallbackRounds.data(), segmentOffsets.data(), segmentSizes.data(),
+		n,
+		[](const uint8_t* data, size_t len) -> uint32_t
+		{
+			Crc32 crc;
+			crc.Append(const_cast<uchar*>(data), (uint32)len);
+			return crc.Finish();
+		},
+		outIndices.data(), outIndices.size());
+	std::vector<ArticleInfo*> mismatches;
+	mismatches.reserve(count);
+	for (size_t i = 0; i < count; i++)
 	{
-		if (nzbget_rs_dcf_dupe_fallback_par2_sums_entry_matches(
-			entry.second.length, fileSize, entry.second.crcs.empty() ? 1 : 0,
-			entry.second.hash16k.c_str(), hash16k.c_str(),
-			entry.second.name.c_str(), filename) != 0)
+		int32_t idx = outIndices[i];
+		if (idx >= 0 && (size_t)idx < n)
 		{
-			sums = &entry.second;
-			break;
-		}
-	}
-	// the block size of the file's own set
-	blockSize = sums ? sums->blockSize : 0;
-	// a par2 block size no real set uses (a damaged packet) isn't trusted: the buffer
-	// for it would be too large to allocate
-	if (nzbget_rs_pnd_dupe_fallback_is_valid_par2_block_spec(
-		sums ? 1 : 0, blockSize, (uint64)MaxPar2BlockSize,
-		sums ? sums->crcs.size() : 0, fileSize) == 0)
-	{
-		return mismatches;
-	}
-
-	// the byte ranges of the file that arrived: a block is only judged when every
-	// byte of it did (a missing article's zeros would fail any block)
-	std::vector<std::pair<int64, int64>> arrived;
-	for (ArticleInfo* article : articles)
-	{
-		if (article->GetStatus() == ArticleInfo::aiFinished && article->GetSegmentSize() > 0)
-		{
-			arrived.emplace_back(article->GetSegmentOffset(), article->GetSegmentOffset() + article->GetSegmentSize());
-		}
-	}
-	std::sort(arrived.begin(), arrived.end());
-	std::vector<NzbgetRsByteRange> arrivedRanges(arrived.size());
-	for (size_t i = 0; i < arrived.size(); i++)
-	{
-		arrivedRanges[i].offset = arrived[i].first;
-		arrivedRanges[i].size = arrived[i].second - arrived[i].first;
-	}
-	auto covered = [&arrivedRanges](int64 from, int64 to)
-		{
-			return nzbget_rs_par2_range_covered(
-				arrivedRanges.empty() ? nullptr : arrivedRanges.data(),
-				arrivedRanges.size(), from, to) != 0;
-		};
-
-	std::ifstream in(fs::u8path(path), std::ios::binary);
-	std::vector<char> buffer((size_t)blockSize);
-	std::map<int64, bool> verdicts;	// block -> its bytes match
-	for (ArticleInfo* article : articles)
-	{
-		if (article->GetStatus() != ArticleInfo::aiFinished || !borrowed(article) ||
-			article->GetSegmentSize() <= 0)
-		{
-			continue;
-		}
-		int64 first = 0;
-		int64 last = -1;
-		nzbget_rs_pnd_dupe_fallback_calc_article_block_range(
-			article->GetSegmentOffset(), article->GetSegmentSize(), blockSize, &first, &last);
-		bool bad = false;
-		for (int64 block = first; block <= last && !bad; block++)
-		{
-			int64 from = block * (int64)blockSize;
-			int64 to = std::min(from + (int64)blockSize, fileSize);
-			// a segment past the end of the file (a misplaced article) has no block
-			if (from >= fileSize || (size_t)block >= sums->crcs.size() || !covered(from, to))
-			{
-				continue;
-			}
-			auto known = verdicts.find(block);
-			if (known == verdicts.end())
-			{
-				std::fill(buffer.begin(), buffer.end(), 0);
-				in.clear();
-				in.seekg((std::streamoff)from);
-				in.read(buffer.data(), (std::streamsize)(to - from));
-				// par2 pads the last block with zeros
-				Crc32 crc;
-				crc.Append((uchar*)buffer.data(), (uint32)blockSize);
-				known = verdicts.emplace(block, crc.Finish() == sums->crcs[(size_t)block]).first;
-			}
-			bad = !known->second;
-		}
-		if (bad)
-		{
-			mismatches.push_back(article);
+			mismatches.push_back((*articles)[idx].get());
 		}
 	}
 	return mismatches;
@@ -1331,15 +1165,17 @@ bool DupeArticleFallback::MergeDecodedFileSize(FileInfo* fileInfo, int64 article
 std::vector<DupeArticleFallback::Par2Desc> DupeArticleFallback::ListPar2Files(const char* dir)
 {
 	std::vector<Par2Desc> list;
-	uint64 blockSize = 0;
-	for (auto& entry : LoadPar2Sums(dir, blockSize))
-	{
-		Par2Desc desc;
-		desc.name = entry.second.name;
-		desc.length = entry.second.length;
-		desc.blockSize = entry.second.blockSize;
-		list.push_back(std::move(desc));
-	}
+	nzbget_rs_dupe_fallback_list_par2_files(
+		dir, &list,
+		[](void* ctx, const char* name, size_t nameLen, uint64_t length, uint64_t blockSize)
+		{
+			auto* out = static_cast<std::vector<Par2Desc>*>(ctx);
+			Par2Desc desc;
+			desc.name.assign(name, nameLen);
+			desc.length = length;
+			desc.blockSize = blockSize;
+			out->push_back(std::move(desc));
+		});
 	return list;
 }
 

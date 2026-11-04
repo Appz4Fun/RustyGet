@@ -1346,30 +1346,34 @@ bool StreamRepairController::ProveDonorOnIntactFile(const char* destDir,
 		// candidates from the donor set only: the member with the intact
 		// file's volume number first, then the set's other members of a
 		// similar size (a renamed repost may number differently)
-		std::vector<FileInfo*> candidates;
-		std::string volumeKey = DupeStreamRepair::VolumeKey(baseName);
-		for (int pass = 0; pass < 2; pass++)
+		std::vector<FileInfo*> donorFiles;
+		std::vector<const char*> donorNames;
+		std::vector<int64_t> donorSizes;
+		std::vector<uint8_t> donorHasArticles;
+		std::vector<uint8_t> donorIsClaimed;
+		int standInIndex = -1;
+		for (FileInfo* donorFile : donorNzb->GetFileList())
 		{
-			for (FileInfo* donorFile : donorNzb->GetFileList())
+			if (donorFile == standIn)
 			{
-				if ((int)candidates.size() >= DupeStreamRepair::MaxDonorCandidates)
-				{
-					break;
-				}
-				if (donorFile == standIn || claimed.count(donorFile) || donorFile->GetArticles()->empty() ||
-					DupeStreamRepair::VolumeSetKey(donorFile->GetFilename()) != donorSet ||
-					!DupeArticleFallback::SizesMatch(donorFile->GetSize(), size, 8) ||
-					std::find(candidates.begin(), candidates.end(), donorFile) != candidates.end())
-				{
-					continue;
-				}
-				bool sameNumber = DupeStreamRepair::VolumeKey(donorFile->GetFilename()) == volumeKey;
-				if (nzbget_rs_src_stream_repair_matches_intact_candidate_pass(
-					sameNumber ? 1 : 0, pass))
-				{
-					candidates.push_back(donorFile);
-				}
+				standInIndex = (int)donorFiles.size();
 			}
+			donorFiles.push_back(donorFile);
+			donorNames.push_back(donorFile->GetFilename());
+			donorSizes.push_back(donorFile->GetSize());
+			donorHasArticles.push_back(!donorFile->GetArticles()->empty() ? 1 : 0);
+			donorIsClaimed.push_back(claimed.count(donorFile) ? 1 : 0);
+		}
+		std::vector<int32_t> candIndices(donorFiles.size());
+		size_t candCount = nzbget_rs_stream_select_intact_proof_candidates(
+			baseName, size, donorSet.c_str(), standInIndex, DupeStreamRepair::MaxDonorCandidates,
+			donorNames.data(), donorSizes.data(), donorHasArticles.data(), donorIsClaimed.data(),
+			donorFiles.size(), candIndices.data(), candIndices.size());
+		std::vector<FileInfo*> candidates;
+		candidates.reserve(candCount);
+		for (size_t c = 0; c < candCount; c++)
+		{
+			candidates.push_back(donorFiles[candIndices[c]]);
 		}
 		for (FileInfo* donorFile : candidates)
 		{
@@ -1554,65 +1558,17 @@ std::vector<FileInfo*> StreamRepairController::FindDonorFiles(const RepairTarget
 bool StreamRepairController::VerifyDonor(DiskFile& file, const RepairTarget& target,
 	FileInfo* donorFile, const StreamRangeList& donorRanges)
 {
-	std::vector<int> probeParts = DupeStreamRepair::SelectProbeParts(
-		donorRanges, target.Holes, DupeStreamRepair::ProbeCount);
-	// eligible parts not probed yet, in the order replacements are drawn
-	// when a probe turns out to be missing on the donor itself
-	std::vector<int> reserve;
-
-	if (!probeParts.empty())
-	{
-		for (int partIndex : DupeStreamRepair::SelectProbeParts(
-			donorRanges, target.Holes, (int)donorRanges.size()))
-		{
-			if (std::find(probeParts.begin(), probeParts.end(), partIndex) == probeParts.end())
-			{
-				reserve.push_back(partIndex);
-			}
-		}
-	}
-	else
-	{
-		// small or heavily-holed files: no donor article clears the holes
-		// entirely. Probe the articles with the LARGEST present overlap
-		// instead (margin 1 pulls in hole-adjacent, fully-present parts);
-		// the compare below still covers only the target's present regions
-		std::vector<int> pool = DupeStreamRepair::SelectPatchParts(
-			donorRanges, target.Holes, 1);
-		std::vector<std::pair<int64, int>> overlaps;
-		for (int partIndex : pool)
-		{
-			StreamRangeList present = { donorRanges[partIndex] };
-			for (const StreamRange& hole : target.Holes)
-			{
-				DupeStreamRepair::SubtractCovered(present, hole);
-			}
-			int64 overlap = DupeStreamRepair::TotalSize(present);
-			if (overlap > 0)
-			{
-				overlaps.emplace_back(overlap, partIndex);
-			}
-		}
-		std::sort(overlaps.begin(), overlaps.end(),
-			[](const std::pair<int64, int>& part1, const std::pair<int64, int>& part2)
-			{
-				return part1.first > part2.first;
-			});
-		int64 base = DupeStreamRepair::BaseCompareFloor(
-			target.DecodedFileSize - DupeStreamRepair::TotalSize(target.Holes));
-		int64 pooled = 0;
-		for (const std::pair<int64, int>& candidate : overlaps)
-		{
-			if (nzbget_rs_sap_stream_repair_verify_donor_pool_stop(
-				probeParts.size(), DupeStreamRepair::ProbeCount, pooled, base))
-			{
-				reserve.push_back(candidate.second);
-				continue;
-			}
-			probeParts.push_back(candidate.second);
-			pooled += candidate.first;
-		}
-	}
+	std::vector<int> probeParts(donorRanges.size());
+	std::vector<int> reserve(donorRanges.size());
+	size_t probeLen = 0, reserveLen = 0;
+	nzbget_rs_stream_select_verify_donor_probes(
+		reinterpret_cast<const NzbgetRsByteRange*>(donorRanges.data()), donorRanges.size(),
+		reinterpret_cast<const NzbgetRsByteRange*>(target.Holes.data()), target.Holes.size(),
+		target.DecodedFileSize, DupeStreamRepair::ProbeCount,
+		probeParts.data(), probeParts.size(), &probeLen,
+		reserve.data(), reserve.size(), &reserveLen);
+	probeParts.resize(probeLen);
+	reserve.resize(reserveLen);
 
 	int64 totalCompared = 0;
 	bool sawVariedData = false;
@@ -2586,25 +2542,21 @@ bool StreamRepairController::VerifyEncryptedFromSource(RepairSetData& repairSet,
 
 	// floor semantics as in the plain path, with the achievable evidence
 	// clipped by the last computable block and each window's chain start
-	int64 mappedBytes = 0;
+	std::vector<NzbgetRsContentRun> rsRuns;
+	rsRuns.reserve(targetMap.GetRuns()->size());
 	for (const ContentRun& run : *targetMap.GetRuns())
 	{
-		mappedBytes += run.Size;
+		rsRuns.push_back({run.InnerOffset, run.MemberIndex, run.MemberOffset, run.Size});
 	}
-	int64 base = DupeStreamRepair::BaseCompareFloor(
-		mappedBytes - DupeStreamRepair::TotalSize(originalHoles));
-	int64 achievable = 0;
-	for (const StreamRange& window : windows)
-	{
-		int64 windowEnd = std::min(window.End(), lastComputable);
-		achievable += nzbget_rs_sap_stream_repair_encrypted_achievable_bytes(
-			window.Offset, window.Size, lastComputable, chainStart(window, windowEnd));
-	}
-	if (achievable < 64)
+	int64 required = nzbget_rs_stream_encrypted_compare_floor(
+		targetMap.GetInnerSize(), blockSize,
+		rsRuns.data(), rsRuns.size(),
+		reinterpret_cast<const NzbgetRsByteRange*>(originalHoles.data()), originalHoles.size(),
+		reinterpret_cast<const NzbgetRsByteRange*>(windows.data()), windows.size());
+	if (required < 0)
 	{
 		return false;	// identity unknowable in cipher space - par2 owns this set
 	}
-	int64 required = std::min(base, achievable);
 
 	int64 totalCompared = 0;
 	bool sawVariedData = false;
@@ -2776,20 +2728,26 @@ int64 StreamRepairController::PatchEncryptedFromSource(RepairSetData& repairSet,
 
 			// partition the chunk by the LIVE holes: hole bytes get written,
 			// every other byte must equal its recomputation exactly
+			std::vector<NzbgetRsByteRange> rsHoleParts(repairSet.InnerHoles.size() + 1);
+			std::vector<NzbgetRsByteRange> rsPresentParts(repairSet.InnerHoles.size() * 2 + 2);
+			size_t holePartsLen = 0, presentPartsLen = 0;
+			nzbget_rs_stream_partition_encrypted_chunk(
+				blockFrom, chunkEnd,
+				reinterpret_cast<const NzbgetRsByteRange*>(repairSet.InnerHoles.data()),
+				repairSet.InnerHoles.size(),
+				rsHoleParts.data(), rsHoleParts.size(), &holePartsLen,
+				rsPresentParts.data(), rsPresentParts.size(), &presentPartsLen);
 			StreamRangeList holeParts;
-			for (const StreamRange& live : repairSet.InnerHoles)
+			holeParts.reserve(holePartsLen);
+			for (size_t i = 0; i < holePartsLen; i++)
 			{
-				int64 from = std::max(live.Offset, blockFrom);
-				int64 to = std::min(live.End(), chunkEnd);
-				if (from < to)
-				{
-					holeParts.push_back({from, to - from});
-				}
+				holeParts.push_back({rsHoleParts[i].offset, rsHoleParts[i].size});
 			}
-			StreamRangeList presentParts = { {blockFrom, chunkEnd - blockFrom} };
-			for (const StreamRange& part : holeParts)
+			StreamRangeList presentParts;
+			presentParts.reserve(presentPartsLen);
+			for (size_t i = 0; i < presentPartsLen; i++)
 			{
-				DupeStreamRepair::SubtractCovered(presentParts, part);
+				presentParts.push_back({rsPresentParts[i].offset, rsPresentParts[i].size});
 			}
 
 			// verify BEFORE writing: block-expansion bytes OUTSIDE holes are

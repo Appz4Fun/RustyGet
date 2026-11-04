@@ -5177,6 +5177,91 @@ NzbgetRsBuf nzbget_rs_binrpc_group_listing_from_wire(
     const char* data, size_t len, uint32_t nr_nzb, uint32_t nr_ppp,
     uint32_t nr_files, int has_pattern);
 
+int nzbget_rs_stream_select_whole_file_donor(
+    const char* target_filename, int64_t target_encoded_size, int target_article_count,
+    uint64_t target_steps_hash, const char* donor_set,
+    const char* const* donor_filenames, const int64_t* donor_sizes,
+    const uint8_t* donor_is_par, const uint8_t* donor_has_articles,
+    const uint8_t* donor_is_claimed, const uint64_t* donor_steps_hashes,
+    size_t donor_count);
+size_t nzbget_rs_stream_select_donor_candidates(
+    const char* target_filename, int64_t target_decoded_file_size,
+    int positional_rank, int positional_window, int max_candidates,
+    uint64_t target_steps_hash,
+    const char* const* donor_filenames, const int64_t* donor_sizes,
+    const uint8_t* donor_is_par, const uint8_t* donor_has_articles,
+    const uint8_t* donor_is_claimed, const uint64_t* donor_steps_hashes,
+    size_t donor_count, int32_t* out_indices, size_t out_cap);
+size_t nzbget_rs_stream_select_intact_proof_candidates(
+    const char* intact_basename, int64_t intact_size, const char* donor_set,
+    int stand_in_index, int max_candidates,
+    const char* const* donor_filenames, const int64_t* donor_sizes,
+    const uint8_t* donor_has_articles, const uint8_t* donor_is_claimed,
+    size_t donor_count, int32_t* out_indices, size_t out_cap);
+void nzbget_rs_stream_select_verify_donor_probes(
+    const NzbgetRsByteRange* donor_ranges, size_t donor_count,
+    const NzbgetRsByteRange* holes, size_t hole_count,
+    int64_t decoded_file_size, int probe_count,
+    int32_t* out_probes, size_t probes_cap, size_t* out_probes_len,
+    int32_t* out_reserve, size_t reserve_cap, size_t* out_reserve_len);
+int64_t nzbget_rs_stream_encrypted_compare_floor(
+    int64_t inner_size, int64_t block_size,
+    const NzbgetRsContentRun* runs, size_t run_count,
+    const NzbgetRsByteRange* original_holes, size_t original_hole_count,
+    const NzbgetRsByteRange* windows, size_t window_count);
+void nzbget_rs_stream_partition_encrypted_chunk(
+    int64_t block_from, int64_t chunk_end,
+    const NzbgetRsByteRange* live_holes, size_t live_hole_count,
+    NzbgetRsByteRange* out_hole_parts, size_t hole_parts_cap, size_t* out_hole_parts_len,
+    NzbgetRsByteRange* out_present_parts, size_t present_parts_cap, size_t* out_present_parts_len);
+void nzbget_rs_content_mapper_collect_inner_holes(
+    const NzbgetRsContentRun* runs, size_t run_count,
+    const int32_t* hole_member_indices, const NzbgetRsByteRange* holes, size_t hole_count,
+    void* ctx,
+    void (*on_holes_cb)(void* ctx, const NzbgetRsByteRange* inner_holes, size_t len));
+
+typedef struct NzbgetRsRarFileEntry {
+    int32_t volume_index;
+    const char* filename;
+    int64_t size;
+    int64_t packed_size;
+    int64_t data_offset;
+    uint8_t stored;
+    uint8_t encrypted_data;
+    uint8_t has_salt;
+    uint8_t salt[8];
+    uint8_t has_crypt;
+    int32_t crypt_version;
+    int32_t crypt_kdf_count;
+    uint8_t crypt_salt[16];
+    uint8_t crypt_iv[16];
+} NzbgetRsRarFileEntry;
+
+void nzbget_rs_content_mapper_build_rar_map(
+    int unknown_volume, int has_password,
+    const uint8_t* vol_readable, const int32_t* vol_versions,
+    const int32_t* vol_member_indices, const uint8_t* vol_has_source,
+    const int64_t* vol_source_sizes, size_t vol_count,
+    const NzbgetRsRarFileEntry* entries, size_t entry_count,
+    void* ctx,
+    int (*make_crypto_cb)(void* ctx, size_t first_vol, int version),
+    void (*on_map_cb)(
+        void* ctx, const char* inner_name, int64_t inner_size,
+        const NzbgetRsContentRun* runs, size_t run_count,
+        int encrypted, const int64_t* cipher_data_offsets, const int64_t* cipher_sizes),
+    void (*on_skip_cb)(void* ctx, const char* reason));
+NzbgetRsBuf nzbget_rs_stream_select_extracted_inner(
+    const char* dir, int64_t inner_size, const char* inner_name, int* out_found_symlink);
+void nzbget_rs_dupe_fallback_list_par2_files(
+    const char* dir, void* ctx,
+    void (*on_entry)(void* ctx, const char* name, size_t name_len, uint64_t length, uint64_t block_size));
+size_t nzbget_rs_dupe_fallback_borrowed_par2_mismatches(
+    const char* path, const char* dest_dir, const char* filename,
+    const int32_t* statuses, const int32_t* donor_ids, const int32_t* fallback_rounds,
+    const int64_t* segment_offsets, const int32_t* segment_sizes, size_t article_count,
+    uint32_t (*crc_cb)(const uint8_t* data, size_t len),
+    int32_t* out_indices, size_t out_cap);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

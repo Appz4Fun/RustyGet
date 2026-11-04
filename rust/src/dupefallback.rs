@@ -599,6 +599,300 @@ pub fn scan_par2_file<FMain, FDesc, FIfsc>(
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct Par2FileSums {
+    pub hash16k: [u8; 32],
+    pub name: Vec<u8>,
+    pub length: u64,
+    pub crcs: Vec<u32>,
+    pub set_id: [u8; 32],
+    pub block_size: u64,
+}
+
+/// Scans all PAR2 files in `dir` and returns their `file_id -> Par2FileSums` map.
+pub fn load_par2_sums(dir: &Path) -> BTreeMap<[u8; 32], Par2FileSums> {
+    let files: std::cell::RefCell<BTreeMap<[u8; 32], Par2FileSums>> =
+        std::cell::RefCell::new(BTreeMap::new());
+    let mut set_block_sizes: BTreeMap<[u8; 32], u64> = BTreeMap::new();
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return files.into_inner();
+    };
+    for entry_res in rd {
+        let Ok(entry) = entry_res else {
+            continue;
+        };
+        scan_par2_file(
+            &entry.path(),
+            |set_id, bs| {
+                set_block_sizes.insert(*set_id, bs);
+            },
+            |set_id, file_id, hash16k, length, name| {
+                let mut map = files.borrow_mut();
+                let sums = map.entry(*file_id).or_default();
+                sums.set_id = *set_id;
+                sums.hash16k = *hash16k;
+                sums.length = length;
+                sums.name = name.to_vec();
+            },
+            |set_id, file_id, crcs| {
+                let mut map = files.borrow_mut();
+                let sums = map.entry(*file_id).or_default();
+                sums.set_id = *set_id;
+                sums.crcs = crcs.to_vec();
+            },
+        );
+    }
+    let mut files = files.into_inner();
+    for sums in files.values_mut() {
+        sums.block_size = set_block_sizes.get(&sums.set_id).copied().unwrap_or(0);
+    }
+    files
+}
+
+const CRC32_SLICE8: [[u32; 256]; 8] = {
+    let mut table = [[0u32; 256]; 8];
+    let mut i = 0usize;
+    while i < 256 {
+        let mut crc = i as u32;
+        let mut j = 0;
+        while j < 8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+            j += 1;
+        }
+        table[0][i] = crc;
+        i += 1;
+    }
+    let mut i = 0usize;
+    while i < 256 {
+        let mut crc = table[0][i];
+        let mut k = 1usize;
+        while k < 8 {
+            crc = table[0][(crc & 0xFF) as usize] ^ (crc >> 8);
+            table[k][i] = crc;
+            k += 1;
+        }
+        i += 1;
+    }
+    table
+};
+
+pub fn crc32_ieee(mut bytes: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    while bytes.len() >= 8 {
+        let b0 = bytes[0] ^ (crc as u8);
+        let b1 = bytes[1] ^ ((crc >> 8) as u8);
+        let b2 = bytes[2] ^ ((crc >> 16) as u8);
+        let b3 = bytes[3] ^ ((crc >> 24) as u8);
+        let b4 = bytes[4];
+        let b5 = bytes[5];
+        let b6 = bytes[6];
+        let b7 = bytes[7];
+        crc = CRC32_SLICE8[7][b0 as usize]
+            ^ CRC32_SLICE8[6][b1 as usize]
+            ^ CRC32_SLICE8[5][b2 as usize]
+            ^ CRC32_SLICE8[4][b3 as usize]
+            ^ CRC32_SLICE8[3][b4 as usize]
+            ^ CRC32_SLICE8[2][b5 as usize]
+            ^ CRC32_SLICE8[1][b6 as usize]
+            ^ CRC32_SLICE8[0][b7 as usize];
+        bytes = &bytes[8..];
+    }
+    for &b in bytes {
+        crc = CRC32_SLICE8[0][((crc as u8) ^ b) as usize] ^ (crc >> 8);
+    }
+    !crc
+}
+
+/// Computes the lower-case 32-hex-digit MD5 of the first 16 KiB of `path`.
+pub fn hash16k_of(path: &Path) -> [u8; 32] {
+    use md5::{Digest, Md5};
+    let mut buf = vec![0u8; 16 * 1024];
+    let mut read_len = 0usize;
+    if let Ok(mut f) = File::open(path) {
+        while read_len < buf.len() {
+            match f.read(&mut buf[read_len..]) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => read_len += n,
+            }
+        }
+    }
+    let digest = Md5::digest(&buf[..read_len]);
+    hex_lower(&digest)
+}
+
+/// `DupeArticleFallback::ListPar2Files`: returns `(name, length, block_size)` for all PAR2 entries in `dir`.
+pub fn list_par2_files(dir: &Path) -> Vec<(Vec<u8>, u64, u64)> {
+    load_par2_sums(dir)
+        .into_values()
+        .map(|s| (s.name, s.length, s.block_size))
+        .collect()
+}
+
+/// `DupeArticleFallback::BorrowedPar2Mismatches`: returns the indices of borrowed finished articles
+/// whose completed PAR2 blocks fail CRC32 verification.
+#[allow(clippy::too_many_arguments)]
+pub fn borrowed_par2_mismatches(
+    path: &Path,
+    dest_dir: &Path,
+    filename: &[u8],
+    statuses: &[i32],
+    donor_ids: &[i32],
+    fallback_rounds: &[i32],
+    segment_offsets: &[i64],
+    segment_sizes: &[i32],
+) -> Vec<i32> {
+    borrowed_par2_mismatches_with_crc(
+        path,
+        dest_dir,
+        filename,
+        statuses,
+        donor_ids,
+        fallback_rounds,
+        segment_offsets,
+        segment_sizes,
+        crc32_ieee,
+    )
+}
+
+/// `DupeArticleFallback::BorrowedPar2Mismatches` with a caller-supplied CRC32 backend.
+#[allow(clippy::too_many_arguments)]
+pub fn borrowed_par2_mismatches_with_crc<F>(
+    path: &Path,
+    dest_dir: &Path,
+    filename: &[u8],
+    statuses: &[i32],
+    donor_ids: &[i32],
+    fallback_rounds: &[i32],
+    segment_offsets: &[i64],
+    segment_sizes: &[i32],
+    crc_fn: F,
+) -> Vec<i32>
+where
+    F: Fn(&[u8]) -> u32,
+{
+    let n = statuses
+        .len()
+        .min(donor_ids.len())
+        .min(fallback_rounds.len())
+        .min(segment_offsets.len())
+        .min(segment_sizes.len());
+    let borrowed = |i: usize| donor_ids[i] != 0 || fallback_rounds[i] > 0;
+    if !(0..n).any(|i| statuses[i] == ARTICLE_STATUS_FINISHED && borrowed(i)) {
+        return Vec::new();
+    }
+    let files = load_par2_sums(dest_dir);
+    if files.is_empty() {
+        return Vec::new();
+    }
+    let file_size = std::fs::metadata(path)
+        .map(|m| m.len() as i64)
+        .unwrap_or(-1);
+    if file_size <= 0 {
+        return Vec::new();
+    }
+    let hash16k = hash16k_of(path);
+    let sums = files.values().find(|s| {
+        crate::dupecoordfallbackstream::dupe_fallback_par2_sums_entry_matches(
+            s.length,
+            file_size,
+            i32::from(s.crcs.is_empty()),
+            &s.hash16k,
+            &hash16k,
+            &s.name,
+            filename,
+        ) != 0
+    });
+    let Some(sums) = sums else {
+        return Vec::new();
+    };
+    let block_size = sums.block_size;
+    if !crate::pardupenzb::dupe_fallback_is_valid_par2_block_spec(
+        true,
+        block_size,
+        MAX_PAR2_BLOCK_SIZE,
+        sums.crcs.len(),
+        file_size,
+    ) {
+        return Vec::new();
+    }
+
+    let mut arrived: Vec<(i64, i64)> = (0..n)
+        .filter(|&i| statuses[i] == ARTICLE_STATUS_FINISHED && segment_sizes[i] > 0)
+        .map(|i| {
+            (
+                segment_offsets[i],
+                segment_offsets[i].wrapping_add(segment_sizes[i] as i64),
+            )
+        })
+        .collect();
+    arrived.sort_unstable();
+    let arrived_ranges: Vec<NzbgetRsByteRange> = arrived
+        .into_iter()
+        .map(|(start, end)| NzbgetRsByteRange {
+            offset: start,
+            size: end.wrapping_sub(start),
+        })
+        .collect();
+
+    let mut in_file = File::open(path);
+    let mut buffer = vec![0u8; block_size as usize];
+    let mut verdicts: BTreeMap<i64, bool> = BTreeMap::new();
+    let mut mismatches = Vec::new();
+    let bs = block_size as i64;
+
+    for i in 0..n {
+        if statuses[i] != ARTICLE_STATUS_FINISHED || !borrowed(i) || segment_sizes[i] <= 0 {
+            continue;
+        }
+        let seg_off = segment_offsets[i];
+        let seg_sz = segment_sizes[i] as i64;
+        if seg_off < 0 || seg_sz <= 0 {
+            continue;
+        }
+        let first = seg_off / bs;
+        let last = (seg_off.saturating_add(seg_sz).saturating_sub(1)) / bs;
+        let mut bad = false;
+        for block in first..=last {
+            if bad {
+                break;
+            }
+            let from = block.saturating_mul(bs);
+            let to = from.saturating_add(bs).min(file_size);
+            if from >= file_size
+                || (block as usize) >= sums.crcs.len()
+                || !range_covered(&arrived_ranges, from, to)
+            {
+                continue;
+            }
+            let ok = *verdicts.entry(block).or_insert_with(|| {
+                buffer.fill(0);
+                if let Ok(ref mut f) = in_file {
+                    if f.seek(SeekFrom::Start(from as u64)).is_ok() {
+                        let target_read = (to - from) as usize;
+                        let mut read_so_far = 0usize;
+                        while read_so_far < target_read {
+                            match f.read(&mut buffer[read_so_far..target_read]) {
+                                Ok(0) | Err(_) => break,
+                                Ok(k) => read_so_far += k,
+                            }
+                        }
+                    }
+                }
+                crc_fn(&buffer) == sums.crcs[block as usize]
+            });
+            bad = !ok;
+        }
+        if bad {
+            mismatches.push(i as i32);
+        }
+    }
+    mismatches
+}
+
 /// Counts distinct blocks of `block_size` touched by `holes` (`ParDamage::BlocksTouched`).
 pub fn blocks_touched(holes: &[NzbgetRsByteRange], block_size: u64) -> i32 {
     if block_size == 0 || block_size > (i64::MAX as u64) {

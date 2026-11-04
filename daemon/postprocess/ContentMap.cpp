@@ -442,322 +442,111 @@ std::unique_ptr<ContentMap> ContentMapper::BuildRarMap(const std::vector<SetMemb
 		unknownVolume = (int)i;
 	}
 
-	// the primary inner file: largest entry of the first readable volume
-	RarFile* primary = nullptr;
-	for (std::unique_ptr<RarVolume>& volume : volumes)
-	{
-		if (!volume)
-		{
-			continue;
-		}
-		for (RarFile& innerFile : *volume->GetFiles())
-		{
-			if (!primary || innerFile.GetSize() > primary->GetSize())
-			{
-				primary = &innerFile;
-			}
-		}
-		break;
-	}
-	if (!primary)
-	{
-		skipReason = "no file entries in the first readable volume";
-		return nullptr;
-	}
-
-	std::string innerName = FileSystem::BaseFileName(primary->GetFilename());
-	int64 innerSize = primary->GetSize();
-	if (!DupeStreamRepair::IsStreamEligible(innerName.c_str()))
-	{
-		skipReason = "inner file is not a media file";
-		return nullptr;
-	}
-
-	struct VolumeRun
-	{
-		int64 PackedSize = 0;
-		int64 DataOffset = -1;	// -1 = no mappable data in this volume
-		int Version = 0;		// rar version of the carrying volume (3 or 5)
-		bool Encrypted = false;	// this volume's primary entry is data-encrypted
-		bool HasSalt = false;	// rar3 per-file data salt present
-		uint8 Salt[8] = {};
-		bool HasCrypt = false;	// rar5 crypt record present
-		RarFile::Rar5Crypt Crypt;
-	};
-	std::vector<VolumeRun> runs(set.Members.size());
-	int64 knownPacked = 0;
-	bool anyEncrypted = false;	// at least one primary entry is data-encrypted
-	bool anyPlain = false;		// at least one primary entry is NOT encrypted
+	std::vector<uint8_t> volReadable(set.Members.size());
+	std::vector<int32_t> volVersions(set.Members.size());
+	std::vector<int32_t> volMemberIndices(set.Members.size());
+	std::vector<uint8_t> volHasSource(set.Members.size());
+	std::vector<int64_t> volSourceSizes(set.Members.size());
+	std::vector<NzbgetRsRarFileEntry> entries;
+	std::vector<RarFile*> entryFiles;
 
 	for (size_t i = 0; i < set.Members.size(); i++)
 	{
+		int memberIndex = set.Members[i];
+		ContentSource* source = sources.GetSource(memberIndex);
+		volReadable[i] = volumes[i] != nullptr ? 1 : 0;
+		volVersions[i] = volumes[i] ? volumes[i]->GetVersion() : 0;
+		volMemberIndices[i] = memberIndex;
+		volHasSource[i] = source != nullptr ? 1 : 0;
+		volSourceSizes[i] = source ? source->Size() : 0;
 		if (!volumes[i])
 		{
 			continue;
 		}
 		for (RarFile& innerFile : *volumes[i]->GetFiles())
 		{
-			if (strcasecmp(FileSystem::BaseFileName(innerFile.GetFilename()),
-				innerName.c_str()))
+			NzbgetRsRarFileEntry e{};
+			e.volume_index = (int32_t)i;
+			e.filename = innerFile.GetFilename();
+			e.size = innerFile.GetSize();
+			e.packed_size = innerFile.GetPackedSize();
+			e.data_offset = innerFile.GetDataOffset();
+			e.stored = innerFile.GetStored() ? 1 : 0;
+			e.encrypted_data = innerFile.GetEncryptedData() ? 1 : 0;
+			if (innerFile.GetHasSalt())
 			{
-				continue;	// other inner files (nfo, srt) stay unmapped
+				e.has_salt = 1;
+				memcpy(e.salt, innerFile.GetSalt(), 8);
 			}
-			if (!innerFile.GetStored())
+			if (const RarFile::Rar5Crypt* crypt = innerFile.GetCrypt())
 			{
-				skipReason = "compressed archive (only store mode is mappable)";
-				return nullptr;
+				e.has_crypt = 1;
+				e.crypt_version = crypt->Version;
+				e.crypt_kdf_count = crypt->KdfCount;
+				memcpy(e.crypt_salt, crypt->Salt, 16);
+				memcpy(e.crypt_iv, crypt->Iv, 16);
 			}
-			if (innerFile.GetEncryptedData())
+			entries.push_back(e);
+			entryFiles.push_back(&innerFile);
+		}
+	}
+
+	struct RarBuildCtx
+	{
+		const std::vector<RarFile*>* EntryFiles;
+		const char* Password;
+		std::shared_ptr<RarCryptoContext> Crypto;
+		std::unique_ptr<ContentMap> Map;
+		std::string* SkipReason;
+	} ctx{&entryFiles, password, nullptr, nullptr, &skipReason};
+
+	nzbget_rs_content_mapper_build_rar_map(
+		unknownVolume, password != nullptr ? 1 : 0,
+		volReadable.data(), volVersions.data(), volMemberIndices.data(),
+		volHasSource.data(), volSourceSizes.data(), set.Members.size(),
+		entries.data(), entries.size(), &ctx,
+		[](void* rawCtx, size_t entryIdx, int version) -> int
+		{
+			auto* c = static_cast<RarBuildCtx*>(rawCtx);
+			if (entryIdx >= c->EntryFiles->size())
 			{
-				// no password => M2 behavior: leave it for par2
-				if (!password)
+				return 0;
+			}
+			RarFile* rf = (*c->EntryFiles)[entryIdx];
+			if (version == 3)
+			{
+				c->Crypto = RarCryptoContext::MakeRar3(c->Password, rf->GetSalt());
+			}
+			else if (version == 5 && rf->GetCrypt())
+			{
+				c->Crypto = RarCryptoContext::MakeRar5(c->Password, *rf->GetCrypt());
+			}
+			return c->Crypto != nullptr ? 1 : 0;
+		},
+		[](void* rawCtx, const char* innerName, int64_t innerSize,
+			const NzbgetRsContentRun* runs, size_t runCount,
+			int encrypted, const int64_t* cipherDataOffsets, const int64_t* cipherSizes)
+		{
+			auto* c = static_cast<RarBuildCtx*>(rawCtx);
+			c->Map = std::make_unique<ContentMap>();
+			c->Map->SetInnerName(innerName);
+			c->Map->SetInnerSize(innerSize);
+			for (size_t i = 0; i < runCount; i++)
+			{
+				c->Map->GetRuns()->push_back({runs[i].inner_offset, runs[i].member_index,
+					runs[i].member_offset, runs[i].size});
+				if (encrypted && cipherDataOffsets && cipherSizes)
 				{
-					skipReason = SkipEncryptedData;
-					return nullptr;
-				}
-				anyEncrypted = true;
-				runs[i].Encrypted = true;
-				runs[i].Version = volumes[i]->GetVersion();
-				if (innerFile.GetHasSalt())
-				{
-					runs[i].HasSalt = true;
-					memcpy(runs[i].Salt, innerFile.GetSalt(), sizeof(runs[i].Salt));
-				}
-				if (const RarFile::Rar5Crypt* crypt = innerFile.GetCrypt())
-				{
-					runs[i].HasCrypt = true;
-					runs[i].Crypt = *crypt;
+					c->Map->GetRunCryptos()->push_back({c->Crypto, cipherDataOffsets[i], cipherSizes[i]});
 				}
 			}
-			else
-			{
-				anyPlain = true;
-			}
-			if (innerFile.GetSize() != innerSize)
-			{
-				skipReason = "inconsistent inner file size across volumes";
-				return nullptr;
-			}
-			ContentSource* source = sources.GetSource(set.Members[i]);
-			if (!nzbget_rs_src_content_map_rar_data_run_geometry_valid(
-				innerFile.GetDataOffset(), innerFile.GetPackedSize(),
-				source != nullptr ? 1 : 0, source ? source->Size() : 0))
-			{
-				skipReason = "implausible data run geometry";
-				return nullptr;
-			}
-			runs[i].PackedSize = innerFile.GetPackedSize();
-			runs[i].DataOffset = innerFile.GetDataOffset();
-			knownPacked += innerFile.GetPackedSize();
-		}
-	}
-
-	// encrypted store-rar: the packed bytes are ciphertext, so the plain
-	// "sum of packed == inner size" gate does not apply - build the crypto
-	// geometry instead. Verified against real WinRAR encrypted testdata: an
-	// encrypted RAR file is ONE continuous AES-CBC stream that RAR splits across
-	// volumes at ARBITRARY byte offsets (NOT re-keyed/16-aligned per volume).
-	// The volumes' data areas therefore concatenate to one contiguous cipher
-	// space of exactly ceil16(innerSize) bytes; the map records each volume's
-	// slab (RunCrypto.CipherSize) so readers can assemble 16-byte blocks across
-	// member boundaries. Reassembly uses ONE shared context (all volumes share
-	// the file's key and chain-start IV); block 0 chains from the header IV,
-	// every later block from its predecessor ciphertext block.
-	if (anyEncrypted)
-	{
-		if (anyPlain)
+		},
+		[](void* rawCtx, const char* reason)
 		{
-			// the same inner file cannot be encrypted in one volume and clear in
-			// another; a mixed set is malformed for our continuous-stream model
-			skipReason = "encrypted volume geometry does not fit store mode";
-			return nullptr;
-		}
-		if (unknownVolume >= 0)
-		{
-			// an unreadable volume yields no crypto params or cipher offset for
-			// its slice: we cannot decrypt around it, so fail closed
-			skipReason = "encrypted archive without crypto parameters";
-			return nullptr;
-		}
-
-		// volumes carrying the primary, in data order
-		std::vector<int> encVols;
-		for (size_t i = 0; i < set.Members.size(); i++)
-		{
-			if (runs[i].DataOffset >= 0 && runs[i].Encrypted)
-			{
-				encVols.push_back((int)i);
-			}
-		}
-		if (encVols.empty())
-		{
-			skipReason = "encrypted volume geometry does not fit store mode";
-			return nullptr;
-		}
-
-		// one shared crypto context from the first carrying volume's parameters;
-		// every volume must agree (same key) for the continuous stream to hold
-		int first = encVols[0];
-		int version = runs[first].Version;
-		std::shared_ptr<RarCryptoContext> crypto;
-		if (version == 3)
-		{
-			if (!runs[first].HasSalt)
-			{
-				skipReason = "encrypted archive without crypto parameters";
-				return nullptr;
-			}
-			crypto = RarCryptoContext::MakeRar3(password, runs[first].Salt);
-			if (!crypto)
-			{
-				// rar3 has no password check: a null here means empty password
-				// or no TLS, i.e. no usable key material
-				skipReason = "encrypted archive without crypto parameters";
-				return nullptr;
-			}
-		}
-		else if (version == 5)
-		{
-			if (!runs[first].HasCrypt)
-			{
-				skipReason = "encrypted archive without crypto parameters";
-				return nullptr;
-			}
-			if (runs[first].Crypt.Version != 0)	// only AES-256 (crypt version 0)
-			{
-				skipReason = "encrypted archive without crypto parameters";
-				return nullptr;
-			}
-			crypto = RarCryptoContext::MakeRar5(password, runs[first].Crypt);
-			if (!crypto)
-			{
-				// rar5 verifies the password against the stored check value
-				skipReason = "archive password rejected";
-				return nullptr;
-			}
-		}
-		else
-		{
-			skipReason = "encrypted archive without crypto parameters";
-			return nullptr;
-		}
-
-		// cross-volume parameter agreement: a differing salt/crypt would mean a
-		// different key, breaking the one-stream assumption
-		for (size_t k = 1; k < encVols.size(); k++)
-		{
-			const VolumeRun& vr = runs[encVols[k]];
-			if (vr.Version != version)
-			{
-				skipReason = "encrypted volume geometry does not fit store mode";
-				return nullptr;
-			}
-			if (version == 3 &&
-				(!vr.HasSalt || memcmp(vr.Salt, runs[first].Salt, sizeof(vr.Salt))))
-			{
-				skipReason = "encrypted volume geometry does not fit store mode";
-				return nullptr;
-			}
-			if (version == 5 &&
-				(!vr.HasCrypt ||
-					vr.Crypt.Version != runs[first].Crypt.Version ||
-					vr.Crypt.KdfCount != runs[first].Crypt.KdfCount ||
-					memcmp(vr.Crypt.Salt, runs[first].Crypt.Salt, 16) ||
-					memcmp(vr.Crypt.Iv, runs[first].Crypt.Iv, 16)))
-			{
-				skipReason = "encrypted volume geometry does not fit store mode";
-				return nullptr;
-			}
-		}
-
-		// contiguous cipher-space geometry: volume cuts are arbitrary, but the
-		// data areas must concatenate to exactly ceil16(innerSize) cipher bytes.
-		// The gate is phrased with subtractions bounded by the source-checked
-		// packed sizes so a lying innerSize cannot overflow the arithmetic.
-		int64 cipherTotal = 0;
-		for (int v : encVols)
-		{
-			if (runs[v].PackedSize <= 0)
-			{
-				skipReason = "encrypted volume geometry does not fit store mode";
-				return nullptr;
-			}
-			cipherTotal += runs[v].PackedSize;
-		}
-		if (!nzbget_rs_cdn_content_mapper_rar_cipher_geometry_valid(innerSize, cipherTotal))
-		{
-			skipReason = "encrypted volume geometry does not fit store mode";
-			return nullptr;
-		}
-
-		std::unique_ptr<ContentMap> map = std::make_unique<ContentMap>();
-		map->SetInnerName(innerName.c_str());
-		map->SetInnerSize(innerSize);
-
-		int64 cipherBase = 0;
-		for (int v : encVols)
-		{
-			// plaintext position p == cipher position p; the run covers this
-			// volume's plaintext bytes, and only the LAST volume's slab may
-			// run past them (the CBC padding tail carries no plaintext)
-			int64 plainChunk = nzbget_rs_cdn_content_mapper_rar_calc_plain_chunk(
-				runs[v].PackedSize, innerSize, cipherBase);
-			if (plainChunk <= 0)
-			{
-				// a padding-only volume: no real RAR splits inside the padding
-				skipReason = "encrypted volume geometry does not fit store mode";
-				return nullptr;
-			}
-			map->GetRuns()->push_back({cipherBase, set.Members[v],
-				runs[v].DataOffset, plainChunk});
-			// all runs share the one stream context; the slab is CipherSize
-			// ciphertext bytes at member offset CipherDataOffset, covering
-			// cipher-space positions [InnerOffset, InnerOffset + CipherSize)
-			map->GetRunCryptos()->push_back({crypto, runs[v].DataOffset,
-				runs[v].PackedSize});
-			cipherBase += runs[v].PackedSize;
-		}
-		return map;
-	}
-
-	// store mode means the packed bytes ARE the inner bytes: exact sum
-	// required (this is the strong gate even if a method byte lied)
-	int64 inferredPacked = 0;
-	int inferStatus = nzbget_rs_cdn_content_mapper_rar_infer_unknown_packed(
-		unknownVolume, innerSize, knownPacked, &inferredPacked);
-	if (inferStatus == 1)
-	{
-		skipReason = "packed sizes exceed the inner file size";
-		return nullptr;
-	}
-	if (inferStatus == 2)
-	{
-		skipReason = "packed sizes do not sum to the inner file size";
-		return nullptr;
-	}
-	if (unknownVolume >= 0)
-	{
-		runs[unknownVolume].PackedSize = inferredPacked;
-		runs[unknownVolume].DataOffset = -1;
-	}
-
-	std::unique_ptr<ContentMap> map = std::make_unique<ContentMap>();
-	map->SetInnerName(innerName.c_str());
-	map->SetInnerSize(innerSize);
-
-	int64 innerOffset = 0;
-	for (size_t i = 0; i < set.Members.size(); i++)
-	{
-		if (nzbget_rs_src_content_map_rar_can_emit_plain_run(
-			runs[i].DataOffset, runs[i].PackedSize))
-		{
-			map->GetRuns()->push_back({innerOffset, set.Members[i],
-				runs[i].DataOffset, runs[i].PackedSize});
-		}
-		innerOffset += runs[i].PackedSize;
-	}
-
-	return map;
+			auto* c = static_cast<RarBuildCtx*>(rawCtx);
+			*c->SkipReason = reason ? reason : "";
+		});
+	return std::move(ctx.Map);
 }
 
 std::unique_ptr<ContentMap> ContentMapper::BuildZipMap(const std::vector<SetMember>& members,
@@ -888,20 +677,34 @@ std::vector<RepairSetData> ContentMapper::BuildRepairSets(const std::vector<SetM
 
 		if (data.Map)
 		{
+			std::vector<NzbgetRsContentRun> rsRuns;
+			rsRuns.reserve(data.Map->GetRuns()->size());
+			for (const ContentRun& run : *data.Map->GetRuns())
+			{
+				rsRuns.push_back({run.InnerOffset, run.MemberIndex, run.MemberOffset, run.Size});
+			}
+			std::vector<int32_t> holeMembers;
+			std::vector<NzbgetRsByteRange> holeRanges;
 			for (int memberIndex : set.Members)
 			{
 				for (const StreamRange& hole : memberHoles[memberIndex])
 				{
-					for (const StreamRange& innerHole : data.Map->MapToInner(memberIndex, hole))
-					{
-						data.InnerHoles.push_back(innerHole);
-					}
+					holeMembers.push_back(memberIndex);
+					holeRanges.push_back({hole.Offset, hole.Size});
 				}
 			}
-			std::sort(data.InnerHoles.begin(), data.InnerHoles.end(),
-				[](const StreamRange& range1, const StreamRange& range2)
+			nzbget_rs_content_mapper_collect_inner_holes(
+				rsRuns.data(), rsRuns.size(),
+				holeMembers.data(), holeRanges.data(), holeRanges.size(),
+				&data.InnerHoles,
+				[](void* ctx, const NzbgetRsByteRange* innerHoles, size_t len)
 				{
-					return range1.Offset < range2.Offset;
+					auto* dst = static_cast<StreamRangeList*>(ctx);
+					dst->reserve(len);
+					for (size_t i = 0; i < len; i++)
+					{
+						dst->push_back({innerHoles[i].offset, innerHoles[i].size});
+					}
 				});
 			data.OriginalInnerHoles = data.InnerHoles;
 			if (data.InnerHoles.empty())

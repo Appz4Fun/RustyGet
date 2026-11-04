@@ -400,7 +400,6 @@ BOOST_AUTO_TEST_CASE(DeleteReadOnlyFileUtf8PathTest)
 	BOOST_CHECK(!fs::exists(file));
 }
 
-#ifndef WIN32
 BOOST_AUTO_TEST_CASE(CopyFileFailsOnFailedWrite)
 {
 	// a file size limit makes writes past 64 KB fail, as a full disk does
@@ -430,9 +429,7 @@ BOOST_AUTO_TEST_CASE(CopyFileFailsOnFailedWrite)
 
 	fs::remove_all(dir);
 }
-#endif
 
-#ifndef WIN32
 BOOST_AUTO_TEST_CASE(MoveFileCrossDeviceFailedCopy)
 {
 	// a cross-device move whose copy fails (here a file size limit, as a full disk)
@@ -470,6 +467,5 @@ BOOST_AUTO_TEST_CASE(MoveFileCrossDeviceFailedCopy)
 	fs::remove_all(srcDir);
 	fs::remove_all(destDir);
 }
-#endif
 
 BOOST_AUTO_TEST_SUITE_END()

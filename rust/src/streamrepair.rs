@@ -1731,9 +1731,797 @@ pub fn compute_positional_rank(
     }
 }
 
+fn ends_with_par2_ci(filename: &[u8]) -> bool {
+    filename.len() >= 5 && c_lower_bytes(&filename[filename.len() - 5..]) == b".par2"
+}
+
+/// `DupeStreamRepair::SelectWholeFileDonor`: returns the unique matching donor index (`-1` if none).
+#[allow(clippy::too_many_arguments)]
+pub fn select_whole_file_donor(
+    target_filename: &[u8],
+    target_encoded_size: i64,
+    target_article_count: i32,
+    target_steps_hash: u64,
+    donor_set: &[u8],
+    donor_filenames: &[&[u8]],
+    donor_sizes: &[i64],
+    donor_is_par: &[u8],
+    donor_has_articles: &[u8],
+    donor_is_claimed: &[u8],
+    donor_steps_hashes: &[u64],
+) -> i32 {
+    if target_filename.is_empty()
+        || ends_with_par2_ci(target_filename)
+        || target_encoded_size <= 0
+        || target_article_count <= 0
+    {
+        return -1;
+    }
+    let n = donor_filenames
+        .len()
+        .min(donor_sizes.len())
+        .min(donor_is_par.len())
+        .min(donor_has_articles.len())
+        .min(donor_is_claimed.len())
+        .min(donor_steps_hashes.len());
+    let mut pool = Vec::new();
+    for i in 0..n {
+        if donor_is_par[i] == 0
+            && !ends_with_par2_ci(donor_filenames[i])
+            && donor_has_articles[i] != 0
+            && donor_is_claimed[i] == 0
+            && (donor_set.is_empty() || volume_set_key(donor_filenames[i]) == donor_set)
+            && crate::dupefallback::sizes_match(donor_sizes[i], target_encoded_size, 64)
+        {
+            pool.push(i);
+        }
+    }
+    let unique = |pred: &dyn Fn(usize) -> bool| -> Option<usize> {
+        let mut found = None;
+        for &idx in &pool {
+            if pred(idx) {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(idx);
+            }
+        }
+        found
+    };
+    if target_steps_hash != 0 {
+        if let Some(idx) = unique(&|i| donor_steps_hashes[i] == target_steps_hash) {
+            return idx as i32;
+        }
+    }
+    if let Some(idx) =
+        unique(&|i| locale_casecmp(donor_filenames[i], target_filename) == std::cmp::Ordering::Equal)
+    {
+        return idx as i32;
+    }
+    let target_key = volume_key(target_filename);
+    if !target_key.is_empty() {
+        if let Some(idx) = unique(&|i| volume_key(donor_filenames[i]) == target_key) {
+            return idx as i32;
+        }
+    }
+    -1
+}
+
+/// `DupeStreamRepair::SelectDonorCandidates`: returns ordered candidate donor indices.
+#[allow(clippy::too_many_arguments)]
+pub fn select_donor_candidates(
+    target_filename: &[u8],
+    target_decoded_file_size: i64,
+    positional_rank: i32,
+    positional_window: i32,
+    max_candidates: i32,
+    target_steps_hash: u64,
+    donor_filenames: &[&[u8]],
+    donor_sizes: &[i64],
+    donor_is_par: &[u8],
+    donor_has_articles: &[u8],
+    donor_is_claimed: &[u8],
+    donor_steps_hashes: &[u64],
+) -> Vec<i32> {
+    if target_filename.is_empty() || ends_with_par2_ci(target_filename) || max_candidates <= 0 {
+        return Vec::new();
+    }
+    let n = donor_filenames
+        .len()
+        .min(donor_sizes.len())
+        .min(donor_is_par.len())
+        .min(donor_has_articles.len())
+        .min(donor_is_claimed.len())
+        .min(donor_steps_hashes.len());
+    let mut window = Vec::new();
+    for i in 0..n {
+        if donor_is_par[i] == 0
+            && !ends_with_par2_ci(donor_filenames[i])
+            && donor_has_articles[i] != 0
+            && crate::dupefallback::sizes_match(donor_sizes[i], target_decoded_file_size, 8)
+        {
+            window.push(i);
+        }
+    }
+    let mut candidates: Vec<i32> = Vec::new();
+    let mut add = |idx: usize| {
+        if (candidates.len() as i32) < max_candidates
+            && donor_is_claimed[idx] == 0
+            && !candidates.contains(&(idx as i32))
+        {
+            candidates.push(idx as i32);
+        }
+    };
+
+    if target_steps_hash != 0 {
+        let mut step_match: Option<usize> = None;
+        let mut ambiguous = false;
+        for i in 0..n {
+            if donor_is_par[i] == 0
+                && !ends_with_par2_ci(donor_filenames[i])
+                && donor_steps_hashes[i] == target_steps_hash
+            {
+                ambiguous = step_match.is_some();
+                step_match = Some(i);
+            }
+        }
+        if let Some(idx) = step_match {
+            if !ambiguous {
+                add(idx);
+            }
+        }
+    }
+
+    for &idx in &window {
+        if locale_casecmp(donor_filenames[idx], target_filename) == std::cmp::Ordering::Equal {
+            add(idx);
+        }
+    }
+
+    let target_key = volume_key(target_filename);
+    if !target_key.is_empty() {
+        let mut key_match: Option<usize> = None;
+        let mut ambiguous = false;
+        for &idx in &window {
+            if volume_key(donor_filenames[idx]) == target_key {
+                ambiguous = key_match.is_some();
+                key_match = Some(idx);
+            }
+        }
+        if let Some(idx) = key_match {
+            if !ambiguous {
+                add(idx);
+            }
+        }
+    }
+
+    if positional_rank >= 0
+        && positional_window >= 2
+        && (window.len() as i32) == positional_window
+        && (positional_rank as usize) < window.len()
+    {
+        let mut by_name = window.clone();
+        by_name.sort_by(|&a, &b| locale_casecmp(donor_filenames[a], donor_filenames[b]));
+        add(by_name[positional_rank as usize]);
+    }
+
+    let mut by_size = window;
+    by_size.sort_by_key(|&idx| {
+        let sz = donor_sizes[idx];
+        if sz >= target_decoded_file_size {
+            sz.wrapping_sub(target_decoded_file_size)
+        } else {
+            target_decoded_file_size.wrapping_sub(sz)
+        }
+    });
+    for idx in by_size {
+        add(idx);
+    }
+
+    candidates
+}
+
+/// `StreamRepairController::ProveDonorOnIntactFile` candidate selection.
+#[allow(clippy::too_many_arguments)]
+pub fn select_intact_proof_candidates(
+    intact_basename: &[u8],
+    intact_size: i64,
+    donor_set: &[u8],
+    stand_in_index: i32,
+    max_candidates: i32,
+    donor_filenames: &[&[u8]],
+    donor_sizes: &[i64],
+    donor_has_articles: &[u8],
+    donor_is_claimed: &[u8],
+) -> Vec<i32> {
+    if max_candidates <= 0 {
+        return Vec::new();
+    }
+    let n = donor_filenames
+        .len()
+        .min(donor_sizes.len())
+        .min(donor_has_articles.len())
+        .min(donor_is_claimed.len());
+    let vol_key = volume_key(intact_basename);
+    let mut candidates: Vec<i32> = Vec::new();
+    for pass in 0..2 {
+        for i in 0..n {
+            if (candidates.len() as i32) >= max_candidates {
+                break;
+            }
+            if (i as i32) == stand_in_index
+                || donor_is_claimed[i] != 0
+                || donor_has_articles[i] == 0
+                || volume_set_key(donor_filenames[i]) != donor_set
+                || !crate::dupefallback::sizes_match(donor_sizes[i], intact_size, 8)
+                || candidates.contains(&(i as i32))
+            {
+                continue;
+            }
+            let same_number = volume_key(donor_filenames[i]) == vol_key;
+            if (pass == 0 && same_number) || (pass == 1 && !same_number) {
+                candidates.push(i as i32);
+            }
+        }
+    }
+    candidates
+}
+
+/// `StreamRepairController::VerifyDonor` probe and reserve selection.
+pub fn select_verify_donor_probes(
+    donor_ranges: &[NzbgetRsByteRange],
+    holes: &[NzbgetRsByteRange],
+    decoded_file_size: i64,
+    probe_count: i32,
+) -> (Vec<i32>, Vec<i32>) {
+    let mut probe_parts = select_probe_parts(donor_ranges, holes, probe_count);
+    let mut reserve = Vec::new();
+    if !probe_parts.is_empty() {
+        for part_index in select_probe_parts(donor_ranges, holes, donor_ranges.len() as i32) {
+            if !probe_parts.contains(&part_index) {
+                reserve.push(part_index);
+            }
+        }
+    } else if !donor_ranges.is_empty() && !holes.is_empty() {
+        let donors: Vec<crate::streampatchparts::Range> = donor_ranges
+            .iter()
+            .map(|r| crate::streampatchparts::Range {
+                offset: r.offset,
+                size: r.size,
+            })
+            .collect();
+        let hole_ranges: Vec<crate::streampatchparts::Range> = holes
+            .iter()
+            .map(|r| crate::streampatchparts::Range {
+                offset: r.offset,
+                size: r.size,
+            })
+            .collect();
+        let mut pool = vec![0i32; donors.len()];
+        let count = crate::streampatchparts::select(&donors, &hole_ranges, 1, &mut pool);
+        pool.truncate(count);
+        let mut overlaps: Vec<(i64, i32)> = Vec::new();
+        for part_index in pool {
+            if part_index < 0 || (part_index as usize) >= donor_ranges.len() {
+                continue;
+            }
+            let mut present = vec![donor_ranges[part_index as usize]];
+            for &hole in holes {
+                present = subtract_covered(&present, hole);
+            }
+            let overlap = total_size(&present);
+            if overlap > 0 {
+                overlaps.push((overlap, part_index));
+            }
+        }
+        overlaps.sort_by(|a, b| b.0.cmp(&a.0));
+        let base = (decoded_file_size.wrapping_sub(total_size(holes))).clamp(64, 16 * 1024);
+        let mut pooled: i64 = 0;
+        for (overlap, part_index) in overlaps {
+            if crate::streamarticleparrepair::sap_stream_repair_verify_donor_pool_stop(
+                probe_parts.len(),
+                probe_count,
+                pooled,
+                base,
+            ) {
+                reserve.push(part_index);
+            } else {
+                probe_parts.push(part_index);
+                pooled = pooled.wrapping_add(overlap);
+            }
+        }
+    }
+    (probe_parts, reserve)
+}
+
+/// `StreamRepairController::VerifyEncryptedFromSource` compare floor (`-1` if `< 64` bytes reachable).
+pub fn encrypted_compare_floor(
+    inner_size: i64,
+    block_size: i64,
+    runs: &[NzbgetRsContentRun],
+    original_holes: &[NzbgetRsByteRange],
+    windows: &[NzbgetRsByteRange],
+) -> i64 {
+    if block_size <= 0 {
+        return -1;
+    }
+    let last_computable = (inner_size / block_size) * block_size;
+    let mut mapped_bytes: i64 = 0;
+    for run in runs {
+        mapped_bytes = mapped_bytes.wrapping_add(run.size);
+    }
+    let base = (mapped_bytes.wrapping_sub(total_size(original_holes))).clamp(64, 16 * 1024);
+    let mut achievable: i64 = 0;
+    for &window in windows {
+        let window_end = range_end(window).min(last_computable);
+        let block_from =
+            encrypted_chain_start(window.offset, window_end, block_size, original_holes);
+        let from = window.offset.max(block_from);
+        if window_end > from {
+            achievable = achievable.wrapping_add(window_end - from);
+        }
+    }
+    if achievable < 64 {
+        -1
+    } else {
+        base.min(achievable)
+    }
+}
+
+/// `StreamRepairController::PatchEncryptedFromSource` chunk hole/present partitioning.
+pub fn partition_encrypted_chunk(
+    block_from: i64,
+    chunk_end: i64,
+    live_holes: &[NzbgetRsByteRange],
+) -> (Vec<NzbgetRsByteRange>, Vec<NzbgetRsByteRange>) {
+    let mut hole_parts = Vec::new();
+    for &live in live_holes {
+        let from = live.offset.max(block_from);
+        let to = range_end(live).min(chunk_end);
+        if from < to {
+            hole_parts.push(NzbgetRsByteRange {
+                offset: from,
+                size: to - from,
+            });
+        }
+    }
+    let mut present_parts = vec![NzbgetRsByteRange {
+        offset: block_from,
+        size: chunk_end - block_from,
+    }];
+    for &part in &hole_parts {
+        present_parts = subtract_covered(&present_parts, part);
+    }
+    (hole_parts, present_parts)
+}
+
+/// `ContentMapper::BuildRepairSets` inner-hole mapping and sorting.
+pub fn content_mapper_collect_inner_holes(
+    runs: &[NzbgetRsContentRun],
+    hole_member_indices: &[i32],
+    holes: &[NzbgetRsByteRange],
+) -> Vec<NzbgetRsByteRange> {
+    let mut inner_holes = Vec::new();
+    for (&member_idx, &hole) in hole_member_indices.iter().zip(holes.iter()) {
+        inner_holes.extend(content_map_to_inner(runs, member_idx, hole));
+    }
+    inner_holes.sort_by_key(|r| r.offset);
+    inner_holes
+}
+
+#[derive(Debug, Clone)]
+pub struct RarFileEntryInput<'a> {
+    pub volume_index: i32,
+    pub filename: &'a [u8],
+    pub size: i64,
+    pub packed_size: i64,
+    pub data_offset: i64,
+    pub stored: bool,
+    pub encrypted_data: bool,
+    pub has_salt: bool,
+    pub salt: [u8; 8],
+    pub has_crypt: bool,
+    pub crypt_version: i32,
+    pub crypt_kdf_count: i32,
+    pub crypt_salt: [u8; 16],
+    pub crypt_iv: [u8; 16],
+}
+
+#[derive(Debug, Clone)]
+pub struct RarMapOutput {
+    pub inner_name: Vec<u8>,
+    pub inner_size: i64,
+    pub runs: Vec<NzbgetRsContentRun>,
+    pub encrypted: bool,
+    pub cipher_data_offsets: Vec<i64>,
+    pub cipher_sizes: Vec<i64>,
+}
+
+/// `ContentMapper::BuildRarMap` run validation and `ContentMap` construction.
+#[allow(clippy::too_many_arguments)]
+pub fn content_mapper_build_rar_map<FCrypto>(
+    unknown_volume: i32,
+    has_password: bool,
+    vol_readable: &[u8],
+    vol_versions: &[i32],
+    vol_member_indices: &[i32],
+    vol_has_source: &[u8],
+    vol_source_sizes: &[i64],
+    entries: &[RarFileEntryInput<'_>],
+    mut make_crypto: FCrypto,
+) -> Result<RarMapOutput, &'static str>
+where
+    FCrypto: FnMut(usize, i32) -> bool,
+{
+    let vol_count = vol_readable
+        .len()
+        .min(vol_versions.len())
+        .min(vol_member_indices.len())
+        .min(vol_has_source.len())
+        .min(vol_source_sizes.len());
+
+    let mut primary: Option<&RarFileEntryInput<'_>> = None;
+    for (v, &readable) in vol_readable.iter().take(vol_count).enumerate() {
+        if readable == 0 {
+            continue;
+        }
+        for entry in entries.iter().filter(|e| e.volume_index == v as i32) {
+            if primary.map_or(true, |p| entry.size > p.size) {
+                primary = Some(entry);
+            }
+        }
+        break;
+    }
+    let Some(primary) = primary else {
+        return Err("no file entries in the first readable volume");
+    };
+
+    let inner_name = base_file_name(primary.filename).to_vec();
+    let inner_size = primary.size;
+    if !is_stream_eligible(&inner_name) {
+        return Err("inner file is not a media file");
+    }
+
+    #[derive(Clone, Default)]
+    struct VolumeRun {
+        entry_index: usize,
+        packed_size: i64,
+        data_offset: i64,
+        version: i32,
+        encrypted: bool,
+        has_salt: bool,
+        salt: [u8; 8],
+        has_crypt: bool,
+        crypt_version: i32,
+        crypt_kdf_count: i32,
+        crypt_salt: [u8; 16],
+        crypt_iv: [u8; 16],
+    }
+
+    let mut runs: Vec<VolumeRun> = (0..vol_count)
+        .map(|_| VolumeRun {
+            data_offset: -1,
+            ..Default::default()
+        })
+        .collect();
+    let mut known_packed: i64 = 0;
+    let mut any_encrypted = false;
+    let mut any_plain = false;
+
+    for i in 0..vol_count {
+        if vol_readable[i] == 0 {
+            continue;
+        }
+        for (entry_idx, entry) in entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.volume_index == i as i32)
+        {
+            if locale_casecmp(base_file_name(entry.filename), &inner_name)
+                != std::cmp::Ordering::Equal
+            {
+                continue;
+            }
+            if !entry.stored {
+                return Err("compressed archive (only store mode is mappable)");
+            }
+            if entry.encrypted_data {
+                if !has_password {
+                    return Err("encrypted archive data");
+                }
+                any_encrypted = true;
+                runs[i].entry_index = entry_idx;
+                runs[i].encrypted = true;
+                runs[i].version = vol_versions[i];
+                if entry.has_salt {
+                    runs[i].has_salt = true;
+                    runs[i].salt = entry.salt;
+                }
+                if entry.has_crypt {
+                    runs[i].has_crypt = true;
+                    runs[i].crypt_version = entry.crypt_version;
+                    runs[i].crypt_kdf_count = entry.crypt_kdf_count;
+                    runs[i].crypt_salt = entry.crypt_salt;
+                    runs[i].crypt_iv = entry.crypt_iv;
+                }
+            } else {
+                any_plain = true;
+            }
+            if entry.size != inner_size {
+                return Err("inconsistent inner file size across volumes");
+            }
+            let src_sz = vol_source_sizes[i];
+            if entry.data_offset < 0
+                || entry.packed_size < 0
+                || vol_has_source[i] == 0
+                || entry.data_offset > src_sz
+                || entry.packed_size > src_sz - entry.data_offset
+            {
+                return Err("implausible data run geometry");
+            }
+            runs[i].packed_size = entry.packed_size;
+            runs[i].data_offset = entry.data_offset;
+            known_packed = known_packed.wrapping_add(entry.packed_size);
+        }
+    }
+
+    if any_encrypted {
+        if any_plain {
+            return Err("encrypted volume geometry does not fit store mode");
+        }
+        if unknown_volume >= 0 {
+            return Err("encrypted archive without crypto parameters");
+        }
+        let enc_vols: Vec<usize> = (0..vol_count)
+            .filter(|&i| runs[i].data_offset >= 0 && runs[i].encrypted)
+            .collect();
+        if enc_vols.is_empty() {
+            return Err("encrypted volume geometry does not fit store mode");
+        }
+        let first = enc_vols[0];
+        let version = runs[first].version;
+        if version == 3 {
+            if !runs[first].has_salt || !make_crypto(runs[first].entry_index, 3) {
+                return Err("encrypted archive without crypto parameters");
+            }
+        } else if version == 5 {
+            if !runs[first].has_crypt || runs[first].crypt_version != 0 {
+                return Err("encrypted archive without crypto parameters");
+            }
+            if !make_crypto(runs[first].entry_index, 5) {
+                return Err("archive password rejected");
+            }
+        } else {
+            return Err("encrypted archive without crypto parameters");
+        }
+
+        for &v in &enc_vols[1..] {
+            let vr = &runs[v];
+            if vr.version != version {
+                return Err("encrypted volume geometry does not fit store mode");
+            }
+            if version == 3 && (!vr.has_salt || vr.salt != runs[first].salt) {
+                return Err("encrypted volume geometry does not fit store mode");
+            }
+            if version == 5
+                && (!vr.has_crypt
+                    || vr.crypt_version != runs[first].crypt_version
+                    || vr.crypt_kdf_count != runs[first].crypt_kdf_count
+                    || vr.crypt_salt != runs[first].crypt_salt
+                    || vr.crypt_iv != runs[first].crypt_iv)
+            {
+                return Err("encrypted volume geometry does not fit store mode");
+            }
+        }
+
+        let mut cipher_total: i64 = 0;
+        for &v in &enc_vols {
+            if runs[v].packed_size <= 0 {
+                return Err("encrypted volume geometry does not fit store mode");
+            }
+            cipher_total = cipher_total.wrapping_add(runs[v].packed_size);
+        }
+        let pad = (16 - (inner_size % 16)) % 16;
+        if inner_size <= 0
+            || cipher_total < inner_size
+            || cipher_total - inner_size != pad
+            || cipher_total % 16 != 0
+        {
+            return Err("encrypted volume geometry does not fit store mode");
+        }
+
+        let mut out_runs = Vec::with_capacity(enc_vols.len());
+        let mut cipher_data_offsets = Vec::with_capacity(enc_vols.len());
+        let mut cipher_sizes = Vec::with_capacity(enc_vols.len());
+        let mut cipher_base: i64 = 0;
+        for &v in &enc_vols {
+            let plain_chunk = runs[v].packed_size.min(inner_size - cipher_base);
+            if plain_chunk <= 0 {
+                return Err("encrypted volume geometry does not fit store mode");
+            }
+            out_runs.push(NzbgetRsContentRun {
+                inner_offset: cipher_base,
+                member_index: vol_member_indices[v],
+                member_offset: runs[v].data_offset,
+                size: plain_chunk,
+            });
+            cipher_data_offsets.push(runs[v].data_offset);
+            cipher_sizes.push(runs[v].packed_size);
+            cipher_base = cipher_base.wrapping_add(runs[v].packed_size);
+        }
+        return Ok(RarMapOutput {
+            inner_name,
+            inner_size,
+            runs: out_runs,
+            encrypted: true,
+            cipher_data_offsets,
+            cipher_sizes,
+        });
+    }
+
+    if unknown_volume < 0 {
+        if known_packed > inner_size {
+            return Err("packed sizes exceed the inner file size");
+        }
+        if known_packed != inner_size {
+            return Err("packed sizes do not sum to the inner file size");
+        }
+    } else {
+        if known_packed > inner_size {
+            return Err("packed sizes exceed the inner file size");
+        }
+        if (unknown_volume as usize) < runs.len() {
+            runs[unknown_volume as usize].packed_size = inner_size - known_packed;
+            runs[unknown_volume as usize].data_offset = -1;
+        }
+    }
+
+    let mut out_runs = Vec::new();
+    let mut inner_offset: i64 = 0;
+    for i in 0..vol_count {
+        if runs[i].data_offset >= 0 && runs[i].packed_size > 0 {
+            out_runs.push(NzbgetRsContentRun {
+                inner_offset,
+                member_index: vol_member_indices[i],
+                member_offset: runs[i].data_offset,
+                size: runs[i].packed_size,
+            });
+        }
+        inner_offset = inner_offset.wrapping_add(runs[i].packed_size);
+    }
+
+    Ok(RarMapOutput {
+        inner_name,
+        inner_size,
+        runs: out_runs,
+        encrypted: false,
+        cipher_data_offsets: Vec::new(),
+        cipher_sizes: Vec::new(),
+    })
+}
+
+/// `DupeStreamRepair::SelectExtractedInner`: walks `dir` recursively without following
+/// symlinks, returning `(selected_path, found_symlink)`.
+pub fn select_extracted_inner(
+    dir: &[u8],
+    inner_size: i64,
+    inner_name: &[u8],
+) -> (Vec<u8>, bool) {
+    if dir.is_empty() || inner_size < 0 {
+        return (Vec::new(), false);
+    }
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::PathBuf;
+
+    const MAX_EXTRACTED_ENTRIES: usize = 10000;
+    let mut entry_count: usize = 0;
+    let mut extracted_bytes: i64 = 0;
+    let mut matches: Vec<Vec<u8>> = Vec::new();
+    let mut stack = vec![PathBuf::from(OsStr::from_bytes(dir))];
+
+    while let Some(cur) = stack.pop() {
+        let rd = match std::fs::read_dir(&cur) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => continue,
+            Err(_) => break,
+        };
+        for entry_res in rd {
+            let Ok(entry) = entry_res else {
+                return (Vec::new(), false);
+            };
+            entry_count += 1;
+            if entry_count > MAX_EXTRACTED_ENTRIES {
+                return (Vec::new(), false);
+            }
+            let path = entry.path();
+            let Ok(sym_meta) = std::fs::symlink_metadata(&path) else {
+                return (Vec::new(), true);
+            };
+            let ft = sym_meta.file_type();
+            if ft.is_symlink() {
+                return (Vec::new(), true);
+            }
+            if ft.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !ft.is_file() {
+                continue;
+            }
+            let size = sym_meta.len() as i64;
+            if size < 0
+                || size > MAX_DECOMPRESS_BYTES
+                || extracted_bytes > MAX_DECOMPRESS_BYTES - size
+            {
+                return (Vec::new(), false);
+            }
+            extracted_bytes += size;
+            if size == inner_size {
+                matches.push(path.as_os_str().as_bytes().to_vec());
+            }
+        }
+    }
+
+    if matches.is_empty() {
+        return (Vec::new(), false);
+    }
+    matches.sort();
+    if !inner_name.is_empty() {
+        for m in &matches {
+            if locale_casecmp(base_file_name(m), inner_name) == std::cmp::Ordering::Equal {
+                return (m.clone(), false);
+            }
+        }
+    }
+    (matches.into_iter().next().unwrap(), false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_select_whole_and_donor_candidates() {
+        let names: &[&[u8]] = &[b"Show.part01.rar", b"Show.part02.rar", b"Show.par2"];
+        let sizes = [1000i64, 1000, 1000];
+        let is_par = [0u8, 0, 1];
+        let has_articles = [1u8, 1, 1];
+        let is_claimed = [0u8, 0, 0];
+        let hashes = [111u64, 222, 333];
+
+        assert_eq!(
+            select_whole_file_donor(
+                b"Other.part02.rar",
+                1000,
+                5,
+                0,
+                b"",
+                names,
+                &sizes,
+                &is_par,
+                &has_articles,
+                &is_claimed,
+                &hashes
+            ),
+            1
+        );
+        let cands = select_donor_candidates(
+            b"Other.part02.rar",
+            980,
+            -1,
+            0,
+            5,
+            0,
+            names,
+            &sizes,
+            &is_par,
+            &has_articles,
+            &is_claimed,
+            &hashes,
+        );
+        assert_eq!(cands, vec![1, 0]);
+    }
 
     #[test]
     fn test_stream_eligible_and_keys() {

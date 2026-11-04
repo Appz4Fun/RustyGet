@@ -492,6 +492,89 @@ void Scanner::ProcessIncomingFile(
 
 	bool exists = true;
 
+#ifdef NZBGET_USE_RUST
+	bool ranScanScript = nzbget_rs_hsr_scanner_should_run_scan_script(
+		m_scanScript ? 1 : 0, extension) != 0;
+	if (ranScanScript)
+	{
+		ScanScriptController::ExecuteScripts(fullFilename,
+			nzbInfo,
+			directory,
+			nzbName,
+			nzbCategory,
+			&priority,
+			&parameters,
+			&addTop,
+			&addPaused,
+			dupeKey,
+			&dupeScore,
+			&dupeMode
+		);
+		exists = FileSystem::FileExists(fullFilename);
+	}
+	int renameToProcessed = 0;
+	int incAction = nzbget_rs_hsr_scanner_classify_incoming_extension(
+		ranScanScript ? 1 : 0, exists ? 1 : 0, extension, &renameToProcessed);
+	if (renameToProcessed)
+	{
+		CString bakname2;
+		bool renameOK = FileSystem::RenameBak(fullFilename, "processed", false, bakname2);
+		if (!renameOK)
+		{
+			error("Could not rename file %s to %s: %s", fullFilename, *bakname2,
+				*FileSystem::GetLastErrorMessage());
+		}
+	}
+	if (incAction == 1)
+	{
+		CString renamedName;
+		bool renameOK = FileSystem::RenameBak(fullFilename, "nzb", true, renamedName);
+		if (renameOK)
+		{
+			bool added = AddFileToQueue(
+				renamedName,
+				nzbName.c_str(),
+				nzbCategory.c_str(),
+				autoCategory,
+				priority,
+				dupeKey.c_str(),
+				dupeScore,
+				dupeMode,
+				&parameters,
+				addTop,
+				addPaused,
+				nzbInfo,
+				&nzbId
+			);
+			addStatus = added ? asSuccess : asFailed;
+		}
+		else
+		{
+			error("Could not rename file %s to %s: %s", fullFilename, *renamedName,
+				*FileSystem::GetLastErrorMessage());
+			addStatus = asFailed;
+		}
+	}
+	else if (incAction == 2)
+	{
+		bool added = AddFileToQueue(
+			fullFilename,
+			nzbName.c_str(),
+			nzbCategory.c_str(),
+			autoCategory,
+			priority,
+			dupeKey.c_str(),
+			dupeScore,
+			dupeMode,
+			&parameters,
+			addTop,
+			addPaused,
+			nzbInfo,
+			&nzbId
+		);
+		addStatus = added ? asSuccess : asFailed;
+	}
+#else
 	if (m_scanScript && strcasecmp(extension, ".nzb_processed"))
 	{
 		ScanScriptController::ExecuteScripts(fullFilename,
@@ -569,6 +652,7 @@ void Scanner::ProcessIncomingFile(
 		);
 		addStatus = added ? asSuccess : asFailed;
 	}
+#endif
 
 	if (queueData)
 	{
@@ -771,6 +855,25 @@ bool Scanner::AddFileToQueue(
 
 	NzbInfo* addedNzb = nullptr;
 
+#ifdef NZBGET_USE_RUST
+	int outcome = nzbget_rs_hsr_scanner_classify_add_file_outcome(ok ? 1 : 0, urlInfo ? 1 : 0);
+	if (outcome == 1)
+	{
+		addedNzb = g_QueueCoordinator->AddNzbFileToQueue(std::move(nzbInfo), std::move(urlInfo), addTop);
+	}
+	else if (outcome == 2)
+	{
+		for (Message& message : nzbInfo->GuardCachedMessages())
+		{
+			urlInfo->AddMessage(message.GetKind(), message.GetText(), false);
+		}
+	}
+	else
+	{
+		nzbInfo->SetDeleteStatus(NzbInfo::dsScan);
+		addedNzb = g_QueueCoordinator->AddNzbFileToQueue(std::move(nzbInfo), std::move(urlInfo), addTop);
+	}
+#else
 	if (ok)
 	{
 		addedNzb = g_QueueCoordinator->AddNzbFileToQueue(std::move(nzbInfo), std::move(urlInfo), addTop);
@@ -787,6 +890,7 @@ bool Scanner::AddFileToQueue(
 		nzbInfo->SetDeleteStatus(NzbInfo::dsScan);
 		addedNzb = g_QueueCoordinator->AddNzbFileToQueue(std::move(nzbInfo), std::move(urlInfo), addTop);
 	}
+#endif
 
 	if (nzbId)
 	{
@@ -925,6 +1029,20 @@ Scanner::EAddStatus Scanner::AddArchive(const char* filename, const char* catego
 
 	ScanNzbDir(true);
 
+#ifdef NZBGET_USE_RUST
+	std::vector<int> statusInts;
+	statusInts.reserve(statuses.size());
+	for (EAddStatus st : statuses)
+	{
+		statusInts.push_back((int)st);
+	}
+	return (EAddStatus)nzbget_rs_hsr_scanner_resolve_archive_add_status(
+		urlInfo ? 1 : 0,
+		statusInts.data(),
+		statusInts.size(),
+		(int)EAddStatus::asSuccess,
+		(int)EAddStatus::asSkipped);
+#else
 	// a url item stays queued unless its nzb was added: report that one's
 	// result, else the item was taken as done and stuck in the queue for good
 	if (urlInfo)
@@ -934,6 +1052,7 @@ Scanner::EAddStatus Scanner::AddArchive(const char* filename, const char* catego
 	bool anyAdded = std::any_of(statuses.begin(), statuses.end(),
 		[](EAddStatus status) { return status == EAddStatus::asSuccess; });
 	return anyAdded ? EAddStatus::asSuccess : statuses[0];
+#endif
 }
 
 Scanner::EAddStatus Scanner::AddArchive(

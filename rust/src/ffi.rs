@@ -19690,6 +19690,710 @@ pub unsafe extern "C" fn nzbget_rs_pnd_nzbfile_accumulate_file_stats(
     ))
 }
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_hsr_history_coord_classify_service_work_item(
+    kind: c_int,
+    hk_dup: c_int,
+    hk_nzb: c_int,
+    item_time: i64,
+    min_time: i64,
+    dupe_check: c_int,
+) -> c_int {
+    crate::histscanrepair::history_coord_classify_service_work_item(
+        kind,
+        hk_dup,
+        hk_nzb,
+        item_time,
+        min_time,
+        dupe_check != 0,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_hsr_history_coord_resolve_post_history_direct_statuses(
+    direct_rename_status: c_int,
+    ts_running: c_int,
+    ts_failure: c_int,
+    direct_unpack_status: c_int,
+    ns_running: c_int,
+    ns_none: c_int,
+    out_new_rename_status: *mut c_int,
+    out_new_unpack_status: *mut c_int,
+) {
+    let (r, u) = crate::histscanrepair::history_coord_resolve_post_history_direct_statuses(
+        direct_rename_status,
+        ts_running,
+        ts_failure,
+        direct_unpack_status,
+        ns_running,
+        ns_none,
+    );
+    *out_new_rename_status = r;
+    *out_new_unpack_status = u;
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_hsr_history_coord_should_sample_completed_file(
+    status: c_int,
+    cf_partial: c_int,
+    cf_failure: c_int,
+    file_id: c_int,
+    out_is_partial: *mut c_int,
+) -> c_int {
+    let (sample, is_partial) = crate::histscanrepair::history_coord_should_sample_completed_file(
+        status, cf_partial, cf_failure, file_id,
+    );
+    *out_is_partial = i32::from(is_partial);
+    i32::from(sample)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_hsr_history_coord_should_sample_article(
+    is_partial: c_int,
+    article_status: c_int,
+    ai_failed: c_int,
+    message_id: *const c_char,
+) -> c_int {
+    let m = if message_id.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(message_id).to_bytes()
+    };
+    i32::from(crate::histscanrepair::history_coord_should_sample_article(
+        is_partial != 0,
+        article_status,
+        ai_failed,
+        m,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_hsr_history_coord_calc_move_to_queue_reset(
+    unpack_cleaned_up_disk: c_int,
+    post_total_sec: c_int,
+    unpack_sec: c_int,
+    has_main_pars: c_int,
+    par_sec: c_int,
+    move_status: c_int,
+    ms_failure: c_int,
+    ms_none: c_int,
+    out_new_post_total_sec: *mut c_int,
+    out_new_move_status: *mut c_int,
+) {
+    let (p, m) = crate::histscanrepair::history_coord_calc_move_to_queue_reset(
+        unpack_cleaned_up_disk != 0,
+        post_total_sec,
+        unpack_sec,
+        has_main_pars != 0,
+        par_sec,
+        move_status,
+        ms_failure,
+        ms_none,
+    );
+    *out_new_post_total_sec = p;
+    *out_new_move_status = m;
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_hsr_history_coord_resolve_url_redownload_dupe_hint(
+    cur_dupe_hint: c_int,
+    dh_none: c_int,
+    dh_redownload_manual: c_int,
+) -> c_int {
+    crate::histscanrepair::history_coord_resolve_url_redownload_dupe_hint(
+        cur_dupe_hint,
+        dh_none,
+        dh_redownload_manual,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_hsr_history_coord_classify_return_action(
+    kind: c_int,
+    hk_url: c_int,
+    hk_nzb: c_int,
+    parked_file_count: c_int,
+) -> c_int {
+    crate::histscanrepair::history_coord_classify_return_action(
+        kind,
+        hk_url,
+        hk_nzb,
+        parked_file_count,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_hsr_history_coord_eval_requeue_loaded_file(
+    status: c_int,
+    cf_none: c_int,
+    cf_failure: c_int,
+    cf_partial: c_int,
+    reset_failed: c_int,
+    state_loaded: c_int,
+    remaining_size: i64,
+) -> c_int {
+    i32::from(crate::histscanrepair::history_coord_eval_requeue_loaded_file(
+        status,
+        cf_none,
+        cf_failure,
+        cf_partial,
+        reset_failed != 0,
+        state_loaded != 0,
+        remaining_size,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_hsr_history_coord_has_retryable_article(
+    statuses_ptr: *const c_int,
+    statuses_len: usize,
+    reset_failed: c_int,
+    ai_undefined: c_int,
+    ai_failed: c_int,
+) -> c_int {
+    let slice = if statuses_ptr.is_null() || statuses_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(statuses_ptr, statuses_len)
+    };
+    i32::from(crate::histscanrepair::history_coord_has_retryable_article(
+        slice,
+        reset_failed != 0,
+        ai_undefined,
+        ai_failed,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_hsr_history_coord_reset_articles_header(
+    all_failed: c_int,
+    is_par_file: c_int,
+    file_size: i64,
+    file_missed_size: i64,
+    file_total_articles: c_int,
+    file_missed_articles: c_int,
+    cur_file_failed_size: i64,
+    cur_file_failed_articles: c_int,
+    cur_file_remaining_size: i64,
+    cur_file_completed_articles: c_int,
+    file_success_size: i64,
+    file_success_articles: c_int,
+    cur_nzb_failed_size: i64,
+    cur_nzb_success_size: i64,
+    cur_nzb_failed_articles: c_int,
+    cur_nzb_success_articles: c_int,
+    cur_nzb_par_failed_size: i64,
+    cur_nzb_par_success_size: i64,
+    out_file_failed_size: *mut i64,
+    out_file_failed_articles: *mut c_int,
+    out_file_remaining_size: *mut i64,
+    out_file_completed_articles: *mut c_int,
+    out_nzb_failed_size: *mut i64,
+    out_nzb_success_size: *mut i64,
+    out_nzb_failed_articles: *mut c_int,
+    out_nzb_success_articles: *mut c_int,
+    out_nzb_par_failed_size: *mut i64,
+    out_nzb_par_success_size: *mut i64,
+) {
+    let res = crate::histscanrepair::history_coord_reset_articles_header(
+        all_failed != 0,
+        is_par_file != 0,
+        file_size,
+        file_missed_size,
+        file_total_articles,
+        file_missed_articles,
+        cur_file_failed_size,
+        cur_file_failed_articles,
+        cur_file_remaining_size,
+        cur_file_completed_articles,
+        file_success_size,
+        file_success_articles,
+        cur_nzb_failed_size,
+        cur_nzb_success_size,
+        cur_nzb_failed_articles,
+        cur_nzb_success_articles,
+        cur_nzb_par_failed_size,
+        cur_nzb_par_success_size,
+    );
+    *out_file_failed_size = res.0;
+    *out_file_failed_articles = res.1;
+    *out_file_remaining_size = res.2;
+    *out_file_completed_articles = res.3;
+    *out_nzb_failed_size = res.4;
+    *out_nzb_success_size = res.5;
+    *out_nzb_failed_articles = res.6;
+    *out_nzb_success_articles = res.7;
+    *out_nzb_par_failed_size = res.8;
+    *out_nzb_par_success_size = res.9;
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_hsr_history_coord_apply_article_reset_delta(
+    pa_status: c_int,
+    ai_failed: c_int,
+    ai_undefined: c_int,
+    ai_finished: c_int,
+    pa_size: c_int,
+    cur_completed_articles: c_int,
+    cur_remaining_size: i64,
+    cur_failed_articles: c_int,
+    cur_failed_size: i64,
+    cur_success_articles: c_int,
+    cur_success_size: i64,
+    out_completed_articles: *mut c_int,
+    out_remaining_size: *mut i64,
+    out_failed_articles: *mut c_int,
+    out_failed_size: *mut i64,
+    out_success_articles: *mut c_int,
+    out_success_size: *mut i64,
+) {
+    let res = crate::histscanrepair::history_coord_apply_article_reset_delta(
+        pa_status,
+        ai_failed,
+        ai_undefined,
+        ai_finished,
+        pa_size,
+        cur_completed_articles,
+        cur_remaining_size,
+        cur_failed_articles,
+        cur_failed_size,
+        cur_success_articles,
+        cur_success_size,
+    );
+    *out_completed_articles = res.0;
+    *out_remaining_size = res.1;
+    *out_failed_articles = res.2;
+    *out_failed_size = res.3;
+    *out_success_articles = res.4;
+    *out_success_size = res.5;
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_hsr_scanner_should_run_scan_script(
+    scan_script: c_int,
+    extension: *const c_char,
+) -> c_int {
+    let ext = if extension.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(extension).to_bytes()
+    };
+    i32::from(crate::histscanrepair::scanner_should_run_scan_script(
+        scan_script != 0,
+        ext,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_hsr_scanner_classify_incoming_extension(
+    ran_scan_script: c_int,
+    exists: c_int,
+    extension: *const c_char,
+    out_rename_to_processed: *mut c_int,
+) -> c_int {
+    let ext = if extension.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(extension).to_bytes()
+    };
+    let (ren, act) = crate::histscanrepair::scanner_classify_incoming_extension(
+        ran_scan_script != 0,
+        exists != 0,
+        ext,
+    );
+    *out_rename_to_processed = i32::from(ren);
+    act
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_hsr_scanner_classify_add_file_outcome(
+    ok: c_int,
+    has_url_info: c_int,
+) -> c_int {
+    crate::histscanrepair::scanner_classify_add_file_outcome(ok != 0, has_url_info != 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_hsr_scanner_resolve_archive_add_status(
+    has_url_info: c_int,
+    statuses_ptr: *const c_int,
+    statuses_len: usize,
+    as_success: c_int,
+    as_skipped: c_int,
+) -> c_int {
+    let slice = if statuses_ptr.is_null() || statuses_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(statuses_ptr, statuses_len)
+    };
+    crate::histscanrepair::scanner_resolve_archive_add_status(
+        has_url_info != 0,
+        slice,
+        as_success,
+        as_skipped,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_hsr_repair_ctrl_should_consider_twin_candidate(
+    is_self: c_int,
+    kind: c_int,
+    nk_nzb: c_int,
+    same_name_or_key: c_int,
+    queued_filename: *const c_char,
+    has_print: c_int,
+    own_print_matches: c_int,
+) -> c_int {
+    let q = if queued_filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(queued_filename).to_bytes()
+    };
+    i32::from(
+        crate::histscanrepair::repair_ctrl_should_consider_twin_candidate(
+            is_self != 0,
+            kind,
+            nk_nzb,
+            same_name_or_key != 0,
+            q,
+            has_print != 0,
+            own_print_matches != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_hsr_repair_ctrl_sum_and_check_twin_blocks(
+    vol_blocks_ptr: *const c_int,
+    vol_blocks_len: usize,
+    block_needed: c_int,
+    out_available: *mut c_int,
+) -> c_int {
+    let slice = if vol_blocks_ptr.is_null() || vol_blocks_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(vol_blocks_ptr, vol_blocks_len)
+    };
+    let (avail, ok) =
+        crate::histscanrepair::repair_ctrl_sum_and_check_twin_blocks(slice, block_needed);
+    *out_available = avail;
+    i32::from(ok)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_hsr_repair_ctrl_calc_dupe_source_extra_blocks(
+    cur_history_extra: c_int,
+    used_blocks: c_int,
+    cur_total_extra: c_int,
+    out_new_history_extra: *mut c_int,
+    out_new_total_extra: *mut c_int,
+) {
+    let (h, t) = crate::histscanrepair::repair_ctrl_calc_dupe_source_extra_blocks(
+        cur_history_extra,
+        used_blocks,
+        cur_total_extra,
+    );
+    *out_new_history_extra = h;
+    *out_new_total_extra = t;
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_hsr_repair_ctrl_should_use_par_quick(
+    par_quick_opt: c_int,
+    force_par_full: c_int,
+    dupe_repaired: c_int,
+) -> c_int {
+    i32::from(crate::histscanrepair::repair_ctrl_should_use_par_quick(
+        par_quick_opt != 0,
+        force_par_full != 0,
+        dupe_repaired != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_hsr_repair_ctrl_eval_stage_transition(
+    cur_post_stage: c_int,
+    new_stage: c_int,
+    pt_repairing: c_int,
+    pt_verifying_repaired: c_int,
+    current_time: i64,
+    repair_time: i64,
+    cur_repair_sec: c_int,
+    out_set_repair_time: *mut c_int,
+    out_new_repair_sec: *mut c_int,
+) -> c_int {
+    let (changed, set_rt, new_sec) = crate::histscanrepair::repair_ctrl_eval_stage_transition(
+        cur_post_stage,
+        new_stage,
+        pt_repairing,
+        pt_verifying_repaired,
+        current_time,
+        repair_time,
+        cur_repair_sec,
+    );
+    *out_set_repair_time = i32::from(set_rt);
+    *out_new_repair_sec = new_sec;
+    i32::from(changed)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_hsr_prepost_classify_nzb_downloaded_entry(
+    skip_script_processing: c_int,
+    skip_disk_write: c_int,
+    opt_skip_write: c_int,
+    delete_status: c_int,
+    ds_health: c_int,
+    ds_bad: c_int,
+    has_post_info: c_int,
+    opt_raw_article: c_int,
+    par_status: c_int,
+    ps_none: c_int,
+    par_check_opt: c_int,
+    pc_always: c_int,
+    pc_force: c_int,
+    out_enqueue_deleted_script: *mut c_int,
+    out_set_par_skipped: *mut c_int,
+) -> c_int {
+    let (route, enq, skip_par) = crate::histscanrepair::prepost_classify_nzb_downloaded_entry(
+        skip_script_processing != 0,
+        skip_disk_write != 0,
+        opt_skip_write != 0,
+        delete_status,
+        ds_health,
+        ds_bad,
+        has_post_info != 0,
+        opt_raw_article != 0,
+        par_status,
+        ps_none,
+        par_check_opt,
+        pc_always,
+        pc_force,
+    );
+    *out_enqueue_deleted_script = i32::from(enq);
+    *out_set_par_skipped = i32::from(skip_par);
+    route
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_hsr_prepost_resolve_nzb_deleted_route(
+    delete_status: c_int,
+    ds_none: c_int,
+    ds_manual: c_int,
+    ds_health: c_int,
+    ds_bad: c_int,
+    out_new_delete_status: *mut c_int,
+) -> c_int {
+    let (new_st, call_dl) = crate::histscanrepair::prepost_resolve_nzb_deleted_route(
+        delete_status,
+        ds_none,
+        ds_manual,
+        ds_health,
+        ds_bad,
+    );
+    *out_new_delete_status = new_st;
+    i32::from(call_dl)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_hsr_prepost_classify_delete_cleanup_mode(
+    cleanup_disk: c_int,
+    delete_status: c_int,
+    ds_dupe: c_int,
+    parking: c_int,
+    skip_disk_write: c_int,
+    opt_skip_write: c_int,
+) -> c_int {
+    crate::histscanrepair::prepost_classify_delete_cleanup_mode(
+        cleanup_disk != 0,
+        delete_status,
+        ds_dupe,
+        parking != 0,
+        skip_disk_write != 0,
+        opt_skip_write != 0,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_hsr_prepost_classify_request_par_action(
+    request_par_check: c_int,
+    par_status: c_int,
+    ps_skipped: c_int,
+    force_repair: c_int,
+    par_full: c_int,
+    par_check_opt: c_int,
+    pc_manual: c_int,
+    cur_force_par_full: c_int,
+    file_list_empty: c_int,
+    out_new_force_par_full: *mut c_int,
+) -> c_int {
+    let (act, new_force) = crate::histscanrepair::prepost_classify_request_par_action(
+        request_par_check != 0,
+        par_status,
+        ps_skipped,
+        force_repair != 0,
+        par_full != 0,
+        par_check_opt,
+        pc_manual,
+        cur_force_par_full != 0,
+        file_list_empty != 0,
+    );
+    *out_new_force_par_full = i32::from(new_force);
+    act
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_hsr_prepost_should_skip_par_cannot_cover_check(
+    health: c_int,
+    critical_health: c_int,
+) -> c_int {
+    i32::from(crate::histscanrepair::prepost_should_skip_par_cannot_cover_check(
+        health,
+        critical_health,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_hsr_prepost_calc_job_protected_damage(
+    decoded_file_size: i64,
+    holes_total_size: i64,
+    failed_size: i64,
+    missed_size: i64,
+) -> i64 {
+    crate::histscanrepair::prepost_calc_job_protected_damage(
+        decoded_file_size,
+        holes_total_size,
+        failed_size,
+        missed_size,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_hsr_prepost_is_damage_beyond_par(
+    protected_damage: i64,
+    par_size: i64,
+    par_current_failed_size: i64,
+) -> c_int {
+    i32::from(crate::histscanrepair::prepost_is_damage_beyond_par(
+        protected_damage,
+        par_size,
+        par_current_failed_size,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_hsr_prepost_should_check_unrecovered_stream_skip(
+    par_cannot_cover: c_int,
+    stream_repair_done: c_int,
+    stream_repair_recovered: c_int,
+    dupe_recovered_bytes: i64,
+    par_check_opt: c_int,
+    pc_auto: c_int,
+    par_status: c_int,
+    ps_none: c_int,
+    delete_status: c_int,
+    ds_none: c_int,
+) -> c_int {
+    i32::from(
+        crate::histscanrepair::prepost_should_check_unrecovered_stream_skip(
+            par_cannot_cover != 0,
+            stream_repair_done != 0,
+            stream_repair_recovered != 0,
+            dupe_recovered_bytes,
+            par_check_opt,
+            pc_auto,
+            par_status,
+            ps_none,
+            delete_status,
+            ds_none,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_hsr_prepost_classify_skipped_par_health(
+    par_status: c_int,
+    ps_skipped: c_int,
+    par_scan_opt: c_int,
+    ps_dupe: c_int,
+    health: c_int,
+    critical_health: c_int,
+    failed_size: i64,
+    par_failed_size: i64,
+) -> c_int {
+    crate::histscanrepair::prepost_classify_skipped_par_health(
+        par_status,
+        ps_skipped,
+        par_scan_opt,
+        ps_dupe,
+        health,
+        critical_health,
+        failed_size,
+        par_failed_size,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_hsr_prepost_eval_want_unpack_and_rar_rename(
+    has_unpack_param: c_int,
+    unpack_param_val: *const c_char,
+    unpack_status: c_int,
+    us_none: c_int,
+    delete_status: c_int,
+    ds_none: c_int,
+    rar_rename_status: c_int,
+    rs_none: c_int,
+    opt_rar_rename: c_int,
+    out_want_unpack: *mut c_int,
+    out_unpack: *mut c_int,
+) -> c_int {
+    let val = if unpack_param_val.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(unpack_param_val).to_bytes()
+    };
+    let (w, u, r) = crate::histscanrepair::prepost_eval_want_unpack_and_rar_rename(
+        has_unpack_param != 0,
+        val,
+        unpack_status,
+        us_none,
+        delete_status,
+        ds_none,
+        rar_rename_status,
+        rs_none,
+        opt_rar_rename != 0,
+    );
+    *out_want_unpack = i32::from(w);
+    *out_unpack = i32::from(u);
+    i32::from(r)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_hsr_prepost_classify_file_downloaded_direct_unpack(
+    opt_direct_unpack: c_int,
+    opt_raw_article: c_int,
+    opt_skip_write: c_int,
+    skip_disk_write: c_int,
+    direct_unpack_status: c_int,
+    ns_none: c_int,
+    ns_running: c_int,
+    direct_rename_status: c_int,
+    ts_running: c_int,
+    has_unpack_thread: c_int,
+) -> c_int {
+    crate::histscanrepair::prepost_classify_file_downloaded_direct_unpack(
+        opt_direct_unpack != 0,
+        opt_raw_article != 0,
+        opt_skip_write != 0,
+        skip_disk_write != 0,
+        direct_unpack_status,
+        ns_none,
+        ns_running,
+        direct_rename_status,
+        ts_running,
+        has_unpack_thread != 0,
+    )
+}
+
 
 
 

@@ -70,6 +70,7 @@ pub mod contentdupenntp;
 pub mod diskartdlpost;
 pub mod queuecoordinfo;
 pub mod pardupenzb;
+pub mod histscanrepair;
 
 pub mod deadpostings;
 pub mod dupewatch;

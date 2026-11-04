@@ -272,6 +272,24 @@ std::string RepairController::PostParChecker::RequestTwinIndex()
 		NzbInfo* nzbInfo = m_postInfo->GetNzbInfo();
 		auto consider = [&](NzbInfo* other)
 			{
+#ifdef NZBGET_USE_RUST
+				bool sameNameOrKey = other != nzbInfo && other->GetKind() == NzbInfo::nkNzb &&
+					DupeCoordinator::SameNameOrKey(other->GetName(), other->GetDupeKey(),
+						nzbInfo->GetName(), nzbInfo->GetDupeKey());
+				NzbParameter* print = sameNameOrKey ? other->GetParameters()->Find(TwinCheck::FilesParam) : nullptr;
+				if (!nzbget_rs_hsr_repair_ctrl_should_consider_twin_candidate(
+					other == nzbInfo ? 1 : 0,
+					(int)other->GetKind(),
+					(int)NzbInfo::nkNzb,
+					sameNameOrKey ? 1 : 0,
+					other->GetQueuedFilename(),
+					print != nullptr ? 1 : 0,
+					(print && ownPrint == print->GetValue()) ? 1 : 0) ||
+					!FileSystem::FileExists(other->GetQueuedFilename()))
+				{
+					return;
+				}
+#else
 				if (other == nzbInfo || other->GetKind() != NzbInfo::nkNzb ||
 					!DupeCoordinator::SameNameOrKey(other->GetName(), other->GetDupeKey(),
 						nzbInfo->GetName(), nzbInfo->GetDupeKey()) ||
@@ -284,6 +302,7 @@ std::string RepairController::PostParChecker::RequestTwinIndex()
 				{
 					return;	// an alt, or no par2
 				}
+#endif
 				candidates.push_back({other->GetName(), other->GetQueuedFilename(), print != nullptr});
 			};
 		for (NzbInfo* queued : downloadQueue->GetQueue())
@@ -393,6 +412,19 @@ std::vector<std::string> RepairController::PostParChecker::RequestTwinVolumes(in
 	}
 	std::sort(volumes.begin(), volumes.end(), [](const Volume& a, const Volume& b) { return a.blocks < b.blocks; });
 
+#ifdef NZBGET_USE_RUST
+	int available = 0;
+	std::vector<int> allVolBlocks;
+	allVolBlocks.reserve(volumes.size());
+	for (const Volume& volume : volumes)
+	{
+		allVolBlocks.push_back(volume.blocks);
+	}
+	bool hasEnoughTwinBlocks = nzbget_rs_hsr_repair_ctrl_sum_and_check_twin_blocks(
+		allVolBlocks.data(), allVolBlocks.size(), blockNeeded, &available) != 0;
+	std::vector<std::string> paths;
+	if (!hasEnoughTwinBlocks)
+#else
 	int available = 0;
 	for (const Volume& volume : volumes)
 	{
@@ -400,6 +432,7 @@ std::vector<std::string> RepairController::PostParChecker::RequestTwinVolumes(in
 	}
 	std::vector<std::string> paths;
 	if (available < blockNeeded)
+#endif
 	{
 		PrintMessage(Message::mkInfo, "Twin %s holds %i par-block(s), %i needed: not fetched",
 			m_twinName.c_str(), available, blockNeeded);
@@ -471,11 +504,29 @@ void RepairController::PostParChecker::StatDupeSources(DupeSourceList* dupeSourc
 				if (historyInfo->GetKind() == HistoryInfo::hkNzb &&
 					historyInfo->GetNzbInfo()->GetId() == dupeSource.GetId())
 				{
+#ifdef NZBGET_USE_RUST
+					int newHistExtra = 0;
+					int dummyTotal = totalExtraParBlocks;
+					nzbget_rs_hsr_repair_ctrl_calc_dupe_source_extra_blocks(
+						historyInfo->GetNzbInfo()->GetExtraParBlocks(),
+						dupeSource.GetUsedBlocks(),
+						totalExtraParBlocks,
+						&newHistExtra,
+						&dummyTotal);
+					historyInfo->GetNzbInfo()->SetExtraParBlocks(newHistExtra);
+#else
 					historyInfo->GetNzbInfo()->SetExtraParBlocks(historyInfo->GetNzbInfo()->GetExtraParBlocks() - dupeSource.GetUsedBlocks());
+#endif
 				}
 			}
 		}
+#ifdef NZBGET_USE_RUST
+		int dummyHist = 0;
+		nzbget_rs_hsr_repair_ctrl_calc_dupe_source_extra_blocks(
+			0, dupeSource.GetUsedBlocks(), totalExtraParBlocks, &dummyHist, &totalExtraParBlocks);
+#else
 		totalExtraParBlocks += dupeSource.GetUsedBlocks();
+#endif
 	}
 
 	m_postInfo->GetNzbInfo()->SetExtraParBlocks(m_postInfo->GetNzbInfo()->GetExtraParBlocks() + totalExtraParBlocks);
@@ -548,8 +599,15 @@ void RepairController::Run()
 	// CRCs and segment states ParQuick judges files by: once it has written
 	// into the collection (live or in post-processing, before or after a
 	// restart), only a full verification sees the repaired bytes
+#ifdef NZBGET_USE_RUST
+	m_parChecker.SetParQuick(nzbget_rs_hsr_repair_ctrl_should_use_par_quick(
+		g_Options->GetParQuick() ? 1 : 0,
+		m_postInfo->GetForceParFull() ? 1 : 0,
+		dupeRepaired ? 1 : 0) != 0);
+#else
 	m_parChecker.SetParQuick(g_Options->GetParQuick() && !m_postInfo->GetForceParFull() &&
 		!dupeRepaired);
+#endif
 	m_parChecker.SetForceRepair(m_postInfo->GetForceRepair());
 
 	m_parChecker.PrintMessage(Message::mkInfo, "Checking pars for %s", *nzbName);
@@ -856,6 +914,32 @@ void RepairController::UpdateParCheckProgress()
 		PostInfo::EStage stage = StageKind[m_parChecker.GetStage()];
 		time_t current = Util::CurrentTime();
 
+#ifdef NZBGET_USE_RUST
+		int setRepairTime = 0;
+		int newRepairSec = postInfo->GetNzbInfo()->GetRepairSec();
+		if (nzbget_rs_hsr_repair_ctrl_eval_stage_transition(
+			(int)postInfo->GetStage(),
+			(int)stage,
+			(int)PostInfo::ptRepairing,
+			(int)PostInfo::ptVerifyingRepaired,
+			(int64)current,
+			(int64)m_parChecker.GetRepairTime(),
+			newRepairSec,
+			&setRepairTime,
+			&newRepairSec) != 0)
+		{
+			postInfo->SetStage(stage);
+			postInfo->SetStageTime(current);
+			if (setRepairTime)
+			{
+				m_parChecker.SetRepairTime(current);
+			}
+			else if (postInfo->GetStage() == PostInfo::ptVerifyingRepaired)
+			{
+				postInfo->GetNzbInfo()->SetRepairSec(newRepairSec);
+			}
+		}
+#else
 		if (postInfo->GetStage() != stage)
 		{
 			postInfo->SetStage(stage);
@@ -870,6 +954,7 @@ void RepairController::UpdateParCheckProgress()
 				postInfo->GetNzbInfo()->SetRepairSec(postInfo->GetNzbInfo()->GetRepairSec() + repairSec);
 			}
 		}
+#endif
 
 		bool parCancel = false;
 		if (!IsStopped())

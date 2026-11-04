@@ -3818,6 +3818,51 @@ int nzbget_rs_dcf_par_damage_desc_matches_file_damage(
 int nzbget_rs_dcf_nzbfile_should_fallback_meta_name_to_title(
     int meta_name_empty, int meta_title_empty);
 
+// TwinCheck, DupeProbe, DirectRenamer & HistoryCoordinator Hot-Path C ABI (rust/src/twinproberenhist.rs)
+int nzbget_rs_tpr_twin_check_job_should_replace_min_index(
+    int is_par2, int has_index, int64_t entry_size, int64_t min_size);
+int nzbget_rs_tpr_twin_check_job_is_index_size_within_max(
+    int has_index, int64_t min_size, int64_t max_index_size);
+int nzbget_rs_tpr_twin_check_job_fallback_fingerprint(int known, int fetched);
+void nzbget_rs_tpr_twin_check_job_compare_sampled_pair(
+    int part_a_success, int part_b_success, int64_t part_a_offset,
+    int64_t part_b_offset, int data_equal, int in_compared, int in_differ,
+    int* out_compared, int* out_differ);
+int nzbget_rs_tpr_twin_check_put_par2_is_complete_flag(const char* after_tab);
+int nzbget_rs_tpr_twin_check_should_prune_store(
+    int64_t cur_time, int64_t last_prune, int64_t prune_interval_sec,
+    int job_count);
+int nzbget_rs_tpr_twin_check_is_job_hinted(
+    int has_dupe_same_size, int has_dupe_same_inner);
+int nzbget_rs_tpr_twin_check_job_less(
+    int a_rank, int a_hinted, int b_rank, int b_hinted);
+int nzbget_rs_tpr_twin_check_should_stop_launching_jobs(
+    int stopping, int active_jobs, int max_running);
+int nzbget_rs_tpr_dupe_probe_probing_for_elapsed_sec(
+    int probe_nzb_id, int query_nzb_id, int count_all, int64_t cur_time,
+    int64_t started);
+ptrdiff_t nzbget_rs_tpr_dupe_probe_samples_of_file_index(
+    size_t position, size_t offset, size_t count);
+int nzbget_rs_tpr_dupe_probe_is_server_recently_blocked(
+    int is_blocked, int64_t block_time, int64_t cur_time,
+    int64_t recent_block_sec);
+void nzbget_rs_tpr_dupe_probe_apply_connect_failure(
+    int in_unknown, int remaining, int exists, int missing, int* out_unknown,
+    int* out_unreachable);
+int nzbget_rs_tpr_dupe_probe_is_join_group_ok(const char* joined);
+int nzbget_rs_tpr_dupe_probe_is_server_measured_complete(
+    int unknown, int exists, int missing);
+int nzbget_rs_tpr_dupe_probe_should_retry_recheck(int existing, int sampled);
+int nzbget_rs_tpr_dupe_probe_classify_run_outcome(
+    int dead, int existing, int min_alive_samples, int finished,
+    int reached_servers);
+int nzbget_rs_tpr_direct_renamer_needs_ignore_ext_pass(
+    int hard_linking, int match_ignore_ext);
+int nzbget_rs_tpr_history_coord_reverse_delete_index(
+    int history_size, int forward_offset);
+int nzbget_rs_tpr_history_coord_should_restore_paused_on_redownload(
+    int restore_pause_state, int delete_paused);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

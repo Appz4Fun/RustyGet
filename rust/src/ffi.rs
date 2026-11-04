@@ -24340,6 +24340,256 @@ pub extern "C" fn nzbget_rs_dcf_nzbfile_should_fallback_meta_name_to_title(
     )
 }
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_tpr_twin_check_job_should_replace_min_index(
+    is_par2: c_int,
+    has_index: c_int,
+    entry_size: i64,
+    min_size: i64,
+) -> c_int {
+    crate::twinproberenhist::twin_check_job_should_replace_min_index(
+        is_par2,
+        has_index,
+        entry_size,
+        min_size,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_tpr_twin_check_job_is_index_size_within_max(
+    has_index: c_int,
+    min_size: i64,
+    max_index_size: i64,
+) -> c_int {
+    crate::twinproberenhist::twin_check_job_is_index_size_within_max(
+        has_index,
+        min_size,
+        max_index_size,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_tpr_twin_check_job_fallback_fingerprint(
+    known: c_int,
+    fetched: c_int,
+) -> c_int {
+    crate::twinproberenhist::twin_check_job_fallback_fingerprint(known, fetched)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_twin_check_job_compare_sampled_pair(
+    part_a_success: c_int,
+    part_b_success: c_int,
+    part_a_offset: i64,
+    part_b_offset: i64,
+    data_equal: c_int,
+    in_compared: c_int,
+    in_differ: c_int,
+    out_compared: *mut c_int,
+    out_differ: *mut c_int,
+) {
+    let (compared, differ) = crate::twinproberenhist::twin_check_job_compare_sampled_pair(
+        part_a_success,
+        part_b_success,
+        part_a_offset,
+        part_b_offset,
+        data_equal,
+        in_compared,
+        in_differ,
+    );
+    if !out_compared.is_null() {
+        *out_compared = compared;
+    }
+    if !out_differ.is_null() {
+        *out_differ = differ;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_twin_check_put_par2_is_complete_flag(
+    after_tab: *const c_char,
+) -> c_int {
+    crate::twinproberenhist::twin_check_put_par2_is_complete_flag(
+        crate::queuehotpath::cstr_to_bytes(after_tab),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_tpr_twin_check_should_prune_store(
+    cur_time: i64,
+    last_prune: i64,
+    prune_interval_sec: i64,
+    job_count: c_int,
+) -> c_int {
+    crate::twinproberenhist::twin_check_should_prune_store(
+        cur_time,
+        last_prune,
+        prune_interval_sec,
+        job_count,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_tpr_twin_check_is_job_hinted(
+    has_dupe_same_size: c_int,
+    has_dupe_same_inner: c_int,
+) -> c_int {
+    crate::twinproberenhist::twin_check_is_job_hinted(has_dupe_same_size, has_dupe_same_inner)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_tpr_twin_check_job_less(
+    a_rank: c_int,
+    a_hinted: c_int,
+    b_rank: c_int,
+    b_hinted: c_int,
+) -> c_int {
+    crate::twinproberenhist::twin_check_job_less(a_rank, a_hinted, b_rank, b_hinted)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_tpr_twin_check_should_stop_launching_jobs(
+    stopping: c_int,
+    active_jobs: c_int,
+    max_running: c_int,
+) -> c_int {
+    crate::twinproberenhist::twin_check_should_stop_launching_jobs(
+        stopping,
+        active_jobs,
+        max_running,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_tpr_dupe_probe_probing_for_elapsed_sec(
+    probe_nzb_id: c_int,
+    query_nzb_id: c_int,
+    count_all: c_int,
+    cur_time: i64,
+    started: i64,
+) -> c_int {
+    crate::twinproberenhist::dupe_probe_probing_for_elapsed_sec(
+        probe_nzb_id,
+        query_nzb_id,
+        count_all,
+        cur_time,
+        started,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_tpr_dupe_probe_samples_of_file_index(
+    position: usize,
+    offset: usize,
+    count: usize,
+) -> isize {
+    crate::twinproberenhist::dupe_probe_samples_of_file_index(position, offset, count)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_tpr_dupe_probe_is_server_recently_blocked(
+    is_blocked: c_int,
+    block_time: i64,
+    cur_time: i64,
+    recent_block_sec: i64,
+) -> c_int {
+    crate::twinproberenhist::dupe_probe_is_server_recently_blocked(
+        is_blocked,
+        block_time,
+        cur_time,
+        recent_block_sec,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_dupe_probe_apply_connect_failure(
+    in_unknown: c_int,
+    remaining: c_int,
+    exists: c_int,
+    missing: c_int,
+    out_unknown: *mut c_int,
+    out_unreachable: *mut c_int,
+) {
+    let (unknown, unreachable) = crate::twinproberenhist::dupe_probe_apply_connect_failure(
+        in_unknown,
+        remaining,
+        exists,
+        missing,
+    );
+    if !out_unknown.is_null() {
+        *out_unknown = unknown;
+    }
+    if !out_unreachable.is_null() {
+        *out_unreachable = unreachable;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_dupe_probe_is_join_group_ok(joined: *const c_char) -> c_int {
+    crate::twinproberenhist::dupe_probe_is_join_group_ok(crate::queuehotpath::cstr_to_bytes(joined))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_tpr_dupe_probe_is_server_measured_complete(
+    unknown: c_int,
+    exists: c_int,
+    missing: c_int,
+) -> c_int {
+    crate::twinproberenhist::dupe_probe_is_server_measured_complete(unknown, exists, missing)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_tpr_dupe_probe_should_retry_recheck(
+    existing: c_int,
+    sampled: c_int,
+) -> c_int {
+    crate::twinproberenhist::dupe_probe_should_retry_recheck(existing, sampled)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_tpr_dupe_probe_classify_run_outcome(
+    dead: c_int,
+    existing: c_int,
+    min_alive_samples: c_int,
+    finished: c_int,
+    reached_servers: c_int,
+) -> c_int {
+    crate::twinproberenhist::dupe_probe_classify_run_outcome(
+        dead,
+        existing,
+        min_alive_samples,
+        finished,
+        reached_servers,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_tpr_direct_renamer_needs_ignore_ext_pass(
+    hard_linking: c_int,
+    match_ignore_ext: c_int,
+) -> c_int {
+    crate::twinproberenhist::direct_renamer_needs_ignore_ext_pass(hard_linking, match_ignore_ext)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_tpr_history_coord_reverse_delete_index(
+    history_size: c_int,
+    forward_offset: c_int,
+) -> c_int {
+    crate::twinproberenhist::history_coord_reverse_delete_index(history_size, forward_offset)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_tpr_history_coord_should_restore_paused_on_redownload(
+    restore_pause_state: c_int,
+    delete_paused: c_int,
+) -> c_int {
+    crate::twinproberenhist::history_coord_should_restore_paused_on_redownload(
+        restore_pause_state,
+        delete_paused,
+    )
+}
+
 
 
 

@@ -82,6 +82,7 @@ pub mod utilfsscript;
 pub mod dlparstatedisk;
 pub mod coorddlwriterpool;
 pub mod dupecoordfallbackstream;
+pub mod twinproberenhist;
 
 pub mod deadpostings;
 pub mod dupewatch;

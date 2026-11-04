@@ -171,12 +171,27 @@ bool TwinCheckJob::IndexData(std::vector<char>& data, bool& fetched)
 	const TwinCheck::NzbEntry* index = nullptr;
 	for (const TwinCheck::NzbEntry& entry : entries)
 	{
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_tpr_twin_check_job_should_replace_min_index(
+			entry.par2 ? 1 : 0,
+			index != nullptr ? 1 : 0,
+			entry.size,
+			index ? index->size : 0) != 0)
+#else
 		if (entry.par2 && (!index || entry.size < index->size))
+#endif
 		{
 			index = &entry;
 		}
 	}
+#ifdef NZBGET_USE_RUST
+	if (!nzbget_rs_tpr_twin_check_job_is_index_size_within_max(
+		index != nullptr ? 1 : 0,
+		index ? index->size : 0,
+		TwinCheck::MaxIndexSize))
+#else
 	if (!index || index->size > TwinCheck::MaxIndexSize)
+#endif
 	{
 		return false;
 	}
@@ -243,10 +258,23 @@ void TwinCheckJob::Run()
 		}
 #endif
 	}
+#ifdef NZBGET_USE_RUST
+	int fallbackFp = nzbget_rs_tpr_twin_check_job_fallback_fingerprint(
+		known ? 1 : 0, fetched ? 1 : 0);
+	if (fallbackFp == 1)
+	{
+		fingerprint = "lost";
+	}
+	else if (fallbackFp == 2)
+	{
+		fingerprint = "none";
+	}
+#else
 	if (!known)
 	{
 		fingerprint = fetched ? "lost" : "none";
 	}
+#endif
 #ifdef NZBGET_USE_RUST
 	int files = known ? nzbget_rs_ccm_twin_check_parse_fingerprint_files(fingerprint.c_str()) : 0;
 #else
@@ -377,11 +405,16 @@ void TwinCheckJob::Sample()
 		size_t segIdx = sampleSegIdx[(size_t)n];
 		ArticleFetcher::FetchedArticle partA = m_fetcher.Fetch(a.segments[segIdx].second.c_str(), a.groups);
 		ArticleFetcher::FetchedArticle partB = m_fetcher.Fetch(b.segments[segIdx].second.c_str(), b.groups);
-		if (partA.Success && partB.Success)
-		{
-			compared++;
-			differ += partA.Offset != partB.Offset || partA.Data != partB.Data;
-		}
+		nzbget_rs_tpr_twin_check_job_compare_sampled_pair(
+			partA.Success ? 1 : 0,
+			partB.Success ? 1 : 0,
+			partA.Offset,
+			partB.Offset,
+			partA.Data == partB.Data ? 1 : 0,
+			compared,
+			differ,
+			&compared,
+			&differ);
 	}
 #else
 	std::vector<std::pair<size_t, size_t>> places;	// file, segment
@@ -535,7 +568,8 @@ std::string TwinCheck::PutPar2(int nzbId, const char* posting, const char* data,
 	size_t tab = result.find('\t');
 	if (complete)
 	{
-		*complete = tab != std::string::npos && result.substr(tab + 1) == "1";
+		*complete = tab != std::string::npos &&
+			nzbget_rs_tpr_twin_check_put_par2_is_complete_flag(result.c_str() + tab + 1) != 0;
 	}
 	return result.substr(0, tab);
 }
@@ -885,7 +919,12 @@ void TwinCheck::ServiceWork()
 	// (not while a fingerprint job runs: it may store a list its posting doesn't
 	// carry the fingerprint of yet)
 	static time_t lastPrune = 0;
+#ifdef NZBGET_USE_RUST
+	bool prune = nzbget_rs_tpr_twin_check_should_prune_store(
+		(int64)Util::CurrentTime(), (int64)lastPrune, 60 * 60, (int)g_jobCount) != 0;
+#else
 	bool prune = Util::CurrentTime() - lastPrune >= 60 * 60 && g_jobCount == 0;
+#endif
 	{
 		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
 		if (prune)
@@ -1005,8 +1044,14 @@ void TwinCheck::ServiceWork()
 					FileSystem::FileExists(nzbInfo->GetQueuedFilename()))
 				{
 					// the dupe tool's hints of a twin go first; they prove nothing
+#ifdef NZBGET_USE_RUST
+					bool hinted = nzbget_rs_tpr_twin_check_is_job_hinted(
+						nzbInfo->GetParameters()->Find("DupeSameSize") != nullptr ? 1 : 0,
+						nzbInfo->GetParameters()->Find("DupeSameInner") != nullptr ? 1 : 0) != 0;
+#else
 					bool hinted = nzbInfo->GetParameters()->Find("DupeSameSize") ||
 						nzbInfo->GetParameters()->Find("DupeSameInner");
+#endif
 					Job job{nzbInfo->GetId(), nzbInfo->GetQueuedFilename(), hinted};
 					job.posting = Posting(nzbInfo);
 					jobs.push_back(std::move(job));
@@ -1196,13 +1241,26 @@ void TwinCheck::ServiceWork()
 		}
 	}
 
+#ifdef NZBGET_USE_RUST
+	std::stable_sort(jobs.begin(), jobs.end(), [](const Job& a, const Job& b)
+		{
+			return nzbget_rs_tpr_twin_check_job_less(
+				a.rank, a.hinted ? 1 : 0, b.rank, b.hinted ? 1 : 0) != 0;
+		});
+#else
 	std::stable_sort(jobs.begin(), jobs.end(), [](const Job& a, const Job& b)
 		{ return a.rank != b.rank ? a.rank < b.rank : a.hinted > b.hinted; });
+#endif
 
 	Guard guard(g_mutex);
 	for (Job& job : jobs)
 	{
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_tpr_twin_check_should_stop_launching_jobs(
+			g_stopping ? 1 : 0, (int)g_jobs.size(), MaxRunning) != 0)
+#else
 		if (g_stopping || (int)g_jobs.size() >= MaxRunning)
+#endif
 		{
 			break;
 		}

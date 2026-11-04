@@ -610,7 +610,13 @@ void HistoryCoordinator::HistoryDelete(DownloadQueue* downloadQueue, HistoryList
 		if (historyInfo->GetKind() == HistoryInfo::hkNzb)
 		{
 			// replace history element
+#ifdef NZBGET_USE_RUST
+			int rindex = nzbget_rs_tpr_history_coord_reverse_delete_index(
+				(int)downloadQueue->GetHistory()->size(),
+				(int)(itHistory - downloadQueue->GetHistory()->begin()));
+#else
 			int rindex = downloadQueue->GetHistory()->size() - 1 - (itHistory - downloadQueue->GetHistory()->begin());
+#endif
 			HistoryHide(downloadQueue, historyInfo, rindex);
 		}
 	}
@@ -774,7 +780,12 @@ void HistoryCoordinator::HistoryRedownload(DownloadQueue* downloadQueue, History
 	}
 
 	NzbInfo* nzbInfo = historyInfo->GetNzbInfo();
+#ifdef NZBGET_USE_RUST
+	bool paused = nzbget_rs_tpr_history_coord_should_restore_paused_on_redownload(
+		restorePauseState ? 1 : 0, nzbInfo->GetDeletePaused() ? 1 : 0) != 0;
+#else
 	bool paused = restorePauseState && nzbInfo->GetDeletePaused();
+#endif
 
 	if (!FileSystem::FileExists(nzbInfo->GetQueuedFilename()))
 	{

@@ -605,7 +605,13 @@ int DirectRenamer::RenameFilesInProgress(NzbInfo* nzbInfo, FileHashList* parHash
 		);
 
 		// Create hardlink and save the path in fileInfo
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_tpr_direct_renamer_needs_ignore_ext_pass(
+			g_Options->GetHardLinking() ? 1 : 0,
+			Util::MatchFileExt(newName.c_str(), g_Options->GetHardLinkingIgnoreExt(), ",") ? 1 : 0) != 0)
+#else
 		if (g_Options->GetHardLinking() && !Util::MatchFileExt(newName.c_str(), g_Options->GetHardLinkingIgnoreExt(), ","))
+#endif
 		{
 			fs::error_code ec;
 			if (!fs::exists(oldOutputFilename, ec))
@@ -705,7 +711,14 @@ int DirectRenamer::RenameCompletedFiles(NzbInfo* nzbInfo, FileHashList* parHashe
 			completedFile.GetFilename(), newName.c_str()
 		);
 
+#ifdef NZBGET_USE_RUST
+		if (!Util::EmptyStr(g_Options->GetInterDir()) &&
+			nzbget_rs_tpr_direct_renamer_needs_ignore_ext_pass(
+				g_Options->GetHardLinking() ? 1 : 0,
+				Util::MatchFileExt(newName.c_str(), g_Options->GetHardLinkingIgnoreExt(), ",") ? 1 : 0) != 0)
+#else
 		if (!Util::EmptyStr(g_Options->GetInterDir()) && g_Options->GetHardLinking() && !Util::MatchFileExt(newName.c_str(), g_Options->GetHardLinkingIgnoreExt(), ","))
+#endif
 		{
 			fs::error_code ec;
 			if (!fs::exists(oldOutputFilename, ec))

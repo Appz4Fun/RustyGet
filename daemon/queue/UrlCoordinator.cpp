@@ -137,7 +137,14 @@ void UrlCoordinator::Run()
 			if ((int)m_activeDownloads.size() < g_Options->GetUrlConnections())
 			{
 				nzbInfo = GetNextUrl(downloadQueue);
+#ifdef NZBGET_USE_RUST
+				if (nzbget_rs_fuq_url_coord_should_start_download(
+					nzbInfo != nullptr ? 1 : 0,
+					g_WorkState->GetPauseDownload() ? 1 : 0,
+					g_Options->GetUrlForce() ? 1 : 0) != 0)
+#else
 				if (nzbInfo && (!g_WorkState->GetPauseDownload() || g_Options->GetUrlForce()))
+#endif
 				{
 					StartUrlDownload(nzbInfo);
 					downloadStarted = true;
@@ -160,7 +167,11 @@ void UrlCoordinator::Run()
 		}
 		else
 		{
+#ifdef NZBGET_USE_RUST
+			int sleepInterval = nzbget_rs_fuq_url_coord_calc_sleep_interval(downloadStarted ? 1 : 0);
+#else
 			int sleepInterval = downloadStarted ? 0 : 100;
+#endif
 			Util::Sleep(sleepInterval);
 		}
 	}
@@ -348,9 +359,17 @@ void UrlCoordinator::Update(Subject* caller, void*)
 	debug("Notification from UrlDownloader received");
 
 	UrlDownloader* urlDownloader = (UrlDownloader*)caller;
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_fuq_url_coord_is_completed_status(
+		(int)urlDownloader->GetStatus(),
+		(int)WebDownloader::adFinished,
+		(int)WebDownloader::adFailed,
+		(int)WebDownloader::adRetry) != 0)
+#else
 	if ((urlDownloader->GetStatus() == WebDownloader::adFinished) ||
 		(urlDownloader->GetStatus() == WebDownloader::adFailed) ||
 		(urlDownloader->GetStatus() == WebDownloader::adRetry))
+#endif
 	{
 		UrlCompleted(urlDownloader);
 	}
@@ -488,7 +507,13 @@ void UrlCoordinator::UrlCompleted(UrlDownloader* urlDownloader)
 			return;
 		}
 
+#ifdef NZBGET_USE_RUST
+		nzbInfo->SetUrlStatus((NzbInfo::EUrlStatus)nzbget_rs_fuq_url_coord_resolve_scan_fail_status(
+			(int)addStatus, (int)Scanner::asFailed,
+			(int)NzbInfo::lsScanFailed, (int)NzbInfo::lsScanSkipped));
+#else
 		nzbInfo->SetUrlStatus(addStatus == Scanner::asFailed ? NzbInfo::lsScanFailed : NzbInfo::lsScanSkipped);
+#endif
 	}
 
 	// the rest of function is only for failed URLs or for failed scans

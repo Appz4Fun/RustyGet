@@ -244,9 +244,18 @@ void DirectUnpack::ExecuteUnrar(const char* archiveName)
 	m_waitingVolume = false;
 	SetLogPrefix(nullptr);
 
+#ifdef NZBGET_USE_RUST
+	int unpackOkInt = 0, interruptedInt = 0;
+	nzbget_rs_fuq_direct_unpack_eval_unrar_result(
+		exitCode, m_allOkMessageReceived ? 1 : 0, GetTerminated() ? 1 : 0,
+		m_cancelled ? 1 : 0, IsStopped() ? 1 : 0, &unpackOkInt, &interruptedInt);
+	m_unpackOk = unpackOkInt != 0;
+	bool interrupted = interruptedInt != 0;
+#else
 	m_unpackOk = exitCode == 0 && m_allOkMessageReceived && !GetTerminated() && !m_cancelled;
 
 	bool interrupted = !m_cancelled && (IsStopped() || GetTerminated());
+#endif
 	if (!m_unpackOk && exitCode > 0 && !interrupted)
 	{
 		PrintMessage(Message::mkError, "Unrar error code: %i", exitCode);

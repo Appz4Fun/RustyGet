@@ -239,7 +239,14 @@ void QueueCoordinator::Run()
 				: m_downloadsLimit;
 			bool canProceed = !IsStopped() && Util::SafeIntCast<size_t, int>(m_activeDownloads.size()) < effectiveLimit;
 
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_fuq_queue_coord_can_start_article(
+				hasMoreArticles ? 1 : 0, canProceed ? 1 : 0,
+				g_WorkState->GetDownloadHeld() ? 1 : 0,
+				(fileInfo && fileInfo->GetExtraPriority()) ? 1 : 0) != 0)
+#else
 			if (hasMoreArticles && canProceed && (!g_WorkState->GetDownloadHeld() || fileInfo->GetExtraPriority()))
+#endif
 			{
 				NntpConnection* connection = nullptr;
 			
@@ -301,7 +308,11 @@ void QueueCoordinator::Run()
 		{
 			// sleeping max. 2 seconds; can't sleep much longer because we can't rely on
 			// notifications from 'WorkState' and we also have periodical work to do here
+#ifdef NZBGET_USE_RUST
+			waitInterval = nzbget_rs_fuq_queue_coord_next_standby_wait(waitInterval);
+#else
 			waitInterval = std::min(waitInterval * 2, 2000);
+#endif
 
 			// woken by WakeUp (new work), not by m_hasMoreJobs: queued articles that
 			// can't start (downloads held while post-processing pauses the queue, no
@@ -313,7 +324,11 @@ void QueueCoordinator::Run()
 		}
 		else
 		{
+#ifdef NZBGET_USE_RUST
+			int sleepInterval = nzbget_rs_fuq_queue_coord_active_sleep_interval(downloadStarted ? 1 : 0);
+#else
 			int sleepInterval = downloadStarted ? 0 : 5;
+#endif
 			Util::Sleep(sleepInterval);
 			g_StatMeter->AddSpeedReading(0);
 			waitInterval = 100;
@@ -524,8 +539,13 @@ void QueueCoordinator::CheckDupeFileInfos(NzbInfo* nzbInfo)
 		}
 		const auto& self = same[0].second == fileInfo ? same[0] : same[1];
 		const auto& other = same[0].second == fileInfo ? same[1] : same[0];
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_fuq_queue_coord_is_smaller_dupe_file(
+			fileInfo->GetSize(), self.first, other.second->GetSize(), other.first) != 0)
+#else
 		if (fileInfo->GetSize() < other.second->GetSize() ||
 			(fileInfo->GetSize() == other.second->GetSize() && other.first < self.first))
+#endif
 		{
 			warn("File \"%s\" appears twice in collection, adding only the biggest file", fileInfo->GetFilename());
 			dupeList.push_back(fileInfo);
@@ -587,10 +607,19 @@ bool QueueCoordinator::GetNextArticle(DownloadQueue* downloadQueue, FileInfo* &f
 
 		for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
 		{
+#ifdef NZBGET_USE_RUST
+			bool nzbHigherPriority = nzbget_rs_fuq_queue_coord_is_higher_nzb_priority(
+				fileInfo != nullptr ? 1 : 0,
+				nzbInfo->HasExtraPriority() ? 1 : 0,
+				(fileInfo && fileInfo->GetNzbInfo()->HasExtraPriority()) ? 1 : 0,
+				nzbInfo->GetPriority(),
+				fileInfo ? fileInfo->GetNzbInfo()->GetPriority() : 0) != 0;
+#else
 			bool nzbHigherPriority = fileInfo &&
 				((nzbInfo->HasExtraPriority() == fileInfo->GetNzbInfo()->HasExtraPriority() &&
 					nzbInfo->GetPriority() > fileInfo->GetNzbInfo()->GetPriority()) ||
 					(nzbInfo->HasExtraPriority() > fileInfo->GetNzbInfo()->HasExtraPriority()));
+#endif
 
 			bool nzbPaused = nzbInfo->GetFileList()->size() - nzbInfo->GetPausedFileCount() <= 0;
 
@@ -796,8 +825,15 @@ void QueueCoordinator::StartArticleDownload(FileInfo* fileInfo, ArticleInfo* art
 
 	// the first article is analyzed for direct-rename, and for duplicate recovery
 	// (which never writes into par2 data, see DupeArticleFallback::TryFallback)
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_fuq_queue_coord_should_analyze_first_article(
+		articleInfo->GetPartNumber(), g_Options->GetRawArticle() ? 1 : 0,
+		g_Options->GetDirectRename() ? 1 : 0,
+		g_Options->GetDupeArticleFallback() != Options::dafNone ? 1 : 0) != 0)
+#else
 	if (articleInfo->GetPartNumber() == 1 && !g_Options->GetRawArticle() &&
 		(g_Options->GetDirectRename() || g_Options->GetDupeArticleFallback() != Options::dafNone))
+#endif
 	{
 		articleDownloader->SetContentAnalyzer(m_directRenamer.MakeArticleContentAnalyzer());
 	}
@@ -825,10 +861,19 @@ void QueueCoordinator::Update(Subject* caller, void* aspect)
 	debug("Notification from ArticleDownloader received");
 
 	ArticleDownloader* articleDownloader = static_cast<ArticleDownloader*>(caller);
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_fuq_queue_coord_is_article_completed_status(
+		(int)articleDownloader->GetStatus(),
+		(int)ArticleDownloader::adFinished,
+		(int)ArticleDownloader::adFailed,
+		(int)ArticleDownloader::adRetry,
+		(int)ArticleDownloader::adFatalError) != 0)
+#else
 	if ((articleDownloader->GetStatus() == ArticleDownloader::adFinished) ||
 		(articleDownloader->GetStatus() == ArticleDownloader::adFailed) ||
 		(articleDownloader->GetStatus() == ArticleDownloader::adRetry) ||
 		(articleDownloader->GetStatus() == ArticleDownloader::adFatalError))
+#endif
 	{
 		ArticleCompleted(articleDownloader);
 	}
@@ -1006,10 +1051,18 @@ void QueueCoordinator::ArticleCompleted(ArticleDownloader* articleDownloader)
 		{
 			// in "FileNaming=auto"-mode prefer filename from nzb-file to filename read from article
 			// if the name from article seems to be obfuscated
+#ifdef NZBGET_USE_RUST
+			bool useFilenameFromArticle = nzbget_rs_fuq_queue_coord_should_use_article_filename(
+				(int)g_Options->GetFileNaming(), (int)Options::nfArticle, (int)Options::nfAuto,
+				g_Options->GetFileNaming() == Options::nfAuto &&
+					Deobfuscation::IsExcessivelyObfuscated(articleDownloader->GetArticleFilename()) ? 1 : 0,
+				nzbInfo->GetManyDupeFiles() ? 1 : 0) != 0;
+#else
 			bool useFilenameFromArticle = g_Options->GetFileNaming() == Options::nfArticle ||
 				(g_Options->GetFileNaming() == Options::nfAuto &&
 				 !Deobfuscation::IsExcessivelyObfuscated(articleDownloader->GetArticleFilename()) &&
 				 !nzbInfo->GetManyDupeFiles());
+#endif
 			if (useFilenameFromArticle)
 			{
 				fileInfo->SetFilename(articleDownloader->GetArticleFilename());
@@ -1179,8 +1232,13 @@ void QueueCoordinator::DeleteDownloader(DownloadQueue* downloadQueue,
 {
 	FileInfo* fileInfo = articleDownloader->GetFileInfo();
 	NzbInfo* nzbInfo = fileInfo->GetNzbInfo();
+#ifdef NZBGET_USE_RUST
+	bool deleteFileObj = nzbget_rs_fuq_queue_coord_should_delete_file_obj(
+		fileCompleted ? 1 : 0, fileInfo->GetDeleted() ? 1 : 0, fileInfo->GetActiveDownloads()) != 0;
+#else
 	bool hasOtherDownloaders = fileInfo->GetActiveDownloads() > 1;
 	bool deleteFileObj = fileCompleted || (fileInfo->GetDeleted() && !hasOtherDownloaders);
+#endif
 
 	// remove downloader from downloader list
 	m_activeDownloads.erase(std::find(m_activeDownloads.begin(), m_activeDownloads.end(), articleDownloader));
@@ -1694,12 +1752,29 @@ void QueueCoordinator::SaveAllFileState()
 
 void QueueCoordinator::CheckHealth(DownloadQueue* downloadQueue, FileInfo* fileInfo)
 {
+#ifdef NZBGET_USE_RUST
+	int health = fileInfo->GetNzbInfo()->CalcHealth();
+	int critHealth = (g_Options->GetHealthCheck() == Options::hcNone ||
+		fileInfo->GetNzbInfo()->GetHealthPaused() ||
+		fileInfo->GetNzbInfo()->GetDeleteStatus() == NzbInfo::dsHealth)
+		? 0
+		: DownloadCriticalHealth(downloadQueue, fileInfo->GetNzbInfo());
+	if (nzbget_rs_fuq_queue_coord_should_skip_health_check(
+		(int)g_Options->GetHealthCheck(), (int)Options::hcNone, (int)Options::hcPark,
+		(int)g_Options->GetParScan(), (int)Options::psDupe,
+		fileInfo->GetNzbInfo()->GetHealthPaused() ? 1 : 0,
+		(int)fileInfo->GetNzbInfo()->GetDeleteStatus(), (int)NzbInfo::dsHealth,
+		health, critHealth,
+		fileInfo->GetNzbInfo()->GetSuccessArticles(),
+		fileInfo->GetNzbInfo()->GetTotalArticles()) != 0)
+#else
 	if (g_Options->GetHealthCheck() == Options::hcNone ||
 		fileInfo->GetNzbInfo()->GetHealthPaused() ||
 		fileInfo->GetNzbInfo()->GetDeleteStatus() == NzbInfo::dsHealth ||
 		fileInfo->GetNzbInfo()->CalcHealth() >= DownloadCriticalHealth(downloadQueue, fileInfo->GetNzbInfo()) ||
 		(g_Options->GetParScan() == Options::psDupe && g_Options->GetHealthCheck() == Options::hcPark &&
 		 fileInfo->GetNzbInfo()->GetSuccessArticles() * 100 / fileInfo->GetNzbInfo()->GetTotalArticles() > 10))
+#endif
 	{
 		return;
 	}
@@ -1741,12 +1816,22 @@ void QueueCoordinator::CheckHealth(DownloadQueue* downloadQueue, FileInfo* fileI
 int QueueCoordinator::DownloadCriticalHealth(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 {
 	int critical = nzbInfo->CalcCriticalHealth(true);
+#ifdef NZBGET_USE_RUST
+	int criticalExact = nzbInfo->CalcCriticalHealth(false);
+	bool parless = (g_Options->GetHealthCheck() == Options::hcDupe && criticalExact == 1000)
+		? CertainlyParless(nzbInfo) : false;
+	bool sizeTwin = parless ? HasSizeTwin(downloadQueue, nzbInfo) : false;
+	return nzbget_rs_fuq_queue_coord_resolve_download_critical_health(
+		critical, criticalExact, (int)g_Options->GetHealthCheck(), (int)Options::hcDupe,
+		parless ? 1 : 0, sizeTwin ? 1 : 0);
+#else
 	if (g_Options->GetHealthCheck() != Options::hcDupe || nzbInfo->CalcCriticalHealth(false) != 1000 ||
 		!CertainlyParless(nzbInfo) || HasSizeTwin(downloadQueue, nzbInfo))
 	{
 		return critical;
 	}
 	return 1000;
+#endif
 }
 
 bool QueueCoordinator::CertainlyParless(NzbInfo* nzbInfo)
@@ -1894,6 +1979,25 @@ bool QueueCoordinator::HasActiveDupe(DownloadQueue* downloadQueue, NzbInfo* nzbI
 			!Util::EmptyStr(queued->GetDupeKey()) &&
 			!strcasecmp(queued->GetDupeKey(), dupeKey))
 		{
+#ifdef NZBGET_USE_RUST
+			PostInfo* qpi = queued->GetPostInfo();
+			if (nzbget_rs_fuq_queue_coord_is_queued_dupe_active(
+				queued->GetDeleting() ? 1 : 0,
+				(int)queued->GetDeleteStatus(),
+				(int)NzbInfo::dsNone,
+				queued->GetActiveDownloads(),
+				qpi != nullptr ? 1 : 0,
+				(qpi && qpi->GetWorking()) ? 1 : 0,
+				qpi ? (int)qpi->GetStage() : 0,
+				(int)PostInfo::ptQueued,
+				queued->HasExtraPriority() ? 1 : 0,
+				nzbInfo->GetCompletedFiles()->empty() ? 1 : 0,
+				(int)queued->GetDirectUnpackStatus(),
+				(int)NzbInfo::nsRunning) != 0)
+			{
+				return true;
+			}
+#else
 			// Ignore jobs that are being deleted and have finished draining active downloads
 			if ((queued->GetDeleting() || queued->GetDeleteStatus() != NzbInfo::dsNone) &&
 				queued->GetActiveDownloads() == 0)
@@ -1913,6 +2017,7 @@ bool QueueCoordinator::HasActiveDupe(DownloadQueue* downloadQueue, NzbInfo* nzbI
 			{
 				return true;
 			}
+#endif
 		}
 	}
 
@@ -2397,8 +2502,14 @@ void QueueCoordinator::FailOverDeadPick(DownloadQueue* downloadQueue, int nzbId,
 	// abandoned here (the regular health check handles partial damage). Articles
 	// borrowed from duplicates since it started don't count: they say nothing
 	// about its own posting (B39); nor does a single stray one (B45)
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_fuq_queue_coord_should_abort_dead_pick_failover(
+		nzbInfo->GetCurrentSuccessArticles(), nzbInfo->GetDupeRecoveredArticles(),
+		recoveredAtStart, DupeProbe::MinAliveSamples) != 0)
+#else
 	int borrowed = nzbInfo->GetDupeRecoveredArticles() - recoveredAtStart;
 	if (nzbInfo->GetCurrentSuccessArticles() - std::max(0, borrowed) >= DupeProbe::MinAliveSamples)
+#endif
 	{
 		return;
 	}

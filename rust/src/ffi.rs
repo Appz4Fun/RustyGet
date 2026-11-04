@@ -16175,5 +16175,475 @@ pub unsafe extern "C" fn nzbget_rs_ntw_xmlrpc_validate_reset_counter(
     crate::nntptlsweb::xmlrpc_validate_reset_counter(input(counter))
 }
 
+// ============================================================================
+// feedurlqueue FFI exports (nzbget_rs_fuq_*)
+// ============================================================================
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_fuq_feed_coord_should_cleanup_history(
+    cur_time: i64,
+    last_cleanup: i64,
+) -> c_int {
+    i32::from(crate::feedurlqueue::feed_coord_should_cleanup_history(
+        cur_time,
+        last_cleanup,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_fuq_feed_coord_calc_wait_interval(
+    url_force: c_int,
+    feeds_empty: c_int,
+) -> c_int {
+    crate::feedurlqueue::feed_coord_calc_wait_interval(url_force != 0, feeds_empty != 0)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_fuq_feed_coord_is_hanging_download(
+    cur_time: i64,
+    last_update: i64,
+    url_timeout: c_int,
+    status: c_int,
+    ad_running: c_int,
+) -> c_int {
+    i32::from(crate::feedurlqueue::feed_coord_is_hanging_download(
+        cur_time,
+        last_update,
+        url_timeout,
+        status,
+        ad_running,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fuq_feed_coord_resolve_category(
+    feed_cat: *const c_char,
+    cat_source: c_int,
+    cs_nzb_file: c_int,
+    cs_auto: c_int,
+    item_cat: *const c_char,
+) -> *const c_char {
+    const EMPTY: &[u8] = b"\0";
+    let fc = input(feed_cat);
+    let ic = input(item_cat);
+    let res = crate::feedurlqueue::feed_coord_resolve_category(
+        fc,
+        cat_source,
+        cs_nzb_file,
+        cs_auto,
+        ic,
+    );
+    if res.is_empty() {
+        EMPTY.as_ptr().cast::<c_char>()
+    } else if std::ptr::eq(res.as_ptr(), ic.as_ptr()) {
+        item_cat
+    } else {
+        feed_cat
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fuq_feed_coord_classify_item_history(
+    first_fetch: c_int,
+    backlog: c_int,
+    has_history: c_int,
+    hs_unknown: c_int,
+    hs_backlog: c_int,
+    hs_fetched: c_int,
+    out_should_add: *mut c_int,
+) -> c_int {
+    let (status, should_add) = crate::feedurlqueue::feed_coord_classify_item_history(
+        first_fetch != 0,
+        backlog != 0,
+        has_history != 0,
+        hs_unknown,
+        hs_backlog,
+        hs_fetched,
+    );
+    if !out_should_add.is_null() {
+        *out_should_add = i32::from(should_add);
+    }
+    status
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_fuq_feed_coord_calc_history_border_date(
+    oldest_update: i64,
+    feed_history_days: c_int,
+) -> i64 {
+    crate::feedurlqueue::feed_coord_calc_history_border_date(oldest_update, feed_history_days)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_fuq_url_coord_should_start_download(
+    has_nzb: c_int,
+    pause_download: c_int,
+    url_force: c_int,
+) -> c_int {
+    i32::from(crate::feedurlqueue::url_coord_should_start_download(
+        has_nzb != 0,
+        pause_download != 0,
+        url_force != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_fuq_url_coord_calc_sleep_interval(download_started: c_int) -> c_int {
+    crate::feedurlqueue::url_coord_calc_sleep_interval(download_started != 0)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_fuq_url_coord_is_completed_status(
+    status: c_int,
+    ad_finished: c_int,
+    ad_failed: c_int,
+    ad_retry: c_int,
+) -> c_int {
+    i32::from(crate::feedurlqueue::url_coord_is_completed_status(
+        status,
+        ad_finished,
+        ad_failed,
+        ad_retry,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_fuq_url_coord_resolve_scan_fail_status(
+    add_status: c_int,
+    as_failed: c_int,
+    ls_scan_failed: c_int,
+    ls_scan_skipped: c_int,
+) -> c_int {
+    crate::feedurlqueue::url_coord_resolve_scan_fail_status(
+        add_status,
+        as_failed,
+        ls_scan_failed,
+        ls_scan_skipped,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_fuq_queue_coord_can_start_article(
+    has_more: c_int,
+    can_proceed: c_int,
+    download_held: c_int,
+    extra_priority: c_int,
+) -> c_int {
+    i32::from(crate::feedurlqueue::queue_coord_can_start_article(
+        has_more != 0,
+        can_proceed != 0,
+        download_held != 0,
+        extra_priority != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_fuq_queue_coord_next_standby_wait(wait_interval: c_int) -> c_int {
+    crate::feedurlqueue::queue_coord_next_standby_wait(wait_interval)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_fuq_queue_coord_active_sleep_interval(
+    download_started: c_int,
+) -> c_int {
+    crate::feedurlqueue::queue_coord_active_sleep_interval(download_started != 0)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_fuq_queue_coord_is_smaller_dupe_file(
+    size1: i64,
+    idx1: c_int,
+    size2: i64,
+    idx2: c_int,
+) -> c_int {
+    i32::from(crate::feedurlqueue::queue_coord_is_smaller_dupe_file(
+        size1, idx1, size2, idx2,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_fuq_queue_coord_is_higher_nzb_priority(
+    has_file: c_int,
+    nzb_extra: c_int,
+    file_nzb_extra: c_int,
+    nzb_prio: c_int,
+    file_nzb_prio: c_int,
+) -> c_int {
+    i32::from(crate::feedurlqueue::queue_coord_is_higher_nzb_priority(
+        has_file != 0,
+        nzb_extra != 0,
+        file_nzb_extra != 0,
+        nzb_prio,
+        file_nzb_prio,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_fuq_queue_coord_should_analyze_first_article(
+    part_num: c_int,
+    raw_article: c_int,
+    direct_rename: c_int,
+    dupe_fallback_enabled: c_int,
+) -> c_int {
+    i32::from(crate::feedurlqueue::queue_coord_should_analyze_first_article(
+        part_num,
+        raw_article != 0,
+        direct_rename != 0,
+        dupe_fallback_enabled != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_fuq_queue_coord_is_article_completed_status(
+    status: c_int,
+    ad_finished: c_int,
+    ad_failed: c_int,
+    ad_retry: c_int,
+    ad_fatal_error: c_int,
+) -> c_int {
+    i32::from(crate::feedurlqueue::queue_coord_is_article_completed_status(
+        status,
+        ad_finished,
+        ad_failed,
+        ad_retry,
+        ad_fatal_error,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_fuq_queue_coord_should_use_article_filename(
+    file_naming: c_int,
+    nf_article: c_int,
+    nf_auto: c_int,
+    is_obfuscated: c_int,
+    many_dupe_files: c_int,
+) -> c_int {
+    i32::from(crate::feedurlqueue::queue_coord_should_use_article_filename(
+        file_naming,
+        nf_article,
+        nf_auto,
+        is_obfuscated != 0,
+        many_dupe_files != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_fuq_queue_coord_should_delete_file_obj(
+    file_completed: c_int,
+    file_deleted: c_int,
+    active_downloads: c_int,
+) -> c_int {
+    i32::from(crate::feedurlqueue::queue_coord_should_delete_file_obj(
+        file_completed != 0,
+        file_deleted != 0,
+        active_downloads,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_fuq_queue_coord_should_skip_health_check(
+    health_check: c_int,
+    hc_none: c_int,
+    hc_park: c_int,
+    par_scan: c_int,
+    ps_dupe: c_int,
+    health_paused: c_int,
+    delete_status: c_int,
+    ds_health: c_int,
+    health: c_int,
+    critical_health: c_int,
+    success_articles: c_int,
+    total_articles: c_int,
+) -> c_int {
+    i32::from(crate::feedurlqueue::queue_coord_should_skip_health_check(
+        health_check,
+        hc_none,
+        hc_park,
+        par_scan,
+        ps_dupe,
+        health_paused != 0,
+        delete_status,
+        ds_health,
+        health,
+        critical_health,
+        success_articles,
+        total_articles,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_fuq_queue_coord_resolve_download_critical_health(
+    critical_est: c_int,
+    critical_exact: c_int,
+    health_check: c_int,
+    hc_dupe: c_int,
+    certainly_parless: c_int,
+    has_size_twin: c_int,
+) -> c_int {
+    crate::feedurlqueue::queue_coord_resolve_download_critical_health(
+        critical_est,
+        critical_exact,
+        health_check,
+        hc_dupe,
+        certainly_parless != 0,
+        has_size_twin != 0,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_fuq_queue_coord_is_queued_dupe_active(
+    deleting: c_int,
+    delete_status: c_int,
+    ds_none: c_int,
+    active_downloads: c_int,
+    has_post_info: c_int,
+    post_working: c_int,
+    post_stage: c_int,
+    pt_queued: c_int,
+    extra_priority: c_int,
+    self_completed_empty: c_int,
+    direct_unpack_status: c_int,
+    ns_running: c_int,
+) -> c_int {
+    i32::from(crate::feedurlqueue::queue_coord_is_queued_dupe_active(
+        deleting != 0,
+        delete_status,
+        ds_none,
+        active_downloads,
+        has_post_info != 0,
+        post_working != 0,
+        post_stage,
+        pt_queued,
+        extra_priority != 0,
+        self_completed_empty != 0,
+        direct_unpack_status,
+        ns_running,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_fuq_queue_coord_should_abort_dead_pick_failover(
+    cur_success: c_int,
+    dupe_recovered: c_int,
+    recovered_at_start: c_int,
+    min_alive_samples: c_int,
+) -> c_int {
+    i32::from(
+        crate::feedurlqueue::queue_coord_should_abort_dead_pick_failover(
+            cur_success,
+            dupe_recovered,
+            recovered_at_start,
+            min_alive_samples,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_fuq_options_normalize_time_correction(raw_val: c_int) -> c_int {
+    crate::feedurlqueue::options_normalize_time_correction(raw_val)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fuq_options_clamp_32bit_memory_limits(
+    is_32bit: c_int,
+    article_cache: c_int,
+    par_buffer: c_int,
+    out_article_cache: *mut c_int,
+    out_par_buffer: *mut c_int,
+) -> c_int {
+    let (ac, pb, err) = crate::feedurlqueue::options_clamp_32bit_memory_limits(
+        is_32bit != 0,
+        article_cache,
+        par_buffer,
+    );
+    if !out_article_cache.is_null() {
+        *out_article_cache = ac;
+    }
+    if !out_par_buffer.is_null() {
+        *out_par_buffer = pb;
+    }
+    err
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_fuq_prepost_should_complete_after_direct_rename(
+    is_stopped: c_int,
+    direct_rename_status: c_int,
+    ts_success: c_int,
+    has_post_info: c_int,
+    delete_status: c_int,
+    ds_none: c_int,
+    completed_not_empty: c_int,
+    download_completed: c_int,
+    raw_article: c_int,
+    skip_write: c_int,
+    skip_disk_write: c_int,
+) -> c_int {
+    i32::from(
+        crate::feedurlqueue::prepost_should_complete_after_direct_rename(
+            is_stopped != 0,
+            direct_rename_status,
+            ts_success,
+            has_post_info != 0,
+            delete_status,
+            ds_none,
+            completed_not_empty != 0,
+            download_completed != 0,
+            raw_article != 0,
+            skip_write != 0,
+            skip_disk_write != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fuq_repair_ctrl_calc_par_check_times(
+    cur_dl_sec: c_int,
+    start_dl_sec: c_int,
+    cur_time: i64,
+    par_time: i64,
+    out_wait_time: *mut c_int,
+    out_par_sec: *mut c_int,
+) {
+    let (wt, ps) = crate::feedurlqueue::repair_ctrl_calc_par_check_times(
+        cur_dl_sec,
+        start_dl_sec,
+        cur_time,
+        par_time,
+    );
+    if !out_wait_time.is_null() {
+        *out_wait_time = wt;
+    }
+    if !out_par_sec.is_null() {
+        *out_par_sec = ps;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fuq_direct_unpack_eval_unrar_result(
+    exit_code: c_int,
+    all_ok_msg: c_int,
+    terminated: c_int,
+    cancelled: c_int,
+    stopped: c_int,
+    out_unpack_ok: *mut c_int,
+    out_interrupted: *mut c_int,
+) {
+    let (ok, intr) = crate::feedurlqueue::direct_unpack_eval_unrar_result(
+        exit_code,
+        all_ok_msg != 0,
+        terminated != 0,
+        cancelled != 0,
+        stopped != 0,
+    );
+    if !out_unpack_ok.is_null() {
+        *out_unpack_ok = i32::from(ok);
+    }
+    if !out_interrupted.is_null() {
+        *out_interrupted = i32::from(intr);
+    }
+}
+
+
 
 

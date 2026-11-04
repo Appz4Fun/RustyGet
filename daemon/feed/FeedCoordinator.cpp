@@ -217,7 +217,12 @@ void FeedCoordinator::Run()
 		CheckSaveFeeds();
 		ResetHangingDownloads();
 
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_fuq_feed_coord_should_cleanup_history(
+			(int64_t)Util::CurrentTime(), (int64_t)lastCleanup) != 0)
+#else
 		if (std::abs(Util::CurrentTime() - lastCleanup) >= 60)
+#endif
 		{
 			// clean up feed history once a minute
 			CleanupHistory();
@@ -242,7 +247,12 @@ void FeedCoordinator::Run()
 			//    is changed. We detect this via notification from 'WorkState'. However such
 			//    notifications are not 100% reliable due to possible race conditions. Therefore
 			//    we sleep for max. 5 seconds.
+#ifdef NZBGET_USE_RUST
+			int waitInterval = nzbget_rs_fuq_feed_coord_calc_wait_interval(
+				g_Options->GetUrlForce() ? 1 : 0, m_feeds.empty() ? 1 : 0);
+#else
 			int waitInterval = g_Options->GetUrlForce() || m_feeds.empty() ? 60000 : 5000;
+#endif
 			m_waitCond.wait_for(lk, std::chrono::milliseconds(waitInterval), [&]{ return m_force || IsStopped(); });
 		}
 	}
@@ -301,8 +311,15 @@ void FeedCoordinator::ResetHangingDownloads()
 
 	for (FeedDownloader* feedDownloader: m_activeDownloads)
 	{
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_fuq_feed_coord_is_hanging_download(
+			(int64_t)tm, (int64_t)feedDownloader->GetLastUpdateTime(),
+			g_Options->GetUrlTimeout(), (int)feedDownloader->GetStatus(),
+			(int)FeedDownloader::adRunning) != 0)
+#else
 		if (tm - feedDownloader->GetLastUpdateTime() > g_Options->GetUrlTimeout() + 10 &&
 			feedDownloader->GetStatus() == FeedDownloader::adRunning)
+#endif
 		{
 			error("Cancelling hanging feed download %s", feedDownloader->GetInfoName());
 			feedDownloader->Stop();
@@ -468,6 +485,14 @@ void FeedCoordinator::SchedulerNextUpdate(FeedInfo* feedInfo, bool success)
 
 std::string FeedCoordinator::ResolveCategory(const FeedInfo& feedInfo, const FeedItemInfo& feedItemInfo)
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_fuq_feed_coord_resolve_category(
+		feedInfo.GetCategory(),
+		(int)feedInfo.GetCategorySource(),
+		(int)FeedInfo::CategorySource::NZBFile,
+		(int)FeedInfo::CategorySource::Auto,
+		feedItemInfo.GetCategory());
+#else
 	const char* feedCategory = feedInfo.GetCategory();
 	if (!Util::EmptyStr(feedCategory))
 	{
@@ -486,6 +511,7 @@ std::string FeedCoordinator::ResolveCategory(const FeedInfo& feedInfo, const Fee
 		default:
 			return "";
 	}
+#endif
 }
 
 void FeedCoordinator::FilterFeed(FeedInfo* feedInfo, FeedItemList* feedItems)
@@ -533,6 +559,20 @@ std::vector<std::unique_ptr<NzbInfo>> FeedCoordinator::ProcessFeed(FeedInfo* fee
 		if (feedItemInfo.GetMatchStatus() == FeedItemInfo::msAccepted)
 		{
 			FeedHistoryInfo* feedHistoryInfo = m_feedHistory.Find(feedItemInfo.GetUrl());
+#ifdef NZBGET_USE_RUST
+			int shouldAdd = 0;
+			FeedHistoryInfo::EStatus status = (FeedHistoryInfo::EStatus)nzbget_rs_fuq_feed_coord_classify_item_history(
+				firstFetch ? 1 : 0, feedInfo->GetBacklog() ? 1 : 0, feedHistoryInfo != nullptr ? 1 : 0,
+				(int)FeedHistoryInfo::hsUnknown, (int)FeedHistoryInfo::hsBacklog,
+				(int)FeedHistoryInfo::hsFetched, &shouldAdd);
+			if (shouldAdd != 0)
+			{
+				debug("Download %s from %s", feedItemInfo.GetUrl(), feedInfo->GetName());
+
+				addedNzbs.push_back(m_nzbInfoCreator.Create(*feedInfo, feedItemInfo));
+				added++;
+			}
+#else
 			FeedHistoryInfo::EStatus status = FeedHistoryInfo::hsUnknown;
 			if (firstFetch && feedInfo->GetBacklog())
 			{
@@ -546,6 +586,7 @@ std::vector<std::unique_ptr<NzbInfo>> FeedCoordinator::ProcessFeed(FeedInfo* fee
 				status = FeedHistoryInfo::hsFetched;
 				added++;
 			}
+#endif
 
 			if (feedHistoryInfo)
 			{
@@ -782,7 +823,12 @@ void FeedCoordinator::CleanupHistory()
 		}
 	}
 
+#ifdef NZBGET_USE_RUST
+	time_t borderDate = (time_t)nzbget_rs_fuq_feed_coord_calc_history_border_date(
+		(int64_t)oldestUpdate, g_Options->GetFeedHistory());
+#else
 	time_t borderDate = oldestUpdate - g_Options->GetFeedHistory() * 60*60*24;
+#endif
 
 	m_feedHistory.erase(std::remove_if(m_feedHistory.begin(), m_feedHistory.end(),
 		[borderDate, this](FeedHistoryInfo& feedHistoryInfo)

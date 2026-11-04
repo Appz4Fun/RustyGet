@@ -713,12 +713,17 @@ void Options::InitOptions()
 	m_parTimeLimit			= ParseIntValue(PARTIMELIMIT.data(), 10);
 	m_keepHistory			= ParseIntValue(KEEPHISTORY.data(), 10);
 	m_feedHistory			= ParseIntValue(FEEDHISTORY.data(), 10);
+#ifdef NZBGET_USE_RUST
+	m_timeCorrection = nzbget_rs_fuq_options_normalize_time_correction(
+		ParseIntValue(TIMECORRECTION.data(), 10));
+#else
 	m_timeCorrection		= ParseIntValue(TIMECORRECTION.data(), 10);
 	if (-24 <= m_timeCorrection && m_timeCorrection <= 24)
 	{
 		m_timeCorrection *= 60;
 	}
 	m_timeCorrection *= 60;
+#endif
 	m_propagationDelay		= ParseIntValue(PROPAGATIONDELAY.data(), 10) * 60;
 	m_articleCache			= ParseIntValue(ARTICLECACHE.data(), 10);
 	m_memoryPressurePath	= GetOption(MEMORYPRESSUREPATH.data());
@@ -2069,6 +2074,33 @@ void Options::CheckOptions()
 		}
 	}
 
+#ifdef NZBGET_USE_RUST
+	int origArticleCache = m_articleCache;
+	int origParBuffer = m_parBuffer;
+	int memErr = nzbget_rs_fuq_options_clamp_32bit_memory_limits(
+		sizeof(void*) == 4 ? 1 : 0, m_articleCache, m_parBuffer,
+		&m_articleCache, &m_parBuffer);
+	if (memErr == 1)
+	{
+		ConfigError("Invalid value for option \"ArticleCache\": %i. Changed to 1900", origArticleCache);
+	}
+	else if (memErr == 2)
+	{
+		ConfigError("Invalid value for option \"ParBuffer\": %i. Changed to 1900", origParBuffer);
+	}
+	else if (memErr == 3)
+	{
+		if (origArticleCache > 1900)
+		{
+			ConfigError("Invalid value for option \"ArticleCache\": %i. Changed to 1900", origArticleCache);
+		}
+		else if (origParBuffer > 1900)
+		{
+			ConfigError("Invalid value for option \"ParBuffer\": %i. Changed to 1900", origParBuffer);
+		}
+		ConfigError("Options \"ArticleCache\" and \"ParBuffer\" in total cannot use more than 1900MB of memory in 32-Bit mode. Changed to 1500 and 400");
+	}
+#else
 	if (m_articleCache < 0)
 	{
 		m_articleCache = 0;
@@ -2090,6 +2122,7 @@ void Options::CheckOptions()
 		m_articleCache = 1500;
 		m_parBuffer = 400;
 	}
+#endif
 
 	if (!m_unpackPassFile.Empty() && !FileSystem::FileExists(m_unpackPassFile))
 	{

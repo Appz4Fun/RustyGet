@@ -2570,6 +2570,76 @@ int nzbget_rs_ntw_xmlrpc_parse_category_source(
     const char* cat_src_str, int cs_nzb_file, int cs_feed_file, int cs_auto);
 int nzbget_rs_ntw_xmlrpc_validate_reset_counter(const char* counter);
 
+int nzbget_rs_fuq_feed_coord_should_cleanup_history(
+    int64_t cur_time, int64_t last_cleanup);
+int nzbget_rs_fuq_feed_coord_calc_wait_interval(
+    int url_force, int feeds_empty);
+int nzbget_rs_fuq_feed_coord_is_hanging_download(
+    int64_t cur_time, int64_t last_update, int url_timeout, int status, int ad_running);
+const char* nzbget_rs_fuq_feed_coord_resolve_category(
+    const char* feed_cat, int cat_source, int cs_nzb_file, int cs_auto,
+    const char* item_cat);
+int nzbget_rs_fuq_feed_coord_classify_item_history(
+    int first_fetch, int backlog, int has_history, int hs_unknown, int hs_backlog,
+    int hs_fetched, int* out_should_add);
+int64_t nzbget_rs_fuq_feed_coord_calc_history_border_date(
+    int64_t oldest_update, int feed_history_days);
+
+int nzbget_rs_fuq_url_coord_should_start_download(
+    int has_nzb, int pause_download, int url_force);
+int nzbget_rs_fuq_url_coord_calc_sleep_interval(int download_started);
+int nzbget_rs_fuq_url_coord_is_completed_status(
+    int status, int ad_finished, int ad_failed, int ad_retry);
+int nzbget_rs_fuq_url_coord_resolve_scan_fail_status(
+    int add_status, int as_failed, int ls_scan_failed, int ls_scan_skipped);
+
+int nzbget_rs_fuq_queue_coord_can_start_article(
+    int has_more, int can_proceed, int download_held, int extra_priority);
+int nzbget_rs_fuq_queue_coord_next_standby_wait(int wait_interval);
+int nzbget_rs_fuq_queue_coord_active_sleep_interval(int download_started);
+int nzbget_rs_fuq_queue_coord_is_smaller_dupe_file(
+    int64_t size1, int idx1, int64_t size2, int idx2);
+int nzbget_rs_fuq_queue_coord_is_higher_nzb_priority(
+    int has_file, int nzb_extra, int file_nzb_extra, int nzb_prio, int file_nzb_prio);
+int nzbget_rs_fuq_queue_coord_should_analyze_first_article(
+    int part_num, int raw_article, int direct_rename, int dupe_fallback_enabled);
+int nzbget_rs_fuq_queue_coord_is_article_completed_status(
+    int status, int ad_finished, int ad_failed, int ad_retry, int ad_fatal_error);
+int nzbget_rs_fuq_queue_coord_should_use_article_filename(
+    int file_naming, int nf_article, int nf_auto, int is_obfuscated, int many_dupe_files);
+int nzbget_rs_fuq_queue_coord_should_delete_file_obj(
+    int file_completed, int file_deleted, int active_downloads);
+int nzbget_rs_fuq_queue_coord_should_skip_health_check(
+    int health_check, int hc_none, int hc_park, int par_scan, int ps_dupe,
+    int health_paused, int delete_status, int ds_health, int health,
+    int critical_health, int success_articles, int total_articles);
+int nzbget_rs_fuq_queue_coord_resolve_download_critical_health(
+    int critical_est, int critical_exact, int health_check, int hc_dupe,
+    int certainly_parless, int has_size_twin);
+int nzbget_rs_fuq_queue_coord_is_queued_dupe_active(
+    int deleting, int delete_status, int ds_none, int active_downloads,
+    int has_post_info, int post_working, int post_stage, int pt_queued,
+    int extra_priority, int self_completed_empty, int direct_unpack_status,
+    int ns_running);
+int nzbget_rs_fuq_queue_coord_should_abort_dead_pick_failover(
+    int cur_success, int dupe_recovered, int recovered_at_start, int min_alive_samples);
+
+int nzbget_rs_fuq_options_normalize_time_correction(int raw_val);
+int nzbget_rs_fuq_options_clamp_32bit_memory_limits(
+    int is_32bit, int article_cache, int par_buffer,
+    int* out_article_cache, int* out_par_buffer);
+
+int nzbget_rs_fuq_prepost_should_complete_after_direct_rename(
+    int is_stopped, int direct_rename_status, int ts_success, int has_post_info,
+    int delete_status, int ds_none, int completed_not_empty, int download_completed,
+    int raw_article, int skip_write, int skip_disk_write);
+void nzbget_rs_fuq_repair_ctrl_calc_par_check_times(
+    int cur_dl_sec, int start_dl_sec, int64_t cur_time, int64_t par_time,
+    int* out_wait_time, int* out_par_sec);
+void nzbget_rs_fuq_direct_unpack_eval_unrar_result(
+    int exit_code, int all_ok_msg, int terminated, int cancelled, int stopped,
+    int* out_unpack_ok, int* out_interrupted);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

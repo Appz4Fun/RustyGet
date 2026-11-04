@@ -615,10 +615,22 @@ void RepairController::ParCheckCompleted()
 	}
 #endif
 
+#ifdef NZBGET_USE_RUST
+	int waitTime = 0, parSec = 0;
+	nzbget_rs_fuq_repair_ctrl_calc_par_check_times(
+		postInfo->GetNzbInfo()->GetDownloadSec(),
+		m_parChecker.GetDownloadSec(),
+		(int64_t)Util::CurrentTime(),
+		(int64_t)m_parChecker.GetParTime(),
+		&waitTime, &parSec);
+	postInfo->SetStartTime(postInfo->GetStartTime() + (time_t)waitTime);
+	postInfo->GetNzbInfo()->SetParSec(postInfo->GetNzbInfo()->GetParSec() + parSec);
+#else
 	int waitTime = postInfo->GetNzbInfo()->GetDownloadSec() - m_parChecker.GetDownloadSec();
 	postInfo->SetStartTime(postInfo->GetStartTime() + (time_t)waitTime);
 	int parSec = (int)(Util::CurrentTime() - m_parChecker.GetParTime()) - waitTime;
 	postInfo->GetNzbInfo()->SetParSec(postInfo->GetNzbInfo()->GetParSec() + parSec);
+#endif
 
 	postInfo->GetNzbInfo()->SetParFull(m_parChecker.GetParFull());
 

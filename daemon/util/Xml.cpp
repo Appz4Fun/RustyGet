@@ -20,6 +20,9 @@
 #include "nzbget.h"
 
 #include "Xml.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 namespace Xml
 {
@@ -83,5 +86,9 @@ void AddArrayNode(xmlNodePtr structNode, const char* name, const std::vector<xml
 	xmlAddChild(structNode, memberNode);
 }
 
+#ifdef NZBGET_USE_RUST
+const char* BoolToStr(bool value) noexcept { return nzbget_rs_awc_xml_bool_to_str(value ? 1 : 0); }
+#else
 const char* BoolToStr(bool value) noexcept { return value ? "1" : "0"; }
+#endif
 }  // namespace Xml

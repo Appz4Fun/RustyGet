@@ -21,6 +21,9 @@
 
 #include "Xml.h"
 #include "Extension.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 namespace Extension
 {
@@ -151,25 +154,55 @@ namespace Extension
 
 	bool Script::GetPostScript() const
 	{
+#ifdef NZBGET_USE_RUST
+		return nzbget_rs_awc_extension_select_kind_flag(
+			m_kind.post ? 1 : 0, m_kind.scan ? 1 : 0, m_kind.queue ? 1 : 0,
+			m_kind.scheduler ? 1 : 0, m_kind.feed ? 1 : 0, 0) != 0;
+#else
 		return m_kind.post;
+#endif
 	}
 
 	bool Script::GetScanScript() const
 	{
+#ifdef NZBGET_USE_RUST
+		return nzbget_rs_awc_extension_select_kind_flag(
+			m_kind.post ? 1 : 0, m_kind.scan ? 1 : 0, m_kind.queue ? 1 : 0,
+			m_kind.scheduler ? 1 : 0, m_kind.feed ? 1 : 0, 1) != 0;
+#else
 		return m_kind.scan;
+#endif
 	}
 
 	bool Script::GetQueueScript() const
 	{
+#ifdef NZBGET_USE_RUST
+		return nzbget_rs_awc_extension_select_kind_flag(
+			m_kind.post ? 1 : 0, m_kind.scan ? 1 : 0, m_kind.queue ? 1 : 0,
+			m_kind.scheduler ? 1 : 0, m_kind.feed ? 1 : 0, 2) != 0;
+#else
 		return m_kind.queue;
+#endif
 	}
 	bool Script::GetSchedulerScript() const
 	{
+#ifdef NZBGET_USE_RUST
+		return nzbget_rs_awc_extension_select_kind_flag(
+			m_kind.post ? 1 : 0, m_kind.scan ? 1 : 0, m_kind.queue ? 1 : 0,
+			m_kind.scheduler ? 1 : 0, m_kind.feed ? 1 : 0, 3) != 0;
+#else
 		return m_kind.scheduler;
+#endif
 	}
 	bool Script::GetFeedScript() const
 	{
+#ifdef NZBGET_USE_RUST
+		return nzbget_rs_awc_extension_select_kind_flag(
+			m_kind.post ? 1 : 0, m_kind.scan ? 1 : 0, m_kind.queue ? 1 : 0,
+			m_kind.scheduler ? 1 : 0, m_kind.feed ? 1 : 0, 4) != 0;
+#else
 		return m_kind.feed;
+#endif
 	}
 	void Script::SetQueueEvents(std::string queueEvents)
 	{

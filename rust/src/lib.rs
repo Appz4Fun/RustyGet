@@ -61,6 +61,7 @@ pub mod frontexthealth;
 pub mod sysnservhealth;
 pub mod extutilhealth;
 pub mod dlunpackrepair;
+pub mod artwritercore;
 
 pub mod deadpostings;
 pub mod dupewatch;

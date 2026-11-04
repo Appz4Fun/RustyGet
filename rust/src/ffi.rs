@@ -15134,4 +15134,342 @@ pub unsafe extern "C" fn nzbget_rs_dur_health_alert_matches(
     i32::from(crate::dlunpackrepair::health_alert_matches(s1, c1, s2, c2))
 }
 
+// ============================================================================
+// ArticleWriter, Extension, Validators, Unpack, Thread, Xml, Json, Network,
+// Observer, WorkState, NewsServer, OpenSSL & Utf8 FFI (`rust/src/artwritercore.rs`)
+// ============================================================================
+
+unsafe fn write_bytes_to_c_buf(src: &[u8], out_buf: *mut c_char, out_cap: usize) -> usize {
+    if !out_buf.is_null() && out_cap > 0 {
+        let copy_len = src.len().min(out_cap - 1);
+        std::ptr::copy_nonoverlapping(src.as_ptr(), out_buf.cast::<u8>(), copy_len);
+        *out_buf.add(copy_len) = 0;
+    }
+    src.len()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_article_writer_format_result_filename(
+    tmp_dir: *const c_char,
+    sep: c_char,
+    file_id: c_int,
+    part_num: c_int,
+    out_buf: *mut c_char,
+    out_cap: usize,
+) -> usize {
+    let dir = if tmp_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(tmp_dir).to_bytes()
+    };
+    let formatted = crate::artwritercore::article_writer_format_result_filename(
+        dir,
+        sep as u8,
+        file_id,
+        part_num,
+    );
+    write_bytes_to_c_buf(&formatted, out_buf, out_cap)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_article_writer_format_direct_out_tmp(
+    dest_dir: *const c_char,
+    sep: c_char,
+    file_id: c_int,
+    out_buf: *mut c_char,
+    out_cap: usize,
+) -> usize {
+    let dir = if dest_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(dest_dir).to_bytes()
+    };
+    let formatted = crate::artwritercore::article_writer_format_direct_out_tmp(
+        dir,
+        sep as u8,
+        file_id,
+    );
+    write_bytes_to_c_buf(&formatted, out_buf, out_cap)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_article_writer_is_within_dest_dir(
+    nzb_dest_dir: *const c_char,
+    nzb_dest_dir_len: usize,
+    output_filename: *const c_char,
+    output_filename_len: usize,
+    sep1: c_char,
+    sep2: c_char,
+) -> c_int {
+    let dir = if nzb_dest_dir.is_null() || nzb_dest_dir_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(nzb_dest_dir.cast::<u8>(), nzb_dest_dir_len)
+    };
+    let out = if output_filename.is_null() || output_filename_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(output_filename.cast::<u8>(), output_filename_len)
+    };
+    i32::from(crate::artwritercore::article_writer_is_within_dest_dir(
+        dir,
+        out,
+        sep1 as u8,
+        sep2 as u8,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_article_writer_classify_completion_status(
+    total_articles: c_int,
+    success_articles: c_int,
+    missed_articles: c_int,
+    failed_articles: c_int,
+) -> c_int {
+    crate::artwritercore::article_writer_classify_completion_status(
+        total_articles,
+        success_articles,
+        missed_articles,
+        failed_articles,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_article_cache_can_flush_file(
+    cached_articles: c_int,
+    active_downloads: c_int,
+    skip_disk_write: c_int,
+    flush_everything: c_int,
+) -> c_int {
+    i32::from(crate::artwritercore::article_cache_can_flush_file(
+        cached_articles,
+        active_downloads,
+        skip_disk_write != 0,
+        flush_everything != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_memory_monitor_tier_name(
+    tier: c_int,
+    constrained: c_int,
+    critical: c_int,
+) -> *const c_char {
+    crate::artwritercore::memory_monitor_tier_name(tier, constrained, critical).as_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_memory_monitor_effective_downloads_limit(
+    tier: c_int,
+    configured_limit: c_int,
+    constrained: c_int,
+    critical: c_int,
+) -> c_int {
+    crate::artwritercore::memory_monitor_effective_downloads_limit(
+        tier,
+        configured_limit,
+        constrained,
+        critical,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_xml_bool_to_str(value: c_int) -> *const c_char {
+    crate::artwritercore::xml_bool_to_str(value != 0).as_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_extension_select_kind_flag(
+    post: c_int,
+    scan: c_int,
+    queue: c_int,
+    scheduler: c_int,
+    feed: c_int,
+    which: c_int,
+) -> c_int {
+    i32::from(crate::artwritercore::extension_select_kind_flag(
+        post != 0,
+        scan != 0,
+        queue != 0,
+        scheduler != 0,
+        feed != 0,
+        which,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_health_status_should_include(is_ok: c_int) -> c_int {
+    i32::from(crate::artwritercore::health_status_should_include(
+        is_ok != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_health_find_duplicate_feed_url(
+    url_ptrs: *const *const c_char,
+    url_lens: *const usize,
+    count: usize,
+    out_first_idx: *mut usize,
+    out_dup_idx: *mut usize,
+) -> c_int {
+    if url_ptrs.is_null() || url_lens.is_null() || count == 0 {
+        return 0;
+    }
+    let ptrs = std::slice::from_raw_parts(url_ptrs, count);
+    let lens = std::slice::from_raw_parts(url_lens, count);
+    let mut slices: Vec<&[u8]> = Vec::with_capacity(count);
+    for i in 0..count {
+        if ptrs[i].is_null() || lens[i] == 0 {
+            slices.push(&[]);
+        } else {
+            slices.push(std::slice::from_raw_parts(ptrs[i].cast::<u8>(), lens[i]));
+        }
+    }
+    if let Some((first_idx, dup_idx)) =
+        crate::artwritercore::health_find_duplicate_feed_url(&slices)
+    {
+        if !out_first_idx.is_null() {
+            *out_first_idx = first_idx;
+        }
+        if !out_dup_idx.is_null() {
+            *out_dup_idx = dup_idx;
+        }
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_health_find_duplicate_category_name(
+    name_ptrs: *const *const c_char,
+    name_lens: *const usize,
+    count: usize,
+    out_dup_idx: *mut usize,
+) -> c_int {
+    if name_ptrs.is_null() || name_lens.is_null() || count == 0 {
+        return 0;
+    }
+    let ptrs = std::slice::from_raw_parts(name_ptrs, count);
+    let lens = std::slice::from_raw_parts(name_lens, count);
+    let mut slices: Vec<&[u8]> = Vec::with_capacity(count);
+    for i in 0..count {
+        if ptrs[i].is_null() || lens[i] == 0 {
+            slices.push(&[]);
+        } else {
+            slices.push(std::slice::from_raw_parts(ptrs[i].cast::<u8>(), lens[i]));
+        }
+    }
+    if let Some(dup_idx) = crate::artwritercore::health_find_duplicate_category_name(&slices) {
+        if !out_dup_idx.is_null() {
+            *out_dup_idx = dup_idx;
+        }
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_health_scheduler_tasks_reserve_count(
+    count: usize,
+) -> usize {
+    crate::artwritercore::health_scheduler_tasks_reserve_count(count)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_unpack_make_password_arg(
+    password: *const c_char,
+    password_len: usize,
+    out_buf: *mut c_char,
+    out_cap: usize,
+) -> usize {
+    let pw = if password.is_null() || password_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(password.cast::<u8>(), password_len)
+    };
+    let formatted = crate::artwritercore::unpack_make_password_arg(pw);
+    write_bytes_to_c_buf(&formatted, out_buf, out_cap)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_unpack_validate_tool_status(
+    tool_empty: c_int,
+    has_err: c_int,
+    exists: c_int,
+) -> c_int {
+    crate::artwritercore::unpack_validate_tool_status(
+        tool_empty != 0,
+        has_err != 0,
+        exists != 0,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_thread_adjust_count_on_kill(
+    terminated: c_int,
+    cur_count: c_int,
+) -> c_int {
+    crate::artwritercore::thread_adjust_count_on_kill(terminated != 0, cur_count)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_json_has_error(err_val: c_int) -> c_int {
+    i32::from(crate::artwritercore::json_has_error(err_val))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_network_is_http_status_ok(status_code: c_int) -> c_int {
+    i32::from(crate::artwritercore::network_is_http_status_ok(status_code))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_observer_find_index(
+    observers: *const usize,
+    count: usize,
+    target: usize,
+) -> isize {
+    let obs = if observers.is_null() || count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(observers, count)
+    };
+    crate::artwritercore::observer_find_index(obs, target)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_work_state_should_notify() -> c_int {
+    i32::from(crate::artwritercore::work_state_should_notify())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_news_server_format_default_name(
+    name: *const c_char,
+    id: c_int,
+    out_buf: *mut c_char,
+    out_cap: usize,
+) -> usize {
+    let n = if name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(name).to_bytes()
+    };
+    let formatted = crate::artwritercore::news_server_format_default_name(n, id);
+    write_bytes_to_c_buf(&formatted, out_buf, out_cap)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_openssl_should_stop_thread(is_libressl: c_int) -> c_int {
+    i32::from(crate::artwritercore::openssl_should_stop_thread(
+        is_libressl != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_utf8_is_empty_len(len: usize) -> c_int {
+    i32::from(crate::artwritercore::utf8_is_empty_len(len))
+}
+
+
 

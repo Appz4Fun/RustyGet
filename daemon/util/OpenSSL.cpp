@@ -21,6 +21,9 @@
 #include "nzbget.h"
 
 #ifndef DISABLE_TLS
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 namespace OpenSSL
 {
@@ -29,7 +32,14 @@ namespace OpenSSL
 #ifndef LIBRESSL_VERSION_NUMBER
 		// OpenSSL specific: cleanly shut down OpenSSL's thread handling.
 		// LibreSSL doesn't require or provide OPENSSL_thread_stop().
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_awc_openssl_should_stop_thread(0) != 0)
+		{
+			OPENSSL_thread_stop();
+		}
+#else
 		OPENSSL_thread_stop();
+#endif
 #endif
 	}
 }

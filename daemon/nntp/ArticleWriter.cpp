@@ -349,6 +349,24 @@ void ArticleWriter::BuildOutputFilename()
 	if (Util::EmptyStr(tmpDir) || Util::EmptyStr(destDir))
 		return;
 
+#ifdef NZBGET_USE_RUST
+	char fmtBuf[1024];
+	size_t fmtLen = nzbget_rs_awc_article_writer_format_result_filename(
+		tmpDir, PATH_SEPARATOR, m_fileInfo->GetId(), m_articleInfo->GetPartNumber(),
+		fmtBuf, sizeof(fmtBuf));
+	std::string filename;
+	if (fmtLen < sizeof(fmtBuf))
+	{
+		filename.assign(fmtBuf, fmtLen);
+	}
+	else
+	{
+		filename.resize(fmtLen);
+		nzbget_rs_awc_article_writer_format_result_filename(
+			tmpDir, PATH_SEPARATOR, m_fileInfo->GetId(), m_articleInfo->GetPartNumber(),
+			filename.data(), fmtLen + 1);
+	}
+#else
 	std::stringstream ss;
 	ss << tmpDir;
 	ss << PATH_SEPARATOR;
@@ -357,6 +375,7 @@ void ArticleWriter::BuildOutputFilename()
 	ss << std::setfill('0') << std::setw(3) << m_articleInfo->GetPartNumber();
 
 	std::string filename = ss.str();
+#endif
 
 	m_articleInfo->SetResultFilename(filename.c_str());
 	m_tempFilename = filename + ".tmp";
@@ -380,6 +399,21 @@ void ArticleWriter::BuildOutputFilename()
 			}
 			else
 			{
+#ifdef NZBGET_USE_RUST
+				size_t outLen = nzbget_rs_awc_article_writer_format_direct_out_tmp(
+					destDir, PATH_SEPARATOR, m_fileInfo->GetId(), fmtBuf, sizeof(fmtBuf));
+				if (outLen < sizeof(fmtBuf))
+				{
+					filename.assign(fmtBuf, outLen);
+				}
+				else
+				{
+					filename.resize(outLen);
+					nzbget_rs_awc_article_writer_format_direct_out_tmp(
+						destDir, PATH_SEPARATOR, m_fileInfo->GetId(), filename.data(), outLen + 1);
+				}
+				m_fileInfo->SetOutputFilename(filename);
+#else
 				ss.str("");
 				ss.clear();
 
@@ -390,6 +424,7 @@ void ArticleWriter::BuildOutputFilename()
 
 				filename = ss.str();
 				m_fileInfo->SetOutputFilename(filename);
+#endif
 			}
 		}
 
@@ -833,9 +868,16 @@ bool ArticleWriter::CleanupOldData(bool directWrite,
 		}
 
 		// Clean up old directory if empty
+#ifdef NZBGET_USE_RUST
+		if (nzbget_rs_awc_article_writer_is_within_dest_dir(
+				nzbDestDir.data(), nzbDestDir.size(),
+				m_outputFilename.c_str(), m_outputFilename.size(),
+				PATH_SEPARATOR, ALT_PATH_SEPARATOR) == 0)
+#else
 		const size_t len = nzbDestDir.size();
 		if (!(!strncmp(nzbDestDir.data(), m_outputFilename.c_str(), len) &&
 			(m_outputFilename[len] == PATH_SEPARATOR || m_outputFilename[len] == ALT_PATH_SEPARATOR)))
+#endif
 		{
 			debug("Checking old dir for: %s", m_outputFilename.c_str());
 			BString<1024> oldDestDir;
@@ -871,11 +913,22 @@ bool ArticleWriter::CleanupOldData(bool directWrite,
 
 void ArticleWriter::ReportCompletionStatus(std::string_view infoFilename)
 {
+#ifdef NZBGET_USE_RUST
+	const int completionKind = nzbget_rs_awc_article_writer_classify_completion_status(
+		m_fileInfo->GetTotalArticles(), m_fileInfo->GetSuccessArticles(),
+		m_fileInfo->GetMissedArticles(), m_fileInfo->GetFailedArticles());
+	if (completionKind == 1)
+#else
 	if (m_fileInfo->GetTotalArticles() == m_fileInfo->GetSuccessArticles())
+#endif
 	{
 		m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkInfo, "Successfully downloaded %s", infoFilename.data());
 	}
+#ifdef NZBGET_USE_RUST
+	else if (completionKind == 2)
+#else
 	else if (m_fileInfo->GetMissedArticles() + m_fileInfo->GetFailedArticles() > 0)
+#endif
 	{
 		m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkWarning, "%i of %i article downloads failed for \"%s\"",
 			m_fileInfo->GetMissedArticles() + m_fileInfo->GetFailedArticles(), m_fileInfo->GetTotalArticles(), infoFilename.data());
@@ -1331,9 +1384,16 @@ bool ArticleCache::CheckFlush(bool flushEverything)
 
 			for (FileInfo* fileInfo : nzbInfo->GetFileList())
 			{
+#ifdef NZBGET_USE_RUST
+				if (nzbget_rs_awc_article_cache_can_flush_file(
+						fileInfo->GetCachedArticles(), fileInfo->GetActiveDownloads(),
+						fileInfo->GetNzbInfo()->GetSkipDiskWrite() ? 1 : 0,
+						flushEverything ? 1 : 0) != 0)
+#else
 				if (fileInfo->GetCachedArticles() > 0 
 					&& (fileInfo->GetActiveDownloads() == 0 || flushEverything)
 					&& (!fileInfo->GetNzbInfo()->GetSkipDiskWrite() || flushEverything))
+#endif
 				{
 					m_fileInfo = fileInfo;
 					infoName.Format("%s%c%s", m_fileInfo->GetNzbInfo()->GetName(), PATH_SEPARATOR, m_fileInfo->GetFilename());
@@ -1435,6 +1495,10 @@ void MemoryMonitor::Stop()
 
 const char* MemoryMonitor::GetTierName() const
 {
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_awc_memory_monitor_tier_name(
+		(int)GetTier(), (int)NZBGET_RS_PRESSURE_CONSTRAINED, (int)NZBGET_RS_PRESSURE_CRITICAL);
+#else
 	switch (GetTier())
 	{
 		case NZBGET_RS_PRESSURE_CRITICAL: return "CRITICAL";
@@ -1442,6 +1506,7 @@ const char* MemoryMonitor::GetTierName() const
 		case NZBGET_RS_PRESSURE_NORMAL:
 		default: return "NORMAL";
 	}
+#endif
 }
 
 size_t MemoryMonitor::GetEffectiveArticleCacheBytes() const
@@ -1471,6 +1536,10 @@ int MemoryMonitor::GetEffectiveParBufferMB(int configuredMB) const
 int MemoryMonitor::GetEffectiveDownloadsLimit(int configuredLimit) const
 {
 	int tier = m_tier.load(std::memory_order_acquire);
+#ifdef NZBGET_USE_RUST
+	return nzbget_rs_awc_memory_monitor_effective_downloads_limit(
+		tier, configuredLimit, (int)NZBGET_RS_PRESSURE_CONSTRAINED, (int)NZBGET_RS_PRESSURE_CRITICAL);
+#else
 	if (tier == NZBGET_RS_PRESSURE_CRITICAL)
 	{
 		return std::max(1, configuredLimit / 4);
@@ -1480,6 +1549,7 @@ int MemoryMonitor::GetEffectiveDownloadsLimit(int configuredLimit) const
 		return std::max(2, configuredLimit / 2);
 	}
 	return configuredLimit;
+#endif
 }
 
 void MemoryMonitor::TrimHeap()

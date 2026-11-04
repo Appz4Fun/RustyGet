@@ -24,6 +24,9 @@
 #include "Util.h"
 #include "Log.h"
 #include "HttpClient.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 namespace System
 {
@@ -35,7 +38,11 @@ namespace System
 		{
 			::Network::HttpClient httpClient;
 			auto result = httpClient.GET(IP_SERVICE).get();
+#ifdef NZBGET_USE_RUST
+			if (nzbget_rs_awc_network_is_http_status_ok((int)result.statusCode) != 0)
+#else
 			if (result.statusCode == 200)
+#endif
 			{
 				network.publicIP = std::move(result.body);
 				network.privateIP = httpClient.GetLocalIP();

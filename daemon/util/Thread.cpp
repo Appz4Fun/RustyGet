@@ -23,6 +23,9 @@
 
 #include "Log.h"
 #include "Thread.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 Thread::Thread()
 {
@@ -90,10 +93,17 @@ bool Thread::Kill()
 #endif
 #endif
 
+#ifdef NZBGET_USE_RUST
+	if (nzbget_rs_awc_thread_adjust_count_on_kill(terminated ? 1 : 0, 1) == 0)
+	{
+		--m_threadCount;
+	}
+#else
 	if (terminated)
 	{
 		--m_threadCount;
 	}
+#endif
 	return terminated;
 }
 

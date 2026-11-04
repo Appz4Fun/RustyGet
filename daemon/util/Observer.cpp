@@ -21,6 +21,9 @@
 #include "nzbget.h"
 #include "Observer.h"
 #include "Log.h"
+#ifdef NZBGET_USE_RUST
+#include "nzbget_rs.h"
+#endif
 
 void Subject::Attach(Observer* observer)
 {
@@ -29,12 +32,26 @@ void Subject::Attach(Observer* observer)
 
 void Subject::Detach(Observer* observer)
 {
+#ifdef NZBGET_USE_RUST
+	std::vector<uintptr_t> ptrs(m_observers.size());
+	for (size_t i = 0; i < m_observers.size(); ++i)
+	{
+		ptrs[i] = reinterpret_cast<uintptr_t>(m_observers[i]);
+	}
+	ptrdiff_t idx = nzbget_rs_awc_observer_find_index(
+		ptrs.data(), ptrs.size(), reinterpret_cast<uintptr_t>(observer));
+	if (idx >= 0)
+	{
+		m_observers.erase(m_observers.begin() + idx);
+	}
+#else
 	// one that isn't attached: erasing end() is undefined
 	auto it = std::find(m_observers.begin(), m_observers.end(), observer);
 	if (it != m_observers.end())
 	{
 		m_observers.erase(it);
 	}
+#endif
 }
 
 void Subject::Notify(void* aspect)

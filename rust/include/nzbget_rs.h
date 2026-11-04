@@ -2410,6 +2410,54 @@ int nzbget_rs_dur_health_alert_matches(
     const char* src1, size_t src1_len, const char* cat1, size_t cat1_len,
     const char* src2, size_t src2_len, const char* cat2, size_t cat2_len);
 
+size_t nzbget_rs_awc_article_writer_format_result_filename(
+    const char* tmp_dir, char sep, int file_id, int part_num,
+    char* out_buf, size_t out_cap);
+size_t nzbget_rs_awc_article_writer_format_direct_out_tmp(
+    const char* dest_dir, char sep, int file_id,
+    char* out_buf, size_t out_cap);
+int nzbget_rs_awc_article_writer_is_within_dest_dir(
+    const char* nzb_dest_dir, size_t nzb_dest_dir_len,
+    const char* output_filename, size_t output_filename_len,
+    char sep1, char sep2);
+int nzbget_rs_awc_article_writer_classify_completion_status(
+    int total_articles, int success_articles, int missed_articles, int failed_articles);
+int nzbget_rs_awc_article_cache_can_flush_file(
+    int cached_articles, int active_downloads, int skip_disk_write, int flush_everything);
+const char* nzbget_rs_awc_memory_monitor_tier_name(
+    int tier, int constrained, int critical);
+int nzbget_rs_awc_memory_monitor_effective_downloads_limit(
+    int tier, int configured_limit, int constrained, int critical);
+
+const char* nzbget_rs_awc_xml_bool_to_str(int value);
+int nzbget_rs_awc_extension_select_kind_flag(
+    int post, int scan, int queue, int scheduler, int feed, int which);
+
+int nzbget_rs_awc_health_status_should_include(int is_ok);
+int nzbget_rs_awc_health_find_duplicate_feed_url(
+    const char* const* url_ptrs, const size_t* url_lens, size_t count,
+    size_t* out_first_idx, size_t* out_dup_idx);
+int nzbget_rs_awc_health_find_duplicate_category_name(
+    const char* const* name_ptrs, const size_t* name_lens, size_t count,
+    size_t* out_dup_idx);
+size_t nzbget_rs_awc_health_scheduler_tasks_reserve_count(size_t count);
+
+size_t nzbget_rs_awc_unpack_make_password_arg(
+    const char* password, size_t password_len, char* out_buf, size_t out_cap);
+int nzbget_rs_awc_unpack_validate_tool_status(
+    int tool_empty, int has_err, int exists);
+
+int nzbget_rs_awc_thread_adjust_count_on_kill(int terminated, int cur_count);
+int nzbget_rs_awc_json_has_error(int err_val);
+int nzbget_rs_awc_network_is_http_status_ok(int status_code);
+ptrdiff_t nzbget_rs_awc_observer_find_index(
+    const uintptr_t* observers, size_t count, uintptr_t target);
+int nzbget_rs_awc_work_state_should_notify(void);
+size_t nzbget_rs_awc_news_server_format_default_name(
+    const char* name, int id, char* out_buf, size_t out_cap);
+int nzbget_rs_awc_openssl_should_stop_thread(int is_libressl);
+int nzbget_rs_awc_utf8_is_empty_len(size_t len);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

@@ -4168,6 +4168,183 @@ pub fn dqh_fs_is_copied_file_valid(
     close_ok && loop_ok && copied_bytes == src_size
 }
 
+/// Resolves the fallback PAR buffer size in MB when `g_MemoryMonitor` is null in `Repairer::Repairer`.
+pub fn dqh_parchecker_resolve_fallback_par_buffer_mb(configured_mb: i32) -> i32 {
+    if configured_mb > 0 {
+        configured_mb
+    } else {
+        16
+    }
+}
+
+/// Returns true when `ch` is a line break (`\n` or `\r`) in `ParChecker::StreamBuf::overflow`.
+pub fn dqh_parchecker_is_streambuf_line_break(ch: i32) -> bool {
+    ch == i32::from(b'\n') || ch == i32::from(b'\r')
+}
+
+/// Classifies the step outcome after `Repairer::PreProcess` in `ParChecker::PreProcessPar`:
+/// `1` = stopped, `2` = invalid command line arguments, `3` = failed (request more pars), `0` = success.
+pub fn dqh_parchecker_classify_preprocess_step(
+    is_stopped: bool,
+    res: i32,
+    e_success: i32,
+    e_invalid_args: i32,
+) -> i32 {
+    if is_stopped {
+        1
+    } else if res == e_invalid_args {
+        2
+    } else if res != e_success {
+        3
+    } else {
+        0
+    }
+}
+
+/// Returns true when `ParChecker::ProcessTwinSet` can proceed with a non-empty twin index while not stopped.
+pub fn dqh_parchecker_can_start_twin_set(index_empty: bool, is_stopped: bool) -> bool {
+    !index_empty && !is_stopped
+}
+
+/// Returns true when `ParChecker::ProcessTwinSet` should re-verify and process after loading twin volumes.
+pub fn dqh_parchecker_should_update_after_twin_volumes(
+    volumes_empty: bool,
+    is_stopped: bool,
+) -> bool {
+    !volumes_empty && !is_stopped
+}
+
+/// Returns true when a repairer sourcefile in `ParChecker::SignalDone` is the missing target for `file_name`.
+pub fn dqh_parchecker_is_missing_target_sourcefile(
+    target_exists: bool,
+    file_name: &[u8],
+    target_base_name: &[u8],
+) -> bool {
+    !target_exists && file_name == target_base_name
+}
+
+/// Returns true when `FindFileCrc` returned a terminal quick-verification status (`fsFailure` or `fsUnknown`) in `ParChecker::VerifyDataFile`.
+pub fn dqh_parchecker_is_terminal_quick_crc_status(
+    file_status: i32,
+    fs_failure: i32,
+    fs_unknown: i32,
+) -> bool {
+    file_status == fs_failure || file_status == fs_unknown
+}
+
+/// Returns true when a valid block range in `ParChecker::VerifyPartialDataFile` passed range CRC verification.
+pub fn dqh_parchecker_is_partial_range_crc_valid(
+    ok: bool,
+    download_crc: u32,
+    par_crc: u32,
+) -> bool {
+    ok && download_crc == par_crc
+}
+
+/// Accumulates elapsed unpack seconds in `UnpackController::Run`.
+pub fn dqh_unpack_ctrl_accum_unpack_sec(
+    prev_unpack_sec: i32,
+    cur_time: i64,
+    start_time: i64,
+) -> i32 {
+    prev_unpack_sec + (cur_time - start_time) as i32
+}
+
+/// Selects the archive wildcard pattern (`"*.7z.001"` vs `"*.7z"`) in `UnpackController::ExecuteSevenZip`.
+pub fn dqh_unpack_ctrl_select_sevenzip_wildcard(multi_volumes: bool) -> &'static [u8] {
+    if multi_volumes {
+        b"*.7z.001\0"
+    } else {
+        b"*.7z\0"
+    }
+}
+
+/// Computes the write buffer size in bytes (`write_buffer_kb * 1024`) when `write_buffer_kb > 0` in `UnpackController::JoinFile`.
+pub fn dqh_unpack_ctrl_calc_write_buffer_bytes(write_buffer_kb: i32) -> Option<i32> {
+    if write_buffer_kb > 0 {
+        Some(write_buffer_kb.saturating_mul(1024))
+    } else {
+        None
+    }
+}
+
+/// Returns true when closing the joined output file in `UnpackController::JoinFile` failed after a clean loop.
+pub fn dqh_unpack_ctrl_should_fail_on_close(close_ok: bool, prev_ok: bool) -> bool {
+    !close_ok && prev_ok
+}
+
+/// Returns true when both unpacking and cleanup succeeded in `UnpackController::Completed`.
+pub fn dqh_unpack_ctrl_is_completed_success(unpack_ok: bool, cleanup_success: bool) -> bool {
+    unpack_ok && cleanup_success
+}
+
+/// Selects `final_dir` when non-empty or falls back to `dest_dir` in `UnpackController::CreateUnpackDir` and `Cleanup`.
+pub fn dqh_unpack_ctrl_select_unpack_parent_dir<'a>(
+    final_dir: &'a [u8],
+    dest_dir: &'a [u8],
+) -> &'a [u8] {
+    if !final_dir.is_empty() {
+        final_dir
+    } else {
+        dest_dir
+    }
+}
+
+/// Returns true when moving an extracted file in `UnpackController::Cleanup` failed on a non-hidden file.
+pub fn dqh_unpack_ctrl_is_move_extracted_error(move_ok: bool, hidden_file: bool) -> bool {
+    !move_ok && !hidden_file
+}
+
+/// Returns true when `UnpackController::Cleanup` should delete a newly created `final_dir` after unpack failure.
+pub fn dqh_unpack_ctrl_should_delete_created_final_dir(
+    unpack_ok: bool,
+    final_dir_created: bool,
+) -> bool {
+    !unpack_ok && final_dir_created
+}
+
+/// Returns true when `PrePostProcessor::SanitisePostQueue` should reset a stale `nsRunning` direct unpack status.
+pub fn dqh_prepost_should_reset_stale_direct_unpack(
+    direct_unpack_status: i32,
+    ns_running: i32,
+    has_unpack_thread: bool,
+) -> bool {
+    direct_unpack_status == ns_running && !has_unpack_thread
+}
+
+/// Returns true when `ParCannotCover` in `PrePostProcessor.cpp` found exactly one main PAR2 set.
+pub fn dqh_prepost_has_single_main_par(found_main_pars: bool, main_pars_count: usize) -> bool {
+    found_main_pars && main_pars_count == 1
+}
+
+/// Returns true when a queued NZB entry matches a post-queue delete target ID in `PrePostProcessor::PostQueueDelete`.
+pub fn dqh_prepost_matches_post_delete_target(
+    has_post_info: bool,
+    nzb_id: i32,
+    target_id: i32,
+) -> bool {
+    has_post_info && nzb_id == target_id
+}
+
+/// Returns true when a twin NZB entry should be skipped while collecting recovery volumes in `RepairController::PostParChecker::RequestTwinVolumes`.
+pub fn dqh_repair_ctrl_should_skip_twin_volume_entry(
+    is_par2: bool,
+    entry_filename: &[u8],
+    twin_index: &[u8],
+) -> bool {
+    !is_par2 || entry_filename == twin_index
+}
+
+/// Returns true when a history entry matches a dupe source in `RepairController::PostParChecker::StatDupeSources`.
+pub fn dqh_repair_ctrl_matches_history_dupe_source(
+    history_kind: i32,
+    hk_nzb: i32,
+    history_nzb_id: i32,
+    dupe_source_id: i32,
+) -> bool {
+    history_kind == hk_nzb && history_nzb_id == dupe_source_id
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5795,5 +5972,92 @@ mod tests {
         assert!(!dqh_fs_is_copied_file_valid(false, true, 4096, 4096));
         assert!(!dqh_fs_is_copied_file_valid(true, false, 4096, 4096));
         assert!(!dqh_fs_is_copied_file_valid(true, true, 4000, 4096));
+        assert_eq!(dqh_parchecker_resolve_fallback_par_buffer_mb(250), 250);
+        assert_eq!(dqh_parchecker_resolve_fallback_par_buffer_mb(0), 16);
+        assert!(dqh_parchecker_is_streambuf_line_break(i32::from(b'\n')));
+        assert!(dqh_parchecker_is_streambuf_line_break(i32::from(b'\r')));
+        assert!(!dqh_parchecker_is_streambuf_line_break(i32::from(b'a')));
+        assert_eq!(dqh_parchecker_classify_preprocess_step(true, 0, 0, 5), 1);
+        assert_eq!(dqh_parchecker_classify_preprocess_step(false, 5, 0, 5), 2);
+        assert_eq!(dqh_parchecker_classify_preprocess_step(false, 3, 0, 5), 3);
+        assert_eq!(dqh_parchecker_classify_preprocess_step(false, 0, 0, 5), 0);
+        assert!(dqh_parchecker_can_start_twin_set(false, false));
+        assert!(!dqh_parchecker_can_start_twin_set(true, false));
+        assert!(!dqh_parchecker_can_start_twin_set(false, true));
+        assert!(dqh_parchecker_should_update_after_twin_volumes(false, false));
+        assert!(!dqh_parchecker_should_update_after_twin_volumes(true, false));
+        assert!(!dqh_parchecker_should_update_after_twin_volumes(false, true));
+        assert!(dqh_parchecker_is_missing_target_sourcefile(
+            false,
+            b"part01.rar",
+            b"part01.rar"
+        ));
+        assert!(!dqh_parchecker_is_missing_target_sourcefile(
+            true,
+            b"part01.rar",
+            b"part01.rar"
+        ));
+        assert!(!dqh_parchecker_is_missing_target_sourcefile(
+            false,
+            b"part01.rar",
+            b"part02.rar"
+        ));
+        assert!(dqh_parchecker_is_terminal_quick_crc_status(2, 2, 0));
+        assert!(dqh_parchecker_is_terminal_quick_crc_status(0, 2, 0));
+        assert!(!dqh_parchecker_is_terminal_quick_crc_status(1, 2, 0));
+        assert!(dqh_parchecker_is_partial_range_crc_valid(true, 0x1234, 0x1234));
+        assert!(!dqh_parchecker_is_partial_range_crc_valid(false, 0x1234, 0x1234));
+        assert!(!dqh_parchecker_is_partial_range_crc_valid(true, 0x1234, 0x5678));
+        assert_eq!(dqh_unpack_ctrl_accum_unpack_sec(10, 1050, 1000), 60);
+        assert_eq!(dqh_unpack_ctrl_select_sevenzip_wildcard(true), b"*.7z.001\0");
+        assert_eq!(dqh_unpack_ctrl_select_sevenzip_wildcard(false), b"*.7z\0");
+        assert_eq!(dqh_unpack_ctrl_calc_write_buffer_bytes(64), Some(65536));
+        assert_eq!(dqh_unpack_ctrl_calc_write_buffer_bytes(0), None);
+        assert!(dqh_unpack_ctrl_should_fail_on_close(false, true));
+        assert!(!dqh_unpack_ctrl_should_fail_on_close(true, true));
+        assert!(!dqh_unpack_ctrl_should_fail_on_close(false, false));
+        assert!(dqh_unpack_ctrl_is_completed_success(true, true));
+        assert!(!dqh_unpack_ctrl_is_completed_success(true, false));
+        assert_eq!(
+            dqh_unpack_ctrl_select_unpack_parent_dir(b"/final", b"/dest"),
+            b"/final"
+        );
+        assert_eq!(
+            dqh_unpack_ctrl_select_unpack_parent_dir(b"", b"/dest"),
+            b"/dest"
+        );
+        assert!(dqh_unpack_ctrl_is_move_extracted_error(false, false));
+        assert!(!dqh_unpack_ctrl_is_move_extracted_error(false, true));
+        assert!(!dqh_unpack_ctrl_is_move_extracted_error(true, false));
+        assert!(dqh_unpack_ctrl_should_delete_created_final_dir(false, true));
+        assert!(!dqh_unpack_ctrl_should_delete_created_final_dir(true, true));
+        assert!(!dqh_unpack_ctrl_should_delete_created_final_dir(false, false));
+        assert!(dqh_prepost_should_reset_stale_direct_unpack(1, 1, false));
+        assert!(!dqh_prepost_should_reset_stale_direct_unpack(1, 1, true));
+        assert!(!dqh_prepost_should_reset_stale_direct_unpack(0, 1, false));
+        assert!(dqh_prepost_has_single_main_par(true, 1));
+        assert!(!dqh_prepost_has_single_main_par(true, 2));
+        assert!(!dqh_prepost_has_single_main_par(false, 1));
+        assert!(dqh_prepost_matches_post_delete_target(true, 7, 7));
+        assert!(!dqh_prepost_matches_post_delete_target(false, 7, 7));
+        assert!(!dqh_prepost_matches_post_delete_target(true, 7, 8));
+        assert!(dqh_repair_ctrl_should_skip_twin_volume_entry(
+            false,
+            b"a.rar",
+            b"a.par2"
+        ));
+        assert!(dqh_repair_ctrl_should_skip_twin_volume_entry(
+            true,
+            b"a.par2",
+            b"a.par2"
+        ));
+        assert!(!dqh_repair_ctrl_should_skip_twin_volume_entry(
+            true,
+            b"a.vol00+01.par2",
+            b"a.par2"
+        ));
+        assert!(dqh_repair_ctrl_matches_history_dupe_source(1, 1, 99, 99));
+        assert!(!dqh_repair_ctrl_matches_history_dupe_source(2, 1, 99, 99));
+        assert!(!dqh_repair_ctrl_matches_history_dupe_source(1, 1, 98, 99));
     }
 }

@@ -217,8 +217,11 @@ void UnpackController::Run()
 	}
 
 
-	int unpackSec = (int)(Util::CurrentTime() - start);
-	m_postInfo->GetNzbInfo()->SetUnpackSec(m_postInfo->GetNzbInfo()->GetUnpackSec() + unpackSec);
+	m_postInfo->GetNzbInfo()->SetUnpackSec(
+		nzbget_rs_dqh_unpack_ctrl_accum_unpack_sec(
+			m_postInfo->GetNzbInfo()->GetUnpackSec(),
+			(int64_t)Util::CurrentTime(),
+			(int64_t)start));
 
 	m_postInfo->SetWorking(false);
 }
@@ -402,7 +405,7 @@ void UnpackController::ExecuteSevenZip(const char* password, bool multiVolumes)
 	NzbgetRsBuf outDirBuf = nzbget_rs_dqh_unpack_format_7z_output_arg(*m_unpackDir);
 	params.emplace_back(outDirBuf.data ? outDirBuf.data : "-o", (int)outDirBuf.len);
 	nzbget_rs_free(outDirBuf);
-	params.emplace_back(multiVolumes ? "*.7z.001" : "*.7z");
+	params.emplace_back(nzbget_rs_dqh_unpack_ctrl_select_sevenzip_wildcard(multiVolumes ? 1 : 0));
 	SetArgs(std::move(params));
 	ResetEnv();
 
@@ -568,9 +571,10 @@ bool UnpackController::JoinFile(const char* fragBaseName)
 			*FileSystem::GetLastErrorMessage());
 		return false;
 	}
-	if (g_Options->GetWriteBuffer() > 0)
+	int writeBufBytes = 0;
+	if (nzbget_rs_dqh_unpack_ctrl_calc_write_buffer_bytes(g_Options->GetWriteBuffer(), &writeBufBytes) != 0)
 	{
-		outFile.SetWriteBuffer(g_Options->GetWriteBuffer() * 1024);
+		outFile.SetWriteBuffer(writeBufBytes);
 	}
 
 	// the pieces' total, to check the joined size against: first * (count - 1) +
@@ -655,7 +659,8 @@ bool UnpackController::JoinFile(const char* fragBaseName)
 		}
 	}
 
-	if (!outFile.Close() && ok)
+	bool closeOk = outFile.Close();
+	if (nzbget_rs_dqh_unpack_ctrl_should_fail_on_close(closeOk ? 1 : 0, ok ? 1 : 0) != 0)
 	{
 		PrintMessage(Message::mkError, "Could not write file %s: %s", *destFilename,
 			*FileSystem::GetLastErrorMessage());
@@ -684,7 +689,7 @@ void UnpackController::Completed()
 
 	bool cleanupSuccess = Cleanup();
 
-	if (m_unpackOk && cleanupSuccess)
+	if (nzbget_rs_dqh_unpack_ctrl_is_completed_success(m_unpackOk ? 1 : 0, cleanupSuccess ? 1 : 0) != 0)
 	{
 		PrintMessage(Message::mkInfo, "%s %s", *m_infoNameUp, "successful");
 		m_postInfo->GetNzbInfo()->SetUnpackStatus(NzbInfo::usSuccess);
@@ -758,7 +763,7 @@ void UnpackController::CreateUnpackDir()
 		m_finalDirCreated = !FileSystem::DirectoryExists(m_finalDir);
 	}
 
-	const char* destDir = !m_finalDir.Empty() ? *m_finalDir : *m_destDir;
+	const char* destDir = nzbget_rs_dqh_unpack_ctrl_select_unpack_parent_dir(*m_finalDir, *m_destDir);
 
 	NzbgetRsBuf unpackDirBuf = nzbget_rs_tpr_unpack_format_unpack_dir(
 		destDir, PATH_SEPARATOR, g_Options->GetUseTempUnpackDir() ? 1 : 0);
@@ -866,7 +871,7 @@ bool UnpackController::Cleanup()
 	{
 		// moving files back
 		DirBrowser dir(m_unpackDir);
-		const char* destDir = !m_finalDir.Empty() ? *m_finalDir : *m_destDir;
+		const char* destDir = nzbget_rs_dqh_unpack_ctrl_select_unpack_parent_dir(*m_finalDir, *m_destDir);
 		while (const char* filename = dir.Next())
 		{
 			NzbgetRsBuf srcBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
@@ -885,7 +890,8 @@ bool UnpackController::Cleanup()
 
 			bool hiddenFile = nzbget_rs_ucf_move_ctrl_is_dot_file(filename) != 0;
 
-			if (!FileSystem::MoveFile(srcFile, dstFile) && !hiddenFile)
+			bool moveOk = FileSystem::MoveFile(srcFile, dstFile);
+			if (nzbget_rs_dqh_unpack_ctrl_is_move_extracted_error(moveOk ? 1 : 0, hiddenFile ? 1 : 0) != 0)
 			{
 				PrintMessage(Message::mkError, "Could not move file %s to %s: %s", *srcFile, *dstFile,
 					*FileSystem::GetLastErrorMessage());
@@ -909,7 +915,7 @@ bool UnpackController::Cleanup()
 		PrintMessage(Message::mkError, "Could not delete temporary directory %s: %s", *m_unpackDir, *errmsg);
 	}
 
-	if (!m_unpackOk && m_finalDirCreated)
+	if (nzbget_rs_dqh_unpack_ctrl_should_delete_created_final_dir(m_unpackOk ? 1 : 0, m_finalDirCreated ? 1 : 0) != 0)
 	{
 		FileSystem::DeleteDirectory(m_finalDir);
 	}

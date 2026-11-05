@@ -49,7 +49,7 @@ public:
 		int configuredParBuffer = g_Options->GetParBuffer();
 		int effectiveMem = g_MemoryMonitor
 			? g_MemoryMonitor->GetEffectiveParBufferMB(configuredParBuffer)
-			: (configuredParBuffer > 0 ? configuredParBuffer : 16);
+			: nzbget_rs_dqh_parchecker_resolve_fallback_par_buffer_mb(configuredParBuffer);
 		nzbget_rs_dur_parchecker_calc_threads_and_mem(
 			g_Options->GetParThreads(), Util::NumberOfCpuCores(), effectiveMem,
 			&m_threadsToUse, &m_memToUse);
@@ -208,7 +208,7 @@ void Repairer::BeginRepair()
 
 int ParChecker::StreamBuf::overflow(int ch)
 {
-	if (ch == '\n' || ch == '\r')
+	if (nzbget_rs_dqh_parchecker_is_streambuf_line_break(ch) != 0)
 	{
 		if (m_buffer.empty())
 		{
@@ -548,21 +548,23 @@ int ParChecker::PreProcessPar()
 		res = GetRepairer()->PreProcess(m_parFilename);
 		debug("ParChecker: PreProcess-result=%i", res);
 
-		if (IsStopped())
+		int stepClass = nzbget_rs_dqh_parchecker_classify_preprocess_step(
+			IsStopped() ? 1 : 0, (int)res, (int)Par2::eSuccess, (int)Par2::eInvalidCommandLineArguments);
+		if (stepClass == 1)
 		{
 			PrintMessage(Message::mkError, "Could not verify %s: stopping", m_infoName.c_str());
 			m_errMsg = "par-check was stopped";
 			return Par2::eRepairFailed;
 		}
 
-		if (res == Par2::eInvalidCommandLineArguments)
+		if (stepClass == 2)
 		{
 			PrintMessage(Message::mkError, "Could not start par-check for %s. Par-file: %s", m_infoName.c_str(), m_parFilename.c_str());
 			m_errMsg = "Command line could not be parsed";
 			return res;
 		}
 
-		if (res != Par2::eSuccess)
+		if (stepClass == 3)
 		{
 			PrintMessage(Message::mkWarning, "Could not verify %s: par2-file could not be processed", m_infoName.c_str());
 			PrintMessage(Message::mkInfo, "Requesting more par2-files for %s", m_infoName.c_str());
@@ -728,7 +730,7 @@ int ParChecker::ProcessMorePars()
 int ParChecker::ProcessTwinSet()
 {
 	std::string index = RequestTwinIndex();
-	if (index.empty() || IsStopped())
+	if (nzbget_rs_dqh_parchecker_can_start_twin_set(index.empty() ? 1 : 0, IsStopped() ? 1 : 0) == 0)
 	{
 		return Par2::eRepairNotPossible;
 	}
@@ -763,7 +765,7 @@ int ParChecker::ProcessTwinSet()
 				PrintMessage(Message::mkInfo, "File %s of the twin loaded for par-check", FileSystem::BaseFileName(volume.c_str()));
 			}
 		}
-		if (!volumes.empty() && !IsStopped())
+		if (nzbget_rs_dqh_parchecker_should_update_after_twin_volumes(volumes.empty() ? 1 : 0, IsStopped() ? 1 : 0) != 0)
 		{
 			GetRepairer()->UpdateVerificationResults();
 			res = GetRepairer()->Process(false);
@@ -1145,7 +1147,10 @@ void ParChecker::SignalDone(std::string fileName, int available, int total)
 			}
 
 			std::string targetFileName = sourcefile->TargetFileName();
-			if (!sourcefile->GetTargetExists() && fileName == FileSystem::BaseFileName(targetFileName.c_str()))
+			if (nzbget_rs_dqh_parchecker_is_missing_target_sourcefile(
+				sourcefile->GetTargetExists() ? 1 : 0,
+				fileName.c_str(),
+				FileSystem::BaseFileName(targetFileName.c_str())) != 0)
 			{
 				fileExists = false;
 				break;
@@ -1322,7 +1327,7 @@ ParChecker::EFileStatus ParChecker::VerifyDataFile(Par2::DiskFile& diskFile, Par
 	EFileStatus	fileStatus = FindFileCrc(FileSystem::BaseFileName(filename.c_str()), &downloadCrc, &segments);
 	ValidBlocks validBlocks;
 
-	if (fileStatus == fsFailure || fileStatus == fsUnknown)
+	if (nzbget_rs_dqh_parchecker_is_terminal_quick_crc_status((int)fileStatus, (int)fsFailure, (int)fsUnknown) != 0)
 	{
 		return fileStatus;
 	}
@@ -1476,7 +1481,7 @@ bool ParChecker::VerifyPartialDataFile(Par2::DiskFile&, Par2::Par2RepairerSource
 			downloadCrc = Par2::CRCUpdateBlock(downloadCrc ^ 0xFFFFFFFF, padLen) ^ 0xFFFFFFFF;
 		}
 
-		if (!ok || downloadCrc != parCrc)
+		if (nzbget_rs_dqh_parchecker_is_partial_range_crc_valid(ok ? 1 : 0, downloadCrc, parCrc) == 0)
 		{
 			infile.Close();
 			return false;

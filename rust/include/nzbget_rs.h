@@ -6217,6 +6217,41 @@ int nzbget_rs_dqh_fs_should_fallback_move_to_copy(
     int rename_ok, int err_no, int exdev);
 int nzbget_rs_dqh_fs_is_copied_file_valid(
     int close_ok, int loop_ok, int64_t copied_bytes, int64_t src_size);
+int nzbget_rs_dqh_parchecker_resolve_fallback_par_buffer_mb(int configured_mb);
+int nzbget_rs_dqh_parchecker_is_streambuf_line_break(int ch);
+int nzbget_rs_dqh_parchecker_classify_preprocess_step(
+    int is_stopped, int res, int e_success, int e_invalid_args);
+int nzbget_rs_dqh_parchecker_can_start_twin_set(int index_empty, int is_stopped);
+int nzbget_rs_dqh_parchecker_should_update_after_twin_volumes(
+    int volumes_empty, int is_stopped);
+int nzbget_rs_dqh_parchecker_is_missing_target_sourcefile(
+    int target_exists, const char* file_name, const char* target_base_name);
+int nzbget_rs_dqh_parchecker_is_terminal_quick_crc_status(
+    int file_status, int fs_failure, int fs_unknown);
+int nzbget_rs_dqh_parchecker_is_partial_range_crc_valid(
+    int ok, uint32_t download_crc, uint32_t par_crc);
+int nzbget_rs_dqh_unpack_ctrl_accum_unpack_sec(
+    int prev_unpack_sec, int64_t cur_time, int64_t start_time);
+const char* nzbget_rs_dqh_unpack_ctrl_select_sevenzip_wildcard(int multi_volumes);
+int nzbget_rs_dqh_unpack_ctrl_calc_write_buffer_bytes(
+    int write_buffer_kb, int* out_bytes);
+int nzbget_rs_dqh_unpack_ctrl_should_fail_on_close(int close_ok, int prev_ok);
+int nzbget_rs_dqh_unpack_ctrl_is_completed_success(int unpack_ok, int cleanup_success);
+const char* nzbget_rs_dqh_unpack_ctrl_select_unpack_parent_dir(
+    const char* final_dir, const char* dest_dir);
+int nzbget_rs_dqh_unpack_ctrl_is_move_extracted_error(int move_ok, int hidden_file);
+int nzbget_rs_dqh_unpack_ctrl_should_delete_created_final_dir(
+    int unpack_ok, int final_dir_created);
+int nzbget_rs_dqh_prepost_should_reset_stale_direct_unpack(
+    int direct_unpack_status, int ns_running, int has_unpack_thread);
+int nzbget_rs_dqh_prepost_has_single_main_par(
+    int found_main_pars, size_t main_pars_count);
+int nzbget_rs_dqh_prepost_matches_post_delete_target(
+    int has_post_info, int nzb_id, int target_id);
+int nzbget_rs_dqh_repair_ctrl_should_skip_twin_volume_entry(
+    int is_par2, const char* entry_filename, const char* twin_index);
+int nzbget_rs_dqh_repair_ctrl_matches_history_dupe_source(
+    int history_kind, int hk_nzb, int history_nzb_id, int dupe_source_id);
 
 #include "nzbget_tls_cipher.h"
 

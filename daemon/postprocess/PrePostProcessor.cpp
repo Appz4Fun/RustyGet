@@ -250,7 +250,10 @@ void PrePostProcessor::SanitisePostQueue()
 	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
 	for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
 	{
-		if (nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsRunning && !nzbInfo->GetUnpackThread())
+		if (nzbget_rs_dqh_prepost_should_reset_stale_direct_unpack(
+			(int)nzbInfo->GetDirectUnpackStatus(),
+			(int)NzbInfo::nsRunning,
+			nzbInfo->GetUnpackThread() != nullptr ? 1 : 0) != 0)
 		{
 			nzbInfo->SetDirectUnpackStatus(NzbInfo::nsNone);
 		}
@@ -996,7 +999,8 @@ static bool ParCannotCover(NzbInfo* nzbInfo)
 	}
 
 	ParParser::ParFileList mainPars;
-	if (!ParParser::FindMainPars(nzbInfo->GetDestDir(), &mainPars) || mainPars.size() != 1)
+	bool foundMainPars = ParParser::FindMainPars(nzbInfo->GetDestDir(), &mainPars);
+	if (nzbget_rs_dqh_prepost_has_single_main_par(foundMainPars ? 1 : 0, mainPars.size()) == 0)
 	{
 		return false;
 	}
@@ -1514,7 +1518,8 @@ bool PrePostProcessor::PostQueueDelete(DownloadQueue* downloadQueue, IdList* idL
 		for (NzbInfo* nzbInfo: downloadQueue->GetQueue())
 		{
 			PostInfo* postInfo = nzbInfo->GetPostInfo();
-			if (postInfo && nzbInfo->GetId() == id)
+			if (nzbget_rs_dqh_prepost_matches_post_delete_target(
+				postInfo != nullptr ? 1 : 0, nzbInfo->GetId(), id) != 0)
 			{
 				if (postInfo->GetWorking())
 				{

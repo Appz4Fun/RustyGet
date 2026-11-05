@@ -384,7 +384,8 @@ std::vector<std::string> RepairController::PostParChecker::RequestTwinVolumes(in
 	std::vector<Volume> volumes;
 	for (const TwinCheck::NzbEntry& entry : m_twinEntries)
 	{
-		if (!entry.par2 || entry.filename == m_twinIndex)
+		if (nzbget_rs_dqh_repair_ctrl_should_skip_twin_volume_entry(
+			entry.par2 ? 1 : 0, entry.filename.c_str(), m_twinIndex.c_str()) != 0)
 		{
 			continue;
 		}
@@ -471,8 +472,11 @@ void RepairController::PostParChecker::StatDupeSources(DupeSourceList* dupeSourc
 		{
 			for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
 			{
-				if (historyInfo->GetKind() == HistoryInfo::hkNzb &&
-					historyInfo->GetNzbInfo()->GetId() == dupeSource.GetId())
+				if (nzbget_rs_dqh_repair_ctrl_matches_history_dupe_source(
+					(int)historyInfo->GetKind(),
+					(int)HistoryInfo::hkNzb,
+					historyInfo->GetKind() == HistoryInfo::hkNzb ? historyInfo->GetNzbInfo()->GetId() : 0,
+					dupeSource.GetId()) != 0)
 				{
 					int newHistExtra = 0;
 					int dummyTotal = totalExtraParBlocks;

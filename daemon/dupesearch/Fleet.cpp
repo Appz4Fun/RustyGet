@@ -359,7 +359,7 @@ Fleet::Result Fleet::Append(Request request)
 				[&](const std::string& key, const DonorHealth::Health& health)
 				{
 					std::lock_guard<std::mutex> guard(mutex);
-					Candidate& candidate = candidates[(size_t)atoi(key.c_str())];
+					Candidate& candidate = candidates[(size_t)nzbget_rs_dqh_parse_c_atoi(key.c_str())];
 					candidate.health = health;
 					candidate.checked = true;
 				});

@@ -44,7 +44,7 @@ namespace
 
 long long ToInt(const std::string& text)
 {
-	return atoll(Trim(text).c_str());
+	return nzbget_rs_dqh_parse_c_atoll(text.c_str());
 }
 
 class PageReader : public XmlReader::Handler
@@ -61,7 +61,7 @@ public:
 		{
 			case 1:
 				m_page.error = true;
-				m_page.errorCode = atoi(XmlReader::Attr(attrs, "code").c_str());
+				m_page.errorCode = nzbget_rs_dqh_parse_c_atoi(XmlReader::Attr(attrs, "code").c_str());
 				m_page.errorText = XmlReader::Attr(attrs, "description");
 				break;
 			case 2:

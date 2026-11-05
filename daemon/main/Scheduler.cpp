@@ -177,7 +177,8 @@ void Scheduler::ExecuteTask(Task* task)
 			if (!task->m_param.empty())
 			{
 				g_WorkState->SetSpeedLimit(
-					nzbget_rs_sfw_scheduler_calc_speed_limit_bytes(atoi(task->m_param.c_str())));
+					nzbget_rs_sfw_scheduler_calc_speed_limit_bytes(
+						nzbget_rs_dqh_parse_c_atoi(task->m_param.c_str())));
 				m_downloadRateChanged = true;
 			}
 			break;
@@ -275,7 +276,7 @@ void Scheduler::EditServer(bool active, const char* serverList)
 	Tokenizer tok(serverList, ",;");
 	while (const char* serverRef = tok.Next())
 	{
-		int id = atoi(serverRef);
+		int id = nzbget_rs_dqh_parse_c_atoi(serverRef);
 		for (NewsServer* server : g_ServerPool->GetServers())
 		{
 			if (nzbget_rs_sfw_scheduler_matches_server_ref(
@@ -304,7 +305,7 @@ void Scheduler::FetchFeed(const char* feedList)
 	Tokenizer tok(feedList, ",;");
 	while (const char* feedRef = tok.Next())
 	{
-		int id = atoi(feedRef);
+		int id = nzbget_rs_dqh_parse_c_atoi(feedRef);
 		for (FeedInfo* feed : g_FeedCoordinator->GetFeeds())
 		{
 			int targetFeedId = 0;

@@ -5984,6 +5984,16 @@ int nzbget_rs_dqh_tls_resolve_probe_result(
     int auth_error, int tls_probe_failure);
 int nzbget_rs_dqh_maintenance_match_sig_line_prefix(
     const char* line, const char* sig_title, size_t* out_offset);
+int64_t nzbget_rs_dqh_parse_c_atoll(const char* text);
+int nzbget_rs_dqh_parse_c_atoi(const char* text);
+int nzbget_rs_dqh_parse_c_atoi_or_default(const char* text, int default_val);
+int nzbget_rs_dqh_diskstate_parse_queue_file_id_and_suffix(
+    const char* filename, int* out_id, char* out_suffix);
+int nzbget_rs_dqh_nstring_find_substr_from(
+    const char* haystack, const char* needle, int pos);
+void nzbget_rs_dqh_log_parse_rotated_date_fields(
+    const char* filename, size_t year_off, size_t mon_off, size_t mday_off,
+    int* out_year, int* out_mon, int* out_mday);
 
 #include "nzbget_tls_cipher.h"
 

@@ -1483,7 +1483,8 @@ bool DiskState::LoadNzbInfo(NzbInfo* nzbInfo, Servers* servers, StateDiskFile& i
 		if (nzbget_rs_dqh_diskstate_find_char_pos(buf, ',', &commaPos) != 0)
 		{
 			const char* scriptName = buf + commaPos + 1;
-			int status = nzbget_rs_dad_diskstate_normalize_script_status(atoi(buf), formatVersion);
+		int status = nzbget_rs_dad_diskstate_normalize_script_status(
+			nzbget_rs_dqh_parse_c_atoi(buf), formatVersion);
 			nzbInfo->GetScriptStatuses()->emplace_back(scriptName, (ScriptStatus::EStatus)status);
 		}
 	}
@@ -2819,9 +2820,9 @@ bool DiskState::LoadAllFileStates(DownloadQueue* downloadQueue, Servers* servers
 	DirBrowser dir(g_Options->GetQueueDir());
 	while (const char* filename = dir.Next())
 	{
-		int id;
-		char suffix;
-		if (sscanf(filename, "%i%c", &id, &suffix) == 2)
+		int id = 0;
+		char suffix = '\0';
+		if (nzbget_rs_dqh_diskstate_parse_queue_file_id_and_suffix(filename, &id, &suffix) != 0)
 		{
 			if (nzbget_rs_dad_diskstate_should_load_file_state(
 				suffix, g_Options->GetContinuePartial() ? 1 : 0, cacheWasActive ? 1 : 0) != 0)

@@ -405,7 +405,7 @@ void NzbFile::Parse_StartElement(const char *name, const char **atts)
 					m_fileInfo->SetSubject(attrvalue);
 					break;
 				case 2:
-					m_fileInfo->SetTime(atoi(attrvalue));
+					m_fileInfo->SetTime(nzbget_rs_dqh_parse_c_atoi(attrvalue));
 					break;
 			}
 		}
@@ -436,10 +436,10 @@ void NzbFile::Parse_StartElement(const char *name, const char **atts)
 			switch (nzbget_rs_dqh_nzbfile_classify_segment_attr(attrname))
 			{
 				case 1:
-					lsize = atol(attrvalue);
+					lsize = nzbget_rs_dqh_parse_c_atoll(attrvalue);
 					break;
 				case 2:
-					partNumber = atol(attrvalue);
+					partNumber = nzbget_rs_dqh_parse_c_atoi(attrvalue);
 					break;
 			}
 		}

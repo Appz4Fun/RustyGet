@@ -2438,6 +2438,163 @@ pub fn dqh_maintenance_match_sig_line_prefix(line: &[u8], sig_title: &[u8]) -> O
     }
 }
 
+/// Parses a leading signed base-10 integer from `text` following C `atoll` / `strtoll(..., 10)`
+/// semantics (skips leading ASCII whitespace, optional `+`/`-`, consecutive decimal digits).
+pub fn dqh_parse_c_atoll(text: &[u8]) -> i64 {
+    let mut i = 0;
+    while i < text.len() && matches!(text[i], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+        i += 1;
+    }
+    let mut neg = false;
+    if i < text.len() {
+        if text[i] == b'-' {
+            neg = true;
+            i += 1;
+        } else if text[i] == b'+' {
+            i += 1;
+        }
+    }
+    let mut acc: u64 = 0;
+    let mut any = false;
+    while i < text.len() && text[i].is_ascii_digit() {
+        any = true;
+        acc = acc
+            .saturating_mul(10)
+            .saturating_add(u64::from(text[i] - b'0'));
+        i += 1;
+    }
+    if !any {
+        return 0;
+    }
+    if neg {
+        let max_neg = (i64::MAX as u64) + 1;
+        if acc >= max_neg {
+            i64::MIN
+        } else {
+            -(acc as i64)
+        }
+    } else {
+        acc.min(i64::MAX as u64) as i64
+    }
+}
+
+/// Parses a leading signed base-10 integer from `text` following C `atoi` semantics.
+pub fn dqh_parse_c_atoi(text: &[u8]) -> i32 {
+    dqh_parse_c_atoll(text) as i32
+}
+
+/// Parses a leading signed base-10 integer from `text` when `Some`, or returns `default_val` when `None`.
+pub fn dqh_parse_c_atoi_or_default(text: Option<&[u8]>, default_val: i32) -> i32 {
+    match text {
+        Some(s) => dqh_parse_c_atoi(s),
+        None => default_val,
+    }
+}
+
+/// Parses `(id, suffix)` from a queue state filename following `sscanf(filename, "%i%c", &id, &suffix) == 2`
+/// semantics in `DiskState::LoadAllFileStates`.
+pub fn dqh_diskstate_parse_queue_file_id_and_suffix(filename: &[u8]) -> Option<(i32, u8)> {
+    let mut i = 0;
+    while i < filename.len() && matches!(filename[i], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+        i += 1;
+    }
+    let mut neg = false;
+    if i < filename.len() {
+        if filename[i] == b'-' {
+            neg = true;
+            i += 1;
+        } else if filename[i] == b'+' {
+            i += 1;
+        }
+    }
+    if i >= filename.len() {
+        return None;
+    }
+    let mut acc: u64 = 0;
+    let mut any = false;
+    if filename[i] == b'0' {
+        if i + 2 < filename.len()
+            && (filename[i + 1] == b'x' || filename[i + 1] == b'X')
+            && filename[i + 2].is_ascii_hexdigit()
+        {
+            i += 2;
+            while i < filename.len() && filename[i].is_ascii_hexdigit() {
+                any = true;
+                let d = match filename[i] {
+                    b'0'..=b'9' => filename[i] - b'0',
+                    b'a'..=b'f' => filename[i] - b'a' + 10,
+                    b'A'..=b'F' => filename[i] - b'A' + 10,
+                    _ => unreachable!(),
+                };
+                acc = acc.saturating_mul(16).saturating_add(u64::from(d));
+                i += 1;
+            }
+        } else {
+            while i < filename.len() && matches!(filename[i], b'0'..=b'7') {
+                any = true;
+                acc = acc
+                    .saturating_mul(8)
+                    .saturating_add(u64::from(filename[i] - b'0'));
+                i += 1;
+            }
+        }
+    } else {
+        while i < filename.len() && filename[i].is_ascii_digit() {
+            any = true;
+            acc = acc
+                .saturating_mul(10)
+                .saturating_add(u64::from(filename[i] - b'0'));
+            i += 1;
+        }
+    }
+    if !any || i >= filename.len() {
+        return None;
+    }
+    let val = if neg {
+        let max_neg = (i64::MAX as u64) + 1;
+        if acc >= max_neg {
+            i64::MIN
+        } else {
+            -(acc as i64)
+        }
+    } else {
+        acc.min(i64::MAX as u64) as i64
+    };
+    Some((val as i32, filename[i]))
+}
+
+/// Finds the first occurrence of `needle` in `haystack` starting at `pos` for `CString::Find`.
+pub fn dqh_nstring_find_substr_from(haystack: &[u8], needle: &[u8], pos: i32) -> i32 {
+    if pos < 0 || (pos != 0 && (pos as usize) >= haystack.len()) {
+        return -1;
+    }
+    let start = pos as usize;
+    if needle.is_empty() {
+        return pos;
+    }
+    match haystack[start..]
+        .windows(needle.len())
+        .position(|w| w == needle)
+    {
+        Some(rel) => pos + (rel as i32),
+        None => -1,
+    }
+}
+
+/// Parses `(tm_year, tm_mon, tm_mday)` from a rotated log filename at the given match offsets
+/// for `Log::RotateLog`.
+pub fn dqh_log_parse_rotated_date_fields(
+    filename: &[u8],
+    year_off: usize,
+    mon_off: usize,
+    mday_off: usize,
+) -> (i32, i32, i32) {
+    let year = dqh_parse_c_atoi(filename.get(year_off..).unwrap_or(b"")) - 1900;
+    let mon = dqh_parse_c_atoi(filename.get(mon_off..).unwrap_or(b"")) - 1;
+    let mday = dqh_parse_c_atoi(filename.get(mday_off..).unwrap_or(b""));
+    (year, mon, mday)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3427,6 +3584,31 @@ mod tests {
         assert_eq!(
             dqh_maintenance_match_sig_line_prefix(b"SHA256 (other.run) = deadbeef", b"SHA256 (pkg.run) = "),
             None
+        );
+        assert_eq!(dqh_parse_c_atoll(b"  -9876543210xyz"), -9876543210);
+        assert_eq!(dqh_parse_c_atoll(b"abc"), 0);
+        assert_eq!(dqh_parse_c_atoi(b" 42 "), 42);
+        assert_eq!(dqh_parse_c_atoi_or_default(Some(b"6791"), 119), 6791);
+        assert_eq!(dqh_parse_c_atoi_or_default(None, 119), 119);
+        assert_eq!(
+            dqh_diskstate_parse_queue_file_id_and_suffix(b"123s"),
+            Some((123, b's'))
+        );
+        assert_eq!(
+            dqh_diskstate_parse_queue_file_id_and_suffix(b"123"),
+            None
+        );
+        assert_eq!(
+            dqh_diskstate_parse_queue_file_id_and_suffix(b"acache"),
+            None
+        );
+        assert_eq!(dqh_nstring_find_substr_from(b"hello world", b"world", 0), 6);
+        assert_eq!(dqh_nstring_find_substr_from(b"hello world", b"o", 5), 7);
+        assert_eq!(dqh_nstring_find_substr_from(b"", b"", 0), 0);
+        assert_eq!(dqh_nstring_find_substr_from(b"hello", b"a", 5), -1);
+        assert_eq!(
+            dqh_log_parse_rotated_date_fields(b"nzbget-2026-11-05.log", 7, 12, 15),
+            (126, 10, 5)
         );
     }
 }

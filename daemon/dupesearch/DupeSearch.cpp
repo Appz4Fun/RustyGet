@@ -96,7 +96,8 @@ bool PlacementAvailable(DownloadQueue* queue, NzbInfo* pick, NzbInfo* backup, bo
         pick != nullptr ? 1 : 0, pick ? pick->GetFullContentHash() : 0, backup->GetFullContentHash(),
         queuedFileExists ? 1 : 0, health, critHealth,
         g_Options->GetHealthCheck() == Options::hcDupe ? 1 : 0,
-        markedAlive != nullptr ? 1 : 0, markedAlive ? atoi(markedAlive->GetValue()) : 0) != 0;
+        markedAlive != nullptr ? 1 : 0,
+        markedAlive ? nzbget_rs_dqh_parse_c_atoi(markedAlive->GetValue()) : 0) != 0;
 }
 
 
@@ -1017,7 +1018,7 @@ void DupeSearch::Place(const Job& job, const NzbSummary& pick, std::vector<NzbFe
 			[&](const std::string& key, const DonorHealth::Health& health)
 			{
 				std::lock_guard<std::mutex> guard(placeMutex);
-				probe[(size_t)atoi(key.c_str())] = health;
+				probe[(size_t)nzbget_rs_dqh_parse_c_atoi(key.c_str())] = health;
 			});
 	}
 
@@ -1143,7 +1144,7 @@ void DupeSearch::Place(const Job& job, const NzbSummary& pick, std::vector<NzbFe
 			[&](const std::string& key, const DonorHealth::Health& health)
 			{
 				std::lock_guard<std::mutex> guard(placeMutex);
-				size_t i = (size_t)atoi(key.c_str());
+				size_t i = (size_t)nzbget_rs_dqh_parse_c_atoi(key.c_str());
 				if (IsStopped() || !todo.erase(i))
 				{
 					return;
@@ -1270,7 +1271,7 @@ void DupeSearch::Place(const Job& job, const NzbSummary& pick, std::vector<NzbFe
 				{ return Posting::SamePosting(summaries[m].messageIds, posting.ids); });
 			if (first != list.end())
 			{
-				sameAs[m] = (size_t)atoi(first->key.c_str());
+				sameAs[m] = (size_t)nzbget_rs_dqh_parse_c_atoi(first->key.c_str());
 				continue;
 			}
 			NzbgetRsBuf keyBuf = nzbget_rs_dqh_dupesearch_format_usize_str(m);
@@ -1283,7 +1284,7 @@ void DupeSearch::Place(const Job& job, const NzbSummary& pick, std::vector<NzbFe
 			[&](const std::string& key, const DonorHealth::Health& health)
 			{
 				std::lock_guard<std::mutex> guard(placeMutex);
-				measured[(size_t)atoi(key.c_str())] = health;
+				measured[(size_t)nzbget_rs_dqh_parse_c_atoi(key.c_str())] = health;
 			});
 		for (const auto& alias : sameAs)
 		{

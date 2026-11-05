@@ -292,7 +292,7 @@ bool QueueEditor::InternEditList(ItemList* itemList,
 	{
 		itemList = &workItems;
 		int offset = args && (action == DownloadQueue::eaFileMoveOffset ||
-			action == DownloadQueue::eaGroupMoveOffset) ? atoi(args) : 0;
+			action == DownloadQueue::eaGroupMoveOffset) ? nzbget_rs_dqh_parse_c_atoi(args) : 0;
 		PrepareList(itemList, idList, action, offset);
 	}
 
@@ -746,7 +746,7 @@ void QueueEditor::SetNzbPriority(NzbInfo* nzbInfo, const char* priority)
 {
 	debug("Setting priority %s for %s", priority, nzbInfo->GetName());
 
-	int priorityVal = atoi(priority);
+	int priorityVal = nzbget_rs_dqh_parse_c_atoi(priority);
 	nzbInfo->SetPriority(priorityVal);
 }
 
@@ -941,7 +941,7 @@ bool QueueEditor::MoveGroupsTo(ItemList* itemList, IdList* idList, bool before, 
 		return false;
 	}
 
-	int targetId = atoi(args);
+	int targetId = nzbget_rs_dqh_parse_c_atoi(args);
 	int offset = 0;
 
 	// a target that isn't queued: the offset below counted to the end of the
@@ -1060,7 +1060,7 @@ void QueueEditor::SetNzbDupeParam(NzbInfo* nzbInfo, DownloadQueue::EEditAction a
 			break;
 
 		case DownloadQueue::eaGroupSetDupeScore:
-			nzbInfo->SetDupeScore(atoi(text));
+			nzbInfo->SetDupeScore(nzbget_rs_dqh_parse_c_atoi(text));
 			break;
 
 		case DownloadQueue::eaGroupSetDupeMode:

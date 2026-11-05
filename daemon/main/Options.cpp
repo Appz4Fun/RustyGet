@@ -1043,14 +1043,14 @@ void Options::InitServers()
 			{
 				m_extender->AddNewsServer(n, active, nname,
 					nhost,
-					nport ? atoi(nport) : 119,
+					nzbget_rs_dqh_parse_c_atoi_or_default(nport, 119),
 					ipversion,
 					nusername, npassword,
 					joinGroup, tls, ncipher,
-					nconnections ? atoi(nconnections) : 1,
-					nretention ? atoi(nretention) : 0,
-					nlevel ? atoi(nlevel) : 0,
-					ngroup ? atoi(ngroup) : 0,
+					nzbget_rs_dqh_parse_c_atoi_or_default(nconnections, 1),
+					nzbget_rs_dqh_parse_c_atoi_or_default(nretention, 0),
+					nzbget_rs_dqh_parse_c_atoi_or_default(nlevel, 0),
+					nzbget_rs_dqh_parse_c_atoi_or_default(ngroup, 0),
 					optional, certveriflevel);
 			}
 		}
@@ -1184,13 +1184,13 @@ void Options::InitFeeds()
 				n,
 				nname,
 				nurl,
-				ninterval ? atoi(ninterval) : 0,
+				nzbget_rs_dqh_parse_c_atoi_or_default(ninterval, 0),
 				nfilter,
 				backlog,
 				pauseNzb,
 				ncategory,
 				categorySource,
-				npriority ? atoi(npriority) : 0,
+				nzbget_rs_dqh_parse_c_atoi_or_default(npriority, 0),
 				nextensions,
 				certveriflevel
 			);

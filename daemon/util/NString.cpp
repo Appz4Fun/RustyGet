@@ -99,13 +99,13 @@ int BString<size>::FormatV(const char* format, va_list ap)
 bool CString::operator==(const CString& other) const
 {
 	return (!m_data && !other.m_data) ||
-		(m_data && other.m_data && !strcmp(m_data, other.m_data));
+		(m_data && other.m_data && nzbget_rs_dqh_bytes_equal(m_data, other.m_data) != 0);
 }
 
 bool CString::operator==(const char* other) const
 {
 	return (!m_data && !other) ||
-		(m_data && other && !strcmp(m_data, other));
+		(m_data && other && nzbget_rs_dqh_bytes_equal(m_data, other) != 0);
 }
 
 void CString::Set(const char* str, int len)
@@ -235,12 +235,11 @@ int CString::FormatV(const char* format, va_list ap)
 
 int CString::Find(const char* str, int pos)
 {
-	if (!m_data || (pos != 0 && pos >= Length()))
+	if (!m_data || !str)
 	{
 		return -1;
 	}
-	char* res = strstr(m_data + pos, str);
-	return res ? (int)(res - m_data) : -1;
+	return nzbget_rs_dqh_nstring_find_substr_from(m_data, str, pos);
 }
 
 void CString::Replace(int pos, int len, const char* str, int strLen)

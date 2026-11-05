@@ -120,7 +120,7 @@ void FeedFile::Parse_StartElement(const char* name, const char **atts)
 			}
 			else if (encKind == 2)
 			{
-				int64 size = atoll(atts[1]);
+				int64 size = nzbget_rs_dqh_parse_c_atoll(atts[1]);
 				m_feedItemInfo->SetSize(size);
 			}
 			if (m_feedItemInfo->GetSize() == 0)
@@ -140,24 +140,24 @@ void FeedFile::Parse_StartElement(const char* name, const char **atts)
 		int attrKind = nzbget_rs_sfc_feed_file_classify_newznab_attr_key(atts[1], m_feedItemInfo->GetSize());
 		if (attrKind == 1)
 		{
-			int64 size = atoll(atts[3]);
+			int64 size = nzbget_rs_dqh_parse_c_atoll(atts[3]);
 			m_feedItemInfo->SetSize(size);
 		}
 		else if (attrKind == 2)
 		{
-			m_feedItemInfo->SetImdbId(atoi(atts[3]));
+			m_feedItemInfo->SetImdbId(nzbget_rs_dqh_parse_c_atoi(atts[3]));
 		}
 		else if (attrKind == 3)
 		{
-			m_feedItemInfo->SetRageId(atoi(atts[3]));
+			m_feedItemInfo->SetRageId(nzbget_rs_dqh_parse_c_atoi(atts[3]));
 		}
 		else if (attrKind == 4)
 		{
-			m_feedItemInfo->SetTvdbId(atoi(atts[3]));
+			m_feedItemInfo->SetTvdbId(nzbget_rs_dqh_parse_c_atoi(atts[3]));
 		}
 		else if (attrKind == 5)
 		{
-			m_feedItemInfo->SetTvmazeId(atoi(atts[3]));
+			m_feedItemInfo->SetTvmazeId(nzbget_rs_dqh_parse_c_atoi(atts[3]));
 		}
 		else if (attrKind == 6)
 		{

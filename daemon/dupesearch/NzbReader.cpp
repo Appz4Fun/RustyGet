@@ -85,8 +85,8 @@ public:
 		}
 		else if (elemKind == 3)
 		{
-			m_segmentBytes = atoll(XmlReader::Attr(attrs, "bytes").c_str());
-			m_segmentNumber = atoll(XmlReader::Attr(attrs, "number").c_str());
+			m_segmentBytes = nzbget_rs_dqh_parse_c_atoll(XmlReader::Attr(attrs, "bytes").c_str());
+			m_segmentNumber = nzbget_rs_dqh_parse_c_atoll(XmlReader::Attr(attrs, "number").c_str());
 			m_inSegment = true;
 		}
 	}

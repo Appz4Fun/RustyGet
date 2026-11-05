@@ -198,7 +198,7 @@ NServOpts::NServOpts(int argc, char* argv[], Options::CmdOptList& cmdOpts)
 				break;
 
 			case 'p':
-				firstPort = atoi(optind > argc ? "6791" : argv[optind - 1]);
+				firstPort = nzbget_rs_dqh_parse_c_atoi_or_default(optind > argc ? nullptr : argv[optind - 1], 6791);
 				break;
 
 			case 's':
@@ -208,24 +208,24 @@ NServOpts::NServOpts(int argc, char* argv[], Options::CmdOptList& cmdOpts)
 				break;
 
 			case 'i':
-				instances = atoi(optind > argc ? "1" : argv[optind - 1]);
+				instances = nzbget_rs_dqh_parse_c_atoi_or_default(optind > argc ? nullptr : argv[optind - 1], 1);
 				break;
 
 			case 'v':
-				verbosity = atoi(optind > argc ? "1" : argv[optind - 1]);
+				verbosity = nzbget_rs_dqh_parse_c_atoi_or_default(optind > argc ? nullptr : argv[optind - 1], 1);
 				break;
 
 			case 'w':
-				latency = atoi(optind > argc ? "0" : argv[optind - 1]);
+				latency = nzbget_rs_dqh_parse_c_atoi_or_default(optind > argc ? nullptr : argv[optind - 1], 0);
 				break;
 
 			case 'r':
-				speed = atoi(optind > argc ? "0" : argv[optind - 1]);
+				speed = nzbget_rs_dqh_parse_c_atoi_or_default(optind > argc ? nullptr : argv[optind - 1], 0);
 				break;
 
 			case 'z':
 				generateNzb = true;
-				segmentSize = atoi(optind > argc ? "500000" : argv[optind - 1]);
+				segmentSize = nzbget_rs_dqh_parse_c_atoi_or_default(optind > argc ? nullptr : argv[optind - 1], 500000);
 				break;
 
 			case 'q':

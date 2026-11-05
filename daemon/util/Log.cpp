@@ -347,9 +347,14 @@ void Log::RotateLog()
 
 			struct tm tm;
 			memset(&tm, 0, sizeof(tm));
-			tm.tm_year = atoi(filename + mask.GetMatchStart(0)) - 1900;
-			tm.tm_mon = atoi(filename + mask.GetMatchStart(1)) - 1;
-			tm.tm_mday = atoi(filename + mask.GetMatchStart(2));
+			nzbget_rs_dqh_log_parse_rotated_date_fields(
+				filename,
+				(size_t)mask.GetMatchStart(0),
+				(size_t)mask.GetMatchStart(1),
+				(size_t)mask.GetMatchStart(2),
+				&tm.tm_year,
+				&tm.tm_mon,
+				&tm.tm_mday);
 			time_t fileTime = Util::Timegm(&tm);
 			int fileDay = (int)fileTime / 86400;
 

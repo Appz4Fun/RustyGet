@@ -35479,6 +35479,106 @@ pub unsafe extern "C" fn nzbget_rs_dqh_maintenance_match_sig_line_prefix(
     }
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_parse_c_atoll(text: *const c_char) -> i64 {
+    let s = if text.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(text).to_bytes()
+    };
+    crate::dupequeuehealth::dqh_parse_c_atoll(s)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_parse_c_atoi(text: *const c_char) -> c_int {
+    let s = if text.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(text).to_bytes()
+    };
+    crate::dupequeuehealth::dqh_parse_c_atoi(s)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_parse_c_atoi_or_default(
+    text: *const c_char,
+    default_val: c_int,
+) -> c_int {
+    let s = if text.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(text).to_bytes())
+    };
+    crate::dupequeuehealth::dqh_parse_c_atoi_or_default(s, default_val)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_parse_queue_file_id_and_suffix(
+    filename: *const c_char,
+    out_id: *mut c_int,
+    out_suffix: *mut c_char,
+) -> c_int {
+    let f = if filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    match crate::dupequeuehealth::dqh_diskstate_parse_queue_file_id_and_suffix(f) {
+        Some((id, suffix)) => {
+            if !out_id.is_null() {
+                *out_id = id;
+            }
+            if !out_suffix.is_null() {
+                *out_suffix = suffix as c_char;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_nstring_find_substr_from(
+    haystack: *const c_char,
+    needle: *const c_char,
+    pos: c_int,
+) -> c_int {
+    if haystack.is_null() || needle.is_null() {
+        return -1;
+    }
+    let h = CStr::from_ptr(haystack).to_bytes();
+    let n = CStr::from_ptr(needle).to_bytes();
+    crate::dupequeuehealth::dqh_nstring_find_substr_from(h, n, pos)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_log_parse_rotated_date_fields(
+    filename: *const c_char,
+    year_off: usize,
+    mon_off: usize,
+    mday_off: usize,
+    out_year: *mut c_int,
+    out_mon: *mut c_int,
+    out_mday: *mut c_int,
+) {
+    let f = if filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    let (y, m, d) =
+        crate::dupequeuehealth::dqh_log_parse_rotated_date_fields(f, year_off, mon_off, mday_off);
+    if !out_year.is_null() {
+        *out_year = y;
+    }
+    if !out_mon.is_null() {
+        *out_mon = m;
+    }
+    if !out_mday.is_null() {
+        *out_mday = d;
+    }
+}
+
 
 
 

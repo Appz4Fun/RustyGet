@@ -525,11 +525,13 @@ void XmlRpcProcessor::SetUrl(const char* url)
 {
 	// the path is decoded here, each query parameter after it is split off: decoded
 	// first, an encoded "&" (%26) inside a value split that value in two
-	const char* query = strchr(url, '?');
+	size_t pathSetLen = 0;
+	size_t queryOffset = 0;
+	bool hasQuery = nzbget_rs_tpr_xmlrpc_split_url_path_and_query(url, &pathSetLen, &queryOffset) != 0;
 	CString path;
-	path.Set(url, query ? (int)(query - url) : 0);
+	path.Set(url, (int)pathSetLen);
 	WebUtil::UrlDecode(path);
-	m_url = CString::FormatStr("%s%s", *path, query ? query : "");
+	m_url = CString::FormatStr("%s%s", *path, hasQuery ? url + queryOffset : "");
 }
 
 bool XmlRpcProcessor::IsRpcRequest(const char* url)
@@ -1491,8 +1493,10 @@ void EditQueueXmlCommand::Execute()
 	}
 
 	BString<100> offsetStr("%i", offset);
-	if (hasOffset && (action == DownloadQueue::eaFileMoveOffset ||
-		action == DownloadQueue::eaGroupMoveOffset))
+	if (nzbget_rs_tpr_xmlrpc_should_use_edit_offset(
+		hasOffset ? 1 : 0, action,
+		(int)DownloadQueue::eaFileMoveOffset,
+		(int)DownloadQueue::eaGroupMoveOffset) != 0)
 	{
 		args = *offsetStr;
 	}
@@ -2616,7 +2620,10 @@ void ReadUrlXmlCommand::Execute()
 	int num = 1;
 	while (num == 1 || FileSystem::FileExists(tempFileName))
 	{
-		tempFileName.Format("%s%creadurl-%i.tmp", g_Options->GetTempDir(), PATH_SEPARATOR, num);
+		NzbgetRsBuf tmpBuf = nzbget_rs_tpr_xmlrpc_format_readurl_temp_filename(
+			g_Options->GetTempDir(), PATH_SEPARATOR, num);
+		tempFileName.Set(tmpBuf.data ? tmpBuf.data : "", (int)tmpBuf.len);
+		nzbget_rs_free(tmpBuf);
 		num++;
 	}
 
@@ -2974,7 +2981,9 @@ void TestServerXmlCommand::Execute()
 		{
 			id.AppendFmt("%i", rand());
 		}
-		const char* response = connection.Request(BString<1024>("ARTICLE <%s@nzbget.com>\r\n", *id));
+		NzbgetRsBuf cmdBuf = nzbget_rs_tpr_xmlrpc_format_testserver_article_cmd(*id);
+		const char* response = connection.Request(cmdBuf.data ? cmdBuf.data : "");
+		nzbget_rs_free(cmdBuf);
 		ok = nzbget_rs_rol_xmlrpc_test_server_response_ok(response) != 0;
 	}
 

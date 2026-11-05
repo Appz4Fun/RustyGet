@@ -595,9 +595,12 @@ void DownloadBinCommand::Execute()
 		) != Scanner::asFailed;
 	}
 
-	SendBoolResponse(ok, BString<1024>(ok ? "Collection %s added to queue" :
-		"Download Request failed for %s",
-		FileSystem::BaseFileName(DownloadRequest.m_nzbFilename)));
+	{
+		NzbgetRsBuf msgBuf = nzbget_rs_tpr_binrpc_format_download_response_msg(
+			ok ? 1 : 0, FileSystem::BaseFileName(DownloadRequest.m_nzbFilename));
+		SendBoolResponse(ok, msgBuf.data ? msgBuf.data : "");
+		nzbget_rs_free(msgBuf);
+	}
 }
 
 void ListBinCommand::Execute()
@@ -661,7 +664,9 @@ void ListBinCommand::Execute()
 			nzbEntries.Add({(uint32)nzbInfo->GetId(), (uint32)nzbInfo->GetKind(), sizeLo, sizeHi, remainingSizeLo,
 				remainingSizeHi, pausedSizeLo, pausedSizeHi, (uint32)nzbInfo->GetPausedFileCount(),
 				(uint32)nzbInfo->GetRemainingParCount(), (uint32)nzbInfo->GetPriority(),
-				(uint32)(matchGroup && (!regEx || regEx->Match(nzbInfo->GetName()))),
+				nzbget_rs_tpr_binrpc_eval_nzb_group_match(
+					matchGroup ? 1 : 0, regEx ? 1 : 0,
+					(matchGroup && regEx && regEx->Match(nzbInfo->GetName())) ? 1 : 0),
 				RsText(nzbInfo->GetFilename()), RsText(nzbInfo->GetName()), RsText(nzbInfo->GetDestDir()),
 				RsText(nzbInfo->GetCategory()), RsText(nzbInfo->GetQueuedFilename())});
 		}
@@ -704,9 +709,10 @@ void ListBinCommand::Execute()
 				bool match = false;
 				if (regEx && !matchGroup)
 				{
-					BString<1024> filename("%s/%s", fileInfo->GetNzbInfo()->GetName(),
-						FileSystem::BaseFileName(fileInfo->GetFilename()));
-					match = regEx->Match(filename);
+					NzbgetRsBuf matchNameBuf = nzbget_rs_tpr_binrpc_format_file_match_name(
+						fileInfo->GetNzbInfo()->GetName(), FileSystem::BaseFileName(fileInfo->GetFilename()));
+					match = regEx->Match(matchNameBuf.data ? matchNameBuf.data : "");
+					nzbget_rs_free(matchNameBuf);
 				}
 
 				uint32 fileSizeHi, fileSizeLo, remainingSizeHi, remainingSizeLo;

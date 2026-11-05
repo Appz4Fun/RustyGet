@@ -369,8 +369,10 @@ void StatMeter::ResetSpeedStat()
 void StatMeter::LogDebugInfo()
 {
 	info("   ---------- SpeedMeter");
-	int speed = CalcCurrentDownloadSpeed() / 1024;
-	int timeDiff = (int)Util::CurrentTime() - m_speedStartTime * SPEEDMETER_SLOTSIZE;
+	int32_t speed = 0, timeDiff = 0;
+	nzbget_rs_dqh_statmeter_calc_debug_speed_and_timediff(
+		CalcCurrentDownloadSpeed(), (int)Util::CurrentTime(),
+		m_speedStartTime.load(), SPEEDMETER_SLOTSIZE, &speed, &timeDiff);
 	info("      Speed: %i", speed);
 	info("      SpeedStartTime: %i", m_speedStartTime.load());
 	info("      SpeedTotalBytes: %" PRIi64, m_speedTotalBytes.load());
@@ -493,7 +495,7 @@ void StatMeter::CalcQuotaUsage(int64& monthBytes, int64& dayBytes)
 		elapsedSlots,
 		&monthBytes,
 		&dayBytes);
-	debug("month volume: %i MB", (int)(monthBytes / 1024 / 1024));
+	debug("month volume: %i MB", nzbget_rs_dqh_statmeter_bytes_to_mb_i32(monthBytes));
 }
 
 int StatMeter::CalcMonthSlots(const ServerVolume& volume)

@@ -194,7 +194,7 @@ bool ArticleWriter::Start(Decoder::EFormat format, const char* filename, int64 f
 		if (!m_outFile.Open(outFilename, directWrite ? DiskFile::omReadWrite : DiskFile::omWrite))
 		{
 			m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError,
-				"Could not %s file %s: %s", directWrite ? "open" : "create", outFilename,
+				"Could not %s file %s: %s", nzbget_rs_dqh_article_writer_open_verb(directWrite ? 1 : 0), outFilename,
 				*FileSystem::GetLastErrorMessage());
 			return false;
 		}
@@ -462,7 +462,16 @@ bool ArticleWriter::CompleteFileParts()
 	}
 	bool cached = m_fileInfo->GetCachedArticles() > 0;
 
-	std::string fullInfoPath = nzbName + PATH_SEPARATOR + filename;
+	std::string fullInfoPath;
+	{
+		NzbgetRsBuf infoPathBuf = nzbget_rs_dqh_article_writer_format_info_path(
+			nzbName.c_str(), PATH_SEPARATOR, filename.c_str());
+		if (infoPathBuf.data)
+		{
+			fullInfoPath.assign(infoPathBuf.data, infoPathBuf.len);
+		}
+		nzbget_rs_free(infoPathBuf);
+	}
 	LogStartMessage(fullInfoPath, directWrite, cached);
 
 	// 2. Return if no successful articles
@@ -588,10 +597,14 @@ ArticleWriter::SetupOutputFile(DiskFile &outfile,
 	// a name with a folder (DirectRename gives a file in progress the relative
 	// path par2 lists, "Sub/file"): the folder may not exist yet, and both the
 	// move of the temporary file and the creation of the joined file failed
-	if (filename.find(PATH_SEPARATOR) != std::string_view::npos)
+	size_t parentLen = 0;
+	if (nzbget_rs_dqh_article_writer_parent_dir_len(
+		filename.data(), filename.size(),
+		paths.finalPath.data(), paths.finalPath.size(),
+		PATH_SEPARATOR, &parentLen) != 0)
 	{
 		CString errmsg;
-		std::string parentDir = paths.finalPath.substr(0, paths.finalPath.rfind(PATH_SEPARATOR));
+		std::string parentDir = paths.finalPath.substr(0, parentLen);
 		if (!FileSystem::ForceDirectories(parentDir.c_str(), errmsg))
 		{
 			m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "Could not create directory %s: %s",
@@ -784,8 +797,12 @@ uint32 ArticleWriter::ProcessArticles(DiskFile& outfile,
 			}
 			else
 			{
-				m_fileInfo->SetFailedArticles(m_fileInfo->GetFailedArticles() + 1);
-				m_fileInfo->SetSuccessArticles(m_fileInfo->GetSuccessArticles() - 1);
+				int32_t newFailed = 0, newSuccess = 0;
+				nzbget_rs_dqh_article_writer_apply_missing_part_counters(
+					m_fileInfo->GetFailedArticles(), m_fileInfo->GetSuccessArticles(),
+					&newFailed, &newSuccess);
+				m_fileInfo->SetFailedArticles(newFailed);
+				m_fileInfo->SetSuccessArticles(newSuccess);
 				m_fileInfo->GetNzbInfo()->PrintMessage(
 					Message::mkError, "Could not find file %s for %s [%i/%zu]",
 					pa->GetResultFilename(), infoFilename.data(),
@@ -795,12 +812,15 @@ uint32 ArticleWriter::ProcessArticles(DiskFile& outfile,
 		else if (g_Options->GetRawArticle())
 		{
 			// Move raw files
-			BString<1024> dstFileName("%s%c%03i", finalOutputPath.data(), PATH_SEPARATOR, pa->GetPartNumber());
+			NzbgetRsBuf dstBuf = nzbget_rs_dqh_article_writer_format_raw_part_dest(
+				finalOutputPath.data(), finalOutputPath.size(), PATH_SEPARATOR, pa->GetPartNumber());
+			const char* dstFileName = dstBuf.data ? dstBuf.data : "";
 			if (!FileSystem::MoveFile(pa->GetResultFilename(), dstFileName))
 			{
 				m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "Could not move file %s to %s: %s",
-					pa->GetResultFilename(), *dstFileName, *FileSystem::GetLastErrorMessage());
+					pa->GetResultFilename(), dstFileName, *FileSystem::GetLastErrorMessage());
 			}
+			nzbget_rs_free(dstBuf);
 		}
 
 		// 3. Calculate CRC
@@ -928,7 +948,9 @@ void ArticleWriter::ReportCompletionStatus(std::string_view infoFilename)
 	else if (completionKind == 2)
 	{
 		m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkWarning, "%i of %i article downloads failed for \"%s\"",
-			m_fileInfo->GetMissedArticles() + m_fileInfo->GetFailedArticles(), m_fileInfo->GetTotalArticles(), infoFilename.data());
+			nzbget_rs_dqh_article_writer_calc_total_failed_articles(
+				m_fileInfo->GetMissedArticles(), m_fileInfo->GetFailedArticles()),
+			m_fileInfo->GetTotalArticles(), infoFilename.data());
 	}
 	else
 	{
@@ -1373,7 +1395,10 @@ bool ArticleCache::CheckFlush(bool flushEverything)
 						flushEverything ? 1 : 0) != 0)
 				{
 					m_fileInfo = fileInfo;
-					infoName.Format("%s%c%s", m_fileInfo->GetNzbInfo()->GetName(), PATH_SEPARATOR, m_fileInfo->GetFilename());
+					NzbgetRsBuf infoBuf = nzbget_rs_dqh_article_writer_format_info_path(
+						m_fileInfo->GetNzbInfo()->GetName(), PATH_SEPARATOR, m_fileInfo->GetFilename());
+					infoName.Set(infoBuf.data ? infoBuf.data : "", (int)infoBuf.len);
+					nzbget_rs_free(infoBuf);
 					break;
 				}
 			}

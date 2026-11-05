@@ -135,8 +135,12 @@ void ArticleDownloader::Run()
 		m_connection->SetCertVerifLevel(lastServer->GetCertVerificationLevel());
 #endif
 
-		m_connectionName.Format("%s (%s)",
-			m_connection->GetNewsServer()->GetName(), m_connection->GetHost());
+		{
+			NzbgetRsBuf connNameBuf = nzbget_rs_dqh_article_dl_format_connection_name(
+				m_connection->GetNewsServer()->GetName(), m_connection->GetHost());
+			m_connectionName.Set(connNameBuf.data ? connNameBuf.data : "", (int)connNameBuf.len);
+			nzbget_rs_free(connNameBuf);
+		}
 
 		// check server retention
 		// a file without a date (none in the nzb) has time 0: its age isn't known,
@@ -417,8 +421,12 @@ ArticleDownloader::EStatus ArticleDownloader::Download()
 	}
 
 	// retrieve article
-	response = m_connection->Request(BString<1024>("%s %s\r\n",
-		g_Options->GetRawArticle() ? "ARTICLE" : "BODY", m_articleInfo->GetMessageId()));
+	{
+		NzbgetRsBuf cmdBuf = nzbget_rs_dqh_article_dl_format_fetch_command(
+			g_Options->GetRawArticle() ? 1 : 0, m_articleInfo->GetMessageId());
+		response = m_connection->Request(cmdBuf.data ? cmdBuf.data : "");
+		nzbget_rs_free(cmdBuf);
+	}
 
 	status = CheckResponse(response, "could not fetch article");
 	if (status != adFinished)
@@ -658,8 +666,9 @@ ArticleDownloader::EStatus ArticleDownloader::DecodeCheck()
 			}
 			if (isYenc)
 			{
-				m_articleInfo->SetCrc(g_Options->GetCrcCheck() ?
-					m_decoder.GetCalculatedCrc() : m_decoder.GetExpectedCrc());
+				m_articleInfo->SetCrc(nzbget_rs_dqh_article_dl_select_yenc_crc(
+					g_Options->GetCrcCheck() ? 1 : 0,
+					m_decoder.GetCalculatedCrc(), m_decoder.GetExpectedCrc()));
 			}
 			return adFinished;
 		case 2:

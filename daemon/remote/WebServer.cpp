@@ -482,7 +482,9 @@ void WebProcessor::SendBodyResponse(const char* body, int bodyLen, const char* c
 		// every image (PNG, ICO...) had the same ETag - a changed one was answered
 		// "not modified"
 		size_t hash = m_hasher(std::string_view(body, bodyLen));
-		newETag.Format("\"%zx\"", hash);
+		NzbgetRsBuf etagBuf = nzbget_rs_tpr_web_format_quoted_hex_etag(hash);
+		newETag.Set(etagBuf.data ? etagBuf.data : "", (int)etagBuf.len);
+		nzbget_rs_free(etagBuf);
 
 		unchanged = nzbget_rs_sfw_web_proc_is_etag_unchanged(m_oldETag, newETag) != 0;
 		if (unchanged)
@@ -501,7 +503,7 @@ void WebProcessor::SendBodyResponse(const char* body, int bodyLen, const char* c
 		uint32 outLen = ZLib::GZipLen(bodyLen);
 		gbuf.Reserve(outLen);
 		int gzippedLen = ZLib::GZip(body, bodyLen, *gbuf, outLen);
-		if (gzippedLen > 0 && gzippedLen < bodyLen)
+		if (nzbget_rs_tpr_web_is_gzip_smaller(gzippedLen, bodyLen) != 0)
 		{
 			body = gbuf;
 			bodyLen = gzippedLen;
@@ -542,7 +544,13 @@ void WebProcessor::SendSingleFileResponse()
 {
 	const char* defRes = nzbget_rs_ntw_web_proc_default_resource(m_url);
 
-	BString<1024> filename("%s%s%s", g_Options->GetWebDir(), *m_url, defRes);
+	BString<1024> filename;
+	{
+		NzbgetRsBuf pathBuf = nzbget_rs_tpr_web_format_single_file_path(
+			g_Options->GetWebDir(), *m_url, defRes);
+		filename.Set(pathBuf.data ? pathBuf.data : "", (int)pathBuf.len);
+		nzbget_rs_free(pathBuf);
+	}
 
 	debug("serving file: %s", *filename);
 

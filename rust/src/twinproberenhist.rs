@@ -1017,6 +1017,97 @@ pub fn tpr_scanner_format_numbered_external_filename(
     out
 }
 
+/// Formats `DownloadBinCommand::Execute` response message (`"Collection %s added to queue"` vs `"Download Request failed for %s"`).
+pub fn tpr_binrpc_format_download_response_msg(ok: bool, base_filename: &[u8]) -> Vec<u8> {
+    if ok {
+        let mut out = Vec::with_capacity(base_filename.len() + 27);
+        out.extend_from_slice(b"Collection ");
+        out.extend_from_slice(base_filename);
+        out.extend_from_slice(b" added to queue");
+        out
+    } else {
+        let mut out = Vec::with_capacity(base_filename.len() + 28);
+        out.extend_from_slice(b"Download Request failed for ");
+        out.extend_from_slice(base_filename);
+        out
+    }
+}
+
+/// Evaluates `ListBinCommand::Execute` NZB group regex match flag (`matchGroup && (!regEx || regEx->Match(...))`).
+pub fn tpr_binrpc_eval_nzb_group_match(
+    match_group: bool,
+    has_regex: bool,
+    regex_matched: bool,
+) -> u32 {
+    u32::from(match_group && (!has_regex || regex_matched))
+}
+
+/// Formats `ListBinCommand::Execute` file regex match target (`"%s/%s"`, `nzb_name`, `base_filename`).
+pub fn tpr_binrpc_format_file_match_name(nzb_name: &[u8], base_filename: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(nzb_name.len() + 1 + base_filename.len());
+    out.extend_from_slice(nzb_name);
+    out.push(b'/');
+    out.extend_from_slice(base_filename);
+    out
+}
+
+/// Formats `WebProcessor::SendBodyResponse` quoted hex ETag (`"\"%zx\""`).
+pub fn tpr_web_format_quoted_hex_etag(hash: usize) -> Vec<u8> {
+    format!("\"{hash:x}\"").into_bytes()
+}
+
+/// Evaluates whether gzipped output is smaller than the original body in `WebProcessor::SendBodyResponse`.
+pub fn tpr_web_is_gzip_smaller(gzipped_len: i32, body_len: i32) -> bool {
+    gzipped_len > 0 && gzipped_len < body_len
+}
+
+/// Formats `WebProcessor::SendSingleFileResponse` file path (`"%s%s%s"`, `web_dir`, `url`, `def_res`).
+pub fn tpr_web_format_single_file_path(web_dir: &[u8], url: &[u8], def_res: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(web_dir.len() + url.len() + def_res.len());
+    out.extend_from_slice(web_dir);
+    out.extend_from_slice(url);
+    out.extend_from_slice(def_res);
+    out
+}
+
+/// Splits `XmlRpcProcessor::SetUrl` into `(path_set_len, query_offset)`.
+/// When `'?'` is absent, `path_set_len` is `0` (matching `CString::Set(url, 0)` which copies the full string).
+pub fn tpr_xmlrpc_split_url_path_and_query(url: &[u8]) -> (usize, Option<usize>) {
+    match url.iter().position(|&b| b == b'?') {
+        Some(pos) => (pos, Some(pos)),
+        None => (0, None),
+    }
+}
+
+/// Evaluates whether `EditQueueXmlCommand::Execute` should replace `args` with the formatted `offset`.
+pub fn tpr_xmlrpc_should_use_edit_offset(
+    has_offset: bool,
+    action: i32,
+    ea_file_move_offset: i32,
+    ea_group_move_offset: i32,
+) -> bool {
+    has_offset && (action == ea_file_move_offset || action == ea_group_move_offset)
+}
+
+/// Formats `ReadUrlXmlCommand::Execute` temporary filename (`"%s%creadurl-%i.tmp"`, `temp_dir`, `sep`, `num`).
+pub fn tpr_xmlrpc_format_readurl_temp_filename(temp_dir: &[u8], sep: u8, num: i32) -> Vec<u8> {
+    let suffix = format!("readurl-{num}.tmp");
+    let mut out = Vec::with_capacity(temp_dir.len() + 1 + suffix.len());
+    out.extend_from_slice(temp_dir);
+    out.push(sep);
+    out.extend_from_slice(suffix.as_bytes());
+    out
+}
+
+/// Formats `TestServerXmlCommand::Execute` synthetic `ARTICLE <%s@nzbget.com>\r\n` command.
+pub fn tpr_xmlrpc_format_testserver_article_cmd(id: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(id.len() + 24);
+    out.extend_from_slice(b"ARTICLE <");
+    out.extend_from_slice(id);
+    out.extend_from_slice(b"@nzbget.com>\r\n");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1362,6 +1453,47 @@ mod tests {
         assert_eq!(
             tpr_scanner_format_numbered_external_filename(b"/nzb", b'/', b"movie", b"", false, 3),
             b"/nzb/movie_3"
+        );
+        assert_eq!(
+            tpr_binrpc_format_download_response_msg(true, b"test.nzb"),
+            b"Collection test.nzb added to queue"
+        );
+        assert_eq!(
+            tpr_binrpc_format_download_response_msg(false, b"test.nzb"),
+            b"Download Request failed for test.nzb"
+        );
+        assert_eq!(tpr_binrpc_eval_nzb_group_match(true, false, false), 1);
+        assert_eq!(tpr_binrpc_eval_nzb_group_match(true, true, false), 0);
+        assert_eq!(
+            tpr_binrpc_format_file_match_name(b"MyNzb", b"part01.rar"),
+            b"MyNzb/part01.rar"
+        );
+        assert_eq!(tpr_web_format_quoted_hex_etag(0x1a2b), b"\"1a2b\"");
+        assert!(tpr_web_is_gzip_smaller(120, 300));
+        assert!(!tpr_web_is_gzip_smaller(0, 300));
+        assert!(!tpr_web_is_gzip_smaller(300, 300));
+        assert_eq!(
+            tpr_web_format_single_file_path(b"/web", b"/", b"index.html"),
+            b"/web/index.html"
+        );
+        assert_eq!(
+            tpr_xmlrpc_split_url_path_and_query(b"/jsonrpc/status?id=1"),
+            (15, Some(15))
+        );
+        assert_eq!(
+            tpr_xmlrpc_split_url_path_and_query(b"/jsonrpc/status"),
+            (0, None)
+        );
+        assert!(tpr_xmlrpc_should_use_edit_offset(true, 1, 1, 13));
+        assert!(!tpr_xmlrpc_should_use_edit_offset(false, 1, 1, 13));
+        assert!(!tpr_xmlrpc_should_use_edit_offset(true, 2, 1, 13));
+        assert_eq!(
+            tpr_xmlrpc_format_readurl_temp_filename(b"/tmp", b'/', 2),
+            b"/tmp/readurl-2.tmp"
+        );
+        assert_eq!(
+            tpr_xmlrpc_format_testserver_article_cmd(b"12345"),
+            b"ARTICLE <12345@nzbget.com>\r\n"
         );
     }
 }

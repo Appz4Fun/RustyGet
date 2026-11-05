@@ -899,6 +899,125 @@ pub fn dqh_nzbinfo_format_final_dir_suffix(
     out
 }
 
+/// Formats `ArticleDownloader::Run` `m_connectionName` (`"%s (%s)"`, `server_name`, `host`).
+pub fn dqh_article_dl_format_connection_name(server_name: &[u8], host: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(server_name.len() + host.len() + 3);
+    out.extend_from_slice(server_name);
+    out.extend_from_slice(b" (");
+    out.extend_from_slice(host);
+    out.push(b')');
+    out
+}
+
+/// Formats `ArticleDownloader::Download` NNTP `ARTICLE` / `BODY` command line.
+pub fn dqh_article_dl_format_fetch_command(raw_article: bool, message_id: &[u8]) -> Vec<u8> {
+    let verb: &[u8] = if raw_article { b"ARTICLE " } else { b"BODY " };
+    let mut out = Vec::with_capacity(verb.len() + message_id.len() + 2);
+    out.extend_from_slice(verb);
+    out.extend_from_slice(message_id);
+    out.extend_from_slice(b"\r\n");
+    out
+}
+
+/// Selects the yEnc article CRC in `ArticleDownloader::DecodeCheck`.
+pub fn dqh_article_dl_select_yenc_crc(
+    crc_check: bool,
+    calculated_crc: u32,
+    expected_crc: u32,
+) -> u32 {
+    if crc_check {
+        calculated_crc
+    } else {
+        expected_crc
+    }
+}
+
+/// Returns the static NUL-terminated error verb (`"open"` vs `"create"`) in `ArticleWriter::Start`.
+pub fn dqh_article_writer_open_verb(direct_write: bool) -> &'static [u8] {
+    if direct_write {
+        b"open\0"
+    } else {
+        b"create\0"
+    }
+}
+
+/// Formats `fullInfoPath` / `infoName` (`"%s%c%s"`, `nzb_name`, `sep`, `filename`) in `ArticleWriter` / `ArticleCache`.
+pub fn dqh_article_writer_format_info_path(nzb_name: &[u8], sep: u8, filename: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(nzb_name.len() + 1 + filename.len());
+    out.extend_from_slice(nzb_name);
+    out.push(sep);
+    out.extend_from_slice(filename);
+    out
+}
+
+/// Computes the parent directory prefix length of `final_path` when `filename` contains `sep` in `ArticleWriter::SetupOutputFile`.
+pub fn dqh_article_writer_parent_dir_len(
+    filename: &[u8],
+    final_path: &[u8],
+    sep: u8,
+) -> Option<usize> {
+    if !filename.contains(&sep) {
+        return None;
+    }
+    Some(
+        final_path
+            .iter()
+            .rposition(|&b| b == sep)
+            .unwrap_or(final_path.len()),
+    )
+}
+
+/// Updates `(failed_articles, success_articles)` when a part file is missing in `ArticleWriter::ProcessArticles`.
+pub fn dqh_article_writer_apply_missing_part_counters(
+    failed_articles: i32,
+    success_articles: i32,
+) -> (i32, i32) {
+    (
+        failed_articles.wrapping_add(1),
+        success_articles.wrapping_sub(1),
+    )
+}
+
+/// Formats the raw article destination path (`"%s%c%03i"`) in `ArticleWriter::ProcessArticles`.
+pub fn dqh_article_writer_format_raw_part_dest(
+    final_output_path: &[u8],
+    sep: u8,
+    part_number: i32,
+) -> Vec<u8> {
+    let part_str = format!("{part_number:03}");
+    let mut out = Vec::with_capacity(final_output_path.len() + 1 + part_str.len());
+    out.extend_from_slice(final_output_path);
+    out.push(sep);
+    out.extend_from_slice(part_str.as_bytes());
+    out
+}
+
+/// Computes total failed+missed articles in `ArticleWriter::ReportCompletionStatus`.
+pub fn dqh_article_writer_calc_total_failed_articles(
+    missed_articles: i32,
+    failed_articles: i32,
+) -> i32 {
+    missed_articles.wrapping_add(failed_articles)
+}
+
+/// Computes `(speed_kb, time_diff)` in `StatMeter::LogDebugInfo`.
+pub fn dqh_statmeter_calc_debug_speed_and_timediff(
+    current_download_speed: i32,
+    cur_time: i32,
+    speed_start_time: i32,
+    slot_size: i32,
+) -> (i32, i32) {
+    (
+        current_download_speed / 1024,
+        cur_time.wrapping_sub(speed_start_time.wrapping_mul(slot_size)),
+    )
+}
+
+/// Converts bytes to megabytes (`(int)(bytes / 1024 / 1024)`) in `StatMeter::CalcQuotaUsage`.
+pub fn dqh_statmeter_bytes_to_mb_i32(bytes: i64) -> i32 {
+    (bytes / 1024 / 1024) as i32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1266,5 +1385,50 @@ mod tests {
             dqh_nzbinfo_format_final_dir_suffix(b'/', false, b"MyRelease", 42),
             b"/MyRelease"
         );
+        assert_eq!(
+            dqh_article_dl_format_connection_name(b"News1", b"news.example.com"),
+            b"News1 (news.example.com)"
+        );
+        assert_eq!(
+            dqh_article_dl_format_fetch_command(false, b"<msg1@host>"),
+            b"BODY <msg1@host>\r\n"
+        );
+        assert_eq!(
+            dqh_article_dl_format_fetch_command(true, b"<msg1@host>"),
+            b"ARTICLE <msg1@host>\r\n"
+        );
+        assert_eq!(dqh_article_dl_select_yenc_crc(true, 0x1111, 0x2222), 0x1111);
+        assert_eq!(
+            dqh_article_dl_select_yenc_crc(false, 0x1111, 0x2222),
+            0x2222
+        );
+        assert_eq!(dqh_article_writer_open_verb(true), b"open\0");
+        assert_eq!(dqh_article_writer_open_verb(false), b"create\0");
+        assert_eq!(
+            dqh_article_writer_format_info_path(b"MyNzb", b'/', b"part01.rar"),
+            b"MyNzb/part01.rar"
+        );
+        assert_eq!(
+            dqh_article_writer_parent_dir_len(b"Sub/file.bin", b"/dst/Sub/file.bin", b'/'),
+            Some(8)
+        );
+        assert_eq!(
+            dqh_article_writer_parent_dir_len(b"file.bin", b"/dst/file.bin", b'/'),
+            None
+        );
+        assert_eq!(
+            dqh_article_writer_apply_missing_part_counters(2, 10),
+            (3, 9)
+        );
+        assert_eq!(
+            dqh_article_writer_format_raw_part_dest(b"/dst/raw", b'/', 7),
+            b"/dst/raw/007"
+        );
+        assert_eq!(dqh_article_writer_calc_total_failed_articles(3, 4), 7);
+        assert_eq!(
+            dqh_statmeter_calc_debug_speed_and_timediff(20480, 1000, 30, 30),
+            (20, 100)
+        );
+        assert_eq!(dqh_statmeter_bytes_to_mb_i32(10 * 1024 * 1024), 10);
     }
 }

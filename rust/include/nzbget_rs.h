@@ -5639,6 +5639,50 @@ int32_t nzbget_rs_tpr_scanner_eval_missed_articles_log(
 NzbgetRsBuf nzbget_rs_tpr_scanner_format_numbered_external_filename(
     const char* nzb_dir, char sep, const char* base_part, const char* ext_part,
     int32_t has_ext, int32_t num);
+NzbgetRsBuf nzbget_rs_dqh_article_dl_format_connection_name(
+    const char* server_name, const char* host);
+NzbgetRsBuf nzbget_rs_dqh_article_dl_format_fetch_command(
+    int32_t raw_article, const char* message_id);
+uint32_t nzbget_rs_dqh_article_dl_select_yenc_crc(
+    int32_t crc_check, uint32_t calculated_crc, uint32_t expected_crc);
+const char* nzbget_rs_dqh_article_writer_open_verb(int32_t direct_write);
+NzbgetRsBuf nzbget_rs_dqh_article_writer_format_info_path(
+    const char* nzb_name, char sep, const char* filename);
+int32_t nzbget_rs_dqh_article_writer_parent_dir_len(
+    const char* filename, size_t filename_len,
+    const char* final_path, size_t final_path_len,
+    char sep, size_t* out_parent_len);
+void nzbget_rs_dqh_article_writer_apply_missing_part_counters(
+    int32_t failed_articles, int32_t success_articles,
+    int32_t* out_failed_articles, int32_t* out_success_articles);
+NzbgetRsBuf nzbget_rs_dqh_article_writer_format_raw_part_dest(
+    const char* final_output_path, size_t final_output_path_len,
+    char sep, int32_t part_number);
+int32_t nzbget_rs_dqh_article_writer_calc_total_failed_articles(
+    int32_t missed_articles, int32_t failed_articles);
+void nzbget_rs_dqh_statmeter_calc_debug_speed_and_timediff(
+    int32_t current_download_speed, int32_t cur_time,
+    int32_t speed_start_time, int32_t slot_size,
+    int32_t* out_speed_kb, int32_t* out_time_diff);
+int32_t nzbget_rs_dqh_statmeter_bytes_to_mb_i32(int64_t bytes);
+NzbgetRsBuf nzbget_rs_tpr_binrpc_format_download_response_msg(
+    int32_t ok, const char* base_filename);
+uint32_t nzbget_rs_tpr_binrpc_eval_nzb_group_match(
+    int32_t match_group, int32_t has_regex, int32_t regex_matched);
+NzbgetRsBuf nzbget_rs_tpr_binrpc_format_file_match_name(
+    const char* nzb_name, const char* base_filename);
+NzbgetRsBuf nzbget_rs_tpr_web_format_quoted_hex_etag(size_t hash);
+int32_t nzbget_rs_tpr_web_is_gzip_smaller(int32_t gzipped_len, int32_t body_len);
+NzbgetRsBuf nzbget_rs_tpr_web_format_single_file_path(
+    const char* web_dir, const char* url, const char* def_res);
+int32_t nzbget_rs_tpr_xmlrpc_split_url_path_and_query(
+    const char* url, size_t* out_path_set_len, size_t* out_query_offset);
+int32_t nzbget_rs_tpr_xmlrpc_should_use_edit_offset(
+    int32_t has_offset, int32_t action,
+    int32_t ea_file_move_offset, int32_t ea_group_move_offset);
+NzbgetRsBuf nzbget_rs_tpr_xmlrpc_format_readurl_temp_filename(
+    const char* temp_dir, char sep, int32_t num);
+NzbgetRsBuf nzbget_rs_tpr_xmlrpc_format_testserver_article_cmd(const char* id);
 
 #include "nzbget_tls_cipher.h"
 

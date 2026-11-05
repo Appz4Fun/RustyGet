@@ -2613,7 +2613,7 @@ bool QueueCoordinator::SetQueueEntryCategory(DownloadQueue* downloadQueue, NzbIn
 	nzbInfo->SetCategory(category);
 	nzbInfo->BuildDestDirName();
 
-	bool dirUnchanged = !strcmp(nzbInfo->GetDestDir(), oldDestDir);
+	bool dirUnchanged = nzbget_rs_dqh_bytes_equal(nzbInfo->GetDestDir(), oldDestDir) != 0;
 	bool ok = dirUnchanged || ArticleWriter::MoveCompletedFiles(nzbInfo, oldDestDir);
 
 	return ok;
@@ -2647,7 +2647,7 @@ bool QueueCoordinator::SetQueueEntryName(DownloadQueue* downloadQueue, NzbInfo* 
 
 	nzbInfo->BuildDestDirName();
 
-	bool dirUnchanged = !strcmp(nzbInfo->GetDestDir(), oldDestDir);
+	bool dirUnchanged = nzbget_rs_dqh_bytes_equal(nzbInfo->GetDestDir(), oldDestDir) != 0;
 	bool ok = dirUnchanged || ArticleWriter::MoveCompletedFiles(nzbInfo, oldDestDir);
 
 	return ok;
@@ -2739,7 +2739,7 @@ bool QueueCoordinator::MergeQueueEntries(DownloadQueue* downloadQueue, NzbInfo* 
 	BString<1024> oldDestDir = srcNzbInfo->GetDestDir();
 	srcNzbInfo->SetCategory(destNzbInfo->GetCategory());
 	srcNzbInfo->SetDestDir(destNzbInfo->GetDestDir());
-	if (strcmp(oldDestDir, srcNzbInfo->GetDestDir()))
+	if (nzbget_rs_dqh_bytes_equal(oldDestDir, srcNzbInfo->GetDestDir()) == 0)
 	{
 		ArticleWriter::MoveCompletedFiles(srcNzbInfo, oldDestDir);
 	}

@@ -186,7 +186,7 @@ void FeedHistory::Remove(const char* url)
 	for (iterator it = begin(); it != end(); ++it)
 	{
 		FeedHistoryInfo& feedHistoryInfo = *it;
-		if (!strcmp(feedHistoryInfo.GetUrl(), url))
+		if (nzbget_rs_dqh_bytes_equal(feedHistoryInfo.GetUrl(), url) != 0)
 		{
 			erase(it);
 			break;
@@ -198,7 +198,7 @@ FeedHistoryInfo* FeedHistory::Find(const char* url)
 {
 	for (FeedHistoryInfo& feedHistoryInfo : this)
 	{
-		if (!strcmp(feedHistoryInfo.GetUrl(), url))
+		if (nzbget_rs_dqh_bytes_equal(feedHistoryInfo.GetUrl(), url) != 0)
 		{
 			return &feedHistoryInfo;
 		}

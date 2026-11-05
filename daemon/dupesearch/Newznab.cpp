@@ -56,65 +56,63 @@ public:
 	{
 		m_depth++;
 		m_text.clear();
-		if (m_depth == 1 && name == "error")
+		switch (nzbget_rs_dqh_newznab_classify_start_element(
+			m_depth, m_inItem ? 1 : 0, name.c_str()))
 		{
-			m_page.error = true;
-			m_page.errorCode = atoi(XmlReader::Attr(attrs, "code").c_str());
-			m_page.errorText = XmlReader::Attr(attrs, "description");
-		}
-		else if (name == "item")
-		{
-			m_inItem = true;
-			m_item = Newznab::Result();
-			m_attrSize = 0;
-			m_elementSize = 0;
-		}
-		else if (m_inItem && name == "attr")
-		{
-			std::string key = XmlReader::Attr(attrs, "name");
-			std::string value = XmlReader::Attr(attrs, "value");
-			if (key == "size")
+			case 1:
+				m_page.error = true;
+				m_page.errorCode = atoi(XmlReader::Attr(attrs, "code").c_str());
+				m_page.errorText = XmlReader::Attr(attrs, "description");
+				break;
+			case 2:
+				m_inItem = true;
+				m_item = Newznab::Result();
+				m_attrSize = 0;
+				m_elementSize = 0;
+				break;
+			case 3:
 			{
-				m_attrSize = ToInt(value);
-			}
-			else if (key == "grabs")
-			{
-				m_item.grabs = (int)ToInt(value);
-			}
-			else if (key == "usenetdate")
-			{
-				m_item.date = Newznab::ParseDate(value);
-			}
-			else if (key == "hydraIndexerName")
-			{
-				m_item.indexer = value;
+				std::string key = XmlReader::Attr(attrs, "name");
+				std::string value = XmlReader::Attr(attrs, "value");
+				switch (nzbget_rs_dqh_newznab_classify_item_attr_key(key.c_str()))
+				{
+					case 1:
+						m_attrSize = ToInt(value);
+						break;
+					case 2:
+						m_item.grabs = (int)ToInt(value);
+						break;
+					case 3:
+						m_item.date = Newznab::ParseDate(value);
+						break;
+					case 4:
+						m_item.indexer = value;
+						break;
+				}
+				break;
 			}
 		}
 	}
 
 	void End(const std::string& name) override
 	{
-		if (m_inItem)
+		switch (nzbget_rs_dqh_newznab_classify_end_element(m_inItem ? 1 : 0, name.c_str()))
 		{
-			if (name == "title")
-			{
+			case 1:
 				m_item.title = Trim(m_text);
-			}
-			else if (name == "link")
-			{
+				break;
+			case 2:
 				m_item.link = Trim(m_text);
-			}
-			else if (name == "size")
-			{
+				break;
+			case 3:
 				m_elementSize = ToInt(m_text);
-			}
-			else if (name == "item")
-			{
+				break;
+			case 4:
 				m_item.size = nzbget_rs_dsf_newznab_resolve_item_size(
 					m_attrSize, m_elementSize);
 				m_page.items.push_back(m_item);
 				m_inItem = false;
-			}
+				break;
 		}
 		m_depth--;
 		m_text.clear();

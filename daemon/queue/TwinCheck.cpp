@@ -777,7 +777,7 @@ void TwinCheck::ServiceWork()
 					sampled ? sampled->GetValue() : ""));
 				const char* kind = kindResolved.c_str();
 				NzbParameter* old = nzbInfo->GetParameters()->Find(KindParam);
-				if (strcmp(old ? old->GetValue() : "", kind))
+				if (nzbget_rs_dqh_bytes_equal(old ? old->GetValue() : "", kind) == 0)
 				{
 					nzbInfo->GetParameters()->SetParameter(KindParam, kind);
 					changed = true;

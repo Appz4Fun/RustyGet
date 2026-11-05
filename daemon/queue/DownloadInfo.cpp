@@ -42,7 +42,7 @@ void NzbParameterList::SetParameter(const char* name, const char* value)
 	iterator pos = std::find_if(begin(), end(),
 		[name](NzbParameter& parameter)
 		{
-			return !strcasecmp(parameter.GetName(), name);
+			return nzbget_rs_dqh_bytes_eq_ignore_case(parameter.GetName(), name) != 0;
 		});
 
 	if (emptyVal && pos != end())
@@ -63,7 +63,7 @@ NzbParameter* NzbParameterList::Find(const char* name)
 {
 	for (NzbParameter& parameter : this)
 	{
-		if (!strcasecmp(parameter.GetName(), name))
+		if (nzbget_rs_dqh_bytes_eq_ignore_case(parameter.GetName(), name) != 0)
 		{
 			return &parameter;
 		}

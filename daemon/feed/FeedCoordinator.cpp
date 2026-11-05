@@ -537,7 +537,7 @@ std::shared_ptr<FeedItemList> FeedCoordinator::PreviewFeed(int id,
 		std::lock_guard<std::mutex> guard(m_downloadsMutex);
 		for (FeedCacheItem& feedCacheItem : m_feedCache)
 		{
-			if (!strcmp(feedCacheItem.GetCacheId(), cacheId))
+			if (nzbget_rs_dqh_bytes_equal(feedCacheItem.GetCacheId(), cacheId) != 0)
 			{
 				feedCacheItem.SetLastUsage(Util::CurrentTime());
 				feedItems = feedCacheItem.GetFeedItems();

@@ -2256,7 +2256,7 @@ pub fn dqh_nzbget_is_backward_compat_root_user(username: &[u8]) -> bool {
 }
 
 /// Returns `true` when `is_xmlrpc_proto && is_http_post` and `method_name` matches `"system.multicall"`
-/// case-insensitively (`releasename::lower`) for `XmlRpcProcessor::Execute`.
+/// case-insensitively (`dqh_bytes_eq_ignore_case`) for `XmlRpcProcessor::Execute`.
 pub fn dqh_xmlrpc_is_multicall_post(
     method_name: &[u8],
     is_xmlrpc_proto: bool,
@@ -2264,7 +2264,7 @@ pub fn dqh_xmlrpc_is_multicall_post(
 ) -> bool {
     is_xmlrpc_proto
         && is_http_post
-        && crate::releasename::lower(method_name) == b"system.multicall"
+        && dqh_bytes_eq_ignore_case(method_name, b"system.multicall")
 }
 
 /// Returns `true` when `name == b"_TlsCipherBaseline"` for `SaveConfigXmlCommand::Execute`.
@@ -2296,6 +2296,90 @@ pub fn dqh_sysinfo_line_contains_marker(line: &[u8], marker: &[u8]) -> bool {
         return true;
     }
     line.windows(marker.len()).any(|w| w == marker)
+}
+
+/// Returns `true` when byte slices `a` and `b` are equal (`strcmp(a, b) == 0`).
+pub fn dqh_bytes_equal(a: &[u8], b: &[u8]) -> bool {
+    a == b
+}
+
+/// Returns `true` when byte slices `a` and `b` are equal under `releasename::c_lower` (`strcasecmp(a, b) == 0`)
+/// without allocating temporary buffers and stopping at the first mismatch.
+pub fn dqh_bytes_eq_ignore_case(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b.iter()).all(|(&x, &y)| {
+            x == y || crate::releasename::c_lower(x) == crate::releasename::c_lower(y)
+        })
+}
+
+/// Classifies an XML start element in `Newznab::PageReader::Start`:
+/// `1` (`depth == 1 && name == "error"`), `2` (`"item"`), `3` (`in_item && name == "attr"`), or `0` (other).
+pub fn dqh_newznab_classify_start_element(depth: i32, in_item: bool, name: &[u8]) -> i32 {
+    if depth == 1 && name == b"error" {
+        1
+    } else if name == b"item" {
+        2
+    } else if in_item && name == b"attr" {
+        3
+    } else {
+        0
+    }
+}
+
+/// Classifies a `<newznab:attr>` `name` attribute in `Newznab::PageReader::Start`:
+/// `1` (`"size"`), `2` (`"grabs"`), `3` (`"usenetdate"`), `4` (`"hydraIndexerName"`), or `0` (other).
+pub fn dqh_newznab_classify_item_attr_key(key: &[u8]) -> i32 {
+    match key {
+        b"size" => 1,
+        b"grabs" => 2,
+        b"usenetdate" => 3,
+        b"hydraIndexerName" => 4,
+        _ => 0,
+    }
+}
+
+/// Classifies an XML end element in `Newznab::PageReader::End` when `in_item` is `true`:
+/// `1` (`"title"`), `2` (`"link"`), `3` (`"size"`), `4` (`"item"`), or `0` (other / `!in_item`).
+pub fn dqh_newznab_classify_end_element(in_item: bool, name: &[u8]) -> i32 {
+    if !in_item {
+        return 0;
+    }
+    match name {
+        b"title" => 1,
+        b"link" => 2,
+        b"size" => 3,
+        b"item" => 4,
+        _ => 0,
+    }
+}
+
+/// Classifies an XML start element in `NzbReader::Reader::Start`:
+/// `1` (`"meta"`), `2` (`"file"`), `3` (`"segment"` when `in_file`), or `0` (other).
+pub fn dqh_nzb_reader_classify_start_element(name: &[u8], in_file: bool) -> i32 {
+    match name {
+        b"meta" => 1,
+        b"file" => 2,
+        b"segment" if in_file => 3,
+        _ => 0,
+    }
+}
+
+/// Classifies an XML end element in `NzbReader::Reader::End`:
+/// `1` (`"meta"` when `has_meta_type`), `2` (`"segment"` when `in_segment`),
+/// `3` (`"group"` when `in_file`), `4` (`"file"`), or `0` (other).
+pub fn dqh_nzb_reader_classify_end_element(
+    name: &[u8],
+    has_meta_type: bool,
+    in_segment: bool,
+    in_file: bool,
+) -> i32 {
+    match name {
+        b"meta" if has_meta_type => 1,
+        b"segment" if in_segment => 2,
+        b"group" if in_file => 3,
+        b"file" => 4,
+        _ => 0,
+    }
 }
 
 #[cfg(test)]
@@ -3211,5 +3295,31 @@ mod tests {
         );
         assert!(dqh_sysinfo_line_contains_marker(b"UNRAR 7.00 freeware", b"UNRAR"));
         assert!(!dqh_sysinfo_line_contains_marker(b"7-Zip 24.01", b"UNRAR"));
+        assert!(dqh_bytes_equal(b"abc", b"abc"));
+        assert!(!dqh_bytes_equal(b"abc", b"ABC"));
+        assert!(dqh_bytes_eq_ignore_case(b"Server1.Host", b"server1.host"));
+        assert!(!dqh_bytes_eq_ignore_case(b"Server1.Host", b"server2.host"));
+        assert_eq!(dqh_newznab_classify_start_element(1, false, b"error"), 1);
+        assert_eq!(dqh_newznab_classify_start_element(2, false, b"item"), 2);
+        assert_eq!(dqh_newznab_classify_start_element(3, true, b"attr"), 3);
+        assert_eq!(dqh_newznab_classify_start_element(3, false, b"attr"), 0);
+        assert_eq!(dqh_newznab_classify_item_attr_key(b"size"), 1);
+        assert_eq!(dqh_newznab_classify_item_attr_key(b"grabs"), 2);
+        assert_eq!(dqh_newznab_classify_item_attr_key(b"usenetdate"), 3);
+        assert_eq!(dqh_newznab_classify_item_attr_key(b"hydraIndexerName"), 4);
+        assert_eq!(dqh_newznab_classify_item_attr_key(b"other"), 0);
+        assert_eq!(dqh_newznab_classify_end_element(true, b"title"), 1);
+        assert_eq!(dqh_newznab_classify_end_element(true, b"link"), 2);
+        assert_eq!(dqh_newznab_classify_end_element(true, b"size"), 3);
+        assert_eq!(dqh_newznab_classify_end_element(true, b"item"), 4);
+        assert_eq!(dqh_newznab_classify_end_element(false, b"title"), 0);
+        assert_eq!(dqh_nzb_reader_classify_start_element(b"meta", false), 1);
+        assert_eq!(dqh_nzb_reader_classify_start_element(b"file", false), 2);
+        assert_eq!(dqh_nzb_reader_classify_start_element(b"segment", true), 3);
+        assert_eq!(dqh_nzb_reader_classify_start_element(b"segment", false), 0);
+        assert_eq!(dqh_nzb_reader_classify_end_element(b"meta", true, false, false), 1);
+        assert_eq!(dqh_nzb_reader_classify_end_element(b"segment", false, true, true), 2);
+        assert_eq!(dqh_nzb_reader_classify_end_element(b"group", false, false, true), 3);
+        assert_eq!(dqh_nzb_reader_classify_end_element(b"file", false, false, true), 4);
     }
 }

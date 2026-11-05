@@ -32,7 +32,7 @@ fn c_digit(b: u8) -> bool {
 fn c_space(b: u8) -> bool {
     unsafe { isspace(b as c_int) != 0 }
 }
-fn c_lower(b: u8) -> u8 {
+pub(crate) fn c_lower(b: u8) -> u8 {
     unsafe { tolower(b as c_int) as u8 }
 }
 

@@ -35273,6 +35273,114 @@ pub unsafe extern "C" fn nzbget_rs_dqh_sysinfo_line_contains_marker(
     c_int::from(crate::dupequeuehealth::dqh_sysinfo_line_contains_marker(l, m))
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_bytes_equal(
+    a: *const c_char,
+    b: *const c_char,
+) -> c_int {
+    let sa = if a.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(a).to_bytes()
+    };
+    let sb = if b.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(b).to_bytes()
+    };
+    c_int::from(crate::dupequeuehealth::dqh_bytes_equal(sa, sb))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_bytes_eq_ignore_case(
+    a: *const c_char,
+    b: *const c_char,
+) -> c_int {
+    let sa = if a.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(a).to_bytes()
+    };
+    let sb = if b.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(b).to_bytes()
+    };
+    c_int::from(crate::dupequeuehealth::dqh_bytes_eq_ignore_case(sa, sb))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_newznab_classify_start_element(
+    depth: c_int,
+    in_item: c_int,
+    name: *const c_char,
+) -> c_int {
+    let n = if name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(name).to_bytes()
+    };
+    crate::dupequeuehealth::dqh_newznab_classify_start_element(depth, in_item != 0, n)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_newznab_classify_item_attr_key(
+    key: *const c_char,
+) -> c_int {
+    let k = if key.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(key).to_bytes()
+    };
+    crate::dupequeuehealth::dqh_newznab_classify_item_attr_key(k)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_newznab_classify_end_element(
+    in_item: c_int,
+    name: *const c_char,
+) -> c_int {
+    let n = if name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(name).to_bytes()
+    };
+    crate::dupequeuehealth::dqh_newznab_classify_end_element(in_item != 0, n)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_nzb_reader_classify_start_element(
+    name: *const c_char,
+    in_file: c_int,
+) -> c_int {
+    let n = if name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(name).to_bytes()
+    };
+    crate::dupequeuehealth::dqh_nzb_reader_classify_start_element(n, in_file != 0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_nzb_reader_classify_end_element(
+    name: *const c_char,
+    has_meta_type: c_int,
+    in_segment: c_int,
+    in_file: c_int,
+) -> c_int {
+    let n = if name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(name).to_bytes()
+    };
+    crate::dupequeuehealth::dqh_nzb_reader_classify_end_element(
+        n,
+        has_meta_type != 0,
+        in_segment != 0,
+        in_file != 0,
+    )
+}
+
 
 
 

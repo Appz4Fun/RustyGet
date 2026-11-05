@@ -69,7 +69,7 @@ Options::OptEntry* Options::OptEntries::FindOption(const char* name)
 
 	for (OptEntry& optEntry : this)
 	{
-		if (!strcasecmp(optEntry.GetName(), name))
+		if (nzbget_rs_dqh_bytes_eq_ignore_case(optEntry.GetName(), name) != 0)
 		{
 			return &optEntry;
 		}
@@ -87,7 +87,7 @@ Options::Category* Options::Categories::FindCategory(const char* name, bool sear
 
 	for (Category& category : this)
 	{
-		if (!strcasecmp(category.GetName(), name))
+		if (nzbget_rs_dqh_bytes_eq_ignore_case(category.GetName(), name) != 0)
 		{
 			return &category;
 		}
@@ -912,7 +912,7 @@ Options::OptEntry* Options::FindOption(const char* optname)
 	OptEntry* optEntry = m_optEntries.FindOption(optname);
 
 	// normalize option name in option list; for example "server1.joingroup" -> "Server1.JoinGroup"
-	if (optEntry && strcmp(optEntry->GetName(), optname))
+	if (optEntry && nzbget_rs_dqh_bytes_equal(optEntry->GetName(), optname) == 0)
 	{
 		optEntry->SetName(optname);
 	}
@@ -1473,8 +1473,8 @@ void Options::ConvertOldOption(CString& option, CString& value)
 	nzbget_rs_convert_old_option(option, value, &newOption, &newValue);
 	// Decide before changing option: callers may pass the same CString twice.
 	// An unchanged null value must also remain null.
-	bool valueChanged = value ? strcmp(value, newValue.data) != 0 : newValue.len != 0;
-	if (!option || strcmp(option, newOption.data))
+	bool valueChanged = value ? nzbget_rs_dqh_bytes_equal(value, newValue.data) == 0 : newValue.len != 0;
+	if (!option || nzbget_rs_dqh_bytes_equal(option, newOption.data) == 0)
 	{
 		option = newOption.data;
 	}

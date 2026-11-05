@@ -61,11 +61,13 @@ public:
 	void Start(const std::string& name, const XmlReader::Attrs& attrs) override
 	{
 		m_text.clear();
-		if (name == "meta" && !XmlReader::Attr(attrs, "type").empty())
+		int elemKind = nzbget_rs_dqh_nzb_reader_classify_start_element(
+			name.c_str(), m_inFile ? 1 : 0);
+		if (elemKind == 1 && !XmlReader::Attr(attrs, "type").empty())
 		{
 			m_metaType = Lower(XmlReader::Attr(attrs, "type"));
 		}
-		else if (name == "file")
+		else if (elemKind == 2)
 		{
 			files++;
 			m_inFile = true;
@@ -81,7 +83,7 @@ public:
 			m_segments.clear();
 			m_validParts = 0;
 		}
-		else if (name == "segment" && m_inFile)
+		else if (elemKind == 3)
 		{
 			m_segmentBytes = atoll(XmlReader::Attr(attrs, "bytes").c_str());
 			m_segmentNumber = atoll(XmlReader::Attr(attrs, "number").c_str());
@@ -91,19 +93,24 @@ public:
 
 	void End(const std::string& name) override
 	{
-		if (name == "meta" && !m_metaType.empty())
+		int elemKind = nzbget_rs_dqh_nzb_reader_classify_end_element(
+			name.c_str(),
+			!m_metaType.empty() ? 1 : 0,
+			m_inSegment ? 1 : 0,
+			m_inFile ? 1 : 0);
+		if (elemKind == 1)
 		{
 			meta[m_metaType] = Trim(m_text);
 			m_metaType.clear();
 		}
-		else if (name == "segment" && m_inSegment)
+		else if (elemKind == 2)
 		{
             // Keep the ID and size together until duplicate part numbers have
             // been resolved with the queue parser's keep-last policy.
             m_segments.push_back({ m_segmentNumber, m_segmentBytes, Trim(m_text) });
 			m_inSegment = false;
 		}
-		else if (name == "group" && m_inFile)
+		else if (elemKind == 3)
 		{
 			std::string group = Trim(m_text);
 			if (!group.empty())
@@ -111,7 +118,7 @@ public:
 				groups.insert(group);
 			}
 		}
-		else if (name == "file")
+		else if (elemKind == 4)
 		{
             std::stable_sort(m_segments.begin(), m_segments.end(),
                 [](const Segment& a, const Segment& b) { return a.number < b.number; });

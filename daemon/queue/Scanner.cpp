@@ -554,7 +554,7 @@ void Scanner::InitPPParameters(const char* category, NzbParameterList* parameter
 				Tokenizer tok(extensions, ",;");
 				while (const char* scriptName = tok.Next())
 				{
-					if (strcmp(scriptName, script->GetName()) != 0) continue;
+					if (nzbget_rs_dqh_bytes_equal(scriptName, script->GetName()) == 0) continue;
 
 					NzbgetRsBuf prefixBuf = nzbget_rs_tpr_nzb_script_format_param_prefix(scriptName);
 					BString<1024> paramName = prefixBuf.data ? prefixBuf.data : "";
@@ -575,7 +575,7 @@ CString Scanner::ResolveCategory(const char* category, const char* filename)
 {
 	CString useCategory = category ? category : "";
 	Options::Category* categoryObj = g_Options->FindCategory(useCategory, true);
-	if (categoryObj && strcmp(useCategory, categoryObj->GetName()))
+	if (categoryObj && nzbget_rs_dqh_bytes_equal(useCategory, categoryObj->GetName()) == 0)
 	{
 		useCategory = categoryObj->GetName();
 		detail("Category '%s' matched to '%s' for '%s'", category, *useCategory, filename);

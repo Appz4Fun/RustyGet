@@ -5966,6 +5966,15 @@ NzbgetRsBuf nzbget_rs_dqh_log_split_basename_and_ext(
     const char* base_name, NzbgetRsBuf* out_ext);
 int nzbget_rs_dqh_sysinfo_line_contains_marker(
     const char* line, const char* marker);
+int nzbget_rs_dqh_bytes_equal(const char* a, const char* b);
+int nzbget_rs_dqh_bytes_eq_ignore_case(const char* a, const char* b);
+int nzbget_rs_dqh_newznab_classify_start_element(
+    int depth, int in_item, const char* name);
+int nzbget_rs_dqh_newznab_classify_item_attr_key(const char* key);
+int nzbget_rs_dqh_newznab_classify_end_element(int in_item, const char* name);
+int nzbget_rs_dqh_nzb_reader_classify_start_element(const char* name, int in_file);
+int nzbget_rs_dqh_nzb_reader_classify_end_element(
+    const char* name, int has_meta_type, int in_segment, int in_file);
 
 #include "nzbget_tls_cipher.h"
 

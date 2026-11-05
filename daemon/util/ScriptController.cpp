@@ -200,7 +200,7 @@ void ScriptController::SetEnvVarSpecial(const char* prefix, const char* name, co
 	SetEnvVar(varname, value);
 
 	NzbgetRsBuf normBuf = nzbget_rs_sus_normalize_special_env_var_name(varname);
-	if (normBuf.data && strcmp(varname, normBuf.data))
+	if (normBuf.data && nzbget_rs_dqh_bytes_equal(varname, normBuf.data) == 0)
 	{
 		SetEnvVar(normBuf.data, value);
 	}

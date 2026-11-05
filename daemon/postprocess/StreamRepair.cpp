@@ -47,11 +47,7 @@ namespace
 	CString WriteErrorMessage()
 	{
 		CString message = FileSystem::GetLastErrorMessage();
-		if (message.Empty())
-		{
-			message = "incomplete write (disk full?)";
-		}
-		return message;
+		return CString(nzbget_rs_dqh_stream_repair_write_errmsg_or_default(message));
 	}
 }
 
@@ -444,7 +440,10 @@ void StreamRepairController::Run()
 		m_postInfo->SetProgressLabel("Repairing files from duplicates");
 	}
 
-	BString<1024> infoName("stream repair for %s", *nzbName);
+	NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_post_format_info_name("stream repair", *nzbName);
+	BString<1024> infoName;
+	infoName.Set(infoNameBuf.data ? infoNameBuf.data : "", (int)infoNameBuf.len);
+	nzbget_rs_free(infoNameBuf);
 	SetInfoName(infoName);
 
 	if (targets.empty())
@@ -531,7 +530,10 @@ void StreamRepairController::RunLive()
 		}
 	}
 
-	BString<1024> infoName("live stream repair for %s", *nzbName);
+	NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_post_format_info_name("live stream repair", *nzbName);
+	BString<1024> infoName;
+	infoName.Set(infoNameBuf.data ? infoNameBuf.data : "", (int)infoNameBuf.len);
+	nzbget_rs_free(infoNameBuf);
 	SetInfoName(infoName);
 
 	bool anyEligible = false;
@@ -797,19 +799,25 @@ void StreamRepairController::StartWatchdog(const std::vector<RepairTarget>& targ
 				}
 				else if (now - lastProgress >= std::chrono::seconds(timeout))
 				{
-					m_slowReason.Format("nothing recovered for %i seconds", timeout);
+					NzbgetRsBuf reasonBuf = nzbget_rs_dqh_stream_repair_format_stall_reason(timeout);
+					m_slowReason.Set(reasonBuf.data ? reasonBuf.data : "", (int)reasonBuf.len);
+					nzbget_rs_free(reasonBuf);
 					break;
 				}
 				if (now - begun >= std::chrono::seconds(timeout * MaxRunFactor + MaxConnectionWaitSec))
 				{
-					m_slowReason.Format("still waiting for news-server connections after %i seconds",
+					NzbgetRsBuf reasonBuf = nzbget_rs_dqh_stream_repair_format_conn_wait_reason(
 						(int)std::chrono::duration_cast<std::chrono::seconds>(now - begun).count());
+					m_slowReason.Set(reasonBuf.data ? reasonBuf.data : "", (int)reasonBuf.len);
+					nzbget_rs_free(reasonBuf);
 					break;
 				}
 				if (now - start >= std::chrono::seconds(timeout * MaxRunFactor))
 				{
-					m_slowReason.Format("still running after %i seconds, %i times the timeout",
+					NzbgetRsBuf reasonBuf = nzbget_rs_dqh_stream_repair_format_max_run_reason(
 						timeout * MaxRunFactor, MaxRunFactor);
+					m_slowReason.Set(reasonBuf.data ? reasonBuf.data : "", (int)reasonBuf.len);
+					nzbget_rs_free(reasonBuf);
 					break;
 				}
 
@@ -824,9 +832,10 @@ void StreamRepairController::StartWatchdog(const std::vector<RepairTarget>& targ
 					downloadRate, recovered, remaining, elapsed, timeout, SlowRepairFactor,
 					&repairMbS, &remainingMb, &repairSec, &downloadMbS) != 0)
 				{
-					m_slowReason.Format("at %.2f MB/s the %.1f MB left would take %.0f seconds, "
-						"more than %i times a download at %.2f MB/s", repairMbS,
-						remainingMb, repairSec, SlowRepairFactor, downloadMbS);
+					NzbgetRsBuf reasonBuf = nzbget_rs_dqh_stream_repair_format_slow_rate_reason(
+						repairMbS, remainingMb, repairSec, SlowRepairFactor, downloadMbS);
+					m_slowReason.Set(reasonBuf.data ? reasonBuf.data : "", (int)reasonBuf.len);
+					nzbget_rs_free(reasonBuf);
 					break;
 				}
 			}
@@ -1108,8 +1117,10 @@ void StreamRepairController::ExecRepair(const char* destDir,
 		if (m_postInfo)
 		{
 			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-			m_postInfo->SetProgressLabel(BString<1024>(
-				"Repairing from duplicate %s", *donor.InfoName));
+			NzbgetRsBuf labelBuf = nzbget_rs_dqh_stream_repair_format_donor_progress_label(
+				"Repairing from duplicate", *donor.InfoName);
+			m_postInfo->SetProgressLabel(labelBuf.data ? labelBuf.data : "");
+			nzbget_rs_free(labelBuf);
 			m_postInfo->SetStageProgress(0);
 		}
 
@@ -1290,7 +1301,10 @@ StreamRepairController::ERepairOutcome StreamRepairController::RepairFile(const 
 			// mkInfo on purpose: a rejected donor is the safety net firing -
 			// the user (and the e2e decoy test) should see it in the log; the
 			// sibling search past the usual budget would flood it, so detail
-			PrintMessage(probed <= DupeStreamRepair::MaxDonorCandidates ? Message::mkInfo : Message::mkDetail,
+			PrintMessage(
+				(Message::EKind)nzbget_rs_dqh_stream_repair_select_reject_log_kind(
+					probed, DupeStreamRepair::MaxDonorCandidates,
+					(int)Message::mkInfo, (int)Message::mkDetail),
 				"Skipping file %s of duplicate %s for %s: content identity not confirmed",
 				donorFile->GetFilename(), donorName, *target.Filename);
 			continue;
@@ -1842,7 +1856,8 @@ int StreamRepairController::PatchFromDonor(DiskFile& file, RepairTarget& target,
 		m_recoveredBytes += recoveredBytes;
 		PrintMessage(Message::mkInfo,
 			"Recovered %.1f MB (%i donor article(s)) of %s from duplicate %s",
-			recoveredBytes / 1024.0 / 1024.0, recoveredParts, *target.Filename, donorName);
+			nzbget_rs_dqh_stream_repair_bytes_to_mb(recoveredBytes),
+			recoveredParts, *target.Filename, donorName);
 	}
 
 	return recoveredParts;
@@ -1905,7 +1920,8 @@ void StreamRepairController::ReportRemainingHoles(std::vector<RepairTarget>& tar
 			m_holesRemain = true;
 			PrintMessage(Message::mkInfo,
 				"Stream repair of %s: no duplicate could supply the file (%s)",
-				*target.Filename, m_hasParFiles ? "left to par-repair" : "no par2 files to repair it");
+				*target.Filename,
+				nzbget_rs_dqh_stream_repair_missing_par_disposition(m_hasParFiles ? 1 : 0));
 		}
 		else if (targetStatus == 3)
 		{
@@ -1913,15 +1929,15 @@ void StreamRepairController::ReportRemainingHoles(std::vector<RepairTarget>& tar
 			int64 missing = DupeStreamRepair::TotalSize(target.Holes);
 			PrintMessage(Message::mkInfo,
 				"Stream repair of %s: %.1f MB still missing after stream repair (%s)",
-				*target.Filename, missing / 1024.0 / 1024.0,
-				m_hasParFiles ? "left to par-repair" : "no par2 files to repair it");
+				*target.Filename, nzbget_rs_dqh_stream_repair_bytes_to_mb(missing),
+				nzbget_rs_dqh_stream_repair_missing_par_disposition(m_hasParFiles ? 1 : 0));
 			if (nzbget_rs_cdn_stream_repair_is_incomplete_nzb_hole(missing, target.EncodedSize) != 0)
 			{
 				PrintMessage(Message::mkWarning,
 					"%s is %.1f MB according to its articles, but the nzb's articles cover only "
 					"%.1f MB of it: the nzb is incomplete",
-					*target.Filename, target.DecodedFileSize / 1024.0 / 1024.0,
-					(target.DecodedFileSize - missing) / 1024.0 / 1024.0);
+					*target.Filename, nzbget_rs_dqh_stream_repair_bytes_to_mb(target.DecodedFileSize),
+					nzbget_rs_dqh_stream_repair_bytes_to_mb(target.DecodedFileSize - missing));
 			}
 		}
 	}
@@ -1978,7 +1994,7 @@ void StreamRepairController::ExecCrossPackRepair(const char* destDir,
 			PrintMessage(Message::mkInfo,
 				"Cross-packing repair of %s: %.1f MB missing of inner file %s",
 				setMembers[repairSet.Set.Members[0]].Name.c_str(),
-				DupeStreamRepair::TotalSize(repairSet.InnerHoles) / 1024.0 / 1024.0,
+				nzbget_rs_dqh_stream_repair_bytes_to_mb(DupeStreamRepair::TotalSize(repairSet.InnerHoles)),
 				repairSet.Map->GetInnerName());
 		}
 		else
@@ -2039,8 +2055,10 @@ void StreamRepairController::ExecCrossPackRepair(const char* destDir,
 		if (m_postInfo)
 		{
 			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-			m_postInfo->SetProgressLabel(BString<1024>(
-				"Cross-packing repair from duplicate %s", *donor.InfoName));
+			NzbgetRsBuf labelBuf = nzbget_rs_dqh_stream_repair_format_donor_progress_label(
+				"Cross-packing repair from duplicate", *donor.InfoName);
+			m_postInfo->SetProgressLabel(labelBuf.data ? labelBuf.data : "");
+			nzbget_rs_free(labelBuf);
 			m_postInfo->SetStageProgress(0);
 		}
 
@@ -2486,7 +2504,7 @@ int64 StreamRepairController::PatchFromDonorSet(RepairSetData& repairSet, Conten
 		m_progressBytes += written;
 		PrintMessage(Message::mkInfo,
 			"Recovered %.1f MB (%i donor article(s)) of %s from duplicate %s (cross-packing)",
-			written / 1024.0 / 1024.0, recoveredParts,
+			nzbget_rs_dqh_stream_repair_bytes_to_mb(written), recoveredParts,
 			repairSet.Map->GetInnerName(), donorName);
 	}
 	return written;
@@ -2862,7 +2880,7 @@ int64 StreamRepairController::PatchFromDonorSetEncrypted(RepairSetData& repairSe
 		m_progressBytes += written;
 		PrintMessage(Message::mkInfo,
 			"Recovered %.1f MB (%i donor article(s)) of %s from duplicate %s (cross-packing)",
-			written / 1024.0 / 1024.0, recoveredParts,
+			nzbget_rs_dqh_stream_repair_bytes_to_mb(written), recoveredParts,
 			repairSet.Map->GetInnerName(), donorName);
 	}
 	return written;
@@ -2927,7 +2945,10 @@ void StreamRepairController::ExecDecompressRepair(const char* destDir,
 	BString<1024> tempDir;
 	for (int suffix = 0; ; suffix++)
 	{
-		tempDir.Format("%s%c.stream-decompress.%i", destDir, PATH_SEPARATOR, suffix);
+		NzbgetRsBuf tempDirBuf = nzbget_rs_dqh_stream_repair_format_decompress_temp_dir(
+			destDir, PATH_SEPARATOR, suffix);
+		tempDir.Set(tempDirBuf.data ? tempDirBuf.data : "", (int)tempDirBuf.len);
+		nzbget_rs_free(tempDirBuf);
 		if (FileSystem::CreateDirectoryExclusive(tempDir))
 		{
 			break;
@@ -2956,8 +2977,10 @@ void StreamRepairController::ExecDecompressRepair(const char* destDir,
 	if (m_postInfo)
 	{
 		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-		m_postInfo->SetProgressLabel(BString<1024>(
-			"Downloading duplicate %s", *donor.InfoName));
+		NzbgetRsBuf labelBuf = nzbget_rs_dqh_stream_repair_format_donor_progress_label(
+			"Downloading duplicate", *donor.InfoName);
+		m_postInfo->SetProgressLabel(labelBuf.data ? labelBuf.data : "");
+		nzbget_rs_free(labelBuf);
 		m_postInfo->SetStageProgress(0);
 	}
 
@@ -2982,7 +3005,10 @@ void StreamRepairController::ExecDecompressRepair(const char* destDir,
 	}
 
 	BString<1024> archivePath("%s%c%s", *tempDir, PATH_SEPARATOR, mainVolume);
-	BString<1024> extractDir("%s%cextracted", *tempDir, PATH_SEPARATOR);
+	NzbgetRsBuf extractDirBuf = nzbget_rs_dqh_stream_repair_format_extract_dir(*tempDir, PATH_SEPARATOR);
+	BString<1024> extractDir;
+	extractDir.Set(extractDirBuf.data ? extractDirBuf.data : "", (int)extractDirBuf.len);
+	nzbget_rs_free(extractDirBuf);
 	if (IsStopped())
 	{
 		return;
@@ -2990,8 +3016,10 @@ void StreamRepairController::ExecDecompressRepair(const char* destDir,
 	if (m_postInfo)
 	{
 		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-		m_postInfo->SetProgressLabel(BString<1024>(
-			"Decompressing duplicate %s", *donor.InfoName));
+		NzbgetRsBuf labelBuf = nzbget_rs_dqh_stream_repair_format_donor_progress_label(
+			"Decompressing duplicate", *donor.InfoName);
+		m_postInfo->SetProgressLabel(labelBuf.data ? labelBuf.data : "");
+		nzbget_rs_free(labelBuf);
 		m_postInfo->SetStageProgress(0);
 	}
 
@@ -3006,7 +3034,7 @@ void StreamRepairController::ExecDecompressRepair(const char* destDir,
 		PrintMessage(Message::mkInfo,
 			"Skipping decompression of %s of duplicate %s: %s",
 			setName, *donor.InfoName,
-			extractor ? "extraction failed" : "no extraction tool configured");
+			nzbget_rs_dqh_stream_repair_decompress_fail_reason(extractor ? 1 : 0));
 		return;
 	}
 
@@ -3127,7 +3155,8 @@ bool StreamRepairController::MaterializeDonorSet(NzbInfo* donorNzb,
 				m_postInfo->SetProgressLabel(BString<1024>(
 					"Downloading duplicate %s (volume %i/%i, article %i/%i, %.1f MB)",
 					donorName, memberNumber, (int)set.Members.size(), deliveredArticles,
-					(int)donorFile->GetArticles()->size(), totalBytes / 1024.0 / 1024.0));
+					(int)donorFile->GetArticles()->size(),
+					nzbget_rs_dqh_stream_repair_bytes_to_mb(totalBytes)));
 				m_postInfo->SetStageProgress(
 					nzbget_rs_sap_stream_repair_materialize_stage_progress(completedArticles, totalArticles));
 			}
@@ -3353,7 +3382,7 @@ int64 StreamRepairController::PatchFromDonorInnerFile(RepairSetData& repairSet,
 		m_progressBytes += written;
 		PrintMessage(Message::mkInfo,
 			"Recovered %.1f MB of %s from duplicate %s (decompressed)",
-			written / 1024.0 / 1024.0, targetMap.GetInnerName(), donorName);
+			nzbget_rs_dqh_stream_repair_bytes_to_mb(written), targetMap.GetInnerName(), donorName);
 	}
 	return written;
 }
@@ -3410,7 +3439,7 @@ int64 StreamRepairController::PatchFromDonorInnerFileEncrypted(RepairSetData& re
 		m_progressBytes += written;
 		PrintMessage(Message::mkInfo,
 			"Recovered %.1f MB of %s from duplicate %s (decompressed)",
-			written / 1024.0 / 1024.0, targetMap.GetInnerName(), donorName);
+			nzbget_rs_dqh_stream_repair_bytes_to_mb(written), targetMap.GetInnerName(), donorName);
 	}
 	return written;
 }

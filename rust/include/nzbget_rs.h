@@ -5719,6 +5719,32 @@ const char* nzbget_rs_tpr_unpack_ctrl_request_par_reason(int32_t force_repair);
 const char* nzbget_rs_tpr_rename_ctrl_archive_kind_prefix(
     int32_t kind, int32_t jk_rar);
 const char* nzbget_rs_tpr_repair_ctrl_twin_par2_reject_reason(int32_t cmp);
+const char* nzbget_rs_dqh_stream_repair_write_errmsg_or_default(const char* last_err);
+NzbgetRsBuf nzbget_rs_dqh_stream_repair_format_stall_reason(int32_t timeout);
+NzbgetRsBuf nzbget_rs_dqh_stream_repair_format_conn_wait_reason(int32_t elapsed_sec);
+NzbgetRsBuf nzbget_rs_dqh_stream_repair_format_max_run_reason(
+    int32_t max_sec, int32_t max_run_factor);
+NzbgetRsBuf nzbget_rs_dqh_stream_repair_format_slow_rate_reason(
+    double repair_mb_s, double remaining_mb, double repair_sec,
+    int32_t slow_factor, double download_mb_s);
+NzbgetRsBuf nzbget_rs_dqh_stream_repair_format_donor_progress_label(
+    const char* prefix, const char* donor_name);
+int32_t nzbget_rs_dqh_stream_repair_select_reject_log_kind(
+    int32_t probed, int32_t max_donor_candidates,
+    int32_t mk_info, int32_t mk_detail);
+const char* nzbget_rs_dqh_stream_repair_missing_par_disposition(int32_t has_par_files);
+NzbgetRsBuf nzbget_rs_dqh_stream_repair_format_decompress_temp_dir(
+    const char* dest_dir, char sep, int32_t suffix);
+NzbgetRsBuf nzbget_rs_dqh_stream_repair_format_extract_dir(
+    const char* temp_dir, char sep);
+const char* nzbget_rs_dqh_stream_repair_decompress_fail_reason(int32_t has_extractor);
+int32_t nzbget_rs_tpr_repair_ctrl_seconds_to_minutes(int32_t seconds);
+NzbgetRsBuf nzbget_rs_tpr_parchecker_format_twin_err_msg(
+    int32_t twin_err_action, const char* own_err_msg);
+NzbgetRsBuf nzbget_rs_tpr_unpack_format_extracting_msg(const char* suffix);
+NzbgetRsBuf nzbget_rs_tpr_unpack_ctrl_format_cancel_msg(const char* info_name);
+NzbgetRsBuf nzbget_rs_tpr_rar_renamer_format_exec_progress(const char* info_name);
+NzbgetRsBuf nzbget_rs_tpr_rar_renamer_format_file_progress(const char* filename);
 
 #include "nzbget_tls_cipher.h"
 

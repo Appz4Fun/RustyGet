@@ -32978,6 +32978,211 @@ pub unsafe extern "C" fn nzbget_rs_tpr_repair_ctrl_twin_par2_reject_reason(
     crate::twinproberenhist::tpr_repair_ctrl_twin_par2_reject_reason(cmp).as_ptr() as *const c_char
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_write_errmsg_or_default(
+    last_err: *const c_char,
+) -> *const c_char {
+    if last_err.is_null() || *last_err == 0 {
+        b"incomplete write (disk full?)\0".as_ptr() as *const c_char
+    } else {
+        last_err
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_format_stall_reason(timeout: i32) -> RsBuf {
+    into_buf(crate::dupequeuehealth::dqh_stream_repair_format_stall_reason(timeout))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_format_conn_wait_reason(
+    elapsed_sec: i32,
+) -> RsBuf {
+    into_buf(crate::dupequeuehealth::dqh_stream_repair_format_conn_wait_reason(elapsed_sec))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_format_max_run_reason(
+    max_sec: i32,
+    max_run_factor: i32,
+) -> RsBuf {
+    into_buf(
+        crate::dupequeuehealth::dqh_stream_repair_format_max_run_reason(max_sec, max_run_factor),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_format_slow_rate_reason(
+    repair_mb_s: f64,
+    remaining_mb: f64,
+    repair_sec: f64,
+    slow_factor: i32,
+    download_mb_s: f64,
+) -> RsBuf {
+    into_buf(
+        crate::dupequeuehealth::dqh_stream_repair_format_slow_rate_reason(
+            repair_mb_s,
+            remaining_mb,
+            repair_sec,
+            slow_factor,
+            download_mb_s,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_format_donor_progress_label(
+    prefix: *const c_char,
+    donor_name: *const c_char,
+) -> RsBuf {
+    let p = if prefix.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(prefix).to_bytes()
+    };
+    let d = if donor_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(donor_name).to_bytes()
+    };
+    into_buf(
+        crate::dupequeuehealth::dqh_stream_repair_format_donor_progress_label(p, d),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_select_reject_log_kind(
+    probed: i32,
+    max_donor_candidates: i32,
+    mk_info: i32,
+    mk_detail: i32,
+) -> i32 {
+    crate::dupequeuehealth::dqh_stream_repair_select_reject_log_kind(
+        probed,
+        max_donor_candidates,
+        mk_info,
+        mk_detail,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_missing_par_disposition(
+    has_par_files: i32,
+) -> *const c_char {
+    crate::dupequeuehealth::dqh_stream_repair_missing_par_disposition(has_par_files != 0).as_ptr()
+        as *const c_char
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_format_decompress_temp_dir(
+    dest_dir: *const c_char,
+    sep: c_char,
+    suffix: i32,
+) -> RsBuf {
+    let d = if dest_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(dest_dir).to_bytes()
+    };
+    into_buf(
+        crate::dupequeuehealth::dqh_stream_repair_format_decompress_temp_dir(d, sep as u8, suffix),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_format_extract_dir(
+    temp_dir: *const c_char,
+    sep: c_char,
+) -> RsBuf {
+    let t = if temp_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(temp_dir).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_stream_repair_format_extract_dir(t, sep as u8))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_decompress_fail_reason(
+    has_extractor: i32,
+) -> *const c_char {
+    crate::dupequeuehealth::dqh_stream_repair_decompress_fail_reason(has_extractor != 0).as_ptr()
+        as *const c_char
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_repair_ctrl_seconds_to_minutes(seconds: i32) -> i32 {
+    crate::twinproberenhist::tpr_repair_ctrl_seconds_to_minutes(seconds)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_parchecker_format_twin_err_msg(
+    twin_err_action: i32,
+    own_err_msg: *const c_char,
+) -> RsBuf {
+    let o = if own_err_msg.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(own_err_msg).to_bytes()
+    };
+    match crate::twinproberenhist::tpr_parchecker_format_twin_err_msg(twin_err_action, o) {
+        Some(v) => into_buf(v),
+        None => RsBuf {
+            data: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        },
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_unpack_format_extracting_msg(
+    suffix: *const c_char,
+) -> RsBuf {
+    let s = if suffix.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(suffix).to_bytes()
+    };
+    into_buf(crate::twinproberenhist::tpr_unpack_format_extracting_msg(s))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_unpack_ctrl_format_cancel_msg(
+    info_name: *const c_char,
+) -> RsBuf {
+    let n = if info_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(info_name).to_bytes()
+    };
+    into_buf(crate::twinproberenhist::tpr_unpack_ctrl_format_cancel_msg(n))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_rar_renamer_format_exec_progress(
+    info_name: *const c_char,
+) -> RsBuf {
+    let n = if info_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(info_name).to_bytes()
+    };
+    into_buf(crate::twinproberenhist::tpr_rar_renamer_format_exec_progress(n))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_rar_renamer_format_file_progress(
+    filename: *const c_char,
+) -> RsBuf {
+    let f = if filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    into_buf(crate::twinproberenhist::tpr_rar_renamer_format_file_progress(f))
+}
+
 
 
 

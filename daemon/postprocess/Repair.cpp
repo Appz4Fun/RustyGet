@@ -837,7 +837,9 @@ void RepairController::UpdateParCheckProgress()
 				&estimatedRepairTime) != 0)
 			{
 				debug("Estimated repair time %i seconds", estimatedRepairTime);
-				m_parChecker.PrintMessage(Message::mkWarning, "Cancelling par-repair for %s, estimated repair time (%i minutes) exceeds allowed repair time", m_parChecker.GetInfoName(), estimatedRepairTime / 60);
+				m_parChecker.PrintMessage(Message::mkWarning, "Cancelling par-repair for %s, estimated repair time (%i minutes) exceeds allowed repair time",
+					m_parChecker.GetInfoName(),
+					nzbget_rs_tpr_repair_ctrl_seconds_to_minutes(estimatedRepairTime));
 				parCancel = true;
 			}
 		}

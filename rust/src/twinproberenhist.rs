@@ -1227,6 +1227,73 @@ pub fn tpr_repair_ctrl_twin_par2_reject_reason(cmp: i32) -> &'static [u8] {
     }
 }
 
+/// Convert estimated repair time in seconds to whole minutes (`seconds / 60`)
+/// for `RepairController::UpdateParCheckProgress` (`Repair.cpp`).
+pub fn tpr_repair_ctrl_seconds_to_minutes(seconds: i32) -> i32 {
+    seconds / 60
+}
+
+/// Format the twin-set PAR error message (`twin_err_action == 1` or `2`) for
+/// `ParChecker::ProcessTwinSet` (`ParChecker.cpp`).
+pub fn tpr_parchecker_format_twin_err_msg(
+    twin_err_action: i32,
+    own_err_msg: &[u8],
+) -> Option<Vec<u8>> {
+    match twin_err_action {
+        1 => Some(b"not enough par-blocks, the twin's included".to_vec()),
+        2 => {
+            let suffix = b"; the twin's didn't do either";
+            let mut out = Vec::with_capacity(own_err_msg.len() + suffix.len());
+            out.extend_from_slice(own_err_msg);
+            out.extend_from_slice(suffix);
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
+/// Format `"Unrar: Extracting <suffix>"` after stripping the unpack directory
+/// prefix in `DirectUnpack::AddMessage` and `UnpackController::AddMessage`.
+pub fn tpr_unpack_format_extracting_msg(suffix: &[u8]) -> Vec<u8> {
+    let prefix = b"Unrar: Extracting ";
+    let mut out = Vec::with_capacity(prefix.len() + suffix.len());
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(suffix);
+    out
+}
+
+/// Format `"Cancelling <info_name> due to errors"` for
+/// `UnpackController::AddMessage` (`UnpackController.cpp`).
+pub fn tpr_unpack_ctrl_format_cancel_msg(info_name: &[u8]) -> Vec<u8> {
+    let prefix = b"Cancelling ";
+    let suffix = b" due to errors";
+    let mut out = Vec::with_capacity(prefix.len() + info_name.len() + suffix.len());
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(info_name);
+    out.extend_from_slice(suffix);
+    out
+}
+
+/// Format `"Checking renamed rar-files for <info_name>"` for
+/// `RarRenamer::Execute` (`RarRenamer.cpp`).
+pub fn tpr_rar_renamer_format_exec_progress(info_name: &[u8]) -> Vec<u8> {
+    let prefix = b"Checking renamed rar-files for ";
+    let mut out = Vec::with_capacity(prefix.len() + info_name.len());
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(info_name);
+    out
+}
+
+/// Format `"Checking file <filename>"` for `RarRenamer::CheckFiles`
+/// (`RarRenamer.cpp`).
+pub fn tpr_rar_renamer_format_file_progress(filename: &[u8]) -> Vec<u8> {
+    let prefix = b"Checking file ";
+    let mut out = Vec::with_capacity(prefix.len() + filename.len());
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(filename);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1661,6 +1728,32 @@ mod tests {
         assert_eq!(
             tpr_repair_ctrl_twin_par2_reject_reason(2),
             b"names the files otherwise\0"
+        );
+        assert_eq!(tpr_repair_ctrl_seconds_to_minutes(185), 3);
+        assert_eq!(
+            tpr_parchecker_format_twin_err_msg(1, b"err"),
+            Some(b"not enough par-blocks, the twin's included".to_vec())
+        );
+        assert_eq!(
+            tpr_parchecker_format_twin_err_msg(2, b"need 5 blocks"),
+            Some(b"need 5 blocks; the twin's didn't do either".to_vec())
+        );
+        assert_eq!(tpr_parchecker_format_twin_err_msg(0, b"err"), None);
+        assert_eq!(
+            tpr_unpack_format_extracting_msg(b"video.mkv"),
+            b"Unrar: Extracting video.mkv"
+        );
+        assert_eq!(
+            tpr_unpack_ctrl_format_cancel_msg(b"unpack for MyNzb"),
+            b"Cancelling unpack for MyNzb due to errors"
+        );
+        assert_eq!(
+            tpr_rar_renamer_format_exec_progress(b"MyNzb"),
+            b"Checking renamed rar-files for MyNzb"
+        );
+        assert_eq!(
+            tpr_rar_renamer_format_file_progress(b"part01.rar"),
+            b"Checking file part01.rar"
         );
     }
 }

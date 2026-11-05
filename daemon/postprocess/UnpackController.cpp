@@ -978,7 +978,10 @@ void UnpackController::AddMessage(Message::EKind kind, const char* text)
 		text, m_unpackExtendedDir, m_unpacker == upSevenZip ? 1 : 0, &info);
 	if (m_unpacker == upUnrar && info.strip_extracting_dir != 0)
 	{
-		msgText.Format("Unrar: Extracting %s", text + info.stripped_suffix_offset);
+		NzbgetRsBuf extMsgBuf = nzbget_rs_tpr_unpack_format_extracting_msg(
+			text + info.stripped_suffix_offset);
+		msgText.Set(extMsgBuf.data ? extMsgBuf.data : "", (int)extMsgBuf.len);
+		nzbget_rs_free(extMsgBuf);
 	}
 
 	if (m_postInfo)
@@ -1023,10 +1026,12 @@ void UnpackController::AddMessage(Message::EKind kind, const char* text)
 	{
 		if (m_postInfo && !WillRetryWithPass())
 		{
+			NzbgetRsBuf cancelBuf = nzbget_rs_tpr_unpack_ctrl_format_cancel_msg(*m_infoName);
 			m_postInfo->GetNzbInfo()->AddMessage(
 				Message::mkWarning,
-				BString<1024>("Cancelling %s due to errors", *m_infoName)
+				cancelBuf.data ? cancelBuf.data : ""
 			);
+			nzbget_rs_free(cancelBuf);
 		}
 
 		m_autoTerminated = true;

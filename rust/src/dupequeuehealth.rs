@@ -1123,6 +1123,126 @@ pub fn dqh_prepost_skip_unpack_par_reason(par_status: i32, ps_manual: i32) -> &'
     }
 }
 
+/// Select the write error message or the `"incomplete write (disk full?)"`
+/// fallback when `last_err` is empty (`StreamRepair.cpp`).
+pub fn dqh_stream_repair_write_errmsg_or_default(last_err: &[u8]) -> &[u8] {
+    if last_err.is_empty() {
+        b"incomplete write (disk full?)"
+    } else {
+        last_err
+    }
+}
+
+/// Format `"nothing recovered for <timeout> seconds"` for
+/// `StreamRepairController::StartWatchdog` (`StreamRepair.cpp`).
+pub fn dqh_stream_repair_format_stall_reason(timeout: i32) -> Vec<u8> {
+    format!("nothing recovered for {timeout} seconds").into_bytes()
+}
+
+/// Format `"still waiting for news-server connections after <elapsed_sec> seconds"`
+/// for `StreamRepairController::StartWatchdog` (`StreamRepair.cpp`).
+pub fn dqh_stream_repair_format_conn_wait_reason(elapsed_sec: i32) -> Vec<u8> {
+    format!("still waiting for news-server connections after {elapsed_sec} seconds").into_bytes()
+}
+
+/// Format `"still running after <max_sec> seconds, <max_run_factor> times the timeout"`
+/// for `StreamRepairController::StartWatchdog` (`StreamRepair.cpp`).
+pub fn dqh_stream_repair_format_max_run_reason(max_sec: i32, max_run_factor: i32) -> Vec<u8> {
+    format!("still running after {max_sec} seconds, {max_run_factor} times the timeout")
+        .into_bytes()
+}
+
+/// Format `"at <repair_mb_s:.2> MB/s the <remaining_mb:.1> MB left would take <repair_sec:.0> seconds, more than <slow_factor> times a download at <download_mb_s:.2> MB/s"`
+/// for `StreamRepairController::StartWatchdog` (`StreamRepair.cpp`).
+pub fn dqh_stream_repair_format_slow_rate_reason(
+    repair_mb_s: f64,
+    remaining_mb: f64,
+    repair_sec: f64,
+    slow_factor: i32,
+    download_mb_s: f64,
+) -> Vec<u8> {
+    format!(
+        "at {repair_mb_s:.2} MB/s the {remaining_mb:.1} MB left would take {repair_sec:.0} seconds, more than {slow_factor} times a download at {download_mb_s:.2} MB/s"
+    )
+    .into_bytes()
+}
+
+/// Format `"<prefix> <donor_name>"` (e.g. `"Repairing from duplicate <donor_name>"`)
+/// for `StreamRepairController` stage progress labels (`StreamRepair.cpp`).
+pub fn dqh_stream_repair_format_donor_progress_label(
+    prefix: &[u8],
+    donor_name: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(prefix.len() + 1 + donor_name.len());
+    out.extend_from_slice(prefix);
+    out.push(b' ');
+    out.extend_from_slice(donor_name);
+    out
+}
+
+/// Select the message log kind (`mk_info` when `probed <= max_donor_candidates`,
+/// `mk_detail` otherwise) when logging a rejected donor file in
+/// `StreamRepairController::RepairFile` (`StreamRepair.cpp`).
+pub fn dqh_stream_repair_select_reject_log_kind(
+    probed: i32,
+    max_donor_candidates: i32,
+    mk_info: i32,
+    mk_detail: i32,
+) -> i32 {
+    if probed <= max_donor_candidates {
+        mk_info
+    } else {
+        mk_detail
+    }
+}
+
+/// Return the NUL-terminated PAR disposition string (`"left to par-repair"` vs
+/// `"no par2 files to repair it"`) for `StreamRepairController::ReportRemainingHoles`
+/// (`StreamRepair.cpp`).
+pub fn dqh_stream_repair_missing_par_disposition(has_par_files: bool) -> &'static [u8] {
+    if has_par_files {
+        b"left to par-repair\0"
+    } else {
+        b"no par2 files to repair it\0"
+    }
+}
+
+/// Format `"<dest_dir><sep>.stream-decompress.<suffix>"` for
+/// `StreamRepairController::ExecDecompressRepair` (`StreamRepair.cpp`).
+pub fn dqh_stream_repair_format_decompress_temp_dir(
+    dest_dir: &[u8],
+    sep: u8,
+    suffix: i32,
+) -> Vec<u8> {
+    let tail = format!(".stream-decompress.{suffix}");
+    let mut out = Vec::with_capacity(dest_dir.len() + 1 + tail.len());
+    out.extend_from_slice(dest_dir);
+    out.push(sep);
+    out.extend_from_slice(tail.as_bytes());
+    out
+}
+
+/// Format `"<temp_dir><sep>extracted"` for
+/// `StreamRepairController::ExecDecompressRepair` (`StreamRepair.cpp`).
+pub fn dqh_stream_repair_format_extract_dir(temp_dir: &[u8], sep: u8) -> Vec<u8> {
+    let mut out = Vec::with_capacity(temp_dir.len() + 10);
+    out.extend_from_slice(temp_dir);
+    out.push(sep);
+    out.extend_from_slice(b"extracted");
+    out
+}
+
+/// Return the NUL-terminated decompression failure reason (`"extraction failed"`
+/// vs `"no extraction tool configured"`) for
+/// `StreamRepairController::ExecDecompressRepair` (`StreamRepair.cpp`).
+pub fn dqh_stream_repair_decompress_fail_reason(has_extractor: bool) -> &'static [u8] {
+    if has_extractor {
+        b"extraction failed\0"
+    } else {
+        b"no extraction tool configured\0"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1568,5 +1688,62 @@ mod tests {
             b"required par-repair\0"
         );
         assert_eq!(dqh_prepost_skip_unpack_par_reason(1, 3), b"par-failure\0");
+        assert_eq!(
+            dqh_stream_repair_write_errmsg_or_default(b""),
+            b"incomplete write (disk full?)"
+        );
+        assert_eq!(
+            dqh_stream_repair_write_errmsg_or_default(b"No space left"),
+            b"No space left"
+        );
+        assert_eq!(
+            dqh_stream_repair_format_stall_reason(60),
+            b"nothing recovered for 60 seconds"
+        );
+        assert_eq!(
+            dqh_stream_repair_format_conn_wait_reason(125),
+            b"still waiting for news-server connections after 125 seconds"
+        );
+        assert_eq!(
+            dqh_stream_repair_format_max_run_reason(180, 3),
+            b"still running after 180 seconds, 3 times the timeout"
+        );
+        assert_eq!(
+            dqh_stream_repair_format_slow_rate_reason(0.5, 100.0, 200.0, 4, 20.0),
+            b"at 0.50 MB/s the 100.0 MB left would take 200 seconds, more than 4 times a download at 20.00 MB/s"
+        );
+        assert_eq!(
+            dqh_stream_repair_format_donor_progress_label(
+                b"Repairing from duplicate",
+                b"MyDonor"
+            ),
+            b"Repairing from duplicate MyDonor"
+        );
+        assert_eq!(dqh_stream_repair_select_reject_log_kind(2, 3, 1, 2), 1);
+        assert_eq!(dqh_stream_repair_select_reject_log_kind(4, 3, 1, 2), 2);
+        assert_eq!(
+            dqh_stream_repair_missing_par_disposition(true),
+            b"left to par-repair\0"
+        );
+        assert_eq!(
+            dqh_stream_repair_missing_par_disposition(false),
+            b"no par2 files to repair it\0"
+        );
+        assert_eq!(
+            dqh_stream_repair_format_decompress_temp_dir(b"/dst", b'/', 0),
+            b"/dst/.stream-decompress.0"
+        );
+        assert_eq!(
+            dqh_stream_repair_format_extract_dir(b"/dst/.stream-decompress.0", b'/'),
+            b"/dst/.stream-decompress.0/extracted"
+        );
+        assert_eq!(
+            dqh_stream_repair_decompress_fail_reason(true),
+            b"extraction failed\0"
+        );
+        assert_eq!(
+            dqh_stream_repair_decompress_fail_reason(false),
+            b"no extraction tool configured\0"
+        );
     }
 }

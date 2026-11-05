@@ -29,7 +29,9 @@
 
 void RarRenamer::Execute()
 {
-	m_progressLabel.Format("Checking renamed rar-files for %s", *m_infoName);
+	NzbgetRsBuf progBuf = nzbget_rs_tpr_rar_renamer_format_exec_progress(*m_infoName);
+	m_progressLabel.Set(progBuf.data ? progBuf.data : "", (int)progBuf.len);
+	nzbget_rs_free(progBuf);
 	m_stageProgress = 0;
 	UpdateProgress();
 
@@ -76,7 +78,9 @@ void RarRenamer::CheckFiles(const char* destDir)
 
 			if (!FileSystem::DirectoryExists(fullFilename))
 			{
-				m_progressLabel.Format("Checking file %s", filename);
+				NzbgetRsBuf progBuf = nzbget_rs_tpr_rar_renamer_format_file_progress(filename);
+				m_progressLabel.Set(progBuf.data ? progBuf.data : "", (int)progBuf.len);
+				nzbget_rs_free(progBuf);
 				m_stageProgress = nzbget_rs_psp_rar_renamer_calc_stage_progress(m_fileCount, m_curFile);
 				UpdateProgress();
 				m_curFile++;

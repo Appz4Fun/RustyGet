@@ -389,7 +389,10 @@ void DirectUnpack::AddMessage(Message::EKind kind, const char* text)
 	nzbget_rs_unpack_parse_message(text, m_unpackExtendedDir, 0, &info);
 	if (info.strip_extracting_dir != 0)
 	{
-		msgText.Format("Unrar: Extracting %s", text + info.stripped_suffix_offset);
+		NzbgetRsBuf extMsgBuf = nzbget_rs_tpr_unpack_format_extracting_msg(
+			text + info.stripped_suffix_offset);
+		msgText.Set(extMsgBuf.data ? extMsgBuf.data : "", (int)extMsgBuf.len);
+		nzbget_rs_free(extMsgBuf);
 	}
 	if (info.is_insert_disk != 0)
 	{

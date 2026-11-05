@@ -784,13 +784,12 @@ int ParChecker::ProcessTwinSet()
 
 	int twinErrAction = nzbget_rs_dps_parchecker_classify_twin_repair_err(
 		(int)res, (int)Par2::eRepairNotPossible, ownErrMsg.empty() ? 1 : 0);
-	if (twinErrAction == 1)
+	NzbgetRsBuf twinErrBuf = nzbget_rs_tpr_parchecker_format_twin_err_msg(
+		twinErrAction, ownErrMsg.c_str());
+	if (twinErrBuf.data)
 	{
-		m_errMsg = "not enough par-blocks, the twin's included";
-	}
-	else if (twinErrAction == 2)
-	{
-		m_errMsg = ownErrMsg + "; the twin's didn't do either";
+		m_errMsg.assign(twinErrBuf.data, twinErrBuf.len);
+		nzbget_rs_free(twinErrBuf);
 	}
 	return res;
 }

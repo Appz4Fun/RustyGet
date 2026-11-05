@@ -650,7 +650,7 @@ bool Scanner::AddFileToQueue(
 		InitPPParameters(nzbInfo->GetCategory(), parameters, true);
 	}
 
-	if (nzbName && strlen(nzbName) > 0)
+	if (!Util::EmptyStr(nzbName))
 	{
 		nzbInfo->SetName(nullptr);
 		nzbInfo->SetFilename(nzbName);

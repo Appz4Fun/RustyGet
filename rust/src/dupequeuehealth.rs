@@ -2674,6 +2674,59 @@ pub fn dqh_util_classify_executor_ext(filename: &[u8]) -> (i32, usize) {
     }
 }
 
+/// Compares `a` and `b` lexicographically after folding each byte via `c_lower` (`tolower`),
+/// with zero heap allocations, for `ScriptConfig::SaveConfig`'s `CaseInsensitiveLess`.
+pub fn dqh_bytes_lt_ignore_case(a: &[u8], b: &[u8]) -> bool {
+    for (&x, &y) in a.iter().zip(b.iter()) {
+        let lx = crate::releasename::c_lower(x);
+        let ly = crate::releasename::c_lower(y);
+        if lx != ly {
+            return lx < ly;
+        }
+    }
+    a.len() < b.len()
+}
+
+/// Returns `true` when `no_disk_access` is set, `value` is empty, or `value` contains
+/// neither `,` nor `;`, for `Options::CheckScriptDir`.
+pub fn dqh_options_should_check_single_script_dir(no_disk_access: bool, value: &[u8]) -> bool {
+    no_disk_access || value.is_empty() || !value.iter().any(|&b| b == b',' || b == b';')
+}
+
+/// Encodes `bytes` as lowercase hexadecimal ASCII bytes (`2 * bytes.len()`) for `GenerateSecureToken`.
+pub fn dqh_webserver_encode_hex_token(bytes: &[u8]) -> Vec<u8> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = Vec::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize]);
+        out.push(HEX[(b & 0x0f) as usize]);
+    }
+    out
+}
+
+/// Formats `"<key>=<val>\n"` for `ScriptConfig::SaveConfig`.
+pub fn dqh_script_config_format_option_line(key: &[u8], val: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(key.len() + val.len() + 2);
+    out.extend_from_slice(key);
+    out.push(b'=');
+    out.extend_from_slice(val);
+    out.push(b'\n');
+    out
+}
+
+/// Returns `line` with a trailing `\n` appended if `line` does not already end with `\n`,
+/// for `ScriptConfig::SaveConfig`.
+pub fn dqh_script_config_ensure_trailing_lf(line: &[u8]) -> Vec<u8> {
+    if line.ends_with(b"\n") {
+        line.to_vec()
+    } else {
+        let mut out = Vec::with_capacity(line.len() + 1);
+        out.extend_from_slice(line);
+        out.push(b'\n');
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3724,5 +3777,28 @@ mod tests {
         assert_eq!(dqh_util_classify_executor_ext(b"/path/script.js"), (3, 12));
         assert_eq!(dqh_util_classify_executor_ext(b"/path/script.rb"), (4, 12));
         assert_eq!(dqh_util_classify_executor_ext(b"/path/script"), (0, 0));
+        assert!(dqh_bytes_lt_ignore_case(b"Alpha", b"beta"));
+        assert!(!dqh_bytes_lt_ignore_case(b"beta", b"Alpha"));
+        assert!(!dqh_bytes_lt_ignore_case(b"Alpha", b"alpha"));
+        assert!(dqh_bytes_lt_ignore_case(b"Alpha", b"alpha2"));
+        assert!(dqh_options_should_check_single_script_dir(false, b"/scripts"));
+        assert!(!dqh_options_should_check_single_script_dir(false, b"/a;/b"));
+        assert!(dqh_options_should_check_single_script_dir(true, b"/a;/b"));
+        assert_eq!(
+            dqh_webserver_encode_hex_token(&[0x00, 0xab, 0xff]),
+            b"00abff"
+        );
+        assert_eq!(
+            dqh_script_config_format_option_line(b"Server1.Port", b"563"),
+            b"Server1.Port=563\n"
+        );
+        assert_eq!(
+            dqh_script_config_ensure_trailing_lf(b"# comment"),
+            b"# comment\n"
+        );
+        assert_eq!(
+            dqh_script_config_ensure_trailing_lf(b"# comment\n"),
+            b"# comment\n"
+        );
     }
 }

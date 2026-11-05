@@ -48,13 +48,13 @@ void RemoteServer::Run()
 #ifndef DISABLE_TLS
 	if (m_tls)
 	{
-		if (strlen(g_Options->GetSecureCert()) == 0 || !FileSystem::FileExists(g_Options->GetSecureCert()))
+		if (Util::EmptyStr(g_Options->GetSecureCert()) || !FileSystem::FileExists(g_Options->GetSecureCert()))
 		{
 			error("Could not initialize TLS, secure certificate is not configured or the cert-file was not found. Check option <SecureCert>");
 			return;
 		}
 
-		if (strlen(g_Options->GetSecureKey()) == 0 || !FileSystem::FileExists(g_Options->GetSecureKey()))
+		if (Util::EmptyStr(g_Options->GetSecureKey()) || !FileSystem::FileExists(g_Options->GetSecureKey()))
 		{
 			error("Could not initialize TLS, secure key is not configured or the key-file was not found. Check option <SecureKey>");
 			return;

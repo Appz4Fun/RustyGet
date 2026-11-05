@@ -399,12 +399,8 @@ time_t Util::Timegm(tm const *t)
 
 bool Util::StrCaseCmp(std::string_view a, std::string_view b)
 {
-	return std::equal(a.begin(), a.end(), b.begin(), b.end(),
-		[](unsigned char ca, unsigned char cb)
-		{
-			return std::tolower(ca) == std::tolower(cb);
-		}
-	);
+	return nzbget_rs_dqh_slice_eq_ignore_case(
+		a.data(), a.size(), b.data(), b.size()) != 0;
 }
 
 // prevent PC from going to sleep

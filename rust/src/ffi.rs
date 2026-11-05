@@ -35721,6 +35721,115 @@ pub unsafe extern "C" fn nzbget_rs_dqh_util_classify_executor_ext(
     kind
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_bytes_lt_ignore_case(
+    a: *const c_char,
+    a_len: usize,
+    b: *const c_char,
+    b_len: usize,
+) -> c_int {
+    let sa = if a.is_null() || a_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(a as *const u8, a_len)
+    };
+    let sb = if b.is_null() || b_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(b as *const u8, b_len)
+    };
+    i32::from(crate::dupequeuehealth::dqh_bytes_lt_ignore_case(sa, sb))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_slice_eq_ignore_case(
+    a: *const c_char,
+    a_len: usize,
+    b: *const c_char,
+    b_len: usize,
+) -> c_int {
+    let sa = if a.is_null() || a_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(a as *const u8, a_len)
+    };
+    let sb = if b.is_null() || b_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(b as *const u8, b_len)
+    };
+    i32::from(crate::dupequeuehealth::dqh_bytes_eq_ignore_case(sa, sb))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_options_should_check_single_script_dir(
+    no_disk_access: c_int,
+    value: *const c_char,
+) -> c_int {
+    let v = if value.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(value).to_bytes()
+    };
+    i32::from(crate::dupequeuehealth::dqh_options_should_check_single_script_dir(
+        no_disk_access != 0,
+        v,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_webserver_encode_hex_token(
+    bytes: *const u8,
+    bytes_len: usize,
+    out_token: *mut c_char,
+    out_cap: usize,
+) {
+    if out_token.is_null() || out_cap == 0 {
+        return;
+    }
+    let b = if bytes.is_null() || bytes_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(bytes, bytes_len)
+    };
+    let hex = crate::dupequeuehealth::dqh_webserver_encode_hex_token(b);
+    let copy_len = hex.len().min(out_cap - 1);
+    std::ptr::copy_nonoverlapping(hex.as_ptr() as *const c_char, out_token, copy_len);
+    *out_token.add(copy_len) = 0;
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_script_config_format_option_line(
+    key: *const c_char,
+    key_len: usize,
+    val: *const c_char,
+    val_len: usize,
+) -> RsBuf {
+    let k = if key.is_null() || key_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(key as *const u8, key_len)
+    };
+    let v = if val.is_null() || val_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(val as *const u8, val_len)
+    };
+    into_buf(crate::dupequeuehealth::dqh_script_config_format_option_line(k, v))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_script_config_ensure_trailing_lf(
+    line: *const c_char,
+) -> RsBuf {
+    let l = if line.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(line).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_script_config_ensure_trailing_lf(l))
+}
+
 
 
 

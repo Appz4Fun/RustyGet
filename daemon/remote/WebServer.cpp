@@ -50,12 +50,8 @@ static void GenerateSecureToken(char* token)
 	unsigned char randBytes[BYTES_NEEDED];
 	if (RAND_bytes(randBytes, static_cast<int>(BYTES_NEEDED)) == 1)
 	{
-		for (size_t i = 0; i < BYTES_NEEDED; ++i)
-		{
-			sprintf(&token[i * 2], "%02x", randBytes[i]);
-		}
-
-		token[TOKEN_SIZE - 1] = '\0';
+		nzbget_rs_dqh_webserver_encode_hex_token(
+			randBytes, BYTES_NEEDED, token, TOKEN_SIZE);
 		return;
 	}
 #endif
@@ -64,17 +60,19 @@ static void GenerateSecureToken(char* token)
 	{
 		std::random_device rd;
 		std::uniform_int_distribution<unsigned int> dist(0, 0xFF);
+		uint8_t fallbackBytes[BYTES_NEEDED];
 		for (size_t i = 0; i < BYTES_NEEDED; ++i)
 		{
-			sprintf(&token[i * 2], "%02x", dist(rd));
+			fallbackBytes[i] = static_cast<uint8_t>(dist(rd));
 		}
+		nzbget_rs_dqh_webserver_encode_hex_token(
+			fallbackBytes, BYTES_NEEDED, token, TOKEN_SIZE);
 	}
 	catch (const std::exception& ex)
 	{
 		error("Could not generate secure authentication token: %s", ex.what());
 		exit(1);
 	}
-	token[TOKEN_SIZE - 1] = '\0';
 }
 
 //*****************************************************************

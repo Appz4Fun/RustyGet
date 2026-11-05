@@ -1234,7 +1234,7 @@ bool DiskState::LoadNzbInfo(NzbInfo* nzbInfo, Servers* servers, StateDiskFile& i
 	nzbInfo->SetQueuedFilename(buf);
 
 	if (!infile.ReadLine(buf, sizeof(buf))) goto error;
-	if (strlen(buf) > 0)
+	if (!Util::EmptyStr(buf))
 	{
 		nzbInfo->SetName(buf);
 	}

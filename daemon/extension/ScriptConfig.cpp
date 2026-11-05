@@ -304,13 +304,8 @@ bool ScriptConfig::SaveConfig(Options::OptEntries* optEntries, const char* ciphe
 	{
 		bool operator()(std::string_view a, std::string_view b) const
 		{
-			return std::lexicographical_compare(
-				a.begin(), a.end(), b.begin(), b.end(),
-				[](unsigned char ca, unsigned char cb)
-				{
-					return std::tolower(ca) < std::tolower(cb);
-				}
-			);
+			return nzbget_rs_dqh_bytes_lt_ignore_case(
+				a.data(), a.size(), b.data(), b.size()) != 0;
 		}
 	};
 
@@ -360,9 +355,11 @@ bool ScriptConfig::SaveConfig(Options::OptEntries* optEntries, const char* ciphe
 				auto it = values.find(*optname);
 				if (it != values.end() && writtenOptions.insert(it->first).second)
 				{
-					infile.Print("%.*s=%.*s\n",
-						static_cast<int>(it->first.size()), it->first.data(),
-						static_cast<int>(it->second.size()), it->second.data());
+					NzbgetRsBuf lineBuf = nzbget_rs_dqh_script_config_format_option_line(
+						it->first.data(), it->first.size(),
+						it->second.data(), it->second.size());
+					infile.Print("%s", lineBuf.data ? lineBuf.data : "");
+					nzbget_rs_free(lineBuf);
 				}
 			}
 		}
@@ -370,7 +367,9 @@ bool ScriptConfig::SaveConfig(Options::OptEntries* optEntries, const char* ciphe
 		{
 			// every line ends: a last line without a line end (a comment, typically)
 			// had the first new option glued onto it, and that option was lost
-			infile.Print("%s%s", *buf, nzbget_rs_sfc_script_config_line_has_trailing_lf(buf) != 0 ? "" : "\n");
+			NzbgetRsBuf lineBuf = nzbget_rs_dqh_script_config_ensure_trailing_lf(buf);
+			infile.Print("%s", lineBuf.data ? lineBuf.data : "");
+			nzbget_rs_free(lineBuf);
 		}
 	}
 
@@ -384,7 +383,11 @@ bool ScriptConfig::SaveConfig(Options::OptEntries* optEntries, const char* ciphe
 			{
 				auto it = values.find(name);
 				std::string_view val = (it != values.end()) ? it->second : entry.GetValue();
-				infile.Print("%s=%.*s\n", name, static_cast<int>(val.size()), val.data());
+				std::string_view nameView(name);
+				NzbgetRsBuf lineBuf = nzbget_rs_dqh_script_config_format_option_line(
+					nameView.data(), nameView.size(), val.data(), val.size());
+				infile.Print("%s", lineBuf.data ? lineBuf.data : "");
+				nzbget_rs_free(lineBuf);
 			}
 		}
 	}

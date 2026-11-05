@@ -6008,6 +6008,17 @@ NzbgetRsBuf nzbget_rs_dqh_nzb_fetcher_format_parse_err(
     const char* body, size_t body_len);
 int nzbget_rs_dqh_util_classify_executor_ext(
     const char* filename, size_t filename_len, size_t* out_dot_idx);
+int nzbget_rs_dqh_bytes_lt_ignore_case(
+    const char* a, size_t a_len, const char* b, size_t b_len);
+int nzbget_rs_dqh_slice_eq_ignore_case(
+    const char* a, size_t a_len, const char* b, size_t b_len);
+int nzbget_rs_dqh_options_should_check_single_script_dir(
+    int no_disk_access, const char* value);
+void nzbget_rs_dqh_webserver_encode_hex_token(
+    const uint8_t* bytes, size_t bytes_len, char* out_token, size_t out_cap);
+NzbgetRsBuf nzbget_rs_dqh_script_config_format_option_line(
+    const char* key, size_t key_len, const char* val, size_t val_len);
+NzbgetRsBuf nzbget_rs_dqh_script_config_ensure_trailing_lf(const char* line);
 
 #include "nzbget_tls_cipher.h"
 

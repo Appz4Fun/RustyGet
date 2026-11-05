@@ -511,7 +511,8 @@ void Options::CheckDir(CString& dir, const char* optionName,
 void Options::CheckScriptDir()
 {
 	const char* value = GetOption(SCRIPTDIR.data());
-	if (m_noDiskAccess || Util::EmptyStr(value) || !strpbrk(value, ",;"))
+	if (nzbget_rs_dqh_options_should_check_single_script_dir(
+		m_noDiskAccess ? 1 : 0, value) != 0)
 	{
 		CheckDir(m_scriptDir, SCRIPTDIR.data(), m_mainDir, true, true);
 		return;
@@ -1085,7 +1086,7 @@ void Options::InitCategories()
 
 		bool definition = nname || ndestdir || nunpack || nextensions || naliases;
 		int catDefState = nzbget_rs_rol_options_check_category_or_feed_def(
-			definition ? 1 : 0, (nname && strlen(nname) > 0) ? 1 : 0);
+			definition ? 1 : 0, !Util::EmptyStr(nname) ? 1 : 0);
 		if (catDefState == 0)
 		{
 			break;
@@ -1267,7 +1268,7 @@ void Options::InitScheduler()
 			continue;
 		}
 
-		bool splitCmdEmpty = (param && strlen(param) > 0 && taskCommand == scProcess)
+		bool splitCmdEmpty = (!Util::EmptyStr(param) && taskCommand == scProcess)
 			? Util::SplitCommandLine(param).empty() : false;
 		int paramCheck = nzbget_rs_rco_options_validate_scheduler_param(
 			(int)taskCommand, param, splitCmdEmpty ? 1 : 0);
@@ -1450,7 +1451,7 @@ bool Options::ValidateOptionName(const char* optname, const char* optvalue)
 			return true;
 
 		case 3:
-			if (optvalue && strlen(optvalue) > 0)
+			if (!Util::EmptyStr(optvalue))
 			{
 				ConfigError("Option \"%s\" is obsolete, ignored, use \"%s\" and \"%s\" instead",
 					optname, SCRIPTDIR.data(), EXTENSIONS.data());

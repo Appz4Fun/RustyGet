@@ -5280,6 +5280,278 @@ pub fn dqh_dupe_fallback_is_donor_file_struct_candidate(
     !is_par_file && structure_matches
 }
 
+/// Returns true when `HistoryCoordinator::PrepareEdit` should mark a history entry as bad (`action == ea_history_mark_bad && has_history_info && kind == hk_nzb`).
+pub fn dqh_history_coord_should_mark_bad_in_prepare_edit(
+    action: i32,
+    ea_history_mark_bad: i32,
+    has_history_info: bool,
+    kind: i32,
+    hk_nzb: i32,
+) -> bool {
+    action == ea_history_mark_bad && has_history_info && kind == hk_nzb
+}
+
+/// Returns true when `HistoryCoordinator::HistoryRetry` should load partial file state (`file_loaded && status == cf_partial`).
+pub fn dqh_history_coord_should_load_partial_file_state(
+    file_loaded: bool,
+    status: i32,
+    cf_partial: i32,
+) -> bool {
+    file_loaded && status == cf_partial
+}
+
+/// Classifies how `HistoryCoordinator::HistoryRetry` should update partial state for a file with `success_articles > 0`:
+/// `0` = no change, `1` = set `ps_completed`, `2` = warn and set `ps_none`.
+pub fn dqh_history_coord_classify_success_output_state(
+    success_articles: i32,
+    file_exists: bool,
+    reprocess: bool,
+) -> i32 {
+    if success_articles <= 0 {
+        0
+    } else if file_exists {
+        1
+    } else if !reprocess {
+        2
+    } else {
+        0
+    }
+}
+
+/// Selects `final_dir` when non-empty, otherwise `dest_dir` (`DupeCoordinator::FilesOnDisk`).
+pub fn dqh_dupecoord_select_disk_dir<'a>(final_dir: &'a [u8], dest_dir: &'a [u8]) -> &'a [u8] {
+    if !final_dir.is_empty() {
+        final_dir
+    } else {
+        dest_dir
+    }
+}
+
+/// Returns true when `DupeCoordinator::NzbFound` finds an active queued duplicate blocking backup return (`!is_self && delete_status == ds_none && same_name_or_key`).
+pub fn dqh_dupecoord_is_unbacked_active_queue_dupe(
+    is_self: bool,
+    delete_status: i32,
+    ds_none: i32,
+    same_name_or_key: bool,
+) -> bool {
+    !is_self && delete_status == ds_none && same_name_or_key
+}
+
+/// Returns true when `DupeCoordinator::NzbFound` should return early for a URL redownload without same-content match (`!same_content && dupe_hint != dh_none`).
+pub fn dqh_dupecoord_should_skip_url_redownload_non_same_content(
+    same_content: bool,
+    dupe_hint: i32,
+    dh_none: i32,
+) -> bool {
+    !same_content && dupe_hint != dh_none
+}
+
+/// Returns true when `DupeCoordinator::NoBackupReason` should check whether the queued NZB file exists (`(delete_status == ds_dupe || delete_status == ds_copy) && dupe_mode != dm_force`).
+pub fn dqh_dupecoord_should_check_no_backup_file_exists(
+    delete_status: i32,
+    ds_dupe: i32,
+    ds_copy: i32,
+    dupe_mode: i32,
+    dm_force: i32,
+) -> bool {
+    (delete_status == ds_dupe || delete_status == ds_copy) && dupe_mode != dm_force
+}
+
+/// Classifies the `QueueEditor::PrepareList` branch:
+/// `1` = file move with non-zero offset, `2` = group move with non-zero offset or before/after,
+/// `3` = file action (`action < ea_group_move_offset`), `4` = group action.
+pub fn dqh_queue_editor_classify_prepare_list_branch(
+    offset: i32,
+    action: i32,
+    ea_file_move_offset: i32,
+    ea_file_move_top: i32,
+    ea_file_move_bottom: i32,
+    ea_group_move_offset: i32,
+    ea_group_move_top: i32,
+    ea_group_move_bottom: i32,
+    ea_group_move_before: i32,
+    ea_group_move_after: i32,
+) -> i32 {
+    if offset != 0
+        && (action == ea_file_move_offset
+            || action == ea_file_move_top
+            || action == ea_file_move_bottom)
+    {
+        1
+    } else if (offset != 0
+        && (action == ea_group_move_offset
+            || action == ea_group_move_top
+            || action == ea_group_move_bottom))
+        || action == ea_group_move_before
+        || action == ea_group_move_after
+    {
+        2
+    } else if action < ea_group_move_offset {
+        3
+    } else {
+        4
+    }
+}
+
+/// Returns `(is_pause_pars_action, extra_pars_only)` for `QueueEditor::InternEditList`.
+pub fn dqh_queue_editor_is_pause_pars_action(
+    action: i32,
+    ea_file_pause_all_pars: i32,
+    ea_file_pause_extra_pars: i32,
+) -> (bool, bool) {
+    let is_pause = action == ea_file_pause_all_pars || action == ea_file_pause_extra_pars;
+    let extra_only = action == ea_file_pause_extra_pars;
+    (is_pause, extra_only)
+}
+
+/// Returns true when `Scanner::FindArchives` can include a regular file (`is_archive && can_process_file`).
+pub fn dqh_scanner_can_process_archive_entry(is_archive: bool, can_process_file: bool) -> bool {
+    is_archive && can_process_file
+}
+
+/// Returns true when `Scanner::AddArchive` should attach `urlInfo` to the extracted NZB entry (`index == 0 && has_url_info`).
+pub fn dqh_scanner_should_assign_url_info_to_archive_entry(
+    index: usize,
+    has_url_info: bool,
+) -> bool {
+    index == 0 && has_url_info
+}
+
+/// Returns true when `TwinCheckJob::Run` unregister guard should nudge `TwinCheck` (`!stopping && stored`).
+pub fn dqh_twin_check_should_unregister_nudge(stopping: bool, stored: bool) -> bool {
+    !stopping && stored
+}
+
+/// Returns true when `TwinCheck::ServiceWork` should queue a fingerprint job for an item (`(print_empty || listless) && !is_merged && file_exists`).
+pub fn dqh_twin_check_can_queue_fingerprint_job(
+    print_empty: bool,
+    listless: bool,
+    is_merged: bool,
+    file_exists: bool,
+) -> bool {
+    (print_empty || listless) && !is_merged && file_exists
+}
+
+/// Returns true when `TwinCheck::ServiceWork` should queue a sample job for an item (`sampleable && !sampled_now && !is_merged && file_exists`).
+pub fn dqh_twin_check_can_queue_sample_job(
+    sampleable: bool,
+    sampled_now: bool,
+    is_merged: bool,
+    file_exists: bool,
+) -> bool {
+    sampleable && !sampled_now && !is_merged && file_exists
+}
+
+/// Returns true when `TwinCheck::ServiceWork` should look up `Kind` by stored file lists (`!is_primary && is_dupe && by_par2`).
+pub fn dqh_twin_check_should_lookup_kind_by_files(
+    is_primary: bool,
+    is_dupe: bool,
+    by_par2: bool,
+) -> bool {
+    !is_primary && is_dupe && by_par2
+}
+
+/// Classifies how `DirectRenamer` should build a new filename (`1` = `BuildNewParName`, `2` = `BuildNewRegularName`, `0` = none).
+pub fn dqh_direct_renamer_classify_rename_target(
+    is_par_file: bool,
+    need_rename_pars: bool,
+) -> i32 {
+    if is_par_file && need_rename_pars {
+        1
+    } else if !is_par_file {
+        2
+    } else {
+        0
+    }
+}
+
+/// Returns true when `NzbInfo::SetFilename` should auto-populate `m_name` (`(!has_name || !had_filename) && !filename_empty`).
+pub fn dqh_dl_info_should_update_auto_filename_name(
+    has_name: bool,
+    had_filename: bool,
+    filename_empty: bool,
+) -> bool {
+    (!has_name || !had_filename) && !filename_empty
+}
+
+/// Returns true when `NzbInfo::AddMessage` should append the message to disk (`server_mode && nzb_log`).
+pub fn dqh_dl_info_should_append_message_to_disk(server_mode: bool, nzb_log: bool) -> bool {
+    server_mode && nzb_log
+}
+
+/// Classifies how `DupeStreamRepair::BuildRepairJob` should build a repair job:
+/// `0` = skip (`false`), `1` = whole-file hole job (`true`), `2` = compute holes from decoded articles.
+pub fn dqh_stream_repair_classify_build_job_mode(
+    empty_or_no_articles: bool,
+    success_articles: i32,
+    encoded_size: i64,
+    decoded_file_size: i64,
+) -> i32 {
+    if empty_or_no_articles {
+        0
+    } else if success_articles == 0 {
+        if encoded_size <= 0 {
+            0
+        } else {
+            1
+        }
+    } else if decoded_file_size <= 0 {
+        0
+    } else {
+        2
+    }
+}
+
+/// Returns true when `NzbFile::Parse_StartElement` should create an `ArticleInfo` for a `<segment>` (`part_number > 0`).
+pub fn dqh_nzbfile_should_create_segment_article(part_number: i32) -> bool {
+    part_number > 0
+}
+
+/// Returns true when `DupeProbe::ProbeServer` should stop probing early (`!count_all && found_count >= min_alive_samples`).
+pub fn dqh_dupe_probe_should_stop_early_on_found(
+    count_all: bool,
+    found_count: i32,
+    min_alive_samples: i32,
+) -> bool {
+    !count_all && found_count >= min_alive_samples
+}
+
+/// Returns true when `DupeProbe::ProbeServer` should disconnect the connection before freeing (`is_stopped || conn_status == cs_cancelled`).
+pub fn dqh_dupe_probe_should_disconnect_after_probe(
+    is_stopped: bool,
+    conn_status: i32,
+    cs_cancelled: i32,
+) -> bool {
+    is_stopped || conn_status == cs_cancelled
+}
+
+/// Returns true when `UrlCoordinator::Run` should wait on `m_waitCond` (`!has_more_jobs && !is_stopped`).
+pub fn dqh_url_coord_should_wait_on_cond(has_more_jobs: bool, is_stopped: bool) -> bool {
+    !has_more_jobs && !is_stopped
+}
+
+/// Classifies how `ParDamage::FileCompleted` handles a completed file:
+/// `1` = par file (`parFilesDone++`), `2` = undamaged data file, `3` = damaged with decoded size (`ComputeHoles`),
+/// `4` = unarrived whole file (`success_articles == 0`), `5` = articles disagreed on size.
+pub fn dqh_par_damage_classify_completed_file(
+    is_par: bool,
+    failed_plus_missed: i32,
+    decoded_size: i64,
+    success_articles: i32,
+) -> i32 {
+    if is_par {
+        1
+    } else if failed_plus_missed == 0 {
+        2
+    } else if decoded_size > 0 {
+        3
+    } else if success_articles == 0 {
+        4
+    } else {
+        5
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7358,5 +7630,106 @@ mod tests {
         assert!(dqh_dupe_fallback_is_donor_file_struct_candidate(false, true));
         assert!(!dqh_dupe_fallback_is_donor_file_struct_candidate(true, true));
         assert!(!dqh_dupe_fallback_is_donor_file_struct_candidate(false, false));
+        assert!(dqh_history_coord_should_mark_bad_in_prepare_edit(5, 5, true, 1, 1));
+        assert!(!dqh_history_coord_should_mark_bad_in_prepare_edit(4, 5, true, 1, 1));
+        assert!(!dqh_history_coord_should_mark_bad_in_prepare_edit(5, 5, false, 1, 1));
+        assert!(!dqh_history_coord_should_mark_bad_in_prepare_edit(5, 5, true, 2, 1));
+        assert!(dqh_history_coord_should_load_partial_file_state(true, 2, 2));
+        assert!(!dqh_history_coord_should_load_partial_file_state(false, 2, 2));
+        assert!(!dqh_history_coord_should_load_partial_file_state(true, 1, 2));
+        assert_eq!(dqh_history_coord_classify_success_output_state(0, true, false), 0);
+        assert_eq!(dqh_history_coord_classify_success_output_state(5, true, false), 1);
+        assert_eq!(dqh_history_coord_classify_success_output_state(5, false, false), 2);
+        assert_eq!(dqh_history_coord_classify_success_output_state(5, false, true), 0);
+        assert_eq!(dqh_dupecoord_select_disk_dir(b"/final", b"/dest"), b"/final");
+        assert_eq!(dqh_dupecoord_select_disk_dir(b"", b"/dest"), b"/dest");
+        assert!(dqh_dupecoord_is_unbacked_active_queue_dupe(false, 0, 0, true));
+        assert!(!dqh_dupecoord_is_unbacked_active_queue_dupe(true, 0, 0, true));
+        assert!(!dqh_dupecoord_is_unbacked_active_queue_dupe(false, 1, 0, true));
+        assert!(!dqh_dupecoord_is_unbacked_active_queue_dupe(false, 0, 0, false));
+        assert!(dqh_dupecoord_should_skip_url_redownload_non_same_content(false, 2, 0));
+        assert!(!dqh_dupecoord_should_skip_url_redownload_non_same_content(true, 2, 0));
+        assert!(!dqh_dupecoord_should_skip_url_redownload_non_same_content(false, 0, 0));
+        assert!(dqh_dupecoord_should_check_no_backup_file_exists(1, 1, 2, 0, 2));
+        assert!(dqh_dupecoord_should_check_no_backup_file_exists(2, 1, 2, 0, 2));
+        assert!(!dqh_dupecoord_should_check_no_backup_file_exists(0, 1, 2, 0, 2));
+        assert!(!dqh_dupecoord_should_check_no_backup_file_exists(1, 1, 2, 2, 2));
+        assert_eq!(
+            dqh_queue_editor_classify_prepare_list_branch(1, 1, 1, 2, 3, 10, 11, 12, 13, 14),
+            1
+        );
+        assert_eq!(
+            dqh_queue_editor_classify_prepare_list_branch(1, 10, 1, 2, 3, 10, 11, 12, 13, 14),
+            2
+        );
+        assert_eq!(
+            dqh_queue_editor_classify_prepare_list_branch(0, 13, 1, 2, 3, 10, 11, 12, 13, 14),
+            2
+        );
+        assert_eq!(
+            dqh_queue_editor_classify_prepare_list_branch(0, 5, 1, 2, 3, 10, 11, 12, 13, 14),
+            3
+        );
+        assert_eq!(
+            dqh_queue_editor_classify_prepare_list_branch(0, 15, 1, 2, 3, 10, 11, 12, 13, 14),
+            4
+        );
+        assert_eq!(dqh_queue_editor_is_pause_pars_action(7, 7, 8), (true, false));
+        assert_eq!(dqh_queue_editor_is_pause_pars_action(8, 7, 8), (true, true));
+        assert_eq!(dqh_queue_editor_is_pause_pars_action(9, 7, 8), (false, false));
+        assert!(dqh_scanner_can_process_archive_entry(true, true));
+        assert!(!dqh_scanner_can_process_archive_entry(true, false));
+        assert!(!dqh_scanner_can_process_archive_entry(false, true));
+        assert!(dqh_scanner_should_assign_url_info_to_archive_entry(0, true));
+        assert!(!dqh_scanner_should_assign_url_info_to_archive_entry(1, true));
+        assert!(!dqh_scanner_should_assign_url_info_to_archive_entry(0, false));
+        assert!(dqh_twin_check_should_unregister_nudge(false, true));
+        assert!(!dqh_twin_check_should_unregister_nudge(true, true));
+        assert!(!dqh_twin_check_should_unregister_nudge(false, false));
+        assert!(dqh_twin_check_can_queue_fingerprint_job(true, false, false, true));
+        assert!(dqh_twin_check_can_queue_fingerprint_job(false, true, false, true));
+        assert!(!dqh_twin_check_can_queue_fingerprint_job(false, false, false, true));
+        assert!(!dqh_twin_check_can_queue_fingerprint_job(true, false, true, true));
+        assert!(!dqh_twin_check_can_queue_fingerprint_job(true, false, false, false));
+        assert!(dqh_twin_check_can_queue_sample_job(true, false, false, true));
+        assert!(!dqh_twin_check_can_queue_sample_job(false, false, false, true));
+        assert!(!dqh_twin_check_can_queue_sample_job(true, true, false, true));
+        assert!(!dqh_twin_check_can_queue_sample_job(true, false, true, true));
+        assert!(!dqh_twin_check_can_queue_sample_job(true, false, false, false));
+        assert!(dqh_twin_check_should_lookup_kind_by_files(false, true, true));
+        assert!(!dqh_twin_check_should_lookup_kind_by_files(true, true, true));
+        assert!(!dqh_twin_check_should_lookup_kind_by_files(false, false, true));
+        assert!(!dqh_twin_check_should_lookup_kind_by_files(false, true, false));
+        assert_eq!(dqh_direct_renamer_classify_rename_target(true, true), 1);
+        assert_eq!(dqh_direct_renamer_classify_rename_target(true, false), 0);
+        assert_eq!(dqh_direct_renamer_classify_rename_target(false, false), 2);
+        assert!(dqh_dl_info_should_update_auto_filename_name(false, true, false));
+        assert!(dqh_dl_info_should_update_auto_filename_name(true, false, false));
+        assert!(!dqh_dl_info_should_update_auto_filename_name(true, true, false));
+        assert!(!dqh_dl_info_should_update_auto_filename_name(false, false, true));
+        assert!(dqh_dl_info_should_append_message_to_disk(true, true));
+        assert!(!dqh_dl_info_should_append_message_to_disk(true, false));
+        assert!(!dqh_dl_info_should_append_message_to_disk(false, true));
+        assert_eq!(dqh_stream_repair_classify_build_job_mode(true, 0, 100, 100), 0);
+        assert_eq!(dqh_stream_repair_classify_build_job_mode(false, 0, 0, 0), 0);
+        assert_eq!(dqh_stream_repair_classify_build_job_mode(false, 0, 100, 0), 1);
+        assert_eq!(dqh_stream_repair_classify_build_job_mode(false, 5, 100, 0), 0);
+        assert_eq!(dqh_stream_repair_classify_build_job_mode(false, 5, 100, 100), 2);
+        assert!(dqh_nzbfile_should_create_segment_article(1));
+        assert!(!dqh_nzbfile_should_create_segment_article(0));
+        assert!(dqh_dupe_probe_should_stop_early_on_found(false, 2, 2));
+        assert!(!dqh_dupe_probe_should_stop_early_on_found(true, 2, 2));
+        assert!(!dqh_dupe_probe_should_stop_early_on_found(false, 1, 2));
+        assert!(dqh_dupe_probe_should_disconnect_after_probe(true, 0, 2));
+        assert!(dqh_dupe_probe_should_disconnect_after_probe(false, 2, 2));
+        assert!(!dqh_dupe_probe_should_disconnect_after_probe(false, 0, 2));
+        assert!(dqh_url_coord_should_wait_on_cond(false, false));
+        assert!(!dqh_url_coord_should_wait_on_cond(true, false));
+        assert!(!dqh_url_coord_should_wait_on_cond(false, true));
+        assert_eq!(dqh_par_damage_classify_completed_file(true, 1, 100, 5), 1);
+        assert_eq!(dqh_par_damage_classify_completed_file(false, 0, 100, 5), 2);
+        assert_eq!(dqh_par_damage_classify_completed_file(false, 2, 100, 5), 3);
+        assert_eq!(dqh_par_damage_classify_completed_file(false, 2, 0, 0), 4);
+        assert_eq!(dqh_par_damage_classify_completed_file(false, 2, 0, 5), 5);
     }
 }

@@ -331,7 +331,12 @@ bool DupeStreamRepair::BuildRepairJob(FileInfo* fileInfo, const char* diskBasena
 		return false;
 	}
 
-	if (Util::EmptyStr(diskBasename) || fileInfo->GetArticles()->empty())
+	int jobMode = nzbget_rs_dqh_stream_repair_classify_build_job_mode(
+		(Util::EmptyStr(diskBasename) || fileInfo->GetArticles()->empty()) ? 1 : 0,
+		fileInfo->GetSuccessArticles(),
+		fileInfo->GetSize(),
+		fileInfo->GetDecodedFileSize());
+	if (jobMode == 0)
 	{
 		return false;
 	}
@@ -340,12 +345,8 @@ bool DupeStreamRepair::BuildRepairJob(FileInfo* fileInfo, const char* diskBasena
 	// on disk: the whole file is its hole. It can only be recreated from a
 	// donor member identified structurally and proven on the collection's
 	// other files (see StreamRepairController::RepairWholeFile).
-	if (fileInfo->GetSuccessArticles() == 0)
+	if (jobMode == 1)
 	{
-		if (fileInfo->GetSize() <= 0)
-		{
-			return false;
-		}
 		nzbInfo->GetStreamRepairJobs()->emplace_back(fileInfo->GetId(), diskBasename,
 			0, fileInfo->GetFailedSize(), fileInfo->GetMissedSize(),
 			fileInfo->GetFailedArticles() + fileInfo->GetMissedArticles(), fileInfo->GetParFile(),
@@ -356,11 +357,6 @@ bool DupeStreamRepair::BuildRepairJob(FileInfo* fileInfo, const char* diskBasena
 	// Data files qualify regardless of container: identity is decided by
 	// probe byte-compares. Parity is excluded above because partial byte
 	// matches cannot establish that another posting belongs to the PAR set.
-	if (fileInfo->GetDecodedFileSize() <= 0)
-	{
-		return false;
-	}
-
 	StreamRangeList holes = ComputeHoles(fileInfo);
 	if (holes.empty())
 	{

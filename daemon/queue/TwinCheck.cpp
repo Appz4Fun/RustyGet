@@ -167,7 +167,8 @@ void TwinCheckJob::Run()
 			g_checking.erase(job->GetNzbId());
 			g_jobCount--;
 			// the labels from what this job stored, and the next job, at once
-			if (!g_stopping && job->m_stored)
+			if (nzbget_rs_dqh_twin_check_should_unregister_nudge(
+				g_stopping ? 1 : 0, job->m_stored ? 1 : 0) != 0)
 			{
 				TwinCheck::NudgeLocked();
 			}
@@ -682,9 +683,14 @@ void TwinCheck::ServiceWork()
 					nzbget_rs_stq_twin_check_is_listless_from_counts(
 						HasSigs(nzbInfo->GetId(), Identity(nzbInfo).c_str()),
 						Attempts(nzbInfo->GetId()), MaxAttempts) != 0;
-				if ((print.empty() || listless) &&
-					!nzbget_rs_tpr_twin_check_is_merged_queued_filename(nzbInfo->GetQueuedFilename()) &&
-					FileSystem::FileExists(nzbInfo->GetQueuedFilename()))
+				bool isMerged = nzbget_rs_tpr_twin_check_is_merged_queued_filename(
+					nzbInfo->GetQueuedFilename()) != 0;
+				if (nzbget_rs_dqh_twin_check_can_queue_fingerprint_job(
+					print.empty() ? 1 : 0,
+					listless ? 1 : 0,
+					isMerged ? 1 : 0,
+					((print.empty() || listless) && !isMerged &&
+						FileSystem::FileExists(nzbInfo->GetQueuedFilename())) ? 1 : 0) != 0)
 				{
 					// the dupe tool's hints of a twin go first; they prove nothing
 					bool hinted = nzbget_rs_tpr_twin_check_is_job_hinted(
@@ -749,16 +755,24 @@ void TwinCheck::ServiceWork()
 					primaryId.c_str(),
 					&sampledNowInt) != 0;
 				bool sampledNow = sampledNowInt != 0;
-				if (sampleable && !sampledNow &&
-					!nzbget_rs_tpr_twin_check_is_merged_queued_filename(nzbInfo->GetQueuedFilename()) &&
-					FileSystem::FileExists(nzbInfo->GetQueuedFilename()))
+				bool isMerged = nzbget_rs_tpr_twin_check_is_merged_queued_filename(
+					nzbInfo->GetQueuedFilename()) != 0;
+				if (nzbget_rs_dqh_twin_check_can_queue_sample_job(
+					sampleable ? 1 : 0,
+					sampledNow ? 1 : 0,
+					isMerged ? 1 : 0,
+					(sampleable && !sampledNow && !isMerged &&
+						FileSystem::FileExists(nzbInfo->GetQueuedFilename())) ? 1 : 0) != 0)
 				{
 					jobs.push_back({nzbInfo->GetId(), nzbInfo->GetQueuedFilename(), false,
 						primary->GetId(), primary->GetQueuedFilename()});
 				}
 				std::string byFiles;
 				bool listed = false;
-				if (nzbInfo != primary && isDupe(item) && byPar2)
+				if (nzbget_rs_dqh_twin_check_should_lookup_kind_by_files(
+					nzbInfo == primary ? 1 : 0,
+					isDupe(item) ? 1 : 0,
+					byPar2 ? 1 : 0) != 0)
 				{
 					byFiles = Kind(primary->GetId(), Identity(primary).c_str(), nzbInfo->GetId(),
 						Identity(nzbInfo).c_str());

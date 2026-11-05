@@ -54,7 +54,8 @@ bool DupeCoordinator::SameNameOrKey(const char* name1, const char* dupeKey1,
 */
 bool DupeCoordinator::FilesOnDisk(NzbInfo* nzbInfo)
 {
-	const char* dir = !Util::EmptyStr(nzbInfo->GetFinalDir()) ? nzbInfo->GetFinalDir() : nzbInfo->GetDestDir();
+	const char* dir = nzbget_rs_dqh_dupecoord_select_disk_dir(
+		nzbInfo->GetFinalDir(), nzbInfo->GetDestDir());
 	if (Util::EmptyStr(dir) || !FileSystem::DirectoryExists(dir))
 	{
 		return false;
@@ -350,13 +351,17 @@ void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 			returnBackup = !std::any_of(downloadQueue->GetQueue()->begin(), downloadQueue->GetQueue()->end(),
 				[nzbInfo](std::unique_ptr<NzbInfo>& queued)
 				{
-					return queued.get() != nzbInfo && queued->GetDeleteStatus() == NzbInfo::dsNone &&
-						SameNameOrKey(queued->GetName(), queued->GetDupeKey(), nzbInfo->GetName(), nzbInfo->GetDupeKey());
+					return nzbget_rs_dqh_dupecoord_is_unbacked_active_queue_dupe(
+						queued.get() == nzbInfo ? 1 : 0,
+						(int)queued->GetDeleteStatus(),
+						(int)NzbInfo::dsNone,
+						SameNameOrKey(queued->GetName(), queued->GetDupeKey(), nzbInfo->GetName(), nzbInfo->GetDupeKey()) ? 1 : 0) != 0;
 				});
 		}
 	}
 
-	if (!sameContent && nzbInfo->GetDupeHint() != NzbInfo::dhNone)
+	if (nzbget_rs_dqh_dupecoord_should_skip_url_redownload_non_same_content(
+		sameContent ? 1 : 0, (int)nzbInfo->GetDupeHint(), (int)NzbInfo::dhNone) != 0)
 	{
 		// dupe check when "download again" URLs: checking same content only
 		return;
@@ -573,8 +578,12 @@ std::string DupeCoordinator::NoBackupReason(DownloadQueue* downloadQueue, NzbInf
 		NzbInfo* item = historyInfo->GetNzbInfo();
 		total++;
 		int alive = AlivePermille(item);
-		bool fileExists = (item->GetDeleteStatus() == NzbInfo::dsDupe || item->GetDeleteStatus() == NzbInfo::dsCopy) &&
-			item->GetDupeMode() != dmForce ? FileSystem::FileExists(item->GetQueuedFilename()) : false;
+		bool fileExists = nzbget_rs_dqh_dupecoord_should_check_no_backup_file_exists(
+			(int)item->GetDeleteStatus(),
+			(int)NzbInfo::dsDupe,
+			(int)NzbInfo::dsCopy,
+			(int)item->GetDupeMode(),
+			(int)dmForce) != 0 ? FileSystem::FileExists(item->GetQueuedFilename()) : false;
 		int bucket = nzbget_rs_dupecoord_classify_no_backup_item(
 			(int)item->GetDeleteStatus(), (int)item->GetDupeMode(), fileExists ? 1 : 0,
 			item->CalcHealth(), item->CalcCriticalHealth(true), (int)item->GetMarkStatus(), alive);

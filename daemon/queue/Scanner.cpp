@@ -198,7 +198,10 @@ std::vector<fs::path> Scanner::FindArchives(const fs::path& dir, bool checkStat)
 
 		// like an nzb, an archive is taken once it stopped changing: one
 		// still being copied in failed to extract and was moved aside for good
-		if (Unpack::IsArchive(path) && CanProcessFile(fs::u8string(path).c_str(), checkStat))
+		bool isArchive = Unpack::IsArchive(path);
+		if (nzbget_rs_dqh_scanner_can_process_archive_entry(
+			isArchive ? 1 : 0,
+			isArchive && CanProcessFile(fs::u8string(path).c_str(), checkStat) ? 1 : 0) != 0)
 		{
 			archives.push_back(path);
 		}
@@ -856,7 +859,9 @@ Scanner::EAddStatus Scanner::AddArchive(const char* filename, const char* catego
 			m_queueList.emplace_back(
 				nzbFilePathStr.c_str(), fileName.c_str(), useCategory,
 				autoCategory, priority, dupeKey, dupeScore, dupeMode,
-				parameters, addTop, addPaused, index == 0 ? urlInfo : nullptr,
+				parameters, addTop, addPaused,
+				nzbget_rs_dqh_scanner_should_assign_url_info_to_archive_entry(
+					index, urlInfo != nullptr ? 1 : 0) != 0 ? urlInfo : nullptr,
 				&statuses[index], nullptr);
 			index++;
 		}

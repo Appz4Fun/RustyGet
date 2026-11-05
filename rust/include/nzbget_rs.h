@@ -6459,6 +6459,60 @@ int nzbget_rs_dqh_dupe_fallback_can_query_content_match(
     int donor_nzb_id, int own_identity_empty, int donor_print_empty);
 int nzbget_rs_dqh_dupe_fallback_is_donor_file_struct_candidate(
     int is_par_file, int structure_matches);
+int nzbget_rs_dqh_history_coord_should_mark_bad_in_prepare_edit(
+    int action, int ea_history_mark_bad, int has_history_info, int kind,
+    int hk_nzb);
+int nzbget_rs_dqh_history_coord_should_load_partial_file_state(
+    int file_loaded, int status, int cf_partial);
+int nzbget_rs_dqh_history_coord_classify_success_output_state(
+    int success_articles, int file_exists, int reprocess);
+const char* nzbget_rs_dqh_dupecoord_select_disk_dir(
+    const char* final_dir, const char* dest_dir);
+int nzbget_rs_dqh_dupecoord_is_unbacked_active_queue_dupe(
+    int is_self, int delete_status, int ds_none, int same_name_or_key);
+int nzbget_rs_dqh_dupecoord_should_skip_url_redownload_non_same_content(
+    int same_content, int dupe_hint, int dh_none);
+int nzbget_rs_dqh_dupecoord_should_check_no_backup_file_exists(
+    int delete_status, int ds_dupe, int ds_copy, int dupe_mode, int dm_force);
+int nzbget_rs_dqh_queue_editor_classify_prepare_list_branch(
+    int offset, int action, int ea_file_move_offset, int ea_file_move_top,
+    int ea_file_move_bottom, int ea_group_move_offset, int ea_group_move_top,
+    int ea_group_move_bottom, int ea_group_move_before,
+    int ea_group_move_after);
+int nzbget_rs_dqh_queue_editor_is_pause_pars_action(
+    int action, int ea_file_pause_all_pars, int ea_file_pause_extra_pars,
+    int* out_extra_pars_only);
+int nzbget_rs_dqh_scanner_can_process_archive_entry(
+    int is_archive, int can_process_file);
+int nzbget_rs_dqh_scanner_should_assign_url_info_to_archive_entry(
+    size_t index, int has_url_info);
+int nzbget_rs_dqh_twin_check_should_unregister_nudge(
+    int stopping, int stored);
+int nzbget_rs_dqh_twin_check_can_queue_fingerprint_job(
+    int print_empty, int listless, int is_merged, int file_exists);
+int nzbget_rs_dqh_twin_check_can_queue_sample_job(
+    int sampleable, int sampled_now, int is_merged, int file_exists);
+int nzbget_rs_dqh_twin_check_should_lookup_kind_by_files(
+    int is_primary, int is_dupe, int by_par2);
+int nzbget_rs_dqh_direct_renamer_classify_rename_target(
+    int is_par_file, int need_rename_pars);
+int nzbget_rs_dqh_dl_info_should_update_auto_filename_name(
+    int has_name, int had_filename, int filename_empty);
+int nzbget_rs_dqh_dl_info_should_append_message_to_disk(
+    int server_mode, int nzb_log);
+int nzbget_rs_dqh_stream_repair_classify_build_job_mode(
+    int empty_or_no_articles, int success_articles, int64_t encoded_size,
+    int64_t decoded_file_size);
+int nzbget_rs_dqh_nzbfile_should_create_segment_article(int part_number);
+int nzbget_rs_dqh_dupe_probe_should_stop_early_on_found(
+    int count_all, int found_count, int min_alive_samples);
+int nzbget_rs_dqh_dupe_probe_should_disconnect_after_probe(
+    int is_stopped, int conn_status, int cs_cancelled);
+int nzbget_rs_dqh_url_coord_should_wait_on_cond(
+    int has_more_jobs, int is_stopped);
+int nzbget_rs_dqh_par_damage_classify_completed_file(
+    int is_par, int failed_plus_missed, int64_t decoded_size,
+    int success_articles);
 
 #include "nzbget_tls_cipher.h"
 

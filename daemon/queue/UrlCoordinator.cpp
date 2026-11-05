@@ -122,7 +122,8 @@ void UrlCoordinator::Run()
 			lastReset = Util::CurrentTime();
 		}
 
-		if (!m_hasMoreJobs && !IsStopped())
+		if (nzbget_rs_dqh_url_coord_should_wait_on_cond(
+			m_hasMoreJobs ? 1 : 0, IsStopped() ? 1 : 0) != 0)
 		{
 			std::unique_lock<std::mutex> lk(m_waitMutex);
 			m_waitCond.wait(lk, [&] { return m_hasMoreJobs || IsStopped(); });

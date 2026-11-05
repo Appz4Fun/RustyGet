@@ -174,7 +174,10 @@ void NzbInfo::SetFilename(const char* filename)
 	bool hadFilename = !Util::EmptyStr(m_filename);
 	m_filename = filename;
 
-	if ((!m_name || !hadFilename) && !Util::EmptyStr(filename))
+	if (nzbget_rs_dqh_dl_info_should_update_auto_filename_name(
+		static_cast<const char*>(m_name) != nullptr ? 1 : 0,
+		hadFilename ? 1 : 0,
+		Util::EmptyStr(filename) ? 1 : 0) != 0)
 	{
 		CString nzbNicename = MakeNiceNzbName(m_filename, true);
 		if (nzbNicename.Empty())
@@ -372,7 +375,9 @@ void NzbInfo::AddMessage(Message::EKind kind, const char * text, bool print)
 
 	m_messages.emplace_back(++m_idMessageGen, kind, Util::CurrentTime(), text);
 
-	if (g_Options->GetServerMode() && g_Options->GetNzbLog())
+	if (nzbget_rs_dqh_dl_info_should_append_message_to_disk(
+		g_Options->GetServerMode() ? 1 : 0,
+		g_Options->GetNzbLog() ? 1 : 0) != 0)
 	{
 		g_DiskState->AppendNzbMessage(m_id, kind, text);
 		m_messageCount.fetch_add(1, std::memory_order_relaxed);

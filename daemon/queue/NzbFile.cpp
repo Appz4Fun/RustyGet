@@ -444,7 +444,7 @@ void NzbFile::Parse_StartElement(const char *name, const char **atts)
 			}
 		}
 
-		if (partNumber > 0)
+		if (nzbget_rs_dqh_nzbfile_should_create_segment_article(partNumber) != 0)
 		{
 			// new segment, add it!
 			std::unique_ptr<ArticleInfo> article = std::make_unique<ArticleInfo>();

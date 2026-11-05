@@ -340,9 +340,11 @@ bool DupeProbe::ProbeServer(int serverId, std::set<int>& probed, ServerResult& r
 					break;
 			}
 
-			if (!m_countAll &&
+			if (nzbget_rs_dqh_dupe_probe_should_stop_early_on_found(
+				m_countAll ? 1 : 0,
 				nzbget_rs_tpr_dupe_probe_count_found_samples(
-					reinterpret_cast<const uint8_t*>(m_found.data()), m_found.size()) >= MinAliveSamples)
+					reinterpret_cast<const uint8_t*>(m_found.data()), m_found.size()),
+				MinAliveSamples) != 0)
 			{
 				break;	// alive: no need to ask further
 			}
@@ -354,7 +356,10 @@ bool DupeProbe::ProbeServer(int serverId, std::set<int>& probed, ServerResult& r
 		Guard guard(g_probeMutex);
 		m_connection = nullptr;
 	}
-	if (IsStopped() || connection->GetStatus() == Connection::csCancelled)
+	if (nzbget_rs_dqh_dupe_probe_should_disconnect_after_probe(
+		IsStopped() ? 1 : 0,
+		(int)connection->GetStatus(),
+		(int)Connection::csCancelled) != 0)
 	{
 		connection->Disconnect();
 	}

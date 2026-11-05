@@ -343,15 +343,17 @@ void HistoryCoordinator::PrepareEdit(DownloadQueue* downloadQueue, IdList* idLis
 {
 	// First pass: when marking multiple items - mark them bad without performing the mark-logic,
 	// this will later (on second step) avoid moving other items to download queue, if they are marked bad too.
-	if (action == DownloadQueue::eaHistoryMarkBad)
+	for (int id : *idList)
 	{
-		for (int id : *idList)
+		HistoryInfo* historyInfo = downloadQueue->GetHistory()->Find(id);
+		if (nzbget_rs_dqh_history_coord_should_mark_bad_in_prepare_edit(
+			(int)action,
+			(int)DownloadQueue::eaHistoryMarkBad,
+			historyInfo != nullptr ? 1 : 0,
+			historyInfo ? (int)historyInfo->GetKind() : 0,
+			(int)HistoryInfo::hkNzb) != 0)
 		{
-			HistoryInfo* historyInfo = downloadQueue->GetHistory()->Find(id);
-			if (historyInfo && historyInfo->GetKind() == HistoryInfo::hkNzb)
-			{
-				historyInfo->GetNzbInfo()->SetMarkStatus(NzbInfo::ksBad);
-			}
+			historyInfo->GetNzbInfo()->SetMarkStatus(NzbInfo::ksBad);
 		}
 	}
 }
@@ -784,8 +786,10 @@ void HistoryCoordinator::HistoryRetry(DownloadQueue* downloadQueue, HistoryList:
 			std::unique_ptr<FileInfo> fileInfo = std::make_unique<FileInfo>();
 			fileInfo->SetId(completedFile.GetId());
 			bool fileLoaded = g_DiskState->LoadFile(fileInfo.get(), true, true);
-			bool stateLoaded = fileLoaded &&
-				completedFile.GetStatus() == CompletedFile::cfPartial &&
+			bool stateLoaded = nzbget_rs_dqh_history_coord_should_load_partial_file_state(
+				fileLoaded ? 1 : 0,
+				(int)completedFile.GetStatus(),
+				(int)CompletedFile::cfPartial) != 0 &&
 				g_DiskState->LoadFileState(fileInfo.get(), g_ServerPool->GetServers(), true);
 			if (fileLoaded &&
 				nzbget_rs_hsr_history_coord_eval_requeue_loaded_file(
@@ -823,17 +827,18 @@ void HistoryCoordinator::HistoryRetry(DownloadQueue* downloadQueue, HistoryList:
 					FileSystem::DeleteFile(outputFilename);
 				}
 
-				if (fileInfo->GetSuccessArticles() > 0)
+				int outStateAct = nzbget_rs_dqh_history_coord_classify_success_output_state(
+					fileInfo->GetSuccessArticles(),
+					fileInfo->GetSuccessArticles() > 0 && FileSystem::FileExists(outputFilename) ? 1 : 0,
+					reprocess ? 1 : 0);
+				if (outStateAct == 1)
 				{
-					if (FileSystem::FileExists(outputFilename))
-					{
-						fileInfo->SetPartialState(FileInfo::psCompleted);
-					}
-					else if (!reprocess)
-					{
-						nzbInfo->PrintMessage(Message::mkWarning, "File %s could not be found on disk, downloading again", fileInfo->GetFilename());
-						fileInfo->SetPartialState(FileInfo::psNone);
-					}
+					fileInfo->SetPartialState(FileInfo::psCompleted);
+				}
+				else if (outStateAct == 2)
+				{
+					nzbInfo->PrintMessage(Message::mkWarning, "File %s could not be found on disk, downloading again", fileInfo->GetFilename());
+					fileInfo->SetPartialState(FileInfo::psNone);
 				}
 
 				// A partial file may contain only entries missing from the NZB.

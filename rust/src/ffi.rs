@@ -39296,6 +39296,378 @@ pub extern "C" fn nzbget_rs_dqh_dupe_fallback_is_donor_file_struct_candidate(
     )
 }
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_history_coord_should_mark_bad_in_prepare_edit(
+    action: c_int,
+    ea_history_mark_bad: c_int,
+    has_history_info: c_int,
+    kind: c_int,
+    hk_nzb: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_history_coord_should_mark_bad_in_prepare_edit(
+            action,
+            ea_history_mark_bad,
+            has_history_info != 0,
+            kind,
+            hk_nzb,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_history_coord_should_load_partial_file_state(
+    file_loaded: c_int,
+    status: c_int,
+    cf_partial: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_history_coord_should_load_partial_file_state(
+            file_loaded != 0,
+            status,
+            cf_partial,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_history_coord_classify_success_output_state(
+    success_articles: c_int,
+    file_exists: c_int,
+    reprocess: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_history_coord_classify_success_output_state(
+        success_articles,
+        file_exists != 0,
+        reprocess != 0,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_dupecoord_select_disk_dir(
+    final_dir: *const c_char,
+    dest_dir: *const c_char,
+) -> *const c_char {
+    let fin = if final_dir.is_null() {
+        b"" as &[u8]
+    } else {
+        CStr::from_ptr(final_dir).to_bytes()
+    };
+    let dst = if dest_dir.is_null() {
+        b"" as &[u8]
+    } else {
+        CStr::from_ptr(dest_dir).to_bytes()
+    };
+    let chosen = crate::dupequeuehealth::dqh_dupecoord_select_disk_dir(fin, dst);
+    if !fin.is_empty() && std::ptr::eq(chosen.as_ptr(), fin.as_ptr()) {
+        final_dir
+    } else if !dest_dir.is_null() {
+        dest_dir
+    } else {
+        b"\0".as_ptr() as *const c_char
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupecoord_is_unbacked_active_queue_dupe(
+    is_self: c_int,
+    delete_status: c_int,
+    ds_none: c_int,
+    same_name_or_key: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_dupecoord_is_unbacked_active_queue_dupe(
+            is_self != 0,
+            delete_status,
+            ds_none,
+            same_name_or_key != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupecoord_should_skip_url_redownload_non_same_content(
+    same_content: c_int,
+    dupe_hint: c_int,
+    dh_none: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_dupecoord_should_skip_url_redownload_non_same_content(
+            same_content != 0,
+            dupe_hint,
+            dh_none,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupecoord_should_check_no_backup_file_exists(
+    delete_status: c_int,
+    ds_dupe: c_int,
+    ds_copy: c_int,
+    dupe_mode: c_int,
+    dm_force: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_dupecoord_should_check_no_backup_file_exists(
+            delete_status,
+            ds_dupe,
+            ds_copy,
+            dupe_mode,
+            dm_force,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_queue_editor_classify_prepare_list_branch(
+    offset: c_int,
+    action: c_int,
+    ea_file_move_offset: c_int,
+    ea_file_move_top: c_int,
+    ea_file_move_bottom: c_int,
+    ea_group_move_offset: c_int,
+    ea_group_move_top: c_int,
+    ea_group_move_bottom: c_int,
+    ea_group_move_before: c_int,
+    ea_group_move_after: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_queue_editor_classify_prepare_list_branch(
+        offset,
+        action,
+        ea_file_move_offset,
+        ea_file_move_top,
+        ea_file_move_bottom,
+        ea_group_move_offset,
+        ea_group_move_top,
+        ea_group_move_bottom,
+        ea_group_move_before,
+        ea_group_move_after,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_queue_editor_is_pause_pars_action(
+    action: c_int,
+    ea_file_pause_all_pars: c_int,
+    ea_file_pause_extra_pars: c_int,
+    out_extra_pars_only: *mut c_int,
+) -> c_int {
+    let (is_pause, extra_only) = crate::dupequeuehealth::dqh_queue_editor_is_pause_pars_action(
+        action,
+        ea_file_pause_all_pars,
+        ea_file_pause_extra_pars,
+    );
+    if !out_extra_pars_only.is_null() {
+        *out_extra_pars_only = i32::from(extra_only);
+    }
+    i32::from(is_pause)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_scanner_can_process_archive_entry(
+    is_archive: c_int,
+    can_process_file: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_scanner_can_process_archive_entry(
+            is_archive != 0,
+            can_process_file != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_scanner_should_assign_url_info_to_archive_entry(
+    index: usize,
+    has_url_info: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_scanner_should_assign_url_info_to_archive_entry(
+            index,
+            has_url_info != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_twin_check_should_unregister_nudge(
+    stopping: c_int,
+    stored: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_twin_check_should_unregister_nudge(
+            stopping != 0,
+            stored != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_twin_check_can_queue_fingerprint_job(
+    print_empty: c_int,
+    listless: c_int,
+    is_merged: c_int,
+    file_exists: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_twin_check_can_queue_fingerprint_job(
+            print_empty != 0,
+            listless != 0,
+            is_merged != 0,
+            file_exists != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_twin_check_can_queue_sample_job(
+    sampleable: c_int,
+    sampled_now: c_int,
+    is_merged: c_int,
+    file_exists: c_int,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_twin_check_can_queue_sample_job(
+        sampleable != 0,
+        sampled_now != 0,
+        is_merged != 0,
+        file_exists != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_twin_check_should_lookup_kind_by_files(
+    is_primary: c_int,
+    is_dupe: c_int,
+    by_par2: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_twin_check_should_lookup_kind_by_files(
+            is_primary != 0,
+            is_dupe != 0,
+            by_par2 != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_direct_renamer_classify_rename_target(
+    is_par_file: c_int,
+    need_rename_pars: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_direct_renamer_classify_rename_target(
+        is_par_file != 0,
+        need_rename_pars != 0,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dl_info_should_update_auto_filename_name(
+    has_name: c_int,
+    had_filename: c_int,
+    filename_empty: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_dl_info_should_update_auto_filename_name(
+            has_name != 0,
+            had_filename != 0,
+            filename_empty != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dl_info_should_append_message_to_disk(
+    server_mode: c_int,
+    nzb_log: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_dl_info_should_append_message_to_disk(
+            server_mode != 0,
+            nzb_log != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_stream_repair_classify_build_job_mode(
+    empty_or_no_articles: c_int,
+    success_articles: c_int,
+    encoded_size: i64,
+    decoded_file_size: i64,
+) -> c_int {
+    crate::dupequeuehealth::dqh_stream_repair_classify_build_job_mode(
+        empty_or_no_articles != 0,
+        success_articles,
+        encoded_size,
+        decoded_file_size,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_nzbfile_should_create_segment_article(
+    part_number: c_int,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_nzbfile_should_create_segment_article(part_number))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupe_probe_should_stop_early_on_found(
+    count_all: c_int,
+    found_count: c_int,
+    min_alive_samples: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_dupe_probe_should_stop_early_on_found(
+            count_all != 0,
+            found_count,
+            min_alive_samples,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupe_probe_should_disconnect_after_probe(
+    is_stopped: c_int,
+    conn_status: c_int,
+    cs_cancelled: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_dupe_probe_should_disconnect_after_probe(
+            is_stopped != 0,
+            conn_status,
+            cs_cancelled,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_url_coord_should_wait_on_cond(
+    has_more_jobs: c_int,
+    is_stopped: c_int,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_url_coord_should_wait_on_cond(
+        has_more_jobs != 0,
+        is_stopped != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_par_damage_classify_completed_file(
+    is_par: c_int,
+    failed_plus_missed: c_int,
+    decoded_size: i64,
+    success_articles: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_par_damage_classify_completed_file(
+        is_par != 0,
+        failed_plus_missed,
+        decoded_size,
+        success_articles,
+    )
+}
+
+
 
 
 

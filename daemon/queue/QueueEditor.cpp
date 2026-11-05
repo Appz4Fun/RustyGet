@@ -299,18 +299,22 @@ bool QueueEditor::InternEditList(ItemList* itemList,
 		PrepareList(itemList, idList, action, offset);
 	}
 
+	int extraParsOnlyInt = 0;
+	if (nzbget_rs_dqh_queue_editor_is_pause_pars_action(
+		(int)action,
+		(int)DownloadQueue::eaFilePauseAllPars,
+		(int)DownloadQueue::eaFilePauseExtraPars,
+		&extraParsOnlyInt) != 0)
+	{
+		// PauseParsInGroups takes the items off the list: the result is
+		// whether there were any (an empty list answered false after pausing)
+		bool any = !itemList->empty();
+		PauseParsInGroups(itemList, extraParsOnlyInt != 0);
+		return any;
+	}
+
 	switch (action)
 	{
-		case DownloadQueue::eaFilePauseAllPars:
-		case DownloadQueue::eaFilePauseExtraPars:
-		{
-			// PauseParsInGroups takes the items off the list: the result is
-			// whether there were any (an empty list answered false after pausing)
-			bool any = !itemList->empty();
-			PauseParsInGroups(itemList, action == DownloadQueue::eaFilePauseExtraPars);
-			return any;
-		}
-
 		case DownloadQueue::eaGroupMerge:
 			return MergeGroups(itemList);
 
@@ -429,8 +433,18 @@ void QueueEditor::PrepareList(ItemList* itemList, IdList* idList,
 		MAX_ID, offset);
 
 	itemList->reserve(idList->size());
-	if ((offset != 0) &&
-		(action == DownloadQueue::eaFileMoveOffset || action == DownloadQueue::eaFileMoveTop || action == DownloadQueue::eaFileMoveBottom))
+	int prepBranch = nzbget_rs_dqh_queue_editor_classify_prepare_list_branch(
+		offset,
+		(int)action,
+		(int)DownloadQueue::eaFileMoveOffset,
+		(int)DownloadQueue::eaFileMoveTop,
+		(int)DownloadQueue::eaFileMoveBottom,
+		(int)DownloadQueue::eaGroupMoveOffset,
+		(int)DownloadQueue::eaGroupMoveTop,
+		(int)DownloadQueue::eaGroupMoveBottom,
+		(int)DownloadQueue::eaGroupMoveBefore,
+		(int)DownloadQueue::eaGroupMoveAfter);
+	if (prepBranch == 1)
 	{
 		// add IDs to list in order they currently have in download queue
 		for (NzbInfo* nzbInfo : m_downloadQueue->GetQueue())
@@ -453,9 +467,7 @@ void QueueEditor::PrepareList(ItemList* itemList, IdList* idList,
 			}
 		}
 	}
-	else if (((offset != 0) &&
-		(action == DownloadQueue::eaGroupMoveOffset || action == DownloadQueue::eaGroupMoveTop || action == DownloadQueue::eaGroupMoveBottom)) ||
-		action == DownloadQueue::eaGroupMoveBefore || action == DownloadQueue::eaGroupMoveAfter)
+	else if (prepBranch == 2)
 	{
 		// add IDs to list in order they currently have in download queue
 		int nrEntries = (int)m_downloadQueue->GetQueue()->size();
@@ -475,7 +487,7 @@ void QueueEditor::PrepareList(ItemList* itemList, IdList* idList,
 			}
 		}
 	}
-	else if (action < DownloadQueue::eaGroupMoveOffset)
+	else if (prepBranch == 3)
 	{
 		// check ID range
 		int maxId = 0;

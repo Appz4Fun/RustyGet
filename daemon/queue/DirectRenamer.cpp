@@ -452,11 +452,13 @@ int DirectRenamer::RenameFilesInProgress(NzbInfo* nzbInfo, FileHashList* parHash
 	for (FileInfo* fileInfo : nzbInfo->GetFileList())
 	{
 		std::string newName;
-		if (fileInfo->GetParFile() && needRenamePars)
+		int renameTarget = nzbget_rs_dqh_direct_renamer_classify_rename_target(
+			fileInfo->GetParFile() ? 1 : 0, needRenamePars ? 1 : 0);
+		if (renameTarget == 1)
 		{
 			newName = BuildNewParName(fileInfo->GetFilename(), nzbInfo->GetDestDir(), fileInfo->GetParSetId(), vol);
 		}
-		else if (!fileInfo->GetParFile())
+		else if (renameTarget == 2)
 		{
 			newName = BuildNewRegularName(fileInfo->GetFilename(), parHashes, fileInfo->GetHash16k());
 		}
@@ -549,11 +551,13 @@ int DirectRenamer::RenameCompletedFiles(NzbInfo* nzbInfo, FileHashList* parHashe
 	for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
 	{
 		std::string newName;
-		if (completedFile.GetParFile() && needRenamePars)
+		int renameTarget = nzbget_rs_dqh_direct_renamer_classify_rename_target(
+			completedFile.GetParFile() ? 1 : 0, needRenamePars ? 1 : 0);
+		if (renameTarget == 1)
 		{
 			newName = BuildNewParName(completedFile.GetFilename(), nzbInfo->GetDestDir(), completedFile.GetParSetId(), vol);
 		}
-		else if (!completedFile.GetParFile())
+		else if (renameTarget == 2)
 		{
 			newName = BuildNewRegularName(completedFile.GetFilename(), parHashes, completedFile.GetHash16k());
 		}

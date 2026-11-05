@@ -55,36 +55,36 @@ std::map<int, State> g_states;
 void ParDamage::FileCompleted(NzbInfo* nzbInfo, FileInfo* fileInfo, const std::string& filename)
 {
 	State& state = g_states[nzbInfo->GetId()];
-	if (fileInfo->GetParFile() || DupeArticleFallback::IsParFile(fileInfo))
+	int64 decodedSize = fileInfo->GetDecodedFileSize();
+	int fileClass = nzbget_rs_dqh_par_damage_classify_completed_file(
+		(fileInfo->GetParFile() || DupeArticleFallback::IsParFile(fileInfo)) ? 1 : 0,
+		fileInfo->GetFailedArticles() + fileInfo->GetMissedArticles(),
+		decodedSize,
+		fileInfo->GetSuccessArticles());
+	if (fileClass == 1)
 	{
 		state.parFilesDone++;
 		return;
 	}
 
 	state.doneBytes += fileInfo->GetSize();
-	if (fileInfo->GetFailedArticles() + fileInfo->GetMissedArticles() == 0)
+	if (fileClass == 2 || fileClass == 5)
 	{
 		return;
 	}
 
 	FileDamage damage;
 	damage.name = FileSystem::BaseFileName(filename.c_str());
-	int64 decodedSize = fileInfo->GetDecodedFileSize();
-	if (decodedSize > 0)
+	if (fileClass == 3)
 	{
 		// the bytes no arrived article covers: exact (borrowed articles count)
 		damage.size = decodedSize;
 		damage.holes = DupeStreamRepair::ComputeHoles(fileInfo);
 	}
-	else if (fileInfo->GetSuccessArticles() == 0)
+	else
 	{
 		// nothing arrived: the whole file (its length comes from par2 if named there)
 		damage.holes = { { 0, nzbget_rs_dcf_par_damage_estimate_unarrived_decoded_size(fileInfo->GetSize()) } };
-	}
-	else
-	{
-		// articles disagreed on the file's size: no reliable picture
-		return;
 	}
 
 	if (!damage.holes.empty())

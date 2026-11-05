@@ -38,7 +38,7 @@ void UrlDownloader::ProcessHeader(const char* line)
 	WebDownloader::ProcessHeader(line);
 
 	// rust/src/urlcoord.rs; most headers aren't X-DNZB ones
-	if (strncmp(line, "X-DNZB-", 7))
+	if (nzbget_rs_dqh_url_dl_has_dnzb_prefix(line) == 0)
 	{
 		return;
 	}

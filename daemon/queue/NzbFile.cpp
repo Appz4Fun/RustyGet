@@ -526,11 +526,11 @@ void NzbFile::Parse_EndElement(const char *name)
 	{
 		m_category = m_tagContent;
 	}
-	else if (!strcmp("meta", name) && m_hasName)
+	else if (elemKind == 4 && m_hasName)
 	{
 		m_metaName = m_tagContent;
 	}
-	else if (!strcmp("meta", name) && m_hasTitle)
+	else if (elemKind == 4 && m_hasTitle)
 	{
 		m_metaTitle = m_tagContent;
 	}

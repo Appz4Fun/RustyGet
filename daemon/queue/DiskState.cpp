@@ -648,12 +648,7 @@ void DiskState::ConvertLegacyFileStates(Servers* servers)
 	DirBrowser dir(g_Options->GetQueueDir());
 	while (const char* filename = dir.Next())
 	{
-		const char* end = filename;
-		while (*end >= '0' && *end <= '9')
-		{
-			end++;
-		}
-		if (end == filename || (*end && strcmp(end, "s") && strcmp(end, "c")))
+		if (nzbget_rs_dqh_diskstate_is_candidate_queue_file_name(filename) == 0)
 		{
 			continue;
 		}
@@ -1469,12 +1464,11 @@ bool DiskState::LoadNzbInfo(NzbInfo* nzbInfo, Servers* servers, StateDiskFile& i
 	{
 		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
 
-		char* value = strchr(buf, '=');
-		if (value)
+		size_t eqPos = 0;
+		if (nzbget_rs_dqh_diskstate_find_char_pos(buf, '=', &eqPos) != 0)
 		{
-			*value = '\0';
-			value++;
-			nzbInfo->GetParameters()->SetParameter(buf, value);
+			buf[eqPos] = '\0';
+			nzbInfo->GetParameters()->SetParameter(buf, buf + eqPos + 1);
 		}
 	}
 
@@ -1485,10 +1479,10 @@ bool DiskState::LoadNzbInfo(NzbInfo* nzbInfo, Servers* servers, StateDiskFile& i
 	{
 		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
 
-		char* scriptName = strchr(buf, ',');
-		if (scriptName)
+		size_t commaPos = 0;
+		if (nzbget_rs_dqh_diskstate_find_char_pos(buf, ',', &commaPos) != 0)
 		{
-			scriptName++;
+			const char* scriptName = buf + commaPos + 1;
 			int status = nzbget_rs_dad_diskstate_normalize_script_status(atoi(buf), formatVersion);
 			nzbInfo->GetScriptStatuses()->emplace_back(scriptName, (ScriptStatus::EStatus)status);
 		}

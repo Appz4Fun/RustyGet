@@ -96,11 +96,11 @@ Status ShellOverrideValidator::Validate() const
 	Tokenizer tok(pathStr.data(), ",;");
 	while (const char* shellover = tok.Next())
 	{
-		const char* shellcmd = strchr(shellover, '=');
-		if (shellcmd)
+		size_t eqPos = 0;
+		if (nzbget_rs_dqh_diskstate_find_char_pos(shellover, '=', &eqPos) != 0)
 		{
-			std::string cmd(shellover, static_cast<size_t>(shellcmd - shellover));
-			const char* actualCmd = shellcmd + 1;
+			std::string cmd(shellover, eqPos);
+			const char* actualCmd = shellover + eqPos + 1;
 			const auto exists = File::Exists(actualCmd);
 			if (!exists.IsOk())
 			{

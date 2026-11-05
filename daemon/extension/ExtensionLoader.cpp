@@ -171,12 +171,10 @@ namespace ExtensionLoader
 
 		void BuildDisplayName(Extension::Script& script)
 		{
-			BString<1024> shortName = script.GetName();
-			if (char* ext = strrchr(shortName, '.')) *ext = '\0'; // strip file extension
-
-			const char* displayName = FileSystem::BaseFileName(shortName);
-
+			NzbgetRsBuf shortBuf = nzbget_rs_dqh_unpack_ctrl_strip_last_extension(script.GetName());
+			const char* displayName = FileSystem::BaseFileName(shortBuf.data ? shortBuf.data : "");
 			script.SetDisplayName(displayName);
+			nzbget_rs_free(shortBuf);
 		}
 	}
 

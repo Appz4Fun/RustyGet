@@ -261,13 +261,17 @@ bool TlsSocket::SetCipherSuite(std::string_view cipher)
 		for (int i = 0; i < sk_SSL_CIPHER_num(ciphers); ++i)
 		{
 			const SSL_CIPHER* candidate = sk_SSL_CIPHER_value(ciphers, i);
-			if (cipher != SSL_CIPHER_get_name(candidate)) continue;
-			bool tls13 = !strcmp(SSL_CIPHER_get_version(candidate), "TLSv1.3");
+			const char* candName = SSL_CIPHER_get_name(candidate);
+			if (cipher != candName) continue;
+			bool tls13 = nzbget_rs_dqh_tls_is_tls13_version_str(SSL_CIPHER_get_version(candidate)) != 0;
 			int auth = SSL_CIPHER_get_auth_nid(candidate), kx = SSL_CIPHER_get_kx_nid(candidate);
-			bool certificate = tls13 || auth == NID_auth_rsa || auth == NID_auth_ecdsa;
-			bool ephemeral = tls13 || kx == NID_kx_ecdhe || kx == NID_kx_dhe;
-			unsigned flags = (SSL_CIPHER_is_aead(candidate) ? 1 : 0) | (certificate ? 2 : 0) | (ephemeral ? 4 : 0);
-			unsigned bits = strstr(SSL_CIPHER_get_name(candidate), "CCM8") ? 64 : SSL_CIPHER_get_bits(candidate, nullptr);
+			unsigned flags = nzbget_rs_dqh_tls_compute_suite_flags(
+				SSL_CIPHER_is_aead(candidate) ? 1 : 0,
+				tls13 ? 1 : 0,
+				(auth == NID_auth_rsa || auth == NID_auth_ecdsa) ? 1 : 0,
+				(kx == NID_kx_ecdhe || kx == NID_kx_dhe) ? 1 : 0);
+			unsigned bits = nzbget_rs_dqh_tls_resolve_cipher_bits(
+				candName, (unsigned)SSL_CIPHER_get_bits(candidate, nullptr));
 			if (!nzbget_rs_tls_cipher_pin(tls13 ? 13 : 12, bits, flags)) break;
 			int version = tls13 ? TLS1_3_VERSION : TLS1_2_VERSION;
 			int minimum = SSL_get_min_proto_version(m_session.get());

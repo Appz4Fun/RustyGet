@@ -5940,6 +5940,19 @@ int nzbget_rs_dqh_nzbfile_classify_end_element(const char* name);
 NzbgetRsBuf nzbget_rs_dqh_sysinfo_format_rapidyenc_version(int32_t ver);
 NzbgetRsBuf nzbget_rs_dqh_fs_format_null_delete_errmsg(const char* last_err);
 NzbgetRsBuf nzbget_rs_dqh_fs_extract_parent_dir_path(const char* filename, char sep);
+int nzbget_rs_dqh_feed_file_classify_start_element(const char* name);
+int nzbget_rs_dqh_url_dl_has_dnzb_prefix(const char* line);
+int nzbget_rs_dqh_diskstate_is_candidate_queue_file_name(const char* filename);
+int nzbget_rs_dqh_diskstate_find_char_pos(
+    const char* line, char sep, size_t* out_pos);
+int nzbget_rs_dqh_tls_is_tls13_version_str(const char* ver);
+uint32_t nzbget_rs_dqh_tls_resolve_cipher_bits(const char* cipher_name, uint32_t raw_bits);
+NzbgetRsBuf nzbget_rs_dqh_tls_format_bulk_cipher_name(
+    const char* bulk_name, const char* cipher_name);
+uint32_t nzbget_rs_dqh_tls_compute_suite_flags(
+    int is_aead, int tls13, int auth_is_cert, int kx_is_ephemeral);
+int nzbget_rs_dqh_nntp_conn_is_already_in_group(
+    const char* active_group, const char* grp);
 
 #include "nzbget_tls_cipher.h"
 

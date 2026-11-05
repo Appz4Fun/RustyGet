@@ -141,7 +141,7 @@ const char* NntpConnection::Request(const char* req)
 
 const char* NntpConnection::JoinGroup(const char* grp)
 {
-	if (!m_activeGroup.Empty() && !strcmp(m_activeGroup, grp))
+	if (nzbget_rs_dqh_nntp_conn_is_already_in_group(*m_activeGroup, grp) != 0)
 	{
 		// already in group
 		strcpy(m_lineBuf, "211 ");

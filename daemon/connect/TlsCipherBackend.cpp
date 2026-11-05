@@ -113,19 +113,25 @@ int Suites(void*, NzbgetTlsEmitSuite emit, void* context) noexcept
 		for (int i = 0; i < sk_SSL_CIPHER_num(suites); ++i)
 		{
 			const auto* suite = sk_SSL_CIPHER_value(suites, i);
-			bool tls13 = !strcmp(SSL_CIPHER_get_version(suite), "TLSv1.3");
+			const char* suiteName = SSL_CIPHER_get_name(suite);
+			bool tls13 = nzbget_rs_dqh_tls_is_tls13_version_str(SSL_CIPHER_get_version(suite)) != 0;
 			int version = tls13 ? TLS1_3_VERSION : TLS1_2_VERSION;
 			if ((minimum && version < minimum) || (maximum && version > maximum)) continue;
 			int auth = SSL_CIPHER_get_auth_nid(suite), kx = SSL_CIPHER_get_kx_nid(suite);
-			bool certificate = tls13 || auth == NID_auth_rsa || auth == NID_auth_ecdsa;
-			bool ephemeral = tls13 || kx == NID_kx_ecdhe || kx == NID_kx_dhe;
-			unsigned flags = (SSL_CIPHER_is_aead(suite) ? 1 : 0) | (certificate ? 2 : 0) | (ephemeral ? 4 : 0);
+			unsigned flags = nzbget_rs_dqh_tls_compute_suite_flags(
+				SSL_CIPHER_is_aead(suite) ? 1 : 0,
+				tls13 ? 1 : 0,
+				(auth == NID_auth_rsa || auth == NID_auth_ecdsa) ? 1 : 0,
+				(kx == NID_kx_ecdhe || kx == NID_kx_dhe) ? 1 : 0);
 			const EVP_CIPHER* bulk = EVP_get_cipherbynid(SSL_CIPHER_get_cipher_nid(suite));
-			std::string name = bulk ? EVP_CIPHER_name(bulk) : "unavailable";
-			if (strstr(SSL_CIPHER_get_name(suite), "CCM8")) name += "@8";
+			NzbgetRsBuf bulkBuf = nzbget_rs_dqh_tls_format_bulk_cipher_name(
+				bulk ? EVP_CIPHER_name(bulk) : nullptr, suiteName);
 			// CCM8 has a 64-bit authentication tag despite a 128/256-bit AES key.
-			unsigned bits = strstr(SSL_CIPHER_get_name(suite), "CCM8") ? 64 : SSL_CIPHER_get_bits(suite, nullptr);
-			if (!emit(context, SSL_CIPHER_get_name(suite), name.c_str(), tls13 ? 13 : 12, bits, flags)) return 0;
+			unsigned bits = nzbget_rs_dqh_tls_resolve_cipher_bits(
+				suiteName, (unsigned)SSL_CIPHER_get_bits(suite, nullptr));
+			int emitted = emit(context, suiteName, bulkBuf.data ? bulkBuf.data : "", tls13 ? 13 : 12, bits, flags);
+			nzbget_rs_free(bulkBuf);
+			if (!emitted) return 0;
 		}
 		return 1;
 	}

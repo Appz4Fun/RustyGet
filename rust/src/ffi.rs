@@ -35012,6 +35012,140 @@ pub unsafe extern "C" fn nzbget_rs_dqh_fs_extract_parent_dir_path(
     ))
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_feed_file_classify_start_element(
+    name: *const c_char,
+) -> c_int {
+    let n = if name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(name).to_bytes()
+    };
+    crate::dupequeuehealth::dqh_feed_file_classify_start_element(n)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_url_dl_has_dnzb_prefix(
+    line: *const c_char,
+) -> c_int {
+    let l = if line.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(line).to_bytes()
+    };
+    c_int::from(crate::dupequeuehealth::dqh_url_dl_has_dnzb_prefix(l))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_is_candidate_queue_file_name(
+    filename: *const c_char,
+) -> c_int {
+    let f = if filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    c_int::from(crate::dupequeuehealth::dqh_diskstate_is_candidate_queue_file_name(f))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_find_char_pos(
+    line: *const c_char,
+    sep: c_char,
+    out_pos: *mut usize,
+) -> c_int {
+    let l = if line.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(line).to_bytes()
+    };
+    match crate::dupequeuehealth::dqh_diskstate_find_char_pos(l, sep as u8) {
+        Some(pos) => {
+            if !out_pos.is_null() {
+                *out_pos = pos;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_tls_is_tls13_version_str(
+    ver: *const c_char,
+) -> c_int {
+    let v = if ver.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(ver).to_bytes()
+    };
+    c_int::from(crate::dupequeuehealth::dqh_tls_is_tls13_version_str(v))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_tls_resolve_cipher_bits(
+    cipher_name: *const c_char,
+    raw_bits: u32,
+) -> u32 {
+    let c = if cipher_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(cipher_name).to_bytes()
+    };
+    crate::dupequeuehealth::dqh_tls_resolve_cipher_bits(c, raw_bits)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_tls_format_bulk_cipher_name(
+    bulk_name: *const c_char,
+    cipher_name: *const c_char,
+) -> RsBuf {
+    let b = if bulk_name.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(bulk_name).to_bytes())
+    };
+    let c = if cipher_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(cipher_name).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_tls_format_bulk_cipher_name(b, c))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_tls_compute_suite_flags(
+    is_aead: c_int,
+    tls13: c_int,
+    auth_is_cert: c_int,
+    kx_is_ephemeral: c_int,
+) -> u32 {
+    crate::dupequeuehealth::dqh_tls_compute_suite_flags(
+        is_aead != 0,
+        tls13 != 0,
+        auth_is_cert != 0,
+        kx_is_ephemeral != 0,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_nntp_conn_is_already_in_group(
+    active_group: *const c_char,
+    grp: *const c_char,
+) -> c_int {
+    let a = if active_group.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(active_group).to_bytes()
+    };
+    let g = if grp.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(grp).to_bytes()
+    };
+    c_int::from(crate::dupequeuehealth::dqh_nntp_conn_is_already_in_group(a, g))
+}
+
 
 
 

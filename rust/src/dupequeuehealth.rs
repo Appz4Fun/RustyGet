@@ -2157,6 +2157,94 @@ pub fn dqh_fs_extract_parent_dir_path(filename: &[u8], sep: u8) -> Vec<u8> {
     }
 }
 
+/// Classifies an XML start element in `FeedFile::Parse_StartElement`:
+/// `1` (`"item"`), `2` (`"enclosure"`), or `0` (other).
+pub fn dqh_feed_file_classify_start_element(name: &[u8]) -> i32 {
+    match name {
+        b"item" => 1,
+        b"enclosure" => 2,
+        _ => 0,
+    }
+}
+
+/// Returns `true` when `line` starts with `"X-DNZB-"` for `UrlDownloader::ProcessHeader`.
+pub fn dqh_url_dl_has_dnzb_prefix(line: &[u8]) -> bool {
+    line.starts_with(b"X-DNZB-")
+}
+
+/// Returns `true` when `filename` is `<digits>`, `<digits>s`, or `<digits>c` for `DiskState::SetAsideQueueFiles`.
+pub fn dqh_diskstate_is_candidate_queue_file_name(filename: &[u8]) -> bool {
+    let digits = filename.iter().take_while(|&&b| b.is_ascii_digit()).count();
+    if digits == 0 {
+        return false;
+    }
+    matches!(&filename[digits..], b"" | b"s" | b"c")
+}
+
+/// Finds the first `sep` byte in `line` and returns its byte index (`Some(pos)`), or `None` if absent.
+pub fn dqh_diskstate_find_char_pos(line: &[u8], sep: u8) -> Option<usize> {
+    line.iter().position(|&b| b == sep)
+}
+
+/// Returns `true` when `ver == b"TLSv1.3"` for `TlsCipherBackend::Suites` and `TlsSocket::ApplyCipherPin`.
+pub fn dqh_tls_is_tls13_version_str(ver: &[u8]) -> bool {
+    ver == b"TLSv1.3"
+}
+
+/// Returns `true` when `cipher_name` contains `"CCM8"`.
+pub fn dqh_tls_cipher_has_ccm8(cipher_name: &[u8]) -> bool {
+    cipher_name.windows(4).any(|w| w == b"CCM8")
+}
+
+/// Resolves effective cipher bits (`64` when `cipher_name` contains `"CCM8"`, else `raw_bits`).
+pub fn dqh_tls_resolve_cipher_bits(cipher_name: &[u8], raw_bits: u32) -> u32 {
+    if dqh_tls_cipher_has_ccm8(cipher_name) {
+        64
+    } else {
+        raw_bits
+    }
+}
+
+/// Formats the bulk cipher name (`bulk_name` or `"unavailable"`, plus `"@8"` if `cipher_name` contains `"CCM8"`).
+pub fn dqh_tls_format_bulk_cipher_name(
+    bulk_name: Option<&[u8]>,
+    cipher_name: &[u8],
+) -> Vec<u8> {
+    let base = bulk_name.unwrap_or(b"unavailable");
+    let has_ccm8 = dqh_tls_cipher_has_ccm8(cipher_name);
+    let mut out = Vec::with_capacity(base.len() + if has_ccm8 { 2 } else { 0 });
+    out.extend_from_slice(base);
+    if has_ccm8 {
+        out.extend_from_slice(b"@8");
+    }
+    out
+}
+
+/// Computes the 3-bit TLS suite capability mask (`1 = AEAD`, `2 = cert auth`, `4 = ephemeral KX`).
+pub fn dqh_tls_compute_suite_flags(
+    is_aead: bool,
+    tls13: bool,
+    auth_is_cert: bool,
+    kx_is_ephemeral: bool,
+) -> u32 {
+    let mut flags = 0u32;
+    if is_aead {
+        flags |= 1;
+    }
+    if tls13 || auth_is_cert {
+        flags |= 2;
+    }
+    if tls13 || kx_is_ephemeral {
+        flags |= 4;
+    }
+    flags
+}
+
+/// Returns `true` when `!active_group.is_empty() && active_group == grp` for `NntpConnection::JoinGroup`.
+pub fn dqh_nntp_conn_is_already_in_group(active_group: &[u8], grp: &[u8]) -> bool {
+    !active_group.is_empty() && active_group == grp
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3015,5 +3103,35 @@ mod tests {
             b"/var/queue"
         );
         assert_eq!(dqh_fs_extract_parent_dir_path(b"file.tmp", b'/'), b"file.tmp");
+        assert_eq!(dqh_feed_file_classify_start_element(b"item"), 1);
+        assert_eq!(dqh_feed_file_classify_start_element(b"enclosure"), 2);
+        assert_eq!(dqh_feed_file_classify_start_element(b"channel"), 0);
+        assert!(dqh_url_dl_has_dnzb_prefix(b"X-DNZB-Category: Movies"));
+        assert!(!dqh_url_dl_has_dnzb_prefix(b"Content-Type: text/xml"));
+        assert!(dqh_diskstate_is_candidate_queue_file_name(b"123"));
+        assert!(dqh_diskstate_is_candidate_queue_file_name(b"123s"));
+        assert!(dqh_diskstate_is_candidate_queue_file_name(b"123c"));
+        assert!(!dqh_diskstate_is_candidate_queue_file_name(b"s"));
+        assert!(!dqh_diskstate_is_candidate_queue_file_name(b"123x"));
+        assert_eq!(dqh_diskstate_find_char_pos(b"key=val", b'='), Some(3));
+        assert_eq!(dqh_diskstate_find_char_pos(b"keyval", b'='), None);
+        assert!(dqh_tls_is_tls13_version_str(b"TLSv1.3"));
+        assert!(!dqh_tls_is_tls13_version_str(b"TLSv1.2"));
+        assert!(dqh_tls_cipher_has_ccm8(b"ECDHE-RSA-AES128-CCM8"));
+        assert!(!dqh_tls_cipher_has_ccm8(b"TLS_AES_256_GCM_SHA384"));
+        assert_eq!(dqh_tls_resolve_cipher_bits(b"ECDHE-RSA-AES128-CCM8", 128), 64);
+        assert_eq!(dqh_tls_resolve_cipher_bits(b"TLS_AES_256_GCM_SHA384", 256), 256);
+        assert_eq!(
+            dqh_tls_format_bulk_cipher_name(Some(b"AES-128-CCM"), b"ECDHE-RSA-AES128-CCM8"),
+            b"AES-128-CCM@8"
+        );
+        assert_eq!(
+            dqh_tls_format_bulk_cipher_name(None, b"TLS_AES_256_GCM_SHA384"),
+            b"unavailable"
+        );
+        assert_eq!(dqh_tls_compute_suite_flags(true, true, false, false), 7);
+        assert_eq!(dqh_tls_compute_suite_flags(false, false, true, false), 2);
+        assert!(dqh_nntp_conn_is_already_in_group(b"alt.binaries.test", b"alt.binaries.test"));
+        assert!(!dqh_nntp_conn_is_already_in_group(b"", b""));
     }
 }

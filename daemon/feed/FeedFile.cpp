@@ -100,12 +100,13 @@ void FeedFile::Parse_StartElement(const char* name, const char **atts)
 	m_currentElement = name;
 	ResetTagContent();
 
-	if (!strcmp("item", name))
+	int elemKind = nzbget_rs_dqh_feed_file_classify_start_element(name);
+	if (elemKind == 1)
 	{
 		m_feedItems->emplace_back();
 		m_feedItemInfo = &m_feedItems->back();
 	}
-	else if (!strcmp("enclosure", name) && m_feedItemInfo)
+	else if (elemKind == 2 && m_feedItemInfo)
 	{
 		// <enclosure url="http://myindexer.com/fetch/9eeb264aecce961a6e0d" length="150263340" type="application/x-nzb" />
 		for (; *atts; atts+=2)

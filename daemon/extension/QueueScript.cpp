@@ -29,15 +29,6 @@
 #include "FileSystem.h"
 #include "nzbget_rs.h"
 
-static const char* QUEUE_EVENT_NAMES[] = {
-	"FILE_DOWNLOADED",
-	"URL_COMPLETED",
-	"NZB_MARKED",
-	"NZB_ADDED",
-	"NZB_NAMED",
-	"NZB_DOWNLOADED",
-	"NZB_DELETED" };
-
 class QueueScriptController : public Thread, public NzbScriptController
 {
 public:
@@ -169,16 +160,10 @@ void QueueScriptController::PrepareParams(const char* scriptName)
 
 	SetEnvVar("NZBNA_DUPEMODE", nzbget_rs_tpr_script_dupe_mode_name((int)m_dupeMode));
 
-	SetEnvVar("NZBNA_EVENT", QUEUE_EVENT_NAMES[m_event]);
-
-	const char* deleteStatusName[] = { "NONE", "MANUAL", "HEALTH", "DUPE", "BAD", "GOOD", "COPY", "SCAN" };
-	SetEnvVar("NZBNA_DELETESTATUS", deleteStatusName[m_deleteStatus]);
-
-	const char* urlStatusName[] = { "NONE", "UNKNOWN", "SUCCESS", "FAILURE", "UNKNOWN", "SCAN_SKIPPED", "SCAN_FAILURE" };
-	SetEnvVar("NZBNA_URLSTATUS", urlStatusName[m_urlStatus]);
-
-	const char* markStatusName[] = { "NONE", "BAD", "GOOD", "SUCCESS" };
-	SetEnvVar("NZBNA_MARKSTATUS", markStatusName[m_markStatus]);
+	SetEnvVar("NZBNA_EVENT", nzbget_rs_dqh_queue_script_event_name((int)m_event));
+	SetEnvVar("NZBNA_DELETESTATUS", nzbget_rs_dqh_queue_script_delete_status_name((int)m_deleteStatus));
+	SetEnvVar("NZBNA_URLSTATUS", nzbget_rs_dqh_queue_script_url_status_name((int)m_urlStatus));
+	SetEnvVar("NZBNA_MARKSTATUS", nzbget_rs_dqh_queue_script_mark_status_name((int)m_markStatus));
 
 	PrepareEnvScript(&m_parameters, scriptName);
 }

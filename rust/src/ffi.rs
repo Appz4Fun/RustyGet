@@ -36028,6 +36028,174 @@ pub unsafe extern "C" fn nzbget_rs_dqh_tokenizer_next(
     }
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_queue_editor_visit_category_ext_diff(
+    old_ext: *const c_char,
+    new_ext: *const c_char,
+    ctx: *mut std::ffi::c_void,
+    cb: Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, param_name: *const c_char, param_val: *const c_char)>,
+) {
+    let Some(cb_fn) = cb else {
+        return;
+    };
+    let old_b = if old_ext.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(old_ext).to_bytes()
+    };
+    let new_b = if new_ext.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(new_ext).to_bytes()
+    };
+    let diff = crate::queuecoordinfo::queue_editor_diff_category_extensions(old_b, new_b);
+    crate::dupequeuehealth::dqh_queue_editor_visit_ext_diff_lines(&diff, |k, v| {
+        let mut k_buf = Vec::with_capacity(k.len() + 1);
+        k_buf.extend_from_slice(k);
+        k_buf.push(0);
+        let mut v_buf = Vec::with_capacity(v.len() + 1);
+        v_buf.extend_from_slice(v);
+        v_buf.push(0);
+        cb_fn(
+            ctx,
+            k_buf.as_ptr().cast::<c_char>(),
+            v_buf.as_ptr().cast::<c_char>(),
+        );
+    });
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_queue_script_event_name(event: c_int) -> *const c_char {
+    crate::dupequeuehealth::dqh_queue_script_event_name(event)
+        .as_ptr()
+        .cast::<c_char>()
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_queue_script_delete_status_name(
+    delete_status: c_int,
+) -> *const c_char {
+    crate::dupequeuehealth::dqh_queue_script_delete_status_name(delete_status)
+        .as_ptr()
+        .cast::<c_char>()
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_queue_script_url_status_name(url_status: c_int) -> *const c_char {
+    crate::dupequeuehealth::dqh_queue_script_url_status_name(url_status)
+        .as_ptr()
+        .cast::<c_char>()
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_queue_script_mark_status_name(
+    mark_status: c_int,
+) -> *const c_char {
+    crate::dupequeuehealth::dqh_queue_script_mark_status_name(mark_status)
+        .as_ptr()
+        .cast::<c_char>()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_calc_encrypted_window_bounds(
+    window_offset: i64,
+    window_end_raw: i64,
+    last_computable: i64,
+    block_from: i64,
+    block_size: i64,
+    out_window_end: *mut i64,
+    out_from: *mut i64,
+    out_block_to: *mut i64,
+) -> c_int {
+    match crate::dupequeuehealth::dqh_stream_repair_calc_encrypted_window_bounds(
+        window_offset,
+        window_end_raw,
+        last_computable,
+        block_from,
+        block_size,
+    ) {
+        Some((we, fr, bt)) => {
+            if !out_window_end.is_null() {
+                *out_window_end = we;
+            }
+            if !out_from.is_null() {
+                *out_from = fr;
+            }
+            if !out_block_to.is_null() {
+                *out_block_to = bt;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_calc_encrypted_chunk_end(
+    block_from: i64,
+    block_to: i64,
+    max_chunk: i64,
+    block_size: i64,
+    out_chunk_end: *mut i64,
+    out_block_count: *mut i64,
+) {
+    let (ce, bc) = crate::dupequeuehealth::dqh_stream_repair_calc_encrypted_chunk_end(
+        block_from, block_to, max_chunk, block_size,
+    );
+    if !out_chunk_end.is_null() {
+        *out_chunk_end = ce;
+    }
+    if !out_block_count.is_null() {
+        *out_block_count = bc;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_stream_repair_is_target_unfinished(
+    decoded_file_size: i64,
+    holes_empty: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_stream_repair_is_target_unfinished(
+            decoded_file_size,
+            holes_empty != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_nzbfile_should_trim_sax_chars(
+    current_element: *const c_char,
+    has_category: c_int,
+) -> c_int {
+    let ce = if current_element.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(current_element).to_bytes()
+    };
+    i32::from(crate::dupequeuehealth::dqh_nzbfile_should_trim_sax_chars(
+        ce,
+        has_category != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_repair_ctrl_map_par_stage_to_post_stage(
+    par_stage: c_int,
+    pt_loading_pars: c_int,
+    pt_verifying_sources: c_int,
+    pt_repairing: c_int,
+    pt_verifying_repaired: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_repair_ctrl_map_par_stage_to_post_stage(
+        par_stage,
+        pt_loading_pars,
+        pt_verifying_sources,
+        pt_repairing,
+        pt_verifying_repaired,
+    )
+}
+
 
 
 

@@ -1922,7 +1922,11 @@ void StreamRepairController::ReportRemainingHoles(std::vector<RepairTarget>& tar
 		// the unfinished files only - the finished ones are marked repaired and
 		// their jobs dropped, so they're credited below, now or never)
 		int unfinished = (int)std::count_if(targets.begin(), targets.end(),
-			[](const RepairTarget& target) { return target.DecodedFileSize <= 0 || !target.Holes.empty(); });
+			[](const RepairTarget& target)
+			{
+				return nzbget_rs_dqh_stream_repair_is_target_unfinished(
+					target.DecodedFileSize, target.Holes.empty() ? 1 : 0) != 0;
+			});
 		m_holesRemain |= unfinished > 0;
 		PrintMessage(Message::mkInfo, "Stream repair interrupted with %i file(s) still incomplete", unfinished);
 	}
@@ -2644,12 +2648,13 @@ bool StreamRepairController::VerifyEncryptedFromSource(RepairSetData& repairSet,
 		}
 		int64 windowEnd = std::min(window.End(), lastComputable);
 		int64 blockFrom = chainStart(window, windowEnd);
-		int64 from = std::max(window.Offset, blockFrom);
-		if (from >= windowEnd)
+		int64 from = 0, blockTo = 0;
+		if (!nzbget_rs_dqh_stream_repair_calc_encrypted_window_bounds(
+			window.Offset, window.End(), lastComputable, blockFrom, blockSize,
+			&windowEnd, &from, &blockTo))
 		{
 			continue;
 		}
-		int64 blockTo = (windowEnd + blockSize - 1) / blockSize * blockSize;
 		uint8 prev[RarCryptoContext::CryptoBlockSize];
 		if (blockFrom > 0 && !ReadTargetCipher(targetMap, targetFiles,
 			{blockFrom - blockSize, blockSize}, (char*)prev))
@@ -2780,7 +2785,9 @@ int64 StreamRepairController::PatchEncryptedFromSource(RepairSetData& repairSet,
 
 		while (blockFrom < blockTo && !IsStopped())
 		{
-			int64 chunkEnd = std::min<int64>(blockFrom + 4 * 1024 * 1024, blockTo);
+			int64 chunkEnd = 0, blockCount = 0;
+			nzbget_rs_dqh_stream_repair_calc_encrypted_chunk_end(
+				blockFrom, blockTo, 4 * 1024 * 1024, blockSize, &chunkEnd, &blockCount);
 			donorData.resize((size_t)(chunkEnd - blockFrom));
 			if (!plaintext.Read(blockFrom, donorData.data(), chunkEnd - blockFrom))
 			{
@@ -2789,7 +2796,7 @@ int64 StreamRepairController::PatchEncryptedFromSource(RepairSetData& repairSet,
 			cipher.resize((size_t)(chunkEnd - blockFrom));
 			if (!runCrypto->Crypto->EncryptRange(havePrev ? prev : nullptr,
 				(const uint8*)donorData.data(), cipher.data(),
-				(chunkEnd - blockFrom) / blockSize))
+				blockCount))
 			{
 				break;
 			}

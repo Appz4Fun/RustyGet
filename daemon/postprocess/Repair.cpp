@@ -807,8 +807,12 @@ void RepairController::UpdateParCheckProgress()
 		}
 		postInfo->SetFileProgress(m_parChecker.GetFileProgress());
 		postInfo->SetStageProgress(m_parChecker.GetStageProgress());
-		PostInfo::EStage StageKind[] = {PostInfo::ptLoadingPars, PostInfo::ptVerifyingSources, PostInfo::ptRepairing, PostInfo::ptVerifyingRepaired};
-		PostInfo::EStage stage = StageKind[m_parChecker.GetStage()];
+		PostInfo::EStage stage = (PostInfo::EStage)nzbget_rs_dqh_repair_ctrl_map_par_stage_to_post_stage(
+			(int)m_parChecker.GetStage(),
+			(int)PostInfo::ptLoadingPars,
+			(int)PostInfo::ptVerifyingSources,
+			(int)PostInfo::ptRepairing,
+			(int)PostInfo::ptVerifyingRepaired);
 		time_t current = Util::CurrentTime();
 
 		int setRepairTime = 0;

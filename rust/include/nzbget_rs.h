@@ -6038,6 +6038,27 @@ int nzbget_rs_dqh_diskstate_next_comma_token(
     size_t* out_tok_len, size_t* out_next_cursor);
 char* nzbget_rs_dqh_tokenizer_next(
     char* data_string, const char* separators, int working, char** save_ptr);
+void nzbget_rs_dqh_queue_editor_visit_category_ext_diff(
+    const char* old_ext, const char* new_ext, void* ctx,
+    void (*cb)(void* ctx, const char* param_name, const char* param_val));
+const char* nzbget_rs_dqh_queue_script_event_name(int event);
+const char* nzbget_rs_dqh_queue_script_delete_status_name(int delete_status);
+const char* nzbget_rs_dqh_queue_script_url_status_name(int url_status);
+const char* nzbget_rs_dqh_queue_script_mark_status_name(int mark_status);
+int nzbget_rs_dqh_stream_repair_calc_encrypted_window_bounds(
+    int64_t window_offset, int64_t window_end_raw, int64_t last_computable,
+    int64_t block_from, int64_t block_size,
+    int64_t* out_window_end, int64_t* out_from, int64_t* out_block_to);
+void nzbget_rs_dqh_stream_repair_calc_encrypted_chunk_end(
+    int64_t block_from, int64_t block_to, int64_t max_chunk, int64_t block_size,
+    int64_t* out_chunk_end, int64_t* out_block_count);
+int nzbget_rs_dqh_stream_repair_is_target_unfinished(
+    int64_t decoded_file_size, int holes_empty);
+int nzbget_rs_dqh_nzbfile_should_trim_sax_chars(
+    const char* current_element, int has_category);
+int nzbget_rs_dqh_repair_ctrl_map_par_stage_to_post_stage(
+    int par_stage, int pt_loading_pars, int pt_verifying_sources,
+    int pt_repairing, int pt_verifying_repaired);
 
 #include "nzbget_tls_cipher.h"
 

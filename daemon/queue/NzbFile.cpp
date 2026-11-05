@@ -559,7 +559,8 @@ void NzbFile::SAX_characters(NzbFile* file, const char * xmlstr, int len)
 		return;
 
 	std::string str(xmlstr, len);
-	if (file->m_currentElement == "meta" && file->m_hasCategory)
+	if (nzbget_rs_dqh_nzbfile_should_trim_sax_chars(
+		file->m_currentElement.c_str(), file->m_hasCategory ? 1 : 0) != 0)
 	{
 		// Do not break existing users' filters that rely on this normalization
 		Util::Trim(str);

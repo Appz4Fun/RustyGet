@@ -2941,6 +2941,153 @@ pub fn dqh_tokenizer_find_next_token(
     None
 }
 
+/// Visits `\n`-delimited `param_name\tparam_val` lines from `dqh_queue_editor_diff_category_extensions`
+/// output, invoking `cb(param_name, param_val)` for each line containing a tab,
+/// for `QueueEditor::SetNzbCategory`.
+pub fn dqh_queue_editor_visit_ext_diff_lines<F>(lines: &[u8], mut cb: F)
+where
+    F: FnMut(&[u8], &[u8]),
+{
+    let mut pos = 0;
+    while pos < lines.len() {
+        let Some(rel_nl) = lines[pos..].iter().position(|&b| b == b'\n') else {
+            break;
+        };
+        let nl = pos + rel_nl;
+        let line = &lines[pos..nl];
+        if let Some(tab) = line.iter().position(|&b| b == b'\t') {
+            cb(&line[..tab], &line[tab + 1..]);
+        }
+        pos = nl + 1;
+    }
+}
+
+/// Maps a `QueueScriptCoordinator::EEvent` value to its NUL-terminated static event name
+/// for `QueueScriptController::PrepareParams`.
+pub fn dqh_queue_script_event_name(event: i32) -> &'static [u8] {
+    match event {
+        0 => b"FILE_DOWNLOADED\0",
+        1 => b"URL_COMPLETED\0",
+        2 => b"NZB_MARKED\0",
+        3 => b"NZB_ADDED\0",
+        4 => b"NZB_NAMED\0",
+        5 => b"NZB_DOWNLOADED\0",
+        6 => b"NZB_DELETED\0",
+        _ => b"NONE\0",
+    }
+}
+
+/// Maps an `NzbInfo::EDeleteStatus` value to its NUL-terminated static status name
+/// for `QueueScriptController::PrepareParams`.
+pub fn dqh_queue_script_delete_status_name(delete_status: i32) -> &'static [u8] {
+    match delete_status {
+        0 => b"NONE\0",
+        1 => b"MANUAL\0",
+        2 => b"HEALTH\0",
+        3 => b"DUPE\0",
+        4 => b"BAD\0",
+        5 => b"GOOD\0",
+        6 => b"COPY\0",
+        7 => b"SCAN\0",
+        _ => b"NONE\0",
+    }
+}
+
+/// Maps an `NzbInfo::EUrlStatus` value to its NUL-terminated static status name
+/// for `QueueScriptController::PrepareParams`.
+pub fn dqh_queue_script_url_status_name(url_status: i32) -> &'static [u8] {
+    match url_status {
+        0 => b"NONE\0",
+        1 => b"UNKNOWN\0",
+        2 => b"SUCCESS\0",
+        3 => b"FAILURE\0",
+        4 => b"UNKNOWN\0",
+        5 => b"SCAN_SKIPPED\0",
+        6 => b"SCAN_FAILURE\0",
+        _ => b"NONE\0",
+    }
+}
+
+/// Maps an `NzbInfo::EMarkStatus` value to its NUL-terminated static status name
+/// for `QueueScriptController::PrepareParams`.
+pub fn dqh_queue_script_mark_status_name(mark_status: i32) -> &'static [u8] {
+    match mark_status {
+        0 => b"NONE\0",
+        1 => b"BAD\0",
+        2 => b"GOOD\0",
+        3 => b"SUCCESS\0",
+        _ => b"NONE\0",
+    }
+}
+
+/// Computes `(window_end, from, block_to)` for an encrypted verification window in
+/// `StreamRepairController::VerifyEncryptedFromSource`, returning `None` when `from >= window_end`.
+pub fn dqh_stream_repair_calc_encrypted_window_bounds(
+    window_offset: i64,
+    window_end_raw: i64,
+    last_computable: i64,
+    block_from: i64,
+    block_size: i64,
+) -> Option<(i64, i64, i64)> {
+    if block_size <= 0 {
+        return None;
+    }
+    let window_end = window_end_raw.min(last_computable);
+    let from = window_offset.max(block_from);
+    if from >= window_end {
+        return None;
+    }
+    let block_to = (window_end + block_size - 1) / block_size * block_size;
+    Some((window_end, from, block_to))
+}
+
+/// Computes `(chunk_end, block_count)` for an encrypted patch chunk in
+/// `StreamRepairController::PatchEncryptedFromSource`.
+pub fn dqh_stream_repair_calc_encrypted_chunk_end(
+    block_from: i64,
+    block_to: i64,
+    max_chunk: i64,
+    block_size: i64,
+) -> (i64, i64) {
+    let chunk_end = (block_from.saturating_add(max_chunk)).min(block_to);
+    let block_count = if block_size > 0 {
+        (chunk_end - block_from) / block_size
+    } else {
+        0
+    };
+    (chunk_end, block_count)
+}
+
+/// Returns true when a stream-repair target is still unfinished (`decoded_file_size <= 0 || !holes_empty`)
+/// for `StreamRepairController::ReportRemainingHoles`.
+pub fn dqh_stream_repair_is_target_unfinished(decoded_file_size: i64, holes_empty: bool) -> bool {
+    decoded_file_size <= 0 || !holes_empty
+}
+
+/// Returns true when `NzbFile::SAX_characters` should trim XML character content
+/// (`current_element == b"meta" && has_category`).
+pub fn dqh_nzbfile_should_trim_sax_chars(current_element: &[u8], has_category: bool) -> bool {
+    has_category && current_element == b"meta"
+}
+
+/// Maps `RepairController::PostParChecker::GetStage()` (`0..=3`) to the corresponding
+/// `PostInfo::EStage` value for `RepairController::UpdateParCheckProgress`.
+pub fn dqh_repair_ctrl_map_par_stage_to_post_stage(
+    par_stage: i32,
+    pt_loading_pars: i32,
+    pt_verifying_sources: i32,
+    pt_repairing: i32,
+    pt_verifying_repaired: i32,
+) -> i32 {
+    match par_stage {
+        0 => pt_loading_pars,
+        1 => pt_verifying_sources,
+        2 => pt_repairing,
+        3 => pt_verifying_repaired,
+        _ => pt_loading_pars,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4066,5 +4213,42 @@ mod tests {
             dqh_tokenizer_find_next_token(b" ,;  foo \t ; bar ", b",;"),
             Some((5, 8, 12))
         );
+        {
+            let mut visited = Vec::new();
+            dqh_queue_editor_visit_ext_diff_lines(b"*Script1:\tyes\n*Script2:\tno\n", |k, v| {
+                visited.push((k.to_vec(), v.to_vec()));
+            });
+            assert_eq!(
+                visited,
+                vec![
+                    (b"*Script1:".to_vec(), b"yes".to_vec()),
+                    (b"*Script2:".to_vec(), b"no".to_vec()),
+                ]
+            );
+        }
+        assert_eq!(dqh_queue_script_event_name(0), b"FILE_DOWNLOADED\0");
+        assert_eq!(dqh_queue_script_event_name(6), b"NZB_DELETED\0");
+        assert_eq!(dqh_queue_script_delete_status_name(3), b"DUPE\0");
+        assert_eq!(dqh_queue_script_url_status_name(5), b"SCAN_SKIPPED\0");
+        assert_eq!(dqh_queue_script_mark_status_name(2), b"GOOD\0");
+        assert_eq!(
+            dqh_stream_repair_calc_encrypted_window_bounds(10, 50, 48, 16, 16),
+            Some((48, 16, 48))
+        );
+        assert_eq!(
+            dqh_stream_repair_calc_encrypted_window_bounds(10, 50, 16, 16, 16),
+            None
+        );
+        assert_eq!(
+            dqh_stream_repair_calc_encrypted_chunk_end(0, 64, 32, 16),
+            (32, 2)
+        );
+        assert!(dqh_stream_repair_is_target_unfinished(0, true));
+        assert!(dqh_stream_repair_is_target_unfinished(100, false));
+        assert!(!dqh_stream_repair_is_target_unfinished(100, true));
+        assert!(dqh_nzbfile_should_trim_sax_chars(b"meta", true));
+        assert!(!dqh_nzbfile_should_trim_sax_chars(b"meta", false));
+        assert!(!dqh_nzbfile_should_trim_sax_chars(b"file", true));
+        assert_eq!(dqh_repair_ctrl_map_par_stage_to_post_stage(2, 10, 11, 12, 13), 12);
     }
 }

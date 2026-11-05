@@ -796,27 +796,14 @@ void QueueEditor::SetNzbCategory(NzbInfo* nzbInfo, const char* category, bool ap
 		nzbInfo->GetParameters()->SetParameter("*Unpack:", nzbget_rs_dqh_scanner_yes_no_str(newUnpack ? 1 : 0));
 	}
 
-	NzbgetRsBuf extDiff = nzbget_rs_qci_queue_editor_diff_category_extensions(oldExtensions, newExtensions);
-	if (extDiff.data && extDiff.len > 0)
-	{
-		std::string_view lines(extDiff.data, extDiff.len);
-		size_t pos = 0;
-		while (pos < lines.size())
+	nzbget_rs_dqh_queue_editor_visit_category_ext_diff(
+		oldExtensions,
+		newExtensions,
+		nzbInfo->GetParameters(),
+		[](void* ctx, const char* paramName, const char* paramVal)
 		{
-			size_t nl = lines.find('\n', pos);
-			if (nl == std::string_view::npos) break;
-			std::string_view line = lines.substr(pos, nl - pos);
-			size_t tab = line.find('\t');
-			if (tab != std::string_view::npos)
-			{
-				std::string paramName(line.substr(0, tab));
-				std::string paramVal(line.substr(tab + 1));
-				nzbInfo->GetParameters()->SetParameter(paramName.c_str(), paramVal.c_str());
-			}
-			pos = nl + 1;
-		}
-	}
-	nzbget_rs_free(extDiff);
+			static_cast<NzbParameterList*>(ctx)->SetParameter(paramName, paramVal);
+		});
 }
 
 void QueueEditor::SetNzbName(NzbInfo* nzbInfo, const char* name)

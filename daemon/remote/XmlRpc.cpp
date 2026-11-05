@@ -474,8 +474,9 @@ public:
 			BuildErrorResponse(2, "Invalid cipher job ID"); return;
 		}
 		if (!params.empty()) id = Json::value_to<std::string>(params[0]);
-		std::string response = m_operation == 0 ? TlsCipherBackend::Start() :
-			m_operation == 1 ? TlsCipherBackend::Status(id.empty() ? nullptr : id.c_str()) : TlsCipherBackend::Cancel(id.c_str());
+		int opKind = nzbget_rs_dqh_xmlrpc_classify_tls_cipher_op(m_operation);
+		std::string response = opKind == 0 ? TlsCipherBackend::Start() :
+			opKind == 1 ? TlsCipherBackend::Status(id.empty() ? nullptr : id.c_str()) : TlsCipherBackend::Cancel(id.c_str());
 		auto parsed = Json::Deserialize(response);
 		if (!parsed || !parsed->is_object()) { BuildErrorResponse(3, "Invalid TLS optimizer response"); return; }
 		const auto& object = parsed->as_object();
@@ -980,15 +981,16 @@ void PauseUnpauseXmlCommand::Execute()
 void ScheduleResumeXmlCommand::Execute()
 {
 	int seconds = 0;
-	if (!NextParamAsInt(&seconds) || seconds < 0)
+	bool hasParam = NextParamAsInt(&seconds);
+	int64_t resumeTime = 0;
+	if (!nzbget_rs_dqh_xmlrpc_calc_schedule_resume_time(
+		hasParam ? 1 : 0, seconds, (int64_t)Util::CurrentTime(), &resumeTime))
 	{
 		BuildErrorResponse(2, "Invalid parameter");
 		return;
 	}
 
-	time_t curTime = Util::CurrentTime();
-
-	g_WorkState->SetResumeTime(curTime + seconds);
+	g_WorkState->SetResumeTime((time_t)resumeTime);
 
 	BuildBoolResponse(true);
 }
@@ -1041,8 +1043,12 @@ void StatusXmlCommand::Execute()
 		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
 		for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
 		{
-			postJobCount += nzbInfo->GetPostInfo() ? 1 : 0;
-			urlCount += nzbInfo->GetKind() == NzbInfo::nkUrl ? 1 : 0;
+			nzbget_rs_dqh_xmlrpc_accum_queue_job_counts(
+				nzbInfo->GetPostInfo() != nullptr ? 1 : 0,
+				(int)nzbInfo->GetKind(),
+				(int)NzbInfo::nkUrl,
+				&postJobCount,
+				&urlCount);
 		}
 		downloadQueue->CalcRemainingSize(&remainingSize, &forcedSize);
 	}
@@ -1576,7 +1582,8 @@ void AppendFleetXmlCommand::Execute()
 			BuildErrorResponse(2, "Invalid parameter (Content of %s)", name);
 			return;
 		}
-		if ((int)request.members.size() >= Fleet::MaxMembers)
+		if (nzbget_rs_dqh_xmlrpc_is_fleet_member_limit_reached(
+			request.members.size(), Fleet::MaxMembers) != 0)
 		{
 			BuildErrorResponse(2, "Too many members (at most %i)", Fleet::MaxMembers);
 			return;
@@ -1919,9 +1926,13 @@ void HistoryXmlCommand::Execute()
 		NzbInfo* nzbInfo = nullptr;
 		const char* status = DetectStatus(historyInfo);
 		int hasComma = index++ > 0 ? 1 : 0;
+		int entryKind = nzbget_rs_dqh_xmlrpc_classify_history_entry_kind(
+			(int)historyInfo->GetKind(),
+			(int)HistoryInfo::hkNzb,
+			(int)HistoryInfo::hkUrl,
+			(int)HistoryInfo::hkDup);
 
-		if (historyInfo->GetKind() == HistoryInfo::hkNzb ||
-			historyInfo->GetKind() == HistoryInfo::hkUrl)
+		if (entryKind == 1)
 		{
 			nzbInfo = historyInfo->GetNzbInfo();
 
@@ -1935,7 +1946,7 @@ void HistoryXmlCommand::Execute()
 				(int)historyInfo->GetTime(),
 				status));
 		}
-		else if (historyInfo->GetKind() == HistoryInfo::hkDup)
+		else if (entryKind == 2)
 		{
 			DupInfo* dupInfo = historyInfo->GetDupInfo();
 
@@ -1967,13 +1978,18 @@ void HistoryXmlCommand::Execute()
 const char* HistoryXmlCommand::DetectStatus(HistoryInfo* historyInfo)
 {
 	const char* status = "FAILURE/INTERNAL_ERROR";
+	int entryKind = nzbget_rs_dqh_xmlrpc_classify_history_entry_kind(
+		(int)historyInfo->GetKind(),
+		(int)HistoryInfo::hkNzb,
+		(int)HistoryInfo::hkUrl,
+		(int)HistoryInfo::hkDup);
 
-	if (historyInfo->GetKind() == HistoryInfo::hkNzb || historyInfo->GetKind() == HistoryInfo::hkUrl)
+	if (entryKind == 1)
 	{
 		NzbInfo* nzbInfo = historyInfo->GetNzbInfo();
 		status = nzbInfo->MakeTextStatus(false);
 	}
-	else if (historyInfo->GetKind() == HistoryInfo::hkDup)
+	else if (entryKind == 2)
 	{
 		DupInfo* dupInfo = historyInfo->GetDupInfo();
 		status = nzbget_rs_rco_rpc_detect_history_dup_status((int)dupInfo->GetStatus());
@@ -2581,7 +2597,7 @@ void EditServerXmlCommand::Execute()
 
 		for (NewsServer* server : g_ServerPool->GetServers())
 		{
-			if (server->GetId() == id)
+			if (nzbget_rs_dqh_xmlrpc_matches_edit_server_id(server->GetId(), id) != 0)
 			{
 				server->SetActive(active);
 				ok = true;
@@ -2804,7 +2820,7 @@ void ResetServerVolumeXmlCommand::Execute()
 	int index = 0;
 	for (ServerVolume& serverVolume : g_StatMeter->GuardServerVolumes())
 	{
-		if (index == serverId || serverId == -1)
+		if (nzbget_rs_dqh_xmlrpc_matches_reset_server_volume(index, serverId) != 0)
 		{
 			if (reset)
 				serverVolume.Reset();
@@ -2949,7 +2965,8 @@ void TestServerXmlCommand::Execute()
 		params.certVerifLevel = certVerifLevel;
 	}
 
-	if (params.certVerifLevel < 0 || params.certVerifLevel >= Options::ECertVerifLevel::Count)
+	if (!nzbget_rs_dqh_xmlrpc_is_valid_cert_verif_level(
+		params.certVerifLevel, (int)Options::ECertVerifLevel::Count))
 	{
 		BuildErrorResponse(2, "Invalid parameter (Certificate Verification Level).");
 		return;
@@ -2998,7 +3015,7 @@ void TestServerXmlCommand::Execute()
 
 	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_string(
 		IsJson() ? 1 : 0,
-		ok ? "" : m_errText.Empty() ? "Unknown error" : *m_errText,
+		nzbget_rs_dqh_xmlrpc_select_test_server_err_text(ok ? 1 : 0, *m_errText),
 		0,
 		1023));
 }
@@ -3076,7 +3093,7 @@ void TestDiskSpeedXmlCommand::Execute()
 		return;
 	}
 
-	if (writeBufferKiB < 0)
+	if (nzbget_rs_dqh_xmlrpc_check_disk_speed_arg_ranges(writeBufferKiB, 1, 1) == 1)
 	{
 		BuildErrorResponse(2, "Write Buffer cannot be negative");
 		return;
@@ -3088,7 +3105,7 @@ void TestDiskSpeedXmlCommand::Execute()
 		return;
 	}
 
-	if (maxFileSizeGiB < 1)
+	if (nzbget_rs_dqh_xmlrpc_check_disk_speed_arg_ranges(writeBufferKiB, maxFileSizeGiB, 1) == 2)
 	{
 		BuildErrorResponse(2, "Max file size must be positive");
 		return;
@@ -3100,7 +3117,7 @@ void TestDiskSpeedXmlCommand::Execute()
 		return;
 	}
 
-	if (timeoutSec < 1)
+	if (nzbget_rs_dqh_xmlrpc_check_disk_speed_arg_ranges(writeBufferKiB, maxFileSizeGiB, timeoutSec) == 3)
 	{
 		BuildErrorResponse(2, "Timeout must be positive");
 		return;

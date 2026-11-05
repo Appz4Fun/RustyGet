@@ -6150,6 +6150,37 @@ int nzbget_rs_dqh_diskstate_classify_begin_read_recovery(
     int transactional, int dest_exists, int temp_exists);
 int nzbget_rs_dqh_diskstate_select_volume_server_slot(
     int index, const int32_t* state_ids, const int32_t* server_ids, size_t count);
+int nzbget_rs_dqh_xmlrpc_classify_tls_cipher_op(int operation);
+int nzbget_rs_dqh_xmlrpc_calc_schedule_resume_time(
+    int has_param, int seconds, int64_t cur_time, int64_t* out_resume_time);
+void nzbget_rs_dqh_xmlrpc_accum_queue_job_counts(
+    int has_post_info, int kind, int nk_url,
+    int* inout_post_count, int* inout_url_count);
+int nzbget_rs_dqh_xmlrpc_is_fleet_member_limit_reached(
+    size_t current_count, int max_members);
+int nzbget_rs_dqh_xmlrpc_classify_history_entry_kind(
+    int kind, int hk_nzb, int hk_url, int hk_dup);
+int nzbget_rs_dqh_xmlrpc_matches_edit_server_id(int server_id, int target_id);
+int nzbget_rs_dqh_xmlrpc_matches_reset_server_volume(int index, int server_id);
+int nzbget_rs_dqh_xmlrpc_is_valid_cert_verif_level(int level, int count);
+const char* nzbget_rs_dqh_xmlrpc_select_test_server_err_text(
+    int ok, const char* err_text);
+int nzbget_rs_dqh_xmlrpc_check_disk_speed_arg_ranges(
+    int write_buffer_kib, int max_file_size_gib, int timeout_sec);
+const char* nzbget_rs_dqh_feed_coord_select_extensions(
+    const char* feed_extensions, const char* global_extensions);
+int64_t nzbget_rs_dqh_feed_coord_min_last_update(
+    int64_t cur_oldest, const int64_t* last_updates, size_t count);
+int nzbget_rs_dqh_feed_file_should_trim_text_chunk(
+    const char* current_element, size_t len);
+int nzbget_rs_dqh_ext_mgr_is_extension_in_use(int64_t use_count);
+int nzbget_rs_dqh_ext_mgr_should_use_entry_as_path(ptrdiff_t same_location_count);
+int nzbget_rs_dqh_ext_mgr_can_create_scheduler_task(
+    int is_scheduler_script, int task_time_empty, int in_extensions_list);
+int nzbget_rs_dqh_queue_script_select_exec_msg_kind(
+    int event, int qe_file_downloaded, int mk_detail, int mk_info);
+int nzbget_rs_dqh_queue_script_is_duplicate_file_downloaded_item(
+    int event, int qe_file_downloaded, int item_nzb_id, int target_nzb_id, int same_script);
 
 #include "nzbget_tls_cipher.h"
 

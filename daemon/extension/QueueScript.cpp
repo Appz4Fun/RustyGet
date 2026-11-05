@@ -121,7 +121,11 @@ void QueueScriptController::Run()
 
 void QueueScriptController::ExecuteScript(std::shared_ptr<const Extension::Script> script)
 {
-	PrintMessage(m_event == QueueScriptCoordinator::qeFileDownloaded ? Message::mkDetail : Message::mkInfo,
+	PrintMessage((Message::EKind)nzbget_rs_dqh_queue_script_select_exec_msg_kind(
+		(int)m_event,
+		(int)QueueScriptCoordinator::qeFileDownloaded,
+		(int)Message::mkDetail,
+		(int)Message::mkInfo),
 		"Executing queue-script %s for %s", script->GetName(), FileSystem::BaseFileName(m_nzbName));
 
 	SetArgs({script->GetEntry()});
@@ -292,7 +296,12 @@ void QueueScriptCoordinator::EnqueueScript(NzbInfo* nzbInfo, EEvent event)
 					// check if this script is already queued for this nzb
 					for (QueueItem* queueItem : &m_queue)
 					{
-						if (queueItem->GetNzbId() == nzbInfo->GetId() && queueItem->GetScript() == script)
+						if (nzbget_rs_dqh_queue_script_is_duplicate_file_downloaded_item(
+							(int)event,
+							(int)qeFileDownloaded,
+							queueItem->GetNzbId(),
+							nzbInfo->GetId(),
+							queueItem->GetScript() == script ? 1 : 0) != 0)
 						{
 							alreadyQueued = true;
 							break;

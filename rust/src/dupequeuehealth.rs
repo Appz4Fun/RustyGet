@@ -3810,6 +3810,177 @@ pub fn dqh_diskstate_select_volume_server_slot(
     slot
 }
 
+/// Classifies the `TlsCipherXmlCommand::Execute` operation code:
+/// `0` = `Start`, `1` = `Status`, `2` = `Cancel`.
+pub fn dqh_xmlrpc_classify_tls_cipher_op(operation: i32) -> i32 {
+    if operation == 0 {
+        0
+    } else if operation == 1 {
+        1
+    } else {
+        2
+    }
+}
+
+/// Validates the `ScheduleResumeXmlCommand::Execute` parameter and computes the resume timestamp.
+pub fn dqh_xmlrpc_calc_schedule_resume_time(
+    has_param: bool,
+    seconds: i32,
+    cur_time: i64,
+) -> Option<i64> {
+    if has_param && seconds >= 0 {
+        Some(cur_time.saturating_add(i64::from(seconds)))
+    } else {
+        None
+    }
+}
+
+/// Steps the `(post_job_count, url_count)` accumulators in `StatusXmlCommand::Execute`.
+pub fn dqh_xmlrpc_accum_queue_job_counts(
+    has_post_info: bool,
+    kind: i32,
+    nk_url: i32,
+    cur_post_count: i32,
+    cur_url_count: i32,
+) -> (i32, i32) {
+    (
+        cur_post_count.saturating_add(i32::from(has_post_info)),
+        cur_url_count.saturating_add(i32::from(kind == nk_url)),
+    )
+}
+
+/// Returns true when `AppendFleetXmlCommand::Execute` has reached or exceeded `max_members`.
+pub fn dqh_xmlrpc_is_fleet_member_limit_reached(current_count: usize, max_members: i32) -> bool {
+    (current_count as i32) >= max_members
+}
+
+/// Classifies a history entry kind in `HistoryXmlCommand::Execute` and `HistoryXmlCommand::DetectStatus`:
+/// `1` = `hkNzb` or `hkUrl`, `2` = `hkDup`, `0` = other.
+pub fn dqh_xmlrpc_classify_history_entry_kind(
+    kind: i32,
+    hk_nzb: i32,
+    hk_url: i32,
+    hk_dup: i32,
+) -> i32 {
+    if kind == hk_nzb || kind == hk_url {
+        1
+    } else if kind == hk_dup {
+        2
+    } else {
+        0
+    }
+}
+
+/// Returns true when a server matches the target ID in `EditServerXmlCommand::Execute`.
+pub fn dqh_xmlrpc_matches_edit_server_id(server_id: i32, target_id: i32) -> bool {
+    server_id == target_id
+}
+
+/// Returns true when a server volume slot matches `server_id` in `ResetServerVolumeXmlCommand::Execute`.
+pub fn dqh_xmlrpc_matches_reset_server_volume(index: i32, server_id: i32) -> bool {
+    index == server_id || server_id == -1
+}
+
+/// Returns true when `certVerifLevel` is within `[0, count)` in `TestServerXmlCommand::Execute`.
+pub fn dqh_xmlrpc_is_valid_cert_verif_level(level: i32, count: i32) -> bool {
+    level >= 0 && level < count
+}
+
+/// Selects the response string for `TestServerXmlCommand::Execute`.
+pub fn dqh_xmlrpc_select_test_server_err_text(ok: bool, err_text: &[u8]) -> &[u8] {
+    if ok {
+        b""
+    } else if err_text.is_empty() {
+        b"Unknown error"
+    } else {
+        err_text
+    }
+}
+
+/// Checks individual argument bounds in `TestDiskSpeedXmlCommand::Execute`:
+/// `1` = `write_buffer_kib < 0`, `2` = `max_file_size_gib < 1`, `3` = `timeout_sec < 1`, `0` = valid.
+pub fn dqh_xmlrpc_check_disk_speed_arg_ranges(
+    write_buffer_kib: i32,
+    max_file_size_gib: i32,
+    timeout_sec: i32,
+) -> i32 {
+    if write_buffer_kib < 0 {
+        1
+    } else if max_file_size_gib < 1 {
+        2
+    } else if timeout_sec < 1 {
+        3
+    } else {
+        0
+    }
+}
+
+/// Selects the effective extension script list for `FeedCoordinator::FeedCompleted` and `PreviewFeed`.
+pub fn dqh_feed_coord_select_extensions<'a>(
+    feed_extensions: &'a [u8],
+    global_extensions: &'a [u8],
+) -> &'a [u8] {
+    if !feed_extensions.is_empty() {
+        feed_extensions
+    } else {
+        global_extensions
+    }
+}
+
+/// Computes the minimum `last_update` timestamp across all feeds and `cur_oldest` in `FeedCoordinator::CleanupHistory`.
+pub fn dqh_feed_coord_min_last_update(cur_oldest: i64, last_updates: &[i64]) -> i64 {
+    last_updates.iter().copied().fold(cur_oldest, i64::min)
+}
+
+/// Returns true when `FeedFile::SAX_textHandler` should trim whitespace from the text chunk (`current_element == "category"`).
+pub fn dqh_feed_file_should_trim_text_chunk(current_element: &[u8]) -> bool {
+    current_element == b"category"
+}
+
+/// Returns true when an extension shared pointer is currently in use (`use_count > 1`).
+pub fn dqh_ext_mgr_is_extension_in_use(use_count: i64) -> bool {
+    use_count > 1
+}
+
+/// Returns true when `ExtensionManager::GetExtensionPath` should target the entry file instead of the directory (`same_location_count > 1`).
+pub fn dqh_ext_mgr_should_use_entry_as_path(same_location_count: isize) -> bool {
+    same_location_count > 1
+}
+
+/// Returns true when `ExtensionManager::CreateTasks` should create a scheduler task for an extension.
+pub fn dqh_ext_mgr_can_create_scheduler_task(
+    is_scheduler_script: bool,
+    task_time_empty: bool,
+    in_extensions_list: bool,
+) -> bool {
+    is_scheduler_script && !task_time_empty && in_extensions_list
+}
+
+/// Selects the log message kind (`mkDetail` vs `mkInfo`) for `QueueScriptController::ExecuteScript`.
+pub fn dqh_queue_script_select_exec_msg_kind(
+    event: i32,
+    qe_file_downloaded: i32,
+    mk_detail: i32,
+    mk_info: i32,
+) -> i32 {
+    if event == qe_file_downloaded {
+        mk_detail
+    } else {
+        mk_info
+    }
+}
+
+/// Returns true when a queued item in `QueueScriptCoordinator::EnqueueScript` is a duplicate `qeFileDownloaded` entry for the same NZB and script.
+pub fn dqh_queue_script_is_duplicate_file_downloaded_item(
+    event: i32,
+    qe_file_downloaded: i32,
+    item_nzb_id: i32,
+    target_nzb_id: i32,
+    same_script: bool,
+) -> bool {
+    event == qe_file_downloaded && item_nzb_id == target_nzb_id && same_script
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5279,5 +5450,83 @@ mod tests {
             dqh_diskstate_select_volume_server_slot(3, &[1, 2], &[10, 20]),
             -1
         );
+        assert_eq!(dqh_xmlrpc_classify_tls_cipher_op(0), 0);
+        assert_eq!(dqh_xmlrpc_classify_tls_cipher_op(1), 1);
+        assert_eq!(dqh_xmlrpc_classify_tls_cipher_op(2), 2);
+        assert_eq!(
+            dqh_xmlrpc_calc_schedule_resume_time(true, 60, 1000),
+            Some(1060)
+        );
+        assert_eq!(dqh_xmlrpc_calc_schedule_resume_time(false, 60, 1000), None);
+        assert_eq!(dqh_xmlrpc_calc_schedule_resume_time(true, -1, 1000), None);
+        assert_eq!(
+            dqh_xmlrpc_accum_queue_job_counts(true, 2, 2, 3, 4),
+            (4, 5)
+        );
+        assert_eq!(
+            dqh_xmlrpc_accum_queue_job_counts(false, 1, 2, 3, 4),
+            (3, 4)
+        );
+        assert!(dqh_xmlrpc_is_fleet_member_limit_reached(16, 16));
+        assert!(!dqh_xmlrpc_is_fleet_member_limit_reached(15, 16));
+        assert_eq!(dqh_xmlrpc_classify_history_entry_kind(1, 1, 2, 3), 1);
+        assert_eq!(dqh_xmlrpc_classify_history_entry_kind(2, 1, 2, 3), 1);
+        assert_eq!(dqh_xmlrpc_classify_history_entry_kind(3, 1, 2, 3), 2);
+        assert_eq!(dqh_xmlrpc_classify_history_entry_kind(0, 1, 2, 3), 0);
+        assert!(dqh_xmlrpc_matches_edit_server_id(5, 5));
+        assert!(!dqh_xmlrpc_matches_edit_server_id(4, 5));
+        assert!(dqh_xmlrpc_matches_reset_server_volume(2, 2));
+        assert!(dqh_xmlrpc_matches_reset_server_volume(2, -1));
+        assert!(!dqh_xmlrpc_matches_reset_server_volume(2, 3));
+        assert!(dqh_xmlrpc_is_valid_cert_verif_level(0, 3));
+        assert!(!dqh_xmlrpc_is_valid_cert_verif_level(-1, 3));
+        assert!(!dqh_xmlrpc_is_valid_cert_verif_level(3, 3));
+        assert_eq!(dqh_xmlrpc_select_test_server_err_text(true, b"err"), b"");
+        assert_eq!(
+            dqh_xmlrpc_select_test_server_err_text(false, b""),
+            b"Unknown error"
+        );
+        assert_eq!(
+            dqh_xmlrpc_select_test_server_err_text(false, b"Connection refused"),
+            b"Connection refused"
+        );
+        assert_eq!(dqh_xmlrpc_check_disk_speed_arg_ranges(-1, 1, 1), 1);
+        assert_eq!(dqh_xmlrpc_check_disk_speed_arg_ranges(0, 0, 1), 2);
+        assert_eq!(dqh_xmlrpc_check_disk_speed_arg_ranges(0, 1, 0), 3);
+        assert_eq!(dqh_xmlrpc_check_disk_speed_arg_ranges(4, 1, 5), 0);
+        assert_eq!(
+            dqh_feed_coord_select_extensions(b"feed.py", b"global.py"),
+            b"feed.py"
+        );
+        assert_eq!(
+            dqh_feed_coord_select_extensions(b"", b"global.py"),
+            b"global.py"
+        );
+        assert_eq!(dqh_feed_coord_min_last_update(1000, &[1200, 800, 950]), 800);
+        assert_eq!(dqh_feed_coord_min_last_update(1000, &[]), 1000);
+        assert!(dqh_feed_file_should_trim_text_chunk(b"category"));
+        assert!(!dqh_feed_file_should_trim_text_chunk(b"title"));
+        assert!(dqh_ext_mgr_is_extension_in_use(2));
+        assert!(!dqh_ext_mgr_is_extension_in_use(1));
+        assert!(dqh_ext_mgr_should_use_entry_as_path(2));
+        assert!(!dqh_ext_mgr_should_use_entry_as_path(1));
+        assert!(dqh_ext_mgr_can_create_scheduler_task(true, false, true));
+        assert!(!dqh_ext_mgr_can_create_scheduler_task(false, false, true));
+        assert!(!dqh_ext_mgr_can_create_scheduler_task(true, true, true));
+        assert!(!dqh_ext_mgr_can_create_scheduler_task(true, false, false));
+        assert_eq!(dqh_queue_script_select_exec_msg_kind(0, 0, 4, 1), 4);
+        assert_eq!(dqh_queue_script_select_exec_msg_kind(1, 0, 4, 1), 1);
+        assert!(dqh_queue_script_is_duplicate_file_downloaded_item(
+            0, 0, 42, 42, true
+        ));
+        assert!(!dqh_queue_script_is_duplicate_file_downloaded_item(
+            1, 0, 42, 42, true
+        ));
+        assert!(!dqh_queue_script_is_duplicate_file_downloaded_item(
+            0, 0, 41, 42, true
+        ));
+        assert!(!dqh_queue_script_is_duplicate_file_downloaded_item(
+            0, 0, 42, 42, false
+        ));
     }
 }

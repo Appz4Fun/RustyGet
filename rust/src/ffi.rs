@@ -36888,4 +36888,261 @@ pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_select_volume_server_slot(
     crate::dupequeuehealth::dqh_diskstate_select_volume_server_slot(index, s_ids, srv_ids)
 }
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_xmlrpc_classify_tls_cipher_op(operation: c_int) -> c_int {
+    crate::dupequeuehealth::dqh_xmlrpc_classify_tls_cipher_op(operation)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_xmlrpc_calc_schedule_resume_time(
+    has_param: c_int,
+    seconds: c_int,
+    cur_time: i64,
+    out_resume_time: *mut i64,
+) -> c_int {
+    match crate::dupequeuehealth::dqh_xmlrpc_calc_schedule_resume_time(
+        has_param != 0,
+        seconds,
+        cur_time,
+    ) {
+        Some(t) => {
+            if !out_resume_time.is_null() {
+                *out_resume_time = t;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_xmlrpc_accum_queue_job_counts(
+    has_post_info: c_int,
+    kind: c_int,
+    nk_url: c_int,
+    inout_post_count: *mut c_int,
+    inout_url_count: *mut c_int,
+) {
+    let cur_post = if inout_post_count.is_null() {
+        0
+    } else {
+        *inout_post_count
+    };
+    let cur_url = if inout_url_count.is_null() {
+        0
+    } else {
+        *inout_url_count
+    };
+    let (next_post, next_url) = crate::dupequeuehealth::dqh_xmlrpc_accum_queue_job_counts(
+        has_post_info != 0,
+        kind,
+        nk_url,
+        cur_post,
+        cur_url,
+    );
+    if !inout_post_count.is_null() {
+        *inout_post_count = next_post;
+    }
+    if !inout_url_count.is_null() {
+        *inout_url_count = next_url;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_xmlrpc_is_fleet_member_limit_reached(
+    current_count: usize,
+    max_members: c_int,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_xmlrpc_is_fleet_member_limit_reached(
+        current_count,
+        max_members,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_xmlrpc_classify_history_entry_kind(
+    kind: c_int,
+    hk_nzb: c_int,
+    hk_url: c_int,
+    hk_dup: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_xmlrpc_classify_history_entry_kind(kind, hk_nzb, hk_url, hk_dup)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_xmlrpc_matches_edit_server_id(
+    server_id: c_int,
+    target_id: c_int,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_xmlrpc_matches_edit_server_id(
+        server_id, target_id,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_xmlrpc_matches_reset_server_volume(
+    index: c_int,
+    server_id: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_xmlrpc_matches_reset_server_volume(index, server_id),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_xmlrpc_is_valid_cert_verif_level(
+    level: c_int,
+    count: c_int,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_xmlrpc_is_valid_cert_verif_level(
+        level, count,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_xmlrpc_select_test_server_err_text(
+    ok: c_int,
+    err_text: *const c_char,
+) -> *const c_char {
+    let err_slice = if err_text.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(err_text).to_bytes()
+    };
+    let chosen = crate::dupequeuehealth::dqh_xmlrpc_select_test_server_err_text(ok != 0, err_slice);
+    if chosen.is_empty() {
+        b"\0".as_ptr().cast::<c_char>()
+    } else if err_slice.is_empty() {
+        b"Unknown error\0".as_ptr().cast::<c_char>()
+    } else {
+        err_text
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_xmlrpc_check_disk_speed_arg_ranges(
+    write_buffer_kib: c_int,
+    max_file_size_gib: c_int,
+    timeout_sec: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_xmlrpc_check_disk_speed_arg_ranges(
+        write_buffer_kib,
+        max_file_size_gib,
+        timeout_sec,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_feed_coord_select_extensions(
+    feed_extensions: *const c_char,
+    global_extensions: *const c_char,
+) -> *const c_char {
+    let f_slice = if feed_extensions.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(feed_extensions).to_bytes()
+    };
+    let g_slice = if global_extensions.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(global_extensions).to_bytes()
+    };
+    let chosen = crate::dupequeuehealth::dqh_feed_coord_select_extensions(f_slice, g_slice);
+    if !f_slice.is_empty() && std::ptr::eq(chosen.as_ptr(), f_slice.as_ptr()) {
+        feed_extensions
+    } else {
+        global_extensions
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_feed_coord_min_last_update(
+    cur_oldest: i64,
+    last_updates: *const i64,
+    count: usize,
+) -> i64 {
+    let slice = if last_updates.is_null() || count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(last_updates, count)
+    };
+    crate::dupequeuehealth::dqh_feed_coord_min_last_update(cur_oldest, slice)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_feed_file_should_trim_text_chunk(
+    current_element: *const c_char,
+    len: usize,
+) -> c_int {
+    let s = if current_element.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(current_element.cast::<u8>(), len)
+    };
+    i32::from(crate::dupequeuehealth::dqh_feed_file_should_trim_text_chunk(s))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_ext_mgr_is_extension_in_use(use_count: i64) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_ext_mgr_is_extension_in_use(
+        use_count,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_ext_mgr_should_use_entry_as_path(
+    same_location_count: isize,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_ext_mgr_should_use_entry_as_path(
+        same_location_count,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_ext_mgr_can_create_scheduler_task(
+    is_scheduler_script: c_int,
+    task_time_empty: c_int,
+    in_extensions_list: c_int,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_ext_mgr_can_create_scheduler_task(
+        is_scheduler_script != 0,
+        task_time_empty != 0,
+        in_extensions_list != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_queue_script_select_exec_msg_kind(
+    event: c_int,
+    qe_file_downloaded: c_int,
+    mk_detail: c_int,
+    mk_info: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_queue_script_select_exec_msg_kind(
+        event,
+        qe_file_downloaded,
+        mk_detail,
+        mk_info,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_queue_script_is_duplicate_file_downloaded_item(
+    event: c_int,
+    qe_file_downloaded: c_int,
+    item_nzb_id: c_int,
+    target_nzb_id: c_int,
+    same_script: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_queue_script_is_duplicate_file_downloaded_item(
+            event,
+            qe_file_downloaded,
+            item_nzb_id,
+            target_nzb_id,
+            same_script != 0,
+        ),
+    )
+}
+
 

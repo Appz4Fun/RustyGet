@@ -355,7 +355,7 @@ void FeedCoordinator::FeedCompleted(FeedDownloader* feedDownloader)
 		{
 			bool scriptSuccess = true;
 			FeedScriptController::ExecuteScripts(
-				!Util::EmptyStr(feedInfo->GetExtensions()) ? feedInfo->GetExtensions(): g_Options->GetExtensions(),
+				nzbget_rs_dqh_feed_coord_select_extensions(feedInfo->GetExtensions(), g_Options->GetExtensions()),
 				feedInfo->GetOutputFilename(), feedInfo->GetId(), &scriptSuccess);
 			if (!scriptSuccess)
 			{
@@ -586,7 +586,7 @@ std::shared_ptr<FeedItemList> FeedCoordinator::PreviewFeed(int id,
 		}
 
 		FeedScriptController::ExecuteScripts(
-			!Util::EmptyStr(feedInfo->GetExtensions()) ? feedInfo->GetExtensions(): g_Options->GetExtensions(),
+			nzbget_rs_dqh_feed_coord_select_extensions(feedInfo->GetExtensions(), g_Options->GetExtensions()),
 			feedInfo->GetOutputFilename(), feedInfo->GetId(), nullptr);
 
 		std::unique_ptr<FeedFile> feedFile = parseFeed(feedInfo.get());
@@ -706,13 +706,14 @@ void FeedCoordinator::CleanupHistory()
 
 	time_t oldestUpdate = Util::CurrentTime();
 
+	std::vector<int64_t> lastUpdates;
+	lastUpdates.reserve(m_feeds.size());
 	for (FeedInfo* feedInfo : &m_feeds)
 	{
-		if (feedInfo->GetLastUpdate() < oldestUpdate)
-		{
-			oldestUpdate = feedInfo->GetLastUpdate();
-		}
+		lastUpdates.push_back((int64_t)feedInfo->GetLastUpdate());
 	}
+	oldestUpdate = (time_t)nzbget_rs_dqh_feed_coord_min_last_update(
+		(int64_t)oldestUpdate, lastUpdates.data(), lastUpdates.size());
 
 	time_t borderDate = (time_t)nzbget_rs_fuq_feed_coord_calc_history_border_date(
 		(int64_t)oldestUpdate, g_Options->GetFeedHistory());

@@ -95,7 +95,7 @@ namespace ExtensionManager
 			return err;
 		}
 
-		if (extensionIt->use_count() > 1)
+		if (nzbget_rs_dqh_ext_mgr_is_extension_in_use(extensionIt->use_count()) != 0)
 		{
 			NzbgetRsBuf errBuf = nzbget_rs_dqh_ext_mgr_format_lookup_error(
 				extName.data(), extName.size(), 1);
@@ -232,7 +232,7 @@ namespace ExtensionManager
 			return err;
 		}
 
-		if (extensionIt->use_count() > 1)
+		if (nzbget_rs_dqh_ext_mgr_is_extension_in_use(extensionIt->use_count()) != 0)
 		{
 			NzbgetRsBuf errBuf = nzbget_rs_dqh_ext_mgr_format_lookup_error(
 				name.data(), name.size(), 3);
@@ -314,7 +314,7 @@ namespace ExtensionManager
 			[&location](const auto& ext) { return nzbget_rs_dqh_bytes_equal(location, ext->GetLocation()) != 0; }
 		);
 
-		if (count > 1)
+		if (nzbget_rs_dqh_ext_mgr_should_use_entry_as_path(count) != 0)
 		{
 			// for backward compatibility, when multiple V1 extensions placed 
 			// in the same directory in which case we have to delete an entry file,
@@ -377,11 +377,10 @@ namespace ExtensionManager
 	{
 		for (const auto& extension : m_extensions)
 		{
-			if (!extension->GetSchedulerScript() || Util::EmptyStr(extension->GetTaskTime()))
-			{
-				continue;
-			}
-			if (nzbget_rs_feh_ext_is_in_list(g_Options->GetExtensions(), extension->GetName()))
+			if (nzbget_rs_dqh_ext_mgr_can_create_scheduler_task(
+				extension->GetSchedulerScript() ? 1 : 0,
+				Util::EmptyStr(extension->GetTaskTime()) ? 1 : 0,
+				nzbget_rs_feh_ext_is_in_list(g_Options->GetExtensions(), extension->GetName())) != 0)
 			{
 				g_Options->CreateSchedulerTask(
 					0,

@@ -246,7 +246,8 @@ void FeedFile::SAX_textHandler(FeedFile* file, const char* xmlstr, int len)
 		return;
 
 	std::string str(xmlstr, len);
-	if (file->m_currentElement == "category")
+	if (nzbget_rs_dqh_feed_file_should_trim_text_chunk(
+		file->m_currentElement.data(), file->m_currentElement.size()) != 0)
 	{
 		// Do not break existing users' filters that rely on this normalization
 		Util::Trim(str);

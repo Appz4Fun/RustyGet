@@ -184,7 +184,7 @@ std::unique_ptr<RarCryptoContext> RarCryptoContext::MakeRar5(const char* passwor
 		{
 			return nullptr;
 		}
-		if (memcmp(check, crypt.CheckValue, 8) != 0)
+		if (!nzbget_rs_dqh_mem_slices_equal(check, crypt.CheckValue, 8))
 		{
 			return nullptr;	// wrong password
 		}

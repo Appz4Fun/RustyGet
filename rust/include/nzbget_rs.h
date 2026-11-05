@@ -5994,6 +5994,20 @@ int nzbget_rs_dqh_nstring_find_substr_from(
 void nzbget_rs_dqh_log_parse_rotated_date_fields(
     const char* filename, size_t year_off, size_t mon_off, size_t mday_off,
     int* out_year, int* out_mon, int* out_mday);
+int nzbget_rs_dqh_mem_slices_equal(const void* a, const void* b, size_t len);
+int nzbget_rs_dqh_tls_is_cipher_list(const char* cipher, size_t cipher_len);
+NzbgetRsBuf nzbget_rs_dqh_sysinfo_extract_version_after_space(const char* text);
+int nzbget_rs_dqh_os_classify_os_release_line(
+    const char* line, size_t line_len, int has_name, int has_version,
+    size_t* out_val_offset);
+int nzbget_rs_dqh_dupe_util_trim_bounds(
+    const char* text, size_t text_len, const char* chars,
+    size_t* out_start, size_t* out_len);
+NzbgetRsBuf nzbget_rs_dqh_dupe_util_lower(const char* text, size_t text_len);
+NzbgetRsBuf nzbget_rs_dqh_nzb_fetcher_format_parse_err(
+    const char* body, size_t body_len);
+int nzbget_rs_dqh_util_classify_executor_ext(
+    const char* filename, size_t filename_len, size_t* out_dot_idx);
 
 #include "nzbget_tls_cipher.h"
 

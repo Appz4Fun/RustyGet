@@ -57,8 +57,10 @@ void Util::Init()
 std::optional<std::string>
 Util::FindExecutorProgram(const std::string& filename, const std::string& customPath)
 {
-	size_t idx = filename.find_last_of(".");
-	if (idx == std::string::npos)
+	size_t idx = 0;
+	int extKind = nzbget_rs_dqh_util_classify_executor_ext(
+		filename.data(), filename.size(), &idx);
+	if (extKind == 0)
 	{
 		return filename;
 	}
@@ -71,12 +73,12 @@ Util::FindExecutorProgram(const std::string& filename, const std::string& custom
 		return res;
 	}
 
-	if (fileExt == ".py")
+	if (extKind == 1)
 	{
 		return FindPython();
 	}
 
-	if (fileExt == ".sh")
+	if (extKind == 2)
 	{
 		std::string cmd = std::string("bash --version") + NULL_OUTPUT;
 		if (std::system(cmd.c_str()) == 0)
@@ -91,7 +93,7 @@ Util::FindExecutorProgram(const std::string& filename, const std::string& custom
 		return std::nullopt;
 	}
 
-	if (fileExt == ".js")
+	if (extKind == 3)
 	{
 		const std::string cmd = std::string("node --version") + NULL_OUTPUT;
 		if (std::system(cmd.c_str()) == 0)

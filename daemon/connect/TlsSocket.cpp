@@ -255,7 +255,7 @@ bool TlsSocket::SetCipherSuite(std::string_view cipher)
 	// A single modern suite is an exact pin. Without a protocol bound, setting
 	// only a TLS 1.2 list leaves the default TLS 1.3 suites usable (and vice versa).
 	// Empty values and custom lists retain their historical negotiation behavior.
-	if (cipher.find(':') == std::string_view::npos)
+	if (!nzbget_rs_dqh_tls_is_cipher_list(cipher.data(), cipher.size()))
 	{
 		const auto* ciphers = SSL_get_ciphers(m_session.get());
 		for (int i = 0; i < sk_SSL_CIPHER_num(ciphers); ++i)

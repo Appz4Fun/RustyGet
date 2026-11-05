@@ -127,35 +127,28 @@ namespace System
 				return;
 			}
 
-			// e.g NAME="Debian GNU/Linux"
-			if (m_name.empty() && line.find("NAME=") == 0)
+			size_t valOffset = 0;
+			int lineKind = nzbget_rs_dqh_os_classify_os_release_line(
+				line.data(), line.size(),
+				!m_name.empty() ? 1 : 0,
+				!m_version.empty() ? 1 : 0,
+				&valOffset);
+			if (lineKind == 1)
 			{
-				m_name = line.substr(line.find("=") + 1);
-
+				m_name = line.substr(valOffset);
 				Util::Trim(m_name);
 				TrimQuotes(m_name);
-
-				continue;
 			}
-
-			// e.g VERSION_ID="12"
-			if (m_version.empty() && line.find("VERSION_ID=") == 0)
+			else if (lineKind == 2)
 			{
-				m_version = line.substr(line.find("=") + 1);
-
+				m_version = line.substr(valOffset);
 				Util::Trim(m_version);
 				TrimQuotes(m_version);
-
-				continue;
 			}
-
-			// e.g. BUILD_ID=rolling
-			if (m_version.empty() && line.find("BUILD_ID=") == 0)
+			else if (lineKind == 3)
 			{
-				m_version = line.substr(line.find("=") + 1);
+				m_version = line.substr(valOffset);
 				Util::Trim(m_version);
-
-				continue;
 			}
 		}
 	}

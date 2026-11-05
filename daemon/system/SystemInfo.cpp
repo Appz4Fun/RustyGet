@@ -70,13 +70,15 @@ namespace System
 
 #ifndef DISABLE_TLS
 #ifdef LIBRESSL_VERSION_TEXT
-		std::string str = LIBRESSL_VERSION_TEXT;
-		m_libraries.push_back({ "LibreSSL", str.substr(str.find(" ") + 1) });
+		NzbgetRsBuf verStrBuf = nzbget_rs_dqh_sysinfo_extract_version_after_space(LIBRESSL_VERSION_TEXT);
+		m_libraries.push_back({ "LibreSSL", std::string(verStrBuf.data ? verStrBuf.data : "", verStrBuf.len) });
+		nzbget_rs_free(verStrBuf);
 #elif defined(OPENSSL_FULL_VERSION_STR)
 		m_libraries.push_back({ "OpenSSL", OPENSSL_FULL_VERSION_STR });
 #else 
-		std::string str = OPENSSL_VERSION_TEXT;
-		m_libraries.push_back({ "OpenSSL", str.substr(str.find(" ") + 1) });
+		NzbgetRsBuf verStrBuf = nzbget_rs_dqh_sysinfo_extract_version_after_space(OPENSSL_VERSION_TEXT);
+		m_libraries.push_back({ "OpenSSL", std::string(verStrBuf.data ? verStrBuf.data : "", verStrBuf.len) });
+		nzbget_rs_free(verStrBuf);
 #endif
 #endif
 

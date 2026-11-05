@@ -173,7 +173,10 @@ NzbFetcher::Fetched NzbFetcher::Fetch(const Newznab::Result& listing, time_t dea
 			// an error answer served with HTTP 200 (code 300, code 429) lands
 			// here too: retried, but no sign of a grab limit by itself
 			fetched.reason = frParse;
-			why = "not an nzb-file: " + Newznab::Mask(reply.body.substr(0, 160));
+			NzbgetRsBuf whyBuf = nzbget_rs_dqh_nzb_fetcher_format_parse_err(
+				reply.body.data(), reply.body.size());
+			why.assign(whyBuf.data ? whyBuf.data : "", whyBuf.len);
+			nzbget_rs_free(whyBuf);
 		}
 		else
 		{

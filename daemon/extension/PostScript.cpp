@@ -125,7 +125,7 @@ void PostScriptController::ExecuteScript(std::shared_ptr<const Extension::Script
 
 	NzbgetRsBuf upInfoNameBuf = nzbget_rs_tpr_post_script_format_info_name(
 		m_script->GetName(), m_postInfo->GetNzbInfo()->GetName(), 1);
-	infoName.Format("%s", upInfoNameBuf.data ? upInfoNameBuf.data : "");
+	infoName.Set(upInfoNameBuf.data ? upInfoNameBuf.data : "", (int)upInfoNameBuf.len);
 	nzbget_rs_free(upInfoNameBuf);
 
 	SetLogPrefix(nullptr);

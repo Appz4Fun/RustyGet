@@ -35579,6 +35579,148 @@ pub unsafe extern "C" fn nzbget_rs_dqh_log_parse_rotated_date_fields(
     }
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_mem_slices_equal(
+    a: *const u8,
+    b: *const u8,
+    len: usize,
+) -> c_int {
+    if len == 0 {
+        return 1;
+    }
+    if a.is_null() || b.is_null() {
+        return i32::from(a == b);
+    }
+    let sa = std::slice::from_raw_parts(a, len);
+    let sb = std::slice::from_raw_parts(b, len);
+    i32::from(crate::dupequeuehealth::dqh_mem_slices_equal(sa, sb))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_tls_is_cipher_list(
+    cipher: *const c_char,
+    cipher_len: usize,
+) -> c_int {
+    let s = if cipher.is_null() || cipher_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(cipher as *const u8, cipher_len)
+    };
+    i32::from(crate::dupequeuehealth::dqh_tls_is_cipher_list(s))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_sysinfo_extract_version_after_space(
+    text: *const c_char,
+) -> RsBuf {
+    let s = if text.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(text).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_sysinfo_extract_version_after_space(s))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_os_classify_os_release_line(
+    line: *const c_char,
+    line_len: usize,
+    has_name: c_int,
+    has_version: c_int,
+    out_val_offset: *mut usize,
+) -> c_int {
+    let l = if line.is_null() || line_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(line as *const u8, line_len)
+    };
+    let (kind, off) = crate::dupequeuehealth::dqh_os_classify_os_release_line(
+        l,
+        has_name != 0,
+        has_version != 0,
+    );
+    if !out_val_offset.is_null() {
+        *out_val_offset = off;
+    }
+    kind
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_dupe_util_trim_bounds(
+    text: *const c_char,
+    text_len: usize,
+    chars: *const c_char,
+    out_start: *mut usize,
+    out_len: *mut usize,
+) -> c_int {
+    let t = if text.is_null() || text_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(text as *const u8, text_len)
+    };
+    let c = if chars.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(chars).to_bytes()
+    };
+    match crate::dupequeuehealth::dqh_dupe_util_trim_bounds(t, c) {
+        Some((start, len)) => {
+            if !out_start.is_null() {
+                *out_start = start;
+            }
+            if !out_len.is_null() {
+                *out_len = len;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_dupe_util_lower(
+    text: *const c_char,
+    text_len: usize,
+) -> RsBuf {
+    let t = if text.is_null() || text_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(text as *const u8, text_len)
+    };
+    into_buf(crate::dupequeuehealth::dqh_dupe_util_lower(t))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_nzb_fetcher_format_parse_err(
+    body: *const c_char,
+    body_len: usize,
+) -> RsBuf {
+    let b = if body.is_null() || body_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(body as *const u8, body_len)
+    };
+    into_buf(crate::dupequeuehealth::dqh_nzb_fetcher_format_parse_err(b))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_util_classify_executor_ext(
+    filename: *const c_char,
+    filename_len: usize,
+    out_dot_idx: *mut usize,
+) -> c_int {
+    let f = if filename.is_null() || filename_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(filename as *const u8, filename_len)
+    };
+    let (kind, idx) = crate::dupequeuehealth::dqh_util_classify_executor_ext(f);
+    if !out_dot_idx.is_null() {
+        *out_dot_idx = idx;
+    }
+    kind
+}
+
 
 
 

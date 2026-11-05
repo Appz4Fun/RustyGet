@@ -88,7 +88,7 @@ struct Crypto
 			EVP_DecryptUpdate(decrypt.get(), output.data(), &size, ciphertext[i].data(), RecordSize) != 1 || size != RecordSize) return -1;
 		if (!ccm && (EVP_CIPHER_CTX_ctrl(decrypt.get(), EVP_CTRL_AEAD_SET_TAG, tagSize, tags[i].data()) != 1 ||
 			EVP_DecryptFinal_ex(decrypt.get(), output.data() + size, &tail) != 1 || tail != 0)) return -1;
-		return memcmp(output.data(), plaintext.data(), RecordSize) == 0 ? RecordSize : -1;
+		return nzbget_rs_dqh_mem_slices_equal(output.data(), plaintext.data(), RecordSize) != 0 ? RecordSize : -1;
 	}
 };
 

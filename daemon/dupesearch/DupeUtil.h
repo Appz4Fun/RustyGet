@@ -24,6 +24,7 @@
 #include <fstream>
 #include <string>
 #include "FileSystem.h"
+#include "nzbget_rs.h"
 
 /* Small helpers the DupeSearch files share. Needs nzbget.h first (fs). */
 namespace DupeUtil
@@ -51,22 +52,22 @@ namespace DupeUtil
 
 	inline std::string Lower(std::string text)
 	{
-		for (char& ch : text)
-		{
-			ch = (char)tolower((unsigned char)ch);
-		}
-		return text;
+		NzbgetRsBuf buf = nzbget_rs_dqh_dupe_util_lower(text.data(), text.size());
+		std::string out(buf.data ? buf.data : "", buf.len);
+		nzbget_rs_free(buf);
+		return out;
 	}
 
 	/* the text without any of chars at its start and end */
 	inline std::string Trim(const std::string& text, const char* chars = " \t\r\n")
 	{
-		size_t begin = text.find_first_not_of(chars);
-		if (begin == std::string::npos)
+		size_t start = 0;
+		size_t len = 0;
+		if (!nzbget_rs_dqh_dupe_util_trim_bounds(text.data(), text.size(), chars, &start, &len))
 		{
 			return "";
 		}
-		return text.substr(begin, text.find_last_not_of(chars) - begin + 1);
+		return text.substr(start, len);
 	}
 
 	inline std::string ReadAll(const std::string& path)

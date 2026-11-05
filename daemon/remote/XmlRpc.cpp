@@ -2983,7 +2983,9 @@ void TestServerXmlCommand::Execute()
 		BString<1024> id;
 		while (id.Length() < 30)
 		{
-			id.AppendFmt("%i", rand());
+			NzbgetRsBuf rBuf = nzbget_rs_dqh_conn_format_port_str(rand());
+			id.Append(rBuf.data ? rBuf.data : "", (int)rBuf.len);
+			nzbget_rs_free(rBuf);
 		}
 		NzbgetRsBuf cmdBuf = nzbget_rs_tpr_xmlrpc_format_testserver_article_cmd(*id);
 		const char* response = connection.Request(cmdBuf.data ? cmdBuf.data : "");

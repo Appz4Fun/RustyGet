@@ -2595,6 +2595,85 @@ pub fn dqh_log_parse_rotated_date_fields(
     (year, mon, mday)
 }
 
+/// Returns `true` when two byte slices are identical.
+pub fn dqh_mem_slices_equal(a: &[u8], b: &[u8]) -> bool {
+    a == b
+}
+
+/// Returns `true` when `cipher` contains `:` (a multi-suite cipher list rather than a single suite).
+pub fn dqh_tls_is_cipher_list(cipher: &[u8]) -> bool {
+    cipher.contains(&b':')
+}
+
+/// Extracts the substring after the first ASCII space in `text` (or `text` if no space exists),
+/// for `SystemInfo::InitLibraries`.
+pub fn dqh_sysinfo_extract_version_after_space(text: &[u8]) -> Vec<u8> {
+    match text.iter().position(|&b| b == b' ') {
+        Some(idx) => text[idx + 1..].to_vec(),
+        None => text.to_vec(),
+    }
+}
+
+/// Classifies an `/etc/os-release` line for `OS::InitOSInfoFromOSRelease`:
+/// `(1, 5)` for `NAME=`, `(2, 11)` for `VERSION_ID=`, `(3, 9)` for `BUILD_ID=`, or `(0, 0)`.
+pub fn dqh_os_classify_os_release_line(
+    line: &[u8],
+    has_name: bool,
+    has_version: bool,
+) -> (i32, usize) {
+    if !has_name && line.starts_with(b"NAME=") {
+        (1, 5)
+    } else if !has_version && line.starts_with(b"VERSION_ID=") {
+        (2, 11)
+    } else if !has_version && line.starts_with(b"BUILD_ID=") {
+        (3, 9)
+    } else {
+        (0, 0)
+    }
+}
+
+/// Computes `(start, len)` after trimming any byte in `chars` from both ends of `text`,
+/// or `None` when every byte in `text` is in `chars`, for `DupeUtil::Trim`.
+pub fn dqh_dupe_util_trim_bounds(text: &[u8], chars: &[u8]) -> Option<(usize, usize)> {
+    let begin = text.iter().position(|b| !chars.contains(b))?;
+    let end = text.iter().rposition(|b| !chars.contains(b))?;
+    Some((begin, end - begin + 1))
+}
+
+/// Lowercases `text` byte-by-byte using the active C locale (`c_lower`), for `DupeUtil::Lower`.
+pub fn dqh_dupe_util_lower(text: &[u8]) -> Vec<u8> {
+    crate::releasename::lower(text)
+}
+
+/// Formats `"not an nzb-file: <masked first 160 bytes>"` for `NzbFetcher::Fetch`.
+pub fn dqh_nzb_fetcher_format_parse_err(body: &[u8]) -> Vec<u8> {
+    let prefix = &body[..body.len().min(160)];
+    let masked = crate::dupefeed::mask_newznab_text(prefix);
+    let mut out = Vec::with_capacity(17 + masked.len());
+    out.extend_from_slice(b"not an nzb-file: ");
+    out.extend_from_slice(&masked);
+    out
+}
+
+/// Classifies the file extension in `Util::FindExecutorProgram`:
+/// returns `(0, 0)` when no `.` is present, or `(kind, dot_idx)` where `kind` is:
+/// `1` = `".py"`, `2` = `".sh"`, `3` = `".js"`, `4` = any other extension.
+pub fn dqh_util_classify_executor_ext(filename: &[u8]) -> (i32, usize) {
+    match filename.iter().rposition(|&b| b == b'.') {
+        None => (0, 0),
+        Some(idx) => {
+            let ext = &filename[idx..];
+            let kind = match ext {
+                b".py" => 1,
+                b".sh" => 2,
+                b".js" => 3,
+                _ => 4,
+            };
+            (kind, idx)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3610,5 +3689,40 @@ mod tests {
             dqh_log_parse_rotated_date_fields(b"nzbget-2026-11-05.log", 7, 12, 15),
             (126, 10, 5)
         );
+        assert!(dqh_mem_slices_equal(b"abcdef", b"abcdef"));
+        assert!(!dqh_mem_slices_equal(b"abcdef", b"abcdeg"));
+        assert!(dqh_tls_is_cipher_list(b"TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384"));
+        assert!(!dqh_tls_is_cipher_list(b"TLS_AES_256_GCM_SHA384"));
+        assert_eq!(
+            dqh_sysinfo_extract_version_after_space(b"OpenSSL 3.0.12 24 Oct 2023"),
+            b"3.0.12 24 Oct 2023"
+        );
+        assert_eq!(
+            dqh_os_classify_os_release_line(b"NAME=\"Debian\"", false, false),
+            (1, 5)
+        );
+        assert_eq!(
+            dqh_os_classify_os_release_line(b"VERSION_ID=\"12\"", true, false),
+            (2, 11)
+        );
+        assert_eq!(
+            dqh_os_classify_os_release_line(b"BUILD_ID=rolling", true, false),
+            (3, 9)
+        );
+        assert_eq!(
+            dqh_dupe_util_trim_bounds(b"  \t hello \r\n ", b" \t\r\n"),
+            Some((4, 5))
+        );
+        assert_eq!(dqh_dupe_util_trim_bounds(b" \t\r\n", b" \t\r\n"), None);
+        assert_eq!(dqh_dupe_util_lower(b"HeLLo"), b"hello");
+        assert_eq!(
+            dqh_nzb_fetcher_format_parse_err(b"<error apikey=secret123 />"),
+            b"not an nzb-file: <error apikey=*** />"
+        );
+        assert_eq!(dqh_util_classify_executor_ext(b"/path/script.py"), (1, 12));
+        assert_eq!(dqh_util_classify_executor_ext(b"/path/script.sh"), (2, 12));
+        assert_eq!(dqh_util_classify_executor_ext(b"/path/script.js"), (3, 12));
+        assert_eq!(dqh_util_classify_executor_ext(b"/path/script.rb"), (4, 12));
+        assert_eq!(dqh_util_classify_executor_ext(b"/path/script"), (0, 0));
     }
 }

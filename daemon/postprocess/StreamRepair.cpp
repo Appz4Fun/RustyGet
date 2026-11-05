@@ -1903,7 +1903,7 @@ bool StreamRepairController::CompareToFile(DiskFile& file, int64 offset, const c
 		{
 			return false; // short read (e.g. join-mode file shorter than expected)
 		}
-		if (memcmp(buffer, data + (size - remaining), chunk))
+		if (!nzbget_rs_dqh_mem_slices_equal(buffer, data + (size - remaining), (size_t)chunk))
 		{
 			return false;
 		}

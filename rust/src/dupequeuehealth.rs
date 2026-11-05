@@ -3285,6 +3285,117 @@ pub fn dqh_options_merge_script_list(existing: &[u8], add_list: &[u8]) -> Vec<u8
     out
 }
 
+/// Returns `Some(b"127.0.0.1\0")` when `control_ip` is `"0.0.0.0"`,
+/// or `None` when the caller's `control_ip` should be used as-is.
+pub fn dqh_frontend_resolve_control_ip(control_ip: &[u8]) -> Option<&'static [u8]> {
+    if control_ip == b"0.0.0.0" {
+        Some(b"127.0.0.1\0")
+    } else {
+        None
+    }
+}
+
+/// Returns the 8-character NUL-terminated message type prefix for `NCursesFrontend::PrintMessage`.
+/// When `first_line` is false, returns 8 spaces (`"        \0"`).
+pub fn dqh_ncurses_message_type_label(kind: i32, first_line: bool) -> &'static [u8] {
+    if !first_line {
+        return b"        \0";
+    }
+    match kind {
+        0 => b"INFO    \0",
+        1 => b"WARNING \0",
+        2 => b"ERROR   \0",
+        3 => b"DEBUG   \0",
+        4 => b"DETAIL  \0",
+        _ => b"        \0",
+    }
+}
+
+/// Maps `Message::EKind` (`0..=4`) to its ncurses color pair (`2..=6`).
+pub fn dqh_ncurses_message_color_pair(kind: i32) -> i32 {
+    match kind {
+        0 => 2, // NCURSES_COLORPAIR_INFO
+        1 => 3, // NCURSES_COLORPAIR_WARNING
+        2 => 4, // NCURSES_COLORPAIR_ERROR
+        3 => 5, // NCURSES_COLORPAIR_DEBUG
+        4 => 6, // NCURSES_COLORPAIR_DETAIL
+        _ => 1, // NCURSES_COLORPAIR_TEXT
+    }
+}
+
+/// Returns the NUL-terminated HTTP `Content-Type` string for `XmlRpcProcessor::BuildResponse`.
+pub fn dqh_xmlrpc_response_content_type(is_xml_rpc: bool) -> &'static [u8] {
+    if is_xml_rpc {
+        b"text/xml\0"
+    } else {
+        b"application/json\0"
+    }
+}
+
+/// Returns the NUL-terminated server validation error message for `TestServerSpeedXmlCommand::Execute`.
+pub fn dqh_xmlrpc_test_server_speed_err_msg(server_err: i32) -> &'static [u8] {
+    match server_err {
+        1 => b"Server not found\0",
+        2 => b"Server is not active\0",
+        _ => b"Server has no connections configured\0",
+    }
+}
+
+/// Returns the NUL-terminated response message for `WriteLogBinCommand::Execute`.
+pub fn dqh_binrpc_write_log_response_msg(ok: bool) -> &'static [u8] {
+    if ok {
+        b"Message added to log\0"
+    } else {
+        b"Invalid message-kind\0"
+    }
+}
+
+/// Returns the NUL-terminated response message for `ScanBinCommand::Execute`.
+pub fn dqh_binrpc_scan_response_msg(sync_mode: bool) -> &'static [u8] {
+    if sync_mode {
+        b"Scan-Command completed\0"
+    } else {
+        b"Scan-Command scheduled successfully\0"
+    }
+}
+
+/// Steps the cumulative file CRC in `ArticleWriter::ProcessArticles` for yEnc articles.
+/// Returns `(next_crc, next_first_article)` where `next_first_article` is always `false`.
+pub fn dqh_article_writer_step_file_crc(
+    first_article: bool,
+    current_crc: u32,
+    article_crc: u32,
+    segment_size: i32,
+) -> (u32, bool) {
+    let next_crc = if first_article {
+        article_crc
+    } else {
+        crate::crc::combine(current_crc, article_crc, segment_size as u32)
+    };
+    (next_crc, false)
+}
+
+/// Classifies the final outcome of `RenameController::Run`:
+/// `1` = cancelled (`is_stopped == true`),
+/// `2` = renamed files (`renamed_count > 0`),
+/// `3` = no renamed files found.
+pub fn dqh_rename_ctrl_classify_run_outcome(is_stopped: bool, renamed_count: i32) -> i32 {
+    if is_stopped {
+        1
+    } else if renamed_count > 0 {
+        2
+    } else {
+        3
+    }
+}
+
+/// Uppercases the first byte of `buf` in-place if it is an ASCII lowercase letter (`a..=z`).
+pub fn dqh_post_capitalize_first_ascii(buf: &mut [u8]) {
+    if let Some(first) = buf.first_mut() {
+        *first = first.to_ascii_uppercase();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4474,5 +4585,68 @@ mod tests {
             dqh_options_merge_script_list(b"ScriptA", b"scripta, ScriptB ; ScriptC"),
             b"ScriptA,ScriptB,ScriptC"
         );
+        assert_eq!(
+            dqh_frontend_resolve_control_ip(b"0.0.0.0"),
+            Some(&b"127.0.0.1\0"[..])
+        );
+        assert_eq!(dqh_frontend_resolve_control_ip(b"::"), None);
+        assert_eq!(dqh_frontend_resolve_control_ip(b"192.168.1.10"), None);
+        assert_eq!(dqh_ncurses_message_type_label(0, true), b"INFO    \0");
+        assert_eq!(dqh_ncurses_message_type_label(2, true), b"ERROR   \0");
+        assert_eq!(dqh_ncurses_message_type_label(2, false), b"        \0");
+        assert_eq!(dqh_ncurses_message_color_pair(0), 2);
+        assert_eq!(dqh_ncurses_message_color_pair(4), 6);
+        assert_eq!(dqh_xmlrpc_response_content_type(true), b"text/xml\0");
+        assert_eq!(
+            dqh_xmlrpc_response_content_type(false),
+            b"application/json\0"
+        );
+        assert_eq!(
+            dqh_xmlrpc_test_server_speed_err_msg(1),
+            b"Server not found\0"
+        );
+        assert_eq!(
+            dqh_xmlrpc_test_server_speed_err_msg(2),
+            b"Server is not active\0"
+        );
+        assert_eq!(
+            dqh_xmlrpc_test_server_speed_err_msg(3),
+            b"Server has no connections configured\0"
+        );
+        assert_eq!(
+            dqh_binrpc_write_log_response_msg(true),
+            b"Message added to log\0"
+        );
+        assert_eq!(
+            dqh_binrpc_write_log_response_msg(false),
+            b"Invalid message-kind\0"
+        );
+        assert_eq!(
+            dqh_binrpc_scan_response_msg(true),
+            b"Scan-Command completed\0"
+        );
+        assert_eq!(
+            dqh_binrpc_scan_response_msg(false),
+            b"Scan-Command scheduled successfully\0"
+        );
+        {
+            let (crc1, first1) = dqh_article_writer_step_file_crc(true, 0, 0x12345678, 100);
+            assert_eq!(crc1, 0x12345678);
+            assert!(!first1);
+            let (crc2, first2) = dqh_article_writer_step_file_crc(first1, crc1, 0x9abcdef0, 200);
+            assert_eq!(
+                crc2,
+                crate::crc::combine(0x12345678, 0x9abcdef0, 200)
+            );
+            assert!(!first2);
+        }
+        assert_eq!(dqh_rename_ctrl_classify_run_outcome(true, 5), 1);
+        assert_eq!(dqh_rename_ctrl_classify_run_outcome(false, 5), 2);
+        assert_eq!(dqh_rename_ctrl_classify_run_outcome(false, 0), 3);
+        {
+            let mut s = *b"move for test";
+            dqh_post_capitalize_first_ascii(&mut s);
+            assert_eq!(&s, b"Move for test");
+        }
     }
 }

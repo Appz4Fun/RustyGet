@@ -104,11 +104,13 @@ void RenameController::Run()
 
 	ExecRename(destDir, finalDir, nzbName);
 
-	if (IsStopped())
+	int runOutcome = nzbget_rs_dqh_rename_ctrl_classify_run_outcome(
+		IsStopped() ? 1 : 0, m_renamedCount);
+	if (runOutcome == 1)
 	{
 		PrintMessage(Message::mkWarning, "Renaming cancelled for %s", *nzbName);
 	}
-	else if (m_renamedCount > 0)
+	else if (runOutcome == 2)
 	{
 		PrintMessage(Message::mkInfo, "Successfully renamed %i %sfile(s) for %s",
 			m_renamedCount, archiveKindPrefix, *nzbName);

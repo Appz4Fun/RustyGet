@@ -372,14 +372,11 @@ int NCursesFrontend::PrintMessage(Message& msg, int row, int maxLines)
 	{
 		int r = row - msgLines + i + 1;
 		PlotLine(text + winWidth * i, r, 8, NCURSES_COLORPAIR_TEXT);
-		if (i == 0)
-		{
-			PlotText(m_messageTypes[msg.GetKind()], r, 0, m_messageColorTypes[msg.GetKind()], false);
-		}
-		else
-		{
-			PlotText("        ", r, 0, m_messageColorTypes[msg.GetKind()], false);
-		}
+		PlotText(
+			nzbget_rs_dqh_ncurses_message_type_label((int)msg.GetKind(), i == 0 ? 1 : 0),
+			r, 0,
+			nzbget_rs_dqh_ncurses_message_color_pair((int)msg.GetKind()),
+			false);
 		lines++;
 	}
 

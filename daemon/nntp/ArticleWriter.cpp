@@ -859,8 +859,10 @@ uint32 ArticleWriter::ProcessArticles(DiskFile& outfile,
 		// 3. Calculate CRC
 		if (m_format == Decoder::efYenc)
 		{
-			crc = firstArticle ? pa->GetCrc() : Crc32::Combine(crc, pa->GetCrc(), static_cast<uint32_t>(pa->GetSegmentSize()));
-			firstArticle = false;
+			int firstArt = firstArticle ? 1 : 0;
+			crc = nzbget_rs_dqh_article_writer_step_file_crc(
+				firstArt, crc, pa->GetCrc(), pa->GetSegmentSize(), &firstArt);
+			firstArticle = firstArt != 0;
 		}
 	}
 

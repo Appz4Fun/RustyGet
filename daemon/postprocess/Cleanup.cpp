@@ -62,7 +62,7 @@ void MoveController::Run()
 
 	bool ok = MoveFiles();
 
-	infoName[0] = 'M'; // uppercase
+	nzbget_rs_dqh_post_capitalize_first_ascii(*infoName);
 
 	if (ok)
 	{
@@ -285,7 +285,7 @@ void CleanupController::Run()
 		deleted = deleted || deleted2;
 	}
 
-	infoName[0] = 'C'; // uppercase
+	nzbget_rs_dqh_post_capitalize_first_ascii(*infoName);
 
 	int cleanupStatus = 0;
 	int cleanupOutcome = nzbget_rs_rco_cleanup_controller_decide_outcome(

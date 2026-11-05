@@ -1098,7 +1098,7 @@ in_addr_t Connection::ResolveHostAddr(const char* host)
 
 const char* Connection::GetRemoteAddr()
 {
-	if (!m_host.empty() && m_host.front() == '/')
+	if (nzbget_rs_ccm_conn_is_unix_domain_path(m_host.c_str()) != 0)
 	{
 		return "-";
 	}

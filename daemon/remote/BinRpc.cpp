@@ -1023,7 +1023,7 @@ void WriteLogBinCommand::Execute()
 		default:
 			OK = false;
 	}
-	SendBoolResponse(OK, OK ? "Message added to log" : "Invalid message-kind");
+	SendBoolResponse(OK, nzbget_rs_dqh_binrpc_write_log_response_msg(OK ? 1 : 0));
 }
 
 void ScanBinCommand::Execute()
@@ -1037,7 +1037,7 @@ void ScanBinCommand::Execute()
 	bool syncMode = ntohl(ScanRequest.m_syncMode);
 
 	g_Scanner->ScanNzbDir(syncMode);
-	SendBoolResponse(true, syncMode ? "Scan-Command completed" : "Scan-Command scheduled successfully");
+	SendBoolResponse(true, nzbget_rs_dqh_binrpc_scan_response_msg(syncMode ? 1 : 0));
 }
 
 void HistoryBinCommand::Execute()

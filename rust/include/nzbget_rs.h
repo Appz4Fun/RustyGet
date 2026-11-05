@@ -6079,6 +6079,18 @@ NzbgetRsBuf nzbget_rs_dqh_ext_mgr_format_compound_update_error(
     int kind);
 NzbgetRsBuf nzbget_rs_dqh_options_merge_script_list(
     const char* existing, const char* add_list);
+const char* nzbget_rs_dqh_frontend_resolve_control_ip(const char* control_ip);
+const char* nzbget_rs_dqh_ncurses_message_type_label(int kind, int first_line);
+int nzbget_rs_dqh_ncurses_message_color_pair(int kind);
+const char* nzbget_rs_dqh_xmlrpc_response_content_type(int is_xml_rpc);
+const char* nzbget_rs_dqh_xmlrpc_test_server_speed_err_msg(int server_err);
+const char* nzbget_rs_dqh_binrpc_write_log_response_msg(int ok);
+const char* nzbget_rs_dqh_binrpc_scan_response_msg(int sync_mode);
+uint32_t nzbget_rs_dqh_article_writer_step_file_crc(
+    int first_article, uint32_t current_crc, uint32_t article_crc,
+    int segment_size, int* out_first_article);
+int nzbget_rs_dqh_rename_ctrl_classify_run_outcome(int is_stopped, int renamed_count);
+void nzbget_rs_dqh_post_capitalize_first_ascii(char* s);
 
 #include "nzbget_tls_cipher.h"
 

@@ -708,7 +708,7 @@ void XmlRpcProcessor::BuildResponse(const char* response, const char* callbackFu
 	nzbget_rs_free(head);
 	nzbget_rs_free(tail);
 
-	m_contentType = xmlRpc ? "text/xml" : "application/json";
+	m_contentType = nzbget_rs_dqh_xmlrpc_response_content_type(xmlRpc ? 1 : 0);
 }
 
 void XmlRpcProcessor::BuildErrorResponse(int errCode, const char* errText)
@@ -3035,8 +3035,7 @@ void TestServerSpeedXmlCommand::Execute()
 		server ? server->GetMaxConnections() : 0);
 	if (serverErr != 0)
 	{
-		BuildErrorResponse(2, serverErr == 1 ? "Server not found" :
-			serverErr == 2 ? "Server is not active" : "Server has no connections configured");
+		BuildErrorResponse(2, nzbget_rs_dqh_xmlrpc_test_server_speed_err_msg(serverErr));
 		return;
 	}
 

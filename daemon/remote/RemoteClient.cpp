@@ -77,8 +77,7 @@ void RemoteClient::perror(const char * msg)
 
 bool RemoteClient::InitConnection()
 {
-	const char* controlIp = nzbget_rs_ccm_remote_client_is_wildcard_control_ip(g_Options->GetControlIp()) ?
-		"127.0.0.1" : g_Options->GetControlIp();
+	const char* controlIp = nzbget_rs_dqh_frontend_resolve_control_ip(g_Options->GetControlIp());
 
 	// Create a connection to the server (retry briefly if server is mid-reload)
 	bool OK = false;

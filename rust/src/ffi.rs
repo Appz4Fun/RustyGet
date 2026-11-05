@@ -36328,16 +36328,98 @@ pub unsafe extern "C" fn nzbget_rs_dqh_options_merge_script_list(
     into_buf(crate::dupequeuehealth::dqh_options_merge_script_list(ex, al))
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_frontend_resolve_control_ip(
+    control_ip: *const c_char,
+) -> *const c_char {
+    if control_ip.is_null() {
+        return b"\0".as_ptr() as *const c_char;
+    }
+    let ip = CStr::from_ptr(control_ip).to_bytes();
+    match crate::dupequeuehealth::dqh_frontend_resolve_control_ip(ip) {
+        Some(resolved) => resolved.as_ptr() as *const c_char,
+        None => control_ip,
+    }
+}
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_ncurses_message_type_label(
+    kind: c_int,
+    first_line: c_int,
+) -> *const c_char {
+    crate::dupequeuehealth::dqh_ncurses_message_type_label(kind, first_line != 0).as_ptr()
+        as *const c_char
+}
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_ncurses_message_color_pair(kind: c_int) -> c_int {
+    crate::dupequeuehealth::dqh_ncurses_message_color_pair(kind)
+}
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_xmlrpc_response_content_type(
+    is_xml_rpc: c_int,
+) -> *const c_char {
+    crate::dupequeuehealth::dqh_xmlrpc_response_content_type(is_xml_rpc != 0).as_ptr()
+        as *const c_char
+}
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_xmlrpc_test_server_speed_err_msg(
+    server_err: c_int,
+) -> *const c_char {
+    crate::dupequeuehealth::dqh_xmlrpc_test_server_speed_err_msg(server_err).as_ptr()
+        as *const c_char
+}
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_binrpc_write_log_response_msg(ok: c_int) -> *const c_char {
+    crate::dupequeuehealth::dqh_binrpc_write_log_response_msg(ok != 0).as_ptr() as *const c_char
+}
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_binrpc_scan_response_msg(sync_mode: c_int) -> *const c_char {
+    crate::dupequeuehealth::dqh_binrpc_scan_response_msg(sync_mode != 0).as_ptr() as *const c_char
+}
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_article_writer_step_file_crc(
+    first_article: c_int,
+    current_crc: u32,
+    article_crc: u32,
+    segment_size: c_int,
+    out_first_article: *mut c_int,
+) -> u32 {
+    let (next_crc, next_first) = crate::dupequeuehealth::dqh_article_writer_step_file_crc(
+        first_article != 0,
+        current_crc,
+        article_crc,
+        segment_size,
+    );
+    if !out_first_article.is_null() {
+        *out_first_article = i32::from(next_first);
+    }
+    next_crc
+}
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_rename_ctrl_classify_run_outcome(
+    is_stopped: c_int,
+    renamed_count: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_rename_ctrl_classify_run_outcome(is_stopped != 0, renamed_count)
+}
 
-
-
-
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_post_capitalize_first_ascii(s: *mut c_char) {
+    if s.is_null() {
+        return;
+    }
+    let b = *(s as *const u8);
+    if b != 0 {
+        let mut arr = [b];
+        crate::dupequeuehealth::dqh_post_capitalize_first_ascii(&mut arr);
+        *(s as *mut u8) = arr[0];
+    }
+}
 

@@ -85,20 +85,6 @@ private:
 	// Inputting numbers
 	int m_inputNumberIndex = 0;
 	int m_inputValue;
-	const char* m_messageTypes[5] = {
-		"INFO    ",
-		"WARNING ",
-		"ERROR   ",
-		"DEBUG   ",
-		"DETAIL  "
-	};
-	const int m_messageColorTypes[5] = { 
-		NCURSES_COLORPAIR_INFO, 
-		NCURSES_COLORPAIR_WARNING,
-		NCURSES_COLORPAIR_ERROR, 
-		NCURSES_COLORPAIR_DEBUG, 
-		NCURSES_COLORPAIR_DETAIL 
-	};
 
 	void* m_window; // WINDOW*
 

@@ -141,7 +141,8 @@ bool TlsSocket::Start()
 		}
 	}
 
-	if (m_isClient && m_X509Store)
+	if (nzbget_rs_dqh_tls_should_verify_client_x509_store(
+		m_isClient ? 1 : 0, m_X509Store ? 1 : 0) != 0)
 	{
 		SSL_CTX_set1_cert_store(m_context.get(), m_X509Store.get());
 
@@ -209,7 +210,8 @@ bool TlsSocket::Start()
 				SSL_R_UNSUPPORTED_PROTOCOL) != 0)
 				m_probeFailure = 0; // Explicit rejection of this single-suite handshake.
 		}
-		if (m_isClient && shouldVerify)
+		if (nzbget_rs_dqh_tls_should_check_verify_result_on_handshake_fail(
+			m_isClient ? 1 : 0, shouldVerify ? 1 : 0) != 0)
 		{
 			long verifyRes = SSL_get_verify_result(m_session.get());
 			if (verifyRes != X509_V_OK)

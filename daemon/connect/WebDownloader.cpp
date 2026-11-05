@@ -364,7 +364,7 @@ WebDownloader::EStatus WebDownloader::DownloadBody()
 		char* buffer;
 		int len;
 		m_connection->ReadBuffer(&buffer, &len);
-		if (len == 0)
+		if (nzbget_rs_dqh_webdl_should_try_recv_when_buf_empty(len) != 0)
 		{
 			len = m_connection->TryRecv(lineBuf, lineBuf.Size());
 			buffer = lineBuf;

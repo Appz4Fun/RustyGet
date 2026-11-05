@@ -827,7 +827,10 @@ NzbInfoXmlCommand::~NzbInfoXmlCommand() = default;
 
 bool XmlCommand::IsJson()
 {
-	return m_protocol == XmlRpcProcessor::rpJsonRpc || m_protocol == XmlRpcProcessor::rpJsonPRpc;
+	return nzbget_rs_dqh_xmlrpc_is_json_protocol(
+		(int)m_protocol,
+		(int)XmlRpcProcessor::rpJsonRpc,
+		(int)XmlRpcProcessor::rpJsonPRpc) != 0;
 }
 
 void XmlCommand::AppendResponse(const char* part)
@@ -878,7 +881,8 @@ void XmlCommand::BuildIntResponse(int value)
 
 void XmlCommand::PrepareParams()
 {
-	if (IsJson() && m_httpMethod == XmlRpcProcessor::hmPost)
+	if (nzbget_rs_dqh_xmlrpc_should_skip_to_json_post_params(
+		IsJson() ? 1 : 0, (int)m_httpMethod, (int)XmlRpcProcessor::hmPost) != 0)
 	{
 		// without "params" the request is emptied: no parameters follow
 		m_requestPtr = nzbget_rs_rpc_skip_to_params(m_requestPtr);
@@ -1444,7 +1448,8 @@ const char* ListGroupsXmlCommand::DetectStatus(NzbInfo* nzbInfo)
 	bool hasPostInfo = nzbInfo->GetPostInfo() != nullptr;
 	int postStage = hasPostInfo ? (int)nzbInfo->GetPostInfo()->GetStage() : 0;
 	bool queueScriptActive = false;
-	bool hasQueueScriptJob = hasPostInfo && postStage == (int)PostInfo::ptQueued &&
+	bool hasQueueScriptJob = nzbget_rs_dqh_xmlrpc_should_check_queue_script_job(
+		hasPostInfo ? 1 : 0, postStage, (int)PostInfo::ptQueued) != 0 &&
 		g_QueueScriptCoordinator->HasJob(nzbInfo->GetId(), &queueScriptActive);
 	return nzbget_rs_rco_rpc_detect_group_status(
 		hasPostInfo ? 1 : 0,
@@ -1808,13 +1813,15 @@ void DownloadXmlCommand::Execute()
 				&nzbId
 			);
 
-			if (v13)
+			int appendMode = nzbget_rs_dqh_xmlrpc_classify_append_result_mode(
+				v13 ? 1 : 0, nzbId);
+			if (appendMode == 1)
 			{
 				BuildIntResponse(nzbId);
 			}
 			else
 			{
-				BuildBoolResponse(nzbId > 0);
+				BuildBoolResponse(appendMode == 2);
 			}
 		}
 	}
@@ -2108,7 +2115,8 @@ void LoadExtensionsXmlCommand::Execute()
 				? Extension::ToJsonStr(*extension)
 				: Extension::ToXmlStr(*extension);
 
-			AppendCondResponse(",\n", isJson && index++ > 0);
+			AppendCondResponse(",\n", nzbget_rs_dqh_xmlrpc_should_emit_json_array_comma(
+				isJson ? 1 : 0, index++) != 0);
 			AppendResponse(response.c_str());
 		}
 	);
@@ -2898,7 +2906,9 @@ void TestServerXmlCommand::Execute()
 	int certVerifLevel;
 
 	// a JSON body only with POST: over GET (JSON-P) m_request is the query string
-	if (IsJson() && m_request && m_httpMethod == XmlRpcProcessor::hmPost)
+	if (nzbget_rs_dqh_xmlrpc_should_parse_json_post_test_server(
+		IsJson() ? 1 : 0, m_request != nullptr ? 1 : 0,
+		(int)m_httpMethod, (int)XmlRpcProcessor::hmPost) != 0)
 	{
 		// rust/src/rpcparams.rs; a std::exception while copying the strings
 		// gives "Invalid parameters", as in ParseRequestParams
@@ -3194,10 +3204,18 @@ void StartScriptXmlCommand::Execute()
 	char* name;
 	char* value;
 	char* dummy;
-	while ((IsJson() && NextParamAsStr(&dummy) && NextParamAsStr(&name) &&
-		NextParamAsStr(&dummy) && NextParamAsStr(&value)) ||
-		(!IsJson() && NextParamAsStr(&name) && NextParamAsStr(&value)))
+	while (true)
 	{
+		bool isJson = IsJson();
+		bool p1 = isJson ? NextParamAsStr(&dummy) : NextParamAsStr(&name);
+		bool p2 = p1 && (isJson ? NextParamAsStr(&name) : NextParamAsStr(&value));
+		bool p3 = isJson && p2 && NextParamAsStr(&dummy);
+		bool p4 = isJson && p3 && NextParamAsStr(&value);
+		if (!nzbget_rs_dqh_xmlrpc_classify_start_script_param_mode(
+			isJson ? 1 : 0, p1 ? 1 : 0, p2 ? 1 : 0, p3 ? 1 : 0, p4 ? 1 : 0))
+		{
+			break;
+		}
 		DecodeStr(name);
 		DecodeStr(value);
 		optEntries->emplace_back(name, value);

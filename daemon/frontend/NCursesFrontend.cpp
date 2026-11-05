@@ -192,7 +192,7 @@ void NCursesFrontend::Update(int key)
 	if (m_inputMode == editQueue)
 	{
 		int queueSize = CalcQueueSize();
-		if (queueSize == 0)
+		if (nzbget_rs_dqh_ncurses_should_reset_empty_edit_queue(1, queueSize) != 0)
 		{
 			m_selectedQueueEntry = 0;
 			m_inputMode = normal;

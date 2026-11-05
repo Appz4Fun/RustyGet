@@ -39667,6 +39667,316 @@ pub extern "C" fn nzbget_rs_dqh_par_damage_classify_completed_file(
     )
 }
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_feed_coord_has_available_url_slot(
+    active_downloads_count: usize,
+    url_connections: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_feed_coord_has_available_url_slot(
+            active_downloads_count,
+            url_connections,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_feed_coord_should_cache_preview_items(
+    has_cache: c_int,
+    cache_time_sec: c_int,
+    cache_id: *const c_char,
+) -> c_int {
+    let cid = if cache_id.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(cache_id).to_bytes()
+    };
+    i32::from(
+        crate::dupequeuehealth::dqh_feed_coord_should_cache_preview_items(
+            has_cache != 0,
+            cache_time_sec,
+            cid,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_webdl_resolve_force_flag(
+    force: c_int,
+    url_force: c_int,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_webdl_resolve_force_flag(
+        force != 0,
+        url_force != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_webdl_should_try_recv_when_buf_empty(
+    buf_len: c_int,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_webdl_should_try_recv_when_buf_empty(buf_len))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_tls_should_verify_client_x509_store(
+    is_client: c_int,
+    has_x509_store: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_tls_should_verify_client_x509_store(
+            is_client != 0,
+            has_x509_store != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_tls_should_check_verify_result_on_handshake_fail(
+    is_client: c_int,
+    should_verify: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_tls_should_check_verify_result_on_handshake_fail(
+            is_client != 0,
+            should_verify != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_tls_cipher_classify_probe_deadline_override(
+    current_result: c_int,
+    is_cancelled: c_int,
+    deadline_expired: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_tls_cipher_classify_probe_deadline_override(
+        current_result,
+        is_cancelled != 0,
+        deadline_expired != 0,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_frontend_should_request_file_list(
+    summary: c_int,
+    file_list: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_frontend_should_request_file_list(
+            summary != 0,
+            file_list != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_frontend_should_build_remote_file_list(
+    file_list: c_int,
+    trailing_data_len: u32,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_frontend_should_build_remote_file_list(
+            file_list != 0,
+            trailing_data_len,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_ncurses_should_reset_empty_edit_queue(
+    is_edit_queue: c_int,
+    queue_size: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_ncurses_should_reset_empty_edit_queue(
+            is_edit_queue != 0,
+            queue_size,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_remote_server_is_cert_or_key_missing(
+    path: *const c_char,
+    file_exists: c_int,
+) -> c_int {
+    let p = if path.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(path).to_bytes()
+    };
+    i32::from(
+        crate::dupequeuehealth::dqh_remote_server_is_cert_or_key_missing(
+            p,
+            file_exists != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_remote_server_should_reset_listener(
+    bind_ok: c_int,
+    has_accepted_conn: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_remote_server_should_reset_listener(
+            bind_ok != 0,
+            has_accepted_conn != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_remote_client_is_empty_edit_target(
+    id_count: usize,
+    name_count: usize,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_remote_client_is_empty_edit_target(
+            id_count,
+            name_count,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_webserver_classify_ext_route(get_route: c_int) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_webserver_classify_ext_route(get_route))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_webserver_is_rel_path_outside_root(
+    is_empty: c_int,
+    first_char: c_char,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_webserver_is_rel_path_outside_root(
+            is_empty != 0,
+            first_char as u8,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_binrpc_should_lookup_unusual_file_owner(
+    same_nzb_ptr: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_binrpc_should_lookup_unusual_file_owner(
+            same_nzb_ptr != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_binrpc_should_match_file_regex(
+    has_regex: c_int,
+    match_group: c_int,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_binrpc_should_match_file_regex(
+        has_regex != 0,
+        match_group != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_xmlrpc_is_json_protocol(
+    protocol: c_int,
+    rp_json_rpc: c_int,
+    rp_jsonp_rpc: c_int,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_xmlrpc_is_json_protocol(
+        protocol,
+        rp_json_rpc,
+        rp_jsonp_rpc,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_xmlrpc_should_skip_to_json_post_params(
+    is_json: c_int,
+    http_method: c_int,
+    hm_post: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_xmlrpc_should_skip_to_json_post_params(
+            is_json != 0,
+            http_method,
+            hm_post,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_xmlrpc_should_check_queue_script_job(
+    has_post_info: c_int,
+    post_stage: c_int,
+    pt_queued: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_xmlrpc_should_check_queue_script_job(
+            has_post_info != 0,
+            post_stage,
+            pt_queued,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_xmlrpc_classify_append_result_mode(
+    v13: c_int,
+    nzb_id: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_xmlrpc_classify_append_result_mode(v13 != 0, nzb_id)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_xmlrpc_should_emit_json_array_comma(
+    is_json: c_int,
+    index: c_int,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_xmlrpc_should_emit_json_array_comma(
+        is_json != 0,
+        index,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_xmlrpc_should_parse_json_post_test_server(
+    is_json: c_int,
+    has_request: c_int,
+    http_method: c_int,
+    hm_post: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_xmlrpc_should_parse_json_post_test_server(
+            is_json != 0,
+            has_request != 0,
+            http_method,
+            hm_post,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_xmlrpc_classify_start_script_param_mode(
+    is_json: c_int,
+    has_p1: c_int,
+    has_p2: c_int,
+    has_p3: c_int,
+    has_p4: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_xmlrpc_classify_start_script_param_mode(
+            is_json != 0,
+            has_p1 != 0,
+            has_p2 != 0,
+            has_p3 != 0,
+            has_p4 != 0,
+        ),
+    )
+}
 
 
 

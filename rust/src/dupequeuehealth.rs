@@ -5552,6 +5552,179 @@ pub fn dqh_par_damage_classify_completed_file(
     }
 }
 
+/// Returns true when `FeedCoordinator::Run` has an available URL download slot (`(active_downloads_count as i32) < url_connections`).
+pub fn dqh_feed_coord_has_available_url_slot(
+    active_downloads_count: usize,
+    url_connections: i32,
+) -> bool {
+    (active_downloads_count as i32) < url_connections
+}
+
+/// Returns true when `FeedCoordinator::PreviewFeed` should store fetched items in `m_feedCache` (`!has_cache && cache_time_sec > 0 && !cache_id.is_empty()`).
+pub fn dqh_feed_coord_should_cache_preview_items(
+    has_cache: bool,
+    cache_time_sec: i32,
+    cache_id: &[u8],
+) -> bool {
+    !has_cache && cache_time_sec > 0 && !cache_id.is_empty()
+}
+
+/// Resolves the effective `force` flag in `FeedCoordinator::StartFeedDownload` (`force || url_force`).
+pub fn dqh_webdl_resolve_force_flag(force: bool, url_force: bool) -> bool {
+    force || url_force
+}
+
+/// Returns true when `WebDownloader::DownloadBody` should call `TryRecv` after `ReadBuffer` (`buf_len == 0`).
+pub fn dqh_webdl_should_try_recv_when_buf_empty(buf_len: i32) -> bool {
+    buf_len == 0
+}
+
+/// Returns true when `TlsSocket::Start` should configure peer verification against `m_X509Store` (`is_client && has_x509_store`).
+pub fn dqh_tls_should_verify_client_x509_store(is_client: bool, has_x509_store: bool) -> bool {
+    is_client && has_x509_store
+}
+
+/// Returns true when `TlsSocket::Start` should inspect `SSL_get_verify_result` after a handshake failure (`is_client && should_verify`).
+pub fn dqh_tls_should_check_verify_result_on_handshake_fail(
+    is_client: bool,
+    should_verify: bool,
+) -> bool {
+    is_client && should_verify
+}
+
+/// Resolves the final probe result in `TlsCipherBackend::Probe` after checking cancellation (`-6`) and deadline expiration (`-3`).
+pub fn dqh_tls_cipher_classify_probe_deadline_override(
+    current_result: i32,
+    is_cancelled: bool,
+    deadline_expired: bool,
+) -> i32 {
+    if is_cancelled {
+        -6
+    } else if deadline_expired {
+        -3
+    } else {
+        current_result
+    }
+}
+
+/// Returns true when `Frontend::PrepareData` needs to request the remote file/summary list (`summary || file_list`).
+pub fn dqh_frontend_should_request_file_list(summary: bool, file_list: bool) -> bool {
+    summary || file_list
+}
+
+/// Returns true when `Frontend::RequestFileList` should populate the local queue via `RemoteClient::BuildFileList` (`file_list && trailing_data_len > 0`).
+pub fn dqh_frontend_should_build_remote_file_list(
+    file_list: bool,
+    trailing_data_len: u32,
+) -> bool {
+    file_list && trailing_data_len > 0
+}
+
+/// Returns true when `NCursesFrontend::Update` should exit `editQueue` mode because the queue became empty (`is_edit_queue && queue_size == 0`).
+pub fn dqh_ncurses_should_reset_empty_edit_queue(is_edit_queue: bool, queue_size: i32) -> bool {
+    is_edit_queue && queue_size == 0
+}
+
+/// Returns true when `RemoteServer::Run` detects a missing TLS cert or key file (`path.is_empty() || !file_exists`).
+pub fn dqh_remote_server_is_cert_or_key_missing(path: &[u8], file_exists: bool) -> bool {
+    path.is_empty() || !file_exists
+}
+
+/// Returns true when `RemoteServer::Run` should reset the listener and retry after a failed bind or accept (`!bind_ok || !has_accepted_conn`).
+pub fn dqh_remote_server_should_reset_listener(bind_ok: bool, has_accepted_conn: bool) -> bool {
+    !bind_ok || !has_accepted_conn
+}
+
+/// Returns true when `RemoteClient::RequestServerEditQueue` has neither IDs nor names specified (`id_count == 0 && name_count == 0`).
+pub fn dqh_remote_client_is_empty_edit_target(id_count: usize, name_count: usize) -> bool {
+    id_count == 0 && name_count == 0
+}
+
+/// Returns true when `WebProcessor::Dispatch` routes a GET request to an extension resource (`get_route == 1 || get_route == 2`).
+pub fn dqh_webserver_classify_ext_route(get_route: i32) -> bool {
+    get_route == 1 || get_route == 2
+}
+
+/// Returns true when a canonicalized extension asset path resolves outside the script directory (`is_empty || first_char == b'.'`).
+pub fn dqh_webserver_is_rel_path_outside_root(is_empty: bool, first_char: u8) -> bool {
+    is_empty || first_char == b'.'
+}
+
+/// Returns true when `ListBinCommand::Execute` must scan the queue for an unusual file owner (`!same_nzb_ptr`).
+pub fn dqh_binrpc_should_lookup_unusual_file_owner(same_nzb_ptr: bool) -> bool {
+    !same_nzb_ptr
+}
+
+/// Returns true when `ListBinCommand::Execute` should evaluate the regex against an individual file (`has_regex && !match_group`).
+pub fn dqh_binrpc_should_match_file_regex(has_regex: bool, match_group: bool) -> bool {
+    has_regex && !match_group
+}
+
+/// Returns true when `XmlCommand::IsJson` is active (`protocol == rp_json_rpc || protocol == rp_jsonp_rpc`).
+pub fn dqh_xmlrpc_is_json_protocol(protocol: i32, rp_json_rpc: i32, rp_jsonp_rpc: i32) -> bool {
+    protocol == rp_json_rpc || protocol == rp_jsonp_rpc
+}
+
+/// Returns true when `XmlCommand::PrepareParams` should advance `m_requestPtr` to `"params"` (`is_json && http_method == hm_post`).
+pub fn dqh_xmlrpc_should_skip_to_json_post_params(
+    is_json: bool,
+    http_method: i32,
+    hm_post: i32,
+) -> bool {
+    is_json && http_method == hm_post
+}
+
+/// Returns true when `ListGroupsXmlCommand::DetectStatus` should check `QueueScriptCoordinator::HasJob` (`has_post_info && post_stage == pt_queued`).
+pub fn dqh_xmlrpc_should_check_queue_script_job(
+    has_post_info: bool,
+    post_stage: i32,
+    pt_queued: i32,
+) -> bool {
+    has_post_info && post_stage == pt_queued
+}
+
+/// Classifies how `DownloadXmlCommand::Execute` formats the result of `AddExternalFile`:
+/// `1` = `BuildIntResponse(nzb_id)` (`v13`), `2` = `BuildBoolResponse(true)` (`!v13 && nzb_id > 0`), `0` = `BuildBoolResponse(false)`.
+pub fn dqh_xmlrpc_classify_append_result_mode(v13: bool, nzb_id: i32) -> i32 {
+    if v13 {
+        1
+    } else if nzb_id > 0 {
+        2
+    } else {
+        0
+    }
+}
+
+/// Returns true when `LoadExtensionsXmlCommand::Execute` should emit a leading comma before an item (`is_json && index > 0`).
+pub fn dqh_xmlrpc_should_emit_json_array_comma(is_json: bool, index: i32) -> bool {
+    is_json && index > 0
+}
+
+/// Returns true when `TestServerXmlCommand::Execute` should parse JSON-RPC POST parameters via `nzbget_rs_test_server_params` (`is_json && has_request && http_method == hm_post`).
+pub fn dqh_xmlrpc_should_parse_json_post_test_server(
+    is_json: bool,
+    has_request: bool,
+    http_method: i32,
+    hm_post: i32,
+) -> bool {
+    is_json && has_request && http_method == hm_post
+}
+
+/// Returns true when `StartScriptXmlCommand::Execute` has extracted a complete option `(name, value)` pair (`(is_json && has_p1 && has_p2 && has_p3 && has_p4) || (!is_json && has_p1 && has_p2)`).
+pub fn dqh_xmlrpc_classify_start_script_param_mode(
+    is_json: bool,
+    has_p1: bool,
+    has_p2: bool,
+    has_p3: bool,
+    has_p4: bool,
+) -> bool {
+    if is_json {
+        has_p1 && has_p2 && has_p3 && has_p4
+    } else {
+        has_p1 && has_p2
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7731,5 +7904,77 @@ mod tests {
         assert_eq!(dqh_par_damage_classify_completed_file(false, 2, 100, 5), 3);
         assert_eq!(dqh_par_damage_classify_completed_file(false, 2, 0, 0), 4);
         assert_eq!(dqh_par_damage_classify_completed_file(false, 2, 0, 5), 5);
+        assert!(dqh_feed_coord_has_available_url_slot(2, 3));
+        assert!(!dqh_feed_coord_has_available_url_slot(3, 3));
+        assert!(dqh_feed_coord_should_cache_preview_items(false, 30, b"cid"));
+        assert!(!dqh_feed_coord_should_cache_preview_items(true, 30, b"cid"));
+        assert!(!dqh_feed_coord_should_cache_preview_items(false, 0, b"cid"));
+        assert!(!dqh_feed_coord_should_cache_preview_items(false, 30, b""));
+        assert!(dqh_webdl_resolve_force_flag(true, false));
+        assert!(dqh_webdl_resolve_force_flag(false, true));
+        assert!(!dqh_webdl_resolve_force_flag(false, false));
+        assert!(dqh_webdl_should_try_recv_when_buf_empty(0));
+        assert!(!dqh_webdl_should_try_recv_when_buf_empty(4));
+        assert!(dqh_tls_should_verify_client_x509_store(true, true));
+        assert!(!dqh_tls_should_verify_client_x509_store(false, true));
+        assert!(!dqh_tls_should_verify_client_x509_store(true, false));
+        assert!(dqh_tls_should_check_verify_result_on_handshake_fail(true, true));
+        assert!(!dqh_tls_should_check_verify_result_on_handshake_fail(false, true));
+        assert!(!dqh_tls_should_check_verify_result_on_handshake_fail(true, false));
+        assert_eq!(dqh_tls_cipher_classify_probe_deadline_override(1, true, true), -6);
+        assert_eq!(dqh_tls_cipher_classify_probe_deadline_override(1, false, true), -3);
+        assert_eq!(dqh_tls_cipher_classify_probe_deadline_override(1, false, false), 1);
+        assert!(dqh_frontend_should_request_file_list(true, false));
+        assert!(dqh_frontend_should_request_file_list(false, true));
+        assert!(!dqh_frontend_should_request_file_list(false, false));
+        assert!(dqh_frontend_should_build_remote_file_list(true, 10));
+        assert!(!dqh_frontend_should_build_remote_file_list(false, 10));
+        assert!(!dqh_frontend_should_build_remote_file_list(true, 0));
+        assert!(dqh_ncurses_should_reset_empty_edit_queue(true, 0));
+        assert!(!dqh_ncurses_should_reset_empty_edit_queue(false, 0));
+        assert!(!dqh_ncurses_should_reset_empty_edit_queue(true, 1));
+        assert!(dqh_remote_server_is_cert_or_key_missing(b"", true));
+        assert!(dqh_remote_server_is_cert_or_key_missing(b"/path", false));
+        assert!(!dqh_remote_server_is_cert_or_key_missing(b"/path", true));
+        assert!(dqh_remote_server_should_reset_listener(false, true));
+        assert!(dqh_remote_server_should_reset_listener(true, false));
+        assert!(!dqh_remote_server_should_reset_listener(true, true));
+        assert!(dqh_remote_client_is_empty_edit_target(0, 0));
+        assert!(!dqh_remote_client_is_empty_edit_target(1, 0));
+        assert!(!dqh_remote_client_is_empty_edit_target(0, 1));
+        assert!(dqh_webserver_classify_ext_route(1));
+        assert!(dqh_webserver_classify_ext_route(2));
+        assert!(!dqh_webserver_classify_ext_route(3));
+        assert!(dqh_webserver_is_rel_path_outside_root(true, b'a'));
+        assert!(dqh_webserver_is_rel_path_outside_root(false, b'.'));
+        assert!(!dqh_webserver_is_rel_path_outside_root(false, b'a'));
+        assert!(dqh_binrpc_should_lookup_unusual_file_owner(false));
+        assert!(!dqh_binrpc_should_lookup_unusual_file_owner(true));
+        assert!(dqh_binrpc_should_match_file_regex(true, false));
+        assert!(!dqh_binrpc_should_match_file_regex(false, false));
+        assert!(!dqh_binrpc_should_match_file_regex(true, true));
+        assert!(dqh_xmlrpc_is_json_protocol(2, 2, 3));
+        assert!(dqh_xmlrpc_is_json_protocol(3, 2, 3));
+        assert!(!dqh_xmlrpc_is_json_protocol(1, 2, 3));
+        assert!(dqh_xmlrpc_should_skip_to_json_post_params(true, 1, 1));
+        assert!(!dqh_xmlrpc_should_skip_to_json_post_params(false, 1, 1));
+        assert!(!dqh_xmlrpc_should_skip_to_json_post_params(true, 0, 1));
+        assert!(dqh_xmlrpc_should_check_queue_script_job(true, 2, 2));
+        assert!(!dqh_xmlrpc_should_check_queue_script_job(false, 2, 2));
+        assert!(!dqh_xmlrpc_should_check_queue_script_job(true, 1, 2));
+        assert_eq!(dqh_xmlrpc_classify_append_result_mode(true, -1), 1);
+        assert_eq!(dqh_xmlrpc_classify_append_result_mode(false, 5), 2);
+        assert_eq!(dqh_xmlrpc_classify_append_result_mode(false, 0), 0);
+        assert!(dqh_xmlrpc_should_emit_json_array_comma(true, 1));
+        assert!(!dqh_xmlrpc_should_emit_json_array_comma(true, 0));
+        assert!(!dqh_xmlrpc_should_emit_json_array_comma(false, 1));
+        assert!(dqh_xmlrpc_should_parse_json_post_test_server(true, true, 1, 1));
+        assert!(!dqh_xmlrpc_should_parse_json_post_test_server(false, true, 1, 1));
+        assert!(!dqh_xmlrpc_should_parse_json_post_test_server(true, false, 1, 1));
+        assert!(!dqh_xmlrpc_should_parse_json_post_test_server(true, true, 0, 1));
+        assert!(dqh_xmlrpc_classify_start_script_param_mode(true, true, true, true, true));
+        assert!(!dqh_xmlrpc_classify_start_script_param_mode(true, true, true, true, false));
+        assert!(dqh_xmlrpc_classify_start_script_param_mode(false, true, true, false, false));
+        assert!(!dqh_xmlrpc_classify_start_script_param_mode(false, true, false, false, false));
     }
 }

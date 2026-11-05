@@ -198,8 +198,10 @@ int Probe(void*, const NzbgetTlsServer* server, const char* cipher, int protocol
 			TLS1_2_VERSION,
 			connection.GetAuthError() ? 1 : 0,
 			connection.GetTlsProbeFailure());
-		if (cancel(cancelContext)) result = -6;
-		else if (std::chrono::steady_clock::now() >= deadline->end) result = -3;
+		result = nzbget_rs_dqh_tls_cipher_classify_probe_deadline_override(
+			result,
+			cancel(cancelContext) ? 1 : 0,
+			std::chrono::steady_clock::now() >= deadline->end ? 1 : 0);
 		connection.SetBroken(); connection.Disconnect();
 		return result;
 	}

@@ -348,7 +348,7 @@ void WebProcessor::Dispatch()
 		SendErrorResponse(ERR_HTTP_NOT_FOUND, true);
 		return;
 	}
-	if (getRoute == 1 || getRoute == 2)
+	if (nzbget_rs_dqh_webserver_classify_ext_route(getRoute) != 0)
 	{
 		if (!m_authorized)
 		{
@@ -382,7 +382,9 @@ void WebProcessor::Dispatch()
 			if (ec) continue;
 
 			auto rel = resolvedPath.lexically_relative(resolvedDir);
-			if (rel.empty() || rel.native().front() == '.') continue;
+			if (nzbget_rs_dqh_webserver_is_rel_path_outside_root(
+				rel.empty() ? 1 : 0,
+				rel.empty() ? '\0' : static_cast<char>(rel.native().front())) != 0) continue;
 
 			CharBuffer body;
 			std::string filePathStr = fs::u8string(resolvedPath);

@@ -48,13 +48,17 @@ void RemoteServer::Run()
 #ifndef DISABLE_TLS
 	if (m_tls)
 	{
-		if (Util::EmptyStr(g_Options->GetSecureCert()) || !FileSystem::FileExists(g_Options->GetSecureCert()))
+		if (nzbget_rs_dqh_remote_server_is_cert_or_key_missing(
+			g_Options->GetSecureCert(),
+			FileSystem::FileExists(g_Options->GetSecureCert()) ? 1 : 0) != 0)
 		{
 			error("Could not initialize TLS, secure certificate is not configured or the cert-file was not found. Check option <SecureCert>");
 			return;
 		}
 
-		if (Util::EmptyStr(g_Options->GetSecureKey()) || !FileSystem::FileExists(g_Options->GetSecureKey()))
+		if (nzbget_rs_dqh_remote_server_is_cert_or_key_missing(
+			g_Options->GetSecureKey(),
+			FileSystem::FileExists(g_Options->GetSecureKey()) ? 1 : 0) != 0)
 		{
 			error("Could not initialize TLS, secure key is not configured or the key-file was not found. Check option <SecureKey>");
 			return;
@@ -101,7 +105,8 @@ void RemoteServer::Run()
 			Util::Sleep(200);
 			continue;
 		}
-		if (!bind || !acceptedConnection)
+		if (nzbget_rs_dqh_remote_server_should_reset_listener(
+			bind ? 1 : 0, acceptedConnection != nullptr ? 1 : 0) != 0)
 		{
 			// Remote server could not bind or accept connection, waiting 1/2 sec and try again
 			if (IsStopped())

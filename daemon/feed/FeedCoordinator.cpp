@@ -144,7 +144,8 @@ void FeedCoordinator::Run()
 			std::lock_guard<std::mutex> guard(m_downloadsMutex);
 
 			time_t current = Util::CurrentTime();
-			if ((int)m_activeDownloads.size() < g_Options->GetUrlConnections())
+			if (nzbget_rs_dqh_feed_coord_has_available_url_slot(
+				m_activeDownloads.size(), g_Options->GetUrlConnections()) != 0)
 			{
 				m_force = false;
 				// check feed list and update feeds
@@ -288,7 +289,8 @@ void FeedCoordinator::StartFeedDownload(FeedInfo* feedInfo, bool force)
 	feedDownloader->SetFeedInfo(feedInfo);
 	feedDownloader->SetUrl(feedInfo->GetUrl());
 	feedDownloader->SetInfoName(feedInfo->GetName());
-	feedDownloader->SetForce(force || g_Options->GetUrlForce());
+	feedDownloader->SetForce(nzbget_rs_dqh_webdl_resolve_force_flag(
+		force ? 1 : 0, g_Options->GetUrlForce() ? 1 : 0) != 0);
 #ifndef DISABLE_TLS
 	feedDownloader->SetCertVerifLevel(feedInfo->GetCertVerificationLevel());
 #endif
@@ -616,7 +618,8 @@ std::shared_ptr<FeedItemList> FeedCoordinator::PreviewFeed(int id,
 	FilterFeed(feedInfo.get(), feedItems.get());
 	feedInfo.reset();
 
-	if (!hasCache && nzbget_rs_ucf_feed_coord_can_use_cache(cacheTimeSec, cacheId) != 0)
+	if (nzbget_rs_dqh_feed_coord_should_cache_preview_items(
+		hasCache ? 1 : 0, cacheTimeSec, cacheId) != 0)
 	{
 		std::lock_guard<std::mutex> guard(m_downloadsMutex);
 		m_feedCache.emplace_back(url, cacheTimeSec, cacheId, Util::CurrentTime(), feedItems);

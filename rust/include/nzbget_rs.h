@@ -6513,6 +6513,51 @@ int nzbget_rs_dqh_url_coord_should_wait_on_cond(
 int nzbget_rs_dqh_par_damage_classify_completed_file(
     int is_par, int failed_plus_missed, int64_t decoded_size,
     int success_articles);
+int nzbget_rs_dqh_feed_coord_has_available_url_slot(
+    size_t active_downloads_count, int url_connections);
+int nzbget_rs_dqh_feed_coord_should_cache_preview_items(
+    int has_cache, int cache_time_sec, const char* cache_id);
+int nzbget_rs_dqh_webdl_resolve_force_flag(int force, int url_force);
+int nzbget_rs_dqh_webdl_should_try_recv_when_buf_empty(int buf_len);
+int nzbget_rs_dqh_tls_should_verify_client_x509_store(
+    int is_client, int has_x509_store);
+int nzbget_rs_dqh_tls_should_check_verify_result_on_handshake_fail(
+    int is_client, int should_verify);
+int nzbget_rs_dqh_tls_cipher_classify_probe_deadline_override(
+    int current_result, int is_cancelled, int deadline_expired);
+int nzbget_rs_dqh_frontend_should_request_file_list(
+    int summary, int file_list);
+int nzbget_rs_dqh_frontend_should_build_remote_file_list(
+    int file_list, uint32_t trailing_data_len);
+int nzbget_rs_dqh_ncurses_should_reset_empty_edit_queue(
+    int is_edit_queue, int queue_size);
+int nzbget_rs_dqh_remote_server_is_cert_or_key_missing(
+    const char* path, int file_exists);
+int nzbget_rs_dqh_remote_server_should_reset_listener(
+    int bind_ok, int has_accepted_conn);
+int nzbget_rs_dqh_remote_client_is_empty_edit_target(
+    size_t id_count, size_t name_count);
+int nzbget_rs_dqh_webserver_classify_ext_route(int get_route);
+int nzbget_rs_dqh_webserver_is_rel_path_outside_root(
+    int is_empty, char first_char);
+int nzbget_rs_dqh_binrpc_should_lookup_unusual_file_owner(
+    int same_nzb_ptr);
+int nzbget_rs_dqh_binrpc_should_match_file_regex(
+    int has_regex, int match_group);
+int nzbget_rs_dqh_xmlrpc_is_json_protocol(
+    int protocol, int rp_json_rpc, int rp_jsonp_rpc);
+int nzbget_rs_dqh_xmlrpc_should_skip_to_json_post_params(
+    int is_json, int http_method, int hm_post);
+int nzbget_rs_dqh_xmlrpc_should_check_queue_script_job(
+    int has_post_info, int post_stage, int pt_queued);
+int nzbget_rs_dqh_xmlrpc_classify_append_result_mode(
+    int v13, int nzb_id);
+int nzbget_rs_dqh_xmlrpc_should_emit_json_array_comma(
+    int is_json, int index);
+int nzbget_rs_dqh_xmlrpc_should_parse_json_post_test_server(
+    int is_json, int has_request, int http_method, int hm_post);
+int nzbget_rs_dqh_xmlrpc_classify_start_script_param_mode(
+    int is_json, int has_p1, int has_p2, int has_p3, int has_p4);
 
 #include "nzbget_tls_cipher.h"
 

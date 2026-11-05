@@ -692,7 +692,8 @@ void ListBinCommand::Execute()
 			{
 				nrFileEntries++;
 				int nzbIndex = ownerIndex;
-				if (fileInfo->GetNzbInfo() != nzbInfo)
+				if (nzbget_rs_dqh_binrpc_should_lookup_unusual_file_owner(
+					fileInfo->GetNzbInfo() == nzbInfo ? 1 : 0) != 0)
 				{
 					// Retain the first-match behavior for an unusual parent.
 					nzbIndex = 0;
@@ -707,7 +708,8 @@ void ListBinCommand::Execute()
 				}
 
 				bool match = false;
-				if (regEx && !matchGroup)
+				if (nzbget_rs_dqh_binrpc_should_match_file_regex(
+					regEx ? 1 : 0, matchGroup ? 1 : 0) != 0)
 				{
 					NzbgetRsBuf matchNameBuf = nzbget_rs_tpr_binrpc_format_file_match_name(
 						fileInfo->GetNzbInfo()->GetName(), FileSystem::BaseFileName(fileInfo->GetFilename()));

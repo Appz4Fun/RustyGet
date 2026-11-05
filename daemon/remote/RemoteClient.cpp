@@ -538,7 +538,8 @@ bool RemoteClient::RequestServerDumpDebug()
 bool RemoteClient::RequestServerEditQueue(DownloadQueue::EEditAction action, int offset, const char* text,
 	IdList* idList, NameList* nameList, ERemoteMatchMode matchMode)
 {
-	if ((idList == nullptr || idList->size() == 0) && (nameList == nullptr || nameList->size() == 0))
+	if (nzbget_rs_dqh_remote_client_is_empty_edit_target(
+		idList ? idList->size() : 0, nameList ? nameList->size() : 0) != 0)
 	{
 		printf("File(s) not specified\n");
 		return false;

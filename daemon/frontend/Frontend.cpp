@@ -63,7 +63,8 @@ bool Frontend::PrepareData()
 		{
 			return false;
 		}
-		if (!RequestMessages() || ((m_summary || m_fileList) && !RequestFileList()))
+		if (!RequestMessages() || (nzbget_rs_dqh_frontend_should_request_file_list(
+			m_summary ? 1 : 0, m_fileList ? 1 : 0) != 0 && !RequestFileList()))
 		{
 			const char* controlIp = nzbget_rs_dqh_frontend_resolve_control_ip(g_Options->GetControlIp());
 			printf("\nUnable to send request to nzbget-server at %s (port %i)    \n", controlIp, g_Options->GetControlPort());
@@ -294,7 +295,8 @@ bool Frontend::RequestFileList()
 		m_allBytes = Util::JoinInt64(ntohl(ListResponse.m_downloadedBytesHi), ntohl(ListResponse.m_downloadedBytesLo));
 	}
 
-	if (m_fileList && ntohl(ListResponse.m_trailingDataLength) > 0)
+	if (nzbget_rs_dqh_frontend_should_build_remote_file_list(
+		m_fileList ? 1 : 0, ntohl(ListResponse.m_trailingDataLength)) != 0)
 	{
 		RemoteClient client;
 		client.SetVerbose(false);

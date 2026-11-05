@@ -1700,6 +1700,97 @@ pub fn tpr_queue_editor_filename_has_vol(filename: &[u8]) -> bool {
         .any(|w| w.eq_ignore_ascii_case(b".vol"))
 }
 
+/// Formats `"<queue_dir><sep><filename><suffix>"` (omitting `suffix` when `suffix == 0`) for `DiskState::DiscardDownloadQueue`.
+pub fn tpr_diskstate_format_queue_file_state_path(
+    queue_dir: &[u8],
+    sep: u8,
+    filename: &[u8],
+    suffix: u8,
+) -> Vec<u8> {
+    let mut out =
+        Vec::with_capacity(queue_dir.len() + 1 + filename.len() + usize::from(suffix != 0));
+    out.extend_from_slice(queue_dir);
+    out.push(sep);
+    out.extend_from_slice(filename);
+    if suffix != 0 {
+        out.push(suffix);
+    }
+    out
+}
+
+/// Formats `"<queue_dir><sep><file_id><suffix>"` (omitting `suffix` when `suffix == 0`) for `DiskState::DiscardFile`.
+pub fn tpr_diskstate_format_queue_id_state_path(
+    queue_dir: &[u8],
+    sep: u8,
+    file_id: i32,
+    suffix: u8,
+) -> Vec<u8> {
+    let id_str = file_id.to_string();
+    let mut out = Vec::with_capacity(queue_dir.len() + 1 + id_str.len() + usize::from(suffix != 0));
+    out.extend_from_slice(queue_dir);
+    out.push(sep);
+    out.extend_from_slice(id_str.as_bytes());
+    if suffix != 0 {
+        out.push(suffix);
+    }
+    out
+}
+
+/// Formats `"<nzb_name><sep><filename> [<part_num>/<total_parts>]"` for `QueueCoordinator::StartArticleDownload`.
+pub fn tpr_queue_coord_format_article_info_name(
+    nzb_name: &[u8],
+    sep: u8,
+    filename: &[u8],
+    part_num: i32,
+    total_parts: i32,
+) -> Vec<u8> {
+    let tail = format!(" [{part_num}/{total_parts}]");
+    let mut out = Vec::with_capacity(nzb_name.len() + 1 + filename.len() + tail.len());
+    out.extend_from_slice(nzb_name);
+    out.push(sep);
+    out.extend_from_slice(filename);
+    out.extend_from_slice(tail.as_bytes());
+    out
+}
+
+/// Formats PAR damage summary string for `QueueCoordinator::CheckParDamage`.
+pub fn tpr_queue_coord_format_par_damage_summary(
+    certain: bool,
+    damaged_blocks: i32,
+    projected_blocks: i32,
+    block_size: i64,
+    recovery_blocks: i32,
+) -> Vec<u8> {
+    let blocks = if certain {
+        damaged_blocks
+    } else {
+        projected_blocks
+    };
+    let mb = (block_size as f64) / 1024.0 / 1024.0;
+    let suffix = if certain { "" } else { " at the rate so far" };
+    format!(
+        "{blocks} par2 block(s) of {mb:.1} MB damaged{suffix}, its par2-files hold {recovery_blocks} recovery block(s)"
+    )
+    .into_bytes()
+}
+
+/// Formats `"<name>.nzb"` for `QueueCoordinator::SetQueueEntryName`.
+pub fn tpr_queue_coord_format_nzb_ext_filename(name: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(name.len() + 4);
+    out.extend_from_slice(name);
+    out.extend_from_slice(b".nzb");
+    out
+}
+
+/// Formats `"<dest_queued>|<src_queued>"` for `QueueCoordinator::MergeQueueEntries`.
+pub fn tpr_queue_coord_join_queued_filenames(dest_queued: &[u8], src_queued: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(dest_queued.len() + 1 + src_queued.len());
+    out.extend_from_slice(dest_queued);
+    out.push(b'|');
+    out.extend_from_slice(src_queued);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2315,5 +2406,41 @@ mod tests {
         );
         assert!(tpr_queue_editor_filename_has_vol(b"Show.VOL00+01.PAR2"));
         assert!(!tpr_queue_editor_filename_has_vol(b"Show.par2"));
+        assert_eq!(
+            tpr_diskstate_format_queue_file_state_path(b"/queue", b'/', b"42", 0),
+            b"/queue/42"
+        );
+        assert_eq!(
+            tpr_diskstate_format_queue_file_state_path(b"/queue", b'/', b"42", b's'),
+            b"/queue/42s"
+        );
+        assert_eq!(
+            tpr_diskstate_format_queue_id_state_path(b"/queue", b'/', 42, 0),
+            b"/queue/42"
+        );
+        assert_eq!(
+            tpr_diskstate_format_queue_id_state_path(b"/queue", b'/', 42, b'c'),
+            b"/queue/42c"
+        );
+        assert_eq!(
+            tpr_queue_coord_format_article_info_name(b"MyShow", b'/', b"part01.rar", 3, 50),
+            b"MyShow/part01.rar [3/50]"
+        );
+        assert_eq!(
+            tpr_queue_coord_format_par_damage_summary(true, 15, 20, 2 * 1024 * 1024, 10),
+            b"15 par2 block(s) of 2.0 MB damaged, its par2-files hold 10 recovery block(s)"
+        );
+        assert_eq!(
+            tpr_queue_coord_format_par_damage_summary(false, 15, 20, 2 * 1024 * 1024, 10),
+            b"20 par2 block(s) of 2.0 MB damaged at the rate so far, its par2-files hold 10 recovery block(s)"
+        );
+        assert_eq!(
+            tpr_queue_coord_format_nzb_ext_filename(b"MyShow"),
+            b"MyShow.nzb"
+        );
+        assert_eq!(
+            tpr_queue_coord_join_queued_filenames(b"a.nzb", b"b.nzb"),
+            b"a.nzb|b.nzb"
+        );
     }
 }

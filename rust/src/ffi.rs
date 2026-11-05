@@ -34072,6 +34072,247 @@ pub unsafe extern "C" fn nzbget_rs_tpr_queue_editor_filename_has_vol(
     i32::from(crate::twinproberenhist::tpr_queue_editor_filename_has_vol(f))
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_format_new_path(
+    base_path: *const c_char,
+) -> RsBuf {
+    let bp = if base_path.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(base_path).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_diskstate_format_new_path(bp))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_format_ids_line(
+    nzb_id: i32,
+    file_id: i32,
+) -> RsBuf {
+    into_buf(crate::dupequeuehealth::dqh_diskstate_format_ids_line(
+        nzb_id, file_id,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_legacy_suffix_str(
+    suffix_kind: i32,
+) -> *const c_char {
+    crate::dupequeuehealth::dqh_diskstate_legacy_suffix_str(suffix_kind).as_ptr() as *const c_char
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_format_unreadable_path(
+    filename: *const c_char,
+    now: i64,
+) -> RsBuf {
+    let f = if filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_diskstate_format_unreadable_path(f, now))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_format_out_tmp_path(
+    dest_dir: *const c_char,
+    sep: c_char,
+    file_id: i32,
+) -> RsBuf {
+    let dd = if dest_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(dest_dir).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_diskstate_format_out_tmp_path(
+        dd,
+        sep as u8,
+        file_id,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_format_staged_part_path(
+    temp_dir: *const c_char,
+    sep: c_char,
+    file_id: i32,
+    part_num: i32,
+) -> RsBuf {
+    let td = if temp_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(temp_dir).to_bytes()
+    };
+    into_buf(
+        crate::dupequeuehealth::dqh_diskstate_format_staged_part_path(
+            td,
+            sep as u8,
+            file_id,
+            part_num,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_format_file_state_name(
+    file_id: i32,
+    completed: i32,
+) -> RsBuf {
+    into_buf(crate::dupequeuehealth::dqh_diskstate_format_file_state_name(
+        file_id,
+        completed != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_format_nzb_log_path(
+    queue_dir: *const c_char,
+    sep: c_char,
+    nzb_id: i32,
+) -> RsBuf {
+    let qd = if queue_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(queue_dir).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_diskstate_format_nzb_log_path(
+        qd,
+        sep as u8,
+        nzb_id,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_diskstate_format_queue_file_state_path(
+    queue_dir: *const c_char,
+    sep: c_char,
+    filename: *const c_char,
+    suffix: c_char,
+) -> RsBuf {
+    let qd = if queue_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(queue_dir).to_bytes()
+    };
+    let f = if filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    into_buf(
+        crate::twinproberenhist::tpr_diskstate_format_queue_file_state_path(
+            qd,
+            sep as u8,
+            f,
+            suffix as u8,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_diskstate_format_queue_id_state_path(
+    queue_dir: *const c_char,
+    sep: c_char,
+    file_id: i32,
+    suffix: c_char,
+) -> RsBuf {
+    let qd = if queue_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(queue_dir).to_bytes()
+    };
+    into_buf(
+        crate::twinproberenhist::tpr_diskstate_format_queue_id_state_path(
+            qd,
+            sep as u8,
+            file_id,
+            suffix as u8,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_queue_coord_format_article_info_name(
+    nzb_name: *const c_char,
+    sep: c_char,
+    filename: *const c_char,
+    part_num: i32,
+    total_parts: i32,
+) -> RsBuf {
+    let nn = if nzb_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(nzb_name).to_bytes()
+    };
+    let f = if filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    into_buf(
+        crate::twinproberenhist::tpr_queue_coord_format_article_info_name(
+            nn,
+            sep as u8,
+            f,
+            part_num,
+            total_parts,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_queue_coord_format_par_damage_summary(
+    certain: i32,
+    damaged_blocks: i32,
+    projected_blocks: i32,
+    block_size: i64,
+    recovery_blocks: i32,
+) -> RsBuf {
+    into_buf(
+        crate::twinproberenhist::tpr_queue_coord_format_par_damage_summary(
+            certain != 0,
+            damaged_blocks,
+            projected_blocks,
+            block_size,
+            recovery_blocks,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_queue_coord_format_nzb_ext_filename(
+    name: *const c_char,
+) -> RsBuf {
+    let n = if name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(name).to_bytes()
+    };
+    into_buf(crate::twinproberenhist::tpr_queue_coord_format_nzb_ext_filename(n))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_queue_coord_join_queued_filenames(
+    dest_queued: *const c_char,
+    src_queued: *const c_char,
+) -> RsBuf {
+    let dq = if dest_queued.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(dest_queued).to_bytes()
+    };
+    let sq = if src_queued.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(src_queued).to_bytes()
+    };
+    into_buf(
+        crate::twinproberenhist::tpr_queue_coord_join_queued_filenames(dq, sq),
+    )
+}
+
+
 
 
 

@@ -62,7 +62,10 @@ bool DupeCoordinator::FilesOnDisk(NzbInfo* nzbInfo)
 	DirBrowser browser(dir);
 	while (const char* filename = browser.Next())
 	{
-		BString<1024> path("%s%c%s", dir, PATH_SEPARATOR, filename);
+		NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			dir, PATH_SEPARATOR, filename);
+		BString<1024> path = pathBuf.data ? pathBuf.data : "";
+		nzbget_rs_free(pathBuf);
 		if (!QueueCoordinator::SideFile(filename) && !FileSystem::DirectoryExists(path) &&
 			FileSystem::FileSize(path) > 0)
 		{

@@ -1605,6 +1605,82 @@ pub fn dqh_url_coord_format_temp_url_path(temp_dir: &[u8], sep: u8, id: i32) -> 
     out
 }
 
+/// Formats `"<base_path>.new"` for `StateFile::StateFile` and `DiskState::SaveIdFloor`.
+pub fn dqh_diskstate_format_new_path(base_path: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(base_path.len() + 4);
+    out.extend_from_slice(base_path);
+    out.extend_from_slice(b".new");
+    out
+}
+
+/// Formats `"nzb <nzb_id> file <file_id>\n"` for `DiskState::SaveIdFloor`.
+pub fn dqh_diskstate_format_ids_line(nzb_id: i32, file_id: i32) -> Vec<u8> {
+    format!("nzb {nzb_id} file {file_id}\n").into_bytes()
+}
+
+/// Returns legacy suffix NUL-terminated string (`"s\0"`, `"c\0"`, or `"\0"`) for `DiskState::ConvertLegacyFileStates`.
+pub fn dqh_diskstate_legacy_suffix_str(suffix_kind: i32) -> &'static [u8] {
+    match suffix_kind {
+        1 => b"s\0",
+        2 => b"c\0",
+        _ => b"\0",
+    }
+}
+
+/// Formats `"<filename>.unreadable-<now>"` for `DiskState::SetAsideQueueFiles`.
+pub fn dqh_diskstate_format_unreadable_path(filename: &[u8], now: i64) -> Vec<u8> {
+    let suffix = format!(".unreadable-{now}");
+    let mut out = Vec::with_capacity(filename.len() + suffix.len());
+    out.extend_from_slice(filename);
+    out.extend_from_slice(suffix.as_bytes());
+    out
+}
+
+/// Formats `"<dest_dir><sep><file_id>.out.tmp"` for `DiskState::LoadFileInfo`, `DiskState::LoadFileState`, and `QueueCoordinator::LoadPartialState`.
+pub fn dqh_diskstate_format_out_tmp_path(dest_dir: &[u8], sep: u8, file_id: i32) -> Vec<u8> {
+    let suffix = format!("{file_id}.out.tmp");
+    let mut out = Vec::with_capacity(dest_dir.len() + 1 + suffix.len());
+    out.extend_from_slice(dest_dir);
+    out.push(sep);
+    out.extend_from_slice(suffix.as_bytes());
+    out
+}
+
+/// Formats `"<temp_dir><sep><file_id>.<part_num:03>"` for `DiskState::LoadFileState`.
+pub fn dqh_diskstate_format_staged_part_path(
+    temp_dir: &[u8],
+    sep: u8,
+    file_id: i32,
+    part_num: i32,
+) -> Vec<u8> {
+    let suffix = if part_num < 0 {
+        format!("{file_id}.-{:03}", part_num.unsigned_abs())
+    } else {
+        format!("{file_id}.{part_num:03}")
+    };
+    let mut out = Vec::with_capacity(temp_dir.len() + 1 + suffix.len());
+    out.extend_from_slice(temp_dir);
+    out.push(sep);
+    out.extend_from_slice(suffix.as_bytes());
+    out
+}
+
+/// Formats `"<file_id>c"` or `"<file_id>s"` for `DiskState::SaveFileState` and `DiskState::LoadFileState`.
+pub fn dqh_diskstate_format_file_state_name(file_id: i32, completed: bool) -> Vec<u8> {
+    let ch = if completed { 'c' } else { 's' };
+    format!("{file_id}{ch}").into_bytes()
+}
+
+/// Formats `"<queue_dir><sep>n<nzb_id>.log"` for `DiskState::DiscardFiles`, `DiskState::AppendNzbMessage`, and `DiskState::LoadNzbMessages`.
+pub fn dqh_diskstate_format_nzb_log_path(queue_dir: &[u8], sep: u8, nzb_id: i32) -> Vec<u8> {
+    let suffix = format!("n{nzb_id}.log");
+    let mut out = Vec::with_capacity(queue_dir.len() + 1 + suffix.len());
+    out.extend_from_slice(queue_dir);
+    out.push(sep);
+    out.extend_from_slice(suffix.as_bytes());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2249,6 +2325,32 @@ mod tests {
         assert_eq!(
             dqh_url_coord_format_temp_url_path(b"/tmp", b'/', 42),
             b"/tmp/url-42.tmp"
+        );
+        assert_eq!(
+            dqh_diskstate_format_new_path(b"/queue/ids"),
+            b"/queue/ids.new"
+        );
+        assert_eq!(dqh_diskstate_format_ids_line(12, 345), b"nzb 12 file 345\n");
+        assert_eq!(dqh_diskstate_legacy_suffix_str(1), b"s\0");
+        assert_eq!(dqh_diskstate_legacy_suffix_str(2), b"c\0");
+        assert_eq!(dqh_diskstate_legacy_suffix_str(0), b"\0");
+        assert_eq!(
+            dqh_diskstate_format_unreadable_path(b"/queue/queue", 1700000000),
+            b"/queue/queue.unreadable-1700000000"
+        );
+        assert_eq!(
+            dqh_diskstate_format_out_tmp_path(b"/dst/show", b'/', 99),
+            b"/dst/show/99.out.tmp"
+        );
+        assert_eq!(
+            dqh_diskstate_format_staged_part_path(b"/tmp", b'/', 99, 7),
+            b"/tmp/99.007"
+        );
+        assert_eq!(dqh_diskstate_format_file_state_name(99, true), b"99c");
+        assert_eq!(dqh_diskstate_format_file_state_name(99, false), b"99s");
+        assert_eq!(
+            dqh_diskstate_format_nzb_log_path(b"/queue", b'/', 12),
+            b"/queue/n12.log"
         );
     }
 }

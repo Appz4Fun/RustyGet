@@ -5842,6 +5842,29 @@ int32_t nzbget_rs_tpr_history_info_select_name_kind(
 NzbgetRsBuf nzbget_rs_tpr_queue_editor_format_nzb_file_match_name(
     const char* nzb_name, const char* base_file_name);
 int32_t nzbget_rs_tpr_queue_editor_filename_has_vol(const char* filename);
+NzbgetRsBuf nzbget_rs_dqh_diskstate_format_new_path(const char* base_path);
+NzbgetRsBuf nzbget_rs_dqh_diskstate_format_ids_line(int32_t nzb_id, int32_t file_id);
+const char* nzbget_rs_dqh_diskstate_legacy_suffix_str(int32_t suffix_kind);
+NzbgetRsBuf nzbget_rs_dqh_diskstate_format_unreadable_path(const char* filename, int64_t now);
+NzbgetRsBuf nzbget_rs_dqh_diskstate_format_out_tmp_path(
+    const char* dest_dir, char sep, int32_t file_id);
+NzbgetRsBuf nzbget_rs_dqh_diskstate_format_staged_part_path(
+    const char* temp_dir, char sep, int32_t file_id, int32_t part_num);
+NzbgetRsBuf nzbget_rs_dqh_diskstate_format_file_state_name(int32_t file_id, int32_t completed);
+NzbgetRsBuf nzbget_rs_dqh_diskstate_format_nzb_log_path(
+    const char* queue_dir, char sep, int32_t nzb_id);
+NzbgetRsBuf nzbget_rs_tpr_diskstate_format_queue_file_state_path(
+    const char* queue_dir, char sep, const char* filename, char suffix);
+NzbgetRsBuf nzbget_rs_tpr_diskstate_format_queue_id_state_path(
+    const char* queue_dir, char sep, int32_t file_id, char suffix);
+NzbgetRsBuf nzbget_rs_tpr_queue_coord_format_article_info_name(
+    const char* nzb_name, char sep, const char* filename, int32_t part_num, int32_t total_parts);
+NzbgetRsBuf nzbget_rs_tpr_queue_coord_format_par_damage_summary(
+    int32_t certain, int32_t damaged_blocks, int32_t projected_blocks,
+    int64_t block_size, int32_t recovery_blocks);
+NzbgetRsBuf nzbget_rs_tpr_queue_coord_format_nzb_ext_filename(const char* name);
+NzbgetRsBuf nzbget_rs_tpr_queue_coord_join_queued_filenames(
+    const char* dest_queued, const char* src_queued);
 
 #include "nzbget_tls_cipher.h"
 

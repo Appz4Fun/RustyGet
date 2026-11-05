@@ -765,8 +765,11 @@ void QueueCoordinator::StartArticleDownload(FileInfo* fileInfo, ArticleInfo* art
 		articleDownloader->SetContentAnalyzer(m_directRenamer.MakeArticleContentAnalyzer());
 	}
 
-	BString<1024> infoName("%s%c%s [%i/%i]", fileInfo->GetNzbInfo()->GetName(), PATH_SEPARATOR, fileInfo->GetFilename(), articleInfo->GetPartNumber(), (int)fileInfo->GetArticles()->size());
-	articleDownloader->SetInfoName(infoName);
+	NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_queue_coord_format_article_info_name(
+		fileInfo->GetNzbInfo()->GetName(), PATH_SEPARATOR, fileInfo->GetFilename(),
+		articleInfo->GetPartNumber(), (int)fileInfo->GetArticles()->size());
+	articleDownloader->SetInfoName(infoNameBuf.data ? infoNameBuf.data : "");
+	nzbget_rs_free(infoNameBuf);
 
 	articleInfo->SetStatus(ArticleInfo::aiRunning);
 	fileInfo->SetActiveDownloads(fileInfo->GetActiveDownloads() + 1);
@@ -1055,10 +1058,15 @@ void QueueCoordinator::ArticleCompleted(ArticleDownloader* articleDownloader)
 				fileInfo->MakeValidFilename();
 			}
 			fileInfo->SetFilenameConfirmed(true);
-			if (g_Options->GetDupeCheck() &&
-				nzbInfo->GetDupeMode() != dmForce &&
-				!nzbInfo->GetManyDupeFiles() &&
-				FileSystem::FileExists(BString<1024>("%s%c%s", nzbInfo->GetDestDir(), PATH_SEPARATOR, fileInfo->GetFilename())))
+			bool dupeFileExists = false;
+			if (g_Options->GetDupeCheck() && nzbInfo->GetDupeMode() != dmForce && !nzbInfo->GetManyDupeFiles())
+			{
+				NzbgetRsBuf destPathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+					nzbInfo->GetDestDir(), PATH_SEPARATOR, fileInfo->GetFilename());
+				dupeFileExists = FileSystem::FileExists(destPathBuf.data ? destPathBuf.data : "");
+				nzbget_rs_free(destPathBuf);
+			}
+			if (dupeFileExists)
 			{
 				warn("File \"%s\" seems to be duplicate, cancelling download and deleting file from queue", fileInfo->GetFilename());
 				fileCompleted = false;
@@ -1186,7 +1194,10 @@ void QueueCoordinator::ArticleCompleted(ArticleDownloader* articleDownloader)
 		}
 		if (path.empty() || !FileSystem::FileExists(path.c_str()))
 		{
-			path = destDir + PATH_SEPARATOR + filename;
+			NzbgetRsBuf destPathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+				destDir.c_str(), PATH_SEPARATOR, filename.c_str());
+			path = destPathBuf.data ? destPathBuf.data : "";
+			nzbget_rs_free(destPathBuf);
 		}
 		std::vector<ArticleInfo*> wrong = g_Options->GetDupeArticleFallback() != Options::dafNone ?
 			DupeArticleFallback::BorrowedPar2Mismatches(fileInfo, path.c_str(), destDir.c_str(), filename.c_str()) :
@@ -1754,7 +1765,10 @@ void QueueCoordinator::LoadPartialState(FileInfo* fileInfo)
 		g_DiskState->LoadFileState(fileInfo, g_ServerPool->GetServers(), false);
 		if ((g_Options->GetDirectWrite() || fileInfo->GetForceDirectWrite()) && !fileInfo->GetOutputInitialized())
 		{
-			BString<1024> outTmpFilename("%s%c%i.out.tmp", fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, fileInfo->GetId());
+			NzbgetRsBuf outTmpBuf = nzbget_rs_dqh_diskstate_format_out_tmp_path(
+				fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, fileInfo->GetId());
+			BString<1024> outTmpFilename = outTmpBuf.data ? outTmpBuf.data : "";
+			nzbget_rs_free(outTmpBuf);
 			if (FileSystem::FileExists(outTmpFilename))
 			{
 				fileInfo->SetOutputFilename(outTmpFilename);
@@ -1762,7 +1776,10 @@ void QueueCoordinator::LoadPartialState(FileInfo* fileInfo)
 			}
 			else if (fileInfo->GetForceDirectWrite())
 			{
-				BString<1024> outputFilename("%s%c%s", fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, fileInfo->GetFilename());
+				NzbgetRsBuf outBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+					fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, fileInfo->GetFilename());
+				BString<1024> outputFilename = outBuf.data ? outBuf.data : "";
+				nzbget_rs_free(outBuf);
 				if (FileSystem::FileExists(outputFilename))
 				{
 					fileInfo->SetOutputFilename(outputFilename);
@@ -1775,8 +1792,10 @@ void QueueCoordinator::LoadPartialState(FileInfo* fileInfo)
 	{
 		g_DiskState->LoadFileState(fileInfo, g_ServerPool->GetServers(), true);
 
-		BString<1024> outputFilename("%s%c%s", fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, fileInfo->GetFilename());
-		fileInfo->SetOutputFilename(outputFilename);
+		NzbgetRsBuf outBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, fileInfo->GetFilename());
+		fileInfo->SetOutputFilename(outBuf.data ? outBuf.data : "");
+		nzbget_rs_free(outBuf);
 
 		fileInfo->SetOutputInitialized(true);
 		fileInfo->SetForceDirectWrite(true);
@@ -1816,7 +1835,8 @@ void QueueCoordinator::CheckHealth(DownloadQueue* downloadQueue, FileInfo* fileI
 	if (g_Options->GetHealthCheck() == Options::hcPause)
 	{
 		warn("Pausing %s due to health %.1f%% below critical %.1f%%", fileInfo->GetNzbInfo()->GetName(),
-			fileInfo->GetNzbInfo()->CalcHealth() / 10.0, fileInfo->GetNzbInfo()->CalcCriticalHealth(true) / 10.0);
+			nzbget_rs_dqh_prepost_permille_to_percent(fileInfo->GetNzbInfo()->CalcHealth()),
+			nzbget_rs_dqh_prepost_permille_to_percent(fileInfo->GetNzbInfo()->CalcCriticalHealth(true)));
 		fileInfo->GetNzbInfo()->SetHealthPaused(true);
 		downloadQueue->EditEntry(fileInfo->GetNzbInfo()->GetId(), DownloadQueue::eaGroupPause, nullptr);
 	}
@@ -1825,8 +1845,9 @@ void QueueCoordinator::CheckHealth(DownloadQueue* downloadQueue, FileInfo* fileI
 	{
 		fileInfo->GetNzbInfo()->PrintMessage(Message::mkWarning,
 			"Cancelling download and deleting %s due to health %.1f%% below critical %.1f%%",
-			fileInfo->GetNzbInfo()->GetName(), fileInfo->GetNzbInfo()->CalcHealth() / 10.0,
-			fileInfo->GetNzbInfo()->CalcCriticalHealth(true) / 10.0);
+			fileInfo->GetNzbInfo()->GetName(),
+			nzbget_rs_dqh_prepost_permille_to_percent(fileInfo->GetNzbInfo()->CalcHealth()),
+			nzbget_rs_dqh_prepost_permille_to_percent(fileInfo->GetNzbInfo()->CalcCriticalHealth(true)));
 		fileInfo->GetNzbInfo()->SetDeleteStatus(NzbInfo::dsHealth);
 		downloadQueue->EditEntry(fileInfo->GetNzbInfo()->GetId(),
 			g_Options->GetHealthCheck() == Options::hcPark ? DownloadQueue::eaGroupParkDelete : DownloadQueue::eaGroupDelete,
@@ -2086,7 +2107,8 @@ void QueueCoordinator::CheckDupeFailover(DownloadQueue* downloadQueue, NzbInfo* 
 			"Failing over %s to duplicate %s: health %.1f%% below critical %.1f%%, "
 			"%i of %i missing article(s) recovered from duplicates",
 			nzbInfo->GetName(), backup->GetNzbInfo()->GetName(),
-			nzbInfo->CalcHealth() / 10.0, DownloadCriticalHealth(downloadQueue, nzbInfo) / 10.0,
+			nzbget_rs_dqh_prepost_permille_to_percent(nzbInfo->CalcHealth()),
+			nzbget_rs_dqh_prepost_permille_to_percent(DownloadCriticalHealth(downloadQueue, nzbInfo)),
 			recovered, attempted);
 	}
 	else if (DownloadHopeless(nzbInfo))
@@ -2095,7 +2117,9 @@ void QueueCoordinator::CheckDupeFailover(DownloadQueue* downloadQueue, NzbInfo* 
 		nzbInfo->PrintMessage(Message::mkWarning,
 			"Parking %s: health %.1f%% below critical %.1f%%, %i of %i missing article(s) "
 			"recovered from duplicates, %i of %i tried article(s) exist and no better duplicate in history (%s)",
-			nzbInfo->GetName(), nzbInfo->CalcHealth() / 10.0, DownloadCriticalHealth(downloadQueue, nzbInfo) / 10.0,
+			nzbInfo->GetName(),
+			nzbget_rs_dqh_prepost_permille_to_percent(nzbInfo->CalcHealth()),
+			nzbget_rs_dqh_prepost_permille_to_percent(DownloadCriticalHealth(downloadQueue, nzbInfo)),
 			recovered, attempted, nzbInfo->GetCurrentSuccessArticles(), tried,
 			g_DupeCoordinator->NoBackupReason(downloadQueue, nzbInfo).c_str());
 	}
@@ -2198,8 +2222,10 @@ void QueueCoordinator::CheckDeadDownload(DownloadQueue* downloadQueue, NzbInfo* 
 			nzbInfo->PrintMessage(Message::mkWarning,
 				"Parking %s: %i of %i tried article(s) of its own arrived, projected health %.1f%% "
 				"%s critical %.1f%%, and no duplicate in history to fail over to (%s)",
-				nzbInfo->GetName(), own, tried, projected / 10.0, farBelow ? "under half the" : "below",
-				critical / 10.0,
+				nzbInfo->GetName(), own, tried,
+				nzbget_rs_dqh_prepost_permille_to_percent(projected),
+				farBelow ? "under half the" : "below",
+				nzbget_rs_dqh_prepost_permille_to_percent(critical),
 				g_DupeCoordinator->NoBackupReason(downloadQueue, nzbInfo).c_str());
 			nzbInfo->SetDeleteStatus(NzbInfo::dsHealth);
 			downloadQueue->EditEntry(nzbInfo->GetId(), DownloadQueue::eaGroupParkDelete, nullptr);
@@ -2248,8 +2274,11 @@ void QueueCoordinator::CheckDeadDownload(DownloadQueue* downloadQueue, NzbInfo* 
 		nzbInfo->PrintMessage(Message::mkWarning,
 			"Failing over %s to duplicate %s: %i of %i tried article(s) of its own arrived, projected health "
 			"%.1f%% %s critical %.1f%%; the duplicate is %.0f%% alive",
-			nzbInfo->GetName(), backup->GetNzbInfo()->GetName(), own, tried, projected / 10.0,
-			projBelowCrit ? "below" : "too close to", critical / 10.0, backupAlive / 10.0);
+			nzbInfo->GetName(), backup->GetNzbInfo()->GetName(), own, tried,
+			nzbget_rs_dqh_prepost_permille_to_percent(projected),
+			projBelowCrit ? "below" : "too close to",
+			nzbget_rs_dqh_prepost_permille_to_percent(critical),
+			nzbget_rs_dqh_prepost_permille_to_percent(backupAlive));
 	}
 	nzbInfo->SetDeleteStatus(NzbInfo::dsHealth);
 	downloadQueue->EditEntry(nzbInfo->GetId(), DownloadQueue::eaGroupParkDelete, nullptr);
@@ -2315,9 +2344,14 @@ bool QueueCoordinator::CheckParDamage(DownloadQueue* downloadQueue, NzbInfo* nzb
 
 	HistoryInfo* backup = g_DupeCoordinator->FindDupeBackup(downloadQueue, nzbInfo,
 		nzbInfo->GetName(), nzbInfo->GetDupeKey());
-	BString<1024> damage("%i par2 block(s) of %.1f MB damaged%s, its par2-files hold %i recovery block(s)",
-		certain ? verdict.damagedBlocks : verdict.projectedBlocks, verdict.blockSize / 1024.0 / 1024.0,
-		certain ? "" : " at the rate so far", verdict.recoveryBlocks);
+	NzbgetRsBuf damageBuf = nzbget_rs_tpr_queue_coord_format_par_damage_summary(
+		certain ? 1 : 0,
+		verdict.damagedBlocks,
+		verdict.projectedBlocks,
+		verdict.blockSize,
+		verdict.recoveryBlocks);
+	BString<1024> damage = damageBuf.data ? damageBuf.data : "";
+	nzbget_rs_free(damageBuf);
 	if (!backup)
 	{
 		if (ParDamage::FirstReport(nzbInfo->GetId()))
@@ -2603,7 +2637,9 @@ bool QueueCoordinator::SetQueueEntryName(DownloadQueue* downloadQueue, NzbInfo* 
 
 	if (nzbInfo->GetKind() == NzbInfo::nkUrl)
 	{
-		nzbInfo->SetFilename(BString<1024>("%s.nzb", nzbInfo->GetName()));
+		NzbgetRsBuf fnBuf = nzbget_rs_tpr_queue_coord_format_nzb_ext_filename(nzbInfo->GetName());
+		nzbInfo->SetFilename(fnBuf.data ? fnBuf.data : "");
+		nzbget_rs_free(fnBuf);
 		return true;
 	}
 
@@ -2731,9 +2767,10 @@ bool QueueCoordinator::MergeQueueEntries(DownloadQueue* downloadQueue, NzbInfo* 
 	srcNzbInfo->GetCompletedFiles()->clear();
 
 	// concatenate QueuedFilenames using character '|' as separator
-	CString queuedFilename;
-	queuedFilename.Format("%s|%s", destNzbInfo->GetQueuedFilename(), srcNzbInfo->GetQueuedFilename());
-	destNzbInfo->SetQueuedFilename(queuedFilename);
+	NzbgetRsBuf qfBuf = nzbget_rs_tpr_queue_coord_join_queued_filenames(
+		destNzbInfo->GetQueuedFilename(), srcNzbInfo->GetQueuedFilename());
+	destNzbInfo->SetQueuedFilename(qfBuf.data ? qfBuf.data : "");
+	nzbget_rs_free(qfBuf);
 	// the merged download is other content: its twin fingerprint and labels go
 	// (TwinCheck leaves merged downloads alone: their nzb-file is two)
 	for (const char* name : { TwinCheck::FilesParam, TwinCheck::KindParam, TwinCheck::SampledParam,

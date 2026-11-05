@@ -182,10 +182,15 @@ StateFile::StateFile(const char* filename, int formatVersion, bool transactional
 	m_formatVersion(formatVersion), m_readVersion(readVersion ? readVersion : formatVersion),
 	m_transactional(transactional)
 {
-	m_destFilename.Format("%s%c%s", g_Options->GetQueueDir(), PATH_SEPARATOR, filename);
+	NzbgetRsBuf destBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+		g_Options->GetQueueDir(), PATH_SEPARATOR, filename ? filename : "");
+	m_destFilename = destBuf.data ? destBuf.data : "";
+	nzbget_rs_free(destBuf);
 	if (m_transactional)
 	{
-		m_tempFilename.Format("%s%c%s.new", g_Options->GetQueueDir(), PATH_SEPARATOR, filename);
+		NzbgetRsBuf tempBuf = nzbget_rs_dqh_diskstate_format_new_path(*m_destFilename);
+		m_tempFilename = tempBuf.data ? tempBuf.data : "";
+		nzbget_rs_free(tempBuf);
 	}
 	else
 	{
@@ -533,7 +538,10 @@ void DiskState::RaiseIdsPastQueueDir()
 	// and without them its id went to the next download after a restart (a client
 	// that still knew the old id then edited or deleted the new download)
 	CharBuffer ids;
-	BString<1024> idsFilename("%s%cids", g_Options->GetQueueDir(), PATH_SEPARATOR);
+	NzbgetRsBuf idsPathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+		g_Options->GetQueueDir(), PATH_SEPARATOR, "ids");
+	BString<1024> idsFilename = idsPathBuf.data ? idsPathBuf.data : "";
+	nzbget_rs_free(idsPathBuf);
 	if (FileSystem::FileExists(idsFilename) && FileSystem::LoadFileIntoBuffer(idsFilename, ids, true))
 	{
 		int nzbId = 0;
@@ -570,9 +578,17 @@ void DiskState::RaiseIdsPastQueueDir()
  */
 void DiskState::SaveIdFloor()
 {
-	BString<1024> idsFilename("%s%cids", g_Options->GetQueueDir(), PATH_SEPARATOR);
-	BString<1024> tempFilename("%s.new", *idsFilename);
-	BString<100> text("nzb %i file %i\n", NzbInfo::LastGenId(), FileInfo::LastGenId());
+	NzbgetRsBuf idsPathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+		g_Options->GetQueueDir(), PATH_SEPARATOR, "ids");
+	BString<1024> idsFilename = idsPathBuf.data ? idsPathBuf.data : "";
+	nzbget_rs_free(idsPathBuf);
+	NzbgetRsBuf tempPathBuf = nzbget_rs_dqh_diskstate_format_new_path(*idsFilename);
+	BString<1024> tempFilename = tempPathBuf.data ? tempPathBuf.data : "";
+	nzbget_rs_free(tempPathBuf);
+	NzbgetRsBuf textBuf = nzbget_rs_dqh_diskstate_format_ids_line(
+		NzbInfo::LastGenId(), FileInfo::LastGenId());
+	BString<100> text = textBuf.data ? textBuf.data : "";
+	nzbget_rs_free(textBuf);
 	if (!FileSystem::SaveBufferIntoFile(tempFilename, text, text.Length()))
 	{
 		FileSystem::DeleteFile(tempFilename);
@@ -641,7 +657,10 @@ void DiskState::ConvertLegacyFileStates(Servers* servers)
 		{
 			continue;
 		}
-		BString<1024> path("%s%c%s", g_Options->GetQueueDir(), PATH_SEPARATOR, filename);
+		NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			g_Options->GetQueueDir(), PATH_SEPARATOR, filename);
+		BString<1024> path = pathBuf.data ? pathBuf.data : "";
+		nzbget_rs_free(pathBuf);
 		DiskFile file;
 		char header[100] = {0};
 		if (!file.Open(path, DiskFile::omRead) || !file.ReadLine(header, sizeof(header)))
@@ -654,7 +673,7 @@ void DiskState::ConvertLegacyFileStates(Servers* servers)
 		if (nzbget_rs_dsp_classify_legacy_file_state(
 			filename, header, DISKSTATE_FILE_VERSION, DISKSTATE_FILE_LEGACY_VERSION, &legacyId, &suffixKind))
 		{
-			legacy.emplace_back(legacyId, suffixKind == 1 ? "s" : suffixKind == 2 ? "c" : "");
+			legacy.emplace_back(legacyId, nzbget_rs_dqh_diskstate_legacy_suffix_str(suffixKind));
 		}
 	}
 	if (legacy.empty())
@@ -692,10 +711,15 @@ void DiskState::SetAsideQueueFiles()
 	time_t now = Util::CurrentTime();
 	for (const char* name : { "queue", "history", "progress" })
 	{
-		BString<1024> filename("%s%c%s", g_Options->GetQueueDir(), PATH_SEPARATOR, name);
+		NzbgetRsBuf fnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			g_Options->GetQueueDir(), PATH_SEPARATOR, name);
+		BString<1024> filename = fnBuf.data ? fnBuf.data : "";
+		nzbget_rs_free(fnBuf);
 		if (FileSystem::FileExists(filename))
 		{
-			BString<1024> keptName("%s.unreadable-%lli", *filename, (long long)now);
+			NzbgetRsBuf keptBuf = nzbget_rs_dqh_diskstate_format_unreadable_path(*filename, (int64)now);
+			BString<1024> keptName = keptBuf.data ? keptBuf.data : "";
+			nzbget_rs_free(keptBuf);
 			if (FileSystem::MoveFile(filename, keptName))
 			{
 				error("Diskstate file %s could not be read; it is kept as %s", name,
@@ -1593,7 +1617,9 @@ bool DiskState::SaveFile(FileInfo* fileInfo, bool replace)
 {
 	debug("Saving FileInfo %i to disk", fileInfo->GetId());
 
-	BString<100> filename("%i", fileInfo->GetId());
+	NzbgetRsBuf fnBuf = nzbget_rs_dqh_conn_format_port_str(fileInfo->GetId());
+	BString<100> filename = fnBuf.data ? fnBuf.data : "";
+	nzbget_rs_free(fnBuf);
 	StateFile stateFile(filename, DISKSTATE_FILE_VERSION, replace);
 	stateFile.SetFlush(!replace);
 
@@ -1662,7 +1688,9 @@ bool DiskState::LoadFile(FileInfo* fileInfo, bool fileSummary, bool articles)
 {
 	debug("Loading FileInfo %i from disk", fileInfo->GetId());
 
-	BString<100> filename("%i", fileInfo->GetId());
+	NzbgetRsBuf fnBuf = nzbget_rs_dqh_conn_format_port_str(fileInfo->GetId());
+	BString<100> filename = fnBuf.data ? fnBuf.data : "";
+	nzbget_rs_free(fnBuf);
 	StateFile stateFile(filename, DISKSTATE_FILE_VERSION, false, DISKSTATE_FILE_LEGACY_VERSION);
 
 	StateDiskFile* infile = stateFile.BeginRead();
@@ -1718,11 +1746,20 @@ bool DiskState::LoadFileInfo(FileInfo* fileInfo, StateDiskFile& infile, int form
 				const char* destDir = fileInfo->GetNzbInfo() ? fileInfo->GetNzbInfo()->GetDestDir() : nullptr;
 				hasOwnOutFile = !fileInfo->GetOutputFilename().empty() &&
 					FileSystem::FileExists(fileInfo->GetOutputFilename().c_str());
-				hasOutTmp = destDir && !Util::EmptyStr(destDir) &&
-					FileSystem::FileExists(BString<1024>("%s%c%i.out.tmp", destDir, PATH_SEPARATOR, fileInfo->GetId()));
-				hasForceDest = forceDirectWrite && destDir &&
-					!Util::EmptyStr(destDir) && !Util::EmptyStr(fileInfo->GetFilename()) &&
-					FileSystem::FileExists(BString<1024>("%s%c%s", destDir, PATH_SEPARATOR, fileInfo->GetFilename()));
+				if (destDir && !Util::EmptyStr(destDir))
+				{
+					NzbgetRsBuf outTmpBuf = nzbget_rs_dqh_diskstate_format_out_tmp_path(
+						destDir, PATH_SEPARATOR, fileInfo->GetId());
+					hasOutTmp = FileSystem::FileExists(outTmpBuf.data ? outTmpBuf.data : "");
+					nzbget_rs_free(outTmpBuf);
+				}
+				if (forceDirectWrite && destDir && !Util::EmptyStr(destDir) && !Util::EmptyStr(fileInfo->GetFilename()))
+				{
+					NzbgetRsBuf forceDestBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+						destDir, PATH_SEPARATOR, fileInfo->GetFilename());
+					hasForceDest = FileSystem::FileExists(forceDestBuf.data ? forceDestBuf.data : "");
+					nzbget_rs_free(forceDestBuf);
+				}
 			}
 			bool restoredOutputInit = nzbget_rs_dad_diskstate_eval_restored_output_init(
 				outputInitialized,
@@ -1796,7 +1833,10 @@ bool DiskState::SaveFileState(FileInfo* fileInfo, bool completed, bool replace)
 {
 	debug("Saving FileState %i to disk", fileInfo->GetId());
 
-	BString<100> filename("%i%s", fileInfo->GetId(), completed ? "c" : "s");
+	NzbgetRsBuf fnBuf = nzbget_rs_dqh_diskstate_format_file_state_name(
+		fileInfo->GetId(), completed ? 1 : 0);
+	BString<100> filename = fnBuf.data ? fnBuf.data : "";
+	nzbget_rs_free(fnBuf);
 	StateFile stateFile(filename, DISKSTATE_FILE_VERSION, replace);
 	stateFile.SetFlush(!replace);
 
@@ -1870,7 +1910,10 @@ bool DiskState::LoadFileState(FileInfo* fileInfo, Servers* servers, bool complet
 {
 	debug("Loading FileInfo %i from disk", fileInfo->GetId());
 
-	BString<100> filename("%i%s", fileInfo->GetId(), completed ? "c" : "s");
+	NzbgetRsBuf fnBuf = nzbget_rs_dqh_diskstate_format_file_state_name(
+		fileInfo->GetId(), completed ? 1 : 0);
+	BString<100> filename = fnBuf.data ? fnBuf.data : "";
+	nzbget_rs_free(fnBuf);
 	StateFile stateFile(filename, DISKSTATE_FILE_VERSION, false, DISKSTATE_FILE_LEGACY_VERSION);
 
 	StateDiskFile* infile = stateFile.BeginRead();
@@ -1976,9 +2019,14 @@ bool DiskState::LoadFileState(FileInfo* fileInfo, Servers* servers, StateDiskFil
 			pa->GetPartNumber(),
 			g_Options->GetDirectWrite() ? 1 : 0,
 			fileInfo->GetForceDirectWrite() ? 1 : 0) != 0;
-		bool stagedFileExists = needStagedCheck &&
-			FileSystem::FileExists(BString<1024>("%s%c%i.%03i", g_Options->GetTempDir(),
-				PATH_SEPARATOR, fileInfo->GetId(), pa->GetPartNumber()));
+		bool stagedFileExists = false;
+		if (needStagedCheck)
+		{
+			NzbgetRsBuf stagedBuf = nzbget_rs_dqh_diskstate_format_staged_part_path(
+				g_Options->GetTempDir(), PATH_SEPARATOR, fileInfo->GetId(), pa->GetPartNumber());
+			stagedFileExists = FileSystem::FileExists(stagedBuf.data ? stagedBuf.data : "");
+			nzbget_rs_free(stagedBuf);
+		}
 		NzbgetRsArticleLoadEval eval{};
 		if (!nzbget_rs_dsp_eval_article_load_state(
 			formatVersion,
@@ -2008,8 +2056,10 @@ bool DiskState::LoadFileState(FileInfo* fileInfo, Servers* servers, StateDiskFil
 		pa->SetDupeFallbackRound(eval.dupe_fallback_round);
 		if (eval.need_result_filename)
 		{
-			pa->SetResultFilename(BString<1024>("%s%c%i.%03i", g_Options->GetTempDir(),
-				PATH_SEPARATOR, fileInfo->GetId(), pa->GetPartNumber()));
+			NzbgetRsBuf resBuf = nzbget_rs_dqh_diskstate_format_staged_part_path(
+				g_Options->GetTempDir(), PATH_SEPARATOR, fileInfo->GetId(), pa->GetPartNumber());
+			pa->SetResultFilename(resBuf.data ? resBuf.data : "");
+			nzbget_rs_free(resBuf);
 		}
 		completedArticles = eval.completed_articles;
 		pa->SetStatus((ArticleInfo::EStatus)eval.status);
@@ -2044,11 +2094,23 @@ bool DiskState::LoadFileState(FileInfo* fileInfo, Servers* servers, StateDiskFil
 		const char* destDir = fileInfo->GetNzbInfo() ? fileInfo->GetNzbInfo()->GetDestDir() : nullptr;
 		bool hasOwnOutFile = !fileInfo->GetOutputFilename().empty() &&
 			FileSystem::FileExists(fileInfo->GetOutputFilename().c_str());
-		bool hasOutTmp = destDir && !Util::EmptyStr(destDir) &&
-			FileSystem::FileExists(BString<1024>("%s%c%i.out.tmp", destDir, PATH_SEPARATOR, fileInfo->GetId()));
-		bool hasCompletedDest = (completed || fileInfo->GetForceDirectWrite()) && destDir &&
-			!Util::EmptyStr(destDir) && !Util::EmptyStr(fileInfo->GetFilename()) &&
-			FileSystem::FileExists(BString<1024>("%s%c%s", destDir, PATH_SEPARATOR, fileInfo->GetFilename()));
+		bool hasOutTmp = false;
+		if (destDir && !Util::EmptyStr(destDir))
+		{
+			NzbgetRsBuf outTmpBuf = nzbget_rs_dqh_diskstate_format_out_tmp_path(
+				destDir, PATH_SEPARATOR, fileInfo->GetId());
+			hasOutTmp = FileSystem::FileExists(outTmpBuf.data ? outTmpBuf.data : "");
+			nzbget_rs_free(outTmpBuf);
+		}
+		bool hasCompletedDest = false;
+		if ((completed || fileInfo->GetForceDirectWrite()) && destDir &&
+			!Util::EmptyStr(destDir) && !Util::EmptyStr(fileInfo->GetFilename()))
+		{
+			NzbgetRsBuf compDestBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+				destDir, PATH_SEPARATOR, fileInfo->GetFilename());
+			hasCompletedDest = FileSystem::FileExists(compDestBuf.data ? compDestBuf.data : "");
+			nzbget_rs_free(compDestBuf);
+		}
 		bool hasDirectWriteOutput = hasOwnOutFile || hasOutTmp || hasCompletedDest;
 
 		int newOutputInitialized = 0;
@@ -2066,9 +2128,11 @@ bool DiskState::LoadFileState(FileInfo* fileInfo, Servers* servers, StateDiskFil
 		fileInfo->SetOutputInitialized(newOutputInitialized != 0);
 		if (pickPathKind != 0)
 		{
-			fileInfo->SetOutputFilename(pickPathKind == 1 ?
-				*BString<1024>("%s%c%i.out.tmp", destDir, PATH_SEPARATOR, fileInfo->GetId()) :
-				*BString<1024>("%s%c%s", destDir, PATH_SEPARATOR, fileInfo->GetFilename()));
+			NzbgetRsBuf pickedBuf = pickPathKind == 1 ?
+				nzbget_rs_dqh_diskstate_format_out_tmp_path(destDir, PATH_SEPARATOR, fileInfo->GetId()) :
+				nzbget_rs_tpr_article_writer_format_dest_file_path(destDir, PATH_SEPARATOR, fileInfo->GetFilename());
+			fileInfo->SetOutputFilename(pickedBuf.data ? pickedBuf.data : "");
+			nzbget_rs_free(pickedBuf);
 		}
 	}
 
@@ -2099,9 +2163,10 @@ void DiskState::DiscardFiles(NzbInfo* nzbInfo, bool deleteLog)
 
 	if (deleteLog)
 	{
-		BString<1024> filename;
-		filename.Format("%s%cn%i.log", g_Options->GetQueueDir(), PATH_SEPARATOR, nzbInfo->GetId());
-		FileSystem::DeleteFile(filename);
+		NzbgetRsBuf logBuf = nzbget_rs_dqh_diskstate_format_nzb_log_path(
+			g_Options->GetQueueDir(), PATH_SEPARATOR, nzbInfo->GetId());
+		FileSystem::DeleteFile(logBuf.data ? logBuf.data : "");
+		nzbget_rs_free(logBuf);
 	}
 }
 
@@ -2257,11 +2322,13 @@ void DiskState::DiscardDownloadQueue()
 {
 	debug("Discarding queue");
 
-	BString<1024> fullFilename("%s%c%s", g_Options->GetQueueDir(), PATH_SEPARATOR, "queue");
-	FileSystem::DeleteFile(fullFilename);
-
-	fullFilename.Format("%s%c%s", g_Options->GetQueueDir(), PATH_SEPARATOR, "history");
-	FileSystem::DeleteFile(fullFilename);
+	for (const char* name : { "queue", "history" })
+	{
+		NzbgetRsBuf qBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			g_Options->GetQueueDir(), PATH_SEPARATOR, name);
+		FileSystem::DeleteFile(qBuf.data ? qBuf.data : "");
+		nzbget_rs_free(qBuf);
+	}
 
 	DirBrowser dir(g_Options->GetQueueDir());
 	while (const char* filename = dir.Next())
@@ -2270,16 +2337,13 @@ void DiskState::DiscardDownloadQueue()
 		bool onlyNums = nzbget_rs_dad_diskstate_is_digits_only_filename(filename) != 0;
 		if (onlyNums)
 		{
-			fullFilename.Format("%s%c%s", g_Options->GetQueueDir(), PATH_SEPARATOR, filename);
-			FileSystem::DeleteFile(fullFilename);
-
-			// delete file state file
-			fullFilename.Format("%s%c%ss", g_Options->GetQueueDir(), PATH_SEPARATOR, filename);
-			FileSystem::DeleteFile(fullFilename);
-
-			// delete failed info file
-			fullFilename.Format("%s%c%sc", g_Options->GetQueueDir(), PATH_SEPARATOR, filename);
-			FileSystem::DeleteFile(fullFilename);
+			for (char suffix : { '\0', 's', 'c' })
+			{
+				NzbgetRsBuf fBuf = nzbget_rs_tpr_diskstate_format_queue_file_state_path(
+					g_Options->GetQueueDir(), PATH_SEPARATOR, filename, suffix);
+				FileSystem::DeleteFile(fBuf.data ? fBuf.data : "");
+				nzbget_rs_free(fBuf);
+			}
 		}
 	}
 }
@@ -2290,34 +2354,47 @@ bool DiskState::DownloadQueueExists()
 
 	// An empty queue still has saved state: the IDs handed out before its entries
 	// were deleted. Load it so both generators continue past those IDs.
-	return FileSystem::FileExists(BString<1024>("%s%c%s", g_Options->GetQueueDir(), PATH_SEPARATOR, "queue")) ||
-		FileSystem::FileExists(BString<1024>("%s%c%s", g_Options->GetQueueDir(), PATH_SEPARATOR, "history")) ||
-		FileSystem::FileExists(BString<1024>("%s%c%s", g_Options->GetQueueDir(), PATH_SEPARATOR, "ids"));
+	for (const char* name : { "queue", "history", "ids" })
+	{
+		NzbgetRsBuf qBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			g_Options->GetQueueDir(), PATH_SEPARATOR, name);
+		bool exists = FileSystem::FileExists(qBuf.data ? qBuf.data : "");
+		nzbget_rs_free(qBuf);
+		if (exists)
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 void DiskState::DiscardFile(int fileId, bool deleteData, bool deletePartialState, bool deleteCompletedState)
 {
-	BString<1024> fileName;
-
 	// info and articles file
 	if (deleteData)
 	{
-		fileName.Format("%s%c%i", g_Options->GetQueueDir(), PATH_SEPARATOR, fileId);
-		FileSystem::DeleteFile(fileName);
+		NzbgetRsBuf fBuf = nzbget_rs_tpr_diskstate_format_queue_id_state_path(
+			g_Options->GetQueueDir(), PATH_SEPARATOR, fileId, '\0');
+		FileSystem::DeleteFile(fBuf.data ? fBuf.data : "");
+		nzbget_rs_free(fBuf);
 	}
 
 	// partial state file
 	if (deletePartialState)
 	{
-		fileName.Format("%s%c%is", g_Options->GetQueueDir(), PATH_SEPARATOR, fileId);
-		FileSystem::DeleteFile(fileName);
+		NzbgetRsBuf fBuf = nzbget_rs_tpr_diskstate_format_queue_id_state_path(
+			g_Options->GetQueueDir(), PATH_SEPARATOR, fileId, 's');
+		FileSystem::DeleteFile(fBuf.data ? fBuf.data : "");
+		nzbget_rs_free(fBuf);
 	}
 
 	// completed state file
 	if (deleteCompletedState)
 	{
-		fileName.Format("%s%c%ic", g_Options->GetQueueDir(), PATH_SEPARATOR, fileId);
-		FileSystem::DeleteFile(fileName);
+		NzbgetRsBuf fBuf = nzbget_rs_tpr_diskstate_format_queue_id_state_path(
+			g_Options->GetQueueDir(), PATH_SEPARATOR, fileId, 'c');
+		FileSystem::DeleteFile(fBuf.data ? fBuf.data : "");
+		nzbget_rs_free(fBuf);
 	}
 }
 
@@ -3155,7 +3232,10 @@ error:
 
 void DiskState::WriteCacheFlag()
 {
-	BString<1024> flagFilename("%s%c%s", g_Options->GetQueueDir(), PATH_SEPARATOR, "acache");
+	NzbgetRsBuf flagBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+		g_Options->GetQueueDir(), PATH_SEPARATOR, "acache");
+	BString<1024> flagFilename = flagBuf.data ? flagBuf.data : "";
+	nzbget_rs_free(flagBuf);
 
 	StateDiskFile outfile;
 	if (!outfile.Open(flagFilename, StateDiskFile::omWrite))
@@ -3169,13 +3249,18 @@ void DiskState::WriteCacheFlag()
 
 void DiskState::DeleteCacheFlag()
 {
-	BString<1024> flagFilename("%s%c%s", g_Options->GetQueueDir(), PATH_SEPARATOR, "acache");
-	FileSystem::DeleteFile(flagFilename);
+	NzbgetRsBuf flagBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+		g_Options->GetQueueDir(), PATH_SEPARATOR, "acache");
+	FileSystem::DeleteFile(flagBuf.data ? flagBuf.data : "");
+	nzbget_rs_free(flagBuf);
 }
 
 void DiskState::AppendNzbMessage(int nzbId, Message::EKind kind, const char* text)
 {
-	BString<1024> logFilename("%s%cn%i.log", g_Options->GetQueueDir(), PATH_SEPARATOR, nzbId);
+	NzbgetRsBuf logBuf = nzbget_rs_dqh_diskstate_format_nzb_log_path(
+		g_Options->GetQueueDir(), PATH_SEPARATOR, nzbId);
+	BString<1024> logFilename = logBuf.data ? logBuf.data : "";
+	nzbget_rs_free(logBuf);
 
 	StateDiskFile outfile;
 	if (!outfile.Open(logFilename, StateDiskFile::omAppend))
@@ -3202,7 +3287,10 @@ void DiskState::LoadNzbMessages(int nzbId, MessageList* messages)
 	//   - Other threads may be writing into the log-file at any time;
 	//   - The log-file may also be deleted from another thread;
 
-	BString<1024> logFilename("%s%cn%i.log", g_Options->GetQueueDir(), PATH_SEPARATOR, nzbId);
+	NzbgetRsBuf logBuf = nzbget_rs_dqh_diskstate_format_nzb_log_path(
+		g_Options->GetQueueDir(), PATH_SEPARATOR, nzbId);
+	BString<1024> logFilename = logBuf.data ? logBuf.data : "";
+	nzbget_rs_free(logBuf);
 
 	if (!FileSystem::FileExists(logFilename))
 	{

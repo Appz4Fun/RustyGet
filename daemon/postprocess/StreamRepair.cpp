@@ -266,7 +266,7 @@ void DonorMemberSource::Prefetch(int64 offset, int64 size)
 
 bool DonorMemberSource::Read(int64 offset, void* buffer, int64 size)
 {
-	if (!EnsureInit() || !nzbget_rs_cdn_content_source_range_valid(offset, size, m_size))
+	if (!EnsureInit() || !(offset >= 0 && size >= 0 && offset <= m_size && size <= m_size - offset))
 	{
 		return false;
 	}
@@ -2551,8 +2551,7 @@ bool StreamRepairController::ReadTargetCipher(ContentMap& targetMap, TargetSetFi
 	const StreamRange& cipherRange, char* buffer)
 {
 	std::vector<MemberRange> pieces = targetMap.MapCipherRange(cipherRange);
-	if (nzbget_rs_src_content_map_is_empty_or_invalid_cipher_pieces(
-		pieces.empty() ? 1 : 0, cipherRange.Size))
+	if (pieces.empty() && cipherRange.Size > 0)
 	{
 		return false;
 	}

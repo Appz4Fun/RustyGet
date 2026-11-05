@@ -1577,6 +1577,60 @@ where
     Ok((prim.name.clone(), prim.size, runs))
 }
 
+/// `ContentMap::ReadInnerDecrypted` (`ContentMap.cpp`): computes the 16-byte AES-CBC
+/// block-aligned `[cipher_from, cipher_to)` bounds covering `[inner_offset, inner_offset + inner_size)`
+/// and validates it against `inner_size_total` and `cipher_stream_size`.
+/// Returns `(valid, empty, cipher_from, cipher_to)`.
+pub fn content_map_calc_decrypt_cipher_bounds(
+    inner_offset: i64,
+    inner_size: i64,
+    inner_size_total: i64,
+    block_size: i64,
+    cipher_stream_size: i64,
+) -> (bool, bool, i64, i64) {
+    if inner_offset < 0
+        || inner_size < 0
+        || block_size <= 0
+        || inner_offset.saturating_add(inner_size) > inner_size_total
+    {
+        return (false, false, 0, 0);
+    }
+    if inner_size == 0 {
+        return (true, true, 0, 0);
+    }
+    let end = inner_offset + inner_size;
+    let cipher_from = (inner_offset / block_size) * block_size;
+    let cipher_to = ((end + block_size - 1) / block_size) * block_size;
+    if cipher_to > cipher_stream_size {
+        return (false, false, cipher_from, cipher_to);
+    }
+    (true, false, cipher_from, cipher_to)
+}
+
+/// `ContentMapper::IsCompressibleArchive` (`ContentMap.cpp`): returns `true` if `format` is one of
+/// the compressible archive formats (`FORMAT_RAR`, `FORMAT_ZIP`, or `FORMAT_SEVEN_ZIP`).
+#[inline]
+pub fn content_mapper_is_compressible_archive(format: i32) -> bool {
+    format == FORMAT_RAR || format == FORMAT_ZIP || format == FORMAT_SEVEN_ZIP
+}
+
+/// `ContentMapper::BuildRarMap` (`ContentMap.cpp`): classifies an unreadable RAR volume (`1` = encrypted
+/// headers, `2` = unreadable headers in more than one volume, `0` = first unknown volume).
+#[inline]
+pub fn content_mapper_classify_unreadable_rar_vol(
+    has_source: bool,
+    is_encrypted: bool,
+    unknown_volume: i32,
+) -> i32 {
+    if has_source && is_encrypted {
+        1
+    } else if unknown_volume >= 0 {
+        2
+    } else {
+        0
+    }
+}
+
 // ============================================================================
 // StreamRepairController Hot-Path Helpers
 // ============================================================================

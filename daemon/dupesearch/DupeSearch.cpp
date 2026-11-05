@@ -573,7 +573,7 @@ void DupeSearch::Collect(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, Job& jo
             LowerKey(EffectiveKey(item))==lowerKey &&
             ReleaseName::SameRelease(nzbInfo->GetName(),item->GetName()) &&
             !Util::EmptyStr(item->GetQueuedFilename()) &&
-            nzbget_rs_tpr_twin_check_is_merged_queued_filename(item->GetQueuedFilename()) == 0)
+            strchr(item->GetQueuedFilename(), '|') == nullptr)
         {
             job.members.emplace_back(item->GetId(),item->GetQueuedFilename());
             job.memberScores.push_back(item->GetDupeScore());
@@ -591,7 +591,7 @@ void DupeSearch::Collect(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, Job& jo
 			if (item != nzbInfo && backup && LowerKey(EffectiveKey(item)) == lowerKey &&
 				ReleaseName::SameRelease(nzbInfo->GetName(), item->GetName()) &&
 				!Util::EmptyStr(item->GetQueuedFilename()) &&
-				nzbget_rs_tpr_twin_check_is_merged_queued_filename(item->GetQueuedFilename()) == 0)
+				strchr(item->GetQueuedFilename(), '|') == nullptr)
 			{
 				job.members.emplace_back(item->GetId(), item->GetQueuedFilename());
 				job.memberScores.push_back(item->GetDupeScore());

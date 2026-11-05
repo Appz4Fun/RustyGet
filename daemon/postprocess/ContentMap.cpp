@@ -27,7 +27,7 @@
 
 bool DiskContentSource::Read(int64 offset, void* buffer, int64 size)
 {
-	return nzbget_rs_cdn_content_source_range_valid(offset, size, m_size) != 0 &&
+	return offset >= 0 && size >= 0 && offset <= m_size && size <= m_size - offset &&
 		m_file.Seek(offset) && m_file.Read(buffer, size) == size;
 }
 
@@ -43,7 +43,7 @@ CompositeSource::CompositeSource(ContentSourceSet& sources, std::vector<int> mem
 
 bool CompositeSource::Read(int64 offset, void* buffer, int64 size)
 {
-	if (nzbget_rs_cdn_content_source_range_valid(offset, size, m_totalSize) == 0)
+	if (!(offset >= 0 && size >= 0 && offset <= m_totalSize && size <= m_totalSize - offset))
 	{
 		return false;
 	}
@@ -89,7 +89,7 @@ bool HoledSource::Read(int64 offset, void* buffer, int64 size)
 
 ContentSource* HoledSourceSet::GetSource(int memberIndex)
 {
-	if (!nzbget_rs_srp_stream_repair_is_member_index_in_bounds(memberIndex, m_wrapped.size()))
+	if (memberIndex < 0 || (size_t)memberIndex >= m_wrapped.size())
 	{
 		return nullptr;
 	}
@@ -161,8 +161,7 @@ int64 ContentMap::GetCipherStreamSize() const
 
 std::vector<MemberRange> ContentMap::MapCipherRange(const StreamRange& cipherRange) const
 {
-	if (nzbget_rs_dqh_content_map_can_map_cipher_range(
-		cipherRange.Offset, cipherRange.Size, m_runCryptos.size(), m_runs.size()) == 0)
+	if (cipherRange.Offset < 0 || cipherRange.Size <= 0 || m_runCryptos.size() != m_runs.size())
 	{
 		return {};
 	}
@@ -223,7 +222,7 @@ bool ContentMap::ReadInnerDecrypted(ContentSourceSet& sources, const StreamRange
 	int empty = 0;
 	int64 cipherFrom = 0;
 	int64 cipherTo = 0;
-	if (!nzbget_rs_cdn_content_map_calc_decrypt_cipher_bounds(
+	if (!nzbget_rs_content_map_calc_decrypt_cipher_bounds(
 		innerRange.Offset, innerRange.Size, m_innerSize, blockSize, GetCipherStreamSize(),
 		&empty, &cipherFrom, &cipherTo))
 	{
@@ -267,14 +266,12 @@ void ContentMap::ExcludeMember(int memberIndex)
 	std::vector<RunCrypto> keptCryptos;
 	for (size_t i = 0; i < m_runs.size(); i++)
 	{
-		int keepCrypto = 0;
-		if (!nzbget_rs_sap_content_map_exclude_member_step(
-			m_runs[i].MemberIndex, memberIndex, m_runCryptos.size(), m_runs.size(), &keepCrypto))
+		if (m_runs[i].MemberIndex == memberIndex)
 		{
 			continue;
 		}
 		keptRuns.push_back(m_runs[i]);
-		if (keepCrypto)
+		if (parallel)
 		{
 			keptCryptos.push_back(m_runCryptos[i]);
 		}
@@ -289,7 +286,7 @@ void ContentMap::ExcludeMember(int memberIndex)
 
 bool ContentMapper::IsCompressibleArchive(const MemberSet& set)
 {
-	return nzbget_rs_cdn_content_mapper_is_compressible_archive(
+	return nzbget_rs_content_mapper_is_compressible_archive(
 		(int)set.Format, (int)MemberSet::mfRar, (int)MemberSet::mfZip, (int)MemberSet::mfSevenZip) != 0;
 }
 
@@ -343,8 +340,7 @@ std::unique_ptr<ContentMap> ContentMapper::BuildBareMap(const std::vector<SetMem
 {
 	int memberIndex = set.Members[0];
 	ContentSource* source = sources.GetSource(memberIndex);
-	if (!nzbget_rs_src_content_map_can_build_bare_or_split_member(
-		source != nullptr ? 1 : 0, source ? source->Size() : 0))
+	if (!source || source->Size() <= 0)
 	{
 		skipReason = "member unreadable";
 		return nullptr;
@@ -378,15 +374,11 @@ std::unique_ptr<ContentMap> ContentMapper::BuildSplitMap(const std::vector<SetMe
 	for (int memberIndex : set.Members)
 	{
 		ContentSource* source = sources.GetSource(memberIndex);
-		if (!nzbget_rs_src_content_map_can_build_bare_or_split_member(
-			source != nullptr ? 1 : 0, source ? source->Size() : 0))
+		if (!source || source->Size() <= 0)
 		{
 			// every member's size shapes the offsets after it - unlike rar
 			// volumes, a split set with an unreadable member cannot map at all
-			NzbgetRsBuf reasonBuf = nzbget_rs_dqh_content_map_format_member_unreadable_reason(
-				members[memberIndex].Name.c_str());
-			skipReason.assign(reasonBuf.data ? reasonBuf.data : "", reasonBuf.len);
-			nzbget_rs_free(reasonBuf);
+			skipReason = "member " + members[memberIndex].Name + " unreadable";
 			return nullptr;
 		}
 		map->GetRuns()->push_back({innerOffset, memberIndex, 0, source->Size()});
@@ -429,7 +421,7 @@ std::unique_ptr<ContentMap> ContentMapper::BuildRarMap(const std::vector<SetMemb
 			volumes[i] = std::move(volume);
 			continue;
 		}
-		int unreadableClass = nzbget_rs_dqh_content_mapper_classify_unreadable_rar_vol(
+		int unreadableClass = nzbget_rs_content_mapper_classify_unreadable_rar_vol(
 			source != nullptr ? 1 : 0, volume->GetEncrypted() ? 1 : 0, unknownVolume);
 		if (unreadableClass == 1)
 		{

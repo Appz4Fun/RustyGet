@@ -43,6 +43,7 @@ pub mod rarreader;
 pub mod rarrenamer;
 pub mod releasename;
 pub mod renameanalyzer;
+pub mod repair;
 pub mod rpcparams;
 pub mod rpcroute;
 pub mod scanner;

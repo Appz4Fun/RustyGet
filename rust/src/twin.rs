@@ -767,6 +767,219 @@ pub fn format_twin_kind_message(
     out
 }
 
+/// `TwinCheckJob::IndexData` (`TwinCheck.cpp`): selects the index of the smallest `.par2`
+/// entry in `entries` within `max_index_size`, returning `-1` if no eligible `.par2` entry exists.
+pub fn select_min_par2_index(is_par2: &[u8], sizes: &[i64], max_index_size: i64) -> i32 {
+    let n = is_par2.len().min(sizes.len());
+    let mut best_idx: i32 = -1;
+    let mut best_size: i64 = i64::MAX;
+    for i in 0..n {
+        if is_par2[i] != 0 && (best_idx < 0 || sizes[i] < best_size) {
+            best_idx = i as i32;
+            best_size = sizes[i];
+        }
+    }
+    if best_idx >= 0 && best_size <= max_index_size {
+        best_idx
+    } else {
+        -1
+    }
+}
+
+/// `TwinCheckJob::Run` (`TwinCheck.cpp`): parses the trailing `-<files>` count from a
+/// PAR2 fingerprint string (`"<hash>-<count>"`).
+pub fn parse_fingerprint_files(fingerprint: &[u8]) -> i32 {
+    crate::connclientmain::twin_check_parse_fingerprint_files(fingerprint)
+}
+
+/// `TwinCheckJob::Sample` (`TwinCheck.cpp`): returns `true` when entry `a` sorts before `b`
+/// by `(filename if non-empty else subject)`.
+#[inline]
+pub fn compare_entry_names(
+    a_filename: &[u8],
+    a_subject: &[u8],
+    b_filename: &[u8],
+    b_subject: &[u8],
+) -> bool {
+    crate::twinproberenhist::twin_check_compare_entry_names(
+        a_filename, a_subject, b_filename, b_subject,
+    )
+}
+
+/// `TwinCheckJob::Sample` (`TwinCheck.cpp`): selects `sample_count` evenly spaced `(file_idx, seg_idx)`
+/// pairs across two postings when their non-PAR2 file count and per-segment byte sizes match.
+pub fn sample_indices(
+    primary_seg_counts: &[usize],
+    primary_seg_bytes: &[i64],
+    dupe_seg_counts: &[usize],
+    dupe_seg_bytes: &[i64],
+    sample_count: usize,
+) -> Option<Vec<(usize, usize)>> {
+    crate::diskstatepp::twin_sample_indices(
+        primary_seg_counts,
+        primary_seg_bytes,
+        dupe_seg_counts,
+        dupe_seg_bytes,
+        sample_count,
+    )
+}
+
+/// `TwinCheckJob::Sample` (`TwinCheck.cpp`): updates `(compared, differ)` for a sampled pair.
+#[inline]
+pub fn compare_sampled_pair(
+    part_a_success: i32,
+    part_b_success: i32,
+    part_a_offset: i64,
+    part_b_offset: i64,
+    data_equal: i32,
+    in_compared: i32,
+    in_differ: i32,
+) -> (i32, i32) {
+    crate::twinproberenhist::twin_check_job_compare_sampled_pair(
+        part_a_success,
+        part_b_success,
+        part_a_offset,
+        part_b_offset,
+        data_equal,
+        in_compared,
+        in_differ,
+    )
+}
+
+/// `TwinCheckJob::Sample` (`TwinCheck.cpp`): evaluates the sample verdict (`0` = retry later,
+/// `1` = `"twin"`, `2` = `"alt"`).
+#[inline]
+pub fn eval_sample_verdict(
+    is_stopped: bool,
+    compared: i32,
+    differ: i32,
+    sample_count: i32,
+) -> i32 {
+    crate::contentdupenntp::twin_check_eval_sample_verdict(
+        is_stopped,
+        compared,
+        differ,
+        sample_count,
+    )
+}
+
+/// `TwinCheck::Identity` (`TwinCheck.cpp`): formats `<files_param>#<posting>`,
+/// or returns an empty buffer if `files_param` is empty, `"none"`, or `"lost"`.
+pub fn format_identity(files_param: &[u8], posting: &[u8]) -> Vec<u8> {
+    crate::connclientmain::twin_check_format_identity(files_param, posting)
+}
+
+/// `TwinCheck::PutPar2` (`TwinCheck.cpp`): splits a `"<print>\t<1|0>"` string returned by
+/// `nzbget_rs_twin_put_par2` into `(print_slice, is_complete)`.
+pub fn split_put_par2_result(raw: &[u8]) -> (&[u8], bool) {
+    crate::twinproberenhist::twin_check_split_put_par2_result(raw)
+}
+
+/// `TwinCheck::FetchEntry` (`TwinCheck.cpp`): validates a fetched segment part and computes
+/// the required vector size `(is_valid, new_len)`.
+#[inline]
+pub fn is_fetched_entry_part_valid(
+    success: bool,
+    offset: i64,
+    data_len: usize,
+    max_size: i64,
+    cur_data_len: usize,
+) -> (bool, usize) {
+    crate::streamtwinqueue::twin_check_is_fetched_entry_part_valid(
+        success,
+        offset,
+        data_len,
+        max_size,
+        cur_data_len,
+    )
+}
+
+/// `TwinCheck::ServiceWork` (`TwinCheck.cpp`): evaluates whether an item is a duplicate.
+#[inline]
+pub fn is_dupe_item(
+    queued: bool,
+    remaining_size: i64,
+    paused_size: i64,
+    delete_status: i32,
+    ds_dupe: i32,
+    ds_copy: i32,
+) -> bool {
+    crate::connclientmain::twin_check_is_dupe_item(
+        queued,
+        remaining_size,
+        paused_size,
+        delete_status,
+        ds_dupe,
+        ds_copy,
+    )
+}
+
+/// `TwinCheck::ServiceWork` (`TwinCheck.cpp`): returns `true` when `print` is non-empty and
+/// neither `"none"` nor `"lost"`.
+#[inline]
+pub fn is_print_usable(print: &[u8]) -> bool {
+    crate::streamtwinqueue::twin_check_is_print_usable(print)
+}
+
+/// `TwinCheck::ServiceWork` (`TwinCheck.cpp`): selects the primary download index within a `dupe_key` group.
+pub fn select_primary(queued: &[u8], is_dupe: &[u8], scores: &[i32]) -> i32 {
+    crate::diskstatepp::twin_select_primary(queued, is_dupe, scores)
+}
+
+/// `TwinCheck::ServiceWork` (`TwinCheck.cpp`): evaluates `(sampleable, sampled_now)`.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub fn eval_sampleable(
+    primary_ok: bool,
+    is_primary: bool,
+    is_dupe: bool,
+    print_empty: bool,
+    primary_print_empty: bool,
+    by_par2: bool,
+    has_sampled: bool,
+    sampled_of: Option<&[u8]>,
+    primary_id: &[u8],
+) -> (bool, bool) {
+    crate::streamtwinqueue::twin_check_eval_sampleable(
+        primary_ok,
+        is_primary,
+        is_dupe,
+        print_empty,
+        primary_print_empty,
+        by_par2,
+        has_sampled,
+        sampled_of,
+        primary_id,
+    )
+}
+
+/// `TwinCheck::ServiceWork` (`TwinCheck.cpp`): resolves the `"twin"`, `"twin:N/M"`, `"alt"`, or `""`
+/// kind label for a duplicate item.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_kind(
+    is_primary: bool,
+    is_dupe: bool,
+    by_par2: bool,
+    by_files: &[u8],
+    listed: bool,
+    same_print: bool,
+    sampleable: bool,
+    sampled_now: bool,
+    sampled_val: &[u8],
+) -> Vec<u8> {
+    crate::diskstatepp::twin_resolve_kind(
+        is_primary,
+        is_dupe,
+        by_par2,
+        by_files,
+        listed,
+        same_print,
+        sampleable,
+        sampled_now,
+        sampled_val,
+    )
+}
+
 /// The crate's parser, as par2_set and block_size used it before the walk
 /// (the comparison tests below).
 #[cfg(test)]

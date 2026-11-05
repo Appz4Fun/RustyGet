@@ -11310,102 +11310,6 @@ pub unsafe extern "C" fn nzbget_rs_dsp_normalize_external_nzb_name(
     into_buf(out)
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dsp_twin_sample_indices(
-    primary_seg_counts: *const usize,
-    primary_seg_bytes: *const i64,
-    primary_seg_bytes_len: usize,
-    primary_files: usize,
-    dupe_seg_counts: *const usize,
-    dupe_seg_bytes: *const i64,
-    dupe_seg_bytes_len: usize,
-    dupe_files: usize,
-    sample_count: usize,
-    out_file_indices: *mut usize,
-    out_seg_indices: *mut usize,
-) -> c_int {
-    if primary_files == 0
-        || dupe_files == 0
-        || sample_count == 0
-        || primary_seg_counts.is_null()
-        || dupe_seg_counts.is_null()
-        || out_file_indices.is_null()
-        || out_seg_indices.is_null()
-    {
-        return 0;
-    }
-    let p_counts = std::slice::from_raw_parts(primary_seg_counts, primary_files);
-    let d_counts = std::slice::from_raw_parts(dupe_seg_counts, dupe_files);
-    let p_bytes = if primary_seg_bytes.is_null() || primary_seg_bytes_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(primary_seg_bytes, primary_seg_bytes_len)
-    };
-    let d_bytes = if dupe_seg_bytes.is_null() || dupe_seg_bytes_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(dupe_seg_bytes, dupe_seg_bytes_len)
-    };
-    if let Some(indices) = crate::diskstatepp::twin_sample_indices(
-        p_counts,
-        p_bytes,
-        d_counts,
-        d_bytes,
-        sample_count,
-    ) {
-        for (i, (f_idx, s_idx)) in indices.into_iter().enumerate() {
-            *out_file_indices.add(i) = f_idx;
-            *out_seg_indices.add(i) = s_idx;
-        }
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dsp_twin_select_primary(
-    queued: *const u8,
-    is_dupe: *const u8,
-    scores: *const c_int,
-    count: usize,
-) -> c_int {
-    if count == 0 || queued.is_null() || is_dupe.is_null() || scores.is_null() {
-        return -1;
-    }
-    crate::diskstatepp::twin_select_primary(
-        std::slice::from_raw_parts(queued, count),
-        std::slice::from_raw_parts(is_dupe, count),
-        std::slice::from_raw_parts(scores, count),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dsp_twin_resolve_kind(
-    is_primary: c_int,
-    is_dupe: c_int,
-    by_par2: c_int,
-    by_files: *const c_char,
-    listed: c_int,
-    same_print: c_int,
-    sampleable: c_int,
-    sampled_now: c_int,
-    sampled_val: *const c_char,
-) -> RsBuf {
-    let out = crate::diskstatepp::twin_resolve_kind(
-        is_primary != 0,
-        is_dupe != 0,
-        by_par2 != 0,
-        crate::diskstatepp::cstr_to_bytes(by_files),
-        listed != 0,
-        same_print != 0,
-        sampleable != 0,
-        sampled_now != 0,
-        crate::diskstatepp::cstr_to_bytes(sampled_val),
-    );
-    into_buf(out)
-}
-
 // ============================================================================
 // DupeSearch, Fleet, DonorHealth, Newznab, FeedCoordinator, FeedInfo &
 // FeedFile Hot-Path FFI (`rust/src/dupefeed.rs`)
@@ -13920,103 +13824,6 @@ pub unsafe extern "C" fn nzbget_rs_dur_direct_unpack_is_insert_disk_prompt(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dur_repair_ctrl_classify_file_crc_status(
-    cf_status: c_int,
-    reprocess: c_int,
-    has_segments: c_int,
-    cf_success: c_int,
-    cf_failure: c_int,
-    cf_partial: c_int,
-    fs_success: c_int,
-    fs_failure: c_int,
-    fs_partial: c_int,
-    fs_unknown: c_int,
-) -> c_int {
-    crate::dlunpackrepair::repair_ctrl_classify_file_crc_status(
-        cf_status,
-        reprocess != 0,
-        has_segments != 0,
-        cf_success,
-        cf_failure,
-        cf_partial,
-        fs_success,
-        fs_failure,
-        fs_partial,
-        fs_unknown,
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dur_repair_ctrl_estimate_twin_vol_blocks(
-    entry_size: i64,
-    twin_block_size: u64,
-) -> c_int {
-    crate::dlunpackrepair::repair_ctrl_estimate_twin_vol_blocks(entry_size, twin_block_size)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dur_repair_ctrl_estimate_par_blocks_from_size(
-    file_size: i64,
-    block_size: i64,
-) -> c_int {
-    crate::dlunpackrepair::repair_ctrl_estimate_par_blocks_from_size(file_size, block_size)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dur_repair_ctrl_match_strict_par_name(
-    filename: *const c_char,
-    main_base: *const c_char,
-) -> c_int {
-    let f = if filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(filename).to_bytes()
-    };
-    let b = if main_base.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(main_base).to_bytes()
-    };
-    i32::from(crate::dlunpackrepair::repair_ctrl_match_strict_par_name(
-        f, b,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dur_repair_ctrl_resolve_par_status(
-    checker_status: c_int,
-    cur_par_status: c_int,
-    ps_repaired: c_int,
-    ps_repair_not_needed: c_int,
-    ps_repair_possible: c_int,
-    nzb_ps_skipped: c_int,
-    nzb_ps_success: c_int,
-    nzb_ps_repair_possible: c_int,
-    nzb_ps_failure: c_int,
-    out_set_par_repaired: *mut c_int,
-    out_par_repaired_val: *mut c_int,
-) -> c_int {
-    let (status, set_rep, rep_val) = crate::dlunpackrepair::repair_ctrl_resolve_par_status(
-        checker_status,
-        cur_par_status,
-        ps_repaired,
-        ps_repair_not_needed,
-        ps_repair_possible,
-        nzb_ps_skipped,
-        nzb_ps_success,
-        nzb_ps_repair_possible,
-        nzb_ps_failure,
-    );
-    if !out_set_par_repaired.is_null() {
-        *out_set_par_repaired = i32::from(set_rep);
-    }
-    if !out_par_repaired_val.is_null() {
-        *out_par_repaired_val = i32::from(rep_val);
-    }
-    status
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dur_parchecker_calc_threads_and_mem(
     par_threads: c_int,
     cpu_cores: c_int,
@@ -14489,60 +14296,6 @@ pub extern "C" fn nzbget_rs_ccm_nzbget_webget_exit_code(
 #[no_mangle]
 pub extern "C" fn nzbget_rs_ccm_nzbget_sigverify_exit_code(ok: c_int) -> c_int {
     crate::connclientmain::nzbget_sigverify_exit_code(ok != 0)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ccm_twin_check_parse_fingerprint_files(
-    fingerprint: *const c_char,
-) -> c_int {
-    let fp = if fingerprint.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(fingerprint).to_bytes()
-    };
-    crate::connclientmain::twin_check_parse_fingerprint_files(fp)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ccm_twin_check_format_identity(
-    files_param: *const c_char,
-    posting: *const c_char,
-) -> RsBuf {
-    let fp = if files_param.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(files_param).to_bytes()
-    };
-    let post = if posting.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(posting).to_bytes()
-    };
-    into_buf(crate::connclientmain::twin_check_format_identity(fp, post))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ccm_twin_check_is_dupe_item(
-    queued: c_int,
-    remaining_size: i64,
-    paused_size: i64,
-    delete_status: c_int,
-    ds_dupe: c_int,
-    ds_copy: c_int,
-) -> c_int {
-    i32::from(crate::connclientmain::twin_check_is_dupe_item(
-        queued != 0,
-        remaining_size,
-        paused_size,
-        delete_status,
-        ds_dupe,
-        ds_copy,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ccm_twin_check_service_interval(nudged: c_int) -> c_int {
-    crate::connclientmain::twin_check_service_interval(nudged != 0)
 }
 
 #[no_mangle]
@@ -15215,29 +14968,6 @@ pub extern "C" fn nzbget_rs_fuq_prepost_should_complete_after_direct_rename(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_fuq_repair_ctrl_calc_par_check_times(
-    cur_dl_sec: c_int,
-    start_dl_sec: c_int,
-    cur_time: i64,
-    par_time: i64,
-    out_wait_time: *mut c_int,
-    out_par_sec: *mut c_int,
-) {
-    let (wt, ps) = crate::feedurlqueue::repair_ctrl_calc_par_check_times(
-        cur_dl_sec,
-        start_dl_sec,
-        cur_time,
-        par_time,
-    );
-    if !out_wait_time.is_null() {
-        *out_wait_time = wt;
-    }
-    if !out_par_sec.is_null() {
-        *out_par_sec = ps;
-    }
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_pup_parchecker_select_match_type(
     file_status: c_int,
     fs_success: c_int,
@@ -15356,95 +15086,6 @@ pub extern "C" fn nzbget_rs_cdn_content_source_range_valid(
     i32::from(crate::contentdupenntp::content_source_range_valid(
         offset, size, total_size,
     ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cdn_content_map_calc_decrypt_cipher_bounds(
-    inner_offset: i64,
-    inner_size: i64,
-    inner_size_total: i64,
-    block_size: i64,
-    cipher_stream_size: i64,
-    out_empty: *mut c_int,
-    out_cipher_from: *mut i64,
-    out_cipher_to: *mut i64,
-) -> c_int {
-    let (valid, empty, from, to) =
-        crate::contentdupenntp::content_map_calc_decrypt_cipher_bounds(
-            inner_offset,
-            inner_size,
-            inner_size_total,
-            block_size,
-            cipher_stream_size,
-        );
-    if !out_empty.is_null() {
-        *out_empty = i32::from(empty);
-    }
-    if !out_cipher_from.is_null() {
-        *out_cipher_from = from;
-    }
-    if !out_cipher_to.is_null() {
-        *out_cipher_to = to;
-    }
-    i32::from(valid)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_cdn_content_mapper_is_compressible_archive(
-    format: c_int,
-    mf_rar: c_int,
-    mf_zip: c_int,
-    mf_seven_zip: c_int,
-) -> c_int {
-    i32::from(
-        crate::contentdupenntp::content_mapper_is_compressible_archive(
-            format,
-            mf_rar,
-            mf_zip,
-            mf_seven_zip,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_cdn_content_mapper_rar_cipher_geometry_valid(
-    inner_size: i64,
-    cipher_total: i64,
-) -> c_int {
-    i32::from(
-        crate::contentdupenntp::content_mapper_rar_cipher_geometry_valid(inner_size, cipher_total),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_cdn_content_mapper_rar_calc_plain_chunk(
-    packed_size: i64,
-    inner_size: i64,
-    cipher_base: i64,
-) -> i64 {
-    crate::contentdupenntp::content_mapper_rar_calc_plain_chunk(
-        packed_size,
-        inner_size,
-        cipher_base,
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cdn_content_mapper_rar_infer_unknown_packed(
-    unknown_volume: c_int,
-    inner_size: i64,
-    known_packed: i64,
-    out_inferred_packed: *mut i64,
-) -> c_int {
-    let (status, inferred) = crate::contentdupenntp::content_mapper_rar_infer_unknown_packed(
-        unknown_volume,
-        inner_size,
-        known_packed,
-    );
-    if !out_inferred_packed.is_null() {
-        *out_inferred_packed = inferred;
-    }
-    status
 }
 
 #[no_mangle]
@@ -15755,21 +15396,6 @@ pub unsafe extern "C" fn nzbget_rs_cdn_stream_repair_credit_repaired_sizes(
     *inout_par_success_size = nps;
     *inout_par_cur_failed_size = npcf;
     *inout_par_cur_success_size = npcs;
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_cdn_twin_check_eval_sample_verdict(
-    is_stopped: c_int,
-    compared: c_int,
-    differ: c_int,
-    sample_count: c_int,
-) -> c_int {
-    crate::contentdupenntp::twin_check_eval_sample_verdict(
-        is_stopped != 0,
-        compared,
-        differ,
-        sample_count,
-    )
 }
 
 #[no_mangle]
@@ -17210,108 +16836,6 @@ pub extern "C" fn nzbget_rs_pnd_dupe_fallback_compare_donors(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_hsr_repair_ctrl_should_consider_twin_candidate(
-    is_self: c_int,
-    kind: c_int,
-    nk_nzb: c_int,
-    same_name_or_key: c_int,
-    queued_filename: *const c_char,
-    has_print: c_int,
-    own_print_matches: c_int,
-) -> c_int {
-    let q = if queued_filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(queued_filename).to_bytes()
-    };
-    i32::from(
-        crate::histscanrepair::repair_ctrl_should_consider_twin_candidate(
-            is_self != 0,
-            kind,
-            nk_nzb,
-            same_name_or_key != 0,
-            q,
-            has_print != 0,
-            own_print_matches != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_hsr_repair_ctrl_sum_and_check_twin_blocks(
-    vol_blocks_ptr: *const c_int,
-    vol_blocks_len: usize,
-    block_needed: c_int,
-    out_available: *mut c_int,
-) -> c_int {
-    let slice = if vol_blocks_ptr.is_null() || vol_blocks_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(vol_blocks_ptr, vol_blocks_len)
-    };
-    let (avail, ok) =
-        crate::histscanrepair::repair_ctrl_sum_and_check_twin_blocks(slice, block_needed);
-    *out_available = avail;
-    i32::from(ok)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_hsr_repair_ctrl_calc_dupe_source_extra_blocks(
-    cur_history_extra: c_int,
-    used_blocks: c_int,
-    cur_total_extra: c_int,
-    out_new_history_extra: *mut c_int,
-    out_new_total_extra: *mut c_int,
-) {
-    let (h, t) = crate::histscanrepair::repair_ctrl_calc_dupe_source_extra_blocks(
-        cur_history_extra,
-        used_blocks,
-        cur_total_extra,
-    );
-    *out_new_history_extra = h;
-    *out_new_total_extra = t;
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_hsr_repair_ctrl_should_use_par_quick(
-    par_quick_opt: c_int,
-    force_par_full: c_int,
-    dupe_repaired: c_int,
-) -> c_int {
-    i32::from(crate::histscanrepair::repair_ctrl_should_use_par_quick(
-        par_quick_opt != 0,
-        force_par_full != 0,
-        dupe_repaired != 0,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_hsr_repair_ctrl_eval_stage_transition(
-    cur_post_stage: c_int,
-    new_stage: c_int,
-    pt_repairing: c_int,
-    pt_verifying_repaired: c_int,
-    current_time: i64,
-    repair_time: i64,
-    cur_repair_sec: c_int,
-    out_set_repair_time: *mut c_int,
-    out_new_repair_sec: *mut c_int,
-) -> c_int {
-    let (changed, set_rt, new_sec) = crate::histscanrepair::repair_ctrl_eval_stage_transition(
-        cur_post_stage,
-        new_stage,
-        pt_repairing,
-        pt_verifying_repaired,
-        current_time,
-        repair_time,
-        cur_repair_sec,
-    );
-    *out_set_repair_time = i32::from(set_rt);
-    *out_new_repair_sec = new_sec;
-    i32::from(changed)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_hsr_prepost_classify_nzb_downloaded_entry(
     skip_script_processing: c_int,
     skip_disk_write: c_int,
@@ -17983,102 +17507,6 @@ pub extern "C" fn nzbget_rs_stq_dupe_stream_repair_calc_abs_size_diff(
     crate::streamtwinqueue::dupe_stream_repair_calc_abs_size_diff(size1, size2)
 }
 
-#[no_mangle]
-pub extern "C" fn nzbget_rs_stq_twin_check_eval_index_fetch_retry(
-    fetched: c_int,
-    known: c_int,
-    complete: c_int,
-    next_attempts: c_int,
-    max_attempts: c_int,
-) -> c_int {
-    i32::from(crate::streamtwinqueue::twin_check_eval_index_fetch_retry(
-        fetched != 0,
-        known != 0,
-        complete != 0,
-        next_attempts,
-        max_attempts,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stq_twin_check_is_fetched_entry_part_valid(
-    success: c_int,
-    offset: i64,
-    data_len: usize,
-    max_size: i64,
-    cur_data_len: usize,
-    out_new_data_len: *mut usize,
-) -> c_int {
-    let (valid, new_len) = crate::streamtwinqueue::twin_check_is_fetched_entry_part_valid(
-        success != 0,
-        offset,
-        data_len,
-        max_size,
-        cur_data_len,
-    );
-    *out_new_data_len = new_len;
-    i32::from(valid)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stq_twin_check_is_print_usable(print: *const c_char) -> c_int {
-    let bytes = if print.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(print).to_bytes()
-    };
-    i32::from(crate::streamtwinqueue::twin_check_is_print_usable(bytes))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_stq_twin_check_is_listless_from_counts(
-    has_sigs: c_int,
-    attempts: c_int,
-    max_attempts: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamtwinqueue::twin_check_is_listless_from_counts(has_sigs, attempts, max_attempts),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stq_twin_check_eval_sampleable(
-    primary_ok: c_int,
-    is_primary: c_int,
-    is_dupe: c_int,
-    print_empty: c_int,
-    primary_print_empty: c_int,
-    by_par2: c_int,
-    has_sampled: c_int,
-    sampled_of: *const c_char,
-    primary_id: *const c_char,
-    out_sampled_now: *mut c_int,
-) -> c_int {
-    let s_of = if sampled_of.is_null() {
-        None
-    } else {
-        Some(CStr::from_ptr(sampled_of).to_bytes())
-    };
-    let p_id = if primary_id.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(primary_id).to_bytes()
-    };
-    let (sampleable, sampled_now) = crate::streamtwinqueue::twin_check_eval_sampleable(
-        primary_ok != 0,
-        is_primary != 0,
-        is_dupe != 0,
-        print_empty != 0,
-        primary_print_empty != 0,
-        by_par2 != 0,
-        has_sampled != 0,
-        s_of,
-        p_id,
-    );
-    *out_sampled_now = i32::from(sampled_now);
-    i32::from(sampleable)
-}
-
 // ============================================================================
 // DirectUnpack, Cleanup, UnpackController, UrlCoordinator, FeedCoordinator & RemoteServer Hot-Path FFI (`unpackcleanurlfeed.rs`)
 // ============================================================================
@@ -18116,116 +17544,6 @@ pub extern "C" fn nzbget_rs_ucf_remote_server_is_accept_busy_retry(
 // DirectRenamer, RarReader, Repair, ArticleDownloader, WebDownloader & NzbFile
 // Hot-Path FFI (`renamerarrepdl.rs`)
 // ---------------------------------------------------------------------------
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rrd_repair_ctrl_filename_eq_ignore_case(
-    a: *const c_char,
-    b: *const c_char,
-) -> c_int {
-    let sa = if a.is_null() { c"" } else { CStr::from_ptr(a) };
-    let sb = if b.is_null() { c"" } else { CStr::from_ptr(b) };
-    i32::from(crate::renamerarrepdl::repair_ctrl_filename_eq_ignore_case(
-        sa, sb,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_rrd_repair_ctrl_should_load_partial_segments(
-    status: c_int,
-    cf_partial: c_int,
-    id: c_int,
-    reprocess: c_int,
-) -> c_int {
-    i32::from(
-        crate::renamerarrepdl::repair_ctrl_should_load_partial_segments(
-            status,
-            cf_partial,
-            id,
-            reprocess != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_rrd_repair_ctrl_can_accept_dupe_without_content_match(
-    size_comparison_possible: c_int,
-) -> c_int {
-    i32::from(
-        crate::renamerarrepdl::repair_ctrl_can_accept_dupe_without_content_match(
-            size_comparison_possible != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_rrd_repair_ctrl_should_add_par_file(
-    same_collection: c_int,
-    deleted: c_int,
-) -> c_int {
-    i32::from(crate::renamerarrepdl::repair_ctrl_should_add_par_file(
-        same_collection != 0,
-        deleted != 0,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_rrd_repair_ctrl_is_request_more_pars_ok(
-    block_needed: c_int,
-    has_unpaused_par_files: c_int,
-) -> c_int {
-    i32::from(crate::renamerarrepdl::repair_ctrl_is_request_more_pars_ok(
-        block_needed,
-        has_unpaused_par_files != 0,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_rrd_repair_ctrl_is_post_process_paused(
-    pause_post_process: c_int,
-    force_priority: c_int,
-    is_stopped: c_int,
-) -> c_int {
-    i32::from(crate::renamerarrepdl::repair_ctrl_is_post_process_paused(
-        pause_post_process != 0,
-        force_priority != 0,
-        is_stopped != 0,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rrd_repair_ctrl_calc_paused_timestamps(
-    cur_time: i64,
-    wait_time: i64,
-    stage_time: i64,
-    start_time: i64,
-    par_time: i64,
-    repair_time: i64,
-    out_stage: *mut i64,
-    out_start: *mut i64,
-    out_par: *mut i64,
-    out_repair: *mut i64,
-) {
-    let (st, sr, pr, rp) = crate::renamerarrepdl::repair_ctrl_calc_paused_timestamps(
-        cur_time,
-        wait_time,
-        stage_time,
-        start_time,
-        par_time,
-        repair_time,
-    );
-    if !out_stage.is_null() {
-        *out_stage = st;
-    }
-    if !out_start.is_null() {
-        *out_start = sr;
-    }
-    if !out_par.is_null() {
-        *out_par = pr;
-    }
-    if !out_repair.is_null() {
-        *out_repair = rp;
-    }
-}
 
 #[no_mangle]
 pub extern "C" fn nzbget_rs_rrd_article_dl_resolve_initial_retries(
@@ -20275,126 +19593,6 @@ pub extern "C" fn nzbget_rs_dcf_stream_repair_is_positional_rank_applicable(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_tpr_twin_check_job_should_replace_min_index(
-    is_par2: c_int,
-    has_index: c_int,
-    entry_size: i64,
-    min_size: i64,
-) -> c_int {
-    crate::twinproberenhist::twin_check_job_should_replace_min_index(
-        is_par2,
-        has_index,
-        entry_size,
-        min_size,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_tpr_twin_check_job_is_index_size_within_max(
-    has_index: c_int,
-    min_size: i64,
-    max_index_size: i64,
-) -> c_int {
-    crate::twinproberenhist::twin_check_job_is_index_size_within_max(
-        has_index,
-        min_size,
-        max_index_size,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_tpr_twin_check_job_fallback_fingerprint(
-    known: c_int,
-    fetched: c_int,
-) -> c_int {
-    crate::twinproberenhist::twin_check_job_fallback_fingerprint(known, fetched)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_twin_check_job_compare_sampled_pair(
-    part_a_success: c_int,
-    part_b_success: c_int,
-    part_a_offset: i64,
-    part_b_offset: i64,
-    data_equal: c_int,
-    in_compared: c_int,
-    in_differ: c_int,
-    out_compared: *mut c_int,
-    out_differ: *mut c_int,
-) {
-    let (compared, differ) = crate::twinproberenhist::twin_check_job_compare_sampled_pair(
-        part_a_success,
-        part_b_success,
-        part_a_offset,
-        part_b_offset,
-        data_equal,
-        in_compared,
-        in_differ,
-    );
-    if !out_compared.is_null() {
-        *out_compared = compared;
-    }
-    if !out_differ.is_null() {
-        *out_differ = differ;
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_twin_check_put_par2_is_complete_flag(
-    after_tab: *const c_char,
-) -> c_int {
-    crate::twinproberenhist::twin_check_put_par2_is_complete_flag(
-        crate::queuehotpath::cstr_to_bytes(after_tab),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_tpr_twin_check_should_prune_store(
-    cur_time: i64,
-    last_prune: i64,
-    prune_interval_sec: i64,
-    job_count: c_int,
-) -> c_int {
-    crate::twinproberenhist::twin_check_should_prune_store(
-        cur_time,
-        last_prune,
-        prune_interval_sec,
-        job_count,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_tpr_twin_check_is_job_hinted(
-    has_dupe_same_size: c_int,
-    has_dupe_same_inner: c_int,
-) -> c_int {
-    crate::twinproberenhist::twin_check_is_job_hinted(has_dupe_same_size, has_dupe_same_inner)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_tpr_twin_check_job_less(
-    a_rank: c_int,
-    a_hinted: c_int,
-    b_rank: c_int,
-    b_hinted: c_int,
-) -> c_int {
-    crate::twinproberenhist::twin_check_job_less(a_rank, a_hinted, b_rank, b_hinted)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_tpr_twin_check_should_stop_launching_jobs(
-    stopping: c_int,
-    active_jobs: c_int,
-    max_running: c_int,
-) -> c_int {
-    crate::twinproberenhist::twin_check_should_stop_launching_jobs(
-        stopping,
-        active_jobs,
-        max_running,
-    )
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_uqs_prepost_is_within_graceful_wait(
     cur_time: i64,
     wait_start: i64,
@@ -20969,29 +20167,6 @@ pub extern "C" fn nzbget_rs_sap_stream_repair_materialize_stage_progress(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_sap_content_map_exclude_member_step(
-    run_member_index: c_int,
-    exclude_member_index: c_int,
-    cryptos_len: usize,
-    runs_len: usize,
-    out_keep_crypto: *mut c_int,
-) -> c_int {
-    let (keep_run, keep_crypto) =
-        crate::streamarticleparrepair::sap_content_map_exclude_member_step(
-            run_member_index,
-            exclude_member_index,
-            cryptos_len,
-            runs_len,
-        );
-    if !out_keep_crypto.is_null() {
-        unsafe {
-            *out_keep_crypto = i32::from(keep_crypto);
-        }
-    }
-    i32::from(keep_run)
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_sap_article_writer_log_start_mode(
     raw_article: c_int,
     direct_write: c_int,
@@ -21078,25 +20253,6 @@ pub extern "C" fn nzbget_rs_sap_parchecker_should_record_processed_file(
             stage,
             pt_loading_pars,
             pt_verifying_sources,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sap_repair_ctrl_is_better_twin_par2_entry(
-    is_par2: c_int,
-    entry_size: i64,
-    has_current_best: c_int,
-    current_best_size: i64,
-    max_index_size: i64,
-) -> c_int {
-    i32::from(
-        crate::streamarticleparrepair::sap_repair_ctrl_is_better_twin_par2_entry(
-            is_par2 != 0,
-            entry_size,
-            has_current_best != 0,
-            current_best_size,
-            max_index_size,
         ),
     )
 }
@@ -22166,19 +21322,6 @@ pub extern "C" fn nzbget_rs_srp_parchecker_should_add_extra_file_entry(
     )
 }
 
-#[no_mangle]
-pub extern "C" fn nzbget_rs_srp_repair_ctrl_is_usable_par_block_candidate(
-    parsed: c_int,
-    block_count: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamrepairparcheck::srp_repair_ctrl_is_usable_par_block_candidate(
-            parsed != 0,
-            block_count,
-        ),
-    )
-}
-
 // --- Batch 42: streamrepaircontentmap (src_*) ---
 
 #[no_mangle]
@@ -22415,49 +21558,6 @@ pub extern "C" fn nzbget_rs_src_content_map_is_empty_or_invalid_cipher_pieces(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_src_content_map_can_build_bare_or_split_member(
-    has_source: c_int,
-    source_size: i64,
-) -> c_int {
-    i32::from(
-        crate::streamrepaircontentmap::src_content_map_can_build_bare_or_split_member(
-            has_source != 0,
-            source_size,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_src_content_map_rar_data_run_geometry_valid(
-    data_offset: i64,
-    packed_size: i64,
-    has_source: c_int,
-    source_size: i64,
-) -> c_int {
-    i32::from(
-        crate::streamrepaircontentmap::src_content_map_rar_data_run_geometry_valid(
-            data_offset,
-            packed_size,
-            has_source != 0,
-            source_size,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_src_content_map_rar_can_emit_plain_run(
-    data_offset: i64,
-    packed_size: i64,
-) -> c_int {
-    i32::from(
-        crate::streamrepaircontentmap::src_content_map_rar_can_emit_plain_run(
-            data_offset,
-            packed_size,
-        ),
-    )
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_src_parchecker_should_process_twin_missing_blocks(
     res: c_int,
     e_repair_not_possible: c_int,
@@ -22468,19 +21568,6 @@ pub extern "C" fn nzbget_rs_src_parchecker_should_process_twin_missing_blocks(
             res,
             e_repair_not_possible,
             is_stopped != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_src_repair_ctrl_should_fetch_more_par_pass(
-    block_found: c_int,
-    block_needed: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamrepaircontentmap::src_repair_ctrl_should_fetch_more_par_pass(
-            block_found,
-            block_needed,
         ),
     )
 }
@@ -25711,28 +24798,6 @@ pub unsafe extern "C" fn nzbget_rs_twin_compare_par2_data(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_repair_ctrl_build_twin_filename(
-    entry_filename: *const c_char,
-    twin_files_count: usize,
-) -> RsBuf {
-    into_buf(crate::twinproberenhist::repair_ctrl_build_twin_filename(
-        input(entry_filename),
-        twin_files_count,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_twin_check_format_live_identity_line(
-    nzb_id: i32,
-    identity: *const c_char,
-) -> RsBuf {
-    into_buf(crate::twinproberenhist::twin_check_format_live_identity_line(
-        nzb_id,
-        input(identity),
-    ))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_stream_composite_compute_member_bases(
     member_sizes_ptr: *const i64,
     out_bases_ptr: *mut i64,
@@ -25849,60 +24914,6 @@ pub unsafe extern "C" fn nzbget_rs_stream_is_intact_proof_member_eligible(
             input(member_name),
             input(target_set),
             &targets,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_twin_check_compare_entry_names(
-    a_filename: *const c_char,
-    a_subject: *const c_char,
-    b_filename: *const c_char,
-    b_subject: *const c_char,
-) -> i32 {
-    i32::from(crate::twinproberenhist::twin_check_compare_entry_names(
-        input(a_filename),
-        input(a_subject),
-        input(b_filename),
-        input(b_subject),
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_twin_check_split_put_par2_result(
-    result_str: *const c_char,
-    out_complete: *mut i32,
-) -> RsBuf {
-    let (fp, complete) =
-        crate::twinproberenhist::twin_check_split_put_par2_result(input(result_str));
-    if !out_complete.is_null() {
-        *out_complete = i32::from(complete);
-    }
-    into_buf(fp.to_vec())
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_twin_check_is_merged_queued_filename(
-    queued_filename: *const c_char,
-) -> i32 {
-    i32::from(
-        crate::twinproberenhist::twin_check_is_merged_queued_filename(input(queued_filename)),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_twin_check_should_nudge_on_queue_event(
-    action: i32,
-    ea_nzb_added: i32,
-    has_nzb_info: i32,
-    dupe_key: *const c_char,
-) -> i32 {
-    i32::from(
-        crate::twinproberenhist::twin_check_should_nudge_on_queue_event(
-            action,
-            ea_nzb_added,
-            has_nzb_info != 0,
-            input(dupe_key),
         ),
     )
 }
@@ -27350,13 +26361,6 @@ pub unsafe extern "C" fn nzbget_rs_tpr_post_format_info_name(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_repair_ctrl_twin_par2_reject_reason(
-    cmp: i32,
-) -> *const c_char {
-    crate::twinproberenhist::tpr_repair_ctrl_twin_par2_reject_reason(cmp).as_ptr() as *const c_char
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_write_errmsg_or_default(
     last_err: *const c_char,
 ) -> *const c_char {
@@ -27489,11 +26493,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_decompress_fail_reason(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_repair_ctrl_seconds_to_minutes(seconds: i32) -> i32 {
-    crate::twinproberenhist::tpr_repair_ctrl_seconds_to_minutes(seconds)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_tpr_parchecker_format_twin_err_msg(
     twin_err_action: i32,
     own_err_msg: *const c_char,
@@ -27511,18 +26510,6 @@ pub unsafe extern "C" fn nzbget_rs_tpr_parchecker_format_twin_err_msg(
             cap: 0,
         },
     }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_content_map_format_member_unreadable_reason(
-    name: *const c_char,
-) -> RsBuf {
-    let n = if name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(name).to_bytes()
-    };
-    into_buf(crate::dupequeuehealth::dqh_content_map_format_member_unreadable_reason(n))
 }
 
 #[no_mangle]
@@ -28217,31 +27204,6 @@ pub unsafe extern "C" fn nzbget_rs_tpr_queue_coord_join_queued_filenames(
     into_buf(
         crate::twinproberenhist::tpr_queue_coord_join_queued_filenames(dq, sq),
     )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_twin_check_sample_verdict_label(
-    verdict: c_int,
-) -> *const c_char {
-    crate::dupequeuehealth::dqh_twin_check_sample_verdict_label(verdict).as_ptr()
-        as *const c_char
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_twin_check_format_u32_str(val: u32) -> RsBuf {
-    into_buf(crate::dupequeuehealth::dqh_twin_check_format_u32_str(val))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_twin_check_lowercase_key(
-    dupe_key: *const c_char,
-) -> RsBuf {
-    let k = if dupe_key.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(dupe_key).to_bytes()
-    };
-    into_buf(crate::dupequeuehealth::dqh_twin_check_lowercase_key(k))
 }
 
 #[no_mangle]
@@ -29584,23 +28546,6 @@ pub extern "C" fn nzbget_rs_dqh_stream_repair_is_target_unfinished(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_repair_ctrl_map_par_stage_to_post_stage(
-    par_stage: c_int,
-    pt_loading_pars: c_int,
-    pt_verifying_sources: c_int,
-    pt_repairing: c_int,
-    pt_verifying_repaired: c_int,
-) -> c_int {
-    crate::dupequeuehealth::dqh_repair_ctrl_map_par_stage_to_post_stage(
-        par_stage,
-        pt_loading_pars,
-        pt_verifying_sources,
-        pt_repairing,
-        pt_verifying_repaired,
-    )
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_parchecker_cmdline_err_str(res: c_int) -> *const c_char {
     crate::dupequeuehealth::dqh_parchecker_cmdline_err_str(res).as_ptr() as *const c_char
 }
@@ -30685,44 +29630,6 @@ pub extern "C" fn nzbget_rs_dqh_prepost_matches_post_delete_target(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_repair_ctrl_should_skip_twin_volume_entry(
-    is_par2: c_int,
-    entry_filename: *const c_char,
-    twin_index: *const c_char,
-) -> c_int {
-    let e = if entry_filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(entry_filename).to_bytes()
-    };
-    let t = if twin_index.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(twin_index).to_bytes()
-    };
-    i32::from(
-        crate::dupequeuehealth::dqh_repair_ctrl_should_skip_twin_volume_entry(is_par2 != 0, e, t),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_repair_ctrl_matches_history_dupe_source(
-    history_kind: c_int,
-    hk_nzb: c_int,
-    history_nzb_id: c_int,
-    dupe_source_id: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_repair_ctrl_matches_history_dupe_source(
-            history_kind,
-            hk_nzb,
-            history_nzb_id,
-            dupe_source_id,
-        ),
-    )
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_par_renamer_needs_create_target_dir(
     old_path: *const c_char,
     new_path: *const c_char,
@@ -30754,36 +29661,6 @@ pub extern "C" fn nzbget_rs_dqh_dupematcher_should_wait_rar_lister(
             timeout_sec,
             cur_time,
         ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_content_map_can_map_cipher_range(
-    offset: i64,
-    size: i64,
-    cryptos_len: usize,
-    runs_len: usize,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_content_map_can_map_cipher_range(
-            offset,
-            size,
-            cryptos_len,
-            runs_len,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_content_mapper_classify_unreadable_rar_vol(
-    has_source: c_int,
-    is_encrypted: c_int,
-    unknown_volume: c_int,
-) -> c_int {
-    crate::dupequeuehealth::dqh_content_mapper_classify_unreadable_rar_vol(
-        has_source != 0,
-        is_encrypted != 0,
-        unknown_volume,
     )
 }
 
@@ -32150,66 +31027,6 @@ pub extern "C" fn nzbget_rs_dqh_dupe_fallback_is_donor_file_struct_candidate(
         crate::dupequeuehealth::dqh_dupe_fallback_is_donor_file_struct_candidate(
             is_par_file != 0,
             structure_matches != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_twin_check_should_unregister_nudge(
-    stopping: c_int,
-    stored: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_twin_check_should_unregister_nudge(
-            stopping != 0,
-            stored != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_twin_check_can_queue_fingerprint_job(
-    print_empty: c_int,
-    listless: c_int,
-    is_merged: c_int,
-    file_exists: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_twin_check_can_queue_fingerprint_job(
-            print_empty != 0,
-            listless != 0,
-            is_merged != 0,
-            file_exists != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_twin_check_can_queue_sample_job(
-    sampleable: c_int,
-    sampled_now: c_int,
-    is_merged: c_int,
-    file_exists: c_int,
-) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_twin_check_can_queue_sample_job(
-        sampleable != 0,
-        sampled_now != 0,
-        is_merged != 0,
-        file_exists != 0,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_twin_check_should_lookup_kind_by_files(
-    is_primary: c_int,
-    is_dupe: c_int,
-    by_par2: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_twin_check_should_lookup_kind_by_files(
-            is_primary != 0,
-            is_dupe != 0,
-            by_par2 != 0,
         ),
     )
 }
@@ -36748,4 +35565,688 @@ pub unsafe extern "C" fn nzbget_rs_history_coord_parse_dupe_backup_flag(
 ) -> c_int {
     crate::historycoord::parse_dupe_backup_flag(input(text), ds_dupe, ds_manual)
 }
+
+// =========================================================================
+// Consolidated RepairController (`repair.rs`), ContentMap (`streamrepair.rs`),
+// and TwinCheck (`twin.rs`) FFI
+// =========================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_repair_filename_eq_ignore_case(
+    a: *const c_char,
+    b: *const c_char,
+) -> c_int {
+    if a.is_null() || b.is_null() {
+        return 0;
+    }
+    i32::from(crate::repair::filename_eq_ignore_case(
+        CStr::from_ptr(a),
+        CStr::from_ptr(b),
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_repair_should_load_partial_segments(
+    status: c_int,
+    cf_partial: c_int,
+    id: c_int,
+    reprocess: c_int,
+) -> c_int {
+    i32::from(crate::repair::should_load_partial_segments(
+        status,
+        cf_partial,
+        id,
+        reprocess != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_repair_classify_file_crc_status(
+    cf_status: c_int,
+    reprocess: c_int,
+    has_segments: c_int,
+    cf_success: c_int,
+    cf_failure: c_int,
+    cf_partial: c_int,
+    fs_success: c_int,
+    fs_failure: c_int,
+    fs_partial: c_int,
+    fs_unknown: c_int,
+) -> c_int {
+    crate::repair::classify_file_crc_status(
+        cf_status,
+        reprocess != 0,
+        has_segments != 0,
+        cf_success,
+        cf_failure,
+        cf_partial,
+        fs_success,
+        fs_failure,
+        fs_partial,
+        fs_unknown,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_repair_build_twin_filename(
+    entry_filename: *const c_char,
+    twin_files_count: usize,
+) -> RsBuf {
+    into_buf(crate::repair::build_twin_filename(
+        input(entry_filename),
+        twin_files_count,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_repair_should_consider_twin_candidate(
+    is_self: c_int,
+    kind: c_int,
+    nk_nzb: c_int,
+    same_name_or_key: c_int,
+    queued_filename: *const c_char,
+    has_print: c_int,
+    own_print_matches: c_int,
+) -> c_int {
+    i32::from(crate::repair::should_consider_twin_candidate(
+        is_self != 0,
+        kind,
+        nk_nzb,
+        same_name_or_key != 0,
+        input(queued_filename),
+        has_print != 0,
+        own_print_matches != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_repair_select_best_twin_par2_index(
+    is_par2_ptr: *const u8,
+    sizes_ptr: *const i64,
+    count: usize,
+    max_index_size: i64,
+) -> isize {
+    if is_par2_ptr.is_null() || sizes_ptr.is_null() || count == 0 {
+        return -1;
+    }
+    crate::repair::select_best_twin_par2_index(
+        std::slice::from_raw_parts(is_par2_ptr, count),
+        std::slice::from_raw_parts(sizes_ptr, count),
+        max_index_size,
+    )
+    .map_or(-1, |idx| idx as isize)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_repair_twin_par2_reject_reason(cmp: c_int) -> *const c_char {
+    crate::repair::twin_par2_reject_reason(cmp).as_ptr() as *const c_char
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_repair_should_skip_twin_volume_entry(
+    is_par2: c_int,
+    entry_filename: *const c_char,
+    twin_index: *const c_char,
+) -> c_int {
+    i32::from(crate::repair::should_skip_twin_volume_entry(
+        is_par2 != 0,
+        input(entry_filename),
+        input(twin_index),
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_repair_estimate_twin_vol_blocks(
+    entry_size: i64,
+    twin_block_size: u64,
+) -> c_int {
+    crate::repair::estimate_twin_vol_blocks(entry_size, twin_block_size)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_repair_sum_and_check_twin_blocks(
+    vol_blocks_ptr: *const c_int,
+    vol_blocks_len: usize,
+    block_needed: c_int,
+    out_available: *mut c_int,
+) -> c_int {
+    let slice = if vol_blocks_ptr.is_null() || vol_blocks_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(vol_blocks_ptr, vol_blocks_len)
+    };
+    let (avail, ok) = crate::repair::sum_and_check_twin_blocks(slice, block_needed);
+    if !out_available.is_null() {
+        *out_available = avail;
+    }
+    i32::from(ok)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_repair_should_use_par_quick(
+    par_quick_opt: c_int,
+    force_par_full: c_int,
+    dupe_repaired: c_int,
+) -> c_int {
+    i32::from(crate::repair::should_use_par_quick(
+        par_quick_opt != 0,
+        force_par_full != 0,
+        dupe_repaired != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_repair_complete_par_check(
+    checker_status: c_int,
+    cur_par_status: c_int,
+    ps_repaired: c_int,
+    ps_repair_not_needed: c_int,
+    ps_repair_possible: c_int,
+    nzb_ps_skipped: c_int,
+    nzb_ps_success: c_int,
+    nzb_ps_repair_possible: c_int,
+    nzb_ps_failure: c_int,
+    cur_dl_sec: c_int,
+    start_dl_sec: c_int,
+    cur_time: i64,
+    par_time: i64,
+    out_par_status: *mut c_int,
+    out_set_par_repaired: *mut c_int,
+    out_par_repaired_val: *mut c_int,
+    out_wait_time: *mut c_int,
+    out_par_sec: *mut c_int,
+) {
+    let (status, set_rep, rep_val, wt, ps) = crate::repair::complete_par_check(
+        checker_status,
+        cur_par_status,
+        ps_repaired,
+        ps_repair_not_needed,
+        ps_repair_possible,
+        nzb_ps_skipped,
+        nzb_ps_success,
+        nzb_ps_repair_possible,
+        nzb_ps_failure,
+        cur_dl_sec,
+        start_dl_sec,
+        cur_time,
+        par_time,
+    );
+    if !out_par_status.is_null() {
+        *out_par_status = status;
+    }
+    if !out_set_par_repaired.is_null() {
+        *out_set_par_repaired = i32::from(set_rep);
+    }
+    if !out_par_repaired_val.is_null() {
+        *out_par_repaired_val = i32::from(rep_val);
+    }
+    if !out_wait_time.is_null() {
+        *out_wait_time = wt;
+    }
+    if !out_par_sec.is_null() {
+        *out_par_sec = ps;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_repair_eval_find_pars_candidate(
+    same_collection: c_int,
+    deleted: c_int,
+    strict_par_name: c_int,
+    filename: *const c_char,
+    main_base: *const c_char,
+    parsed_ok: c_int,
+    parsed_blocks: c_int,
+    file_size: i64,
+    block_size: i64,
+    out_blocks: *mut c_int,
+) -> c_int {
+    if same_collection == 0 || deleted != 0 {
+        if !out_blocks.is_null() {
+            *out_blocks = 0;
+        }
+        return 0;
+    }
+    let (usable, blocks, matches_strict) = crate::repair::eval_find_pars_candidate(
+        parsed_ok != 0,
+        parsed_blocks,
+        file_size,
+        block_size,
+        false,
+        strict_par_name != 0,
+        input(filename),
+        input(main_base),
+    );
+    if !out_blocks.is_null() {
+        *out_blocks = blocks;
+    }
+    i32::from(usable && matches_strict)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_repair_match_strict_par_name(
+    filename: *const c_char,
+    main_base: *const c_char,
+) -> c_int {
+    i32::from(crate::repair::match_strict_par_name(
+        input(filename),
+        input(main_base),
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_repair_eval_par_progress_update(
+    cur_post_stage: c_int,
+    checker_stage: c_int,
+    pt_loading_pars: c_int,
+    pt_verifying_sources: c_int,
+    pt_repairing: c_int,
+    pt_verifying_repaired: c_int,
+    current_time: i64,
+    repair_time: i64,
+    cur_repair_sec: c_int,
+    out_new_post_stage: *mut c_int,
+    out_set_repair_time: *mut c_int,
+    out_new_repair_sec: *mut c_int,
+) -> c_int {
+    let (new_stage, changed, set_rt, new_sec, _, _, _) = crate::repair::eval_par_progress_update(
+        checker_stage,
+        cur_post_stage,
+        pt_loading_pars,
+        pt_verifying_sources,
+        pt_repairing,
+        pt_verifying_repaired,
+        current_time,
+        0,
+        repair_time,
+        cur_repair_sec,
+        true,
+        0,
+        false,
+        0,
+    );
+    if !out_new_post_stage.is_null() {
+        *out_new_post_stage = new_stage;
+    }
+    if !out_set_repair_time.is_null() {
+        *out_set_repair_time = i32::from(set_rt);
+    }
+    if !out_new_repair_sec.is_null() {
+        *out_new_repair_sec = new_sec;
+    }
+    i32::from(changed)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_repair_calc_paused_timestamps(
+    cur_time: i64,
+    wait_time: i64,
+    stage_time: i64,
+    start_time: i64,
+    par_time: i64,
+    repair_time: i64,
+    out_stage: *mut i64,
+    out_start: *mut i64,
+    out_par: *mut i64,
+    out_repair: *mut i64,
+) {
+    let (st, sr, pr, rp) = crate::repair::calc_paused_timestamps(
+        cur_time,
+        wait_time,
+        stage_time,
+        start_time,
+        par_time,
+        repair_time,
+    );
+    if !out_stage.is_null() {
+        *out_stage = st;
+    }
+    if !out_start.is_null() {
+        *out_start = sr;
+    }
+    if !out_par.is_null() {
+        *out_par = pr;
+    }
+    if !out_repair.is_null() {
+        *out_repair = rp;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_content_map_calc_decrypt_cipher_bounds(
+    inner_offset: i64,
+    inner_size: i64,
+    inner_size_total: i64,
+    block_size: i64,
+    cipher_stream_size: i64,
+    out_empty: *mut c_int,
+    out_cipher_from: *mut i64,
+    out_cipher_to: *mut i64,
+) -> c_int {
+    let (valid, empty, from, to) = crate::streamrepair::content_map_calc_decrypt_cipher_bounds(
+        inner_offset,
+        inner_size,
+        inner_size_total,
+        block_size,
+        cipher_stream_size,
+    );
+    if !out_empty.is_null() {
+        *out_empty = i32::from(empty);
+    }
+    if !out_cipher_from.is_null() {
+        *out_cipher_from = from;
+    }
+    if !out_cipher_to.is_null() {
+        *out_cipher_to = to;
+    }
+    i32::from(valid)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_content_mapper_is_compressible_archive(
+    format: c_int,
+    _mf_rar: c_int,
+    _mf_zip: c_int,
+    _mf_seven_zip: c_int,
+) -> c_int {
+    i32::from(crate::streamrepair::content_mapper_is_compressible_archive(
+        format,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_content_mapper_classify_unreadable_rar_vol(
+    has_source: c_int,
+    is_encrypted: c_int,
+    unknown_volume: c_int,
+) -> c_int {
+    crate::streamrepair::content_mapper_classify_unreadable_rar_vol(
+        has_source != 0,
+        is_encrypted != 0,
+        unknown_volume,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_twin_select_min_par2_index(
+    is_par2_ptr: *const u8,
+    sizes_ptr: *const i64,
+    count: usize,
+    max_index_size: i64,
+) -> isize {
+    if is_par2_ptr.is_null() || sizes_ptr.is_null() || count == 0 {
+        return -1;
+    }
+    crate::twin::select_min_par2_index(
+        std::slice::from_raw_parts(is_par2_ptr, count),
+        std::slice::from_raw_parts(sizes_ptr, count),
+        max_index_size,
+    ) as isize
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_twin_parse_fingerprint_files(
+    fingerprint: *const c_char,
+) -> c_int {
+    crate::twin::parse_fingerprint_files(input(fingerprint))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_twin_compare_entry_names(
+    a_filename: *const c_char,
+    a_subject: *const c_char,
+    b_filename: *const c_char,
+    b_subject: *const c_char,
+) -> c_int {
+    i32::from(crate::twin::compare_entry_names(
+        input(a_filename),
+        input(a_subject),
+        input(b_filename),
+        input(b_subject),
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_twin_sample_indices(
+    primary_seg_counts: *const usize,
+    primary_seg_bytes: *const i64,
+    primary_seg_bytes_len: usize,
+    primary_files: usize,
+    dupe_seg_counts: *const usize,
+    dupe_seg_bytes: *const i64,
+    dupe_seg_bytes_len: usize,
+    dupe_files: usize,
+    sample_count: usize,
+    out_file_indices: *mut usize,
+    out_seg_indices: *mut usize,
+) -> c_int {
+    if primary_files == 0
+        || dupe_files == 0
+        || sample_count == 0
+        || primary_seg_counts.is_null()
+        || dupe_seg_counts.is_null()
+        || out_file_indices.is_null()
+        || out_seg_indices.is_null()
+    {
+        return 0;
+    }
+    let p_counts = std::slice::from_raw_parts(primary_seg_counts, primary_files);
+    let d_counts = std::slice::from_raw_parts(dupe_seg_counts, dupe_files);
+    let p_bytes = if primary_seg_bytes.is_null() || primary_seg_bytes_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(primary_seg_bytes, primary_seg_bytes_len)
+    };
+    let d_bytes = if dupe_seg_bytes.is_null() || dupe_seg_bytes_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(dupe_seg_bytes, dupe_seg_bytes_len)
+    };
+    if let Some(indices) =
+        crate::twin::sample_indices(p_counts, p_bytes, d_counts, d_bytes, sample_count)
+    {
+        for (i, (f_idx, s_idx)) in indices.into_iter().enumerate() {
+            *out_file_indices.add(i) = f_idx;
+            *out_seg_indices.add(i) = s_idx;
+        }
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_twin_compare_sampled_pair(
+    part_a_success: c_int,
+    part_b_success: c_int,
+    part_a_offset: i64,
+    part_b_offset: i64,
+    data_equal: c_int,
+    in_compared: c_int,
+    in_differ: c_int,
+    out_compared: *mut c_int,
+    out_differ: *mut c_int,
+) {
+    let (compared, differ) = crate::twin::compare_sampled_pair(
+        part_a_success,
+        part_b_success,
+        part_a_offset,
+        part_b_offset,
+        data_equal,
+        in_compared,
+        in_differ,
+    );
+    if !out_compared.is_null() {
+        *out_compared = compared;
+    }
+    if !out_differ.is_null() {
+        *out_differ = differ;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_twin_eval_sample_verdict(
+    is_stopped: c_int,
+    compared: c_int,
+    differ: c_int,
+    sample_count: c_int,
+    out_label: *mut *const c_char,
+) -> c_int {
+    let verdict = crate::twin::eval_sample_verdict(is_stopped != 0, compared, differ, sample_count);
+    if !out_label.is_null() {
+        *out_label = match verdict {
+            1 => b"twin\0".as_ptr() as *const c_char,
+            2 => b"alt\0".as_ptr() as *const c_char,
+            _ => b"\0".as_ptr() as *const c_char,
+        };
+    }
+    verdict
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_twin_format_identity(
+    files_param: *const c_char,
+    posting: *const c_char,
+) -> RsBuf {
+    into_buf(crate::twin::format_identity(
+        input(files_param),
+        input(posting),
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_twin_split_put_par2_result(
+    result_str: *const c_char,
+    out_complete: *mut i32,
+) -> RsBuf {
+    let (fp, complete) = crate::twin::split_put_par2_result(input(result_str));
+    if !out_complete.is_null() {
+        *out_complete = i32::from(complete);
+    }
+    into_buf(fp.to_vec())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_twin_is_fetched_entry_part_valid(
+    success: c_int,
+    offset: i64,
+    data_len: usize,
+    max_size: i64,
+    cur_data_len: usize,
+    out_new_data_len: *mut usize,
+) -> c_int {
+    let (valid, new_len) = crate::twin::is_fetched_entry_part_valid(
+        success != 0,
+        offset,
+        data_len,
+        max_size,
+        cur_data_len,
+    );
+    if !out_new_data_len.is_null() {
+        *out_new_data_len = new_len;
+    }
+    i32::from(valid)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_twin_is_dupe_item(
+    queued: c_int,
+    remaining_size: i64,
+    paused_size: i64,
+    delete_status: c_int,
+    ds_dupe: c_int,
+    ds_copy: c_int,
+) -> c_int {
+    i32::from(crate::twin::is_dupe_item(
+        queued != 0,
+        remaining_size,
+        paused_size,
+        delete_status,
+        ds_dupe,
+        ds_copy,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_twin_is_print_usable(print: *const c_char) -> c_int {
+    i32::from(crate::twin::is_print_usable(input(print)))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_twin_select_primary(
+    queued: *const u8,
+    is_dupe: *const u8,
+    scores: *const c_int,
+    count: usize,
+) -> c_int {
+    if count == 0 || queued.is_null() || is_dupe.is_null() || scores.is_null() {
+        return -1;
+    }
+    crate::twin::select_primary(
+        std::slice::from_raw_parts(queued, count),
+        std::slice::from_raw_parts(is_dupe, count),
+        std::slice::from_raw_parts(scores, count),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_twin_eval_sampleable(
+    primary_ok: c_int,
+    is_primary: c_int,
+    is_dupe: c_int,
+    print_empty: c_int,
+    primary_print_empty: c_int,
+    by_par2: c_int,
+    has_sampled: c_int,
+    sampled_of: *const c_char,
+    primary_id: *const c_char,
+    out_sampled_now: *mut c_int,
+) -> c_int {
+    let s_of = if sampled_of.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(sampled_of).to_bytes())
+    };
+    let (sampleable, sampled_now) = crate::twin::eval_sampleable(
+        primary_ok != 0,
+        is_primary != 0,
+        is_dupe != 0,
+        print_empty != 0,
+        primary_print_empty != 0,
+        by_par2 != 0,
+        has_sampled != 0,
+        s_of,
+        input(primary_id),
+    );
+    if !out_sampled_now.is_null() {
+        *out_sampled_now = i32::from(sampled_now);
+    }
+    i32::from(sampleable)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_twin_resolve_kind(
+    is_primary: c_int,
+    is_dupe: c_int,
+    by_par2: c_int,
+    by_files: *const c_char,
+    listed: c_int,
+    same_print: c_int,
+    sampleable: c_int,
+    sampled_now: c_int,
+    sampled_val: *const c_char,
+) -> RsBuf {
+    into_buf(crate::twin::resolve_kind(
+        is_primary != 0,
+        is_dupe != 0,
+        by_par2 != 0,
+        input(by_files),
+        listed != 0,
+        same_print != 0,
+        sampleable != 0,
+        sampled_now != 0,
+        input(sampled_val),
+    ))
+}
+
 

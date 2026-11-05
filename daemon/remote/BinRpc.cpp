@@ -900,13 +900,18 @@ void EditQueueBinCommand::Execute()
 		names += strlen(names) + 1;
 	}
 
+	bool useOffsetStr = nzbget_rs_sap_binrpc_edit_queue_use_offset_str(
+		action, (int)DownloadQueue::eaFileMoveOffset, (int)DownloadQueue::eaGroupMoveOffset) != 0;
+	NzbgetRsBuf offBuf = useOffsetStr ? nzbget_rs_dqh_conn_format_port_str(offset) : NzbgetRsBuf{};
 	bool ok = DownloadQueue::Guard()->EditList(
 		nrIdEntries > 0 ? &cIdList : nullptr,
 		nrNameEntries > 0 ? &cNameList : nullptr,
 		(DownloadQueue::EMatchMode)matchMode, (DownloadQueue::EEditAction)action,
-		nzbget_rs_sap_binrpc_edit_queue_use_offset_str(
-			action, (int)DownloadQueue::eaFileMoveOffset, (int)DownloadQueue::eaGroupMoveOffset) ?
-		*CString::FormatStr("%i", offset) : text);
+		useOffsetStr ? (offBuf.data ? offBuf.data : "0") : text);
+	if (useOffsetStr)
+	{
+		nzbget_rs_free(offBuf);
+	}
 
 	if (ok)
 	{

@@ -1040,12 +1040,11 @@ bool DiskState::LoadDupeTrailer(const std::function<NzbInfo*(int)>& find, StateD
 			if (archives)
 			{
 				archives->clear();
-				for (char* token = strtok(archivesStr, ","); token; token = strtok(nullptr, ","))
+				size_t cursor = 0, tokStart = 0, tokLen = 0;
+				while (nzbget_rs_dqh_diskstate_next_comma_token(
+					archivesStr, cursor, &tokStart, &tokLen, &cursor))
 				{
-					if (*token)
-					{
-						archives->emplace_back(token);
-					}
+					archives->emplace_back(archivesStr + tokStart, (int)tokLen);
 				}
 			}
 		}
@@ -1562,12 +1561,11 @@ bool DiskState::LoadNzbInfo(NzbInfo* nzbInfo, Servers* servers, StateDiskFile& i
 		if (archives)
 		{
 			archives->clear();
-			for (char* token = strtok(archivesStr, ","); token; token = strtok(nullptr, ","))
+			size_t cursor = 0, tokStart = 0, tokLen = 0;
+			while (nzbget_rs_dqh_diskstate_next_comma_token(
+				archivesStr, cursor, &tokStart, &tokLen, &cursor))
 			{
-				if (*token)
-				{
-					archives->emplace_back(token);
-				}
+				archives->emplace_back(archivesStr + tokStart, (int)tokLen);
 			}
 		}
 	}

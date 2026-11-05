@@ -1000,8 +1000,11 @@ bool QueueEditor::MoveGroupsTo(ItemList* itemList, IdList* idList, bool before, 
 			before ? 1 : 0, itemList->size());
 	}
 
-	return InternEditList(nullptr, idList, DownloadQueue::eaGroupMoveOffset,
-		CString::FormatStr("%i", offset));
+	NzbgetRsBuf offBuf = nzbget_rs_dqh_conn_format_port_str(offset);
+	bool res = InternEditList(nullptr, idList, DownloadQueue::eaGroupMoveOffset,
+		offBuf.data ? offBuf.data : "0");
+	nzbget_rs_free(offBuf);
+	return res;
 }
 
 void QueueEditor::ReorderFiles(ItemList* itemList)

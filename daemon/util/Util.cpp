@@ -957,17 +957,9 @@ Tokenizer::Tokenizer(char* dataString, const char* separators, bool inplaceBuf) 
 
 char* Tokenizer::Next()
 {
-	char* token = nullptr;
-	while (!token || !*token)
-	{
-		token = strtok_r(m_working ? nullptr : m_dataString, m_separators, &m_savePtr);
-		m_working = true;
-		if (!token)
-		{
-			return nullptr;
-		}
-		token = Util::Trim(token);
-	}
+	char* token = nzbget_rs_dqh_tokenizer_next(
+		m_dataString, m_separators, m_working ? 1 : 0, &m_savePtr);
+	m_working = true;
 	return token;
 }
 

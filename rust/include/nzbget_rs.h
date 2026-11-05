@@ -6019,6 +6019,25 @@ void nzbget_rs_dqh_webserver_encode_hex_token(
 NzbgetRsBuf nzbget_rs_dqh_script_config_format_option_line(
     const char* key, size_t key_len, const char* val, size_t val_len);
 NzbgetRsBuf nzbget_rs_dqh_script_config_ensure_trailing_lf(const char* line);
+NzbgetRsBuf nzbget_rs_dqh_yenc_format_begin_headers(
+    int part, int64_t file_size, const char* base_filename,
+    int64_t offset, int size);
+NzbgetRsBuf nzbget_rs_dqh_yenc_format_end_trailer(int size, uint32_t pcrc32);
+size_t nzbget_rs_dqh_yenc_encode_chunk_step(
+    const char* in_buf, size_t in_len, int last_block, int* io_lnsz,
+    char* out_buf, size_t* io_out_len, size_t out_cap, int* out_need_flush);
+NzbgetRsBuf nzbget_rs_dqh_nntpserver_format_reply_line(
+    int kind, const char* arg);
+NzbgetRsBuf nzbget_rs_dqh_unpack_format_7z_output_arg(const char* unpack_dir);
+NzbgetRsBuf nzbget_rs_dqh_script_format_prefixed_message(
+    const char* prefix, const char* text);
+NzbgetRsBuf nzbget_rs_dqh_xmlrpc_concat_decoded_path_and_query(
+    const char* decoded_path, const char* url, int has_query, size_t query_offset);
+int nzbget_rs_dqh_diskstate_next_comma_token(
+    const char* s, size_t cursor, size_t* out_tok_start,
+    size_t* out_tok_len, size_t* out_next_cursor);
+char* nzbget_rs_dqh_tokenizer_next(
+    char* data_string, const char* separators, int working, char** save_ptr);
 
 #include "nzbget_tls_cipher.h"
 

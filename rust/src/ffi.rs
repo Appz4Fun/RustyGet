@@ -35830,6 +35830,204 @@ pub unsafe extern "C" fn nzbget_rs_dqh_script_config_ensure_trailing_lf(
     into_buf(crate::dupequeuehealth::dqh_script_config_ensure_trailing_lf(l))
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_yenc_format_begin_headers(
+    part: c_int,
+    file_size: i64,
+    base_filename: *const c_char,
+    offset: i64,
+    size: c_int,
+) -> RsBuf {
+    let bf = if base_filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(base_filename).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_yenc_format_begin_headers(
+        part, file_size, bf, offset, size,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_yenc_format_end_trailer(
+    size: c_int,
+    pcrc32: u32,
+) -> RsBuf {
+    into_buf(crate::dupequeuehealth::dqh_yenc_format_end_trailer(size, pcrc32))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_yenc_encode_chunk_step(
+    in_buf: *const c_char,
+    in_len: usize,
+    last_block: c_int,
+    io_lnsz: *mut c_int,
+    out_buf: *mut c_char,
+    io_out_len: *mut usize,
+    out_cap: usize,
+    out_need_flush: *mut c_int,
+) -> usize {
+    if in_buf.is_null() || in_len == 0 || io_lnsz.is_null() || out_buf.is_null() || io_out_len.is_null() {
+        if !out_need_flush.is_null() {
+            *out_need_flush = 0;
+        }
+        return 0;
+    }
+    let in_slice = std::slice::from_raw_parts(in_buf as *const u8, in_len);
+    let out_slice = std::slice::from_raw_parts_mut(out_buf as *mut u8, out_cap);
+    let mut lnsz = *io_lnsz;
+    let mut out_len = *io_out_len;
+    let (consumed, flush) = crate::dupequeuehealth::dqh_yenc_encode_chunk_step(
+        in_slice,
+        last_block != 0,
+        &mut lnsz,
+        out_slice,
+        &mut out_len,
+        out_cap,
+    );
+    *io_lnsz = lnsz;
+    *io_out_len = out_len;
+    if !out_need_flush.is_null() {
+        *out_need_flush = i32::from(flush);
+    }
+    consumed
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_nntpserver_format_reply_line(
+    kind: c_int,
+    arg: *const c_char,
+) -> RsBuf {
+    let a = if arg.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(arg).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_nntpserver_format_reply_line(kind, a))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_unpack_format_7z_output_arg(
+    unpack_dir: *const c_char,
+) -> RsBuf {
+    let ud = if unpack_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(unpack_dir).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_unpack_format_7z_output_arg(ud))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_script_format_prefixed_message(
+    prefix: *const c_char,
+    text: *const c_char,
+) -> RsBuf {
+    let p = if prefix.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(prefix).to_bytes()
+    };
+    let t = if text.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(text).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_script_format_prefixed_message(p, t))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_xmlrpc_concat_decoded_path_and_query(
+    decoded_path: *const c_char,
+    url: *const c_char,
+    has_query: c_int,
+    query_offset: usize,
+) -> RsBuf {
+    let dp = if decoded_path.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(decoded_path).to_bytes()
+    };
+    let u = if url.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(url).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_xmlrpc_concat_decoded_path_and_query(
+        dp,
+        u,
+        has_query != 0,
+        query_offset,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_next_comma_token(
+    s: *const c_char,
+    cursor: usize,
+    out_tok_start: *mut usize,
+    out_tok_len: *mut usize,
+    out_next_cursor: *mut usize,
+) -> c_int {
+    let bytes = if s.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(s).to_bytes()
+    };
+    match crate::dupequeuehealth::dqh_diskstate_next_comma_token(bytes, cursor) {
+        Some((start, len, next)) => {
+            if !out_tok_start.is_null() {
+                *out_tok_start = start;
+            }
+            if !out_tok_len.is_null() {
+                *out_tok_len = len;
+            }
+            if !out_next_cursor.is_null() {
+                *out_next_cursor = next;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_tokenizer_next(
+    data_string: *mut c_char,
+    separators: *const c_char,
+    working: c_int,
+    save_ptr: *mut *mut c_char,
+) -> *mut c_char {
+    if save_ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    let cur = if working != 0 { *save_ptr } else { data_string };
+    if cur.is_null() {
+        *save_ptr = std::ptr::null_mut();
+        return std::ptr::null_mut();
+    }
+    let seps = if separators.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(separators).to_bytes()
+    };
+    let s = CStr::from_ptr(cur).to_bytes();
+    let s_len = s.len();
+    match crate::dupequeuehealth::dqh_tokenizer_find_next_token(s, seps) {
+        Some((tok_start, tok_end, next_pos)) => {
+            if tok_end < s_len {
+                *cur.add(tok_end) = 0;
+            }
+            *save_ptr = cur.add(next_pos);
+            cur.add(tok_start)
+        }
+        None => {
+            *save_ptr = cur.add(s_len);
+            std::ptr::null_mut()
+        }
+    }
+}
+
 
 
 

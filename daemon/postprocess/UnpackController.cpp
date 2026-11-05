@@ -399,7 +399,9 @@ void UnpackController::ExecuteSevenZip(const char* password, bool multiVolumes)
 	params.emplace_back(passBuf.data ? passBuf.data : "-p-", (int)passBuf.len);
 	nzbget_rs_free(passBuf);
 
-	params.push_back(CString::FormatStr("-o%s", *m_unpackDir));
+	NzbgetRsBuf outDirBuf = nzbget_rs_dqh_unpack_format_7z_output_arg(*m_unpackDir);
+	params.emplace_back(outDirBuf.data ? outDirBuf.data : "-o", (int)outDirBuf.len);
+	nzbget_rs_free(outDirBuf);
 	params.emplace_back(multiVolumes ? "*.7z.001" : "*.7z");
 	SetArgs(std::move(params));
 	ResetEnv();

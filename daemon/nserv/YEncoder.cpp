@@ -66,13 +66,14 @@ void YEncoder::WriteSegment()
 	nzbget_rs_snh_yenc_calc_segment_buffers(m_size, &reserveSize, &inbufSize);
 	outbuf.Reserve(reserveSize);
 
-	outbuf.Append(CString::FormatStr("=ybegin part=%i line=128 size=%" PRIi64 " name=%s\r\n", m_part, m_fileSize, FileSystem::BaseFileName(m_filename)));
-	outbuf.Append(CString::FormatStr("=ypart begin=%" PRIi64 " end=%" PRIi64 "\r\n", m_offset + 1, m_offset + m_size));
+	NzbgetRsBuf beginHdr = nzbget_rs_dqh_yenc_format_begin_headers(
+		m_part, m_fileSize, FileSystem::BaseFileName(m_filename), m_offset, m_size);
+	outbuf.Append(beginHdr.data ? beginHdr.data : "", (int)beginHdr.len);
+	nzbget_rs_free(beginHdr);
 
 	Crc32 crc;
 	CharBuffer inbuf(inbufSize);
 	int lnsz = 0;
-	char* out = (char*)outbuf + outbuf.Length();
 
 	while (m_diskfile.Position() < m_offset + m_size)
 	{
@@ -86,46 +87,33 @@ void YEncoder::WriteSegment()
 
 		crc.Append((uchar*)(const char*)inbuf, (int)readBytes);
 
-		char* in = inbuf;
-		while (readBytes > 0)
+		size_t consumed = 0;
+		while (consumed < (size_t)readBytes)
 		{
-			char ch = *in++;
-			readBytes--;
-			ch = (char)(((uchar)(ch) + 42) % 256);
-			if (ch == '\0' || ch == '\n' || ch == '\r' || ch == '=' || ch == ' ' || ch == '\t')
+			size_t outLen = (size_t)outbuf.Length();
+			int needFlush = 0;
+			size_t stepConsumed = nzbget_rs_dqh_yenc_encode_chunk_step(
+				(const char*)inbuf + consumed,
+				(size_t)readBytes - consumed,
+				lastblock ? 1 : 0,
+				&lnsz,
+				(char*)outbuf,
+				&outLen,
+				(size_t)outbuf.Capacity(),
+				&needFlush);
+			outbuf.SetLength((int)outLen);
+			consumed += stepConsumed;
+			if (needFlush)
 			{
-				*out++ = '=';
-				lnsz++;
-				ch = (char)(((uchar)ch + 64) % 256);
-			}
-			if (ch == '.' && lnsz == 0)
-			{
-				*out++ = '.';
-				lnsz++;
-			}
-			*out++ = ch;
-			lnsz++;
-
-			if (lnsz >= 128 || (readBytes == 0 && lastblock))
-			{
-				*out++ = '\r';
-				*out++ = '\n';
-				lnsz += 2;
-				outbuf.SetLength(outbuf.Length() + lnsz);
-
-				if (outbuf.Length() > outbuf.Capacity() - 200)
-				{
-					m_writeFunc(outbuf, outbuf.Length());
-					outbuf.SetLength(0);
-					out = (char*)outbuf;
-				}
-
-				lnsz = 0;
+				m_writeFunc(outbuf, outbuf.Length());
+				outbuf.SetLength(0);
 			}
 		}
 	}
 	m_diskfile.Close();
 
-	outbuf.Append(CString::FormatStr("=yend size=%i part=0 pcrc32=%08x\r\n", m_size, (unsigned int)crc.Finish()));
+	NzbgetRsBuf endTrl = nzbget_rs_dqh_yenc_format_end_trailer(m_size, (uint32_t)crc.Finish());
+	outbuf.Append(endTrl.data ? endTrl.data : "", (int)endTrl.len);
+	nzbget_rs_free(endTrl);
 	m_writeFunc(outbuf, outbuf.Length());
 }

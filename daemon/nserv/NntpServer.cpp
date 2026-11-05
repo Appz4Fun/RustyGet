@@ -188,7 +188,9 @@ void NntpProcessor::Run()
 		}
 		else if (cmdKind == 4)
 		{
-			m_connection->WriteLine(CString::FormatStr("211 0 0 0 %s\r\n", line + argOffset));
+			NzbgetRsBuf grpReply = nzbget_rs_dqh_nntpserver_format_reply_line(0, line + argOffset);
+			m_connection->WriteLine(grpReply.data ? grpReply.data : "");
+			nzbget_rs_free(grpReply);
 		}
 		else if (cmdKind == 5)
 		{
@@ -339,7 +341,7 @@ void NntpProcessor::SendSegment()
 
 	if (!cachedData && !readCache && !FileSystem::FileExists(fullFilename))
 	{
-		m_connection->WriteLine(CString::FormatStr("430 Article not found\r\n"));
+		m_connection->WriteLine("430 Article not found\r\n");
 		return;
 	}
 
@@ -359,7 +361,9 @@ void NntpProcessor::SendSegment()
 
 	if (!cachedData && !readCache && !encoder.OpenFile(errmsg))
 	{
-		m_connection->WriteLine(CString::FormatStr("403 %s\r\n", *errmsg));
+		NzbgetRsBuf errReply = nzbget_rs_dqh_nntpserver_format_reply_line(1, *errmsg);
+		m_connection->WriteLine(errReply.data ? errReply.data : "");
+		nzbget_rs_free(errReply);
 		return;
 	}
 
@@ -367,15 +371,27 @@ void NntpProcessor::SendSegment()
 
 	if (m_sendStat)
 	{
-		m_connection->WriteLine(CString::FormatStr("223 0 %s\r\n", m_messageid));
+		NzbgetRsBuf statReply = nzbget_rs_dqh_nntpserver_format_reply_line(2, m_messageid);
+		m_connection->WriteLine(statReply.data ? statReply.data : "");
+		nzbget_rs_free(statReply);
 		return; // done
 	}
 
-	m_connection->WriteLine(CString::FormatStr("%i 0 %s\r\n", m_sendHeaders ? 220 : 222, m_messageid));
+	{
+		NzbgetRsBuf hdrReply = nzbget_rs_dqh_nntpserver_format_reply_line(
+			m_sendHeaders ? 3 : 4, m_messageid);
+		m_connection->WriteLine(hdrReply.data ? hdrReply.data : "");
+		nzbget_rs_free(hdrReply);
+	}
 	if (m_sendHeaders)
 	{
-		m_connection->WriteLine(CString::FormatStr("Message-ID: %s\r\n", m_messageid));
-		m_connection->WriteLine(CString::FormatStr("Subject: \"%s\"\r\n", FileSystem::BaseFileName(m_filename)));
+		NzbgetRsBuf msgIdReply = nzbget_rs_dqh_nntpserver_format_reply_line(5, m_messageid);
+		m_connection->WriteLine(msgIdReply.data ? msgIdReply.data : "");
+		nzbget_rs_free(msgIdReply);
+		NzbgetRsBuf subjReply = nzbget_rs_dqh_nntpserver_format_reply_line(
+			6, FileSystem::BaseFileName(m_filename));
+		m_connection->WriteLine(subjReply.data ? subjReply.data : "");
+		nzbget_rs_free(subjReply);
 		m_connection->WriteLine("\r\n");
 	}
 

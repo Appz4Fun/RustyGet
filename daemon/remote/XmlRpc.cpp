@@ -531,7 +531,10 @@ void XmlRpcProcessor::SetUrl(const char* url)
 	CString path;
 	path.Set(url, (int)pathSetLen);
 	WebUtil::UrlDecode(path);
-	m_url = CString::FormatStr("%s%s", *path, hasQuery ? url + queryOffset : "");
+	NzbgetRsBuf urlBuf = nzbget_rs_dqh_xmlrpc_concat_decoded_path_and_query(
+		*path, url, hasQuery ? 1 : 0, queryOffset);
+	m_url.Set(urlBuf.data ? urlBuf.data : "", (int)urlBuf.len);
+	nzbget_rs_free(urlBuf);
 }
 
 bool XmlRpcProcessor::IsRpcRequest(const char* url)

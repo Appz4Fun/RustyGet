@@ -2727,6 +2727,220 @@ pub fn dqh_script_config_ensure_trailing_lf(line: &[u8]) -> Vec<u8> {
     }
 }
 
+/// Formats `=ybegin part=<part> line=128 size=<file_size> name=<base_filename>\r\n=ypart begin=<offset + 1> end=<offset + size>\r\n`
+/// for `YEncoder::WriteSegment`.
+pub fn dqh_yenc_format_begin_headers(
+    part: i32,
+    file_size: i64,
+    base_filename: &[u8],
+    offset: i64,
+    size: i32,
+) -> Vec<u8> {
+    let part_s = part.to_string();
+    let fsize_s = file_size.to_string();
+    let begin_s = offset.saturating_add(1).to_string();
+    let end_s = offset.saturating_add(i64::from(size)).to_string();
+    let mut out = Vec::with_capacity(
+        48 + part_s.len() + fsize_s.len() + base_filename.len() + begin_s.len() + end_s.len(),
+    );
+    out.extend_from_slice(b"=ybegin part=");
+    out.extend_from_slice(part_s.as_bytes());
+    out.extend_from_slice(b" line=128 size=");
+    out.extend_from_slice(fsize_s.as_bytes());
+    out.extend_from_slice(b" name=");
+    out.extend_from_slice(base_filename);
+    out.extend_from_slice(b"\r\n=ypart begin=");
+    out.extend_from_slice(begin_s.as_bytes());
+    out.extend_from_slice(b" end=");
+    out.extend_from_slice(end_s.as_bytes());
+    out.extend_from_slice(b"\r\n");
+    out
+}
+
+/// Formats `=yend size=<size> part=0 pcrc32=<pcrc32:08x>\r\n` for `YEncoder::WriteSegment`.
+pub fn dqh_yenc_format_end_trailer(size: i32, pcrc32: u32) -> Vec<u8> {
+    format!("=yend size={} part=0 pcrc32={:08x}\r\n", size, pcrc32).into_bytes()
+}
+
+/// Executes one step of the yEnc byte-encoding state machine for `YEncoder::WriteSegment`.
+/// Returns `(bytes_consumed_from_in_slice, need_flush)`.
+pub fn dqh_yenc_encode_chunk_step(
+    in_slice: &[u8],
+    last_block: bool,
+    lnsz: &mut i32,
+    out_slice: &mut [u8],
+    out_len: &mut usize,
+    out_cap: usize,
+) -> (usize, bool) {
+    let len = in_slice.len();
+    for (idx, &raw) in in_slice.iter().enumerate() {
+        let mut ch = raw.wrapping_add(42);
+        let mut cur_off = *out_len + (*lnsz as usize);
+        if matches!(ch, b'\0' | b'\n' | b'\r' | b'=' | b' ' | b'\t') {
+            if cur_off < out_slice.len() {
+                out_slice[cur_off] = b'=';
+            }
+            cur_off += 1;
+            *lnsz += 1;
+            ch = ch.wrapping_add(64);
+        }
+        if ch == b'.' && *lnsz == 0 {
+            if cur_off < out_slice.len() {
+                out_slice[cur_off] = b'.';
+            }
+            cur_off += 1;
+            *lnsz += 1;
+        }
+        if cur_off < out_slice.len() {
+            out_slice[cur_off] = ch;
+        }
+        cur_off += 1;
+        *lnsz += 1;
+
+        if *lnsz >= 128 || (idx + 1 == len && last_block) {
+            if cur_off + 1 < out_slice.len() {
+                out_slice[cur_off] = b'\r';
+                out_slice[cur_off + 1] = b'\n';
+            }
+            *lnsz += 2;
+            *out_len += *lnsz as usize;
+            if *out_len < out_slice.len() {
+                out_slice[*out_len] = 0;
+            }
+            *lnsz = 0;
+            if *out_len > out_cap.saturating_sub(200) {
+                return (idx + 1, true);
+            }
+        }
+    }
+    (len, false)
+}
+
+/// Formats NNTP server reply lines for `NntpProcessor`:
+/// `kind`:
+/// - `0`: `"211 0 0 0 <arg>\r\n"`
+/// - `1`: `"403 <arg>\r\n"`
+/// - `2`: `"223 0 <arg>\r\n"`
+/// - `3`: `"220 0 <arg>\r\n"`
+/// - `4`: `"222 0 <arg>\r\n"`
+/// - `5`: `"Message-ID: <arg>\r\n"`
+/// - `6`: `"Subject: \"<arg>\"\r\n"`
+pub fn dqh_nntpserver_format_reply_line(kind: i32, arg: &[u8]) -> Vec<u8> {
+    let (prefix, suffix): (&[u8], &[u8]) = match kind {
+        0 => (b"211 0 0 0 ", b"\r\n"),
+        1 => (b"403 ", b"\r\n"),
+        2 => (b"223 0 ", b"\r\n"),
+        3 => (b"220 0 ", b"\r\n"),
+        4 => (b"222 0 ", b"\r\n"),
+        5 => (b"Message-ID: ", b"\r\n"),
+        6 => (b"Subject: \"", b"\"\r\n"),
+        _ => (b"", b"\r\n"),
+    };
+    let mut out = Vec::with_capacity(prefix.len() + arg.len() + suffix.len());
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(arg);
+    out.extend_from_slice(suffix);
+    out
+}
+
+/// Formats `"-o<unpack_dir>"` for `UnpackController::ExecuteSevenZip`.
+pub fn dqh_unpack_format_7z_output_arg(unpack_dir: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(2 + unpack_dir.len());
+    out.extend_from_slice(b"-o");
+    out.extend_from_slice(unpack_dir);
+    out
+}
+
+/// Formats `"<prefix>: <text>"` for `ScriptController::PrintMessage`.
+pub fn dqh_script_format_prefixed_message(prefix: &[u8], text: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(prefix.len() + 2 + text.len());
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(b": ");
+    out.extend_from_slice(text);
+    out
+}
+
+/// Concatenates `decoded_path` and (when `has_query` is true) `&url[query_offset..]`
+/// for `XmlRpcProcessor::SetUrl`.
+pub fn dqh_xmlrpc_concat_decoded_path_and_query(
+    decoded_path: &[u8],
+    url: &[u8],
+    has_query: bool,
+    query_offset: usize,
+) -> Vec<u8> {
+    let query = if has_query && query_offset <= url.len() {
+        &url[query_offset..]
+    } else {
+        &[][..]
+    };
+    let mut out = Vec::with_capacity(decoded_path.len() + query.len());
+    out.extend_from_slice(decoded_path);
+    out.extend_from_slice(query);
+    out
+}
+
+/// Finds the next non-empty comma-delimited token `(tok_start, tok_len, next_cursor)` in `s`
+/// starting from `cursor`, for `DiskState::LoadDupeRepairState` and `DiskState::LoadNzbInfo`.
+pub fn dqh_diskstate_next_comma_token(
+    s: &[u8],
+    cursor: usize,
+) -> Option<(usize, usize, usize)> {
+    let mut pos = cursor;
+    while pos < s.len() {
+        while pos < s.len() && s[pos] == b',' {
+            pos += 1;
+        }
+        if pos >= s.len() {
+            return None;
+        }
+        let end = pos
+            + s[pos..]
+                .iter()
+                .take_while(|&&b| b != b',')
+                .count();
+        let next = if end < s.len() { end + 1 } else { end };
+        if end > pos {
+            return Some((pos, end - pos, next));
+        }
+        pos = next;
+    }
+    None
+}
+
+/// Finds the next non-empty trimmed token `(tok_start, tok_end, next_pos)` in `s`
+/// separated by any byte in `separators` and trimmed via `crate::util::trim_line`,
+/// for `Tokenizer::Next`.
+pub fn dqh_tokenizer_find_next_token(
+    s: &[u8],
+    separators: &[u8],
+) -> Option<(usize, usize, usize)> {
+    let mut pos = 0;
+    while pos < s.len() {
+        while pos < s.len() && separators.contains(&s[pos]) {
+            pos += 1;
+        }
+        if pos >= s.len() {
+            return None;
+        }
+        let raw_end = pos
+            + s[pos..]
+                .iter()
+                .take_while(|&&b| !separators.contains(&b))
+                .count();
+        let next_pos = if raw_end < s.len() {
+            raw_end + 1
+        } else {
+            raw_end
+        };
+        let (trim_start, trim_end) = crate::util::trim_line(&s[pos..raw_end]);
+        if trim_start < trim_end {
+            return Some((pos + trim_start, pos + trim_end, next_pos));
+        }
+        pos = next_pos;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3799,6 +4013,58 @@ mod tests {
         assert_eq!(
             dqh_script_config_ensure_trailing_lf(b"# comment\n"),
             b"# comment\n"
+        );
+        assert_eq!(
+            dqh_yenc_format_begin_headers(1, 50000, b"test.dat", 0, 1000),
+            b"=ybegin part=1 line=128 size=50000 name=test.dat\r\n=ypart begin=1 end=1000\r\n"
+        );
+        assert_eq!(
+            dqh_yenc_format_end_trailer(1000, 0x0a1b2c3d),
+            b"=yend size=1000 part=0 pcrc32=0a1b2c3d\r\n"
+        );
+        {
+            let mut lnsz = 0;
+            let mut out = vec![0u8; 256];
+            let mut out_len = 0usize;
+            let (consumed, flush) =
+                dqh_yenc_encode_chunk_step(&[4, b'A', 214], true, &mut lnsz, &mut out, &mut out_len, 256);
+            assert_eq!(consumed, 3);
+            assert!(!flush);
+            assert_eq!(lnsz, 0);
+            assert_eq!(&out[..out_len], b"..k=@\r\n");
+        }
+        assert_eq!(
+            dqh_nntpserver_format_reply_line(0, b"alt.binaries.test"),
+            b"211 0 0 0 alt.binaries.test\r\n"
+        );
+        assert_eq!(
+            dqh_nntpserver_format_reply_line(6, b"file.rar"),
+            b"Subject: \"file.rar\"\r\n"
+        );
+        assert_eq!(
+            dqh_unpack_format_7z_output_arg(b"/dst/unpack"),
+            b"-o/dst/unpack"
+        );
+        assert_eq!(
+            dqh_script_format_prefixed_message(b"7-Zip", b"Everything is Ok"),
+            b"7-Zip: Everything is Ok"
+        );
+        assert_eq!(
+            dqh_xmlrpc_concat_decoded_path_and_query(b"/jsonrpc", b"/jsonrpc?a=1", true, 8),
+            b"/jsonrpc?a=1"
+        );
+        assert_eq!(
+            dqh_diskstate_next_comma_token(b",,a.rar,b.rar,", 0),
+            Some((2, 5, 8))
+        );
+        assert_eq!(
+            dqh_diskstate_next_comma_token(b",,a.rar,b.rar,", 8),
+            Some((8, 5, 14))
+        );
+        assert_eq!(dqh_diskstate_next_comma_token(b",,a.rar,b.rar,", 14), None);
+        assert_eq!(
+            dqh_tokenizer_find_next_token(b" ,;  foo \t ; bar ", b",;"),
+            Some((5, 8, 12))
         );
     }
 }

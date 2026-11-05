@@ -152,21 +152,21 @@ bool Frontend::ServerEditQueue(DownloadQueue::EEditAction action, int offset, in
 	}
 	else
 	{
-		return DownloadQueue::Guard()->EditEntry(id, action, CString::FormatStr("%i", offset));
+		NzbgetRsBuf offBuf = nzbget_rs_dqh_conn_format_port_str(offset);
+		bool ok = DownloadQueue::Guard()->EditEntry(id, action, offBuf.data ? offBuf.data : "0");
+		nzbget_rs_free(offBuf);
+		return ok;
 	}
 }
 
 void Frontend::InitMessageBase(SNzbRequestBase* messageBase, int request, int size)
 {
-	messageBase->m_signature	= htonl(NZBMESSAGE_SIGNATURE);
-	messageBase->m_type = htonl(request);
-	messageBase->m_structSize = htonl(size);
-
-	strncpy(messageBase->m_username, g_Options->GetControlUsername(), NZBREQUESTPASSWORDSIZE - 1);
-	messageBase->m_username[NZBREQUESTPASSWORDSIZE - 1] = '\0';
-
-	strncpy(messageBase->m_password, g_Options->GetControlPassword(), NZBREQUESTPASSWORDSIZE);
-	messageBase->m_password[NZBREQUESTPASSWORDSIZE - 1] = '\0';
+	nzbget_rs_binrpc_init_message_base(
+		(uint8_t*)messageBase,
+		request,
+		size,
+		g_Options->GetControlUsername(),
+		g_Options->GetControlPassword());
 }
 
 bool Frontend::RequestMessages()

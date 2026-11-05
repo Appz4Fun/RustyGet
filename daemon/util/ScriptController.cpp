@@ -716,7 +716,9 @@ void ScriptController::PrintMessage(Message::EKind kind, const char* format, ...
 
 	if (m_logPrefix)
 	{
-		AddMessage(kind, CString::FormatStr("%s: %s", m_logPrefix, *tmp2));
+		NzbgetRsBuf prefBuf = nzbget_rs_dqh_script_format_prefixed_message(m_logPrefix, *tmp2);
+		AddMessage(kind, prefBuf.data ? prefBuf.data : "");
+		nzbget_rs_free(prefBuf);
 	}
 	else
 	{

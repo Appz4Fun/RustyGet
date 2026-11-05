@@ -811,7 +811,10 @@ void HistoryCoordinator::HistoryRetry(DownloadQueue* downloadQueue, HistoryList:
 				}
 				fileInfo->SetNzbInfo(nzbInfo);
 
-				BString<1024> outputFilename("%s%c%s", nzbInfo->GetDestDir(), PATH_SEPARATOR, recordedName.c_str());
+				NzbgetRsBuf outPathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+					nzbInfo->GetDestDir(), PATH_SEPARATOR, recordedName.c_str());
+				BString<1024> outputFilename = outPathBuf.data ? outPathBuf.data : "";
+				nzbget_rs_free(outPathBuf);
 
 				int64 outFileSize = fileInfo->GetSuccessArticles() == 0 ? 0 : FileSystem::FileSize(outputFilename);
 				if (nzbget_rs_pur_history_coord_should_delete_empty_or_zero_success_output(

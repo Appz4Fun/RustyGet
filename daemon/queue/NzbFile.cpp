@@ -139,7 +139,9 @@ void NzbFile::ParseSubject(FileInfo* fileInfo, bool TryQuotes)
 	if (!fileInfo->GetSubject())
 	{
 		// Malformed file element without subject. We generate subject using internal element id.
-		fileInfo->SetSubject(CString::FormatStr("%d", fileInfo->GetId()));
+		NzbgetRsBuf subjBuf = nzbget_rs_dqh_conn_format_port_str(fileInfo->GetId());
+		fileInfo->SetSubject(subjBuf.data ? subjBuf.data : "");
+		nzbget_rs_free(subjBuf);
 		return;
 	}
 
@@ -353,15 +355,19 @@ bool NzbFile::Parse()
 
 	if (ret != 0)
 	{
-		m_nzbInfo->AddMessage(Message::mkError, BString<1024>(
-			"Error parsing nzb-file %s", FileSystem::BaseFileName(m_fileName.c_str())));
+		NzbgetRsBuf errBuf = nzbget_rs_tpr_nzbfile_format_parse_error_msg(
+			FileSystem::BaseFileName(m_fileName.c_str()), 0);
+		m_nzbInfo->AddMessage(Message::mkError, errBuf.data ? errBuf.data : "");
+		nzbget_rs_free(errBuf);
 		return false;
 	}
 
 	if (m_nzbInfo->GetFileList()->empty())
 	{
-		m_nzbInfo->AddMessage(Message::mkError, BString<1024>(
-			"Error parsing nzb-file %s: file has no content", FileSystem::BaseFileName(m_fileName.c_str())));
+		NzbgetRsBuf errBuf = nzbget_rs_tpr_nzbfile_format_parse_error_msg(
+			FileSystem::BaseFileName(m_fileName.c_str()), 1);
+		m_nzbInfo->AddMessage(Message::mkError, errBuf.data ? errBuf.data : "");
+		nzbget_rs_free(errBuf);
 		return false;
 	}
 
@@ -588,5 +594,7 @@ void NzbFile::SAX_error(NzbFile* file, const char *msg, ...)
 	// remove trailing CRLF
 	nzbget_rs_tpr_nzbfile_trim_sax_error_in_place(errMsg);
 
-	file->m_nzbInfo->AddMessage(Message::mkError, BString<1024>("Error parsing nzb-file: %s", errMsg));
+	NzbgetRsBuf errBuf = nzbget_rs_tpr_nzbfile_format_sax_error_msg(errMsg);
+	file->m_nzbInfo->AddMessage(Message::mkError, errBuf.data ? errBuf.data : "");
+	nzbget_rs_free(errBuf);
 }

@@ -255,7 +255,10 @@ void Scanner::CheckIncomingNzbs(const char* directory, const char* category, boo
 			continue;
 		}
 
-		BString<1024> fullfilename("%s%c%s", directory, PATH_SEPARATOR, filename);
+		NzbgetRsBuf fullPathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			directory, PATH_SEPARATOR, filename);
+		BString<1024> fullfilename = fullPathBuf.data ? fullPathBuf.data : "";
+		nzbget_rs_free(fullPathBuf);
 		bool isDirectory = FileSystem::DirectoryExists(fullfilename);
 
 		if (isDirectory)
@@ -529,14 +532,16 @@ void Scanner::InitPPParameters(const char* category, NzbParameterList* parameter
 	{
 		g_ExtensionManager->ForEach([&parameters](auto script)
 			{
-				parameters->SetParameter(BString<1024>("%s:", script->GetName()), nullptr);
+				NzbgetRsBuf prefixBuf = nzbget_rs_tpr_nzb_script_format_param_prefix(script->GetName());
+				parameters->SetParameter(prefixBuf.data ? prefixBuf.data : "", nullptr);
+				nzbget_rs_free(prefixBuf);
 			}
 		);
 	}
 
 	if (!parameters->Find("*Unpack:"))
 	{
-		parameters->SetParameter("*Unpack:", unpack ? "yes" : "no");
+		parameters->SetParameter("*Unpack:", nzbget_rs_dqh_scanner_yes_no_str(unpack ? 1 : 0));
 	}
 
 	if (!Util::EmptyStr(extensions))
@@ -550,7 +555,9 @@ void Scanner::InitPPParameters(const char* category, NzbParameterList* parameter
 				{
 					if (strcmp(scriptName, script->GetName()) != 0) continue;
 
-					BString<1024> paramName("%s:", scriptName);
+					NzbgetRsBuf prefixBuf = nzbget_rs_tpr_nzb_script_format_param_prefix(scriptName);
+					BString<1024> paramName = prefixBuf.data ? prefixBuf.data : "";
+					nzbget_rs_free(prefixBuf);
 					if (nzbget_rs_uqs_scanner_script_qualifies_for_pp_param(
 						script->GetPostScript() ? 1 : 0,
 						script->GetQueueScript() ? 1 : 0,
@@ -949,7 +956,10 @@ Scanner::EAddStatus Scanner::AddExternalFile(
 		int num = ++m_idGen;
 		while (tempFileName.Empty() || FileSystem::FileExists(tempFileName))
 		{
-			tempFileName.Format("%s%cnzb-%i.tmp", g_Options->GetTempDir(), PATH_SEPARATOR, num);
+			NzbgetRsBuf tmpBuf = nzbget_rs_dqh_scanner_format_temp_nzb_path(
+				g_Options->GetTempDir(), PATH_SEPARATOR, num);
+			tempFileName = tmpBuf.data ? tmpBuf.data : "";
+			nzbget_rs_free(tmpBuf);
 			num++;
 		}
 
@@ -975,7 +985,10 @@ Scanner::EAddStatus Scanner::AddExternalFile(
 		validNzbName = normStr.c_str();
 	}
 
-	BString<1024> scanFileName("%s%c%s", g_Options->GetNzbDir(), PATH_SEPARATOR, *validNzbName);
+	NzbgetRsBuf scanPathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+		g_Options->GetNzbDir(), PATH_SEPARATOR, *validNzbName);
+	BString<1024> scanFileName = scanPathBuf.data ? scanPathBuf.data : "";
+	nzbget_rs_free(scanPathBuf);
 
 	const char* validCStr = validNzbName ? *validNzbName : "";
 	size_t validLen = strlen(validCStr);

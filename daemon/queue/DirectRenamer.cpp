@@ -126,8 +126,10 @@ void DirectParLoader::StartLoader(DirectRenamer* owner, NzbInfo* nzbInfo)
 	{
 		if (completedFile.GetParFile())
 		{
-			directParLoader->m_parFiles.emplace_back(BString<1024>("%s%c%s",
-				nzbInfo->GetDestDir(), PATH_SEPARATOR, completedFile.GetFilename()));
+			NzbgetRsBuf parPathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+				nzbInfo->GetDestDir(), PATH_SEPARATOR, completedFile.GetFilename());
+			directParLoader->m_parFiles.emplace_back(parPathBuf.data ? parPathBuf.data : "");
+			nzbget_rs_free(parPathBuf);
 		}
 	}
 
@@ -244,7 +246,9 @@ void DirectRenamer::ArticleDownloaded(DownloadQueue* downloadQueue, FileInfo* fi
 		debug("file: %s; article-hash16k: %s", fileInfo->GetFilename(), fileInfo->GetHash16k());
 	}
 
-	fileInfo->GetNzbInfo()->PrintMessage(Message::mkDetail, "Detected %s %s", (contentAnalyzer->GetParFile() ? "par2-file" : "non-par2-file"), fileInfo->GetFilename());
+	fileInfo->GetNzbInfo()->PrintMessage(Message::mkDetail, "Detected %s %s",
+		nzbget_rs_dqh_direct_renamer_par_kind_label(contentAnalyzer->GetParFile() ? 1 : 0),
+		fileInfo->GetFilename());
 
 	if (parDelta.par_flag_changed)
 	{
@@ -472,9 +476,10 @@ int DirectRenamer::RenameFilesInProgress(NzbInfo* nzbInfo, FileHashList* parHash
 
 		const std::string& currOutputFilename = fileInfo->GetOutputFilename();
 		const std::string nzbDestDir = fileInfo->GetNzbInfo()->GetDestDir();
-		const std::string oldOutputFilename = currOutputFilename.empty()
-			? nzbDestDir + PATH_SEPARATOR + fileInfo->GetFilename()
-			: currOutputFilename;
+		NzbgetRsBuf oldOutBuf = nzbget_rs_dqh_direct_renamer_resolve_old_output_path(
+			currOutputFilename.c_str(), nzbDestDir.c_str(), PATH_SEPARATOR, fileInfo->GetFilename());
+		const std::string oldOutputFilename(oldOutBuf.data ? oldOutBuf.data : "", oldOutBuf.len);
+		nzbget_rs_free(oldOutBuf);
 
 		nzbInfo->PrintMessage(Message::mkInfo,
 			"Renaming in-progress file %s to %s",
@@ -497,7 +502,10 @@ int DirectRenamer::RenameFilesInProgress(NzbInfo* nzbInfo, FileHashList* parHash
 			else
 			{
 				std::string nzbFinalDir = fileInfo->GetNzbInfo()->BuildFinalDirName().Str();
-				std::string finalOutputFilename = nzbFinalDir + PATH_SEPARATOR + newName;
+				NzbgetRsBuf finalOutBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+					nzbFinalDir.c_str(), PATH_SEPARATOR, newName.c_str());
+				std::string finalOutputFilename(finalOutBuf.data ? finalOutBuf.data : "", finalOutBuf.len);
+				nzbget_rs_free(finalOutBuf);
 
 				nzbInfo->PrintMessage(Message::mkInfo,
 					"HardLinking in-progress file %s to %s",
@@ -564,8 +572,14 @@ int DirectRenamer::RenameCompletedFiles(NzbInfo* nzbInfo, FileHashList* parHashe
 		}
 
 		const std::string destDir = nzbInfo->GetDestDir();
-		const std::string oldOutputFilename = destDir + PATH_SEPARATOR + completedFile.GetFilename();
-		const std::string outputFilename = destDir + PATH_SEPARATOR + newName;
+		NzbgetRsBuf oldOutBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			destDir.c_str(), PATH_SEPARATOR, completedFile.GetFilename());
+		const std::string oldOutputFilename(oldOutBuf.data ? oldOutBuf.data : "", oldOutBuf.len);
+		nzbget_rs_free(oldOutBuf);
+		NzbgetRsBuf outBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			destDir.c_str(), PATH_SEPARATOR, newName.c_str());
+		const std::string outputFilename(outBuf.data ? outBuf.data : "", outBuf.len);
+		nzbget_rs_free(outBuf);
 
 		nzbInfo->PrintMessage(Message::mkInfo,
 			"Renaming completed file %s to %s",
@@ -588,7 +602,10 @@ int DirectRenamer::RenameCompletedFiles(NzbInfo* nzbInfo, FileHashList* parHashe
 			else
 			{
 				const std::string finalDir = nzbInfo->BuildFinalDirName().Str();
-				const std::string finalOutputFilename = finalDir + PATH_SEPARATOR + newName;
+				NzbgetRsBuf finalOutBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+					finalDir.c_str(), PATH_SEPARATOR, newName.c_str());
+				const std::string finalOutputFilename(finalOutBuf.data ? finalOutBuf.data : "", finalOutBuf.len);
+				nzbget_rs_free(finalOutBuf);
 
 				nzbInfo->PrintMessage(Message::mkInfo,
 					"HardLinking completed file %s to %s",

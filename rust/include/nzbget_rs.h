@@ -5822,6 +5822,26 @@ size_t nzbget_rs_tpr_options_strip_trailing_sep(const char* dir, char sep);
 NzbgetRsBuf nzbget_rs_tpr_options_format_joined_dir(
     const char* parent_dir, char sep, const char* dir, int32_t join_mode);
 int32_t nzbget_rs_tpr_options_minutes_to_seconds_i32(int32_t minutes);
+const char* nzbget_rs_dqh_direct_renamer_par_kind_label(int32_t is_par);
+NzbgetRsBuf nzbget_rs_dqh_direct_renamer_resolve_old_output_path(
+    const char* curr_output_filename, const char* dest_dir, char sep, const char* filename);
+const char* nzbget_rs_dqh_scanner_yes_no_str(int32_t val);
+NzbgetRsBuf nzbget_rs_dqh_scanner_format_temp_nzb_path(
+    const char* temp_dir, char sep, int32_t num);
+NzbgetRsBuf nzbget_rs_dqh_url_coord_format_temp_url_path(
+    const char* temp_dir, char sep, int32_t id);
+NzbgetRsBuf nzbget_rs_tpr_nzbfile_format_parse_error_msg(
+    const char* base_name, int32_t has_no_content);
+NzbgetRsBuf nzbget_rs_tpr_nzbfile_format_sax_error_msg(const char* err_msg);
+NzbgetRsBuf nzbget_rs_tpr_nzbinfo_format_fallback_name(int32_t id);
+NzbgetRsBuf nzbget_rs_tpr_nzbinfo_format_inter_id_suffix(int32_t id);
+NzbgetRsBuf nzbget_rs_tpr_nzbinfo_format_inter_dest_dir(
+    const char* inter_dir, char sep, const char* dir_name, const char* id_suffix);
+int32_t nzbget_rs_tpr_history_info_select_name_kind(
+    int32_t kind, int32_t hk_nzb, int32_t hk_url, int32_t hk_dup);
+NzbgetRsBuf nzbget_rs_tpr_queue_editor_format_nzb_file_match_name(
+    const char* nzb_name, const char* base_file_name);
+int32_t nzbget_rs_tpr_queue_editor_filename_has_vol(const char* filename);
 
 #include "nzbget_tls_cipher.h"
 

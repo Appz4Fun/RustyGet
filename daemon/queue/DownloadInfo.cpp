@@ -177,7 +177,9 @@ void NzbInfo::SetFilename(const char* filename)
 		CString nzbNicename = MakeNiceNzbName(m_filename, true);
 		if (nzbNicename.Empty())
 		{
-			nzbNicename.Format("nzb-%i", GetId());
+			NzbgetRsBuf fbBuf = nzbget_rs_tpr_nzbinfo_format_fallback_name(GetId());
+			nzbNicename = fbBuf.data ? fbBuf.data : "";
+			nzbget_rs_free(fbBuf);
 		}
 		SetName(nzbNicename);
 	}
@@ -238,9 +240,14 @@ void NzbInfo::BuildDestDirName()
 	}
 	else
 	{
-		BString<100> idSuffix(".#%i", GetId());
-		m_destDir.Format("%s%c%s%s", g_Options->GetInterDir(), PATH_SEPARATOR,
-			DirNameOf(GetName(), strlen(idSuffix)).c_str(), *idSuffix);
+		NzbgetRsBuf idSuffixBuf = nzbget_rs_tpr_nzbinfo_format_inter_id_suffix(GetId());
+		const char* idSuffix = idSuffixBuf.data ? idSuffixBuf.data : "";
+		std::string dirName = DirNameOf(GetName(), idSuffixBuf.len);
+		NzbgetRsBuf destBuf = nzbget_rs_tpr_nzbinfo_format_inter_dest_dir(
+			g_Options->GetInterDir(), PATH_SEPARATOR, dirName.c_str(), idSuffix);
+		m_destDir = destBuf.data ? destBuf.data : "";
+		nzbget_rs_free(destBuf);
+		nzbget_rs_free(idSuffixBuf);
 	}
 }
 
@@ -264,8 +271,10 @@ CString NzbInfo::BuildFinalDirName()
 		std::string categoryDir = FileSystem::SanitizeRelativePath(*m_category);
 		if (!categoryDir.empty())
 		{
-			// we can't format with "finalDir.Format" because one of the parameter is "finalDir" itself.
-			finalDir = CString::FormatStr("%s%c%s", *finalDir, PATH_SEPARATOR, categoryDir.c_str());
+			NzbgetRsBuf joinedBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+				*finalDir, PATH_SEPARATOR, categoryDir.c_str());
+			finalDir = joinedBuf.data ? joinedBuf.data : "";
+			nzbget_rs_free(joinedBuf);
 		}
 	}
 
@@ -770,11 +779,13 @@ int HistoryInfo::GetId()
 
 const char* HistoryInfo::GetName()
 {
-	if (m_kind == hkNzb || m_kind == hkUrl)
+	int nameKind = nzbget_rs_tpr_history_info_select_name_kind(
+		(int)m_kind, (int)hkNzb, (int)hkUrl, (int)hkDup);
+	if (nameKind == 1)
 	{
 		return GetNzbInfo()->GetName();
 	}
-	else if (m_kind == hkDup)
+	else if (nameKind == 2)
 	{
 		return GetDupInfo()->GetName();
 	}

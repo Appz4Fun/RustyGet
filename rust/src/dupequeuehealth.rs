@@ -1548,6 +1548,63 @@ pub fn dqh_scheduler_server_action_str(active: bool) -> &'static [u8] {
     }
 }
 
+/// Returns `"par2-file"` or `"non-par2-file"` for `DirectRenamer::ArticleDownloaded`.
+pub fn dqh_direct_renamer_par_kind_label(is_par: bool) -> &'static [u8] {
+    if is_par {
+        b"par2-file\0"
+    } else {
+        b"non-par2-file\0"
+    }
+}
+
+/// Resolves the old output path for `DirectRenamer::RenameFilesInProgress`:
+/// returns `curr_output_filename` when non-empty, otherwise `"<dest_dir><sep><filename>"`.
+pub fn dqh_direct_renamer_resolve_old_output_path(
+    curr_output_filename: &[u8],
+    dest_dir: &[u8],
+    sep: u8,
+    filename: &[u8],
+) -> Vec<u8> {
+    if !curr_output_filename.is_empty() {
+        return curr_output_filename.to_vec();
+    }
+    let mut out = Vec::with_capacity(dest_dir.len() + 1 + filename.len());
+    out.extend_from_slice(dest_dir);
+    out.push(sep);
+    out.extend_from_slice(filename);
+    out
+}
+
+/// Returns `"yes"` or `"no"` for boolean PP-parameter values in `Scanner::InitPPParameters`
+/// and `QueueEditor::SetNzbCategory`.
+pub fn dqh_scanner_yes_no_str(val: bool) -> &'static [u8] {
+    if val {
+        b"yes\0"
+    } else {
+        b"no\0"
+    }
+}
+
+/// Formats `"<temp_dir><sep>nzb-<num>.tmp"` for `Scanner::AddExternalFile`.
+pub fn dqh_scanner_format_temp_nzb_path(temp_dir: &[u8], sep: u8, num: i32) -> Vec<u8> {
+    let suffix = format!("nzb-{num}.tmp");
+    let mut out = Vec::with_capacity(temp_dir.len() + 1 + suffix.len());
+    out.extend_from_slice(temp_dir);
+    out.push(sep);
+    out.extend_from_slice(suffix.as_bytes());
+    out
+}
+
+/// Formats `"<temp_dir><sep>url-<id>.tmp"` for `UrlCoordinator::StartUrlDownload`.
+pub fn dqh_url_coord_format_temp_url_path(temp_dir: &[u8], sep: u8, id: i32) -> Vec<u8> {
+    let suffix = format!("url-{id}.tmp");
+    let mut out = Vec::with_capacity(temp_dir.len() + 1 + suffix.len());
+    out.extend_from_slice(temp_dir);
+    out.push(sep);
+    out.extend_from_slice(suffix.as_bytes());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2165,5 +2222,33 @@ mod tests {
         assert_eq!(dqh_scheduler_pause_action_str(false), b"unpausing\0");
         assert_eq!(dqh_scheduler_server_action_str(true), b"activating\0");
         assert_eq!(dqh_scheduler_server_action_str(false), b"deactivating\0");
+        assert_eq!(dqh_direct_renamer_par_kind_label(true), b"par2-file\0");
+        assert_eq!(
+            dqh_direct_renamer_par_kind_label(false),
+            b"non-par2-file\0"
+        );
+        assert_eq!(
+            dqh_direct_renamer_resolve_old_output_path(
+                b"/custom/out.rar",
+                b"/dst",
+                b'/',
+                b"part01.rar"
+            ),
+            b"/custom/out.rar"
+        );
+        assert_eq!(
+            dqh_direct_renamer_resolve_old_output_path(b"", b"/dst", b'/', b"part01.rar"),
+            b"/dst/part01.rar"
+        );
+        assert_eq!(dqh_scanner_yes_no_str(true), b"yes\0");
+        assert_eq!(dqh_scanner_yes_no_str(false), b"no\0");
+        assert_eq!(
+            dqh_scanner_format_temp_nzb_path(b"/tmp", b'/', 7),
+            b"/tmp/nzb-7.tmp"
+        );
+        assert_eq!(
+            dqh_url_coord_format_temp_url_path(b"/tmp", b'/', 42),
+            b"/tmp/url-42.tmp"
+        );
     }
 }

@@ -284,8 +284,10 @@ void UrlCoordinator::StartUrlDownload(NzbInfo* nzbInfo)
 	urlDownloader->SetUrl(nzbInfo->GetUrl());
 	urlDownloader->SetForce(g_Options->GetUrlForce());
 	urlDownloader->SetInfoName(nzbInfo->MakeNiceUrlName(nzbInfo->GetUrl(), nzbInfo->GetFilename()));
-	urlDownloader->SetOutputFilename(BString<1024>("%s%curl-%i.tmp",
-		g_Options->GetTempDir(), PATH_SEPARATOR, nzbInfo->GetId()));
+	NzbgetRsBuf outPathBuf = nzbget_rs_dqh_url_coord_format_temp_url_path(
+		g_Options->GetTempDir(), PATH_SEPARATOR, nzbInfo->GetId());
+	urlDownloader->SetOutputFilename(outPathBuf.data ? outPathBuf.data : "");
+	nzbget_rs_free(outPathBuf);
 
 	nzbInfo->SetActiveDownloads(1);
 	nzbInfo->SetUrlStatus(NzbInfo::lsRunning);

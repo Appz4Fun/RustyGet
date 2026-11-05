@@ -1611,6 +1611,95 @@ pub fn tpr_options_minutes_to_seconds_i32(minutes: i32) -> i32 {
     minutes.wrapping_mul(60)
 }
 
+/// Formats `"Error parsing nzb-file <base_name>"` or
+/// `"Error parsing nzb-file <base_name>: file has no content"` for `NzbFile::Parse`.
+pub fn tpr_nzbfile_format_parse_error_msg(base_name: &[u8], has_no_content: bool) -> Vec<u8> {
+    const PREFIX: &[u8] = b"Error parsing nzb-file ";
+    const NO_CONTENT_SUFFIX: &[u8] = b": file has no content";
+    let extra = if has_no_content {
+        NO_CONTENT_SUFFIX.len()
+    } else {
+        0
+    };
+    let mut out = Vec::with_capacity(PREFIX.len() + base_name.len() + extra);
+    out.extend_from_slice(PREFIX);
+    out.extend_from_slice(base_name);
+    if has_no_content {
+        out.extend_from_slice(NO_CONTENT_SUFFIX);
+    }
+    out
+}
+
+/// Formats `"Error parsing nzb-file: <err_msg>"` for `NzbFile::SAX_error`.
+pub fn tpr_nzbfile_format_sax_error_msg(err_msg: &[u8]) -> Vec<u8> {
+    const PREFIX: &[u8] = b"Error parsing nzb-file: ";
+    let mut out = Vec::with_capacity(PREFIX.len() + err_msg.len());
+    out.extend_from_slice(PREFIX);
+    out.extend_from_slice(err_msg);
+    out
+}
+
+/// Formats `"nzb-<id>"` for `NzbInfo::SetFilename` fallback name.
+pub fn tpr_nzbinfo_format_fallback_name(id: i32) -> Vec<u8> {
+    format!("nzb-{id}").into_bytes()
+}
+
+/// Formats `".#<id>"` for `NzbInfo::BuildDestDirName` intermediate directory suffix.
+pub fn tpr_nzbinfo_format_inter_id_suffix(id: i32) -> Vec<u8> {
+    format!(".#{id}").into_bytes()
+}
+
+/// Formats `"<inter_dir><sep><dir_name><id_suffix>"` for `NzbInfo::BuildDestDirName`.
+pub fn tpr_nzbinfo_format_inter_dest_dir(
+    inter_dir: &[u8],
+    sep: u8,
+    dir_name: &[u8],
+    id_suffix: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(inter_dir.len() + 1 + dir_name.len() + id_suffix.len());
+    out.extend_from_slice(inter_dir);
+    out.push(sep);
+    out.extend_from_slice(dir_name);
+    out.extend_from_slice(id_suffix);
+    out
+}
+
+/// Classifies `HistoryInfo::GetName` kind:
+/// `1` when `kind == hk_nzb || kind == hk_url`, `2` when `kind == hk_dup`, `0` otherwise.
+pub fn tpr_history_info_select_name_kind(
+    kind: i32,
+    hk_nzb: i32,
+    hk_url: i32,
+    hk_dup: i32,
+) -> i32 {
+    if kind == hk_nzb || kind == hk_url {
+        1
+    } else if kind == hk_dup {
+        2
+    } else {
+        0
+    }
+}
+
+/// Formats `"<nzb_name>/<base_file_name>"` for `QueueEditor::BuildIdListFromNameList`.
+pub fn tpr_queue_editor_format_nzb_file_match_name(
+    nzb_name: &[u8],
+    base_file_name: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(nzb_name.len() + 1 + base_file_name.len());
+    out.extend_from_slice(nzb_name);
+    out.push(b'/');
+    out.extend_from_slice(base_file_name);
+    out
+}
+
+/// Checks case-insensitively whether `filename` contains `".vol"` for `QueueEditor::PausePars`.
+pub fn tpr_queue_editor_filename_has_vol(filename: &[u8]) -> bool {
+    filename
+        .windows(4)
+        .any(|w| w.eq_ignore_ascii_case(b".vol"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2198,5 +2287,33 @@ mod tests {
             b"/main/tmp"
         );
         assert_eq!(tpr_options_minutes_to_seconds_i32(15), 900);
+        assert_eq!(
+            tpr_nzbfile_format_parse_error_msg(b"movie.nzb", false),
+            b"Error parsing nzb-file movie.nzb"
+        );
+        assert_eq!(
+            tpr_nzbfile_format_parse_error_msg(b"movie.nzb", true),
+            b"Error parsing nzb-file movie.nzb: file has no content"
+        );
+        assert_eq!(
+            tpr_nzbfile_format_sax_error_msg(b"Premature end of data"),
+            b"Error parsing nzb-file: Premature end of data"
+        );
+        assert_eq!(tpr_nzbinfo_format_fallback_name(12), b"nzb-12");
+        assert_eq!(tpr_nzbinfo_format_inter_id_suffix(12), b".#12");
+        assert_eq!(
+            tpr_nzbinfo_format_inter_dest_dir(b"/inter", b'/', b"MyShow", b".#12"),
+            b"/inter/MyShow.#12"
+        );
+        assert_eq!(tpr_history_info_select_name_kind(1, 1, 2, 3), 1);
+        assert_eq!(tpr_history_info_select_name_kind(2, 1, 2, 3), 1);
+        assert_eq!(tpr_history_info_select_name_kind(3, 1, 2, 3), 2);
+        assert_eq!(tpr_history_info_select_name_kind(0, 1, 2, 3), 0);
+        assert_eq!(
+            tpr_queue_editor_format_nzb_file_match_name(b"MyShow", b"part01.rar"),
+            b"MyShow/part01.rar"
+        );
+        assert!(tpr_queue_editor_filename_has_vol(b"Show.VOL00+01.PAR2"));
+        assert!(!tpr_queue_editor_filename_has_vol(b"Show.par2"));
     }
 }

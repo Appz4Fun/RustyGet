@@ -559,7 +559,11 @@ bool QueueEditor::BuildIdListFromNameList(IdList* idList, NameList* nameList, Do
 				if (action < DownloadQueue::eaGroupMoveOffset)
 				{
 					// file action
-					BString<1024> filename("%s/%s", fileInfo->GetNzbInfo()->GetName(), FileSystem::BaseFileName(fileInfo->GetFilename()));
+					NzbgetRsBuf matchBuf = nzbget_rs_tpr_queue_editor_format_nzb_file_match_name(
+						fileInfo->GetNzbInfo()->GetName(),
+						FileSystem::BaseFileName(fileInfo->GetFilename()));
+					BString<1024> filename = matchBuf.data ? matchBuf.data : "";
+					nzbget_rs_free(matchBuf);
 					if (nzbget_rs_uqs_queue_editor_matches_name_filter(
 						regEx != nullptr ? 1 : 0,
 						regEx ? (regEx->Match(filename) ? 1 : 0) : 0,
@@ -717,9 +721,8 @@ void QueueEditor::PausePars(RawFileList* fileList, bool extraParsOnly)
 	for (FileInfo* fileInfo : fileList)
 	{
 		rsIsPar.push_back(fileInfo->GetParFile() ? 1 : 0);
-		BString<1024> loFileName = fileInfo->GetFilename();
-		for (char* p = loFileName; *p; p++) *p = tolower(*p);
-		rsHasVol.push_back(strstr(loFileName, ".vol") != nullptr ? 1 : 0);
+		rsHasVol.push_back(
+			nzbget_rs_tpr_queue_editor_filename_has_vol(fileInfo->GetFilename()) != 0 ? 1 : 0);
 		rsSizes.push_back(fileInfo->GetSize());
 	}
 	nzbget_rs_qhp_select_pars_to_pause(
@@ -790,7 +793,7 @@ void QueueEditor::SetNzbCategory(NzbInfo* nzbInfo, const char* category, bool ap
 
 	if (oldUnpack != newUnpack)
 	{
-		nzbInfo->GetParameters()->SetParameter("*Unpack:", newUnpack ? "yes" : "no");
+		nzbInfo->GetParameters()->SetParameter("*Unpack:", nzbget_rs_dqh_scanner_yes_no_str(newUnpack ? 1 : 0));
 	}
 
 	NzbgetRsBuf extDiff = nzbget_rs_qci_queue_editor_diff_category_extensions(oldExtensions, newExtensions);

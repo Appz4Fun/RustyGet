@@ -38329,5 +38329,289 @@ pub extern "C" fn nzbget_rs_dqh_webdl_is_terminal_retry_status(
     )
 }
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_conn_is_unix_path_too_long(
+    host_len: usize,
+    sun_path_cap: usize,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_conn_is_unix_path_too_long(
+        host_len,
+        sun_path_cap,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_conn_resolve_gai_report_err_code(
+    res: c_int,
+    eai_system: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_conn_resolve_gai_report_err_code(res, eai_system)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_conn_should_report_socket_create_failed(
+    is_invalid_socket: c_int,
+    has_addr_list: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_conn_should_report_socket_create_failed(
+            is_invalid_socket != 0,
+            has_addr_list != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_conn_should_cleanup_unconnected_socket(
+    connected: c_int,
+    is_invalid_socket: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_conn_should_cleanup_unconnected_socket(
+            connected != 0,
+            is_invalid_socket != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_conn_should_unlink_listening_unix_socket(
+    is_unix_path: c_int,
+    getsockopt_res: c_int,
+    is_listening: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_conn_should_unlink_listening_unix_socket(
+            is_unix_path != 0,
+            getsockopt_res,
+            is_listening,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_conn_resolve_report_err_code(
+    err_code: c_int,
+    last_net_err: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_conn_resolve_report_err_code(err_code, last_net_err)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_tls_has_cert_and_key_files(
+    cert_empty: c_int,
+    key_empty: c_int,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_tls_has_cert_and_key_files(
+        cert_empty != 0,
+        key_empty != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_tls_should_set_sni_hostname(
+    is_client: c_int,
+    host_empty: c_int,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_tls_should_set_sni_hostname(
+        is_client != 0,
+        host_empty != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_tls_should_validate_client_cert(
+    is_client: c_int,
+    should_verify: c_int,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_tls_should_validate_client_cert(
+        is_client != 0,
+        should_verify != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_tls_is_proto_version_out_of_bounds(
+    version: c_int,
+    minimum: c_int,
+    maximum: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_tls_is_proto_version_out_of_bounds(version, minimum, maximum),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_tls_should_send_close_notify(
+    has_session: c_int,
+    connected: c_int,
+    has_deadline: c_int,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_tls_should_send_close_notify(
+        has_session != 0,
+        connected != 0,
+        has_deadline != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_webdl_is_connect_aborted(
+    connected: c_int,
+    is_stopped: c_int,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_webdl_is_connect_aborted(
+        connected != 0,
+        is_stopped != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_webdl_should_download_body(
+    status: c_int,
+    ad_running: c_int,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_webdl_should_download_body(
+        status, ad_running,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_webdl_should_delete_broken_output(
+    status: c_int,
+    ad_finished: c_int,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_webdl_should_delete_broken_output(
+        status,
+        ad_finished,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_webdl_needs_prepare_file(out_file_active: c_int) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_webdl_needs_prepare_file(
+        out_file_active != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_webdl_is_gunzip_write_failed(
+    out_len: c_int,
+    written_bytes: i64,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_webdl_is_gunzip_write_failed(
+        out_len,
+        written_bytes,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_webdl_should_disconnect_on_free(
+    conn_status: c_int,
+    cs_cancelled: c_int,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_webdl_should_disconnect_on_free(
+        conn_status,
+        cs_cancelled,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_speed_test_is_iteration_failed(
+    elapsed_sec: f64,
+    downloaded: u32,
+    target_size: u32,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_speed_test_is_iteration_failed(
+        elapsed_sec,
+        downloaded,
+        target_size,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_speed_test_should_stop_recv_loop(
+    received: c_int,
+    elapsed_sec: f64,
+    timeout_sec: f64,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_speed_test_should_stop_recv_loop(
+            received,
+            elapsed_sec,
+            timeout_sec,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_tls_cipher_fill_test_plaintext(
+    buf: *mut u8,
+    len: usize,
+) {
+    if buf.is_null() || len == 0 {
+        return;
+    }
+    let slice = std::slice::from_raw_parts_mut(buf, len);
+    crate::dupequeuehealth::dqh_tls_cipher_fill_test_plaintext(slice);
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_tls_cipher_is_prepare_batch_valid(
+    sequence: u64,
+    count: u32,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_tls_cipher_is_prepare_batch_valid(sequence, count),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_tls_cipher_write_record_nonce(
+    prefix4: *const u8,
+    seq: u64,
+    out_nonce12: *mut u8,
+) {
+    if prefix4.is_null() || out_nonce12.is_null() {
+        return;
+    }
+    let prefix: &[u8; 4] = &*(prefix4 as *const [u8; 4]);
+    let out: &mut [u8; 12] = &mut *(out_nonce12 as *mut [u8; 12]);
+    crate::dupequeuehealth::dqh_tls_cipher_write_record_nonce(prefix, seq, out);
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_tls_cipher_is_record_seq_in_range(
+    sequence: u64,
+    first: u64,
+    count: usize,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_tls_cipher_is_record_seq_in_range(sequence, first, count),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_tls_cipher_precheck_probe_args(
+    cancelled: c_int,
+    milliseconds: u64,
+    verification: c_int,
+    has_cert_store: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_tls_cipher_precheck_probe_args(
+        cancelled != 0,
+        milliseconds,
+        verification != 0,
+        has_cert_store != 0,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_tls_cipher_is_probe_addr_list_valid(
+    addr_count: usize,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_tls_cipher_is_probe_addr_list_valid(addr_count))
+}
+
+
 
 

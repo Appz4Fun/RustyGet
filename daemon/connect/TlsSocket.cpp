@@ -124,7 +124,8 @@ bool TlsSocket::Start()
 		return false;
 	}
 
-	if (!m_certFile.empty() && !m_keyFile.empty())
+	if (nzbget_rs_dqh_tls_has_cert_and_key_files(
+		m_certFile.empty() ? 1 : 0, m_keyFile.empty() ? 1 : 0) != 0)
 	{
 		if (!SSL_CTX_use_certificate_chain_file(m_context.get(), m_certFile.c_str()))
 		{
@@ -170,7 +171,9 @@ bool TlsSocket::Start()
 		return false;
 	}
 
-	if (m_isClient && !m_host.empty() && !SSL_set_tlsext_host_name(m_session.get(), m_host.c_str()))
+	if (nzbget_rs_dqh_tls_should_set_sni_hostname(
+		m_isClient ? 1 : 0, m_host.empty() ? 1 : 0) != 0 &&
+		!SSL_set_tlsext_host_name(m_session.get(), m_host.c_str()))
 	{
 		ReportError("Could not set host name for TLS");
 		Close();
@@ -228,7 +231,8 @@ bool TlsSocket::Start()
 		return false;
 	}
 
-	if (m_isClient && shouldVerify && !ValidateCert())
+	if (nzbget_rs_dqh_tls_should_validate_client_cert(
+		m_isClient ? 1 : 0, shouldVerify ? 1 : 0) != 0 && !ValidateCert())
 	{
 		m_probeFailure = -4;
 		Close();
@@ -276,7 +280,7 @@ bool TlsSocket::SetCipherSuite(std::string_view cipher)
 			int version = tls13 ? TLS1_3_VERSION : TLS1_2_VERSION;
 			int minimum = SSL_get_min_proto_version(m_session.get());
 			int maximum = SSL_get_max_proto_version(m_session.get());
-			if ((minimum && version < minimum) || (maximum && version > maximum)) return false;
+			if (nzbget_rs_dqh_tls_is_proto_version_out_of_bounds(version, minimum, maximum) != 0) return false;
 			if (!SSL_set_min_proto_version(m_session.get(), version) || !SSL_set_max_proto_version(m_session.get(), version)) return false;
 			return tls13 ? SSL_set_ciphersuites(m_session.get(), m_cipher.c_str()) == 1 :
 				SSL_set_cipher_list(m_session.get(), m_cipher.c_str()) == 1;
@@ -342,7 +346,8 @@ bool TlsSocket::ValidateCert()
 
 void TlsSocket::Close()
 {
-	if (m_session && m_connected && !m_deadline)
+	if (nzbget_rs_dqh_tls_should_send_close_notify(
+		m_session ? 1 : 0, m_connected ? 1 : 0, m_deadline ? 1 : 0) != 0)
 	{
 		if (SSL_shutdown(m_session.get()) == 0)
 		{

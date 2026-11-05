@@ -4687,6 +4687,180 @@ pub fn dqh_webdl_is_terminal_retry_status(
     status == ad_finished || status == ad_fatal_error || status == ad_not_found
 }
 
+/// Returns true when a Unix-domain socket path length overflows `sun_path` (`host_len >= sun_path_cap`).
+pub fn dqh_conn_is_unix_path_too_long(host_len: usize, sun_path_cap: usize) -> bool {
+    host_len >= sun_path_cap
+}
+
+/// Resolves the `getaddrinfo` error code passed to `Connection::ReportError` (`if res != eai_system { res } else { 0 }`).
+pub fn dqh_conn_resolve_gai_report_err_code(res: i32, eai_system: i32) -> i32 {
+    if res != eai_system {
+        res
+    } else {
+        0
+    }
+}
+
+/// Returns true when `Connection::DoConnect` should log `"Socket creation failed"` (`is_invalid_socket && has_addr_list`).
+pub fn dqh_conn_should_report_socket_create_failed(
+    is_invalid_socket: bool,
+    has_addr_list: bool,
+) -> bool {
+    is_invalid_socket && has_addr_list
+}
+
+/// Returns true when `Connection::DoConnect` should report connection failure and close a created socket (`!connected && !is_invalid_socket`).
+pub fn dqh_conn_should_cleanup_unconnected_socket(
+    connected: bool,
+    is_invalid_socket: bool,
+) -> bool {
+    !connected && !is_invalid_socket
+}
+
+/// Returns true when `Connection::DoDisconnect` should `unlink` a listening Unix-domain socket (`is_unix_path && getsockopt_res == 0 && is_listening != 0`).
+pub fn dqh_conn_should_unlink_listening_unix_socket(
+    is_unix_path: bool,
+    getsockopt_res: i32,
+    is_listening: i32,
+) -> bool {
+    is_unix_path && getsockopt_res == 0 && is_listening != 0
+}
+
+/// Resolves the error code in `Connection::ReportError` (`if err_code == 0 { last_net_err } else { err_code }`).
+pub fn dqh_conn_resolve_report_err_code(err_code: i32, last_net_err: i32) -> i32 {
+    if err_code == 0 {
+        last_net_err
+    } else {
+        err_code
+    }
+}
+
+/// Returns true when `TlsSocket::Start` should load both certificate chain and private key files (`!cert_empty && !key_empty`).
+pub fn dqh_tls_has_cert_and_key_files(cert_empty: bool, key_empty: bool) -> bool {
+    !cert_empty && !key_empty
+}
+
+/// Returns true when `TlsSocket::Start` should set the SNI hostname (`is_client && !host_empty`).
+pub fn dqh_tls_should_set_sni_hostname(is_client: bool, host_empty: bool) -> bool {
+    is_client && !host_empty
+}
+
+/// Returns true when `TlsSocket::Start` should run `ValidateCert()` after handshake (`is_client && should_verify`).
+pub fn dqh_tls_should_validate_client_cert(is_client: bool, should_verify: bool) -> bool {
+    is_client && should_verify
+}
+
+/// Returns true when a TLS protocol version falls outside configured `[minimum, maximum]` bounds (`(minimum != 0 && version < minimum) || (maximum != 0 && version > maximum)`).
+pub fn dqh_tls_is_proto_version_out_of_bounds(version: i32, minimum: i32, maximum: i32) -> bool {
+    (minimum != 0 && version < minimum) || (maximum != 0 && version > maximum)
+}
+
+/// Returns true when `TlsSocket::Close` should perform `SSL_shutdown` (`has_session && connected && !has_deadline`).
+pub fn dqh_tls_should_send_close_notify(
+    has_session: bool,
+    connected: bool,
+    has_deadline: bool,
+) -> bool {
+    has_session && connected && !has_deadline
+}
+
+/// Returns true when `WebDownloader::Download` should abort right after `Connect()` (`!connected || is_stopped`).
+pub fn dqh_webdl_is_connect_aborted(connected: bool, is_stopped: bool) -> bool {
+    !connected || is_stopped
+}
+
+/// Returns true when `WebDownloader::Download` should proceed to `DownloadBody()` (`status == ad_running`).
+pub fn dqh_webdl_should_download_body(status: i32, ad_running: i32) -> bool {
+    status == ad_running
+}
+
+/// Returns true when `WebDownloader::Download` should delete a broken partial output file (`status != ad_finished`).
+pub fn dqh_webdl_should_delete_broken_output(status: i32, ad_finished: i32) -> bool {
+    status != ad_finished
+}
+
+/// Returns true when `WebDownloader::Write` needs to call `PrepareFile()` (`!out_file_active`).
+pub fn dqh_webdl_needs_prepare_file(out_file_active: bool) -> bool {
+    !out_file_active
+}
+
+/// Returns true when `WebDownloader::Write` should fail after gunzipping a chunk (`out_len > 0 && written_bytes <= 0`).
+pub fn dqh_webdl_is_gunzip_write_failed(out_len: i32, written_bytes: i64) -> bool {
+    out_len > 0 && written_bytes <= 0
+}
+
+/// Returns true when `WebDownloader::FreeConnection` should disconnect a cancelled connection (`conn_status == cs_cancelled`).
+pub fn dqh_webdl_should_disconnect_on_free(conn_status: i32, cs_cancelled: i32) -> bool {
+    conn_status == cs_cancelled
+}
+
+/// Returns true when `Network::SpeedTest::RunTest` should count an iteration as a failure (`elapsed_sec == 0.0 || downloaded < target_size`).
+pub fn dqh_speed_test_is_iteration_failed(
+    elapsed_sec: f64,
+    downloaded: u32,
+    target_size: u32,
+) -> bool {
+    elapsed_sec == 0.0 || downloaded < target_size
+}
+
+/// Returns true when `Network::SpeedTest::ExecuteTest` should break from its receive loop (`received <= 0 || elapsed_sec >= timeout_sec`).
+pub fn dqh_speed_test_should_stop_recv_loop(
+    received: i32,
+    elapsed_sec: f64,
+    timeout_sec: f64,
+) -> bool {
+    received <= 0 || elapsed_sec >= timeout_sec
+}
+
+/// Populates the deterministic AEAD benchmark plaintext buffer (`(i * 31 + i / 251) & 255`) in `TlsCipherBackend.cpp`.
+pub fn dqh_tls_cipher_fill_test_plaintext(buf: &mut [u8]) {
+    for (i, b) in buf.iter_mut().enumerate() {
+        *b = ((i * 31 + i / 251) & 255) as u8;
+    }
+}
+
+/// Returns true when `Crypto::Prepare` batch arguments in `TlsCipherBackend.cpp` are valid (`count > 0 && count <= 64 && sequence <= u64::MAX - u64::from(count)`).
+pub fn dqh_tls_cipher_is_prepare_batch_valid(sequence: u64, count: u32) -> bool {
+    count > 0 && count <= 64 && sequence <= u64::MAX - u64::from(count)
+}
+
+/// Writes a 12-byte TLS record nonce (`prefix[0..4]` followed by big-endian `seq`) in `TlsCipherBackend.cpp`.
+pub fn dqh_tls_cipher_write_record_nonce(prefix: &[u8; 4], seq: u64, out_nonce: &mut [u8; 12]) {
+    out_nonce[..4].copy_from_slice(prefix);
+    out_nonce[4..12].copy_from_slice(&seq.to_be_bytes());
+}
+
+/// Returns true when `sequence` is within `[first, first + count)` in `Crypto::Record` (`TlsCipherBackend.cpp`).
+pub fn dqh_tls_cipher_is_record_seq_in_range(sequence: u64, first: u64, count: usize) -> bool {
+    sequence >= first && (sequence - first) < (count as u64)
+}
+
+/// Prechecks `Probe` arguments in `TlsCipherBackend.cpp`:
+/// `0` = proceed, `-6` = cancelled, `-3` = zero timeout, `-1` = timeout > 10000ms, `-4` = missing cert store when verification enabled.
+pub fn dqh_tls_cipher_precheck_probe_args(
+    cancelled: bool,
+    milliseconds: u64,
+    verification: bool,
+    has_cert_store: bool,
+) -> i32 {
+    if cancelled {
+        -6
+    } else if milliseconds == 0 {
+        -3
+    } else if milliseconds > 10000 {
+        -1
+    } else if verification && !has_cert_store {
+        -4
+    } else {
+        0
+    }
+}
+
+/// Returns true when `Probe` in `TlsCipherBackend.cpp` has a valid resolved address count (`addr_count > 0 && addr_count <= 16`).
+pub fn dqh_tls_cipher_is_probe_addr_list_valid(addr_count: usize) -> bool {
+    addr_count > 0 && addr_count <= 16
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6529,5 +6703,77 @@ mod tests {
         assert!(dqh_webdl_is_terminal_retry_status(2, 1, 2, 3));
         assert!(dqh_webdl_is_terminal_retry_status(3, 1, 2, 3));
         assert!(!dqh_webdl_is_terminal_retry_status(4, 1, 2, 3));
+        assert!(dqh_conn_is_unix_path_too_long(108, 108));
+        assert!(!dqh_conn_is_unix_path_too_long(107, 108));
+        assert_eq!(dqh_conn_resolve_gai_report_err_code(-2, -11), -2);
+        assert_eq!(dqh_conn_resolve_gai_report_err_code(-11, -11), 0);
+        assert!(dqh_conn_should_report_socket_create_failed(true, true));
+        assert!(!dqh_conn_should_report_socket_create_failed(false, true));
+        assert!(!dqh_conn_should_report_socket_create_failed(true, false));
+        assert!(dqh_conn_should_cleanup_unconnected_socket(false, false));
+        assert!(!dqh_conn_should_cleanup_unconnected_socket(true, false));
+        assert!(!dqh_conn_should_cleanup_unconnected_socket(false, true));
+        assert!(dqh_conn_should_unlink_listening_unix_socket(true, 0, 1));
+        assert!(!dqh_conn_should_unlink_listening_unix_socket(false, 0, 1));
+        assert!(!dqh_conn_should_unlink_listening_unix_socket(true, -1, 1));
+        assert!(!dqh_conn_should_unlink_listening_unix_socket(true, 0, 0));
+        assert_eq!(dqh_conn_resolve_report_err_code(0, 111), 111);
+        assert_eq!(dqh_conn_resolve_report_err_code(22, 111), 22);
+        assert!(dqh_tls_has_cert_and_key_files(false, false));
+        assert!(!dqh_tls_has_cert_and_key_files(true, false));
+        assert!(!dqh_tls_has_cert_and_key_files(false, true));
+        assert!(dqh_tls_should_set_sni_hostname(true, false));
+        assert!(!dqh_tls_should_set_sni_hostname(false, false));
+        assert!(!dqh_tls_should_set_sni_hostname(true, true));
+        assert!(dqh_tls_should_validate_client_cert(true, true));
+        assert!(!dqh_tls_should_validate_client_cert(false, true));
+        assert!(!dqh_tls_should_validate_client_cert(true, false));
+        assert!(dqh_tls_is_proto_version_out_of_bounds(0x0303, 0x0304, 0));
+        assert!(dqh_tls_is_proto_version_out_of_bounds(0x0304, 0, 0x0303));
+        assert!(!dqh_tls_is_proto_version_out_of_bounds(0x0304, 0x0303, 0x0304));
+        assert!(dqh_tls_should_send_close_notify(true, true, false));
+        assert!(!dqh_tls_should_send_close_notify(true, true, true));
+        assert!(!dqh_tls_should_send_close_notify(true, false, false));
+        assert!(dqh_webdl_is_connect_aborted(false, false));
+        assert!(dqh_webdl_is_connect_aborted(true, true));
+        assert!(!dqh_webdl_is_connect_aborted(true, false));
+        assert!(dqh_webdl_should_download_body(1, 1));
+        assert!(!dqh_webdl_should_download_body(2, 1));
+        assert!(dqh_webdl_should_delete_broken_output(2, 1));
+        assert!(!dqh_webdl_should_delete_broken_output(1, 1));
+        assert!(dqh_webdl_needs_prepare_file(false));
+        assert!(!dqh_webdl_needs_prepare_file(true));
+        assert!(dqh_webdl_is_gunzip_write_failed(128, 0));
+        assert!(!dqh_webdl_is_gunzip_write_failed(128, 128));
+        assert!(!dqh_webdl_is_gunzip_write_failed(0, 0));
+        assert!(dqh_webdl_should_disconnect_on_free(3, 3));
+        assert!(!dqh_webdl_should_disconnect_on_free(1, 3));
+        assert!(dqh_speed_test_is_iteration_failed(0.0, 1024, 1024));
+        assert!(dqh_speed_test_is_iteration_failed(1.5, 512, 1024));
+        assert!(!dqh_speed_test_is_iteration_failed(1.5, 1024, 1024));
+        assert!(dqh_speed_test_should_stop_recv_loop(0, 0.5, 5.0));
+        assert!(dqh_speed_test_should_stop_recv_loop(1024, 5.0, 5.0));
+        assert!(!dqh_speed_test_should_stop_recv_loop(1024, 1.0, 5.0));
+        let mut pt = [0u8; 4];
+        dqh_tls_cipher_fill_test_plaintext(&mut pt);
+        assert_eq!(pt, [0, 31, 62, 93]);
+        assert!(dqh_tls_cipher_is_prepare_batch_valid(100, 16));
+        assert!(!dqh_tls_cipher_is_prepare_batch_valid(100, 0));
+        assert!(!dqh_tls_cipher_is_prepare_batch_valid(100, 65));
+        assert!(!dqh_tls_cipher_is_prepare_batch_valid(u64::MAX - 5, 10));
+        let mut nonce = [0u8; 12];
+        dqh_tls_cipher_write_record_nonce(&[1, 2, 3, 4], 0x0102_0304_0506_0708, &mut nonce);
+        assert_eq!(nonce, [1, 2, 3, 4, 1, 2, 3, 4, 5, 6, 7, 8]);
+        assert!(dqh_tls_cipher_is_record_seq_in_range(105, 100, 8));
+        assert!(!dqh_tls_cipher_is_record_seq_in_range(99, 100, 8));
+        assert!(!dqh_tls_cipher_is_record_seq_in_range(108, 100, 8));
+        assert_eq!(dqh_tls_cipher_precheck_probe_args(true, 1000, true, true), -6);
+        assert_eq!(dqh_tls_cipher_precheck_probe_args(false, 0, true, true), -3);
+        assert_eq!(dqh_tls_cipher_precheck_probe_args(false, 10001, true, true), -1);
+        assert_eq!(dqh_tls_cipher_precheck_probe_args(false, 1000, true, false), -4);
+        assert_eq!(dqh_tls_cipher_precheck_probe_args(false, 1000, true, true), 0);
+        assert!(dqh_tls_cipher_is_probe_addr_list_valid(4));
+        assert!(!dqh_tls_cipher_is_probe_addr_list_valid(0));
+        assert!(!dqh_tls_cipher_is_probe_addr_list_valid(17));
     }
 }

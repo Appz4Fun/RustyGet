@@ -40,7 +40,7 @@ struct Crypto
 		ccm = mode == EVP_CIPH_CCM_MODE;
 		if (mode != EVP_CIPH_GCM_MODE && !ccm && EVP_CIPHER_nid(cipher) != NID_chacha20_poly1305) return false;
 		if (keySize <= 0 || keySize > static_cast<int>(key.size()) || RAND_bytes(key.data(), keySize) != 1 || RAND_bytes(prefix.data(), prefix.size()) != 1) return false;
-		for (int i = 0; i < RecordSize; ++i) plaintext[i] = static_cast<unsigned char>((i * 31 + i / 251) & 255);
+		nzbget_rs_dqh_tls_cipher_fill_test_plaintext(plaintext.data(), RecordSize);
 		return EVP_EncryptInit_ex(encrypt.get(), cipher, nullptr, nullptr, nullptr) == 1 &&
 			EVP_DecryptInit_ex(decrypt.get(), cipher, nullptr, nullptr, nullptr) == 1 &&
 			EVP_CIPHER_CTX_ctrl(encrypt.get(), EVP_CTRL_AEAD_SET_IVLEN, 12, nullptr) == 1 &&
@@ -48,12 +48,12 @@ struct Crypto
 	}
 	bool Prepare(uint64_t sequence, uint32_t count)
 	{
-		if (count == 0 || count > 64 || sequence > std::numeric_limits<uint64_t>::max() - count) return false;
+		if (!nzbget_rs_dqh_tls_cipher_is_prepare_batch_valid(sequence, count)) return false;
 		first = sequence; ciphertext.resize(count); tags.resize(count); nonces.resize(count);
 		for (uint32_t i = 0; i < count; ++i)
 		{
-			auto& nonce = nonces[i]; std::copy(prefix.begin(), prefix.end(), nonce.begin());
-			for (unsigned j = 0; j < 8; ++j) nonce[11 - j] = static_cast<unsigned char>((sequence + i) >> (j * 8));
+			auto& nonce = nonces[i];
+			nzbget_rs_dqh_tls_cipher_write_record_nonce(prefix.data(), sequence + i, nonce.data());
 			int size = 0, tail = 0;
 			unsigned char aad[5]{23, 3, 3, 0x40, static_cast<unsigned char>(tagSize)};
 			if (ccm && EVP_CIPHER_CTX_ctrl(encrypt.get(), EVP_CTRL_AEAD_SET_TAG, tagSize, nullptr) != 1) return false;
@@ -76,7 +76,7 @@ struct Crypto
 	}
 	int Record(uint64_t sequence)
 	{
-		if (sequence < first || sequence - first >= ciphertext.size()) return -1;
+		if (!nzbget_rs_dqh_tls_cipher_is_record_seq_in_range(sequence, first, ciphertext.size())) return -1;
 		size_t i = static_cast<size_t>(sequence - first);
 		unsigned char aad[5]{23, 3, 3, 0x40, static_cast<unsigned char>(tagSize)};
 		int size = 0, tail = 0;
@@ -116,7 +116,7 @@ int Suites(void*, NzbgetTlsEmitSuite emit, void* context) noexcept
 			const char* suiteName = SSL_CIPHER_get_name(suite);
 			bool tls13 = nzbget_rs_dqh_tls_is_tls13_version_str(SSL_CIPHER_get_version(suite)) != 0;
 			int version = tls13 ? TLS1_3_VERSION : TLS1_2_VERSION;
-			if ((minimum && version < minimum) || (maximum && version > maximum)) continue;
+			if (nzbget_rs_dqh_tls_is_proto_version_out_of_bounds(version, minimum, maximum) != 0) continue;
 			int auth = SSL_CIPHER_get_auth_nid(suite), kx = SSL_CIPHER_get_kx_nid(suite);
 			unsigned flags = nzbget_rs_dqh_tls_compute_suite_flags(
 				SSL_CIPHER_is_aead(suite) ? 1 : 0,
@@ -164,10 +164,12 @@ int Probe(void*, const NzbgetTlsServer* server, const char* cipher, int protocol
 {
 	try
 	{
-		if (cancel(cancelContext)) return -6;
-		if (milliseconds == 0) return -3;
-		if (milliseconds > 10000) return -1;
-		if (server->verification && !TlsSocket::HasCertificateStore()) return -4;
+		int precheck = nzbget_rs_dqh_tls_cipher_precheck_probe_args(
+			cancel(cancelContext) ? 1 : 0,
+			milliseconds,
+			server->verification ? 1 : 0,
+			TlsSocket::HasCertificateStore() ? 1 : 0);
+		if (precheck != 0) return precheck;
 		auto deadline = std::make_shared<SocketDeadline>();
 		deadline->end = std::chrono::steady_clock::now() + std::chrono::milliseconds(milliseconds);
 		deadline->cancelled = [=] { return cancel(cancelContext) != 0; };
@@ -182,7 +184,7 @@ int Probe(void*, const NzbgetTlsServer* server, const char* cipher, int protocol
 			addresses.push_back(remaining.substr(pos, end == std::string::npos ? end : end - pos));
 			if (end == std::string::npos) break; pos = end + 1;
 		}
-		if (addresses.empty() || addresses.size() > 16) return -2;
+		if (!nzbget_rs_dqh_tls_cipher_is_probe_addr_list_valid(addresses.size())) return -2;
 		connection.SetResolvedAddresses(addresses); connection.SetDeadline(deadline);
 		connection.SetSuppressErrors(true); connection.SetTimeout(10);
 		bool connected = connection.Connect();

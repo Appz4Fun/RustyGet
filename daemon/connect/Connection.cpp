@@ -204,7 +204,7 @@ bool Connection::Bind()
 	{
 		struct sockaddr_un addr;
 		addr.sun_family = AF_UNIX;
-		if (m_host.size() >= sizeof(addr.sun_path))
+		if (nzbget_rs_dqh_conn_is_unix_path_too_long(m_host.size(), sizeof(addr.sun_path)) != 0)
 		{
 			ReportError("Binding socket failed for %s: name too long\n", m_host.c_str(), false);
 			return false;
@@ -248,9 +248,10 @@ bool Connection::Bind()
 		int res = getaddrinfo(m_host.c_str(), portStr, &addr_hints, &addr_list);
 		if (res != 0)
 		{
+			int gaiErr = nzbget_rs_dqh_conn_resolve_gai_report_err_code(res, EAI_SYSTEM);
 			ReportError("Could not resolve hostname %s", m_host.c_str(), true,
-				res != EAI_SYSTEM ? res : 0,
-				res != EAI_SYSTEM ? gai_strerror(res) : nullptr);
+				gaiErr,
+				gaiErr != 0 ? gai_strerror(res) : nullptr);
 			return false;
 		}
 
@@ -578,7 +579,7 @@ bool Connection::DoConnect()
 	{
 		struct sockaddr_un addr;
 		addr.sun_family = AF_UNIX;
-		if (m_host.size() >= sizeof(addr.sun_path))
+		if (nzbget_rs_dqh_conn_is_unix_path_too_long(m_host.size(), sizeof(addr.sun_path)) != 0)
 		{
 			ReportError("Connection to %s failed: name too long\n", m_host.c_str(), false);
 			return false;
@@ -649,9 +650,10 @@ bool Connection::DoConnect()
 
 		if (res != 0)
 		{
+			int gaiErr = nzbget_rs_dqh_conn_resolve_gai_report_err_code(res, EAI_SYSTEM);
 			ReportError("Could not resolve hostname %s", m_host.c_str(), true,
-						res != EAI_SYSTEM ? res : 0,
-						res != EAI_SYSTEM ? gai_strerror(res) : nullptr);
+						gaiErr,
+						gaiErr != 0 ? gai_strerror(res) : nullptr);
 			return false;
 		}
 
@@ -692,12 +694,14 @@ bool Connection::DoConnect()
 			}
 		}
 
-		if (m_socket == INVALID_SOCKET && addr_list)
+		if (nzbget_rs_dqh_conn_should_report_socket_create_failed(
+			m_socket == INVALID_SOCKET ? 1 : 0, addr_list ? 1 : 0) != 0)
 		{
 			ReportError("Socket creation failed for %s", m_host.c_str(), true);
 		}
 
-		if (!connected && m_socket != INVALID_SOCKET)
+		if (nzbget_rs_dqh_conn_should_cleanup_unconnected_socket(
+			connected ? 1 : 0, m_socket == INVALID_SOCKET ? 1 : 0) != 0)
 		{
 			ReportError("Connection to %s failed", m_host.c_str(), true);
 			closesocket(m_socket);
@@ -873,10 +877,12 @@ void Connection::DoDisconnect()
 #ifndef DISABLE_TLS
 		CloseTls();
 #endif
-		int is_listening;
+		int is_listening = 0;
 		socklen_t len = sizeof(is_listening);
-		if (nzbget_rs_ccm_conn_is_unix_domain_path(m_host.c_str()) != 0
-			&& getsockopt(m_socket, SOL_SOCKET, SO_ACCEPTCONN, &is_listening, &len) == 0 && is_listening)
+		bool isUnixPath = nzbget_rs_ccm_conn_is_unix_domain_path(m_host.c_str()) != 0;
+		int sockoptRes = isUnixPath ? getsockopt(m_socket, SOL_SOCKET, SO_ACCEPTCONN, &is_listening, &len) : -1;
+		if (nzbget_rs_dqh_conn_should_unlink_listening_unix_socket(
+			isUnixPath ? 1 : 0, sockoptRes, is_listening) != 0)
 		{
 			unlink(m_host.c_str());
 		}
@@ -943,10 +949,7 @@ void Connection::ReportError(const char* msgPrefix, const char* msgArg, bool pri
 	if (printErrCode)
 	{
 		BString<1024> printErrMsg;
-		if (errCode == 0)
-		{
-			errCode = GetLastNetworkError();
-		}
+		errCode = nzbget_rs_dqh_conn_resolve_report_err_code(errCode, GetLastNetworkError());
 		if (errMsg)
 		{
 			printErrMsg = errMsg;

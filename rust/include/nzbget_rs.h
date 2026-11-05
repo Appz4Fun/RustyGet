@@ -6322,6 +6322,41 @@ int nzbget_rs_dqh_webdl_should_keep_waiting_retry_interval(
     int is_stopped, int msec, int url_interval_sec, int force, int pause_download);
 int nzbget_rs_dqh_webdl_is_terminal_retry_status(
     int status, int ad_finished, int ad_fatal_error, int ad_not_found);
+int nzbget_rs_dqh_conn_is_unix_path_too_long(size_t host_len, size_t sun_path_cap);
+int nzbget_rs_dqh_conn_resolve_gai_report_err_code(int res, int eai_system);
+int nzbget_rs_dqh_conn_should_report_socket_create_failed(
+    int is_invalid_socket, int has_addr_list);
+int nzbget_rs_dqh_conn_should_cleanup_unconnected_socket(
+    int connected, int is_invalid_socket);
+int nzbget_rs_dqh_conn_should_unlink_listening_unix_socket(
+    int is_unix_path, int getsockopt_res, int is_listening);
+int nzbget_rs_dqh_conn_resolve_report_err_code(int err_code, int last_net_err);
+int nzbget_rs_dqh_tls_has_cert_and_key_files(int cert_empty, int key_empty);
+int nzbget_rs_dqh_tls_should_set_sni_hostname(int is_client, int host_empty);
+int nzbget_rs_dqh_tls_should_validate_client_cert(int is_client, int should_verify);
+int nzbget_rs_dqh_tls_is_proto_version_out_of_bounds(
+    int version, int minimum, int maximum);
+int nzbget_rs_dqh_tls_should_send_close_notify(
+    int has_session, int connected, int has_deadline);
+int nzbget_rs_dqh_webdl_is_connect_aborted(int connected, int is_stopped);
+int nzbget_rs_dqh_webdl_should_download_body(int status, int ad_running);
+int nzbget_rs_dqh_webdl_should_delete_broken_output(int status, int ad_finished);
+int nzbget_rs_dqh_webdl_needs_prepare_file(int out_file_active);
+int nzbget_rs_dqh_webdl_is_gunzip_write_failed(int out_len, int64_t written_bytes);
+int nzbget_rs_dqh_webdl_should_disconnect_on_free(int conn_status, int cs_cancelled);
+int nzbget_rs_dqh_speed_test_is_iteration_failed(
+    double elapsed_sec, uint32_t downloaded, uint32_t target_size);
+int nzbget_rs_dqh_speed_test_should_stop_recv_loop(
+    int received, double elapsed_sec, double timeout_sec);
+void nzbget_rs_dqh_tls_cipher_fill_test_plaintext(uint8_t* buf, size_t len);
+int nzbget_rs_dqh_tls_cipher_is_prepare_batch_valid(uint64_t sequence, uint32_t count);
+void nzbget_rs_dqh_tls_cipher_write_record_nonce(
+    const uint8_t* prefix4, uint64_t seq, uint8_t* out_nonce12);
+int nzbget_rs_dqh_tls_cipher_is_record_seq_in_range(
+    uint64_t sequence, uint64_t first, size_t count);
+int nzbget_rs_dqh_tls_cipher_precheck_probe_args(
+    int cancelled, uint64_t milliseconds, int verification, int has_cert_store);
+int nzbget_rs_dqh_tls_cipher_is_probe_addr_list_valid(size_t addr_count);
 
 #include "nzbget_tls_cipher.h"
 

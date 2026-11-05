@@ -157,7 +157,8 @@ WebDownloader::EStatus WebDownloader::Download()
 
 	// connection
 	bool connected = m_connection->Connect();
-	if (!connected || IsStopped())
+	if (nzbget_rs_dqh_webdl_is_connect_aborted(
+		connected ? 1 : 0, IsStopped() ? 1 : 0) != 0)
 	{
 		FreeConnection();
 		return adConnectError;
@@ -170,7 +171,7 @@ WebDownloader::EStatus WebDownloader::Download()
 
 	Status = DownloadHeaders();
 
-	if (Status == adRunning)
+	if (nzbget_rs_dqh_webdl_should_download_body((int)Status, (int)adRunning) != 0)
 	{
 		Status = DownloadBody();
 	}
@@ -182,7 +183,7 @@ WebDownloader::EStatus WebDownloader::Download()
 
 	FreeConnection();
 
-	if (Status != adFinished)
+	if (nzbget_rs_dqh_webdl_should_delete_broken_output((int)Status, (int)adFinished) != 0)
 	{
 		// Download failed, delete broken output file
 		FileSystem::DeleteFile(m_outputFilename);
@@ -520,7 +521,7 @@ void WebDownloader::ParseRedirect(const char* location)
 
 bool WebDownloader::Write(void* buffer, int len)
 {
-	if (!m_outFile.Active() && !PrepareFile())
+	if (nzbget_rs_dqh_webdl_needs_prepare_file(m_outFile.Active() ? 1 : 0) != 0 && !PrepareFile())
 	{
 		return false;
 	}
@@ -541,7 +542,8 @@ bool WebDownloader::Write(void* buffer, int len)
 				return false;
 			}
 
-			if (outLen > 0 && m_outFile.Write(outBuf, outLen) <= 0)
+			if (outLen > 0 && nzbget_rs_dqh_webdl_is_gunzip_write_failed(
+				outLen, m_outFile.Write(outBuf, outLen)) != 0)
 			{
 				return false;
 			}
@@ -603,7 +605,8 @@ void WebDownloader::FreeConnection()
 	{
 		debug("Releasing connection");
 		Guard guard(m_connectionMutex);
-		if (m_connection->GetStatus() == Connection::csCancelled)
+		if (nzbget_rs_dqh_webdl_should_disconnect_on_free(
+			(int)m_connection->GetStatus(), (int)Connection::csCancelled) != 0)
 		{
 			m_connection->Disconnect();
 		}

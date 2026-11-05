@@ -61,7 +61,8 @@ namespace Network
 		while (--iterations)
 		{
 			auto [downloaded, elapsedTime] = ExecuteTest(MakeRequest(size), timeout);
-			if (elapsedTime == seconds{ 0 } || downloaded < size)
+			if (nzbget_rs_dqh_speed_test_is_iteration_failed(
+				elapsedTime.count(), downloaded, size) != 0)
 			{
 				++failures;
 				if (HasExceededMaxFailures(failures, iterations))
@@ -104,7 +105,10 @@ namespace Network
 		auto start = steady_clock::now();
 		while (int recieved = connection.TryRecv(buffer, m_bufferSize))
 		{
-			if (recieved <= 0 || (steady_clock::now() - start) >= timeout)
+			if (nzbget_rs_dqh_speed_test_should_stop_recv_loop(
+				recieved,
+				duration<double>(steady_clock::now() - start).count(),
+				duration<double>(timeout).count()) != 0)
 			{
 				break;
 			}

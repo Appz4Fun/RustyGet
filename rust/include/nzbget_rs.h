@@ -6357,6 +6357,61 @@ int nzbget_rs_dqh_tls_cipher_is_record_seq_in_range(
 int nzbget_rs_dqh_tls_cipher_precheck_probe_args(
     int cancelled, uint64_t milliseconds, int verification, int has_cert_store);
 int nzbget_rs_dqh_tls_cipher_is_probe_addr_list_valid(size_t addr_count);
+int nzbget_rs_dqh_queue_coord_should_cleanup_temp_dir(
+    int queue_loaded, int stat_loaded);
+int nzbget_rs_dqh_queue_coord_should_resave_legacy_queue(
+    int queue_loaded, int legacy_queue_read);
+int nzbget_rs_dqh_queue_coord_should_resave_on_server_mismatch(
+    int queue_loaded, int stat_loaded, int perfect_server_match);
+int nzbget_rs_dqh_queue_coord_is_nzb_eligible_for_next_article(
+    int has_file_info, int nzb_higher_priority, int nzb_paused,
+    int has_active_dupe, int pause_download, int quota_reached,
+    int force_priority);
+int nzbget_rs_dqh_queue_coord_should_log_propagation_wait(
+    int has_prop_file, int prop_file_id, int last_logged_id);
+int nzbget_rs_dqh_queue_coord_can_select_first_article(
+    int filename_confirmed, int articles_empty, int first_status,
+    int ai_undefined);
+int nzbget_rs_dqh_queue_coord_should_check_donor_alignment(
+    int status, int ad_finished, int dupe_fallback_round,
+    int64_t decoded_file_size);
+int nzbget_rs_dqh_queue_coord_can_try_reactive_dupe_fallback(
+    int status, int ad_failed, int misplaced);
+int nzbget_rs_dqh_queue_coord_is_terminal_article_failure(
+    int status, int ad_failed, int ad_fatal_error, int misplaced);
+int nzbget_rs_dqh_queue_coord_should_confirm_article_filename(
+    int filename_confirmed, int misplaced, int status, int ad_finished,
+    int has_article_filename);
+int nzbget_rs_dqh_queue_coord_should_check_existing_dest_dupe(
+    int dupe_check, int dupe_mode, int dm_force, int many_dupe_files);
+int nzbget_rs_dqh_queue_coord_should_process_analyzed_first_article(
+    int has_analyzer, int misplaced, int status, int ad_finished);
+int nzbget_rs_dqh_queue_coord_should_log_file_dupe_recovery_summary(
+    int completed, int dupe_attempted_articles);
+int nzbget_rs_dqh_queue_coord_should_update_completed_stats_on_delete(
+    int completed, int nzb_deleting);
+int nzbget_rs_dqh_queue_coord_should_check_failed_output_exists(
+    int completed, int file_status, int cf_failure, int filename_empty);
+int nzbget_rs_dqh_queue_coord_needs_completed_tiling_validation(
+    int success_articles, int total_articles);
+int nzbget_rs_dqh_queue_coord_needs_partial_direct_write_init(
+    int direct_write, int force_direct_write, int output_initialized);
+int nzbget_rs_dqh_queue_coord_should_skip_critical_health_calc(
+    int health_check, int hc_none, int health_paused, int delete_status,
+    int ds_health);
+int nzbget_rs_dqh_queue_coord_should_check_certainly_parless(
+    int health_check, int hc_dupe, int critical_exact);
+int nzbget_rs_dqh_queue_coord_select_failover_effective_health(
+    int dl_crit_health, int base_crit_health, int cur_health);
+int nzbget_rs_dqh_queue_coord_should_abort_dead_download_action(
+    int dead, int doomed, int probing, int hopeless);
+int nzbget_rs_dqh_queue_coord_validate_merge_entries(
+    int dest_has_post, int src_has_post, int dest_kind, int src_kind,
+    int nk_url);
+int nzbget_rs_dqh_queue_coord_should_pause_pars_after_direct_rename(
+    int par_check, int pc_force);
+int nzbget_rs_dqh_queue_coord_should_log_discarded_direct_rename(
+    int64_t discarded_size);
 
 #include "nzbget_tls_cipher.h"
 

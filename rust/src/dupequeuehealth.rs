@@ -4861,6 +4861,240 @@ pub fn dqh_tls_cipher_is_probe_addr_list_valid(addr_count: usize) -> bool {
     addr_count > 0 && addr_count <= 16
 }
 
+/// Returns true when `QueueCoordinator::Load` should clean up the temporary directory (`queue_loaded && stat_loaded`).
+pub fn dqh_queue_coord_should_cleanup_temp_dir(queue_loaded: bool, stat_loaded: bool) -> bool {
+    queue_loaded && stat_loaded
+}
+
+/// Returns true when `QueueCoordinator::Load` should immediately resave a legacy-format queue (`queue_loaded && legacy_queue_read`).
+pub fn dqh_queue_coord_should_resave_legacy_queue(
+    queue_loaded: bool,
+    legacy_queue_read: bool,
+) -> bool {
+    queue_loaded && legacy_queue_read
+}
+
+/// Returns true when `QueueCoordinator::Load` should resave queue and server stats after a server mismatch (`queue_loaded && stat_loaded && !perfect_server_match`).
+pub fn dqh_queue_coord_should_resave_on_server_mismatch(
+    queue_loaded: bool,
+    stat_loaded: bool,
+    perfect_server_match: bool,
+) -> bool {
+    queue_loaded && stat_loaded && !perfect_server_match
+}
+
+/// Returns true when an `NzbInfo` entry in `QueueCoordinator::GetNextArticle` is eligible for candidate file selection.
+pub fn dqh_queue_coord_is_nzb_eligible_for_next_article(
+    has_file_info: bool,
+    nzb_higher_priority: bool,
+    nzb_paused: bool,
+    has_active_dupe: bool,
+    pause_download: bool,
+    quota_reached: bool,
+    force_priority: bool,
+) -> bool {
+    (!has_file_info || nzb_higher_priority)
+        && !nzb_paused
+        && !has_active_dupe
+        && (!(pause_download || quota_reached) || force_priority)
+}
+
+/// Returns true when `QueueCoordinator::GetNextArticle` should log a propagation-wait notice (`has_prop_file && prop_file_id != last_logged_id`).
+pub fn dqh_queue_coord_should_log_propagation_wait(
+    has_prop_file: bool,
+    prop_file_id: i32,
+    last_logged_id: i32,
+) -> bool {
+    has_prop_file && prop_file_id != last_logged_id
+}
+
+/// Returns true when `QueueCoordinator::GetNextFirstArticle` can select the first article of a file (`!filename_confirmed && !articles_empty && first_status == ai_undefined`).
+pub fn dqh_queue_coord_can_select_first_article(
+    filename_confirmed: bool,
+    articles_empty: bool,
+    first_status: i32,
+    ai_undefined: i32,
+) -> bool {
+    !filename_confirmed && !articles_empty && first_status == ai_undefined
+}
+
+/// Returns true when `QueueCoordinator::ArticleCompleted` should check segment alignment on a finished donor article (`status == ad_finished && dupe_fallback_round > 0 && decoded_file_size > 0`).
+pub fn dqh_queue_coord_should_check_donor_alignment(
+    status: i32,
+    ad_finished: i32,
+    dupe_fallback_round: i32,
+    decoded_file_size: i64,
+) -> bool {
+    status == ad_finished && dupe_fallback_round > 0 && decoded_file_size > 0
+}
+
+/// Returns true when `QueueCoordinator::ArticleCompleted` can attempt reactive duplicate fallback (`status == ad_failed || misplaced`).
+pub fn dqh_queue_coord_can_try_reactive_dupe_fallback(
+    status: i32,
+    ad_failed: i32,
+    misplaced: bool,
+) -> bool {
+    status == ad_failed || misplaced
+}
+
+/// Returns true when `QueueCoordinator::ArticleCompleted` should record a terminal article failure (`status == ad_failed || misplaced || status == ad_fatal_error`).
+pub fn dqh_queue_coord_is_terminal_article_failure(
+    status: i32,
+    ad_failed: i32,
+    ad_fatal_error: i32,
+    misplaced: bool,
+) -> bool {
+    status == ad_failed || misplaced || status == ad_fatal_error
+}
+
+/// Returns true when `QueueCoordinator::ArticleCompleted` should confirm the filename from a finished article (`!filename_confirmed && !misplaced && status == ad_finished && has_article_filename`).
+pub fn dqh_queue_coord_should_confirm_article_filename(
+    filename_confirmed: bool,
+    misplaced: bool,
+    status: i32,
+    ad_finished: i32,
+    has_article_filename: bool,
+) -> bool {
+    !filename_confirmed && !misplaced && status == ad_finished && has_article_filename
+}
+
+/// Returns true when `QueueCoordinator::ArticleCompleted` should check whether a confirmed destination file already exists (`dupe_check && dupe_mode != dm_force && !many_dupe_files`).
+pub fn dqh_queue_coord_should_check_existing_dest_dupe(
+    dupe_check: bool,
+    dupe_mode: i32,
+    dm_force: i32,
+    many_dupe_files: bool,
+) -> bool {
+    dupe_check && dupe_mode != dm_force && !many_dupe_files
+}
+
+/// Returns true when `QueueCoordinator::ArticleCompleted` should process a finished article's `ContentAnalyzer` (`has_analyzer && !misplaced && status == ad_finished`).
+pub fn dqh_queue_coord_should_process_analyzed_first_article(
+    has_analyzer: bool,
+    misplaced: bool,
+    status: i32,
+    ad_finished: i32,
+) -> bool {
+    has_analyzer && !misplaced && status == ad_finished
+}
+
+/// Returns true when `QueueCoordinator::DeleteFileInfo` should log the per-file duplicate recovery summary (`completed && dupe_attempted_articles > 0`).
+pub fn dqh_queue_coord_should_log_file_dupe_recovery_summary(
+    completed: bool,
+    dupe_attempted_articles: i32,
+) -> bool {
+    completed && dupe_attempted_articles > 0
+}
+
+/// Returns true when `QueueCoordinator::DeleteFileInfo` should update completed stats instead of deleted stats (`completed || nzb_deleting`).
+pub fn dqh_queue_coord_should_update_completed_stats_on_delete(
+    completed: bool,
+    nzb_deleting: bool,
+) -> bool {
+    completed || nzb_deleting
+}
+
+/// Returns true when `QueueCoordinator::DeleteFileInfo` needs to check on-disk existence of a failed completed file (`completed && file_status == cf_failure && !filename_empty`).
+pub fn dqh_queue_coord_should_check_failed_output_exists(
+    completed: bool,
+    file_status: i32,
+    cf_failure: i32,
+    filename_empty: bool,
+) -> bool {
+    completed && file_status == cf_failure && !filename_empty
+}
+
+/// Returns true when `QueueCoordinator::ValidateCompletedFileTiling` needs to inspect donor tiling (`success_articles == total_articles`).
+pub fn dqh_queue_coord_needs_completed_tiling_validation(
+    success_articles: i32,
+    total_articles: i32,
+) -> bool {
+    success_articles == total_articles
+}
+
+/// Returns true when `QueueCoordinator::LoadPartialState` needs to initialize output filename for direct write (`(direct_write || force_direct_write) && !output_initialized`).
+pub fn dqh_queue_coord_needs_partial_direct_write_init(
+    direct_write: bool,
+    force_direct_write: bool,
+    output_initialized: bool,
+) -> bool {
+    (direct_write || force_direct_write) && !output_initialized
+}
+
+/// Returns true when `QueueCoordinator::CheckHealth` should skip critical health calculation (`health_check == hc_none || health_paused || delete_status == ds_health`).
+pub fn dqh_queue_coord_should_skip_critical_health_calc(
+    health_check: i32,
+    hc_none: i32,
+    health_paused: bool,
+    delete_status: i32,
+    ds_health: i32,
+) -> bool {
+    health_check == hc_none || health_paused || delete_status == ds_health
+}
+
+/// Returns true when `QueueCoordinator::DownloadCriticalHealth` should check `CertainlyParless` (`health_check == hc_dupe && critical_exact == 1000`).
+pub fn dqh_queue_coord_should_check_certainly_parless(
+    health_check: i32,
+    hc_dupe: i32,
+    critical_exact: i32,
+) -> bool {
+    health_check == hc_dupe && critical_exact == 1000
+}
+
+/// Returns the effective health passed to `DupeFailoverWarranted` in `QueueCoordinator::CheckDupeFailover` (`0` if `dl_crit_health > base_crit_health`, else `cur_health`).
+pub fn dqh_queue_coord_select_failover_effective_health(
+    dl_crit_health: i32,
+    base_crit_health: i32,
+    cur_health: i32,
+) -> i32 {
+    if dl_crit_health > base_crit_health {
+        0
+    } else {
+        cur_health
+    }
+}
+
+/// Returns true when `QueueCoordinator::CheckDeadDownload` should return early without failing over or parking (`(!dead && !doomed) || (probing >= 0 && !hopeless)`).
+pub fn dqh_queue_coord_should_abort_dead_download_action(
+    dead: bool,
+    doomed: bool,
+    probing: i32,
+    hopeless: bool,
+) -> bool {
+    (!dead && !doomed) || (probing >= 0 && !hopeless)
+}
+
+/// Validates whether two `NzbInfo` entries in `QueueCoordinator::MergeQueueEntries` can be merged:
+/// returns `1` if either is in post-process stage, `2` if either is a URL entry, or `0` if valid.
+pub fn dqh_queue_coord_validate_merge_entries(
+    dest_has_post: bool,
+    src_has_post: bool,
+    dest_kind: i32,
+    src_kind: i32,
+    nk_url: i32,
+) -> i32 {
+    if dest_has_post || src_has_post {
+        1
+    } else if dest_kind == nk_url || src_kind == nk_url {
+        2
+    } else {
+        0
+    }
+}
+
+/// Returns true when `QueueCoordinator::DirectRenameCompleted` should resume the group and pause all pars (`par_check != pc_force`).
+pub fn dqh_queue_coord_should_pause_pars_after_direct_rename(
+    par_check: i32,
+    pc_force: i32,
+) -> bool {
+    par_check != pc_force
+}
+
+/// Returns true when `QueueCoordinator::DiscardDirectRename` should log discarded size (`discarded_size > 0`).
+pub fn dqh_queue_coord_should_log_discarded_direct_rename(discarded_size: i64) -> bool {
+    discarded_size > 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6775,5 +7009,89 @@ mod tests {
         assert!(dqh_tls_cipher_is_probe_addr_list_valid(4));
         assert!(!dqh_tls_cipher_is_probe_addr_list_valid(0));
         assert!(!dqh_tls_cipher_is_probe_addr_list_valid(17));
+        assert!(dqh_queue_coord_should_cleanup_temp_dir(true, true));
+        assert!(!dqh_queue_coord_should_cleanup_temp_dir(true, false));
+        assert!(!dqh_queue_coord_should_cleanup_temp_dir(false, true));
+        assert!(dqh_queue_coord_should_resave_legacy_queue(true, true));
+        assert!(!dqh_queue_coord_should_resave_legacy_queue(true, false));
+        assert!(dqh_queue_coord_should_resave_on_server_mismatch(true, true, false));
+        assert!(!dqh_queue_coord_should_resave_on_server_mismatch(true, true, true));
+        assert!(!dqh_queue_coord_should_resave_on_server_mismatch(false, true, false));
+        assert!(dqh_queue_coord_is_nzb_eligible_for_next_article(
+            false, false, false, false, false, false, false
+        ));
+        assert!(dqh_queue_coord_is_nzb_eligible_for_next_article(
+            true, true, false, false, true, false, true
+        ));
+        assert!(!dqh_queue_coord_is_nzb_eligible_for_next_article(
+            true, false, false, false, false, false, false
+        ));
+        assert!(!dqh_queue_coord_is_nzb_eligible_for_next_article(
+            false, false, false, false, true, false, false
+        ));
+        assert!(dqh_queue_coord_should_log_propagation_wait(true, 10, 5));
+        assert!(!dqh_queue_coord_should_log_propagation_wait(true, 10, 10));
+        assert!(!dqh_queue_coord_should_log_propagation_wait(false, 10, 5));
+        assert!(dqh_queue_coord_can_select_first_article(false, false, 0, 0));
+        assert!(!dqh_queue_coord_can_select_first_article(true, false, 0, 0));
+        assert!(!dqh_queue_coord_can_select_first_article(false, true, 0, 0));
+        assert!(!dqh_queue_coord_can_select_first_article(false, false, 1, 0));
+        assert!(dqh_queue_coord_should_check_donor_alignment(2, 2, 1, 5000));
+        assert!(!dqh_queue_coord_should_check_donor_alignment(2, 2, 0, 5000));
+        assert!(!dqh_queue_coord_should_check_donor_alignment(2, 2, 1, 0));
+        assert!(dqh_queue_coord_can_try_reactive_dupe_fallback(3, 3, false));
+        assert!(dqh_queue_coord_can_try_reactive_dupe_fallback(2, 3, true));
+        assert!(!dqh_queue_coord_can_try_reactive_dupe_fallback(2, 3, false));
+        assert!(dqh_queue_coord_is_terminal_article_failure(3, 3, 5, false));
+        assert!(dqh_queue_coord_is_terminal_article_failure(5, 3, 5, false));
+        assert!(dqh_queue_coord_is_terminal_article_failure(2, 3, 5, true));
+        assert!(!dqh_queue_coord_is_terminal_article_failure(2, 3, 5, false));
+        assert!(dqh_queue_coord_should_confirm_article_filename(false, false, 2, 2, true));
+        assert!(!dqh_queue_coord_should_confirm_article_filename(true, false, 2, 2, true));
+        assert!(!dqh_queue_coord_should_confirm_article_filename(false, true, 2, 2, true));
+        assert!(!dqh_queue_coord_should_confirm_article_filename(false, false, 2, 2, false));
+        assert!(dqh_queue_coord_should_check_existing_dest_dupe(true, 0, 2, false));
+        assert!(!dqh_queue_coord_should_check_existing_dest_dupe(false, 0, 2, false));
+        assert!(!dqh_queue_coord_should_check_existing_dest_dupe(true, 2, 2, false));
+        assert!(!dqh_queue_coord_should_check_existing_dest_dupe(true, 0, 2, true));
+        assert!(dqh_queue_coord_should_process_analyzed_first_article(true, false, 2, 2));
+        assert!(!dqh_queue_coord_should_process_analyzed_first_article(false, false, 2, 2));
+        assert!(!dqh_queue_coord_should_process_analyzed_first_article(true, true, 2, 2));
+        assert!(dqh_queue_coord_should_log_file_dupe_recovery_summary(true, 3));
+        assert!(!dqh_queue_coord_should_log_file_dupe_recovery_summary(false, 3));
+        assert!(!dqh_queue_coord_should_log_file_dupe_recovery_summary(true, 0));
+        assert!(dqh_queue_coord_should_update_completed_stats_on_delete(true, false));
+        assert!(dqh_queue_coord_should_update_completed_stats_on_delete(false, true));
+        assert!(!dqh_queue_coord_should_update_completed_stats_on_delete(false, false));
+        assert!(dqh_queue_coord_should_check_failed_output_exists(true, 3, 3, false));
+        assert!(!dqh_queue_coord_should_check_failed_output_exists(false, 3, 3, false));
+        assert!(!dqh_queue_coord_should_check_failed_output_exists(true, 1, 3, false));
+        assert!(!dqh_queue_coord_should_check_failed_output_exists(true, 3, 3, true));
+        assert!(dqh_queue_coord_needs_completed_tiling_validation(10, 10));
+        assert!(!dqh_queue_coord_needs_completed_tiling_validation(9, 10));
+        assert!(dqh_queue_coord_needs_partial_direct_write_init(true, false, false));
+        assert!(dqh_queue_coord_needs_partial_direct_write_init(false, true, false));
+        assert!(!dqh_queue_coord_needs_partial_direct_write_init(true, false, true));
+        assert!(!dqh_queue_coord_needs_partial_direct_write_init(false, false, false));
+        assert!(dqh_queue_coord_should_skip_critical_health_calc(0, 0, false, 0, 4));
+        assert!(dqh_queue_coord_should_skip_critical_health_calc(1, 0, true, 0, 4));
+        assert!(dqh_queue_coord_should_skip_critical_health_calc(1, 0, false, 4, 4));
+        assert!(!dqh_queue_coord_should_skip_critical_health_calc(1, 0, false, 0, 4));
+        assert!(dqh_queue_coord_should_check_certainly_parless(3, 3, 1000));
+        assert!(!dqh_queue_coord_should_check_certainly_parless(3, 3, 850));
+        assert!(!dqh_queue_coord_should_check_certainly_parless(1, 3, 1000));
+        assert_eq!(dqh_queue_coord_select_failover_effective_health(1000, 850, 950), 0);
+        assert_eq!(dqh_queue_coord_select_failover_effective_health(850, 850, 800), 800);
+        assert!(dqh_queue_coord_should_abort_dead_download_action(false, false, -1, false));
+        assert!(dqh_queue_coord_should_abort_dead_download_action(true, false, 5, false));
+        assert!(!dqh_queue_coord_should_abort_dead_download_action(true, false, 5, true));
+        assert!(!dqh_queue_coord_should_abort_dead_download_action(true, false, -1, false));
+        assert_eq!(dqh_queue_coord_validate_merge_entries(true, false, 0, 0, 1), 1);
+        assert_eq!(dqh_queue_coord_validate_merge_entries(false, false, 1, 0, 1), 2);
+        assert_eq!(dqh_queue_coord_validate_merge_entries(false, false, 0, 0, 1), 0);
+        assert!(dqh_queue_coord_should_pause_pars_after_direct_rename(0, 2));
+        assert!(!dqh_queue_coord_should_pause_pars_after_direct_rename(2, 2));
+        assert!(dqh_queue_coord_should_log_discarded_direct_rename(1024));
+        assert!(!dqh_queue_coord_should_log_discarded_direct_rename(0));
     }
 }

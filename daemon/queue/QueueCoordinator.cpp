@@ -148,12 +148,14 @@ void QueueCoordinator::Load()
 		}
 	}
 
-	if (queueLoaded && statLoaded)
+	if (nzbget_rs_dqh_queue_coord_should_cleanup_temp_dir(
+		queueLoaded ? 1 : 0, statLoaded ? 1 : 0) != 0)
 	{
 		g_DiskState->CleanupTempDir(downloadQueue);
 	}
 
-	if (queueLoaded && g_DiskState->LegacyQueueRead())
+	if (nzbget_rs_dqh_queue_coord_should_resave_legacy_queue(
+		queueLoaded ? 1 : 0, g_DiskState->LegacyQueueRead() ? 1 : 0) != 0)
 	{
 		// written again at once in the upstream format: until the next change it would
 		// stay in the earlier build's format, which upstream can't read after a downgrade
@@ -162,7 +164,8 @@ void QueueCoordinator::Load()
 		downloadQueue->Save();
 	}
 
-	if (queueLoaded && statLoaded && !perfectServerMatch)
+	if (nzbget_rs_dqh_queue_coord_should_resave_on_server_mismatch(
+		queueLoaded ? 1 : 0, statLoaded ? 1 : 0, perfectServerMatch ? 1 : 0) != 0)
 	{
 		debug("Changes in section <NEWS SERVERS> of config file detected, resaving queue");
 
@@ -577,9 +580,14 @@ bool QueueCoordinator::GetNextArticle(DownloadQueue* downloadQueue, FileInfo* &f
 			bool nzbPaused = nzbget_rs_cwp_queue_coord_is_nzb_paused(
 				(int)nzbInfo->GetFileList()->size(), nzbInfo->GetPausedFileCount()) != 0;
 
-			if ((!fileInfo || nzbHigherPriority) && !nzbPaused &&
-				!HasActiveDupe(downloadQueue, nzbInfo) &&
-				(!(g_WorkState->GetPauseDownload() || g_WorkState->GetQuotaReached()) || nzbInfo->GetForcePriority()))
+			if (nzbget_rs_dqh_queue_coord_is_nzb_eligible_for_next_article(
+				fileInfo != nullptr ? 1 : 0,
+				nzbHigherPriority ? 1 : 0,
+				nzbPaused ? 1 : 0,
+				((!fileInfo || nzbHigherPriority) && !nzbPaused && HasActiveDupe(downloadQueue, nzbInfo)) ? 1 : 0,
+				g_WorkState->GetPauseDownload() ? 1 : 0,
+				g_WorkState->GetQuotaReached() ? 1 : 0,
+				nzbInfo->GetForcePriority() ? 1 : 0) != 0)
 			{
 				std::vector<FileInfo*> ptrs;
 				std::vector<NzbgetRsCandidateFile> cands;
@@ -642,7 +650,10 @@ bool QueueCoordinator::GetNextArticle(DownloadQueue* downloadQueue, FileInfo* &f
 		if (!fileInfo)
 		{
 			// there are no more files for download
-			if (propagationWaitFile && propagationWaitFile->GetId() != m_propagationWaitLoggedId)
+			if (nzbget_rs_dqh_queue_coord_should_log_propagation_wait(
+				propagationWaitFile != nullptr ? 1 : 0,
+				propagationWaitFile ? propagationWaitFile->GetId() : 0,
+				m_propagationWaitLoggedId) != 0)
 			{
 				// log once per idle period, otherwise the queue looks stuck without any explanation
 				m_propagationWaitLoggedId = propagationWaitFile->GetId();
@@ -724,16 +735,17 @@ bool QueueCoordinator::GetNextFirstArticle(NzbInfo* nzbInfo, FileInfo* &fileInfo
 				g_DiskState->LoadArticles(fileInfo1);
 				LoadPartialState(fileInfo1);
 			}
-			if (!fileInfo1->GetArticles()->empty())
+			if (nzbget_rs_dqh_queue_coord_can_select_first_article(
+				fileInfo1->GetFilenameConfirmed() ? 1 : 0,
+				fileInfo1->GetArticles()->empty() ? 1 : 0,
+				fileInfo1->GetArticles()->empty() ? 0 : (int)fileInfo1->GetArticles()->at(0)->GetStatus(),
+				(int)ArticleInfo::aiUndefined) != 0)
 			{
 				ArticleInfo* article = fileInfo1->GetArticles()->at(0).get();
-				if (article->GetStatus() == ArticleInfo::aiUndefined)
-				{
-					fileInfo = fileInfo1;
-					articleInfo = article;
-					nzbInfo->SetDirectRenameStatus(NzbInfo::tsRunning);
-					return true;
-				}
+				fileInfo = fileInfo1;
+				articleInfo = article;
+				nzbInfo->SetDirectRenameStatus(NzbInfo::tsRunning);
+				return true;
 			}
 		}
 	}
@@ -823,9 +835,11 @@ void QueueCoordinator::ArticleCompleted(ArticleDownloader* articleDownloader)
 		// mis-placed article would leave a zero-filled gap and/or overwrite a
 		// neighbour's bytes, so it is treated as a failed attempt instead
 		// (advancing to the next duplicate source, if any)
-		bool checkAligned = articleDownloader->GetStatus() == ArticleDownloader::adFinished &&
-			articleInfo->GetDupeFallbackRound() > 0 &&
-			articleDownloader->GetDecodedFileSize() > 0;
+		bool checkAligned = nzbget_rs_dqh_queue_coord_should_check_donor_alignment(
+			(int)articleDownloader->GetStatus(),
+			(int)ArticleDownloader::adFinished,
+			articleInfo->GetDupeFallbackRound(),
+			articleDownloader->GetDecodedFileSize()) != 0;
 		bool misplaced = nzbget_rs_qci_queue_coord_is_misplaced_donor_article(
 			(int)articleDownloader->GetStatus(),
 			(int)ArticleDownloader::adFinished,
@@ -945,7 +959,10 @@ void QueueCoordinator::ArticleCompleted(ArticleDownloader* articleDownloader)
 				DemoteMisalignedDupeNeighbors(fileInfo, articleInfo);
 			}
 		}
-		else if ((articleDownloader->GetStatus() == ArticleDownloader::adFailed || misplaced) &&
+		else if (nzbget_rs_dqh_queue_coord_can_try_reactive_dupe_fallback(
+			(int)articleDownloader->GetStatus(),
+			(int)ArticleDownloader::adFailed,
+			misplaced ? 1 : 0) != 0 &&
 			m_dupeArticleFallback.TryFallback(downloadQueue, fileInfo, articleInfo))
 		{
 			// the article is requeued with a message-id borrowed from a duplicate
@@ -956,8 +973,11 @@ void QueueCoordinator::ArticleCompleted(ArticleDownloader* articleDownloader)
 				nzbInfo->SetAllFirst(false);
 			}
 		}
-		else if (articleDownloader->GetStatus() == ArticleDownloader::adFailed || misplaced ||
-			articleDownloader->GetStatus() == ArticleDownloader::adFatalError)
+		else if (nzbget_rs_dqh_queue_coord_is_terminal_article_failure(
+			(int)articleDownloader->GetStatus(),
+			(int)ArticleDownloader::adFailed,
+			(int)ArticleDownloader::adFatalError,
+			misplaced ? 1 : 0) != 0)
 		{
 			articleInfo->SetStatus(ArticleInfo::aiFailed);
 			// par2 volumes aside: a lost one says nothing about the data
@@ -1041,9 +1061,12 @@ void QueueCoordinator::ArticleCompleted(ArticleDownloader* articleDownloader)
 			fileInfo->SetPartialChanged(true);
 		}
 
-		if (!fileInfo->GetFilenameConfirmed() && !misplaced &&
-			articleDownloader->GetStatus() == ArticleDownloader::adFinished &&
-			articleDownloader->GetArticleFilename())
+		if (nzbget_rs_dqh_queue_coord_should_confirm_article_filename(
+			fileInfo->GetFilenameConfirmed() ? 1 : 0,
+			misplaced ? 1 : 0,
+			(int)articleDownloader->GetStatus(),
+			(int)ArticleDownloader::adFinished,
+			articleDownloader->GetArticleFilename() != nullptr ? 1 : 0) != 0)
 		{
 			// in "FileNaming=auto"-mode prefer filename from nzb-file to filename read from article
 			// if the name from article seems to be obfuscated
@@ -1059,7 +1082,11 @@ void QueueCoordinator::ArticleCompleted(ArticleDownloader* articleDownloader)
 			}
 			fileInfo->SetFilenameConfirmed(true);
 			bool dupeFileExists = false;
-			if (g_Options->GetDupeCheck() && nzbInfo->GetDupeMode() != dmForce && !nzbInfo->GetManyDupeFiles())
+			if (nzbget_rs_dqh_queue_coord_should_check_existing_dest_dupe(
+				g_Options->GetDupeCheck() ? 1 : 0,
+				(int)nzbInfo->GetDupeMode(),
+				(int)dmForce,
+				nzbInfo->GetManyDupeFiles() ? 1 : 0) != 0)
 			{
 				NzbgetRsBuf destPathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
 					nzbInfo->GetDestDir(), PATH_SEPARATOR, fileInfo->GetFilename());
@@ -1075,8 +1102,11 @@ void QueueCoordinator::ArticleCompleted(ArticleDownloader* articleDownloader)
 			}
 		}
 
-		if (articleDownloader->GetContentAnalyzer() && !misplaced &&
-			articleDownloader->GetStatus() == ArticleDownloader::adFinished)
+		if (nzbget_rs_dqh_queue_coord_should_process_analyzed_first_article(
+			articleDownloader->GetContentAnalyzer() != nullptr ? 1 : 0,
+			misplaced ? 1 : 0,
+			(int)articleDownloader->GetStatus(),
+			(int)ArticleDownloader::adFinished) != 0)
 		{
 			fileInfo->SetFirstContent(DirectRenamer::AnalyzedParFile(articleDownloader->GetContentAnalyzer()) ?
 				FileInfo::fcPar2 : FileInfo::fcOther);
@@ -1295,7 +1325,8 @@ void QueueCoordinator::DeleteFileInfo(DownloadQueue* downloadQueue, FileInfo* fi
 
 	fileInfo->SetDeleted(true);
 
-	if (completed && fileInfo->GetDupeAttemptedArticles() > 0)
+	if (nzbget_rs_dqh_queue_coord_should_log_file_dupe_recovery_summary(
+		completed ? 1 : 0, fileInfo->GetDupeAttemptedArticles()) != 0)
 	{
 		// honest per-file summary: recovered vs how many were tried from
 		// duplicates (0 recovered means the duplicates lacked those articles too)
@@ -1304,7 +1335,8 @@ void QueueCoordinator::DeleteFileInfo(DownloadQueue* downloadQueue, FileInfo* fi
 			fileInfo->GetDupeRecoveredArticles(), fileInfo->GetDupeAttemptedArticles(), fileInfo->GetFilename());
 	}
 
-	if (completed || nzbInfo->GetDeleting())
+	if (nzbget_rs_dqh_queue_coord_should_update_completed_stats_on_delete(
+		completed ? 1 : 0, nzbInfo->GetDeleting() ? 1 : 0) != 0)
 	{
 		nzbInfo->UpdateCompletedStats(fileInfo);
 	}
@@ -1344,7 +1376,11 @@ void QueueCoordinator::DeleteFileInfo(DownloadQueue* downloadQueue, FileInfo* fi
 	if (completed || parking)
 	{
 		const std::string& outputFilename = fileInfo->GetOutputFilename();
-		bool outputFileExists = (completed && fileStatus == CompletedFile::cfFailure && !Util::EmptyStr(fileInfo->GetFilename()))
+		bool outputFileExists = nzbget_rs_dqh_queue_coord_should_check_failed_output_exists(
+			completed ? 1 : 0,
+			(int)fileStatus,
+			(int)CompletedFile::cfFailure,
+			Util::EmptyStr(fileInfo->GetFilename()) ? 1 : 0) != 0
 			? FileSystem::FileExists(outputFilename.c_str())
 			: true;
 		NzbgetRsBuf fnBuf = nzbget_rs_qhp_resolve_completed_filename(
@@ -1532,7 +1568,8 @@ void QueueCoordinator::ValidateCompletedFileTiling(FileInfo* fileInfo)
 	// only a would-be cfSuccess file is at risk of silently standing on
 	// mis-placed bytes; a file with any failed/missed article already falls to
 	// par2/stream repair
-	if (fileInfo->GetSuccessArticles() != fileInfo->GetTotalArticles())
+	if (nzbget_rs_dqh_queue_coord_needs_completed_tiling_validation(
+		fileInfo->GetSuccessArticles(), fileInfo->GetTotalArticles()) == 0)
 	{
 		return;
 	}
@@ -1763,7 +1800,10 @@ void QueueCoordinator::LoadPartialState(FileInfo* fileInfo)
 	if (fileInfo->GetPartialState() == FileInfo::psPartial)
 	{
 		g_DiskState->LoadFileState(fileInfo, g_ServerPool->GetServers(), false);
-		if ((g_Options->GetDirectWrite() || fileInfo->GetForceDirectWrite()) && !fileInfo->GetOutputInitialized())
+		if (nzbget_rs_dqh_queue_coord_needs_partial_direct_write_init(
+			g_Options->GetDirectWrite() ? 1 : 0,
+			fileInfo->GetForceDirectWrite() ? 1 : 0,
+			fileInfo->GetOutputInitialized() ? 1 : 0) != 0)
 		{
 			NzbgetRsBuf outTmpBuf = nzbget_rs_dqh_diskstate_format_out_tmp_path(
 				fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, fileInfo->GetId());
@@ -1815,9 +1855,12 @@ void QueueCoordinator::SaveAllFileState()
 void QueueCoordinator::CheckHealth(DownloadQueue* downloadQueue, FileInfo* fileInfo)
 {
 	int health = fileInfo->GetNzbInfo()->CalcHealth();
-	int critHealth = (g_Options->GetHealthCheck() == Options::hcNone ||
-		fileInfo->GetNzbInfo()->GetHealthPaused() ||
-		fileInfo->GetNzbInfo()->GetDeleteStatus() == NzbInfo::dsHealth)
+	int critHealth = nzbget_rs_dqh_queue_coord_should_skip_critical_health_calc(
+		(int)g_Options->GetHealthCheck(),
+		(int)Options::hcNone,
+		fileInfo->GetNzbInfo()->GetHealthPaused() ? 1 : 0,
+		(int)fileInfo->GetNzbInfo()->GetDeleteStatus(),
+		(int)NzbInfo::dsHealth) != 0
 		? 0
 		: DownloadCriticalHealth(downloadQueue, fileInfo->GetNzbInfo());
 	if (nzbget_rs_fuq_queue_coord_should_skip_health_check(
@@ -1876,7 +1919,10 @@ int QueueCoordinator::DownloadCriticalHealth(DownloadQueue* downloadQueue, NzbIn
 {
 	int critical = nzbInfo->CalcCriticalHealth(true);
 	int criticalExact = nzbInfo->CalcCriticalHealth(false);
-	bool parless = (g_Options->GetHealthCheck() == Options::hcDupe && criticalExact == 1000)
+	bool parless = nzbget_rs_dqh_queue_coord_should_check_certainly_parless(
+		(int)g_Options->GetHealthCheck(),
+		(int)Options::hcDupe,
+		criticalExact) != 0
 		? CertainlyParless(nzbInfo) : false;
 	bool sizeTwin = parless ? HasSizeTwin(downloadQueue, nzbInfo) : false;
 	return nzbget_rs_fuq_queue_coord_resolve_download_critical_health(
@@ -2106,9 +2152,12 @@ void QueueCoordinator::CheckDupeFailover(DownloadQueue* downloadQueue, NzbInfo* 
 		nullptr;
 	// one that can't lose an article (DownloadCriticalHealth raised the critical
 	// health to 100%) has lost one: it fails, whatever its health, like a dead one
-	bool doomed = DownloadCriticalHealth(downloadQueue, nzbInfo) > nzbInfo->CalcCriticalHealth(true);
+	int effectiveFailoverHealth = nzbget_rs_dqh_queue_coord_select_failover_effective_health(
+		DownloadCriticalHealth(downloadQueue, nzbInfo),
+		nzbInfo->CalcCriticalHealth(true),
+		nzbInfo->CalcHealth());
 	if (backup && DupeCoordinator::DupeFailoverWarranted(nzbInfo->GetDupeScore(),
-		doomed ? 0 : nzbInfo->CalcHealth(), backup->GetNzbInfo()->GetDupeScore()))
+		effectiveFailoverHealth, backup->GetNzbInfo()->GetDupeScore()))
 	{
 		nzbInfo->PrintMessage(Message::mkWarning,
 			"Failing over %s to duplicate %s: health %.1f%% below critical %.1f%%, "
@@ -2195,7 +2244,8 @@ void QueueCoordinator::CheckDeadDownload(DownloadQueue* downloadQueue, NzbInfo* 
 	{
 		return;
 	}
-	if ((!dead && !doomed) || (probing >= 0 && !hopeless))
+	if (nzbget_rs_dqh_queue_coord_should_abort_dead_download_action(
+		dead ? 1 : 0, doomed ? 1 : 0, probing, hopeless ? 1 : 0) != 0)
 	{
 		return;
 	}
@@ -2728,13 +2778,18 @@ static void WriteNzbMergeSplitCounters(NzbInfo* nzbInfo, const NzbgetRsNzbMergeS
 
 bool QueueCoordinator::MergeQueueEntries(DownloadQueue* downloadQueue, NzbInfo* destNzbInfo, NzbInfo* srcNzbInfo)
 {
-	if (destNzbInfo->GetPostInfo() || srcNzbInfo->GetPostInfo())
+	int mergeErr = nzbget_rs_dqh_queue_coord_validate_merge_entries(
+		destNzbInfo->GetPostInfo() != nullptr ? 1 : 0,
+		srcNzbInfo->GetPostInfo() != nullptr ? 1 : 0,
+		(int)destNzbInfo->GetKind(),
+		(int)srcNzbInfo->GetKind(),
+		(int)NzbInfo::nkUrl);
+	if (mergeErr == 1)
 	{
 		error("Could not merge %s and %s. File in post-process-stage", destNzbInfo->GetName(), srcNzbInfo->GetName());
 		return false;
 	}
-
-	if (destNzbInfo->GetKind() == NzbInfo::nkUrl || srcNzbInfo->GetKind() == NzbInfo::nkUrl)
+	else if (mergeErr == 2)
 	{
 		error("Could not merge %s and %s. URLs cannot be merged", destNzbInfo->GetName(), srcNzbInfo->GetName());
 		return false;
@@ -2916,7 +2971,8 @@ void QueueCoordinator::DirectRenameCompleted(DownloadQueue* downloadQueue, NzbIn
 
 	nzbInfo->SetDirectRenameStatus(NzbInfo::tsSuccess);
 
-	if (g_Options->GetParCheck() != Options::pcForce)
+	if (nzbget_rs_dqh_queue_coord_should_pause_pars_after_direct_rename(
+		(int)g_Options->GetParCheck(), (int)Options::pcForce) != 0)
 	{
 		downloadQueue->EditEntry(nzbInfo->GetId(), DownloadQueue::eaGroupResume, nullptr);
 		downloadQueue->EditEntry(nzbInfo->GetId(), DownloadQueue::eaGroupPauseAllPars, nullptr);
@@ -2990,7 +3046,7 @@ void QueueCoordinator::DiscardDirectRename(DownloadQueue* downloadQueue, NzbInfo
 		}
 	}
 
-	if (discardedSize > 0)
+	if (nzbget_rs_dqh_queue_coord_should_log_discarded_direct_rename(discardedSize) != 0)
 	{
 		nzbInfo->PrintMessage(Message::mkDetail, "Discarded %s from %i files used for direct renaming",
 			*Util::FormatSize(discardedSize), discardedCount);

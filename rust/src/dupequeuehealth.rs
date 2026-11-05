@@ -1681,6 +1681,57 @@ pub fn dqh_diskstate_format_nzb_log_path(queue_dir: &[u8], sep: u8, nzb_id: i32)
     out
 }
 
+/// Formats `"STAT <message_id>\r\n"` for `DupeProbe::ProbeServer`.
+pub fn dqh_dupe_probe_format_stat_cmd(message_id: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(5 + message_id.len() + 2);
+    out.extend_from_slice(b"STAT ");
+    out.extend_from_slice(message_id);
+    out.extend_from_slice(b"\r\n");
+    out
+}
+
+/// Returns `"; retrying them"` or `"; not retrying"` for `DupeProbe::Recheck`.
+pub fn dqh_dupe_probe_recheck_retry_suffix(retry: bool) -> &'static [u8] {
+    if retry {
+        b"; retrying them\0"
+    } else {
+        b"; not retrying\0"
+    }
+}
+
+/// Returns `""` or `", found on "` for `DupeProbe::Run`.
+pub fn dqh_dupe_probe_found_on_prefix(found_on_empty: bool) -> &'static [u8] {
+    if found_on_empty {
+        b"\0"
+    } else {
+        b", found on \0"
+    }
+}
+
+/// Computes `max(0, size - par_size)` for `ParDamage::Judge`.
+pub fn dqh_par_damage_calc_total_data_bytes(size: i64, par_size: i64) -> i64 {
+    (size - par_size).max(0)
+}
+
+/// Returns `"alt"` (`verdict == 2`) or `"twin"` for `TwinCheckJob::Sample`.
+pub fn dqh_twin_check_sample_verdict_label(verdict: i32) -> &'static [u8] {
+    if verdict == 2 {
+        b"alt\0"
+    } else {
+        b"twin\0"
+    }
+}
+
+/// Formats `val` as a decimal string for `TwinCheck::Posting`.
+pub fn dqh_twin_check_format_u32_str(val: u32) -> Vec<u8> {
+    val.to_string().into_bytes()
+}
+
+/// Lowercases bytes in `dupe_key` via `releasename::lower` (`libc` `tolower`) for `TwinCheck::ServiceWork`.
+pub fn dqh_twin_check_lowercase_key(dupe_key: &[u8]) -> Vec<u8> {
+    crate::releasename::lower(dupe_key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2351,6 +2402,29 @@ mod tests {
         assert_eq!(
             dqh_diskstate_format_nzb_log_path(b"/queue", b'/', 12),
             b"/queue/n12.log"
+        );
+        assert_eq!(
+            dqh_dupe_probe_format_stat_cmd(b"<abc@example.com>"),
+            b"STAT <abc@example.com>\r\n"
+        );
+        assert_eq!(
+            dqh_dupe_probe_recheck_retry_suffix(true),
+            b"; retrying them\0"
+        );
+        assert_eq!(
+            dqh_dupe_probe_recheck_retry_suffix(false),
+            b"; not retrying\0"
+        );
+        assert_eq!(dqh_dupe_probe_found_on_prefix(true), b"\0");
+        assert_eq!(dqh_dupe_probe_found_on_prefix(false), b", found on \0");
+        assert_eq!(dqh_par_damage_calc_total_data_bytes(1000, 300), 700);
+        assert_eq!(dqh_par_damage_calc_total_data_bytes(200, 300), 0);
+        assert_eq!(dqh_twin_check_sample_verdict_label(2), b"alt\0");
+        assert_eq!(dqh_twin_check_sample_verdict_label(1), b"twin\0");
+        assert_eq!(dqh_twin_check_format_u32_str(4294967295), b"4294967295");
+        assert_eq!(
+            dqh_twin_check_lowercase_key(b"RagE.S01E02-GRP"),
+            b"rage.s01e02-grp"
         );
     }
 }

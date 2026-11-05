@@ -320,7 +320,10 @@ ParChecker::EStatus ParChecker::RunParCheckAll()
 
 		if (!IsStopped())
 		{
-			std::string path = m_destDir + PATH_SEPARATOR + parFilename;
+			NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+				m_destDir.c_str(), PATH_SEPARATOR, parFilename.c_str());
+			std::string path(pathBuf.data ? pathBuf.data : "", pathBuf.len);
+			nzbget_rs_free(pathBuf);
 			std::string fullParFilename = FileSystem::GetRealPath(path)
 				.value_or(std::move(path));
 
@@ -329,7 +332,11 @@ ParChecker::EStatus ParChecker::RunParCheckAll()
 			BString<1024> infoName;
 			infoName.Set(parFilename.c_str(), baseLen);
 
-			BString<1024> parInfoName("%s%c%s", m_nzbName.c_str(), PATH_SEPARATOR, *infoName);
+			NzbgetRsBuf parInfoBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+				m_nzbName.c_str(), PATH_SEPARATOR, *infoName);
+			BString<1024> parInfoName;
+			parInfoName.Set(parInfoBuf.data ? parInfoBuf.data : "", (int)parInfoBuf.len);
+			nzbget_rs_free(parInfoBuf);
 			SetInfoName(parInfoName);
 
 			EStatus status = RunParCheck(std::move(fullParFilename));
@@ -854,7 +861,10 @@ bool ParChecker::AddSplittedFragments()
 					MaybeSplittedFragement(filename, original)))
 				{
 					detail("Found splitted fragment %s", filename);
-					extrafiles.push_back(m_destDir + PATH_SEPARATOR + filename);
+					NzbgetRsBuf fragBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+						m_destDir.c_str(), PATH_SEPARATOR, filename);
+					extrafiles.emplace_back(fragBuf.data ? fragBuf.data : "", fragBuf.len);
+					nzbget_rs_free(fragBuf);
 					break;
 				}
 			}
@@ -963,7 +973,12 @@ void ParChecker::FindExtraFiles(std::vector<std::string>& extrafiles, const char
 	DirBrowser dir(directory);
 	while (const char* filename = dir.Next())
 	{
-		BString<1024> fullFilename("%s%c%s", directory, PATH_SEPARATOR, filename);
+		NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			directory, PATH_SEPARATOR, filename);
+		std::string fullFilenameStr(fullFnBuf.data ? fullFnBuf.data : "", fullFnBuf.len);
+		BString<1024> fullFilename;
+		fullFilename.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
+		nzbget_rs_free(fullFnBuf);
 
 		if (FileSystem::DirectoryExists(fullFilename))
 		{
@@ -976,7 +991,7 @@ void ParChecker::FindExtraFiles(std::vector<std::string>& extrafiles, const char
 			if (nzbget_rs_srp_parchecker_should_add_extra_file_entry(
 				externalDir ? 1 : 0, isParred ? 1 : 0, isProcessed ? 1 : 0))
 			{
-				extrafiles.push_back(std::string(directory) + PATH_SEPARATOR + filename);
+				extrafiles.push_back(std::move(fullFilenameStr));
 			}
 		}
 	}
@@ -1088,7 +1103,10 @@ void ParChecker::SignalFilename(std::string str)
 		PrintMessage(Message::mkInfo, "%s %s", Par2StageMessage[m_stage], str.c_str());
 	}
 
-	m_progressLabel = Par2StageMessage[m_stage] + (" " + str);
+	NzbgetRsBuf progBuf = nzbget_rs_dqh_parchecker_format_action_label(
+		Par2StageMessage[m_stage], str.c_str());
+	m_progressLabel.assign(progBuf.data ? progBuf.data : "", progBuf.len);
+	nzbget_rs_free(progBuf);
 
 	if (nzbget_rs_sap_parchecker_should_record_processed_file(
 		(int)m_stage, (int)ptLoadingPars, (int)ptVerifyingSources))

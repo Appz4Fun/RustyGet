@@ -78,7 +78,10 @@ void RepairController::PostParChecker::RegisterVerifiedFile(const char* filename
 					break;
 				}
 			}
-			std::string path = std::string(nzbInfo->GetDestDir()) + PATH_SEPARATOR + currentName;
+			NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+				nzbInfo->GetDestDir(), PATH_SEPARATOR, currentName.c_str());
+			std::string path(pathBuf.data ? pathBuf.data : "", pathBuf.len);
+			nzbget_rs_free(pathBuf);
 			path = FileSystem::GetRealPath(path).value_or(path);
 			return FileSystem::SameFilename(path.c_str(), verifiedPath.c_str());
 		}), jobs->end());
@@ -223,7 +226,11 @@ std::string RepairController::PostParChecker::FetchTwinFile(const TwinCheck::Nzb
 		entry.filename.c_str(), m_twinFiles.size());
 	std::string name(nameBuf.data ? nameBuf.data : "", nameBuf.len);
 	nzbget_rs_free(nameBuf);
-	BString<1024> path("%s%c%s", GetDestDir(), PATH_SEPARATOR, name.c_str());
+	NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+		GetDestDir(), PATH_SEPARATOR, name.c_str());
+	BString<1024> path;
+	path.Set(pathBuf.data ? pathBuf.data : "", (int)pathBuf.len);
+	nzbget_rs_free(pathBuf);
 	{
 		std::ofstream out(fs::u8path(*path), std::ios::binary | std::ios::trunc);
 		out.write(data.data(), (std::streamsize)data.size());
@@ -573,7 +580,11 @@ bool RepairController::AddPar(FileInfo* fileInfo, bool deleted)
 	bool sameCollection = fileInfo->GetNzbInfo() == m_parChecker.GetPostInfo()->GetNzbInfo();
 	if (nzbget_rs_rrd_repair_ctrl_should_add_par_file(sameCollection ? 1 : 0, deleted ? 1 : 0) != 0)
 	{
-		BString<1024> fullFilename("%s%c%s", fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, fileInfo->GetFilename());
+		NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, fileInfo->GetFilename());
+		BString<1024> fullFilename;
+		fullFilename.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
+		nzbget_rs_free(fullFnBuf);
 		m_parChecker.AddParFile(fullFilename);
 	}
 	else

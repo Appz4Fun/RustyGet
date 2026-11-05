@@ -704,7 +704,11 @@ void PrePostProcessor::DeleteCleanup(NzbInfo* nzbInfo)
 		// download was cancelled, deleting already downloaded files from disk
 		for (CompletedFile& completedFile: nzbInfo->GetCompletedFiles())
 		{
-			BString<1024> fullFileName("%s%c%s", nzbInfo->GetDestDir(), PATH_SEPARATOR, completedFile.GetFilename());
+			NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+				nzbInfo->GetDestDir(), PATH_SEPARATOR, completedFile.GetFilename());
+			BString<1024> fullFileName;
+			fullFileName.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
+			nzbget_rs_free(fullFnBuf);
 			if (FileSystem::FileExists(fullFileName))
 			{
 				detail("Deleting file %s", completedFile.GetFilename());
@@ -718,7 +722,11 @@ void PrePostProcessor::DeleteCleanup(NzbInfo* nzbInfo)
 		{
 			if (nzbget_rs_pup_history_coord_is_temporary_output_name(filename) != 0)
 			{
-				BString<1024> fullFilename("%s%c%s", nzbInfo->GetDestDir(), PATH_SEPARATOR, filename);
+				NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+					nzbInfo->GetDestDir(), PATH_SEPARATOR, filename);
+				BString<1024> fullFilename;
+				fullFilename.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
+				nzbget_rs_free(fullFnBuf);
 				detail("Deleting file %s", filename);
 				FileSystem::DeleteFile(fullFilename);
 			}

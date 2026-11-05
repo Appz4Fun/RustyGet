@@ -5865,6 +5865,19 @@ NzbgetRsBuf nzbget_rs_tpr_queue_coord_format_par_damage_summary(
 NzbgetRsBuf nzbget_rs_tpr_queue_coord_format_nzb_ext_filename(const char* name);
 NzbgetRsBuf nzbget_rs_tpr_queue_coord_join_queued_filenames(
     const char* dest_queued, const char* src_queued);
+NzbgetRsBuf nzbget_rs_dqh_dupe_probe_format_stat_cmd(const char* message_id);
+const char* nzbget_rs_dqh_dupe_probe_recheck_retry_suffix(int32_t retry);
+const char* nzbget_rs_dqh_dupe_probe_found_on_prefix(int32_t found_on_empty);
+int64_t nzbget_rs_dqh_par_damage_calc_total_data_bytes(int64_t size, int64_t par_size);
+const char* nzbget_rs_dqh_twin_check_sample_verdict_label(int32_t verdict);
+NzbgetRsBuf nzbget_rs_dqh_twin_check_format_u32_str(uint32_t val);
+NzbgetRsBuf nzbget_rs_dqh_twin_check_lowercase_key(const char* dupe_key);
+NzbgetRsBuf nzbget_rs_tpr_direct_unpack_format_status_msg(
+    const char* info_name_up, int32_t success);
+NzbgetRsBuf nzbget_rs_tpr_direct_unpack_format_trailing_sep_dir(const char* dir, char sep);
+NzbgetRsBuf nzbget_rs_tpr_direct_unpack_format_cancelling_msg(const char* info_name);
+NzbgetRsBuf nzbget_rs_tpr_direct_unpack_format_dest_changed_msg(const char* nzb_name);
+NzbgetRsBuf nzbget_rs_tpr_direct_unpack_format_missing_vol_msg(const char* waiting_file);
 
 #include "nzbget_tls_cipher.h"
 

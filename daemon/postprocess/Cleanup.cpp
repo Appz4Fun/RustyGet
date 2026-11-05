@@ -340,7 +340,11 @@ bool CleanupController::Cleanup(const char* destDir, bool *deleted)
 	DirBrowser dir(destDir);
 	while (const char* filename = dir.Next())
 	{
-		BString<1024> fullFilename("%s%c%s", destDir, PATH_SEPARATOR, filename);
+		NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			destDir, PATH_SEPARATOR, filename);
+		BString<1024> fullFilename;
+		fullFilename.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
+		nzbget_rs_free(fullFnBuf);
 
 		// a link to a directory (from an archive) isn't entered: the cleanup
 		// deleted the matching files of the directory it points to

@@ -55,7 +55,8 @@ bool OpenStore()
 	{
 		return false;
 	}
-	std::string path = std::string(g_Options->GetQueueDir()) + PATH_SEPARATOR + "twincheck";
+	std::string path = RsString(nzbget_rs_tpr_article_writer_format_dest_file_path(
+		g_Options->GetQueueDir(), PATH_SEPARATOR, "twincheck"));
 	std::lock_guard<std::mutex> guard(mutex);
 	if (openedPath != path)
 	{
@@ -298,7 +299,7 @@ void TwinCheckJob::Sample()
 		};
 	std::vector<TwinCheck::NzbEntry> primary = dataFiles(m_primaryNzbFilename);
 	std::vector<TwinCheck::NzbEntry> dupe = dataFiles(m_nzbFilename);
-	std::string primaryId = std::to_string(m_primaryId);
+	std::string primaryId = RsString(nzbget_rs_dqh_conn_format_port_str(m_primaryId));
 
 	std::vector<size_t> pSegCounts;
 	std::vector<int64> pSegBytes;
@@ -360,7 +361,8 @@ void TwinCheckJob::Sample()
 	{
 		return;	// too few arrived: asked again at a later round
 	}
-	Store(TwinCheck::SampledParam, verdict == 2 ? "alt" : "twin", TwinCheck::SampledOfParam, primaryId.c_str());
+	Store(TwinCheck::SampledParam, nzbget_rs_dqh_twin_check_sample_verdict_label(verdict),
+		TwinCheck::SampledOfParam, primaryId.c_str());
 }
 
 struct Item
@@ -439,7 +441,7 @@ std::vector<TwinCheck::FileSig> TwinCheck::ParsePar2(const char* data, size_t si
 
 std::string TwinCheck::Posting(NzbInfo* nzbInfo)
 {
-	return std::to_string(nzbInfo->GetFullContentHash());
+	return RsString(nzbget_rs_dqh_twin_check_format_u32_str(nzbInfo->GetFullContentHash()));
 }
 
 std::string TwinCheck::Identity(NzbInfo* nzbInfo)
@@ -610,9 +612,7 @@ void TwinCheck::ServiceWork()
 		std::map<std::string, std::vector<Item>> keys;
 		auto keyOf = [](NzbInfo* nzbInfo)
 			{
-				std::string key = nzbInfo->GetDupeKey() ? nzbInfo->GetDupeKey() : "";
-				std::transform(key.begin(), key.end(), key.begin(), ::tolower);
-				return key;
+				return RsString(nzbget_rs_dqh_twin_check_lowercase_key(nzbInfo->GetDupeKey()));
 			};
 		for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
 		{
@@ -727,7 +727,7 @@ void TwinCheck::ServiceWork()
 			bool primaryOk = primary &&
 				!nzbget_rs_tpr_twin_check_is_merged_queued_filename(primary->GetQueuedFilename()) &&
 				FileSystem::FileExists(primary->GetQueuedFilename());
-			std::string primaryId = primary ? std::to_string(primary->GetId()) : "";
+			std::string primaryId = primary ? RsString(nzbget_rs_dqh_conn_format_port_str(primary->GetId())) : "";
 			for (Item& item : items)
 			{
 				NzbInfo* nzbInfo = item.nzbInfo;

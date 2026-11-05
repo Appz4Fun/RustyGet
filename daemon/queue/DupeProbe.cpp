@@ -307,7 +307,11 @@ bool DupeProbe::ProbeServer(int serverId, std::set<int>& probed, ServerResult& r
 				}
 			}
 
-			const char* response = connection->Request(BString<1024>("STAT %s\r\n", *sample.MessageId));
+			NzbgetRsBuf statCmdBuf = nzbget_rs_dqh_dupe_probe_format_stat_cmd(*sample.MessageId);
+			BString<1024> statCmd;
+			statCmd.Set(statCmdBuf.data ? statCmdBuf.data : "", (int)statCmdBuf.len);
+			nzbget_rs_free(statCmdBuf);
+			const char* response = connection->Request(statCmd);
 			if (!response)
 			{
 				connection->Disconnect();
@@ -495,7 +499,7 @@ void DupeProbe::Recheck()
 			}
 		}
 		nzbInfo->PrintMessage(Message::mkInfo, "%i of %i failed articles exist on the servers%s",
-			verdict.Existing, sampled, retry ? "; retrying them" : "; not retrying");
+			verdict.Existing, sampled, nzbget_rs_dqh_dupe_probe_recheck_retry_suffix(retry ? 1 : 0));
 		if (retry)
 		{
 			IdList ids = { historyInfo->GetId() };
@@ -548,7 +552,8 @@ void DupeProbe::Run()
 	{
 		Note(Message::mkInfo, "Dupe probe: %i of %i sampled articles exist (%i of %i servers answered "
 			"definitively%s)%s%s: the posting is dead", verdict.Existing, sampled, verdict.MissingServers,
-			verdict.ActiveServers, *Unreachable(verdict), verdict.FoundOn.empty() ? "" : ", found on ",
+			verdict.ActiveServers, *Unreachable(verdict),
+			nzbget_rs_dqh_dupe_probe_found_on_prefix(verdict.FoundOn.empty() ? 1 : 0),
 			verdict.FoundOn.c_str());
 		Abandon(verdict.MissingServers, verdict.ActiveServers);
 	}

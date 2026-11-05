@@ -160,13 +160,16 @@ void DirectUnpack::Run()
 		{
 			debug("%s stopped due to reload/shutdown, preserving unpack state", *m_infoName);
 		}
-		else if (nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsSuccess)
+		else if (nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsSuccess ||
+			nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsFailure)
 		{
-			nzbInfo->AddMessage(Message::mkInfo, BString<1024>("%s successful", *m_infoNameUp));
-		}
-		else if (nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsFailure)
-		{
-			nzbInfo->AddMessage(Message::mkWarning, BString<1024>("%s failed", *m_infoNameUp));
+			bool ok = nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsSuccess;
+			NzbgetRsBuf statusBuf = nzbget_rs_tpr_direct_unpack_format_status_msg(
+				*m_infoNameUp, ok ? 1 : 0);
+			BString<1024> statusMsg;
+			statusMsg.Set(statusBuf.data ? statusBuf.data : "", (int)statusBuf.len);
+			nzbget_rs_free(statusBuf);
+			nzbInfo->AddMessage(ok ? Message::mkInfo : Message::mkWarning, statusMsg);
 		}
 
 		if (nzbget_rs_dad_direct_unpack_should_commit_extracted_archives(
@@ -232,7 +235,10 @@ void DirectUnpack::ExecuteUnrar(const char* archiveName)
 
 	params.emplace_back(archiveName);
 	m_unpackExtendedDir = FileSystem::MakeExtendedPath(m_unpackDir, true);
-	params.push_back(*BString<1024>("%s%c", *m_unpackExtendedDir, PATH_SEPARATOR));
+	NzbgetRsBuf extDirBuf = nzbget_rs_tpr_direct_unpack_format_trailing_sep_dir(
+		*m_unpackExtendedDir, PATH_SEPARATOR);
+	params.emplace_back(extDirBuf.data ? extDirBuf.data : "", (int)extDirBuf.len);
+	nzbget_rs_free(extDirBuf);
 	SetArgs(std::move(params));
 	SetLogPrefix("Unrar");
 	ResetEnv();
@@ -323,7 +329,11 @@ void DirectUnpack::FindArchiveFiles()
 	{
 		if (IsMainArchive(filename))
 		{
-			BString<1024> fullFilename("%s%c%s", *m_destDir, PATH_SEPARATOR, filename);
+			NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+				*m_destDir, PATH_SEPARATOR, filename);
+			BString<1024> fullFilename;
+			fullFilename.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
+			nzbget_rs_free(fullFnBuf);
 			if (!FileSystem::DirectoryExists(fullFilename))
 			{
 				m_archives.emplace_back(filename);
@@ -455,7 +465,11 @@ void DirectUnpack::Stop(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 	{
 		if (nzbInfo)
 		{
-			nzbInfo->AddMessage(Message::mkWarning, BString<1024>("Cancelling %s", *m_infoName));
+			NzbgetRsBuf cancelBuf = nzbget_rs_tpr_direct_unpack_format_cancelling_msg(*m_infoName);
+			BString<1024> cancelMsg;
+			cancelMsg.Set(cancelBuf.data ? cancelBuf.data : "", (int)cancelBuf.len);
+			nzbget_rs_free(cancelBuf);
+			nzbInfo->AddMessage(Message::mkWarning, cancelMsg);
 		}
 		else
 		{
@@ -504,12 +518,20 @@ void DirectUnpack::WaitNextVolume(const char* filename)
 		if (nzbInfo && nzbget_rs_ucf_direct_unpack_has_dest_changed(
 			1, m_destDir, nzbInfo->GetDestDir(), m_finalDir, nzbInfo->BuildFinalDirName()) != 0)
 		{
-			nzbInfo->AddMessage(Message::mkWarning, BString<1024>("Destination directory changed for %s", nzbInfo->GetName()));
+			NzbgetRsBuf chgBuf = nzbget_rs_tpr_direct_unpack_format_dest_changed_msg(nzbInfo->GetName());
+			BString<1024> chgMsg;
+			chgMsg.Set(chgBuf.data ? chgBuf.data : "", (int)chgBuf.len);
+			nzbget_rs_free(chgBuf);
+			nzbInfo->AddMessage(Message::mkWarning, chgMsg);
 			Stop(downloadQueue, nzbInfo);
 		}
 	}
 
-	BString<1024> fullFilename("%s%c%s", *m_destDir, PATH_SEPARATOR, filename);
+	NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+		*m_destDir, PATH_SEPARATOR, filename);
+	BString<1024> fullFilename;
+	fullFilename.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
+	nzbget_rs_free(fullFnBuf);
 	if (FileSystem::FileExists(fullFilename))
 	{
 		m_waitingVolume = false;
@@ -579,7 +601,11 @@ void DirectUnpack::NzbDownloaded(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 	if (m_waitingFile)
 	{
 		// nzb completed but unrar waits for another volume
-		nzbInfo->AddMessage(Message::mkWarning, BString<1024>("Unrar: Could not find volume %s", *m_waitingFile));
+		NzbgetRsBuf missBuf = nzbget_rs_tpr_direct_unpack_format_missing_vol_msg(*m_waitingFile);
+		BString<1024> missMsg;
+		missMsg.Set(missBuf.data ? missBuf.data : "", (int)missBuf.len);
+		nzbget_rs_free(missBuf);
+		nzbInfo->AddMessage(Message::mkWarning, missMsg);
 		Stop(downloadQueue, nzbInfo);
 		return;
 	}

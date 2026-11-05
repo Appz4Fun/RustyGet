@@ -1791,6 +1791,47 @@ pub fn tpr_queue_coord_join_queued_filenames(dest_queued: &[u8], src_queued: &[u
     out
 }
 
+/// Formats `"<info_name_up> successful"` or `"<info_name_up> failed"` for `DirectUnpack::Run`.
+pub fn tpr_direct_unpack_format_status_msg(info_name_up: &[u8], success: bool) -> Vec<u8> {
+    let suffix: &[u8] = if success { b" successful" } else { b" failed" };
+    let mut out = Vec::with_capacity(info_name_up.len() + suffix.len());
+    out.extend_from_slice(info_name_up);
+    out.extend_from_slice(suffix);
+    out
+}
+
+/// Formats `"<dir><sep>"` for `DirectUnpack::ExecuteUnrar`.
+pub fn tpr_direct_unpack_format_trailing_sep_dir(dir: &[u8], sep: u8) -> Vec<u8> {
+    let mut out = Vec::with_capacity(dir.len() + 1);
+    out.extend_from_slice(dir);
+    out.push(sep);
+    out
+}
+
+/// Formats `"Cancelling <info_name>"` for `DirectUnpack::Stop`.
+pub fn tpr_direct_unpack_format_cancelling_msg(info_name: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(11 + info_name.len());
+    out.extend_from_slice(b"Cancelling ");
+    out.extend_from_slice(info_name);
+    out
+}
+
+/// Formats `"Destination directory changed for <nzb_name>"` for `DirectUnpack::WaitNextVolume`.
+pub fn tpr_direct_unpack_format_dest_changed_msg(nzb_name: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(34 + nzb_name.len());
+    out.extend_from_slice(b"Destination directory changed for ");
+    out.extend_from_slice(nzb_name);
+    out
+}
+
+/// Formats `"Unrar: Could not find volume <waiting_file>"` for `DirectUnpack::NzbDownloaded`.
+pub fn tpr_direct_unpack_format_missing_vol_msg(waiting_file: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(29 + waiting_file.len());
+    out.extend_from_slice(b"Unrar: Could not find volume ");
+    out.extend_from_slice(waiting_file);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2441,6 +2482,30 @@ mod tests {
         assert_eq!(
             tpr_queue_coord_join_queued_filenames(b"a.nzb", b"b.nzb"),
             b"a.nzb|b.nzb"
+        );
+        assert_eq!(
+            tpr_direct_unpack_format_status_msg(b"Direct unpack for MyShow", true),
+            b"Direct unpack for MyShow successful"
+        );
+        assert_eq!(
+            tpr_direct_unpack_format_status_msg(b"Direct unpack for MyShow", false),
+            b"Direct unpack for MyShow failed"
+        );
+        assert_eq!(
+            tpr_direct_unpack_format_trailing_sep_dir(b"/dst/_unpack", b'/'),
+            b"/dst/_unpack/"
+        );
+        assert_eq!(
+            tpr_direct_unpack_format_cancelling_msg(b"direct unpack for MyShow"),
+            b"Cancelling direct unpack for MyShow"
+        );
+        assert_eq!(
+            tpr_direct_unpack_format_dest_changed_msg(b"MyShow"),
+            b"Destination directory changed for MyShow"
+        );
+        assert_eq!(
+            tpr_direct_unpack_format_missing_vol_msg(b"archive.part02.rar"),
+            b"Unrar: Could not find volume archive.part02.rar"
         );
     }
 }

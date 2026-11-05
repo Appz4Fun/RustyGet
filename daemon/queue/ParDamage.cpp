@@ -181,7 +181,11 @@ ParDamage::Verdict ParDamage::Judge(NzbInfo* nzbInfo)
 		{
 			if (blocks < 0)
 			{
-				BString<1024> path("%s%c%s", nzbInfo->GetDestDir(), PATH_SEPARATOR, completedFile.GetFilename());
+				NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+					nzbInfo->GetDestDir(), PATH_SEPARATOR, completedFile.GetFilename());
+				BString<1024> path;
+				path.Set(pathBuf.data ? pathBuf.data : "", (int)pathBuf.len);
+				nzbget_rs_free(pathBuf);
 				int64 size = FileSystem::FileSize(path);
 				blocks = nzbget_rs_cdn_par_damage_calc_completed_volume_blocks(blocks, size, blockSize);
 			}
@@ -190,7 +194,8 @@ ParDamage::Verdict ParDamage::Judge(NzbInfo* nzbInfo)
 	}
 
 	verdict.doneBytes = state.doneBytes;
-	verdict.totalBytes = std::max<int64>(0, nzbInfo->GetSize() - nzbInfo->GetParSize());
+	verdict.totalBytes = nzbget_rs_dqh_par_damage_calc_total_data_bytes(
+		nzbInfo->GetSize(), nzbInfo->GetParSize());
 	nzbget_rs_par_damage_project(verdict.known ? 1 : 0, verdict.damagedBlocks,
 		verdict.recoveryBlocks, verdict.doneBytes, verdict.totalBytes,
 		&verdict.projectedBlocks, nullptr, nullptr);

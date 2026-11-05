@@ -109,9 +109,11 @@ bool Maintenance::StartUpdate(EBranch branch)
 	}
 
 	// make absolute path
-	if (m_updateScript[0] != PATH_SEPARATOR)
 	{
-		m_updateScript = CString::FormatStr("%s%c%s", g_Options->GetAppDir(), PATH_SEPARATOR, *m_updateScript);
+		NzbgetRsBuf scriptPathBuf = nzbget_rs_dqh_maintenance_resolve_script_path(
+			g_Options->GetAppDir(), PATH_SEPARATOR, *m_updateScript);
+		m_updateScript.Set(scriptPathBuf.data ? scriptPathBuf.data : "", (int)scriptPathBuf.len);
+		nzbget_rs_free(scriptPathBuf);
 	}
 
 	{
@@ -144,7 +146,13 @@ bool Maintenance::CheckUpdates(CString& updateInfo)
 
 bool Maintenance::ReadPackageInfoStr(const char* key, CString& value)
 {
-	BString<1024> fileName("%s%cpackage-info.json", g_Options->GetWebDir(), PATH_SEPARATOR);
+	BString<1024> fileName;
+	{
+		NzbgetRsBuf fnBuf = nzbget_rs_dqh_maintenance_format_package_info_path(
+			g_Options->GetWebDir(), PATH_SEPARATOR);
+		fileName.Set(fnBuf.data ? fnBuf.data : "", (int)fnBuf.len);
+		nzbget_rs_free(fnBuf);
+	}
 
 	CharBuffer packageInfo;
 	if (!FileSystem::LoadFileIntoBuffer(fileName, packageInfo, true))
@@ -190,28 +198,41 @@ void UpdateScriptController::Run()
 	m_prefixLen = 0;
 	PrintMessage(Message::mkInfo, "Executing update-script %s", GetScript());
 
-	BString<1024> infoName("update-script %s", FileSystem::BaseFileName(GetScript()));
-	SetInfoName(infoName);
+	{
+		NzbgetRsBuf infoBuf = nzbget_rs_dqh_maintenance_format_script_info_name(
+			0, FileSystem::BaseFileName(GetScript()));
+		SetInfoName(infoBuf.data ? infoBuf.data : "");
+		nzbget_rs_free(infoBuf);
+	}
 
-	const char* branchName[] = { "STABLE", "TESTING", "DEVEL" };
-	SetEnvVar("NZBUP_BRANCH", branchName[m_branch]);
+	SetEnvVar("NZBUP_BRANCH", nzbget_rs_dqh_maintenance_branch_name((int)m_branch));
 
-	SetEnvVar("NZBUP_RUNMODE", g_Options->GetDaemonMode() ? "DAEMON" : "SERVER");
+	SetEnvVar("NZBUP_RUNMODE", nzbget_rs_dqh_maintenance_run_mode_name(g_Options->GetDaemonMode() ? 1 : 0));
 
 	for (int i = 0; i < g_ArgumentCount; i++)
 	{
-		BString<100> envName("NZBUP_CMDLINE%i", i);
-		SetEnvVar(envName, (*g_Arguments)[i]);
+		NzbgetRsBuf envBuf = nzbget_rs_dqh_maintenance_format_cmdline_env_name(i);
+		SetEnvVar(envBuf.data ? envBuf.data : "", (*g_Arguments)[i]);
+		nzbget_rs_free(envBuf);
 	}
 
 	int pid = (int)getpid();
 
-	SetEnvVar("NZBUP_PROCESSID", BString<100>("%i", pid));
+	{
+		NzbgetRsBuf pidBuf = nzbget_rs_dqh_conn_format_port_str(pid);
+		SetEnvVar("NZBUP_PROCESSID", pidBuf.data ? pidBuf.data : "");
+		nzbget_rs_free(pidBuf);
+	}
 
-	BString<100> logPrefix = FileSystem::BaseFileName(GetScript());
-	if (char* ext = strrchr(logPrefix, '.')) *ext = '\0'; // strip file extension
-	SetLogPrefix(logPrefix);
-	m_prefixLen = strlen(logPrefix) + 2; // 2 = strlen(": ");
+	const char* baseScript = FileSystem::BaseFileName(GetScript());
+	size_t prefixLen = 0;
+	{
+		NzbgetRsBuf lpBuf = nzbget_rs_dqh_maintenance_strip_ext_and_calc_prefix_len(
+			baseScript, 99, &prefixLen);
+		SetLogPrefix(lpBuf.data ? lpBuf.data : "");
+		nzbget_rs_free(lpBuf);
+	}
+	m_prefixLen = (int)prefixLen; // 2 = strlen(": ");
 
 	Execute();
 
@@ -250,13 +271,21 @@ void UpdateInfoScriptController::ExecuteScript(const char* script, CString& upda
 	UpdateInfoScriptController scriptController;
 	scriptController.SetArgs({script});
 
-	BString<1024> infoName("update-info-script %s", FileSystem::BaseFileName(script));
-	scriptController.SetInfoName(infoName);
+	const char* baseScript = FileSystem::BaseFileName(script);
+	{
+		NzbgetRsBuf infoBuf = nzbget_rs_dqh_maintenance_format_script_info_name(1, baseScript);
+		scriptController.SetInfoName(infoBuf.data ? infoBuf.data : "");
+		nzbget_rs_free(infoBuf);
+	}
 
-	BString<1024> logPrefix = FileSystem::BaseFileName(script);
-	if (char* ext = strrchr(logPrefix, '.')) *ext = '\0'; // strip file extension
-	scriptController.SetLogPrefix(logPrefix);
-	scriptController.m_prefixLen = strlen(logPrefix) + 2; // 2 = strlen(": ");
+	size_t prefixLen = 0;
+	{
+		NzbgetRsBuf lpBuf = nzbget_rs_dqh_maintenance_strip_ext_and_calc_prefix_len(
+			baseScript, 1023, &prefixLen);
+		scriptController.SetLogPrefix(lpBuf.data ? lpBuf.data : "");
+		nzbget_rs_free(lpBuf);
+	}
+	scriptController.m_prefixLen = (int)prefixLen; // 2 = strlen(": ");
 
 	scriptController.Execute();
 
@@ -328,7 +357,13 @@ bool Signature::ComputeInHash()
 // Read signature from file (m_sigFilename) into memory
 bool Signature::ReadSignature()
 {
-	BString<1024> sigTitle("\"RSA-SHA256(%s)\" : \"", FileSystem::BaseFileName(m_inFilename));
+	BString<1024> sigTitle;
+	{
+		NzbgetRsBuf sigBuf = nzbget_rs_dqh_maintenance_format_sig_title(
+			FileSystem::BaseFileName(m_inFilename));
+		sigTitle.Set(sigBuf.data ? sigBuf.data : "", (int)sigBuf.len);
+		nzbget_rs_free(sigBuf);
+	}
 
 	DiskFile infile;
 	if (!infile.Open(m_sigFilename, DiskFile::omRead))

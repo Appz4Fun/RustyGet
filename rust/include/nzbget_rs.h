@@ -5797,6 +5797,31 @@ NzbgetRsBuf nzbget_rs_tpr_ncurses_format_timestamp_message(
     const char* time_str, const char* msg_text);
 NzbgetRsBuf nzbget_rs_tpr_ncurses_format_download_rate_hint(int32_t input_val);
 const char* nzbget_rs_tpr_ncurses_pause_log_msg(int32_t pause_download);
+NzbgetRsBuf nzbget_rs_dqh_maintenance_resolve_script_path(
+    const char* app_dir, char sep, const char* script);
+NzbgetRsBuf nzbget_rs_dqh_maintenance_format_package_info_path(
+    const char* web_dir, char sep);
+NzbgetRsBuf nzbget_rs_dqh_maintenance_format_script_info_name(
+    int32_t is_info_script, const char* base_name);
+const char* nzbget_rs_dqh_maintenance_branch_name(int32_t branch);
+const char* nzbget_rs_dqh_maintenance_run_mode_name(int32_t daemon_mode);
+NzbgetRsBuf nzbget_rs_dqh_maintenance_format_cmdline_env_name(int32_t index);
+NzbgetRsBuf nzbget_rs_dqh_maintenance_strip_ext_and_calc_prefix_len(
+    const char* base_name, size_t max_len, size_t* out_prefix_len);
+NzbgetRsBuf nzbget_rs_dqh_maintenance_format_sig_title(const char* base_name);
+int32_t nzbget_rs_dqh_scheduler_bytes_to_kb(int32_t bytes);
+const char* nzbget_rs_dqh_scheduler_pause_action_str(int32_t paused);
+const char* nzbget_rs_dqh_scheduler_server_action_str(int32_t active);
+NzbgetRsBuf nzbget_rs_tpr_article_writer_format_dest_file_path(
+    const char* dest_dir, char sep, const char* filename);
+NzbgetRsBuf nzbget_rs_tpr_article_writer_format_tmp_path(const char* base_path);
+size_t nzbget_rs_tpr_article_cache_mb_to_bytes(int32_t mb);
+size_t nzbget_rs_tpr_server_volume_required_day_len(int32_t day_slot, size_t current_len);
+NzbgetRsBuf nzbget_rs_tpr_options_format_default_conf_path(const char* dir, char sep);
+size_t nzbget_rs_tpr_options_strip_trailing_sep(const char* dir, char sep);
+NzbgetRsBuf nzbget_rs_tpr_options_format_joined_dir(
+    const char* parent_dir, char sep, const char* dir, int32_t join_mode);
+int32_t nzbget_rs_tpr_options_minutes_to_seconds_i32(int32_t minutes);
 
 #include "nzbget_tls_cipher.h"
 

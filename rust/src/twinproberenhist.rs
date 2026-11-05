@@ -1531,6 +1531,86 @@ pub fn tpr_ncurses_pause_log_msg(pause_download: bool) -> &'static [u8] {
     }
 }
 
+/// Formats `"<dest_dir><sep><filename>"` for `ArticleWriter`.
+pub fn tpr_article_writer_format_dest_file_path(
+    dest_dir: &[u8],
+    sep: u8,
+    filename: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(dest_dir.len() + 1 + filename.len());
+    out.extend_from_slice(dest_dir);
+    out.push(sep);
+    out.extend_from_slice(filename);
+    out
+}
+
+/// Formats `"<base_path>.tmp"` for `ArticleWriter`.
+pub fn tpr_article_writer_format_tmp_path(base_path: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(base_path.len() + 4);
+    out.extend_from_slice(base_path);
+    out.extend_from_slice(b".tmp");
+    out
+}
+
+/// Converts megabytes to bytes (`mb * 1024 * 1024`) for `ArticleCache` and `MemoryMonitor`.
+pub fn tpr_article_cache_mb_to_bytes(mb: i32) -> usize {
+    (mb.max(0) as usize)
+        .saturating_mul(1024)
+        .saturating_mul(1024)
+}
+
+/// Returns `(day_slot + 1) as usize` when `day_slot + 1 > current_len`, or `0` when no resize is needed,
+/// for `ServerVolume::CalcSlots`.
+pub fn tpr_server_volume_required_day_len(day_slot: i32, current_len: usize) -> usize {
+    let needed = (day_slot.saturating_add(1)).max(0) as usize;
+    if needed > current_len {
+        needed
+    } else {
+        0
+    }
+}
+
+/// Formats `"<dir><sep>nzbget.conf"` for `Options::InitOptFile` and `Options::CheckOptions`.
+pub fn tpr_options_format_default_conf_path(dir: &[u8], sep: u8) -> Vec<u8> {
+    const SUFFIX: &[u8] = b"nzbget.conf";
+    let mut out = Vec::with_capacity(dir.len() + 1 + SUFFIX.len());
+    out.extend_from_slice(dir);
+    out.push(sep);
+    out.extend_from_slice(SUFFIX);
+    out
+}
+
+/// Returns the byte length of `dir` after stripping a single trailing `sep` for `Options::CheckDir`.
+pub fn tpr_options_strip_trailing_sep(dir: &[u8], sep: u8) -> usize {
+    if !dir.is_empty() && dir[dir.len() - 1] == sep {
+        dir.len() - 1
+    } else {
+        dir.len()
+    }
+}
+
+/// Formats `"<parent_dir><dir>"` (`join_mode == 1`) or `"<parent_dir><sep><dir>"` (`join_mode != 1`)
+/// for `Options::CheckDir`.
+pub fn tpr_options_format_joined_dir(
+    parent_dir: &[u8],
+    sep: u8,
+    dir: &[u8],
+    join_mode: i32,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(parent_dir.len() + 1 + dir.len());
+    out.extend_from_slice(parent_dir);
+    if join_mode != 1 {
+        out.push(sep);
+    }
+    out.extend_from_slice(dir);
+    out
+}
+
+/// Converts minutes to seconds (`minutes * 60`) for `Options::InitOptions`.
+pub fn tpr_options_minutes_to_seconds_i32(minutes: i32) -> i32 {
+    minutes.wrapping_mul(60)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2092,5 +2172,31 @@ mod tests {
         );
         assert_eq!(tpr_ncurses_pause_log_msg(true), b"Unpausing download\0");
         assert_eq!(tpr_ncurses_pause_log_msg(false), b"Pausing download\0");
+        assert_eq!(
+            tpr_article_writer_format_dest_file_path(b"/dst/show", b'/', b"part01.rar"),
+            b"/dst/show/part01.rar"
+        );
+        assert_eq!(
+            tpr_article_writer_format_tmp_path(b"/tmp/1.001"),
+            b"/tmp/1.001.tmp"
+        );
+        assert_eq!(tpr_article_cache_mb_to_bytes(250), 250 * 1024 * 1024);
+        assert_eq!(tpr_server_volume_required_day_len(4, 3), 5);
+        assert_eq!(tpr_server_volume_required_day_len(2, 5), 0);
+        assert_eq!(
+            tpr_options_format_default_conf_path(b"/opt/nzbget", b'/'),
+            b"/opt/nzbget/nzbget.conf"
+        );
+        assert_eq!(tpr_options_strip_trailing_sep(b"/downloads/", b'/'), 10);
+        assert_eq!(tpr_options_strip_trailing_sep(b"/downloads", b'/'), 10);
+        assert_eq!(
+            tpr_options_format_joined_dir(b"/main/", b'/', b"tmp", 1),
+            b"/main/tmp"
+        );
+        assert_eq!(
+            tpr_options_format_joined_dir(b"/main", b'/', b"tmp", 2),
+            b"/main/tmp"
+        );
+        assert_eq!(tpr_options_minutes_to_seconds_i32(15), 900);
     }
 }

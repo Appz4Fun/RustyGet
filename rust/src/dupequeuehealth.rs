@@ -1436,6 +1436,118 @@ pub fn dqh_tls_select_io_err_msg(is_write: bool, peek_err_zero: bool) -> &'stati
     }
 }
 
+/// Resolves `script` against `app_dir` if `script` does not start with `sep` for `Maintenance::StartUpdate`.
+pub fn dqh_maintenance_resolve_script_path(app_dir: &[u8], sep: u8, script: &[u8]) -> Vec<u8> {
+    if script.first().copied() != Some(sep) {
+        let mut out = Vec::with_capacity(app_dir.len() + 1 + script.len());
+        out.extend_from_slice(app_dir);
+        out.push(sep);
+        out.extend_from_slice(script);
+        out
+    } else {
+        script.to_vec()
+    }
+}
+
+/// Formats `"<web_dir><sep>package-info.json"` for `Maintenance::ReadPackageInfoStr`.
+pub fn dqh_maintenance_format_package_info_path(web_dir: &[u8], sep: u8) -> Vec<u8> {
+    const SUFFIX: &[u8] = b"package-info.json";
+    let mut out = Vec::with_capacity(web_dir.len() + 1 + SUFFIX.len());
+    out.extend_from_slice(web_dir);
+    out.push(sep);
+    out.extend_from_slice(SUFFIX);
+    out
+}
+
+/// Formats `"update-script <base_name>"` or `"update-info-script <base_name>"`
+/// for `UpdateScriptController::Run` and `UpdateInfoScriptController::ExecuteScript`.
+pub fn dqh_maintenance_format_script_info_name(
+    is_info_script: bool,
+    base_name: &[u8],
+) -> Vec<u8> {
+    let prefix: &[u8] = if is_info_script {
+        b"update-info-script "
+    } else {
+        b"update-script "
+    };
+    let mut out = Vec::with_capacity(prefix.len() + base_name.len());
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(base_name);
+    out
+}
+
+/// Returns `"STABLE"`, `"TESTING"`, or `"DEVEL"` for `UpdateScriptController::Run`.
+pub fn dqh_maintenance_branch_name(branch: i32) -> &'static [u8] {
+    match branch {
+        1 => b"TESTING\0",
+        2 => b"DEVEL\0",
+        _ => b"STABLE\0",
+    }
+}
+
+/// Returns `"DAEMON"` or `"SERVER"` for `UpdateScriptController::Run`.
+pub fn dqh_maintenance_run_mode_name(daemon_mode: bool) -> &'static [u8] {
+    if daemon_mode {
+        b"DAEMON\0"
+    } else {
+        b"SERVER\0"
+    }
+}
+
+/// Formats `"NZBUP_CMDLINE<index>"` for `UpdateScriptController::Run`.
+pub fn dqh_maintenance_format_cmdline_env_name(index: i32) -> Vec<u8> {
+    format!("NZBUP_CMDLINE{index}").into_bytes()
+}
+
+/// Returns `(log_prefix, prefix_len)` after bounding `base_name` to `max_len` bytes
+/// and stripping the file extension for `UpdateScriptController::Run` and
+/// `UpdateInfoScriptController::ExecuteScript`.
+pub fn dqh_maintenance_strip_ext_and_calc_prefix_len(
+    base_name: &[u8],
+    max_len: usize,
+) -> (Vec<u8>, usize) {
+    let bounded = &base_name[..base_name.len().min(max_len)];
+    let stem_len = bounded
+        .iter()
+        .rposition(|&b| b == b'.')
+        .unwrap_or(bounded.len());
+    (bounded[..stem_len].to_vec(), stem_len.saturating_add(2))
+}
+
+/// Formats `"\"RSA-SHA256(<base_name>)\" : \""` for `Signature::ReadSignature`.
+pub fn dqh_maintenance_format_sig_title(base_name: &[u8]) -> Vec<u8> {
+    const PREFIX: &[u8] = b"\"RSA-SHA256(";
+    const SUFFIX: &[u8] = b")\" : \"";
+    let mut out = Vec::with_capacity(PREFIX.len() + base_name.len() + SUFFIX.len());
+    out.extend_from_slice(PREFIX);
+    out.extend_from_slice(base_name);
+    out.extend_from_slice(SUFFIX);
+    out
+}
+
+/// Converts bytes per second to KB/s (`bytes / 1024`) for `Scheduler::PrintLog`.
+pub fn dqh_scheduler_bytes_to_kb(bytes: i32) -> i32 {
+    bytes / 1024
+}
+
+/// Returns `"pausing"` or `"unpausing"` for `Scheduler::PrintLog`.
+pub fn dqh_scheduler_pause_action_str(paused: bool) -> &'static [u8] {
+    if paused {
+        b"pausing\0"
+    } else {
+        b"unpausing\0"
+    }
+}
+
+/// Returns `"activating"` or `"deactivating"` for `Scheduler::PrintLog`.
+pub fn dqh_scheduler_server_action_str(active: bool) -> &'static [u8] {
+    if active {
+        b"activating\0"
+    } else {
+        b"deactivating\0"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2003,5 +2115,55 @@ mod tests {
             dqh_tls_select_io_err_msg(false, false),
             b"Could not read from TLS-Socket\0"
         );
+        assert_eq!(
+            dqh_maintenance_resolve_script_path(b"/opt/nzbget", b'/', b"install-update.sh"),
+            b"/opt/nzbget/install-update.sh"
+        );
+        assert_eq!(
+            dqh_maintenance_resolve_script_path(b"/opt/nzbget", b'/', b"/usr/bin/install.sh"),
+            b"/usr/bin/install.sh"
+        );
+        assert_eq!(
+            dqh_maintenance_format_package_info_path(b"/opt/nzbget/webui", b'/'),
+            b"/opt/nzbget/webui/package-info.json"
+        );
+        assert_eq!(
+            dqh_maintenance_format_script_info_name(false, b"update.sh"),
+            b"update-script update.sh"
+        );
+        assert_eq!(
+            dqh_maintenance_format_script_info_name(true, b"info.sh"),
+            b"update-info-script info.sh"
+        );
+        assert_eq!(dqh_maintenance_branch_name(0), b"STABLE\0");
+        assert_eq!(dqh_maintenance_branch_name(1), b"TESTING\0");
+        assert_eq!(dqh_maintenance_branch_name(2), b"DEVEL\0");
+        assert_eq!(dqh_maintenance_run_mode_name(true), b"DAEMON\0");
+        assert_eq!(dqh_maintenance_run_mode_name(false), b"SERVER\0");
+        assert_eq!(
+            dqh_maintenance_format_cmdline_env_name(3),
+            b"NZBUP_CMDLINE3"
+        );
+        assert_eq!(
+            dqh_maintenance_strip_ext_and_calc_prefix_len(b"install-update.sh", 99),
+            (b"install-update".to_vec(), 16)
+        );
+        assert_eq!(
+            dqh_maintenance_strip_ext_and_calc_prefix_len(b".update", 99),
+            (b"".to_vec(), 2)
+        );
+        assert_eq!(
+            dqh_maintenance_strip_ext_and_calc_prefix_len(&vec![b'a'; 120], 99),
+            (vec![b'a'; 99], 101)
+        );
+        assert_eq!(
+            dqh_maintenance_format_sig_title(b"nzbget-bin.tar.gz"),
+            b"\"RSA-SHA256(nzbget-bin.tar.gz)\" : \""
+        );
+        assert_eq!(dqh_scheduler_bytes_to_kb(20480), 20);
+        assert_eq!(dqh_scheduler_pause_action_str(true), b"pausing\0");
+        assert_eq!(dqh_scheduler_pause_action_str(false), b"unpausing\0");
+        assert_eq!(dqh_scheduler_server_action_str(true), b"activating\0");
+        assert_eq!(dqh_scheduler_server_action_str(false), b"deactivating\0");
     }
 }

@@ -33652,6 +33652,236 @@ pub unsafe extern "C" fn nzbget_rs_tpr_ncurses_pause_log_msg(
         as *const c_char
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_maintenance_resolve_script_path(
+    app_dir: *const c_char,
+    sep: c_char,
+    script: *const c_char,
+) -> RsBuf {
+    let ad = if app_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(app_dir).to_bytes()
+    };
+    let sc = if script.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(script).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_maintenance_resolve_script_path(
+        ad,
+        sep as u8,
+        sc,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_maintenance_format_package_info_path(
+    web_dir: *const c_char,
+    sep: c_char,
+) -> RsBuf {
+    let wd = if web_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(web_dir).to_bytes()
+    };
+    into_buf(
+        crate::dupequeuehealth::dqh_maintenance_format_package_info_path(wd, sep as u8),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_maintenance_format_script_info_name(
+    is_info_script: i32,
+    base_name: *const c_char,
+) -> RsBuf {
+    let bn = if base_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(base_name).to_bytes()
+    };
+    into_buf(
+        crate::dupequeuehealth::dqh_maintenance_format_script_info_name(
+            is_info_script != 0,
+            bn,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_maintenance_branch_name(branch: i32) -> *const c_char {
+    crate::dupequeuehealth::dqh_maintenance_branch_name(branch).as_ptr() as *const c_char
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_maintenance_run_mode_name(
+    daemon_mode: i32,
+) -> *const c_char {
+    crate::dupequeuehealth::dqh_maintenance_run_mode_name(daemon_mode != 0).as_ptr()
+        as *const c_char
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_maintenance_format_cmdline_env_name(index: i32) -> RsBuf {
+    into_buf(crate::dupequeuehealth::dqh_maintenance_format_cmdline_env_name(index))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_maintenance_strip_ext_and_calc_prefix_len(
+    base_name: *const c_char,
+    max_len: usize,
+    out_prefix_len: *mut usize,
+) -> RsBuf {
+    let bn = if base_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(base_name).to_bytes()
+    };
+    let (stem, prefix_len) =
+        crate::dupequeuehealth::dqh_maintenance_strip_ext_and_calc_prefix_len(bn, max_len);
+    if !out_prefix_len.is_null() {
+        *out_prefix_len = prefix_len;
+    }
+    into_buf(stem)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_maintenance_format_sig_title(
+    base_name: *const c_char,
+) -> RsBuf {
+    let bn = if base_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(base_name).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_maintenance_format_sig_title(bn))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_scheduler_bytes_to_kb(bytes: i32) -> i32 {
+    crate::dupequeuehealth::dqh_scheduler_bytes_to_kb(bytes)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_scheduler_pause_action_str(
+    paused: i32,
+) -> *const c_char {
+    crate::dupequeuehealth::dqh_scheduler_pause_action_str(paused != 0).as_ptr() as *const c_char
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_scheduler_server_action_str(
+    active: i32,
+) -> *const c_char {
+    crate::dupequeuehealth::dqh_scheduler_server_action_str(active != 0).as_ptr() as *const c_char
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_article_writer_format_dest_file_path(
+    dest_dir: *const c_char,
+    sep: c_char,
+    filename: *const c_char,
+) -> RsBuf {
+    let dd = if dest_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(dest_dir).to_bytes()
+    };
+    let fn_bytes = if filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    into_buf(
+        crate::twinproberenhist::tpr_article_writer_format_dest_file_path(
+            dd, sep as u8, fn_bytes,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_article_writer_format_tmp_path(
+    base_path: *const c_char,
+) -> RsBuf {
+    let bp = if base_path.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(base_path).to_bytes()
+    };
+    into_buf(crate::twinproberenhist::tpr_article_writer_format_tmp_path(bp))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_article_cache_mb_to_bytes(mb: i32) -> usize {
+    crate::twinproberenhist::tpr_article_cache_mb_to_bytes(mb)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_server_volume_required_day_len(
+    day_slot: i32,
+    current_len: usize,
+) -> usize {
+    crate::twinproberenhist::tpr_server_volume_required_day_len(day_slot, current_len)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_options_format_default_conf_path(
+    dir: *const c_char,
+    sep: c_char,
+) -> RsBuf {
+    let d = if dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(dir).to_bytes()
+    };
+    into_buf(crate::twinproberenhist::tpr_options_format_default_conf_path(
+        d, sep as u8,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_options_strip_trailing_sep(
+    dir: *const c_char,
+    sep: c_char,
+) -> usize {
+    let d = if dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(dir).to_bytes()
+    };
+    crate::twinproberenhist::tpr_options_strip_trailing_sep(d, sep as u8)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_options_format_joined_dir(
+    parent_dir: *const c_char,
+    sep: c_char,
+    dir: *const c_char,
+    join_mode: i32,
+) -> RsBuf {
+    let pd = if parent_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(parent_dir).to_bytes()
+    };
+    let d = if dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(dir).to_bytes()
+    };
+    into_buf(crate::twinproberenhist::tpr_options_format_joined_dir(
+        pd,
+        sep as u8,
+        d,
+        join_mode,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_options_minutes_to_seconds_i32(minutes: i32) -> i32 {
+    crate::twinproberenhist::tpr_options_minutes_to_seconds_i32(minutes)
+}
+
 
 
 

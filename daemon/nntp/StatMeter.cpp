@@ -40,15 +40,18 @@ void ServerVolume::CalcSlots(time_t locCurTime)
 	m_daySlot = slots.day;
 	if (slots.inRange)
 	{
-		size_t daySlot = Util::SafeIntCast<int, size_t>(m_daySlot + 1);
-		if (daySlot > m_bytesPerDays.size())
+		size_t newBytesDaysLen = nzbget_rs_tpr_server_volume_required_day_len(
+			m_daySlot, m_bytesPerDays.size());
+		if (newBytesDaysLen > 0)
 		{
-			m_bytesPerDays.resize(daySlot);
+			m_bytesPerDays.resize(newBytesDaysLen);
 		}
 
-		if (daySlot > m_articlesPerDays.size())
+		size_t newArtDaysLen = nzbget_rs_tpr_server_volume_required_day_len(
+			m_daySlot, m_articlesPerDays.size());
+		if (newArtDaysLen > 0)
 		{
-			m_articlesPerDays.resize(daySlot);
+			m_articlesPerDays.resize(newArtDaysLen);
 		}
 	}
 }

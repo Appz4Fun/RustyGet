@@ -235,19 +235,23 @@ void Scheduler::PrintLog()
 {
 	if (m_downloadRateChanged)
 	{
-		info("Scheduler: setting download rate to %i KB/s", g_WorkState->GetSpeedLimit() / 1024);
+		info("Scheduler: setting download rate to %i KB/s",
+			nzbget_rs_dqh_scheduler_bytes_to_kb(g_WorkState->GetSpeedLimit()));
 	}
 	if (m_pauseDownloadChanged)
 	{
-		info("Scheduler: %s download", g_WorkState->GetPauseDownload() ? "pausing" : "unpausing");
+		info("Scheduler: %s download",
+			nzbget_rs_dqh_scheduler_pause_action_str(g_WorkState->GetPauseDownload() ? 1 : 0));
 	}
 	if (m_pausePostProcessChanged)
 	{
-		info("Scheduler: %s post-processing", g_WorkState->GetPausePostProcess() ? "pausing" : "unpausing");
+		info("Scheduler: %s post-processing",
+			nzbget_rs_dqh_scheduler_pause_action_str(g_WorkState->GetPausePostProcess() ? 1 : 0));
 	}
 	if (m_pauseScanChanged)
 	{
-		info("Scheduler: %s scan", g_WorkState->GetPauseScan() ? "pausing" : "unpausing");
+		info("Scheduler: %s scan",
+			nzbget_rs_dqh_scheduler_pause_action_str(g_WorkState->GetPauseScan() ? 1 : 0));
 	}
 	if (m_serverChanged)
 	{
@@ -256,7 +260,9 @@ void Scheduler::PrintLog()
 		{
 			if (server->GetActive() != m_serverStatusList[index])
 			{
-				info("Scheduler: %s %s", server->GetActive() ? "activating" : "deactivating", server->GetName());
+				info("Scheduler: %s %s",
+					nzbget_rs_dqh_scheduler_server_action_str(server->GetActive() ? 1 : 0),
+					server->GetName());
 			}
 			index++;
 		}

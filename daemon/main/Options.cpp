@@ -392,7 +392,12 @@ void Options::InitOptFile()
 	{
 		// search for config file in default locations
 		// look in the exe-directory first
-		BString<1024> filename("%s/nzbget.conf", *m_appDir);
+		BString<1024> filename;
+		{
+			NzbgetRsBuf cfBuf = nzbget_rs_tpr_options_format_default_conf_path(*m_appDir, '/');
+			filename.Set(cfBuf.data ? cfBuf.data : "", (int)cfBuf.len);
+			nzbget_rs_free(cfBuf);
+		}
 
 		if (FileSystem::FileExists(filename))
 		{
@@ -455,10 +460,11 @@ void Options::CheckDir(CString& dir, const char* optionName,
 
 	dir = tempdir;
 	FileSystem::NormalizePathSeparators((char*)dir);
-	if (!Util::EmptyStr(dir) && dir[dir.Length() - 1] == PATH_SEPARATOR)
+	size_t strippedLen = nzbget_rs_tpr_options_strip_trailing_sep(dir, PATH_SEPARATOR);
+	if (strippedLen < (size_t)dir.Length())
 	{
 		// remove trailing slash
-		dir[dir.Length() - 1] = '\0';
+		dir[(int)strippedLen] = '\0';
 	}
 
 	int joinMode = nzbget_rs_rol_options_check_dir_join_mode(
@@ -466,13 +472,11 @@ void Options::CheckDir(CString& dir, const char* optionName,
 	if (joinMode != 0)
 	{
 		BString<1024> usedir2;
-		if (joinMode == 1)
 		{
-			usedir2.Format("%s%s", parentDir, *dir);
-		}
-		else
-		{
-			usedir2.Format("%s%c%s", parentDir, PATH_SEPARATOR, *dir);
+			NzbgetRsBuf joinBuf = nzbget_rs_tpr_options_format_joined_dir(
+				parentDir, PATH_SEPARATOR, *dir, joinMode);
+			usedir2.Set(joinBuf.data ? joinBuf.data : "", (int)joinBuf.len);
+			nzbget_rs_free(joinBuf);
 		}
 
 		FileSystem::NormalizePathSeparators((char*)usedir2);
@@ -606,9 +610,9 @@ void Options::InitOptions()
 
 	m_renameIgnoreExt 	    = GetOption(RENAMEIGNOREEXT.data());
 
-	m_downloadRate			= ParseIntValue(DOWNLOADRATE.data(), 10) * 1024;
+	m_downloadRate			= nzbget_rs_tpr_webdl_kb_to_bytes(ParseIntValue(DOWNLOADRATE.data(), 10));
 	m_articleTimeout		= ParseIntValue(ARTICLETIMEOUT.data(), 10);
-	m_articleReadChunkSize  = ParseIntValue(ARTICLEREADCHUNKSIZE.data(), 10) * 1024;
+	m_articleReadChunkSize  = nzbget_rs_tpr_webdl_kb_to_bytes(ParseIntValue(ARTICLEREADCHUNKSIZE.data(), 10));
 	m_urlTimeout			= ParseIntValue(URLTIMEOUT.data(), 10);
 	m_remoteTimeout			= ParseIntValue(REMOTETIMEOUT.data(), 10);
 	m_articleRetries		= ParseIntValue(ARTICLERETRIES.data(), 10);
@@ -636,7 +640,7 @@ void Options::InitOptions()
 	m_feedHistory			= ParseIntValue(FEEDHISTORY.data(), 10);
 	m_timeCorrection = nzbget_rs_fuq_options_normalize_time_correction(
 		ParseIntValue(TIMECORRECTION.data(), 10));
-	m_propagationDelay		= ParseIntValue(PROPAGATIONDELAY.data(), 10) * 60;
+	m_propagationDelay		= nzbget_rs_tpr_options_minutes_to_seconds_i32(ParseIntValue(PROPAGATIONDELAY.data(), 10));
 	m_articleCache			= ParseIntValue(ARTICLECACHE.data(), 10);
 	m_memoryPressurePath	= GetOption(MEMORYPRESSUREPATH.data());
 	int memoryPressureInterval = ParseIntValue(MEMORYPRESSUREINTERVAL.data(), 10);
@@ -1530,7 +1534,9 @@ void Options::CheckOptions()
 	// (for compatibility with versions 9 and 10).
 	if (m_configTemplate.Empty() && !m_noDiskAccess && !m_webDir.Empty())
 	{
-		m_configTemplate.Format("%s%c%s", *m_webDir, PATH_SEPARATOR, "nzbget.conf");
+		NzbgetRsBuf ctBuf = nzbget_rs_tpr_options_format_default_conf_path(*m_webDir, PATH_SEPARATOR);
+		m_configTemplate.Set(ctBuf.data ? ctBuf.data : "", (int)ctBuf.len);
+		nzbget_rs_free(ctBuf);
 		if (!FileSystem::FileExists(m_configTemplate))
 		{
 			m_configTemplate = "";

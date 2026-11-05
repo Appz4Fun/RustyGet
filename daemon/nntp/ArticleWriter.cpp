@@ -104,7 +104,14 @@ bool ArticleWriter::Start(Decoder::EFormat format, const char* filename, int64 f
 				}
 			}
 
-			BString<1024> destFilePath("%s%c%s", m_fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, filename);
+			BString<1024> destFilePath;
+			if (filename)
+			{
+				NzbgetRsBuf dfpBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+					m_fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, filename);
+				destFilePath.Set(dfpBuf.data ? dfpBuf.data : "", (int)dfpBuf.len);
+				nzbget_rs_free(dfpBuf);
+			}
 			bool isOwnOutputFile = false;
 			if (g_Options->GetDirectWrite() || m_fileInfo->GetForceDirectWrite())
 			{
@@ -374,7 +381,11 @@ void ArticleWriter::BuildOutputFilename()
 	}
 
 	m_articleInfo->SetResultFilename(filename.c_str());
-	m_tempFilename = filename + ".tmp";
+	{
+		NzbgetRsBuf tmpBuf = nzbget_rs_tpr_article_writer_format_tmp_path(filename.c_str());
+		m_tempFilename.assign(tmpBuf.data ? tmpBuf.data : "", tmpBuf.len);
+		nzbget_rs_free(tmpBuf);
+	}
 
 	if (g_Options->GetDirectWrite() || m_fileInfo->GetForceDirectWrite())
 	{
@@ -387,7 +398,13 @@ void ArticleWriter::BuildOutputFilename()
 		}
 		else
 		{
-			BString<1024> destPath("%s%c%s", destDir, PATH_SEPARATOR, m_fileInfo->GetFilename());
+			BString<1024> destPath;
+			{
+				NzbgetRsBuf dpBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+					destDir, PATH_SEPARATOR, m_fileInfo->GetFilename());
+				destPath.Set(dpBuf.data ? dpBuf.data : "", (int)dpBuf.len);
+				nzbget_rs_free(dpBuf);
+			}
 			if (m_fileInfo->GetForceDirectWrite() && m_fileInfo->GetOutputInitialized() && FileSystem::FileExists(destPath))
 			{
 				filename = destPath.Str();
@@ -444,7 +461,13 @@ bool ArticleWriter::CompleteFileParts()
 	bool hasForceDest = false;
 	if ((directWriteOpt || forceDirectWrite) && !curOutputInit)
 	{
-		BString<1024> destPath("%s%c%s", nzbDestDir.c_str(), PATH_SEPARATOR, filename.c_str());
+		BString<1024> destPath;
+		{
+			NzbgetRsBuf dpBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+				nzbDestDir.c_str(), PATH_SEPARATOR, filename.c_str());
+			destPath.Set(dpBuf.data ? dpBuf.data : "", (int)dpBuf.len);
+			nzbget_rs_free(dpBuf);
+		}
 		hasOwnOut = !m_outputFilename.empty() && FileSystem::FileExists(m_outputFilename.c_str());
 		hasForceDest = !hasOwnOut && forceDirectWrite && FileSystem::FileExists(destPath);
 	}
@@ -578,7 +601,13 @@ ArticleWriter::SetupOutputFile(DiskFile &outfile,
 							bool cached)
 {
 	OutputPaths paths;
-	std::string targetPath = std::string(destDir) + PATH_SEPARATOR + std::string(filename);
+	std::string targetPath;
+	{
+		NzbgetRsBuf tpBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			destDir.data(), PATH_SEPARATOR, filename.data());
+		targetPath.assign(tpBuf.data ? tpBuf.data : "", tpBuf.len);
+		nzbget_rs_free(tpBuf);
+	}
 	if (nzbget_rs_dqh_article_writer_use_target_path_directly(
 		m_fileInfo->GetForceDirectWrite() ? 1 : 0,
 		directWrite ? 1 : 0,
@@ -592,7 +621,11 @@ ArticleWriter::SetupOutputFile(DiskFile &outfile,
 		paths.finalPath = FileSystem::MakeUniqueFilename(destDir.data(), filename.data()).Str();
 	}
 
-	paths.tempPath = paths.finalPath + ".tmp";
+	{
+		NzbgetRsBuf tmpBuf = nzbget_rs_tpr_article_writer_format_tmp_path(paths.finalPath.c_str());
+		paths.tempPath.assign(tmpBuf.data ? tmpBuf.data : "", tmpBuf.len);
+		nzbget_rs_free(tmpBuf);
+	}
 
 	// a name with a folder (DirectRename gives a file in progress the relative
 	// path par2 lists, "Sub/file"): the folder may not exist yet, and both the
@@ -1073,7 +1106,9 @@ void ArticleWriter::FlushCache()
 
 				if (!directWrite)
 				{
-					destFile.Format("%s.tmp", pa->GetResultFilename());
+					NzbgetRsBuf tmpBuf = nzbget_rs_tpr_article_writer_format_tmp_path(pa->GetResultFilename());
+					destFile.Set(tmpBuf.data ? tmpBuf.data : "", (int)tmpBuf.len);
+					nzbget_rs_free(tmpBuf);
 					if (!outfile.Open(destFile, DiskFile::omWrite))
 					{
 						m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError,
@@ -1258,7 +1293,7 @@ CachedSegmentData ArticleCache::Alloc(int size)
 	void* p = nullptr;
 	size_t effectiveLimit = g_MemoryMonitor ?
 		g_MemoryMonitor->GetEffectiveArticleCacheBytes() :
-		(size_t)g_Options->GetArticleCache() * 1024 * 1024;
+		nzbget_rs_tpr_article_cache_mb_to_bytes(g_Options->GetArticleCache());
 
 	int wasEmpty = 0;
 	if (nzbget_rs_dad_article_cache_can_alloc(effectiveLimit, m_allocated, (size_t)size, &wasEmpty) != 0)
@@ -1327,7 +1362,7 @@ void ArticleCache::Run()
 	{
 		size_t effectiveLimit = g_MemoryMonitor ?
 			g_MemoryMonitor->GetEffectiveArticleCacheBytes() :
-			(size_t)g_Options->GetArticleCache() * 1024 * 1024;
+			nzbget_rs_tpr_article_cache_mb_to_bytes(g_Options->GetArticleCache());
 
 		int tier = g_MemoryMonitor ? (int)g_MemoryMonitor->GetTier() : (int)NZBGET_RS_PRESSURE_NORMAL;
 		int flushEverything = 0;
@@ -1500,7 +1535,8 @@ const char* MemoryMonitor::GetTierName() const
 
 size_t MemoryMonitor::GetEffectiveArticleCacheBytes() const
 {
-	return (size_t)m_effectiveCacheMB.load(std::memory_order_acquire) * 1024 * 1024;
+	return nzbget_rs_tpr_article_cache_mb_to_bytes(
+		(int)m_effectiveCacheMB.load(std::memory_order_acquire));
 }
 
 int MemoryMonitor::GetEffectiveArticleCacheMB() const

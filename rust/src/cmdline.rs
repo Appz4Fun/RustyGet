@@ -964,60 +964,6 @@ pub fn format_nserv_usage(base_name: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Format an `<file>...</file>` XML block for `NzbGenerator::AppendFile` (`daemon/nserv/NzbGenerator.cpp`).
-pub fn format_nserv_nzb_file(
-    file_size: i64,
-    segment_size: i32,
-    timestamp: i32,
-    base_name: &[u8],
-    relative_path: Option<&[u8]>,
-) -> Vec<u8> {
-    let (seg_count, _) =
-        crate::sysnservhealth::nzbgen_calc_segment_count_and_size(file_size, segment_size, 0);
-    let mut out = Vec::with_capacity((seg_count.max(1) as usize) * 80 + 200);
-    out.extend_from_slice(b"<file poster=\"nserv\" date=\"");
-    out.extend_from_slice(timestamp.to_string().as_bytes());
-    out.extend_from_slice(b"\" subject=\"&quot;");
-    out.extend_from_slice(base_name);
-    out.extend_from_slice(b"&quot; yEnc (1/");
-    out.extend_from_slice(seg_count.to_string().as_bytes());
-    out.extend_from_slice(
-        b")\">\n\
-<groups>\n\
-<group>alt.binaries.test</group>\n\
-</groups>\n\
-<segments>\n",
-    );
-    let mut seg_offset: i64 = 0;
-    for segno in 1..=seg_count {
-        let (_, seg_size) = crate::sysnservhealth::nzbgen_calc_segment_count_and_size(
-            file_size,
-            segment_size,
-            seg_offset,
-        );
-        out.extend_from_slice(b"<segment bytes=\"");
-        out.extend_from_slice(seg_size.to_string().as_bytes());
-        out.extend_from_slice(b"\" number=\"");
-        out.extend_from_slice(segno.to_string().as_bytes());
-        out.extend_from_slice(b"\">");
-        if let Some(rel) = relative_path {
-            out.extend_from_slice(rel);
-            out.push(b'/');
-        }
-        out.extend_from_slice(base_name);
-        out.push(b'?');
-        out.extend_from_slice(segno.to_string().as_bytes());
-        out.push(b'=');
-        out.extend_from_slice(seg_offset.to_string().as_bytes());
-        out.push(b':');
-        out.extend_from_slice(seg_size.to_string().as_bytes());
-        out.extend_from_slice(b"</segment>\n");
-        seg_offset = seg_offset.wrapping_add(seg_size as i64);
-    }
-    out.extend_from_slice(b"</segments>\n</file>\n");
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1037,15 +983,5 @@ mod tests {
 
         let nserv_u = String::from_utf8(format_nserv_usage(b"nzbget")).unwrap();
         assert!(nserv_u.starts_with("Usage:\n nzbget --nserv -d <data-dir>"));
-        let nzb_xml = String::from_utf8(format_nserv_nzb_file(
-            1000,
-            600,
-            1700000000,
-            b"file.bin",
-            Some(b"sub"),
-        ))
-        .unwrap();
-        assert!(nzb_xml.contains("<segment bytes=\"600\" number=\"1\">sub/file.bin?1=0:600</segment>"));
-        assert!(nzb_xml.contains("<segment bytes=\"400\" number=\"2\">sub/file.bin?2=600:400</segment>"));
     }
 }

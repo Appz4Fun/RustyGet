@@ -9,6 +9,52 @@
 /// The reflected CRC-32 polynomial.
 const POLY: u32 = 0xedb8_8320;
 
+const CRC32_TABLE: [u32; 256] = {
+    let mut table = [0u32; 256];
+    let mut i = 0;
+    while i < 256 {
+        let mut c = i as u32;
+        let mut bit = 0;
+        while bit < 8 {
+            c = if c & 1 != 0 { (c >> 1) ^ POLY } else { c >> 1 };
+            bit += 1;
+        }
+        table[i] = c;
+        i += 1;
+    }
+    table
+};
+
+/// Incremental IEEE 802.3 CRC-32 accumulator matching C++ `Crc32`.
+#[derive(Debug, Clone, Copy)]
+pub struct Crc32 {
+    state: u32,
+}
+
+impl Default for Crc32 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Crc32 {
+    pub const fn new() -> Self {
+        Self { state: !0u32 }
+    }
+
+    pub fn append(&mut self, data: &[u8]) {
+        let mut c = self.state;
+        for &b in data {
+            c = CRC32_TABLE[((c as u8) ^ b) as usize] ^ (c >> 8);
+        }
+        self.state = c;
+    }
+
+    pub const fn finish(&self) -> u32 {
+        !self.state
+    }
+}
+
 /// a * b modulo POLY (bit-reflected: bit 31 is x^0).
 const fn mult_mod_p(a: u32, mut b: u32) -> u32 {
     let mut m: u32 = 1 << 31;

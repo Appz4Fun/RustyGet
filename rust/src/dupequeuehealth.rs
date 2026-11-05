@@ -2059,16 +2059,6 @@ pub fn dqh_nntpserver_format_cache_file_name(part: i32, offset: i64, size: i32) 
     format!("{part}={offset}-{size}").into_bytes()
 }
 
-/// Formats `"<data_dir><sep><base_name>.nzb"` for `NzbGenerator::GenerateNzb`.
-pub fn dqh_nzbgen_format_nzb_output_path(data_dir: &[u8], sep: u8, base_name: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(data_dir.len() + 1 + base_name.len() + 4);
-    out.extend_from_slice(data_dir);
-    out.push(sep);
-    out.extend_from_slice(base_name);
-    out.extend_from_slice(b".nzb");
-    out
-}
-
 /// Formats `"LogFile=<log_file>"` for `NServMain`.
 pub fn dqh_nserv_format_logfile_opt(log_file: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(8 + log_file.len());
@@ -2725,95 +2715,6 @@ pub fn dqh_script_config_ensure_trailing_lf(line: &[u8]) -> Vec<u8> {
         out.push(b'\n');
         out
     }
-}
-
-/// Formats `=ybegin part=<part> line=128 size=<file_size> name=<base_filename>\r\n=ypart begin=<offset + 1> end=<offset + size>\r\n`
-/// for `YEncoder::WriteSegment`.
-pub fn dqh_yenc_format_begin_headers(
-    part: i32,
-    file_size: i64,
-    base_filename: &[u8],
-    offset: i64,
-    size: i32,
-) -> Vec<u8> {
-    let part_s = part.to_string();
-    let fsize_s = file_size.to_string();
-    let begin_s = offset.saturating_add(1).to_string();
-    let end_s = offset.saturating_add(i64::from(size)).to_string();
-    let mut out = Vec::with_capacity(
-        48 + part_s.len() + fsize_s.len() + base_filename.len() + begin_s.len() + end_s.len(),
-    );
-    out.extend_from_slice(b"=ybegin part=");
-    out.extend_from_slice(part_s.as_bytes());
-    out.extend_from_slice(b" line=128 size=");
-    out.extend_from_slice(fsize_s.as_bytes());
-    out.extend_from_slice(b" name=");
-    out.extend_from_slice(base_filename);
-    out.extend_from_slice(b"\r\n=ypart begin=");
-    out.extend_from_slice(begin_s.as_bytes());
-    out.extend_from_slice(b" end=");
-    out.extend_from_slice(end_s.as_bytes());
-    out.extend_from_slice(b"\r\n");
-    out
-}
-
-/// Formats `=yend size=<size> part=0 pcrc32=<pcrc32:08x>\r\n` for `YEncoder::WriteSegment`.
-pub fn dqh_yenc_format_end_trailer(size: i32, pcrc32: u32) -> Vec<u8> {
-    format!("=yend size={} part=0 pcrc32={:08x}\r\n", size, pcrc32).into_bytes()
-}
-
-/// Executes one step of the yEnc byte-encoding state machine for `YEncoder::WriteSegment`.
-/// Returns `(bytes_consumed_from_in_slice, need_flush)`.
-pub fn dqh_yenc_encode_chunk_step(
-    in_slice: &[u8],
-    last_block: bool,
-    lnsz: &mut i32,
-    out_slice: &mut [u8],
-    out_len: &mut usize,
-    out_cap: usize,
-) -> (usize, bool) {
-    let len = in_slice.len();
-    for (idx, &raw) in in_slice.iter().enumerate() {
-        let mut ch = raw.wrapping_add(42);
-        let mut cur_off = *out_len + (*lnsz as usize);
-        if matches!(ch, b'\0' | b'\n' | b'\r' | b'=' | b' ' | b'\t') {
-            if cur_off < out_slice.len() {
-                out_slice[cur_off] = b'=';
-            }
-            cur_off += 1;
-            *lnsz += 1;
-            ch = ch.wrapping_add(64);
-        }
-        if ch == b'.' && *lnsz == 0 {
-            if cur_off < out_slice.len() {
-                out_slice[cur_off] = b'.';
-            }
-            cur_off += 1;
-            *lnsz += 1;
-        }
-        if cur_off < out_slice.len() {
-            out_slice[cur_off] = ch;
-        }
-        cur_off += 1;
-        *lnsz += 1;
-
-        if *lnsz >= 128 || (idx + 1 == len && last_block) {
-            if cur_off + 1 < out_slice.len() {
-                out_slice[cur_off] = b'\r';
-                out_slice[cur_off + 1] = b'\n';
-            }
-            *lnsz += 2;
-            *out_len += *lnsz as usize;
-            if *out_len < out_slice.len() {
-                out_slice[*out_len] = 0;
-            }
-            *lnsz = 0;
-            if *out_len > out_cap.saturating_sub(200) {
-                return (idx + 1, true);
-            }
-        }
-    }
-    (len, false)
 }
 
 /// Formats NNTP server reply lines for `NntpProcessor`:
@@ -4384,11 +4285,6 @@ pub fn dqh_direct_unpack_should_delete_temp_unpack_dir(
 /// Returns true when `RenameController::RenameCompleted` should reset `ParRenameStatus` to `rsNone` after requesting extra PAR2 files (`remaining_size > 0`).
 pub fn dqh_rename_ctrl_should_reset_par_rename_status(remaining_size: i64) -> bool {
     remaining_size > 0
-}
-
-/// Returns true when `ParParser::FindMainPars` found at least one main PAR2 file (`has_file_list && !file_list_empty`).
-pub fn dqh_parparser_has_found_main_pars(has_file_list: bool, file_list_empty: bool) -> bool {
-    has_file_list && !file_list_empty
 }
 
 /// Returns true when `ParRenamer::RenameFile` needs to create target directories (`old_path != new_path`).
@@ -6547,10 +6443,6 @@ mod tests {
             b"2=65536-32768"
         );
         assert_eq!(
-            dqh_nzbgen_format_nzb_output_path(b"/data", b'/', b"release"),
-            b"/data/release.nzb"
-        );
-        assert_eq!(
             dqh_nserv_format_logfile_opt(b"/var/log/nserv.log"),
             b"LogFile=/var/log/nserv.log"
         );
@@ -6798,25 +6690,6 @@ mod tests {
             dqh_script_config_ensure_trailing_lf(b"# comment\n"),
             b"# comment\n"
         );
-        assert_eq!(
-            dqh_yenc_format_begin_headers(1, 50000, b"test.dat", 0, 1000),
-            b"=ybegin part=1 line=128 size=50000 name=test.dat\r\n=ypart begin=1 end=1000\r\n"
-        );
-        assert_eq!(
-            dqh_yenc_format_end_trailer(1000, 0x0a1b2c3d),
-            b"=yend size=1000 part=0 pcrc32=0a1b2c3d\r\n"
-        );
-        {
-            let mut lnsz = 0;
-            let mut out = vec![0u8; 256];
-            let mut out_len = 0usize;
-            let (consumed, flush) =
-                dqh_yenc_encode_chunk_step(&[4, b'A', 214], true, &mut lnsz, &mut out, &mut out_len, 256);
-            assert_eq!(consumed, 3);
-            assert!(!flush);
-            assert_eq!(lnsz, 0);
-            assert_eq!(&out[..out_len], b"..k=@\r\n");
-        }
         assert_eq!(
             dqh_nntpserver_format_reply_line(0, b"alt.binaries.test"),
             b"211 0 0 0 alt.binaries.test\r\n"
@@ -7456,9 +7329,6 @@ mod tests {
         assert!(!dqh_direct_unpack_should_delete_temp_unpack_dir(true, false));
         assert!(dqh_rename_ctrl_should_reset_par_rename_status(1024));
         assert!(!dqh_rename_ctrl_should_reset_par_rename_status(0));
-        assert!(dqh_parparser_has_found_main_pars(true, false));
-        assert!(!dqh_parparser_has_found_main_pars(false, false));
-        assert!(!dqh_parparser_has_found_main_pars(true, true));
         assert!(dqh_par_renamer_needs_create_target_dir(b"/a", b"/b"));
         assert!(!dqh_par_renamer_needs_create_target_dir(b"/a", b"/a"));
         assert!(dqh_rar_volume_is_read_handle_ready(100, true));

@@ -21,10 +21,6 @@
 #include "nzbget.h"
 
 #include "FileTypes.h"
-#include "Util.h"
-#include <fstream>
-#include <cstring>
-
 #include "nzbget_rs.h"
 
 namespace FileTypes
@@ -168,36 +164,12 @@ std::string_view SniffExtension(std::span<const uint8_t> header)
 	return std::string_view(ext, len);
 }
 
-}
-
-namespace FileTypes
-{
-
-// Keep native path handling and ifstream read/error semantics on the C++ side.
-// Header classification above is implemented in Rust when enabled.
 std::string_view SniffExtension(const std::filesystem::path& filePath)
 {
-	std::error_code ec;
-	if (!std::filesystem::is_regular_file(filePath, ec))
-	{
-		return "";
-	}
-
-	std::ifstream file(filePath, std::ios::binary);
-	if (!file)
-	{
-		return "";
-	}
-
-	uint8_t buffer[512];
-	file.read(reinterpret_cast<char*>(buffer), sizeof(buffer));
-	std::streamsize bytesRead = file.gcount();
-	if (bytesRead <= 0)
-	{
-		return "";
-	}
-
-	return SniffExtension(std::span<const uint8_t>(buffer, static_cast<size_t>(bytesRead)));
+	const auto& native = filePath.native();
+	size_t len = 0;
+	const char* ext = nzbget_rs_sniff_extension_file(native.c_str(), native.size(), &len);
+	return std::string_view(ext, len);
 }
 
 }

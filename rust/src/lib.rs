@@ -23,6 +23,7 @@ pub mod fsops;
 pub mod json;
 pub mod manifest;
 pub mod nntp;
+pub mod nserv;
 pub mod nzbfile;
 pub mod options;
 pub mod parparser;

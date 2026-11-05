@@ -159,61 +159,6 @@ pub fn cpu_parse_cpuinfo_line(line: &[u8]) -> Option<usize> {
     Some(colon_pos + 1)
 }
 
-/// Port of `YEncoder::OpenFile` range calculation and validation.
-/// Given `size` (`m_size >= 0`), `offset` (`m_offset`), and `file_size` (`m_fileSize`),
-/// returns `(ok, effective_size)`.
-pub fn yenc_validate_open_range(size: i32, offset: i64, file_size: i64) -> (i32, i32) {
-    let eff_size = if size == 0 {
-        (file_size.wrapping_sub(offset).wrapping_add(1)) as i32
-    } else {
-        size
-    };
-    let ok = if file_size < offset.saturating_add(eff_size as i64) {
-        0
-    } else {
-        1
-    };
-    (ok, eff_size)
-}
-
-/// Port of `YEncoder::WriteSegment` buffer size calculations.
-/// Returns `(reserve_size, inbuf_size)`.
-pub fn yenc_calc_segment_buffers(size: i32) -> (i32, i32) {
-    const MAX_BUF: i32 = 16 * 1024 * 1024;
-    let scaled = ((size as f64) * 1.1) as i32;
-    let reserve_size = 2048.max(scaled.min(MAX_BUF));
-    let inbuf_size = size.min(MAX_BUF);
-    (reserve_size, inbuf_size)
-}
-
-/// Port of `NzbGenerator::Execute` `.nzb` filename check.
-/// Returns `true` if `filename.len() > 4` and ends with `.nzb` (ASCII case-insensitive).
-pub fn nzbgen_is_nzb_file(filename: &[u8]) -> bool {
-    const EXT: &[u8] = b".nzb";
-    filename.len() > EXT.len() && filename[filename.len() - EXT.len()..].eq_ignore_ascii_case(EXT)
-}
-
-/// Port of `NzbGenerator::AppendFile` segment count and segment size calculation.
-/// Returns `(segment_count, cur_seg_size)`.
-pub fn nzbgen_calc_segment_count_and_size(
-    file_size: i64,
-    segment_size: i32,
-    seg_offset: i64,
-) -> (i32, i32) {
-    let seg_size_64 = segment_size as i64;
-    let seg_count = if seg_size_64 > 0 {
-        ((file_size + seg_size_64 - 1) / seg_size_64) as i32
-    } else {
-        0
-    };
-    let cur_seg_size = (if seg_offset + seg_size_64 < file_size {
-        seg_size_64
-    } else {
-        file_size - seg_offset
-    }) as i32;
-    (seg_count, cur_seg_size)
-}
-
 /// Port of `NServOpts` verbosity target flag evaluation.
 /// Returns `(mute_info_warn_err, mute_detail, enable_debug)`.
 pub fn nserv_verbosity_flags(verbosity: i32) -> (bool, bool, bool) {
@@ -553,14 +498,6 @@ mod tests {
 
     #[test]
     fn test_nserv_dupesearch_connect_and_post_renamer() {
-        assert_eq!(yenc_validate_open_range(0, 10, 100), (0, 91));
-        assert_eq!(yenc_validate_open_range(50, 10, 100), (1, 50));
-        assert_eq!(yenc_calc_segment_buffers(1000), (2048, 1000));
-
-        assert!(nzbgen_is_nzb_file(b"movie.NZB"));
-        assert!(!nzbgen_is_nzb_file(b".nzb"));
-        assert_eq!(nzbgen_calc_segment_count_and_size(1000, 300, 900), (4, 100));
-
         assert_eq!(nserv_verbosity_flags(0), (true, true, false));
         assert_eq!(nserv_verbosity_flags(2), (false, false, false));
         assert_eq!(nserv_verbosity_flags(3), (false, false, true));

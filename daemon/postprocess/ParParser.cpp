@@ -20,48 +20,8 @@
 
 
 #include "nzbget.h"
-#include "FileSystem.h"
 #include "ParParser.h"
 #include "nzbget_rs.h"
-
-bool ParParser::FindMainPars(const char* path, ParFileList* fileList)
-{
-	if (fileList)
-	{
-		fileList->clear();
-	}
-
-	DirBrowser dir(path);
-	while (const char* filename = dir.Next())
-	{
-		int baseLen = 0;
-		if (ParseParFilename(filename, true, &baseLen, nullptr))
-		{
-			if (!fileList)
-			{
-				return true;
-			}
-
-			// check if the base file already added to list
-			bool exists = false;
-			for (std::string& filename2 : *fileList)
-			{
-				exists = SameParCollection(filename, filename2.c_str(), true);
-				if (exists)
-				{
-					break;
-				}
-			}
-			if (!exists)
-			{
-				fileList->emplace_back(filename);
-			}
-		}
-	}
-	return nzbget_rs_dqh_parparser_has_found_main_pars(
-		fileList != nullptr ? 1 : 0,
-		fileList ? (fileList->empty() ? 1 : 0) : 1) != 0;
-}
 
 int ParParser::FilenameFold(int byte)
 {
@@ -88,6 +48,28 @@ namespace
 		return nullptr;
 #endif
 	}
+
+	void AddParFile(void* ctx, const char* name, size_t len)
+	{
+		static_cast<ParParser::ParFileList*>(ctx)->emplace_back(name, len);
+	}
+}
+
+bool ParParser::FindMainPars(const char* path, ParFileList* fileList)
+{
+	if (fileList)
+	{
+		fileList->clear();
+	}
+	// rust/src/parparser.rs
+	return nzbget_rs_find_main_pars(
+		path,
+		fileList != nullptr ? 1 : 0,
+		ParFilenameTable(),
+		CHAR_MIN < 0,
+		FilenameFold,
+		fileList ? AddParFile : nullptr,
+		fileList) != 0;
 }
 
 bool ParParser::SameParCollection(const char* filename1, const char* filename2, bool confirmedFilenames)

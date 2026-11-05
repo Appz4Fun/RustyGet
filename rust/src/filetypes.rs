@@ -315,6 +315,35 @@ pub fn sniff_extension(h: &[u8]) -> &'static CStr {
     c""
 }
 
+/// FileTypes::SniffExtension(path): reads up to 512 bytes from a regular file
+/// and sniffs its extension.
+pub fn sniff_extension_file(path: &std::path::Path) -> &'static CStr {
+    use std::io::Read;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return c"";
+    };
+    if !meta.is_file() {
+        return c"";
+    }
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return c"";
+    };
+    let mut buf = [0u8; 512];
+    let mut total = 0usize;
+    while total < buf.len() {
+        match file.read(&mut buf[total..]) {
+            Ok(0) => break,
+            Ok(n) => total += n,
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    if total == 0 {
+        return c"";
+    }
+    sniff_extension(&buf[..total])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

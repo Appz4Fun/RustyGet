@@ -221,6 +221,7 @@ NzbgetRsBuf nzbget_rs_deobfuscate(const char* str, size_t len);
 // static lifetime and must not be freed. Panics abort at the ABI boundary.
 int nzbget_rs_file_type(int which, const char* str, size_t len);
 const char* nzbget_rs_sniff_extension(const unsigned char* header, size_t len, size_t* outLen);
+const char* nzbget_rs_sniff_extension_file(const char* path, size_t pathLen, size_t* outLen);
 
 // FileSystem's path texts (rust/src/paths.rs): op 0 MakeValidFilename (flag:
 // allow slashes), 1 SanitizePathSegment, 2 SanitizeRelativePath,
@@ -633,6 +634,8 @@ int nzbget_rs_parse_par_filename(const char* name, int confirmed, int* baseLen, 
 	const int* table, int charSigned, int (*fold)(int));
 int nzbget_rs_same_par_collection(const char* name1, const char* name2, int confirmed,
 	const int* table, int charSigned, int (*fold)(int));
+int nzbget_rs_find_main_pars(const char* path, int collect, const int* table, int charSigned,
+	int (*fold)(int), void (*addFile)(void* ctx, const char* name, size_t len), void* ctx);
 
 // RarVolume's header parsing (rust/src/rarreader.rs). rar_read parses the
 // content source into *state (read and written back) and calls addFile for each
@@ -2253,14 +2256,19 @@ const char* nzbget_rs_snh_cpu_canonical_arch(const char* arch, size_t len);
 int nzbget_rs_snh_cpu_parse_cpuinfo_line(
     const char* line, size_t len, size_t* out_val_offset);
 
-int nzbget_rs_snh_yenc_validate_open_range(
-    int size, int64_t offset, int64_t file_size, int* out_eff_size);
-void nzbget_rs_snh_yenc_calc_segment_buffers(
-    int size, int* out_reserve, int* out_inbuf);
-int nzbget_rs_snh_nzbgen_is_nzb_file(const char* filename);
-void nzbget_rs_snh_nzbgen_calc_segment_count_and_size(
-    int64_t file_size, int segment_size, int64_t seg_offset,
-    int* out_seg_count, int* out_cur_seg_size);
+typedef struct NzbgetRsYEncoderFile NzbgetRsYEncoderFile;
+
+NzbgetRsYEncoderFile* nzbget_rs_yencoder_open(
+    const char* filename, int64_t offset, int* io_size, int64_t* out_file_size,
+    const char** out_errmsg);
+void nzbget_rs_yencoder_free(NzbgetRsYEncoderFile* handle);
+void nzbget_rs_yencoder_write_segment(
+    NzbgetRsYEncoderFile* handle, const char* filename, int part, int64_t offset,
+    int size, int64_t file_size,
+    void (*write_cb)(void* ctx, const char* buf, int size), void* ctx);
+void nzbget_rs_nzb_generator_execute(
+    const char* data_dir, int segment_size,
+    void (*log_cb)(int kind, const char* msg));
 void nzbget_rs_snh_nserv_verbosity_flags(
     int verbosity, int* out_mute_info_warn_err, int* out_mute_detail,
     int* out_enable_debug);
@@ -5153,9 +5161,6 @@ NzbgetRsBuf nzbget_rs_qci_queue_editor_diff_category_extensions(
     const char* old_ext, const char* new_ext);
 
 NzbgetRsBuf nzbget_rs_nserv_format_usage(const char* base_name);
-NzbgetRsBuf nzbget_rs_nserv_format_nzb_file(
-    int64_t file_size, int segment_size, int timestamp,
-    const char* base_name, const char* relative_path);
 
 void nzbget_rs_binrpc_init_message_base(
     uint8_t* out, int request_type, int struct_size,
@@ -5929,8 +5934,6 @@ NzbgetRsBuf nzbget_rs_dqh_statmeter_format_indexed_bytes_line(
     int32_t first_idx, const int64_t* values, size_t count);
 NzbgetRsBuf nzbget_rs_dqh_nntpserver_format_cache_file_name(
     int32_t part, int64_t offset, int32_t size);
-NzbgetRsBuf nzbget_rs_dqh_nzbgen_format_nzb_output_path(
-    const char* data_dir, char sep, const char* base_name);
 NzbgetRsBuf nzbget_rs_dqh_nserv_format_logfile_opt(const char* log_file);
 NzbgetRsBuf nzbget_rs_dqh_nzbfile_format_missing_attrs_msg(const char* tag_name);
 int nzbget_rs_dqh_nzbfile_classify_start_element(const char* name);
@@ -6019,13 +6022,6 @@ void nzbget_rs_dqh_webserver_encode_hex_token(
 NzbgetRsBuf nzbget_rs_dqh_script_config_format_option_line(
     const char* key, size_t key_len, const char* val, size_t val_len);
 NzbgetRsBuf nzbget_rs_dqh_script_config_ensure_trailing_lf(const char* line);
-NzbgetRsBuf nzbget_rs_dqh_yenc_format_begin_headers(
-    int part, int64_t file_size, const char* base_filename,
-    int64_t offset, int size);
-NzbgetRsBuf nzbget_rs_dqh_yenc_format_end_trailer(int size, uint32_t pcrc32);
-size_t nzbget_rs_dqh_yenc_encode_chunk_step(
-    const char* in_buf, size_t in_len, int last_block, int* io_lnsz,
-    char* out_buf, size_t* io_out_len, size_t out_cap, int* out_need_flush);
 NzbgetRsBuf nzbget_rs_dqh_nntpserver_format_reply_line(
     int kind, const char* arg);
 NzbgetRsBuf nzbget_rs_dqh_unpack_format_7z_output_arg(const char* unpack_dir);
@@ -6261,7 +6257,6 @@ int nzbget_rs_dqh_direct_unpack_should_keep_waiting_break(
 int nzbget_rs_dqh_direct_unpack_should_delete_temp_unpack_dir(
     int use_temp_unpack_dir, int dir_exists);
 int nzbget_rs_dqh_rename_ctrl_should_reset_par_rename_status(int64_t remaining_size);
-int nzbget_rs_dqh_parparser_has_found_main_pars(int has_file_list, int file_list_empty);
 int nzbget_rs_dqh_par_renamer_needs_create_target_dir(
     const char* old_path, const char* new_path);
 int nzbget_rs_dqh_rar_volume_is_read_handle_ready(int64_t size, int seek_zero_ok);

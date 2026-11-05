@@ -82,6 +82,59 @@ pub fn same_par_collection<F: Fn(u8) -> u8 + ?Sized>(name1: &CStr, name2: &CStr,
     b1 == b2 && unsafe { strncasecmp(name1.as_ptr(), name2.as_ptr(), b1) } == 0
 }
 
+#[cfg(unix)]
+fn os_str_to_bytes(s: &std::ffi::OsStr) -> &[u8] {
+    use std::os::unix::ffi::OsStrExt;
+    s.as_bytes()
+}
+
+#[cfg(not(unix))]
+fn os_str_to_bytes(s: &std::ffi::OsStr) -> &[u8] {
+    s.to_str().map(str::as_bytes).unwrap_or(b"")
+}
+
+/// ParParser::FindMainPars: scans `dir_path` for confirmed `.par2` files,
+/// deduplicating by par collection base name in directory iteration order.
+/// When `collect` is false, stops and returns `true` as soon as the first
+/// `.par2` file is found. When `collect` is true, invokes `on_file` for each
+/// distinct collection's first `.par2` filename and returns `true` if at least
+/// one was found.
+pub fn find_main_pars<F, G>(
+    dir_path: &std::path::Path,
+    collect: bool,
+    lower: &F,
+    mut on_file: G,
+) -> bool
+where
+    F: Fn(u8) -> u8 + ?Sized,
+    G: FnMut(&[u8]),
+{
+    let Ok(entries) = std::fs::read_dir(dir_path) else {
+        return false;
+    };
+    let mut found: Vec< std::ffi::CString > = Vec::new();
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let name_bytes = os_str_to_bytes(&file_name);
+        let Ok(c_name) = std::ffi::CString::new(name_bytes) else {
+            continue;
+        };
+        if parse_par_filename(c_name.as_bytes(), true, lower).is_some() {
+            if !collect {
+                return true;
+            }
+            if !found
+                .iter()
+                .any(|existing| same_par_collection(&c_name, existing.as_c_str(), true, lower))
+            {
+                on_file(c_name.as_bytes());
+                found.push(c_name);
+            }
+        }
+    }
+    !found.is_empty()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

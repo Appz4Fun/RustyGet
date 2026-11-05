@@ -22,7 +22,8 @@
 #define YENCODER_H
 
 #include "NString.h"
-#include "FileSystem.h"
+
+struct NzbgetRsYEncoderFile;
 
 class YEncoder
 {
@@ -31,11 +32,12 @@ public:
 
 	YEncoder(const char* filename, int part, int64 offset, int size, WriteFunc writeFunc) :
 		m_filename(filename), m_part(part), m_offset(offset), m_size(size), m_fileSize(0), m_writeFunc(writeFunc) {};
+	~YEncoder();
 	bool OpenFile(CString& errmsg);
 	void WriteSegment();
 
 private:
-	DiskFile m_diskfile;
+	NzbgetRsYEncoderFile* m_handle = nullptr;
 	CString m_filename;
 	int m_part;
 	int64 m_offset;

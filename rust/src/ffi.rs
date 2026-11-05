@@ -1046,6 +1046,33 @@ pub unsafe extern "C" fn nzbget_rs_sniff_extension(header: *const u8, len: usize
     static_str(crate::filetypes::sniff_extension(h), out_len)
 }
 
+/// FileTypes::SniffExtension of a file path: a static extension ("" for none),
+/// its length in `out_len`.
+///
+/// # Safety
+/// `path` is null or readable for `path_len` bytes; `out_len` null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_sniff_extension_file(
+    path: *const c_char,
+    path_len: usize,
+    out_len: *mut usize,
+) -> *const c_char {
+    if path.is_null() || path_len == 0 {
+        return static_str(c"", out_len);
+    }
+    let raw = std::slice::from_raw_parts(path.cast::<u8>(), path_len);
+    #[cfg(unix)]
+    let p = {
+        use std::os::unix::ffi::OsStrExt;
+        std::path::Path::new(std::ffi::OsStr::from_bytes(raw))
+    };
+    #[cfg(not(unix))]
+    let p_buf = std::path::PathBuf::from(String::from_utf8_lossy(raw).into_owned());
+    #[cfg(not(unix))]
+    let p = p_buf.as_path();
+    static_str(crate::filetypes::sniff_extension_file(p), out_len)
+}
+
 /// FileSystem's path texts (rust/src/paths.rs): 0 MakeValidFilename (`flag`:
 /// allow slashes), 1 SanitizePathSegment, 2 SanitizeRelativePath,
 /// 3 EscapePathForShell; free the result with nzbget_rs_free.
@@ -2890,6 +2917,41 @@ pub unsafe extern "C" fn nzbget_rs_same_par_collection(name1: *const c_char, nam
     // Each local copy has a trailing NUL, even when the input did not.
     crate::parparser::same_par_collection(CStr::from_ptr(name1.as_ptr().cast()), CStr::from_ptr(name2.as_ptr().cast()), confirmed != 0,
         &lower) as c_int
+}
+
+/// ParParser::FindMainPars: scans `path` for confirmed `.par2` files,
+/// invoking `add_file(ctx, name, len)` for each unique collection when
+/// `collect != 0`.
+///
+/// # Safety
+/// `path` is null or a valid NUL-terminated string; `table` and `fold` follow
+/// `nzbget_rs_parse_par_filename`; `add_file`, if supplied, must not unwind.
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_find_main_pars(
+    path: *const c_char,
+    collect: c_int,
+    table: *const c_int,
+    char_signed: c_int,
+    fold: Option<extern "C" fn(c_int) -> c_int>,
+    add_file: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, usize)>,
+    ctx: *mut std::ffi::c_void,
+) -> c_int {
+    if path.is_null() {
+        return 0;
+    }
+    let Some(fold) = fold else { return 0 };
+    let lower = par_fold(table, char_signed, fold);
+    let dir_path = path_arg(path);
+    i32::from(crate::parparser::find_main_pars(
+        &dir_path,
+        collect != 0,
+        &lower,
+        |name| {
+            if let Some(cb) = add_file {
+                cb(ctx, name.as_ptr().cast(), name.len());
+            }
+        },
+    ))
 }
 
 /// ParParser::FilenameFold: glibc's tolower table read in place for the C++
@@ -13980,63 +14042,96 @@ pub unsafe extern "C" fn nzbget_rs_snh_cpu_parse_cpuinfo_line(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_snh_yenc_validate_open_range(
-    size: c_int,
+pub unsafe extern "C" fn nzbget_rs_yencoder_open(
+    filename: *const c_char,
     offset: i64,
-    file_size: i64,
-    out_eff_size: *mut c_int,
-) -> c_int {
-    let (ok, eff) = crate::sysnservhealth::yenc_validate_open_range(size, offset, file_size);
-    if !out_eff_size.is_null() {
-        *out_eff_size = eff;
+    io_size: *mut c_int,
+    out_file_size: *mut i64,
+    out_errmsg: *mut *const c_char,
+) -> *mut crate::nserv::YEncoderFile {
+    if filename.is_null() || io_size.is_null() || out_file_size.is_null() {
+        if !out_errmsg.is_null() {
+            *out_errmsg = c"File not found".as_ptr();
+        }
+        return std::ptr::null_mut();
     }
-    ok
+    let mut size = *io_size;
+    let mut file_size = *out_file_size;
+    let path = path_arg(filename);
+    let res = crate::nserv::yencoder_open_file(&path, offset, &mut size, &mut file_size);
+    *io_size = size;
+    *out_file_size = file_size;
+    match res {
+        Ok(handle) => {
+            if !out_errmsg.is_null() {
+                *out_errmsg = std::ptr::null();
+            }
+            Box::into_raw(Box::new(handle))
+        }
+        Err(msg) => {
+            if !out_errmsg.is_null() {
+                *out_errmsg = msg.as_ptr();
+            }
+            std::ptr::null_mut()
+        }
+    }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_snh_yenc_calc_segment_buffers(
+pub unsafe extern "C" fn nzbget_rs_yencoder_free(handle: *mut crate::nserv::YEncoderFile) {
+    if !handle.is_null() {
+        drop(Box::from_raw(handle));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_yencoder_write_segment(
+    handle: *mut crate::nserv::YEncoderFile,
+    filename: *const c_char,
+    part: c_int,
+    offset: i64,
     size: c_int,
-    out_reserve: *mut c_int,
-    out_inbuf: *mut c_int,
-) {
-    let (res, inb) = crate::sysnservhealth::yenc_calc_segment_buffers(size);
-    if !out_reserve.is_null() {
-        *out_reserve = res;
-    }
-    if !out_inbuf.is_null() {
-        *out_inbuf = inb;
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_snh_nzbgen_is_nzb_file(filename: *const c_char) -> c_int {
-    let s = if filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(filename).to_bytes()
-    };
-    i32::from(crate::sysnservhealth::nzbgen_is_nzb_file(s))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_snh_nzbgen_calc_segment_count_and_size(
     file_size: i64,
-    segment_size: c_int,
-    seg_offset: i64,
-    out_seg_count: *mut c_int,
-    out_cur_seg_size: *mut c_int,
+    write_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, c_int)>,
+    ctx: *mut std::ffi::c_void,
 ) {
-    let (cnt, sz) = crate::sysnservhealth::nzbgen_calc_segment_count_and_size(
+    if handle.is_null() || filename.is_null() {
+        return;
+    }
+    let Some(cb) = write_cb else { return };
+    let filename_bytes = input(filename);
+    crate::nserv::yencoder_write_segment(
+        &mut *handle,
+        filename_bytes,
+        part,
+        offset,
+        size,
         file_size,
-        segment_size,
-        seg_offset,
+        |chunk| {
+            cb(ctx, chunk.as_ptr().cast(), chunk.len() as c_int);
+        },
     );
-    if !out_seg_count.is_null() {
-        *out_seg_count = cnt;
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nzb_generator_execute(
+    data_dir: *const c_char,
+    segment_size: c_int,
+    log_cb: Option<unsafe extern "C" fn(c_int, *const c_char)>,
+) {
+    if data_dir.is_null() {
+        return;
     }
-    if !out_cur_seg_size.is_null() {
-        *out_cur_seg_size = sz;
-    }
+    let path = path_arg(data_dir);
+    let dir_bytes = input(data_dir);
+    crate::nserv::execute_nzb_generator(&path, dir_bytes, segment_size, |kind, msg| {
+        if let Some(cb) = log_cb {
+            let mut c_msg = Vec::with_capacity(msg.len() + 1);
+            c_msg.extend_from_slice(msg);
+            c_msg.push(0);
+            cb(kind as c_int, c_msg.as_ptr().cast());
+        }
+    });
 }
 
 #[no_mangle]
@@ -29006,28 +29101,6 @@ pub unsafe extern "C" fn nzbget_rs_nserv_format_usage(base_name: *const c_char) 
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nserv_format_nzb_file(
-    file_size: i64,
-    segment_size: c_int,
-    timestamp: c_int,
-    base_name: *const c_char,
-    relative_path: *const c_char,
-) -> RsBuf {
-    let rel = if relative_path.is_null() {
-        None
-    } else {
-        Some(input(relative_path))
-    };
-    into_buf(crate::cmdline::format_nserv_nzb_file(
-        file_size,
-        segment_size,
-        timestamp,
-        input(base_name),
-        rel,
-    ))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_binrpc_init_message_base(
     out: *mut u8,
     request_type: c_int,
@@ -34888,27 +34961,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_nntpserver_format_cache_file_name(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_nzbgen_format_nzb_output_path(
-    data_dir: *const c_char,
-    sep: c_char,
-    base_name: *const c_char,
-) -> RsBuf {
-    let d = if data_dir.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(data_dir).to_bytes()
-    };
-    let b = if base_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(base_name).to_bytes()
-    };
-    into_buf(crate::dupequeuehealth::dqh_nzbgen_format_nzb_output_path(
-        d, sep as u8, b,
-    ))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_nserv_format_logfile_opt(
     log_file: *const c_char,
 ) -> RsBuf {
@@ -35828,69 +35880,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_script_config_ensure_trailing_lf(
         CStr::from_ptr(line).to_bytes()
     };
     into_buf(crate::dupequeuehealth::dqh_script_config_ensure_trailing_lf(l))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_yenc_format_begin_headers(
-    part: c_int,
-    file_size: i64,
-    base_filename: *const c_char,
-    offset: i64,
-    size: c_int,
-) -> RsBuf {
-    let bf = if base_filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(base_filename).to_bytes()
-    };
-    into_buf(crate::dupequeuehealth::dqh_yenc_format_begin_headers(
-        part, file_size, bf, offset, size,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_yenc_format_end_trailer(
-    size: c_int,
-    pcrc32: u32,
-) -> RsBuf {
-    into_buf(crate::dupequeuehealth::dqh_yenc_format_end_trailer(size, pcrc32))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_yenc_encode_chunk_step(
-    in_buf: *const c_char,
-    in_len: usize,
-    last_block: c_int,
-    io_lnsz: *mut c_int,
-    out_buf: *mut c_char,
-    io_out_len: *mut usize,
-    out_cap: usize,
-    out_need_flush: *mut c_int,
-) -> usize {
-    if in_buf.is_null() || in_len == 0 || io_lnsz.is_null() || out_buf.is_null() || io_out_len.is_null() {
-        if !out_need_flush.is_null() {
-            *out_need_flush = 0;
-        }
-        return 0;
-    }
-    let in_slice = std::slice::from_raw_parts(in_buf as *const u8, in_len);
-    let out_slice = std::slice::from_raw_parts_mut(out_buf as *mut u8, out_cap);
-    let mut lnsz = *io_lnsz;
-    let mut out_len = *io_out_len;
-    let (consumed, flush) = crate::dupequeuehealth::dqh_yenc_encode_chunk_step(
-        in_slice,
-        last_block != 0,
-        &mut lnsz,
-        out_slice,
-        &mut out_len,
-        out_cap,
-    );
-    *io_lnsz = lnsz;
-    *io_out_len = out_len;
-    if !out_need_flush.is_null() {
-        *out_need_flush = i32::from(flush);
-    }
-    consumed
 }
 
 #[no_mangle]
@@ -37791,19 +37780,6 @@ pub extern "C" fn nzbget_rs_dqh_rename_ctrl_should_reset_par_rename_status(
 ) -> c_int {
     i32::from(
         crate::dupequeuehealth::dqh_rename_ctrl_should_reset_par_rename_status(remaining_size),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_parparser_has_found_main_pars(
-    has_file_list: c_int,
-    file_list_empty: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_parparser_has_found_main_pars(
-            has_file_list != 0,
-            file_list_empty != 0,
-        ),
     )
 }
 

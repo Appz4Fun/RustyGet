@@ -22,7 +22,6 @@
 #define NZBGENERATOR_H
 
 #include "NString.h"
-#include "FileSystem.h"
 
 class NzbGenerator
 {
@@ -34,10 +33,6 @@ public:
 private:
 	CString m_dataDir;
 	int m_segmentSize;
-
-	void GenerateNzb(const char* path);
-	void AppendFile(DiskFile& outfile, const char* filename, const char* relativePath);
-	void AppendDir(DiskFile& outfile, const char* path);
 };
 
 #endif

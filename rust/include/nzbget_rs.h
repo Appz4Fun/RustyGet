@@ -2795,10 +2795,6 @@ void nzbget_rs_cdn_stream_repair_credit_repaired_sizes(
 
 int nzbget_rs_cdn_twin_check_eval_sample_verdict(
     int is_stopped, int compared, int differ, int sample_count);
-int nzbget_rs_cdn_par_damage_calc_queued_volume_blocks(
-    int parsed_blocks, int64_t file_size, uint64_t block_size);
-int nzbget_rs_cdn_par_damage_calc_completed_volume_blocks(
-    int parsed_blocks, int64_t disk_size, uint64_t block_size);
 
 int nzbget_rs_cdn_article_fetcher_eval_decoded_yenc(
     int check_status, int ds_finished, int format, int ef_yenc,
@@ -3454,8 +3450,6 @@ int nzbget_rs_psp_rar_renamer_calc_stage_progress(
     int file_count, int cur_file);
 void nzbget_rs_psp_rar_renamer_calc_old_extension_parts(
     int volume_no, uint8_t* out_ch, int* out_num);
-int nzbget_rs_psp_dupematcher_is_content_match(
-    int64_t dupe_max_size, int64_t max_size, int dupe_compressed, int compressed);
 int nzbget_rs_psp_rename_ctrl_eval_par_rename_config(
     int unpack_status, int us_success, int us_none, int final_dir_empty,
     int* out_detect_missing);
@@ -3819,10 +3813,6 @@ int nzbget_rs_dcf_stream_repair_can_add_candidate(
     int already_present);
 int nzbget_rs_dcf_stream_repair_is_positional_rank_applicable(
     int positional_rank, int positional_window, size_t window_len);
-int64_t nzbget_rs_dcf_par_damage_estimate_unarrived_decoded_size(int64_t file_size);
-int nzbget_rs_dcf_par_damage_desc_matches_file_damage(
-    uint64_t block_size, uint64_t max_par2_block_size, const char* desc_name,
-    const char* damage_name, int64_t damage_size, uint64_t desc_length);
 int nzbget_rs_dcf_nzbfile_should_fallback_meta_name_to_title(
     int meta_name_empty, int meta_title_empty);
 
@@ -5751,7 +5741,6 @@ NzbgetRsBuf nzbget_rs_tpr_unpack_ctrl_format_cancel_msg(const char* info_name);
 NzbgetRsBuf nzbget_rs_tpr_rar_renamer_format_exec_progress(const char* info_name);
 NzbgetRsBuf nzbget_rs_tpr_rar_renamer_format_file_progress(const char* filename);
 NzbgetRsBuf nzbget_rs_dqh_content_map_format_member_unreadable_reason(const char* name);
-const char* nzbget_rs_dqh_dupematcher_size_mismatch_suffix(int32_t ok);
 const char* nzbget_rs_dqh_post_renamer_plan_skip_static_msg(
     int32_t is_post_unpack, int32_t plan_class);
 NzbgetRsBuf nzbget_rs_dqh_post_renamer_format_final_status_msg(
@@ -5873,7 +5862,6 @@ NzbgetRsBuf nzbget_rs_tpr_queue_coord_join_queued_filenames(
 NzbgetRsBuf nzbget_rs_dqh_dupe_probe_format_stat_cmd(const char* message_id);
 const char* nzbget_rs_dqh_dupe_probe_recheck_retry_suffix(int32_t retry);
 const char* nzbget_rs_dqh_dupe_probe_found_on_prefix(int32_t found_on_empty);
-int64_t nzbget_rs_dqh_par_damage_calc_total_data_bytes(int64_t size, int64_t par_size);
 const char* nzbget_rs_dqh_twin_check_sample_verdict_label(int32_t verdict);
 NzbgetRsBuf nzbget_rs_dqh_twin_check_format_u32_str(uint32_t val);
 NzbgetRsBuf nzbget_rs_dqh_twin_check_lowercase_key(const char* dupe_key);
@@ -6265,7 +6253,6 @@ int nzbget_rs_dqh_rar_volume_is_decrypt_buf_valid(int evp_ok, int out_len);
 int nzbget_rs_dqh_rar_renamer_should_ignore_file(int has_ignore_ext, int matched_ext);
 int nzbget_rs_dqh_dupematcher_should_wait_rar_lister(
     int is_running, int64_t start_time, int timeout_sec, int64_t cur_time);
-int nzbget_rs_dqh_dupematcher_is_larger_file(int64_t file_size, int64_t cur_max_size);
 int nzbget_rs_dqh_content_map_can_map_cipher_range(
     int64_t offset, int64_t size, size_t cryptos_len, size_t runs_len);
 int nzbget_rs_dqh_content_mapper_classify_unreadable_rar_vol(
@@ -6505,9 +6492,6 @@ int nzbget_rs_dqh_dupe_probe_should_disconnect_after_probe(
     int is_stopped, int conn_status, int cs_cancelled);
 int nzbget_rs_dqh_url_coord_should_wait_on_cond(
     int has_more_jobs, int is_stopped);
-int nzbget_rs_dqh_par_damage_classify_completed_file(
-    int is_par, int failed_plus_missed, int64_t decoded_size,
-    int success_articles);
 int nzbget_rs_dqh_feed_coord_has_available_url_slot(
     size_t active_downloads_count, int url_connections);
 int nzbget_rs_dqh_feed_coord_should_cache_preview_items(
@@ -6553,6 +6537,72 @@ int nzbget_rs_dqh_xmlrpc_should_parse_json_post_test_server(
     int is_json, int has_request, int http_method, int hm_post);
 int nzbget_rs_dqh_xmlrpc_classify_start_script_param_mode(
     int is_json, int has_p1, int has_p2, int has_p3, int has_p4);
+
+typedef struct NzbgetRsParDamageQueuedFile {
+    const char* filename;
+    int confirmed;
+    int64_t size;
+} NzbgetRsParDamageQueuedFile;
+
+typedef struct NzbgetRsParDamageCompletedFile {
+    const char* filename;
+    int not_failed;
+} NzbgetRsParDamageCompletedFile;
+
+typedef struct NzbgetRsParDamageVerdict {
+    int known;
+    uint64_t block_size;
+    int damaged_blocks;
+    int recovery_blocks;
+    int64_t done_bytes;
+    int64_t total_bytes;
+    int projected_blocks;
+} NzbgetRsParDamageVerdict;
+
+void nzbget_rs_par_damage_file_completed(
+    int nzb_id,
+    int is_par,
+    int failed_plus_missed,
+    int64_t decoded_size,
+    int success_articles,
+    int64_t file_size,
+    const char* filename,
+    const NzbgetRsByteRange* holes,
+    size_t holes_count);
+
+int nzbget_rs_par_damage_has_damage(int nzb_id);
+
+void nzbget_rs_par_damage_judge(
+    int nzb_id,
+    const char* dest_dir,
+    int64_t nzb_size,
+    int64_t nzb_par_size,
+    const NzbgetRsParDamageQueuedFile* queued,
+    size_t queued_count,
+    const NzbgetRsParDamageCompletedFile* completed,
+    size_t completed_count,
+    const int* tolower_table,
+    int char_is_signed,
+    int (*fold)(int),
+    NzbgetRsParDamageVerdict* out_verdict);
+
+int nzbget_rs_par_damage_first_report(int nzb_id);
+void nzbget_rs_par_damage_forget(int nzb_id);
+
+void nzbget_rs_dupematcher_find_largest_file(
+    const char* directory,
+    char* filename_buf,
+    int buf_len,
+    int64_t* out_max_size,
+    int* out_compressed,
+    int aliases_member_max,
+    int64_t expected_rar_size,
+    void (*rar_lister_cb)(void* ctx, char* filename_buf, int buf_len, int64_t expected_size, int64_t* out_max_size, int* out_compressed),
+    void* rar_lister_ctx);
+
+const char* nzbget_rs_dupematcher_size_mismatch_suffix(int ok);
+int nzbget_rs_dupematcher_is_content_match(
+    int64_t dupe_max_size, int64_t max_size, int dupe_compressed, int compressed);
 
 #include "nzbget_tls_cipher.h"
 

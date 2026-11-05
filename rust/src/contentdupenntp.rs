@@ -463,48 +463,6 @@ pub fn twin_check_eval_sample_verdict(
     }
 }
 
-/// `ParDamage::Judge`:
-/// Computes the recovery blocks contributed by a PAR2 volume file in the queue
-/// (`blocks >= 0 ? blocks : file_size * 100 / 102 / (block_size + 68)`).
-pub fn par_damage_calc_queued_volume_blocks(
-    parsed_blocks: i32,
-    file_size: i64,
-    block_size: u64,
-) -> i32 {
-    if parsed_blocks >= 0 {
-        parsed_blocks
-    } else {
-        let denom = block_size.saturating_add(68) as i64;
-        if denom <= 0 {
-            0
-        } else {
-            ((file_size.saturating_mul(100) / 102) / denom) as i32
-        }
-    }
-}
-
-/// `ParDamage::Judge`:
-/// Computes the recovery blocks contributed by a completed PAR2 volume file on disk
-/// (`blocks >= 0 ? blocks : disk_size > 0 ? disk_size / (block_size + 68) : 0`).
-pub fn par_damage_calc_completed_volume_blocks(
-    parsed_blocks: i32,
-    disk_size: i64,
-    block_size: u64,
-) -> i32 {
-    if parsed_blocks >= 0 {
-        parsed_blocks
-    } else if disk_size > 0 {
-        let denom = block_size.saturating_add(68) as i64;
-        if denom <= 0 {
-            0
-        } else {
-            (disk_size / denom) as i32
-        }
-    } else {
-        0
-    }
-}
-
 /// `ArticleFetcher::FetchFromConnection`:
 /// Validates a completed yEnc decode in `ArticleFetcher` and computes
 /// `(valid, offset, file_size, success)`.

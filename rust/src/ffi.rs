@@ -17719,32 +17719,6 @@ pub extern "C" fn nzbget_rs_cdn_twin_check_eval_sample_verdict(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_cdn_par_damage_calc_queued_volume_blocks(
-    parsed_blocks: c_int,
-    file_size: i64,
-    block_size: u64,
-) -> c_int {
-    crate::contentdupenntp::par_damage_calc_queued_volume_blocks(
-        parsed_blocks,
-        file_size,
-        block_size,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_cdn_par_damage_calc_completed_volume_blocks(
-    parsed_blocks: c_int,
-    disk_size: i64,
-    block_size: u64,
-) -> c_int {
-    crate::contentdupenntp::par_damage_calc_completed_volume_blocks(
-        parsed_blocks,
-        disk_size,
-        block_size,
-    )
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_cdn_article_fetcher_eval_decoded_yenc(
     check_status: c_int,
     ds_finished: c_int,
@@ -22202,21 +22176,6 @@ pub unsafe extern "C" fn nzbget_rs_psp_rar_renamer_calc_old_extension_parts(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_psp_dupematcher_is_content_match(
-    dupe_max_size: i64,
-    max_size: i64,
-    dupe_compressed: c_int,
-    compressed: c_int,
-) -> c_int {
-    i32::from(crate::poolstatprepost::dupematcher_is_content_match(
-        dupe_max_size,
-        max_size,
-        dupe_compressed != 0,
-        compressed != 0,
-    ))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_psp_rename_ctrl_eval_par_rename_config(
     unpack_status: c_int,
     us_success: c_int,
@@ -24395,32 +24354,6 @@ pub extern "C" fn nzbget_rs_dcf_stream_repair_is_positional_rank_applicable(
         positional_rank,
         positional_window,
         window_len,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dcf_par_damage_estimate_unarrived_decoded_size(
-    file_size: i64,
-) -> i64 {
-    crate::dupecoordfallbackstream::par_damage_estimate_unarrived_decoded_size(file_size)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dcf_par_damage_desc_matches_file_damage(
-    block_size: u64,
-    max_par2_block_size: u64,
-    desc_name: *const c_char,
-    damage_name: *const c_char,
-    damage_size: i64,
-    desc_length: u64,
-) -> c_int {
-    crate::dupecoordfallbackstream::par_damage_desc_matches_file_damage(
-        block_size,
-        max_par2_block_size,
-        crate::queuehotpath::cstr_to_bytes(desc_name),
-        crate::queuehotpath::cstr_to_bytes(damage_name),
-        damage_size,
-        desc_length,
     )
 }
 
@@ -33269,13 +33202,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_content_map_format_member_unreadable_reas
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_dupematcher_size_mismatch_suffix(
-    ok: i32,
-) -> *const c_char {
-    crate::dupequeuehealth::dqh_dupematcher_size_mismatch_suffix(ok != 0).as_ptr() as *const c_char
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_post_renamer_plan_skip_static_msg(
     is_post_unpack: i32,
     plan_class: i32,
@@ -34411,14 +34337,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_dupe_probe_found_on_prefix(
 ) -> *const c_char {
     crate::dupequeuehealth::dqh_dupe_probe_found_on_prefix(found_on_empty != 0).as_ptr()
         as *const c_char
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_par_damage_calc_total_data_bytes(
-    size: i64,
-    par_size: i64,
-) -> i64 {
-    crate::dupequeuehealth::dqh_par_damage_calc_total_data_bytes(size, par_size)
 }
 
 #[no_mangle]
@@ -37865,17 +37783,6 @@ pub extern "C" fn nzbget_rs_dqh_dupematcher_should_wait_rar_lister(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupematcher_is_larger_file(
-    file_size: i64,
-    cur_max_size: i64,
-) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_dupematcher_is_larger_file(
-        file_size,
-        cur_max_size,
-    ))
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_content_map_can_map_cipher_range(
     offset: i64,
     size: i64,
@@ -39629,21 +39536,6 @@ pub extern "C" fn nzbget_rs_dqh_url_coord_should_wait_on_cond(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_par_damage_classify_completed_file(
-    is_par: c_int,
-    failed_plus_missed: c_int,
-    decoded_size: i64,
-    success_articles: c_int,
-) -> c_int {
-    crate::dupequeuehealth::dqh_par_damage_classify_completed_file(
-        is_par != 0,
-        failed_plus_missed,
-        decoded_size,
-        success_articles,
-    )
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_feed_coord_has_available_url_slot(
     active_downloads_count: usize,
     url_connections: c_int,
@@ -39954,6 +39846,253 @@ pub extern "C" fn nzbget_rs_dqh_xmlrpc_classify_start_script_param_mode(
     )
 }
 
+#[repr(C)]
+pub struct NzbgetRsParDamageQueuedFile {
+    pub filename: *const c_char,
+    pub confirmed: c_int,
+    pub size: i64,
+}
 
+#[repr(C)]
+pub struct NzbgetRsParDamageCompletedFile {
+    pub filename: *const c_char,
+    pub not_failed: c_int,
+}
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_damage_file_completed(
+    nzb_id: c_int,
+    is_par: c_int,
+    failed_plus_missed: c_int,
+    decoded_size: i64,
+    success_articles: c_int,
+    file_size: i64,
+    filename: *const c_char,
+    holes: *const crate::dupefallback::NzbgetRsByteRange,
+    holes_count: usize,
+) {
+    let fname = if filename.is_null() {
+        b""
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    let holes_slice = if holes.is_null() || holes_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(holes, holes_count)
+    };
+    crate::pardamage::file_completed(
+        nzb_id,
+        is_par != 0,
+        failed_plus_missed,
+        decoded_size,
+        success_articles,
+        file_size,
+        fname,
+        holes_slice,
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_par_damage_has_damage(nzb_id: c_int) -> c_int {
+    i32::from(crate::pardamage::has_damage(nzb_id))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_damage_judge(
+    nzb_id: c_int,
+    dest_dir: *const c_char,
+    nzb_size: i64,
+    nzb_par_size: i64,
+    queued: *const NzbgetRsParDamageQueuedFile,
+    queued_count: usize,
+    completed: *const NzbgetRsParDamageCompletedFile,
+    completed_count: usize,
+    tolower_table: *const c_int,
+    char_is_signed: c_int,
+    fold: Option<extern "C" fn(c_int) -> c_int>,
+    out_verdict: *mut crate::pardamage::ParDamageVerdictC,
+) {
+    if out_verdict.is_null() {
+        return;
+    }
+    let dir_bytes = if dest_dir.is_null() {
+        b""
+    } else {
+        CStr::from_ptr(dest_dir).to_bytes()
+    };
+    #[cfg(unix)]
+    let dir_path = {
+        use std::os::unix::ffi::OsStrExt;
+        std::path::Path::new(std::ffi::OsStr::from_bytes(dir_bytes))
+    };
+    #[cfg(not(unix))]
+    let dir_path = std::path::Path::new(std::str::from_utf8(dir_bytes).unwrap_or(""));
+
+    let mut q_vec = Vec::with_capacity(queued_count);
+    if !queued.is_null() && queued_count > 0 {
+        for q in std::slice::from_raw_parts(queued, queued_count) {
+            let fname = if q.filename.is_null() {
+                &[][..]
+            } else {
+                CStr::from_ptr(q.filename).to_bytes()
+            };
+            q_vec.push(crate::pardamage::QueuedParCandidate {
+                filename: fname,
+                confirmed: q.confirmed != 0,
+                size: q.size,
+            });
+        }
+    }
+
+    let mut c_vec = Vec::with_capacity(completed_count);
+    if !completed.is_null() && completed_count > 0 {
+        for c in std::slice::from_raw_parts(completed, completed_count) {
+            let fname = if c.filename.is_null() {
+                &[][..]
+            } else {
+                CStr::from_ptr(c.filename).to_bytes()
+            };
+            c_vec.push(crate::pardamage::CompletedParCandidate {
+                filename: fname,
+                not_failed: c.not_failed != 0,
+            });
+        }
+    }
+
+    let verdict = match fold {
+        Some(f) => {
+            let lower = par_fold(tolower_table, char_is_signed, f);
+            crate::pardamage::judge(
+                nzb_id,
+                dir_path,
+                nzb_size,
+                nzb_par_size,
+                &q_vec,
+                &c_vec,
+                &lower,
+            )
+        }
+        None => crate::pardamage::judge(
+            nzb_id,
+            dir_path,
+            nzb_size,
+            nzb_par_size,
+            &q_vec,
+            &c_vec,
+            &|b| b.to_ascii_lowercase(),
+        ),
+    };
+
+    *out_verdict = verdict;
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_par_damage_first_report(nzb_id: c_int) -> c_int {
+    i32::from(crate::pardamage::first_report(nzb_id))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_par_damage_forget(nzb_id: c_int) {
+    crate::pardamage::forget(nzb_id);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupematcher_find_largest_file(
+    directory: *const c_char,
+    filename_buf: *mut c_char,
+    buf_len: c_int,
+    out_max_size: *mut i64,
+    out_compressed: *mut c_int,
+    aliases_member_max: c_int,
+    expected_rar_size: i64,
+    rar_lister_cb: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            *mut c_char,
+            c_int,
+            i64,
+            *mut i64,
+            *mut c_int,
+        ),
+    >,
+    rar_lister_ctx: *mut std::ffi::c_void,
+) {
+    if directory.is_null() {
+        return;
+    }
+    let dir_bytes = CStr::from_ptr(directory).to_bytes();
+    #[cfg(unix)]
+    let dir_path = {
+        use std::os::unix::ffi::OsStrExt;
+        std::path::Path::new(std::ffi::OsStr::from_bytes(dir_bytes))
+    };
+    #[cfg(not(unix))]
+    let dir_path = std::path::Path::new(std::str::from_utf8(dir_bytes).unwrap_or(""));
+
+    let mut local_buf = vec![0u8; buf_len.max(0) as usize];
+    let mut max_size: i64 = 0;
+    let mut compressed = false;
+    let exp_opt = if aliases_member_max != 0 {
+        None
+    } else {
+        Some(expected_rar_size)
+    };
+
+    crate::pardamage::find_largest_file(
+        dir_path,
+        &mut local_buf,
+        &mut max_size,
+        &mut compressed,
+        exp_opt,
+        |fbuf, exp_sz, m_sz, comp| {
+            if let Some(cb) = rar_lister_cb {
+                let mut c_comp: c_int = i32::from(*comp);
+                cb(
+                    rar_lister_ctx,
+                    fbuf.as_mut_ptr() as *mut c_char,
+                    fbuf.len() as c_int,
+                    exp_sz,
+                    m_sz,
+                    &mut c_comp,
+                );
+                *comp = c_comp != 0;
+            }
+        },
+    );
+
+    if !filename_buf.is_null() && !local_buf.is_empty() {
+        std::ptr::copy_nonoverlapping(
+            local_buf.as_ptr() as *const c_char,
+            filename_buf,
+            local_buf.len(),
+        );
+    }
+    if !out_max_size.is_null() {
+        *out_max_size = max_size;
+    }
+    if !out_compressed.is_null() {
+        *out_compressed = i32::from(compressed);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dupematcher_size_mismatch_suffix(ok: c_int) -> *const c_char {
+    crate::pardamage::size_mismatch_suffix(ok != 0).as_ptr() as *const c_char
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dupematcher_is_content_match(
+    dupe_max_size: i64,
+    max_size: i64,
+    dupe_compressed: c_int,
+    compressed: c_int,
+) -> c_int {
+    i32::from(crate::pardamage::is_dupe_content_match(
+        dupe_max_size,
+        max_size,
+        dupe_compressed != 0,
+        compressed != 0,
+    ))
+}
 

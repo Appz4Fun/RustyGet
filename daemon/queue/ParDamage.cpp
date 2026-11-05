@@ -18,79 +18,50 @@
 
 #include "nzbget.h"
 
-#include <algorithm>
-#include <map>
 #include <vector>
 #include "ParDamage.h"
 #include "DupeArticleFallback.h"
 #include "ParParser.h"
-#include "FileSystem.h"
 #include "nzbget_rs.h"
 
 namespace
 {
 
-struct FileDamage
+const int* ParFilenameTable()
 {
-	std::string name;
-	int64 size = 0;			// decoded size, 0 if no article arrived
-	StreamRangeList holes;
-};
-
-struct State
-{
-	std::vector<FileDamage> files;
-	int64 doneBytes = 0;	// nzb sizes (encoded) of the data files finished
-	int parFilesDone = 0;	// par2-files finished: the set is read again when it changes
-	int parFilesRead = -1;
-	std::vector<DupeArticleFallback::Par2Desc> par2;
-	bool reported = false;
-};
-
-// by download id; only touched under the queue guard
-std::map<int, State> g_states;
+#ifdef __GLIBC__
+	return reinterpret_cast<const int*>(*__ctype_tolower_loc());
+#else
+	return nullptr;
+#endif
+}
 
 }
 
 void ParDamage::FileCompleted(NzbInfo* nzbInfo, FileInfo* fileInfo, const std::string& filename)
 {
-	State& state = g_states[nzbInfo->GetId()];
+	static_assert(sizeof(StreamRange) == sizeof(NzbgetRsByteRange) &&
+		offsetof(StreamRange, Offset) == offsetof(NzbgetRsByteRange, offset) &&
+		offsetof(StreamRange, Size) == offsetof(NzbgetRsByteRange, size),
+		"StreamRange layout must match NzbgetRsByteRange");
+	bool isPar = fileInfo->GetParFile() || DupeArticleFallback::IsParFile(fileInfo);
+	int failedPlusMissed = fileInfo->GetFailedArticles() + fileInfo->GetMissedArticles();
 	int64 decodedSize = fileInfo->GetDecodedFileSize();
-	int fileClass = nzbget_rs_dqh_par_damage_classify_completed_file(
-		(fileInfo->GetParFile() || DupeArticleFallback::IsParFile(fileInfo)) ? 1 : 0,
-		fileInfo->GetFailedArticles() + fileInfo->GetMissedArticles(),
+	StreamRangeList holes;
+	if (!isPar && failedPlusMissed > 0 && decodedSize > 0)
+	{
+		holes = DupeStreamRepair::ComputeHoles(fileInfo);
+	}
+	nzbget_rs_par_damage_file_completed(
+		nzbInfo->GetId(),
+		isPar ? 1 : 0,
+		failedPlusMissed,
 		decodedSize,
-		fileInfo->GetSuccessArticles());
-	if (fileClass == 1)
-	{
-		state.parFilesDone++;
-		return;
-	}
-
-	state.doneBytes += fileInfo->GetSize();
-	if (fileClass == 2 || fileClass == 5)
-	{
-		return;
-	}
-
-	FileDamage damage;
-	damage.name = FileSystem::BaseFileName(filename.c_str());
-	if (fileClass == 3)
-	{
-		// the bytes no arrived article covers: exact (borrowed articles count)
-		damage.size = decodedSize;
-		damage.holes = DupeStreamRepair::ComputeHoles(fileInfo);
-	}
-	else
-	{
-		// nothing arrived: the whole file (its length comes from par2 if named there)
-		damage.holes = { { 0, nzbget_rs_dcf_par_damage_estimate_unarrived_decoded_size(fileInfo->GetSize()) } };
-	}
-
-	if (!damage.holes.empty())
-	{
-		state.files.push_back(std::move(damage));
-	}
+		fileInfo->GetSuccessArticles(),
+		fileInfo->GetSize(),
+		filename.c_str(),
+		holes.empty() ? nullptr : reinterpret_cast<const NzbgetRsByteRange*>(holes.data()),
+		holes.size());
 }
 
 int ParDamage::BlocksTouched(const StreamRangeList& holes, uint64 blockSize)
@@ -107,110 +78,63 @@ int ParDamage::BlocksTouched(const StreamRangeList& holes, uint64 blockSize)
 ParDamage::Verdict ParDamage::Judge(NzbInfo* nzbInfo)
 {
 	Verdict verdict;
-	auto it = g_states.find(nzbInfo->GetId());
-	if (it == g_states.end() || it->second.files.empty())
+	if (!nzbget_rs_par_damage_has_damage(nzbInfo->GetId()))
 	{
 		return verdict;
 	}
-	State& state = it->second;
 
-	if (state.parFilesRead != state.parFilesDone)
-	{
-		state.par2 = DupeArticleFallback::ListPar2Files(nzbInfo->GetDestDir());
-		state.parFilesRead = state.parFilesDone;
-	}
-
-	// the damaged files the par2 set describes (by name, or by length when a
-	// rename came after): files it doesn't cover (.nfo, .sfv) don't count
-	for (const FileDamage& damage : state.files)
-	{
-		const DupeArticleFallback::Par2Desc* match = nullptr;
-		for (const DupeArticleFallback::Par2Desc& desc : state.par2)
-		{
-			// a block size no real set uses (a damaged or crafted packet) isn't trusted
-			if (nzbget_rs_dcf_par_damage_desc_matches_file_damage(
-				desc.blockSize, (uint64)DupeArticleFallback::MaxPar2BlockSize,
-				desc.name.c_str(), damage.name.c_str(),
-				damage.size, desc.length) != 0)
-			{
-				match = &desc;
-				break;
-			}
-		}
-		if (!match)
-		{
-			continue;
-		}
-		if (verdict.blockSize == 0)
-		{
-			verdict.blockSize = match->blockSize;
-		}
-		if (damage.size > 0)
-		{
-			verdict.damagedBlocks += BlocksTouched(damage.holes, match->blockSize);
-		}
-		else
-		{
-			verdict.damagedBlocks += BlocksTouched({ { 0, (int64)match->length } }, match->blockSize);
-		}
-	}
-	if (verdict.blockSize == 0)
-	{
-		return verdict;
-	}
-	verdict.known = true;
-
-	// recovery blocks in every par2 volume, counted whole (an error here can only
-	// keep a download, never give one up): by the count its name gives, or by
-	// its size (a recovery packet is a block and 68 bytes; nzb sizes are encoded)
-	uint64 blockSize = verdict.blockSize;
+	std::vector<NzbgetRsParDamageQueuedFile> queued;
+	queued.reserve(nzbInfo->GetFileList()->size());
 	for (FileInfo* fileInfo : nzbInfo->GetFileList())
 	{
-		int blocks = 0;
-		if (ParParser::ParseParFilename(fileInfo->GetFilename(), fileInfo->GetFilenameConfirmed(), nullptr, &blocks))
-		{
-			verdict.recoveryBlocks += nzbget_rs_cdn_par_damage_calc_queued_volume_blocks(
-				blocks, fileInfo->GetSize(), blockSize);
-		}
-	}
-	for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
-	{
-		int blocks = 0;
-		if (completedFile.GetStatus() != CompletedFile::cfFailure &&
-			ParParser::ParseParFilename(completedFile.GetFilename(), true, nullptr, &blocks))
-		{
-			if (blocks < 0)
-			{
-				NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-					nzbInfo->GetDestDir(), PATH_SEPARATOR, completedFile.GetFilename());
-				BString<1024> path;
-				path.Set(pathBuf.data ? pathBuf.data : "", (int)pathBuf.len);
-				nzbget_rs_free(pathBuf);
-				int64 size = FileSystem::FileSize(path);
-				blocks = nzbget_rs_cdn_par_damage_calc_completed_volume_blocks(blocks, size, blockSize);
-			}
-			verdict.recoveryBlocks += blocks;
-		}
+		queued.push_back({
+			fileInfo->GetFilename(),
+			fileInfo->GetFilenameConfirmed() ? 1 : 0,
+			fileInfo->GetSize()
+		});
 	}
 
-	verdict.doneBytes = state.doneBytes;
-	verdict.totalBytes = nzbget_rs_dqh_par_damage_calc_total_data_bytes(
-		nzbInfo->GetSize(), nzbInfo->GetParSize());
-	nzbget_rs_par_damage_project(verdict.known ? 1 : 0, verdict.damagedBlocks,
-		verdict.recoveryBlocks, verdict.doneBytes, verdict.totalBytes,
-		&verdict.projectedBlocks, nullptr, nullptr);
+	std::vector<NzbgetRsParDamageCompletedFile> completed;
+	completed.reserve(nzbInfo->GetCompletedFiles()->size());
+	for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
+	{
+		completed.push_back({
+			completedFile.GetFilename(),
+			completedFile.GetStatus() != CompletedFile::cfFailure ? 1 : 0
+		});
+	}
+
+	NzbgetRsParDamageVerdict rsVerdict{};
+	nzbget_rs_par_damage_judge(
+		nzbInfo->GetId(),
+		nzbInfo->GetDestDir(),
+		nzbInfo->GetSize(),
+		nzbInfo->GetParSize(),
+		queued.empty() ? nullptr : queued.data(),
+		queued.size(),
+		completed.empty() ? nullptr : completed.data(),
+		completed.size(),
+		ParFilenameTable(),
+		CHAR_MIN < 0,
+		ParParser::FilenameFold,
+		&rsVerdict);
+
+	verdict.known = rsVerdict.known != 0;
+	verdict.blockSize = rsVerdict.block_size;
+	verdict.damagedBlocks = rsVerdict.damaged_blocks;
+	verdict.recoveryBlocks = rsVerdict.recovery_blocks;
+	verdict.doneBytes = rsVerdict.done_bytes;
+	verdict.totalBytes = rsVerdict.total_bytes;
+	verdict.projectedBlocks = rsVerdict.projected_blocks;
 	return verdict;
 }
 
 bool ParDamage::FirstReport(int nzbId)
 {
-	State& state = g_states[nzbId];
-	bool first = !state.reported;
-	state.reported = true;
-	return first;
+	return nzbget_rs_par_damage_first_report(nzbId) != 0;
 }
 
 void ParDamage::Forget(int nzbId)
 {
-	g_states.erase(nzbId);
+	nzbget_rs_par_damage_forget(nzbId);
 }

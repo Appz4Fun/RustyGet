@@ -1252,15 +1252,6 @@ pub fn dqh_content_map_format_member_unreadable_reason(name: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Returns `b""` or `b", size mismatch"` for `DupeMatcher::Prepare` and `DupeMatcher::MatchDupeContent`.
-pub fn dqh_dupematcher_size_mismatch_suffix(ok: bool) -> &'static [u8] {
-    if ok {
-        b"\0"
-    } else {
-        b", size mismatch\0"
-    }
-}
-
 /// Returns the static skip/warning message for `PostDownloadRenamer::Controller::Run`
 /// and `PostUnpackRenamer::Controller::Run` when `plan_class` is `1`, `2`, or `3`.
 pub fn dqh_post_renamer_plan_skip_static_msg(
@@ -1706,11 +1697,6 @@ pub fn dqh_dupe_probe_found_on_prefix(found_on_empty: bool) -> &'static [u8] {
     } else {
         b", found on \0"
     }
-}
-
-/// Computes `max(0, size - par_size)` for `ParDamage::Judge`.
-pub fn dqh_par_damage_calc_total_data_bytes(size: i64, par_size: i64) -> i64 {
-    (size - par_size).max(0)
 }
 
 /// Returns `"alt"` (`verdict == 2`) or `"twin"` for `TwinCheckJob::Sample`.
@@ -4322,11 +4308,6 @@ pub fn dqh_dupematcher_should_wait_rar_lister(
     is_running && start_time + i64::from(timeout_sec) > cur_time && start_time >= cur_time
 }
 
-/// Returns true when `DupeMatcher::FindLargestFile` found a new largest file (`file_size > cur_max_size`).
-pub fn dqh_dupematcher_is_larger_file(file_size: i64, cur_max_size: i64) -> bool {
-    file_size > cur_max_size
-}
-
 /// Returns true when `ContentMap::MapCipherRange` arguments and state are valid (`offset >= 0 && size > 0 && cryptos_len == runs_len`).
 pub fn dqh_content_map_can_map_cipher_range(
     offset: i64,
@@ -5426,28 +5407,6 @@ pub fn dqh_url_coord_should_wait_on_cond(has_more_jobs: bool, is_stopped: bool) 
     !has_more_jobs && !is_stopped
 }
 
-/// Classifies how `ParDamage::FileCompleted` handles a completed file:
-/// `1` = par file (`parFilesDone++`), `2` = undamaged data file, `3` = damaged with decoded size (`ComputeHoles`),
-/// `4` = unarrived whole file (`success_articles == 0`), `5` = articles disagreed on size.
-pub fn dqh_par_damage_classify_completed_file(
-    is_par: bool,
-    failed_plus_missed: i32,
-    decoded_size: i64,
-    success_articles: i32,
-) -> i32 {
-    if is_par {
-        1
-    } else if failed_plus_missed == 0 {
-        2
-    } else if decoded_size > 0 {
-        3
-    } else if success_articles == 0 {
-        4
-    } else {
-        5
-    }
-}
-
 /// Returns true when `FeedCoordinator::Run` has an available URL download slot (`(active_downloads_count as i32) < url_connections`).
 pub fn dqh_feed_coord_has_available_url_slot(
     active_downloads_count: usize,
@@ -6127,11 +6086,6 @@ mod tests {
             dqh_content_map_format_member_unreadable_reason(b"video.mkv"),
             b"member video.mkv unreadable"
         );
-        assert_eq!(dqh_dupematcher_size_mismatch_suffix(true), b"\0");
-        assert_eq!(
-            dqh_dupematcher_size_mismatch_suffix(false),
-            b", size mismatch\0"
-        );
         assert_eq!(
             dqh_post_renamer_plan_skip_static_msg(false, 2),
             b"Skipping Post-download renaming: ambiguous multi-file collection detected\0"
@@ -6306,8 +6260,6 @@ mod tests {
         );
         assert_eq!(dqh_dupe_probe_found_on_prefix(true), b"\0");
         assert_eq!(dqh_dupe_probe_found_on_prefix(false), b", found on \0");
-        assert_eq!(dqh_par_damage_calc_total_data_bytes(1000, 300), 700);
-        assert_eq!(dqh_par_damage_calc_total_data_bytes(200, 300), 0);
         assert_eq!(dqh_twin_check_sample_verdict_label(2), b"alt\0");
         assert_eq!(dqh_twin_check_sample_verdict_label(1), b"twin\0");
         assert_eq!(dqh_twin_check_format_u32_str(4294967295), b"4294967295");
@@ -7346,8 +7298,6 @@ mod tests {
         assert!(dqh_dupematcher_should_wait_rar_lister(true, 1000, 60, 1000));
         assert!(!dqh_dupematcher_should_wait_rar_lister(true, 1000, 60, 1020));
         assert!(!dqh_dupematcher_should_wait_rar_lister(true, 1000, 60, 1060));
-        assert!(dqh_dupematcher_is_larger_file(500, 400));
-        assert!(!dqh_dupematcher_is_larger_file(400, 400));
         assert!(dqh_content_map_can_map_cipher_range(0, 16, 3, 3));
         assert!(!dqh_content_map_can_map_cipher_range(-1, 16, 3, 3));
         assert!(!dqh_content_map_can_map_cipher_range(0, 0, 3, 3));
@@ -7769,11 +7719,6 @@ mod tests {
         assert!(dqh_url_coord_should_wait_on_cond(false, false));
         assert!(!dqh_url_coord_should_wait_on_cond(true, false));
         assert!(!dqh_url_coord_should_wait_on_cond(false, true));
-        assert_eq!(dqh_par_damage_classify_completed_file(true, 1, 100, 5), 1);
-        assert_eq!(dqh_par_damage_classify_completed_file(false, 0, 100, 5), 2);
-        assert_eq!(dqh_par_damage_classify_completed_file(false, 2, 100, 5), 3);
-        assert_eq!(dqh_par_damage_classify_completed_file(false, 2, 0, 0), 4);
-        assert_eq!(dqh_par_damage_classify_completed_file(false, 2, 0, 5), 5);
         assert!(dqh_feed_coord_has_available_url_slot(2, 3));
         assert!(!dqh_feed_coord_has_available_url_slot(3, 3));
         assert!(dqh_feed_coord_should_cache_preview_items(false, 30, b"cid"));

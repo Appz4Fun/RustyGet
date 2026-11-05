@@ -141,6 +141,27 @@ void RarLister::AddMessage(Message::EKind kind, const char* text)
 }
 
 
+namespace
+{
+
+struct RarListerCtx
+{
+	DupeMatcher* owner;
+	const char* directory;
+};
+
+void OnRarArchive(void* rawCtx, char* filenameBuf, int bufLen, int64 expectedSize,
+	int64* outMaxSize, int* outCompressed)
+{
+	RarListerCtx* ctx = static_cast<RarListerCtx*>(rawCtx);
+	bool comp = *outCompressed != 0;
+	RarLister::FindLargestFile(ctx->owner, ctx->directory, filenameBuf, bufLen,
+		expectedSize, 60, outMaxSize, &comp);
+	*outCompressed = comp ? 1 : 0;
+}
+
+}
+
 bool DupeMatcher::SizeDiffOK(int64 size1, int64 size2, int maxDiffPercent)
 {
 	return nzbget_rs_dupematcher_size_diff_ok(size1, size2, maxDiffPercent) != 0;
@@ -152,7 +173,7 @@ bool DupeMatcher::Prepare()
 	FindLargestFile(m_destDir, filename, sizeof(filename), &m_maxSize, &m_compressed);
 	bool sizeOK = SizeDiffOK(m_maxSize, m_expectedSize, 20);
 	PrintMessage(Message::mkDetail, "Found main file %s with size %" PRIi64 " bytes%s",
-		filename, m_maxSize, nzbget_rs_dqh_dupematcher_size_mismatch_suffix(sizeOK ? 1 : 0));
+		filename, m_maxSize, nzbget_rs_dupematcher_size_mismatch_suffix(sizeOK ? 1 : 0));
 	return sizeOK;
 }
 
@@ -162,41 +183,27 @@ bool DupeMatcher::MatchDupeContent(const char* dupeDir)
 	bool dupeCompressed = false;
 	char filename[1024];
 	FindLargestFile(dupeDir, filename, sizeof(filename), &dupeMaxSize, &dupeCompressed);
-	bool ok = nzbget_rs_psp_dupematcher_is_content_match(
+	bool ok = nzbget_rs_dupematcher_is_content_match(
 		dupeMaxSize, m_maxSize, dupeCompressed ? 1 : 0, m_compressed ? 1 : 0) != 0;
 	PrintMessage(Message::mkDetail, "Found main file %s with size %" PRIi64 " bytes%s",
-		filename, m_maxSize, nzbget_rs_dqh_dupematcher_size_mismatch_suffix(ok ? 1 : 0));
+		filename, m_maxSize, nzbget_rs_dupematcher_size_mismatch_suffix(ok ? 1 : 0));
 	return ok;
 }
 
 void DupeMatcher::FindLargestFile(const char* directory, char* filenameBuf, int bufLen,
 	int64* maxSize, bool* compressed)
 {
-	*maxSize = 0;
-	*compressed = false;
-
-	DirBrowser dir(directory);
-	while (const char* filename = dir.Next())
-	{
-		NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-			directory, PATH_SEPARATOR, filename);
-		BString<1024> fullFilename;
-		fullFilename.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
-		nzbget_rs_free(fullFnBuf);
-
-		int64 fileSize = FileSystem::FileSize(fullFilename);
-		if (nzbget_rs_dqh_dupematcher_is_larger_file(fileSize, *maxSize) != 0)
-		{
-			*maxSize = fileSize;
-			strncpy(filenameBuf, filename, bufLen);
-			filenameBuf[bufLen-1] = '\0';
-		}
-
-		if (Util::MatchFileExt(filename, ".rar", ","))
-		{
-			RarLister::FindLargestFile(this, directory, filenameBuf, bufLen,
-				m_maxSize, 60, maxSize, compressed);
-			return;
-		}
-	}
+	RarListerCtx ctx{ this, directory };
+	int comp = 0;
+	nzbget_rs_dupematcher_find_largest_file(
+		directory,
+		filenameBuf,
+		bufLen,
+		maxSize,
+		&comp,
+		maxSize == &m_maxSize ? 1 : 0,
+		m_maxSize,
+		OnRarArchive,
+		&ctx);
+	*compressed = comp != 0;
 }

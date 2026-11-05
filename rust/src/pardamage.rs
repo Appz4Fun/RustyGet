@@ -1,0 +1,517 @@
+//! End-to-end Rust implementations of:
+//! - `ParDamage` (`daemon/queue/ParDamage.cpp`): per-download PAR2 block damage
+//!   tracking, recovery block counting, and early failure projection.
+//! - `DupeMatcher` (`daemon/postprocess/DupeMatcher.cpp`): directory scanning for
+//!   the largest file, RAR archive inspection handoff, and size comparison.
+
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::{LazyLock, Mutex};
+
+use crate::dupefallback::{blocks_touched, list_par2_files, project_par_damage, NzbgetRsByteRange};
+
+pub const MAX_PAR2_BLOCK_SIZE: u64 = 256 * 1024 * 1024;
+
+#[derive(Debug, Clone)]
+pub struct FileDamage {
+    pub name: Vec<u8>,
+    pub size: i64,
+    pub holes: Vec<NzbgetRsByteRange>,
+}
+
+#[derive(Debug, Default)]
+pub struct ParDamageState {
+    pub files: Vec<FileDamage>,
+    pub done_bytes: i64,
+    pub par_files_done: i32,
+    pub par_files_read: i32,
+    pub par2: Vec<(Vec<u8>, u64, u64)>,
+    pub reported: bool,
+}
+
+impl ParDamageState {
+    pub fn new() -> Self {
+        Self {
+            files: Vec::new(),
+            done_bytes: 0,
+            par_files_done: 0,
+            par_files_read: -1,
+            par2: Vec::new(),
+            reported: false,
+        }
+    }
+}
+
+static STATES: LazyLock<Mutex<HashMap<i32, ParDamageState>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn base_file_name(path: &[u8]) -> &[u8] {
+    path.iter()
+        .rposition(|&b| b == b'/' || b == b'\\')
+        .map_or(path, |pos| &path[pos + 1..])
+}
+
+/// Estimates the decoded hole size (`file_size * 100 / 102`) for a file with zero
+/// arrived articles in `ParDamage::FileCompleted`.
+#[inline]
+pub fn estimate_unarrived_decoded_size(file_size: i64) -> i64 {
+    file_size.wrapping_mul(100) / 102
+}
+
+/// Evaluates whether a `Par2Desc` entry matches a `FileDamage` entry in `ParDamage::Judge`.
+#[inline]
+pub fn desc_matches_file_damage(
+    block_size: u64,
+    max_par2_block_size: u64,
+    desc_name: &[u8],
+    damage_name: &[u8],
+    damage_size: i64,
+    desc_length: u64,
+) -> bool {
+    block_size > 0
+        && block_size % 4 == 0
+        && block_size <= max_par2_block_size
+        && (desc_name == damage_name || (damage_size > 0 && (desc_length as i64) == damage_size))
+}
+
+/// Computes the recovery blocks contributed by a PAR2 volume file in the queue.
+#[inline]
+pub fn calc_queued_volume_blocks(parsed_blocks: i32, file_size: i64, block_size: u64) -> i32 {
+    if parsed_blocks >= 0 {
+        parsed_blocks
+    } else {
+        let denom = block_size.saturating_add(68) as i64;
+        if denom <= 0 {
+            0
+        } else {
+            ((file_size.saturating_mul(100) / 102) / denom) as i32
+        }
+    }
+}
+
+/// Computes the recovery blocks contributed by a completed PAR2 volume file on disk.
+#[inline]
+pub fn calc_completed_volume_blocks(parsed_blocks: i32, disk_size: i64, block_size: u64) -> i32 {
+    if parsed_blocks >= 0 {
+        parsed_blocks
+    } else if disk_size > 0 {
+        let denom = block_size.saturating_add(68) as i64;
+        if denom <= 0 {
+            0
+        } else {
+            (disk_size / denom) as i32
+        }
+    } else {
+        0
+    }
+}
+
+/// Records completion of a file in `ParDamage::FileCompleted`.
+#[allow(clippy::too_many_arguments)]
+pub fn file_completed(
+    nzb_id: i32,
+    is_par: bool,
+    failed_plus_missed: i32,
+    decoded_size: i64,
+    success_articles: i32,
+    file_size: i64,
+    filename: &[u8],
+    holes: &[NzbgetRsByteRange],
+) {
+    let mut guard = STATES.lock().unwrap_or_else(|e| e.into_inner());
+    let state = guard.entry(nzb_id).or_insert_with(ParDamageState::new);
+
+    if is_par {
+        state.par_files_done += 1;
+        return;
+    }
+
+    state.done_bytes = state.done_bytes.wrapping_add(file_size);
+    if failed_plus_missed == 0 {
+        return;
+    }
+
+    let name = base_file_name(filename).to_vec();
+    let damage = if decoded_size > 0 {
+        FileDamage {
+            name,
+            size: decoded_size,
+            holes: holes.to_vec(),
+        }
+    } else if success_articles == 0 {
+        FileDamage {
+            name,
+            size: 0,
+            holes: vec![NzbgetRsByteRange {
+                offset: 0,
+                size: estimate_unarrived_decoded_size(file_size),
+            }],
+        }
+    } else {
+        return;
+    };
+
+    if !damage.holes.is_empty() {
+        state.files.push(damage);
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ParDamageVerdictC {
+    pub known: i32,
+    pub block_size: u64,
+    pub damaged_blocks: i32,
+    pub recovery_blocks: i32,
+    pub done_bytes: i64,
+    pub total_bytes: i64,
+    pub projected_blocks: i32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct QueuedParCandidate<'a> {
+    pub filename: &'a [u8],
+    pub confirmed: bool,
+    pub size: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CompletedParCandidate<'a> {
+    pub filename: &'a [u8],
+    pub not_failed: bool,
+}
+
+#[cfg(unix)]
+fn bytes_to_os_str(bytes: &[u8]) -> &std::ffi::OsStr {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::OsStr::from_bytes(bytes)
+}
+
+#[cfg(not(unix))]
+fn bytes_to_path_buf(bytes: &[u8]) -> std::path::PathBuf {
+    std::path::PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
+}
+
+/// Fast check used by `ParDamage::Judge` to avoid snapshotting queued/completed
+/// file lists when no damaged files have been recorded for `nzb_id`.
+pub fn has_damage(nzb_id: i32) -> bool {
+    let guard = STATES.lock().unwrap_or_else(|e| e.into_inner());
+    guard.get(&nzb_id).is_some_and(|s| !s.files.is_empty())
+}
+
+/// Evaluates `ParDamage::Judge` for download `nzb_id`.
+pub fn judge<F>(
+    nzb_id: i32,
+    dest_dir: &Path,
+    nzb_size: i64,
+    nzb_par_size: i64,
+    queued: &[QueuedParCandidate<'_>],
+    completed: &[CompletedParCandidate<'_>],
+    lower: &F,
+) -> ParDamageVerdictC
+where
+    F: Fn(u8) -> u8 + ?Sized,
+{
+    let mut verdict = ParDamageVerdictC::default();
+    let mut guard = STATES.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(state) = guard.get_mut(&nzb_id) else {
+        return verdict;
+    };
+    if state.files.is_empty() {
+        return verdict;
+    }
+
+    if state.par_files_read != state.par_files_done {
+        state.par2 = list_par2_files(dest_dir);
+        state.par_files_read = state.par_files_done;
+    }
+
+    for damage in &state.files {
+        let mut matched: Option<&(Vec<u8>, u64, u64)> = None;
+        for desc in &state.par2 {
+            if desc_matches_file_damage(
+                desc.2,
+                MAX_PAR2_BLOCK_SIZE,
+                &desc.0,
+                &damage.name,
+                damage.size,
+                desc.1,
+            ) {
+                matched = Some(desc);
+                break;
+            }
+        }
+        let Some(m) = matched else {
+            continue;
+        };
+        if verdict.block_size == 0 {
+            verdict.block_size = m.2;
+        }
+        if damage.size > 0 {
+            verdict.damaged_blocks += blocks_touched(&damage.holes, m.2);
+        } else {
+            verdict.damaged_blocks += blocks_touched(
+                &[NzbgetRsByteRange {
+                    offset: 0,
+                    size: m.1 as i64,
+                }],
+                m.2,
+            );
+        }
+    }
+
+    if verdict.block_size == 0 {
+        return verdict;
+    }
+    verdict.known = 1;
+
+    let block_size = verdict.block_size;
+    for q in queued {
+        if let Some((_, blocks)) = crate::parparser::parse_par_filename(q.filename, q.confirmed, lower) {
+            verdict.recovery_blocks += calc_queued_volume_blocks(blocks, q.size, block_size);
+        }
+    }
+    for c in completed {
+        if !c.not_failed {
+            continue;
+        }
+        if let Some((_, mut blocks)) = crate::parparser::parse_par_filename(c.filename, true, lower) {
+            if blocks < 0 {
+                #[cfg(unix)]
+                let full_path = dest_dir.join(bytes_to_os_str(c.filename));
+                #[cfg(not(unix))]
+                let full_path = dest_dir.join(bytes_to_path_buf(c.filename));
+                let disk_size = std::fs::metadata(&full_path)
+                    .ok()
+                    .filter(|m| !m.is_dir())
+                    .map(|m| m.len() as i64)
+                    .unwrap_or(-1);
+                blocks = calc_completed_volume_blocks(blocks, disk_size, block_size);
+            }
+            verdict.recovery_blocks += blocks;
+        }
+    }
+
+    verdict.done_bytes = state.done_bytes;
+    verdict.total_bytes = nzb_size.wrapping_sub(nzb_par_size).max(0);
+    let (proj, _, _) = project_par_damage(
+        true,
+        verdict.damaged_blocks,
+        verdict.recovery_blocks,
+        verdict.done_bytes,
+        verdict.total_bytes,
+    );
+    verdict.projected_blocks = proj;
+    verdict
+}
+
+/// `ParDamage::FirstReport`: returns `true` the first time called for `nzb_id`, `false` thereafter.
+pub fn first_report(nzb_id: i32) -> bool {
+    let mut guard = STATES.lock().unwrap_or_else(|e| e.into_inner());
+    let state = guard.entry(nzb_id).or_insert_with(ParDamageState::new);
+    let first = !state.reported;
+    state.reported = true;
+    first
+}
+
+/// `ParDamage::Forget`: removes any stored state for `nzb_id`.
+pub fn forget(nzb_id: i32) {
+    let mut guard = STATES.lock().unwrap_or_else(|e| e.into_inner());
+    guard.remove(&nzb_id);
+}
+
+// ---- DupeMatcher (`daemon/postprocess/DupeMatcher.cpp`) ----
+
+#[cfg(unix)]
+fn os_str_bytes(s: &std::ffi::OsStr) -> &[u8] {
+    use std::os::unix::ffi::OsStrExt;
+    s.as_bytes()
+}
+
+#[cfg(not(unix))]
+fn os_str_bytes(s: &std::ffi::OsStr) -> &[u8] {
+    s.to_str().map(str::as_bytes).unwrap_or(b"")
+}
+
+/// Scans `directory` for the largest file (`DupeMatcher::FindLargestFile`).
+/// If any `.rar` file is encountered, delegates to `on_rar_archive(rar_expected_size)`
+/// and stops scanning immediately. When `expected_rar_size` is `None` (`Prepare()`),
+/// `rar_expected_size` tracks the live `*max_size` accumulated so far; when `Some(sz)`
+/// (`MatchDupeContent()`), `rar_expected_size` uses the prepared `m_maxSize`.
+pub fn find_largest_file<R>(
+    directory: &Path,
+    filename_buf: &mut [u8],
+    max_size: &mut i64,
+    compressed: &mut bool,
+    expected_rar_size: Option<i64>,
+    mut on_rar_archive: R,
+) where
+    R: FnMut(&mut [u8], i64, &mut i64, &mut bool),
+{
+    *max_size = 0;
+    *compressed = false;
+
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let entry_path = entry.path();
+        let file_size = std::fs::metadata(&entry_path)
+            .ok()
+            .filter(|m| !m.is_dir())
+            .map(|m| m.len() as i64)
+            .unwrap_or(-1);
+
+        let file_name = entry.file_name();
+        let name_bytes = os_str_bytes(&file_name);
+
+        if file_size > *max_size {
+            *max_size = file_size;
+            if !filename_buf.is_empty() {
+                let copy_len = name_bytes.len().min(filename_buf.len() - 1);
+                filename_buf[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+                for b in &mut filename_buf[copy_len..] {
+                    *b = 0;
+                }
+            }
+        }
+
+        if crate::filetypes::is_rar_ext(crate::filetypes::file_extension(name_bytes)) {
+            let rar_expected = expected_rar_size.unwrap_or(*max_size);
+            on_rar_archive(filename_buf, rar_expected, max_size, compressed);
+            return;
+        }
+    }
+}
+
+/// Returns the suffix logged by `DupeMatcher::Prepare` and `DupeMatcher::MatchDupeContent`.
+pub fn size_mismatch_suffix(ok: bool) -> &'static std::ffi::CStr {
+    if ok {
+        c""
+    } else {
+        c", size mismatch"
+    }
+}
+
+/// Evaluates `DupeMatcher::MatchDupeContent`'s size and compression match condition.
+pub fn is_dupe_content_match(
+    dupe_max_size: i64,
+    max_size: i64,
+    dupe_compressed: bool,
+    compressed: bool,
+) -> bool {
+    dupe_max_size == max_size && dupe_compressed == compressed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_par_damage_end_to_end() {
+        let dir = std::env::temp_dir().join(format!("rustyget_pardamage_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let nzb_id = 999_123;
+        forget(nzb_id);
+        assert!(!has_damage(nzb_id));
+        assert!(first_report(nzb_id));
+        assert!(!first_report(nzb_id));
+
+        // Record a completed PAR2 file and a damaged data file
+        file_completed(nzb_id, true, 0, 1000, 1, 1020, b"movie.par2", &[]);
+        assert!(!has_damage(nzb_id));
+        file_completed(
+            nzb_id,
+            false,
+            2,
+            10_000,
+            8,
+            10_200,
+            b"/tmp/movie.mkv",
+            &[NzbgetRsByteRange {
+                offset: 0,
+                size: 4000,
+            }],
+        );
+        assert!(has_damage(nzb_id));
+
+        // Without par2 packets on disk, Judge returns unknown
+        let v = judge(
+            nzb_id,
+            &dir,
+            20_000,
+            2_000,
+            &[],
+            &[],
+            &|b: u8| b.to_ascii_lowercase(),
+        );
+        assert_eq!(v.known, 0);
+
+        forget(nzb_id);
+        assert!(first_report(nzb_id));
+        forget(nzb_id);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_find_largest_file_and_dupe_match() {
+        let dir = std::env::temp_dir().join(format!("rustyget_dupematcher_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(dir.join("small.nfo"), vec![b'a'; 100]).unwrap();
+        std::fs::write(dir.join("main.mkv"), vec![b'b'; 5000]).unwrap();
+
+        let mut buf = [0u8; 128];
+        let mut max_size = 0;
+        let mut compressed = false;
+        find_largest_file(
+            &dir,
+            &mut buf,
+            &mut max_size,
+            &mut compressed,
+            None,
+            |_, _, _, _| unreachable!("no rar files"),
+        );
+        assert_eq!(max_size, 5000);
+        assert!(!compressed);
+        let name_end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        assert_eq!(&buf[..name_end], b"main.mkv");
+        assert!(is_dupe_content_match(5000, 5000, false, false));
+        assert!(!is_dupe_content_match(5000, 4500, false, false));
+        assert!(!is_dupe_content_match(5000, 5000, true, false));
+
+        // Verify live vs prepared expected_rar_size when a .rar file is present
+        std::fs::write(dir.join("archive.rar"), vec![b'r'; 200]).unwrap();
+        let mut seen_live = -1;
+        find_largest_file(
+            &dir,
+            &mut buf,
+            &mut max_size,
+            &mut compressed,
+            None,
+            |_, exp_sz, _, _| {
+                seen_live = exp_sz;
+            },
+        );
+        assert!(seen_live >= 200);
+
+        let mut seen_prepared = -1;
+        find_largest_file(
+            &dir,
+            &mut buf,
+            &mut max_size,
+            &mut compressed,
+            Some(99_999),
+            |_, exp_sz, _, _| {
+                seen_prepared = exp_sz;
+            },
+        );
+        assert_eq!(seen_prepared, 99_999);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

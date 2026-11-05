@@ -26,6 +26,7 @@ pub mod nntp;
 pub mod nserv;
 pub mod nzbfile;
 pub mod options;
+pub mod pardamage;
 pub mod parparser;
 pub mod parrenamer;
 pub mod paths;

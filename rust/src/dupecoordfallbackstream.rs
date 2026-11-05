@@ -318,35 +318,6 @@ pub fn stream_repair_is_positional_rank_applicable(
     }
 }
 
-/// Estimates the decoded hole size (`file_size * 100 / 102`) for a file with zero
-/// arrived articles in `ParDamage::FileCompleted`.
-#[inline]
-pub fn par_damage_estimate_unarrived_decoded_size(file_size: i64) -> i64 {
-    file_size.wrapping_mul(100) / 102
-}
-
-/// Evaluates whether a `Par2Desc` entry matches a `FileDamage` entry in
-/// `ParDamage::Judge`.
-#[inline]
-pub fn par_damage_desc_matches_file_damage(
-    block_size: u64,
-    max_par2_block_size: u64,
-    desc_name: &[u8],
-    damage_name: &[u8],
-    damage_size: i64,
-    desc_length: u64,
-) -> i32 {
-    if block_size > 0
-        && block_size % 4 == 0
-        && block_size <= max_par2_block_size
-        && (desc_name == damage_name || (damage_size > 0 && (desc_length as i64) == damage_size))
-    {
-        1
-    } else {
-        0
-    }
-}
-
 /// Evaluates whether `NzbFile::ProcessFiles` should fall back to `m_metaTitle` when
 /// `m_metaName` is empty.
 #[inline]
@@ -436,11 +407,6 @@ mod tests {
         assert_eq!(stream_repair_can_add_candidate(4, 4, 0, 0), 0);
         assert_eq!(stream_repair_is_positional_rank_applicable(2, 5, 5), 1);
         assert_eq!(stream_repair_is_positional_rank_applicable(5, 5, 5), 0);
-        assert_eq!(par_damage_estimate_unarrived_decoded_size(10200), 10000);
-        assert_eq!(
-            par_damage_desc_matches_file_damage(2048, 65536, b"a.rar", b"b.rar", 5000, 5000),
-            1
-        );
         assert_eq!(nzbfile_should_fallback_meta_name_to_title(1, 0), 1);
         assert_eq!(nzbfile_should_fallback_meta_name_to_title(0, 0), 0);
     }

@@ -780,7 +780,7 @@ where
         .min(fallback_rounds.len())
         .min(segment_offsets.len())
         .min(segment_sizes.len());
-    let borrowed = |i: usize| donor_ids[i] != 0 || fallback_rounds[i] > 0;
+    let borrowed = |i: usize| donor_ids[i] > 0 || fallback_rounds[i] > 0;
     if !(0..n).any(|i| statuses[i] == ARTICLE_STATUS_FINISHED && borrowed(i)) {
         return Vec::new();
     }
@@ -796,27 +796,20 @@ where
     }
     let hash16k = hash16k_of(path);
     let sums = files.values().find(|s| {
-        crate::dupecoordfallbackstream::dupe_fallback_par2_sums_entry_matches(
-            s.length,
-            file_size,
-            i32::from(s.crcs.is_empty()),
-            &s.hash16k,
-            &hash16k,
-            &s.name,
-            filename,
-        ) != 0
+        s.length == (file_size as u64)
+            && !s.crcs.is_empty()
+            && (s.hash16k.eq_ignore_ascii_case(&hash16k) || s.name == filename)
     });
     let Some(sums) = sums else {
         return Vec::new();
     };
     let block_size = sums.block_size;
-    if !crate::pardupenzb::dupe_fallback_is_valid_par2_block_spec(
-        true,
-        block_size,
-        MAX_PAR2_BLOCK_SIZE,
-        sums.crcs.len(),
-        file_size,
-    ) {
+    if block_size == 0
+        || block_size % 4 != 0
+        || block_size > MAX_PAR2_BLOCK_SIZE
+        || (sums.crcs.len() as u64)
+            < (file_size as u64).wrapping_add(block_size - 1) / block_size
+    {
         return Vec::new();
     }
 
@@ -1170,6 +1163,356 @@ pub fn article_downloader_validate_yenc(
     Ok((article_offset, article_size))
 }
 
+/// `DupeArticleFallback::IsParFile`:
+/// Checks whether a file is a PAR2 file by flag, first-article content (`fcPar2`),
+/// or confirmed `.par2` extension (case-insensitive on ASCII bytes).
+pub fn is_par_file(
+    par_file: bool,
+    first_content: i32,
+    fc_par2: i32,
+    filename_confirmed: bool,
+    filename: &[u8],
+) -> bool {
+    if par_file || first_content == fc_par2 {
+        return true;
+    }
+    filename_confirmed
+        && filename.len() >= 5
+        && filename[filename.len() - 5..].eq_ignore_ascii_case(b".par2")
+}
+
+/// `DupeArticleFallback::HasPar2` / `ShouldDeferToPar`:
+/// Checks whether a completed file is a PAR2 file by flag or `.par2` extension.
+pub fn completed_file_is_par2(par_file: bool, filename: &[u8]) -> bool {
+    par_file
+        || (filename.len() >= 5
+            && filename[filename.len() - 5..].eq_ignore_ascii_case(b".par2"))
+}
+
+/// `DupeArticleFallback::ShouldDeferToPar` header evaluation:
+/// - `-1`: do not defer (`false`)
+/// - `1`: defer (`true`)
+/// - `0`: check file list and completed files for PAR2 entries
+pub fn should_defer_to_par_header(
+    has_nzb_info: bool,
+    direct_rename_status: i32,
+    ts_running: i32,
+    all_first: bool,
+    par_status: i32,
+    ps_failure: i32,
+    par_size: i64,
+) -> i32 {
+    if !has_nzb_info {
+        return -1;
+    }
+    if direct_rename_status == ts_running && !all_first {
+        return 1;
+    }
+    if par_status == ps_failure {
+        return -1;
+    }
+    if par_size > 0 {
+        return 1;
+    }
+    0
+}
+
+/// `DupeArticleFallback::TryFallback`:
+/// Evaluates all entry preconditions (mode, raw article, PAR file, first-article content,
+/// and file/NZB deletion/parking/force status). Returns `true` when `TryFallback` may proceed.
+#[allow(clippy::too_many_arguments)]
+pub fn check_try_preconditions(
+    fallback_mode: i32,
+    daf_none: i32,
+    raw_article: bool,
+    par_file: bool,
+    first_content: i32,
+    fc_par2: i32,
+    fc_unknown: i32,
+    part_number: i32,
+    filename: &[u8],
+    file_deleted: bool,
+    nzb_deleting: bool,
+    nzb_parking: bool,
+    delete_status: i32,
+    ds_none: i32,
+    dupe_mode: i32,
+    dm_force: i32,
+) -> bool {
+    if fallback_mode == daf_none || raw_article || par_file {
+        return false;
+    }
+    if first_content == fc_par2
+        || (first_content == fc_unknown && part_number != 1 && !has_extension(filename))
+    {
+        return false;
+    }
+    if file_deleted
+        || nzb_deleting
+        || nzb_parking
+        || delete_status != ds_none
+        || dupe_mode == dm_force
+    {
+        return false;
+    }
+    true
+}
+
+/// `DupeArticleFallback::TryFallback`:
+/// Evaluates whether duplicate article fallback should defer to par-check and
+/// whether defer state transitions to `dpLifted`.
+/// Returns `(defer, lift_defer_state, log_lifted)`.
+#[allow(clippy::too_many_arguments)]
+pub fn eval_par_defer(
+    par_defer: bool,
+    part_number: i32,
+    dupe_par_defer_state: i32,
+    dp_deferred: i32,
+    dp_lifted: i32,
+    par_cannot_cover_flag: bool,
+    damage_certain: bool,
+    damage_projected: bool,
+) -> (bool, bool, bool) {
+    let defer = par_defer
+        && part_number != 1
+        && dupe_par_defer_state != dp_lifted
+        && !par_cannot_cover_flag
+        && !damage_certain
+        && !damage_projected;
+    let lift_defer_state = par_defer && !defer && part_number != 1;
+    let log_lifted = lift_defer_state && dupe_par_defer_state == dp_deferred;
+    (defer, lift_defer_state, log_lifted)
+}
+
+/// `DupeArticleFallback::TryFallback`:
+/// Checks whether deferred fallback must abort before pinning or advancing sources.
+pub fn should_abort_deferred_try(
+    defer: bool,
+    round: i32,
+    has_download_queue: bool,
+    source_donors_empty: bool,
+) -> bool {
+    defer && ((round == 0 && !has_download_queue) || (round > 0 && source_donors_empty))
+}
+
+/// `DupeArticleFallback::TryFallback`:
+/// Evaluates actions when `round >= sources.len()` (all candidate sources exhausted):
+/// Returns `(check_log_par_defer, inc_unsourced, restore_orig_msg_id)`.
+pub fn resolve_exhausted_sources(
+    defer: bool,
+    pinned_round: i32,
+    dupe_proactive: bool,
+    par_defer_state: i32,
+    dp_none: i32,
+    has_download_queue: bool,
+    orig_msg_id_empty: bool,
+) -> (bool, bool, bool) {
+    if defer {
+        let check_log_par_defer =
+            !dupe_proactive && par_defer_state == dp_none && has_download_queue;
+        let restore_orig_msg_id = pinned_round > 0 && !orig_msg_id_empty;
+        (check_log_par_defer, false, restore_orig_msg_id)
+    } else if pinned_round == 0 && !dupe_proactive {
+        (false, true, false)
+    } else {
+        (false, false, !orig_msg_id_empty)
+    }
+}
+
+/// `DupeArticleFallback::RotateToLead`:
+/// Returns the rotation index (`1..donor_ids.len()`) when `lead_nzb_id` is found after index 0,
+/// or `0` when no rotation should occur.
+pub fn find_rotate_offset(donor_ids: &[i32], lead_nzb_id: i32) -> usize {
+    if lead_nzb_id == 0 {
+        return 0;
+    }
+    match donor_ids.iter().position(|&id| id == lead_nzb_id) {
+        Some(idx) if idx > 0 && idx < donor_ids.len() => idx,
+        _ => 0,
+    }
+}
+
+/// `DupeArticleFallback::FinishPin`:
+/// Computes `(lead_snapshot, next_lead, donor_count, new_file_lead_donor_id)` from `contributors`.
+pub fn compute_pin_lead_state(
+    contributors: &[i32],
+    cur_file_lead_donor_id: i32,
+) -> (i32, i32, i32, i32) {
+    let mut donor_ids: Vec<i32> = Vec::new();
+    for &id in contributors {
+        if !donor_ids.contains(&id) {
+            donor_ids.push(id);
+        }
+    }
+    let lead_snapshot = donor_ids.first().copied().unwrap_or(0);
+    let next_lead = donor_ids.get(1).copied().unwrap_or(0);
+    let donor_count = donor_ids.len() as i32;
+    let new_file_lead = if cur_file_lead_donor_id == 0 && !donor_ids.is_empty() {
+        donor_ids[0]
+    } else {
+        cur_file_lead_donor_id
+    };
+    (lead_snapshot, next_lead, donor_count, new_file_lead)
+}
+
+/// `DupeArticleFallback::VacateGhostLead`:
+/// Returns `true` when the file's current lead donor is barred or absent from `donor_ids`.
+pub fn should_vacate_ghost_lead(lead_nzb_id: i32, is_barred: bool, donor_ids: &[i32]) -> bool {
+    if lead_nzb_id == 0 {
+        return false;
+    }
+    if is_barred {
+        return true;
+    }
+    !donor_ids.contains(&lead_nzb_id)
+}
+
+/// `DupeArticleFallback::NzbFilenameOf`:
+/// Checks whether `own_article` matches `article` by part number and original (or current) message-id.
+pub fn own_article_matches(
+    own_part_number: i32,
+    part_number: i32,
+    own_msg_id: &[u8],
+    orig_msg_id: &[u8],
+    cur_msg_id: &[u8],
+) -> bool {
+    let msg_id = if !orig_msg_id.is_empty() {
+        orig_msg_id
+    } else {
+        cur_msg_id
+    };
+    own_part_number == part_number && !msg_id.is_empty() && own_msg_id == msg_id
+}
+
+/// `DupeArticleFallback::CollectDonors`:
+/// Checks whether a queued or history item is eligible as a donor before comparing names/dupe-keys.
+pub fn is_donor_eligible(
+    is_self: bool,
+    kind: i32,
+    expected_kind: i32,
+    dupe_mode: i32,
+    dm_force: i32,
+) -> bool {
+    !is_self && kind == expected_kind && dupe_mode != dm_force
+}
+
+/// `DupeArticleFallback::CollectDonors` / `MatchDonorFile`:
+/// Checks whether both identities are non-empty and `kind` starts with `"twin"`.
+pub fn is_twin_kind(own_identity: &[u8], donor_identity: &[u8], kind: &[u8]) -> bool {
+    !own_identity.is_empty() && !donor_identity.is_empty() && kind.starts_with(b"twin")
+}
+
+/// `DupeArticleFallback::CollectDonors`:
+/// Comparator ordering twin donors first, then higher `dupe_score`, then lower `id`.
+pub fn compare_donors(
+    twin1: bool,
+    score1: i32,
+    id1: i32,
+    twin2: bool,
+    score2: i32,
+    id2: i32,
+) -> bool {
+    if twin1 != twin2 {
+        return twin1;
+    }
+    if score1 != score2 {
+        return score1 > score2;
+    }
+    id1 < id2
+}
+
+/// `DupeArticleFallback::PinSources`:
+/// Checks whether a non-twin lead donor should be reset when `twin_only` is active.
+pub fn should_reset_non_twin_lead(
+    twin_only: bool,
+    lead_id: i32,
+    own_identity: &[u8],
+    lead_identity: &[u8],
+    kind: &[u8],
+) -> bool {
+    twin_only && lead_id != 0 && !is_twin_kind(own_identity, lead_identity, kind)
+}
+
+/// `DupeArticleFallback::GetParsedDonor`:
+/// Checks whether a donor whose NZB failed to parse is still within its retry cooldown window.
+pub fn is_bad_donor_in_cooldown(now_sec: i64, bad_since_sec: i64, retry_sec: i64) -> bool {
+    now_sec.wrapping_sub(bad_since_sec) < retry_sec
+}
+
+/// `DupeArticleFallback::MatchDonorFile`:
+/// Classifies how `donor_filename` matches `by_content`:
+/// `1` (exact byte match), `2` (case-insensitive match), or `0` (no match).
+pub fn classify_content_name_match(donor_filename: &[u8], by_content: &[u8]) -> i32 {
+    if donor_filename == by_content {
+        1
+    } else if crate::queuehotpath::strcasecmp_bytes(donor_filename, by_content) {
+        2
+    } else {
+        0
+    }
+}
+
+/// `DupeArticleFallback::MatchDonorFile`:
+/// Selects between exact-case and case-folded content-matched donor files:
+/// `1` when `exact_count == 1`, `2` when `exact_count == 0 && folded_count == 1`, `0` otherwise.
+pub fn select_named_content_match(exact_count: usize, folded_count: usize) -> i32 {
+    if exact_count == 1 {
+        1
+    } else if exact_count == 0 && folded_count == 1 {
+        2
+    } else {
+        0
+    }
+}
+
+/// `DupeArticleFallback::MatchDonorFile`:
+/// Checks whether a donor file's name matches either the target's current filename
+/// or its original NZB filename case-insensitively.
+pub fn is_donor_filename_match(
+    target_filename: &[u8],
+    target_nzb_filename: &[u8],
+    donor_filename: &[u8],
+) -> bool {
+    crate::queuehotpath::strcasecmp_bytes(target_filename, donor_filename)
+        || (!target_nzb_filename.is_empty()
+            && crate::queuehotpath::strcasecmp_bytes(target_nzb_filename, donor_filename))
+}
+
+/// `DupeArticleFallback::MatchDonorFile`:
+/// Resolves structural / filename match:
+/// `-1` to abort (`nullptr`), `1` to return `filenameMatch`, `2` to return `structuralMatches[0]`,
+/// or `0` to continue to step-size matching.
+pub fn resolve_structural_or_filename_match(
+    filename_ambiguous: bool,
+    has_filename_match: bool,
+    structural_matches_len: usize,
+) -> i32 {
+    if filename_ambiguous {
+        -1
+    } else if has_filename_match {
+        1
+    } else if structural_matches_len == 1 {
+        2
+    } else {
+        0
+    }
+}
+
+/// `DupeArticleFallback::FirstContent`:
+/// Classifies the first 8 bytes of a file's first article on disk:
+/// - `0`: all zeroes (not flushed from article cache yet -> `fcUnknown`)
+/// - `1`: `"PAR2\0PKT"` (`fcPar2`)
+/// - `2`: any other non-zero header (`fcOther`)
+pub fn classify_first_head(head8: &[u8]) -> i32 {
+    if head8.len() < 8 || head8[..8].iter().all(|&b| b == 0) {
+        0
+    } else if &head8[..8] == b"PAR2\0PKT" {
+        1
+    } else {
+        2
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1403,5 +1746,92 @@ mod tests {
             article_downloader_validate_yenc(101, 200, 1000, 1000, 1, 90, 200),
             Err(4)
         );
+    }
+
+    #[test]
+    fn test_consolidated_dupe_fallback_domain_functions() {
+        assert!(is_par_file(false, 0, 2, true, b"caf\xe9.PAR2"));
+        assert!(!is_par_file(false, 0, 2, false, b"caf\xe9.PAR2"));
+        assert!(completed_file_is_par2(false, b"vol01.PAR2"));
+        assert!(!completed_file_is_par2(false, b"vol01.rar"));
+
+        assert_eq!(should_defer_to_par_header(false, 0, 1, false, 0, 2, 100), -1);
+        assert_eq!(should_defer_to_par_header(true, 1, 1, false, 0, 2, 0), 1);
+        assert_eq!(should_defer_to_par_header(true, 0, 1, false, 2, 2, 100), -1);
+        assert_eq!(should_defer_to_par_header(true, 0, 1, false, 0, 2, 100), 1);
+        assert_eq!(should_defer_to_par_header(true, 0, 1, false, 0, 2, 0), 0);
+
+        assert!(check_try_preconditions(
+            1, 0, false, false, 0, 2, 0, 2, b"part01.rar", false, false, false, 0, 0, 0, 2
+        ));
+        assert!(!check_try_preconditions(
+            1, 0, false, false, 0, 2, 0, 2, b"obfuscated", false, false, false, 0, 0, 0, 2
+        ));
+        assert!(check_try_preconditions(
+            1, 0, false, false, 0, 2, 0, 1, b"obfuscated", false, false, false, 0, 0, 0, 2
+        ));
+
+        assert_eq!(
+            eval_par_defer(true, 2, 1, 1, 2, false, false, false),
+            (true, false, false)
+        );
+        assert_eq!(
+            eval_par_defer(true, 2, 1, 1, 2, true, false, false),
+            (false, true, true)
+        );
+
+        assert!(should_abort_deferred_try(true, 0, false, false));
+        assert!(should_abort_deferred_try(true, 1, true, true));
+        assert!(!should_abort_deferred_try(true, 1, true, false));
+
+        assert_eq!(
+            resolve_exhausted_sources(true, 0, false, 0, 0, true, false),
+            (true, false, false)
+        );
+        assert_eq!(
+            resolve_exhausted_sources(false, 0, false, 0, 0, true, false),
+            (false, true, false)
+        );
+        assert_eq!(
+            resolve_exhausted_sources(false, 1, false, 0, 0, true, false),
+            (false, false, true)
+        );
+
+        assert_eq!(find_rotate_offset(&[10, 20, 30], 20), 1);
+        assert_eq!(find_rotate_offset(&[10, 20, 30], 10), 0);
+        assert_eq!(find_rotate_offset(&[10, 20, 30], 0), 0);
+
+        assert_eq!(
+            compute_pin_lead_state(&[11, 11, 22, 33], 0),
+            (11, 22, 3, 11)
+        );
+        assert_eq!(compute_pin_lead_state(&[11], 99), (11, 0, 1, 99));
+
+        assert!(should_vacate_ghost_lead(10, true, &[10, 20]));
+        assert!(should_vacate_ghost_lead(30, false, &[10, 20]));
+        assert!(!should_vacate_ghost_lead(10, false, &[10, 20]));
+
+        assert!(own_article_matches(3, 3, b"<orig@id>", b"<orig@id>", b"<sub@id>"));
+        assert!(!own_article_matches(3, 3, b"<orig@id>", b"", b"<sub@id>"));
+
+        assert!(is_donor_eligible(false, 1, 1, 0, 2));
+        assert!(!is_donor_eligible(true, 1, 1, 0, 2));
+        assert!(is_twin_kind(b"fp1", b"fp2", b"twin 16/18"));
+        assert!(!is_twin_kind(b"fp1", b"fp2", b"alt"));
+        assert!(compare_donors(true, 10, 5, false, 100, 1));
+        assert!(should_reset_non_twin_lead(true, 3, b"fp1", b"fp2", b"alt"));
+        assert!(is_bad_donor_in_cooldown(105, 100, 30));
+        assert!(!is_bad_donor_in_cooldown(130, 100, 30));
+
+        assert_eq!(classify_content_name_match(b"Movie.rar", b"Movie.rar"), 1);
+        assert_eq!(classify_content_name_match(b"Movie.rar", b"movie.rar"), 2);
+        assert_eq!(select_named_content_match(0, 1), 2);
+        assert!(is_donor_filename_match(
+            b"obfuscated.bin",
+            b"Movie.part01.rar",
+            b"movie.part01.rar"
+        ));
+        assert_eq!(resolve_structural_or_filename_match(false, true, 2), 1);
+        assert_eq!(classify_first_head(b"PAR2\0PKT"), 1);
     }
 }

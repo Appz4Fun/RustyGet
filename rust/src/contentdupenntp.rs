@@ -165,96 +165,6 @@ pub fn dupesearch_fast_donor_alive_param(is_dead: bool, alive: f64) -> i32 {
     }
 }
 
-/// `DupeArticleFallback::IsParFile`:
-/// Checks whether a file is a PAR2 file by its flag, first-article content enum,
-/// or confirmed `.par2` extension (case-insensitive on ASCII bytes).
-pub fn dupe_fallback_is_par_file(
-    par_file: bool,
-    first_content: i32,
-    fc_par2: i32,
-    filename_confirmed: bool,
-    filename: &[u8],
-) -> bool {
-    if par_file || first_content == fc_par2 {
-        return true;
-    }
-    filename_confirmed
-        && filename.len() >= 5
-        && filename[filename.len() - 5..].eq_ignore_ascii_case(b".par2")
-}
-
-/// `DupeArticleFallback::TryFallback`:
-/// Returns true when fallback must be skipped because the file's first article
-/// is a PAR2 packet or is still unknown on an extensionless filename for part > 1.
-pub fn dupe_fallback_should_skip_first_content(
-    content: i32,
-    fc_par2: i32,
-    fc_unknown: i32,
-    part_number: i32,
-    has_extension: bool,
-) -> bool {
-    content == fc_par2 || (content == fc_unknown && part_number != 1 && !has_extension)
-}
-
-/// `DupeArticleFallback::TryFallback`:
-/// Returns true when the file or parent NZB is being deleted, parked, or forced,
-/// so duplicate fallback must not run.
-pub fn dupe_fallback_is_nzb_or_file_ineligible(
-    file_deleted: bool,
-    nzb_deleting: bool,
-    nzb_parking: bool,
-    delete_status: i32,
-    ds_none: i32,
-    dupe_mode: i32,
-    dm_force: i32,
-) -> bool {
-    file_deleted
-        || nzb_deleting
-        || nzb_parking
-        || delete_status != ds_none
-        || dupe_mode == dm_force
-}
-
-/// `DupeArticleFallback::TryFallback`:
-/// Evaluates whether duplicate article fallback should defer to par-check and
-/// whether defer state transitions to `dpLifted`.
-/// Returns `(defer, lift_defer_state, log_lifted)`.
-pub fn dupe_fallback_eval_par_defer(
-    par_defer: bool,
-    part_number: i32,
-    dupe_par_defer_state: i32,
-    dp_deferred: i32,
-    dp_lifted: i32,
-    par_cannot_cover: bool,
-    damage_certain: bool,
-    damage_projected: bool,
-) -> (bool, bool, bool) {
-    let defer = par_defer
-        && part_number != 1
-        && dupe_par_defer_state != dp_lifted
-        && !par_cannot_cover
-        && !damage_certain
-        && !damage_projected;
-    let lift_defer_state = par_defer && !defer && part_number != 1;
-    let log_lifted = lift_defer_state && dupe_par_defer_state == dp_deferred;
-    (defer, lift_defer_state, log_lifted)
-}
-
-/// `DupeArticleFallback::FirstContent`:
-/// Classifies the first 8 bytes of a file's first article on disk:
-/// - `0`: all zeroes (not flushed from article cache yet -> `fcUnknown`)
-/// - `1`: `"PAR2\0PKT"` (`fcPar2`)
-/// - `2`: any other non-zero header (`fcOther`)
-pub fn dupe_fallback_classify_first_head(head8: &[u8]) -> i32 {
-    if head8.len() < 8 || head8[..8].iter().all(|&b| b == 0) {
-        0
-    } else if &head8[..8] == b"PAR2\0PKT" {
-        1
-    } else {
-        2
-    }
-}
-
 /// `DupeCoordinator::NzbFound`:
 /// Checks whether two NZBs share the same non-zero full or filtered content hash.
 pub fn dupecoord_same_content_hash(
@@ -405,13 +315,6 @@ mod tests {
         assert_eq!(dupesearch_alive_to_percent(0.956), 96);
         assert_eq!(dupesearch_fast_donor_alive_param(true, 0.9), 0);
         assert_eq!(dupesearch_fast_donor_alive_param(false, -1.0), 100);
-
-        assert!(dupe_fallback_is_par_file(false, 0, 2, true, b"caf\xe9.PAR2"));
-        assert!(!dupe_fallback_is_par_file(false, 0, 2, false, b"caf\xe9.PAR2"));
-
-        assert_eq!(dupe_fallback_classify_first_head(b"PAR2\0PKT"), 1);
-        assert_eq!(dupe_fallback_classify_first_head(&[0u8; 8]), 0);
-        assert_eq!(dupe_fallback_classify_first_head(b"Rar!\x1a\x07\x00\x00"), 2);
     }
 
     #[test]

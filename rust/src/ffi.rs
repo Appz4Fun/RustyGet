@@ -8860,6 +8860,409 @@ pub unsafe extern "C" fn nzbget_rs_dupe_fallback_register_lead_success(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_is_par_file(
+    par_file: c_int,
+    first_content: c_int,
+    fc_par2: c_int,
+    filename_confirmed: c_int,
+    filename: *const c_char,
+) -> c_int {
+    let fname = if filename.is_null() {
+        &b""[..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    i32::from(crate::dupefallback::is_par_file(
+        par_file != 0,
+        first_content,
+        fc_par2,
+        filename_confirmed != 0,
+        fname,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_completed_file_is_par2(
+    par_file: c_int,
+    filename: *const c_char,
+) -> c_int {
+    let fname = if filename.is_null() {
+        &b""[..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    i32::from(crate::dupefallback::completed_file_is_par2(
+        par_file != 0,
+        fname,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dupe_fallback_should_defer_to_par_header(
+    has_nzb_info: c_int,
+    direct_rename_status: c_int,
+    ts_running: c_int,
+    all_first: c_int,
+    par_status: c_int,
+    ps_failure: c_int,
+    par_size: i64,
+) -> c_int {
+    crate::dupefallback::should_defer_to_par_header(
+        has_nzb_info != 0,
+        direct_rename_status,
+        ts_running,
+        all_first != 0,
+        par_status,
+        ps_failure,
+        par_size,
+    )
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_check_try_preconditions(
+    fallback_mode: c_int,
+    daf_none: c_int,
+    raw_article: c_int,
+    par_file: c_int,
+    first_content: c_int,
+    fc_par2: c_int,
+    fc_unknown: c_int,
+    part_number: c_int,
+    filename: *const c_char,
+    file_deleted: c_int,
+    nzb_deleting: c_int,
+    nzb_parking: c_int,
+    delete_status: c_int,
+    ds_none: c_int,
+    dupe_mode: c_int,
+    dm_force: c_int,
+) -> c_int {
+    let fname = if filename.is_null() {
+        &b""[..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    i32::from(crate::dupefallback::check_try_preconditions(
+        fallback_mode,
+        daf_none,
+        raw_article != 0,
+        par_file != 0,
+        first_content,
+        fc_par2,
+        fc_unknown,
+        part_number,
+        fname,
+        file_deleted != 0,
+        nzb_deleting != 0,
+        nzb_parking != 0,
+        delete_status,
+        ds_none,
+        dupe_mode,
+        dm_force,
+    ))
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_eval_par_defer(
+    par_defer: c_int,
+    part_number: c_int,
+    dupe_par_defer_state: c_int,
+    dp_deferred: c_int,
+    dp_lifted: c_int,
+    par_cannot_cover: c_int,
+    damage_certain: c_int,
+    damage_projected: c_int,
+    out_lift_defer_state: *mut c_int,
+    out_log_lifted: *mut c_int,
+) -> c_int {
+    let (defer, lift, log) = crate::dupefallback::eval_par_defer(
+        par_defer != 0,
+        part_number,
+        dupe_par_defer_state,
+        dp_deferred,
+        dp_lifted,
+        par_cannot_cover != 0,
+        damage_certain != 0,
+        damage_projected != 0,
+    );
+    if !out_lift_defer_state.is_null() {
+        *out_lift_defer_state = i32::from(lift);
+    }
+    if !out_log_lifted.is_null() {
+        *out_log_lifted = i32::from(log);
+    }
+    i32::from(defer)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dupe_fallback_should_abort_deferred_try(
+    defer: c_int,
+    round: c_int,
+    has_download_queue: c_int,
+    source_donors_empty: c_int,
+) -> c_int {
+    i32::from(crate::dupefallback::should_abort_deferred_try(
+        defer != 0,
+        round,
+        has_download_queue != 0,
+        source_donors_empty != 0,
+    ))
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_resolve_exhausted_sources(
+    defer: c_int,
+    pinned_round: c_int,
+    dupe_proactive: c_int,
+    par_defer_state: c_int,
+    dp_none: c_int,
+    has_download_queue: c_int,
+    orig_msg_id_empty: c_int,
+    out_check_log_par_defer: *mut c_int,
+    out_inc_unsourced: *mut c_int,
+    out_restore_orig_msg_id: *mut c_int,
+) {
+    let (check_log, inc_unsourced, restore_orig) = crate::dupefallback::resolve_exhausted_sources(
+        defer != 0,
+        pinned_round,
+        dupe_proactive != 0,
+        par_defer_state,
+        dp_none,
+        has_download_queue != 0,
+        orig_msg_id_empty != 0,
+    );
+    if !out_check_log_par_defer.is_null() {
+        *out_check_log_par_defer = i32::from(check_log);
+    }
+    if !out_inc_unsourced.is_null() {
+        *out_inc_unsourced = i32::from(inc_unsourced);
+    }
+    if !out_restore_orig_msg_id.is_null() {
+        *out_restore_orig_msg_id = i32::from(restore_orig);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_find_rotate_offset(
+    donor_ids_ptr: *const i32,
+    count: usize,
+    lead_nzb_id: i32,
+) -> usize {
+    let slice = if donor_ids_ptr.is_null() || count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(donor_ids_ptr, count)
+    };
+    crate::dupefallback::find_rotate_offset(slice, lead_nzb_id)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_compute_pin_lead_state(
+    contributors: *const c_int,
+    contributors_len: usize,
+    cur_file_lead_donor_id: c_int,
+    out_lead_snapshot: *mut c_int,
+    out_next_lead: *mut c_int,
+    out_donor_count: *mut c_int,
+    out_new_file_lead: *mut c_int,
+) {
+    let slice = if contributors.is_null() || contributors_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(contributors, contributors_len)
+    };
+    let (lead, next, cnt, file_lead) =
+        crate::dupefallback::compute_pin_lead_state(slice, cur_file_lead_donor_id);
+    if !out_lead_snapshot.is_null() {
+        *out_lead_snapshot = lead;
+    }
+    if !out_next_lead.is_null() {
+        *out_next_lead = next;
+    }
+    if !out_donor_count.is_null() {
+        *out_donor_count = cnt;
+    }
+    if !out_new_file_lead.is_null() {
+        *out_new_file_lead = file_lead;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_should_vacate_ghost_lead(
+    lead_nzb_id: c_int,
+    is_barred: c_int,
+    donor_ids_ptr: *const i32,
+    donor_ids_len: usize,
+) -> c_int {
+    let slice = if donor_ids_ptr.is_null() || donor_ids_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(donor_ids_ptr, donor_ids_len)
+    };
+    i32::from(crate::dupefallback::should_vacate_ghost_lead(
+        lead_nzb_id,
+        is_barred != 0,
+        slice,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_own_article_matches(
+    own_part_number: c_int,
+    part_number: c_int,
+    own_msg_id: *const c_char,
+    orig_msg_id: *const c_char,
+    cur_msg_id: *const c_char,
+) -> c_int {
+    i32::from(crate::dupefallback::own_article_matches(
+        own_part_number,
+        part_number,
+        crate::queuehotpath::cstr_to_bytes(own_msg_id),
+        crate::queuehotpath::cstr_to_bytes(orig_msg_id),
+        crate::queuehotpath::cstr_to_bytes(cur_msg_id),
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dupe_fallback_is_donor_eligible(
+    is_self: c_int,
+    kind: c_int,
+    expected_kind: c_int,
+    dupe_mode: c_int,
+    dm_force: c_int,
+) -> c_int {
+    i32::from(crate::dupefallback::is_donor_eligible(
+        is_self != 0,
+        kind,
+        expected_kind,
+        dupe_mode,
+        dm_force,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_is_twin_kind(
+    own_identity: *const c_char,
+    donor_identity: *const c_char,
+    kind: *const c_char,
+) -> c_int {
+    i32::from(crate::dupefallback::is_twin_kind(
+        crate::queuehotpath::cstr_to_bytes(own_identity),
+        crate::queuehotpath::cstr_to_bytes(donor_identity),
+        crate::queuehotpath::cstr_to_bytes(kind),
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dupe_fallback_compare_donors(
+    twin1: c_int,
+    score1: c_int,
+    id1: c_int,
+    twin2: c_int,
+    score2: c_int,
+    id2: c_int,
+) -> c_int {
+    i32::from(crate::dupefallback::compare_donors(
+        twin1 != 0,
+        score1,
+        id1,
+        twin2 != 0,
+        score2,
+        id2,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_should_reset_non_twin_lead(
+    twin_only: c_int,
+    lead_id: c_int,
+    own_identity: *const c_char,
+    lead_identity: *const c_char,
+    kind: *const c_char,
+) -> c_int {
+    i32::from(crate::dupefallback::should_reset_non_twin_lead(
+        twin_only != 0,
+        lead_id,
+        crate::queuehotpath::cstr_to_bytes(own_identity),
+        crate::queuehotpath::cstr_to_bytes(lead_identity),
+        crate::queuehotpath::cstr_to_bytes(kind),
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dupe_fallback_is_bad_donor_in_cooldown(
+    cur_time: i64,
+    bad_time: i64,
+    retry_sec: c_int,
+) -> c_int {
+    i32::from(crate::dupefallback::is_bad_donor_in_cooldown(
+        cur_time,
+        bad_time,
+        retry_sec as i64,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_classify_content_name_match(
+    donor_filename: *const c_char,
+    by_content: *const c_char,
+) -> c_int {
+    crate::dupefallback::classify_content_name_match(
+        crate::queuehotpath::cstr_to_bytes(donor_filename),
+        crate::queuehotpath::cstr_to_bytes(by_content),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dupe_fallback_select_named_content_match(
+    exact_count: usize,
+    folded_count: usize,
+) -> c_int {
+    crate::dupefallback::select_named_content_match(exact_count, folded_count)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_is_donor_filename_match(
+    target_filename: *const c_char,
+    target_nzb_filename: *const c_char,
+    donor_filename: *const c_char,
+) -> c_int {
+    i32::from(crate::dupefallback::is_donor_filename_match(
+        crate::queuehotpath::cstr_to_bytes(target_filename),
+        crate::queuehotpath::cstr_to_bytes(target_nzb_filename),
+        crate::queuehotpath::cstr_to_bytes(donor_filename),
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dupe_fallback_resolve_structural_or_filename_match(
+    filename_ambiguous: c_int,
+    has_filename_match: c_int,
+    structural_matches_len: usize,
+) -> c_int {
+    crate::dupefallback::resolve_structural_or_filename_match(
+        filename_ambiguous != 0,
+        has_filename_match != 0,
+        structural_matches_len,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_classify_first_head(
+    head_ptr: *const u8,
+    head_len: usize,
+) -> c_int {
+    if head_ptr.is_null() || head_len < 8 {
+        return 0;
+    }
+    let slice = std::slice::from_raw_parts(head_ptr, head_len);
+    crate::dupefallback::classify_first_head(slice)
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_par2_range_covered(
     ranges: *const crate::dupefallback::NzbgetRsByteRange,
     count: usize,
@@ -15651,114 +16054,6 @@ pub extern "C" fn nzbget_rs_cdn_dupesearch_fast_donor_alive_param(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cdn_dupe_fallback_is_par_file(
-    par_file: c_int,
-    first_content: c_int,
-    fc_par2: c_int,
-    filename_confirmed: c_int,
-    filename: *const c_char,
-) -> c_int {
-    let fname = if filename.is_null() {
-        &b""[..]
-    } else {
-        CStr::from_ptr(filename).to_bytes()
-    };
-    i32::from(crate::contentdupenntp::dupe_fallback_is_par_file(
-        par_file != 0,
-        first_content,
-        fc_par2,
-        filename_confirmed != 0,
-        fname,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_cdn_dupe_fallback_should_skip_first_content(
-    content: c_int,
-    fc_par2: c_int,
-    fc_unknown: c_int,
-    part_number: c_int,
-    has_extension: c_int,
-) -> c_int {
-    i32::from(
-        crate::contentdupenntp::dupe_fallback_should_skip_first_content(
-            content,
-            fc_par2,
-            fc_unknown,
-            part_number,
-            has_extension != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_cdn_dupe_fallback_is_nzb_or_file_ineligible(
-    file_deleted: c_int,
-    nzb_deleting: c_int,
-    nzb_parking: c_int,
-    delete_status: c_int,
-    ds_none: c_int,
-    dupe_mode: c_int,
-    dm_force: c_int,
-) -> c_int {
-    i32::from(
-        crate::contentdupenntp::dupe_fallback_is_nzb_or_file_ineligible(
-            file_deleted != 0,
-            nzb_deleting != 0,
-            nzb_parking != 0,
-            delete_status,
-            ds_none,
-            dupe_mode,
-            dm_force,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cdn_dupe_fallback_eval_par_defer(
-    par_defer: c_int,
-    part_number: c_int,
-    dupe_par_defer_state: c_int,
-    dp_deferred: c_int,
-    dp_lifted: c_int,
-    par_cannot_cover: c_int,
-    damage_certain: c_int,
-    damage_projected: c_int,
-    out_lift_defer_state: *mut c_int,
-    out_log_lifted: *mut c_int,
-) -> c_int {
-    let (defer, lift, log) = crate::contentdupenntp::dupe_fallback_eval_par_defer(
-        par_defer != 0,
-        part_number,
-        dupe_par_defer_state,
-        dp_deferred,
-        dp_lifted,
-        par_cannot_cover != 0,
-        damage_certain != 0,
-        damage_projected != 0,
-    );
-    if !out_lift_defer_state.is_null() {
-        *out_lift_defer_state = i32::from(lift);
-    }
-    if !out_log_lifted.is_null() {
-        *out_log_lifted = i32::from(log);
-    }
-    i32::from(defer)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cdn_dupe_fallback_classify_first_head(
-    head_ptr: *const u8,
-    head_len: usize,
-) -> c_int {
-    if head_ptr.is_null() || head_len < 8 {
-        return 0;
-    }
-    let slice = std::slice::from_raw_parts(head_ptr, head_len);
-    crate::contentdupenntp::dupe_fallback_classify_first_head(slice)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_cdn_article_fetcher_eval_decoded_yenc(
     check_status: c_int,
     ds_finished: c_int,
@@ -16794,144 +17089,6 @@ pub extern "C" fn nzbget_rs_qci_queue_coord_validate_split_file_state(
         has_post_info != 0,
         same_nzb != 0,
     )
-}
-
-// ============================================================================
-// ParChecker, UnpackController, DupeArticleFallback, DupeCoordinator & NzbFile
-// Hot-Path C ABI (rust/src/pardupenzb.rs)
-// ============================================================================
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pnd_dupe_fallback_should_defer_to_par_header(
-    has_nzb_info: c_int,
-    direct_rename_status: c_int,
-    ts_running: c_int,
-    all_first: c_int,
-    par_status: c_int,
-    ps_failure: c_int,
-    par_size: i64,
-) -> c_int {
-    crate::pardupenzb::dupe_fallback_should_defer_to_par_header(
-        has_nzb_info != 0,
-        direct_rename_status,
-        ts_running,
-        all_first != 0,
-        par_status,
-        ps_failure,
-        par_size,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pnd_dupe_fallback_is_borrowed_article(
-    donor_id: c_int,
-    fallback_round: c_int,
-) -> c_int {
-    i32::from(crate::pardupenzb::dupe_fallback_is_borrowed_article(
-        donor_id,
-        fallback_round,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pnd_dupe_fallback_is_valid_par2_block_spec(
-    has_sums: c_int,
-    block_size: u64,
-    max_par2_block_size: u64,
-    crc_count: usize,
-    file_size: i64,
-) -> c_int {
-    i32::from(crate::pardupenzb::dupe_fallback_is_valid_par2_block_spec(
-        has_sums != 0,
-        block_size,
-        max_par2_block_size,
-        crc_count,
-        file_size,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_pnd_dupe_fallback_calc_article_block_range(
-    segment_offset: i64,
-    segment_size: c_int,
-    block_size: u64,
-    out_first: *mut i64,
-    out_last: *mut i64,
-) {
-    let (first, last) = crate::pardupenzb::dupe_fallback_calc_article_block_range(
-        segment_offset,
-        segment_size,
-        block_size,
-    );
-    if !out_first.is_null() {
-        *out_first = first;
-    }
-    if !out_last.is_null() {
-        *out_last = last;
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_pnd_dupe_fallback_compute_pin_lead_state(
-    contributors: *const c_int,
-    contributors_len: usize,
-    cur_file_lead_donor_id: c_int,
-    out_lead_snapshot: *mut c_int,
-    out_next_lead: *mut c_int,
-    out_donor_count: *mut c_int,
-    out_new_file_lead: *mut c_int,
-) {
-    let slice = if contributors.is_null() || contributors_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(contributors, contributors_len)
-    };
-    let (lead, next, cnt, file_lead) =
-        crate::pardupenzb::dupe_fallback_compute_pin_lead_state(slice, cur_file_lead_donor_id);
-    if !out_lead_snapshot.is_null() {
-        *out_lead_snapshot = lead;
-    }
-    if !out_next_lead.is_null() {
-        *out_next_lead = next;
-    }
-    if !out_donor_count.is_null() {
-        *out_donor_count = cnt;
-    }
-    if !out_new_file_lead.is_null() {
-        *out_new_file_lead = file_lead;
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pnd_dupe_fallback_should_vacate_ghost_lead(
-    lead_nzb_id: c_int,
-    is_barred: c_int,
-    in_donors: c_int,
-) -> c_int {
-    i32::from(crate::pardupenzb::dupe_fallback_should_vacate_ghost_lead(
-        lead_nzb_id,
-        is_barred != 0,
-        in_donors != 0,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pnd_dupe_fallback_compare_donors(
-    twin1: c_int,
-    score1: c_int,
-    id1: c_int,
-    twin2: c_int,
-    score2: c_int,
-    id2: c_int,
-) -> c_int {
-    i32::from(crate::pardupenzb::dupe_fallback_compare_donors(
-        twin1 != 0,
-        score1,
-        id1,
-        twin2 != 0,
-        score2,
-        id2,
-    ))
 }
 
 // ============================================================================
@@ -18590,101 +18747,6 @@ pub extern "C" fn nzbget_rs_cwp_server_pool_calc_missing_connections(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dcf_dupe_fallback_completed_file_is_par2(
-    par_file: c_int,
-    filename: *const c_char,
-) -> c_int {
-    crate::dupecoordfallbackstream::dupe_fallback_completed_file_is_par2(
-        par_file,
-        crate::queuehotpath::cstr_to_bytes(filename),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dcf_dupe_fallback_should_abort_deferred_try(
-    defer: c_int,
-    round: c_int,
-    has_download_queue: c_int,
-    source_donors_empty: c_int,
-) -> c_int {
-    crate::dupecoordfallbackstream::dupe_fallback_should_abort_deferred_try(
-        defer,
-        round,
-        has_download_queue,
-        source_donors_empty,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dcf_dupe_fallback_is_reactive_first_round(
-    pinned_round: c_int,
-    dupe_proactive: c_int,
-) -> c_int {
-    crate::dupecoordfallbackstream::dupe_fallback_is_reactive_first_round(
-        pinned_round,
-        dupe_proactive,
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dcf_dupe_fallback_par2_sums_entry_matches(
-    entry_length: u64,
-    file_size: i64,
-    crcs_empty: c_int,
-    entry_hash16k: *const c_char,
-    hash16k: *const c_char,
-    entry_name: *const c_char,
-    filename: *const c_char,
-) -> c_int {
-    crate::dupecoordfallbackstream::dupe_fallback_par2_sums_entry_matches(
-        entry_length,
-        file_size,
-        crcs_empty,
-        crate::queuehotpath::cstr_to_bytes(entry_hash16k),
-        crate::queuehotpath::cstr_to_bytes(hash16k),
-        crate::queuehotpath::cstr_to_bytes(entry_name),
-        crate::queuehotpath::cstr_to_bytes(filename),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dcf_dupe_fallback_own_article_matches(
-    own_part_number: c_int,
-    part_number: c_int,
-    own_msg_id: *const c_char,
-    msg_id: *const c_char,
-) -> c_int {
-    crate::dupecoordfallbackstream::dupe_fallback_own_article_matches(
-        own_part_number,
-        part_number,
-        crate::queuehotpath::cstr_to_bytes(own_msg_id),
-        crate::queuehotpath::cstr_to_bytes(msg_id),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dcf_dupe_fallback_is_bad_donor_in_cooldown(
-    cur_time: i64,
-    bad_time: i64,
-    retry_sec: c_int,
-) -> c_int {
-    crate::dupecoordfallbackstream::dupe_fallback_is_bad_donor_in_cooldown(
-        cur_time, bad_time, retry_sec,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dcf_dupe_fallback_select_named_content_match(
-    exact_count: usize,
-    folded_count: usize,
-) -> c_int {
-    crate::dupecoordfallbackstream::dupe_fallback_select_named_content_match(
-        exact_count,
-        folded_count,
-    )
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_roc_xmlrpc_multicall_needs_array_wrap(
     resp: *const c_char,
 ) -> c_int {
@@ -19705,160 +19767,6 @@ pub unsafe extern "C" fn nzbget_rs_qcf_queue_coord_merge_min_max_time(
             *out_max = m_max;
         }
     }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_qcf_dupe_fallback_should_evict_parsed_donor_cache(
-    cache_len: usize,
-    max_cached_donors: c_int,
-) -> c_int {
-    i32::from(
-        crate::queuecoordfallbackhist::qcf_dupe_fallback_should_evict_parsed_donor_cache(
-            cache_len,
-            max_cached_donors,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_qcf_dupe_fallback_resolve_structural_or_filename_match(
-    filename_ambiguous: c_int,
-    has_filename_match: c_int,
-    structural_matches_len: usize,
-) -> c_int {
-    crate::queuecoordfallbackhist::qcf_dupe_fallback_resolve_structural_or_filename_match(
-        filename_ambiguous != 0,
-        has_filename_match != 0,
-        structural_matches_len,
-    )
-}
-
-// ============================================================================
-// Batch 40: postunpackrenamehist (`pur_*`)
-// ============================================================================
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupe_fallback_should_log_par_defer(
-    is_proactive: c_int,
-    par_defer_state: c_int,
-    dp_none_val: c_int,
-    has_download_queue: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_dupe_fallback_should_log_par_defer(
-            is_proactive != 0,
-            par_defer_state,
-            dp_none_val,
-            has_download_queue != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupe_fallback_should_restore_original_msg_id(
-    pinned_round: c_int,
-    orig_msg_id_empty: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_dupe_fallback_should_restore_original_msg_id(
-            pinned_round,
-            orig_msg_id_empty != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupe_fallback_is_queued_donor_eligible(
-    is_self: c_int,
-    kind: c_int,
-    nk_nzb_val: c_int,
-    dupe_mode: c_int,
-    dm_force_val: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_dupe_fallback_is_queued_donor_eligible(
-            is_self != 0,
-            kind,
-            nk_nzb_val,
-            dupe_mode,
-            dm_force_val,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupe_fallback_is_history_donor_eligible(
-    kind: c_int,
-    hk_nzb_val: c_int,
-    dupe_mode: c_int,
-    dm_force_val: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_dupe_fallback_is_history_donor_eligible(
-            kind,
-            hk_nzb_val,
-            dupe_mode,
-            dm_force_val,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupe_fallback_is_same_full_content_hash(
-    own_full_hash: u32,
-    donor_full_hash: u32,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_dupe_fallback_is_same_full_content_hash(
-            own_full_hash,
-            donor_full_hash,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupe_fallback_should_log_no_source(
-    twin_only: c_int,
-    candidates_empty: c_int,
-    donors_empty: c_int,
-    no_source_logged: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_dupe_fallback_should_log_no_source(
-            twin_only != 0,
-            candidates_empty != 0,
-            donors_empty != 0,
-            no_source_logged != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_dupe_fallback_is_content_match_rejected(
-    by_content: *const c_char,
-    twin_only: c_int,
-) -> c_int {
-    let bytes = crate::diskstatepp::cstr_to_bytes(by_content);
-    i32::from(
-        crate::dupequeuehealth::dqh_dupe_fallback_is_content_match_rejected(
-            bytes,
-            twin_only != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_dupe_fallback_is_donor_filename_match(
-    target_filename: *const c_char,
-    target_nzb_filename: *const c_char,
-    donor_filename: *const c_char,
-) -> c_int {
-    let tf = crate::diskstatepp::cstr_to_bytes(target_filename);
-    let tnf = crate::diskstatepp::cstr_to_bytes(target_nzb_filename);
-    let df = crate::diskstatepp::cstr_to_bytes(donor_filename);
-    i32::from(
-        crate::dupequeuehealth::dqh_dupe_fallback_is_donor_filename_match(tf, tnf, df),
-    )
 }
 
 #[no_mangle]
@@ -22981,99 +22889,6 @@ pub unsafe extern "C" fn nzbget_rs_stream_is_intact_proof_member_eligible(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_dupe_fallback_find_lead_index(
-    donor_ids_ptr: *const i32,
-    count: usize,
-    lead_nzb_id: i32,
-) -> isize {
-    let slice = if donor_ids_ptr.is_null() || count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(donor_ids_ptr, count)
-    };
-    crate::dupequeuehealth::dqh_dupe_fallback_find_lead_index(slice, lead_nzb_id)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupe_fallback_can_register_lead_success(
-    fallback_round: i32,
-    lead_snapshot: i32,
-    file_lead_donor_id: i32,
-) -> i32 {
-    i32::from(
-        crate::dupequeuehealth::dqh_dupe_fallback_can_register_lead_success(
-            fallback_round,
-            lead_snapshot,
-            file_lead_donor_id,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_dupe_fallback_has_donor_articles(
-    fallback_rounds_ptr: *const i32,
-    count: usize,
-) -> i32 {
-    let slice = if fallback_rounds_ptr.is_null() || count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(fallback_rounds_ptr, count)
-    };
-    i32::from(crate::dupequeuehealth::dqh_dupe_fallback_has_donor_articles(slice))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_dupe_fallback_can_read_first_content_from_disk(
-    has_articles: i32,
-    first_part_number: i32,
-    first_status: i32,
-    ai_finished: i32,
-    output_filename: *const c_char,
-) -> i32 {
-    i32::from(
-        crate::dupequeuehealth::dqh_dupe_fallback_can_read_first_content_from_disk(
-            has_articles != 0,
-            first_part_number,
-            first_status,
-            ai_finished,
-            input(output_filename),
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_dupe_fallback_is_twin_kind(
-    own_identity: *const c_char,
-    donor_identity: *const c_char,
-    kind: *const c_char,
-) -> i32 {
-    i32::from(crate::dupequeuehealth::dqh_dupe_fallback_is_twin_kind(
-        input(own_identity),
-        input(donor_identity),
-        input(kind),
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_dupe_fallback_should_reset_non_twin_lead(
-    twin_only: i32,
-    lead_id: i32,
-    own_identity: *const c_char,
-    lead_identity: *const c_char,
-    kind: *const c_char,
-) -> i32 {
-    i32::from(
-        crate::dupequeuehealth::dqh_dupe_fallback_should_reset_non_twin_lead(
-            twin_only != 0,
-            lead_id,
-            input(own_identity),
-            input(lead_identity),
-            input(kind),
-        ),
-    )
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_donor_health_accum_health(
     checked: *mut i32,
     present: *mut i32,
@@ -23461,21 +23276,6 @@ pub extern "C" fn nzbget_rs_tpr_article_fetcher_should_throttle_bandwidth(
         speed_limit,
         cur_speed,
         momentary_speed,
-    ) {
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupe_fallback_should_append_primary_on_order(
-    cutover: i32,
-    donors_len: usize,
-) -> i32 {
-    if crate::dupequeuehealth::dqh_dupe_fallback_should_append_primary_on_order(
-        cutover != 0,
-        donors_len,
     ) {
         1
     } else {
@@ -25634,24 +25434,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_nzb_reader_classify_end_element(
         in_segment != 0,
         in_file != 0,
     )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_dupe_fallback_classify_content_name_match(
-    donor_filename: *const c_char,
-    by_content: *const c_char,
-) -> c_int {
-    let d = if donor_filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(donor_filename).to_bytes()
-    };
-    let b = if by_content.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(by_content).to_bytes()
-    };
-    crate::dupequeuehealth::dqh_dupe_fallback_classify_content_name_match(d, b)
 }
 
 #[no_mangle]
@@ -28293,117 +28075,6 @@ pub extern "C" fn nzbget_rs_dqh_diskstate_can_store_volume_slot(
             has_volume_array != 0,
             index,
             array_size,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupe_fallback_should_skip_try_entry(
-    fallback_mode: c_int,
-    daf_none: c_int,
-    raw_article: c_int,
-    is_par_file: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_dupe_fallback_should_skip_try_entry(
-            fallback_mode,
-            daf_none,
-            raw_article != 0,
-            is_par_file != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupe_fallback_can_defer_to_par(
-    par_check: c_int,
-    pc_manual: c_int,
-    should_defer_to_par: c_int,
-) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_dupe_fallback_can_defer_to_par(
-        par_check,
-        pc_manual,
-        should_defer_to_par != 0,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupe_fallback_should_skip_blocked_donor_round(
-    round: c_int,
-    sources_len: usize,
-    donors_len: usize,
-    is_blocked: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_dupe_fallback_should_skip_blocked_donor_round(
-            round,
-            sources_len,
-            donors_len,
-            is_blocked != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupe_fallback_should_rotate_donors(
-    idx: isize,
-    donors_len: usize,
-) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_dupe_fallback_should_rotate_donors(
-        idx, donors_len,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupe_fallback_needs_twin_lead_check(
-    twin_only: c_int,
-    lead_donor_id: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_dupe_fallback_needs_twin_lead_check(
-            twin_only != 0,
-            lead_donor_id,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupe_fallback_can_parse_donor_nzb(
-    filename_empty: c_int,
-    file_exists: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_dupe_fallback_can_parse_donor_nzb(
-            filename_empty != 0,
-            file_exists != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupe_fallback_can_query_content_match(
-    donor_nzb_id: c_int,
-    own_identity_empty: c_int,
-    donor_print_empty: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_dupe_fallback_can_query_content_match(
-            donor_nzb_id,
-            own_identity_empty != 0,
-            donor_print_empty != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupe_fallback_is_donor_file_struct_candidate(
-    is_par_file: c_int,
-    structure_matches: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_dupe_fallback_is_donor_file_struct_candidate(
-            is_par_file != 0,
-            structure_matches != 0,
         ),
     )
 }

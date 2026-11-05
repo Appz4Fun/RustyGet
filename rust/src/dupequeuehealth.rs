@@ -1,89 +1,6 @@
 //! Hot-path decision predicates for duplicate article fallback, duplicate queue
 //! coordination, fleet member scoring, and donor health exchange/verdict accounting.
 
-/// Returns whether deferred fallback should check for available donors to log the
-/// par-first deferral message (`DupeArticleFallback::TryNextSource`).
-pub fn dqh_dupe_fallback_should_log_par_defer(
-    is_proactive: bool,
-    par_defer_state: i32,
-    dp_none_val: i32,
-    has_download_queue: bool,
-) -> bool {
-    !is_proactive && par_defer_state == dp_none_val && has_download_queue
-}
-
-/// Returns whether the article's original message-id should be restored when
-/// deferring fallback after an advanced round (`DupeArticleFallback::TryNextSource`).
-pub fn dqh_dupe_fallback_should_restore_original_msg_id(
-    pinned_round: i32,
-    orig_msg_id_empty: bool,
-) -> bool {
-    pinned_round > 0 && !orig_msg_id_empty
-}
-
-/// Returns whether a queued item is eligible as a donor before comparing
-/// names/dupe-keys (`DupeArticleFallback::CollectDonors`).
-pub fn dqh_dupe_fallback_is_queued_donor_eligible(
-    is_self: bool,
-    kind: i32,
-    nk_nzb_val: i32,
-    dupe_mode: i32,
-    dm_force_val: i32,
-) -> bool {
-    !is_self && kind == nk_nzb_val && dupe_mode != dm_force_val
-}
-
-/// Returns whether a history item is eligible as a donor or history duplicate
-/// before comparing names/dupe-keys (`DupeArticleFallback::CollectDonors`,
-/// `DupeCoordinator::ListHistoryDupes`).
-pub fn dqh_dupe_fallback_is_history_donor_eligible(
-    kind: i32,
-    hk_nzb_val: i32,
-    dupe_mode: i32,
-    dm_force_val: i32,
-) -> bool {
-    kind == hk_nzb_val && dupe_mode != dm_force_val
-}
-
-/// Returns whether two NZBs share a non-zero full content hash
-/// (`DupeArticleFallback::CollectDonors`, `DupeArticleFallback::PinSources`).
-pub fn dqh_dupe_fallback_is_same_full_content_hash(
-    own_full_hash: u32,
-    donor_full_hash: u32,
-) -> bool {
-    own_full_hash > 0 && own_full_hash == donor_full_hash
-}
-
-/// Returns whether `PinSources` should emit the once-per-file "No duplicate source"
-/// detail message (`DupeArticleFallback::PinSources`).
-pub fn dqh_dupe_fallback_should_log_no_source(
-    twin_only: bool,
-    candidates_empty: bool,
-    donors_empty: bool,
-    no_source_logged: bool,
-) -> bool {
-    !twin_only && candidates_empty && !donors_empty && !no_source_logged
-}
-
-/// Returns whether `MatchByContent` rejected the donor file (explicit `"-"` or
-/// empty when `twin_only` is required) (`DupeArticleFallback::MatchDonorFile`).
-pub fn dqh_dupe_fallback_is_content_match_rejected(by_content: &[u8], twin_only: bool) -> bool {
-    by_content == b"-" || (twin_only && by_content.is_empty())
-}
-
-/// Returns whether a donor file's name matches either the target's current filename
-/// or its original NZB filename case-insensitively in the active C locale
-/// (`DupeArticleFallback::MatchDonorFile`).
-pub fn dqh_dupe_fallback_is_donor_filename_match(
-    target_filename: &[u8],
-    target_nzb_filename: &[u8],
-    donor_filename: &[u8],
-) -> bool {
-    crate::queuehotpath::strcasecmp_bytes(target_filename, donor_filename)
-        || (!target_nzb_filename.is_empty()
-            && crate::queuehotpath::strcasecmp_bytes(target_nzb_filename, donor_filename))
-}
-
 /// Returns whether `NzbFound` should check if the release is already downloaded on
 /// disk (`DupeCoordinator::NzbFound`).
 pub fn dqh_dupecoord_can_check_downloaded_on_disk(
@@ -313,68 +230,6 @@ pub fn dqh_fleet_visit_pipe_names(names: &[u8], mut visit: impl FnMut(&[u8])) {
     }
 }
 
-/// Finds the index of `lead_nzb_id` in `donor_ids` for `DupeArticleFallback::RotateToLead`
-/// (`-1` if `lead_nzb_id == 0` or not found).
-pub fn dqh_dupe_fallback_find_lead_index(donor_ids: &[i32], lead_nzb_id: i32) -> isize {
-    if lead_nzb_id == 0 {
-        return -1;
-    }
-    donor_ids
-        .iter()
-        .position(|&id| id == lead_nzb_id)
-        .map(|p| p as isize)
-        .unwrap_or(-1)
-}
-
-/// Checks whether `DupeArticleFallback::RegisterLeadSuccess` should proceed.
-pub fn dqh_dupe_fallback_can_register_lead_success(
-    fallback_round: i32,
-    lead_snapshot: i32,
-    file_lead_donor_id: i32,
-) -> bool {
-    fallback_round == 1 && lead_snapshot != 0 && lead_snapshot == file_lead_donor_id
-}
-
-/// Checks whether any article in `fallback_rounds` has `round > 0` (`DupeArticleFallback::HasDonorArticles`).
-pub fn dqh_dupe_fallback_has_donor_articles(fallback_rounds: &[i32]) -> bool {
-    fallback_rounds.iter().any(|&r| r > 0)
-}
-
-/// Checks whether `DupeArticleFallback::FirstContent` can inspect the first article on disk.
-pub fn dqh_dupe_fallback_can_read_first_content_from_disk(
-    has_articles: bool,
-    first_part_number: i32,
-    first_status: i32,
-    ai_finished: i32,
-    output_filename: &[u8],
-) -> bool {
-    has_articles
-        && first_part_number == 1
-        && first_status == ai_finished
-        && !output_filename.is_empty()
-}
-
-/// Checks whether both identities are non-empty and `kind` starts with `"twin"`
-/// (`DupeArticleFallback::CollectDonors`, `DupeArticleFallback::MatchDonorFile`).
-pub fn dqh_dupe_fallback_is_twin_kind(
-    own_identity: &[u8],
-    donor_identity: &[u8],
-    kind: &[u8],
-) -> bool {
-    !own_identity.is_empty() && !donor_identity.is_empty() && kind.starts_with(b"twin")
-}
-
-/// Checks whether `DupeArticleFallback::PinSources` should reset a non-twin lead donor when `twin_only` is active.
-pub fn dqh_dupe_fallback_should_reset_non_twin_lead(
-    twin_only: bool,
-    lead_id: i32,
-    own_identity: &[u8],
-    lead_identity: &[u8],
-    kind: &[u8],
-) -> bool {
-    twin_only && lead_id != 0 && !dqh_dupe_fallback_is_twin_kind(own_identity, lead_identity, kind)
-}
-
 /// Accumulates `DonorHealth::Health::operator+=` counters.
 #[allow(clippy::too_many_arguments)]
 pub fn dqh_donor_health_accum_health(
@@ -594,15 +449,6 @@ pub fn dqh_dupesearch_pending_identity_matches(
         && saved_title == cur_norm_title
         && saved_key == cur_lower_key
         && saved_posting == cur_fingerprint
-}
-
-/// Evaluates whether `DupeArticleFallback::OrderSources` should append the primary message ID
-/// after the donor candidates.
-pub fn dqh_dupe_fallback_should_append_primary_on_order(
-    cutover: bool,
-    donors_len: usize,
-) -> bool {
-    cutover && donors_len > 0
 }
 
 /// Converts a byte count into megabytes (`bytes / 1024.0 / 1024.0`).
@@ -2115,21 +1961,6 @@ pub fn dqh_bytes_cmp(a: &[u8], b: &[u8]) -> i32 {
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Equal => 0,
         std::cmp::Ordering::Greater => 1,
-    }
-}
-
-/// Classifies how `donor_filename` matches `by_content` in `DupeArticleFallback::MatchDonorFile`:
-/// `1` (exact byte match), `2` (case-insensitive match via `dqh_bytes_eq_ignore_case`), or `0` (no match).
-pub fn dqh_dupe_fallback_classify_content_name_match(
-    donor_filename: &[u8],
-    by_content: &[u8],
-) -> i32 {
-    if donor_filename == by_content {
-        1
-    } else if dqh_bytes_eq_ignore_case(donor_filename, by_content) {
-        2
-    } else {
-        0
     }
 }
 
@@ -4709,67 +4540,6 @@ pub fn dqh_diskstate_can_store_volume_slot(
     has_volume_array && index >= 0 && (index as usize) < array_size
 }
 
-/// Returns true when `DupeArticleFallback::TryFallback` should immediately skip fallback (`fallback_mode == daf_none || raw_article || is_par_file`).
-pub fn dqh_dupe_fallback_should_skip_try_entry(
-    fallback_mode: i32,
-    daf_none: i32,
-    raw_article: bool,
-    is_par_file: bool,
-) -> bool {
-    fallback_mode == daf_none || raw_article || is_par_file
-}
-
-/// Returns true when `DupeArticleFallback::TryFallback` can defer recovery to par-check (`par_check != pc_manual && should_defer_to_par`).
-pub fn dqh_dupe_fallback_can_defer_to_par(
-    par_check: i32,
-    pc_manual: i32,
-    should_defer_to_par: bool,
-) -> bool {
-    par_check != pc_manual && should_defer_to_par
-}
-
-/// Returns true when `DupeArticleFallback::TryFallback` should advance past a blocked donor round (`round >= 0 && (round as usize) < sources_len && (round as usize) < donors_len && is_blocked`).
-pub fn dqh_dupe_fallback_should_skip_blocked_donor_round(
-    round: i32,
-    sources_len: usize,
-    donors_len: usize,
-    is_blocked: bool,
-) -> bool {
-    round >= 0 && (round as usize) < sources_len && (round as usize) < donors_len && is_blocked
-}
-
-/// Returns true when `DupeArticleFallback::RotateToLead` should rotate the donor list (`idx > 0 && (idx as usize) < donors_len`).
-pub fn dqh_dupe_fallback_should_rotate_donors(idx: isize, donors_len: usize) -> bool {
-    idx > 0 && (idx as usize) < donors_len
-}
-
-/// Returns true when `DupeArticleFallback::PinSources` needs to check whether the current lead is a twin (`twin_only && lead_donor_id != 0`).
-pub fn dqh_dupe_fallback_needs_twin_lead_check(twin_only: bool, lead_donor_id: i32) -> bool {
-    twin_only && lead_donor_id != 0
-}
-
-/// Returns true when `DupeArticleFallback::ParseDonorNzb` can parse a donor NZB file (`!filename_empty && file_exists`).
-pub fn dqh_dupe_fallback_can_parse_donor_nzb(filename_empty: bool, file_exists: bool) -> bool {
-    !filename_empty && file_exists
-}
-
-/// Returns true when `DupeArticleFallback::MatchDonorFile` can query `TwinCheck::MatchByContent` (`donor_nzb_id != 0 && !own_identity_empty && !donor_print_empty`).
-pub fn dqh_dupe_fallback_can_query_content_match(
-    donor_nzb_id: i32,
-    own_identity_empty: bool,
-    donor_print_empty: bool,
-) -> bool {
-    donor_nzb_id != 0 && !own_identity_empty && !donor_print_empty
-}
-
-/// Returns true when a donor file in `DupeArticleFallback::MatchDonorFile` is a structural candidate (`!is_par_file && structure_matches`).
-pub fn dqh_dupe_fallback_is_donor_file_struct_candidate(
-    is_par_file: bool,
-    structure_matches: bool,
-) -> bool {
-    !is_par_file && structure_matches
-}
-
 /// Returns true when `HistoryCoordinator::PrepareEdit` should mark a history entry as bad (`action == ea_history_mark_bad && has_history_info && kind == hk_nzb`).
 pub fn dqh_history_coord_should_mark_bad_in_prepare_edit(
     action: i32,
@@ -5175,58 +4945,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_dupe_fallback_helpers() {
-        assert!(dqh_dupe_fallback_should_log_par_defer(false, 0, 0, true));
-        assert!(!dqh_dupe_fallback_should_log_par_defer(true, 0, 0, true));
-        assert!(!dqh_dupe_fallback_should_log_par_defer(false, 1, 0, true));
-        assert!(!dqh_dupe_fallback_should_log_par_defer(false, 0, 0, false));
-
-        assert!(dqh_dupe_fallback_should_restore_original_msg_id(1, false));
-        assert!(!dqh_dupe_fallback_should_restore_original_msg_id(0, false));
-        assert!(!dqh_dupe_fallback_should_restore_original_msg_id(1, true));
-
-        assert!(dqh_dupe_fallback_is_queued_donor_eligible(false, 0, 0, 1, 2));
-        assert!(!dqh_dupe_fallback_is_queued_donor_eligible(true, 0, 0, 1, 2));
-        assert!(!dqh_dupe_fallback_is_queued_donor_eligible(false, 1, 0, 1, 2));
-        assert!(!dqh_dupe_fallback_is_queued_donor_eligible(false, 0, 0, 2, 2));
-
-        assert!(dqh_dupe_fallback_is_history_donor_eligible(1, 1, 0, 2));
-        assert!(!dqh_dupe_fallback_is_history_donor_eligible(0, 1, 0, 2));
-        assert!(!dqh_dupe_fallback_is_history_donor_eligible(1, 1, 2, 2));
-
-        assert!(dqh_dupe_fallback_is_same_full_content_hash(42, 42));
-        assert!(!dqh_dupe_fallback_is_same_full_content_hash(0, 0));
-        assert!(!dqh_dupe_fallback_is_same_full_content_hash(42, 43));
-
-        assert!(dqh_dupe_fallback_should_log_no_source(false, true, false, false));
-        assert!(!dqh_dupe_fallback_should_log_no_source(true, true, false, false));
-        assert!(!dqh_dupe_fallback_should_log_no_source(false, false, false, false));
-        assert!(!dqh_dupe_fallback_should_log_no_source(false, true, true, false));
-        assert!(!dqh_dupe_fallback_should_log_no_source(false, true, false, true));
-
-        assert!(dqh_dupe_fallback_is_content_match_rejected(b"-", false));
-        assert!(dqh_dupe_fallback_is_content_match_rejected(b"", true));
-        assert!(!dqh_dupe_fallback_is_content_match_rejected(b"", false));
-        assert!(!dqh_dupe_fallback_is_content_match_rejected(b"part01.rar", true));
-
-        assert!(dqh_dupe_fallback_is_donor_filename_match(
-            b"Movie.part01.rar",
-            b"",
-            b"movie.part01.rar"
-        ));
-        assert!(dqh_dupe_fallback_is_donor_filename_match(
-            b"obfuscated.bin",
-            b"Movie.part01.rar",
-            b"movie.part01.rar"
-        ));
-        assert!(!dqh_dupe_fallback_is_donor_filename_match(
-            b"obfuscated.bin",
-            b"",
-            b"movie.part01.rar"
-        ));
-    }
-
-    #[test]
     fn test_dupecoord_helpers() {
         assert!(dqh_dupecoord_can_check_downloaded_on_disk(0, 0, 1, 2));
         assert!(!dqh_dupecoord_can_check_downloaded_on_disk(1, 0, 1, 2));
@@ -5304,21 +5022,6 @@ mod tests {
         dqh_fleet_visit_pipe_names(b"first.nzb||second.nzb|", |s| parts.push(s.to_vec()));
         assert_eq!(parts, vec![b"first.nzb".to_vec(), b"second.nzb".to_vec()]);
 
-        assert_eq!(dqh_dupe_fallback_find_lead_index(&[10, 20, 30], 20), 1);
-        assert_eq!(dqh_dupe_fallback_find_lead_index(&[10, 20, 30], 0), -1);
-        assert!(dqh_dupe_fallback_can_register_lead_success(1, 5, 5));
-        assert!(!dqh_dupe_fallback_can_register_lead_success(2, 5, 5));
-        assert!(dqh_dupe_fallback_has_donor_articles(&[0, 0, 2]));
-        assert!(!dqh_dupe_fallback_has_donor_articles(&[0, 0]));
-        assert!(dqh_dupe_fallback_can_read_first_content_from_disk(
-            true, 1, 2, 2, b"/tmp/out"
-        ));
-        assert!(dqh_dupe_fallback_is_twin_kind(b"fp1", b"fp2", b"twin 16/18"));
-        assert!(!dqh_dupe_fallback_is_twin_kind(b"fp1", b"fp2", b"alt"));
-        assert!(dqh_dupe_fallback_should_reset_non_twin_lead(
-            true, 3, b"fp1", b"fp2", b"alt"
-        ));
-
         let mut b_ms = 0;
         assert!(dqh_donor_health_calc_worker_budget_ms(5000, 3000, 4000, &mut b_ms));
         assert_eq!(b_ms, 2000);
@@ -5384,9 +5087,6 @@ mod tests {
         assert!(!dqh_dupesearch_pending_identity_matches(
             false, b"title", b"title", b"key", b"key", b"fp", b"fp"
         ));
-        assert!(dqh_dupe_fallback_should_append_primary_on_order(true, 2));
-        assert!(!dqh_dupe_fallback_should_append_primary_on_order(false, 2));
-        assert!(!dqh_dupe_fallback_should_append_primary_on_order(true, 0));
         assert_eq!(dqh_stream_repair_bytes_to_mb(1048576), 1.0);
         assert!(dqh_article_writer_use_target_path_directly(
             true, false, true, false
@@ -5994,18 +5694,6 @@ mod tests {
         assert_eq!(dqh_bytes_cmp(b"abc", b"abd"), -1);
         assert_eq!(dqh_bytes_cmp(b"abc", b"abc"), 0);
         assert_eq!(dqh_bytes_cmp(b"abd", b"abc"), 1);
-        assert_eq!(
-            dqh_dupe_fallback_classify_content_name_match(b"Movie.rar", b"Movie.rar"),
-            1
-        );
-        assert_eq!(
-            dqh_dupe_fallback_classify_content_name_match(b"Movie.rar", b"movie.rar"),
-            2
-        );
-        assert_eq!(
-            dqh_dupe_fallback_classify_content_name_match(b"Movie.rar", b"other.rar"),
-            0
-        );
         assert_eq!(
             dqh_tls_resolve_probe_result(
                 true,
@@ -7033,32 +6721,6 @@ mod tests {
         assert!(dqh_diskstate_can_store_volume_slot(true, 3, 5));
         assert!(!dqh_diskstate_can_store_volume_slot(false, 3, 5));
         assert!(!dqh_diskstate_can_store_volume_slot(true, 5, 5));
-        assert!(dqh_dupe_fallback_should_skip_try_entry(0, 0, false, false));
-        assert!(dqh_dupe_fallback_should_skip_try_entry(1, 0, true, false));
-        assert!(dqh_dupe_fallback_should_skip_try_entry(1, 0, false, true));
-        assert!(!dqh_dupe_fallback_should_skip_try_entry(1, 0, false, false));
-        assert!(dqh_dupe_fallback_can_defer_to_par(0, 1, true));
-        assert!(!dqh_dupe_fallback_can_defer_to_par(1, 1, true));
-        assert!(!dqh_dupe_fallback_can_defer_to_par(0, 1, false));
-        assert!(dqh_dupe_fallback_should_skip_blocked_donor_round(1, 3, 3, true));
-        assert!(!dqh_dupe_fallback_should_skip_blocked_donor_round(3, 3, 3, true));
-        assert!(!dqh_dupe_fallback_should_skip_blocked_donor_round(1, 3, 3, false));
-        assert!(dqh_dupe_fallback_should_rotate_donors(2, 4));
-        assert!(!dqh_dupe_fallback_should_rotate_donors(0, 4));
-        assert!(!dqh_dupe_fallback_should_rotate_donors(4, 4));
-        assert!(dqh_dupe_fallback_needs_twin_lead_check(true, 7));
-        assert!(!dqh_dupe_fallback_needs_twin_lead_check(false, 7));
-        assert!(!dqh_dupe_fallback_needs_twin_lead_check(true, 0));
-        assert!(dqh_dupe_fallback_can_parse_donor_nzb(false, true));
-        assert!(!dqh_dupe_fallback_can_parse_donor_nzb(true, true));
-        assert!(!dqh_dupe_fallback_can_parse_donor_nzb(false, false));
-        assert!(dqh_dupe_fallback_can_query_content_match(5, false, false));
-        assert!(!dqh_dupe_fallback_can_query_content_match(0, false, false));
-        assert!(!dqh_dupe_fallback_can_query_content_match(5, true, false));
-        assert!(!dqh_dupe_fallback_can_query_content_match(5, false, true));
-        assert!(dqh_dupe_fallback_is_donor_file_struct_candidate(false, true));
-        assert!(!dqh_dupe_fallback_is_donor_file_struct_candidate(true, true));
-        assert!(!dqh_dupe_fallback_is_donor_file_struct_candidate(false, false));
         assert!(dqh_history_coord_should_mark_bad_in_prepare_edit(5, 5, true, 1, 1));
         assert!(!dqh_history_coord_should_mark_bad_in_prepare_edit(4, 5, true, 1, 1));
         assert!(!dqh_history_coord_should_mark_bad_in_prepare_edit(5, 5, false, 1, 1));

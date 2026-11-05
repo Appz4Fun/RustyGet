@@ -192,33 +192,6 @@ pub fn qcf_dupecoord_same_content_history_outcome(succeeded: bool, failed: bool)
     (clear_skip_and_same_content, check_return_backup)
 }
 
-/// Returns whether `DupeArticleFallback::GetParsedDonor` should evict the oldest cached donor.
-pub fn qcf_dupe_fallback_should_evict_parsed_donor_cache(
-    cache_len: usize,
-    max_cached_donors: i32,
-) -> bool {
-    (cache_len as i64) >= (max_cached_donors as i64)
-}
-
-/// Resolves structural / filename match in `DupeArticleFallback::MatchDonorFile`.
-/// Returns `-1` to abort (`nullptr`), `1` to return `filenameMatch`, `2` to return `structuralMatches[0]`,
-/// or `0` to continue to step-size matching.
-pub fn qcf_dupe_fallback_resolve_structural_or_filename_match(
-    filename_ambiguous: bool,
-    has_filename_match: bool,
-    structural_matches_len: usize,
-) -> i32 {
-    if filename_ambiguous {
-        -1
-    } else if has_filename_match {
-        1
-    } else if structural_matches_len == 1 {
-        2
-    } else {
-        0
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,25 +298,5 @@ mod tests {
         assert_eq!(qcf_dupecoord_same_content_history_outcome(false, false), (true, false));
         assert_eq!(qcf_dupecoord_same_content_history_outcome(false, true), (false, true));
         assert_eq!(qcf_dupecoord_same_content_history_outcome(true, false), (false, false));
-
-        assert!(qcf_dupe_fallback_should_evict_parsed_donor_cache(8, 8));
-        assert!(!qcf_dupe_fallback_should_evict_parsed_donor_cache(7, 8));
-
-        assert_eq!(
-            qcf_dupe_fallback_resolve_structural_or_filename_match(true, true, 1),
-            -1
-        );
-        assert_eq!(
-            qcf_dupe_fallback_resolve_structural_or_filename_match(false, true, 2),
-            1
-        );
-        assert_eq!(
-            qcf_dupe_fallback_resolve_structural_or_filename_match(false, false, 1),
-            2
-        );
-        assert_eq!(
-            qcf_dupe_fallback_resolve_structural_or_filename_match(false, false, 3),
-            0
-        );
     }
 }

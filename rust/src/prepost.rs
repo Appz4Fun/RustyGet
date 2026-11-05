@@ -106,21 +106,17 @@ pub fn classify_nzb_downloaded_entry(
     pc_always: i32,
     pc_force: i32,
 ) -> (i32, bool, bool) {
-    crate::histscanrepair::prepost_classify_nzb_downloaded_entry(
-        skip_script_processing,
-        skip_disk_write,
-        opt_skip_write,
-        delete_status,
-        ds_health,
-        ds_bad,
-        has_post_info,
-        opt_raw_article,
-        par_status,
-        ps_none,
-        par_check_opt,
-        pc_always,
-        pc_force,
-    )
+    if skip_script_processing && (skip_disk_write || opt_skip_write) {
+        return (1, false, false);
+    }
+    let enqueue_deleted = delete_status == ds_health || delete_status == ds_bad;
+    if !has_post_info && !opt_raw_article && !opt_skip_write && !skip_disk_write {
+        let set_par_skipped =
+            par_status == ps_none && par_check_opt != pc_always && par_check_opt != pc_force;
+        (2, enqueue_deleted, set_par_skipped)
+    } else {
+        (3, enqueue_deleted, false)
+    }
 }
 
 /// Resolve delete status and route in `PrePostProcessor::NzbDeleted`:
@@ -132,13 +128,13 @@ pub fn resolve_nzb_deleted_route(
     ds_health: i32,
     ds_bad: i32,
 ) -> (i32, bool) {
-    crate::histscanrepair::prepost_resolve_nzb_deleted_route(
-        delete_status,
-        ds_none,
-        ds_manual,
-        ds_health,
-        ds_bad,
-    )
+    let new_status = if delete_status == ds_none {
+        ds_manual
+    } else {
+        delete_status
+    };
+    let call_downloaded = new_status == ds_health || new_status == ds_bad;
+    (new_status, call_downloaded)
 }
 
 /// `PrePostProcessor::NzbCompleted` action flags evaluator.
@@ -190,14 +186,15 @@ pub fn classify_delete_cleanup_mode(
     skip_disk_write: bool,
     opt_skip_write: bool,
 ) -> i32 {
-    crate::histscanrepair::prepost_classify_delete_cleanup_mode(
-        cleanup_disk,
-        delete_status,
-        ds_dupe,
-        parking,
-        skip_disk_write,
-        opt_skip_write,
-    )
+    if cleanup_disk || (delete_status == ds_dupe && !parking) {
+        if skip_disk_write || opt_skip_write {
+            1
+        } else {
+            2
+        }
+    } else {
+        0
+    }
 }
 
 /// Classify action for `PrePostProcessor::CheckRequestPar`:
@@ -218,17 +215,21 @@ pub fn classify_request_par_action(
     cur_force_par_full: bool,
     file_list_empty: bool,
 ) -> (i32, bool) {
-    crate::histscanrepair::prepost_classify_request_par_action(
-        request_par_check,
-        par_status,
-        ps_skipped,
-        force_repair,
-        par_full,
-        par_check_opt,
-        pc_manual,
-        cur_force_par_full,
-        file_list_empty,
-    )
+    if request_par_check
+        && (par_status <= ps_skipped || (force_repair && !par_full))
+        && par_check_opt != pc_manual
+    {
+        let new_force_par_full = cur_force_par_full || par_status > ps_skipped;
+        (1, new_force_par_full)
+    } else if request_par_check && par_status <= ps_skipped && par_check_opt == pc_manual {
+        if !file_list_empty {
+            (2, cur_force_par_full)
+        } else {
+            (3, cur_force_par_full)
+        }
+    } else {
+        (0, cur_force_par_full)
+    }
 }
 
 /// `PrePostProcessor::CleanupJobs`:
@@ -309,16 +310,22 @@ pub fn classify_skipped_par_health(
     failed_size: i64,
     par_failed_size: i64,
 ) -> i32 {
-    crate::histscanrepair::prepost_classify_skipped_par_health(
-        par_status,
-        ps_skipped,
-        par_scan_opt,
-        ps_dupe,
-        health,
-        critical_health,
-        failed_size,
-        par_failed_size,
-    )
+    if par_status != ps_skipped {
+        return 0;
+    }
+    if (par_scan_opt != ps_dupe && health < critical_health && critical_health < 1000)
+        || health == 0
+    {
+        if health == 0 {
+            1
+        } else {
+            2
+        }
+    } else if failed_size - par_failed_size > 0 {
+        3
+    } else {
+        0
+    }
 }
 
 /// Evaluate `wantUnpack`, `unpack`, and whether to start `RenameController::jkRar` in `PrePostProcessor::StartJob`.
@@ -334,17 +341,10 @@ pub fn eval_want_unpack_and_rar_rename(
     rs_none: i32,
     opt_rar_rename: bool,
 ) -> (bool, bool, bool) {
-    crate::histscanrepair::prepost_eval_want_unpack_and_rar_rename(
-        has_unpack_param,
-        unpack_param_val,
-        unpack_status,
-        us_none,
-        delete_status,
-        ds_none,
-        rar_rename_status,
-        rs_none,
-        opt_rar_rename,
-    )
+    let want_unpack = !(has_unpack_param && unpack_param_val.eq_ignore_ascii_case(b"no"));
+    let unpack = want_unpack && unpack_status == us_none && delete_status == ds_none;
+    let start_rar_rename = rar_rename_status == rs_none && unpack && opt_rar_rename;
+    (want_unpack, unpack, start_rar_rename)
 }
 
 /// `PrePostProcessor::StartJob` stage eligibility calculator.
@@ -423,18 +423,16 @@ pub fn classify_file_downloaded_direct_unpack(
     ts_running: i32,
     has_unpack_thread: bool,
 ) -> i32 {
-    crate::histscanrepair::prepost_classify_file_downloaded_direct_unpack(
-        opt_direct_unpack,
-        opt_raw_article,
-        opt_skip_write,
-        skip_disk_write,
-        direct_unpack_status,
-        ns_none,
-        ns_running,
-        direct_rename_status,
-        ts_running,
-        has_unpack_thread,
-    )
+    if !opt_direct_unpack || opt_raw_article || opt_skip_write || skip_disk_write {
+        return 0;
+    }
+    if direct_unpack_status == ns_none && direct_rename_status != ts_running {
+        1
+    } else if direct_unpack_status == ns_running && has_unpack_thread {
+        2
+    } else {
+        0
+    }
 }
 
 #[cfg(test)]

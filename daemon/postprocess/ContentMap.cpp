@@ -383,7 +383,10 @@ std::unique_ptr<ContentMap> ContentMapper::BuildSplitMap(const std::vector<SetMe
 		{
 			// every member's size shapes the offsets after it - unlike rar
 			// volumes, a split set with an unreadable member cannot map at all
-			skipReason = std::string("member ") + members[memberIndex].Name + " unreadable";
+			NzbgetRsBuf reasonBuf = nzbget_rs_dqh_content_map_format_member_unreadable_reason(
+				members[memberIndex].Name.c_str());
+			skipReason.assign(reasonBuf.data ? reasonBuf.data : "", reasonBuf.len);
+			nzbget_rs_free(reasonBuf);
 			return nullptr;
 		}
 		map->GetRuns()->push_back({innerOffset, memberIndex, 0, source->Size()});

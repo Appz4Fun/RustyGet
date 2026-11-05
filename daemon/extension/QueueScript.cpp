@@ -135,7 +135,10 @@ void QueueScriptController::ExecuteScript(std::shared_ptr<const Extension::Scrip
 
 	SetArgs({script->GetEntry()});
 
-	BString<1024> infoName("queue-script %s for %s", script->GetName(), FileSystem::BaseFileName(m_nzbName));
+	NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_queue_script_format_info_name(
+		script->GetName(), FileSystem::BaseFileName(m_nzbName));
+	BString<1024> infoName("%s", infoNameBuf.data ? infoNameBuf.data : "");
+	nzbget_rs_free(infoNameBuf);
 	SetInfoName(infoName);
 
 	SetLogPrefix(script->GetDisplayName());
@@ -164,8 +167,7 @@ void QueueScriptController::PrepareParams(const char* scriptName)
 	SetEnvVar("NZBNA_DUPEKEY", m_dupeKey);
 	SetIntEnvVar("NZBNA_DUPESCORE", m_dupeScore);
 
-	const char* dupeModeName[] = { "SCORE", "ALL", "FORCE" };
-	SetEnvVar("NZBNA_DUPEMODE", dupeModeName[m_dupeMode]);
+	SetEnvVar("NZBNA_DUPEMODE", nzbget_rs_tpr_script_dupe_mode_name((int)m_dupeMode));
 
 	SetEnvVar("NZBNA_EVENT", QUEUE_EVENT_NAMES[m_event]);
 

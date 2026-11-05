@@ -214,7 +214,8 @@ bool RarVolume::ReadFrom(ContentSource& source)
 		{
 			RarFile& file = c->volume->m_files.back();
 			// Preserve the two's-complement result without signed overflow.
-			file.m_dataOffset = (int64)((uint64)position - (uint64)file.m_packedSize);
+			file.m_dataOffset = (int64)nzbget_rs_dqh_rar_volume_set_data_offset(
+				position, (int64_t)file.m_packedSize);
 			return 0;
 		});
 	};

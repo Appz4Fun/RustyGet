@@ -51,7 +51,9 @@ void NzbScriptController::PrepareEnvScript(NzbParameterList* parameters, const c
 		PrepareEnvParameters(parameters, nullptr);
 	}
 
-	BString<1024> paramPrefix("%s:", scriptName);
+	NzbgetRsBuf paramPrefixBuf = nzbget_rs_tpr_nzb_script_format_param_prefix(scriptName);
+	BString<1024> paramPrefix("%s", paramPrefixBuf.data ? paramPrefixBuf.data : "");
+	nzbget_rs_free(paramPrefixBuf);
 
 	if (parameters)
 	{

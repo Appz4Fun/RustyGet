@@ -1243,6 +1243,106 @@ pub fn dqh_stream_repair_decompress_fail_reason(has_extractor: bool) -> &'static
     }
 }
 
+/// Formats `"member <name> unreadable"` for `ContentMapper::BuildSplitMap`.
+pub fn dqh_content_map_format_member_unreadable_reason(name: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(name.len() + 18);
+    out.extend_from_slice(b"member ");
+    out.extend_from_slice(name);
+    out.extend_from_slice(b" unreadable");
+    out
+}
+
+/// Returns `b""` or `b", size mismatch"` for `DupeMatcher::Prepare` and `DupeMatcher::MatchDupeContent`.
+pub fn dqh_dupematcher_size_mismatch_suffix(ok: bool) -> &'static [u8] {
+    if ok {
+        b"\0"
+    } else {
+        b", size mismatch\0"
+    }
+}
+
+/// Returns the static skip/warning message for `PostDownloadRenamer::Controller::Run`
+/// and `PostUnpackRenamer::Controller::Run` when `plan_class` is `1`, `2`, or `3`.
+pub fn dqh_post_renamer_plan_skip_static_msg(
+    is_post_unpack: bool,
+    plan_class: i32,
+) -> &'static [u8] {
+    if is_post_unpack {
+        match plan_class {
+            1 => b"Skipping Post-unpack renaming: disc structure detected\0",
+            2 => b"Skipping Post-unpack renaming: ambiguous multi-file collection detected\0",
+            3 => b"No qualifying media file found for Post-unpack renaming\0",
+            _ => b"\0",
+        }
+    } else {
+        match plan_class {
+            1 => b"Skipping Post-download renaming: disc structure detected\0",
+            2 => b"Skipping Post-download renaming: ambiguous multi-file collection detected\0",
+            3 => b"No qualifying media file found for Post-download renaming\0",
+            _ => b"\0",
+        }
+    }
+}
+
+/// Formats the final status message for `PostDownloadRenamer::Controller::Run`
+/// and `PostUnpackRenamer::Controller::Run`.
+pub fn dqh_post_renamer_format_final_status_msg(
+    info_name: &[u8],
+    final_decision: i32,
+) -> Vec<u8> {
+    match final_decision {
+        1 => {
+            let mut out = Vec::with_capacity(info_name.len() + 10);
+            out.extend_from_slice(info_name);
+            out.extend_from_slice(b" cancelled");
+            out
+        }
+        2 => {
+            let mut out = Vec::with_capacity(info_name.len() + 21);
+            out.extend_from_slice(info_name);
+            out.extend_from_slice(b" finished with errors");
+            out
+        }
+        3 => {
+            let mut out = Vec::with_capacity(info_name.len() + 11);
+            out.extend_from_slice(info_name);
+            out.extend_from_slice(b" successful");
+            out
+        }
+        _ => {
+            let mut out = Vec::with_capacity(info_name.len() + 29);
+            out.extend_from_slice(b"No files needed renaming for ");
+            out.extend_from_slice(info_name);
+            out
+        }
+    }
+}
+
+/// Computes `file.m_dataOffset` via two's-complement subtraction for `RarVolume::ReadFrom`.
+pub fn dqh_rar_volume_set_data_offset(position: i64, packed_size: i64) -> i64 {
+    (position as u64).wrapping_sub(packed_size as u64) as i64
+}
+
+/// Formats the 3-byte little-endian round counter for `StreamCrypto::DeriveRar3`.
+pub fn dqh_stream_crypto_format_rar3_round_bytes(round: i32) -> [u8; 3] {
+    [
+        (round & 0xff) as u8,
+        ((round >> 8) & 0xff) as u8,
+        ((round >> 16) & 0xff) as u8,
+    ]
+}
+
+/// Returns the IV byte index (`0..16`) if `round` is an IV sampling round in `StreamCrypto::DeriveRar3`,
+/// or `-1` otherwise.
+pub fn dqh_stream_crypto_rar3_iv_index(round: i32, rounds: i32) -> i32 {
+    let step = rounds / 16;
+    if step > 0 && round >= 0 && round % step == 0 {
+        round / step
+    } else {
+        -1
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1745,5 +1845,38 @@ mod tests {
             dqh_stream_repair_decompress_fail_reason(false),
             b"no extraction tool configured\0"
         );
+        assert_eq!(
+            dqh_content_map_format_member_unreadable_reason(b"video.mkv"),
+            b"member video.mkv unreadable"
+        );
+        assert_eq!(dqh_dupematcher_size_mismatch_suffix(true), b"\0");
+        assert_eq!(
+            dqh_dupematcher_size_mismatch_suffix(false),
+            b", size mismatch\0"
+        );
+        assert_eq!(
+            dqh_post_renamer_plan_skip_static_msg(false, 2),
+            b"Skipping Post-download renaming: ambiguous multi-file collection detected\0"
+        );
+        assert_eq!(
+            dqh_post_renamer_plan_skip_static_msg(true, 3),
+            b"No qualifying media file found for Post-unpack renaming\0"
+        );
+        assert_eq!(
+            dqh_post_renamer_format_final_status_msg(b"Post-download renaming for Nzb", 3),
+            b"Post-download renaming for Nzb successful"
+        );
+        assert_eq!(
+            dqh_post_renamer_format_final_status_msg(b"Post-unpack renaming for Nzb", 4),
+            b"No files needed renaming for Post-unpack renaming for Nzb"
+        );
+        assert_eq!(dqh_rar_volume_set_data_offset(1000, 400), 600);
+        assert_eq!(
+            dqh_stream_crypto_format_rar3_round_bytes(0x030201),
+            [0x01, 0x02, 0x03]
+        );
+        assert_eq!(dqh_stream_crypto_rar3_iv_index(0, 0x40000), 0);
+        assert_eq!(dqh_stream_crypto_rar3_iv_index(0x4000, 0x40000), 1);
+        assert_eq!(dqh_stream_crypto_rar3_iv_index(1, 0x40000), -1);
     }
 }

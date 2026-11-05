@@ -99,7 +99,9 @@ void PostScriptController::ExecuteScript(std::shared_ptr<const Extension::Script
 
 	PrintMessage(Message::mkInfo, "Executing post-process-script %s for %s", m_script->GetName(), m_postInfo->GetNzbInfo()->GetName());
 
-	BString<1024> progressLabel("Executing post-process-script %s", m_script->GetName());
+	NzbgetRsBuf progressLabelBuf = nzbget_rs_tpr_post_script_format_progress_label(m_script->GetName());
+	BString<1024> progressLabel("%s", progressLabelBuf.data ? progressLabelBuf.data : "");
+	nzbget_rs_free(progressLabelBuf);
 
 	{
 		GuardedDownloadQueue guard = DownloadQueue::Guard();
@@ -108,7 +110,10 @@ void PostScriptController::ExecuteScript(std::shared_ptr<const Extension::Script
 
 	SetArgs({m_script->GetEntry()});
 
-	BString<1024> infoName("post-process-script %s for %s", m_script->GetName(), m_postInfo->GetNzbInfo()->GetName());
+	NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_post_script_format_info_name(
+		m_script->GetName(), m_postInfo->GetNzbInfo()->GetName(), 0);
+	BString<1024> infoName("%s", infoNameBuf.data ? infoNameBuf.data : "");
+	nzbget_rs_free(infoNameBuf);
 	SetInfoName(infoName);
 
 	
@@ -118,7 +123,10 @@ void PostScriptController::ExecuteScript(std::shared_ptr<const Extension::Script
 
 	int exitCode = Execute();
 
-	infoName[0] = 'P'; // uppercase
+	NzbgetRsBuf upInfoNameBuf = nzbget_rs_tpr_post_script_format_info_name(
+		m_script->GetName(), m_postInfo->GetNzbInfo()->GetName(), 1);
+	infoName.Format("%s", upInfoNameBuf.data ? upInfoNameBuf.data : "");
+	nzbget_rs_free(upInfoNameBuf);
 
 	SetLogPrefix(nullptr);
 	ScriptStatus::EStatus status = AnalyseExitCode(exitCode, infoName);
@@ -149,14 +157,14 @@ void PostScriptController::PrepareParams(const char* scriptName)
 	SetEnvVar("NZBPP_DUPEKEY", m_postInfo->GetNzbInfo()->GetDupeKey());
 	SetIntEnvVar("NZBPP_DUPESCORE", m_postInfo->GetNzbInfo()->GetDupeScore());
 
-	const char* dupeModeName[] = { "SCORE", "ALL", "FORCE" };
-	SetEnvVar("NZBPP_DUPEMODE", dupeModeName[m_postInfo->GetNzbInfo()->GetDupeMode()]);
+	SetEnvVar("NZBPP_DUPEMODE",
+		nzbget_rs_tpr_script_dupe_mode_name((int)m_postInfo->GetNzbInfo()->GetDupeMode()));
 
 	BString<1024> status = m_postInfo->GetNzbInfo()->MakeTextStatus(true);
 	SetEnvVar("NZBPP_STATUS", status);
 
-	char* detail = strchr(status, '/');
-	if (detail) *detail = '\0';
+	size_t totalStatusLen = nzbget_rs_tpr_post_script_total_status_len(status);
+	status[totalStatusLen] = '\0';
 	SetEnvVar("NZBPP_TOTALSTATUS", status);
 
 	const char* scriptStatusName[] = { "NONE", "FAILURE", "SUCCESS" };
@@ -186,11 +194,15 @@ void PostScriptController::PrepareParams(const char* scriptName)
 
 	for (ServerStat& serverStat : m_postInfo->GetNzbInfo()->GetServerStats())
 	{
-		SetIntEnvVar(BString<1024>("NZBPP_SERVER%i_SUCCESSARTICLES", serverStat.GetServerId()),
-			serverStat.GetSuccessArticles());
+		NzbgetRsBuf succNameBuf = nzbget_rs_tpr_post_script_format_server_env_name(
+			serverStat.GetServerId(), 0);
+		SetIntEnvVar(succNameBuf.data ? succNameBuf.data : "", serverStat.GetSuccessArticles());
+		nzbget_rs_free(succNameBuf);
 
-		SetIntEnvVar(BString<1024>("NZBPP_SERVER%i_FAILEDARTICLES", serverStat.GetServerId()),
-			serverStat.GetFailedArticles());
+		NzbgetRsBuf failNameBuf = nzbget_rs_tpr_post_script_format_server_env_name(
+			serverStat.GetServerId(), 1);
+		SetIntEnvVar(failNameBuf.data ? failNameBuf.data : "", serverStat.GetFailedArticles());
+		nzbget_rs_free(failNameBuf);
 	}
 
 	PrepareEnvScript(m_postInfo->GetNzbInfo()->GetParameters(), scriptName);

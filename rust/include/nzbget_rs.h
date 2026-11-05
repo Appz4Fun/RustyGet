@@ -5745,6 +5745,36 @@ NzbgetRsBuf nzbget_rs_tpr_unpack_format_extracting_msg(const char* suffix);
 NzbgetRsBuf nzbget_rs_tpr_unpack_ctrl_format_cancel_msg(const char* info_name);
 NzbgetRsBuf nzbget_rs_tpr_rar_renamer_format_exec_progress(const char* info_name);
 NzbgetRsBuf nzbget_rs_tpr_rar_renamer_format_file_progress(const char* filename);
+NzbgetRsBuf nzbget_rs_dqh_content_map_format_member_unreadable_reason(const char* name);
+const char* nzbget_rs_dqh_dupematcher_size_mismatch_suffix(int32_t ok);
+const char* nzbget_rs_dqh_post_renamer_plan_skip_static_msg(
+    int32_t is_post_unpack, int32_t plan_class);
+NzbgetRsBuf nzbget_rs_dqh_post_renamer_format_final_status_msg(
+    const char* info_name, int32_t final_decision);
+int64_t nzbget_rs_dqh_rar_volume_set_data_offset(int64_t position, int64_t packed_size);
+void nzbget_rs_dqh_stream_crypto_format_rar3_round_bytes(int32_t round, uint8_t* out_buf);
+int32_t nzbget_rs_dqh_stream_crypto_rar3_iv_index(int32_t round, int32_t rounds);
+NzbgetRsBuf nzbget_rs_tpr_feed_coord_format_temp_filename(
+    const char* temp_dir, char sep, int32_t id, int32_t preview,
+    int32_t cur_time, int32_t rand_val, int32_t preview_num);
+NzbgetRsBuf nzbget_rs_tpr_feed_script_format_info_name(
+    const char* script_name, int32_t feed_id, int32_t uppercase_first);
+NzbgetRsBuf nzbget_rs_tpr_nzb_script_format_param_prefix(const char* script_name);
+NzbgetRsBuf nzbget_rs_tpr_post_script_format_info_name(
+    const char* script_name, const char* nzb_name, int32_t uppercase_first);
+NzbgetRsBuf nzbget_rs_tpr_post_script_format_progress_label(const char* script_name);
+const char* nzbget_rs_tpr_script_dupe_mode_name(int32_t dupe_mode);
+size_t nzbget_rs_tpr_post_script_total_status_len(const char* status);
+NzbgetRsBuf nzbget_rs_tpr_post_script_format_server_env_name(
+    int32_t server_id, int32_t is_failed);
+NzbgetRsBuf nzbget_rs_tpr_queue_script_format_info_name(
+    const char* script_name, const char* base_nzb_name);
+NzbgetRsBuf nzbget_rs_tpr_scan_script_format_info_name(
+    const char* script_name, const char* base_nzb_filename);
+NzbgetRsBuf nzbget_rs_tpr_sched_script_format_task_suffix(int32_t task_id);
+NzbgetRsBuf nzbget_rs_tpr_sched_script_format_info_name(
+    const char* script_name, int32_t task_id, int32_t external_process);
+NzbgetRsBuf nzbget_rs_tpr_ext_mgr_format_temp_zip_name(int64_t cur_time, int32_t counter);
 
 #include "nzbget_tls_cipher.h"
 

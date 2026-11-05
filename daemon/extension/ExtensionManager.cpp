@@ -59,8 +59,11 @@ namespace ExtensionManager
 		// ("../x" wrote anywhere the daemon can), and two downloads of one
 		// extension at once wrote the same file
 		static std::atomic<int> counter{0};
+		NzbgetRsBuf zipNameBuf = nzbget_rs_tpr_ext_mgr_format_temp_zip_name(
+			(int64_t)Util::CurrentTime(), ++counter);
 		fs::path tmpFileName = g_Options->GetTempDirPath() /
-			("extension-" + std::to_string(Util::CurrentTime()) + "-" + std::to_string(++counter) + ".tmp.zip");
+			std::string(zipNameBuf.data ? zipNameBuf.data : "", zipNameBuf.len);
+		nzbget_rs_free(zipNameBuf);
 
 		const auto tmpFileNameStr = fs::u8string(tmpFileName);
 

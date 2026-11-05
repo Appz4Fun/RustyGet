@@ -150,7 +150,7 @@ bool DupeMatcher::Prepare()
 	FindLargestFile(m_destDir, filename, sizeof(filename), &m_maxSize, &m_compressed);
 	bool sizeOK = SizeDiffOK(m_maxSize, m_expectedSize, 20);
 	PrintMessage(Message::mkDetail, "Found main file %s with size %" PRIi64 " bytes%s",
-		filename, m_maxSize, sizeOK ? "" : ", size mismatch");
+		filename, m_maxSize, nzbget_rs_dqh_dupematcher_size_mismatch_suffix(sizeOK ? 1 : 0));
 	return sizeOK;
 }
 
@@ -163,7 +163,7 @@ bool DupeMatcher::MatchDupeContent(const char* dupeDir)
 	bool ok = nzbget_rs_psp_dupematcher_is_content_match(
 		dupeMaxSize, m_maxSize, dupeCompressed ? 1 : 0, m_compressed ? 1 : 0) != 0;
 	PrintMessage(Message::mkDetail, "Found main file %s with size %" PRIi64 " bytes%s",
-		filename, m_maxSize, ok ? "" : ", size mismatch");
+		filename, m_maxSize, nzbget_rs_dqh_dupematcher_size_mismatch_suffix(ok ? 1 : 0));
 	return ok;
 }
 

@@ -72,7 +72,10 @@ namespace PostDownloadRenamer
 			return;
 		}
 
-		BString<1024> infoName("Post-download renaming for %s", targetName.c_str());
+		NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_post_format_info_name(
+			"Post-download renaming", targetName.c_str());
+		BString<1024> infoName("%s", infoNameBuf.data ? infoNameBuf.data : "");
+		nzbget_rs_free(infoNameBuf);
 		SetInfoName(*infoName);
 
 		CollectionAnalyzer::RenamePlan plan = CollectionAnalyzer::BuildPlan(
@@ -86,17 +89,10 @@ namespace PostDownloadRenamer
 			plan.targetNameObfuscated ? 1 : 0);
 		if (planClass != 0)
 		{
-			if (planClass == 1)
+			if (planClass >= 1 && planClass <= 3)
 			{
-				PrintMessage(Message::mkInfo, "Skipping Post-download renaming: disc structure detected");
-			}
-			else if (planClass == 2)
-			{
-				PrintMessage(Message::mkInfo, "Skipping Post-download renaming: ambiguous multi-file collection detected");
-			}
-			else if (planClass == 3)
-			{
-				PrintMessage(Message::mkInfo, "No qualifying media file found for Post-download renaming");
+				PrintMessage(Message::mkInfo, "%s",
+					nzbget_rs_dqh_post_renamer_plan_skip_static_msg(0, planClass));
 			}
 			else if (planClass == 4)
 			{
@@ -141,27 +137,31 @@ namespace PostDownloadRenamer
 
 		int finalDecision = nzbget_rs_snh_post_renamer_decide_final_status(
 			IsStopped() ? 1 : 0, anyFailed ? 1 : 0, anyRenamed ? 1 : 0);
+		NzbgetRsBuf finalMsgBuf = nzbget_rs_dqh_post_renamer_format_final_status_msg(
+			*infoName, finalDecision);
 		if (finalDecision == 1)
 		{
-			PrintMessage(Message::mkWarning, "%s cancelled", *infoName);
+			PrintMessage(Message::mkWarning, "%s", finalMsgBuf.data ? finalMsgBuf.data : "");
+			nzbget_rs_free(finalMsgBuf);
 			Finish();
 			return;
 		}
 		if (finalDecision == 2)
 		{
-			PrintMessage(Message::mkError, "%s finished with errors", *infoName);
+			PrintMessage(Message::mkError, "%s", finalMsgBuf.data ? finalMsgBuf.data : "");
 			finalStatus = NzbInfo::PostDownloadRenamingStatus::Failure;
 		}
 		else if (finalDecision == 3)
 		{
-			PrintMessage(Message::mkInfo, "%s successful", *infoName);
+			PrintMessage(Message::mkInfo, "%s", finalMsgBuf.data ? finalMsgBuf.data : "");
 			finalStatus = NzbInfo::PostDownloadRenamingStatus::Success;
 		}
 		else
 		{
-			PrintMessage(Message::mkInfo, "No files needed renaming for %s", *infoName);
+			PrintMessage(Message::mkInfo, "%s", finalMsgBuf.data ? finalMsgBuf.data : "");
 			finalStatus = NzbInfo::PostDownloadRenamingStatus::Skipped;
 		}
+		nzbget_rs_free(finalMsgBuf);
 
 		Finish();
 	}

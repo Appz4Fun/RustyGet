@@ -295,17 +295,16 @@ void FeedCoordinator::StartFeedDownload(FeedInfo* feedInfo, bool force)
 
 	// a preview of a configured feed must not share the file of that feed's own fetch
 	static std::atomic<int> previewNum{0};
-	BString<1024> outFilename;
-	if (nzbget_rs_ucf_feed_coord_use_feed_id_temp_file(
-		feedInfo->GetId(), feedInfo->GetPreview() ? 1 : 0) != 0)
-	{
-		outFilename.Format("%s%cfeed-%i.tmp", g_Options->GetTempDir(), PATH_SEPARATOR, feedInfo->GetId());
-	}
-	else
-	{
-		outFilename.Format("%s%cfeed-%i-%i-%i.tmp", g_Options->GetTempDir(), PATH_SEPARATOR,
-			(int)Util::CurrentTime(), rand(), ++previewNum);
-	}
+	bool useFeedId = nzbget_rs_ucf_feed_coord_use_feed_id_temp_file(
+		feedInfo->GetId(), feedInfo->GetPreview() ? 1 : 0) != 0;
+	NzbgetRsBuf outFilenameBuf = nzbget_rs_tpr_feed_coord_format_temp_filename(
+		g_Options->GetTempDir(), PATH_SEPARATOR, feedInfo->GetId(),
+		useFeedId ? 0 : 1,
+		useFeedId ? 0 : (int)Util::CurrentTime(),
+		useFeedId ? 0 : rand(),
+		useFeedId ? 0 : ++previewNum);
+	BString<1024> outFilename("%s", outFilenameBuf.data ? outFilenameBuf.data : "");
+	nzbget_rs_free(outFilenameBuf);
 	feedDownloader->SetOutputFilename(outFilename);
 
 	feedInfo->SetStatus(FeedInfo::fsRunning);
@@ -404,7 +403,8 @@ void FeedCoordinator::SchedulerNextUpdate(FeedInfo* feedInfo, bool success)
 		success ? 1 : 0, feedInfo->GetInterval(), feedInfo->GetLastInterval(), &newLastInterval);
 	feedInfo->SetLastInterval(newLastInterval);
 
-	detail("Scheduling update for feed %s in %i minute(s)", feedInfo->GetName(), interval / 60);
+	detail("Scheduling update for feed %s in %i minute(s)",
+		feedInfo->GetName(), nzbget_rs_tpr_repair_ctrl_seconds_to_minutes(interval));
 	feedInfo->SetNextUpdate(current + interval);
 }
 

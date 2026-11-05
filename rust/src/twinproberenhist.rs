@@ -1294,6 +1294,171 @@ pub fn tpr_rar_renamer_format_file_progress(filename: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Formats the temporary feed download filename for `FeedCoordinator::StartFeedDownload`.
+pub fn tpr_feed_coord_format_temp_filename(
+    temp_dir: &[u8],
+    sep: u8,
+    id: i32,
+    preview: bool,
+    cur_time: i32,
+    rand_val: i32,
+    preview_num: i32,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(temp_dir.len() + 48);
+    out.extend_from_slice(temp_dir);
+    out.push(sep);
+    if id > 0 && !preview {
+        out.extend_from_slice(format!("feed-{id}.tmp").as_bytes());
+    } else {
+        out.extend_from_slice(format!("feed-{cur_time}-{rand_val}-{preview_num}.tmp").as_bytes());
+    }
+    out
+}
+
+/// Formats `"feed-script <script_name> for Feed<feed_id>"` (or capitalized `"Feed-script..."`)
+/// for `FeedScriptController::ExecuteScript`.
+pub fn tpr_feed_script_format_info_name(
+    script_name: &[u8],
+    feed_id: i32,
+    uppercase_first: bool,
+) -> Vec<u8> {
+    let prefix: &[u8] = if uppercase_first {
+        b"Feed-script "
+    } else {
+        b"feed-script "
+    };
+    let suffix = format!(" for Feed{feed_id}");
+    let mut out = Vec::with_capacity(prefix.len() + script_name.len() + suffix.len());
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(script_name);
+    out.extend_from_slice(suffix.as_bytes());
+    out
+}
+
+/// Formats `"<script_name>:"` for `NzbScriptController::PrepareEnvScript`.
+pub fn tpr_nzb_script_format_param_prefix(script_name: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(script_name.len() + 1);
+    out.extend_from_slice(script_name);
+    out.push(b':');
+    out
+}
+
+/// Formats `"post-process-script <script_name> for <nzb_name>"` (or capitalized `"Post-process-script..."`)
+/// for `PostScriptController::ExecuteScript`.
+pub fn tpr_post_script_format_info_name(
+    script_name: &[u8],
+    nzb_name: &[u8],
+    uppercase_first: bool,
+) -> Vec<u8> {
+    let prefix: &[u8] = if uppercase_first {
+        b"Post-process-script "
+    } else {
+        b"post-process-script "
+    };
+    let mut out = Vec::with_capacity(prefix.len() + script_name.len() + 5 + nzb_name.len());
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(script_name);
+    out.extend_from_slice(b" for ");
+    out.extend_from_slice(nzb_name);
+    out
+}
+
+/// Formats `"Executing post-process-script <script_name>"` for `PostScriptController::ExecuteScript`.
+pub fn tpr_post_script_format_progress_label(script_name: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(script_name.len() + 30);
+    out.extend_from_slice(b"Executing post-process-script ");
+    out.extend_from_slice(script_name);
+    out
+}
+
+/// Returns `"SCORE"`, `"ALL"`, or `"FORCE"` for script environment preparation.
+pub fn tpr_script_dupe_mode_name(dupe_mode: i32) -> &'static [u8] {
+    match dupe_mode {
+        1 => b"ALL\0",
+        2 => b"FORCE\0",
+        _ => b"SCORE\0",
+    }
+}
+
+/// Returns the length of the total status prefix before `'/'` for `PostScriptController::PrepareParams`.
+pub fn tpr_post_script_total_status_len(status: &[u8]) -> usize {
+    status.iter().position(|&b| b == b'/').unwrap_or(status.len())
+}
+
+/// Formats `"NZBPP_SERVER<id>_SUCCESSARTICLES"` or `"NZBPP_SERVER<id>_FAILEDARTICLES"`
+/// for `PostScriptController::PrepareParams`.
+pub fn tpr_post_script_format_server_env_name(server_id: i32, is_failed: bool) -> Vec<u8> {
+    if is_failed {
+        format!("NZBPP_SERVER{server_id}_FAILEDARTICLES").into_bytes()
+    } else {
+        format!("NZBPP_SERVER{server_id}_SUCCESSARTICLES").into_bytes()
+    }
+}
+
+/// Formats `"queue-script <script_name> for <base_nzb_name>"` for `QueueScriptController::ExecuteScript`.
+pub fn tpr_queue_script_format_info_name(
+    script_name: &[u8],
+    base_nzb_name: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(script_name.len() + base_nzb_name.len() + 18);
+    out.extend_from_slice(b"queue-script ");
+    out.extend_from_slice(script_name);
+    out.extend_from_slice(b" for ");
+    out.extend_from_slice(base_nzb_name);
+    out
+}
+
+/// Formats `"scan-script <script_name> for <base_nzb_filename>"` for `ScanScriptController::ExecuteScript`.
+pub fn tpr_scan_script_format_info_name(
+    script_name: &[u8],
+    base_nzb_filename: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(script_name.len() + base_nzb_filename.len() + 17);
+    out.extend_from_slice(b"scan-script ");
+    out.extend_from_slice(script_name);
+    out.extend_from_slice(b" for ");
+    out.extend_from_slice(base_nzb_filename);
+    out
+}
+
+/// Formats `" for Task<task_id>"` when `task_id > 0` or `""` for `SchedulerScriptController::ExecuteScript`.
+pub fn tpr_sched_script_format_task_suffix(task_id: i32) -> Vec<u8> {
+    if task_id > 0 {
+        format!(" for Task{task_id}").into_bytes()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Formats the scheduler script `infoName` for `SchedulerScriptController::ExecuteScript`
+/// and `SchedulerScriptController::ExecuteExternalProcess`.
+pub fn tpr_sched_script_format_info_name(
+    script_name: &[u8],
+    task_id: i32,
+    external_process: bool,
+) -> Vec<u8> {
+    let prefix: &[u8] = if external_process {
+        b"scheduled process-script "
+    } else {
+        b"scheduler-script "
+    };
+    let suffix = if external_process || task_id > 0 {
+        format!(" for Task{task_id}")
+    } else {
+        String::new()
+    };
+    let mut out = Vec::with_capacity(prefix.len() + script_name.len() + suffix.len());
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(script_name);
+    out.extend_from_slice(suffix.as_bytes());
+    out
+}
+
+/// Formats `"extension-<cur_time>-<counter>.tmp.zip"` for `ExtensionManager::Manager::DownloadExtension`.
+pub fn tpr_ext_mgr_format_temp_zip_name(cur_time: i64, counter: i32) -> Vec<u8> {
+    format!("extension-{cur_time}-{counter}.tmp.zip").into_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1754,6 +1919,74 @@ mod tests {
         assert_eq!(
             tpr_rar_renamer_format_file_progress(b"part01.rar"),
             b"Checking file part01.rar"
+        );
+        assert_eq!(
+            tpr_feed_coord_format_temp_filename(b"/tmp", b'/', 3, false, 100, 200, 1),
+            b"/tmp/feed-3.tmp"
+        );
+        assert_eq!(
+            tpr_feed_coord_format_temp_filename(b"/tmp", b'/', 3, true, 100, 200, 1),
+            b"/tmp/feed-100-200-1.tmp"
+        );
+        assert_eq!(
+            tpr_feed_script_format_info_name(b"Subliminal.py", 2, false),
+            b"feed-script Subliminal.py for Feed2"
+        );
+        assert_eq!(
+            tpr_feed_script_format_info_name(b"Subliminal.py", 2, true),
+            b"Feed-script Subliminal.py for Feed2"
+        );
+        assert_eq!(tpr_nzb_script_format_param_prefix(b"Notify.py"), b"Notify.py:");
+        assert_eq!(
+            tpr_post_script_format_info_name(b"Notify.py", b"MyNzb", false),
+            b"post-process-script Notify.py for MyNzb"
+        );
+        assert_eq!(
+            tpr_post_script_format_info_name(b"Notify.py", b"MyNzb", true),
+            b"Post-process-script Notify.py for MyNzb"
+        );
+        assert_eq!(
+            tpr_post_script_format_progress_label(b"Notify.py"),
+            b"Executing post-process-script Notify.py"
+        );
+        assert_eq!(tpr_script_dupe_mode_name(0), b"SCORE\0");
+        assert_eq!(tpr_script_dupe_mode_name(1), b"ALL\0");
+        assert_eq!(tpr_script_dupe_mode_name(2), b"FORCE\0");
+        assert_eq!(tpr_post_script_total_status_len(b"SUCCESS/ALL"), 7);
+        assert_eq!(tpr_post_script_total_status_len(b"FAILURE"), 7);
+        assert_eq!(
+            tpr_post_script_format_server_env_name(1, false),
+            b"NZBPP_SERVER1_SUCCESSARTICLES"
+        );
+        assert_eq!(
+            tpr_post_script_format_server_env_name(2, true),
+            b"NZBPP_SERVER2_FAILEDARTICLES"
+        );
+        assert_eq!(
+            tpr_queue_script_format_info_name(b"Logger.py", b"MyNzb"),
+            b"queue-script Logger.py for MyNzb"
+        );
+        assert_eq!(
+            tpr_scan_script_format_info_name(b"Sanitize.py", b"MyNzb.nzb"),
+            b"scan-script Sanitize.py for MyNzb.nzb"
+        );
+        assert_eq!(tpr_sched_script_format_task_suffix(4), b" for Task4");
+        assert_eq!(tpr_sched_script_format_task_suffix(0), b"");
+        assert_eq!(
+            tpr_sched_script_format_info_name(b"Clean.py", 4, false),
+            b"scheduler-script Clean.py for Task4"
+        );
+        assert_eq!(
+            tpr_sched_script_format_info_name(b"Clean.py", 0, false),
+            b"scheduler-script Clean.py"
+        );
+        assert_eq!(
+            tpr_sched_script_format_info_name(b"backup.sh", 2, true),
+            b"scheduled process-script backup.sh for Task2"
+        );
+        assert_eq!(
+            tpr_ext_mgr_format_temp_zip_name(1700000000, 5),
+            b"extension-1700000000-5.tmp.zip"
         );
     }
 }

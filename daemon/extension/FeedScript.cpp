@@ -52,7 +52,10 @@ void FeedScriptController::ExecuteScript(std::shared_ptr<const Extension::Script
 
 	SetArgs({script->GetEntry()});
 
-	BString<1024> infoName("feed-script %s for Feed%i", script->GetName(), m_feedId);
+	NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_feed_script_format_info_name(
+		script->GetName(), m_feedId, 0);
+	BString<1024> infoName("%s", infoNameBuf.data ? infoNameBuf.data : "");
+	nzbget_rs_free(infoNameBuf);
 	SetInfoName(infoName);
 
 	SetLogPrefix(script->GetDisplayName());
@@ -62,8 +65,10 @@ void FeedScriptController::ExecuteScript(std::shared_ptr<const Extension::Script
 
 	if (nzbget_rs_euh_feed_script_is_success(exitCode) == 0)
 	{
-		infoName[0] = 'F'; // uppercase
-		PrintMessage(Message::mkError, "%s failed", *infoName);
+		NzbgetRsBuf upInfoNameBuf = nzbget_rs_tpr_feed_script_format_info_name(
+			script->GetName(), m_feedId, 1);
+		PrintMessage(Message::mkError, "%s failed", upInfoNameBuf.data ? upInfoNameBuf.data : "");
+		nzbget_rs_free(upInfoNameBuf);
 		m_success = false;
 	}
 

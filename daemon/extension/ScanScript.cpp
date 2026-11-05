@@ -104,7 +104,10 @@ void ScanScriptController::ExecuteScript(std::shared_ptr<const Extension::Script
 
 	SetArgs({script->GetEntry()});
 
-	BString<1024> infoName("scan-script %s for %s", script->GetName(), FileSystem::BaseFileName(m_nzbFilename));
+	NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_scan_script_format_info_name(
+		script->GetName(), FileSystem::BaseFileName(m_nzbFilename));
+	BString<1024> infoName("%s", infoNameBuf.data ? infoNameBuf.data : "");
+	nzbget_rs_free(infoNameBuf);
 	SetInfoName(infoName);
 
 	SetLogPrefix(script->GetDisplayName());
@@ -130,8 +133,7 @@ void ScanScriptController::PrepareParams(const char* scriptName)
 	SetEnvVar("NZBNP_DUPEKEY", m_dupeKey.c_str());
 	SetIntEnvVar("NZBNP_DUPESCORE", *m_dupeScore);
 
-	const char* dupeModeName[] = { "SCORE", "ALL", "FORCE" };
-	SetEnvVar("NZBNP_DUPEMODE", dupeModeName[*m_dupeMode]);
+	SetEnvVar("NZBNP_DUPEMODE", nzbget_rs_tpr_script_dupe_mode_name((int)*m_dupeMode));
 
 	// remove trailing slash
 	BString<1024> dir = m_directory;

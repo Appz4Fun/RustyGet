@@ -67,13 +67,12 @@ bool StreamCrypto::DeriveRar3(const char* password, const uint8 salt[8],
 		EVP_DigestUpdate(context.get(), *seed, seed.Size());
 
 		uint8 buf[3];
-		buf[0] = (uint8)i;
-		buf[1] = (uint8)(i >> 8);
-		buf[2] = (uint8)(i >> 16);
+		nzbget_rs_dqh_stream_crypto_format_rar3_round_bytes(i, buf);
 
 		EVP_DigestUpdate(context.get(), buf, sizeof(buf));
 
-		if (i % (rounds / 16) == 0)
+		int ivIdx = nzbget_rs_dqh_stream_crypto_rar3_iv_index(i, rounds);
+		if (ivIdx >= 0)
 		{
 			OpenSSL::EVPMdCtxPtr ivContext{ EVP_MD_CTX_new(), &EVP_MD_CTX_free };
 			if (ivContext)
@@ -81,7 +80,7 @@ bool StreamCrypto::DeriveRar3(const char* password, const uint8 salt[8],
 				EVP_MD_CTX_copy(ivContext.get(), context.get());
 				EVP_DigestFinal(ivContext.get(), digest, nullptr);
 			}
-			ivOut[i / (rounds / 16)] = digest[sizeof(digest) - 1];
+			ivOut[ivIdx] = digest[sizeof(digest) - 1];
 		}
 	}
 

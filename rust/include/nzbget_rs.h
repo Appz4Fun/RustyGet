@@ -1117,20 +1117,7 @@ typedef struct
 	const int* lower;
 	int charSigned;
 } NzbgetRsCtype;
-typedef struct
-{
-	size_t kept;
-	int totalArticles;
-	int missedArticles;
-	int64_t size;
-	int64_t remainingSize;
-	int64_t missedSize;
-	int cutShort;
-} NzbgetRsFileTotals;
-int nzbget_rs_nzb_file_totals(const char* subject, const int* parts, const int64_t* sizes, size_t count,
-	const NzbgetRsCtype* ct, size_t* order, NzbgetRsFileTotals* totals);
 int nzbget_rs_nzb_declared_parts(const char* subject, const NzbgetRsCtype* ct);
-int nzbget_rs_nzb_duplicate_filenames(const char* const* names, const char* const* subjects, size_t count);
 
 // UrlCoordinator (rust/src/urlcoord.rs). dnzb_header: UrlDownloader's
 // X-DNZB headers; 1 with *start and *length the trimmed value of
@@ -2023,32 +2010,6 @@ int nzbget_rs_sus_web_classify_get_dispatch(const char* url);
 int nzbget_rs_sus_web_is_ignorable_404(const char* base_name);
 const char* nzbget_rs_sus_web_detect_content_type(const char* filename);
 
-int nzbget_rs_sus_select_next_url(
-    const int* kinds, const int* url_statuses, const int* delete_statuses,
-    const int* priorities, size_t count, int nk_url, int ls_none, int ds_none);
-int nzbget_rs_sus_is_hanging_url_download(
-    int64_t now, int64_t last_update_time, int url_timeout, int status, int ad_running);
-
-void nzbget_rs_sus_eval_direct_rename_article(
-    int article_size, size_t article_count, int old_par_file, int new_par_file,
-    int file_paused, int64_t file_size, int64_t file_success_size,
-    int64_t file_failed_size, int64_t file_missed_size,
-    int64_t par_size, int64_t par_current_success_size,
-    int64_t par_current_failed_size, int64_t par_failed_size,
-    int remaining_par_count, NzbgetRsDirectRenameParDelta* out_delta);
-size_t nzbget_rs_sus_select_pars_to_unpause(
-    const int* ids, const char* const* set_ids, const uint8_t* completed,
-    const uint8_t* in_file_list, const int64_t* sizes, size_t count,
-    int* out_file_ids);
-
-int nzbget_rs_sus_extract_password_from_filename(
-    const char* filename, size_t* out_start, size_t* out_len);
-NzbgetRsBuf nzbget_rs_sus_sanitize_segment_message_id(const char* tag_content);
-void nzbget_rs_sus_calc_nzb_hashes(
-    const uint8_t* skip_flags, const size_t* article_counts, size_t file_count,
-    const char* const* message_ids, size_t total_articles,
-    uint32_t* out_full_hash, uint32_t* out_filtered_hash);
-
 int nzbget_rs_sus_parse_queue_script_cmd(
     const char* msg_text, int event, int qe_nzb_downloaded,
     NzbgetRsQueueScriptCmd* out_cmd);
@@ -2478,14 +2439,6 @@ int nzbget_rs_ntw_xmlrpc_is_http_url(const char* content);
 int nzbget_rs_ntw_xmlrpc_parse_category_source(
     const char* cat_src_str, int cs_nzb_file, int cs_feed_file, int cs_auto);
 int nzbget_rs_ntw_xmlrpc_validate_reset_counter(const char* counter);
-
-int nzbget_rs_fuq_url_coord_should_start_download(
-    int has_nzb, int pause_download, int url_force);
-int nzbget_rs_fuq_url_coord_calc_sleep_interval(int download_started);
-int nzbget_rs_fuq_url_coord_is_completed_status(
-    int status, int ad_finished, int ad_failed, int ad_retry);
-int nzbget_rs_fuq_url_coord_resolve_scan_fail_status(
-    int add_status, int as_failed, int ls_scan_failed, int ls_scan_skipped);
 
 int nzbget_rs_fuq_queue_coord_can_start_article(
     int has_more, int can_proceed, int download_held, int extra_priority);
@@ -2970,16 +2923,6 @@ int nzbget_rs_pnd_dupecoord_accum_dup_history_status(
     int dup_ds_success, int dup_ds_good, int dup_ds_failed,
     int dup_ds_bad, int ds_success, int ds_failure);
 
-int nzbget_rs_pnd_nzbfile_accumulate_file_stats(
-    const char* filename, int file_total_articles, int file_missed_articles,
-    int64_t file_size, int64_t file_remaining_size, int64_t file_missed_size,
-    int* inout_nzb_file_count, int* inout_nzb_total_articles,
-    int* inout_nzb_failed_articles, int* inout_nzb_cur_failed_articles,
-    int64_t* inout_nzb_size, int64_t* inout_nzb_remaining_size,
-    int64_t* inout_nzb_failed_size, int64_t* inout_nzb_cur_failed_size,
-    int64_t* inout_nzb_par_size, int64_t* inout_nzb_par_failed_size,
-    int64_t* inout_nzb_par_cur_failed_size, int* inout_nzb_remaining_par_count);
-
 int nzbget_rs_hsr_history_coord_classify_service_work_item(
     int kind, int hk_dup, int hk_nzb, int64_t item_time, int64_t min_time, int dupe_check);
 void nzbget_rs_hsr_history_coord_resolve_post_history_direct_statuses(
@@ -3224,22 +3167,10 @@ int nzbget_rs_ucf_unpack_ctrl_should_move_from_temp_unpack(
     int unpack_ok, int use_temp_unpack_dir);
 int nzbget_rs_ucf_unpack_ctrl_should_cleanup_archive_disks(
     int unpack_ok, int move_ok, int unpack_cleanup_disk);
-int nzbget_rs_ucf_url_coord_is_wake_action(
-    int action, int ea_url_added, int ea_url_returned);
-int nzbget_rs_ucf_url_coord_resolve_delete_status(
-    int cur_delete_status, int ds_none, int ds_manual);
 int nzbget_rs_ucf_remote_server_is_accept_busy_retry(
     int bind, int has_accepted_conn, int accept_busy, int is_stopped);
 
 /* DirectRenamer, RarReader, Repair, ArticleDownloader, WebDownloader & NzbFile Hot-Path FFI (`renamerarrepdl.rs`) */
-int nzbget_rs_rrd_direct_renamer_can_write_par_loader(
-    int has_nzb, int skip_disk_write, int opt_skip_write);
-int nzbget_rs_rrd_direct_renamer_is_file_missing_state_hash(
-    const char* hash16k, int is_par_file, const char* par_set_id);
-int nzbget_rs_rrd_direct_renamer_should_check_extra_priority(
-    int waiting_par, int loading_par);
-int nzbget_rs_rrd_direct_renamer_resolve_empty_new_name_action(
-    int new_name_empty, int is_par_file, int hard_linking);
 int64_t nzbget_rs_rrd_rar_cursor_calc_read_window(
     int64_t source_size, int64_t cur_pos, int64_t req_size,
     int* out_eof, int64_t* out_new_pos);
@@ -3279,8 +3210,6 @@ int nzbget_rs_rrd_webdl_resolve_final_loop_status(
 int nzbget_rs_rrd_webdl_resolve_body_end_status(
     int end, int status, int is_stopped,
     int ad_running, int ad_failed, int ad_finished, int* out_warn_incomplete);
-int nzbget_rs_rrd_nzbfile_classify_meta_type(
-    const char* attr_name, const char* attr_val);
 
 /* ServerPool, StatMeter, PrePostProcessor, RarRenamer, DupeMatcher, Rename & ParChecker Hot-Path FFI (`poolstatprepost.rs`) */
 int nzbget_rs_psp_server_pool_should_increment_level_on_free(
@@ -3638,8 +3567,6 @@ int nzbget_rs_dcf_stream_repair_can_add_candidate(
     int already_present);
 int nzbget_rs_dcf_stream_repair_is_positional_rank_applicable(
     int positional_rank, int positional_window, size_t window_len);
-int nzbget_rs_dcf_nzbfile_should_fallback_meta_name_to_title(
-    int meta_name_empty, int meta_title_empty);
 
 // TwinCheck, DupeProbe, DirectRenamer & HistoryCoordinator Hot-Path C ABI (rust/src/twinproberenhist.rs)
 int nzbget_rs_tpr_twin_check_job_should_replace_min_index(
@@ -3679,16 +3606,12 @@ int nzbget_rs_tpr_dupe_probe_should_retry_recheck(int existing, int sampled);
 int nzbget_rs_tpr_dupe_probe_classify_run_outcome(
     int dead, int existing, int min_alive_samples, int finished,
     int reached_servers);
-int nzbget_rs_tpr_direct_renamer_needs_ignore_ext_pass(
-    int hard_linking, int match_ignore_ext);
 int nzbget_rs_tpr_history_coord_reverse_delete_index(
     int history_size, int forward_offset);
 int nzbget_rs_tpr_history_coord_should_restore_paused_on_redownload(
     int restore_pause_state, int delete_paused);
 
 // UrlCoordinator, QueueEditor, Scanner, FeedCoordinator & PrePostProcessor Hot-Path C ABI (rust/src/urlqueuescanfeedpost.rs)
-int nzbget_rs_uqs_url_coord_has_more_jobs(int active_empty, int has_nzb_info);
-int nzbget_rs_uqs_url_coord_use_primary_str(const char* primary);
 void nzbget_rs_uqs_queue_editor_update_min_max_id(
     int id, int in_min_id, int in_max_id, int* out_min_id, int* out_max_id);
 int nzbget_rs_uqs_queue_editor_is_id_in_bounds(int id, int min_id, int max_id);
@@ -5356,7 +5279,6 @@ int32_t nzbget_rs_tpr_options_split_option_string(
 void nzbget_rs_tpr_script_resolve_single_arg_executor(
     int32_t has_found, const char* found_executor, const char* arg0,
     int32_t* out_use_found, int32_t* out_prepend_arg);
-void nzbget_rs_tpr_nzbfile_trim_sax_error_in_place(char* buf);
 NzbgetRsBuf nzbget_rs_dqh_queue_coord_format_donor_id_list(
     const int32_t* donor_ids_ptr, size_t len,
     int32_t* out_unique_ids_ptr, size_t* out_unique_len);
@@ -5579,17 +5501,9 @@ size_t nzbget_rs_tpr_options_strip_trailing_sep(const char* dir, char sep);
 NzbgetRsBuf nzbget_rs_tpr_options_format_joined_dir(
     const char* parent_dir, char sep, const char* dir, int32_t join_mode);
 int32_t nzbget_rs_tpr_options_minutes_to_seconds_i32(int32_t minutes);
-const char* nzbget_rs_dqh_direct_renamer_par_kind_label(int32_t is_par);
-NzbgetRsBuf nzbget_rs_dqh_direct_renamer_resolve_old_output_path(
-    const char* curr_output_filename, const char* dest_dir, char sep, const char* filename);
 const char* nzbget_rs_dqh_scanner_yes_no_str(int32_t val);
 NzbgetRsBuf nzbget_rs_dqh_scanner_format_temp_nzb_path(
     const char* temp_dir, char sep, int32_t num);
-NzbgetRsBuf nzbget_rs_dqh_url_coord_format_temp_url_path(
-    const char* temp_dir, char sep, int32_t id);
-NzbgetRsBuf nzbget_rs_tpr_nzbfile_format_parse_error_msg(
-    const char* base_name, int32_t has_no_content);
-NzbgetRsBuf nzbget_rs_tpr_nzbfile_format_sax_error_msg(const char* err_msg);
 NzbgetRsBuf nzbget_rs_tpr_nzbinfo_format_fallback_name(int32_t id);
 NzbgetRsBuf nzbget_rs_tpr_nzbinfo_format_inter_id_suffix(int32_t id);
 NzbgetRsBuf nzbget_rs_tpr_nzbinfo_format_inter_dest_dir(
@@ -5679,15 +5593,9 @@ size_t nzbget_rs_dqh_benchmark_resolve_block_size(
     size_t block_size_bytes, size_t default_block_size);
 NzbgetRsBuf nzbget_rs_dqh_statmeter_format_indexed_bytes_line(
     int32_t first_idx, const int64_t* values, size_t count);
-NzbgetRsBuf nzbget_rs_dqh_nzbfile_format_missing_attrs_msg(const char* tag_name);
-int nzbget_rs_dqh_nzbfile_classify_start_element(const char* name);
-int nzbget_rs_dqh_nzbfile_classify_file_attr(const char* attr_name);
-int nzbget_rs_dqh_nzbfile_classify_segment_attr(const char* attr_name);
-int nzbget_rs_dqh_nzbfile_classify_end_element(const char* name);
 NzbgetRsBuf nzbget_rs_dqh_sysinfo_format_rapidyenc_version(int32_t ver);
 NzbgetRsBuf nzbget_rs_dqh_fs_format_null_delete_errmsg(const char* last_err);
 NzbgetRsBuf nzbget_rs_dqh_fs_extract_parent_dir_path(const char* filename, char sep);
-int nzbget_rs_dqh_url_dl_has_dnzb_prefix(const char* line);
 int nzbget_rs_dqh_diskstate_is_candidate_queue_file_name(const char* filename);
 int nzbget_rs_dqh_diskstate_find_char_pos(
     const char* line, char sep, size_t* out_pos);
@@ -5784,8 +5692,6 @@ void nzbget_rs_dqh_stream_repair_calc_encrypted_chunk_end(
     int64_t* out_chunk_end, int64_t* out_block_count);
 int nzbget_rs_dqh_stream_repair_is_target_unfinished(
     int64_t decoded_file_size, int holes_empty);
-int nzbget_rs_dqh_nzbfile_should_trim_sax_chars(
-    const char* current_element, int has_category);
 int nzbget_rs_dqh_repair_ctrl_map_par_stage_to_post_stage(
     int par_stage, int pt_loading_pars, int pt_verifying_sources,
     int pt_repairing, int pt_verifying_repaired);
@@ -6187,8 +6093,6 @@ int nzbget_rs_dqh_twin_check_can_queue_sample_job(
     int sampleable, int sampled_now, int is_merged, int file_exists);
 int nzbget_rs_dqh_twin_check_should_lookup_kind_by_files(
     int is_primary, int is_dupe, int by_par2);
-int nzbget_rs_dqh_direct_renamer_classify_rename_target(
-    int is_par_file, int need_rename_pars);
 int nzbget_rs_dqh_dl_info_should_update_auto_filename_name(
     int has_name, int had_filename, int filename_empty);
 int nzbget_rs_dqh_dl_info_should_append_message_to_disk(
@@ -6196,13 +6100,10 @@ int nzbget_rs_dqh_dl_info_should_append_message_to_disk(
 int nzbget_rs_dqh_stream_repair_classify_build_job_mode(
     int empty_or_no_articles, int success_articles, int64_t encoded_size,
     int64_t decoded_file_size);
-int nzbget_rs_dqh_nzbfile_should_create_segment_article(int part_number);
 int nzbget_rs_dqh_dupe_probe_should_stop_early_on_found(
     int count_all, int found_count, int min_alive_samples);
 int nzbget_rs_dqh_dupe_probe_should_disconnect_after_probe(
     int is_stopped, int conn_status, int cs_cancelled);
-int nzbget_rs_dqh_url_coord_should_wait_on_cond(
-    int has_more_jobs, int is_stopped);
 int nzbget_rs_dqh_webdl_resolve_force_flag(int force, int url_force);
 int nzbget_rs_dqh_webdl_should_try_recv_when_buf_empty(int buf_len);
 int nzbget_rs_dqh_tls_should_verify_client_x509_store(
@@ -6770,6 +6671,104 @@ int nzbget_rs_feed_should_delete_history_entry(
     size_t* out_url_len_without_query);
 int nzbget_rs_feed_is_cache_expired(
     int64_t last_usage, int cache_time_sec, int64_t cur_time);
+
+// NzbFileParser, UrlCoordinator & DirectRenamer End-to-End FFI
+typedef struct NzbgetRsNzbFileParser NzbgetRsNzbFileParser;
+typedef int (*NzbgetRsAllocFileIdCb)(void* ctx);
+
+typedef struct
+{
+    int file_count;
+    int total_articles;
+    int failed_articles;
+    int cur_failed_articles;
+    int64_t size;
+    int64_t remaining_size;
+    int64_t failed_size;
+    int64_t cur_failed_size;
+    int64_t par_size;
+    int64_t par_failed_size;
+    int64_t par_cur_failed_size;
+    int remaining_par_count;
+    uint32_t full_content_hash;
+    uint32_t filtered_content_hash;
+    int many_dupe_files;
+    const char* password;
+    const char* meta_name;
+    const char* meta_title;
+    const char* category;
+    size_t kept_files_count;
+    size_t messages_count;
+} NzbgetRsNzbFileSummary;
+
+typedef struct
+{
+    int id;
+    const char* subject;
+    const char* filename;
+    int time;
+    int total_articles;
+    int missed_articles;
+    int64_t size;
+    int64_t remaining_size;
+    int64_t missed_size;
+    int par_file;
+    int cut_short;
+    const char* const* groups_ptrs;
+    size_t groups_count;
+    const int* article_parts;
+    const int64_t* article_sizes;
+    const char* const* article_msg_ids;
+    size_t articles_count;
+} NzbgetRsNzbKeptFileView;
+
+NzbgetRsNzbFileParser* nzbget_rs_nzbfile_parser_new(const char* file_name);
+void nzbget_rs_nzbfile_parser_free(NzbgetRsNzbFileParser* parser);
+void nzbget_rs_nzbfile_parser_start_element(
+    NzbgetRsNzbFileParser* parser, const char* name, const char* const* atts,
+    void* alloc_ctx, NzbgetRsAllocFileIdCb alloc_file_id_cb);
+void nzbget_rs_nzbfile_parser_end_element(
+    NzbgetRsNzbFileParser* parser, const char* name);
+void nzbget_rs_nzbfile_parser_characters(
+    NzbgetRsNzbFileParser* parser, const char* xmlstr, int len);
+void nzbget_rs_nzbfile_parser_on_missing_entity(
+    NzbgetRsNzbFileParser* parser);
+void nzbget_rs_nzbfile_parser_on_sax_error(
+    NzbgetRsNzbFileParser* parser, const char* err_msg);
+int nzbget_rs_nzbfile_parser_finalize(
+    NzbgetRsNzbFileParser* parser, int sax_ret,
+    const char* par_ignore_ext, const NzbgetRsCtype* ct,
+    void (*on_parsed_subject)(const char*, const char*),
+    void (*sort_indices)(const char* const*, size_t*, size_t),
+    NzbgetRsNzbFileSummary* out_summary);
+int nzbget_rs_nzbfile_parser_get_message(
+    const NzbgetRsNzbFileParser* parser, size_t index,
+    int* out_kind, const char** out_text);
+int nzbget_rs_nzbfile_parser_get_file(
+    const NzbgetRsNzbFileParser* parser, size_t index,
+    NzbgetRsNzbKeptFileView* out_view);
+
+int nzbget_rs_url_coord_select_next_url(
+    const int* kinds, const int* url_statuses, const int* delete_statuses,
+    const int* priorities, size_t count, int nk_url, int ls_none, int ds_none);
+int nzbget_rs_url_coord_is_hanging_download(
+    int64_t now, int64_t last_update_time, int url_timeout, int status, int ad_running);
+NzbgetRsBuf nzbget_rs_url_coord_format_temp_path(
+    const char* temp_dir, char sep, int32_t id);
+
+void nzbget_rs_direct_renamer_eval_article(
+    int article_size, size_t article_count, int old_par_file, int new_par_file,
+    int file_paused, int64_t file_size, int64_t file_success_size,
+    int64_t file_failed_size, int64_t file_missed_size,
+    int64_t par_size, int64_t par_current_success_size,
+    int64_t par_current_failed_size, int64_t par_failed_size,
+    int remaining_par_count, NzbgetRsDirectRenameParDelta* out_delta);
+size_t nzbget_rs_direct_renamer_select_pars_to_unpause(
+    const int* ids, const char* const* set_ids, const uint8_t* completed,
+    const uint8_t* in_file_list, const int64_t* sizes, size_t count,
+    int* out_file_ids);
+NzbgetRsBuf nzbget_rs_direct_renamer_resolve_old_output_path(
+    const char* curr_output_filename, const char* dest_dir, char sep, const char* filename);
 
 #include "nzbget_tls_cipher.h"
 

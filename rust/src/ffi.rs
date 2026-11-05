@@ -4408,52 +4408,6 @@ unsafe fn rs_ctype<'a>(ct: *const RsCtype) -> Option<crate::nzbfile::Ctype<'a>> 
     })
 }
 
-/// NzbFile::AddFileInfo's totals for one file.
-#[repr(C)]
-pub struct RsFileTotals {
-    kept: usize,
-    total_articles: c_int,
-    missed_articles: c_int,
-    size: i64,
-    remaining_size: i64,
-    missed_size: i64,
-    cut_short: c_int,
-}
-
-/// A file's segments (`parts` and `sizes`, `count` of them in the nzb's
-/// order) as NzbFile::AddFileInfo makes them: 1 with the kept segments'
-/// indexes in part order in `order[0..totals.kept]` and `totals` set; 0
-/// (outputs untouched) when none is left or an argument is missing.
-///
-/// # Safety
-/// `subject` is null (empty) or NUL-terminated; `parts`, `sizes` and
-/// `order` are arrays of `count` (null for 0); `ct` and `totals` valid.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nzb_file_totals(subject: *const c_char, parts: *const c_int, sizes: *const i64,
-    count: usize, ct: *const RsCtype, order: *mut usize, totals: *mut RsFileTotals) -> c_int {
-    let Some(ct) = rs_ctype(ct) else { return 0 };
-    if totals.is_null() || (count > 0 && (parts.is_null() || sizes.is_null() || order.is_null())) {
-        return 0;
-    }
-    let (parts, sizes) = if count > 0 {
-        (std::slice::from_raw_parts(parts, count), std::slice::from_raw_parts(sizes, count))
-    } else {
-        (&[][..], &[][..])
-    };
-    let Some(t) = crate::nzbfile::file_totals(input(subject), parts, sizes, &ct) else { return 0 };
-    std::ptr::copy_nonoverlapping(t.order.as_ptr(), order, t.order.len());
-    *totals = RsFileTotals {
-        kept: t.order.len(),
-        total_articles: t.total_articles,
-        missed_articles: t.missed_articles,
-        size: t.size,
-        remaining_size: t.remaining_size,
-        missed_size: t.missed_size,
-        cut_short: t.cut_short as c_int,
-    };
-    1
-}
-
 /// NzbFile::DeclaredParts: the "(1/N)" part count ending the subject, 0
 /// for none (or a missing ctype).
 ///
@@ -4462,21 +4416,6 @@ pub unsafe extern "C" fn nzbget_rs_nzb_file_totals(subject: *const c_char, parts
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_nzb_declared_parts(subject: *const c_char, ct: *const RsCtype) -> c_int {
     rs_ctype(ct).map_or(0, |ct| crate::nzbfile::declared_parts(input(subject), &ct))
-}
-
-/// NzbFile::HasDuplicateFilenames over `count` files' names and subjects.
-///
-/// # Safety
-/// `names` and `subjects` are arrays of `count` NUL-terminated strings (null
-/// entries are empty), or null for 0.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nzb_duplicate_filenames(names: *const *const c_char,
-    subjects: *const *const c_char, count: usize) -> c_int {
-    if count > 0 && (names.is_null() || subjects.is_null()) {
-        return 0;
-    }
-    let files: Vec<(&[u8], &[u8])> = (0..count).map(|i| (input(*names.add(i)), input(*subjects.add(i)))).collect();
-    crate::nzbfile::has_duplicate_filenames(&files) as c_int
 }
 
 #[cfg(test)]
@@ -12254,196 +12193,6 @@ pub unsafe extern "C" fn nzbget_rs_sus_web_detect_content_type(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_sus_select_next_url(
-    kinds: *const c_int,
-    url_statuses: *const c_int,
-    delete_statuses: *const c_int,
-    priorities: *const c_int,
-    count: usize,
-    nk_url: c_int,
-    ls_none: c_int,
-    ds_none: c_int,
-) -> c_int {
-    if count == 0
-        || kinds.is_null()
-        || url_statuses.is_null()
-        || delete_statuses.is_null()
-        || priorities.is_null()
-    {
-        return -1;
-    }
-    crate::scripturlstat::select_next_url(
-        std::slice::from_raw_parts(kinds, count),
-        std::slice::from_raw_parts(url_statuses, count),
-        std::slice::from_raw_parts(delete_statuses, count),
-        std::slice::from_raw_parts(priorities, count),
-        nk_url,
-        ls_none,
-        ds_none,
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_sus_is_hanging_url_download(
-    now: i64,
-    last_update_time: i64,
-    url_timeout: c_int,
-    status: c_int,
-    ad_running: c_int,
-) -> c_int {
-    if crate::scripturlstat::is_hanging_url_download(
-        now,
-        last_update_time,
-        url_timeout,
-        status,
-        ad_running,
-    ) {
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_sus_eval_direct_rename_article(
-    article_size: c_int,
-    article_count: usize,
-    old_par_file: c_int,
-    new_par_file: c_int,
-    file_paused: c_int,
-    file_size: i64,
-    file_success_size: i64,
-    file_failed_size: i64,
-    file_missed_size: i64,
-    par_size: i64,
-    par_current_success_size: i64,
-    par_current_failed_size: i64,
-    par_failed_size: i64,
-    remaining_par_count: c_int,
-    out_delta: *mut crate::scripturlstat::RsDirectRenameParDelta,
-) {
-    if out_delta.is_null() {
-        return;
-    }
-    *out_delta = crate::scripturlstat::eval_direct_rename_article(
-        article_size,
-        article_count,
-        old_par_file != 0,
-        new_par_file != 0,
-        file_paused != 0,
-        file_size,
-        file_success_size,
-        file_failed_size,
-        file_missed_size,
-        par_size,
-        par_current_success_size,
-        par_current_failed_size,
-        par_failed_size,
-        remaining_par_count,
-    );
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_sus_select_pars_to_unpause(
-    ids: *const c_int,
-    set_ids: *const *const c_char,
-    completed: *const u8,
-    in_file_list: *const u8,
-    sizes: *const i64,
-    count: usize,
-    out_file_ids: *mut c_int,
-) -> usize {
-    if count == 0
-        || ids.is_null()
-        || set_ids.is_null()
-        || completed.is_null()
-        || in_file_list.is_null()
-        || sizes.is_null()
-        || out_file_ids.is_null()
-    {
-        return 0;
-    }
-    let mut set_id_slices: Vec<&[u8]> = Vec::with_capacity(count);
-    for i in 0..count {
-        set_id_slices.push(crate::diskstatepp::cstr_to_bytes(*set_ids.add(i)));
-    }
-    crate::scripturlstat::select_pars_to_unpause(
-        std::slice::from_raw_parts(ids, count),
-        &set_id_slices,
-        std::slice::from_raw_parts(completed, count),
-        std::slice::from_raw_parts(in_file_list, count),
-        std::slice::from_raw_parts(sizes, count),
-        std::slice::from_raw_parts_mut(out_file_ids, count),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_sus_extract_password_from_filename(
-    filename: *const c_char,
-    out_start: *mut usize,
-    out_len: *mut usize,
-) -> c_int {
-    let bytes = crate::diskstatepp::cstr_to_bytes(filename);
-    if let Some(pw) = crate::scripturlstat::extract_password_from_filename(bytes) {
-        let start = (pw.as_ptr() as usize) - (bytes.as_ptr() as usize);
-        if !out_start.is_null() {
-            *out_start = start;
-        }
-        if !out_len.is_null() {
-            *out_len = pw.len();
-        }
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_sus_sanitize_segment_message_id(
-    tag_content: *const c_char,
-) -> RsBuf {
-    into_buf(crate::scripturlstat::sanitize_segment_message_id(
-        crate::diskstatepp::cstr_to_bytes(tag_content),
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_sus_calc_nzb_hashes(
-    skip_flags: *const u8,
-    article_counts: *const usize,
-    file_count: usize,
-    message_ids: *const *const c_char,
-    total_articles: usize,
-    out_full_hash: *mut u32,
-    out_filtered_hash: *mut u32,
-) {
-    let mut msg_slices: Vec<&[u8]> = Vec::with_capacity(total_articles);
-    if !message_ids.is_null() {
-        for i in 0..total_articles {
-            msg_slices.push(crate::diskstatepp::cstr_to_bytes(*message_ids.add(i)));
-        }
-    }
-    let skips = if skip_flags.is_null() || file_count == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(skip_flags, file_count)
-    };
-    let counts = if article_counts.is_null() || file_count == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(article_counts, file_count)
-    };
-    let (full, filt) =
-        crate::scripturlstat::calc_nzb_hashes(skips, counts, &msg_slices);
-    if !out_full_hash.is_null() {
-        *out_full_hash = full;
-    }
-    if !out_filtered_hash.is_null() {
-        *out_filtered_hash = filt;
-    }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_sus_parse_queue_script_cmd(
     msg_text: *const c_char,
     event: c_int,
@@ -15530,54 +15279,6 @@ pub unsafe extern "C" fn nzbget_rs_ntw_xmlrpc_validate_reset_counter(
 // ============================================================================
 // feedurlqueue FFI exports (nzbget_rs_fuq_*)
 // ============================================================================
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_fuq_url_coord_should_start_download(
-    has_nzb: c_int,
-    pause_download: c_int,
-    url_force: c_int,
-) -> c_int {
-    i32::from(crate::feedurlqueue::url_coord_should_start_download(
-        has_nzb != 0,
-        pause_download != 0,
-        url_force != 0,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_fuq_url_coord_calc_sleep_interval(download_started: c_int) -> c_int {
-    crate::feedurlqueue::url_coord_calc_sleep_interval(download_started != 0)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_fuq_url_coord_is_completed_status(
-    status: c_int,
-    ad_finished: c_int,
-    ad_failed: c_int,
-    ad_retry: c_int,
-) -> c_int {
-    i32::from(crate::feedurlqueue::url_coord_is_completed_status(
-        status,
-        ad_finished,
-        ad_failed,
-        ad_retry,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_fuq_url_coord_resolve_scan_fail_status(
-    add_status: c_int,
-    as_failed: c_int,
-    ls_scan_failed: c_int,
-    ls_scan_skipped: c_int,
-) -> c_int {
-    crate::feedurlqueue::url_coord_resolve_scan_fail_status(
-        add_status,
-        as_failed,
-        ls_scan_failed,
-        ls_scan_skipped,
-    )
-}
 
 #[no_mangle]
 pub extern "C" fn nzbget_rs_fuq_queue_coord_can_start_article(
@@ -18874,54 +18575,6 @@ pub extern "C" fn nzbget_rs_pnd_dupecoord_accum_dup_history_status(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_pnd_nzbfile_accumulate_file_stats(
-    filename: *const c_char,
-    file_total_articles: c_int,
-    file_missed_articles: c_int,
-    file_size: i64,
-    file_remaining_size: i64,
-    file_missed_size: i64,
-    inout_nzb_file_count: *mut c_int,
-    inout_nzb_total_articles: *mut c_int,
-    inout_nzb_failed_articles: *mut c_int,
-    inout_nzb_cur_failed_articles: *mut c_int,
-    inout_nzb_size: *mut i64,
-    inout_nzb_remaining_size: *mut i64,
-    inout_nzb_failed_size: *mut i64,
-    inout_nzb_cur_failed_size: *mut i64,
-    inout_nzb_par_size: *mut i64,
-    inout_nzb_par_failed_size: *mut i64,
-    inout_nzb_par_cur_failed_size: *mut i64,
-    inout_nzb_remaining_par_count: *mut c_int,
-) -> c_int {
-    let f = if filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(filename).to_bytes()
-    };
-    i32::from(crate::pardupenzb::nzbfile_accumulate_file_stats(
-        f,
-        file_total_articles,
-        file_missed_articles,
-        file_size,
-        file_remaining_size,
-        file_missed_size,
-        &mut *inout_nzb_file_count,
-        &mut *inout_nzb_total_articles,
-        &mut *inout_nzb_failed_articles,
-        &mut *inout_nzb_cur_failed_articles,
-        &mut *inout_nzb_size,
-        &mut *inout_nzb_remaining_size,
-        &mut *inout_nzb_failed_size,
-        &mut *inout_nzb_cur_failed_size,
-        &mut *inout_nzb_par_size,
-        &mut *inout_nzb_par_failed_size,
-        &mut *inout_nzb_par_cur_failed_size,
-        &mut *inout_nzb_remaining_par_count,
-    ))
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_hsr_history_coord_classify_service_work_item(
     kind: c_int,
     hk_dup: c_int,
@@ -20545,32 +20198,6 @@ pub extern "C" fn nzbget_rs_ucf_unpack_ctrl_should_cleanup_archive_disks(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_ucf_url_coord_is_wake_action(
-    action: c_int,
-    ea_url_added: c_int,
-    ea_url_returned: c_int,
-) -> c_int {
-    i32::from(crate::unpackcleanurlfeed::url_coord_is_wake_action(
-        action,
-        ea_url_added,
-        ea_url_returned,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ucf_url_coord_resolve_delete_status(
-    cur_delete_status: c_int,
-    ds_none: c_int,
-    ds_manual: c_int,
-) -> c_int {
-    crate::unpackcleanurlfeed::url_coord_resolve_delete_status(
-        cur_delete_status,
-        ds_none,
-        ds_manual,
-    )
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_ucf_remote_server_is_accept_busy_retry(
     bind: c_int,
     has_accepted_conn: c_int,
@@ -20591,66 +20218,6 @@ pub extern "C" fn nzbget_rs_ucf_remote_server_is_accept_busy_retry(
 // DirectRenamer, RarReader, Repair, ArticleDownloader, WebDownloader & NzbFile
 // Hot-Path FFI (`renamerarrepdl.rs`)
 // ---------------------------------------------------------------------------
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_rrd_direct_renamer_can_write_par_loader(
-    has_nzb: c_int,
-    skip_disk_write: c_int,
-    opt_skip_write: c_int,
-) -> c_int {
-    i32::from(crate::renamerarrepdl::direct_renamer_can_write_par_loader(
-        has_nzb != 0,
-        skip_disk_write != 0,
-        opt_skip_write != 0,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rrd_direct_renamer_is_file_missing_state_hash(
-    hash16k: *const c_char,
-    is_par_file: c_int,
-    par_set_id: *const c_char,
-) -> c_int {
-    let h = if hash16k.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(hash16k).to_bytes()
-    };
-    let pid = if par_set_id.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(par_set_id).to_bytes()
-    };
-    i32::from(
-        crate::renamerarrepdl::direct_renamer_is_file_missing_state_hash(h, is_par_file != 0, pid),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_rrd_direct_renamer_should_check_extra_priority(
-    waiting_par: c_int,
-    loading_par: c_int,
-) -> c_int {
-    i32::from(
-        crate::renamerarrepdl::direct_renamer_should_check_extra_priority(
-            waiting_par != 0,
-            loading_par != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_rrd_direct_renamer_resolve_empty_new_name_action(
-    new_name_empty: c_int,
-    is_par_file: c_int,
-    hard_linking: c_int,
-) -> c_int {
-    crate::renamerarrepdl::direct_renamer_resolve_empty_new_name_action(
-        new_name_empty != 0,
-        is_par_file != 0,
-        hard_linking != 0,
-    )
-}
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_rrd_rar_cursor_calc_read_window(
@@ -20934,24 +20501,6 @@ pub unsafe extern "C" fn nzbget_rs_rrd_webdl_resolve_body_end_status(
         *out_warn_incomplete = i32::from(warn);
     }
     final_status
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rrd_nzbfile_classify_meta_type(
-    attr_name: *const c_char,
-    attr_val: *const c_char,
-) -> c_int {
-    let n = if attr_name.is_null() {
-        c""
-    } else {
-        CStr::from_ptr(attr_name)
-    };
-    let v = if attr_val.is_null() {
-        c""
-    } else {
-        CStr::from_ptr(attr_val)
-    };
-    crate::renamerarrepdl::nzbfile_classify_meta_type(n, v)
 }
 
 // ============================================================================
@@ -23097,17 +22646,6 @@ pub extern "C" fn nzbget_rs_dcf_stream_repair_is_positional_rank_applicable(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dcf_nzbfile_should_fallback_meta_name_to_title(
-    meta_name_empty: c_int,
-    meta_title_empty: c_int,
-) -> c_int {
-    crate::dupecoordfallbackstream::nzbfile_should_fallback_meta_name_to_title(
-        meta_name_empty,
-        meta_title_empty,
-    )
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_tpr_twin_check_job_should_replace_min_index(
     is_par2: c_int,
     has_index: c_int,
@@ -23331,14 +22869,6 @@ pub extern "C" fn nzbget_rs_tpr_dupe_probe_classify_run_outcome(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_tpr_direct_renamer_needs_ignore_ext_pass(
-    hard_linking: c_int,
-    match_ignore_ext: c_int,
-) -> c_int {
-    crate::twinproberenhist::direct_renamer_needs_ignore_ext_pass(hard_linking, match_ignore_ext)
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_tpr_history_coord_reverse_delete_index(
     history_size: c_int,
     forward_offset: c_int,
@@ -23355,21 +22885,6 @@ pub extern "C" fn nzbget_rs_tpr_history_coord_should_restore_paused_on_redownloa
         restore_pause_state,
         delete_paused,
     )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_uqs_url_coord_has_more_jobs(
-    active_empty: c_int,
-    has_nzb_info: c_int,
-) -> c_int {
-    crate::urlqueuescanfeedpost::url_coord_has_more_jobs(active_empty, has_nzb_info)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_uqs_url_coord_use_primary_str(primary: *const c_char) -> c_int {
-    crate::urlqueuescanfeedpost::url_coord_use_primary_str(crate::queuehotpath::cstr_to_bytes(
-        primary,
-    ))
 }
 
 #[no_mangle]
@@ -30215,19 +29730,6 @@ pub unsafe extern "C" fn nzbget_rs_tpr_script_resolve_single_arg_executor(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_nzbfile_trim_sax_error_in_place(buf: *mut c_char) {
-    if buf.is_null() {
-        return;
-    }
-    let len = std::ffi::CStr::from_ptr(buf).to_bytes().len();
-    let slice = std::slice::from_raw_parts_mut(buf as *mut u8, len);
-    let new_len = crate::twinproberenhist::tpr_nzbfile_trim_sax_error_trailing(slice);
-    for b in &mut slice[new_len..] {
-        *b = 0;
-    }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_queue_coord_format_donor_id_list(
     donor_ids_ptr: *const i32,
     len: usize,
@@ -32071,45 +31573,6 @@ pub unsafe extern "C" fn nzbget_rs_tpr_options_minutes_to_seconds_i32(minutes: i
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_direct_renamer_par_kind_label(
-    is_par: i32,
-) -> *const c_char {
-    crate::dupequeuehealth::dqh_direct_renamer_par_kind_label(is_par != 0).as_ptr() as *const c_char
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_direct_renamer_resolve_old_output_path(
-    curr_output_filename: *const c_char,
-    dest_dir: *const c_char,
-    sep: c_char,
-    filename: *const c_char,
-) -> RsBuf {
-    let curr = if curr_output_filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(curr_output_filename).to_bytes()
-    };
-    let dd = if dest_dir.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(dest_dir).to_bytes()
-    };
-    let f = if filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(filename).to_bytes()
-    };
-    into_buf(
-        crate::dupequeuehealth::dqh_direct_renamer_resolve_old_output_path(
-            curr,
-            dd,
-            sep as u8,
-            f,
-        ),
-    )
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_scanner_yes_no_str(val: i32) -> *const c_char {
     crate::dupequeuehealth::dqh_scanner_yes_no_str(val != 0).as_ptr() as *const c_char
 }
@@ -32130,52 +31593,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_scanner_format_temp_nzb_path(
         sep as u8,
         num,
     ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_url_coord_format_temp_url_path(
-    temp_dir: *const c_char,
-    sep: c_char,
-    id: i32,
-) -> RsBuf {
-    let td = if temp_dir.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(temp_dir).to_bytes()
-    };
-    into_buf(crate::dupequeuehealth::dqh_url_coord_format_temp_url_path(
-        td,
-        sep as u8,
-        id,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_nzbfile_format_parse_error_msg(
-    base_name: *const c_char,
-    has_no_content: i32,
-) -> RsBuf {
-    let bn = if base_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(base_name).to_bytes()
-    };
-    into_buf(crate::twinproberenhist::tpr_nzbfile_format_parse_error_msg(
-        bn,
-        has_no_content != 0,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_nzbfile_format_sax_error_msg(
-    err_msg: *const c_char,
-) -> RsBuf {
-    let em = if err_msg.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(err_msg).to_bytes()
-    };
-    into_buf(crate::twinproberenhist::tpr_nzbfile_format_sax_error_msg(em))
 }
 
 #[no_mangle]
@@ -33018,66 +32435,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_statmeter_format_indexed_bytes_line(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_nzbfile_format_missing_attrs_msg(
-    tag_name: *const c_char,
-) -> RsBuf {
-    let t = if tag_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(tag_name).to_bytes()
-    };
-    into_buf(crate::dupequeuehealth::dqh_nzbfile_format_missing_attrs_msg(t))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_nzbfile_classify_start_element(
-    name: *const c_char,
-) -> c_int {
-    let n = if name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(name).to_bytes()
-    };
-    crate::dupequeuehealth::dqh_nzbfile_classify_start_element(n)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_nzbfile_classify_file_attr(
-    attr_name: *const c_char,
-) -> c_int {
-    let a = if attr_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(attr_name).to_bytes()
-    };
-    crate::dupequeuehealth::dqh_nzbfile_classify_file_attr(a)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_nzbfile_classify_segment_attr(
-    attr_name: *const c_char,
-) -> c_int {
-    let a = if attr_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(attr_name).to_bytes()
-    };
-    crate::dupequeuehealth::dqh_nzbfile_classify_segment_attr(a)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_nzbfile_classify_end_element(
-    name: *const c_char,
-) -> c_int {
-    let n = if name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(name).to_bytes()
-    };
-    crate::dupequeuehealth::dqh_nzbfile_classify_end_element(n)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_sysinfo_format_rapidyenc_version(ver: c_int) -> RsBuf {
     into_buf(crate::dupequeuehealth::dqh_sysinfo_format_rapidyenc_version(ver))
 }
@@ -33107,18 +32464,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_fs_extract_parent_dir_path(
     into_buf(crate::dupequeuehealth::dqh_fs_extract_parent_dir_path(
         f, sep as u8,
     ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_url_dl_has_dnzb_prefix(
-    line: *const c_char,
-) -> c_int {
-    let l = if line.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(line).to_bytes()
-    };
-    c_int::from(crate::dupequeuehealth::dqh_url_dl_has_dnzb_prefix(l))
 }
 
 #[no_mangle]
@@ -34106,22 +33451,6 @@ pub extern "C" fn nzbget_rs_dqh_stream_repair_is_target_unfinished(
             holes_empty != 0,
         ),
     )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_nzbfile_should_trim_sax_chars(
-    current_element: *const c_char,
-    has_category: c_int,
-) -> c_int {
-    let ce = if current_element.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(current_element).to_bytes()
-    };
-    i32::from(crate::dupequeuehealth::dqh_nzbfile_should_trim_sax_chars(
-        ce,
-        has_category != 0,
-    ))
 }
 
 #[no_mangle]
@@ -37201,17 +36530,6 @@ pub extern "C" fn nzbget_rs_dqh_twin_check_should_lookup_kind_by_files(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_direct_renamer_classify_rename_target(
-    is_par_file: c_int,
-    need_rename_pars: c_int,
-) -> c_int {
-    crate::dupequeuehealth::dqh_direct_renamer_classify_rename_target(
-        is_par_file != 0,
-        need_rename_pars != 0,
-    )
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_dl_info_should_update_auto_filename_name(
     has_name: c_int,
     had_filename: c_int,
@@ -37255,13 +36573,6 @@ pub extern "C" fn nzbget_rs_dqh_stream_repair_classify_build_job_mode(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_nzbfile_should_create_segment_article(
-    part_number: c_int,
-) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_nzbfile_should_create_segment_article(part_number))
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_dupe_probe_should_stop_early_on_found(
     count_all: c_int,
     found_count: c_int,
@@ -37289,17 +36600,6 @@ pub extern "C" fn nzbget_rs_dqh_dupe_probe_should_disconnect_after_probe(
             cs_cancelled,
         ),
     )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_url_coord_should_wait_on_cond(
-    has_more_jobs: c_int,
-    is_stopped: c_int,
-) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_url_coord_should_wait_on_cond(
-        has_more_jobs != 0,
-        is_stopped != 0,
-    ))
 }
 
 #[no_mangle]
@@ -40068,6 +39368,457 @@ pub unsafe extern "C" fn nzbget_rs_queue_script_prepare_env(
         },
     );
 }
+
+// ============================================================================
+// NzbFileParser, UrlCoordinator & DirectRenamer End-to-End FFI
+// ============================================================================
+
+pub type NzbgetRsNzbFileParser = crate::nzbfile::NzbFileParser;
+pub type NzbgetRsAllocFileIdCb = Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>;
+
+#[repr(C)]
+pub struct NzbgetRsNzbFileSummary {
+    pub file_count: c_int,
+    pub total_articles: c_int,
+    pub failed_articles: c_int,
+    pub cur_failed_articles: c_int,
+    pub size: i64,
+    pub remaining_size: i64,
+    pub failed_size: i64,
+    pub cur_failed_size: i64,
+    pub par_size: i64,
+    pub par_failed_size: i64,
+    pub par_cur_failed_size: i64,
+    pub remaining_par_count: c_int,
+    pub full_content_hash: u32,
+    pub filtered_content_hash: u32,
+    pub many_dupe_files: c_int,
+    pub password: *const c_char,
+    pub meta_name: *const c_char,
+    pub meta_title: *const c_char,
+    pub category: *const c_char,
+    pub kept_files_count: usize,
+    pub messages_count: usize,
+}
+
+#[repr(C)]
+pub struct NzbgetRsNzbKeptFileView {
+    pub id: c_int,
+    pub subject: *const c_char,
+    pub filename: *const c_char,
+    pub time: c_int,
+    pub total_articles: c_int,
+    pub missed_articles: c_int,
+    pub size: i64,
+    pub remaining_size: i64,
+    pub missed_size: i64,
+    pub par_file: c_int,
+    pub cut_short: c_int,
+    pub groups_ptrs: *const *const c_char,
+    pub groups_count: usize,
+    pub article_parts: *const c_int,
+    pub article_sizes: *const i64,
+    pub article_msg_ids: *const *const c_char,
+    pub articles_count: usize,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nzbfile_parser_new(
+    file_name: *const c_char,
+) -> *mut NzbgetRsNzbFileParser {
+    let fn_bytes = if file_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(file_name).to_bytes()
+    };
+    Box::into_raw(Box::new(crate::nzbfile::NzbFileParser::new(fn_bytes)))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nzbfile_parser_free(parser: *mut NzbgetRsNzbFileParser) {
+    if !parser.is_null() {
+        drop(Box::from_raw(parser));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nzbfile_parser_start_element(
+    parser: *mut NzbgetRsNzbFileParser,
+    name: *const c_char,
+    atts: *const *const c_char,
+    alloc_ctx: *mut std::ffi::c_void,
+    alloc_file_id_cb: NzbgetRsAllocFileIdCb,
+) {
+    if parser.is_null() || name.is_null() {
+        return;
+    }
+    let name_bytes = CStr::from_ptr(name).to_bytes();
+    let has_atts = !atts.is_null();
+    let mut att_vec: Vec<(&[u8], Option<&[u8]>)> = Vec::new();
+    if has_atts {
+        let mut i = 0;
+        loop {
+            let k_ptr = *atts.add(i);
+            if k_ptr.is_null() {
+                break;
+            }
+            let v_ptr = *atts.add(i + 1);
+            let k = CStr::from_ptr(k_ptr).to_bytes();
+            let v = if v_ptr.is_null() {
+                None
+            } else {
+                Some(CStr::from_ptr(v_ptr).to_bytes())
+            };
+            att_vec.push((k, v));
+            i += 2;
+        }
+    }
+    (*parser).start_element(name_bytes, has_atts, &att_vec, || {
+        if let Some(cb) = alloc_file_id_cb {
+            cb(alloc_ctx)
+        } else {
+            0
+        }
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nzbfile_parser_end_element(
+    parser: *mut NzbgetRsNzbFileParser,
+    name: *const c_char,
+) {
+    if parser.is_null() || name.is_null() {
+        return;
+    }
+    (*parser).end_element(CStr::from_ptr(name).to_bytes());
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nzbfile_parser_characters(
+    parser: *mut NzbgetRsNzbFileParser,
+    xmlstr: *const c_char,
+    len: c_int,
+) {
+    if parser.is_null() || xmlstr.is_null() || len <= 0 {
+        return;
+    }
+    let bytes = std::slice::from_raw_parts(xmlstr as *const u8, len as usize);
+    (*parser).characters(bytes);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nzbfile_parser_on_missing_entity(
+    parser: *mut NzbgetRsNzbFileParser,
+) {
+    if parser.is_null() {
+        return;
+    }
+    (*parser).on_missing_entity();
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nzbfile_parser_on_sax_error(
+    parser: *mut NzbgetRsNzbFileParser,
+    err_msg: *const c_char,
+) {
+    if parser.is_null() || err_msg.is_null() {
+        return;
+    }
+    (*parser).on_sax_error(CStr::from_ptr(err_msg).to_bytes());
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nzbfile_parser_finalize(
+    parser: *mut NzbgetRsNzbFileParser,
+    sax_ret: c_int,
+    par_ignore_ext: *const c_char,
+    ct: *const RsCtype,
+    on_parsed_subject: Option<unsafe extern "C" fn(*const c_char, *const c_char)>,
+    sort_indices: Option<unsafe extern "C" fn(*const *const c_char, *mut usize, usize)>,
+    out_summary: *mut NzbgetRsNzbFileSummary,
+) -> c_int {
+    if parser.is_null() || out_summary.is_null() {
+        return 0;
+    }
+    let Some(ct_view) = rs_ctype(ct) else {
+        return 0;
+    };
+    let pie_bytes = if par_ignore_ext.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(par_ignore_ext).to_bytes()
+    };
+    let p = &mut *parser;
+    let sort_cb = sort_indices.map(|cb| {
+        move |filenames: &[*const c_char], indices: &mut [usize]| {
+            cb(filenames.as_ptr(), indices.as_mut_ptr(), indices.len());
+        }
+    });
+    let ok = p.finalize_with(
+        sax_ret,
+        pie_bytes,
+        &ct_view,
+        |subj, fname| {
+            if let Some(cb) = on_parsed_subject {
+                cb(subj.as_ptr(), fname.as_ptr());
+            }
+        },
+        sort_cb,
+    );
+    *out_summary = NzbgetRsNzbFileSummary {
+        file_count: p.file_count,
+        total_articles: p.total_articles,
+        failed_articles: p.failed_articles,
+        cur_failed_articles: p.cur_failed_articles,
+        size: p.size,
+        remaining_size: p.remaining_size,
+        failed_size: p.failed_size,
+        cur_failed_size: p.cur_failed_size,
+        par_size: p.par_size,
+        par_failed_size: p.par_failed_size,
+        par_cur_failed_size: p.par_cur_failed_size,
+        remaining_par_count: p.remaining_par_count,
+        full_content_hash: p.full_content_hash,
+        filtered_content_hash: p.filtered_content_hash,
+        many_dupe_files: c_int::from(p.many_dupe_files),
+        password: p.password.as_ptr(),
+        meta_name: p.meta_name.as_ptr(),
+        meta_title: p.meta_title.as_ptr(),
+        category: p.category.as_ptr(),
+        kept_files_count: p.files.len(),
+        messages_count: p.messages.len(),
+    };
+    c_int::from(ok)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nzbfile_parser_get_message(
+    parser: *const NzbgetRsNzbFileParser,
+    index: usize,
+    out_kind: *mut c_int,
+    out_text: *mut *const c_char,
+) -> c_int {
+    let Some(p) = parser.as_ref() else {
+        return 0;
+    };
+    let Some(msg) = p.messages.get(index) else {
+        return 0;
+    };
+    if !out_kind.is_null() {
+        *out_kind = msg.kind;
+    }
+    if !out_text.is_null() {
+        *out_text = msg.text.as_ptr();
+    }
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nzbfile_parser_get_file(
+    parser: *const NzbgetRsNzbFileParser,
+    index: usize,
+    out_view: *mut NzbgetRsNzbKeptFileView,
+) -> c_int {
+    if out_view.is_null() {
+        return 0;
+    }
+    let Some(p) = parser.as_ref() else {
+        return 0;
+    };
+    let Some(f) = p.files.get(index) else {
+        return 0;
+    };
+    *out_view = NzbgetRsNzbKeptFileView {
+        id: f.id,
+        subject: f.subject.as_ptr(),
+        filename: f.filename.as_ptr(),
+        time: f.time,
+        total_articles: f.total_articles,
+        missed_articles: f.missed_articles,
+        size: f.size,
+        remaining_size: f.remaining_size,
+        missed_size: f.missed_size,
+        par_file: c_int::from(f.par_file),
+        cut_short: c_int::from(f.cut_short),
+        groups_ptrs: f.group_ptrs.as_ptr(),
+        groups_count: f.group_ptrs.len(),
+        article_parts: f.article_parts.as_ptr(),
+        article_sizes: f.article_sizes.as_ptr(),
+        article_msg_ids: f.article_msg_id_ptrs.as_ptr(),
+        articles_count: f.article_parts.len(),
+    };
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_url_coord_select_next_url(
+    kinds: *const c_int,
+    url_statuses: *const c_int,
+    delete_statuses: *const c_int,
+    priorities: *const c_int,
+    count: usize,
+    nk_url: c_int,
+    ls_none: c_int,
+    ds_none: c_int,
+) -> c_int {
+    if count == 0
+        || kinds.is_null()
+        || url_statuses.is_null()
+        || delete_statuses.is_null()
+        || priorities.is_null()
+    {
+        return -1;
+    }
+    crate::urlcoord::select_next_url(
+        std::slice::from_raw_parts(kinds, count),
+        std::slice::from_raw_parts(url_statuses, count),
+        std::slice::from_raw_parts(delete_statuses, count),
+        std::slice::from_raw_parts(priorities, count),
+        nk_url,
+        ls_none,
+        ds_none,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_url_coord_is_hanging_download(
+    now: i64,
+    last_update_time: i64,
+    url_timeout: c_int,
+    status: c_int,
+    ad_running: c_int,
+) -> c_int {
+    c_int::from(crate::urlcoord::is_hanging_url_download(
+        now,
+        last_update_time,
+        url_timeout,
+        status,
+        ad_running,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_url_coord_format_temp_path(
+    temp_dir: *const c_char,
+    sep: c_char,
+    id: i32,
+) -> RsBuf {
+    let td = if temp_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(temp_dir).to_bytes()
+    };
+    into_buf(crate::urlcoord::format_temp_url_path(td, sep as u8, id))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_direct_renamer_eval_article(
+    article_size: c_int,
+    article_count: usize,
+    old_par_file: c_int,
+    new_par_file: c_int,
+    file_paused: c_int,
+    file_size: i64,
+    file_success_size: i64,
+    file_failed_size: i64,
+    file_missed_size: i64,
+    par_size: i64,
+    par_current_success_size: i64,
+    par_current_failed_size: i64,
+    par_failed_size: i64,
+    remaining_par_count: c_int,
+    out_delta: *mut crate::directrenamer::RsDirectRenameParDelta,
+) {
+    if out_delta.is_null() {
+        return;
+    }
+    *out_delta = crate::directrenamer::eval_direct_rename_article(
+        article_size,
+        article_count,
+        old_par_file != 0,
+        new_par_file != 0,
+        file_paused != 0,
+        file_size,
+        file_success_size,
+        file_failed_size,
+        file_missed_size,
+        par_size,
+        par_current_success_size,
+        par_current_failed_size,
+        par_failed_size,
+        remaining_par_count,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_direct_renamer_select_pars_to_unpause(
+    ids: *const c_int,
+    set_ids: *const *const c_char,
+    completed: *const u8,
+    in_file_list: *const u8,
+    sizes: *const i64,
+    count: usize,
+    out_file_ids: *mut c_int,
+) -> usize {
+    if count == 0
+        || ids.is_null()
+        || set_ids.is_null()
+        || completed.is_null()
+        || in_file_list.is_null()
+        || sizes.is_null()
+        || out_file_ids.is_null()
+    {
+        return 0;
+    }
+    let mut set_id_slices: Vec<&[u8]> = Vec::with_capacity(count);
+    for i in 0..count {
+        let p = *set_ids.add(i);
+        set_id_slices.push(if p.is_null() {
+            &[][..]
+        } else {
+            CStr::from_ptr(p).to_bytes()
+        });
+    }
+    crate::directrenamer::select_pars_to_unpause(
+        std::slice::from_raw_parts(ids, count),
+        &set_id_slices,
+        std::slice::from_raw_parts(completed, count),
+        std::slice::from_raw_parts(in_file_list, count),
+        std::slice::from_raw_parts(sizes, count),
+        std::slice::from_raw_parts_mut(out_file_ids, count),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_direct_renamer_resolve_old_output_path(
+    curr_output_filename: *const c_char,
+    dest_dir: *const c_char,
+    sep: c_char,
+    filename: *const c_char,
+) -> RsBuf {
+    let curr = if curr_output_filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(curr_output_filename).to_bytes()
+    };
+    let dd = if dest_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(dest_dir).to_bytes()
+    };
+    let f = if filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    into_buf(crate::directrenamer::resolve_old_output_path(
+        curr,
+        dd,
+        sep as u8,
+        f,
+    ))
+}
+
 
 
 

@@ -33,7 +33,6 @@
 
 NzbFile::NzbFile(const char* fileName, const char* category) 
 	: m_fileName{ fileName ? fileName : "" }
-	, m_ignoreNextError(false)
 {
 	debug("Creating NZBFile");
 
@@ -46,14 +45,6 @@ NzbFile::NzbFile(const char* fileName, const char* category)
 void NzbFile::LogDebugInfo()
 {
 	info(" NZBFile %s", m_fileName.c_str());
-}
-
-ArticleInfo* NzbFile::AddArticle(FileInfo* fileInfo, std::unique_ptr<ArticleInfo> articleInfo)
-{
-	// kept in file order and put in part-number order when the file ends: a
-	// list indexed by the part number took the memory a huge number asks for
-	fileInfo->GetArticles()->push_back(std::move(articleInfo));
-	return fileInfo->GetArticles()->back().get();
 }
 
 // The C library's character classes and lower case under the daemon's
@@ -87,259 +78,6 @@ int NzbFile::DeclaredParts(const char* subject)
 	return nzbget_rs_nzb_declared_parts(subject, &ct);
 }
 
-void NzbFile::AddFileInfo(std::unique_ptr<FileInfo> fileInfo)
-{
-	// rust/src/nzbfile.rs: the segments in part-number order (of two with one
-	// number the later counts), the parts the subject declares past the last
-	// one when the nzb plainly cut the file short, and the file's sizes
-	ArticleList* articles = fileInfo->GetArticles();
-	std::vector<int> parts;
-	std::vector<int64> sizes;
-	parts.reserve(articles->size());
-	sizes.reserve(articles->size());
-	for (std::unique_ptr<ArticleInfo>& article : *articles)
-	{
-		parts.push_back(article->GetPartNumber());
-		sizes.push_back(article->GetSize());
-	}
-	std::vector<size_t> order(articles->size());
-	NzbgetRsCtype ct = RsCtype();
-	NzbgetRsFileTotals totals;
-	if (!nzbget_rs_nzb_file_totals(fileInfo->GetSubject(), parts.data(), sizes.data(), parts.size(), &ct,
-		order.data(), &totals))
-	{
-		return;
-	}
-
-	ArticleList kept;
-	kept.reserve(totals.kept);
-	for (size_t k = 0; k < totals.kept; k++)
-	{
-		kept.push_back(std::move((*articles)[order[k]]));
-	}
-	*articles = std::move(kept);
-
-	if (totals.cutShort)
-	{
-		m_cutShortFiles.insert(fileInfo.get());
-	}
-	fileInfo->SetNzbInfo(m_nzbInfo.get());
-	fileInfo->SetSize(totals.size);
-	fileInfo->SetRemainingSize(totals.remainingSize);
-	fileInfo->SetMissedSize(totals.missedSize);
-	fileInfo->SetTotalArticles(totals.totalArticles);
-	fileInfo->SetMissedArticles(totals.missedArticles);
-	m_nzbInfo->GetFileList()->Add(std::move(fileInfo));
-}
-
-void NzbFile::ParseSubject(FileInfo* fileInfo, bool TryQuotes)
-{
-	if (!fileInfo) return;
-
-	if (!fileInfo->GetSubject())
-	{
-		// Malformed file element without subject. We generate subject using internal element id.
-		NzbgetRsBuf subjBuf = nzbget_rs_dqh_conn_format_port_str(fileInfo->GetId());
-		fileInfo->SetSubject(subjBuf.data ? subjBuf.data : "");
-		nzbget_rs_free(subjBuf);
-		return;
-	}
-
-	detail("Extracting a filename from Subject %s", fileInfo->GetSubject());
-
-	std::string filename = Deobfuscation::Deobfuscate(fileInfo->GetSubject());
-
-	detail("Extracted Filename: %s", filename.c_str());
-
-	fileInfo->SetFilename(std::move(filename));
-}
-
-bool NzbFile::HasDuplicateFilenames()
-{
-	// rust/src/nzbfile.rs: one pass, counting each name's and each name and
-	// subject's later files
-	std::vector<const char*> names;
-	std::vector<const char*> subjects;
-	names.reserve(m_nzbInfo->GetFileList()->size());
-	subjects.reserve(m_nzbInfo->GetFileList()->size());
-	for (FileInfo* fileInfo : m_nzbInfo->GetFileList())
-	{
-		names.push_back(fileInfo->GetFilename());
-		subjects.push_back(fileInfo->GetSubject());
-	}
-	return nzbget_rs_nzb_duplicate_filenames(names.data(), subjects.data(), names.size()) != 0;
-}
-
-/**
- * Generate filenames from subjects and check if the parsing of subject was correct
- */
-void NzbFile::BuildFilenames()
-{
-	for (FileInfo* fileInfo : m_nzbInfo->GetFileList())
-	{
-		ParseSubject(fileInfo, true);
-	}
-
-	if (HasDuplicateFilenames())
-	{
-		for (FileInfo* fileInfo : m_nzbInfo->GetFileList())
-		{
-			ParseSubject(fileInfo, false);
-		}
-	}
-
-	if (HasDuplicateFilenames())
-	{
-		m_nzbInfo->SetManyDupeFiles(true);
-		for (FileInfo* fileInfo : m_nzbInfo->GetFileList())
-		{
-			fileInfo->SetFilename(fileInfo->GetSubject());
-		}
-	}
-}
-
-void NzbFile::CalcHashes()
-{
-	RawFileList sortedFiles;
-
-	for (FileInfo* fileInfo : m_nzbInfo->GetFileList())
-	{
-		sortedFiles.push_back(fileInfo);
-	}
-
-	std::sort(sortedFiles.begin(), sortedFiles.end(),
-		[](FileInfo* first, FileInfo* second)
-		{
-			return nzbget_rs_dqh_bytes_cmp(first->GetFilename(), second->GetFilename()) > 0;
-		});
-
-	size_t fileCount = sortedFiles.size();
-	std::vector<uint8_t> skipFlags;
-	std::vector<size_t> articleCounts;
-	std::vector<const char*> messageIds;
-	skipFlags.reserve(fileCount);
-	articleCounts.reserve(fileCount);
-
-	for (FileInfo* fileInfo : sortedFiles)
-	{
-		bool skip = !fileInfo->GetParFile() &&
-			Util::MatchFileExt(fileInfo->GetFilename(), g_Options->GetParIgnoreExt(), ",;");
-		skipFlags.push_back(skip ? 1 : 0);
-		articleCounts.push_back(fileInfo->GetArticles()->size());
-		for (ArticleInfo* article : fileInfo->GetArticles())
-		{
-			messageIds.push_back(article->GetMessageId());
-		}
-	}
-
-	uint32 fullContentHash = 0;
-	uint32 filteredContentHash = 0;
-	nzbget_rs_sus_calc_nzb_hashes(
-		skipFlags.data(),
-		articleCounts.data(),
-		fileCount,
-		messageIds.data(),
-		messageIds.size(),
-		&fullContentHash,
-		&filteredContentHash);
-
-	m_nzbInfo->SetFullContentHash(fullContentHash);
-	m_nzbInfo->SetFilteredContentHash(filteredContentHash);
-}
-
-void NzbFile::ProcessFiles()
-{
-	BuildFilenames();
-
-	for (FileInfo* fileInfo : m_nzbInfo->GetFileList())
-	{
-		fileInfo->MakeValidFilename();
-
-		int fileCount = m_nzbInfo->GetFileCount();
-		int totalArticles = m_nzbInfo->GetTotalArticles();
-		int failedArticles = m_nzbInfo->GetFailedArticles();
-		int curFailedArticles = m_nzbInfo->GetCurrentFailedArticles();
-		int64 size = m_nzbInfo->GetSize();
-		int64 remSize = m_nzbInfo->GetRemainingSize();
-		int64 failedSize = m_nzbInfo->GetFailedSize();
-		int64 curFailedSize = m_nzbInfo->GetCurrentFailedSize();
-		int64 parSize = m_nzbInfo->GetParSize();
-		int64 parFailedSize = m_nzbInfo->GetParFailedSize();
-		int64 parCurFailedSize = m_nzbInfo->GetParCurrentFailedSize();
-		int remParCount = m_nzbInfo->GetRemainingParCount();
-		bool parFile = nzbget_rs_pnd_nzbfile_accumulate_file_stats(
-			fileInfo->GetFilename(),
-			fileInfo->GetTotalArticles(),
-			fileInfo->GetMissedArticles(),
-			fileInfo->GetSize(),
-			fileInfo->GetRemainingSize(),
-			fileInfo->GetMissedSize(),
-			&fileCount, &totalArticles, &failedArticles, &curFailedArticles,
-			&size, &remSize, &failedSize, &curFailedSize,
-			&parSize, &parFailedSize, &parCurFailedSize, &remParCount) != 0;
-		m_nzbInfo->SetFileCount(fileCount);
-		m_nzbInfo->SetTotalArticles(totalArticles);
-		m_nzbInfo->SetFailedArticles(failedArticles);
-		m_nzbInfo->SetCurrentFailedArticles(curFailedArticles);
-		m_nzbInfo->SetSize(size);
-		m_nzbInfo->SetRemainingSize(remSize);
-		m_nzbInfo->SetFailedSize(failedSize);
-		m_nzbInfo->SetCurrentFailedSize(curFailedSize);
-		fileInfo->SetParFile(parFile);
-		m_nzbInfo->SetParSize(parSize);
-		m_nzbInfo->SetParFailedSize(parFailedSize);
-		m_nzbInfo->SetParCurrentFailedSize(parCurFailedSize);
-		m_nzbInfo->SetRemainingParCount(remParCount);
-	}
-
-	m_nzbInfo->UpdateMinMaxTime();
-
-	CalcHashes();
-
-	if (g_Options->GetServerMode())
-	{
-		for (FileInfo* fileInfo : m_nzbInfo->GetFileList())
-		{
-			g_DiskState->SaveFile(fileInfo);
-			fileInfo->GetArticles()->clear();
-		}
-	}
-
-	if (m_password.empty())
-	{
-		ReadPasswordFromFilename();
-	}
-
-	m_metaName = FileSystem::SanitizePathSegment(m_metaName);
-	m_metaTitle = FileSystem::SanitizePathSegment(m_metaTitle);
-
-	if (nzbget_rs_dcf_nzbfile_should_fallback_meta_name_to_title(
-		m_metaName.empty() ? 1 : 0, m_metaTitle.empty() ? 1 : 0) != 0)
-	{
-		m_metaName = m_metaTitle;
-	}
-
-	// Sanitize control characters (\r, \n, \t, etc.) to prevent
-	// line desynchronization in the line-based DiskState file format.
-	Util::SanitizeLine(m_category);
-
-	if (!m_metaName.empty() && m_nzbInfo)
-	{
-		m_nzbInfo->SetMetaName(m_metaName);
-	}
-}
-/*
-* Attempt to Read the Password from the Filename encoded in {{ Bracets }}
-*/
-void NzbFile::ReadPasswordFromFilename()
-{
-	size_t start = 0, len = 0;
-	if (nzbget_rs_sus_extract_password_from_filename(m_fileName.c_str(), &start, &len))
-	{
-		m_password = m_fileName.substr(start, len);
-	}
-}
-
 bool NzbFile::Parse()
 {
 	xmlSAXHandler SAX_handler = {0};
@@ -349,250 +87,173 @@ bool NzbFile::Parse()
 	SAX_handler.error = reinterpret_cast<errorSAXFunc>(SAX_error);
 	SAX_handler.getEntity = reinterpret_cast<getEntitySAXFunc>(SAX_getEntity);
 
-	m_ignoreNextError = false;
+	std::unique_ptr<NzbgetRsNzbFileParser, void (*)(NzbgetRsNzbFileParser*)> parser(
+		nzbget_rs_nzbfile_parser_new(m_fileName.c_str()),
+		nzbget_rs_nzbfile_parser_free);
+	m_parser = parser.get();
 
 	int ret = xmlSAXUserParseFile(&SAX_handler, this, m_fileName.c_str());
 
-	if (ret != 0)
+	NzbgetRsCtype ct = RsCtype();
+	NzbgetRsNzbFileSummary summary{};
+	bool ok = nzbget_rs_nzbfile_parser_finalize(
+		m_parser,
+		ret,
+		g_Options ? g_Options->GetParIgnoreExt() : "",
+		&ct,
+		[](const char* subject, const char* filename)
+		{
+			detail("Extracting a filename from Subject %s", subject);
+			detail("Extracted Filename: %s", filename);
+		},
+		[](const char* const* filenames, size_t* indices, size_t count)
+		{
+			std::sort(indices, indices + count,
+				[filenames](size_t a, size_t b)
+				{
+					return strcmp(filenames[a], filenames[b]) > 0;
+				});
+		},
+		&summary) != 0;
+
+	for (size_t i = 0; i < summary.messages_count; i++)
 	{
-		NzbgetRsBuf errBuf = nzbget_rs_tpr_nzbfile_format_parse_error_msg(
-			FileSystem::BaseFileName(m_fileName.c_str()), 0);
-		m_nzbInfo->AddMessage(Message::mkError, errBuf.data ? errBuf.data : "");
-		nzbget_rs_free(errBuf);
+		int kind = 0;
+		const char* text = nullptr;
+		if (nzbget_rs_nzbfile_parser_get_message(m_parser, i, &kind, &text) && text)
+		{
+			m_nzbInfo->AddMessage(
+				kind == 2 ? Message::mkError : Message::mkWarning,
+				text);
+		}
+	}
+
+	if (!ok)
+	{
+		m_parser = nullptr;
 		return false;
 	}
 
-	if (m_nzbInfo->GetFileList()->empty())
+	m_nzbInfo->SetManyDupeFiles(summary.many_dupe_files != 0);
+	m_nzbInfo->SetFileCount(summary.file_count);
+	m_nzbInfo->SetTotalArticles(summary.total_articles);
+	m_nzbInfo->SetFailedArticles(summary.failed_articles);
+	m_nzbInfo->SetCurrentFailedArticles(summary.cur_failed_articles);
+	m_nzbInfo->SetSize(summary.size);
+	m_nzbInfo->SetRemainingSize(summary.remaining_size);
+	m_nzbInfo->SetFailedSize(summary.failed_size);
+	m_nzbInfo->SetCurrentFailedSize(summary.cur_failed_size);
+	m_nzbInfo->SetParSize(summary.par_size);
+	m_nzbInfo->SetParFailedSize(summary.par_failed_size);
+	m_nzbInfo->SetParCurrentFailedSize(summary.par_cur_failed_size);
+	m_nzbInfo->SetRemainingParCount(summary.remaining_par_count);
+	m_nzbInfo->SetFullContentHash(summary.full_content_hash);
+	m_nzbInfo->SetFilteredContentHash(summary.filtered_content_hash);
+
+	for (size_t i = 0; i < summary.kept_files_count; i++)
 	{
-		NzbgetRsBuf errBuf = nzbget_rs_tpr_nzbfile_format_parse_error_msg(
-			FileSystem::BaseFileName(m_fileName.c_str()), 1);
-		m_nzbInfo->AddMessage(Message::mkError, errBuf.data ? errBuf.data : "");
-		nzbget_rs_free(errBuf);
-		return false;
-	}
-
-	ProcessFiles();
-
-	return true;
-}
-
-void NzbFile::Parse_StartElement(const char *name, const char **atts)
-{
-	m_currentElement = name;
-	m_tagContent.Clear();
-
-	int elemKind = nzbget_rs_dqh_nzbfile_classify_start_element(name);
-	if (elemKind == 1)
-	{
-		m_fileInfo = std::make_unique<FileInfo>();
-		m_fileInfo->SetFilename(m_fileName.c_str());
-
-		if (!atts)
+		NzbgetRsNzbKeptFileView view{};
+		if (!nzbget_rs_nzbfile_parser_get_file(m_parser, i, &view))
 		{
-			NzbgetRsBuf msgBuf = nzbget_rs_dqh_nzbfile_format_missing_attrs_msg(name);
-			m_nzbInfo->AddMessage(Message::mkWarning, msgBuf.data ? msgBuf.data : "");
-			nzbget_rs_free(msgBuf);
-			return;
+			continue;
+		}
+		std::unique_ptr<FileInfo> fileInfo = std::make_unique<FileInfo>(view.id);
+		fileInfo->SetNzbInfo(m_nzbInfo.get());
+		fileInfo->SetSubject(view.subject ? view.subject : "");
+		fileInfo->SetFilename(view.filename ? view.filename : "");
+		fileInfo->SetTime(view.time);
+		fileInfo->SetSize(view.size);
+		fileInfo->SetRemainingSize(view.remaining_size);
+		fileInfo->SetMissedSize(view.missed_size);
+		fileInfo->SetTotalArticles(view.total_articles);
+		fileInfo->SetMissedArticles(view.missed_articles);
+		fileInfo->SetParFile(view.par_file != 0);
+
+		for (size_t g = 0; g < view.groups_count; g++)
+		{
+			fileInfo->GetGroups()->push_back(view.groups_ptrs[g] ? view.groups_ptrs[g] : "");
 		}
 
-		for (int i = 0; atts[i]; i += 2)
+		ArticleList* articles = fileInfo->GetArticles();
+		articles->reserve(view.articles_count);
+		for (size_t a = 0; a < view.articles_count; a++)
 		{
-			const char* attrname = atts[i];
-			const char* attrvalue = atts[i + 1];
-			switch (nzbget_rs_dqh_nzbfile_classify_file_attr(attrname))
-			{
-				case 1:
-					m_fileInfo->SetSubject(attrvalue);
-					break;
-				case 2:
-					m_fileInfo->SetTime(nzbget_rs_dqh_parse_c_atoi(attrvalue));
-					break;
-			}
-		}
-	}
-	else if (elemKind == 2)
-	{
-		if (!m_fileInfo)
-		{
-			m_nzbInfo->AddMessage(Message::mkWarning, "Malformed nzb-file, tag <segment> without tag <file>");
-			return;
-		}
-
-		if (!atts)
-		{
-			NzbgetRsBuf msgBuf = nzbget_rs_dqh_nzbfile_format_missing_attrs_msg(name);
-			m_nzbInfo->AddMessage(Message::mkWarning, msgBuf.data ? msgBuf.data : "");
-			nzbget_rs_free(msgBuf);
-			return;
-		}
-
-		int64 lsize = -1;
-		int partNumber = -1;
-
-		for (int i = 0; atts[i]; i += 2)
-		{
-			const char* attrname = atts[i];
-			const char* attrvalue = atts[i + 1];
-			switch (nzbget_rs_dqh_nzbfile_classify_segment_attr(attrname))
-			{
-				case 1:
-					lsize = nzbget_rs_dqh_parse_c_atoll(attrvalue);
-					break;
-				case 2:
-					partNumber = nzbget_rs_dqh_parse_c_atoi(attrvalue);
-					break;
-			}
-		}
-
-		if (nzbget_rs_dqh_nzbfile_should_create_segment_article(partNumber) != 0)
-		{
-			// new segment, add it!
 			std::unique_ptr<ArticleInfo> article = std::make_unique<ArticleInfo>();
-			article->SetPartNumber(partNumber);
-			article->SetSize(lsize);
-			m_article = AddArticle(m_fileInfo.get(), std::move(article));
+			article->SetPartNumber(view.article_parts[a]);
+			article->SetSize(view.article_sizes[a]);
+			article->SetMessageId(view.article_msg_ids[a] ? view.article_msg_ids[a] : "");
+			articles->push_back(std::move(article));
 		}
-	}
-	else if (elemKind == 3)
-	{
-		m_hasPassword = false;
-		m_hasCategory = false;
-		m_hasName = false;
-		m_hasTitle = false;
 
-		if (!atts)
+		if (view.cut_short)
 		{
-			NzbgetRsBuf msgBuf = nzbget_rs_dqh_nzbfile_format_missing_attrs_msg(name);
-			m_nzbInfo->AddMessage(Message::mkWarning, msgBuf.data ? msgBuf.data : "");
-			nzbget_rs_free(msgBuf);
-			return;
+			m_cutShortFiles.insert(fileInfo.get());
 		}
 
-		for (int i = 0; atts[i] && atts[i + 1]; i += 2)
+		m_nzbInfo->GetFileList()->Add(std::move(fileInfo));
+	}
+
+	m_nzbInfo->UpdateMinMaxTime();
+
+	if (g_Options && g_Options->GetServerMode())
+	{
+		for (FileInfo* fileInfo : m_nzbInfo->GetFileList())
 		{
-			switch (nzbget_rs_rrd_nzbfile_classify_meta_type(atts[i], atts[i + 1]))
-			{
-				case 1: m_hasPassword = true; break;
-				case 2: m_hasCategory = true; break;
-				case 3: m_hasName = true; break;
-				case 4: m_hasTitle = true; break;
-			}
+			g_DiskState->SaveFile(fileInfo);
+			fileInfo->GetArticles()->clear();
 		}
 	}
-}
 
-void NzbFile::Parse_EndElement(const char *name)
-{
-	int elemKind = nzbget_rs_dqh_nzbfile_classify_end_element(name);
-	if (elemKind == 1)
-	{
-		// Close the file element, add the new file to file-list
-		AddFileInfo(std::move(m_fileInfo));
-		m_article = nullptr;
-	}
-	else if (elemKind == 2)
-	{
-		if (!m_fileInfo)
-		{
-			// error: bad nzb-file
-			return;
-		}
+	m_password = summary.password ? summary.password : "";
+	m_metaName = summary.meta_name ? summary.meta_name : "";
+	m_metaTitle = summary.meta_title ? summary.meta_title : "";
+	m_category = summary.category ? summary.category : "";
 
-		m_fileInfo->GetGroups()->push_back(*m_tagContent);
-		m_tagContent.Clear();
-	}
-	else if (elemKind == 3)
+	if (!m_metaName.empty() && m_nzbInfo)
 	{
-		if (!m_fileInfo || !m_article)
-		{
-			// error: bad nzb-file
-			return;
-		}
-
-		// Get the #text part; it goes into NNTP commands as is, so a line break
-		// in it would send a command of the nzb's choosing on our connection.
-		// Spaces and control characters can't be in a message-id: replaced, the
-		// article is simply not found
-		NzbgetRsBuf idBuf = nzbget_rs_sus_sanitize_segment_message_id(*m_tagContent);
-		m_article->SetMessageId(idBuf.data ? idBuf.data : "");
-		nzbget_rs_free(idBuf);
-		m_article = nullptr;
-	}
-	else if (elemKind == 4 && m_hasPassword)
-	{
-		m_password = m_tagContent;
-	}
-	else if (elemKind == 4 && m_hasCategory)
-	{
-		m_category = m_tagContent;
-	}
-	else if (elemKind == 4 && m_hasName)
-	{
-		m_metaName = m_tagContent;
-	}
-	else if (elemKind == 4 && m_hasTitle)
-	{
-		m_metaTitle = m_tagContent;
+		m_nzbInfo->SetMetaName(m_metaName);
 	}
 
-	m_currentElement.clear();
-}
-
-void NzbFile::Parse_Content(const char *buf, int len)
-{
-	m_tagContent.Append(buf, len);
+	m_parser = nullptr;
+	return true;
 }
 
 void NzbFile::SAX_StartElement(NzbFile* file, const char *name, const char **atts)
 {
-	file->Parse_StartElement(name, atts);
+	nzbget_rs_nzbfile_parser_start_element(
+		file->m_parser,
+		name,
+		atts,
+		nullptr,
+		[](void*) -> int
+		{
+			FileInfo tmp;
+			return tmp.GetId();
+		});
 }
 
 void NzbFile::SAX_EndElement(NzbFile* file, const char *name)
 {
-	file->Parse_EndElement(name);
+	nzbget_rs_nzbfile_parser_end_element(file->m_parser, name);
 }
 
 void NzbFile::SAX_characters(NzbFile* file, const char * xmlstr, int len)
 {
-	if (len <= 0)
-		return;
-
-	std::string str(xmlstr, len);
-	if (nzbget_rs_dqh_nzbfile_should_trim_sax_chars(
-		file->m_currentElement.c_str(), file->m_hasCategory ? 1 : 0) != 0)
-	{
-		// Do not break existing users' filters that rely on this normalization
-		Util::Trim(str);
-	}
-
-	if (!str.empty())
-	{
-		file->Parse_Content(str.data(), str.length());
-	}
+	nzbget_rs_nzbfile_parser_characters(file->m_parser, xmlstr, len);
 }
 
 void* NzbFile::SAX_getEntity(NzbFile* file, const char * name)
 {
 	xmlEntityPtr e = xmlGetPredefinedEntity(reinterpret_cast<const xmlChar*>(name));
-
 	if (!e)
 	{
-		file->m_nzbInfo->AddMessage(Message::mkWarning, "entity not found");
-		file->m_ignoreNextError = true;
+		nzbget_rs_nzbfile_parser_on_missing_entity(file->m_parser);
 	}
-
 	return e;
 }
 
 void NzbFile::SAX_error(NzbFile* file, const char *msg, ...)
 {
-	if (file->m_ignoreNextError)
-	{
-		file->m_ignoreNextError = false;
-		return;
-	}
-
 	va_list argp;
 	va_start(argp, msg);
 	char errMsg[1024];
@@ -600,10 +261,5 @@ void NzbFile::SAX_error(NzbFile* file, const char *msg, ...)
 	errMsg[1024-1] = '\0';
 	va_end(argp);
 
-	// remove trailing CRLF
-	nzbget_rs_tpr_nzbfile_trim_sax_error_in_place(errMsg);
-
-	NzbgetRsBuf errBuf = nzbget_rs_tpr_nzbfile_format_sax_error_msg(errMsg);
-	file->m_nzbInfo->AddMessage(Message::mkError, errBuf.data ? errBuf.data : "");
-	nzbget_rs_free(errBuf);
+	nzbget_rs_nzbfile_parser_on_sax_error(file->m_parser, errMsg);
 }

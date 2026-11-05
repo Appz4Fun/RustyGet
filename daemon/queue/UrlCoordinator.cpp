@@ -37,12 +37,6 @@ void UrlDownloader::ProcessHeader(const char* line)
 {
 	WebDownloader::ProcessHeader(line);
 
-	// rust/src/urlcoord.rs; most headers aren't X-DNZB ones
-	if (nzbget_rs_dqh_url_dl_has_dnzb_prefix(line) == 0)
-	{
-		return;
-	}
-
 	size_t start, length;
 	NzbgetRsBuf name{}, value{};
 	switch (nzbget_rs_url_dnzb_header(line, &start, &length, &name, &value))
@@ -102,17 +96,13 @@ void UrlCoordinator::Run()
 			if ((int)m_activeDownloads.size() < g_Options->GetUrlConnections())
 			{
 				nzbInfo = GetNextUrl(downloadQueue);
-				if (nzbget_rs_fuq_url_coord_should_start_download(
-					nzbInfo != nullptr ? 1 : 0,
-					g_WorkState->GetPauseDownload() ? 1 : 0,
-					g_Options->GetUrlForce() ? 1 : 0) != 0)
+				if (nzbInfo && (!g_WorkState->GetPauseDownload() || g_Options->GetUrlForce()))
 				{
 					StartUrlDownload(nzbInfo);
 					downloadStarted = true;
 				}
 			}
-			m_hasMoreJobs = nzbget_rs_uqs_url_coord_has_more_jobs(
-				m_activeDownloads.empty() ? 1 : 0, nzbInfo != nullptr ? 1 : 0) != 0;
+			m_hasMoreJobs = !m_activeDownloads.empty() || nzbInfo != nullptr;
 		}
 
 		if (lastReset != Util::CurrentTime())
@@ -122,16 +112,14 @@ void UrlCoordinator::Run()
 			lastReset = Util::CurrentTime();
 		}
 
-		if (nzbget_rs_dqh_url_coord_should_wait_on_cond(
-			m_hasMoreJobs ? 1 : 0, IsStopped() ? 1 : 0) != 0)
+		if (!m_hasMoreJobs && !IsStopped())
 		{
 			std::unique_lock<std::mutex> lk(m_waitMutex);
 			m_waitCond.wait(lk, [&] { return m_hasMoreJobs || IsStopped(); });
 		}
 		else
 		{
-			int sleepInterval = nzbget_rs_fuq_url_coord_calc_sleep_interval(downloadStarted ? 1 : 0);
-			Util::Sleep(sleepInterval);
+			Util::Sleep(downloadStarted ? 0 : 100);
 		}
 	}
 
@@ -185,10 +173,8 @@ void UrlCoordinator::DownloadQueueUpdate(Subject*, void* aspect)
 	debug("Notification from download queue received");
 
 	DownloadQueue::Aspect* queueAspect = (DownloadQueue::Aspect*)aspect;
-	if (nzbget_rs_ucf_url_coord_is_wake_action(
-		(int)queueAspect->action,
-		(int)DownloadQueue::eaUrlAdded,
-		(int)DownloadQueue::eaUrlReturned) != 0)
+	if (queueAspect->action == DownloadQueue::eaUrlAdded ||
+		queueAspect->action == DownloadQueue::eaUrlReturned)
 	{
 		// Resume Run()
 		std::lock_guard<std::mutex> guard(m_waitMutex);
@@ -209,7 +195,7 @@ void UrlCoordinator::ResetHangingDownloads()
 
 	for (UrlDownloader* urlDownloader : m_activeDownloads)
 	{
-		if (nzbget_rs_sus_is_hanging_url_download(
+		if (nzbget_rs_url_coord_is_hanging_download(
 			static_cast<int64>(tm),
 			static_cast<int64>(urlDownloader->GetLastUpdateTime()),
 			g_Options->GetUrlTimeout(),
@@ -262,7 +248,7 @@ NzbInfo* UrlCoordinator::GetNextUrl(DownloadQueue* downloadQueue)
 		deleteStatuses.push_back(static_cast<int>(nzbInfo1->GetDeleteStatus()));
 		priorities.push_back(nzbInfo1->GetPriority());
 	}
-	int idx = nzbget_rs_sus_select_next_url(
+	int idx = nzbget_rs_url_coord_select_next_url(
 		kinds.data(),
 		urlStatuses.data(),
 		deleteStatuses.data(),
@@ -285,7 +271,7 @@ void UrlCoordinator::StartUrlDownload(NzbInfo* nzbInfo)
 	urlDownloader->SetUrl(nzbInfo->GetUrl());
 	urlDownloader->SetForce(g_Options->GetUrlForce());
 	urlDownloader->SetInfoName(nzbInfo->MakeNiceUrlName(nzbInfo->GetUrl(), nzbInfo->GetFilename()));
-	NzbgetRsBuf outPathBuf = nzbget_rs_dqh_url_coord_format_temp_url_path(
+	NzbgetRsBuf outPathBuf = nzbget_rs_url_coord_format_temp_path(
 		g_Options->GetTempDir(), PATH_SEPARATOR, nzbInfo->GetId());
 	urlDownloader->SetOutputFilename(outPathBuf.data ? outPathBuf.data : "");
 	nzbget_rs_free(outPathBuf);
@@ -302,11 +288,9 @@ void UrlCoordinator::Update(Subject* caller, void*)
 	debug("Notification from UrlDownloader received");
 
 	UrlDownloader* urlDownloader = (UrlDownloader*)caller;
-	if (nzbget_rs_fuq_url_coord_is_completed_status(
-		(int)urlDownloader->GetStatus(),
-		(int)WebDownloader::adFinished,
-		(int)WebDownloader::adFailed,
-		(int)WebDownloader::adRetry) != 0)
+	if (urlDownloader->GetStatus() == WebDownloader::adFinished ||
+		urlDownloader->GetStatus() == WebDownloader::adFailed ||
+		urlDownloader->GetStatus() == WebDownloader::adRetry)
 	{
 		UrlCompleted(urlDownloader);
 	}
@@ -370,9 +354,9 @@ void UrlCoordinator::UrlCompleted(UrlDownloader* urlDownloader)
 
 	if (nzbInfo->GetUrlStatus() == NzbInfo::lsFinished)
 	{
-		const char* name = nzbget_rs_uqs_url_coord_use_primary_str(nzbInfo->GetFilename()) != 0
+		const char* name = !Util::EmptyStr(nzbInfo->GetFilename())
 			? nzbInfo->GetFilename() : *filename;
-		const char* category = nzbget_rs_uqs_url_coord_use_primary_str(nzbInfo->GetCategory()) != 0
+		const char* category = !Util::EmptyStr(nzbInfo->GetCategory())
 			? nzbInfo->GetCategory() : urlDownloader->GetCategory();
 
 		Scanner::EAddStatus addStatus;
@@ -421,9 +405,8 @@ void UrlCoordinator::UrlCompleted(UrlDownloader* urlDownloader)
 			return;
 		}
 
-		nzbInfo->SetUrlStatus((NzbInfo::EUrlStatus)nzbget_rs_fuq_url_coord_resolve_scan_fail_status(
-			(int)addStatus, (int)Scanner::asFailed,
-			(int)NzbInfo::lsScanFailed, (int)NzbInfo::lsScanSkipped));
+		nzbInfo->SetUrlStatus(addStatus == Scanner::asFailed
+			? NzbInfo::lsScanFailed : NzbInfo::lsScanSkipped);
 	}
 
 	// the rest of function is only for failed URLs or for failed scans
@@ -462,8 +445,10 @@ bool UrlCoordinator::DeleteQueueEntry(DownloadQueue* downloadQueue, NzbInfo* nzb
 
 	info("Deleting URL %s", nzbInfo->GetName());
 
-	nzbInfo->SetDeleteStatus((NzbInfo::EDeleteStatus)nzbget_rs_ucf_url_coord_resolve_delete_status(
-		(int)nzbInfo->GetDeleteStatus(), (int)NzbInfo::dsNone, (int)NzbInfo::dsManual));
+	if (nzbInfo->GetDeleteStatus() == NzbInfo::dsNone)
+	{
+		nzbInfo->SetDeleteStatus(NzbInfo::dsManual);
+	}
 	nzbInfo->SetUrlStatus(NzbInfo::lsNone);
 
 	DownloadQueue::Aspect deletedAspect = {DownloadQueue::eaUrlDeleted, downloadQueue, nzbInfo, nullptr};

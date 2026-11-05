@@ -186,9 +186,16 @@ int Probe(void*, const NzbgetTlsServer* server, const char* cipher, int protocol
 		connection.SetResolvedAddresses(addresses); connection.SetDeadline(deadline);
 		connection.SetSuppressErrors(true); connection.SetTimeout(10);
 		bool connected = connection.Connect();
-		int result = connected && !strcmp(connection.GetNegotiatedCipher(), cipher) &&
-			connection.GetNegotiatedVersion() == (protocol == 13 ? TLS1_3_VERSION : TLS1_2_VERSION) ? 1 :
-			connection.GetAuthError() ? -5 : connection.GetTlsProbeFailure();
+		int result = nzbget_rs_dqh_tls_resolve_probe_result(
+			connected ? 1 : 0,
+			connection.GetNegotiatedCipher(),
+			cipher,
+			connection.GetNegotiatedVersion(),
+			protocol,
+			TLS1_3_VERSION,
+			TLS1_2_VERSION,
+			connection.GetAuthError() ? 1 : 0,
+			connection.GetTlsProbeFailure());
 		if (cancel(cancelContext)) result = -6;
 		else if (std::chrono::steady_clock::now() >= deadline->end) result = -3;
 		connection.SetBroken(); connection.Disconnect();

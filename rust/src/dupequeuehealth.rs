@@ -2382,6 +2382,62 @@ pub fn dqh_nzb_reader_classify_end_element(
     }
 }
 
+/// Lexicographically compares byte slices `a` and `b` (`-1`, `0`, or `1`).
+pub fn dqh_bytes_cmp(a: &[u8], b: &[u8]) -> i32 {
+    match a.cmp(b) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }
+}
+
+/// Classifies how `donor_filename` matches `by_content` in `DupeArticleFallback::MatchDonorFile`:
+/// `1` (exact byte match), `2` (case-insensitive match via `dqh_bytes_eq_ignore_case`), or `0` (no match).
+pub fn dqh_dupe_fallback_classify_content_name_match(
+    donor_filename: &[u8],
+    by_content: &[u8],
+) -> i32 {
+    if donor_filename == by_content {
+        1
+    } else if dqh_bytes_eq_ignore_case(donor_filename, by_content) {
+        2
+    } else {
+        0
+    }
+}
+
+/// Resolves the probe outcome in `TlsCipherBackend::Probe`.
+pub fn dqh_tls_resolve_probe_result(
+    connected: bool,
+    negotiated_cipher: &[u8],
+    expected_cipher: &[u8],
+    negotiated_version: i32,
+    protocol: i32,
+    tls13_ver: i32,
+    tls12_ver: i32,
+    auth_error: bool,
+    tls_probe_failure: i32,
+) -> i32 {
+    let expected_ver = if protocol == 13 { tls13_ver } else { tls12_ver };
+    if connected && negotiated_cipher == expected_cipher && negotiated_version == expected_ver {
+        1
+    } else if auth_error {
+        -5
+    } else {
+        tls_probe_failure
+    }
+}
+
+/// Returns `Some(sig_title.len())` when `line` starts with `sig_title`, or `None` otherwise,
+/// for `Signature::ReadSignature`.
+pub fn dqh_maintenance_match_sig_line_prefix(line: &[u8], sig_title: &[u8]) -> Option<usize> {
+    if line.starts_with(sig_title) {
+        Some(sig_title.len())
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3321,5 +3377,56 @@ mod tests {
         assert_eq!(dqh_nzb_reader_classify_end_element(b"segment", false, true, true), 2);
         assert_eq!(dqh_nzb_reader_classify_end_element(b"group", false, false, true), 3);
         assert_eq!(dqh_nzb_reader_classify_end_element(b"file", false, false, true), 4);
+        assert_eq!(dqh_bytes_cmp(b"abc", b"abd"), -1);
+        assert_eq!(dqh_bytes_cmp(b"abc", b"abc"), 0);
+        assert_eq!(dqh_bytes_cmp(b"abd", b"abc"), 1);
+        assert_eq!(
+            dqh_dupe_fallback_classify_content_name_match(b"Movie.rar", b"Movie.rar"),
+            1
+        );
+        assert_eq!(
+            dqh_dupe_fallback_classify_content_name_match(b"Movie.rar", b"movie.rar"),
+            2
+        );
+        assert_eq!(
+            dqh_dupe_fallback_classify_content_name_match(b"Movie.rar", b"other.rar"),
+            0
+        );
+        assert_eq!(
+            dqh_tls_resolve_probe_result(
+                true,
+                b"TLS_AES_256_GCM_SHA384",
+                b"TLS_AES_256_GCM_SHA384",
+                0x0304,
+                13,
+                0x0304,
+                0x0303,
+                false,
+                -2
+            ),
+            1
+        );
+        assert_eq!(
+            dqh_tls_resolve_probe_result(
+                false,
+                b"",
+                b"TLS_AES_256_GCM_SHA384",
+                0,
+                13,
+                0x0304,
+                0x0303,
+                true,
+                -2
+            ),
+            -5
+        );
+        assert_eq!(
+            dqh_maintenance_match_sig_line_prefix(b"SHA256 (pkg.run) = deadbeef", b"SHA256 (pkg.run) = "),
+            Some(19)
+        );
+        assert_eq!(
+            dqh_maintenance_match_sig_line_prefix(b"SHA256 (other.run) = deadbeef", b"SHA256 (pkg.run) = "),
+            None
+        );
     }
 }

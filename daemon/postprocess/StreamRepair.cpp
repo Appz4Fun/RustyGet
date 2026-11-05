@@ -1988,7 +1988,7 @@ void StreamRepairController::ExecCrossPackRepair(const char* destDir,
 		int64 size = FileSystem::FileSize(path);
 		for (size_t t = 0; t < targets.size(); t++)
 		{
-			if (!strcasecmp(*targets[t].Filename, *memberNames[i]))
+			if (nzbget_rs_dqh_bytes_eq_ignore_case(*targets[t].Filename, *memberNames[i]) != 0)
 			{
 				memberHoles[i] = targets[t].Holes;
 				memberTargets[i] = targets[t].PatchEligible ? (int)t : -1;

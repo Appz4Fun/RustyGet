@@ -75,7 +75,7 @@ void NzbScriptController::ExecuteScriptList(const char* scriptList)
 	{
 		auto found = g_ExtensionManager->FindIf([&scriptName](auto script)
 			{
-				return strcmp(scriptName, script->GetName()) == 0;
+				return nzbget_rs_dqh_bytes_equal(scriptName, script->GetName()) != 0;
 			}
 		);
 

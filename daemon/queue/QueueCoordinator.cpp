@@ -1999,7 +1999,7 @@ bool QueueCoordinator::HasActiveDupe(DownloadQueue* downloadQueue, NzbInfo* nzbI
 	{
 		if (queued != nzbInfo &&
 			!Util::EmptyStr(queued->GetDupeKey()) &&
-			!strcasecmp(queued->GetDupeKey(), dupeKey))
+			nzbget_rs_dqh_bytes_eq_ignore_case(queued->GetDupeKey(), dupeKey) != 0)
 		{
 			PostInfo* qpi = queued->GetPostInfo();
 			if (nzbget_rs_fuq_queue_coord_is_queued_dupe_active(

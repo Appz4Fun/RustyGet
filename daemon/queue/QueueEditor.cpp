@@ -133,14 +133,14 @@ bool GroupSorter::operator()(const std::unique_ptr<NzbInfo>& refNzbInfo1, const 
 		(int)m_sortCriteria,
 		(int)m_sortOrder,
 		(int)soDescending,
-		strcmp(nzbInfo1->GetName(), nzbInfo2->GetName()),
+		nzbget_rs_dqh_bytes_cmp(nzbInfo1->GetName(), nzbInfo2->GetName()),
 		nzbInfo1->GetSize(),
 		nzbInfo2->GetSize(),
 		nzbInfo1->GetRemainingSize() - nzbInfo1->GetPausedSize(),
 		nzbInfo2->GetRemainingSize() - nzbInfo2->GetPausedSize(),
 		(int64)nzbInfo1->GetMinTime(),
 		(int64)nzbInfo2->GetMinTime(),
-		strcmp(nzbInfo1->GetCategory(), nzbInfo2->GetCategory()),
+		nzbget_rs_dqh_bytes_cmp(nzbInfo1->GetCategory(), nzbInfo2->GetCategory()),
 		nzbInfo1->GetPriority(),
 		nzbInfo2->GetPriority()) != 0;
 

@@ -254,7 +254,7 @@ namespace ExtensionManager
 		ptrdiff_t count = std::count_if(
 			std::begin(m_extensions),
 			std::end(m_extensions),
-			[&location](const auto& ext) { return strcmp(location, ext->GetLocation()) == 0; }
+			[&location](const auto& ext) { return nzbget_rs_dqh_bytes_equal(location, ext->GetLocation()) != 0; }
 		);
 
 		if (count > 1)

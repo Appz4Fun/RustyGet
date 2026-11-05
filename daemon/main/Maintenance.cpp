@@ -372,15 +372,13 @@ bool Signature::ReadSignature()
 	}
 
 	bool ok = false;
-	int titLen = strlen(sigTitle);
 	char buf[1024];
-	uchar* output = m_signature;
 	while (infile.ReadLine(buf, sizeof(buf) - 1))
 	{
-		if (!strncmp(buf, sigTitle, titLen))
+		size_t hexSigOffset = 0;
+		if (nzbget_rs_dqh_maintenance_match_sig_line_prefix(buf, sigTitle, &hexSigOffset) != 0)
 		{
-			char* hexSig = buf + titLen;
-			(void)output;
+			char* hexSig = buf + hexSigOffset;
 			ok = nzbget_rs_feh_maintenance_decode_hex_signature(hexSig, m_signature) != 0;
 
 			break;

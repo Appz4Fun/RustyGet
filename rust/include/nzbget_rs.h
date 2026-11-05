@@ -5975,6 +5975,15 @@ int nzbget_rs_dqh_newznab_classify_end_element(int in_item, const char* name);
 int nzbget_rs_dqh_nzb_reader_classify_start_element(const char* name, int in_file);
 int nzbget_rs_dqh_nzb_reader_classify_end_element(
     const char* name, int has_meta_type, int in_segment, int in_file);
+int nzbget_rs_dqh_bytes_cmp(const char* a, const char* b);
+int nzbget_rs_dqh_dupe_fallback_classify_content_name_match(
+    const char* donor_filename, const char* by_content);
+int nzbget_rs_dqh_tls_resolve_probe_result(
+    int connected, const char* negotiated_cipher, const char* expected_cipher,
+    int negotiated_version, int protocol, int tls13_ver, int tls12_ver,
+    int auth_error, int tls_probe_failure);
+int nzbget_rs_dqh_maintenance_match_sig_line_prefix(
+    const char* line, const char* sig_title, size_t* out_offset);
 
 #include "nzbget_tls_cipher.h"
 

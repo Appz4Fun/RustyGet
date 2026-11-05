@@ -718,7 +718,7 @@ CString FileSystem::GetExeFileName(const char* argv0)
 
 bool FileSystem::SameFilename(const char* filename1, const char* filename2)
 {
-	return strcmp(filename1, filename2) == 0;
+	return nzbget_rs_dqh_bytes_equal(filename1, filename2) != 0;
 }
 
 bool FileSystem::FlushFileBuffers(int fileDescriptor, CString& errmsg)

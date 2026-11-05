@@ -45,7 +45,7 @@ bool CommandScriptController::StartScript(const char* scriptName, const char* co
 
 	auto found = g_ExtensionManager->FindIf([&](auto script)
 		{
-			return strcmp(scriptName, script->GetName()) == 0;
+			return nzbget_rs_dqh_bytes_equal(scriptName, script->GetName()) != 0;
 		}
 	);
 	

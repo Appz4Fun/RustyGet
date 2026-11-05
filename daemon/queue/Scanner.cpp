@@ -306,7 +306,7 @@ bool Scanner::CanProcessFile(const char* fullFilename, bool checkStat)
 	for (FileList::iterator it = m_fileList.begin(); it != m_fileList.end(); ++it)
 	{
 		FileData& fileData = *it;
-		if (!strcmp(fileData.GetFilename(), fullFilename))
+		if (nzbget_rs_dqh_bytes_equal(fileData.GetFilename(), fullFilename) != 0)
 		{
 			inList = true;
 			int64 updatedSize = fileData.GetSize();

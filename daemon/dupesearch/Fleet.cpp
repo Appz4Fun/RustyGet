@@ -186,7 +186,8 @@ Fleet::Result Fleet::Append(Request request)
 		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
 		auto consider = [&](NzbInfo* nzbInfo, bool queued)
 			{
-				if (nzbInfo->GetKind() != NzbInfo::nkNzb || strcasecmp(nzbInfo->GetDupeKey(), request.dupeKey.c_str()))
+				if (nzbInfo->GetKind() != NzbInfo::nkNzb ||
+					!nzbget_rs_dqh_bytes_eq_ignore_case(nzbInfo->GetDupeKey(), request.dupeKey.c_str()))
 				{
 					return;
 				}

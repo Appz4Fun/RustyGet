@@ -1045,7 +1045,7 @@ static bool ParCannotCover(NzbInfo* nzbInfo)
 		}
 		const char* baseName = FileSystem::BaseFileName(filename.c_str());
 		if (std::any_of(parredFiles.begin(), parredFiles.end(),
-			[baseName](const std::string& parredFile) { return !strcasecmp(parredFile.c_str(), baseName); }))
+			[baseName](const std::string& parredFile) { return nzbget_rs_dqh_bytes_eq_ignore_case(parredFile.c_str(), baseName) != 0; }))
 		{
 			// a whole-file job has no decoded geometry yet: its encoded size
 			// is the closest measure of its damage

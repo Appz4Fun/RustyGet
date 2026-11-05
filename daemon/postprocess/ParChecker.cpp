@@ -1077,7 +1077,7 @@ bool ParChecker::IsProcessedFile(const char* filename)
 {
 	for (std::string& processedFilename : m_processedFiles)
 	{
-		if (!strcasecmp(FileSystem::BaseFileName(processedFilename.c_str()), filename))
+		if (nzbget_rs_dqh_bytes_eq_ignore_case(FileSystem::BaseFileName(processedFilename.c_str()), filename) != 0)
 		{
 			return true;
 		}

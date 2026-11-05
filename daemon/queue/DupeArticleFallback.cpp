@@ -716,7 +716,7 @@ void DupeArticleFallback::AppendDonorCandidate(std::vector<CString>& candidates,
 	}
 
 	bool duplicate = std::find_if(candidates.begin(), candidates.end(),
-		[messageId](const CString& candidate) { return !strcmp(candidate, messageId); }) != candidates.end();
+		[messageId](const CString& candidate) { return nzbget_rs_dqh_bytes_equal(candidate, messageId) != 0; }) != candidates.end();
 	if (!duplicate)
 	{
 		candidates.emplace_back(messageId);
@@ -868,11 +868,13 @@ FileInfo* DupeArticleFallback::MatchDonorFile(FileInfo* targetFile, NzbInfo* don
 			{
 				continue;
 			}
-			if (!strcmp(donorFile->GetFilename(), byContent.c_str()))
+			int nameMatchKind = nzbget_rs_dqh_dupe_fallback_classify_content_name_match(
+				donorFile->GetFilename(), byContent.c_str());
+			if (nameMatchKind == 1)
 			{
 				exact.push_back(donorFile);
 			}
-			else if (!strcasecmp(donorFile->GetFilename(), byContent.c_str()))
+			else if (nameMatchKind == 2)
 			{
 				folded.push_back(donorFile);
 			}

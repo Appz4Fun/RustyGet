@@ -35381,6 +35381,104 @@ pub unsafe extern "C" fn nzbget_rs_dqh_nzb_reader_classify_end_element(
     )
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_bytes_cmp(
+    a: *const c_char,
+    b: *const c_char,
+) -> c_int {
+    let sa = if a.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(a).to_bytes()
+    };
+    let sb = if b.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(b).to_bytes()
+    };
+    crate::dupequeuehealth::dqh_bytes_cmp(sa, sb)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_dupe_fallback_classify_content_name_match(
+    donor_filename: *const c_char,
+    by_content: *const c_char,
+) -> c_int {
+    let d = if donor_filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(donor_filename).to_bytes()
+    };
+    let b = if by_content.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(by_content).to_bytes()
+    };
+    crate::dupequeuehealth::dqh_dupe_fallback_classify_content_name_match(d, b)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_tls_resolve_probe_result(
+    connected: c_int,
+    negotiated_cipher: *const c_char,
+    expected_cipher: *const c_char,
+    negotiated_version: c_int,
+    protocol: c_int,
+    tls13_ver: c_int,
+    tls12_ver: c_int,
+    auth_error: c_int,
+    tls_probe_failure: c_int,
+) -> c_int {
+    let neg = if negotiated_cipher.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(negotiated_cipher).to_bytes()
+    };
+    let exp = if expected_cipher.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(expected_cipher).to_bytes()
+    };
+    crate::dupequeuehealth::dqh_tls_resolve_probe_result(
+        connected != 0,
+        neg,
+        exp,
+        negotiated_version,
+        protocol,
+        tls13_ver,
+        tls12_ver,
+        auth_error != 0,
+        tls_probe_failure,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_maintenance_match_sig_line_prefix(
+    line: *const c_char,
+    sig_title: *const c_char,
+    out_offset: *mut usize,
+) -> c_int {
+    let l = if line.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(line).to_bytes()
+    };
+    let s = if sig_title.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(sig_title).to_bytes()
+    };
+    match crate::dupequeuehealth::dqh_maintenance_match_sig_line_prefix(l, s) {
+        Some(off) => {
+            if !out_offset.is_null() {
+                *out_offset = off;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
 
 
 

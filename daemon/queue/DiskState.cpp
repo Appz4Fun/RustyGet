@@ -991,7 +991,7 @@ void DiskState::SaveDupeTrailer(const std::vector<NzbInfo*>& nzbs, StateDiskFile
 bool DiskState::LoadDupeTrailer(const std::function<NzbInfo*(int)>& find, StateDiskFile& infile)
 {
 	char buf[1024];
-	if (!infile.ReadLine(buf, sizeof(buf)) || strcmp(buf, DUPESTATE_TRAILER))
+	if (!infile.ReadLine(buf, sizeof(buf)) || !nzbget_rs_dqh_bytes_equal(buf, DUPESTATE_TRAILER))
 	{
 		return true;	// a file upstream nzbget wrote, or one without any
 	}
@@ -1005,7 +1005,7 @@ bool DiskState::LoadDupeTrailer(const std::function<NzbInfo*(int)>& find, StateD
 		NzbInfo unknown;	// an nzb no longer listed: its extras are read and dropped
 		if (!LoadDupeExtras(nzbInfo ? nzbInfo : &unknown, infile, DISKSTATE_QUEUE_LEGACY_VERSION)) goto error;
 	}
-	if (infile.ReadLine(buf, sizeof(buf)) && !strcmp(buf, UNPACKSTATE_TRAILER))
+	if (infile.ReadLine(buf, sizeof(buf)) && nzbget_rs_dqh_bytes_equal(buf, UNPACKSTATE_TRAILER))
 	{
 		int unpackCount = 0;
 		if (infile.ScanLine("%i", &unpackCount) != 1 || unpackCount < 0) goto error;

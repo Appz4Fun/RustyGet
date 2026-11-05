@@ -210,7 +210,7 @@ void NzbFile::CalcHashes()
 	std::sort(sortedFiles.begin(), sortedFiles.end(),
 		[](FileInfo* first, FileInfo* second)
 		{
-			return strcmp(first->GetFilename(), second->GetFilename()) > 0;
+			return nzbget_rs_dqh_bytes_cmp(first->GetFilename(), second->GetFilename()) > 0;
 		});
 
 	size_t fileCount = sortedFiles.size();

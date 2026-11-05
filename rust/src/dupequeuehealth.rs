@@ -3981,6 +3981,193 @@ pub fn dqh_queue_script_is_duplicate_file_downloaded_item(
     event == qe_file_downloaded && item_nzb_id == target_nzb_id && same_script
 }
 
+/// Returns true when row `index` is within the visible scroll window in `NCursesFrontend`.
+pub fn dqh_ncurses_is_row_in_scroll_window(
+    index: i32,
+    scroll_offset: i32,
+    win_height: i32,
+) -> bool {
+    index >= scroll_offset && index < scroll_offset + win_height - 1
+}
+
+/// Accumulates file queue remaining bytes, paused bytes, and paused file count in `NCursesFrontend::PrintFileQueue`.
+pub fn dqh_ncurses_accum_file_queue_stats(
+    paused: bool,
+    file_rem_size: i64,
+    cur_rem: i64,
+    cur_paused: i64,
+    cur_paused_files: i32,
+) -> (i64, i64, i32) {
+    let next_rem = cur_rem + file_rem_size;
+    if paused {
+        (
+            next_rem,
+            cur_paused + file_rem_size,
+            cur_paused_files + 1,
+        )
+    } else {
+        (next_rem, cur_paused, cur_paused_files)
+    }
+}
+
+/// Accumulates group queue remaining bytes and paused bytes in `NCursesFrontend::PrintGroupQueue`.
+pub fn dqh_ncurses_accum_group_queue_stats(
+    group_rem_size: i64,
+    group_paused_size: i64,
+    cur_rem: i64,
+    cur_paused: i64,
+) -> (i64, i64) {
+    (cur_rem + group_rem_size, cur_paused + group_paused_size)
+}
+
+/// Evaluates whether `NCursesFrontend::UpdateInput` can enter `editQueue` mode and returns the updated queue window percentage.
+pub fn dqh_ncurses_enter_edit_queue_win_pct(queue_size: i32, cur_win_pct: i32) -> Option<i32> {
+    if queue_size > 0 {
+        Some(if cur_win_pct == 0 { 50 } else { cur_win_pct })
+    } else {
+        None
+    }
+}
+
+/// Computes the last valid queue index (`queue_size - 1` or `0` when empty) in `NCursesFrontend::UpdateInput`.
+pub fn dqh_ncurses_last_queue_index(queue_size: i32) -> i32 {
+    if queue_size > 0 {
+        queue_size - 1
+    } else {
+        0
+    }
+}
+
+/// Returns true when `DiskService::ServiceWork` should check free disk space.
+pub fn dqh_disk_service_should_check_disk_space(disk_space_mb: i32, is_downloading: bool) -> bool {
+    disk_space_mb > 0 && is_downloading
+}
+
+/// Evaluates a required directory check in `DiskService::CheckRequiredDir`:
+/// returns `(is_missing, should_log_waiting, next_waiting_reported)`.
+pub fn dqh_disk_service_eval_missing_required_dir(
+    file_exists: bool,
+    dir_exists: bool,
+    was_waiting_reported: bool,
+    cur_waiting_reported: bool,
+) -> (bool, bool, bool) {
+    if !file_exists && !dir_exists {
+        let should_log = !was_waiting_reported;
+        let next_reported = if should_log {
+            true
+        } else {
+            cur_waiting_reported
+        };
+        (true, should_log, next_reported)
+    } else {
+        (false, false, cur_waiting_reported)
+    }
+}
+
+/// Returns true when `Maintenance::CheckUpdates` received non-empty update info output.
+pub fn dqh_maintenance_has_update_info(len: i32) -> bool {
+    len > 0
+}
+
+/// Resolves `m_configLine` in `Options::LocateOptionSrcPos`.
+pub fn dqh_options_resolve_locate_src_line(found: bool, line_no: i32) -> i32 {
+    if found {
+        line_no
+    } else {
+        0
+    }
+}
+
+/// Updates `m_configLine` in `Options::GetOption` when `line_no > 0`.
+pub fn dqh_options_update_config_line_on_get(line_no: i32, cur_config_line: i32) -> i32 {
+    if line_no > 0 {
+        line_no
+    } else {
+        cur_config_line
+    }
+}
+
+/// Returns true when a parsed scheduler task hour represents every hour (`hours == -2`).
+pub fn dqh_options_is_every_hour_task(hours: i32) -> bool {
+    hours == -2
+}
+
+/// Returns true when `NZBGet::Phase1_Init` should run the system health check.
+pub fn dqh_nzbget_should_run_system_health_check(
+    server_mode: bool,
+    system_health_check: bool,
+) -> bool {
+    server_mode && system_health_check
+}
+
+/// Evaluates whether `NZBGet::BootConfig` should print usage and exit, returning the exit code (`0` or `1`).
+pub fn dqh_nzbget_classify_boot_usage_or_error(
+    print_usage: bool,
+    has_errors: bool,
+    arg_count: i32,
+) -> Option<i32> {
+    if print_usage || has_errors || arg_count <= 1 {
+        Some(if print_usage { 0 } else { 1 })
+    } else {
+        None
+    }
+}
+
+/// Returns true when `NZBGet::StopFrontend` should immediately stop the frontend thread before waiting.
+pub fn dqh_nzbget_should_stop_frontend_immediately(
+    remote_client_mode: bool,
+    stopped: bool,
+) -> bool {
+    !remote_client_mode || stopped
+}
+
+/// Classifies the log file initialization action in `Log::InitOptions`:
+/// `0` = skip, `1` = update log path only, `2` = update log path and reset log.
+pub fn dqh_log_classify_init_logfile_action(
+    remote_client_mode: bool,
+    direct_client_mode: bool,
+    write_log: i32,
+    wl_none: i32,
+    wl_reset: i32,
+    has_log_file: bool,
+    server_mode: bool,
+) -> i32 {
+    if !remote_client_mode && !direct_client_mode && write_log != wl_none && has_log_file {
+        if server_mode && write_log == wl_reset {
+            2
+        } else {
+            1
+        }
+    } else {
+        0
+    }
+}
+
+/// Evaluates whether `ScriptController::Terminate` succeeded.
+pub fn dqh_script_ctrl_is_terminate_ok(child_pid: i32, kill_res: i32, completed: bool) -> bool {
+    child_pid <= 0 || kill_res == 0 || completed
+}
+
+/// Returns true when `ScriptController::Break` has an active uncompleted process to signal.
+pub fn dqh_script_ctrl_can_send_break(pid: i32, completed: bool) -> bool {
+    pid > 0 && !completed
+}
+
+/// Returns true when `FileSystem::MoveFile` should fall back from `rename` to `CopyFile` + `DeleteFile` (`!rename_ok && err_no == exdev`).
+pub fn dqh_fs_should_fallback_move_to_copy(rename_ok: bool, err_no: i32, exdev: i32) -> bool {
+    !rename_ok && err_no == exdev
+}
+
+/// Returns true when `FileSystem::CopyFile` closed cleanly, had no read/write error, and copied the exact source size.
+pub fn dqh_fs_is_copied_file_valid(
+    close_ok: bool,
+    loop_ok: bool,
+    copied_bytes: i64,
+    src_size: i64,
+) -> bool {
+    close_ok && loop_ok && copied_bytes == src_size
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5528,5 +5715,85 @@ mod tests {
         assert!(!dqh_queue_script_is_duplicate_file_downloaded_item(
             0, 0, 42, 42, false
         ));
+        assert!(dqh_ncurses_is_row_in_scroll_window(2, 2, 5));
+        assert!(dqh_ncurses_is_row_in_scroll_window(5, 2, 5));
+        assert!(!dqh_ncurses_is_row_in_scroll_window(1, 2, 5));
+        assert!(!dqh_ncurses_is_row_in_scroll_window(6, 2, 5));
+        assert_eq!(
+            dqh_ncurses_accum_file_queue_stats(true, 100, 500, 200, 3),
+            (600, 300, 4)
+        );
+        assert_eq!(
+            dqh_ncurses_accum_file_queue_stats(false, 100, 500, 200, 3),
+            (600, 200, 3)
+        );
+        assert_eq!(
+            dqh_ncurses_accum_group_queue_stats(400, 150, 1000, 300),
+            (1400, 450)
+        );
+        assert_eq!(dqh_ncurses_enter_edit_queue_win_pct(3, 0), Some(50));
+        assert_eq!(dqh_ncurses_enter_edit_queue_win_pct(3, 75), Some(75));
+        assert_eq!(dqh_ncurses_enter_edit_queue_win_pct(0, 0), None);
+        assert_eq!(dqh_ncurses_last_queue_index(5), 4);
+        assert_eq!(dqh_ncurses_last_queue_index(0), 0);
+        assert!(dqh_disk_service_should_check_disk_space(100, true));
+        assert!(!dqh_disk_service_should_check_disk_space(0, true));
+        assert!(!dqh_disk_service_should_check_disk_space(100, false));
+        assert_eq!(
+            dqh_disk_service_eval_missing_required_dir(false, false, false, false),
+            (true, true, true)
+        );
+        assert_eq!(
+            dqh_disk_service_eval_missing_required_dir(false, false, true, true),
+            (true, false, true)
+        );
+        assert_eq!(
+            dqh_disk_service_eval_missing_required_dir(true, false, false, false),
+            (false, false, false)
+        );
+        assert!(dqh_maintenance_has_update_info(12));
+        assert!(!dqh_maintenance_has_update_info(0));
+        assert_eq!(dqh_options_resolve_locate_src_line(true, 42), 42);
+        assert_eq!(dqh_options_resolve_locate_src_line(false, 42), 0);
+        assert_eq!(dqh_options_update_config_line_on_get(55, 10), 55);
+        assert_eq!(dqh_options_update_config_line_on_get(0, 10), 10);
+        assert!(dqh_options_is_every_hour_task(-2));
+        assert!(!dqh_options_is_every_hour_task(8));
+        assert!(dqh_nzbget_should_run_system_health_check(true, true));
+        assert!(!dqh_nzbget_should_run_system_health_check(true, false));
+        assert!(!dqh_nzbget_should_run_system_health_check(false, true));
+        assert_eq!(dqh_nzbget_classify_boot_usage_or_error(true, false, 2), Some(0));
+        assert_eq!(dqh_nzbget_classify_boot_usage_or_error(false, true, 2), Some(1));
+        assert_eq!(dqh_nzbget_classify_boot_usage_or_error(false, false, 1), Some(1));
+        assert_eq!(dqh_nzbget_classify_boot_usage_or_error(false, false, 2), None);
+        assert!(dqh_nzbget_should_stop_frontend_immediately(false, false));
+        assert!(dqh_nzbget_should_stop_frontend_immediately(true, true));
+        assert!(!dqh_nzbget_should_stop_frontend_immediately(true, false));
+        assert_eq!(
+            dqh_log_classify_init_logfile_action(false, false, 2, 0, 2, true, true),
+            2
+        );
+        assert_eq!(
+            dqh_log_classify_init_logfile_action(false, false, 1, 0, 2, true, true),
+            1
+        );
+        assert_eq!(
+            dqh_log_classify_init_logfile_action(true, false, 2, 0, 2, true, true),
+            0
+        );
+        assert!(dqh_script_ctrl_is_terminate_ok(0, -1, false));
+        assert!(dqh_script_ctrl_is_terminate_ok(123, 0, false));
+        assert!(dqh_script_ctrl_is_terminate_ok(123, -1, true));
+        assert!(!dqh_script_ctrl_is_terminate_ok(123, -1, false));
+        assert!(dqh_script_ctrl_can_send_break(123, false));
+        assert!(!dqh_script_ctrl_can_send_break(0, false));
+        assert!(!dqh_script_ctrl_can_send_break(123, true));
+        assert!(dqh_fs_should_fallback_move_to_copy(false, 18, 18));
+        assert!(!dqh_fs_should_fallback_move_to_copy(true, 18, 18));
+        assert!(!dqh_fs_should_fallback_move_to_copy(false, 13, 18));
+        assert!(dqh_fs_is_copied_file_valid(true, true, 4096, 4096));
+        assert!(!dqh_fs_is_copied_file_valid(false, true, 4096, 4096));
+        assert!(!dqh_fs_is_copied_file_valid(true, false, 4096, 4096));
+        assert!(!dqh_fs_is_copied_file_valid(true, true, 4000, 4096));
     }
 }

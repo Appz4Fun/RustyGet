@@ -6181,6 +6181,42 @@ int nzbget_rs_dqh_queue_script_select_exec_msg_kind(
     int event, int qe_file_downloaded, int mk_detail, int mk_info);
 int nzbget_rs_dqh_queue_script_is_duplicate_file_downloaded_item(
     int event, int qe_file_downloaded, int item_nzb_id, int target_nzb_id, int same_script);
+int nzbget_rs_dqh_ncurses_is_row_in_scroll_window(
+    int index, int scroll_offset, int win_height);
+void nzbget_rs_dqh_ncurses_accum_file_queue_stats(
+    int paused, int64_t file_rem_size,
+    int64_t* inout_rem, int64_t* inout_paused, int* inout_paused_files);
+void nzbget_rs_dqh_ncurses_accum_group_queue_stats(
+    int64_t group_rem_size, int64_t group_paused_size,
+    int64_t* inout_rem, int64_t* inout_paused);
+int nzbget_rs_dqh_ncurses_enter_edit_queue_win_pct(
+    int queue_size, int cur_win_pct, int* out_win_pct);
+int nzbget_rs_dqh_ncurses_last_queue_index(int queue_size);
+int nzbget_rs_dqh_disk_service_should_check_disk_space(
+    int disk_space_mb, int is_downloading);
+int nzbget_rs_dqh_disk_service_eval_missing_required_dir(
+    int file_exists, int dir_exists, int was_waiting_reported, int cur_waiting_reported,
+    int* out_should_log_waiting, int* out_next_waiting_reported);
+int nzbget_rs_dqh_maintenance_has_update_info(int len);
+int nzbget_rs_dqh_options_resolve_locate_src_line(int found, int line_no);
+int nzbget_rs_dqh_options_update_config_line_on_get(int line_no, int cur_config_line);
+int nzbget_rs_dqh_options_is_every_hour_task(int hours);
+int nzbget_rs_dqh_nzbget_should_run_system_health_check(
+    int server_mode, int system_health_check);
+int nzbget_rs_dqh_nzbget_classify_boot_usage_or_error(
+    int print_usage, int has_errors, int arg_count, int* out_exit_code);
+int nzbget_rs_dqh_nzbget_should_stop_frontend_immediately(
+    int remote_client_mode, int stopped);
+int nzbget_rs_dqh_log_classify_init_logfile_action(
+    int remote_client_mode, int direct_client_mode, int write_log,
+    int wl_none, int wl_reset, int has_log_file, int server_mode);
+int nzbget_rs_dqh_script_ctrl_is_terminate_ok(
+    int child_pid, int kill_res, int completed);
+int nzbget_rs_dqh_script_ctrl_can_send_break(int pid, int completed);
+int nzbget_rs_dqh_fs_should_fallback_move_to_copy(
+    int rename_ok, int err_no, int exdev);
+int nzbget_rs_dqh_fs_is_copied_file_valid(
+    int close_ok, int loop_ok, int64_t copied_bytes, int64_t src_size);
 
 #include "nzbget_tls_cipher.h"
 

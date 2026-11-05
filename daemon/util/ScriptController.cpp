@@ -578,7 +578,9 @@ void ScriptController::Terminate()
 	pid_t childPid = m_processId.load();
 	pid_t killId = (pid_t)nzbget_rs_ufs_script_ctrl_select_kill_pid(
 		(int)childPid, childPid > 0 ? (int)getpgid(childPid) : 0);
-	bool ok = childPid <= 0 || kill(killId, SIGKILL) == 0 || m_completed;
+	int killRes = childPid > 0 ? kill(killId, SIGKILL) : 0;
+	bool ok = nzbget_rs_dqh_script_ctrl_is_terminate_ok(
+		(int)childPid, killRes, m_completed ? 1 : 0) != 0;
 
 	if (ok)
 	{
@@ -618,7 +620,8 @@ bool ScriptController::Break()
 	debug("Sending break signal to %s", *m_infoName);
 
 	pid_t pid = m_processId.load();
-	bool ok = pid > 0 && !m_completed && kill(pid, SIGINT) == 0;
+	bool ok = nzbget_rs_dqh_script_ctrl_can_send_break((int)pid, m_completed ? 1 : 0) != 0 &&
+		kill(pid, SIGINT) == 0;
 
 	if (ok)
 	{

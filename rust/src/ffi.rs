@@ -37145,4 +37145,286 @@ pub extern "C" fn nzbget_rs_dqh_queue_script_is_duplicate_file_downloaded_item(
     )
 }
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_ncurses_is_row_in_scroll_window(
+    index: c_int,
+    scroll_offset: c_int,
+    win_height: c_int,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_ncurses_is_row_in_scroll_window(
+        index,
+        scroll_offset,
+        win_height,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_ncurses_accum_file_queue_stats(
+    paused: c_int,
+    file_rem_size: i64,
+    inout_rem: *mut i64,
+    inout_paused: *mut i64,
+    inout_paused_files: *mut c_int,
+) {
+    let cur_rem = if inout_rem.is_null() { 0 } else { *inout_rem };
+    let cur_paused = if inout_paused.is_null() {
+        0
+    } else {
+        *inout_paused
+    };
+    let cur_files = if inout_paused_files.is_null() {
+        0
+    } else {
+        *inout_paused_files
+    };
+    let (next_rem, next_paused, next_files) =
+        crate::dupequeuehealth::dqh_ncurses_accum_file_queue_stats(
+            paused != 0,
+            file_rem_size,
+            cur_rem,
+            cur_paused,
+            cur_files,
+        );
+    if !inout_rem.is_null() {
+        *inout_rem = next_rem;
+    }
+    if !inout_paused.is_null() {
+        *inout_paused = next_paused;
+    }
+    if !inout_paused_files.is_null() {
+        *inout_paused_files = next_files;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_ncurses_accum_group_queue_stats(
+    group_rem_size: i64,
+    group_paused_size: i64,
+    inout_rem: *mut i64,
+    inout_paused: *mut i64,
+) {
+    let cur_rem = if inout_rem.is_null() { 0 } else { *inout_rem };
+    let cur_paused = if inout_paused.is_null() {
+        0
+    } else {
+        *inout_paused
+    };
+    let (next_rem, next_paused) = crate::dupequeuehealth::dqh_ncurses_accum_group_queue_stats(
+        group_rem_size,
+        group_paused_size,
+        cur_rem,
+        cur_paused,
+    );
+    if !inout_rem.is_null() {
+        *inout_rem = next_rem;
+    }
+    if !inout_paused.is_null() {
+        *inout_paused = next_paused;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_ncurses_enter_edit_queue_win_pct(
+    queue_size: c_int,
+    cur_win_pct: c_int,
+    out_win_pct: *mut c_int,
+) -> c_int {
+    if let Some(pct) =
+        crate::dupequeuehealth::dqh_ncurses_enter_edit_queue_win_pct(queue_size, cur_win_pct)
+    {
+        if !out_win_pct.is_null() {
+            *out_win_pct = pct;
+        }
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_ncurses_last_queue_index(queue_size: c_int) -> c_int {
+    crate::dupequeuehealth::dqh_ncurses_last_queue_index(queue_size)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_disk_service_should_check_disk_space(
+    disk_space_mb: c_int,
+    is_downloading: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_disk_service_should_check_disk_space(
+            disk_space_mb,
+            is_downloading != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_disk_service_eval_missing_required_dir(
+    file_exists: c_int,
+    dir_exists: c_int,
+    was_waiting_reported: c_int,
+    cur_waiting_reported: c_int,
+    out_should_log_waiting: *mut c_int,
+    out_next_waiting_reported: *mut c_int,
+) -> c_int {
+    let (missing, should_log, next_reported) =
+        crate::dupequeuehealth::dqh_disk_service_eval_missing_required_dir(
+            file_exists != 0,
+            dir_exists != 0,
+            was_waiting_reported != 0,
+            cur_waiting_reported != 0,
+        );
+    if !out_should_log_waiting.is_null() {
+        *out_should_log_waiting = i32::from(should_log);
+    }
+    if !out_next_waiting_reported.is_null() {
+        *out_next_waiting_reported = i32::from(next_reported);
+    }
+    i32::from(missing)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_maintenance_has_update_info(len: c_int) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_maintenance_has_update_info(len))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_options_resolve_locate_src_line(
+    found: c_int,
+    line_no: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_options_resolve_locate_src_line(found != 0, line_no)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_options_update_config_line_on_get(
+    line_no: c_int,
+    cur_config_line: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_options_update_config_line_on_get(line_no, cur_config_line)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_options_is_every_hour_task(hours: c_int) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_options_is_every_hour_task(hours))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_nzbget_should_run_system_health_check(
+    server_mode: c_int,
+    system_health_check: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_nzbget_should_run_system_health_check(
+            server_mode != 0,
+            system_health_check != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_nzbget_classify_boot_usage_or_error(
+    print_usage: c_int,
+    has_errors: c_int,
+    arg_count: c_int,
+    out_exit_code: *mut c_int,
+) -> c_int {
+    if let Some(code) = crate::dupequeuehealth::dqh_nzbget_classify_boot_usage_or_error(
+        print_usage != 0,
+        has_errors != 0,
+        arg_count,
+    ) {
+        if !out_exit_code.is_null() {
+            *out_exit_code = code;
+        }
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_nzbget_should_stop_frontend_immediately(
+    remote_client_mode: c_int,
+    stopped: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_nzbget_should_stop_frontend_immediately(
+            remote_client_mode != 0,
+            stopped != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_log_classify_init_logfile_action(
+    remote_client_mode: c_int,
+    direct_client_mode: c_int,
+    write_log: c_int,
+    wl_none: c_int,
+    wl_reset: c_int,
+    has_log_file: c_int,
+    server_mode: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_log_classify_init_logfile_action(
+        remote_client_mode != 0,
+        direct_client_mode != 0,
+        write_log,
+        wl_none,
+        wl_reset,
+        has_log_file != 0,
+        server_mode != 0,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_script_ctrl_is_terminate_ok(
+    child_pid: c_int,
+    kill_res: c_int,
+    completed: c_int,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_script_ctrl_is_terminate_ok(
+        child_pid,
+        kill_res,
+        completed != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_script_ctrl_can_send_break(pid: c_int, completed: c_int) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_script_ctrl_can_send_break(
+        pid,
+        completed != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_fs_should_fallback_move_to_copy(
+    rename_ok: c_int,
+    err_no: c_int,
+    exdev: c_int,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_fs_should_fallback_move_to_copy(
+        rename_ok != 0,
+        err_no,
+        exdev,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_fs_is_copied_file_valid(
+    close_ok: c_int,
+    loop_ok: c_int,
+    copied_bytes: i64,
+    src_size: i64,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_fs_is_copied_file_valid(
+        close_ok != 0,
+        loop_ok != 0,
+        copied_bytes,
+        src_size,
+    ))
+}
+
 

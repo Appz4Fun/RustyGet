@@ -484,18 +484,19 @@ void NCursesFrontend::PrintFileQueue()
 	{
 		for (FileInfo* fileInfo : nzbInfo->GetFileList())
 		{
-			if (fileNum >= m_queueScrollOffset && fileNum < m_queueScrollOffset + m_queueWinHeight -1)
+			if (nzbget_rs_dqh_ncurses_is_row_in_scroll_window(
+				fileNum, m_queueScrollOffset, m_queueWinHeight) != 0)
 			{
 				PrintFilename(fileInfo, lineNr++, fileNum == m_selectedQueueEntry);
 			}
 			fileNum++;
 
-			if (fileInfo->GetPaused())
-			{
-				pausedFiles++;
-				paused += fileInfo->GetRemainingSize();
-			}
-			remaining += fileInfo->GetRemainingSize();
+			nzbget_rs_dqh_ncurses_accum_file_queue_stats(
+				fileInfo->GetPaused() ? 1 : 0,
+				fileInfo->GetRemainingSize(),
+				&remaining,
+				&paused,
+				&pausedFiles);
 		}
 	}
 
@@ -587,7 +588,8 @@ void NCursesFrontend::PrintGroupQueue()
 		int i = 0;
 		for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
 		{
-			if (i >= m_queueScrollOffset && i < m_queueScrollOffset + m_queueWinHeight -1)
+			if (nzbget_rs_dqh_ncurses_is_row_in_scroll_window(
+				i, m_queueScrollOffset, m_queueWinHeight) != 0)
 			{
 				PrintGroupname(nzbInfo, calcLineNr++, false, true);
 			}
@@ -599,13 +601,17 @@ void NCursesFrontend::PrintGroupQueue()
 		i = 0;
 		for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
 		{
-			if (i >= m_queueScrollOffset && i < m_queueScrollOffset + m_queueWinHeight -1)
+			if (nzbget_rs_dqh_ncurses_is_row_in_scroll_window(
+				i, m_queueScrollOffset, m_queueWinHeight) != 0)
 			{
 				PrintGroupname(nzbInfo, lineNr++, i == m_selectedQueueEntry, false);
 			}
 			i++;
-			remaining += nzbInfo->GetRemainingSize();
-			paused += nzbInfo->GetPausedSize();
+			nzbget_rs_dqh_ncurses_accum_group_queue_stats(
+				nzbInfo->GetRemainingSize(),
+				nzbInfo->GetPausedSize(),
+				&remaining,
+				&paused);
 		}
 
 		NzbgetRsBuf headerBuf = nzbget_rs_ncurses_format_group_queue_header(
@@ -780,16 +786,17 @@ void NCursesFrontend::UpdateInput(int initialKey)
 			case 'e':
 			case 10: // return
 			case 13: // enter
-				if (queueSize > 0)
+			{
+				int nextWinPct = m_queueWindowPercentage;
+				if (nzbget_rs_dqh_ncurses_enter_edit_queue_win_pct(
+					queueSize, m_queueWindowPercentage, &nextWinPct) != 0)
 				{
 					m_inputMode = editQueue;
-					if (m_queueWindowPercentage == 0)
-					{
-						m_queueWindowPercentage = 50;
-					}
+					m_queueWindowPercentage = nextWinPct;
 					return;
 				}
 				break;
+			}
 			case 'r':
 				// Download rate
 				m_inputMode = downloadRate;
@@ -843,7 +850,7 @@ void NCursesFrontend::UpdateInput(int initialKey)
 				SetCurrentQueueEntry(0);
 				break;
 			case KEY_END:
-				SetCurrentQueueEntry(queueSize > 0 ? queueSize - 1 : 0);
+				SetCurrentQueueEntry(nzbget_rs_dqh_ncurses_last_queue_index(queueSize));
 				break;
 			case 'p':
 				// Key 'p' for pause
@@ -880,7 +887,7 @@ void NCursesFrontend::UpdateInput(int initialKey)
 			case 'b':
 				if (EditQueue(DownloadQueue::eaFileMoveBottom, 0))
 				{
-					SetCurrentQueueEntry(queueSize > 0 ? queueSize - 1 : 0);
+					SetCurrentQueueEntry(nzbget_rs_dqh_ncurses_last_queue_index(queueSize));
 				}
 				break;
 			}

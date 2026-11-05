@@ -248,7 +248,9 @@ int NZBGet::Phase1_Init(bool reload)
 
 	ProcessDirect();
 
-	if (g_Options->GetServerMode() && g_Options->GetSystemHealthCheck())
+	if (nzbget_rs_dqh_nzbget_should_run_system_health_check(
+		g_Options->GetServerMode() ? 1 : 0,
+		g_Options->GetSystemHealthCheck() ? 1 : 0) != 0)
 	{
 		m_systemHealth = std::make_unique<SystemHealth::Service>(
 			*g_Options,
@@ -405,10 +407,15 @@ void NZBGet::BootConfig()
 		printf("nzbget version: %s\n", Util::VersionRevision());
 		exit(0);
 	}
-	if (m_commandLineParser->GetPrintUsage() || m_commandLineParser->GetErrors() || g_ArgumentCount <= 1)
+	int bootExitCode = 0;
+	if (nzbget_rs_dqh_nzbget_classify_boot_usage_or_error(
+		m_commandLineParser->GetPrintUsage() ? 1 : 0,
+		m_commandLineParser->GetErrors() ? 1 : 0,
+		g_ArgumentCount,
+		&bootExitCode) != 0)
 	{
 		m_commandLineParser->PrintUsage(((const char**)(*g_Arguments))[0]);
-		exit(m_commandLineParser->GetPrintUsage() ? 0 : 1);
+		exit(bootExitCode);
 	}
 
 	debug("Reading options");
@@ -642,7 +649,9 @@ void NZBGet::StopFrontend()
 {
 	if (m_frontend)
 	{
-		if (!m_commandLineParser->GetRemoteClientMode() || m_stopped)
+		if (nzbget_rs_dqh_nzbget_should_stop_frontend_immediately(
+			m_commandLineParser->GetRemoteClientMode() ? 1 : 0,
+			m_stopped ? 1 : 0) != 0)
 		{
 			debug("Stopping Frontend");
 			m_frontend->Stop();

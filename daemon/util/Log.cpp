@@ -394,12 +394,19 @@ void Log::InitOptions()
 {
 	const char* messageType[] = { "INFO", "WARNING", "ERROR", "DEBUG", "DETAIL"};
 
-	if (!g_Options->GetRemoteClientMode() && !g_Options->GetDirectClientMode() &&
-		g_Options->GetWriteLog() != Options::wlNone && g_Options->GetLogFile())
+	int logFileAction = nzbget_rs_dqh_log_classify_init_logfile_action(
+		g_Options->GetRemoteClientMode() ? 1 : 0,
+		g_Options->GetDirectClientMode() ? 1 : 0,
+		(int)g_Options->GetWriteLog(),
+		(int)Options::wlNone,
+		(int)Options::wlReset,
+		g_Options->GetLogFile() ? 1 : 0,
+		g_Options->GetServerMode() ? 1 : 0);
+	if (logFileAction != 0)
 	{
 		UpdateLogPath(g_Options->GetLogFile());
 
-		if (g_Options->GetServerMode() && g_Options->GetWriteLog() == Options::wlReset)
+		if (logFileAction == 2)
 		{
 			g_Log->ResetLog();
 		}

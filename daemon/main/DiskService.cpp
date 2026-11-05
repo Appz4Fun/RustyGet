@@ -51,7 +51,8 @@ void DiskService::ServiceWork()
 {
 	debug("Disk service work");
 
-	if (g_Options->GetDiskSpace() > 0 && g_WorkState->GetDownloading())
+	if (nzbget_rs_dqh_disk_service_should_check_disk_space(
+		g_Options->GetDiskSpace(), g_WorkState->GetDownloading() ? 1 : 0) != 0)
 	{
 		// check free disk space every 1 second
 		CheckDiskSpace();
@@ -105,13 +106,21 @@ void DiskService::CheckRequiredDir()
 		Tokenizer tok(g_Options->GetRequiredDir(), ",;");
 		while (const char* dir = tok.Next())
 		{
-			if (!FileSystem::FileExists(dir) && !FileSystem::DirectoryExists(dir))
+			int shouldLogWaiting = 0;
+			int nextWaitingReported = m_waitingReported ? 1 : 0;
+			if (nzbget_rs_dqh_disk_service_eval_missing_required_dir(
+				FileSystem::FileExists(dir) ? 1 : 0,
+				FileSystem::DirectoryExists(dir) ? 1 : 0,
+				wasWaitingReported ? 1 : 0,
+				m_waitingReported ? 1 : 0,
+				&shouldLogWaiting,
+				&nextWaitingReported) != 0)
 			{
-				if (!wasWaitingReported)
+				if (shouldLogWaiting != 0)
 				{
 					info("Waiting for required directory %s", dir);
-					m_waitingReported = true;
 				}
+				m_waitingReported = nextWaitingReported != 0;
 				allExist = false;
 			}
 		}

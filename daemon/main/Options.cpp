@@ -232,14 +232,8 @@ void Options::ConfigWarn(const char* msg, ...)
 void Options::LocateOptionSrcPos(const char *optionName)
 {
 	OptEntry* optEntry = FindOption(optionName);
-	if (optEntry)
-	{
-		m_configLine = optEntry->GetLineNo();
-	}
-	else
-	{
-		m_configLine = 0;
-	}
+	m_configLine = nzbget_rs_dqh_options_resolve_locate_src_line(
+		optEntry ? 1 : 0, optEntry ? optEntry->GetLineNo() : 0);
 }
 
 void Options::InitDefaults()
@@ -926,10 +920,8 @@ const char* Options::GetOption(const char* optname)
 	OptEntry* optEntry = FindOption(optname);
 	if (optEntry)
 	{
-		if (optEntry->GetLineNo() > 0)
-		{
-			m_configLine = optEntry->GetLineNo();
-		}
+		m_configLine = nzbget_rs_dqh_options_update_config_line_on_get(
+			optEntry->GetLineNo(), m_configLine);
 		return optEntry->GetValue();
 	}
 	return nullptr;
@@ -1319,7 +1311,7 @@ void Options::CreateSchedulerTask(int id, const char* time, const char* weekDays
 
 		if (m_extender)
 		{
-			if (hours == -2)
+			if (nzbget_rs_dqh_options_is_every_hour_task(hours) != 0)
 			{
 				for (int everyHour = 0; everyHour < 24; everyHour++)
 				{

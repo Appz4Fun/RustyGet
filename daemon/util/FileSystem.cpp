@@ -307,7 +307,7 @@ CString FileSystem::MakeUniqueFilename(const char* destDir, const char* basename
 bool FileSystem::MoveFile(const char* srcFilename, const char* dstFilename)
 {
 	bool ok = rename(srcFilename, dstFilename) == 0;
-	if (!ok && errno == EXDEV)
+	if (nzbget_rs_dqh_fs_should_fallback_move_to_copy(ok ? 1 : 0, errno, EXDEV) != 0)
 	{
 		ok = CopyFile(srcFilename, dstFilename) && DeleteFile(srcFilename);
 	}
@@ -350,7 +350,10 @@ bool FileSystem::CopyFile(const char* srcFilename, const char* dstFilename)
 	}
 
 	infile.Close();
-	ok = outfile.Close() && ok && copied == FileSize(srcFilename);
+	bool closeOk = outfile.Close();
+	ok = closeOk && ok &&
+		nzbget_rs_dqh_fs_is_copied_file_valid(
+			closeOk ? 1 : 0, ok ? 1 : 0, copied, FileSize(srcFilename)) != 0;
 
 	if (!ok)
 	{

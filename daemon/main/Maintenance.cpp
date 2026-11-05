@@ -141,7 +141,7 @@ bool Maintenance::CheckUpdates(CString& updateInfo)
 
 	UpdateInfoScriptController::ExecuteScript(updateInfoScript, updateInfo);
 
-	return updateInfo.Length() > 0;
+	return nzbget_rs_dqh_maintenance_has_update_info(updateInfo.Length()) != 0;
 }
 
 bool Maintenance::ReadPackageInfoStr(const char* key, CString& value)

@@ -36423,3 +36423,209 @@ pub unsafe extern "C" fn nzbget_rs_dqh_post_capitalize_first_ascii(s: *mut c_cha
     }
 }
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupesearch_prepare_status_suffix(
+    rank_only: c_int,
+    history: c_int,
+) -> *const c_char {
+    crate::dupequeuehealth::dqh_dupesearch_prepare_status_suffix(rank_only != 0, history != 0)
+        .as_ptr() as *const c_char
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_dupesearch_visit_expand_queries(
+    name: *const c_char,
+    name_len: usize,
+    ctx: *mut std::ffi::c_void,
+    cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, usize)>,
+) {
+    let Some(cb) = cb else {
+        return;
+    };
+    let n = if name.is_null() || name_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(name as *const u8, name_len)
+    };
+    crate::dupequeuehealth::dqh_dupesearch_visit_expand_queries(n, |q| {
+        cb(ctx, q.as_ptr() as *const c_char, q.len());
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_newznab_format_query_label(
+    keys: *const *const c_char,
+    vals: *const *const c_char,
+    count: usize,
+) -> RsBuf {
+    if keys.is_null() || vals.is_null() || count == 0 {
+        return into_buf(Vec::new());
+    }
+    let mut k_vec = Vec::with_capacity(count);
+    let mut v_vec = Vec::with_capacity(count);
+    for i in 0..count {
+        let kp = *keys.add(i);
+        let vp = *vals.add(i);
+        k_vec.push(if kp.is_null() {
+            &[][..]
+        } else {
+            CStr::from_ptr(kp).to_bytes()
+        });
+        v_vec.push(if vp.is_null() {
+            &[][..]
+        } else {
+            CStr::from_ptr(vp).to_bytes()
+        });
+    }
+    into_buf(crate::dupequeuehealth::dqh_newznab_format_query_label(
+        &k_vec, &v_vec,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_nntp_health_format_bracketed_id(
+    message_id: *const c_char,
+    len: usize,
+) -> RsBuf {
+    let mid = if message_id.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(message_id as *const u8, len)
+    };
+    into_buf(crate::dupequeuehealth::dqh_nntp_health_format_bracketed_id(
+        mid,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_nntp_health_format_stat_batch(
+    ids: *const *const c_char,
+    lens: *const usize,
+    count: usize,
+) -> RsBuf {
+    if ids.is_null() || lens.is_null() || count == 0 {
+        return into_buf(Vec::new());
+    }
+    let mut slices = Vec::with_capacity(count);
+    for i in 0..count {
+        let p = *ids.add(i);
+        let l = *lens.add(i);
+        slices.push(if p.is_null() || l == 0 {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts(p as *const u8, l)
+        });
+    }
+    into_buf(crate::dupequeuehealth::dqh_nntp_health_format_stat_batch(
+        &slices,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_queue_coord_stream_repair_queue_msg_fmt(
+    is_failure: c_int,
+) -> *const c_char {
+    crate::dupequeuehealth::dqh_queue_coord_stream_repair_queue_msg_fmt(is_failure != 0).as_ptr()
+        as *const c_char
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_queue_coord_select_health_delete_action(
+    health_check: c_int,
+    hc_park: c_int,
+    ea_group_park_delete: c_int,
+    ea_group_delete: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_queue_coord_select_health_delete_action(
+        health_check,
+        hc_park,
+        ea_group_park_delete,
+        ea_group_delete,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_queue_coord_max_i64_slice(
+    values: *const i64,
+    len: usize,
+) -> i64 {
+    let slice = if values.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(values, len)
+    };
+    crate::dupequeuehealth::dqh_queue_coord_max_i64_slice(slice)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_queue_coord_projected_health_rel_str(
+    far_below: c_int,
+) -> *const c_char {
+    crate::dupequeuehealth::dqh_queue_coord_projected_health_rel_str(far_below != 0).as_ptr()
+        as *const c_char
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_queue_coord_partly_alive_rel_str(
+    proj_below_crit: c_int,
+) -> *const c_char {
+    crate::dupequeuehealth::dqh_queue_coord_partly_alive_rel_str(proj_below_crit != 0).as_ptr()
+        as *const c_char
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_nzb_param_decide_set_action(
+    empty_val: c_int,
+    found: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_nzb_param_decide_set_action(empty_val != 0, found != 0)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupecoord_is_valid_disk_file(
+    is_side_file: c_int,
+    is_dir: c_int,
+    file_size: i64,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_dupecoord_is_valid_disk_file(
+        is_side_file != 0,
+        is_dir != 0,
+        file_size,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupecoord_select_other_dupe_delete_action(
+    in_post_process: c_int,
+    ea_post_delete: c_int,
+    delete_action: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_dupecoord_select_other_dupe_delete_action(
+        in_post_process != 0,
+        ea_post_delete,
+        delete_action,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_queue_editor_delete_entry_msg_kind(
+    deleting: c_int,
+    mk_detail: c_int,
+    mk_info: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_queue_editor_delete_entry_msg_kind(
+        deleting != 0,
+        mk_detail,
+        mk_info,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_scanner_missed_articles_msg_kind(
+    is_warn: c_int,
+    mk_warning: c_int,
+    mk_detail: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_scanner_missed_articles_msg_kind(is_warn != 0, mk_warning, mk_detail)
+}
+

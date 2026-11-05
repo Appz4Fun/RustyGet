@@ -45,15 +45,17 @@ void NzbParameterList::SetParameter(const char* name, const char* value)
 			return nzbget_rs_dqh_bytes_eq_ignore_case(parameter.GetName(), name) != 0;
 		});
 
-	if (emptyVal && pos != end())
+	int action = nzbget_rs_dqh_nzb_param_decide_set_action(
+		emptyVal ? 1 : 0, pos != end() ? 1 : 0);
+	if (action == 1)
 	{
 		erase(pos);
 	}
-	else if (pos != end())
+	else if (action == 2)
 	{
 		pos->SetValue(value);
 	}
-	else if (!emptyVal)
+	else if (action == 3)
 	{
 		emplace_back(name, value);
 	}

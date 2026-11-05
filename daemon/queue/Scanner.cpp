@@ -672,7 +672,11 @@ bool Scanner::AddFileToQueue(
 				int presentArticles = 0;
 				bool isWarn = nzbget_rs_tpr_scanner_eval_missed_articles_log(
 					fileInfo->GetTotalArticles(), fileInfo->GetMissedArticles(), sev, &presentArticles) != 0;
-				nzbInfo->PrintMessage(isWarn ? Message::mkWarning : Message::mkDetail,
+				nzbInfo->PrintMessage(
+					(Message::EKind)nzbget_rs_dqh_scanner_missed_articles_msg_kind(
+						isWarn ? 1 : 0,
+						(int)Message::mkWarning,
+						(int)Message::mkDetail),
 					"Collection %s lists only %i of the %i articles of %s: the missing ones count as failed",
 					nzbInfo->GetName(), presentArticles,
 					fileInfo->GetTotalArticles(), fileInfo->GetFilename());

@@ -39,11 +39,11 @@ namespace
 // list it without them
 std::string Bracketed(const std::string& messageId)
 {
-	if (nzbget_rs_snh_nntp_health_is_bracketed(messageId.c_str(), messageId.size()))
-	{
-		return messageId;
-	}
-	return "<" + messageId + ">";
+	NzbgetRsBuf buf = nzbget_rs_dqh_nntp_health_format_bracketed_id(
+		messageId.data(), messageId.size());
+	std::string out(buf.data ? buf.data : "", buf.len);
+	nzbget_rs_free(buf);
+	return out;
 }
 
 }
@@ -151,11 +151,19 @@ std::vector<Answer> NntpHealthServer::Exchange(const std::vector<DonorHealth::Re
 	}
 
 	// all STATs in one write, then their replies in order (RFC 3977 section 3.5)
-	std::string commands;
+	std::vector<const char*> statIds;
+	std::vector<size_t> statLens;
+	statIds.reserve(batch.size());
+	statLens.reserve(batch.size());
 	for (const DonorHealth::Request& request : batch)
 	{
-		commands += "STAT " + Bracketed(request.messageId) + "\r\n";
+		statIds.push_back(request.messageId.data());
+		statLens.push_back(request.messageId.size());
 	}
+	NzbgetRsBuf cmdBuf = nzbget_rs_dqh_nntp_health_format_stat_batch(
+		statIds.data(), statLens.data(), statIds.size());
+	std::string commands(cmdBuf.data ? cmdBuf.data : "", cmdBuf.len);
+	nzbget_rs_free(cmdBuf);
 	if (!connection->Send(commands.c_str(), (int)commands.size()))
 	{
 		release.broken = true;

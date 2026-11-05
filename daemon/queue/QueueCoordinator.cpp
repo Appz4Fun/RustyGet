@@ -1385,9 +1385,9 @@ void QueueCoordinator::DeleteFileInfo(DownloadQueue* downloadQueue, FileInfo* fi
 			DupeStreamRepair::BuildRepairJob(fileInfo, filename.c_str()))
 		{
 			nzbInfo->PrintMessage(Message::mkInfo,
-				fileStatus == CompletedFile::cfFailure ?
-					"Queueing stream repair of %s (no article available) from duplicate collections" :
-					"Queueing stream repair of %s from duplicate collections", filename.c_str());
+				nzbget_rs_dqh_queue_coord_stream_repair_queue_msg_fmt(
+					fileStatus == CompletedFile::cfFailure ? 1 : 0),
+				filename.c_str());
 
 			// live mode: repair this file's holes now, while the rest of the
 			// collection still downloads. Only when other files remain queued -
@@ -1850,7 +1850,11 @@ void QueueCoordinator::CheckHealth(DownloadQueue* downloadQueue, FileInfo* fileI
 			nzbget_rs_dqh_prepost_permille_to_percent(fileInfo->GetNzbInfo()->CalcCriticalHealth(true)));
 		fileInfo->GetNzbInfo()->SetDeleteStatus(NzbInfo::dsHealth);
 		downloadQueue->EditEntry(fileInfo->GetNzbInfo()->GetId(),
-			g_Options->GetHealthCheck() == Options::hcPark ? DownloadQueue::eaGroupParkDelete : DownloadQueue::eaGroupDelete,
+			(DownloadQueue::EEditAction)nzbget_rs_dqh_queue_coord_select_health_delete_action(
+				(int)g_Options->GetHealthCheck(),
+				(int)Options::hcPark,
+				(int)DownloadQueue::eaGroupParkDelete,
+				(int)DownloadQueue::eaGroupDelete),
 			nullptr);
 	}
 	else if (g_Options->GetHealthCheck() == Options::hcDupe)
@@ -1914,11 +1918,14 @@ bool QueueCoordinator::CertainlyParless(NzbInfo* nzbInfo)
 
 bool QueueCoordinator::HasSizeTwin(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 {
-	int64 largest = 0;
+	std::vector<int64_t> fileSizes;
+	fileSizes.reserve(nzbInfo->GetFileList()->size());
 	for (FileInfo* fileInfo : nzbInfo->GetFileList())
 	{
-		largest = std::max(largest, fileInfo->GetSize());
+		fileSizes.push_back(fileInfo->GetSize());
 	}
+	int64 largest = nzbget_rs_dqh_queue_coord_max_i64_slice(
+		fileSizes.data(), fileSizes.size());
 	if (largest <= 0)
 	{
 		return false;
@@ -2224,7 +2231,7 @@ void QueueCoordinator::CheckDeadDownload(DownloadQueue* downloadQueue, NzbInfo* 
 				"%s critical %.1f%%, and no duplicate in history to fail over to (%s)",
 				nzbInfo->GetName(), own, tried,
 				nzbget_rs_dqh_prepost_permille_to_percent(projected),
-				farBelow ? "under half the" : "below",
+				nzbget_rs_dqh_queue_coord_projected_health_rel_str(farBelow ? 1 : 0),
 				nzbget_rs_dqh_prepost_permille_to_percent(critical),
 				g_DupeCoordinator->NoBackupReason(downloadQueue, nzbInfo).c_str());
 			nzbInfo->SetDeleteStatus(NzbInfo::dsHealth);
@@ -2276,7 +2283,7 @@ void QueueCoordinator::CheckDeadDownload(DownloadQueue* downloadQueue, NzbInfo* 
 			"%.1f%% %s critical %.1f%%; the duplicate is %.0f%% alive",
 			nzbInfo->GetName(), backup->GetNzbInfo()->GetName(), own, tried,
 			nzbget_rs_dqh_prepost_permille_to_percent(projected),
-			projBelowCrit ? "below" : "too close to",
+			nzbget_rs_dqh_queue_coord_partly_alive_rel_str(projBelowCrit),
 			nzbget_rs_dqh_prepost_permille_to_percent(critical),
 			nzbget_rs_dqh_prepost_permille_to_percent(backupAlive));
 	}

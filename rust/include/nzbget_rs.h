@@ -6091,6 +6091,28 @@ uint32_t nzbget_rs_dqh_article_writer_step_file_crc(
     int segment_size, int* out_first_article);
 int nzbget_rs_dqh_rename_ctrl_classify_run_outcome(int is_stopped, int renamed_count);
 void nzbget_rs_dqh_post_capitalize_first_ascii(char* s);
+const char* nzbget_rs_dqh_dupesearch_prepare_status_suffix(int rank_only, int history);
+void nzbget_rs_dqh_dupesearch_visit_expand_queries(
+    const char* name, size_t name_len, void* ctx,
+    void (*cb)(void* ctx, const char* q_ptr, size_t q_len));
+NzbgetRsBuf nzbget_rs_dqh_newznab_format_query_label(
+    const char* const* keys, const char* const* vals, size_t count);
+NzbgetRsBuf nzbget_rs_dqh_nntp_health_format_bracketed_id(
+    const char* message_id, size_t len);
+NzbgetRsBuf nzbget_rs_dqh_nntp_health_format_stat_batch(
+    const char* const* ids, const size_t* lens, size_t count);
+const char* nzbget_rs_dqh_queue_coord_stream_repair_queue_msg_fmt(int is_failure);
+int nzbget_rs_dqh_queue_coord_select_health_delete_action(
+    int health_check, int hc_park, int ea_group_park_delete, int ea_group_delete);
+int64_t nzbget_rs_dqh_queue_coord_max_i64_slice(const int64_t* values, size_t len);
+const char* nzbget_rs_dqh_queue_coord_projected_health_rel_str(int far_below);
+const char* nzbget_rs_dqh_queue_coord_partly_alive_rel_str(int proj_below_crit);
+int nzbget_rs_dqh_nzb_param_decide_set_action(int empty_val, int found);
+int nzbget_rs_dqh_dupecoord_is_valid_disk_file(int is_side_file, int is_dir, int64_t file_size);
+int nzbget_rs_dqh_dupecoord_select_other_dupe_delete_action(
+    int in_post_process, int ea_post_delete, int delete_action);
+int nzbget_rs_dqh_queue_editor_delete_entry_msg_kind(int deleting, int mk_detail, int mk_info);
+int nzbget_rs_dqh_scanner_missed_articles_msg_kind(int is_warn, int mk_warning, int mk_detail);
 
 #include "nzbget_tls_cipher.h"
 

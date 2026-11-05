@@ -207,11 +207,19 @@ std::vector<Newznab::Result> Newznab::Search(const std::string& base, const std:
 	{
 		for (size_t index = next++; index < queries.size(); index = next++)
 		{
-			std::string label;
+			std::vector<const char*> lKeys;
+			std::vector<const char*> lVals;
+			lKeys.reserve(queries[index].size());
+			lVals.reserve(queries[index].size());
 			for (const auto& param : queries[index])
 			{
-				label += (label.empty() ? "" : " ") + param.first + "=" + param.second;
+				lKeys.push_back(param.first.c_str());
+				lVals.push_back(param.second.c_str());
 			}
+			NzbgetRsBuf lblBuf = nzbget_rs_dqh_newznab_format_query_label(
+				lKeys.data(), lVals.data(), lKeys.size());
+			std::string label(lblBuf.data ? lblBuf.data : "", lblBuf.len);
+			nzbget_rs_free(lblBuf);
 
 			for (int page = 0; page < MaxPages; page++)
 			{

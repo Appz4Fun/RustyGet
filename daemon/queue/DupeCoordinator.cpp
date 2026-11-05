@@ -66,8 +66,10 @@ bool DupeCoordinator::FilesOnDisk(NzbInfo* nzbInfo)
 			dir, PATH_SEPARATOR, filename);
 		BString<1024> path = pathBuf.data ? pathBuf.data : "";
 		nzbget_rs_free(pathBuf);
-		if (!QueueCoordinator::SideFile(filename) && !FileSystem::DirectoryExists(path) &&
-			FileSystem::FileSize(path) > 0)
+		if (nzbget_rs_dqh_dupecoord_is_valid_disk_file(
+			QueueCoordinator::SideFile(filename) ? 1 : 0,
+			FileSystem::DirectoryExists(path) ? 1 : 0,
+			FileSystem::FileSize(path)) != 0)
 		{
 			return true;
 		}
@@ -542,8 +544,12 @@ void DupeCoordinator::NzbCompleted(DownloadQueue* downloadQueue, NzbInfo* nzbInf
 		}
 		for (const auto& other : others)
 		{
-			downloadQueue->EditEntry(other.first, other.second ? DownloadQueue::eaPostDelete :
-				deleteAction, nullptr);
+			downloadQueue->EditEntry(other.first,
+				(DownloadQueue::EEditAction)nzbget_rs_dqh_dupecoord_select_other_dupe_delete_action(
+					other.second ? 1 : 0,
+					(int)DownloadQueue::eaPostDelete,
+					(int)deleteAction),
+				nullptr);
 		}
 	}
 }

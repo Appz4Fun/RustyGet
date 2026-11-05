@@ -41,8 +41,10 @@ ArticleFetcher::FetchedArticle DupeIdentity::FetchArticle(const NzbSummary::Head
     for (const std::string& name : names) groups.emplace_back(name.c_str());
     ArticleFetcher fetcher;
     std::atomic<bool> done{false};
-    std::string id = head.messageId;
-    if (id.front() != '<' || id.back() != '>') id = "<" + id + ">";
+    NzbgetRsBuf idBuf = nzbget_rs_dqh_nntp_health_format_bracketed_id(
+        head.messageId.data(), head.messageId.size());
+    std::string id(idBuf.data ? idBuf.data : "", idBuf.len);
+    nzbget_rs_free(idBuf);
     std::thread worker([&]() {
         try { article = fetch ? fetch(id, groups) : fetcher.Fetch(id.c_str(), groups); }
         catch (...) { article = ArticleFetcher::FetchedArticle(); }

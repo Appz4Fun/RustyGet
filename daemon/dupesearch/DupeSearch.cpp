@@ -507,7 +507,8 @@ bool DupeSearch::PrepareNative(DownloadQueue* downloadQueue, int nzbId, Job& job
     job.failed = history;
     job.rankOnly = rankOnly;
     pick->PrintMessage(Message::mkInfo, "DupeSearch: searching duplicates of %s (key %s)%s",
-        pick->GetName(), key.c_str(), rankOnly ? ": ranking new backups" : history ? ": it failed before its search was due" : "");
+        pick->GetName(), key.c_str(),
+        nzbget_rs_dqh_dupesearch_prepare_status_suffix(rankOnly ? 1 : 0, history ? 1 : 0));
     return true;
 }
 
@@ -690,27 +691,26 @@ void DupeSearch::Expand(const Job& job, const NzbSummary& pick, const std::vecto
     }
     if (IsStopped() || budget.Spent() || Util::CurrentTime()>=deadline) return;
     std::vector<Newznab::Params> queries;
-    NzbgetRsBuf raw=nzbget_rs_dupe_queries(job.name.data(),job.name.size());
-    size_t at=0;
-    auto number=[&]() -> uint32_t {
-        if (at>raw.len || raw.len-at<4) { at=raw.len; return 0; }
-        uint32_t value=0;
-        for (int i=0;i<4;i++) value|=(uint32_t)(unsigned char)raw.data[at++]<<(8*i);
-        return value;
-    };
-    uint32_t count=number();
     auto strict=Newznab::BuildQueries(job.name,pick.meta.count("imdb")?pick.meta.at("imdb"):"",pick.meta.count("tvdb")?pick.meta.at("tvdb"):"");
-    for (uint32_t i=0;i<count && i<8;i++)
+    struct ExpandQueryCtx
     {
-        uint32_t len=number();
-        if (at>raw.len || len>raw.len-at) break;
-        std::string q(raw.data+at,len);at+=len;
-        bool duplicate=std::any_of(strict.begin(),strict.end(),[&](const Newznab::Params& params) {
-            return std::any_of(params.begin(),params.end(),[&](const auto& p) {return p.first=="q" && p.second==q;});
+        std::vector<Newznab::Params>& queries;
+        const std::vector<Newznab::Params>& strict;
+    } expandCtx{queries, strict};
+    nzbget_rs_dqh_dupesearch_visit_expand_queries(
+        job.name.data(), job.name.size(), &expandCtx,
+        [](void* ctx, const char* qPtr, size_t qLen)
+        {
+            auto* c = static_cast<ExpandQueryCtx*>(ctx);
+            std::string q(qPtr, qLen);
+            bool duplicate = std::any_of(c->strict.begin(), c->strict.end(), [&](const Newznab::Params& params) {
+                return std::any_of(params.begin(), params.end(), [&](const auto& p) { return p.first == "q" && p.second == q; });
+            });
+            if (!duplicate)
+            {
+                c->queries.push_back({{"t", "search"}, {"q", q}});
+            }
         });
-        if (!q.empty() && !duplicate) queries.push_back({{"t","search"},{"q",q}});
-    }
-    nzbget_rs_free(raw);
     Newznab::SearchStats searchStats;
     auto wider=Newznab::Search(g_Options->GetDupeSearchUrl(),g_Options->GetDupeSearchApiKey(),queries,deadline,&searchStats);
     queryStats.queries += searchStats.queries;

@@ -3396,6 +3396,184 @@ pub fn dqh_post_capitalize_first_ascii(buf: &mut [u8]) {
     }
 }
 
+/// Returns the NUL-terminated status suffix for `DupeSearch::PrepareNative` search log message.
+pub fn dqh_dupesearch_prepare_status_suffix(rank_only: bool, history: bool) -> &'static [u8] {
+    if rank_only {
+        b": ranking new backups\0"
+    } else if history {
+        b": it failed before its search was due\0"
+    } else {
+        b"\0"
+    }
+}
+
+/// Visits up to 8 non-empty lenient search queries for `DupeSearch::Expand`.
+pub fn dqh_dupesearch_visit_expand_queries<F: FnMut(&[u8])>(name: &[u8], mut cb: F) {
+    for q in crate::dupewatch::lenient_queries(name).into_iter().take(8) {
+        if !q.is_empty() {
+            cb(&q);
+        }
+    }
+}
+
+/// Formats `Newznab::Search` query label (`"key1=val1 key2=val2"`).
+pub fn dqh_newznab_format_query_label(keys: &[&[u8]], vals: &[&[u8]]) -> Vec<u8> {
+    let n = keys.len().min(vals.len());
+    let mut out = Vec::new();
+    for i in 0..n {
+        if !out.is_empty() {
+            out.push(b' ');
+        }
+        out.extend_from_slice(keys[i]);
+        out.push(b'=');
+        out.extend_from_slice(vals[i]);
+    }
+    out
+}
+
+/// Formats an NNTP message-id in angle brackets (`<id>`) if not already bracketed.
+pub fn dqh_nntp_health_format_bracketed_id(message_id: &[u8]) -> Vec<u8> {
+    if message_id.first() == Some(&b'<') && message_id.last() == Some(&b'>') {
+        message_id.to_vec()
+    } else {
+        let mut out = Vec::with_capacity(message_id.len() + 2);
+        out.push(b'<');
+        out.extend_from_slice(message_id);
+        out.push(b'>');
+        out
+    }
+}
+
+/// Formats a pipelined batch of `"STAT <id>\r\n"` commands for `NntpHealthServer::Exchange`.
+pub fn dqh_nntp_health_format_stat_batch(ids: &[&[u8]]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(ids.len() * 48);
+    for id in ids {
+        out.extend_from_slice(b"STAT ");
+        if id.first() == Some(&b'<') && id.last() == Some(&b'>') {
+            out.extend_from_slice(id);
+        } else {
+            out.push(b'<');
+            out.extend_from_slice(id);
+            out.push(b'>');
+        }
+        out.extend_from_slice(b"\r\n");
+    }
+    out
+}
+
+/// Returns the NUL-terminated format string for `QueueCoordinator::DeleteFileInfo` stream repair queueing log.
+pub fn dqh_queue_coord_stream_repair_queue_msg_fmt(is_failure: bool) -> &'static [u8] {
+    if is_failure {
+        b"Queueing stream repair of %s (no article available) from duplicate collections\0"
+    } else {
+        b"Queueing stream repair of %s from duplicate collections\0"
+    }
+}
+
+/// Selects the edit action (`ea_group_park_delete` vs `ea_group_delete`) for `QueueCoordinator::CheckHealth`.
+pub fn dqh_queue_coord_select_health_delete_action(
+    health_check: i32,
+    hc_park: i32,
+    ea_group_park_delete: i32,
+    ea_group_delete: i32,
+) -> i32 {
+    if health_check == hc_park {
+        ea_group_park_delete
+    } else {
+        ea_group_delete
+    }
+}
+
+/// Returns the maximum positive `i64` in `values` (floor `0`) for `QueueCoordinator::HasSizeTwin`.
+pub fn dqh_queue_coord_max_i64_slice(values: &[i64]) -> i64 {
+    let mut largest = 0i64;
+    for &v in values {
+        if v > largest {
+            largest = v;
+        }
+    }
+    largest
+}
+
+/// Returns the NUL-terminated relation string (`"under half the"` vs `"below"`) for
+/// `QueueCoordinator::CheckDeadDownload` no-backup parking warning.
+pub fn dqh_queue_coord_projected_health_rel_str(far_below: bool) -> &'static [u8] {
+    if far_below {
+        b"under half the\0"
+    } else {
+        b"below\0"
+    }
+}
+
+/// Returns the NUL-terminated relation string (`"below"` vs `"too close to"`) for
+/// `QueueCoordinator::CheckDeadDownload` partly-alive failover warning.
+pub fn dqh_queue_coord_partly_alive_rel_str(proj_below_crit: bool) -> &'static [u8] {
+    if proj_below_crit {
+        b"below\0"
+    } else {
+        b"too close to\0"
+    }
+}
+
+/// Decides the parameter mutation action for `NzbParameterList::SetParameter`:
+/// `1` = erase existing, `2` = update existing in-place, `3` = append new, `0` = no-op.
+pub fn dqh_nzb_param_decide_set_action(empty_val: bool, found: bool) -> i32 {
+    if empty_val && found {
+        1
+    } else if found {
+        2
+    } else if !empty_val {
+        3
+    } else {
+        0
+    }
+}
+
+/// Returns true when a directory entry in `DupeCoordinator::FilesOnDisk` is a valid non-side regular file (`> 0` bytes).
+pub fn dqh_dupecoord_is_valid_disk_file(is_side_file: bool, is_dir: bool, file_size: i64) -> bool {
+    !is_side_file && !is_dir && file_size > 0
+}
+
+/// Selects the edit action (`ea_post_delete` vs `delete_action`) for other queued duplicates
+/// in `DupeCoordinator::NzbCompleted`.
+pub fn dqh_dupecoord_select_other_dupe_delete_action(
+    in_post_process: bool,
+    ea_post_delete: i32,
+    delete_action: i32,
+) -> i32 {
+    if in_post_process {
+        ea_post_delete
+    } else {
+        delete_action
+    }
+}
+
+/// Selects the message kind (`mk_detail` vs `mk_info`) for `QueueEditor::DeleteEntry`.
+pub fn dqh_queue_editor_delete_entry_msg_kind(
+    deleting: bool,
+    mk_detail: i32,
+    mk_info: i32,
+) -> i32 {
+    if deleting {
+        mk_detail
+    } else {
+        mk_info
+    }
+}
+
+/// Selects the message kind (`mk_warning` vs `mk_detail`) for `Scanner::AddFileToQueue` missed articles log.
+pub fn dqh_scanner_missed_articles_msg_kind(
+    is_warn: bool,
+    mk_warning: i32,
+    mk_detail: i32,
+) -> i32 {
+    if is_warn {
+        mk_warning
+    } else {
+        mk_detail
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4648,5 +4826,85 @@ mod tests {
             dqh_post_capitalize_first_ascii(&mut s);
             assert_eq!(&s, b"Move for test");
         }
+        assert_eq!(
+            dqh_dupesearch_prepare_status_suffix(true, false),
+            b": ranking new backups\0"
+        );
+        assert_eq!(
+            dqh_dupesearch_prepare_status_suffix(false, true),
+            b": it failed before its search was due\0"
+        );
+        assert_eq!(dqh_dupesearch_prepare_status_suffix(false, false), b"\0");
+        {
+            let mut qs = Vec::new();
+            dqh_dupesearch_visit_expand_queries(b"Show.Name.S01E02.1080p.WEB-DL", |q| {
+                qs.push(q.to_vec())
+            });
+            assert!(!qs.is_empty());
+        }
+        assert_eq!(
+            dqh_newznab_format_query_label(&[b"t", b"q"], &[b"search", b"movie"]),
+            b"t=search q=movie"
+        );
+        assert_eq!(
+            dqh_nntp_health_format_bracketed_id(b"abc@host"),
+            b"<abc@host>"
+        );
+        assert_eq!(
+            dqh_nntp_health_format_bracketed_id(b"<abc@host>"),
+            b"<abc@host>"
+        );
+        assert_eq!(
+            dqh_nntp_health_format_stat_batch(&[b"id1@h", b"<id2@h>"]),
+            b"STAT <id1@h>\r\nSTAT <id2@h>\r\n"
+        );
+        assert_eq!(
+            dqh_queue_coord_stream_repair_queue_msg_fmt(true),
+            b"Queueing stream repair of %s (no article available) from duplicate collections\0"
+        );
+        assert_eq!(
+            dqh_queue_coord_stream_repair_queue_msg_fmt(false),
+            b"Queueing stream repair of %s from duplicate collections\0"
+        );
+        assert_eq!(
+            dqh_queue_coord_select_health_delete_action(2, 2, 10, 20),
+            10
+        );
+        assert_eq!(
+            dqh_queue_coord_select_health_delete_action(1, 2, 10, 20),
+            20
+        );
+        assert_eq!(dqh_queue_coord_max_i64_slice(&[-5, 100, 42, 250]), 250);
+        assert_eq!(dqh_queue_coord_max_i64_slice(&[]), 0);
+        assert_eq!(
+            dqh_queue_coord_projected_health_rel_str(true),
+            b"under half the\0"
+        );
+        assert_eq!(dqh_queue_coord_projected_health_rel_str(false), b"below\0");
+        assert_eq!(dqh_queue_coord_partly_alive_rel_str(true), b"below\0");
+        assert_eq!(
+            dqh_queue_coord_partly_alive_rel_str(false),
+            b"too close to\0"
+        );
+        assert_eq!(dqh_nzb_param_decide_set_action(true, true), 1);
+        assert_eq!(dqh_nzb_param_decide_set_action(false, true), 2);
+        assert_eq!(dqh_nzb_param_decide_set_action(false, false), 3);
+        assert_eq!(dqh_nzb_param_decide_set_action(true, false), 0);
+        assert!(dqh_dupecoord_is_valid_disk_file(false, false, 1024));
+        assert!(!dqh_dupecoord_is_valid_disk_file(true, false, 1024));
+        assert!(!dqh_dupecoord_is_valid_disk_file(false, true, 1024));
+        assert!(!dqh_dupecoord_is_valid_disk_file(false, false, 0));
+        assert_eq!(
+            dqh_dupecoord_select_other_dupe_delete_action(true, 11, 22),
+            11
+        );
+        assert_eq!(
+            dqh_dupecoord_select_other_dupe_delete_action(false, 11, 22),
+            22
+        );
+        assert_eq!(dqh_queue_editor_delete_entry_msg_kind(true, 4, 0), 4);
+        assert_eq!(dqh_queue_editor_delete_entry_msg_kind(false, 4, 0), 0);
+        assert_eq!(dqh_scanner_missed_articles_msg_kind(true, 1, 4), 1);
+        assert_eq!(dqh_scanner_missed_articles_msg_kind(false, 1, 4), 4);
     }
 }

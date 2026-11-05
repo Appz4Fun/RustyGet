@@ -171,7 +171,10 @@ void QueueEditor::DeleteEntry(FileInfo* fileInfo)
 	if (!fileInfo->GetDeleted())
 	{
 		fileInfo->GetNzbInfo()->PrintMessage(
-			fileInfo->GetNzbInfo()->GetDeleting() ? Message::mkDetail : Message::mkInfo,
+			(Message::EKind)nzbget_rs_dqh_queue_editor_delete_entry_msg_kind(
+				fileInfo->GetNzbInfo()->GetDeleting() ? 1 : 0,
+				(int)Message::mkDetail,
+				(int)Message::mkInfo),
 			"Deleting file %s from download queue", fileInfo->GetFilename());
 		g_QueueCoordinator->DeleteQueueEntry(m_downloadQueue, fileInfo);
 	}

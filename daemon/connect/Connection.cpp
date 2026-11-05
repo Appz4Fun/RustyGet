@@ -102,7 +102,8 @@ Connection::Connection(const char* host, int port, bool tls) :
 {
 	debug("Creating Connection");
 
-	m_readBuf.Reserve(CONNECTION_READBUFFER_SIZE + 1 + DECODE_SLACK);
+	m_readBuf.Reserve(nzbget_rs_dqh_conn_calc_read_buffer_cap(
+		CONNECTION_READBUFFER_SIZE, DECODE_SLACK));
 #ifndef DISABLE_TLS
 	m_certVerifLevel = Options::ECertVerifLevel::cvStrict;
 #endif
@@ -120,7 +121,8 @@ Connection::Connection(SOCKET socket, bool tls)
 	m_bufAvail = 0;
 	m_timeout = 60;
 	m_suppressErrors = true;
-	m_readBuf.Reserve(CONNECTION_READBUFFER_SIZE + 1 + DECODE_SLACK);
+	m_readBuf.Reserve(nzbget_rs_dqh_conn_calc_read_buffer_cap(
+		CONNECTION_READBUFFER_SIZE, DECODE_SLACK));
 #ifndef DISABLE_TLS
 	m_tlsSocket = nullptr;
 	m_tlsError = false;
@@ -239,7 +241,9 @@ bool Connection::Bind()
 		addr_hints.ai_socktype = SOCK_STREAM;
 		addr_hints.ai_flags = AI_PASSIVE;    // For wildcard IP address
 
-		BString<100> portStr("%d", m_port);
+		NzbgetRsBuf portStrBuf = nzbget_rs_dqh_conn_format_port_str(m_port);
+		BString<100> portStr("%s", portStrBuf.data ? portStrBuf.data : "0");
+		nzbget_rs_free(portStrBuf);
 
 		int res = getaddrinfo(m_host.c_str(), portStr, &addr_hints, &addr_list);
 		if (res != 0)
@@ -432,7 +436,7 @@ char* Connection::ReadLine(char* buffer, int size, int* bytesReadOut)
 	}
 	*inpBuffer = '\0';
 
-	m_bufAvail = bufAvail > 0 ? bufAvail : 0; // copy back to member
+	m_bufAvail = nzbget_rs_dqh_conn_clamp_buf_avail(bufAvail); // copy back to member
 	m_bufPtr = bufPtr; // copy back to member
 
 	if (bytesReadOut)
@@ -609,7 +613,9 @@ bool Connection::DoConnect()
 			(int)m_ipVersion, (int)ipV4, (int)ipV6, AF_INET, AF_INET6, AF_UNSPEC);
 		addr_hints.ai_socktype = SOCK_STREAM;
 
-		BString<100> portStr("%d", m_port);
+		NzbgetRsBuf portStrBuf = nzbget_rs_dqh_conn_format_port_str(m_port);
+		BString<100> portStr("%s", portStrBuf.data ? portStrBuf.data : "0");
+		nzbget_rs_free(portStrBuf);
 
 		// Optimizer probes resolve in a bounded owned child, preserving m_host
 		// for TLS SNI/certificate validation. AI_NUMERICHOST never queries DNS.
@@ -950,14 +956,17 @@ void Connection::ReportError(const char* msgPrefix, const char* msgArg, bool pri
 			printErrMsg = strerror(errCode);
 		}
 
+		NzbgetRsBuf formattedErr = nzbget_rs_dqh_conn_format_report_err_with_code(
+			*errPrefix, errCode, (const char*)printErrMsg);
 		if (m_suppressErrors)
 		{
-			debug("%s: Error %i - %s", *errPrefix, errCode, (const char*)printErrMsg);
+			debug("%s", formattedErr.data ? formattedErr.data : "");
 		}
 		else
 		{
-			PrintError(BString<1024>("%s: Error %i - %s", *errPrefix, errCode, (const char*)printErrMsg));
+			PrintError(formattedErr.data ? formattedErr.data : "");
 		}
+		nzbget_rs_free(formattedErr);
 	}
 	else
 	{

@@ -1459,6 +1459,78 @@ pub fn tpr_ext_mgr_format_temp_zip_name(cur_time: i64, counter: i32) -> Vec<u8> 
     format!("extension-{cur_time}-{counter}.tmp.zip").into_bytes()
 }
 
+/// Formats `"GET <resource> HTTP/1.0\r\n"` for `WebDownloader::SendHeaders`.
+pub fn tpr_webdl_format_get_request_line(resource: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(resource.len() + 15);
+    out.extend_from_slice(b"GET ");
+    out.extend_from_slice(resource);
+    out.extend_from_slice(b" HTTP/1.0\r\n");
+    out
+}
+
+/// Formats `"User-Agent: nzbget/<version_rev>\r\n"` for `WebDownloader::SendHeaders`.
+pub fn tpr_webdl_format_user_agent_header(version_rev: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(version_rev.len() + 21);
+    out.extend_from_slice(b"User-Agent: nzbget/");
+    out.extend_from_slice(version_rev);
+    out.extend_from_slice(b"\r\n");
+    out
+}
+
+/// Formats `"Host: <host>\r\n"` or `"Host: <host>:<port>\r\n"` for `WebDownloader::SendHeaders`.
+pub fn tpr_webdl_format_host_header(
+    is_default_port: bool,
+    host: &[u8],
+    port: i32,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(host.len() + 20);
+    out.extend_from_slice(b"Host: ");
+    out.extend_from_slice(host);
+    if !is_default_port {
+        out.extend_from_slice(format!(":{port}").as_bytes());
+    }
+    out.extend_from_slice(b"\r\n");
+    out
+}
+
+/// Converts kilobytes to bytes (`kb * 1024`) for `WebDownloader::PrepareFile`
+/// and `NCursesFrontend::UpdateInput`.
+pub fn tpr_webdl_kb_to_bytes(kb: i32) -> i32 {
+    kb.wrapping_mul(1024)
+}
+
+/// Returns `" Messages"` or `"***  Messages"` for `NCursesFrontend::PrintMessages`.
+pub fn tpr_ncurses_format_messages_header(use_color: bool) -> &'static [u8] {
+    if use_color {
+        b" Messages\0"
+    } else {
+        b"***  Messages\0"
+    }
+}
+
+/// Formats `"<time_str> - <msg_text>"` for `NCursesFrontend::PrintMessage`.
+pub fn tpr_ncurses_format_timestamp_message(time_str: &[u8], msg_text: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(time_str.len() + 3 + msg_text.len());
+    out.extend_from_slice(time_str);
+    out.extend_from_slice(b" - ");
+    out.extend_from_slice(msg_text);
+    out
+}
+
+/// Formats `"Download rate: <input_val>"` for `NCursesFrontend::PrintKeyInputBar`.
+pub fn tpr_ncurses_format_download_rate_hint(input_val: i32) -> Vec<u8> {
+    format!("Download rate: {input_val}").into_bytes()
+}
+
+/// Returns `"Unpausing download"` or `"Pausing download"` for `NCursesFrontend::UpdateInput`.
+pub fn tpr_ncurses_pause_log_msg(pause_download: bool) -> &'static [u8] {
+    if pause_download {
+        b"Unpausing download\0"
+    } else {
+        b"Pausing download\0"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1988,5 +2060,37 @@ mod tests {
             tpr_ext_mgr_format_temp_zip_name(1700000000, 5),
             b"extension-1700000000-5.tmp.zip"
         );
+        assert_eq!(
+            tpr_webdl_format_get_request_line(b"/get/123"),
+            b"GET /get/123 HTTP/1.0\r\n"
+        );
+        assert_eq!(
+            tpr_webdl_format_user_agent_header(b"24.3"),
+            b"User-Agent: nzbget/24.3\r\n"
+        );
+        assert_eq!(
+            tpr_webdl_format_host_header(true, b"example.com", 80),
+            b"Host: example.com\r\n"
+        );
+        assert_eq!(
+            tpr_webdl_format_host_header(false, b"example.com", 8080),
+            b"Host: example.com:8080\r\n"
+        );
+        assert_eq!(tpr_webdl_kb_to_bytes(64), 65536);
+        assert_eq!(tpr_ncurses_format_messages_header(true), b" Messages\0");
+        assert_eq!(
+            tpr_ncurses_format_messages_header(false),
+            b"***  Messages\0"
+        );
+        assert_eq!(
+            tpr_ncurses_format_timestamp_message(b"12:00:00", b"Hello"),
+            b"12:00:00 - Hello"
+        );
+        assert_eq!(
+            tpr_ncurses_format_download_rate_hint(5000),
+            b"Download rate: 5000"
+        );
+        assert_eq!(tpr_ncurses_pause_log_msg(true), b"Unpausing download\0");
+        assert_eq!(tpr_ncurses_pause_log_msg(false), b"Pausing download\0");
     }
 }

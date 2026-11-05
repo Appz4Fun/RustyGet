@@ -33448,6 +33448,210 @@ pub unsafe extern "C" fn nzbget_rs_tpr_ext_mgr_format_temp_zip_name(
     ))
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_conn_calc_read_buffer_cap(
+    read_buf_size: i32,
+    decode_slack: i32,
+) -> i32 {
+    crate::dupequeuehealth::dqh_conn_calc_read_buffer_cap(read_buf_size, decode_slack)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_conn_format_port_str(port: i32) -> RsBuf {
+    into_buf(crate::dupequeuehealth::dqh_conn_format_port_str(port))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_conn_clamp_buf_avail(buf_avail: i32) -> i32 {
+    crate::dupequeuehealth::dqh_conn_clamp_buf_avail(buf_avail)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_conn_format_report_err_with_code(
+    prefix: *const c_char,
+    err_code: i32,
+    err_msg: *const c_char,
+) -> RsBuf {
+    let p = if prefix.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(prefix).to_bytes()
+    };
+    let m = if err_msg.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(err_msg).to_bytes()
+    };
+    into_buf(
+        crate::dupequeuehealth::dqh_conn_format_report_err_with_code(p, err_code, m),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_tls_format_report_err(
+    err_msg: *const c_char,
+    err_str: *const c_char,
+) -> RsBuf {
+    let m = if err_msg.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(err_msg).to_bytes()
+    };
+    let s = if err_str.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(err_str).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_tls_format_report_err(m, s))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_tls_format_cert_verify_err(
+    host: *const c_char,
+    verify_err_str: *const c_char,
+) -> RsBuf {
+    let h = if host.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(host).to_bytes()
+    };
+    let v = if verify_err_str.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(verify_err_str).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_tls_format_cert_verify_err(h, v))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_tls_format_handshake_err(host: *const c_char) -> RsBuf {
+    let h = if host.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(host).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_tls_format_handshake_err(h))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_tls_format_hostname_mismatch_err(
+    host: *const c_char,
+    cert_host: *const c_char,
+) -> RsBuf {
+    let h = if host.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(host).to_bytes()
+    };
+    let ch = if cert_host.is_null() {
+        b"(null)"
+    } else {
+        CStr::from_ptr(cert_host).to_bytes()
+    };
+    into_buf(
+        crate::dupequeuehealth::dqh_tls_format_hostname_mismatch_err(h, ch),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_tls_select_io_err_msg(
+    is_write: i32,
+    peek_err_zero: i32,
+) -> *const c_char {
+    crate::dupequeuehealth::dqh_tls_select_io_err_msg(is_write != 0, peek_err_zero != 0).as_ptr()
+        as *const c_char
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_webdl_format_get_request_line(
+    resource: *const c_char,
+) -> RsBuf {
+    let r = if resource.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(resource).to_bytes()
+    };
+    into_buf(crate::twinproberenhist::tpr_webdl_format_get_request_line(r))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_webdl_format_user_agent_header(
+    version_rev: *const c_char,
+) -> RsBuf {
+    let v = if version_rev.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(version_rev).to_bytes()
+    };
+    into_buf(crate::twinproberenhist::tpr_webdl_format_user_agent_header(v))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_webdl_format_host_header(
+    is_default_port: i32,
+    host: *const c_char,
+    port: i32,
+) -> RsBuf {
+    let h = if host.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(host).to_bytes()
+    };
+    into_buf(crate::twinproberenhist::tpr_webdl_format_host_header(
+        is_default_port != 0,
+        h,
+        port,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_webdl_kb_to_bytes(kb: i32) -> i32 {
+    crate::twinproberenhist::tpr_webdl_kb_to_bytes(kb)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_ncurses_format_messages_header(
+    use_color: i32,
+) -> *const c_char {
+    crate::twinproberenhist::tpr_ncurses_format_messages_header(use_color != 0).as_ptr()
+        as *const c_char
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_ncurses_format_timestamp_message(
+    time_str: *const c_char,
+    msg_text: *const c_char,
+) -> RsBuf {
+    let ts = if time_str.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(time_str).to_bytes()
+    };
+    let mt = if msg_text.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(msg_text).to_bytes()
+    };
+    into_buf(
+        crate::twinproberenhist::tpr_ncurses_format_timestamp_message(ts, mt),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_ncurses_format_download_rate_hint(
+    input_val: i32,
+) -> RsBuf {
+    into_buf(crate::twinproberenhist::tpr_ncurses_format_download_rate_hint(input_val))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_ncurses_pause_log_msg(
+    pause_download: i32,
+) -> *const c_char {
+    crate::twinproberenhist::tpr_ncurses_pause_log_msg(pause_download != 0).as_ptr()
+        as *const c_char
+}
+
 
 
 

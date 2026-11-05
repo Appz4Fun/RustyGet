@@ -90,11 +90,15 @@ void TlsSocket::ReportError(const char* errMsg, bool suppressable)
 
 		if (suppressable && m_suppressErrors)
 		{
-			debug("%s: %s", errMsg, errstr);
+			NzbgetRsBuf formattedErr = nzbget_rs_dqh_tls_format_report_err(errMsg, errstr);
+			debug("%s", formattedErr.data ? formattedErr.data : "");
+			nzbget_rs_free(formattedErr);
 		}
 		else if (errcode != 0)
 		{
-			PrintError(BString<1024>("%s: %s", errMsg, errstr));
+			NzbgetRsBuf formattedErr = nzbget_rs_dqh_tls_format_report_err(errMsg, errstr);
+			PrintError(formattedErr.data ? formattedErr.data : "");
+			nzbget_rs_free(formattedErr);
 		}
 		else
 		{
@@ -208,15 +212,18 @@ bool TlsSocket::Start()
 			if (verifyRes != X509_V_OK)
 			{
 				m_probeFailure = -4;
-				PrintError(BString<1024>("TLS certificate verification failed for %s: %s."
-					" For more info visit https://nzbget.com/documentation/certificate-verification/",
-					m_host.c_str(), X509_verify_cert_error_string(verifyRes)));
+				NzbgetRsBuf verifyErrBuf = nzbget_rs_dqh_tls_format_cert_verify_err(
+					m_host.c_str(), X509_verify_cert_error_string(verifyRes));
+				PrintError(verifyErrBuf.data ? verifyErrBuf.data : "");
+				nzbget_rs_free(verifyErrBuf);
 				Close();
 				return false;
 			}
 		}
 
-		ReportError(BString<1024>("TLS handshake failed for %s", m_host.c_str()));
+		NzbgetRsBuf hsErrBuf = nzbget_rs_dqh_tls_format_handshake_err(m_host.c_str());
+		ReportError(hsErrBuf.data ? hsErrBuf.data : "");
+		nzbget_rs_free(hsErrBuf);
 		Close();
 		return false;
 	}
@@ -287,8 +294,10 @@ bool TlsSocket::ValidateCert()
 	OpenSSL::X509Ptr cert{ SSL_get_peer_certificate(m_session.get()), &X509_free };
 	if (!cert)
 	{
-		PrintError(BString<1024>("TLS certificate verification failed for %s: no certificate provided by server."
-			" For more info visit https://nzbget.com/documentation/certificate-verification/", m_host.c_str()));
+		NzbgetRsBuf verifyErrBuf = nzbget_rs_dqh_tls_format_cert_verify_err(
+			m_host.c_str(), "no certificate provided by server");
+		PrintError(verifyErrBuf.data ? verifyErrBuf.data : "");
+		nzbget_rs_free(verifyErrBuf);
 		return false;
 	}
 
@@ -316,8 +325,10 @@ bool TlsSocket::ValidateCert()
 			}
 		}
 
-		PrintError(BString<1024>("TLS certificate verification failed for %s: certificate hostname mismatch (%s)."
-			" For more info visit https://nzbget.com/documentation/certificate-verification/", m_host.c_str(), certHost));
+		NzbgetRsBuf mismatchErrBuf = nzbget_rs_dqh_tls_format_hostname_mismatch_err(
+			m_host.c_str(), reinterpret_cast<const char*>(certHost));
+		PrintError(mismatchErrBuf.data ? mismatchErrBuf.data : "");
+		nzbget_rs_free(mismatchErrBuf);
 		return false;
 	}
 #endif
@@ -350,12 +361,7 @@ int TlsSocket::Send(const char* buffer, int size)
 
 	if (m_retCode < 0)
 	{
-		if (ERR_peek_error() == 0)
-		{
-			ReportError("Could not write to TLS-Socket: Connection closed by remote host");
-		}
-		else
-			ReportError("Could not write to TLS-Socket");
+		ReportError(nzbget_rs_dqh_tls_select_io_err_msg(1, ERR_peek_error() == 0 ? 1 : 0));
 		return -1;
 	}
 
@@ -372,14 +378,7 @@ int TlsSocket::Recv(char* buffer, int size)
 
 	if (m_retCode < 0)
 	{
-		if (ERR_peek_error() == 0)
-		{
-			ReportError("Could not read from TLS-Socket: Connection closed by remote host");
-		}
-		else
-		{
-			ReportError("Could not read from TLS-Socket");
-		}
+		ReportError(nzbget_rs_dqh_tls_select_io_err_msg(0, ERR_peek_error() == 0 ? 1 : 0));
 		return -1;
 	}
 

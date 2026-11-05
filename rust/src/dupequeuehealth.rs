@@ -1343,6 +1343,99 @@ pub fn dqh_stream_crypto_rar3_iv_index(round: i32, rounds: i32) -> i32 {
     }
 }
 
+/// Computes the read buffer capacity (`read_buf_size + 1 + decode_slack`) for `Connection::Connection`.
+pub fn dqh_conn_calc_read_buffer_cap(read_buf_size: i32, decode_slack: i32) -> i32 {
+    read_buf_size.saturating_add(1).saturating_add(decode_slack)
+}
+
+/// Formats `port` as a decimal byte string for `Connection::Bind` and `Connection::DoConnect`.
+pub fn dqh_conn_format_port_str(port: i32) -> Vec<u8> {
+    format!("{port}").into_bytes()
+}
+
+/// Clamps `buf_avail` to `>= 0` for `Connection::ReadLine`.
+pub fn dqh_conn_clamp_buf_avail(buf_avail: i32) -> i32 {
+    if buf_avail > 0 {
+        buf_avail
+    } else {
+        0
+    }
+}
+
+/// Formats `"<prefix>: Error <err_code> - <err_msg>"` for `Connection::ReportError`.
+pub fn dqh_conn_format_report_err_with_code(
+    prefix: &[u8],
+    err_code: i32,
+    err_msg: &[u8],
+) -> Vec<u8> {
+    let mid = format!(": Error {err_code} - ");
+    let mut out = Vec::with_capacity(prefix.len() + mid.len() + err_msg.len());
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(mid.as_bytes());
+    out.extend_from_slice(err_msg);
+    out
+}
+
+/// Formats `"<err_msg>: <err_str>"` for `TlsSocket::ReportError`.
+pub fn dqh_tls_format_report_err(err_msg: &[u8], err_str: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(err_msg.len() + 2 + err_str.len());
+    out.extend_from_slice(err_msg);
+    out.extend_from_slice(b": ");
+    out.extend_from_slice(err_str);
+    out
+}
+
+/// Formats `"TLS certificate verification failed for <host>: <verify_err_str>. For more info visit https://nzbget.com/documentation/certificate-verification/"`
+/// for `TlsSocket::Start` and `TlsSocket::ValidateCert`.
+pub fn dqh_tls_format_cert_verify_err(host: &[u8], verify_err_str: &[u8]) -> Vec<u8> {
+    const PREFIX: &[u8] = b"TLS certificate verification failed for ";
+    const SUFFIX: &[u8] =
+        b". For more info visit https://nzbget.com/documentation/certificate-verification/";
+    let mut out = Vec::with_capacity(PREFIX.len() + host.len() + 2 + verify_err_str.len() + SUFFIX.len());
+    out.extend_from_slice(PREFIX);
+    out.extend_from_slice(host);
+    out.extend_from_slice(b": ");
+    out.extend_from_slice(verify_err_str);
+    out.extend_from_slice(SUFFIX);
+    out
+}
+
+/// Formats `"TLS handshake failed for <host>"` for `TlsSocket::Start`.
+pub fn dqh_tls_format_handshake_err(host: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(host.len() + 25);
+    out.extend_from_slice(b"TLS handshake failed for ");
+    out.extend_from_slice(host);
+    out
+}
+
+/// Formats `"TLS certificate verification failed for <host>: certificate hostname mismatch (<cert_host>). For more info visit https://nzbget.com/documentation/certificate-verification/"`
+/// for `TlsSocket::ValidateCert`.
+pub fn dqh_tls_format_hostname_mismatch_err(host: &[u8], cert_host: &[u8]) -> Vec<u8> {
+    const PREFIX: &[u8] = b"TLS certificate verification failed for ";
+    const MID: &[u8] = b": certificate hostname mismatch (";
+    const SUFFIX: &[u8] =
+        b"). For more info visit https://nzbget.com/documentation/certificate-verification/";
+    let mut out = Vec::with_capacity(
+        PREFIX.len() + host.len() + MID.len() + cert_host.len() + SUFFIX.len(),
+    );
+    out.extend_from_slice(PREFIX);
+    out.extend_from_slice(host);
+    out.extend_from_slice(MID);
+    out.extend_from_slice(cert_host);
+    out.extend_from_slice(SUFFIX);
+    out
+}
+
+/// Selects the static TLS read/write error string for `TlsSocket::Send` and `TlsSocket::Recv`.
+pub fn dqh_tls_select_io_err_msg(is_write: bool, peek_err_zero: bool) -> &'static [u8] {
+    match (is_write, peek_err_zero) {
+        (true, true) => b"Could not write to TLS-Socket: Connection closed by remote host\0",
+        (true, false) => b"Could not write to TLS-Socket\0",
+        (false, true) => b"Could not read from TLS-Socket: Connection closed by remote host\0",
+        (false, false) => b"Could not read from TLS-Socket\0",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1878,5 +1971,37 @@ mod tests {
         assert_eq!(dqh_stream_crypto_rar3_iv_index(0, 0x40000), 0);
         assert_eq!(dqh_stream_crypto_rar3_iv_index(0x4000, 0x40000), 1);
         assert_eq!(dqh_stream_crypto_rar3_iv_index(1, 0x40000), -1);
+        assert_eq!(dqh_conn_calc_read_buffer_cap(1024, 128), 1153);
+        assert_eq!(dqh_conn_format_port_str(6789), b"6789");
+        assert_eq!(dqh_conn_clamp_buf_avail(-1), 0);
+        assert_eq!(dqh_conn_clamp_buf_avail(42), 42);
+        assert_eq!(
+            dqh_conn_format_report_err_with_code(b"Connect failed", 111, b"Connection refused"),
+            b"Connect failed: Error 111 - Connection refused"
+        );
+        assert_eq!(
+            dqh_tls_format_report_err(b"TLS error", b"bad cert"),
+            b"TLS error: bad cert"
+        );
+        assert_eq!(
+            dqh_tls_format_cert_verify_err(b"news.example.com", b"certificate has expired"),
+            b"TLS certificate verification failed for news.example.com: certificate has expired. For more info visit https://nzbget.com/documentation/certificate-verification/"
+        );
+        assert_eq!(
+            dqh_tls_format_handshake_err(b"news.example.com"),
+            b"TLS handshake failed for news.example.com"
+        );
+        assert_eq!(
+            dqh_tls_format_hostname_mismatch_err(b"news.example.com", b"other.example.com"),
+            b"TLS certificate verification failed for news.example.com: certificate hostname mismatch (other.example.com). For more info visit https://nzbget.com/documentation/certificate-verification/"
+        );
+        assert_eq!(
+            dqh_tls_select_io_err_msg(true, true),
+            b"Could not write to TLS-Socket: Connection closed by remote host\0"
+        );
+        assert_eq!(
+            dqh_tls_select_io_err_msg(false, false),
+            b"Could not read from TLS-Socket\0"
+        );
     }
 }

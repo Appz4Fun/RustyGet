@@ -316,8 +316,9 @@ void NCursesFrontend::PrintMessages()
 {
 	int lineNr = m_messagesWinTop;
 
-	std::string buffer = (m_useColor ? "" : "*** ") + std::string(" Messages");
-	PlotLine(buffer.c_str(), lineNr++, 0, NCURSES_COLORPAIR_INFOLINE);
+	PlotLine(
+		nzbget_rs_tpr_ncurses_format_messages_header(m_useColor ? 1 : 0),
+		lineNr++, 0, NCURSES_COLORPAIR_INFOLINE);
 
 	int line = lineNr + m_messagesWinClientHeight - 1;
 	int linesToPrint = m_messagesWinClientHeight;
@@ -357,7 +358,10 @@ int NCursesFrontend::PrintMessage(Message& msg, int row, int maxLines)
 	if (m_showTimestamp)
 	{
 		time_t rawtime = msg.GetTime() + g_Options->GetTimeCorrection();
-		text.Format("%s - %s", *Util::FormatTime(rawtime), msg.GetText());
+		NzbgetRsBuf tsBuf = nzbget_rs_tpr_ncurses_format_timestamp_message(
+			*Util::FormatTime(rawtime), msg.GetText());
+		text = tsBuf.data ? tsBuf.data : "";
+		nzbget_rs_free(tsBuf);
 	}
 	else
 	{
@@ -447,12 +451,15 @@ void NCursesFrontend::PrintKeyInputBar()
 		break;
 	}
 	case downloadRate:
-		std::string hint = "Download rate: " + std::to_string(m_inputValue);
-		PlotLine(hint.c_str(), inputBarRow, 0, NCURSES_COLORPAIR_KEYBAR);
+	{
+		NzbgetRsBuf hintBuf = nzbget_rs_tpr_ncurses_format_download_rate_hint(m_inputValue);
+		PlotLine(hintBuf.data ? hintBuf.data : "", inputBarRow, 0, NCURSES_COLORPAIR_KEYBAR);
+		nzbget_rs_free(hintBuf);
 
 		// Print the cursor
 		PlotText(" ", inputBarRow, 15 + m_inputNumberIndex, NCURSES_COLORPAIR_CURSOR, true);
 		break;
+	}
 	}
 }
 
@@ -776,7 +783,7 @@ void NCursesFrontend::UpdateInput(int initialKey)
 				// Key 'p' for pause
 				if (!IsRemoteMode())
 				{
-					info(m_pauseDownload ? "Unpausing download" : "Pausing download");
+					info("%s", nzbget_rs_tpr_ncurses_pause_log_msg(m_pauseDownload ? 1 : 0));
 				}
 				ServerPauseUnpause(!m_pauseDownload);
 				break;
@@ -896,7 +903,7 @@ void NCursesFrontend::UpdateInput(int initialKey)
 				key, KEY_BACKSPACE, &m_inputNumberIndex, &m_inputValue);
 			if (rateStep == 1)
 			{
-				ServerSetDownloadRate(m_inputValue * 1024);
+				ServerSetDownloadRate(nzbget_rs_tpr_webdl_kb_to_bytes(m_inputValue));
 				m_inputMode = normal;
 				return;
 			}

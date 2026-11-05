@@ -5775,6 +5775,28 @@ NzbgetRsBuf nzbget_rs_tpr_sched_script_format_task_suffix(int32_t task_id);
 NzbgetRsBuf nzbget_rs_tpr_sched_script_format_info_name(
     const char* script_name, int32_t task_id, int32_t external_process);
 NzbgetRsBuf nzbget_rs_tpr_ext_mgr_format_temp_zip_name(int64_t cur_time, int32_t counter);
+int32_t nzbget_rs_dqh_conn_calc_read_buffer_cap(int32_t read_buf_size, int32_t decode_slack);
+NzbgetRsBuf nzbget_rs_dqh_conn_format_port_str(int32_t port);
+int32_t nzbget_rs_dqh_conn_clamp_buf_avail(int32_t buf_avail);
+NzbgetRsBuf nzbget_rs_dqh_conn_format_report_err_with_code(
+    const char* prefix, int32_t err_code, const char* err_msg);
+NzbgetRsBuf nzbget_rs_dqh_tls_format_report_err(const char* err_msg, const char* err_str);
+NzbgetRsBuf nzbget_rs_dqh_tls_format_cert_verify_err(
+    const char* host, const char* verify_err_str);
+NzbgetRsBuf nzbget_rs_dqh_tls_format_handshake_err(const char* host);
+NzbgetRsBuf nzbget_rs_dqh_tls_format_hostname_mismatch_err(
+    const char* host, const char* cert_host);
+const char* nzbget_rs_dqh_tls_select_io_err_msg(int32_t is_write, int32_t peek_err_zero);
+NzbgetRsBuf nzbget_rs_tpr_webdl_format_get_request_line(const char* resource);
+NzbgetRsBuf nzbget_rs_tpr_webdl_format_user_agent_header(const char* version_rev);
+NzbgetRsBuf nzbget_rs_tpr_webdl_format_host_header(
+    int32_t is_default_port, const char* host, int32_t port);
+int32_t nzbget_rs_tpr_webdl_kb_to_bytes(int32_t kb);
+const char* nzbget_rs_tpr_ncurses_format_messages_header(int32_t use_color);
+NzbgetRsBuf nzbget_rs_tpr_ncurses_format_timestamp_message(
+    const char* time_str, const char* msg_text);
+NzbgetRsBuf nzbget_rs_tpr_ncurses_format_download_rate_hint(int32_t input_val);
+const char* nzbget_rs_tpr_ncurses_pause_log_msg(int32_t pause_download);
 
 #include "nzbget_tls_cipher.h"
 

@@ -250,17 +250,20 @@ void WebDownloader::SendHeaders(URL *url)
 {
 	// retrieve file
 	// not cut to a fixed size: a long (signed) url lost its "HTTP/1.0" and line end
-	m_connection->WriteLine(CString::FormatStr("GET %s HTTP/1.0\r\n", url->GetResource()));
-	m_connection->WriteLine(BString<1024>("User-Agent: nzbget/%s\r\n", Util::VersionRevision()));
+	NzbgetRsBuf reqLineBuf = nzbget_rs_tpr_webdl_format_get_request_line(url->GetResource());
+	m_connection->WriteLine(reqLineBuf.data ? reqLineBuf.data : "");
+	nzbget_rs_free(reqLineBuf);
 
-	if (nzbget_rs_ntw_webdl_is_default_http_port(url->GetProtocol(), url->GetPort()) != 0)
-	{
-		m_connection->WriteLine(BString<1024>("Host: %s\r\n", url->GetHost()));
-	}
-	else
-	{
-		m_connection->WriteLine(BString<1024>("Host: %s:%i\r\n", url->GetHost(), url->GetPort()));
-	}
+	NzbgetRsBuf uaLineBuf = nzbget_rs_tpr_webdl_format_user_agent_header(Util::VersionRevision());
+	m_connection->WriteLine(uaLineBuf.data ? uaLineBuf.data : "");
+	nzbget_rs_free(uaLineBuf);
+
+	int isDefaultPort = nzbget_rs_ntw_webdl_is_default_http_port(
+		url->GetProtocol(), url->GetPort());
+	NzbgetRsBuf hostLineBuf = nzbget_rs_tpr_webdl_format_host_header(
+		isDefaultPort, url->GetHost(), url->GetPort());
+	m_connection->WriteLine(hostLineBuf.data ? hostLineBuf.data : "");
+	nzbget_rs_free(hostLineBuf);
 
 	m_connection->WriteLine("Accept: */*\r\n");
 #ifndef DISABLE_GZIP
@@ -566,7 +569,7 @@ bool WebDownloader::PrepareFile()
 	}
 	if (g_Options->GetWriteBuffer() > 0)
 	{
-		m_outFile.SetWriteBuffer(g_Options->GetWriteBuffer() * 1024);
+		m_outFile.SetWriteBuffer(nzbget_rs_tpr_webdl_kb_to_bytes(g_Options->GetWriteBuffer()));
 	}
 
 	return true;

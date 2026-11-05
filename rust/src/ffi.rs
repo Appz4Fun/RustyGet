@@ -36196,6 +36196,139 @@ pub extern "C" fn nzbget_rs_dqh_repair_ctrl_map_par_stage_to_post_stage(
     )
 }
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_parchecker_cmdline_err_str(res: c_int) -> *const c_char {
+    crate::dupequeuehealth::dqh_parchecker_cmdline_err_str(res).as_ptr() as *const c_char
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_parchecker_stage_message(stage: c_int) -> *const c_char {
+    crate::dupequeuehealth::dqh_parchecker_stage_message(stage).as_ptr() as *const c_char
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_post_script_status_name(status: c_int) -> *const c_char {
+    crate::dupequeuehealth::dqh_post_script_status_name(status).as_ptr() as *const c_char
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_post_script_deprecated_status_code(status: c_int) -> c_int {
+    crate::dupequeuehealth::dqh_post_script_deprecated_status_code(status)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_scheduler_command_name(command: c_int) -> *const c_char {
+    crate::dupequeuehealth::dqh_scheduler_command_name(command).as_ptr() as *const c_char
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_ext_mgr_format_update_backup_path(
+    target_path: *const c_char,
+    target_path_len: usize,
+) -> RsBuf {
+    let tp = if target_path.is_null() || target_path_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(target_path as *const u8, target_path_len)
+    };
+    into_buf(crate::dupequeuehealth::dqh_ext_mgr_format_update_backup_path(tp))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_ext_mgr_format_lookup_error(
+    ext_name: *const c_char,
+    ext_name_len: usize,
+    kind: c_int,
+) -> RsBuf {
+    let en = if ext_name.is_null() || ext_name_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(ext_name as *const u8, ext_name_len)
+    };
+    into_buf(crate::dupequeuehealth::dqh_ext_mgr_format_lookup_error(
+        en, kind,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_ext_mgr_format_install_or_delete_error(
+    path: *const c_char,
+    path_len: usize,
+    detail: *const c_char,
+    detail_len: usize,
+    kind: c_int,
+) -> RsBuf {
+    let p = if path.is_null() || path_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(path as *const u8, path_len)
+    };
+    let d = if detail.is_null() || detail_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(detail as *const u8, detail_len)
+    };
+    into_buf(
+        crate::dupequeuehealth::dqh_ext_mgr_format_install_or_delete_error(p, d, kind),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_ext_mgr_format_compound_update_error(
+    primary_err: *const c_char,
+    primary_err_len: usize,
+    path1: *const c_char,
+    path1_len: usize,
+    path2: *const c_char,
+    path2_len: usize,
+    ec_msg: *const c_char,
+    ec_msg_len: usize,
+    kind: c_int,
+) -> RsBuf {
+    let pe = if primary_err.is_null() || primary_err_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(primary_err as *const u8, primary_err_len)
+    };
+    let p1 = if path1.is_null() || path1_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(path1 as *const u8, path1_len)
+    };
+    let p2 = if path2.is_null() || path2_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(path2 as *const u8, path2_len)
+    };
+    let em = if ec_msg.is_null() || ec_msg_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(ec_msg as *const u8, ec_msg_len)
+    };
+    into_buf(
+        crate::dupequeuehealth::dqh_ext_mgr_format_compound_update_error(pe, p1, p2, em, kind),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_options_merge_script_list(
+    existing: *const c_char,
+    add_list: *const c_char,
+) -> RsBuf {
+    let ex = if existing.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(existing).to_bytes()
+    };
+    let al = if add_list.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(add_list).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_options_merge_script_list(ex, al))
+}
+
+
 
 
 

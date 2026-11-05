@@ -167,11 +167,11 @@ void PostScriptController::PrepareParams(const char* scriptName)
 	status[totalStatusLen] = '\0';
 	SetEnvVar("NZBPP_TOTALSTATUS", status);
 
-	const char* scriptStatusName[] = { "NONE", "FAILURE", "SUCCESS" };
-	SetEnvVar("NZBPP_SCRIPTSTATUS", scriptStatusName[m_postInfo->GetNzbInfo()->GetScriptStatuses()->CalcTotalStatus()]);
+	SetEnvVar("NZBPP_SCRIPTSTATUS",
+		nzbget_rs_dqh_post_script_status_name(
+			(int)m_postInfo->GetNzbInfo()->GetScriptStatuses()->CalcTotalStatus()));
 
 	// deprecated
-	int parStatusCodes[] = { 0, 0, 1, 2, 3, 4 };
 	NzbInfo::EParStatus parStatus = (NzbInfo::EParStatus)nzbget_rs_sfc_post_script_resolve_compat_par_status(
 		(int)m_postInfo->GetNzbInfo()->GetParStatus(),
 		(int)NzbInfo::psFailure,
@@ -179,11 +179,13 @@ void PostScriptController::PrepareParams(const char* scriptName)
 		(int)NzbInfo::dsNone,
 		(int)m_postInfo->GetNzbInfo()->GetMarkStatus(),
 		(int)NzbInfo::ksBad);
-	SetIntEnvVar("NZBPP_PARSTATUS", parStatusCodes[parStatus]);
+	SetIntEnvVar("NZBPP_PARSTATUS",
+		nzbget_rs_dqh_post_script_deprecated_status_code((int)parStatus));
 
 	// deprecated
-	int unpackStatus[] = { 0, 0, 1, 2, 3, 4 };
-	SetIntEnvVar("NZBPP_UNPACKSTATUS", unpackStatus[m_postInfo->GetNzbInfo()->GetUnpackStatus()]);
+	SetIntEnvVar("NZBPP_UNPACKSTATUS",
+		nzbget_rs_dqh_post_script_deprecated_status_code(
+			(int)m_postInfo->GetNzbInfo()->GetUnpackStatus()));
 
 	// deprecated
 	SetIntEnvVar("NZBPP_HEALTHDELETED", (int)m_postInfo->GetNzbInfo()->GetDeleteStatus() == NzbInfo::dsHealth);

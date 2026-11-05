@@ -184,7 +184,10 @@ namespace ExtensionLoader
 		if (!ManifestFile::Load(manifest, location))
 			return false;
 
-		std::string entry = std::string(location) + PATH_SEPARATOR + manifest.main;
+		NzbgetRsBuf entryBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			location, PATH_SEPARATOR, manifest.main.c_str());
+		std::string entry(entryBuf.data ? entryBuf.data : "", entryBuf.len);
+		nzbget_rs_free(entryBuf);
 		script.SetEntry(std::move(entry));
 		script.SetLocation(location);
 		script.SetRootDir(rootDir);

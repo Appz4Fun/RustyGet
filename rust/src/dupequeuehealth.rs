@@ -3088,6 +3088,203 @@ pub fn dqh_repair_ctrl_map_par_stage_to_post_stage(
     }
 }
 
+/// Returns the NUL-terminated error message for `ParChecker` `Par2CmdLineErrStr[res]`.
+pub fn dqh_parchecker_cmdline_err_str(res: i32) -> &'static [u8] {
+    match res {
+        0 => b"OK\0",
+        1 => b"data files are damaged and there is enough recovery data available to repair them\0",
+        2 => b"data files are damaged and there is insufficient recovery data available to be able to repair them\0",
+        3 => b"there was something wrong with the command line arguments\0",
+        4 => b"the PAR2 files did not contain sufficient information about the data files to be able to verify them\0",
+        5 => b"repair completed but the data files still appear to be damaged\0",
+        6 => b"an error occurred when accessing files\0",
+        7 => b"internal error occurred\0",
+        8 => b"out of memory\0",
+        _ => b"internal error occurred\0",
+    }
+}
+
+/// Returns the NUL-terminated stage message for `ParChecker` `Par2StageMessage[stage]`.
+pub fn dqh_parchecker_stage_message(stage: i32) -> &'static [u8] {
+    match stage {
+        0 => b"Loading file\0",
+        1 => b"Verifying file\0",
+        2 => b"Repairing file\0",
+        3 => b"Verifying repaired file\0",
+        _ => b"Verifying file\0",
+    }
+}
+
+/// Returns the NUL-terminated `NZBPP_SCRIPTSTATUS` name for `ScriptStatus::EStatus`.
+pub fn dqh_post_script_status_name(status: i32) -> &'static [u8] {
+    match status {
+        0 => b"NONE\0",
+        1 => b"FAILURE\0",
+        2 => b"SUCCESS\0",
+        _ => b"NONE\0",
+    }
+}
+
+/// Maps `PostScriptController::PrepareParams` deprecated `NZBPP_PARSTATUS` /
+/// `NZBPP_UNPACKSTATUS` enum value (`0..=5`) to `{ 0, 0, 1, 2, 3, 4 }`.
+pub fn dqh_post_script_deprecated_status_code(status: i32) -> i32 {
+    match status {
+        0 | 1 => 0,
+        2 => 1,
+        3 => 2,
+        4 => 3,
+        5 => 4,
+        _ => 0,
+    }
+}
+
+/// Returns the NUL-terminated `Scheduler::ExecuteTask` debug command name.
+pub fn dqh_scheduler_command_name(command: i32) -> &'static [u8] {
+    match command {
+        0 => b"Pause\0",
+        1 => b"Unpause\0",
+        2 => b"Pause Post-processing\0",
+        3 => b"Unpause Post-processing\0",
+        4 => b"Set download rate\0",
+        5 => b"Execute process\0",
+        6 => b"Execute script\0",
+        7 => b"Pause Scan\0",
+        8 => b"Unpause Scan\0",
+        9 => b"Enable Server\0",
+        10 => b"Disable Server\0",
+        11 => b"Fetch Feed\0",
+        _ => b"Unknown\0",
+    }
+}
+
+/// Formats `ExtensionManager::Manager::UpdateExtension` backup path `<target_path>.update-backup`.
+pub fn dqh_ext_mgr_format_update_backup_path(target_path: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(target_path.len() + 14);
+    out.extend_from_slice(target_path);
+    out.extend_from_slice(b".update-backup");
+    out
+}
+
+/// Formats `ExtensionManager::Manager` lookup/use-count error messages:
+/// - `0`: `"Update failed: Extension '<ext_name>' not found"`
+/// - `1`: `"Update failed: Extension '<ext_name>' is currently in use or running"`
+/// - `2`: `"Deletion failed: Extension '<ext_name>' not found"`
+/// - `3`: `"Deletion failed: Extension '<ext_name>' is currently in use"`
+pub fn dqh_ext_mgr_format_lookup_error(ext_name: &[u8], kind: i32) -> Vec<u8> {
+    let (prefix, suffix): (&[u8], &[u8]) = match kind {
+        0 => (b"Update failed: Extension '", b"' not found"),
+        1 => (
+            b"Update failed: Extension '",
+            b"' is currently in use or running",
+        ),
+        2 => (b"Deletion failed: Extension '", b"' not found"),
+        _ => (b"Deletion failed: Extension '", b"' is currently in use"),
+    };
+    let mut out = Vec::with_capacity(prefix.len() + ext_name.len() + suffix.len());
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(ext_name);
+    out.extend_from_slice(suffix);
+    out
+}
+
+/// Formats `ExtensionManager::Manager` single-path install/move/delete error messages:
+/// - `0`: `"Failed to initialize extraction for archive '<path>"`
+/// - `1`: `"Extraction failed for archive '<path>"`
+/// - `2`: `"Extension unpacked, but failed to delete temporary archive '<path>': <detail>"`
+/// - `3`: `"Failed to move aside <path>: <detail>"`
+/// - `4`: `"Failed to delete <path>: <detail>"`
+pub fn dqh_ext_mgr_format_install_or_delete_error(
+    path: &[u8],
+    detail: &[u8],
+    kind: i32,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(path.len() + detail.len() + 64);
+    match kind {
+        0 => {
+            out.extend_from_slice(b"Failed to initialize extraction for archive '");
+            out.extend_from_slice(path);
+        }
+        1 => {
+            out.extend_from_slice(b"Extraction failed for archive '");
+            out.extend_from_slice(path);
+        }
+        2 => {
+            out.extend_from_slice(
+                b"Extension unpacked, but failed to delete temporary archive '",
+            );
+            out.extend_from_slice(path);
+            out.extend_from_slice(b"': ");
+            out.extend_from_slice(detail);
+        }
+        3 => {
+            out.extend_from_slice(b"Failed to move aside ");
+            out.extend_from_slice(path);
+            out.extend_from_slice(b": ");
+            out.extend_from_slice(detail);
+        }
+        _ => {
+            out.extend_from_slice(b"Failed to delete ");
+            out.extend_from_slice(path);
+            out.extend_from_slice(b": ");
+            out.extend_from_slice(detail);
+        }
+    }
+    out
+}
+
+/// Formats `ExtensionManager::Manager::UpdateExtension` compound rollback/cleanup errors:
+/// - `0`: `"Failed to remove existing extension (Error: <primary_err>) and failed to cleanup temporary file '<path1>' (Error: <ec_msg>)"`
+/// - `1`: `"<primary_err>; failed to restore <path1> from <path2>: <ec_msg>"`
+pub fn dqh_ext_mgr_format_compound_update_error(
+    primary_err: &[u8],
+    path1: &[u8],
+    path2: &[u8],
+    ec_msg: &[u8],
+    kind: i32,
+) -> Vec<u8> {
+    let mut out =
+        Vec::with_capacity(primary_err.len() + path1.len() + path2.len() + ec_msg.len() + 96);
+    if kind == 0 {
+        out.extend_from_slice(b"Failed to remove existing extension (Error: ");
+        out.extend_from_slice(primary_err);
+        out.extend_from_slice(b") and failed to cleanup temporary file '");
+        out.extend_from_slice(path1);
+        out.extend_from_slice(b"' (Error: ");
+        out.extend_from_slice(ec_msg);
+        out.push(b')');
+    } else {
+        out.extend_from_slice(primary_err);
+        out.extend_from_slice(b"; failed to restore ");
+        out.extend_from_slice(path1);
+        out.extend_from_slice(b" from ");
+        out.extend_from_slice(path2);
+        out.extend_from_slice(b": ");
+        out.extend_from_slice(ec_msg);
+    }
+    out
+}
+
+/// Merges `,;`-separated script names from `add_list` into `existing` if not already
+/// present (case-insensitively via `crate::options::has_script`), matching
+/// `Options::MergeOldScriptOption`.
+pub fn dqh_options_merge_script_list(existing: &[u8], add_list: &[u8]) -> Vec<u8> {
+    let mut out = existing.to_vec();
+    for script_name in crate::util::tokens(add_list, b",;") {
+        let mut cbuf = Vec::with_capacity(script_name.len() + 1);
+        cbuf.extend_from_slice(script_name);
+        cbuf.push(0);
+        if let Ok(cstr) = std::ffi::CStr::from_bytes_with_nul(&cbuf) {
+            if !crate::options::has_script(&out, cstr) {
+                if !out.is_empty() {
+                    out.push(b',');
+                }
+                out.extend_from_slice(script_name);
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4250,5 +4447,32 @@ mod tests {
         assert!(!dqh_nzbfile_should_trim_sax_chars(b"meta", false));
         assert!(!dqh_nzbfile_should_trim_sax_chars(b"file", true));
         assert_eq!(dqh_repair_ctrl_map_par_stage_to_post_stage(2, 10, 11, 12, 13), 12);
+        assert_eq!(dqh_parchecker_cmdline_err_str(0), b"OK\0");
+        assert_eq!(dqh_parchecker_cmdline_err_str(8), b"out of memory\0");
+        assert_eq!(dqh_parchecker_stage_message(2), b"Repairing file\0");
+        assert_eq!(dqh_post_script_status_name(2), b"SUCCESS\0");
+        assert_eq!(dqh_post_script_deprecated_status_code(1), 0);
+        assert_eq!(dqh_post_script_deprecated_status_code(5), 4);
+        assert_eq!(dqh_scheduler_command_name(11), b"Fetch Feed\0");
+        assert_eq!(
+            dqh_ext_mgr_format_update_backup_path(b"/scripts/ext"),
+            b"/scripts/ext.update-backup"
+        );
+        assert_eq!(
+            dqh_ext_mgr_format_lookup_error(b"MyExt", 0),
+            b"Update failed: Extension 'MyExt' not found"
+        );
+        assert_eq!(
+            dqh_ext_mgr_format_install_or_delete_error(b"/tmp/a.zip", b"perm denied", 2),
+            b"Extension unpacked, but failed to delete temporary archive '/tmp/a.zip': perm denied"
+        );
+        assert_eq!(
+            dqh_ext_mgr_format_compound_update_error(b"err1", b"/a", b"/b", b"err2", 1),
+            b"err1; failed to restore /a from /b: err2"
+        );
+        assert_eq!(
+            dqh_options_merge_script_list(b"ScriptA", b"scripta, ScriptB ; ScriptC"),
+            b"ScriptA,ScriptB,ScriptC"
+        );
     }
 }

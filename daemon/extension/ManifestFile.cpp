@@ -129,7 +129,10 @@ namespace ManifestFile
 
 	bool Load(Manifest& manifest, const char* directory)
 	{
-		std::string path = std::string(directory) + PATH_SEPARATOR + MANIFEST_FILE;
+		NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			directory, PATH_SEPARATOR, MANIFEST_FILE);
+		std::string path(pathBuf.data ? pathBuf.data : "", pathBuf.len);
+		nzbget_rs_free(pathBuf);
 		DiskFile file;
 		if (!file.Open(path.c_str(), DiskFile::omRead)) return false;
 

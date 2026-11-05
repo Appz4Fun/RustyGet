@@ -162,10 +162,8 @@ void Scheduler::CheckTasks()
 void Scheduler::ExecuteTask(Task* task)
 {
 #ifdef DEBUG
-	const char* commandName[] = { "Pause", "Unpause", "Pause Post-processing", "Unpause Post-processing",
-		"Set download rate", "Execute process", "Execute script",
-		"Pause Scan", "Unpause Scan", "Enable Server", "Disable Server", "Fetch Feed" };
-	debug("Executing scheduled command: %s", commandName[task->m_command]);
+	debug("Executing scheduled command: %s",
+		nzbget_rs_dqh_scheduler_command_name((int)task->m_command));
 #endif
 
 	bool executeProcess = nzbget_rs_sfw_scheduler_should_execute_process(

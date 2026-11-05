@@ -38,25 +38,6 @@
 #include "FileSystem.h"
 #include "nzbget_rs.h"
 
-static const char* Par2CmdLineErrStr[] = { 
-	"OK",
-	"data files are damaged and there is enough recovery data available to repair them",
-	"data files are damaged and there is insufficient recovery data available to be able to repair them",
-	"there was something wrong with the command line arguments",
-	"the PAR2 files did not contain sufficient information about the data files to be able to verify them",
-	"repair completed but the data files still appear to be damaged",
-	"an error occurred when accessing files",
-	"internal error occurred",
-	"out of memory" 
-};
-
-static const char* Par2StageMessage[] = { 
-	"Loading file", 
-	"Verifying file", 
-	"Repairing file", 
-	"Verifying repaired file" 
-};
-
 class Repairer final : public Par2::Par2Repairer, public ParChecker::AbstractRepairer
 {
 public:
@@ -516,7 +497,7 @@ ParChecker::EStatus ParChecker::RunParCheck(std::string parFilename)
 	{
 		if (useCmdErr != 0)
 		{
-			m_errMsg = Par2CmdLineErrStr[res];
+			m_errMsg = nzbget_rs_dqh_parchecker_cmdline_err_str((int)res);
 		}
 		PrintMessage(Message::mkError, "Repair failed for %s: %s. Recovery files created by: %s",
 			m_infoName.c_str(), m_errMsg.c_str(), nzbget_rs_dqh_parchecker_creator_or_unknown(creator.c_str()));
@@ -1097,14 +1078,15 @@ void ParChecker::SignalFilename(std::string str)
 
 	// don't print progress messages when verifying repaired files in quick verification mode,
 	// because repaired files are not verified in this mode
+	const char* stageMsg = nzbget_rs_dqh_parchecker_stage_message((int)m_stage);
 	if (nzbget_rs_pup_parchecker_should_print_stage_msg(
 		(int)m_stage, (int)ptVerifyingRepaired, m_parQuick ? 1 : 0) != 0)
 	{
-		PrintMessage(Message::mkInfo, "%s %s", Par2StageMessage[m_stage], str.c_str());
+		PrintMessage(Message::mkInfo, "%s %s", stageMsg, str.c_str());
 	}
 
 	NzbgetRsBuf progBuf = nzbget_rs_dqh_parchecker_format_action_label(
-		Par2StageMessage[m_stage], str.c_str());
+		stageMsg, str.c_str());
 	m_progressLabel.assign(progBuf.data ? progBuf.data : "", progBuf.len);
 	nzbget_rs_free(progBuf);
 
@@ -1461,9 +1443,11 @@ bool ParChecker::VerifyPartialDataFile(Par2::DiskFile&, Par2::Par2RepairerSource
 	// - compare two CRCs - they must match; if not - the file is more damaged than we thought -
 	//   let libpar2 do the full verification of the file in this case.
 	std::vector<uint8_t> validBlockFlags(validBlocks.size(), 0);
+	std::vector<uint32_t> blockCrcs(validBlocks.size(), 0);
 	for (size_t i = 0; i < validBlocks.size(); ++i)
 	{
 		validBlockFlags[i] = validBlocks[i] ? 1 : 0;
+		blockCrcs[i] = packet->VerificationEntry((uint32)i)->crc;
 	}
 	size_t searchIdx = 0;
 	size_t runStart = 0, runEnd = 0;
@@ -1474,13 +1458,8 @@ bool ParChecker::VerifyPartialDataFile(Par2::DiskFile&, Par2::Par2RepairerSource
 		&runStart,
 		&runEnd) != 0)
 	{
-		uint32 parCrc = 0;
-		for (size_t i = runStart; i <= runEnd; ++i)
-		{
-			const Par2::FILEVERIFICATIONENTRY* entry = packet->VerificationEntry(i);
-			Par2::u32 blockCrc = entry->crc;
-			parCrc = i == runStart ? blockCrc : Crc32::Combine(parCrc, blockCrc, (uint32)blocksize);
-		}
+		uint32 parCrc = nzbget_rs_pup_parchecker_combine_block_crcs(
+			&blockCrcs[runStart], runEnd - runStart + 1, (uint64_t)blocksize);
 		int blockStart = (int)runStart;
 		int blockEnd = (int)runEnd;
 		int64 bytesStart = 0;

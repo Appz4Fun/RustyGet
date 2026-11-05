@@ -171,9 +171,7 @@ bool Maintenance::ReadPackageInfoStr(const char* key, CString& value)
 	const char* p = (const char*)packageInfo + valStart;
 	size_t len = valLen;
 
-	value.Reserve(len);
-	strncpy(value, p, len);
-	value[len] = '\0';
+	value.Set(len > 0 ? p : "", (int)len);
 
 	WebUtil::JsonDecode(value);
 

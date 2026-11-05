@@ -6059,6 +6059,26 @@ int nzbget_rs_dqh_nzbfile_should_trim_sax_chars(
 int nzbget_rs_dqh_repair_ctrl_map_par_stage_to_post_stage(
     int par_stage, int pt_loading_pars, int pt_verifying_sources,
     int pt_repairing, int pt_verifying_repaired);
+const char* nzbget_rs_dqh_parchecker_cmdline_err_str(int res);
+const char* nzbget_rs_dqh_parchecker_stage_message(int stage);
+const char* nzbget_rs_dqh_post_script_status_name(int status);
+int nzbget_rs_dqh_post_script_deprecated_status_code(int status);
+const char* nzbget_rs_dqh_scheduler_command_name(int command);
+NzbgetRsBuf nzbget_rs_dqh_ext_mgr_format_update_backup_path(
+    const char* target_path, size_t target_path_len);
+NzbgetRsBuf nzbget_rs_dqh_ext_mgr_format_lookup_error(
+    const char* ext_name, size_t ext_name_len, int kind);
+NzbgetRsBuf nzbget_rs_dqh_ext_mgr_format_install_or_delete_error(
+    const char* path, size_t path_len, const char* detail, size_t detail_len,
+    int kind);
+NzbgetRsBuf nzbget_rs_dqh_ext_mgr_format_compound_update_error(
+    const char* primary_err, size_t primary_err_len,
+    const char* path1, size_t path1_len,
+    const char* path2, size_t path2_len,
+    const char* ec_msg, size_t ec_msg_len,
+    int kind);
+NzbgetRsBuf nzbget_rs_dqh_options_merge_script_list(
+    const char* existing, const char* add_list);
 
 #include "nzbget_tls_cipher.h"
 

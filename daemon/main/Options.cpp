@@ -1686,32 +1686,25 @@ void Options::MergeOldScriptOption(OptEntries* optEntries, const char* optname, 
 
 	const char* scriptList = optEntry->GetValue();
 
-	Tokenizer tok(scriptList, ",;");
-	while (const char* scriptName = tok.Next())
-	{
-		// merge into global "Extensions"
-		if (!HasScript(extensionsOpt->m_value, scriptName))
-		{
-			if (!extensionsOpt->m_value.Empty())
-			{
-				extensionsOpt->m_value.Append(",");
-			}
-			extensionsOpt->m_value.Append(scriptName);
-		}
+	NzbgetRsBuf globalMergedBuf = nzbget_rs_dqh_options_merge_script_list(
+		extensionsOpt->m_value, scriptList);
+	extensionsOpt->m_value.Set(
+		globalMergedBuf.data ? globalMergedBuf.data : "", (int)globalMergedBuf.len);
+	nzbget_rs_free(globalMergedBuf);
 
-		// merge into categories' "Extensions" (if not empty)
-		if (mergeCategories)
+	// merge into categories' "Extensions" (if not empty)
+	if (mergeCategories)
+	{
+		for (OptEntry& opt : optEntries)
 		{
-			for (OptEntry& opt : optEntries)
+			if (nzbget_rs_options_is_category_extensions_opt(opt.GetName()) != 0 &&
+				!opt.m_value.Empty())
 			{
-				if (nzbget_rs_options_is_category_extensions_opt(opt.GetName()) != 0)
-				{
-					if (!opt.m_value.Empty() && !HasScript(opt.m_value, scriptName))
-					{
-						opt.m_value.Append(",");
-						opt.m_value.Append(scriptName);
-					}
-				}
+				NzbgetRsBuf catMergedBuf = nzbget_rs_dqh_options_merge_script_list(
+					opt.m_value, scriptList);
+				opt.m_value.Set(
+					catMergedBuf.data ? catMergedBuf.data : "", (int)catMergedBuf.len);
+				nzbget_rs_free(catMergedBuf);
 			}
 		}
 	}

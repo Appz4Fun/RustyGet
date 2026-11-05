@@ -269,17 +269,10 @@ int NCursesFrontend::CalcQueueSize()
 
 void NCursesFrontend::PlotLine(const char* str, int row, int pos, int colorPair)
 {
-	size_t size = Util::SafeIntCast<int, size_t>(m_screenWidth + 1);
-	std::string buffer(size, '\0');
-	snprintf(buffer.data(), size, "%-*s", m_screenWidth, str);
-
-	if (Util::CmpGreater(size, m_screenWidth - pos) && m_screenWidth - pos < MAX_SCREEN_WIDTH)
-	{
-		size = Util::SafeIntCast<int, size_t>(m_screenWidth - pos);
-		buffer.resize(size);
-	}
-
-	PlotText(buffer.c_str(), row, pos, colorPair, false);
+	NzbgetRsBuf lineBuf = nzbget_rs_dqh_ncurses_format_plot_line(
+		str, m_screenWidth, pos, MAX_SCREEN_WIDTH);
+	PlotText(lineBuf.data ? lineBuf.data : "", row, pos, colorPair, false);
+	nzbget_rs_free(lineBuf);
 }
 
 void NCursesFrontend::PlotText(const char * string, int row, int pos, int colorPair, bool blink)

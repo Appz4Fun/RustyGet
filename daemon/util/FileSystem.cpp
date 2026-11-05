@@ -677,7 +677,9 @@ CString FileSystem::ExpandFileName(const char* filename)
 	{
 		char curDir[MAX_PATH + 1];
 		getcwd(curDir, sizeof(curDir) - 1); // 1 char reserved for adding backslash
-		result.Format("%s/%s", curDir, filename + skipDotSlash);
+		NzbgetRsBuf expBuf = nzbget_rs_dqh_fs_format_expanded_rel_path(curDir, filename + skipDotSlash);
+		result.Set(expBuf.data ? expBuf.data : "", (int)expBuf.len);
+		nzbget_rs_free(expBuf);
 	}
 	else
 	{

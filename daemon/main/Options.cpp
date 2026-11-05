@@ -933,79 +933,97 @@ const char* Options::GetOption(const char* optname)
 	return nullptr;
 }
 
+namespace
+{
+BString<100> IndexedOptName(const char* prefix, int n, const char* field)
+{
+	NzbgetRsBuf buf = nzbget_rs_dqh_options_format_indexed_opt_name(prefix, n, field);
+	BString<100> res;
+	res.Set(buf.data ? buf.data : "", (int)buf.len);
+	nzbget_rs_free(buf);
+	return res;
+}
+}
+
 void Options::InitServers()
 {
 	int n = 1;
 	while (true)
 	{
-		const char* nactive = GetOption(BString<100>("Server%i.Active", n));
+		BString<100> activeOpt = IndexedOptName("Server", n, "Active");
+		const char* nactive = GetOption(activeOpt);
 		bool active = true;
 		if (nactive)
 		{
-			active = (bool)ParseEnumValue(BString<100>("Server%i.Active", n), BoolCount, BoolNames, BoolValues);
+			active = (bool)ParseEnumValue(activeOpt, BoolCount, BoolNames, BoolValues);
 		}
 
-		const char* nname = GetOption(BString<100>("Server%i.Name", n));
-		const char* nlevel = GetOption(BString<100>("Server%i.Level", n));
-		const char* ngroup = GetOption(BString<100>("Server%i.Group", n));
-		const char* nhost = GetOption(BString<100>("Server%i.Host", n));
-		const char* nport = GetOption(BString<100>("Server%i.Port", n));
-		const char* nusername = GetOption(BString<100>("Server%i.Username", n));
-		const char* npassword = GetOption(BString<100>("Server%i.Password", n));
+		const char* nname = GetOption(IndexedOptName("Server", n, "Name"));
+		const char* nlevel = GetOption(IndexedOptName("Server", n, "Level"));
+		const char* ngroup = GetOption(IndexedOptName("Server", n, "Group"));
+		const char* nhost = GetOption(IndexedOptName("Server", n, "Host"));
+		const char* nport = GetOption(IndexedOptName("Server", n, "Port"));
+		const char* nusername = GetOption(IndexedOptName("Server", n, "Username"));
+		const char* npassword = GetOption(IndexedOptName("Server", n, "Password"));
 
-		const char* njoingroup = GetOption(BString<100>("Server%i.JoinGroup", n));
+		BString<100> joinGroupOpt = IndexedOptName("Server", n, "JoinGroup");
+		const char* njoingroup = GetOption(joinGroupOpt);
 		bool joinGroup = false;
 		if (njoingroup)
 		{
-			joinGroup = (bool)ParseEnumValue(BString<100>("Server%i.JoinGroup", n), BoolCount, BoolNames, BoolValues);
+			joinGroup = (bool)ParseEnumValue(joinGroupOpt, BoolCount, BoolNames, BoolValues);
 		}
 
-		const char* noptional = GetOption(BString<100>("Server%i.Optional", n));
+		BString<100> optionalOpt = IndexedOptName("Server", n, "Optional");
+		const char* noptional = GetOption(optionalOpt);
 		bool optional = false;
 		if (noptional)
 		{
-			optional = (bool)ParseEnumValue(BString<100>("Server%i.Optional", n), BoolCount, BoolNames, BoolValues);
+			optional = (bool)ParseEnumValue(optionalOpt, BoolCount, BoolNames, BoolValues);
 		}
 
-		const char* ntls = GetOption(BString<100>("Server%i.Encryption", n));
+		BString<100> tlsOpt = IndexedOptName("Server", n, "Encryption");
+		const char* ntls = GetOption(tlsOpt);
 		bool tls = false;
 		if (ntls)
 		{
-			tls = (bool)ParseEnumValue(BString<100>("Server%i.Encryption", n), BoolCount, BoolNames, BoolValues);
+			tls = (bool)ParseEnumValue(tlsOpt, BoolCount, BoolNames, BoolValues);
 #ifdef DISABLE_TLS
 			if (tls)
 			{
 				ConfigError("Invalid value for option \"%s\": program was compiled without TLS/SSL-support",
-					*BString<100>("Server%i.Encryption", n));
+					*tlsOpt);
 				tls = false;
 			}
 #endif
 			m_tls |= tls;
 		}
 
-		const char* ncertveriflevel = GetOption(BString<100>("Server%i.CertVerification", n));
+		BString<100> certVerifOpt = IndexedOptName("Server", n, "CertVerification");
+		const char* ncertveriflevel = GetOption(certVerifOpt);
 		int certveriflevel = ECertVerifLevel::cvStrict;
 		if (ncertveriflevel)
 		{
 			const char* CertVerifNames[] = { "none", "minimal", "strict" };
 			const int CertVerifValues[] = { ECertVerifLevel::cvNone, ECertVerifLevel::cvMinimal, ECertVerifLevel::cvStrict };
 			const int CertVerifCount = ECertVerifLevel::Count;
-			certveriflevel = ParseEnumValue(BString<100>("Server%i.CertVerification", n), CertVerifCount, CertVerifNames, CertVerifValues);
+			certveriflevel = ParseEnumValue(certVerifOpt, CertVerifCount, CertVerifNames, CertVerifValues);
 		}
 
-		const char* nipversion = GetOption(BString<100>("Server%i.IpVersion", n));
+		BString<100> ipVerOpt = IndexedOptName("Server", n, "IpVersion");
+		const char* nipversion = GetOption(ipVerOpt);
 		int ipversion = 0;
 		if (nipversion)
 		{
 			const char* IpVersionNames[] = {"auto", "ipv4", "ipv6"};
 			const int IpVersionValues[] = {0, 4, 6};
 			const int IpVersionCount = 3;
-			ipversion = ParseEnumValue(BString<100>("Server%i.IpVersion", n), IpVersionCount, IpVersionNames, IpVersionValues);
+			ipversion = ParseEnumValue(ipVerOpt, IpVersionCount, IpVersionNames, IpVersionValues);
 		}
 
-		const char* ncipher = GetOption(BString<100>("Server%i.Cipher", n));
-		const char* nconnections = GetOption(BString<100>("Server%i.Connections", n));
-		const char* nretention = GetOption(BString<100>("Server%i.Retention", n));
+		const char* ncipher = GetOption(IndexedOptName("Server", n, "Cipher"));
+		const char* nconnections = GetOption(IndexedOptName("Server", n, "Connections"));
+		const char* nretention = GetOption(IndexedOptName("Server", n, "Retention"));
 
 		bool definition = nactive || nname || nlevel || ngroup || nhost || nport || noptional ||
 			nusername || npassword || nconnections || njoingroup || ntls || ncipher || nretention;
@@ -1049,18 +1067,20 @@ void Options::InitCategories()
 	int n = 1;
 	while (true)
 	{
-		const char* nname = GetOption(BString<100>("Category%i.Name", n));
-		const char* ndestdir = GetOption(BString<100>("Category%i.DestDir", n));
+		const char* nname = GetOption(IndexedOptName("Category", n, "Name"));
+		BString<100> destDirOpt = IndexedOptName("Category", n, "DestDir");
+		const char* ndestdir = GetOption(destDirOpt);
 
-		const char* nunpack = GetOption(BString<100>("Category%i.Unpack", n));
+		BString<100> unpackOpt = IndexedOptName("Category", n, "Unpack");
+		const char* nunpack = GetOption(unpackOpt);
 		bool unpack = true;
 		if (nunpack)
 		{
-			unpack = (bool)ParseEnumValue(BString<100>("Category%i.Unpack", n), BoolCount, BoolNames, BoolValues);
+			unpack = (bool)ParseEnumValue(unpackOpt, BoolCount, BoolNames, BoolValues);
 		}
 
-		const char* nextensions = GetOption(BString<100>("Category%i.Extensions", n));
-		const char* naliases = GetOption(BString<100>("Category%i.Aliases", n));
+		const char* nextensions = GetOption(IndexedOptName("Category", n, "Extensions"));
+		const char* naliases = GetOption(IndexedOptName("Category", n, "Aliases"));
 
 		bool definition = nname || ndestdir || nunpack || nextensions || naliases;
 		int catDefState = nzbget_rs_rol_options_check_category_or_feed_def(
@@ -1076,7 +1096,7 @@ void Options::InitCategories()
 			CString destDir;
 			if (ndestdir && ndestdir[0] != '\0')
 			{
-				CheckDir(destDir, BString<100>("Category%i.DestDir", n), m_destDir, false, false);
+				CheckDir(destDir, destDirOpt, m_destDir, false, false);
 			}
 
 			m_categories.emplace_back(nname, destDir, unpack, nextensions);
@@ -1106,40 +1126,43 @@ void Options::InitFeeds()
 	int n = 1;
 	while (true)
 	{
-		const char* nname = GetOption(BString<100>("Feed%i.Name", n));
-		const char* nurl = GetOption(BString<100>("Feed%i.URL", n));
-		const char* nfilter = GetOption(BString<100>("Feed%i.Filter", n));
-		const char* ncategory = GetOption(BString<100>("Feed%i.Category", n));
-		const char* nextensions = GetOption(BString<100>("Feed%i.Extensions", n));
+		const char* nname = GetOption(IndexedOptName("Feed", n, "Name"));
+		const char* nurl = GetOption(IndexedOptName("Feed", n, "URL"));
+		const char* nfilter = GetOption(IndexedOptName("Feed", n, "Filter"));
+		const char* ncategory = GetOption(IndexedOptName("Feed", n, "Category"));
+		const char* nextensions = GetOption(IndexedOptName("Feed", n, "Extensions"));
 
-		const char* nbacklog = GetOption(BString<100>("Feed%i.Backlog", n));
+		BString<100> backlogOpt = IndexedOptName("Feed", n, "Backlog");
+		const char* nbacklog = GetOption(backlogOpt);
 		bool backlog = true;
 		if (nbacklog)
 		{
-			backlog = (bool)ParseEnumValue(BString<100>("Feed%i.Backlog", n), BoolCount, BoolNames, BoolValues);
+			backlog = (bool)ParseEnumValue(backlogOpt, BoolCount, BoolNames, BoolValues);
 		}
 
-		const char* npausenzb = GetOption(BString<100>("Feed%i.PauseNzb", n));
+		BString<100> pauseNzbOpt = IndexedOptName("Feed", n, "PauseNzb");
+		const char* npausenzb = GetOption(pauseNzbOpt);
 		bool pauseNzb = false;
 		if (npausenzb)
 		{
-			pauseNzb = (bool)ParseEnumValue(BString<100>("Feed%i.PauseNzb", n), BoolCount, BoolNames, BoolValues);
+			pauseNzb = (bool)ParseEnumValue(pauseNzbOpt, BoolCount, BoolNames, BoolValues);
 		}
 
-		const char* ncategorySource = GetOption(BString<100>("Feed%i.CategorySource", n));
+		const char* ncategorySource = GetOption(IndexedOptName("Feed", n, "CategorySource"));
 		const auto categorySource = ParseCategorySource(ncategorySource);
 
-		const char* ninterval = GetOption(BString<100>("Feed%i.Interval", n));
-		const char* npriority = GetOption(BString<100>("Feed%i.Priority", n));
+		const char* ninterval = GetOption(IndexedOptName("Feed", n, "Interval"));
+		const char* npriority = GetOption(IndexedOptName("Feed", n, "Priority"));
 
-		const char* ncertveriflevel = GetOption(BString<100>("Feed%i.CertVerification", n));
+		BString<100> certVerifOpt = IndexedOptName("Feed", n, "CertVerification");
+		const char* ncertveriflevel = GetOption(certVerifOpt);
 		int certveriflevel = ECertVerifLevel::cvStrict;
 		if (ncertveriflevel)
 		{
 			const char* CertVerifNames[] = { "none", "minimal", "strict" };
 			const int CertVerifValues[] = { ECertVerifLevel::cvNone, ECertVerifLevel::cvMinimal, ECertVerifLevel::cvStrict };
 			const int CertVerifCount = ECertVerifLevel::Count;
-			certveriflevel = ParseEnumValue(BString<100>("Feed%i.CertVerification", n), CertVerifCount, CertVerifNames, CertVerifValues);
+			certveriflevel = ParseEnumValue(certVerifOpt, CertVerifCount, CertVerifNames, CertVerifValues);
 		}
 
 		bool definition = nname || nurl || nfilter || ncategory || nbacklog || npausenzb ||
@@ -1185,12 +1208,13 @@ void Options::InitScheduler()
 {
 	for (int n = 1; ; n++)
 	{
-		const char* time = GetOption(BString<100>("Task%i.Time", n));
-		const char* weekDays = GetOption(BString<100>("Task%i.WeekDays", n));
-		const char* command = GetOption(BString<100>("Task%i.Command", n));
-		const char* downloadRate = GetOption(BString<100>("Task%i.DownloadRate", n));
-		const char* process = GetOption(BString<100>("Task%i.Process", n));
-		const char* param = GetOption(BString<100>("Task%i.Param", n));
+		const char* time = GetOption(IndexedOptName("Task", n, "Time"));
+		const char* weekDays = GetOption(IndexedOptName("Task", n, "WeekDays"));
+		BString<100> cmdOpt = IndexedOptName("Task", n, "Command");
+		const char* command = GetOption(cmdOpt);
+		const char* downloadRate = GetOption(IndexedOptName("Task", n, "DownloadRate"));
+		const char* process = GetOption(IndexedOptName("Task", n, "Process"));
+		const char* param = GetOption(IndexedOptName("Task", n, "Param"));
 
 		int paramSource = 0, definition = 0, completed = 0;
 		nzbget_rs_tpr_options_resolve_scheduler_task_state(
@@ -1236,7 +1260,7 @@ void Options::InitScheduler()
 		const int CommandCount = 27;
 		bool knownCommand = nzbget_rs_rco_options_lookup_scheduler_command(command) >= 0;
 		ESchedulerCommand taskCommand = (ESchedulerCommand)ParseEnumValue(
-			BString<100>("Task%i.Command", n), CommandCount, CommandNames, CommandValues);
+			cmdOpt, CommandCount, CommandNames, CommandValues);
 		if (!knownCommand)
 		{
 			continue;
@@ -1578,11 +1602,11 @@ void Options::CheckOptions()
 	// Rule 7.1: ServerX.Encryption=no with ServerX.Cipher configured
 	for (int n = 1; ; n++)
 	{
-		BString<100> encOpt("Server%i.Encryption", n);
-		BString<100> cipherOpt("Server%i.Cipher", n);
+		BString<100> encOpt = IndexedOptName("Server", n, "Encryption");
+		BString<100> cipherOpt = IndexedOptName("Server", n, "Cipher");
 		const char* ntls = GetOption(encOpt);
 		const char* ncipher = GetOption(cipherOpt);
-		if (!ntls && !ncipher && !GetOption(BString<100>("Server%i.Host", n)) && !GetOption(BString<100>("Server%i.Name", n)))
+		if (!ntls && !ncipher && !GetOption(IndexedOptName("Server", n, "Host")) && !GetOption(IndexedOptName("Server", n, "Name")))
 		{
 			break;
 		}

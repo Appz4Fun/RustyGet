@@ -5915,6 +5915,16 @@ NzbgetRsBuf nzbget_rs_dqh_log_format_deleting_old_msg(const char* filename);
 NzbgetRsBuf nzbget_rs_dqh_log_format_rotated_path(
     const char* directory, char sep, const char* base_name,
     int32_t year, int32_t month, int32_t mday, const char* base_ext);
+NzbgetRsBuf nzbget_rs_dqh_options_format_indexed_opt_name(
+    const char* prefix, int32_t idx, const char* field);
+NzbgetRsBuf nzbget_rs_dqh_nzbget_format_pid_line(int32_t pid);
+NzbgetRsBuf nzbget_rs_dqh_ncurses_format_plot_line(
+    const char* text, int32_t screen_width, int32_t pos, int32_t max_screen_width);
+NzbgetRsBuf nzbget_rs_dqh_fs_format_expanded_rel_path(
+    const char* cur_dir, const char* rel_filename);
+NzbgetRsBuf nzbget_rs_dqh_benchmark_format_unique_filename(int64_t epoch_ticks);
+size_t nzbget_rs_dqh_benchmark_resolve_block_size(
+    size_t block_size_bytes, size_t default_block_size);
 
 #include "nzbget_tls_cipher.h"
 

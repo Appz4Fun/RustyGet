@@ -1183,8 +1183,12 @@ void NZBGet::Daemonize()
 	// record pid to lockfile
 	if (lfp > -1)
 	{
-		BString<100> str("%d\n", getpid());
-		write(lfp, str, strlen(str));
+		NzbgetRsBuf pidBuf = nzbget_rs_dqh_nzbget_format_pid_line((int32_t)getpid());
+		if (pidBuf.data && pidBuf.len > 0)
+		{
+			write(lfp, pidBuf.data, pidBuf.len);
+		}
+		nzbget_rs_free(pidBuf);
 	}
 
 	// ignore unwanted signals

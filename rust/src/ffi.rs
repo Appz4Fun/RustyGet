@@ -34780,6 +34780,89 @@ pub unsafe extern "C" fn nzbget_rs_dqh_log_format_rotated_path(
     ))
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_options_format_indexed_opt_name(
+    prefix: *const c_char,
+    idx: c_int,
+    field: *const c_char,
+) -> RsBuf {
+    let p = if prefix.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(prefix).to_bytes()
+    };
+    let f = if field.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(field).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_options_format_indexed_opt_name(
+        p, idx, f,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_nzbget_format_pid_line(pid: c_int) -> RsBuf {
+    into_buf(crate::dupequeuehealth::dqh_nzbget_format_pid_line(pid))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_ncurses_format_plot_line(
+    text: *const c_char,
+    screen_width: c_int,
+    pos: c_int,
+    max_screen_width: c_int,
+) -> RsBuf {
+    let t = if text.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(text).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_ncurses_format_plot_line(
+        t,
+        screen_width,
+        pos,
+        max_screen_width,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_fs_format_expanded_rel_path(
+    cur_dir: *const c_char,
+    rel_filename: *const c_char,
+) -> RsBuf {
+    let c = if cur_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(cur_dir).to_bytes()
+    };
+    let r = if rel_filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(rel_filename).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_fs_format_expanded_rel_path(c, r))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_benchmark_format_unique_filename(
+    epoch_ticks: i64,
+) -> RsBuf {
+    into_buf(crate::dupequeuehealth::dqh_benchmark_format_unique_filename(epoch_ticks))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_benchmark_resolve_block_size(
+    block_size_bytes: usize,
+    default_block_size: usize,
+) -> usize {
+    crate::dupequeuehealth::dqh_benchmark_resolve_block_size(
+        block_size_bytes,
+        default_block_size,
+    )
+}
+
+
 
 
 

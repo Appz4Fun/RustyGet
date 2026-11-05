@@ -1978,6 +1978,72 @@ pub fn dqh_log_format_rotated_path(
     out
 }
 
+/// Formats `"<prefix><idx>.<field>"` for `Options::InitServers`, `Options::InitCategories`,
+/// `Options::InitFeeds`, and `Options::InitScheduler`.
+pub fn dqh_options_format_indexed_opt_name(prefix: &[u8], idx: i32, field: &[u8]) -> Vec<u8> {
+    let idx_str = idx.to_string();
+    let mut out = Vec::with_capacity(prefix.len() + idx_str.len() + 1 + field.len());
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(idx_str.as_bytes());
+    out.push(b'.');
+    out.extend_from_slice(field);
+    out
+}
+
+/// Formats `"<pid>\n"` for `NZBGet::Daemonize`.
+pub fn dqh_nzbget_format_pid_line(pid: i32) -> Vec<u8> {
+    format!("{pid}\n").into_bytes()
+}
+
+/// Formats the padded/truncated line buffer for `NCursesFrontend::PlotLine`.
+pub fn dqh_ncurses_format_plot_line(
+    text: &[u8],
+    screen_width: i32,
+    pos: i32,
+    max_screen_width: i32,
+) -> Vec<u8> {
+    let w = screen_width.max(0) as usize;
+    let mut out = Vec::with_capacity(w);
+    let copy_len = text.len().min(w);
+    out.extend_from_slice(&text[..copy_len]);
+    if copy_len < w {
+        out.resize(w, b' ');
+    }
+    let size = (w + 1) as i64;
+    let rem = (screen_width - pos) as i64;
+    if size > rem && rem < max_screen_width as i64 {
+        let target_len = rem.max(0) as usize;
+        out.truncate(target_len);
+    }
+    out
+}
+
+/// Formats `"<cur_dir>/<rel_filename>"` for `FileSystem::ExpandFileName`.
+pub fn dqh_fs_format_expanded_rel_path(cur_dir: &[u8], rel_filename: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(cur_dir.len() + 1 + rel_filename.len());
+    out.extend_from_slice(cur_dir);
+    out.push(b'/');
+    out.extend_from_slice(rel_filename);
+    out
+}
+
+/// Formats `"nzbget_disktest_<epoch_ticks>.bin"` for `Benchmark::GetUniqueFilename`.
+pub fn dqh_benchmark_format_unique_filename(epoch_ticks: i64) -> Vec<u8> {
+    format!("nzbget_disktest_{epoch_ticks}.bin").into_bytes()
+}
+
+/// Resolves the benchmark block size (`default_block_size` when `block_size_bytes == 0`).
+pub fn dqh_benchmark_resolve_block_size(
+    block_size_bytes: usize,
+    default_block_size: usize,
+) -> usize {
+    if block_size_bytes == 0 {
+        default_block_size
+    } else {
+        block_size_bytes
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2768,5 +2834,28 @@ mod tests {
             dqh_log_format_rotated_path(b"/var/log", b'/', b"nzbget", 2026, 11, 5, b".log"),
             b"/var/log/nzbget-2026-11-05.log"
         );
+        assert_eq!(
+            dqh_options_format_indexed_opt_name(b"Server", 3, b"Active"),
+            b"Server3.Active"
+        );
+        assert_eq!(dqh_nzbget_format_pid_line(4321), b"4321\n");
+        assert_eq!(
+            dqh_ncurses_format_plot_line(b"abc", 6, 0, 500),
+            b"abc   "
+        );
+        assert_eq!(
+            dqh_ncurses_format_plot_line(b"abcdef", 6, 2, 500),
+            b"abcd"
+        );
+        assert_eq!(
+            dqh_fs_format_expanded_rel_path(b"/work/dir", b"sub/file.nzb"),
+            b"/work/dir/sub/file.nzb"
+        );
+        assert_eq!(
+            dqh_benchmark_format_unique_filename(123456789),
+            b"nzbget_disktest_123456789.bin"
+        );
+        assert_eq!(dqh_benchmark_resolve_block_size(0, 4096), 4096);
+        assert_eq!(dqh_benchmark_resolve_block_size(8192, 4096), 8192);
     }
 }

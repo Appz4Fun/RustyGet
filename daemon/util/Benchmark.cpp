@@ -62,8 +62,11 @@ namespace Benchmark
 
 		std::string GetUniqueFilename()
 		{
-			return "nzbget_disktest_" + std::to_string(
-				high_resolution_clock::now().time_since_epoch().count()) + ".bin";
+			NzbgetRsBuf fnBuf = nzbget_rs_dqh_benchmark_format_unique_filename(
+				(int64_t)high_resolution_clock::now().time_since_epoch().count());
+			std::string res(fnBuf.data ? fnBuf.data : "", fnBuf.len);
+			nzbget_rs_free(fnBuf);
+			return res;
 		}
 
 		uint64_t ResolveMaxFileSize(const fs::path& dir, size_t blockSize, uint64_t requested)
@@ -105,7 +108,8 @@ namespace Benchmark
 			throw std::invalid_argument("The buffer size is too big");
 		}
 
-		const size_t blockSize = blockSizeBytes == 0 ? DEFAULT_BLOCK_SIZE : blockSizeBytes;
+		const size_t blockSize = nzbget_rs_dqh_benchmark_resolve_block_size(
+			blockSizeBytes, DEFAULT_BLOCK_SIZE);
 		const fs::path dirPath = fs::u8path(dir);
 
 		fs::error_code ec;

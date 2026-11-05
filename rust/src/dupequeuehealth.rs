@@ -768,6 +768,137 @@ pub fn dqh_prepost_permille_to_percent(permille: i32) -> f64 {
     f64::from(permille) / 10.0
 }
 
+/// Formats the queued duplicate skip warning message in `DupeCoordinator::NzbFound`.
+pub fn dqh_dupecoord_format_queued_dupe_skip_message(
+    name: &[u8],
+    queued_name: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(name.len() + queued_name.len() + 48);
+    out.extend_from_slice(b"Skipping duplicate ");
+    out.extend_from_slice(name);
+    if name == queued_name {
+        out.extend_from_slice(b", already queued");
+    } else {
+        out.extend_from_slice(b", already queued as ");
+        out.extend_from_slice(queued_name);
+    }
+    out
+}
+
+/// Formats the history duplicate skip warning message in `DupeCoordinator::NzbFound`.
+pub fn dqh_dupecoord_format_history_dupe_skip_message(
+    name: &[u8],
+    dupe_name: &[u8],
+    same_content: bool,
+    good: bool,
+) -> Vec<u8> {
+    let reason: &[u8] = if same_content {
+        b"exactly same content (the same posting, no new articles)"
+    } else if good {
+        b"good status"
+    } else {
+        b"success status"
+    };
+    let mut out = Vec::with_capacity(name.len() + dupe_name.len() + reason.len() + 48);
+    out.extend_from_slice(b"Skipping duplicate ");
+    out.extend_from_slice(name);
+    if name == dupe_name {
+        out.extend_from_slice(b", found in history with ");
+    } else {
+        out.extend_from_slice(b", found in history ");
+        out.extend_from_slice(dupe_name);
+        out.extend_from_slice(b" with ");
+    }
+    out.extend_from_slice(reason);
+    out
+}
+
+/// Evaluates whether `DupeCoordinator::NzbCompleted` should check `FilesOnDisk` to stop other
+/// queued duplicates of the same key, and resolves the group delete action.
+#[allow(clippy::too_many_arguments)]
+pub fn dqh_dupecoord_eval_completed_stop_others(
+    dupe_health: bool,
+    dupe_key_empty: bool,
+    delete_status: i32,
+    ds_none: i32,
+    is_dupe_success: bool,
+    health_check: i32,
+    hc_park: i32,
+    ea_group_park_delete: i32,
+    ea_group_dupe_delete: i32,
+) -> (bool, i32) {
+    let should_check =
+        dupe_health && !dupe_key_empty && delete_status == ds_none && is_dupe_success;
+    let delete_action = if health_check == hc_park {
+        ea_group_park_delete
+    } else {
+        ea_group_dupe_delete
+    };
+    (should_check, delete_action)
+}
+
+/// Returns the NUL-terminated non-failover reason in `DupeCoordinator::NoBackupReason`
+/// when `!FailsOver(nzbInfo)`.
+pub fn dqh_dupecoord_format_non_failover_reason(dupe_mode: i32, dm_force: i32) -> &'static [u8] {
+    if dupe_mode == dm_force {
+        b"its DupeMode is force\0"
+    } else {
+        b"its DupeMode is all\0"
+    }
+}
+
+/// Returns the NUL-terminated mark-status label for `DupeCoordinator::HistoryMark`.
+pub fn dqh_dupecoord_mark_status_label(mark_status: i32) -> &'static [u8] {
+    match mark_status {
+        1 => b"bad\0",
+        2 => b"good\0",
+        3 => b"success\0",
+        _ => b"NONE\0",
+    }
+}
+
+/// Formats `NzbInfo::MakeNiceUrlName` (`DownloadInfo.cpp`).
+pub fn dqh_nzbinfo_format_nice_url_name(
+    url_str: &[u8],
+    nzb_nicename: &[u8],
+    has_nzb_filename: bool,
+    url_valid: bool,
+    url_host: &[u8],
+    url_resource: &[u8],
+) -> Vec<u8> {
+    if has_nzb_filename {
+        let mut out = Vec::with_capacity(nzb_nicename.len() + url_host.len() + 3);
+        out.extend_from_slice(nzb_nicename);
+        out.extend_from_slice(b" @ ");
+        out.extend_from_slice(url_host);
+        out
+    } else if url_valid {
+        let mut out = Vec::with_capacity(url_host.len() + url_resource.len());
+        out.extend_from_slice(url_host);
+        out.extend_from_slice(url_resource);
+        out
+    } else {
+        url_str.to_vec()
+    }
+}
+
+/// Formats the final leaf directory suffix (`"%c%s-%i"` or `"%c%s"`) in `NzbInfo::BuildFinalDirName`.
+pub fn dqh_nzbinfo_format_final_dir_suffix(
+    sep: u8,
+    name_empty: bool,
+    dir_name: &[u8],
+    nzb_id: i32,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(dir_name.len() + 16);
+    out.push(sep);
+    if name_empty {
+        out.extend_from_slice(format!("nzb-{nzb_id}").as_bytes());
+    } else {
+        out.extend_from_slice(dir_name);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1076,5 +1207,64 @@ mod tests {
             b"active\0"
         );
         assert_eq!(dqh_prepost_permille_to_percent(985), 98.5);
+        assert_eq!(
+            dqh_dupecoord_format_queued_dupe_skip_message(b"Rel.A", b"Rel.A"),
+            b"Skipping duplicate Rel.A, already queued"
+        );
+        assert_eq!(
+            dqh_dupecoord_format_queued_dupe_skip_message(b"Rel.A", b"Rel.B"),
+            b"Skipping duplicate Rel.A, already queued as Rel.B"
+        );
+        assert_eq!(
+            dqh_dupecoord_format_history_dupe_skip_message(b"Rel.A", b"Rel.A", false, true),
+            b"Skipping duplicate Rel.A, found in history with good status"
+        );
+        assert_eq!(
+            dqh_dupecoord_format_history_dupe_skip_message(b"Rel.A", b"Rel.B", false, false),
+            b"Skipping duplicate Rel.A, found in history Rel.B with success status"
+        );
+        assert_eq!(
+            dqh_dupecoord_eval_completed_stop_others(true, false, 0, 0, true, 4, 4, 24, 25),
+            (true, 24)
+        );
+        assert_eq!(
+            dqh_dupecoord_eval_completed_stop_others(true, true, 0, 0, true, 3, 4, 24, 25),
+            (false, 25)
+        );
+        assert_eq!(
+            dqh_dupecoord_format_non_failover_reason(2, 2),
+            b"its DupeMode is force\0"
+        );
+        assert_eq!(
+            dqh_dupecoord_format_non_failover_reason(1, 2),
+            b"its DupeMode is all\0"
+        );
+        assert_eq!(dqh_dupecoord_mark_status_label(1), b"bad\0");
+        assert_eq!(dqh_dupecoord_mark_status_label(2), b"good\0");
+        assert_eq!(dqh_dupecoord_mark_status_label(3), b"success\0");
+        assert_eq!(dqh_dupecoord_mark_status_label(0), b"NONE\0");
+        assert_eq!(
+            dqh_nzbinfo_format_nice_url_name(
+                b"https://host/p",
+                b"Movie",
+                true,
+                true,
+                b"host",
+                b"/p"
+            ),
+            b"Movie @ host"
+        );
+        assert_eq!(
+            dqh_nzbinfo_format_nice_url_name(b"https://host/p", b"", false, true, b"host", b"/p"),
+            b"host/p"
+        );
+        assert_eq!(
+            dqh_nzbinfo_format_final_dir_suffix(b'/', true, b"", 42),
+            b"/nzb-42"
+        );
+        assert_eq!(
+            dqh_nzbinfo_format_final_dir_suffix(b'/', false, b"MyRelease", 42),
+            b"/MyRelease"
+        );
     }
 }

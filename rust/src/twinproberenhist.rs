@@ -873,6 +873,150 @@ pub fn tpr_history_coord_retry_action_labels(
     (wrong_type, missing_dir, start_msg)
 }
 
+/// Evaluates whether a feed history entry is older than `border_date` (`FeedCoordinator::CleanupHistory`),
+/// returning `Some(url_len_without_query)` when it should be deleted, or `None` to keep it.
+pub fn tpr_feed_coord_should_delete_history_entry(
+    last_seen: i64,
+    border_date: i64,
+    url: &[u8],
+) -> Option<usize> {
+    if last_seen < border_date {
+        Some(url.iter().position(|&b| b == b'?').unwrap_or(url.len()))
+    } else {
+        None
+    }
+}
+
+/// Computes the feed item age (`cur_time - item_time`) with wrapping semantics (`FeedFilter::Field` case 5).
+pub fn tpr_feed_filter_calc_age(cur_time: i64, item_time: i64) -> i64 {
+    cur_time.wrapping_sub(item_time)
+}
+
+/// Applies wrapping signed addition for `addPriority` and `addDupeScore` in `FeedFilter::Apply`.
+pub fn tpr_feed_filter_wrapping_add_i32(cur: i32, delta: i32) -> i32 {
+    cur.wrapping_add(delta)
+}
+
+/// Maps the filter match status code (`1 -> msAccepted`, `2 -> msRejected`, `_ -> msIgnored`)
+/// in `FeedFilter::SetMatch`.
+pub fn tpr_feed_filter_map_match_status(
+    status: i32,
+    ms_accepted: i32,
+    ms_rejected: i32,
+    ms_ignored: i32,
+) -> i32 {
+    match status {
+        1 => ms_accepted,
+        2 => ms_rejected,
+        _ => ms_ignored,
+    }
+}
+
+/// Formats the default feed name (`"Feed<id>"`) when `name` is empty (`FeedInfo::FeedInfo`).
+pub fn tpr_feed_info_default_name(id: i32) -> Vec<u8> {
+    format!("Feed{id}").into_bytes()
+}
+
+fn c_atoi_i32(bytes: &[u8]) -> i32 {
+    let mut idx = 0;
+    while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    let mut neg = false;
+    if idx < bytes.len() {
+        if bytes[idx] == b'-' {
+            neg = true;
+            idx += 1;
+        } else if bytes[idx] == b'+' {
+            idx += 1;
+        }
+    }
+    let mut acc: i64 = 0;
+    while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+        acc = acc
+            .wrapping_mul(10)
+            .wrapping_add(i64::from(bytes[idx] - b'0'));
+        idx += 1;
+    }
+    if neg {
+        acc.wrapping_neg() as i32
+    } else {
+        acc as i32
+    }
+}
+
+/// Evaluates `anySeriesId` in `FeedItemInfo::BuildDupeKey`.
+pub fn tpr_feed_item_has_any_series_id(
+    series: &[u8],
+    rage_id_str: &[u8],
+    tvdb_id_str: &[u8],
+    tvmaze_id_str: &[u8],
+    item_rage_id: i32,
+    item_tvdb_id: i32,
+    item_tvmaze_id: i32,
+) -> bool {
+    let rage = if !rage_id_str.is_empty() {
+        c_atoi_i32(rage_id_str)
+    } else {
+        item_rage_id
+    };
+    let tvdb = if !tvdb_id_str.is_empty() {
+        c_atoi_i32(tvdb_id_str)
+    } else {
+        item_tvdb_id
+    };
+    let tvmaze = if !tvmaze_id_str.is_empty() {
+        c_atoi_i32(tvmaze_id_str)
+    } else {
+        item_tvmaze_id
+    };
+    !series.is_empty() || rage != 0 || tvdb != 0 || tvmaze != 0
+}
+
+/// Formats `subCategory` for `Scanner::ProcessSubdirectory`.
+pub fn tpr_scanner_format_subcategory(category: &[u8], sep: u8, filename: &[u8]) -> Vec<u8> {
+    if category.is_empty() {
+        filename.to_vec()
+    } else {
+        let mut out = Vec::with_capacity(category.len() + 1 + filename.len());
+        out.extend_from_slice(category);
+        out.push(sep);
+        out.extend_from_slice(filename);
+        out
+    }
+}
+
+/// Computes `(present_articles, is_warning)` for missing-articles logging in `Scanner::AddFileToQueue`.
+pub fn tpr_scanner_eval_missed_articles_log(
+    total_articles: i32,
+    missed_articles: i32,
+    sev: i32,
+) -> (i32, bool) {
+    (total_articles.wrapping_sub(missed_articles), sev >= 2)
+}
+
+/// Formats a numbered external collision candidate path (`"%s%c%s_%i.%s"` or `"%s%c%s_%i"`)
+/// in `Scanner::AddExternalFile`.
+pub fn tpr_scanner_format_numbered_external_filename(
+    nzb_dir: &[u8],
+    sep: u8,
+    base_part: &[u8],
+    ext_part: &[u8],
+    has_ext: bool,
+    num: i32,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(nzb_dir.len() + base_part.len() + ext_part.len() + 16);
+    out.extend_from_slice(nzb_dir);
+    out.push(sep);
+    out.extend_from_slice(base_part);
+    out.extend_from_slice(format!("_{num}").as_bytes());
+    if has_ext {
+        out.push(b'.');
+        out.extend_from_slice(ext_part);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1170,6 +1314,54 @@ mod tests {
                 b"post-process again\0".as_slice(),
                 b"Post-processing again\0".as_slice(),
             )
+        );
+        assert_eq!(
+            tpr_feed_coord_should_delete_history_entry(
+                100,
+                200,
+                b"https://idx.example/get?apikey=secret"
+            ),
+            Some(23)
+        );
+        assert_eq!(
+            tpr_feed_coord_should_delete_history_entry(
+                200,
+                200,
+                b"https://idx.example/get?apikey=secret"
+            ),
+            None
+        );
+        assert_eq!(tpr_feed_filter_calc_age(1000, 940), 60);
+        assert_eq!(tpr_feed_filter_wrapping_add_i32(10, -3), 7);
+        assert_eq!(tpr_feed_filter_map_match_status(1, 10, 20, 30), 10);
+        assert_eq!(tpr_feed_filter_map_match_status(2, 10, 20, 30), 20);
+        assert_eq!(tpr_feed_filter_map_match_status(0, 10, 20, 30), 30);
+        assert_eq!(tpr_feed_info_default_name(3), b"Feed3");
+        assert!(tpr_feed_item_has_any_series_id(
+            b"", b"123", b"", b"", 0, 0, 0
+        ));
+        assert!(!tpr_feed_item_has_any_series_id(
+            b"", b"0", b"", b"", 99, 0, 0
+        ));
+        assert!(tpr_feed_item_has_any_series_id(
+            b"", b"", b"", b"", 0, 42, 0
+        ));
+        assert_eq!(
+            tpr_scanner_format_subcategory(b"Movies", b'/', b"HD"),
+            b"Movies/HD"
+        );
+        assert_eq!(tpr_scanner_format_subcategory(b"", b'/', b"HD"), b"HD");
+        assert_eq!(tpr_scanner_eval_missed_articles_log(100, 3, 2), (97, true));
+        assert_eq!(tpr_scanner_eval_missed_articles_log(100, 1, 1), (99, false));
+        assert_eq!(
+            tpr_scanner_format_numbered_external_filename(
+                b"/nzb", b'/', b"movie", b"nzb", true, 2
+            ),
+            b"/nzb/movie_2.nzb"
+        );
+        assert_eq!(
+            tpr_scanner_format_numbered_external_filename(b"/nzb", b'/', b"movie", b"", false, 3),
+            b"/nzb/movie_3"
         );
     }
 }

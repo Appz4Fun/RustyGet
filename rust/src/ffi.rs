@@ -32034,6 +32034,349 @@ pub unsafe extern "C" fn nzbget_rs_tpr_history_coord_retry_action_labels(
     }
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_dupecoord_format_queued_dupe_skip_message(
+    name: *const c_char,
+    queued_name: *const c_char,
+) -> RsBuf {
+    let n = if name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(name).to_bytes()
+    };
+    let q = if queued_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(queued_name).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_dupecoord_format_queued_dupe_skip_message(n, q))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_dupecoord_format_history_dupe_skip_message(
+    name: *const c_char,
+    dupe_name: *const c_char,
+    same_content: i32,
+    good: i32,
+) -> RsBuf {
+    let n = if name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(name).to_bytes()
+    };
+    let d = if dupe_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(dupe_name).to_bytes()
+    };
+    into_buf(
+        crate::dupequeuehealth::dqh_dupecoord_format_history_dupe_skip_message(
+            n,
+            d,
+            same_content != 0,
+            good != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_dupecoord_eval_completed_stop_others(
+    dupe_health: i32,
+    dupe_key_empty: i32,
+    delete_status: i32,
+    ds_none: i32,
+    is_dupe_success: i32,
+    health_check: i32,
+    hc_park: i32,
+    ea_group_park_delete: i32,
+    ea_group_dupe_delete: i32,
+    out_delete_action: *mut i32,
+) -> i32 {
+    let (should_check, delete_action) =
+        crate::dupequeuehealth::dqh_dupecoord_eval_completed_stop_others(
+            dupe_health != 0,
+            dupe_key_empty != 0,
+            delete_status,
+            ds_none,
+            is_dupe_success != 0,
+            health_check,
+            hc_park,
+            ea_group_park_delete,
+            ea_group_dupe_delete,
+        );
+    if !out_delete_action.is_null() {
+        *out_delete_action = delete_action;
+    }
+    if should_check {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_dupecoord_format_non_failover_reason(
+    dupe_mode: i32,
+    dm_force: i32,
+) -> *const c_char {
+    crate::dupequeuehealth::dqh_dupecoord_format_non_failover_reason(dupe_mode, dm_force).as_ptr()
+        as *const c_char
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_dupecoord_mark_status_label(
+    mark_status: i32,
+) -> *const c_char {
+    crate::dupequeuehealth::dqh_dupecoord_mark_status_label(mark_status).as_ptr() as *const c_char
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_nzbinfo_format_nice_url_name(
+    url_str: *const c_char,
+    nzb_nicename: *const c_char,
+    has_nzb_filename: i32,
+    url_valid: i32,
+    url_host: *const c_char,
+    url_resource: *const c_char,
+) -> RsBuf {
+    let u = if url_str.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(url_str).to_bytes()
+    };
+    let n = if nzb_nicename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(nzb_nicename).to_bytes()
+    };
+    let h = if url_host.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(url_host).to_bytes()
+    };
+    let r = if url_resource.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(url_resource).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_nzbinfo_format_nice_url_name(
+        u,
+        n,
+        has_nzb_filename != 0,
+        url_valid != 0,
+        h,
+        r,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_nzbinfo_format_final_dir_suffix(
+    sep: c_char,
+    name_empty: i32,
+    dir_name: *const c_char,
+    nzb_id: i32,
+) -> RsBuf {
+    let d = if dir_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(dir_name).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_nzbinfo_format_final_dir_suffix(
+        sep as u8,
+        name_empty != 0,
+        d,
+        nzb_id,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_feed_coord_should_delete_history_entry(
+    last_seen: i64,
+    border_date: i64,
+    url: *const c_char,
+    out_url_len_without_query: *mut usize,
+) -> i32 {
+    let u = if url.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(url).to_bytes()
+    };
+    match crate::twinproberenhist::tpr_feed_coord_should_delete_history_entry(
+        last_seen,
+        border_date,
+        u,
+    ) {
+        Some(len) => {
+            if !out_url_len_without_query.is_null() {
+                *out_url_len_without_query = len;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_feed_filter_calc_age(
+    cur_time: i64,
+    item_time: i64,
+) -> i64 {
+    crate::twinproberenhist::tpr_feed_filter_calc_age(cur_time, item_time)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_feed_filter_wrapping_add_i32(
+    cur: i32,
+    delta: i32,
+) -> i32 {
+    crate::twinproberenhist::tpr_feed_filter_wrapping_add_i32(cur, delta)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_feed_filter_map_match_status(
+    status: i32,
+    ms_accepted: i32,
+    ms_rejected: i32,
+    ms_ignored: i32,
+) -> i32 {
+    crate::twinproberenhist::tpr_feed_filter_map_match_status(
+        status,
+        ms_accepted,
+        ms_rejected,
+        ms_ignored,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_feed_info_default_name(id: i32) -> RsBuf {
+    into_buf(crate::twinproberenhist::tpr_feed_info_default_name(id))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_feed_item_has_any_series_id(
+    series: *const c_char,
+    rage_id_str: *const c_char,
+    tvdb_id_str: *const c_char,
+    tvmaze_id_str: *const c_char,
+    item_rage_id: i32,
+    item_tvdb_id: i32,
+    item_tvmaze_id: i32,
+) -> i32 {
+    let s = if series.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(series).to_bytes()
+    };
+    let r = if rage_id_str.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(rage_id_str).to_bytes()
+    };
+    let tv = if tvdb_id_str.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(tvdb_id_str).to_bytes()
+    };
+    let tm = if tvmaze_id_str.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(tvmaze_id_str).to_bytes()
+    };
+    if crate::twinproberenhist::tpr_feed_item_has_any_series_id(
+        s,
+        r,
+        tv,
+        tm,
+        item_rage_id,
+        item_tvdb_id,
+        item_tvmaze_id,
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_scanner_format_subcategory(
+    category: *const c_char,
+    sep: c_char,
+    filename: *const c_char,
+) -> RsBuf {
+    let c = if category.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(category).to_bytes()
+    };
+    let f = if filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    into_buf(crate::twinproberenhist::tpr_scanner_format_subcategory(
+        c, sep as u8, f,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_scanner_eval_missed_articles_log(
+    total_articles: i32,
+    missed_articles: i32,
+    sev: i32,
+    out_present_articles: *mut i32,
+) -> i32 {
+    let (present, is_warn) = crate::twinproberenhist::tpr_scanner_eval_missed_articles_log(
+        total_articles,
+        missed_articles,
+        sev,
+    );
+    if !out_present_articles.is_null() {
+        *out_present_articles = present;
+    }
+    if is_warn {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_scanner_format_numbered_external_filename(
+    nzb_dir: *const c_char,
+    sep: c_char,
+    base_part: *const c_char,
+    ext_part: *const c_char,
+    has_ext: i32,
+    num: i32,
+) -> RsBuf {
+    let d = if nzb_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(nzb_dir).to_bytes()
+    };
+    let b = if base_part.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(base_part).to_bytes()
+    };
+    let e = if ext_part.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(ext_part).to_bytes()
+    };
+    into_buf(
+        crate::twinproberenhist::tpr_scanner_format_numbered_external_filename(
+            d,
+            sep as u8,
+            b,
+            e,
+            has_ext != 0,
+            num,
+        ),
+    )
+}
+
+
 
 
 

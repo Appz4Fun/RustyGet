@@ -720,11 +720,16 @@ void FeedCoordinator::CleanupHistory()
 	m_feedHistory.erase(std::remove_if(m_feedHistory.begin(), m_feedHistory.end(),
 		[borderDate, this](FeedHistoryInfo& feedHistoryInfo)
 		{
-			if (feedHistoryInfo.GetLastSeen() < borderDate)
+			size_t urlLenWithoutQuery = 0;
+			if (nzbget_rs_tpr_feed_coord_should_delete_history_entry(
+				(int64_t)feedHistoryInfo.GetLastSeen(),
+				(int64_t)borderDate,
+				feedHistoryInfo.GetUrl(),
+				&urlLenWithoutQuery) != 0)
 			{
 				// without the query: feed item links carry api keys
 				detail("Deleting %.*s from feed history",
-					(int)strcspn(feedHistoryInfo.GetUrl(), "?"), feedHistoryInfo.GetUrl());
+					(int)urlLenWithoutQuery, feedHistoryInfo.GetUrl());
 				m_save = true;
 				return true;
 			}

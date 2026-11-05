@@ -203,24 +203,19 @@ CString NzbInfo::MakeNiceNzbName(const char * nzbFilename, bool removeExt)
 
 CString NzbInfo::MakeNiceUrlName(const char* urlStr, const char* nzbFilename)
 {
-	CString urlNicename;
 	URL url(urlStr);
-
-	if (!Util::EmptyStr(nzbFilename))
-	{
-		CString nzbNicename = MakeNiceNzbName(nzbFilename, true);
-		urlNicename.Format("%s @ %s", *nzbNicename, url.GetHost());
-	}
-	else if (url.IsValid())
-	{
-		urlNicename.Format("%s%s", url.GetHost(), url.GetResource());
-	}
-	else
-	{
-		urlNicename = urlStr;
-	}
-
-	return urlNicename;
+	bool hasNzbFilename = !Util::EmptyStr(nzbFilename);
+	CString nzbNicename = hasNzbFilename ? MakeNiceNzbName(nzbFilename, true) : CString();
+	NzbgetRsBuf buf = nzbget_rs_dqh_nzbinfo_format_nice_url_name(
+		urlStr,
+		*nzbNicename,
+		hasNzbFilename ? 1 : 0,
+		url.IsValid() ? 1 : 0,
+		url.GetHost(),
+		url.GetResource());
+	std::string out(buf.data ? buf.data : "", buf.len);
+	nzbget_rs_free(buf);
+	return out.c_str();
 }
 
 // The name as a directory name: a file system takes 255 bytes for a name, and
@@ -274,14 +269,13 @@ CString NzbInfo::BuildFinalDirName()
 		}
 	}
 
-	if (Util::EmptyStr(GetName()))
-	{
-		finalDir.AppendFmt("%c%s-%i", PATH_SEPARATOR, "nzb", GetId());
-	}
-	else
-	{
-		finalDir.AppendFmt("%c%s", PATH_SEPARATOR, DirNameOf(GetName(), 0).c_str());
-	}
+	bool nameEmpty = Util::EmptyStr(GetName());
+	std::string dirName = nameEmpty ? std::string() : DirNameOf(GetName(), 0);
+	NzbgetRsBuf suffixBuf = nzbget_rs_dqh_nzbinfo_format_final_dir_suffix(
+		PATH_SEPARATOR, nameEmpty ? 1 : 0, dirName.c_str(), GetId());
+	std::string suffixStr(suffixBuf.data ? suffixBuf.data : "", suffixBuf.len);
+	nzbget_rs_free(suffixBuf);
+	finalDir.Append(suffixStr.c_str());
 
 	return finalDir;
 }

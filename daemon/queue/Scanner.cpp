@@ -271,14 +271,11 @@ void Scanner::CheckIncomingNzbs(const char* directory, const char* category, boo
 
 void Scanner::ProcessSubdirectory(const char* fullPath, const char* filename, const char* category, bool checkStat)
 {
-	const char* useCategory = filename;
-	BString<1024> subCategory;
-	if (strlen(category) > 0)
-	{
-		subCategory.Format("%s%c%s", category, PATH_SEPARATOR, filename);
-		useCategory = subCategory;
-	}
-	CheckIncomingNzbs(fullPath, useCategory, checkStat);
+	NzbgetRsBuf subCatBuf = nzbget_rs_tpr_scanner_format_subcategory(
+		category, PATH_SEPARATOR, filename);
+	std::string subCategory(subCatBuf.data ? subCatBuf.data : "", subCatBuf.len);
+	nzbget_rs_free(subCatBuf);
+	CheckIncomingNzbs(fullPath, subCategory.c_str(), checkStat);
 }
 
 /**
@@ -664,9 +661,12 @@ bool Scanner::AddFileToQueue(
 				bool cutShort = nzbFile.GetCutShortFiles().count(fileInfo) > 0;
 				int sev = nzbget_rs_dsp_classify_missed_articles(
 					fileInfo->GetMissedArticles(), fileInfo->GetTotalArticles(), cutShort ? 1 : 0);
-				nzbInfo->PrintMessage(sev >= 2 ? Message::mkWarning : Message::mkDetail,
+				int presentArticles = 0;
+				bool isWarn = nzbget_rs_tpr_scanner_eval_missed_articles_log(
+					fileInfo->GetTotalArticles(), fileInfo->GetMissedArticles(), sev, &presentArticles) != 0;
+				nzbInfo->PrintMessage(isWarn ? Message::mkWarning : Message::mkDetail,
 					"Collection %s lists only %i of the %i articles of %s: the missing ones count as failed",
-					nzbInfo->GetName(), fileInfo->GetTotalArticles() - fileInfo->GetMissedArticles(),
+					nzbInfo->GetName(), presentArticles,
 					fileInfo->GetTotalArticles(), fileInfo->GetFilename());
 			}
 		}
@@ -987,16 +987,11 @@ Scanner::EAddStatus Scanner::AddExternalFile(
 	int num = 2;
 	while (FileSystem::FileExists(scanFileName))
 	{
-		if (hasExt)
-		{
-			scanFileName.Format("%s%c%s_%i.%s", g_Options->GetNzbDir(),
-				PATH_SEPARATOR, basePart.c_str(), num, extPart.c_str());
-		}
-		else
-		{
-			scanFileName.Format("%s%c%s_%i", g_Options->GetNzbDir(),
-				PATH_SEPARATOR, basePart.c_str(), num);
-		}
+		NzbgetRsBuf numBuf = nzbget_rs_tpr_scanner_format_numbered_external_filename(
+			g_Options->GetNzbDir(), PATH_SEPARATOR, basePart.c_str(), extPart.c_str(),
+			hasExt ? 1 : 0, num);
+		scanFileName.Set(numBuf.data ? numBuf.data : "", numBuf.len);
+		nzbget_rs_free(numBuf);
 		num++;
 	}
 

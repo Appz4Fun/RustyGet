@@ -53,7 +53,9 @@ FeedInfo::FeedInfo(
 {
 	if (m_name.empty())
 	{
-		m_name = "Feed" + std::to_string(m_id);
+		NzbgetRsBuf nameBuf = nzbget_rs_tpr_feed_info_default_name(m_id);
+		m_name.assign(nameBuf.data ? nameBuf.data : "", nameBuf.len);
+		nzbget_rs_free(nameBuf);
 	}
 	m_filterHash = Util::HashBJ96(m_filter.c_str(), m_filter.size(), 0);
 }
@@ -100,10 +102,8 @@ void FeedItemInfo::AppendDupeKey(const char* extraDupeKey)
 
 void FeedItemInfo::BuildDupeKey(const char* rageId, const char* tvdbId, const char* tvmazeId, const char* series)
 {
-	bool anySeriesId = !Util::EmptyStr(series) ||
-		(!Util::EmptyStr(rageId) ? atoi(rageId) : m_rageId) != 0 ||
-		(!Util::EmptyStr(tvdbId) ? atoi(tvdbId) : m_tvdbId) != 0 ||
-		(!Util::EmptyStr(tvmazeId) ? atoi(tvmazeId) : m_tvmazeId) != 0;
+	bool anySeriesId = nzbget_rs_tpr_feed_item_has_any_series_id(
+		series, rageId, tvdbId, tvmazeId, m_rageId, m_tvdbId, m_tvmazeId) != 0;
 	int seasonNum = anySeriesId ? GetSeasonNum() : 0;
 	int episodeNum = (anySeriesId && seasonNum != 0) ? GetEpisodeNum() : 0;
 	NzbgetRsBuf buf = nzbget_rs_df_build_feed_dupe_key(

@@ -61,11 +61,8 @@ void FeedFilter::Field(void* user, int field, const char* attr, const char** str
 		case 4: *num = item->GetSize(); break;
 		case 5:
 		{
-			// Subtract at time_t's width, preserving legacy wraparound for
-			// extreme timestamps without overflowing a signed time_t.
-			using UnsignedTime = std::make_unsigned_t<time_t>;
-			*num = static_cast<time_t>(static_cast<UnsignedTime>(Util::CurrentTime()) -
-				static_cast<UnsignedTime>(item->GetTime()));
+			*num = static_cast<time_t>(nzbget_rs_tpr_feed_filter_calc_age(
+				(int64_t)Util::CurrentTime(), (int64_t)item->GetTime()));
 			break;
 		}
 		case 6: *num = item->GetImdbId(); break;
@@ -142,9 +139,8 @@ void FeedFilter::Apply(void* user, const NzbgetRsFeedOptions* o) noexcept
 	}
 	if (o->hasAddPriority)
 	{
-		// Preserve the legacy wraparound without signed-overflow UB.
-		item->SetPriority(static_cast<int>(static_cast<unsigned int>(item->GetPriority()) +
-			static_cast<unsigned int>(o->addPriority)));
+		item->SetPriority(nzbget_rs_tpr_feed_filter_wrapping_add_i32(
+			item->GetPriority(), o->addPriority));
 	}
 	if (o->hasDupeScore)
 	{
@@ -152,8 +148,8 @@ void FeedFilter::Apply(void* user, const NzbgetRsFeedOptions* o) noexcept
 	}
 	if (o->hasAddDupeScore)
 	{
-		item->SetDupeScore(static_cast<int>(static_cast<unsigned int>(item->GetDupeScore()) +
-			static_cast<unsigned int>(o->addDupeScore)));
+		item->SetDupeScore(nzbget_rs_tpr_feed_filter_wrapping_add_i32(
+			item->GetDupeScore(), o->addDupeScore));
 	}
 	if (o->hasBuildDupeKey)
 	{
@@ -176,8 +172,11 @@ void FeedFilter::Apply(void* user, const NzbgetRsFeedOptions* o) noexcept
 void FeedFilter::SetMatch(void* user, int status, int rule) noexcept
 {
 	FeedItemInfo* item = static_cast<Context*>(user)->item;
-	item->SetMatchStatus(status == 1 ? FeedItemInfo::msAccepted :
-		status == 2 ? FeedItemInfo::msRejected : FeedItemInfo::msIgnored);
+	item->SetMatchStatus((FeedItemInfo::EMatchStatus)nzbget_rs_tpr_feed_filter_map_match_status(
+		status,
+		(int)FeedItemInfo::msAccepted,
+		(int)FeedItemInfo::msRejected,
+		(int)FeedItemInfo::msIgnored));
 	item->SetMatchRule(rule);
 }
 

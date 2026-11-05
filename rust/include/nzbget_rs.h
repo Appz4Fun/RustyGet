@@ -5602,6 +5602,43 @@ void nzbget_rs_tpr_history_coord_retry_action_labels(
     int32_t reset_failed, int32_t reprocess,
     const char** out_wrong_type_verb, const char** out_missing_dir_verb,
     const char** out_start_msg_verb);
+NzbgetRsBuf nzbget_rs_dqh_dupecoord_format_queued_dupe_skip_message(
+    const char* name, const char* queued_name);
+NzbgetRsBuf nzbget_rs_dqh_dupecoord_format_history_dupe_skip_message(
+    const char* name, const char* dupe_name, int32_t same_content, int32_t good);
+int32_t nzbget_rs_dqh_dupecoord_eval_completed_stop_others(
+    int32_t dupe_health, int32_t dupe_key_empty, int32_t delete_status,
+    int32_t ds_none, int32_t is_dupe_success, int32_t health_check,
+    int32_t hc_park, int32_t ea_group_park_delete, int32_t ea_group_dupe_delete,
+    int32_t* out_delete_action);
+const char* nzbget_rs_dqh_dupecoord_format_non_failover_reason(
+    int32_t dupe_mode, int32_t dm_force);
+const char* nzbget_rs_dqh_dupecoord_mark_status_label(int32_t mark_status);
+NzbgetRsBuf nzbget_rs_dqh_nzbinfo_format_nice_url_name(
+    const char* url_str, const char* nzb_nicename, int32_t has_nzb_filename,
+    int32_t url_valid, const char* url_host, const char* url_resource);
+NzbgetRsBuf nzbget_rs_dqh_nzbinfo_format_final_dir_suffix(
+    char sep, int32_t name_empty, const char* dir_name, int32_t nzb_id);
+int32_t nzbget_rs_tpr_feed_coord_should_delete_history_entry(
+    int64_t last_seen, int64_t border_date, const char* url,
+    size_t* out_url_len_without_query);
+int64_t nzbget_rs_tpr_feed_filter_calc_age(int64_t cur_time, int64_t item_time);
+int32_t nzbget_rs_tpr_feed_filter_wrapping_add_i32(int32_t cur, int32_t delta);
+int32_t nzbget_rs_tpr_feed_filter_map_match_status(
+    int32_t status, int32_t ms_accepted, int32_t ms_rejected, int32_t ms_ignored);
+NzbgetRsBuf nzbget_rs_tpr_feed_info_default_name(int32_t id);
+int32_t nzbget_rs_tpr_feed_item_has_any_series_id(
+    const char* series, const char* rage_id_str, const char* tvdb_id_str,
+    const char* tvmaze_id_str, int32_t item_rage_id, int32_t item_tvdb_id,
+    int32_t item_tvmaze_id);
+NzbgetRsBuf nzbget_rs_tpr_scanner_format_subcategory(
+    const char* category, char sep, const char* filename);
+int32_t nzbget_rs_tpr_scanner_eval_missed_articles_log(
+    int32_t total_articles, int32_t missed_articles, int32_t sev,
+    int32_t* out_present_articles);
+NzbgetRsBuf nzbget_rs_tpr_scanner_format_numbered_external_filename(
+    const char* nzb_dir, char sep, const char* base_part, const char* ext_part,
+    int32_t has_ext, int32_t num);
 
 #include "nzbget_tls_cipher.h"
 

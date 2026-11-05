@@ -109,12 +109,9 @@ int DupeProbe::ProbingFor(int nzbId)
 	Guard guard(g_probeMutex);
 	for (DupeProbe* probe : g_probes)
 	{
-		int elapsed = nzbget_rs_tpr_dupe_probe_probing_for_elapsed_sec(
-			probe->m_nzbId, nzbId, probe->m_countAll ? 1 : 0,
-			(int64)Util::CurrentTime(), (int64)probe->m_started);
-		if (elapsed >= 0)
+		if (probe->m_nzbId == nzbId && !probe->m_countAll)
 		{
-			return elapsed;
+			return std::max(0, (int)(Util::CurrentTime() - probe->m_started));
 		}
 	}
 	return -1;
@@ -156,13 +153,12 @@ std::vector<DupeProbe::Sample> DupeProbe::SamplesOf(const std::vector<FileInfo*>
 		for (FileInfo* fileInfo : files)
 		{
 			size_t count = fileInfo->GetTotalArticles();
-			ptrdiff_t relIdx = nzbget_rs_tpr_dupe_probe_samples_of_file_index(position, offset, count);
-			if (relIdx < 0)
+			if (position >= offset + count)
 			{
 				offset += count;
 				continue;
 			}
-			size_t index = (size_t)relIdx;
+			size_t index = position - offset;
 
 			if (fileInfo->GetArticles()->empty() && loadArticles)
 			{
@@ -242,11 +238,8 @@ bool DupeProbe::ProbeServer(int serverId, std::set<int>& probed, ServerResult& r
 		// the last minute (its block ran out, and the download's own retries
 		// hold its connections)
 		time_t blockTime = wanted->GetBlockTime();
-		result.Unreachable = nzbget_rs_tpr_dupe_probe_is_server_recently_blocked(
-			g_ServerPool->IsServerBlocked(wanted) ? 1 : 0,
-			(int64)blockTime,
-			(int64)Util::CurrentTime(),
-			RecentBlockSec) != 0;
+		result.Unreachable = g_ServerPool->IsServerBlocked(wanted) ||
+			(blockTime > 0 && Util::CurrentTime() - blockTime < RecentBlockSec);
 		return false;
 	}
 
@@ -277,11 +270,8 @@ bool DupeProbe::ProbeServer(int serverId, std::set<int>& probed, ServerResult& r
 
 			if (!connection->Connect())
 			{
-				int outUnreachable = 0;
-				nzbget_rs_tpr_dupe_probe_apply_connect_failure(
-					result.Unknown, remaining, result.Exists, result.Missing,
-					&result.Unknown, &outUnreachable);
-				result.Unreachable = outUnreachable != 0;
+				result.Unknown += remaining + 1;
+				result.Unreachable = result.Exists + result.Missing == 0;
 				break;
 			}
 
@@ -291,12 +281,12 @@ bool DupeProbe::ProbeServer(int serverId, std::set<int>& probed, ServerResult& r
 				for (const CString& group : *sample.Groups)
 				{
 					joined = connection->JoinGroup(group);
-					if (nzbget_rs_tpr_dupe_probe_is_join_group_ok(joined) != 0)
+					if (joined && !strncmp(joined, "2", 1))
 					{
 						break;
 					}
 				}
-				if (!nzbget_rs_tpr_dupe_probe_is_join_group_ok(joined))
+				if (!joined || strncmp(joined, "2", 1))
 				{
 					result.Unknown += remaining + 1;
 					if (!joined)
@@ -307,10 +297,7 @@ bool DupeProbe::ProbeServer(int serverId, std::set<int>& probed, ServerResult& r
 				}
 			}
 
-			NzbgetRsBuf statCmdBuf = nzbget_rs_dqh_dupe_probe_format_stat_cmd(*sample.MessageId);
-			BString<1024> statCmd;
-			statCmd.Set(statCmdBuf.data ? statCmdBuf.data : "", (int)statCmdBuf.len);
-			nzbget_rs_free(statCmdBuf);
+			BString<1024> statCmd("STAT %s\r\n", *sample.MessageId);
 			const char* response = connection->Request(statCmd);
 			if (!response)
 			{
@@ -326,10 +313,7 @@ bool DupeProbe::ProbeServer(int serverId, std::set<int>& probed, ServerResult& r
 					m_found[index] = 1;
 					if (m_foundOn.empty())
 					{
-						NzbgetRsBuf foundBuf = nzbget_rs_tpr_dupe_probe_format_found_on(
-							server->GetName(), *sample.MessageId);
-						m_foundOn.assign(foundBuf.data ? foundBuf.data : "", foundBuf.len);
-						nzbget_rs_free(foundBuf);
+						m_foundOn = std::string(server->GetName()) + " (" + *sample.MessageId + ")";
 					}
 					break;
 				case daMissing:
@@ -340,11 +324,8 @@ bool DupeProbe::ProbeServer(int serverId, std::set<int>& probed, ServerResult& r
 					break;
 			}
 
-			if (nzbget_rs_dqh_dupe_probe_should_stop_early_on_found(
-				m_countAll ? 1 : 0,
-				nzbget_rs_tpr_dupe_probe_count_found_samples(
-					reinterpret_cast<const uint8_t*>(m_found.data()), m_found.size()),
-				MinAliveSamples) != 0)
+			int foundCount = (int)std::count(m_found.begin(), m_found.end(), 1);
+			if (!m_countAll && foundCount >= MinAliveSamples)
 			{
 				break;	// alive: no need to ask further
 			}
@@ -356,10 +337,7 @@ bool DupeProbe::ProbeServer(int serverId, std::set<int>& probed, ServerResult& r
 		Guard guard(g_probeMutex);
 		m_connection = nullptr;
 	}
-	if (nzbget_rs_dqh_dupe_probe_should_disconnect_after_probe(
-		IsStopped() ? 1 : 0,
-		(int)connection->GetStatus(),
-		(int)Connection::csCancelled) != 0)
+	if (IsStopped() || connection->GetStatus() == Connection::csCancelled)
 	{
 		connection->Disconnect();
 	}
@@ -388,7 +366,7 @@ DupeProbe::Verdict DupeProbe::Measure(int limitSec)
 		srvIds.push_back(server->GetId());
 	}
 	std::vector<int32_t> order(servers->size());
-	size_t orderLen = nzbget_rs_tpr_dupe_probe_select_server_order(
+	size_t orderLen = nzbget_rs_dupe_probe_select_server_order(
 		srvActive.data(), srvGroups.data(), srvLevels.data(), srvIds.data(),
 		servers->size(), order.data(), order.size());
 	order.resize(orderLen);
@@ -419,8 +397,7 @@ DupeProbe::Verdict DupeProbe::Measure(int limitSec)
 		}
 		verdict.ReachedServers++;
 
-		verdict.Existing = nzbget_rs_tpr_dupe_probe_count_found_samples(
-			reinterpret_cast<const uint8_t*>(m_found.data()), m_found.size());
+		verdict.Existing = (int)std::count(m_found.begin(), m_found.end(), 1);
 		verdict.FoundOn = m_foundOn;
 		if (m_countAll)
 		{
@@ -435,8 +412,7 @@ DupeProbe::Verdict DupeProbe::Measure(int limitSec)
 		{
 			break;
 		}
-		if (nzbget_rs_tpr_dupe_probe_is_server_measured_complete(
-			result.Unknown, result.Exists, result.Missing) != 0)
+		if (result.Unknown == 0 && result.Exists + result.Missing > 0)
 		{
 			verdict.MissingServers++;
 		}
@@ -480,53 +456,43 @@ void DupeProbe::Recheck()
 		}
 		NzbInfo* nzbInfo = historyInfo->GetNzbInfo();
 		int sampled = (int)m_samples.size();
-		if (verdict.ReachedServers == 0)
+		const char* duplicateQueuedName = "";
+		if (verdict.ReachedServers > 0 && verdict.Existing * 2 >= sampled)
 		{
-			// no server was asked (every connection busy the whole wait): that
-			// says nothing about the articles. It read "0 of N exist; not
-			// retrying" and used up the one recheck
-			nzbInfo->PrintMessage(Message::mkInfo,
-				"Failed articles not rechecked: no server connection was free");
+			for (NzbInfo* queued : downloadQueue->GetQueue())
+			{
+				if (DupeCoordinator::SameNameOrKey(queued->GetName(), queued->GetDupeKey(),
+					nzbInfo->GetName(), nzbInfo->GetDupeKey()))
+				{
+					duplicateQueuedName = queued->GetName();
+					break;
+				}
+			}
+		}
+
+		int outcome = 0;
+		NzbgetRsBuf msgBuf = nzbget_rs_dupe_probe_eval_recheck_outcome(
+			verdict.Existing, sampled, verdict.ReachedServers, duplicateQueuedName, &outcome);
+		std::string message(msgBuf.data ? msgBuf.data : "", msgBuf.len);
+		nzbget_rs_free(msgBuf);
+
+		nzbInfo->PrintMessage(Message::mkInfo, "%s", message.c_str());
+		if (outcome == 1)
+		{
 			nzbInfo->GetParameters()->SetParameter("*DupeRecheck", nullptr);
 			return;
 		}
-		bool retry = nzbget_rs_tpr_dupe_probe_should_retry_recheck(verdict.Existing, sampled) != 0;
-		// a duplicate queued while the probe ran (up to a minute) downloads in its
-		// place: retrying as well downloaded the release twice at once (F22)
-		for (NzbInfo* queued : downloadQueue->GetQueue())
+		if (outcome == 2)
 		{
-			if (retry && DupeCoordinator::SameNameOrKey(queued->GetName(), queued->GetDupeKey(),
-				nzbInfo->GetName(), nzbInfo->GetDupeKey()))
-			{
-				nzbInfo->PrintMessage(Message::mkInfo, "Not retrying failed articles: duplicate %s downloads in its place",
-					queued->GetName());
-				return;
-			}
+			return;
 		}
-		nzbInfo->PrintMessage(Message::mkInfo, "%i of %i failed articles exist on the servers%s",
-			verdict.Existing, sampled, nzbget_rs_dqh_dupe_probe_recheck_retry_suffix(retry ? 1 : 0));
-		if (retry)
+		if (outcome == 3)
 		{
 			IdList ids = { historyInfo->GetId() };
 			downloadQueue->EditList(&ids, nullptr, DownloadQueue::mmId, DownloadQueue::eaHistoryRetryFailed, nullptr);
 		}
 		break;
 	}
-}
-
-namespace
-{
-BString<100> Unreachable(const DupeProbe::Verdict& verdict)
-{
-	BString<100> text;
-	NzbgetRsBuf buf = nzbget_rs_tpr_dupe_probe_format_unreachable_suffix(verdict.UnreachableServers);
-	if (buf.len > 0 && buf.data)
-	{
-		text.Set(buf.data, (int)buf.len);
-	}
-	nzbget_rs_free(buf);
-	return text;
-}
 }
 
 void DupeProbe::Run()
@@ -547,26 +513,28 @@ void DupeProbe::Run()
 	}
 
 	int sampled = (int)m_samples.size();
-	int outcome = nzbget_rs_tpr_dupe_probe_classify_run_outcome(
-		verdict.Dead() ? 1 : 0,
+	int outcome = 0;
+	NzbgetRsBuf msgBuf = nzbget_rs_dupe_probe_eval_run_outcome(
 		verdict.Existing,
-		MinAliveSamples,
+		sampled,
+		verdict.MissingServers,
+		verdict.ActiveServers,
+		verdict.UnreachableServers,
+		verdict.ReachedServers,
 		verdict.Finished ? 1 : 0,
-		verdict.ReachedServers);
+		verdict.FoundOn.c_str(),
+		&outcome);
+	std::string message(msgBuf.data ? msgBuf.data : "", msgBuf.len);
+	nzbget_rs_free(msgBuf);
+
 	if (outcome == 1)
 	{
-		Note(Message::mkInfo, "Dupe probe: %i of %i sampled articles exist (%i of %i servers answered "
-			"definitively%s)%s%s: the posting is dead", verdict.Existing, sampled, verdict.MissingServers,
-			verdict.ActiveServers, *Unreachable(verdict),
-			nzbget_rs_dqh_dupe_probe_found_on_prefix(verdict.FoundOn.empty() ? 1 : 0),
-			verdict.FoundOn.c_str());
+		Note(Message::mkInfo, "%s", message.c_str());
 		Abandon(verdict.MissingServers, verdict.ActiveServers);
 	}
 	else if (outcome == 2)
 	{
-		// the probe stops asking once MinAliveSamples were found: the rest weren't asked
-		Note(Message::mkInfo, "Dupe probe: %i of %i sampled articles found (it stops at %i), the first on %s: "
-			"not abandoning it", verdict.Existing, sampled, MinAliveSamples, verdict.FoundOn.c_str());
+		Note(Message::mkInfo, "%s", message.c_str());
 	}
 	else if (outcome == 3)
 	{
@@ -578,14 +546,12 @@ void DupeProbe::Run()
 		{
 			nzbInfo->SetDeadPickProbed(false);
 			// (under the queue lock already: not through Note, the lock isn't recursive)
-			nzbInfo->PrintMessage(Message::mkDetail, "Dupe probe: no server could be asked, will probe again");
+			nzbInfo->PrintMessage(Message::mkDetail, "%s", message.c_str());
 		}
 	}
 	else if (outcome == 4)
 	{
-		Note(Message::mkInfo, "Dupe probe: no verdict (%i of %i sampled articles exist, %i of %i servers "
-			"answered definitively%s)", verdict.Existing, sampled, verdict.MissingServers, verdict.ActiveServers,
-			*Unreachable(verdict));
+		Note(Message::mkInfo, "%s", message.c_str());
 	}
 
 	Unregister();

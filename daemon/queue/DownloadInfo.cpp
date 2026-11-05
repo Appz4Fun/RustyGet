@@ -42,22 +42,23 @@ void NzbParameterList::SetParameter(const char* name, const char* value)
 	iterator pos = std::find_if(begin(), end(),
 		[name](NzbParameter& parameter)
 		{
-			return nzbget_rs_dqh_bytes_eq_ignore_case(parameter.GetName(), name) != 0;
+			return !strcasecmp(parameter.GetName(), name);
 		});
 
-	int action = nzbget_rs_dqh_nzb_param_decide_set_action(
-		emptyVal ? 1 : 0, pos != end() ? 1 : 0);
-	if (action == 1)
+	if (emptyVal && pos != end())
 	{
 		erase(pos);
 	}
-	else if (action == 2)
+	else if (!emptyVal)
 	{
-		pos->SetValue(value);
-	}
-	else if (action == 3)
-	{
-		emplace_back(name, value);
+		if (pos != end())
+		{
+			pos->SetValue(value);
+		}
+		else
+		{
+			emplace_back(name, value);
+		}
 	}
 }
 
@@ -65,7 +66,7 @@ NzbParameter* NzbParameterList::Find(const char* name)
 {
 	for (NzbParameter& parameter : this)
 	{
-		if (nzbget_rs_dqh_bytes_eq_ignore_case(parameter.GetName(), name) != 0)
+		if (!strcasecmp(parameter.GetName(), name))
 		{
 			return &parameter;
 		}
@@ -91,7 +92,7 @@ ScriptStatus::EStatus ScriptStatusList::CalcTotalStatus()
 	{
 		statuses.push_back((int32_t)scriptStatus.GetStatus());
 	}
-	return (ScriptStatus::EStatus)nzbget_rs_qhp_script_calc_total_status(
+	return (ScriptStatus::EStatus)nzbget_rs_downloadinfo_script_calc_total_status(
 		statuses.empty() ? nullptr : statuses.data(), statuses.size());
 }
 
@@ -116,7 +117,7 @@ void ServerStatList::StatOp(int serverId, int successArticles, int failedArticle
 
 	int newSuccess = serverStat->GetSuccessArticles();
 	int newFailed = serverStat->GetFailedArticles();
-	nzbget_rs_qci_server_stat_apply_op(
+	nzbget_rs_downloadinfo_server_stat_apply_op(
 		newSuccess,
 		newFailed,
 		successArticles,
@@ -143,14 +144,23 @@ void ServerStatList::ListOp(ServerStatList* serverStats, EStatOperation statOper
 void NzbInfo::SetId(int id)
 {
 	m_id = id;
-	m_idMax = nzbget_rs_dps_dl_info_update_max_id(m_id, m_idMax);
+	if (m_idMax < m_id)
+	{
+		m_idMax = m_id;
+	}
 }
 
 void NzbInfo::ResetGenId(bool max)
 {
-	int idGen = 0;
-	nzbget_rs_dps_dl_info_reset_gen_id(max ? 1 : 0, m_idMax, &idGen, &m_idMax);
-	m_idGen = idGen;
+	if (max)
+	{
+		m_idGen = m_idMax;
+	}
+	else
+	{
+		m_idGen = 0;
+		m_idMax = 0;
+	}
 }
 
 int NzbInfo::GenerateId()
@@ -174,67 +184,31 @@ void NzbInfo::SetFilename(const char* filename)
 	bool hadFilename = !Util::EmptyStr(m_filename);
 	m_filename = filename;
 
-	if (nzbget_rs_dqh_dl_info_should_update_auto_filename_name(
-		static_cast<const char*>(m_name) != nullptr ? 1 : 0,
-		hadFilename ? 1 : 0,
-		Util::EmptyStr(filename) ? 1 : 0) != 0)
+	if ((!m_name || !hadFilename) && !Util::EmptyStr(filename))
 	{
 		CString nzbNicename = MakeNiceNzbName(m_filename, true);
 		if (nzbNicename.Empty())
 		{
-			NzbgetRsBuf fbBuf = nzbget_rs_tpr_nzbinfo_format_fallback_name(GetId());
-			nzbNicename = fbBuf.data ? fbBuf.data : "";
-			nzbget_rs_free(fbBuf);
+			nzbNicename.Format("nzb_%i", GetId());
 		}
 		SetName(nzbNicename);
 	}
 }
 
-CString NzbInfo::MakeNiceNzbName(const char * nzbFilename, bool removeExt)
+CString NzbInfo::MakeNiceNzbName(const char* nzbFilename, bool removeExt)
 {
-	// only a full path drops its folder: other "/" belong to the name (indexers
-	// post "[hash] [16/22] - Title", which became "22] - Title"); the sanitizing
-	// below makes them safe
-	bool absolutePath = nzbget_rs_pup_scanner_is_absolute_nzb_name(nzbFilename) != 0;
-	std::string nicename = absolutePath ? FileSystem::BaseFileName(nzbFilename) : nzbFilename;
-	size_t strippedLen = nzbget_rs_pup_nzb_info_strip_nzb_ext_len(
-		nicename.c_str(), removeExt ? 1 : 0);
-	nicename.resize(strippedLen);
-	std::string validname = FileSystem::SanitizePathSegment(nicename);
-	if (validname.empty())
-	{
-		validname = "nzb";
-	}
-	return validname.c_str();
-}
-
-CString NzbInfo::MakeNiceUrlName(const char* urlStr, const char* nzbFilename)
-{
-	URL url(urlStr);
-	bool hasNzbFilename = !Util::EmptyStr(nzbFilename);
-	CString nzbNicename = hasNzbFilename ? MakeNiceNzbName(nzbFilename, true) : CString();
-	NzbgetRsBuf buf = nzbget_rs_dqh_nzbinfo_format_nice_url_name(
-		urlStr,
-		*nzbNicename,
-		hasNzbFilename ? 1 : 0,
-		url.IsValid() ? 1 : 0,
-		url.GetHost(),
-		url.GetResource());
-	std::string out(buf.data ? buf.data : "", buf.len);
+	NzbgetRsBuf buf = nzbget_rs_downloadinfo_make_nice_nzb_name(nzbFilename, removeExt ? 1 : 0);
+	std::string out(buf.data ? buf.data : "nzb", buf.len);
 	nzbget_rs_free(buf);
 	return out.c_str();
 }
 
-// The name as a directory name: a file system takes 255 bytes for a name, and
-// a longer one couldn't be created - the download's files failed to write and
-// counted as failed articles. Cut on a whole UTF-8 character, leaving room for
-// "reserve" more bytes; a name starting with "." gets "_" in front (hidden).
-static std::string DirNameOf(const char* name, size_t reserve)
+CString NzbInfo::MakeNiceUrlName(const char* urlStr, const char* nzbFilename)
 {
-	NzbgetRsBuf buf = nzbget_rs_qhp_dir_name_of(name, reserve);
-	std::string dirName(buf.data ? buf.data : "nzb");
+	NzbgetRsBuf buf = nzbget_rs_downloadinfo_make_nice_url_name(urlStr, nzbFilename);
+	std::string out(buf.data ? buf.data : "", buf.len);
 	nzbget_rs_free(buf);
-	return dirName;
+	return out.c_str();
 }
 
 void NzbInfo::BuildDestDirName()
@@ -245,52 +219,34 @@ void NzbInfo::BuildDestDirName()
 	}
 	else
 	{
-		NzbgetRsBuf idSuffixBuf = nzbget_rs_tpr_nzbinfo_format_inter_id_suffix(GetId());
-		const char* idSuffix = idSuffixBuf.data ? idSuffixBuf.data : "";
-		std::string dirName = DirNameOf(GetName(), idSuffixBuf.len);
-		NzbgetRsBuf destBuf = nzbget_rs_tpr_nzbinfo_format_inter_dest_dir(
-			g_Options->GetInterDir(), PATH_SEPARATOR, dirName.c_str(), idSuffix);
+		NzbgetRsBuf destBuf = nzbget_rs_downloadinfo_build_dest_dir_name(
+			g_Options->GetInterDir(), nullptr, nullptr, nullptr, 0, GetName(), GetId());
 		m_destDir = destBuf.data ? destBuf.data : "";
 		nzbget_rs_free(destBuf);
-		nzbget_rs_free(idSuffixBuf);
 	}
 }
 
 CString NzbInfo::BuildFinalDirName()
 {
-	CString finalDir = g_Options->GetDestDir();
-	bool useCategory = !m_category.Empty();
-
-	if (useCategory)
+	const char* categoryDestDir = nullptr;
+	if (!m_category.Empty())
 	{
 		Options::Category* category = g_Options->FindCategory(m_category, false);
 		if (category && !Util::EmptyStr(category->GetDestDir()))
 		{
-			finalDir = category->GetDestDir();
-			useCategory = false;
+			categoryDestDir = category->GetDestDir();
 		}
 	}
 
-	if (g_Options->GetAppendCategoryDir() && useCategory)
-	{
-		std::string categoryDir = FileSystem::SanitizeRelativePath(*m_category);
-		if (!categoryDir.empty())
-		{
-			NzbgetRsBuf joinedBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-				*finalDir, PATH_SEPARATOR, categoryDir.c_str());
-			finalDir = joinedBuf.data ? joinedBuf.data : "";
-			nzbget_rs_free(joinedBuf);
-		}
-	}
-
-	bool nameEmpty = Util::EmptyStr(GetName());
-	std::string dirName = nameEmpty ? std::string() : DirNameOf(GetName(), 0);
-	NzbgetRsBuf suffixBuf = nzbget_rs_dqh_nzbinfo_format_final_dir_suffix(
-		PATH_SEPARATOR, nameEmpty ? 1 : 0, dirName.c_str(), GetId());
-	std::string suffixStr(suffixBuf.data ? suffixBuf.data : "", suffixBuf.len);
-	nzbget_rs_free(suffixBuf);
-	finalDir.Append(suffixStr.c_str());
-
+	NzbgetRsBuf finalBuf = nzbget_rs_downloadinfo_build_final_dir_name(
+		g_Options->GetDestDir(),
+		categoryDestDir,
+		m_category,
+		g_Options->GetAppendCategoryDir() ? 1 : 0,
+		GetName(),
+		GetId());
+	CString finalDir = finalBuf.data ? finalBuf.data : "";
+	nzbget_rs_free(finalBuf);
 	return finalDir;
 }
 
@@ -337,7 +293,7 @@ void NzbInfo::UpdateMinMaxTime()
 		times.push_back((int64_t)fileInfo->GetTime());
 	}
 	int64_t minTime = 0, maxTime = 0;
-	nzbget_rs_qhp_update_min_max_time(
+	nzbget_rs_downloadinfo_update_min_max_time(
 		times.empty() ? nullptr : times.data(), times.size(), &minTime, &maxTime);
 	m_minTime = (time_t)minTime;
 	m_maxTime = (time_t)maxTime;
@@ -375,16 +331,13 @@ void NzbInfo::AddMessage(Message::EKind kind, const char * text, bool print)
 
 	m_messages.emplace_back(++m_idMessageGen, kind, Util::CurrentTime(), text);
 
-	if (nzbget_rs_dqh_dl_info_should_append_message_to_disk(
-		g_Options->GetServerMode() ? 1 : 0,
-		g_Options->GetNzbLog() ? 1 : 0) != 0)
+	if (g_Options->GetServerMode() && g_Options->GetNzbLog())
 	{
 		g_DiskState->AppendNzbMessage(m_id, kind, text);
 		m_messageCount.fetch_add(1, std::memory_order_relaxed);
 	}
 
-	while (nzbget_rs_dds_dl_info_should_trim_message_buffer(
-		m_messages.size(), g_Options->GetLogBuffer()) != 0)
+	while (m_messages.size() > (uint32)g_Options->GetLogBuffer())
 	{
 		m_messages.pop_front();
 	}
@@ -472,7 +425,7 @@ void NzbInfo::SetActiveDownloads(int activeDownloads)
 	int64 outStartTime = (int64)m_downloadStartTime;
 	int outStartSec = m_downloadStartSec;
 	int outChanged = 0;
-	nzbget_rs_pup_nzb_info_calc_active_downloads_sec(
+	nzbget_rs_downloadinfo_calc_active_downloads_sec(
 		m_activeDownloads, activeDownloads, m_kind == NzbInfo::nkNzb ? 1 : 0,
 		(int64)Util::CurrentTime(), m_downloadSec, (int64)m_downloadStartTime,
 		m_downloadStartSec, &outSec, &outStartTime, &outStartSec, &outChanged);
@@ -488,7 +441,7 @@ void NzbInfo::SetActiveDownloads(int activeDownloads)
 
 bool NzbInfo::IsDupeSuccess()
 {
-	return nzbget_rs_qhp_is_dupe_success(
+	return nzbget_rs_downloadinfo_is_dupe_success(
 		(int)m_markStatus, (int)m_deleteStatus, (int)m_parStatus,
 		(int)m_unpackStatus, (int)m_urlStatus, CalcHealth(),
 		CalcCriticalHealth(true), CalcCriticalHealth(false),
@@ -502,7 +455,7 @@ const char* NzbInfo::MakeTextStatus(bool ignoreScriptStatus)
 	ScriptStatus::EStatus scriptStatus = (m_kind == NzbInfo::nkNzb && !ignoreScriptStatus)
 		? m_scriptStatuses.CalcTotalStatus()
 		: ScriptStatus::srSuccess;
-	return nzbget_rs_qhp_make_text_status(
+	return nzbget_rs_downloadinfo_make_text_status(
 		(int)m_kind, (int)m_markStatus, (int)m_deleteStatus, (int)m_parStatus,
 		(int)m_unpackStatus, (int)m_moveStatus, (int)m_urlStatus,
 		(int)scriptStatus, health, criticalHealth);
@@ -540,7 +493,7 @@ void NzbInfo::UpdateCurrentStats()
 			m_remainingParCount,
 			0
 		};
-		nzbget_rs_dps_dl_info_update_current_stats_step(
+		nzbget_rs_downloadinfo_update_current_stats_step(
 			&acc,
 			fileInfo->GetRemainingSize(),
 			fileInfo->GetSuccessArticles(),
@@ -568,7 +521,7 @@ void NzbInfo::UpdateCurrentStats()
 
 void NzbInfo::UpdateCompletedStats(FileInfo* fileInfo)
 {
-	nzbget_rs_qci_nzb_info_update_completed_stats(
+	nzbget_rs_downloadinfo_update_completed_stats(
 		fileInfo->GetSuccessSize(),
 		fileInfo->GetFailedSize(),
 		fileInfo->GetFailedArticles(),
@@ -591,7 +544,7 @@ void NzbInfo::UpdateCompletedStats(FileInfo* fileInfo)
 
 void NzbInfo::UpdateDeletedStats(FileInfo* fileInfo)
 {
-	nzbget_rs_qci_nzb_info_update_deleted_stats(
+	nzbget_rs_downloadinfo_update_deleted_stats(
 		fileInfo->GetSize(),
 		fileInfo->GetSuccessSize(),
 		fileInfo->GetFailedSize(),
@@ -635,9 +588,8 @@ bool NzbInfo::IsDownloadCompleted(bool ignorePausedPars)
 
 	for (FileInfo* fileInfo : &m_fileList)
 	{
-		if (nzbget_rs_pup_file_info_blocks_download_completion(
-			fileInfo->GetPaused() ? 1 : 0, ignorePausedPars ? 1 : 0,
-			fileInfo->GetParFile() ? 1 : 0, fileInfo->GetDeleted() ? 1 : 0) != 0)
+		if (((!fileInfo->GetPaused() || !ignorePausedPars) || !fileInfo->GetParFile()) &&
+			!fileInfo->GetDeleted())
 		{
 			return false;
 		}
@@ -662,47 +614,40 @@ void ArticleInfo::DiscardSegment()
 void FileInfo::SetId(int id)
 {
 	m_id = id;
-	m_idMax = nzbget_rs_dps_dl_info_update_max_id(m_id, m_idMax);
+	if (m_idMax < m_id)
+	{
+		m_idMax = m_id;
+	}
 }
 
 void FileInfo::ResetGenId(bool max)
 {
-	int idGen = 0;
-	nzbget_rs_dps_dl_info_reset_gen_id(max ? 1 : 0, m_idMax, &idGen, &m_idMax);
-	m_idGen = idGen;
+	if (max)
+	{
+		m_idGen = m_idMax;
+	}
+	else
+	{
+		m_idGen = 0;
+		m_idMax = 0;
+	}
 }
 
 void FileInfo::SetPaused(bool paused)
 {
-	int newPausedCount = m_nzbInfo ? m_nzbInfo->GetPausedFileCount() : 0;
-	int64 newPausedSize = m_nzbInfo ? m_nzbInfo->GetPausedSize() : 0;
-	if (nzbget_rs_qci_file_info_calc_paused_delta(
-		m_paused ? 1 : 0,
-		paused ? 1 : 0,
-		m_nzbInfo ? 1 : 0,
-		newPausedCount,
-		newPausedSize,
-		m_remainingSize,
-		&newPausedCount,
-		&newPausedSize) != 0)
+	if (m_paused != paused && m_nzbInfo)
 	{
-		m_nzbInfo->SetPausedFileCount(newPausedCount);
-		m_nzbInfo->SetPausedSize(newPausedSize);
+		m_nzbInfo->SetPausedFileCount(m_nzbInfo->GetPausedFileCount() + (paused ? 1 : -1));
+		m_nzbInfo->SetPausedSize(m_nzbInfo->GetPausedSize() + (paused ? m_remainingSize : -m_remainingSize));
 	}
 	m_paused = paused;
 }
 
 void FileInfo::SetExtraPriority(bool extraPriority)
 {
-	int newExtra = m_nzbInfo ? m_nzbInfo->GetExtraPriority() : 0;
-	if (nzbget_rs_qci_file_info_calc_extra_priority_delta(
-		m_extraPriority ? 1 : 0,
-		extraPriority ? 1 : 0,
-		m_nzbInfo ? 1 : 0,
-		newExtra,
-		&newExtra) != 0)
+	if (m_extraPriority != extraPriority && m_nzbInfo)
 	{
-		m_nzbInfo->SetExtraPriority(newExtra);
+		m_nzbInfo->SetExtraPriority(m_nzbInfo->GetExtraPriority() + (extraPriority ? 1 : -1));
 	}
 	m_extraPriority = extraPriority;
 }
@@ -716,13 +661,11 @@ void FileInfo::SetActiveDownloads(int activeDownloads)
 {
 	m_activeDownloads = activeDownloads;
 
-	int mutexAction = nzbget_rs_dds_file_info_eval_output_mutex_action(
-		m_activeDownloads, m_outputFileMutex ? 1 : 0);
-	if (mutexAction == 1)
+	if (m_activeDownloads > 0 && !m_outputFileMutex)
 	{
 		m_outputFileMutex = std::make_unique<Mutex>();
 	}
-	else if (mutexAction == 2)
+	else if (m_activeDownloads == 0 && m_outputFileMutex)
 	{
 		m_outputFileMutex.reset();
 	}
@@ -745,18 +688,24 @@ CompletedFile::CompletedFile(int id, std::string filename, std::string origname,
 	, m_hash16k(std::move(hash16k))
 	, m_parSetId(std::move(parSetId))
 {
-	FileInfo::m_idMax = nzbget_rs_dps_dl_info_update_max_id(m_id, FileInfo::m_idMax);
+	if (FileInfo::m_idMax < m_id)
+	{
+		FileInfo::m_idMax = m_id;
+	}
 }
 
 bool CompletedFile::SameFilename(const char* name) const
 {
-	return nzbget_rs_qhp_completed_same_filename(m_filename.c_str(), name) != 0;
+	return nzbget_rs_downloadinfo_completed_same_filename(m_filename.c_str(), name) != 0;
 }
 
 void DupInfo::SetId(int id)
 {
 	m_id = id;
-	NzbInfo::m_idMax = nzbget_rs_dps_dl_info_update_max_id(m_id, NzbInfo::m_idMax);
+	if (NzbInfo::m_idMax < m_id)
+	{
+		NzbInfo::m_idMax = m_id;
+	}
 }
 
 
@@ -786,13 +735,11 @@ int HistoryInfo::GetId()
 
 const char* HistoryInfo::GetName()
 {
-	int nameKind = nzbget_rs_tpr_history_info_select_name_kind(
-		(int)m_kind, (int)hkNzb, (int)hkUrl, (int)hkDup);
-	if (nameKind == 1)
+	if (m_kind == hkNzb || m_kind == hkUrl)
 	{
 		return GetNzbInfo()->GetName();
 	}
-	else if (nameKind == 2)
+	else if (m_kind == hkDup)
 	{
 		return GetDupInfo()->GetName();
 	}
@@ -812,15 +759,14 @@ void DownloadQueue::CalcRemainingSize(int64* remaining, int64* remainingForced)
 	{
 		for (FileInfo* fileInfo : nzbInfo->GetFileList())
 		{
-			nzbget_rs_dps_dl_queue_calc_remaining_size_step(
-				fileInfo->GetPaused() ? 1 : 0,
-				fileInfo->GetDeleted() ? 1 : 0,
-				nzbInfo->GetForcePriority() ? 1 : 0,
-				fileInfo->GetRemainingSize(),
-				remainingSize,
-				remainingForcedSize,
-				&remainingSize,
-				&remainingForcedSize);
+			if (!fileInfo->GetPaused() && !fileInfo->GetDeleted())
+			{
+				remainingSize += fileInfo->GetRemainingSize();
+				if (nzbInfo->GetForcePriority())
+				{
+					remainingForcedSize += fileInfo->GetRemainingSize();
+				}
+			}
 		}
 	}
 

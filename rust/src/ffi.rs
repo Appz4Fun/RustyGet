@@ -9009,7 +9009,7 @@ pub unsafe extern "C" fn nzbget_rs_dupe_probe_sample_indexes(
     out_indexes: *mut usize,
     cap: usize,
 ) -> usize {
-    let indexes = crate::dupefallback::dupe_probe_sample_indexes(total, count);
+    let indexes = crate::dupeprobe::sample_indexes(total, count);
     if !out_indexes.is_null() && cap > 0 {
         let write_len = indexes.len().min(cap);
         std::ptr::copy_nonoverlapping(indexes.as_ptr(), out_indexes, write_len);
@@ -9024,7 +9024,7 @@ pub unsafe extern "C" fn nzbget_rs_dupe_probe_classify(response: *const c_char) 
     } else {
         Some(CStr::from_ptr(response).to_bytes())
     };
-    crate::dupefallback::dupe_probe_classify(opt)
+    crate::dupeprobe::classify(opt)
 }
 
 #[no_mangle]
@@ -9033,7 +9033,7 @@ pub extern "C" fn nzbget_rs_dupe_probe_is_dead(
     definitive_servers: c_int,
     active_servers: c_int,
 ) -> c_int {
-    crate::dupefallback::dupe_probe_is_dead(existing, definitive_servers, active_servers) as c_int
+    crate::dupeprobe::is_dead(existing, definitive_servers, active_servers) as c_int
 }
 
 #[no_mangle]
@@ -9776,7 +9776,7 @@ pub unsafe extern "C" fn nzbget_rs_dupecoord_same_name_or_key(
     let k1 = if dupe_key1.is_null() { b"" } else { CStr::from_ptr(dupe_key1).to_bytes() };
     let n2 = if name2.is_null() { b"" } else { CStr::from_ptr(name2).to_bytes() };
     let k2 = if dupe_key2.is_null() { b"" } else { CStr::from_ptr(dupe_key2).to_bytes() };
-    crate::postrepair::same_name_or_key(n1, k1, n2, k2) as c_int
+    crate::dupecoord::same_name_or_key(n1, k1, n2, k2) as c_int
 }
 
 #[no_mangle]
@@ -9785,14 +9785,14 @@ pub extern "C" fn nzbget_rs_dupecoord_failover_warranted(
     health: c_int,
     backup_score: c_int,
 ) -> c_int {
-    crate::postrepair::failover_warranted(item_score, health, backup_score) as c_int
+    crate::dupecoord::failover_warranted(item_score, health, backup_score) as c_int
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dupecoord_parse_alive_permille(
     value: *const c_char,
 ) -> c_int {
-    crate::postrepair::parse_alive_permille_cstr(value)
+    crate::dupecoord::parse_alive_permille_cstr(value)
 }
 
 #[no_mangle]
@@ -9801,28 +9801,7 @@ pub extern "C" fn nzbget_rs_dupecoord_fails_over(
     dupe_mode: c_int,
     health_check: c_int,
 ) -> c_int {
-    crate::postrepair::fails_over(dupe_check != 0, dupe_mode, health_check) as c_int
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dupecoord_classify_no_backup_item(
-    delete_status: c_int,
-    dupe_mode: c_int,
-    file_exists: c_int,
-    health: c_int,
-    critical_health: c_int,
-    mark_status: c_int,
-    alive: c_int,
-) -> c_int {
-    crate::postrepair::classify_no_backup_item(
-        delete_status,
-        dupe_mode,
-        file_exists != 0,
-        health,
-        critical_health,
-        mark_status,
-        alive,
-    )
+    crate::dupecoord::fails_over(dupe_check != 0, dupe_mode, health_check) as c_int
 }
 
 #[no_mangle]
@@ -9835,7 +9814,7 @@ pub extern "C" fn nzbget_rs_dupecoord_format_no_backup_reason(
     bad: c_int,
     dead: c_int,
 ) -> RsBuf {
-    into_buf(crate::postrepair::format_no_backup_reason(
+    into_buf(crate::dupecoord::format_no_backup_reason(
         total, not_backup, forced, no_file, unhealthy, bad, dead,
     ))
 }
@@ -9849,7 +9828,7 @@ pub unsafe extern "C" fn nzbget_rs_dupecoord_status_from_text(
     } else {
         CStr::from_ptr(text_status).to_bytes()
     };
-    crate::postrepair::status_from_text(s)
+    crate::dupecoord::status_from_text(s)
 }
 
 #[no_mangle]
@@ -9857,9 +9836,9 @@ pub unsafe extern "C" fn nzbget_rs_dupecoord_select_dupe_backup(
     has_self_nzb: c_int,
     self_full_content_hash: u32,
     dupe_health: c_int,
-    history: *const crate::postrepair::NzbgetRsDupeHistoryCandidate,
+    history: *const crate::dupecoord::NzbgetRsDupeHistoryCandidate,
     history_count: usize,
-    queue: *const crate::postrepair::NzbgetRsDupeQueueCandidate,
+    queue: *const crate::dupecoord::NzbgetRsDupeQueueCandidate,
     queue_count: usize,
     ctx: *mut std::ffi::c_void,
     file_exists_cb: Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, history_index: usize) -> c_int>,
@@ -9874,7 +9853,7 @@ pub unsafe extern "C" fn nzbget_rs_dupecoord_select_dupe_backup(
     } else {
         std::slice::from_raw_parts(queue, queue_count)
     };
-    crate::postrepair::select_dupe_backup(
+    crate::dupecoord::select_dupe_backup(
         has_self_nzb != 0,
         self_full_content_hash,
         dupe_health != 0,
@@ -10173,37 +10152,13 @@ pub unsafe extern "C" fn nzbget_rs_unpack_parse_message(
 // ============================================================================
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_qhp_script_calc_total_status(
-    statuses: *const i32,
-    len: usize,
-) -> c_int {
-    let slice = if len == 0 || statuses.is_null() {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(statuses, len)
-    };
-    crate::queuehotpath::script_calc_total_status(slice)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_qhp_dir_name_of(
-    name: *const c_char,
-    reserve: usize,
-) -> RsBuf {
-    let bytes = crate::queuehotpath::cstr_to_bytes(name);
-    let mut out = crate::queuehotpath::dir_name_of(bytes, reserve);
-    out.push(0);
-    into_buf(out)
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_qhp_calc_health(
     size: i64,
     par_size: i64,
     current_failed_size: i64,
     par_current_failed_size: i64,
 ) -> c_int {
-    crate::queuehotpath::calc_health(
+    crate::downloadinfo::calc_health(
         size,
         par_size,
         current_failed_size,
@@ -10218,101 +10173,12 @@ pub extern "C" fn nzbget_rs_qhp_calc_critical_health(
     par_current_failed_size: i64,
     allow_estimation: c_int,
 ) -> c_int {
-    crate::queuehotpath::calc_critical_health(
+    crate::downloadinfo::calc_critical_health(
         size,
         par_size,
         par_current_failed_size,
         allow_estimation != 0,
     )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_qhp_update_min_max_time(
-    times: *const i64,
-    len: usize,
-    out_min: *mut i64,
-    out_max: *mut i64,
-) {
-    let slice = if len == 0 || times.is_null() {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(times, len)
-    };
-    let (mn, mx) = crate::queuehotpath::calc_min_max_time(slice);
-    if !out_min.is_null() {
-        *out_min = mn;
-    }
-    if !out_max.is_null() {
-        *out_max = mx;
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_qhp_is_dupe_success(
-    mark_status: c_int,
-    delete_status: c_int,
-    par_status: c_int,
-    unpack_status: c_int,
-    url_status: c_int,
-    health: c_int,
-    critical_health_est: c_int,
-    critical_health_exact: c_int,
-    health_check_dupe: c_int,
-) -> c_int {
-    crate::queuehotpath::is_dupe_success(
-        mark_status,
-        delete_status,
-        par_status,
-        unpack_status,
-        url_status,
-        health,
-        critical_health_est,
-        critical_health_exact,
-        health_check_dupe != 0,
-    ) as c_int
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_qhp_make_text_status(
-    kind: c_int,
-    mark_status: c_int,
-    delete_status: c_int,
-    par_status: c_int,
-    unpack_status: c_int,
-    move_status: c_int,
-    url_status: c_int,
-    script_status: c_int,
-    health: c_int,
-    critical_health: c_int,
-) -> *const c_char {
-    crate::queuehotpath::make_text_status_cstr(
-        kind,
-        mark_status,
-        delete_status,
-        par_status,
-        unpack_status,
-        move_status,
-        url_status,
-        script_status,
-        health,
-        critical_health,
-    )
-    .as_ptr()
-    .cast()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_qhp_completed_same_filename(
-    a: *const c_char,
-    b: *const c_char,
-) -> c_int {
-    if a.is_null() || b.is_null() {
-        return 0;
-    }
-    crate::queuehotpath::completed_same_filename(
-        CStr::from_ptr(a).to_bytes(),
-        CStr::from_ptr(b).to_bytes(),
-    ) as c_int
 }
 
 #[no_mangle]
@@ -16037,74 +15903,6 @@ pub extern "C" fn nzbget_rs_pup_queue_editor_is_history_or_post_without_ids(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_pup_nzb_info_strip_nzb_ext_len(
-    nicename: *const c_char,
-    remove_ext: c_int,
-) -> usize {
-    let s = if nicename.is_null() {
-        &b""[..]
-    } else {
-        CStr::from_ptr(nicename).to_bytes()
-    };
-    crate::parunpackpost::nzb_info_strip_nzb_ext(s, remove_ext != 0).len()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_pup_nzb_info_calc_active_downloads_sec(
-    old_active: c_int,
-    new_active: c_int,
-    is_nzb_kind: c_int,
-    cur_time: i64,
-    download_sec: c_int,
-    download_start_time: i64,
-    download_start_sec: c_int,
-    out_download_sec: *mut c_int,
-    out_download_start_time: *mut i64,
-    out_download_start_sec: *mut c_int,
-    out_changed: *mut c_int,
-) {
-    let (sec, start_time, start_sec, changed) =
-        crate::parunpackpost::nzb_info_calc_active_downloads_sec(
-            old_active,
-            new_active,
-            is_nzb_kind != 0,
-            cur_time,
-            download_sec,
-            download_start_time,
-            download_start_sec,
-        );
-    if !out_download_sec.is_null() {
-        *out_download_sec = sec;
-    }
-    if !out_download_start_time.is_null() {
-        *out_download_start_time = start_time;
-    }
-    if !out_download_start_sec.is_null() {
-        *out_download_start_sec = start_sec;
-    }
-    if !out_changed.is_null() {
-        *out_changed = i32::from(changed);
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pup_file_info_blocks_download_completion(
-    paused: c_int,
-    ignore_paused_pars: c_int,
-    par_file: c_int,
-    deleted: c_int,
-) -> c_int {
-    i32::from(
-        crate::parunpackpost::file_info_blocks_download_completion(
-            paused != 0,
-            ignore_paused_pars != 0,
-            par_file != 0,
-            deleted != 0,
-        ),
-    )
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_pup_history_coord_can_attempt_requeue_file(
     status: c_int,
     cf_success: c_int,
@@ -16395,39 +16193,6 @@ pub extern "C" fn nzbget_rs_cdn_stream_repair_is_nzb_eligible_for_job(
             has_post_info != 0,
         ),
     )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_cdn_dupecoord_same_content_hash(
-    full1: u32,
-    filtered1: u32,
-    full2: u32,
-    filtered2: u32,
-) -> c_int {
-    i32::from(crate::contentdupenntp::dupecoord_same_content_hash(
-        full1, filtered1, full2, filtered2,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_cdn_dupecoord_should_keep_returned_dupe(
-    health_check: c_int,
-    hc_dupe: c_int,
-    dupe_hint: c_int,
-    dh_redownload_auto: c_int,
-    current_success_articles: c_int,
-    health: c_int,
-    critical_health: c_int,
-) -> c_int {
-    i32::from(crate::contentdupenntp::dupecoord_should_keep_returned_dupe(
-        health_check,
-        hc_dupe,
-        dupe_hint,
-        dh_redownload_auto,
-        current_success_articles,
-        health,
-        critical_health,
-    ))
 }
 
 #[no_mangle]
@@ -17198,224 +16963,6 @@ pub extern "C" fn nzbget_rs_dad_prepost_is_skipped_delete_status(
 // ============================================================================
 // DownloadInfo, QueueCoordinator & QueueEditor Hot-Path FFI (`queuecoordinfo.rs`)
 // ============================================================================
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_qci_server_stat_apply_op(
-    cur_success: c_int,
-    cur_failed: c_int,
-    delta_success: c_int,
-    delta_failed: c_int,
-    stat_op: c_int,
-    so_set: c_int,
-    so_add: c_int,
-    so_subtract: c_int,
-    out_success: *mut c_int,
-    out_failed: *mut c_int,
-) {
-    let (new_succ, new_fail) = crate::queuecoordinfo::server_stat_apply_op(
-        cur_success,
-        cur_failed,
-        delta_success,
-        delta_failed,
-        stat_op,
-        so_set,
-        so_add,
-        so_subtract,
-    );
-    if !out_success.is_null() {
-        *out_success = new_succ;
-    }
-    if !out_failed.is_null() {
-        *out_failed = new_fail;
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_qci_nzb_info_update_completed_stats(
-    file_success_size: i64,
-    file_failed_size: i64,
-    file_failed_articles: c_int,
-    file_success_articles: c_int,
-    file_extra_priority: c_int,
-    file_par_file: c_int,
-    file_paused: c_int,
-    inout_success_size: *mut i64,
-    inout_failed_size: *mut i64,
-    inout_failed_articles: *mut c_int,
-    inout_success_articles: *mut c_int,
-    inout_extra_priority: *mut c_int,
-    inout_par_success_size: *mut i64,
-    inout_par_failed_size: *mut i64,
-    inout_remaining_par_count: *mut c_int,
-    inout_paused_file_count: *mut c_int,
-) {
-    if inout_success_size.is_null()
-        || inout_failed_size.is_null()
-        || inout_failed_articles.is_null()
-        || inout_success_articles.is_null()
-        || inout_extra_priority.is_null()
-        || inout_par_success_size.is_null()
-        || inout_par_failed_size.is_null()
-        || inout_remaining_par_count.is_null()
-        || inout_paused_file_count.is_null()
-    {
-        return;
-    }
-    crate::queuecoordinfo::nzb_info_update_completed_stats(
-        file_success_size,
-        file_failed_size,
-        file_failed_articles,
-        file_success_articles,
-        file_extra_priority != 0,
-        file_par_file != 0,
-        file_paused != 0,
-        &mut *inout_success_size,
-        &mut *inout_failed_size,
-        &mut *inout_failed_articles,
-        &mut *inout_success_articles,
-        &mut *inout_extra_priority,
-        &mut *inout_par_success_size,
-        &mut *inout_par_failed_size,
-        &mut *inout_remaining_par_count,
-        &mut *inout_paused_file_count,
-    );
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_qci_nzb_info_update_deleted_stats(
-    file_size: i64,
-    file_success_size: i64,
-    file_failed_size: i64,
-    file_missed_size: i64,
-    file_total_articles: c_int,
-    file_success_articles: c_int,
-    file_failed_articles: c_int,
-    file_missed_articles: c_int,
-    file_remaining_size: i64,
-    file_extra_priority: c_int,
-    file_par_file: c_int,
-    file_paused: c_int,
-    inout_file_count: *mut c_int,
-    inout_size: *mut i64,
-    inout_cur_success_size: *mut i64,
-    inout_failed_size: *mut i64,
-    inout_failed_articles: *mut c_int,
-    inout_cur_failed_size: *mut i64,
-    inout_total_articles: *mut c_int,
-    inout_cur_success_articles: *mut c_int,
-    inout_cur_failed_articles: *mut c_int,
-    inout_remaining_size: *mut i64,
-    inout_extra_priority: *mut c_int,
-    inout_remaining_par_count: *mut c_int,
-    inout_par_size: *mut i64,
-    inout_par_cur_success_size: *mut i64,
-    inout_par_failed_size: *mut i64,
-    inout_par_cur_failed_size: *mut i64,
-    inout_paused_file_count: *mut c_int,
-    inout_paused_size: *mut i64,
-) {
-    if inout_file_count.is_null()
-        || inout_size.is_null()
-        || inout_cur_success_size.is_null()
-        || inout_failed_size.is_null()
-        || inout_failed_articles.is_null()
-        || inout_cur_failed_size.is_null()
-        || inout_total_articles.is_null()
-        || inout_cur_success_articles.is_null()
-        || inout_cur_failed_articles.is_null()
-        || inout_remaining_size.is_null()
-        || inout_extra_priority.is_null()
-        || inout_remaining_par_count.is_null()
-        || inout_par_size.is_null()
-        || inout_par_cur_success_size.is_null()
-        || inout_par_failed_size.is_null()
-        || inout_par_cur_failed_size.is_null()
-        || inout_paused_file_count.is_null()
-        || inout_paused_size.is_null()
-    {
-        return;
-    }
-    crate::queuecoordinfo::nzb_info_update_deleted_stats(
-        file_size,
-        file_success_size,
-        file_failed_size,
-        file_missed_size,
-        file_total_articles,
-        file_success_articles,
-        file_failed_articles,
-        file_missed_articles,
-        file_remaining_size,
-        file_extra_priority != 0,
-        file_par_file != 0,
-        file_paused != 0,
-        &mut *inout_file_count,
-        &mut *inout_size,
-        &mut *inout_cur_success_size,
-        &mut *inout_failed_size,
-        &mut *inout_failed_articles,
-        &mut *inout_cur_failed_size,
-        &mut *inout_total_articles,
-        &mut *inout_cur_success_articles,
-        &mut *inout_cur_failed_articles,
-        &mut *inout_remaining_size,
-        &mut *inout_extra_priority,
-        &mut *inout_remaining_par_count,
-        &mut *inout_par_size,
-        &mut *inout_par_cur_success_size,
-        &mut *inout_par_failed_size,
-        &mut *inout_par_cur_failed_size,
-        &mut *inout_paused_file_count,
-        &mut *inout_paused_size,
-    );
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_qci_file_info_calc_paused_delta(
-    cur_paused: c_int,
-    new_paused: c_int,
-    has_nzb: c_int,
-    cur_paused_count: c_int,
-    cur_paused_size: i64,
-    remaining_size: i64,
-    out_paused_count: *mut c_int,
-    out_paused_size: *mut i64,
-) -> c_int {
-    let (changed, new_cnt, new_sz) = crate::queuecoordinfo::file_info_calc_paused_delta(
-        cur_paused != 0,
-        new_paused != 0,
-        has_nzb != 0,
-        cur_paused_count,
-        cur_paused_size,
-        remaining_size,
-    );
-    if !out_paused_count.is_null() {
-        *out_paused_count = new_cnt;
-    }
-    if !out_paused_size.is_null() {
-        *out_paused_size = new_sz;
-    }
-    i32::from(changed)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_qci_file_info_calc_extra_priority_delta(
-    cur_extra: c_int,
-    new_extra: c_int,
-    has_nzb: c_int,
-    cur_nzb_extra: c_int,
-    out_nzb_extra: *mut c_int,
-) -> c_int {
-    let (changed, new_extra_cnt) = crate::queuecoordinfo::file_info_calc_extra_priority_delta(
-        cur_extra != 0,
-        new_extra != 0,
-        has_nzb != 0,
-        cur_nzb_extra,
-    );
-    if !out_nzb_extra.is_null() {
-        *out_nzb_extra = new_extra_cnt;
-    }
-    i32::from(changed)
-}
 
 #[no_mangle]
 pub extern "C" fn nzbget_rs_qci_queue_coord_should_resave_completed_file_state(
@@ -18424,154 +17971,6 @@ pub extern "C" fn nzbget_rs_pnd_dupe_fallback_compare_donors(
         score2,
         id2,
     ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_pnd_dupecoord_check_history_good_or_score_skip(
-    is_hk_nzb: c_int,
-    is_hk_dup: c_int,
-    hist_dupe_mode: c_int,
-    dm_force: c_int,
-    hist_mark_status: c_int,
-    ks_good: c_int,
-    hist_dup_status: c_int,
-    ds_good: c_int,
-    ds_success: c_int,
-    nzb_dupe_mode: c_int,
-    dm_score: c_int,
-    nzb_dupe_score: c_int,
-    hist_dupe_score: c_int,
-    same_name_or_key: c_int,
-    out_good: *mut c_int,
-) -> c_int {
-    let (skip, good) = crate::pardupenzb::dupecoord_check_history_good_or_score_skip(
-        is_hk_nzb != 0,
-        is_hk_dup != 0,
-        hist_dupe_mode,
-        dm_force,
-        hist_mark_status,
-        ks_good,
-        hist_dup_status,
-        ds_good,
-        ds_success,
-        nzb_dupe_mode,
-        dm_score,
-        nzb_dupe_score,
-        hist_dupe_score,
-        same_name_or_key != 0,
-    );
-    if !out_good.is_null() {
-        *out_good = i32::from(good);
-    }
-    i32::from(skip)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_pnd_dupecoord_classify_same_content_history_item(
-    is_hk_nzb: c_int,
-    is_hk_dup: c_int,
-    same_hash: c_int,
-    delete_status: c_int,
-    ds_dupe: c_int,
-    ds_copy: c_int,
-    ds_manual: c_int,
-    is_dupe_success: c_int,
-    dup_status: c_int,
-    dup_ds_success: c_int,
-    dup_ds_good: c_int,
-    dup_ds_failed: c_int,
-    dup_ds_bad: c_int,
-    out_failed: *mut c_int,
-) -> c_int {
-    let (succeeded, failed) = crate::pardupenzb::dupecoord_classify_same_content_history_item(
-        is_hk_nzb != 0,
-        is_hk_dup != 0,
-        same_hash != 0,
-        delete_status,
-        ds_dupe,
-        ds_copy,
-        ds_manual,
-        is_dupe_success != 0,
-        dup_status,
-        dup_ds_success,
-        dup_ds_good,
-        dup_ds_failed,
-        dup_ds_bad,
-    );
-    if !out_failed.is_null() {
-        *out_failed = i32::from(failed);
-    }
-    i32::from(succeeded)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_pnd_dupecoord_resolve_skip_action(
-    feed_id: c_int,
-    dupe_hint: c_int,
-    dh_none: c_int,
-    same_content: c_int,
-    ds_manual: c_int,
-    ds_copy: c_int,
-    ds_good: c_int,
-    out_delete_disk: *mut c_int,
-) -> c_int {
-    let (del_status, del_disk) = crate::pardupenzb::dupecoord_resolve_skip_action(
-        feed_id,
-        dupe_hint,
-        dh_none,
-        same_content != 0,
-        ds_manual,
-        ds_copy,
-        ds_good,
-    );
-    if !out_delete_disk.is_null() {
-        *out_delete_disk = i32::from(del_disk);
-    }
-    del_status
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pnd_dupecoord_accum_queue_dupe_status(
-    cur_statuses: c_int,
-    same_name_or_key: c_int,
-    success_articles: c_int,
-    failed_articles: c_int,
-    ds_downloading: c_int,
-    ds_queued: c_int,
-) -> c_int {
-    crate::pardupenzb::dupecoord_accum_queue_dupe_status(
-        cur_statuses,
-        same_name_or_key != 0,
-        success_articles,
-        failed_articles,
-        ds_downloading,
-        ds_queued,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pnd_dupecoord_accum_dup_history_status(
-    cur_statuses: c_int,
-    same_name_or_key: c_int,
-    dup_status: c_int,
-    dup_ds_success: c_int,
-    dup_ds_good: c_int,
-    dup_ds_failed: c_int,
-    dup_ds_bad: c_int,
-    ds_success: c_int,
-    ds_failure: c_int,
-) -> c_int {
-    crate::pardupenzb::dupecoord_accum_dup_history_status(
-        cur_statuses,
-        same_name_or_key != 0,
-        dup_status,
-        dup_ds_success,
-        dup_ds_good,
-        dup_ds_failed,
-        dup_ds_bad,
-        ds_success,
-        ds_failure,
-    )
 }
 
 #[no_mangle]
@@ -21706,81 +21105,6 @@ pub unsafe extern "C" fn nzbget_rs_ufs_unpack_ctrl_parse_backspace_progress(
 // ============================================================================
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dps_dl_info_update_max_id(id: c_int, id_max: c_int) -> c_int {
-    crate::dlparstatedisk::dl_info_update_max_id(id, id_max)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dps_dl_info_reset_gen_id(
-    max: c_int,
-    id_max: c_int,
-    out_id_gen: *mut c_int,
-    out_id_max: *mut c_int,
-) {
-    let (gen, mx) = crate::dlparstatedisk::dl_info_reset_gen_id(max, id_max);
-    if !out_id_gen.is_null() {
-        *out_id_gen = gen;
-    }
-    if !out_id_max.is_null() {
-        *out_id_max = mx;
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dps_dl_info_update_current_stats_step(
-    acc: *mut crate::dlparstatedisk::NzbgetRsDpsCurrentStatsAcc,
-    file_remaining_size: i64,
-    file_success_articles: i32,
-    file_failed_articles: i32,
-    file_success_size: i64,
-    file_failed_size: i64,
-    file_extra_priority: c_int,
-    file_paused: c_int,
-    file_par_file: c_int,
-) {
-    if !acc.is_null() {
-        crate::dlparstatedisk::dl_info_update_current_stats_step(
-            &mut *acc,
-            file_remaining_size,
-            file_success_articles,
-            file_failed_articles,
-            file_success_size,
-            file_failed_size,
-            file_extra_priority,
-            file_paused,
-            file_par_file,
-        );
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dps_dl_queue_calc_remaining_size_step(
-    paused: c_int,
-    deleted: c_int,
-    force_priority: c_int,
-    file_remaining_size: i64,
-    remaining_size: i64,
-    remaining_forced_size: i64,
-    out_remaining_size: *mut i64,
-    out_remaining_forced_size: *mut i64,
-) {
-    let (rem, forced) = crate::dlparstatedisk::dl_queue_calc_remaining_size_step(
-        paused,
-        deleted,
-        force_priority,
-        file_remaining_size,
-        remaining_size,
-        remaining_forced_size,
-    );
-    if !out_remaining_size.is_null() {
-        *out_remaining_size = rem;
-    }
-    if !out_remaining_forced_size.is_null() {
-        *out_remaining_forced_size = forced;
-    }
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dps_parchecker_should_quick_verify(
     stage: c_int,
     pt_verifying_repaired: c_int,
@@ -22363,149 +21687,6 @@ pub extern "C" fn nzbget_rs_cwp_server_pool_calc_missing_connections(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dcf_dupecoord_is_downloaded_on_disk_candidate(
-    is_self: c_int,
-    delete_status: c_int,
-    ds_none: c_int,
-    is_dupe_success: c_int,
-    mark_status: c_int,
-    ks_bad: c_int,
-    item_dupe_key: *const c_char,
-    nzb_dupe_key: *const c_char,
-) -> c_int {
-    crate::dupecoordfallbackstream::dupecoord_is_downloaded_on_disk_candidate(
-        is_self,
-        delete_status,
-        ds_none,
-        is_dupe_success,
-        mark_status,
-        ks_bad,
-        crate::queuehotpath::cstr_to_bytes(item_dupe_key),
-        crate::queuehotpath::cstr_to_bytes(nzb_dupe_key),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dcf_dupecoord_should_inherit_dupe_props(
-    cand_name: *const c_char,
-    nzb_name: *const c_char,
-    cand_dupe_key: *const c_char,
-    cand_dupe_score: c_int,
-) -> c_int {
-    crate::dupecoordfallbackstream::dupecoord_should_inherit_dupe_props(
-        crate::queuehotpath::cstr_to_bytes(cand_name),
-        crate::queuehotpath::cstr_to_bytes(nzb_name),
-        crate::queuehotpath::cstr_to_bytes(cand_dupe_key),
-        cand_dupe_score,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dcf_dupecoord_is_recent_history_score_duplicate(
-    kind: c_int,
-    hk_nzb: c_int,
-    hk_url: c_int,
-    item_dupe_mode: c_int,
-    dm_force: c_int,
-    same_name_or_key: c_int,
-    nzb_dupe_score: c_int,
-    item_dupe_score: c_int,
-    is_dupe_success: c_int,
-) -> c_int {
-    crate::dupecoordfallbackstream::dupecoord_is_recent_history_score_duplicate(
-        kind,
-        hk_nzb,
-        hk_url,
-        item_dupe_mode,
-        dm_force,
-        same_name_or_key,
-        nzb_dupe_score,
-        item_dupe_score,
-        is_dupe_success,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dcf_dupecoord_calc_post_delete_index(
-    index: c_int,
-    old_size: c_int,
-    new_size: c_int,
-) -> c_int {
-    crate::dupecoordfallbackstream::dupecoord_calc_post_delete_index(index, old_size, new_size)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dcf_dupecoord_should_stop_other_queued_dupe(
-    is_self: c_int,
-    kind: c_int,
-    nk_nzb: c_int,
-    deleting: c_int,
-    delete_status: c_int,
-    ds_none: c_int,
-    dupe_mode: c_int,
-    dm_force: c_int,
-    queued_dupe_key: *const c_char,
-    nzb_dupe_key: *const c_char,
-) -> c_int {
-    crate::dupecoordfallbackstream::dupecoord_should_stop_other_queued_dupe(
-        is_self,
-        kind,
-        nk_nzb,
-        deleting,
-        delete_status,
-        ds_none,
-        dupe_mode,
-        dm_force,
-        crate::queuehotpath::cstr_to_bytes(queued_dupe_key),
-        crate::queuehotpath::cstr_to_bytes(nzb_dupe_key),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dcf_dupecoord_map_mark_to_dup_status(
-    mark_status: c_int,
-    ks_good: c_int,
-    ks_success: c_int,
-    ds_good: c_int,
-    ds_success: c_int,
-    ds_bad: c_int,
-) -> c_int {
-    crate::dupecoordfallbackstream::dupecoord_map_mark_to_dup_status(
-        mark_status,
-        ks_good,
-        ks_success,
-        ds_good,
-        ds_success,
-        ds_bad,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dcf_dupecoord_should_hide_history_dupe(
-    kind: c_int,
-    hk_nzb: c_int,
-    hk_url: c_int,
-    dupe_mode: c_int,
-    dm_force: c_int,
-    delete_status: c_int,
-    ds_dupe: c_int,
-    is_self: c_int,
-    same_name_or_key: c_int,
-) -> c_int {
-    crate::dupecoordfallbackstream::dupecoord_should_hide_history_dupe(
-        kind,
-        hk_nzb,
-        hk_url,
-        dupe_mode,
-        dm_force,
-        delete_status,
-        ds_dupe,
-        is_self,
-        same_name_or_key,
-    )
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dcf_dupe_fallback_completed_file_is_par2(
     par_file: c_int,
     filename: *const c_char,
@@ -22762,109 +21943,6 @@ pub extern "C" fn nzbget_rs_tpr_twin_check_should_stop_launching_jobs(
         stopping,
         active_jobs,
         max_running,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_tpr_dupe_probe_probing_for_elapsed_sec(
-    probe_nzb_id: c_int,
-    query_nzb_id: c_int,
-    count_all: c_int,
-    cur_time: i64,
-    started: i64,
-) -> c_int {
-    crate::twinproberenhist::dupe_probe_probing_for_elapsed_sec(
-        probe_nzb_id,
-        query_nzb_id,
-        count_all,
-        cur_time,
-        started,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_tpr_dupe_probe_samples_of_file_index(
-    position: usize,
-    offset: usize,
-    count: usize,
-) -> isize {
-    crate::twinproberenhist::dupe_probe_samples_of_file_index(position, offset, count)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_tpr_dupe_probe_is_server_recently_blocked(
-    is_blocked: c_int,
-    block_time: i64,
-    cur_time: i64,
-    recent_block_sec: i64,
-) -> c_int {
-    crate::twinproberenhist::dupe_probe_is_server_recently_blocked(
-        is_blocked,
-        block_time,
-        cur_time,
-        recent_block_sec,
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_dupe_probe_apply_connect_failure(
-    in_unknown: c_int,
-    remaining: c_int,
-    exists: c_int,
-    missing: c_int,
-    out_unknown: *mut c_int,
-    out_unreachable: *mut c_int,
-) {
-    let (unknown, unreachable) = crate::twinproberenhist::dupe_probe_apply_connect_failure(
-        in_unknown,
-        remaining,
-        exists,
-        missing,
-    );
-    if !out_unknown.is_null() {
-        *out_unknown = unknown;
-    }
-    if !out_unreachable.is_null() {
-        *out_unreachable = unreachable;
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_dupe_probe_is_join_group_ok(joined: *const c_char) -> c_int {
-    crate::twinproberenhist::dupe_probe_is_join_group_ok(crate::queuehotpath::cstr_to_bytes(joined))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_tpr_dupe_probe_is_server_measured_complete(
-    unknown: c_int,
-    exists: c_int,
-    missing: c_int,
-) -> c_int {
-    crate::twinproberenhist::dupe_probe_is_server_measured_complete(unknown, exists, missing)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_tpr_dupe_probe_should_retry_recheck(
-    existing: c_int,
-    sampled: c_int,
-) -> c_int {
-    crate::twinproberenhist::dupe_probe_should_retry_recheck(existing, sampled)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_tpr_dupe_probe_classify_run_outcome(
-    dead: c_int,
-    existing: c_int,
-    min_alive_samples: c_int,
-    finished: c_int,
-    reached_servers: c_int,
-) -> c_int {
-    crate::twinproberenhist::dupe_probe_classify_run_outcome(
-        dead,
-        existing,
-        min_alive_samples,
-        finished,
-        reached_servers,
     )
 }
 
@@ -23962,30 +23040,6 @@ pub extern "C" fn nzbget_rs_dds_diskstate_validate_articles_per_day_count(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dds_dl_info_should_trim_message_buffer(
-    messages_len: usize,
-    log_buffer_limit: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupedlstateconn::dds_dl_info_should_trim_message_buffer(
-            messages_len,
-            log_buffer_limit,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dds_file_info_eval_output_mutex_action(
-    active_downloads: c_int,
-    has_mutex: c_int,
-) -> c_int {
-    crate::dupedlstateconn::dds_file_info_eval_output_mutex_action(
-        active_downloads,
-        has_mutex != 0,
-    )
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dds_article_dl_should_join_group(
     join_group_opt: c_int,
     groups_empty: c_int,
@@ -24323,43 +23377,6 @@ pub unsafe extern "C" fn nzbget_rs_qcf_queue_coord_merge_min_max_time(
         }
         if !out_max.is_null() {
             *out_max = m_max;
-        }
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_qcf_dupecoord_is_dupe_health_mode(
-    health_check: c_int,
-    hc_dupe: c_int,
-    hc_park: c_int,
-) -> c_int {
-    i32::from(
-        crate::queuecoordfallbackhist::qcf_dupecoord_is_dupe_health_mode(
-            health_check,
-            hc_dupe,
-            hc_park,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_qcf_dupecoord_same_content_history_outcome(
-    succeeded: c_int,
-    failed: c_int,
-    out_clear_skip: *mut c_int,
-    out_check_return_backup: *mut c_int,
-) {
-    let (clear_skip, check_ret) =
-        crate::queuecoordfallbackhist::qcf_dupecoord_same_content_history_outcome(
-            succeeded != 0,
-            failed != 0,
-        );
-    unsafe {
-        if !out_clear_skip.is_null() {
-            *out_clear_skip = i32::from(clear_skip);
-        }
-        if !out_check_return_backup.is_null() {
-            *out_check_return_backup = i32::from(check_ret);
         }
     }
 }
@@ -25412,126 +24429,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_dupe_fallback_is_donor_filename_match(
     let df = crate::diskstatepp::cstr_to_bytes(donor_filename);
     i32::from(
         crate::dupequeuehealth::dqh_dupe_fallback_is_donor_filename_match(tf, tnf, df),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupecoord_can_check_downloaded_on_disk(
-    kind: c_int,
-    nk_nzb_val: c_int,
-    dupe_mode: c_int,
-    dm_force_val: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_dupecoord_can_check_downloaded_on_disk(
-            kind,
-            nk_nzb_val,
-            dupe_mode,
-            dm_force_val,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupecoord_is_queued_same_content_dupe(
-    is_self: c_int,
-    same_content: c_int,
-    kind: c_int,
-    nk_nzb_val: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_dupecoord_is_queued_same_content_dupe(
-            is_self != 0,
-            same_content != 0,
-            kind,
-            nk_nzb_val,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupecoord_needs_dupe_prop_inheritance(
-    dupe_key_empty: c_int,
-    dupe_score: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_dupecoord_needs_dupe_prop_inheritance(
-            dupe_key_empty != 0,
-            dupe_score,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupecoord_should_inspect_same_content_history(
-    skip: c_int,
-    same_content: c_int,
-    health_check: c_int,
-    hc_dupe_val: c_int,
-    kind: c_int,
-    nk_nzb_val: c_int,
-    dupe_hint: c_int,
-    dh_none_val: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_dupecoord_should_inspect_same_content_history(
-            skip != 0,
-            same_content != 0,
-            health_check,
-            hc_dupe_val,
-            kind,
-            nk_nzb_val,
-            dupe_hint,
-            dh_none_val,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupecoord_is_queue_score_dupe_candidate(
-    is_self: c_int,
-    delete_status: c_int,
-    ds_none_val: c_int,
-    queued_kind: c_int,
-    own_kind: c_int,
-    nk_nzb_val: c_int,
-    nk_url_val: c_int,
-    queued_dupe_mode: c_int,
-    dm_force_val: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_dupecoord_is_queue_score_dupe_candidate(
-            is_self != 0,
-            delete_status,
-            ds_none_val,
-            queued_kind,
-            own_kind,
-            nk_nzb_val,
-            nk_url_val,
-            queued_dupe_mode,
-            dm_force_val,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupecoord_should_skip_mark_action(
-    dupe_check_enabled: c_int,
-    kind: c_int,
-    hk_nzb_val: c_int,
-    hk_dup_val: c_int,
-    item_dupe_mode: c_int,
-    dm_force_val: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_dupecoord_should_skip_mark_action(
-            dupe_check_enabled != 0,
-            kind,
-            hk_nzb_val,
-            hk_dup_val,
-            item_dupe_mode,
-            dm_force_val,
-        ),
     )
 }
 
@@ -28659,41 +27556,6 @@ pub unsafe extern "C" fn nzbget_rs_tpr_twin_check_format_live_identity_line(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_dupe_probe_select_server_order(
-    active_ptr: *const u8,
-    groups_ptr: *const i32,
-    norm_levels_ptr: *const i32,
-    ids_ptr: *const i32,
-    count: usize,
-    out_ids_ptr: *mut i32,
-    out_cap: usize,
-) -> usize {
-    if active_ptr.is_null()
-        || groups_ptr.is_null()
-        || norm_levels_ptr.is_null()
-        || ids_ptr.is_null()
-        || count == 0
-    {
-        return 0;
-    }
-    let active = std::slice::from_raw_parts(active_ptr, count);
-    let groups = std::slice::from_raw_parts(groups_ptr, count);
-    let norm_levels = std::slice::from_raw_parts(norm_levels_ptr, count);
-    let ids = std::slice::from_raw_parts(ids_ptr, count);
-    let order = crate::twinproberenhist::dupe_probe_select_server_order(
-        active,
-        groups,
-        norm_levels,
-        ids,
-    );
-    let n = order.len().min(out_cap);
-    if !out_ids_ptr.is_null() && n > 0 {
-        std::ptr::copy_nonoverlapping(order.as_ptr(), out_ids_ptr, n);
-    }
-    n
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_tpr_direct_unpack_readline_step(
     buf_ptr: *mut u8,
     buf_len: usize,
@@ -28954,37 +27816,6 @@ pub unsafe extern "C" fn nzbget_rs_tpr_twin_check_should_nudge_on_queue_event(
             input(dupe_key),
         ),
     )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_dupe_probe_format_found_on(
-    server_name: *const c_char,
-    message_id: *const c_char,
-) -> RsBuf {
-    into_buf(crate::twinproberenhist::dupe_probe_format_found_on(
-        input(server_name),
-        input(message_id),
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_dupe_probe_count_found_samples(
-    found_ptr: *const u8,
-    count: usize,
-) -> i32 {
-    let slice = if found_ptr.is_null() || count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(found_ptr, count)
-    };
-    crate::twinproberenhist::dupe_probe_count_found_samples(slice)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_tpr_dupe_probe_format_unreachable_suffix(
-    unreachable_servers: i32,
-) -> RsBuf {
-    into_buf(crate::twinproberenhist::dupe_probe_format_unreachable_suffix(unreachable_servers))
 }
 
 #[no_mangle]
@@ -30052,161 +28883,6 @@ pub unsafe extern "C" fn nzbget_rs_tpr_history_coord_retry_action_labels(
     if !out_start_msg_verb.is_null() {
         *out_start_msg_verb = start_msg.as_ptr() as *const c_char;
     }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_dupecoord_format_queued_dupe_skip_message(
-    name: *const c_char,
-    queued_name: *const c_char,
-) -> RsBuf {
-    let n = if name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(name).to_bytes()
-    };
-    let q = if queued_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(queued_name).to_bytes()
-    };
-    into_buf(crate::dupequeuehealth::dqh_dupecoord_format_queued_dupe_skip_message(n, q))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_dupecoord_format_history_dupe_skip_message(
-    name: *const c_char,
-    dupe_name: *const c_char,
-    same_content: i32,
-    good: i32,
-) -> RsBuf {
-    let n = if name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(name).to_bytes()
-    };
-    let d = if dupe_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(dupe_name).to_bytes()
-    };
-    into_buf(
-        crate::dupequeuehealth::dqh_dupecoord_format_history_dupe_skip_message(
-            n,
-            d,
-            same_content != 0,
-            good != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_dupecoord_eval_completed_stop_others(
-    dupe_health: i32,
-    dupe_key_empty: i32,
-    delete_status: i32,
-    ds_none: i32,
-    is_dupe_success: i32,
-    health_check: i32,
-    hc_park: i32,
-    ea_group_park_delete: i32,
-    ea_group_dupe_delete: i32,
-    out_delete_action: *mut i32,
-) -> i32 {
-    let (should_check, delete_action) =
-        crate::dupequeuehealth::dqh_dupecoord_eval_completed_stop_others(
-            dupe_health != 0,
-            dupe_key_empty != 0,
-            delete_status,
-            ds_none,
-            is_dupe_success != 0,
-            health_check,
-            hc_park,
-            ea_group_park_delete,
-            ea_group_dupe_delete,
-        );
-    if !out_delete_action.is_null() {
-        *out_delete_action = delete_action;
-    }
-    if should_check {
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_dupecoord_format_non_failover_reason(
-    dupe_mode: i32,
-    dm_force: i32,
-) -> *const c_char {
-    crate::dupequeuehealth::dqh_dupecoord_format_non_failover_reason(dupe_mode, dm_force).as_ptr()
-        as *const c_char
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_dupecoord_mark_status_label(
-    mark_status: i32,
-) -> *const c_char {
-    crate::dupequeuehealth::dqh_dupecoord_mark_status_label(mark_status).as_ptr() as *const c_char
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_nzbinfo_format_nice_url_name(
-    url_str: *const c_char,
-    nzb_nicename: *const c_char,
-    has_nzb_filename: i32,
-    url_valid: i32,
-    url_host: *const c_char,
-    url_resource: *const c_char,
-) -> RsBuf {
-    let u = if url_str.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(url_str).to_bytes()
-    };
-    let n = if nzb_nicename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(nzb_nicename).to_bytes()
-    };
-    let h = if url_host.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(url_host).to_bytes()
-    };
-    let r = if url_resource.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(url_resource).to_bytes()
-    };
-    into_buf(crate::dupequeuehealth::dqh_nzbinfo_format_nice_url_name(
-        u,
-        n,
-        has_nzb_filename != 0,
-        url_valid != 0,
-        h,
-        r,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_nzbinfo_format_final_dir_suffix(
-    sep: c_char,
-    name_empty: i32,
-    dir_name: *const c_char,
-    nzb_id: i32,
-) -> RsBuf {
-    let d = if dir_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(dir_name).to_bytes()
-    };
-    into_buf(crate::dupequeuehealth::dqh_nzbinfo_format_final_dir_suffix(
-        sep as u8,
-        name_empty != 0,
-        d,
-        nzb_id,
-    ))
 }
 
 #[no_mangle]
@@ -31596,56 +30272,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_scanner_format_temp_nzb_path(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_nzbinfo_format_fallback_name(id: i32) -> RsBuf {
-    into_buf(crate::twinproberenhist::tpr_nzbinfo_format_fallback_name(id))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_nzbinfo_format_inter_id_suffix(id: i32) -> RsBuf {
-    into_buf(crate::twinproberenhist::tpr_nzbinfo_format_inter_id_suffix(id))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_nzbinfo_format_inter_dest_dir(
-    inter_dir: *const c_char,
-    sep: c_char,
-    dir_name: *const c_char,
-    id_suffix: *const c_char,
-) -> RsBuf {
-    let idir = if inter_dir.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(inter_dir).to_bytes()
-    };
-    let dn = if dir_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(dir_name).to_bytes()
-    };
-    let ids = if id_suffix.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(id_suffix).to_bytes()
-    };
-    into_buf(crate::twinproberenhist::tpr_nzbinfo_format_inter_dest_dir(
-        idir,
-        sep as u8,
-        dn,
-        ids,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_history_info_select_name_kind(
-    kind: i32,
-    hk_nzb: i32,
-    hk_url: i32,
-    hk_dup: i32,
-) -> i32 {
-    crate::twinproberenhist::tpr_history_info_select_name_kind(kind, hk_nzb, hk_url, hk_dup)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_tpr_queue_editor_format_nzb_file_match_name(
     nzb_name: *const c_char,
     base_file_name: *const c_char,
@@ -31915,34 +30541,6 @@ pub unsafe extern "C" fn nzbget_rs_tpr_queue_coord_join_queued_filenames(
     into_buf(
         crate::twinproberenhist::tpr_queue_coord_join_queued_filenames(dq, sq),
     )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_dupe_probe_format_stat_cmd(
-    message_id: *const c_char,
-) -> RsBuf {
-    let m = if message_id.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(message_id).to_bytes()
-    };
-    into_buf(crate::dupequeuehealth::dqh_dupe_probe_format_stat_cmd(m))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_dupe_probe_recheck_retry_suffix(
-    retry: c_int,
-) -> *const c_char {
-    crate::dupequeuehealth::dqh_dupe_probe_recheck_retry_suffix(retry != 0).as_ptr()
-        as *const c_char
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_dupe_probe_found_on_prefix(
-    found_on_empty: c_int,
-) -> *const c_char {
-    crate::dupequeuehealth::dqh_dupe_probe_found_on_prefix(found_on_empty != 0).as_ptr()
-        as *const c_char
 }
 
 #[no_mangle]
@@ -33720,40 +32318,6 @@ pub extern "C" fn nzbget_rs_dqh_queue_coord_partly_alive_rel_str(
 ) -> *const c_char {
     crate::dupequeuehealth::dqh_queue_coord_partly_alive_rel_str(proj_below_crit != 0).as_ptr()
         as *const c_char
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_nzb_param_decide_set_action(
-    empty_val: c_int,
-    found: c_int,
-) -> c_int {
-    crate::dupequeuehealth::dqh_nzb_param_decide_set_action(empty_val != 0, found != 0)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupecoord_is_valid_disk_file(
-    is_side_file: c_int,
-    is_dir: c_int,
-    file_size: i64,
-) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_dupecoord_is_valid_disk_file(
-        is_side_file != 0,
-        is_dir != 0,
-        file_size,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupecoord_select_other_dupe_delete_action(
-    in_post_process: c_int,
-    ea_post_delete: c_int,
-    delete_action: c_int,
-) -> c_int {
-    crate::dupequeuehealth::dqh_dupecoord_select_other_dupe_delete_action(
-        in_post_process != 0,
-        ea_post_delete,
-        delete_action,
-    )
 }
 
 #[no_mangle]
@@ -36323,82 +34887,6 @@ pub extern "C" fn nzbget_rs_dqh_history_coord_classify_success_output_state(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_dupecoord_select_disk_dir(
-    final_dir: *const c_char,
-    dest_dir: *const c_char,
-) -> *const c_char {
-    let fin = if final_dir.is_null() {
-        b"" as &[u8]
-    } else {
-        CStr::from_ptr(final_dir).to_bytes()
-    };
-    let dst = if dest_dir.is_null() {
-        b"" as &[u8]
-    } else {
-        CStr::from_ptr(dest_dir).to_bytes()
-    };
-    let chosen = crate::dupequeuehealth::dqh_dupecoord_select_disk_dir(fin, dst);
-    if !fin.is_empty() && std::ptr::eq(chosen.as_ptr(), fin.as_ptr()) {
-        final_dir
-    } else if !dest_dir.is_null() {
-        dest_dir
-    } else {
-        b"\0".as_ptr() as *const c_char
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupecoord_is_unbacked_active_queue_dupe(
-    is_self: c_int,
-    delete_status: c_int,
-    ds_none: c_int,
-    same_name_or_key: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_dupecoord_is_unbacked_active_queue_dupe(
-            is_self != 0,
-            delete_status,
-            ds_none,
-            same_name_or_key != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupecoord_should_skip_url_redownload_non_same_content(
-    same_content: c_int,
-    dupe_hint: c_int,
-    dh_none: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_dupecoord_should_skip_url_redownload_non_same_content(
-            same_content != 0,
-            dupe_hint,
-            dh_none,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupecoord_should_check_no_backup_file_exists(
-    delete_status: c_int,
-    ds_dupe: c_int,
-    ds_copy: c_int,
-    dupe_mode: c_int,
-    dm_force: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_dupecoord_should_check_no_backup_file_exists(
-            delete_status,
-            ds_dupe,
-            ds_copy,
-            dupe_mode,
-            dm_force,
-        ),
-    )
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_queue_editor_classify_prepare_list_branch(
     offset: c_int,
     action: c_int,
@@ -36530,34 +35018,6 @@ pub extern "C" fn nzbget_rs_dqh_twin_check_should_lookup_kind_by_files(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dl_info_should_update_auto_filename_name(
-    has_name: c_int,
-    had_filename: c_int,
-    filename_empty: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_dl_info_should_update_auto_filename_name(
-            has_name != 0,
-            had_filename != 0,
-            filename_empty != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dl_info_should_append_message_to_disk(
-    server_mode: c_int,
-    nzb_log: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_dl_info_should_append_message_to_disk(
-            server_mode != 0,
-            nzb_log != 0,
-        ),
-    )
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_stream_repair_classify_build_job_mode(
     empty_or_no_articles: c_int,
     success_articles: c_int,
@@ -36569,36 +35029,6 @@ pub extern "C" fn nzbget_rs_dqh_stream_repair_classify_build_job_mode(
         success_articles,
         encoded_size,
         decoded_file_size,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupe_probe_should_stop_early_on_found(
-    count_all: c_int,
-    found_count: c_int,
-    min_alive_samples: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_dupe_probe_should_stop_early_on_found(
-            count_all != 0,
-            found_count,
-            min_alive_samples,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupe_probe_should_disconnect_after_probe(
-    is_stopped: c_int,
-    conn_status: c_int,
-    cs_cancelled: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_dupe_probe_should_disconnect_after_probe(
-            is_stopped != 0,
-            conn_status,
-            cs_cancelled,
-        ),
     )
 }
 
@@ -39818,6 +38248,554 @@ pub unsafe extern "C" fn nzbget_rs_direct_renamer_resolve_old_output_path(
         f,
     ))
 }
+
+// ============================================================================
+// DownloadInfo, DupeProbe & DupeCoordinator End-to-End FFI
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_downloadinfo_script_calc_total_status(
+    statuses: *const i32,
+    len: usize,
+) -> c_int {
+    let slice = if len == 0 || statuses.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(statuses, len)
+    };
+    crate::downloadinfo::script_calc_total_status(slice)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_downloadinfo_server_stat_apply_op(
+    cur_success: c_int,
+    cur_failed: c_int,
+    delta_success: c_int,
+    delta_failed: c_int,
+    stat_op: c_int,
+    so_set: c_int,
+    so_add: c_int,
+    so_subtract: c_int,
+    out_success: *mut c_int,
+    out_failed: *mut c_int,
+) {
+    let (s, f) = crate::downloadinfo::server_stat_apply_op(
+        cur_success,
+        cur_failed,
+        delta_success,
+        delta_failed,
+        stat_op,
+        so_set,
+        so_add,
+        so_subtract,
+    );
+    if !out_success.is_null() {
+        *out_success = s;
+    }
+    if !out_failed.is_null() {
+        *out_failed = f;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_downloadinfo_make_nice_nzb_name(
+    nzb_filename: *const c_char,
+    remove_ext: c_int,
+) -> RsBuf {
+    let f = if nzb_filename.is_null() {
+        b""
+    } else {
+        CStr::from_ptr(nzb_filename).to_bytes()
+    };
+    let mut out = crate::downloadinfo::make_nice_nzb_name(f, remove_ext != 0);
+    out.push(0);
+    into_buf(out)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_downloadinfo_make_nice_url_name(
+    url_str: *const c_char,
+    nzb_filename: *const c_char,
+) -> RsBuf {
+    let u = if url_str.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(url_str))
+    };
+    let f = if nzb_filename.is_null() {
+        b""
+    } else {
+        CStr::from_ptr(nzb_filename).to_bytes()
+    };
+    let mut out = crate::downloadinfo::make_nice_url_name(u, f);
+    out.push(0);
+    into_buf(out)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_downloadinfo_build_dest_dir_name(
+    inter_dir: *const c_char,
+    default_dest_dir: *const c_char,
+    category_dest_dir: *const c_char,
+    category: *const c_char,
+    append_category_dir: c_int,
+    name: *const c_char,
+    nzb_id: c_int,
+) -> RsBuf {
+    let idir = if inter_dir.is_null() { b"" } else { CStr::from_ptr(inter_dir).to_bytes() };
+    let ddir = if default_dest_dir.is_null() { b"" } else { CStr::from_ptr(default_dest_dir).to_bytes() };
+    let cdir = if category_dest_dir.is_null() { b"" } else { CStr::from_ptr(category_dest_dir).to_bytes() };
+    let cat = if category.is_null() { b"" } else { CStr::from_ptr(category).to_bytes() };
+    let nm = if name.is_null() { b"" } else { CStr::from_ptr(name).to_bytes() };
+    let mut out = crate::downloadinfo::build_dest_dir_name(
+        idir,
+        ddir,
+        cdir,
+        cat,
+        append_category_dir != 0,
+        nm,
+        nzb_id,
+    );
+    out.push(0);
+    into_buf(out)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_downloadinfo_build_final_dir_name(
+    default_dest_dir: *const c_char,
+    category_dest_dir: *const c_char,
+    category: *const c_char,
+    append_category_dir: c_int,
+    name: *const c_char,
+    nzb_id: c_int,
+) -> RsBuf {
+    let ddir = if default_dest_dir.is_null() { b"" } else { CStr::from_ptr(default_dest_dir).to_bytes() };
+    let cdir = if category_dest_dir.is_null() { b"" } else { CStr::from_ptr(category_dest_dir).to_bytes() };
+    let cat = if category.is_null() { b"" } else { CStr::from_ptr(category).to_bytes() };
+    let nm = if name.is_null() { b"" } else { CStr::from_ptr(name).to_bytes() };
+    let mut out = crate::downloadinfo::build_final_dir_name(
+        ddir,
+        cdir,
+        cat,
+        append_category_dir != 0,
+        nm,
+        nzb_id,
+    );
+    out.push(0);
+    into_buf(out)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_downloadinfo_update_min_max_time(
+    times: *const i64,
+    len: usize,
+    out_min: *mut i64,
+    out_max: *mut i64,
+) {
+    let slice = if len == 0 || times.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(times, len)
+    };
+    let (mn, mx) = crate::downloadinfo::calc_min_max_time(slice);
+    if !out_min.is_null() {
+        *out_min = mn;
+    }
+    if !out_max.is_null() {
+        *out_max = mx;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_downloadinfo_calc_active_downloads_sec(
+    old_active: c_int,
+    new_active: c_int,
+    is_nzb_kind: c_int,
+    cur_time: i64,
+    download_sec: c_int,
+    download_start_time: i64,
+    download_start_sec: c_int,
+    out_sec: *mut c_int,
+    out_start_time: *mut i64,
+    out_start_sec: *mut c_int,
+    out_changed: *mut c_int,
+) {
+    let (sec, start_time, start_sec, changed) = crate::downloadinfo::calc_active_downloads_sec(
+        old_active,
+        new_active,
+        is_nzb_kind != 0,
+        cur_time,
+        download_sec,
+        download_start_time,
+        download_start_sec,
+    );
+    if !out_sec.is_null() {
+        *out_sec = sec;
+    }
+    if !out_start_time.is_null() {
+        *out_start_time = start_time;
+    }
+    if !out_start_sec.is_null() {
+        *out_start_sec = start_sec;
+    }
+    if !out_changed.is_null() {
+        *out_changed = changed as c_int;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_downloadinfo_is_dupe_success(
+    mark_status: c_int,
+    delete_status: c_int,
+    par_status: c_int,
+    unpack_status: c_int,
+    url_status: c_int,
+    health: c_int,
+    critical_health_est: c_int,
+    critical_health_exact: c_int,
+    health_check_dupe: c_int,
+) -> c_int {
+    crate::downloadinfo::is_dupe_success(
+        mark_status,
+        delete_status,
+        par_status,
+        unpack_status,
+        url_status,
+        health,
+        critical_health_est,
+        critical_health_exact,
+        health_check_dupe != 0,
+    ) as c_int
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_downloadinfo_make_text_status(
+    kind: c_int,
+    mark_status: c_int,
+    delete_status: c_int,
+    par_status: c_int,
+    unpack_status: c_int,
+    move_status: c_int,
+    url_status: c_int,
+    script_status: c_int,
+    health: c_int,
+    critical_health: c_int,
+) -> *const c_char {
+    crate::downloadinfo::make_text_status_cstr(
+        kind,
+        mark_status,
+        delete_status,
+        par_status,
+        unpack_status,
+        move_status,
+        url_status,
+        script_status,
+        health,
+        critical_health,
+    )
+    .as_ptr()
+    .cast()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_downloadinfo_update_current_stats_step(
+    acc: *mut crate::dlparstatedisk::NzbgetRsDpsCurrentStatsAcc,
+    file_remaining_size: i64,
+    file_success_articles: c_int,
+    file_failed_articles: c_int,
+    file_success_size: i64,
+    file_failed_size: i64,
+    file_extra_priority: c_int,
+    file_paused: c_int,
+    file_par_file: c_int,
+) {
+    if let Some(acc_ref) = acc.as_mut() {
+        let local = (acc_ref as *mut crate::dlparstatedisk::NzbgetRsDpsCurrentStatsAcc)
+            .cast::<crate::downloadinfo::RsDownloadCurrentStatsAcc>();
+        crate::downloadinfo::update_current_stats_step(
+            &mut *local,
+            file_remaining_size,
+            file_success_articles,
+            file_failed_articles,
+            file_success_size,
+            file_failed_size,
+            file_extra_priority != 0,
+            file_paused != 0,
+            file_par_file != 0,
+        );
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_downloadinfo_update_completed_stats(
+    file_success_size: i64,
+    file_failed_size: i64,
+    file_failed_articles: c_int,
+    file_success_articles: c_int,
+    file_extra_priority: c_int,
+    file_par_file: c_int,
+    file_paused: c_int,
+    inout_success_size: *mut i64,
+    inout_failed_size: *mut i64,
+    inout_failed_articles: *mut c_int,
+    inout_success_articles: *mut c_int,
+    inout_extra_priority: *mut c_int,
+    inout_par_success_size: *mut i64,
+    inout_par_failed_size: *mut i64,
+    inout_remaining_par_count: *mut c_int,
+    inout_paused_file_count: *mut c_int,
+) {
+    crate::downloadinfo::update_completed_stats(
+        file_success_size,
+        file_failed_size,
+        file_failed_articles,
+        file_success_articles,
+        file_extra_priority != 0,
+        file_par_file != 0,
+        file_paused != 0,
+        &mut *inout_success_size,
+        &mut *inout_failed_size,
+        &mut *inout_failed_articles,
+        &mut *inout_success_articles,
+        &mut *inout_extra_priority,
+        &mut *inout_par_success_size,
+        &mut *inout_par_failed_size,
+        &mut *inout_remaining_par_count,
+        &mut *inout_paused_file_count,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_downloadinfo_update_deleted_stats(
+    file_size: i64,
+    file_success_size: i64,
+    file_failed_size: i64,
+    file_missed_size: i64,
+    file_total_articles: c_int,
+    file_success_articles: c_int,
+    file_failed_articles: c_int,
+    file_missed_articles: c_int,
+    file_remaining_size: i64,
+    file_extra_priority: c_int,
+    file_par_file: c_int,
+    file_paused: c_int,
+    inout_file_count: *mut c_int,
+    inout_size: *mut i64,
+    inout_cur_success_size: *mut i64,
+    inout_failed_size: *mut i64,
+    inout_failed_articles: *mut c_int,
+    inout_cur_failed_size: *mut i64,
+    inout_total_articles: *mut c_int,
+    inout_cur_success_articles: *mut c_int,
+    inout_cur_failed_articles: *mut c_int,
+    inout_remaining_size: *mut i64,
+    inout_extra_priority: *mut c_int,
+    inout_remaining_par_count: *mut c_int,
+    inout_par_size: *mut i64,
+    inout_par_cur_success_size: *mut i64,
+    inout_par_failed_size: *mut i64,
+    inout_par_cur_failed_size: *mut i64,
+    inout_paused_file_count: *mut c_int,
+    inout_paused_size: *mut i64,
+) {
+    crate::downloadinfo::update_deleted_stats(
+        file_size,
+        file_success_size,
+        file_failed_size,
+        file_missed_size,
+        file_total_articles,
+        file_success_articles,
+        file_failed_articles,
+        file_missed_articles,
+        file_remaining_size,
+        file_extra_priority != 0,
+        file_par_file != 0,
+        file_paused != 0,
+        &mut *inout_file_count,
+        &mut *inout_size,
+        &mut *inout_cur_success_size,
+        &mut *inout_failed_size,
+        &mut *inout_failed_articles,
+        &mut *inout_cur_failed_size,
+        &mut *inout_total_articles,
+        &mut *inout_cur_success_articles,
+        &mut *inout_cur_failed_articles,
+        &mut *inout_remaining_size,
+        &mut *inout_extra_priority,
+        &mut *inout_remaining_par_count,
+        &mut *inout_par_size,
+        &mut *inout_par_cur_success_size,
+        &mut *inout_par_failed_size,
+        &mut *inout_par_cur_failed_size,
+        &mut *inout_paused_file_count,
+        &mut *inout_paused_size,
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_downloadinfo_completed_same_filename(
+    a: *const c_char,
+    b: *const c_char,
+) -> c_int {
+    if a.is_null() || b.is_null() {
+        return 0;
+    }
+    crate::downloadinfo::completed_same_filename(
+        CStr::from_ptr(a).to_bytes(),
+        CStr::from_ptr(b).to_bytes(),
+    ) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_probe_select_server_order(
+    active: *const u8,
+    groups: *const i32,
+    norm_levels: *const i32,
+    ids: *const i32,
+    count: usize,
+    out_order: *mut i32,
+    out_cap: usize,
+) -> usize {
+    if count == 0
+        || active.is_null()
+        || groups.is_null()
+        || norm_levels.is_null()
+        || ids.is_null()
+        || out_order.is_null()
+        || out_cap == 0
+    {
+        return 0;
+    }
+    let order = crate::dupeprobe::select_server_order(
+        std::slice::from_raw_parts(active, count),
+        std::slice::from_raw_parts(groups, count),
+        std::slice::from_raw_parts(norm_levels, count),
+        std::slice::from_raw_parts(ids, count),
+    );
+    let n = order.len().min(out_cap);
+    std::ptr::copy_nonoverlapping(order.as_ptr(), out_order, n);
+    n
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_probe_eval_run_outcome(
+    existing: c_int,
+    sampled: c_int,
+    missing_servers: c_int,
+    active_servers: c_int,
+    unreachable_servers: c_int,
+    reached_servers: c_int,
+    finished: c_int,
+    found_on: *const c_char,
+    out_outcome: *mut c_int,
+) -> RsBuf {
+    let f = if found_on.is_null() {
+        b""
+    } else {
+        CStr::from_ptr(found_on).to_bytes()
+    };
+    let (outcome, mut msg) = crate::dupeprobe::eval_run_outcome(
+        existing,
+        sampled,
+        missing_servers,
+        active_servers,
+        unreachable_servers,
+        reached_servers,
+        finished != 0,
+        f,
+    );
+    if !out_outcome.is_null() {
+        *out_outcome = outcome;
+    }
+    msg.push(0);
+    into_buf(msg)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_probe_eval_recheck_outcome(
+    existing: c_int,
+    sampled: c_int,
+    reached_servers: c_int,
+    duplicate_queued_name: *const c_char,
+    out_outcome: *mut c_int,
+) -> RsBuf {
+    let d = if duplicate_queued_name.is_null() {
+        b""
+    } else {
+        CStr::from_ptr(duplicate_queued_name).to_bytes()
+    };
+    let (outcome, mut msg) = crate::dupeprobe::eval_recheck_outcome(
+        existing,
+        sampled,
+        reached_servers,
+        d,
+    );
+    if !out_outcome.is_null() {
+        *out_outcome = outcome;
+    }
+    msg.push(0);
+    into_buf(msg)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupecoord_files_on_disk(
+    final_dir: *const c_char,
+    dest_dir: *const c_char,
+    ext_cleanup_disk: *const c_char,
+) -> c_int {
+    let f = if final_dir.is_null() { b"" } else { CStr::from_ptr(final_dir).to_bytes() };
+    let d = if dest_dir.is_null() { b"" } else { CStr::from_ptr(dest_dir).to_bytes() };
+    let e = if ext_cleanup_disk.is_null() { b"" } else { CStr::from_ptr(ext_cleanup_disk).to_bytes() };
+    crate::dupecoord::files_on_disk(f, d, e) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupecoord_format_dupe_skip_message(
+    name: *const c_char,
+    other_name: *const c_char,
+    in_history: c_int,
+    same_content: c_int,
+    good: c_int,
+) -> RsBuf {
+    let n = if name.is_null() { b"" } else { CStr::from_ptr(name).to_bytes() };
+    let o = if other_name.is_null() { b"" } else { CStr::from_ptr(other_name).to_bytes() };
+    into_buf(crate::dupecoord::format_dupe_skip_message(
+        n,
+        o,
+        in_history != 0,
+        same_content != 0,
+        good != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupecoord_no_backup_reason(
+    fails_over_flag: c_int,
+    dupe_mode: c_int,
+    history: *const crate::dupecoord::NzbgetRsDupeHistoryCandidate,
+    history_len: usize,
+    cb_ctx: *mut std::ffi::c_void,
+    file_exists_cb: Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, history_index: usize) -> c_int>,
+) -> RsBuf {
+    let h = if history_len == 0 || history.is_null() {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(history, history_len)
+    };
+    into_buf(crate::dupecoord::no_backup_reason(
+        fails_over_flag != 0,
+        dupe_mode,
+        h,
+        |idx| {
+            if let Some(cb) = file_exists_cb {
+                cb(cb_ctx, idx) != 0
+            } else {
+                false
+            }
+        },
+    ))
+}
+
 
 
 

@@ -35,36 +35,12 @@ class NewsServersValidator final : public SectionGroupValidator
 public:
 	explicit NewsServersValidator(const Servers& servers);
 	std::string_view GetName() const override { return "NewsServers"; }
+	SectionReport Validate() const override;
 
 private:
 	const Servers& m_servers;
 	std::vector<std::unique_ptr<SectionValidator>> MakeServerValidators(
 		const Servers& servers) const;
-};
-
-class ServersConfiguredValidator final : public Validator
-{
-public:
-	explicit ServersConfiguredValidator(const Servers& servers) : m_servers(servers) {}
-
-	std::string_view GetName() const override { return ""; }
-	Status Validate() const override;
-
-private:
-	const Servers& m_servers;
-	static constexpr std::string_view DEFAULT_SERVER_HOST = "my.newsserver.com";
-};
-
-class AnyServerActiveValidator final : public Validator
-{
-public:
-	explicit AnyServerActiveValidator(const Servers& servers) : m_servers(servers) {}
-
-	std::string_view GetName() const override { return ""; }
-	Status Validate() const override;
-
-private:
-	const Servers& m_servers;
 };
 
 class AnyPrimaryServerExistsValidator final : public Validator

@@ -28,8 +28,12 @@ namespace SystemHealth::NewsServer
 class NewsServerValidator final : public SectionValidator
 {
 public:
-	explicit NewsServerValidator(const ::NewsServer& server);
+	explicit NewsServerValidator(const ::NewsServer& server)
+		: m_server(server), m_name("Server" + std::to_string(server.GetId()))
+	{
+	}
 	std::string_view GetName() const override { return m_name; }
+	SectionReport Validate() const override;
 
 private:
 	const ::NewsServer& m_server;
@@ -40,32 +44,7 @@ class ServerActiveValidator final : public Validator
 {
 public:
 	explicit ServerActiveValidator(const ::NewsServer& server) : m_server(server) {}
-
 	std::string_view GetName() const override { return "Active"; }
-	Status Validate() const override;
-
-private:
-	const ::NewsServer& m_server;
-};
-
-class ServerNameValidator final : public Validator
-{
-public:
-	explicit ServerNameValidator(const ::NewsServer& server) : m_server(server) {}
-
-	std::string_view GetName() const override { return "Name"; }
-	Status Validate() const override;
-
-private:
-	const ::NewsServer& m_server;
-};
-
-class ServerLevelValidator final : public Validator
-{
-public:
-	explicit ServerLevelValidator(const ::NewsServer& server) : m_server(server) {}
-
-	std::string_view GetName() const override { return "Level"; }
 	Status Validate() const override;
 
 private:
@@ -76,20 +55,7 @@ class ServerOptionalValidator final : public Validator
 {
 public:
 	explicit ServerOptionalValidator(const ::NewsServer& server) : m_server(server) {}
-
 	std::string_view GetName() const override { return "Optional"; }
-	Status Validate() const override;
-
-private:
-	const ::NewsServer& m_server;
-};
-
-class ServerGroupValidator final : public Validator
-{
-public:
-	explicit ServerGroupValidator(const ::NewsServer& server) : m_server(server) {}
-
-	std::string_view GetName() const override { return "Group"; }
 	Status Validate() const override;
 
 private:
@@ -100,7 +66,6 @@ class ServerHostValidator final : public Validator
 {
 public:
 	explicit ServerHostValidator(const ::NewsServer& server) : m_server(server) {}
-
 	std::string_view GetName() const override { return "Host"; }
 	Status Validate() const override;
 
@@ -112,7 +77,6 @@ class ServerPortValidator final : public Validator
 {
 public:
 	explicit ServerPortValidator(const ::NewsServer& server) : m_server(server) {}
-
 	std::string_view GetName() const override { return "Port"; }
 	Status Validate() const override;
 
@@ -124,7 +88,6 @@ class ServerUsernameValidator final : public Validator
 {
 public:
 	explicit ServerUsernameValidator(const ::NewsServer& server) : m_server(server) {}
-
 	std::string_view GetName() const override { return "Username"; }
 	Status Validate() const override;
 
@@ -136,7 +99,6 @@ class ServerPasswordValidator final : public Validator
 {
 public:
 	explicit ServerPasswordValidator(const ::NewsServer& server) : m_server(server) {}
-
 	std::string_view GetName() const override { return "Password"; }
 	Status Validate() const override;
 
@@ -148,7 +110,6 @@ class ServerEncryptionValidator final : public Validator
 {
 public:
 	explicit ServerEncryptionValidator(const ::NewsServer& server) : m_server(server) {}
-
 	std::string_view GetName() const override { return "Encryption"; }
 	Status Validate() const override;
 
@@ -160,7 +121,6 @@ class ServerCipherValidator final : public Validator
 {
 public:
 	explicit ServerCipherValidator(const ::NewsServer& server) : m_server(server) {}
-
 	std::string_view GetName() const override { return "Cipher"; }
 	Status Validate() const override;
 
@@ -172,7 +132,6 @@ class ServerConnectionsValidator final : public Validator
 {
 public:
 	explicit ServerConnectionsValidator(const ::NewsServer& server) : m_server(server) {}
-
 	std::string_view GetName() const override { return "Connections"; }
 	Status Validate() const override;
 
@@ -184,7 +143,6 @@ class ServerRetentionValidator final : public Validator
 {
 public:
 	explicit ServerRetentionValidator(const ::NewsServer& server) : m_server(server) {}
-
 	std::string_view GetName() const override { return "Retention"; }
 	Status Validate() const override;
 
@@ -196,20 +154,7 @@ class ServerCertVerificationValidator final : public Validator
 {
 public:
 	explicit ServerCertVerificationValidator(const ::NewsServer& server) : m_server(server) {}
-
 	std::string_view GetName() const override { return "CertVerification"; }
-	Status Validate() const override;
-
-private:
-	const ::NewsServer& m_server;
-};
-
-class ServerIpVersionValidator final : public Validator
-{
-public:
-	explicit ServerIpVersionValidator(const ::NewsServer& server) : m_server(server) {}
-
-	std::string_view GetName() const override { return "IpVersion"; }
 	Status Validate() const override;
 
 private:

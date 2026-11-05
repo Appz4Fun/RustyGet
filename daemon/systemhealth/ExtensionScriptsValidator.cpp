@@ -29,113 +29,67 @@
 
 namespace SystemHealth::ExtensionScripts
 {
-ExtensionScriptsValidator::ExtensionScriptsValidator(const Options& options,
-													 const ExtensionManager::Manager& manager)
-	: m_options(options), m_extensionManager(manager)
+SectionReport ExtensionScriptsValidator::Validate() const
 {
-	m_validators.reserve(5);
-	m_validators.push_back(std::make_unique<ExtensionListValidator>(options, manager));
-	m_validators.push_back(std::make_unique<ScriptOrderValidator>(options));
-	m_validators.push_back(std::make_unique<ScriptPauseQueueValidator>(options));
-	m_validators.push_back(std::make_unique<ShellOverrideValidator>(options));
-	m_validators.push_back(std::make_unique<EventIntervalValidator>(options));
+	SectionReport report;
+	report.name = GetName();
+	std::string_view extensions = m_options.GetExtensions();
+	std::string_view shellOverride = m_options.GetShellOverride();
+
+	std::vector<ExtensionManager::ExtensionPtr> extHolders;
+	std::vector<const char*> extNamePtrs;
+	std::vector<size_t> extNameLens;
+	std::vector<const char*> extEntryPtrs;
+	std::vector<size_t> extEntryLens;
+	m_extensionManager.ForEach([&](const ExtensionManager::ExtensionPtr ext)
+	{
+		extHolders.push_back(ext);
+		std::string_view name = ext->GetName();
+		std::string_view entry = ext->GetEntry();
+		extNamePtrs.push_back(name.data());
+		extNameLens.push_back(name.size());
+		extEntryPtrs.push_back(entry.data());
+		extEntryLens.push_back(entry.size());
+	});
+
+	nzbget_rs_health_validate_extension_scripts_section(
+		extensions.data(), extensions.size(),
+		extNamePtrs.data(), extNameLens.data(),
+		extEntryPtrs.data(), extEntryLens.data(),
+		extNamePtrs.size(),
+		shellOverride.data(), shellOverride.size(),
+		m_options.GetEventInterval(),
+		&report.options,
+		&SectionValidator::AppendOptionCallback);
+	return report;
 }
 
 Status ExtensionListValidator::Validate() const
 {
 	std::string_view extensions = m_options.GetExtensions();
-	if (extensions.empty()) return Status::Ok();
-
-	std::string message;
-	Tokenizer tokDir(extensions.data(), ",;");
-	while (const char* scriptNameRaw = tokDir.Next())
+	std::vector<ExtensionManager::ExtensionPtr> extHolders;
+	std::vector<const char*> extNamePtrs;
+	std::vector<size_t> extNameLens;
+	std::vector<const char*> extEntryPtrs;
+	std::vector<size_t> extEntryLens;
+	m_extensionManager.ForEach([&](const ExtensionManager::ExtensionPtr ext)
 	{
-		// Strip file extension from script name (e.g., "QueueSort.py" -> "QueueSort")
-		std::string scriptName(scriptNameRaw);
-		scriptName.resize(
-			nzbget_rs_euh_health_strip_script_ext_len(scriptName.data(), scriptName.size()));
+		extHolders.push_back(ext);
+		std::string_view name = ext->GetName();
+		std::string_view entry = ext->GetEntry();
+		extNamePtrs.push_back(name.data());
+		extNameLens.push_back(name.size());
+		extEntryPtrs.push_back(entry.data());
+		extEntryLens.push_back(entry.size());
+	});
 
-		const auto extension =
-			m_extensionManager.FindIf([&](const auto ext) 
-			{
-				std::string_view name = ext->GetName();
-				return name == scriptName; 
-			});
-		if (!extension)
-		{
-			if (!message.empty()) message += "; ";
-			message += std::string("'") + scriptNameRaw + "' doesn't exist";
-			continue;
-		}
-
-		const auto exists = File::Exists(extension.value()->GetEntry());
-		if (!exists.IsOk())
-		{
-			if (!message.empty()) message += "; ";
-			message += exists.GetMessage() + " ";
-		}
-	}
-
-	if (message.empty()) return Status::Ok();
-
-	return Status::Warning(std::move(message));
-}
-
-Status ScriptPauseQueueValidator::Validate() const
-{
-	return Status::Ok();
-}
-
-Status ShellOverrideValidator::Validate() const
-{
-	std::string_view path = m_options.GetShellOverride();
-	if (path.empty()) return Status::Ok();
-
-	std::string message;
-	std::string pathStr(path);
-	Tokenizer tok(pathStr.data(), ",;");
-	while (const char* shellover = tok.Next())
-	{
-		size_t eqPos = 0;
-		if (nzbget_rs_dqh_diskstate_find_char_pos(shellover, '=', &eqPos) != 0)
-		{
-			std::string cmd(shellover, eqPos);
-			const char* actualCmd = shellover + eqPos + 1;
-			const auto exists = File::Exists(actualCmd);
-			if (!exists.IsOk())
-			{
-				if (!message.empty()) message += "; ";
-				message += exists.GetMessage() + " ";
-				continue;
-			}
-			const auto exe = File::Executable(actualCmd);
-			if (!exe.IsOk())
-			{
-				if (!message.empty()) message += "; ";
-				message += exe.GetMessage() + " ";
-			}
-		}
-	}
-
-	if (message.empty()) return Status::Ok();
-
-	return Status::Warning(std::move(message));
-}
-
-Status EventIntervalValidator::Validate() const
-{
-	int val = m_options.GetEventInterval();
-	if (nzbget_rs_euh_health_validate_event_interval(val) == 0)
-	{
-		return Status::Error("'" + std::string(Options::EVENTINTERVAL) +
-							 "' cannot be less than -1");
-	}
-
-	return Status::Ok();
-}
-
-Status ScriptOrderValidator::Validate() const
-{
-	return Status::Ok();
+	NzbgetRsBuf msg{};
+	int sev = nzbget_rs_health_validate_extension_list(
+		extensions.data(), extensions.size(),
+		extNamePtrs.data(), extNameLens.data(),
+		extEntryPtrs.data(), extEntryLens.data(),
+		extNamePtrs.size(),
+		&msg);
+	return Status::FromRust(sev, msg);
 }
 }  // namespace SystemHealth::ExtensionScripts

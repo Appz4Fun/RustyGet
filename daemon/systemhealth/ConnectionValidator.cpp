@@ -25,193 +25,48 @@
 
 namespace SystemHealth::Connection
 {
-ConnectionValidator::ConnectionValidator(const Options& options) : m_options(options)
+SectionReport ConnectionValidator::Validate() const
 {
-	m_validators.reserve(14);
-	m_validators.push_back(std::make_unique<ArticleRetriesValidator>(options));
-	m_validators.push_back(std::make_unique<ArticleIntervalValidator>(options));
-	m_validators.push_back(std::make_unique<ArticleTimeoutValidator>(options));
-	m_validators.push_back(std::make_unique<ArticleReadChunkSizeValidator>(options));
-	m_validators.push_back(std::make_unique<UrlRetriesValidator>(options));
-	m_validators.push_back(std::make_unique<UrlIntervalValidator>(options));
-	m_validators.push_back(std::make_unique<UrlTimeoutValidator>(options));
-	m_validators.push_back(std::make_unique<UrlConnectionsValidator>(options));
-	m_validators.push_back(std::make_unique<UrlForceValidator>(options));
-	m_validators.push_back(std::make_unique<RemoteTimeoutValidator>(options));
-	m_validators.push_back(std::make_unique<DownloadRateValidator>(options));
-	m_validators.push_back(std::make_unique<MonthlyQuotaValidator>(options));
-	m_validators.push_back(std::make_unique<QuotaStartDayValidator>(options));
-	m_validators.push_back(std::make_unique<DailyQuotaValidator>(options));
+	SectionReport report;
+	report.name = GetName();
+	nzbget_rs_health_validate_connection_section(
+		m_options.GetArticleRetries(),
+		m_options.GetHealthCheck() == Options::hcDupe ? 1 : 0,
+		m_options.GetDupeSearch() ? 1 : 0,
+		m_options.GetArticleInterval(),
+		m_options.GetArticleTimeout(),
+		m_options.GetArticleReadChunkSize(),
+		m_options.GetUrlRetries(),
+		m_options.GetUrlInterval(),
+		m_options.GetUrlTimeout(),
+		m_options.GetUrlConnections(),
+		m_options.GetRemoteTimeout(),
+		m_options.GetDownloadRate(),
+		m_options.GetMonthlyQuota(),
+		m_options.GetQuotaStartDay(),
+		m_options.GetDailyQuota(),
+		&report.options,
+		&SectionValidator::AppendOptionCallback);
+	return report;
 }
 
 Status ArticleRetriesValidator::Validate() const
 {
-	int val = m_options.GetArticleRetries();
-	NzbgetRsBuf msgBuf{};
-	int check = nzbget_rs_feh_health_validate_article_retries(
-		Options::ARTICLERETRIES.data(),
-		Options::ARTICLERETRIES.size(),
-		val,
+	NzbgetRsBuf msg{};
+	int sev = nzbget_rs_health_validate_article_retries(
+		m_options.GetArticleRetries(),
 		m_options.GetHealthCheck() == Options::hcDupe ? 1 : 0,
 		m_options.GetDupeSearch() ? 1 : 0,
-		&msgBuf);
-	std::string msg(msgBuf.data ? msgBuf.data : "", msgBuf.len);
-	nzbget_rs_free(msgBuf);
-
-	if (check == -1)
-	{
-		return Status::Error("'" + std::string(Options::ARTICLERETRIES) +
-							 "' must be between 0 and 99");
-	}
-	if (check == 1)
-	{
-		return Status::Warning(msg);
-	}
-
-	return Status::Ok();
-}
-
-Status ArticleIntervalValidator::Validate() const
-{
-	return CheckPositiveNum(Options::ARTICLEINTERVAL, m_options.GetArticleInterval());
-}
-
-Status ArticleTimeoutValidator::Validate() const
-{
-	int val = m_options.GetArticleTimeout();
-	Status s = CheckPositiveNum(Options::ARTICLETIMEOUT, val);
-	if (!s.IsOk()) return s;
-
-	if (val < 30)
-	{
-		return Status::Warning(
-			"'" + std::string(Options::ARTICLETIMEOUT) + "' is set to " + std::to_string(val) +
-			" seconds. "
-			"Slow server responses may cause valid connections to be dropped prematurely");
-	}
-
-	return Status::Ok();
+		&msg);
+	return Status::FromRust(sev, msg);
 }
 
 Status ArticleReadChunkSizeValidator::Validate() const
 {
-	// Options stores bytes; these thresholds and messages use configured KB.
-	int val = 0;
-	int chunkCheck = nzbget_rs_feh_health_validate_article_read_chunk_size(
-		m_options.GetArticleReadChunkSize(), &val);
-	if (chunkCheck == -1)
-		return Status::Error("'" + std::string(Options::ARTICLEREADCHUNKSIZE) + "' option must not be negative");
-	if (chunkCheck == 1)
-		return Status::Warning(
-			"'" + std::string(Options::ARTICLEREADCHUNKSIZE) + "' is set to " +
-			std::to_string(val) +
-			" KB. "
-			"This is very low and may reduce download speed due to network overhead");
-	if (chunkCheck == 2)
-		return Status::Info(
-			"'" + std::string(Options::ARTICLEREADCHUNKSIZE) + "' is set to " +
-			std::to_string(val) +
-			" KB. "
-			"This buffer is allocated per connection; ensure sufficient system RAM is available");
-	return Status::Ok();
-}
-
-Status UrlRetriesValidator::Validate() const
-{
-	int val = m_options.GetUrlRetries();
-	if (val < 0 || val > 99)
-		return Status::Error("'" + std::string(Options::URLRETRIES) + "' must be between 0 and 99");
-
-	return Status::Ok();
-}
-
-Status UrlIntervalValidator::Validate() const
-{
-	return CheckPositiveNum(Options::URLINTERVAL, m_options.GetUrlInterval());
-}
-
-Status UrlTimeoutValidator::Validate() const
-{
-	int val = m_options.GetUrlTimeout();
-	Status s = CheckPositiveNum(Options::URLTIMEOUT, val);
-	if (!s.IsOk()) return s;
-
-	if (val < 5)
-	{
-		return Status::Warning(
-			"'" + std::string(Options::URLTIMEOUT) + "' is set to " + std::to_string(val) +
-			" seconds. "
-			"RSS feeds and external URL fetches may fail if the remote server is slow");
-	}
-
-	return Status::Ok();
-}
-
-Status RemoteTimeoutValidator::Validate() const
-{
-	return CheckPositiveNum(Options::REMOTETIMEOUT, m_options.GetRemoteTimeout());
-}
-
-Status DownloadRateValidator::Validate() const
-{
-	int val = m_options.GetDownloadRate();
-	Status s = CheckPositiveNum(Options::DOWNLOADRATE, val);
-	if (!s.IsOk()) return s;
-
-	if (val == 0) return Status::Ok();
-
-	return Status::Info("Global download speed is restricted");
-}
-
-Status UrlConnectionsValidator::Validate() const
-{
-	int val = m_options.GetUrlConnections();
-	if (val < 0 || val > 999)
-	{
-		return Status::Error("'" + std::string(Options::URLCONNECTIONS) +
-							 "' must be between 0 and 999");
-	}
-	return Status::Ok();
-}
-
-Status UrlForceValidator::Validate() const { return Status::Ok(); }
-
-Status MonthlyQuotaValidator::Validate() const
-{
-	int val = m_options.GetMonthlyQuota();
-	Status s = CheckPositiveNum(Options::MONTHLYQUOTA, val);
-	if (!s.IsOk()) return s;
-
-	if (val == 0) return Status::Ok();	// no quota
-
-	return Status::Info("'" + std::string(Options::MONTHLYQUOTA) + "' is active (" +
-						std::to_string(val) +
-						" MB). "
-						"Downloads will pause if this limit is reached");
-}
-
-Status QuotaStartDayValidator::Validate() const
-{
-	int day = m_options.GetQuotaStartDay();
-	if (day < 1 || day > 31)
-		return Status::Error("'" + std::string(Options::QUOTASTARTDAY) +
-							 "' must be between 1 and 31");
-
-	return Status::Ok();
-}
-
-Status DailyQuotaValidator::Validate() const
-{
-	int val = m_options.GetDailyQuota();
-	Status s = CheckPositiveNum(Options::DAILYQUOTA, val);
-	if (!s.IsOk()) return s;
-
-	if (val == 0) return Status::Ok();
-
-	return Status::Info("'" + std::string(Options::DAILYQUOTA) + "' is active (" +
-						std::to_string(val) +
-						" MB). "
-						"Downloads will pause if this limit is reached");
+	NzbgetRsBuf msg{};
+	int sev = nzbget_rs_health_validate_article_read_chunk_size(
+		m_options.GetArticleReadChunkSize(), &msg);
+	return Status::FromRust(sev, msg);
 }
 
 }  // namespace SystemHealth::Connection

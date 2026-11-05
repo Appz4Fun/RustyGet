@@ -349,52 +349,6 @@ pub fn feed_script_is_success(exit_code: i32) -> bool {
     exit_code == 93
 }
 
-// ============================================================================
-// SystemHealth Validators (`IncomingNzbValidator`, `UnpackValidator`, `ExtensionScriptsValidator`,
-// `NewsServersValidator`, `DisplayValidator`, `SchedulerTaskValidator`, `CategoryValidator`,
-// `Status`)
-// ============================================================================
-
-/// Matches `NzbDirIntervalValidator::Validate()`:
-/// - `0`: Ok (`interval >= 3`)
-/// Matches `ExtensionListValidator::Validate` script extension stripping:
-/// `size_t dotPos = scriptName.find_last_of('.'); if (dotPos != npos && dotPos > 0) resize(dotPos);`
-pub fn health_strip_script_ext_len(name: &[u8]) -> usize {
-    match name.iter().rposition(|&b| b == b'.') {
-        Some(pos) if pos > 0 => pos,
-        _ => name.len(),
-    }
-}
-
-/// Matches `EventIntervalValidator::Validate()`:
-/// returns `true` if `val >= -1` (Ok), `false` if `val < -1` (Error).
-pub fn health_validate_event_interval(val: i32) -> bool {
-    val >= -1
-}
-
-/// Matches `AnyPrimaryServerExistsValidator::Validate()`:
-/// - `0`: Ok (at least one server at `minLevel` is active)
-/// - `1`: Error (`"At least one server must be configured"`, when empty)
-/// - `2`: Error (`"At least one primary server must be active"`)
-pub fn health_validate_primary_server(levels: &[i32], actives: &[u8]) -> i32 {
-    let n = levels.len().min(actives.len());
-    if n == 0 {
-        return 1;
-    }
-    let mut min_level = levels[0];
-    for &lvl in &levels[..n] {
-        if lvl < min_level {
-            min_level = lvl;
-        }
-    }
-    let any_primary_active = (0..n).any(|i| levels[i] == min_level && actives[i] != 0);
-    if any_primary_active {
-        0
-    } else {
-        2
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scripts_and_health_validators() {
+    fn test_scripts() {
         assert_eq!(cmd_script_classify_exit_code(93), 0);
         assert_eq!(cmd_script_classify_exit_code(94), 1);
         assert_eq!(cmd_script_classify_exit_code(1), 2);
@@ -457,12 +411,5 @@ mod tests {
             None
         );
         assert!(feed_script_is_success(93));
-
-        assert_eq!(health_strip_script_ext_len(b"QueueSort.py"), 9);
-        assert_eq!(health_strip_script_ext_len(b".hidden"), 7);
-        assert!(health_validate_event_interval(-1));
-        assert!(!health_validate_event_interval(-2));
-        assert_eq!(health_validate_primary_server(&[1, 0], &[1, 0]), 2);
-        assert_eq!(health_validate_primary_server(&[1, 0], &[0, 1]), 0);
     }
 }

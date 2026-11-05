@@ -516,21 +516,6 @@ pub fn parchecker_compare_extra_file_stems(
     stem1 == par_stem && stem1 != stem2
 }
 
-// ============================================================================
-// SystemHealth (`SystemHealthService.cpp`)
-// ============================================================================
-
-/// Matches `existing.GetSource() == alert.GetSource() && existing.GetCategory() == alert.GetCategory()`
-/// in `SystemHealth::Service::ReportAlert`.
-pub fn health_alert_matches(
-    src1: &[u8],
-    cat1: &[u8],
-    src2: &[u8],
-    cat2: &[u8],
-) -> bool {
-    src1 == src2 && cat1 == cat2
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -650,6 +635,5 @@ mod tests {
             b"other.mkv",
             b"movie"
         ));
-        assert!(health_alert_matches(b"s1", b"c1", b"s1", b"c1"));
     }
 }

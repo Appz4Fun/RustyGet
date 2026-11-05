@@ -32,8 +32,12 @@ class ExtensionScriptsValidator final : public SectionValidator
 {
 public:
 	explicit ExtensionScriptsValidator(const Options& options,
-									   const ExtensionManager::Manager& manager);
+									   const ExtensionManager::Manager& manager)
+		: m_options(options), m_extensionManager(manager)
+	{
+	}
 	std::string_view GetName() const override { return "ExtensionScripts"; }
+	SectionReport Validate() const override;
 
 private:
 	const Options& m_options;
@@ -54,50 +58,6 @@ public:
 private:
 	const Options& m_options;
 	const ExtensionManager::Manager& m_extensionManager;
-};
-
-class ScriptOrderValidator : public Validator
-{
-public:
-	explicit ScriptOrderValidator(const Options& options) : m_options(options) {}
-	std::string_view GetName() const override { return Options::SCRIPTORDER; }
-	Status Validate() const override;
-
-private:
-	const Options& m_options;
-};
-
-class ScriptPauseQueueValidator : public Validator
-{
-public:
-	explicit ScriptPauseQueueValidator(const Options& options) : m_options(options) {}
-	std::string_view GetName() const override { return Options::SCRIPTPAUSEQUEUE; }
-	Status Validate() const override;
-
-private:
-	const Options& m_options;
-};
-
-class ShellOverrideValidator : public Validator
-{
-public:
-	explicit ShellOverrideValidator(const Options& options) : m_options(options) {}
-	std::string_view GetName() const override { return Options::SHELLOVERRIDE; }
-	Status Validate() const override;
-
-private:
-	const Options& m_options;
-};
-
-class EventIntervalValidator : public Validator
-{
-public:
-	explicit EventIntervalValidator(const Options& options) : m_options(options) {}
-	std::string_view GetName() const override { return Options::EVENTINTERVAL; }
-	Status Validate() const override;
-
-private:
-	const Options& m_options;
 };
 
 }  // namespace SystemHealth::ExtensionScripts

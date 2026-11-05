@@ -29,10 +29,6 @@ namespace SystemHealth::NewsServers
 NewsServersValidator::NewsServersValidator(const Servers& servers)
 	: SectionGroupValidator(MakeServerValidators(servers)), m_servers(servers)
 {
-	m_validators.reserve(3);
-	m_validators.push_back(std::make_unique<ServersConfiguredValidator>(servers));
-	m_validators.push_back(std::make_unique<AnyServerActiveValidator>(servers));
-	m_validators.push_back(std::make_unique<AnyPrimaryServerExistsValidator>(servers));
 }
 
 std::vector<std::unique_ptr<SectionValidator>> NewsServersValidator::MakeServerValidators(
@@ -47,23 +43,51 @@ std::vector<std::unique_ptr<SectionValidator>> NewsServersValidator::MakeServerV
 	return validators;
 }
 
-Status ServersConfiguredValidator::Validate() const
+SectionReport NewsServersValidator::Validate() const
 {
-	if (m_servers.empty() ||
-		(m_servers.size() == 1 && m_servers.front()->GetHost() == DEFAULT_SERVER_HOST))
-		return Status::Error("No servers are configured");
-
-	return Status::Ok();
-}
-
-Status AnyServerActiveValidator::Validate() const
-{
-	auto anyActive =
-		std::any_of(m_servers.cbegin(), m_servers.cend(), [](const auto& server)
-					{ return server->GetActive() && server->GetMaxConnections() > 0; });
-	if (!anyActive) return Status::Error("At least one server must be active");
-
-	return Status::Ok();
+	SectionReport report = SectionGroupValidator::Validate();
+	std::vector<const char*> hostPtrs;
+	std::vector<size_t> hostLens;
+	std::vector<uint8_t> actives;
+	std::vector<int32_t> maxConns;
+	std::vector<int32_t> levels;
+	hostPtrs.reserve(m_servers.size());
+	hostLens.reserve(m_servers.size());
+	actives.reserve(m_servers.size());
+	maxConns.reserve(m_servers.size());
+	levels.reserve(m_servers.size());
+	for (const auto& server : m_servers)
+	{
+		std::string_view host = server->GetHost();
+		hostPtrs.push_back(host.data());
+		hostLens.push_back(host.size());
+		actives.push_back(server->GetActive() ? 1 : 0);
+		maxConns.push_back(server->GetMaxConnections());
+		levels.push_back(server->GetLevel());
+	}
+	auto appendIssue = +[](void* ctx, const char*, size_t, int severity, const char* msg_ptr, size_t msg_len)
+	{
+		auto* issues = static_cast<std::vector<Status>*>(ctx);
+		Severity sev = Severity::Ok;
+		if (severity == 1) sev = Severity::Info;
+		else if (severity == 2) sev = Severity::Warning;
+		else if (severity == 3) sev = Severity::Error;
+		if (sev != Severity::Ok)
+		{
+			issues->push_back(
+				Status::FromRaw(sev, std::string(msg_ptr ? msg_ptr : "", msg_len)));
+		}
+	};
+	nzbget_rs_health_validate_news_servers_group(
+		hostPtrs.data(),
+		hostLens.data(),
+		actives.data(),
+		maxConns.data(),
+		levels.data(),
+		m_servers.size(),
+		&report.issues,
+		appendIssue);
+	return report;
 }
 
 Status AnyPrimaryServerExistsValidator::Validate() const
@@ -77,16 +101,10 @@ Status AnyPrimaryServerExistsValidator::Validate() const
 		levels.push_back(server->GetLevel());
 		actives.push_back(server->GetActive() ? 1 : 0);
 	}
-	switch (nzbget_rs_euh_health_validate_primary_server(
-		levels.data(), actives.data(), levels.size()))
-	{
-		case 1:
-			return Status::Error("At least one server must be configured");
-		case 2:
-			return Status::Error("At least one primary server must be active");
-		default:
-			return Status::Ok();
-	}
+	NzbgetRsBuf msg{};
+	int sev = nzbget_rs_health_validate_primary_server_exists(
+		levels.data(), actives.data(), levels.size(), &msg);
+	return Status::FromRust(sev, msg);
 }
 
 }  // namespace SystemHealth::NewsServers

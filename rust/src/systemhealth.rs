@@ -1471,6 +1471,852 @@ pub fn validate_download_queue_section(
     }
 }
 
+// ============================================================================
+// ConnectionValidator (`daemon/systemhealth/ConnectionValidator.cpp`)
+// ============================================================================
+
+pub fn validate_article_retries(val: i32, hc_dupe: bool, dupe_search: bool) -> HealthStatus {
+    if !(0..=99).contains(&val) {
+        return HealthStatus::error("'ArticleRetries' must be between 0 and 99");
+    }
+    if val < 3 {
+        let mut msg = format!(
+            "'ArticleRetries' is set to {val}. This is very low; temporary connection drops may cause permanent download failures"
+        );
+        let decisions = match (hc_dupe, dupe_search) {
+            (true, true) => "HealthCheck=dupe and DupeSearch",
+            (true, false) => "HealthCheck=dupe",
+            (false, true) => "DupeSearch",
+            (false, false) => "",
+        };
+        if !decisions.is_empty() {
+            msg.push_str(", and ");
+            msg.push_str(decisions);
+            msg.push_str(
+                " may then take a good download for a bad one (fail over from it, rank its duplicates above it)",
+            );
+        }
+        return HealthStatus::warning(msg);
+    }
+    HealthStatus::ok()
+}
+
+pub fn validate_article_read_chunk_size(bytes: i32) -> HealthStatus {
+    let val = bytes / 1024;
+    if val < 0 {
+        HealthStatus::error("'ArticleReadChunkSize' option must not be negative")
+    } else if val < 4 {
+        HealthStatus::warning(format!(
+            "'ArticleReadChunkSize' is set to {val} KB. This is very low and may reduce download speed due to network overhead"
+        ))
+    } else if val > 10240 {
+        HealthStatus::info(format!(
+            "'ArticleReadChunkSize' is set to {val} KB. This buffer is allocated per connection; ensure sufficient system RAM is available"
+        ))
+    } else {
+        HealthStatus::ok()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn validate_connection_section(
+    article_retries: i32,
+    hc_dupe: bool,
+    dupe_search: bool,
+    article_interval: i32,
+    article_timeout: i32,
+    article_read_chunk_size: i32,
+    url_retries: i32,
+    url_interval: i32,
+    url_timeout: i32,
+    url_connections: i32,
+    remote_timeout: i32,
+    download_rate: i32,
+    monthly_quota: i32,
+    quota_start_day: i32,
+    daily_quota: i32,
+    mut emit: impl FnMut(&str, Severity, &[u8]),
+) {
+    emit_if_not_ok(
+        &mut emit,
+        "ArticleRetries",
+        validate_article_retries(article_retries, hc_dupe, dupe_search),
+    );
+    emit_if_not_ok(
+        &mut emit,
+        "ArticleInterval",
+        check_positive_num(b"ArticleInterval", article_interval),
+    );
+
+    let art_timeout_status = check_positive_num(b"ArticleTimeout", article_timeout).and_then(|| {
+        if article_timeout < 30 {
+            HealthStatus::warning(format!(
+                "'ArticleTimeout' is set to {article_timeout} seconds. Slow server responses may cause valid connections to be dropped prematurely"
+            ))
+        } else {
+            HealthStatus::ok()
+        }
+    });
+    emit_if_not_ok(&mut emit, "ArticleTimeout", art_timeout_status);
+
+    emit_if_not_ok(
+        &mut emit,
+        "ArticleReadChunkSize",
+        validate_article_read_chunk_size(article_read_chunk_size),
+    );
+
+    if !(0..=99).contains(&url_retries) {
+        emit(
+            "UrlRetries",
+            Severity::Error,
+            b"'UrlRetries' must be between 0 and 99",
+        );
+    }
+
+    emit_if_not_ok(
+        &mut emit,
+        "UrlInterval",
+        check_positive_num(b"UrlInterval", url_interval),
+    );
+
+    let url_timeout_status = check_positive_num(b"UrlTimeout", url_timeout).and_then(|| {
+        if url_timeout < 5 {
+            HealthStatus::warning(format!(
+                "'UrlTimeout' is set to {url_timeout} seconds. RSS feeds and external URL fetches may fail if the remote server is slow"
+            ))
+        } else {
+            HealthStatus::ok()
+        }
+    });
+    emit_if_not_ok(&mut emit, "UrlTimeout", url_timeout_status);
+
+    if !(0..=999).contains(&url_connections) {
+        emit(
+            "UrlConnections",
+            Severity::Error,
+            b"'UrlConnections' must be between 0 and 999",
+        );
+    }
+
+    emit_if_not_ok(
+        &mut emit,
+        "RemoteTimeout",
+        check_positive_num(b"RemoteTimeout", remote_timeout),
+    );
+
+    let rate_status = check_positive_num(b"DownloadRate", download_rate).and_then(|| {
+        if download_rate == 0 {
+            HealthStatus::ok()
+        } else {
+            HealthStatus::info("Global download speed is restricted")
+        }
+    });
+    emit_if_not_ok(&mut emit, "DownloadRate", rate_status);
+
+    let monthly_status = check_positive_num(b"MonthlyQuota", monthly_quota).and_then(|| {
+        if monthly_quota == 0 {
+            HealthStatus::ok()
+        } else {
+            HealthStatus::info(format!(
+                "'MonthlyQuota' is active ({monthly_quota} MB). Downloads will pause if this limit is reached"
+            ))
+        }
+    });
+    emit_if_not_ok(&mut emit, "MonthlyQuota", monthly_status);
+
+    if !(1..=31).contains(&quota_start_day) {
+        emit(
+            "QuotaStartDay",
+            Severity::Error,
+            b"'QuotaStartDay' must be between 1 and 31",
+        );
+    }
+
+    let daily_status = check_positive_num(b"DailyQuota", daily_quota).and_then(|| {
+        if daily_quota == 0 {
+            HealthStatus::ok()
+        } else {
+            HealthStatus::info(format!(
+                "'DailyQuota' is active ({daily_quota} MB). Downloads will pause if this limit is reached"
+            ))
+        }
+    });
+    emit_if_not_ok(&mut emit, "DailyQuota", daily_status);
+}
+
+// ============================================================================
+// SecurityValidator (`daemon/systemhealth/SecurityValidator.cpp`)
+// ============================================================================
+
+pub fn validate_control_password(password: &[u8]) -> HealthStatus {
+    if password == b"tegbzn6789" {
+        return HealthStatus::info("Using default password is not recommended for security");
+    }
+    check_password(password)
+}
+
+pub fn validate_form_auth(
+    form_auth: bool,
+    secure_control: bool,
+    no_control_pass: bool,
+    no_add_user: bool,
+    no_restricted_user: bool,
+) -> HealthStatus {
+    if !form_auth {
+        return HealthStatus::ok();
+    }
+    if !secure_control {
+        return HealthStatus::warning(
+            "'FormAuth' is enabled but 'SecureControl' is disabled. Form credentials may be transmitted in plaintext",
+        );
+    }
+    if no_control_pass && no_add_user && no_restricted_user {
+        return HealthStatus::warning(
+            "'FormAuth' is enabled but no form users are configured. Users cannot log in via forms",
+        );
+    }
+    HealthStatus::ok()
+}
+
+pub struct SecuritySectionInput<'a> {
+    pub control_ip: &'a [u8],
+    pub control_port: i32,
+    pub control_username: &'a [u8],
+    pub control_password: &'a [u8],
+    pub restricted_username: &'a [u8],
+    pub restricted_password: &'a [u8],
+    pub add_username: &'a [u8],
+    pub add_password: &'a [u8],
+    pub form_auth: bool,
+    pub secure_control: bool,
+    pub secure_cert: &'a Path,
+    pub secure_key: &'a Path,
+    pub secure_port: i32,
+    pub cert_check: bool,
+    pub cert_store_path_empty: bool,
+    pub daemon_mode: bool,
+    pub daemon_username: &'a [u8],
+    pub umask: i32,
+}
+
+pub fn validate_security_section(
+    input: &SecuritySectionInput<'_>,
+    mut emit: impl FnMut(&str, Severity, &[u8]),
+) {
+    let ip_status = required_option(b"ControlIP", input.control_ip).and_then(|| {
+        if input.control_ip == b"0.0.0.0" {
+            HealthStatus::info(
+                "'ControlIP' is '0.0.0.0', allowing connections from any IP. Client mode will default to 127.0.0.1 to connect",
+            )
+        } else if input.control_ip.starts_with(b"/") || input.control_ip.starts_with(b".") {
+            if cfg!(windows) {
+                HealthStatus::error("Using Unix domain sockets is not supported on Windows")
+            } else {
+                HealthStatus::info(
+                    "'ControlIP' is set to a path, activating Unix domain socket mode",
+                )
+            }
+        } else {
+            HealthStatus::ok()
+        }
+    });
+    emit_if_not_ok(&mut emit, "ControlIP", ip_status);
+
+    let port_status = network_valid_port(input.control_port).and_then(|| {
+        if input.control_port < 1024 {
+            HealthStatus::warning("'ControlPort' is below 1024 and may require root privileges")
+        } else {
+            HealthStatus::ok()
+        }
+    });
+    emit_if_not_ok(&mut emit, "ControlPort", port_status);
+
+    if input.control_username.is_empty() {
+        emit(
+            "ControlUsername",
+            Severity::Info,
+            b"Using an empty username is not recommended for security reasons",
+        );
+    } else if input.control_username == b"nzbget" {
+        emit(
+            "ControlUsername",
+            Severity::Info,
+            b"Using default username 'nzbget' is not recommended for security reasons",
+        );
+    }
+
+    emit_if_not_ok(
+        &mut emit,
+        "ControlPassword",
+        validate_control_password(input.control_password),
+    );
+
+    if !input.restricted_username.is_empty() && input.control_username == b"nzbget" {
+        emit(
+            "RestrictedUsername",
+            Severity::Warning,
+            b"'RestrictedUsername' is enabled while 'ControlUsername' is still set to the default 'nzbget'",
+        );
+    }
+
+    if !input.restricted_username.is_empty() && input.restricted_password.is_empty() {
+        emit(
+            "RestrictedPassword",
+            Severity::Warning,
+            b"'RestrictedUsername' is enabled, but 'RestrictedPassword' is empty. This allows restricted access without a password",
+        );
+    } else if input.restricted_username.is_empty() && !input.restricted_password.is_empty() {
+        emit(
+            "RestrictedPassword",
+            Severity::Info,
+            b"'RestrictedPassword' is set, but 'RestrictedUsername' is empty. The restricted user is currently disabled",
+        );
+    }
+
+    if !input.add_username.is_empty() && input.control_username == b"nzbget" {
+        emit(
+            "AddUsername",
+            Severity::Warning,
+            b"'AddUsername' is enabled while 'ControlUsername' is still set to the default 'nzbget'",
+        );
+    }
+
+    if !input.add_username.is_empty() && input.add_password.is_empty() {
+        emit(
+            "AddPassword",
+            Severity::Warning,
+            b"'AddUsername' is enabled, but 'AddPassword' is empty. This allows add-only access without a password",
+        );
+    } else if input.add_username.is_empty() && !input.add_password.is_empty() {
+        emit(
+            "AddPassword",
+            Severity::Info,
+            b"'AddPassword' is set, but 'AddUsername' is empty. The add-user is currently disabled",
+        );
+    }
+
+    emit_if_not_ok(
+        &mut emit,
+        "FormAuth",
+        validate_form_auth(
+            input.form_auth,
+            input.secure_control,
+            input.control_password.is_empty(),
+            input.add_username.is_empty(),
+            input.restricted_username.is_empty(),
+        ),
+    );
+
+    if input.secure_control && input.secure_port == 0 {
+        emit(
+            "SecureControl",
+            Severity::Error,
+            b"'SecureControl' is enabled but 'SecurePort' is invalid",
+        );
+    }
+
+    if input.secure_control {
+        let cert_status = if input.secure_cert.as_os_str().is_empty() {
+            HealthStatus::warning("'SecureControl' is enabled but 'SecureCert' is empty")
+        } else {
+            file_exists(input.secure_cert).and_then(|| file_readable(input.secure_cert))
+        };
+        emit_if_not_ok(&mut emit, "SecureCert", cert_status);
+
+        let key_status = if input.secure_key.as_os_str().is_empty() {
+            HealthStatus::warning("'SecureControl' is enabled but 'SecureKey' is empty")
+        } else {
+            file_exists(input.secure_key).and_then(|| file_readable(input.secure_key))
+        };
+        emit_if_not_ok(&mut emit, "SecureKey", key_status);
+
+        let sec_port_status = network_valid_port(input.secure_port).and_then(|| {
+            if input.secure_port == input.control_port {
+                HealthStatus::error("'SecurePort' cannot be the same as 'ControlPort'")
+            } else {
+                HealthStatus::ok()
+            }
+        });
+        emit_if_not_ok(&mut emit, "SecurePort", sec_port_status);
+    }
+
+    if !input.cert_check && !input.cert_store_path_empty {
+        emit(
+            "CertCheck",
+            Severity::Warning,
+            b"'CertCheck' is disabled. TLS connections may be insecure",
+        );
+    }
+
+    if input.daemon_mode && input.daemon_username == b"root" {
+        emit(
+            "DaemonUsername",
+            Severity::Warning,
+            b"'DaemonUsername' is set to 'root', consider using a non-privileged user",
+        );
+    }
+
+    if input.umask == 0 {
+        emit(
+            "UMask",
+            Severity::Warning,
+            b"'UMask' is set to 0, files will be created with full permissions",
+        );
+    }
+}
+
+// ============================================================================
+// NewsServerValidator & NewsServersValidator (`daemon/systemhealth/NewsServerValidator.cpp`)
+// ============================================================================
+
+pub fn validate_server_active(active: bool) -> HealthStatus {
+    if !active {
+        HealthStatus::info("Server is disabled")
+    } else {
+        HealthStatus::ok()
+    }
+}
+
+pub fn validate_server_optional(active: bool, optional: bool, level: i32) -> HealthStatus {
+    if !active {
+        return HealthStatus::ok();
+    }
+    if optional && level == 0 {
+        HealthStatus::info(
+            "Server is marked as optional but assigned to level 0; this may affect primary server selection",
+        )
+    } else {
+        HealthStatus::ok()
+    }
+}
+
+pub fn validate_server_host(active: bool, host: &[u8], ip_version: i32) -> HealthStatus {
+    if !active {
+        return HealthStatus::ok();
+    }
+    required_option(b"Host", host).and_then(|| network_valid_host(host, ip_version))
+}
+
+pub fn validate_server_port(active: bool, port: i32, tls: bool) -> HealthStatus {
+    if !active {
+        return HealthStatus::ok();
+    }
+    if !(1..=65535).contains(&port) {
+        return HealthStatus::error("Port must be between 1 and 65535");
+    }
+    if tls && port != 443 && port != 563 {
+        return HealthStatus::info("Consider using a standard encrypted port (443 or 563)");
+    }
+    if !tls && port != 80 && port != 119 {
+        return HealthStatus::info("Consider using a standard unencrypted port (80 or 119)");
+    }
+    HealthStatus::ok()
+}
+
+pub fn validate_server_username(active: bool, username: &[u8]) -> HealthStatus {
+    if !active {
+        return HealthStatus::ok();
+    }
+    if username.is_empty() {
+        HealthStatus::warning("Username is set to empty")
+    } else {
+        HealthStatus::ok()
+    }
+}
+
+pub fn validate_server_password(active: bool, password: &[u8]) -> HealthStatus {
+    if !active {
+        return HealthStatus::ok();
+    }
+    check_password(password)
+}
+
+pub fn validate_server_encryption(active: bool, tls: bool) -> HealthStatus {
+    if !active {
+        return HealthStatus::ok();
+    }
+    if !tls {
+        HealthStatus::warning("TLS is disabled. Communication with this server will not be encrypted")
+    } else {
+        HealthStatus::ok()
+    }
+}
+
+pub fn validate_server_cipher(active: bool, cipher: &[u8], tls: bool) -> HealthStatus {
+    if !active || cipher.is_empty() {
+        HealthStatus::ok()
+    } else if !tls {
+        HealthStatus::warning("Cipher specified but TLS is disabled")
+    } else {
+        HealthStatus::info("Using custom cipher suite")
+    }
+}
+
+pub fn validate_server_connections(
+    active: bool,
+    max_connections: i32,
+    dupe_search: bool,
+) -> HealthStatus {
+    if !active {
+        return HealthStatus::ok();
+    }
+    if max_connections == 0 {
+        return HealthStatus::warning("'Connections' is set to '0'. The Server is disabled");
+    }
+    if !(0..=999).contains(&max_connections) {
+        return HealthStatus::error("'Connections' value is invalid. It must be between 0 and 999");
+    }
+    if max_connections < 4 && dupe_search {
+        return HealthStatus::warning(
+            "A low number of connections may impact download performance, and DupeSearch's health checks get only 1 connection to this server (4 or more give them 2)",
+        );
+    }
+    if max_connections < 8 {
+        return HealthStatus::warning("A low number of connections may impact download performance");
+    }
+    HealthStatus::ok()
+}
+
+pub fn validate_server_retention(active: bool, retention: i32) -> HealthStatus {
+    if !active {
+        return HealthStatus::ok();
+    }
+    if retention > 0 && retention < 100 {
+        return HealthStatus::warning(format!(
+            "Retention is set to {retention} days. This low value may cause downloads to fail"
+        ));
+    }
+    if retention > 10000 {
+        return HealthStatus::info(format!(
+            "Retention ({retention}) is unrealistically high and will be limited by the server's actual retention"
+        ));
+    }
+    HealthStatus::ok()
+}
+
+pub fn validate_server_cert_verification(
+    active: bool,
+    tls: bool,
+    cert_level: u32,
+) -> HealthStatus {
+    if !active || !tls {
+        return HealthStatus::ok();
+    }
+    // Options::ECertVerifLevel::cvNone = 0
+    if cert_level == 0 {
+        HealthStatus::warning(
+            "Certificate verification is 'None', making the TLS connection insecure",
+        )
+    } else {
+        HealthStatus::ok()
+    }
+}
+
+pub fn validate_server_ip_version(ip_version: i32) -> HealthStatus {
+    match ip_version {
+        0 | 4 => HealthStatus::ok(),
+        6 => HealthStatus::info("Using IPv6 - ensure your network supports IPv6"),
+        _ => HealthStatus::error("Invalid value. Available options are: Auto, IpV4, IpV6"),
+    }
+}
+
+pub struct NewsServerSectionInput<'a> {
+    pub active: bool,
+    pub name: &'a [u8],
+    pub level: i32,
+    pub optional: bool,
+    pub group: i32,
+    pub host: &'a [u8],
+    pub port: i32,
+    pub username: &'a [u8],
+    pub password: &'a [u8],
+    pub tls: bool,
+    pub cipher: &'a [u8],
+    pub max_connections: i32,
+    pub retention: i32,
+    pub cert_level: u32,
+    pub ip_version: i32,
+    pub dupe_search: bool,
+}
+
+pub fn validate_news_server_section(
+    input: &NewsServerSectionInput<'_>,
+    mut emit: impl FnMut(&str, Severity, &[u8]),
+) {
+    emit_if_not_ok(&mut emit, "Active", validate_server_active(input.active));
+
+    if input.active && input.name.is_empty() {
+        emit(
+            "Name",
+            Severity::Info,
+            b"Name is recommended for clearer logs and troubleshooting",
+        );
+    }
+
+    if input.active && !(0..=99).contains(&input.level) {
+        emit(
+            "Level",
+            Severity::Error,
+            b"Level must be between 0 and 99",
+        );
+    }
+
+    emit_if_not_ok(
+        &mut emit,
+        "Optional",
+        validate_server_optional(input.active, input.optional, input.level),
+    );
+
+    if input.active && !(0..=99).contains(&input.group) {
+        emit(
+            "Group",
+            Severity::Error,
+            b"Group must be between 0 and 99",
+        );
+    }
+
+    emit_if_not_ok(
+        &mut emit,
+        "Host",
+        validate_server_host(input.active, input.host, input.ip_version),
+    );
+    emit_if_not_ok(
+        &mut emit,
+        "Port",
+        validate_server_port(input.active, input.port, input.tls),
+    );
+    emit_if_not_ok(
+        &mut emit,
+        "Username",
+        validate_server_username(input.active, input.username),
+    );
+    emit_if_not_ok(
+        &mut emit,
+        "Password",
+        validate_server_password(input.active, input.password),
+    );
+    emit_if_not_ok(
+        &mut emit,
+        "Encryption",
+        validate_server_encryption(input.active, input.tls),
+    );
+    emit_if_not_ok(
+        &mut emit,
+        "Cipher",
+        validate_server_cipher(input.active, input.cipher, input.tls),
+    );
+    emit_if_not_ok(
+        &mut emit,
+        "Connections",
+        validate_server_connections(input.active, input.max_connections, input.dupe_search),
+    );
+    emit_if_not_ok(
+        &mut emit,
+        "Retention",
+        validate_server_retention(input.active, input.retention),
+    );
+    emit_if_not_ok(
+        &mut emit,
+        "CertVerification",
+        validate_server_cert_verification(input.active, input.tls, input.cert_level),
+    );
+    emit_if_not_ok(
+        &mut emit,
+        "IpVersion",
+        validate_server_ip_version(input.ip_version),
+    );
+}
+
+pub fn validate_primary_server_exists(levels: &[i32], actives: &[u8]) -> HealthStatus {
+    let n = levels.len().min(actives.len());
+    if n == 0 {
+        return HealthStatus::error("At least one server must be configured");
+    }
+    let mut min_level = levels[0];
+    for &lvl in &levels[..n] {
+        if lvl < min_level {
+            min_level = lvl;
+        }
+    }
+    if (0..n).any(|i| levels[i] == min_level && actives[i] != 0) {
+        HealthStatus::ok()
+    } else {
+        HealthStatus::error("At least one primary server must be active")
+    }
+}
+
+pub fn validate_news_servers_group(
+    hosts: &[&[u8]],
+    actives: &[u8],
+    max_conns: &[i32],
+    levels: &[i32],
+    mut emit_issue: impl FnMut(Severity, &[u8]),
+) {
+    let n = hosts
+        .len()
+        .min(actives.len())
+        .min(max_conns.len())
+        .min(levels.len());
+    if n == 0 || (n == 1 && hosts[0] == b"my.newsserver.com") {
+        emit_issue(Severity::Error, b"No servers are configured");
+    }
+    if !(0..n).any(|i| actives[i] != 0 && max_conns[i] > 0) {
+        emit_issue(Severity::Error, b"At least one server must be active");
+    }
+    let prim = validate_primary_server_exists(&levels[..n], &actives[..n]);
+    if !prim.is_ok() {
+        emit_issue(prim.severity, &prim.message);
+    }
+}
+
+// ============================================================================
+// ExtensionScriptsValidator (`daemon/systemhealth/ExtensionScriptsValidator.cpp`)
+// ============================================================================
+
+fn trim_tokenizer_ws(mut s: &[u8]) -> &[u8] {
+    while let Some(&b) = s.first() {
+        if matches!(b, b' ' | b'\t' | b'\n' | b'\r') {
+            s = &s[1..];
+        } else {
+            break;
+        }
+    }
+    while let Some(&b) = s.last() {
+        if matches!(b, b' ' | b'\t' | b'\n' | b'\r') {
+            s = &s[..s.len() - 1];
+        } else {
+            break;
+        }
+    }
+    s
+}
+
+fn strip_script_ext(name: &[u8]) -> &[u8] {
+    match name.iter().rposition(|&b| b == b'.') {
+        Some(pos) if pos > 0 => &name[..pos],
+        _ => name,
+    }
+}
+
+pub fn validate_extension_list(
+    extensions_opt: &[u8],
+    known_extensions: &[(&[u8], &Path)],
+) -> HealthStatus {
+    if extensions_opt.is_empty() {
+        return HealthStatus::ok();
+    }
+    let mut message = Vec::new();
+    for raw_tok in extensions_opt.split(|&b| b == b',' || b == b';') {
+        let script_name_raw = trim_tokenizer_ws(raw_tok);
+        if script_name_raw.is_empty() {
+            continue;
+        }
+        let script_name = strip_script_ext(script_name_raw);
+        let found = known_extensions
+            .iter()
+            .find(|&&(ext_name, _)| ext_name == script_name);
+        let Some(&(_, entry_path)) = found else {
+            if !message.is_empty() {
+                message.extend_from_slice(b"; ");
+            }
+            message.push(b'\'');
+            message.extend_from_slice(script_name_raw);
+            message.extend_from_slice(b"' doesn't exist");
+            continue;
+        };
+        let exists = file_exists(entry_path);
+        if !exists.is_ok() {
+            if !message.is_empty() {
+                message.extend_from_slice(b"; ");
+            }
+            message.extend_from_slice(&exists.message);
+            message.push(b' ');
+        }
+    }
+    if message.is_empty() {
+        HealthStatus::ok()
+    } else {
+        HealthStatus::warning(message)
+    }
+}
+
+pub fn validate_shell_override(shell_override: &[u8]) -> HealthStatus {
+    if shell_override.is_empty() {
+        return HealthStatus::ok();
+    }
+    let mut message = Vec::new();
+    for raw_tok in shell_override.split(|&b| b == b',' || b == b';') {
+        let tok = trim_tokenizer_ws(raw_tok);
+        if tok.is_empty() {
+            continue;
+        }
+        if let Some(eq_pos) = tok.iter().position(|&b| b == b'=') {
+            let actual_cmd_bytes = &tok[eq_pos + 1..];
+            let actual_path = bytes_to_path(actual_cmd_bytes);
+            let exists = file_exists(&actual_path);
+            if !exists.is_ok() {
+                if !message.is_empty() {
+                    message.extend_from_slice(b"; ");
+                }
+                message.extend_from_slice(&exists.message);
+                message.push(b' ');
+                continue;
+            }
+            let exe = file_executable(&actual_path);
+            if !exe.is_ok() {
+                if !message.is_empty() {
+                    message.extend_from_slice(b"; ");
+                }
+                message.extend_from_slice(&exe.message);
+                message.push(b' ');
+            }
+        }
+    }
+    if message.is_empty() {
+        HealthStatus::ok()
+    } else {
+        HealthStatus::warning(message)
+    }
+}
+
+pub fn validate_extension_scripts_section(
+    extensions_opt: &[u8],
+    known_extensions: &[(&[u8], &Path)],
+    shell_override: &[u8],
+    event_interval: i32,
+    mut emit: impl FnMut(&str, Severity, &[u8]),
+) {
+    emit_if_not_ok(
+        &mut emit,
+        "Extensions",
+        validate_extension_list(extensions_opt, known_extensions),
+    );
+    emit_if_not_ok(
+        &mut emit,
+        "ShellOverride",
+        validate_shell_override(shell_override),
+    );
+    if event_interval < -1 {
+        emit(
+            "EventInterval",
+            Severity::Error,
+            b"'EventInterval' cannot be less than -1",
+        );
+    }
+}
+
+#[cfg(unix)]
+fn bytes_to_path(bytes: &[u8]) -> std::path::PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    std::path::PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
+}
+
+#[cfg(not(unix))]
+fn bytes_to_path(bytes: &[u8]) -> std::path::PathBuf {
+    std::path::PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1535,6 +2381,52 @@ mod tests {
         assert_eq!(
             feed_opts,
             vec![("CertVerification".to_string(), Severity::Warning)]
+        );
+
+        assert_eq!(
+            validate_article_retries(1, true, false).severity,
+            Severity::Warning
+        );
+        assert!(validate_article_retries(3, true, true).is_ok());
+        assert!(validate_article_retries(100, false, false).is_error());
+        assert_eq!(
+            validate_article_read_chunk_size(2048).severity,
+            Severity::Warning
+        );
+        assert!(validate_article_read_chunk_size(4096).is_ok());
+
+        assert_eq!(
+            validate_control_password(b"tegbzn6789").severity,
+            Severity::Info
+        );
+        assert!(validate_control_password(b"a-long-password").is_ok());
+        assert_eq!(
+            validate_form_auth(true, false, false, true, true).severity,
+            Severity::Warning
+        );
+        assert_eq!(
+            validate_form_auth(true, true, true, true, true).severity,
+            Severity::Warning
+        );
+        assert!(validate_form_auth(true, true, false, true, true).is_ok());
+
+        assert!(validate_server_port(true, 563, true).is_ok());
+        assert_eq!(validate_server_port(true, 119, true).severity, Severity::Info);
+        assert!(validate_server_connections(true, 1000, false).is_error());
+        assert_eq!(
+            validate_server_connections(true, 2, true).severity,
+            Severity::Warning
+        );
+        assert_eq!(
+            validate_server_retention(true, 50).severity,
+            Severity::Warning
+        );
+        assert!(validate_primary_server_exists(&[1, 0], &[1, 0]).is_error());
+        assert!(validate_primary_server_exists(&[1, 0], &[0, 1]).is_ok());
+
+        assert_eq!(
+            validate_extension_list(b"Missing.py", &[]).severity,
+            Severity::Warning
         );
     }
 }

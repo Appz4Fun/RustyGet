@@ -25,207 +25,129 @@
 
 namespace SystemHealth::NewsServer
 {
-NewsServerValidator::NewsServerValidator(const ::NewsServer& server)
-	: m_server(server), m_name("Server" + std::to_string(server.GetId()))
+SectionReport NewsServerValidator::Validate() const
 {
-	m_validators.reserve(15);
-	m_validators.push_back(std::make_unique<ServerActiveValidator>(server));
-	m_validators.push_back(std::make_unique<ServerNameValidator>(server));
-	m_validators.push_back(std::make_unique<ServerLevelValidator>(server));
-	m_validators.push_back(std::make_unique<ServerOptionalValidator>(server));
-	m_validators.push_back(std::make_unique<ServerGroupValidator>(server));
-	m_validators.push_back(std::make_unique<ServerHostValidator>(server));
-	m_validators.push_back(std::make_unique<ServerPortValidator>(server));
-	m_validators.push_back(std::make_unique<ServerUsernameValidator>(server));
-	m_validators.push_back(std::make_unique<ServerPasswordValidator>(server));
-	m_validators.push_back(std::make_unique<ServerEncryptionValidator>(server));
-	m_validators.push_back(std::make_unique<ServerCipherValidator>(server));
-	m_validators.push_back(std::make_unique<ServerConnectionsValidator>(server));
-	m_validators.push_back(std::make_unique<ServerRetentionValidator>(server));
-	m_validators.push_back(std::make_unique<ServerCertVerificationValidator>(server));
-	m_validators.push_back(std::make_unique<ServerIpVersionValidator>(server));
+	SectionReport report;
+	report.name = GetName();
+	std::string_view name = m_server.GetName();
+	std::string_view host = m_server.GetHost();
+	std::string_view user = m_server.GetUser();
+	std::string_view pass = m_server.GetPassword();
+	std::string_view cipher = m_server.GetCipher();
+
+	nzbget_rs_health_validate_news_server_section(
+		m_server.GetActive() ? 1 : 0,
+		name.data(), name.size(),
+		m_server.GetLevel(),
+		m_server.GetOptional() ? 1 : 0,
+		m_server.GetGroup(),
+		host.data(), host.size(),
+		m_server.GetPort(),
+		user.data(), user.size(),
+		pass.data(), pass.size(),
+		m_server.GetTls() ? 1 : 0,
+		cipher.data(), cipher.size(),
+		m_server.GetMaxConnections(),
+		m_server.GetRetention(),
+		static_cast<uint32_t>(m_server.GetCertVerificationLevel()),
+		m_server.GetIpVersion(),
+		(g_Options && g_Options->GetDupeSearch()) ? 1 : 0,
+		&report.options,
+		&SectionValidator::AppendOptionCallback);
+	return report;
 }
 
 Status ServerActiveValidator::Validate() const
 {
-	if (!m_server.GetActive()) return Status::Info("Server is disabled");
-
-	return Status::Ok();
-}
-
-Status ServerNameValidator::Validate() const
-{
-	if (!m_server.GetActive()) return Status::Ok();
-
-	std::string_view name = m_server.GetName();
-	if (name.empty())
-		return Status::Info("Name is recommended for clearer logs and troubleshooting");
-
-	return Status::Ok();
-}
-
-Status ServerLevelValidator::Validate() const
-{
-	if (!m_server.GetActive()) return Status::Ok();
-
-	const auto level = m_server.GetLevel();
-	if (level < 0 || level > 99) return Status::Error("Level must be between 0 and 99");
-
-	return Status::Ok();
+	NzbgetRsBuf msg{};
+	int sev = nzbget_rs_health_validate_server_active(m_server.GetActive() ? 1 : 0, &msg);
+	return Status::FromRust(sev, msg);
 }
 
 Status ServerOptionalValidator::Validate() const
 {
-	if (!m_server.GetActive()) return Status::Ok();
-
-	if (m_server.GetOptional() && m_server.GetLevel() == 0)
-	{
-		return Status::Info(
-			"Server is marked as optional but assigned to level 0; this may affect primary "
-			"server selection");
-	}
-	return Status::Ok();
-}
-
-Status ServerGroupValidator::Validate() const
-{
-	if (!m_server.GetActive()) return Status::Ok();
-
-	const auto group = m_server.GetGroup();
-	if (group < 0 || group > 99) return Status::Error("Group must be between 0 and 99");
-
-	return Status::Ok();
+	NzbgetRsBuf msg{};
+	int sev = nzbget_rs_health_validate_server_optional(
+		m_server.GetActive() ? 1 : 0, m_server.GetOptional() ? 1 : 0, m_server.GetLevel(), &msg);
+	return Status::FromRust(sev, msg);
 }
 
 Status ServerHostValidator::Validate() const
 {
-	if (!m_server.GetActive()) return Status::Ok();
-
-	return RequiredOption(GetName(), m_server.GetHost())
-		.And([&]() { return Network::ValidHost(
-			m_server.GetHost(),
-			static_cast<Connection::EIPVersion>(m_server.GetIpVersion()));
-		});
+	std::string_view host = m_server.GetHost();
+	NzbgetRsBuf msg{};
+	int sev = nzbget_rs_health_validate_server_host(
+		m_server.GetActive() ? 1 : 0, host.data(), host.size(), m_server.GetIpVersion(), &msg);
+	return Status::FromRust(sev, msg);
 }
 
 Status ServerPortValidator::Validate() const
 {
-	int portCheck = nzbget_rs_feh_health_validate_server_port(
-		m_server.GetActive() ? 1 : 0, m_server.GetPort(), m_server.GetTls() ? 1 : 0);
-	if (portCheck == -1)
-		return Status::Error("Port must be between 1 and 65535");
-	if (portCheck == 1)
-		return Status::Info("Consider using a standard encrypted port (443 or 563)");
-	if (portCheck == 2)
-		return Status::Info("Consider using a standard unencrypted port (80 or 119)");
-	return Status::Ok();
+	NzbgetRsBuf msg{};
+	int sev = nzbget_rs_health_validate_server_port(
+		m_server.GetActive() ? 1 : 0, m_server.GetPort(), m_server.GetTls() ? 1 : 0, &msg);
+	return Status::FromRust(sev, msg);
 }
 
 Status ServerUsernameValidator::Validate() const
 {
-	if (!m_server.GetActive()) return Status::Ok();
-
 	std::string_view username = m_server.GetUser();
-	if (username.empty())
-	{
-		return Status::Warning("Username is set to empty");
-	}
-	return Status::Ok();
+	NzbgetRsBuf msg{};
+	int sev = nzbget_rs_health_validate_server_username(
+		m_server.GetActive() ? 1 : 0, username.data(), username.size(), &msg);
+	return Status::FromRust(sev, msg);
 }
 
 Status ServerPasswordValidator::Validate() const
 {
-	if (!m_server.GetActive()) return Status::Ok();
-	return CheckPassword(m_server.GetPassword());
+	std::string_view password = m_server.GetPassword();
+	NzbgetRsBuf msg{};
+	int sev = nzbget_rs_health_validate_server_password(
+		m_server.GetActive() ? 1 : 0, password.data(), password.size(), &msg);
+	return Status::FromRust(sev, msg);
 }
 
 Status ServerEncryptionValidator::Validate() const
 {
-	if (!m_server.GetActive()) return Status::Ok();
-
-	if (!m_server.GetTls())
-	{
-		return Status::Warning(
-			"TLS is disabled. "
-			"Communication with this server will not be encrypted");
-	}
-
-	return Status::Ok();
+	NzbgetRsBuf msg{};
+	int sev = nzbget_rs_health_validate_server_encryption(
+		m_server.GetActive() ? 1 : 0, m_server.GetTls() ? 1 : 0, &msg);
+	return Status::FromRust(sev, msg);
 }
 
 Status ServerCipherValidator::Validate() const
 {
 	std::string_view cipher = m_server.GetCipher();
-	int check = nzbget_rs_feh_health_validate_server_cipher(
-		m_server.GetActive() ? 1 : 0, cipher.data(), cipher.size(), m_server.GetTls() ? 1 : 0);
-	if (check == 1) return Status::Warning("Cipher specified but TLS is disabled");
-	if (check == 2) return Status::Info("Using custom cipher suite");
-	return Status::Ok();
+	NzbgetRsBuf msg{};
+	int sev = nzbget_rs_health_validate_server_cipher(
+		m_server.GetActive() ? 1 : 0, cipher.data(), cipher.size(), m_server.GetTls() ? 1 : 0, &msg);
+	return Status::FromRust(sev, msg);
 }
 
 Status ServerConnectionsValidator::Validate() const
 {
-	int connCheck = nzbget_rs_feh_health_validate_server_connections(
+	NzbgetRsBuf msg{};
+	int sev = nzbget_rs_health_validate_server_connections(
 		m_server.GetActive() ? 1 : 0, m_server.GetMaxConnections(),
-		(g_Options && g_Options->GetDupeSearch()) ? 1 : 0);
-	if (connCheck == 1)
-		return Status::Warning("'Connections' is set to '0'. The Server is disabled");
-	if (connCheck == -1)
-		return Status::Error("'Connections' value is invalid. It must be between 0 and 999");
-	if (connCheck == 2)
-		return Status::Warning("A low number of connections may impact download performance, and "
-			"DupeSearch's health checks get only 1 connection to this server (4 or more give them 2)");
-	if (connCheck == 3)
-		return Status::Warning("A low number of connections may impact download performance");
-	return Status::Ok();
+		(g_Options && g_Options->GetDupeSearch()) ? 1 : 0, &msg);
+	return Status::FromRust(sev, msg);
 }
 
 Status ServerRetentionValidator::Validate() const
 {
-	int retention = m_server.GetRetention();
-	int retCheck = nzbget_rs_feh_health_validate_server_retention(
-		m_server.GetActive() ? 1 : 0, retention);
-	if (retCheck == 1)
-	{
-		std::stringstream ss;
-		ss << "Retention is set to " << retention << " days. "
-		   << "This low value may cause downloads to fail";
-		return Status::Warning(ss.str());
-	}
-	if (retCheck == 2)
-	{
-		std::stringstream ss;
-		ss << "Retention (" << retention << ") is unrealistically high "
-		   << "and will be limited by the server's actual retention";
-		return Status::Info(ss.str());
-	}
-	return Status::Ok();
+	NzbgetRsBuf msg{};
+	int sev = nzbget_rs_health_validate_server_retention(
+		m_server.GetActive() ? 1 : 0, m_server.GetRetention(), &msg);
+	return Status::FromRust(sev, msg);
 }
 
 Status ServerCertVerificationValidator::Validate() const
 {
-	if (!m_server.GetActive()) return Status::Ok();
-
-	bool tls = m_server.GetTls();
-	auto certLevel = m_server.GetCertVerificationLevel();
-	if (!tls) return Status::Ok();
-
-	if (certLevel == Options::ECertVerifLevel::cvNone)
-		return Status::Warning(
-			"Certificate verification is 'None', "
-			"making the TLS connection insecure");
-
-	return Status::Ok();
-}
-
-Status ServerIpVersionValidator::Validate() const
-{
-	int check = nzbget_rs_feh_health_validate_server_ip_version(m_server.GetIpVersion());
-	if (check == 0)
-		return Status::Ok();
-	if (check == 1)
-		return Status::Info("Using IPv6 - ensure your network supports IPv6");
-	return Status::Error("Invalid value. Available options are: Auto, IpV4, IpV6");
+	NzbgetRsBuf msg{};
+	int sev = nzbget_rs_health_validate_server_cert_verification(
+		m_server.GetActive() ? 1 : 0, m_server.GetTls() ? 1 : 0,
+		static_cast<uint32_t>(m_server.GetCertVerificationLevel()), &msg);
+	return Status::FromRust(sev, msg);
 }
 
 }  // namespace SystemHealth::NewsServer

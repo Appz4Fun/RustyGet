@@ -28,8 +28,9 @@ namespace SystemHealth::Connection
 class ConnectionValidator final : public SectionValidator
 {
 public:
-	explicit ConnectionValidator(const Options& options);
+	explicit ConnectionValidator(const Options& options) : m_options(options) {}
 	std::string_view GetName() const override { return "Connection"; }
+	SectionReport Validate() const override;
 
 private:
 	const Options& m_options;
@@ -46,143 +47,11 @@ private:
 	const Options& m_options;
 };
 
-class ArticleIntervalValidator : public Validator
-{
-public:
-	explicit ArticleIntervalValidator(const Options& options) : m_options(options) {}
-	std::string_view GetName() const override { return Options::ARTICLEINTERVAL; }
-	Status Validate() const override;
-
-private:
-	const Options& m_options;
-};
-
-class ArticleTimeoutValidator : public Validator
-{
-public:
-	explicit ArticleTimeoutValidator(const Options& options) : m_options(options) {}
-	std::string_view GetName() const override { return Options::ARTICLETIMEOUT; }
-	Status Validate() const override;
-
-private:
-	const Options& m_options;
-};
-
 class ArticleReadChunkSizeValidator : public Validator
 {
 public:
 	explicit ArticleReadChunkSizeValidator(const Options& options) : m_options(options) {}
 	std::string_view GetName() const override { return Options::ARTICLEREADCHUNKSIZE; }
-	Status Validate() const override;
-
-private:
-	const Options& m_options;
-};
-
-class UrlRetriesValidator : public Validator
-{
-public:
-	explicit UrlRetriesValidator(const Options& options) : m_options(options) {}
-	std::string_view GetName() const override { return Options::URLRETRIES; }
-	Status Validate() const override;
-
-private:
-	const Options& m_options;
-};
-
-class UrlIntervalValidator : public Validator
-{
-public:
-	explicit UrlIntervalValidator(const Options& options) : m_options(options) {}
-	std::string_view GetName() const override { return Options::URLINTERVAL; }
-	Status Validate() const override;
-
-private:
-	const Options& m_options;
-};
-
-class UrlTimeoutValidator : public Validator
-{
-public:
-	explicit UrlTimeoutValidator(const Options& options) : m_options(options) {}
-	std::string_view GetName() const override { return Options::URLTIMEOUT; }
-	Status Validate() const override;
-
-private:
-	const Options& m_options;
-};
-
-class RemoteTimeoutValidator : public Validator
-{
-public:
-	explicit RemoteTimeoutValidator(const Options& options) : m_options(options) {}
-	std::string_view GetName() const override { return Options::REMOTETIMEOUT; }
-	Status Validate() const override;
-
-private:
-	const Options& m_options;
-};
-
-class DownloadRateValidator : public Validator
-{
-public:
-	explicit DownloadRateValidator(const Options& options) : m_options(options) {}
-	std::string_view GetName() const override { return Options::DOWNLOADRATE; }
-	Status Validate() const override;
-
-private:
-	const Options& m_options;
-};
-
-class UrlConnectionsValidator : public Validator
-{
-public:
-	explicit UrlConnectionsValidator(const Options& options) : m_options(options) {}
-	std::string_view GetName() const override { return Options::URLCONNECTIONS; }
-	Status Validate() const override;
-
-private:
-	const Options& m_options;
-};
-
-class UrlForceValidator : public Validator
-{
-public:
-	explicit UrlForceValidator(const Options& options) : m_options(options) {}
-	std::string_view GetName() const override { return Options::URLFORCE; }
-	Status Validate() const override;
-
-private:
-	const Options& m_options;
-};
-
-class MonthlyQuotaValidator : public Validator
-{
-public:
-	explicit MonthlyQuotaValidator(const Options& options) : m_options(options) {}
-	std::string_view GetName() const override { return Options::MONTHLYQUOTA; }
-	Status Validate() const override;
-
-private:
-	const Options& m_options;
-};
-
-class QuotaStartDayValidator : public Validator
-{
-public:
-	explicit QuotaStartDayValidator(const Options& options) : m_options(options) {}
-	std::string_view GetName() const override { return Options::QUOTASTARTDAY; }
-	Status Validate() const override;
-
-private:
-	const Options& m_options;
-};
-
-class DailyQuotaValidator : public Validator
-{
-public:
-	explicit DailyQuotaValidator(const Options& options) : m_options(options) {}
-	std::string_view GetName() const override { return Options::DAILYQUOTA; }
 	Status Validate() const override;
 
 private:

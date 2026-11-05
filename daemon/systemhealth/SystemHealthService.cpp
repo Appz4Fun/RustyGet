@@ -98,11 +98,8 @@ void Service::ReportAlert(Alert alert)
 	auto it = std::find_if(
 		m_alerts.begin(), m_alerts.end(), [&](const Alert& existing)
 		{
-			return nzbget_rs_dur_health_alert_matches(
-				existing.GetSource().data(), existing.GetSource().size(),
-				existing.GetCategory().data(), existing.GetCategory().size(),
-				alert.GetSource().data(), alert.GetSource().size(),
-				alert.GetCategory().data(), alert.GetCategory().size()) != 0;
+			return existing.GetSource() == alert.GetSource() &&
+				   existing.GetCategory() == alert.GetCategory();
 		});
 
 	if (alert.GetSeverity() == Severity::Ok)

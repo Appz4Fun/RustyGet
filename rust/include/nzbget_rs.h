@@ -2201,20 +2201,6 @@ int nzbget_rs_feh_ext_should_skip_dir_entry(const char* filename);
 size_t nzbget_rs_feh_ext_get_stem_len(const char* filename, size_t filename_len);
 int nzbget_rs_feh_ext_is_in_list(const char* extensions_list, const char* target_name);
 
-int nzbget_rs_feh_health_validate_control_ip(
-    const char* ip, size_t ip_len, int is_win32);
-int nzbget_rs_feh_health_validate_user_pass_pair(
-    const char* user, size_t user_len, const char* pass, size_t pass_len);
-int nzbget_rs_feh_health_validate_form_auth(
-    int form_auth, int secure_control, int no_control_pass, int no_add_user,
-    int no_restricted_user);
-int nzbget_rs_feh_health_validate_server_port(int active, int port, int tls);
-int nzbget_rs_feh_health_validate_server_connections(
-    int active, int max_conn, int dupe_search);
-int nzbget_rs_feh_health_validate_server_retention(int active, int retention);
-int nzbget_rs_feh_health_validate_article_read_chunk_size(
-    int bytes, int* out_kb_val);
-
 int nzbget_rs_snh_sys_extract_python_version(
     const char* line, size_t len, size_t* out_start, size_t* out_len);
 int nzbget_rs_snh_sys_parse_unpacker_version(
@@ -2309,10 +2295,6 @@ size_t nzbget_rs_euh_sched_script_strip_ext_len(const char* base_name, size_t le
 int nzbget_rs_euh_nzb_script_match_param_prefix(
     const char* param_name, const char* strip_prefix, size_t* out_offset);
 int nzbget_rs_euh_feed_script_is_success(int exit_code);
-size_t nzbget_rs_euh_health_strip_script_ext_len(const char* name, size_t len);
-int nzbget_rs_euh_health_validate_event_interval(int val);
-int nzbget_rs_euh_health_validate_primary_server(
-    const int32_t* levels, const uint8_t* actives, size_t count);
 
 int nzbget_rs_dur_article_dl_is_retention_failure(
     int retention_days, int64_t file_time, int64_t cur_time, int* out_age_days);
@@ -2374,10 +2356,6 @@ uint64_t nzbget_rs_dur_parchecker_calc_pad_bytes(
     uint64_t block_size, uint32_t block_count, uint64_t file_size);
 int nzbget_rs_dur_parchecker_compare_extra_file_stems(
     const char* base_name1, const char* base_name2, const char* par_stem);
-
-int nzbget_rs_dur_health_alert_matches(
-    const char* src1, size_t src1_len, const char* cat1, size_t cat1_len,
-    const char* src2, size_t src2_len, const char* cat2, size_t cat2_len);
 
 size_t nzbget_rs_awc_article_writer_format_result_filename(
     const char* tmp_dir, char sep, int file_id, int part_num,
@@ -5252,14 +5230,6 @@ NzbgetRsBuf nzbget_rs_ufs_util_resolve_path_from_env(
 int32_t nzbget_rs_ext_script_kind(const char* line_ptr, size_t line_len);
 void nzbget_rs_feh_ext_sort_indices(
     const char* const* names, size_t count, const char* order_str, size_t* out_indices);
-int32_t nzbget_rs_feh_health_validate_control_username(const char* username_ptr, size_t username_len);
-int32_t nzbget_rs_feh_health_is_default_control_user_with_subuser(
-    const char* sub_ptr, size_t sub_len, const char* ctrl_ptr, size_t ctrl_len);
-int32_t nzbget_rs_feh_health_validate_article_retries(
-    const char* opt_ptr, size_t opt_len, int32_t val, int32_t hc_dupe, int32_t dupe_search, NzbgetRsBuf* out_msg);
-int32_t nzbget_rs_feh_health_validate_server_cipher(
-    int32_t active, const char* cipher_ptr, size_t cipher_len, int32_t tls);
-int32_t nzbget_rs_feh_health_validate_server_ip_version(int32_t ip_version);
 void nzbget_rs_sfc_feed_info_format_season_episode(
     int32_t season_num, const char* ep_ptr, size_t ep_len,
     NzbgetRsBuf* out_season, NzbgetRsBuf* out_episode);
@@ -6713,6 +6683,89 @@ void nzbget_rs_health_validate_download_queue_section(
     int file_naming, int post_strategy, int disk_space,
     int nzb_cleanup_disk, int keep_history, int feed_history,
     int skip_write, int raw_article,
+    void* ctx, NzbgetRsHealthOptionEmitCb emit_cb);
+int nzbget_rs_health_validate_article_retries(
+    int val, int hc_dupe, int dupe_search, NzbgetRsBuf* out_msg);
+int nzbget_rs_health_validate_article_read_chunk_size(
+    int bytes, NzbgetRsBuf* out_msg);
+void nzbget_rs_health_validate_connection_section(
+    int article_retries, int hc_dupe, int dupe_search,
+    int article_interval, int article_timeout, int article_read_chunk_size,
+    int url_retries, int url_interval, int url_timeout,
+    int url_connections, int remote_timeout, int download_rate,
+    int monthly_quota, int quota_start_day, int daily_quota,
+    void* ctx, NzbgetRsHealthOptionEmitCb emit_cb);
+int nzbget_rs_health_validate_control_password(
+    const char* password, size_t password_len, NzbgetRsBuf* out_msg);
+int nzbget_rs_health_validate_form_auth(
+    int form_auth, int secure_control, int no_control_pass,
+    int no_add_user, int no_restricted_user, NzbgetRsBuf* out_msg);
+void nzbget_rs_health_validate_security_section(
+    const char* control_ip, size_t control_ip_len,
+    int control_port,
+    const char* control_username, size_t control_username_len,
+    const char* control_password, size_t control_password_len,
+    const char* restricted_username, size_t restricted_username_len,
+    const char* restricted_password, size_t restricted_password_len,
+    const char* add_username, size_t add_username_len,
+    const char* add_password, size_t add_password_len,
+    int form_auth, int secure_control,
+    const char* secure_cert, size_t secure_cert_len,
+    const char* secure_key, size_t secure_key_len,
+    int secure_port, int cert_check, int cert_store_path_empty,
+    int daemon_mode, const char* daemon_username, size_t daemon_username_len,
+    int umask, void* ctx, NzbgetRsHealthOptionEmitCb emit_cb);
+int nzbget_rs_health_validate_server_active(int active, NzbgetRsBuf* out_msg);
+int nzbget_rs_health_validate_server_optional(
+    int active, int optional, int level, NzbgetRsBuf* out_msg);
+int nzbget_rs_health_validate_server_host(
+    int active, const char* host, size_t host_len, int ip_version, NzbgetRsBuf* out_msg);
+int nzbget_rs_health_validate_server_port(
+    int active, int port, int tls, NzbgetRsBuf* out_msg);
+int nzbget_rs_health_validate_server_username(
+    int active, const char* username, size_t username_len, NzbgetRsBuf* out_msg);
+int nzbget_rs_health_validate_server_password(
+    int active, const char* password, size_t password_len, NzbgetRsBuf* out_msg);
+int nzbget_rs_health_validate_server_encryption(
+    int active, int tls, NzbgetRsBuf* out_msg);
+int nzbget_rs_health_validate_server_cipher(
+    int active, const char* cipher, size_t cipher_len, int tls, NzbgetRsBuf* out_msg);
+int nzbget_rs_health_validate_server_connections(
+    int active, int max_connections, int dupe_search, NzbgetRsBuf* out_msg);
+int nzbget_rs_health_validate_server_retention(
+    int active, int retention, NzbgetRsBuf* out_msg);
+int nzbget_rs_health_validate_server_cert_verification(
+    int active, int tls, uint32_t cert_level, NzbgetRsBuf* out_msg);
+void nzbget_rs_health_validate_news_server_section(
+    int active, const char* name, size_t name_len,
+    int level, int optional, int group,
+    const char* host, size_t host_len, int port,
+    const char* username, size_t username_len,
+    const char* password, size_t password_len,
+    int tls, const char* cipher, size_t cipher_len,
+    int max_connections, int retention, uint32_t cert_level,
+    int ip_version, int dupe_search,
+    void* ctx, NzbgetRsHealthOptionEmitCb emit_cb);
+int nzbget_rs_health_validate_primary_server_exists(
+    const int32_t* levels_ptr, const uint8_t* actives_ptr, size_t count,
+    NzbgetRsBuf* out_msg);
+void nzbget_rs_health_validate_news_servers_group(
+    const char* const* host_ptrs, const size_t* host_lens,
+    const uint8_t* actives_ptr, const int32_t* max_conns_ptr,
+    const int32_t* levels_ptr, size_t count,
+    void* ctx, NzbgetRsHealthOptionEmitCb emit_cb);
+int nzbget_rs_health_validate_extension_list(
+    const char* extensions_opt, size_t extensions_opt_len,
+    const char* const* ext_name_ptrs, const size_t* ext_name_lens,
+    const char* const* ext_entry_ptrs, const size_t* ext_entry_lens,
+    size_t ext_count, NzbgetRsBuf* out_msg);
+void nzbget_rs_health_validate_extension_scripts_section(
+    const char* extensions_opt, size_t extensions_opt_len,
+    const char* const* ext_name_ptrs, const size_t* ext_name_lens,
+    const char* const* ext_entry_ptrs, const size_t* ext_entry_lens,
+    size_t ext_count,
+    const char* shell_override, size_t shell_override_len,
+    int event_interval,
     void* ctx, NzbgetRsHealthOptionEmitCb emit_cb);
 
 #include "nzbget_tls_cipher.h"

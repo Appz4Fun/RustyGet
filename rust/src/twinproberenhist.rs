@@ -1206,16 +1206,6 @@ pub fn tpr_unpack_ctrl_request_par_reason(force_repair: bool) -> &'static [u8] {
     }
 }
 
-/// Return the NUL-terminated `"archive "` or `""` kind prefix for
-/// `RenameController::Run` log messages in `Rename.cpp`.
-pub fn tpr_rename_ctrl_archive_kind_prefix(kind: i32, jk_rar: i32) -> &'static [u8] {
-    if kind == jk_rar {
-        b"archive \0"
-    } else {
-        b"\0"
-    }
-}
-
 /// Return the NUL-terminated rejection reason (`"describes other files"` vs
 /// `"names the files otherwise"`) for a twin PAR2 set in
 /// `RepairController::PostParChecker::RequestTwinIndex` (`Repair.cpp`).
@@ -2257,8 +2247,6 @@ mod tests {
             tpr_unpack_ctrl_request_par_reason(false),
             b"par-check/repair\0"
         );
-        assert_eq!(tpr_rename_ctrl_archive_kind_prefix(1, 1), b"archive \0");
-        assert_eq!(tpr_rename_ctrl_archive_kind_prefix(0, 1), b"\0");
         assert_eq!(
             tpr_repair_ctrl_twin_par2_reject_reason(1),
             b"describes other files\0"

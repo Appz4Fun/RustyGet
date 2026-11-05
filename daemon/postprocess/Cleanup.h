@@ -38,7 +38,6 @@ public:
 protected:
 	void AddMessage(Message::EKind kind, const char* text) override;
 	bool MoveFiles();
-	bool MoveFiles(const fs::path& src, const fs::path& dest);
 	void RemoveStaleHardlinks(NzbInfo& nzbInfo, const fs::path& destDir);
 
 private:
@@ -60,8 +59,6 @@ private:
 	PostInfo* m_postInfo;
 	CString m_destDir;
 	CString m_finalDir;
-
-	bool Cleanup(const char* destDir, bool *deleted);
 };
 
 #endif

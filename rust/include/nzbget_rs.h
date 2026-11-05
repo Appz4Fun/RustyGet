@@ -2157,14 +2157,6 @@ int nzbget_rs_rco_options_lookup_scheduler_command(const char* cmd);
 int nzbget_rs_rco_options_validate_scheduler_param(
     int task_command, const char* param, int split_cmd_empty);
 
-int nzbget_rs_rco_move_controller_decide_outcome(
-    int ok, int is_stopped, int* out_move_status);
-int nzbget_rs_rco_cleanup_controller_decide_outcome(
-    int ok, int deleted, int* out_cleanup_status);
-int nzbget_rs_rco_rename_controller_complete_action(
-    int kind, int renamed_count, int has_damaged_pars, int remaining_par_count,
-    int has_missed_files, int par_status,
-    int* out_request_extra_pars, int* out_request_par_check);
 int nzbget_rs_rco_archive_is_nzb_extension(const char* ext);
 int nzbget_rs_rco_archive_decide_dispose_action(
     int config_action, int non_nzb_file_count);
@@ -3318,8 +3310,6 @@ int nzbget_rs_ucf_direct_unpack_calc_extra_time(
     int cur_unpack_sec, int cur_post_total_sec,
     int* out_new_unpack_sec, int* out_new_post_total_sec);
 int nzbget_rs_ucf_move_ctrl_is_dot_file(const char* filename);
-int nzbget_rs_ucf_cleanup_ctrl_should_delete_entry(
-    int is_dir, int matches_ext);
 int nzbget_rs_ucf_unpack_ctrl_eval_unpack_param(const char* param_val);
 int nzbget_rs_ucf_unpack_ctrl_has_any_archive_files(
     int has_rar, int has_7z, int has_7z_multi, int has_splitted);
@@ -3450,9 +3440,6 @@ int nzbget_rs_psp_rar_renamer_calc_stage_progress(
     int file_count, int cur_file);
 void nzbget_rs_psp_rar_renamer_calc_old_extension_parts(
     int volume_no, uint8_t* out_ch, int* out_num);
-int nzbget_rs_psp_rename_ctrl_eval_par_rename_config(
-    int unpack_status, int us_success, int us_none, int final_dir_empty,
-    int* out_detect_missing);
 int nzbget_rs_psp_parchecker_calc_twin_blocks_needed(
     size_t missing_block_count, size_t recovery_packet_count);
 int nzbget_rs_psp_parchecker_should_check_original_splitted_fragment(
@@ -5711,8 +5698,6 @@ NzbgetRsBuf nzbget_rs_tpr_unpack_ctrl_format_split_piece_name(
 NzbgetRsBuf nzbget_rs_tpr_unpack_ctrl_format_split_piece_path(
     const char* dest_dir, char sep, const char* dest_base_name, int32_t index);
 const char* nzbget_rs_tpr_unpack_ctrl_request_par_reason(int32_t force_repair);
-const char* nzbget_rs_tpr_rename_ctrl_archive_kind_prefix(
-    int32_t kind, int32_t jk_rar);
 const char* nzbget_rs_tpr_repair_ctrl_twin_par2_reject_reason(int32_t cmp);
 const char* nzbget_rs_dqh_stream_repair_write_errmsg_or_default(const char* last_err);
 NzbgetRsBuf nzbget_rs_dqh_stream_repair_format_stall_reason(int32_t timeout);
@@ -6073,7 +6058,6 @@ const char* nzbget_rs_dqh_binrpc_scan_response_msg(int sync_mode);
 uint32_t nzbget_rs_dqh_article_writer_step_file_crc(
     int first_article, uint32_t current_crc, uint32_t article_crc,
     int segment_size, int* out_first_article);
-int nzbget_rs_dqh_rename_ctrl_classify_run_outcome(int is_stopped, int renamed_count);
 void nzbget_rs_dqh_post_capitalize_first_ascii(char* s);
 const char* nzbget_rs_dqh_dupesearch_prepare_status_suffix(int rank_only, int history);
 void nzbget_rs_dqh_dupesearch_visit_expand_queries(
@@ -6236,15 +6220,12 @@ int nzbget_rs_dqh_repair_ctrl_should_skip_twin_volume_entry(
     int is_par2, const char* entry_filename, const char* twin_index);
 int nzbget_rs_dqh_repair_ctrl_matches_history_dupe_source(
     int history_kind, int hk_nzb, int history_nzb_id, int dupe_source_id);
-int nzbget_rs_dqh_cleanup_ctrl_should_cleanup_final_dir(int ok, int final_dir_empty);
-int nzbget_rs_dqh_cleanup_ctrl_is_traversable_dir(int dir_exists, int is_link);
 int nzbget_rs_dqh_direct_unpack_should_log_final_status(
     int status, int ns_success, int ns_failure);
 int nzbget_rs_dqh_direct_unpack_should_keep_waiting_break(
     int iter, int unpacking, int has_active_process);
 int nzbget_rs_dqh_direct_unpack_should_delete_temp_unpack_dir(
     int use_temp_unpack_dir, int dir_exists);
-int nzbget_rs_dqh_rename_ctrl_should_reset_par_rename_status(int64_t remaining_size);
 int nzbget_rs_dqh_par_renamer_needs_create_target_dir(
     const char* old_path, const char* new_path);
 int nzbget_rs_dqh_rar_volume_is_read_handle_ready(int64_t size, int seek_zero_ok);
@@ -6603,6 +6584,42 @@ void nzbget_rs_dupematcher_find_largest_file(
 const char* nzbget_rs_dupematcher_size_mismatch_suffix(int ok);
 int nzbget_rs_dupematcher_is_content_match(
     int64_t dupe_max_size, int64_t max_size, int dupe_compressed, int compressed);
+
+int nzbget_rs_move_controller_move_files(
+    const char* inter_dir,
+    const char* dest_dir,
+    void* ctx,
+    int (*is_stopped_cb)(void* ctx),
+    void (*log_cb)(void* ctx, int kind, const char* msg),
+    void (*rename_cb)(void* ctx, const char* old_rel, const char* new_rel));
+
+void nzbget_rs_move_controller_remove_stale_hardlinks(
+    const char* hard_link_path,
+    const char* dest_dir,
+    void* ctx,
+    void (*log_cb)(void* ctx, int kind, const char* msg));
+
+int nzbget_rs_move_controller_decide_outcome(
+    int ok, int is_stopped, int* out_move_status);
+
+int nzbget_rs_cleanup_controller_run(
+    const char* dest_dir,
+    const char* final_dir,
+    const char* ext_cleanup_disk,
+    void* ctx,
+    void (*log_cb)(void* ctx, int kind, const char* msg),
+    int* out_cleanup_status);
+
+const char* nzbget_rs_rename_controller_archive_kind_prefix(int kind, int jk_rar);
+int nzbget_rs_rename_controller_classify_run_outcome(int is_stopped, int renamed_count);
+int nzbget_rs_rename_controller_eval_par_config(
+    int unpack_status, int us_success, int us_none, int final_dir_empty,
+    int* out_detect_missing);
+int nzbget_rs_rename_controller_complete_action(
+    int kind, int renamed_count, int has_damaged_pars, int remaining_par_count,
+    int has_missed_files, int par_status,
+    int* out_request_extra_pars, int* out_request_par_check);
+int nzbget_rs_rename_controller_should_reset_par_status(int64_t remaining_size);
 
 #include "nzbget_tls_cipher.h"
 

@@ -259,24 +259,6 @@ pub fn rar_renamer_calc_old_extension_parts(volume_no: i32) -> (u8, i32) {
     (ch, num)
 }
 
-/// `RenameController::ExecRename`:
-/// Evaluates whether `m_parRenamer` should use `finalDir` instead of `destDir` and whether
-/// `DetectMissing` should be enabled.
-/// Mirrors:
-/// `useFinal = unpackStatus == NzbInfo::usSuccess && !Util::EmptyStr(finalDir)`
-/// `detectMissing = unpackStatus == NzbInfo::usNone`
-#[inline]
-pub fn rename_ctrl_eval_par_rename_config(
-    unpack_status: i32,
-    us_success: i32,
-    us_none: i32,
-    final_dir_empty: bool,
-) -> (bool, bool) {
-    let use_final_dir = unpack_status == us_success && !final_dir_empty;
-    let detect_missing = unpack_status == us_none;
-    (use_final_dir, detect_missing)
-}
-
 /// `ParChecker::ProcessTwinSet`:
 /// Computes the number of additional recovery blocks needed for a twin par2 set.
 /// Mirrors:
@@ -442,9 +424,6 @@ mod tests {
         assert_eq!(rar_renamer_calc_stage_progress(0, 0), 1000);
         assert_eq!(rar_renamer_calc_old_extension_parts(1), (b'r', 0));
         assert_eq!(rar_renamer_calc_old_extension_parts(105), (b's', 4));
-
-        assert_eq!(rename_ctrl_eval_par_rename_config(3, 3, 0, false), (true, false));
-        assert_eq!(rename_ctrl_eval_par_rename_config(0, 3, 0, false), (false, true));
 
         assert_eq!(parchecker_calc_twin_blocks_needed(15, 4), 11);
 

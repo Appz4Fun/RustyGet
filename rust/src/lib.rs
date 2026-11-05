@@ -3,6 +3,7 @@
 
 pub mod binrpc;
 pub mod bytes;
+pub mod cleanup;
 pub mod cmdline;
 pub mod collection;
 pub mod crc;

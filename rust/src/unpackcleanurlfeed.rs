@@ -100,12 +100,6 @@ pub fn move_ctrl_is_dot_file(filename: &[u8]) -> bool {
     filename.first() == Some(&b'.')
 }
 
-/// `CleanupController::Cleanup`:
-/// `bool deleteIt = Util::MatchFileExt(...) && !isDir;`
-pub fn cleanup_ctrl_should_delete_entry(is_dir: bool, matches_ext: bool) -> bool {
-    matches_ext && !is_dir
-}
-
 /// `UnpackController::Run`:
 /// `unpack = !(parameter && !strcasecmp(parameter->GetValue(), "no"));`
 pub fn unpack_ctrl_eval_unpack_param(param_val: Option<&[u8]>) -> bool {
@@ -377,9 +371,6 @@ mod tests {
         assert!(move_ctrl_is_dot_file(b".hidden"));
         assert!(!move_ctrl_is_dot_file(b"visible.mkv"));
         assert!(!move_ctrl_is_dot_file(b""));
-
-        assert!(cleanup_ctrl_should_delete_entry(false, true));
-        assert!(!cleanup_ctrl_should_delete_entry(true, true));
 
         assert!(unpack_ctrl_eval_unpack_param(None));
         assert!(unpack_ctrl_eval_unpack_param(Some(b"yes")));

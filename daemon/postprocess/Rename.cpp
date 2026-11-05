@@ -97,14 +97,14 @@ void RenameController::Run()
 	nzbget_rs_free(infoNameBuf);
 	SetInfoName(infoName);
 
-	const char* archiveKindPrefix = nzbget_rs_tpr_rename_ctrl_archive_kind_prefix(
+	const char* archiveKindPrefix = nzbget_rs_rename_controller_archive_kind_prefix(
 		(int)m_kind, (int)jkRar);
 	PrintMessage(Message::mkInfo, "Checking renamed %sfiles for %s",
 		archiveKindPrefix, *nzbName);
 
 	ExecRename(destDir, finalDir, nzbName);
 
-	int runOutcome = nzbget_rs_dqh_rename_ctrl_classify_run_outcome(
+	int runOutcome = nzbget_rs_rename_controller_classify_run_outcome(
 		IsStopped() ? 1 : 0, m_renamedCount);
 	if (runOutcome == 1)
 	{
@@ -135,7 +135,7 @@ void RenameController::ExecRename(const char* destDir, const char* finalDir, con
 	{
 #ifndef DISABLE_PARCHECK
 		int detectMissingInt = 0;
-		bool useFinal = nzbget_rs_psp_rename_ctrl_eval_par_rename_config(
+		bool useFinal = nzbget_rs_rename_controller_eval_par_config(
 			(int)m_postInfo->GetNzbInfo()->GetUnpackStatus(),
 			(int)NzbInfo::usSuccess,
 			(int)NzbInfo::usNone,
@@ -176,7 +176,7 @@ void RenameController::RenameCompleted()
 	int hasDamagedParFiles = 0;
 	int hasMissedFiles = 0;
 #endif
-	int initialStatus = nzbget_rs_rco_rename_controller_complete_action(
+	int initialStatus = nzbget_rs_rename_controller_complete_action(
 		(int)m_kind, m_renamedCount,
 		hasDamagedParFiles,
 		m_postInfo->GetNzbInfo()->GetRemainingParCount(),
@@ -192,7 +192,7 @@ void RenameController::RenameCompleted()
 			m_parRenamer.PrintMessage(Message::mkInfo, "Requesting extra par2-files for %s to perform par-rename", m_parRenamer.GetInfoName());
 			downloadQueue->EditEntry(m_postInfo->GetNzbInfo()->GetId(), DownloadQueue::eaGroupResume, nullptr);
 			downloadQueue->EditEntry(m_postInfo->GetNzbInfo()->GetId(), DownloadQueue::eaGroupPauseExtraPars, nullptr);
-			if (nzbget_rs_dqh_rename_ctrl_should_reset_par_rename_status(
+			if (nzbget_rs_rename_controller_should_reset_par_status(
 				m_postInfo->GetNzbInfo()->GetRemainingSize()) != 0)
 			{
 				m_postInfo->GetNzbInfo()->SetParRenameStatus(NzbInfo::rsNone);

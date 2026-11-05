@@ -3262,20 +3262,6 @@ pub fn dqh_article_writer_step_file_crc(
     (next_crc, false)
 }
 
-/// Classifies the final outcome of `RenameController::Run`:
-/// `1` = cancelled (`is_stopped == true`),
-/// `2` = renamed files (`renamed_count > 0`),
-/// `3` = no renamed files found.
-pub fn dqh_rename_ctrl_classify_run_outcome(is_stopped: bool, renamed_count: i32) -> i32 {
-    if is_stopped {
-        1
-    } else if renamed_count > 0 {
-        2
-    } else {
-        3
-    }
-}
-
 /// Uppercases the first byte of `buf` in-place if it is an ASCII lowercase letter (`a..=z`).
 pub fn dqh_post_capitalize_first_ascii(buf: &mut [u8]) {
     if let Some(first) = buf.first_mut() {
@@ -4232,16 +4218,6 @@ pub fn dqh_repair_ctrl_matches_history_dupe_source(
     history_kind == hk_nzb && history_nzb_id == dupe_source_id
 }
 
-/// Returns true when `CleanupController::Run` should also run cleanup on `final_dir`.
-pub fn dqh_cleanup_ctrl_should_cleanup_final_dir(ok: bool, final_dir_empty: bool) -> bool {
-    ok && !final_dir_empty
-}
-
-/// Returns true when `CleanupController::Cleanup` should recurse into an entry (`dir_exists && !is_link`).
-pub fn dqh_cleanup_ctrl_is_traversable_dir(dir_exists: bool, is_link: bool) -> bool {
-    dir_exists && !is_link
-}
-
 /// Returns true when `DirectUnpack::Run` should print the final status message (`status == nsSuccess || status == nsFailure`).
 pub fn dqh_direct_unpack_should_log_final_status(
     status: i32,
@@ -4266,11 +4242,6 @@ pub fn dqh_direct_unpack_should_delete_temp_unpack_dir(
     dir_exists: bool,
 ) -> bool {
     use_temp_unpack_dir && dir_exists
-}
-
-/// Returns true when `RenameController::RenameCompleted` should reset `ParRenameStatus` to `rsNone` after requesting extra PAR2 files (`remaining_size > 0`).
-pub fn dqh_rename_ctrl_should_reset_par_rename_status(remaining_size: i64) -> bool {
-    remaining_size > 0
 }
 
 /// Returns true when `ParRenamer::RenameFile` needs to create target directories (`old_path != new_path`).
@@ -6794,9 +6765,6 @@ mod tests {
             );
             assert!(!first2);
         }
-        assert_eq!(dqh_rename_ctrl_classify_run_outcome(true, 5), 1);
-        assert_eq!(dqh_rename_ctrl_classify_run_outcome(false, 5), 2);
-        assert_eq!(dqh_rename_ctrl_classify_run_outcome(false, 0), 3);
         {
             let mut s = *b"move for test";
             dqh_post_capitalize_first_ascii(&mut s);
@@ -7264,12 +7232,6 @@ mod tests {
         assert!(dqh_repair_ctrl_matches_history_dupe_source(1, 1, 99, 99));
         assert!(!dqh_repair_ctrl_matches_history_dupe_source(2, 1, 99, 99));
         assert!(!dqh_repair_ctrl_matches_history_dupe_source(1, 1, 98, 99));
-        assert!(dqh_cleanup_ctrl_should_cleanup_final_dir(true, false));
-        assert!(!dqh_cleanup_ctrl_should_cleanup_final_dir(false, false));
-        assert!(!dqh_cleanup_ctrl_should_cleanup_final_dir(true, true));
-        assert!(dqh_cleanup_ctrl_is_traversable_dir(true, false));
-        assert!(!dqh_cleanup_ctrl_is_traversable_dir(true, true));
-        assert!(!dqh_cleanup_ctrl_is_traversable_dir(false, false));
         assert!(dqh_direct_unpack_should_log_final_status(1, 1, 2));
         assert!(dqh_direct_unpack_should_log_final_status(2, 1, 2));
         assert!(!dqh_direct_unpack_should_log_final_status(0, 1, 2));
@@ -7279,8 +7241,6 @@ mod tests {
         assert!(dqh_direct_unpack_should_delete_temp_unpack_dir(true, true));
         assert!(!dqh_direct_unpack_should_delete_temp_unpack_dir(false, true));
         assert!(!dqh_direct_unpack_should_delete_temp_unpack_dir(true, false));
-        assert!(dqh_rename_ctrl_should_reset_par_rename_status(1024));
-        assert!(!dqh_rename_ctrl_should_reset_par_rename_status(0));
         assert!(dqh_par_renamer_needs_create_target_dir(b"/a", b"/b"));
         assert!(!dqh_par_renamer_needs_create_target_dir(b"/a", b"/a"));
         assert!(dqh_rar_volume_is_read_handle_ready(100, true));

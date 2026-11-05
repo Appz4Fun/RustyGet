@@ -772,54 +772,8 @@ pub fn options_validate_scheduler_param(
 }
 
 // ============================================================================
-// Cleanup, Rename, ArchiveProcessor, Log & NString hot paths
+// ArchiveProcessor, Log & NString hot paths
 // ============================================================================
-
-/// Determines the post-move action and `NzbInfo::EMoveStatus` in `MoveController::Run`:
-/// - `(1, 2)`: move succeeded -> set `DestDir`, clear `FinalDir`, set `msSuccess` (`2`)
-/// - `(2, 0)`: interrupted by stop -> log resume-on-restart message, keep `msNone` (`0`)
-/// - `(3, 1)`: move failed -> log error and set `msFailure` (`1`)
-pub fn move_controller_decide_outcome(ok: bool, is_stopped: bool) -> (i32, i32) {
-    if ok {
-        (1, 2)
-    } else if is_stopped {
-        (2, 0)
-    } else {
-        (3, 1)
-    }
-}
-
-/// Determines the message kind and `NzbInfo::ECleanupStatus` in `CleanupController::Run`:
-/// - `(1, 2)`: cleanup succeeded and deleted files -> `csSuccess` (`2`)
-/// - `(2, 2)`: cleanup succeeded with nothing to delete -> `csSuccess` (`2`)
-/// - `(3, 1)`: cleanup failed -> `csFailure` (`1`)
-pub fn cleanup_controller_decide_outcome(ok: bool, deleted: bool) -> (i32, i32) {
-    if ok && deleted {
-        (1, 2)
-    } else if ok {
-        (2, 2)
-    } else {
-        (3, 1)
-    }
-}
-
-/// Computes `(initial_rename_status, request_extra_pars, request_par_check)` for
-/// `RenameController::RenameCompleted`.
-pub fn rename_controller_complete_action(
-    kind: i32,
-    renamed_count: i32,
-    has_damaged_pars: bool,
-    remaining_par_count: i32,
-    has_missed_files: bool,
-    par_status: i32,
-) -> (i32, bool, bool) {
-    // NzbInfo::rsNothing = 2, NzbInfo::rsSuccess = 3, NzbInfo::psSkipped = 1
-    let initial_status = if renamed_count > 0 { 3 } else { 2 };
-    let request_extra_pars =
-        kind == 0 && renamed_count == 0 && has_damaged_pars && remaining_par_count > 0;
-    let request_par_check = has_missed_files && par_status <= 1;
-    (initial_status, request_extra_pars, request_par_check)
-}
 
 /// Case-insensitively checks if `ext` is `".nzb"` for `ArchiveProcessor::IsNzbFile`.
 pub fn archive_is_nzb_extension(ext: &[u8]) -> bool {
@@ -1196,23 +1150,6 @@ mod tests {
 
     #[test]
     fn test_cleanup_rename_archive_log_nstring() {
-        assert_eq!(move_controller_decide_outcome(true, false), (1, 2));
-        assert_eq!(move_controller_decide_outcome(false, true), (2, 0));
-        assert_eq!(move_controller_decide_outcome(false, false), (3, 1));
-
-        assert_eq!(cleanup_controller_decide_outcome(true, true), (1, 2));
-        assert_eq!(cleanup_controller_decide_outcome(true, false), (2, 2));
-        assert_eq!(cleanup_controller_decide_outcome(false, false), (3, 1));
-
-        assert_eq!(
-            rename_controller_complete_action(0, 0, true, 2, true, 0),
-            (2, true, true)
-        );
-        assert_eq!(
-            rename_controller_complete_action(1, 3, false, 0, false, 3),
-            (3, false, false)
-        );
-
         assert!(archive_is_nzb_extension(b".NZB"));
         assert!(!archive_is_nzb_extension(b".rar"));
         assert_eq!(archive_decide_dispose_action(0, 2), 1);

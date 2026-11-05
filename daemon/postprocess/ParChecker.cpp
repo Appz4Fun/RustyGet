@@ -47,11 +47,10 @@ public:
 		, m_commandLine() 
 	{
 		int configuredParBuffer = g_Options->GetParBuffer();
-		int effectiveMem = g_MemoryMonitor
-			? g_MemoryMonitor->GetEffectiveParBufferMB(configuredParBuffer)
-			: nzbget_rs_dqh_parchecker_resolve_fallback_par_buffer_mb(configuredParBuffer);
-		nzbget_rs_dur_parchecker_calc_threads_and_mem(
-			g_Options->GetParThreads(), Util::NumberOfCpuCores(), effectiveMem,
+		int monitorMem = g_MemoryMonitor ? g_MemoryMonitor->GetEffectiveParBufferMB(configuredParBuffer) : 0;
+		nzbget_rs_parchecker_calc_repairer_resources(
+			g_Options->GetParThreads(), Util::NumberOfCpuCores(),
+			g_MemoryMonitor != nullptr ? 1 : 0, monitorMem, configuredParBuffer,
 			&m_threadsToUse, &m_memToUse);
 	}
 	Par2::Result PreProcess(const std::string& parFilename);
@@ -93,9 +92,11 @@ class RepairCreatorPacket : public Par2::CreatorPacket
 
 Par2::Result Repairer::PreProcess(const std::string& parFilename)
 {
-	NzbgetRsBuf memBuf{}, threadsBuf{}, fileThreadsBuf{};
-	nzbget_rs_dqh_parchecker_format_cli_flags(
-		m_threadsToUse, m_memToUse, &memBuf, &threadsBuf, &fileThreadsBuf);
+	NzbgetRsBuf memBuf{}, threadsBuf{}, fileThreadsBuf{}, wildcardBuf{};
+	int hasWildcard = nzbget_rs_parchecker_build_preprocess_cli_args(
+		m_threadsToUse, m_memToUse, parFilename.c_str(),
+		g_Options->GetParScan() == Options::psFull ? 1 : 0,
+		&memBuf, &threadsBuf, &fileThreadsBuf, &wildcardBuf);
 	std::string memParam(memBuf.data ? memBuf.data : "", memBuf.len);
 	std::string threadsParam(threadsBuf.data ? threadsBuf.data : "", threadsBuf.len);
 	std::string fileThreadsParam(fileThreadsBuf.data ? fileThreadsBuf.data : "", fileThreadsBuf.len);
@@ -103,10 +104,9 @@ Par2::Result Repairer::PreProcess(const std::string& parFilename)
 	nzbget_rs_free(threadsBuf);
 	nzbget_rs_free(fileThreadsBuf);
 
-	if (g_Options->GetParScan() == Options::psFull)
+	if (hasWildcard != 0)
 	{
 		// the path is the text, not a format (a "%" in a name)
-		NzbgetRsBuf wildcardBuf = nzbget_rs_pup_parchecker_build_wildcard_param(parFilename.c_str());
 		BString<1024> wildcardParam;
 		if (wildcardBuf.data)
 		{
@@ -122,6 +122,10 @@ Par2::Result Repairer::PreProcess(const std::string& parFilename)
 	}
 	else
 	{
+		if (wildcardBuf.data)
+		{
+			nzbget_rs_free(wildcardBuf);
+		}
 		const char* argv[] = { "par2", "r", "-v", memParam.c_str(), threadsParam.c_str(), fileThreadsParam.c_str(), parFilename.c_str() };
 		if (!m_commandLine.Parse(7, const_cast<char**>(argv)))
 		{
@@ -134,7 +138,7 @@ Par2::Result Repairer::PreProcess(const std::string& parFilename)
 
 Par2::Result Repairer::Process(bool dorepair)
 {
-	Par2::Result res = Par2Repairer::Process(
+	Par2::Result res = Par2::Par2Repairer::Process(
 		m_commandLine.GetMemoryLimit(),
 		m_commandLine.GetBasePath(),
 		m_commandLine.GetNumThreads(),
@@ -161,18 +165,14 @@ bool Repairer::ScanDataFile(
 	Par2::MD5Hash &hash16k, 
 	Par2::u32 &count)
 {
-	if (nzbget_rs_srp_parchecker_can_quick_scan_data_file(
-		m_owner->GetParQuick() ? 1 : 0,
-		sourcefile != nullptr ? 1 : 0,
-		diskfile != nullptr ? 1 : 0))
+	if (m_owner->GetParQuick() && sourcefile != nullptr && diskfile != nullptr)
 	{
 		std::string name;
 		Par2::DiskFile::SplitFilename(diskfile->FileName(), basepath, name);
 
 		SigFilename(name);
 
-		if (nzbget_rs_dps_parchecker_should_quick_verify(
-			(int)m_owner->GetStage(), (int)ParChecker::ptVerifyingRepaired, m_owner->GetParFull() ? 1 : 0) != 0)
+		if (!(m_owner->GetStage() == ParChecker::ptVerifyingRepaired && m_owner->GetParFull()))
 		{
 			int availableBlocks = static_cast<int>(sourcefile->BlockCount());
 			ParChecker::EFileStatus fileStatus = m_owner->VerifyDataFile(*diskfile, *sourcefile, availableBlocks);
@@ -180,9 +180,9 @@ bool Repairer::ScanDataFile(
 			{
 				SigDone(name, availableBlocks, static_cast<int>(sourcefile->BlockCount()));
 				SigProgress(1000);
-				matchtype = (Par2::MatchType)nzbget_rs_pup_parchecker_select_match_type(
-					(int)fileStatus, (int)ParChecker::fsSuccess, (int)ParChecker::fsPartial,
-					(int)Par2::eFullMatch, (int)Par2::ePartialMatch, (int)Par2::eNoMatch);
+				matchtype = fileStatus == ParChecker::fsSuccess
+					? Par2::eFullMatch
+					: (fileStatus == ParChecker::fsPartial ? Par2::ePartialMatch : Par2::eNoMatch);
 				m_owner->SetParFull(false);
 				return true;
 			}
@@ -208,7 +208,7 @@ void Repairer::BeginRepair()
 
 int ParChecker::StreamBuf::overflow(int ch)
 {
-	if (nzbget_rs_dqh_parchecker_is_streambuf_line_break(ch) != 0)
+	if (ch == '\n' || ch == '\r')
 	{
 		if (m_buffer.empty())
 		{
@@ -264,9 +264,7 @@ void ParChecker::Execute()
 	m_verifiedFiles.clear();
 	m_status = RunParCheckAll();
 
-	if (nzbget_rs_pup_parchecker_should_run_forced_full_check(
-		(int)m_status, (int)psRepairNotNeeded, m_parQuick ? 1 : 0,
-		m_forceRepair ? 1 : 0, IsStopped() ? 1 : 0) != 0)
+	if (m_status == psRepairNotNeeded && m_parQuick && m_forceRepair && !IsStopped())
 	{
 		PrintMessage(Message::mkInfo, "Performing full par-check for %s", m_nzbName.c_str());
 		m_parQuick = false;
@@ -323,7 +321,10 @@ ParChecker::EStatus ParChecker::RunParCheckAll()
 			EStatus status = RunParCheck(std::move(fullParFilename));
 
 			// accumulate total status, the worst status has priority
-			allStatus = (EStatus)nzbget_rs_pnd_parchecker_accumulate_worst_status((int)allStatus, (int)status);
+			if (allStatus > status)
+			{
+				allStatus = status;
+			}
 		}
 	}
 
@@ -346,9 +347,7 @@ ParChecker::EStatus ParChecker::RunParCheck(std::string parFilename)
 
 	debug("par: %s", m_parFilename.c_str());
 
-	NzbgetRsBuf verifyLabelBuf = nzbget_rs_dqh_parchecker_format_action_label("Verifying", m_infoName.c_str());
-	m_progressLabel.assign(verifyLabelBuf.data ? verifyLabelBuf.data : "", verifyLabelBuf.len);
-	nzbget_rs_free(verifyLabelBuf);
+	m_progressLabel = std::string("Verifying ") + m_infoName;
 	m_fileProgress = 0;
 	m_stageProgress = 0;
 	UpdateProgress();
@@ -361,7 +360,7 @@ ParChecker::EStatus ParChecker::RunParCheck(std::string parFilename)
 	}
 
 	std::string creator = GetPacketCreator();
-	info("Recovery files created by: %s", nzbget_rs_dqh_parchecker_creator_or_unknown(creator.c_str()));
+	info("Recovery files created by: %s", creator.empty() ? "unknown" : creator.c_str());
 
 	m_stage = ptVerifyingSources;
 	res = GetRepairer()->Process(false);
@@ -372,9 +371,7 @@ ParChecker::EStatus ParChecker::RunParCheck(std::string parFilename)
 	}
 
 	bool addedSplittedFragments = false;
-	if (nzbget_rs_pnd_parchecker_should_try_more_recovery(
-		m_hasDamagedFiles ? 1 : 0, IsStopped() ? 1 : 0, (int)res,
-		(int)Par2::eRepairNotPossible, 0, 0, 0) != 0)
+	if (m_hasDamagedFiles && !IsStopped() && res == Par2::eRepairNotPossible)
 	{
 		addedSplittedFragments = AddSplittedFragments();
 		if (addedSplittedFragments)
@@ -383,10 +380,9 @@ ParChecker::EStatus ParChecker::RunParCheck(std::string parFilename)
 		}
 	}
 
-	if (nzbget_rs_pup_parchecker_should_add_missing_files(
-		m_hasDamagedFiles ? 1 : 0, IsStopped() ? 1 : 0, GetRepairer()->missingfilecount,
-		addedSplittedFragments ? 1 : 0, (int)res, (int)Par2::eRepairPossible,
-		(int)g_Options->GetParScan(), (int)Options::psExtended, (int)Options::psDupe) != 0)
+	if (m_hasDamagedFiles && !IsStopped() && GetRepairer()->missingfilecount > 0 &&
+		!(addedSplittedFragments && res == Par2::eRepairPossible) &&
+		(g_Options->GetParScan() == Options::psExtended || g_Options->GetParScan() == Options::psDupe))
 	{
 		if (AddMissingFiles())
 		{
@@ -394,22 +390,18 @@ ParChecker::EStatus ParChecker::RunParCheck(std::string parFilename)
 		}
 	}
 
-	if (nzbget_rs_pnd_parchecker_should_try_more_recovery(
-		m_hasDamagedFiles ? 1 : 0, IsStopped() ? 1 : 0, (int)res,
-		(int)Par2::eRepairNotPossible, 0, 0, 0) != 0)
+	if (m_hasDamagedFiles && !IsStopped() && res == Par2::eRepairNotPossible)
 	{
 		res = static_cast<Par2::Result>(ProcessMorePars());
 	}
 
-	if (nzbget_rs_pnd_parchecker_should_try_more_recovery(
-		m_hasDamagedFiles ? 1 : 0, IsStopped() ? 1 : 0, (int)res,
-		(int)Par2::eRepairNotPossible, 1, (int)g_Options->GetParScan(), (int)Options::psDupe) != 0)
+	if (m_hasDamagedFiles && !IsStopped() && res == Par2::eRepairNotPossible &&
+		g_Options->GetParScan() == Options::psDupe)
 	{
 		if (AddDupeFiles())
 		{
 			res = GetRepairer()->Process(false);
-			if (nzbget_rs_src_parchecker_should_process_twin_missing_blocks(
-				(int)res, (int)Par2::eRepairNotPossible, IsStopped() ? 1 : 0))
+			if (res == Par2::eRepairNotPossible && !IsStopped())
 			{
 				res = static_cast<Par2::Result>(ProcessMorePars());
 			}
@@ -418,9 +410,7 @@ ParChecker::EStatus ParChecker::RunParCheck(std::string parFilename)
 
 	// a twin's par2 set (other block size, other parity level, same files) may hold
 	// the recovery blocks its own lacks
-	if (nzbget_rs_pnd_parchecker_should_try_more_recovery(
-		m_hasDamagedFiles ? 1 : 0, IsStopped() ? 1 : 0, (int)res,
-		(int)Par2::eRepairNotPossible, 0, 0, 0) != 0)
+	if (m_hasDamagedFiles && !IsStopped() && res == Par2::eRepairNotPossible)
 	{
 		res = static_cast<Par2::Result>(ProcessTwinSet());
 	}
@@ -434,7 +424,7 @@ ParChecker::EStatus ParChecker::RunParCheck(std::string parFilename)
 	status = psFailed;
 
 	int postVerifyAction = 0;
-	status = (EStatus)nzbget_rs_pnd_parchecker_eval_post_verify_action(
+	status = (EStatus)nzbget_rs_parchecker_eval_post_verify_action(
 		(int)res, (int)Par2::eSuccess, (int)Par2::eRepairPossible,
 		m_hasDamagedFiles ? 1 : 0, g_Options->GetParRepair() ? 1 : 0,
 		(int)psFailed, (int)psRepairNotNeeded, (int)psRepairPossible,
@@ -448,15 +438,12 @@ ParChecker::EStatus ParChecker::RunParCheck(std::string parFilename)
 		PrintMessage(Message::mkInfo, "Repairing %s", m_infoName.c_str());
 
 		SaveSourceList();
-		NzbgetRsBuf repairLabelBuf = nzbget_rs_dqh_parchecker_format_action_label("Repairing", m_infoName.c_str());
-		m_progressLabel.assign(repairLabelBuf.data ? repairLabelBuf.data : "", repairLabelBuf.len);
-		nzbget_rs_free(repairLabelBuf);
+		m_progressLabel = std::string("Repairing ") + m_infoName;
 		m_fileProgress = 0;
 		m_stageProgress = 0;
 		m_processedCount = 0;
 		m_stage = ptRepairing;
-		m_filesToRepair = nzbget_rs_dps_parchecker_calc_files_to_repair(
-			GetRepairer()->damagedfilecount, GetRepairer()->missingfilecount);
+		m_filesToRepair = static_cast<int>(GetRepairer()->damagedfilecount + GetRepairer()->missingfilecount);
 		UpdateProgress();
 
 		res = GetRepairer()->Process(true);
@@ -479,7 +466,7 @@ ParChecker::EStatus ParChecker::RunParCheck(std::string parFilename)
 
 	int outcomeKind = 0;
 	int useCmdErr = 0;
-	status = (EStatus)nzbget_rs_pnd_parchecker_eval_cancel_or_fail_outcome(
+	status = (EStatus)nzbget_rs_parchecker_eval_cancel_or_fail_outcome(
 		IsStopped() ? 1 : 0, (int)m_stage, (int)ptRepairing, (int)status,
 		(int)psFailed, (int)psRepairPossible, m_errMsg.empty() ? 1 : 0, (int)res,
 		&outcomeKind, &useCmdErr);
@@ -497,10 +484,10 @@ ParChecker::EStatus ParChecker::RunParCheck(std::string parFilename)
 	{
 		if (useCmdErr != 0)
 		{
-			m_errMsg = nzbget_rs_dqh_parchecker_cmdline_err_str((int)res);
+			m_errMsg = nzbget_rs_parchecker_cmdline_err_str((int)res);
 		}
 		PrintMessage(Message::mkError, "Repair failed for %s: %s. Recovery files created by: %s",
-			m_infoName.c_str(), m_errMsg.c_str(), nzbget_rs_dqh_parchecker_creator_or_unknown(creator.c_str()));
+			m_infoName.c_str(), m_errMsg.c_str(), creator.empty() ? "unknown" : creator.c_str());
 	}
 
 	// A successful set does not cover unrelated files, and ignored damage
@@ -520,10 +507,9 @@ ParChecker::EStatus ParChecker::RunParCheck(std::string parFilename)
 			{
 				return FileSystem::SameFilename(previous.c_str(), targetName.c_str());
 			}), m_verifiedFiles.end());
-		if (nzbget_rs_pnd_parchecker_is_verified_complete_target(
-			(int)status, (int)psRepaired, (int)psRepairNotNeeded,
-			sourcefile->GetCompleteFile() ? 1 : 0,
-			sourcefile->GetCompleteFile() == sourcefile->GetTargetFile() ? 1 : 0) != 0)
+		if ((status == psRepaired || status == psRepairNotNeeded) &&
+			sourcefile->GetCompleteFile() != nullptr &&
+			sourcefile->GetCompleteFile() == sourcefile->GetTargetFile())
 		{
 			m_verifiedFiles.push_back(sourcefile->GetTargetFile()->FileName());
 		}
@@ -548,23 +534,21 @@ int ParChecker::PreProcessPar()
 		res = GetRepairer()->PreProcess(m_parFilename);
 		debug("ParChecker: PreProcess-result=%i", res);
 
-		int stepClass = nzbget_rs_dqh_parchecker_classify_preprocess_step(
-			IsStopped() ? 1 : 0, (int)res, (int)Par2::eSuccess, (int)Par2::eInvalidCommandLineArguments);
-		if (stepClass == 1)
+		if (IsStopped())
 		{
 			PrintMessage(Message::mkError, "Could not verify %s: stopping", m_infoName.c_str());
 			m_errMsg = "par-check was stopped";
 			return Par2::eRepairFailed;
 		}
 
-		if (stepClass == 2)
+		if (res == Par2::eInvalidCommandLineArguments)
 		{
 			PrintMessage(Message::mkError, "Could not start par-check for %s. Par-file: %s", m_infoName.c_str(), m_parFilename.c_str());
 			m_errMsg = "Command line could not be parsed";
 			return res;
 		}
 
-		if (stepClass == 3)
+		if (res != Par2::eSuccess)
 		{
 			PrintMessage(Message::mkWarning, "Could not verify %s: par2-file could not be processed", m_infoName.c_str());
 			PrintMessage(Message::mkInfo, "Requesting more par2-files for %s", m_infoName.c_str());
@@ -618,14 +602,12 @@ bool ParChecker::LoadMainParBak()
 			m_queuedParFilesChanged = false;
 		}
 
-		int waitAction = nzbget_rs_srp_parchecker_should_wait_for_queued_pars(
-			requested ? 1 : 0, hasMorePars ? 1 : 0);
-		if (waitAction == 0)
+		if (!requested && !hasMorePars)
 		{
 			return false;
 		}
 
-		if (waitAction == 1)
+		if (!hasMorePars)
 		{
 			// wait until new files are added by "AddParFile" or a change is signaled by "QueueChanged"
 			bool queuedParFilesChanged = false;
@@ -650,8 +632,8 @@ int ParChecker::ProcessMorePars()
 	bool moreFilesLoaded = true;
 	while (!IsStopped() && res == Par2::eRepairNotPossible)
 	{
-		int missingblockcount = nzbget_rs_pup_parchecker_calc_missing_blocks(
-			GetRepairer()->missingblockcount, GetRepairer()->recoverypacketmap.size());
+		int missingblockcount = static_cast<int>(GetRepairer()->missingblockcount) -
+			static_cast<int>(GetRepairer()->recoverypacketmap.size());
 		if (missingblockcount <= 0)
 		{
 			return Par2::eRepairPossible;
@@ -685,18 +667,16 @@ int ParChecker::ProcessMorePars()
 				m_queuedParFilesChanged = false;
 			}
 
-			int waitAction = nzbget_rs_srp_parchecker_should_wait_for_queued_pars(
-				requested ? 1 : 0, hasMorePars ? 1 : 0);
-			if (waitAction == 0)
+			if (!requested && !hasMorePars)
 			{
-				NzbgetRsBuf errBuf = nzbget_rs_pup_parchecker_format_not_enough_blocks_errmsg(
+				NzbgetRsBuf errBuf = nzbget_rs_parchecker_format_not_enough_blocks_errmsg(
 					missingblockcount, blockFound);
 				m_errMsg = errBuf.data ? std::string(errBuf.data, errBuf.len) : std::string();
 				nzbget_rs_free(errBuf);
 				break;
 			}
 
-			if (waitAction == 1)
+			if (!hasMorePars)
 			{
 				// wait until new files are added by "AddParFile" or a change is signaled by "QueueChanged"
 				bool queuedParFilesChanged = false;
@@ -730,7 +710,7 @@ int ParChecker::ProcessMorePars()
 int ParChecker::ProcessTwinSet()
 {
 	std::string index = RequestTwinIndex();
-	if (nzbget_rs_dqh_parchecker_can_start_twin_set(index.empty() ? 1 : 0, IsStopped() ? 1 : 0) == 0)
+	if (index.empty() || IsStopped())
 	{
 		return Par2::eRepairNotPossible;
 	}
@@ -750,12 +730,10 @@ int ParChecker::ProcessTwinSet()
 	}
 
 	res = GetRepairer()->Process(false);
-	if (nzbget_rs_src_parchecker_should_process_twin_missing_blocks(
-		(int)res, (int)Par2::eRepairNotPossible,
-		(res == Par2::eRepairNotPossible && IsStopped()) ? 1 : 0))
+	if (res == Par2::eRepairNotPossible && !IsStopped())
 	{
-		int blockNeeded = nzbget_rs_psp_parchecker_calc_twin_blocks_needed(
-			GetRepairer()->missingblockcount, GetRepairer()->recoverypacketmap.size());
+		int blockNeeded = std::max(1, static_cast<int>(GetRepairer()->missingblockcount) -
+			static_cast<int>(GetRepairer()->recoverypacketmap.size()));
 		PrintMessage(Message::mkInfo, "Need %i par-block(s) of the twin's set for %s", blockNeeded, m_infoName.c_str());
 		std::vector<std::string> volumes = RequestTwinVolumes(blockNeeded);
 		for (const std::string& volume : volumes)
@@ -765,17 +743,15 @@ int ParChecker::ProcessTwinSet()
 				PrintMessage(Message::mkInfo, "File %s of the twin loaded for par-check", FileSystem::BaseFileName(volume.c_str()));
 			}
 		}
-		if (nzbget_rs_dqh_parchecker_should_update_after_twin_volumes(volumes.empty() ? 1 : 0, IsStopped() ? 1 : 0) != 0)
+		if (!volumes.empty() && !IsStopped())
 		{
 			GetRepairer()->UpdateVerificationResults();
 			res = GetRepairer()->Process(false);
 		}
 	}
 
-	int twinErrAction = nzbget_rs_dps_parchecker_classify_twin_repair_err(
-		(int)res, (int)Par2::eRepairNotPossible, ownErrMsg.empty() ? 1 : 0);
-	NzbgetRsBuf twinErrBuf = nzbget_rs_tpr_parchecker_format_twin_err_msg(
-		twinErrAction, ownErrMsg.c_str());
+	NzbgetRsBuf twinErrBuf = nzbget_rs_parchecker_format_twin_err_msg(
+		(int)res, (int)Par2::eRepairNotPossible, ownErrMsg.c_str());
 	if (twinErrBuf.data)
 	{
 		m_errMsg.assign(twinErrBuf.data, twinErrBuf.len);
@@ -840,7 +816,7 @@ bool ParChecker::AddSplittedFragments()
 				const char* original = FindFileOrigname(current);
 
 				if (MaybeSplittedFragement(filename, current) ||
-					(nzbget_rs_psp_parchecker_should_check_original_splitted_fragment(original, current) != 0 &&
+					(original && strcasecmp(original, current) &&
 					MaybeSplittedFragement(filename, original)))
 				{
 					detail("Found splitted fragment %s", filename);
@@ -883,8 +859,8 @@ bool ParChecker::AddDupeFiles()
 {
 	// the folder of the par2 file, not the file itself (which is no folder to scan)
 	BString<1024> directory;
-	size_t dirLen = nzbget_rs_tpr_parchecker_strip_last_path_sep_len(
-		m_parFilename.c_str(), PATH_SEPARATOR);
+	const char* lastSep = strrchr(m_parFilename.c_str(), PATH_SEPARATOR);
+	size_t dirLen = lastSep ? static_cast<size_t>(lastSep - m_parFilename.c_str()) : m_parFilename.size();
 	directory.Set(m_parFilename.c_str(), (int)dirLen);
 
 	bool added = AddExtraFiles(false, false, directory);
@@ -906,7 +882,7 @@ bool ParChecker::AddDupeFiles()
 					bool oneAdded = AddExtraFiles(false, true, dupeSource.GetDirectory());
 					added |= oneAdded;
 					uint32_t blocksMissing2 = GetRepairer()->missingblockcount;
-					dupeSource.SetUsedBlocks(nzbget_rs_pnd_parchecker_calc_dupe_blocks_delta(
+					dupeSource.SetUsedBlocks(nzbget_rs_parchecker_calc_dupe_blocks_delta(
 						dupeSource.GetUsedBlocks(), wasBlocksMissing2, blocksMissing2,
 						wasBlocksMissing, &totalExtraBlocksFound));
 				}
@@ -932,7 +908,7 @@ bool ParChecker::AddDupeFiles()
 */
 void ParChecker::SortExtraFiles(std::vector<std::string>& extrafiles)
 {
-	NzbgetRsBuf stemBuf = nzbget_rs_pup_parchecker_extract_base_par_stem(m_parFilename.c_str());
+	NzbgetRsBuf stemBuf = nzbget_rs_parchecker_extract_base_par_stem(m_parFilename.c_str());
 	std::string baseParFilename = stemBuf.data ? std::string(stemBuf.data, stemBuf.len) : std::string();
 	nzbget_rs_free(stemBuf);
 
@@ -941,7 +917,7 @@ void ParChecker::SortExtraFiles(std::vector<std::string>& extrafiles)
 		end(extrafiles),
 		[&baseParFilename](const std::string& a, const std::string& b)
 		{
-			return nzbget_rs_dur_parchecker_compare_extra_file_stems(
+			return nzbget_rs_parchecker_compare_extra_file_stems(
 				FileSystem::BaseFileName(a.c_str()),
 				FileSystem::BaseFileName(b.c_str()),
 				baseParFilename.c_str()) != 0;
@@ -971,8 +947,7 @@ void ParChecker::FindExtraFiles(std::vector<std::string>& extrafiles, const char
 		{
 			bool isParred = !externalDir && IsParredFile(filename);
 			bool isProcessed = !externalDir && !isParred && IsProcessedFile(filename);
-			if (nzbget_rs_srp_parchecker_should_add_extra_file_entry(
-				externalDir ? 1 : 0, isParred ? 1 : 0, isProcessed ? 1 : 0))
+			if (externalDir || (!isParred && !isProcessed))
 			{
 				extrafiles.push_back(std::move(fullFilenameStr));
 			}
@@ -1021,11 +996,12 @@ bool ParChecker::AddExtraFiles(bool onlyMissing, bool externalDir, const char* d
 			int blockAdded = 0;
 			uint32_t blocksDelta = 0;
 			int registerParred = 0;
-			filesAdded = nzbget_rs_pnd_parchecker_eval_extra_file_step(
+			int abortReason = 0;
+			filesAdded = nzbget_rs_parchecker_eval_extra_file_step(
 				wasFilesMissing, GetRepairer()->missingfilecount,
 				wasBlocksMissing, GetRepairer()->missingblockcount,
-				externalDir ? 1 : 0, filesAdded ? 1 : 0,
-				&fileAdded, &blockAdded, &blocksDelta, &registerParred) != 0;
+				externalDir ? 1 : 0, filesAdded ? 1 : 0, onlyMissing ? 1 : 0,
+				&fileAdded, &blockAdded, &blocksDelta, &registerParred, &abortReason) != 0;
 			if (registerParred != 0)
 			{
 				PrintMessage(Message::mkInfo, "Found missing file %s", FileSystem::BaseFileName(extraFile.c_str()));
@@ -1036,8 +1012,6 @@ bool ParChecker::AddExtraFiles(bool onlyMissing, bool externalDir, const char* d
 				PrintMessage(Message::mkInfo, "Found %u missing blocks", blocksDelta);
 			}
 
-			int abortReason = nzbget_rs_pup_parchecker_should_abort_extra_scan(
-				onlyMissing ? 1 : 0, GetRepairer()->missingfilecount, GetRepairer()->missingblockcount);
 			if (abortReason == 1)
 			{
 				PrintMessage(Message::mkInfo, "All missing files found, aborting par-scan");
@@ -1073,27 +1047,22 @@ void ParChecker::SignalFilename(std::string str)
 {
 	std::lock_guard guard{ m_signalMtx };
 
-	if (nzbget_rs_sap_parchecker_should_mark_verifying_repaired((int)m_stage, (int)ptRepairing))
+	if (m_stage == ptRepairing)
 	{
 		m_stage = ptVerifyingRepaired;
 	}
 
 	// don't print progress messages when verifying repaired files in quick verification mode,
 	// because repaired files are not verified in this mode
-	const char* stageMsg = nzbget_rs_dqh_parchecker_stage_message((int)m_stage);
-	if (nzbget_rs_pup_parchecker_should_print_stage_msg(
-		(int)m_stage, (int)ptVerifyingRepaired, m_parQuick ? 1 : 0) != 0)
+	const char* stageMsg = nzbget_rs_parchecker_stage_message((int)m_stage);
+	if (!(m_stage == ptVerifyingRepaired && m_parQuick))
 	{
 		PrintMessage(Message::mkInfo, "%s %s", stageMsg, str.c_str());
 	}
 
-	NzbgetRsBuf progBuf = nzbget_rs_dqh_parchecker_format_action_label(
-		stageMsg, str.c_str());
-	m_progressLabel.assign(progBuf.data ? progBuf.data : "", progBuf.len);
-	nzbget_rs_free(progBuf);
+	m_progressLabel = std::string(stageMsg) + " " + str;
 
-	if (nzbget_rs_sap_parchecker_should_record_processed_file(
-		(int)m_stage, (int)ptLoadingPars, (int)ptVerifyingSources))
+	if (m_stage == ptLoadingPars || m_stage == ptVerifyingSources)
 	{
 		m_processedFiles.push_back(std::move(str));
 	}
@@ -1108,9 +1077,9 @@ void ParChecker::SignalProgress(int progress)
 
 	m_fileProgress = progress;
 
-	int sourceFilesCount = nzbget_rs_dqh_parchecker_effective_source_files_count(
-		(int)m_stage, (int)ptRepairing, (int)ptVerifyingRepaired,
-		GetRepairer()->sourcefiles.size());
+	int sourceFilesCount = (m_stage == ptRepairing || m_stage == ptVerifyingRepaired)
+		? 0
+		: static_cast<int>(GetRepairer()->sourcefiles.size());
 	m_stageProgress = nzbget_rs_parchecker_calc_stage_progress(
 		(int)m_stage, m_fileProgress, m_processedCount, m_filesToRepair,
 		sourceFilesCount, m_extraFiles, m_quickFiles);
@@ -1125,14 +1094,12 @@ void ParChecker::SignalDone(std::string fileName, int available, int total)
 
 	++m_processedCount;
 
-	bool ignore = nzbget_rs_dqh_parchecker_should_check_ignore_ext(
-		(int)m_stage, (int)ptVerifyingSources, available, total,
-		m_verifyingExtraFiles ? 1 : 0) != 0
+	bool ignore = (m_stage == ptVerifyingSources && available < total && !m_verifyingExtraFiles)
 		? Util::MatchFileExt(fileName.c_str(), g_Options->GetParIgnoreExt(), ",;")
 		: false;
 	int newHasDamaged = m_hasDamagedFiles ? 1 : 0;
 	int badBlocks = 0;
-	if (nzbget_rs_pnd_parchecker_eval_signal_done(
+	if (nzbget_rs_parchecker_eval_signal_done(
 		(int)m_stage, (int)ptVerifyingSources, available, total,
 		m_verifyingExtraFiles ? 1 : 0, ignore ? 1 : 0,
 		m_hasDamagedFiles ? 1 : 0, &newHasDamaged, &badBlocks) != 0)
@@ -1147,25 +1114,24 @@ void ParChecker::SignalDone(std::string fileName, int available, int total)
 			}
 
 			std::string targetFileName = sourcefile->TargetFileName();
-			if (nzbget_rs_dqh_parchecker_is_missing_target_sourcefile(
-				sourcefile->GetTargetExists() ? 1 : 0,
-				fileName.c_str(),
-				FileSystem::BaseFileName(targetFileName.c_str())) != 0)
+			if (!sourcefile->GetTargetExists() &&
+				!strcmp(fileName.c_str(), FileSystem::BaseFileName(targetFileName.c_str())))
 			{
 				fileExists = false;
 				break;
 			}
 		}
 
+		const char* ignoreSuffix = ignore ? " (ignored)" : "";
 		if (fileExists)
 		{
 			PrintMessage(Message::mkWarning, "File %s has %i bad block(s) of total %i block(s)%s",
-				fileName.c_str(), badBlocks, total, nzbget_rs_dqh_parchecker_ignore_suffix(ignore ? 1 : 0));
+				fileName.c_str(), badBlocks, total, ignoreSuffix);
 		}
 		else
 		{
 			PrintMessage(Message::mkWarning, "File %s with %i block(s) is missing%s",
-				fileName.c_str(), total, nzbget_rs_dqh_parchecker_ignore_suffix(ignore ? 1 : 0));
+				fileName.c_str(), total, ignoreSuffix);
 		}
 
 		if (!IsProcessedFile(fileName.c_str()))
@@ -1196,12 +1162,11 @@ void ParChecker::CheckEmptyFiles()
 			if (!filenameObj.empty() && !IsProcessedFile(filenameObj.c_str()))
 			{
 				bool ignore = Util::MatchFileExt(filenameObj.c_str(), g_Options->GetParIgnoreExt(), ",;");
-				m_hasDamagedFiles = nzbget_rs_dps_parchecker_update_damaged_flag(
-					m_hasDamagedFiles ? 1 : 0, ignore ? 1 : 0) != 0;
+				m_hasDamagedFiles |= !ignore;
 
 				uint32_t total = sourcefile->GetVerificationPacket() ? sourcefile->GetVerificationPacket()->BlockCount() : 0;
 				PrintMessage(Message::mkWarning, "File %s has %u bad block(s) of total %u block(s)%s",
-					filenameObj.c_str(), total, total, nzbget_rs_dqh_parchecker_ignore_suffix(ignore ? 1 : 0));
+					filenameObj.c_str(), total, total, ignore ? " (ignored)" : "");
 			}
 		}
 		else
@@ -1304,7 +1269,7 @@ ParChecker::EFileStatus ParChecker::VerifyDataFile(Par2::DiskFile& diskFile, Par
 		? sourceFile.GetTargetFile()->FileName()
 		: std::string();
 	int64 fileSize = (!filename.empty()) ? FileSystem::FileSize(filename.c_str()) : -1;
-	int precond = nzbget_rs_pnd_parchecker_check_verify_data_file_preconditions(
+	int precond = nzbget_rs_parchecker_check_verify_data_file_preconditions(
 		(int)m_stage, (int)ptVerifyingSources, sourceFile.GetTargetExists() ? 1 : 0,
 		packet ? 1 : 0, fileSize, sourceFile.BlockCount());
 	if (precond == 1)
@@ -1327,7 +1292,7 @@ ParChecker::EFileStatus ParChecker::VerifyDataFile(Par2::DiskFile& diskFile, Par
 	EFileStatus	fileStatus = FindFileCrc(FileSystem::BaseFileName(filename.c_str()), &downloadCrc, &segments);
 	ValidBlocks validBlocks;
 
-	if (nzbget_rs_dqh_parchecker_is_terminal_quick_crc_status((int)fileStatus, (int)fsFailure, (int)fsUnknown) != 0)
+	if (fileStatus == fsFailure || fileStatus == fsUnknown)
 	{
 		return fileStatus;
 	}
@@ -1335,7 +1300,7 @@ ParChecker::EFileStatus ParChecker::VerifyDataFile(Par2::DiskFile& diskFile, Par
 		(fileStatus == fsPartial && !VerifyPartialDataFile(diskFile, sourceFile, segments, validBlocks)))
 	{
 		PrintMessage(Message::mkWarning, "Quick verification failed for %s file %s, performing full verification instead",
-			nzbget_rs_dqh_parchecker_file_quality_label((int)fileStatus, (int)fsSuccess),
+			fileStatus == fsSuccess ? "good" : "damaged",
 			FileSystem::BaseFileName(filename.c_str()));
 		return fsUnknown; // let libpar2 do the full verification of the file
 	}
@@ -1353,10 +1318,7 @@ ParChecker::EFileStatus ParChecker::VerifyDataFile(Par2::DiskFile& diskFile, Par
 
 			// Look for a match
 			const Par2::VerificationHashEntry* hashEntry = GetRepairer()->verificationhashtable.Lookup(blockCrc);
-			if (nzbget_rs_dps_parchecker_is_verify_hash_mismatch(
-				hashEntry ? 1 : 0,
-				(hashEntry && hashEntry->SourceFile() == &sourceFile) ? 1 : 0,
-				(hashEntry && hashEntry->IsSet()) ? 1 : 0) != 0)
+			if (!hashEntry || hashEntry->SourceFile() != &sourceFile || hashEntry->IsSet())
 			{
 				// no match found, revert back the changes made by "pHashEntry->SetBlock"
 				for (const Par2::VerificationHashEntry* undoEntry : undoList)
@@ -1367,14 +1329,14 @@ ParChecker::EFileStatus ParChecker::VerifyDataFile(Par2::DiskFile& diskFile, Par
 			}
 
 			undoList.push_back(hashEntry);
-			hashEntry->SetBlock(&diskFile, nzbget_rs_dps_parchecker_calc_block_offset(i, blocksize));
+			hashEntry->SetBlock(&diskFile, static_cast<Par2::u64>(i) * blocksize);
 			++availableBlocks;
 		}
 	}
 
 	m_quickFiles++;
 	PrintMessage(Message::mkDetail, "Quickly verified %s file %s",
-		nzbget_rs_dqh_parchecker_file_quality_label((int)fileStatus, (int)fsSuccess),
+		fileStatus == fsSuccess ? "good" : "damaged",
 		FileSystem::BaseFileName(filename.c_str()));
 
 	return fileStatus;
@@ -1386,8 +1348,9 @@ bool ParChecker::VerifySuccessDataFile(Par2::DiskFile&, Par2::Par2RepairerSource
 	Par2::VerificationPacket* packet = sourceFile.GetVerificationPacket();
 
 	// extend lDownloadCrc to block size
-	uint64_t padBytes = nzbget_rs_dur_parchecker_calc_pad_bytes(
-		blocksize, packet->BlockCount(), sourceFile.GetTargetFile()->FileSize());
+	uint64_t totalBlocksSize = blocksize * static_cast<Par2::u64>(packet->BlockCount());
+	uint64_t targetFileSize = static_cast<uint64_t>(sourceFile.GetTargetFile()->FileSize());
+	uint64_t padBytes = totalBlocksSize > targetFileSize ? totalBlocksSize - targetFileSize : 0;
 	downloadCrc = Par2::CRCUpdateBlock(downloadCrc ^ 0xFFFFFFFF, padBytes) ^ 0xFFFFFFFF;
 	debug("Download-CRC: %.8x", downloadCrc);
 
@@ -1399,7 +1362,7 @@ bool ParChecker::VerifySuccessDataFile(Par2::DiskFile&, Par2::Par2RepairerSource
 		const Par2::FILEVERIFICATIONENTRY* entry = packet->VerificationEntry(i);
 		blockCrcs.push_back(entry->crc);
 	}
-	uint32 parCrc = nzbget_rs_pup_parchecker_combine_block_crcs(
+	uint32 parCrc = nzbget_rs_parchecker_combine_block_crcs(
 		blockCrcs.data(), blockCrcs.size(), blocksize);
 	std::string fileName = sourceFile.GetTargetFile()->FileName();
 	debug("Block-CRC: %x, filename: %s", parCrc, FileSystem::BaseFileName(fileName.c_str()));
@@ -1455,25 +1418,24 @@ bool ParChecker::VerifyPartialDataFile(Par2::DiskFile&, Par2::Par2RepairerSource
 		blockCrcs[i] = packet->VerificationEntry((uint32)i)->crc;
 	}
 	size_t searchIdx = 0;
-	size_t runStart = 0, runEnd = 0;
-	while (nzbget_rs_tpr_parchecker_next_valid_block_run(
+	size_t runEnd = 0;
+	uint32 parCrc = 0;
+	int64 bytesStart = 0;
+	int64 clampedEnd = 0;
+	size_t padLen = 0;
+	while (nzbget_rs_parchecker_next_valid_block_run(
 		validBlockFlags.empty() ? nullptr : validBlockFlags.data(),
+		blockCrcs.empty() ? nullptr : blockCrcs.data(),
 		validBlockFlags.size(),
 		searchIdx,
-		&runStart,
-		&runEnd) != 0)
+		blocksize,
+		fileSize,
+		&runEnd,
+		&parCrc,
+		&bytesStart,
+		&clampedEnd,
+		&padLen) != 0)
 	{
-		uint32 parCrc = nzbget_rs_pup_parchecker_combine_block_crcs(
-			&blockCrcs[runStart], runEnd - runStart + 1, (uint64_t)blocksize);
-		int blockStart = (int)runStart;
-		int blockEnd = (int)runEnd;
-		int64 bytesStart = 0;
-		int64 bytesEnd = 0;
-		int64 clampedEnd = 0;
-		size_t padLen = 0;
-		nzbget_rs_psp_parchecker_calc_block_byte_range(
-			blockStart, blockEnd, blocksize, fileSize,
-			&bytesStart, &bytesEnd, &clampedEnd, &padLen);
 		uint32 downloadCrc = 0;
 		bool ok = SmartCalcFileRangeCrc(infile, bytesStart, clampedEnd, segments, downloadCrc);
 		if (ok && padLen > 0)
@@ -1481,7 +1443,7 @@ bool ParChecker::VerifyPartialDataFile(Par2::DiskFile&, Par2::Par2RepairerSource
 			downloadCrc = Par2::CRCUpdateBlock(downloadCrc ^ 0xFFFFFFFF, padLen) ^ 0xFFFFFFFF;
 		}
 
-		if (nzbget_rs_dqh_parchecker_is_partial_range_crc_valid(ok ? 1 : 0, downloadCrc, parCrc) == 0)
+		if (!ok || downloadCrc != parCrc)
 		{
 			infile.Close();
 			return false;
@@ -1546,9 +1508,9 @@ bool ParChecker::DumbCalcFileRangeCrc(DiskFile& file, int64 start, int64 end, ui
 	Crc32 downloadCrc;
 
 	int cnt = buffer.Size();
-	while (int needBytes = nzbget_rs_pnd_parchecker_calc_dumb_crc_read_size(
-		cnt, buffer.Size(), start, end))
+	while (cnt == buffer.Size() && start < end)
 	{
+		int needBytes = end - start + 1 > buffer.Size() ? buffer.Size() : (int)(end - start + 1);
 		cnt = (int)file.Read(buffer, needBytes);
 		downloadCrc.Append((uchar*)(char*)buffer, cnt);
 		start += cnt;
@@ -1564,9 +1526,7 @@ std::string ParChecker::GetPacketCreator()
 	if (GetRepairer()->creatorpacket &&
 		(creatorpacket = (Par2::CREATORPACKET*)(((RepairCreatorPacket*)GetRepairer()->creatorpacket)->packetdata)))
 	{
-		size_t len = nzbget_rs_psp_parchecker_calc_creator_packet_payload_len(
-			creatorpacket->header.length, sizeof(Par2::PACKET_HEADER));
-		if (len > 0)
+		if (creatorpacket->header.length > sizeof(Par2::PACKET_HEADER))
 		{
 			return std::string((const char*)creatorpacket->client);
 		}

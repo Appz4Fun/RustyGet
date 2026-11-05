@@ -777,8 +777,8 @@ void HistoryCoordinator::HistoryRetry(DownloadQueue* downloadQueue, HistoryList:
 				// name ("<id>.out.tmp"): its data is there, but it keeps the name its
 				// nzb-file gives it, which a recreation from a duplicate pairs by
 				std::string recordedName = completedFile.GetFilename();
-				bool temporaryName = nzbget_rs_pup_history_coord_is_temporary_output_name(
-					recordedName.c_str()) != 0;
+				bool temporaryName = recordedName.size() >= 8 &&
+					recordedName.compare(recordedName.size() - 8, 8, ".out.tmp") == 0;
 				if (!temporaryName || Util::EmptyStr(fileInfo->GetFilename()))
 				{
 					fileInfo->SetFilename(recordedName.c_str());

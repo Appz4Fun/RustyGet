@@ -1878,8 +1878,8 @@ void QueueCoordinator::CheckHealth(DownloadQueue* downloadQueue, FileInfo* fileI
 	if (g_Options->GetHealthCheck() == Options::hcPause)
 	{
 		warn("Pausing %s due to health %.1f%% below critical %.1f%%", fileInfo->GetNzbInfo()->GetName(),
-			nzbget_rs_dqh_prepost_permille_to_percent(fileInfo->GetNzbInfo()->CalcHealth()),
-			nzbget_rs_dqh_prepost_permille_to_percent(fileInfo->GetNzbInfo()->CalcCriticalHealth(true)));
+			fileInfo->GetNzbInfo()->CalcHealth() / 10.0,
+			fileInfo->GetNzbInfo()->CalcCriticalHealth(true) / 10.0);
 		fileInfo->GetNzbInfo()->SetHealthPaused(true);
 		downloadQueue->EditEntry(fileInfo->GetNzbInfo()->GetId(), DownloadQueue::eaGroupPause, nullptr);
 	}
@@ -1889,8 +1889,8 @@ void QueueCoordinator::CheckHealth(DownloadQueue* downloadQueue, FileInfo* fileI
 		fileInfo->GetNzbInfo()->PrintMessage(Message::mkWarning,
 			"Cancelling download and deleting %s due to health %.1f%% below critical %.1f%%",
 			fileInfo->GetNzbInfo()->GetName(),
-			nzbget_rs_dqh_prepost_permille_to_percent(fileInfo->GetNzbInfo()->CalcHealth()),
-			nzbget_rs_dqh_prepost_permille_to_percent(fileInfo->GetNzbInfo()->CalcCriticalHealth(true)));
+			fileInfo->GetNzbInfo()->CalcHealth() / 10.0,
+			fileInfo->GetNzbInfo()->CalcCriticalHealth(true) / 10.0);
 		fileInfo->GetNzbInfo()->SetDeleteStatus(NzbInfo::dsHealth);
 		downloadQueue->EditEntry(fileInfo->GetNzbInfo()->GetId(),
 			(DownloadQueue::EEditAction)nzbget_rs_dqh_queue_coord_select_health_delete_action(
@@ -2163,8 +2163,8 @@ void QueueCoordinator::CheckDupeFailover(DownloadQueue* downloadQueue, NzbInfo* 
 			"Failing over %s to duplicate %s: health %.1f%% below critical %.1f%%, "
 			"%i of %i missing article(s) recovered from duplicates",
 			nzbInfo->GetName(), backup->GetNzbInfo()->GetName(),
-			nzbget_rs_dqh_prepost_permille_to_percent(nzbInfo->CalcHealth()),
-			nzbget_rs_dqh_prepost_permille_to_percent(DownloadCriticalHealth(downloadQueue, nzbInfo)),
+			nzbInfo->CalcHealth() / 10.0,
+			DownloadCriticalHealth(downloadQueue, nzbInfo) / 10.0,
 			recovered, attempted);
 	}
 	else if (DownloadHopeless(nzbInfo))
@@ -2174,8 +2174,8 @@ void QueueCoordinator::CheckDupeFailover(DownloadQueue* downloadQueue, NzbInfo* 
 			"Parking %s: health %.1f%% below critical %.1f%%, %i of %i missing article(s) "
 			"recovered from duplicates, %i of %i tried article(s) exist and no better duplicate in history (%s)",
 			nzbInfo->GetName(),
-			nzbget_rs_dqh_prepost_permille_to_percent(nzbInfo->CalcHealth()),
-			nzbget_rs_dqh_prepost_permille_to_percent(DownloadCriticalHealth(downloadQueue, nzbInfo)),
+			nzbInfo->CalcHealth() / 10.0,
+			DownloadCriticalHealth(downloadQueue, nzbInfo) / 10.0,
 			recovered, attempted, nzbInfo->GetCurrentSuccessArticles(), tried,
 			g_DupeCoordinator->NoBackupReason(downloadQueue, nzbInfo).c_str());
 	}
@@ -2280,9 +2280,9 @@ void QueueCoordinator::CheckDeadDownload(DownloadQueue* downloadQueue, NzbInfo* 
 				"Parking %s: %i of %i tried article(s) of its own arrived, projected health %.1f%% "
 				"%s critical %.1f%%, and no duplicate in history to fail over to (%s)",
 				nzbInfo->GetName(), own, tried,
-				nzbget_rs_dqh_prepost_permille_to_percent(projected),
+				projected / 10.0,
 				nzbget_rs_dqh_queue_coord_projected_health_rel_str(farBelow ? 1 : 0),
-				nzbget_rs_dqh_prepost_permille_to_percent(critical),
+				critical / 10.0,
 				g_DupeCoordinator->NoBackupReason(downloadQueue, nzbInfo).c_str());
 			nzbInfo->SetDeleteStatus(NzbInfo::dsHealth);
 			downloadQueue->EditEntry(nzbInfo->GetId(), DownloadQueue::eaGroupParkDelete, nullptr);
@@ -2332,10 +2332,10 @@ void QueueCoordinator::CheckDeadDownload(DownloadQueue* downloadQueue, NzbInfo* 
 			"Failing over %s to duplicate %s: %i of %i tried article(s) of its own arrived, projected health "
 			"%.1f%% %s critical %.1f%%; the duplicate is %.0f%% alive",
 			nzbInfo->GetName(), backup->GetNzbInfo()->GetName(), own, tried,
-			nzbget_rs_dqh_prepost_permille_to_percent(projected),
+			projected / 10.0,
 			nzbget_rs_dqh_queue_coord_partly_alive_rel_str(projBelowCrit),
-			nzbget_rs_dqh_prepost_permille_to_percent(critical),
-			nzbget_rs_dqh_prepost_permille_to_percent(backupAlive));
+			critical / 10.0,
+			backupAlive / 10.0);
 	}
 	nzbInfo->SetDeleteStatus(NzbInfo::dsHealth);
 	downloadQueue->EditEntry(nzbInfo->GetId(), DownloadQueue::eaGroupParkDelete, nullptr);

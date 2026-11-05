@@ -9986,6 +9986,258 @@ pub unsafe extern "C" fn nzbget_rs_repair_check_par_time_limit(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_parchecker_calc_repairer_resources(
+    par_threads: c_int,
+    cpu_cores: c_int,
+    has_memory_monitor: c_int,
+    monitor_mem_mb: c_int,
+    configured_par_buffer_mb: c_int,
+    out_threads: *mut c_int,
+    out_mem: *mut c_int,
+) {
+    let (t, m) = crate::parchecker::calc_repairer_resources(
+        par_threads,
+        cpu_cores,
+        has_memory_monitor != 0,
+        monitor_mem_mb,
+        configured_par_buffer_mb,
+    );
+    if !out_threads.is_null() {
+        *out_threads = t;
+    }
+    if !out_mem.is_null() {
+        *out_mem = m;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_parchecker_build_preprocess_cli_args(
+    threads_to_use: c_int,
+    mem_to_use: c_int,
+    par_filename: *const c_char,
+    par_scan_full: c_int,
+    out_mem_param: *mut RsBuf,
+    out_threads_param: *mut RsBuf,
+    out_file_threads_param: *mut RsBuf,
+    out_wildcard_param: *mut RsBuf,
+) -> c_int {
+    let pf = if par_filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(par_filename).to_bytes()
+    };
+    let (m, t, ft, wc) = crate::parchecker::build_preprocess_cli_args(
+        threads_to_use,
+        mem_to_use,
+        pf,
+        par_scan_full != 0,
+    );
+    if !out_mem_param.is_null() {
+        *out_mem_param = into_buf(m);
+    }
+    if !out_threads_param.is_null() {
+        *out_threads_param = into_buf(t);
+    }
+    if !out_file_threads_param.is_null() {
+        *out_file_threads_param = into_buf(ft);
+    }
+    match wc {
+        Some(w) => {
+            if !out_wildcard_param.is_null() {
+                *out_wildcard_param = into_buf(w);
+            }
+            1
+        }
+        None => {
+            if !out_wildcard_param.is_null() {
+                *out_wildcard_param = RsBuf {
+                    data: std::ptr::null_mut(),
+                    len: 0,
+                    cap: 0,
+                };
+            }
+            0
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_parchecker_cmdline_err_str(res: c_int) -> *const c_char {
+    crate::parchecker::cmdline_err_str(res).as_ptr() as *const c_char
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_parchecker_stage_message(stage: c_int) -> *const c_char {
+    crate::parchecker::stage_message(stage).as_ptr() as *const c_char
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_parchecker_format_action_label(
+    verb: *const c_char,
+    info_name: *const c_char,
+) -> RsBuf {
+    let v = if verb.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(verb).to_bytes()
+    };
+    let n = if info_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(info_name).to_bytes()
+    };
+    into_buf(crate::parchecker::format_action_label(v, n))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_parchecker_should_try_more_recovery(
+    has_damaged_files: c_int,
+    is_stopped: c_int,
+    res: c_int,
+    e_repair_not_possible: c_int,
+    require_dupe_scan: c_int,
+    par_scan: c_int,
+    ps_dupe: c_int,
+) -> c_int {
+    i32::from(crate::parchecker::should_try_more_recovery(
+        has_damaged_files != 0,
+        is_stopped != 0,
+        res,
+        e_repair_not_possible,
+        require_dupe_scan != 0,
+        par_scan,
+        ps_dupe,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_parchecker_should_add_missing_files(
+    has_damaged: c_int,
+    is_stopped: c_int,
+    missing_file_count: u32,
+    added_split: c_int,
+    res: c_int,
+    e_repair_possible: c_int,
+    par_scan: c_int,
+    ps_extended: c_int,
+    ps_dupe: c_int,
+) -> c_int {
+    i32::from(crate::parchecker::should_add_missing_files(
+        has_damaged != 0,
+        is_stopped != 0,
+        missing_file_count,
+        added_split != 0,
+        res,
+        e_repair_possible,
+        par_scan,
+        ps_extended,
+        ps_dupe,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_parchecker_eval_post_verify_action(
+    res: c_int,
+    e_success: c_int,
+    e_repair_possible: c_int,
+    has_damaged_files: c_int,
+    par_repair: c_int,
+    ps_failed: c_int,
+    ps_repair_not_needed: c_int,
+    ps_repair_possible: c_int,
+    out_action_code: *mut c_int,
+) -> c_int {
+    let (status, action) = crate::parchecker::eval_post_verify_action(
+        res,
+        e_success,
+        e_repair_possible,
+        has_damaged_files != 0,
+        par_repair != 0,
+        ps_failed,
+        ps_repair_not_needed,
+        ps_repair_possible,
+    );
+    if !out_action_code.is_null() {
+        *out_action_code = action;
+    }
+    status
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_parchecker_eval_cancel_or_fail_outcome(
+    is_stopped: c_int,
+    stage: c_int,
+    pt_repairing: c_int,
+    cur_status: c_int,
+    ps_failed: c_int,
+    ps_repair_possible: c_int,
+    err_msg_empty: c_int,
+    res: c_int,
+    out_outcome_kind: *mut c_int,
+    out_use_cmd_err: *mut c_int,
+) -> c_int {
+    let (status, kind, use_cmd) = crate::parchecker::eval_cancel_or_fail_outcome(
+        is_stopped != 0,
+        stage,
+        pt_repairing,
+        cur_status,
+        ps_failed,
+        ps_repair_possible,
+        err_msg_empty != 0,
+        res,
+    );
+    if !out_outcome_kind.is_null() {
+        *out_outcome_kind = kind;
+    }
+    if !out_use_cmd_err.is_null() {
+        *out_use_cmd_err = i32::from(use_cmd);
+    }
+    status
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_parchecker_classify_preprocess_step(
+    is_stopped: c_int,
+    res: c_int,
+    e_success: c_int,
+    e_invalid_args: c_int,
+) -> c_int {
+    crate::parchecker::classify_preprocess_step(is_stopped != 0, res, e_success, e_invalid_args)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_parchecker_format_not_enough_blocks_errmsg(
+    missing_blocks: i32,
+    block_found: i32,
+) -> RsBuf {
+    into_buf(crate::parchecker::format_not_enough_blocks_errmsg(
+        missing_blocks,
+        block_found,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_parchecker_format_twin_err_msg(
+    res: c_int,
+    e_repair_not_possible: c_int,
+    own_err_msg: *const c_char,
+) -> RsBuf {
+    let o = if own_err_msg.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(own_err_msg).to_bytes()
+    };
+    match crate::parchecker::format_twin_err_msg(res, e_repair_not_possible, o) {
+        Some(v) => into_buf(v),
+        None => RsBuf {
+            data: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        },
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_parchecker_maybe_splitted_fragment(
     filename1: *const c_char,
     filename2: *const c_char,
@@ -9995,7 +10247,102 @@ pub unsafe extern "C" fn nzbget_rs_parchecker_maybe_splitted_fragment(
     }
     let f1 = CStr::from_ptr(filename1).to_bytes();
     let f2 = CStr::from_ptr(filename2).to_bytes();
-    crate::postrepair::maybe_splitted_fragment(f1, f2) as c_int
+    crate::parchecker::maybe_splitted_fragment(f1, f2) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_parchecker_calc_dupe_blocks_delta(
+    prev_used_blocks: c_int,
+    was_blocks_missing2: u32,
+    blocks_missing2: u32,
+    was_blocks_missing_total: u32,
+    out_total_found: *mut u32,
+) -> c_int {
+    let (new_used, total_found) = crate::parchecker::calc_dupe_blocks_delta(
+        prev_used_blocks,
+        was_blocks_missing2,
+        blocks_missing2,
+        was_blocks_missing_total,
+    );
+    if !out_total_found.is_null() {
+        *out_total_found = total_found;
+    }
+    new_used
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_parchecker_extract_base_par_stem(
+    par_filename: *const c_char,
+) -> RsBuf {
+    into_buf(crate::parchecker::extract_base_par_stem(input(
+        par_filename,
+    )))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_parchecker_compare_extra_file_stems(
+    base_name1: *const c_char,
+    base_name2: *const c_char,
+    par_stem: *const c_char,
+) -> c_int {
+    let b1 = if base_name1.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(base_name1).to_bytes()
+    };
+    let b2 = if base_name2.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(base_name2).to_bytes()
+    };
+    let ps = if par_stem.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(par_stem).to_bytes()
+    };
+    i32::from(crate::parchecker::compare_extra_file_stems(b1, b2, ps))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_parchecker_eval_extra_file_step(
+    was_files_missing: u32,
+    now_files_missing: u32,
+    was_blocks_missing: u32,
+    now_blocks_missing: u32,
+    external_dir: c_int,
+    prev_files_added: c_int,
+    only_missing: c_int,
+    out_file_added: *mut c_int,
+    out_block_added: *mut c_int,
+    out_blocks_delta: *mut u32,
+    out_register_parred: *mut c_int,
+    out_abort_reason: *mut c_int,
+) -> c_int {
+    let (fa, ba, nfa, delta, reg, abort_reason) = crate::parchecker::eval_extra_file_step(
+        was_files_missing,
+        now_files_missing,
+        was_blocks_missing,
+        now_blocks_missing,
+        external_dir != 0,
+        prev_files_added != 0,
+        only_missing != 0,
+    );
+    if !out_file_added.is_null() {
+        *out_file_added = i32::from(fa);
+    }
+    if !out_block_added.is_null() {
+        *out_block_added = i32::from(ba);
+    }
+    if !out_blocks_delta.is_null() {
+        *out_blocks_delta = delta;
+    }
+    if !out_register_parred.is_null() {
+        *out_register_parred = i32::from(reg);
+    }
+    if !out_abort_reason.is_null() {
+        *out_abort_reason = abort_reason;
+    }
+    i32::from(nfa)
 }
 
 #[no_mangle]
@@ -10008,7 +10355,7 @@ pub extern "C" fn nzbget_rs_parchecker_calc_stage_progress(
     extra_files: c_int,
     quick_files: c_int,
 ) -> c_int {
-    crate::postrepair::calc_stage_progress(
+    crate::parchecker::calc_stage_progress(
         stage,
         file_progress,
         processed_count,
@@ -10017,6 +10364,69 @@ pub extern "C" fn nzbget_rs_parchecker_calc_stage_progress(
         extra_files,
         quick_files,
     )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_parchecker_eval_signal_done(
+    stage: c_int,
+    pt_verifying_sources: c_int,
+    available: c_int,
+    total: c_int,
+    verifying_extra_files: c_int,
+    ignore: c_int,
+    prev_has_damaged_files: c_int,
+    out_has_damaged_files: *mut c_int,
+    out_bad_blocks: *mut c_int,
+) -> c_int {
+    let (report, has_damaged, bad_blocks) = crate::parchecker::eval_signal_done(
+        stage,
+        pt_verifying_sources,
+        available,
+        total,
+        verifying_extra_files != 0,
+        ignore != 0,
+        prev_has_damaged_files != 0,
+    );
+    if !out_has_damaged_files.is_null() {
+        *out_has_damaged_files = i32::from(has_damaged);
+    }
+    if !out_bad_blocks.is_null() {
+        *out_bad_blocks = bad_blocks;
+    }
+    i32::from(report)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_parchecker_check_verify_data_file_preconditions(
+    stage: c_int,
+    pt_verifying_sources: c_int,
+    target_exists: c_int,
+    has_verification_packet: c_int,
+    file_size: i64,
+    block_count: u64,
+) -> c_int {
+    crate::parchecker::check_verify_data_file_preconditions(
+        stage,
+        pt_verifying_sources,
+        target_exists != 0,
+        has_verification_packet != 0,
+        file_size,
+        block_count,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_parchecker_combine_block_crcs(
+    block_crcs_ptr: *const u32,
+    count: usize,
+    block_size: u64,
+) -> u32 {
+    let crcs = if block_crcs_ptr.is_null() || count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(block_crcs_ptr, count)
+    };
+    crate::parchecker::combine_block_crcs(crcs, block_size)
 }
 
 #[no_mangle]
@@ -10037,7 +10447,55 @@ pub unsafe extern "C" fn nzbget_rs_parchecker_compute_valid_blocks(
         std::slice::from_raw_parts(segments, segment_count)
     };
     let valid_slice = std::slice::from_raw_parts_mut(out_valid, block_count);
-    crate::postrepair::compute_valid_blocks(block_count, block_size, file_size, segs, valid_slice);
+    crate::parchecker::compute_valid_blocks(block_count, block_size, file_size, segs, valid_slice);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_parchecker_next_valid_block_run(
+    valid_blocks_ptr: *const u8,
+    block_crcs_ptr: *const u32,
+    len: usize,
+    start_idx: usize,
+    block_size: i64,
+    file_size: i64,
+    out_block_end: *mut usize,
+    out_par_crc: *mut u32,
+    out_bytes_start: *mut i64,
+    out_clamped_end: *mut i64,
+    out_pad_len: *mut usize,
+) -> i32 {
+    if valid_blocks_ptr.is_null() || block_crcs_ptr.is_null() || len == 0 {
+        return 0;
+    }
+    let valid_slice = std::slice::from_raw_parts(valid_blocks_ptr, len);
+    let crcs_slice = std::slice::from_raw_parts(block_crcs_ptr, len);
+    match crate::parchecker::next_valid_block_run(
+        valid_slice,
+        crcs_slice,
+        start_idx,
+        block_size,
+        file_size,
+    ) {
+        Some((b_end, par_crc, bytes_start, clamped_end, pad_len)) => {
+            if !out_block_end.is_null() {
+                *out_block_end = b_end;
+            }
+            if !out_par_crc.is_null() {
+                *out_par_crc = par_crc;
+            }
+            if !out_bytes_start.is_null() {
+                *out_bytes_start = bytes_start;
+            }
+            if !out_clamped_end.is_null() {
+                *out_clamped_end = clamped_end;
+            }
+            if !out_pad_len.is_null() {
+                *out_pad_len = pad_len;
+            }
+            1
+        }
+        None => 0,
+    }
 }
 
 #[no_mangle]
@@ -10057,7 +10515,7 @@ pub unsafe extern "C" fn nzbget_rs_parchecker_smart_calc_range_crc(
     } else {
         std::slice::from_raw_parts(segments, segment_count)
     };
-    let res = crate::postrepair::smart_calc_range_crc(start, end, segs, |s, e| {
+    let res = crate::parchecker::smart_calc_range_crc(start, end, segs, |s, e| {
         let cb = dumb_calc_cb?;
         let mut c = 0u32;
         if cb(ctx, s, e, &mut c) != 0 {
@@ -10088,7 +10546,7 @@ pub unsafe extern "C" fn nzbget_rs_parchecker_classify_streambuf_line(
         return 1;
     }
     let bytes = CStr::from_ptr(msg).to_bytes();
-    let (extra_debug, offset) = crate::postrepair::classify_streambuf_line(bytes);
+    let (extra_debug, offset) = crate::parchecker::classify_streambuf_line(bytes);
     if !out_offset.is_null() {
         *out_offset = offset;
     }
@@ -10958,7 +11416,7 @@ pub unsafe extern "C" fn nzbget_rs_dsp_parse_log_line(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dsp_sanitise_post_stage(
+pub unsafe extern "C" fn nzbget_rs_prepost_sanitise_post_stage(
     stage: c_int,
     pt_executing_script: c_int,
     pt_finished: c_int,
@@ -10970,7 +11428,7 @@ pub unsafe extern "C" fn nzbget_rs_dsp_sanitise_post_stage(
     out_stage: *mut c_int,
     out_request_par_check: *mut c_int,
 ) {
-    let (new_stage, req_par) = crate::diskstatepp::sanitise_post_stage(
+    let (new_stage, req_par) = crate::prepost::sanitise_post_stage(
         stage,
         pt_executing_script,
         pt_finished,
@@ -10989,7 +11447,7 @@ pub unsafe extern "C" fn nzbget_rs_dsp_sanitise_post_stage(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dsp_classify_file_event(
+pub unsafe extern "C" fn nzbget_rs_prepost_classify_file_event(
     is_file_completed: c_int,
     is_file_deleted: c_int,
     dupe_deleted: c_int,
@@ -11000,7 +11458,7 @@ pub unsafe extern "C" fn nzbget_rs_dsp_classify_file_event(
     download_completed_ignore_paused: c_int,
     download_completed_all: c_int,
 ) -> c_int {
-    crate::diskstatepp::classify_file_event(
+    crate::prepost::classify_file_event(
         is_file_completed != 0,
         is_file_deleted != 0,
         dupe_deleted != 0,
@@ -11014,7 +11472,100 @@ pub unsafe extern "C" fn nzbget_rs_dsp_classify_file_event(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dsp_eval_nzb_completed(
+pub extern "C" fn nzbget_rs_prepost_should_complete_after_direct_rename(
+    is_stopped: c_int,
+    direct_rename_status: c_int,
+    ts_success: c_int,
+    has_post_info: c_int,
+    delete_status: c_int,
+    ds_none: c_int,
+    completed_not_empty: c_int,
+    download_completed: c_int,
+    raw_article: c_int,
+    skip_write: c_int,
+    skip_disk_write: c_int,
+) -> c_int {
+    i32::from(crate::prepost::should_complete_after_direct_rename(
+        is_stopped != 0,
+        direct_rename_status,
+        ts_success,
+        has_post_info != 0,
+        delete_status,
+        ds_none,
+        completed_not_empty != 0,
+        download_completed != 0,
+        raw_article != 0,
+        skip_write != 0,
+        skip_disk_write != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_prepost_classify_nzb_downloaded_entry(
+    skip_script_processing: c_int,
+    skip_disk_write: c_int,
+    opt_skip_write: c_int,
+    delete_status: c_int,
+    ds_health: c_int,
+    ds_bad: c_int,
+    has_post_info: c_int,
+    opt_raw_article: c_int,
+    par_status: c_int,
+    ps_none: c_int,
+    par_check_opt: c_int,
+    pc_always: c_int,
+    pc_force: c_int,
+    out_enqueue_deleted_script: *mut c_int,
+    out_set_par_skipped: *mut c_int,
+) -> c_int {
+    let (route, enq, skip_par) = crate::prepost::classify_nzb_downloaded_entry(
+        skip_script_processing != 0,
+        skip_disk_write != 0,
+        opt_skip_write != 0,
+        delete_status,
+        ds_health,
+        ds_bad,
+        has_post_info != 0,
+        opt_raw_article != 0,
+        par_status,
+        ps_none,
+        par_check_opt,
+        pc_always,
+        pc_force,
+    );
+    if !out_enqueue_deleted_script.is_null() {
+        *out_enqueue_deleted_script = i32::from(enq);
+    }
+    if !out_set_par_skipped.is_null() {
+        *out_set_par_skipped = i32::from(skip_par);
+    }
+    route
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_prepost_resolve_nzb_deleted_route(
+    delete_status: c_int,
+    ds_none: c_int,
+    ds_manual: c_int,
+    ds_health: c_int,
+    ds_bad: c_int,
+    out_new_delete_status: *mut c_int,
+) -> c_int {
+    let (new_st, call_dl) = crate::prepost::resolve_nzb_deleted_route(
+        delete_status,
+        ds_none,
+        ds_manual,
+        ds_health,
+        ds_bad,
+    );
+    if !out_new_delete_status.is_null() {
+        *out_new_delete_status = new_st;
+    }
+    i32::from(call_dl)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_prepost_eval_nzb_completed(
     dupe_hint: c_int,
     dh_redownload_auto: c_int,
     keep_history: c_int,
@@ -11034,7 +11585,7 @@ pub unsafe extern "C" fn nzbget_rs_dsp_eval_nzb_completed(
     out_enqueue_deleted_script: *mut c_int,
     out_need_save: *mut c_int,
 ) {
-    let (add_hist, call_dupe, enq_del, need_save) = crate::diskstatepp::eval_nzb_completed(
+    let (add_hist, call_dupe, enq_del, need_save) = crate::prepost::eval_nzb_completed(
         dupe_hint,
         dh_redownload_auto,
         keep_history,
@@ -11065,7 +11616,92 @@ pub unsafe extern "C" fn nzbget_rs_dsp_eval_nzb_completed(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dsp_can_run_more_jobs(
+pub extern "C" fn nzbget_rs_prepost_classify_delete_cleanup_mode(
+    cleanup_disk: c_int,
+    delete_status: c_int,
+    ds_dupe: c_int,
+    parking: c_int,
+    skip_disk_write: c_int,
+    opt_skip_write: c_int,
+) -> c_int {
+    crate::prepost::classify_delete_cleanup_mode(
+        cleanup_disk != 0,
+        delete_status,
+        ds_dupe,
+        parking != 0,
+        skip_disk_write != 0,
+        opt_skip_write != 0,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_prepost_classify_request_par_action(
+    request_par_check: c_int,
+    par_status: c_int,
+    ps_skipped: c_int,
+    force_repair: c_int,
+    par_full: c_int,
+    par_check_opt: c_int,
+    pc_manual: c_int,
+    cur_force_par_full: c_int,
+    file_list_empty: c_int,
+    out_new_force_par_full: *mut c_int,
+) -> c_int {
+    let (act, new_force) = crate::prepost::classify_request_par_action(
+        request_par_check != 0,
+        par_status,
+        ps_skipped,
+        force_repair != 0,
+        par_full != 0,
+        par_check_opt,
+        pc_manual,
+        cur_force_par_full != 0,
+        file_list_empty != 0,
+    );
+    if !out_new_force_par_full.is_null() {
+        *out_new_force_par_full = i32::from(new_force);
+    }
+    act
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_prepost_eval_cleanup_job_state(
+    working: c_int,
+    has_running_thread: c_int,
+    stage: c_int,
+    pt_finished: c_int,
+    deleted: c_int,
+    start_time: i64,
+    cur_time: i64,
+    prev_post_total_sec: c_int,
+    out_update_total_sec: *mut c_int,
+    out_is_completed: *mut c_int,
+    out_new_total_sec: *mut c_int,
+) -> c_int {
+    let (ready, upd, comp, new_sec) = crate::prepost::eval_cleanup_job_state(
+        working != 0,
+        has_running_thread != 0,
+        stage,
+        pt_finished,
+        deleted != 0,
+        start_time,
+        cur_time,
+        prev_post_total_sec,
+    );
+    if !out_update_total_sec.is_null() {
+        *out_update_total_sec = i32::from(upd);
+    }
+    if !out_is_completed.is_null() {
+        *out_is_completed = i32::from(comp);
+    }
+    if !out_new_total_sec.is_null() {
+        *out_new_total_sec = new_sec;
+    }
+    i32::from(ready)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_prepost_can_run_more_jobs(
     job_stages: *const c_int,
     job_count: usize,
     pt_loading_pars: c_int,
@@ -11079,7 +11715,7 @@ pub unsafe extern "C" fn nzbget_rs_dsp_can_run_more_jobs(
     } else {
         std::slice::from_raw_parts(job_stages, job_count)
     };
-    let (can_run, allow_par) = crate::diskstatepp::can_run_more_jobs(
+    let (can_run, allow_par) = crate::prepost::can_run_more_jobs(
         stages,
         pt_loading_pars,
         pt_verifying_repaired,
@@ -11097,8 +11733,8 @@ pub unsafe extern "C" fn nzbget_rs_dsp_can_run_more_jobs(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dsp_pick_next_post_job(
-    candidates: *const crate::diskstatepp::RsPostJobCandidate,
+pub unsafe extern "C" fn nzbget_rs_prepost_pick_next_post_job(
+    candidates: *const crate::prepost::RsPostJobCandidate,
     count: usize,
     allow_par: c_int,
     has_active_unpack: c_int,
@@ -11108,7 +11744,7 @@ pub unsafe extern "C" fn nzbget_rs_dsp_pick_next_post_job(
         return -1;
     }
     let slice = std::slice::from_raw_parts(candidates, count);
-    crate::diskstatepp::pick_next_post_job(
+    crate::prepost::pick_next_post_job(
         slice,
         allow_par != 0,
         has_active_unpack != 0,
@@ -11117,7 +11753,69 @@ pub unsafe extern "C" fn nzbget_rs_dsp_pick_next_post_job(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dsp_eval_post_stages(
+pub extern "C" fn nzbget_rs_prepost_classify_skipped_par_health(
+    par_status: c_int,
+    ps_skipped: c_int,
+    par_scan_opt: c_int,
+    ps_dupe: c_int,
+    health: c_int,
+    critical_health: c_int,
+    failed_size: i64,
+    par_failed_size: i64,
+) -> c_int {
+    crate::prepost::classify_skipped_par_health(
+        par_status,
+        ps_skipped,
+        par_scan_opt,
+        ps_dupe,
+        health,
+        critical_health,
+        failed_size,
+        par_failed_size,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_prepost_eval_want_unpack_and_rar_rename(
+    has_unpack_param: c_int,
+    unpack_param_val: *const c_char,
+    unpack_status: c_int,
+    us_none: c_int,
+    delete_status: c_int,
+    ds_none: c_int,
+    rar_rename_status: c_int,
+    rs_none: c_int,
+    opt_rar_rename: c_int,
+    out_want_unpack: *mut c_int,
+    out_unpack: *mut c_int,
+) -> c_int {
+    let val = if unpack_param_val.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(unpack_param_val).to_bytes()
+    };
+    let (w, u, r) = crate::prepost::eval_want_unpack_and_rar_rename(
+        has_unpack_param != 0,
+        val,
+        unpack_status,
+        us_none,
+        delete_status,
+        ds_none,
+        rar_rename_status,
+        rs_none,
+        opt_rar_rename != 0,
+    );
+    if !out_want_unpack.is_null() {
+        *out_want_unpack = i32::from(w);
+    }
+    if !out_unpack.is_null() {
+        *out_unpack = i32::from(u);
+    }
+    i32::from(r)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_prepost_eval_post_stages(
     want_unpack: c_int,
     unpack_status: c_int,
     delete_status: c_int,
@@ -11126,7 +11824,9 @@ pub unsafe extern "C" fn nzbget_rs_dsp_eval_post_stages(
     has_ext_cleanup_disk: c_int,
     health: c_int,
     move_status: c_int,
-    in_inter_dir: c_int,
+    dest_dir: *const c_char,
+    inter_dir: *const c_char,
+    sep: c_char,
     direct_unpack_status: c_int,
     opt_post_download_rename: c_int,
     post_download_renaming_status: c_int,
@@ -11134,9 +11834,19 @@ pub unsafe extern "C" fn nzbget_rs_dsp_eval_post_stages(
     has_name: c_int,
     opt_rename_after_unpack: c_int,
     post_unpack_renaming_status: c_int,
-    out_decision: *mut crate::diskstatepp::RsPostStageDecision,
+    out_decision: *mut crate::prepost::RsPostStageDecision,
 ) {
-    let dec = crate::diskstatepp::eval_post_stages(
+    let d = if dest_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(dest_dir).to_bytes()
+    };
+    let i = if inter_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(inter_dir).to_bytes()
+    };
+    let dec = crate::prepost::eval_post_stages(
         want_unpack != 0,
         unpack_status,
         delete_status,
@@ -11145,7 +11855,9 @@ pub unsafe extern "C" fn nzbget_rs_dsp_eval_post_stages(
         has_ext_cleanup_disk != 0,
         health,
         move_status,
-        in_inter_dir != 0,
+        d,
+        i,
+        sep as u8,
         direct_unpack_status,
         opt_post_download_rename != 0,
         post_download_renaming_status,
@@ -11160,7 +11872,7 @@ pub unsafe extern "C" fn nzbget_rs_dsp_eval_post_stages(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dsp_calc_post_pause_state(
+pub unsafe extern "C" fn nzbget_rs_prepost_calc_post_pause_state(
     job_stages: *const c_int,
     job_count: usize,
     par_pause_queue: c_int,
@@ -11172,7 +11884,7 @@ pub unsafe extern "C" fn nzbget_rs_dsp_calc_post_pause_state(
     } else {
         std::slice::from_raw_parts(job_stages, job_count)
     };
-    if crate::diskstatepp::calc_post_pause_state(
+    if crate::prepost::calc_post_pause_state(
         stages,
         par_pause_queue != 0,
         unpack_pause_queue != 0,
@@ -11182,6 +11894,33 @@ pub unsafe extern "C" fn nzbget_rs_dsp_calc_post_pause_state(
     } else {
         0
     }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_prepost_classify_file_downloaded_direct_unpack(
+    opt_direct_unpack: c_int,
+    opt_raw_article: c_int,
+    opt_skip_write: c_int,
+    skip_disk_write: c_int,
+    direct_unpack_status: c_int,
+    ns_none: c_int,
+    ns_running: c_int,
+    direct_rename_status: c_int,
+    ts_running: c_int,
+    has_unpack_thread: c_int,
+) -> c_int {
+    crate::prepost::classify_file_downloaded_direct_unpack(
+        opt_direct_unpack != 0,
+        opt_raw_article != 0,
+        opt_skip_write != 0,
+        skip_disk_write != 0,
+        direct_unpack_status,
+        ns_none,
+        ns_running,
+        direct_rename_status,
+        ts_running,
+        has_unpack_thread != 0,
+    )
 }
 
 #[no_mangle]
@@ -13781,29 +14520,6 @@ pub unsafe extern "C" fn nzbget_rs_dur_article_dl_classify_decode_status(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dur_direct_unpack_use_inter_dir(
-    dest_dir: *const c_char,
-    inter_dir: *const c_char,
-    sep: c_char,
-) -> c_int {
-    let d = if dest_dir.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(dest_dir).to_bytes()
-    };
-    let i = if inter_dir.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(inter_dir).to_bytes()
-    };
-    i32::from(crate::dlunpackrepair::direct_unpack_use_inter_dir(
-        d,
-        i,
-        sep as u8,
-    ))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dur_direct_unpack_is_insert_disk_prompt(
     buf: *const c_char,
     i: usize,
@@ -13820,62 +14536,6 @@ pub unsafe extern "C" fn nzbget_rs_dur_direct_unpack_is_insert_disk_prompt(
     };
     i32::from(crate::dlunpackrepair::direct_unpack_is_insert_disk_prompt(
         s, i, ch,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dur_parchecker_calc_threads_and_mem(
-    par_threads: c_int,
-    cpu_cores: c_int,
-    effective_mem_mb: c_int,
-    out_threads: *mut c_int,
-    out_mem: *mut c_int,
-) {
-    let (t, m) = crate::dlunpackrepair::parchecker_calc_threads_and_mem(
-        par_threads,
-        cpu_cores,
-        effective_mem_mb,
-    );
-    if !out_threads.is_null() {
-        *out_threads = t;
-    }
-    if !out_mem.is_null() {
-        *out_mem = m;
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dur_parchecker_calc_pad_bytes(
-    block_size: u64,
-    block_count: u32,
-    file_size: u64,
-) -> u64 {
-    crate::dlunpackrepair::parchecker_calc_pad_bytes(block_size, block_count, file_size)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dur_parchecker_compare_extra_file_stems(
-    base_name1: *const c_char,
-    base_name2: *const c_char,
-    par_stem: *const c_char,
-) -> c_int {
-    let b1 = if base_name1.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(base_name1).to_bytes()
-    };
-    let b2 = if base_name2.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(base_name2).to_bytes()
-    };
-    let ps = if par_stem.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(par_stem).to_bytes()
-    };
-    i32::from(crate::dlunpackrepair::parchecker_compare_extra_file_stems(
-        b1, b2, ps,
     ))
 }
 
@@ -14937,147 +15597,6 @@ pub unsafe extern "C" fn nzbget_rs_fuq_options_clamp_32bit_memory_limits(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_fuq_prepost_should_complete_after_direct_rename(
-    is_stopped: c_int,
-    direct_rename_status: c_int,
-    ts_success: c_int,
-    has_post_info: c_int,
-    delete_status: c_int,
-    ds_none: c_int,
-    completed_not_empty: c_int,
-    download_completed: c_int,
-    raw_article: c_int,
-    skip_write: c_int,
-    skip_disk_write: c_int,
-) -> c_int {
-    i32::from(
-        crate::feedurlqueue::prepost_should_complete_after_direct_rename(
-            is_stopped != 0,
-            direct_rename_status,
-            ts_success,
-            has_post_info != 0,
-            delete_status,
-            ds_none,
-            completed_not_empty != 0,
-            download_completed != 0,
-            raw_article != 0,
-            skip_write != 0,
-            skip_disk_write != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pup_parchecker_select_match_type(
-    file_status: c_int,
-    fs_success: c_int,
-    fs_partial: c_int,
-    match_full: c_int,
-    match_partial: c_int,
-    match_none: c_int,
-) -> c_int {
-    crate::parunpackpost::parchecker_select_match_type(
-        file_status,
-        fs_success,
-        fs_partial,
-        match_full,
-        match_partial,
-        match_none,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pup_parchecker_should_run_forced_full_check(
-    status: c_int,
-    ps_repair_not_needed: c_int,
-    par_quick: c_int,
-    force_repair: c_int,
-    is_stopped: c_int,
-) -> c_int {
-    i32::from(crate::parunpackpost::parchecker_should_run_forced_full_check(
-        status,
-        ps_repair_not_needed,
-        par_quick != 0,
-        force_repair != 0,
-        is_stopped != 0,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pup_parchecker_should_add_missing_files(
-    has_damaged: c_int,
-    is_stopped: c_int,
-    missing_file_count: u32,
-    added_split: c_int,
-    res: c_int,
-    e_repair_possible: c_int,
-    par_scan: c_int,
-    ps_extended: c_int,
-    ps_dupe: c_int,
-) -> c_int {
-    i32::from(crate::parunpackpost::parchecker_should_add_missing_files(
-        has_damaged != 0,
-        is_stopped != 0,
-        missing_file_count,
-        added_split != 0,
-        res,
-        e_repair_possible,
-        par_scan,
-        ps_extended,
-        ps_dupe,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pup_parchecker_calc_missing_blocks(
-    missing_block_count: u32,
-    recovery_packet_count: usize,
-) -> c_int {
-    crate::parunpackpost::parchecker_calc_missing_blocks(
-        missing_block_count,
-        recovery_packet_count,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pup_parchecker_should_abort_extra_scan(
-    only_missing: c_int,
-    missing_file_count: u32,
-    missing_block_count: u32,
-) -> c_int {
-    crate::parunpackpost::parchecker_should_abort_extra_scan(
-        only_missing != 0,
-        missing_file_count,
-        missing_block_count,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pup_parchecker_should_print_stage_msg(
-    stage: c_int,
-    pt_verifying_repaired: c_int,
-    par_quick: c_int,
-) -> c_int {
-    i32::from(crate::parunpackpost::parchecker_should_print_stage_msg(
-        stage,
-        pt_verifying_repaired,
-        par_quick != 0,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_pup_history_coord_is_temporary_output_name(
-    filename: *const c_char,
-) -> c_int {
-    let s = if filename.is_null() {
-        &b""[..]
-    } else {
-        CStr::from_ptr(filename).to_bytes()
-    };
-    i32::from(crate::historycoord::is_temporary_output_name(s))
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_cdn_content_source_range_valid(
     offset: i64,
     size: i64,
@@ -15934,46 +16453,6 @@ pub extern "C" fn nzbget_rs_dad_article_dl_should_pace_critical_uncached(
     )
 }
 
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dad_prepost_should_complete_interrupted_download(
-    has_post_info: c_int,
-    kind: c_int,
-    nk_nzb: c_int,
-    completed_files_empty: c_int,
-    delete_status: c_int,
-    ds_none: c_int,
-    download_completed: c_int,
-) -> c_int {
-    i32::from(
-        crate::diskartdlpost::prepost_should_complete_interrupted_download(
-            has_post_info != 0,
-            kind,
-            nk_nzb,
-            completed_files_empty != 0,
-            delete_status,
-            ds_none,
-            download_completed != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dad_prepost_is_skipped_delete_status(
-    delete_status: c_int,
-    ds_dupe: c_int,
-    ds_copy: c_int,
-    ds_good: c_int,
-    ds_scan: c_int,
-) -> c_int {
-    i32::from(crate::diskartdlpost::prepost_is_skipped_delete_status(
-        delete_status,
-        ds_dupe,
-        ds_copy,
-        ds_good,
-        ds_scan,
-    ))
-}
-
 // ============================================================================
 // DownloadInfo, QueueCoordinator & QueueEditor Hot-Path FFI (`queuecoordinfo.rs`)
 // ============================================================================
@@ -16482,227 +16961,6 @@ pub extern "C" fn nzbget_rs_qci_queue_coord_validate_split_file_state(
 // ============================================================================
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_pnd_parchecker_accumulate_worst_status(
-    all_status: c_int,
-    set_status: c_int,
-) -> c_int {
-    crate::pardupenzb::parchecker_accumulate_worst_status(all_status, set_status)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pnd_parchecker_should_try_more_recovery(
-    has_damaged_files: c_int,
-    is_stopped: c_int,
-    res: c_int,
-    e_repair_not_possible: c_int,
-    require_dupe_scan: c_int,
-    par_scan: c_int,
-    ps_dupe: c_int,
-) -> c_int {
-    i32::from(crate::pardupenzb::parchecker_should_try_more_recovery(
-        has_damaged_files != 0,
-        is_stopped != 0,
-        res,
-        e_repair_not_possible,
-        require_dupe_scan != 0,
-        par_scan,
-        ps_dupe,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_pnd_parchecker_eval_post_verify_action(
-    res: c_int,
-    e_success: c_int,
-    e_repair_possible: c_int,
-    has_damaged_files: c_int,
-    par_repair: c_int,
-    ps_failed: c_int,
-    ps_repair_not_needed: c_int,
-    ps_repair_possible: c_int,
-    out_action_code: *mut c_int,
-) -> c_int {
-    let (status, action) = crate::pardupenzb::parchecker_eval_post_verify_action(
-        res,
-        e_success,
-        e_repair_possible,
-        has_damaged_files != 0,
-        par_repair != 0,
-        ps_failed,
-        ps_repair_not_needed,
-        ps_repair_possible,
-    );
-    if !out_action_code.is_null() {
-        *out_action_code = action;
-    }
-    status
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_pnd_parchecker_eval_cancel_or_fail_outcome(
-    is_stopped: c_int,
-    stage: c_int,
-    pt_repairing: c_int,
-    cur_status: c_int,
-    ps_failed: c_int,
-    ps_repair_possible: c_int,
-    err_msg_empty: c_int,
-    res: c_int,
-    out_outcome_kind: *mut c_int,
-    out_use_cmd_err: *mut c_int,
-) -> c_int {
-    let (status, kind, use_cmd) = crate::pardupenzb::parchecker_eval_cancel_or_fail_outcome(
-        is_stopped != 0,
-        stage,
-        pt_repairing,
-        cur_status,
-        ps_failed,
-        ps_repair_possible,
-        err_msg_empty != 0,
-        res,
-    );
-    if !out_outcome_kind.is_null() {
-        *out_outcome_kind = kind;
-    }
-    if !out_use_cmd_err.is_null() {
-        *out_use_cmd_err = i32::from(use_cmd);
-    }
-    status
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pnd_parchecker_is_verified_complete_target(
-    status: c_int,
-    ps_repaired: c_int,
-    ps_repair_not_needed: c_int,
-    has_complete_file: c_int,
-    complete_eq_target: c_int,
-) -> c_int {
-    i32::from(crate::pardupenzb::parchecker_is_verified_complete_target(
-        status,
-        ps_repaired,
-        ps_repair_not_needed,
-        has_complete_file != 0,
-        complete_eq_target != 0,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_pnd_parchecker_calc_dupe_blocks_delta(
-    prev_used_blocks: c_int,
-    was_blocks_missing2: u32,
-    blocks_missing2: u32,
-    was_blocks_missing_total: u32,
-    out_total_found: *mut u32,
-) -> c_int {
-    let (new_used, total_found) = crate::pardupenzb::parchecker_calc_dupe_blocks_delta(
-        prev_used_blocks,
-        was_blocks_missing2,
-        blocks_missing2,
-        was_blocks_missing_total,
-    );
-    if !out_total_found.is_null() {
-        *out_total_found = total_found;
-    }
-    new_used
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_pnd_parchecker_eval_extra_file_step(
-    was_files_missing: u32,
-    now_files_missing: u32,
-    was_blocks_missing: u32,
-    now_blocks_missing: u32,
-    external_dir: c_int,
-    prev_files_added: c_int,
-    out_file_added: *mut c_int,
-    out_block_added: *mut c_int,
-    out_blocks_delta: *mut u32,
-    out_register_parred: *mut c_int,
-) -> c_int {
-    let (fa, ba, nfa, delta, reg) = crate::pardupenzb::parchecker_eval_extra_file_step(
-        was_files_missing,
-        now_files_missing,
-        was_blocks_missing,
-        now_blocks_missing,
-        external_dir != 0,
-        prev_files_added != 0,
-    );
-    if !out_file_added.is_null() {
-        *out_file_added = i32::from(fa);
-    }
-    if !out_block_added.is_null() {
-        *out_block_added = i32::from(ba);
-    }
-    if !out_blocks_delta.is_null() {
-        *out_blocks_delta = delta;
-    }
-    if !out_register_parred.is_null() {
-        *out_register_parred = i32::from(reg);
-    }
-    i32::from(nfa)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_pnd_parchecker_eval_signal_done(
-    stage: c_int,
-    pt_verifying_sources: c_int,
-    available: c_int,
-    total: c_int,
-    verifying_extra_files: c_int,
-    ignore: c_int,
-    prev_has_damaged_files: c_int,
-    out_has_damaged_files: *mut c_int,
-    out_bad_blocks: *mut c_int,
-) -> c_int {
-    let (report, has_damaged, bad_blocks) = crate::pardupenzb::parchecker_eval_signal_done(
-        stage,
-        pt_verifying_sources,
-        available,
-        total,
-        verifying_extra_files != 0,
-        ignore != 0,
-        prev_has_damaged_files != 0,
-    );
-    if !out_has_damaged_files.is_null() {
-        *out_has_damaged_files = i32::from(has_damaged);
-    }
-    if !out_bad_blocks.is_null() {
-        *out_bad_blocks = bad_blocks;
-    }
-    i32::from(report)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pnd_parchecker_check_verify_data_file_preconditions(
-    stage: c_int,
-    pt_verifying_sources: c_int,
-    target_exists: c_int,
-    has_verification_packet: c_int,
-    file_size: i64,
-    block_count: u64,
-) -> c_int {
-    crate::pardupenzb::parchecker_check_verify_data_file_preconditions(
-        stage,
-        pt_verifying_sources,
-        target_exists != 0,
-        has_verification_packet != 0,
-        file_size,
-        block_count,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pnd_parchecker_calc_dumb_crc_read_size(
-    cnt: c_int,
-    buffer_size: c_int,
-    start: i64,
-    end: i64,
-) -> c_int {
-    crate::pardupenzb::parchecker_calc_dumb_crc_read_size(cnt, buffer_size, start, end)
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_pnd_dupe_fallback_should_defer_to_par_header(
     has_nzb_info: c_int,
     direct_rename_status: c_int,
@@ -16833,264 +17091,6 @@ pub extern "C" fn nzbget_rs_pnd_dupe_fallback_compare_donors(
         score2,
         id2,
     ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_hsr_prepost_classify_nzb_downloaded_entry(
-    skip_script_processing: c_int,
-    skip_disk_write: c_int,
-    opt_skip_write: c_int,
-    delete_status: c_int,
-    ds_health: c_int,
-    ds_bad: c_int,
-    has_post_info: c_int,
-    opt_raw_article: c_int,
-    par_status: c_int,
-    ps_none: c_int,
-    par_check_opt: c_int,
-    pc_always: c_int,
-    pc_force: c_int,
-    out_enqueue_deleted_script: *mut c_int,
-    out_set_par_skipped: *mut c_int,
-) -> c_int {
-    let (route, enq, skip_par) = crate::histscanrepair::prepost_classify_nzb_downloaded_entry(
-        skip_script_processing != 0,
-        skip_disk_write != 0,
-        opt_skip_write != 0,
-        delete_status,
-        ds_health,
-        ds_bad,
-        has_post_info != 0,
-        opt_raw_article != 0,
-        par_status,
-        ps_none,
-        par_check_opt,
-        pc_always,
-        pc_force,
-    );
-    *out_enqueue_deleted_script = i32::from(enq);
-    *out_set_par_skipped = i32::from(skip_par);
-    route
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_hsr_prepost_resolve_nzb_deleted_route(
-    delete_status: c_int,
-    ds_none: c_int,
-    ds_manual: c_int,
-    ds_health: c_int,
-    ds_bad: c_int,
-    out_new_delete_status: *mut c_int,
-) -> c_int {
-    let (new_st, call_dl) = crate::histscanrepair::prepost_resolve_nzb_deleted_route(
-        delete_status,
-        ds_none,
-        ds_manual,
-        ds_health,
-        ds_bad,
-    );
-    *out_new_delete_status = new_st;
-    i32::from(call_dl)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_hsr_prepost_classify_delete_cleanup_mode(
-    cleanup_disk: c_int,
-    delete_status: c_int,
-    ds_dupe: c_int,
-    parking: c_int,
-    skip_disk_write: c_int,
-    opt_skip_write: c_int,
-) -> c_int {
-    crate::histscanrepair::prepost_classify_delete_cleanup_mode(
-        cleanup_disk != 0,
-        delete_status,
-        ds_dupe,
-        parking != 0,
-        skip_disk_write != 0,
-        opt_skip_write != 0,
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_hsr_prepost_classify_request_par_action(
-    request_par_check: c_int,
-    par_status: c_int,
-    ps_skipped: c_int,
-    force_repair: c_int,
-    par_full: c_int,
-    par_check_opt: c_int,
-    pc_manual: c_int,
-    cur_force_par_full: c_int,
-    file_list_empty: c_int,
-    out_new_force_par_full: *mut c_int,
-) -> c_int {
-    let (act, new_force) = crate::histscanrepair::prepost_classify_request_par_action(
-        request_par_check != 0,
-        par_status,
-        ps_skipped,
-        force_repair != 0,
-        par_full != 0,
-        par_check_opt,
-        pc_manual,
-        cur_force_par_full != 0,
-        file_list_empty != 0,
-    );
-    *out_new_force_par_full = i32::from(new_force);
-    act
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_hsr_prepost_should_skip_par_cannot_cover_check(
-    health: c_int,
-    critical_health: c_int,
-) -> c_int {
-    i32::from(crate::histscanrepair::prepost_should_skip_par_cannot_cover_check(
-        health,
-        critical_health,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_hsr_prepost_calc_job_protected_damage(
-    decoded_file_size: i64,
-    holes_total_size: i64,
-    failed_size: i64,
-    missed_size: i64,
-) -> i64 {
-    crate::histscanrepair::prepost_calc_job_protected_damage(
-        decoded_file_size,
-        holes_total_size,
-        failed_size,
-        missed_size,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_hsr_prepost_is_damage_beyond_par(
-    protected_damage: i64,
-    par_size: i64,
-    par_current_failed_size: i64,
-) -> c_int {
-    i32::from(crate::histscanrepair::prepost_is_damage_beyond_par(
-        protected_damage,
-        par_size,
-        par_current_failed_size,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_hsr_prepost_should_check_unrecovered_stream_skip(
-    par_cannot_cover: c_int,
-    stream_repair_done: c_int,
-    stream_repair_recovered: c_int,
-    dupe_recovered_bytes: i64,
-    par_check_opt: c_int,
-    pc_auto: c_int,
-    par_status: c_int,
-    ps_none: c_int,
-    delete_status: c_int,
-    ds_none: c_int,
-) -> c_int {
-    i32::from(
-        crate::histscanrepair::prepost_should_check_unrecovered_stream_skip(
-            par_cannot_cover != 0,
-            stream_repair_done != 0,
-            stream_repair_recovered != 0,
-            dupe_recovered_bytes,
-            par_check_opt,
-            pc_auto,
-            par_status,
-            ps_none,
-            delete_status,
-            ds_none,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_hsr_prepost_classify_skipped_par_health(
-    par_status: c_int,
-    ps_skipped: c_int,
-    par_scan_opt: c_int,
-    ps_dupe: c_int,
-    health: c_int,
-    critical_health: c_int,
-    failed_size: i64,
-    par_failed_size: i64,
-) -> c_int {
-    crate::histscanrepair::prepost_classify_skipped_par_health(
-        par_status,
-        ps_skipped,
-        par_scan_opt,
-        ps_dupe,
-        health,
-        critical_health,
-        failed_size,
-        par_failed_size,
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_hsr_prepost_eval_want_unpack_and_rar_rename(
-    has_unpack_param: c_int,
-    unpack_param_val: *const c_char,
-    unpack_status: c_int,
-    us_none: c_int,
-    delete_status: c_int,
-    ds_none: c_int,
-    rar_rename_status: c_int,
-    rs_none: c_int,
-    opt_rar_rename: c_int,
-    out_want_unpack: *mut c_int,
-    out_unpack: *mut c_int,
-) -> c_int {
-    let val = if unpack_param_val.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(unpack_param_val).to_bytes()
-    };
-    let (w, u, r) = crate::histscanrepair::prepost_eval_want_unpack_and_rar_rename(
-        has_unpack_param != 0,
-        val,
-        unpack_status,
-        us_none,
-        delete_status,
-        ds_none,
-        rar_rename_status,
-        rs_none,
-        opt_rar_rename != 0,
-    );
-    *out_want_unpack = i32::from(w);
-    *out_unpack = i32::from(u);
-    i32::from(r)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_hsr_prepost_classify_file_downloaded_direct_unpack(
-    opt_direct_unpack: c_int,
-    opt_raw_article: c_int,
-    opt_skip_write: c_int,
-    skip_disk_write: c_int,
-    direct_unpack_status: c_int,
-    ns_none: c_int,
-    ns_running: c_int,
-    direct_rename_status: c_int,
-    ts_running: c_int,
-    has_unpack_thread: c_int,
-) -> c_int {
-    crate::histscanrepair::prepost_classify_file_downloaded_direct_unpack(
-        opt_direct_unpack != 0,
-        opt_raw_article != 0,
-        opt_skip_write != 0,
-        skip_disk_write != 0,
-        direct_unpack_status,
-        ns_none,
-        ns_running,
-        direct_rename_status,
-        ts_running,
-        has_unpack_thread != 0,
-    )
 }
 
 #[no_mangle]
@@ -17512,18 +17512,6 @@ pub extern "C" fn nzbget_rs_stq_dupe_stream_repair_calc_abs_size_diff(
 // ============================================================================
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ucf_unpack_ctrl_eval_unpack_param(
-    param_val: *const c_char,
-) -> c_int {
-    let pv = if param_val.is_null() {
-        None
-    } else {
-        Some(CStr::from_ptr(param_val).to_bytes())
-    };
-    i32::from(crate::unpackcleanurlfeed::unpack_ctrl_eval_unpack_param(pv))
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_ucf_remote_server_is_accept_busy_retry(
     bind: c_int,
     has_accepted_conn: c_int,
@@ -17773,163 +17761,6 @@ pub extern "C" fn nzbget_rs_psp_statmeter_calc_month_slots_same_month(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_psp_prepost_is_direct_unpack_active(
-    include_waiting_volume: c_int,
-    is_unpacking: c_int,
-    is_waiting_volume: c_int,
-) -> c_int {
-    i32::from(crate::poolstatprepost::prepost_is_direct_unpack_active(
-        include_waiting_volume != 0,
-        is_unpacking != 0,
-        is_waiting_volume != 0,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_psp_prepost_is_empty_deleting_nzb_event(
-    deleting: c_int,
-    has_post_info: c_int,
-    file_list_empty: c_int,
-) -> c_int {
-    i32::from(crate::poolstatprepost::prepost_is_empty_deleting_nzb_event(
-        deleting != 0,
-        has_post_info != 0,
-        file_list_empty != 0,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_psp_prepost_can_try_add_par_to_active_repair(
-    has_post_job: c_int,
-    same_nzb: c_int,
-    has_post_info: c_int,
-    has_post_thread: c_int,
-    stage: c_int,
-    pt_loading_pars: c_int,
-    pt_verifying_repaired: c_int,
-) -> c_int {
-    i32::from(crate::poolstatprepost::prepost_can_try_add_par_to_active_repair(
-        has_post_job != 0,
-        same_nzb != 0,
-        has_post_info != 0,
-        has_post_thread != 0,
-        stage,
-        pt_loading_pars,
-        pt_verifying_repaired,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_psp_prepost_eval_cleanup_job_state(
-    working: c_int,
-    has_running_thread: c_int,
-    stage: c_int,
-    pt_finished: c_int,
-    deleted: c_int,
-    start_time: i64,
-    cur_time: i64,
-    prev_post_total_sec: c_int,
-    out_update_total_sec: *mut c_int,
-    out_is_completed: *mut c_int,
-    out_new_total_sec: *mut c_int,
-) -> c_int {
-    let (ready, upd, comp, new_sec) = crate::poolstatprepost::prepost_eval_cleanup_job_state(
-        working != 0,
-        has_running_thread != 0,
-        stage,
-        pt_finished,
-        deleted != 0,
-        start_time,
-        cur_time,
-        prev_post_total_sec,
-    );
-    if !out_update_total_sec.is_null() {
-        *out_update_total_sec = i32::from(upd);
-    }
-    if !out_is_completed.is_null() {
-        *out_is_completed = i32::from(comp);
-    }
-    if !out_new_total_sec.is_null() {
-        *out_new_total_sec = new_sec;
-    }
-    i32::from(ready)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_psp_prepost_should_start_par_rename(
-    par_rename_status: c_int,
-    rs_none: c_int,
-    delete_status: c_int,
-    ds_none: c_int,
-    opt_par_rename: c_int,
-) -> c_int {
-    i32::from(crate::poolstatprepost::prepost_should_start_par_rename(
-        par_rename_status,
-        rs_none,
-        delete_status,
-        ds_none,
-        opt_par_rename != 0,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_psp_prepost_is_stream_repair_enabled(
-    dupe_article_fallback: c_int,
-    daf_stream: c_int,
-    jobs_empty: c_int,
-    delete_status: c_int,
-    ds_none: c_int,
-) -> c_int {
-    i32::from(crate::poolstatprepost::prepost_is_stream_repair_enabled(
-        dupe_article_fallback,
-        daf_stream,
-        jobs_empty != 0,
-        delete_status,
-        ds_none,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_psp_prepost_should_check_unpaused_par_for_missing_index(
-    par_status: c_int,
-    ps_none: c_int,
-    ps_skipped: c_int,
-    delete_status: c_int,
-    ds_none: c_int,
-    health: c_int,
-) -> c_int {
-    i32::from(
-        crate::poolstatprepost::prepost_should_check_unpaused_par_for_missing_index(
-            par_status,
-            ps_none,
-            ps_skipped,
-            delete_status,
-            ds_none,
-            health,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_psp_prepost_is_better_paused_par_candidate(
-    is_par_file: c_int,
-    paused: c_int,
-    deleted: c_int,
-    has_smallest: c_int,
-    file_size: i64,
-    smallest_size: i64,
-) -> c_int {
-    i32::from(crate::poolstatprepost::prepost_is_better_paused_par_candidate(
-        is_par_file != 0,
-        paused != 0,
-        deleted != 0,
-        has_smallest != 0,
-        file_size,
-        smallest_size,
-    ))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_psp_rar_renamer_calc_old_extension_parts(
     volume_no: c_int,
     out_ch: *mut u8,
@@ -17942,68 +17773,6 @@ pub unsafe extern "C" fn nzbget_rs_psp_rar_renamer_calc_old_extension_parts(
     if !out_num.is_null() {
         *out_num = num;
     }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_psp_parchecker_calc_twin_blocks_needed(
-    missing_block_count: usize,
-    recovery_packet_count: usize,
-) -> c_int {
-    crate::poolstatprepost::parchecker_calc_twin_blocks_needed(
-        missing_block_count,
-        recovery_packet_count,
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_psp_parchecker_should_check_original_splitted_fragment(
-    original: *const c_char,
-    current: *const c_char,
-) -> c_int {
-    i32::from(
-        crate::poolstatprepost::parchecker_should_check_original_splitted_fragment(
-            original, current,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_psp_parchecker_calc_block_byte_range(
-    block_start: c_int,
-    block_end: c_int,
-    block_size: i64,
-    file_size: i64,
-    out_bytes_start: *mut i64,
-    out_bytes_end: *mut i64,
-    out_clamped_end: *mut i64,
-    out_pad_len: *mut usize,
-) {
-    let (bs, be, ce, pl) = crate::poolstatprepost::parchecker_calc_block_byte_range(
-        block_start,
-        block_end,
-        block_size,
-        file_size,
-    );
-    if !out_bytes_start.is_null() {
-        *out_bytes_start = bs;
-    }
-    if !out_bytes_end.is_null() {
-        *out_bytes_end = be;
-    }
-    if !out_clamped_end.is_null() {
-        *out_clamped_end = ce;
-    }
-    if !out_pad_len.is_null() {
-        *out_pad_len = pl;
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_psp_parchecker_calc_creator_packet_payload_len(
-    packet_length: u64,
-    header_size: usize,
-) -> usize {
-    crate::poolstatprepost::parchecker_calc_creator_packet_payload_len(packet_length, header_size)
 }
 
 // ============================================================================
@@ -18871,65 +18640,6 @@ pub unsafe extern "C" fn nzbget_rs_ufs_unpack_ctrl_parse_backspace_progress(
 // ============================================================================
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dps_parchecker_should_quick_verify(
-    stage: c_int,
-    pt_verifying_repaired: c_int,
-    par_full: c_int,
-) -> c_int {
-    crate::dlparstatedisk::parchecker_should_quick_verify(stage, pt_verifying_repaired, par_full)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dps_parchecker_calc_files_to_repair(
-    damaged_count: u32,
-    missing_count: u32,
-) -> c_int {
-    crate::dlparstatedisk::parchecker_calc_files_to_repair(damaged_count, missing_count)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dps_parchecker_classify_twin_repair_err(
-    res: c_int,
-    e_repair_not_possible: c_int,
-    own_err_empty: c_int,
-) -> c_int {
-    crate::dlparstatedisk::parchecker_classify_twin_repair_err(
-        res,
-        e_repair_not_possible,
-        own_err_empty,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dps_parchecker_update_damaged_flag(
-    has_damaged: c_int,
-    ignore: c_int,
-) -> c_int {
-    crate::dlparstatedisk::parchecker_update_damaged_flag(has_damaged, ignore)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dps_parchecker_is_verify_hash_mismatch(
-    has_hash_entry: c_int,
-    same_source_file: c_int,
-    is_already_set: c_int,
-) -> c_int {
-    crate::dlparstatedisk::parchecker_is_verify_hash_mismatch(
-        has_hash_entry,
-        same_source_file,
-        is_already_set,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dps_parchecker_calc_block_offset(
-    block_idx: u32,
-    block_size: u64,
-) -> u64 {
-    crate::dlparstatedisk::parchecker_calc_block_offset(block_idx, block_size)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dps_diskstate_inspect_read_line(
     buf: *const c_char,
     out_needs_scroll: *mut c_int,
@@ -19593,106 +19303,6 @@ pub extern "C" fn nzbget_rs_dcf_stream_repair_is_positional_rank_applicable(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_uqs_prepost_is_within_graceful_wait(
-    cur_time: i64,
-    wait_start: i64,
-    timeout_sec: i64,
-) -> c_int {
-    crate::urlqueuescanfeedpost::prepost_is_within_graceful_wait(cur_time, wait_start, timeout_sec)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_uqs_prepost_should_reorder_added_nzb(
-    reorder_files: c_int,
-    delete_status: c_int,
-    ds_none: c_int,
-) -> c_int {
-    crate::urlqueuescanfeedpost::prepost_should_reorder_added_nzb(
-        reorder_files,
-        delete_status,
-        ds_none,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_uqs_prepost_is_better_main_par_file(
-    size: i64,
-    best_size: i64,
-) -> c_int {
-    crate::urlqueuescanfeedpost::prepost_is_better_main_par_file(size, best_size)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_uqs_prepost_should_defer_stream_repair_to_backup(
-    stream_repair: c_int,
-    stream_repair_done: c_int,
-    health_check: c_int,
-    hc_dupe: c_int,
-    fails_over: c_int,
-) -> c_int {
-    crate::urlqueuescanfeedpost::prepost_should_defer_stream_repair_to_backup(
-        stream_repair,
-        stream_repair_done,
-        health_check,
-        hc_dupe,
-        fails_over,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_uqs_prepost_should_stream_repair_before_par(
-    stream_repair: c_int,
-    stream_repair_done: c_int,
-    par_status: c_int,
-    ps_skipped: c_int,
-    par_check: c_int,
-    pc_auto: c_int,
-) -> c_int {
-    crate::urlqueuescanfeedpost::prepost_should_stream_repair_before_par(
-        stream_repair,
-        stream_repair_done,
-        par_status,
-        ps_skipped,
-        par_check,
-        pc_auto,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_uqs_prepost_can_enter_final_stream_repair(
-    stream_repair: c_int,
-    par_status: c_int,
-    ps_repair_possible: c_int,
-    ps_manual: c_int,
-) -> c_int {
-    crate::urlqueuescanfeedpost::prepost_can_enter_final_stream_repair(
-        stream_repair,
-        par_status,
-        ps_repair_possible,
-        ps_manual,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_uqs_prepost_should_request_par_without_archives(
-    par_status: c_int,
-    ps_skipped: c_int,
-    delete_status: c_int,
-    ds_none: c_int,
-    par_check: c_int,
-    pc_auto: c_int,
-) -> c_int {
-    crate::urlqueuescanfeedpost::prepost_should_request_par_without_archives(
-        par_status,
-        ps_skipped,
-        delete_status,
-        ds_none,
-        par_check,
-        pc_auto,
-    )
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_roc_xmlrpc_multicall_needs_array_wrap(
     resp: *const c_char,
 ) -> c_int {
@@ -20227,34 +19837,6 @@ pub unsafe extern "C" fn nzbget_rs_sap_article_cache_free_eval(
         }
     }
     new_allocated
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sap_parchecker_should_mark_verifying_repaired(
-    stage: c_int,
-    pt_repairing: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamarticleparrepair::sap_parchecker_should_mark_verifying_repaired(
-            stage,
-            pt_repairing,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sap_parchecker_should_record_processed_file(
-    stage: c_int,
-    pt_loading_pars: c_int,
-    pt_verifying_sources: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamarticleparrepair::sap_parchecker_should_record_processed_file(
-            stage,
-            pt_loading_pars,
-            pt_verifying_sources,
-        ),
-    )
 }
 
 #[no_mangle]
@@ -20901,139 +20483,6 @@ pub extern "C" fn nzbget_rs_qcf_dupe_fallback_resolve_structural_or_filename_mat
 // Batch 40: postunpackrenamehist (`pur_*`)
 // ============================================================================
 
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pur_prepost_is_nzb_or_url_found_action(
-    action: c_int,
-    ea_nzb_found: c_int,
-    ea_url_found: c_int,
-) -> c_int {
-    i32::from(
-        crate::postunpackrenamehist::pur_prepost_is_nzb_or_url_found_action(
-            action,
-            ea_nzb_found,
-            ea_url_found,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pur_prepost_is_nzb_or_url_added_action(
-    action: c_int,
-    ea_nzb_added: c_int,
-    ea_url_added: c_int,
-) -> c_int {
-    i32::from(
-        crate::postunpackrenamehist::pur_prepost_is_nzb_or_url_added_action(
-            action,
-            ea_nzb_added,
-            ea_url_added,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pur_prepost_is_file_completed_or_deleted_action(
-    action: c_int,
-    ea_file_completed: c_int,
-    ea_file_deleted: c_int,
-) -> c_int {
-    i32::from(
-        crate::postunpackrenamehist::pur_prepost_is_file_completed_or_deleted_action(
-            action,
-            ea_file_completed,
-            ea_file_deleted,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pur_prepost_should_run_dupe_found(
-    dupe_check: c_int,
-    dupe_mode: c_int,
-    dm_force: c_int,
-) -> c_int {
-    i32::from(
-        crate::postunpackrenamehist::pur_prepost_should_run_dupe_found(
-            dupe_check != 0,
-            dupe_mode,
-            dm_force,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pur_prepost_can_start_queued_post_job(
-    stage: c_int,
-    pt_queued: c_int,
-    pause_post_process: c_int,
-    force_priority: c_int,
-) -> c_int {
-    i32::from(
-        crate::postunpackrenamehist::pur_prepost_can_start_queued_post_job(
-            stage,
-            pt_queued,
-            pause_post_process != 0,
-            force_priority != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pur_prepost_should_request_par_for_skipped_stream_repair(
-    stream_repair: c_int,
-    par_status: c_int,
-    ps_skipped: c_int,
-) -> c_int {
-    i32::from(
-        crate::postunpackrenamehist::pur_prepost_should_request_par_for_skipped_stream_repair(
-            stream_repair != 0,
-            par_status,
-            ps_skipped,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pur_prepost_is_par_none_and_not_deleted(
-    par_status: c_int,
-    ps_none: c_int,
-    delete_status: c_int,
-    ds_none: c_int,
-) -> c_int {
-    i32::from(
-        crate::postunpackrenamehist::pur_prepost_is_par_none_and_not_deleted(
-            par_status,
-            ps_none,
-            delete_status,
-            ds_none,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pur_prepost_eval_temp_pause_download_transition(
-    need_pause: c_int,
-    temp_pause_download: c_int,
-) -> c_int {
-    crate::postunpackrenamehist::pur_prepost_eval_temp_pause_download_transition(
-        need_pause != 0,
-        temp_pause_download != 0,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pur_prepost_should_start_direct_unpack_job(
-    want_unpack: c_int,
-    failed_articles: c_int,
-) -> c_int {
-    i32::from(
-        crate::postunpackrenamehist::pur_prepost_should_start_direct_unpack_job(
-            want_unpack != 0,
-            failed_articles,
-        ),
-    )
-}
-
 // --- Batch 41: streamrepairparcheck (srp_*) ---
 
 #[no_mangle]
@@ -21281,47 +20730,6 @@ pub extern "C" fn nzbget_rs_srp_stream_repair_has_any_recovered_stats(
     )
 }
 
-#[no_mangle]
-pub extern "C" fn nzbget_rs_srp_parchecker_can_quick_scan_data_file(
-    par_quick: c_int,
-    has_sourcefile: c_int,
-    has_diskfile: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamrepairparcheck::srp_parchecker_can_quick_scan_data_file(
-            par_quick != 0,
-            has_sourcefile != 0,
-            has_diskfile != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_srp_parchecker_should_wait_for_queued_pars(
-    requested: c_int,
-    has_more_pars: c_int,
-) -> c_int {
-    crate::streamrepairparcheck::srp_parchecker_should_wait_for_queued_pars(
-        requested != 0,
-        has_more_pars != 0,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_srp_parchecker_should_add_extra_file_entry(
-    external_dir: c_int,
-    is_parred: c_int,
-    is_processed: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamrepairparcheck::srp_parchecker_should_add_extra_file_entry(
-            external_dir != 0,
-            is_parred != 0,
-            is_processed != 0,
-        ),
-    )
-}
-
 // --- Batch 42: streamrepaircontentmap (src_*) ---
 
 #[no_mangle]
@@ -21553,21 +20961,6 @@ pub extern "C" fn nzbget_rs_src_content_map_is_empty_or_invalid_cipher_pieces(
         crate::streamrepaircontentmap::src_content_map_is_empty_or_invalid_cipher_pieces(
             pieces_empty != 0,
             cipher_range_size,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_src_parchecker_should_process_twin_missing_blocks(
-    res: c_int,
-    e_repair_not_possible: c_int,
-    is_stopped: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamrepaircontentmap::src_parchecker_should_process_twin_missing_blocks(
-            res,
-            e_repair_not_possible,
-            is_stopped != 0,
         ),
     )
 }
@@ -24833,49 +24226,6 @@ pub unsafe extern "C" fn nzbget_rs_stream_content_mapper_split_inner_name(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_pup_parchecker_combine_block_crcs(
-    block_crcs_ptr: *const u32,
-    count: usize,
-    block_size: u64,
-) -> u32 {
-    let crcs = if block_crcs_ptr.is_null() || count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(block_crcs_ptr, count)
-    };
-    crate::parunpackpost::parchecker_combine_block_crcs(crcs, block_size)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_pup_parchecker_extract_base_par_stem(
-    par_filename: *const c_char,
-) -> RsBuf {
-    into_buf(crate::parunpackpost::parchecker_extract_base_par_stem(input(
-        par_filename,
-    )))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pup_parchecker_format_not_enough_blocks_errmsg(
-    missing_blocks: i32,
-    block_found: i32,
-) -> RsBuf {
-    into_buf(crate::parunpackpost::parchecker_format_not_enough_blocks_errmsg(
-        missing_blocks,
-        block_found,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_pup_parchecker_build_wildcard_param(
-    par_filename: *const c_char,
-) -> RsBuf {
-    into_buf(crate::parunpackpost::parchecker_build_wildcard_param(input(
-        par_filename,
-    )))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_stream_order_donor_indices(
     dupe_scores_ptr: *const i32,
     ids_ptr: *const i32,
@@ -25823,45 +25173,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_queue_coord_download_debug_state_label(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_prepost_permille_to_percent(permille: i32) -> f64 {
-    crate::dupequeuehealth::dqh_prepost_permille_to_percent(permille)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_parchecker_strip_last_path_sep_len(
-    path: *const c_char,
-    sep: c_char,
-) -> usize {
-    crate::twinproberenhist::tpr_parchecker_strip_last_path_sep_len(input(path), sep as u8)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_parchecker_next_valid_block_run(
-    valid_blocks_ptr: *const u8,
-    len: usize,
-    start_idx: usize,
-    out_block_start: *mut usize,
-    out_block_end: *mut usize,
-) -> i32 {
-    if valid_blocks_ptr.is_null() || len == 0 {
-        return 0;
-    }
-    let slice = std::slice::from_raw_parts(valid_blocks_ptr, len);
-    match crate::twinproberenhist::tpr_parchecker_next_valid_block_run(slice, start_idx) {
-        Some((b_start, b_end)) => {
-            if !out_block_start.is_null() {
-                *out_block_start = b_start;
-            }
-            if !out_block_end.is_null() {
-                *out_block_end = b_end;
-            }
-            1
-        }
-        None => 0,
-    }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_article_dl_format_connection_name(
     server_name: *const c_char,
     host: *const c_char,
@@ -26211,138 +25522,6 @@ pub unsafe extern "C" fn nzbget_rs_tpr_xmlrpc_format_testserver_article_cmd(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_parchecker_format_cli_flags(
-    threads_to_use: i32,
-    mem_to_use: i32,
-    out_mem_param: *mut RsBuf,
-    out_threads_param: *mut RsBuf,
-    out_file_threads_param: *mut RsBuf,
-) {
-    let (mem_param, threads_param, file_threads_param) =
-        crate::dupequeuehealth::dqh_parchecker_format_cli_flags(threads_to_use, mem_to_use);
-    if !out_mem_param.is_null() {
-        *out_mem_param = into_buf(mem_param);
-    }
-    if !out_threads_param.is_null() {
-        *out_threads_param = into_buf(threads_param);
-    }
-    if !out_file_threads_param.is_null() {
-        *out_file_threads_param = into_buf(file_threads_param);
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_parchecker_creator_or_unknown(
-    creator: *const c_char,
-) -> *const c_char {
-    if creator.is_null() || *creator == 0 {
-        b"<unknown program>\0".as_ptr() as *const c_char
-    } else {
-        creator
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_parchecker_format_action_label(
-    verb: *const c_char,
-    info_name: *const c_char,
-) -> RsBuf {
-    let v = if verb.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(verb).to_bytes()
-    };
-    let n = if info_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(info_name).to_bytes()
-    };
-    into_buf(crate::dupequeuehealth::dqh_parchecker_format_action_label(
-        v, n,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_parchecker_effective_source_files_count(
-    stage: i32,
-    pt_repairing: i32,
-    pt_verifying_repaired: i32,
-    total_source_files: usize,
-) -> i32 {
-    crate::dupequeuehealth::dqh_parchecker_effective_source_files_count(
-        stage,
-        pt_repairing,
-        pt_verifying_repaired,
-        total_source_files,
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_parchecker_should_check_ignore_ext(
-    stage: i32,
-    pt_verifying_sources: i32,
-    available: i32,
-    total: i32,
-    verifying_extra_files: i32,
-) -> i32 {
-    if crate::dupequeuehealth::dqh_parchecker_should_check_ignore_ext(
-        stage,
-        pt_verifying_sources,
-        available,
-        total,
-        verifying_extra_files != 0,
-    ) {
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_parchecker_ignore_suffix(ignore: i32) -> *const c_char {
-    crate::dupequeuehealth::dqh_parchecker_ignore_suffix(ignore != 0).as_ptr() as *const c_char
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_parchecker_file_quality_label(
-    file_status: i32,
-    fs_success: i32,
-) -> *const c_char {
-    crate::dupequeuehealth::dqh_parchecker_file_quality_label(file_status, fs_success).as_ptr()
-        as *const c_char
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_prepost_should_calc_health_for_par_index(
-    par_status: i32,
-    ps_none: i32,
-    ps_skipped: i32,
-    delete_status: i32,
-    ds_none: i32,
-) -> i32 {
-    if crate::dupequeuehealth::dqh_prepost_should_calc_health_for_par_index(
-        par_status,
-        ps_none,
-        ps_skipped,
-        delete_status,
-        ds_none,
-    ) {
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_prepost_skip_unpack_par_reason(
-    par_status: i32,
-    ps_manual: i32,
-) -> *const c_char {
-    crate::dupequeuehealth::dqh_prepost_skip_unpack_par_reason(par_status, ps_manual).as_ptr()
-        as *const c_char
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_tpr_post_format_info_name(
     prefix: *const c_char,
     name: *const c_char,
@@ -26490,26 +25669,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_decompress_fail_reason(
 ) -> *const c_char {
     crate::dupequeuehealth::dqh_stream_repair_decompress_fail_reason(has_extractor != 0).as_ptr()
         as *const c_char
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_parchecker_format_twin_err_msg(
-    twin_err_action: i32,
-    own_err_msg: *const c_char,
-) -> RsBuf {
-    let o = if own_err_msg.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(own_err_msg).to_bytes()
-    };
-    match crate::twinproberenhist::tpr_parchecker_format_twin_err_msg(twin_err_action, o) {
-        Some(v) => into_buf(v),
-        None => RsBuf {
-            data: std::ptr::null_mut(),
-            len: 0,
-            cap: 0,
-        },
-    }
 }
 
 #[no_mangle]
@@ -28546,16 +27705,6 @@ pub extern "C" fn nzbget_rs_dqh_stream_repair_is_target_unfinished(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_parchecker_cmdline_err_str(res: c_int) -> *const c_char {
-    crate::dupequeuehealth::dqh_parchecker_cmdline_err_str(res).as_ptr() as *const c_char
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_parchecker_stage_message(stage: c_int) -> *const c_char {
-    crate::dupequeuehealth::dqh_parchecker_stage_message(stage).as_ptr() as *const c_char
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_scheduler_command_name(command: c_int) -> *const c_char {
     crate::dupequeuehealth::dqh_scheduler_command_name(command).as_ptr() as *const c_char
 }
@@ -29480,153 +28629,6 @@ pub extern "C" fn nzbget_rs_dqh_fs_is_copied_file_valid(
         copied_bytes,
         src_size,
     ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_parchecker_resolve_fallback_par_buffer_mb(
-    configured_mb: c_int,
-) -> c_int {
-    crate::dupequeuehealth::dqh_parchecker_resolve_fallback_par_buffer_mb(configured_mb)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_parchecker_is_streambuf_line_break(ch: c_int) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_parchecker_is_streambuf_line_break(ch))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_parchecker_classify_preprocess_step(
-    is_stopped: c_int,
-    res: c_int,
-    e_success: c_int,
-    e_invalid_args: c_int,
-) -> c_int {
-    crate::dupequeuehealth::dqh_parchecker_classify_preprocess_step(
-        is_stopped != 0,
-        res,
-        e_success,
-        e_invalid_args,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_parchecker_can_start_twin_set(
-    index_empty: c_int,
-    is_stopped: c_int,
-) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_parchecker_can_start_twin_set(
-        index_empty != 0,
-        is_stopped != 0,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_parchecker_should_update_after_twin_volumes(
-    volumes_empty: c_int,
-    is_stopped: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_parchecker_should_update_after_twin_volumes(
-            volumes_empty != 0,
-            is_stopped != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_parchecker_is_missing_target_sourcefile(
-    target_exists: c_int,
-    file_name: *const c_char,
-    target_base_name: *const c_char,
-) -> c_int {
-    let f = if file_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(file_name).to_bytes()
-    };
-    let t = if target_base_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(target_base_name).to_bytes()
-    };
-    i32::from(
-        crate::dupequeuehealth::dqh_parchecker_is_missing_target_sourcefile(
-            target_exists != 0,
-            f,
-            t,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_parchecker_is_terminal_quick_crc_status(
-    file_status: c_int,
-    fs_failure: c_int,
-    fs_unknown: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_parchecker_is_terminal_quick_crc_status(
-            file_status,
-            fs_failure,
-            fs_unknown,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_parchecker_is_partial_range_crc_valid(
-    ok: c_int,
-    download_crc: u32,
-    par_crc: u32,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_parchecker_is_partial_range_crc_valid(
-            ok != 0,
-            download_crc,
-            par_crc,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_prepost_should_reset_stale_direct_unpack(
-    direct_unpack_status: c_int,
-    ns_running: c_int,
-    has_unpack_thread: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_prepost_should_reset_stale_direct_unpack(
-            direct_unpack_status,
-            ns_running,
-            has_unpack_thread != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_prepost_has_single_main_par(
-    found_main_pars: c_int,
-    main_pars_count: usize,
-) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_prepost_has_single_main_par(
-        found_main_pars != 0,
-        main_pars_count,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_prepost_matches_post_delete_target(
-    has_post_info: c_int,
-    nzb_id: c_int,
-    target_id: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_prepost_matches_post_delete_target(
-            has_post_info != 0,
-            nzb_id,
-            target_id,
-        ),
-    )
 }
 
 #[no_mangle]

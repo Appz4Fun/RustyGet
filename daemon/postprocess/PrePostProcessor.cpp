@@ -1011,7 +1011,11 @@ static bool ParCannotCover(NzbInfo* nzbInfo)
 	{
 		if (ParParser::SameParCollection(filename, mainPars[0].c_str(), true))
 		{
-			BString<1024> path("%s%c%s", nzbInfo->GetDestDir(), PATH_SEPARATOR, filename);
+			NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+				nzbInfo->GetDestDir(), PATH_SEPARATOR, filename);
+			BString<1024> path;
+			path.Set(pathBuf.data ? pathBuf.data : "", (int)pathBuf.len);
+			nzbget_rs_free(pathBuf);
 			int64 size = FileSystem::FileSize(path);
 			if (nzbget_rs_uqs_prepost_is_better_main_par_file(size, parFileSize) != 0)
 			{

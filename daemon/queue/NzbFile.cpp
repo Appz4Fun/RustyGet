@@ -378,19 +378,20 @@ bool NzbFile::Parse()
 
 void NzbFile::Parse_StartElement(const char *name, const char **atts)
 {
-	BString<1024> tagAttrMessage("Malformed nzb-file, tag <%s> must have attributes", name);
-
 	m_currentElement = name;
 	m_tagContent.Clear();
 
-	if (!strcmp("file", name))
+	int elemKind = nzbget_rs_dqh_nzbfile_classify_start_element(name);
+	if (elemKind == 1)
 	{
 		m_fileInfo = std::make_unique<FileInfo>();
 		m_fileInfo->SetFilename(m_fileName.c_str());
 
 		if (!atts)
 		{
-			m_nzbInfo->AddMessage(Message::mkWarning, tagAttrMessage);
+			NzbgetRsBuf msgBuf = nzbget_rs_dqh_nzbfile_format_missing_attrs_msg(name);
+			m_nzbInfo->AddMessage(Message::mkWarning, msgBuf.data ? msgBuf.data : "");
+			nzbget_rs_free(msgBuf);
 			return;
 		}
 
@@ -398,17 +399,18 @@ void NzbFile::Parse_StartElement(const char *name, const char **atts)
 		{
 			const char* attrname = atts[i];
 			const char* attrvalue = atts[i + 1];
-			if (!strcmp("subject", attrname))
+			switch (nzbget_rs_dqh_nzbfile_classify_file_attr(attrname))
 			{
-				m_fileInfo->SetSubject(attrvalue);
-			}
-			if (!strcmp("date", attrname))
-			{
-				m_fileInfo->SetTime(atoi(attrvalue));
+				case 1:
+					m_fileInfo->SetSubject(attrvalue);
+					break;
+				case 2:
+					m_fileInfo->SetTime(atoi(attrvalue));
+					break;
 			}
 		}
 	}
-	else if (!strcmp("segment", name))
+	else if (elemKind == 2)
 	{
 		if (!m_fileInfo)
 		{
@@ -418,7 +420,9 @@ void NzbFile::Parse_StartElement(const char *name, const char **atts)
 
 		if (!atts)
 		{
-			m_nzbInfo->AddMessage(Message::mkWarning, tagAttrMessage);
+			NzbgetRsBuf msgBuf = nzbget_rs_dqh_nzbfile_format_missing_attrs_msg(name);
+			m_nzbInfo->AddMessage(Message::mkWarning, msgBuf.data ? msgBuf.data : "");
+			nzbget_rs_free(msgBuf);
 			return;
 		}
 
@@ -429,13 +433,14 @@ void NzbFile::Parse_StartElement(const char *name, const char **atts)
 		{
 			const char* attrname = atts[i];
 			const char* attrvalue = atts[i + 1];
-			if (!strcmp("bytes", attrname))
+			switch (nzbget_rs_dqh_nzbfile_classify_segment_attr(attrname))
 			{
-				lsize = atol(attrvalue);
-			}
-			if (!strcmp("number", attrname))
-			{
-				partNumber = atol(attrvalue);
+				case 1:
+					lsize = atol(attrvalue);
+					break;
+				case 2:
+					partNumber = atol(attrvalue);
+					break;
 			}
 		}
 
@@ -448,7 +453,7 @@ void NzbFile::Parse_StartElement(const char *name, const char **atts)
 			m_article = AddArticle(m_fileInfo.get(), std::move(article));
 		}
 	}
-	else if (!strcmp("meta", name))
+	else if (elemKind == 3)
 	{
 		m_hasPassword = false;
 		m_hasCategory = false;
@@ -457,7 +462,9 @@ void NzbFile::Parse_StartElement(const char *name, const char **atts)
 
 		if (!atts)
 		{
-			m_nzbInfo->AddMessage(Message::mkWarning, tagAttrMessage);
+			NzbgetRsBuf msgBuf = nzbget_rs_dqh_nzbfile_format_missing_attrs_msg(name);
+			m_nzbInfo->AddMessage(Message::mkWarning, msgBuf.data ? msgBuf.data : "");
+			nzbget_rs_free(msgBuf);
 			return;
 		}
 
@@ -476,13 +483,14 @@ void NzbFile::Parse_StartElement(const char *name, const char **atts)
 
 void NzbFile::Parse_EndElement(const char *name)
 {
-	if (!strcmp("file", name))
+	int elemKind = nzbget_rs_dqh_nzbfile_classify_end_element(name);
+	if (elemKind == 1)
 	{
 		// Close the file element, add the new file to file-list
 		AddFileInfo(std::move(m_fileInfo));
 		m_article = nullptr;
 	}
-	else if (!strcmp("group", name))
+	else if (elemKind == 2)
 	{
 		if (!m_fileInfo)
 		{
@@ -493,7 +501,7 @@ void NzbFile::Parse_EndElement(const char *name)
 		m_fileInfo->GetGroups()->push_back(*m_tagContent);
 		m_tagContent.Clear();
 	}
-	else if (!strcmp("segment", name))
+	else if (elemKind == 3)
 	{
 		if (!m_fileInfo || !m_article)
 		{
@@ -510,11 +518,11 @@ void NzbFile::Parse_EndElement(const char *name)
 		nzbget_rs_free(idBuf);
 		m_article = nullptr;
 	}
-	else if (!strcmp("meta", name) && m_hasPassword)
+	else if (elemKind == 4 && m_hasPassword)
 	{
 		m_password = m_tagContent;
 	}
-	else if (!strcmp("meta", name) && m_hasCategory)
+	else if (elemKind == 4 && m_hasCategory)
 	{
 		m_category = m_tagContent;
 	}

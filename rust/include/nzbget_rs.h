@@ -5925,6 +5925,21 @@ NzbgetRsBuf nzbget_rs_dqh_fs_format_expanded_rel_path(
 NzbgetRsBuf nzbget_rs_dqh_benchmark_format_unique_filename(int64_t epoch_ticks);
 size_t nzbget_rs_dqh_benchmark_resolve_block_size(
     size_t block_size_bytes, size_t default_block_size);
+NzbgetRsBuf nzbget_rs_dqh_statmeter_format_indexed_bytes_line(
+    int32_t first_idx, const int64_t* values, size_t count);
+NzbgetRsBuf nzbget_rs_dqh_nntpserver_format_cache_file_name(
+    int32_t part, int64_t offset, int32_t size);
+NzbgetRsBuf nzbget_rs_dqh_nzbgen_format_nzb_output_path(
+    const char* data_dir, char sep, const char* base_name);
+NzbgetRsBuf nzbget_rs_dqh_nserv_format_logfile_opt(const char* log_file);
+NzbgetRsBuf nzbget_rs_dqh_nzbfile_format_missing_attrs_msg(const char* tag_name);
+int nzbget_rs_dqh_nzbfile_classify_start_element(const char* name);
+int nzbget_rs_dqh_nzbfile_classify_file_attr(const char* attr_name);
+int nzbget_rs_dqh_nzbfile_classify_segment_attr(const char* attr_name);
+int nzbget_rs_dqh_nzbfile_classify_end_element(const char* name);
+NzbgetRsBuf nzbget_rs_dqh_sysinfo_format_rapidyenc_version(int32_t ver);
+NzbgetRsBuf nzbget_rs_dqh_fs_format_null_delete_errmsg(const char* last_err);
+NzbgetRsBuf nzbget_rs_dqh_fs_extract_parent_dir_path(const char* filename, char sep);
 
 #include "nzbget_tls_cipher.h"
 

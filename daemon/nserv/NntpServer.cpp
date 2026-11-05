@@ -281,11 +281,34 @@ void NntpProcessor::SendSegment()
 		m_start = Util::CurrentTicks();
 	}
 
-	BString<1024> fullFilename("%s/%s", m_dataDir, *m_filename);
-	BString<1024> cacheFileDir("%s/%s", m_cacheDir, *m_filename);
-	BString<1024> cacheFileName("%i=%" PRIi64 "-%i", m_part, m_offset, m_size);
-	BString<1024> cacheFullFilename("%s/%s", *cacheFileDir, *cacheFileName);
-	BString<1024> cacheKey("%s/%s", *m_filename, *cacheFileName);
+	NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+		m_dataDir ? m_dataDir : "", '/', *m_filename);
+	BString<1024> fullFilename;
+	fullFilename.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
+	nzbget_rs_free(fullFnBuf);
+
+	NzbgetRsBuf cacheDirBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+		m_cacheDir ? m_cacheDir : "", '/', *m_filename);
+	BString<1024> cacheFileDir;
+	cacheFileDir.Set(cacheDirBuf.data ? cacheDirBuf.data : "", (int)cacheDirBuf.len);
+	nzbget_rs_free(cacheDirBuf);
+
+	NzbgetRsBuf cacheFnBuf = nzbget_rs_dqh_nntpserver_format_cache_file_name(m_part, m_offset, m_size);
+	BString<1024> cacheFileName;
+	cacheFileName.Set(cacheFnBuf.data ? cacheFnBuf.data : "", (int)cacheFnBuf.len);
+	nzbget_rs_free(cacheFnBuf);
+
+	NzbgetRsBuf cacheFullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+		*cacheFileDir, '/', *cacheFileName);
+	BString<1024> cacheFullFilename;
+	cacheFullFilename.Set(cacheFullFnBuf.data ? cacheFullFnBuf.data : "", (int)cacheFullFnBuf.len);
+	nzbget_rs_free(cacheFullFnBuf);
+
+	NzbgetRsBuf cacheKeyBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+		*m_filename, '/', *cacheFileName);
+	BString<1024> cacheKey;
+	cacheKey.Set(cacheKeyBuf.data ? cacheKeyBuf.data : "", (int)cacheKeyBuf.len);
+	nzbget_rs_free(cacheKeyBuf);
 
 	const char* cachedData = nullptr;
 	int cachedSize;

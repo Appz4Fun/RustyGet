@@ -246,7 +246,9 @@ NServOpts::NServOpts(int argc, char* argv[], Options::CmdOptList& cmdOpts)
 	else
 	{
 		cmdOpts.push_back("WriteLog=append");
-		logOpt.Format("LogFile=%s", *logFile);
+		NzbgetRsBuf logOptBuf = nzbget_rs_dqh_nserv_format_logfile_opt(*logFile);
+		logOpt.Set(logOptBuf.data ? logOptBuf.data : "", (int)logOptBuf.len);
+		nzbget_rs_free(logOptBuf);
 		cmdOpts.push_back(logOpt);
 	}
 

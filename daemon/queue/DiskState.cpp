@@ -2421,8 +2421,10 @@ void DiskState::CleanupTempDir(DownloadQueue* downloadQueue)
 
 		if (garbage)
 		{
-			BString<1024> fullFilename("%s%c%s", g_Options->GetTempDir(), PATH_SEPARATOR, filename);
-			FileSystem::DeleteFile(fullFilename);
+			NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+				g_Options->GetTempDir(), PATH_SEPARATOR, filename);
+			FileSystem::DeleteFile(fullFnBuf.data ? fullFnBuf.data : "");
+			nzbget_rs_free(fullFnBuf);
 		}
 	}
 }
@@ -2486,9 +2488,11 @@ void DiskState::CleanupQueueDir(DownloadQueue* downloadQueue)
 
 		if (del)
 		{
-			BString<1024> fullFilename("%s%c%s", g_Options->GetQueueDir(), PATH_SEPARATOR, filename);
+			NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+				g_Options->GetQueueDir(), PATH_SEPARATOR, filename);
 			detail("Deleting orphaned diskstate file %s", filename);
-			FileSystem::DeleteFile(fullFilename);
+			FileSystem::DeleteFile(fullFnBuf.data ? fullFnBuf.data : "");
+			nzbget_rs_free(fullFnBuf);
 			deletedFiles++;
 		}
 	}
@@ -2813,8 +2817,10 @@ void DiskState::DiscardQuickFileInfos()
 
 bool DiskState::LoadAllFileStates(DownloadQueue* downloadQueue, Servers* servers)
 {
-	BString<1024> cacheFlagFilename("%s%c%s", g_Options->GetQueueDir(), PATH_SEPARATOR, "acache");
-	bool cacheWasActive = FileSystem::FileExists(cacheFlagFilename);
+	NzbgetRsBuf cacheFlagBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+		g_Options->GetQueueDir(), PATH_SEPARATOR, "acache");
+	bool cacheWasActive = FileSystem::FileExists(cacheFlagBuf.data ? cacheFlagBuf.data : "");
+	nzbget_rs_free(cacheFlagBuf);
 
 	DirBrowser dir(g_Options->GetQueueDir());
 	while (const char* filename = dir.Next())
@@ -2850,7 +2856,10 @@ bool DiskState::LoadAllFileStates(DownloadQueue* downloadQueue, Servers* servers
 								fileInfo->SetRemainingSize(remainingSize);
 								fileInfo->SetSuccessSize(successSize);
 								fileInfo->SetFailedSize(failedSize);
-								FileSystem::DeleteFile(BString<1024>("%s%c%s", g_Options->GetQueueDir(), PATH_SEPARATOR, filename));
+								NzbgetRsBuf dmgFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+									g_Options->GetQueueDir(), PATH_SEPARATOR, filename);
+								FileSystem::DeleteFile(dmgFnBuf.data ? dmgFnBuf.data : "");
+								nzbget_rs_free(dmgFnBuf);
 								goto next;
 							}
 							if (nzbget_rs_dds_diskstate_should_save_updated_file_state_version(
@@ -2870,8 +2879,10 @@ bool DiskState::LoadAllFileStates(DownloadQueue* downloadQueue, Servers* servers
 			}
 			else
 			{
-				BString<1024> fullFilename("%s%c%s", g_Options->GetQueueDir(), PATH_SEPARATOR, filename);
-				FileSystem::DeleteFile(fullFilename);
+				NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+					g_Options->GetQueueDir(), PATH_SEPARATOR, filename);
+				FileSystem::DeleteFile(fullFnBuf.data ? fullFnBuf.data : "");
+				nzbget_rs_free(fullFnBuf);
 			}
 		}
 		next:;

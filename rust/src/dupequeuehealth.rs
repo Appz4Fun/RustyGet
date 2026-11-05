@@ -2044,6 +2044,119 @@ pub fn dqh_benchmark_resolve_block_size(
     }
 }
 
+/// Formats `"[first_idx]=v0 [first_idx+1]=v1 ... "` for `ServerVolume::LogDebugInfo`.
+pub fn dqh_statmeter_format_indexed_bytes_line(first_idx: i32, values: &[i64]) -> Vec<u8> {
+    let mut out = String::with_capacity(values.len() * 12);
+    for (i, &val) in values.iter().enumerate() {
+        use std::fmt::Write;
+        let _ = write!(out, "[{}]={val} ", first_idx.wrapping_add(i as i32));
+    }
+    out.into_bytes()
+}
+
+/// Formats `"<part>=<offset>-<size>"` for `NntpProcessor::SendSegment`.
+pub fn dqh_nntpserver_format_cache_file_name(part: i32, offset: i64, size: i32) -> Vec<u8> {
+    format!("{part}={offset}-{size}").into_bytes()
+}
+
+/// Formats `"<data_dir><sep><base_name>.nzb"` for `NzbGenerator::GenerateNzb`.
+pub fn dqh_nzbgen_format_nzb_output_path(data_dir: &[u8], sep: u8, base_name: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data_dir.len() + 1 + base_name.len() + 4);
+    out.extend_from_slice(data_dir);
+    out.push(sep);
+    out.extend_from_slice(base_name);
+    out.extend_from_slice(b".nzb");
+    out
+}
+
+/// Formats `"LogFile=<log_file>"` for `NServMain`.
+pub fn dqh_nserv_format_logfile_opt(log_file: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 + log_file.len());
+    out.extend_from_slice(b"LogFile=");
+    out.extend_from_slice(log_file);
+    out
+}
+
+/// Formats `"Malformed nzb-file, tag <<tag_name>> must have attributes"` for `NzbFile::Parse_StartElement`.
+pub fn dqh_nzbfile_format_missing_attrs_msg(tag_name: &[u8]) -> Vec<u8> {
+    let prefix = b"Malformed nzb-file, tag <";
+    let suffix = b"> must have attributes";
+    let mut out = Vec::with_capacity(prefix.len() + tag_name.len() + suffix.len());
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(tag_name);
+    out.extend_from_slice(suffix);
+    out
+}
+
+/// Classifies an XML start element in `NzbFile::Parse_StartElement`:
+/// `1` (`"file"`), `2` (`"segment"`), `3` (`"meta"`), or `0` (other).
+pub fn dqh_nzbfile_classify_start_element(name: &[u8]) -> i32 {
+    match name {
+        b"file" => 1,
+        b"segment" => 2,
+        b"meta" => 3,
+        _ => 0,
+    }
+}
+
+/// Classifies a `<file>` attribute name in `NzbFile::Parse_StartElement`:
+/// `1` (`"subject"`), `2` (`"date"`), or `0` (other).
+pub fn dqh_nzbfile_classify_file_attr(attr_name: &[u8]) -> i32 {
+    match attr_name {
+        b"subject" => 1,
+        b"date" => 2,
+        _ => 0,
+    }
+}
+
+/// Classifies a `<segment>` attribute name in `NzbFile::Parse_StartElement`:
+/// `1` (`"bytes"`), `2` (`"number"`), or `0` (other).
+pub fn dqh_nzbfile_classify_segment_attr(attr_name: &[u8]) -> i32 {
+    match attr_name {
+        b"bytes" => 1,
+        b"number" => 2,
+        _ => 0,
+    }
+}
+
+/// Classifies an XML end element in `NzbFile::Parse_EndElement`:
+/// `1` (`"file"`), `2` (`"group"`), `3` (`"segment"`), `4` (`"meta"`), or `0` (other).
+pub fn dqh_nzbfile_classify_end_element(name: &[u8]) -> i32 {
+    match name {
+        b"file" => 1,
+        b"group" => 2,
+        b"segment" => 3,
+        b"meta" => 4,
+        _ => 0,
+    }
+}
+
+/// Formats `"<major>.<minor>.<patch>"` from a packed 24-bit version integer for `SystemInfo`.
+pub fn dqh_sysinfo_format_rapidyenc_version(ver: i32) -> Vec<u8> {
+    let major = (ver >> 16) & 0xFF;
+    let minor = (ver >> 8) & 0xFF;
+    let patch = ver & 0xFF;
+    format!("{major}.{minor}.{patch}").into_bytes()
+}
+
+/// Formats `"could not delete (null): <last_err>"` for `FileSystem::DeleteDirectoryWithContent`.
+pub fn dqh_fs_format_null_delete_errmsg(last_err: &[u8]) -> Vec<u8> {
+    let prefix = b"could not delete (null): ";
+    let mut out = Vec::with_capacity(prefix.len() + last_err.len());
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(last_err);
+    out
+}
+
+/// Extracts the parent directory path up to the last `sep` (or the whole `filename` if no `sep` exists)
+/// for `FileSystem::FlushDirBuffers`.
+pub fn dqh_fs_extract_parent_dir_path(filename: &[u8], sep: u8) -> Vec<u8> {
+    match filename.iter().rposition(|&b| b == sep) {
+        Some(pos) => filename[..pos].to_vec(),
+        None => filename.to_vec(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2857,5 +2970,50 @@ mod tests {
         );
         assert_eq!(dqh_benchmark_resolve_block_size(0, 4096), 4096);
         assert_eq!(dqh_benchmark_resolve_block_size(8192, 4096), 8192);
+        assert_eq!(
+            dqh_statmeter_format_indexed_bytes_line(10, &[100, 250]),
+            b"[10]=100 [11]=250 "
+        );
+        assert_eq!(
+            dqh_nntpserver_format_cache_file_name(2, 65536, 32768),
+            b"2=65536-32768"
+        );
+        assert_eq!(
+            dqh_nzbgen_format_nzb_output_path(b"/data", b'/', b"release"),
+            b"/data/release.nzb"
+        );
+        assert_eq!(
+            dqh_nserv_format_logfile_opt(b"/var/log/nserv.log"),
+            b"LogFile=/var/log/nserv.log"
+        );
+        assert_eq!(
+            dqh_nzbfile_format_missing_attrs_msg(b"file"),
+            b"Malformed nzb-file, tag <file> must have attributes"
+        );
+        assert_eq!(dqh_nzbfile_classify_start_element(b"file"), 1);
+        assert_eq!(dqh_nzbfile_classify_start_element(b"segment"), 2);
+        assert_eq!(dqh_nzbfile_classify_start_element(b"meta"), 3);
+        assert_eq!(dqh_nzbfile_classify_start_element(b"nzb"), 0);
+        assert_eq!(dqh_nzbfile_classify_file_attr(b"subject"), 1);
+        assert_eq!(dqh_nzbfile_classify_file_attr(b"date"), 2);
+        assert_eq!(dqh_nzbfile_classify_file_attr(b"poster"), 0);
+        assert_eq!(dqh_nzbfile_classify_segment_attr(b"bytes"), 1);
+        assert_eq!(dqh_nzbfile_classify_segment_attr(b"number"), 2);
+        assert_eq!(dqh_nzbfile_classify_segment_attr(b"id"), 0);
+        assert_eq!(dqh_nzbfile_classify_end_element(b"file"), 1);
+        assert_eq!(dqh_nzbfile_classify_end_element(b"group"), 2);
+        assert_eq!(dqh_nzbfile_classify_end_element(b"segment"), 3);
+        assert_eq!(dqh_nzbfile_classify_end_element(b"meta"), 4);
+        assert_eq!(dqh_nzbfile_classify_end_element(b"nzb"), 0);
+        assert_eq!(dqh_sysinfo_format_rapidyenc_version(0x010203), b"1.2.3");
+        assert_eq!(
+            dqh_fs_format_null_delete_errmsg(b"Bad address"),
+            b"could not delete (null): Bad address"
+        );
+        assert_eq!(
+            dqh_fs_extract_parent_dir_path(b"/var/queue/file.tmp", b'/'),
+            b"/var/queue"
+        );
+        assert_eq!(dqh_fs_extract_parent_dir_path(b"file.tmp", b'/'), b"file.tmp");
     }
 }

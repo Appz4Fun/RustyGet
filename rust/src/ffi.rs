@@ -34862,6 +34862,156 @@ pub unsafe extern "C" fn nzbget_rs_dqh_benchmark_resolve_block_size(
     )
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_statmeter_format_indexed_bytes_line(
+    first_idx: c_int,
+    values: *const i64,
+    count: usize,
+) -> RsBuf {
+    let slice = if values.is_null() || count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(values, count)
+    };
+    into_buf(crate::dupequeuehealth::dqh_statmeter_format_indexed_bytes_line(first_idx, slice))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_nntpserver_format_cache_file_name(
+    part: c_int,
+    offset: i64,
+    size: c_int,
+) -> RsBuf {
+    into_buf(crate::dupequeuehealth::dqh_nntpserver_format_cache_file_name(
+        part, offset, size,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_nzbgen_format_nzb_output_path(
+    data_dir: *const c_char,
+    sep: c_char,
+    base_name: *const c_char,
+) -> RsBuf {
+    let d = if data_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(data_dir).to_bytes()
+    };
+    let b = if base_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(base_name).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_nzbgen_format_nzb_output_path(
+        d, sep as u8, b,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_nserv_format_logfile_opt(
+    log_file: *const c_char,
+) -> RsBuf {
+    let l = if log_file.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(log_file).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_nserv_format_logfile_opt(l))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_nzbfile_format_missing_attrs_msg(
+    tag_name: *const c_char,
+) -> RsBuf {
+    let t = if tag_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(tag_name).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_nzbfile_format_missing_attrs_msg(t))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_nzbfile_classify_start_element(
+    name: *const c_char,
+) -> c_int {
+    let n = if name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(name).to_bytes()
+    };
+    crate::dupequeuehealth::dqh_nzbfile_classify_start_element(n)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_nzbfile_classify_file_attr(
+    attr_name: *const c_char,
+) -> c_int {
+    let a = if attr_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(attr_name).to_bytes()
+    };
+    crate::dupequeuehealth::dqh_nzbfile_classify_file_attr(a)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_nzbfile_classify_segment_attr(
+    attr_name: *const c_char,
+) -> c_int {
+    let a = if attr_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(attr_name).to_bytes()
+    };
+    crate::dupequeuehealth::dqh_nzbfile_classify_segment_attr(a)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_nzbfile_classify_end_element(
+    name: *const c_char,
+) -> c_int {
+    let n = if name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(name).to_bytes()
+    };
+    crate::dupequeuehealth::dqh_nzbfile_classify_end_element(n)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_sysinfo_format_rapidyenc_version(ver: c_int) -> RsBuf {
+    into_buf(crate::dupequeuehealth::dqh_sysinfo_format_rapidyenc_version(ver))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_fs_format_null_delete_errmsg(
+    last_err: *const c_char,
+) -> RsBuf {
+    let e = if last_err.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(last_err).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_fs_format_null_delete_errmsg(e))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_fs_extract_parent_dir_path(
+    filename: *const c_char,
+    sep: c_char,
+) -> RsBuf {
+    let f = if filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_fs_extract_parent_dir_path(
+        f, sep as u8,
+    ))
+}
+
 
 
 

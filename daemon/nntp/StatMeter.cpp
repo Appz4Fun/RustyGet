@@ -139,34 +139,25 @@ void ServerVolume::LogDebugInfo()
 {
 	info("   ---------- ServerVolume");
 
-	StringBuilder msg;
+	NzbgetRsBuf secsBuf = nzbget_rs_dqh_statmeter_format_indexed_bytes_line(
+		0, m_bytesPerSeconds.data(), m_bytesPerSeconds.size());
+	info("Secs: %s", secsBuf.data ? secsBuf.data : "");
+	nzbget_rs_free(secsBuf);
 
-	for (int i = 0; i < 60; i++)
-	{
-		msg.AppendFmt("[%i]=%" PRIi64 " ", i, m_bytesPerSeconds[i]);
-	}
-	info("Secs: %s", *msg);
+	NzbgetRsBuf minsBuf = nzbget_rs_dqh_statmeter_format_indexed_bytes_line(
+		0, m_bytesPerMinutes.data(), m_bytesPerMinutes.size());
+	info("Mins: %s", minsBuf.data ? minsBuf.data : "");
+	nzbget_rs_free(minsBuf);
 
-	msg.Clear();
-	for (int i = 0; i < 60; i++)
-	{
-		msg.AppendFmt("[%i]=%" PRIi64 " ", i, m_bytesPerMinutes[i]);
-	}
-	info("Mins: %s", *msg);
+	NzbgetRsBuf hoursBuf = nzbget_rs_dqh_statmeter_format_indexed_bytes_line(
+		0, m_bytesPerHours.data(), m_bytesPerHours.size());
+	info("Hours: %s", hoursBuf.data ? hoursBuf.data : "");
+	nzbget_rs_free(hoursBuf);
 
-	msg.Clear();
-	for (int i = 0; i < 24; i++)
-	{
-		msg.AppendFmt("[%i]=%" PRIi64 " ", i, m_bytesPerHours[i]);
-	}
-	info("Hours: %s", *msg);
-
-	msg.Clear();
-	for (int i = 0; i < (int)m_bytesPerDays.size(); i++)
-	{
-		msg.AppendFmt("[%i]=%" PRIi64 " ", m_firstDay + i, m_bytesPerDays[i]);
-	}
-	info("Days: %s", *msg);
+	NzbgetRsBuf daysBuf = nzbget_rs_dqh_statmeter_format_indexed_bytes_line(
+		m_firstDay, m_bytesPerDays.data(), m_bytesPerDays.size());
+	info("Days: %s", daysBuf.data ? daysBuf.data : "");
+	nzbget_rs_free(daysBuf);
 }
 
 StatMeter::StatMeter()

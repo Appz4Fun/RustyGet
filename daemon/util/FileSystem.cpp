@@ -570,7 +570,9 @@ bool FileSystem::DeleteDirectoryWithContent(const char* dirFilename, CString& er
 	{
 		errmsg.Clear();
 		errno = EFAULT;
-		errmsg.Format("could not delete (null): %s", *GetLastErrorMessage());
+		NzbgetRsBuf errBuf = nzbget_rs_dqh_fs_format_null_delete_errmsg(*GetLastErrorMessage());
+		errmsg.Set(errBuf.data ? errBuf.data : "", (int)errBuf.len);
+		nzbget_rs_free(errBuf);
 		return false;
 	}
 	// rust/src/fsdelete.rs
@@ -737,20 +739,17 @@ bool FileSystem::FlushFileBuffers(int fileDescriptor, CString& errmsg)
 
 bool FileSystem::FlushDirBuffers(const char* filename, CString& errmsg)
 {
-	BString<1024> parentPath = filename;
-	char* p = (char*)strrchr(parentPath, PATH_SEPARATOR);
-	if (p)
-	{
-		*p = '\0';
-	}
+	NzbgetRsBuf parentBuf = nzbget_rs_dqh_fs_extract_parent_dir_path(filename, PATH_SEPARATOR);
 	// the directory is opened close-on-exec through DiskFile: the descriptor
 	// is short-lived, but a script forked meanwhile must not inherit it
 	DiskFile dir;
-	if (!dir.Open(parentPath, DiskFile::omRead))
+	if (!dir.Open(parentBuf.data ? parentBuf.data : "", DiskFile::omRead))
 	{
+		nzbget_rs_free(parentBuf);
 		errmsg = GetLastErrorMessage();
 		return false;
 	}
+	nzbget_rs_free(parentBuf);
 	bool ok = FlushFileBuffers(dir.GetFileDescriptor(), errmsg);
 	dir.Close();
 	return ok;

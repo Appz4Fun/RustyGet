@@ -85,13 +85,9 @@ namespace System
 #endif
 
 #ifdef RAPIDYENC_VERSION
-		int ver = rapidyenc_version(); 
-		int major = (ver >> 16) & 0xFF;
-		int minor = (ver >> 8) & 0xFF;
-		int patch = ver & 0xFF;
-		char buffer[32];
-		snprintf(buffer, sizeof(buffer), "%d.%d.%d", major, minor, patch);
-		m_libraries.push_back({ "rapidyenc", buffer });
+		NzbgetRsBuf verBuf = nzbget_rs_dqh_sysinfo_format_rapidyenc_version(rapidyenc_version());
+		m_libraries.push_back({ "rapidyenc", verBuf.data ? verBuf.data : "" });
+		nzbget_rs_free(verBuf);
 #endif
 
 #ifdef BOOST_LIB_VERSION

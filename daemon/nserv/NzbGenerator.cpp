@@ -32,7 +32,11 @@ void NzbGenerator::Execute()
 	DirBrowser dir(m_dataDir);
 	while (const char* filename = dir.Next())
 	{
-		BString<1024> fullFilename("%s%c%s", *m_dataDir, PATH_SEPARATOR, filename);
+		NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			*m_dataDir, PATH_SEPARATOR, filename);
+		BString<1024> fullFilename;
+		fullFilename.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
+		nzbget_rs_free(fullFnBuf);
 
 		if (nzbget_rs_snh_nzbgen_is_nzb_file(filename))
 		{
@@ -48,7 +52,11 @@ void NzbGenerator::Execute()
 
 void NzbGenerator::GenerateNzb(const char* path)
 {
-	BString<1024> nzbFilename("%s%c%s.nzb", *m_dataDir, PATH_SEPARATOR, FileSystem::BaseFileName(path));
+	NzbgetRsBuf nzbFnBuf = nzbget_rs_dqh_nzbgen_format_nzb_output_path(
+		*m_dataDir, PATH_SEPARATOR, FileSystem::BaseFileName(path));
+	BString<1024> nzbFilename;
+	nzbFilename.Set(nzbFnBuf.data ? nzbFnBuf.data : "", (int)nzbFnBuf.len);
+	nzbget_rs_free(nzbFnBuf);
 
 	if (FileSystem::FileExists(nzbFilename))
 	{
@@ -88,7 +96,11 @@ void NzbGenerator::AppendDir(DiskFile& outfile, const char* path)
 	DirBrowser dir(path);
 	while (const char* filename = dir.Next())
 	{
-		BString<1024> fullFilename("%s%c%s", path, PATH_SEPARATOR, filename);
+		NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			path, PATH_SEPARATOR, filename);
+		BString<1024> fullFilename;
+		fullFilename.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
+		nzbget_rs_free(fullFnBuf);
 
 		bool isDir = FileSystem::DirectoryExists(fullFilename);
 		if (!isDir)

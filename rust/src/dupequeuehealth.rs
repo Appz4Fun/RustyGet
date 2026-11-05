@@ -1252,63 +1252,6 @@ pub fn dqh_content_map_format_member_unreadable_reason(name: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Returns the static skip/warning message for `PostDownloadRenamer::Controller::Run`
-/// and `PostUnpackRenamer::Controller::Run` when `plan_class` is `1`, `2`, or `3`.
-pub fn dqh_post_renamer_plan_skip_static_msg(
-    is_post_unpack: bool,
-    plan_class: i32,
-) -> &'static [u8] {
-    if is_post_unpack {
-        match plan_class {
-            1 => b"Skipping Post-unpack renaming: disc structure detected\0",
-            2 => b"Skipping Post-unpack renaming: ambiguous multi-file collection detected\0",
-            3 => b"No qualifying media file found for Post-unpack renaming\0",
-            _ => b"\0",
-        }
-    } else {
-        match plan_class {
-            1 => b"Skipping Post-download renaming: disc structure detected\0",
-            2 => b"Skipping Post-download renaming: ambiguous multi-file collection detected\0",
-            3 => b"No qualifying media file found for Post-download renaming\0",
-            _ => b"\0",
-        }
-    }
-}
-
-/// Formats the final status message for `PostDownloadRenamer::Controller::Run`
-/// and `PostUnpackRenamer::Controller::Run`.
-pub fn dqh_post_renamer_format_final_status_msg(
-    info_name: &[u8],
-    final_decision: i32,
-) -> Vec<u8> {
-    match final_decision {
-        1 => {
-            let mut out = Vec::with_capacity(info_name.len() + 10);
-            out.extend_from_slice(info_name);
-            out.extend_from_slice(b" cancelled");
-            out
-        }
-        2 => {
-            let mut out = Vec::with_capacity(info_name.len() + 21);
-            out.extend_from_slice(info_name);
-            out.extend_from_slice(b" finished with errors");
-            out
-        }
-        3 => {
-            let mut out = Vec::with_capacity(info_name.len() + 11);
-            out.extend_from_slice(info_name);
-            out.extend_from_slice(b" successful");
-            out
-        }
-        _ => {
-            let mut out = Vec::with_capacity(info_name.len() + 29);
-            out.extend_from_slice(b"No files needed renaming for ");
-            out.extend_from_slice(info_name);
-            out
-        }
-    }
-}
-
 /// Computes `file.m_dataOffset` via two's-complement subtraction for `RarVolume::ReadFrom`.
 pub fn dqh_rar_volume_set_data_offset(position: i64, packed_size: i64) -> i64 {
     (position as u64).wrapping_sub(packed_size as u64) as i64
@@ -6056,22 +5999,6 @@ mod tests {
         assert_eq!(
             dqh_content_map_format_member_unreadable_reason(b"video.mkv"),
             b"member video.mkv unreadable"
-        );
-        assert_eq!(
-            dqh_post_renamer_plan_skip_static_msg(false, 2),
-            b"Skipping Post-download renaming: ambiguous multi-file collection detected\0"
-        );
-        assert_eq!(
-            dqh_post_renamer_plan_skip_static_msg(true, 3),
-            b"No qualifying media file found for Post-unpack renaming\0"
-        );
-        assert_eq!(
-            dqh_post_renamer_format_final_status_msg(b"Post-download renaming for Nzb", 3),
-            b"Post-download renaming for Nzb successful"
-        );
-        assert_eq!(
-            dqh_post_renamer_format_final_status_msg(b"Post-unpack renaming for Nzb", 4),
-            b"No files needed renaming for Post-unpack renaming for Nzb"
         );
         assert_eq!(dqh_rar_volume_set_data_offset(1000, 400), 600);
         assert_eq!(

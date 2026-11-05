@@ -301,62 +301,6 @@ pub fn speed_test_make_request(
     req
 }
 
-/// Port of pre-loop plan classification in `PostDownloadRenamer::Controller::Run`
-/// and `PostUnpackRenamer::Controller::Run`.
-/// Returns:
-/// - `0`: proceed with rename actions
-/// - `1`: disc structure detected
-/// - `2`: ambiguous multi-file collection detected
-/// - `3`: no qualifying media file (`!canRename`)
-/// - `4`: actions empty and target name is obfuscated
-/// - `5`: actions empty and target name is clean
-pub fn post_renamer_classify_plan(
-    is_disc: bool,
-    is_ambiguous: bool,
-    can_rename: bool,
-    actions_empty: bool,
-    target_obfuscated: bool,
-) -> i32 {
-    if is_disc {
-        1
-    } else if is_ambiguous {
-        2
-    } else if !can_rename {
-        3
-    } else if actions_empty {
-        if target_obfuscated {
-            4
-        } else {
-            5
-        }
-    } else {
-        0
-    }
-}
-
-/// Port of post-loop final status decision in `PostDownloadRenamer::Controller::Run`
-/// and `PostUnpackRenamer::Controller::Run`.
-/// Returns:
-/// - `1`: stopped / cancelled
-/// - `2`: finished with errors (`Failure`)
-/// - `3`: successful (`Success`)
-/// - `4`: no files needed renaming (`Skipped`)
-pub fn post_renamer_decide_final_status(
-    is_stopped: bool,
-    any_failed: bool,
-    any_renamed: bool,
-) -> i32 {
-    if is_stopped {
-        1
-    } else if any_failed {
-        2
-    } else if any_renamed {
-        3
-    } else {
-        4
-    }
-}
-
 /// Port of `SystemHealth::CheckAndRepair::ParBufferValidator::Validate`.
 /// Returns `0` (`Ok`), `1` (`< 0` error), or `2` (`< 250` MB info).
 pub fn health_validate_par_buffer(par_repair: bool, buffer_mb: i32) -> i32 {
@@ -535,11 +479,6 @@ mod tests {
             speed_test_make_request(b"__down", b"?bytes=", 1000, b"speed.cloudflare.com"),
             b"GET /__down?bytes=1000 HTTP/1.1\r\nHost: speed.cloudflare.com\r\nConnection: close\r\n\r\n"
         );
-
-        assert_eq!(post_renamer_classify_plan(true, false, true, false, false), 1);
-        assert_eq!(post_renamer_classify_plan(false, false, true, true, true), 4);
-        assert_eq!(post_renamer_classify_plan(false, false, true, false, false), 0);
-        assert_eq!(post_renamer_decide_final_status(false, false, true), 3);
     }
 
     #[test]

@@ -48,122 +48,53 @@ namespace PostDownloadRenamer
 
 	void Controller::Run()
 	{
-		std::string targetName;
+		std::string metaName;
+		std::string nzbName;
 		std::string dstDir;
 		{
 			GuardedDownloadQueue guard = DownloadQueue::Guard();
 			NzbInfo* nzbInfo = m_postInfo->GetNzbInfo();
-			targetName = CollectionAnalyzer::ResolveTargetName(
-				nzbInfo->GetMetaName(), nzbInfo->GetName() ? nzbInfo->GetName() : "");
+			metaName = nzbInfo->GetMetaName();
+			nzbName = nzbInfo->GetName() ? nzbInfo->GetName() : "";
 			dstDir = nzbInfo->GetDestDir() ? nzbInfo->GetDestDir() : "";
 		}
 
-		NzbInfo::PostDownloadRenamingStatus finalStatus = NzbInfo::PostDownloadRenamingStatus::Skipped;
-
-		auto Finish = [&]() {
-			GuardedDownloadQueue guard = DownloadQueue::Guard();
-			m_postInfo->GetNzbInfo()->SetPostDownloadRenamingStatus(finalStatus);
-			m_postInfo->SetWorking(false);
-		};
-
-		if (dstDir.empty())
-		{
-			Finish();
-			return;
-		}
-
-		NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_post_format_info_name(
-			"Post-download renaming", targetName.c_str());
-		BString<1024> infoName("%s", infoNameBuf.data ? infoNameBuf.data : "");
-		nzbget_rs_free(infoNameBuf);
-		SetInfoName(*infoName);
-
-		CollectionAnalyzer::RenamePlan plan = CollectionAnalyzer::BuildPlan(
-			fs::u8path(dstDir), targetName, g_Options->GetRenameIgnoreExt());
-
-		int planClass = nzbget_rs_snh_post_renamer_classify_plan(
-			plan.isDiscStructure ? 1 : 0,
-			plan.isAmbiguousCollection ? 1 : 0,
-			plan.canRename ? 1 : 0,
-			plan.actions.empty() ? 1 : 0,
-			plan.targetNameObfuscated ? 1 : 0);
-		if (planClass != 0)
-		{
-			if (planClass >= 1 && planClass <= 3)
-			{
-				PrintMessage(Message::mkInfo, "%s",
-					nzbget_rs_dqh_post_renamer_plan_skip_static_msg(0, planClass));
-			}
-			else if (planClass == 4)
-			{
-				PrintMessage(Message::mkWarning,
-					"Skipping Post-download renaming. Obfuscated files found, but NZB filename %s is also obfuscated and no clean metadata was provided.",
-					targetName.c_str());
-			}
-			else
-			{
-				PrintMessage(Message::mkInfo, "No files needed renaming for %s", targetName.c_str());
-			}
-			Finish();
-			return;
-		}
-
-		bool anyRenamed = false;
-		bool anyFailed = false;
-		NzbInfo* nzbInfo = m_postInfo->GetNzbInfo();
-
-		for (const auto& action : plan.actions)
-		{
-			if (IsStopped()) break;
-
-			fs::error_code ec;
-			fs::move_file(action.srcPath, action.dstPath, ec);
-			if (!ec)
-			{
-				PrintMessage(Message::mkInfo, "Renamed %s to %s", action.oldFilename.c_str(), action.newFilename.c_str());
+		int status = nzbget_rs_post_renamer_run(
+			0,
+			metaName.c_str(),
+			nzbName.c_str(),
+			dstDir.c_str(),
+			g_Options->GetRenameIgnoreExt(),
+			this,
+			[](void* rawCtx, const char* infoName) {
+				static_cast<Controller*>(rawCtx)->SetInfoName(infoName ? infoName : "");
+			},
+			[](void* rawCtx) -> int {
+				return static_cast<Controller*>(rawCtx)->IsStopped() ? 1 : 0;
+			},
+			[](void* rawCtx, int kind, const char* msg) {
+				auto* self = static_cast<Controller*>(rawCtx);
+				Message::EKind msgKind = kind == 1
+					? Message::mkWarning
+					: kind == 2
+						? Message::mkError
+						: Message::mkInfo;
+				self->PrintMessage(msgKind, "%s", msg ? msg : "");
+			},
+			[](void* rawCtx, const char* oldName, const char* newName) {
+				auto* self = static_cast<Controller*>(rawCtx);
+				GuardedDownloadQueue guard = DownloadQueue::Guard();
+				if (self->m_postInfo && self->m_postInfo->GetNzbInfo())
 				{
-					GuardedDownloadQueue guard = DownloadQueue::Guard();
-					nzbInfo->RenameCompletedFile(action.oldFilename.c_str(), action.newFilename.c_str());
+					self->m_postInfo->GetNzbInfo()->RenameCompletedFile(
+						oldName ? oldName : "", newName ? newName : "");
 				}
-				anyRenamed = true;
-			}
-			else
-			{
-				PrintMessage(Message::mkError, "Could not rename file %s to %s: %s",
-					action.oldFilename.c_str(), action.newFilename.c_str(), ec.message().c_str());
-				anyFailed = true;
-			}
-		}
+			});
 
-		int finalDecision = nzbget_rs_snh_post_renamer_decide_final_status(
-			IsStopped() ? 1 : 0, anyFailed ? 1 : 0, anyRenamed ? 1 : 0);
-		NzbgetRsBuf finalMsgBuf = nzbget_rs_dqh_post_renamer_format_final_status_msg(
-			*infoName, finalDecision);
-		if (finalDecision == 1)
-		{
-			PrintMessage(Message::mkWarning, "%s", finalMsgBuf.data ? finalMsgBuf.data : "");
-			nzbget_rs_free(finalMsgBuf);
-			Finish();
-			return;
-		}
-		if (finalDecision == 2)
-		{
-			PrintMessage(Message::mkError, "%s", finalMsgBuf.data ? finalMsgBuf.data : "");
-			finalStatus = NzbInfo::PostDownloadRenamingStatus::Failure;
-		}
-		else if (finalDecision == 3)
-		{
-			PrintMessage(Message::mkInfo, "%s", finalMsgBuf.data ? finalMsgBuf.data : "");
-			finalStatus = NzbInfo::PostDownloadRenamingStatus::Success;
-		}
-		else
-		{
-			PrintMessage(Message::mkInfo, "%s", finalMsgBuf.data ? finalMsgBuf.data : "");
-			finalStatus = NzbInfo::PostDownloadRenamingStatus::Skipped;
-		}
-		nzbget_rs_free(finalMsgBuf);
-
-		Finish();
+		GuardedDownloadQueue guard = DownloadQueue::Guard();
+		m_postInfo->GetNzbInfo()->SetPostDownloadRenamingStatus(
+			static_cast<NzbInfo::PostDownloadRenamingStatus>(status));
+		m_postInfo->SetWorking(false);
 	}
 
 	void Controller::AddMessage(Message::EKind kind, const char* text)

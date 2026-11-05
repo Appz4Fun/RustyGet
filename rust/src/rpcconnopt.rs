@@ -772,30 +772,8 @@ pub fn options_validate_scheduler_param(
 }
 
 // ============================================================================
-// ArchiveProcessor, Log & NString hot paths
+// Log & NString hot paths
 // ============================================================================
-
-/// Case-insensitively checks if `ext` is `".nzb"` for `ArchiveProcessor::IsNzbFile`.
-pub fn archive_is_nzb_extension(ext: &[u8]) -> bool {
-    ext.eq_ignore_ascii_case(b".nzb")
-}
-
-/// Determines the disposal action for `ArchiveProcessor::DisposeArchive`:
-/// - `1`: `Delete` configured, but `non_nzb_file_count > 0` -> move to processed dir to prevent data loss
-/// - `2`: `Delete` configured and `non_nzb_file_count == 0` -> delete archive
-/// - `3`: `Move` configured -> move archive to processed dir
-pub fn archive_decide_dispose_action(config_action: i32, non_nzb_file_count: i32) -> i32 {
-    // Options::ENzbDirArchiveAction::Delete == 0
-    if config_action == 0 {
-        if non_nzb_file_count > 0 {
-            1
-        } else {
-            2
-        }
-    } else {
-        3
-    }
-}
 
 /// Evaluates whether `Log::Filelog` should rotate the log file on a day boundary.
 pub fn log_should_rotate(rawtime: i64, last_written: i64, write_log_mode: i32) -> bool {
@@ -1150,12 +1128,6 @@ mod tests {
 
     #[test]
     fn test_cleanup_rename_archive_log_nstring() {
-        assert!(archive_is_nzb_extension(b".NZB"));
-        assert!(!archive_is_nzb_extension(b".rar"));
-        assert_eq!(archive_decide_dispose_action(0, 2), 1);
-        assert_eq!(archive_decide_dispose_action(0, 0), 2);
-        assert_eq!(archive_decide_dispose_action(1, 0), 3);
-
         assert!(log_should_rotate(86400 * 2, 86400, 3));
         assert!(!log_should_rotate(86400 + 10, 86400 + 5, 3));
         assert_eq!(log_init_message_disposition(0), (false, false));

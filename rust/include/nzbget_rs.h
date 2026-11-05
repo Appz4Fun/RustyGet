@@ -2157,9 +2157,6 @@ int nzbget_rs_rco_options_lookup_scheduler_command(const char* cmd);
 int nzbget_rs_rco_options_validate_scheduler_param(
     int task_command, const char* param, int split_cmd_empty);
 
-int nzbget_rs_rco_archive_is_nzb_extension(const char* ext);
-int nzbget_rs_rco_archive_decide_dispose_action(
-    int config_action, int non_nzb_file_count);
 int nzbget_rs_rco_log_should_rotate(
     int64_t rawtime, int64_t last_written, int write_log_mode);
 void nzbget_rs_rco_log_init_message_disposition(
@@ -2279,12 +2276,6 @@ double nzbget_rs_snh_speed_test_calc_mbps(uint32_t bytes, double time_sec);
 int nzbget_rs_snh_speed_test_is_required_more(
     size_t dataset_len, double curr_median, double prev_p25);
 int nzbget_rs_snh_speed_test_exceeded_max_failures(int failures, int iterations);
-
-int nzbget_rs_snh_post_renamer_classify_plan(
-    int is_disc, int is_ambiguous, int can_rename, int actions_empty,
-    int target_obfuscated);
-int nzbget_rs_snh_post_renamer_decide_final_status(
-    int is_stopped, int any_failed, int any_renamed);
 
 int nzbget_rs_snh_health_validate_par_buffer(int par_repair, int buffer_mb);
 int nzbget_rs_snh_health_validate_par_threads(
@@ -5726,10 +5717,6 @@ NzbgetRsBuf nzbget_rs_tpr_unpack_ctrl_format_cancel_msg(const char* info_name);
 NzbgetRsBuf nzbget_rs_tpr_rar_renamer_format_exec_progress(const char* info_name);
 NzbgetRsBuf nzbget_rs_tpr_rar_renamer_format_file_progress(const char* filename);
 NzbgetRsBuf nzbget_rs_dqh_content_map_format_member_unreadable_reason(const char* name);
-const char* nzbget_rs_dqh_post_renamer_plan_skip_static_msg(
-    int32_t is_post_unpack, int32_t plan_class);
-NzbgetRsBuf nzbget_rs_dqh_post_renamer_format_final_status_msg(
-    const char* info_name, int32_t final_decision);
 int64_t nzbget_rs_dqh_rar_volume_set_data_offset(int64_t position, int64_t packed_size);
 void nzbget_rs_dqh_stream_crypto_format_rar3_round_bytes(int32_t round, uint8_t* out_buf);
 int32_t nzbget_rs_dqh_stream_crypto_rar3_iv_index(int32_t round, int32_t rounds);
@@ -6620,6 +6607,35 @@ int nzbget_rs_rename_controller_complete_action(
     int has_missed_files, int par_status,
     int* out_request_extra_pars, int* out_request_par_check);
 int nzbget_rs_rename_controller_should_reset_par_status(int64_t remaining_size);
+
+int nzbget_rs_post_renamer_run(
+    int is_post_unpack,
+    const char* meta_name,
+    const char* nzb_name,
+    const char* dst_dir,
+    const char* ignore_ext,
+    void* ctx,
+    void (*info_name_cb)(void* ctx, const char* info_name),
+    int (*is_stopped_cb)(void* ctx),
+    void (*log_cb)(void* ctx, int kind, const char* msg),
+    void (*rename_cb)(void* ctx, const char* old_name, const char* new_name));
+
+void nzbget_rs_archive_processor_handle_extract_failure(
+    const char* archive_file,
+    const char* unpack_dir,
+    const char* broken_dir,
+    void* ctx,
+    void (*log_cb)(void* ctx, int kind, const char* msg));
+
+void nzbget_rs_archive_processor_finish(
+    const char* archive_file,
+    const char* unpack_dir,
+    const char* dest_dir,
+    const char* processed_dir,
+    int config_action,
+    void* ctx,
+    void (*log_cb)(void* ctx, int kind, const char* msg),
+    void (*moved_nzb_cb)(void* ctx, const char* moved_path));
 
 #include "nzbget_tls_cipher.h"
 

@@ -13219,23 +13219,6 @@ pub unsafe extern "C" fn nzbget_rs_rco_options_validate_scheduler_param(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rco_archive_is_nzb_extension(ext: *const c_char) -> c_int {
-    if crate::rpcconnopt::archive_is_nzb_extension(crate::diskstatepp::cstr_to_bytes(ext)) {
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rco_archive_decide_dispose_action(
-    config_action: c_int,
-    non_nzb_file_count: c_int,
-) -> c_int {
-    crate::rpcconnopt::archive_decide_dispose_action(config_action, non_nzb_file_count)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_rco_log_should_rotate(
     rawtime: i64,
     last_written: i64,
@@ -14207,36 +14190,6 @@ pub unsafe extern "C" fn nzbget_rs_snh_speed_test_exceeded_max_failures(
     i32::from(crate::sysnservhealth::speed_test_exceeded_max_failures(
         failures, iterations,
     ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_snh_post_renamer_classify_plan(
-    is_disc: c_int,
-    is_ambiguous: c_int,
-    can_rename: c_int,
-    actions_empty: c_int,
-    target_obfuscated: c_int,
-) -> c_int {
-    crate::sysnservhealth::post_renamer_classify_plan(
-        is_disc != 0,
-        is_ambiguous != 0,
-        can_rename != 0,
-        actions_empty != 0,
-        target_obfuscated != 0,
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_snh_post_renamer_decide_final_status(
-    is_stopped: c_int,
-    any_failed: c_int,
-    any_renamed: c_int,
-) -> c_int {
-    crate::sysnservhealth::post_renamer_decide_final_status(
-        is_stopped != 0,
-        any_failed != 0,
-        any_renamed != 0,
-    )
 }
 
 #[no_mangle]
@@ -33105,30 +33058,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_content_map_format_member_unreadable_reas
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_post_renamer_plan_skip_static_msg(
-    is_post_unpack: i32,
-    plan_class: i32,
-) -> *const c_char {
-    crate::dupequeuehealth::dqh_post_renamer_plan_skip_static_msg(is_post_unpack != 0, plan_class)
-        .as_ptr() as *const c_char
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_post_renamer_format_final_status_msg(
-    info_name: *const c_char,
-    final_decision: i32,
-) -> RsBuf {
-    let n = if info_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(info_name).to_bytes()
-    };
-    into_buf(
-        crate::dupequeuehealth::dqh_post_renamer_format_final_status_msg(n, final_decision),
-    )
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_rar_volume_set_data_offset(
     position: i64,
     packed_size: i64,
@@ -40143,5 +40072,130 @@ pub extern "C" fn nzbget_rs_rename_controller_should_reset_par_status(
     i32::from(crate::cleanup::rename_should_reset_par_status(
         remaining_size,
     ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_post_renamer_run(
+    is_post_unpack: c_int,
+    meta_name: *const c_char,
+    nzb_name: *const c_char,
+    dst_dir: *const c_char,
+    ignore_ext: *const c_char,
+    ctx: *mut std::ffi::c_void,
+    info_name_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
+    is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
+    log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
+    rename_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *const c_char)>,
+) -> c_int {
+    let meta_bytes = crate::diskstatepp::cstr_to_bytes(meta_name);
+    let nzb_bytes = crate::diskstatepp::cstr_to_bytes(nzb_name);
+    let dst_path = crate::cleanup::bytes_to_path_buf(crate::diskstatepp::cstr_to_bytes(dst_dir));
+    let ignore_bytes = crate::diskstatepp::cstr_to_bytes(ignore_ext);
+
+    crate::cleanup::run_post_renamer(
+        is_post_unpack != 0,
+        meta_bytes,
+        nzb_bytes,
+        &dst_path,
+        ignore_bytes,
+        |info| {
+            if let Some(cb) = info_name_cb {
+                let c_info = bytes_to_cstr_buf(info);
+                cb(ctx, c_info.as_ptr() as *const c_char);
+            }
+        },
+        || {
+            if let Some(cb) = is_stopped_cb {
+                cb(ctx) != 0
+            } else {
+                false
+            }
+        },
+        |kind, msg| {
+            if let Some(cb) = log_cb {
+                let c_msg = bytes_to_cstr_buf(msg);
+                cb(ctx, kind as c_int, c_msg.as_ptr() as *const c_char);
+            }
+        },
+        |old_name, new_name| {
+            if let Some(cb) = rename_cb {
+                let c_old = bytes_to_cstr_buf(old_name);
+                let c_new = bytes_to_cstr_buf(new_name);
+                cb(
+                    ctx,
+                    c_old.as_ptr() as *const c_char,
+                    c_new.as_ptr() as *const c_char,
+                );
+            }
+        },
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_archive_processor_handle_extract_failure(
+    archive_file: *const c_char,
+    unpack_dir: *const c_char,
+    broken_dir: *const c_char,
+    ctx: *mut std::ffi::c_void,
+    log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
+) {
+    let archive_path =
+        crate::cleanup::bytes_to_path_buf(crate::diskstatepp::cstr_to_bytes(archive_file));
+    let unpack_path =
+        crate::cleanup::bytes_to_path_buf(crate::diskstatepp::cstr_to_bytes(unpack_dir));
+    let broken_path =
+        crate::cleanup::bytes_to_path_buf(crate::diskstatepp::cstr_to_bytes(broken_dir));
+
+    crate::cleanup::archive_handle_extract_failure(
+        &archive_path,
+        &unpack_path,
+        &broken_path,
+        |kind, msg| {
+            if let Some(cb) = log_cb {
+                let c_msg = bytes_to_cstr_buf(msg);
+                cb(ctx, kind as c_int, c_msg.as_ptr() as *const c_char);
+            }
+        },
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_archive_processor_finish(
+    archive_file: *const c_char,
+    unpack_dir: *const c_char,
+    dest_dir: *const c_char,
+    processed_dir: *const c_char,
+    config_action: c_int,
+    ctx: *mut std::ffi::c_void,
+    log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
+    moved_nzb_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
+) {
+    let archive_path =
+        crate::cleanup::bytes_to_path_buf(crate::diskstatepp::cstr_to_bytes(archive_file));
+    let unpack_path =
+        crate::cleanup::bytes_to_path_buf(crate::diskstatepp::cstr_to_bytes(unpack_dir));
+    let dest_path = crate::cleanup::bytes_to_path_buf(crate::diskstatepp::cstr_to_bytes(dest_dir));
+    let processed_path =
+        crate::cleanup::bytes_to_path_buf(crate::diskstatepp::cstr_to_bytes(processed_dir));
+
+    crate::cleanup::archive_finish_extracted(
+        &archive_path,
+        &unpack_path,
+        &dest_path,
+        &processed_path,
+        config_action,
+        |kind, msg| {
+            if let Some(cb) = log_cb {
+                let c_msg = bytes_to_cstr_buf(msg);
+                cb(ctx, kind as c_int, c_msg.as_ptr() as *const c_char);
+            }
+        },
+        |moved_path| {
+            if let Some(cb) = moved_nzb_cb {
+                let c_path = bytes_to_cstr_buf(moved_path);
+                cb(ctx, c_path.as_ptr() as *const c_char);
+            }
+        },
+    );
 }
 

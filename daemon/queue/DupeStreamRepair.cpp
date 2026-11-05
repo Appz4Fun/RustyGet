@@ -303,36 +303,21 @@ int64 DupeStreamRepair::RequiredCompareFloor(int64 decodedFileSize, const Stream
 
 bool DupeStreamRepair::BuildRepairJob(FileInfo* fileInfo, const char* diskBasename)
 {
-	if (nzbget_rs_dcf_stream_repair_should_skip_build_job(
+	NzbInfo* nzbInfo = fileInfo->GetNzbInfo();
+	int jobMode = nzbget_rs_stream_eval_build_repair_job(
 		(int)g_Options->GetDupeArticleFallback(),
 		(int)Options::dafStream,
 		g_Options->GetRawArticle() ? 1 : 0,
 		DupeArticleFallback::IsParFile(fileInfo) ? 1 : 0,
-		diskBasename) != 0)
-	{
-		return false;
-	}
-
-	NzbInfo* nzbInfo = fileInfo->GetNzbInfo();
-	// a health cancel keeps the files for "Download remaining files": the file
-	// whose last article set it off still takes its job
-	if (!nzbget_rs_cdn_stream_repair_is_nzb_eligible_for_job(
+		diskBasename,
 		nzbInfo ? 1 : 0,
 		nzbInfo ? (int)nzbInfo->GetDeleteStatus() : 0,
 		(int)NzbInfo::dsNone,
 		(int)NzbInfo::dsHealth,
 		nzbInfo && nzbInfo->GetDeleting() ? 1 : 0,
 		nzbInfo && nzbInfo->GetParking() ? 1 : 0,
-		nzbInfo && nzbInfo->GetPostInfo() != nullptr ? 1 : 0))
-	{
-		// the PostInfo check: files completing AFTER post-processing started
-		// (par-check unpauses par2 volumes mid-repair) must not re-arm the
-		// already-drained job list for a second stream-repair pass
-		return false;
-	}
-
-	int jobMode = nzbget_rs_dqh_stream_repair_classify_build_job_mode(
-		(Util::EmptyStr(diskBasename) || fileInfo->GetArticles()->empty()) ? 1 : 0,
+		nzbInfo && nzbInfo->GetPostInfo() != nullptr ? 1 : 0,
+		fileInfo->GetArticles()->empty() ? 1 : 0,
 		fileInfo->GetSuccessArticles(),
 		fileInfo->GetSize(),
 		fileInfo->GetDecodedFileSize());

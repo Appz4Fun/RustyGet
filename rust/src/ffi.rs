@@ -15759,165 +15759,6 @@ pub unsafe extern "C" fn nzbget_rs_cdn_dupe_fallback_classify_first_head(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_cdn_stream_repair_is_nzb_eligible_for_job(
-    has_nzb: c_int,
-    delete_status: c_int,
-    ds_none: c_int,
-    ds_health: c_int,
-    deleting: c_int,
-    parking: c_int,
-    has_post_info: c_int,
-) -> c_int {
-    i32::from(
-        crate::contentdupenntp::stream_repair_is_nzb_eligible_for_job(
-            has_nzb != 0,
-            delete_status,
-            ds_none,
-            ds_health,
-            deleting != 0,
-            parking != 0,
-            has_post_info != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cdn_stream_repair_check_fetched_member_part(
-    success: c_int,
-    data_len: usize,
-    offset: i64,
-    fetched_file_size: i64,
-    member_size: i64,
-    out_mark_member_bad: *mut c_int,
-) -> c_int {
-    let (invalid, mark_bad) = crate::contentdupenntp::stream_repair_check_fetched_member_part(
-        success != 0,
-        data_len,
-        offset,
-        fetched_file_size,
-        member_size,
-    );
-    if !out_mark_member_bad.is_null() {
-        *out_mark_member_bad = i32::from(mark_bad);
-    }
-    i32::from(invalid)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cdn_stream_repair_eval_slow_rate(
-    download_rate: i64,
-    recovered: i64,
-    remaining: i64,
-    elapsed_sec: f64,
-    timeout_sec: c_int,
-    slow_repair_factor: c_int,
-    out_repair_mb_s: *mut f64,
-    out_remaining_mb: *mut f64,
-    out_repair_sec: *mut f64,
-    out_download_mb_s: *mut f64,
-) -> c_int {
-    let (is_slow, repair_mb_s, rem_mb, repair_sec, dl_mb_s) =
-        crate::contentdupenntp::stream_repair_eval_slow_rate(
-            download_rate,
-            recovered,
-            remaining,
-            elapsed_sec,
-            timeout_sec,
-            slow_repair_factor,
-        );
-    if !out_repair_mb_s.is_null() {
-        *out_repair_mb_s = repair_mb_s;
-    }
-    if !out_remaining_mb.is_null() {
-        *out_remaining_mb = rem_mb;
-    }
-    if !out_repair_sec.is_null() {
-        *out_repair_sec = repair_sec;
-    }
-    if !out_download_mb_s.is_null() {
-        *out_download_mb_s = dl_mb_s;
-    }
-    i32::from(is_slow)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_cdn_stream_repair_is_incomplete_nzb_hole(
-    missing: i64,
-    encoded_size: i64,
-) -> c_int {
-    i32::from(crate::contentdupenntp::stream_repair_is_incomplete_nzb_hole(
-        missing,
-        encoded_size,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_cdn_stream_repair_materialize_article_valid(
-    success: c_int,
-    data_len: usize,
-    offset: i64,
-    fetched_file_size: i64,
-    member_size: i64,
-) -> c_int {
-    i32::from(
-        crate::contentdupenntp::stream_repair_materialize_article_valid(
-            success != 0,
-            data_len,
-            offset,
-            fetched_file_size,
-            member_size,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cdn_stream_repair_credit_repaired_sizes(
-    recovered_failed_size: i64,
-    recovered_failed_par_size: i64,
-    inout_failed_size: *mut i64,
-    inout_success_size: *mut i64,
-    inout_cur_failed_size: *mut i64,
-    inout_cur_success_size: *mut i64,
-    inout_par_failed_size: *mut i64,
-    inout_par_success_size: *mut i64,
-    inout_par_cur_failed_size: *mut i64,
-    inout_par_cur_success_size: *mut i64,
-) {
-    if inout_failed_size.is_null()
-        || inout_success_size.is_null()
-        || inout_cur_failed_size.is_null()
-        || inout_cur_success_size.is_null()
-        || inout_par_failed_size.is_null()
-        || inout_par_success_size.is_null()
-        || inout_par_cur_failed_size.is_null()
-        || inout_par_cur_success_size.is_null()
-    {
-        return;
-    }
-    let (nf, ns, ncf, ncs, npf, nps, npcf, npcs) =
-        crate::contentdupenntp::stream_repair_credit_repaired_sizes(
-            recovered_failed_size,
-            recovered_failed_par_size,
-            *inout_failed_size,
-            *inout_success_size,
-            *inout_cur_failed_size,
-            *inout_cur_success_size,
-            *inout_par_failed_size,
-            *inout_par_success_size,
-            *inout_par_cur_failed_size,
-            *inout_par_cur_success_size,
-        );
-    *inout_failed_size = nf;
-    *inout_success_size = ns;
-    *inout_cur_failed_size = ncf;
-    *inout_cur_success_size = ncs;
-    *inout_par_failed_size = npf;
-    *inout_par_success_size = nps;
-    *inout_par_cur_failed_size = npcf;
-    *inout_par_cur_success_size = npcs;
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_cdn_article_fetcher_eval_decoded_yenc(
     check_status: c_int,
     ds_finished: c_int,
@@ -17091,420 +16932,6 @@ pub extern "C" fn nzbget_rs_pnd_dupe_fallback_compare_donors(
         score2,
         id2,
     ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_stq_stream_repair_is_first_donor_part_valid(
-    has_first: c_int,
-    success: c_int,
-    offset: i64,
-) -> c_int {
-    i32::from(
-        crate::streamtwinqueue::stream_repair_is_first_donor_part_valid(
-            has_first != 0,
-            success != 0,
-            offset,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stq_stream_repair_step_part_for_offset(
-    offset: i64,
-    fetched_offset: i64,
-    fetched_len: usize,
-    index: c_int,
-    ranges_len: usize,
-    out_new_index: *mut c_int,
-) -> c_int {
-    let (status, new_idx) = crate::streamtwinqueue::stream_repair_step_part_for_offset(
-        offset,
-        fetched_offset,
-        fetched_len,
-        index,
-        ranges_len,
-    );
-    *out_new_index = new_idx;
-    status
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stq_stream_repair_calc_prefetch_bounds(
-    first_est: c_int,
-    last_est: c_int,
-    ranges_len: usize,
-    out_first: *mut c_int,
-    out_last: *mut c_int,
-) {
-    let (f, l) =
-        crate::streamtwinqueue::stream_repair_calc_prefetch_bounds(first_est, last_est, ranges_len);
-    *out_first = f;
-    *out_last = l;
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stq_stream_repair_calc_donor_read_chunk(
-    pos: i64,
-    fetched_offset: i64,
-    fetched_data_len: usize,
-    end_offset: i64,
-    out_from: *mut i64,
-    out_len: *mut i64,
-) {
-    let (from, len) = crate::streamtwinqueue::stream_repair_calc_donor_read_chunk(
-        pos,
-        fetched_offset,
-        fetched_data_len,
-        end_offset,
-    );
-    *out_from = from;
-    *out_len = len;
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stq_stream_repair_is_par2_job_or_file(
-    is_par_file: c_int,
-    filename: *const c_char,
-) -> c_int {
-    let fname = if filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(filename).to_bytes()
-    };
-    i32::from(crate::streamtwinqueue::stream_repair_is_par2_job_or_file(
-        is_par_file != 0,
-        fname,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_stq_stream_repair_is_donor_nzb_pre_eligible(
-    is_self: c_int,
-    kind: c_int,
-    nk_nzb: c_int,
-    dupe_mode: c_int,
-    dm_force: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamtwinqueue::stream_repair_is_donor_nzb_pre_eligible(
-            is_self != 0,
-            kind,
-            nk_nzb,
-            dupe_mode,
-            dm_force,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stq_stream_repair_should_skip_donor_candidate(
-    own_full_hash: u32,
-    donor_full_hash: u32,
-    queued_filename: *const c_char,
-) -> c_int {
-    let qname = if queued_filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(queued_filename).to_bytes()
-    };
-    i32::from(
-        crate::streamtwinqueue::stream_repair_should_skip_donor_candidate(
-            own_full_hash,
-            donor_full_hash,
-            qname,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stq_stream_repair_eval_donor_outcome_bail(
-    outcome: c_int,
-    ro_productive: c_int,
-    ro_unproductive: c_int,
-    donor_proven: c_int,
-    cur_consecutive_failures: c_int,
-    donor_failure_bail: c_int,
-    unproven_donor_bail: c_int,
-    out_new_consecutive_failures: *mut c_int,
-) -> c_int {
-    let (next, bail) = crate::streamtwinqueue::stream_repair_eval_donor_outcome_bail(
-        outcome,
-        ro_productive,
-        ro_unproductive,
-        donor_proven != 0,
-        cur_consecutive_failures,
-        donor_failure_bail,
-        unproven_donor_bail,
-    );
-    *out_new_consecutive_failures = next;
-    i32::from(bail)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_stq_stream_repair_resolve_repair_file_outcome(
-    patched: c_int,
-    spent_fetches: c_int,
-    ro_productive: c_int,
-    ro_unproductive: c_int,
-    ro_no_cost: c_int,
-) -> c_int {
-    crate::streamtwinqueue::stream_repair_resolve_repair_file_outcome(
-        patched != 0,
-        spent_fetches != 0,
-        ro_productive,
-        ro_unproductive,
-        ro_no_cost,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_stq_stream_repair_calc_probe_replacement_count(
-    missing: c_int,
-    reserve_len: usize,
-    max_probe_fetches: c_int,
-    attempted_len: usize,
-) -> c_int {
-    crate::streamtwinqueue::stream_repair_calc_probe_replacement_count(
-        missing,
-        reserve_len,
-        max_probe_fetches,
-        attempted_len,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_stq_stream_repair_pick_replacement_index(
-    reserve_len: usize,
-    k: c_int,
-    replacements: c_int,
-) -> usize {
-    crate::streamtwinqueue::stream_repair_pick_replacement_index(reserve_len, k, replacements)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stq_stream_repair_is_probe_article_valid(
-    success: c_int,
-    data_len: usize,
-    file_size: i64,
-    offset: i64,
-    target_decoded_size: i64,
-    out_is_missing: *mut c_int,
-) -> c_int {
-    let (valid, missing) = crate::streamtwinqueue::stream_repair_is_probe_article_valid(
-        success != 0,
-        data_len,
-        file_size,
-        offset,
-        target_decoded_size,
-    );
-    *out_is_missing = i32::from(missing);
-    i32::from(valid)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stq_stream_repair_clip_hole_to_fetched(
-    hole_offset: i64,
-    hole_size: i64,
-    fetched_offset: i64,
-    fetched_len: usize,
-    out_from: *mut i64,
-    out_to: *mut i64,
-) -> c_int {
-    if let Some((from, to)) = crate::streamtwinqueue::stream_repair_clip_hole_to_fetched(
-        hole_offset,
-        hole_size,
-        fetched_offset,
-        fetched_len,
-    ) {
-        *out_from = from;
-        *out_to = to;
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stq_stream_repair_classify_remaining_hole_target(
-    interrupted: c_int,
-    decoded_file_size: i64,
-    holes_empty: c_int,
-    is_par_file: c_int,
-    failed_articles: c_int,
-    failed_size: i64,
-    missed_size: i64,
-    inout_recovered_articles: *mut c_int,
-    inout_recovered_failed_size: *mut i64,
-    inout_recovered_failed_par_size: *mut i64,
-) -> c_int {
-    let (status, rec_arts, rec_fsize, rec_pfsize) =
-        crate::streamtwinqueue::stream_repair_classify_remaining_hole_target(
-            interrupted != 0,
-            decoded_file_size,
-            holes_empty != 0,
-            is_par_file != 0,
-            failed_articles,
-            failed_size,
-            missed_size,
-            *inout_recovered_articles,
-            *inout_recovered_failed_size,
-            *inout_recovered_failed_par_size,
-        );
-    *inout_recovered_articles = rec_arts;
-    *inout_recovered_failed_size = rec_fsize;
-    *inout_recovered_failed_par_size = rec_pfsize;
-    status
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stq_stream_repair_patch_from_donor_set_step_failure(
-    chunk: i64,
-    min_chunk: i64,
-    inout_size: *mut i64,
-    inout_pos: *mut i64,
-    inout_failed_pieces: *mut c_int,
-    max_failed_pieces: c_int,
-) -> c_int {
-    let (action, new_sz, new_pos, new_failed) =
-        crate::streamtwinqueue::stream_repair_patch_from_donor_set_step_failure(
-            chunk,
-            min_chunk,
-            *inout_size,
-            *inout_pos,
-            *inout_failed_pieces,
-            max_failed_pieces,
-        );
-    *inout_size = new_sz;
-    *inout_pos = new_pos;
-    *inout_failed_pieces = new_failed;
-    action
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stq_stream_repair_encrypted_clip_live_hole(
-    hole_offset: i64,
-    hole_size: i64,
-    live_holes: *const crate::dupefallback::NzbgetRsByteRange,
-    live_holes_len: usize,
-    last_computable: i64,
-    block_size: i64,
-    inout_uncomputable_tail: *mut i64,
-    out_hole_from: *mut i64,
-    out_patch_to: *mut i64,
-    out_block_from: *mut i64,
-    out_block_to: *mut i64,
-) -> c_int {
-    let slice = if live_holes.is_null() || live_holes_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(live_holes, live_holes_len)
-    };
-    let (ok, new_tail, h_from, p_to, b_from, b_to) =
-        crate::streamtwinqueue::stream_repair_encrypted_clip_live_hole(
-            hole_offset,
-            hole_size,
-            slice,
-            last_computable,
-            block_size,
-            *inout_uncomputable_tail,
-        );
-    *inout_uncomputable_tail = new_tail;
-    *out_hole_from = h_from;
-    *out_patch_to = p_to;
-    *out_block_from = b_from;
-    *out_block_to = b_to;
-    i32::from(ok)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stq_stream_repair_encrypted_is_prev_block_present(
-    block_from: i64,
-    block_size: i64,
-    live_holes: *const crate::dupefallback::NzbgetRsByteRange,
-    live_holes_len: usize,
-) -> c_int {
-    let slice = if live_holes.is_null() || live_holes_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(live_holes, live_holes_len)
-    };
-    i32::from(
-        crate::streamtwinqueue::stream_repair_encrypted_is_prev_block_present(
-            block_from, block_size, slice,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stq_stream_repair_resolve_completion_par_action(
-    recovered_bytes: i64,
-    holes_remain: c_int,
-    par_rename_status: c_int,
-    rs_none: c_int,
-    par_status: c_int,
-    ps_skipped: c_int,
-    par_check_opt: c_int,
-    pc_manual: c_int,
-    ps_manual: c_int,
-    ps_none: c_int,
-    out_reset_par_rename: *mut c_int,
-    out_set_par_status: *mut c_int,
-    out_new_par_status: *mut c_int,
-    out_force_par_full: *mut c_int,
-    out_set_request_par_check_false: *mut c_int,
-    out_check_main_pars: *mut c_int,
-) {
-    let (rst_ren, set_ps, new_ps, force_full, req_false, chk_pars) =
-        crate::streamtwinqueue::stream_repair_resolve_completion_par_action(
-            recovered_bytes,
-            holes_remain != 0,
-            par_rename_status,
-            rs_none,
-            par_status,
-            ps_skipped,
-            par_check_opt,
-            pc_manual,
-            ps_manual,
-            ps_none,
-        );
-    *out_reset_par_rename = i32::from(rst_ren);
-    *out_set_par_status = i32::from(set_ps);
-    *out_new_par_status = new_ps;
-    *out_force_par_full = i32::from(force_full);
-    *out_set_request_par_check_false = i32::from(req_false);
-    *out_check_main_pars = i32::from(chk_pars);
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stq_dupe_stream_repair_is_extracted_entry_valid(
-    entry_count: usize,
-    max_entries: usize,
-    size: i64,
-    max_bytes: i64,
-    inout_extracted_bytes: *mut i64,
-    inner_size: i64,
-    out_is_size_match: *mut c_int,
-) -> c_int {
-    let (valid, next_bytes, is_match) =
-        crate::streamtwinqueue::dupe_stream_repair_is_extracted_entry_valid(
-            entry_count,
-            max_entries,
-            size,
-            max_bytes,
-            *inout_extracted_bytes,
-            inner_size,
-        );
-    *inout_extracted_bytes = next_bytes;
-    *out_is_size_match = i32::from(is_match);
-    i32::from(valid)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_stq_dupe_stream_repair_calc_abs_size_diff(
-    size1: i64,
-    size2: i64,
-) -> i64 {
-    crate::streamtwinqueue::dupe_stream_repair_calc_abs_size_diff(size1, size2)
 }
 
 // ============================================================================
@@ -19258,51 +18685,6 @@ pub extern "C" fn nzbget_rs_dcf_dupe_fallback_select_named_content_match(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dcf_stream_repair_should_skip_build_job(
-    fallback_mode: c_int,
-    daf_stream: c_int,
-    raw_article: c_int,
-    is_par_file: c_int,
-    disk_basename: *const c_char,
-) -> c_int {
-    crate::dupecoordfallbackstream::stream_repair_should_skip_build_job(
-        fallback_mode,
-        daf_stream,
-        raw_article,
-        is_par_file,
-        crate::queuehotpath::cstr_to_bytes(disk_basename),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dcf_stream_repair_can_add_candidate(
-    candidates_len: usize,
-    max_candidates: c_int,
-    is_claimed: c_int,
-    already_present: c_int,
-) -> c_int {
-    crate::dupecoordfallbackstream::stream_repair_can_add_candidate(
-        candidates_len,
-        max_candidates,
-        is_claimed,
-        already_present,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dcf_stream_repair_is_positional_rank_applicable(
-    positional_rank: c_int,
-    positional_window: c_int,
-    window_len: usize,
-) -> c_int {
-    crate::dupecoordfallbackstream::stream_repair_is_positional_rank_applicable(
-        positional_rank,
-        positional_window,
-        window_len,
-    )
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_roc_xmlrpc_multicall_needs_array_wrap(
     resp: *const c_char,
 ) -> c_int {
@@ -19647,134 +19029,6 @@ pub unsafe extern "C" fn nzbget_rs_roc_remote_client_calc_group_unpaused_remaini
 // ============================================================================
 // Batch 37: streamarticleparrepair (sap_*)
 // ============================================================================
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_sap_stream_repair_donor_index_for_offset(
-    offset: i64,
-    drift: i64,
-    ranges: *const crate::dupefallback::NzbgetRsByteRange,
-    num_ranges: usize,
-) -> c_int {
-    let slice = if ranges.is_null() || num_ranges == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(ranges, num_ranges) }
-    };
-    crate::streamarticleparrepair::sap_stream_repair_donor_index_for_offset(offset, drift, slice)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sap_stream_repair_can_evict_donor_cache(
-    cache_len: usize,
-    max_cached_parts: c_int,
-    order_len: usize,
-) -> c_int {
-    i32::from(
-        crate::streamarticleparrepair::sap_stream_repair_can_evict_donor_cache(
-            cache_len,
-            max_cached_parts,
-            order_len,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sap_stream_repair_target_missing_bytes(
-    decoded_file_size: i64,
-    holes_total_size: i64,
-    encoded_size: i64,
-) -> i64 {
-    crate::streamarticleparrepair::sap_stream_repair_target_missing_bytes(
-        decoded_file_size,
-        holes_total_size,
-        encoded_size,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sap_stream_repair_watchdog_calc_download_rate(
-    download_time_sec: c_int,
-    all_bytes: i64,
-) -> i64 {
-    crate::streamarticleparrepair::sap_stream_repair_watchdog_calc_download_rate(
-        download_time_sec,
-        all_bytes,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sap_stream_repair_whole_file_existing_reusable(
-    existing_size: i64,
-    fetched_file_size: i64,
-) -> c_int {
-    i32::from(
-        crate::streamarticleparrepair::sap_stream_repair_whole_file_existing_reusable(
-            existing_size,
-            fetched_file_size,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sap_stream_repair_verify_donor_pool_stop(
-    probe_count: usize,
-    min_probe_count: c_int,
-    pooled: i64,
-    base_floor: i64,
-) -> c_int {
-    i32::from(
-        crate::streamarticleparrepair::sap_stream_repair_verify_donor_pool_stop(
-            probe_count,
-            min_probe_count,
-            pooled,
-            base_floor,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sap_stream_repair_patch_should_break_pass2(
-    fetched_any: c_int,
-    drift: i64,
-) -> c_int {
-    i32::from(
-        crate::streamarticleparrepair::sap_stream_repair_patch_should_break_pass2(
-            fetched_any != 0,
-            drift,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sap_stream_repair_mapping_budget(member_count: usize) -> c_int {
-    crate::streamarticleparrepair::sap_stream_repair_mapping_budget(member_count)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sap_stream_repair_encrypted_achievable_bytes(
-    window_offset: i64,
-    window_size: i64,
-    last_computable: i64,
-    chain_start: i64,
-) -> i64 {
-    crate::streamarticleparrepair::sap_stream_repair_encrypted_achievable_bytes(
-        window_offset,
-        window_size,
-        last_computable,
-        chain_start,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sap_stream_repair_materialize_stage_progress(
-    completed_articles: i64,
-    total_articles: i64,
-) -> c_int {
-    crate::streamarticleparrepair::sap_stream_repair_materialize_stage_progress(
-        completed_articles,
-        total_articles,
-    )
-}
 
 #[no_mangle]
 pub extern "C" fn nzbget_rs_sap_article_writer_log_start_mode(
@@ -20482,488 +19736,6 @@ pub extern "C" fn nzbget_rs_qcf_dupe_fallback_resolve_structural_or_filename_mat
 // ============================================================================
 // Batch 40: postunpackrenamehist (`pur_*`)
 // ============================================================================
-
-// --- Batch 41: streamrepairparcheck (srp_*) ---
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_srp_stream_repair_is_member_index_in_bounds(
-    member_index: c_int,
-    entries_len: usize,
-) -> c_int {
-    i32::from(
-        crate::streamrepairparcheck::srp_stream_repair_is_member_index_in_bounds(
-            member_index,
-            entries_len,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_srp_stream_repair_max_disk_and_member_size(
-    disk_size: i64,
-    member_size: i64,
-) -> i64 {
-    crate::streamrepairparcheck::srp_stream_repair_max_disk_and_member_size(
-        disk_size,
-        member_size,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_srp_stream_repair_donor_fetch_part_can_proceed(
-    part_index: c_int,
-    articles_len: usize,
-    is_bad: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamrepairparcheck::srp_stream_repair_donor_fetch_part_can_proceed(
-            part_index,
-            articles_len,
-            is_bad != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_srp_stream_repair_donor_consume_fetch_budget(
-    has_budget: c_int,
-    current_budget: c_int,
-    out_new_budget: *mut c_int,
-) -> c_int {
-    let mut new_budget = current_budget;
-    let ok = crate::streamrepairparcheck::srp_stream_repair_donor_consume_fetch_budget(
-        has_budget != 0,
-        current_budget,
-        &mut new_budget,
-    );
-    if !out_new_budget.is_null() {
-        *out_new_budget = new_budget;
-    }
-    i32::from(ok)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_srp_stream_repair_can_prefetch_donor_range(
-    has_batch_fetcher: c_int,
-    has_fetch_budget: c_int,
-    is_bad: c_int,
-    ranges_empty: c_int,
-    size: i64,
-) -> c_int {
-    i32::from(
-        crate::streamrepairparcheck::srp_stream_repair_can_prefetch_donor_range(
-            has_batch_fetcher != 0,
-            has_fetch_budget != 0,
-            is_bad != 0,
-            ranges_empty != 0,
-            size,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_srp_stream_repair_should_run_cross_pack(
-    any_holes: c_int,
-    is_stopped: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamrepairparcheck::srp_stream_repair_should_run_cross_pack(
-            any_holes != 0,
-            is_stopped != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_srp_stream_repair_should_clear_post_working_after_live(
-    has_post_info: c_int,
-    has_unpack_thread: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamrepairparcheck::srp_stream_repair_should_clear_post_working_after_live(
-            has_post_info != 0,
-            has_unpack_thread != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_srp_stream_repair_should_include_file_in_donor_dead_pass(
-    total_articles: c_int,
-    pass: c_int,
-    is_par_file: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamrepairparcheck::srp_stream_repair_should_include_file_in_donor_dead_pass(
-            total_articles,
-            pass,
-            is_par_file != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_srp_stream_repair_should_check_donor_dead_samples(
-    samples_len: usize,
-    min_articles: c_int,
-    is_stopped: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamrepairparcheck::srp_stream_repair_should_check_donor_dead_samples(
-            samples_len,
-            min_articles,
-            is_stopped != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_srp_stream_repair_is_eligible_target_for_round(
-    patch_eligible: c_int,
-    needs_repair: c_int,
-    decoded_file_size: i64,
-    round: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamrepairparcheck::srp_stream_repair_is_eligible_target_for_round(
-            patch_eligible != 0,
-            needs_repair != 0,
-            decoded_file_size,
-            round,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_srp_stream_repair_should_stop_sibling_donor_probes(
-    verified: c_int,
-    probed: c_int,
-    max_donor_candidates: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamrepairparcheck::srp_stream_repair_should_stop_sibling_donor_probes(
-            verified != 0,
-            probed,
-            max_donor_candidates,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_srp_stream_repair_is_patch_article_usable(
-    success: c_int,
-    fetched_file_size: i64,
-    target_decoded_size: i64,
-    data_len: usize,
-    fetched_offset: i64,
-) -> c_int {
-    i32::from(
-        crate::streamrepairparcheck::srp_stream_repair_is_patch_article_usable(
-            success != 0,
-            fetched_file_size,
-            target_decoded_size,
-            data_len,
-            fetched_offset,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_srp_stream_repair_should_retry_donor_map_with_password(
-    has_map: c_int,
-    password_empty: c_int,
-    skip_is_encrypted_data: c_int,
-    skip_is_encrypted_headers: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamrepairparcheck::srp_stream_repair_should_retry_donor_map_with_password(
-            has_map != 0,
-            password_empty != 0,
-            skip_is_encrypted_data != 0,
-            skip_is_encrypted_headers != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_srp_stream_repair_can_verify_donor_inner_file(
-    is_encrypted: c_int,
-    expect_encrypted: c_int,
-    donor_inner_size: i64,
-    target_inner_size: i64,
-) -> c_int {
-    i32::from(
-        crate::streamrepairparcheck::srp_stream_repair_can_verify_donor_inner_file(
-            is_encrypted != 0,
-            expect_encrypted != 0,
-            donor_inner_size,
-            target_inner_size,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_srp_stream_repair_classify_completed_target_mark(
-    decoded_file_size: i64,
-    holes_empty: c_int,
-    recreated: c_int,
-) -> c_int {
-    crate::streamrepairparcheck::srp_stream_repair_classify_completed_target_mark(
-        decoded_file_size,
-        holes_empty != 0,
-        recreated != 0,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_srp_stream_repair_has_any_recovered_stats(
-    recovered_articles: c_int,
-    recovered_bytes: i64,
-    recovered_holes: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamrepairparcheck::srp_stream_repair_has_any_recovered_stats(
-            recovered_articles,
-            recovered_bytes,
-            recovered_holes,
-        ),
-    )
-}
-
-// --- Batch 42: streamrepaircontentmap (src_*) ---
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_src_stream_repair_is_active_primary_server(
-    active: c_int,
-    norm_level: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamrepaircontentmap::src_stream_repair_is_active_primary_server(
-            active != 0,
-            norm_level,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_src_stream_repair_can_prove_donor_on_intact_file(
-    target_set_empty: c_int,
-    donor_set_empty: c_int,
-    has_stand_in: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamrepaircontentmap::src_stream_repair_can_prove_donor_on_intact_file(
-            target_set_empty != 0,
-            donor_set_empty != 0,
-            has_stand_in != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_src_stream_repair_should_stop_intact_proof_loop(
-    is_stopped: c_int,
-    tried: c_int,
-    max_intact_proof_files: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamrepaircontentmap::src_stream_repair_should_stop_intact_proof_loop(
-            is_stopped != 0,
-            tried,
-            max_intact_proof_files,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_src_stream_repair_matches_intact_candidate_pass(
-    same_number: c_int,
-    pass: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamrepaircontentmap::src_stream_repair_matches_intact_candidate_pass(
-            same_number != 0,
-            pass,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_src_stream_repair_should_skip_size_probe_index(
-    sized: c_int,
-    is_stopped: c_int,
-    index: usize,
-    articles_len: usize,
-) -> c_int {
-    i32::from(
-        crate::streamrepaircontentmap::src_stream_repair_should_skip_size_probe_index(
-            sized != 0,
-            is_stopped != 0,
-            index,
-            articles_len,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_src_stream_repair_should_mark_completed_repaired(
-    file_id: c_int,
-    target_file_id: c_int,
-    status: c_int,
-    cf_success: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamrepaircontentmap::src_stream_repair_should_mark_completed_repaired(
-            file_id,
-            target_file_id,
-            status,
-            cf_success,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_src_stream_repair_should_mark_completed_recreated(
-    file_id: c_int,
-    target_file_id: c_int,
-    status: c_int,
-    cf_failure: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamrepaircontentmap::src_stream_repair_should_mark_completed_recreated(
-            file_id,
-            target_file_id,
-            status,
-            cf_failure,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_src_stream_repair_verify_donor_completed(
-    is_stopped: c_int,
-    total_compared: i64,
-    required_compare: i64,
-    saw_varied_data: c_int,
-    out_verified: *mut c_int,
-) -> c_int {
-    let mut verified = false;
-    let done = crate::streamrepaircontentmap::src_stream_repair_verify_donor_completed(
-        is_stopped != 0,
-        total_compared,
-        required_compare,
-        saw_varied_data != 0,
-        &mut verified,
-    );
-    if !out_verified.is_null() {
-        *out_verified = i32::from(verified);
-    }
-    i32::from(done)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_src_stream_repair_can_try_decompress_fallback(
-    live_mode: c_int,
-    decompress_opt: c_int,
-    is_compressible: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamrepaircontentmap::src_stream_repair_can_try_decompress_fallback(
-            live_mode != 0,
-            decompress_opt != 0,
-            is_compressible != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_src_stream_repair_verify_window_loop_stop(
-    is_stopped: c_int,
-    total_compared: i64,
-    required: i64,
-    saw_varied_data: c_int,
-) -> c_int {
-    crate::streamrepaircontentmap::src_stream_repair_verify_window_loop_stop(
-        is_stopped != 0,
-        total_compared,
-        required,
-        saw_varied_data != 0,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_src_stream_repair_calc_patch_chunk_size(
-    hole_end: i64,
-    pos: i64,
-    max_chunk: i64,
-) -> i64 {
-    crate::streamrepaircontentmap::src_stream_repair_calc_patch_chunk_size(
-        hole_end,
-        pos,
-        max_chunk,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_src_stream_repair_is_member_valid_for_materialize(
-    member_index: c_int,
-    files_len: usize,
-    articles_empty: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamrepaircontentmap::src_stream_repair_is_member_valid_for_materialize(
-            member_index,
-            files_len,
-            articles_empty != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_src_stream_repair_is_materialized_member_complete(
-    member_size: i64,
-    holes_empty: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamrepaircontentmap::src_stream_repair_is_materialized_member_complete(
-            member_size,
-            holes_empty != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_src_stream_repair_classify_interrupted_job_update(
-    target_holes_empty: c_int,
-    target_decoded_size: i64,
-    job_decoded_size: i64,
-    out_update_job_size: *mut c_int,
-) -> c_int {
-    let mut update_job_size = false;
-    let action = crate::streamrepaircontentmap::src_stream_repair_classify_interrupted_job_update(
-        target_holes_empty != 0,
-        target_decoded_size,
-        job_decoded_size,
-        &mut update_job_size,
-    );
-    if !out_update_job_size.is_null() {
-        *out_update_job_size = i32::from(update_job_size);
-    }
-    action
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_src_content_map_is_empty_or_invalid_cipher_pieces(
-    pieces_empty: c_int,
-    cipher_range_size: i64,
-) -> c_int {
-    i32::from(
-        crate::streamrepaircontentmap::src_content_map_is_empty_or_invalid_cipher_pieces(
-            pieces_empty != 0,
-            cipher_range_size,
-        ),
-    )
-}
 
 #[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_dupe_fallback_should_log_par_defer(
@@ -23894,66 +22666,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_fleet_visit_pipe_names(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_srp_streamcrypto_fill_rar3_seed(
-    wchars_ptr: *const u32,
-    wchars_len: usize,
-    salt_ptr: *const u8,
-    out_seed_ptr: *mut u8,
-    out_seed_len: usize,
-) -> i32 {
-    if wchars_ptr.is_null() || salt_ptr.is_null() || out_seed_ptr.is_null() || wchars_len == 0 {
-        return 0;
-    }
-    let wchars = std::slice::from_raw_parts(wchars_ptr, wchars_len);
-    let salt: &[u8; 8] = &*(salt_ptr as *const [u8; 8]);
-    let out_seed = std::slice::from_raw_parts_mut(out_seed_ptr, out_seed_len);
-    i32::from(crate::streamrepairparcheck::srp_streamcrypto_fill_rar3_seed(
-        wchars, salt, out_seed,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_srp_streamcrypto_rar5_iterations(
-    kdf_count: u8,
-    add_psw_check_offset: i32,
-    out_iterations: *mut i32,
-) -> i32 {
-    match crate::streamrepairparcheck::srp_streamcrypto_rar5_iterations(
-        kdf_count,
-        add_psw_check_offset != 0,
-    ) {
-        Some(iters) => {
-            if !out_iterations.is_null() {
-                *out_iterations = iters;
-            }
-            1
-        }
-        None => 0,
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_srp_streamcrypto_next_batch(
-    done_blocks: i64,
-    total_blocks: i64,
-    block_size: i64,
-    out_batch: *mut i64,
-    out_len: *mut i32,
-) {
-    let (batch, len) = crate::streamrepairparcheck::srp_streamcrypto_next_batch(
-        done_blocks,
-        total_blocks,
-        block_size,
-    );
-    if !out_batch.is_null() {
-        *out_batch = batch;
-    }
-    if !out_len.is_null() {
-        *out_len = len;
-    }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_snh_http_client_validate_version(
     version_ptr: *const c_char,
     version_len: usize,
@@ -24772,34 +23484,8 @@ pub extern "C" fn nzbget_rs_dqh_dupe_fallback_should_append_primary_on_order(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_stream_repair_format_whole_files_suffix(
-    unsized_count: i32,
-) -> RsBuf {
-    into_buf(
-        crate::dupequeuehealth::dqh_stream_repair_format_whole_files_suffix(unsized_count),
-    )
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_stream_repair_bytes_to_mb(bytes: i64) -> f64 {
     crate::dupequeuehealth::dqh_stream_repair_bytes_to_mb(bytes)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_stream_repair_is_verification_satisfied(
-    total_compared: i64,
-    required: i64,
-    saw_varied_data: i32,
-) -> i32 {
-    if crate::dupequeuehealth::dqh_stream_repair_is_verification_satisfied(
-        total_compared,
-        required,
-        saw_varied_data != 0,
-    ) {
-        1
-    } else {
-        0
-    }
 }
 
 #[no_mangle]
@@ -25540,158 +24226,6 @@ pub unsafe extern "C" fn nzbget_rs_tpr_post_format_info_name(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_write_errmsg_or_default(
-    last_err: *const c_char,
-) -> *const c_char {
-    if last_err.is_null() || *last_err == 0 {
-        b"incomplete write (disk full?)\0".as_ptr() as *const c_char
-    } else {
-        last_err
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_format_stall_reason(timeout: i32) -> RsBuf {
-    into_buf(crate::dupequeuehealth::dqh_stream_repair_format_stall_reason(timeout))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_format_conn_wait_reason(
-    elapsed_sec: i32,
-) -> RsBuf {
-    into_buf(crate::dupequeuehealth::dqh_stream_repair_format_conn_wait_reason(elapsed_sec))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_format_max_run_reason(
-    max_sec: i32,
-    max_run_factor: i32,
-) -> RsBuf {
-    into_buf(
-        crate::dupequeuehealth::dqh_stream_repair_format_max_run_reason(max_sec, max_run_factor),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_format_slow_rate_reason(
-    repair_mb_s: f64,
-    remaining_mb: f64,
-    repair_sec: f64,
-    slow_factor: i32,
-    download_mb_s: f64,
-) -> RsBuf {
-    into_buf(
-        crate::dupequeuehealth::dqh_stream_repair_format_slow_rate_reason(
-            repair_mb_s,
-            remaining_mb,
-            repair_sec,
-            slow_factor,
-            download_mb_s,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_format_donor_progress_label(
-    prefix: *const c_char,
-    donor_name: *const c_char,
-) -> RsBuf {
-    let p = if prefix.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(prefix).to_bytes()
-    };
-    let d = if donor_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(donor_name).to_bytes()
-    };
-    into_buf(
-        crate::dupequeuehealth::dqh_stream_repair_format_donor_progress_label(p, d),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_select_reject_log_kind(
-    probed: i32,
-    max_donor_candidates: i32,
-    mk_info: i32,
-    mk_detail: i32,
-) -> i32 {
-    crate::dupequeuehealth::dqh_stream_repair_select_reject_log_kind(
-        probed,
-        max_donor_candidates,
-        mk_info,
-        mk_detail,
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_missing_par_disposition(
-    has_par_files: i32,
-) -> *const c_char {
-    crate::dupequeuehealth::dqh_stream_repair_missing_par_disposition(has_par_files != 0).as_ptr()
-        as *const c_char
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_format_decompress_temp_dir(
-    dest_dir: *const c_char,
-    sep: c_char,
-    suffix: i32,
-) -> RsBuf {
-    let d = if dest_dir.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(dest_dir).to_bytes()
-    };
-    into_buf(
-        crate::dupequeuehealth::dqh_stream_repair_format_decompress_temp_dir(d, sep as u8, suffix),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_format_extract_dir(
-    temp_dir: *const c_char,
-    sep: c_char,
-) -> RsBuf {
-    let t = if temp_dir.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(temp_dir).to_bytes()
-    };
-    into_buf(crate::dupequeuehealth::dqh_stream_repair_format_extract_dir(t, sep as u8))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_decompress_fail_reason(
-    has_extractor: i32,
-) -> *const c_char {
-    crate::dupequeuehealth::dqh_stream_repair_decompress_fail_reason(has_extractor != 0).as_ptr()
-        as *const c_char
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_stream_crypto_format_rar3_round_bytes(
-    round: i32,
-    out_buf: *mut u8,
-) {
-    if out_buf.is_null() {
-        return;
-    }
-    let bytes = crate::dupequeuehealth::dqh_stream_crypto_format_rar3_round_bytes(round);
-    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, 3);
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_stream_crypto_rar3_iv_index(
-    round: i32,
-    rounds: i32,
-) -> i32 {
-    crate::dupequeuehealth::dqh_stream_crypto_rar3_iv_index(round, rounds)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_conn_calc_read_buffer_cap(
     read_buf_size: i32,
     decode_slack: i32,
@@ -26375,32 +24909,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_unpack_ctrl_strip_last_extension(
         CStr::from_ptr(frag_base_name).to_bytes()
     };
     into_buf(crate::dupequeuehealth::dqh_unpack_ctrl_strip_last_extension(f))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_format_materialize_progress(
-    donor_name: *const c_char,
-    member_num: c_int,
-    total_members: c_int,
-    delivered_articles: c_int,
-    total_articles: c_int,
-    total_bytes: i64,
-) -> RsBuf {
-    let d = if donor_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(donor_name).to_bytes()
-    };
-    into_buf(
-        crate::dupequeuehealth::dqh_stream_repair_format_materialize_progress(
-            d,
-            member_num,
-            total_members,
-            delivered_articles,
-            total_articles,
-            total_bytes,
-        ),
-    )
 }
 
 #[no_mangle]
@@ -27638,73 +26146,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_tokenizer_next(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_calc_encrypted_window_bounds(
-    window_offset: i64,
-    window_end_raw: i64,
-    last_computable: i64,
-    block_from: i64,
-    block_size: i64,
-    out_window_end: *mut i64,
-    out_from: *mut i64,
-    out_block_to: *mut i64,
-) -> c_int {
-    match crate::dupequeuehealth::dqh_stream_repair_calc_encrypted_window_bounds(
-        window_offset,
-        window_end_raw,
-        last_computable,
-        block_from,
-        block_size,
-    ) {
-        Some((we, fr, bt)) => {
-            if !out_window_end.is_null() {
-                *out_window_end = we;
-            }
-            if !out_from.is_null() {
-                *out_from = fr;
-            }
-            if !out_block_to.is_null() {
-                *out_block_to = bt;
-            }
-            1
-        }
-        None => 0,
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_calc_encrypted_chunk_end(
-    block_from: i64,
-    block_to: i64,
-    max_chunk: i64,
-    block_size: i64,
-    out_chunk_end: *mut i64,
-    out_block_count: *mut i64,
-) {
-    let (ce, bc) = crate::dupequeuehealth::dqh_stream_repair_calc_encrypted_chunk_end(
-        block_from, block_to, max_chunk, block_size,
-    );
-    if !out_chunk_end.is_null() {
-        *out_chunk_end = ce;
-    }
-    if !out_block_count.is_null() {
-        *out_block_count = bc;
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_stream_repair_is_target_unfinished(
-    decoded_file_size: i64,
-    holes_empty: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_stream_repair_is_target_unfinished(
-            decoded_file_size,
-            holes_empty != 0,
-        ),
-    )
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_scheduler_command_name(command: c_int) -> *const c_char {
     crate::dupequeuehealth::dqh_scheduler_command_name(command).as_ptr() as *const c_char
 }
@@ -28663,72 +27104,6 @@ pub extern "C" fn nzbget_rs_dqh_dupematcher_should_wait_rar_lister(
             timeout_sec,
             cur_time,
         ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_stream_repair_is_attached_live_thread(
-    has_nzb: c_int,
-    is_this_thread: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_stream_repair_is_attached_live_thread(
-            has_nzb != 0,
-            is_this_thread != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_stream_repair_has_live_recovered_stats(
-    recovered_bytes: i64,
-    recovered_holes: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_stream_repair_has_live_recovered_stats(
-            recovered_bytes,
-            recovered_holes,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_stream_repair_watchdog_has_activity(
-    progress_bytes: i64,
-    prev_progress: i64,
-    waiting: c_int,
-    materializing: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_stream_repair_watchdog_has_activity(
-            progress_bytes,
-            prev_progress,
-            waiting != 0,
-            materializing,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_stream_repair_watchdog_calc_remaining_bytes(
-    missing_bytes: i64,
-    progress: i64,
-    start_progress: i64,
-) -> i64 {
-    crate::dupequeuehealth::dqh_stream_repair_watchdog_calc_remaining_bytes(
-        missing_bytes,
-        progress,
-        start_progress,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_stream_repair_is_chunk_read_complete(
-    read_bytes: i64,
-    chunk: i64,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_stream_repair_is_chunk_read_complete(read_bytes, chunk),
     )
 }
 
@@ -30030,21 +28405,6 @@ pub extern "C" fn nzbget_rs_dqh_dupe_fallback_is_donor_file_struct_candidate(
             is_par_file != 0,
             structure_matches != 0,
         ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_stream_repair_classify_build_job_mode(
-    empty_or_no_articles: c_int,
-    success_articles: c_int,
-    encoded_size: i64,
-    decoded_file_size: i64,
-) -> c_int {
-    crate::dupequeuehealth::dqh_stream_repair_classify_build_job_mode(
-        empty_or_no_articles != 0,
-        success_articles,
-        encoded_size,
-        decoded_file_size,
     )
 }
 
@@ -35250,5 +33610,786 @@ pub unsafe extern "C" fn nzbget_rs_twin_resolve_kind(
         input(sampled_val),
     ))
 }
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_streamcrypto_fill_rar3_seed(
+    wchars: *const u32,
+    wchar_len: usize,
+    salt: *const u8,
+    out_seed: *mut u8,
+    out_seed_len: usize,
+) -> c_int {
+    if wchars.is_null() || salt.is_null() || out_seed.is_null() {
+        return 0;
+    }
+    let w_slice = std::slice::from_raw_parts(wchars, wchar_len);
+    let mut salt_arr = [0u8; 8];
+    std::ptr::copy_nonoverlapping(salt, salt_arr.as_mut_ptr(), 8);
+    let out_slice = std::slice::from_raw_parts_mut(out_seed, out_seed_len);
+    i32::from(crate::streamrepair::streamcrypto_fill_rar3_seed(
+        w_slice, &salt_arr, out_slice,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_streamcrypto_rar5_iterations(
+    kdf_count: u8,
+    add_psw_check_offset: c_int,
+    out_iterations: *mut c_int,
+) -> c_int {
+    match crate::streamrepair::streamcrypto_rar5_iterations(kdf_count, add_psw_check_offset != 0) {
+        Some(iters) => {
+            if !out_iterations.is_null() {
+                *out_iterations = iters;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_streamcrypto_next_batch(
+    done_blocks: i64,
+    total_blocks: i64,
+    block_size: i64,
+    out_len: *mut c_int,
+) -> i64 {
+    let (batch, len) =
+        crate::streamrepair::streamcrypto_next_batch(done_blocks, total_blocks, block_size);
+    if !out_len.is_null() {
+        *out_len = len;
+    }
+    batch
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_eval_build_repair_job(
+    fallback_mode: c_int,
+    daf_stream: c_int,
+    raw_article: c_int,
+    is_par_file: c_int,
+    disk_basename: *const c_char,
+    has_nzb: c_int,
+    delete_status: c_int,
+    ds_none: c_int,
+    ds_health: c_int,
+    deleting: c_int,
+    parking: c_int,
+    has_post_info: c_int,
+    articles_empty: c_int,
+    success_articles: c_int,
+    encoded_size: i64,
+    decoded_file_size: i64,
+) -> c_int {
+    crate::streamrepair::eval_build_repair_job(
+        fallback_mode,
+        daf_stream,
+        raw_article != 0,
+        is_par_file != 0,
+        input(disk_basename),
+        has_nzb != 0,
+        delete_status,
+        ds_none,
+        ds_health,
+        deleting != 0,
+        parking != 0,
+        has_post_info != 0,
+        articles_empty != 0,
+        success_articles,
+        encoded_size,
+        decoded_file_size,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_donor_check_fetched_part(
+    success: c_int,
+    data_len: usize,
+    offset: i64,
+    fetched_file_size: i64,
+    member_size: i64,
+    out_mark_member_bad: *mut c_int,
+) -> c_int {
+    let (invalid, mark_bad) = crate::streamrepair::donor_check_fetched_part(
+        success != 0,
+        data_len,
+        offset,
+        fetched_file_size,
+        member_size,
+    );
+    if !out_mark_member_bad.is_null() {
+        *out_mark_member_bad = i32::from(mark_bad);
+    }
+    i32::from(invalid)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_donor_index_for_offset(
+    offset: i64,
+    drift: i64,
+    ranges: *const crate::dupefallback::NzbgetRsByteRange,
+    ranges_len: usize,
+) -> c_int {
+    let slice = if ranges.is_null() || ranges_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(ranges, ranges_len)
+    };
+    crate::streamrepair::donor_index_for_offset(offset, drift, slice)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_donor_step_part_for_offset(
+    offset: i64,
+    fetched_offset: i64,
+    fetched_len: usize,
+    index: c_int,
+    ranges_len: usize,
+    out_new_index: *mut c_int,
+) -> c_int {
+    let (status, new_index) = crate::streamrepair::donor_step_part_for_offset(
+        offset,
+        fetched_offset,
+        fetched_len,
+        index,
+        ranges_len,
+    );
+    if !out_new_index.is_null() {
+        *out_new_index = new_index;
+    }
+    status
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_donor_calc_prefetch_bounds(
+    first_est: c_int,
+    last_est: c_int,
+    ranges_len: usize,
+    out_first: *mut c_int,
+    out_last: *mut c_int,
+) {
+    let (first, last) =
+        crate::streamrepair::donor_calc_prefetch_bounds(first_est, last_est, ranges_len);
+    if !out_first.is_null() {
+        *out_first = first;
+    }
+    if !out_last.is_null() {
+        *out_last = last;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_donor_calc_read_chunk(
+    pos: i64,
+    fetched_offset: i64,
+    fetched_data_len: usize,
+    end_offset: i64,
+    out_from: *mut i64,
+    out_len: *mut i64,
+) {
+    let (from, len) = crate::streamrepair::donor_calc_read_chunk(
+        pos,
+        fetched_offset,
+        fetched_data_len,
+        end_offset,
+    );
+    if !out_from.is_null() {
+        *out_from = from;
+    }
+    if !out_len.is_null() {
+        *out_len = len;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_watchdog_eval_tick(
+    progress_bytes: i64,
+    prev_progress: i64,
+    waiting: c_int,
+    materializing: c_int,
+    since_last_progress_sec: i64,
+    since_begun_sec: i64,
+    since_start_sec: i64,
+    elapsed_sec: f64,
+    timeout_sec: c_int,
+    max_run_factor: c_int,
+    max_conn_wait_sec: c_int,
+    slow_repair_factor: c_int,
+    download_rate: i64,
+    start_progress: i64,
+    missing_bytes: i64,
+    out_new_progress: *mut i64,
+    out_reset_last_progress: *mut c_int,
+    out_reason: *mut RsBuf,
+) -> c_int {
+    let mut new_prog = prev_progress;
+    let mut reset = false;
+    let reason = crate::streamrepair::watchdog_eval_tick(
+        progress_bytes,
+        prev_progress,
+        waiting != 0,
+        materializing,
+        since_last_progress_sec,
+        since_begun_sec,
+        since_start_sec,
+        elapsed_sec,
+        timeout_sec,
+        max_run_factor,
+        max_conn_wait_sec,
+        slow_repair_factor,
+        download_rate,
+        start_progress,
+        missing_bytes,
+        &mut new_prog,
+        &mut reset,
+    );
+    if !out_new_progress.is_null() {
+        *out_new_progress = new_prog;
+    }
+    if !out_reset_last_progress.is_null() {
+        *out_reset_last_progress = i32::from(reset);
+    }
+    match reason {
+        Some(buf) => {
+            if !out_reason.is_null() {
+                *out_reason = into_buf(buf);
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_stream_format_whole_files_suffix(unsized_count: c_int) -> RsBuf {
+    into_buf(crate::streamrepair::format_whole_files_suffix(unsized_count))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_is_par2_job_or_file(
+    is_par_file: c_int,
+    filename: *const c_char,
+) -> c_int {
+    i32::from(crate::streamrepair::is_par2_job_or_file(
+        is_par_file != 0,
+        input(filename),
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_eval_donor_outcome_bail(
+    outcome: c_int,
+    ro_productive: c_int,
+    ro_unproductive: c_int,
+    donor_proven: c_int,
+    cur_consecutive_failures: c_int,
+    donor_failure_bail: c_int,
+    unproven_donor_bail: c_int,
+    out_new_consecutive_failures: *mut c_int,
+) -> c_int {
+    let (next, bail) = crate::streamrepair::eval_donor_outcome_bail(
+        outcome,
+        ro_productive,
+        ro_unproductive,
+        donor_proven != 0,
+        cur_consecutive_failures,
+        donor_failure_bail,
+        unproven_donor_bail,
+    );
+    if !out_new_consecutive_failures.is_null() {
+        *out_new_consecutive_failures = next;
+    }
+    i32::from(bail)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_select_probe_replacements(
+    missing: c_int,
+    reserve: *const c_int,
+    reserve_len: usize,
+    max_probe_fetches: c_int,
+    attempted_len: usize,
+    out_batch: *mut c_int,
+    max_out: usize,
+) -> usize {
+    let r_slice = if reserve.is_null() || reserve_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(reserve, reserve_len)
+    };
+    let batch = crate::streamrepair::select_probe_replacements(
+        missing,
+        r_slice,
+        max_probe_fetches,
+        attempted_len,
+    );
+    let count = batch.len().min(max_out);
+    if !out_batch.is_null() && count > 0 {
+        std::ptr::copy_nonoverlapping(batch.as_ptr(), out_batch, count);
+    }
+    count
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_check_probe_article(
+    success: c_int,
+    data_len: usize,
+    file_size: i64,
+    offset: i64,
+    target_decoded_size: i64,
+    out_is_missing: *mut c_int,
+) -> c_int {
+    let (valid, missing) = crate::streamrepair::check_probe_article(
+        success != 0,
+        data_len,
+        file_size,
+        offset,
+        target_decoded_size,
+    );
+    if !out_is_missing.is_null() {
+        *out_is_missing = i32::from(missing);
+    }
+    i32::from(valid)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_stream_is_patch_article_usable(
+    success: c_int,
+    fetched_file_size: i64,
+    target_decoded_size: i64,
+    data_len: usize,
+    fetched_offset: i64,
+) -> c_int {
+    i32::from(crate::streamrepair::is_patch_article_usable(
+        success != 0,
+        fetched_file_size,
+        target_decoded_size,
+        data_len,
+        fetched_offset,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_clip_hole_to_fetched(
+    hole_offset: i64,
+    hole_size: i64,
+    fetched_offset: i64,
+    fetched_len: usize,
+    out_from: *mut i64,
+    out_to: *mut i64,
+) -> c_int {
+    match crate::streamrepair::clip_hole_to_fetched(
+        hole_offset,
+        hole_size,
+        fetched_offset,
+        fetched_len,
+    ) {
+        Some((from, to)) => {
+            if !out_from.is_null() {
+                *out_from = from;
+            }
+            if !out_to.is_null() {
+                *out_to = to;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_classify_remaining_hole_target(
+    interrupted: c_int,
+    decoded_file_size: i64,
+    holes_empty: c_int,
+    is_par_file: c_int,
+    failed_articles: c_int,
+    failed_size: i64,
+    missed_size: i64,
+    inout_recovered_articles: *mut c_int,
+    inout_recovered_failed_size: *mut i64,
+    inout_recovered_failed_par_size: *mut i64,
+) -> c_int {
+    let cur_art = if inout_recovered_articles.is_null() {
+        0
+    } else {
+        *inout_recovered_articles
+    };
+    let cur_fail = if inout_recovered_failed_size.is_null() {
+        0
+    } else {
+        *inout_recovered_failed_size
+    };
+    let cur_par = if inout_recovered_failed_par_size.is_null() {
+        0
+    } else {
+        *inout_recovered_failed_par_size
+    };
+    let (status, new_art, new_fail, new_par) =
+        crate::streamrepair::classify_remaining_hole_target(
+            interrupted != 0,
+            decoded_file_size,
+            holes_empty != 0,
+            is_par_file != 0,
+            failed_articles,
+            failed_size,
+            missed_size,
+            cur_art,
+            cur_fail,
+            cur_par,
+        );
+    if !inout_recovered_articles.is_null() {
+        *inout_recovered_articles = new_art;
+    }
+    if !inout_recovered_failed_size.is_null() {
+        *inout_recovered_failed_size = new_fail;
+    }
+    if !inout_recovered_failed_par_size.is_null() {
+        *inout_recovered_failed_par_size = new_par;
+    }
+    status
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_stream_is_incomplete_nzb_hole(
+    missing: i64,
+    encoded_size: i64,
+) -> c_int {
+    i32::from(crate::streamrepair::is_incomplete_nzb_hole(
+        missing,
+        encoded_size,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_patch_donor_set_step_failure(
+    chunk: i64,
+    min_chunk: i64,
+    inout_size: *mut i64,
+    inout_pos: *mut i64,
+    inout_failed_pieces: *mut c_int,
+    max_failed_pieces: c_int,
+) -> c_int {
+    let cur_size = if inout_size.is_null() { 0 } else { *inout_size };
+    let cur_pos = if inout_pos.is_null() { 0 } else { *inout_pos };
+    let cur_fp = if inout_failed_pieces.is_null() {
+        0
+    } else {
+        *inout_failed_pieces
+    };
+    let (action, new_size, new_pos, new_fp) =
+        crate::streamrepair::patch_donor_set_step_failure(
+            chunk,
+            min_chunk,
+            cur_size,
+            cur_pos,
+            cur_fp,
+            max_failed_pieces,
+        );
+    if !inout_size.is_null() {
+        *inout_size = new_size;
+    }
+    if !inout_pos.is_null() {
+        *inout_pos = new_pos;
+    }
+    if !inout_failed_pieces.is_null() {
+        *inout_failed_pieces = new_fp;
+    }
+    action
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_calc_encrypted_window_bounds(
+    window_offset: i64,
+    window_end_raw: i64,
+    last_computable: i64,
+    block_from: i64,
+    block_size: i64,
+    out_window_end: *mut i64,
+    out_from: *mut i64,
+    out_block_to: *mut i64,
+) -> c_int {
+    match crate::streamrepair::calc_encrypted_window_bounds(
+        window_offset,
+        window_end_raw,
+        last_computable,
+        block_from,
+        block_size,
+    ) {
+        Some((we, fr, bt)) => {
+            if !out_window_end.is_null() {
+                *out_window_end = we;
+            }
+            if !out_from.is_null() {
+                *out_from = fr;
+            }
+            if !out_block_to.is_null() {
+                *out_block_to = bt;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_encrypted_clip_live_hole(
+    hole_offset: i64,
+    hole_size: i64,
+    live_holes: *const crate::dupefallback::NzbgetRsByteRange,
+    live_holes_len: usize,
+    last_computable: i64,
+    block_size: i64,
+    inout_uncomputable_tail: *mut i64,
+    out_hole_from: *mut i64,
+    out_patch_to: *mut i64,
+    out_block_from: *mut i64,
+    out_block_to: *mut i64,
+) -> c_int {
+    let slice = if live_holes.is_null() || live_holes_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(live_holes, live_holes_len)
+    };
+    let cur_tail = if inout_uncomputable_tail.is_null() {
+        0
+    } else {
+        *inout_uncomputable_tail
+    };
+    let (ok, new_tail, hf, pt, bf, bt) = crate::streamrepair::encrypted_clip_live_hole(
+        hole_offset,
+        hole_size,
+        slice,
+        last_computable,
+        block_size,
+        cur_tail,
+    );
+    if !inout_uncomputable_tail.is_null() {
+        *inout_uncomputable_tail = new_tail;
+    }
+    if !out_hole_from.is_null() {
+        *out_hole_from = hf;
+    }
+    if !out_patch_to.is_null() {
+        *out_patch_to = pt;
+    }
+    if !out_block_from.is_null() {
+        *out_block_from = bf;
+    }
+    if !out_block_to.is_null() {
+        *out_block_to = bt;
+    }
+    i32::from(ok)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_encrypted_is_prev_block_present(
+    block_from: i64,
+    block_size: i64,
+    live_holes: *const crate::dupefallback::NzbgetRsByteRange,
+    live_holes_len: usize,
+) -> c_int {
+    let slice = if live_holes.is_null() || live_holes_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(live_holes, live_holes_len)
+    };
+    i32::from(crate::streamrepair::encrypted_is_prev_block_present(
+        block_from, block_size, slice,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_calc_encrypted_chunk_end(
+    block_from: i64,
+    block_to: i64,
+    max_chunk: i64,
+    block_size: i64,
+    out_chunk_end: *mut i64,
+    out_block_count: *mut i64,
+) {
+    let (ce, bc) = crate::streamrepair::calc_encrypted_chunk_end(
+        block_from, block_to, max_chunk, block_size,
+    );
+    if !out_chunk_end.is_null() {
+        *out_chunk_end = ce;
+    }
+    if !out_block_count.is_null() {
+        *out_block_count = bc;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_format_materialize_progress(
+    donor_name: *const c_char,
+    member_num: c_int,
+    total_members: c_int,
+    delivered_articles: c_int,
+    total_articles: c_int,
+    total_bytes: i64,
+) -> RsBuf {
+    into_buf(crate::streamrepair::format_materialize_progress(
+        input(donor_name),
+        member_num,
+        total_members,
+        delivered_articles,
+        total_articles,
+        total_bytes,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_stream_materialize_article_valid(
+    success: c_int,
+    data_len: usize,
+    offset: i64,
+    fetched_file_size: i64,
+    member_size: i64,
+) -> c_int {
+    i32::from(crate::streamrepair::materialize_article_valid(
+        success != 0,
+        data_len,
+        offset,
+        fetched_file_size,
+        member_size,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_credit_repaired_sizes(
+    recovered_failed_size: i64,
+    recovered_failed_par_size: i64,
+    inout_failed_size: *mut i64,
+    inout_success_size: *mut i64,
+    inout_current_failed_size: *mut i64,
+    inout_current_success_size: *mut i64,
+    inout_par_failed_size: *mut i64,
+    inout_par_success_size: *mut i64,
+    inout_par_current_failed_size: *mut i64,
+    inout_par_current_success_size: *mut i64,
+) {
+    let (f, s, cf, cs, pf, ps, pcf, pcs) = crate::streamrepair::credit_repaired_sizes(
+        recovered_failed_size,
+        recovered_failed_par_size,
+        if inout_failed_size.is_null() {
+            0
+        } else {
+            *inout_failed_size
+        },
+        if inout_success_size.is_null() {
+            0
+        } else {
+            *inout_success_size
+        },
+        if inout_current_failed_size.is_null() {
+            0
+        } else {
+            *inout_current_failed_size
+        },
+        if inout_current_success_size.is_null() {
+            0
+        } else {
+            *inout_current_success_size
+        },
+        if inout_par_failed_size.is_null() {
+            0
+        } else {
+            *inout_par_failed_size
+        },
+        if inout_par_success_size.is_null() {
+            0
+        } else {
+            *inout_par_success_size
+        },
+        if inout_par_current_failed_size.is_null() {
+            0
+        } else {
+            *inout_par_current_failed_size
+        },
+        if inout_par_current_success_size.is_null() {
+            0
+        } else {
+            *inout_par_current_success_size
+        },
+    );
+    if !inout_failed_size.is_null() {
+        *inout_failed_size = f;
+    }
+    if !inout_success_size.is_null() {
+        *inout_success_size = s;
+    }
+    if !inout_current_failed_size.is_null() {
+        *inout_current_failed_size = cf;
+    }
+    if !inout_current_success_size.is_null() {
+        *inout_current_success_size = cs;
+    }
+    if !inout_par_failed_size.is_null() {
+        *inout_par_failed_size = pf;
+    }
+    if !inout_par_success_size.is_null() {
+        *inout_par_success_size = ps;
+    }
+    if !inout_par_current_failed_size.is_null() {
+        *inout_par_current_failed_size = pcf;
+    }
+    if !inout_par_current_success_size.is_null() {
+        *inout_par_current_success_size = pcs;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_resolve_completion_par_action(
+    recovered_bytes: i64,
+    holes_remain: c_int,
+    par_rename_status: c_int,
+    rs_none: c_int,
+    par_status: c_int,
+    ps_skipped: c_int,
+    par_check_opt: c_int,
+    pc_manual: c_int,
+    ps_manual: c_int,
+    ps_none: c_int,
+    out_reset_par_rename: *mut c_int,
+    out_update_par_status: *mut c_int,
+    out_new_par_status: *mut c_int,
+    out_log_reenabling: *mut c_int,
+    out_request_par_check: *mut c_int,
+    out_log_remaining_holes: *mut c_int,
+) {
+    let (reset_pr, upd_ps, new_ps, log_re, req_pc, log_rem) =
+        crate::streamrepair::resolve_completion_par_action(
+            recovered_bytes,
+            holes_remain != 0,
+            par_rename_status,
+            rs_none,
+            par_status,
+            ps_skipped,
+            par_check_opt,
+            pc_manual,
+            ps_manual,
+            ps_none,
+        );
+    if !out_reset_par_rename.is_null() {
+        *out_reset_par_rename = i32::from(reset_pr);
+    }
+    if !out_update_par_status.is_null() {
+        *out_update_par_status = i32::from(upd_ps);
+    }
+    if !out_new_par_status.is_null() {
+        *out_new_par_status = new_ps;
+    }
+    if !out_log_reenabling.is_null() {
+        *out_log_reenabling = i32::from(log_re);
+    }
+    if !out_request_par_check.is_null() {
+        *out_request_par_check = i32::from(req_pc);
+    }
+    if !out_log_remaining_holes.is_null() {
+        *out_log_remaining_holes = i32::from(log_rem);
+    }
+}
+
 
 

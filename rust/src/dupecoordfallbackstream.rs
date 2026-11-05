@@ -267,57 +267,6 @@ pub fn dupe_fallback_select_named_content_match(exact_count: usize, folded_count
     }
 }
 
-/// Evaluates whether `DupeStreamRepair::BuildRepairJob` should reject a file based on
-/// fallback mode, raw mode, or `.par2` status.
-#[inline]
-pub fn stream_repair_should_skip_build_job(
-    fallback_mode: i32,
-    daf_stream: i32,
-    raw_article: i32,
-    is_par_file: i32,
-    disk_basename: &[u8],
-) -> i32 {
-    let ends_with_par2 = disk_basename.len() >= 5
-        && disk_basename[disk_basename.len() - 5..].eq_ignore_ascii_case(b".par2");
-    if fallback_mode < daf_stream || raw_article != 0 || is_par_file != 0 || ends_with_par2 {
-        1
-    } else {
-        0
-    }
-}
-
-/// Evaluates whether a donor file can be appended to the candidate list in
-/// `DupeStreamRepair::SelectDonorCandidates`.
-#[inline]
-pub fn stream_repair_can_add_candidate(
-    candidates_len: usize,
-    max_candidates: i32,
-    is_claimed: i32,
-    already_present: i32,
-) -> i32 {
-    if (candidates_len as i32) < max_candidates && is_claimed == 0 && already_present == 0 {
-        1
-    } else {
-        0
-    }
-}
-
-/// Evaluates whether the positional-rank tier applies in
-/// `DupeStreamRepair::SelectDonorCandidates`.
-#[inline]
-pub fn stream_repair_is_positional_rank_applicable(
-    positional_rank: i32,
-    positional_window: i32,
-    window_len: usize,
-) -> i32 {
-    let w = window_len as i32;
-    if positional_rank >= 0 && positional_window == w && positional_rank < w {
-        1
-    } else {
-        0
-    }
-}
-
 /// Evaluates whether `NzbFile::ProcessFiles` should fall back to `m_metaTitle` when
 /// `m_metaName` is empty.
 #[inline]
@@ -395,18 +344,6 @@ mod tests {
         assert_eq!(dupe_fallback_select_named_content_match(1, 2), 1);
         assert_eq!(dupe_fallback_select_named_content_match(0, 1), 2);
         assert_eq!(dupe_fallback_select_named_content_match(0, 2), 0);
-        assert_eq!(
-            stream_repair_should_skip_build_job(2, 1, 0, 0, b"test.mkv"),
-            0
-        );
-        assert_eq!(
-            stream_repair_should_skip_build_job(2, 1, 0, 0, b"test.par2"),
-            1
-        );
-        assert_eq!(stream_repair_can_add_candidate(2, 4, 0, 0), 1);
-        assert_eq!(stream_repair_can_add_candidate(4, 4, 0, 0), 0);
-        assert_eq!(stream_repair_is_positional_rank_applicable(2, 5, 5), 1);
-        assert_eq!(stream_repair_is_positional_rank_applicable(5, 5, 5), 0);
         assert_eq!(nzbfile_should_fallback_meta_name_to_title(1, 0), 1);
         assert_eq!(nzbfile_should_fallback_meta_name_to_title(0, 0), 0);
     }

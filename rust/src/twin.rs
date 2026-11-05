@@ -885,13 +885,12 @@ pub fn is_fetched_entry_part_valid(
     max_size: i64,
     cur_data_len: usize,
 ) -> (bool, usize) {
-    crate::streamtwinqueue::twin_check_is_fetched_entry_part_valid(
-        success,
-        offset,
-        data_len,
-        max_size,
-        cur_data_len,
-    )
+    if !success || offset < 0 || offset.saturating_add(data_len as i64) > max_size {
+        return (false, cur_data_len);
+    }
+    let end_len = (offset as usize).saturating_add(data_len);
+    let new_len = cur_data_len.max(end_len);
+    (true, new_len)
 }
 
 /// `TwinCheck::ServiceWork` (`TwinCheck.cpp`): evaluates whether an item is a duplicate.
@@ -918,7 +917,7 @@ pub fn is_dupe_item(
 /// neither `"none"` nor `"lost"`.
 #[inline]
 pub fn is_print_usable(print: &[u8]) -> bool {
-    crate::streamtwinqueue::twin_check_is_print_usable(print)
+    !print.is_empty() && print != b"none" && print != b"lost"
 }
 
 /// `TwinCheck::ServiceWork` (`TwinCheck.cpp`): selects the primary download index within a `dupe_key` group.
@@ -940,17 +939,10 @@ pub fn eval_sampleable(
     sampled_of: Option<&[u8]>,
     primary_id: &[u8],
 ) -> (bool, bool) {
-    crate::streamtwinqueue::twin_check_eval_sampleable(
-        primary_ok,
-        is_primary,
-        is_dupe,
-        print_empty,
-        primary_print_empty,
-        by_par2,
-        has_sampled,
-        sampled_of,
-        primary_id,
-    )
+    let sampleable =
+        primary_ok && !is_primary && is_dupe && !print_empty && !primary_print_empty && !by_par2;
+    let sampled_now = has_sampled && sampled_of.is_some_and(|s| s == primary_id);
+    (sampleable, sampled_now)
 }
 
 /// `TwinCheck::ServiceWork` (`TwinCheck.cpp`): resolves the `"twin"`, `"twin:N/M"`, `"alt"`, or `""`

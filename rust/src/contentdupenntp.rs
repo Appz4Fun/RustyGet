@@ -255,27 +255,6 @@ pub fn dupe_fallback_classify_first_head(head8: &[u8]) -> i32 {
     }
 }
 
-/// `DupeStreamRepair::BuildRepairJob`:
-/// Checks whether an NZB is eligible to record a stream-repair job on file completion.
-pub fn stream_repair_is_nzb_eligible_for_job(
-    has_nzb: bool,
-    delete_status: i32,
-    ds_none: i32,
-    ds_health: i32,
-    deleting: bool,
-    parking: bool,
-    has_post_info: bool,
-) -> bool {
-    if !has_nzb || has_post_info {
-        return false;
-    }
-    let health_cancel = delete_status == ds_health;
-    if !health_cancel && (deleting || parking || delete_status != ds_none) {
-        return false;
-    }
-    true
-}
-
 /// `DupeCoordinator::NzbFound`:
 /// Checks whether two NZBs share the same non-zero full or filtered content hash.
 pub fn dupecoord_same_content_hash(
@@ -304,142 +283,6 @@ pub fn dupecoord_should_keep_returned_dupe(
         && dupe_hint == dh_redownload_auto
         && current_success_articles > 0
         && health >= critical_health
-}
-
-/// `DonorMemberSource::StoreFetched`:
-/// Checks whether a fetched donor article is inconsistent with the member's
-/// decoded file size or bounds.
-/// Returns `(invalid, mark_member_bad)`.
-pub fn stream_repair_check_fetched_member_part(
-    success: bool,
-    data_len: usize,
-    offset: i64,
-    fetched_file_size: i64,
-    member_size: i64,
-) -> (bool, bool) {
-    if !success {
-        return (false, false);
-    }
-    let size_mismatch = member_size >= 0 && fetched_file_size != member_size;
-    let invalid = data_len == 0
-        || offset < 0
-        || offset.saturating_add(data_len as i64) > fetched_file_size
-        || size_mismatch;
-    (invalid, invalid && size_mismatch)
-}
-
-/// `StreamRepairController::StartWatchdog`:
-/// Evaluates whether the stream repair rate is too slow compared to normal
-/// download speed (`repairSec > slow_repair_factor * downloadSec && repairSec > timeout`).
-/// Returns `(is_slow, repair_mb_s, remaining_mb, repair_sec, download_mb_s)`.
-pub fn stream_repair_eval_slow_rate(
-    download_rate: i64,
-    recovered: i64,
-    remaining: i64,
-    elapsed_sec: f64,
-    timeout_sec: i32,
-    slow_repair_factor: i32,
-) -> (bool, f64, f64, f64, f64) {
-    if download_rate <= 0
-        || recovered <= 0
-        || remaining <= 0
-        || elapsed_sec < (timeout_sec as f64) / 2.0
-    {
-        return (false, 0.0, 0.0, 0.0, 0.0);
-    }
-    let repair_rate = (recovered as f64) / elapsed_sec;
-    let repair_sec = (remaining as f64) / repair_rate;
-    let download_sec = (remaining as f64) / (download_rate as f64);
-    let is_slow = repair_sec > (slow_repair_factor as f64) * download_sec
-        && repair_sec > (timeout_sec as f64);
-    (
-        is_slow,
-        repair_rate / 1024.0 / 1024.0,
-        (remaining as f64) / 1024.0 / 1024.0,
-        repair_sec,
-        (download_rate as f64) / 1024.0 / 1024.0,
-    )
-}
-
-/// `StreamRepairController::ReportRemainingHoles`:
-/// Returns true when the missing byte count exceeds the target's encoded size by
-/// more than 10% + 1 MiB, indicating an incomplete NZB.
-pub fn stream_repair_is_incomplete_nzb_hole(missing: i64, encoded_size: i64) -> bool {
-    missing
-        > encoded_size
-            .saturating_add(encoded_size / 10)
-            .saturating_add(1024 * 1024)
-}
-
-/// `StreamRepairController::MaterializeDonorSet`:
-/// Validates a fetched donor article before writing it into the materialized
-/// archive member file.
-pub fn stream_repair_materialize_article_valid(
-    success: bool,
-    data_len: usize,
-    offset: i64,
-    fetched_file_size: i64,
-    member_size: i64,
-) -> bool {
-    success
-        && data_len > 0
-        && offset >= 0
-        && fetched_file_size > 0
-        && offset <= fetched_file_size
-        && (data_len as i64) <= fetched_file_size - offset
-        && (member_size < 0 || fetched_file_size == member_size)
-}
-
-/// `StreamRepairController::RepairCompleted`:
-/// Computes updated NZB failed/success byte counters after crediting fully
-/// repaired files back to health.
-#[allow(clippy::too_many_arguments)]
-pub fn stream_repair_credit_repaired_sizes(
-    recovered_failed_size: i64,
-    recovered_failed_par_size: i64,
-    failed_size: i64,
-    success_size: i64,
-    current_failed_size: i64,
-    current_success_size: i64,
-    par_failed_size: i64,
-    par_success_size: i64,
-    par_current_failed_size: i64,
-    par_current_success_size: i64,
-) -> (i64, i64, i64, i64, i64, i64, i64, i64) {
-    let mut new_failed = failed_size;
-    let mut new_success = success_size;
-    let mut new_cur_failed = current_failed_size;
-    let mut new_cur_success = current_success_size;
-    let mut new_par_failed = par_failed_size;
-    let mut new_par_success = par_success_size;
-    let mut new_par_cur_failed = par_current_failed_size;
-    let mut new_par_cur_success = par_current_success_size;
-
-    if recovered_failed_size > 0 {
-        new_failed = 0.max(failed_size.saturating_sub(recovered_failed_size));
-        new_success = success_size.saturating_add(recovered_failed_size);
-        new_cur_failed = 0.max(current_failed_size.saturating_sub(recovered_failed_size));
-        new_cur_success = current_success_size.saturating_add(recovered_failed_size);
-        if recovered_failed_par_size > 0 {
-            new_par_failed = 0.max(par_failed_size.saturating_sub(recovered_failed_par_size));
-            new_par_success = par_success_size.saturating_add(recovered_failed_par_size);
-            new_par_cur_failed =
-                0.max(par_current_failed_size.saturating_sub(recovered_failed_par_size));
-            new_par_cur_success =
-                par_current_success_size.saturating_add(recovered_failed_par_size);
-        }
-    }
-
-    (
-        new_failed,
-        new_success,
-        new_cur_failed,
-        new_cur_success,
-        new_par_failed,
-        new_par_success,
-        new_par_cur_failed,
-        new_par_cur_success,
-    )
 }
 
 /// `TwinCheckJob::Sample`:
@@ -573,19 +416,6 @@ mod tests {
 
     #[test]
     fn test_stream_repair_and_fetcher_helpers() {
-        assert!(stream_repair_is_nzb_eligible_for_job(
-            true, 3, 0, 3, true, false, false
-        ));
-        assert!(!stream_repair_is_nzb_eligible_for_job(
-            true, 0, 0, 3, true, false, false
-        ));
-
-        let (inv, bad) = stream_repair_check_fetched_member_part(true, 100, 0, 200, 300);
-        assert!(inv && bad);
-
-        assert!(stream_repair_is_incomplete_nzb_hole(12_000_000, 9_000_000));
-        assert!(!stream_repair_is_incomplete_nzb_hole(1_000_000, 9_000_000));
-
         assert_eq!(twin_check_eval_sample_verdict(false, 4, 0, 8), 1);
         assert_eq!(twin_check_eval_sample_verdict(false, 1, 1, 8), 2);
         assert_eq!(twin_check_eval_sample_verdict(false, 2, 0, 8), 0);

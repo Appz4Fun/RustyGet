@@ -605,27 +605,9 @@ pub fn dqh_dupe_fallback_should_append_primary_on_order(
     cutover && donors_len > 0
 }
 
-/// Formats the optional `" and N whole file(s)"` suffix for `StreamRepairController::StopWatchdog`.
-pub fn dqh_stream_repair_format_whole_files_suffix(unsized_count: i32) -> Vec<u8> {
-    if unsized_count > 0 {
-        format!(" and {unsized_count} whole file(s)").into_bytes()
-    } else {
-        Vec::new()
-    }
-}
-
 /// Converts a byte count into megabytes (`bytes / 1024.0 / 1024.0`).
 pub fn dqh_stream_repair_bytes_to_mb(bytes: i64) -> f64 {
     (bytes as f64) / 1024.0 / 1024.0
-}
-
-/// Evaluates whether stream repair donor verification succeeded (`totalCompared >= required && sawVariedData`).
-pub fn dqh_stream_repair_is_verification_satisfied(
-    total_compared: i64,
-    required: i64,
-    saw_varied_data: bool,
-) -> bool {
-    total_compared >= required && saw_varied_data
 }
 
 /// Evaluates whether `ArticleWriter::SetupOutputFile` should use `targetPath` directly instead of `MakeUniqueFilename`.
@@ -1123,126 +1105,6 @@ pub fn dqh_prepost_skip_unpack_par_reason(par_status: i32, ps_manual: i32) -> &'
     }
 }
 
-/// Select the write error message or the `"incomplete write (disk full?)"`
-/// fallback when `last_err` is empty (`StreamRepair.cpp`).
-pub fn dqh_stream_repair_write_errmsg_or_default(last_err: &[u8]) -> &[u8] {
-    if last_err.is_empty() {
-        b"incomplete write (disk full?)"
-    } else {
-        last_err
-    }
-}
-
-/// Format `"nothing recovered for <timeout> seconds"` for
-/// `StreamRepairController::StartWatchdog` (`StreamRepair.cpp`).
-pub fn dqh_stream_repair_format_stall_reason(timeout: i32) -> Vec<u8> {
-    format!("nothing recovered for {timeout} seconds").into_bytes()
-}
-
-/// Format `"still waiting for news-server connections after <elapsed_sec> seconds"`
-/// for `StreamRepairController::StartWatchdog` (`StreamRepair.cpp`).
-pub fn dqh_stream_repair_format_conn_wait_reason(elapsed_sec: i32) -> Vec<u8> {
-    format!("still waiting for news-server connections after {elapsed_sec} seconds").into_bytes()
-}
-
-/// Format `"still running after <max_sec> seconds, <max_run_factor> times the timeout"`
-/// for `StreamRepairController::StartWatchdog` (`StreamRepair.cpp`).
-pub fn dqh_stream_repair_format_max_run_reason(max_sec: i32, max_run_factor: i32) -> Vec<u8> {
-    format!("still running after {max_sec} seconds, {max_run_factor} times the timeout")
-        .into_bytes()
-}
-
-/// Format `"at <repair_mb_s:.2> MB/s the <remaining_mb:.1> MB left would take <repair_sec:.0> seconds, more than <slow_factor> times a download at <download_mb_s:.2> MB/s"`
-/// for `StreamRepairController::StartWatchdog` (`StreamRepair.cpp`).
-pub fn dqh_stream_repair_format_slow_rate_reason(
-    repair_mb_s: f64,
-    remaining_mb: f64,
-    repair_sec: f64,
-    slow_factor: i32,
-    download_mb_s: f64,
-) -> Vec<u8> {
-    format!(
-        "at {repair_mb_s:.2} MB/s the {remaining_mb:.1} MB left would take {repair_sec:.0} seconds, more than {slow_factor} times a download at {download_mb_s:.2} MB/s"
-    )
-    .into_bytes()
-}
-
-/// Format `"<prefix> <donor_name>"` (e.g. `"Repairing from duplicate <donor_name>"`)
-/// for `StreamRepairController` stage progress labels (`StreamRepair.cpp`).
-pub fn dqh_stream_repair_format_donor_progress_label(
-    prefix: &[u8],
-    donor_name: &[u8],
-) -> Vec<u8> {
-    let mut out = Vec::with_capacity(prefix.len() + 1 + donor_name.len());
-    out.extend_from_slice(prefix);
-    out.push(b' ');
-    out.extend_from_slice(donor_name);
-    out
-}
-
-/// Select the message log kind (`mk_info` when `probed <= max_donor_candidates`,
-/// `mk_detail` otherwise) when logging a rejected donor file in
-/// `StreamRepairController::RepairFile` (`StreamRepair.cpp`).
-pub fn dqh_stream_repair_select_reject_log_kind(
-    probed: i32,
-    max_donor_candidates: i32,
-    mk_info: i32,
-    mk_detail: i32,
-) -> i32 {
-    if probed <= max_donor_candidates {
-        mk_info
-    } else {
-        mk_detail
-    }
-}
-
-/// Return the NUL-terminated PAR disposition string (`"left to par-repair"` vs
-/// `"no par2 files to repair it"`) for `StreamRepairController::ReportRemainingHoles`
-/// (`StreamRepair.cpp`).
-pub fn dqh_stream_repair_missing_par_disposition(has_par_files: bool) -> &'static [u8] {
-    if has_par_files {
-        b"left to par-repair\0"
-    } else {
-        b"no par2 files to repair it\0"
-    }
-}
-
-/// Format `"<dest_dir><sep>.stream-decompress.<suffix>"` for
-/// `StreamRepairController::ExecDecompressRepair` (`StreamRepair.cpp`).
-pub fn dqh_stream_repair_format_decompress_temp_dir(
-    dest_dir: &[u8],
-    sep: u8,
-    suffix: i32,
-) -> Vec<u8> {
-    let tail = format!(".stream-decompress.{suffix}");
-    let mut out = Vec::with_capacity(dest_dir.len() + 1 + tail.len());
-    out.extend_from_slice(dest_dir);
-    out.push(sep);
-    out.extend_from_slice(tail.as_bytes());
-    out
-}
-
-/// Format `"<temp_dir><sep>extracted"` for
-/// `StreamRepairController::ExecDecompressRepair` (`StreamRepair.cpp`).
-pub fn dqh_stream_repair_format_extract_dir(temp_dir: &[u8], sep: u8) -> Vec<u8> {
-    let mut out = Vec::with_capacity(temp_dir.len() + 10);
-    out.extend_from_slice(temp_dir);
-    out.push(sep);
-    out.extend_from_slice(b"extracted");
-    out
-}
-
-/// Return the NUL-terminated decompression failure reason (`"extraction failed"`
-/// vs `"no extraction tool configured"`) for
-/// `StreamRepairController::ExecDecompressRepair` (`StreamRepair.cpp`).
-pub fn dqh_stream_repair_decompress_fail_reason(has_extractor: bool) -> &'static [u8] {
-    if has_extractor {
-        b"extraction failed\0"
-    } else {
-        b"no extraction tool configured\0"
-    }
-}
-
 /// Formats `"member <name> unreadable"` for `ContentMapper::BuildSplitMap`.
 pub fn dqh_content_map_format_member_unreadable_reason(name: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(name.len() + 18);
@@ -1255,26 +1117,6 @@ pub fn dqh_content_map_format_member_unreadable_reason(name: &[u8]) -> Vec<u8> {
 /// Computes `file.m_dataOffset` via two's-complement subtraction for `RarVolume::ReadFrom`.
 pub fn dqh_rar_volume_set_data_offset(position: i64, packed_size: i64) -> i64 {
     (position as u64).wrapping_sub(packed_size as u64) as i64
-}
-
-/// Formats the 3-byte little-endian round counter for `StreamCrypto::DeriveRar3`.
-pub fn dqh_stream_crypto_format_rar3_round_bytes(round: i32) -> [u8; 3] {
-    [
-        (round & 0xff) as u8,
-        ((round >> 8) & 0xff) as u8,
-        ((round >> 16) & 0xff) as u8,
-    ]
-}
-
-/// Returns the IV byte index (`0..16`) if `round` is an IV sampling round in `StreamCrypto::DeriveRar3`,
-/// or `-1` otherwise.
-pub fn dqh_stream_crypto_rar3_iv_index(round: i32, rounds: i32) -> i32 {
-    let step = rounds / 16;
-    if step > 0 && round >= 0 && round % step == 0 {
-        round / step
-    } else {
-        -1
-    }
 }
 
 /// Computes the read buffer capacity (`read_buf_size + 1 + decode_slack`) for `Connection::Connection`.
@@ -1675,27 +1517,6 @@ pub fn dqh_unpack_ctrl_strip_last_extension(frag_base_name: &[u8]) -> Vec<u8> {
         Some(idx) => frag_base_name[..idx].to_vec(),
         None => frag_base_name.to_vec(),
     }
-}
-
-/// Formats `"Downloading duplicate <donor_name> (volume <member_num>/<total_members>, article <delivered_articles>/<total_articles>, <mb:.1> MB)"`
-/// for `StreamRepairController::MaterializeDonorSet`.
-pub fn dqh_stream_repair_format_materialize_progress(
-    donor_name: &[u8],
-    member_num: i32,
-    total_members: i32,
-    delivered_articles: i32,
-    total_articles: i32,
-    total_bytes: i64,
-) -> Vec<u8> {
-    let mb = dqh_stream_repair_bytes_to_mb(total_bytes);
-    let suffix = format!(
-        " (volume {member_num}/{total_members}, article {delivered_articles}/{total_articles}, {mb:.1} MB)"
-    );
-    let mut out = Vec::with_capacity(22 + donor_name.len() + suffix.len());
-    out.extend_from_slice(b"Downloading duplicate ");
-    out.extend_from_slice(donor_name);
-    out.extend_from_slice(suffix.as_bytes());
-    out
 }
 
 /// Formats `"BODY <message_id>\r\n"` for `ArticleFetcher::FetchOnConnection`.
@@ -2808,50 +2629,6 @@ pub fn dqh_queue_script_mark_status_name(mark_status: i32) -> &'static [u8] {
         3 => b"SUCCESS\0",
         _ => b"NONE\0",
     }
-}
-
-/// Computes `(window_end, from, block_to)` for an encrypted verification window in
-/// `StreamRepairController::VerifyEncryptedFromSource`, returning `None` when `from >= window_end`.
-pub fn dqh_stream_repair_calc_encrypted_window_bounds(
-    window_offset: i64,
-    window_end_raw: i64,
-    last_computable: i64,
-    block_from: i64,
-    block_size: i64,
-) -> Option<(i64, i64, i64)> {
-    if block_size <= 0 {
-        return None;
-    }
-    let window_end = window_end_raw.min(last_computable);
-    let from = window_offset.max(block_from);
-    if from >= window_end {
-        return None;
-    }
-    let block_to = (window_end + block_size - 1) / block_size * block_size;
-    Some((window_end, from, block_to))
-}
-
-/// Computes `(chunk_end, block_count)` for an encrypted patch chunk in
-/// `StreamRepairController::PatchEncryptedFromSource`.
-pub fn dqh_stream_repair_calc_encrypted_chunk_end(
-    block_from: i64,
-    block_to: i64,
-    max_chunk: i64,
-    block_size: i64,
-) -> (i64, i64) {
-    let chunk_end = (block_from.saturating_add(max_chunk)).min(block_to);
-    let block_count = if block_size > 0 {
-        (chunk_end - block_from) / block_size
-    } else {
-        0
-    };
-    (chunk_end, block_count)
-}
-
-/// Returns true when a stream-repair target is still unfinished (`decoded_file_size <= 0 || !holes_empty`)
-/// for `StreamRepairController::ReportRemainingHoles`.
-pub fn dqh_stream_repair_is_target_unfinished(decoded_file_size: i64, holes_empty: bool) -> bool {
-    decoded_file_size <= 0 || !holes_empty
 }
 
 /// Returns true when `NzbFile::SAX_characters` should trim XML character content
@@ -4210,44 +3987,6 @@ pub fn dqh_content_mapper_classify_unreadable_rar_vol(
     }
 }
 
-/// Returns true when `StreamRepairController::RunLive` is attached to a live `NzbInfo` (`has_nzb && is_this_thread`).
-pub fn dqh_stream_repair_is_attached_live_thread(has_nzb: bool, is_this_thread: bool) -> bool {
-    has_nzb && is_this_thread
-}
-
-/// Returns true when `StreamRepairController::RepairCompletedLive` should update recovered stats (`recovered_bytes > 0 || recovered_holes > 0`).
-pub fn dqh_stream_repair_has_live_recovered_stats(
-    recovered_bytes: i64,
-    recovered_holes: i32,
-) -> bool {
-    recovered_bytes > 0 || recovered_holes > 0
-}
-
-/// Returns true when `StreamRepairController::Watchdog` should reset its progress timer (`progress_bytes != prev_progress || waiting || materializing > 0`).
-pub fn dqh_stream_repair_watchdog_has_activity(
-    progress_bytes: i64,
-    prev_progress: i64,
-    waiting: bool,
-    materializing: i32,
-) -> bool {
-    progress_bytes != prev_progress || waiting || materializing > 0
-}
-
-/// Computes remaining missing bytes (`max(0, missing_bytes - (progress - start_progress))`) in `StreamRepairController::StartWatchdog`.
-pub fn dqh_stream_repair_watchdog_calc_remaining_bytes(
-    missing_bytes: i64,
-    progress: i64,
-    start_progress: i64,
-) -> i64 {
-    let recovered = progress.saturating_sub(start_progress);
-    missing_bytes.saturating_sub(recovered).max(0)
-}
-
-/// Returns true when `StreamRepairController::CompareToFile` has a valid seek and chunk read (`pos == offset && read_bytes == chunk`).
-pub fn dqh_stream_repair_is_chunk_read_complete(read_bytes: i64, chunk: i64) -> bool {
-    read_bytes == chunk
-}
-
 /// Returns true when `ArticleDownloader::Run` should break out of the server loop (`status == adFinished || status == adFatalError`).
 pub fn dqh_article_dl_is_terminal_loop_status(
     status: i32,
@@ -5230,29 +4969,6 @@ pub fn dqh_dl_info_should_append_message_to_disk(server_mode: bool, nzb_log: boo
     server_mode && nzb_log
 }
 
-/// Classifies how `DupeStreamRepair::BuildRepairJob` should build a repair job:
-/// `0` = skip (`false`), `1` = whole-file hole job (`true`), `2` = compute holes from decoded articles.
-pub fn dqh_stream_repair_classify_build_job_mode(
-    empty_or_no_articles: bool,
-    success_articles: i32,
-    encoded_size: i64,
-    decoded_file_size: i64,
-) -> i32 {
-    if empty_or_no_articles {
-        0
-    } else if success_articles == 0 {
-        if encoded_size <= 0 {
-            0
-        } else {
-            1
-        }
-    } else if decoded_file_size <= 0 {
-        0
-    } else {
-        2
-    }
-}
-
 /// Returns true when `NzbFile::Parse_StartElement` should create an `ArticleInfo` for a `<segment>` (`part_number > 0`).
 pub fn dqh_nzbfile_should_create_segment_article(part_number: i32) -> bool {
     part_number > 0
@@ -5671,15 +5387,7 @@ mod tests {
         assert!(dqh_dupe_fallback_should_append_primary_on_order(true, 2));
         assert!(!dqh_dupe_fallback_should_append_primary_on_order(false, 2));
         assert!(!dqh_dupe_fallback_should_append_primary_on_order(true, 0));
-        assert_eq!(
-            dqh_stream_repair_format_whole_files_suffix(3),
-            b" and 3 whole file(s)"
-        );
-        assert!(dqh_stream_repair_format_whole_files_suffix(0).is_empty());
         assert_eq!(dqh_stream_repair_bytes_to_mb(1048576), 1.0);
-        assert!(dqh_stream_repair_is_verification_satisfied(64, 64, true));
-        assert!(!dqh_stream_repair_is_verification_satisfied(63, 64, true));
-        assert!(!dqh_stream_repair_is_verification_satisfied(64, 64, false));
         assert!(dqh_article_writer_use_target_path_directly(
             true, false, true, false
         ));
@@ -5900,74 +5608,10 @@ mod tests {
         );
         assert_eq!(dqh_prepost_skip_unpack_par_reason(1, 3), b"par-failure\0");
         assert_eq!(
-            dqh_stream_repair_write_errmsg_or_default(b""),
-            b"incomplete write (disk full?)"
-        );
-        assert_eq!(
-            dqh_stream_repair_write_errmsg_or_default(b"No space left"),
-            b"No space left"
-        );
-        assert_eq!(
-            dqh_stream_repair_format_stall_reason(60),
-            b"nothing recovered for 60 seconds"
-        );
-        assert_eq!(
-            dqh_stream_repair_format_conn_wait_reason(125),
-            b"still waiting for news-server connections after 125 seconds"
-        );
-        assert_eq!(
-            dqh_stream_repair_format_max_run_reason(180, 3),
-            b"still running after 180 seconds, 3 times the timeout"
-        );
-        assert_eq!(
-            dqh_stream_repair_format_slow_rate_reason(0.5, 100.0, 200.0, 4, 20.0),
-            b"at 0.50 MB/s the 100.0 MB left would take 200 seconds, more than 4 times a download at 20.00 MB/s"
-        );
-        assert_eq!(
-            dqh_stream_repair_format_donor_progress_label(
-                b"Repairing from duplicate",
-                b"MyDonor"
-            ),
-            b"Repairing from duplicate MyDonor"
-        );
-        assert_eq!(dqh_stream_repair_select_reject_log_kind(2, 3, 1, 2), 1);
-        assert_eq!(dqh_stream_repair_select_reject_log_kind(4, 3, 1, 2), 2);
-        assert_eq!(
-            dqh_stream_repair_missing_par_disposition(true),
-            b"left to par-repair\0"
-        );
-        assert_eq!(
-            dqh_stream_repair_missing_par_disposition(false),
-            b"no par2 files to repair it\0"
-        );
-        assert_eq!(
-            dqh_stream_repair_format_decompress_temp_dir(b"/dst", b'/', 0),
-            b"/dst/.stream-decompress.0"
-        );
-        assert_eq!(
-            dqh_stream_repair_format_extract_dir(b"/dst/.stream-decompress.0", b'/'),
-            b"/dst/.stream-decompress.0/extracted"
-        );
-        assert_eq!(
-            dqh_stream_repair_decompress_fail_reason(true),
-            b"extraction failed\0"
-        );
-        assert_eq!(
-            dqh_stream_repair_decompress_fail_reason(false),
-            b"no extraction tool configured\0"
-        );
-        assert_eq!(
             dqh_content_map_format_member_unreadable_reason(b"video.mkv"),
             b"member video.mkv unreadable"
         );
         assert_eq!(dqh_rar_volume_set_data_offset(1000, 400), 600);
-        assert_eq!(
-            dqh_stream_crypto_format_rar3_round_bytes(0x030201),
-            [0x01, 0x02, 0x03]
-        );
-        assert_eq!(dqh_stream_crypto_rar3_iv_index(0, 0x40000), 0);
-        assert_eq!(dqh_stream_crypto_rar3_iv_index(0x4000, 0x40000), 1);
-        assert_eq!(dqh_stream_crypto_rar3_iv_index(1, 0x40000), -1);
         assert_eq!(dqh_conn_calc_read_buffer_cap(1024, 128), 1153);
         assert_eq!(dqh_conn_format_port_str(6789), b"6789");
         assert_eq!(dqh_conn_clamp_buf_avail(-1), 0);
@@ -6132,17 +5776,6 @@ mod tests {
         assert_eq!(
             dqh_unpack_ctrl_strip_last_extension(b"movie.mkv.001"),
             b"movie.mkv"
-        );
-        assert_eq!(
-            dqh_stream_repair_format_materialize_progress(
-                b"MyShow.copy2",
-                2,
-                5,
-                10,
-                40,
-                2 * 1024 * 1024,
-            ),
-            b"Downloading duplicate MyShow.copy2 (volume 2/5, article 10/40, 2.0 MB)"
         );
         assert_eq!(
             dqh_article_fetcher_format_body_cmd(b"<part1@example.com>"),
@@ -6535,21 +6168,6 @@ mod tests {
         assert_eq!(dqh_queue_script_delete_status_name(3), b"DUPE\0");
         assert_eq!(dqh_queue_script_url_status_name(5), b"SCAN_SKIPPED\0");
         assert_eq!(dqh_queue_script_mark_status_name(2), b"GOOD\0");
-        assert_eq!(
-            dqh_stream_repair_calc_encrypted_window_bounds(10, 50, 48, 16, 16),
-            Some((48, 16, 48))
-        );
-        assert_eq!(
-            dqh_stream_repair_calc_encrypted_window_bounds(10, 50, 16, 16, 16),
-            None
-        );
-        assert_eq!(
-            dqh_stream_repair_calc_encrypted_chunk_end(0, 64, 32, 16),
-            (32, 2)
-        );
-        assert!(dqh_stream_repair_is_target_unfinished(0, true));
-        assert!(dqh_stream_repair_is_target_unfinished(100, false));
-        assert!(!dqh_stream_repair_is_target_unfinished(100, true));
         assert!(dqh_nzbfile_should_trim_sax_chars(b"meta", true));
         assert!(!dqh_nzbfile_should_trim_sax_chars(b"meta", false));
         assert!(!dqh_nzbfile_should_trim_sax_chars(b"file", true));
@@ -7136,19 +6754,6 @@ mod tests {
         assert_eq!(dqh_content_mapper_classify_unreadable_rar_vol(true, true, -1), 1);
         assert_eq!(dqh_content_mapper_classify_unreadable_rar_vol(true, false, 0), 2);
         assert_eq!(dqh_content_mapper_classify_unreadable_rar_vol(true, false, -1), 0);
-        assert!(dqh_stream_repair_is_attached_live_thread(true, true));
-        assert!(!dqh_stream_repair_is_attached_live_thread(true, false));
-        assert!(dqh_stream_repair_has_live_recovered_stats(1024, 0));
-        assert!(dqh_stream_repair_has_live_recovered_stats(0, 1));
-        assert!(!dqh_stream_repair_has_live_recovered_stats(0, 0));
-        assert!(dqh_stream_repair_watchdog_has_activity(200, 100, false, 0));
-        assert!(dqh_stream_repair_watchdog_has_activity(100, 100, true, 0));
-        assert!(dqh_stream_repair_watchdog_has_activity(100, 100, false, 1));
-        assert!(!dqh_stream_repair_watchdog_has_activity(100, 100, false, 0));
-        assert_eq!(dqh_stream_repair_watchdog_calc_remaining_bytes(1000, 400, 100), 700);
-        assert_eq!(dqh_stream_repair_watchdog_calc_remaining_bytes(200, 500, 100), 0);
-        assert!(dqh_stream_repair_is_chunk_read_complete(4096, 4096));
-        assert!(!dqh_stream_repair_is_chunk_read_complete(2048, 4096));
         assert!(dqh_article_dl_is_terminal_loop_status(2, 2, 5));
         assert!(dqh_article_dl_is_terminal_loop_status(5, 2, 5));
         assert!(!dqh_article_dl_is_terminal_loop_status(1, 2, 5));
@@ -7534,11 +7139,6 @@ mod tests {
         assert!(dqh_dl_info_should_append_message_to_disk(true, true));
         assert!(!dqh_dl_info_should_append_message_to_disk(true, false));
         assert!(!dqh_dl_info_should_append_message_to_disk(false, true));
-        assert_eq!(dqh_stream_repair_classify_build_job_mode(true, 0, 100, 100), 0);
-        assert_eq!(dqh_stream_repair_classify_build_job_mode(false, 0, 0, 0), 0);
-        assert_eq!(dqh_stream_repair_classify_build_job_mode(false, 0, 100, 0), 1);
-        assert_eq!(dqh_stream_repair_classify_build_job_mode(false, 5, 100, 0), 0);
-        assert_eq!(dqh_stream_repair_classify_build_job_mode(false, 5, 100, 100), 2);
         assert!(dqh_nzbfile_should_create_segment_article(1));
         assert!(!dqh_nzbfile_should_create_segment_article(0));
         assert!(dqh_dupe_probe_should_stop_early_on_found(false, 2, 2));

@@ -45,7 +45,7 @@ bool StreamCrypto::DeriveRar3(const char* password, const uint8 salt[8],
 
 	static_assert(sizeof(wchar_t) == sizeof(uint32_t), "wchar_t ABI size");
 	CharBuffer seed(len * 2 + 8);
-	if (!nzbget_rs_srp_streamcrypto_fill_rar3_seed(
+	if (!nzbget_rs_streamcrypto_fill_rar3_seed(
 		reinterpret_cast<const uint32_t*>(*wstr), (size_t)len, salt,
 		reinterpret_cast<uint8_t*>(*seed), (size_t)seed.Size()))
 	{
@@ -66,13 +66,11 @@ bool StreamCrypto::DeriveRar3(const char* password, const uint8 salt[8],
 	{
 		EVP_DigestUpdate(context.get(), *seed, seed.Size());
 
-		uint8 buf[3];
-		nzbget_rs_dqh_stream_crypto_format_rar3_round_bytes(i, buf);
+		uint8 buf[3] = { (uint8)i, (uint8)(i >> 8), (uint8)(i >> 16) };
 
 		EVP_DigestUpdate(context.get(), buf, sizeof(buf));
 
-		int ivIdx = nzbget_rs_dqh_stream_crypto_rar3_iv_index(i, rounds);
-		if (ivIdx >= 0)
+		if (i % (rounds / 16) == 0)
 		{
 			OpenSSL::EVPMdCtxPtr ivContext{ EVP_MD_CTX_new(), &EVP_MD_CTX_free };
 			if (ivContext)
@@ -80,7 +78,7 @@ bool StreamCrypto::DeriveRar3(const char* password, const uint8 salt[8],
 				EVP_MD_CTX_copy(ivContext.get(), context.get());
 				EVP_DigestFinal(ivContext.get(), digest, nullptr);
 			}
-			ivOut[ivIdx] = digest[sizeof(digest) - 1];
+			ivOut[i / (rounds / 16)] = digest[sizeof(digest) - 1];
 		}
 	}
 
@@ -101,7 +99,7 @@ bool StreamCrypto::DeriveRar5(const char* password, uint8 kdfCount,
 	const uint8 salt[16], uint8 keyOut[32])
 {
 	int iterations = 0;
-	if (!nzbget_rs_srp_streamcrypto_rar5_iterations(kdfCount, 0, &iterations))
+	if (!nzbget_rs_streamcrypto_rar5_iterations(kdfCount, 0, &iterations))
 	{
 		return false;
 	}
@@ -127,7 +125,7 @@ bool StreamCrypto::DeriveRar5PswCheck(const char* password, uint8 kdfCount,
 	const uint8 salt[16], uint8 checkOut[8])
 {
 	int iterations = 0;
-	if (!nzbget_rs_srp_streamcrypto_rar5_iterations(kdfCount, 1, &iterations))
+	if (!nzbget_rs_streamcrypto_rar5_iterations(kdfCount, 1, &iterations))
 	{
 		return false;
 	}
@@ -225,9 +223,8 @@ bool RarCryptoContext::Crypt(bool encrypt, const uint8* prevCipherBlock,
 	int64 done = 0;
 	while (done < blocks)
 	{
-		int64 batch = 0;
 		int len = 0;
-		nzbget_rs_srp_streamcrypto_next_batch(done, blocks, CryptoBlockSize, &batch, &len);
+		int64 batch = nzbget_rs_streamcrypto_next_batch(done, blocks, CryptoBlockSize, &len);
 		int outlen = 0;
 		int step = encrypt
 			? EVP_EncryptUpdate(ctx.get(), out + done * CryptoBlockSize, &outlen,

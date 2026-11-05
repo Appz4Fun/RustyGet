@@ -2072,12 +2072,10 @@ pub fn select_verify_donor_probes(
         let base = (decoded_file_size.wrapping_sub(total_size(holes))).clamp(64, 16 * 1024);
         let mut pooled: i64 = 0;
         for (overlap, part_index) in overlaps {
-            if crate::streamarticleparrepair::sap_stream_repair_verify_donor_pool_stop(
-                probe_parts.len(),
-                probe_count,
-                pooled,
-                base,
-            ) {
+            let pc = probe_parts.len() as i32;
+            let pool_stop = pc >= probe_count
+                && (pooled >= base || pc >= probe_count.saturating_mul(2));
+            if pool_stop {
                 reserve.push(part_index);
             } else {
                 probe_parts.push(part_index);
@@ -2652,6 +2650,704 @@ pub fn stream_repair_is_intact_proof_member_eligible(
             .any(|t| locale_casecmp(t, member_name) == std::cmp::Ordering::Equal)
 }
 
+/// Builds the RAR3 KDF seed (`len * 2` bytes of UTF-16LE low-16-bit code units from `wchars`
+/// followed by the 8-byte `salt`). Returns `false` if `wchars` is empty or `out_seed` is too small.
+pub fn streamcrypto_fill_rar3_seed(
+    wchars: &[u32],
+    salt: &[u8; 8],
+    out_seed: &mut [u8],
+) -> bool {
+    if wchars.is_empty() {
+        return false;
+    }
+    let needed = wchars.len() * 2 + 8;
+    if out_seed.len() < needed {
+        return false;
+    }
+    for (i, &ch) in wchars.iter().enumerate() {
+        out_seed[i * 2] = (ch & 0xFF) as u8;
+        out_seed[i * 2 + 1] = ((ch & 0xFF00) >> 8) as u8;
+    }
+    out_seed[wchars.len() * 2..needed].copy_from_slice(salt);
+    true
+}
+
+/// Computes the RAR5 PBKDF2-HMAC-SHA256 iteration count for `kdf_count` (must be `<= 24`),
+/// optionally adding `32` for `DeriveRar5PswCheck`.
+pub fn streamcrypto_rar5_iterations(
+    kdf_count: u8,
+    add_psw_check_offset: bool,
+) -> Option<i32> {
+    if kdf_count > 24 {
+        return None;
+    }
+    let base = 1i32 << kdf_count;
+    Some(if add_psw_check_offset {
+        base + 32
+    } else {
+        base
+    })
+}
+
+/// Computes the next batch block count (capped at `1 << 16` blocks = 1 MiB) and byte length
+/// for `RarCryptoContext::Crypt`.
+pub fn streamcrypto_next_batch(
+    done_blocks: i64,
+    total_blocks: i64,
+    block_size: i64,
+) -> (i64, i32) {
+    const BATCH_BLOCKS: i64 = 1 << 16;
+    let rem = total_blocks.saturating_sub(done_blocks);
+    let batch = if rem < BATCH_BLOCKS { rem } else { BATCH_BLOCKS };
+    let len = (batch * block_size) as i32;
+    (batch, len)
+}
+
+/// Evaluates `DupeStreamRepair::BuildRepairJob`:
+/// - `0`: skip (`return false`)
+/// - `1`: whole-file hole job (`success_articles == 0 && encoded_size > 0`)
+/// - `2`: compute holes from decoded articles (`success_articles > 0 && decoded_file_size > 0`)
+#[allow(clippy::too_many_arguments)]
+pub fn eval_build_repair_job(
+    fallback_mode: i32,
+    daf_stream: i32,
+    raw_article: bool,
+    is_par_file: bool,
+    disk_basename: &[u8],
+    has_nzb: bool,
+    delete_status: i32,
+    ds_none: i32,
+    ds_health: i32,
+    deleting: bool,
+    parking: bool,
+    has_post_info: bool,
+    articles_empty: bool,
+    success_articles: i32,
+    encoded_size: i64,
+    decoded_file_size: i64,
+) -> i32 {
+    if fallback_mode < daf_stream
+        || raw_article
+        || is_par_file
+        || ends_with_par2_ci(disk_basename)
+        || disk_basename.is_empty()
+        || articles_empty
+        || !has_nzb
+        || has_post_info
+    {
+        return 0;
+    }
+    let health_cancel = delete_status == ds_health;
+    if !health_cancel && (deleting || parking || delete_status != ds_none) {
+        return 0;
+    }
+    if success_articles == 0 {
+        if encoded_size <= 0 {
+            0
+        } else {
+            1
+        }
+    } else if decoded_file_size <= 0 {
+        0
+    } else {
+        2
+    }
+}
+
+/// `DonorMemberSource::StoreFetched`:
+/// Checks whether a fetched donor article is inconsistent with the member's
+/// decoded file size or bounds. Returns `(invalid, mark_member_bad)`.
+pub fn donor_check_fetched_part(
+    success: bool,
+    data_len: usize,
+    offset: i64,
+    fetched_file_size: i64,
+    member_size: i64,
+) -> (bool, bool) {
+    if !success {
+        return (false, false);
+    }
+    let size_mismatch = member_size >= 0 && fetched_file_size != member_size;
+    let invalid = data_len == 0
+        || offset < 0
+        || offset.saturating_add(data_len as i64) > fetched_file_size
+        || size_mismatch;
+    (invalid, invalid && size_mismatch)
+}
+
+/// Resolves the estimated donor part index for `offset` corrected by `drift`
+/// in `DonorMemberSource::PartForOffset` and `DonorMemberSource::Prefetch`.
+pub fn donor_index_for_offset(
+    offset: i64,
+    drift: i64,
+    ranges: &[NzbgetRsByteRange],
+) -> i32 {
+    let target = offset.saturating_sub(drift);
+    let mut index: usize = 0;
+    while index + 1 < ranges.len()
+        && ranges[index].offset.saturating_add(ranges[index].size) <= target
+    {
+        index += 1;
+    }
+    index as i32
+}
+
+/// Evaluates one resolution step in `DonorMemberSource::PartForOffset`.
+/// Returns `(status, new_index)` where:
+/// - `status == 0`: out of bounds (`return nullptr`)
+/// - `status == 1`: step again with `index = new_index`
+/// - `status == 2`: found matching part at `index`
+pub fn donor_step_part_for_offset(
+    offset: i64,
+    fetched_offset: i64,
+    fetched_len: usize,
+    index: i32,
+    ranges_len: usize,
+) -> (i32, i32) {
+    if offset < fetched_offset {
+        if index <= 0 {
+            (0, index)
+        } else {
+            (1, index - 1)
+        }
+    } else if offset >= fetched_offset.saturating_add(fetched_len as i64) {
+        if (index + 1) as usize >= ranges_len {
+            (0, index)
+        } else {
+            (1, index + 1)
+        }
+    } else {
+        (2, index)
+    }
+}
+
+/// Computes `(first, last)` inclusive prefetch part indices in `DonorMemberSource::Prefetch`.
+pub fn donor_calc_prefetch_bounds(
+    first_est: i32,
+    last_est: i32,
+    ranges_len: usize,
+) -> (i32, i32) {
+    let first = (first_est - 1).max(0);
+    let max_last = (ranges_len as i32) - 1;
+    let last = (last_est + 1).min(max_last);
+    (first, last)
+}
+
+/// Computes `(from, len)` for copying a slice of a fetched donor article in `DonorMemberSource::Read`.
+pub fn donor_calc_read_chunk(
+    pos: i64,
+    fetched_offset: i64,
+    fetched_data_len: usize,
+    end_offset: i64,
+) -> (i64, i64) {
+    let from = pos - fetched_offset;
+    let avail = (fetched_data_len as i64) - from;
+    let rem = end_offset - pos;
+    let len = avail.min(rem);
+    (from, len)
+}
+
+/// Evaluates a single watchdog tick in `StreamRepairController::StartWatchdog`.
+/// Updates `*out_new_progress` and `*out_reset_last_progress`, and returns `Some(reason)`
+/// when the watchdog should stop the stream-repair pass.
+#[allow(clippy::too_many_arguments)]
+pub fn watchdog_eval_tick(
+    progress_bytes: i64,
+    prev_progress: i64,
+    waiting: bool,
+    materializing: i32,
+    since_last_progress_sec: i64,
+    since_begun_sec: i64,
+    since_start_sec: i64,
+    elapsed_sec: f64,
+    timeout_sec: i32,
+    max_run_factor: i32,
+    max_conn_wait_sec: i32,
+    slow_repair_factor: i32,
+    download_rate: i64,
+    start_progress: i64,
+    missing_bytes: i64,
+    out_new_progress: &mut i64,
+    out_reset_last_progress: &mut bool,
+) -> Option<Vec<u8>> {
+    let has_activity = progress_bytes != prev_progress || waiting || materializing > 0;
+    if has_activity {
+        *out_new_progress = progress_bytes;
+        *out_reset_last_progress = true;
+    } else {
+        *out_new_progress = prev_progress;
+        *out_reset_last_progress = false;
+        if since_last_progress_sec >= i64::from(timeout_sec) {
+            return Some(format!("nothing recovered for {timeout_sec} seconds").into_bytes());
+        }
+    }
+
+    let max_sec = timeout_sec.saturating_mul(max_run_factor);
+    if since_begun_sec >= i64::from(max_sec.saturating_add(max_conn_wait_sec)) {
+        return Some(
+            format!("still waiting for news-server connections after {since_begun_sec} seconds")
+                .into_bytes(),
+        );
+    }
+    if since_start_sec >= i64::from(max_sec) {
+        return Some(
+            format!("still running after {max_sec} seconds, {max_run_factor} times the timeout")
+                .into_bytes(),
+        );
+    }
+
+    let recovered = (*out_new_progress).saturating_sub(start_progress);
+    let remaining = missing_bytes.saturating_sub(recovered).max(0);
+    if download_rate > 0
+        && recovered > 0
+        && remaining > 0
+        && elapsed_sec >= (timeout_sec as f64) / 2.0
+    {
+        let repair_rate = (recovered as f64) / elapsed_sec;
+        let repair_sec = (remaining as f64) / repair_rate;
+        let download_sec = (remaining as f64) / (download_rate as f64);
+        if repair_sec > (slow_repair_factor as f64) * download_sec
+            && repair_sec > (timeout_sec as f64)
+        {
+            let repair_mb_s = repair_rate / 1024.0 / 1024.0;
+            let remaining_mb = (remaining as f64) / 1024.0 / 1024.0;
+            let download_mb_s = (download_rate as f64) / 1024.0 / 1024.0;
+            return Some(
+                format!(
+                    "at {repair_mb_s:.2} MB/s the {remaining_mb:.1} MB left would take {repair_sec:.0} seconds, more than {slow_repair_factor} times a download at {download_mb_s:.2} MB/s"
+                )
+                .into_bytes(),
+            );
+        }
+    }
+
+    None
+}
+
+/// Formats the optional `" and N whole file(s)"` suffix for `StreamRepairController::StopWatchdog`.
+pub fn format_whole_files_suffix(unsized_count: i32) -> Vec<u8> {
+    if unsized_count > 0 {
+        format!(" and {unsized_count} whole file(s)").into_bytes()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Checks whether a target file in `StreamRepairController::CollectTargets` is a `.par2` file
+/// that should be excluded from stream repair targets.
+pub fn is_par2_job_or_file(is_par_file: bool, filename: &[u8]) -> bool {
+    is_par_file || ends_with_par2_ci(filename)
+}
+
+/// Evaluates consecutive unproductive donor outcomes in `StreamRepairController::ExecRepair`.
+/// Returns `(new_consecutive_failures, should_bail)`.
+pub fn eval_donor_outcome_bail(
+    outcome: i32,
+    ro_productive: i32,
+    ro_unproductive: i32,
+    donor_proven: bool,
+    cur_consecutive_failures: i32,
+    donor_failure_bail: i32,
+    unproven_donor_bail: i32,
+) -> (i32, bool) {
+    if outcome == ro_productive {
+        (0, false)
+    } else if outcome == ro_unproductive {
+        let next = cur_consecutive_failures + 1;
+        let limit = if donor_proven {
+            donor_failure_bail
+        } else {
+            unproven_donor_bail
+        };
+        (next, next >= limit)
+    } else {
+        (cur_consecutive_failures, false)
+    }
+}
+
+/// Selects replacement probe parts from `reserve` in `StreamRepairController::VerifyDonor`.
+pub fn select_probe_replacements(
+    missing: i32,
+    reserve: &[i32],
+    max_probe_fetches: i32,
+    attempted_len: usize,
+) -> Vec<i32> {
+    let budget_rem = max_probe_fetches - (attempted_len as i32);
+    let replacements = missing.min(reserve.len() as i32).min(budget_rem).max(0);
+    let mut batch = Vec::with_capacity(replacements as usize);
+    for k in 0..replacements {
+        let r_idx = if replacements <= 0 || reserve.is_empty() {
+            0
+        } else {
+            (reserve.len() * ((2 * (k as usize)) + 1)) / (2 * (replacements as usize))
+        };
+        batch.push(reserve[r_idx]);
+    }
+    batch
+}
+
+/// Validates a fetched probe article in `StreamRepairController::CompareProbes`.
+/// Returns `(is_valid, is_missing)`.
+pub fn check_probe_article(
+    success: bool,
+    data_len: usize,
+    file_size: i64,
+    offset: i64,
+    target_decoded_size: i64,
+) -> (bool, bool) {
+    if !success || data_len == 0 {
+        return (false, true);
+    }
+    if file_size != target_decoded_size
+        || offset.saturating_add(data_len as i64) > target_decoded_size
+    {
+        return (false, false);
+    }
+    (true, false)
+}
+
+/// Returns whether a fetched donor article in `PatchFromDonor` is valid and within the target's decoded size.
+pub fn is_patch_article_usable(
+    success: bool,
+    fetched_file_size: i64,
+    target_decoded_size: i64,
+    data_len: usize,
+    fetched_offset: i64,
+) -> bool {
+    if !success
+        || fetched_file_size != target_decoded_size
+        || data_len == 0
+        || fetched_offset < 0
+    {
+        return false;
+    }
+    match i64::try_from(data_len)
+        .ok()
+        .and_then(|len| fetched_offset.checked_add(len))
+    {
+        Some(end) => end <= target_decoded_size,
+        None => false,
+    }
+}
+
+/// Clips a target hole `(hole_offset, hole_size)` against a fetched donor article `(fetched_offset, fetched_len)`.
+/// Returns `Some((from, to))` when `from < to`.
+pub fn clip_hole_to_fetched(
+    hole_offset: i64,
+    hole_size: i64,
+    fetched_offset: i64,
+    fetched_len: usize,
+) -> Option<(i64, i64)> {
+    let hole_end = hole_offset.saturating_add(hole_size);
+    let fetched_end = fetched_offset.saturating_add(fetched_len as i64);
+    let from = hole_offset.max(fetched_offset);
+    let to = hole_end.min(fetched_end);
+    if from < to {
+        Some((from, to))
+    } else {
+        None
+    }
+}
+
+/// Classifies a target at the end of `StreamRepairController::ReportRemainingHoles` and updates
+/// recovered article/byte-health credits when the target is fully repaired.
+#[allow(clippy::too_many_arguments)]
+pub fn classify_remaining_hole_target(
+    interrupted: bool,
+    decoded_file_size: i64,
+    holes_empty: bool,
+    is_par_file: bool,
+    failed_articles: i32,
+    failed_size: i64,
+    missed_size: i64,
+    cur_recovered_articles: i32,
+    cur_recovered_failed_size: i64,
+    cur_recovered_failed_par_size: i64,
+) -> (i32, i32, i64, i64) {
+    if interrupted && (decoded_file_size <= 0 || !holes_empty) {
+        return (
+            1,
+            cur_recovered_articles,
+            cur_recovered_failed_size,
+            cur_recovered_failed_par_size,
+        );
+    }
+    if decoded_file_size <= 0 {
+        return (
+            2,
+            cur_recovered_articles,
+            cur_recovered_failed_size,
+            cur_recovered_failed_par_size,
+        );
+    }
+    if !holes_empty {
+        return (
+            3,
+            cur_recovered_articles,
+            cur_recovered_failed_size,
+            cur_recovered_failed_par_size,
+        );
+    }
+    let delta_size = failed_size.saturating_add(missed_size);
+    let new_articles = cur_recovered_articles.saturating_add(failed_articles);
+    let new_failed_size = cur_recovered_failed_size.saturating_add(delta_size);
+    let new_failed_par_size = if is_par_file {
+        cur_recovered_failed_par_size.saturating_add(delta_size)
+    } else {
+        cur_recovered_failed_par_size
+    };
+    (0, new_articles, new_failed_size, new_failed_par_size)
+}
+
+/// Returns true when the missing byte count exceeds the target's encoded size by
+/// more than 10% + 1 MiB, indicating an incomplete NZB (`ReportRemainingHoles`).
+pub fn is_incomplete_nzb_hole(missing: i64, encoded_size: i64) -> bool {
+    missing
+        > encoded_size
+            .saturating_add(encoded_size / 10)
+            .saturating_add(1024 * 1024)
+}
+
+/// Evaluates chunk-size backoff or piece skip when `ReadDonorInner` fails in
+/// `StreamRepairController::PatchFromDonorSet`.
+pub fn patch_donor_set_step_failure(
+    chunk: i64,
+    min_chunk: i64,
+    cur_size: i64,
+    cur_pos: i64,
+    cur_failed_pieces: i32,
+    max_failed_pieces: i32,
+) -> (i32, i64, i64, i32) {
+    if chunk > min_chunk {
+        let new_size = min_chunk.max(chunk / 4);
+        return (1, new_size, cur_pos, cur_failed_pieces);
+    }
+    let next_failed = cur_failed_pieces + 1;
+    if next_failed >= max_failed_pieces {
+        (0, cur_size, cur_pos, next_failed)
+    } else {
+        (2, cur_size, cur_pos.saturating_add(chunk), next_failed)
+    }
+}
+
+/// Computes `(window_end, from, block_to)` for an encrypted verification window in
+/// `StreamRepairController::VerifyEncryptedFromSource`, returning `None` when `from >= window_end`.
+pub fn calc_encrypted_window_bounds(
+    window_offset: i64,
+    window_end_raw: i64,
+    last_computable: i64,
+    block_from: i64,
+    block_size: i64,
+) -> Option<(i64, i64, i64)> {
+    if block_size <= 0 {
+        return None;
+    }
+    let window_end = window_end_raw.min(last_computable);
+    let from = window_offset.max(block_from);
+    if from >= window_end {
+        return None;
+    }
+    let block_to = (window_end + block_size - 1) / block_size * block_size;
+    Some((window_end, from, block_to))
+}
+
+/// Computes the live remainder of an inner hole in `StreamRepairController::PatchEncryptedFromSource`,
+/// clips it to `last_computable`, updates `uncomputable_tail`, and expands to cipher-block bounds.
+pub fn encrypted_clip_live_hole(
+    hole_offset: i64,
+    hole_size: i64,
+    live_holes: &[NzbgetRsByteRange],
+    last_computable: i64,
+    block_size: i64,
+    cur_uncomputable_tail: i64,
+) -> (bool, i64, i64, i64, i64, i64) {
+    let hole_end = hole_offset.saturating_add(hole_size);
+    let mut hole_from: i64 = -1;
+    let mut hole_to: i64 = -1;
+    for live in live_holes {
+        let live_end = live.offset.saturating_add(live.size);
+        let from = live.offset.max(hole_offset);
+        let to = live_end.min(hole_end);
+        if from < to {
+            if hole_from < 0 {
+                hole_from = from;
+            }
+            hole_to = to;
+        }
+    }
+    if hole_from < 0 {
+        return (false, cur_uncomputable_tail, -1, -1, 0, 0);
+    }
+    let patch_to = hole_to.min(last_computable);
+    let new_tail = cur_uncomputable_tail + (hole_to - patch_to.max(hole_from));
+    if patch_to <= hole_from || block_size <= 0 {
+        return (false, new_tail, hole_from, patch_to, 0, 0);
+    }
+    let block_from = (hole_from / block_size) * block_size;
+    let block_to = ((patch_to + block_size - 1) / block_size) * block_size;
+    (true, new_tail, hole_from, patch_to, block_from, block_to)
+}
+
+/// Checks whether the predecessor cipher block `[block_from - block_size, block_from)` is
+/// completely outside all current `live_holes` in `StreamRepairController::PatchEncryptedFromSource`.
+pub fn encrypted_is_prev_block_present(
+    block_from: i64,
+    block_size: i64,
+    live_holes: &[NzbgetRsByteRange],
+) -> bool {
+    let prev_start = block_from - block_size;
+    for live in live_holes {
+        let live_end = live.offset.saturating_add(live.size);
+        if !(live_end <= prev_start || live.offset >= block_from) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Computes `(chunk_end, block_count)` for an encrypted patch chunk in
+/// `StreamRepairController::PatchEncryptedFromSource`.
+pub fn calc_encrypted_chunk_end(
+    block_from: i64,
+    block_to: i64,
+    max_chunk: i64,
+    block_size: i64,
+) -> (i64, i64) {
+    let chunk_end = (block_from.saturating_add(max_chunk)).min(block_to);
+    let block_count = if block_size > 0 {
+        (chunk_end - block_from) / block_size
+    } else {
+        0
+    };
+    (chunk_end, block_count)
+}
+
+/// Formats `"Downloading duplicate <donor_name> (volume <member_num>/<total_members>, article <delivered_articles>/<total_articles>, <mb:.1> MB)"`
+/// for `StreamRepairController::MaterializeDonorSet`.
+pub fn format_materialize_progress(
+    donor_name: &[u8],
+    member_num: i32,
+    total_members: i32,
+    delivered_articles: i32,
+    total_articles: i32,
+    total_bytes: i64,
+) -> Vec<u8> {
+    let mb = (total_bytes as f64) / 1024.0 / 1024.0;
+    let suffix = format!(
+        " (volume {member_num}/{total_members}, article {delivered_articles}/{total_articles}, {mb:.1} MB)"
+    );
+    let mut out = Vec::with_capacity(22 + donor_name.len() + suffix.len());
+    out.extend_from_slice(b"Downloading duplicate ");
+    out.extend_from_slice(donor_name);
+    out.extend_from_slice(suffix.as_bytes());
+    out
+}
+
+/// Validates a fetched donor article before writing it into the materialized
+/// archive member file (`StreamRepairController::MaterializeDonorSet`).
+pub fn materialize_article_valid(
+    success: bool,
+    data_len: usize,
+    offset: i64,
+    fetched_file_size: i64,
+    member_size: i64,
+) -> bool {
+    success
+        && data_len > 0
+        && offset >= 0
+        && fetched_file_size > 0
+        && offset <= fetched_file_size
+        && (data_len as i64) <= fetched_file_size - offset
+        && (member_size < 0 || fetched_file_size == member_size)
+}
+
+/// Computes updated NZB failed/success byte counters after crediting fully
+/// repaired files back to health (`StreamRepairController::RepairCompleted`).
+#[allow(clippy::too_many_arguments)]
+pub fn credit_repaired_sizes(
+    recovered_failed_size: i64,
+    recovered_failed_par_size: i64,
+    failed_size: i64,
+    success_size: i64,
+    current_failed_size: i64,
+    current_success_size: i64,
+    par_failed_size: i64,
+    par_success_size: i64,
+    par_current_failed_size: i64,
+    par_current_success_size: i64,
+) -> (i64, i64, i64, i64, i64, i64, i64, i64) {
+    let mut new_failed = failed_size;
+    let mut new_success = success_size;
+    let mut new_cur_failed = current_failed_size;
+    let mut new_cur_success = current_success_size;
+    let mut new_par_failed = par_failed_size;
+    let mut new_par_success = par_success_size;
+    let mut new_par_cur_failed = par_current_failed_size;
+    let mut new_par_cur_success = par_current_success_size;
+
+    if recovered_failed_size > 0 {
+        new_failed = 0.max(failed_size.saturating_sub(recovered_failed_size));
+        new_success = success_size.saturating_add(recovered_failed_size);
+        new_cur_failed = 0.max(current_failed_size.saturating_sub(recovered_failed_size));
+        new_cur_success = current_success_size.saturating_add(recovered_failed_size);
+        if recovered_failed_par_size > 0 {
+            new_par_failed = 0.max(par_failed_size.saturating_sub(recovered_failed_par_size));
+            new_par_success = par_success_size.saturating_add(recovered_failed_par_size);
+            new_par_cur_failed =
+                0.max(par_current_failed_size.saturating_sub(recovered_failed_par_size));
+            new_par_cur_success =
+                par_current_success_size.saturating_add(recovered_failed_par_size);
+        }
+    }
+
+    (
+        new_failed,
+        new_success,
+        new_cur_failed,
+        new_cur_success,
+        new_par_failed,
+        new_par_success,
+        new_par_cur_failed,
+        new_par_cur_success,
+    )
+}
+
+/// Resolves post-stream-repair par-check and par-rename state transitions in
+/// `StreamRepairController::RepairCompleted`.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_completion_par_action(
+    recovered_bytes: i64,
+    holes_remain: bool,
+    par_rename_status: i32,
+    rs_none: i32,
+    par_status: i32,
+    ps_skipped: i32,
+    par_check_opt: i32,
+    pc_manual: i32,
+    ps_manual: i32,
+    ps_none: i32,
+) -> (bool, bool, i32, bool, bool, bool) {
+    let recovered = recovered_bytes > 0;
+    if !recovered && !holes_remain {
+        return (false, false, par_status, false, false, false);
+    }
+    let reset_par_rename = recovered && par_rename_status != rs_none;
+    if par_status > ps_skipped {
+        if recovered {
+            let new_status = if par_check_opt == pc_manual {
+                ps_manual
+            } else {
+                ps_none
+            };
+            (reset_par_rename, true, new_status, true, true, false)
+        } else {
+            (reset_par_rename, false, par_status, false, false, false)
+        }
+    } else {
+        (reset_par_rename, false, par_status, recovered, false, true)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2878,5 +3574,69 @@ mod tests {
             &target_set,
             &[b"Show.part01.rar"]
         ));
+    }
+
+    #[test]
+    fn test_consolidated_stream_repair_and_crypto() {
+        let mut seed = [0u8; 12];
+        assert!(streamcrypto_fill_rar3_seed(
+            &[0x41, 0x42],
+            &[1, 2, 3, 4, 5, 6, 7, 8],
+            &mut seed
+        ));
+        assert_eq!(&seed[..4], &[0x41, 0x00, 0x42, 0x00]);
+        assert_eq!(streamcrypto_rar5_iterations(15, false), Some(32768));
+        assert_eq!(streamcrypto_rar5_iterations(15, true), Some(32800));
+        assert_eq!(streamcrypto_rar5_iterations(25, false), None);
+        assert_eq!(streamcrypto_next_batch(0, 100, 16), (100, 1600));
+
+        assert_eq!(
+            eval_build_repair_job(
+                2, 2, false, false, b"movie.mkv", true, 0, 0, 3, false, false, false, false, 0,
+                1000, 0
+            ),
+            1
+        );
+        assert_eq!(
+            eval_build_repair_job(
+                2, 2, false, false, b"movie.mkv", true, 0, 0, 3, false, false, false, false, 5,
+                1000, 950
+            ),
+            2
+        );
+        assert_eq!(
+            eval_build_repair_job(
+                2, 2, false, false, b"movie.par2", true, 0, 0, 3, false, false, false, false, 5,
+                1000, 950
+            ),
+            0
+        );
+
+        let mut new_prog = 0i64;
+        let mut reset_last = false;
+        let reason = watchdog_eval_tick(
+            100, 100, false, 0, 30, 30, 30, 30.0, 30, 4, 120, 4, 0, 0, 1000, &mut new_prog,
+            &mut reset_last,
+        );
+        assert_eq!(reason.as_deref(), Some(&b"nothing recovered for 30 seconds"[..]));
+
+        assert_eq!(
+            select_probe_replacements(2, &[10, 20, 30, 40, 50], 8, 4),
+            vec![20, 40]
+        );
+        assert_eq!(check_probe_article(true, 100, 1000, 0, 1000), (true, false));
+        assert!(is_patch_article_usable(true, 1000, 1000, 100, 900));
+        assert_eq!(clip_hole_to_fetched(100, 200, 150, 100), Some((150, 250)));
+        assert!(is_incomplete_nzb_hole(12_000_000, 9_000_000));
+        assert_eq!(
+            patch_donor_set_step_failure(1024, 64, 1024, 0, 0, 8),
+            (1, 256, 0, 0)
+        );
+        assert_eq!(
+            calc_encrypted_window_bounds(16, 64, 64, 16, 16),
+            Some((64, 16, 64))
+        );
+        assert_eq!(calc_encrypted_chunk_end(16, 64, 32, 16), (48, 2));
+        assert!(materialize_article_valid(true, 100, 0, 1000, -1));
     }
 }

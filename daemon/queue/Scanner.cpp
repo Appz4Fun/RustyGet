@@ -100,9 +100,9 @@ void Scanner::InitOptions()
 
 int Scanner::ServiceInterval()
 {
-	return nzbget_rs_pup_scanner_select_service_interval(
-		m_requestedNzbDirScan ? 1 : 0, g_Options->GetNzbDirInterval(),
-		m_nzbDirInterval, Service::Now, Service::Sleep);
+	return m_requestedNzbDirScan ? Service::Now :
+		g_Options->GetNzbDirInterval() <= 0 ? Service::Sleep :
+		m_nzbDirInterval;
 }
 
 void Scanner::ServiceWork()
@@ -116,8 +116,7 @@ void Scanner::ServiceWork()
 
 	m_nzbDirInterval = g_Options->GetNzbDirInterval();
 
-	if (nzbget_rs_uqs_scanner_should_pause_scan(
-		g_WorkState->GetPauseScan() ? 1 : 0, m_requestedNzbDirScan ? 1 : 0) != 0)
+	if (g_WorkState->GetPauseScan() && !m_requestedNzbDirScan)
 	{
 		return;
 	}
@@ -137,8 +136,7 @@ void Scanner::ServiceWork()
 	}
 
 	CheckIncomingNzbs(g_Options->GetNzbDir(), "", checkStat);
-	if (nzbget_rs_uqs_scanner_needs_second_immediate_scan(
-		checkStat ? 1 : 0, m_scanScript ? 1 : 0) != 0)
+	if (!checkStat && m_scanScript)
 	{
 		// if immediate scan requested, we need second scan to process files extracted by scan-scripts
 		CheckIncomingNzbs(g_Options->GetNzbDir(), "", checkStat);
@@ -198,10 +196,7 @@ std::vector<fs::path> Scanner::FindArchives(const fs::path& dir, bool checkStat)
 
 		// like an nzb, an archive is taken once it stopped changing: one
 		// still being copied in failed to extract and was moved aside for good
-		bool isArchive = Unpack::IsArchive(path);
-		if (nzbget_rs_dqh_scanner_can_process_archive_entry(
-			isArchive ? 1 : 0,
-			isArchive && CanProcessFile(fs::u8string(path).c_str(), checkStat) ? 1 : 0) != 0)
+		if (Unpack::IsArchive(path) && CanProcessFile(fs::u8string(path).c_str(), checkStat))
 		{
 			archives.push_back(path);
 		}
@@ -258,10 +253,7 @@ void Scanner::CheckIncomingNzbs(const char* directory, const char* category, boo
 			continue;
 		}
 
-		NzbgetRsBuf fullPathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-			directory, PATH_SEPARATOR, filename);
-		BString<1024> fullfilename = fullPathBuf.data ? fullPathBuf.data : "";
-		nzbget_rs_free(fullPathBuf);
+		BString<1024> fullfilename("%s%c%s", directory, PATH_SEPARATOR, filename);
 		bool isDirectory = FileSystem::DirectoryExists(fullfilename);
 
 		if (isDirectory)
@@ -277,11 +269,16 @@ void Scanner::CheckIncomingNzbs(const char* directory, const char* category, boo
 
 void Scanner::ProcessSubdirectory(const char* fullPath, const char* filename, const char* category, bool checkStat)
 {
-	NzbgetRsBuf subCatBuf = nzbget_rs_tpr_scanner_format_subcategory(
-		category, PATH_SEPARATOR, filename);
-	std::string subCategory(subCatBuf.data ? subCatBuf.data : "", subCatBuf.len);
-	nzbget_rs_free(subCatBuf);
-	CheckIncomingNzbs(fullPath, subCategory.c_str(), checkStat);
+	BString<1024> subCategory;
+	if (category && category[0] != '\0')
+	{
+		subCategory.Format("%s%c%s", category, PATH_SEPARATOR, filename);
+	}
+	else
+	{
+		subCategory = filename;
+	}
+	CheckIncomingNzbs(fullPath, subCategory, checkStat);
 }
 
 /**
@@ -309,7 +306,7 @@ bool Scanner::CanProcessFile(const char* fullFilename, bool checkStat)
 	for (FileList::iterator it = m_fileList.begin(); it != m_fileList.end(); ++it)
 	{
 		FileData& fileData = *it;
-		if (nzbget_rs_dqh_bytes_equal(fileData.GetFilename(), fullFilename) != 0)
+		if (!strcmp(fileData.GetFilename(), fullFilename))
 		{
 			inList = true;
 			int64 updatedSize = fileData.GetSize();
@@ -369,7 +366,7 @@ bool Scanner::ShouldSkipItem(std::string_view filename)
 	std::string nameStr(filename);
 	std::string procStr(PROCESSED_DIR);
 	std::string brokStr(BROKEN_DIR);
-	return nzbget_rs_pup_scanner_should_skip_item(
+	return nzbget_rs_scanner_should_skip_item(
 		nameStr.c_str(), procStr.c_str(), brokStr.c_str()) != 0;
 }
 
@@ -380,12 +377,11 @@ void Scanner::ProcessIncomingFile(
 	const char* category
 )
 {
-	size_t dotPos = 0;
-	if (nzbget_rs_dqh_scanner_find_last_char_pos(baseFilename, '.', &dotPos) == 0)
+	const char* extension = strrchr(baseFilename, '.');
+	if (!extension)
 	{
 		return;
 	}
-	const char* extension = baseFilename + dotPos;
 
 	std::string nzbName;
 	std::string nzbCategory = category ? category : "";
@@ -394,7 +390,7 @@ void Scanner::ProcessIncomingFile(
 	int priority = 0;
 	bool addTop = false;
 	bool addPaused = false;
-	bool autoCategory = nzbCategory.empty() ? true : false;
+	bool autoCategory = nzbCategory.empty();
 	int dupeScore = 0;
 	EDupeMode dupeMode = dmScore;
 	EAddStatus addStatus = asSkipped;
@@ -425,8 +421,7 @@ void Scanner::ProcessIncomingFile(
 
 	bool exists = true;
 
-	bool ranScanScript = nzbget_rs_hsr_scanner_should_run_scan_script(
-		m_scanScript ? 1 : 0, extension) != 0;
+	bool ranScanScript = m_scanScript && strcasecmp(extension, ".nzb_processed");
 	if (ranScanScript)
 	{
 		ScanScriptController::ExecuteScripts(fullFilename,
@@ -445,7 +440,7 @@ void Scanner::ProcessIncomingFile(
 		exists = FileSystem::FileExists(fullFilename);
 	}
 	int renameToProcessed = 0;
-	int incAction = nzbget_rs_hsr_scanner_classify_incoming_extension(
+	int incAction = nzbget_rs_scanner_classify_incoming_extension(
 		ranScanScript ? 1 : 0, exists ? 1 : 0, extension, &renameToProcessed);
 	if (renameToProcessed)
 	{
@@ -536,16 +531,15 @@ void Scanner::InitPPParameters(const char* category, NzbParameterList* parameter
 	{
 		g_ExtensionManager->ForEach([&parameters](auto script)
 			{
-				NzbgetRsBuf prefixBuf = nzbget_rs_tpr_nzb_script_format_param_prefix(script->GetName());
-				parameters->SetParameter(prefixBuf.data ? prefixBuf.data : "", nullptr);
-				nzbget_rs_free(prefixBuf);
+				BString<1024> paramName("%s:", script->GetName());
+				parameters->SetParameter(paramName, nullptr);
 			}
 		);
 	}
 
 	if (!parameters->Find("*Unpack:"))
 	{
-		parameters->SetParameter("*Unpack:", nzbget_rs_dqh_scanner_yes_no_str(unpack ? 1 : 0));
+		parameters->SetParameter("*Unpack:", unpack ? "yes" : "no");
 	}
 
 	if (!Util::EmptyStr(extensions))
@@ -557,15 +551,10 @@ void Scanner::InitPPParameters(const char* category, NzbParameterList* parameter
 				Tokenizer tok(extensions, ",;");
 				while (const char* scriptName = tok.Next())
 				{
-					if (nzbget_rs_dqh_bytes_equal(scriptName, script->GetName()) == 0) continue;
+					if (strcmp(scriptName, script->GetName()) != 0) continue;
 
-					NzbgetRsBuf prefixBuf = nzbget_rs_tpr_nzb_script_format_param_prefix(scriptName);
-					BString<1024> paramName = prefixBuf.data ? prefixBuf.data : "";
-					nzbget_rs_free(prefixBuf);
-					if (nzbget_rs_uqs_scanner_script_qualifies_for_pp_param(
-						script->GetPostScript() ? 1 : 0,
-						script->GetQueueScript() ? 1 : 0,
-						parameters->Find(paramName) != nullptr ? 1 : 0) != 0)
+					BString<1024> paramName("%s:", scriptName);
+					if ((script->GetPostScript() || script->GetQueueScript()) && !parameters->Find(paramName))
 					{
 						parameters->SetParameter(paramName, "yes");
 					}
@@ -578,7 +567,7 @@ CString Scanner::ResolveCategory(const char* category, const char* filename)
 {
 	CString useCategory = category ? category : "";
 	Options::Category* categoryObj = g_Options->FindCategory(useCategory, true);
-	if (categoryObj && nzbget_rs_dqh_bytes_equal(useCategory, categoryObj->GetName()) == 0)
+	if (categoryObj && strcmp(useCategory, categoryObj->GetName()) != 0)
 	{
 		useCategory = categoryObj->GetName();
 		detail("Category '%s' matched to '%s' for '%s'", category, *useCategory, filename);
@@ -636,7 +625,7 @@ bool Scanner::AddFileToQueue(
 	}
 
 	CString bakname2;
-	const char* bakSuffix = nzbget_rs_uqs_scanner_select_rename_bak_queued(ok ? 1 : 0) != 0 ? "queued" : "error";
+	const char* bakSuffix = ok ? "queued" : "error";
 	if (!FileSystem::RenameBak(filename, bakSuffix, false, bakname2))
 	{
 		ok = false;
@@ -672,14 +661,9 @@ bool Scanner::AddFileToQueue(
 				bool cutShort = nzbFile.GetCutShortFiles().count(fileInfo) > 0;
 				int sev = nzbget_rs_dsp_classify_missed_articles(
 					fileInfo->GetMissedArticles(), fileInfo->GetTotalArticles(), cutShort ? 1 : 0);
-				int presentArticles = 0;
-				bool isWarn = nzbget_rs_tpr_scanner_eval_missed_articles_log(
-					fileInfo->GetTotalArticles(), fileInfo->GetMissedArticles(), sev, &presentArticles) != 0;
+				int presentArticles = fileInfo->GetTotalArticles() - fileInfo->GetMissedArticles();
 				nzbInfo->PrintMessage(
-					(Message::EKind)nzbget_rs_dqh_scanner_missed_articles_msg_kind(
-						isWarn ? 1 : 0,
-						(int)Message::mkWarning,
-						(int)Message::mkDetail),
+					sev == 2 ? Message::mkWarning : Message::mkDetail,
 					"Collection %s lists only %i of the %i articles of %s: the missing ones count as failed",
 					nzbInfo->GetName(), presentArticles,
 					fileInfo->GetTotalArticles(), fileInfo->GetFilename());
@@ -716,12 +700,11 @@ bool Scanner::AddFileToQueue(
 
 	NzbInfo* addedNzb = nullptr;
 
-	int outcome = nzbget_rs_hsr_scanner_classify_add_file_outcome(ok ? 1 : 0, urlInfo ? 1 : 0);
-	if (outcome == 1)
+	if (ok)
 	{
 		addedNzb = g_QueueCoordinator->AddNzbFileToQueue(std::move(nzbInfo), std::move(urlInfo), addTop);
 	}
-	else if (outcome == 2)
+	else if (urlInfo)
 	{
 		for (Message& message : nzbInfo->GuardCachedMessages())
 		{
@@ -860,8 +843,7 @@ Scanner::EAddStatus Scanner::AddArchive(const char* filename, const char* catego
 				nzbFilePathStr.c_str(), fileName.c_str(), useCategory,
 				autoCategory, priority, dupeKey, dupeScore, dupeMode,
 				parameters, addTop, addPaused,
-				nzbget_rs_dqh_scanner_should_assign_url_info_to_archive_entry(
-					index, urlInfo != nullptr ? 1 : 0) != 0 ? urlInfo : nullptr,
+				index == 0 ? urlInfo : nullptr,
 				&statuses[index], nullptr);
 			index++;
 		}
@@ -879,7 +861,7 @@ Scanner::EAddStatus Scanner::AddArchive(const char* filename, const char* catego
 	{
 		statusInts.push_back((int)st);
 	}
-	return (EAddStatus)nzbget_rs_hsr_scanner_resolve_archive_add_status(
+	return (EAddStatus)nzbget_rs_scanner_resolve_archive_add_status(
 		urlInfo ? 1 : 0,
 		statusInts.data(),
 		statusInts.size(),
@@ -966,10 +948,7 @@ Scanner::EAddStatus Scanner::AddExternalFile(
 		int num = ++m_idGen;
 		while (tempFileName.Empty() || FileSystem::FileExists(tempFileName))
 		{
-			NzbgetRsBuf tmpBuf = nzbget_rs_dqh_scanner_format_temp_nzb_path(
-				g_Options->GetTempDir(), PATH_SEPARATOR, num);
-			tempFileName = tmpBuf.data ? tmpBuf.data : "";
-			nzbget_rs_free(tmpBuf);
+			tempFileName.Format("%s%cnzb-%i.tmp", g_Options->GetTempDir(), PATH_SEPARATOR, num);
 			num++;
 		}
 
@@ -986,7 +965,7 @@ Scanner::EAddStatus Scanner::AddExternalFile(
 	// a name that is a full path (a client passing its file) drops the folder; any
 	// other "/" belongs to the name (indexers post "[hash] [16/22] - Title"), and it
 	// lost everything up to it ("22] - Title"). MakeValidFilename makes it safe
-	bool absolutePath = nzbget_rs_pup_scanner_is_absolute_nzb_name(nzbName) != 0;
+	bool absolutePath = nzbget_rs_scanner_is_absolute_nzb_name(nzbName) != 0;
 	CString validNzbName = FileSystem::MakeValidFilename(absolutePath ? FileSystem::BaseFileName(nzbName) : nzbName);
 	{
 		NzbgetRsBuf normBuf = nzbget_rs_dsp_normalize_external_nzb_name(nzbName, validNzbName, nzb ? 1 : 0);
@@ -995,10 +974,7 @@ Scanner::EAddStatus Scanner::AddExternalFile(
 		validNzbName = normStr.c_str();
 	}
 
-	NzbgetRsBuf scanPathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-		g_Options->GetNzbDir(), PATH_SEPARATOR, *validNzbName);
-	BString<1024> scanFileName = scanPathBuf.data ? scanPathBuf.data : "";
-	nzbget_rs_free(scanPathBuf);
+	BString<1024> scanFileName("%s%c%s", g_Options->GetNzbDir(), PATH_SEPARATOR, *validNzbName);
 
 	const char* validCStr = validNzbName ? *validNzbName : "";
 	size_t validLen = strlen(validCStr);
@@ -1010,11 +986,16 @@ Scanner::EAddStatus Scanner::AddExternalFile(
 	int num = 2;
 	while (FileSystem::FileExists(scanFileName))
 	{
-		NzbgetRsBuf numBuf = nzbget_rs_tpr_scanner_format_numbered_external_filename(
-			g_Options->GetNzbDir(), PATH_SEPARATOR, basePart.c_str(), extPart.c_str(),
-			hasExt ? 1 : 0, num);
-		scanFileName.Set(numBuf.data ? numBuf.data : "", numBuf.len);
-		nzbget_rs_free(numBuf);
+		if (hasExt)
+		{
+			scanFileName.Format("%s%c%s_%i.%s", g_Options->GetNzbDir(), PATH_SEPARATOR,
+				basePart.c_str(), num, extPart.c_str());
+		}
+		else
+		{
+			scanFileName.Format("%s%c%s_%i", g_Options->GetNzbDir(), PATH_SEPARATOR,
+				basePart.c_str(), num);
+		}
 		num++;
 	}
 

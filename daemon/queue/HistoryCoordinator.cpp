@@ -47,7 +47,7 @@ void HistoryCoordinator::ServiceWork()
 
 	// in 64 bits: past 24,855 days the int product went negative, and every item was
 	// hidden as too old
-	time_t minTime = (time_t)nzbget_rs_pup_history_coord_calc_min_time(
+	time_t minTime = (time_t)nzbget_rs_history_coord_calc_min_time(
 		(int64)Util::CurrentTime(), g_Options->GetKeepHistory());
 	bool changed = false;
 	int index = 0;
@@ -57,7 +57,7 @@ void HistoryCoordinator::ServiceWork()
 	for (HistoryList::reverse_iterator it = downloadQueue->GetHistory()->rbegin(); it != downloadQueue->GetHistory()->rend(); )
 	{
 		HistoryInfo* historyInfo = (*it).get();
-		int action = nzbget_rs_hsr_history_coord_classify_service_work_item(
+		int action = nzbget_rs_history_coord_classify_service_work_item(
 			(int)historyInfo->GetKind(),
 			(int)HistoryInfo::hkDup,
 			(int)HistoryInfo::hkNzb,
@@ -117,16 +117,15 @@ void HistoryCoordinator::DeleteDiskFiles(NzbInfo* nzbInfo)
 	// QueuedFile may contain one filename or several filenames separated
 	// with "|"-character (for merged groups)
 	const char* filename = nzbInfo->GetQueuedFilename() ? nzbInfo->GetQueuedFilename() : "";
-	nzbget_rs_dqh_fleet_visit_pipe_names(filename, strlen(filename), nullptr,
-		[](void*, const char* namePtr, size_t nameLen)
+	Tokenizer tok(filename, "|");
+	while (const char* name1 = tok.Next())
+	{
+		if (FileSystem::FileExists(name1))
 		{
-			std::string name1(namePtr ? namePtr : "", nameLen);
-			if (FileSystem::FileExists(name1.c_str()))
-			{
-				info("Deleting file %s", name1.c_str());
-				FileSystem::DeleteFile(name1.c_str());
-			}
-		});
+			info("Deleting file %s", name1);
+			FileSystem::DeleteFile(name1);
+		}
+	}
 }
 
 void HistoryCoordinator::AddToHistory(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
@@ -185,9 +184,9 @@ void HistoryCoordinator::AddToHistory(DownloadQueue* downloadQueue, NzbInfo* nzb
 	nzbInfo->SetParkedFileCount(0);
 	for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
 	{
-		if (nzbget_rs_pup_history_coord_should_count_parked_file(
-			(int)completedFile.GetStatus(), (int)CompletedFile::cfNone, (int)CompletedFile::cfPartial,
-			&completedFile == &*nzbInfo->GetCompletedFiles()->rbegin() ? 1 : 0) != 0)
+		bool isLast = &completedFile == &*nzbInfo->GetCompletedFiles()->rbegin();
+		if (completedFile.GetStatus() == CompletedFile::cfNone ||
+			(completedFile.GetStatus() == CompletedFile::cfPartial && isLast))
 		{
 			nzbInfo->PrintMessage(Message::mkDetail, "Parking file %s", completedFile.GetFilename());
 			nzbInfo->SetParkedFileCount(nzbInfo->GetParkedFileCount() + 1);
@@ -198,15 +197,13 @@ void HistoryCoordinator::AddToHistory(DownloadQueue* downloadQueue, NzbInfo* nzb
 	nzbInfo->SetRemainingParCount(0);
 	nzbInfo->SetParking(false);
 
+	if (nzbInfo->GetDirectRenameStatus() == NzbInfo::tsRunning)
 	{
-		int newRename = (int)nzbInfo->GetDirectRenameStatus();
-		int newUnpack = (int)nzbInfo->GetDirectUnpackStatus();
-		nzbget_rs_hsr_history_coord_resolve_post_history_direct_statuses(
-			newRename, (int)NzbInfo::tsRunning, (int)NzbInfo::tsFailure,
-			newUnpack, (int)NzbInfo::nsRunning, (int)NzbInfo::nsNone,
-			&newRename, &newUnpack);
-		nzbInfo->SetDirectRenameStatus((NzbInfo::EDirectRenameStatus)newRename);
-		nzbInfo->SetDirectUnpackStatus((NzbInfo::EDirectUnpackStatus)newUnpack);
+		nzbInfo->SetDirectRenameStatus(NzbInfo::tsFailure);
+	}
+	if (nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsRunning)
+	{
+		nzbInfo->SetDirectUnpackStatus(NzbInfo::nsNone);
 	}
 
 	nzbInfo->SetDupeHint(NzbInfo::dhNone);
@@ -227,7 +224,7 @@ void HistoryCoordinator::AddToHistory(DownloadQueue* downloadQueue, NzbInfo* nzb
  */
 void HistoryCoordinator::RecheckFailedArticles(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 {
-	if (nzbget_rs_pup_history_coord_should_recheck_failed_articles(
+	if (nzbget_rs_history_coord_should_recheck_failed_articles(
 		g_Options->GetDupeArticleFallback() == Options::dafNone ? 1 : 0,
 		g_Options->GetHealthCheck() == Options::hcDupe ? 1 : 0,
 		nzbInfo->GetKind() == NzbInfo::nkNzb ? 1 : 0,
@@ -246,10 +243,8 @@ void HistoryCoordinator::RecheckFailedArticles(DownloadQueue* downloadQueue, Nzb
 		}
 	}
 	// a duplicate waits in history: nzbget fetches it in its place (B39)
-	if (nzbget_rs_pur_history_coord_should_skip_recheck_for_dupe_backup(
-		g_Options->GetDupeCheck() ? 1 : 0,
-		(int)nzbInfo->GetDupeMode(),
-		(int)dmScore) != 0 &&
+	if (g_Options->GetDupeCheck() &&
+		nzbInfo->GetDupeMode() == dmScore &&
 		g_DupeCoordinator->FindDupeBackup(downloadQueue, nzbInfo, nzbInfo->GetName(), nzbInfo->GetDupeKey()))
 	{
 		return;
@@ -260,17 +255,13 @@ void HistoryCoordinator::RecheckFailedArticles(DownloadQueue* downloadQueue, Nzb
 	std::vector<DupeProbe::Sample> failed;
 	for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
 	{
-		int isPartialInt = 0;
-		if (nzbget_rs_hsr_history_coord_should_sample_completed_file(
-			(int)completedFile.GetStatus(),
-			(int)CompletedFile::cfPartial,
-			(int)CompletedFile::cfFailure,
-			completedFile.GetId(),
-			&isPartialInt) == 0)
+		if ((completedFile.GetStatus() != CompletedFile::cfPartial &&
+			 completedFile.GetStatus() != CompletedFile::cfFailure) ||
+			completedFile.GetId() <= 0)
 		{
 			continue;
 		}
-		bool partial = isPartialInt != 0;
+		bool partial = completedFile.GetStatus() == CompletedFile::cfPartial;
 		FileInfo fileInfo(completedFile.GetId());
 		if (!g_DiskState->LoadFile(&fileInfo, false, true) ||
 			(partial && !g_DiskState->LoadFileState(&fileInfo, g_ServerPool->GetServers(), true)))
@@ -284,11 +275,8 @@ void HistoryCoordinator::RecheckFailedArticles(DownloadQueue* downloadQueue, Nzb
 		}
 		for (ArticleInfo* article : fileInfo.GetArticles())
 		{
-			if (nzbget_rs_hsr_history_coord_should_sample_article(
-				partial ? 1 : 0,
-				(int)article->GetStatus(),
-				(int)ArticleInfo::aiFailed,
-				article->GetMessageId()) != 0)
+			if ((!partial || article->GetStatus() == ArticleInfo::aiFailed) &&
+				!Util::EmptyStr(article->GetMessageId()))
 			{
 				DupeProbe::Sample sample;
 				sample.MessageId = article->GetMessageId();
@@ -346,12 +334,8 @@ void HistoryCoordinator::PrepareEdit(DownloadQueue* downloadQueue, IdList* idLis
 	for (int id : *idList)
 	{
 		HistoryInfo* historyInfo = downloadQueue->GetHistory()->Find(id);
-		if (nzbget_rs_dqh_history_coord_should_mark_bad_in_prepare_edit(
-			(int)action,
-			(int)DownloadQueue::eaHistoryMarkBad,
-			historyInfo != nullptr ? 1 : 0,
-			historyInfo ? (int)historyInfo->GetKind() : 0,
-			(int)HistoryInfo::hkNzb) != 0)
+		if (action == DownloadQueue::eaHistoryMarkBad &&
+			historyInfo && historyInfo->GetKind() == HistoryInfo::hkNzb)
 		{
 			historyInfo->GetNzbInfo()->SetMarkStatus(NzbInfo::ksBad);
 		}
@@ -460,7 +444,7 @@ void HistoryCoordinator::HistoryDelete(DownloadQueue* downloadQueue, HistoryList
 	}
 
 	bool isNzb = historyInfo->GetKind() == HistoryInfo::hkNzb;
-	if (isNzb && nzbget_rs_pup_history_coord_should_delete_dest_dir(
+	if (isNzb && nzbget_rs_history_coord_should_delete_dest_dir(
 		1,
 		(int)historyInfo->GetNzbInfo()->GetDeleteStatus(), (int)NzbInfo::dsNone,
 		(int)historyInfo->GetNzbInfo()->GetParStatus(), (int)NzbInfo::psFailure,
@@ -476,22 +460,15 @@ void HistoryCoordinator::HistoryDelete(DownloadQueue* downloadQueue, HistoryList
 		}
 	}
 
-	if (nzbget_rs_pup_history_coord_should_erase_on_delete(
-		final ? 1 : 0, g_Options->GetDupeCheck() ? 1 : 0,
-		historyInfo->GetKind() == HistoryInfo::hkUrl ? 1 : 0) != 0)
+	if (final || !g_Options->GetDupeCheck() || historyInfo->GetKind() == HistoryInfo::hkUrl)
 	{
 		downloadQueue->GetHistory()->erase(itHistory);
 	}
-	else
+	else if (historyInfo->GetKind() == HistoryInfo::hkNzb)
 	{
-		if (historyInfo->GetKind() == HistoryInfo::hkNzb)
-		{
-			// replace history element
-			int rindex = nzbget_rs_tpr_history_coord_reverse_delete_index(
-				(int)downloadQueue->GetHistory()->size(),
-				(int)(itHistory - downloadQueue->GetHistory()->begin()));
-			HistoryHide(downloadQueue, historyInfo, rindex);
-		}
+		// replace history element
+		int rindex = (int)downloadQueue->GetHistory()->size() - 1 - (int)(itHistory - downloadQueue->GetHistory()->begin());
+		HistoryHide(downloadQueue, historyInfo, rindex);
 	}
 }
 
@@ -515,7 +492,7 @@ void HistoryCoordinator::MoveToQueue(DownloadQueue* downloadQueue, HistoryList::
 		ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr);
 	int newPostTotalSec = nzbInfo->GetPostTotalSec();
 	int newMoveStatus = (int)nzbInfo->GetMoveStatus();
-	nzbget_rs_hsr_history_coord_calc_move_to_queue_reset(
+	nzbget_rs_history_coord_calc_move_to_queue_reset(
 		nzbInfo->GetUnpackCleanedUpDisk() ? 1 : 0,
 		nzbInfo->GetPostTotalSec(),
 		nzbInfo->GetUnpackSec(),
@@ -586,8 +563,10 @@ void HistoryCoordinator::HistoryRedownload(DownloadQueue* downloadQueue, History
 		historyInfo->DiscardNzbInfo();
 		nzbInfo->SetUrlStatus(NzbInfo::lsNone);
 		nzbInfo->SetDeleteStatus(NzbInfo::dsNone);
-		nzbInfo->SetDupeHint((NzbInfo::EDupeHint)nzbget_rs_hsr_history_coord_resolve_url_redownload_dupe_hint(
-			(int)nzbInfo->GetDupeHint(), (int)NzbInfo::dhNone, (int)NzbInfo::dhRedownloadManual));
+		if (nzbInfo->GetDupeHint() == NzbInfo::dhNone)
+		{
+			nzbInfo->SetDupeHint(NzbInfo::dhRedownloadManual);
+		}
 		downloadQueue->GetQueue()->Add(std::unique_ptr<NzbInfo>(nzbInfo), true);
 		downloadQueue->GetHistory()->erase(itHistory);
 
@@ -604,8 +583,7 @@ void HistoryCoordinator::HistoryRedownload(DownloadQueue* downloadQueue, History
 	}
 
 	NzbInfo* nzbInfo = historyInfo->GetNzbInfo();
-	bool paused = nzbget_rs_tpr_history_coord_should_restore_paused_on_redownload(
-		restorePauseState ? 1 : 0, nzbInfo->GetDeletePaused() ? 1 : 0) != 0;
+	bool paused = restorePauseState && nzbInfo->GetDeletePaused();
 
 	if (!FileSystem::FileExists(nzbInfo->GetQueuedFilename()))
 	{
@@ -707,19 +685,15 @@ void HistoryCoordinator::HistoryRedownload(DownloadQueue* downloadQueue, History
 void HistoryCoordinator::HistoryReturn(DownloadQueue* downloadQueue, HistoryList::iterator itHistory,
 	HistoryInfo* historyInfo)
 {
-	int parkedCount = historyInfo->GetKind() == HistoryInfo::hkNzb ?
-		historyInfo->GetNzbInfo()->GetParkedFileCount() : 0;
-	int returnAction = nzbget_rs_hsr_history_coord_classify_return_action(
-		(int)historyInfo->GetKind(), (int)HistoryInfo::hkUrl, (int)HistoryInfo::hkNzb, parkedCount);
-	if (returnAction == 1)
+	if (historyInfo->GetKind() == HistoryInfo::hkUrl)
 	{
 		HistoryRedownload(downloadQueue, itHistory, historyInfo, false);
 	}
-	else if (returnAction == 2)
+	else if (historyInfo->GetKind() == HistoryInfo::hkNzb && historyInfo->GetNzbInfo()->GetParkedFileCount() == 0)
 	{
 		warn("Could not download remaining files for %s: history item does not have any files left for download", historyInfo->GetName());
 	}
-	else if (returnAction == 3)
+	else if (historyInfo->GetKind() == HistoryInfo::hkNzb)
 	{
 		HistoryRetry(downloadQueue, itHistory, historyInfo, false, false);
 	}
@@ -746,7 +720,7 @@ void HistoryCoordinator::HistoryRetry(DownloadQueue* downloadQueue, HistoryList:
 	const char* wrongTypeVerb = nullptr;
 	const char* missingDirVerb = nullptr;
 	const char* startMsgVerb = nullptr;
-	nzbget_rs_tpr_history_coord_retry_action_labels(
+	nzbget_rs_history_coord_retry_action_labels(
 		resetFailed ? 1 : 0, reprocess ? 1 : 0,
 		&wrongTypeVerb, &missingDirVerb, &startMsgVerb);
 
@@ -779,20 +753,18 @@ void HistoryCoordinator::HistoryRetry(DownloadQueue* downloadQueue, HistoryList:
 	for (CompletedFileList::iterator it = nzbInfo->GetCompletedFiles()->begin(); it != nzbInfo->GetCompletedFiles()->end(); )
 	{
 		CompletedFile& completedFile = *it;
-		if (nzbget_rs_pup_history_coord_can_attempt_requeue_file(
-			(int)completedFile.GetStatus(), (int)CompletedFile::cfSuccess,
-			(int)CompletedFile::cfFailure, resetFailed ? 1 : 0, completedFile.GetId()) != 0)
+		if (completedFile.GetStatus() != CompletedFile::cfSuccess &&
+			(completedFile.GetStatus() != CompletedFile::cfFailure || resetFailed) &&
+			completedFile.GetId() > 0)
 		{
 			std::unique_ptr<FileInfo> fileInfo = std::make_unique<FileInfo>();
 			fileInfo->SetId(completedFile.GetId());
 			bool fileLoaded = g_DiskState->LoadFile(fileInfo.get(), true, true);
-			bool stateLoaded = nzbget_rs_dqh_history_coord_should_load_partial_file_state(
-				fileLoaded ? 1 : 0,
-				(int)completedFile.GetStatus(),
-				(int)CompletedFile::cfPartial) != 0 &&
+			bool stateLoaded = fileLoaded &&
+				completedFile.GetStatus() == CompletedFile::cfPartial &&
 				g_DiskState->LoadFileState(fileInfo.get(), g_ServerPool->GetServers(), true);
 			if (fileLoaded &&
-				nzbget_rs_hsr_history_coord_eval_requeue_loaded_file(
+				nzbget_rs_history_coord_eval_requeue_loaded_file(
 					(int)completedFile.GetStatus(),
 					(int)CompletedFile::cfNone,
 					(int)CompletedFile::cfFailure,
@@ -807,38 +779,31 @@ void HistoryCoordinator::HistoryRetry(DownloadQueue* downloadQueue, HistoryList:
 				std::string recordedName = completedFile.GetFilename();
 				bool temporaryName = nzbget_rs_pup_history_coord_is_temporary_output_name(
 					recordedName.c_str()) != 0;
-				if (nzbget_rs_pur_history_coord_should_keep_recorded_filename(
-					temporaryName ? 1 : 0,
-					Util::EmptyStr(fileInfo->GetFilename()) ? 1 : 0) != 0)
+				if (!temporaryName || Util::EmptyStr(fileInfo->GetFilename()))
 				{
 					fileInfo->SetFilename(recordedName.c_str());
 				}
 				fileInfo->SetNzbInfo(nzbInfo);
 
-				NzbgetRsBuf outPathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-					nzbInfo->GetDestDir(), PATH_SEPARATOR, recordedName.c_str());
-				BString<1024> outputFilename = outPathBuf.data ? outPathBuf.data : "";
-				nzbget_rs_free(outPathBuf);
+				BString<1024> outputFilename("%s%c%s", nzbInfo->GetDestDir(), PATH_SEPARATOR, recordedName.c_str());
 
 				int64 outFileSize = fileInfo->GetSuccessArticles() == 0 ? 0 : FileSystem::FileSize(outputFilename);
-				if (nzbget_rs_pur_history_coord_should_delete_empty_or_zero_success_output(
-					fileInfo->GetSuccessArticles(), outFileSize) != 0)
+				if (fileInfo->GetSuccessArticles() == 0 || outFileSize == 0)
 				{
 					FileSystem::DeleteFile(outputFilename);
 				}
 
-				int outStateAct = nzbget_rs_dqh_history_coord_classify_success_output_state(
-					fileInfo->GetSuccessArticles(),
-					fileInfo->GetSuccessArticles() > 0 && FileSystem::FileExists(outputFilename) ? 1 : 0,
-					reprocess ? 1 : 0);
-				if (outStateAct == 1)
+				if (fileInfo->GetSuccessArticles() > 0)
 				{
-					fileInfo->SetPartialState(FileInfo::psCompleted);
-				}
-				else if (outStateAct == 2)
-				{
-					nzbInfo->PrintMessage(Message::mkWarning, "File %s could not be found on disk, downloading again", fileInfo->GetFilename());
-					fileInfo->SetPartialState(FileInfo::psNone);
+					if (FileSystem::FileExists(outputFilename))
+					{
+						fileInfo->SetPartialState(FileInfo::psCompleted);
+					}
+					else if (!reprocess)
+					{
+						nzbInfo->PrintMessage(Message::mkWarning, "File %s could not be found on disk, downloading again", fileInfo->GetFilename());
+						fileInfo->SetPartialState(FileInfo::psNone);
+					}
 				}
 
 				// A partial file may contain only entries missing from the NZB.
@@ -854,7 +819,7 @@ void HistoryCoordinator::HistoryRetry(DownloadQueue* downloadQueue, HistoryList:
 					{
 						artStatuses.push_back((int)article->GetStatus());
 					}
-					noRetryableArticles = nzbget_rs_hsr_history_coord_has_retryable_article(
+					noRetryableArticles = nzbget_rs_history_coord_has_retryable_article(
 						artStatuses.data(),
 						artStatuses.size(),
 						resetFailed ? 1 : 0,
@@ -894,9 +859,7 @@ void HistoryCoordinator::HistoryRetry(DownloadQueue* downloadQueue, HistoryList:
 		[&requeued](const StreamRepairJob& job) { return requeued.count(job.GetFileId()) > 0; }), jobs->end());
 
 	nzbInfo->UpdateCurrentStats();
-	if (nzbget_rs_pur_history_coord_should_pause_health_on_remaining_retry(
-		resetFailed ? 1 : 0,
-		reprocess ? 1 : 0) != 0)
+	if (!resetFailed && !reprocess)
 	{
 		// The user explicitly requested the remaining files; do not park the
 		// download again because of the health failure being overridden.
@@ -927,7 +890,7 @@ void HistoryCoordinator::ResetArticles(FileInfo* fileInfo, bool allFailed, bool 
 	int nzbSuccessArticles = nzbInfo->GetSuccessArticles();
 	int64 nzbParFailedSize = nzbInfo->GetParFailedSize();
 	int64 nzbParSuccessSize = nzbInfo->GetParSuccessSize();
-	nzbget_rs_hsr_history_coord_reset_articles_header(
+	nzbget_rs_history_coord_reset_articles_header(
 		allFailed ? 1 : 0,
 		fileInfo->GetParFile() ? 1 : 0,
 		fileInfo->GetSize(),
@@ -989,7 +952,7 @@ void HistoryCoordinator::ResetArticles(FileInfo* fileInfo, bool allFailed, bool 
 			int64 failSize = fileInfo->GetFailedSize();
 			int succArt = fileInfo->GetSuccessArticles();
 			int64 succSize = fileInfo->GetSuccessSize();
-			nzbget_rs_hsr_history_coord_apply_article_reset_delta(
+			nzbget_rs_history_coord_apply_article_reset_delta(
 				(int)pa->GetStatus(),
 				(int)ArticleInfo::aiFailed,
 				(int)ArticleInfo::aiUndefined,
@@ -1028,20 +991,17 @@ bool HistoryCoordinator::HistorySetParameter(HistoryInfo* historyInfo, const cha
 {
 	debug("Setting post-process-parameter '%s' for '%s'", text, historyInfo->GetName());
 
-	if (nzbget_rs_pur_history_coord_is_nzb_or_url_kind(
-		(int)historyInfo->GetKind(),
-		(int)HistoryInfo::hkNzb,
-		(int)HistoryInfo::hkUrl) == 0)
+	if (historyInfo->GetKind() != HistoryInfo::hkNzb && historyInfo->GetKind() != HistoryInfo::hkUrl)
 	{
 		error("Could not set post-process-parameter for %s: history item has wrong type", historyInfo->GetName());
 		return false;
 	}
 
-	size_t nameLen = 0, valOff = 0;
-	if (text && nzbget_rs_tpr_split_param_assignment(text, &nameLen, &valOff) != 0)
+	const char* eq = text ? strchr(text, '=') : nullptr;
+	if (eq)
 	{
-		std::string name(text, nameLen);
-		historyInfo->GetNzbInfo()->GetParameters()->SetParameter(name.c_str(), text + valOff);
+		std::string name(text, (size_t)(eq - text));
+		historyInfo->GetNzbInfo()->GetParameters()->SetParameter(name.c_str(), eq + 1);
 	}
 	else
 	{
@@ -1055,10 +1015,7 @@ bool HistoryCoordinator::HistorySetCategory(HistoryInfo* historyInfo, const char
 {
 	debug("Setting category '%s' for '%s'", text, historyInfo->GetName());
 
-	if (nzbget_rs_pur_history_coord_is_nzb_or_url_kind(
-		(int)historyInfo->GetKind(),
-		(int)HistoryInfo::hkNzb,
-		(int)HistoryInfo::hkUrl) == 0)
+	if (historyInfo->GetKind() != HistoryInfo::hkNzb && historyInfo->GetKind() != HistoryInfo::hkUrl)
 	{
 		error("Could not set category for %s: history item has wrong type", historyInfo->GetName());
 		return false;
@@ -1079,18 +1036,11 @@ bool HistoryCoordinator::HistorySetName(HistoryInfo* historyInfo, const char* te
 		return false;
 	}
 
-	if (nzbget_rs_pur_history_coord_is_nzb_or_url_kind(
-		(int)historyInfo->GetKind(),
-		(int)HistoryInfo::hkNzb,
-		(int)HistoryInfo::hkUrl) != 0)
+	if (historyInfo->GetKind() == HistoryInfo::hkNzb || historyInfo->GetKind() == HistoryInfo::hkUrl)
 	{
 		std::string previous = historyInfo->GetNzbInfo()->GetName();
 		historyInfo->GetNzbInfo()->SetName(text);
-		if (nzbget_rs_pur_history_coord_should_notify_dupe_search_name_changed(
-			(int)historyInfo->GetKind(),
-			(int)HistoryInfo::hkNzb,
-			g_DupeSearch != nullptr ? 1 : 0,
-			previous != historyInfo->GetNzbInfo()->GetName() ? 1 : 0) != 0)
+		if (historyInfo->GetKind() == HistoryInfo::hkNzb && g_DupeSearch && previous != historyInfo->GetNzbInfo()->GetName())
             g_DupeSearch->NotifyNameChanged(historyInfo->GetNzbInfo()->GetId());
 	}
 	else if (historyInfo->GetKind() == HistoryInfo::hkDup)
@@ -1117,10 +1067,7 @@ void HistoryCoordinator::HistorySetDupeParam(HistoryInfo* historyInfo, DownloadQ
 		mode = (EDupeMode)parsedMode;
 	}
 
-	if (nzbget_rs_pur_history_coord_is_nzb_or_url_kind(
-		(int)historyInfo->GetKind(),
-		(int)HistoryInfo::hkNzb,
-		(int)HistoryInfo::hkUrl) != 0)
+	if (historyInfo->GetKind() == HistoryInfo::hkNzb || historyInfo->GetKind() == HistoryInfo::hkUrl)
 	{
 		switch (action)
 		{
@@ -1130,7 +1077,7 @@ void HistoryCoordinator::HistorySetDupeParam(HistoryInfo* historyInfo, DownloadQ
 				break;
 
 			case DownloadQueue::eaHistorySetDupeScore:
-				historyInfo->GetNzbInfo()->SetDupeScore(nzbget_rs_dqh_parse_c_atoi(text));
+				historyInfo->GetNzbInfo()->SetDupeScore(text ? atoi(text) : 0);
 				break;
 
 			case DownloadQueue::eaHistorySetDupeMode:
@@ -1143,16 +1090,14 @@ void HistoryCoordinator::HistorySetDupeParam(HistoryInfo* historyInfo, DownloadQ
 					error("Could not set duplicate parameter for %s: history item has wrong type", historyInfo->GetName());
 					return;
 				}
-				else if (nzbget_rs_pur_history_coord_is_valid_dupe_backup_delete_status(
-					(int)historyInfo->GetNzbInfo()->GetDeleteStatus(),
-					(int)NzbInfo::dsDupe,
-					(int)NzbInfo::dsManual) == 0)
+				else if (historyInfo->GetNzbInfo()->GetDeleteStatus() != NzbInfo::dsDupe &&
+					historyInfo->GetNzbInfo()->GetDeleteStatus() != NzbInfo::dsManual)
 				{
 					error("Could not set duplicate parameter for %s: history item has wrong delete status", historyInfo->GetName());
 					return;
 				}
 				historyInfo->GetNzbInfo()->SetDeleteStatus(
-					(NzbInfo::EDeleteStatus)nzbget_rs_pup_history_coord_parse_dupe_backup_flag(
+					(NzbInfo::EDeleteStatus)nzbget_rs_history_coord_parse_dupe_backup_flag(
 						text, (int)NzbInfo::dsDupe, (int)NzbInfo::dsManual));
 				break;
 
@@ -1170,7 +1115,7 @@ void HistoryCoordinator::HistorySetDupeParam(HistoryInfo* historyInfo, DownloadQ
 				break;
 
 			case DownloadQueue::eaHistorySetDupeScore:
-				historyInfo->GetDupInfo()->SetDupeScore(nzbget_rs_dqh_parse_c_atoi(text));
+				historyInfo->GetDupInfo()->SetDupeScore(text ? atoi(text) : 0);
 				break;
 
 			case DownloadQueue::eaHistorySetDupeMode:

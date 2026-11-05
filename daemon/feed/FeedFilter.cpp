@@ -26,7 +26,7 @@
 #include "FeedFilter.h"
 
 #include <climits>
-#include <type_traits>
+#include <cstdint>
 #include "nzbget_rs.h"
 
 // the feed item and this filter's regular expressions, for the callbacks
@@ -60,11 +60,9 @@ void FeedFilter::Field(void* user, int field, const char* attr, const char** str
 		case 3: *str = item->GetUrl(); break;
 		case 4: *num = item->GetSize(); break;
 		case 5:
-		{
-			*num = static_cast<time_t>(nzbget_rs_tpr_feed_filter_calc_age(
-				(int64_t)Util::CurrentTime(), (int64_t)item->GetTime()));
+			*num = static_cast<time_t>(
+				static_cast<uint64_t>(Util::CurrentTime()) - static_cast<uint64_t>(item->GetTime()));
 			break;
-		}
 		case 6: *num = item->GetImdbId(); break;
 		case 7: *num = item->GetRageId(); break;
 		case 8: *num = item->GetTvdbId(); break;
@@ -139,8 +137,8 @@ void FeedFilter::Apply(void* user, const NzbgetRsFeedOptions* o) noexcept
 	}
 	if (o->hasAddPriority)
 	{
-		item->SetPriority(nzbget_rs_tpr_feed_filter_wrapping_add_i32(
-			item->GetPriority(), o->addPriority));
+		item->SetPriority(static_cast<int>(
+			static_cast<uint32_t>(item->GetPriority()) + static_cast<uint32_t>(o->addPriority)));
 	}
 	if (o->hasDupeScore)
 	{
@@ -148,8 +146,8 @@ void FeedFilter::Apply(void* user, const NzbgetRsFeedOptions* o) noexcept
 	}
 	if (o->hasAddDupeScore)
 	{
-		item->SetDupeScore(nzbget_rs_tpr_feed_filter_wrapping_add_i32(
-			item->GetDupeScore(), o->addDupeScore));
+		item->SetDupeScore(static_cast<int>(
+			static_cast<uint32_t>(item->GetDupeScore()) + static_cast<uint32_t>(o->addDupeScore)));
 	}
 	if (o->hasBuildDupeKey)
 	{
@@ -172,11 +170,10 @@ void FeedFilter::Apply(void* user, const NzbgetRsFeedOptions* o) noexcept
 void FeedFilter::SetMatch(void* user, int status, int rule) noexcept
 {
 	FeedItemInfo* item = static_cast<Context*>(user)->item;
-	item->SetMatchStatus((FeedItemInfo::EMatchStatus)nzbget_rs_tpr_feed_filter_map_match_status(
-		status,
-		(int)FeedItemInfo::msAccepted,
-		(int)FeedItemInfo::msRejected,
-		(int)FeedItemInfo::msIgnored));
+	item->SetMatchStatus(
+		status == 1 ? FeedItemInfo::msAccepted :
+		status == 2 ? FeedItemInfo::msRejected :
+		FeedItemInfo::msIgnored);
 	item->SetMatchRule(rule);
 }
 
@@ -214,4 +211,3 @@ void FeedFilter::Match(FeedItemInfo& feedItemInfo)
 	item.fold = FeedFilterFold;
 	nzbget_rs_feed_filter_match(m_filter, &item);
 }
-

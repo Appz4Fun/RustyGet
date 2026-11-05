@@ -100,20 +100,20 @@ BOOST_AUTO_TEST_CASE(BuildDupeKeyUsesSeriesIdentifierPriority)
 
 BOOST_AUTO_TEST_CASE(RustDupeFeedFfiBoundaryTest)
 {
-	NzbgetRsBuf norm = nzbget_rs_df_normalize_feed_nzb_name("Release.Name.NZB");
+	NzbgetRsBuf norm = nzbget_rs_feed_normalize_nzb_name("Release.Name.NZB");
 	BOOST_CHECK_EQUAL(std::string(norm.data, norm.len), "Release.Name.nzb");
 	nzbget_rs_free(norm);
 
-	NzbgetRsBuf statusMask = nzbget_rs_df_format_dupe_status_mask(1 | 4 | 16);
+	NzbgetRsBuf statusMask = nzbget_rs_feed_format_dupe_status_mask(1 | 4 | 16);
 	BOOST_CHECK_EQUAL(std::string(statusMask.data, statusMask.len), "QUEUED,SUCCESS,FAILURE");
 	nzbget_rs_free(statusMask);
 
 	int setForce = 0;
-	BOOST_CHECK_EQUAL(nzbget_rs_df_should_start_feed(15, 1000, 1200, 0, 0, 1, &setForce), 1);
+	BOOST_CHECK_EQUAL(nzbget_rs_feed_should_start(15, 1000, 1200, 0, 0, 1, &setForce), 1);
 	BOOST_CHECK_EQUAL(setForce, 0);
 
 	int lastInterval = 0;
-	BOOST_CHECK_EQUAL(nzbget_rs_df_calc_feed_next_interval(0, 15, 60, &lastInterval), 120);
+	BOOST_CHECK_EQUAL(nzbget_rs_feed_calc_next_interval(0, 15, 60, &lastInterval), 120);
 	BOOST_CHECK_EQUAL(lastInterval, 120);
 
 	NzbgetRsBuf meta = nzbget_rs_df_format_pending_meta("Rel.Title", "IndexerA", 25, 123456789LL, 1749517805LL);
@@ -131,7 +131,7 @@ BOOST_AUTO_TEST_CASE(RustDupeFeedFfiBoundaryTest)
 	int votes[] = { 2, 1 };
 	BOOST_CHECK_EQUAL(nzbget_rs_df_eval_article_votes(votes, 2), 1);
 	BOOST_CHECK_EQUAL(nzbget_rs_df_parse_newznab_date("Tue, 10 Jun 2025 01:10:05+0000", 30), 1749517805LL);
-	BOOST_CHECK_EQUAL(nzbget_rs_df_extract_size_from_description("Size: 1e3 MB"), 1000LL * 1024LL * 1024LL);
+	BOOST_CHECK_EQUAL(nzbget_rs_feed_extract_size_from_description("Size: 1e3 MB"), 1000LL * 1024LL * 1024LL);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

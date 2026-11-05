@@ -45,34 +45,36 @@ FeedInfo::FeedInfo(
 	, m_category{ category ? category : "" }
 	, m_categorySource{ categorySource }
 	, m_extensions{ extensions ? extensions : "" }
-	, m_backlog{ backlog}
+	, m_backlog{ backlog }
 	, m_interval{ interval }
 	, m_pauseNzb{ pauseNzb }
 	, m_priority{ priority }
 	, m_certVerifLevel{ certVerifLevel }
 {
-	if (m_name.empty())
+	NzbgetRsBuf nameBuf{};
+	nzbget_rs_feed_info_init(m_id, m_name.c_str(), m_filter.c_str(), &nameBuf, &m_filterHash);
+	if (nameBuf.data)
 	{
-		NzbgetRsBuf nameBuf = nzbget_rs_tpr_feed_info_default_name(m_id);
-		m_name.assign(nameBuf.data ? nameBuf.data : "", nameBuf.len);
-		nzbget_rs_free(nameBuf);
+		m_name.assign(nameBuf.data, nameBuf.len);
 	}
-	m_filterHash = Util::HashBJ96(m_filter.c_str(), m_filter.size(), 0);
+	nzbget_rs_free(nameBuf);
 }
 
 FeedItemInfo::Attr* FeedItemInfo::Attributes::Find(const char* name)
 {
+	if (!name)
+	{
+		return nullptr;
+	}
 	for (Attr& attr : this)
 	{
-		if (nzbget_rs_sfc_feed_info_attr_name_eq_ignore_case(attr.GetName(), name) != 0)
+		if (!strcasecmp(attr.GetName(), name))
 		{
 			return &attr;
 		}
 	}
-
 	return nullptr;
 }
-
 
 void FeedItemInfo::SetSeason(const char* season)
 {
@@ -88,12 +90,12 @@ void FeedItemInfo::SetEpisode(const char* episode)
 
 int FeedItemInfo::ParsePrefixedInt(const char *value)
 {
-	return nzbget_rs_df_parse_prefixed_int(value);
+	return nzbget_rs_feed_parse_prefixed_int(value);
 }
 
 void FeedItemInfo::AppendDupeKey(const char* extraDupeKey)
 {
-	if (nzbget_rs_sfc_feed_info_should_append_dupe_key(m_dupeKey.empty() ? 1 : 0, extraDupeKey) != 0)
+	if (!m_dupeKey.empty() && !Util::EmptyStr(extraDupeKey))
 	{
 		m_dupeKey += "-";
 		m_dupeKey += extraDupeKey;
@@ -102,11 +104,11 @@ void FeedItemInfo::AppendDupeKey(const char* extraDupeKey)
 
 void FeedItemInfo::BuildDupeKey(const char* rageId, const char* tvdbId, const char* tvmazeId, const char* series)
 {
-	bool anySeriesId = nzbget_rs_tpr_feed_item_has_any_series_id(
+	bool anySeriesId = nzbget_rs_feed_has_any_series_id(
 		series, rageId, tvdbId, tvmazeId, m_rageId, m_tvdbId, m_tvmazeId) != 0;
 	int seasonNum = anySeriesId ? GetSeasonNum() : 0;
 	int episodeNum = (anySeriesId && seasonNum != 0) ? GetEpisodeNum() : 0;
-	NzbgetRsBuf buf = nzbget_rs_df_build_feed_dupe_key(
+	NzbgetRsBuf buf = nzbget_rs_feed_build_dupe_key(
 		rageId, tvdbId, tvmazeId, series,
 		m_rageId, m_tvdbId, m_tvmazeId, m_imdbId,
 		seasonNum, episodeNum, m_season.c_str(), m_episode.c_str());
@@ -117,21 +119,19 @@ void FeedItemInfo::BuildDupeKey(const char* rageId, const char* tvdbId, const ch
 
 int FeedItemInfo::GetSeasonNum()
 {
-	if (nzbget_rs_sfc_feed_info_should_parse_season_episode(m_season.empty() ? 1 : 0, m_seasonEpisodeParsed ? 1 : 0) != 0)
+	if (m_season.empty() && !m_seasonEpisodeParsed)
 	{
 		ParseSeasonEpisode();
 	}
-
 	return m_seasonNum;
 }
 
 int FeedItemInfo::GetEpisodeNum()
 {
-	if (nzbget_rs_sfc_feed_info_should_parse_season_episode(m_episode.empty() ? 1 : 0, m_seasonEpisodeParsed ? 1 : 0) != 0)
+	if (m_episode.empty() && !m_seasonEpisodeParsed)
 	{
 		ParseSeasonEpisode();
 	}
-
 	return m_episodeNum;
 }
 
@@ -160,7 +160,7 @@ void FeedItemInfo::ParseSeasonEpisode()
 		size_t valLen = (size_t)regEx->GetMatchLen(2);
 		NzbgetRsBuf seasonBuf{};
 		NzbgetRsBuf episodeBuf{};
-		nzbget_rs_sfc_feed_info_format_season_episode(seasonNum, val, valLen, &seasonBuf, &episodeBuf);
+		nzbget_rs_feed_format_season_episode(seasonNum, val, valLen, &seasonBuf, &episodeBuf);
 		SetSeason(seasonBuf.data ? seasonBuf.data : "");
 		SetEpisode(episodeBuf.data ? episodeBuf.data : "");
 		nzbget_rs_free(seasonBuf);
@@ -176,17 +176,18 @@ const char* FeedItemInfo::GetDupeStatus()
 		m_feedFilterHelper->CalcDupeStatus(m_title.c_str(), m_dupeKey.c_str(), statuses, statuses.Capacity());
 		m_dupeStatus = statuses;
 	}
-
 	return m_dupeStatus.c_str();
 }
 
-
 void FeedHistory::Remove(const char* url)
 {
+	if (!url)
+	{
+		return;
+	}
 	for (iterator it = begin(); it != end(); ++it)
 	{
-		FeedHistoryInfo& feedHistoryInfo = *it;
-		if (nzbget_rs_dqh_bytes_equal(feedHistoryInfo.GetUrl(), url) != 0)
+		if (!strcmp(it->GetUrl(), url))
 		{
 			erase(it);
 			break;
@@ -196,13 +197,16 @@ void FeedHistory::Remove(const char* url)
 
 FeedHistoryInfo* FeedHistory::Find(const char* url)
 {
+	if (!url)
+	{
+		return nullptr;
+	}
 	for (FeedHistoryInfo& feedHistoryInfo : this)
 	{
-		if (nzbget_rs_dqh_bytes_equal(feedHistoryInfo.GetUrl(), url) != 0)
+		if (!strcmp(feedHistoryInfo.GetUrl(), url))
 		{
 			return &feedHistoryInfo;
 		}
 	}
-
 	return nullptr;
 }

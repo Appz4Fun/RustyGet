@@ -1953,24 +1953,6 @@ NzbgetRsBuf nzbget_rs_df_build_newznab_url(
     size_t param_count, const char* api_key);
 NzbgetRsBuf nzbget_rs_df_mask_newznab_text(const char* text, size_t len);
 
-NzbgetRsBuf nzbget_rs_df_normalize_feed_nzb_name(const char* filename);
-NzbgetRsBuf nzbget_rs_df_format_dupe_status_mask(int dupe_status);
-int nzbget_rs_df_should_start_feed(
-    int interval_min, int64_t next_update, int64_t current_time, int fetch,
-    int status, int fs_running, int* out_set_force);
-int nzbget_rs_df_calc_feed_next_interval(
-    int success, int interval_min, int last_interval_sec, int* out_last_interval_sec);
-int nzbget_rs_df_is_feed_cache_expired(
-    int64_t last_usage, int cache_time_sec, int64_t cur_time);
-int nzbget_rs_df_parse_prefixed_int(const char* value);
-NzbgetRsBuf nzbget_rs_df_build_feed_dupe_key(
-    const char* rage_id_str, const char* tvdb_id_str, const char* tvmaze_id_str,
-    const char* series, int item_rage_id, int item_tvdb_id, int item_tvmaze_id,
-    int item_imdb_id, int season_num, int episode_num,
-    const char* season, const char* episode);
-NzbgetRsBuf nzbget_rs_df_parse_feed_subject(const char* title);
-int64_t nzbget_rs_df_extract_size_from_description(const char* description);
-
 // ============================================================================
 // StatMeter, WebProcessor, UrlCoordinator, DirectRenamer, NzbFile,
 // QueueScript, PostScript, ScanScript, ScriptConfig & ScriptController FFI
@@ -2496,21 +2478,6 @@ int nzbget_rs_ntw_xmlrpc_is_http_url(const char* content);
 int nzbget_rs_ntw_xmlrpc_parse_category_source(
     const char* cat_src_str, int cs_nzb_file, int cs_feed_file, int cs_auto);
 int nzbget_rs_ntw_xmlrpc_validate_reset_counter(const char* counter);
-
-int nzbget_rs_fuq_feed_coord_should_cleanup_history(
-    int64_t cur_time, int64_t last_cleanup);
-int nzbget_rs_fuq_feed_coord_calc_wait_interval(
-    int url_force, int feeds_empty);
-int nzbget_rs_fuq_feed_coord_is_hanging_download(
-    int64_t cur_time, int64_t last_update, int url_timeout, int status, int ad_running);
-const char* nzbget_rs_fuq_feed_coord_resolve_category(
-    const char* feed_cat, int cat_source, int cs_nzb_file, int cs_auto,
-    const char* item_cat);
-int nzbget_rs_fuq_feed_coord_classify_item_history(
-    int first_fetch, int backlog, int has_history, int hs_unknown, int hs_backlog,
-    int hs_fetched, int* out_should_add);
-int64_t nzbget_rs_fuq_feed_coord_calc_history_border_date(
-    int64_t oldest_update, int feed_history_days);
 
 int nzbget_rs_fuq_url_coord_should_start_download(
     int has_nzb, int pause_download, int url_force);
@@ -3261,17 +3228,6 @@ int nzbget_rs_ucf_url_coord_is_wake_action(
     int action, int ea_url_added, int ea_url_returned);
 int nzbget_rs_ucf_url_coord_resolve_delete_status(
     int cur_delete_status, int ds_none, int ds_manual);
-int nzbget_rs_ucf_feed_coord_can_check_feeds(
-    int pause_download, int force, int url_force);
-int nzbget_rs_ucf_feed_coord_use_feed_id_temp_file(int id, int preview);
-int nzbget_rs_ucf_feed_coord_can_use_cache(
-    int cache_time_sec, const char* cache_id);
-int nzbget_rs_ucf_feed_coord_matches_existing_feed(
-    const char* url1, const char* url2, const char* filter1, const char* filter2,
-    int64_t last_update);
-int nzbget_rs_ucf_feed_coord_resolve_preview_item_status(
-    int has_history, int history_status, int first_fetch, int backlog,
-    int is_backlog, int is_new);
 int nzbget_rs_ucf_remote_server_is_accept_busy_retry(
     int bind, int has_accepted_conn, int accept_busy, int is_stopped);
 
@@ -3380,21 +3336,6 @@ size_t nzbget_rs_psp_parchecker_calc_creator_packet_payload_len(
 
 /* QueueScript, PostScript, ScriptConfig, ScanScript, CommandScript, SchedulerScript, FeedFile & FeedInfo Hot-Path FFI (`scriptfeedcfg.rs`) */
 int nzbget_rs_sfc_sched_script_should_format_task_suffix(int task_id);
-int nzbget_rs_sfc_feed_file_classify_enclosure_attr(const char* attr_name);
-int nzbget_rs_sfc_feed_file_is_newznab_attr_element(
-    const char* elem_name, const char* att0, const char* att1,
-    const char* att2, const char* att3);
-int nzbget_rs_sfc_feed_file_classify_newznab_attr_key(
-    const char* key, int64_t cur_size);
-int nzbget_rs_sfc_feed_file_classify_end_element(
-    const char* elem_name, int has_item, int url_empty);
-size_t nzbget_rs_sfc_feed_file_trim_trailing_crlf_space_len(const char* err_msg);
-int nzbget_rs_sfc_feed_info_attr_name_eq_ignore_case(
-    const char* attr_name, const char* target_name);
-int nzbget_rs_sfc_feed_info_should_append_dupe_key(
-    int dupe_key_empty, const char* extra_dupe_key);
-int nzbget_rs_sfc_feed_info_should_parse_season_episode(
-    int field_empty, int parsed);
 
 // Scheduler, Frontend, ColoredFrontend, NCursesFrontend, RemoteClient &
 // WebServer Hot-Path C ABI (rust/src/schedfrontweb.rs)
@@ -3764,10 +3705,6 @@ int nzbget_rs_uqs_scanner_needs_second_immediate_scan(
 int nzbget_rs_uqs_scanner_script_qualifies_for_pp_param(
     int is_post_script, int is_queue_script, int already_has_param);
 int nzbget_rs_uqs_scanner_select_rename_bak_queued(int ok);
-int nzbget_rs_uqs_feed_coord_is_completed_status(
-    int status, int ad_finished, int ad_failed, int ad_retry);
-int nzbget_rs_uqs_feed_coord_is_valid_feed_id(int id, int feeds_len);
-int nzbget_rs_uqs_feed_coord_matches_fetch_feed_id(int feed_id, int target_id);
 int nzbget_rs_uqs_prepost_is_within_graceful_wait(
     int64_t cur_time, int64_t wait_start, int64_t timeout_sec);
 int nzbget_rs_uqs_prepost_should_reorder_added_nzb(
@@ -5188,9 +5125,6 @@ NzbgetRsBuf nzbget_rs_ufs_util_resolve_path_from_env(
 int32_t nzbget_rs_ext_script_kind(const char* line_ptr, size_t line_len);
 void nzbget_rs_feh_ext_sort_indices(
     const char* const* names, size_t count, const char* order_str, size_t* out_indices);
-void nzbget_rs_sfc_feed_info_format_season_episode(
-    int32_t season_num, const char* ep_ptr, size_t ep_len,
-    NzbgetRsBuf* out_season, NzbgetRsBuf* out_episode);
 int32_t nzbget_rs_dsf_nzb_fetcher_parse_cooldown_line(
     const char* line_ptr, size_t line_len, int64_t now_sec,
     NzbgetRsBuf* out_indexer, int64_t* out_when);
@@ -5481,18 +5415,6 @@ NzbgetRsBuf nzbget_rs_dqh_nzbinfo_format_nice_url_name(
     int32_t url_valid, const char* url_host, const char* url_resource);
 NzbgetRsBuf nzbget_rs_dqh_nzbinfo_format_final_dir_suffix(
     char sep, int32_t name_empty, const char* dir_name, int32_t nzb_id);
-int32_t nzbget_rs_tpr_feed_coord_should_delete_history_entry(
-    int64_t last_seen, int64_t border_date, const char* url,
-    size_t* out_url_len_without_query);
-int64_t nzbget_rs_tpr_feed_filter_calc_age(int64_t cur_time, int64_t item_time);
-int32_t nzbget_rs_tpr_feed_filter_wrapping_add_i32(int32_t cur, int32_t delta);
-int32_t nzbget_rs_tpr_feed_filter_map_match_status(
-    int32_t status, int32_t ms_accepted, int32_t ms_rejected, int32_t ms_ignored);
-NzbgetRsBuf nzbget_rs_tpr_feed_info_default_name(int32_t id);
-int32_t nzbget_rs_tpr_feed_item_has_any_series_id(
-    const char* series, const char* rage_id_str, const char* tvdb_id_str,
-    const char* tvmaze_id_str, int32_t item_rage_id, int32_t item_tvdb_id,
-    int32_t item_tvmaze_id);
 NzbgetRsBuf nzbget_rs_tpr_scanner_format_subcategory(
     const char* category, char sep, const char* filename);
 int32_t nzbget_rs_tpr_scanner_eval_missed_articles_log(
@@ -5609,9 +5531,6 @@ NzbgetRsBuf nzbget_rs_dqh_content_map_format_member_unreadable_reason(const char
 int64_t nzbget_rs_dqh_rar_volume_set_data_offset(int64_t position, int64_t packed_size);
 void nzbget_rs_dqh_stream_crypto_format_rar3_round_bytes(int32_t round, uint8_t* out_buf);
 int32_t nzbget_rs_dqh_stream_crypto_rar3_iv_index(int32_t round, int32_t rounds);
-NzbgetRsBuf nzbget_rs_tpr_feed_coord_format_temp_filename(
-    const char* temp_dir, char sep, int32_t id, int32_t preview,
-    int32_t cur_time, int32_t rand_val, int32_t preview_num);
 NzbgetRsBuf nzbget_rs_tpr_nzb_script_format_param_prefix(const char* script_name);
 int32_t nzbget_rs_dqh_conn_calc_read_buffer_cap(int32_t read_buf_size, int32_t decode_slack);
 NzbgetRsBuf nzbget_rs_dqh_conn_format_port_str(int32_t port);
@@ -5768,7 +5687,6 @@ int nzbget_rs_dqh_nzbfile_classify_end_element(const char* name);
 NzbgetRsBuf nzbget_rs_dqh_sysinfo_format_rapidyenc_version(int32_t ver);
 NzbgetRsBuf nzbget_rs_dqh_fs_format_null_delete_errmsg(const char* last_err);
 NzbgetRsBuf nzbget_rs_dqh_fs_extract_parent_dir_path(const char* filename, char sep);
-int nzbget_rs_dqh_feed_file_classify_start_element(const char* name);
 int nzbget_rs_dqh_url_dl_has_dnzb_prefix(const char* line);
 int nzbget_rs_dqh_diskstate_is_candidate_queue_file_name(const char* filename);
 int nzbget_rs_dqh_diskstate_find_char_pos(
@@ -5961,12 +5879,6 @@ const char* nzbget_rs_dqh_xmlrpc_select_test_server_err_text(
     int ok, const char* err_text);
 int nzbget_rs_dqh_xmlrpc_check_disk_speed_arg_ranges(
     int write_buffer_kib, int max_file_size_gib, int timeout_sec);
-const char* nzbget_rs_dqh_feed_coord_select_extensions(
-    const char* feed_extensions, const char* global_extensions);
-int64_t nzbget_rs_dqh_feed_coord_min_last_update(
-    int64_t cur_oldest, const int64_t* last_updates, size_t count);
-int nzbget_rs_dqh_feed_file_should_trim_text_chunk(
-    const char* current_element, size_t len);
 int nzbget_rs_dqh_ncurses_is_row_in_scroll_window(
     int index, int scroll_offset, int win_height);
 void nzbget_rs_dqh_ncurses_accum_file_queue_stats(
@@ -6291,10 +6203,6 @@ int nzbget_rs_dqh_dupe_probe_should_disconnect_after_probe(
     int is_stopped, int conn_status, int cs_cancelled);
 int nzbget_rs_dqh_url_coord_should_wait_on_cond(
     int has_more_jobs, int is_stopped);
-int nzbget_rs_dqh_feed_coord_has_available_url_slot(
-    size_t active_downloads_count, int url_connections);
-int nzbget_rs_dqh_feed_coord_should_cache_preview_items(
-    int has_cache, int cache_time_sec, const char* cache_id);
 int nzbget_rs_dqh_webdl_resolve_force_flag(int force, int url_force);
 int nzbget_rs_dqh_webdl_should_try_recv_when_buf_empty(int buf_len);
 int nzbget_rs_dqh_tls_should_verify_client_x509_store(
@@ -6780,6 +6688,88 @@ void nzbget_rs_queue_script_prepare_env(
     const NzbgetRsQueueScriptEnv* env, void* ctx,
     void (*set_env_cb)(void* ctx, const char* name, const char* value),
     void (*set_int_env_cb)(void* ctx, const char* name, int value));
+
+/* ============================================================================
+ * Feed Subsystem (`rust/src/feed.rs`)
+ * ============================================================================ */
+
+typedef struct NzbgetRsFeedFileParser NzbgetRsFeedFileParser;
+
+typedef struct NzbgetRsParsedFeedItemView {
+    const char* title;
+    const char* filename;
+    const char* url;
+    const char* category;
+    const char* description;
+    const char* season;
+    const char* episode;
+    int has_season;
+    int has_episode;
+    int64_t time;
+    int64_t size;
+    int imdb_id;
+    int rage_id;
+    int tvdb_id;
+    int tvmaze_id;
+    const char* const* attr_names;
+    const char* const* attr_values;
+    size_t attr_count;
+} NzbgetRsParsedFeedItemView;
+
+void nzbget_rs_feed_info_init(
+    int id, const char* name, const char* filter,
+    NzbgetRsBuf* out_default_name, uint32_t* out_filter_hash);
+int nzbget_rs_feed_parse_prefixed_int(const char* value);
+int nzbget_rs_feed_has_any_series_id(
+    const char* series, const char* rage_id, const char* tvdb_id, const char* tvmaze_id,
+    int item_rage_id, int item_tvdb_id, int item_tvmaze_id);
+NzbgetRsBuf nzbget_rs_feed_build_dupe_key(
+    const char* rage_id, const char* tvdb_id, const char* tvmaze_id, const char* series,
+    int item_rage_id, int item_tvdb_id, int item_tvmaze_id, int item_imdb_id,
+    int season_num, int episode_num, const char* season, const char* episode);
+void nzbget_rs_feed_format_season_episode(
+    int season_num, const char* ep_raw, size_t ep_raw_len,
+    NzbgetRsBuf* out_season, NzbgetRsBuf* out_episode);
+
+NzbgetRsFeedFileParser* nzbget_rs_feed_file_parser_new(void);
+void nzbget_rs_feed_file_parser_free(NzbgetRsFeedFileParser* parser);
+void nzbget_rs_feed_file_parser_start_element(
+    NzbgetRsFeedFileParser* parser, const char* name, const char* const* atts);
+void nzbget_rs_feed_file_parser_end_element(
+    NzbgetRsFeedFileParser* parser, const char* name);
+void nzbget_rs_feed_file_parser_text(
+    NzbgetRsFeedFileParser* parser, const char* xmlstr, int len);
+size_t nzbget_rs_feed_file_parser_finalize(NzbgetRsFeedFileParser* parser);
+int nzbget_rs_feed_file_parser_get_item(
+    const NzbgetRsFeedFileParser* parser, size_t index,
+    NzbgetRsParsedFeedItemView* out_view);
+size_t nzbget_rs_feed_file_trim_sax_error(const char* err_msg);
+int64_t nzbget_rs_feed_extract_size_from_description(const char* description);
+
+NzbgetRsBuf nzbget_rs_feed_normalize_nzb_name(const char* filename);
+const char* nzbget_rs_feed_resolve_category(
+    const char* feed_cat, int category_source, const char* item_cat);
+NzbgetRsBuf nzbget_rs_feed_format_dupe_status_mask(int dupe_status);
+int nzbget_rs_feed_should_start(
+    int interval_min, int64_t next_update, int64_t current_time, int fetch,
+    int status, int fs_running, int* out_set_force);
+int nzbget_rs_feed_calc_next_interval(
+    int success, int interval_min, int last_interval_sec, int* out_new_last_interval_sec);
+NzbgetRsBuf nzbget_rs_feed_format_temp_filename(
+    const char* temp_dir, char sep, int id, int preview,
+    int cur_time, int rand_val, int preview_num);
+int nzbget_rs_feed_classify_item_history(
+    int first_fetch, int backlog, int has_history, int* out_should_add);
+int nzbget_rs_feed_resolve_preview_item_status(
+    int has_history, int history_status, int first_fetch, int backlog);
+int64_t nzbget_rs_feed_calc_history_border_date(
+    int64_t cur_time, const int64_t* last_updates, size_t last_updates_len,
+    int feed_history_days);
+int nzbget_rs_feed_should_delete_history_entry(
+    int64_t last_seen, int64_t border_date, const char* url,
+    size_t* out_url_len_without_query);
+int nzbget_rs_feed_is_cache_expired(
+    int64_t last_usage, int cache_time_sec, int64_t cur_time);
 
 #include "nzbget_tls_cipher.h"
 

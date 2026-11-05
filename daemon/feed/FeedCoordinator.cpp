@@ -42,9 +42,7 @@ std::unique_ptr<NzbInfo> NzbInfoCreator::Create(const FeedInfo& feedInfo, const 
 	nzbInfo->SetFeedId(feedInfo.GetId());
 	nzbInfo->SetUrl(feedItemInfo.GetUrl());
 
-	// add .nzb-extension if not present
-	BString<1024> nzbName = feedItemInfo.GetFilename();
-	NzbgetRsBuf normBuf = nzbget_rs_df_normalize_feed_nzb_name(*nzbName);
+	NzbgetRsBuf normBuf = nzbget_rs_feed_normalize_nzb_name(feedItemInfo.GetFilename());
 	if (normBuf.len > 0 && normBuf.data)
 	{
 		BString<1024> nzbName2("%s", normBuf.data);
@@ -68,7 +66,6 @@ std::unique_ptr<NzbInfo> NzbInfoCreator::Create(const FeedInfo& feedInfo, const 
 
 void NzbInfoCreator::ApplyCategory(NzbInfo& nzbInfo, const FeedInfo& feedInfo, const FeedItemInfo& feedItemInfo) const
 {
-	// Priority 1: AddCategory from filter rules
 	const std::string& addCategory = feedItemInfo.GetAddCategory();
 	if (!addCategory.empty())
 	{
@@ -76,7 +73,6 @@ void NzbInfoCreator::ApplyCategory(NzbInfo& nzbInfo, const FeedInfo& feedInfo, c
 		return;
 	}
 
-	// Priority 2: Feed.Category / CategorySource fallback
 	nzbInfo.SetCategory(FeedCoordinator::ResolveCategory(feedInfo, feedItemInfo).c_str());
 }
 
@@ -90,7 +86,7 @@ void FeedCoordinator::FilterHelper::CalcDupeStatus(const char* title, const char
 {
 	DupeCoordinator::EDupeStatus dupeStatus = g_DupeCoordinator->GetDupeStatus(DownloadQueue::Guard(), title, dupeKey);
 
-	NzbgetRsBuf buf = nzbget_rs_df_format_dupe_status_mask((int)dupeStatus);
+	NzbgetRsBuf buf = nzbget_rs_feed_format_dupe_status_mask((int)dupeStatus);
 	strncpy(statusBuf, buf.data ? buf.data : "", bufLen);
 	nzbget_rs_free(buf);
 }
@@ -135,24 +131,18 @@ void FeedCoordinator::Run()
 	time_t lastCleanup = 0;
 	while (!IsStopped())
 	{
-		// this code should not be called too often, once per second is OK
-		if (nzbget_rs_ucf_feed_coord_can_check_feeds(
-			g_WorkState->GetPauseDownload() ? 1 : 0,
-			m_force ? 1 : 0,
-			g_Options->GetUrlForce() ? 1 : 0) != 0)
+		if (!g_WorkState->GetPauseDownload() || m_force || g_Options->GetUrlForce())
 		{
 			std::lock_guard<std::mutex> guard(m_downloadsMutex);
 
 			time_t current = Util::CurrentTime();
-			if (nzbget_rs_dqh_feed_coord_has_available_url_slot(
-				m_activeDownloads.size(), g_Options->GetUrlConnections()) != 0)
+			if ((int)m_activeDownloads.size() < g_Options->GetUrlConnections())
 			{
 				m_force = false;
-				// check feed list and update feeds
 				for (FeedInfo* feedInfo : &m_feeds)
 				{
 					int setForce = 0;
-					if (nzbget_rs_df_should_start_feed(
+					if (nzbget_rs_feed_should_start(
 						feedInfo->GetInterval(), (int64_t)feedInfo->GetNextUpdate(), (int64_t)current,
 						feedInfo->GetFetch() ? 1 : 0, (int)feedInfo->GetStatus(), (int)FeedInfo::fsRunning,
 						&setForce))
@@ -170,10 +160,9 @@ void FeedCoordinator::Run()
 		CheckSaveFeeds();
 		ResetHangingDownloads();
 
-		if (nzbget_rs_fuq_feed_coord_should_cleanup_history(
-			(int64_t)Util::CurrentTime(), (int64_t)lastCleanup) != 0)
+		time_t now = Util::CurrentTime();
+		if (std::abs(now - lastCleanup) >= 60)
 		{
-			// clean up feed history once a minute
 			CleanupHistory();
 			CleanupCache();
 			CheckSaveFeeds();
@@ -183,33 +172,22 @@ void FeedCoordinator::Run()
 		std::unique_lock<std::mutex> lk(m_downloadsMutex);
 		if (m_force)
 		{
-			// don't sleep too long if there active feeds scheduled for redownload
 			m_waitCond.wait_for(lk, std::chrono::milliseconds(1000), [&]{ return IsStopped(); });
 		}
 		else
 		{
-			// no active jobs, we can sleep longer:
-			//  - if option "UrlForce" is active or if the feed list is empty we need to wake up
-			//    only when a new feed preview is requested. We could wait indefinitely for that
-			//    but we need to do some job every now and then and therefore we sleep only 60 seconds.
-			//  - if option "UrlForce" is disabled we need also to wake up when state "DownloadPaused"
-			//    is changed. We detect this via notification from 'WorkState'. However such
-			//    notifications are not 100% reliable due to possible race conditions. Therefore
-			//    we sleep for max. 5 seconds.
-			int waitInterval = nzbget_rs_fuq_feed_coord_calc_wait_interval(
-				g_Options->GetUrlForce() ? 1 : 0, m_feeds.empty() ? 1 : 0);
+			int waitInterval = (g_Options->GetUrlForce() || m_feeds.empty()) ? 60000 : 5000;
 			m_waitCond.wait_for(lk, std::chrono::milliseconds(waitInterval), [&]{ return m_force || IsStopped(); });
 		}
 	}
 
-	// waiting for downloads
 	debug("FeedCoordinator: waiting for Downloads to complete");
 	bool completed = false;
 	while (!completed)
 	{
 		{
 			std::lock_guard<std::mutex> guard(m_downloadsMutex);
-			completed = m_activeDownloads.size() == 0;
+			completed = m_activeDownloads.empty();
 		}
 		CheckSaveFeeds();
 		Util::Sleep(100);
@@ -233,7 +211,6 @@ void FeedCoordinator::Stop()
 	}
 	debug("UrlDownloads are notified");
 
-	// Resume Run() to exit it
 	m_waitCond.notify_all();
 }
 
@@ -256,10 +233,8 @@ void FeedCoordinator::ResetHangingDownloads()
 
 	for (FeedDownloader* feedDownloader: m_activeDownloads)
 	{
-		if (nzbget_rs_fuq_feed_coord_is_hanging_download(
-			(int64_t)tm, (int64_t)feedDownloader->GetLastUpdateTime(),
-			g_Options->GetUrlTimeout(), (int)feedDownloader->GetStatus(),
-			(int)FeedDownloader::adRunning) != 0)
+		if (tm - feedDownloader->GetLastUpdateTime() > g_Options->GetUrlTimeout() + 10 &&
+			feedDownloader->GetStatus() == FeedDownloader::adRunning)
 		{
 			error("Cancelling hanging feed download %s", feedDownloader->GetInfoName());
 			feedDownloader->Stop();
@@ -289,17 +264,14 @@ void FeedCoordinator::StartFeedDownload(FeedInfo* feedInfo, bool force)
 	feedDownloader->SetFeedInfo(feedInfo);
 	feedDownloader->SetUrl(feedInfo->GetUrl());
 	feedDownloader->SetInfoName(feedInfo->GetName());
-	feedDownloader->SetForce(nzbget_rs_dqh_webdl_resolve_force_flag(
-		force ? 1 : 0, g_Options->GetUrlForce() ? 1 : 0) != 0);
+	feedDownloader->SetForce(force || g_Options->GetUrlForce());
 #ifndef DISABLE_TLS
 	feedDownloader->SetCertVerifLevel(feedInfo->GetCertVerificationLevel());
 #endif
 
-	// a preview of a configured feed must not share the file of that feed's own fetch
 	static std::atomic<int> previewNum{0};
-	bool useFeedId = nzbget_rs_ucf_feed_coord_use_feed_id_temp_file(
-		feedInfo->GetId(), feedInfo->GetPreview() ? 1 : 0) != 0;
-	NzbgetRsBuf outFilenameBuf = nzbget_rs_tpr_feed_coord_format_temp_filename(
+	bool useFeedId = feedInfo->GetId() > 0 && !feedInfo->GetPreview();
+	NzbgetRsBuf outFilenameBuf = nzbget_rs_feed_format_temp_filename(
 		g_Options->GetTempDir(), PATH_SEPARATOR, feedInfo->GetId(),
 		useFeedId ? 0 : 1,
 		useFeedId ? 0 : (int)Util::CurrentTime(),
@@ -317,16 +289,13 @@ void FeedCoordinator::StartFeedDownload(FeedInfo* feedInfo, bool force)
 	feedDownloader->Start();
 }
 
-void FeedCoordinator::Update(Subject* caller, void* aspect)
+void FeedCoordinator::Update(Subject* caller, void*)
 {
 	debug("Notification from FeedDownloader received");
 
 	FeedDownloader* feedDownloader = (FeedDownloader*) caller;
-	if (nzbget_rs_uqs_feed_coord_is_completed_status(
-		(int)feedDownloader->GetStatus(),
-		(int)WebDownloader::adFinished,
-		(int)WebDownloader::adFailed,
-		(int)WebDownloader::adRetry) != 0)
+	WebDownloader::EStatus st = feedDownloader->GetStatus();
+	if (st == WebDownloader::adFinished || st == WebDownloader::adFailed || st == WebDownloader::adRetry)
 	{
 		FeedCompleted(feedDownloader);
 	}
@@ -343,7 +312,6 @@ void FeedCoordinator::FeedCompleted(FeedDownloader* feedDownloader)
 		feedInfo->SetOutputFilename(feedDownloader->GetOutputFilename());
 	}
 
-	// remove downloader from downloader list
 	{
 		std::lock_guard<std::mutex> guard(m_downloadsMutex);
 		m_activeDownloads.erase(std::find(m_activeDownloads.begin(), m_activeDownloads.end(), feedDownloader));
@@ -356,9 +324,11 @@ void FeedCoordinator::FeedCompleted(FeedDownloader* feedDownloader)
 		if (!feedInfo->GetPreview())
 		{
 			bool scriptSuccess = true;
+			const char* extensions = !Util::EmptyStr(feedInfo->GetExtensions())
+				? feedInfo->GetExtensions()
+				: g_Options->GetExtensions();
 			FeedScriptController::ExecuteScripts(
-				nzbget_rs_dqh_feed_coord_select_extensions(feedInfo->GetExtensions(), g_Options->GetExtensions()),
-				feedInfo->GetOutputFilename(), feedInfo->GetId(), &scriptSuccess);
+				extensions, feedInfo->GetOutputFilename(), feedInfo->GetId(), &scriptSuccess);
 			if (!scriptSuccess)
 			{
 				feedInfo->SetStatus(FeedInfo::fsFailed);
@@ -366,7 +336,6 @@ void FeedCoordinator::FeedCompleted(FeedDownloader* feedDownloader)
 			}
 
 			std::unique_ptr<FeedFile> feedFile = parseFeed(feedInfo);
-
 			std::vector<std::unique_ptr<NzbInfo>> addedNzbs;
 
 			{
@@ -398,25 +367,20 @@ void FeedCoordinator::FeedCompleted(FeedDownloader* feedDownloader)
 void FeedCoordinator::SchedulerNextUpdate(FeedInfo* feedInfo, bool success)
 {
 	time_t current = Util::CurrentTime();
-	int interval;
-
 	int newLastInterval = 0;
-	interval = nzbget_rs_df_calc_feed_next_interval(
+	int interval = nzbget_rs_feed_calc_next_interval(
 		success ? 1 : 0, feedInfo->GetInterval(), feedInfo->GetLastInterval(), &newLastInterval);
 	feedInfo->SetLastInterval(newLastInterval);
 
-	detail("Scheduling update for feed %s in %i minute(s)",
-		feedInfo->GetName(), nzbget_rs_tpr_repair_ctrl_seconds_to_minutes(interval));
+	detail("Scheduling update for feed %s in %i minute(s)", feedInfo->GetName(), interval / 60);
 	feedInfo->SetNextUpdate(current + interval);
 }
 
 std::string FeedCoordinator::ResolveCategory(const FeedInfo& feedInfo, const FeedItemInfo& feedItemInfo)
 {
-	return nzbget_rs_fuq_feed_coord_resolve_category(
+	return nzbget_rs_feed_resolve_category(
 		feedInfo.GetCategory(),
 		(int)feedInfo.GetCategorySource(),
-		(int)FeedInfo::CategorySource::NZBFile,
-		(int)FeedInfo::CategorySource::Auto,
 		feedItemInfo.GetCategory());
 }
 
@@ -466,10 +430,9 @@ std::vector<std::unique_ptr<NzbInfo>> FeedCoordinator::ProcessFeed(FeedInfo* fee
 		{
 			FeedHistoryInfo* feedHistoryInfo = m_feedHistory.Find(feedItemInfo.GetUrl());
 			int shouldAdd = 0;
-			FeedHistoryInfo::EStatus status = (FeedHistoryInfo::EStatus)nzbget_rs_fuq_feed_coord_classify_item_history(
+			FeedHistoryInfo::EStatus status = (FeedHistoryInfo::EStatus)nzbget_rs_feed_classify_item_history(
 				firstFetch ? 1 : 0, feedInfo->GetBacklog() ? 1 : 0, feedHistoryInfo != nullptr ? 1 : 0,
-				(int)FeedHistoryInfo::hsUnknown, (int)FeedHistoryInfo::hsBacklog,
-				(int)FeedHistoryInfo::hsFetched, &shouldAdd);
+				&shouldAdd);
 			if (shouldAdd != 0)
 			{
 				debug("Download %s from %s", feedItemInfo.GetUrl(), feedInfo->GetName());
@@ -503,7 +466,7 @@ std::vector<std::unique_ptr<NzbInfo>> FeedCoordinator::ProcessFeed(FeedInfo* fee
 
 std::shared_ptr<FeedItemList> FeedCoordinator::ViewFeed(int id)
 {
-	if (!nzbget_rs_uqs_feed_coord_is_valid_feed_id(id, static_cast<int>(m_feeds.size())))
+	if (id < 1 || id > static_cast<int>(m_feeds.size()))
 	{
 		return nullptr;
 	}
@@ -523,7 +486,7 @@ std::shared_ptr<FeedItemList> FeedCoordinator::PreviewFeed(int id,
 	debug("Preview feed %s", name);
 
 	unsigned int certVerifLevel = Options::ECertVerifLevel::cvStrict;
-	if (nzbget_rs_uqs_feed_coord_is_valid_feed_id(id, static_cast<int>(m_feeds.size())) != 0)
+	if (id >= 1 && id <= static_cast<int>(m_feeds.size()))
 	{
 		certVerifLevel = m_feeds[static_cast<size_t>(id - 1)]->GetCertVerificationLevel();
 	}
@@ -534,12 +497,12 @@ std::shared_ptr<FeedItemList> FeedCoordinator::PreviewFeed(int id,
 
 	std::shared_ptr<FeedItemList> feedItems;
 	bool hasCache = false;
-	if (nzbget_rs_ucf_feed_coord_can_use_cache(cacheTimeSec, cacheId) != 0)
+	if (cacheTimeSec > 0 && !Util::EmptyStr(cacheId))
 	{
 		std::lock_guard<std::mutex> guard(m_downloadsMutex);
 		for (FeedCacheItem& feedCacheItem : m_feedCache)
 		{
-			if (nzbget_rs_dqh_bytes_equal(feedCacheItem.GetCacheId(), cacheId) != 0)
+			if (!strcmp(feedCacheItem.GetCacheId(), cacheId))
 			{
 				feedCacheItem.SetLastUsage(Util::CurrentTime());
 				feedItems = feedCacheItem.GetFeedItems();
@@ -558,10 +521,9 @@ std::shared_ptr<FeedItemList> FeedCoordinator::PreviewFeed(int id,
 
 			for (FeedInfo* feedInfo2 : &m_feeds)
 			{
-				if (nzbget_rs_ucf_feed_coord_matches_existing_feed(
-					feedInfo2->GetUrl(), feedInfo->GetUrl(),
-					feedInfo2->GetFilter(), feedInfo->GetFilter(),
-					(int64_t)feedInfo2->GetLastUpdate()) != 0)
+				if (!strcmp(feedInfo2->GetUrl(), feedInfo->GetUrl()) &&
+					!strcmp(feedInfo2->GetFilter(), feedInfo->GetFilter()) &&
+					feedInfo2->GetLastUpdate() > 0)
 				{
 					firstFetch = false;
 					break;
@@ -574,22 +536,21 @@ std::shared_ptr<FeedItemList> FeedCoordinator::PreviewFeed(int id,
 			m_waitCond.notify_all();
 		}
 
-		// wait until the download in a separate thread completes
 		while (feedInfo->GetStatus() == FeedInfo::fsRunning)
 		{
 			Util::Sleep(100);
 		}
-
-		// now can process the feed
 
 		if (feedInfo->GetStatus() != FeedInfo::fsFinished)
 		{
 			return nullptr;
 		}
 
+		const char* extensions = !Util::EmptyStr(feedInfo->GetExtensions())
+			? feedInfo->GetExtensions()
+			: g_Options->GetExtensions();
 		FeedScriptController::ExecuteScripts(
-			nzbget_rs_dqh_feed_coord_select_extensions(feedInfo->GetExtensions(), g_Options->GetExtensions()),
-			feedInfo->GetOutputFilename(), feedInfo->GetId(), nullptr);
+			extensions, feedInfo->GetOutputFilename(), feedInfo->GetId(), nullptr);
 
 		std::unique_ptr<FeedFile> feedFile = parseFeed(feedInfo.get());
 		if (!feedFile)
@@ -600,26 +561,22 @@ std::shared_ptr<FeedItemList> FeedCoordinator::PreviewFeed(int id,
 		feedItems = feedFile->DetachFeedItems();
 		feedFile.reset();
 
-		// the history grows while feeds are processed
 		std::lock_guard<std::mutex> guard(m_downloadsMutex);
 		for (FeedItemInfo& feedItemInfo : feedItems.get())
 		{
 			FeedHistoryInfo* feedHistoryInfo = m_feedHistory.Find(feedItemInfo.GetUrl());
-			feedItemInfo.SetStatus((FeedItemInfo::EStatus)nzbget_rs_ucf_feed_coord_resolve_preview_item_status(
+			feedItemInfo.SetStatus((FeedItemInfo::EStatus)nzbget_rs_feed_resolve_preview_item_status(
 				feedHistoryInfo != nullptr ? 1 : 0,
 				feedHistoryInfo ? (int)feedHistoryInfo->GetStatus() : 0,
 				firstFetch ? 1 : 0,
-				feedInfo->GetBacklog() ? 1 : 0,
-				(int)FeedItemInfo::isBacklog,
-				(int)FeedItemInfo::isNew));
+				feedInfo->GetBacklog() ? 1 : 0));
 		}
 	}
 
 	FilterFeed(feedInfo.get(), feedItems.get());
 	feedInfo.reset();
 
-	if (nzbget_rs_dqh_feed_coord_should_cache_preview_items(
-		hasCache ? 1 : 0, cacheTimeSec, cacheId) != 0)
+	if (!hasCache && cacheTimeSec > 0 && !Util::EmptyStr(cacheId))
 	{
 		std::lock_guard<std::mutex> guard(m_downloadsMutex);
 		m_feedCache.emplace_back(url, cacheTimeSec, cacheId, Util::CurrentTime(), feedItems);
@@ -635,7 +592,7 @@ void FeedCoordinator::FetchFeed(int id)
 	std::lock_guard<std::mutex> guard(m_downloadsMutex);
 	for (FeedInfo* feedInfo : &m_feeds)
 	{
-		if (nzbget_rs_uqs_feed_coord_matches_fetch_feed_id(feedInfo->GetId(), id) != 0)
+		if (feedInfo->GetId() == id || id == 0)
 		{
 			feedInfo->SetFetch(true);
 			m_force = true;
@@ -660,7 +617,7 @@ std::unique_ptr<FeedFile> FeedCoordinator::parseFeed(FeedInfo* feedInfo)
 	return feedFile;
 }
 
-void FeedCoordinator::DownloadQueueUpdate(Subject* caller, void* aspect)
+void FeedCoordinator::DownloadQueueUpdate(Subject*, void* aspect)
 {
 	debug("Notification from URL-Coordinator received");
 
@@ -707,31 +664,29 @@ void FeedCoordinator::CleanupHistory()
 
 	std::lock_guard<std::mutex> guard(m_downloadsMutex);
 
-	time_t oldestUpdate = Util::CurrentTime();
-
 	std::vector<int64_t> lastUpdates;
 	lastUpdates.reserve(m_feeds.size());
 	for (FeedInfo* feedInfo : &m_feeds)
 	{
 		lastUpdates.push_back((int64_t)feedInfo->GetLastUpdate());
 	}
-	oldestUpdate = (time_t)nzbget_rs_dqh_feed_coord_min_last_update(
-		(int64_t)oldestUpdate, lastUpdates.data(), lastUpdates.size());
 
-	time_t borderDate = (time_t)nzbget_rs_fuq_feed_coord_calc_history_border_date(
-		(int64_t)oldestUpdate, g_Options->GetFeedHistory());
+	time_t borderDate = (time_t)nzbget_rs_feed_calc_history_border_date(
+		(int64_t)Util::CurrentTime(),
+		lastUpdates.data(),
+		lastUpdates.size(),
+		g_Options->GetFeedHistory());
 
 	m_feedHistory.erase(std::remove_if(m_feedHistory.begin(), m_feedHistory.end(),
 		[borderDate, this](FeedHistoryInfo& feedHistoryInfo)
 		{
 			size_t urlLenWithoutQuery = 0;
-			if (nzbget_rs_tpr_feed_coord_should_delete_history_entry(
+			if (nzbget_rs_feed_should_delete_history_entry(
 				(int64_t)feedHistoryInfo.GetLastSeen(),
 				(int64_t)borderDate,
 				feedHistoryInfo.GetUrl(),
 				&urlLenWithoutQuery) != 0)
 			{
-				// without the query: feed item links carry api keys
 				detail("Deleting %.*s from feed history",
 					(int)urlLenWithoutQuery, feedHistoryInfo.GetUrl());
 				m_save = true;
@@ -753,7 +708,7 @@ void FeedCoordinator::CleanupCache()
 	m_feedCache.remove_if(
 		[curTime](FeedCacheItem& feedCacheItem)
 		{
-			if (nzbget_rs_df_is_feed_cache_expired(
+			if (nzbget_rs_feed_is_cache_expired(
 				(int64_t)feedCacheItem.GetLastUsage(), feedCacheItem.GetCacheTimeSec(), (int64_t)curTime))
 			{
 				debug("Deleting %s from feed cache", feedCacheItem.GetUrl());

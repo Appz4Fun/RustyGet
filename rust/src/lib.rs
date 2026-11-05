@@ -16,6 +16,7 @@ pub mod dupesearch_nzb;
 pub mod escape;
 pub mod extension;
 pub mod extload;
+pub mod feed;
 pub mod feedfilter;
 pub mod ffi;
 pub mod filetypes;

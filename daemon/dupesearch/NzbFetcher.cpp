@@ -179,7 +179,9 @@ NzbFetcher::Fetched NzbFetcher::Fetch(const Newznab::Result& listing, time_t dea
 		{
 			status = reply.status;
 			fetched.reason = frFetch;
-			why = "HTTP " + std::to_string(reply.status);
+			NzbgetRsBuf whyBuf = nzbget_rs_dqh_nzb_fetcher_format_http_status_err(reply.status);
+			why.assign(whyBuf.data ? whyBuf.data : "", whyBuf.len);
+			nzbget_rs_free(whyBuf);
 		}
 		info("DupeSearch: the nzb-file of %s from %s failed (attempt %i): %s",
 			listing.title.c_str(), listing.indexer.c_str(), attempt + 1, why.c_str());

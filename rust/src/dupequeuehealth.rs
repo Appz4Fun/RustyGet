@@ -1816,6 +1816,168 @@ pub fn dqh_script_config_format_tls_temp_name(leaf: &[u8], pid: i32, seq: u64) -
     out
 }
 
+/// Formats `"DupeSearch <label> page <page_one_based>"` for `Newznab::Search`.
+pub fn dqh_newznab_format_search_info_name(label: &[u8], page_one_based: i32) -> Vec<u8> {
+    let suffix = format!(" page {page_one_based}");
+    let mut out = Vec::with_capacity(11 + label.len() + suffix.len());
+    out.extend_from_slice(b"DupeSearch ");
+    out.extend_from_slice(label);
+    out.extend_from_slice(suffix.as_bytes());
+    out
+}
+
+/// Formats `"<param_name>=<val>"` for `DupeSearch`.
+pub fn dqh_dupesearch_format_key_val_param(param_name: &[u8], val: i32) -> Vec<u8> {
+    let val_str = format!("={val}");
+    let mut out = Vec::with_capacity(param_name.len() + val_str.len());
+    out.extend_from_slice(param_name);
+    out.extend_from_slice(val_str.as_bytes());
+    out
+}
+
+/// Formats `"<queue_dir><sep>dupesearch-pending<sep><nzb_id>"` when `nzb_id > 0`
+/// else `"<queue_dir><sep>dupesearch-pending"` for `DupeSearch::PendingDir`.
+pub fn dqh_dupesearch_format_pending_dir(queue_dir: &[u8], sep: u8, nzb_id: i32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(queue_dir.len() + 32);
+    out.extend_from_slice(queue_dir);
+    out.push(sep);
+    out.extend_from_slice(b"dupesearch-pending");
+    if nzb_id > 0 {
+        out.push(sep);
+        out.extend_from_slice(nzb_id.to_string().as_bytes());
+    }
+    out
+}
+
+/// Formats `"<dir><sep><idx>"` for `DupeSearch::SavePending` and `DupeSearch::ResumePending`.
+pub fn dqh_dupesearch_format_indexed_base_path(dir: &[u8], sep: u8, idx: usize) -> Vec<u8> {
+    let suffix = idx.to_string();
+    let mut out = Vec::with_capacity(dir.len() + 1 + suffix.len());
+    out.extend_from_slice(dir);
+    out.push(sep);
+    out.extend_from_slice(suffix.as_bytes());
+    out
+}
+
+/// Formats `idx` as a decimal string for `DupeSearch`.
+pub fn dqh_dupesearch_format_usize_str(idx: usize) -> Vec<u8> {
+    idx.to_string().into_bytes()
+}
+
+/// Formats `"HTTP <status>"` for `NzbFetcher::Fetch`.
+pub fn dqh_nzb_fetcher_format_http_status_err(status: i32) -> Vec<u8> {
+    format!("HTTP {status}").into_bytes()
+}
+
+/// Formats `"<temp_dir><sep>dupesearch-<now_sec>-<counter>.tmp"` for `HttpGet::Fetch`.
+pub fn dqh_http_get_format_temp_path(
+    temp_dir: &[u8],
+    sep: u8,
+    now_sec: i32,
+    counter: i32,
+) -> Vec<u8> {
+    let suffix = format!("dupesearch-{now_sec}-{counter}.tmp");
+    let mut out = Vec::with_capacity(temp_dir.len() + 1 + suffix.len());
+    out.extend_from_slice(temp_dir);
+    out.push(sep);
+    out.extend_from_slice(suffix.as_bytes());
+    out
+}
+
+/// Computes `max(0, deadline_ms - now_ms - finish_reserve_ms - 1000)` for `Fleet::Run`.
+pub fn dqh_fleet_calc_check_lock_wait_ms(
+    deadline_ms: i64,
+    now_ms: i64,
+    finish_reserve_ms: i64,
+) -> i64 {
+    deadline_ms
+        .saturating_sub(now_ms)
+        .saturating_sub(finish_reserve_ms)
+        .saturating_sub(1000)
+        .max(0)
+}
+
+/// Formats `"<name>=<value>"` for `ScriptController::SetEnvVar`.
+pub fn dqh_script_ctrl_format_env_assignment(name: &[u8], value: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(name.len() + 1 + value.len());
+    out.extend_from_slice(name);
+    out.push(b'=');
+    out.extend_from_slice(value);
+    out
+}
+
+/// Formats `"<prefix>_<name>"` for `ScriptController::SetEnvVarSpecial`.
+pub fn dqh_script_ctrl_format_prefixed_varname(prefix: &[u8], name: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(prefix.len() + 1 + name.len());
+    out.extend_from_slice(prefix);
+    out.push(b'_');
+    out.extend_from_slice(name);
+    out
+}
+
+/// Formats `"<msg> (<base_filename>:<line_nr>:<funcname>)"` or `"<msg> (<base_filename>:<line_nr>)"` for `debug()`.
+pub fn dqh_log_format_debug_line(
+    msg: &[u8],
+    base_filename: &[u8],
+    line_nr: i32,
+    funcname: Option<&[u8]>,
+) -> Vec<u8> {
+    let line_str = format!(":{line_nr}");
+    let mut out = Vec::with_capacity(
+        msg.len() + 3 + base_filename.len() + line_str.len() + funcname.map_or(0, |f| 1 + f.len()),
+    );
+    out.extend_from_slice(msg);
+    out.extend_from_slice(b" (");
+    out.extend_from_slice(base_filename);
+    out.extend_from_slice(line_str.as_bytes());
+    if let Some(fn_bytes) = funcname {
+        out.push(b':');
+        out.extend_from_slice(fn_bytes);
+    }
+    out.push(b')');
+    out
+}
+
+/// Formats `"<base_name>-####-##-##<base_ext>"` for `Log::RotateLog`.
+pub fn dqh_log_format_rotate_mask(base_name: &[u8], base_ext: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(base_name.len() + 11 + base_ext.len());
+    out.extend_from_slice(base_name);
+    out.extend_from_slice(b"-####-##-##");
+    out.extend_from_slice(base_ext);
+    out
+}
+
+/// Formats `"Deleting old log-file <filename>\n"` for `Log::RotateLog`.
+pub fn dqh_log_format_deleting_old_msg(filename: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(22 + filename.len() + 1);
+    out.extend_from_slice(b"Deleting old log-file ");
+    out.extend_from_slice(filename);
+    out.push(b'\n');
+    out
+}
+
+/// Formats `"<directory><sep><base_name>-<year>-<month:02>-<mday:02><base_ext>"` for `Log::RotateLog`.
+pub fn dqh_log_format_rotated_path(
+    directory: &[u8],
+    sep: u8,
+    base_name: &[u8],
+    year: i32,
+    month: i32,
+    mday: i32,
+    base_ext: &[u8],
+) -> Vec<u8> {
+    let date_part = format!("-{year}-{month:02}-{mday:02}");
+    let mut out = Vec::with_capacity(
+        directory.len() + 1 + base_name.len() + date_part.len() + base_ext.len(),
+    );
+    out.extend_from_slice(directory);
+    out.push(sep);
+    out.extend_from_slice(base_name);
+    out.extend_from_slice(date_part.as_bytes());
+    out.extend_from_slice(base_ext);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2549,6 +2711,62 @@ mod tests {
         assert_eq!(
             dqh_script_config_format_tls_temp_name(b"nzbget.conf", 1234, 7),
             b".nzbget.conf.tls-1234-7"
+        );
+        assert_eq!(
+            dqh_newznab_format_search_info_name(b"Indexer1 q=Show", 2),
+            b"DupeSearch Indexer1 q=Show page 2"
+        );
+        assert_eq!(
+            dqh_dupesearch_format_key_val_param(b"DupeAlive", 98),
+            b"DupeAlive=98"
+        );
+        assert_eq!(
+            dqh_dupesearch_format_pending_dir(b"/queue", b'/', 0),
+            b"/queue/dupesearch-pending"
+        );
+        assert_eq!(
+            dqh_dupesearch_format_pending_dir(b"/queue", b'/', 42),
+            b"/queue/dupesearch-pending/42"
+        );
+        assert_eq!(
+            dqh_dupesearch_format_indexed_base_path(b"/queue/pending", b'/', 7),
+            b"/queue/pending/7"
+        );
+        assert_eq!(dqh_dupesearch_format_usize_str(19), b"19");
+        assert_eq!(dqh_nzb_fetcher_format_http_status_err(429), b"HTTP 429");
+        assert_eq!(
+            dqh_http_get_format_temp_path(b"/tmp", b'/', 1700000000, 3),
+            b"/tmp/dupesearch-1700000000-3.tmp"
+        );
+        assert_eq!(dqh_fleet_calc_check_lock_wait_ms(10000, 3000, 2000), 4000);
+        assert_eq!(dqh_fleet_calc_check_lock_wait_ms(4000, 3000, 2000), 0);
+        assert_eq!(
+            dqh_script_ctrl_format_env_assignment(b"NZBOP_TEMPDIR", b"/tmp"),
+            b"NZBOP_TEMPDIR=/tmp"
+        );
+        assert_eq!(
+            dqh_script_ctrl_format_prefixed_varname(b"NZBPO", b"Host"),
+            b"NZBPO_Host"
+        );
+        assert_eq!(
+            dqh_log_format_debug_line(b"hello", b"Log.cpp", 42, Some(b"RotateLog")),
+            b"hello (Log.cpp:42:RotateLog)"
+        );
+        assert_eq!(
+            dqh_log_format_debug_line(b"hello", b"Log.cpp", 42, None),
+            b"hello (Log.cpp:42)"
+        );
+        assert_eq!(
+            dqh_log_format_rotate_mask(b"nzbget", b".log"),
+            b"nzbget-####-##-##.log"
+        );
+        assert_eq!(
+            dqh_log_format_deleting_old_msg(b"nzbget-2026-10-01.log"),
+            b"Deleting old log-file nzbget-2026-10-01.log\n"
+        );
+        assert_eq!(
+            dqh_log_format_rotated_path(b"/var/log", b'/', b"nzbget", 2026, 11, 5, b".log"),
+            b"/var/log/nzbget-2026-11-05.log"
         );
     }
 }

@@ -154,13 +154,16 @@ void ScriptController::ResetEnv()
 
 void ScriptController::SetEnvVar(const char* name, const char* value)
 {
-	m_environmentStrings.Append(CString::FormatStr("%s=%s", name, value));
+	NzbgetRsBuf envBuf = nzbget_rs_dqh_script_ctrl_format_env_assignment(name, value);
+	m_environmentStrings.Append(CString(envBuf.data ? envBuf.data : "", (int)envBuf.len));
+	nzbget_rs_free(envBuf);
 }
 
 void ScriptController::SetIntEnvVar(const char* name, int value)
 {
-	BString<1024> strValue("%i", value);
-	SetEnvVar(name, strValue);
+	NzbgetRsBuf valBuf = nzbget_rs_dqh_conn_format_port_str(value);
+	SetEnvVar(name, valBuf.data ? valBuf.data : "0");
+	nzbget_rs_free(valBuf);
 }
 
 /**
@@ -188,7 +191,10 @@ void ScriptController::PrepareEnvOptions(const char* stripPrefix)
 
 void ScriptController::SetEnvVarSpecial(const char* prefix, const char* name, const char* value)
 {
-	BString<1024> varname("%s_%s", prefix, name);
+	NzbgetRsBuf varBuf = nzbget_rs_dqh_script_ctrl_format_prefixed_varname(prefix, name);
+	BString<1024> varname;
+	varname.Set(varBuf.data ? varBuf.data : "", (int)varBuf.len);
+	nzbget_rs_free(varBuf);
 
 	// Original name
 	SetEnvVar(varname, value);

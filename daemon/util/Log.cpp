@@ -158,16 +158,12 @@ void debug(const char* msg, ...)
 
 	BString<1024> tmp2;
 #ifdef HAVE_VARIADIC_MACROS
-	if (funcname)
-	{
-		tmp2.Format("%s (%s:%i:%s)", tmp1, FileSystem::BaseFileName(filename), lineNr, funcname);
-	}
-	else
-	{
-		tmp2.Format("%s (%s:%i)", tmp1, FileSystem::BaseFileName(filename), lineNr);
-	}
+	NzbgetRsBuf dbgBuf = nzbget_rs_dqh_log_format_debug_line(
+		tmp1, FileSystem::BaseFileName(filename), lineNr, funcname);
+	tmp2.Set(dbgBuf.data ? dbgBuf.data : "", (int)dbgBuf.len);
+	nzbget_rs_free(dbgBuf);
 #else
-	tmp2.Format("%s", tmp1);
+	tmp2.Set(tmp1);
 #endif
 
 	Guard guard(g_Log->m_logMutex);
@@ -325,7 +321,10 @@ void Log::RotateLog()
 		ext[0] = '\0';
 	}
 
-	BString<1024> fileMask("%s-####-##-##%s", baseName, *baseExt);
+	NzbgetRsBuf maskBuf = nzbget_rs_dqh_log_format_rotate_mask(baseName, *baseExt);
+	BString<1024> fileMask;
+	fileMask.Set(maskBuf.data ? maskBuf.data : "", (int)maskBuf.len);
+	nzbget_rs_free(maskBuf);
 
 	time_t curTime = Util::CurrentTime() + g_Options->GetTimeCorrection();
 	int curDay = (int)curTime / 86400;
@@ -337,7 +336,10 @@ void Log::RotateLog()
 	{
 		if (mask.Match(filename))
 		{
-			fullFilename.Format("%s%c%s", *directory, PATH_SEPARATOR, filename);
+			NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+				*directory, PATH_SEPARATOR, filename);
+			fullFilename.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
+			nzbget_rs_free(fullFnBuf);
 
 			struct tm tm;
 			memset(&tm, 0, sizeof(tm));
@@ -349,7 +351,10 @@ void Log::RotateLog()
 
 			if (nzbget_rs_rol_log_should_delete_old_rotated(fileDay, curDay, g_Options->GetRotateLog()))
 			{
-				BString<1024> message("Deleting old log-file %s\n", filename);
+				NzbgetRsBuf delMsgBuf = nzbget_rs_dqh_log_format_deleting_old_msg(filename);
+				BString<1024> message;
+				message.Set(delMsgBuf.data ? delMsgBuf.data : "", (int)delMsgBuf.len);
+				nzbget_rs_free(delMsgBuf);
 				g_Log->AddMessage(Message::mkInfo, message);
 
 				FileSystem::DeleteFile(fullFilename);
@@ -359,8 +364,10 @@ void Log::RotateLog()
 
 	struct tm tm;
 	gmtime_r(&curTime, &tm);
-	fullFilename.Format("%s%c%s-%i-%.2i-%.2i%s", *directory, PATH_SEPARATOR,
-		baseName, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, *baseExt);
+	NzbgetRsBuf rotBuf = nzbget_rs_dqh_log_format_rotated_path(
+		*directory, PATH_SEPARATOR, baseName, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, *baseExt);
+	fullFilename.Set(rotBuf.data ? rotBuf.data : "", (int)rotBuf.len);
+	nzbget_rs_free(rotBuf);
 
 	UpdateLogPath(*fullFilename);
 }

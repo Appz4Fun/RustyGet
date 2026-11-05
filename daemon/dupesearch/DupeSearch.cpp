@@ -1008,7 +1008,10 @@ void DupeSearch::Place(const Job& job, const NzbSummary& pick, std::vector<NzbFe
 		std::vector<DonorHealth::Posting> list;
 		for (size_t i = 0; i < verified.size(); i++)
 		{
-			list.push_back({ std::to_string(i), verified[i].info.messageIds, groupsOf(verified[i].info) });
+			NzbgetRsBuf keyBuf = nzbget_rs_dqh_dupesearch_format_usize_str(i);
+			std::string keyStr(keyBuf.data ? keyBuf.data : "", keyBuf.len);
+			nzbget_rs_free(keyBuf);
+			list.push_back({ std::move(keyStr), verified[i].info.messageIds, groupsOf(verified[i].info) });
 		}
 		DonorHealth::CheckPostings(servers, list, healthOptions, false, FetchParallel,
 			[&](const std::string& key, const DonorHealth::Health& health)
@@ -1131,7 +1134,10 @@ void DupeSearch::Place(const Job& job, const NzbSummary& pick, std::vector<NzbFe
 		std::vector<DonorHealth::Posting> list;
 		for (size_t i : todo)
 		{
-			list.push_back({ std::to_string(i), verified[i].info.messageIds, groupsOf(verified[i].info) });
+			NzbgetRsBuf keyBuf = nzbget_rs_dqh_dupesearch_format_usize_str(i);
+			std::string keyStr(keyBuf.data ? keyBuf.data : "", keyBuf.len);
+			nzbget_rs_free(keyBuf);
+			list.push_back({ std::move(keyStr), verified[i].info.messageIds, groupsOf(verified[i].info) });
 		}
 		DonorHealth::CheckPostings(servers, list, healthOptions, true, FetchParallel,
 			[&](const std::string& key, const DonorHealth::Health& health)
@@ -1155,8 +1161,11 @@ void DupeSearch::Place(const Job& job, const NzbSummary& pick, std::vector<NzbFe
 					Placed& donor = it->second;
 					ranks.Release(donor.entry.score);
 					int score = isDead ? DonorScore::Dead : ranks.Take(alive, donor.entry.twin);
-					std::string param = std::string(AliveParam) + "=" + std::to_string(
+					NzbgetRsBuf paramBuf = nzbget_rs_dqh_dupesearch_format_key_val_param(
+						AliveParam,
 						nzbget_rs_cdn_dupesearch_fast_donor_alive_param(isDead ? 1 : 0, alive));
+					std::string param(paramBuf.data ? paramBuf.data : "", paramBuf.len);
+					nzbget_rs_free(paramBuf);
 					if (alive < 0 || SetScore(donor.id, base + score,
 						param.empty() ? std::vector<std::string>() : std::vector<std::string>{ param }))
 					{
@@ -1264,7 +1273,10 @@ void DupeSearch::Place(const Job& job, const NzbSummary& pick, std::vector<NzbFe
 				sameAs[m] = (size_t)atoi(first->key.c_str());
 				continue;
 			}
-			list.push_back({ std::to_string(m), summaries[m].messageIds, groupsOf(summaries[m]) });
+			NzbgetRsBuf keyBuf = nzbget_rs_dqh_dupesearch_format_usize_str(m);
+			std::string keyStr(keyBuf.data ? keyBuf.data : "", keyBuf.len);
+			nzbget_rs_free(keyBuf);
+			list.push_back({ std::move(keyStr), summaries[m].messageIds, groupsOf(summaries[m]) });
 		}
 		std::map<size_t, DonorHealth::Health> measured;
 		if (!servers.empty()) DonorHealth::CheckPostings(servers, list, healthOptions, true, FetchParallel,
@@ -1345,7 +1357,9 @@ void DupeSearch::Place(const Job& job, const NzbSummary& pick, std::vector<NzbFe
 			nzbget_rs_df_eval_member_rerank(
 				base, wanted[n], DonorScore::Dead, donor.oldScore, donor.entry.alive, allDead ? 1 : 0,
 				&score, &percent, &addAliveZero);
-			params.push_back(std::string(HealthParam) + "=" + std::to_string(percent));
+			NzbgetRsBuf hpBuf = nzbget_rs_dqh_dupesearch_format_key_val_param(HealthParam, percent);
+			params.emplace_back(hpBuf.data ? hpBuf.data : "", hpBuf.len);
+			nzbget_rs_free(hpBuf);
 			if (addAliveZero)
 			{
 				params.push_back(std::string(AliveParam) + "=0");
@@ -1546,7 +1560,10 @@ int DupeSearch::AddDonor(const Job& job, const NzbSummary& pick, const NzbFetche
 	}
 	if (alive >= 0)
 	{
-		parameters.SetParameter(AliveParam, std::to_string((int)std::lround(100 * alive)).c_str());
+		NzbgetRsBuf aliveBuf = nzbget_rs_dqh_conn_format_port_str(
+			nzbget_rs_cdn_dupesearch_alive_to_percent(alive));
+		parameters.SetParameter(AliveParam, aliveBuf.data ? aliveBuf.data : "0");
+		nzbget_rs_free(aliveBuf);
 	}
 	std::string name = posting.listing.title;
 	if (nzbget_rs_dds_dupesearch_needs_nzb_ext(name.data(), name.size()) != 0)
@@ -1619,7 +1636,9 @@ bool DupeSearch::SetScore(int id, int score, const std::vector<std::string>& par
 		}
 	}
 	IdList ids{ id };
-	std::string text = std::to_string(score);
+	NzbgetRsBuf scoreBuf = nzbget_rs_dqh_conn_format_port_str(score);
+	std::string text(scoreBuf.data ? scoreBuf.data : "", scoreBuf.len);
+	nzbget_rs_free(scoreBuf);
 	const std::pair<DownloadQueue::EEditAction, DownloadQueue::EEditAction> kinds[] = {
 		{ DownloadQueue::eaHistorySetDupeScore, DownloadQueue::eaHistorySetParameter },
 		{ DownloadQueue::eaGroupSetDupeScore, DownloadQueue::eaGroupSetParameter } };
@@ -1664,8 +1683,11 @@ void DupeSearch::Note(int nzbId, Message::EKind kind, const char* format, ...)
 
 std::string DupeSearch::PendingDir(int nzbId)
 {
-	std::string dir = std::string(g_Options->GetQueueDir()) + PATH_SEPARATOR + "dupesearch-pending";
-	return nzbId > 0 ? dir + PATH_SEPARATOR + std::to_string(nzbId) : dir;
+	NzbgetRsBuf dirBuf = nzbget_rs_dqh_dupesearch_format_pending_dir(
+		g_Options->GetQueueDir(), PATH_SEPARATOR, nzbId);
+	std::string dir(dirBuf.data ? dirBuf.data : "", dirBuf.len);
+	nzbget_rs_free(dirBuf);
+	return dir;
 }
 
 namespace
@@ -1711,7 +1733,10 @@ void DupeSearch::SavePending(const Job& job, const NzbSummary& pick, const std::
 	for (size_t i = 0; i < verified.size() && ok; i++)
 	{
 		const Newznab::Result& listing = verified[i].listing;
-		std::string base = dir + PATH_SEPARATOR + std::to_string(i);
+		NzbgetRsBuf baseBuf = nzbget_rs_dqh_dupesearch_format_indexed_base_path(
+			dir.c_str(), PATH_SEPARATOR, i);
+		std::string base(baseBuf.data ? baseBuf.data : "", baseBuf.len);
+		nzbget_rs_free(baseBuf);
 		NzbgetRsBuf metaBuf = nzbget_rs_df_format_pending_meta(
 			listing.title.c_str(), listing.indexer.c_str(), listing.grabs, listing.size, (int64_t)listing.date);
 		std::string metaStr(metaBuf.data ? metaBuf.data : "", metaBuf.len);
@@ -1872,7 +1897,10 @@ void DupeSearch::ResumePending()
 		std::map<std::string, int> rejected;
 		for (int i = 0;; i++)
 		{
-			std::string base = dir + PATH_SEPARATOR + std::to_string(i);
+			NzbgetRsBuf baseBuf = nzbget_rs_dqh_dupesearch_format_indexed_base_path(
+				dir.c_str(), PATH_SEPARATOR, (size_t)i);
+			std::string base(baseBuf.data ? baseBuf.data : "", baseBuf.len);
+			nzbget_rs_free(baseBuf);
 			if (!FileSystem::FileExists((base + ".meta").c_str()))
 			{
 				break;

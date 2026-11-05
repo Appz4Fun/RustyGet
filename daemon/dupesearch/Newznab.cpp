@@ -224,9 +224,15 @@ std::vector<Newznab::Result> Newznab::Search(const std::string& base, const std:
 				}
 
 				Params params = queries[index];
-				params.emplace_back("limit", std::to_string(PageSize));
-				params.emplace_back("offset", std::to_string(page * PageSize));
-				std::string infoName = "DupeSearch " + label + " page " + std::to_string(page + 1);
+				NzbgetRsBuf limBuf = nzbget_rs_dqh_conn_format_port_str(PageSize);
+				params.emplace_back("limit", std::string(limBuf.data ? limBuf.data : "", limBuf.len));
+				nzbget_rs_free(limBuf);
+				NzbgetRsBuf offBuf = nzbget_rs_dqh_conn_format_port_str(page * PageSize);
+				params.emplace_back("offset", std::string(offBuf.data ? offBuf.data : "", offBuf.len));
+				nzbget_rs_free(offBuf);
+				NzbgetRsBuf infoBuf = nzbget_rs_dqh_newznab_format_search_info_name(label.c_str(), page + 1);
+				std::string infoName(infoBuf.data ? infoBuf.data : "", infoBuf.len);
+				nzbget_rs_free(infoBuf);
 				long long pageDeadlineMs = nzbget_rs_dsf_newznab_calc_page_deadline_ms(
 					DonorHealth::NowMs(), (int64_t)deadline, (int64_t)Util::CurrentTime());
 				HttpGet::Reply reply = HttpGet::Fetch(BuildUrl(base, params, apiKey), infoName, 16 * 1024 * 1024,

@@ -5889,6 +5889,32 @@ NzbgetRsBuf nzbget_rs_dqh_cmd_script_format_info_name(
     const char* script_name, const char* command, int32_t uppercase);
 NzbgetRsBuf nzbget_rs_dqh_script_config_format_tls_temp_name(
     const char* leaf, int32_t pid, uint64_t seq);
+NzbgetRsBuf nzbget_rs_dqh_newznab_format_search_info_name(
+    const char* label, int32_t page_one_based);
+NzbgetRsBuf nzbget_rs_dqh_dupesearch_format_key_val_param(
+    const char* param_name, int32_t val);
+NzbgetRsBuf nzbget_rs_dqh_dupesearch_format_pending_dir(
+    const char* queue_dir, char sep, int32_t nzb_id);
+NzbgetRsBuf nzbget_rs_dqh_dupesearch_format_indexed_base_path(
+    const char* dir, char sep, size_t idx);
+NzbgetRsBuf nzbget_rs_dqh_dupesearch_format_usize_str(size_t idx);
+NzbgetRsBuf nzbget_rs_dqh_nzb_fetcher_format_http_status_err(int32_t status);
+NzbgetRsBuf nzbget_rs_dqh_http_get_format_temp_path(
+    const char* temp_dir, char sep, int32_t now_sec, int32_t counter);
+int64_t nzbget_rs_dqh_fleet_calc_check_lock_wait_ms(
+    int64_t deadline_ms, int64_t now_ms, int64_t finish_reserve_ms);
+NzbgetRsBuf nzbget_rs_dqh_script_ctrl_format_env_assignment(
+    const char* name, const char* value);
+NzbgetRsBuf nzbget_rs_dqh_script_ctrl_format_prefixed_varname(
+    const char* prefix, const char* name);
+NzbgetRsBuf nzbget_rs_dqh_log_format_debug_line(
+    const char* msg, const char* base_filename, int32_t line_nr, const char* funcname);
+NzbgetRsBuf nzbget_rs_dqh_log_format_rotate_mask(
+    const char* base_name, const char* base_ext);
+NzbgetRsBuf nzbget_rs_dqh_log_format_deleting_old_msg(const char* filename);
+NzbgetRsBuf nzbget_rs_dqh_log_format_rotated_path(
+    const char* directory, char sep, const char* base_name,
+    int32_t year, int32_t month, int32_t mday, const char* base_ext);
 
 #include "nzbget_tls_cipher.h"
 

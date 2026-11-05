@@ -49,8 +49,10 @@ HttpGet::Reply HttpGet::Fetch(const std::string& url, const std::string& infoNam
 		return reply;
 	}
 
-	std::string path = std::string(g_Options->GetTempDir()) + PATH_SEPARATOR + "dupesearch-" +
-		std::to_string((int)Util::CurrentTime()) + "-" + std::to_string(++g_counter) + ".tmp";
+	NzbgetRsBuf pathBuf = nzbget_rs_dqh_http_get_format_temp_path(
+		g_Options->GetTempDir(), PATH_SEPARATOR, (int)Util::CurrentTime(), ++g_counter);
+	std::string path(pathBuf.data ? pathBuf.data : "", pathBuf.len);
+	nzbget_rs_free(pathBuf);
 
 	WebDownloader downloader;
 	downloader.SetUrl(url.c_str());

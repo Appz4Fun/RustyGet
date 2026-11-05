@@ -34552,6 +34552,235 @@ pub unsafe extern "C" fn nzbget_rs_dqh_script_config_format_tls_temp_name(
     )
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_newznab_format_search_info_name(
+    label: *const c_char,
+    page_one_based: c_int,
+) -> RsBuf {
+    let l = if label.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(label).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_newznab_format_search_info_name(
+        l,
+        page_one_based,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_dupesearch_format_key_val_param(
+    param_name: *const c_char,
+    val: c_int,
+) -> RsBuf {
+    let p = if param_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(param_name).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_dupesearch_format_key_val_param(
+        p, val,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_dupesearch_format_pending_dir(
+    queue_dir: *const c_char,
+    sep: c_char,
+    nzb_id: c_int,
+) -> RsBuf {
+    let q = if queue_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(queue_dir).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_dupesearch_format_pending_dir(
+        q, sep as u8, nzb_id,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_dupesearch_format_indexed_base_path(
+    dir: *const c_char,
+    sep: c_char,
+    idx: usize,
+) -> RsBuf {
+    let d = if dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(dir).to_bytes()
+    };
+    into_buf(
+        crate::dupequeuehealth::dqh_dupesearch_format_indexed_base_path(d, sep as u8, idx),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_dupesearch_format_usize_str(idx: usize) -> RsBuf {
+    into_buf(crate::dupequeuehealth::dqh_dupesearch_format_usize_str(idx))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_nzb_fetcher_format_http_status_err(
+    status: c_int,
+) -> RsBuf {
+    into_buf(crate::dupequeuehealth::dqh_nzb_fetcher_format_http_status_err(status))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_http_get_format_temp_path(
+    temp_dir: *const c_char,
+    sep: c_char,
+    now_sec: c_int,
+    counter: c_int,
+) -> RsBuf {
+    let t = if temp_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(temp_dir).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_http_get_format_temp_path(
+        t, sep as u8, now_sec, counter,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_fleet_calc_check_lock_wait_ms(
+    deadline_ms: i64,
+    now_ms: i64,
+    finish_reserve_ms: i64,
+) -> i64 {
+    crate::dupequeuehealth::dqh_fleet_calc_check_lock_wait_ms(
+        deadline_ms,
+        now_ms,
+        finish_reserve_ms,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_script_ctrl_format_env_assignment(
+    name: *const c_char,
+    value: *const c_char,
+) -> RsBuf {
+    let n = if name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(name).to_bytes()
+    };
+    let v = if value.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(value).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_script_ctrl_format_env_assignment(n, v))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_script_ctrl_format_prefixed_varname(
+    prefix: *const c_char,
+    name: *const c_char,
+) -> RsBuf {
+    let p = if prefix.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(prefix).to_bytes()
+    };
+    let n = if name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(name).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_script_ctrl_format_prefixed_varname(p, n))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_log_format_debug_line(
+    msg: *const c_char,
+    base_filename: *const c_char,
+    line_nr: c_int,
+    funcname: *const c_char,
+) -> RsBuf {
+    let m = if msg.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(msg).to_bytes()
+    };
+    let b = if base_filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(base_filename).to_bytes()
+    };
+    let f = if funcname.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(funcname).to_bytes())
+    };
+    into_buf(crate::dupequeuehealth::dqh_log_format_debug_line(
+        m, b, line_nr, f,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_log_format_rotate_mask(
+    base_name: *const c_char,
+    base_ext: *const c_char,
+) -> RsBuf {
+    let n = if base_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(base_name).to_bytes()
+    };
+    let e = if base_ext.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(base_ext).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_log_format_rotate_mask(n, e))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_log_format_deleting_old_msg(
+    filename: *const c_char,
+) -> RsBuf {
+    let f = if filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_log_format_deleting_old_msg(f))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_log_format_rotated_path(
+    directory: *const c_char,
+    sep: c_char,
+    base_name: *const c_char,
+    year: c_int,
+    month: c_int,
+    mday: c_int,
+    base_ext: *const c_char,
+) -> RsBuf {
+    let d = if directory.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(directory).to_bytes()
+    };
+    let n = if base_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(base_name).to_bytes()
+    };
+    let e = if base_ext.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(base_ext).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_log_format_rotated_path(
+        d, sep as u8, n, year, month, mday, e,
+    ))
+}
+
+
 
 
 

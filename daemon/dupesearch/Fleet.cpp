@@ -307,7 +307,10 @@ Fleet::Result Fleet::Append(Request request)
 		// a posting the key holds already needs no check: it isn't added again
 		if (candidate.error.empty() && candidate.sameAs < 0 && !candidate.existingId)
 		{
-			postings.push_back({ std::to_string(candidate.index), candidate.summary.messageIds,
+			NzbgetRsBuf idxBuf = nzbget_rs_dqh_conn_format_port_str(candidate.index);
+			std::string idxStr(idxBuf.data ? idxBuf.data : "", idxBuf.len);
+			nzbget_rs_free(idxBuf);
+			postings.push_back({ std::move(idxStr), candidate.summary.messageIds,
 				std::make_shared<std::vector<std::string>>(candidate.summary.groups) });
 		}
 	}
@@ -317,7 +320,8 @@ Fleet::Result Fleet::Append(Request request)
 	// other within its own limit
 	std::unique_lock<std::timed_mutex> checkGuard(g_checkMutex, std::defer_lock);
 	bool mayCheck = !servers.empty() && !postings.empty() && checkGuard.try_lock_for(
-		std::chrono::milliseconds(std::max(0LL, deadlineMs - DonorHealth::NowMs() - FinishReserveMs - 1000)));
+		std::chrono::milliseconds(nzbget_rs_dqh_fleet_calc_check_lock_wait_ms(
+			deadlineMs, DonorHealth::NowMs(), FinishReserveMs)));
 	if (!servers.empty() && !postings.empty() && !mayCheck)
 	{
 		result.complete = false;
@@ -479,11 +483,15 @@ Fleet::Result Fleet::Append(Request request)
 		else
 		{
 			NzbParameterList parameters;
-			parameters.SetParameter(FleetParam, std::to_string(entry.rank).c_str());
+			NzbgetRsBuf rankBuf = nzbget_rs_dqh_conn_format_port_str(entry.rank);
+			parameters.SetParameter(FleetParam, rankBuf.data ? rankBuf.data : "0");
+			nzbget_rs_free(rankBuf);
 			if (candidate->alive >= 0)
 			{
-				parameters.SetParameter(DupeSearch::AliveParam, candidate->dead ? "0" :
-					std::to_string(candidate->alive).c_str());
+				NzbgetRsBuf aliveBuf = nzbget_rs_dqh_conn_format_port_str(
+					candidate->dead ? 0 : candidate->alive);
+				parameters.SetParameter(DupeSearch::AliveParam, aliveBuf.data ? aliveBuf.data : "0");
+				nzbget_rs_free(aliveBuf);
 			}
 			int nzbId = 0;
 			NzbgetRsBuf nameBuf = nzbget_rs_dqh_fleet_ensure_nzb_ext(member.name.data(), member.name.size());

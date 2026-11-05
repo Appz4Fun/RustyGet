@@ -32725,6 +32725,259 @@ pub unsafe extern "C" fn nzbget_rs_tpr_xmlrpc_format_testserver_article_cmd(
     into_buf(crate::twinproberenhist::tpr_xmlrpc_format_testserver_article_cmd(i))
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_parchecker_format_cli_flags(
+    threads_to_use: i32,
+    mem_to_use: i32,
+    out_mem_param: *mut RsBuf,
+    out_threads_param: *mut RsBuf,
+    out_file_threads_param: *mut RsBuf,
+) {
+    let (mem_param, threads_param, file_threads_param) =
+        crate::dupequeuehealth::dqh_parchecker_format_cli_flags(threads_to_use, mem_to_use);
+    if !out_mem_param.is_null() {
+        *out_mem_param = into_buf(mem_param);
+    }
+    if !out_threads_param.is_null() {
+        *out_threads_param = into_buf(threads_param);
+    }
+    if !out_file_threads_param.is_null() {
+        *out_file_threads_param = into_buf(file_threads_param);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_parchecker_creator_or_unknown(
+    creator: *const c_char,
+) -> *const c_char {
+    if creator.is_null() || *creator == 0 {
+        b"<unknown program>\0".as_ptr() as *const c_char
+    } else {
+        creator
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_parchecker_format_action_label(
+    verb: *const c_char,
+    info_name: *const c_char,
+) -> RsBuf {
+    let v = if verb.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(verb).to_bytes()
+    };
+    let n = if info_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(info_name).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_parchecker_format_action_label(
+        v, n,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_parchecker_effective_source_files_count(
+    stage: i32,
+    pt_repairing: i32,
+    pt_verifying_repaired: i32,
+    total_source_files: usize,
+) -> i32 {
+    crate::dupequeuehealth::dqh_parchecker_effective_source_files_count(
+        stage,
+        pt_repairing,
+        pt_verifying_repaired,
+        total_source_files,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_parchecker_should_check_ignore_ext(
+    stage: i32,
+    pt_verifying_sources: i32,
+    available: i32,
+    total: i32,
+    verifying_extra_files: i32,
+) -> i32 {
+    if crate::dupequeuehealth::dqh_parchecker_should_check_ignore_ext(
+        stage,
+        pt_verifying_sources,
+        available,
+        total,
+        verifying_extra_files != 0,
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_parchecker_ignore_suffix(ignore: i32) -> *const c_char {
+    crate::dupequeuehealth::dqh_parchecker_ignore_suffix(ignore != 0).as_ptr() as *const c_char
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_parchecker_file_quality_label(
+    file_status: i32,
+    fs_success: i32,
+) -> *const c_char {
+    crate::dupequeuehealth::dqh_parchecker_file_quality_label(file_status, fs_success).as_ptr()
+        as *const c_char
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_prepost_should_calc_health_for_par_index(
+    par_status: i32,
+    ps_none: i32,
+    ps_skipped: i32,
+    delete_status: i32,
+    ds_none: i32,
+) -> i32 {
+    if crate::dupequeuehealth::dqh_prepost_should_calc_health_for_par_index(
+        par_status,
+        ps_none,
+        ps_skipped,
+        delete_status,
+        ds_none,
+    ) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_prepost_skip_unpack_par_reason(
+    par_status: i32,
+    ps_manual: i32,
+) -> *const c_char {
+    crate::dupequeuehealth::dqh_prepost_skip_unpack_par_reason(par_status, ps_manual).as_ptr()
+        as *const c_char
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_post_format_info_name(
+    prefix: *const c_char,
+    name: *const c_char,
+) -> RsBuf {
+    let p = if prefix.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(prefix).to_bytes()
+    };
+    let n = if name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(name).to_bytes()
+    };
+    into_buf(crate::twinproberenhist::tpr_post_format_info_name(p, n))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_unpack_format_password_arg(
+    password: *const c_char,
+) -> RsBuf {
+    let p = if password.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(password).to_bytes()
+    };
+    into_buf(crate::twinproberenhist::tpr_unpack_format_password_arg(p))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_unpack_format_unpack_dir(
+    dest_dir: *const c_char,
+    sep: c_char,
+    use_temp_unpack_dir: i32,
+) -> RsBuf {
+    let d = if dest_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(dest_dir).to_bytes()
+    };
+    into_buf(crate::twinproberenhist::tpr_unpack_format_unpack_dir(
+        d,
+        sep as u8,
+        use_temp_unpack_dir != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_unpack_ctrl_second_attempt_skip_errmsg(
+    last_unpack_status: i32,
+    us_password: i32,
+) -> *const c_char {
+    crate::twinproberenhist::tpr_unpack_ctrl_second_attempt_skip_errmsg(
+        last_unpack_status,
+        us_password,
+    )
+    .as_ptr() as *const c_char
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_unpack_ctrl_format_split_piece_name(
+    dest_base_name: *const c_char,
+    index: i32,
+) -> RsBuf {
+    let b = if dest_base_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(dest_base_name).to_bytes()
+    };
+    into_buf(
+        crate::twinproberenhist::tpr_unpack_ctrl_format_split_piece_name(b, index),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_unpack_ctrl_format_split_piece_path(
+    dest_dir: *const c_char,
+    sep: c_char,
+    dest_base_name: *const c_char,
+    index: i32,
+) -> RsBuf {
+    let d = if dest_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(dest_dir).to_bytes()
+    };
+    let b = if dest_base_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(dest_base_name).to_bytes()
+    };
+    into_buf(
+        crate::twinproberenhist::tpr_unpack_ctrl_format_split_piece_path(d, sep as u8, b, index),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_unpack_ctrl_request_par_reason(
+    force_repair: i32,
+) -> *const c_char {
+    crate::twinproberenhist::tpr_unpack_ctrl_request_par_reason(force_repair != 0).as_ptr()
+        as *const c_char
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_rename_ctrl_archive_kind_prefix(
+    kind: i32,
+    jk_rar: i32,
+) -> *const c_char {
+    crate::twinproberenhist::tpr_rename_ctrl_archive_kind_prefix(kind, jk_rar).as_ptr()
+        as *const c_char
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_tpr_repair_ctrl_twin_par2_reject_reason(
+    cmp: i32,
+) -> *const c_char {
+    crate::twinproberenhist::tpr_repair_ctrl_twin_par2_reject_reason(cmp).as_ptr() as *const c_char
+}
+
 
 
 

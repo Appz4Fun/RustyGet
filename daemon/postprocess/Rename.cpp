@@ -91,11 +91,16 @@ void RenameController::Run()
 		finalDir = m_postInfo->GetNzbInfo()->GetFinalDir();
 	}
 
-	BString<1024> infoName("rename for %s", *nzbName);
+	NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_post_format_info_name("rename", *nzbName);
+	BString<1024> infoName;
+	infoName.Set(infoNameBuf.data ? infoNameBuf.data : "", (int)infoNameBuf.len);
+	nzbget_rs_free(infoNameBuf);
 	SetInfoName(infoName);
 
+	const char* archiveKindPrefix = nzbget_rs_tpr_rename_ctrl_archive_kind_prefix(
+		(int)m_kind, (int)jkRar);
 	PrintMessage(Message::mkInfo, "Checking renamed %sfiles for %s",
-		m_kind == jkRar ? "archive " : "", *nzbName);
+		archiveKindPrefix, *nzbName);
 
 	ExecRename(destDir, finalDir, nzbName);
 
@@ -106,12 +111,12 @@ void RenameController::Run()
 	else if (m_renamedCount > 0)
 	{
 		PrintMessage(Message::mkInfo, "Successfully renamed %i %sfile(s) for %s",
-			m_renamedCount, m_kind == jkRar ? "archive " : "", *nzbName);
+			m_renamedCount, archiveKindPrefix, *nzbName);
 	}
 	else
 	{
 		PrintMessage(Message::mkInfo, "No renamed %sfiles found for %s",
-			m_kind == jkRar ? "archive " : "", *nzbName);
+			archiveKindPrefix, *nzbName);
 	}
 
 	RenameCompleted();

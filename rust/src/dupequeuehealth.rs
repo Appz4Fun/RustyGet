@@ -1018,6 +1018,111 @@ pub fn dqh_statmeter_bytes_to_mb_i32(bytes: i64) -> i32 {
     (bytes / 1024 / 1024) as i32
 }
 
+/// Format the `-m<mem>`, `-t<threads>`, and `-T<threads>` CLI flags for
+/// `Repairer::PreProcess` in `ParChecker.cpp`.
+pub fn dqh_parchecker_format_cli_flags(
+    threads_to_use: i32,
+    mem_to_use: i32,
+) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let threads_str = threads_to_use.to_string();
+    let mem_param = format!("-m{mem_to_use}").into_bytes();
+    let threads_param = format!("-t{threads_str}").into_bytes();
+    let file_threads_param = format!("-T{threads_str}").into_bytes();
+    (mem_param, threads_param, file_threads_param)
+}
+
+/// Select the PAR2 packet creator display string (`"<unknown program>"` when
+/// empty) for `ParChecker::RunParCheck` in `ParChecker.cpp`.
+pub fn dqh_parchecker_creator_or_unknown(creator: &[u8]) -> &[u8] {
+    if creator.is_empty() {
+        b"<unknown program>"
+    } else {
+        creator
+    }
+}
+
+/// Format `"<verb> <info_name>"` (e.g. `"Verifying <info_name>"` or
+/// `"Repairing <info_name>"`) for `ParChecker::RunParCheck` in `ParChecker.cpp`.
+pub fn dqh_parchecker_format_action_label(verb: &[u8], info_name: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(verb.len() + 1 + info_name.len());
+    out.extend_from_slice(verb);
+    out.push(b' ');
+    out.extend_from_slice(info_name);
+    out
+}
+
+/// Compute the effective `sourceFilesCount` passed to stage-progress calculation
+/// in `ParChecker::SignalProgress` (`ParChecker.cpp`).
+pub fn dqh_parchecker_effective_source_files_count(
+    stage: i32,
+    pt_repairing: i32,
+    pt_verifying_repaired: i32,
+    total_source_files: usize,
+) -> i32 {
+    if stage != pt_repairing && stage != pt_verifying_repaired {
+        total_source_files as i32
+    } else {
+        0
+    }
+}
+
+/// Return whether `ParChecker::SignalDone` should check `ParIgnoreExt` for a
+/// verified file (`ParChecker.cpp`).
+pub fn dqh_parchecker_should_check_ignore_ext(
+    stage: i32,
+    pt_verifying_sources: i32,
+    available: i32,
+    total: i32,
+    verifying_extra_files: bool,
+) -> bool {
+    stage == pt_verifying_sources && available < total && !verifying_extra_files
+}
+
+/// Return the NUL-terminated `", ignoring"` or `""` suffix for damaged/missing
+/// file warnings in `ParChecker::SignalDone` and `ParChecker::CheckEmptyFiles`
+/// (`ParChecker.cpp`).
+pub fn dqh_parchecker_ignore_suffix(ignore: bool) -> &'static [u8] {
+    if ignore {
+        b", ignoring\0"
+    } else {
+        b"\0"
+    }
+}
+
+/// Return the NUL-terminated `"good"` or `"damaged"` label for
+/// `ParChecker::VerifyDataFile` messages in `ParChecker.cpp`.
+pub fn dqh_parchecker_file_quality_label(file_status: i32, fs_success: i32) -> &'static [u8] {
+    if file_status == fs_success {
+        b"good\0"
+    } else {
+        b"damaged\0"
+    }
+}
+
+/// Return whether `PrePostProcessor::StartJob` should compute `nzbInfo->CalcHealth()`
+/// when checking for an unpaused PAR volume to replace a missing index file
+/// (`PrePostProcessor.cpp`).
+pub fn dqh_prepost_should_calc_health_for_par_index(
+    par_status: i32,
+    ps_none: i32,
+    ps_skipped: i32,
+    delete_status: i32,
+    ds_none: i32,
+) -> bool {
+    (par_status == ps_none || par_status == ps_skipped) && delete_status == ds_none
+}
+
+/// Return the NUL-terminated reason string (`"required par-repair"` vs
+/// `"par-failure"`) when skipping unpack due to PAR status in
+/// `PrePostProcessor::StartJob` (`PrePostProcessor.cpp`).
+pub fn dqh_prepost_skip_unpack_par_reason(par_status: i32, ps_manual: i32) -> &'static [u8] {
+    if par_status == ps_manual {
+        b"required par-repair\0"
+    } else {
+        b"par-failure\0"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1430,5 +1535,38 @@ mod tests {
             (20, 100)
         );
         assert_eq!(dqh_statmeter_bytes_to_mb_i32(10 * 1024 * 1024), 10);
+        assert_eq!(
+            dqh_parchecker_format_cli_flags(4, 256),
+            (b"-m256".to_vec(), b"-t4".to_vec(), b"-T4".to_vec())
+        );
+        assert_eq!(dqh_parchecker_creator_or_unknown(b""), b"<unknown program>");
+        assert_eq!(dqh_parchecker_creator_or_unknown(b"par2cmdline"), b"par2cmdline");
+        assert_eq!(
+            dqh_parchecker_format_action_label(b"Verifying", b"MyNzb/vol"),
+            b"Verifying MyNzb/vol"
+        );
+        assert_eq!(
+            dqh_parchecker_effective_source_files_count(1, 2, 3, 12),
+            12
+        );
+        assert_eq!(
+            dqh_parchecker_effective_source_files_count(2, 2, 3, 12),
+            0
+        );
+        assert!(dqh_parchecker_should_check_ignore_ext(1, 1, 5, 10, false));
+        assert!(!dqh_parchecker_should_check_ignore_ext(1, 1, 10, 10, false));
+        assert!(!dqh_parchecker_should_check_ignore_ext(1, 1, 5, 10, true));
+        assert_eq!(dqh_parchecker_ignore_suffix(true), b", ignoring\0");
+        assert_eq!(dqh_parchecker_ignore_suffix(false), b"\0");
+        assert_eq!(dqh_parchecker_file_quality_label(1, 1), b"good\0");
+        assert_eq!(dqh_parchecker_file_quality_label(2, 1), b"damaged\0");
+        assert!(dqh_prepost_should_calc_health_for_par_index(0, 0, 4, 0, 0));
+        assert!(dqh_prepost_should_calc_health_for_par_index(4, 0, 4, 0, 0));
+        assert!(!dqh_prepost_should_calc_health_for_par_index(1, 0, 4, 0, 0));
+        assert_eq!(
+            dqh_prepost_skip_unpack_par_reason(3, 3),
+            b"required par-repair\0"
+        );
+        assert_eq!(dqh_prepost_skip_unpack_par_reason(1, 3), b"par-failure\0");
     }
 }

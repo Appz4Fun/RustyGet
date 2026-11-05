@@ -70,8 +70,12 @@ void DirectUnpack::Run()
 		}
 	}
 
-	m_infoName.Format("direct unpack for %s", *m_name);
-	m_infoNameUp.Format("Direct unpack for %s", *m_name); // first letter in upper case
+	NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_post_format_info_name("direct unpack", *m_name);
+	m_infoName.Set(infoNameBuf.data ? infoNameBuf.data : "", (int)infoNameBuf.len);
+	nzbget_rs_free(infoNameBuf);
+	NzbgetRsBuf infoNameUpBuf = nzbget_rs_tpr_post_format_info_name("Direct unpack", *m_name);
+	m_infoNameUp.Set(infoNameUpBuf.data ? infoNameUpBuf.data : "", (int)infoNameUpBuf.len);
+	nzbget_rs_free(infoNameUpBuf);
 
 	FindArchiveFiles();
 
@@ -212,14 +216,9 @@ void DirectUnpack::ExecuteUnrar(const char* archiveName)
 
 	params.emplace_back("-y");
 
-	if (!m_password.Empty())
-	{
-		params.push_back(CString::FormatStr("-p%s", *m_password));
-	}
-	else
-	{
-		params.emplace_back("-p-");
-	}
+	NzbgetRsBuf passBuf = nzbget_rs_tpr_unpack_format_password_arg(m_password);
+	params.emplace_back(passBuf.data ? passBuf.data : "-p-", (int)passBuf.len);
+	nzbget_rs_free(passBuf);
 
 	if (nzbget_rs_pur_unpack_ctrl_should_add_default_overwrite_flag(
 		params.Exists("-o+") ? 1 : 0,
@@ -301,14 +300,10 @@ void DirectUnpack::CreateUnpackDir()
 	const char* destDir = nzbget_rs_ucf_direct_unpack_use_final_dir(
 		useInterDir ? 1 : 0, *m_finalDir) != 0 ? *m_finalDir : *m_destDir;
 
-	if (g_Options->GetUseTempUnpackDir())
-	{
-		m_unpackDir.Format("%s%c%s", destDir, PATH_SEPARATOR, "_unpack");
-	}
-	else
-	{
-		m_unpackDir.Format("%s", destDir);
-	}
+	NzbgetRsBuf unpackDirBuf = nzbget_rs_tpr_unpack_format_unpack_dir(
+		destDir, PATH_SEPARATOR, g_Options->GetUseTempUnpackDir() ? 1 : 0);
+	m_unpackDir.Set(unpackDirBuf.data ? unpackDirBuf.data : "", (int)unpackDirBuf.len);
+	nzbget_rs_free(unpackDirBuf);
 
 	detail("Unpacking into %s", *m_unpackDir);
 

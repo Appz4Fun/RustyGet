@@ -92,8 +92,12 @@ void UnpackController::Run()
 		}
 	}
 
-	m_infoName.Format("unpack for %s", *m_name);
-	m_infoNameUp.Format("Unpack for %s", *m_name); // first letter in upper case
+	NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_post_format_info_name("unpack", *m_name);
+	m_infoName.Set(infoNameBuf.data ? infoNameBuf.data : "", (int)infoNameBuf.len);
+	nzbget_rs_free(infoNameBuf);
+	NzbgetRsBuf infoNameUpBuf = nzbget_rs_tpr_post_format_info_name("Unpack", *m_name);
+	m_infoNameUp.Set(infoNameUpBuf.data ? infoNameUpBuf.data : "", (int)infoNameUpBuf.len);
+	nzbget_rs_free(infoNameUpBuf);
 
 	m_hasParFiles = ParParser::FindMainPars(m_destDir, nullptr);
 
@@ -118,8 +122,8 @@ void UnpackController::Run()
 	{
 		PrintMessage(Message::mkInfo, "Second unpack attempt skipped for %s due to par-check not repaired anything", *m_name);
 		PrintMessage(Message::mkError,
-			m_postInfo->GetLastUnpackStatus() == (int)NzbInfo::usPassword ?
-				 "%s failed: checksum error in the encrypted file. Corrupt file or wrong password." : "%s failed.",
+			nzbget_rs_tpr_unpack_ctrl_second_attempt_skip_errmsg(
+				m_postInfo->GetLastUnpackStatus(), (int)NzbInfo::usPassword),
 			*m_infoNameUp);
 		m_postInfo->GetNzbInfo()->SetUnpackStatus((NzbInfo::EPostUnpackStatus)m_postInfo->GetLastUnpackStatus());
 	}
@@ -316,14 +320,9 @@ void UnpackController::ExecuteUnrar(const char* password)
 
 	params.emplace_back("-y");
 
-	if (!Util::EmptyStr(password))
-	{
-		params.push_back(CString::FormatStr("-p%s", password));
-	}
-	else
-	{
-		params.emplace_back("-p-");
-	}
+	NzbgetRsBuf passBuf = nzbget_rs_tpr_unpack_format_password_arg(password);
+	params.emplace_back(passBuf.data ? passBuf.data : "-p-", (int)passBuf.len);
+	nzbget_rs_free(passBuf);
 
 	if (nzbget_rs_pur_unpack_ctrl_should_add_default_overwrite_flag(
 		params.Exists("-o+") ? 1 : 0,
@@ -393,14 +392,9 @@ void UnpackController::ExecuteSevenZip(const char* password, bool multiVolumes)
 
 	params.emplace_back("-y");
 
-	if (!Util::EmptyStr(password))
-	{
-		params.push_back(CString::FormatStr("-p%s", password));
-	}
-	else
-	{
-		params.emplace_back("-p-");
-	}
+	NzbgetRsBuf passBuf = nzbget_rs_tpr_unpack_format_password_arg(password);
+	params.emplace_back(passBuf.data ? passBuf.data : "-p-", (int)passBuf.len);
+	nzbget_rs_free(passBuf);
 
 	params.push_back(CString::FormatStr("-o%s", *m_unpackDir));
 	params.emplace_back(multiVolumes ? "*.7z.001" : "*.7z");
@@ -566,7 +560,11 @@ bool UnpackController::JoinFile(const char* fragBaseName)
 	int64 totalSize = 0;
 	for (int i = min; i <= max; i++)
 	{
-		BString<1024> fragFilename("%s%c%s.%.3i", *m_destDir, PATH_SEPARATOR, *destBaseName, i);
+		NzbgetRsBuf fragPathBuf = nzbget_rs_tpr_unpack_ctrl_format_split_piece_path(
+			*m_destDir, PATH_SEPARATOR, *destBaseName, i);
+		BString<1024> fragFilename;
+		fragFilename.Set(fragPathBuf.data ? fragPathBuf.data : "", (int)fragPathBuf.len);
+		nzbget_rs_free(fragPathBuf);
 		if (FileSystem::FileExists(fragFilename))
 		{
 			totalSize += FileSystem::FileSize(fragFilename);
@@ -584,10 +582,17 @@ bool UnpackController::JoinFile(const char* fragBaseName)
 	bool ok = true;
 	for (int i = min; i <= max; i++)
 	{
-		PrintMessage(Message::mkInfo, "Joining from %s.%.3i", *destBaseName, i);
-		SetProgressLabel(BString<1024>("Joining from %s.%.3i", *destBaseName, i));
+		NzbgetRsBuf pieceNameBuf = nzbget_rs_tpr_unpack_ctrl_format_split_piece_name(*destBaseName, i);
+		CString pieceName(pieceNameBuf.data ? pieceNameBuf.data : "", (int)pieceNameBuf.len);
+		nzbget_rs_free(pieceNameBuf);
+		PrintMessage(Message::mkInfo, "Joining from %s", *pieceName);
+		SetProgressLabel(BString<1024>("Joining from %s", *pieceName));
 
-		BString<1024> fragFilename("%s%c%s.%.3i", *m_destDir, PATH_SEPARATOR, *destBaseName, i);
+		NzbgetRsBuf fragPathBuf = nzbget_rs_tpr_unpack_ctrl_format_split_piece_path(
+			*m_destDir, PATH_SEPARATOR, *destBaseName, i);
+		BString<1024> fragFilename;
+		fragFilename.Set(fragPathBuf.data ? fragPathBuf.data : "", (int)fragPathBuf.len);
+		nzbget_rs_free(fragPathBuf);
 		if (!FileSystem::FileExists(fragFilename))
 		{
 			break;
@@ -619,9 +624,7 @@ bool UnpackController::JoinFile(const char* fragBaseName)
 				break;
 			}
 
-			CString fragFilename;
-			fragFilename.Format("%s.%.3i", *destBaseName, i);
-			m_joinedFiles.push_back(std::move(fragFilename));
+			m_joinedFiles.push_back(std::move(pieceName));
 		}
 		else
 		{
@@ -705,7 +708,8 @@ void UnpackController::Completed()
 #ifndef DISABLE_PARCHECK
 void UnpackController::RequestParCheck(bool forceRepair)
 {
-	PrintMessage(Message::mkInfo, "%s requested %s", *m_infoNameUp, forceRepair ? "par-check with forced repair" : "par-check/repair");
+	PrintMessage(Message::mkInfo, "%s requested %s", *m_infoNameUp,
+		nzbget_rs_tpr_unpack_ctrl_request_par_reason(forceRepair ? 1 : 0));
 	m_postInfo->SetRequestParCheck(true);
 	m_postInfo->SetForceRepair(forceRepair);
 	m_postInfo->SetUnpackTried(true);
@@ -735,14 +739,10 @@ void UnpackController::CreateUnpackDir()
 
 	const char* destDir = !m_finalDir.Empty() ? *m_finalDir : *m_destDir;
 
-	if (g_Options->GetUseTempUnpackDir())
-	{
-		m_unpackDir.Format("%s%c%s", destDir, PATH_SEPARATOR, "_unpack");
-	}
-	else
-	{
-		m_unpackDir.Format("%s", destDir);
-	}
+	NzbgetRsBuf unpackDirBuf = nzbget_rs_tpr_unpack_format_unpack_dir(
+		destDir, PATH_SEPARATOR, g_Options->GetUseTempUnpackDir() ? 1 : 0);
+	m_unpackDir.Set(unpackDirBuf.data ? unpackDirBuf.data : "", (int)unpackDirBuf.len);
+	nzbget_rs_free(unpackDirBuf);
 
 	m_unpackDirCreated = !FileSystem::DirectoryExists(m_unpackDir);
 

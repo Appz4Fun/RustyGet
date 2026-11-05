@@ -5683,6 +5683,42 @@ int32_t nzbget_rs_tpr_xmlrpc_should_use_edit_offset(
 NzbgetRsBuf nzbget_rs_tpr_xmlrpc_format_readurl_temp_filename(
     const char* temp_dir, char sep, int32_t num);
 NzbgetRsBuf nzbget_rs_tpr_xmlrpc_format_testserver_article_cmd(const char* id);
+void nzbget_rs_dqh_parchecker_format_cli_flags(
+    int32_t threads_to_use, int32_t mem_to_use,
+    NzbgetRsBuf* out_mem_param, NzbgetRsBuf* out_threads_param,
+    NzbgetRsBuf* out_file_threads_param);
+const char* nzbget_rs_dqh_parchecker_creator_or_unknown(const char* creator);
+NzbgetRsBuf nzbget_rs_dqh_parchecker_format_action_label(
+    const char* verb, const char* info_name);
+int32_t nzbget_rs_dqh_parchecker_effective_source_files_count(
+    int32_t stage, int32_t pt_repairing, int32_t pt_verifying_repaired,
+    size_t total_source_files);
+int32_t nzbget_rs_dqh_parchecker_should_check_ignore_ext(
+    int32_t stage, int32_t pt_verifying_sources,
+    int32_t available, int32_t total, int32_t verifying_extra_files);
+const char* nzbget_rs_dqh_parchecker_ignore_suffix(int32_t ignore);
+const char* nzbget_rs_dqh_parchecker_file_quality_label(
+    int32_t file_status, int32_t fs_success);
+int32_t nzbget_rs_dqh_prepost_should_calc_health_for_par_index(
+    int32_t par_status, int32_t ps_none, int32_t ps_skipped,
+    int32_t delete_status, int32_t ds_none);
+const char* nzbget_rs_dqh_prepost_skip_unpack_par_reason(
+    int32_t par_status, int32_t ps_manual);
+NzbgetRsBuf nzbget_rs_tpr_post_format_info_name(
+    const char* prefix, const char* name);
+NzbgetRsBuf nzbget_rs_tpr_unpack_format_password_arg(const char* password);
+NzbgetRsBuf nzbget_rs_tpr_unpack_format_unpack_dir(
+    const char* dest_dir, char sep, int32_t use_temp_unpack_dir);
+const char* nzbget_rs_tpr_unpack_ctrl_second_attempt_skip_errmsg(
+    int32_t last_unpack_status, int32_t us_password);
+NzbgetRsBuf nzbget_rs_tpr_unpack_ctrl_format_split_piece_name(
+    const char* dest_base_name, int32_t index);
+NzbgetRsBuf nzbget_rs_tpr_unpack_ctrl_format_split_piece_path(
+    const char* dest_dir, char sep, const char* dest_base_name, int32_t index);
+const char* nzbget_rs_tpr_unpack_ctrl_request_par_reason(int32_t force_repair);
+const char* nzbget_rs_tpr_rename_ctrl_archive_kind_prefix(
+    int32_t kind, int32_t jk_rar);
+const char* nzbget_rs_tpr_repair_ctrl_twin_par2_reject_reason(int32_t cmp);
 
 #include "nzbget_tls_cipher.h"
 

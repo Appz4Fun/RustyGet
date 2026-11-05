@@ -1108,6 +1108,125 @@ pub fn tpr_xmlrpc_format_testserver_article_cmd(id: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Format `"<prefix> for <name>"` (e.g. `"unpack for MyNzb"`, `"Unpack for MyNzb"`)
+/// for post-processing controllers (`DirectUnpack.cpp`, `UnpackController.cpp`,
+/// `Cleanup.cpp`, `Rename.cpp`).
+pub fn tpr_post_format_info_name(prefix: &[u8], name: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(prefix.len() + 5 + name.len());
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(b" for ");
+    out.extend_from_slice(name);
+    out
+}
+
+/// Format the `-p<password>` or `-p-` CLI flag for `unrar` / `7z` in
+/// `DirectUnpack::ExecuteUnrar`, `UnpackController::ExecuteUnrar`, and
+/// `UnpackController::ExecuteSevenZip`.
+pub fn tpr_unpack_format_password_arg(password: &[u8]) -> Vec<u8> {
+    if !password.is_empty() {
+        let mut out = Vec::with_capacity(2 + password.len());
+        out.extend_from_slice(b"-p");
+        out.extend_from_slice(password);
+        out
+    } else {
+        b"-p-".to_vec()
+    }
+}
+
+/// Format the unpack destination directory (`"<dest_dir><sep>_unpack"` when
+/// `use_temp_unpack_dir` is true, or `"<dest_dir>"` otherwise) for
+/// `DirectUnpack::CreateUnpackDir` and `UnpackController::CreateUnpackDir`.
+pub fn tpr_unpack_format_unpack_dir(
+    dest_dir: &[u8],
+    sep: u8,
+    use_temp_unpack_dir: bool,
+) -> Vec<u8> {
+    if use_temp_unpack_dir {
+        let mut out = Vec::with_capacity(dest_dir.len() + 8);
+        out.extend_from_slice(dest_dir);
+        out.push(sep);
+        out.extend_from_slice(b"_unpack");
+        out
+    } else {
+        dest_dir.to_vec()
+    }
+}
+
+/// Select the NUL-terminated format string for the second-unpack-attempt skipped
+/// error in `UnpackController::Run` (`UnpackController.cpp`).
+pub fn tpr_unpack_ctrl_second_attempt_skip_errmsg(
+    last_unpack_status: i32,
+    us_password: i32,
+) -> &'static [u8] {
+    if last_unpack_status == us_password {
+        b"%s failed: checksum error in the encrypted file. Corrupt file or wrong password.\0"
+    } else {
+        b"%s failed.\0"
+    }
+}
+
+/// Format `"<dest_base_name>.<index:03>"` (matching `"%s.%.3i"`) for
+/// `UnpackController::JoinFile` in `UnpackController.cpp`.
+pub fn tpr_unpack_ctrl_format_split_piece_name(dest_base_name: &[u8], index: i32) -> Vec<u8> {
+    let suffix = if index < 0 {
+        format!("-{:03}", -(index as i64))
+    } else {
+        format!("{index:03}")
+    };
+    let mut out = Vec::with_capacity(dest_base_name.len() + 1 + suffix.len());
+    out.extend_from_slice(dest_base_name);
+    out.push(b'.');
+    out.extend_from_slice(suffix.as_bytes());
+    out
+}
+
+/// Format `"<dest_dir><sep><dest_base_name>.<index:03>"` (matching `"%s%c%s.%.3i"`)
+/// for `UnpackController::JoinFile` in `UnpackController.cpp`.
+pub fn tpr_unpack_ctrl_format_split_piece_path(
+    dest_dir: &[u8],
+    sep: u8,
+    dest_base_name: &[u8],
+    index: i32,
+) -> Vec<u8> {
+    let piece_name = tpr_unpack_ctrl_format_split_piece_name(dest_base_name, index);
+    let mut out = Vec::with_capacity(dest_dir.len() + 1 + piece_name.len());
+    out.extend_from_slice(dest_dir);
+    out.push(sep);
+    out.extend_from_slice(&piece_name);
+    out
+}
+
+/// Return the NUL-terminated PAR-check request reason (`"par-check with forced repair"`
+/// vs `"par-check/repair"`) for `UnpackController::RequestParCheck` (`UnpackController.cpp`).
+pub fn tpr_unpack_ctrl_request_par_reason(force_repair: bool) -> &'static [u8] {
+    if force_repair {
+        b"par-check with forced repair\0"
+    } else {
+        b"par-check/repair\0"
+    }
+}
+
+/// Return the NUL-terminated `"archive "` or `""` kind prefix for
+/// `RenameController::Run` log messages in `Rename.cpp`.
+pub fn tpr_rename_ctrl_archive_kind_prefix(kind: i32, jk_rar: i32) -> &'static [u8] {
+    if kind == jk_rar {
+        b"archive \0"
+    } else {
+        b"\0"
+    }
+}
+
+/// Return the NUL-terminated rejection reason (`"describes other files"` vs
+/// `"names the files otherwise"`) for a twin PAR2 set in
+/// `RepairController::PostParChecker::RequestTwinIndex` (`Repair.cpp`).
+pub fn tpr_repair_ctrl_twin_par2_reject_reason(cmp: i32) -> &'static [u8] {
+    if cmp == 1 {
+        b"describes other files\0"
+    } else {
+        b"names the files otherwise\0"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1494,6 +1613,54 @@ mod tests {
         assert_eq!(
             tpr_xmlrpc_format_testserver_article_cmd(b"12345"),
             b"ARTICLE <12345@nzbget.com>\r\n"
+        );
+        assert_eq!(
+            tpr_post_format_info_name(b"unpack", b"MyNzb"),
+            b"unpack for MyNzb"
+        );
+        assert_eq!(tpr_unpack_format_password_arg(b"secret"), b"-psecret");
+        assert_eq!(tpr_unpack_format_password_arg(b""), b"-p-");
+        assert_eq!(
+            tpr_unpack_format_unpack_dir(b"/dst", b'/', true),
+            b"/dst/_unpack"
+        );
+        assert_eq!(
+            tpr_unpack_format_unpack_dir(b"/dst", b'/', false),
+            b"/dst"
+        );
+        assert_eq!(
+            tpr_unpack_ctrl_second_attempt_skip_errmsg(3, 3),
+            b"%s failed: checksum error in the encrypted file. Corrupt file or wrong password.\0"
+        );
+        assert_eq!(
+            tpr_unpack_ctrl_second_attempt_skip_errmsg(1, 3),
+            b"%s failed.\0"
+        );
+        assert_eq!(
+            tpr_unpack_ctrl_format_split_piece_name(b"archive.rar", 7),
+            b"archive.rar.007"
+        );
+        assert_eq!(
+            tpr_unpack_ctrl_format_split_piece_path(b"/dst", b'/', b"archive.rar", 7),
+            b"/dst/archive.rar.007"
+        );
+        assert_eq!(
+            tpr_unpack_ctrl_request_par_reason(true),
+            b"par-check with forced repair\0"
+        );
+        assert_eq!(
+            tpr_unpack_ctrl_request_par_reason(false),
+            b"par-check/repair\0"
+        );
+        assert_eq!(tpr_rename_ctrl_archive_kind_prefix(1, 1), b"archive \0");
+        assert_eq!(tpr_rename_ctrl_archive_kind_prefix(0, 1), b"\0");
+        assert_eq!(
+            tpr_repair_ctrl_twin_par2_reject_reason(1),
+            b"describes other files\0"
+        );
+        assert_eq!(
+            tpr_repair_ctrl_twin_par2_reject_reason(2),
+            b"names the files otherwise\0"
         );
     }
 }

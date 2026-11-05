@@ -1188,9 +1188,12 @@ void PrePostProcessor::StartJob(DownloadQueue* downloadQueue, PostInfo* postInfo
 	// damaged, and the par2-files downloaded so far all failed (a lost index file):
 	// any par2-volume carries the set's description too, so the smallest one held
 	// back is fetched, and the job waits for it (it isn't picked while files download)
-	int healthForParIndex = ((nzbInfo->GetParStatus() == NzbInfo::psNone ||
-		nzbInfo->GetParStatus() == NzbInfo::psSkipped) &&
-		nzbInfo->GetDeleteStatus() == NzbInfo::dsNone) ? nzbInfo->CalcHealth() : 1000;
+	int healthForParIndex = nzbget_rs_dqh_prepost_should_calc_health_for_par_index(
+		(int)nzbInfo->GetParStatus(),
+		(int)NzbInfo::psNone,
+		(int)NzbInfo::psSkipped,
+		(int)nzbInfo->GetDeleteStatus(),
+		(int)NzbInfo::dsNone) != 0 ? nzbInfo->CalcHealth() : 1000;
 	if (nzbget_rs_psp_prepost_should_check_unpaused_par_for_missing_index(
 		(int)nzbInfo->GetParStatus(),
 		(int)NzbInfo::psNone,
@@ -1375,7 +1378,8 @@ void PrePostProcessor::StartJob(DownloadQueue* downloadQueue, PostInfo* postInfo
 	{
 		nzbInfo->PrintMessage(Message::mkWarning,
 			"Skipping unpack for %s due to %s", nzbInfo->GetName(),
-			nzbInfo->GetParStatus() == NzbInfo::psManual ? "required par-repair" : "par-failure");
+			nzbget_rs_dqh_prepost_skip_unpack_par_reason(
+				(int)nzbInfo->GetParStatus(), (int)NzbInfo::psManual));
 		nzbInfo->SetUnpackStatus(NzbInfo::usSkipped);
 	}
 	unpack = stageDec.unpack != 0;

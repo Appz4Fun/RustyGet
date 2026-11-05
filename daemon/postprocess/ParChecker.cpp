@@ -112,10 +112,15 @@ class RepairCreatorPacket : public Par2::CreatorPacket
 
 Par2::Result Repairer::PreProcess(const std::string& parFilename)
 {
-	std::string threadsStr = std::to_string(m_threadsToUse);
-	std::string memParam = "-m" + std::to_string(m_memToUse);
-	std::string threadsParam = "-t" + threadsStr;
-	std::string fileThreadsParam = "-T" + threadsStr;
+	NzbgetRsBuf memBuf{}, threadsBuf{}, fileThreadsBuf{};
+	nzbget_rs_dqh_parchecker_format_cli_flags(
+		m_threadsToUse, m_memToUse, &memBuf, &threadsBuf, &fileThreadsBuf);
+	std::string memParam(memBuf.data ? memBuf.data : "", memBuf.len);
+	std::string threadsParam(threadsBuf.data ? threadsBuf.data : "", threadsBuf.len);
+	std::string fileThreadsParam(fileThreadsBuf.data ? fileThreadsBuf.data : "", fileThreadsBuf.len);
+	nzbget_rs_free(memBuf);
+	nzbget_rs_free(threadsBuf);
+	nzbget_rs_free(fileThreadsBuf);
 
 	if (g_Options->GetParScan() == Options::psFull)
 	{
@@ -353,7 +358,9 @@ ParChecker::EStatus ParChecker::RunParCheck(std::string parFilename)
 
 	debug("par: %s", m_parFilename.c_str());
 
-	m_progressLabel = "Verifying " + m_infoName;
+	NzbgetRsBuf verifyLabelBuf = nzbget_rs_dqh_parchecker_format_action_label("Verifying", m_infoName.c_str());
+	m_progressLabel.assign(verifyLabelBuf.data ? verifyLabelBuf.data : "", verifyLabelBuf.len);
+	nzbget_rs_free(verifyLabelBuf);
 	m_fileProgress = 0;
 	m_stageProgress = 0;
 	UpdateProgress();
@@ -366,7 +373,7 @@ ParChecker::EStatus ParChecker::RunParCheck(std::string parFilename)
 	}
 
 	std::string creator = GetPacketCreator();
-	info("Recovery files created by: %s", creator.empty() ? "<unknown program>" : creator.c_str());
+	info("Recovery files created by: %s", nzbget_rs_dqh_parchecker_creator_or_unknown(creator.c_str()));
 
 	m_stage = ptVerifyingSources;
 	res = GetRepairer()->Process(false);
@@ -453,7 +460,9 @@ ParChecker::EStatus ParChecker::RunParCheck(std::string parFilename)
 		PrintMessage(Message::mkInfo, "Repairing %s", m_infoName.c_str());
 
 		SaveSourceList();
-		m_progressLabel = std::string("Repairing ") + m_infoName.c_str();
+		NzbgetRsBuf repairLabelBuf = nzbget_rs_dqh_parchecker_format_action_label("Repairing", m_infoName.c_str());
+		m_progressLabel.assign(repairLabelBuf.data ? repairLabelBuf.data : "", repairLabelBuf.len);
+		nzbget_rs_free(repairLabelBuf);
 		m_fileProgress = 0;
 		m_stageProgress = 0;
 		m_processedCount = 0;
@@ -503,7 +512,7 @@ ParChecker::EStatus ParChecker::RunParCheck(std::string parFilename)
 			m_errMsg = Par2CmdLineErrStr[res];
 		}
 		PrintMessage(Message::mkError, "Repair failed for %s: %s. Recovery files created by: %s",
-			m_infoName.c_str(), m_errMsg.c_str(), creator.empty() ? "<unknown program>" : creator.c_str());
+			m_infoName.c_str(), m_errMsg.c_str(), nzbget_rs_dqh_parchecker_creator_or_unknown(creator.c_str()));
 	}
 
 	// A successful set does not cover unrelated files, and ignored damage
@@ -1098,9 +1107,9 @@ void ParChecker::SignalProgress(int progress)
 
 	m_fileProgress = progress;
 
-	int sourceFilesCount = (m_stage != ptRepairing && m_stage != ptVerifyingRepaired)
-		? static_cast<int>(GetRepairer()->sourcefiles.size())
-		: 0;
+	int sourceFilesCount = nzbget_rs_dqh_parchecker_effective_source_files_count(
+		(int)m_stage, (int)ptRepairing, (int)ptVerifyingRepaired,
+		GetRepairer()->sourcefiles.size());
 	m_stageProgress = nzbget_rs_parchecker_calc_stage_progress(
 		(int)m_stage, m_fileProgress, m_processedCount, m_filesToRepair,
 		sourceFilesCount, m_extraFiles, m_quickFiles);
@@ -1115,7 +1124,9 @@ void ParChecker::SignalDone(std::string fileName, int available, int total)
 
 	++m_processedCount;
 
-	bool ignore = (m_stage == ptVerifyingSources && available < total && !m_verifyingExtraFiles)
+	bool ignore = nzbget_rs_dqh_parchecker_should_check_ignore_ext(
+		(int)m_stage, (int)ptVerifyingSources, available, total,
+		m_verifyingExtraFiles ? 1 : 0) != 0
 		? Util::MatchFileExt(fileName.c_str(), g_Options->GetParIgnoreExt(), ",;")
 		: false;
 	int newHasDamaged = m_hasDamagedFiles ? 1 : 0;
@@ -1145,12 +1156,12 @@ void ParChecker::SignalDone(std::string fileName, int available, int total)
 		if (fileExists)
 		{
 			PrintMessage(Message::mkWarning, "File %s has %i bad block(s) of total %i block(s)%s",
-				fileName.c_str(), badBlocks, total, ignore ? ", ignoring" : "");
+				fileName.c_str(), badBlocks, total, nzbget_rs_dqh_parchecker_ignore_suffix(ignore ? 1 : 0));
 		}
 		else
 		{
 			PrintMessage(Message::mkWarning, "File %s with %i block(s) is missing%s",
-				fileName.c_str(), total, ignore ? ", ignoring" : "");
+				fileName.c_str(), total, nzbget_rs_dqh_parchecker_ignore_suffix(ignore ? 1 : 0));
 		}
 
 		if (!IsProcessedFile(fileName.c_str()))
@@ -1186,7 +1197,7 @@ void ParChecker::CheckEmptyFiles()
 
 				uint32_t total = sourcefile->GetVerificationPacket() ? sourcefile->GetVerificationPacket()->BlockCount() : 0;
 				PrintMessage(Message::mkWarning, "File %s has %u bad block(s) of total %u block(s)%s",
-					filenameObj.c_str(), total, total, ignore ? ", ignoring" : "");
+					filenameObj.c_str(), total, total, nzbget_rs_dqh_parchecker_ignore_suffix(ignore ? 1 : 0));
 			}
 		}
 		else
@@ -1320,7 +1331,8 @@ ParChecker::EFileStatus ParChecker::VerifyDataFile(Par2::DiskFile& diskFile, Par
 		(fileStatus == fsPartial && !VerifyPartialDataFile(diskFile, sourceFile, segments, validBlocks)))
 	{
 		PrintMessage(Message::mkWarning, "Quick verification failed for %s file %s, performing full verification instead",
-			fileStatus == fsSuccess ? "good" : "damaged", FileSystem::BaseFileName(filename.c_str()));
+			nzbget_rs_dqh_parchecker_file_quality_label((int)fileStatus, (int)fsSuccess),
+			FileSystem::BaseFileName(filename.c_str()));
 		return fsUnknown; // let libpar2 do the full verification of the file
 	}
 
@@ -1358,7 +1370,8 @@ ParChecker::EFileStatus ParChecker::VerifyDataFile(Par2::DiskFile& diskFile, Par
 
 	m_quickFiles++;
 	PrintMessage(Message::mkDetail, "Quickly verified %s file %s",
-		fileStatus == fsSuccess ? "good" : "damaged", FileSystem::BaseFileName(filename.c_str()));
+		nzbget_rs_dqh_parchecker_file_quality_label((int)fileStatus, (int)fsSuccess),
+		FileSystem::BaseFileName(filename.c_str()));
 
 	return fileStatus;
 }

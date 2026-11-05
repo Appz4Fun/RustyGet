@@ -53,7 +53,10 @@ void MoveController::Run()
 		}
 	}
 
-	BString<1024> infoName("move for %s", *nzbName);
+	NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_post_format_info_name("move", *nzbName);
+	BString<1024> infoName;
+	infoName.Set(infoNameBuf.data ? infoNameBuf.data : "", (int)infoNameBuf.len);
+	nzbget_rs_free(infoNameBuf);
 	SetInfoName(*infoName);
 	PrintMessage(Message::mkInfo, "Moving completed files for %s", *nzbName);
 
@@ -264,7 +267,10 @@ void CleanupController::Run()
 		finalDir = m_postInfo->GetNzbInfo()->GetFinalDir();
 	}
 
-	BString<1024> infoName("cleanup for %s", *nzbName);
+	NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_post_format_info_name("cleanup", *nzbName);
+	BString<1024> infoName;
+	infoName.Set(infoNameBuf.data ? infoNameBuf.data : "", (int)infoNameBuf.len);
+	nzbget_rs_free(infoNameBuf);
 	SetInfoName(*infoName);
 
 	PrintMessage(Message::mkInfo, "Cleaning up %s", *nzbName);

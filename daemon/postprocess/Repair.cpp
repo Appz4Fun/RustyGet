@@ -348,7 +348,7 @@ std::string RepairController::PostParChecker::RequestTwinIndex()
 			// another encode, or the same files under other names (par2 would rename
 			// ours to them): not used
 			PrintMessage(Message::mkDetail, "%s: its par2 set %s", candidate.name.c_str(),
-				cmp == 1 ? "describes other files" : "names the files otherwise");
+				nzbget_rs_tpr_repair_ctrl_twin_par2_reject_reason(cmp));
 			FileSystem::DeleteFile(path.c_str());
 			m_twinFiles.pop_back();
 			continue;
@@ -359,7 +359,7 @@ std::string RepairController::PostParChecker::RequestTwinIndex()
 		m_twinIndex = index->filename;
 		m_twinBlockSize = TwinCheck::BlockSize(data.data(), data.size());
 		PrintMessage(Message::mkInfo, "Trying the par2 set of twin %s (blocks of %.1f MB)",
-			m_twinName.c_str(), m_twinBlockSize / 1024.0 / 1024.0);
+			m_twinName.c_str(), nzbget_rs_dqh_stream_repair_bytes_to_mb(m_twinBlockSize));
 		return path;
 	}
 	return "";

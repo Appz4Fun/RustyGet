@@ -33,6 +33,7 @@ class PathsValidator final : public SectionValidator
 public:
 	explicit PathsValidator(const Options& options, const ::Log& log);
 	std::string_view GetName() const override { return "Paths"; }
+	SectionReport Validate() const override;
 
 private:
 	const Options& m_options;

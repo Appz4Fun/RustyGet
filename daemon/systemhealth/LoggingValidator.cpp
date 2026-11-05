@@ -28,79 +28,44 @@ namespace SystemHealth::Logging
 {
 LoggingValidator::LoggingValidator(const Options& options) : m_options(options)
 {
-	m_validators.reserve(7);
-	m_validators.push_back(std::make_unique<WriteLogValidator>(options));
-	m_validators.push_back(std::make_unique<RotateLogValidator>(options));
-	m_validators.push_back(std::make_unique<LogBufferValidator>(options));
-	m_validators.push_back(std::make_unique<NzbLogValidator>(options));
-	m_validators.push_back(std::make_unique<CrashTraceValidator>(options));
-	m_validators.push_back(std::make_unique<CrashDumpValidator>(options));
-	m_validators.push_back(std::make_unique<TimeCorrectionValidator>(options));
+}
+
+SectionReport LoggingValidator::Validate() const
+{
+	SectionReport report;
+	report.name = GetName();
+	std::string logFile = m_options.GetLogFilePath().string();
+	nzbget_rs_health_validate_logging_section(
+		static_cast<int>(m_options.GetWriteLog()),
+		logFile.data(), logFile.size(),
+		m_options.GetRotateLog(),
+		m_options.GetLogBuffer(),
+		m_options.GetCrashDump() ? 1 : 0,
+		m_options.GetTimeCorrection(),
+		&report.options,
+		&SectionValidator::AppendOptionCallback);
+	return report;
 }
 
 Status WriteLogValidator::Validate() const
 {
-	const auto writeLog = m_options.GetWriteLog();
-	switch (writeLog)
-	{
-		case Options::EWriteLog::wlAppend:
-			if (File::NullOrConsoleDevice(m_options.GetLogFilePath()))
-				return Status::Ok();
-			return Status::Warning("'" + std::string(Options::WRITELOG) +
-								   "' is set to 'Append'. The log file may grow indefinitely");
-		case Options::EWriteLog::wlNone:
-		case Options::EWriteLog::wlReset:
-		case Options::EWriteLog::wlRotate:
-			return Status::Ok();
-		default: return Status::Ok();
-	}
+	std::string logFile = m_options.GetLogFilePath().string();
+	NzbgetRsBuf msg{nullptr, 0, 0};
+	int sev = nzbget_rs_health_validate_write_log(
+		static_cast<int>(m_options.GetWriteLog()),
+		logFile.data(), logFile.size(),
+		&msg);
+	return Status::FromRust(sev, msg);
 }
 
 Status RotateLogValidator::Validate() const
 {
-	int rotateLog = m_options.GetRotateLog();
-	int check = nzbget_rs_snh_health_validate_rotate_log(
-		m_options.GetWriteLog() == Options::EWriteLog::wlRotate ? 1 : 0, rotateLog);
-	if (check == 1) return CheckPositiveNum(Options::ROTATELOG, rotateLog);
-	if (check == 2)
-		return Status::Warning("'" + std::string(Options::ROTATELOG) +
-							   "' is very high (>365). This may consume significant disk space");
-	return Status::Ok();
-}
-Status LogBufferValidator::Validate() const
-{
-	Status s = CheckPositiveNum(Options::LOGBUFFER, m_options.GetLogBuffer());
-	if (!s.IsOk()) return s;
-
-	if (m_options.GetLogBuffer() < 100)
-		return Status::Info("'" + std::string(Options::LOGBUFFER) +
-							"' is very low. You might miss recent messages in the web UI");
-	return Status::Ok();
-}
-
-Status CrashDumpValidator::Validate() const
-{
-#ifdef __linux__
-	if (m_options.GetCrashDump())
-		return Status::Info(
-			"'" + std::string(Options::CRASHDUMP) +
-			"' is enabled. Memory dumps may contain sensitive data (passwords, keys)");
-#endif
-
-	return Status::Ok();
-}
-
-Status TimeCorrectionValidator::Validate() const
-{
-	int val = m_options.GetTimeCorrection();
-
-	// Config says: -24..+24 are hours, others are minutes.
-	// If someone sets 10000 (minutes), that's ~7 days offset, likely a mistake.
-	if (nzbget_rs_snh_health_validate_time_correction(val))
-		return Status::Warning("'" + std::string(Options::TIMECORRECTION) +
-							   "' value is very large (interpreted as minutes)");
-
-	return Status::Ok();
+	NzbgetRsBuf msg{nullptr, 0, 0};
+	int sev = nzbget_rs_health_validate_rotate_log(
+		static_cast<int>(m_options.GetWriteLog()),
+		m_options.GetRotateLog(),
+		&msg);
+	return Status::FromRust(sev, msg);
 }
 
 }  // namespace SystemHealth::Logging

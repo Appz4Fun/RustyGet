@@ -27,43 +27,19 @@ namespace SystemHealth::Scheduler
 SchedulerTaskValidator::SchedulerTaskValidator(const ::Scheduler::Task& task)
 	: m_task(task), m_name("Task" + std::to_string(m_task.GetId()))
 {
-	m_validators.reserve(4);
-	m_validators.push_back(std::make_unique<TimeValidator>(task));
-	m_validators.push_back(std::make_unique<WeekDaysValidator>(task));
-	m_validators.push_back(std::make_unique<ParamValidator>(task));
-	m_validators.push_back(std::make_unique<CommandValidator>(task));
 }
 
-Status TimeValidator::Validate() const
+SectionReport SchedulerTaskValidator::Validate() const
 {
-	int h = m_task.GetHours();
-	int m = m_task.GetMinutes();
-
-	switch (nzbget_rs_euh_health_validate_scheduler_time(h, m))
-	{
-		case 1:
-			return Status::Error("Invalid hour: " + std::to_string(h));
-		case 2:
-			return Status::Error("Invalid minute: " + std::to_string(m));
-		default:
-			return Status::Ok();
-	}
+	SectionReport report;
+	report.name = GetName();
+	nzbget_rs_health_validate_scheduler_task_section(
+		m_task.GetHours(),
+		m_task.GetMinutes(),
+		m_task.GetWeeDaysBits(),
+		&report.options,
+		&SectionValidator::AppendOptionCallback);
+	return report;
 }
-
-Status WeekDaysValidator::Validate() const
-{
-	int bits = m_task.GetWeeDaysBits();
-
-	if (nzbget_rs_euh_health_validate_scheduler_weekdays(bits) == 0)
-	{
-		return Status::Error("Invalid weekdays configuration");
-	}
-
-	return Status::Ok();
-}
-
-Status ParamValidator::Validate() const { return Status::Ok(); }
-
-Status CommandValidator::Validate() const { return Status::Ok(); }
 
 }  // namespace SystemHealth::Scheduler

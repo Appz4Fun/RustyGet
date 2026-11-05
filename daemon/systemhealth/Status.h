@@ -25,6 +25,7 @@
 
 #include "Json.h"
 #include "Xml.h"
+#include "nzbget_rs.h"
 
 namespace SystemHealth
 {
@@ -48,6 +49,24 @@ public:
 		return Status(Severity::Warning, std::move(message));
 	}
 	static Status Error(std::string message) { return Status(Severity::Error, std::move(message)); }
+	static Status FromRaw(Severity severity, std::string message)
+	{
+		return Status(severity, std::move(message));
+	}
+	static Status FromRust(int severity, NzbgetRsBuf msg)
+	{
+		std::string text;
+		if (msg.data && msg.len > 0)
+		{
+			text.assign(msg.data, msg.len);
+		}
+		nzbget_rs_free(msg);
+		Severity sev = Severity::Ok;
+		if (severity == 1) sev = Severity::Info;
+		else if (severity == 2) sev = Severity::Warning;
+		else if (severity == 3) sev = Severity::Error;
+		return Status(sev, std::move(text));
+	}
 
 	template <typename Fn, typename... Args>
 	Status And(Fn&& nextCheck, Args&&... args) const

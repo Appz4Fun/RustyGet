@@ -357,62 +357,6 @@ pub fn feed_script_is_success(exit_code: i32) -> bool {
 
 /// Matches `NzbDirIntervalValidator::Validate()`:
 /// - `0`: Ok (`interval >= 3`)
-/// - `1`: Error (`interval < 0`)
-/// - `2`: Warning (`interval == 0` -> disabled)
-/// - `3`: Warning (`0 < interval < 3` -> very frequent scanning)
-pub fn health_validate_nzb_dir_interval(interval: i32) -> i32 {
-    if interval < 0 {
-        1
-    } else if interval == 0 {
-        2
-    } else if interval < 3 {
-        3
-    } else {
-        0
-    }
-}
-
-/// Matches `NzbDirFileAgeValidator::Validate()`:
-/// - `0`: Ok (`0 <= age <= 3600`)
-/// - `1`: Error (`age < 0`)
-/// - `2`: Warning (`age > 3600`)
-pub fn health_validate_nzb_dir_file_age(age: i32) -> i32 {
-    if age < 0 {
-        1
-    } else if age > 3600 {
-        2
-    } else {
-        0
-    }
-}
-
-/// Matches `DupeSearchValidator::Validate()`:
-/// - `0`: Ok
-/// - `1`: Warning (`dupe_search && !dupe_check`)
-/// - `2`: Warning (`dupe_search && dupe_check && !health_check_is_dupe`)
-pub fn health_validate_dupe_search(
-    dupe_search: bool,
-    dupe_check: bool,
-    health_check_is_dupe: bool,
-) -> i32 {
-    if !dupe_search {
-        return 0;
-    }
-    if !dupe_check {
-        return 1;
-    }
-    if !health_check_is_dupe {
-        return 2;
-    }
-    0
-}
-
-/// Matches `ExtensionCleanupValidator::Validate` and `UnpackIgnoreExtValidator::Validate`:
-/// returns `true` when `len <= 512` (Ok), `false` when `len > 512` (Warning).
-pub fn health_validate_ext_list_len(len: usize) -> bool {
-    len <= 512
-}
-
 /// Matches `ExtensionListValidator::Validate` script extension stripping:
 /// `size_t dotPos = scriptName.find_last_of('.'); if (dotPos != npos && dotPos > 0) resize(dotPos);`
 pub fn health_strip_script_ext_len(name: &[u8]) -> usize {
@@ -448,58 +392,6 @@ pub fn health_validate_primary_server(levels: &[i32], actives: &[u8]) -> i32 {
         0
     } else {
         2
-    }
-}
-
-/// Matches `UpdateIntervalValidator::Validate()`:
-/// returns `true` if `v == 0 || v >= 25`, `false` if `v != 0 && v < 25`.
-pub fn health_validate_update_interval(v: i32) -> bool {
-    v == 0 || v >= 25
-}
-
-/// Matches `TimeValidator::Validate()`:
-/// - `0`: Ok
-/// - `1`: Error (`h < -1 || h > 23`)
-/// - `2`: Error (`m < 0 || m > 59`)
-pub fn health_validate_scheduler_time(h: i32, m: i32) -> i32 {
-    if !(-1..=23).contains(&h) {
-        1
-    } else if !(0..=59).contains(&m) {
-        2
-    } else {
-        0
-    }
-}
-
-/// Matches `WeekDaysValidator::Validate()`:
-/// returns `true` if `0 <= bits <= 127`.
-pub fn health_validate_scheduler_weekdays(bits: i32) -> bool {
-    (0..=127).contains(&bits)
-}
-
-/// Matches `Category::UnpackValidator::Validate()`:
-/// - `0`: Ok (`global_unpack == cat_unpack`)
-/// - `1`: Info (`global_unpack && !cat_unpack`)
-/// - `2`: Info (`!global_unpack && cat_unpack`)
-pub fn health_validate_category_unpack(global_unpack: bool, cat_unpack: bool) -> i32 {
-    if global_unpack && !cat_unpack {
-        1
-    } else if !global_unpack && cat_unpack {
-        2
-    } else {
-        0
-    }
-}
-
-/// Matches `SystemHealth::SeverityToStr(severity)`:
-/// `0 -> "Ok"`, `1 -> "Info"`, `2 -> "Warning"`, `3 -> "Error"`.
-pub fn health_severity_to_str(severity: i32) -> &'static CStr {
-    match severity {
-        0 => c"Ok",
-        1 => c"Info",
-        2 => c"Warning",
-        3 => c"Error",
-        _ => c"Ok",
     }
 }
 
@@ -566,31 +458,11 @@ mod tests {
         );
         assert!(feed_script_is_success(93));
 
-        assert_eq!(health_validate_nzb_dir_interval(-1), 1);
-        assert_eq!(health_validate_nzb_dir_interval(0), 2);
-        assert_eq!(health_validate_nzb_dir_interval(2), 3);
-        assert_eq!(health_validate_nzb_dir_interval(5), 0);
-        assert_eq!(health_validate_nzb_dir_file_age(4000), 2);
-        assert_eq!(health_validate_dupe_search(true, false, false), 1);
-        assert_eq!(health_validate_dupe_search(true, true, false), 2);
-        assert_eq!(health_validate_dupe_search(true, true, true), 0);
-        assert!(health_validate_ext_list_len(512));
-        assert!(!health_validate_ext_list_len(513));
         assert_eq!(health_strip_script_ext_len(b"QueueSort.py"), 9);
         assert_eq!(health_strip_script_ext_len(b".hidden"), 7);
         assert!(health_validate_event_interval(-1));
         assert!(!health_validate_event_interval(-2));
         assert_eq!(health_validate_primary_server(&[1, 0], &[1, 0]), 2);
         assert_eq!(health_validate_primary_server(&[1, 0], &[0, 1]), 0);
-        assert!(health_validate_update_interval(0));
-        assert!(!health_validate_update_interval(10));
-        assert_eq!(health_validate_scheduler_time(24, 0), 1);
-        assert_eq!(health_validate_scheduler_time(12, 60), 2);
-        assert_eq!(health_validate_scheduler_time(-1, 30), 0);
-        assert!(health_validate_scheduler_weekdays(127));
-        assert!(!health_validate_scheduler_weekdays(128));
-        assert_eq!(health_validate_category_unpack(true, false), 1);
-        assert_eq!(health_validate_category_unpack(false, true), 2);
-        assert_eq!(health_severity_to_str(2).to_bytes(), b"Warning");
     }
 }

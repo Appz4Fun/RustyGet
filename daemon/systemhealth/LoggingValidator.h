@@ -31,6 +31,7 @@ class LoggingValidator final : public SectionValidator
 public:
 	explicit LoggingValidator(const Options& options);
 	std::string_view GetName() const override { return "Logging"; }
+	SectionReport Validate() const override;
 
 private:
 	const Options& m_options;
@@ -52,61 +53,6 @@ class RotateLogValidator final : public Validator
 public:
 	explicit RotateLogValidator(const Options& options) : m_options(options) {}
 	std::string_view GetName() const override { return Options::ROTATELOG; }
-	Status Validate() const override;
-
-private:
-	const Options& m_options;
-};
-
-class LogBufferValidator final : public Validator
-{
-public:
-	explicit LogBufferValidator(const Options& options) : m_options(options) {}
-	std::string_view GetName() const override { return Options::LOGBUFFER; }
-	Status Validate() const override;
-
-private:
-	const Options& m_options;
-};
-
-class NzbLogValidator final : public Validator
-{
-public:
-	explicit NzbLogValidator(const Options& options) : m_options(options) {}
-	std::string_view GetName() const override { return Options::NZBLOG; }
-	Status Validate() const override { return Status::Ok(); }
-
-private:
-	const Options& m_options;
-};
-
-class CrashTraceValidator final : public Validator
-{
-public:
-	explicit CrashTraceValidator(const Options& options) : m_options(options) {}
-	std::string_view GetName() const override { return Options::CRASHTRACE; }
-	Status Validate() const override { return Status::Ok(); }
-
-private:
-	const Options& m_options;
-};
-
-class CrashDumpValidator final : public Validator
-{
-public:
-	explicit CrashDumpValidator(const Options& options) : m_options(options) {}
-	std::string_view GetName() const override { return Options::CRASHDUMP; }
-	Status Validate() const override;
-
-private:
-	const Options& m_options;
-};
-
-class TimeCorrectionValidator final : public Validator
-{
-public:
-	explicit TimeCorrectionValidator(const Options& options) : m_options(options) {}
-	std::string_view GetName() const override { return Options::TIMECORRECTION; }
 	Status Validate() const override;
 
 private:

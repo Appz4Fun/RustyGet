@@ -40,6 +40,7 @@ pub mod rpcparams;
 pub mod rpcroute;
 pub mod scheduler;
 pub mod statmeter;
+pub mod systemhealth;
 pub mod text;
 pub mod tlscipher;
 pub mod twin;

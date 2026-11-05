@@ -144,45 +144,6 @@ pub fn extension_select_kind_flag(
 // `SchedulerTasksValidator`, `FeedsValidator`, `CategoriesValidator`)
 // ============================================================================
 
-/// Returns `true` when an option/section status should be recorded in the report (`!is_ok`).
-pub fn health_status_should_include(is_ok: bool) -> bool {
-    !is_ok
-}
-
-/// Finds the first duplicate non-empty feed URL in `urls` (using `std::map` lexicographical
-/// equivalence, i.e. exact byte equality) and returns `Some((first_index, duplicate_index))`.
-pub fn health_find_duplicate_feed_url(urls: &[&[u8]]) -> Option<(usize, usize)> {
-    for (i, &u) in urls.iter().enumerate() {
-        if u.is_empty() {
-            continue;
-        }
-        for (j, &prev) in urls[..i].iter().enumerate() {
-            if prev == u {
-                return Some((j, i));
-            }
-        }
-    }
-    None
-}
-
-/// Finds the first duplicate non-empty category name in `names` and returns its index.
-pub fn health_find_duplicate_category_name(names: &[&[u8]]) -> Option<usize> {
-    for (i, &n) in names.iter().enumerate() {
-        if n.is_empty() {
-            continue;
-        }
-        if names[..i].contains(&n) {
-            return Some(i);
-        }
-    }
-    None
-}
-
-/// Returns reserved capacity for `SchedulerTasksValidator::MakeTaskValidators`.
-pub fn health_scheduler_tasks_reserve_count(count: usize) -> usize {
-    count
-}
-
 // ============================================================================
 // Unpack (`daemon/util/Unpack.cpp`)
 // ============================================================================
@@ -320,12 +281,6 @@ mod tests {
         assert_eq!(xml_bool_to_str(false).to_bytes(), b"0");
         assert!(extension_select_kind_flag(true, false, false, false, false, 0));
         assert!(!extension_select_kind_flag(true, false, false, false, false, 1));
-        assert!(health_status_should_include(false));
-        assert!(!health_status_should_include(true));
-        let urls: [&[u8]; 3] = [b"https://a.example", b"https://b.example", b"https://a.example"];
-        assert_eq!(health_find_duplicate_feed_url(&urls), Some((0, 2)));
-        let cats: [&[u8]; 3] = [b"Movies", b"TV", b"Movies"];
-        assert_eq!(health_find_duplicate_category_name(&cats), Some(2));
         assert_eq!(unpack_make_password_arg(b""), b"-p-");
         assert_eq!(unpack_make_password_arg(b"secret"), b"-psecret");
         assert_eq!(unpack_validate_tool_status(false, false, true), 0);

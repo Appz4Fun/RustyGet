@@ -26,159 +26,192 @@
 
 namespace SystemHealth::Paths
 {
+namespace
+{
+Status ValidateRequiredWritableDir(std::string_view optName, const fs::path& path)
+{
+	std::string p = path.string();
+	NzbgetRsBuf msg{nullptr, 0, 0};
+	int sev = nzbget_rs_health_validate_required_writable_dir(
+		optName.data(), optName.size(), p.data(), p.size(), &msg);
+	return Status::FromRust(sev, msg);
+}
+}  // namespace
+
 PathsValidator::PathsValidator(const Options& options, const ::Log& log)
 	: m_options(options)
 	, m_log(log)
 {
-	m_validators.reserve(13);
-	m_validators.push_back(std::make_unique<MainDirValidator>(options));
-	m_validators.push_back(std::make_unique<DestDirValidator>(options));
-	m_validators.push_back(std::make_unique<InterDirValidator>(options));
-	m_validators.push_back(std::make_unique<NzbDirValidator>(options));
-	m_validators.push_back(std::make_unique<QueueDirValidator>(options));
-	m_validators.push_back(std::make_unique<WebDirValidator>(options));
-	m_validators.push_back(std::make_unique<TempDirValidator>(options));
-	m_validators.push_back(std::make_unique<ScriptDirValidator>(options));
-	m_validators.push_back(std::make_unique<ConfigTemplateValidator>(options));
-	m_validators.push_back(std::make_unique<LogFileValidator>(options, log));
-	m_validators.push_back(std::make_unique<CertStoreValidator>(options, log));
-	m_validators.push_back(std::make_unique<RequiredDirValidator>(options));
-	m_validators.push_back(std::make_unique<LockFileValidator>(options, log));
+}
+
+SectionReport PathsValidator::Validate() const
+{
+	SectionReport report;
+	report.name = GetName();
+
+	std::string mainDir = m_options.GetMainDirPath().string();
+	std::string destDir = m_options.GetDestDirPath().string();
+	std::string interDir = m_options.GetInterDirPath().string();
+	std::string nzbDir = m_options.GetNzbDirPath().string();
+	std::string queueDir = m_options.GetQueueDirPath().string();
+	std::string webDir = m_options.GetWebDirPath().string();
+	std::string tempDir = m_options.GetTempDirPath().string();
+	std::string configTemplate = m_options.GetConfigTemplatePath().string();
+	std::string configFile = m_options.GetConfigFilePath().string();
+	std::string logFile = m_log.GetLogFilePath().string();
+	std::string_view certStore = m_options.GetCertStore();
+	std::string certStorePath = m_options.GetCertStorePath().string();
+	std::string lockFile = m_options.GetLockFilePath().string();
+
+	const auto& scriptDirPaths = m_options.GetScriptDirPaths();
+	std::vector<std::string> scriptDirStrs;
+	scriptDirStrs.reserve(scriptDirPaths.size());
+	std::vector<const char*> scriptDirPtrs;
+	std::vector<size_t> scriptDirLens;
+	scriptDirPtrs.reserve(scriptDirPaths.size());
+	scriptDirLens.reserve(scriptDirPaths.size());
+	for (const auto& dir : scriptDirPaths)
+	{
+		scriptDirStrs.push_back(dir.string());
+		scriptDirPtrs.push_back(scriptDirStrs.back().data());
+		scriptDirLens.push_back(scriptDirStrs.back().size());
+	}
+
+	nzbget_rs_health_validate_paths_section(
+		mainDir.data(), mainDir.size(),
+		destDir.data(), destDir.size(),
+		interDir.data(), interDir.size(),
+		nzbDir.data(), nzbDir.size(),
+		queueDir.data(), queueDir.size(),
+		webDir.data(), webDir.size(),
+		tempDir.data(), tempDir.size(),
+		scriptDirPtrs.data(), scriptDirLens.data(), scriptDirPaths.size(),
+		configTemplate.data(), configTemplate.size(),
+		logFile.data(), logFile.size(),
+		certStore.data(), certStore.size(),
+		certStorePath.data(), certStorePath.size(),
+		configFile.data(), configFile.size(),
+		lockFile.data(), lockFile.size(),
+		static_cast<int>(m_options.GetWriteLog()),
+		m_options.GetCertCheck() ? 1 : 0,
+		m_options.GetDaemonMode() ? 1 : 0,
+		&report.options,
+		&SectionValidator::AppendOptionCallback);
+
+	return report;
 }
 
 Status MainDirValidator::Validate() const { return Validate(m_options.GetMainDirPath()); }
 
 Status MainDirValidator::Validate(const fs::path& path)
 {
-	return RequiredPathOption(Options::MAINDIR, path)
-		.And(&Directory::Exists, path)
-		.And(&Directory::Writable, path);
+	return ValidateRequiredWritableDir(Options::MAINDIR, path);
 }
 
 Status DestDirValidator::Validate() const
 {
 	return Validate(m_options.GetDestDirPath())
-		.And(
-			[&]()
-			{
-				return UniquePath(GetName(), m_options.GetDestDirPath(),
-								  {{Options::MAINDIR, m_options.GetMainDirPath()}});
-			});
+		.And([&]() {
+			return UniquePath(GetName(), m_options.GetDestDirPath(),
+							  {{Options::MAINDIR, m_options.GetMainDirPath()}});
+		});
 }
 
 Status DestDirValidator::Validate(const fs::path& path)
 {
-	return RequiredPathOption(Options::DESTDIR, path)
-		.And(&Directory::Exists, path)
-		.And(&Directory::Writable, path);
+	return ValidateRequiredWritableDir(Options::DESTDIR, path);
 }
 
 Status InterDirValidator::Validate() const
 {
 	return Validate(m_options.GetInterDirPath())
-		.And(
-			[&]()
-			{
-				return UniquePath(GetName(), m_options.GetInterDirPath(),
-								  {{Options::MAINDIR, m_options.GetMainDirPath()},
-								   {Options::DESTDIR, m_options.GetDestDirPath()}});
-			});
+		.And([&]() {
+			return UniquePath(GetName(), m_options.GetInterDirPath(),
+							  {{Options::MAINDIR, m_options.GetMainDirPath()},
+							   {Options::DESTDIR, m_options.GetDestDirPath()}});
+		});
 }
 
 Status InterDirValidator::Validate(const fs::path& path)
 {
-	if (path.empty())
-		return Status::Warning(
-			"'" + std::string(Options::INTERDIR) +
-			"' is set to empty which is not recommended for optimal unpack performance");
-
-	return Directory::Exists(path).And(&Directory::Writable, path);
+	std::string p = path.string();
+	NzbgetRsBuf msg{nullptr, 0, 0};
+	int sev = nzbget_rs_health_validate_inter_dir_path(p.data(), p.size(), &msg);
+	return Status::FromRust(sev, msg);
 }
 
 Status NzbDirValidator::Validate() const
 {
 	return Validate(m_options.GetNzbDirPath())
-		.And(
-			[&]()
-			{
-				return UniquePath(GetName(), m_options.GetNzbDirPath(),
-								  {{Options::MAINDIR, m_options.GetMainDirPath()},
-								   {Options::DESTDIR, m_options.GetDestDirPath()},
-								   {Options::INTERDIR, m_options.GetInterDirPath()}});
-			});
+		.And([&]() {
+			return UniquePath(GetName(), m_options.GetNzbDirPath(),
+							  {{Options::MAINDIR, m_options.GetMainDirPath()},
+							   {Options::DESTDIR, m_options.GetDestDirPath()},
+							   {Options::INTERDIR, m_options.GetInterDirPath()}});
+		});
 }
 
 Status NzbDirValidator::Validate(const fs::path& path)
 {
-	return RequiredPathOption(Options::NZBDIR, path)
-		.And(&Directory::Exists, path)
-		.And(&Directory::Writable, path);
+	return ValidateRequiredWritableDir(Options::NZBDIR, path);
 }
 
 Status QueueDirValidator::Validate() const
 {
 	return Validate(m_options.GetQueueDirPath())
-		.And(
-			[&]()
-			{
-				return UniquePath(GetName(), m_options.GetQueueDirPath(),
-								  {{Options::MAINDIR, m_options.GetMainDirPath()},
-								   {Options::DESTDIR, m_options.GetDestDirPath()},
-								   {Options::INTERDIR, m_options.GetInterDirPath()},
-								   {Options::NZBDIR, m_options.GetNzbDirPath()}});
-			});
+		.And([&]() {
+			return UniquePath(GetName(), m_options.GetQueueDirPath(),
+							  {{Options::MAINDIR, m_options.GetMainDirPath()},
+							   {Options::DESTDIR, m_options.GetDestDirPath()},
+							   {Options::INTERDIR, m_options.GetInterDirPath()},
+							   {Options::NZBDIR, m_options.GetNzbDirPath()}});
+		});
 }
 
 Status QueueDirValidator::Validate(const fs::path& path)
 {
-	return RequiredPathOption(Options::QUEUEDIR, path)
-		.And(&Directory::Exists, path)
-		.And(&Directory::Writable, path);
+	return ValidateRequiredWritableDir(Options::QUEUEDIR, path);
 }
 
 Status WebDirValidator::Validate() const
 {
 	const auto& path = m_options.GetWebDirPath();
-	return Validate(path).And(
-		[&]()
-		{
-			if (path.empty()) return Status::Ok();
-			return UniquePath(GetName(), m_options.GetWebDirPath(),
-							  {{Options::MAINDIR, m_options.GetMainDirPath()},
-							   {Options::DESTDIR, m_options.GetDestDirPath()},
-							   {Options::INTERDIR, m_options.GetInterDirPath()},
-							   {Options::NZBDIR, m_options.GetNzbDirPath()},
-							   {Options::QUEUEDIR, m_options.GetQueueDirPath()}});
-		});
+	return Validate(path).And([&]() {
+		if (path.empty()) return Status::Ok();
+		return UniquePath(GetName(), m_options.GetWebDirPath(),
+						  {{Options::MAINDIR, m_options.GetMainDirPath()},
+						   {Options::DESTDIR, m_options.GetDestDirPath()},
+						   {Options::INTERDIR, m_options.GetInterDirPath()},
+						   {Options::NZBDIR, m_options.GetNzbDirPath()},
+						   {Options::QUEUEDIR, m_options.GetQueueDirPath()}});
+	});
 }
 
 Status WebDirValidator::Validate(const fs::path& path)
 {
-	if (path.empty()) return Status::Ok();
-	return Directory::Exists(path).And(&Directory::Readable, path);
+	std::string p = path.string();
+	NzbgetRsBuf msg{nullptr, 0, 0};
+	int sev = nzbget_rs_health_validate_web_dir_path(p.data(), p.size(), &msg);
+	return Status::FromRust(sev, msg);
 }
 
 Status TempDirValidator::Validate() const
 {
 	return Validate(m_options.GetTempDirPath())
-		.And(
-			[&]()
-			{
-				return UniquePath(GetName(), m_options.GetTempDirPath(),
-								  {{Options::MAINDIR, m_options.GetMainDirPath()},
-								   {Options::DESTDIR, m_options.GetDestDirPath()},
-								   {Options::INTERDIR, m_options.GetInterDirPath()},
-								   {Options::NZBDIR, m_options.GetNzbDirPath()},
-								   {Options::QUEUEDIR, m_options.GetQueueDirPath()},
-								   {Options::WEBDIR, m_options.GetWebDirPath()}});
-			});
+		.And([&]() {
+			return UniquePath(GetName(), m_options.GetTempDirPath(),
+							  {{Options::MAINDIR, m_options.GetMainDirPath()},
+							   {Options::DESTDIR, m_options.GetDestDirPath()},
+							   {Options::INTERDIR, m_options.GetInterDirPath()},
+							   {Options::NZBDIR, m_options.GetNzbDirPath()},
+							   {Options::QUEUEDIR, m_options.GetQueueDirPath()},
+							   {Options::WEBDIR, m_options.GetWebDirPath()}});
+		});
 }
 
 Status TempDirValidator::Validate(const fs::path& path)
 {
-	return RequiredPathOption(Options::TEMPDIR, path)
-		.And(&Directory::Exists, path)
-		.And(&Directory::Writable, path);
+	return ValidateRequiredWritableDir(Options::TEMPDIR, path);
 }
 
 Status ScriptDirValidator::Validate() const
@@ -192,18 +225,16 @@ Status ScriptDirValidator::Validate() const
 
 	for (const auto& dir : paths)
 	{
-		auto status = Validate(dir).And(
-			[&]()
-			{
-				return UniquePath(GetName(), dir,
-								  {{Options::MAINDIR, m_options.GetMainDirPath()},
-								   {Options::DESTDIR, m_options.GetDestDirPath()},
-								   {Options::INTERDIR, m_options.GetInterDirPath()},
-								   {Options::NZBDIR, m_options.GetNzbDirPath()},
-								   {Options::QUEUEDIR, m_options.GetQueueDirPath()},
-								   {Options::WEBDIR, m_options.GetWebDirPath()},
-								   {Options::TEMPDIR, m_options.GetTempDirPath()}});
-			});
+		auto status = Validate(dir).And([&]() {
+			return UniquePath(GetName(), dir,
+							  {{Options::MAINDIR, m_options.GetMainDirPath()},
+							   {Options::DESTDIR, m_options.GetDestDirPath()},
+							   {Options::INTERDIR, m_options.GetInterDirPath()},
+							   {Options::NZBDIR, m_options.GetNzbDirPath()},
+							   {Options::QUEUEDIR, m_options.GetQueueDirPath()},
+							   {Options::WEBDIR, m_options.GetWebDirPath()},
+							   {Options::TEMPDIR, m_options.GetTempDirPath()}});
+		});
 		if (!status.IsOk())
 		{
 			return status;
@@ -215,9 +246,7 @@ Status ScriptDirValidator::Validate() const
 
 Status ScriptDirValidator::Validate(const fs::path& path)
 {
-	return RequiredPathOption(Options::SCRIPTDIR, path)
-		.And(&Directory::Exists, path)
-		.And(&Directory::Writable, path);
+	return ValidateRequiredWritableDir(Options::SCRIPTDIR, path);
 }
 
 Status ConfigTemplateValidator::Validate() const { return Status::Ok(); }
@@ -225,82 +254,48 @@ Status ConfigTemplateValidator::Validate() const { return Status::Ok(); }
 Status LogFileValidator::Validate() const
 {
 	return Validate(m_log.GetLogFilePath(), m_options.GetWriteLog())
-		.And(
-			[&]()
-			{
-				return UniquePath(GetName(), m_log.GetLogFilePath(),
-								  {{Options::CONFIGTEMPLATE, m_options.GetConfigTemplatePath()},
-								   {Options::CONFIGFILE, m_options.GetConfigFilePath()}});
-			});
+		.And([&]() {
+			return UniquePath(GetName(), m_log.GetLogFilePath(),
+							  {{Options::CONFIGTEMPLATE, m_options.GetConfigTemplatePath()},
+							   {Options::CONFIGFILE, m_options.GetConfigFilePath()}});
+		});
 }
 
 Status LogFileValidator::Validate(const fs::path& path, Options::EWriteLog writeLog)
 {
-	switch (nzbget_rs_dur_health_classify_log_file_mode(
+	std::string p = path.string();
+	NzbgetRsBuf msg{nullptr, 0, 0};
+	int sev = nzbget_rs_health_validate_log_file_path(
+		p.data(), p.size(),
 		static_cast<int>(writeLog),
-		static_cast<int>(Options::EWriteLog::wlNone),
-		static_cast<int>(Options::EWriteLog::wlRotate),
-		static_cast<int>(Options::EWriteLog::wlReset),
-		path.empty() ? 1 : 0,
-		(!path.empty() && File::NullOrConsoleDevice(path)) ? 1 : 0,
-		path.has_parent_path() ? 1 : 0))
-	{
-		case 0:
-			return Status::Ok();
-		case 1:
-			return Status::Warning("Logging is enabled, but '" + std::string(Options::LOGFILE) +
-								 "' is set to empty");
-		case 2:
-		{
-			const auto&& parent = path.parent_path();
-			return Directory::Exists(parent).And(&Directory::Writable, parent);
-		}
-		default:
-			return File::Exists(path).And(&File::Writable, path);
-	}
+		&msg);
+	return Status::FromRust(sev, msg);
 }
 
 Status CertStoreValidator::Validate() const
 {
 	return Validate(m_options.GetCertStore(), m_options.GetCertCheck())
-		.And(
-			[&]()
-			{
-				return UniquePath(GetName(), m_options.GetCertStorePath(),
-								  {{Options::MAINDIR, m_options.GetMainDirPath()},
-								   {Options::DESTDIR, m_options.GetDestDirPath()},
-								   {Options::INTERDIR, m_options.GetInterDirPath()},
-								   {Options::NZBDIR, m_options.GetNzbDirPath()},
-								   {Options::QUEUEDIR, m_options.GetQueueDirPath()},
-								   {Options::WEBDIR, m_options.GetWebDirPath()},
-								   {Options::TEMPDIR, m_options.GetTempDirPath()},
-								   {Options::CONFIGTEMPLATE, m_options.GetConfigTemplatePath()},
-								   {Options::LOGFILE, m_log.GetLogFilePath()},
-								   {Options::CONFIGFILE, m_options.GetConfigFilePath()}});
-			});
+		.And([&]() {
+			return UniquePath(GetName(), m_options.GetCertStorePath(),
+							  {{Options::MAINDIR, m_options.GetMainDirPath()},
+							   {Options::DESTDIR, m_options.GetDestDirPath()},
+							   {Options::INTERDIR, m_options.GetInterDirPath()},
+							   {Options::NZBDIR, m_options.GetNzbDirPath()},
+							   {Options::QUEUEDIR, m_options.GetQueueDirPath()},
+							   {Options::WEBDIR, m_options.GetWebDirPath()},
+							   {Options::TEMPDIR, m_options.GetTempDirPath()},
+							   {Options::CONFIGTEMPLATE, m_options.GetConfigTemplatePath()},
+							   {Options::LOGFILE, m_log.GetLogFilePath()},
+							   {Options::CONFIGFILE, m_options.GetConfigFilePath()}});
+		});
 }
 
 Status CertStoreValidator::Validate(const fs::path& path, bool certCheck)
 {
-	switch (nzbget_rs_dur_health_classify_cert_store(path.empty() ? 1 : 0, certCheck ? 1 : 0))
-	{
-		case 0:
-			return Status::Ok();
-		case 1:
-			return Status::Error("'" + std::string(Options::CERTCHECK) +
-								 "' requires proper configuration of option '" +
-								 std::string(Options::CERTSTORE) + "'");
-		default:
-			break;
-	}
-
-	const auto file = File::Exists(path);
-	if (!file.IsError()) return File::Readable(path);
-
-	const auto dir = Directory::Exists(path);
-	if (!dir.IsError()) return Directory::Readable(path);
-
-	return Status::Error("'" + std::string(Options::CERTSTORE) + "' must be a file or a directory");
+	std::string p = path.string();
+	NzbgetRsBuf msg{nullptr, 0, 0};
+	int sev = nzbget_rs_health_validate_cert_store_path(p.data(), p.size(), certCheck ? 1 : 0, &msg);
+	return Status::FromRust(sev, msg);
 }
 
 Status RequiredDirValidator::Validate() const { return Status::Ok(); }
@@ -308,43 +303,21 @@ Status RequiredDirValidator::Validate() const { return Status::Ok(); }
 Status LockFileValidator::Validate() const
 {
 	return Validate(m_options.GetLockFilePath(), m_options.GetDaemonMode())
-		.And(
-			[&]()
-			{
-				return UniquePath(GetName(), m_options.GetLockFilePath(),
-								  {{Options::MAINDIR, m_options.GetMainDirPath()},
-								   {Options::CONFIGTEMPLATE, m_options.GetConfigTemplatePath()},
-								   {Options::LOGFILE, m_log.GetLogFilePath()},
-								   {Options::CERTSTORE, m_options.GetCertStorePath()},
-								   {Options::CONFIGFILE, m_options.GetConfigFilePath()}});
-			});
+		.And([&]() {
+			return UniquePath(GetName(), m_options.GetLockFilePath(),
+							  {{Options::MAINDIR, m_options.GetMainDirPath()},
+							   {Options::CONFIGTEMPLATE, m_options.GetConfigTemplatePath()},
+							   {Options::LOGFILE, m_log.GetLogFilePath()},
+							   {Options::CERTSTORE, m_options.GetCertStorePath()},
+							   {Options::CONFIGFILE, m_options.GetConfigFilePath()}});
+		});
 }
 
 Status LockFileValidator::Validate(const fs::path& path, bool daemonMode)
 {
-	switch (nzbget_rs_dur_health_classify_lock_file(path.empty() ? 1 : 0, daemonMode ? 1 : 0))
-	{
-		case 0:
-			return Status::Ok();
-		case 1:
-			return Status::Warning(
-				"'" + std::string(Options::LOCKFILE) +
-				"' is set to empty. The check for another running instance is disabled");
-		default:
-			break;
-	}
-
-	if (File::Exists(path).IsOk())
-	{
-		return File::Writable(path);
-	}
-
-	auto parent = path.parent_path();
-	if (parent.empty())
-	{
-		parent = fs::current_path();
-	}
-
-	return Directory::Exists(parent).And(&Directory::Writable, parent);
+	std::string p = path.string();
+	NzbgetRsBuf msg{nullptr, 0, 0};
+	int sev = nzbget_rs_health_validate_lock_file_path(p.data(), p.size(), daemonMode ? 1 : 0, &msg);
+	return Status::FromRust(sev, msg);
 }
 }  // namespace SystemHealth::Paths

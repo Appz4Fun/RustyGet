@@ -19,7 +19,6 @@
 
 #include "nzbget.h"
 
-#include <sstream>
 #include "CategoriesValidator.h"
 #include "CategoryValidator.h"
 #include "Options.h"
@@ -60,14 +59,10 @@ Status DuplicateNamesValidator::Validate() const
 		ptrs[i] = name.data();
 		lens[i] = name.size();
 	}
-	size_t dupIdx = 0;
-	if (nzbget_rs_awc_health_find_duplicate_category_name(
-			ptrs.data(), lens.data(), m_categories.size(), &dupIdx) != 0)
-	{
-		return Status::Warning("Duplicate category name detected: '" +
-							   std::string(m_categories[dupIdx].GetName()) + "'");
-	}
-	return Status::Ok();
+	NzbgetRsBuf msg{nullptr, 0, 0};
+	int sev = nzbget_rs_health_validate_duplicate_category_names(
+		ptrs.data(), lens.data(), m_categories.size(), &msg);
+	return Status::FromRust(sev, msg);
 }
 
 }  // namespace SystemHealth::Category

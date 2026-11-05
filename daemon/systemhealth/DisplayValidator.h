@@ -31,61 +31,7 @@ class DisplayValidator final : public SectionValidator
 public:
 	explicit DisplayValidator(const Options& options);
 	std::string_view GetName() const override { return "Display"; }
-
-private:
-	const Options& m_options;
-};
-
-class OutputModeValidator final : public Validator
-{
-public:
-	explicit OutputModeValidator(const Options& options) : m_options(options) {}
-	std::string_view GetName() const override { return Options::OUTPUTMODE; }
-	Status Validate() const override;
-
-private:
-	const Options& m_options;
-};
-
-class UpdateIntervalValidator final : public Validator
-{
-public:
-	explicit UpdateIntervalValidator(const Options& options) : m_options(options) {}
-	std::string_view GetName() const override { return Options::UPDATEINTERVAL; }
-	Status Validate() const override;
-
-private:
-	const Options& m_options;
-};
-
-class CursesNzbNameValidator final : public Validator
-{
-public:
-	explicit CursesNzbNameValidator(const Options& options) : m_options(options) {}
-	std::string_view GetName() const override { return Options::CURSESNZBNAME; }
-	Status Validate() const override;
-
-private:
-	const Options& m_options;
-};
-
-class CursesGroupValidator final : public Validator
-{
-public:
-	explicit CursesGroupValidator(const Options& options) : m_options(options) {}
-	std::string_view GetName() const override { return Options::CURSESGROUP; }
-	Status Validate() const override;
-
-private:
-	const Options& m_options;
-};
-
-class CursesTimeValidator final : public Validator
-{
-public:
-	explicit CursesTimeValidator(const Options& options) : m_options(options) {}
-	std::string_view GetName() const override { return Options::CURSESTIME; }
-	Status Validate() const override;
+	SectionReport Validate() const override;
 
 private:
 	const Options& m_options;

@@ -30,75 +30,33 @@ namespace SystemHealth::Feeds
 FeedValidator::FeedValidator(const FeedInfo& feed, const Options& options)
 	: m_feed(feed), m_options(options), m_name("Feed" + std::to_string(feed.GetId()))
 {
-	m_validators.reserve(7);
-	m_validators.push_back(std::make_unique<NameValidator>(feed));
-	m_validators.push_back(std::make_unique<UrlValidator>(feed));
-	m_validators.push_back(std::make_unique<IntervalValidator>(feed));
-	m_validators.push_back(std::make_unique<FilterValidator>(feed));
-	m_validators.push_back(std::make_unique<ScriptsValidator>(feed));
-	m_validators.push_back(std::make_unique<CategoryValidator>(feed, options));
-	m_validators.push_back(std::make_unique<FeedCertValidator>(feed));
 }
 
-Status NameValidator::Validate() const
+SectionReport FeedValidator::Validate() const
 {
+	SectionReport report;
+	report.name = GetName();
 	std::string_view name = m_feed.GetName();
-	if (name.empty())
-	{
-		return Status::Info("Name is recommended for clearer logs and troubleshooting");
-	}
-	return Status::Ok();
-}
-
-Status UrlValidator::Validate() const
-{
 	std::string_view url = m_feed.GetUrl();
-	int urlCheck = nzbget_rs_snh_health_validate_feed_url(url.data(), url.size());
-	if (urlCheck == 1)
-	{
-		return Status::Warning("URL is required");
-	}
-	if (urlCheck == 2)
-	{
-		return Status::Warning("URL does not start with 'http://' or 'https://'");
-	}
-	return Status::Ok();
-}
-
-Status IntervalValidator::Validate() const
-{
-	int interval = m_feed.GetInterval();
-	const auto check = CheckPositiveNum("Interval", interval);
-	if (!check.IsOk()) return check;
-
-	if (interval == 0)
-	{
-		return Status::Info("Automatic check is disabled");
-	}
-
-	return Status::Ok();
-}
-
-Status FilterValidator::Validate() const { return Status::Ok(); }
-
-Status ScriptsValidator::Validate() const { return Status::Ok(); }
-
-Status CategoryValidator::Validate() const
-{
-	return Status::Ok();
+	nzbget_rs_health_validate_feed_section(
+		name.data(), name.size(),
+		url.data(), url.size(),
+		m_feed.GetInterval(),
+		static_cast<uint32_t>(m_feed.GetCertVerificationLevel()),
+		&report.options,
+		&SectionValidator::AppendOptionCallback);
+	return report;
 }
 
 Status FeedCertValidator::Validate() const
 {
-	if (nzbget_rs_feh_health_validate_feed_cert(
-		m_feed.GetUrl(),
-		m_feed.GetCertVerificationLevel() == Options::ECertVerifLevel::cvNone ? 1 : 0) != 0)
-	{
-		return Status::Warning("Certificate verification is 'None', "
-							   "making the TLS connection insecure");
-	}
-
-	return Status::Ok();
+	std::string_view url = m_feed.GetUrl();
+	NzbgetRsBuf msg{nullptr, 0, 0};
+	int sev = nzbget_rs_health_validate_feed_cert(
+		url.data(), url.size(),
+		static_cast<uint32_t>(m_feed.GetCertVerificationLevel()),
+		&msg);
+	return Status::FromRust(sev, msg);
 }
 
 }  // namespace SystemHealth::Feeds

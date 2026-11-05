@@ -54,6 +54,14 @@ public:
 	virtual std::string_view GetName() const = 0;
 	virtual SectionReport Validate() const;
 
+	static void AppendOptionCallback(
+		void* ctx,
+		const char* opt_ptr,
+		size_t opt_len,
+		int severity,
+		const char* msg_ptr,
+		size_t msg_len);
+
 protected:
 	std::vector<std::unique_ptr<Validator>> m_validators;
 };

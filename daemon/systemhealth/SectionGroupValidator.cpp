@@ -46,7 +46,7 @@ SectionReport SectionGroupValidator::Validate() const
 	for (const auto& validator : m_validators)
 	{
 		Status status = validator->Validate();
-		if (nzbget_rs_awc_health_status_should_include(status.IsOk() ? 1 : 0) != 0)
+		if (!status.IsOk())
 			report.issues.push_back(std::move(status));
 	}
 

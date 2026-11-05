@@ -13574,24 +13574,6 @@ pub unsafe extern "C" fn nzbget_rs_feh_ext_is_in_list(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feh_health_check_password(
-    password: *const c_char,
-    password_len: usize,
-) -> c_int {
-    let bytes = if password.is_null() || password_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(password.cast::<u8>(), password_len)
-    };
-    crate::frontexthealth::health_check_password(bytes)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feh_health_valid_port(port: c_int) -> c_int {
-    c_int::from(crate::frontexthealth::health_valid_port(port))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_feh_health_validate_control_ip(
     ip: *const c_char,
     ip_len: usize,
@@ -13640,20 +13622,6 @@ pub unsafe extern "C" fn nzbget_rs_feh_health_validate_form_auth(
         no_add_user != 0,
         no_restricted_user != 0,
     )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feh_health_validate_article_cache(
-    val: c_int,
-    ptr_size: usize,
-    direct_write: c_int,
-) -> c_int {
-    crate::frontexthealth::health_validate_article_cache(val, ptr_size, direct_write != 0)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feh_health_validate_write_buffer(val: c_int) -> c_int {
-    crate::frontexthealth::health_validate_write_buffer(val)
 }
 
 #[no_mangle]
@@ -14225,57 +14193,6 @@ pub unsafe extern "C" fn nzbget_rs_snh_speed_test_exceeded_max_failures(
     ))
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_snh_health_validate_par_buffer(
-    par_repair: c_int,
-    buffer_mb: c_int,
-) -> c_int {
-    crate::sysnservhealth::health_validate_par_buffer(par_repair != 0, buffer_mb)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_snh_health_validate_par_threads(
-    par_repair: c_int,
-    threads: c_int,
-    hw_threads: usize,
-) -> c_int {
-    crate::sysnservhealth::health_validate_par_threads(par_repair != 0, threads, hw_threads)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_snh_health_validate_par_time_limit(
-    par_repair: c_int,
-    limit: c_int,
-) -> c_int {
-    crate::sysnservhealth::health_validate_par_time_limit(par_repair != 0, limit)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_snh_health_validate_rotate_log(
-    is_rotate: c_int,
-    rotate_log: c_int,
-) -> c_int {
-    crate::sysnservhealth::health_validate_rotate_log(is_rotate != 0, rotate_log)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_snh_health_validate_time_correction(val: c_int) -> c_int {
-    i32::from(crate::sysnservhealth::health_validate_time_correction(val))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_snh_health_validate_feed_url(
-    url: *const c_char,
-    len: usize,
-) -> c_int {
-    let s = if url.is_null() || len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(url.cast::<u8>(), len)
-    };
-    crate::sysnservhealth::health_validate_feed_url(s)
-}
-
 // ============================================================================
 // Extension, Utility, NServ & SystemHealth Hot-Path FFI (`rust/src/extutilhealth.rs`)
 // ============================================================================
@@ -14523,36 +14440,6 @@ pub unsafe extern "C" fn nzbget_rs_euh_feed_script_is_success(exit_code: c_int) 
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_euh_health_validate_nzb_dir_interval(
-    interval: c_int,
-) -> c_int {
-    crate::extutilhealth::health_validate_nzb_dir_interval(interval)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_euh_health_validate_nzb_dir_file_age(age: c_int) -> c_int {
-    crate::extutilhealth::health_validate_nzb_dir_file_age(age)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_euh_health_validate_dupe_search(
-    dupe_search: c_int,
-    dupe_check: c_int,
-    health_check_is_dupe: c_int,
-) -> c_int {
-    crate::extutilhealth::health_validate_dupe_search(
-        dupe_search != 0,
-        dupe_check != 0,
-        health_check_is_dupe != 0,
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_euh_health_validate_ext_list_len(len: usize) -> c_int {
-    i32::from(crate::extutilhealth::health_validate_ext_list_len(len))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_euh_health_strip_script_ext_len(
     name: *const c_char,
     len: usize,
@@ -14587,39 +14474,6 @@ pub unsafe extern "C" fn nzbget_rs_euh_health_validate_primary_server(
         std::slice::from_raw_parts(actives, count)
     };
     crate::extutilhealth::health_validate_primary_server(lvls, acts)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_euh_health_validate_update_interval(v: c_int) -> c_int {
-    i32::from(crate::extutilhealth::health_validate_update_interval(v))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_euh_health_validate_scheduler_time(
-    h: c_int,
-    m: c_int,
-) -> c_int {
-    crate::extutilhealth::health_validate_scheduler_time(h, m)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_euh_health_validate_scheduler_weekdays(bits: c_int) -> c_int {
-    i32::from(crate::extutilhealth::health_validate_scheduler_weekdays(bits))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_euh_health_validate_category_unpack(
-    global_unpack: c_int,
-    cat_unpack: c_int,
-) -> c_int {
-    crate::extutilhealth::health_validate_category_unpack(global_unpack != 0, cat_unpack != 0)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_euh_health_severity_to_str(
-    severity: c_int,
-) -> *const c_char {
-    crate::extutilhealth::health_severity_to_str(severity).as_ptr()
 }
 
 // ============================================================================
@@ -15074,43 +14928,6 @@ pub unsafe extern "C" fn nzbget_rs_dur_parchecker_compare_extra_file_stems(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dur_health_classify_log_file_mode(
-    write_log: c_int,
-    wl_none: c_int,
-    wl_rotate: c_int,
-    wl_reset: c_int,
-    path_empty: c_int,
-    is_null_or_console: c_int,
-    has_parent_path: c_int,
-) -> c_int {
-    crate::dlunpackrepair::health_classify_log_file_mode(
-        write_log,
-        wl_none,
-        wl_rotate,
-        wl_reset,
-        path_empty != 0,
-        is_null_or_console != 0,
-        has_parent_path != 0,
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dur_health_classify_cert_store(
-    path_empty: c_int,
-    cert_check: c_int,
-) -> c_int {
-    crate::dlunpackrepair::health_classify_cert_store(path_empty != 0, cert_check != 0)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dur_health_classify_lock_file(
-    path_empty: c_int,
-    daemon_mode: c_int,
-) -> c_int {
-    crate::dlunpackrepair::health_classify_lock_file(path_empty != 0, daemon_mode != 0)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dur_health_alert_matches(
     src1: *const c_char,
     src1_len: usize,
@@ -15305,86 +15122,6 @@ pub unsafe extern "C" fn nzbget_rs_awc_extension_select_kind_flag(
         feed != 0,
         which,
     ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_awc_health_status_should_include(is_ok: c_int) -> c_int {
-    i32::from(crate::artwritercore::health_status_should_include(
-        is_ok != 0,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_awc_health_find_duplicate_feed_url(
-    url_ptrs: *const *const c_char,
-    url_lens: *const usize,
-    count: usize,
-    out_first_idx: *mut usize,
-    out_dup_idx: *mut usize,
-) -> c_int {
-    if url_ptrs.is_null() || url_lens.is_null() || count == 0 {
-        return 0;
-    }
-    let ptrs = std::slice::from_raw_parts(url_ptrs, count);
-    let lens = std::slice::from_raw_parts(url_lens, count);
-    let mut slices: Vec<&[u8]> = Vec::with_capacity(count);
-    for i in 0..count {
-        if ptrs[i].is_null() || lens[i] == 0 {
-            slices.push(&[]);
-        } else {
-            slices.push(std::slice::from_raw_parts(ptrs[i].cast::<u8>(), lens[i]));
-        }
-    }
-    if let Some((first_idx, dup_idx)) =
-        crate::artwritercore::health_find_duplicate_feed_url(&slices)
-    {
-        if !out_first_idx.is_null() {
-            *out_first_idx = first_idx;
-        }
-        if !out_dup_idx.is_null() {
-            *out_dup_idx = dup_idx;
-        }
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_awc_health_find_duplicate_category_name(
-    name_ptrs: *const *const c_char,
-    name_lens: *const usize,
-    count: usize,
-    out_dup_idx: *mut usize,
-) -> c_int {
-    if name_ptrs.is_null() || name_lens.is_null() || count == 0 {
-        return 0;
-    }
-    let ptrs = std::slice::from_raw_parts(name_ptrs, count);
-    let lens = std::slice::from_raw_parts(name_lens, count);
-    let mut slices: Vec<&[u8]> = Vec::with_capacity(count);
-    for i in 0..count {
-        if ptrs[i].is_null() || lens[i] == 0 {
-            slices.push(&[]);
-        } else {
-            slices.push(std::slice::from_raw_parts(ptrs[i].cast::<u8>(), lens[i]));
-        }
-    }
-    if let Some(dup_idx) = crate::artwritercore::health_find_duplicate_category_name(&slices) {
-        if !out_dup_idx.is_null() {
-            *out_dup_idx = dup_idx;
-        }
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_awc_health_scheduler_tasks_reserve_count(
-    count: usize,
-) -> usize {
-    crate::artwritercore::health_scheduler_tasks_reserve_count(count)
 }
 
 #[no_mangle]
@@ -29930,75 +29667,6 @@ pub unsafe extern "C" fn nzbget_rs_feh_ext_sort_indices(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feh_health_is_null_or_console_device(
-    path_ptr: *const c_char,
-    path_len: usize,
-) -> i32 {
-    let slice = if path_ptr.is_null() || path_len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(path_ptr.cast::<u8>(), path_len)
-    };
-    i32::from(crate::frontexthealth::health_is_null_or_console_device(slice))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feh_health_extract_host_ip_slice(
-    hostname_ptr: *const c_char,
-    hostname_len: usize,
-    out_ip_off: *mut usize,
-    out_ip_len: *mut usize,
-) -> i32 {
-    let slice = if hostname_ptr.is_null() || hostname_len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(hostname_ptr.cast::<u8>(), hostname_len)
-    };
-    let (has_brackets, off, len) = crate::frontexthealth::health_extract_host_ip_slice(slice);
-    if !out_ip_off.is_null() {
-        *out_ip_off = off;
-    }
-    if !out_ip_len.is_null() {
-        *out_ip_len = len;
-    }
-    i32::from(has_brackets)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feh_health_validate_host(
-    hostname_ptr: *const c_char,
-    hostname_len: usize,
-    ipv: i32,
-    ip_v4_mode: i32,
-    ip_v6_mode: i32,
-    is_v4: i32,
-    is_v6: i32,
-    out_ip_off: *mut usize,
-    out_ip_len: *mut usize,
-) -> i32 {
-    let slice = if hostname_ptr.is_null() || hostname_len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(hostname_ptr.cast::<u8>(), hostname_len)
-    };
-    let (code, off, len) = crate::frontexthealth::health_validate_host(
-        slice,
-        ipv,
-        ip_v4_mode,
-        ip_v6_mode,
-        is_v4 != 0,
-        is_v6 != 0,
-    );
-    if !out_ip_off.is_null() {
-        *out_ip_off = off;
-    }
-    if !out_ip_len.is_null() {
-        *out_ip_len = len;
-    }
-    code
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_feh_health_validate_control_username(
     username_ptr: *const c_char,
     username_len: usize,
@@ -30075,17 +29743,6 @@ pub unsafe extern "C" fn nzbget_rs_feh_health_validate_server_cipher(
 #[no_mangle]
 pub extern "C" fn nzbget_rs_feh_health_validate_server_ip_version(ip_version: i32) -> i32 {
     crate::frontexthealth::health_validate_server_ip_version(ip_version)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feh_health_validate_feed_cert(
-    url: *const c_char,
-    cert_none: i32,
-) -> i32 {
-    i32::from(crate::frontexthealth::health_validate_feed_cert(
-        input(url),
-        cert_none != 0,
-    ))
 }
 
 #[no_mangle]
@@ -40181,4 +39838,820 @@ pub unsafe extern "C" fn nzbget_rs_archive_processor_finish(
         },
     );
 }
+
+// ============================================================================
+// SystemHealth (`rust/src/systemhealth.rs`)
+// ============================================================================
+
+pub type HealthOptionEmitCb = Option<
+    unsafe extern "C" fn(
+        ctx: *mut std::ffi::c_void,
+        name_ptr: *const c_char,
+        name_len: usize,
+        severity: c_int,
+        msg_ptr: *const c_char,
+        msg_len: usize,
+    ),
+>;
+
+unsafe fn write_health_status(
+    status: crate::systemhealth::HealthStatus,
+    out_msg: *mut RsBuf,
+) -> c_int {
+    let sev = status.severity as c_int;
+    if !out_msg.is_null() {
+        if status.message.is_empty() {
+            *out_msg = RsBuf {
+                data: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            };
+        } else {
+            *out_msg = into_buf(status.message);
+        }
+    }
+    sev
+}
+
+unsafe fn bytes_from_ptr_len<'a>(ptr: *const c_char, len: usize) -> &'a [u8] {
+    if ptr.is_null() || len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(ptr.cast::<u8>(), len)
+    }
+}
+
+unsafe fn path_from_ptr_len(ptr: *const c_char, len: usize) -> std::path::PathBuf {
+    if ptr.is_null() || len == 0 {
+        std::path::PathBuf::new()
+    } else {
+        crate::cleanup::bytes_to_path_buf(std::slice::from_raw_parts(ptr.cast::<u8>(), len))
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_severity_to_str(severity: c_int) -> *const c_char {
+    crate::systemhealth::Severity::from_i32(severity)
+        .as_cstr()
+        .as_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_required_option(
+    name: *const c_char,
+    name_len: usize,
+    val: *const c_char,
+    val_len: usize,
+    out_msg: *mut RsBuf,
+) -> c_int {
+    let n = bytes_from_ptr_len(name, name_len);
+    let v = bytes_from_ptr_len(val, val_len);
+    write_health_status(crate::systemhealth::required_option(n, v), out_msg)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_unique_path(
+    name: *const c_char,
+    name_len: usize,
+    path: *const c_char,
+    path_len: usize,
+    other_name_ptrs: *const *const c_char,
+    other_name_lens: *const usize,
+    other_path_ptrs: *const *const c_char,
+    other_path_lens: *const usize,
+    other_count: usize,
+    out_msg: *mut RsBuf,
+) -> c_int {
+    let n = bytes_from_ptr_len(name, name_len);
+    let p = path_from_ptr_len(path, path_len);
+    let mut other_names = Vec::with_capacity(other_count);
+    let mut other_paths = Vec::with_capacity(other_count);
+    if !other_name_ptrs.is_null()
+        && !other_name_lens.is_null()
+        && !other_path_ptrs.is_null()
+        && !other_path_lens.is_null()
+    {
+        let n_ptrs = std::slice::from_raw_parts(other_name_ptrs, other_count);
+        let n_lens = std::slice::from_raw_parts(other_name_lens, other_count);
+        let p_ptrs = std::slice::from_raw_parts(other_path_ptrs, other_count);
+        let p_lens = std::slice::from_raw_parts(other_path_lens, other_count);
+        for i in 0..other_count {
+            other_names.push(bytes_from_ptr_len(n_ptrs[i], n_lens[i]));
+            other_paths.push(path_from_ptr_len(p_ptrs[i], p_lens[i]));
+        }
+    }
+    let pairs: Vec<(&[u8], &std::path::Path)> = other_names
+        .iter()
+        .zip(other_paths.iter())
+        .map(|(&on, op)| (on, op.as_path()))
+        .collect();
+    write_health_status(crate::systemhealth::unique_path(n, &p, &pairs), out_msg)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_check_password(
+    password: *const c_char,
+    password_len: usize,
+    out_msg: *mut RsBuf,
+) -> c_int {
+    let pw = bytes_from_ptr_len(password, password_len);
+    write_health_status(crate::systemhealth::check_password(pw), out_msg)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_check_positive_num(
+    name: *const c_char,
+    name_len: usize,
+    val: c_int,
+    out_msg: *mut RsBuf,
+) -> c_int {
+    let n = bytes_from_ptr_len(name, name_len);
+    write_health_status(crate::systemhealth::check_positive_num(n, val), out_msg)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_file_exists(
+    path: *const c_char,
+    path_len: usize,
+    out_msg: *mut RsBuf,
+) -> c_int {
+    let p = path_from_ptr_len(path, path_len);
+    write_health_status(crate::systemhealth::file_exists(&p), out_msg)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_file_readable(
+    path: *const c_char,
+    path_len: usize,
+    out_msg: *mut RsBuf,
+) -> c_int {
+    let p = path_from_ptr_len(path, path_len);
+    write_health_status(crate::systemhealth::file_readable(&p), out_msg)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_file_writable(
+    path: *const c_char,
+    path_len: usize,
+    out_msg: *mut RsBuf,
+) -> c_int {
+    let p = path_from_ptr_len(path, path_len);
+    write_health_status(crate::systemhealth::file_writable(&p), out_msg)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_file_executable(
+    path: *const c_char,
+    path_len: usize,
+    out_msg: *mut RsBuf,
+) -> c_int {
+    let p = path_from_ptr_len(path, path_len);
+    write_health_status(crate::systemhealth::file_executable(&p), out_msg)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_file_null_or_console_device(
+    path: *const c_char,
+    path_len: usize,
+) -> c_int {
+    let p = path_from_ptr_len(path, path_len);
+    c_int::from(crate::systemhealth::file_null_or_console_device(&p))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_directory_exists(
+    path: *const c_char,
+    path_len: usize,
+    out_msg: *mut RsBuf,
+) -> c_int {
+    let p = path_from_ptr_len(path, path_len);
+    write_health_status(crate::systemhealth::directory_exists(&p), out_msg)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_directory_readable(
+    path: *const c_char,
+    path_len: usize,
+    out_msg: *mut RsBuf,
+) -> c_int {
+    let p = path_from_ptr_len(path, path_len);
+    write_health_status(crate::systemhealth::directory_readable(&p), out_msg)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_directory_writable(
+    path: *const c_char,
+    path_len: usize,
+    out_msg: *mut RsBuf,
+) -> c_int {
+    let p = path_from_ptr_len(path, path_len);
+    write_health_status(crate::systemhealth::directory_writable(&p), out_msg)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_network_valid_host(
+    hostname: *const c_char,
+    hostname_len: usize,
+    ipv: c_int,
+    out_msg: *mut RsBuf,
+) -> c_int {
+    let h = bytes_from_ptr_len(hostname, hostname_len);
+    write_health_status(crate::systemhealth::network_valid_host(h, ipv), out_msg)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_network_valid_port(
+    port: c_int,
+    out_msg: *mut RsBuf,
+) -> c_int {
+    write_health_status(crate::systemhealth::network_valid_port(port), out_msg)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_validate_required_writable_dir(
+    name: *const c_char,
+    name_len: usize,
+    path: *const c_char,
+    path_len: usize,
+    out_msg: *mut RsBuf,
+) -> c_int {
+    let n = bytes_from_ptr_len(name, name_len);
+    let p = path_from_ptr_len(path, path_len);
+    write_health_status(
+        crate::systemhealth::validate_required_writable_dir(n, &p),
+        out_msg,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_validate_inter_dir_path(
+    path: *const c_char,
+    path_len: usize,
+    out_msg: *mut RsBuf,
+) -> c_int {
+    let p = path_from_ptr_len(path, path_len);
+    write_health_status(crate::systemhealth::validate_inter_dir_path(&p), out_msg)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_validate_web_dir_path(
+    path: *const c_char,
+    path_len: usize,
+    out_msg: *mut RsBuf,
+) -> c_int {
+    let p = path_from_ptr_len(path, path_len);
+    write_health_status(crate::systemhealth::validate_web_dir_path(&p), out_msg)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_validate_log_file_path(
+    path: *const c_char,
+    path_len: usize,
+    write_log: c_int,
+    out_msg: *mut RsBuf,
+) -> c_int {
+    let p = path_from_ptr_len(path, path_len);
+    write_health_status(
+        crate::systemhealth::validate_log_file_path(&p, write_log),
+        out_msg,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_validate_cert_store_path(
+    path: *const c_char,
+    path_len: usize,
+    cert_check: c_int,
+    out_msg: *mut RsBuf,
+) -> c_int {
+    let p = path_from_ptr_len(path, path_len);
+    write_health_status(
+        crate::systemhealth::validate_cert_store_path(&p, cert_check != 0),
+        out_msg,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_validate_lock_file_path(
+    path: *const c_char,
+    path_len: usize,
+    daemon_mode: c_int,
+    out_msg: *mut RsBuf,
+) -> c_int {
+    let p = path_from_ptr_len(path, path_len);
+    write_health_status(
+        crate::systemhealth::validate_lock_file_path(&p, daemon_mode != 0),
+        out_msg,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_validate_paths_section(
+    main_dir: *const c_char,
+    main_dir_len: usize,
+    dest_dir: *const c_char,
+    dest_dir_len: usize,
+    inter_dir: *const c_char,
+    inter_dir_len: usize,
+    nzb_dir: *const c_char,
+    nzb_dir_len: usize,
+    queue_dir: *const c_char,
+    queue_dir_len: usize,
+    web_dir: *const c_char,
+    web_dir_len: usize,
+    temp_dir: *const c_char,
+    temp_dir_len: usize,
+    script_dir_ptrs: *const *const c_char,
+    script_dir_lens: *const usize,
+    script_dir_count: usize,
+    config_template: *const c_char,
+    config_template_len: usize,
+    log_file: *const c_char,
+    log_file_len: usize,
+    cert_store: *const c_char,
+    cert_store_len: usize,
+    cert_store_path: *const c_char,
+    cert_store_path_len: usize,
+    config_file: *const c_char,
+    config_file_len: usize,
+    lock_file: *const c_char,
+    lock_file_len: usize,
+    write_log: c_int,
+    cert_check: c_int,
+    daemon_mode: c_int,
+    ctx: *mut std::ffi::c_void,
+    emit_cb: HealthOptionEmitCb,
+) {
+    let main_p = path_from_ptr_len(main_dir, main_dir_len);
+    let dest_p = path_from_ptr_len(dest_dir, dest_dir_len);
+    let inter_p = path_from_ptr_len(inter_dir, inter_dir_len);
+    let nzb_p = path_from_ptr_len(nzb_dir, nzb_dir_len);
+    let queue_p = path_from_ptr_len(queue_dir, queue_dir_len);
+    let web_p = path_from_ptr_len(web_dir, web_dir_len);
+    let temp_p = path_from_ptr_len(temp_dir, temp_dir_len);
+    let mut script_paths = Vec::with_capacity(script_dir_count);
+    if !script_dir_ptrs.is_null() && !script_dir_lens.is_null() {
+        let ptrs = std::slice::from_raw_parts(script_dir_ptrs, script_dir_count);
+        let lens = std::slice::from_raw_parts(script_dir_lens, script_dir_count);
+        for i in 0..script_dir_count {
+            script_paths.push(path_from_ptr_len(ptrs[i], lens[i]));
+        }
+    }
+    let script_refs: Vec<&std::path::Path> = script_paths.iter().map(|p| p.as_path()).collect();
+    let cfg_tpl_p = path_from_ptr_len(config_template, config_template_len);
+    let log_p = path_from_ptr_len(log_file, log_file_len);
+    let cert_p = path_from_ptr_len(cert_store, cert_store_len);
+    let cert_path_p = path_from_ptr_len(cert_store_path, cert_store_path_len);
+    let cfg_p = path_from_ptr_len(config_file, config_file_len);
+    let lock_p = path_from_ptr_len(lock_file, lock_file_len);
+
+    let input = crate::systemhealth::PathsSectionInput {
+        main_dir: &main_p,
+        dest_dir: &dest_p,
+        inter_dir: &inter_p,
+        nzb_dir: &nzb_p,
+        queue_dir: &queue_p,
+        web_dir: &web_p,
+        temp_dir: &temp_p,
+        script_dirs: &script_refs,
+        config_template: &cfg_tpl_p,
+        log_file: &log_p,
+        cert_store: &cert_p,
+        cert_store_path: &cert_path_p,
+        config_file: &cfg_p,
+        lock_file: &lock_p,
+        write_log,
+        cert_check: cert_check != 0,
+        daemon_mode: daemon_mode != 0,
+    };
+
+    crate::systemhealth::validate_paths_section(&input, |name, sev, msg| {
+        if let Some(cb) = emit_cb {
+            cb(
+                ctx,
+                name.as_ptr().cast(),
+                name.len(),
+                sev as c_int,
+                msg.as_ptr().cast(),
+                msg.len(),
+            );
+        }
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_validate_category_section(
+    name: *const c_char,
+    name_len: usize,
+    global_unpack: c_int,
+    cat_unpack: c_int,
+    ctx: *mut std::ffi::c_void,
+    emit_cb: HealthOptionEmitCb,
+) {
+    let n = bytes_from_ptr_len(name, name_len);
+    crate::systemhealth::validate_category_section(
+        n,
+        global_unpack != 0,
+        cat_unpack != 0,
+        |opt_name, sev, msg| {
+            if let Some(cb) = emit_cb {
+                cb(
+                    ctx,
+                    opt_name.as_ptr().cast(),
+                    opt_name.len(),
+                    sev as c_int,
+                    msg.as_ptr().cast(),
+                    msg.len(),
+                );
+            }
+        },
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_validate_duplicate_category_names(
+    name_ptrs: *const *const c_char,
+    name_lens: *const usize,
+    count: usize,
+    out_msg: *mut RsBuf,
+) -> c_int {
+    let mut names = Vec::with_capacity(count);
+    if !name_ptrs.is_null() && !name_lens.is_null() {
+        let ptrs = std::slice::from_raw_parts(name_ptrs, count);
+        let lens = std::slice::from_raw_parts(name_lens, count);
+        for i in 0..count {
+            names.push(bytes_from_ptr_len(ptrs[i], lens[i]));
+        }
+    }
+    write_health_status(
+        crate::systemhealth::validate_duplicate_category_names(&names),
+        out_msg,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_validate_display_section(
+    output_mode: c_int,
+    update_interval: c_int,
+    curses_nzb_name: c_int,
+    curses_group: c_int,
+    curses_time: c_int,
+    ctx: *mut std::ffi::c_void,
+    emit_cb: HealthOptionEmitCb,
+) {
+    crate::systemhealth::validate_display_section(
+        output_mode,
+        update_interval,
+        curses_nzb_name != 0,
+        curses_group != 0,
+        curses_time != 0,
+        |name, sev, msg| {
+            if let Some(cb) = emit_cb {
+                cb(
+                    ctx,
+                    name.as_ptr().cast(),
+                    name.len(),
+                    sev as c_int,
+                    msg.as_ptr().cast(),
+                    msg.len(),
+                );
+            }
+        },
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_validate_write_log(
+    write_log: c_int,
+    log_file: *const c_char,
+    log_file_len: usize,
+    out_msg: *mut RsBuf,
+) -> c_int {
+    let p = path_from_ptr_len(log_file, log_file_len);
+    write_health_status(
+        crate::systemhealth::validate_write_log(write_log, &p),
+        out_msg,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_validate_rotate_log(
+    write_log: c_int,
+    rotate_log: c_int,
+    out_msg: *mut RsBuf,
+) -> c_int {
+    write_health_status(
+        crate::systemhealth::validate_rotate_log(write_log, rotate_log),
+        out_msg,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_validate_logging_section(
+    write_log: c_int,
+    log_file: *const c_char,
+    log_file_len: usize,
+    rotate_log: c_int,
+    log_buffer: c_int,
+    crash_dump: c_int,
+    time_correction: c_int,
+    ctx: *mut std::ffi::c_void,
+    emit_cb: HealthOptionEmitCb,
+) {
+    let p = path_from_ptr_len(log_file, log_file_len);
+    crate::systemhealth::validate_logging_section(
+        write_log,
+        &p,
+        rotate_log,
+        log_buffer,
+        crash_dump != 0,
+        time_correction,
+        |name, sev, msg| {
+            if let Some(cb) = emit_cb {
+                cb(
+                    ctx,
+                    name.as_ptr().cast(),
+                    name.len(),
+                    sev as c_int,
+                    msg.as_ptr().cast(),
+                    msg.len(),
+                );
+            }
+        },
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_validate_scheduler_task_section(
+    hours: c_int,
+    minutes: c_int,
+    weekdays_bits: c_int,
+    ctx: *mut std::ffi::c_void,
+    emit_cb: HealthOptionEmitCb,
+) {
+    crate::systemhealth::validate_scheduler_task_section(
+        hours,
+        minutes,
+        weekdays_bits,
+        |name, sev, msg| {
+            if let Some(cb) = emit_cb {
+                cb(
+                    ctx,
+                    name.as_ptr().cast(),
+                    name.len(),
+                    sev as c_int,
+                    msg.as_ptr().cast(),
+                    msg.len(),
+                );
+            }
+        },
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_validate_feed_cert(
+    url: *const c_char,
+    url_len: usize,
+    cert_level: u32,
+    out_msg: *mut RsBuf,
+) -> c_int {
+    let u = bytes_from_ptr_len(url, url_len);
+    write_health_status(
+        crate::systemhealth::validate_feed_cert(u, cert_level),
+        out_msg,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_validate_feed_section(
+    name: *const c_char,
+    name_len: usize,
+    url: *const c_char,
+    url_len: usize,
+    interval: c_int,
+    cert_level: u32,
+    ctx: *mut std::ffi::c_void,
+    emit_cb: HealthOptionEmitCb,
+) {
+    let n = bytes_from_ptr_len(name, name_len);
+    let u = bytes_from_ptr_len(url, url_len);
+    crate::systemhealth::validate_feed_section(n, u, interval, cert_level, |opt_name, sev, msg| {
+        if let Some(cb) = emit_cb {
+            cb(
+                ctx,
+                opt_name.as_ptr().cast(),
+                opt_name.len(),
+                sev as c_int,
+                msg.as_ptr().cast(),
+                msg.len(),
+            );
+        }
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_validate_duplicate_feed_urls(
+    name_ptrs: *const *const c_char,
+    name_lens: *const usize,
+    url_ptrs: *const *const c_char,
+    url_lens: *const usize,
+    count: usize,
+    out_msg: *mut RsBuf,
+) -> c_int {
+    let mut feeds = Vec::with_capacity(count);
+    if !name_ptrs.is_null() && !name_lens.is_null() && !url_ptrs.is_null() && !url_lens.is_null() {
+        let n_ptrs = std::slice::from_raw_parts(name_ptrs, count);
+        let n_lens = std::slice::from_raw_parts(name_lens, count);
+        let u_ptrs = std::slice::from_raw_parts(url_ptrs, count);
+        let u_lens = std::slice::from_raw_parts(url_lens, count);
+        for i in 0..count {
+            feeds.push((
+                bytes_from_ptr_len(n_ptrs[i], n_lens[i]),
+                bytes_from_ptr_len(u_ptrs[i], u_lens[i]),
+            ));
+        }
+    }
+    write_health_status(
+        crate::systemhealth::validate_duplicate_feed_urls(&feeds),
+        out_msg,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_validate_incoming_nzb_section(
+    append_category_dir: c_int,
+    nzb_dir_interval: c_int,
+    nzb_dir_file_age: c_int,
+    dupe_check: c_int,
+    dupe_search: c_int,
+    health_check: c_int,
+    ctx: *mut std::ffi::c_void,
+    emit_cb: HealthOptionEmitCb,
+) {
+    crate::systemhealth::validate_incoming_nzb_section(
+        append_category_dir != 0,
+        nzb_dir_interval,
+        nzb_dir_file_age,
+        dupe_check != 0,
+        dupe_search != 0,
+        health_check,
+        |name, sev, msg| {
+            if let Some(cb) = emit_cb {
+                cb(
+                    ctx,
+                    name.as_ptr().cast(),
+                    name.len(),
+                    sev as c_int,
+                    msg.as_ptr().cast(),
+                    msg.len(),
+                );
+            }
+        },
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_validate_unpack_section(
+    unpack: c_int,
+    direct_unpack: c_int,
+    unpack_pause_queue: c_int,
+    unrar_path: *const c_char,
+    unrar_path_len: usize,
+    sevenzip_path: *const c_char,
+    sevenzip_path_len: usize,
+    ext_cleanup_disk: *const c_char,
+    ext_cleanup_disk_len: usize,
+    unpack_pass_file: *const c_char,
+    unpack_pass_file_len: usize,
+    unpack_ignore_ext: *const c_char,
+    unpack_ignore_ext_len: usize,
+    ctx: *mut std::ffi::c_void,
+    emit_cb: HealthOptionEmitCb,
+) {
+    let unrar_p = path_from_ptr_len(unrar_path, unrar_path_len);
+    let sevenzip_p = path_from_ptr_len(sevenzip_path, sevenzip_path_len);
+    let ext_cleanup = bytes_from_ptr_len(ext_cleanup_disk, ext_cleanup_disk_len);
+    let pass_p = path_from_ptr_len(unpack_pass_file, unpack_pass_file_len);
+    let ignore_ext = bytes_from_ptr_len(unpack_ignore_ext, unpack_ignore_ext_len);
+
+    crate::systemhealth::validate_unpack_section(
+        unpack != 0,
+        direct_unpack != 0,
+        unpack_pause_queue != 0,
+        &unrar_p,
+        &sevenzip_p,
+        ext_cleanup,
+        &pass_p,
+        ignore_ext,
+        |name, sev, msg| {
+            if let Some(cb) = emit_cb {
+                cb(
+                    ctx,
+                    name.as_ptr().cast(),
+                    name.len(),
+                    sev as c_int,
+                    msg.as_ptr().cast(),
+                    msg.len(),
+                );
+            }
+        },
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_validate_check_and_repair_section(
+    crc_check: c_int,
+    par_check: c_int,
+    par_repair: c_int,
+    par_quick: c_int,
+    par_buffer: c_int,
+    par_threads: c_int,
+    hw_threads: usize,
+    par_rename: c_int,
+    rar_rename: c_int,
+    direct_rename: c_int,
+    hard_linking: c_int,
+    health_check: c_int,
+    par_time_limit: c_int,
+    ctx: *mut std::ffi::c_void,
+    emit_cb: HealthOptionEmitCb,
+) {
+    crate::systemhealth::validate_check_and_repair_section(
+        crc_check != 0,
+        par_check,
+        par_repair != 0,
+        par_quick != 0,
+        par_buffer,
+        par_threads,
+        hw_threads,
+        par_rename != 0,
+        rar_rename != 0,
+        direct_rename != 0,
+        hard_linking != 0,
+        health_check,
+        par_time_limit,
+        |name, sev, msg| {
+            if let Some(cb) = emit_cb {
+                cb(
+                    ctx,
+                    name.as_ptr().cast(),
+                    name.len(),
+                    sev as c_int,
+                    msg.as_ptr().cast(),
+                    msg.len(),
+                );
+            }
+        },
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_health_validate_download_queue_section(
+    flush_queue: c_int,
+    continue_partial: c_int,
+    propagation_delay: c_int,
+    article_cache: c_int,
+    direct_write: c_int,
+    write_buffer: c_int,
+    file_naming: c_int,
+    post_strategy: c_int,
+    disk_space: c_int,
+    nzb_cleanup_disk: c_int,
+    keep_history: c_int,
+    feed_history: c_int,
+    skip_write: c_int,
+    raw_article: c_int,
+    ctx: *mut std::ffi::c_void,
+    emit_cb: HealthOptionEmitCb,
+) {
+    crate::systemhealth::validate_download_queue_section(
+        flush_queue != 0,
+        continue_partial != 0,
+        propagation_delay,
+        article_cache,
+        direct_write != 0,
+        write_buffer,
+        file_naming,
+        post_strategy,
+        disk_space,
+        nzb_cleanup_disk != 0,
+        keep_history,
+        feed_history,
+        skip_write != 0,
+        raw_article != 0,
+        |name, sev, msg| {
+            if let Some(cb) = emit_cb {
+                cb(
+                    ctx,
+                    name.as_ptr().cast(),
+                    name.len(),
+                    sev as c_int,
+                    msg.as_ptr().cast(),
+                    msg.len(),
+                );
+            }
+        },
+    );
+}
+
 

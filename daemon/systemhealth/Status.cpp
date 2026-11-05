@@ -53,6 +53,6 @@ Xml::XmlNodePtr ToXml(const Status& status)
 
 std::string_view SeverityToStr(Severity severity)
 {
-	return nzbget_rs_euh_health_severity_to_str(static_cast<int>(severity));
+	return nzbget_rs_health_severity_to_str(static_cast<int>(severity));
 }
 }  // namespace SystemHealth

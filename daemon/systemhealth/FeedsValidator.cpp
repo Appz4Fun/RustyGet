@@ -47,22 +47,24 @@ Status DuplicateFeedsValidator::Validate() const
 {
 	if (m_feeds.empty()) return Status::Ok();
 
-	std::vector<const char*> ptrs(m_feeds.size());
-	std::vector<size_t> lens(m_feeds.size());
+	std::vector<const char*> namePtrs(m_feeds.size());
+	std::vector<size_t> nameLens(m_feeds.size());
+	std::vector<const char*> urlPtrs(m_feeds.size());
+	std::vector<size_t> urlLens(m_feeds.size());
 	for (size_t i = 0; i < m_feeds.size(); ++i)
 	{
+		std::string_view name = m_feeds[i]->GetName();
 		std::string_view url = m_feeds[i]->GetUrl();
-		ptrs[i] = url.data();
-		lens[i] = url.size();
+		namePtrs[i] = name.data();
+		nameLens[i] = name.size();
+		urlPtrs[i] = url.data();
+		urlLens[i] = url.size();
 	}
-	size_t firstIdx = 0;
-	size_t dupIdx = 0;
-	if (nzbget_rs_awc_health_find_duplicate_feed_url(
-			ptrs.data(), lens.data(), m_feeds.size(), &firstIdx, &dupIdx) != 0)
-	{
-		return Status::Warning("Feeds '" + std::string(m_feeds[firstIdx]->GetName()) + "' and '" +
-							   std::string(m_feeds[dupIdx]->GetName()) + "' have the same URL");
-	}
-	return Status::Ok();
+	NzbgetRsBuf msg{nullptr, 0, 0};
+	int sev = nzbget_rs_health_validate_duplicate_feed_urls(
+		namePtrs.data(), nameLens.data(),
+		urlPtrs.data(), urlLens.data(),
+		m_feeds.size(), &msg);
+	return Status::FromRust(sev, msg);
 }
 }  // namespace SystemHealth::Feeds

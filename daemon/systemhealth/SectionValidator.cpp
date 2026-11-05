@@ -29,6 +29,28 @@ namespace SystemHealth
 
 SectionValidator::~SectionValidator() = default;
 
+void SectionValidator::AppendOptionCallback(
+	void* ctx,
+	const char* opt_ptr,
+	size_t opt_len,
+	int severity,
+	const char* msg_ptr,
+	size_t msg_len)
+{
+	auto* options = static_cast<std::vector<OptionStatus>*>(ctx);
+	Severity sev = Severity::Ok;
+	if (severity == 1) sev = Severity::Info;
+	else if (severity == 2) sev = Severity::Warning;
+	else if (severity == 3) sev = Severity::Error;
+	if (sev != Severity::Ok)
+	{
+		options->push_back({
+			std::string(opt_ptr ? opt_ptr : "", opt_len),
+			Status::FromRaw(sev, std::string(msg_ptr ? msg_ptr : "", msg_len))
+		});
+	}
+}
+
 SectionReport SectionValidator::Validate() const
 {
 	SectionReport report;
@@ -38,7 +60,7 @@ SectionReport SectionValidator::Validate() const
 	for (const auto& validator : m_validators)
 	{
 		auto status = validator->Validate();
-		if (nzbget_rs_awc_health_status_should_include(status.IsOk() ? 1 : 0) != 0)
+		if (!status.IsOk())
 			report.options.push_back({std::string(validator->GetName()), std::move(status)});
 	}
 

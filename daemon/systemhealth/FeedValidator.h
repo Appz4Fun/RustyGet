@@ -33,83 +33,12 @@ class FeedValidator final : public SectionValidator
 public:
 	FeedValidator(const FeedInfo& feed, const Options& options);
 	std::string_view GetName() const override { return m_name; }
+	SectionReport Validate() const override;
 
 private:
 	const FeedInfo& m_feed;
 	const Options& m_options;
 	const std::string m_name;
-};
-
-class NameValidator final : public Validator
-{
-public:
-	explicit NameValidator(const FeedInfo& feed) : m_feed(feed) {}
-	std::string_view GetName() const override { return "Name"; }
-	Status Validate() const override;
-
-private:
-	const FeedInfo& m_feed;
-};
-
-class UrlValidator final : public Validator
-{
-public:
-	explicit UrlValidator(const FeedInfo& feed) : m_feed(feed) {}
-	std::string_view GetName() const override { return "URL"; }
-	Status Validate() const override;
-
-private:
-	const FeedInfo& m_feed;
-};
-
-class IntervalValidator final : public Validator
-{
-public:
-	explicit IntervalValidator(const FeedInfo& feed) : m_feed(feed) {}
-	std::string_view GetName() const override { return "Interval"; }
-	Status Validate() const override;
-
-private:
-	const FeedInfo& m_feed;
-};
-
-class FilterValidator final : public Validator
-{
-public:
-	explicit FilterValidator(const FeedInfo& feed) : m_feed(feed) {}
-	std::string_view GetName() const override { return "Filter"; }
-	Status Validate() const override;
-
-private:
-	const FeedInfo& m_feed;
-};
-
-class ScriptsValidator final : public Validator
-{
-public:
-	ScriptsValidator(const FeedInfo& feed) : m_feed(feed) {}
-
-	std::string_view GetName() const override { return "Extensions"; }
-	Status Validate() const override;
-
-private:
-	const FeedInfo& m_feed;
-};
-
-class CategoryValidator final : public Validator
-{
-public:
-	CategoryValidator(const FeedInfo& feed, const Options& options)
-		: m_feed(feed), m_options(options)
-	{
-	}
-
-	std::string_view GetName() const override { return "Category"; }
-	Status Validate() const override;
-
-private:
-	const FeedInfo& m_feed;
-	const Options& m_options;
 };
 
 class FeedCertValidator final : public Validator

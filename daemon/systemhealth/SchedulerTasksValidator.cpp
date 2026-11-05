@@ -6,7 +6,6 @@
 
 #include "SchedulerTasksValidator.h"
 #include "SchedulerTaskValidator.h"
-#include "nzbget_rs.h"
 
 namespace SystemHealth::Scheduler
 {
@@ -19,7 +18,7 @@ std::vector<std::unique_ptr<SectionValidator>> SchedulerTasksValidator::MakeTask
 	const ::Scheduler::TaskList& tasks) const
 {
 	std::vector<std::unique_ptr<SectionValidator>> validators;
-	validators.reserve(nzbget_rs_awc_health_scheduler_tasks_reserve_count(tasks.size()));
+	validators.reserve(tasks.size());
 	for (const auto& task : tasks)
 	{
 		validators.push_back(std::make_unique<SchedulerTaskValidator>(*task));
@@ -27,4 +26,4 @@ std::vector<std::unique_ptr<SectionValidator>> SchedulerTasksValidator::MakeTask
 	return validators;
 }
 
-}  // namespace SystemHealth::SchedulerTask
+}  // namespace SystemHealth::Scheduler

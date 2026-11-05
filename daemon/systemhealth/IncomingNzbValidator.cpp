@@ -17,7 +17,6 @@
  *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-
 #include "nzbget.h"
 
 #include "IncomingNzbValidator.h"
@@ -27,111 +26,21 @@ namespace SystemHealth::IncomingNzb
 {
 IncomingNzbValidator::IncomingNzbValidator(const Options& options) : m_options(options)
 {
-	m_validators.reserve(4);
-	m_validators.push_back(std::make_unique<AppendCategoryDirValidator>(options));
-	m_validators.push_back(std::make_unique<NzbDirIntervalValidator>(options));
-	m_validators.push_back(std::make_unique<NzbDirFileAgeValidator>(options));
-	m_validators.push_back(std::make_unique<NzbDirArchiveScanValidator>(options));
-	m_validators.push_back(std::make_unique<NzbDirArchiveActionValidator>(options));
-	m_validators.push_back(std::make_unique<DupeCheckValidator>(options));
-	m_validators.push_back(std::make_unique<DupeSearchValidator>(options));
 }
 
-Status AppendCategoryDirValidator::Validate() const
+SectionReport IncomingNzbValidator::Validate() const
 {
-	bool append = m_options.GetAppendCategoryDir();
-	if (append) return Status::Info("Category subdirectories will be created automatically");
-
-	return Status::Ok();
-}
-
-Status NzbDirIntervalValidator::Validate() const
-{
-	int interval = m_options.GetNzbDirInterval();
-	switch (nzbget_rs_euh_health_validate_nzb_dir_interval(interval))
-	{
-		case 1:
-			return CheckPositiveNum(Options::NZBDIRINTERVAL, interval);
-		case 2:
-			return Status::Warning("Automatic NZB directory scanning is disabled");
-		case 3:
-		{
-			std::stringstream ss;
-			ss << "'" << Options::NZBDIRINTERVAL << "' is set to " << interval << " seconds. "
-			   << "Very frequent scanning may cause high CPU/Disk usage";
-			return Status::Warning(ss.str());
-		}
-		default:
-			return Status::Ok();
-	}
-}
-
-Status NzbDirFileAgeValidator::Validate() const
-{
-	int age = m_options.GetNzbDirFileAge();
-	switch (nzbget_rs_euh_health_validate_nzb_dir_file_age(age))
-	{
-		case 1:
-			return CheckPositiveNum(Options::NZBDIRFILEAGE, age);
-		case 2:
-		{
-			std::stringstream ss;
-			ss << "'" << Options::NZBDIRFILEAGE << "' is set to " << age << " seconds (> 1 hour). "
-			   << "New NZB files will not be picked up until they are at least this old";
-			return Status::Warning(ss.str());
-		}
-		default:
-			return Status::Ok();
-	}
-}
-
-Status NzbDirArchiveScanValidator::Validate() const
-{
-	return Status::Ok();
-}
-
-Status NzbDirArchiveActionValidator::Validate() const
-{
-	return Status::Ok();
-}
-
-Status DupeCheckValidator::Validate() const
-{
-	bool dupeCheck = m_options.GetDupeCheck();
-	auto healthCheckMode = m_options.GetHealthCheck();
-	if (!dupeCheck) return Status::Ok();
-
-	if (healthCheckMode == Options::EHealthCheck::hcPause)
-	{
-		const auto healthCheckStr = std::string(Options::HEALTHCHECK);
-		return Status::Info(
-			"'" + std::string(Options::DUPECHECK) + "' is enabled while '" + healthCheckStr +
-			"' is set to 'Pause'. "
-			"This configuration is not recommended as it requires manual intervention "
-			"to unpause backup downloads if the primary one fails. "
-			"Consider using 'Delete', 'Park', or 'None' for '" +
-			healthCheckStr + "'");
-	}
-
-	return Status::Ok();
-}
-
-Status DupeSearchValidator::Validate() const
-{
-	switch (nzbget_rs_euh_health_validate_dupe_search(
-		m_options.GetDupeSearch() ? 1 : 0,
+	SectionReport report;
+	report.name = GetName();
+	nzbget_rs_health_validate_incoming_nzb_section(
+		m_options.GetAppendCategoryDir() ? 1 : 0,
+		m_options.GetNzbDirInterval(),
+		m_options.GetNzbDirFileAge(),
 		m_options.GetDupeCheck() ? 1 : 0,
-		m_options.GetHealthCheck() == Options::EHealthCheck::hcDupe ? 1 : 0))
-	{
-		case 1:
-			return Status::Warning("'DupeSearch' is enabled while '" + std::string(Options::DUPECHECK) +
-				"' is disabled. Nothing is searched: duplicates need duplicate handling");
-		case 2:
-			return Status::Warning("'DupeSearch' is enabled while '" + std::string(Options::HEALTHCHECK) +
-				"' isn't 'Dupe'. The duplicates it finds are only fetched once a download has failed, "
-				"not as soon as it turns out dead");
-		default:
-			return Status::Ok();
-	}
+		m_options.GetDupeSearch() ? 1 : 0,
+		static_cast<int>(m_options.GetHealthCheck()),
+		&report.options,
+		&SectionValidator::AppendOptionCallback);
+	return report;
 }
 }  // namespace SystemHealth::IncomingNzb

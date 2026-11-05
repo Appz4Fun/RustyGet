@@ -30,36 +30,19 @@ CategoryValidator::CategoryValidator(const Options& options, const Options::Cate
 									 size_t id)
 	: m_options(options), m_category(category), m_name("Category" + std::to_string(id))
 {
-	m_validators.reserve(2);
-	m_validators.push_back(std::make_unique<NameValidator>(category));
-	m_validators.push_back(std::make_unique<UnpackValidator>(options, category));
 }
 
-Status NameValidator::Validate() const
+SectionReport CategoryValidator::Validate() const
 {
+	SectionReport report;
+	report.name = GetName();
 	std::string_view name = m_category.GetName();
-	if (name.empty())
-	{
-		return Status::Warning("Category name is empty. Categories should have a name");
-	}
-	return Status::Ok();
-}
-
-Status UnpackValidator::Validate() const
-{
-	bool globalUnpack = m_options.GetUnpack();
-	bool catUnpack = m_category.GetUnpack();
-
-	switch (nzbget_rs_euh_health_validate_category_unpack(
-		globalUnpack ? 1 : 0, catUnpack ? 1 : 0))
-	{
-		case 1:
-			return Status::Info(
-				"Unpack is disabled. Files will remain packed after download");
-		case 2:
-			return Status::Info("Global Unpack is disabled, so this category setting has no effect");
-		default:
-			return Status::Ok();
-	}
+	nzbget_rs_health_validate_category_section(
+		name.data(), name.size(),
+		m_options.GetUnpack() ? 1 : 0,
+		m_category.GetUnpack() ? 1 : 0,
+		&report.options,
+		&SectionValidator::AppendOptionCallback);
+	return report;
 }
 }  // namespace SystemHealth::Category

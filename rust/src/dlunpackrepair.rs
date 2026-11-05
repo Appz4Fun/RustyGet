@@ -517,65 +517,8 @@ pub fn parchecker_compare_extra_file_stems(
 }
 
 // ============================================================================
-// SystemHealth (`PathsValidator.cpp`, `SystemHealthService.cpp`)
+// SystemHealth (`SystemHealthService.cpp`)
 // ============================================================================
-
-/// Matches `LogFileValidator::Validate(path, writeLog)` mode decision:
-/// - `0`: `writeLog == wlNone` -> `Status::Ok()`
-/// - `1`: `path.empty()` -> `Status::Warning(...)`
-/// - `2`: `writeLog == wlRotate || writeLog == wlReset` with `has_parent_path` -> check parent dir
-/// - `3`: check `File::Exists(path).And(&File::Writable, path)`
-pub fn health_classify_log_file_mode(
-    write_log: i32,
-    wl_none: i32,
-    wl_rotate: i32,
-    wl_reset: i32,
-    path_empty: bool,
-    is_null_or_console: bool,
-    has_parent_path: bool,
-) -> i32 {
-    if write_log == wl_none {
-        return 0;
-    }
-    if path_empty {
-        return 1;
-    }
-    if is_null_or_console {
-        return 0;
-    }
-    if (write_log == wl_rotate || write_log == wl_reset) && has_parent_path {
-        return 2;
-    }
-    3
-}
-
-/// Matches the initial checks in `CertStoreValidator::Validate(path, certCheck)`:
-/// - `0`: `path.empty() && !certCheck` -> `Status::Ok()`
-/// - `1`: `path.empty() && certCheck` -> `Status::Error(...)`
-/// - `2`: check file/directory existence and readability
-pub fn health_classify_cert_store(path_empty: bool, cert_check: bool) -> i32 {
-    if path_empty && !cert_check {
-        0
-    } else if path_empty && cert_check {
-        1
-    } else {
-        2
-    }
-}
-
-/// Matches the initial checks in `LockFileValidator::Validate(path, daemonMode)`:
-/// - `0`: `!daemonMode` -> `Status::Ok()`
-/// - `1`: `path.empty()` -> `Status::Warning(...)`
-/// - `2`: check file or parent directory
-pub fn health_classify_lock_file(path_empty: bool, daemon_mode: bool) -> i32 {
-    if !daemon_mode {
-        0
-    } else if path_empty {
-        1
-    } else {
-        2
-    }
-}
 
 /// Matches `existing.GetSource() == alert.GetSource() && existing.GetCategory() == alert.GetCategory()`
 /// in `SystemHealth::Service::ReportAlert`.
@@ -707,12 +650,6 @@ mod tests {
             b"other.mkv",
             b"movie"
         ));
-        assert_eq!(
-            health_classify_log_file_mode(2, 0, 2, 3, false, false, true),
-            2
-        );
-        assert_eq!(health_classify_cert_store(true, true), 1);
-        assert_eq!(health_classify_lock_file(true, true), 1);
         assert!(health_alert_matches(b"s1", b"c1", b"s1", b"c1"));
     }
 }

@@ -295,91 +295,6 @@ pub fn speed_test_make_request(
     req
 }
 
-/// Port of `SystemHealth::CheckAndRepair::ParBufferValidator::Validate`.
-/// Returns `0` (`Ok`), `1` (`< 0` error), or `2` (`< 250` MB info).
-pub fn health_validate_par_buffer(par_repair: bool, buffer_mb: i32) -> i32 {
-    if !par_repair {
-        return 0;
-    }
-    if buffer_mb < 0 {
-        return 1;
-    }
-    if buffer_mb < 250 {
-        return 2;
-    }
-    0
-}
-
-/// Port of `SystemHealth::CheckAndRepair::ParThreadsValidator::Validate`.
-/// Returns `0` (`Ok`), `1` (`< 0` error), or `2` (`threads > hw_threads` warning).
-pub fn health_validate_par_threads(par_repair: bool, threads: i32, hw_threads: usize) -> i32 {
-    if !par_repair {
-        return 0;
-    }
-    if threads < 0 {
-        return 1;
-    }
-    if threads == 0 {
-        return 0;
-    }
-    if hw_threads > 0 && (threads as usize) > hw_threads {
-        return 2;
-    }
-    0
-}
-
-/// Port of `SystemHealth::CheckAndRepair::ParTimeLimitValidator::Validate`.
-/// Returns `0` (`Ok`), `1` (`< 0` error), or `2` (`1..=4` minutes info).
-pub fn health_validate_par_time_limit(par_repair: bool, limit: i32) -> i32 {
-    if !par_repair {
-        return 0;
-    }
-    if limit < 0 {
-        return 1;
-    }
-    if limit == 0 {
-        return 0;
-    }
-    if limit < 5 {
-        return 2;
-    }
-    0
-}
-
-/// Port of `SystemHealth::Logging::RotateLogValidator::Validate`.
-/// Returns `0` (`Ok`), `1` (`< 0` error), or `2` (`> 365` warning).
-pub fn health_validate_rotate_log(is_rotate: bool, rotate_log: i32) -> i32 {
-    if !is_rotate {
-        return 0;
-    }
-    if rotate_log < 0 {
-        return 1;
-    }
-    if rotate_log > 365 {
-        return 2;
-    }
-    0
-}
-
-/// Port of `SystemHealth::Logging::TimeCorrectionValidator::Validate`.
-/// Returns `true` if `abs(val) > 1440 && abs(val) < 1000000`.
-pub fn health_validate_time_correction(val: i32) -> bool {
-    let abs_val = (val as i64).abs();
-    abs_val > 1440 && abs_val < 1_000_000
-}
-
-/// Port of `SystemHealth::Feeds::UrlValidator::Validate`.
-/// Returns `0` (`Ok`), `1` (empty warning), or `2` (missing `http://`/`https://` warning).
-pub fn health_validate_feed_url(url: &[u8]) -> i32 {
-    if url.is_empty() {
-        return 1;
-    }
-    if !contains_subslice(url, b"http://") && !contains_subslice(url, b"https://") {
-        return 2;
-    }
-    0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,35 +384,5 @@ mod tests {
             speed_test_make_request(b"__down", b"?bytes=", 1000, b"speed.cloudflare.com"),
             b"GET /__down?bytes=1000 HTTP/1.1\r\nHost: speed.cloudflare.com\r\nConnection: close\r\n\r\n"
         );
-    }
-
-    #[test]
-    fn test_system_health_validators() {
-        assert_eq!(health_validate_par_buffer(false, 100), 0);
-        assert_eq!(health_validate_par_buffer(true, -1), 1);
-        assert_eq!(health_validate_par_buffer(true, 100), 2);
-        assert_eq!(health_validate_par_buffer(true, 250), 0);
-
-        assert_eq!(health_validate_par_threads(true, -1, 8), 1);
-        assert_eq!(health_validate_par_threads(true, 0, 8), 0);
-        assert_eq!(health_validate_par_threads(true, 16, 8), 2);
-        assert_eq!(health_validate_par_threads(true, 8, 8), 0);
-
-        assert_eq!(health_validate_par_time_limit(true, -1), 1);
-        assert_eq!(health_validate_par_time_limit(true, 0), 0);
-        assert_eq!(health_validate_par_time_limit(true, 3), 2);
-        assert_eq!(health_validate_par_time_limit(true, 5), 0);
-
-        assert_eq!(health_validate_rotate_log(false, 500), 0);
-        assert_eq!(health_validate_rotate_log(true, -1), 1);
-        assert_eq!(health_validate_rotate_log(true, 400), 2);
-        assert_eq!(health_validate_rotate_log(true, 30), 0);
-
-        assert!(health_validate_time_correction(2000));
-        assert!(!health_validate_time_correction(60));
-
-        assert_eq!(health_validate_feed_url(b""), 1);
-        assert_eq!(health_validate_feed_url(b"ftp://example.com"), 2);
-        assert_eq!(health_validate_feed_url(b"https://example.com/rss"), 0);
     }
 }

@@ -6412,6 +6412,53 @@ int nzbget_rs_dqh_queue_coord_should_pause_pars_after_direct_rename(
     int par_check, int pc_force);
 int nzbget_rs_dqh_queue_coord_should_log_discarded_direct_rename(
     int64_t discarded_size);
+int nzbget_rs_dqh_diskstate_resolve_read_version(
+    int read_version, int format_version);
+int nzbget_rs_dqh_diskstate_state_file_exists(
+    int dest_exists, int transactional, int temp_exists);
+int nzbget_rs_dqh_diskstate_should_flush_queue_file(
+    int flush, int flush_queue_opt);
+int nzbget_rs_dqh_diskstate_is_file_version_unsupported(
+    int file_version, int read_version);
+int nzbget_rs_dqh_diskstate_should_load_separate_history_file(
+    int format_version);
+int nzbget_rs_dqh_diskstate_should_reload_fallback_file_infos(
+    int file_infos_loaded, int queue_empty);
+int nzbget_rs_dqh_diskstate_expected_repair_job_fields(int format_version);
+int nzbget_rs_dqh_diskstate_is_nonneg_count_scan_invalid(
+    int scan_cnt, int count);
+int nzbget_rs_dqh_diskstate_has_meta_name_field(int format_version);
+int nzbget_rs_dqh_diskstate_matches_server_state_id(
+    int news_server_state_id, int server_id);
+const char* nzbget_rs_dqh_diskstate_select_original_or_current_msg_id(
+    const char* orig_msg_id, const char* cur_msg_id);
+int nzbget_rs_dqh_diskstate_should_probe_direct_write_files(
+    int output_initialized, int direct_write_opt, int force_direct_write);
+int nzbget_rs_dqh_diskstate_can_check_completed_dest_file(
+    int completed, int force_direct_write, int dest_dir_empty,
+    int filename_empty);
+int nzbget_rs_dqh_diskstate_matches_history_nzb_id(
+    int kind, int hk_nzb, int hk_url, int nzb_id, int target_id);
+int nzbget_rs_dqh_diskstate_should_discard_feeds_file(
+    int feeds_empty, int feed_history_empty);
+int nzbget_rs_dqh_diskstate_can_store_volume_slot(
+    int has_volume_array, int index, size_t array_size);
+int nzbget_rs_dqh_dupe_fallback_should_skip_try_entry(
+    int fallback_mode, int daf_none, int raw_article, int is_par_file);
+int nzbget_rs_dqh_dupe_fallback_can_defer_to_par(
+    int par_check, int pc_manual, int should_defer_to_par);
+int nzbget_rs_dqh_dupe_fallback_should_skip_blocked_donor_round(
+    int round, size_t sources_len, size_t donors_len, int is_blocked);
+int nzbget_rs_dqh_dupe_fallback_should_rotate_donors(
+    ptrdiff_t idx, size_t donors_len);
+int nzbget_rs_dqh_dupe_fallback_needs_twin_lead_check(
+    int twin_only, int lead_donor_id);
+int nzbget_rs_dqh_dupe_fallback_can_parse_donor_nzb(
+    int filename_empty, int file_exists);
+int nzbget_rs_dqh_dupe_fallback_can_query_content_match(
+    int donor_nzb_id, int own_identity_empty, int donor_print_empty);
+int nzbget_rs_dqh_dupe_fallback_is_donor_file_struct_candidate(
+    int is_par_file, int structure_matches);
 
 #include "nzbget_tls_cipher.h"
 

@@ -179,7 +179,8 @@ private:
 
 
 StateFile::StateFile(const char* filename, int formatVersion, bool transactional, int readVersion) :
-	m_formatVersion(formatVersion), m_readVersion(readVersion ? readVersion : formatVersion),
+	m_formatVersion(formatVersion),
+	m_readVersion(nzbget_rs_dqh_diskstate_resolve_read_version(readVersion, formatVersion)),
 	m_transactional(transactional)
 {
 	NzbgetRsBuf destBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
@@ -218,7 +219,10 @@ int StateFile::ParseFormatVersion(const char* formatSignature)
 
 bool StateFile::FileExists()
 {
-	return FileSystem::FileExists(m_destFilename) || (m_transactional && FileSystem::FileExists(m_tempFilename));
+	return nzbget_rs_dqh_diskstate_state_file_exists(
+		FileSystem::FileExists(m_destFilename) ? 1 : 0,
+		m_transactional ? 1 : 0,
+		m_transactional && FileSystem::FileExists(m_tempFilename) ? 1 : 0) != 0;
 }
 
 StateDiskFile* StateFile::BeginWrite()
@@ -244,7 +248,8 @@ bool StateFile::FinishWrite()
 	}
 
 	// flush file content before renaming
-	if (m_flush && g_Options->GetFlushQueue())
+	if (nzbget_rs_dqh_diskstate_should_flush_queue_file(
+		m_flush ? 1 : 0, g_Options->GetFlushQueue() ? 1 : 0) != 0)
 	{
 		debug("Flushing data for file %s", FileSystem::BaseFileName(m_tempFilename));
 		m_file.Flush();
@@ -267,7 +272,8 @@ bool StateFile::FinishWrite()
 	}
 
 	// flush directory buffer after renaming
-	if (m_flush && g_Options->GetFlushQueue())
+	if (nzbget_rs_dqh_diskstate_should_flush_queue_file(
+		m_flush ? 1 : 0, g_Options->GetFlushQueue() ? 1 : 0) != 0)
 	{
 		debug("Flushing directory for file %s", FileSystem::BaseFileName(m_destFilename));
 		CString errmsg;
@@ -314,7 +320,7 @@ StateDiskFile* StateFile::BeginRead()
 	char FileSignatur[128];
 	m_file.ReadLine(FileSignatur, sizeof(FileSignatur));
 	m_fileVersion = ParseFormatVersion(FileSignatur);
-	if (m_fileVersion > m_readVersion)
+	if (nzbget_rs_dqh_diskstate_is_file_version_unsupported(m_fileVersion, m_readVersion) != 0)
 	{
 		error("Could not load diskstate file %s due to file version mismatch", *m_destFilename);
 		m_file.Close();
@@ -465,7 +471,7 @@ bool DiskState::LoadDownloadQueue(DownloadQueue* downloadQueue, Servers* servers
 		}
 	}
 
-	if (formatVersion == 0 || formatVersion >= 57)
+	if (nzbget_rs_dqh_diskstate_should_load_separate_history_file(formatVersion) != 0)
 	{
 		StateFile stateFile("history", DISKSTATE_QUEUE_VERSION, true, queueReadVersion);
 		if (stateFile.FileExists())
@@ -507,7 +513,8 @@ error:
 	{
 		error("Error reading diskstate for download queue and history");
 	}
-	if (!fileInfosLoaded && !downloadQueue->GetQueue()->empty())
+	if (nzbget_rs_dqh_diskstate_should_reload_fallback_file_infos(
+		fileInfosLoaded ? 1 : 0, downloadQueue->GetQueue()->empty() ? 1 : 0) != 0)
 	{
 		// the downloads that did load keep running: with only the stubs the queue
 		// file holds (no name, size or groups) they showed blank and the next save
@@ -901,8 +908,8 @@ bool DiskState::LoadDupeExtras(NzbInfo* nzbInfo, StateDiskFile& infile, int form
 		int fileId = 0, parFile = 0, failedArticles = 0;
 		uint32 decodedHigh = 0, decodedLow = 0, failedHigh = 0, failedLow = 0, missedHigh = 0, missedLow = 0;
 		uint32 stepsHigh = 0, stepsLow = 0;
-		int expectedJobFields = formatVersion >= 66 ? 11 : 9;
-		int jobScanCnt = formatVersion >= 66 ?
+		int expectedJobFields = nzbget_rs_dqh_diskstate_expected_repair_job_fields(formatVersion);
+		int jobScanCnt = expectedJobFields == 11 ?
 			infile.ScanLine("%i,%u,%u,%u,%u,%u,%u,%i,%i,%u,%u", &fileId, &decodedHigh,
 				&decodedLow, &failedHigh, &failedLow, &missedHigh, &missedLow, &parFile,
 				&failedArticles, &stepsHigh, &stepsLow) :
@@ -998,8 +1005,9 @@ bool DiskState::LoadDupeTrailer(const std::function<NzbInfo*(int)>& find, StateD
 	{
 		return true;	// a file upstream nzbget wrote, or one without any
 	}
-	int count;
-	if (infile.ScanLine("%i", &count) != 1 || count < 0) goto error;
+	int count = 0;
+	int countScanCnt = infile.ScanLine("%i", &count);
+	if (nzbget_rs_dqh_diskstate_is_nonneg_count_scan_invalid(countScanCnt, count) != 0) goto error;
 	for (int i = 0; i < count; i++)
 	{
 		int id;
@@ -1011,7 +1019,8 @@ bool DiskState::LoadDupeTrailer(const std::function<NzbInfo*(int)>& find, StateD
 	if (infile.ReadLine(buf, sizeof(buf)) && nzbget_rs_dqh_bytes_equal(buf, UNPACKSTATE_TRAILER))
 	{
 		int unpackCount = 0;
-		if (infile.ScanLine("%i", &unpackCount) != 1 || unpackCount < 0) goto error;
+		int unpackScanCnt = infile.ScanLine("%i", &unpackCount);
+		if (nzbget_rs_dqh_diskstate_is_nonneg_count_scan_invalid(unpackScanCnt, unpackCount) != 0) goto error;
 		for (int i = 0; i < unpackCount; i++)
 		{
 			int id = 0;
@@ -1226,7 +1235,7 @@ bool DiskState::LoadNzbInfo(NzbInfo* nzbInfo, Servers* servers, StateDiskFile& i
 
 	// format 65 was written only by pre-release DupeArticleFallback builds,
 	// which had the stream-repair state below but not the meta name
-	if (formatVersion >= 64 && formatVersion != 65)
+	if (nzbget_rs_dqh_diskstate_has_meta_name_field(formatVersion) != 0)
 	{
 		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
 		nzbInfo->SetMetaName(buf);
@@ -1594,7 +1603,8 @@ bool DiskState::LoadServerStats(ServerStatList* serverStatList, Servers* servers
 			// find server (id could change if config file was edited)
 			for (NewsServer* newsServer : servers)
 			{
-				if (newsServer->GetStateId() == serverId)
+				if (nzbget_rs_dqh_diskstate_matches_server_state_id(
+					newsServer->GetStateId(), serverId) != 0)
 				{
 					serverStatList->StatOp(newsServer->GetId(), successArticles, failedArticles, ServerStatList::soSet);
 				}
@@ -1660,8 +1670,9 @@ bool DiskState::SaveFileInfo(FileInfo* fileInfo, StateDiskFile& outfile, bool ar
 			articleEntries.push_back(NzbgetRsDiskArticleInfo{
 				articleInfo->GetPartNumber(),
 				articleInfo->GetSize(),
-				!Util::EmptyStr(articleInfo->GetDupeOriginalMessageId()) ?
-					articleInfo->GetDupeOriginalMessageId() : articleInfo->GetMessageId()
+				nzbget_rs_dqh_diskstate_select_original_or_current_msg_id(
+					articleInfo->GetDupeOriginalMessageId(),
+					articleInfo->GetMessageId())
 			});
 		}
 	}
@@ -1737,7 +1748,8 @@ bool DiskState::LoadFileInfo(FileInfo* fileInfo, StateDiskFile& infile, int form
 			bool hasOwnOutFile = false;
 			bool hasOutTmp = false;
 			bool hasForceDest = false;
-			if (outputInitialized != 0 && (directWriteOpt || forceDirectWrite))
+			if (nzbget_rs_dqh_diskstate_should_probe_direct_write_files(
+				outputInitialized, directWriteOpt ? 1 : 0, forceDirectWrite ? 1 : 0) != 0)
 			{
 				const char* destDir = fileInfo->GetNzbInfo() ? fileInfo->GetNzbInfo()->GetDestDir() : nullptr;
 				hasOwnOutFile = !fileInfo->GetOutputFilename().empty() &&
@@ -2099,8 +2111,11 @@ bool DiskState::LoadFileState(FileInfo* fileInfo, Servers* servers, StateDiskFil
 			nzbget_rs_free(outTmpBuf);
 		}
 		bool hasCompletedDest = false;
-		if ((completed || fileInfo->GetForceDirectWrite()) && destDir &&
-			!Util::EmptyStr(destDir) && !Util::EmptyStr(fileInfo->GetFilename()))
+		if (nzbget_rs_dqh_diskstate_can_check_completed_dest_file(
+			completed ? 1 : 0,
+			fileInfo->GetForceDirectWrite() ? 1 : 0,
+			Util::EmptyStr(destDir) ? 1 : 0,
+			Util::EmptyStr(fileInfo->GetFilename()) ? 1 : 0) != 0)
 		{
 			NzbgetRsBuf compDestBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
 				destDir, PATH_SEPARATOR, fileInfo->GetFilename());
@@ -2295,8 +2310,13 @@ bool DiskState::LoadHistory(HistoryList* history, Servers* servers, StateDiskFil
 			{
 				for (HistoryInfo* historyInfo : history)
 				{
-					if ((historyInfo->GetKind() == HistoryInfo::hkNzb || historyInfo->GetKind() == HistoryInfo::hkUrl) &&
-						historyInfo->GetNzbInfo()->GetId() == id)
+					if (nzbget_rs_dqh_diskstate_matches_history_nzb_id(
+						(int)historyInfo->GetKind(),
+						(int)HistoryInfo::hkNzb,
+						(int)HistoryInfo::hkUrl,
+						(historyInfo->GetKind() == HistoryInfo::hkNzb || historyInfo->GetKind() == HistoryInfo::hkUrl) ?
+							historyInfo->GetNzbInfo()->GetId() : 0,
+						id) != 0)
 					{
 						return historyInfo->GetNzbInfo();
 					}
@@ -2510,7 +2530,8 @@ bool DiskState::SaveFeeds(Feeds* feeds, FeedHistory* feedHistory)
 
 	StateFile stateFile("feeds", DISKSTATE_FEEDS_VERSION, true);
 
-	if (feeds->empty() && feedHistory->empty())
+	if (nzbget_rs_dqh_diskstate_should_discard_feeds_file(
+		feeds->empty() ? 1 : 0, feedHistory->empty() ? 1 : 0) != 0)
 	{
 		stateFile.Discard();
 		return true;
@@ -3206,7 +3227,13 @@ bool DiskState::LoadVolumeStat(Servers* servers, ServerVolumes* serverVolumes, S
 			for (int j = 0; j < arrSize; j++)
 			{
 				if (infile.ScanLine("%u,%u", &High1, &Low1) != 2) goto error;
-				if (volumeArray && j < (int)volumeArray->size()) (*volumeArray)[j] = Util::JoinInt64(High1, Low1);
+				if (nzbget_rs_dqh_diskstate_can_store_volume_slot(
+					volumeArray != nullptr ? 1 : 0,
+					j,
+					volumeArray ? volumeArray->size() : 0) != 0)
+				{
+					(*volumeArray)[j] = Util::JoinInt64(High1, Low1);
+				}
 			}
 		}
 

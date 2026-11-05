@@ -38983,6 +38983,319 @@ pub extern "C" fn nzbget_rs_dqh_queue_coord_should_log_discarded_direct_rename(
     )
 }
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_diskstate_resolve_read_version(
+    read_version: c_int,
+    format_version: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_diskstate_resolve_read_version(read_version, format_version)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_diskstate_state_file_exists(
+    dest_exists: c_int,
+    transactional: c_int,
+    temp_exists: c_int,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_diskstate_state_file_exists(
+        dest_exists != 0,
+        transactional != 0,
+        temp_exists != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_diskstate_should_flush_queue_file(
+    flush: c_int,
+    flush_queue_opt: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_diskstate_should_flush_queue_file(
+            flush != 0,
+            flush_queue_opt != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_diskstate_is_file_version_unsupported(
+    file_version: c_int,
+    read_version: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_diskstate_is_file_version_unsupported(
+            file_version,
+            read_version,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_diskstate_should_load_separate_history_file(
+    format_version: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_diskstate_should_load_separate_history_file(format_version),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_diskstate_should_reload_fallback_file_infos(
+    file_infos_loaded: c_int,
+    queue_empty: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_diskstate_should_reload_fallback_file_infos(
+            file_infos_loaded != 0,
+            queue_empty != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_diskstate_expected_repair_job_fields(
+    format_version: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_diskstate_expected_repair_job_fields(format_version)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_diskstate_is_nonneg_count_scan_invalid(
+    scan_cnt: c_int,
+    count: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_diskstate_is_nonneg_count_scan_invalid(scan_cnt, count),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_diskstate_has_meta_name_field(format_version: c_int) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_diskstate_has_meta_name_field(
+        format_version,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_diskstate_matches_server_state_id(
+    news_server_state_id: c_int,
+    server_id: c_int,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_diskstate_matches_server_state_id(
+        news_server_state_id,
+        server_id,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_select_original_or_current_msg_id(
+    orig_msg_id: *const c_char,
+    cur_msg_id: *const c_char,
+) -> *const c_char {
+    let orig = if orig_msg_id.is_null() {
+        b"" as &[u8]
+    } else {
+        CStr::from_ptr(orig_msg_id).to_bytes()
+    };
+    let cur = if cur_msg_id.is_null() {
+        b"" as &[u8]
+    } else {
+        CStr::from_ptr(cur_msg_id).to_bytes()
+    };
+    let chosen = crate::dupequeuehealth::dqh_diskstate_select_original_or_current_msg_id(orig, cur);
+    if !orig.is_empty() && std::ptr::eq(chosen.as_ptr(), orig.as_ptr()) {
+        orig_msg_id
+    } else {
+        cur_msg_id
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_diskstate_should_probe_direct_write_files(
+    output_initialized: c_int,
+    direct_write_opt: c_int,
+    force_direct_write: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_diskstate_should_probe_direct_write_files(
+            output_initialized,
+            direct_write_opt != 0,
+            force_direct_write != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_diskstate_can_check_completed_dest_file(
+    completed: c_int,
+    force_direct_write: c_int,
+    dest_dir_empty: c_int,
+    filename_empty: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_diskstate_can_check_completed_dest_file(
+            completed != 0,
+            force_direct_write != 0,
+            dest_dir_empty != 0,
+            filename_empty != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_diskstate_matches_history_nzb_id(
+    kind: c_int,
+    hk_nzb: c_int,
+    hk_url: c_int,
+    nzb_id: c_int,
+    target_id: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_diskstate_matches_history_nzb_id(
+            kind, hk_nzb, hk_url, nzb_id, target_id,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_diskstate_should_discard_feeds_file(
+    feeds_empty: c_int,
+    feed_history_empty: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_diskstate_should_discard_feeds_file(
+            feeds_empty != 0,
+            feed_history_empty != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_diskstate_can_store_volume_slot(
+    has_volume_array: c_int,
+    index: c_int,
+    array_size: usize,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_diskstate_can_store_volume_slot(
+            has_volume_array != 0,
+            index,
+            array_size,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupe_fallback_should_skip_try_entry(
+    fallback_mode: c_int,
+    daf_none: c_int,
+    raw_article: c_int,
+    is_par_file: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_dupe_fallback_should_skip_try_entry(
+            fallback_mode,
+            daf_none,
+            raw_article != 0,
+            is_par_file != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupe_fallback_can_defer_to_par(
+    par_check: c_int,
+    pc_manual: c_int,
+    should_defer_to_par: c_int,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_dupe_fallback_can_defer_to_par(
+        par_check,
+        pc_manual,
+        should_defer_to_par != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupe_fallback_should_skip_blocked_donor_round(
+    round: c_int,
+    sources_len: usize,
+    donors_len: usize,
+    is_blocked: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_dupe_fallback_should_skip_blocked_donor_round(
+            round,
+            sources_len,
+            donors_len,
+            is_blocked != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupe_fallback_should_rotate_donors(
+    idx: isize,
+    donors_len: usize,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_dupe_fallback_should_rotate_donors(
+        idx, donors_len,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupe_fallback_needs_twin_lead_check(
+    twin_only: c_int,
+    lead_donor_id: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_dupe_fallback_needs_twin_lead_check(
+            twin_only != 0,
+            lead_donor_id,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupe_fallback_can_parse_donor_nzb(
+    filename_empty: c_int,
+    file_exists: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_dupe_fallback_can_parse_donor_nzb(
+            filename_empty != 0,
+            file_exists != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupe_fallback_can_query_content_match(
+    donor_nzb_id: c_int,
+    own_identity_empty: c_int,
+    donor_print_empty: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_dupe_fallback_can_query_content_match(
+            donor_nzb_id,
+            own_identity_empty != 0,
+            donor_print_empty != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupe_fallback_is_donor_file_struct_candidate(
+    is_par_file: c_int,
+    structure_matches: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_dupe_fallback_is_donor_file_struct_candidate(
+            is_par_file != 0,
+            structure_matches != 0,
+        ),
+    )
+}
+
 
 
 

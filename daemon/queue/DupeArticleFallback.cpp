@@ -114,8 +114,11 @@ bool DupeArticleFallback::ParCannotCover(NzbInfo* nzbInfo, bool withMargin)
 
 bool DupeArticleFallback::TryFallback(DownloadQueue* downloadQueue, FileInfo* fileInfo, ArticleInfo* articleInfo)
 {
-	if (g_Options->GetDupeArticleFallback() == Options::dafNone || g_Options->GetRawArticle() ||
-		IsParFile(fileInfo))
+	if (nzbget_rs_dqh_dupe_fallback_should_skip_try_entry(
+		(int)g_Options->GetDupeArticleFallback(),
+		(int)Options::dafNone,
+		g_Options->GetRawArticle() ? 1 : 0,
+		IsParFile(fileInfo) ? 1 : 0) != 0)
 	{
 		return false;
 	}
@@ -180,7 +183,10 @@ bool DupeArticleFallback::TryFallback(DownloadQueue* downloadQueue, FileInfo* fi
 		// nothing by itself, and the stream repair of post-processing waits for
 		// it too: a hole left to it stayed, while the "article" mode had filled
 		// it. Then the articles are borrowed as in that mode.
-		bool parDefer = g_Options->GetParCheck() != Options::pcManual && ShouldDeferToPar(nzbInfo);
+		bool parDefer = nzbget_rs_dqh_dupe_fallback_can_defer_to_par(
+			(int)g_Options->GetParCheck(),
+			(int)Options::pcManual,
+			g_Options->GetParCheck() != Options::pcManual && ShouldDeferToPar(nzbInfo) ? 1 : 0) != 0;
 		ParDamage::Verdict damage = parDefer ? ParDamage::Judge(nzbInfo) : ParDamage::Verdict();
 		// par2 repairs whole blocks: the blocks the failed articles spoiled may
 		// be more than its volumes hold long before the bytes are (ParDamage);
@@ -249,8 +255,12 @@ bool DupeArticleFallback::TryFallback(DownloadQueue* downloadQueue, FileInfo* fi
 	// sources of a duplicate whose articles failed the par2 checksums are passed over (B40)
 	std::vector<int>& sourceDonors = *articleInfo->GetDupeSourceDonors();
 	int pinnedRound = round;
-	while (round < (int)sources.size() && round < (int)sourceDonors.size() &&
-		nzbInfo->GetDupeBlockedDonors()->count(sourceDonors[round]))
+	while (nzbget_rs_dqh_dupe_fallback_should_skip_blocked_donor_round(
+		round,
+		sources.size(),
+		sourceDonors.size(),
+		round >= 0 && (size_t)round < sourceDonors.size() &&
+			nzbInfo->GetDupeBlockedDonors()->count(sourceDonors[round]) ? 1 : 0) != 0)
 	{
 		round++;
 	}
@@ -358,7 +368,7 @@ void DupeArticleFallback::RotateToLead(RawNzbList& donors, int leadNzbId)
 	}
 	ptrdiff_t idx = nzbget_rs_dqh_dupe_fallback_find_lead_index(
 		donorIds.data(), donorIds.size(), leadNzbId);
-	if (idx > 0 && (size_t)idx < donors.size())
+	if (nzbget_rs_dqh_dupe_fallback_should_rotate_donors(idx, donors.size()) != 0)
 	{
 		std::rotate(donors.begin(), donors.begin() + idx, donors.end());
 	}
@@ -521,8 +531,8 @@ CString DupeArticleFallback::NzbFilenameOf(FileInfo* fileInfo)
 		for (size_t i = 0; i < articles->size(); i++)
 		{
 			ArticleInfo* article = (*articles)[i].get();
-			const char* messageId = !Util::EmptyStr(article->GetDupeOriginalMessageId()) ?
-				article->GetDupeOriginalMessageId() : article->GetMessageId();
+			const char* messageId = nzbget_rs_dqh_diskstate_select_original_or_current_msg_id(
+				article->GetDupeOriginalMessageId(), article->GetMessageId());
 			ArticleInfo* ownArticle = (*ownArticles)[i].get();
 			if (nzbget_rs_dcf_dupe_fallback_own_article_matches(
 				ownArticle->GetPartNumber(), article->GetPartNumber(),
@@ -612,7 +622,8 @@ void DupeArticleFallback::PinSources(DownloadQueue* downloadQueue, FileInfo* fil
 
 	RawNzbList donors = CollectDonors(downloadQueue, nzbInfo);
 	VacateGhostLead(fileInfo, donors);
-	if (twinOnly && fileInfo->GetDupeLeadDonorId() != 0)
+	if (nzbget_rs_dqh_dupe_fallback_needs_twin_lead_check(
+		twinOnly ? 1 : 0, fileInfo->GetDupeLeadDonorId()) != 0)
 	{
 		std::string ownIdentity = TwinCheck::Identity(nzbInfo);
 		int leadId = fileInfo->GetDupeLeadDonorId();
@@ -750,7 +761,9 @@ std::vector<CString> DupeArticleFallback::BuildCandidateMessageIds(
 
 std::unique_ptr<NzbInfo> DupeArticleFallback::ParseDonorNzb(const char* queuedFilename)
 {
-	if (Util::EmptyStr(queuedFilename) || !FileSystem::FileExists(queuedFilename))
+	if (nzbget_rs_dqh_dupe_fallback_can_parse_donor_nzb(
+		Util::EmptyStr(queuedFilename) ? 1 : 0,
+		!Util::EmptyStr(queuedFilename) && FileSystem::FileExists(queuedFilename) ? 1 : 0) == 0)
 	{
 		return nullptr;
 	}
@@ -845,7 +858,10 @@ FileInfo* DupeArticleFallback::MatchDonorFile(FileInfo* targetFile, NzbInfo* don
 			return nullptr;
 		}
 	}
-	std::string byContent = donorNzbId && !ownIdentity.empty() && !Util::EmptyStr(donorPrint) ?
+	std::string byContent = nzbget_rs_dqh_dupe_fallback_can_query_content_match(
+		donorNzbId,
+		ownIdentity.empty() ? 1 : 0,
+		Util::EmptyStr(donorPrint) ? 1 : 0) != 0 ?
 		TwinCheck::MatchByContent(own->GetId(), ownIdentity.c_str(), targetFile->GetFilename(),
 			targetNzbFilename, donorNzbId, donorPrint) : "";
 	if (nzbget_rs_dqh_dupe_fallback_is_content_match_rejected(
@@ -894,7 +910,10 @@ FileInfo* DupeArticleFallback::MatchDonorFile(FileInfo* targetFile, NzbInfo* don
 
 	for (FileInfo* donorFile : donorNzb->GetFileList())
 	{
-		if (IsParFile(donorFile) || !StructureMatches(targetFile, donorFile))
+		bool isPar = IsParFile(donorFile);
+		if (nzbget_rs_dqh_dupe_fallback_is_donor_file_struct_candidate(
+			isPar ? 1 : 0,
+			!isPar && StructureMatches(targetFile, donorFile) ? 1 : 0) == 0)
 		{
 			continue;
 		}

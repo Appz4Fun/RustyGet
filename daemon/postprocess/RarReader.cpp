@@ -15,7 +15,7 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 
@@ -32,11 +32,10 @@
 
 int64 RarSourceCursor::Read(void* buffer, int64 size)
 {
-	int eofInt = 0;
-	int64 newPos = m_position;
-	int64 available = nzbget_rs_rrd_rar_cursor_calc_read_window(
-		m_source.Size(), m_position, size, &eofInt, &newPos);
-	if (eofInt != 0)
+	int64 rem = (int64)((uint64)m_source.Size() - (uint64)m_position);
+	int64 clampedRem = rem > 0 ? rem : 0;
+	int64 available = size < clampedRem ? size : clampedRem;
+	if (available < size)
 	{
 		m_eof = true;	// mimic feof: only a read past the end raises it
 	}
@@ -48,7 +47,7 @@ int64 RarSourceCursor::Read(void* buffer, int64 size)
 	{
 		return 0;	// source refused (donor article missing / target hole)
 	}
-	m_position = newPos;
+	m_position = (int64)((uint64)m_position + (uint64)available);
 	return available;
 }
 
@@ -56,12 +55,16 @@ bool RarSourceCursor::Seek(int64 position, DiskFile::ESeekOrigin origin)
 {
 	// Header sizes can wrap the cursor. Use unsigned arithmetic explicitly:
 	// signed overflow here is undefined even though the parser needs wrapping.
-	int64 target = 0;
-	if (!nzbget_rs_rrd_rar_cursor_calc_seek_target(
-		m_position,
-		origin == DiskFile::soEnd ? m_source.Size() : 0,
-		position, (int)origin, (int)DiskFile::soCur, (int)DiskFile::soEnd,
-		&target))
+	int64 target = position;
+	if (origin == DiskFile::soCur)
+	{
+		target = (int64)((uint64)m_position + (uint64)position);
+	}
+	else if (origin == DiskFile::soEnd)
+	{
+		target = (int64)((uint64)m_source.Size() + (uint64)position);
+	}
+	if (target < 0)
 	{
 		return false;
 	}
@@ -83,8 +86,7 @@ bool RarVolume::Read()
 	// size the source through the open handle: a path-based stat could race
 	// a concurrent rename/replace and disagree with the handle's file
 	int64 size = file.Seek(0, DiskFile::soEnd) ? file.Position() : -1;
-	bool seekZeroOk = size >= 0 && file.Seek(0);
-	if (nzbget_rs_dqh_rar_volume_is_read_handle_ready(size, seekZeroOk ? 1 : 0) == 0)
+	if (size < 0 || !file.Seek(0))
 	{
 		file.Close();
 		return false;
@@ -215,8 +217,7 @@ bool RarVolume::ReadFrom(ContentSource& source)
 		{
 			RarFile& file = c->volume->m_files.back();
 			// Preserve the two's-complement result without signed overflow.
-			file.m_dataOffset = (int64)nzbget_rs_dqh_rar_volume_set_data_offset(
-				position, (int64_t)file.m_packedSize);
+			file.m_dataOffset = (int64)((uint64)position - (uint64)file.m_packedSize);
 			return 0;
 		});
 	};
@@ -236,8 +237,7 @@ bool RarVolume::ReadFrom(ContentSource& source)
 
 	// DetectRarVersion never assigned m_version if Size/Read threw while
 	// reading the signature. Preserve it when this is a repeated ReadFrom.
-	if (nzbget_rs_dqh_rar_volume_should_update_version(
-		context.error != nullptr ? 1 : 0, context.signatureRead ? 1 : 0) != 0)
+	if (!context.error || context.signatureRead)
 	{
 		m_version = state.version;
 	}
@@ -316,8 +316,7 @@ bool RarVolume::DecryptBuf(const uint8 in[16], uint8 out[16])
 	// padding is disabled in DecryptInit, so one 16-byte block in yields exactly
 	// one 16-byte block out
 	int outlen = 0;
-	bool evpOk = EVP_DecryptUpdate(m_context.get(), out, &outlen, in, 16) != 0;
-	return nzbget_rs_dqh_rar_volume_is_decrypt_buf_valid(evpOk ? 1 : 0, outlen) != 0;
+	return EVP_DecryptUpdate(m_context.get(), out, &outlen, in, 16) != 0 && outlen == 16;
 #else
 	return false;
 #endif
@@ -329,4 +328,3 @@ void RarVolume::DecryptFree()
 	m_context.reset();
 #endif
 }
-

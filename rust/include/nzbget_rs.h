@@ -2231,27 +2231,11 @@ int nzbget_rs_dur_article_dl_should_throttle_bandwidth(
 int nzbget_rs_dur_article_dl_classify_decode_status(
     int raw_article, int decoder_status, int is_yenc, int range_exceeded);
 
-int nzbget_rs_dur_direct_unpack_resolve_final_status(
-    int processed, int unpack_ok, int interrupted, int cancelled,
-    int ns_none, int ns_success, int ns_failure);
 int nzbget_rs_dur_direct_unpack_use_inter_dir(
     const char* dest_dir, const char* inter_dir, char sep);
-int nzbget_rs_dur_direct_unpack_is_main_archive(const char* filename);
 int nzbget_rs_dur_direct_unpack_is_insert_disk_prompt(
     const char* buf, size_t i, int ch);
 
-int nzbget_rs_dur_unpack_ctrl_should_skip_second_attempt(
-    int unpack_tried, int par_repaired, int password_empty,
-    int pass_file_empty, int pass_list_tried);
-void nzbget_rs_dur_unpack_ctrl_eval_unrar_exit(
-    int exit_code, int all_ok_received, int terminated, int auto_terminated,
-    int prev_password_error, int* out_unpack_ok, int* out_start_error,
-    int* out_space_error, int* out_password_error);
-int nzbget_rs_dur_unpack_ctrl_classify_archive_file(const char* filename);
-int nzbget_rs_dur_unpack_ctrl_resolve_fail_status(
-    int space_error, int password_error, int decrypt_error,
-    int us_space, int us_password, int us_failure);
-int nzbget_rs_dur_unpack_ctrl_has_completed_archive_ext(const char* filename);
 
 int nzbget_rs_dur_repair_ctrl_classify_file_crc_status(
     int cf_status, int reprocess, int has_segments,
@@ -2469,9 +2453,6 @@ int nzbget_rs_fuq_prepost_should_complete_after_direct_rename(
 void nzbget_rs_fuq_repair_ctrl_calc_par_check_times(
     int cur_dl_sec, int start_dl_sec, int64_t cur_time, int64_t par_time,
     int* out_wait_time, int* out_par_sec);
-void nzbget_rs_fuq_direct_unpack_eval_unrar_result(
-    int exit_code, int all_ok_msg, int terminated, int cancelled, int stopped,
-    int* out_unpack_ok, int* out_interrupted);
 
 int nzbget_rs_pup_parchecker_select_match_type(
     int file_status, int fs_success, int fs_partial,
@@ -2490,25 +2471,6 @@ int nzbget_rs_pup_parchecker_should_abort_extra_scan(
 int nzbget_rs_pup_parchecker_should_print_stage_msg(
     int stage, int pt_verifying_repaired, int par_quick);
 
-int nzbget_rs_pup_unpack_ctrl_should_try_par_before_pass_file(
-    int unpack_ok, int has_par_files, int password_err, int par_status, int ps_skipped);
-int nzbget_rs_pup_unpack_ctrl_should_try_password_file(
-    int unpack_ok, int start_err, int space_err, int decrypt_err, int password_err,
-    int terminated, int auto_terminated, int password_empty, int pass_file_empty);
-void nzbget_rs_pup_unpack_ctrl_eval_sevenzip_exit(
-    int exit_code, int all_ok_msg, int terminated, int auto_terminated,
-    int* out_unpack_ok, int* out_start_err);
-int nzbget_rs_pup_unpack_ctrl_will_retry_with_pass(
-    int decrypt_err, int password_err, int password_empty, int pass_file_not_empty);
-int nzbget_rs_pup_unpack_ctrl_is_stopped_for_reload(
-    int auto_terminated, int post_deleted, int is_stopped, int terminated);
-int nzbget_rs_pup_unpack_ctrl_should_request_par_after_fail(
-    int unpack_ok, int par_status, int ps_skipped, int par_full,
-    int start_err, int space_err, int password_err,
-    int terminated, int is_stopped, int auto_terminated, int has_par_files);
-int nzbget_rs_pup_unpack_ctrl_calc_force_repair_on_request(
-    int password_empty, int pass_file_empty, int pass_list_tried,
-    int decrypt_err, int password_err, int par_status, int ps_skipped);
 
 int64_t nzbget_rs_pup_history_coord_calc_min_time(
     int64_t cur_time, int keep_history_days);
@@ -2683,11 +2645,6 @@ int nzbget_rs_dad_article_dl_should_advance_server_list(
 int nzbget_rs_dad_article_dl_should_pace_critical_uncached(
     int is_stopped, int has_cached_buffer, int is_critical, int is_flushing);
 
-int nzbget_rs_dad_direct_unpack_eval_post_run_actions(
-    int unpack_ok, int cancelled, int is_stopped, int terminated,
-    int* out_should_cleanup);
-int nzbget_rs_dad_direct_unpack_should_commit_extracted_archives(
-    int has_archives, int status, int ns_success, int interrupted);
 
 int nzbget_rs_dad_prepost_should_complete_interrupted_download(
     int has_post_info, int kind, int nk_nzb, int completed_files_empty,
@@ -2804,23 +2761,6 @@ int nzbget_rs_pnd_parchecker_check_verify_data_file_preconditions(
 int nzbget_rs_pnd_parchecker_calc_dumb_crc_read_size(
     int cnt, int buffer_size, int64_t start, int64_t end);
 
-int nzbget_rs_pnd_unpack_ctrl_classify_run_branch(
-    int unpack, int has_files, int par_status, int ps_skipped,
-    int par_rename_status, int rs_skipped, int has_par_files,
-    int has_renamed_archive_files);
-int nzbget_rs_pnd_unpack_ctrl_eval_rar_unpack_mode(
-    int has_not_unpacked_rar_files, int unpack_dir_created,
-    int direct_unpack_status, int ns_success, int* out_log_kind);
-int nzbget_rs_pnd_unpack_ctrl_should_log_exit_error(
-    int unpack_ok, int exit_code, int will_retry_with_pass,
-    int is_stopped, int is_terminated);
-int nzbget_rs_pnd_unpack_ctrl_accumulate_split_piece(
-    const char* filename, const char* dest_base_name,
-    int64_t segment_size, int64_t first_segment_size,
-    int* inout_count, int* inout_min, int* inout_max, int* inout_dif_size_min);
-int nzbget_rs_pnd_unpack_ctrl_classify_cleanup_archive_file(
-    int is_dir, int inter_dir, int in_extracted_files, int is_downloaded_file,
-    int has_splitted_files, int in_joined_files, const char* filename);
 
 int nzbget_rs_pnd_dupe_fallback_should_defer_to_par_header(
     int has_nzb_info, int direct_rename_status, int ts_running,
@@ -3046,57 +2986,11 @@ int nzbget_rs_stq_queue_editor_eval_align_group_step(
     uint32_t* out_new_last_num);
 
 /* DirectUnpack, Cleanup, UnpackController, UrlCoordinator, FeedCoordinator & RemoteServer Hot-Path FFI (`unpackcleanurlfeed.rs`) */
-int nzbget_rs_ucf_direct_unpack_should_clear_working(
-    int has_post_info, int has_live_repair_thread);
-int nzbget_rs_ucf_direct_unpack_use_final_dir(
-    int use_inter_dir, const char* final_dir);
-int nzbget_rs_ucf_direct_unpack_is_progress_dots_line(const char* buf);
-int nzbget_rs_ucf_direct_unpack_should_set_cancelled(
-    int has_prepost, int prepost_stopped);
-int nzbget_rs_ucf_direct_unpack_should_try_break(
-    int is_exec_thread, int cancelled_or_auto_terminated, int has_active_process);
-int nzbget_rs_ucf_direct_unpack_has_dest_changed(
-    int has_nzb, const char* cur_dest, const char* nzb_dest,
-    const char* cur_final, const char* nzb_final);
-int nzbget_rs_ucf_direct_unpack_matches_waiting_file(
-    const char* waiting_file, const char* downloaded_filename);
-int nzbget_rs_ucf_direct_unpack_can_proceed(
-    int is_archive, int failed_articles);
-int nzbget_rs_ucf_direct_unpack_calc_extra_time(
-    int64_t extra_start_time, int64_t cur_time,
-    int cur_unpack_sec, int cur_post_total_sec,
-    int* out_new_unpack_sec, int* out_new_post_total_sec);
-int nzbget_rs_ucf_move_ctrl_is_dot_file(const char* filename);
 int nzbget_rs_ucf_unpack_ctrl_eval_unpack_param(const char* param_val);
-int nzbget_rs_ucf_unpack_ctrl_has_any_archive_files(
-    int has_rar, int has_7z, int has_7z_multi, int has_splitted);
-int nzbget_rs_ucf_unpack_ctrl_can_continue_password_loop(
-    int unpack_ok, int start_err, int space_err, int decrypt_err, int password_err);
-int nzbget_rs_ucf_unpack_ctrl_should_resume_before_password_try(
-    int is_stopped, int auto_terminated);
-int nzbget_rs_ucf_unpack_ctrl_eval_pass_list_tried(
-    int is_stopped, int auto_terminated);
-int nzbget_rs_ucf_unpack_ctrl_is_split_first_piece(const char* filename);
-int nzbget_rs_ucf_unpack_ctrl_calc_join_progress(
-    int64_t cur_written, int cnt, int64_t total_size, int64_t* out_new_written);
-int nzbget_rs_ucf_unpack_ctrl_is_join_size_mismatch(
-    int ok, int64_t written, int64_t total_size);
-int nzbget_rs_ucf_unpack_ctrl_is_downloaded_file_allowed(
-    int use_temp_unpack_dir, int downloaded_empty);
-int nzbget_rs_ucf_unpack_ctrl_should_move_from_temp_unpack(
-    int unpack_ok, int use_temp_unpack_dir);
-int nzbget_rs_ucf_unpack_ctrl_should_cleanup_archive_disks(
-    int unpack_ok, int move_ok, int unpack_cleanup_disk);
 int nzbget_rs_ucf_remote_server_is_accept_busy_retry(
     int bind, int has_accepted_conn, int accept_busy, int is_stopped);
 
 /* DirectRenamer, RarReader, Repair, ArticleDownloader, WebDownloader & NzbFile Hot-Path FFI (`renamerarrepdl.rs`) */
-int64_t nzbget_rs_rrd_rar_cursor_calc_read_window(
-    int64_t source_size, int64_t cur_pos, int64_t req_size,
-    int* out_eof, int64_t* out_new_pos);
-int nzbget_rs_rrd_rar_cursor_calc_seek_target(
-    int64_t cur_pos, int64_t source_size, int64_t offset,
-    int origin, int so_cur, int so_end, int64_t* out_target);
 int nzbget_rs_rrd_repair_ctrl_filename_eq_ignore_case(
     const char* a, const char* b);
 int nzbget_rs_rrd_repair_ctrl_should_load_partial_segments(
@@ -3168,8 +3062,6 @@ int nzbget_rs_psp_prepost_should_check_unpaused_par_for_missing_index(
 int nzbget_rs_psp_prepost_is_better_paused_par_candidate(
     int is_par_file, int paused, int deleted, int has_smallest,
     int64_t file_size, int64_t smallest_size);
-int nzbget_rs_psp_rar_renamer_calc_stage_progress(
-    int file_count, int cur_file);
 void nzbget_rs_psp_rar_renamer_calc_old_extension_parts(
     int volume_no, uint8_t* out_ch, int* out_num);
 int nzbget_rs_psp_parchecker_calc_twin_blocks_needed(
@@ -3748,14 +3640,6 @@ int nzbget_rs_pur_history_coord_should_notify_dupe_search_name_changed(
     int kind, int hk_nzb, int has_dupe_search, int name_changed);
 int nzbget_rs_pur_history_coord_is_valid_dupe_backup_delete_status(
     int delete_status, int ds_dupe, int ds_manual);
-int nzbget_rs_pur_unpack_ctrl_should_execute_initial_unpack(
-    int unpack_tried, int par_repaired);
-int nzbget_rs_pur_unpack_ctrl_should_add_extract_cmd_flag(
-    int has_x, int has_e);
-int nzbget_rs_pur_unpack_ctrl_should_add_default_overwrite_flag(
-    int has_o_plus, int has_o_minus, int has_or);
-int nzbget_rs_pur_direct_unpack_should_log_unrar_exit_error(
-    int unpack_ok, int exit_code, int interrupted);
 
 /* Batch 41: streamrepairparcheck (srp_*) */
 int nzbget_rs_srp_stream_repair_is_member_index_in_bounds(
@@ -4950,26 +4834,12 @@ NzbgetRsBuf nzbget_rs_tpr_repair_ctrl_build_twin_filename(
     const char* entry_filename, size_t twin_files_count);
 NzbgetRsBuf nzbget_rs_tpr_twin_check_format_live_identity_line(
     int32_t nzb_id, const char* identity);
-int32_t nzbget_rs_tpr_direct_unpack_readline_step(
-    uint8_t* buf_ptr,
-    size_t buf_len,
-    size_t i,
-    int32_t ch,
-    int32_t* backspace_ptr,
-    size_t* out_idx_ptr);
 int64_t nzbget_rs_stream_composite_compute_member_bases(
     const int64_t* member_sizes_ptr, int64_t* out_bases_ptr, size_t count);
 int64_t nzbget_rs_stream_content_map_sum_cipher_sizes(
     const int64_t* cipher_sizes_ptr, size_t count);
 NzbgetRsBuf nzbget_rs_stream_content_mapper_split_inner_name(
     const char* first_name);
-int32_t nzbget_rs_pup_unpack_ctrl_trim_password_line(char* line);
-int32_t nzbget_rs_pup_unpack_ctrl_matches_split_piece_name(
-    const char* filename, const char* dest_base_name);
-int32_t nzbget_rs_pup_unpack_ctrl_readline_step(
-    uint8_t* buf_ptr, size_t buf_len, size_t* idx_ptr, int32_t ch,
-    int32_t* printed_ptr, ptrdiff_t* last_bs_ptr,
-    ptrdiff_t* out_process_len_ptr, int32_t* out_progress_ptr);
 uint32_t nzbget_rs_pup_parchecker_combine_block_crcs(
     const uint32_t* block_crcs_ptr, size_t count, uint64_t block_size);
 NzbgetRsBuf nzbget_rs_pup_parchecker_extract_base_par_stem(
@@ -5139,11 +5009,6 @@ size_t nzbget_rs_tpr_parchecker_strip_last_path_sep_len(const char* path, char s
 int32_t nzbget_rs_tpr_parchecker_next_valid_block_run(
     const uint8_t* valid_blocks_ptr, size_t len, size_t start_idx,
     size_t* out_block_start, size_t* out_block_end);
-int32_t nzbget_rs_tpr_unpack_ctrl_should_check_renamed_rar_sig(
-    int32_t has_renamed_archive_files, int32_t archive_kind, int32_t is_ignored_ext);
-int32_t nzbget_rs_tpr_unpack_should_auto_stop_on_error(
-    int32_t is_stopped, int32_t decrypt_error, int32_t password_error,
-    int32_t crc_or_volume_error);
 void nzbget_rs_tpr_history_coord_retry_action_labels(
     int32_t reset_failed, int32_t reprocess,
     const char** out_wrong_type_verb, const char** out_missing_dir_verb,
@@ -5223,16 +5088,6 @@ const char* nzbget_rs_dqh_prepost_skip_unpack_par_reason(
     int32_t par_status, int32_t ps_manual);
 NzbgetRsBuf nzbget_rs_tpr_post_format_info_name(
     const char* prefix, const char* name);
-NzbgetRsBuf nzbget_rs_tpr_unpack_format_password_arg(const char* password);
-NzbgetRsBuf nzbget_rs_tpr_unpack_format_unpack_dir(
-    const char* dest_dir, char sep, int32_t use_temp_unpack_dir);
-const char* nzbget_rs_tpr_unpack_ctrl_second_attempt_skip_errmsg(
-    int32_t last_unpack_status, int32_t us_password);
-NzbgetRsBuf nzbget_rs_tpr_unpack_ctrl_format_split_piece_name(
-    const char* dest_base_name, int32_t index);
-NzbgetRsBuf nzbget_rs_tpr_unpack_ctrl_format_split_piece_path(
-    const char* dest_dir, char sep, const char* dest_base_name, int32_t index);
-const char* nzbget_rs_tpr_unpack_ctrl_request_par_reason(int32_t force_repair);
 const char* nzbget_rs_tpr_repair_ctrl_twin_par2_reject_reason(int32_t cmp);
 const char* nzbget_rs_dqh_stream_repair_write_errmsg_or_default(const char* last_err);
 NzbgetRsBuf nzbget_rs_dqh_stream_repair_format_stall_reason(int32_t timeout);
@@ -5256,12 +5111,7 @@ const char* nzbget_rs_dqh_stream_repair_decompress_fail_reason(int32_t has_extra
 int32_t nzbget_rs_tpr_repair_ctrl_seconds_to_minutes(int32_t seconds);
 NzbgetRsBuf nzbget_rs_tpr_parchecker_format_twin_err_msg(
     int32_t twin_err_action, const char* own_err_msg);
-NzbgetRsBuf nzbget_rs_tpr_unpack_format_extracting_msg(const char* suffix);
-NzbgetRsBuf nzbget_rs_tpr_unpack_ctrl_format_cancel_msg(const char* info_name);
-NzbgetRsBuf nzbget_rs_tpr_rar_renamer_format_exec_progress(const char* info_name);
-NzbgetRsBuf nzbget_rs_tpr_rar_renamer_format_file_progress(const char* filename);
 NzbgetRsBuf nzbget_rs_dqh_content_map_format_member_unreadable_reason(const char* name);
-int64_t nzbget_rs_dqh_rar_volume_set_data_offset(int64_t position, int64_t packed_size);
 void nzbget_rs_dqh_stream_crypto_format_rar3_round_bytes(int32_t round, uint8_t* out_buf);
 int32_t nzbget_rs_dqh_stream_crypto_rar3_iv_index(int32_t round, int32_t rounds);
 NzbgetRsBuf nzbget_rs_tpr_nzb_script_format_param_prefix(const char* script_name);
@@ -5344,13 +5194,6 @@ NzbgetRsBuf nzbget_rs_tpr_queue_coord_join_queued_filenames(
 const char* nzbget_rs_dqh_twin_check_sample_verdict_label(int32_t verdict);
 NzbgetRsBuf nzbget_rs_dqh_twin_check_format_u32_str(uint32_t val);
 NzbgetRsBuf nzbget_rs_dqh_twin_check_lowercase_key(const char* dupe_key);
-NzbgetRsBuf nzbget_rs_tpr_direct_unpack_format_status_msg(
-    const char* info_name_up, int32_t success);
-NzbgetRsBuf nzbget_rs_tpr_direct_unpack_format_trailing_sep_dir(const char* dir, char sep);
-NzbgetRsBuf nzbget_rs_tpr_direct_unpack_format_cancelling_msg(const char* info_name);
-NzbgetRsBuf nzbget_rs_tpr_direct_unpack_format_dest_changed_msg(const char* nzb_name);
-NzbgetRsBuf nzbget_rs_tpr_direct_unpack_format_missing_vol_msg(const char* waiting_file);
-NzbgetRsBuf nzbget_rs_dqh_unpack_ctrl_format_joining_progress(const char* piece_name);
 NzbgetRsBuf nzbget_rs_dqh_unpack_ctrl_strip_last_extension(const char* frag_base_name);
 NzbgetRsBuf nzbget_rs_dqh_stream_repair_format_materialize_progress(
     const char* donor_name, int32_t member_num, int32_t total_members,
@@ -5472,7 +5315,6 @@ int nzbget_rs_dqh_options_should_check_single_script_dir(
     int no_disk_access, const char* value);
 void nzbget_rs_dqh_webserver_encode_hex_token(
     const uint8_t* bytes, size_t bytes_len, char* out_token, size_t out_cap);
-NzbgetRsBuf nzbget_rs_dqh_unpack_format_7z_output_arg(const char* unpack_dir);
 NzbgetRsBuf nzbget_rs_dqh_script_format_prefixed_message(
     const char* prefix, const char* text);
 NzbgetRsBuf nzbget_rs_dqh_xmlrpc_concat_decoded_path_and_query(
@@ -5632,18 +5474,6 @@ int nzbget_rs_dqh_parchecker_is_terminal_quick_crc_status(
     int file_status, int fs_failure, int fs_unknown);
 int nzbget_rs_dqh_parchecker_is_partial_range_crc_valid(
     int ok, uint32_t download_crc, uint32_t par_crc);
-int nzbget_rs_dqh_unpack_ctrl_accum_unpack_sec(
-    int prev_unpack_sec, int64_t cur_time, int64_t start_time);
-const char* nzbget_rs_dqh_unpack_ctrl_select_sevenzip_wildcard(int multi_volumes);
-int nzbget_rs_dqh_unpack_ctrl_calc_write_buffer_bytes(
-    int write_buffer_kb, int* out_bytes);
-int nzbget_rs_dqh_unpack_ctrl_should_fail_on_close(int close_ok, int prev_ok);
-int nzbget_rs_dqh_unpack_ctrl_is_completed_success(int unpack_ok, int cleanup_success);
-const char* nzbget_rs_dqh_unpack_ctrl_select_unpack_parent_dir(
-    const char* final_dir, const char* dest_dir);
-int nzbget_rs_dqh_unpack_ctrl_is_move_extracted_error(int move_ok, int hidden_file);
-int nzbget_rs_dqh_unpack_ctrl_should_delete_created_final_dir(
-    int unpack_ok, int final_dir_created);
 int nzbget_rs_dqh_prepost_should_reset_stale_direct_unpack(
     int direct_unpack_status, int ns_running, int has_unpack_thread);
 int nzbget_rs_dqh_prepost_has_single_main_par(
@@ -5654,18 +5484,8 @@ int nzbget_rs_dqh_repair_ctrl_should_skip_twin_volume_entry(
     int is_par2, const char* entry_filename, const char* twin_index);
 int nzbget_rs_dqh_repair_ctrl_matches_history_dupe_source(
     int history_kind, int hk_nzb, int history_nzb_id, int dupe_source_id);
-int nzbget_rs_dqh_direct_unpack_should_log_final_status(
-    int status, int ns_success, int ns_failure);
-int nzbget_rs_dqh_direct_unpack_should_keep_waiting_break(
-    int iter, int unpacking, int has_active_process);
-int nzbget_rs_dqh_direct_unpack_should_delete_temp_unpack_dir(
-    int use_temp_unpack_dir, int dir_exists);
 int nzbget_rs_dqh_par_renamer_needs_create_target_dir(
     const char* old_path, const char* new_path);
-int nzbget_rs_dqh_rar_volume_is_read_handle_ready(int64_t size, int seek_zero_ok);
-int nzbget_rs_dqh_rar_volume_should_update_version(int has_error, int signature_read);
-int nzbget_rs_dqh_rar_volume_is_decrypt_buf_valid(int evp_ok, int out_len);
-int nzbget_rs_dqh_rar_renamer_should_ignore_file(int has_ignore_ext, int matched_ext);
 int nzbget_rs_dqh_dupematcher_should_wait_rar_lister(
     int is_running, int64_t start_time, int timeout_sec, int64_t cur_time);
 int nzbget_rs_dqh_content_map_can_map_cipher_range(
@@ -6625,6 +6445,24 @@ NzbgetRsBuf nzbget_rs_dupecoord_format_dupe_skip_message(
 NzbgetRsBuf nzbget_rs_dupecoord_no_backup_reason(
     int fails_over_flag, int dupe_mode, const NzbgetRsDupeHistoryCandidate* history,
     size_t history_len, void* cb_ctx, int (*file_exists_cb)(void* ctx, size_t history_index));
+
+int nzbget_rs_unpack_use_inter_dir(const char* dest_dir, const char* inter_dir, char sep);
+int nzbget_rs_unpack_is_main_archive(const char* filename);
+int nzbget_rs_unpack_direct_readline_step(
+    uint8_t* buf, size_t buf_len, size_t i, int ch, int* backspace, size_t* out_idx);
+int nzbget_rs_unpack_classify_archive_file(const char* filename);
+int nzbget_rs_unpack_has_completed_archive_ext(const char* filename);
+int nzbget_rs_unpack_is_split_first_piece(const char* filename);
+int nzbget_rs_unpack_accumulate_split_piece(
+    const char* filename, const char* dest_base_name, int64_t segment_size,
+    int64_t first_segment_size, int* inout_count, int* inout_min, int* inout_max,
+    int* inout_dif_size_min);
+int nzbget_rs_unpack_classify_cleanup_archive_file(
+    int is_dir, int inter_dir, int in_extracted_files, int is_downloaded_file,
+    int has_splitted_files, int in_joined_files, const char* filename);
+int32_t nzbget_rs_unpack_ctrl_readline_step(
+    uint8_t* buf, size_t buf_len, size_t* idx, int ch, int32_t* printed,
+    ptrdiff_t* last_bs, ptrdiff_t* out_process_len, int32_t* out_progress);
 
 #include "nzbget_tls_cipher.h"
 

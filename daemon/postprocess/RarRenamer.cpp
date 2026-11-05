@@ -29,9 +29,7 @@
 
 void RarRenamer::Execute()
 {
-	NzbgetRsBuf progBuf = nzbget_rs_tpr_rar_renamer_format_exec_progress(*m_infoName);
-	m_progressLabel.Set(progBuf.data ? progBuf.data : "", (int)progBuf.len);
-	nzbget_rs_free(progBuf);
+	m_progressLabel.Format("Checkingrar-files for %s", *m_infoName);
 	m_stageProgress = 0;
 	UpdateProgress();
 
@@ -54,11 +52,7 @@ void RarRenamer::BuildDirList(const char* destDir)
 	{
 		if (!IsStopped())
 		{
-			NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-				destDir, PATH_SEPARATOR, filename);
-			BString<1024> fullFilename;
-			fullFilename.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
-			nzbget_rs_free(fullFnBuf);
+			BString<1024> fullFilename("%s%c%s", destDir, PATH_SEPARATOR, filename);
 			if (FileSystem::DirectoryExists(fullFilename))
 			{
 				BuildDirList(fullFilename);
@@ -78,18 +72,12 @@ void RarRenamer::CheckFiles(const char* destDir)
 	{
 		if (!IsStopped())
 		{
-			NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-				destDir, PATH_SEPARATOR, filename);
-			BString<1024> fullFilename;
-			fullFilename.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
-			nzbget_rs_free(fullFnBuf);
+			BString<1024> fullFilename("%s%c%s", destDir, PATH_SEPARATOR, filename);
 
 			if (!FileSystem::DirectoryExists(fullFilename))
 			{
-				NzbgetRsBuf progBuf = nzbget_rs_tpr_rar_renamer_format_file_progress(filename);
-				m_progressLabel.Set(progBuf.data ? progBuf.data : "", (int)progBuf.len);
-				nzbget_rs_free(progBuf);
-				m_stageProgress = nzbget_rs_psp_rar_renamer_calc_stage_progress(m_fileCount, m_curFile);
+				m_progressLabel.Format("Checking file %s", filename);
+				m_stageProgress = m_fileCount > 0 ? m_curFile * 1000 / m_fileCount : 1000;
 				UpdateProgress();
 				m_curFile++;
 
@@ -110,13 +98,11 @@ void RarRenamer::CheckFiles(const char* destDir)
 
 void RarRenamer::CheckOneFile(const char* filename)
 {
-	bool matchedExt = m_ignoreExt && Util::MatchFileExt(FileSystem::BaseFileName(filename), m_ignoreExt, ",;");
-	if (nzbget_rs_dqh_rar_renamer_should_ignore_file(
-		m_ignoreExt != nullptr ? 1 : 0, matchedExt ? 1 : 0) != 0)
+	if (m_ignoreExt && Util::MatchFileExt(FileSystem::BaseFileName(filename), m_ignoreExt, ",;"))
 	{
 		return;
 	}
-	
+
 	RarVolume volume(filename);
 	volume.SetPassword(m_password);
 	if (volume.Read())
@@ -222,4 +208,3 @@ void RarRenamer::RenameFiles(const char* destDir)
 		std::rethrow_exception(context.error);
 	}
 }
-

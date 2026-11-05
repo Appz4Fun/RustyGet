@@ -10103,7 +10103,7 @@ pub unsafe extern "C" fn nzbget_rs_unpack_detect_rar_signature(
     if sig_bytes.is_null() || sig_len != 8 {
         return 0;
     }
-    crate::postrepair::detect_rar_signature(std::slice::from_raw_parts(sig_bytes, sig_len))
+    crate::unpack::detect_rar_signature(std::slice::from_raw_parts(sig_bytes, sig_len))
 }
 
 #[no_mangle]
@@ -10114,7 +10114,7 @@ pub extern "C" fn nzbget_rs_unpack_check_joinable_fragments(
     dif_size_min: c_int,
     par_success: c_int,
 ) -> c_int {
-    crate::postrepair::check_joinable_fragments(
+    crate::unpack::check_joinable_fragments(
         count,
         min_seg,
         max_seg,
@@ -10128,7 +10128,7 @@ pub unsafe extern "C" fn nzbget_rs_unpack_parse_message(
     text: *const c_char,
     unpack_extended_dir: *const c_char,
     is_seven_zip: c_int,
-    out_info: *mut crate::postrepair::NzbgetRsUnpackMessageInfo,
+    out_info: *mut crate::unpack::NzbgetRsUnpackMessageInfo,
 ) {
     if out_info.is_null() {
         return;
@@ -10143,7 +10143,7 @@ pub unsafe extern "C" fn nzbget_rs_unpack_parse_message(
     } else {
         CStr::from_ptr(unpack_extended_dir).to_bytes()
     };
-    *out_info = crate::postrepair::parse_unpack_message(t, d, is_seven_zip != 0);
+    *out_info = crate::unpack::parse_unpack_message(t, d, is_seven_zip != 0);
 }
 
 // ============================================================================
@@ -13877,27 +13877,6 @@ pub unsafe extern "C" fn nzbget_rs_dur_article_dl_classify_decode_status(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dur_direct_unpack_resolve_final_status(
-    processed: c_int,
-    unpack_ok: c_int,
-    interrupted: c_int,
-    cancelled: c_int,
-    ns_none: c_int,
-    ns_success: c_int,
-    ns_failure: c_int,
-) -> c_int {
-    crate::dlunpackrepair::direct_unpack_resolve_final_status(
-        processed != 0,
-        unpack_ok != 0,
-        interrupted != 0,
-        cancelled != 0,
-        ns_none,
-        ns_success,
-        ns_failure,
-    )
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dur_direct_unpack_use_inter_dir(
     dest_dir: *const c_char,
     inter_dir: *const c_char,
@@ -13921,18 +13900,6 @@ pub unsafe extern "C" fn nzbget_rs_dur_direct_unpack_use_inter_dir(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dur_direct_unpack_is_main_archive(
-    filename: *const c_char,
-) -> c_int {
-    let s = if filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(filename).to_bytes()
-    };
-    i32::from(crate::dlunpackrepair::direct_unpack_is_main_archive(s))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dur_direct_unpack_is_insert_disk_prompt(
     buf: *const c_char,
     i: usize,
@@ -13950,101 +13917,6 @@ pub unsafe extern "C" fn nzbget_rs_dur_direct_unpack_is_insert_disk_prompt(
     i32::from(crate::dlunpackrepair::direct_unpack_is_insert_disk_prompt(
         s, i, ch,
     ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dur_unpack_ctrl_should_skip_second_attempt(
-    unpack_tried: c_int,
-    par_repaired: c_int,
-    password_empty: c_int,
-    pass_file_empty: c_int,
-    pass_list_tried: c_int,
-) -> c_int {
-    i32::from(
-        crate::dlunpackrepair::unpack_ctrl_should_skip_second_attempt(
-            unpack_tried != 0,
-            par_repaired != 0,
-            password_empty != 0,
-            pass_file_empty != 0,
-            pass_list_tried != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dur_unpack_ctrl_eval_unrar_exit(
-    exit_code: c_int,
-    all_ok_received: c_int,
-    terminated: c_int,
-    auto_terminated: c_int,
-    prev_password_error: c_int,
-    out_unpack_ok: *mut c_int,
-    out_start_error: *mut c_int,
-    out_space_error: *mut c_int,
-    out_password_error: *mut c_int,
-) {
-    let (ok, start_err, space_err, pass_err) = crate::dlunpackrepair::unpack_ctrl_eval_unrar_exit(
-        exit_code,
-        all_ok_received != 0,
-        terminated != 0,
-        auto_terminated != 0,
-        prev_password_error != 0,
-    );
-    if !out_unpack_ok.is_null() {
-        *out_unpack_ok = i32::from(ok);
-    }
-    if !out_start_error.is_null() {
-        *out_start_error = i32::from(start_err);
-    }
-    if !out_space_error.is_null() {
-        *out_space_error = i32::from(space_err);
-    }
-    if !out_password_error.is_null() {
-        *out_password_error = i32::from(pass_err);
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dur_unpack_ctrl_classify_archive_file(
-    filename: *const c_char,
-) -> c_int {
-    let s = if filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(filename).to_bytes()
-    };
-    crate::dlunpackrepair::unpack_ctrl_classify_archive_file(s)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dur_unpack_ctrl_resolve_fail_status(
-    space_error: c_int,
-    password_error: c_int,
-    decrypt_error: c_int,
-    us_space: c_int,
-    us_password: c_int,
-    us_failure: c_int,
-) -> c_int {
-    crate::dlunpackrepair::unpack_ctrl_resolve_fail_status(
-        space_error != 0,
-        password_error != 0,
-        decrypt_error != 0,
-        us_space,
-        us_password,
-        us_failure,
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dur_unpack_ctrl_has_completed_archive_ext(
-    filename: *const c_char,
-) -> c_int {
-    let s = if filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(filename).to_bytes()
-    };
-    i32::from(crate::dlunpackrepair::unpack_ctrl_has_completed_archive_ext(s))
 }
 
 #[no_mangle]
@@ -15444,31 +15316,6 @@ pub unsafe extern "C" fn nzbget_rs_fuq_repair_ctrl_calc_par_check_times(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_fuq_direct_unpack_eval_unrar_result(
-    exit_code: c_int,
-    all_ok_msg: c_int,
-    terminated: c_int,
-    cancelled: c_int,
-    stopped: c_int,
-    out_unpack_ok: *mut c_int,
-    out_interrupted: *mut c_int,
-) {
-    let (ok, intr) = crate::feedurlqueue::direct_unpack_eval_unrar_result(
-        exit_code,
-        all_ok_msg != 0,
-        terminated != 0,
-        cancelled != 0,
-        stopped != 0,
-    );
-    if !out_unpack_ok.is_null() {
-        *out_unpack_ok = i32::from(ok);
-    }
-    if !out_interrupted.is_null() {
-        *out_interrupted = i32::from(intr);
-    }
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_pup_parchecker_select_match_type(
     file_status: c_int,
     fs_success: c_int,
@@ -15564,157 +15411,6 @@ pub extern "C" fn nzbget_rs_pup_parchecker_should_print_stage_msg(
         pt_verifying_repaired,
         par_quick != 0,
     ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pup_unpack_ctrl_should_try_par_before_pass_file(
-    unpack_ok: c_int,
-    has_par_files: c_int,
-    password_err: c_int,
-    par_status: c_int,
-    ps_skipped: c_int,
-) -> c_int {
-    i32::from(
-        crate::parunpackpost::unpack_ctrl_should_try_par_before_pass_file(
-            unpack_ok != 0,
-            has_par_files != 0,
-            password_err != 0,
-            par_status,
-            ps_skipped,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pup_unpack_ctrl_should_try_password_file(
-    unpack_ok: c_int,
-    start_err: c_int,
-    space_err: c_int,
-    decrypt_err: c_int,
-    password_err: c_int,
-    terminated: c_int,
-    auto_terminated: c_int,
-    password_empty: c_int,
-    pass_file_empty: c_int,
-) -> c_int {
-    i32::from(crate::parunpackpost::unpack_ctrl_should_try_password_file(
-        unpack_ok != 0,
-        start_err != 0,
-        space_err != 0,
-        decrypt_err != 0,
-        password_err != 0,
-        terminated != 0,
-        auto_terminated != 0,
-        password_empty != 0,
-        pass_file_empty != 0,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_pup_unpack_ctrl_eval_sevenzip_exit(
-    exit_code: c_int,
-    all_ok_msg: c_int,
-    terminated: c_int,
-    auto_terminated: c_int,
-    out_unpack_ok: *mut c_int,
-    out_start_err: *mut c_int,
-) {
-    let (ok, start_err) = crate::parunpackpost::unpack_ctrl_eval_sevenzip_exit(
-        exit_code,
-        all_ok_msg != 0,
-        terminated != 0,
-        auto_terminated != 0,
-    );
-    if !out_unpack_ok.is_null() {
-        *out_unpack_ok = i32::from(ok);
-    }
-    if !out_start_err.is_null() {
-        *out_start_err = i32::from(start_err);
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pup_unpack_ctrl_will_retry_with_pass(
-    decrypt_err: c_int,
-    password_err: c_int,
-    password_empty: c_int,
-    pass_file_not_empty: c_int,
-) -> c_int {
-    i32::from(crate::parunpackpost::unpack_ctrl_will_retry_with_pass(
-        decrypt_err != 0,
-        password_err != 0,
-        password_empty != 0,
-        pass_file_not_empty != 0,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pup_unpack_ctrl_is_stopped_for_reload(
-    auto_terminated: c_int,
-    post_deleted: c_int,
-    is_stopped: c_int,
-    terminated: c_int,
-) -> c_int {
-    i32::from(crate::parunpackpost::unpack_ctrl_is_stopped_for_reload(
-        auto_terminated != 0,
-        post_deleted != 0,
-        is_stopped != 0,
-        terminated != 0,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pup_unpack_ctrl_should_request_par_after_fail(
-    unpack_ok: c_int,
-    par_status: c_int,
-    ps_skipped: c_int,
-    par_full: c_int,
-    start_err: c_int,
-    space_err: c_int,
-    password_err: c_int,
-    terminated: c_int,
-    is_stopped: c_int,
-    auto_terminated: c_int,
-    has_par_files: c_int,
-) -> c_int {
-    i32::from(
-        crate::parunpackpost::unpack_ctrl_should_request_par_after_fail(
-            unpack_ok != 0,
-            par_status,
-            ps_skipped,
-            par_full != 0,
-            start_err != 0,
-            space_err != 0,
-            password_err != 0,
-            terminated != 0,
-            is_stopped != 0,
-            auto_terminated != 0,
-            has_par_files != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pup_unpack_ctrl_calc_force_repair_on_request(
-    password_empty: c_int,
-    pass_file_empty: c_int,
-    pass_list_tried: c_int,
-    decrypt_err: c_int,
-    password_err: c_int,
-    par_status: c_int,
-    ps_skipped: c_int,
-) -> c_int {
-    i32::from(
-        crate::parunpackpost::unpack_ctrl_calc_force_repair_on_request(
-            password_empty != 0,
-            pass_file_empty != 0,
-            pass_list_tried != 0,
-            decrypt_err != 0,
-            password_err != 0,
-            par_status,
-            ps_skipped,
-        ),
-    )
 }
 
 #[no_mangle]
@@ -16883,44 +16579,6 @@ pub extern "C" fn nzbget_rs_dad_article_dl_should_pace_critical_uncached(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dad_direct_unpack_eval_post_run_actions(
-    unpack_ok: c_int,
-    cancelled: c_int,
-    is_stopped: c_int,
-    terminated: c_int,
-    out_should_cleanup: *mut c_int,
-) -> c_int {
-    let (interrupted, should_cleanup) =
-        crate::diskartdlpost::direct_unpack_eval_post_run_actions(
-            unpack_ok != 0,
-            cancelled != 0,
-            is_stopped != 0,
-            terminated != 0,
-        );
-    if !out_should_cleanup.is_null() {
-        *out_should_cleanup = i32::from(should_cleanup);
-    }
-    i32::from(interrupted)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dad_direct_unpack_should_commit_extracted_archives(
-    has_archives: c_int,
-    status: c_int,
-    ns_success: c_int,
-    interrupted: c_int,
-) -> c_int {
-    i32::from(
-        crate::diskartdlpost::direct_unpack_should_commit_extracted_archives(
-            has_archives != 0,
-            status,
-            ns_success,
-            interrupted != 0,
-        ),
-    )
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dad_prepost_should_complete_interrupted_download(
     has_post_info: c_int,
     kind: c_int,
@@ -17719,125 +17377,6 @@ pub extern "C" fn nzbget_rs_pnd_parchecker_calc_dumb_crc_read_size(
     end: i64,
 ) -> c_int {
     crate::pardupenzb::parchecker_calc_dumb_crc_read_size(cnt, buffer_size, start, end)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pnd_unpack_ctrl_classify_run_branch(
-    unpack: c_int,
-    has_files: c_int,
-    par_status: c_int,
-    ps_skipped: c_int,
-    par_rename_status: c_int,
-    rs_skipped: c_int,
-    has_par_files: c_int,
-    has_renamed_archive_files: c_int,
-) -> c_int {
-    crate::pardupenzb::unpack_ctrl_classify_run_branch(
-        unpack != 0,
-        has_files != 0,
-        par_status,
-        ps_skipped,
-        par_rename_status,
-        rs_skipped,
-        has_par_files != 0,
-        has_renamed_archive_files != 0,
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_pnd_unpack_ctrl_eval_rar_unpack_mode(
-    has_not_unpacked_rar_files: c_int,
-    unpack_dir_created: c_int,
-    direct_unpack_status: c_int,
-    ns_success: c_int,
-    out_log_kind: *mut c_int,
-) -> c_int {
-    let (run_unrar, log_kind) = crate::pardupenzb::unpack_ctrl_eval_rar_unpack_mode(
-        has_not_unpacked_rar_files != 0,
-        unpack_dir_created != 0,
-        direct_unpack_status,
-        ns_success,
-    );
-    if !out_log_kind.is_null() {
-        *out_log_kind = log_kind;
-    }
-    i32::from(run_unrar)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pnd_unpack_ctrl_should_log_exit_error(
-    unpack_ok: c_int,
-    exit_code: c_int,
-    will_retry_with_pass: c_int,
-    is_stopped: c_int,
-    is_terminated: c_int,
-) -> c_int {
-    i32::from(crate::pardupenzb::unpack_ctrl_should_log_exit_error(
-        unpack_ok != 0,
-        exit_code,
-        will_retry_with_pass != 0,
-        is_stopped != 0,
-        is_terminated != 0,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_pnd_unpack_ctrl_accumulate_split_piece(
-    filename: *const c_char,
-    dest_base_name: *const c_char,
-    segment_size: i64,
-    first_segment_size: i64,
-    inout_count: *mut c_int,
-    inout_min: *mut c_int,
-    inout_max: *mut c_int,
-    inout_dif_size_min: *mut c_int,
-) -> c_int {
-    let f = if filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(filename).to_bytes()
-    };
-    let b = if dest_base_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(dest_base_name).to_bytes()
-    };
-    i32::from(crate::pardupenzb::unpack_ctrl_accumulate_split_piece(
-        f,
-        b,
-        segment_size,
-        first_segment_size,
-        &mut *inout_count,
-        &mut *inout_min,
-        &mut *inout_max,
-        &mut *inout_dif_size_min,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_pnd_unpack_ctrl_classify_cleanup_archive_file(
-    is_dir: c_int,
-    inter_dir: c_int,
-    in_extracted_files: c_int,
-    is_downloaded_file: c_int,
-    has_splitted_files: c_int,
-    in_joined_files: c_int,
-    filename: *const c_char,
-) -> c_int {
-    let f = if filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(filename).to_bytes()
-    };
-    crate::pardupenzb::unpack_ctrl_classify_cleanup_archive_file(
-        is_dir != 0,
-        inter_dir != 0,
-        in_extracted_files != 0,
-        is_downloaded_file != 0,
-        has_splitted_files != 0,
-        in_joined_files != 0,
-        f,
-    )
 }
 
 #[no_mangle]
@@ -19276,171 +18815,6 @@ pub unsafe extern "C" fn nzbget_rs_stq_queue_editor_eval_align_group_step(
 // ============================================================================
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_ucf_direct_unpack_should_clear_working(
-    has_post_info: c_int,
-    has_live_repair_thread: c_int,
-) -> c_int {
-    i32::from(
-        crate::unpackcleanurlfeed::direct_unpack_should_clear_working(
-            has_post_info != 0,
-            has_live_repair_thread != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ucf_direct_unpack_use_final_dir(
-    use_inter_dir: c_int,
-    final_dir: *const c_char,
-) -> c_int {
-    let bytes = if final_dir.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(final_dir).to_bytes()
-    };
-    i32::from(crate::unpackcleanurlfeed::direct_unpack_use_final_dir(
-        use_inter_dir != 0,
-        bytes,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ucf_direct_unpack_is_progress_dots_line(
-    buf: *const c_char,
-) -> c_int {
-    let bytes = if buf.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(buf).to_bytes()
-    };
-    i32::from(crate::unpackcleanurlfeed::direct_unpack_is_progress_dots_line(bytes))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ucf_direct_unpack_should_set_cancelled(
-    has_prepost: c_int,
-    prepost_stopped: c_int,
-) -> c_int {
-    i32::from(
-        crate::unpackcleanurlfeed::direct_unpack_should_set_cancelled(
-            has_prepost != 0,
-            prepost_stopped != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ucf_direct_unpack_should_try_break(
-    is_exec_thread: c_int,
-    cancelled_or_auto_terminated: c_int,
-    has_active_process: c_int,
-) -> c_int {
-    i32::from(crate::unpackcleanurlfeed::direct_unpack_should_try_break(
-        is_exec_thread != 0,
-        cancelled_or_auto_terminated != 0,
-        has_active_process != 0,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ucf_direct_unpack_has_dest_changed(
-    has_nzb: c_int,
-    cur_dest: *const c_char,
-    nzb_dest: *const c_char,
-    cur_final: *const c_char,
-    nzb_final: *const c_char,
-) -> c_int {
-    let cd = if cur_dest.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(cur_dest).to_bytes()
-    };
-    let nd = if nzb_dest.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(nzb_dest).to_bytes()
-    };
-    let cf = if cur_final.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(cur_final).to_bytes()
-    };
-    let nf = if nzb_final.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(nzb_final).to_bytes()
-    };
-    i32::from(crate::unpackcleanurlfeed::direct_unpack_has_dest_changed(
-        has_nzb != 0,
-        cd,
-        nd,
-        cf,
-        nf,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ucf_direct_unpack_matches_waiting_file(
-    waiting_file: *const c_char,
-    downloaded_filename: *const c_char,
-) -> c_int {
-    let wf = if waiting_file.is_null() {
-        None
-    } else {
-        Some(CStr::from_ptr(waiting_file).to_bytes())
-    };
-    let df = if downloaded_filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(downloaded_filename).to_bytes()
-    };
-    i32::from(crate::unpackcleanurlfeed::direct_unpack_matches_waiting_file(wf, df))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ucf_direct_unpack_can_proceed(
-    is_archive: c_int,
-    failed_articles: c_int,
-) -> c_int {
-    i32::from(crate::unpackcleanurlfeed::direct_unpack_can_proceed(
-        is_archive != 0,
-        failed_articles,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ucf_direct_unpack_calc_extra_time(
-    extra_start_time: i64,
-    cur_time: i64,
-    cur_unpack_sec: c_int,
-    cur_post_total_sec: c_int,
-    out_new_unpack_sec: *mut c_int,
-    out_new_post_total_sec: *mut c_int,
-) -> c_int {
-    let (applied, u, p) = crate::unpackcleanurlfeed::direct_unpack_calc_extra_time(
-        extra_start_time,
-        cur_time,
-        cur_unpack_sec,
-        cur_post_total_sec,
-    );
-    *out_new_unpack_sec = u;
-    *out_new_post_total_sec = p;
-    i32::from(applied)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ucf_move_ctrl_is_dot_file(
-    filename: *const c_char,
-) -> c_int {
-    let bytes = if filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(filename).to_bytes()
-    };
-    i32::from(crate::unpackcleanurlfeed::move_ctrl_is_dot_file(bytes))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_ucf_unpack_ctrl_eval_unpack_param(
     param_val: *const c_char,
 ) -> c_int {
@@ -19450,150 +18824,6 @@ pub unsafe extern "C" fn nzbget_rs_ucf_unpack_ctrl_eval_unpack_param(
         Some(CStr::from_ptr(param_val).to_bytes())
     };
     i32::from(crate::unpackcleanurlfeed::unpack_ctrl_eval_unpack_param(pv))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ucf_unpack_ctrl_has_any_archive_files(
-    has_rar: c_int,
-    has_7z: c_int,
-    has_7z_multi: c_int,
-    has_splitted: c_int,
-) -> c_int {
-    i32::from(
-        crate::unpackcleanurlfeed::unpack_ctrl_has_any_archive_files(
-            has_rar != 0,
-            has_7z != 0,
-            has_7z_multi != 0,
-            has_splitted != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ucf_unpack_ctrl_can_continue_password_loop(
-    unpack_ok: c_int,
-    start_err: c_int,
-    space_err: c_int,
-    decrypt_err: c_int,
-    password_err: c_int,
-) -> c_int {
-    i32::from(
-        crate::unpackcleanurlfeed::unpack_ctrl_can_continue_password_loop(
-            unpack_ok != 0,
-            start_err != 0,
-            space_err != 0,
-            decrypt_err != 0,
-            password_err != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ucf_unpack_ctrl_should_resume_before_password_try(
-    is_stopped: c_int,
-    auto_terminated: c_int,
-) -> c_int {
-    i32::from(
-        crate::unpackcleanurlfeed::unpack_ctrl_should_resume_before_password_try(
-            is_stopped != 0,
-            auto_terminated != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ucf_unpack_ctrl_eval_pass_list_tried(
-    is_stopped: c_int,
-    auto_terminated: c_int,
-) -> c_int {
-    i32::from(crate::unpackcleanurlfeed::unpack_ctrl_eval_pass_list_tried(
-        is_stopped != 0,
-        auto_terminated != 0,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ucf_unpack_ctrl_is_split_first_piece(
-    filename: *const c_char,
-) -> c_int {
-    let bytes = if filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(filename).to_bytes()
-    };
-    i32::from(crate::unpackcleanurlfeed::unpack_ctrl_is_split_first_piece(
-        bytes,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ucf_unpack_ctrl_calc_join_progress(
-    cur_written: i64,
-    cnt: c_int,
-    total_size: i64,
-    out_new_written: *mut i64,
-) -> c_int {
-    let (w, p) = crate::unpackcleanurlfeed::unpack_ctrl_calc_join_progress(
-        cur_written,
-        cnt,
-        total_size,
-    );
-    *out_new_written = w;
-    p
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ucf_unpack_ctrl_is_join_size_mismatch(
-    ok: c_int,
-    written: i64,
-    total_size: i64,
-) -> c_int {
-    i32::from(crate::unpackcleanurlfeed::unpack_ctrl_is_join_size_mismatch(
-        ok != 0,
-        written,
-        total_size,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ucf_unpack_ctrl_is_downloaded_file_allowed(
-    use_temp_unpack_dir: c_int,
-    downloaded_empty: c_int,
-) -> c_int {
-    i32::from(
-        crate::unpackcleanurlfeed::unpack_ctrl_is_downloaded_file_allowed(
-            use_temp_unpack_dir != 0,
-            downloaded_empty != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ucf_unpack_ctrl_should_move_from_temp_unpack(
-    unpack_ok: c_int,
-    use_temp_unpack_dir: c_int,
-) -> c_int {
-    i32::from(
-        crate::unpackcleanurlfeed::unpack_ctrl_should_move_from_temp_unpack(
-            unpack_ok != 0,
-            use_temp_unpack_dir != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ucf_unpack_ctrl_should_cleanup_archive_disks(
-    unpack_ok: c_int,
-    move_ok: c_int,
-    unpack_cleanup_disk: c_int,
-) -> c_int {
-    i32::from(
-        crate::unpackcleanurlfeed::unpack_ctrl_should_cleanup_archive_disks(
-            unpack_ok != 0,
-            move_ok != 0,
-            unpack_cleanup_disk != 0,
-        ),
-    )
 }
 
 #[no_mangle]
@@ -19617,49 +18847,6 @@ pub extern "C" fn nzbget_rs_ucf_remote_server_is_accept_busy_retry(
 // DirectRenamer, RarReader, Repair, ArticleDownloader, WebDownloader & NzbFile
 // Hot-Path FFI (`renamerarrepdl.rs`)
 // ---------------------------------------------------------------------------
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rrd_rar_cursor_calc_read_window(
-    source_size: i64,
-    cur_pos: i64,
-    req_size: i64,
-    out_eof: *mut c_int,
-    out_new_pos: *mut i64,
-) -> i64 {
-    let (avail, eof, new_pos) =
-        crate::renamerarrepdl::rar_cursor_calc_read_window(source_size, cur_pos, req_size);
-    if !out_eof.is_null() {
-        *out_eof = i32::from(eof);
-    }
-    if !out_new_pos.is_null() {
-        *out_new_pos = new_pos;
-    }
-    avail
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rrd_rar_cursor_calc_seek_target(
-    cur_pos: i64,
-    source_size: i64,
-    offset: i64,
-    origin: c_int,
-    so_cur: c_int,
-    so_end: c_int,
-    out_target: *mut i64,
-) -> c_int {
-    let (ok, target) = crate::renamerarrepdl::rar_cursor_calc_seek_target(
-        cur_pos,
-        source_size,
-        offset,
-        origin,
-        so_cur,
-        so_end,
-    );
-    if !out_target.is_null() {
-        *out_target = target;
-    }
-    i32::from(ok)
-}
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_rrd_repair_ctrl_filename_eq_ignore_case(
@@ -20153,14 +19340,6 @@ pub extern "C" fn nzbget_rs_psp_prepost_is_better_paused_par_candidate(
         file_size,
         smallest_size,
     ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_psp_rar_renamer_calc_stage_progress(
-    file_count: c_int,
-    cur_file: c_int,
-) -> c_int {
-    crate::poolstatprepost::rar_renamer_calc_stage_progress(file_count, cur_file)
 }
 
 #[no_mangle]
@@ -23641,62 +22820,6 @@ pub extern "C" fn nzbget_rs_pur_history_coord_is_valid_dupe_backup_delete_status
             delete_status,
             ds_dupe,
             ds_manual,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pur_unpack_ctrl_should_execute_initial_unpack(
-    unpack_tried: c_int,
-    par_repaired: c_int,
-) -> c_int {
-    i32::from(
-        crate::postunpackrenamehist::pur_unpack_ctrl_should_execute_initial_unpack(
-            unpack_tried != 0,
-            par_repaired != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pur_unpack_ctrl_should_add_extract_cmd_flag(
-    has_x: c_int,
-    has_e: c_int,
-) -> c_int {
-    i32::from(
-        crate::postunpackrenamehist::pur_unpack_ctrl_should_add_extract_cmd_flag(
-            has_x != 0,
-            has_e != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pur_unpack_ctrl_should_add_default_overwrite_flag(
-    has_o_plus: c_int,
-    has_o_minus: c_int,
-    has_or: c_int,
-) -> c_int {
-    i32::from(
-        crate::postunpackrenamehist::pur_unpack_ctrl_should_add_default_overwrite_flag(
-            has_o_plus != 0,
-            has_o_minus != 0,
-            has_or != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_pur_direct_unpack_should_log_unrar_exit_error(
-    unpack_ok: c_int,
-    exit_code: c_int,
-    interrupted: c_int,
-) -> c_int {
-    i32::from(
-        crate::postunpackrenamehist::pur_direct_unpack_should_log_unrar_exit_error(
-            unpack_ok != 0,
-            exit_code,
-            interrupted != 0,
         ),
     )
 }
@@ -27556,29 +26679,6 @@ pub unsafe extern "C" fn nzbget_rs_tpr_twin_check_format_live_identity_line(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_direct_unpack_readline_step(
-    buf_ptr: *mut u8,
-    buf_len: usize,
-    i: usize,
-    ch: i32,
-    backspace_ptr: *mut i32,
-    out_idx_ptr: *mut usize,
-) -> i32 {
-    if buf_ptr.is_null() || buf_len == 0 || backspace_ptr.is_null() {
-        return 1;
-    }
-    let buf = std::slice::from_raw_parts_mut(buf_ptr, buf_len);
-    let mut bs = *backspace_ptr != 0;
-    let (next_i, should_break) =
-        crate::twinproberenhist::direct_unpack_readline_step(buf, i, ch, &mut bs);
-    *backspace_ptr = i32::from(bs);
-    if !out_idx_ptr.is_null() {
-        *out_idx_ptr = next_i;
-    }
-    i32::from(should_break)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_stream_composite_compute_member_bases(
     member_sizes_ptr: *const i64,
     out_bases_ptr: *mut i64,
@@ -27611,71 +26711,6 @@ pub unsafe extern "C" fn nzbget_rs_stream_content_mapper_split_inner_name(
     into_buf(crate::streamrepair::content_mapper_split_inner_name(input(
         first_name,
     )))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_pup_unpack_ctrl_trim_password_line(
-    line: *mut c_char,
-) -> i32 {
-    if line.is_null() {
-        return 0;
-    }
-    let len = std::ffi::CStr::from_ptr(line).to_bytes_with_nul().len();
-    let slice = std::slice::from_raw_parts_mut(line as *mut u8, len);
-    i32::from(crate::parunpackpost::unpack_ctrl_trim_password_line(slice))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_pup_unpack_ctrl_matches_split_piece_name(
-    filename: *const c_char,
-    dest_base_name: *const c_char,
-) -> i32 {
-    i32::from(crate::parunpackpost::unpack_ctrl_matches_split_piece_name(
-        input(filename),
-        input(dest_base_name),
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_pup_unpack_ctrl_readline_step(
-    buf_ptr: *mut u8,
-    buf_len: usize,
-    idx_ptr: *mut usize,
-    ch: i32,
-    printed_ptr: *mut i32,
-    last_bs_ptr: *mut isize,
-    out_process_len_ptr: *mut isize,
-    out_progress_ptr: *mut i32,
-) -> i32 {
-    if buf_ptr.is_null()
-        || buf_len == 0
-        || idx_ptr.is_null()
-        || printed_ptr.is_null()
-        || last_bs_ptr.is_null()
-    {
-        return 1;
-    }
-    let buf = std::slice::from_raw_parts_mut(buf_ptr, buf_len);
-    let mut printed = *printed_ptr != 0;
-    let mut proc_len = -1isize;
-    let mut prog = -1i32;
-    let should_break = crate::parunpackpost::unpack_ctrl_readline_step(
-        buf,
-        &mut *idx_ptr,
-        ch,
-        &mut printed,
-        &mut *last_bs_ptr,
-        &mut proc_len,
-        &mut prog,
-    );
-    *printed_ptr = i32::from(printed);
-    if !out_process_len_ptr.is_null() {
-        *out_process_len_ptr = proc_len;
-    }
-    if !out_progress_ptr.is_null() {
-        *out_progress_ptr = prog;
-    }
-    i32::from(should_break)
 }
 
 #[no_mangle]
@@ -28826,42 +27861,6 @@ pub unsafe extern "C" fn nzbget_rs_tpr_parchecker_next_valid_block_run(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_unpack_ctrl_should_check_renamed_rar_sig(
-    has_renamed_archive_files: i32,
-    archive_kind: i32,
-    is_ignored_ext: i32,
-) -> i32 {
-    if crate::twinproberenhist::tpr_unpack_ctrl_should_check_renamed_rar_sig(
-        has_renamed_archive_files != 0,
-        archive_kind,
-        is_ignored_ext != 0,
-    ) {
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_unpack_should_auto_stop_on_error(
-    is_stopped: i32,
-    decrypt_error: i32,
-    password_error: i32,
-    crc_or_volume_error: i32,
-) -> i32 {
-    if crate::twinproberenhist::tpr_unpack_should_auto_stop_on_error(
-        is_stopped != 0,
-        decrypt_error != 0,
-        password_error != 0,
-        crc_or_volume_error != 0,
-    ) {
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_tpr_history_coord_retry_action_labels(
     reset_failed: i32,
     reprocess: i32,
@@ -29464,93 +28463,6 @@ pub unsafe extern "C" fn nzbget_rs_tpr_post_format_info_name(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_unpack_format_password_arg(
-    password: *const c_char,
-) -> RsBuf {
-    let p = if password.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(password).to_bytes()
-    };
-    into_buf(crate::twinproberenhist::tpr_unpack_format_password_arg(p))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_unpack_format_unpack_dir(
-    dest_dir: *const c_char,
-    sep: c_char,
-    use_temp_unpack_dir: i32,
-) -> RsBuf {
-    let d = if dest_dir.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(dest_dir).to_bytes()
-    };
-    into_buf(crate::twinproberenhist::tpr_unpack_format_unpack_dir(
-        d,
-        sep as u8,
-        use_temp_unpack_dir != 0,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_unpack_ctrl_second_attempt_skip_errmsg(
-    last_unpack_status: i32,
-    us_password: i32,
-) -> *const c_char {
-    crate::twinproberenhist::tpr_unpack_ctrl_second_attempt_skip_errmsg(
-        last_unpack_status,
-        us_password,
-    )
-    .as_ptr() as *const c_char
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_unpack_ctrl_format_split_piece_name(
-    dest_base_name: *const c_char,
-    index: i32,
-) -> RsBuf {
-    let b = if dest_base_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(dest_base_name).to_bytes()
-    };
-    into_buf(
-        crate::twinproberenhist::tpr_unpack_ctrl_format_split_piece_name(b, index),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_unpack_ctrl_format_split_piece_path(
-    dest_dir: *const c_char,
-    sep: c_char,
-    dest_base_name: *const c_char,
-    index: i32,
-) -> RsBuf {
-    let d = if dest_dir.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(dest_dir).to_bytes()
-    };
-    let b = if dest_base_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(dest_base_name).to_bytes()
-    };
-    into_buf(
-        crate::twinproberenhist::tpr_unpack_ctrl_format_split_piece_path(d, sep as u8, b, index),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_unpack_ctrl_request_par_reason(
-    force_repair: i32,
-) -> *const c_char {
-    crate::twinproberenhist::tpr_unpack_ctrl_request_par_reason(force_repair != 0).as_ptr()
-        as *const c_char
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_tpr_repair_ctrl_twin_par2_reject_reason(
     cmp: i32,
 ) -> *const c_char {
@@ -29715,54 +28627,6 @@ pub unsafe extern "C" fn nzbget_rs_tpr_parchecker_format_twin_err_msg(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_unpack_format_extracting_msg(
-    suffix: *const c_char,
-) -> RsBuf {
-    let s = if suffix.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(suffix).to_bytes()
-    };
-    into_buf(crate::twinproberenhist::tpr_unpack_format_extracting_msg(s))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_unpack_ctrl_format_cancel_msg(
-    info_name: *const c_char,
-) -> RsBuf {
-    let n = if info_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(info_name).to_bytes()
-    };
-    into_buf(crate::twinproberenhist::tpr_unpack_ctrl_format_cancel_msg(n))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_rar_renamer_format_exec_progress(
-    info_name: *const c_char,
-) -> RsBuf {
-    let n = if info_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(info_name).to_bytes()
-    };
-    into_buf(crate::twinproberenhist::tpr_rar_renamer_format_exec_progress(n))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_rar_renamer_format_file_progress(
-    filename: *const c_char,
-) -> RsBuf {
-    let f = if filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(filename).to_bytes()
-    };
-    into_buf(crate::twinproberenhist::tpr_rar_renamer_format_file_progress(f))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_content_map_format_member_unreadable_reason(
     name: *const c_char,
 ) -> RsBuf {
@@ -29772,14 +28636,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_content_map_format_member_unreadable_reas
         CStr::from_ptr(name).to_bytes()
     };
     into_buf(crate::dupequeuehealth::dqh_content_map_format_member_unreadable_reason(n))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_rar_volume_set_data_offset(
-    position: i64,
-    packed_size: i64,
-) -> i64 {
-    crate::dupequeuehealth::dqh_rar_volume_set_data_offset(position, packed_size)
 }
 
 #[no_mangle]
@@ -30566,84 +29422,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_twin_check_lowercase_key(
         CStr::from_ptr(dupe_key).to_bytes()
     };
     into_buf(crate::dupequeuehealth::dqh_twin_check_lowercase_key(k))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_direct_unpack_format_status_msg(
-    info_name_up: *const c_char,
-    success: c_int,
-) -> RsBuf {
-    let i = if info_name_up.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(info_name_up).to_bytes()
-    };
-    into_buf(
-        crate::twinproberenhist::tpr_direct_unpack_format_status_msg(i, success != 0),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_direct_unpack_format_trailing_sep_dir(
-    dir: *const c_char,
-    sep: c_char,
-) -> RsBuf {
-    let d = if dir.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(dir).to_bytes()
-    };
-    into_buf(
-        crate::twinproberenhist::tpr_direct_unpack_format_trailing_sep_dir(d, sep as u8),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_direct_unpack_format_cancelling_msg(
-    info_name: *const c_char,
-) -> RsBuf {
-    let i = if info_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(info_name).to_bytes()
-    };
-    into_buf(crate::twinproberenhist::tpr_direct_unpack_format_cancelling_msg(i))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_direct_unpack_format_dest_changed_msg(
-    nzb_name: *const c_char,
-) -> RsBuf {
-    let n = if nzb_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(nzb_name).to_bytes()
-    };
-    into_buf(crate::twinproberenhist::tpr_direct_unpack_format_dest_changed_msg(n))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_direct_unpack_format_missing_vol_msg(
-    waiting_file: *const c_char,
-) -> RsBuf {
-    let w = if waiting_file.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(waiting_file).to_bytes()
-    };
-    into_buf(crate::twinproberenhist::tpr_direct_unpack_format_missing_vol_msg(w))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_unpack_ctrl_format_joining_progress(
-    piece_name: *const c_char,
-) -> RsBuf {
-    let p = if piece_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(piece_name).to_bytes()
-    };
-    into_buf(crate::dupequeuehealth::dqh_unpack_ctrl_format_joining_progress(p))
 }
 
 #[no_mangle]
@@ -31824,18 +30602,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_webserver_encode_hex_token(
     let copy_len = hex.len().min(out_cap - 1);
     std::ptr::copy_nonoverlapping(hex.as_ptr() as *const c_char, out_token, copy_len);
     *out_token.add(copy_len) = 0;
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_unpack_format_7z_output_arg(
-    unpack_dir: *const c_char,
-) -> RsBuf {
-    let ud = if unpack_dir.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(unpack_dir).to_bytes()
-    };
-    into_buf(crate::dupequeuehealth::dqh_unpack_format_7z_output_arg(ud))
 }
 
 #[no_mangle]
@@ -33134,112 +31900,6 @@ pub extern "C" fn nzbget_rs_dqh_parchecker_is_partial_range_crc_valid(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_unpack_ctrl_accum_unpack_sec(
-    prev_unpack_sec: c_int,
-    cur_time: i64,
-    start_time: i64,
-) -> c_int {
-    crate::dupequeuehealth::dqh_unpack_ctrl_accum_unpack_sec(prev_unpack_sec, cur_time, start_time)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_unpack_ctrl_select_sevenzip_wildcard(
-    multi_volumes: c_int,
-) -> *const c_char {
-    crate::dupequeuehealth::dqh_unpack_ctrl_select_sevenzip_wildcard(multi_volumes != 0)
-        .as_ptr()
-        .cast::<c_char>()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_unpack_ctrl_calc_write_buffer_bytes(
-    write_buffer_kb: c_int,
-    out_bytes: *mut c_int,
-) -> c_int {
-    if let Some(b) =
-        crate::dupequeuehealth::dqh_unpack_ctrl_calc_write_buffer_bytes(write_buffer_kb)
-    {
-        if !out_bytes.is_null() {
-            *out_bytes = b;
-        }
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_unpack_ctrl_should_fail_on_close(
-    close_ok: c_int,
-    prev_ok: c_int,
-) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_unpack_ctrl_should_fail_on_close(
-        close_ok != 0,
-        prev_ok != 0,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_unpack_ctrl_is_completed_success(
-    unpack_ok: c_int,
-    cleanup_success: c_int,
-) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_unpack_ctrl_is_completed_success(
-        unpack_ok != 0,
-        cleanup_success != 0,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_unpack_ctrl_select_unpack_parent_dir(
-    final_dir: *const c_char,
-    dest_dir: *const c_char,
-) -> *const c_char {
-    let f_slice = if final_dir.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(final_dir).to_bytes()
-    };
-    let d_slice = if dest_dir.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(dest_dir).to_bytes()
-    };
-    let chosen = crate::dupequeuehealth::dqh_unpack_ctrl_select_unpack_parent_dir(f_slice, d_slice);
-    if !f_slice.is_empty() && std::ptr::eq(chosen.as_ptr(), f_slice.as_ptr()) {
-        final_dir
-    } else {
-        dest_dir
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_unpack_ctrl_is_move_extracted_error(
-    move_ok: c_int,
-    hidden_file: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_unpack_ctrl_is_move_extracted_error(
-            move_ok != 0,
-            hidden_file != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_unpack_ctrl_should_delete_created_final_dir(
-    unpack_ok: c_int,
-    final_dir_created: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_unpack_ctrl_should_delete_created_final_dir(
-            unpack_ok != 0,
-            final_dir_created != 0,
-        ),
-    )
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_prepost_should_reset_stale_direct_unpack(
     direct_unpack_status: c_int,
     ns_running: c_int,
@@ -33319,49 +31979,6 @@ pub extern "C" fn nzbget_rs_dqh_repair_ctrl_matches_history_dupe_source(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_direct_unpack_should_log_final_status(
-    status: c_int,
-    ns_success: c_int,
-    ns_failure: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_direct_unpack_should_log_final_status(
-            status,
-            ns_success,
-            ns_failure,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_direct_unpack_should_keep_waiting_break(
-    iter: c_int,
-    unpacking: c_int,
-    has_active_process: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_direct_unpack_should_keep_waiting_break(
-            iter,
-            unpacking != 0,
-            has_active_process != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_direct_unpack_should_delete_temp_unpack_dir(
-    use_temp_unpack_dir: c_int,
-    dir_exists: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_direct_unpack_should_delete_temp_unpack_dir(
-            use_temp_unpack_dir != 0,
-            dir_exists != 0,
-        ),
-    )
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_par_renamer_needs_create_target_dir(
     old_path: *const c_char,
     new_path: *const c_char,
@@ -33377,52 +31994,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_par_renamer_needs_create_target_dir(
         CStr::from_ptr(new_path).to_bytes()
     };
     i32::from(crate::dupequeuehealth::dqh_par_renamer_needs_create_target_dir(o, n))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_rar_volume_is_read_handle_ready(
-    size: i64,
-    seek_zero_ok: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_rar_volume_is_read_handle_ready(size, seek_zero_ok != 0),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_rar_volume_should_update_version(
-    has_error: c_int,
-    signature_read: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_rar_volume_should_update_version(
-            has_error != 0,
-            signature_read != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_rar_volume_is_decrypt_buf_valid(
-    evp_ok: c_int,
-    out_len: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_rar_volume_is_decrypt_buf_valid(evp_ok != 0, out_len),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_rar_renamer_should_ignore_file(
-    has_ignore_ext: c_int,
-    matched_ext: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_rar_renamer_should_ignore_file(
-            has_ignore_ext != 0,
-            matched_ext != 0,
-        ),
-    )
 }
 
 #[no_mangle]
@@ -38795,6 +37366,198 @@ pub unsafe extern "C" fn nzbget_rs_dupecoord_no_backup_reason(
         },
     ))
 }
+
+// ============================================================================
+// DirectUnpack & UnpackController (`rust/src/unpack.rs`)
+// ============================================================================
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_unpack_use_inter_dir(
+    dest_dir: *const c_char,
+    inter_dir: *const c_char,
+    sep: c_char,
+) -> c_int {
+    let d = if dest_dir.is_null() {
+        b""
+    } else {
+        CStr::from_ptr(dest_dir).to_bytes()
+    };
+    let i = if inter_dir.is_null() {
+        b""
+    } else {
+        CStr::from_ptr(inter_dir).to_bytes()
+    };
+    crate::unpack::use_inter_dir(d, i, sep as u8) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_unpack_is_main_archive(filename: *const c_char) -> c_int {
+    let f = if filename.is_null() {
+        b""
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    crate::unpack::is_main_archive(f) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_unpack_direct_readline_step(
+    buf: *mut u8,
+    buf_len: usize,
+    i: usize,
+    ch: c_int,
+    backspace: *mut c_int,
+    out_idx: *mut usize,
+) -> c_int {
+    if buf.is_null() || buf_len == 0 || backspace.is_null() || out_idx.is_null() {
+        return 1;
+    }
+    let slice = std::slice::from_raw_parts_mut(buf, buf_len);
+    let mut bs = *backspace != 0;
+    let (next_i, should_break) = crate::unpack::direct_unpack_readline_step(slice, i, ch, &mut bs);
+    *backspace = bs as c_int;
+    *out_idx = next_i;
+    should_break as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_unpack_classify_archive_file(
+    filename: *const c_char,
+) -> c_int {
+    let f = if filename.is_null() {
+        b""
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    crate::unpack::classify_archive_file(f)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_unpack_has_completed_archive_ext(
+    filename: *const c_char,
+) -> c_int {
+    let f = if filename.is_null() {
+        b""
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    crate::unpack::has_completed_archive_ext(f) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_unpack_is_split_first_piece(
+    filename: *const c_char,
+) -> c_int {
+    let f = if filename.is_null() {
+        b""
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    crate::unpack::is_split_first_piece(f) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_unpack_accumulate_split_piece(
+    filename: *const c_char,
+    dest_base_name: *const c_char,
+    segment_size: i64,
+    first_segment_size: i64,
+    inout_count: *mut c_int,
+    inout_min: *mut c_int,
+    inout_max: *mut c_int,
+    inout_dif_size_min: *mut c_int,
+) -> c_int {
+    if inout_count.is_null()
+        || inout_min.is_null()
+        || inout_max.is_null()
+        || inout_dif_size_min.is_null()
+    {
+        return 0;
+    }
+    let f = if filename.is_null() {
+        b""
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    let b = if dest_base_name.is_null() {
+        b""
+    } else {
+        CStr::from_ptr(dest_base_name).to_bytes()
+    };
+    crate::unpack::accumulate_split_piece(
+        f,
+        b,
+        segment_size,
+        first_segment_size,
+        &mut *inout_count,
+        &mut *inout_min,
+        &mut *inout_max,
+        &mut *inout_dif_size_min,
+    ) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_unpack_classify_cleanup_archive_file(
+    is_dir: c_int,
+    inter_dir: c_int,
+    in_extracted_files: c_int,
+    is_downloaded_file: c_int,
+    has_splitted_files: c_int,
+    in_joined_files: c_int,
+    filename: *const c_char,
+) -> c_int {
+    let f = if filename.is_null() {
+        b""
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    crate::unpack::classify_cleanup_archive_file(
+        is_dir != 0,
+        inter_dir != 0,
+        in_extracted_files != 0,
+        is_downloaded_file != 0,
+        has_splitted_files != 0,
+        in_joined_files != 0,
+        f,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_unpack_ctrl_readline_step(
+    buf: *mut u8,
+    buf_len: usize,
+    idx: *mut usize,
+    ch: c_int,
+    printed: *mut i32,
+    last_bs: *mut isize,
+    out_process_len: *mut isize,
+    out_progress: *mut i32,
+) -> i32 {
+    if buf.is_null()
+        || buf_len == 0
+        || idx.is_null()
+        || printed.is_null()
+        || last_bs.is_null()
+        || out_process_len.is_null()
+        || out_progress.is_null()
+    {
+        return 1;
+    }
+    let slice = std::slice::from_raw_parts_mut(buf, buf_len);
+    let mut pr = *printed != 0;
+    let should_break = crate::unpack::unpack_ctrl_readline_step(
+        slice,
+        &mut *idx,
+        ch,
+        &mut pr,
+        &mut *last_bs,
+        &mut *out_process_len,
+        &mut *out_progress,
+    );
+    *printed = pr as i32;
+    should_break as i32
+}
+
 
 
 

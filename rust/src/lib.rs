@@ -49,6 +49,7 @@ pub mod systemhealth;
 pub mod text;
 pub mod tlscipher;
 pub mod twin;
+pub mod unpack;
 pub mod url;
 pub mod urlcoord;
 pub mod util;

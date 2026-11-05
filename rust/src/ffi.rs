@@ -34439,6 +34439,120 @@ pub unsafe extern "C" fn nzbget_rs_tpr_direct_unpack_format_missing_vol_msg(
     into_buf(crate::twinproberenhist::tpr_direct_unpack_format_missing_vol_msg(w))
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_unpack_ctrl_format_joining_progress(
+    piece_name: *const c_char,
+) -> RsBuf {
+    let p = if piece_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(piece_name).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_unpack_ctrl_format_joining_progress(p))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_unpack_ctrl_strip_last_extension(
+    frag_base_name: *const c_char,
+) -> RsBuf {
+    let f = if frag_base_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(frag_base_name).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_unpack_ctrl_strip_last_extension(f))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_format_materialize_progress(
+    donor_name: *const c_char,
+    member_num: c_int,
+    total_members: c_int,
+    delivered_articles: c_int,
+    total_articles: c_int,
+    total_bytes: i64,
+) -> RsBuf {
+    let d = if donor_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(donor_name).to_bytes()
+    };
+    into_buf(
+        crate::dupequeuehealth::dqh_stream_repair_format_materialize_progress(
+            d,
+            member_num,
+            total_members,
+            delivered_articles,
+            total_articles,
+            total_bytes,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_article_fetcher_format_body_cmd(
+    message_id: *const c_char,
+) -> RsBuf {
+    let m = if message_id.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(message_id).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_article_fetcher_format_body_cmd(m))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_webserver_format_forwarded_for_suffix(
+    forwarded_for: *const c_char,
+) -> RsBuf {
+    let f = if forwarded_for.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(forwarded_for).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_webserver_format_forwarded_for_suffix(f))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_cmd_script_format_info_name(
+    script_name: *const c_char,
+    command: *const c_char,
+    uppercase: c_int,
+) -> RsBuf {
+    let s = if script_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(script_name).to_bytes()
+    };
+    let c = if command.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(command).to_bytes()
+    };
+    into_buf(crate::dupequeuehealth::dqh_cmd_script_format_info_name(
+        s,
+        c,
+        uppercase != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_script_config_format_tls_temp_name(
+    leaf: *const c_char,
+    pid: c_int,
+    seq: u64,
+) -> RsBuf {
+    let l = if leaf.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(leaf).to_bytes()
+    };
+    into_buf(
+        crate::dupequeuehealth::dqh_script_config_format_tls_temp_name(l, pid, seq),
+    )
+}
+
+
 
 
 

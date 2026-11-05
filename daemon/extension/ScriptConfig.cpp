@@ -170,7 +170,10 @@ ScriptConfig::CipherCommit ScriptConfig::CommitCipherPatch(std::string_view expe
 	int descriptor = -1;
 	for (int attempt = 0; attempt < 16; ++attempt)
 	{
-		temporary = "." + leaf + ".tls-" + std::to_string(getpid()) + "-" + std::to_string(sequence.fetch_add(1));
+		NzbgetRsBuf tmpBuf = nzbget_rs_dqh_script_config_format_tls_temp_name(
+			leaf.c_str(), (int32_t)getpid(), sequence.fetch_add(1));
+		temporary.assign(tmpBuf.data ? tmpBuf.data : "", tmpBuf.len);
+		nzbget_rs_free(tmpBuf);
 		descriptor = openat(parent.value, temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
 		if (descriptor >= 0 || errno != EEXIST) break;
 	}

@@ -54,7 +54,11 @@ void RarRenamer::BuildDirList(const char* destDir)
 	{
 		if (!IsStopped())
 		{
-			BString<1024> fullFilename("%s%c%s", destDir, PATH_SEPARATOR, filename);
+			NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+				destDir, PATH_SEPARATOR, filename);
+			BString<1024> fullFilename;
+			fullFilename.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
+			nzbget_rs_free(fullFnBuf);
 			if (FileSystem::DirectoryExists(fullFilename))
 			{
 				BuildDirList(fullFilename);
@@ -74,7 +78,11 @@ void RarRenamer::CheckFiles(const char* destDir)
 	{
 		if (!IsStopped())
 		{
-			BString<1024> fullFilename("%s%c%s", destDir, PATH_SEPARATOR, filename);
+			NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+				destDir, PATH_SEPARATOR, filename);
+			BString<1024> fullFilename;
+			fullFilename.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
+			nzbget_rs_free(fullFnBuf);
 
 			if (!FileSystem::DirectoryExists(fullFilename))
 			{

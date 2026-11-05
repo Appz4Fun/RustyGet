@@ -301,10 +301,12 @@ bool WebProcessor::CheckCredentials()
 	}
 	if (check.warn)
 	{
+		NzbgetRsBuf fwdBuf = nzbget_rs_dqh_webserver_format_forwarded_for_suffix(*m_forwardedFor);
 		warn("Request received on port %i from %s%s, but username (%s) or password invalid",
 			g_Options->GetControlPort(), m_connection->GetRemoteAddr(),
-			!m_forwardedFor.Empty() ? (char*)BString<1024>(" (forwarded for: %s)", *m_forwardedFor) : "",
+			fwdBuf.data ? fwdBuf.data : "",
 			m_authInfo);
+		nzbget_rs_free(fwdBuf);
 	}
 	return check.authorized != 0;
 }
@@ -595,7 +597,11 @@ void WebProcessor::SendMultiFileResponse()
 	Tokenizer tok(filelist, "+");
 	while (const char* filename = tok.Next())
 	{
-		BString<1024> diskFilename("%s%c%s", g_Options->GetWebDir(), PATH_SEPARATOR, filename);
+		NzbgetRsBuf diskFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			g_Options->GetWebDir(), PATH_SEPARATOR, filename);
+		BString<1024> diskFilename;
+		diskFilename.Set(diskFnBuf.data ? diskFnBuf.data : "", (int)diskFnBuf.len);
+		nzbget_rs_free(diskFnBuf);
 
 		CharBuffer body;
 		if (!FileSystem::LoadFileIntoBuffer(diskFilename, body, true))

@@ -5878,6 +5878,17 @@ NzbgetRsBuf nzbget_rs_tpr_direct_unpack_format_trailing_sep_dir(const char* dir,
 NzbgetRsBuf nzbget_rs_tpr_direct_unpack_format_cancelling_msg(const char* info_name);
 NzbgetRsBuf nzbget_rs_tpr_direct_unpack_format_dest_changed_msg(const char* nzb_name);
 NzbgetRsBuf nzbget_rs_tpr_direct_unpack_format_missing_vol_msg(const char* waiting_file);
+NzbgetRsBuf nzbget_rs_dqh_unpack_ctrl_format_joining_progress(const char* piece_name);
+NzbgetRsBuf nzbget_rs_dqh_unpack_ctrl_strip_last_extension(const char* frag_base_name);
+NzbgetRsBuf nzbget_rs_dqh_stream_repair_format_materialize_progress(
+    const char* donor_name, int32_t member_num, int32_t total_members,
+    int32_t delivered_articles, int32_t total_articles, int64_t total_bytes);
+NzbgetRsBuf nzbget_rs_dqh_article_fetcher_format_body_cmd(const char* message_id);
+NzbgetRsBuf nzbget_rs_dqh_webserver_format_forwarded_for_suffix(const char* forwarded_for);
+NzbgetRsBuf nzbget_rs_dqh_cmd_script_format_info_name(
+    const char* script_name, const char* command, int32_t uppercase);
+NzbgetRsBuf nzbget_rs_dqh_script_config_format_tls_temp_name(
+    const char* leaf, int32_t pid, uint64_t seq);
 
 #include "nzbget_tls_cipher.h"
 

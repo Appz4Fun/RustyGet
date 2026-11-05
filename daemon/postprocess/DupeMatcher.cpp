@@ -176,7 +176,11 @@ void DupeMatcher::FindLargestFile(const char* directory, char* filenameBuf, int 
 	DirBrowser dir(directory);
 	while (const char* filename = dir.Next())
 	{
-		BString<1024> fullFilename("%s%c%s", directory, PATH_SEPARATOR, filename);
+		NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			directory, PATH_SEPARATOR, filename);
+		BString<1024> fullFilename;
+		fullFilename.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
+		nzbget_rs_free(fullFnBuf);
 
 		int64 fileSize = FileSystem::FileSize(fullFilename);
 		if (fileSize > *maxSize)

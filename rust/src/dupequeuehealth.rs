@@ -1732,6 +1732,90 @@ pub fn dqh_twin_check_lowercase_key(dupe_key: &[u8]) -> Vec<u8> {
     crate::releasename::lower(dupe_key)
 }
 
+/// Formats `"Joining from <piece_name>"` for `UnpackController::JoinFile`.
+pub fn dqh_unpack_ctrl_format_joining_progress(piece_name: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(13 + piece_name.len());
+    out.extend_from_slice(b"Joining from ");
+    out.extend_from_slice(piece_name);
+    out
+}
+
+/// Strips the last `.ext` from `frag_base_name` for `UnpackController::JoinFile`.
+pub fn dqh_unpack_ctrl_strip_last_extension(frag_base_name: &[u8]) -> Vec<u8> {
+    match frag_base_name.iter().rposition(|&b| b == b'.') {
+        Some(idx) => frag_base_name[..idx].to_vec(),
+        None => frag_base_name.to_vec(),
+    }
+}
+
+/// Formats `"Downloading duplicate <donor_name> (volume <member_num>/<total_members>, article <delivered_articles>/<total_articles>, <mb:.1> MB)"`
+/// for `StreamRepairController::MaterializeDonorSet`.
+pub fn dqh_stream_repair_format_materialize_progress(
+    donor_name: &[u8],
+    member_num: i32,
+    total_members: i32,
+    delivered_articles: i32,
+    total_articles: i32,
+    total_bytes: i64,
+) -> Vec<u8> {
+    let mb = dqh_stream_repair_bytes_to_mb(total_bytes);
+    let suffix = format!(
+        " (volume {member_num}/{total_members}, article {delivered_articles}/{total_articles}, {mb:.1} MB)"
+    );
+    let mut out = Vec::with_capacity(22 + donor_name.len() + suffix.len());
+    out.extend_from_slice(b"Downloading duplicate ");
+    out.extend_from_slice(donor_name);
+    out.extend_from_slice(suffix.as_bytes());
+    out
+}
+
+/// Formats `"BODY <message_id>\r\n"` for `ArticleFetcher::FetchOnConnection`.
+pub fn dqh_article_fetcher_format_body_cmd(message_id: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(5 + message_id.len() + 2);
+    out.extend_from_slice(b"BODY ");
+    out.extend_from_slice(message_id);
+    out.extend_from_slice(b"\r\n");
+    out
+}
+
+/// Formats `" (forwarded for: <forwarded_for>)"` when non-empty else `""` for `WebProcessor::CheckCredentials`.
+pub fn dqh_webserver_format_forwarded_for_suffix(forwarded_for: &[u8]) -> Vec<u8> {
+    if forwarded_for.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(17 + forwarded_for.len() + 1);
+    out.extend_from_slice(b" (forwarded for: ");
+    out.extend_from_slice(forwarded_for);
+    out.push(b')');
+    out
+}
+
+/// Formats `"script <script_name> with command <command>"` or `"Script <script_name> with command <command>"`
+/// for `CommandScriptController::ExecuteScript`.
+pub fn dqh_cmd_script_format_info_name(
+    script_name: &[u8],
+    command: &[u8],
+    uppercase: bool,
+) -> Vec<u8> {
+    let prefix: &[u8] = if uppercase { b"Script " } else { b"script " };
+    let mut out = Vec::with_capacity(prefix.len() + script_name.len() + 14 + command.len());
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(script_name);
+    out.extend_from_slice(b" with command ");
+    out.extend_from_slice(command);
+    out
+}
+
+/// Formats `".<leaf>.tls-<pid>-<seq>"` for `ScriptConfig.cpp`.
+pub fn dqh_script_config_format_tls_temp_name(leaf: &[u8], pid: i32, seq: u64) -> Vec<u8> {
+    let suffix = format!(".tls-{pid}-{seq}");
+    let mut out = Vec::with_capacity(1 + leaf.len() + suffix.len());
+    out.push(b'.');
+    out.extend_from_slice(leaf);
+    out.extend_from_slice(suffix.as_bytes());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2425,6 +2509,46 @@ mod tests {
         assert_eq!(
             dqh_twin_check_lowercase_key(b"RagE.S01E02-GRP"),
             b"rage.s01e02-grp"
+        );
+        assert_eq!(
+            dqh_unpack_ctrl_format_joining_progress(b"movie.mkv.001"),
+            b"Joining from movie.mkv.001"
+        );
+        assert_eq!(
+            dqh_unpack_ctrl_strip_last_extension(b"movie.mkv.001"),
+            b"movie.mkv"
+        );
+        assert_eq!(
+            dqh_stream_repair_format_materialize_progress(
+                b"MyShow.copy2",
+                2,
+                5,
+                10,
+                40,
+                2 * 1024 * 1024,
+            ),
+            b"Downloading duplicate MyShow.copy2 (volume 2/5, article 10/40, 2.0 MB)"
+        );
+        assert_eq!(
+            dqh_article_fetcher_format_body_cmd(b"<part1@example.com>"),
+            b"BODY <part1@example.com>\r\n"
+        );
+        assert_eq!(dqh_webserver_format_forwarded_for_suffix(b""), b"");
+        assert_eq!(
+            dqh_webserver_format_forwarded_for_suffix(b"10.0.0.1"),
+            b" (forwarded for: 10.0.0.1)"
+        );
+        assert_eq!(
+            dqh_cmd_script_format_info_name(b"EMail.py", b"Test", false),
+            b"script EMail.py with command Test"
+        );
+        assert_eq!(
+            dqh_cmd_script_format_info_name(b"EMail.py", b"Test", true),
+            b"Script EMail.py with command Test"
+        );
+        assert_eq!(
+            dqh_script_config_format_tls_temp_name(b"nzbget.conf", 1234, 7),
+            b".nzbget.conf.tls-1234-7"
         );
     }
 }

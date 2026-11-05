@@ -63,7 +63,11 @@ void CommandScriptController::ExecuteScript(std::shared_ptr<const Extension::Scr
 
 	SetArgs({script->GetEntry()});
 
-	BString<1024> infoName("script %s with command %s", script->GetName(), *m_command);
+	NzbgetRsBuf infoBuf = nzbget_rs_dqh_cmd_script_format_info_name(
+		script->GetName(), *m_command, 0);
+	BString<1024> infoName;
+	infoName.Set(infoBuf.data ? infoBuf.data : "", (int)infoBuf.len);
+	nzbget_rs_free(infoBuf);
 	SetInfoName(infoName);
 
 	SetLogPrefix(script->GetDisplayName());
@@ -71,7 +75,10 @@ void CommandScriptController::ExecuteScript(std::shared_ptr<const Extension::Scr
 
 	int exitCode = Execute();
 
-	infoName[0] = 'S'; // uppercase
+	NzbgetRsBuf upInfoBuf = nzbget_rs_dqh_cmd_script_format_info_name(
+		script->GetName(), *m_command, 1);
+	infoName.Set(upInfoBuf.data ? upInfoBuf.data : "", (int)upInfoBuf.len);
+	nzbget_rs_free(upInfoBuf);
 	SetLogPrefix(nullptr);
 
 	switch (nzbget_rs_euh_cmd_script_classify_exit_code(exitCode))

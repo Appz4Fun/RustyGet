@@ -61,8 +61,11 @@ ContentSource* DiskSourceSet::GetSource(int memberIndex)
 	if (!entry.Tried)
 	{
 		entry.Tried = true;
-		BString<1024> path("%s%c%s", *m_destDir, PATH_SEPARATOR,
-			m_members[memberIndex].Name.c_str());
+		NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			*m_destDir, PATH_SEPARATOR, m_members[memberIndex].Name.c_str());
+		BString<1024> path;
+		path.Set(pathBuf.data ? pathBuf.data : "", (int)pathBuf.len);
+		nzbget_rs_free(pathBuf);
 		// a member's size may exceed the file on disk: a target joined from
 		// article files ends with its last downloaded article, and the ranges
 		// past it are declared holes (HoledSourceSet), never read from here
@@ -374,8 +377,11 @@ DiskFile* TargetSetFiles::GetFile(int memberIndex)
 			existing->second.get() : nullptr;
 	}
 	std::unique_ptr<DiskFile> file = std::make_unique<DiskFile>();
-	BString<1024> path("%s%c%s", *m_destDir, PATH_SEPARATOR,
-		m_members[memberIndex].Name.c_str());
+	NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+		*m_destDir, PATH_SEPARATOR, m_members[memberIndex].Name.c_str());
+	BString<1024> path;
+	path.Set(pathBuf.data ? pathBuf.data : "", (int)pathBuf.len);
+	nzbget_rs_free(pathBuf);
 	if (!file->Open(path, DiskFile::omReadWrite))
 	{
 		file.reset();
@@ -964,7 +970,11 @@ void StreamRepairController::ComputePositionalRanks(const char* destDir,
 	sizes.reserve(memberNames.size());
 	for (const CString& memberName : memberNames)
 	{
-		BString<1024> memberPath("%s%c%s", destDir, PATH_SEPARATOR, *memberName);
+		NzbgetRsBuf memberPathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			destDir, PATH_SEPARATOR, *memberName);
+		BString<1024> memberPath;
+		memberPath.Set(memberPathBuf.data ? memberPathBuf.data : "", (int)memberPathBuf.len);
+		nzbget_rs_free(memberPathBuf);
 		names.push_back(*memberName);
 		sizes.push_back(FileSystem::FileSize(memberPath));
 	}
@@ -1259,7 +1269,11 @@ StreamRepairController::ERepairOutcome StreamRepairController::RepairFile(const 
 		RefreshLiveTargetName(target);
 	}
 
-	BString<1024> filePath("%s%c%s", destDir, PATH_SEPARATOR, *target.Filename);
+	NzbgetRsBuf filePathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+		destDir, PATH_SEPARATOR, *target.Filename);
+	BString<1024> filePath;
+	filePath.Set(filePathBuf.data ? filePathBuf.data : "", (int)filePathBuf.len);
+	nzbget_rs_free(filePathBuf);
 
 	DiskFile file;
 	if (!file.Open(filePath, DiskFile::omReadWrite))
@@ -1361,7 +1375,11 @@ bool StreamRepairController::ProveDonorOnIntactFile(const char* destDir,
 			continue;
 		}
 
-		BString<1024> path("%s%c%s", destDir, PATH_SEPARATOR, *memberName);
+		NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			destDir, PATH_SEPARATOR, *memberName);
+		BString<1024> path;
+		path.Set(pathBuf.data ? pathBuf.data : "", (int)pathBuf.len);
+		nzbget_rs_free(pathBuf);
 		int64 size = FileSystem::FileSize(path);
 		if (size <= 0)
 		{
@@ -1490,7 +1508,11 @@ StreamRepairController::ERepairOutcome StreamRepairController::RepairWholeFile(c
 		return roUnproductive;
 	}
 
-	BString<1024> filePath("%s%c%s", destDir, PATH_SEPARATOR, *target.Filename);
+	NzbgetRsBuf filePathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+		destDir, PATH_SEPARATOR, *target.Filename);
+	BString<1024> filePath;
+	filePath.Set(filePathBuf.data ? filePathBuf.data : "", (int)filePathBuf.len);
+	nzbget_rs_free(filePathBuf);
 	if (FileSystem::FileExists(filePath))
 	{
 		// None of the file's own articles arrived, so a file of its name and of the
@@ -1958,7 +1980,11 @@ void StreamRepairController::ExecCrossPackRepair(const char* destDir,
 	std::vector<int> memberTargets(memberNames.size(), -1);
 	for (size_t i = 0; i < memberNames.size(); i++)
 	{
-		BString<1024> path("%s%c%s", destDir, PATH_SEPARATOR, *memberNames[i]);
+		NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			destDir, PATH_SEPARATOR, *memberNames[i]);
+		BString<1024> path;
+		path.Set(pathBuf.data ? pathBuf.data : "", (int)pathBuf.len);
+		nzbget_rs_free(pathBuf);
 		int64 size = FileSystem::FileSize(path);
 		for (size_t t = 0; t < targets.size(); t++)
 		{
@@ -3004,7 +3030,11 @@ void StreamRepairController::ExecDecompressRepair(const char* destDir,
 		return;
 	}
 
-	BString<1024> archivePath("%s%c%s", *tempDir, PATH_SEPARATOR, mainVolume);
+	NzbgetRsBuf archPathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+		*tempDir, PATH_SEPARATOR, mainVolume);
+	BString<1024> archivePath;
+	archivePath.Set(archPathBuf.data ? archPathBuf.data : "", (int)archPathBuf.len);
+	nzbget_rs_free(archPathBuf);
 	NzbgetRsBuf extractDirBuf = nzbget_rs_dqh_stream_repair_format_extract_dir(*tempDir, PATH_SEPARATOR);
 	BString<1024> extractDir;
 	extractDir.Set(extractDirBuf.data ? extractDirBuf.data : "", (int)extractDirBuf.len);
@@ -3132,8 +3162,11 @@ bool StreamRepairController::MaterializeDonorSet(NzbInfo* donorNzb,
 		memberNumber++;
 		FileInfo* donorFile = files[memberIndex];
 
-		BString<1024> path("%s%c%s", tempDir, PATH_SEPARATOR,
-			donorMembers[memberIndex].Name.c_str());
+		NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			tempDir, PATH_SEPARATOR, donorMembers[memberIndex].Name.c_str());
+		BString<1024> path;
+		path.Set(pathBuf.data ? pathBuf.data : "", (int)pathBuf.len);
+		nzbget_rs_free(pathBuf);
 		DiskFile file;
 		if (!file.Open(path, DiskFile::omWrite))
 		{
@@ -3152,11 +3185,11 @@ bool StreamRepairController::MaterializeDonorSet(NzbInfo* donorNzb,
 			if (m_postInfo)
 			{
 				GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-				m_postInfo->SetProgressLabel(BString<1024>(
-					"Downloading duplicate %s (volume %i/%i, article %i/%i, %.1f MB)",
+				NzbgetRsBuf progBuf = nzbget_rs_dqh_stream_repair_format_materialize_progress(
 					donorName, memberNumber, (int)set.Members.size(), deliveredArticles,
-					(int)donorFile->GetArticles()->size(),
-					nzbget_rs_dqh_stream_repair_bytes_to_mb(totalBytes)));
+					(int)donorFile->GetArticles()->size(), totalBytes);
+				m_postInfo->SetProgressLabel(progBuf.data ? progBuf.data : "");
+				nzbget_rs_free(progBuf);
 				m_postInfo->SetStageProgress(
 					nzbget_rs_sap_stream_repair_materialize_stage_progress(completedArticles, totalArticles));
 			}

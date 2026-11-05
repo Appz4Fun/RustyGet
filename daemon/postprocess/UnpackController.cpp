@@ -334,7 +334,10 @@ void UnpackController::ExecuteUnrar(const char* password)
 
 	params.emplace_back("*.rar");
 	m_unpackExtendedDir = FileSystem::MakeExtendedPath(m_unpackDir, true);
-	params.push_back(*BString<1024>("%s%c", *m_unpackExtendedDir, PATH_SEPARATOR));
+	NzbgetRsBuf extDirBuf = nzbget_rs_tpr_direct_unpack_format_trailing_sep_dir(
+		*m_unpackExtendedDir, PATH_SEPARATOR);
+	params.emplace_back(extDirBuf.data ? extDirBuf.data : "", (int)extDirBuf.len);
+	nzbget_rs_free(extDirBuf);
 	SetArgs(std::move(params));
 	SetLogPrefix("Unrar");
 	ResetEnv();
@@ -471,7 +474,11 @@ void UnpackController::JoinSplittedFiles()
 	DirBrowser dir(m_destDir);
 	while (const char* filename = dir.Next())
 	{
-		BString<1024> fullFilename("%s%c%s", *m_destDir, PATH_SEPARATOR, filename);
+		NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			*m_destDir, PATH_SEPARATOR, filename);
+		BString<1024> fullFilename;
+		fullFilename.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
+		nzbget_rs_free(fullFnBuf);
 
 		if (!FileSystem::DirectoryExists(fullFilename) &&
 			nzbget_rs_ucf_unpack_ctrl_is_split_first_piece(filename) != 0 &&
@@ -491,13 +498,16 @@ void UnpackController::JoinSplittedFiles()
 
 bool UnpackController::JoinFile(const char* fragBaseName)
 {
-	BString<1024> destBaseName = fragBaseName;
+	NzbgetRsBuf baseBuf = nzbget_rs_dqh_unpack_ctrl_strip_last_extension(fragBaseName);
+	BString<1024> destBaseName;
+	destBaseName.Set(baseBuf.data ? baseBuf.data : "", (int)baseBuf.len);
+	nzbget_rs_free(baseBuf);
 
-	// trim extension
-	char* extension = strrchr(destBaseName, '.');
-	*extension = '\0';
-
-	BString<1024> fullFilename("%s%c%s", *m_destDir, PATH_SEPARATOR, fragBaseName);
+	NzbgetRsBuf firstFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+		*m_destDir, PATH_SEPARATOR, fragBaseName);
+	BString<1024> fullFilename;
+	fullFilename.Set(firstFnBuf.data ? firstFnBuf.data : "", (int)firstFnBuf.len);
+	nzbget_rs_free(firstFnBuf);
 	int64 firstSegmentSize = FileSystem::FileSize(fullFilename);
 
 	// Validate joinable file:
@@ -513,7 +523,10 @@ bool UnpackController::JoinFile(const char* fragBaseName)
 	DirBrowser dir(m_destDir);
 	while (const char* filename = dir.Next())
 	{
-		fullFilename.Format("%s%c%s", *m_destDir, PATH_SEPARATOR, filename);
+		NzbgetRsBuf pieceFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			*m_destDir, PATH_SEPARATOR, filename);
+		fullFilename.Set(pieceFnBuf.data ? pieceFnBuf.data : "", (int)pieceFnBuf.len);
+		nzbget_rs_free(pieceFnBuf);
 
 		// only this file's pieces (its name plus ".NNN"): with a second set of split
 		// files in the folder, their pieces were counted and compared too, and the join
@@ -540,7 +553,11 @@ bool UnpackController::JoinFile(const char* fragBaseName)
 	PrintMessage(Message::mkInfo, "Joining splitted file %s", *destBaseName);
 	m_postInfo->SetStageProgress(0);
 
-	BString<1024> destFilename("%s%c%s", *m_unpackDir, PATH_SEPARATOR, *destBaseName);
+	NzbgetRsBuf destFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+		*m_unpackDir, PATH_SEPARATOR, *destBaseName);
+	BString<1024> destFilename;
+	destFilename.Set(destFnBuf.data ? destFnBuf.data : "", (int)destFnBuf.len);
+	nzbget_rs_free(destFnBuf);
 
 	DiskFile outFile;
 	if (!outFile.Open(destFilename, DiskFile::omWrite))
@@ -586,7 +603,9 @@ bool UnpackController::JoinFile(const char* fragBaseName)
 		CString pieceName(pieceNameBuf.data ? pieceNameBuf.data : "", (int)pieceNameBuf.len);
 		nzbget_rs_free(pieceNameBuf);
 		PrintMessage(Message::mkInfo, "Joining from %s", *pieceName);
-		SetProgressLabel(BString<1024>("Joining from %s", *pieceName));
+		NzbgetRsBuf joinProgBuf = nzbget_rs_dqh_unpack_ctrl_format_joining_progress(*pieceName);
+		SetProgressLabel(joinProgBuf.data ? joinProgBuf.data : "");
+		nzbget_rs_free(joinProgBuf);
 
 		NzbgetRsBuf fragPathBuf = nzbget_rs_tpr_unpack_ctrl_format_split_piece_path(
 			*m_destDir, PATH_SEPARATOR, *destBaseName, i);
@@ -761,7 +780,11 @@ void UnpackController::CheckArchiveFiles()
 	DirBrowser dir(m_destDir);
 	while (const char* filename = dir.Next())
 	{
-		BString<1024> fullFilename("%s%c%s", *m_destDir, PATH_SEPARATOR, filename);
+		NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			*m_destDir, PATH_SEPARATOR, filename);
+		BString<1024> fullFilename;
+		fullFilename.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
+		nzbget_rs_free(fullFnBuf);
 
 		if (!FileSystem::DirectoryExists(fullFilename) && IsDownloadedFile(filename))
 		{
@@ -844,8 +867,16 @@ bool UnpackController::Cleanup()
 		const char* destDir = !m_finalDir.Empty() ? *m_finalDir : *m_destDir;
 		while (const char* filename = dir.Next())
 		{
-			BString<1024> srcFile("%s%c%s", *m_unpackDir, PATH_SEPARATOR, filename);
-			BString<1024> dstFile("%s%c%s", destDir, PATH_SEPARATOR, *FileSystem::MakeValidFilename(filename));
+			NzbgetRsBuf srcBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+				*m_unpackDir, PATH_SEPARATOR, filename);
+			BString<1024> srcFile;
+			srcFile.Set(srcBuf.data ? srcBuf.data : "", (int)srcBuf.len);
+			nzbget_rs_free(srcBuf);
+			NzbgetRsBuf dstBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+				destDir, PATH_SEPARATOR, *FileSystem::MakeValidFilename(filename));
+			BString<1024> dstFile;
+			dstFile.Set(dstBuf.data ? dstBuf.data : "", (int)dstBuf.len);
+			nzbget_rs_free(dstBuf);
 
 			// silently overwrite existing files
 			FileSystem::DeleteFile(dstFile);
@@ -890,7 +921,11 @@ bool UnpackController::Cleanup()
 		DirBrowser dir(m_destDir);
 		while (const char* filename = dir.Next())
 		{
-			BString<1024> fullFilename("%s%c%s", *m_destDir, PATH_SEPARATOR, filename);
+			NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+				*m_destDir, PATH_SEPARATOR, filename);
+			BString<1024> fullFilename;
+			fullFilename.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
+			nzbget_rs_free(fullFnBuf);
 
 			int cleanupKind = nzbget_rs_pnd_unpack_ctrl_classify_cleanup_archive_file(
 				FileSystem::DirectoryExists(fullFilename) ? 1 : 0,

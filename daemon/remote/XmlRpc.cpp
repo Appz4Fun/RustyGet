@@ -1492,7 +1492,10 @@ void EditQueueXmlCommand::Execute()
 		return;
 	}
 
-	BString<100> offsetStr("%i", offset);
+	NzbgetRsBuf offsetStrBuf = nzbget_rs_dqh_conn_format_port_str(offset);
+	BString<100> offsetStr;
+	offsetStr.Set(offsetStrBuf.data ? offsetStrBuf.data : "", (int)offsetStrBuf.len);
+	nzbget_rs_free(offsetStrBuf);
 	if (nzbget_rs_tpr_xmlrpc_should_use_edit_offset(
 		hasOffset ? 1 : 0, action,
 		(int)DownloadQueue::eaFileMoveOffset,

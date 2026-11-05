@@ -317,7 +317,11 @@ ArticleFetcher::FetchedArticle ArticleFetcher::FetchFromConnection(NntpConnectio
 		}
 	}
 
-	const char* response = connection->Request(BString<1024>("BODY %s\r\n", messageId));
+	NzbgetRsBuf bodyCmdBuf = nzbget_rs_dqh_article_fetcher_format_body_cmd(messageId);
+	BString<1024> bodyCmd;
+	bodyCmd.Set(bodyCmdBuf.data ? bodyCmdBuf.data : "", (int)bodyCmdBuf.len);
+	nzbget_rs_free(bodyCmdBuf);
+	const char* response = connection->Request(bodyCmd);
 	if (!response)
 	{
 		// no reply at all (a timeout, or a pooled connection the server

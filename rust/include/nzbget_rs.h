@@ -5953,6 +5953,19 @@ uint32_t nzbget_rs_dqh_tls_compute_suite_flags(
     int is_aead, int tls13, int auth_is_cert, int kx_is_ephemeral);
 int nzbget_rs_dqh_nntp_conn_is_already_in_group(
     const char* active_group, const char* grp);
+int nzbget_rs_dqh_options_should_expand_home_value(
+    const char* value, int no_disk_access);
+int nzbget_rs_dqh_nzbget_is_backward_compat_root_user(const char* username);
+int nzbget_rs_dqh_xmlrpc_is_multicall_post(
+    const char* method_name, int is_xmlrpc_proto, int is_http_post);
+int nzbget_rs_dqh_xmlrpc_is_tls_cipher_baseline_entry(const char* name);
+int nzbget_rs_dqh_webserver_is_html_content_type(const char* content_type);
+int nzbget_rs_dqh_scanner_find_last_char_pos(
+    const char* text, char ch, size_t* out_pos);
+NzbgetRsBuf nzbget_rs_dqh_log_split_basename_and_ext(
+    const char* base_name, NzbgetRsBuf* out_ext);
+int nzbget_rs_dqh_sysinfo_line_contains_marker(
+    const char* line, const char* marker);
 
 #include "nzbget_tls_cipher.h"
 

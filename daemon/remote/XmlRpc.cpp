@@ -575,7 +575,8 @@ void XmlRpcProcessor::Dispatch()
 
 	m_userAccess = Access(m_protocol, m_userAccess);
 
-	if (!strcasecmp(methodName, "system.multicall") && m_protocol == rpXmlRpc && m_httpMethod == hmPost)
+	if (nzbget_rs_dqh_xmlrpc_is_multicall_post(
+		methodName, m_protocol == rpXmlRpc ? 1 : 0, m_httpMethod == hmPost ? 1 : 0) != 0)
 	{
 		MutliCall();
 	}
@@ -2288,7 +2289,7 @@ void SaveConfigXmlCommand::Execute()
 			}
 		}
 		DecodeStr(name);
-		bool baselineEntry = !strcmp(name, "_TlsCipherBaseline");
+		bool baselineEntry = nzbget_rs_dqh_xmlrpc_is_tls_cipher_baseline_entry(name) != 0;
 		// The token contains only ASCII field names and hex-encoded UTF-8.
 		// Reject encoded NUL rather than accepting a decoder-truncated token.
 		if (baselineEntry && !nzbget_rs_rol_xmlrpc_save_config_raw_baseline_valid(value))

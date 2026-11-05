@@ -313,13 +313,17 @@ void Log::RotateLog()
 		baseName[-1] = '\0';
 	}
 
+	NzbgetRsBuf extBuf{};
+	NzbgetRsBuf stemBuf = nzbget_rs_dqh_log_split_basename_and_ext(baseName, &extBuf);
 	BString<1024> baseExt;
-	char* ext = strrchr(baseName, '.');
-	if (ext && ext > baseName)
+	baseExt.Set(extBuf.data ? extBuf.data : "", (int)extBuf.len);
+	nzbget_rs_free(extBuf);
+	if (stemBuf.data)
 	{
-		baseExt = ext;
-		ext[0] = '\0';
+		memcpy(baseName, stemBuf.data, stemBuf.len);
+		baseName[stemBuf.len] = '\0';
 	}
+	nzbget_rs_free(stemBuf);
 
 	NzbgetRsBuf maskBuf = nzbget_rs_dqh_log_format_rotate_mask(baseName, *baseExt);
 	BString<1024> fileMask;

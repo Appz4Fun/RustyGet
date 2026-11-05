@@ -246,7 +246,7 @@ namespace System
 		{
 			if (fgets(buffer, BUFFER_SIZE, pipe.get()) != nullptr)
 			{
-				if (strstr(buffer, marker))
+				if (nzbget_rs_dqh_sysinfo_line_contains_marker(buffer, marker) != 0)
 				{
 					version = ParseUnpackerVersion(buffer);
 					break;

@@ -377,11 +377,12 @@ void Scanner::ProcessIncomingFile(
 	const char* category
 )
 {
-	const char* extension = strrchr(baseFilename, '.');
-	if (!extension)
+	size_t dotPos = 0;
+	if (nzbget_rs_dqh_scanner_find_last_char_pos(baseFilename, '.', &dotPos) == 0)
 	{
 		return;
 	}
+	const char* extension = baseFilename + dotPos;
 
 	std::string nzbName;
 	std::string nzbCategory = category ? category : "";

@@ -176,7 +176,11 @@ void WebProcessor::ParseHeaders()
 	m_contentLen = 0;
 	while (char* p = m_connection->ReadLine(buffer, sizeof(buffer), nullptr))
 	{
-		if (char* pe = strrchr(p, '\r')) *pe = '\0';
+		size_t crPos = 0;
+		if (nzbget_rs_dqh_scanner_find_last_char_pos(p, '\r', &crPos) != 0)
+		{
+			p[crPos] = '\0';
+		}
 		debug("header=%s", p);
 
 		size_t start = 0, len = 0;
@@ -573,7 +577,7 @@ void WebProcessor::SendSingleFileResponse()
 	int len = body.Size() - 1;
 
 #ifdef DEBUG
-	if (contentType && !strcmp(contentType, "text/html"))
+	if (nzbget_rs_dqh_webserver_is_html_content_type(contentType) != 0)
 	{
 		Util::ReduceStr(body, "<!-- %if-debug%", "");
 		Util::ReduceStr(body, "<!-- %if-not-debug% -->", "<!--");
@@ -591,7 +595,9 @@ void WebProcessor::SendMultiFileResponse()
 	debug("serving multiple files: %s", *m_url);
 
 	StringBuilder response;
-	char* filelist = strchr(m_url, '?');
+	size_t qPos = 0;
+	nzbget_rs_dqh_diskstate_find_char_pos(m_url, '?', &qPos);
+	char* filelist = (char*)m_url + qPos;
 	*filelist++ = '\0';
 
 	Tokenizer tok(filelist, "+");

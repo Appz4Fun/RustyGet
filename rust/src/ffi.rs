@@ -35146,6 +35146,133 @@ pub unsafe extern "C" fn nzbget_rs_dqh_nntp_conn_is_already_in_group(
     c_int::from(crate::dupequeuehealth::dqh_nntp_conn_is_already_in_group(a, g))
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_options_should_expand_home_value(
+    value: *const c_char,
+    no_disk_access: c_int,
+) -> c_int {
+    let v = if value.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(value).to_bytes())
+    };
+    c_int::from(crate::dupequeuehealth::dqh_options_should_expand_home_value(
+        v,
+        no_disk_access != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_nzbget_is_backward_compat_root_user(
+    username: *const c_char,
+) -> c_int {
+    let u = if username.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(username).to_bytes()
+    };
+    c_int::from(crate::dupequeuehealth::dqh_nzbget_is_backward_compat_root_user(u))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_xmlrpc_is_multicall_post(
+    method_name: *const c_char,
+    is_xmlrpc_proto: c_int,
+    is_http_post: c_int,
+) -> c_int {
+    let m = if method_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(method_name).to_bytes()
+    };
+    c_int::from(crate::dupequeuehealth::dqh_xmlrpc_is_multicall_post(
+        m,
+        is_xmlrpc_proto != 0,
+        is_http_post != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_xmlrpc_is_tls_cipher_baseline_entry(
+    name: *const c_char,
+) -> c_int {
+    let n = if name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(name).to_bytes()
+    };
+    c_int::from(crate::dupequeuehealth::dqh_xmlrpc_is_tls_cipher_baseline_entry(n))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_webserver_is_html_content_type(
+    content_type: *const c_char,
+) -> c_int {
+    let c = if content_type.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(content_type).to_bytes())
+    };
+    c_int::from(crate::dupequeuehealth::dqh_webserver_is_html_content_type(c))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_scanner_find_last_char_pos(
+    text: *const c_char,
+    ch: c_char,
+    out_pos: *mut usize,
+) -> c_int {
+    let t = if text.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(text).to_bytes()
+    };
+    match crate::dupequeuehealth::dqh_scanner_find_last_char_pos(t, ch as u8) {
+        Some(pos) => {
+            if !out_pos.is_null() {
+                *out_pos = pos;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_log_split_basename_and_ext(
+    base_name: *const c_char,
+    out_ext: *mut RsBuf,
+) -> RsBuf {
+    let b = if base_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(base_name).to_bytes()
+    };
+    let (stem, ext) = crate::dupequeuehealth::dqh_log_split_basename_and_ext(b);
+    if !out_ext.is_null() {
+        *out_ext = into_buf(ext);
+    }
+    into_buf(stem)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_sysinfo_line_contains_marker(
+    line: *const c_char,
+    marker: *const c_char,
+) -> c_int {
+    let l = if line.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(line).to_bytes()
+    };
+    let m = if marker.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(marker).to_bytes()
+    };
+    c_int::from(crate::dupequeuehealth::dqh_sysinfo_line_contains_marker(l, m))
+}
+
 
 
 

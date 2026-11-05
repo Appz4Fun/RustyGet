@@ -146,8 +146,9 @@ void Options::Init(const char* exeName, const char* configFilename, bool noConfi
 	}
 	FileSystem::NormalizePathSeparators(filename);
 	SetOption(APPBIN.data(), filename);
-	char* end = strrchr(filename, PATH_SEPARATOR);
-	if (end) *end = '\0';
+	NzbgetRsBuf appDirBuf = nzbget_rs_dqh_fs_extract_parent_dir_path(filename, PATH_SEPARATOR);
+	filename.Set(appDirBuf.data ? appDirBuf.data : "", (int)appDirBuf.len);
+	nzbget_rs_free(appDirBuf);
 	SetOption(APPDIR.data(), filename);
 	m_appDir = *filename;
 	m_appDirPath = fs::u8path(*m_appDir);
@@ -835,7 +836,7 @@ void Options::SetOption(const char* optname, const char* value)
 
 	CString curvalue;
 
-	if (value && strncmp(value, "~/", 2) == 0 && !m_noDiskAccess)
+	if (nzbget_rs_dqh_options_should_expand_home_value(value, m_noDiskAccess ? 1 : 0) != 0)
 	{
 		curvalue = FileSystem::ExpandHomePath(value);
 	}

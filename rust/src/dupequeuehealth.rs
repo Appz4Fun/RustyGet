@@ -2245,6 +2245,59 @@ pub fn dqh_nntp_conn_is_already_in_group(active_group: &[u8], grp: &[u8]) -> boo
     !active_group.is_empty() && active_group == grp
 }
 
+/// Returns `true` when `!no_disk_access` and `value` starts with `"~/"` for `Options::SetOption`.
+pub fn dqh_options_should_expand_home_value(value: Option<&[u8]>, no_disk_access: bool) -> bool {
+    !no_disk_access && value.is_some_and(|v| v.starts_with(b"~/"))
+}
+
+/// Returns `true` when `username == b"root"` for `NZBGet::Daemonize`.
+pub fn dqh_nzbget_is_backward_compat_root_user(username: &[u8]) -> bool {
+    username == b"root"
+}
+
+/// Returns `true` when `is_xmlrpc_proto && is_http_post` and `method_name` matches `"system.multicall"`
+/// case-insensitively (`releasename::lower`) for `XmlRpcProcessor::Execute`.
+pub fn dqh_xmlrpc_is_multicall_post(
+    method_name: &[u8],
+    is_xmlrpc_proto: bool,
+    is_http_post: bool,
+) -> bool {
+    is_xmlrpc_proto
+        && is_http_post
+        && crate::releasename::lower(method_name) == b"system.multicall"
+}
+
+/// Returns `true` when `name == b"_TlsCipherBaseline"` for `SaveConfigXmlCommand::Execute`.
+pub fn dqh_xmlrpc_is_tls_cipher_baseline_entry(name: &[u8]) -> bool {
+    name == b"_TlsCipherBaseline"
+}
+
+/// Returns `true` when `content_type == Some(b"text/html")` for `WebProcessor::SendFileResponse`.
+pub fn dqh_webserver_is_html_content_type(content_type: Option<&[u8]>) -> bool {
+    content_type == Some(b"text/html")
+}
+
+/// Finds the last occurrence of `ch` in `text` and returns its byte index (`Some(pos)`), or `None`.
+pub fn dqh_scanner_find_last_char_pos(text: &[u8], ch: u8) -> Option<usize> {
+    text.iter().rposition(|&b| b == ch)
+}
+
+/// Splits `base_name` at the last `.` (when `pos > 0`) into `(stem, ext_with_dot)` for `Log::RotateLog`.
+pub fn dqh_log_split_basename_and_ext(base_name: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    match base_name.iter().rposition(|&b| b == b'.') {
+        Some(pos) if pos > 0 => (base_name[..pos].to_vec(), base_name[pos..].to_vec()),
+        _ => (base_name.to_vec(), Vec::new()),
+    }
+}
+
+/// Returns `true` when `line` contains `marker` as a contiguous byte slice for `SystemInfo::GetUnpackerVersion`.
+pub fn dqh_sysinfo_line_contains_marker(line: &[u8], marker: &[u8]) -> bool {
+    if marker.is_empty() {
+        return true;
+    }
+    line.windows(marker.len()).any(|w| w == marker)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3133,5 +3186,30 @@ mod tests {
         assert_eq!(dqh_tls_compute_suite_flags(false, false, true, false), 2);
         assert!(dqh_nntp_conn_is_already_in_group(b"alt.binaries.test", b"alt.binaries.test"));
         assert!(!dqh_nntp_conn_is_already_in_group(b"", b""));
+        assert!(dqh_options_should_expand_home_value(Some(b"~/downloads"), false));
+        assert!(!dqh_options_should_expand_home_value(Some(b"~/downloads"), true));
+        assert!(!dqh_options_should_expand_home_value(Some(b"/downloads"), false));
+        assert!(!dqh_options_should_expand_home_value(None, false));
+        assert!(dqh_nzbget_is_backward_compat_root_user(b"root"));
+        assert!(!dqh_nzbget_is_backward_compat_root_user(b"daemon"));
+        assert!(dqh_xmlrpc_is_multicall_post(b"System.MultiCall", true, true));
+        assert!(!dqh_xmlrpc_is_multicall_post(b"System.MultiCall", false, true));
+        assert!(dqh_xmlrpc_is_tls_cipher_baseline_entry(b"_TlsCipherBaseline"));
+        assert!(!dqh_xmlrpc_is_tls_cipher_baseline_entry(b"Server1.Cipher"));
+        assert!(dqh_webserver_is_html_content_type(Some(b"text/html")));
+        assert!(!dqh_webserver_is_html_content_type(Some(b"text/plain")));
+        assert!(!dqh_webserver_is_html_content_type(None));
+        assert_eq!(dqh_scanner_find_last_char_pos(b"movie.nzb.queued", b'.'), Some(9));
+        assert_eq!(dqh_scanner_find_last_char_pos(b"movienzb", b'.'), None);
+        assert_eq!(
+            dqh_log_split_basename_and_ext(b"nzbget.log"),
+            (b"nzbget".to_vec(), b".log".to_vec())
+        );
+        assert_eq!(
+            dqh_log_split_basename_and_ext(b".hidden"),
+            (b".hidden".to_vec(), Vec::new())
+        );
+        assert!(dqh_sysinfo_line_contains_marker(b"UNRAR 7.00 freeware", b"UNRAR"));
+        assert!(!dqh_sysinfo_line_contains_marker(b"7-Zip 24.01", b"UNRAR"));
     }
 }

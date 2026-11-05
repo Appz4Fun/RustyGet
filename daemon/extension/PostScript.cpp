@@ -88,9 +88,7 @@ void PostScriptController::Run()
 void PostScriptController::ExecuteScript(std::shared_ptr<const Extension::Script> script)
 {
 	// if any script has requested par-check, do not execute other scripts
-	if (nzbget_rs_sfc_post_script_should_skip_execute(
-		script->GetPostScript() ? 1 : 0,
-		m_postInfo->GetRequestParCheck() ? 1 : 0) != 0)
+	if (!script->GetPostScript() || m_postInfo->GetRequestParCheck())
 	{
 		return;
 	}
@@ -99,10 +97,7 @@ void PostScriptController::ExecuteScript(std::shared_ptr<const Extension::Script
 
 	PrintMessage(Message::mkInfo, "Executing post-process-script %s for %s", m_script->GetName(), m_postInfo->GetNzbInfo()->GetName());
 
-	NzbgetRsBuf progressLabelBuf = nzbget_rs_tpr_post_script_format_progress_label(m_script->GetName());
-	BString<1024> progressLabel("%s", progressLabelBuf.data ? progressLabelBuf.data : "");
-	nzbget_rs_free(progressLabelBuf);
-
+	BString<1024> progressLabel("Executing post-process-script %s", m_script->GetName());
 	{
 		GuardedDownloadQueue guard = DownloadQueue::Guard();
 		m_postInfo->SetProgressLabel(progressLabel);
@@ -110,23 +105,16 @@ void PostScriptController::ExecuteScript(std::shared_ptr<const Extension::Script
 
 	SetArgs({m_script->GetEntry()});
 
-	NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_post_script_format_info_name(
-		m_script->GetName(), m_postInfo->GetNzbInfo()->GetName(), 0);
-	BString<1024> infoName("%s", infoNameBuf.data ? infoNameBuf.data : "");
-	nzbget_rs_free(infoNameBuf);
+	BString<1024> infoName("post-process-script %s for %s", m_script->GetName(), m_postInfo->GetNzbInfo()->GetName());
 	SetInfoName(infoName);
 
-	
 	SetLogPrefix(m_script->GetDisplayName());
-	m_prefixLen = nzbget_rs_sfc_script_ctrl_calc_prefix_len(strlen(m_script->GetDisplayName()));
+	m_prefixLen = static_cast<int>(strlen(m_script->GetDisplayName())) + 2; // 2 = strlen(": ");
 	PrepareParams(m_script->GetName());
 
 	int exitCode = Execute();
 
-	NzbgetRsBuf upInfoNameBuf = nzbget_rs_tpr_post_script_format_info_name(
-		m_script->GetName(), m_postInfo->GetNzbInfo()->GetName(), 1);
-	infoName.Set(upInfoNameBuf.data ? upInfoNameBuf.data : "", (int)upInfoNameBuf.len);
-	nzbget_rs_free(upInfoNameBuf);
+	infoName[0] = 'P';
 
 	SetLogPrefix(nullptr);
 	ScriptStatus::EStatus status = AnalyseExitCode(exitCode, infoName);
@@ -143,71 +131,62 @@ void PostScriptController::PrepareParams(const char* scriptName)
 
 	ResetEnv();
 
-	SetIntEnvVar("NZBPP_NZBID", m_postInfo->GetNzbInfo()->GetId());
-	SetEnvVar("NZBPP_NZBNAME", m_postInfo->GetNzbInfo()->GetName());
-	SetEnvVar("NZBPP_DIRECTORY", m_postInfo->GetNzbInfo()->GetDestDir());
-	SetEnvVar("NZBPP_NZBFILENAME", m_postInfo->GetNzbInfo()->GetFilename());
-	SetEnvVar("NZBPP_QUEUEDFILE", m_postInfo->GetNzbInfo()->GetQueuedFilename());
-	SetEnvVar("NZBPP_URL", m_postInfo->GetNzbInfo()->GetUrl());
-	SetEnvVar("NZBPP_FINALDIR", m_postInfo->GetNzbInfo()->GetFinalDir());
-	SetEnvVar("NZBPP_CATEGORY", m_postInfo->GetNzbInfo()->GetCategory());
-	SetIntEnvVar("NZBPP_HEALTH", m_postInfo->GetNzbInfo()->CalcHealth());
-	SetIntEnvVar("NZBPP_CRITICALHEALTH", m_postInfo->GetNzbInfo()->CalcCriticalHealth(false));
-
-	SetEnvVar("NZBPP_DUPEKEY", m_postInfo->GetNzbInfo()->GetDupeKey());
-	SetIntEnvVar("NZBPP_DUPESCORE", m_postInfo->GetNzbInfo()->GetDupeScore());
-
-	SetEnvVar("NZBPP_DUPEMODE",
-		nzbget_rs_tpr_script_dupe_mode_name((int)m_postInfo->GetNzbInfo()->GetDupeMode()));
-
-	BString<1024> status = m_postInfo->GetNzbInfo()->MakeTextStatus(true);
-	SetEnvVar("NZBPP_STATUS", status);
-
-	size_t totalStatusLen = nzbget_rs_tpr_post_script_total_status_len(status);
-	status[totalStatusLen] = '\0';
-	SetEnvVar("NZBPP_TOTALSTATUS", status);
-
-	SetEnvVar("NZBPP_SCRIPTSTATUS",
-		nzbget_rs_dqh_post_script_status_name(
-			(int)m_postInfo->GetNzbInfo()->GetScriptStatuses()->CalcTotalStatus()));
-
-	// deprecated
-	NzbInfo::EParStatus parStatus = (NzbInfo::EParStatus)nzbget_rs_sfc_post_script_resolve_compat_par_status(
-		(int)m_postInfo->GetNzbInfo()->GetParStatus(),
-		(int)NzbInfo::psFailure,
-		(int)m_postInfo->GetNzbInfo()->GetDeleteStatus(),
-		(int)NzbInfo::dsNone,
-		(int)m_postInfo->GetNzbInfo()->GetMarkStatus(),
-		(int)NzbInfo::ksBad);
-	SetIntEnvVar("NZBPP_PARSTATUS",
-		nzbget_rs_dqh_post_script_deprecated_status_code((int)parStatus));
-
-	// deprecated
-	SetIntEnvVar("NZBPP_UNPACKSTATUS",
-		nzbget_rs_dqh_post_script_deprecated_status_code(
-			(int)m_postInfo->GetNzbInfo()->GetUnpackStatus()));
-
-	// deprecated
-	SetIntEnvVar("NZBPP_HEALTHDELETED", (int)m_postInfo->GetNzbInfo()->GetDeleteStatus() == NzbInfo::dsHealth);
-
-	SetIntEnvVar("NZBPP_TOTALARTICLES", (int)m_postInfo->GetNzbInfo()->GetTotalArticles());
-	SetIntEnvVar("NZBPP_SUCCESSARTICLES", (int)m_postInfo->GetNzbInfo()->GetSuccessArticles());
-	SetIntEnvVar("NZBPP_FAILEDARTICLES", (int)m_postInfo->GetNzbInfo()->GetFailedArticles());
-
-	for (ServerStat& serverStat : m_postInfo->GetNzbInfo()->GetServerStats())
+	NzbInfo* nzbInfo = m_postInfo->GetNzbInfo();
+	BString<1024> status = nzbInfo->MakeTextStatus(true);
+	std::vector<int> serverIds;
+	std::vector<int> serverSuccess;
+	std::vector<int> serverFailed;
+	serverIds.reserve(nzbInfo->GetServerStats()->size());
+	serverSuccess.reserve(nzbInfo->GetServerStats()->size());
+	serverFailed.reserve(nzbInfo->GetServerStats()->size());
+	for (ServerStat& serverStat : nzbInfo->GetServerStats())
 	{
-		NzbgetRsBuf succNameBuf = nzbget_rs_tpr_post_script_format_server_env_name(
-			serverStat.GetServerId(), 0);
-		SetIntEnvVar(succNameBuf.data ? succNameBuf.data : "", serverStat.GetSuccessArticles());
-		nzbget_rs_free(succNameBuf);
-
-		NzbgetRsBuf failNameBuf = nzbget_rs_tpr_post_script_format_server_env_name(
-			serverStat.GetServerId(), 1);
-		SetIntEnvVar(failNameBuf.data ? failNameBuf.data : "", serverStat.GetFailedArticles());
-		nzbget_rs_free(failNameBuf);
+		serverIds.push_back(serverStat.GetServerId());
+		serverSuccess.push_back(serverStat.GetSuccessArticles());
+		serverFailed.push_back(serverStat.GetFailedArticles());
 	}
 
-	PrepareEnvScript(m_postInfo->GetNzbInfo()->GetParameters(), scriptName);
+	NzbgetRsPostScriptEnv env{};
+	env.nzb_id = nzbInfo->GetId();
+	env.nzb_name = nzbInfo->GetName();
+	env.dest_dir = nzbInfo->GetDestDir();
+	env.filename = nzbInfo->GetFilename();
+	env.queued_filename = nzbInfo->GetQueuedFilename();
+	env.url = nzbInfo->GetUrl();
+	env.final_dir = nzbInfo->GetFinalDir();
+	env.category = nzbInfo->GetCategory();
+	env.health = nzbInfo->CalcHealth();
+	env.critical_health = nzbInfo->CalcCriticalHealth(false);
+	env.dupe_key = nzbInfo->GetDupeKey();
+	env.dupe_score = nzbInfo->GetDupeScore();
+	env.dupe_mode = static_cast<int>(nzbInfo->GetDupeMode());
+	env.status = status;
+	env.script_status = static_cast<int>(nzbInfo->GetScriptStatuses()->CalcTotalStatus());
+	env.par_status = static_cast<int>(nzbInfo->GetParStatus());
+	env.unpack_status = static_cast<int>(nzbInfo->GetUnpackStatus());
+	env.delete_status = static_cast<int>(nzbInfo->GetDeleteStatus());
+	env.mark_status = static_cast<int>(nzbInfo->GetMarkStatus());
+	env.total_articles = nzbInfo->GetTotalArticles();
+	env.success_articles = nzbInfo->GetSuccessArticles();
+	env.failed_articles = nzbInfo->GetFailedArticles();
+	env.server_ids = serverIds.data();
+	env.server_success_articles = serverSuccess.data();
+	env.server_failed_articles = serverFailed.data();
+	env.server_count = serverIds.size();
+
+	nzbget_rs_post_script_prepare_env(
+		&env,
+		this,
+		[](void* ctx, const char* name, const char* value)
+		{
+			static_cast<PostScriptController*>(ctx)->SetEnvVar(name, value);
+		},
+		[](void* ctx, const char* name, int value)
+		{
+			static_cast<PostScriptController*>(ctx)->SetIntEnvVar(name, value);
+		});
+
+	PrepareEnvScript(nzbInfo->GetParameters(), scriptName);
 }
 
 ScriptStatus::EStatus PostScriptController::AnalyseExitCode(int exitCode, const char* upInfoName)
@@ -306,35 +285,24 @@ void PostScriptController::AddMessage(Message::EKind kind, const char* text)
 		m_postInfo->SetProgressLabel(text);
 	}
 
-	if (nzbget_rs_sfc_post_script_is_paused_wait_active(
-		g_WorkState->GetPausePostProcess() ? 1 : 0,
-		m_postInfo->GetNzbInfo()->GetForcePriority() ? 1 : 0,
-		0) != 0)
+	if (g_WorkState->GetPausePostProcess() && !m_postInfo->GetNzbInfo()->GetForcePriority())
 	{
 		time_t stageTime = m_postInfo->GetStageTime();
 		time_t startTime = m_postInfo->GetStartTime();
 		time_t waitTime = Util::CurrentTime();
 
-		while (nzbget_rs_sfc_post_script_is_paused_wait_active(
-			g_WorkState->GetPausePostProcess() ? 1 : 0,
-			m_postInfo->GetNzbInfo()->GetForcePriority() ? 1 : 0,
-			IsStopped() ? 1 : 0) != 0)
+		while (g_WorkState->GetPausePostProcess() && !m_postInfo->GetNzbInfo()->GetForcePriority() && !IsStopped())
 		{
 			Util::Sleep(100);
 
-			int64_t newStage = 0;
-			int64_t newStart = 0;
-			nzbget_rs_sfc_post_script_calc_paused_timestamps(
-				(int64_t)Util::CurrentTime(), (int64_t)waitTime,
-				(int64_t)stageTime, (int64_t)startTime,
-				&newStage, &newStart);
+			time_t delta = Util::CurrentTime() - waitTime;
 			if (stageTime > 0)
 			{
-				m_postInfo->SetStageTime((time_t)newStage);
+				m_postInfo->SetStageTime(stageTime + delta);
 			}
 			if (startTime > 0)
 			{
-				m_postInfo->SetStartTime((time_t)newStart);
+				m_postInfo->SetStartTime(startTime + delta);
 			}
 		}
 	}

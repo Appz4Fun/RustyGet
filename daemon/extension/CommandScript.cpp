@@ -45,7 +45,7 @@ bool CommandScriptController::StartScript(const char* scriptName, const char* co
 
 	auto found = g_ExtensionManager->FindIf([&](auto script)
 		{
-			return nzbget_rs_dqh_bytes_equal(scriptName, script->GetName()) != 0;
+			return strcmp(scriptName, script->GetName()) == 0;
 		}
 	);
 	
@@ -63,11 +63,7 @@ void CommandScriptController::ExecuteScript(std::shared_ptr<const Extension::Scr
 
 	SetArgs({script->GetEntry()});
 
-	NzbgetRsBuf infoBuf = nzbget_rs_dqh_cmd_script_format_info_name(
-		script->GetName(), *m_command, 0);
-	BString<1024> infoName;
-	infoName.Set(infoBuf.data ? infoBuf.data : "", (int)infoBuf.len);
-	nzbget_rs_free(infoBuf);
+	BString<1024> infoName("script %s with command %s", script->GetName(), *m_command);
 	SetInfoName(infoName);
 
 	SetLogPrefix(script->GetDisplayName());
@@ -75,20 +71,20 @@ void CommandScriptController::ExecuteScript(std::shared_ptr<const Extension::Scr
 
 	int exitCode = Execute();
 
-	NzbgetRsBuf upInfoBuf = nzbget_rs_dqh_cmd_script_format_info_name(
-		script->GetName(), *m_command, 1);
-	infoName.Set(upInfoBuf.data ? upInfoBuf.data : "", (int)upInfoBuf.len);
-	nzbget_rs_free(upInfoBuf);
+	infoName[0] = 'S';
 	SetLogPrefix(nullptr);
 
-	switch (nzbget_rs_euh_cmd_script_classify_exit_code(exitCode))
+	switch (exitCode)
 	{
-		case 0:
+		case COMMANDPROCESS_SUCCESS:
 			PrintMessage(Message::mkInfo, "%s successful", *infoName);
 			break;
-		case 1:
+
+		case COMMANDPROCESS_ERROR:
+		case -1:
 			PrintMessage(Message::mkError, "%s failed", *infoName);
 			break;
+
 		default:
 			PrintMessage(Message::mkError, "%s failed (terminated with unknown status)", *infoName);
 			break;
@@ -129,7 +125,7 @@ void CommandScriptLog::AddMessage(int scriptId, Message::EKind kind, const char 
 	Guard guard(m_logMutex);
 
 	// save only messages from the last started script
-	if (nzbget_rs_sfc_cmd_script_should_append_log_message(scriptId, m_idScriptGen) != 0)
+	if (scriptId == m_idScriptGen)
 	{
 		m_messages.emplace_back(++m_idMessageGen, kind, Util::CurrentTime(), text);
 	}

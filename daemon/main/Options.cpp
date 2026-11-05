@@ -1656,50 +1656,33 @@ void Options::CheckOptions()
 
 void Options::ConvertOldOptions(OptEntries* optEntries)
 {
-	MergeOldScriptOption(optEntries, SCANSCRIPT.data(), true);
-	MergeOldScriptOption(optEntries, QUEUESCRIPT.data(), true);
-	MergeOldScriptOption(optEntries, FEEDSCRIPT.data(), false);
-}
-
-void Options::MergeOldScriptOption(OptEntries* optEntries, const char* optname, bool mergeCategories)
-{
-	OptEntry* optEntry = optEntries->FindOption(optname);
-	if (!optEntry || Util::EmptyStr(optEntry->GetValue()))
+	if (!optEntries) return;
+	std::vector<const char*> names;
+	std::vector<const char*> values;
+	names.reserve(optEntries->size());
+	values.reserve(optEntries->size());
+	for (const OptEntry& opt : optEntries)
 	{
-		return;
+		names.push_back(opt.GetName() ? opt.GetName() : "");
+		values.push_back(opt.GetValue() ? opt.GetValue() : "");
 	}
-
-	OptEntry* extensionsOpt = optEntries->FindOption(EXTENSIONS.data());
-	if (!extensionsOpt)
-	{
-		optEntries->emplace_back(EXTENSIONS.data(), "");
-		extensionsOpt = optEntries->FindOption(EXTENSIONS.data());
-	}
-
-	const char* scriptList = optEntry->GetValue();
-
-	NzbgetRsBuf globalMergedBuf = nzbget_rs_dqh_options_merge_script_list(
-		extensionsOpt->m_value, scriptList);
-	extensionsOpt->m_value.Set(
-		globalMergedBuf.data ? globalMergedBuf.data : "", (int)globalMergedBuf.len);
-	nzbget_rs_free(globalMergedBuf);
-
-	// merge into categories' "Extensions" (if not empty)
-	if (mergeCategories)
-	{
-		for (OptEntry& opt : optEntries)
+	nzbget_rs_options_convert_old_options(
+		names.data(),
+		values.data(),
+		names.size(),
+		optEntries,
+		[](void* ctx, size_t idx, const char* name, const char* value)
 		{
-			if (nzbget_rs_options_is_category_extensions_opt(opt.GetName()) != 0 &&
-				!opt.m_value.Empty())
+			auto* entries = static_cast<OptEntries*>(ctx);
+			if (idx < entries->size())
 			{
-				NzbgetRsBuf catMergedBuf = nzbget_rs_dqh_options_merge_script_list(
-					opt.m_value, scriptList);
-				opt.m_value.Set(
-					catMergedBuf.data ? catMergedBuf.data : "", (int)catMergedBuf.len);
-				nzbget_rs_free(catMergedBuf);
+				(*entries)[idx].m_value = value;
 			}
-		}
-	}
+			else
+			{
+				entries->emplace_back(name, value);
+			}
+		});
 }
 
 bool Options::HasScript(const char* scriptList, const char* scriptName)

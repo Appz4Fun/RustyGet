@@ -814,7 +814,6 @@ private:
 	void ConfigWarn(const char* msg, ...);
 	void LocateOptionSrcPos(const char *optionName);
 	static void ConvertOldOption(CString& option, CString& value);
-	static void MergeOldScriptOption(OptEntries* optEntries, const char* optname, bool mergeCategories);
 	static bool HasScript(const char* scriptList, const char* scriptName);
 };
 

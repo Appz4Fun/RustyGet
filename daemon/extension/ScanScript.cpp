@@ -104,14 +104,11 @@ void ScanScriptController::ExecuteScript(std::shared_ptr<const Extension::Script
 
 	SetArgs({script->GetEntry()});
 
-	NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_scan_script_format_info_name(
-		script->GetName(), FileSystem::BaseFileName(m_nzbFilename));
-	BString<1024> infoName("%s", infoNameBuf.data ? infoNameBuf.data : "");
-	nzbget_rs_free(infoNameBuf);
+	BString<1024> infoName("scan-script %s for %s", script->GetName(), FileSystem::BaseFileName(m_nzbFilename));
 	SetInfoName(infoName);
 
 	SetLogPrefix(script->GetDisplayName());
-	m_prefixLen = nzbget_rs_sfc_script_ctrl_calc_prefix_len(strlen(script->GetDisplayName()));
+	m_prefixLen = static_cast<int>(strlen(script->GetDisplayName())) + 2; // 2 = strlen(": ");
 	PrepareParams(script->GetName());
 
 	Execute();
@@ -123,23 +120,29 @@ void ScanScriptController::PrepareParams(const char* scriptName)
 {
 	ResetEnv();
 
-	SetEnvVar("NZBNP_FILENAME", m_nzbFilename);
-	SetEnvVar("NZBNP_URL", m_url);
-	SetEnvVar("NZBNP_NZBNAME", !m_nzbName.empty() ? m_nzbName.c_str() : FileSystem::BaseFileName(m_nzbFilename));
-	SetEnvVar("NZBNP_CATEGORY", m_category.c_str());
-	SetIntEnvVar("NZBNP_PRIORITY", *m_priority);
-	SetIntEnvVar("NZBNP_TOP", *m_addTop ? 1 : 0);
-	SetIntEnvVar("NZBNP_PAUSED", *m_addPaused ? 1 : 0);
-	SetEnvVar("NZBNP_DUPEKEY", m_dupeKey.c_str());
-	SetIntEnvVar("NZBNP_DUPESCORE", *m_dupeScore);
-
-	SetEnvVar("NZBNP_DUPEMODE", nzbget_rs_tpr_script_dupe_mode_name((int)*m_dupeMode));
-
-	// remove trailing slash
-	BString<1024> dir = m_directory;
-	size_t trimmedLen = nzbget_rs_sfc_scan_script_trim_trailing_sep_len(dir, PATH_SEPARATOR);
-	dir[trimmedLen] = '\0';
-	SetEnvVar("NZBNP_DIRECTORY", dir);
+	nzbget_rs_scan_script_prepare_env(
+		m_nzbFilename,
+		FileSystem::BaseFileName(m_nzbFilename),
+		m_url,
+		m_nzbName.c_str(),
+		m_category.c_str(),
+		*m_priority,
+		*m_addTop ? 1 : 0,
+		*m_addPaused ? 1 : 0,
+		m_dupeKey.c_str(),
+		*m_dupeScore,
+		static_cast<int>(*m_dupeMode),
+		m_directory,
+		PATH_SEPARATOR,
+		this,
+		[](void* ctx, const char* name, const char* value)
+		{
+			static_cast<ScanScriptController*>(ctx)->SetEnvVar(name, value);
+		},
+		[](void* ctx, const char* name, int value)
+		{
+			static_cast<ScanScriptController*>(ctx)->SetIntEnvVar(name, value);
+		});
 
 	PrepareEnvScript(m_parameters, scriptName);
 }

@@ -53,36 +53,21 @@ struct CipherDescriptor
 bool SameCipherFile(const struct stat& a, const struct stat& b)
 {
 #ifdef __APPLE__
-	return nzbget_rs_ufs_script_config_same_cipher_file(
-		(uint64_t)a.st_dev, (uint64_t)b.st_dev,
-		(uint64_t)a.st_ino, (uint64_t)b.st_ino,
-		(int64_t)a.st_size, (int64_t)b.st_size,
-		(uint32_t)a.st_mode, (uint32_t)b.st_mode,
-		(uint32_t)a.st_uid, (uint32_t)b.st_uid,
-		(uint32_t)a.st_gid, (uint32_t)b.st_gid,
-		(int64_t)a.st_mtimespec.tv_sec, (int64_t)b.st_mtimespec.tv_sec,
-		(int64_t)a.st_mtimespec.tv_nsec, (int64_t)b.st_mtimespec.tv_nsec,
-		(int64_t)a.st_ctimespec.tv_sec, (int64_t)b.st_ctimespec.tv_sec,
-		(int64_t)a.st_ctimespec.tv_nsec, (int64_t)b.st_ctimespec.tv_nsec) != 0;
+	return a.st_dev == b.st_dev && a.st_ino == b.st_ino && a.st_size == b.st_size &&
+		a.st_mode == b.st_mode && a.st_uid == b.st_uid && a.st_gid == b.st_gid &&
+		a.st_mtimespec.tv_sec == b.st_mtimespec.tv_sec && a.st_mtimespec.tv_nsec == b.st_mtimespec.tv_nsec &&
+		a.st_ctimespec.tv_sec == b.st_ctimespec.tv_sec && a.st_ctimespec.tv_nsec == b.st_ctimespec.tv_nsec;
 #else
-	return nzbget_rs_ufs_script_config_same_cipher_file(
-		(uint64_t)a.st_dev, (uint64_t)b.st_dev,
-		(uint64_t)a.st_ino, (uint64_t)b.st_ino,
-		(int64_t)a.st_size, (int64_t)b.st_size,
-		(uint32_t)a.st_mode, (uint32_t)b.st_mode,
-		(uint32_t)a.st_uid, (uint32_t)b.st_uid,
-		(uint32_t)a.st_gid, (uint32_t)b.st_gid,
-		(int64_t)a.st_mtim.tv_sec, (int64_t)b.st_mtim.tv_sec,
-		(int64_t)a.st_mtim.tv_nsec, (int64_t)b.st_mtim.tv_nsec,
-		(int64_t)a.st_ctim.tv_sec, (int64_t)b.st_ctim.tv_sec,
-		(int64_t)a.st_ctim.tv_nsec, (int64_t)b.st_ctim.tv_nsec) != 0;
+	return a.st_dev == b.st_dev && a.st_ino == b.st_ino && a.st_size == b.st_size &&
+		a.st_mode == b.st_mode && a.st_uid == b.st_uid && a.st_gid == b.st_gid &&
+		a.st_mtim.tv_sec == b.st_mtim.tv_sec && a.st_mtim.tv_nsec == b.st_mtim.tv_nsec &&
+		a.st_ctim.tv_sec == b.st_ctim.tv_sec && a.st_ctim.tv_nsec == b.st_ctim.tv_nsec;
 #endif
 }
 
 bool ReadCipherDescriptor(int fd, std::string& output, struct stat& before)
 {
-	if (fstat(fd, &before) != 0 ||
-		nzbget_rs_ufs_script_config_is_valid_cipher_size(S_ISREG(before.st_mode) ? 1 : 0, (int64_t)before.st_size) == 0)
+	if (fstat(fd, &before) != 0 || !S_ISREG(before.st_mode) || before.st_size < 0 || before.st_size > 16 * 1024 * 1024)
 	{
 		return false;
 	}
@@ -170,10 +155,7 @@ ScriptConfig::CipherCommit ScriptConfig::CommitCipherPatch(std::string_view expe
 	int descriptor = -1;
 	for (int attempt = 0; attempt < 16; ++attempt)
 	{
-		NzbgetRsBuf tmpBuf = nzbget_rs_dqh_script_config_format_tls_temp_name(
-			leaf.c_str(), (int32_t)getpid(), sequence.fetch_add(1));
-		temporary.assign(tmpBuf.data ? tmpBuf.data : "", tmpBuf.len);
-		nzbget_rs_free(tmpBuf);
+		temporary = "." + leaf + ".tls-" + std::to_string(getpid()) + "-" + std::to_string(sequence.fetch_add(1));
 		descriptor = openat(parent.value, temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
 		if (descriptor >= 0 || errno != EEXIST) break;
 	}
@@ -223,47 +205,17 @@ bool ScriptConfig::LoadConfig(Options::OptEntries* optEntries)
 
 bool ScriptConfig::LoadConfigUnlocked(Options::OptEntries* optEntries)
 {
-	// read config file
-	DiskFile infile;
-
-	if (!infile.Open(g_Options->GetConfigFilename(), DiskFile::omRead))
+	if (!optEntries || !g_Options || !g_Options->GetConfigFilename())
 	{
 		return false;
 	}
-
-	int fileLen = (int)FileSystem::FileSize(g_Options->GetConfigFilename());
-	if (fileLen <= 0)
-	{
-		// nothing to read: a buffer of one byte read an empty line forever
-		return true;
-	}
-	CString buf;
-	buf.Reserve(fileLen);
-
-	while (infile.ReadLine(buf, fileLen + 1))
-	{
-		// remove trailing '\n' and '\r' and spaces
-		Util::TrimRight(buf);
-
-		// skip comments and empty lines
-		if (nzbget_rs_sfc_script_config_is_comment_or_blank_line(buf) != 0)
+	return nzbget_rs_script_config_load(
+		g_Options->GetConfigFilename(),
+		optEntries,
+		[](void* ctx, const char* name, const char* value)
 		{
-			continue;
-		}
-
-		CString optname;
-		CString optvalue;
-		if (Options::SplitOptionString(buf, optname, optvalue))
-		{
-			optEntries->emplace_back(optname, optvalue);
-		}
-	}
-
-	infile.Close();
-
-	Options::ConvertOldOptions(optEntries);
-
-	return true;
+			static_cast<Options::OptEntries*>(ctx)->emplace_back(name, value);
+		}) != 0;
 }
 
 // Versioned, unambiguous saved-value token shared with Config.cipherBaseline.
@@ -290,115 +242,35 @@ bool ScriptConfig::SaveConfig(Options::OptEntries* optEntries, const char* ciphe
 {
 	std::lock_guard<std::mutex> lock(m_configWriteMutex);
 	if (conflict) *conflict = false;
-	if (cipherBaseline)
-	{
-		Options::OptEntries current;
-		if (!LoadConfigUnlocked(&current)) return false;
-		if (CipherBaseline(current) != cipherBaseline)
-		{
-			if (conflict) *conflict = true;
-			return false;
-		}
-	}
-	struct CaseInsensitiveLess
-	{
-		bool operator()(std::string_view a, std::string_view b) const
-		{
-			return nzbget_rs_dqh_bytes_lt_ignore_case(
-				a.data(), a.size(), b.data(), b.size()) != 0;
-		}
-	};
-
-	// save to config file
-	DiskFile infile;
-
-	if (!infile.Open(g_Options->GetConfigFilename(), DiskFile::omReadWrite))
+	if (!optEntries || !g_Options || !g_Options->GetConfigFilename())
 	{
 		return false;
 	}
-
-	std::map<std::string_view, std::string_view, CaseInsensitiveLess> values;
+	std::vector<const char*> names;
+	std::vector<const char*> values;
+	names.reserve(optEntries->size());
+	values.reserve(optEntries->size());
 	for (const auto& entry : *optEntries)
 	{
 		if (entry.GetName() && entry.GetValue())
 		{
-			values[entry.GetName()] = entry.GetValue();
+			names.push_back(entry.GetName());
+			values.push_back(entry.GetValue());
 		}
 	}
-
-	std::set<std::string_view, CaseInsensitiveLess> writtenOptions;
-
-	// read config file into memory array
-	int fileLen = (int)FileSystem::FileSize(g_Options->GetConfigFilename()) + 1;
-	CString content;
-	content.Reserve(fileLen);
-	std::vector<CString> config;
-	while (infile.ReadLine(content, fileLen + 1))
+	int conflictFlag = 0;
+	int saved = nzbget_rs_script_config_save(
+		g_Options->GetConfigFilename(),
+		names.data(),
+		values.data(),
+		names.size(),
+		cipherBaseline,
+		&conflictFlag);
+	if (conflict)
 	{
-		config.push_back(*content);
+		*conflict = conflictFlag != 0;
 	}
-	content.Clear();
-
-	// write config file back to disk, replace old values of existing options with new values
-	infile.Seek(0);
-	for (CString& buf : config)
-	{
-		if (nzbget_rs_sfc_script_config_is_editable_option_line(buf) != 0)
-		{
-			// remove trailing '\n' and '\r' and spaces
-			buf.TrimRight();
-
-			CString optname;
-			CString optvalue;
-			if (g_Options->SplitOptionString(buf, optname, optvalue))
-			{
-				auto it = values.find(*optname);
-				if (it != values.end() && writtenOptions.insert(it->first).second)
-				{
-					NzbgetRsBuf lineBuf = nzbget_rs_dqh_script_config_format_option_line(
-						it->first.data(), it->first.size(),
-						it->second.data(), it->second.size());
-					infile.Print("%s", lineBuf.data ? lineBuf.data : "");
-					nzbget_rs_free(lineBuf);
-				}
-			}
-		}
-		else
-		{
-			// every line ends: a last line without a line end (a comment, typically)
-			// had the first new option glued onto it, and that option was lost
-			NzbgetRsBuf lineBuf = nzbget_rs_dqh_script_config_ensure_trailing_lf(buf);
-			infile.Print("%s", lineBuf.data ? lineBuf.data : "");
-			nzbget_rs_free(lineBuf);
-		}
-	}
-
-	// write new options
-	for (const auto& entry : *optEntries)
-	{
-		if (entry.GetName() && entry.GetValue())
-		{
-			const char* name = entry.GetName();
-			if (writtenOptions.insert(name).second)
-			{
-				auto it = values.find(name);
-				std::string_view val = (it != values.end()) ? it->second : entry.GetValue();
-				std::string_view nameView(name);
-				NzbgetRsBuf lineBuf = nzbget_rs_dqh_script_config_format_option_line(
-					nameView.data(), nameView.size(), val.data(), val.size());
-				infile.Print("%s", lineBuf.data ? lineBuf.data : "");
-				nzbget_rs_free(lineBuf);
-			}
-		}
-	}
-
-	// close and truncate the file
-	int pos = (int)infile.Position();
-	infile.Close();
-
-	FileSystem::TruncateFile(g_Options->GetConfigFilename(), pos);
-
-	return true;
+	return saved != 0;
 }
 
 bool ScriptConfig::LoadConfigTemplates(ConfigTemplates* configTemplates)

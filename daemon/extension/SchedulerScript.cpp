@@ -70,18 +70,21 @@ void SchedulerScriptController::ExecuteScript(std::shared_ptr<const Extension::S
 		return;
 	}
 
-	NzbgetRsBuf taskNameBuf = nzbget_rs_tpr_sched_script_format_task_suffix(m_taskId);
-	BString<1024> taskName("%s", taskNameBuf.data ? taskNameBuf.data : "");
-	nzbget_rs_free(taskNameBuf);
+	BString<1024> taskName;
+	if (m_taskId > 0)
+	{
+		taskName.Format(" for Task%i", m_taskId);
+	}
+	else
+	{
+		taskName = "";
+	}
 
 	PrintMessage(Message::mkInfo, "Executing scheduler-script %s%s", script->GetName(), *taskName);
 
 	SetArgs({script->GetEntry()});
 
-	NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_sched_script_format_info_name(
-		script->GetName(), m_taskId, 0);
-	BString<1024> infoName("%s", infoNameBuf.data ? infoNameBuf.data : "");
-	nzbget_rs_free(infoNameBuf);
+	BString<1024> infoName("scheduler-script %s%s", script->GetName(), *taskName);
 	SetInfoName(infoName);
 
 	SetLogPrefix(script->GetDisplayName());
@@ -105,15 +108,11 @@ void SchedulerScriptController::ExecuteExternalProcess()
 {
 	info("Executing scheduled process-script %s for Task%i", FileSystem::BaseFileName(GetScript()), m_taskId);
 
-	NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_sched_script_format_info_name(
-		FileSystem::BaseFileName(GetScript()), m_taskId, 1);
-	BString<1024> infoName("%s", infoNameBuf.data ? infoNameBuf.data : "");
-	nzbget_rs_free(infoNameBuf);
+	BString<1024> infoName("scheduled process-script %s for Task%i", FileSystem::BaseFileName(GetScript()), m_taskId);
 	SetInfoName(infoName);
 
 	BString<1024> logPrefix = FileSystem::BaseFileName(GetScript());
-	size_t stemLen = nzbget_rs_euh_sched_script_strip_ext_len(logPrefix, strlen(logPrefix));
-	logPrefix[stemLen] = '\0';
+	if (char* ext = strrchr(logPrefix, '.')) *ext = '\0';
 	SetLogPrefix(logPrefix);
 
 	Execute();

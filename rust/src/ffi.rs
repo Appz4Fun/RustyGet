@@ -13535,44 +13535,6 @@ pub unsafe extern "C" fn nzbget_rs_feh_maintenance_decode_hex_signature(
     ))
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feh_ext_should_skip_dir_entry(
-    filename: *const c_char,
-) -> c_int {
-    if filename.is_null() {
-        return 1;
-    }
-    let bytes = crate::diskstatepp::cstr_to_bytes(filename);
-    c_int::from(crate::frontexthealth::ext_should_skip_dir_entry(bytes))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feh_ext_get_stem_len(
-    filename: *const c_char,
-    filename_len: usize,
-) -> usize {
-    if filename.is_null() || filename_len == 0 {
-        return 0;
-    }
-    let bytes = std::slice::from_raw_parts(filename.cast::<u8>(), filename_len);
-    crate::frontexthealth::ext_get_stem_len(bytes)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feh_ext_is_in_list(
-    extensions_list: *const c_char,
-    target_name: *const c_char,
-) -> c_int {
-    if extensions_list.is_null() || target_name.is_null() {
-        return 0;
-    }
-    let list_bytes = crate::diskstatepp::cstr_to_bytes(extensions_list);
-    let name_bytes = crate::diskstatepp::cstr_to_bytes(target_name);
-    c_int::from(crate::frontexthealth::ext_is_in_list(
-        list_bytes, name_bytes,
-    ))
-}
-
 // ============================================================================
 // System, NServ, DupeSearch, Connect, PostRenamer & SystemHealth Hot-Path FFI
 // (`rust/src/sysnservhealth.rs`)
@@ -14296,56 +14258,6 @@ pub unsafe extern "C" fn nzbget_rs_euh_disk_service_is_low_space(
     ))
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_euh_cmd_script_classify_exit_code(exit_code: c_int) -> c_int {
-    crate::extutilhealth::cmd_script_classify_exit_code(exit_code)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_euh_sched_script_strip_ext_len(
-    base_name: *const c_char,
-    len: usize,
-) -> usize {
-    let s = if base_name.is_null() || len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(base_name.cast::<u8>(), len)
-    };
-    crate::extutilhealth::sched_script_strip_ext_len(s)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_euh_nzb_script_match_param_prefix(
-    param_name: *const c_char,
-    strip_prefix: *const c_char,
-    out_offset: *mut usize,
-) -> c_int {
-    let pname = if param_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(param_name).to_bytes()
-    };
-    let sprefix = if strip_prefix.is_null() {
-        None
-    } else {
-        Some(CStr::from_ptr(strip_prefix).to_bytes())
-    };
-    match crate::extutilhealth::nzb_script_match_param_prefix(pname, sprefix) {
-        Some(off) => {
-            if !out_offset.is_null() {
-                *out_offset = off;
-            }
-            1
-        }
-        None => 0,
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_euh_feed_script_is_success(exit_code: c_int) -> c_int {
-    i32::from(crate::extutilhealth::feed_script_is_success(exit_code))
-}
-
 // ============================================================================
 // ArticleDownloader, DirectUnpack, UnpackController, Repair & ParChecker Hot-Path FFI
 // (`rust/src/dlunpackrepair.rs`)
@@ -14939,25 +14851,6 @@ pub unsafe extern "C" fn nzbget_rs_awc_memory_monitor_effective_downloads_limit(
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_awc_xml_bool_to_str(value: c_int) -> *const c_char {
     crate::artwritercore::xml_bool_to_str(value != 0).as_ptr()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_awc_extension_select_kind_flag(
-    post: c_int,
-    scan: c_int,
-    queue: c_int,
-    scheduler: c_int,
-    feed: c_int,
-    which: c_int,
-) -> c_int {
-    i32::from(crate::artwritercore::extension_select_kind_flag(
-        post != 0,
-        scan != 0,
-        queue != 0,
-        scheduler != 0,
-        feed != 0,
-        which,
-    ))
 }
 
 #[no_mangle]
@@ -21719,168 +21612,6 @@ pub extern "C" fn nzbget_rs_psp_parchecker_calc_creator_packet_payload_len(
 // ============================================================================
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_sfc_queue_script_can_start_or_enqueue(
-    has_queue_scripts: c_int,
-    has_nzb: c_int,
-    skip_script_processing: c_int,
-) -> c_int {
-    i32::from(crate::scriptfeedcfg::queue_script_can_start_or_enqueue(
-        has_queue_scripts != 0,
-        has_nzb != 0,
-        skip_script_processing != 0,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sfc_script_ctrl_calc_prefix_len(display_name_len: usize) -> c_int {
-    crate::scriptfeedcfg::script_ctrl_calc_prefix_len(display_name_len)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sfc_queue_script_is_better_queued_item(
-    has_cur_nzb: c_int,
-    item_event: c_int,
-    max_event: c_int,
-) -> c_int {
-    i32::from(crate::scriptfeedcfg::queue_script_is_better_queued_item(
-        has_cur_nzb != 0,
-        item_event,
-        max_event,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sfc_queue_script_calc_queue_size(
-    queue_len: usize,
-    has_cur_item: c_int,
-) -> c_int {
-    crate::scriptfeedcfg::queue_script_calc_queue_size(queue_len, has_cur_item != 0)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sfc_post_script_should_skip_execute(
-    is_post_script: c_int,
-    request_par_check: c_int,
-) -> c_int {
-    i32::from(crate::scriptfeedcfg::post_script_should_skip_execute(
-        is_post_script != 0,
-        request_par_check != 0,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sfc_post_script_resolve_compat_par_status(
-    par_status: c_int,
-    ps_failure: c_int,
-    delete_status: c_int,
-    ds_none: c_int,
-    mark_status: c_int,
-    ks_bad: c_int,
-) -> c_int {
-    crate::scriptfeedcfg::post_script_resolve_compat_par_status(
-        par_status,
-        ps_failure,
-        delete_status,
-        ds_none,
-        mark_status,
-        ks_bad,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sfc_post_script_is_paused_wait_active(
-    pause_post_process: c_int,
-    force_priority: c_int,
-    is_stopped: c_int,
-) -> c_int {
-    i32::from(crate::scriptfeedcfg::post_script_is_paused_wait_active(
-        pause_post_process != 0,
-        force_priority != 0,
-        is_stopped != 0,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_sfc_post_script_calc_paused_timestamps(
-    cur_time: i64,
-    wait_time: i64,
-    stage_time: i64,
-    start_time: i64,
-    out_stage_time: *mut i64,
-    out_start_time: *mut i64,
-) {
-    let (st, sr) = crate::scriptfeedcfg::post_script_calc_paused_timestamps(
-        cur_time, wait_time, stage_time, start_time,
-    );
-    if !out_stage_time.is_null() {
-        *out_stage_time = st;
-    }
-    if !out_start_time.is_null() {
-        *out_start_time = sr;
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_sfc_script_config_is_comment_or_blank_line(
-    line: *const c_char,
-) -> c_int {
-    let s = if line.is_null() {
-        c""
-    } else {
-        CStr::from_ptr(line)
-    };
-    i32::from(crate::scriptfeedcfg::script_config_is_comment_or_blank_line(s))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_sfc_script_config_is_editable_option_line(
-    line: *const c_char,
-) -> c_int {
-    let s = if line.is_null() {
-        c""
-    } else {
-        CStr::from_ptr(line)
-    };
-    i32::from(crate::scriptfeedcfg::script_config_is_editable_option_line(s))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_sfc_script_config_line_has_trailing_lf(
-    line: *const c_char,
-) -> c_int {
-    let s = if line.is_null() {
-        c""
-    } else {
-        CStr::from_ptr(line)
-    };
-    i32::from(crate::scriptfeedcfg::script_config_line_has_trailing_lf(s))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_sfc_scan_script_trim_trailing_sep_len(
-    dir: *const c_char,
-    sep: c_char,
-) -> usize {
-    let s = if dir.is_null() {
-        c""
-    } else {
-        CStr::from_ptr(dir)
-    };
-    crate::scriptfeedcfg::scan_script_trim_trailing_sep_len(s, sep as u8)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sfc_cmd_script_should_append_log_message(
-    script_id: c_int,
-    id_script_gen: c_int,
-) -> c_int {
-    i32::from(crate::scriptfeedcfg::cmd_script_should_append_log_message(
-        script_id,
-        id_script_gen,
-    ))
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_sfc_sched_script_should_format_task_suffix(task_id: c_int) -> c_int {
     i32::from(crate::scriptfeedcfg::sched_script_should_format_task_suffix(
         task_id,
@@ -22831,43 +22562,6 @@ pub unsafe extern "C" fn nzbget_rs_ufs_unpack_ctrl_parse_backspace_progress(
     } else {
         0
     }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ufs_script_config_same_cipher_file(
-    a_dev: u64,
-    b_dev: u64,
-    a_ino: u64,
-    b_ino: u64,
-    a_size: i64,
-    b_size: i64,
-    a_mode: u32,
-    b_mode: u32,
-    a_uid: u32,
-    b_uid: u32,
-    a_gid: u32,
-    b_gid: u32,
-    a_msec: i64,
-    b_msec: i64,
-    a_mnsec: i64,
-    b_mnsec: i64,
-    a_csec: i64,
-    b_csec: i64,
-    a_cnsec: i64,
-    b_cnsec: i64,
-) -> c_int {
-    crate::utilfsscript::script_config_same_cipher_file(
-        a_dev, b_dev, a_ino, b_ino, a_size, b_size, a_mode, b_mode, a_uid, b_uid, a_gid, b_gid,
-        a_msec, b_msec, a_mnsec, b_mnsec, a_csec, b_csec, a_cnsec, b_cnsec,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ufs_script_config_is_valid_cipher_size(
-    is_reg: c_int,
-    size: i64,
-) -> c_int {
-    crate::utilfsscript::script_config_is_valid_cipher_size(is_reg, size)
 }
 
 // ============================================================================
@@ -28367,20 +28061,6 @@ pub unsafe extern "C" fn nzbget_rs_options_parse_int_value(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_options_is_category_extensions_opt(
-    optname: *const c_char,
-) -> c_int {
-    if optname.is_null() {
-        return 0;
-    }
-    if crate::options::is_category_extensions_opt(CStr::from_ptr(optname)) {
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dupe_watch_build_item_flags(
     kind: c_int,
     in_history: c_int,
@@ -32545,24 +32225,6 @@ pub unsafe extern "C" fn nzbget_rs_tpr_feed_coord_format_temp_filename(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_feed_script_format_info_name(
-    script_name: *const c_char,
-    feed_id: i32,
-    uppercase_first: i32,
-) -> RsBuf {
-    let sn = if script_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(script_name).to_bytes()
-    };
-    into_buf(crate::twinproberenhist::tpr_feed_script_format_info_name(
-        sn,
-        feed_id,
-        uppercase_first != 0,
-    ))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_tpr_nzb_script_format_param_prefix(
     script_name: *const c_char,
 ) -> RsBuf {
@@ -32572,144 +32234,6 @@ pub unsafe extern "C" fn nzbget_rs_tpr_nzb_script_format_param_prefix(
         CStr::from_ptr(script_name).to_bytes()
     };
     into_buf(crate::twinproberenhist::tpr_nzb_script_format_param_prefix(sn))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_post_script_format_info_name(
-    script_name: *const c_char,
-    nzb_name: *const c_char,
-    uppercase_first: i32,
-) -> RsBuf {
-    let sn = if script_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(script_name).to_bytes()
-    };
-    let nn = if nzb_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(nzb_name).to_bytes()
-    };
-    into_buf(crate::twinproberenhist::tpr_post_script_format_info_name(
-        sn,
-        nn,
-        uppercase_first != 0,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_post_script_format_progress_label(
-    script_name: *const c_char,
-) -> RsBuf {
-    let sn = if script_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(script_name).to_bytes()
-    };
-    into_buf(crate::twinproberenhist::tpr_post_script_format_progress_label(sn))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_script_dupe_mode_name(dupe_mode: i32) -> *const c_char {
-    crate::twinproberenhist::tpr_script_dupe_mode_name(dupe_mode).as_ptr() as *const c_char
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_post_script_total_status_len(
-    status: *const c_char,
-) -> usize {
-    let s = if status.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(status).to_bytes()
-    };
-    crate::twinproberenhist::tpr_post_script_total_status_len(s)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_post_script_format_server_env_name(
-    server_id: i32,
-    is_failed: i32,
-) -> RsBuf {
-    into_buf(
-        crate::twinproberenhist::tpr_post_script_format_server_env_name(
-            server_id,
-            is_failed != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_queue_script_format_info_name(
-    script_name: *const c_char,
-    base_nzb_name: *const c_char,
-) -> RsBuf {
-    let sn = if script_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(script_name).to_bytes()
-    };
-    let bn = if base_nzb_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(base_nzb_name).to_bytes()
-    };
-    into_buf(crate::twinproberenhist::tpr_queue_script_format_info_name(
-        sn, bn,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_scan_script_format_info_name(
-    script_name: *const c_char,
-    base_nzb_filename: *const c_char,
-) -> RsBuf {
-    let sn = if script_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(script_name).to_bytes()
-    };
-    let bf = if base_nzb_filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(base_nzb_filename).to_bytes()
-    };
-    into_buf(crate::twinproberenhist::tpr_scan_script_format_info_name(
-        sn, bf,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_sched_script_format_task_suffix(task_id: i32) -> RsBuf {
-    into_buf(crate::twinproberenhist::tpr_sched_script_format_task_suffix(task_id))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_sched_script_format_info_name(
-    script_name: *const c_char,
-    task_id: i32,
-    external_process: i32,
-) -> RsBuf {
-    let sn = if script_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(script_name).to_bytes()
-    };
-    into_buf(crate::twinproberenhist::tpr_sched_script_format_info_name(
-        sn,
-        task_id,
-        external_process != 0,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_ext_mgr_format_temp_zip_name(
-    cur_time: i64,
-    counter: i32,
-) -> RsBuf {
-    into_buf(crate::twinproberenhist::tpr_ext_mgr_format_temp_zip_name(
-        cur_time, counter,
-    ))
 }
 
 #[no_mangle]
@@ -33767,45 +33291,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_webserver_format_forwarded_for_suffix(
         CStr::from_ptr(forwarded_for).to_bytes()
     };
     into_buf(crate::dupequeuehealth::dqh_webserver_format_forwarded_for_suffix(f))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_cmd_script_format_info_name(
-    script_name: *const c_char,
-    command: *const c_char,
-    uppercase: c_int,
-) -> RsBuf {
-    let s = if script_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(script_name).to_bytes()
-    };
-    let c = if command.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(command).to_bytes()
-    };
-    into_buf(crate::dupequeuehealth::dqh_cmd_script_format_info_name(
-        s,
-        c,
-        uppercase != 0,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_script_config_format_tls_temp_name(
-    leaf: *const c_char,
-    pid: c_int,
-    seq: u64,
-) -> RsBuf {
-    let l = if leaf.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(leaf).to_bytes()
-    };
-    into_buf(
-        crate::dupequeuehealth::dqh_script_config_format_tls_temp_name(l, pid, seq),
-    )
 }
 
 #[no_mangle]
@@ -35011,38 +34496,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_webserver_encode_hex_token(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_script_config_format_option_line(
-    key: *const c_char,
-    key_len: usize,
-    val: *const c_char,
-    val_len: usize,
-) -> RsBuf {
-    let k = if key.is_null() || key_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(key as *const u8, key_len)
-    };
-    let v = if val.is_null() || val_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(val as *const u8, val_len)
-    };
-    into_buf(crate::dupequeuehealth::dqh_script_config_format_option_line(k, v))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_script_config_ensure_trailing_lf(
-    line: *const c_char,
-) -> RsBuf {
-    let l = if line.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(line).to_bytes()
-    };
-    into_buf(crate::dupequeuehealth::dqh_script_config_ensure_trailing_lf(l))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_unpack_format_7z_output_arg(
     unpack_dir: *const c_char,
 ) -> RsBuf {
@@ -35201,38 +34654,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_queue_editor_visit_category_ext_diff(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_script_event_name(event: c_int) -> *const c_char {
-    crate::dupequeuehealth::dqh_queue_script_event_name(event)
-        .as_ptr()
-        .cast::<c_char>()
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_script_delete_status_name(
-    delete_status: c_int,
-) -> *const c_char {
-    crate::dupequeuehealth::dqh_queue_script_delete_status_name(delete_status)
-        .as_ptr()
-        .cast::<c_char>()
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_script_url_status_name(url_status: c_int) -> *const c_char {
-    crate::dupequeuehealth::dqh_queue_script_url_status_name(url_status)
-        .as_ptr()
-        .cast::<c_char>()
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_script_mark_status_name(
-    mark_status: c_int,
-) -> *const c_char {
-    crate::dupequeuehealth::dqh_queue_script_mark_status_name(mark_status)
-        .as_ptr()
-        .cast::<c_char>()
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_stream_repair_calc_encrypted_window_bounds(
     window_offset: i64,
     window_end_raw: i64,
@@ -35343,125 +34764,8 @@ pub extern "C" fn nzbget_rs_dqh_parchecker_stage_message(stage: c_int) -> *const
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_post_script_status_name(status: c_int) -> *const c_char {
-    crate::dupequeuehealth::dqh_post_script_status_name(status).as_ptr() as *const c_char
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_post_script_deprecated_status_code(status: c_int) -> c_int {
-    crate::dupequeuehealth::dqh_post_script_deprecated_status_code(status)
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_scheduler_command_name(command: c_int) -> *const c_char {
     crate::dupequeuehealth::dqh_scheduler_command_name(command).as_ptr() as *const c_char
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_ext_mgr_format_update_backup_path(
-    target_path: *const c_char,
-    target_path_len: usize,
-) -> RsBuf {
-    let tp = if target_path.is_null() || target_path_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(target_path as *const u8, target_path_len)
-    };
-    into_buf(crate::dupequeuehealth::dqh_ext_mgr_format_update_backup_path(tp))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_ext_mgr_format_lookup_error(
-    ext_name: *const c_char,
-    ext_name_len: usize,
-    kind: c_int,
-) -> RsBuf {
-    let en = if ext_name.is_null() || ext_name_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(ext_name as *const u8, ext_name_len)
-    };
-    into_buf(crate::dupequeuehealth::dqh_ext_mgr_format_lookup_error(
-        en, kind,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_ext_mgr_format_install_or_delete_error(
-    path: *const c_char,
-    path_len: usize,
-    detail: *const c_char,
-    detail_len: usize,
-    kind: c_int,
-) -> RsBuf {
-    let p = if path.is_null() || path_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(path as *const u8, path_len)
-    };
-    let d = if detail.is_null() || detail_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(detail as *const u8, detail_len)
-    };
-    into_buf(
-        crate::dupequeuehealth::dqh_ext_mgr_format_install_or_delete_error(p, d, kind),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_ext_mgr_format_compound_update_error(
-    primary_err: *const c_char,
-    primary_err_len: usize,
-    path1: *const c_char,
-    path1_len: usize,
-    path2: *const c_char,
-    path2_len: usize,
-    ec_msg: *const c_char,
-    ec_msg_len: usize,
-    kind: c_int,
-) -> RsBuf {
-    let pe = if primary_err.is_null() || primary_err_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(primary_err as *const u8, primary_err_len)
-    };
-    let p1 = if path1.is_null() || path1_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(path1 as *const u8, path1_len)
-    };
-    let p2 = if path2.is_null() || path2_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(path2 as *const u8, path2_len)
-    };
-    let em = if ec_msg.is_null() || ec_msg_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(ec_msg as *const u8, ec_msg_len)
-    };
-    into_buf(
-        crate::dupequeuehealth::dqh_ext_mgr_format_compound_update_error(pe, p1, p2, em, kind),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_options_merge_script_list(
-    existing: *const c_char,
-    add_list: *const c_char,
-) -> RsBuf {
-    let ex = if existing.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(existing).to_bytes()
-    };
-    let al = if add_list.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(add_list).to_bytes()
-    };
-    into_buf(crate::dupequeuehealth::dqh_options_merge_script_list(ex, al))
 }
 
 #[no_mangle]
@@ -36208,69 +35512,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_feed_file_should_trim_text_chunk(
         std::slice::from_raw_parts(current_element.cast::<u8>(), len)
     };
     i32::from(crate::dupequeuehealth::dqh_feed_file_should_trim_text_chunk(s))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_ext_mgr_is_extension_in_use(use_count: i64) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_ext_mgr_is_extension_in_use(
-        use_count,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_ext_mgr_should_use_entry_as_path(
-    same_location_count: isize,
-) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_ext_mgr_should_use_entry_as_path(
-        same_location_count,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_ext_mgr_can_create_scheduler_task(
-    is_scheduler_script: c_int,
-    task_time_empty: c_int,
-    in_extensions_list: c_int,
-) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_ext_mgr_can_create_scheduler_task(
-        is_scheduler_script != 0,
-        task_time_empty != 0,
-        in_extensions_list != 0,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_script_select_exec_msg_kind(
-    event: c_int,
-    qe_file_downloaded: c_int,
-    mk_detail: c_int,
-    mk_info: c_int,
-) -> c_int {
-    crate::dupequeuehealth::dqh_queue_script_select_exec_msg_kind(
-        event,
-        qe_file_downloaded,
-        mk_detail,
-        mk_info,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_script_is_duplicate_file_downloaded_item(
-    event: c_int,
-    qe_file_downloaded: c_int,
-    item_nzb_id: c_int,
-    target_nzb_id: c_int,
-    same_script: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_queue_script_is_duplicate_file_downloaded_item(
-            event,
-            qe_file_downloaded,
-            item_nzb_id,
-            target_nzb_id,
-            same_script != 0,
-        ),
-    )
 }
 
 #[no_mangle]
@@ -40968,5 +40209,560 @@ pub unsafe extern "C" fn nzbget_rs_health_validate_extension_scripts_section(
         },
     );
 }
+
+// ============================================================================
+// Extension & Script Subsystem End-to-End FFI (`rust/src/extension.rs`, `rust/src/options.rs`)
+// ============================================================================
+
+pub type OptionsConvertUpdateCb = Option<
+    unsafe extern "C" fn(
+        ctx: *mut std::ffi::c_void,
+        idx: usize,
+        name: *const c_char,
+        value: *const c_char,
+    ),
+>;
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_options_convert_old_options(
+    names: *const *const c_char,
+    values: *const *const c_char,
+    count: usize,
+    ctx: *mut std::ffi::c_void,
+    update_cb: OptionsConvertUpdateCb,
+) {
+    let mut entries = Vec::with_capacity(count + 1);
+    let mut orig_values = Vec::with_capacity(count);
+    if !names.is_null() && !values.is_null() {
+        let n_slice = std::slice::from_raw_parts(names, count);
+        let v_slice = std::slice::from_raw_parts(values, count);
+        for i in 0..count {
+            let n_cstr = if n_slice[i].is_null() {
+                c""
+            } else {
+                CStr::from_ptr(n_slice[i])
+            };
+            let v_cstr = if v_slice[i].is_null() {
+                c""
+            } else {
+                CStr::from_ptr(v_slice[i])
+            };
+            orig_values.push(v_cstr.to_bytes().to_vec());
+            entries.push((n_cstr.to_owned(), v_cstr.to_owned()));
+        }
+    }
+    crate::options::convert_old_options(&mut entries);
+    if let Some(cb) = update_cb {
+        for (i, (name, val)) in entries.iter().enumerate() {
+            if i >= count || val.to_bytes() != orig_values[i].as_slice() {
+                cb(ctx, i, name.as_ptr(), val.as_ptr());
+            }
+        }
+    }
+}
+
+pub type ScriptConfigLoadEmitCb = Option<
+    unsafe extern "C" fn(ctx: *mut std::ffi::c_void, name: *const c_char, value: *const c_char),
+>;
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_script_config_load(
+    filename: *const c_char,
+    ctx: *mut std::ffi::c_void,
+    emit_cb: ScriptConfigLoadEmitCb,
+) -> c_int {
+    if filename.is_null() {
+        return 0;
+    }
+    let fname_bytes = CStr::from_ptr(filename).to_bytes();
+    let Some(entries) = crate::extension::script_config_load(fname_bytes) else {
+        return 0;
+    };
+    if let Some(cb) = emit_cb {
+        for (name, val) in &entries {
+            cb(ctx, name.as_ptr(), val.as_ptr());
+        }
+    }
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_script_config_save(
+    filename: *const c_char,
+    names: *const *const c_char,
+    values: *const *const c_char,
+    count: usize,
+    cipher_baseline: *const c_char,
+    out_conflict: *mut c_int,
+) -> c_int {
+    if !out_conflict.is_null() {
+        *out_conflict = 0;
+    }
+    if filename.is_null() {
+        return 0;
+    }
+    let fname_bytes = CStr::from_ptr(filename).to_bytes();
+    let mut pairs = Vec::with_capacity(count);
+    if !names.is_null() && !values.is_null() {
+        let n_slice = std::slice::from_raw_parts(names, count);
+        let v_slice = std::slice::from_raw_parts(values, count);
+        for i in 0..count {
+            if !n_slice[i].is_null() && !v_slice[i].is_null() {
+                pairs.push((
+                    CStr::from_ptr(n_slice[i]).to_bytes(),
+                    CStr::from_ptr(v_slice[i]).to_bytes(),
+                ));
+            }
+        }
+    }
+    let baseline = if cipher_baseline.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(cipher_baseline).to_bytes())
+    };
+    let (saved, conflict) = crate::extension::script_config_save(fname_bytes, &pairs, baseline);
+    if !out_conflict.is_null() {
+        *out_conflict = c_int::from(conflict);
+    }
+    c_int::from(saved)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ext_is_in_list(
+    extensions_list: *const c_char,
+    target_name: *const c_char,
+) -> c_int {
+    if extensions_list.is_null() || target_name.is_null() {
+        return 0;
+    }
+    let list_bytes = CStr::from_ptr(extensions_list).to_bytes();
+    let name_bytes = CStr::from_ptr(target_name).to_bytes();
+    c_int::from(crate::extension::ext_is_in_list(list_bytes, name_bytes))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ext_mgr_prepare_update(
+    ext_name: *const c_char,
+    found: c_int,
+    use_count: i64,
+    target_path: *const c_char,
+    archive_path: *const c_char,
+    out_backup_path: *mut RsBuf,
+) -> RsBuf {
+    let en = if ext_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(ext_name).to_bytes()
+    };
+    let tp = if target_path.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(target_path).to_bytes()
+    };
+    let ap = if archive_path.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(archive_path).to_bytes()
+    };
+    let (backup, err) =
+        crate::extension::ext_mgr_prepare_update(en, found != 0, use_count, tp, ap);
+    if !out_backup_path.is_null() {
+        *out_backup_path = into_buf(backup);
+    }
+    match err {
+        Some(e) => into_buf(e),
+        None => RsBuf {
+            data: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        },
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ext_mgr_finish_update(
+    target_path: *const c_char,
+    backup_path: *const c_char,
+    archive_path: *const c_char,
+    install_err: *const c_char,
+) -> RsBuf {
+    let tp = if target_path.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(target_path).to_bytes()
+    };
+    let bp = if backup_path.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(backup_path).to_bytes()
+    };
+    let ap = if archive_path.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(archive_path).to_bytes()
+    };
+    let ie = if install_err.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(install_err).to_bytes())
+    };
+    match crate::extension::ext_mgr_finish_update(tp, bp, ap, ie) {
+        Some(e) => into_buf(e),
+        None => RsBuf {
+            data: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        },
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ext_mgr_delete_extension(
+    ext_name: *const c_char,
+    found: c_int,
+    use_count: i64,
+    target_path: *const c_char,
+) -> RsBuf {
+    let en = if ext_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(ext_name).to_bytes()
+    };
+    let tp = if target_path.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(target_path).to_bytes()
+    };
+    match crate::extension::ext_mgr_delete_extension(en, found != 0, use_count, tp) {
+        Some(e) => into_buf(e),
+        None => RsBuf {
+            data: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        },
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ext_mgr_install_error(
+    file_path: *const c_char,
+    os_err: *const c_char,
+    kind: c_int,
+) -> RsBuf {
+    let fp = if file_path.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(file_path).to_bytes()
+    };
+    let oe = if os_err.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(os_err).to_bytes())
+    };
+    into_buf(crate::extension::ext_mgr_install_error(fp, oe, kind))
+}
+
+pub type NzbScriptSetEnvSpecialCb = Option<
+    unsafe extern "C" fn(
+        ctx: *mut std::ffi::c_void,
+        prefix: *const c_char,
+        name: *const c_char,
+        value: *const c_char,
+    ),
+>;
+
+pub type NzbScriptPrepareOptionsCb =
+    Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, strip_prefix: *const c_char)>;
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nzb_script_prepare_env(
+    script_name: *const c_char,
+    has_parameters: c_int,
+    param_names: *const *const c_char,
+    param_values: *const *const c_char,
+    param_count: usize,
+    ctx: *mut std::ffi::c_void,
+    set_env_special_cb: NzbScriptSetEnvSpecialCb,
+    prepare_options_cb: NzbScriptPrepareOptionsCb,
+) {
+    let sn = if script_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(script_name).to_bytes()
+    };
+    let mut names = Vec::with_capacity(param_count);
+    let mut vals = Vec::with_capacity(param_count);
+    if !param_names.is_null() && !param_values.is_null() {
+        let n_slice = std::slice::from_raw_parts(param_names, param_count);
+        let v_slice = std::slice::from_raw_parts(param_values, param_count);
+        for i in 0..param_count {
+            let n_cstr = if n_slice[i].is_null() {
+                c""
+            } else {
+                CStr::from_ptr(n_slice[i])
+            };
+            let v_cstr = if v_slice[i].is_null() {
+                c""
+            } else {
+                CStr::from_ptr(v_slice[i])
+            };
+            names.push(n_cstr);
+            vals.push(v_cstr);
+        }
+    }
+    crate::extension::nzb_script_prepare_env(
+        sn,
+        has_parameters != 0,
+        &names,
+        &vals,
+        |prefix, name, val| {
+            if let Some(cb) = set_env_special_cb {
+                cb(ctx, prefix.as_ptr(), name.as_ptr(), val.as_ptr());
+            }
+        },
+        |strip_prefix| {
+            if let Some(cb) = prepare_options_cb {
+                cb(ctx, strip_prefix.as_ptr());
+            }
+        },
+    );
+}
+
+pub type ScriptSetEnvVarCb = Option<
+    unsafe extern "C" fn(ctx: *mut std::ffi::c_void, name: *const c_char, value: *const c_char),
+>;
+
+pub type ScriptSetIntEnvVarCb =
+    Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, name: *const c_char, value: c_int)>;
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn nzbget_rs_scan_script_prepare_env(
+    nzb_filename: *const c_char,
+    base_filename: *const c_char,
+    url: *const c_char,
+    nzb_name: *const c_char,
+    category: *const c_char,
+    priority: c_int,
+    add_top: c_int,
+    add_paused: c_int,
+    dupe_key: *const c_char,
+    dupe_score: c_int,
+    dupe_mode: c_int,
+    directory: *const c_char,
+    path_sep: c_char,
+    ctx: *mut std::ffi::c_void,
+    set_env_cb: ScriptSetEnvVarCb,
+    set_int_env_cb: ScriptSetIntEnvVarCb,
+) {
+    let cstr_or_empty = |p: *const c_char| -> &CStr {
+        if p.is_null() {
+            c""
+        } else {
+            CStr::from_ptr(p)
+        }
+    };
+    let dir_bytes = cstr_or_empty(directory).to_bytes();
+    crate::extension::scan_script_prepare_env(
+        cstr_or_empty(nzb_filename),
+        cstr_or_empty(base_filename),
+        cstr_or_empty(url),
+        cstr_or_empty(nzb_name),
+        cstr_or_empty(category),
+        priority,
+        add_top != 0,
+        add_paused != 0,
+        cstr_or_empty(dupe_key),
+        dupe_score,
+        dupe_mode,
+        dir_bytes,
+        path_sep as u8,
+        |name, val| {
+            if let Some(cb) = set_env_cb {
+                cb(ctx, name.as_ptr(), val.as_ptr());
+            }
+        },
+        |name, val| {
+            if let Some(cb) = set_int_env_cb {
+                cb(ctx, name.as_ptr(), val);
+            }
+        },
+    );
+}
+
+#[repr(C)]
+pub struct NzbgetRsPostScriptEnv {
+    pub nzb_id: c_int,
+    pub nzb_name: *const c_char,
+    pub dest_dir: *const c_char,
+    pub filename: *const c_char,
+    pub queued_filename: *const c_char,
+    pub url: *const c_char,
+    pub final_dir: *const c_char,
+    pub category: *const c_char,
+    pub health: c_int,
+    pub critical_health: c_int,
+    pub dupe_key: *const c_char,
+    pub dupe_score: c_int,
+    pub dupe_mode: c_int,
+    pub status: *const c_char,
+    pub script_status: c_int,
+    pub par_status: c_int,
+    pub unpack_status: c_int,
+    pub delete_status: c_int,
+    pub mark_status: c_int,
+    pub total_articles: c_int,
+    pub success_articles: c_int,
+    pub failed_articles: c_int,
+    pub server_ids: *const c_int,
+    pub server_success_articles: *const c_int,
+    pub server_failed_articles: *const c_int,
+    pub server_count: usize,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_post_script_prepare_env(
+    env: *const NzbgetRsPostScriptEnv,
+    ctx: *mut std::ffi::c_void,
+    set_env_cb: ScriptSetEnvVarCb,
+    set_int_env_cb: ScriptSetIntEnvVarCb,
+) {
+    if env.is_null() {
+        return;
+    }
+    let e = &*env;
+    let cstr_or_empty = |p: *const c_char| -> &CStr {
+        if p.is_null() {
+            c""
+        } else {
+            CStr::from_ptr(p)
+        }
+    };
+    let srv_ids = if e.server_ids.is_null() || e.server_count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(e.server_ids, e.server_count)
+    };
+    let srv_succ = if e.server_success_articles.is_null() || e.server_count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(e.server_success_articles, e.server_count)
+    };
+    let srv_fail = if e.server_failed_articles.is_null() || e.server_count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(e.server_failed_articles, e.server_count)
+    };
+    let inp = crate::extension::PostScriptEnvInput {
+        nzb_id: e.nzb_id,
+        nzb_name: cstr_or_empty(e.nzb_name),
+        dest_dir: cstr_or_empty(e.dest_dir),
+        filename: cstr_or_empty(e.filename),
+        queued_filename: cstr_or_empty(e.queued_filename),
+        url: cstr_or_empty(e.url),
+        final_dir: cstr_or_empty(e.final_dir),
+        category: cstr_or_empty(e.category),
+        health: e.health,
+        critical_health: e.critical_health,
+        dupe_key: cstr_or_empty(e.dupe_key),
+        dupe_score: e.dupe_score,
+        dupe_mode: e.dupe_mode,
+        status: cstr_or_empty(e.status),
+        script_status: e.script_status,
+        par_status: e.par_status,
+        unpack_status: e.unpack_status,
+        delete_status: e.delete_status,
+        mark_status: e.mark_status,
+        total_articles: e.total_articles,
+        success_articles: e.success_articles,
+        failed_articles: e.failed_articles,
+        server_ids: srv_ids,
+        server_success_articles: srv_succ,
+        server_failed_articles: srv_fail,
+    };
+    crate::extension::post_script_prepare_env(
+        &inp,
+        |name, val| {
+            if let Some(cb) = set_env_cb {
+                cb(ctx, name.as_ptr(), val.as_ptr());
+            }
+        },
+        |name, val| {
+            if let Some(cb) = set_int_env_cb {
+                cb(ctx, name.as_ptr(), val);
+            }
+        },
+    );
+}
+
+#[repr(C)]
+pub struct NzbgetRsQueueScriptEnv {
+    pub nzb_name: *const c_char,
+    pub nzb_id: c_int,
+    pub filename: *const c_char,
+    pub dest_dir: *const c_char,
+    pub queued_filename: *const c_char,
+    pub url: *const c_char,
+    pub category: *const c_char,
+    pub priority: c_int,
+    pub dupe_key: *const c_char,
+    pub dupe_score: c_int,
+    pub dupe_mode: c_int,
+    pub event: c_int,
+    pub delete_status: c_int,
+    pub url_status: c_int,
+    pub mark_status: c_int,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_queue_script_prepare_env(
+    env: *const NzbgetRsQueueScriptEnv,
+    ctx: *mut std::ffi::c_void,
+    set_env_cb: ScriptSetEnvVarCb,
+    set_int_env_cb: ScriptSetIntEnvVarCb,
+) {
+    if env.is_null() {
+        return;
+    }
+    let e = &*env;
+    let cstr_or_empty = |p: *const c_char| -> &CStr {
+        if p.is_null() {
+            c""
+        } else {
+            CStr::from_ptr(p)
+        }
+    };
+    let inp = crate::extension::QueueScriptEnvInput {
+        nzb_name: cstr_or_empty(e.nzb_name),
+        nzb_id: e.nzb_id,
+        filename: cstr_or_empty(e.filename),
+        dest_dir: cstr_or_empty(e.dest_dir),
+        queued_filename: cstr_or_empty(e.queued_filename),
+        url: cstr_or_empty(e.url),
+        category: cstr_or_empty(e.category),
+        priority: e.priority,
+        dupe_key: cstr_or_empty(e.dupe_key),
+        dupe_score: e.dupe_score,
+        dupe_mode: e.dupe_mode,
+        event: e.event,
+        delete_status: e.delete_status,
+        url_status: e.url_status,
+        mark_status: e.mark_status,
+    };
+    crate::extension::queue_script_prepare_env(
+        &inp,
+        |name, val| {
+            if let Some(cb) = set_env_cb {
+                cb(ctx, name.as_ptr(), val.as_ptr());
+            }
+        },
+        |name, val| {
+            if let Some(cb) = set_int_env_cb {
+                cb(ctx, name.as_ptr(), val);
+            }
+        },
+    );
+}
+
 
 

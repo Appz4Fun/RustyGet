@@ -59,11 +59,8 @@ namespace ExtensionManager
 		// ("../x" wrote anywhere the daemon can), and two downloads of one
 		// extension at once wrote the same file
 		static std::atomic<int> counter{0};
-		NzbgetRsBuf zipNameBuf = nzbget_rs_tpr_ext_mgr_format_temp_zip_name(
-			(int64_t)Util::CurrentTime(), ++counter);
 		fs::path tmpFileName = g_Options->GetTempDirPath() /
-			std::string(zipNameBuf.data ? zipNameBuf.data : "", zipNameBuf.len);
-		nzbget_rs_free(zipNameBuf);
+			("ext-" + std::to_string(static_cast<int64_t>(Util::CurrentTime())) + "-" + std::to_string(++counter) + ".zip");
 
 		const auto tmpFileNameStr = fs::u8string(tmpFileName);
 
@@ -86,93 +83,50 @@ namespace ExtensionManager
 		std::unique_lock<std::shared_mutex> lock{m_mutex};
 
 		auto extensionIt = GetByName(extName);
-		if (extensionIt == std::end(m_extensions))
-		{
-			NzbgetRsBuf errBuf = nzbget_rs_dqh_ext_mgr_format_lookup_error(
-				extName.data(), extName.size(), 0);
-			std::string err(errBuf.data ? errBuf.data : "", errBuf.len);
-			nzbget_rs_free(errBuf);
-			return err;
-		}
-
-		if (nzbget_rs_dqh_ext_mgr_is_extension_in_use(extensionIt->use_count()) != 0)
-		{
-			NzbgetRsBuf errBuf = nzbget_rs_dqh_ext_mgr_format_lookup_error(
-				extName.data(), extName.size(), 1);
-			std::string err(errBuf.data ? errBuf.data : "", errBuf.len);
-			nzbget_rs_free(errBuf);
-			return err;
-		}
-
-		// the installed extension is moved aside, not deleted, until the new one
-		// is in place: a failed install puts it back
+		bool found = extensionIt != std::end(m_extensions);
+		int64_t useCount = found ? extensionIt->use_count() : 0;
 		fs::path targetPath;
-		auto moveAsideError = GetExtensionPath(*(*extensionIt), targetPath);
+		if (found)
+		{
+			GetExtensionPath(*(*extensionIt), targetPath);
+		}
 		std::string targetPathStr = fs::u8string(targetPath);
-		NzbgetRsBuf backupBuf = nzbget_rs_dqh_ext_mgr_format_update_backup_path(
-			targetPathStr.data(), targetPathStr.size());
-		fs::path backupPath = fs::u8path(std::string(backupBuf.data ? backupBuf.data : "", backupBuf.len));
-		nzbget_rs_free(backupBuf);
-		if (!moveAsideError)
-		{
-			fs::error_code ec;
-			fs::remove_all(backupPath, ec);
-			fs::rename(targetPath, backupPath, ec);
-			if (ec)
-			{
-				std::string ecMsg = ec.message();
-				NzbgetRsBuf maBuf = nzbget_rs_dqh_ext_mgr_format_install_or_delete_error(
-					targetPathStr.data(), targetPathStr.size(), ecMsg.data(), ecMsg.size(), 3);
-				moveAsideError = std::string(maBuf.data ? maBuf.data : "", maBuf.len);
-				nzbget_rs_free(maBuf);
-			}
-		}
-		if (moveAsideError)
-		{
-			fs::error_code ec;
-			fs::remove(filename, ec);
-			if (ec)
-			{
-				std::string fnStr = fs::u8string(filename);
-				std::string ecMsg = ec.message();
-				NzbgetRsBuf cmpBuf = nzbget_rs_dqh_ext_mgr_format_compound_update_error(
-					moveAsideError->data(), moveAsideError->size(),
-					fnStr.data(), fnStr.size(),
-					nullptr, 0,
-					ecMsg.data(), ecMsg.size(), 0);
-				std::string err(cmpBuf.data ? cmpBuf.data : "", cmpBuf.len);
-				nzbget_rs_free(cmpBuf);
-				return err;
-			}
+		std::string archiveStr = fs::u8string(filename);
 
-			return moveAsideError;
+		NzbgetRsBuf backupBuf{};
+		NzbgetRsBuf prepErrBuf = nzbget_rs_ext_mgr_prepare_update(
+			extName.c_str(),
+			found ? 1 : 0,
+			useCount,
+			targetPathStr.c_str(),
+			archiveStr.c_str(),
+			&backupBuf);
+		std::string backupPathStr(backupBuf.data ? backupBuf.data : "", backupBuf.len);
+		nzbget_rs_free(backupBuf);
+
+		if (prepErrBuf.data)
+		{
+			std::string err(prepErrBuf.data, prepErrBuf.len);
+			nzbget_rs_free(prepErrBuf);
+			return err;
 		}
+		nzbget_rs_free(prepErrBuf);
+
 		const auto rootDir = (*extensionIt)->GetRootDir();
 		const auto installExtError = InstallExtension(filename, rootDir);
-		if (installExtError)
+		NzbgetRsBuf finishErrBuf = nzbget_rs_ext_mgr_finish_update(
+			targetPathStr.c_str(),
+			backupPathStr.c_str(),
+			archiveStr.c_str(),
+			installExtError ? installExtError->c_str() : nullptr);
+		if (finishErrBuf.data)
 		{
-			fs::error_code ec;
-			fs::remove(filename, ec);
-			fs::remove_all(targetPath, ec);
-			fs::rename(backupPath, targetPath, ec);
-			if (ec)
-			{
-				std::string backupStr = fs::u8string(backupPath);
-				std::string ecMsg = ec.message();
-				NzbgetRsBuf cmpBuf = nzbget_rs_dqh_ext_mgr_format_compound_update_error(
-					installExtError->data(), installExtError->size(),
-					targetPathStr.data(), targetPathStr.size(),
-					backupStr.data(), backupStr.size(),
-					ecMsg.data(), ecMsg.size(), 1);
-				std::string err(cmpBuf.data ? cmpBuf.data : "", cmpBuf.len);
-				nzbget_rs_free(cmpBuf);
-				return err;
-			}
-			return installExtError;
+			std::string err(finishErrBuf.data, finishErrBuf.len);
+			nzbget_rs_free(finishErrBuf);
+			return err;
 		}
+		nzbget_rs_free(finishErrBuf);
 
-		fs::error_code ec;
-		fs::remove_all(backupPath, ec);
 		m_extensions.erase(extensionIt);
 		return std::nullopt;
 	}
@@ -186,8 +140,7 @@ namespace ExtensionManager
 
 		if (!extractor)
 		{
-			NzbgetRsBuf errBuf = nzbget_rs_dqh_ext_mgr_format_install_or_delete_error(
-				fileStr.data(), fileStr.size(), nullptr, 0, 0);
+			NzbgetRsBuf errBuf = nzbget_rs_ext_mgr_install_error(fileStr.c_str(), nullptr, 0);
 			std::string err(errBuf.data ? errBuf.data : "", errBuf.len);
 			nzbget_rs_free(errBuf);
 			return err;
@@ -195,8 +148,7 @@ namespace ExtensionManager
 
 		if (!extractor->Extract())
 		{
-			NzbgetRsBuf errBuf = nzbget_rs_dqh_ext_mgr_format_install_or_delete_error(
-				fileStr.data(), fileStr.size(), nullptr, 0, 1);
+			NzbgetRsBuf errBuf = nzbget_rs_ext_mgr_install_error(fileStr.c_str(), nullptr, 1);
 			std::string err(errBuf.data ? errBuf.data : "", errBuf.len);
 			nzbget_rs_free(errBuf);
 			return err;
@@ -207,8 +159,7 @@ namespace ExtensionManager
 		if (ec)
 		{
 			std::string ecMsg = ec.message();
-			NzbgetRsBuf errBuf = nzbget_rs_dqh_ext_mgr_format_install_or_delete_error(
-				fileStr.data(), fileStr.size(), ecMsg.data(), ecMsg.size(), 2);
+			NzbgetRsBuf errBuf = nzbget_rs_ext_mgr_install_error(fileStr.c_str(), ecMsg.c_str(), 2);
 			std::string err(errBuf.data ? errBuf.data : "", errBuf.len);
 			nzbget_rs_free(errBuf);
 			return err;
@@ -223,29 +174,27 @@ namespace ExtensionManager
 		std::unique_lock<std::shared_mutex> lock{m_mutex};
 
 		auto extensionIt = GetByName(name);
-		if (extensionIt == std::end(m_extensions))
+		bool found = extensionIt != std::end(m_extensions);
+		int64_t useCount = found ? extensionIt->use_count() : 0;
+		fs::path targetPath;
+		if (found)
 		{
-			NzbgetRsBuf errBuf = nzbget_rs_dqh_ext_mgr_format_lookup_error(
-				name.data(), name.size(), 2);
-			std::string err(errBuf.data ? errBuf.data : "", errBuf.len);
+			GetExtensionPath(*(*extensionIt), targetPath);
+		}
+		std::string targetPathStr = fs::u8string(targetPath);
+
+		NzbgetRsBuf errBuf = nzbget_rs_ext_mgr_delete_extension(
+			name.c_str(),
+			found ? 1 : 0,
+			useCount,
+			targetPathStr.c_str());
+		if (errBuf.data)
+		{
+			std::string err(errBuf.data, errBuf.len);
 			nzbget_rs_free(errBuf);
 			return err;
 		}
-
-		if (nzbget_rs_dqh_ext_mgr_is_extension_in_use(extensionIt->use_count()) != 0)
-		{
-			NzbgetRsBuf errBuf = nzbget_rs_dqh_ext_mgr_format_lookup_error(
-				name.data(), name.size(), 3);
-			std::string err(errBuf.data ? errBuf.data : "", errBuf.len);
-			nzbget_rs_free(errBuf);
-			return err;
-		}
-
-		const auto err = DeleteExtension(*(*extensionIt));
-		if (err)
-		{
-			return err;
-		}
+		nzbget_rs_free(errBuf);
 
 		m_extensions.erase(extensionIt);
 		return std::nullopt;
@@ -278,32 +227,6 @@ namespace ExtensionManager
 	}
 
 	std::optional<std::string>
-	Manager::DeleteExtension(const Extension::Script& extension)
-	{
-		fs::path targetPath;
-		const auto err = GetExtensionPath(extension, targetPath);
-		if (err)
-		{
-			return err;
-		}
-
-		fs::error_code ec;
-		fs::remove_all(targetPath, ec);
-		if (ec)
-		{
-			std::string tpStr = fs::u8string(targetPath);
-			std::string ecMsg = ec.message();
-			NzbgetRsBuf errBuf = nzbget_rs_dqh_ext_mgr_format_install_or_delete_error(
-				tpStr.data(), tpStr.size(), ecMsg.data(), ecMsg.size(), 4);
-			std::string err(errBuf.data ? errBuf.data : "", errBuf.len);
-			nzbget_rs_free(errBuf);
-			return err;
-		}
-
-		return std::nullopt;
-	}
-
-	std::optional<std::string>
 	Manager::GetExtensionPath(const Extension::Script& extension, fs::path& path)
 	{
 		const char* location = extension.GetLocation();
@@ -311,10 +234,10 @@ namespace ExtensionManager
 		ptrdiff_t count = std::count_if(
 			std::begin(m_extensions),
 			std::end(m_extensions),
-			[&location](const auto& ext) { return nzbget_rs_dqh_bytes_equal(location, ext->GetLocation()) != 0; }
+			[&location](const auto& ext) { return strcmp(location, ext->GetLocation()) == 0; }
 		);
 
-		if (nzbget_rs_dqh_ext_mgr_should_use_entry_as_path(count) != 0)
+		if (count > 1)
 		{
 			// for backward compatibility, when multiple V1 extensions placed 
 			// in the same directory in which case we have to delete an entry file,
@@ -322,9 +245,7 @@ namespace ExtensionManager
 			location = extension.GetEntry();
 		}
 
-		fs::path targetPath(location);
-
-		path = std::move(targetPath);
+		path = fs::path(location);
 		return std::nullopt;
 	}
 	
@@ -343,7 +264,7 @@ namespace ExtensionManager
 		DirBrowser dir(directory);
 		while (const char* filename = dir.Next())
 		{
-			if (nzbget_rs_feh_ext_should_skip_dir_entry(filename))
+			if (filename[0] == '.' || filename[0] == '_')
 				continue;
 
 			NzbgetRsBuf entryBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
@@ -377,10 +298,9 @@ namespace ExtensionManager
 	{
 		for (const auto& extension : m_extensions)
 		{
-			if (nzbget_rs_dqh_ext_mgr_can_create_scheduler_task(
-				extension->GetSchedulerScript() ? 1 : 0,
-				Util::EmptyStr(extension->GetTaskTime()) ? 1 : 0,
-				nzbget_rs_feh_ext_is_in_list(g_Options->GetExtensions(), extension->GetName())) != 0)
+			if (extension->GetSchedulerScript() &&
+				!Util::EmptyStr(extension->GetTaskTime()) &&
+				nzbget_rs_ext_is_in_list(g_Options->GetExtensions(), extension->GetName()) != 0)
 			{
 				g_Options->CreateSchedulerTask(
 					0,
@@ -425,10 +345,10 @@ namespace ExtensionManager
 
 	std::string Manager::GetExtensionName(const std::string& fileName) const
 	{
-		size_t stemLen = nzbget_rs_feh_ext_get_stem_len(fileName.data(), fileName.size());
-		if (stemLen < fileName.size())
+		size_t dotPos = fileName.find_last_of('.');
+		if (dotPos != std::string::npos)
 		{
-			return fileName.substr(0, stemLen);
+			return fileName.substr(0, dotPos);
 		}
 		return fileName;
 	}

@@ -45,46 +45,46 @@ namespace Extension
 		Script(Script&& other) = default;
 		Script& operator=(Script&& other) = default;
 
-		void SetEntry(std::string entry);
-		const char* GetEntry() const;
-		void SetLocation(std::string location);
-		const char* GetLocation() const;
-		void SetRootDir(std::string dir);
-		const char* GetRootDir() const;
-		void SetAuthor(std::string author);
-		const char* GetAuthor() const;
-		void SetVersion(std::string version);
-		void SetNzbgetMinVersion(std::string version);
-		const char* GetVersion() const;
-		const char* GetNzbgetMinVersion() const;
-		void SetLicense(std::string license);
-		const char* GetLicense() const;
-		void SetHomepage(std::string homepage);
-		const char* GetHomepage() const;
-		void SetName(std::string name);
-		const char* GetName() const;
-		void SetDisplayName(std::string displayName);
-		const char* GetDisplayName() const;
-		void SetAbout(std::string about);
-		const char* GetAbout() const;
-		void SetDescription(std::vector<std::string> description);
-		const std::vector<std::string>& GetDescription() const;
-		void SetKind(Kind kind);
-		bool GetPostScript() const;
-		bool GetScanScript() const;
-		bool GetQueueScript() const;
-		bool GetSchedulerScript() const;
-		bool GetFeedScript() const;
-		void SetQueueEvents(std::string queueEvents);
-		const char* GetQueueEvents() const;
-		void SetTaskTime(std::string taskTime);
-		const char* GetTaskTime() const;
-		void SetRequirements(std::vector<std::string> requirements);
-		const std::vector<std::string>& GetRequirements() const;
-		void SetOptions(std::vector<ManifestFile::Option> options);
-		const std::vector<ManifestFile::Option>& GetOptions() const;
-		void SetCommands(std::vector<ManifestFile::Command> commands);
-		const std::vector<ManifestFile::Command>& GetCommands() const;
+		void SetEntry(std::string entry) { m_entry = std::move(entry); }
+		const char* GetEntry() const { return m_entry.c_str(); }
+		void SetLocation(std::string location) { m_location = std::move(location); }
+		const char* GetLocation() const { return m_location.c_str(); }
+		void SetRootDir(std::string dir) { m_rootDir = std::move(dir); }
+		const char* GetRootDir() const { return m_rootDir.c_str(); }
+		void SetAuthor(std::string author) { m_author = std::move(author); }
+		const char* GetAuthor() const { return m_author.c_str(); }
+		void SetVersion(std::string version) { m_version = std::move(version); }
+		void SetNzbgetMinVersion(std::string version) { m_nzbgetMinVersion = std::move(version); }
+		const char* GetVersion() const { return m_version.c_str(); }
+		const char* GetNzbgetMinVersion() const { return m_nzbgetMinVersion.c_str(); }
+		void SetLicense(std::string license) { m_license = std::move(license); }
+		const char* GetLicense() const { return m_license.c_str(); }
+		void SetHomepage(std::string homepage) { m_homepage = std::move(homepage); }
+		const char* GetHomepage() const { return m_homepage.c_str(); }
+		void SetName(std::string name) { m_name = std::move(name); }
+		const char* GetName() const { return m_name.c_str(); }
+		void SetDisplayName(std::string displayName) { m_displayName = std::move(displayName); }
+		const char* GetDisplayName() const { return m_displayName.c_str(); }
+		void SetAbout(std::string about) { m_about = std::move(about); }
+		const char* GetAbout() const { return m_about.c_str(); }
+		void SetDescription(std::vector<std::string> description) { m_description = std::move(description); }
+		const std::vector<std::string>& GetDescription() const { return m_description; }
+		void SetKind(Kind kind) { m_kind = std::move(kind); }
+		bool GetPostScript() const { return m_kind.post; }
+		bool GetScanScript() const { return m_kind.scan; }
+		bool GetQueueScript() const { return m_kind.queue; }
+		bool GetSchedulerScript() const { return m_kind.scheduler; }
+		bool GetFeedScript() const { return m_kind.feed; }
+		void SetQueueEvents(std::string queueEvents) { m_queueEvents = std::move(queueEvents); }
+		const char* GetQueueEvents() const { return m_queueEvents.c_str(); }
+		void SetTaskTime(std::string taskTime) { m_taskTime = std::move(taskTime); }
+		const char* GetTaskTime() const { return m_taskTime.c_str(); }
+		void SetRequirements(std::vector<std::string> requirements) { m_requirements = std::move(requirements); }
+		const std::vector<std::string>& GetRequirements() const { return m_requirements; }
+		void SetOptions(std::vector<ManifestFile::Option> options) { m_options = std::move(options); }
+		const std::vector<ManifestFile::Option>& GetOptions() const { return m_options; }
+		void SetCommands(std::vector<ManifestFile::Command> commands) { m_commands = std::move(commands); }
+		const std::vector<ManifestFile::Command>& GetCommands() const { return m_commands; }
 
 	private:
 		Kind m_kind;

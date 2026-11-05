@@ -2197,10 +2197,6 @@ int nzbget_rs_feh_maintenance_classify_update_info_message(const char* text);
 int nzbget_rs_feh_maintenance_decode_hex_signature(
     const char* hex_sig, uint8_t* out_sig);
 
-int nzbget_rs_feh_ext_should_skip_dir_entry(const char* filename);
-size_t nzbget_rs_feh_ext_get_stem_len(const char* filename, size_t filename_len);
-int nzbget_rs_feh_ext_is_in_list(const char* extensions_list, const char* target_name);
-
 int nzbget_rs_snh_sys_extract_python_version(
     const char* line, size_t len, size_t* out_start, size_t* out_len);
 int nzbget_rs_snh_sys_parse_unpacker_version(
@@ -2290,11 +2286,6 @@ void nzbget_rs_euh_service_calc_remaining_wait(
 int nzbget_rs_euh_disk_service_interval(
     int waiting_required_dir, int disk_space_mb, int downloading, int sleep_val);
 int nzbget_rs_euh_disk_service_is_low_space(int64_t available_bytes, int disk_space_mb);
-int nzbget_rs_euh_cmd_script_classify_exit_code(int exit_code);
-size_t nzbget_rs_euh_sched_script_strip_ext_len(const char* base_name, size_t len);
-int nzbget_rs_euh_nzb_script_match_param_prefix(
-    const char* param_name, const char* strip_prefix, size_t* out_offset);
-int nzbget_rs_euh_feed_script_is_success(int exit_code);
 
 int nzbget_rs_dur_article_dl_is_retention_failure(
     int retention_days, int64_t file_time, int64_t cur_time, int* out_age_days);
@@ -2377,8 +2368,6 @@ int nzbget_rs_awc_memory_monitor_effective_downloads_limit(
     int tier, int configured_limit, int constrained, int critical);
 
 const char* nzbget_rs_awc_xml_bool_to_str(int value);
-int nzbget_rs_awc_extension_select_kind_flag(
-    int post, int scan, int queue, int scheduler, int feed, int which);
 
 size_t nzbget_rs_awc_unpack_make_password_arg(
     const char* password, size_t password_len, char* out_buf, size_t out_cap);
@@ -3390,29 +3379,6 @@ size_t nzbget_rs_psp_parchecker_calc_creator_packet_payload_len(
     uint64_t packet_length, size_t header_size);
 
 /* QueueScript, PostScript, ScriptConfig, ScanScript, CommandScript, SchedulerScript, FeedFile & FeedInfo Hot-Path FFI (`scriptfeedcfg.rs`) */
-int nzbget_rs_sfc_queue_script_can_start_or_enqueue(
-    int has_queue_scripts, int has_nzb, int skip_script_processing);
-int nzbget_rs_sfc_script_ctrl_calc_prefix_len(size_t display_name_len);
-int nzbget_rs_sfc_queue_script_is_better_queued_item(
-    int has_cur_nzb, int item_event, int max_event);
-int nzbget_rs_sfc_queue_script_calc_queue_size(
-    size_t queue_len, int has_cur_item);
-int nzbget_rs_sfc_post_script_should_skip_execute(
-    int is_post_script, int request_par_check);
-int nzbget_rs_sfc_post_script_resolve_compat_par_status(
-    int par_status, int ps_failure, int delete_status, int ds_none,
-    int mark_status, int ks_bad);
-int nzbget_rs_sfc_post_script_is_paused_wait_active(
-    int pause_post_process, int force_priority, int is_stopped);
-void nzbget_rs_sfc_post_script_calc_paused_timestamps(
-    int64_t cur_time, int64_t wait_time, int64_t stage_time, int64_t start_time,
-    int64_t* out_stage_time, int64_t* out_start_time);
-int nzbget_rs_sfc_script_config_is_comment_or_blank_line(const char* line);
-int nzbget_rs_sfc_script_config_is_editable_option_line(const char* line);
-int nzbget_rs_sfc_script_config_line_has_trailing_lf(const char* line);
-size_t nzbget_rs_sfc_scan_script_trim_trailing_sep_len(const char* dir, char sep);
-int nzbget_rs_sfc_cmd_script_should_append_log_message(
-    int script_id, int id_script_gen);
 int nzbget_rs_sfc_sched_script_should_format_task_suffix(int task_id);
 int nzbget_rs_sfc_feed_file_classify_enclosure_attr(const char* attr_name);
 int nzbget_rs_sfc_feed_file_is_newznab_attr_element(
@@ -3561,13 +3527,6 @@ int nzbget_rs_ufs_script_ctrl_calc_signal_exit_code(int term_sig);
 int nzbget_rs_ufs_script_ctrl_select_kill_pid(int child_pid, int child_pgid);
 int nzbget_rs_ufs_unpack_ctrl_parse_backspace_progress(
     const char* backspace, int* out_progress);
-int nzbget_rs_ufs_script_config_same_cipher_file(
-    uint64_t a_dev, uint64_t b_dev, uint64_t a_ino, uint64_t b_ino,
-    int64_t a_size, int64_t b_size, uint32_t a_mode, uint32_t b_mode,
-    uint32_t a_uid, uint32_t b_uid, uint32_t a_gid, uint32_t b_gid,
-    int64_t a_msec, int64_t b_msec, int64_t a_mnsec, int64_t b_mnsec,
-    int64_t a_csec, int64_t b_csec, int64_t a_cnsec, int64_t b_cnsec);
-int nzbget_rs_ufs_script_config_is_valid_cipher_size(int is_reg, int64_t size);
 
 // DownloadInfo, ParChecker & DiskState Hot-Path C ABI (rust/src/dlparstatedisk.rs)
 typedef struct NzbgetRsDpsCurrentStatsAcc {
@@ -5009,7 +4968,6 @@ int nzbget_rs_options_parse_enum_value(
     int* out_value, int* out_norm_idx);
 int nzbget_rs_options_parse_int_value(
     const char* val, const char* def_val, int base, int* out_value);
-int nzbget_rs_options_is_category_extensions_opt(const char* optname);
 
 uint32_t nzbget_rs_dupe_watch_build_item_flags(
     int kind, int in_history, int dupe_success, int deleting,
@@ -5654,24 +5612,7 @@ int32_t nzbget_rs_dqh_stream_crypto_rar3_iv_index(int32_t round, int32_t rounds)
 NzbgetRsBuf nzbget_rs_tpr_feed_coord_format_temp_filename(
     const char* temp_dir, char sep, int32_t id, int32_t preview,
     int32_t cur_time, int32_t rand_val, int32_t preview_num);
-NzbgetRsBuf nzbget_rs_tpr_feed_script_format_info_name(
-    const char* script_name, int32_t feed_id, int32_t uppercase_first);
 NzbgetRsBuf nzbget_rs_tpr_nzb_script_format_param_prefix(const char* script_name);
-NzbgetRsBuf nzbget_rs_tpr_post_script_format_info_name(
-    const char* script_name, const char* nzb_name, int32_t uppercase_first);
-NzbgetRsBuf nzbget_rs_tpr_post_script_format_progress_label(const char* script_name);
-const char* nzbget_rs_tpr_script_dupe_mode_name(int32_t dupe_mode);
-size_t nzbget_rs_tpr_post_script_total_status_len(const char* status);
-NzbgetRsBuf nzbget_rs_tpr_post_script_format_server_env_name(
-    int32_t server_id, int32_t is_failed);
-NzbgetRsBuf nzbget_rs_tpr_queue_script_format_info_name(
-    const char* script_name, const char* base_nzb_name);
-NzbgetRsBuf nzbget_rs_tpr_scan_script_format_info_name(
-    const char* script_name, const char* base_nzb_filename);
-NzbgetRsBuf nzbget_rs_tpr_sched_script_format_task_suffix(int32_t task_id);
-NzbgetRsBuf nzbget_rs_tpr_sched_script_format_info_name(
-    const char* script_name, int32_t task_id, int32_t external_process);
-NzbgetRsBuf nzbget_rs_tpr_ext_mgr_format_temp_zip_name(int64_t cur_time, int32_t counter);
 int32_t nzbget_rs_dqh_conn_calc_read_buffer_cap(int32_t read_buf_size, int32_t decode_slack);
 NzbgetRsBuf nzbget_rs_dqh_conn_format_port_str(int32_t port);
 int32_t nzbget_rs_dqh_conn_clamp_buf_avail(int32_t buf_avail);
@@ -5781,10 +5722,6 @@ NzbgetRsBuf nzbget_rs_dqh_stream_repair_format_materialize_progress(
     int32_t delivered_articles, int32_t total_articles, int64_t total_bytes);
 NzbgetRsBuf nzbget_rs_dqh_article_fetcher_format_body_cmd(const char* message_id);
 NzbgetRsBuf nzbget_rs_dqh_webserver_format_forwarded_for_suffix(const char* forwarded_for);
-NzbgetRsBuf nzbget_rs_dqh_cmd_script_format_info_name(
-    const char* script_name, const char* command, int32_t uppercase);
-NzbgetRsBuf nzbget_rs_dqh_script_config_format_tls_temp_name(
-    const char* leaf, int32_t pid, uint64_t seq);
 NzbgetRsBuf nzbget_rs_dqh_newznab_format_search_info_name(
     const char* label, int32_t page_one_based);
 NzbgetRsBuf nzbget_rs_dqh_dupesearch_format_key_val_param(
@@ -5907,9 +5844,6 @@ int nzbget_rs_dqh_options_should_check_single_script_dir(
     int no_disk_access, const char* value);
 void nzbget_rs_dqh_webserver_encode_hex_token(
     const uint8_t* bytes, size_t bytes_len, char* out_token, size_t out_cap);
-NzbgetRsBuf nzbget_rs_dqh_script_config_format_option_line(
-    const char* key, size_t key_len, const char* val, size_t val_len);
-NzbgetRsBuf nzbget_rs_dqh_script_config_ensure_trailing_lf(const char* line);
 NzbgetRsBuf nzbget_rs_dqh_unpack_format_7z_output_arg(const char* unpack_dir);
 NzbgetRsBuf nzbget_rs_dqh_script_format_prefixed_message(
     const char* prefix, const char* text);
@@ -5923,10 +5857,6 @@ char* nzbget_rs_dqh_tokenizer_next(
 void nzbget_rs_dqh_queue_editor_visit_category_ext_diff(
     const char* old_ext, const char* new_ext, void* ctx,
     void (*cb)(void* ctx, const char* param_name, const char* param_val));
-const char* nzbget_rs_dqh_queue_script_event_name(int event);
-const char* nzbget_rs_dqh_queue_script_delete_status_name(int delete_status);
-const char* nzbget_rs_dqh_queue_script_url_status_name(int url_status);
-const char* nzbget_rs_dqh_queue_script_mark_status_name(int mark_status);
 int nzbget_rs_dqh_stream_repair_calc_encrypted_window_bounds(
     int64_t window_offset, int64_t window_end_raw, int64_t last_computable,
     int64_t block_from, int64_t block_size,
@@ -5943,24 +5873,7 @@ int nzbget_rs_dqh_repair_ctrl_map_par_stage_to_post_stage(
     int pt_repairing, int pt_verifying_repaired);
 const char* nzbget_rs_dqh_parchecker_cmdline_err_str(int res);
 const char* nzbget_rs_dqh_parchecker_stage_message(int stage);
-const char* nzbget_rs_dqh_post_script_status_name(int status);
-int nzbget_rs_dqh_post_script_deprecated_status_code(int status);
 const char* nzbget_rs_dqh_scheduler_command_name(int command);
-NzbgetRsBuf nzbget_rs_dqh_ext_mgr_format_update_backup_path(
-    const char* target_path, size_t target_path_len);
-NzbgetRsBuf nzbget_rs_dqh_ext_mgr_format_lookup_error(
-    const char* ext_name, size_t ext_name_len, int kind);
-NzbgetRsBuf nzbget_rs_dqh_ext_mgr_format_install_or_delete_error(
-    const char* path, size_t path_len, const char* detail, size_t detail_len,
-    int kind);
-NzbgetRsBuf nzbget_rs_dqh_ext_mgr_format_compound_update_error(
-    const char* primary_err, size_t primary_err_len,
-    const char* path1, size_t path1_len,
-    const char* path2, size_t path2_len,
-    const char* ec_msg, size_t ec_msg_len,
-    int kind);
-NzbgetRsBuf nzbget_rs_dqh_options_merge_script_list(
-    const char* existing, const char* add_list);
 const char* nzbget_rs_dqh_frontend_resolve_control_ip(const char* control_ip);
 const char* nzbget_rs_dqh_ncurses_message_type_label(int kind, int first_line);
 int nzbget_rs_dqh_ncurses_message_color_pair(int kind);
@@ -6054,14 +5967,6 @@ int64_t nzbget_rs_dqh_feed_coord_min_last_update(
     int64_t cur_oldest, const int64_t* last_updates, size_t count);
 int nzbget_rs_dqh_feed_file_should_trim_text_chunk(
     const char* current_element, size_t len);
-int nzbget_rs_dqh_ext_mgr_is_extension_in_use(int64_t use_count);
-int nzbget_rs_dqh_ext_mgr_should_use_entry_as_path(ptrdiff_t same_location_count);
-int nzbget_rs_dqh_ext_mgr_can_create_scheduler_task(
-    int is_scheduler_script, int task_time_empty, int in_extensions_list);
-int nzbget_rs_dqh_queue_script_select_exec_msg_kind(
-    int event, int qe_file_downloaded, int mk_detail, int mk_info);
-int nzbget_rs_dqh_queue_script_is_duplicate_file_downloaded_item(
-    int event, int qe_file_downloaded, int item_nzb_id, int target_nzb_id, int same_script);
 int nzbget_rs_dqh_ncurses_is_row_in_scroll_window(
     int index, int scroll_offset, int win_height);
 void nzbget_rs_dqh_ncurses_accum_file_queue_stats(
@@ -6767,6 +6672,114 @@ void nzbget_rs_health_validate_extension_scripts_section(
     const char* shell_override, size_t shell_override_len,
     int event_interval,
     void* ctx, NzbgetRsHealthOptionEmitCb emit_cb);
+
+/* Extension & Script Subsystem End-to-End C ABI (`rust/src/extension.rs`, `rust/src/options.rs`) */
+void nzbget_rs_options_convert_old_options(
+    const char* const* names, const char* const* values, size_t count,
+    void* ctx,
+    void (*update_cb)(void* ctx, size_t idx, const char* name, const char* value));
+
+int nzbget_rs_script_config_load(
+    const char* filename, void* ctx,
+    void (*emit_cb)(void* ctx, const char* name, const char* value));
+
+int nzbget_rs_script_config_save(
+    const char* filename,
+    const char* const* names, const char* const* values, size_t count,
+    const char* cipher_baseline, int* out_conflict);
+
+int nzbget_rs_ext_is_in_list(
+    const char* extensions_list, const char* target_name);
+
+NzbgetRsBuf nzbget_rs_ext_mgr_prepare_update(
+    const char* ext_name, int found, int64_t use_count,
+    const char* target_path, const char* archive_path,
+    NzbgetRsBuf* out_backup_path);
+
+NzbgetRsBuf nzbget_rs_ext_mgr_finish_update(
+    const char* target_path, const char* backup_path,
+    const char* archive_path, const char* install_err);
+
+NzbgetRsBuf nzbget_rs_ext_mgr_delete_extension(
+    const char* ext_name, int found, int64_t use_count,
+    const char* target_path);
+
+NzbgetRsBuf nzbget_rs_ext_mgr_install_error(
+    const char* file_path, const char* os_err, int kind);
+
+void nzbget_rs_nzb_script_prepare_env(
+    const char* script_name, int has_parameters,
+    const char* const* param_names, const char* const* param_values, size_t param_count,
+    void* ctx,
+    void (*set_env_special_cb)(void* ctx, const char* prefix, const char* name, const char* value),
+    void (*prepare_options_cb)(void* ctx, const char* strip_prefix));
+
+void nzbget_rs_scan_script_prepare_env(
+    const char* nzb_filename, const char* base_filename,
+    const char* url, const char* nzb_name, const char* category,
+    int priority, int add_top, int add_paused,
+    const char* dupe_key, int dupe_score, int dupe_mode,
+    const char* directory, char path_sep,
+    void* ctx,
+    void (*set_env_cb)(void* ctx, const char* name, const char* value),
+    void (*set_int_env_cb)(void* ctx, const char* name, int value));
+
+typedef struct NzbgetRsPostScriptEnv {
+    int nzb_id;
+    const char* nzb_name;
+    const char* dest_dir;
+    const char* filename;
+    const char* queued_filename;
+    const char* url;
+    const char* final_dir;
+    const char* category;
+    int health;
+    int critical_health;
+    const char* dupe_key;
+    int dupe_score;
+    int dupe_mode;
+    const char* status;
+    int script_status;
+    int par_status;
+    int unpack_status;
+    int delete_status;
+    int mark_status;
+    int total_articles;
+    int success_articles;
+    int failed_articles;
+    const int* server_ids;
+    const int* server_success_articles;
+    const int* server_failed_articles;
+    size_t server_count;
+} NzbgetRsPostScriptEnv;
+
+void nzbget_rs_post_script_prepare_env(
+    const NzbgetRsPostScriptEnv* env, void* ctx,
+    void (*set_env_cb)(void* ctx, const char* name, const char* value),
+    void (*set_int_env_cb)(void* ctx, const char* name, int value));
+
+typedef struct NzbgetRsQueueScriptEnv {
+    const char* nzb_name;
+    int nzb_id;
+    const char* filename;
+    const char* dest_dir;
+    const char* queued_filename;
+    const char* url;
+    const char* category;
+    int priority;
+    const char* dupe_key;
+    int dupe_score;
+    int dupe_mode;
+    int event;
+    int delete_status;
+    int url_status;
+    int mark_status;
+} NzbgetRsQueueScriptEnv;
+
+void nzbget_rs_queue_script_prepare_env(
+    const NzbgetRsQueueScriptEnv* env, void* ctx,
+    void (*set_env_cb)(void* ctx, const char* name, const char* value),
+    void (*set_int_env_cb)(void* ctx, const char* name, int value));
 
 #include "nzbget_tls_cipher.h"
 

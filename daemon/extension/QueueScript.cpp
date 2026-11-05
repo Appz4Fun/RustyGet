@@ -66,8 +66,7 @@ private:
 
 void QueueScriptController::StartScript(NzbInfo* nzbInfo, std::shared_ptr<const Extension::Script> script, QueueScriptCoordinator::EEvent event)
 {
-	if (nzbget_rs_sfc_queue_script_can_start_or_enqueue(
-		1, nzbInfo != nullptr ? 1 : 0, nzbInfo ? (nzbInfo->GetSkipScriptProcessing() ? 1 : 0) : 0) == 0)
+	if (!nzbInfo || nzbInfo->GetSkipScriptProcessing())
 	{
 		return;
 	}
@@ -121,23 +120,16 @@ void QueueScriptController::Run()
 
 void QueueScriptController::ExecuteScript(std::shared_ptr<const Extension::Script> script)
 {
-	PrintMessage((Message::EKind)nzbget_rs_dqh_queue_script_select_exec_msg_kind(
-		(int)m_event,
-		(int)QueueScriptCoordinator::qeFileDownloaded,
-		(int)Message::mkDetail,
-		(int)Message::mkInfo),
+	PrintMessage(m_event == QueueScriptCoordinator::qeFileDownloaded ? Message::mkDetail : Message::mkInfo,
 		"Executing queue-script %s for %s", script->GetName(), FileSystem::BaseFileName(m_nzbName));
 
 	SetArgs({script->GetEntry()});
 
-	NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_queue_script_format_info_name(
-		script->GetName(), FileSystem::BaseFileName(m_nzbName));
-	BString<1024> infoName("%s", infoNameBuf.data ? infoNameBuf.data : "");
-	nzbget_rs_free(infoNameBuf);
+	BString<1024> infoName("queue-script %s for %s", script->GetName(), FileSystem::BaseFileName(m_nzbName));
 	SetInfoName(infoName);
 
 	SetLogPrefix(script->GetDisplayName());
-	m_prefixLen = nzbget_rs_sfc_script_ctrl_calc_prefix_len(strlen(script->GetDisplayName()));
+	m_prefixLen = static_cast<int>(strlen(script->GetDisplayName())) + 2; // 2 = strlen(": ");
 	PrepareParams(script->GetName());
 
 	Execute();
@@ -149,25 +141,34 @@ void QueueScriptController::PrepareParams(const char* scriptName)
 {
 	ResetEnv();
 
-	SetEnvVar("NZBNA_NZBNAME", m_nzbName);
-	SetIntEnvVar("NZBNA_NZBID", m_id);
-	SetEnvVar("NZBNA_FILENAME", m_nzbFilename);
-	SetEnvVar("NZBNA_DIRECTORY", m_destDir);
-	SetEnvVar("NZBNA_QUEUEDFILE", m_queuedFilename);
-	SetEnvVar("NZBNA_URL", m_url);
-	SetEnvVar("NZBNA_CATEGORY", m_category);
-	SetIntEnvVar("NZBNA_PRIORITY", m_priority);
-	SetIntEnvVar("NZBNA_LASTID", m_id);	// deprecated
+	NzbgetRsQueueScriptEnv env{};
+	env.nzb_name = m_nzbName;
+	env.nzb_id = m_id;
+	env.filename = m_nzbFilename;
+	env.dest_dir = m_destDir;
+	env.queued_filename = m_queuedFilename;
+	env.url = m_url;
+	env.category = m_category;
+	env.priority = m_priority;
+	env.dupe_key = m_dupeKey;
+	env.dupe_score = m_dupeScore;
+	env.dupe_mode = static_cast<int>(m_dupeMode);
+	env.event = static_cast<int>(m_event);
+	env.delete_status = static_cast<int>(m_deleteStatus);
+	env.url_status = static_cast<int>(m_urlStatus);
+	env.mark_status = static_cast<int>(m_markStatus);
 
-	SetEnvVar("NZBNA_DUPEKEY", m_dupeKey);
-	SetIntEnvVar("NZBNA_DUPESCORE", m_dupeScore);
-
-	SetEnvVar("NZBNA_DUPEMODE", nzbget_rs_tpr_script_dupe_mode_name((int)m_dupeMode));
-
-	SetEnvVar("NZBNA_EVENT", nzbget_rs_dqh_queue_script_event_name((int)m_event));
-	SetEnvVar("NZBNA_DELETESTATUS", nzbget_rs_dqh_queue_script_delete_status_name((int)m_deleteStatus));
-	SetEnvVar("NZBNA_URLSTATUS", nzbget_rs_dqh_queue_script_url_status_name((int)m_urlStatus));
-	SetEnvVar("NZBNA_MARKSTATUS", nzbget_rs_dqh_queue_script_mark_status_name((int)m_markStatus));
+	nzbget_rs_queue_script_prepare_env(
+		&env,
+		this,
+		[](void* ctx, const char* name, const char* value)
+		{
+			static_cast<QueueScriptController*>(ctx)->SetEnvVar(name, value);
+		},
+		[](void* ctx, const char* name, int value)
+		{
+			static_cast<QueueScriptController*>(ctx)->SetIntEnvVar(name, value);
+		});
 
 	PrepareEnvScript(&m_parameters, scriptName);
 }
@@ -253,10 +254,7 @@ void QueueScriptCoordinator::InitOptions()
 
 void QueueScriptCoordinator::EnqueueScript(NzbInfo* nzbInfo, EEvent event)
 {
-	if (nzbget_rs_sfc_queue_script_can_start_or_enqueue(
-		m_hasQueueScripts ? 1 : 0,
-		nzbInfo != nullptr ? 1 : 0,
-		nzbInfo ? (nzbInfo->GetSkipScriptProcessing() ? 1 : 0) : 0) == 0)
+	if (!m_hasQueueScripts || !nzbInfo || nzbInfo->GetSkipScriptProcessing())
 	{
 		return;
 	}
@@ -296,12 +294,7 @@ void QueueScriptCoordinator::EnqueueScript(NzbInfo* nzbInfo, EEvent event)
 					// check if this script is already queued for this nzb
 					for (QueueItem* queueItem : &m_queue)
 					{
-						if (nzbget_rs_dqh_queue_script_is_duplicate_file_downloaded_item(
-							(int)event,
-							(int)qeFileDownloaded,
-							queueItem->GetNzbId(),
-							nzbInfo->GetId(),
-							queueItem->GetScript() == script ? 1 : 0) != 0)
+						if (queueItem->GetNzbId() == nzbInfo->GetId() && queueItem->GetScript() == script)
 						{
 							alreadyQueued = true;
 							break;
@@ -428,10 +421,7 @@ void QueueScriptCoordinator::CheckQueue()
 			continue;
 		}
 
-		if (nzbget_rs_sfc_queue_script_is_better_queued_item(
-			curNzbInfo != nullptr ? 1 : 0,
-			(int)queueItem->GetEvent(),
-			(int)maxEvent) != 0)
+		if (!curNzbInfo || queueItem->GetEvent() > maxEvent)
 		{
 			itCurItem = it;
 			curNzbInfo = nzbInfo;
@@ -477,5 +467,5 @@ int QueueScriptCoordinator::GetQueueSize()
 {
 	Guard guard(m_queueMutex);
 
-	return nzbget_rs_sfc_queue_script_calc_queue_size(m_queue.size(), m_curItem ? 1 : 0);
+	return static_cast<int>(m_queue.size()) + (m_curItem ? 1 : 0);
 }

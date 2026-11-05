@@ -14,6 +14,7 @@ pub mod directrenamer;
 pub mod donorscore;
 pub mod dupesearch_nzb;
 pub mod escape;
+pub mod extension;
 pub mod extload;
 pub mod feedfilter;
 pub mod ffi;

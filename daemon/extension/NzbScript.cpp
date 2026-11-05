@@ -26,41 +26,35 @@
 #include "FileSystem.h"
 #include "nzbget_rs.h"
 
-/**
- * If szStripPrefix is not nullptr, only pp-parameters, whose names start with the prefix
- * are processed. The prefix is then stripped from the names.
- * If szStripPrefix is nullptr, all pp-parameters are processed; without stripping.
- */
-void NzbScriptController::PrepareEnvParameters(NzbParameterList* parameters, const char* stripPrefix)
-{
-	for (NzbParameter& parameter : parameters)
-	{
-		size_t offset = 0;
-		if (nzbget_rs_euh_nzb_script_match_param_prefix(
-				parameter.GetName(), stripPrefix, &offset) != 0)
-		{
-			SetEnvVarSpecial("NZBPR", parameter.GetName() + offset, parameter.GetValue());
-		}
-	}
-}
-
 void NzbScriptController::PrepareEnvScript(NzbParameterList* parameters, const char* scriptName)
 {
+	std::vector<const char*> pnames;
+	std::vector<const char*> pvals;
 	if (parameters)
 	{
-		PrepareEnvParameters(parameters, nullptr);
+		pnames.reserve(parameters->size());
+		pvals.reserve(parameters->size());
+		for (NzbParameter& parameter : parameters)
+		{
+			pnames.push_back(parameter.GetName());
+			pvals.push_back(parameter.GetValue());
+		}
 	}
-
-	NzbgetRsBuf paramPrefixBuf = nzbget_rs_tpr_nzb_script_format_param_prefix(scriptName);
-	BString<1024> paramPrefix("%s", paramPrefixBuf.data ? paramPrefixBuf.data : "");
-	nzbget_rs_free(paramPrefixBuf);
-
-	if (parameters)
-	{
-		PrepareEnvParameters(parameters, paramPrefix);
-	}
-
-	PrepareEnvOptions(paramPrefix);
+	nzbget_rs_nzb_script_prepare_env(
+		scriptName ? scriptName : "",
+		parameters != nullptr ? 1 : 0,
+		pnames.data(),
+		pvals.data(),
+		pnames.size(),
+		this,
+		[](void* ctx, const char* prefix, const char* name, const char* value)
+		{
+			static_cast<NzbScriptController*>(ctx)->SetEnvVarSpecial(prefix, name, value);
+		},
+		[](void* ctx, const char* stripPrefix)
+		{
+			static_cast<NzbScriptController*>(ctx)->PrepareEnvOptions(stripPrefix);
+		});
 }
 
 void NzbScriptController::ExecuteScriptList(const char* scriptList)
@@ -75,7 +69,7 @@ void NzbScriptController::ExecuteScriptList(const char* scriptList)
 	{
 		auto found = g_ExtensionManager->FindIf([&scriptName](auto script)
 			{
-				return nzbget_rs_dqh_bytes_equal(scriptName, script->GetName()) != 0;
+				return strcmp(scriptName, script->GetName()) == 0;
 			}
 		);
 

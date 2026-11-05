@@ -75,8 +75,6 @@ namespace ExtensionManager
 		void Sort(const char* order);
 		std::string GetExtensionName(const std::string& fileName) const;
 		std::optional<std::string>
-		DeleteExtension(const Extension::Script& ext);
-		std::optional<std::string>
 		GetExtensionPath(const Extension::Script& ext, fs::path& path);
 
 		Extensions m_extensions;

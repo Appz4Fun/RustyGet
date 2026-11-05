@@ -380,6 +380,61 @@ pub fn is_category_extensions_opt(optname: &CStr) -> bool {
     eq(from(optname, idx), c".extensions")
 }
 
+/// Merges `,;`-separated script names from `add_list` into `existing` if not already
+/// present (case-insensitively via `has_script`), matching `Options::MergeOldScriptOption`.
+pub fn merge_script_list(existing: &[u8], add_list: &[u8]) -> Vec<u8> {
+    let mut out = existing.to_vec();
+    for script_name in crate::util::tokens(add_list, b",;") {
+        let mut cbuf = Vec::with_capacity(script_name.len() + 1);
+        cbuf.extend_from_slice(script_name);
+        cbuf.push(0);
+        if let Ok(cstr) = CStr::from_bytes_with_nul(&cbuf) {
+            if !has_script(&out, cstr) {
+                if !out.is_empty() {
+                    out.push(b',');
+                }
+                out.extend_from_slice(script_name);
+            }
+        }
+    }
+    out
+}
+
+/// `Options::ConvertOldOptions`: merges legacy `ScanScript`, `QueueScript`, and `FeedScript`
+/// entries into `Extensions` (and `CategoryN.Extensions` when applicable).
+pub fn convert_old_options(entries: &mut Vec<(CString, CString)>) {
+    for (optname, merge_categories) in [
+        (c"ScanScript", true),
+        (c"QueueScript", true),
+        (c"FeedScript", false),
+    ] {
+        let Some(opt_idx) = entries.iter().position(|(n, _)| eq(n, optname)) else {
+            continue;
+        };
+        let script_list = entries[opt_idx].1.to_bytes().to_vec();
+        if script_list.is_empty() {
+            continue;
+        }
+        let ext_idx = match entries.iter().position(|(n, _)| eq(n, c"Extensions")) {
+            Some(idx) => idx,
+            None => {
+                entries.push((c"Extensions".to_owned(), c"".to_owned()));
+                entries.len() - 1
+            }
+        };
+        let merged = merge_script_list(entries[ext_idx].1.to_bytes(), &script_list);
+        entries[ext_idx].1 = cstring(merged);
+        if merge_categories {
+            for (name, val) in entries.iter_mut() {
+                if is_category_extensions_opt(name) && !val.to_bytes().is_empty() {
+                    let cat_merged = merge_script_list(val.to_bytes(), &script_list);
+                    *val = cstring(cat_merged);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

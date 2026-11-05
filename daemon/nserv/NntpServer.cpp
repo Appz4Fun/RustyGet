@@ -23,7 +23,6 @@
 #include "NntpServer.h"
 #include "Log.h"
 #include "Util.h"
-#include "YEncoder.h"
 #include "nzbget_rs.h"
 
 #ifndef DISABLE_TLS
@@ -37,8 +36,7 @@ public:
 		const char* secureCert, const char* secureKey, int latency, int speed, NntpCache* cache) :
 		m_id(id), m_serverId(serverId), m_dataDir(dataDir), m_cacheDir(cacheDir),
 		m_secureCert(secureCert), m_secureKey(secureKey), m_latency(latency),
-		m_speed(speed), m_messageid(nullptr), m_part(0), m_offset(0), m_size(0),
-		m_sendHeaders(false), m_sendStat(false), m_start(0), m_cache(cache) {}
+		m_speed(speed), m_cache(cache) {}
 	~NntpProcessor()
 	{
 		m_connection->Disconnect();
@@ -60,20 +58,7 @@ private:
 	const char* m_secureKey;
 	int m_latency;
 	int m_speed;
-	const char* m_messageid;
-	CString m_filename;
-	int m_part;
-	int64 m_offset;
-	int m_size;
-	bool m_sendHeaders;
-	bool m_sendStat;
-	int64 m_start;
 	NntpCache* m_cache;
-
-	void ServArticle();
-	void SendSegment();
-	bool ServerInList(const char* servList);
-	void SendData(const char* buffer, int size);
 };
 
 
@@ -153,63 +138,49 @@ void NntpProcessor::Run()
 	}
 #endif
 
-	info("%s [%i] Incoming connection from: %s", *Util::FormatTime(Util::CurrentTime()),m_id, m_connection->GetHost() );
+	info("%s [%i] Incoming connection from: %s", *Util::FormatTime(Util::CurrentTime()), m_id, m_connection->GetHost());
 	m_connection->WriteLine("200 Welcome (NServ)\r\n");
 
 	CharBuffer buf(1024);
 	int bytesRead = 0;
 	while (CString line = m_connection->ReadLine(buf, 1024, &bytesRead))
 	{
-		line.TrimRight();
-		detail("%s [%i] Received: %s", *Util::FormatTime(Util::CurrentTime()), m_id, *line);
-
-		size_t argOffset = 0;
-		int cmdKind = nzbget_rs_feh_nntp_classify_command(line, &argOffset);
-		if (cmdKind == 1)
+		int keepGoing = nzbget_rs_nntp_processor_handle_line(
+			m_serverId,
+			m_dataDir,
+			m_cacheDir,
+			m_latency,
+			m_speed,
+			m_cache ? m_cache->GetRustHandle() : nullptr,
+			*line,
+			this,
+			[](void* rawCtx, const char* replyLine) {
+				static_cast<NntpProcessor*>(rawCtx)->m_connection->WriteLine(replyLine ? replyLine : "");
+			},
+			[](void* rawCtx, const char* data, int size) {
+				static_cast<NntpProcessor*>(rawCtx)->m_connection->Send(data, size);
+			},
+			[](void* rawCtx, int kind, const char* msg) {
+				auto* self = static_cast<NntpProcessor*>(rawCtx);
+				switch (kind)
+				{
+				case 0:
+					detail("%s [%i] %s", *Util::FormatTime(Util::CurrentTime()), self->m_id, msg ? msg : "");
+					break;
+				case 1:
+					detail("[%i] %s", self->m_id, msg ? msg : "");
+					break;
+				case 2:
+					warn("[%i] %s", self->m_id, msg ? msg : "");
+					break;
+				case 3:
+					error("%s", msg ? msg : "");
+					break;
+				}
+			});
+		if (!keepGoing)
 		{
-			m_messageid = line + argOffset;
-			m_sendHeaders = true;
-			m_sendStat = false;
-			ServArticle();
-		}
-		else if (cmdKind == 2)
-		{
-			m_messageid = line + argOffset;
-			m_sendHeaders = false;
-			m_sendStat = false;
-			ServArticle();
-		}
-		else if (cmdKind == 3)
-		{
-			m_messageid = line + argOffset;
-			m_sendHeaders = false;
-			m_sendStat = true;
-			ServArticle();
-		}
-		else if (cmdKind == 4)
-		{
-			NzbgetRsBuf grpReply = nzbget_rs_dqh_nntpserver_format_reply_line(0, line + argOffset);
-			m_connection->WriteLine(grpReply.data ? grpReply.data : "");
-			nzbget_rs_free(grpReply);
-		}
-		else if (cmdKind == 5)
-		{
-			m_connection->WriteLine("381 Enter passphrase\r\n");
-		}
-		else if (cmdKind == 6)
-		{
-			m_connection->WriteLine("281 Authentication accepted\r\n");
-		}
-		else if (cmdKind == 7)
-		{
-			detail("%s [%i] Closing connection", *Util::FormatTime(Util::CurrentTime()), m_id);
-			m_connection->WriteLine("205 Connection closing\r\n");
 			break;
-		}
-		else
-		{
-			warn("[%i] Unknown command: %s", m_id, *line);
-			m_connection->WriteLine("500 Unknown command\r\n");
 		}
 	}
 
@@ -217,273 +188,22 @@ void NntpProcessor::Run()
 	m_connection->Disconnect();
 }
 
-/* 
- Message-id format:
-   <file-path-relative-to-dataDir?xxx=yyy:zzz!1,2,3>
-where:
-   xxx   - part number (integer)
-   xxx   - offset from which to read the files (integer)
-   yyy   - size of file block to return (integer)
-   1,2,3 - list of server ids, which have the article (optional),
-           if the list is given and current server is not in the list
-           the "article not found"-error is returned.
- Examples:
-	<parchecker/testfile.dat?1=0:50000>	       - return first 50000 bytes starting from beginning
-	<parchecker/testfile.dat?2=50000:50000>      - return 50000 bytes starting from offset 50000
-	<parchecker/testfile.dat?2=50000:50000!2>    - article is missing on server 1
-*/
-void NntpProcessor::ServArticle()
+NntpCache::NntpCache()
+	: m_handle(nzbget_rs_nntp_cache_new())
 {
-	detail("%s [%i] Serving: %s", *Util::FormatTime(Util::CurrentTime()), m_id, m_messageid);
-
-	if (m_latency)
-	{
-		Util::Sleep(m_latency);
-	}
-
-	bool ok = false;
-
-	int nameLen = 0, part = 0, size = 0, servOff = -1;
-	int64 offset = 0;
-	if (nzbget_rs_feh_nntp_parse_message_id(
-		m_messageid, &nameLen, &part, &offset, &size, &servOff))
-	{
-		m_filename.Set(m_messageid + 1, nameLen);
-		m_part = part;
-		m_offset = offset;
-		m_size = size;
-
-		ok = servOff < 0 || ServerInList(m_messageid + servOff);
-
-		if (ok)
-		{
-			SendSegment();
-			return;
-		}
-
-		m_connection->WriteLine("430 No Such Article Found\r\n");
-	}
-	else
-	{
-		m_connection->WriteLine("430 No Such Article Found (invalid message id format)\r\n");
-	}
 }
 
-bool NntpProcessor::ServerInList(const char* servList)
+NntpCache::~NntpCache()
 {
-	return nzbget_rs_feh_nntp_server_in_list(servList, m_serverId) != 0;
+	nzbget_rs_nntp_cache_free(m_handle);
 }
-
-void NntpProcessor::SendSegment()
-{
-	detail("[%i] Sending segment %s (%i=%" PRIi64 ":%i)", m_id, *m_filename, m_part, m_offset, m_size);
-
-	if (m_speed > 0)
-	{
-		m_start = Util::CurrentTicks();
-	}
-
-	NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-		m_dataDir ? m_dataDir : "", '/', *m_filename);
-	BString<1024> fullFilename;
-	fullFilename.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
-	nzbget_rs_free(fullFnBuf);
-
-	NzbgetRsBuf cacheDirBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-		m_cacheDir ? m_cacheDir : "", '/', *m_filename);
-	BString<1024> cacheFileDir;
-	cacheFileDir.Set(cacheDirBuf.data ? cacheDirBuf.data : "", (int)cacheDirBuf.len);
-	nzbget_rs_free(cacheDirBuf);
-
-	NzbgetRsBuf cacheFnBuf = nzbget_rs_dqh_nntpserver_format_cache_file_name(m_part, m_offset, m_size);
-	BString<1024> cacheFileName;
-	cacheFileName.Set(cacheFnBuf.data ? cacheFnBuf.data : "", (int)cacheFnBuf.len);
-	nzbget_rs_free(cacheFnBuf);
-
-	NzbgetRsBuf cacheFullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-		*cacheFileDir, '/', *cacheFileName);
-	BString<1024> cacheFullFilename;
-	cacheFullFilename.Set(cacheFullFnBuf.data ? cacheFullFnBuf.data : "", (int)cacheFullFnBuf.len);
-	nzbget_rs_free(cacheFullFnBuf);
-
-	NzbgetRsBuf cacheKeyBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-		*m_filename, '/', *cacheFileName);
-	BString<1024> cacheKey;
-	cacheKey.Set(cacheKeyBuf.data ? cacheKeyBuf.data : "", (int)cacheKeyBuf.len);
-	nzbget_rs_free(cacheKeyBuf);
-
-	const char* cachedData = nullptr;
-	int cachedSize;
-	if (m_cache)
-	{
-		m_cache->Find(cacheKey, cachedData, cachedSize);
-	}
-
-	DiskFile cacheFile;
-	bool readCache = !cachedData && m_cacheDir && cacheFile.Open(cacheFullFilename, DiskFile::omRead);
-	bool writeCache = !cachedData && m_cacheDir && !readCache;
-	StringBuilder cacheMem;
-	if (m_cache && !cachedData)
-	{
-		cacheMem.Reserve((int)(m_size * 1.1));
-	}
-
-	CString errmsg;
-	if (writeCache && !FileSystem::ForceDirectories(cacheFileDir, errmsg))
-	{
-		error("Could not create directory %s: %s", *cacheFileDir, *errmsg);
-	}
-
-	if (writeCache && !cacheFile.Open(cacheFullFilename, DiskFile::omWrite))
-	{
-		error("Could not create file %s: %s", *cacheFullFilename, *FileSystem::GetLastErrorMessage());
-	}
-
-	if (!cachedData && !readCache && !FileSystem::FileExists(fullFilename))
-	{
-		m_connection->WriteLine("430 Article not found\r\n");
-		return;
-	}
-
-	YEncoder encoder(fullFilename, m_part, m_offset, m_size, 
-		[proc = this, writeCache, &cacheFile, &cacheMem](const char* buf, int size)
-		{
-			if (proc->m_cache)
-			{
-				cacheMem.Append(buf);
-			}
-			if (writeCache)
-			{
-				cacheFile.Write(buf, size);
-			}
-			proc->SendData(buf, size);
-		});
-
-	if (!cachedData && !readCache && !encoder.OpenFile(errmsg))
-	{
-		NzbgetRsBuf errReply = nzbget_rs_dqh_nntpserver_format_reply_line(1, *errmsg);
-		m_connection->WriteLine(errReply.data ? errReply.data : "");
-		nzbget_rs_free(errReply);
-		return;
-	}
-
-	// if we get here, everything is ok: input is OK, article exists
-
-	if (m_sendStat)
-	{
-		NzbgetRsBuf statReply = nzbget_rs_dqh_nntpserver_format_reply_line(2, m_messageid);
-		m_connection->WriteLine(statReply.data ? statReply.data : "");
-		nzbget_rs_free(statReply);
-		return; // done
-	}
-
-	{
-		NzbgetRsBuf hdrReply = nzbget_rs_dqh_nntpserver_format_reply_line(
-			m_sendHeaders ? 3 : 4, m_messageid);
-		m_connection->WriteLine(hdrReply.data ? hdrReply.data : "");
-		nzbget_rs_free(hdrReply);
-	}
-	if (m_sendHeaders)
-	{
-		NzbgetRsBuf msgIdReply = nzbget_rs_dqh_nntpserver_format_reply_line(5, m_messageid);
-		m_connection->WriteLine(msgIdReply.data ? msgIdReply.data : "");
-		nzbget_rs_free(msgIdReply);
-		NzbgetRsBuf subjReply = nzbget_rs_dqh_nntpserver_format_reply_line(
-			6, FileSystem::BaseFileName(m_filename));
-		m_connection->WriteLine(subjReply.data ? subjReply.data : "");
-		nzbget_rs_free(subjReply);
-		m_connection->WriteLine("\r\n");
-	}
-
-	if (cachedData)
-	{
-		SendData(cachedData, cachedSize);
-	}
-	else if (readCache)
-	{
-		cacheFile.Seek(0, DiskFile::soEnd);
-		int size = (int)cacheFile.Position();
-		CharBuffer buf(size);
-		cacheFile.Seek(0);
-		if (cacheFile.Read((char*)buf, size) != size)
-		{
-			error("Could not read file %s: %s", *cacheFullFilename, *FileSystem::GetLastErrorMessage());
-		}
-		if (m_cache)
-		{
-			cacheMem.Append(buf, size);
-		}
-		SendData(buf, size);
-	}
-	else
-	{
-		encoder.WriteSegment();
-	}
-
-	if (!cachedData && cacheMem.Length() > 0)
-	{
-		m_cache->Append(cacheKey, cacheMem, cacheMem.Length());
-	}
-
-	m_connection->WriteLine(".\r\n");
-}
-
-void NntpProcessor::SendData(const char* buffer, int size)
-{
-	if (m_speed == 0)
-	{
-		m_connection->Send(buffer, size);
-		return;
-	}
-
-	int64 expectedTime = 0;
-	int chunkNum = 0, chunkSize = 0, pause = 0;
-	nzbget_rs_feh_nntp_calc_send_chunks(
-		size, m_speed, Util::CurrentTicks() - m_start,
-		&expectedTime, &chunkNum, &chunkSize, &pause);
-
-	int sent = 0;
-	for (int i = 0; i < chunkNum; i++)
-	{
-		int len = sent + chunkSize < size ? chunkSize : size - sent;
-
-		while (sent + len < size && *(buffer + sent + len) != '\r')
-		{
-			len++;
-		}
-		
-		m_connection->Send(buffer + sent, len);
-		int64 now = Util::CurrentTicks();
-		if (now + pause * 1000 < m_start + expectedTime * 1000)
-		{
-			Util::Sleep(pause);
-		}
-		sent += len;
-	}
-}
-
 
 void NntpCache::Append(const char* key, const char* data, int len)
 {
-	Guard guard(m_lock);
-	if (!len)
-	{
-		len = strlen(data);
-	}
-	m_items.emplace(key, std::make_unique<CacheItem>(key, data, len));
+	nzbget_rs_nntp_cache_append(m_handle, key, data, len);
 }
 
 bool NntpCache::Find(const char* key, const char*& data, int& size)
 {
-	Guard guard(m_lock);
-
-	CacheMap::iterator pos = m_items.find(key);
-	if (pos != m_items.end())
-	{
-		data = (*pos).second->m_data;
-		size = (*pos).second->m_size;
-		return true;
-	}
-
-	return false;
+	return nzbget_rs_nntp_cache_find(m_handle, key, &data, &size) != 0;
 }

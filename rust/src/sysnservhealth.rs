@@ -159,12 +159,6 @@ pub fn cpu_parse_cpuinfo_line(line: &[u8]) -> Option<usize> {
     Some(colon_pos + 1)
 }
 
-/// Port of `NServOpts` verbosity target flag evaluation.
-/// Returns `(mute_info_warn_err, mute_detail, enable_debug)`.
-pub fn nserv_verbosity_flags(verbosity: i32) -> (bool, bool, bool) {
-    (verbosity < 1, verbosity < 2, verbosity > 2)
-}
-
 /// Port of `NntpHealthServer::CapFor`.
 pub fn nntp_health_cap_for(connections: i32, max_cap: i32) -> i32 {
     1.max(max_cap.min(connections / 2))
@@ -442,10 +436,6 @@ mod tests {
 
     #[test]
     fn test_nserv_dupesearch_connect_and_post_renamer() {
-        assert_eq!(nserv_verbosity_flags(0), (true, true, false));
-        assert_eq!(nserv_verbosity_flags(2), (false, false, false));
-        assert_eq!(nserv_verbosity_flags(3), (false, false, true));
-
         assert_eq!(nntp_health_cap_for(10, 4), 4);
         assert_eq!(nntp_health_cap_for(1, 4), 1);
         assert!(nntp_health_is_bracketed(b"<abc@news>"));

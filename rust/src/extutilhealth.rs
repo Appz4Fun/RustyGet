@@ -300,21 +300,6 @@ pub fn disk_service_is_low_space(available_bytes: i64, disk_space_mb: i32) -> bo
 }
 
 // ============================================================================
-// NServFrontend (`daemon/nserv/NServFrontend.cpp`)
-// ============================================================================
-
-/// Matches the start index and skip check in `NServFrontend::Update()`:
-/// `int start = needed - first + 1; if (start < 0) { need_skip = true; start = 0; }`.
-pub fn nserv_frontend_calc_start_index(needed_first_id: i32, first_msg_id: i32) -> (i32, bool) {
-    let start = needed_first_id.wrapping_sub(first_msg_id).wrapping_add(1);
-    if start < 0 {
-        (0, true)
-    } else {
-        (start, false)
-    }
-}
-
-// ============================================================================
 // Extension Scripts (`CommandScript.cpp`, `SchedulerScript.cpp`, `NzbScript.cpp`, `FeedScript.cpp`)
 // ============================================================================
 
@@ -563,8 +548,6 @@ mod tests {
         assert_eq!(disk_service_interval(true, 0, false, -1), 1);
         assert_eq!(disk_service_interval(false, 100, false, -1), 10);
         assert!(disk_service_is_low_space(50 * 1024 * 1024, 100));
-        assert_eq!(nserv_frontend_calc_start_index(0, 5), (0, true));
-        assert_eq!(nserv_frontend_calc_start_index(10, 5), (6, false));
     }
 
     #[test]

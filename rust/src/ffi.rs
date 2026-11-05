@@ -13574,96 +13574,6 @@ pub unsafe extern "C" fn nzbget_rs_feh_ext_is_in_list(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feh_nntp_classify_command(
-    line: *const c_char,
-    out_arg_offset: *mut usize,
-) -> c_int {
-    if line.is_null() {
-        return 0;
-    }
-    let bytes = crate::diskstatepp::cstr_to_bytes(line);
-    let (cmd, off) = crate::frontexthealth::nntp_classify_command(bytes);
-    if !out_arg_offset.is_null() {
-        *out_arg_offset = off;
-    }
-    cmd
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feh_nntp_parse_message_id(
-    msg_id: *const c_char,
-    out_name_len: *mut c_int,
-    out_part: *mut c_int,
-    out_offset: *mut i64,
-    out_size: *mut c_int,
-    out_serv_offset: *mut c_int,
-) -> c_int {
-    if msg_id.is_null() {
-        return 0;
-    }
-    let bytes = crate::diskstatepp::cstr_to_bytes(msg_id);
-    match crate::frontexthealth::nntp_parse_message_id(bytes) {
-        Some((name_len, part, offset, size, serv_off)) => {
-            if !out_name_len.is_null() {
-                *out_name_len = name_len;
-            }
-            if !out_part.is_null() {
-                *out_part = part;
-            }
-            if !out_offset.is_null() {
-                *out_offset = offset;
-            }
-            if !out_size.is_null() {
-                *out_size = size;
-            }
-            if !out_serv_offset.is_null() {
-                *out_serv_offset = serv_off;
-            }
-            1
-        }
-        None => 0,
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feh_nntp_server_in_list(
-    serv_list: *const c_char,
-    server_id: c_int,
-) -> c_int {
-    if serv_list.is_null() {
-        return 0;
-    }
-    let bytes = crate::diskstatepp::cstr_to_bytes(serv_list);
-    c_int::from(crate::frontexthealth::nntp_server_in_list(bytes, server_id))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feh_nntp_calc_send_chunks(
-    size: c_int,
-    speed: c_int,
-    elapsed_ticks: i64,
-    out_expected_time: *mut i64,
-    out_chunk_num: *mut c_int,
-    out_chunk_size: *mut c_int,
-    out_pause: *mut c_int,
-) {
-    let (exp, cnum, csize, pause) =
-        crate::frontexthealth::nntp_calc_send_chunks(size, speed, elapsed_ticks);
-    if !out_expected_time.is_null() {
-        *out_expected_time = exp;
-    }
-    if !out_chunk_num.is_null() {
-        *out_chunk_num = cnum;
-    }
-    if !out_chunk_size.is_null() {
-        *out_chunk_size = csize;
-    }
-    if !out_pause.is_null() {
-        *out_pause = pause;
-    }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_feh_health_check_password(
     password: *const c_char,
     password_len: usize,
@@ -14061,21 +13971,144 @@ pub unsafe extern "C" fn nzbget_rs_nzb_generator_execute(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_snh_nserv_verbosity_flags(
-    verbosity: c_int,
-    out_mute_info_warn_err: *mut c_int,
-    out_mute_detail: *mut c_int,
-    out_enable_debug: *mut c_int,
+pub unsafe extern "C" fn nzbget_rs_nntp_cache_new() -> *mut crate::nserv::NntpCache {
+    Box::into_raw(Box::new(crate::nserv::NntpCache::new()))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nntp_cache_free(cache: *mut crate::nserv::NntpCache) {
+    if !cache.is_null() {
+        drop(Box::from_raw(cache));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nntp_cache_append(
+    cache: *const crate::nserv::NntpCache,
+    key: *const c_char,
+    data: *const c_char,
+    len: c_int,
 ) {
-    let (m1, m2, dbg) = crate::sysnservhealth::nserv_verbosity_flags(verbosity);
-    if !out_mute_info_warn_err.is_null() {
-        *out_mute_info_warn_err = i32::from(m1);
+    if cache.is_null() || key.is_null() || data.is_null() {
+        return;
     }
-    if !out_mute_detail.is_null() {
-        *out_mute_detail = i32::from(m2);
+    let key_bytes = input(key);
+    let data_bytes = if len > 0 {
+        std::slice::from_raw_parts(data.cast::<u8>(), len as usize)
+    } else {
+        input(data)
+    };
+    (*cache).append(key_bytes, data_bytes);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nntp_cache_find(
+    cache: *const crate::nserv::NntpCache,
+    key: *const c_char,
+    out_data: *mut *const c_char,
+    out_size: *mut c_int,
+) -> c_int {
+    if cache.is_null() || key.is_null() {
+        return 0;
     }
-    if !out_enable_debug.is_null() {
-        *out_enable_debug = i32::from(dbg);
+    let key_bytes = input(key);
+    match (*cache).find(key_bytes) {
+        Some(slice) => {
+            if !out_data.is_null() {
+                *out_data = slice.as_ptr().cast();
+            }
+            if !out_size.is_null() {
+                *out_size = slice.len() as c_int;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nntp_processor_handle_line(
+    server_id: c_int,
+    data_dir: *const c_char,
+    cache_dir: *const c_char,
+    latency: c_int,
+    speed: c_int,
+    cache: *const crate::nserv::NntpCache,
+    raw_line: *const c_char,
+    ctx: *mut std::ffi::c_void,
+    write_line_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
+    send_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, c_int)>,
+    log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
+) -> c_int {
+    let data_dir_opt = (!data_dir.is_null()).then(|| input(data_dir)).filter(|b| !b.is_empty());
+    let cache_dir_opt = (!cache_dir.is_null()).then(|| input(cache_dir)).filter(|b| !b.is_empty());
+    let cache_ref = (!cache.is_null()).then(|| &*cache);
+    let line_bytes = if raw_line.is_null() { &[][..] } else { input(raw_line) };
+
+    let mut write_line_fn = |line: &[u8]| {
+        if let Some(cb) = write_line_cb {
+            let mut c_str = Vec::with_capacity(line.len() + 1);
+            c_str.extend_from_slice(line);
+            c_str.push(0);
+            cb(ctx, c_str.as_ptr().cast());
+        }
+    };
+    let mut send_fn = |buf: &[u8]| {
+        if let Some(cb) = send_cb {
+            cb(ctx, buf.as_ptr().cast(), buf.len() as c_int);
+        }
+    };
+    let mut log_fn = |kind: i32, msg: &[u8]| {
+        if let Some(cb) = log_cb {
+            let mut c_str = Vec::with_capacity(msg.len() + 1);
+            c_str.extend_from_slice(msg);
+            c_str.push(0);
+            cb(ctx, kind as c_int, c_str.as_ptr().cast());
+        }
+    };
+
+    i32::from(crate::nserv::nntp_processor_handle_line(
+        server_id,
+        data_dir_opt,
+        cache_dir_opt,
+        latency,
+        speed,
+        cache_ref,
+        line_bytes,
+        &mut write_line_fn,
+        &mut send_fn,
+        &mut log_fn,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nserv_frontend_calc_start_index(
+    needed_first_id: c_int,
+    first_msg_id: c_int,
+    out_need_skip: *mut c_int,
+) -> c_int {
+    let (start, skip) =
+        crate::nserv::nserv_frontend_calc_start_index(needed_first_id, first_msg_id);
+    if !out_need_skip.is_null() {
+        *out_need_skip = i32::from(skip);
+    }
+    start
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nserv_build_cmd_opts(
+    log_file: *const c_char,
+    verbosity: c_int,
+    ctx: *mut std::ffi::c_void,
+    push_opt_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
+) {
+    let lf_opt = (!log_file.is_null()).then(|| input(log_file)).filter(|b| !b.is_empty());
+    let opts = crate::nserv::nserv_build_cmd_opts(lf_opt, verbosity);
+    if let Some(cb) = push_opt_cb {
+        for mut opt in opts {
+            opt.push(0);
+            cb(ctx, opt.as_ptr().cast());
+        }
     }
 }
 
@@ -14437,20 +14470,6 @@ pub unsafe extern "C" fn nzbget_rs_euh_disk_service_is_low_space(
         available_bytes,
         disk_space_mb,
     ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_euh_nserv_frontend_calc_start_index(
-    needed_first_id: c_int,
-    first_msg_id: c_int,
-    out_need_skip: *mut c_int,
-) -> c_int {
-    let (start, skip) =
-        crate::extutilhealth::nserv_frontend_calc_start_index(needed_first_id, first_msg_id);
-    if !out_need_skip.is_null() {
-        *out_need_skip = i32::from(skip);
-    }
-    start
 }
 
 #[no_mangle]
@@ -34700,29 +34719,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_statmeter_format_indexed_bytes_line(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_nntpserver_format_cache_file_name(
-    part: c_int,
-    offset: i64,
-    size: c_int,
-) -> RsBuf {
-    into_buf(crate::dupequeuehealth::dqh_nntpserver_format_cache_file_name(
-        part, offset, size,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_nserv_format_logfile_opt(
-    log_file: *const c_char,
-) -> RsBuf {
-    let l = if log_file.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(log_file).to_bytes()
-    };
-    into_buf(crate::dupequeuehealth::dqh_nserv_format_logfile_opt(l))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_nzbfile_format_missing_attrs_msg(
     tag_name: *const c_char,
 ) -> RsBuf {
@@ -35630,19 +35626,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_script_config_ensure_trailing_lf(
         CStr::from_ptr(line).to_bytes()
     };
     into_buf(crate::dupequeuehealth::dqh_script_config_ensure_trailing_lf(l))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_nntpserver_format_reply_line(
-    kind: c_int,
-    arg: *const c_char,
-) -> RsBuf {
-    let a = if arg.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(arg).to_bytes()
-    };
-    into_buf(crate::dupequeuehealth::dqh_nntpserver_format_reply_line(kind, a))
 }
 
 #[no_mangle]

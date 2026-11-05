@@ -48,7 +48,7 @@ void NServFrontend::Update()
 		{
 			Message& firstMessage = messages->front();
 			int needSkip = 0;
-			int start = nzbget_rs_euh_nserv_frontend_calc_start_index(
+			int start = nzbget_rs_nserv_frontend_calc_start_index(
 				m_neededLogFirstId, firstMessage.GetId(), &needSkip);
 			if (needSkip)
 			{

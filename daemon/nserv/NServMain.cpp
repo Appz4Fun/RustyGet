@@ -41,7 +41,7 @@ struct NServOpts
 	CString logFile;
 	CString secureCert;
 	CString secureKey;
-	BString<1024> logOpt;
+	std::deque<CString> ownedOpts;
 	bool generateNzb;
 	int segmentSize;
 	bool quit;
@@ -239,35 +239,19 @@ NServOpts::NServOpts(int argc, char* argv[], Options::CmdOptList& cmdOpts)
 		paramError = true;
 	}
 
-	if (logFile.Empty())
+	struct OptCtx
 	{
-		cmdOpts.push_back("WriteLog=none");
-	}
-	else
-	{
-		cmdOpts.push_back("WriteLog=append");
-		NzbgetRsBuf logOptBuf = nzbget_rs_dqh_nserv_format_logfile_opt(*logFile);
-		logOpt.Set(logOptBuf.data ? logOptBuf.data : "", (int)logOptBuf.len);
-		nzbget_rs_free(logOptBuf);
-		cmdOpts.push_back(logOpt);
-	}
+		std::deque<CString>& owned;
+		Options::CmdOptList& list;
+	} optCtx{ownedOpts, cmdOpts};
 
-	int muteInfoWarnErr = 0;
-	int muteDetail = 0;
-	int enableDebug = 0;
-	nzbget_rs_snh_nserv_verbosity_flags(verbosity, &muteInfoWarnErr, &muteDetail, &enableDebug);
-	if (muteInfoWarnErr)
-	{
-		cmdOpts.push_back("InfoTarget=none");
-		cmdOpts.push_back("WarningTarget=none");
-		cmdOpts.push_back("ErrorTarget=none");
-	}
-	if (muteDetail)
-	{
-		cmdOpts.push_back("DetailTarget=none");
-	}
-	if (enableDebug)
-	{
-		cmdOpts.push_back("DebugTarget=both");
-	}
+	nzbget_rs_nserv_build_cmd_opts(
+		logFile.Empty() ? nullptr : *logFile,
+		verbosity,
+		&optCtx,
+		[](void* rawCtx, const char* opt) {
+			auto* ctx = static_cast<OptCtx*>(rawCtx);
+			ctx->owned.emplace_back(opt ? opt : "");
+			ctx->list.push_back(*ctx->owned.back());
+		});
 }

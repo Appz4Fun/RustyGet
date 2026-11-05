@@ -25,28 +25,21 @@
 #include "Connection.h"
 #include "Util.h"
 
+struct NzbgetRsNntpCache;
+
 class NntpCache
 {
 public:
+	NntpCache();
+	~NntpCache();
+	NntpCache(const NntpCache&) = delete;
+	NntpCache& operator=(const NntpCache&) = delete;
 	void Append(const char* key, const char* data, int len = 0);
 	bool Find(const char* key, const char*& data, int& size);
+	const NzbgetRsNntpCache* GetRustHandle() const { return m_handle; }
 
 private:
-	class CacheItem
-	{
-	public:
-		CacheItem(const char* key, const char* data, int size) :
-			m_key(key), m_data(data), m_size(size) {}
-
-		CString m_key;
-		CString m_data;
-		int m_size = 0;
-	};
-
-	typedef std::unordered_map<std::string, std::unique_ptr<CacheItem>> CacheMap;
-
-	CacheMap m_items;
-	Mutex m_lock;
+	NzbgetRsNntpCache* m_handle = nullptr;
 };
 
 class NntpServer : public Thread

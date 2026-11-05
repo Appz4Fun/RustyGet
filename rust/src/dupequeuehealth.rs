@@ -1983,19 +1983,6 @@ pub fn dqh_statmeter_format_indexed_bytes_line(first_idx: i32, values: &[i64]) -
     out.into_bytes()
 }
 
-/// Formats `"<part>=<offset>-<size>"` for `NntpProcessor::SendSegment`.
-pub fn dqh_nntpserver_format_cache_file_name(part: i32, offset: i64, size: i32) -> Vec<u8> {
-    format!("{part}={offset}-{size}").into_bytes()
-}
-
-/// Formats `"LogFile=<log_file>"` for `NServMain`.
-pub fn dqh_nserv_format_logfile_opt(log_file: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(8 + log_file.len());
-    out.extend_from_slice(b"LogFile=");
-    out.extend_from_slice(log_file);
-    out
-}
-
 /// Formats `"Malformed nzb-file, tag <<tag_name>> must have attributes"` for `NzbFile::Parse_StartElement`.
 pub fn dqh_nzbfile_format_missing_attrs_msg(tag_name: &[u8]) -> Vec<u8> {
     let prefix = b"Malformed nzb-file, tag <";
@@ -2644,33 +2631,6 @@ pub fn dqh_script_config_ensure_trailing_lf(line: &[u8]) -> Vec<u8> {
         out.push(b'\n');
         out
     }
-}
-
-/// Formats NNTP server reply lines for `NntpProcessor`:
-/// `kind`:
-/// - `0`: `"211 0 0 0 <arg>\r\n"`
-/// - `1`: `"403 <arg>\r\n"`
-/// - `2`: `"223 0 <arg>\r\n"`
-/// - `3`: `"220 0 <arg>\r\n"`
-/// - `4`: `"222 0 <arg>\r\n"`
-/// - `5`: `"Message-ID: <arg>\r\n"`
-/// - `6`: `"Subject: \"<arg>\"\r\n"`
-pub fn dqh_nntpserver_format_reply_line(kind: i32, arg: &[u8]) -> Vec<u8> {
-    let (prefix, suffix): (&[u8], &[u8]) = match kind {
-        0 => (b"211 0 0 0 ", b"\r\n"),
-        1 => (b"403 ", b"\r\n"),
-        2 => (b"223 0 ", b"\r\n"),
-        3 => (b"220 0 ", b"\r\n"),
-        4 => (b"222 0 ", b"\r\n"),
-        5 => (b"Message-ID: ", b"\r\n"),
-        6 => (b"Subject: \"", b"\"\r\n"),
-        _ => (b"", b"\r\n"),
-    };
-    let mut out = Vec::with_capacity(prefix.len() + arg.len() + suffix.len());
-    out.extend_from_slice(prefix);
-    out.extend_from_slice(arg);
-    out.extend_from_slice(suffix);
-    out
 }
 
 /// Formats `"-o<unpack_dir>"` for `UnpackController::ExecuteSevenZip`.
@@ -6289,14 +6249,6 @@ mod tests {
             b"[10]=100 [11]=250 "
         );
         assert_eq!(
-            dqh_nntpserver_format_cache_file_name(2, 65536, 32768),
-            b"2=65536-32768"
-        );
-        assert_eq!(
-            dqh_nserv_format_logfile_opt(b"/var/log/nserv.log"),
-            b"LogFile=/var/log/nserv.log"
-        );
-        assert_eq!(
             dqh_nzbfile_format_missing_attrs_msg(b"file"),
             b"Malformed nzb-file, tag <file> must have attributes"
         );
@@ -6539,14 +6491,6 @@ mod tests {
         assert_eq!(
             dqh_script_config_ensure_trailing_lf(b"# comment\n"),
             b"# comment\n"
-        );
-        assert_eq!(
-            dqh_nntpserver_format_reply_line(0, b"alt.binaries.test"),
-            b"211 0 0 0 alt.binaries.test\r\n"
-        );
-        assert_eq!(
-            dqh_nntpserver_format_reply_line(6, b"file.rar"),
-            b"Subject: \"file.rar\"\r\n"
         );
         assert_eq!(
             dqh_unpack_format_7z_output_arg(b"/dst/unpack"),

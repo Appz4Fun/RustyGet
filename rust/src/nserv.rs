@@ -3,11 +3,19 @@
 //!   line wrapping, escaping, dot-stuffing, and CRC32 calculation.
 //! - `NzbGenerator` (`daemon/nserv/NzbGenerator.cpp`): directory scanning and `.nzb`
 //!   XML generation for test data directories.
+//! - `NntpCache` & `NntpProcessor` (`daemon/nserv/NntpServer.cpp`): in-memory segment
+//!   cache, NNTP command dispatch, message-id parsing, disk/memory segment caching,
+//!   yEnc encoding, and rate-limited chunk streaming.
+//! - `NServFrontend` (`daemon/nserv/NServFrontend.cpp`): log cursor tracking and terminal output.
+//! - `NServOpts` (`daemon/nserv/NServMain.cpp`): CLI option parsing and option-list generation.
 
+use std::collections::HashMap;
 use std::ffi::CStr;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use crate::crc::Crc32;
 
@@ -382,6 +390,623 @@ where
     log_fn(NzbGenLogKind::Finished, b"");
 }
 
+// ============================================================================
+// NntpCache & NntpProcessor (`daemon/nserv/NntpServer.cpp`)
+// ============================================================================
+
+#[cfg(unix)]
+fn bytes_to_path_buf(bytes: &[u8]) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
+}
+
+#[cfg(not(unix))]
+fn bytes_to_path_buf(bytes: &[u8]) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
+}
+
+fn format_io_error(err: &std::io::Error) -> Vec<u8> {
+    if let Some(code) = err.raw_os_error() {
+        unsafe extern "C" {
+            fn strerror(errnum: std::ffi::c_int) -> *const std::ffi::c_char;
+        }
+        let ptr = unsafe { strerror(code) };
+        if !ptr.is_null() {
+            return unsafe { CStr::from_ptr(ptr) }.to_bytes().to_vec();
+        }
+    }
+    err.to_string().into_bytes()
+}
+
+fn join_slash_1023(dir: &[u8], file: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(dir.len() + 1 + file.len());
+    out.extend_from_slice(dir);
+    out.push(b'/');
+    out.extend_from_slice(file);
+    if out.len() > 1023 {
+        out.truncate(1023);
+    }
+    out
+}
+
+/// Thread-safe in-memory yEnc segment cache for `NntpServer` (`NntpCache` in `NntpServer.h`).
+/// Entries are never evicted or mutated once inserted (`emplace` semantics), so cached pointers
+/// remain valid for the lifetime of `NntpCache`.
+#[derive(Default)]
+pub struct NntpCache {
+    items: Mutex<HashMap<Vec<u8>, Box<[u8]>>>,
+}
+
+impl NntpCache {
+    pub fn new() -> Self {
+        Self {
+            items: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Inserts `(key, data)` if `key` is not already present (matching `std::unordered_map::emplace`),
+    /// appending a trailing NUL byte so C callers can also treat the buffer as a C-string.
+    pub fn append(&self, key: &[u8], data: &[u8]) {
+        if let Ok(mut guard) = self.items.lock() {
+            guard.entry(key.to_vec()).or_insert_with(|| {
+                let mut buf = Vec::with_capacity(data.len() + 1);
+                buf.extend_from_slice(data);
+                buf.push(0);
+                buf.into_boxed_slice()
+            });
+        }
+    }
+
+    /// Looks up `key` and returns a slice (excluding the trailing NUL) whose backing allocation
+    /// lives as long as `self` (since entries are never removed or reallocated).
+    pub fn find(&self, key: &[u8]) -> Option<&[u8]> {
+        let guard = self.items.lock().ok()?;
+        let boxed = guard.get(key)?;
+        let len = boxed.len().saturating_sub(1);
+        let ptr = boxed.as_ptr();
+        // Safety: `boxed` is heap-allocated inside `Box<[u8]>` and never removed or mutated
+        // during `&self`'s lifetime.
+        Some(unsafe { std::slice::from_raw_parts(ptr, len) })
+    }
+}
+
+fn starts_with_ignore_ascii_case(s: &[u8], prefix: &[u8]) -> bool {
+    s.len() >= prefix.len() && s[..prefix.len()].eq_ignore_ascii_case(prefix)
+}
+
+fn trim_tokenizer_ws(mut s: &[u8]) -> &[u8] {
+    while let Some(&b) = s.first() {
+        if matches!(b, b' ' | b'\t' | b'\n' | b'\r') {
+            s = &s[1..];
+        } else {
+            break;
+        }
+    }
+    while let Some(&b) = s.last() {
+        if matches!(b, b' ' | b'\t' | b'\n' | b'\r') {
+            s = &s[..s.len() - 1];
+        } else {
+            break;
+        }
+    }
+    s
+}
+
+fn trim_right_cstring(mut s: &[u8]) -> &[u8] {
+    while let Some(&b) = s.last() {
+        if (b as i8) <= (b' ' as i8) {
+            s = &s[..s.len() - 1];
+        } else {
+            break;
+        }
+    }
+    s
+}
+
+/// Classifies an incoming NNTP line in `NntpProcessor::Run`, returning `(cmd_kind, arg_offset)`:
+/// - `(1, 8)`: `"ARTICLE "`
+/// - `(2, 5)`: `"BODY "`
+/// - `(3, 5)`: `"STAT "`
+/// - `(4, 6)`: `"GROUP "`
+/// - `(5, 13)`: `"AUTHINFO USER"`
+/// - `(6, 13)`: `"AUTHINFO PASS"`
+/// - `(7, 4)`: `"QUIT"`
+/// - `(0, 0)`: unknown command
+pub fn nntp_classify_command(line: &[u8]) -> (i32, usize) {
+    if starts_with_ignore_ascii_case(line, b"ARTICLE ") {
+        (1, b"ARTICLE ".len())
+    } else if starts_with_ignore_ascii_case(line, b"BODY ") {
+        (2, b"BODY ".len())
+    } else if starts_with_ignore_ascii_case(line, b"STAT ") {
+        (3, b"STAT ".len())
+    } else if starts_with_ignore_ascii_case(line, b"GROUP ") {
+        (4, b"GROUP ".len())
+    } else if starts_with_ignore_ascii_case(line, b"AUTHINFO USER") {
+        (5, b"AUTHINFO USER".len())
+    } else if starts_with_ignore_ascii_case(line, b"AUTHINFO PASS") {
+        (6, b"AUTHINFO PASS".len())
+    } else if line.eq_ignore_ascii_case(b"QUIT") {
+        (7, b"QUIT".len())
+    } else {
+        (0, 0)
+    }
+}
+
+fn c_atoll_bytes(s: &[u8]) -> i64 {
+    let mut i = 0;
+    while i < s.len() && matches!(s[i], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+        i += 1;
+    }
+    if i >= s.len() {
+        return 0;
+    }
+    let mut neg = false;
+    if s[i] == b'-' {
+        neg = true;
+        i += 1;
+    } else if s[i] == b'+' {
+        i += 1;
+    }
+    let mut val: i64 = 0;
+    while i < s.len() && s[i].is_ascii_digit() {
+        let d = (s[i] - b'0') as i64;
+        val = val.wrapping_mul(10).wrapping_add(d);
+        i += 1;
+    }
+    if neg {
+        val.wrapping_neg()
+    } else {
+        val
+    }
+}
+
+fn c_atoi_bytes(s: &[u8]) -> i32 {
+    c_atoll_bytes(s) as i32
+}
+
+/// Parses an NServ `<file?part=offset:size!servers>` message-id in `NntpProcessor::ServArticle`.
+/// Returns `Some((name_len, part, offset, size, serv_offset))` where `name_len = from_idx - 1`
+/// and `serv_offset` is `-1` when `'!'` is absent or the index after `'!'` when present.
+pub fn nntp_parse_message_id(msg_id: &[u8]) -> Option<(i32, i32, i64, i32, i32)> {
+    let from_idx = msg_id.iter().position(|&b| b == b'?')?;
+    let off_idx = msg_id.iter().position(|&b| b == b'=')?;
+    let to_idx = msg_id.iter().position(|&b| b == b':')?;
+    let _end_idx = msg_id.iter().position(|&b| b == b'>')?;
+    let serv_offset = match msg_id.iter().position(|&b| b == b'!') {
+        Some(idx) => (idx + 1) as i32,
+        None => -1,
+    };
+    let name_len = (from_idx as i32) - 1;
+    let part = c_atoi_bytes(&msg_id[from_idx + 1..]);
+    let offset = c_atoll_bytes(&msg_id[off_idx + 1..]);
+    let size = c_atoi_bytes(&msg_id[to_idx + 1..]);
+    Some((name_len, part, offset, size, serv_offset))
+}
+
+/// Checks whether `server_id` is in `serv_list` (comma-separated) for `NntpProcessor::ServerInList`.
+pub fn nntp_server_in_list(serv_list: &[u8], server_id: i32) -> bool {
+    for raw_tok in serv_list.split(|&b| b == b',') {
+        let tok = trim_tokenizer_ws(raw_tok);
+        if !tok.is_empty() && c_atoi_bytes(tok) == server_id {
+            return true;
+        }
+    }
+    false
+}
+
+/// Calculates `(expected_time, chunk_num, chunk_size, pause)` for `NntpProcessor::SendData`.
+pub fn nntp_calc_send_chunks(
+    size: i32,
+    speed: i32,
+    elapsed_ticks: i64,
+) -> (i64, i32, i32, i32) {
+    let expected_time =
+        1000_i64 * (size as i64) / ((speed as i64) * 1024) - elapsed_ticks / 1000;
+    let mut chunk_num = 21;
+    let mut chunk_size = size;
+    let mut pause = 0;
+    while pause < 1 && chunk_num > 1 {
+        chunk_num -= 1;
+        chunk_size = size / chunk_num;
+        pause = (expected_time / (chunk_num as i64)) as i32;
+    }
+    (expected_time, chunk_num, chunk_size, pause)
+}
+
+/// Formats `"<part>=<offset>-<size>"` for `NntpProcessor::SendSegment`.
+pub fn nntp_format_cache_file_name(part: i32, offset: i64, size: i32) -> Vec<u8> {
+    format!("{part}={offset}-{size}").into_bytes()
+}
+
+/// Formats NNTP server reply lines for `NntpProcessor`:
+/// `kind`:
+/// - `0`: `"211 0 0 0 <arg>\r\n"`
+/// - `1`: `"403 <arg>\r\n"`
+/// - `2`: `"223 0 <arg>\r\n"`
+/// - `3`: `"220 0 <arg>\r\n"`
+/// - `4`: `"222 0 <arg>\r\n"`
+/// - `5`: `"Message-ID: <arg>\r\n"`
+/// - `6`: `"Subject: \"<arg>\"\r\n"`
+pub fn nntp_format_reply_line(kind: i32, arg: &[u8]) -> Vec<u8> {
+    let (prefix, suffix): (&[u8], &[u8]) = match kind {
+        0 => (b"211 0 0 0 ", b"\r\n"),
+        1 => (b"403 ", b"\r\n"),
+        2 => (b"223 0 ", b"\r\n"),
+        3 => (b"220 0 ", b"\r\n"),
+        4 => (b"222 0 ", b"\r\n"),
+        5 => (b"Message-ID: ", b"\r\n"),
+        6 => (b"Subject: \"", b"\"\r\n"),
+        _ => (b"", b"\r\n"),
+    };
+    let mut out = Vec::with_capacity(prefix.len() + arg.len() + suffix.len());
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(arg);
+    out.extend_from_slice(suffix);
+    out
+}
+
+fn send_data_rate_limited(
+    buffer: &[u8],
+    speed: i32,
+    start_instant: Option<Instant>,
+    send_fn: &mut dyn FnMut(&[u8]),
+) {
+    if speed == 0 {
+        send_fn(buffer);
+        return;
+    }
+
+    let size = buffer.len() as i32;
+    let elapsed_ticks = start_instant
+        .map(|s| s.elapsed().as_micros() as i64)
+        .unwrap_or(0);
+    let (expected_time, chunk_num, chunk_size, pause) =
+        nntp_calc_send_chunks(size, speed, elapsed_ticks);
+
+    let mut sent: i32 = 0;
+    for _ in 0..chunk_num {
+        if sent >= size {
+            break;
+        }
+        let mut len = if sent + chunk_size < size {
+            chunk_size
+        } else {
+            size - sent
+        };
+        while sent + len < size && buffer[(sent + len) as usize] != b'\r' {
+            len += 1;
+        }
+        send_fn(&buffer[sent as usize..(sent + len) as usize]);
+        let now_ticks = start_instant
+            .map(|s| s.elapsed().as_micros() as i64)
+            .unwrap_or(0);
+        if now_ticks + i64::from(pause) * 1000 < expected_time * 1000 && pause > 0 {
+            std::thread::sleep(Duration::from_millis(pause as u64));
+        }
+        sent += len;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn send_segment(
+    message_id: &[u8],
+    filename: &[u8],
+    part: i32,
+    offset: i64,
+    size: i32,
+    send_headers: bool,
+    send_stat: bool,
+    data_dir: Option<&[u8]>,
+    cache_dir: Option<&[u8]>,
+    speed: i32,
+    cache: Option<&NntpCache>,
+    write_line_fn: &mut dyn FnMut(&[u8]),
+    send_fn: &mut dyn FnMut(&[u8]),
+    log_fn: &mut dyn FnMut(i32, &[u8]),
+) {
+    let mut seg_log = Vec::with_capacity(32 + filename.len());
+    seg_log.extend_from_slice(b"Sending segment ");
+    seg_log.extend_from_slice(filename);
+    seg_log.extend_from_slice(format!(" ({part}={offset}:{size})").as_bytes());
+    log_fn(1, &seg_log);
+
+    let start_instant = (speed > 0).then(Instant::now);
+
+    let full_filename = join_slash_1023(data_dir.unwrap_or(b""), filename);
+    let cache_file_dir = join_slash_1023(cache_dir.unwrap_or(b""), filename);
+    let cache_file_name = nntp_format_cache_file_name(part, offset, size);
+    let cache_full_filename = join_slash_1023(&cache_file_dir, &cache_file_name);
+    let cache_key = join_slash_1023(filename, &cache_file_name);
+
+    let cached_data = cache.and_then(|c| c.find(&cache_key));
+
+    let has_cache_dir = cache_dir.is_some_and(|d| !d.is_empty());
+    let mut read_cache_file: Option<File> = None;
+    if cached_data.is_none() && has_cache_dir {
+        read_cache_file = File::open(bytes_to_path_buf(&cache_full_filename)).ok();
+    }
+    let write_cache = cached_data.is_none() && has_cache_dir && read_cache_file.is_none();
+
+    let mut cache_mem: Vec<u8> = Vec::new();
+    if cache.is_some() && cached_data.is_none() && size > 0 {
+        cache_mem.reserve(((size as f64) * 1.1) as usize);
+    }
+
+    let full_path = bytes_to_path_buf(&full_filename);
+    if cached_data.is_none()
+        && read_cache_file.is_none()
+        && !std::fs::metadata(&full_path)
+            .map(|m| m.is_file())
+            .unwrap_or(false)
+    {
+        write_line_fn(b"430 Article not found\r\n");
+        return;
+    }
+
+    let mut yenc_handle: Option<YEncoderFile> = None;
+    let mut enc_size = size;
+    let mut file_size = 0i64;
+    if cached_data.is_none() && read_cache_file.is_none() {
+        match yencoder_open_file(&full_path, offset, &mut enc_size, &mut file_size) {
+            Ok(h) => yenc_handle = Some(h),
+            Err(errmsg) => {
+                let reply = nntp_format_reply_line(1, errmsg.to_bytes());
+                write_line_fn(&reply);
+                return;
+            }
+        }
+    }
+
+    if send_stat {
+        let reply = nntp_format_reply_line(2, message_id);
+        write_line_fn(&reply);
+        return;
+    }
+
+    let mut write_cache_file: Option<File> = None;
+    if write_cache {
+        let dir_path = bytes_to_path_buf(&cache_file_dir);
+        if let Err(e) = std::fs::create_dir_all(&dir_path) {
+            let err_str = format_io_error(&e);
+            let mut msg = b"Could not create directory ".to_vec();
+            msg.extend_from_slice(&cache_file_dir);
+            msg.extend_from_slice(b": ");
+            msg.extend_from_slice(&err_str);
+            log_fn(3, &msg);
+        }
+        let file_path = bytes_to_path_buf(&cache_full_filename);
+        match File::create(&file_path) {
+            Ok(f) => write_cache_file = Some(f),
+            Err(e) => {
+                let err_str = format_io_error(&e);
+                let mut msg = b"Could not create file ".to_vec();
+                msg.extend_from_slice(&cache_full_filename);
+                msg.extend_from_slice(b": ");
+                msg.extend_from_slice(&err_str);
+                log_fn(3, &msg);
+            }
+        }
+    }
+
+    let hdr_reply = nntp_format_reply_line(if send_headers { 3 } else { 4 }, message_id);
+    write_line_fn(&hdr_reply);
+    if send_headers {
+        let msg_id_reply = nntp_format_reply_line(5, message_id);
+        write_line_fn(&msg_id_reply);
+        let subj_reply = nntp_format_reply_line(6, base_file_name(filename));
+        write_line_fn(&subj_reply);
+        write_line_fn(b"\r\n");
+    }
+
+    if let Some(data) = cached_data {
+        send_data_rate_limited(data, speed, start_instant, send_fn);
+    } else if let Some(mut cfile) = read_cache_file {
+        let end_pos = cfile.seek(SeekFrom::End(0)).unwrap_or(0) as usize;
+        let _ = cfile.seek(SeekFrom::Start(0));
+        let mut buf = vec![0u8; end_pos];
+        if let Err(e) = cfile.read_exact(&mut buf) {
+            let err_str = format_io_error(&e);
+            let mut msg = b"Could not read file ".to_vec();
+            msg.extend_from_slice(&cache_full_filename);
+            msg.extend_from_slice(b": ");
+            msg.extend_from_slice(&err_str);
+            log_fn(3, &msg);
+        }
+        if cache.is_some() {
+            cache_mem.extend_from_slice(&buf);
+        }
+        send_data_rate_limited(&buf, speed, start_instant, send_fn);
+    } else if let Some(mut handle) = yenc_handle {
+        yencoder_write_segment(
+            &mut handle,
+            &full_filename,
+            part,
+            offset,
+            enc_size,
+            file_size,
+            |chunk| {
+                if cache.is_some() {
+                    cache_mem.extend_from_slice(chunk);
+                }
+                if let Some(ref mut wf) = write_cache_file {
+                    let _ = wf.write_all(chunk);
+                }
+                send_data_rate_limited(chunk, speed, start_instant, send_fn);
+            },
+        );
+    }
+
+    if cached_data.is_none() && !cache_mem.is_empty() {
+        if let Some(c) = cache {
+            c.append(&cache_key, &cache_mem);
+        }
+    }
+
+    write_line_fn(b".\r\n");
+}
+
+/// Processes a single incoming NNTP client line in `NntpProcessor::Run` (`NntpServer.cpp`).
+/// Returns `true` to continue reading commands, or `false` on `QUIT`.
+#[allow(clippy::too_many_arguments)]
+pub fn nntp_processor_handle_line(
+    server_id: i32,
+    data_dir: Option<&[u8]>,
+    cache_dir: Option<&[u8]>,
+    latency: i32,
+    speed: i32,
+    cache: Option<&NntpCache>,
+    raw_line: &[u8],
+    write_line_fn: &mut dyn FnMut(&[u8]),
+    send_fn: &mut dyn FnMut(&[u8]),
+    log_fn: &mut dyn FnMut(i32, &[u8]),
+) -> bool {
+    let line = trim_right_cstring(raw_line);
+    let mut recv_msg = Vec::with_capacity(10 + line.len());
+    recv_msg.extend_from_slice(b"Received: ");
+    recv_msg.extend_from_slice(line);
+    log_fn(0, &recv_msg);
+
+    let (cmd_kind, arg_offset) = nntp_classify_command(line);
+    match cmd_kind {
+        1..=3 => {
+            let message_id = &line[arg_offset..];
+            let send_headers = cmd_kind == 1;
+            let send_stat = cmd_kind == 3;
+
+            let mut srv_msg = Vec::with_capacity(9 + message_id.len());
+            srv_msg.extend_from_slice(b"Serving: ");
+            srv_msg.extend_from_slice(message_id);
+            log_fn(0, &srv_msg);
+
+            if latency > 0 {
+                std::thread::sleep(Duration::from_millis(latency as u64));
+            }
+
+            if let Some((name_len, part, offset, size, serv_off)) =
+                nntp_parse_message_id(message_id)
+            {
+                let filename = if name_len > 0 && (1 + name_len as usize) <= message_id.len() {
+                    &message_id[1..1 + name_len as usize]
+                } else {
+                    b""
+                };
+                let ok = serv_off < 0
+                    || ((serv_off as usize) <= message_id.len()
+                        && nntp_server_in_list(&message_id[serv_off as usize..], server_id));
+                if ok {
+                    send_segment(
+                        message_id,
+                        filename,
+                        part,
+                        offset,
+                        size,
+                        send_headers,
+                        send_stat,
+                        data_dir,
+                        cache_dir,
+                        speed,
+                        cache,
+                        write_line_fn,
+                        send_fn,
+                        log_fn,
+                    );
+                } else {
+                    write_line_fn(b"430 No Such Article Found\r\n");
+                }
+            } else {
+                write_line_fn(b"430 No Such Article Found (invalid message id format)\r\n");
+            }
+            true
+        }
+        4 => {
+            let reply = nntp_format_reply_line(0, &line[arg_offset..]);
+            write_line_fn(&reply);
+            true
+        }
+        5 => {
+            write_line_fn(b"381 Enter passphrase\r\n");
+            true
+        }
+        6 => {
+            write_line_fn(b"281 Authentication accepted\r\n");
+            true
+        }
+        7 => {
+            log_fn(0, b"Closing connection");
+            write_line_fn(b"205 Connection closing\r\n");
+            false
+        }
+        _ => {
+            let mut warn_msg = Vec::with_capacity(17 + line.len());
+            warn_msg.extend_from_slice(b"Unknown command: ");
+            warn_msg.extend_from_slice(line);
+            log_fn(2, &warn_msg);
+            write_line_fn(b"500 Unknown command\r\n");
+            true
+        }
+    }
+}
+
+// ============================================================================
+// NServFrontend & NServMain (`daemon/nserv/NServFrontend.cpp`, `NServMain.cpp`)
+// ============================================================================
+
+/// Matches the start index and skip check in `NServFrontend::Update()`:
+/// `int start = needed - first + 1; if (start < 0) { need_skip = true; start = 0; }`.
+pub fn nserv_frontend_calc_start_index(needed_first_id: i32, first_msg_id: i32) -> (i32, bool) {
+    let start = needed_first_id.wrapping_sub(first_msg_id).wrapping_add(1);
+    if start < 0 {
+        (0, true)
+    } else {
+        (start, false)
+    }
+}
+
+/// Port of `NServOpts` verbosity target flag evaluation.
+/// Returns `(mute_info_warn_err, mute_detail, enable_debug)`.
+pub fn nserv_verbosity_flags(verbosity: i32) -> (bool, bool, bool) {
+    (verbosity < 1, verbosity < 2, verbosity > 2)
+}
+
+/// Formats `"LogFile=<log_file>"` for `NServMain`.
+pub fn nserv_format_logfile_opt(log_file: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(8 + log_file.len());
+    out.extend_from_slice(b"LogFile=");
+    out.extend_from_slice(log_file);
+    out
+}
+
+/// Finalizes `NServOpts` option strings for `Options::CmdOptList` given `log_file` and `verbosity`.
+pub fn nserv_build_cmd_opts(log_file: Option<&[u8]>, verbosity: i32) -> Vec<Vec<u8>> {
+    let mut opts = Vec::new();
+    match log_file.filter(|f| !f.is_empty()) {
+        None => {
+            opts.push(b"WriteLog=none".to_vec());
+        }
+        Some(lf) => {
+            opts.push(b"WriteLog=append".to_vec());
+            let mut log_opt = nserv_format_logfile_opt(lf);
+            if log_opt.len() > 1023 {
+                log_opt.truncate(1023);
+            }
+            opts.push(log_opt);
+        }
+    }
+    let (mute_info_warn_err, mute_detail, enable_debug) = nserv_verbosity_flags(verbosity);
+    if mute_info_warn_err {
+        opts.push(b"InfoTarget=none".to_vec());
+        opts.push(b"WarningTarget=none".to_vec());
+        opts.push(b"ErrorTarget=none".to_vec());
+    }
+    if mute_detail {
+        opts.push(b"DetailTarget=none".to_vec());
+    }
+    if enable_debug {
+        opts.push(b"DebugTarget=both".to_vec());
+    }
+    opts
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,6 +1082,127 @@ mod tests {
 
         let album_nzb = std::fs::read_to_string(dir.join("album.nzb")).unwrap();
         assert!(album_nzb.contains("<segment bytes=\"400\" number=\"1\">album/track01.flac?1=0:400</segment>"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_nntp_processor_and_cache_end_to_end() {
+        let dir = std::env::temp_dir().join(format!("rustyget_nntp_proc_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let data_dir = dir.join("data");
+        let cache_dir = dir.join("cache");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("test.bin"), b"0123456789").unwrap();
+
+        let cache = NntpCache::new();
+        let data_bytes = os_str_bytes(data_dir.as_os_str());
+        let cache_bytes = os_str_bytes(cache_dir.as_os_str());
+
+        let mut lines = Vec::new();
+        let mut payload = Vec::new();
+        let mut logs = Vec::new();
+
+        // GROUP command
+        assert!(nntp_processor_handle_line(
+            1,
+            Some(data_bytes),
+            Some(cache_bytes),
+            0,
+            0,
+            Some(&cache),
+            b"GROUP alt.binaries.test\r\n",
+            &mut |l| lines.push(l.to_vec()),
+            &mut |p| payload.extend_from_slice(p),
+            &mut |k, m| logs.push((k, m.to_vec())),
+        ));
+        assert_eq!(lines.pop().unwrap(), b"211 0 0 0 alt.binaries.test\r\n");
+
+        // STAT command
+        assert!(nntp_processor_handle_line(
+            1,
+            Some(data_bytes),
+            Some(cache_bytes),
+            0,
+            0,
+            Some(&cache),
+            b"STAT <test.bin?1=0:5!1,2>\r\n",
+            &mut |l| lines.push(l.to_vec()),
+            &mut |p| payload.extend_from_slice(p),
+            &mut |k, m| logs.push((k, m.to_vec())),
+        ));
+        assert_eq!(lines.pop().unwrap(), b"223 0 <test.bin?1=0:5!1,2>\r\n");
+
+        // Server not in list
+        assert!(nntp_processor_handle_line(
+            3,
+            Some(data_bytes),
+            Some(cache_bytes),
+            0,
+            0,
+            Some(&cache),
+            b"STAT <test.bin?1=0:5!1,2>\r\n",
+            &mut |l| lines.push(l.to_vec()),
+            &mut |p| payload.extend_from_slice(p),
+            &mut |k, m| logs.push((k, m.to_vec())),
+        ));
+        assert_eq!(lines.pop().unwrap(), b"430 No Such Article Found\r\n");
+
+        // ARTICLE command (populates both disk cache and memory cache)
+        lines.clear();
+        payload.clear();
+        assert!(nntp_processor_handle_line(
+            1,
+            Some(data_bytes),
+            Some(cache_bytes),
+            0,
+            0,
+            Some(&cache),
+            b"ARTICLE <test.bin?1=0:5>\r\n",
+            &mut |l| lines.push(l.to_vec()),
+            &mut |p| payload.extend_from_slice(p),
+            &mut |k, m| logs.push((k, m.to_vec())),
+        ));
+        assert_eq!(lines[0], b"220 0 <test.bin?1=0:5>\r\n");
+        assert_eq!(lines.last().unwrap(), b".\r\n");
+        assert!(!payload.is_empty());
+        assert!(cache.find(b"test.bin/1=0-5").is_some());
+        assert!(cache_dir.join("test.bin").join("1=0-5").is_file());
+
+        // QUIT command returns false
+        assert!(!nntp_processor_handle_line(
+            1,
+            Some(data_bytes),
+            Some(cache_bytes),
+            0,
+            0,
+            Some(&cache),
+            b"QUIT\r\n",
+            &mut |l| lines.push(l.to_vec()),
+            &mut |p| payload.extend_from_slice(p),
+            &mut |k, m| logs.push((k, m.to_vec())),
+        ));
+
+        assert_eq!(nserv_frontend_calc_start_index(0, 1), (0, false));
+        assert_eq!(nserv_frontend_calc_start_index(2, 5), (0, true));
+        assert_eq!(
+            nserv_build_cmd_opts(None, 0),
+            vec![
+                b"WriteLog=none".to_vec(),
+                b"InfoTarget=none".to_vec(),
+                b"WarningTarget=none".to_vec(),
+                b"ErrorTarget=none".to_vec(),
+                b"DetailTarget=none".to_vec(),
+            ]
+        );
+        assert_eq!(
+            nserv_build_cmd_opts(Some(b"/tmp/nserv.log"), 3),
+            vec![
+                b"WriteLog=append".to_vec(),
+                b"LogFile=/tmp/nserv.log".to_vec(),
+                b"DebugTarget=both".to_vec(),
+            ]
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -2201,15 +2201,6 @@ int nzbget_rs_feh_ext_should_skip_dir_entry(const char* filename);
 size_t nzbget_rs_feh_ext_get_stem_len(const char* filename, size_t filename_len);
 int nzbget_rs_feh_ext_is_in_list(const char* extensions_list, const char* target_name);
 
-int nzbget_rs_feh_nntp_classify_command(const char* line, size_t* out_arg_offset);
-int nzbget_rs_feh_nntp_parse_message_id(
-    const char* msg_id, int* out_name_len, int* out_part, int64_t* out_offset,
-    int* out_size, int* out_serv_offset);
-int nzbget_rs_feh_nntp_server_in_list(const char* serv_list, int server_id);
-void nzbget_rs_feh_nntp_calc_send_chunks(
-    int size, int speed, int64_t elapsed_ticks, int64_t* out_expected_time,
-    int* out_chunk_num, int* out_chunk_size, int* out_pause);
-
 int nzbget_rs_feh_health_check_password(const char* password, size_t password_len);
 int nzbget_rs_feh_health_valid_port(int port);
 int nzbget_rs_feh_health_validate_control_ip(
@@ -2258,9 +2249,26 @@ void nzbget_rs_yencoder_write_segment(
 void nzbget_rs_nzb_generator_execute(
     const char* data_dir, int segment_size,
     void (*log_cb)(int kind, const char* msg));
-void nzbget_rs_snh_nserv_verbosity_flags(
-    int verbosity, int* out_mute_info_warn_err, int* out_mute_detail,
-    int* out_enable_debug);
+
+typedef struct NzbgetRsNntpCache NzbgetRsNntpCache;
+NzbgetRsNntpCache* nzbget_rs_nntp_cache_new(void);
+void nzbget_rs_nntp_cache_free(NzbgetRsNntpCache* cache);
+void nzbget_rs_nntp_cache_append(
+    const NzbgetRsNntpCache* cache, const char* key, const char* data, int len);
+int nzbget_rs_nntp_cache_find(
+    const NzbgetRsNntpCache* cache, const char* key, const char** out_data, int* out_size);
+int nzbget_rs_nntp_processor_handle_line(
+    int server_id, const char* data_dir, const char* cache_dir,
+    int latency, int speed, const NzbgetRsNntpCache* cache,
+    const char* raw_line, void* ctx,
+    void (*write_line_cb)(void* ctx, const char* line),
+    void (*send_cb)(void* ctx, const char* buf, int size),
+    void (*log_cb)(void* ctx, int kind, const char* msg));
+int nzbget_rs_nserv_frontend_calc_start_index(
+    int needed_first_id, int first_msg_id, int* out_need_skip);
+void nzbget_rs_nserv_build_cmd_opts(
+    const char* log_file, int verbosity, void* ctx,
+    void (*push_opt_cb)(void* ctx, const char* opt));
 
 int nzbget_rs_snh_nntp_health_cap_for(int connections, int max_cap);
 int nzbget_rs_snh_nntp_health_is_bracketed(const char* msg_id, size_t len);
@@ -2309,8 +2317,6 @@ void nzbget_rs_euh_service_calc_remaining_wait(
 int nzbget_rs_euh_disk_service_interval(
     int waiting_required_dir, int disk_space_mb, int downloading, int sleep_val);
 int nzbget_rs_euh_disk_service_is_low_space(int64_t available_bytes, int disk_space_mb);
-int nzbget_rs_euh_nserv_frontend_calc_start_index(
-    int needed_first_id, int first_msg_id, int* out_need_skip);
 int nzbget_rs_euh_cmd_script_classify_exit_code(int exit_code);
 size_t nzbget_rs_euh_sched_script_strip_ext_len(const char* base_name, size_t len);
 int nzbget_rs_euh_nzb_script_match_param_prefix(
@@ -5892,9 +5898,6 @@ size_t nzbget_rs_dqh_benchmark_resolve_block_size(
     size_t block_size_bytes, size_t default_block_size);
 NzbgetRsBuf nzbget_rs_dqh_statmeter_format_indexed_bytes_line(
     int32_t first_idx, const int64_t* values, size_t count);
-NzbgetRsBuf nzbget_rs_dqh_nntpserver_format_cache_file_name(
-    int32_t part, int64_t offset, int32_t size);
-NzbgetRsBuf nzbget_rs_dqh_nserv_format_logfile_opt(const char* log_file);
 NzbgetRsBuf nzbget_rs_dqh_nzbfile_format_missing_attrs_msg(const char* tag_name);
 int nzbget_rs_dqh_nzbfile_classify_start_element(const char* name);
 int nzbget_rs_dqh_nzbfile_classify_file_attr(const char* attr_name);
@@ -5982,8 +5985,6 @@ void nzbget_rs_dqh_webserver_encode_hex_token(
 NzbgetRsBuf nzbget_rs_dqh_script_config_format_option_line(
     const char* key, size_t key_len, const char* val, size_t val_len);
 NzbgetRsBuf nzbget_rs_dqh_script_config_ensure_trailing_lf(const char* line);
-NzbgetRsBuf nzbget_rs_dqh_nntpserver_format_reply_line(
-    int kind, const char* arg);
 NzbgetRsBuf nzbget_rs_dqh_unpack_format_7z_output_arg(const char* unpack_dir);
 NzbgetRsBuf nzbget_rs_dqh_script_format_prefixed_message(
     const char* prefix, const char* text);

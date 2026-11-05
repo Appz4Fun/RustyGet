@@ -456,6 +456,36 @@ pub unsafe fn encode<E: Entry>(entries: &[E], out: &mut [MaybeUninit<u8>]) -> us
 /// The largest response (an int, as the C++ counted it).
 pub const MAX_RESPONSE: u64 = i32::MAX as u64;
 
+/// Computes `(start, nr_entries)` for a binary RPC log slice request (`LogBinCommand::Execute`).
+#[inline]
+pub fn log_slice_bounds(
+    lines: i32,
+    id_from: u32,
+    messages_len: usize,
+    first_msg_id: u32,
+) -> (i32, i32) {
+    let msg_count = messages_len as i32;
+    let mut nr_entries = if lines < 0 { 0 } else { lines };
+    let mut start = msg_count;
+    if nr_entries > 0 {
+        if nr_entries > msg_count {
+            nr_entries = msg_count;
+        }
+        start = msg_count - nr_entries;
+    }
+    if id_from > 0 && messages_len > 0 {
+        start = id_from.wrapping_sub(first_msg_id) as i32;
+        if start < 0 {
+            start = 0;
+        }
+        nr_entries = msg_count.wrapping_sub(start);
+        if nr_entries < 0 {
+            nr_entries = 0;
+        }
+    }
+    (start, nr_entries)
+}
+
 /// EditQueue's check of the client's counts and lengths against each other
 /// and the trailing data's length (64-bit sums).
 pub fn edit_sizes_ok(ids: i32, names: i32, names_len: i32, text_len: i32, data_len: u32) -> bool {

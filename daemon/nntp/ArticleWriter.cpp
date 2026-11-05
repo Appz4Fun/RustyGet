@@ -585,17 +585,15 @@ bool ArticleWriter::CompleteFileParts()
 
 void ArticleWriter::LogStartMessage(std::string_view infoFilename, bool directWrite, bool cached)
 {
-	int startMode = nzbget_rs_sap_article_writer_log_start_mode(
-		g_Options->GetRawArticle() ? 1 : 0, directWrite ? 1 : 0, cached ? 1 : 0);
-	if (startMode == 0)
+	if (g_Options->GetRawArticle())
 	{
 		detail("Moving articles for %s", infoFilename.data());
 	}
-	else if (startMode == 1)
+	else if (directWrite && cached)
 	{
 		detail("Writing articles for %s", infoFilename.data());
 	}
-	else if (startMode == 2)
+	else if (directWrite)
 	{
 		detail("Checking articles for %s", infoFilename.data());
 	}
@@ -1068,10 +1066,8 @@ void ArticleWriter::FlushCache()
 	// a file being retried writes into its existing output (ForceDirectWrite), as
 	// Start and Finish do: flushed to temporary files instead, its cached articles
 	// were never written to the file although marked done
-	bool directWrite = nzbget_rs_sap_article_writer_flush_is_direct_write(
-		g_Options->GetDirectWrite() ? 1 : 0,
-		m_fileInfo->GetForceDirectWrite() ? 1 : 0,
-		m_fileInfo->GetOutputInitialized() ? 1 : 0) != 0;
+	bool directWrite = (g_Options->GetDirectWrite() || m_fileInfo->GetForceDirectWrite()) &&
+		m_fileInfo->GetOutputInitialized();
 	DiskFile outfile;
 	bool needBufFile = false;
 	int flushedArticles = 0;
@@ -1104,9 +1100,7 @@ void ArticleWriter::FlushCache()
 
 		for (ArticleInfo* pa : cachedArticles)
 		{
-			if (nzbget_rs_sap_article_writer_flush_should_abort_deleted(
-				m_fileInfo->GetDeleted() ? 1 : 0,
-				m_fileInfo->GetNzbInfo()->GetParking() ? 1 : 0))
+			if (m_fileInfo->GetDeleted() && !m_fileInfo->GetNzbInfo()->GetParking())
 			{
 				// the file was deleted during flushing: stop flushing immediately
 				break;
@@ -1371,13 +1365,9 @@ void ArticleCache::Free(CachedSegmentData* segment)
 		free(segment->m_data);
 
 		std::lock_guard<std::mutex> guard(m_allocMutex);
-		int deleteCacheFlag = 0;
-		m_allocated = nzbget_rs_sap_article_cache_free_eval(
-			segment->m_size, m_allocated,
-			g_Options->GetServerMode() ? 1 : 0,
-			g_Options->GetContinuePartial() ? 1 : 0,
-			&deleteCacheFlag);
-		if (deleteCacheFlag)
+		size_t sub = segment->m_size > 0 ? (size_t)segment->m_size : 0;
+		m_allocated = m_allocated >= sub ? (m_allocated - sub) : 0;
+		if (m_allocated == 0 && g_Options->GetServerMode() && g_Options->GetContinuePartial())
 		{
 			g_DiskState->DeleteCacheFlag();
 		}

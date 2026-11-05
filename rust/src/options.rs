@@ -293,6 +293,46 @@ pub fn parse_category_source(value: Option<&CStr>) -> i32 {
     }
 }
 
+/// `Options::CheckOptions`: converts `TimeCorrection` (hours if in `[-24, 24]`, else minutes) to seconds.
+#[inline]
+pub fn normalize_time_correction(raw_val: i32) -> i32 {
+    let mins = if (-24..=24).contains(&raw_val) {
+        raw_val * 60
+    } else {
+        raw_val
+    };
+    mins * 60
+}
+
+/// `Options::CheckOptions`: checks 32-bit memory limits for `ArticleCache` and `ParBuffer`.
+/// Returns `(article_cache, par_buffer, err_kind)` where `err_kind`:
+/// 0 = ok, 1 = article_cache > 1900, 2 = par_buffer > 1900, 3 = sum > 1900.
+#[inline]
+pub fn clamp_32bit_memory_limits(
+    is_32bit: bool,
+    article_cache: i32,
+    par_buffer: i32,
+) -> (i32, i32, i32) {
+    let mut ac = article_cache;
+    let mut pb = par_buffer;
+    let mut err = 0;
+    if ac < 0 {
+        ac = 0;
+    } else if is_32bit && ac > 1900 {
+        ac = 1900;
+        err = 1;
+    } else if is_32bit && pb > 1900 {
+        pb = 1900;
+        err = 2;
+    }
+    if is_32bit && pb.saturating_add(ac) > 1900 {
+        ac = 1500;
+        pb = 400;
+        err = 3;
+    }
+    (ac, pb, err)
+}
+
 /// OptEntry::Restricted's options whose value is protected, compared with strcasecmp.
 const PROTECTED: [&CStr; 13] = [
     c"ControlIP", c"ControlPort", c"FormAuth", c"JsonP", c"SecureControl", c"SecurePort", c"SecureCert",

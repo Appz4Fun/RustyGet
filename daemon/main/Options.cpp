@@ -634,7 +634,7 @@ void Options::InitOptions()
 	m_parTimeLimit			= ParseIntValue(PARTIMELIMIT.data(), 10);
 	m_keepHistory			= ParseIntValue(KEEPHISTORY.data(), 10);
 	m_feedHistory			= ParseIntValue(FEEDHISTORY.data(), 10);
-	m_timeCorrection = nzbget_rs_fuq_options_normalize_time_correction(
+	m_timeCorrection = nzbget_rs_options_normalize_time_correction(
 		ParseIntValue(TIMECORRECTION.data(), 10));
 	m_propagationDelay		= nzbget_rs_tpr_options_minutes_to_seconds_i32(ParseIntValue(PROPAGATIONDELAY.data(), 10));
 	m_articleCache			= ParseIntValue(ARTICLECACHE.data(), 10);
@@ -1563,7 +1563,7 @@ void Options::CheckOptions()
 
 	int origArticleCache = m_articleCache;
 	int origParBuffer = m_parBuffer;
-	int memErr = nzbget_rs_fuq_options_clamp_32bit_memory_limits(
+	int memErr = nzbget_rs_options_clamp_32bit_memory_limits(
 		sizeof(void*) == 4 ? 1 : 0, m_articleCache, m_parBuffer,
 		&m_articleCache, &m_parBuffer);
 	if (memErr == 1)

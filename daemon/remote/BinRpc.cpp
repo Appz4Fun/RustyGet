@@ -798,7 +798,7 @@ void LogBinCommand::Execute()
 		GuardedMessageList messages = g_Log->GuardMessages();
 
 		int start = 0;
-		nzbget_rs_sap_binrpc_log_slice_bounds(
+		nzbget_rs_binrpc_log_slice_bounds(
 			ntohl(LogRequest.m_lines),
 			ntohl(LogRequest.m_idFrom),
 			messages->size(),
@@ -902,8 +902,7 @@ void EditQueueBinCommand::Execute()
 		names += strlen(names) + 1;
 	}
 
-	bool useOffsetStr = nzbget_rs_sap_binrpc_edit_queue_use_offset_str(
-		action, (int)DownloadQueue::eaFileMoveOffset, (int)DownloadQueue::eaGroupMoveOffset) != 0;
+	bool useOffsetStr = (action == DownloadQueue::eaFileMoveOffset || action == DownloadQueue::eaGroupMoveOffset);
 	NzbgetRsBuf offBuf = useOffsetStr ? nzbget_rs_dqh_conn_format_port_str(offset) : NzbgetRsBuf{};
 	bool ok = DownloadQueue::Guard()->EditList(
 		nrIdEntries > 0 ? &cIdList : nullptr,

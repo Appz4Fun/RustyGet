@@ -94,11 +94,7 @@ void RemoteServer::Run()
 		{
 			acceptedConnection = m_connection->Accept();
 		}
-		if (nzbget_rs_ucf_remote_server_is_accept_busy_retry(
-			bind ? 1 : 0,
-			acceptedConnection != nullptr ? 1 : 0,
-			(m_connection && m_connection->GetAcceptBusy()) ? 1 : 0,
-			IsStopped() ? 1 : 0) != 0)
+		if (bind && !acceptedConnection && m_connection && m_connection->GetAcceptBusy() && !IsStopped())
 		{
 			// out of descriptors or memory: the listener is fine, and tearing it
 			// down dropped the clients waiting in its backlog

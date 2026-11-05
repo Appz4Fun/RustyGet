@@ -15753,129 +15753,23 @@ pub unsafe extern "C" fn nzbget_rs_ntw_xmlrpc_validate_reset_counter(
 }
 
 // ============================================================================
-// feedurlqueue FFI exports (nzbget_rs_fuq_*)
+// QueueCoordinator & Options consolidated FFI exports
 // ============================================================================
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_fuq_queue_coord_can_start_article(
-    has_more: c_int,
-    can_proceed: c_int,
-    download_held: c_int,
-    extra_priority: c_int,
-) -> c_int {
-    i32::from(crate::feedurlqueue::queue_coord_can_start_article(
-        has_more != 0,
-        can_proceed != 0,
-        download_held != 0,
-        extra_priority != 0,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_fuq_queue_coord_next_standby_wait(wait_interval: c_int) -> c_int {
-    crate::feedurlqueue::queue_coord_next_standby_wait(wait_interval)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_fuq_queue_coord_active_sleep_interval(
-    download_started: c_int,
-) -> c_int {
-    crate::feedurlqueue::queue_coord_active_sleep_interval(download_started != 0)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_fuq_queue_coord_is_smaller_dupe_file(
+pub extern "C" fn nzbget_rs_queue_coord_is_smaller_dupe_file(
     size1: i64,
     idx1: c_int,
     size2: i64,
     idx2: c_int,
 ) -> c_int {
-    i32::from(crate::feedurlqueue::queue_coord_is_smaller_dupe_file(
+    i32::from(crate::queuehotpath::is_smaller_dupe_file(
         size1, idx1, size2, idx2,
     ))
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_fuq_queue_coord_is_higher_nzb_priority(
-    has_file: c_int,
-    nzb_extra: c_int,
-    file_nzb_extra: c_int,
-    nzb_prio: c_int,
-    file_nzb_prio: c_int,
-) -> c_int {
-    i32::from(crate::feedurlqueue::queue_coord_is_higher_nzb_priority(
-        has_file != 0,
-        nzb_extra != 0,
-        file_nzb_extra != 0,
-        nzb_prio,
-        file_nzb_prio,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_fuq_queue_coord_should_analyze_first_article(
-    part_num: c_int,
-    raw_article: c_int,
-    direct_rename: c_int,
-    dupe_fallback_enabled: c_int,
-) -> c_int {
-    i32::from(crate::feedurlqueue::queue_coord_should_analyze_first_article(
-        part_num,
-        raw_article != 0,
-        direct_rename != 0,
-        dupe_fallback_enabled != 0,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_fuq_queue_coord_is_article_completed_status(
-    status: c_int,
-    ad_finished: c_int,
-    ad_failed: c_int,
-    ad_retry: c_int,
-    ad_fatal_error: c_int,
-) -> c_int {
-    i32::from(crate::feedurlqueue::queue_coord_is_article_completed_status(
-        status,
-        ad_finished,
-        ad_failed,
-        ad_retry,
-        ad_fatal_error,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_fuq_queue_coord_should_use_article_filename(
-    file_naming: c_int,
-    nf_article: c_int,
-    nf_auto: c_int,
-    is_obfuscated: c_int,
-    many_dupe_files: c_int,
-) -> c_int {
-    i32::from(crate::feedurlqueue::queue_coord_should_use_article_filename(
-        file_naming,
-        nf_article,
-        nf_auto,
-        is_obfuscated != 0,
-        many_dupe_files != 0,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_fuq_queue_coord_should_delete_file_obj(
-    file_completed: c_int,
-    file_deleted: c_int,
-    active_downloads: c_int,
-) -> c_int {
-    i32::from(crate::feedurlqueue::queue_coord_should_delete_file_obj(
-        file_completed != 0,
-        file_deleted != 0,
-        active_downloads,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_fuq_queue_coord_should_skip_health_check(
+pub extern "C" fn nzbget_rs_queue_coord_should_skip_health_check(
     health_check: c_int,
     hc_none: c_int,
     hc_park: c_int,
@@ -15889,7 +15783,7 @@ pub extern "C" fn nzbget_rs_fuq_queue_coord_should_skip_health_check(
     success_articles: c_int,
     total_articles: c_int,
 ) -> c_int {
-    i32::from(crate::feedurlqueue::queue_coord_should_skip_health_check(
+    i32::from(crate::queuehotpath::should_skip_health_check(
         health_check,
         hc_none,
         hc_park,
@@ -15906,26 +15800,7 @@ pub extern "C" fn nzbget_rs_fuq_queue_coord_should_skip_health_check(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_fuq_queue_coord_resolve_download_critical_health(
-    critical_est: c_int,
-    critical_exact: c_int,
-    health_check: c_int,
-    hc_dupe: c_int,
-    certainly_parless: c_int,
-    has_size_twin: c_int,
-) -> c_int {
-    crate::feedurlqueue::queue_coord_resolve_download_critical_health(
-        critical_est,
-        critical_exact,
-        health_check,
-        hc_dupe,
-        certainly_parless != 0,
-        has_size_twin != 0,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_fuq_queue_coord_is_queued_dupe_active(
+pub extern "C" fn nzbget_rs_queue_coord_is_queued_dupe_active(
     deleting: c_int,
     delete_status: c_int,
     ds_none: c_int,
@@ -15939,7 +15814,7 @@ pub extern "C" fn nzbget_rs_fuq_queue_coord_is_queued_dupe_active(
     direct_unpack_status: c_int,
     ns_running: c_int,
 ) -> c_int {
-    i32::from(crate::feedurlqueue::queue_coord_is_queued_dupe_active(
+    i32::from(crate::queuehotpath::is_queued_dupe_active(
         deleting != 0,
         delete_status,
         ds_none,
@@ -15956,36 +15831,19 @@ pub extern "C" fn nzbget_rs_fuq_queue_coord_is_queued_dupe_active(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_fuq_queue_coord_should_abort_dead_pick_failover(
-    cur_success: c_int,
-    dupe_recovered: c_int,
-    recovered_at_start: c_int,
-    min_alive_samples: c_int,
-) -> c_int {
-    i32::from(
-        crate::feedurlqueue::queue_coord_should_abort_dead_pick_failover(
-            cur_success,
-            dupe_recovered,
-            recovered_at_start,
-            min_alive_samples,
-        ),
-    )
+pub extern "C" fn nzbget_rs_options_normalize_time_correction(raw_val: c_int) -> c_int {
+    crate::options::normalize_time_correction(raw_val)
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_fuq_options_normalize_time_correction(raw_val: c_int) -> c_int {
-    crate::feedurlqueue::options_normalize_time_correction(raw_val)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_fuq_options_clamp_32bit_memory_limits(
+pub unsafe extern "C" fn nzbget_rs_options_clamp_32bit_memory_limits(
     is_32bit: c_int,
     article_cache: c_int,
     par_buffer: c_int,
     out_article_cache: *mut c_int,
     out_par_buffer: *mut c_int,
 ) -> c_int {
-    let (ac, pb, err) = crate::feedurlqueue::options_clamp_32bit_memory_limits(
+    let (ac, pb, err) = crate::options::clamp_32bit_memory_limits(
         is_32bit != 0,
         article_cache,
         par_buffer,
@@ -16590,52 +16448,18 @@ pub extern "C" fn nzbget_rs_dad_article_dl_should_pace_critical_uncached(
 }
 
 // ============================================================================
-// DownloadInfo, QueueCoordinator & QueueEditor Hot-Path FFI (`queuecoordinfo.rs`)
+// QueueCoordinator Consolidated Hot-Path FFI (`queuehotpath.rs`)
 // ============================================================================
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_qci_queue_coord_should_resave_completed_file_state(
-    status: c_int,
-    cf_partial: c_int,
-    cf_failure: c_int,
-    file_id: c_int,
-) -> c_int {
-    i32::from(
-        crate::queuecoordinfo::queue_coord_should_resave_completed_file_state(
-            status, cf_partial, cf_failure, file_id,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_resolve_desired_server_level(
-    has_desired_server: c_int,
-    has_server_obj: c_int,
-    is_active: c_int,
-    norm_level: c_int,
-    out_level: *mut c_int,
-) -> c_int {
-    let (use_specific, level) = crate::queuecoordinfo::queue_coord_resolve_desired_server_level(
-        has_desired_server != 0,
-        has_server_obj != 0,
-        is_active != 0,
-        norm_level,
-    );
-    if !out_level.is_null() {
-        *out_level = level;
-    }
-    i32::from(use_specific)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_calc_propagation_wait_log_mins(
+pub unsafe extern "C" fn nzbget_rs_queue_coord_calc_propagation_wait_log_mins(
     file_time: i64,
     propagation_delay: c_int,
     cur_date: i64,
     out_posted_min: *mut c_int,
     out_start_min: *mut c_int,
 ) {
-    let (posted_min, start_min) = crate::queuecoordinfo::queue_coord_calc_propagation_wait_log_mins(
+    let (posted_min, start_min) = crate::queuehotpath::calc_propagation_wait_log_mins(
         file_time,
         propagation_delay,
         cur_date,
@@ -16649,64 +16473,7 @@ pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_calc_propagation_wait_log_min
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_qci_queue_coord_should_fetch_first_article_for_rename(
-    direct_rename: c_int,
-    direct_rename_status: c_int,
-    ts_running: c_int,
-    all_first: c_int,
-) -> c_int {
-    i32::from(
-        crate::queuecoordinfo::queue_coord_should_fetch_first_article_for_rename(
-            direct_rename != 0,
-            direct_rename_status,
-            ts_running,
-            all_first != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_qci_queue_coord_is_misplaced_donor_article(
-    status: c_int,
-    ad_finished: c_int,
-    dupe_fallback_round: c_int,
-    decoded_file_size: i64,
-    segment_aligned: c_int,
-) -> c_int {
-    i32::from(
-        crate::queuecoordinfo::queue_coord_is_misplaced_donor_article(
-            status,
-            ad_finished,
-            dupe_fallback_round,
-            decoded_file_size,
-            segment_aligned != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_should_reset_dupe_failed_run(
-    dupe_fallback_round: c_int,
-    msg_id: *const c_char,
-    orig_msg_id: *const c_char,
-) -> c_int {
-    let m = if msg_id.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(msg_id).to_bytes()
-    };
-    let o = if orig_msg_id.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(orig_msg_id).to_bytes()
-    };
-    i32::from(
-        crate::queuecoordinfo::queue_coord_should_reset_dupe_failed_run(dupe_fallback_round, m, o),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_eval_dupe_recovery_and_cutover(
+pub unsafe extern "C" fn nzbget_rs_queue_coord_eval_dupe_recovery_and_cutover(
     dupe_fallback_round: c_int,
     dupe_proactive: c_int,
     msg_id: *const c_char,
@@ -16730,7 +16497,7 @@ pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_eval_dupe_recovery_and_cutove
         CStr::from_ptr(orig_msg_id).to_bytes()
     };
     let (recovered, next_file_rec, next_nzb_rec, trigger_cutover) =
-        crate::queuecoordinfo::queue_coord_eval_dupe_recovery_and_cutover(
+        crate::queuehotpath::eval_dupe_recovery_and_cutover(
             dupe_fallback_round,
             dupe_proactive != 0,
             m,
@@ -16753,7 +16520,7 @@ pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_eval_dupe_recovery_and_cutove
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_advance_article_completion_counters(
+pub unsafe extern "C" fn nzbget_rs_queue_coord_advance_article_completion_counters(
     rem_file_size: i64,
     rem_nzb_size: i64,
     paused_size: i64,
@@ -16767,7 +16534,7 @@ pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_advance_article_completion_co
     out_completed_articles: *mut c_int,
 ) -> c_int {
     let (rf, rn, ps, ca, fc) =
-        crate::queuecoordinfo::queue_coord_advance_article_completion_counters(
+        crate::queuehotpath::advance_article_completion_counters(
             rem_file_size,
             rem_nzb_size,
             paused_size,
@@ -16792,7 +16559,7 @@ pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_advance_article_completion_co
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_eval_file_completion_and_assembly(
+pub unsafe extern "C" fn nzbget_rs_queue_coord_eval_file_completion_and_assembly(
     file_completed: c_int,
     parking: c_int,
     active_downloads: c_int,
@@ -16802,7 +16569,7 @@ pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_eval_file_completion_and_asse
     out_file_completed: *mut c_int,
 ) -> c_int {
     let (fc, complete_parts) =
-        crate::queuecoordinfo::queue_coord_eval_file_completion_and_assembly(
+        crate::queuehotpath::eval_file_completion_and_assembly(
             file_completed != 0,
             parking != 0,
             active_downloads,
@@ -16817,7 +16584,7 @@ pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_eval_file_completion_and_asse
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_apply_assembly_failure_counters(
+pub unsafe extern "C" fn nzbget_rs_queue_coord_apply_assembly_failure_counters(
     success_articles: c_int,
     success_size: i64,
     is_par_file: c_int,
@@ -16841,7 +16608,7 @@ pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_apply_assembly_failure_counte
     {
         return;
     }
-    crate::queuecoordinfo::queue_coord_apply_assembly_failure_counters(
+    crate::queuehotpath::apply_assembly_failure_counters(
         success_articles,
         success_size,
         is_par_file != 0,
@@ -16857,7 +16624,7 @@ pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_apply_assembly_failure_counte
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_demote_article_counters(
+pub unsafe extern "C" fn nzbget_rs_queue_coord_demote_article_counters(
     article_size: c_int,
     is_par_file: c_int,
     dupe_proactive: c_int,
@@ -16901,7 +16668,7 @@ pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_demote_article_counters(
     } else {
         CStr::from_ptr(orig_msg_id).to_bytes()
     };
-    crate::queuecoordinfo::queue_coord_demote_article_counters(
+    crate::queuehotpath::demote_article_counters(
         article_size,
         is_par_file != 0,
         dupe_proactive != 0,
@@ -16923,24 +16690,7 @@ pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_demote_article_counters(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_qci_queue_coord_should_delete_temp_article_file(
-    has_result_filename: c_int,
-    direct_write: c_int,
-    force_direct_write: c_int,
-    dupe_fallback_round: c_int,
-) -> c_int {
-    i32::from(
-        crate::queuecoordinfo::queue_coord_should_delete_temp_article_file(
-            has_result_filename != 0,
-            direct_write != 0,
-            force_direct_write != 0,
-            dupe_fallback_round,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_should_defer_dupe_failover(
+pub unsafe extern "C" fn nzbget_rs_queue_coord_should_defer_dupe_failover(
     fallback_enabled: c_int,
     attempted: c_int,
     recovered: c_int,
@@ -16952,7 +16702,7 @@ pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_should_defer_dupe_failover(
     failover_checked: c_int,
     out_update_checked: *mut c_int,
 ) -> c_int {
-    let (defer, update_checked) = crate::queuecoordinfo::queue_coord_should_defer_dupe_failover(
+    let (defer, update_checked) = crate::queuehotpath::should_defer_dupe_failover(
         fallback_enabled != 0,
         attempted,
         recovered,
@@ -16970,7 +16720,7 @@ pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_should_defer_dupe_failover(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_qci_queue_coord_should_park_dead_without_backup(
+pub extern "C" fn nzbget_rs_queue_coord_should_park_dead_without_backup(
     fallback_enabled: c_int,
     defer_state: c_int,
     dp_deferred: c_int,
@@ -16983,7 +16733,7 @@ pub extern "C" fn nzbget_rs_qci_queue_coord_should_park_dead_without_backup(
     below: c_int,
 ) -> c_int {
     i32::from(
-        crate::queuecoordinfo::queue_coord_should_park_dead_without_backup(
+        crate::queuehotpath::should_park_dead_without_backup(
             fallback_enabled != 0,
             defer_state,
             dp_deferred,
@@ -16999,29 +16749,7 @@ pub extern "C" fn nzbget_rs_qci_queue_coord_should_park_dead_without_backup(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_is_partly_alive_failover_ready(
-    backup_alive: c_int,
-    projected: c_int,
-    backup_lead: c_int,
-    critical: c_int,
-    failover_warranted: c_int,
-    out_projected_below_critical: *mut c_int,
-) -> c_int {
-    let (ready, below_crit) = crate::queuecoordinfo::queue_coord_is_partly_alive_failover_ready(
-        backup_alive,
-        projected,
-        backup_lead,
-        critical,
-        failover_warranted != 0,
-    );
-    if !out_projected_below_critical.is_null() {
-        *out_projected_below_critical = i32::from(below_crit);
-    }
-    i32::from(ready)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_qci_queue_coord_should_wait_for_borrowing_on_par_damage(
+pub extern "C" fn nzbget_rs_queue_coord_should_wait_for_borrowing_on_par_damage(
     fallback_enabled: c_int,
     raw_article: c_int,
     dupe_mode: c_int,
@@ -17034,7 +16762,7 @@ pub extern "C" fn nzbget_rs_qci_queue_coord_should_wait_for_borrowing_on_par_dam
     recovered: c_int,
 ) -> c_int {
     i32::from(
-        crate::queuecoordinfo::queue_coord_should_wait_for_borrowing_on_par_damage(
+        crate::queuehotpath::should_wait_for_borrowing_on_par_damage(
             fallback_enabled != 0,
             raw_article != 0,
             dupe_mode,
@@ -17050,7 +16778,7 @@ pub extern "C" fn nzbget_rs_qci_queue_coord_should_wait_for_borrowing_on_par_dam
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_eval_discard_direct_rename_file(
+pub unsafe extern "C" fn nzbget_rs_queue_coord_eval_discard_direct_rename_file(
     is_par_file: c_int,
     completed_articles: c_int,
     active_downloads: c_int,
@@ -17061,7 +16789,7 @@ pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_eval_discard_direct_rename_fi
     out_discard_infos: *mut c_int,
 ) -> c_int {
     let (discard_par, discard_infos) =
-        crate::queuecoordinfo::queue_coord_eval_discard_direct_rename_file(
+        crate::queuehotpath::eval_discard_direct_rename_file(
             is_par_file != 0,
             completed_articles,
             active_downloads,
@@ -17077,38 +16805,17 @@ pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_eval_discard_direct_rename_fi
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_qci_queue_coord_validate_split_file_state(
+pub extern "C" fn nzbget_rs_queue_coord_validate_split_file_state(
     active_downloads: c_int,
     completed_articles: c_int,
     has_post_info: c_int,
     same_nzb: c_int,
 ) -> c_int {
-    crate::queuecoordinfo::queue_coord_validate_split_file_state(
+    crate::queuehotpath::validate_split_file_state(
         active_downloads,
         completed_articles,
         has_post_info != 0,
         same_nzb != 0,
-    )
-}
-
-// ============================================================================
-// DirectUnpack, Cleanup, UnpackController, UrlCoordinator, FeedCoordinator & RemoteServer Hot-Path FFI (`unpackcleanurlfeed.rs`)
-// ============================================================================
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ucf_remote_server_is_accept_busy_retry(
-    bind: c_int,
-    has_accepted_conn: c_int,
-    accept_busy: c_int,
-    is_stopped: c_int,
-) -> c_int {
-    i32::from(
-        crate::unpackcleanurlfeed::remote_server_is_accept_busy_retry(
-            bind != 0,
-            has_accepted_conn != 0,
-            accept_busy != 0,
-            is_stopped != 0,
-        ),
     )
 }
 
@@ -18359,26 +18066,7 @@ pub extern "C" fn nzbget_rs_dps_diskstate_calc_first_day_reset_time(first_day: c
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_cwp_queue_coord_is_nzb_paused(
-    file_list_size: c_int,
-    paused_file_count: c_int,
-) -> c_int {
-    crate::coorddlwriterpool::queue_coord_is_nzb_paused(file_list_size, paused_file_count)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_cwp_queue_coord_should_try_proactive_cutover(
-    dupe_cutover: c_int,
-    dupe_fallback_round: c_int,
-) -> c_int {
-    crate::coorddlwriterpool::queue_coord_should_try_proactive_cutover(
-        dupe_cutover,
-        dupe_fallback_round,
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cwp_queue_coord_select_dupe_donor_id(
+pub unsafe extern "C" fn nzbget_rs_queue_coord_select_dupe_donor_id(
     dupe_fallback_round: c_int,
     donors_ptr: *const c_int,
     donors_len: usize,
@@ -18390,7 +18078,7 @@ pub unsafe extern "C" fn nzbget_rs_cwp_queue_coord_select_dupe_donor_id(
     } else {
         std::slice::from_raw_parts(donors_ptr, donors_len)
     };
-    crate::coorddlwriterpool::queue_coord_select_dupe_donor_id(
+    crate::queuehotpath::select_dupe_donor_id(
         dupe_fallback_round,
         donors,
         crate::queuehotpath::cstr_to_bytes(msg_id),
@@ -18399,7 +18087,7 @@ pub unsafe extern "C" fn nzbget_rs_cwp_queue_coord_select_dupe_donor_id(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cwp_queue_coord_apply_failed_article_counters(
+pub unsafe extern "C" fn nzbget_rs_queue_coord_apply_failed_article_counters(
     part_number: c_int,
     par_file: c_int,
     article_size: c_int,
@@ -18417,7 +18105,7 @@ pub unsafe extern "C" fn nzbget_rs_cwp_queue_coord_apply_failed_article_counters
     out_nzb_cur_failed_articles: *mut c_int,
 ) {
     let (r, ffs, ncfs, npcfs, ffa, ncfa) =
-        crate::coorddlwriterpool::queue_coord_apply_failed_article_counters(
+        crate::queuehotpath::apply_failed_article_counters(
             part_number,
             par_file,
             article_size,
@@ -18449,7 +18137,7 @@ pub unsafe extern "C" fn nzbget_rs_cwp_queue_coord_apply_failed_article_counters
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cwp_queue_coord_eval_delete_file_diskstate_flags(
+pub unsafe extern "C" fn nzbget_rs_queue_coord_eval_delete_file_diskstate_flags(
     file_status: c_int,
     cf_success: c_int,
     cf_partial: c_int,
@@ -18460,7 +18148,7 @@ pub unsafe extern "C" fn nzbget_rs_cwp_queue_coord_eval_delete_file_diskstate_fl
     out_save_partial: *mut c_int,
 ) {
     let (delete_data, save_partial) =
-        crate::coorddlwriterpool::queue_coord_eval_delete_file_diskstate_flags(
+        crate::queuehotpath::eval_delete_file_diskstate_flags(
             file_status,
             cf_success,
             cf_partial,
@@ -18477,70 +18165,7 @@ pub unsafe extern "C" fn nzbget_rs_cwp_queue_coord_eval_delete_file_diskstate_fl
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_cwp_queue_coord_should_start_live_stream_repair(
-    dupe_fallback_mode: c_int,
-    daf_live: c_int,
-    more_files_queued: c_int,
-    has_live_repair_thread: c_int,
-) -> c_int {
-    crate::coorddlwriterpool::queue_coord_should_start_live_stream_repair(
-        dupe_fallback_mode,
-        daf_live,
-        more_files_queued,
-        has_live_repair_thread,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_cwp_queue_coord_is_neighbor_eligible_for_demotion(
-    status: c_int,
-    ai_finished: c_int,
-    dupe_fallback_round: c_int,
-    segment_size: c_int,
-) -> c_int {
-    crate::coorddlwriterpool::queue_coord_is_neighbor_eligible_for_demotion(
-        status,
-        ai_finished,
-        dupe_fallback_round,
-        segment_size,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_cwp_queue_coord_is_file_tried(
-    success_articles: c_int,
-    failed_articles: c_int,
-) -> c_int {
-    crate::coorddlwriterpool::queue_coord_is_file_tried(success_articles, failed_articles)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_cwp_queue_coord_is_dead_pick_probe_file_eligible(
-    deleted: c_int,
-    paused: c_int,
-    total_articles: c_int,
-    pass: c_int,
-    par_file: c_int,
-) -> c_int {
-    crate::coorddlwriterpool::queue_coord_is_dead_pick_probe_file_eligible(
-        deleted,
-        paused,
-        total_articles,
-        pass,
-        par_file,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_cwp_queue_coord_select_merged_download_start_time(
-    dest_start: i64,
-    src_start: i64,
-) -> i64 {
-    crate::coorddlwriterpool::queue_coord_select_merged_download_start_time(dest_start, src_start)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cwp_queue_coord_discard_downloaded_articles_counters(
+pub unsafe extern "C" fn nzbget_rs_queue_coord_discard_downloaded_articles_counters(
     nzb_rem_size: i64,
     nzb_paused_size: i64,
     nzb_cur_succ_art: c_int,
@@ -18567,7 +18192,7 @@ pub unsafe extern "C" fn nzbget_rs_cwp_queue_coord_discard_downloaded_articles_c
     out_file_rem_size: *mut i64,
 ) {
     let (n_rem, n_pau, n_csa, n_css, n_pcss, n_cfa, n_cfs, n_pcfs, f_rem) =
-        crate::coorddlwriterpool::queue_coord_discard_downloaded_articles_counters(
+        crate::queuehotpath::discard_downloaded_articles_counters(
             nzb_rem_size,
             nzb_paused_size,
             nzb_cur_succ_art,
@@ -19088,75 +18713,8 @@ pub unsafe extern "C" fn nzbget_rs_roc_remote_client_calc_group_unpaused_remaini
     }
 }
 
-// ============================================================================
-// Batch 37: streamarticleparrepair (sap_*)
-// ============================================================================
-
 #[no_mangle]
-pub extern "C" fn nzbget_rs_sap_article_writer_log_start_mode(
-    raw_article: c_int,
-    direct_write: c_int,
-    cached: c_int,
-) -> c_int {
-    crate::streamarticleparrepair::sap_article_writer_log_start_mode(
-        raw_article != 0,
-        direct_write != 0,
-        cached != 0,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sap_article_writer_flush_is_direct_write(
-    direct_write_opt: c_int,
-    force_direct_write: c_int,
-    output_initialized: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamarticleparrepair::sap_article_writer_flush_is_direct_write(
-            direct_write_opt != 0,
-            force_direct_write != 0,
-            output_initialized != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sap_article_writer_flush_should_abort_deleted(
-    file_deleted: c_int,
-    nzb_parking: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamarticleparrepair::sap_article_writer_flush_should_abort_deleted(
-            file_deleted != 0,
-            nzb_parking != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_sap_article_cache_free_eval(
-    segment_size: c_int,
-    allocated_before: usize,
-    server_mode: c_int,
-    continue_partial: c_int,
-    out_delete_cache_flag: *mut c_int,
-) -> usize {
-    let (new_allocated, delete_flag) = crate::streamarticleparrepair::sap_article_cache_free_eval(
-        segment_size,
-        allocated_before,
-        server_mode != 0,
-        continue_partial != 0,
-    );
-    if !out_delete_cache_flag.is_null() {
-        unsafe {
-            *out_delete_cache_flag = i32::from(delete_flag);
-        }
-    }
-    new_allocated
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_sap_binrpc_log_slice_bounds(
+pub unsafe extern "C" fn nzbget_rs_binrpc_log_slice_bounds(
     lines: c_int,
     id_from: u32,
     messages_len: usize,
@@ -19164,7 +18722,7 @@ pub unsafe extern "C" fn nzbget_rs_sap_binrpc_log_slice_bounds(
     out_start: *mut c_int,
     out_nr_entries: *mut c_int,
 ) {
-    let (start, nr_entries) = crate::streamarticleparrepair::sap_binrpc_log_slice_bounds(
+    let (start, nr_entries) = crate::binrpc::log_slice_bounds(
         lines,
         id_from,
         messages_len,
@@ -19180,21 +18738,6 @@ pub unsafe extern "C" fn nzbget_rs_sap_binrpc_log_slice_bounds(
             *out_nr_entries = nr_entries;
         }
     }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sap_binrpc_edit_queue_use_offset_str(
-    action: c_int,
-    ea_file_move_offset: c_int,
-    ea_group_move_offset: c_int,
-) -> c_int {
-    i32::from(
-        crate::streamarticleparrepair::sap_binrpc_edit_queue_use_offset_str(
-            action,
-            ea_file_move_offset,
-            ea_group_move_offset,
-        ),
-    )
 }
 
 // ============================================================================
@@ -19462,12 +19005,8 @@ pub unsafe extern "C" fn nzbget_rs_dds_webdl_redirect_loop_step(
     i32::from(should_continue)
 }
 
-// ============================================================================
-// Batch 39: queuecoordfallbackhist (`qcf_*`)
-// ============================================================================
-
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_qcf_queue_coord_apply_success_article_counters(
+pub unsafe extern "C" fn nzbget_rs_queue_coord_apply_success_article_counters(
     article_size: i64,
     is_par_file: c_int,
     file_success_size: i64,
@@ -19482,7 +19021,7 @@ pub unsafe extern "C" fn nzbget_rs_qcf_queue_coord_apply_success_article_counter
     out_nzb_cur_success_articles: *mut c_int,
 ) {
     let (fs, ns, ps, fa, na) =
-        crate::queuecoordfallbackhist::qcf_queue_coord_apply_success_article_counters(
+        crate::queuehotpath::apply_success_article_counters(
             article_size,
             is_par_file != 0,
             file_success_size,
@@ -19506,265 +19045,6 @@ pub unsafe extern "C" fn nzbget_rs_qcf_queue_coord_apply_success_article_counter
         }
         if !out_nzb_cur_success_articles.is_null() {
             *out_nzb_cur_success_articles = na;
-        }
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_qcf_queue_coord_has_more_jobs(
-    has_more_articles: c_int,
-    active_downloads_running: c_int,
-) -> c_int {
-    i32::from(
-        crate::queuecoordfallbackhist::qcf_queue_coord_has_more_jobs(
-            has_more_articles != 0,
-            active_downloads_running != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_qcf_queue_coord_can_proceed_downloads(
-    is_stopped: c_int,
-    active_count: usize,
-    effective_limit: c_int,
-) -> c_int {
-    i32::from(
-        crate::queuecoordfallbackhist::qcf_queue_coord_can_proceed_downloads(
-            is_stopped != 0,
-            active_count,
-            effective_limit,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_qcf_queue_coord_should_run_check_dupe_file_infos(
-    delete_status: c_int,
-    ds_none: c_int,
-    dupe_check: c_int,
-    dupe_mode: c_int,
-    dm_force: c_int,
-) -> c_int {
-    i32::from(
-        crate::queuecoordfallbackhist::qcf_queue_coord_should_run_check_dupe_file_infos(
-            delete_status,
-            ds_none,
-            dupe_check != 0,
-            dupe_mode,
-            dm_force,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_qcf_queue_coord_should_notify_nzb_added(
-    delete_status: c_int,
-    ds_manual: c_int,
-) -> c_int {
-    i32::from(
-        crate::queuecoordfallbackhist::qcf_queue_coord_should_notify_nzb_added(
-            delete_status,
-            ds_manual,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_qcf_queue_coord_should_revalidate_dupe_neighbors(
-    dupe_recovered_articles: c_int,
-    decoded_file_size: i64,
-) -> c_int {
-    i32::from(
-        crate::queuecoordfallbackhist::qcf_queue_coord_should_revalidate_dupe_neighbors(
-            dupe_recovered_articles,
-            decoded_file_size,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_qcf_queue_coord_should_account_attempt_server_stats(
-    dl_status: c_int,
-    ad_retry: c_int,
-) -> c_int {
-    i32::from(
-        crate::queuecoordfallbackhist::qcf_queue_coord_should_account_attempt_server_stats(
-            dl_status,
-            ad_retry,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_qcf_queue_coord_completed_file_crc(
-    status: c_int,
-    cf_success: c_int,
-    crc: u32,
-) -> u32 {
-    crate::queuecoordfallbackhist::qcf_queue_coord_completed_file_crc(status, cf_success, crc)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_qcf_queue_coord_should_discard_direct_rename_on_complete(
-    direct_rename_status: c_int,
-    ts_running: c_int,
-    deleting: c_int,
-    download_completed: c_int,
-) -> c_int {
-    i32::from(
-        crate::queuecoordfallbackhist::qcf_queue_coord_should_discard_direct_rename_on_complete(
-            direct_rename_status,
-            ts_running,
-            deleting != 0,
-            download_completed != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_qcf_queue_coord_select_file_removed_event(
-    completed: c_int,
-    file_deleted: c_int,
-    ea_file_completed: c_int,
-    ea_file_deleted: c_int,
-) -> c_int {
-    crate::queuecoordfallbackhist::qcf_queue_coord_select_file_removed_event(
-        completed != 0,
-        file_deleted != 0,
-        ea_file_completed,
-        ea_file_deleted,
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_qcf_queue_coord_discard_segment_actions(
-    fallback_round: c_int,
-    has_result_filename: c_int,
-    has_segment_content: c_int,
-    flush_locked: c_int,
-    out_delete_result_file: *mut c_int,
-    out_discard_cached_segment: *mut c_int,
-) {
-    let (del_res, disc_seg) =
-        crate::queuecoordfallbackhist::qcf_queue_coord_discard_segment_actions(
-            fallback_round,
-            has_result_filename != 0,
-            has_segment_content != 0,
-            flush_locked != 0,
-        );
-    unsafe {
-        if !out_delete_result_file.is_null() {
-            *out_delete_result_file = i32::from(del_res);
-        }
-        if !out_discard_cached_segment.is_null() {
-            *out_discard_cached_segment = i32::from(disc_seg);
-        }
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_qcf_queue_coord_should_delete_direct_write_output(
-    direct_write: c_int,
-    output_filename_empty: c_int,
-    force_direct_write: c_int,
-) -> c_int {
-    i32::from(
-        crate::queuecoordfallbackhist::qcf_queue_coord_should_delete_direct_write_output(
-            direct_write != 0,
-            output_filename_empty != 0,
-            force_direct_write != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_qcf_queue_coord_has_active_dupe_self_exempt(
-    has_extra_priority: c_int,
-    has_post_info: c_int,
-    post_working: c_int,
-    post_stage: c_int,
-    pt_queued: c_int,
-) -> c_int {
-    i32::from(
-        crate::queuecoordfallbackhist::qcf_queue_coord_has_active_dupe_self_exempt(
-            has_extra_priority != 0,
-            has_post_info != 0,
-            post_working != 0,
-            post_stage,
-            pt_queued,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_qcf_queue_coord_par_damage_failover_allowed(
-    certain: c_int,
-    backup_alive: c_int,
-    failover_warranted: c_int,
-) -> c_int {
-    i32::from(
-        crate::queuecoordfallbackhist::qcf_queue_coord_par_damage_failover_allowed(
-            certain != 0,
-            backup_alive,
-            failover_warranted != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_qcf_queue_coord_start_dead_pick_probe_eligible(
-    hc_is_dupe: c_int,
-    dupe_check: c_int,
-    dead_pick_probed: c_int,
-    fails_over: c_int,
-    is_nzb_kind: c_int,
-    deleting: c_int,
-    parking: c_int,
-    delete_status: c_int,
-    ds_none: c_int,
-    current_success_articles: c_int,
-    out_mark_probed: *mut c_int,
-) -> c_int {
-    let (mark_probed, continue_probe) =
-        crate::queuecoordfallbackhist::qcf_queue_coord_start_dead_pick_probe_eligible(
-            hc_is_dupe != 0,
-            dupe_check != 0,
-            dead_pick_probed != 0,
-            fails_over != 0,
-            is_nzb_kind != 0,
-            deleting != 0,
-            parking != 0,
-            delete_status,
-            ds_none,
-            current_success_articles,
-        );
-    if !out_mark_probed.is_null() {
-        unsafe {
-            *out_mark_probed = i32::from(mark_probed);
-        }
-    }
-    i32::from(continue_probe)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_qcf_queue_coord_merge_min_max_time(
-    dest_min: i64,
-    src_min: i64,
-    dest_max: i64,
-    src_max: i64,
-    out_min: *mut i64,
-    out_max: *mut i64,
-) {
-    let (m_min, m_max) = crate::queuecoordfallbackhist::qcf_queue_coord_merge_min_max_time(
-        dest_min, src_min, dest_max, src_max,
-    );
-    unsafe {
-        if !out_min.is_null() {
-            *out_min = m_min;
-        }
-        if !out_max.is_null() {
-            *out_max = m_max;
         }
     }
 }
@@ -21440,35 +20720,24 @@ pub unsafe extern "C" fn nzbget_rs_dupe_watch_format_searched_state_line(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_merge_counters(
-    dest: *mut crate::queuecoordinfo::NzbgetRsNzbMergeSplitCounters,
-    src: *const crate::queuecoordinfo::NzbgetRsNzbMergeSplitCounters,
+pub unsafe extern "C" fn nzbget_rs_queue_coord_merge_counters(
+    dest: *mut crate::queuehotpath::NzbgetRsNzbMergeSplitCounters,
+    src: *const crate::queuehotpath::NzbgetRsNzbMergeSplitCounters,
 ) {
     if !dest.is_null() && !src.is_null() {
-        crate::queuecoordinfo::queue_coord_merge_counters(&mut *dest, &*src);
+        crate::queuehotpath::merge_counters(&mut *dest, &*src);
     }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_qci_queue_coord_split_transfer_file(
-    src: *mut crate::queuecoordinfo::NzbgetRsNzbMergeSplitCounters,
-    dst: *mut crate::queuecoordinfo::NzbgetRsNzbMergeSplitCounters,
-    file: *const crate::queuecoordinfo::NzbgetRsSplitFileCounters,
+pub unsafe extern "C" fn nzbget_rs_queue_coord_split_transfer_file(
+    src: *mut crate::queuehotpath::NzbgetRsNzbMergeSplitCounters,
+    dst: *mut crate::queuehotpath::NzbgetRsNzbMergeSplitCounters,
+    file: *const crate::queuehotpath::NzbgetRsSplitFileCounters,
 ) {
     if !src.is_null() && !dst.is_null() && !file.is_null() {
-        crate::queuecoordinfo::queue_coord_split_transfer_file(&mut *src, &mut *dst, &*file);
+        crate::queuehotpath::split_transfer_file(&mut *src, &mut *dst, &*file);
     }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_qci_queue_editor_diff_category_extensions(
-    old_ext: *const c_char,
-    new_ext: *const c_char,
-) -> RsBuf {
-    into_buf(crate::queuecoordinfo::queue_editor_diff_category_extensions(
-        input(old_ext),
-        input(new_ext),
-    ))
 }
 
 #[no_mangle]
@@ -22417,7 +21686,7 @@ pub unsafe extern "C" fn nzbget_rs_twin_format_kind_message(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_fuq_queue_coord_find_dupe_file_indices(
+pub unsafe extern "C" fn nzbget_rs_queue_coord_find_dupe_file_indices(
     filenames: *const *const c_char,
     sizes: *const i64,
     count: usize,
@@ -22431,7 +21700,7 @@ pub unsafe extern "C" fn nzbget_rs_fuq_queue_coord_find_dupe_file_indices(
     for i in 0..count {
         name_slices.push(input(*filenames.add(i)));
     }
-    crate::feedurlqueue::queue_coord_find_dupe_file_indices(
+    crate::queuehotpath::find_dupe_file_indices(
         &name_slices,
         std::slice::from_raw_parts(sizes, count),
         std::slice::from_raw_parts_mut(out_dupe_indices, out_cap),
@@ -23497,7 +22766,7 @@ pub unsafe extern "C" fn nzbget_rs_tpr_script_resolve_single_arg_executor(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_queue_coord_format_donor_id_list(
+pub unsafe extern "C" fn nzbget_rs_queue_coord_format_donor_id_list(
     donor_ids_ptr: *const i32,
     len: usize,
     out_unique_ids_ptr: *mut i32,
@@ -23508,7 +22777,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_queue_coord_format_donor_id_list(
     } else {
         std::slice::from_raw_parts(donor_ids_ptr, len)
     };
-    let (uniq, formatted) = crate::dupequeuehealth::dqh_queue_coord_format_donor_id_list(ids);
+    let (uniq, formatted) = crate::queuehotpath::format_donor_id_list(ids);
     if !out_unique_ids_ptr.is_null() && uniq.len() <= len {
         std::ptr::copy_nonoverlapping(uniq.as_ptr(), out_unique_ids_ptr, uniq.len());
     }
@@ -23519,33 +22788,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_queue_coord_format_donor_id_list(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_queue_coord_eval_completed_file_repair_eligibility(
-    completed: i32,
-    file_status: i32,
-    cf_partial: i32,
-    cf_failure: i32,
-    is_side_file: i32,
-    out_side_file: *mut i32,
-    out_check_stream_repair: *mut i32,
-) {
-    let (side_file, check_stream_repair) =
-        crate::dupequeuehealth::dqh_queue_coord_eval_completed_file_repair_eligibility(
-            completed != 0,
-            file_status,
-            cf_partial,
-            cf_failure,
-            is_side_file != 0,
-        );
-    if !out_side_file.is_null() {
-        *out_side_file = if side_file { 1 } else { 0 };
-    }
-    if !out_check_stream_repair.is_null() {
-        *out_check_stream_repair = if check_stream_repair { 1 } else { 0 };
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_queue_coord_is_size_twin(
+pub unsafe extern "C" fn nzbget_rs_queue_coord_is_size_twin(
     is_self: i32,
     same_name_or_key: i32,
     self_size: i64,
@@ -23560,7 +22803,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_queue_coord_is_size_twin(
     } else {
         std::slice::from_raw_parts(other_file_sizes_ptr, other_file_sizes_len)
     };
-    if crate::dupequeuehealth::dqh_queue_coord_is_size_twin(
+    if crate::queuehotpath::is_size_twin(
         is_self != 0,
         same_name_or_key != 0,
         self_size,
@@ -23573,89 +22816,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_queue_coord_is_size_twin(
     } else {
         0
     }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_queue_coord_can_check_dead_download(
-    health_check: i32,
-    hc_dupe: i32,
-    dupe_check: i32,
-    fails_over: i32,
-    kind: i32,
-    nk_nzb: i32,
-    deleting: i32,
-    parking: i32,
-    delete_status: i32,
-    ds_none: i32,
-) -> i32 {
-    if crate::dupequeuehealth::dqh_queue_coord_can_check_dead_download(
-        health_check,
-        hc_dupe,
-        dupe_check != 0,
-        fails_over != 0,
-        kind,
-        nk_nzb,
-        deleting != 0,
-        parking != 0,
-        delete_status,
-        ds_none,
-    ) {
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_queue_coord_is_active_unpaused_queued_dupe(
-    is_self: i32,
-    paused_size: i64,
-    remaining_size: i64,
-    same_name_or_key: i32,
-) -> i32 {
-    if crate::dupequeuehealth::dqh_queue_coord_is_active_unpaused_queued_dupe(
-        is_self != 0,
-        paused_size,
-        remaining_size,
-        same_name_or_key != 0,
-    ) {
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_queue_coord_can_fail_over_dead_pick(
-    has_nzb: i32,
-    deleting: i32,
-    parking: i32,
-    delete_status: i32,
-    ds_none: i32,
-) -> i32 {
-    if crate::dupequeuehealth::dqh_queue_coord_can_fail_over_dead_pick(
-        has_nzb != 0,
-        deleting != 0,
-        parking != 0,
-        delete_status,
-        ds_none,
-    ) {
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_queue_coord_download_debug_state_label(
-    pause_download: i32,
-    temp_pause_download: i32,
-) -> *const c_char {
-    crate::dupequeuehealth::dqh_queue_coord_download_debug_state_label(
-        pause_download != 0,
-        temp_pause_download != 0,
-    )
-    .as_ptr() as *const c_char
 }
 
 #[no_mangle]
@@ -24620,36 +23780,7 @@ pub unsafe extern "C" fn nzbget_rs_tpr_diskstate_format_queue_id_state_path(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_queue_coord_format_article_info_name(
-    nzb_name: *const c_char,
-    sep: c_char,
-    filename: *const c_char,
-    part_num: i32,
-    total_parts: i32,
-) -> RsBuf {
-    let nn = if nzb_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(nzb_name).to_bytes()
-    };
-    let f = if filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(filename).to_bytes()
-    };
-    into_buf(
-        crate::twinproberenhist::tpr_queue_coord_format_article_info_name(
-            nn,
-            sep as u8,
-            f,
-            part_num,
-            total_parts,
-        ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_queue_coord_format_par_damage_summary(
+pub unsafe extern "C" fn nzbget_rs_queue_coord_format_par_damage_summary(
     certain: i32,
     damaged_blocks: i32,
     projected_blocks: i32,
@@ -24657,45 +23788,13 @@ pub unsafe extern "C" fn nzbget_rs_tpr_queue_coord_format_par_damage_summary(
     recovery_blocks: i32,
 ) -> RsBuf {
     into_buf(
-        crate::twinproberenhist::tpr_queue_coord_format_par_damage_summary(
+        crate::queuehotpath::format_par_damage_summary(
             certain != 0,
             damaged_blocks,
             projected_blocks,
             block_size,
             recovery_blocks,
         ),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_queue_coord_format_nzb_ext_filename(
-    name: *const c_char,
-) -> RsBuf {
-    let n = if name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(name).to_bytes()
-    };
-    into_buf(crate::twinproberenhist::tpr_queue_coord_format_nzb_ext_filename(n))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_queue_coord_join_queued_filenames(
-    dest_queued: *const c_char,
-    src_queued: *const c_char,
-) -> RsBuf {
-    let dq = if dest_queued.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(dest_queued).to_bytes()
-    };
-    let sq = if src_queued.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(src_queued).to_bytes()
-    };
-    into_buf(
-        crate::twinproberenhist::tpr_queue_coord_join_queued_filenames(dq, sq),
     )
 }
 
@@ -26118,58 +25217,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_nntp_health_format_stat_batch(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_coord_stream_repair_queue_msg_fmt(
-    is_failure: c_int,
-) -> *const c_char {
-    crate::dupequeuehealth::dqh_queue_coord_stream_repair_queue_msg_fmt(is_failure != 0).as_ptr()
-        as *const c_char
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_coord_select_health_delete_action(
-    health_check: c_int,
-    hc_park: c_int,
-    ea_group_park_delete: c_int,
-    ea_group_delete: c_int,
-) -> c_int {
-    crate::dupequeuehealth::dqh_queue_coord_select_health_delete_action(
-        health_check,
-        hc_park,
-        ea_group_park_delete,
-        ea_group_delete,
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_queue_coord_max_i64_slice(
-    values: *const i64,
-    len: usize,
-) -> i64 {
-    let slice = if values.is_null() || len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(values, len)
-    };
-    crate::dupequeuehealth::dqh_queue_coord_max_i64_slice(slice)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_coord_projected_health_rel_str(
-    far_below: c_int,
-) -> *const c_char {
-    crate::dupequeuehealth::dqh_queue_coord_projected_health_rel_str(far_below != 0).as_ptr()
-        as *const c_char
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_coord_partly_alive_rel_str(
-    proj_below_crit: c_int,
-) -> *const c_char {
-    crate::dupequeuehealth::dqh_queue_coord_partly_alive_rel_str(proj_below_crit != 0).as_ptr()
-        as *const c_char
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_article_writer_check_existing_output_file(
     exists: c_int,
     existing_size: i64,
@@ -27504,377 +26551,6 @@ pub extern "C" fn nzbget_rs_dqh_tls_cipher_is_probe_addr_list_valid(
     addr_count: usize,
 ) -> c_int {
     i32::from(crate::dupequeuehealth::dqh_tls_cipher_is_probe_addr_list_valid(addr_count))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_coord_should_cleanup_temp_dir(
-    queue_loaded: c_int,
-    stat_loaded: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_queue_coord_should_cleanup_temp_dir(
-            queue_loaded != 0,
-            stat_loaded != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_coord_should_resave_legacy_queue(
-    queue_loaded: c_int,
-    legacy_queue_read: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_queue_coord_should_resave_legacy_queue(
-            queue_loaded != 0,
-            legacy_queue_read != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_coord_should_resave_on_server_mismatch(
-    queue_loaded: c_int,
-    stat_loaded: c_int,
-    perfect_server_match: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_queue_coord_should_resave_on_server_mismatch(
-            queue_loaded != 0,
-            stat_loaded != 0,
-            perfect_server_match != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_coord_is_nzb_eligible_for_next_article(
-    has_file_info: c_int,
-    nzb_higher_priority: c_int,
-    nzb_paused: c_int,
-    has_active_dupe: c_int,
-    pause_download: c_int,
-    quota_reached: c_int,
-    force_priority: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_queue_coord_is_nzb_eligible_for_next_article(
-            has_file_info != 0,
-            nzb_higher_priority != 0,
-            nzb_paused != 0,
-            has_active_dupe != 0,
-            pause_download != 0,
-            quota_reached != 0,
-            force_priority != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_coord_should_log_propagation_wait(
-    has_prop_file: c_int,
-    prop_file_id: c_int,
-    last_logged_id: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_queue_coord_should_log_propagation_wait(
-            has_prop_file != 0,
-            prop_file_id,
-            last_logged_id,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_coord_can_select_first_article(
-    filename_confirmed: c_int,
-    articles_empty: c_int,
-    first_status: c_int,
-    ai_undefined: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_queue_coord_can_select_first_article(
-            filename_confirmed != 0,
-            articles_empty != 0,
-            first_status,
-            ai_undefined,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_coord_should_check_donor_alignment(
-    status: c_int,
-    ad_finished: c_int,
-    dupe_fallback_round: c_int,
-    decoded_file_size: i64,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_queue_coord_should_check_donor_alignment(
-            status,
-            ad_finished,
-            dupe_fallback_round,
-            decoded_file_size,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_coord_can_try_reactive_dupe_fallback(
-    status: c_int,
-    ad_failed: c_int,
-    misplaced: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_queue_coord_can_try_reactive_dupe_fallback(
-            status,
-            ad_failed,
-            misplaced != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_coord_is_terminal_article_failure(
-    status: c_int,
-    ad_failed: c_int,
-    ad_fatal_error: c_int,
-    misplaced: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_queue_coord_is_terminal_article_failure(
-            status,
-            ad_failed,
-            ad_fatal_error,
-            misplaced != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_coord_should_confirm_article_filename(
-    filename_confirmed: c_int,
-    misplaced: c_int,
-    status: c_int,
-    ad_finished: c_int,
-    has_article_filename: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_queue_coord_should_confirm_article_filename(
-            filename_confirmed != 0,
-            misplaced != 0,
-            status,
-            ad_finished,
-            has_article_filename != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_coord_should_check_existing_dest_dupe(
-    dupe_check: c_int,
-    dupe_mode: c_int,
-    dm_force: c_int,
-    many_dupe_files: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_queue_coord_should_check_existing_dest_dupe(
-            dupe_check != 0,
-            dupe_mode,
-            dm_force,
-            many_dupe_files != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_coord_should_process_analyzed_first_article(
-    has_analyzer: c_int,
-    misplaced: c_int,
-    status: c_int,
-    ad_finished: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_queue_coord_should_process_analyzed_first_article(
-            has_analyzer != 0,
-            misplaced != 0,
-            status,
-            ad_finished,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_coord_should_log_file_dupe_recovery_summary(
-    completed: c_int,
-    dupe_attempted_articles: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_queue_coord_should_log_file_dupe_recovery_summary(
-            completed != 0,
-            dupe_attempted_articles,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_coord_should_update_completed_stats_on_delete(
-    completed: c_int,
-    nzb_deleting: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_queue_coord_should_update_completed_stats_on_delete(
-            completed != 0,
-            nzb_deleting != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_coord_should_check_failed_output_exists(
-    completed: c_int,
-    file_status: c_int,
-    cf_failure: c_int,
-    filename_empty: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_queue_coord_should_check_failed_output_exists(
-            completed != 0,
-            file_status,
-            cf_failure,
-            filename_empty != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_coord_needs_completed_tiling_validation(
-    success_articles: c_int,
-    total_articles: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_queue_coord_needs_completed_tiling_validation(
-            success_articles,
-            total_articles,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_coord_needs_partial_direct_write_init(
-    direct_write: c_int,
-    force_direct_write: c_int,
-    output_initialized: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_queue_coord_needs_partial_direct_write_init(
-            direct_write != 0,
-            force_direct_write != 0,
-            output_initialized != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_coord_should_skip_critical_health_calc(
-    health_check: c_int,
-    hc_none: c_int,
-    health_paused: c_int,
-    delete_status: c_int,
-    ds_health: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_queue_coord_should_skip_critical_health_calc(
-            health_check,
-            hc_none,
-            health_paused != 0,
-            delete_status,
-            ds_health,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_coord_should_check_certainly_parless(
-    health_check: c_int,
-    hc_dupe: c_int,
-    critical_exact: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_queue_coord_should_check_certainly_parless(
-            health_check,
-            hc_dupe,
-            critical_exact,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_coord_select_failover_effective_health(
-    dl_crit_health: c_int,
-    base_crit_health: c_int,
-    cur_health: c_int,
-) -> c_int {
-    crate::dupequeuehealth::dqh_queue_coord_select_failover_effective_health(
-        dl_crit_health,
-        base_crit_health,
-        cur_health,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_coord_should_abort_dead_download_action(
-    dead: c_int,
-    doomed: c_int,
-    probing: c_int,
-    hopeless: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_queue_coord_should_abort_dead_download_action(
-            dead != 0,
-            doomed != 0,
-            probing,
-            hopeless != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_coord_validate_merge_entries(
-    dest_has_post: c_int,
-    src_has_post: c_int,
-    dest_kind: c_int,
-    src_kind: c_int,
-    nk_url: c_int,
-) -> c_int {
-    crate::dupequeuehealth::dqh_queue_coord_validate_merge_entries(
-        dest_has_post != 0,
-        src_has_post != 0,
-        dest_kind,
-        src_kind,
-        nk_url,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_coord_should_pause_pars_after_direct_rename(
-    par_check: c_int,
-    pc_force: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_queue_coord_should_pause_pars_after_direct_rename(
-            par_check, pc_force,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_queue_coord_should_log_discarded_direct_rename(
-    discarded_size: i64,
-) -> c_int {
-    i32::from(
-        crate::dupequeuehealth::dqh_queue_coord_should_log_discarded_direct_rename(discarded_size),
-    )
 }
 
 #[no_mangle]

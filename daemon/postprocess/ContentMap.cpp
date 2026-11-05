@@ -161,8 +161,8 @@ int64 ContentMap::GetCipherStreamSize() const
 
 std::vector<MemberRange> ContentMap::MapCipherRange(const StreamRange& cipherRange) const
 {
-	if (cipherRange.Offset < 0 || cipherRange.Size <= 0 ||
-		m_runCryptos.size() != m_runs.size())
+	if (nzbget_rs_dqh_content_map_can_map_cipher_range(
+		cipherRange.Offset, cipherRange.Size, m_runCryptos.size(), m_runs.size()) == 0)
 	{
 		return {};
 	}
@@ -429,12 +429,14 @@ std::unique_ptr<ContentMap> ContentMapper::BuildRarMap(const std::vector<SetMemb
 			volumes[i] = std::move(volume);
 			continue;
 		}
-		if (source && volume->GetEncrypted())
+		int unreadableClass = nzbget_rs_dqh_content_mapper_classify_unreadable_rar_vol(
+			source != nullptr ? 1 : 0, volume->GetEncrypted() ? 1 : 0, unknownVolume);
+		if (unreadableClass == 1)
 		{
 			skipReason = SkipEncryptedHeaders;
 			return nullptr;
 		}
-		if (unknownVolume >= 0)
+		if (unreadableClass == 2)
 		{
 			skipReason = "unreadable headers in more than one volume";
 			return nullptr;

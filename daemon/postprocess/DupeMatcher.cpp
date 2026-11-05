@@ -77,9 +77,11 @@ bool RarLister::FindLargestFile(DupeMatcher* owner, const char* directory,
 	unrar.Start();
 
 	// wait up to iTimeoutSec for unrar output
-	while (unrar.IsRunning() &&
-		curTime + timeoutSec > Util::CurrentTime() &&
-		curTime >= Util::CurrentTime())					// in a case clock was changed
+	while (nzbget_rs_dqh_dupematcher_should_wait_rar_lister(
+		unrar.IsRunning() ? 1 : 0,
+		(int64_t)curTime,
+		timeoutSec,
+		(int64_t)Util::CurrentTime()) != 0)					// in a case clock was changed
 	{
 		Util::Sleep(200);
 	}
@@ -183,7 +185,7 @@ void DupeMatcher::FindLargestFile(const char* directory, char* filenameBuf, int 
 		nzbget_rs_free(fullFnBuf);
 
 		int64 fileSize = FileSystem::FileSize(fullFilename);
-		if (fileSize > *maxSize)
+		if (nzbget_rs_dqh_dupematcher_is_larger_file(fileSize, *maxSize) != 0)
 		{
 			*maxSize = fileSize;
 			strncpy(filenameBuf, filename, bufLen);

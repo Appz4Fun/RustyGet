@@ -83,7 +83,8 @@ bool RarVolume::Read()
 	// size the source through the open handle: a path-based stat could race
 	// a concurrent rename/replace and disagree with the handle's file
 	int64 size = file.Seek(0, DiskFile::soEnd) ? file.Position() : -1;
-	if (size < 0 || !file.Seek(0))
+	bool seekZeroOk = size >= 0 && file.Seek(0);
+	if (nzbget_rs_dqh_rar_volume_is_read_handle_ready(size, seekZeroOk ? 1 : 0) == 0)
 	{
 		file.Close();
 		return false;
@@ -235,7 +236,11 @@ bool RarVolume::ReadFrom(ContentSource& source)
 
 	// DetectRarVersion never assigned m_version if Size/Read threw while
 	// reading the signature. Preserve it when this is a repeated ReadFrom.
-	if (!context.error || context.signatureRead) m_version = state.version;
+	if (nzbget_rs_dqh_rar_volume_should_update_version(
+		context.error != nullptr ? 1 : 0, context.signatureRead ? 1 : 0) != 0)
+	{
+		m_version = state.version;
+	}
 	m_volumeNo = state.volumeNo;
 	m_newNaming = state.newNaming;
 	m_hasNextVolume = state.hasNextVolume;
@@ -311,9 +316,8 @@ bool RarVolume::DecryptBuf(const uint8 in[16], uint8 out[16])
 	// padding is disabled in DecryptInit, so one 16-byte block in yields exactly
 	// one 16-byte block out
 	int outlen = 0;
-	if (!EVP_DecryptUpdate(m_context.get(), out, &outlen, in, 16)) return false;
-	if (outlen != 16) return false;
-	return true;
+	bool evpOk = EVP_DecryptUpdate(m_context.get(), out, &outlen, in, 16) != 0;
+	return nzbget_rs_dqh_rar_volume_is_decrypt_buf_valid(evpOk ? 1 : 0, outlen) != 0;
 #else
 	return false;
 #endif

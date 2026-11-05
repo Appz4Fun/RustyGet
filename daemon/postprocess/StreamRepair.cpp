@@ -505,7 +505,9 @@ void StreamRepairController::RunLive()
 	{
 		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
 		NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_nzbId);
-		if (!nzbInfo || nzbInfo->GetLiveRepairThread() != this)
+		if (nzbget_rs_dqh_stream_repair_is_attached_live_thread(
+			nzbInfo != nullptr ? 1 : 0,
+			nzbInfo && nzbInfo->GetLiveRepairThread() == this ? 1 : 0) == 0)
 		{
 			return;
 		}
@@ -659,7 +661,7 @@ void StreamRepairController::RepairCompletedLive(std::vector<RepairTarget>& targ
 		return;
 	}
 
-	if (m_recoveredBytes > 0 || m_recoveredHoles > 0)
+	if (nzbget_rs_dqh_stream_repair_has_live_recovered_stats(m_recoveredBytes, m_recoveredHoles) != 0)
 	{
 		nzbInfo->SetDupeRecoveredBytes(nzbInfo->GetDupeRecoveredBytes() + m_recoveredBytes);
 		nzbInfo->SetDupeRecoveredHoles(nzbInfo->GetDupeRecoveredHoles() + m_recoveredHoles);
@@ -798,7 +800,8 @@ void StreamRepairController::StartWatchdog(const std::vector<RepairTarget>& targ
 					start += now - lastTick;
 				}
 				lastTick = now;
-				if (m_progressBytes != progress || waiting() || m_materializing > 0)
+				if (nzbget_rs_dqh_stream_repair_watchdog_has_activity(
+					m_progressBytes, progress, waiting() ? 1 : 0, m_materializing.load()) != 0)
 				{
 					progress = m_progressBytes;
 					lastProgress = now;
@@ -829,7 +832,8 @@ void StreamRepairController::StartWatchdog(const std::vector<RepairTarget>& targ
 
 				double elapsed = std::chrono::duration<double>(now - start).count();
 				int64 recovered = progress - startProgress;
-				int64 remaining = std::max<int64>(0, m_missingBytes - recovered);
+				int64 remaining = nzbget_rs_dqh_stream_repair_watchdog_calc_remaining_bytes(
+					m_missingBytes, progress, startProgress);
 				double repairMbS = 0.0;
 				double remainingMb = 0.0;
 				double repairSec = 0.0;
@@ -1899,7 +1903,7 @@ bool StreamRepairController::CompareToFile(DiskFile& file, int64 offset, const c
 	while (remaining > 0)
 	{
 		int64 chunk = std::min(remaining, (int64)buffer.Size());
-		if (file.Read(buffer, chunk) != chunk)
+		if (nzbget_rs_dqh_stream_repair_is_chunk_read_complete(file.Read(buffer, chunk), chunk) == 0)
 		{
 			return false; // short read (e.g. join-mode file shorter than expected)
 		}

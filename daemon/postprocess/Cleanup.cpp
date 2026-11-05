@@ -278,7 +278,7 @@ void CleanupController::Run()
 	bool deleted = false;
 	bool ok = Cleanup(destDir, &deleted);
 
-	if (ok && !finalDir.Empty())
+	if (nzbget_rs_dqh_cleanup_ctrl_should_cleanup_final_dir(ok ? 1 : 0, finalDir.Empty() ? 1 : 0) != 0)
 	{
 		bool deleted2 = false;
 		ok = Cleanup(finalDir, &deleted2);
@@ -348,7 +348,9 @@ bool CleanupController::Cleanup(const char* destDir, bool *deleted)
 
 		// a link to a directory (from an archive) isn't entered: the cleanup
 		// deleted the matching files of the directory it points to
-		bool isDir = FileSystem::DirectoryExists(fullFilename) && !FileSystem::IsLink(fullFilename);
+		bool isDir = nzbget_rs_dqh_cleanup_ctrl_is_traversable_dir(
+			FileSystem::DirectoryExists(fullFilename) ? 1 : 0,
+			FileSystem::IsLink(fullFilename) ? 1 : 0) != 0;
 
 		if (isDir)
 		{

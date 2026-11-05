@@ -320,7 +320,7 @@ void ParRenamer::RenameFile(const char* srcFilename, const char* destFileName)
 
 	PrintMessage(Message::mkInfo, "Renaming %s to %s", oldName.c_str(), newName.c_str());
 
-	if (oldPath != newPath)
+	if (nzbget_rs_dqh_par_renamer_needs_create_target_dir(oldPath.c_str(), newPath.c_str()) != 0)
 	{
 		CString errmsg;
 		if (!FileSystem::ForceDirectories(newPath.c_str(), errmsg))

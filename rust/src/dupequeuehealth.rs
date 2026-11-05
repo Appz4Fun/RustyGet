@@ -4345,6 +4345,158 @@ pub fn dqh_repair_ctrl_matches_history_dupe_source(
     history_kind == hk_nzb && history_nzb_id == dupe_source_id
 }
 
+/// Returns true when `CleanupController::Run` should also run cleanup on `final_dir`.
+pub fn dqh_cleanup_ctrl_should_cleanup_final_dir(ok: bool, final_dir_empty: bool) -> bool {
+    ok && !final_dir_empty
+}
+
+/// Returns true when `CleanupController::Cleanup` should recurse into an entry (`dir_exists && !is_link`).
+pub fn dqh_cleanup_ctrl_is_traversable_dir(dir_exists: bool, is_link: bool) -> bool {
+    dir_exists && !is_link
+}
+
+/// Returns true when `DirectUnpack::Run` should print the final status message (`status == nsSuccess || status == nsFailure`).
+pub fn dqh_direct_unpack_should_log_final_status(
+    status: i32,
+    ns_success: i32,
+    ns_failure: i32,
+) -> bool {
+    status == ns_success || status == ns_failure
+}
+
+/// Returns true when `DirectUnpack::Stop` should keep sleeping while waiting for active process break (`i < 50 && unpacking && has_active_process`).
+pub fn dqh_direct_unpack_should_keep_waiting_break(
+    iter: i32,
+    unpacking: bool,
+    has_active_process: bool,
+) -> bool {
+    iter < 50 && unpacking && has_active_process
+}
+
+/// Returns true when `DirectUnpack::Cleanup` should attempt to delete the temporary unpack directory (`use_temp_unpack_dir && dir_exists`).
+pub fn dqh_direct_unpack_should_delete_temp_unpack_dir(
+    use_temp_unpack_dir: bool,
+    dir_exists: bool,
+) -> bool {
+    use_temp_unpack_dir && dir_exists
+}
+
+/// Returns true when `RenameController::RenameCompleted` should reset `ParRenameStatus` to `rsNone` after requesting extra PAR2 files (`remaining_size > 0`).
+pub fn dqh_rename_ctrl_should_reset_par_rename_status(remaining_size: i64) -> bool {
+    remaining_size > 0
+}
+
+/// Returns true when `ParParser::FindMainPars` found at least one main PAR2 file (`has_file_list && !file_list_empty`).
+pub fn dqh_parparser_has_found_main_pars(has_file_list: bool, file_list_empty: bool) -> bool {
+    has_file_list && !file_list_empty
+}
+
+/// Returns true when `ParRenamer::RenameFile` needs to create target directories (`old_path != new_path`).
+pub fn dqh_par_renamer_needs_create_target_dir(old_path: &[u8], new_path: &[u8]) -> bool {
+    old_path != new_path
+}
+
+/// Returns true when `RarVolume::Read` obtained a valid file size and rewound to 0 (`size >= 0 && seek_zero_ok`).
+pub fn dqh_rar_volume_is_read_handle_ready(size: i64, seek_zero_ok: bool) -> bool {
+    size >= 0 && seek_zero_ok
+}
+
+/// Returns true when `RarVolume::ReadFrom` should update `m_version` (`!has_error || signature_read`).
+pub fn dqh_rar_volume_should_update_version(has_error: bool, signature_read: bool) -> bool {
+    !has_error || signature_read
+}
+
+/// Returns true when `RarVolume::DecryptBuf` succeeded (`evp_ok && outlen == 16`).
+pub fn dqh_rar_volume_is_decrypt_buf_valid(evp_ok: bool, out_len: i32) -> bool {
+    evp_ok && out_len == 16
+}
+
+/// Returns true when `RarRenamer::CheckOneFile` should skip a file matching the ignore extension list (`has_ignore_ext && matched_ext`).
+pub fn dqh_rar_renamer_should_ignore_file(has_ignore_ext: bool, matched_ext: bool) -> bool {
+    has_ignore_ext && matched_ext
+}
+
+/// Returns true when `RarLister::FindLargestFile` in `DupeMatcher.cpp` should continue waiting for `unrar` (`is_running && start_time + timeout_sec > cur_time && start_time >= cur_time`).
+pub fn dqh_dupematcher_should_wait_rar_lister(
+    is_running: bool,
+    start_time: i64,
+    timeout_sec: i32,
+    cur_time: i64,
+) -> bool {
+    is_running && start_time + i64::from(timeout_sec) > cur_time && start_time >= cur_time
+}
+
+/// Returns true when `DupeMatcher::FindLargestFile` found a new largest file (`file_size > cur_max_size`).
+pub fn dqh_dupematcher_is_larger_file(file_size: i64, cur_max_size: i64) -> bool {
+    file_size > cur_max_size
+}
+
+/// Returns true when `ContentMap::MapCipherRange` arguments and state are valid (`offset >= 0 && size > 0 && cryptos_len == runs_len`).
+pub fn dqh_content_map_can_map_cipher_range(
+    offset: i64,
+    size: i64,
+    cryptos_len: usize,
+    runs_len: usize,
+) -> bool {
+    offset >= 0 && size > 0 && cryptos_len == runs_len
+}
+
+/// Classifies an unreadable volume during `ContentMapper::BuildRarMap`:
+/// `1` = encrypted headers (`SkipEncryptedHeaders`),
+/// `2` = second unreadable volume (`"unreadable headers in more than one volume"`),
+/// `0` = record `vol_index` as `unknown_volume`.
+pub fn dqh_content_mapper_classify_unreadable_rar_vol(
+    has_source: bool,
+    is_encrypted: bool,
+    unknown_volume: i32,
+) -> i32 {
+    if has_source && is_encrypted {
+        1
+    } else if unknown_volume >= 0 {
+        2
+    } else {
+        0
+    }
+}
+
+/// Returns true when `StreamRepairController::RunLive` is attached to a live `NzbInfo` (`has_nzb && is_this_thread`).
+pub fn dqh_stream_repair_is_attached_live_thread(has_nzb: bool, is_this_thread: bool) -> bool {
+    has_nzb && is_this_thread
+}
+
+/// Returns true when `StreamRepairController::RepairCompletedLive` should update recovered stats (`recovered_bytes > 0 || recovered_holes > 0`).
+pub fn dqh_stream_repair_has_live_recovered_stats(
+    recovered_bytes: i64,
+    recovered_holes: i32,
+) -> bool {
+    recovered_bytes > 0 || recovered_holes > 0
+}
+
+/// Returns true when `StreamRepairController::Watchdog` should reset its progress timer (`progress_bytes != prev_progress || waiting || materializing > 0`).
+pub fn dqh_stream_repair_watchdog_has_activity(
+    progress_bytes: i64,
+    prev_progress: i64,
+    waiting: bool,
+    materializing: i32,
+) -> bool {
+    progress_bytes != prev_progress || waiting || materializing > 0
+}
+
+/// Computes remaining missing bytes (`max(0, missing_bytes - (progress - start_progress))`) in `StreamRepairController::StartWatchdog`.
+pub fn dqh_stream_repair_watchdog_calc_remaining_bytes(
+    missing_bytes: i64,
+    progress: i64,
+    start_progress: i64,
+) -> i64 {
+    let recovered = progress.saturating_sub(start_progress);
+    missing_bytes.saturating_sub(recovered).max(0)
+}
+
+/// Returns true when `StreamRepairController::CompareToFile` has a valid seek and chunk read (`pos == offset && read_bytes == chunk`).
+pub fn dqh_stream_repair_is_chunk_read_complete(read_bytes: i64, chunk: i64) -> bool {
+    read_bytes == chunk
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6059,5 +6211,64 @@ mod tests {
         assert!(dqh_repair_ctrl_matches_history_dupe_source(1, 1, 99, 99));
         assert!(!dqh_repair_ctrl_matches_history_dupe_source(2, 1, 99, 99));
         assert!(!dqh_repair_ctrl_matches_history_dupe_source(1, 1, 98, 99));
+        assert!(dqh_cleanup_ctrl_should_cleanup_final_dir(true, false));
+        assert!(!dqh_cleanup_ctrl_should_cleanup_final_dir(false, false));
+        assert!(!dqh_cleanup_ctrl_should_cleanup_final_dir(true, true));
+        assert!(dqh_cleanup_ctrl_is_traversable_dir(true, false));
+        assert!(!dqh_cleanup_ctrl_is_traversable_dir(true, true));
+        assert!(!dqh_cleanup_ctrl_is_traversable_dir(false, false));
+        assert!(dqh_direct_unpack_should_log_final_status(1, 1, 2));
+        assert!(dqh_direct_unpack_should_log_final_status(2, 1, 2));
+        assert!(!dqh_direct_unpack_should_log_final_status(0, 1, 2));
+        assert!(dqh_direct_unpack_should_keep_waiting_break(10, true, true));
+        assert!(!dqh_direct_unpack_should_keep_waiting_break(50, true, true));
+        assert!(!dqh_direct_unpack_should_keep_waiting_break(10, false, true));
+        assert!(dqh_direct_unpack_should_delete_temp_unpack_dir(true, true));
+        assert!(!dqh_direct_unpack_should_delete_temp_unpack_dir(false, true));
+        assert!(!dqh_direct_unpack_should_delete_temp_unpack_dir(true, false));
+        assert!(dqh_rename_ctrl_should_reset_par_rename_status(1024));
+        assert!(!dqh_rename_ctrl_should_reset_par_rename_status(0));
+        assert!(dqh_parparser_has_found_main_pars(true, false));
+        assert!(!dqh_parparser_has_found_main_pars(false, false));
+        assert!(!dqh_parparser_has_found_main_pars(true, true));
+        assert!(dqh_par_renamer_needs_create_target_dir(b"/a", b"/b"));
+        assert!(!dqh_par_renamer_needs_create_target_dir(b"/a", b"/a"));
+        assert!(dqh_rar_volume_is_read_handle_ready(100, true));
+        assert!(!dqh_rar_volume_is_read_handle_ready(-1, true));
+        assert!(!dqh_rar_volume_is_read_handle_ready(100, false));
+        assert!(dqh_rar_volume_should_update_version(false, false));
+        assert!(dqh_rar_volume_should_update_version(true, true));
+        assert!(!dqh_rar_volume_should_update_version(true, false));
+        assert!(dqh_rar_volume_is_decrypt_buf_valid(true, 16));
+        assert!(!dqh_rar_volume_is_decrypt_buf_valid(false, 16));
+        assert!(!dqh_rar_volume_is_decrypt_buf_valid(true, 8));
+        assert!(dqh_rar_renamer_should_ignore_file(true, true));
+        assert!(!dqh_rar_renamer_should_ignore_file(false, true));
+        assert!(!dqh_rar_renamer_should_ignore_file(true, false));
+        assert!(dqh_dupematcher_should_wait_rar_lister(true, 1000, 60, 1000));
+        assert!(!dqh_dupematcher_should_wait_rar_lister(true, 1000, 60, 1020));
+        assert!(!dqh_dupematcher_should_wait_rar_lister(true, 1000, 60, 1060));
+        assert!(dqh_dupematcher_is_larger_file(500, 400));
+        assert!(!dqh_dupematcher_is_larger_file(400, 400));
+        assert!(dqh_content_map_can_map_cipher_range(0, 16, 3, 3));
+        assert!(!dqh_content_map_can_map_cipher_range(-1, 16, 3, 3));
+        assert!(!dqh_content_map_can_map_cipher_range(0, 0, 3, 3));
+        assert!(!dqh_content_map_can_map_cipher_range(0, 16, 2, 3));
+        assert_eq!(dqh_content_mapper_classify_unreadable_rar_vol(true, true, -1), 1);
+        assert_eq!(dqh_content_mapper_classify_unreadable_rar_vol(true, false, 0), 2);
+        assert_eq!(dqh_content_mapper_classify_unreadable_rar_vol(true, false, -1), 0);
+        assert!(dqh_stream_repair_is_attached_live_thread(true, true));
+        assert!(!dqh_stream_repair_is_attached_live_thread(true, false));
+        assert!(dqh_stream_repair_has_live_recovered_stats(1024, 0));
+        assert!(dqh_stream_repair_has_live_recovered_stats(0, 1));
+        assert!(!dqh_stream_repair_has_live_recovered_stats(0, 0));
+        assert!(dqh_stream_repair_watchdog_has_activity(200, 100, false, 0));
+        assert!(dqh_stream_repair_watchdog_has_activity(100, 100, true, 0));
+        assert!(dqh_stream_repair_watchdog_has_activity(100, 100, false, 1));
+        assert!(!dqh_stream_repair_watchdog_has_activity(100, 100, false, 0));
+        assert_eq!(dqh_stream_repair_watchdog_calc_remaining_bytes(1000, 400, 100), 700);
+        assert_eq!(dqh_stream_repair_watchdog_calc_remaining_bytes(200, 500, 100), 0);
+        assert!(dqh_stream_repair_is_chunk_read_complete(4096, 4096));
+        assert!(!dqh_stream_repair_is_chunk_read_complete(2048, 4096));
     }
 }

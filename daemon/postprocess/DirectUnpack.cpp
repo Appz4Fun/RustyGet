@@ -160,8 +160,8 @@ void DirectUnpack::Run()
 		{
 			debug("%s stopped due to reload/shutdown, preserving unpack state", *m_infoName);
 		}
-		else if (nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsSuccess ||
-			nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsFailure)
+		else if (nzbget_rs_dqh_direct_unpack_should_log_final_status(
+			(int)nzbInfo->GetDirectUnpackStatus(), (int)NzbInfo::nsSuccess, (int)NzbInfo::nsFailure) != 0)
 		{
 			bool ok = nzbInfo->GetDirectUnpackStatus() == NzbInfo::nsSuccess;
 			NzbgetRsBuf statusBuf = nzbget_rs_tpr_direct_unpack_format_status_msg(
@@ -495,7 +495,8 @@ void DirectUnpack::Stop(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 		if (nzbget_rs_ucf_direct_unpack_should_try_break(
 			isExecThread ? 1 : 0, m_cancelled ? 1 : 0, HasActiveProcess() ? 1 : 0) != 0 && Break())
 		{
-			for (int i = 0; i < 50 && m_unpacking && HasActiveProcess(); ++i)
+			for (int i = 0; nzbget_rs_dqh_direct_unpack_should_keep_waiting_break(
+				i, m_unpacking ? 1 : 0, HasActiveProcess() ? 1 : 0) != 0; ++i)
 			{
 				Util::Sleep(100);
 			}
@@ -636,7 +637,9 @@ void DirectUnpack::Cleanup()
 	// download's own folder (or the final one), and deleting it removed every file
 	// downloaded so far
 	CString errmsg;
-	if (g_Options->GetUseTempUnpackDir() && FileSystem::DirectoryExists(m_unpackDir) &&
+	if (nzbget_rs_dqh_direct_unpack_should_delete_temp_unpack_dir(
+		g_Options->GetUseTempUnpackDir() ? 1 : 0,
+		FileSystem::DirectoryExists(m_unpackDir) ? 1 : 0) != 0 &&
 		!FileSystem::DeleteDirectoryWithContent(m_unpackDir, errmsg))
 	{
 		PrintMessage(Message::mkError, "Could not delete temporary directory %s: %s", *m_unpackDir, *errmsg);

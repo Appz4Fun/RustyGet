@@ -6252,6 +6252,38 @@ int nzbget_rs_dqh_repair_ctrl_should_skip_twin_volume_entry(
     int is_par2, const char* entry_filename, const char* twin_index);
 int nzbget_rs_dqh_repair_ctrl_matches_history_dupe_source(
     int history_kind, int hk_nzb, int history_nzb_id, int dupe_source_id);
+int nzbget_rs_dqh_cleanup_ctrl_should_cleanup_final_dir(int ok, int final_dir_empty);
+int nzbget_rs_dqh_cleanup_ctrl_is_traversable_dir(int dir_exists, int is_link);
+int nzbget_rs_dqh_direct_unpack_should_log_final_status(
+    int status, int ns_success, int ns_failure);
+int nzbget_rs_dqh_direct_unpack_should_keep_waiting_break(
+    int iter, int unpacking, int has_active_process);
+int nzbget_rs_dqh_direct_unpack_should_delete_temp_unpack_dir(
+    int use_temp_unpack_dir, int dir_exists);
+int nzbget_rs_dqh_rename_ctrl_should_reset_par_rename_status(int64_t remaining_size);
+int nzbget_rs_dqh_parparser_has_found_main_pars(int has_file_list, int file_list_empty);
+int nzbget_rs_dqh_par_renamer_needs_create_target_dir(
+    const char* old_path, const char* new_path);
+int nzbget_rs_dqh_rar_volume_is_read_handle_ready(int64_t size, int seek_zero_ok);
+int nzbget_rs_dqh_rar_volume_should_update_version(int has_error, int signature_read);
+int nzbget_rs_dqh_rar_volume_is_decrypt_buf_valid(int evp_ok, int out_len);
+int nzbget_rs_dqh_rar_renamer_should_ignore_file(int has_ignore_ext, int matched_ext);
+int nzbget_rs_dqh_dupematcher_should_wait_rar_lister(
+    int is_running, int64_t start_time, int timeout_sec, int64_t cur_time);
+int nzbget_rs_dqh_dupematcher_is_larger_file(int64_t file_size, int64_t cur_max_size);
+int nzbget_rs_dqh_content_map_can_map_cipher_range(
+    int64_t offset, int64_t size, size_t cryptos_len, size_t runs_len);
+int nzbget_rs_dqh_content_mapper_classify_unreadable_rar_vol(
+    int has_source, int is_encrypted, int unknown_volume);
+int nzbget_rs_dqh_stream_repair_is_attached_live_thread(
+    int has_nzb, int is_this_thread);
+int nzbget_rs_dqh_stream_repair_has_live_recovered_stats(
+    int64_t recovered_bytes, int recovered_holes);
+int nzbget_rs_dqh_stream_repair_watchdog_has_activity(
+    int64_t progress_bytes, int64_t prev_progress, int waiting, int materializing);
+int64_t nzbget_rs_dqh_stream_repair_watchdog_calc_remaining_bytes(
+    int64_t missing_bytes, int64_t progress, int64_t start_progress);
+int nzbget_rs_dqh_stream_repair_is_chunk_read_complete(int64_t read_bytes, int64_t chunk);
 
 #include "nzbget_tls_cipher.h"
 

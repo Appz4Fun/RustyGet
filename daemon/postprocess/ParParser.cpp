@@ -58,7 +58,9 @@ bool ParParser::FindMainPars(const char* path, ParFileList* fileList)
 			}
 		}
 	}
-	return fileList && !fileList->empty();
+	return nzbget_rs_dqh_parparser_has_found_main_pars(
+		fileList != nullptr ? 1 : 0,
+		fileList ? (fileList->empty() ? 1 : 0) : 1) != 0;
 }
 
 int ParParser::FilenameFold(int byte)

@@ -37718,4 +37718,281 @@ pub extern "C" fn nzbget_rs_dqh_repair_ctrl_matches_history_dupe_source(
     )
 }
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_cleanup_ctrl_should_cleanup_final_dir(
+    ok: c_int,
+    final_dir_empty: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_cleanup_ctrl_should_cleanup_final_dir(
+            ok != 0,
+            final_dir_empty != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_cleanup_ctrl_is_traversable_dir(
+    dir_exists: c_int,
+    is_link: c_int,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_cleanup_ctrl_is_traversable_dir(
+        dir_exists != 0,
+        is_link != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_direct_unpack_should_log_final_status(
+    status: c_int,
+    ns_success: c_int,
+    ns_failure: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_direct_unpack_should_log_final_status(
+            status,
+            ns_success,
+            ns_failure,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_direct_unpack_should_keep_waiting_break(
+    iter: c_int,
+    unpacking: c_int,
+    has_active_process: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_direct_unpack_should_keep_waiting_break(
+            iter,
+            unpacking != 0,
+            has_active_process != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_direct_unpack_should_delete_temp_unpack_dir(
+    use_temp_unpack_dir: c_int,
+    dir_exists: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_direct_unpack_should_delete_temp_unpack_dir(
+            use_temp_unpack_dir != 0,
+            dir_exists != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_rename_ctrl_should_reset_par_rename_status(
+    remaining_size: i64,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_rename_ctrl_should_reset_par_rename_status(remaining_size),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_parparser_has_found_main_pars(
+    has_file_list: c_int,
+    file_list_empty: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_parparser_has_found_main_pars(
+            has_file_list != 0,
+            file_list_empty != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_par_renamer_needs_create_target_dir(
+    old_path: *const c_char,
+    new_path: *const c_char,
+) -> c_int {
+    let o = if old_path.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(old_path).to_bytes()
+    };
+    let n = if new_path.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(new_path).to_bytes()
+    };
+    i32::from(crate::dupequeuehealth::dqh_par_renamer_needs_create_target_dir(o, n))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_rar_volume_is_read_handle_ready(
+    size: i64,
+    seek_zero_ok: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_rar_volume_is_read_handle_ready(size, seek_zero_ok != 0),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_rar_volume_should_update_version(
+    has_error: c_int,
+    signature_read: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_rar_volume_should_update_version(
+            has_error != 0,
+            signature_read != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_rar_volume_is_decrypt_buf_valid(
+    evp_ok: c_int,
+    out_len: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_rar_volume_is_decrypt_buf_valid(evp_ok != 0, out_len),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_rar_renamer_should_ignore_file(
+    has_ignore_ext: c_int,
+    matched_ext: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_rar_renamer_should_ignore_file(
+            has_ignore_ext != 0,
+            matched_ext != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupematcher_should_wait_rar_lister(
+    is_running: c_int,
+    start_time: i64,
+    timeout_sec: c_int,
+    cur_time: i64,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_dupematcher_should_wait_rar_lister(
+            is_running != 0,
+            start_time,
+            timeout_sec,
+            cur_time,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_dupematcher_is_larger_file(
+    file_size: i64,
+    cur_max_size: i64,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_dupematcher_is_larger_file(
+        file_size,
+        cur_max_size,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_content_map_can_map_cipher_range(
+    offset: i64,
+    size: i64,
+    cryptos_len: usize,
+    runs_len: usize,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_content_map_can_map_cipher_range(
+            offset,
+            size,
+            cryptos_len,
+            runs_len,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_content_mapper_classify_unreadable_rar_vol(
+    has_source: c_int,
+    is_encrypted: c_int,
+    unknown_volume: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_content_mapper_classify_unreadable_rar_vol(
+        has_source != 0,
+        is_encrypted != 0,
+        unknown_volume,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_stream_repair_is_attached_live_thread(
+    has_nzb: c_int,
+    is_this_thread: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_stream_repair_is_attached_live_thread(
+            has_nzb != 0,
+            is_this_thread != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_stream_repair_has_live_recovered_stats(
+    recovered_bytes: i64,
+    recovered_holes: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_stream_repair_has_live_recovered_stats(
+            recovered_bytes,
+            recovered_holes,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_stream_repair_watchdog_has_activity(
+    progress_bytes: i64,
+    prev_progress: i64,
+    waiting: c_int,
+    materializing: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_stream_repair_watchdog_has_activity(
+            progress_bytes,
+            prev_progress,
+            waiting != 0,
+            materializing,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_stream_repair_watchdog_calc_remaining_bytes(
+    missing_bytes: i64,
+    progress: i64,
+    start_progress: i64,
+) -> i64 {
+    crate::dupequeuehealth::dqh_stream_repair_watchdog_calc_remaining_bytes(
+        missing_bytes,
+        progress,
+        start_progress,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_stream_repair_is_chunk_read_complete(
+    read_bytes: i64,
+    chunk: i64,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_stream_repair_is_chunk_read_complete(read_bytes, chunk),
+    )
+}
+
 

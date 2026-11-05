@@ -192,7 +192,8 @@ void RenameController::RenameCompleted()
 			m_parRenamer.PrintMessage(Message::mkInfo, "Requesting extra par2-files for %s to perform par-rename", m_parRenamer.GetInfoName());
 			downloadQueue->EditEntry(m_postInfo->GetNzbInfo()->GetId(), DownloadQueue::eaGroupResume, nullptr);
 			downloadQueue->EditEntry(m_postInfo->GetNzbInfo()->GetId(), DownloadQueue::eaGroupPauseExtraPars, nullptr);
-			if (m_postInfo->GetNzbInfo()->GetRemainingSize() > 0)
+			if (nzbget_rs_dqh_rename_ctrl_should_reset_par_rename_status(
+				m_postInfo->GetNzbInfo()->GetRemainingSize()) != 0)
 			{
 				m_postInfo->GetNzbInfo()->SetParRenameStatus(NzbInfo::rsNone);
 			}

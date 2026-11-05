@@ -110,7 +110,9 @@ void RarRenamer::CheckFiles(const char* destDir)
 
 void RarRenamer::CheckOneFile(const char* filename)
 {
-	if (m_ignoreExt && Util::MatchFileExt(FileSystem::BaseFileName(filename), m_ignoreExt, ",;"))
+	bool matchedExt = m_ignoreExt && Util::MatchFileExt(FileSystem::BaseFileName(filename), m_ignoreExt, ",;");
+	if (nzbget_rs_dqh_rar_renamer_should_ignore_file(
+		m_ignoreExt != nullptr ? 1 : 0, matchedExt ? 1 : 0) != 0)
 	{
 		return;
 	}

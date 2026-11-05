@@ -1073,7 +1073,13 @@ void HistoryBinCommand::Execute()
 				nrEntries++;
 				// fields a kind doesn't set are 0
 				uint32 sizeHi = 0, sizeLo = 0, fileCount = 0, parStatus = 0, scriptStatus = 0, urlStatus = 0;
-				if (historyInfo->GetKind() == HistoryInfo::hkNzb)
+				int histFieldKind = nzbget_rs_dqh_binrpc_classify_history_entry_fields(
+					(int)historyInfo->GetKind(),
+					(int)HistoryInfo::hkNzb,
+					(int)HistoryInfo::hkDup,
+					(int)HistoryInfo::hkUrl,
+					showHidden ? 1 : 0);
+				if (histFieldKind == 1)
 				{
 					NzbInfo* nzbInfo = historyInfo->GetNzbInfo();
 					Util::SplitInt64(nzbInfo->GetSize(), &sizeHi, &sizeLo);
@@ -1081,12 +1087,12 @@ void HistoryBinCommand::Execute()
 					parStatus = nzbInfo->GetParStatus();
 					scriptStatus = nzbInfo->GetScriptStatuses()->CalcTotalStatus();
 				}
-				else if (historyInfo->GetKind() == HistoryInfo::hkDup && showHidden)
+				else if (histFieldKind == 2)
 				{
 					DupInfo* dupInfo = historyInfo->GetDupInfo();
 					Util::SplitInt64(dupInfo->GetSize(), &sizeHi, &sizeLo);
 				}
-				else if (historyInfo->GetKind() == HistoryInfo::hkUrl)
+				else if (histFieldKind == 3)
 				{
 					NzbInfo* nzbInfo = historyInfo->GetNzbInfo();
 					urlStatus = nzbInfo->GetUrlStatus();

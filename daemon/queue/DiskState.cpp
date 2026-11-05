@@ -284,12 +284,15 @@ StateDiskFile* StateFile::BeginRead()
 {
 	// with the dest-file there, a temp-file is what an interrupted write left (the
 	// dest-file is deleted only right before the temp-file takes its place)
-	if (m_transactional && FileSystem::FileExists(m_destFilename) && FileSystem::FileExists(m_tempFilename))
+	int recoveryMode = nzbget_rs_dqh_diskstate_classify_begin_read_recovery(
+		m_transactional ? 1 : 0,
+		FileSystem::FileExists(m_destFilename) ? 1 : 0,
+		FileSystem::FileExists(m_tempFilename) ? 1 : 0);
+	if (recoveryMode == 1)
 	{
 		FileSystem::DeleteFile(m_tempFilename);
 	}
-
-	if (!FileSystem::FileExists(m_destFilename) && FileSystem::FileExists(m_tempFilename))
+	else if (recoveryMode == 2)
 	{
 		// disaster recovery: temp-file exists but the dest-file doesn't
 		warn("Restoring diskstate file %s from %s", FileSystem::BaseFileName(m_destFilename), FileSystem::BaseFileName(m_tempFilename));
@@ -3124,24 +3127,25 @@ bool DiskState::LoadVolumeStat(Servers* servers, ServerVolumes* serverVolumes, S
 	debug("Loading volume stats from disk");
 
 	int size;
+	std::vector<int32_t> srvStateIds;
+	std::vector<int32_t> srvIds;
 	if (infile.ScanLine("%i", &size) != 1) goto error;
+	srvStateIds.reserve(servers->size());
+	srvIds.reserve(servers->size());
+	for (NewsServer* newsServer : servers)
+	{
+		srvStateIds.push_back(newsServer->GetStateId());
+		srvIds.push_back(newsServer->GetId());
+	}
 	for (int i = 0; i < size; i++)
 	{
 		ServerVolume* serverVolume = nullptr;
 
-		if (i == 0)
+		int slotIdx = nzbget_rs_dqh_diskstate_select_volume_server_slot(
+			i, srvStateIds.data(), srvIds.data(), srvStateIds.size());
+		if (slotIdx >= 0)
 		{
-			serverVolume = &serverVolumes->at(0);
-		}
-		else
-		{
-			for (NewsServer* newsServer : servers)
-			{
-				if (newsServer->GetStateId() == i)
-				{
-					serverVolume = &serverVolumes->at(newsServer->GetId());
-				}
-			}
+			serverVolume = &serverVolumes->at(slotIdx);
 		}
 
 		int firstDay, dataTime, customTime, countersResetTime;

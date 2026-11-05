@@ -101,7 +101,9 @@ void WebProcessor::Execute()
 
 	ParseHeaders();
 
-	if (m_httpMethod == hmPost && m_contentLen <= 0)
+	int preParseMethod = nzbget_rs_dqh_webserver_classify_pre_parse_method(
+		(int)m_httpMethod, (int)hmPost, (int)hmOptions, m_contentLen);
+	if (preParseMethod == 1)
 	{
 		// answered and closed: without an answer a kept-alive client waited until
 		// its timeout, and a body (chunked) left unread would be the next request
@@ -111,7 +113,7 @@ void WebProcessor::Execute()
 		return;
 	}
 
-	if (m_httpMethod == hmOptions)
+	if (preParseMethod == 2)
 	{
 		SendOptionsResponse();
 		return;

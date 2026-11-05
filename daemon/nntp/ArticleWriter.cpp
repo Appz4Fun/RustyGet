@@ -320,13 +320,18 @@ void ArticleWriter::Finish(bool success)
 /* creates output file and subdirectores */
 bool ArticleWriter::CreateOutputFile(int64 size)
 {
-	if (FileSystem::FileExists(m_outputFilename.c_str()))
+	bool outExists = FileSystem::FileExists(m_outputFilename.c_str());
+	int existingStatus = nzbget_rs_dqh_article_writer_check_existing_output_file(
+		outExists ? 1 : 0,
+		outExists ? FileSystem::FileSize(m_outputFilename.c_str()) : 0,
+		size);
+	if (existingStatus == 1)
 	{
-		if (FileSystem::FileSize(m_outputFilename.c_str()) == size)
-		{
-			// keep existing old file from previous program session
-			return true;
-		}
+		// keep existing old file from previous program session
+		return true;
+	}
+	if (existingStatus == 2)
+	{
 		// delete existing old file from previous program session
 		FileSystem::DeleteFile(m_outputFilename.c_str());
 	}
@@ -392,40 +397,46 @@ void ArticleWriter::BuildOutputFilename()
 		Guard guard = m_fileInfo->GuardOutputFile();
 		const std::string& outputFilename = m_fileInfo->GetOutputFilename();
 
-		if (!outputFilename.empty())
+		BString<1024> destPath;
+		bool destExists = false;
+		if (outputFilename.empty() && m_fileInfo->GetForceDirectWrite() && m_fileInfo->GetOutputInitialized())
+		{
+			NzbgetRsBuf dpBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+				destDir, PATH_SEPARATOR, m_fileInfo->GetFilename());
+			destPath.Set(dpBuf.data ? dpBuf.data : "", (int)dpBuf.len);
+			nzbget_rs_free(dpBuf);
+			destExists = FileSystem::FileExists(destPath);
+		}
+		int directMode = nzbget_rs_dqh_article_writer_select_direct_output_mode(
+			g_Options->GetDirectWrite() ? 1 : 0,
+			m_fileInfo->GetForceDirectWrite() ? 1 : 0,
+			!outputFilename.empty() ? 1 : 0,
+			m_fileInfo->GetOutputInitialized() ? 1 : 0,
+			destExists ? 1 : 0);
+		if (directMode == 1)
 		{
 			filename = outputFilename;
 		}
-		else
+		else if (directMode == 2)
 		{
-			BString<1024> destPath;
+			filename = destPath.Str();
+			m_fileInfo->SetOutputFilename(filename);
+		}
+		else if (directMode == 3)
+		{
+			size_t outLen = nzbget_rs_awc_article_writer_format_direct_out_tmp(
+				destDir, PATH_SEPARATOR, m_fileInfo->GetId(), fmtBuf, sizeof(fmtBuf));
+			if (outLen < sizeof(fmtBuf))
 			{
-				NzbgetRsBuf dpBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-					destDir, PATH_SEPARATOR, m_fileInfo->GetFilename());
-				destPath.Set(dpBuf.data ? dpBuf.data : "", (int)dpBuf.len);
-				nzbget_rs_free(dpBuf);
-			}
-			if (m_fileInfo->GetForceDirectWrite() && m_fileInfo->GetOutputInitialized() && FileSystem::FileExists(destPath))
-			{
-				filename = destPath.Str();
-				m_fileInfo->SetOutputFilename(filename);
+				filename.assign(fmtBuf, outLen);
 			}
 			else
 			{
-				size_t outLen = nzbget_rs_awc_article_writer_format_direct_out_tmp(
-					destDir, PATH_SEPARATOR, m_fileInfo->GetId(), fmtBuf, sizeof(fmtBuf));
-				if (outLen < sizeof(fmtBuf))
-				{
-					filename.assign(fmtBuf, outLen);
-				}
-				else
-				{
-					filename.resize(outLen);
-					nzbget_rs_awc_article_writer_format_direct_out_tmp(
-						destDir, PATH_SEPARATOR, m_fileInfo->GetId(), filename.data(), outLen + 1);
-				}
-				m_fileInfo->SetOutputFilename(filename);
+				filename.resize(outLen);
+				nzbget_rs_awc_article_writer_format_direct_out_tmp(
+					destDir, PATH_SEPARATOR, m_fileInfo->GetId(), filename.data(), outLen + 1);
 			}
+			m_fileInfo->SetOutputFilename(filename);
 		}
 
 		m_outputFilename = std::move(filename);
@@ -661,7 +672,10 @@ ArticleWriter::SetupOutputFile(DiskFile &outfile,
 	else if (setupScenario == 2)
 	{
 		const char* openPath = m_outputFilename.c_str();
-		if (!FileSystem::FileExists(openPath) && FileSystem::FileExists(paths.finalPath.c_str()))
+		bool openExists = FileSystem::FileExists(openPath);
+		if (nzbget_rs_dqh_article_writer_should_fallback_open_to_final_path(
+			openExists ? 1 : 0,
+			!openExists && FileSystem::FileExists(paths.finalPath.c_str()) ? 1 : 0) != 0)
 		{
 			openPath = paths.finalPath.c_str();
 			m_outputFilename = paths.finalPath;
@@ -771,7 +785,8 @@ uint32 ArticleWriter::ProcessArticles(DiskFile& outfile,
 			// has accepted the article's final geometry; never let an unvalidated
 			// donor overwrite the shared output during download.
 			DiskFile infile;
-			if (FileSystem::FileSize(pa->GetResultFilename()) != pa->GetSegmentSize())
+			if (!nzbget_rs_dqh_article_writer_validate_staged_dupe_size(
+				FileSystem::FileSize(pa->GetResultFilename()), pa->GetSegmentSize()))
 			{
 				m_commitError = true;
 				m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError,
@@ -802,7 +817,8 @@ uint32 ArticleWriter::ProcessArticles(DiskFile& outfile,
 					}
 					copied += cnt;
 				}
-				if (copied != pa->GetSegmentSize())
+				if (!nzbget_rs_dqh_article_writer_validate_staged_dupe_size(
+					copied, pa->GetSegmentSize()))
 				{
 					m_commitError = true;
 				}
@@ -879,14 +895,16 @@ bool ArticleWriter::CommitDiskFile(DiskFile& outfile,
 
 	bool flushed = outfile.Flush();
 	bool closed = outfile.Close();
-	if (!flushed || !closed)
+	int commitAction = nzbget_rs_dqh_article_writer_eval_commit_post_close(
+		flushed ? 1 : 0, closed ? 1 : 0, directWrite ? 1 : 0);
+	if (commitAction < 0)
 	{
 		m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError,
 			"Could not flush completed output file %s", finalOutputPath.data());
 		return false;
 	}
 
-	if (!directWrite)
+	if (commitAction == 1)
 	{
 		// a failed rename leaves the complete data under its temporary name
 		// (as it always has): it is not a data-commit failure, and failing the
@@ -908,27 +926,29 @@ bool ArticleWriter::CleanupOldData(bool directWrite,
 	{
 		for (ArticleInfo* pa : m_fileInfo->GetArticles())
 		{
-			if (pa->GetDupeFallbackRound() > 0 && pa->GetResultFilename())
+			if (nzbget_rs_dqh_article_writer_is_staged_dupe_article_file(
+				pa->GetDupeFallbackRound(), pa->GetResultFilename() ? 1 : 0) != 0)
 			{
 				FileSystem::DeleteFile(pa->GetResultFilename());
 			}
 		}
-		if (!finalOutputPath.empty())
+		bool finalEmpty = finalOutputPath.empty();
+		bool sameFilename = !finalEmpty && FileSystem::SameFilename(m_outputFilename.c_str(), finalOutputPath.data());
+		bool outputExists = finalEmpty && FileSystem::FileExists(m_outputFilename.c_str());
+		int cleanupAction = nzbget_rs_dqh_article_writer_classify_direct_final_cleanup(
+			finalEmpty ? 1 : 0, sameFilename ? 1 : 0, outputExists ? 1 : 0);
+		if (cleanupAction == 1)
 		{
-			bool sameFilename = FileSystem::SameFilename(m_outputFilename.c_str(), finalOutputPath.data());
 			// a failed rename is logged only, see CommitDiskFile
-			if (!sameFilename && !FileSystem::MoveFile(m_outputFilename.c_str(), finalOutputPath.data()))
+			if (!FileSystem::MoveFile(m_outputFilename.c_str(), finalOutputPath.data()))
 			{
 				m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "Could not move file %s to %s: %s",
 					m_outputFilename.c_str(), finalOutputPath.data(), *FileSystem::GetLastErrorMessage());
 			}
 		}
-		else
+		else if (cleanupAction == 2)
 		{
-			if (FileSystem::FileExists(m_outputFilename.c_str()))
-			{
-				FileSystem::DeleteFile(m_outputFilename.c_str());
-			}
+			FileSystem::DeleteFile(m_outputFilename.c_str());
 		}
 
 		// Clean up old directory if empty
@@ -1303,8 +1323,10 @@ CachedSegmentData ArticleCache::Alloc(int size)
 		p = malloc(size);
 		if (p)
 		{
-			if (wasEmpty && g_Options->GetServerMode() && g_Options->GetContinuePartial()
-				&& !g_Options->GetSkipWrite())
+			if (nzbget_rs_dqh_article_cache_should_write_cache_flag(
+				wasEmpty, g_Options->GetServerMode() ? 1 : 0,
+				g_Options->GetContinuePartial() ? 1 : 0,
+				g_Options->GetSkipWrite() ? 1 : 0) != 0)
 			{
 				g_DiskState->WriteCacheFlag();
 			}
@@ -1377,11 +1399,13 @@ void ArticleCache::Run()
 			justFlushed = CheckFlush(flushEverything != 0);
 			resetCounter = 0;
 
-			if (needEmergencyFlush != 0 && m_allocated == 0)
+			int postFlushAction = nzbget_rs_dqh_article_cache_post_flush_action(
+				needEmergencyFlush, m_allocated, justFlushed ? 1 : 0, IsStopped() ? 1 : 0);
+			if (postFlushAction == 1)
 			{
 				MemoryMonitor::TrimHeap();
 			}
-			else if (!justFlushed && !IsStopped())
+			else if (postFlushAction == 2)
 			{
 				Util::Sleep(5);
 			}

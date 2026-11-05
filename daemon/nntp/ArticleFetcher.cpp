@@ -154,14 +154,14 @@ ArticleFetcher::FetchedArticle ArticleFetcher::Fetch(const char* messageId,
 		NewsServer* server = connection->GetNewsServer();
 		ReleaseConnection(connection, true);
 
-		if (result.Success)
-		{
-			SetServerUnreachable(server, false);
-			return result;
-		}
-		if (!result.Transient)
+		if (nzbget_rs_dqh_article_fetcher_should_clear_unreachable(
+			result.Success ? 1 : 0, result.Transient ? 1 : 0) != 0)
 		{
 			SetServerUnreachable(server, false);	// it answered
+		}
+		if (result.Success)
+		{
+			return result;
 		}
 		if (result.Retry)
 		{
@@ -171,7 +171,8 @@ ArticleFetcher::FetchedArticle ArticleFetcher::Fetch(const char* messageId,
 			}
 			continue;
 		}
-		if (result.Transient && !ServerUnreachable(server))
+		if (nzbget_rs_dqh_article_fetcher_can_attempt_transient_retry(
+			result.Transient ? 1 : 0, ServerUnreachable(server) ? 1 : 0) != 0)
 		{
 			// an idle pooled connection the server already closed (a provider
 			// dropping every connection of the account) says nothing about the
@@ -183,7 +184,8 @@ ArticleFetcher::FetchedArticle ArticleFetcher::Fetch(const char* messageId,
 				continue;
 			}
 			int attempt = ++transientAttempts[server];
-			if (attempt < MaxTransientAttempts)
+			if (nzbget_rs_dqh_article_fetcher_has_more_transient_attempts(
+				attempt, MaxTransientAttempts) != 0)
 			{
 				if (WaitBeforeRetry(TransientRetryDelay(attempt)))
 				{
@@ -545,7 +547,8 @@ void ArticleBatchFetcher::StoreResult(int batchId, size_t index,
 	ArticleFetcher::FetchedArticle&& result)
 {
 	Guard guard(m_mutex);
-	if (batchId != m_batchId || m_cancelled)
+	if (!nzbget_rs_dqh_article_batch_can_store_result(
+		batchId, m_batchId, m_cancelled ? 1 : 0))
 	{
 		return;	// stale batch or the consumer bailed: discard
 	}
@@ -596,7 +599,8 @@ bool ArticleBatchFetcher::Next(ArticleFetcher::FetchedArticle& result)
 	size_t index;
 	{
 		Guard guard(m_mutex);
-		if (m_cancelled || m_stopped || m_nextDeliver >= m_requests.size())
+		if (!nzbget_rs_dqh_article_batch_can_deliver_next(
+			m_cancelled ? 1 : 0, m_stopped ? 1 : 0, m_nextDeliver, m_requests.size()))
 		{
 			return false;
 		}

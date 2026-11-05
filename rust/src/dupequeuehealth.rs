@@ -3574,6 +3574,242 @@ pub fn dqh_scanner_missed_articles_msg_kind(
     }
 }
 
+/// Evaluates existing output file status in `ArticleWriter::CreateOutputFile`:
+/// `0` = does not exist, `1` = keep existing file of equal size, `2` = delete existing file of different size.
+pub fn dqh_article_writer_check_existing_output_file(
+    exists: bool,
+    existing_size: i64,
+    target_size: i64,
+) -> i32 {
+    if !exists {
+        0
+    } else if existing_size == target_size {
+        1
+    } else {
+        2
+    }
+}
+
+/// Selects the direct-write output path mode in `ArticleWriter::BuildOutputFilename`:
+/// `0` = not direct write, `1` = reuse existing `outputFilename`, `2` = use `destPath`, `3` = format `<id>.out.tmp`.
+pub fn dqh_article_writer_select_direct_output_mode(
+    direct_write: bool,
+    force_direct_write: bool,
+    has_existing_output: bool,
+    output_initialized: bool,
+    dest_exists: bool,
+) -> i32 {
+    if !direct_write && !force_direct_write {
+        0
+    } else if has_existing_output {
+        1
+    } else if force_direct_write && output_initialized && dest_exists {
+        2
+    } else {
+        3
+    }
+}
+
+/// Returns true when `ArticleWriter::SetupOutputFile` in direct-write mode should fall back to opening `finalPath`.
+pub fn dqh_article_writer_should_fallback_open_to_final_path(
+    open_exists: bool,
+    final_exists: bool,
+) -> bool {
+    !open_exists && final_exists
+}
+
+/// Returns true when a staged duplicate article's size or copied byte count matches `segment_size`.
+pub fn dqh_article_writer_validate_staged_dupe_size(
+    actual_size: i64,
+    segment_size: i32,
+) -> bool {
+    actual_size == i64::from(segment_size)
+}
+
+/// Evaluates post-close commit action in `ArticleWriter::CommitDiskFile`:
+/// `-1` = flush/close failed, `1` = move `tempDestPath` to `finalOutputPath`, `0` = direct-write complete.
+pub fn dqh_article_writer_eval_commit_post_close(
+    flushed: bool,
+    closed: bool,
+    direct_write: bool,
+) -> i32 {
+    if !flushed || !closed {
+        -1
+    } else if !direct_write {
+        1
+    } else {
+        0
+    }
+}
+
+/// Returns true when an article has a staged duplicate temp file to delete in `ArticleWriter::CleanupOldData`.
+pub fn dqh_article_writer_is_staged_dupe_article_file(
+    dupe_fallback_round: i32,
+    has_result_filename: bool,
+) -> bool {
+    dupe_fallback_round > 0 && has_result_filename
+}
+
+/// Classifies the final output file cleanup action in `ArticleWriter::CleanupOldData` (direct-write branch):
+/// `1` = move `m_outputFilename` to `finalOutputPath`, `2` = delete `m_outputFilename`, `0` = no-op.
+pub fn dqh_article_writer_classify_direct_final_cleanup(
+    final_empty: bool,
+    same_filename: bool,
+    output_exists: bool,
+) -> i32 {
+    if !final_empty {
+        if !same_filename {
+            1
+        } else {
+            0
+        }
+    } else if output_exists {
+        2
+    } else {
+        0
+    }
+}
+
+/// Returns true when `ArticleCache::Alloc` should write the `acache` flag file on disk.
+pub fn dqh_article_cache_should_write_cache_flag(
+    was_empty: bool,
+    server_mode: bool,
+    continue_partial: bool,
+    skip_write: bool,
+) -> bool {
+    was_empty && server_mode && continue_partial && !skip_write
+}
+
+/// Selects the post-flush action in `ArticleCache::Run`:
+/// `1` = `MemoryMonitor::TrimHeap()`, `2` = `Util::Sleep(5)`, `0` = none.
+pub fn dqh_article_cache_post_flush_action(
+    need_emergency_flush: bool,
+    allocated: usize,
+    just_flushed: bool,
+    is_stopped: bool,
+) -> i32 {
+    if need_emergency_flush && allocated == 0 {
+        1
+    } else if !just_flushed && !is_stopped {
+        2
+    } else {
+        0
+    }
+}
+
+/// Returns true when `ArticleFetcher::Fetch` should clear the unreachable flag for the server.
+pub fn dqh_article_fetcher_should_clear_unreachable(success: bool, transient: bool) -> bool {
+    success || !transient
+}
+
+/// Returns true when `ArticleFetcher::Fetch` should evaluate transient retry on an answering/reachable server.
+pub fn dqh_article_fetcher_can_attempt_transient_retry(
+    transient: bool,
+    server_unreachable: bool,
+) -> bool {
+    transient && !server_unreachable
+}
+
+/// Returns true when `ArticleFetcher::Fetch` has remaining transient retry attempts (`attempt < max_transient_attempts`).
+pub fn dqh_article_fetcher_has_more_transient_attempts(
+    attempt: i32,
+    max_transient_attempts: i32,
+) -> bool {
+    attempt < max_transient_attempts
+}
+
+/// Returns true when `ArticleBatchFetcher::StoreResult` should accept and store the fetched result.
+pub fn dqh_article_batch_can_store_result(
+    batch_id: i32,
+    current_batch_id: i32,
+    cancelled: bool,
+) -> bool {
+    batch_id == current_batch_id && !cancelled
+}
+
+/// Returns true when `ArticleBatchFetcher::Next` can deliver the next slot.
+pub fn dqh_article_batch_can_deliver_next(
+    cancelled: bool,
+    stopped: bool,
+    next_deliver: usize,
+    total_requests: usize,
+) -> bool {
+    !cancelled && !stopped && next_deliver < total_requests
+}
+
+/// Classifies the pre-URL HTTP method check in `WebProcessor::Execute`:
+/// `1` = reject POST with `content_len <= 0`, `2` = answer OPTIONS request, `0` = continue.
+pub fn dqh_webserver_classify_pre_parse_method(
+    http_method: i32,
+    hm_post: i32,
+    hm_options: i32,
+    content_len: i32,
+) -> i32 {
+    if http_method == hm_post && content_len <= 0 {
+        1
+    } else if http_method == hm_options {
+        2
+    } else {
+        0
+    }
+}
+
+/// Classifies which history entry fields to populate in `HistoryBinCommand::Execute`:
+/// `1` = NZB fields, `2` = Dup size fields, `3` = URL status field, `0` = none.
+pub fn dqh_binrpc_classify_history_entry_fields(
+    kind: i32,
+    hk_nzb: i32,
+    hk_dup: i32,
+    hk_url: i32,
+    show_hidden: bool,
+) -> i32 {
+    if kind == hk_nzb {
+        1
+    } else if kind == hk_dup && show_hidden {
+        2
+    } else if kind == hk_url {
+        3
+    } else {
+        0
+    }
+}
+
+/// Classifies transactional temp/dest file recovery in `StateFile::BeginRead`:
+/// `1` = delete leftover temp file, `2` = restore temp file to dest file, `0` = normal open.
+pub fn dqh_diskstate_classify_begin_read_recovery(
+    transactional: bool,
+    dest_exists: bool,
+    temp_exists: bool,
+) -> i32 {
+    if transactional && dest_exists && temp_exists {
+        1
+    } else if !dest_exists && temp_exists {
+        2
+    } else {
+        0
+    }
+}
+
+/// Selects the `serverVolumes` slot index for `DiskState::LoadVolumeStat` entry `index`:
+/// returns `0` for `index == 0`, the last matching `server_id` where `state_id == index`, or `-1` if none.
+pub fn dqh_diskstate_select_volume_server_slot(
+    index: i32,
+    state_ids: &[i32],
+    server_ids: &[i32],
+) -> i32 {
+    if index == 0 {
+        return 0;
+    }
+    let count = state_ids.len().min(server_ids.len());
+    let mut slot = -1;
+    for k in 0..count {
+        if state_ids[k] == index {
+            slot = server_ids[k];
+        }
+    }
+    slot
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4906,5 +5142,142 @@ mod tests {
         assert_eq!(dqh_queue_editor_delete_entry_msg_kind(false, 4, 0), 0);
         assert_eq!(dqh_scanner_missed_articles_msg_kind(true, 1, 4), 1);
         assert_eq!(dqh_scanner_missed_articles_msg_kind(false, 1, 4), 4);
+        assert_eq!(
+            dqh_article_writer_check_existing_output_file(false, 0, 1000),
+            0
+        );
+        assert_eq!(
+            dqh_article_writer_check_existing_output_file(true, 1000, 1000),
+            1
+        );
+        assert_eq!(
+            dqh_article_writer_check_existing_output_file(true, 500, 1000),
+            2
+        );
+        assert_eq!(
+            dqh_article_writer_select_direct_output_mode(false, false, true, true, true),
+            0
+        );
+        assert_eq!(
+            dqh_article_writer_select_direct_output_mode(true, false, true, false, false),
+            1
+        );
+        assert_eq!(
+            dqh_article_writer_select_direct_output_mode(false, true, false, true, true),
+            2
+        );
+        assert_eq!(
+            dqh_article_writer_select_direct_output_mode(true, false, false, true, true),
+            3
+        );
+        assert!(dqh_article_writer_should_fallback_open_to_final_path(
+            false, true
+        ));
+        assert!(!dqh_article_writer_should_fallback_open_to_final_path(
+            true, true
+        ));
+        assert!(dqh_article_writer_validate_staged_dupe_size(768000, 768000));
+        assert!(!dqh_article_writer_validate_staged_dupe_size(768001, 768000));
+        assert_eq!(
+            dqh_article_writer_eval_commit_post_close(false, true, false),
+            -1
+        );
+        assert_eq!(
+            dqh_article_writer_eval_commit_post_close(true, true, false),
+            1
+        );
+        assert_eq!(
+            dqh_article_writer_eval_commit_post_close(true, true, true),
+            0
+        );
+        assert!(dqh_article_writer_is_staged_dupe_article_file(1, true));
+        assert!(!dqh_article_writer_is_staged_dupe_article_file(0, true));
+        assert!(!dqh_article_writer_is_staged_dupe_article_file(1, false));
+        assert_eq!(
+            dqh_article_writer_classify_direct_final_cleanup(false, false, true),
+            1
+        );
+        assert_eq!(
+            dqh_article_writer_classify_direct_final_cleanup(false, true, true),
+            0
+        );
+        assert_eq!(
+            dqh_article_writer_classify_direct_final_cleanup(true, false, true),
+            2
+        );
+        assert_eq!(
+            dqh_article_writer_classify_direct_final_cleanup(true, false, false),
+            0
+        );
+        assert!(dqh_article_cache_should_write_cache_flag(
+            true, true, true, false
+        ));
+        assert!(!dqh_article_cache_should_write_cache_flag(
+            true, true, true, true
+        ));
+        assert_eq!(dqh_article_cache_post_flush_action(true, 0, true, false), 1);
+        assert_eq!(
+            dqh_article_cache_post_flush_action(false, 100, false, false),
+            2
+        );
+        assert_eq!(
+            dqh_article_cache_post_flush_action(false, 100, true, false),
+            0
+        );
+        assert!(dqh_article_fetcher_should_clear_unreachable(true, true));
+        assert!(dqh_article_fetcher_should_clear_unreachable(false, false));
+        assert!(!dqh_article_fetcher_should_clear_unreachable(false, true));
+        assert!(dqh_article_fetcher_can_attempt_transient_retry(true, false));
+        assert!(!dqh_article_fetcher_can_attempt_transient_retry(true, true));
+        assert!(dqh_article_fetcher_has_more_transient_attempts(1, 3));
+        assert!(!dqh_article_fetcher_has_more_transient_attempts(3, 3));
+        assert!(dqh_article_batch_can_store_result(5, 5, false));
+        assert!(!dqh_article_batch_can_store_result(4, 5, false));
+        assert!(!dqh_article_batch_can_store_result(5, 5, true));
+        assert!(dqh_article_batch_can_deliver_next(false, false, 2, 5));
+        assert!(!dqh_article_batch_can_deliver_next(false, false, 5, 5));
+        assert_eq!(dqh_webserver_classify_pre_parse_method(1, 1, 2, 0), 1);
+        assert_eq!(dqh_webserver_classify_pre_parse_method(2, 1, 2, 0), 2);
+        assert_eq!(dqh_webserver_classify_pre_parse_method(0, 1, 2, 0), 0);
+        assert_eq!(
+            dqh_binrpc_classify_history_entry_fields(1, 1, 2, 3, false),
+            1
+        );
+        assert_eq!(
+            dqh_binrpc_classify_history_entry_fields(2, 1, 2, 3, true),
+            2
+        );
+        assert_eq!(
+            dqh_binrpc_classify_history_entry_fields(2, 1, 2, 3, false),
+            0
+        );
+        assert_eq!(
+            dqh_binrpc_classify_history_entry_fields(3, 1, 2, 3, false),
+            3
+        );
+        assert_eq!(
+            dqh_diskstate_classify_begin_read_recovery(true, true, true),
+            1
+        );
+        assert_eq!(
+            dqh_diskstate_classify_begin_read_recovery(true, false, true),
+            2
+        );
+        assert_eq!(
+            dqh_diskstate_classify_begin_read_recovery(true, true, false),
+            0
+        );
+        assert_eq!(
+            dqh_diskstate_select_volume_server_slot(0, &[1, 2], &[10, 20]),
+            0
+        );
+        assert_eq!(
+            dqh_diskstate_select_volume_server_slot(2, &[1, 2], &[10, 20]),
+            20
+        );
+        assert_eq!(
+            dqh_diskstate_select_volume_server_slot(3, &[1, 2], &[10, 20]),
+            -1
+        );
     }
 }

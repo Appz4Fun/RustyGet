@@ -36629,3 +36629,263 @@ pub extern "C" fn nzbget_rs_dqh_scanner_missed_articles_msg_kind(
     crate::dupequeuehealth::dqh_scanner_missed_articles_msg_kind(is_warn != 0, mk_warning, mk_detail)
 }
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_article_writer_check_existing_output_file(
+    exists: c_int,
+    existing_size: i64,
+    target_size: i64,
+) -> c_int {
+    crate::dupequeuehealth::dqh_article_writer_check_existing_output_file(
+        exists != 0,
+        existing_size,
+        target_size,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_article_writer_select_direct_output_mode(
+    direct_write: c_int,
+    force_direct_write: c_int,
+    has_existing_output: c_int,
+    output_initialized: c_int,
+    dest_exists: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_article_writer_select_direct_output_mode(
+        direct_write != 0,
+        force_direct_write != 0,
+        has_existing_output != 0,
+        output_initialized != 0,
+        dest_exists != 0,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_article_writer_should_fallback_open_to_final_path(
+    open_exists: c_int,
+    final_exists: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_article_writer_should_fallback_open_to_final_path(
+            open_exists != 0,
+            final_exists != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_article_writer_validate_staged_dupe_size(
+    actual_size: i64,
+    segment_size: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_article_writer_validate_staged_dupe_size(
+            actual_size,
+            segment_size,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_article_writer_eval_commit_post_close(
+    flushed: c_int,
+    closed: c_int,
+    direct_write: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_article_writer_eval_commit_post_close(
+        flushed != 0,
+        closed != 0,
+        direct_write != 0,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_article_writer_is_staged_dupe_article_file(
+    dupe_fallback_round: c_int,
+    has_result_filename: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_article_writer_is_staged_dupe_article_file(
+            dupe_fallback_round,
+            has_result_filename != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_article_writer_classify_direct_final_cleanup(
+    final_empty: c_int,
+    same_filename: c_int,
+    output_exists: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_article_writer_classify_direct_final_cleanup(
+        final_empty != 0,
+        same_filename != 0,
+        output_exists != 0,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_article_cache_should_write_cache_flag(
+    was_empty: c_int,
+    server_mode: c_int,
+    continue_partial: c_int,
+    skip_write: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_article_cache_should_write_cache_flag(
+            was_empty != 0,
+            server_mode != 0,
+            continue_partial != 0,
+            skip_write != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_article_cache_post_flush_action(
+    need_emergency_flush: c_int,
+    allocated: usize,
+    just_flushed: c_int,
+    is_stopped: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_article_cache_post_flush_action(
+        need_emergency_flush != 0,
+        allocated,
+        just_flushed != 0,
+        is_stopped != 0,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_article_fetcher_should_clear_unreachable(
+    success: c_int,
+    transient: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_article_fetcher_should_clear_unreachable(
+            success != 0,
+            transient != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_article_fetcher_can_attempt_transient_retry(
+    transient: c_int,
+    server_unreachable: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_article_fetcher_can_attempt_transient_retry(
+            transient != 0,
+            server_unreachable != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_article_fetcher_has_more_transient_attempts(
+    attempt: c_int,
+    max_transient_attempts: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_article_fetcher_has_more_transient_attempts(
+            attempt,
+            max_transient_attempts,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_article_batch_can_store_result(
+    batch_id: c_int,
+    current_batch_id: c_int,
+    cancelled: c_int,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_article_batch_can_store_result(
+        batch_id,
+        current_batch_id,
+        cancelled != 0,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_article_batch_can_deliver_next(
+    cancelled: c_int,
+    stopped: c_int,
+    next_deliver: usize,
+    total_requests: usize,
+) -> c_int {
+    i32::from(crate::dupequeuehealth::dqh_article_batch_can_deliver_next(
+        cancelled != 0,
+        stopped != 0,
+        next_deliver,
+        total_requests,
+    ))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_webserver_classify_pre_parse_method(
+    http_method: c_int,
+    hm_post: c_int,
+    hm_options: c_int,
+    content_len: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_webserver_classify_pre_parse_method(
+        http_method,
+        hm_post,
+        hm_options,
+        content_len,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_binrpc_classify_history_entry_fields(
+    kind: c_int,
+    hk_nzb: c_int,
+    hk_dup: c_int,
+    hk_url: c_int,
+    show_hidden: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_binrpc_classify_history_entry_fields(
+        kind,
+        hk_nzb,
+        hk_dup,
+        hk_url,
+        show_hidden != 0,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_diskstate_classify_begin_read_recovery(
+    transactional: c_int,
+    dest_exists: c_int,
+    temp_exists: c_int,
+) -> c_int {
+    crate::dupequeuehealth::dqh_diskstate_classify_begin_read_recovery(
+        transactional != 0,
+        dest_exists != 0,
+        temp_exists != 0,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_select_volume_server_slot(
+    index: c_int,
+    state_ids: *const i32,
+    server_ids: *const i32,
+    count: usize,
+) -> c_int {
+    let s_ids = if state_ids.is_null() || count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(state_ids, count)
+    };
+    let srv_ids = if server_ids.is_null() || count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(server_ids, count)
+    };
+    crate::dupequeuehealth::dqh_diskstate_select_volume_server_slot(index, s_ids, srv_ids)
+}
+
+

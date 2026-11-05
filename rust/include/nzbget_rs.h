@@ -6113,6 +6113,43 @@ int nzbget_rs_dqh_dupecoord_select_other_dupe_delete_action(
     int in_post_process, int ea_post_delete, int delete_action);
 int nzbget_rs_dqh_queue_editor_delete_entry_msg_kind(int deleting, int mk_detail, int mk_info);
 int nzbget_rs_dqh_scanner_missed_articles_msg_kind(int is_warn, int mk_warning, int mk_detail);
+int nzbget_rs_dqh_article_writer_check_existing_output_file(
+    int exists, int64_t existing_size, int64_t target_size);
+int nzbget_rs_dqh_article_writer_select_direct_output_mode(
+    int direct_write, int force_direct_write, int has_existing_output,
+    int output_initialized, int dest_exists);
+int nzbget_rs_dqh_article_writer_should_fallback_open_to_final_path(
+    int open_exists, int final_exists);
+int nzbget_rs_dqh_article_writer_validate_staged_dupe_size(
+    int64_t actual_size, int segment_size);
+int nzbget_rs_dqh_article_writer_eval_commit_post_close(
+    int flushed, int closed, int direct_write);
+int nzbget_rs_dqh_article_writer_is_staged_dupe_article_file(
+    int dupe_fallback_round, int has_result_filename);
+int nzbget_rs_dqh_article_writer_classify_direct_final_cleanup(
+    int final_empty, int same_filename, int output_exists);
+int nzbget_rs_dqh_article_cache_should_write_cache_flag(
+    int was_empty, int server_mode, int continue_partial, int skip_write);
+int nzbget_rs_dqh_article_cache_post_flush_action(
+    int need_emergency_flush, size_t allocated, int just_flushed, int is_stopped);
+int nzbget_rs_dqh_article_fetcher_should_clear_unreachable(
+    int success, int transient);
+int nzbget_rs_dqh_article_fetcher_can_attempt_transient_retry(
+    int transient, int server_unreachable);
+int nzbget_rs_dqh_article_fetcher_has_more_transient_attempts(
+    int attempt, int max_transient_attempts);
+int nzbget_rs_dqh_article_batch_can_store_result(
+    int batch_id, int current_batch_id, int cancelled);
+int nzbget_rs_dqh_article_batch_can_deliver_next(
+    int cancelled, int stopped, size_t next_deliver, size_t total_requests);
+int nzbget_rs_dqh_webserver_classify_pre_parse_method(
+    int http_method, int hm_post, int hm_options, int content_len);
+int nzbget_rs_dqh_binrpc_classify_history_entry_fields(
+    int kind, int hk_nzb, int hk_dup, int hk_url, int show_hidden);
+int nzbget_rs_dqh_diskstate_classify_begin_read_recovery(
+    int transactional, int dest_exists, int temp_exists);
+int nzbget_rs_dqh_diskstate_select_volume_server_slot(
+    int index, const int32_t* state_ids, const int32_t* server_ids, size_t count);
 
 #include "nzbget_tls_cipher.h"
 

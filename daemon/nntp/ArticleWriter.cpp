@@ -71,7 +71,9 @@ void ArticleWriter::Prepare()
 
 bool ArticleWriter::IsDupeFallbackArticle() const
 {
-	return m_articleInfo && m_articleInfo->GetDupeFallbackRound() > 0;
+	return nzbget_rs_dqh_article_writer_is_dupe_fallback_article(
+		m_articleInfo ? 1 : 0,
+		m_articleInfo ? m_articleInfo->GetDupeFallbackRound() : 0) != 0;
 }
 
 bool ArticleWriter::Start(Decoder::EFormat format, const char* filename, int64 fileSize,
@@ -1023,7 +1025,8 @@ void ArticleWriter::HandlePostProcessing(uint32 crc,
 	m_fileInfo->SetOutputFilename(currentPath.data());
 
 	// 1. Rename if file was renamed during completion
-	if (m_fileInfo->GetFilename() != originalFilename)
+	if (nzbget_rs_dqh_article_writer_was_renamed_during_completion(
+		m_fileInfo->GetFilename(), originalFilename.data(), originalFilename.size()) != 0)
 	{
 		CString newOfn = FileSystem::MakeUniqueFilename(nzbDestDir.data(), m_fileInfo->GetFilename());
 		if (!FileSystem::MoveFile(m_fileInfo->GetOutputFilename().c_str(), *newOfn))
@@ -1035,7 +1038,9 @@ void ArticleWriter::HandlePostProcessing(uint32 crc,
 	}
 
 	// 2. Handle Hardlinks
-	if (m_fileInfo->IsHardLinked() && Util::EmptyStr(g_Options->GetInterDir()))
+	if (nzbget_rs_dqh_article_writer_should_delete_hardlinked_without_interdir(
+		m_fileInfo->IsHardLinked() ? 1 : 0,
+		Util::EmptyStr(g_Options->GetInterDir()) ? 1 : 0) != 0)
 	{
 		if (FileSystem::DeleteFile(m_outputFilename.c_str()))
 		{
@@ -1049,7 +1054,8 @@ void ArticleWriter::HandlePostProcessing(uint32 crc,
 	}
 
 	// 3. Move Completed Files (if destination changed)
-	if (m_fileInfo->GetNzbInfo()->GetDestDir() != nzbDestDir)
+	if (nzbget_rs_dqh_article_writer_did_dest_dir_change(
+		m_fileInfo->GetNzbInfo()->GetDestDir(), nzbDestDir.data(), nzbDestDir.size()) != 0)
 	{
 		MoveCompletedFiles(m_fileInfo->GetNzbInfo(), nzbDestDir.data());
 	}
@@ -1382,7 +1388,8 @@ void ArticleCache::Run()
 {
 	int resetCounter = 0;
 	bool justFlushed = false;
-	while (!IsStopped() || m_allocated > 0)
+	while (nzbget_rs_dqh_article_cache_should_continue_run_loop(
+		IsStopped() ? 1 : 0, m_allocated) != 0)
 	{
 		size_t effectiveLimit = g_MemoryMonitor ?
 			g_MemoryMonitor->GetEffectiveArticleCacheBytes() :
@@ -1538,7 +1545,8 @@ void MemoryMonitor::Run()
 		interval = nzbget_rs_cwp_memory_monitor_clamp_interval(interval);
 
 		int slept = 0;
-		while (!IsStopped() && slept < interval)
+		while (nzbget_rs_dqh_memory_monitor_should_keep_sleeping(
+			IsStopped() ? 1 : 0, slept, interval) != 0)
 		{
 			Util::Sleep(50);
 			slept += 50;

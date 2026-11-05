@@ -4497,6 +4497,196 @@ pub fn dqh_stream_repair_is_chunk_read_complete(read_bytes: i64, chunk: i64) -> 
     read_bytes == chunk
 }
 
+/// Returns true when `ArticleDownloader::Run` should break out of the server loop (`status == adFinished || status == adFatalError`).
+pub fn dqh_article_dl_is_terminal_loop_status(
+    status: i32,
+    ad_finished: i32,
+    ad_fatal_error: i32,
+) -> bool {
+    status == ad_finished || status == ad_fatal_error
+}
+
+/// Returns true when `ArticleDownloader::Run` should fail immediately because a desired server failed and isn't being retried (`!has_want_server && has_desired_server`).
+pub fn dqh_article_dl_should_fail_for_desired_server(
+    has_want_server: bool,
+    has_desired_server: bool,
+) -> bool {
+    !has_want_server && has_desired_server
+}
+
+/// Returns true when `ArticleDownloader::Download` should continue reading/decoding body chunks (`!is_stopped && !decoder_eof`).
+pub fn dqh_article_dl_should_continue_read_loop(is_stopped: bool, decoder_eof: bool) -> bool {
+    !is_stopped && !decoder_eof
+}
+
+/// Returns true when `ArticleDownloader::Download` should release the connection and run `DecodeCheck()` (`status == adRunning`).
+pub fn dqh_article_dl_should_run_decode_check(status: i32, ad_running: i32) -> bool {
+    status == ad_running
+}
+
+/// Returns true when `ServerPool` has a valid level index with free connection slots (`level >= 0 && (level as usize) < levels_len && level_free_count > 0`).
+pub fn dqh_server_pool_has_available_level_conns(
+    level: i32,
+    levels_len: usize,
+    level_free_count: i32,
+) -> bool {
+    level >= 0 && (level as usize) < levels_len && level_free_count > 0
+}
+
+/// Computes `rand_val % candidates_len` for `ServerPool::LockedGetConnection`.
+pub fn dqh_server_pool_pick_candidate_index(rand_val: i32, candidates_len: usize) -> usize {
+    if candidates_len == 0 {
+        0
+    } else {
+        (rand_val.unsigned_abs() as usize) % candidates_len
+    }
+}
+
+/// Returns true when `ServerPool::CloseUnusedConnections` should disconnect a pooled connection on an idle level (`conn_norm_level == level && conn_status == cs_connected`).
+pub fn dqh_server_pool_should_disconnect_idle_level_conn(
+    conn_norm_level: i32,
+    level: i32,
+    conn_status: i32,
+    cs_connected: i32,
+) -> bool {
+    conn_norm_level == level && conn_status == cs_connected
+}
+
+/// Returns true when `StatMeter::CheckQuota` has at least one quota configured (`daily_quota != 0 || monthly_quota != 0`).
+pub fn dqh_statmeter_has_any_quota_configured(daily_quota: i32, monthly_quota: i32) -> bool {
+    daily_quota != 0 || monthly_quota != 0
+}
+
+/// Returns true when `StatMeter::CalcMonthSlots` is before `QuotaStartDay` in the current month (`quota_start_day > cur_mday`).
+pub fn dqh_statmeter_is_before_quota_start_day(quota_start_day: i32, cur_mday: i32) -> bool {
+    quota_start_day > cur_mday
+}
+
+/// Returns true when `StatMeter::CalcMonthSlots` previous month day overflowed (`prev_mday != quota_start_day`).
+pub fn dqh_statmeter_did_prev_month_day_overflow(prev_mday: i32, quota_start_day: i32) -> bool {
+    prev_mday != quota_start_day
+}
+
+/// Classifies `NntpConnection::Connect` handshake result:
+/// `0` = connected (`result == 0`),
+/// `1` = disconnect & fail (`result == 1`),
+/// `-1` = fail without disconnect (`result != 0 && result != 1`).
+pub fn dqh_nntp_conn_classify_handshake_result(result: i32) -> i32 {
+    if result == 1 {
+        1
+    } else if result == 0 {
+        0
+    } else {
+        -1
+    }
+}
+
+/// Returns true when `ArticleFetcher::WaitBeforeRetry` should keep sleeping (`waited < seconds * 10 && !is_stopped`).
+pub fn dqh_article_fetcher_should_keep_waiting_retry(
+    waited: i32,
+    seconds: i32,
+    is_stopped: bool,
+) -> bool {
+    waited < seconds.saturating_mul(10) && !is_stopped
+}
+
+/// Returns true when `ArticleFetcher::ReleaseConnection` should disconnect the connection (`!keep_connected || conn_status == cs_cancelled`).
+pub fn dqh_article_fetcher_should_disconnect_on_release(
+    keep_connected: bool,
+    conn_status: i32,
+    cs_cancelled: i32,
+) -> bool {
+    !keep_connected || conn_status == cs_cancelled
+}
+
+/// Returns true when `ArticleFetcher::FetchFromConnection` should treat a failed group join as transient and disconnect (`!has_response`).
+pub fn dqh_article_fetcher_is_join_group_failure_transient(has_response: bool) -> bool {
+    !has_response
+}
+
+/// Returns true when `ArticleBatchFetcher::Begin` should call `EnsureWorkers()` (`worker_count > 0 && !is_stopped`).
+pub fn dqh_article_batch_should_ensure_workers(worker_count: i32, is_stopped: bool) -> bool {
+    worker_count > 0 && !is_stopped
+}
+
+/// Returns true when `ArticleWriter::IsDupeFallbackArticle` is active (`has_article_info && dupe_fallback_round > 0`).
+pub fn dqh_article_writer_is_dupe_fallback_article(
+    has_article_info: bool,
+    dupe_fallback_round: i32,
+) -> bool {
+    has_article_info && dupe_fallback_round > 0
+}
+
+/// Returns true when `ArticleWriter::HandlePostProcessing` should rename the output file because `m_fileInfo->GetFilename() != originalFilename`.
+pub fn dqh_article_writer_was_renamed_during_completion(
+    cur_filename: &[u8],
+    orig_filename: &[u8],
+) -> bool {
+    cur_filename != orig_filename
+}
+
+/// Returns true when `ArticleWriter::HandlePostProcessing` should delete the hard-linked temporary file (`is_hard_linked && inter_dir_empty`).
+pub fn dqh_article_writer_should_delete_hardlinked_without_interdir(
+    is_hard_linked: bool,
+    inter_dir_empty: bool,
+) -> bool {
+    is_hard_linked && inter_dir_empty
+}
+
+/// Returns true when `ArticleWriter::HandlePostProcessing` should move completed files because `DestDir` changed (`cur_dest_dir != orig_dest_dir`).
+pub fn dqh_article_writer_did_dest_dir_change(
+    cur_dest_dir: &[u8],
+    orig_dest_dir: &[u8],
+) -> bool {
+    cur_dest_dir != orig_dest_dir
+}
+
+/// Returns true when `ArticleCache::Run` should continue its main loop (`!is_stopped || allocated > 0`).
+pub fn dqh_article_cache_should_continue_run_loop(is_stopped: bool, allocated: usize) -> bool {
+    !is_stopped || allocated > 0
+}
+
+/// Returns true when `MemoryMonitor::Run` should keep sleeping between state checks (`!is_stopped && slept < interval`).
+pub fn dqh_memory_monitor_should_keep_sleeping(
+    is_stopped: bool,
+    slept: i32,
+    interval: i32,
+) -> bool {
+    !is_stopped && slept < interval
+}
+
+/// Returns true when `WebDownloader::Run` should continue its retry loop (`!is_stopped && remained_download_retries > 0 && remained_connect_retries > 0`).
+pub fn dqh_webdl_should_continue_retry_loop(
+    is_stopped: bool,
+    remained_download_retries: i32,
+    remained_connect_retries: i32,
+) -> bool {
+    !is_stopped && remained_download_retries > 0 && remained_connect_retries > 0
+}
+
+/// Returns true when `WebDownloader::Run` should keep sleeping during the retry interval (`!is_stopped && msec < url_interval_sec * 1000 && !(!force && pause_download)`).
+pub fn dqh_webdl_should_keep_waiting_retry_interval(
+    is_stopped: bool,
+    msec: i32,
+    url_interval_sec: i32,
+    force: bool,
+    pause_download: bool,
+) -> bool {
+    !is_stopped
+        && msec < url_interval_sec.saturating_mul(1000)
+        && !(!force && pause_download)
+}
+
+/// Returns true when `WebDownloader::Run` has reached a terminal status (`status == adFinished || status == adFatalError || status == adNotFound`).
+pub fn dqh_webdl_is_terminal_retry_status(
+    status: i32,
+    ad_finished: i32,
+    ad_fatal_error: i32,
+    ad_not_found: i32,
+) -> bool {
+    status == ad_finished || status == ad_fatal_error || status == ad_not_found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6270,5 +6460,74 @@ mod tests {
         assert_eq!(dqh_stream_repair_watchdog_calc_remaining_bytes(200, 500, 100), 0);
         assert!(dqh_stream_repair_is_chunk_read_complete(4096, 4096));
         assert!(!dqh_stream_repair_is_chunk_read_complete(2048, 4096));
+        assert!(dqh_article_dl_is_terminal_loop_status(2, 2, 5));
+        assert!(dqh_article_dl_is_terminal_loop_status(5, 2, 5));
+        assert!(!dqh_article_dl_is_terminal_loop_status(1, 2, 5));
+        assert!(dqh_article_dl_should_fail_for_desired_server(false, true));
+        assert!(!dqh_article_dl_should_fail_for_desired_server(true, true));
+        assert!(!dqh_article_dl_should_fail_for_desired_server(false, false));
+        assert!(dqh_article_dl_should_continue_read_loop(false, false));
+        assert!(!dqh_article_dl_should_continue_read_loop(true, false));
+        assert!(!dqh_article_dl_should_continue_read_loop(false, true));
+        assert!(dqh_article_dl_should_run_decode_check(1, 1));
+        assert!(!dqh_article_dl_should_run_decode_check(3, 1));
+        assert!(dqh_server_pool_has_available_level_conns(0, 3, 2));
+        assert!(!dqh_server_pool_has_available_level_conns(3, 3, 2));
+        assert!(!dqh_server_pool_has_available_level_conns(0, 3, 0));
+        assert!(!dqh_server_pool_has_available_level_conns(-1, 3, 2));
+        assert_eq!(dqh_server_pool_pick_candidate_index(7, 3), 1);
+        assert_eq!(dqh_server_pool_pick_candidate_index(7, 0), 0);
+        assert!(dqh_server_pool_should_disconnect_idle_level_conn(1, 1, 2, 2));
+        assert!(!dqh_server_pool_should_disconnect_idle_level_conn(0, 1, 2, 2));
+        assert!(!dqh_server_pool_should_disconnect_idle_level_conn(1, 1, 0, 2));
+        assert!(dqh_statmeter_has_any_quota_configured(10, 0));
+        assert!(dqh_statmeter_has_any_quota_configured(0, 100));
+        assert!(!dqh_statmeter_has_any_quota_configured(0, 0));
+        assert!(dqh_statmeter_is_before_quota_start_day(15, 10));
+        assert!(!dqh_statmeter_is_before_quota_start_day(15, 15));
+        assert!(dqh_statmeter_did_prev_month_day_overflow(2, 31));
+        assert!(!dqh_statmeter_did_prev_month_day_overflow(15, 15));
+        assert_eq!(dqh_nntp_conn_classify_handshake_result(0), 0);
+        assert_eq!(dqh_nntp_conn_classify_handshake_result(1), 1);
+        assert_eq!(dqh_nntp_conn_classify_handshake_result(-1), -1);
+        assert!(dqh_article_fetcher_should_keep_waiting_retry(9, 1, false));
+        assert!(!dqh_article_fetcher_should_keep_waiting_retry(10, 1, false));
+        assert!(!dqh_article_fetcher_should_keep_waiting_retry(0, 1, true));
+        assert!(dqh_article_fetcher_should_disconnect_on_release(false, 1, 3));
+        assert!(dqh_article_fetcher_should_disconnect_on_release(true, 3, 3));
+        assert!(!dqh_article_fetcher_should_disconnect_on_release(true, 1, 3));
+        assert!(dqh_article_fetcher_is_join_group_failure_transient(false));
+        assert!(!dqh_article_fetcher_is_join_group_failure_transient(true));
+        assert!(dqh_article_batch_should_ensure_workers(4, false));
+        assert!(!dqh_article_batch_should_ensure_workers(0, false));
+        assert!(!dqh_article_batch_should_ensure_workers(4, true));
+        assert!(dqh_article_writer_is_dupe_fallback_article(true, 1));
+        assert!(!dqh_article_writer_is_dupe_fallback_article(true, 0));
+        assert!(!dqh_article_writer_is_dupe_fallback_article(false, 1));
+        assert!(dqh_article_writer_was_renamed_during_completion(b"new.rar", b"old.rar"));
+        assert!(!dqh_article_writer_was_renamed_during_completion(b"same.rar", b"same.rar"));
+        assert!(dqh_article_writer_should_delete_hardlinked_without_interdir(true, true));
+        assert!(!dqh_article_writer_should_delete_hardlinked_without_interdir(true, false));
+        assert!(!dqh_article_writer_should_delete_hardlinked_without_interdir(false, true));
+        assert!(dqh_article_writer_did_dest_dir_change(b"/dst2", b"/dst1"));
+        assert!(!dqh_article_writer_did_dest_dir_change(b"/dst1", b"/dst1"));
+        assert!(dqh_article_cache_should_continue_run_loop(false, 0));
+        assert!(dqh_article_cache_should_continue_run_loop(true, 1024));
+        assert!(!dqh_article_cache_should_continue_run_loop(true, 0));
+        assert!(dqh_memory_monitor_should_keep_sleeping(false, 100, 500));
+        assert!(!dqh_memory_monitor_should_keep_sleeping(false, 500, 500));
+        assert!(!dqh_memory_monitor_should_keep_sleeping(true, 100, 500));
+        assert!(dqh_webdl_should_continue_retry_loop(false, 2, 2));
+        assert!(!dqh_webdl_should_continue_retry_loop(true, 2, 2));
+        assert!(!dqh_webdl_should_continue_retry_loop(false, 0, 2));
+        assert!(!dqh_webdl_should_continue_retry_loop(false, 2, 0));
+        assert!(dqh_webdl_should_keep_waiting_retry_interval(false, 500, 2, false, false));
+        assert!(!dqh_webdl_should_keep_waiting_retry_interval(false, 2000, 2, false, false));
+        assert!(!dqh_webdl_should_keep_waiting_retry_interval(false, 500, 2, false, true));
+        assert!(dqh_webdl_should_keep_waiting_retry_interval(false, 500, 2, true, true));
+        assert!(dqh_webdl_is_terminal_retry_status(1, 1, 2, 3));
+        assert!(dqh_webdl_is_terminal_retry_status(2, 1, 2, 3));
+        assert!(dqh_webdl_is_terminal_retry_status(3, 1, 2, 3));
+        assert!(!dqh_webdl_is_terminal_retry_status(4, 1, 2, 3));
     }
 }

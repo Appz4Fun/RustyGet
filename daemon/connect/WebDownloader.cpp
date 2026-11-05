@@ -69,7 +69,8 @@ void WebDownloader::Run()
 
 	EStatus Status = adFailed;
 
-	while (!IsStopped() && remainedDownloadRetries > 0 && remainedConnectRetries > 0)
+	while (nzbget_rs_dqh_webdl_should_continue_retry_loop(
+		IsStopped() ? 1 : 0, remainedDownloadRetries, remainedConnectRetries) != 0)
 	{
 		SetLastUpdateTimeNow();
 
@@ -83,8 +84,9 @@ void WebDownloader::Run()
 		{
 			detail("Waiting %i sec to retry", g_Options->GetUrlInterval());
 			int msec = 0;
-			while (!IsStopped() && (msec < g_Options->GetUrlInterval() * 1000) &&
-				!(!m_force && g_WorkState->GetPauseDownload()))
+			while (nzbget_rs_dqh_webdl_should_keep_waiting_retry_interval(
+				IsStopped() ? 1 : 0, msec, g_Options->GetUrlInterval(),
+				m_force ? 1 : 0, g_WorkState->GetPauseDownload() ? 1 : 0) != 0)
 			{
 				// waiting isn't hanging: an interval longer than UrlTimeout got the
 				// download cancelled and restarted with all its retries again
@@ -101,7 +103,8 @@ void WebDownloader::Run()
 			break;
 		}
 
-		if (Status == adFinished || Status == adFatalError || Status == adNotFound)
+		if (nzbget_rs_dqh_webdl_is_terminal_retry_status(
+			(int)Status, (int)adFinished, (int)adFatalError, (int)adNotFound) != 0)
 		{
 			break;
 		}

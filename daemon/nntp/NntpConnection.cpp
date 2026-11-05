@@ -190,12 +190,13 @@ bool NntpConnection::Connect()
 	m_authError = authError;
 	m_authRejected = authRejected;
 	exchange.Rethrow();
-	if (result == 1)
+	int hsStatus = nzbget_rs_dqh_nntp_conn_classify_handshake_result(result);
+	if (hsStatus == 1)
 	{
 		Disconnect();
 		return false;
 	}
-	return result == 0;
+	return hsStatus == 0;
 }
 
 bool NntpConnection::Disconnect()

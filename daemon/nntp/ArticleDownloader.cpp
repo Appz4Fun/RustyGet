@@ -267,7 +267,8 @@ void ArticleDownloader::Run()
 				(int)status, (int)adFinished, (int)adNotFound) != 0);
 		}
 
-		if (status == adFinished || status == adFatalError)
+		if (nzbget_rs_dqh_article_dl_is_terminal_loop_status(
+			(int)status, (int)adFinished, (int)adFatalError) != 0)
 		{
 			break;
 		}
@@ -285,7 +286,9 @@ void ArticleDownloader::Run()
 			break;
 		}
 
-		if (!wantServer && m_fileInfo->GetNzbInfo()->HasDesiredServer())
+		if (nzbget_rs_dqh_article_dl_should_fail_for_desired_server(
+			wantServer ? 1 : 0,
+			m_fileInfo->GetNzbInfo()->HasDesiredServer() ? 1 : 0) != 0)
 		{
 			status = adFailed;
 			break;
@@ -444,7 +447,8 @@ ArticleDownloader::EStatus ArticleDownloader::Download()
 	int readChunk = g_Options->GetArticleReadChunkSize();
 	CharBuffer lineBuf(nzbget_rs_cwp_article_dl_calc_line_buf_capacity(readChunk));
 
-	while (!IsStopped() && !m_decoder.GetEof())
+	while (nzbget_rs_dqh_article_dl_should_continue_read_loop(
+		IsStopped() ? 1 : 0, m_decoder.GetEof() ? 1 : 0) != 0)
 	{
 		// Memory pressure throttling: pace uncached network reads if memory is Critical and cache is flushing.
 		// Never block an article that already allocated a cache buffer before pressure turned Critical,
@@ -525,7 +529,8 @@ ArticleDownloader::EStatus ArticleDownloader::Download()
 		status = adFailed;
 	}
 
-	if (status == adRunning)
+	if (nzbget_rs_dqh_article_dl_should_run_decode_check(
+		(int)status, (int)adRunning) != 0)
 	{
 		FreeConnection(true);
 		status = DecodeCheck();

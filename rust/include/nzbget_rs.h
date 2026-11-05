@@ -6284,6 +6284,44 @@ int nzbget_rs_dqh_stream_repair_watchdog_has_activity(
 int64_t nzbget_rs_dqh_stream_repair_watchdog_calc_remaining_bytes(
     int64_t missing_bytes, int64_t progress, int64_t start_progress);
 int nzbget_rs_dqh_stream_repair_is_chunk_read_complete(int64_t read_bytes, int64_t chunk);
+int nzbget_rs_dqh_article_dl_is_terminal_loop_status(
+    int status, int ad_finished, int ad_fatal_error);
+int nzbget_rs_dqh_article_dl_should_fail_for_desired_server(
+    int has_want_server, int has_desired_server);
+int nzbget_rs_dqh_article_dl_should_continue_read_loop(int is_stopped, int decoder_eof);
+int nzbget_rs_dqh_article_dl_should_run_decode_check(int status, int ad_running);
+int nzbget_rs_dqh_server_pool_has_available_level_conns(
+    int level, size_t levels_len, int level_free_count);
+size_t nzbget_rs_dqh_server_pool_pick_candidate_index(int rand_val, size_t candidates_len);
+int nzbget_rs_dqh_server_pool_should_disconnect_idle_level_conn(
+    int conn_norm_level, int level, int conn_status, int cs_connected);
+int nzbget_rs_dqh_statmeter_has_any_quota_configured(int daily_quota, int monthly_quota);
+int nzbget_rs_dqh_statmeter_is_before_quota_start_day(int quota_start_day, int cur_mday);
+int nzbget_rs_dqh_statmeter_did_prev_month_day_overflow(int prev_mday, int quota_start_day);
+int nzbget_rs_dqh_nntp_conn_classify_handshake_result(int result);
+int nzbget_rs_dqh_article_fetcher_should_keep_waiting_retry(
+    int waited, int seconds, int is_stopped);
+int nzbget_rs_dqh_article_fetcher_should_disconnect_on_release(
+    int keep_connected, int conn_status, int cs_cancelled);
+int nzbget_rs_dqh_article_fetcher_is_join_group_failure_transient(int has_response);
+int nzbget_rs_dqh_article_batch_should_ensure_workers(int worker_count, int is_stopped);
+int nzbget_rs_dqh_article_writer_is_dupe_fallback_article(
+    int has_article_info, int dupe_fallback_round);
+int nzbget_rs_dqh_article_writer_was_renamed_during_completion(
+    const char* cur_filename, const char* orig_filename, size_t orig_len);
+int nzbget_rs_dqh_article_writer_should_delete_hardlinked_without_interdir(
+    int is_hard_linked, int inter_dir_empty);
+int nzbget_rs_dqh_article_writer_did_dest_dir_change(
+    const char* cur_dest_dir, const char* orig_dest_dir, size_t orig_len);
+int nzbget_rs_dqh_article_cache_should_continue_run_loop(int is_stopped, size_t allocated);
+int nzbget_rs_dqh_memory_monitor_should_keep_sleeping(
+    int is_stopped, int slept, int interval);
+int nzbget_rs_dqh_webdl_should_continue_retry_loop(
+    int is_stopped, int remained_download_retries, int remained_connect_retries);
+int nzbget_rs_dqh_webdl_should_keep_waiting_retry_interval(
+    int is_stopped, int msec, int url_interval_sec, int force, int pause_download);
+int nzbget_rs_dqh_webdl_is_terminal_retry_status(
+    int status, int ad_finished, int ad_fatal_error, int ad_not_found);
 
 #include "nzbget_tls_cipher.h"
 

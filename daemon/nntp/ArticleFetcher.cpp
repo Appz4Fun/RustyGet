@@ -231,7 +231,10 @@ void ArticleFetcher::SetServerUnreachable(NewsServer* server, bool unreachable)
 
 bool ArticleFetcher::WaitBeforeRetry(int seconds)
 {
-	for (int waited = 0; waited < seconds * 10 && !m_stopped; waited++)
+	for (int waited = 0;
+		nzbget_rs_dqh_article_fetcher_should_keep_waiting_retry(
+			waited, seconds, m_stopped ? 1 : 0) != 0;
+		waited++)
 	{
 		Util::Sleep(100);
 	}
@@ -253,7 +256,8 @@ void ArticleFetcher::ReleaseConnection(NntpConnection* connection, bool keepConn
 {
 	Guard guard(m_connectionMutex);
 	AddServerStats(connection);
-	if (!keepConnected || connection->GetStatus() == Connection::csCancelled)
+	if (nzbget_rs_dqh_article_fetcher_should_disconnect_on_release(
+		keepConnected ? 1 : 0, (int)connection->GetStatus(), (int)Connection::csCancelled) != 0)
 	{
 		connection->Disconnect();
 	}
@@ -310,8 +314,9 @@ ArticleFetcher::FetchedArticle ArticleFetcher::FetchFromConnection(NntpConnectio
 		{
 			detail("Stream repair: could not join groups on %s for %s",
 				connection->GetNewsServer()->GetName(), messageId);
-			result.Transient = !response;
-			if (!response)
+			result.Transient = nzbget_rs_dqh_article_fetcher_is_join_group_failure_transient(
+				response ? 1 : 0) != 0;
+			if (result.Transient)
 			{
 				connection->Disconnect();
 			}
@@ -520,7 +525,8 @@ void ArticleBatchFetcher::Begin(std::vector<Request> requests)
 	m_nextDeliver = 0;
 	m_bufferedBytes = 0;
 	m_cancelled = false;
-	if (m_workerCount > 0 && !m_stopped)
+	if (nzbget_rs_dqh_article_batch_should_ensure_workers(
+		m_workerCount, m_stopped ? 1 : 0) != 0)
 	{
 		EnsureWorkers();
 	}

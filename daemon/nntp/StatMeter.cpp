@@ -442,7 +442,8 @@ bool StatMeter::Load(bool* perfectServerMatch)
 
 void StatMeter::CheckQuota()
 {
-	if ((g_Options->GetDailyQuota() == 0 && g_Options->GetMonthlyQuota() == 0))
+	if (!nzbget_rs_dqh_statmeter_has_any_quota_configured(
+		g_Options->GetDailyQuota(), g_Options->GetMonthlyQuota()))
 	{
 		return;
 	}
@@ -500,14 +501,16 @@ int StatMeter::CalcMonthSlots(const ServerVolume& volume)
 	tm dayparts;
 	gmtime_r(&locCurTime, &dayparts);
 
-	if (g_Options->GetQuotaStartDay() > dayparts.tm_mday)
+	if (nzbget_rs_dqh_statmeter_is_before_quota_start_day(
+		g_Options->GetQuotaStartDay(), dayparts.tm_mday) != 0)
 	{
 		dayparts.tm_mon--;
 		dayparts.tm_mday = g_Options->GetQuotaStartDay();
 		time_t prevMonth = Util::Timegm(&dayparts);
 		tm prevparts;
 		gmtime_r(&prevMonth, &prevparts);
-		if (prevparts.tm_mday != g_Options->GetQuotaStartDay())
+		if (nzbget_rs_dqh_statmeter_did_prev_month_day_overflow(
+			prevparts.tm_mday, g_Options->GetQuotaStartDay()) != 0)
 		{
 			dayparts.tm_mday = 1;
 			dayparts.tm_mon++;

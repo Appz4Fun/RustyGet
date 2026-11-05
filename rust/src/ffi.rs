@@ -37995,4 +37995,339 @@ pub extern "C" fn nzbget_rs_dqh_stream_repair_is_chunk_read_complete(
     )
 }
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_article_dl_is_terminal_loop_status(
+    status: c_int,
+    ad_finished: c_int,
+    ad_fatal_error: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_article_dl_is_terminal_loop_status(
+            status,
+            ad_finished,
+            ad_fatal_error,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_article_dl_should_fail_for_desired_server(
+    has_want_server: c_int,
+    has_desired_server: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_article_dl_should_fail_for_desired_server(
+            has_want_server != 0,
+            has_desired_server != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_article_dl_should_continue_read_loop(
+    is_stopped: c_int,
+    decoder_eof: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_article_dl_should_continue_read_loop(
+            is_stopped != 0,
+            decoder_eof != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_article_dl_should_run_decode_check(
+    status: c_int,
+    ad_running: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_article_dl_should_run_decode_check(status, ad_running),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_server_pool_has_available_level_conns(
+    level: c_int,
+    levels_len: usize,
+    level_free_count: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_server_pool_has_available_level_conns(
+            level,
+            levels_len,
+            level_free_count,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_server_pool_pick_candidate_index(
+    rand_val: c_int,
+    candidates_len: usize,
+) -> usize {
+    crate::dupequeuehealth::dqh_server_pool_pick_candidate_index(rand_val, candidates_len)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_server_pool_should_disconnect_idle_level_conn(
+    conn_norm_level: c_int,
+    level: c_int,
+    conn_status: c_int,
+    cs_connected: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_server_pool_should_disconnect_idle_level_conn(
+            conn_norm_level,
+            level,
+            conn_status,
+            cs_connected,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_statmeter_has_any_quota_configured(
+    daily_quota: c_int,
+    monthly_quota: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_statmeter_has_any_quota_configured(
+            daily_quota,
+            monthly_quota,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_statmeter_is_before_quota_start_day(
+    quota_start_day: c_int,
+    cur_mday: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_statmeter_is_before_quota_start_day(
+            quota_start_day,
+            cur_mday,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_statmeter_did_prev_month_day_overflow(
+    prev_mday: c_int,
+    quota_start_day: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_statmeter_did_prev_month_day_overflow(
+            prev_mday,
+            quota_start_day,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_nntp_conn_classify_handshake_result(result: c_int) -> c_int {
+    crate::dupequeuehealth::dqh_nntp_conn_classify_handshake_result(result)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_article_fetcher_should_keep_waiting_retry(
+    waited: c_int,
+    seconds: c_int,
+    is_stopped: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_article_fetcher_should_keep_waiting_retry(
+            waited,
+            seconds,
+            is_stopped != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_article_fetcher_should_disconnect_on_release(
+    keep_connected: c_int,
+    conn_status: c_int,
+    cs_cancelled: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_article_fetcher_should_disconnect_on_release(
+            keep_connected != 0,
+            conn_status,
+            cs_cancelled,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_article_fetcher_is_join_group_failure_transient(
+    has_response: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_article_fetcher_is_join_group_failure_transient(
+            has_response != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_article_batch_should_ensure_workers(
+    worker_count: c_int,
+    is_stopped: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_article_batch_should_ensure_workers(
+            worker_count,
+            is_stopped != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_article_writer_is_dupe_fallback_article(
+    has_article_info: c_int,
+    dupe_fallback_round: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_article_writer_is_dupe_fallback_article(
+            has_article_info != 0,
+            dupe_fallback_round,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_article_writer_was_renamed_during_completion(
+    cur_filename: *const c_char,
+    orig_filename: *const c_char,
+    orig_len: usize,
+) -> c_int {
+    let cur = if cur_filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(cur_filename).to_bytes()
+    };
+    let orig = if orig_filename.is_null() || orig_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(orig_filename as *const u8, orig_len)
+    };
+    i32::from(
+        crate::dupequeuehealth::dqh_article_writer_was_renamed_during_completion(cur, orig),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_article_writer_should_delete_hardlinked_without_interdir(
+    is_hard_linked: c_int,
+    inter_dir_empty: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_article_writer_should_delete_hardlinked_without_interdir(
+            is_hard_linked != 0,
+            inter_dir_empty != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dqh_article_writer_did_dest_dir_change(
+    cur_dest_dir: *const c_char,
+    orig_dest_dir: *const c_char,
+    orig_len: usize,
+) -> c_int {
+    let cur = if cur_dest_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(cur_dest_dir).to_bytes()
+    };
+    let orig = if orig_dest_dir.is_null() || orig_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(orig_dest_dir as *const u8, orig_len)
+    };
+    i32::from(crate::dupequeuehealth::dqh_article_writer_did_dest_dir_change(cur, orig))
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_article_cache_should_continue_run_loop(
+    is_stopped: c_int,
+    allocated: usize,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_article_cache_should_continue_run_loop(
+            is_stopped != 0,
+            allocated,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_memory_monitor_should_keep_sleeping(
+    is_stopped: c_int,
+    slept: c_int,
+    interval: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_memory_monitor_should_keep_sleeping(
+            is_stopped != 0,
+            slept,
+            interval,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_webdl_should_continue_retry_loop(
+    is_stopped: c_int,
+    remained_download_retries: c_int,
+    remained_connect_retries: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_webdl_should_continue_retry_loop(
+            is_stopped != 0,
+            remained_download_retries,
+            remained_connect_retries,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_webdl_should_keep_waiting_retry_interval(
+    is_stopped: c_int,
+    msec: c_int,
+    url_interval_sec: c_int,
+    force: c_int,
+    pause_download: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_webdl_should_keep_waiting_retry_interval(
+            is_stopped != 0,
+            msec,
+            url_interval_sec,
+            force != 0,
+            pause_download != 0,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dqh_webdl_is_terminal_retry_status(
+    status: c_int,
+    ad_finished: c_int,
+    ad_fatal_error: c_int,
+    ad_not_found: c_int,
+) -> c_int {
+    i32::from(
+        crate::dupequeuehealth::dqh_webdl_is_terminal_retry_status(
+            status,
+            ad_finished,
+            ad_fatal_error,
+            ad_not_found,
+        ),
+    )
+}
+
+
 

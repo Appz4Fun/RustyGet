@@ -156,7 +156,9 @@ NntpConnection* ServerPool::GetConnection(int level, NewsServer* wantServer, Raw
 		return nullptr;
 	}
 
-	for (; level < (int)m_levels.size() && m_levels[level] > 0; level++)
+	for (; nzbget_rs_dqh_server_pool_has_available_level_conns(
+		level, m_levels.size(),
+		(level >= 0 && level < (int)m_levels.size()) ? m_levels[level] : 0) != 0; level++)
 	{
 		NntpConnection* connection = LockedGetConnection(level, wantServer, ignoreServers);
 		if (connection)
@@ -182,7 +184,9 @@ NntpConnection* ServerPool::GetConnection(int level, NewsServer* wantServer, Raw
 
 NntpConnection* ServerPool::LockedGetConnection(int level, NewsServer* wantServer, RawServerList* ignoreServers)
 {
-	if (level >= (int)m_levels.size() || m_levels[level] == 0)
+	if (!nzbget_rs_dqh_server_pool_has_available_level_conns(
+		level, m_levels.size(),
+		(level >= 0 && level < (int)m_levels.size()) ? m_levels[level] : 0))
 	{
 		return nullptr;
 	}
@@ -245,7 +249,7 @@ NntpConnection* ServerPool::LockedGetConnection(int level, NewsServer* wantServe
 		// Peeking a random free connection. This is better than taking the first
 		// available connection because provides better distribution across news servers,
 		// especially when one of servers becomes unavailable or doesn't have requested articles.
-		int randomIndex = rand() % candidates.size();
+		size_t randomIndex = nzbget_rs_dqh_server_pool_pick_candidate_index(rand(), candidates.size());
 		connection = candidates[randomIndex];
 		connection->SetInUse(true);
 	}
@@ -363,8 +367,9 @@ void ServerPool::CloseUnusedConnections()
 		{
 			for (PooledConnection* connection : &m_connections)
 			{
-				if (connection->GetNewsServer()->GetNormLevel() == level &&
-					connection->GetStatus() == Connection::csConnected)
+				if (nzbget_rs_dqh_server_pool_should_disconnect_idle_level_conn(
+					connection->GetNewsServer()->GetNormLevel(), level,
+					(int)connection->GetStatus(), (int)Connection::csConnected) != 0)
 				{
 					debug("Closing (and keeping) unused connection to server%i", connection->GetNewsServer()->GetId());
 					connection->Disconnect();

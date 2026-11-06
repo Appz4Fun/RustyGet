@@ -4629,6 +4629,215 @@ impl ContentMap {
             self.run_cryptos = kept_cryptos;
         }
     }
+
+    /// Reads donor plaintext for `inner_range` (`StreamRepairController::ReadDonorInner` in `StreamRepair.cpp`),
+    /// decrypting through the donor map when the donor is encrypted.
+    pub fn read_donor_inner(
+        &self,
+        sources: &dyn ContentSourceSet,
+        inner_range: NzbgetRsByteRange,
+        buffer: &mut Vec<u8>,
+    ) -> bool {
+        if inner_range.size < 0 {
+            return false;
+        }
+        buffer.resize(inner_range.size as usize, 0);
+        if self.encrypted() {
+            return self.read_inner_decrypted(sources, inner_range, buffer);
+        }
+        let mut covered: i64 = 0;
+        for piece in self.map_from_inner(inner_range) {
+            let inner_pos = self.map_to_inner(
+                piece.member_index,
+                NzbgetRsByteRange {
+                    offset: piece.offset,
+                    size: piece.size,
+                },
+            );
+            if inner_pos.len() != 1 {
+                return false;
+            }
+            let Some(source) = sources.get_source(piece.member_index) else {
+                return false;
+            };
+            let rel = (inner_pos[0].offset - inner_range.offset) as usize;
+            let len = piece.size as usize;
+            if !source.read(piece.offset, &mut buffer[rel..rel + len]) {
+                return false;
+            }
+            covered += piece.size;
+        }
+        covered == inner_range.size
+    }
+
+    /// Assembles raw ciphertext of the target's contiguous cipher space from its member files on disk
+    /// (`StreamRepairController::ReadTargetCipher` in `StreamRepair.cpp`).
+    pub fn read_target_cipher(
+        &self,
+        target_files: &mut dyn TargetFileSet,
+        cipher_range: NzbgetRsByteRange,
+        buffer: &mut [u8],
+    ) -> bool {
+        let pieces = self.map_cipher_range(cipher_range);
+        if pieces.is_empty() && cipher_range.size > 0 {
+            return false;
+        }
+        if (buffer.len() as i64) < cipher_range.size {
+            return false;
+        }
+        let mut filled = 0usize;
+        for piece in pieces {
+            let len = piece.size as usize;
+            if !target_files.read_file(
+                piece.member_index,
+                piece.offset,
+                &mut buffer[filled..filled + len],
+            ) {
+                return false;
+            }
+            filled += len;
+        }
+        true
+    }
+
+    /// Writes `data` (bytes of `inner_range`) through the target map with M2 containment guards
+    /// (`StreamRepairController::WriteInnerRange` in `StreamRepair.cpp`).
+    /// Returns the number of bytes written, or `-1` when a write was blocked or failed.
+    pub fn write_inner_range(
+        &self,
+        target_files: &mut dyn TargetFileSet,
+        target_holes: &mut [Vec<NzbgetRsByteRange>],
+        member_targets: &[i32],
+        set_members: &[SetMember],
+        inner_range: NzbgetRsByteRange,
+        data: &[u8],
+    ) -> i64 {
+        let mut written: i64 = 0;
+        for piece in self.map_from_inner(inner_range) {
+            let piece_range = NzbgetRsByteRange {
+                offset: piece.offset,
+                size: piece.size,
+            };
+            let inner_pos = self.map_to_inner(piece.member_index, piece_range);
+            let has_file = target_files.has_file(piece.member_index);
+            if inner_pos.len() != 1 || !has_file {
+                return -1;
+            }
+            let member_idx = piece.member_index as usize;
+            let member_name = set_members
+                .get(member_idx)
+                .map(|m| String::from_utf8_lossy(&m.name))
+                .unwrap_or_default();
+            let target_idx = member_targets.get(member_idx).copied().unwrap_or(-1);
+            if target_idx < 0 || (target_idx as usize) >= target_holes.len() {
+                target_files.on_message(
+                    TargetMessageKind::Warning,
+                    &format!(
+                        "Stream repair write outside a repair target blocked for {member_name}"
+                    ),
+                );
+                return -1;
+            }
+            let holes = &mut target_holes[target_idx as usize];
+            let mut remainder = vec![piece_range];
+            for &th in holes.iter() {
+                remainder = subtract_covered(&remainder, th);
+            }
+            if !remainder.is_empty() {
+                target_files.on_message(
+                    TargetMessageKind::Warning,
+                    &format!("Stream repair write outside a captured hole blocked for {member_name}"),
+                );
+                return -1;
+            }
+            let rel = (inner_pos[0].offset - inner_range.offset) as usize;
+            let len = piece.size as usize;
+            if rel.saturating_add(len) > data.len()
+                || !target_files.write_file(
+                    piece.member_index,
+                    piece.offset,
+                    &data[rel..rel + len],
+                )
+            {
+                return -1;
+            }
+            *holes = subtract_covered(holes, piece_range);
+            written += piece.size;
+        }
+        written
+    }
+}
+
+/// Log severity emitted by inner-space verification and patching.
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TargetMessageKind {
+    Info = 0,
+    Warning = 1,
+    Error = 2,
+}
+
+/// Target member files opened read-write on demand (`TargetSetFiles` in `StreamRepair.h`).
+pub trait TargetFileSet {
+    fn is_stopped(&self) -> bool {
+        false
+    }
+    fn has_file(&mut self, member_index: i32) -> bool;
+    fn read_file(&mut self, member_index: i32, offset: i64, buf: &mut [u8]) -> bool;
+    fn compare_file(&mut self, member_index: i32, offset: i64, expected: &[u8]) -> bool {
+        if expected.is_empty() {
+            return self.read_file(member_index, offset, &mut []);
+        }
+        let mut buf = vec![0u8; expected.len().min(64 * 1024)];
+        let mut pos = 0usize;
+        while pos < expected.len() {
+            let chunk = (expected.len() - pos).min(buf.len());
+            if !self.read_file(member_index, offset + (pos as i64), &mut buf[..chunk]) {
+                return false;
+            }
+            if buf[..chunk] != expected[pos..pos + chunk] {
+                return false;
+            }
+            pos += chunk;
+        }
+        true
+    }
+    fn write_file(&mut self, member_index: i32, offset: i64, data: &[u8]) -> bool;
+    fn on_message(&mut self, _kind: TargetMessageKind, _text: &str) {}
+}
+
+/// Adapts a mapped donor to `ContentSource` (`DonorInnerPlaintextSource` in `StreamRepair.cpp`).
+pub struct DonorInnerPlaintextSource<'a> {
+    map: &'a ContentMap,
+    sources: &'a dyn ContentSourceSet,
+}
+
+impl<'a> DonorInnerPlaintextSource<'a> {
+    pub fn new(map: &'a ContentMap, sources: &'a dyn ContentSourceSet) -> Self {
+        Self { map, sources }
+    }
+}
+
+impl ContentSource for DonorInnerPlaintextSource<'_> {
+    fn size(&self) -> i64 {
+        self.map.inner_size()
+    }
+
+    fn read(&self, offset: i64, buf: &mut [u8]) -> bool {
+        let mut scratch = Vec::new();
+        if !self.map.read_donor_inner(
+            self.sources,
+            NzbgetRsByteRange {
+                offset,
+                size: buf.len() as i64,
+            },
+            &mut scratch,
+        ) {
+            return false;
+        }
+        buf.copy_from_slice(&scratch);
+        true
+    }
 }
 
 /// One target-side set the repair stage can work on (`RepairSetData` in `ContentMap.h`).
@@ -4638,6 +4847,677 @@ pub struct RepairSetData {
     pub inner_holes: Vec<NzbgetRsByteRange>,
     pub original_inner_holes: Vec<NzbgetRsByteRange>,
     pub skip_reason: String,
+}
+
+impl RepairSetData {
+    pub const PROBE_COUNT: i32 = 2;
+    pub const MIN_PROBE_COMPARE_BYTES: i64 = 16 * 1024;
+
+    /// Builds probe windows hugging each current hole, clipped against `original_inner_holes`
+    /// (`StreamRepairController::BuildProbeWindows` in `StreamRepair.cpp`).
+    pub fn build_probe_windows(&self) -> Vec<NzbgetRsByteRange> {
+        let Some(map) = &self.map else {
+            return Vec::new();
+        };
+        build_probe_windows(
+            map.inner_size(),
+            &self.inner_holes,
+            &self.original_inner_holes,
+            Self::PROBE_COUNT,
+            Self::MIN_PROBE_COMPARE_BYTES,
+        )
+    }
+
+    /// Computes the plaintext-target compare floor (`StreamRepairController::PlainCompareFloor`).
+    pub fn plain_compare_floor(&self, windows: &[NzbgetRsByteRange]) -> i64 {
+        let Some(map) = &self.map else {
+            return -1;
+        };
+        plain_compare_floor(map.runs(), &self.original_inner_holes, windows)
+    }
+
+    /// Verifies a plaintext target set against a plaintext `ContentSource` over `windows`.
+    pub fn verify_plain_from_source(
+        &self,
+        plaintext: &dyn ContentSource,
+        target_files: &mut dyn TargetFileSet,
+        windows: &[NzbgetRsByteRange],
+    ) -> bool {
+        let Some(target_map) = &self.map else {
+            return false;
+        };
+        let required = self.plain_compare_floor(windows);
+        if required < 0 {
+            return false;
+        }
+        let mut total_compared: i64 = 0;
+        let mut saw_varied_data = false;
+        let mut donor_data = Vec::new();
+
+        for &window in windows {
+            if target_files.is_stopped() {
+                return false;
+            }
+            if total_compared >= required && saw_varied_data {
+                break;
+            }
+            if window.size < 0 {
+                continue;
+            }
+            donor_data.resize(window.size as usize, 0);
+            if !plaintext.read(window.offset, &mut donor_data) {
+                continue;
+            }
+            for piece in target_map.map_from_inner(window) {
+                let inner_pos = target_map.map_to_inner(
+                    piece.member_index,
+                    NzbgetRsByteRange {
+                        offset: piece.offset,
+                        size: piece.size,
+                    },
+                );
+                let has_file = target_files.has_file(piece.member_index);
+                if inner_pos.len() != 1 || !has_file {
+                    return false;
+                }
+                let rel = (inner_pos[0].offset - window.offset) as usize;
+                let len = piece.size as usize;
+                let piece_data = &donor_data[rel..rel + len];
+                if !target_files.compare_file(piece.member_index, piece.offset, piece_data) {
+                    return false;
+                }
+                total_compared += piece.size;
+                if !saw_varied_data && piece.size > 1 {
+                    saw_varied_data = buffer_has_varied_data(piece_data);
+                }
+            }
+        }
+
+        total_compared >= required && saw_varied_data
+    }
+
+    /// Encrypted-target probe in ciphertext space (`StreamRepairController::VerifyEncryptedFromSource`).
+    pub fn verify_encrypted_from_source(
+        &self,
+        plaintext: &dyn ContentSource,
+        target_files: &mut dyn TargetFileSet,
+        windows: &[NzbgetRsByteRange],
+    ) -> bool {
+        const BLOCK_SIZE: i64 = RarCryptoContext::CRYPTO_BLOCK_SIZE as i64;
+        let Some(target_map) = &self.map else {
+            return false;
+        };
+        let Some(run_crypto) = target_map.run_crypto(0) else {
+            return false;
+        };
+        let Some(crypto) = &run_crypto.crypto else {
+            return false;
+        };
+        let last_computable = (target_map.inner_size() / BLOCK_SIZE) * BLOCK_SIZE;
+        let required = encrypted_compare_floor(
+            target_map.inner_size(),
+            BLOCK_SIZE,
+            target_map.runs(),
+            &self.original_inner_holes,
+            windows,
+        );
+        if required < 0 {
+            return false;
+        }
+
+        let mut total_compared: i64 = 0;
+        let mut saw_varied_data = false;
+        let mut donor_data = Vec::new();
+        let mut cipher = Vec::new();
+
+        for &window in windows {
+            if target_files.is_stopped() {
+                return false;
+            }
+            if total_compared >= required && saw_varied_data {
+                break;
+            }
+            let window_end_raw = range_end(window);
+            let window_end_clamped = window_end_raw.min(last_computable);
+            let block_from = encrypted_chain_start(
+                window.offset,
+                window_end_clamped,
+                BLOCK_SIZE,
+                &self.original_inner_holes,
+            );
+            let Some((window_end, from, block_to)) = calc_encrypted_window_bounds(
+                window.offset,
+                window_end_raw,
+                last_computable,
+                block_from,
+                BLOCK_SIZE,
+            ) else {
+                continue;
+            };
+            let mut prev = [0u8; RarCryptoContext::CRYPTO_BLOCK_SIZE];
+            if block_from > 0
+                && !target_map.read_target_cipher(
+                    target_files,
+                    NzbgetRsByteRange {
+                        offset: block_from - BLOCK_SIZE,
+                        size: BLOCK_SIZE,
+                    },
+                    &mut prev,
+                )
+            {
+                continue;
+            }
+            let block_len = (block_to - block_from) as usize;
+            donor_data.resize(block_len, 0);
+            if !plaintext.read(block_from, &mut donor_data) {
+                continue;
+            }
+            cipher.resize(block_len, 0);
+            if !crypto.encrypt_range(
+                if block_from > 0 { Some(&prev) } else { None },
+                &donor_data,
+                &mut cipher,
+                (block_to - block_from) / BLOCK_SIZE,
+            ) {
+                continue;
+            }
+            let pieces = target_map.map_cipher_range(NzbgetRsByteRange {
+                offset: from,
+                size: window_end - from,
+            });
+            if pieces.is_empty() {
+                continue;
+            }
+            let mut seen = 0usize;
+            let rel_start = (from - block_from) as usize;
+            for piece in pieces {
+                if !target_files.has_file(piece.member_index) {
+                    return false;
+                }
+                let len = piece.size as usize;
+                let expected = &cipher[rel_start + seen..rel_start + seen + len];
+                if !target_files.compare_file(piece.member_index, piece.offset, expected) {
+                    return false;
+                }
+                seen += len;
+            }
+            total_compared += window_end - from;
+            let plain_window = &donor_data[rel_start..rel_start + (window_end - from) as usize];
+            if !saw_varied_data && window_end - from > 1 {
+                saw_varied_data = buffer_has_varied_data(plain_window);
+            }
+        }
+
+        total_compared >= required && saw_varied_data
+    }
+
+    /// M3 entry: encrypted target verified against a mapped donor (`StreamRepairController::VerifyDonorSetEncrypted`).
+    pub fn verify_donor_set_encrypted(
+        &self,
+        donor_map: &ContentMap,
+        donor_sources: &dyn ContentSourceSet,
+        target_files: &mut dyn TargetFileSet,
+        windows: &[NzbgetRsByteRange],
+    ) -> bool {
+        let plaintext = DonorInnerPlaintextSource::new(donor_map, donor_sources);
+        self.verify_encrypted_from_source(&plaintext, target_files, windows)
+    }
+
+    /// Verifies a mapped donor set against this target set (`StreamRepairController::VerifyDonorSet`).
+    pub fn verify_donor_set(
+        &self,
+        donor_map: &ContentMap,
+        donor_sources: &dyn ContentSourceSet,
+        target_files: &mut dyn TargetFileSet,
+    ) -> bool {
+        let Some(target_map) = &self.map else {
+            return false;
+        };
+        let windows = self.build_probe_windows();
+        if target_map.encrypted() {
+            return self.verify_donor_set_encrypted(
+                donor_map,
+                donor_sources,
+                target_files,
+                &windows,
+            );
+        }
+        let plaintext = DonorInnerPlaintextSource::new(donor_map, donor_sources);
+        self.verify_plain_from_source(&plaintext, target_files, &windows)
+    }
+
+    /// Encrypted-target patch core (`StreamRepairController::PatchEncryptedFromSource`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn patch_encrypted_from_source(
+        &mut self,
+        plaintext: &dyn ContentSource,
+        target_files: &mut dyn TargetFileSet,
+        target_holes: &mut [Vec<NzbgetRsByteRange>],
+        member_targets: &[i32],
+        set_members: &[SetMember],
+        donor_name: &str,
+    ) -> i64 {
+        const BLOCK_SIZE: i64 = RarCryptoContext::CRYPTO_BLOCK_SIZE as i64;
+        let Some(target_map) = self.map.clone() else {
+            return 0;
+        };
+        let Some(run_crypto) = target_map.run_crypto(0) else {
+            return 0;
+        };
+        let Some(crypto) = &run_crypto.crypto else {
+            return 0;
+        };
+        let inner_name = target_map.inner_name().into_owned();
+        let last_computable = (target_map.inner_size() / BLOCK_SIZE) * BLOCK_SIZE;
+        let mut written: i64 = 0;
+        let mut uncomputable_tail: i64 = 0;
+        let mut donor_data = Vec::new();
+        let mut cipher = Vec::new();
+
+        let holes = self.inner_holes.clone();
+        for hole in holes {
+            if target_files.is_stopped() {
+                break;
+            }
+            let (ok, new_tail, _hole_from, _patch_to, mut block_from, block_to) =
+                encrypted_clip_live_hole(
+                    hole.offset,
+                    hole.size,
+                    &self.inner_holes,
+                    last_computable,
+                    BLOCK_SIZE,
+                    uncomputable_tail,
+                );
+            uncomputable_tail = new_tail;
+            if !ok {
+                continue;
+            }
+
+            let mut prev = [0u8; RarCryptoContext::CRYPTO_BLOCK_SIZE];
+            let mut have_prev = false;
+            if block_from > 0 {
+                let prev_present =
+                    encrypted_is_prev_block_present(block_from, BLOCK_SIZE, &self.inner_holes);
+                if !prev_present
+                    || !target_map.read_target_cipher(
+                        target_files,
+                        NzbgetRsByteRange {
+                            offset: block_from - BLOCK_SIZE,
+                            size: BLOCK_SIZE,
+                        },
+                        &mut prev,
+                    )
+                {
+                    target_files.on_message(
+                        TargetMessageKind::Info,
+                        &format!(
+                            "Skipping a hole of {inner_name} for duplicate {donor_name}: predecessor cipher block is missing"
+                        ),
+                    );
+                    continue;
+                }
+                have_prev = true;
+            }
+
+            while block_from < block_to && !target_files.is_stopped() {
+                let (chunk_end, block_count) =
+                    calc_encrypted_chunk_end(block_from, block_to, 4 * 1024 * 1024, BLOCK_SIZE);
+                let chunk_len = (chunk_end - block_from) as usize;
+                donor_data.resize(chunk_len, 0);
+                if !plaintext.read(block_from, &mut donor_data) {
+                    break;
+                }
+                cipher.resize(chunk_len, 0);
+                if !crypto.encrypt_range(
+                    if have_prev { Some(&prev) } else { None },
+                    &donor_data,
+                    &mut cipher,
+                    block_count,
+                ) {
+                    break;
+                }
+
+                let (hole_parts, present_parts) =
+                    partition_encrypted_chunk(block_from, chunk_end, &self.inner_holes);
+
+                for part in present_parts {
+                    let pieces = target_map.map_cipher_range(part);
+                    if pieces.is_empty() {
+                        target_files.on_message(
+                            TargetMessageKind::Info,
+                            &format!(
+                                "Skipping packing of duplicate {donor_name} for {inner_name}: unmappable boundary bytes"
+                            ),
+                        );
+                        return written;
+                    }
+                    let mut seen = 0usize;
+                    let rel_start = (part.offset - block_from) as usize;
+                    for piece in pieces {
+                        let len = piece.size as usize;
+                        let expected = &cipher[rel_start + seen..rel_start + seen + len];
+                        if !target_files.has_file(piece.member_index)
+                            || !target_files.compare_file(
+                                piece.member_index,
+                                piece.offset,
+                                expected,
+                            )
+                        {
+                            target_files.on_message(
+                                TargetMessageKind::Info,
+                                &format!(
+                                    "Skipping packing of duplicate {donor_name} for {inner_name}: boundary block mismatch"
+                                ),
+                            );
+                            return written;
+                        }
+                        seen += len;
+                    }
+                }
+
+                for part in hole_parts {
+                    let rel_start = (part.offset - block_from) as usize;
+                    let part_len = part.size as usize;
+                    let wrote = target_map.write_inner_range(
+                        target_files,
+                        target_holes,
+                        member_targets,
+                        set_members,
+                        part,
+                        &cipher[rel_start..rel_start + part_len],
+                    );
+                    if wrote < 0 {
+                        return written;
+                    }
+                    written += wrote;
+                    self.inner_holes = subtract_covered(&self.inner_holes, part);
+                }
+
+                prev.copy_from_slice(&cipher[chunk_len - (BLOCK_SIZE as usize)..chunk_len]);
+                have_prev = true;
+                block_from = chunk_end;
+            }
+        }
+
+        if uncomputable_tail > 0 {
+            target_files.on_message(
+                TargetMessageKind::Info,
+                &format!(
+                    "Cross-packing repair of {inner_name}: {uncomputable_tail} byte(s) in the final partial cipher block stay for par-repair"
+                ),
+            );
+        }
+        written
+    }
+
+    /// Patches this target set from a mapped donor (`StreamRepairController::PatchFromDonorSet`
+    /// and `StreamRepairController::PatchFromDonorSetEncrypted`).
+    /// Returns `(written, credit_recovery)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn patch_from_donor_set(
+        &mut self,
+        donor_map: &ContentMap,
+        donor_sources: &dyn ContentSourceSet,
+        target_files: &mut dyn TargetFileSet,
+        target_holes: &mut [Vec<NzbgetRsByteRange>],
+        member_targets: &[i32],
+        set_members: &[SetMember],
+        donor_name: &str,
+    ) -> (i64, bool) {
+        let Some(target_map) = self.map.clone() else {
+            return (0, false);
+        };
+        if target_map.encrypted() {
+            let plaintext = DonorInnerPlaintextSource::new(donor_map, donor_sources);
+            let written = self.patch_encrypted_from_source(
+                &plaintext,
+                target_files,
+                target_holes,
+                member_targets,
+                set_members,
+                donor_name,
+            );
+            return (written, written > 0);
+        }
+
+        const FULL_CHUNK: i64 = 4 * 1024 * 1024;
+        const MIN_CHUNK: i64 = 64 * 1024;
+        const MAX_FAILED_PIECES: i32 = 8;
+
+        let mut written: i64 = 0;
+        let mut donor_data = Vec::new();
+        let holes = self.inner_holes.clone();
+
+        for hole in holes {
+            let mut target_hole = true;
+            for piece in target_map.map_from_inner(hole) {
+                let idx = piece.member_index as usize;
+                target_hole &= member_targets.get(idx).copied().unwrap_or(-1) >= 0;
+            }
+            if !target_hole {
+                continue;
+            }
+
+            let hole_end = range_end(hole);
+            let mut pos = hole.offset;
+            let mut size = FULL_CHUNK;
+            let mut failed_pieces = 0;
+            while pos < hole_end && !target_files.is_stopped() {
+                let chunk = (hole_end - pos).min(size);
+                let chunk_range = NzbgetRsByteRange {
+                    offset: pos,
+                    size: chunk,
+                };
+                if !donor_map.read_donor_inner(donor_sources, chunk_range, &mut donor_data) {
+                    let (step_action, new_size, new_pos, new_failed) =
+                        patch_donor_set_step_failure(
+                            chunk,
+                            MIN_CHUNK,
+                            size,
+                            pos,
+                            failed_pieces,
+                            MAX_FAILED_PIECES,
+                        );
+                    size = new_size;
+                    pos = new_pos;
+                    failed_pieces = new_failed;
+                    if step_action == 0 {
+                        break;
+                    }
+                    continue;
+                }
+                failed_pieces = 0;
+                size = FULL_CHUNK;
+                let wrote = target_map.write_inner_range(
+                    target_files,
+                    target_holes,
+                    member_targets,
+                    set_members,
+                    chunk_range,
+                    &donor_data,
+                );
+                if wrote < 0 {
+                    return (written, false);
+                }
+                written += wrote;
+                self.inner_holes = subtract_covered(&self.inner_holes, chunk_range);
+                pos += chunk;
+            }
+        }
+
+        (written, written > 0)
+    }
+
+    /// M4 identity probe for a plaintext target (`StreamRepairController::VerifyDonorInnerFile`).
+    pub fn verify_donor_inner_file(
+        &self,
+        donor_inner: &dyn ContentSource,
+        donor_inner_size: i64,
+        target_files: &mut dyn TargetFileSet,
+    ) -> bool {
+        let Some(target_map) = &self.map else {
+            return false;
+        };
+        if target_map.encrypted() || donor_inner_size != target_map.inner_size() {
+            return false;
+        }
+        let windows = self.build_probe_windows();
+        self.verify_plain_from_source(donor_inner, target_files, &windows)
+    }
+
+    /// M4 identity probe for an encrypted target (`StreamRepairController::VerifyDonorInnerFileEncrypted`).
+    pub fn verify_donor_inner_file_encrypted(
+        &self,
+        donor_inner: &dyn ContentSource,
+        donor_inner_size: i64,
+        target_files: &mut dyn TargetFileSet,
+    ) -> bool {
+        let Some(target_map) = &self.map else {
+            return false;
+        };
+        if !target_map.encrypted() || donor_inner_size != target_map.inner_size() {
+            return false;
+        }
+        let windows = self.build_probe_windows();
+        self.verify_encrypted_from_source(donor_inner, target_files, &windows)
+    }
+
+    /// Unified M4 identity probe (dispatches to encrypted or plaintext verification).
+    pub fn verify_donor_inner(
+        &self,
+        donor_inner: &dyn ContentSource,
+        donor_inner_size: i64,
+        target_files: &mut dyn TargetFileSet,
+    ) -> bool {
+        let Some(target_map) = &self.map else {
+            return false;
+        };
+        if target_map.encrypted() {
+            self.verify_donor_inner_file_encrypted(donor_inner, donor_inner_size, target_files)
+        } else {
+            self.verify_donor_inner_file(donor_inner, donor_inner_size, target_files)
+        }
+    }
+
+    /// M4 patch for a plaintext target (`StreamRepairController::PatchFromDonorInnerFile`).
+    /// Returns `(written, holes_filled, credit_recovery)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn patch_from_donor_inner_file(
+        &mut self,
+        donor_inner: &dyn ContentSource,
+        target_files: &mut dyn TargetFileSet,
+        target_holes: &mut [Vec<NzbgetRsByteRange>],
+        member_targets: &[i32],
+        set_members: &[SetMember],
+    ) -> (i64, i32, bool) {
+        let Some(target_map) = self.map.clone() else {
+            return (0, 0, false);
+        };
+        let mut written: i64 = 0;
+        let mut holes_filled: i32 = 0;
+        let mut donor_data = Vec::new();
+        let holes = self.inner_holes.clone();
+
+        for hole in holes {
+            let hole_end = range_end(hole);
+            let mut pos = hole.offset;
+            while pos < hole_end && !target_files.is_stopped() {
+                let chunk = (hole_end - pos).min(4 * 1024 * 1024);
+                donor_data.resize(chunk as usize, 0);
+                if !donor_inner.read(pos, &mut donor_data) {
+                    break;
+                }
+                let chunk_range = NzbgetRsByteRange {
+                    offset: pos,
+                    size: chunk,
+                };
+                let wrote = target_map.write_inner_range(
+                    target_files,
+                    target_holes,
+                    member_targets,
+                    set_members,
+                    chunk_range,
+                    &donor_data,
+                );
+                if wrote < 0 {
+                    return (written, holes_filled, false);
+                }
+                written += wrote;
+                self.inner_holes = subtract_covered(&self.inner_holes, chunk_range);
+                pos += chunk;
+            }
+            if pos >= hole_end {
+                holes_filled += 1;
+            }
+        }
+
+        (written, holes_filled, written > 0)
+    }
+
+    /// M4 patch for an encrypted target (`StreamRepairController::PatchFromDonorInnerFileEncrypted`).
+    /// Returns `(written, holes_filled, credit_recovery)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn patch_from_donor_inner_file_encrypted(
+        &mut self,
+        donor_inner: &dyn ContentSource,
+        target_files: &mut dyn TargetFileSet,
+        target_holes: &mut [Vec<NzbgetRsByteRange>],
+        member_targets: &[i32],
+        set_members: &[SetMember],
+        donor_name: &str,
+    ) -> (i64, i32, bool) {
+        let before = self.inner_holes.clone();
+        let written = self.patch_encrypted_from_source(
+            donor_inner,
+            target_files,
+            target_holes,
+            member_targets,
+            set_members,
+            donor_name,
+        );
+        let mut holes_filled: i32 = 0;
+        if written > 0 {
+            for hole in before {
+                if !intersects_any(hole, &self.inner_holes) {
+                    holes_filled += 1;
+                }
+            }
+        }
+        (written, holes_filled, written > 0)
+    }
+
+    /// Unified M4 patch (dispatches to encrypted or plaintext patching).
+    /// Returns `(written, holes_filled, credit_recovery)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn patch_from_donor_inner(
+        &mut self,
+        donor_inner: &dyn ContentSource,
+        target_files: &mut dyn TargetFileSet,
+        target_holes: &mut [Vec<NzbgetRsByteRange>],
+        member_targets: &[i32],
+        set_members: &[SetMember],
+        donor_name: &str,
+    ) -> (i64, i32, bool) {
+        let encrypted = self.map.as_ref().is_some_and(ContentMap::encrypted);
+        if encrypted {
+            self.patch_from_donor_inner_file_encrypted(
+                donor_inner,
+                target_files,
+                target_holes,
+                member_targets,
+                set_members,
+                donor_name,
+            )
+        } else {
+            self.patch_from_donor_inner_file(
+                donor_inner,
+                target_files,
+                target_holes,
+                member_targets,
+                set_members,
+            )
+        }
+    }
 }
 
 /// Pure-Rust `ContentMapper` mirroring `daemon/postprocess/ContentMap.h`.
@@ -8607,5 +9487,236 @@ mod tests {
                 vec![("show.rar".to_string(), 5, 1, "movie.mkv".to_string())]
             );
         }
+    }
+
+    struct MemTargetFileSet {
+        files: Vec<Vec<u8>>,
+        messages: Vec<(TargetMessageKind, String)>,
+        stopped: bool,
+    }
+
+    impl MemTargetFileSet {
+        fn new(files: Vec<Vec<u8>>) -> Self {
+            Self {
+                files,
+                messages: Vec::new(),
+                stopped: false,
+            }
+        }
+    }
+
+    impl TargetFileSet for MemTargetFileSet {
+        fn is_stopped(&self) -> bool {
+            self.stopped
+        }
+
+        fn has_file(&mut self, member_index: i32) -> bool {
+            member_index >= 0 && (member_index as usize) < self.files.len()
+        }
+
+        fn read_file(&mut self, member_index: i32, offset: i64, buf: &mut [u8]) -> bool {
+            let Some(file) = self.files.get(member_index as usize) else {
+                return false;
+            };
+            if offset < 0 || (offset as usize).saturating_add(buf.len()) > file.len() {
+                return false;
+            }
+            let start = offset as usize;
+            buf.copy_from_slice(&file[start..start + buf.len()]);
+            true
+        }
+
+        fn write_file(&mut self, member_index: i32, offset: i64, data: &[u8]) -> bool {
+            let Some(file) = self.files.get_mut(member_index as usize) else {
+                return false;
+            };
+            if offset < 0 || (offset as usize).saturating_add(data.len()) > file.len() {
+                return false;
+            }
+            let start = offset as usize;
+            file[start..start + data.len()].copy_from_slice(data);
+            true
+        }
+
+        fn on_message(&mut self, kind: TargetMessageKind, text: &str) {
+            self.messages.push((kind, text.to_string()));
+        }
+    }
+
+    #[test]
+    fn inner_space_plain_verify_and_patch_with_containment_guards() {
+        let canonical: Vec<u8> = (0..512u32).map(|i| ((i * 37 + 11) & 0xff) as u8).collect();
+        let mut target_disk = canonical.clone();
+        // Zero out hole [128, 256) on target disk
+        target_disk[128..256].fill(0);
+
+        let members = vec![SetMember::new(b"movie.mkv", 512)];
+        let holes = vec![vec![NzbgetRsByteRange {
+            offset: 128,
+            size: 128,
+        }]];
+        let mut target_src = MemorySourceSet::default();
+        target_src.push(target_disk.clone());
+        let mut repair_sets =
+            ContentMapper::build_repair_sets(&members, &holes, &target_src, None);
+        assert_eq!(repair_sets.len(), 1);
+
+        let donor_members = vec![
+            SetMember::new(b"movie.mkv.001", 256),
+            SetMember::new(b"movie.mkv.002", 256),
+        ];
+        let mut donor_src = MemorySourceSet::default();
+        donor_src.push(canonical[..256].to_vec());
+        donor_src.push(canonical[256..].to_vec());
+        let donor_set = MemberSet {
+            format: MemberFormat::Split,
+            members: vec![0, 1],
+        };
+        let donor_map = ContentMapper::build_map(&donor_members, &donor_set, &donor_src, None)
+            .expect("split donor should map");
+
+        let mut target_files = MemTargetFileSet::new(vec![target_disk.clone()]);
+        assert!(repair_sets[0].verify_donor_set(&donor_map, &donor_src, &mut target_files));
+
+        // Corrupt donor bytes in the probe window and verify rejection
+        let mut bad_first = canonical[..256].to_vec();
+        bad_first[0] ^= 0xff;
+        let mut bad_donor_src = MemorySourceSet::default();
+        bad_donor_src.push(bad_first);
+        bad_donor_src.push(canonical[256..].to_vec());
+        assert!(!repair_sets[0].verify_donor_set(&donor_map, &bad_donor_src, &mut target_files));
+
+        // Containment guard: when target_holes does not cover the hole, write is blocked
+        let mut empty_target_holes = vec![Vec::new()];
+        let (wrote_blocked, credit_blocked) = repair_sets[0].patch_from_donor_set(
+            &donor_map,
+            &donor_src,
+            &mut target_files,
+            &mut empty_target_holes,
+            &[0],
+            &members,
+            "Donor.Split",
+        );
+        assert_eq!(wrote_blocked, 0);
+        assert!(!credit_blocked);
+        assert!(target_files
+            .messages
+            .iter()
+            .any(|(k, m)| *k == TargetMessageKind::Warning && m.contains("captured hole blocked")));
+
+        // Valid patch fills the hole and updates both inner_holes and target_holes
+        let mut live_target_holes = holes.clone();
+        let (written, credit) = repair_sets[0].patch_from_donor_set(
+            &donor_map,
+            &donor_src,
+            &mut target_files,
+            &mut live_target_holes,
+            &[0],
+            &members,
+            "Donor.Split",
+        );
+        assert_eq!(written, 128);
+        assert!(credit);
+        assert!(repair_sets[0].inner_holes.is_empty());
+        assert!(live_target_holes[0].is_empty());
+        assert_eq!(target_files.files[0], canonical);
+    }
+
+    #[test]
+    fn inner_space_encrypted_m3_and_m4_verify_and_patch() {
+        let key = [0x42u8; 16];
+        let iv = [0x11u8; 16];
+        let crypto = std::sync::Arc::new(
+            RarCryptoContext::from_key_iv(&key, iv).expect("valid AES-128 context"),
+        );
+
+        let plain: Vec<u8> = (0..256u32).map(|i| ((i * 53 + 7) & 0xff) as u8).collect();
+        let mut cipher = vec![0u8; 256];
+        assert!(crypto.encrypt_range(None, &plain, &mut cipher, 16));
+
+        let mut damaged_cipher = cipher.clone();
+        // Hole at [64, 112) (3 AES blocks)
+        damaged_cipher[64..112].fill(0);
+
+        let mut target_map = ContentMap::default();
+        target_map.set_inner_name("secret.bin");
+        target_map.set_inner_size(256);
+        target_map.runs_mut().push(NzbgetRsContentRun {
+            inner_offset: 0,
+            member_index: 0,
+            member_offset: 0,
+            size: 256,
+        });
+        target_map.run_cryptos_mut().push(RunCrypto {
+            crypto: Some(crypto),
+            cipher_data_offset: 0,
+            cipher_size: 256,
+        });
+
+        let hole = NzbgetRsByteRange {
+            offset: 64,
+            size: 48,
+        };
+        let mut repair_set = RepairSetData {
+            set: MemberSet {
+                format: MemberFormat::Rar,
+                members: vec![0],
+            },
+            map: Some(target_map),
+            inner_holes: vec![hole],
+            original_inner_holes: vec![hole],
+            skip_reason: String::new(),
+        };
+
+        let mut donor_map = ContentMap::default();
+        donor_map.set_inner_name("secret.bin");
+        donor_map.set_inner_size(256);
+        donor_map.runs_mut().push(NzbgetRsContentRun {
+            inner_offset: 0,
+            member_index: 0,
+            member_offset: 0,
+            size: 256,
+        });
+        let mut donor_src = MemorySourceSet::default();
+        donor_src.push(plain.clone());
+
+        let mut target_files = MemTargetFileSet::new(vec![damaged_cipher.clone()]);
+        assert!(repair_set.verify_donor_set(&donor_map, &donor_src, &mut target_files));
+
+        let members = vec![SetMember::new(b"secret.rar", 256)];
+        let mut target_holes = vec![vec![hole]];
+        let (written, credit) = repair_set.patch_from_donor_set(
+            &donor_map,
+            &donor_src,
+            &mut target_files,
+            &mut target_holes,
+            &[0],
+            &members,
+            "Donor.Plain",
+        );
+        assert_eq!(written, 48);
+        assert!(credit);
+        assert!(repair_set.inner_holes.is_empty());
+        assert!(target_holes[0].is_empty());
+        assert_eq!(target_files.files[0], cipher);
+
+        // Also test M4 (verify_donor_inner / patch_from_donor_inner) into an encrypted target
+        repair_set.inner_holes = vec![hole];
+        let mut target_files_m4 = MemTargetFileSet::new(vec![damaged_cipher]);
+        let mut target_holes_m4 = vec![vec![hole]];
+        let inner_source = MemoryContentSource(plain);
+        assert!(repair_set.verify_donor_inner(&inner_source, 256, &mut target_files_m4));
+        let (written_m4, holes_filled_m4, credit_m4) = repair_set.patch_from_donor_inner(
+            &inner_source,
+            &mut target_files_m4,
+            &mut target_holes_m4,
+            &[0],
+            &members,
+            "Donor.Decompressed",
+        );
+        assert_eq!(written_m4, 48);
+        assert_eq!(holes_filled_m4, 1);
+        assert!(credit_m4);
+        assert_eq!(target_files_m4.files[0], cipher);
     }
 }

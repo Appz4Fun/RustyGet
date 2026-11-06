@@ -368,13 +368,10 @@ private:
 		const StreamRangeList& donorRanges, const char* donorName);
 	static bool CompareToFile(DiskFile& file, int64 offset, const char* data, int64 size);
 
-	// cross-packing (M2): repairs holes through inner-content maps after
+	// cross-packing (M2/M3): repairs holes through inner-content maps after
 	// the per-member same-bytes pass (M1) exhausted all donors
 	void ExecCrossPackRepair(const char* destDir, std::vector<RepairTarget>& targets,
 		std::vector<DonorSource>& donors, const std::vector<CString>& memberNames);
-	static std::vector<StreamRange> BuildProbeWindows(const RepairSetData& repairSet);
-	static int64 PlainCompareFloor(RepairSetData& repairSet,
-		const std::vector<StreamRange>& windows);
 	bool VerifyDonorSet(RepairSetData& repairSet, ContentMap& donorMap,
 		DonorSetSources& donorSources, TargetSetFiles& targetFiles);
 	int64 PatchFromDonorSet(RepairSetData& repairSet, ContentMap& donorMap,
@@ -382,45 +379,12 @@ private:
 		std::vector<RepairTarget>& targets, const std::vector<int>& memberTargets,
 		const std::vector<SetMember>& setMembers, const char* donorName);
 
-	// encrypted-target variants (M3): identity and patching in CIPHERTEXT
-	// space - donor plaintext is re-encrypted under the target's stream
-	// context and byte-compared against the target's disk before any write
-	static bool ReadTargetCipher(ContentMap& targetMap, TargetSetFiles& targetFiles,
-		const StreamRange& cipherRange, char* buffer);
-	// the encrypted verify/patch cores read the donor PLAINTEXT through a
-	// ContentSource, so one crypto implementation serves both a mapped donor
-	// (M3, wrapped in DonorInnerPlaintextSource) and an extracted inner file
-	// (M4 into an encrypted target, a DiskContentSource). They do the crypto
-	// only - no served-parts/recovered accounting or "recovered" logging,
-	// which each caller owns (the two sources count recoveries differently).
-	bool VerifyEncryptedFromSource(RepairSetData& repairSet, ContentSource& plaintext,
-		TargetSetFiles& targetFiles, const std::vector<StreamRange>& windows);
-	int64 PatchEncryptedFromSource(RepairSetData& repairSet, ContentSource& plaintext,
-		TargetSetFiles& targetFiles, std::vector<RepairTarget>& targets,
-		const std::vector<int>& memberTargets, const std::vector<SetMember>& setMembers,
-		const char* donorName);
-	// M3 entries: mapped-donor plaintext, with the served-articles accounting
-	bool VerifyDonorSetEncrypted(RepairSetData& repairSet, ContentMap& donorMap,
-		DonorSetSources& donorSources, TargetSetFiles& targetFiles,
-		const std::vector<StreamRange>& windows);
-	int64 PatchFromDonorSetEncrypted(RepairSetData& repairSet, ContentMap& donorMap,
-		DonorSetSources& donorSources, TargetSetFiles& targetFiles,
-		std::vector<RepairTarget>& targets, const std::vector<int>& memberTargets,
-		const std::vector<SetMember>& setMembers, const char* donorName);
-	int64 WriteInnerRange(ContentMap& targetMap, TargetSetFiles& targetFiles,
-		std::vector<RepairTarget>& targets, const std::vector<int>& memberTargets,
-		const std::vector<SetMember>& setMembers, const StreamRange& innerRange,
-		const char* data);
-
 	// decompression-assisted donor extraction (M4, option <DupeStreamDecompress>):
 	// a compressed donor that cannot map for byte-copy is materialized to a
 	// temp dir, extracted with the configured unrar/7z tool, and the extracted
-	// inner file donates through the plain inner-space verify/patch path.
-	// the extracted plaintext donates through the plain inner-space
-	// verify/patch path for a plaintext target, or - for an encrypted
-	// store-mode target - through the M3 ciphertext verify/patch cores
-	// (re-encrypted under the target's stream context). The temp tree is
-	// removed on every exit
+	// plaintext donates through the Rust inner-space verify/patch engine
+	// (plaintext or re-encrypted under the target's stream context).
+	// The temp tree is removed on every exit.
 	void ExecDecompressRepair(const char* destDir, RepairSetData& repairSet,
 		NzbInfo* donorNzb, const std::vector<SetMember>& donorMembers,
 		const MemberSet& donorSet, const DonorSource& donor,
@@ -431,13 +395,6 @@ private:
 	bool VerifyDonorInnerFile(RepairSetData& repairSet, DiskFile& donorInner,
 		int64 donorInnerSize, TargetSetFiles& targetFiles);
 	int64 PatchFromDonorInnerFile(RepairSetData& repairSet, DiskFile& donorInner,
-		TargetSetFiles& targetFiles, std::vector<RepairTarget>& targets,
-		const std::vector<int>& memberTargets, const std::vector<SetMember>& setMembers,
-		const char* donorName);
-	// encrypted-target variants (extracted plaintext re-encrypted, M3+M4)
-	bool VerifyDonorInnerFileEncrypted(RepairSetData& repairSet, DiskFile& donorInner,
-		int64 donorInnerSize, TargetSetFiles& targetFiles);
-	int64 PatchFromDonorInnerFileEncrypted(RepairSetData& repairSet, DiskFile& donorInner,
 		int64 donorInnerSize, TargetSetFiles& targetFiles, std::vector<RepairTarget>& targets,
 		const std::vector<int>& memberTargets, const std::vector<SetMember>& setMembers,
 		const char* donorName);

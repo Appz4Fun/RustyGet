@@ -975,6 +975,110 @@ pub fn ncurses_next_queue_win_pct(cur_pct: i32, is_edit_queue: bool) -> i32 {
     }
 }
 
+/// Maps a file-level edit action to its corresponding group-level edit action
+/// (`NCursesFrontend::EditQueue`).
+pub fn ncurses_map_file_to_group_action(action: i32) -> i32 {
+    match action {
+        1 => 11, // eaFileMoveOffset -> eaGroupMoveOffset
+        2 => 12, // eaFileMoveTop -> eaGroupMoveTop
+        3 => 13, // eaFileMoveBottom -> eaGroupMoveBottom
+        4 => 16, // eaFilePause -> eaGroupPause
+        5 => 17, // eaFileResume -> eaGroupResume
+        6 => 18, // eaFileDelete -> eaGroupDelete
+        7 => 22, // eaFilePauseAllPars -> eaGroupPauseAllPars
+        8 => 23, // eaFilePauseExtraPars -> eaGroupPauseExtraPars
+        _ => 0,
+    }
+}
+
+/// Resolves whether a file pause action should pause or resume the selected file
+/// (`NCursesFrontend::EditQueue`).
+pub fn ncurses_resolve_file_pause_action(
+    action: i32,
+    ea_file_pause: i32,
+    ea_file_resume: i32,
+    file_paused: bool,
+) -> i32 {
+    if action == ea_file_pause {
+        if !file_paused {
+            ea_file_pause
+        } else {
+            ea_file_resume
+        }
+    } else {
+        action
+    }
+}
+
+/// Computes the new `queue_scroll_offset` and target `entry` for `KEY_PPAGE` / `KEY_NPAGE`
+/// in `NCursesFrontend::UpdateInput`.
+pub fn ncurses_calc_page_nav(
+    is_page_down: bool,
+    selected: i32,
+    queue_size: i32,
+    scroll_offset: i32,
+    win_height: i32,
+) -> Option<(i32, i32)> {
+    if !is_page_down {
+        if selected > 0 {
+            if selected == scroll_offset {
+                Some((
+                    scroll_offset.wrapping_sub(win_height),
+                    selected.wrapping_sub(win_height),
+                ))
+            } else {
+                Some((scroll_offset, scroll_offset))
+            }
+        } else {
+            None
+        }
+    } else if selected < queue_size.wrapping_sub(1) {
+        let bottom = scroll_offset.wrapping_add(win_height).wrapping_sub(1);
+        if selected == bottom {
+            Some((
+                scroll_offset.wrapping_add(win_height),
+                selected.wrapping_add(win_height),
+            ))
+        } else {
+            Some((scroll_offset, bottom))
+        }
+    } else {
+        None
+    }
+}
+
+/// Returns `" Messages"` or `"***  Messages"` for `NCursesFrontend::PrintMessages`.
+pub fn ncurses_format_messages_header(use_color: bool) -> &'static [u8] {
+    if use_color {
+        b" Messages\0"
+    } else {
+        b"***  Messages\0"
+    }
+}
+
+/// Formats `"<time_str> - <msg_text>"` for `NCursesFrontend::PrintMessage`.
+pub fn ncurses_format_timestamp_message(time_str: &[u8], msg_text: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(time_str.len() + 3 + msg_text.len());
+    out.extend_from_slice(time_str);
+    out.extend_from_slice(b" - ");
+    out.extend_from_slice(msg_text);
+    out
+}
+
+/// Formats `"Download rate: <input_val>"` for `NCursesFrontend::PrintKeyInputBar`.
+pub fn ncurses_format_download_rate_hint(input_val: i32) -> Vec<u8> {
+    format!("Download rate: {input_val}").into_bytes()
+}
+
+/// Returns `"Unpausing download"` or `"Pausing download"` for `NCursesFrontend::UpdateInput`.
+pub fn ncurses_pause_log_msg(pause_download: bool) -> &'static [u8] {
+    if pause_download {
+        b"Unpausing download\0"
+    } else {
+        b"Pausing download\0"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

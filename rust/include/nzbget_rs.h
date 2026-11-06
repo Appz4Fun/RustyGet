@@ -1984,7 +1984,7 @@ NzbgetRsBuf nzbget_rs_dsp_normalize_external_nzb_name(
 
 // ============================================================================
 // DupeSearch, Fleet, DonorHealth, Newznab, FeedCoordinator, FeedInfo &
-// FeedFile Hot-Path FFI (`rust/src/dupefeed.rs`)
+// FeedFile Hot-Path FFI (`rust/src/dupesearch_nzb.rs` / `rust/src/feed.rs`)
 // ============================================================================
 
 typedef struct NzbgetRsPendingMetaView {
@@ -2061,9 +2061,6 @@ int nzbget_rs_df_adjust_pipeline_depth(
 int nzbget_rs_df_eval_article_votes(const int* votes, size_t count);
 int nzbget_rs_df_resolve_unsettled_vote(const int* votes, size_t count);
 
-NzbgetRsBuf nzbget_rs_df_url_encode(const char* text, size_t len);
-NzbgetRsBuf nzbget_rs_df_digits_only(const char* text, size_t len);
-int64_t nzbget_rs_df_days_from_civil(int64_t year, int month, int day);
 int64_t nzbget_rs_df_parse_newznab_date(const char* text, size_t len);
 NzbgetRsBuf nzbget_rs_df_build_newznab_url(
     const char* base, const char* const* param_keys, const char* const* param_vals,
@@ -2073,7 +2070,7 @@ NzbgetRsBuf nzbget_rs_df_mask_newznab_text(const char* text, size_t len);
 // ============================================================================
 // StatMeter, WebProcessor, UrlCoordinator, DirectRenamer, NzbFile,
 // QueueScript, PostScript, ScanScript, ScriptConfig & ScriptController FFI
-// (`rust/src/scripturlstat.rs`)
+// (`rust/src/statmeter.rs` / `rust/src/extension.rs`)
 // ============================================================================
 
 typedef struct NzbgetRsDirectRenameParDelta {

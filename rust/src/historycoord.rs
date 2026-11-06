@@ -339,6 +339,15 @@ pub fn parse_dupe_backup_flag(text: &[u8], ds_dupe: i32, ds_manual: i32) -> i32 
     }
 }
 
+/// Splits a `"name=value"` parameter assignment at the first `'='`.
+/// Returns `Some((name, value))` if `'='` is present, else `None`
+/// (`HistoryCoordinator::HistorySetParameter`, `QueueEditor::SetNzbParameter`).
+pub fn split_param_assignment(text: &[u8]) -> Option<(&[u8], &[u8])> {
+    text.iter()
+        .position(|&b| b == b'=')
+        .map(|eq| (&text[..eq], &text[eq + 1..]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

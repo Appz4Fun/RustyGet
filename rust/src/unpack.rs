@@ -606,6 +606,17 @@ pub fn sevenzip_decode_exit_code(ec: i32) -> (bool, &'static std::ffi::CStr) {
     }
 }
 
+/// Format `"<prefix> for <name>"` (e.g. `"unpack for MyNzb"`, `"Unpack for MyNzb"`)
+/// for post-processing controllers (`DirectUnpack.cpp`, `UnpackController.cpp`,
+/// `Cleanup.cpp`, `Rename.cpp`).
+pub fn post_format_info_name(prefix: &[u8], name: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(prefix.len() + 5 + name.len());
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(b" for ");
+    out.extend_from_slice(name);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

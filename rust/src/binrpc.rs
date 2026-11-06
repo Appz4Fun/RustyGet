@@ -1384,6 +1384,71 @@ pub fn group_listing_from_wire(
     group_listing(&groups, has_pattern)
 }
 
+/// Validates a BinRPC response header (`RemoteClient::ReceiveBoolResponse`, `RequestServerList`,
+/// `RequestServerLog`, `RequestPostQueue`, `RequestHistory`).
+pub fn binrpc_is_valid_response_header(
+    read_ok: bool,
+    host_signature: i32,
+    expected_signature: i32,
+    host_struct_size: u32,
+    expected_struct_size: u32,
+) -> bool {
+    read_ok && host_signature == expected_signature && host_struct_size == expected_struct_size
+}
+
+/// Computes elapsed seconds from `start_time` to `cur_time` when `start_time != 0`
+/// (`PostQueueBinCommand::Execute`).
+pub fn binrpc_calc_elapsed_sec(cur_time: i64, start_time: i64) -> u32 {
+    if start_time != 0 {
+        (cur_time.wrapping_sub(start_time) as i32) as u32
+    } else {
+        0
+    }
+}
+
+/// Evaluates whether a history item should be included in `HistoryBinCommand::Execute`.
+pub fn binrpc_should_include_history_entry(
+    kind: i32,
+    hk_dup: i32,
+    show_hidden: bool,
+) -> bool {
+    kind != hk_dup || show_hidden
+}
+
+/// Formats `DownloadBinCommand::Execute` response message (`"Collection %s added to queue"` vs `"Download Request failed for %s"`).
+pub fn binrpc_format_download_response_msg(ok: bool, base_filename: &[u8]) -> Vec<u8> {
+    if ok {
+        let mut out = Vec::with_capacity(base_filename.len() + 27);
+        out.extend_from_slice(b"Collection ");
+        out.extend_from_slice(base_filename);
+        out.extend_from_slice(b" added to queue");
+        out
+    } else {
+        let mut out = Vec::with_capacity(base_filename.len() + 28);
+        out.extend_from_slice(b"Download Request failed for ");
+        out.extend_from_slice(base_filename);
+        out
+    }
+}
+
+/// Evaluates `ListBinCommand::Execute` NZB group regex match flag (`matchGroup && (!regEx || regEx->Match(...))`).
+pub fn binrpc_eval_nzb_group_match(
+    match_group: bool,
+    has_regex: bool,
+    regex_matched: bool,
+) -> u32 {
+    u32::from(match_group && (!has_regex || regex_matched))
+}
+
+/// Formats `ListBinCommand::Execute` file regex match target (`"%s/%s"`, `nzb_name`, `base_filename`).
+pub fn binrpc_format_file_match_name(nzb_name: &[u8], base_filename: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(nzb_name.len() + 1 + base_filename.len());
+    out.extend_from_slice(nzb_name);
+    out.push(b'/');
+    out.extend_from_slice(base_filename);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

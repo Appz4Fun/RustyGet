@@ -62,7 +62,7 @@ pub fn script_config_cipher_baseline(entries: &[(&[u8], &[u8])]) -> Vec<u8> {
         names.push(k);
         values.push(v);
     }
-    crate::scripturlstat::build_cipher_baseline(&names, &values)
+    build_cipher_baseline(&names, &values)
 }
 
 fn script_config_cipher_baseline_cstrings(entries: &[(CString, CString)]) -> Vec<u8> {
@@ -72,7 +72,7 @@ fn script_config_cipher_baseline_cstrings(entries: &[(CString, CString)]) -> Vec
         names.push(k.to_bytes());
         values.push(v.to_bytes());
     }
-    crate::scripturlstat::build_cipher_baseline(&names, &values)
+    build_cipher_baseline(&names, &values)
 }
 
 /// Parses config file bytes into `(name, value)` entries, applying `ConvertOldOption`
@@ -90,7 +90,7 @@ pub fn script_config_parse_bytes(raw: &[u8]) -> Vec<(CString, CString)> {
             continue;
         }
         if let Some((raw_name, raw_val)) =
-            crate::twinproberenhist::tpr_options_split_option_string(line)
+            crate::options::options_split_option_string(line)
         {
             let name_c = cstring_lossy(raw_name);
             let val_c = cstring_lossy(raw_val);
@@ -152,7 +152,7 @@ pub fn script_config_merge_bytes(raw: &[u8], entries: &[(&[u8], &[u8])]) -> Vec<
                 trimmed = &trimmed[..trimmed.len() - 1];
             }
             if let Some((raw_name, raw_val)) =
-                crate::twinproberenhist::tpr_options_split_option_string(trimmed)
+                crate::options::options_split_option_string(trimmed)
             {
                 let name_c = cstring_lossy(raw_name);
                 let val_c = cstring_lossy(raw_val);
@@ -827,6 +827,620 @@ pub fn queue_script_prepare_env(
         _ => c"NONE",
     };
     set_env_var(c"NZBNA_MARKSTATUS", mark_status_name);
+}
+
+use std::collections::BTreeMap;
+
+pub const QUEUE_EVENT_NAMES: [&[u8]; 7] = [
+    b"FILE_DOWNLOADED",
+    b"URL_COMPLETED",
+    b"NZB_MARKED",
+    b"NZB_ADDED",
+    b"NZB_NAMED",
+    b"NZB_DOWNLOADED",
+    b"NZB_DELETED",
+];
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RsQueueScriptCmd {
+    /// - `0`: not an `[NZB] ` command (log normally)
+    /// - `1`: `[NZB] NZBPR_<key>=<val>`
+    /// - `2`: `[NZB] DIRECTORY=<dir>` (only when `event == qe_nzb_downloaded`)
+    /// - `3`: `[NZB] MARK=BAD`
+    /// - `-1`: invalid `[NZB] ` command
+    pub kind: i32,
+    pub key_offset: usize,
+    pub key_len: usize,
+    pub val_offset: usize,
+    pub val_len: usize,
+}
+
+/// Parses a `[NZB] ...` line in `QueueScriptController::AddMessage`.
+pub fn parse_queue_script_cmd(
+    msg_text: &[u8],
+    event: i32,
+    qe_nzb_downloaded: i32,
+) -> RsQueueScriptCmd {
+    if !msg_text.starts_with(b"[NZB] ") {
+        return RsQueueScriptCmd::default();
+    }
+    let body = &msg_text[6..];
+    if body.starts_with(b"NZBPR_") {
+        let kv = &body[6..];
+        if let Some(eq) = kv.iter().position(|&b| b == b'=') {
+            RsQueueScriptCmd {
+                kind: 1,
+                key_offset: 12,
+                key_len: eq,
+                val_offset: 12 + eq + 1,
+                val_len: kv.len() - eq - 1,
+            }
+        } else {
+            RsQueueScriptCmd {
+                kind: -1,
+                ..Default::default()
+            }
+        }
+    } else if body.starts_with(b"DIRECTORY=") && event == qe_nzb_downloaded {
+        RsQueueScriptCmd {
+            kind: 2,
+            key_offset: 6,
+            key_len: 9,
+            val_offset: 16,
+            val_len: body.len() - 10,
+        }
+    } else if body.starts_with(b"MARK=BAD") {
+        RsQueueScriptCmd {
+            kind: 3,
+            ..Default::default()
+        }
+    } else {
+        RsQueueScriptCmd {
+            kind: -1,
+            ..Default::default()
+        }
+    }
+}
+
+/// Evaluates the `EventInterval` suppression check in `QueueScriptCoordinator::EnqueueScript`.
+pub fn should_skip_queue_event_interval(
+    event: i32,
+    qe_file_downloaded: i32,
+    event_interval: i32,
+    cur_time: i64,
+    queue_script_time: i64,
+) -> bool {
+    event == qe_file_downloaded
+        && (event_interval == -1
+            || (event_interval > 0
+                && cur_time - queue_script_time > 0
+                && ((cur_time - queue_script_time) as i32) < event_interval))
+}
+
+/// Checks if a parameter value is truthy (`"yes"`, `"on"`, `"1"`, case-insensitive).
+fn is_param_enabled_value(val: &[u8]) -> bool {
+    val.eq_ignore_ascii_case(b"yes") || val.eq_ignore_ascii_case(b"on") || val == b"1"
+}
+
+/// Evaluates `QueueScriptCoordinator::UsableScript`.
+pub fn is_usable_queue_script(
+    is_queue_script: bool,
+    queue_events: &[u8],
+    script_name: &[u8],
+    event: i32,
+    qe_url_completed: i32,
+    param_names: &[&[u8]],
+    param_values: &[&[u8]],
+    url_extensions: &[u8],
+) -> bool {
+    if !is_queue_script {
+        return false;
+    }
+    let event_name = if event >= 0 && (event as usize) < QUEUE_EVENT_NAMES.len() {
+        QUEUE_EVENT_NAMES[event as usize]
+    } else {
+        b""
+    };
+    if !queue_events.is_empty()
+        && !event_name.is_empty()
+        && !queue_events
+            .windows(event_name.len())
+            .any(|w| w == event_name)
+    {
+        return false;
+    }
+
+    let param_count = param_names.len().min(param_values.len());
+    for i in 0..param_count {
+        let varname = param_names[i];
+        if !varname.is_empty()
+            && varname[0] != b'*'
+            && varname[varname.len() - 1] == b':'
+            && is_param_enabled_value(param_values[i])
+        {
+            let stripped = &varname[..varname.len() - 1];
+            let truncated = if stripped.len() > 1023 {
+                &stripped[..1023]
+            } else {
+                stripped
+            };
+            if truncated == script_name {
+                return true;
+            }
+        }
+    }
+
+    if event == qe_url_completed && !url_extensions.is_empty() {
+        for tok in url_extensions.split(|&b| b == b',' || b == b';') {
+            let trimmed = trim_ascii_spaces(tok);
+            if !trimmed.is_empty() && trimmed == script_name {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn trim_ascii_spaces(mut s: &[u8]) -> &[u8] {
+    while let Some((&last, rest)) = s.split_last() {
+        if last == b'\n' || last == b'\r' || last == b' ' || last == b'\t' {
+            s = rest;
+        } else {
+            break;
+        }
+    }
+    while let Some((&first, rest)) = s.split_first() {
+        if first == b'\n' || first == b'\r' || first == b' ' || first == b'\t' {
+            s = rest;
+        } else {
+            break;
+        }
+    }
+    s
+}
+
+/// Evaluates whether a queued script item should be ignored/erased in `QueueScriptCoordinator::CheckQueue`.
+pub fn should_ignore_queued_script_event(
+    has_nzb_info: bool,
+    delete_status: i32,
+    ds_none: i32,
+    mark_status: i32,
+    ks_bad: i32,
+    event: i32,
+    qe_nzb_deleted: i32,
+    qe_nzb_marked: i32,
+) -> bool {
+    !has_nzb_info
+        || (delete_status != ds_none && event != qe_nzb_deleted && event != qe_nzb_marked)
+        || (mark_status == ks_bad && event != qe_nzb_marked)
+}
+
+// ============================================================================
+// 7. PostScript (`daemon/extension/PostScript.cpp`)
+// ============================================================================
+
+/// Builds the comma-separated list of enabled post-script names in `PostScriptController::Run`.
+pub fn build_enabled_script_comma_list(
+    param_names: &[&[u8]],
+    param_values: &[&[u8]],
+) -> Vec<u8> {
+    let count = param_names.len().min(param_values.len());
+    let mut out = Vec::new();
+    for i in 0..count {
+        let varname = param_names[i];
+        if !varname.is_empty()
+            && varname[0] != b'*'
+            && varname[varname.len() - 1] == b':'
+            && is_param_enabled_value(param_values[i])
+        {
+            out.extend_from_slice(&varname[..varname.len() - 1]);
+            out.push(b',');
+        }
+    }
+    out
+}
+
+/// Evaluates `PostScriptController::AnalyseExitCode`.
+/// Returns `(script_status, message_action, request_par_check)` where `message_action`:
+/// - `1`: info `"%s successful"`
+/// - `2`: error `"%s failed"`
+/// - `3`: info `"%s skipped"`
+/// - `4`: error `"%s requested par-check/repair, but the collection was already checked"`
+/// - `5`: info `"%s requested par-check/repair"`
+/// - `6`: error `"%s failed (terminated with unknown status)"`
+pub fn analyse_post_script_exit_code(
+    exit_code: i32,
+    par_status: i32,
+    ps_skipped: i32,
+    parcheck_enabled: bool,
+    sr_none: i32,
+    sr_failure: i32,
+    sr_success: i32,
+) -> (i32, i32, bool) {
+    match exit_code {
+        93 => (sr_success, 1, false),
+        94 | -1 => (sr_failure, 2, false),
+        95 => (sr_none, 3, false),
+        92 if parcheck_enabled => {
+            if par_status > ps_skipped {
+                (sr_failure, 4, false)
+            } else {
+                (sr_success, 5, true)
+            }
+        }
+        _ => (sr_failure, 6, false),
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RsPostScriptCmd {
+    /// - `0`: not an `[NZB] ` command
+    /// - `1`: `[NZB] FINALDIR=<dir>`
+    /// - `2`: `[NZB] DIRECTORY=<dir>`
+    /// - `3`: `[NZB] NZBPR_<key>=<val>`
+    /// - `4`: `[NZB] MARK=BAD`
+    /// - `-1`: invalid `[NZB] ` command
+    pub kind: i32,
+    pub key_offset: usize,
+    pub key_len: usize,
+    pub val_offset: usize,
+    pub val_len: usize,
+}
+
+/// Parses a `[NZB] ...` line in `PostScriptController::AddMessage`.
+pub fn parse_post_script_cmd(msg_text: &[u8]) -> RsPostScriptCmd {
+    if !msg_text.starts_with(b"[NZB] ") {
+        return RsPostScriptCmd::default();
+    }
+    let body = &msg_text[6..];
+    if body.starts_with(b"FINALDIR=") {
+        RsPostScriptCmd {
+            kind: 1,
+            key_offset: 6,
+            key_len: 8,
+            val_offset: 15,
+            val_len: body.len() - 9,
+        }
+    } else if body.starts_with(b"DIRECTORY=") {
+        RsPostScriptCmd {
+            kind: 2,
+            key_offset: 6,
+            key_len: 9,
+            val_offset: 16,
+            val_len: body.len() - 10,
+        }
+    } else if body.starts_with(b"NZBPR_") {
+        let kv = &body[6..];
+        if let Some(eq) = kv.iter().position(|&b| b == b'=') {
+            RsPostScriptCmd {
+                kind: 3,
+                key_offset: 12,
+                key_len: eq,
+                val_offset: 12 + eq + 1,
+                val_len: kv.len() - eq - 1,
+            }
+        } else {
+            RsPostScriptCmd {
+                kind: -1,
+                ..Default::default()
+            }
+        }
+    } else if body.starts_with(b"MARK=BAD") {
+        RsPostScriptCmd {
+            kind: 4,
+            ..Default::default()
+        }
+    } else {
+        RsPostScriptCmd {
+            kind: -1,
+            ..Default::default()
+        }
+    }
+}
+
+// ============================================================================
+// 8. ScanScript (`daemon/extension/ScanScript.cpp`)
+// ============================================================================
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RsScanScriptCmd {
+    /// - `0`: not an `[NZB] ` command
+    /// - `1`: `[NZB] NZBNAME=<val>`
+    /// - `2`: `[NZB] CATEGORY=<val>`
+    /// - `3`: `[NZB] NZBPR_<key>=<val>`
+    /// - `4`: `[NZB] PRIORITY=<int>`
+    /// - `5`: `[NZB] TOP=<bool>`
+    /// - `6`: `[NZB] PAUSED=<bool>`
+    /// - `7`: `[NZB] DUPEKEY=<val>`
+    /// - `8`: `[NZB] DUPESCORE=<int>`
+    /// - `9`: `[NZB] DUPEMODE=<mode>` (`int_val` = 0 score, 1 all, 2 force)
+    /// - `-1`: invalid `[NZB] ` command
+    /// - `-2`: invalid value for `DUPEMODE` (`val_offset`/`val_len` point to value)
+    pub kind: i32,
+    pub key_offset: usize,
+    pub key_len: usize,
+    pub val_offset: usize,
+    pub val_len: usize,
+    pub int_val: i32,
+}
+
+fn c_atoi(bytes: &[u8]) -> i32 {
+    let mut idx = 0;
+    while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    let mut sign: i64 = 1;
+    if idx < bytes.len() {
+        if bytes[idx] == b'-' {
+            sign = -1;
+            idx += 1;
+        } else if bytes[idx] == b'+' {
+            idx += 1;
+        }
+    }
+    let mut acc: i64 = 0;
+    while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+        acc = acc
+            .wrapping_mul(10)
+            .wrapping_add((bytes[idx] - b'0') as i64);
+        idx += 1;
+    }
+    (acc * sign) as i32
+}
+
+/// Parses a `[NZB] ...` line in `ScanScriptController::AddMessage`.
+pub fn parse_scan_script_cmd(msg_text: &[u8]) -> RsScanScriptCmd {
+    if !msg_text.starts_with(b"[NZB] ") {
+        return RsScanScriptCmd::default();
+    }
+    let body = &msg_text[6..];
+    if body.starts_with(b"NZBNAME=") {
+        RsScanScriptCmd {
+            kind: 1,
+            val_offset: 14,
+            val_len: body.len() - 8,
+            ..Default::default()
+        }
+    } else if body.starts_with(b"CATEGORY=") {
+        RsScanScriptCmd {
+            kind: 2,
+            val_offset: 15,
+            val_len: body.len() - 9,
+            ..Default::default()
+        }
+    } else if body.starts_with(b"NZBPR_") {
+        let kv = &body[6..];
+        if let Some(eq) = kv.iter().position(|&b| b == b'=') {
+            RsScanScriptCmd {
+                kind: 3,
+                key_offset: 12,
+                key_len: eq,
+                val_offset: 12 + eq + 1,
+                val_len: kv.len() - eq - 1,
+                int_val: 0,
+            }
+        } else {
+            RsScanScriptCmd {
+                kind: -1,
+                ..Default::default()
+            }
+        }
+    } else if body.starts_with(b"PRIORITY=") {
+        RsScanScriptCmd {
+            kind: 4,
+            val_offset: 15,
+            val_len: body.len() - 9,
+            int_val: c_atoi(&body[9..]),
+            ..Default::default()
+        }
+    } else if body.starts_with(b"TOP=") {
+        RsScanScriptCmd {
+            kind: 5,
+            val_offset: 10,
+            val_len: body.len() - 4,
+            int_val: if c_atoi(&body[4..]) != 0 { 1 } else { 0 },
+            ..Default::default()
+        }
+    } else if body.starts_with(b"PAUSED=") {
+        RsScanScriptCmd {
+            kind: 6,
+            val_offset: 13,
+            val_len: body.len() - 7,
+            int_val: if c_atoi(&body[7..]) != 0 { 1 } else { 0 },
+            ..Default::default()
+        }
+    } else if body.starts_with(b"DUPEKEY=") {
+        RsScanScriptCmd {
+            kind: 7,
+            val_offset: 14,
+            val_len: body.len() - 8,
+            ..Default::default()
+        }
+    } else if body.starts_with(b"DUPESCORE=") {
+        RsScanScriptCmd {
+            kind: 8,
+            val_offset: 16,
+            val_len: body.len() - 10,
+            int_val: c_atoi(&body[10..]),
+            ..Default::default()
+        }
+    } else if body.starts_with(b"DUPEMODE=") {
+        let val = &body[9..];
+        let mode = if val.eq_ignore_ascii_case(b"score") {
+            0
+        } else if val.eq_ignore_ascii_case(b"all") {
+            1
+        } else if val.eq_ignore_ascii_case(b"force") {
+            2
+        } else {
+            return RsScanScriptCmd {
+                kind: -2,
+                val_offset: 15,
+                val_len: val.len(),
+                ..Default::default()
+            };
+        };
+        RsScanScriptCmd {
+            kind: 9,
+            val_offset: 15,
+            val_len: val.len(),
+            int_val: mode,
+            ..Default::default()
+        }
+    } else {
+        RsScanScriptCmd {
+            kind: -1,
+            ..Default::default()
+        }
+    }
+}
+
+// ============================================================================
+// 9. ScriptConfig (`daemon/extension/ScriptConfig.cpp`)
+// ============================================================================
+
+/// Builds the canonical versioned `v1\n` cipher baseline token in `ScriptConfig::CipherBaseline`.
+pub fn build_cipher_baseline(names: &[&[u8]], values: &[&[u8]]) -> Vec<u8> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let count = names.len().min(values.len());
+    let mut fields: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+
+    for i in 0..count {
+        let raw_name = names[i];
+        let mut name: Vec<u8> = raw_name
+            .iter()
+            .map(|&b| {
+                if b.is_ascii_uppercase() {
+                    b + (b'a' - b'A')
+                } else {
+                    b
+                }
+            })
+            .collect();
+        if !name.starts_with(b"server") {
+            continue;
+        }
+        let dot = match name[6..].iter().position(|&b| b == b'.') {
+            Some(pos) => 6 + pos,
+            None => continue,
+        };
+        if dot == 6
+            || name[6] == b'0'
+            || !name[6..dot].iter().all(|&c| c.is_ascii_digit())
+        {
+            continue;
+        }
+        let suffix = &name[dot + 1..];
+        if suffix != b"host" && suffix != b"port" && suffix != b"cipher" {
+            continue;
+        }
+        let raw_val = values[i];
+        let mut hex_val = Vec::with_capacity(raw_val.len() * 2);
+        for &c in raw_val {
+            hex_val.push(HEX[(c >> 4) as usize]);
+            hex_val.push(HEX[(c & 15) as usize]);
+        }
+        fields.insert(std::mem::take(&mut name), hex_val);
+    }
+
+    let mut token = Vec::from(&b"v1\n"[..]);
+    for (name, val) in fields {
+        token.extend_from_slice(&name);
+        token.push(b'=');
+        token.extend_from_slice(&val);
+        token.push(b'\n');
+    }
+    token
+}
+
+// ============================================================================
+// 10. ScriptController (`daemon/util/ScriptController.cpp`)
+// ============================================================================
+
+/// Checks whether an environment variable string `var` matches the `NZBXX_...` pattern
+/// filtered out in `EnvironmentStrings::InitFromCurrentProcess`.
+pub fn is_nzbget_internal_env_var(var: &[u8]) -> bool {
+    var.len() > 5 && var.starts_with(b"NZB") && var[5] == b'_'
+}
+
+/// Normalizes an environment variable name in `ScriptController::SetEnvVarSpecial`:
+/// replaces `.:*!"$%&/()=`+~#'{}[]@- ` with `_` and converts ASCII letters to uppercase.
+pub fn normalize_special_env_var_name(varname: &[u8]) -> Vec<u8> {
+    const SPECIAL: &[u8] = b".:*!\"$%&/()=`+~#'{}[]@- ";
+    varname
+        .iter()
+        .map(|&b| {
+            let replaced = if SPECIAL.contains(&b) { b'_' } else { b };
+            replaced.to_ascii_uppercase()
+        })
+        .collect()
+}
+
+/// Strips trailing `\n`, `\r`, and `' '` in-place and classifies the log prefix
+/// in `ScriptController::ProcessOutput`.
+/// Returns `(is_empty, message_kind, text_offset)` where `message_kind`:
+/// - `0`: `mkInfo`
+/// - `1`: `mkWarning`
+/// - `2`: `mkError`
+/// - `3`: `mkDetail`
+/// - `4`: `mkDebug`
+pub fn classify_script_output_line(line: &[u8]) -> ( usize, i32, usize) {
+    let mut trimmed_len = line.len();
+    while trimmed_len > 0 {
+        let last = line[trimmed_len - 1];
+        if last == b'\n' || last == b'\r' || last == b' ' {
+            trimmed_len -= 1;
+        } else {
+            break;
+        }
+    }
+    if trimmed_len == 0 {
+        return (0, 0, 0);
+    }
+    let trimmed = &line[..trimmed_len];
+    if trimmed.starts_with(b"[INFO] ") {
+        (trimmed_len, 0, 7)
+    } else if trimmed.starts_with(b"[WARNING] ") {
+        (trimmed_len, 1, 10)
+    } else if trimmed.starts_with(b"[ERROR] ") {
+        (trimmed_len, 2, 8)
+    } else if trimmed.starts_with(b"[DETAIL] ") {
+        (trimmed_len, 3, 9)
+    } else if trimmed.starts_with(b"[DEBUG] ") {
+        (trimmed_len, 4, 8)
+    } else {
+        (trimmed_len, 0, 0)
+    }
+}
+
+/// Evaluates `ScriptController::CheckEnvSize`.
+/// Returns `Some(exceeded_total)` if cumulative environment size exceeds `limit`, or `None`.
+pub fn check_env_size_limit(env_lens: &[usize], ptr_size: usize, limit: usize) -> Option<usize> {
+    if limit == 0 {
+        return None;
+    }
+    let mut total = 0usize;
+    for &len in env_lens {
+        total = total.saturating_add(len).saturating_add(1).saturating_add(ptr_size);
+        if total > limit {
+            return Some(total);
+        }
+    }
+    None
+}
+
+/// Resolves whether a single-argument script should use `found_executor` as `m_cmdLine`
+/// and whether to prepend `found_executor` to `m_cmdArgs` (`ScriptController::PrepareArgs`).
+pub fn script_resolve_single_arg_executor(
+    has_found: bool,
+    found_executor: &[u8],
+    arg0: &[u8],
+) -> (bool, bool) {
+    (has_found, has_found && found_executor != arg0)
 }
 
 #[cfg(test)]

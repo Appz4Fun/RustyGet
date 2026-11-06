@@ -833,9 +833,17 @@ pub fn compare_entry_names(
     b_filename: &[u8],
     b_subject: &[u8],
 ) -> bool {
-    crate::twinproberenhist::twin_check_compare_entry_names(
-        a_filename, a_subject, b_filename, b_subject,
-    )
+    let ka = if a_filename.is_empty() {
+        a_subject
+    } else {
+        a_filename
+    };
+    let kb = if b_filename.is_empty() {
+        b_subject
+    } else {
+        b_filename
+    };
+    ka < kb
 }
 
 /// `TwinCheckJob::Sample` (`TwinCheck.cpp`): selects `sample_count` evenly spaced `(file_idx, seg_idx)`
@@ -867,15 +875,17 @@ pub fn compare_sampled_pair(
     in_compared: i32,
     in_differ: i32,
 ) -> (i32, i32) {
-    crate::twinproberenhist::twin_check_job_compare_sampled_pair(
-        part_a_success,
-        part_b_success,
-        part_a_offset,
-        part_b_offset,
-        data_equal,
-        in_compared,
-        in_differ,
-    )
+    if part_a_success != 0 && part_b_success != 0 {
+        let compared = in_compared.wrapping_add(1);
+        let differ = if part_a_offset != part_b_offset || data_equal == 0 {
+            in_differ.wrapping_add(1)
+        } else {
+            in_differ
+        };
+        (compared, differ)
+    } else {
+        (in_compared, in_differ)
+    }
 }
 
 /// `TwinCheckJob::Sample` (`TwinCheck.cpp`): evaluates the sample verdict (`0` = retry later,
@@ -912,7 +922,10 @@ pub fn format_identity(files_param: &[u8], posting: &[u8]) -> Vec<u8> {
 /// `TwinCheck::PutPar2` (`TwinCheck.cpp`): splits a `"<print>\t<1|0>"` string returned by
 /// `nzbget_rs_twin_put_par2` into `(print_slice, is_complete)`.
 pub fn split_put_par2_result(raw: &[u8]) -> (&[u8], bool) {
-    crate::twinproberenhist::twin_check_split_put_par2_result(raw)
+    match raw.iter().position(|&b| b == b'\t') {
+        Some(tab) => (&raw[..tab], &raw[tab + 1..] == b"1"),
+        None => (raw, false),
+    }
 }
 
 /// `TwinCheck::FetchEntry` (`TwinCheck.cpp`): validates a fetched segment part and computes

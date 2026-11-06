@@ -2323,6 +2323,44 @@ pub extern "C" fn nzbget_rs_xmlrpc_format_network_speed(
     into_buf(out)
 }
 
+/// Splits `XmlRpcProcessor::SetUrl` into `(path_set_len, query_offset)`.
+/// When `'?'` is absent, `path_set_len` is `0` (matching `CString::Set(url, 0)` which copies the full string).
+pub fn xmlrpc_split_url_path_and_query(url: &[u8]) -> (usize, Option<usize>) {
+    match url.iter().position(|&b| b == b'?') {
+        Some(pos) => (pos, Some(pos)),
+        None => (0, None),
+    }
+}
+
+/// Evaluates whether `EditQueueXmlCommand::Execute` should replace `args` with the formatted `offset`.
+pub fn xmlrpc_should_use_edit_offset(
+    has_offset: bool,
+    action: i32,
+    ea_file_move_offset: i32,
+    ea_group_move_offset: i32,
+) -> bool {
+    has_offset && (action == ea_file_move_offset || action == ea_group_move_offset)
+}
+
+/// Formats `ReadUrlXmlCommand::Execute` temporary filename (`"%s%creadurl-%i.tmp"`, `temp_dir`, `sep`, `num`).
+pub fn xmlrpc_format_readurl_temp_filename(temp_dir: &[u8], sep: u8, num: i32) -> Vec<u8> {
+    let suffix = format!("readurl-{num}.tmp");
+    let mut out = Vec::with_capacity(temp_dir.len() + 1 + suffix.len());
+    out.extend_from_slice(temp_dir);
+    out.push(sep);
+    out.extend_from_slice(suffix.as_bytes());
+    out
+}
+
+/// Formats `TestServerXmlCommand::Execute` synthetic `ARTICLE <%s@nzbget.com>\r\n` command.
+pub fn xmlrpc_format_testserver_article_cmd(id: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(id.len() + 24);
+    out.extend_from_slice(b"ARTICLE <");
+    out.extend_from_slice(id);
+    out.extend_from_slice(b"@nzbget.com>\r\n");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

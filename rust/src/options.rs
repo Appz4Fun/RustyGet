@@ -475,6 +475,83 @@ pub fn convert_old_options(entries: &mut Vec<(CString, CString)>) {
     }
 }
 
+/// Resolves the fallback `param` source (`0=param, 1=process, 2=downloadRate`) and
+/// `(definition, completed)` flags for `Options::InitScheduler`.
+pub fn options_resolve_scheduler_task_state(
+    has_time: bool,
+    has_weekdays: bool,
+    has_command: bool,
+    has_download_rate: bool,
+    has_param_ptr: bool,
+    param_empty: bool,
+    process_empty: bool,
+    download_rate_empty: bool,
+) -> (i32, bool, bool) {
+    let param_source = if param_empty && !process_empty {
+        1
+    } else if param_empty && !download_rate_empty {
+        2
+    } else {
+        0
+    };
+    let has_effective_param = (param_source != 0) || has_param_ptr;
+    let definition =
+        has_time || has_weekdays || has_command || has_download_rate || has_effective_param;
+    let completed = has_time && has_command;
+    (param_source, definition, completed)
+}
+
+/// Splits an `option=value` string at the first `=` where the option name is non-empty
+/// (`Options::SplitOptionString`).
+pub fn options_split_option_string(option: &[u8]) -> Option<(&[u8], &[u8])> {
+    option
+        .iter()
+        .position(|&b| b == b'=')
+        .filter(|&eq| eq > 0)
+        .map(|eq| (&option[..eq], &option[eq + 1..]))
+}
+
+/// Formats `"<dir><sep>nzbget.conf"` for `Options::InitOptFile` and `Options::CheckOptions`.
+pub fn options_format_default_conf_path(dir: &[u8], sep: u8) -> Vec<u8> {
+    const SUFFIX: &[u8] = b"nzbget.conf";
+    let mut out = Vec::with_capacity(dir.len() + 1 + SUFFIX.len());
+    out.extend_from_slice(dir);
+    out.push(sep);
+    out.extend_from_slice(SUFFIX);
+    out
+}
+
+/// Returns the byte length of `dir` after stripping a single trailing `sep` for `Options::CheckDir`.
+pub fn options_strip_trailing_sep(dir: &[u8], sep: u8) -> usize {
+    if !dir.is_empty() && dir[dir.len() - 1] == sep {
+        dir.len() - 1
+    } else {
+        dir.len()
+    }
+}
+
+/// Formats `"<parent_dir><dir>"` (`join_mode == 1`) or `"<parent_dir><sep><dir>"` (`join_mode != 1`)
+/// for `Options::CheckDir`.
+pub fn options_format_joined_dir(
+    parent_dir: &[u8],
+    sep: u8,
+    dir: &[u8],
+    join_mode: i32,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(parent_dir.len() + 1 + dir.len());
+    out.extend_from_slice(parent_dir);
+    if join_mode != 1 {
+        out.push(sep);
+    }
+    out.extend_from_slice(dir);
+    out
+}
+
+/// Converts minutes to seconds (`minutes * 60`) for `Options::InitOptions`.
+pub fn options_minutes_to_seconds_i32(minutes: i32) -> i32 {
+    minutes.wrapping_mul(60)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -261,6 +261,34 @@ pub fn memory_monitor_classify_tier_transition_action(
     }
 }
 
+/// Formats `"<dest_dir><sep><filename>"` for `ArticleWriter`.
+pub fn article_writer_format_dest_file_path(
+    dest_dir: &[u8],
+    sep: u8,
+    filename: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(dest_dir.len() + 1 + filename.len());
+    out.extend_from_slice(dest_dir);
+    out.push(sep);
+    out.extend_from_slice(filename);
+    out
+}
+
+/// Formats `"<base_path>.tmp"` for `ArticleWriter`.
+pub fn article_writer_format_tmp_path(base_path: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(base_path.len() + 4);
+    out.extend_from_slice(base_path);
+    out.extend_from_slice(b".tmp");
+    out
+}
+
+/// Converts megabytes to bytes (`mb * 1024 * 1024`) for `ArticleCache` and `MemoryMonitor`.
+pub fn article_cache_mb_to_bytes(mb: i32) -> usize {
+    (mb.max(0) as usize)
+        .saturating_mul(1024)
+        .saturating_mul(1024)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

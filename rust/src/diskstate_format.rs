@@ -986,6 +986,42 @@ pub unsafe extern "C" fn nzbget_rs_diskstate_parse_completed_file_line(
     1
 }
 
+/// Formats `"<queue_dir><sep><filename><suffix>"` (omitting `suffix` when `suffix == 0`) for `DiskState::DiscardDownloadQueue`.
+pub fn diskstate_format_queue_file_state_path(
+    queue_dir: &[u8],
+    sep: u8,
+    filename: &[u8],
+    suffix: u8,
+) -> Vec<u8> {
+    let mut out =
+        Vec::with_capacity(queue_dir.len() + 1 + filename.len() + usize::from(suffix != 0));
+    out.extend_from_slice(queue_dir);
+    out.push(sep);
+    out.extend_from_slice(filename);
+    if suffix != 0 {
+        out.push(suffix);
+    }
+    out
+}
+
+/// Formats `"<queue_dir><sep><file_id><suffix>"` (omitting `suffix` when `suffix == 0`) for `DiskState::DiscardFile`.
+pub fn diskstate_format_queue_id_state_path(
+    queue_dir: &[u8],
+    sep: u8,
+    file_id: i32,
+    suffix: u8,
+) -> Vec<u8> {
+    let id_str = file_id.to_string();
+    let mut out = Vec::with_capacity(queue_dir.len() + 1 + id_str.len() + usize::from(suffix != 0));
+    out.extend_from_slice(queue_dir);
+    out.push(sep);
+    out.extend_from_slice(id_str.as_bytes());
+    if suffix != 0 {
+        out.push(suffix);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -359,6 +359,46 @@ pub fn webdl_check_body_chunk(
     }
 }
 
+/// Formats `"GET <resource> HTTP/1.0\r\n"` for `WebDownloader::SendHeaders`.
+pub fn webdl_format_get_request_line(resource: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(resource.len() + 15);
+    out.extend_from_slice(b"GET ");
+    out.extend_from_slice(resource);
+    out.extend_from_slice(b" HTTP/1.0\r\n");
+    out
+}
+
+/// Formats `"User-Agent: nzbget/<version_rev>\r\n"` for `WebDownloader::SendHeaders`.
+pub fn webdl_format_user_agent_header(version_rev: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(version_rev.len() + 21);
+    out.extend_from_slice(b"User-Agent: nzbget/");
+    out.extend_from_slice(version_rev);
+    out.extend_from_slice(b"\r\n");
+    out
+}
+
+/// Formats `"Host: <host>\r\n"` or `"Host: <host>:<port>\r\n"` for `WebDownloader::SendHeaders`.
+pub fn webdl_format_host_header(
+    is_default_port: bool,
+    host: &[u8],
+    port: i32,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(host.len() + 20);
+    out.extend_from_slice(b"Host: ");
+    out.extend_from_slice(host);
+    if !is_default_port {
+        out.extend_from_slice(format!(":{port}").as_bytes());
+    }
+    out.extend_from_slice(b"\r\n");
+    out
+}
+
+/// Converts kilobytes to bytes (`kb * 1024`) for `WebDownloader::PrepareFile`
+/// and `NCursesFrontend::UpdateInput`.
+pub fn webdl_kb_to_bytes(kb: i32) -> i32 {
+    kb.wrapping_mul(1024)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

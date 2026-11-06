@@ -2091,7 +2091,7 @@ pub fn dqh_dupe_util_lower(text: &[u8]) -> Vec<u8> {
 /// Formats `"not an nzb-file: <masked first 160 bytes>"` for `NzbFetcher::Fetch`.
 pub fn dqh_nzb_fetcher_format_parse_err(body: &[u8]) -> Vec<u8> {
     let prefix = &body[..body.len().min(160)];
-    let masked = crate::dupefeed::mask_newznab_text(prefix);
+    let masked = crate::dupesearch_nzb::mask_newznab_text(prefix);
     let mut out = Vec::with_capacity(17 + masked.len());
     out.extend_from_slice(b"not an nzb-file: ");
     out.extend_from_slice(&masked);

@@ -672,8 +672,8 @@ impl NzbFileParser {
             return;
         }
         let msg = truncate_at_nul(err_msg);
-        let trimmed_len = crate::twinproberenhist::tpr_nzbfile_trim_sax_error_trailing(&msg);
-        let full = crate::twinproberenhist::tpr_nzbfile_format_sax_error_msg(&msg[..trimmed_len]);
+        let trimmed_len = nzbfile_trim_sax_error_trailing(&msg);
+        let full = nzbfile_format_sax_error_msg(&msg[..trimmed_len]);
         self.push_error(full);
     }
 
@@ -700,7 +700,7 @@ impl NzbFileParser {
         let base_name = &file_name_bytes[base_idx..];
 
         if sax_ret != 0 {
-            self.push_error(crate::twinproberenhist::tpr_nzbfile_format_parse_error_msg(
+            self.push_error(nzbfile_format_parse_error_msg(
                 base_name, false,
             ));
             return false;
@@ -760,7 +760,7 @@ impl NzbFileParser {
         }
 
         if parsed_files.is_empty() {
-            self.push_error(crate::twinproberenhist::tpr_nzbfile_format_parse_error_msg(
+            self.push_error(nzbfile_format_parse_error_msg(
                 base_name, true,
             ));
             return false;
@@ -897,6 +897,44 @@ impl NzbFileParser {
 
         true
     }
+}
+
+/// Computes the trimmed length of an XML/SAX error message after stripping trailing
+/// `\n`, `\r`, and `' '` (`NzbFile::SAX_error`).
+pub fn nzbfile_trim_sax_error_trailing(buf: &[u8]) -> usize {
+    let mut len = buf.len();
+    while len > 0 && matches!(buf[len - 1], b'\n' | b'\r' | b' ') {
+        len -= 1;
+    }
+    len
+}
+
+/// Formats `"Error parsing nzb-file <base_name>"` or
+/// `"Error parsing nzb-file <base_name>: file has no content"` for `NzbFile::Parse`.
+pub fn nzbfile_format_parse_error_msg(base_name: &[u8], has_no_content: bool) -> Vec<u8> {
+    const PREFIX: &[u8] = b"Error parsing nzb-file ";
+    const NO_CONTENT_SUFFIX: &[u8] = b": file has no content";
+    let extra = if has_no_content {
+        NO_CONTENT_SUFFIX.len()
+    } else {
+        0
+    };
+    let mut out = Vec::with_capacity(PREFIX.len() + base_name.len() + extra);
+    out.extend_from_slice(PREFIX);
+    out.extend_from_slice(base_name);
+    if has_no_content {
+        out.extend_from_slice(NO_CONTENT_SUFFIX);
+    }
+    out
+}
+
+/// Formats `"Error parsing nzb-file: <err_msg>"` for `NzbFile::SAX_error`.
+pub fn nzbfile_format_sax_error_msg(err_msg: &[u8]) -> Vec<u8> {
+    const PREFIX: &[u8] = b"Error parsing nzb-file: ";
+    let mut out = Vec::with_capacity(PREFIX.len() + err_msg.len());
+    out.extend_from_slice(PREFIX);
+    out.extend_from_slice(err_msg);
+    out
 }
 
 #[cfg(test)]

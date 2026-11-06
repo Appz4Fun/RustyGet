@@ -193,6 +193,198 @@ pub fn calc_month_slots_same_month(tm_mday: i32, quota_start_day: i32) -> i32 {
     tm_mday.wrapping_sub(quota_start_day).wrapping_add(1)
 }
 
+pub const SPEEDMETER_SLOTS: usize = 30;
+pub const SPEEDMETER_SLOTSIZE: i32 = 1;
+
+/// Evaluates `StatMeter::IntervalCheck` time-step and timezone refresh decisions.
+/// Returns `(adjust_clocks, clock_delta, adjust_time_offset)`.
+pub fn eval_interval_check(
+    cur_time: i64,
+    last_check: i64,
+    last_time_offset: i64,
+    start_download: i64,
+    stand_by: bool,
+) -> (bool, i64, bool, bool) {
+    let diff = cur_time - last_check;
+    if diff > 60 || diff < 0 {
+        let delta = diff + 1;
+        let adjust_download = start_download != 0 && !stand_by;
+        (true, delta, adjust_download, true)
+    } else if last_time_offset > cur_time
+        || cur_time - last_time_offset > 60 * 60 * 3
+        || (cur_time - last_time_offset > 60 && !stand_by)
+    {
+        (false, 0, false, true)
+    } else {
+        (false, 0, false, false)
+    }
+}
+
+/// Computes `StatMeter::CalcTotalStat` (`up_time_sec`, `dn_time_sec`).
+pub fn calc_total_stat(
+    cur_time: i64,
+    start_server: i64,
+    start_download: i64,
+    paused_from: i64,
+    stand_by: bool,
+) -> (i32, i32) {
+    let up_time_sec = if start_server > 0 {
+        (cur_time - start_server) as i32
+    } else {
+        0
+    };
+    let dn_time_sec = if stand_by {
+        (paused_from - start_download) as i32
+    } else {
+        (cur_time - start_download) as i32
+    };
+    (up_time_sec, dn_time_sec)
+}
+
+/// Computes `StatMeter::CalcCurrentDownloadSpeed`.
+pub fn calc_current_download_speed(
+    stand_by: bool,
+    cur_time: i64,
+    speed_start_time: i32,
+    speed_total_bytes: i64,
+) -> i64 {
+    if stand_by {
+        return 0;
+    }
+    let time_diff = cur_time - (speed_start_time as i64) * (SPEEDMETER_SLOTSIZE as i64);
+    if time_diff == 0 {
+        return 0;
+    }
+    speed_total_bytes / time_diff
+}
+
+/// Computes `StatMeter::CalcMomentaryDownloadSpeed`.
+pub fn calc_momentary_download_speed(cur_time: i64, cur_sec_time: i64, cur_sec_bytes: i64) -> i64 {
+    if cur_time == cur_sec_time {
+        cur_sec_bytes
+    } else {
+        0
+    }
+}
+
+/// Performs `StatMeter::AddSpeedReading` ring-buffer slot advancement and byte accumulation.
+#[allow(clippy::too_many_arguments)]
+pub fn add_speed_reading(
+    bytes: i32,
+    cur_time: i64,
+    cur_sec_time: &mut i64,
+    cur_sec_bytes: &mut i64,
+    speed_bytes: &mut [i32; SPEEDMETER_SLOTS],
+    speed_time: &mut [i32; SPEEDMETER_SLOTS],
+    speed_bytes_index: &mut i32,
+    speed_total_bytes: &mut i64,
+    speed_start_time: &mut i32,
+    speed_correction: &mut i64,
+    all_bytes: &mut i64,
+) {
+    let now_slot = (cur_time as i32) / SPEEDMETER_SLOTSIZE;
+
+    if cur_time != *cur_sec_time {
+        *cur_sec_time = cur_time;
+        *cur_sec_bytes = 0;
+    }
+    *cur_sec_bytes += bytes as i64;
+
+    let mut idx = (*speed_bytes_index).clamp(0, (SPEEDMETER_SLOTS - 1) as i32) as usize;
+    while now_slot > speed_time[idx] {
+        idx += 1;
+        if idx >= SPEEDMETER_SLOTS {
+            idx = 0;
+        }
+        *speed_total_bytes -= speed_bytes[idx] as i64;
+        *speed_start_time = speed_time[idx];
+        speed_bytes[idx] = 0;
+        speed_time[idx] = now_slot;
+    }
+    *speed_bytes_index = idx as i32;
+
+    if cur_time > *speed_correction {
+        let mut total: i64 = 0;
+        for &b in speed_bytes.iter() {
+            total += b as i64;
+        }
+        *speed_total_bytes = total;
+        *speed_correction = cur_time;
+    }
+
+    if *speed_total_bytes == 0 {
+        *speed_start_time = now_slot;
+    }
+    speed_bytes[idx] = speed_bytes[idx].wrapping_add(bytes);
+    *speed_total_bytes += bytes as i64;
+    *all_bytes += bytes as i64;
+}
+
+/// Computes `StatMeter::CalcQuotaUsage` (`month_bytes`, `day_bytes`).
+pub fn calc_quota_usage(
+    loc_time: i64,
+    first_day: i32,
+    bytes_per_days: &[i64],
+    elapsed_slots: i32,
+) -> (i64, i64) {
+    let day_slot = (loc_time / 86400) as i32 - first_day;
+    let day_bytes = if day_slot >= 0 && (day_slot as usize) < bytes_per_days.len() {
+        bytes_per_days[day_slot as usize]
+    } else {
+        0
+    };
+
+    let mut month_bytes: i64 = 0;
+    let end_slot = (day_slot - elapsed_slots).max(-1);
+    let mut slot = day_slot;
+    while slot >= 0 && slot > end_slot {
+        if (slot as usize) < bytes_per_days.len() {
+            month_bytes += bytes_per_days[slot as usize];
+        }
+        slot -= 1;
+    }
+    (month_bytes, day_bytes)
+}
+
+/// Evaluates `StatMeter::CheckQuota` transition action and new quota-reached state.
+/// Action codes:
+/// - `0`: no log message
+/// - `1`: warn `"Monthly quota reached at %s"`
+/// - `2`: warn `"Daily quota reached at %s"`
+/// - `3`: info `"Quota lifted"`
+pub fn eval_quota_status(
+    monthly_quota_mb: i32,
+    daily_quota_mb: i32,
+    month_bytes: i64,
+    day_bytes: i64,
+    was_quota_reached: bool,
+) -> (bool, i32) {
+    let monthly_reached =
+        monthly_quota_mb > 0 && month_bytes >= (monthly_quota_mb as i64) * 1024 * 1024;
+    let daily_reached = daily_quota_mb > 0 && day_bytes >= (daily_quota_mb as i64) * 1024 * 1024;
+    let action = if monthly_reached && !was_quota_reached {
+        1
+    } else if daily_reached && !was_quota_reached {
+        2
+    } else if !monthly_reached && !daily_reached && was_quota_reached {
+        3
+    } else {
+        0
+    };
+    (monthly_reached || daily_reached, action)
+}
+
+/// Returns `(day_slot + 1) as usize` when `day_slot + 1 > current_len`, or `0` when no resize is needed,
+/// for `ServerVolume::CalcSlots`.
+pub fn server_volume_required_day_len(day_slot: i32, current_len: usize) -> usize {
+    let needed = (day_slot.saturating_add(1)).max(0) as usize;
+    if needed > current_len {
+        needed
+    } else {
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,5 +412,61 @@ mod tests {
         // negative slots (an int time before 1970) are skipped, not written
         let s = calc_slots(-61, &mut first);
         add_stats(&mut sec, &mut min, &mut hour, &s, 0, 0, -61, 0, 1);
+    }
+
+    #[test]
+    fn test_statmeter_functions() {
+        let (adj_clk, delta, adj_dl, adj_tz) = eval_interval_check(200, 100, 100, 50, false);
+        assert!(adj_clk);
+        assert_eq!(delta, 101);
+        assert!(adj_dl);
+        assert!(adj_tz);
+
+        let (up, dn) = calc_total_stat(1000, 900, 950, 980, true);
+        assert_eq!(up, 100);
+        assert_eq!(dn, 30);
+
+        assert_eq!(calc_current_download_speed(false, 110, 100, 5000), 500);
+        assert_eq!(calc_current_or_momentary(), 1024);
+
+        let mut cur_sec_time = 0i64;
+        let mut cur_sec_bytes = 0i64;
+        let mut speed_bytes = [0i32; SPEEDMETER_SLOTS];
+        let mut speed_time = [100i32; SPEEDMETER_SLOTS];
+        let mut idx = 0i32;
+        let mut total = 0i64;
+        let mut start = 100i32;
+        let mut corr = 100i64;
+        let mut all = 0i64;
+        add_speed_reading(
+            4096,
+            105,
+            &mut cur_sec_time,
+            &mut cur_sec_bytes,
+            &mut speed_bytes,
+            &mut speed_time,
+            &mut idx,
+            &mut total,
+            &mut start,
+            &mut corr,
+            &mut all,
+        );
+        assert_eq!(cur_sec_time, 105);
+        assert_eq!(cur_sec_bytes, 4096);
+        assert_eq!(total, 4096);
+        assert_eq!(all, 4096);
+
+        let days = [100i64, 200, 300, 400];
+        let (month_b, day_b) = calc_quota_usage(86400 * 13, 10, &days, 3);
+        assert_eq!(day_b, 400);
+        assert_eq!(month_b, 400 + 300 + 200);
+
+        let (reached, action) = eval_quota_status(1, 0, 2 * 1024 * 1024, 0, false);
+        assert!(reached);
+        assert_eq!(action, 1);
+    }
+
+    fn calc_current_or_momentary() -> i64 {
+        calc_momentary_download_speed(50, 50, 1024)
     }
 }

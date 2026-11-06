@@ -509,6 +509,100 @@ pub fn remote_parse_web_request_line(
     Some((http_method, start_offset, url_len))
 }
 
+/// Validates URL characters in `WebProcessor::Dispatch`:
+/// allows only `0..9 A..Z a..z . - + _ / ?` and rejects `..`.
+pub fn web_is_safe_url_chars(url: &[u8]) -> bool {
+    for i in 0..url.len() {
+        let c = url[i];
+        let allowed = c.is_ascii_alphanumeric()
+            || c == b'.'
+            || c == b'-'
+            || c == b'+'
+            || c == b'?'
+            || c == b'_'
+            || c == b'/';
+        if !allowed || (c == b'.' && i + 1 < url.len() && url[i + 1] == b'.') {
+            return false;
+        }
+    }
+    true
+}
+
+/// Classifies static GET route in `WebProcessor::Dispatch`:
+/// - `0`: invalid URL characters (404 Not Found with warning)
+/// - `1`: `/extensions/` route with invalid subpath (404 Not Found without warning)
+/// - `2`: `/extensions/` route with valid subpath (`ext_offset = 12`)
+/// - `3`: `/combined.` with `?` (multi-file response)
+/// - `4`: single-file response
+pub fn web_classify_get_dispatch(url: &[u8]) -> i32 {
+    if !web_is_safe_url_chars(url) {
+        return 0;
+    }
+    if url.starts_with(b"/extensions/") {
+        let ext_url = &url[12..];
+        match ext_url.iter().position(|&b| b == b'/') {
+            None | Some(0) => 1,
+            Some(_) => 2,
+        }
+    } else if url.starts_with(b"/combined.") && url.contains(&b'?') {
+        3
+    } else {
+        4
+    }
+}
+
+/// Checks whether a missing static file 404 is ignorable in `WebProcessor::SendSingleFileResponse`.
+pub fn web_is_ignorable_404(base_name: &[u8]) -> bool {
+    base_name == b"package-info.json"
+        || base_name == b"favicon.ico"
+        || base_name.starts_with(b"apple-touch-icon")
+}
+
+/// Maps filename extension to MIME content-type in `WebProcessor::DetectContentType`.
+/// Returns `None` if unknown or no extension.
+pub fn web_detect_content_type(filename: &[u8]) -> Option<&'static [u8]> {
+    let dot = filename.iter().rposition(|&b| b == b'.')?;
+    let ext = &filename[dot..];
+    if ext.eq_ignore_ascii_case(b".css") {
+        Some(b"text/css\0")
+    } else if ext.eq_ignore_ascii_case(b".html") {
+        Some(b"text/html\0")
+    } else if ext.eq_ignore_ascii_case(b".js") {
+        Some(b"application/javascript\0")
+    } else if ext.eq_ignore_ascii_case(b".png") {
+        Some(b"image/png\0")
+    } else if ext.eq_ignore_ascii_case(b".jpeg") {
+        Some(b"image/jpeg\0")
+    } else if ext.eq_ignore_ascii_case(b".gif") {
+        Some(b"image/gif\0")
+    } else if ext.eq_ignore_ascii_case(b".svg") {
+        Some(b"image/svg+xml\0")
+    } else if ext.eq_ignore_ascii_case(b".json") {
+        Some(b"application/json\0")
+    } else {
+        None
+    }
+}
+
+/// Formats `WebProcessor::SendBodyResponse` quoted hex ETag (`"\"%zx\""`).
+pub fn web_format_quoted_hex_etag(hash: usize) -> Vec<u8> {
+    format!("\"{hash:x}\"").into_bytes()
+}
+
+/// Evaluates whether gzipped output is smaller than the original body in `WebProcessor::SendBodyResponse`.
+pub fn web_is_gzip_smaller(gzipped_len: i32, body_len: i32) -> bool {
+    gzipped_len > 0 && gzipped_len < body_len
+}
+
+/// Formats `WebProcessor::SendSingleFileResponse` file path (`"%s%s%s"`, `web_dir`, `url`, `def_res`).
+pub fn web_format_single_file_path(web_dir: &[u8], url: &[u8], def_res: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(web_dir.len() + url.len() + def_res.len());
+    out.extend_from_slice(web_dir);
+    out.extend_from_slice(url);
+    out.extend_from_slice(def_res);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -585,5 +679,17 @@ mod tests {
         assert!(text.contains("Set-Cookie: Auth-Type=form; SameSite=Lax\r\n"));
         assert!(text.contains("Set-Cookie: Auth-Token=tok123; HttpOnly; SameSite=Lax\r\n"));
         assert!(text.contains("Content-Type: application/json\r\nContent-Encoding: gzip\r\nETag: \"abc\"\r\n"));
+    }
+
+    #[test]
+    fn test_web_functions() {
+        assert!(web_is_safe_url_chars(b"/index.html?a+1_2-3"));
+        assert!(!web_is_safe_url_chars(b"/../secret"));
+        assert_eq!(web_classify_get_dispatch(b"/extensions/myext/script.js"), 2);
+        assert_eq!(web_classify_get_dispatch(b"/extensions//bad"), 1);
+        assert_eq!(web_classify_get_dispatch(b"/combined.js?a.js+b.js"), 3);
+        assert!(web_is_ignorable_404(b"apple-touch-icon-120x120.png"));
+        assert!(!web_is_ignorable_404(b"index.html"));
+        assert_eq!(web_detect_content_type(b"app.CSS"), Some(&b"text/css\0"[..]));
     }
 }

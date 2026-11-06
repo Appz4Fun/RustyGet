@@ -246,4 +246,102 @@ mod tests {
         assert_eq!(m.options[1].section, Section { multi: false, name: b"S".to_vec(), prefix: vec![] });
         assert_eq!(m.commands[0].section, m.options[1].section);
     }
+
+    #[test]
+    fn manifest_file_fixture_and_wrong_types_test() {
+        let invalid = include_bytes!("../../tests/testdata/extension/manifest/invalid/manifest.json");
+        assert!(matches!(load(invalid, json::TEST_LIMITS), Outcome::Refused(_)));
+
+        let valid = include_bytes!("../../tests/testdata/extension/manifest/valid/manifest.json");
+        let Outcome::Loaded(m) = load(valid, json::TEST_LIMITS) else {
+            panic!("expected valid manifest to load");
+        };
+        // fields order: author, main, homepage, about, version, name, displayName, kind, license, taskTime, queueEvents, nzbgetMinVersion
+        assert_eq!(m.fields[0].as_deref(), Some(&b"Author's name"[..]));
+        assert_eq!(m.fields[1].as_deref(), Some(&b"email.py"[..]));
+        assert_eq!(m.fields[2].as_deref(), Some(&b"https://github"[..]));
+        assert_eq!(m.fields[3].as_deref(), Some(&b"About"[..]));
+        assert_eq!(m.fields[4].as_deref(), Some(&b"1.0.0"[..]));
+        assert_eq!(m.fields[5].as_deref(), Some(&b"email"[..]));
+        assert_eq!(m.fields[6].as_deref(), Some(&b"Email"[..]));
+        assert_eq!(m.fields[7].as_deref(), Some(&b"POST-PROCESSING"[..]));
+        assert_eq!(m.fields[8].as_deref(), Some(&b"GNU"[..]));
+        assert_eq!(m.fields[9].as_deref(), Some(&b"1:00:00"[..]));
+        assert_eq!(
+            m.fields[10].as_deref(),
+            Some(&b"NZB_ADDED, NZB_DOWNLOADED, FILE_DOWNLOADED"[..])
+        );
+        assert_eq!(m.fields[11].as_deref(), Some(&b"23.1"[..]));
+        assert_eq!(m.description, vec![b"Description".to_vec()]);
+        assert_eq!(
+            m.requirements,
+            vec![b"This script requires Python to be installed on your system.".to_vec()]
+        );
+
+        assert_eq!(m.options.len(), 3);
+        assert_eq!(m.options[0].name, b"sendMail");
+        assert_eq!(m.options[0].display_name, b"SendMail");
+        assert_eq!(
+            m.options[0].description,
+            vec![b"When to send the message.".to_vec()]
+        );
+        assert_eq!(m.options[0].value, Select::String(b"Always".to_vec()));
+        assert_eq!(
+            m.options[0].select,
+            vec![
+                Select::String(b"Always".to_vec()),
+                Select::String(b"OnFailure".to_vec())
+            ]
+        );
+        assert_eq!(m.options[1].name, b"port");
+        assert_eq!(m.options[1].display_name, b"Port");
+        assert_eq!(m.options[1].value, Select::Number(25.0));
+        assert_eq!(
+            m.options[1].select,
+            vec![Select::Number(1.0), Select::Number(65535.0)]
+        );
+        assert_eq!(m.options[2].name, b"Category");
+        assert_eq!(m.options[2].section.name, b"Categories");
+
+        assert_eq!(m.commands.len(), 2);
+        assert_eq!(m.commands[0].name, b"connectionTest");
+        assert_eq!(m.commands[0].action, b"Send");
+        assert_eq!(m.commands[0].display_name, b"ConnectionTest");
+        assert_eq!(m.commands[1].name, b"connectionTestTask");
+        assert_eq!(m.commands[1].action, b"SendToTask");
+        assert_eq!(m.commands[1].section.name, b"Feeds");
+
+        assert_eq!(m.sections.len(), 2);
+        assert_eq!(
+            m.sections[0],
+            Section {
+                multi: true,
+                name: b"Categories".to_vec(),
+                prefix: b"Category".to_vec()
+            }
+        );
+        assert_eq!(
+            m.sections[1],
+            Section {
+                multi: false,
+                name: b"Feeds".to_vec(),
+                prefix: b"Feed".to_vec()
+            }
+        );
+
+        // ManifestWrongTypesTest
+        let valid_str = std::str::from_utf8(valid).unwrap();
+        let pos = valid_str.find("\"commands\"").unwrap();
+        let bad_commands = format!(
+            "{}\"commands\": [\"a\"], \"x-replaced\"{}",
+            &valid_str[..pos],
+            &valid_str[pos + 10..]
+        );
+        assert_eq!(load(b"[]", json::TEST_LIMITS), Outcome::NotObject);
+        assert_eq!(load(b"\"x\"", json::TEST_LIMITS), Outcome::NotObject);
+        assert!(matches!(
+            load(bad_commands.as_bytes(), json::TEST_LIMITS),
+            Outcome::ElementNotObject(_)
+        ));
+    }
 }

@@ -577,4 +577,265 @@ mod tests {
         assert!(!looks_like_camel_case_title(b"ABCDEF"));
         assert!(!looks_like_camel_case_title(b"xKRTvErc"));
     }
+
+    #[test]
+    fn deobfuscation_full_suite_port_from_cpp() {
+        obfuscated(
+            &[
+                "2c0837e5fa42c8cfb5d5e583168a2af4.10",
+                "5KzdcWdGVGUG83Q9jv8KXht4O2k57w.mkv",
+                "2c0837e5fa42c8cfb5d5e583168a2af4.mkv",
+                "a4c7d1f239b71a.a1c0a8b1790e65c9430d5a601037a4.7893",
+                "a1b2c3d4e5f678.901234567890abcdef01234567890123.4567",
+                "abc.xyz.a1b2c3d4e5f678.mkv",
+                "b00bs.a1b2c3d4e5f678.mkv",
+                "ac4rcq47pkqt4flatz2xfac4rcq47pkqt4flatz2xf4567",
+                "yfjEpzFbQommamTW",
+                "MQHeRbSCIoPs",
+                "n1iY94U6fTpMVY9GPD",
+                "nzqymzflnjiyztgyntcynzzytq",
+                "abcdef0123456789abcdef.r000",
+                "abcdef0123456789abcdef.mkv.015",
+                "abcdef0123456789abcdef.015",
+                "a1b2c3d4e5f6789.rar",
+                "a1b2c3d4e5f6789-abc.rar",
+                "a1b2c3d4e5f6789a.mkv",
+                "Backup_12345S67-89",
+                "Backup_1234567890S01-02.mkv",
+                "123456_78",
+                "987654_32.mkv",
+                "File-0123456789ab.cafe",
+                "HFg3BYe1unWxVw.mkv",
+                "l5PcmaKxDxcUaSM",
+                "abcdefghij12",
+                "HFg3BYe1unWxVw-release",
+                "xY7z8K9mN2pQ3rS4t-group",
+                "a1b2c3d4e5f6-group",
+                "HFg3BYe.1unWxVw",
+                "HFg3BYe-1unWxVw",
+                "HFg3BYe_1unWxVw",
+                "deadbeefcafe1234",
+                "1234567890123456",
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+                "abcdef0123456789",
+                "Movie9999Extended",
+                "BCDFGHJKLMNP.mkv",
+                "QWRTZPSDFGHJ.mkv",
+                "tag.HFg3BYe.1unWxVw.mkv",
+                "Release.1234567890123456.mkv",
+                "aBcDeF1234567890abcdef1234.S01E01.mkv",
+                "abcdef1234567890abcdef1234567890.1080p.x264-GROUP",
+                "ABCDEF1234567890ABCDEF1234567890.S01E01.mkv",
+                "ABCDEFGHIJK001.mkv",
+                "abcdefghijklm001.mkv",
+                "ABCDEFGHIJ01.mkv",
+                "abcdefghijkl01.mkv",
+                "xK1RT5Ervcw.mkv",
+                "xK1RT5Er.mkv",
+                "[xK1RT5Ervcw].mkv",
+                "(xK1RT5Ervcw).mkv",
+                "Release.[deadbeefcafe1234].mkv",
+                "a4f9c2e1b8.mkv",
+                "k3m9p2x7q1.mkv",
+                "xKRTvErc.mkv",
+                "aBcDeFgH.mkv",
+                "bcdfghjklmnpq.mkv",
+                "qwrtypsdfghjklzxc.mkv",
+                "qwrtypsdfghjklzxcvbnmqwerty.mkv",
+                "18446744073709551615.mkv",
+                "1234567890123456.mkv",
+                "ABC",
+                "AbC-XyZ",
+                "ABC-XYZ",
+                "9e12c233ddf94502a46e47b1f0246f25 [10_78] _9e12c233ddf94502a46e47b1f0246f25.part09.rar_ yEnc",
+                "785d61fbd43d41e8aaa751f0c2481a1c [1_64] _785d61fbd43d41e8aaa751f0c2481a1c.par2_ yEnc",
+            ],
+            true,
+        );
+
+        obfuscated(
+            &[
+                "Not.obfuscated.rar",
+                "Movie2",
+                "SomeMovie",
+                "Movie",
+                "Movie1998",
+                "nameNZBGood_New_Sample_2012__DvdRip__CD1",
+                "Example_Feature_1999_1080p",
+                "-Abc12Abc12Abc12Abc12Abc12Abc12Abc12Abc12Abc12Abc12Abc12Abc12!",
+                "a1b2c3d4e5f678.901234567890abcdef01234567890123.rar",
+                "a1b2c3d4e5f678.901234567890abcdef01234567890123.r00",
+                "2fpJZyw12WSJz8JunjkxpZcw0XIZKKMP.7z.15",
+                "2fpJZyw12WSJz8JunjkxpZcw0XIZKKMP.7z.015",
+                "a1b2c3d4e5f678.901234567890abcdef01234567890123.zip",
+                "a1b2c3d4e5f678.901234567890abcdef01234567890123.par2",
+                "ac4rcq47pkqt4flatz2xf.rar",
+                "2fpJZyw12WSJz8JunjkxpZcw0XIZKKMP.7z.01",
+                "abcdef0123456789abcdef.7z",
+                "abcdef0123456789abcdef.7z.15",
+                "abcdef0123456789abcdef.7z.015",
+                "abcdef0123456789abcdef.rar",
+                "abcdef0123456789abcdef.zip",
+                "abcdef0123456789abcdef.par2",
+                "abcdef0123456789abcdef.r00",
+                "abcdef0123456789abcdef.RAR",
+                "abcdef0123456789abcdef.PAR2",
+                "abcdef0123456789abcdef.s00",
+                "abcdef0123456789abcdef.z99",
+                "abcdef0123456789abcdef.gz",
+                "abcdef0123456789abcdef.tar",
+                "abcdef0123456789abcdef.sfv",
+                "a1b2c3d4e5f6789a.rar",
+                "ac4rcq47pkqt4flatz2xf.z00",
+                "ac4rcq47pkqt4flatz2xf.s99",
+                "ac4rcq47pkqt4flatz2xf.r50",
+                "Backup_1234S67-89",
+                "Backup_Series.S01E01",
+                "12345_78",
+                "2024_2025",
+                "01_02_03",
+                "2012",
+                "300",
+                "1917",
+                "9",
+                "21",
+                "CamelCaseTitle",
+                "TigerManTwo",
+                "CamelCase1999",
+                "Some-Movie",
+                "The-Movie",
+                "Strike4Force2",
+                "Strike4Force",
+                "Rise4Glory",
+                "Show.2024.01.02.1080p.x264-Group",
+                "Show.2024.S01E01.1080p.WEB-DL.x264-Group",
+                "NightHawk2022",
+                "Sentinel2024",
+                "Champion2000",
+                "Spartan2004",
+                "TigerOnTheRun",
+                "BattleInBerlin",
+                "ChaseToNowhere",
+                "RunOfTheMill",
+                "FallAtDawn",
+                "TigerOnTheRun2024",
+                "BattleInBerlin2023",
+                "xyz",
+                "The.Show.Name.mkv",
+                "The_Last_Of_The_Words",
+                "StarTrekIntoDarkness",
+                "Movie2024Extended",
+                "Rise4Glory2023Fall",
+                "abcdef0123456789abcdef.part01.rar",
+                "abcdef0123456789abcdef.part123.par2",
+                "abcdef0123456789abcdef.vol00+01.par2",
+                "abcdef0123456789abcdef.vol10+20.par2",
+                "american.gangster.mkv",
+                "Fahrenheit.451.mkv",
+                "SpiderManNoWayHome.mkv",
+                "MissionImpossibleIII.mkv",
+                "INTERSTELLAR.mkv",
+                "History.of.telecommunications.mkv",
+                "Documentary.about.counterrevolutionary.theme.mkv",
+                "Doku.kraftfahrzeugversicherung.mkv",
+                "Doku.geschwindigkeitsbegrenzung.mkv",
+                "Release.2024.01.02.mkv",
+                "Show.2024.1080pRemux.mkv",
+                "Show.2024.1080pBluRay.mkv",
+                "Movie.2024.1080p.hevc10bit.mkv",
+                "Movie.2024.1080p.x264bluray.mkv",
+                "Show.720p.dts51audio.mkv",
+                "Title.2024.webdl2024.mkv",
+                "LIGHTSWITCH.mkv",
+                "BLACKKNIGHTS.mkv",
+                "PSYCHOPATHS.mkv",
+                "CYBERCRYPTS.mkv",
+                "FLIGHTPATHS.mkv",
+                "iPhone13Pro.mkv",
+                "iPhoneSE.mkv",
+                "macOSVentura.mkv",
+                "eBayPlus.mkv",
+                "Show.x264Hi10P.mkv",
+                "Show.S01E01E02.mkv",
+                "Show.S01E01v2.mkv",
+                "Movie.1080p60fps.mkv",
+                "Movie.1080p10bit.mkv",
+                "Doku.schlittschuhschritt.mkv",
+                "Doku.kraftfahrzeugpflicht.mkv",
+                "8492017364.mkv",
+                "1234567890.mkv",
+                "1712345678.mkv",
+                "Stream.1712345678.mkv",
+                "Book.9780141036144.epub",
+                "1917.mkv",
+                "2012.mkv",
+                "20240102.mkv",
+                "Sample.Show.Title.S01E05.Pies.And.Tarts.720p.WEB.h264-GRP",
+                "Sample.Show.Title.S01E05.Pies.And.Tarts.720p.WEB.h264-GRP.nzb",
+                "Secret.Agents.of.A.B.C.D.E.S07E03.PROPER.1080p.WEB.H264-GRP",
+                "Secret.Agents.of.A.B.C.D.E.S07E03.PROPER.1080p.WEB.H264-GRP.nzb",
+            ],
+            false,
+        );
+
+        assert_eq!(deobfuscate(b""), b"");
+        assert_eq!(deobfuscate(b"\"A\""), b"A");
+        assert_eq!(deobfuscate(b"Not obfuscated"), b"Not obfuscated");
+        assert_eq!(
+            deobfuscate(b"\"filename.mkv yEnc (1/1)"),
+            b"filename.mkv yEnc (1/1)"
+        );
+        assert_eq!(deobfuscate(b"filename.mkv yEnc\""), b"");
+        assert_eq!(
+            deobfuscate(b"Any.Show.2024.S01E01.Die.verborgene.Hand.GERMAN.5.1.DL.EAC3.2160p.WEB-DL.DV.HDR.x265-TvR.vol127+128.par2 (1/0)"),
+            b"Any.Show.2024.S01E01.Die.verborgene.Hand.GERMAN.5.1.DL.EAC3.2160p.WEB-DL.DV.HDR.x265-TvR.vol127+128.par2"
+        );
+        assert_eq!(
+            deobfuscate(b"[PRiVATE]-[WtFnZb]-[setup_app_-_reforced_161554.339115__54385_-1.bin]-[1/10] - \"\" yEnc  4288754174 (1/8377)"),
+            b"setup_app_-_reforced_161554.339115__54385_-1.bin"
+        );
+        assert_eq!(
+            deobfuscate(b"[PRiVATE]-[WtFnZb]-[1/series/Any.Show.S01E01.Pilot.1080p.DSNP.WEBRip.DDP.5.1.H.265.-EDGE2020.mkv]-[1/7] - \"\" yEnc  225628476 (1/315)"),
+            b"Any.Show.S01E01.Pilot.1080p.DSNP.WEBRip.DDP.5.1.H.265.-EDGE2020.mkv"
+        );
+        assert_eq!(
+            deobfuscate(b"[PRiVATE]-[WtFnZb]-[Movie_(1999)_DTS-HD_MA_5.1_-RELEASE_[TBoP].mkv]-[3/15] - \"\" yEnc 9876543210 (2/12345)"),
+            b"Movie_(1999)_DTS-HD_MA_5.1_-RELEASE_[TBoP].mkv"
+        );
+        assert_eq!(
+            deobfuscate(b"[PRiVATE]-[WtFnZb]-[00101.mpls]-[163/591] - \"\" yEnc (2/12345)"),
+            b"00101.mpls"
+        );
+        assert_eq!(
+            deobfuscate(b"[PRiVATE]-[WtFnZb]-[24]-[12/filename.ext] - \"\" yEnc (2/12345)"),
+            b"filename.ext"
+        );
+        assert_eq!(
+            deobfuscate(b"[PRiVATE]-[WtFnZb]-[24]-[filename] - \"\" yEnc (2/12345)"),
+            b"filename"
+        );
+        assert_eq!(
+            deobfuscate(b"[N3wZ] \\6aZWVk237607\\::[PRiVATE]-[WtFnZb]-[The.Show.S01E02.1080p.NF.WEB-DL.DDP5.1.Atmos.H.264-playWEB.mkv]-[2/8] - \"\" yEnc 2241590477 (1/3128)"),
+            b"The.Show.S01E02.1080p.NF.WEB-DL.DDP5.1.Atmos.H.264-playWEB.mkv"
+        );
+        assert_eq!(
+            deobfuscate(b"[N3wZ] _mC3M3U14246___[PRiVATE]-[EnCrYpTnZb]-[[SubsPlease].Some.file.name.-.20.(1080p).[64032D13].mkv]-[1_1] - \"\" yEnc  1454715270 (1/2030)"),
+            b"[SubsPlease].Some.file.name.-.20.(1080p).[64032D13].mkv"
+        );
+        assert_eq!(
+            deobfuscate(b"\"2c0837e5fa42c8cfb5d5e583168a2af4.10\" yEnc (1/111)"),
+            b"2c0837e5fa42c8cfb5d5e583168a2af4.10"
+        );
+        assert_eq!(
+            deobfuscate(b"[02/11] - \"Some.Show.S01E18.Terminal.EAC3.2.0.1080p.WEBRip.x265-iVy.part1.rar\" yEnc(1/144)"),
+            b"Some.Show.S01E18.Terminal.EAC3.2.0.1080p.WEBRip.x265-iVy.part1.rar"
+        );
+        assert_eq!(
+            deobfuscate(b"Re: Artist Band's The Album-Thanks much - Band, John - Artist - The Album.mp3 (2/3)"),
+            b"Artist Band's The Album-Thanks much - Band, John - Artist - The Album.mp3"
+        );
+        assert_eq!(deobfuscate(b"Re: A (2/3)"), b"A");
+        assert_eq!(deobfuscate(b"Re: A"), b"A");
+        assert_eq!(deobfuscate(b"[34/44] - id.bdmv yEnc (1/1) 104"), b"id.bdmv");
+    }
 }

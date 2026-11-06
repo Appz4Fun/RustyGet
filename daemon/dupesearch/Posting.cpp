@@ -20,12 +20,7 @@
 
 #include "nzbget.h"
 
-#include <map>
-#include <mutex>
 #include "Posting.h"
-#include "DupeUtil.h"
-#include "NzbReader.h"
-#include "FileSystem.h"
 #include "nzbget_rs.h"
 
 // rust/src/posting.rs
@@ -78,41 +73,14 @@ Posting::Sketch Posting::MakeSketch(const std::vector<std::string>& messageIds)
 
 bool Posting::SketchOfFile(const std::string& path, Sketch& sketch)
 {
-	static std::mutex mutex;
-	static std::map<std::string, std::pair<std::pair<long long, long long>, Sketch>> cache;
-
-	std::error_code ec;
-	fs::path filePath = fs::u8path(path);
-	auto modified = fs::last_write_time(filePath, ec);
-	long long size = ec ? -1 : (long long)fs::file_size(filePath, ec);
-	if (ec)
+	sketch.assign(SketchSize, 0);
+	size_t len = 0;
+	if (!nzbget_rs_posting_sketch_of_file(path.c_str(), sketch.data(), SketchSize, &len))
 	{
+		sketch.clear();
 		return false;
 	}
-	std::pair<long long, long long> stamp((long long)modified.time_since_epoch().count(), size);
-	{
-		std::lock_guard<std::mutex> guard(mutex);
-		auto it = cache.find(path);
-		if (it != cache.end() && it->second.first == stamp)
-		{
-			sketch = it->second.second;
-			return true;
-		}
-	}
-
-	NzbSummary summary;
-	if (!NzbReader::Parse(DupeUtil::ReadAll(path), summary))
-	{
-		return false;
-	}
-	sketch = MakeSketch(summary.messageIds);
-
-	std::lock_guard<std::mutex> guard(mutex);
-	if (cache.size() > 4096)
-	{
-		cache.clear();
-	}
-	cache[path] = { stamp, sketch };
+	sketch.resize(len);
 	return true;
 }
 

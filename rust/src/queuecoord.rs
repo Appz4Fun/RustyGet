@@ -1187,4 +1187,42 @@ mod tests {
         merge_counters(&mut d, &s);
         assert_eq!((d.file_count, d.size, d.min_time, d.max_time), (5, 300, 40, 80));
     }
+
+    #[test]
+    fn propagation_wait_disabled_test() {
+        let now: i64 = 1_760_000_000;
+        assert!(!is_propagation_wait(now, 0, now));
+        assert!(!is_propagation_wait(now + 60, 0, now));
+    }
+
+    #[test]
+    fn propagation_wait_test() {
+        let now: i64 = 1_760_000_000;
+        let delay: i32 = 15 * 60;
+
+        // posted just now or within the delay: held back
+        assert!(is_propagation_wait(now, delay, now));
+        assert!(is_propagation_wait(now - 14 * 60, delay, now));
+        assert!(is_propagation_wait(now - delay as i64, delay, now));
+
+        // posted before the delay: downloadable
+        assert!(!is_propagation_wait(now - delay as i64 - 1, delay, now));
+        assert!(!is_propagation_wait(now - 3600, delay, now));
+    }
+
+    #[test]
+    fn propagation_wait_per_file_test() {
+        let now: i64 = 1_760_000_000;
+        let delay: i32 = 15 * 60;
+        let mkv_posted = now - 3600;
+        let nfo_posted = now - 60;
+
+        assert!(!is_propagation_wait(mkv_posted, delay, now));
+        assert!(is_propagation_wait(nfo_posted, delay, now));
+        assert!(!is_propagation_wait(
+            nfo_posted,
+            delay,
+            nfo_posted + delay as i64 + 1
+        ));
+    }
 }

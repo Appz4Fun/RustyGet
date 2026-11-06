@@ -1,6 +1,6 @@
 //! Posting (daemon/dupesearch/Posting.cpp): which search results are one
-//! posting, the order to fetch postings in, and sketches of postings' articles.
-//! SketchOfFile (file reading and its cache) stays C++.
+//! posting, the order to fetch postings in, and sketches of postings' articles
+//! (including `sketch_of_file` and its mtime+size cache).
 
 /// Listings of one size posted this close together are one posting on several indexers.
 pub const RELIST_WINDOW_SEC: i64 = 120;
@@ -156,6 +156,99 @@ pub fn order_postings(candidates: &[Listing], pick_bytes: i64, max_postings: i32
     firsts
 }
 
+type SketchCacheMap = std::collections::HashMap<
+    std::path::PathBuf,
+    ((std::time::SystemTime, u64), Vec<u32>),
+>;
+
+static SKETCH_CACHE: std::sync::Mutex<Option<SketchCacheMap>> = std::sync::Mutex::new(None);
+
+/// `Posting::SketchOfFile`: reads an NZB file, parses its summary, and returns
+/// its 64-hash article sketch, caching by `(path, mtime, file_size)`.
+pub fn sketch_of_file(path: &std::path::Path) -> Option<Vec<u32>> {
+    if path.as_os_str().is_empty() {
+        return None;
+    }
+    let stamp = std::fs::metadata(path).ok().and_then(|m| {
+        if m.is_file() {
+            Some((m.modified().ok()?, m.len()))
+        } else {
+            None
+        }
+    });
+    if let Some(st) = stamp {
+        if let Ok(mut guard) = SKETCH_CACHE.lock() {
+            let map = guard.get_or_insert_with(std::collections::HashMap::new);
+            if let Some((cached_st, cached_sketch)) = map.get(path) {
+                if *cached_st == st {
+                    return Some(cached_sketch.clone());
+                }
+            }
+        }
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let summary = crate::dupesearch_nzb::parse_nzb_summary(&bytes)?;
+    let sketch = make_sketch(summary.message_ids.iter().map(|v| v.as_slice()));
+    if let Some(st) = stamp {
+        if let Ok(mut guard) = SKETCH_CACHE.lock() {
+            let map = guard.get_or_insert_with(std::collections::HashMap::new);
+            if map.len() > 4096 {
+                map.clear();
+            }
+            map.insert(path.to_path_buf(), (st, sketch.clone()));
+        }
+    }
+    Some(sketch)
+}
+
+#[cfg(unix)]
+unsafe fn c_path_to_path(path: *const std::ffi::c_char) -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    if path.is_null() {
+        return None;
+    }
+    let bytes = std::ffi::CStr::from_ptr(path).to_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
+}
+
+#[cfg(not(unix))]
+unsafe fn c_path_to_path(path: *const std::ffi::c_char) -> Option<std::path::PathBuf> {
+    if path.is_null() {
+        return None;
+    }
+    let s = std::ffi::CStr::from_ptr(path).to_string_lossy();
+    if s.is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(s.as_ref()))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_posting_sketch_of_file(
+    path: *const std::ffi::c_char,
+    out: *mut u32,
+    cap: usize,
+    out_len: *mut usize,
+) -> std::ffi::c_int {
+    let Some(path_buf) = c_path_to_path(path) else {
+        return 0;
+    };
+    let Some(sketch) = sketch_of_file(&path_buf) else {
+        return 0;
+    };
+    let n = sketch.len().min(cap);
+    if !out.is_null() && n > 0 {
+        std::ptr::copy_nonoverlapping(sketch.as_ptr(), out, n);
+    }
+    if !out_len.is_null() {
+        *out_len = n;
+    }
+    1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,5 +279,90 @@ mod tests {
         assert_eq!(order_postings(&c, 100, 0), vec![vec![1, 0], vec![2], vec![3]]);
         assert_eq!(order_postings(&c, 100, 1).len(), 3);
         assert!(listing_mismatch(100, 103) && !listing_mismatch(100, 102) && !listing_mismatch(0, 5));
+    }
+
+    #[test]
+    fn posting_full_suite_port_from_cpp() {
+        let make_ids = |prefix: &str, count: usize, from: usize| -> Vec<Vec<u8>> {
+            let mut ids: Vec<Vec<u8>> = (from..from + count)
+                .map(|i| format!("{prefix}{i}@x").into_bytes())
+                .collect();
+            ids.sort();
+            ids
+        };
+
+        // PostingSketchTest
+        let a = make_ids("a", 6000, 0);
+        let mut reupload = make_ids("a", 5996, 2);
+        reupload.push(b"z1@x".to_vec());
+        reupload.push(b"z2@x".to_vec());
+        reupload.sort();
+        let other = make_ids("b", 6000, 0);
+
+        let sk_a = make_sketch(a.iter().map(|v| v.as_slice()));
+        let sk_re = make_sketch(reupload.iter().map(|v| v.as_slice()));
+        let sk_other = make_sketch(other.iter().map(|v| v.as_slice()));
+        assert_eq!(sk_a.len(), 64);
+        assert!(same_sketch(&sk_a, &sk_re));
+        assert!(!same_sketch(&sk_a, &sk_other));
+
+        let tiny = [b"t1@x".as_slice(), b"t2@x".as_slice()];
+        let sk_tiny = make_sketch(tiny);
+        assert!(same_sketch(&sk_tiny, &sk_tiny));
+        assert!(!same_sketch(&sk_tiny, &[]));
+        assert!(!same_sketch(&[], &[]));
+
+        // PostingSamePostingTest
+        let a1000 = make_ids("a", 1000, 0);
+        let a980 = make_ids("a", 980, 20);
+        let mut partial = make_ids("a", 5, 0);
+        partial.extend(make_ids("c", 995, 0));
+        partial.sort();
+        let b1000 = make_ids("b", 1000, 0);
+
+        fn refs(v: &[Vec<u8>]) -> Vec<&[u8]> {
+            v.iter().map(|s| s.as_slice()).collect()
+        }
+        assert!(same_posting(&refs(&a1000), &refs(&a1000)));
+        assert!(same_posting(&refs(&a1000), &refs(&a980)));
+        assert!(!same_posting(&refs(&a1000), &refs(&partial)));
+        assert!(!same_posting(&refs(&a1000), &refs(&b1000)));
+
+        // PostingSketchOfFileTest
+        let path = std::env::temp_dir().join(format!(
+            "nzbget-sketch-of-file-rust-{}.nzb",
+            std::process::id()
+        ));
+        let write_nzb = |prefix: &str| {
+            let mut xml = String::from(
+                "<?xml version=\"1.0\"?><nzb><file poster=\"p\" subject=\"&quot;a.mkv&quot;\"><segments>",
+            );
+            for i in 0..30 {
+                xml.push_str(&format!(
+                    "<segment bytes=\"10\" number=\"{}\">{prefix}{i}@x</segment>",
+                    i + 1
+                ));
+            }
+            xml.push_str("</segments></file></nzb>");
+            std::fs::write(&path, xml).unwrap();
+        };
+        write_nzb("a");
+        let first = sketch_of_file(&path).unwrap();
+        assert_eq!(first.len(), 30);
+        let a30 = make_ids("a", 30, 0);
+        assert!(same_sketch(
+            &first,
+            &make_sketch(a30.iter().map(|v| v.as_slice()))
+        ));
+
+        write_nzb("bb");
+        let second = sketch_of_file(&path).unwrap();
+        assert!(!same_sketch(&first, &second));
+
+        let _ = std::fs::remove_file(&path);
+        assert!(sketch_of_file(&path).is_none());
+        std::fs::write(&path, "<html>not an nzb").unwrap();
+        assert!(sketch_of_file(&path).is_none());
+        let _ = std::fs::remove_file(&path);
     }
 }

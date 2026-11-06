@@ -70,6 +70,11 @@ unsafe extern "C" {
     fn __ctype_tolower_loc() -> *const *const std::ffi::c_int;
 }
 
+unsafe extern "C" {
+    fn isspace(ch: std::ffi::c_int) -> std::ffi::c_int;
+    fn isdigit(ch: std::ffi::c_int) -> std::ffi::c_int;
+}
+
 /// Keep C locale case folding used by DupeUtil::Lower, including unsigned bytes.
 pub fn is_par_name(name: &[u8]) -> bool {
     if name.len() < 5 {
@@ -2187,14 +2192,182 @@ fn normalize_xml_attr_ws(s: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(out)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum XmlSourceEncoding {
+    ByteStream,
+    Utf16Le,
+    Utf16Be,
+    Utf32Le,
+    Utf32Be,
+}
+
+fn transcode_xml_input(xml: &[u8]) -> Option<(std::borrow::Cow<'_, [u8]>, XmlSourceEncoding)> {
+    if xml.is_empty() {
+        return None;
+    }
+    if xml.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        return Some((
+            std::borrow::Cow::Borrowed(&xml[3..]),
+            XmlSourceEncoding::ByteStream,
+        ));
+    }
+    if xml.starts_with(&[0xFF, 0xFE, 0x00, 0x00])
+        || (xml.len() >= 4 && xml[0] != 0 && xml[1] == 0 && xml[2] == 0 && xml[3] == 0)
+    {
+        if xml.len() % 4 != 0 {
+            return None;
+        }
+        let body = if xml.starts_with(&[0xFF, 0xFE, 0x00, 0x00]) {
+            &xml[4..]
+        } else {
+            xml
+        };
+        let mut out = String::with_capacity(body.len() / 4);
+        for chunk in body.chunks_exact(4) {
+            let code = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            out.push(char::from_u32(code)?);
+        }
+        return Some((
+            std::borrow::Cow::Owned(out.into_bytes()),
+            XmlSourceEncoding::Utf32Le,
+        ));
+    }
+    if xml.starts_with(&[0x00, 0x00, 0xFE, 0xFF])
+        || (xml.len() >= 4 && xml[0] == 0 && xml[1] == 0 && xml[2] == 0 && xml[3] != 0)
+    {
+        if xml.len() % 4 != 0 {
+            return None;
+        }
+        let body = if xml.starts_with(&[0x00, 0x00, 0xFE, 0xFF]) {
+            &xml[4..]
+        } else {
+            xml
+        };
+        let mut out = String::with_capacity(body.len() / 4);
+        for chunk in body.chunks_exact(4) {
+            let code = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            out.push(char::from_u32(code)?);
+        }
+        return Some((
+            std::borrow::Cow::Owned(out.into_bytes()),
+            XmlSourceEncoding::Utf32Be,
+        ));
+    }
+    if xml.starts_with(&[0xFF, 0xFE])
+        || (xml.len() >= 4 && xml[0] != 0 && xml[1] == 0 && xml[2] != 0 && xml[3] == 0)
+    {
+        if xml.len() % 2 != 0 {
+            return None;
+        }
+        let body = if xml.starts_with(&[0xFF, 0xFE]) {
+            &xml[2..]
+        } else {
+            xml
+        };
+        let mut out = String::with_capacity(body.len() / 2);
+        let iter = body
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]));
+        for res in char::decode_utf16(iter) {
+            out.push(res.ok()?);
+        }
+        return Some((
+            std::borrow::Cow::Owned(out.into_bytes()),
+            XmlSourceEncoding::Utf16Le,
+        ));
+    }
+    if xml.starts_with(&[0xFE, 0xFF])
+        || (xml.len() >= 4 && xml[0] == 0 && xml[1] != 0 && xml[2] == 0 && xml[3] != 0)
+    {
+        if xml.len() % 2 != 0 {
+            return None;
+        }
+        let body = if xml.starts_with(&[0xFE, 0xFF]) {
+            &xml[2..]
+        } else {
+            xml
+        };
+        let mut out = String::with_capacity(body.len() / 2);
+        let iter = body
+            .chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]));
+        for res in char::decode_utf16(iter) {
+            out.push(res.ok()?);
+        }
+        return Some((
+            std::borrow::Cow::Owned(out.into_bytes()),
+            XmlSourceEncoding::Utf16Be,
+        ));
+    }
+    Some((
+        std::borrow::Cow::Borrowed(xml),
+        XmlSourceEncoding::ByteStream,
+    ))
+}
+
+fn validate_xml_decl_encoding(
+    decl: &quick_xml::events::BytesDecl<'_>,
+    source_enc: XmlSourceEncoding,
+) -> bool {
+    let Some(enc_res) = decl.encoding() else {
+        return true;
+    };
+    let Ok(enc) = enc_res else {
+        return false;
+    };
+    let lower: Vec<u8> = enc.iter().map(|b| b.to_ascii_lowercase()).collect();
+    match source_enc {
+        XmlSourceEncoding::Utf16Le => matches!(
+            lower.as_slice(),
+            b"utf-16" | b"utf-16le" | b"ucs-2" | b"iso-10646-ucs-2" | b"unicode"
+        ),
+        XmlSourceEncoding::Utf16Be => matches!(
+            lower.as_slice(),
+            b"utf-16" | b"utf-16be" | b"ucs-2" | b"iso-10646-ucs-2" | b"unicode"
+        ),
+        XmlSourceEncoding::Utf32Le => matches!(
+            lower.as_slice(),
+            b"utf-32" | b"utf-32le" | b"ucs-4" | b"iso-10646-ucs-4"
+        ),
+        XmlSourceEncoding::Utf32Be => matches!(
+            lower.as_slice(),
+            b"utf-32" | b"utf-32be" | b"ucs-4" | b"iso-10646-ucs-4"
+        ),
+        XmlSourceEncoding::ByteStream => !matches!(
+            lower.as_slice(),
+            b"utf-16"
+                | b"utf-16le"
+                | b"utf-16be"
+                | b"ucs-2"
+                | b"iso-10646-ucs-2"
+                | b"unicode"
+                | b"utf-32"
+                | b"utf-32le"
+                | b"utf-32be"
+                | b"ucs-4"
+                | b"iso-10646-ucs-4"
+        ),
+    }
+}
+
+fn decode_xml_bytes<'a>(
+    raw: &'a [u8],
+    decoder: quick_xml::Decoder,
+    source_enc: XmlSourceEncoding,
+) -> Option<std::borrow::Cow<'a, str>> {
+    if source_enc == XmlSourceEncoding::ByteStream {
+        decoder.decode(raw).ok()
+    } else {
+        std::str::from_utf8(raw).ok().map(std::borrow::Cow::Borrowed)
+    }
+}
+
 /// Parses a Newznab RSS/XML response (`Newznab::ParseResponse` in `Newznab.cpp`),
 /// rejecting empty documents, unclosed elements, and DTD `<!ENTITY` declarations.
 pub fn parse_newznab_response(xml: &[u8]) -> Option<NewznabPage> {
     use quick_xml::events::Event;
-    if xml.is_empty() {
-        return None;
-    }
-    let mut reader = quick_xml::Reader::from_reader(xml);
+    let (xml_utf8, source_enc) = transcode_xml_input(xml)?;
+    let mut reader = quick_xml::Reader::from_reader(xml_utf8.as_ref());
     let mut page = NewznabPage::default();
     let mut item = NewznabResult::default();
     let mut text = Vec::new();
@@ -2216,7 +2389,7 @@ pub fn parse_newznab_response(xml: &[u8]) -> Option<NewznabPage> {
                 let mut attrs = Vec::new();
                 for attr_res in e.attributes() {
                     let a = attr_res.ok()?;
-                    let decoded = reader.decoder().decode(&a.value).ok()?;
+                    let decoded = decode_xml_bytes(&a.value, reader.decoder(), source_enc)?;
                     let norm = normalize_xml_attr_ws(&decoded);
                     let unescaped = quick_xml::escape::unescape(&norm).ok()?;
                     attrs.push((
@@ -2268,7 +2441,7 @@ pub fn parse_newznab_response(xml: &[u8]) -> Option<NewznabPage> {
                 let mut attrs = Vec::new();
                 for attr_res in e.attributes() {
                     let a = attr_res.ok()?;
-                    let decoded = reader.decoder().decode(&a.value).ok()?;
+                    let decoded = decode_xml_bytes(&a.value, reader.decoder(), source_enc)?;
                     let norm = normalize_xml_attr_ws(&decoded);
                     let unescaped = quick_xml::escape::unescape(&norm).ok()?;
                     attrs.push((
@@ -2329,7 +2502,7 @@ pub fn parse_newznab_response(xml: &[u8]) -> Option<NewznabPage> {
                 text.clear();
             }
             Ok(Event::Text(t)) => {
-                let decoded = t.decode().ok()?;
+                let decoded = decode_xml_bytes(t.as_ref(), reader.decoder(), source_enc)?;
                 let norm = normalize_xml_eol(&decoded);
                 if depth == 0 {
                     let rest = norm.strip_prefix('\u{feff}').unwrap_or(&norm);
@@ -2344,7 +2517,7 @@ pub fn parse_newznab_response(xml: &[u8]) -> Option<NewznabPage> {
                 if depth == 0 {
                     return None;
                 }
-                let decoded = c.decode().ok()?;
+                let decoded = decode_xml_bytes(c.as_ref(), reader.decoder(), source_enc)?;
                 let norm = normalize_xml_eol(&decoded);
                 text.extend_from_slice(norm.as_bytes());
             }
@@ -2370,8 +2543,8 @@ pub fn parse_newznab_response(xml: &[u8]) -> Option<NewznabPage> {
                     return None;
                 }
             }
-            Ok(Event::Decl(_)) => {
-                if saw_root {
+            Ok(Event::Decl(ref decl)) => {
+                if saw_root || !validate_xml_decl_encoding(decl, source_enc) {
                     return None;
                 }
             }
@@ -2471,6 +2644,641 @@ pub unsafe extern "C" fn nzbget_rs_newznab_parse_response(
                 item.date,
                 item.indexer.as_ptr(),
                 item.indexer.len(),
+            );
+        }
+    }
+    1
+}
+
+/// First segment of a file in an NZB summary (`NzbSummary::Head` in `NzbReader.h`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NzbSummaryHead {
+    pub name: Vec<u8>,
+    pub id: Vec<u8>,
+    pub bytes: i64,
+}
+
+/// Parsed NZB summary (`NzbSummary` in `NzbReader.h`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NzbSummaryData {
+    pub poster: Vec<u8>,
+    pub groups: std::collections::BTreeSet<Vec<u8>>,
+    pub meta: std::collections::BTreeMap<Vec<u8>, Vec<u8>>,
+    pub filenames: std::collections::BTreeSet<Vec<u8>>,
+    pub message_ids: Vec<Vec<u8>>,
+    pub data_message_ids: Vec<Vec<u8>>,
+    pub heads: Vec<NzbSummaryHead>,
+    pub main_name: Vec<u8>,
+    pub par_index: NzbSummaryHead,
+    pub recovery_bytes: Vec<u64>,
+    pub files: i32,
+    pub total_bytes: i64,
+    pub data_files: i32,
+    pub data_bytes: i64,
+    pub listed_parts: u64,
+    pub declared_parts: u64,
+    pub data_listed_parts: u64,
+    pub data_declared_parts: u64,
+    pub article_bytes: u64,
+    pub geometry_valid: bool,
+}
+
+impl NzbSummaryData {
+    /// 16-byte lowercase hex FNV-1a fingerprint over `message_ids` (`NzbSummary::Fingerprint`).
+    pub fn fingerprint(&self) -> Vec<u8> {
+        let refs: Vec<&[u8]> = self.message_ids.iter().map(|v| v.as_slice()).collect();
+        fnv1a_fingerprint(&refs).to_vec()
+    }
+}
+
+fn declared_parts_c_locale(subject: &[u8]) -> i32 {
+    let s = &subject[..subject.iter().position(|&b| b == 0).unwrap_or(subject.len())];
+    let is_sp = |b: u8| unsafe { isspace(std::ffi::c_int::from(b)) != 0 };
+    let is_dg = |b: u8| unsafe { isdigit(std::ffi::c_int::from(b)) != 0 };
+    let char_val = |b: u8| (b as std::ffi::c_char) as i32;
+
+    let mut end = s.len();
+    while end > 0 && is_sp(s[end - 1]) {
+        end -= 1;
+    }
+    if end == 0 || s[end - 1] != b')' {
+        return 0;
+    }
+    let mut p = end - 1;
+    let mut total: i64 = 0;
+    let mut scale: i64 = 1;
+    while p > 0 && is_dg(s[p - 1]) && scale <= 1_000_000 {
+        p -= 1;
+        total += (char_val(s[p]) - b'0' as i32) as i64 * scale;
+        scale *= 10;
+    }
+    if scale == 1 || p == 0 || s[p - 1] != b'/' {
+        return 0;
+    }
+    p -= 1;
+    let digits = p;
+    while p > 0 && is_dg(s[p - 1]) {
+        p -= 1;
+    }
+    if p == digits || p == 0 || s[p - 1] != b'(' {
+        return 0;
+    }
+    if total <= 1_000_000 {
+        total as i32
+    } else {
+        0
+    }
+}
+
+fn par_filename_fold(byte: u8) -> u8 {
+    let ch = (byte as std::ffi::c_char) as std::ffi::c_int;
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        let table = unsafe { *__ctype_tolower_loc() };
+        unsafe { *table.offset(ch as isize) as u8 }
+    }
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+    {
+        if ch < 0 {
+            ch as u8
+        } else {
+            unsafe { tolower(ch) as u8 }
+        }
+    }
+}
+
+fn cstring_trunc(bytes: &[u8]) -> std::ffi::CString {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    std::ffi::CString::new(&bytes[..end]).unwrap_or_default()
+}
+
+/// Parses an NZB XML document into an `NzbSummaryData` (`NzbReader::Parse` in `NzbReader.cpp`).
+pub fn parse_nzb_summary(xml: &[u8]) -> Option<NzbSummaryData> {
+    use quick_xml::events::Event;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let (xml_utf8, source_enc) = transcode_xml_input(xml)?;
+    let mut reader = quick_xml::Reader::from_reader(xml_utf8.as_ref());
+    let mut out = NzbSummaryData {
+        geometry_valid: true,
+        ..Default::default()
+    };
+    let mut sizes: BTreeMap<Vec<u8>, i64> = BTreeMap::new();
+    let mut ids: BTreeSet<Vec<u8>> = BTreeSet::new();
+    let mut data_ids: BTreeSet<Vec<u8>> = BTreeSet::new();
+    let mut article_sizes: Vec<u64> = Vec::new();
+    let mut parity_heads: Vec<NzbSummaryHead> = Vec::new();
+    let mut data_files: i32 = 0;
+    let mut data_bytes: i64 = 0;
+    let mut listed_parts: u64 = 0;
+    let mut declared_parts: u64 = 0;
+    let mut data_listed_parts: u64 = 0;
+    let mut data_declared_parts: u64 = 0;
+    let mut geometry_valid = true;
+
+    let mut m_text: Vec<u8> = Vec::new();
+    let mut m_meta_type: Vec<u8> = Vec::new();
+    let mut m_name: Vec<u8> = Vec::new();
+    let mut m_subject: Vec<u8> = Vec::new();
+    let mut m_first_id: Vec<u8> = Vec::new();
+    let mut m_segments: Vec<(i64, i64, Vec<u8>)> = Vec::new();
+    let mut m_parts: Vec<(i64, i64)> = Vec::new();
+    let mut m_file_bytes: i64 = 0;
+    let mut m_valid_parts: usize = 0;
+    let mut m_seg_bytes: i64 = 0;
+    let mut m_seg_number: i64 = 0;
+    let mut m_in_file = false;
+    let mut m_in_segment = false;
+
+    let mut depth: i32 = 0;
+    let mut saw_root = false;
+    let mut root_closed = false;
+    let mut buf = Vec::new();
+
+    macro_rules! handle_start {
+        ($local:expr, $attrs:expr) => {{
+            let local_bytes: &[u8] = $local;
+            let attrs_slice: &[(Vec<u8>, Vec<u8>)] = $attrs;
+            m_text.clear();
+            let find_attr = |k: &[u8]| -> &[u8] {
+                attrs_slice
+                    .iter()
+                    .find(|(ak, _)| ak == k)
+                    .map(|(_, av)| av.as_slice())
+                    .unwrap_or(b"")
+            };
+            match nzb_reader_classify_start_element(local_bytes, m_in_file) {
+                1 => {
+                    let ty = find_attr(b"type");
+                    if !ty.is_empty() {
+                        m_meta_type = dupe_util_lower(ty);
+                    }
+                }
+                2 => {
+                    out.files += 1;
+                    if out.poster.is_empty() {
+                        out.poster = find_attr(b"poster").to_vec();
+                    }
+                    let subj = find_attr(b"subject");
+                    let (s_start, s_end) = name_of_subject_range(subj);
+                    m_name = subj[s_start..s_end].to_vec();
+                    m_subject = subj.to_vec();
+                    m_first_id.clear();
+                    m_segments.clear();
+                    m_parts.clear();
+                    m_file_bytes = 0;
+                    m_valid_parts = 0;
+                    m_in_file = true;
+                }
+                3 => {
+                    m_seg_bytes = c_atoll_bytes(find_attr(b"bytes"));
+                    m_seg_number = c_atoll_bytes(find_attr(b"number"));
+                    m_in_segment = true;
+                }
+                _ => {}
+            }
+        }};
+    }
+
+    macro_rules! finish_element {
+        ($local:expr) => {{
+            let local_bytes: &[u8] = $local;
+            match nzb_reader_classify_end_element(
+                local_bytes,
+                !m_meta_type.is_empty(),
+                m_in_segment,
+                m_in_file,
+            ) {
+                1 => {
+                    out.meta
+                        .insert(std::mem::take(&mut m_meta_type), trim_ascii_slice(&m_text));
+                }
+                2 => {
+                    let id = trim_ascii_slice(&m_text);
+                    m_segments.push((m_seg_number, m_seg_bytes, id));
+                    m_in_segment = false;
+                }
+                3 => {
+                    let group = trim_ascii_slice(&m_text);
+                    if !group.is_empty() {
+                        out.groups.insert(group);
+                    }
+                }
+                4 => {
+                    m_segments.sort_by_key(|s| s.0);
+                    let is_par = is_par_name(&m_name);
+                    let seg_len = m_segments.len();
+                    for i in 0..seg_len {
+                        if i + 1 < seg_len && m_segments[i + 1].0 == m_segments[i].0 {
+                            continue;
+                        }
+                        let (seg_num, seg_bytes, ref seg_id) = m_segments[i];
+                        m_parts.push((seg_num, seg_bytes));
+                        if !valid_message_id(seg_id) {
+                            if !is_par {
+                                geometry_valid = false;
+                            }
+                            continue;
+                        }
+                        let entry = sizes.entry(m_name.clone()).or_insert(0);
+                        *entry = entry.wrapping_add(seg_bytes);
+                        ids.insert(seg_id.clone());
+                        if !is_par {
+                            data_ids.insert(seg_id.clone());
+                        }
+                        m_valid_parts += 1;
+                        let (new_file_bytes, new_geom, push_art) =
+                            accum_segment_bytes(m_file_bytes, seg_bytes, is_par, geometry_valid);
+                        m_file_bytes = new_file_bytes;
+                        geometry_valid = new_geom;
+                        if push_art {
+                            article_sizes.push(seg_bytes as u64);
+                        }
+                        if seg_num == 1 {
+                            m_first_id = seg_id.clone();
+                        }
+                    }
+                    let count = declared_parts_c_locale(&m_subject);
+                    let (_file_listed, file_total) = crate::dupewatch::part_counts(
+                        &m_parts,
+                        if count > 0 { count as u32 } else { 0 },
+                        is_par,
+                    );
+                    listed_parts = listed_parts.wrapping_add(m_valid_parts as u64);
+                    declared_parts = declared_parts.wrapping_add(file_total);
+                    if !is_par {
+                        data_listed_parts = data_listed_parts.wrapping_add(m_valid_parts as u64);
+                        data_declared_parts = data_declared_parts.wrapping_add(file_total);
+                    }
+                    let (new_df, new_db, new_geom2, push_par_head, push_data_head) =
+                        accum_file_data_totals(
+                            is_par,
+                            m_file_bytes,
+                            m_first_id.is_empty(),
+                            data_files,
+                            data_bytes,
+                            geometry_valid,
+                        );
+                    data_files = new_df;
+                    data_bytes = new_db;
+                    geometry_valid = new_geom2;
+                    if push_par_head {
+                        parity_heads.push(NzbSummaryHead {
+                            name: m_name.clone(),
+                            id: m_first_id.clone(),
+                            bytes: m_file_bytes,
+                        });
+                    }
+                    if push_data_head {
+                        out.heads.push(NzbSummaryHead {
+                            name: m_name.clone(),
+                            id: m_first_id.clone(),
+                            bytes: m_file_bytes,
+                        });
+                    }
+                    m_in_file = false;
+                    m_in_segment = false;
+                }
+                _ => {}
+            }
+            m_text.clear();
+        }};
+    }
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                if root_closed {
+                    return None;
+                }
+                saw_root = true;
+                let mut attrs = Vec::new();
+                for attr_res in e.attributes() {
+                    let a = attr_res.ok()?;
+                    let decoded = decode_xml_bytes(&a.value, reader.decoder(), source_enc)?;
+                    let norm = normalize_xml_attr_ws(&decoded);
+                    let unescaped = quick_xml::escape::unescape(&norm).ok()?;
+                    attrs.push((
+                        a.key.local_name().as_ref().to_vec(),
+                        unescaped.into_owned().into_bytes(),
+                    ));
+                }
+                let local = e.local_name();
+                depth += 1;
+                handle_start!(local.as_ref(), &attrs);
+            }
+            Ok(Event::Empty(e)) => {
+                if root_closed {
+                    return None;
+                }
+                saw_root = true;
+                let mut attrs = Vec::new();
+                for attr_res in e.attributes() {
+                    let a = attr_res.ok()?;
+                    let decoded = decode_xml_bytes(&a.value, reader.decoder(), source_enc)?;
+                    let norm = normalize_xml_attr_ws(&decoded);
+                    let unescaped = quick_xml::escape::unescape(&norm).ok()?;
+                    attrs.push((
+                        a.key.local_name().as_ref().to_vec(),
+                        unescaped.into_owned().into_bytes(),
+                    ));
+                }
+                let local = e.local_name().as_ref().to_vec();
+                depth += 1;
+                handle_start!(&local, &attrs);
+                finish_element!(&local);
+                depth -= 1;
+                if depth == 0 {
+                    root_closed = true;
+                }
+            }
+            Ok(Event::Text(t)) => {
+                let decoded = decode_xml_bytes(t.as_ref(), reader.decoder(), source_enc)?;
+                let norm = normalize_xml_eol(&decoded);
+                if depth == 0 {
+                    let rest = norm.strip_prefix('\u{feff}').unwrap_or(&norm);
+                    if !rest.bytes().all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n')) {
+                        return None;
+                    }
+                } else {
+                    m_text.extend_from_slice(norm.as_bytes());
+                }
+            }
+            Ok(Event::CData(c)) => {
+                if depth == 0 {
+                    return None;
+                }
+                let decoded = decode_xml_bytes(c.as_ref(), reader.decoder(), source_enc)?;
+                let norm = normalize_xml_eol(&decoded);
+                m_text.extend_from_slice(norm.as_bytes());
+            }
+            Ok(Event::GeneralRef(r)) => {
+                if depth == 0 {
+                    return None;
+                }
+                let ent = match r.as_ref() {
+                    b"lt" => Some(b"<".to_vec()),
+                    b"gt" => Some(b">".to_vec()),
+                    b"amp" => Some(b"&".to_vec()),
+                    b"quot" => Some(b"\"".to_vec()),
+                    b"apos" => Some(b"'".to_vec()),
+                    _ => r
+                        .resolve_char_ref()
+                        .ok()
+                        .flatten()
+                        .map(|c| c.to_string().into_bytes()),
+                };
+                if let Some(bytes) = ent {
+                    m_text.extend_from_slice(&bytes);
+                } else {
+                    return None;
+                }
+            }
+            Ok(Event::Decl(ref decl)) => {
+                if saw_root || !validate_xml_decl_encoding(decl, source_enc) {
+                    return None;
+                }
+            }
+            Ok(Event::DocType(d)) => {
+                if saw_root || d.windows(8).any(|w| w.eq_ignore_ascii_case(b"<!entity")) {
+                    return None;
+                }
+            }
+            Ok(Event::End(e)) => {
+                let local = e.local_name().as_ref().to_vec();
+                finish_element!(&local);
+                depth -= 1;
+                if depth < 0 {
+                    return None;
+                }
+                if depth == 0 {
+                    root_closed = true;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => return None,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    if !(saw_root && root_closed && depth == 0) || out.files == 0 || ids.is_empty() {
+        return None;
+    }
+
+    out.listed_parts = listed_parts;
+    out.declared_parts = declared_parts;
+    out.data_listed_parts = data_listed_parts;
+    out.data_declared_parts = data_declared_parts;
+    if !article_sizes.is_empty() {
+        let mid = article_sizes.len() / 2;
+        let (_, median, _) = article_sizes.select_nth_unstable(mid);
+        out.article_bytes = *median;
+    }
+    out.message_ids = ids.into_iter().collect();
+    out.data_message_ids = data_ids.into_iter().collect();
+
+    for head in &parity_heads {
+        let head_c = cstring_trunc(&head.name);
+        if let Some((base_len, _blocks)) =
+            crate::parparser::parse_par_filename(head_c.as_bytes(), true, &par_filename_fold)
+        {
+            if base_len + 5 == head.name.len() {
+                if !out.par_index.id.is_empty() {
+                    let idx_c = cstring_trunc(&out.par_index.name);
+                    if !crate::parparser::same_par_collection(
+                        idx_c.as_c_str(),
+                        head_c.as_c_str(),
+                        true,
+                        &par_filename_fold,
+                    ) {
+                        out.par_index = NzbSummaryHead::default();
+                        break;
+                    }
+                }
+                if out.par_index.id.is_empty() {
+                    out.par_index = head.clone();
+                }
+            }
+        }
+    }
+    if !out.par_index.id.is_empty() {
+        let idx_c = cstring_trunc(&out.par_index.name);
+        for head in &parity_heads {
+            let head_c = cstring_trunc(&head.name);
+            if let Some((base_len, _blocks)) =
+                crate::parparser::parse_par_filename(head_c.as_bytes(), true, &par_filename_fold)
+            {
+                if base_len + 5 < head.name.len()
+                    && crate::parparser::same_par_collection(
+                        idx_c.as_c_str(),
+                        head_c.as_c_str(),
+                        true,
+                        &par_filename_fold,
+                    )
+                {
+                    out.recovery_bytes.push(head.bytes as u64);
+                }
+            }
+        }
+    }
+
+    let mut size_names: Vec<Vec<u8>> = Vec::with_capacity(sizes.len());
+    let mut size_vals: Vec<i64> = Vec::with_capacity(sizes.len());
+    let mut size_is_par: Vec<u8> = Vec::with_capacity(sizes.len());
+    for (name, bytes) in sizes {
+        out.filenames.insert(dupe_util_lower(&name));
+        size_is_par.push(u8::from(is_par_name(&name)));
+        size_names.push(name);
+        size_vals.push(bytes);
+    }
+    let (total_bytes, chosen_idx) = select_main_file(&size_vals, &size_is_par);
+    out.total_bytes = total_bytes;
+    if chosen_idx >= 0 && (chosen_idx as usize) < size_names.len() {
+        out.main_name = std::mem::take(&mut size_names[chosen_idx as usize]);
+    }
+
+    out.geometry_valid = geometry_valid;
+    if out.geometry_valid {
+        out.data_files = data_files;
+        out.data_bytes = data_bytes;
+        let head_bytes: Vec<i64> = out.heads.iter().map(|h| h.bytes).collect();
+        let mut top_idx = [0usize; 3];
+        let kept = select_top_heads(&head_bytes, &mut top_idx);
+        let mut top_heads = Vec::with_capacity(kept);
+        for &idx in &top_idx[..kept] {
+            top_heads.push(out.heads[idx].clone());
+        }
+        out.heads = top_heads;
+    } else {
+        out.heads.clear();
+    }
+
+    Some(out)
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RsNzbSummaryScalars {
+    pub files: i32,
+    pub total_bytes: i64,
+    pub data_files: i32,
+    pub data_bytes: i64,
+    pub listed_parts: u64,
+    pub declared_parts: u64,
+    pub data_listed_parts: u64,
+    pub data_declared_parts: u64,
+    pub article_bytes: u64,
+    pub geometry_valid: i32,
+}
+
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nzb_reader_parse(
+    xml_ptr: *const u8,
+    xml_len: usize,
+    out_scalars: *mut RsNzbSummaryScalars,
+    ctx: *mut std::ffi::c_void,
+    on_strings: Option<
+        unsafe extern "C" fn(
+            ctx: *mut std::ffi::c_void,
+            poster_ptr: *const u8,
+            poster_len: usize,
+            main_name_ptr: *const u8,
+            main_name_len: usize,
+            par_name_ptr: *const u8,
+            par_name_len: usize,
+            par_id_ptr: *const u8,
+            par_id_len: usize,
+            par_bytes: i64,
+        ),
+    >,
+    on_slice: Option<
+        unsafe extern "C" fn(
+            ctx: *mut std::ffi::c_void,
+            kind: std::ffi::c_int,
+            ptr1: *const u8,
+            len1: usize,
+            ptr2: *const u8,
+            len2: usize,
+            bytes: i64,
+        ),
+    >,
+    on_recovery_bytes: Option<
+        unsafe extern "C" fn(ctx: *mut std::ffi::c_void, ptr: *const u64, len: usize),
+    >,
+) -> std::ffi::c_int {
+    let xml = if xml_ptr.is_null() || xml_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(xml_ptr, xml_len)
+    };
+    let Some(summary) = parse_nzb_summary(xml) else {
+        return 0;
+    };
+    if !out_scalars.is_null() {
+        *out_scalars = RsNzbSummaryScalars {
+            files: summary.files,
+            total_bytes: summary.total_bytes,
+            data_files: summary.data_files,
+            data_bytes: summary.data_bytes,
+            listed_parts: summary.listed_parts,
+            declared_parts: summary.declared_parts,
+            data_listed_parts: summary.data_listed_parts,
+            data_declared_parts: summary.data_declared_parts,
+            article_bytes: summary.article_bytes,
+            geometry_valid: i32::from(summary.geometry_valid),
+        };
+    }
+    if let Some(cb) = on_strings {
+        cb(
+            ctx,
+            summary.poster.as_ptr(),
+            summary.poster.len(),
+            summary.main_name.as_ptr(),
+            summary.main_name.len(),
+            summary.par_index.name.as_ptr(),
+            summary.par_index.name.len(),
+            summary.par_index.id.as_ptr(),
+            summary.par_index.id.len(),
+            summary.par_index.bytes,
+        );
+    }
+    if let Some(cb) = on_slice {
+        // kind: 1 = group, 2 = meta, 3 = filename, 4 = message_id, 5 = data_message_id, 6 = head
+        for g in &summary.groups {
+            cb(ctx, 1, g.as_ptr(), g.len(), std::ptr::null(), 0, 0);
+        }
+        for (k, v) in &summary.meta {
+            cb(ctx, 2, k.as_ptr(), k.len(), v.as_ptr(), v.len(), 0);
+        }
+        for f in &summary.filenames {
+            cb(ctx, 3, f.as_ptr(), f.len(), std::ptr::null(), 0, 0);
+        }
+        for id in &summary.message_ids {
+            cb(ctx, 4, id.as_ptr(), id.len(), std::ptr::null(), 0, 0);
+        }
+        for id in &summary.data_message_ids {
+            cb(ctx, 5, id.as_ptr(), id.len(), std::ptr::null(), 0, 0);
+        }
+        for h in &summary.heads {
+            cb(
+                ctx,
+                6,
+                h.name.as_ptr(),
+                h.name.len(),
+                h.id.as_ptr(),
+                h.id.len(),
+                h.bytes,
+            );
+        }
+    }
+    if let Some(cb) = on_recovery_bytes {
+        if !summary.recovery_bytes.is_empty() {
+            cb(
+                ctx,
+                summary.recovery_bytes.as_ptr(),
+                summary.recovery_bytes.len(),
             );
         }
     }
@@ -2851,5 +3659,458 @@ mod tests {
         let page_latin1 = parse_newznab_response(latin1_cdata).unwrap();
         assert_eq!(page_latin1.items[0].title, "Café\nBeta\nGamma".as_bytes());
         assert_eq!(page_latin1.items[0].indexer, b"Idx One Two\tTab");
+    }
+
+    fn make_test_nzb(files: &[(&str, &[i32])], prefix: &str, meta: &str) -> Vec<u8> {
+        let mut xml =
+            String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n");
+        if !meta.is_empty() {
+            xml.push_str(&format!("<head><meta type=\"imdb\">{meta}</meta></head>\n"));
+        }
+        for (f, (name, sizes)) in files.iter().enumerate() {
+            xml.push_str(&format!(
+                "<file poster=\"poster@example.com\" date=\"1\" subject=\"[1/1] &quot;{name}&quot; yEnc (1/1)\"><groups><group>alt.binaries.test</group></groups><segments>"
+            ));
+            for (s, sz) in sizes.iter().enumerate() {
+                xml.push_str(&format!(
+                    "<segment bytes=\"{sz}\" number=\"{}\">{prefix}-{f}-{s}@x</segment>",
+                    s + 1
+                ));
+            }
+            xml.push_str("</segments></file>\n");
+        }
+        xml.push_str("</nzb>\n");
+        xml.into_bytes()
+    }
+
+    #[test]
+    fn nzb_reader_full_suite_port_from_cpp() {
+        use std::collections::BTreeSet;
+
+        // NzbReaderCountsBytesNamesIdsTest
+        let info = parse_nzb_summary(&make_test_nzb(
+            &[("rel.part1.rar", &[100, 100]), ("rel.par2", &[50])],
+            "a",
+            "tt123",
+        ))
+        .unwrap();
+        assert_eq!(info.files, 2);
+        assert_eq!(info.total_bytes, 250);
+        assert_eq!(
+            info.filenames,
+            BTreeSet::from([b"rel.part1.rar".to_vec(), b"rel.par2".to_vec()])
+        );
+        assert_eq!(
+            info.message_ids,
+            vec![b"a-0-0@x".to_vec(), b"a-0-1@x".to_vec(), b"a-1-0@x".to_vec()]
+        );
+        assert_eq!(info.meta.get(b"imdb".as_slice()).unwrap(), b"tt123");
+        assert_eq!(info.poster, b"poster@example.com");
+
+        let other = parse_nzb_summary(&make_test_nzb(
+            &[("other", &[1, 2]), ("x", &[3])],
+            "a",
+            "",
+        ))
+        .unwrap();
+        assert_eq!(info.fingerprint(), other.fingerprint());
+        let other_b = parse_nzb_summary(&make_test_nzb(
+            &[("other", &[1, 2]), ("x", &[3])],
+            "b",
+            "",
+        ))
+        .unwrap();
+        assert_ne!(info.fingerprint(), other_b.fingerprint());
+
+        // NzbReaderMainNameTest
+        let info = parse_nzb_summary(&make_test_nzb(
+            &[
+                ("small.nfo", &[10]),
+                ("big.mkv", &[100, 100]),
+                ("mid.par2", &[50]),
+            ],
+            "a",
+            "",
+        ))
+        .unwrap();
+        assert_eq!(info.main_name, b"big.mkv");
+
+        let info = parse_nzb_summary(&make_test_nzb(
+            &[
+                ("abc.vol063-121.par2", &[500]),
+                ("Show.S01E01.1080p.WEB.H264-GRP.mkv", &[100]),
+            ],
+            "a",
+            "",
+        ))
+        .unwrap();
+        assert_eq!(info.main_name, b"Show.S01E01.1080p.WEB.H264-GRP.mkv");
+
+        let info = parse_nzb_summary(&make_test_nzb(
+            &[("a.par2", &[5]), ("a.vol0+1.par2", &[50])],
+            "a",
+            "",
+        ))
+        .unwrap();
+        assert_eq!(info.main_name, b"a.vol0+1.par2");
+
+        // NzbReaderNativeIdentityMetadataTest
+        let info = parse_nzb_summary(&make_test_nzb(
+            &[
+                ("small.nfo", &[10]),
+                ("big.part1.rar", &[100, 100]),
+                ("rel.vol0+1.par2", &[500]),
+                ("rel.par2", &[50]),
+            ],
+            "identity",
+            "",
+        ))
+        .unwrap();
+        assert_eq!(info.data_bytes, 210);
+        assert_eq!(info.data_files, 2);
+        assert_eq!(info.heads.len(), 2);
+        assert_eq!(info.heads[0].name, b"big.part1.rar");
+        assert_eq!(info.heads[0].id, b"identity-1-0@x");
+        assert_eq!(info.heads[0].bytes, 200);
+        assert_eq!(info.heads[1].name, b"small.nfo");
+
+        let xml = b"<nzb><file subject='&quot;x.rar&quot;'><segments><segment number='2' bytes='100'>second@x</segment><segment number='1' bytes='100'>first@x</segment></segments></file></nzb>";
+        let info = parse_nzb_summary(xml).unwrap();
+        assert_eq!(info.heads.len(), 1);
+        assert_eq!(info.heads[0].id, b"first@x");
+
+        let info = parse_nzb_summary(&make_test_nzb(&[("only.par2", &[50])], "p", "")).unwrap();
+        assert_eq!(info.data_bytes, 0);
+        assert_eq!(info.data_files, 0);
+        assert!(info.heads.is_empty());
+
+        // NativeIdentityHintTest & NativeIdentityDuplicateFileGeometryTest
+        let pick = parse_nzb_summary(&make_test_nzb(
+            &[("rel.part1.rar", &[200]), ("rel.par2", &[10])],
+            "pick",
+            "",
+        ))
+        .unwrap();
+        let donor = parse_nzb_summary(&make_test_nzb(
+            &[("rel.part1.rar", &[200]), ("rel.vol1+9.par2", &[90])],
+            "donor",
+            "",
+        ))
+        .unwrap();
+        assert!(crate::dupeidentity::same_data(
+            pick.data_bytes as u64,
+            pick.data_files as u32,
+            donor.data_bytes as u64,
+            donor.data_files as u32
+        ));
+
+        let separate = parse_nzb_summary(&make_test_nzb(
+            &[("same.rar", &[100]), ("same.rar", &[100])],
+            "a",
+            "",
+        ))
+        .unwrap();
+        let joined = parse_nzb_summary(&make_test_nzb(&[("same.rar", &[200])], "b", "")).unwrap();
+        assert_eq!(separate.data_files, 2);
+        assert!(!crate::dupeidentity::same_data(
+            separate.data_bytes as u64,
+            separate.data_files as u32,
+            joined.data_bytes as u64,
+            joined.data_files as u32
+        ));
+        assert_eq!(separate.heads.len(), 2);
+        assert_ne!(separate.heads[0].id, separate.heads[1].id);
+
+        // NativeFetchBudgetConcurrentTest
+        let budget = std::sync::Arc::new(crate::dupewatch::FetchBudget::from_max_donors(1));
+        let admitted = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0));
+        let mut threads = Vec::new();
+        for _ in 0..16 {
+            let b = budget.clone();
+            let a = admitted.clone();
+            threads.push(std::thread::spawn(move || {
+                if b.take() {
+                    a.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }));
+        }
+        for t in threads {
+            t.join().unwrap();
+        }
+        assert_eq!(admitted.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert!(budget.spent());
+        let unlimited = crate::dupewatch::FetchBudget::from_max_donors(0);
+        for _ in 0..100 {
+            assert!(unlimited.take());
+        }
+        assert!(!unlimited.spent());
+
+        // NativePartialNzbHealthTest
+        let xml = b"<nzb><file subject='&quot;rel.part01.rar&quot; yEnc (1/150)'><segments><segment number='1' bytes='10000'>a@x</segment><segment number='2' bytes='10000'>b@x</segment></segments></file></nzb>";
+        let info = parse_nzb_summary(xml).unwrap();
+        assert_eq!(info.listed_parts, 2);
+        assert_eq!(info.declared_parts, 150);
+        assert_eq!(info.article_bytes, 10000);
+        assert_eq!(
+            crate::dupewatch::whole_bytes(
+                info.total_bytes as u64,
+                info.listed_parts,
+                info.declared_parts
+            ),
+            1_500_000
+        );
+
+        // NativeDataArticleIdsExcludeParityTest
+        let mut xml = String::from(
+            "<nzb><file subject='&quot;rel.mkv&quot;'><segments><segment number='1' bytes='100'>discarded@x</segment><segment number='2' bytes='100'>a-data@x</segment><segment number='1' bytes='100'>z-data@x</segment><segment number='3' bytes='100'>z-data@x</segment></segments></file><file subject='&quot;rel.vol00+25.PAR2&quot;'><segments>",
+        );
+        for i in 1..=25 {
+            xml.push_str(&format!(
+                "<segment number='{i}' bytes='10'>par-{i}@x</segment>"
+            ));
+        }
+        xml.push_str("</segments></file></nzb>");
+        let info = parse_nzb_summary(xml.as_bytes()).unwrap();
+        assert_eq!(info.data_bytes, 300);
+        assert_eq!(
+            info.data_message_ids,
+            vec![b"a-data@x".to_vec(), b"z-data@x".to_vec()]
+        );
+        assert_eq!(info.message_ids.len(), 27);
+        assert!(!info.message_ids.contains(&b"discarded@x".to_vec()));
+        let orig_fp = info.fingerprint();
+        let xml_mod = xml.replacen("par-1@x", "par-new@x", 1);
+        let info_mod = parse_nzb_summary(xml_mod.as_bytes()).unwrap();
+        assert_eq!(
+            info_mod.data_message_ids,
+            vec![b"a-data@x".to_vec(), b"z-data@x".to_vec()]
+        );
+        assert_ne!(info_mod.fingerprint(), orig_fp);
+
+        let xml_bad = b"<nzb><file subject='&quot;rel.mkv&quot;'><segments><segment number='1' bytes='100'>valid@x</segment><segment number='2' bytes='100'>invalid id@x</segment></segments></file></nzb>";
+        let info_bad = parse_nzb_summary(xml_bad).unwrap();
+        assert_eq!(info_bad.data_bytes, 0);
+        assert_eq!(info_bad.data_message_ids, vec![b"valid@x".to_vec()]);
+
+        // NativeDataPartGeometryExcludesParityTest
+        let mut xml = String::from(
+            "<nzb><file subject='&quot;rel.mkv&quot; yEnc (1/150)'><segments><segment number='1' bytes='100'>data-1@x</segment><segment number='2' bytes='100'>data-2@x</segment></segments></file><file subject='&quot;rel.vol00+25.par2&quot;'><segments>",
+        );
+        for i in 1..=25 {
+            xml.push_str(&format!(
+                "<segment number='{i}' bytes='10'>par-{i}@x</segment>"
+            ));
+        }
+        xml.push_str("</segments></file></nzb>");
+        let info = parse_nzb_summary(xml.as_bytes()).unwrap();
+        assert_eq!(info.listed_parts, 27);
+        assert_eq!(info.declared_parts, 175);
+        assert_eq!(info.data_listed_parts, 2);
+        assert_eq!(info.data_declared_parts, 150);
+        assert_eq!(info.data_message_ids.len(), 2);
+
+        // NativeDeclaredTailGuardTableTest
+        type GuardCase<'a> = (
+            &'a str,
+            Vec<(i64, i64)>,
+            &'a str,
+            bool,
+            u64,
+            u64,
+            i64,
+            bool,
+        );
+        let make_parts = |count: i64| -> Vec<(i64, i64)> { (1..=count).map(|n| (n, 100)).collect() };
+        let cases: Vec<GuardCase> = vec![
+            ("true_tail", vec![(1, 100), (2, 100)], "(1/150)", false, 2, 150, 200, true),
+            ("number_gap_without_tail", vec![(1, 100), (3, 100)], "(1/0)", false, 2, 3, 200, true),
+            ("single_segment", vec![(9374, 100)], "(1/10000)", false, 1, 9374, 100, true),
+            ("zero_subject_count", vec![(1, 100), (2, 100)], "(1/0)", false, 2, 2, 200, true),
+            ("max_subject_count", vec![(1, 100), (2, 100)], "(1/200000)", false, 2, 200000, 200, true),
+            ("over_max_subject_count", vec![(1, 100), (2, 100)], "(1/200001)", false, 2, 2, 200, true),
+            ("two_thirds_equal", make_parts(200), "(1/300)", false, 200, 200, 20000, true),
+            ("two_thirds_below", make_parts(199), "(1/300)", false, 199, 300, 19900, true),
+            ("tail_gap_99", vec![(1, 100), (101, 100)], "(1/200)", false, 2, 101, 200, true),
+            ("tail_gap_100", vec![(1, 100), (101, 100)], "(1/201)", false, 2, 201, 200, true),
+            ("zero_part_number", vec![(0, 100), (2, 100)], "(1/1000)", false, 2, 2, 200, true),
+            ("negative_part_number", vec![(-1, 100), (2, 100)], "(1/1000)", false, 2, 2, 200, true),
+            ("invalid_number_suppresses_valid_max", vec![(1, 100), (199999, 100), (200001, 100)], "(1/200000)", false, 3, 3, 300, true),
+            ("maximum_valid_part", vec![(1, 100), (200000, 100)], "(1/200000)", false, 2, 200000, 200, true),
+            ("zero_bytes", vec![(1, 100), (2, 0)], "(1/150)", false, 2, 2, 100, false),
+            ("negative_bytes", vec![(1, 100), (2, -1)], "(1/150)", false, 2, 2, 99, false),
+            ("strict_majority_short_last", vec![(1, 100), (2, 100), (3, 98)], "(1/150)", false, 3, 3, 298, true),
+            ("strict_majority_large_last", vec![(1, 100), (2, 100), (3, 101)], "(1/150)", false, 3, 3, 301, true),
+            ("strict_majority_equal_last", vec![(1, 100), (2, 98), (3, 100)], "(1/150)", false, 3, 150, 298, true),
+            ("median_exact_99_percent", vec![(1, 900), (2, 1000), (3, 1100), (4, 990)], "(1/150)", false, 4, 150, 3990, true),
+            ("median_below_99_percent", vec![(1, 900), (2, 1000), (3, 1100), (4, 989)], "(1/150)", false, 4, 4, 3989, true),
+            ("half_is_not_strict_majority", vec![(1, 99), (2, 100), (3, 99), (4, 100)], "(1/150)", false, 4, 150, 398, true),
+            ("parity_never_infers", vec![(1, 100), (2, 100)], "(1/150)", true, 2, 2, 200, true),
+            ("malformed_tail", vec![(1, 100), (3, 100)], "(x/150)", false, 2, 3, 200, true),
+            ("trailing_subject_whitespace", vec![(1, 100), (2, 100)], "(1/150)  ", false, 2, 150, 200, true),
+            ("unsorted_input", vec![(3, 100), (1, 100), (2, 100)], "(1/150)", false, 3, 150, 300, true),
+            ("duplicate_keeps_last_bytes", vec![(1, 100), (2, 100), (2, 30)], "(1/150)", false, 2, 2, 130, true),
+        ];
+        for (label, parts, tail, parity, listed, declared, bytes, geom) in cases {
+            let name = if parity { "guard.par2" } else { "guard.mkv" };
+            let mut xml = format!("<nzb><file subject='&quot;{name}&quot; yEnc {tail}'><segments>");
+            for (i, (num, sz)) in parts.iter().enumerate() {
+                xml.push_str(&format!(
+                    "<segment number='{num}' bytes='{sz}'>guard-{i}@x</segment>"
+                ));
+            }
+            xml.push_str("</segments></file></nzb>");
+            let info = parse_nzb_summary(xml.as_bytes()).expect(label);
+            assert_eq!(info.files, 1, "{label}");
+            assert_eq!(info.listed_parts, listed, "{label}");
+            assert_eq!(info.declared_parts, declared, "{label}");
+            assert_eq!(
+                info.data_listed_parts,
+                if parity { 0 } else { listed },
+                "{label}"
+            );
+            assert_eq!(
+                info.data_declared_parts,
+                if parity { 0 } else { declared },
+                "{label}"
+            );
+            assert_eq!(info.message_ids.len() as u64, listed, "{label}");
+            assert_eq!(
+                info.data_message_ids.len() as u64,
+                if parity { 0 } else { listed },
+                "{label}"
+            );
+            assert_eq!(info.total_bytes, bytes, "{label}");
+            assert_eq!(
+                info.data_bytes,
+                if parity || !geom { 0 } else { bytes },
+                "{label}"
+            );
+            assert_eq!(
+                info.data_files,
+                if parity || !geom { 0 } else { 1 },
+                "{label}"
+            );
+            if label == "duplicate_keeps_last_bytes" {
+                assert!(!info.message_ids.contains(&b"guard-1@x".to_vec()));
+                assert!(info.message_ids.contains(&b"guard-2@x".to_vec()));
+            }
+        }
+
+        // NativeEmptyFilePartCountsTest, NativeDuplicateSegmentKeepsLastTest, NativeDuplicateSegmentInvalidLastTest
+        let empty = "<file subject='&quot;empty.mkv&quot; yEnc (1/150)'><segments></segments></file>";
+        assert!(parse_nzb_summary(format!("<nzb>{empty}</nzb>").as_bytes()).is_none());
+        let valid = "<file subject='&quot;valid.mkv&quot;'><segments><segment number='1' bytes='100'>valid@x</segment></segments></file>";
+        let info = parse_nzb_summary(format!("<nzb>{empty}{valid}</nzb>").as_bytes()).unwrap();
+        assert_eq!(info.files, 2);
+        assert_eq!(info.listed_parts, 1);
+        assert_eq!(info.declared_parts, 1);
+        assert_eq!(info.total_bytes, 100);
+        assert_eq!(info.data_bytes, 0);
+        assert_eq!(info.data_files, 0);
+        assert!(info.heads.is_empty());
+
+        // NativeIndependentParityCollectionsUnknownTest & NativeParityIndexByFilenameTest
+        for reverse in [false, true] {
+            let mut files: Vec<(&str, &[i32])> = vec![
+                ("first.par2", &[100]),
+                ("first.vol00+01.par2", &[200]),
+                ("second.par2", &[300]),
+                ("second.vol00+01.par2", &[400]),
+                ("first.mkv", &[1000]),
+                ("second.mkv", &[2000]),
+            ];
+            if reverse {
+                files.reverse();
+            }
+            let info = parse_nzb_summary(&make_test_nzb(&files, "par-sets", "")).unwrap();
+            assert_eq!(info.data_bytes, 3000);
+            assert!(info.par_index.id.is_empty());
+            assert!(info.recovery_bytes.is_empty());
+        }
+
+        let info = parse_nzb_summary(&make_test_nzb(
+            &[
+                ("rel.vol00+01.par2", &[100]),
+                ("rel.par2", &[900]),
+                ("rel.vol01+02.PAR2", &[200]),
+                ("other.vol00+10.par2", &[1000]),
+                ("rel.mkv", &[10000]),
+            ],
+            "par-index",
+            "",
+        ))
+        .unwrap();
+        assert_eq!(info.par_index.name, b"rel.par2");
+        assert_eq!(info.recovery_bytes, vec![100, 200]);
+
+        let info = parse_nzb_summary(&make_test_nzb(
+            &[
+                ("rel.vol00+01.par2", &[100]),
+                ("rel.vol01+02.par2", &[200]),
+                ("rel.mkv", &[10000]),
+            ],
+            "par-volumes",
+            "",
+        ))
+        .unwrap();
+        assert!(info.par_index.id.is_empty());
+        assert!(info.recovery_bytes.is_empty());
+
+        // NzbReaderRejectsBadNzbTest
+        assert!(parse_nzb_summary(b"<nzb><file").is_none());
+        assert!(parse_nzb_summary(b"<nzb></nzb>").is_none());
+        assert!(parse_nzb_summary(b"").is_none());
+        assert!(parse_nzb_summary(b"<html><body>Forbidden</body></html>").is_none());
+        assert!(parse_nzb_summary(
+            b"<?xml version=\"1.0\"?><error code=\"429\" description=\"Request limit reached\"/>"
+        )
+        .is_none());
+        let bomb = "<?xml version=\"1.0\"?><!DOCTYPE n [<!ENTITY a \"aaaa\"><!ENTITY b \"&a;&a;\">]><nzb><file subject=\"&b;\"><segments><segment bytes=\"1\">x@y</segment></segments></file></nzb>";
+        assert!(parse_nzb_summary(bomb.as_bytes()).is_none());
+        let padded = format!(
+            "<?xml version=\"1.0\"?><!--{}-->{}",
+            " ".repeat(8000),
+            &bomb[bomb.find("<!DOCTYPE").unwrap()..]
+        );
+        assert!(parse_nzb_summary(padded.as_bytes()).is_none());
+        let mut standard =
+            String::from_utf8(make_test_nzb(&[("a.mkv", &[5])], "a", "")).unwrap();
+        let pos = standard.find("<nzb").unwrap();
+        standard.insert_str(
+            pos,
+            "<!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.1//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.1.dtd\">\n",
+        );
+        let info = parse_nzb_summary(standard.as_bytes()).unwrap();
+        assert_eq!(info.files, 1);
+
+        // NzbReaderUtf16Test (UTF-16LE & UTF-16BE with BOM, without BOM, and with encoding="UTF-16")
+        let utf8_src = "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n<nzb><head><meta type=\"title\">Café.2026</meta></head><file poster=\"u@x\" subject=\"&quot;Café.2026.mkv&quot; yEnc (1/2)\"><groups><group>alt.binaries.test</group></groups><segments><segment bytes=\"500\" number=\"1\">u16_1@x</segment><segment bytes=\"500\" number=\"2\">u16_2@x</segment></segments></file></nzb>";
+        let expected_utf8 = parse_nzb_summary(
+            utf8_src
+                .replace("encoding=\"UTF-16\"", "encoding=\"UTF-8\"")
+                .as_bytes(),
+        )
+        .unwrap();
+
+        let mut utf16le_bom = vec![0xFFu8, 0xFEu8];
+        let mut utf16le_nobom = Vec::new();
+        let mut utf16be_bom = vec![0xFEu8, 0xFFu8];
+        let mut utf16be_nobom = Vec::new();
+        for unit in utf8_src.encode_utf16() {
+            utf16le_bom.extend_from_slice(&unit.to_le_bytes());
+            utf16le_nobom.extend_from_slice(&unit.to_le_bytes());
+            utf16be_bom.extend_from_slice(&unit.to_be_bytes());
+            utf16be_nobom.extend_from_slice(&unit.to_be_bytes());
+        }
+        for candidate in [&utf16le_bom, &utf16le_nobom, &utf16be_bom, &utf16be_nobom] {
+            let parsed = parse_nzb_summary(candidate).expect("UTF-16 NZB should parse");
+            assert_eq!(parsed.files, expected_utf8.files);
+            assert_eq!(parsed.data_bytes, expected_utf8.data_bytes);
+            assert_eq!(parsed.main_name, b"Caf\xc3\xa9.2026.mkv");
+            assert_eq!(parsed.meta.get(&b"title"[..]).map(|v| v.as_slice()), Some(&b"Caf\xc3\xa9.2026"[..]));
+            assert_eq!(parsed.data_message_ids, expected_utf8.data_message_ids);
+        }
+        // Single-byte stream falsely claiming UTF-16 is rejected
+        assert!(parse_nzb_summary(utf8_src.as_bytes()).is_none());
     }
 }

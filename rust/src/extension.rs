@@ -1622,4 +1622,125 @@ mod tests {
         assert!(ext_is_in_list(b"ScriptA, ScriptB", b"ScriptB"));
         assert!(!ext_is_in_list(b"ScriptA, ScriptB", b"scriptb"));
     }
+
+    #[test]
+    fn scan_script_command_test() {
+        let msg = b"[NZB] NZBNAME=my download";
+        let cmd = parse_scan_script_cmd(msg);
+        assert_eq!(cmd.kind, 1);
+        assert_eq!(&msg[cmd.val_offset..cmd.val_offset + cmd.val_len], b"my download");
+
+        let msg = b"[NZB] CATEGORY=my category";
+        let cmd = parse_scan_script_cmd(msg);
+        assert_eq!(cmd.kind, 2);
+        assert_eq!(&msg[cmd.val_offset..cmd.val_offset + cmd.val_len], b"my category");
+
+        let msg = b"[NZB] DUPEKEY=tv show s01e02";
+        let cmd = parse_scan_script_cmd(msg);
+        assert_eq!(cmd.kind, 7);
+        assert_eq!(&msg[cmd.val_offset..cmd.val_offset + cmd.val_len], b"tv show s01e02");
+
+        let msg = b"[NZB] PRIORITY=50";
+        let cmd = parse_scan_script_cmd(msg);
+        assert_eq!(cmd.kind, 4);
+        assert_eq!(cmd.int_val, 50);
+
+        let msg = b"[NZB] DUPESCORE=10";
+        let cmd = parse_scan_script_cmd(msg);
+        assert_eq!(cmd.kind, 8);
+        assert_eq!(cmd.int_val, 10);
+
+        let msg = b"[NZB] TOP=1";
+        let cmd = parse_scan_script_cmd(msg);
+        assert_eq!(cmd.kind, 5);
+        assert_eq!(cmd.int_val, 1);
+
+        let msg = b"[NZB] PAUSED=1";
+        let cmd = parse_scan_script_cmd(msg);
+        assert_eq!(cmd.kind, 6);
+        assert_eq!(cmd.int_val, 1);
+
+        let msg = b"[NZB] DUPEMODE=FORCE";
+        let cmd = parse_scan_script_cmd(msg);
+        assert_eq!(cmd.kind, 9);
+        assert_eq!(cmd.int_val, 2);
+
+        let msg = b"[NZB] NZBPR_myvar=my value";
+        let cmd = parse_scan_script_cmd(msg);
+        assert_eq!(cmd.kind, 3);
+        assert_eq!(&msg[cmd.key_offset..cmd.key_offset + cmd.key_len], b"myvar");
+        assert_eq!(&msg[cmd.val_offset..cmd.val_offset + cmd.val_len], b"my value");
+    }
+
+    #[test]
+    fn save_config_duplicate_and_orphaned_option_tests() {
+        // SaveConfigDoesNotAppendDuplicateOptionNames
+        let entries: &[(&[u8], &[u8])] = &[
+            (b"Extension.Option", b"first"),
+            (b"extension.option", b"second"),
+        ];
+        let first = script_config_merge_bytes(b"# existing config\n", entries);
+        assert_eq!(first, b"# existing config\nExtension.Option=second\n");
+        let second = script_config_merge_bytes(&first, entries);
+        assert_eq!(second, first);
+
+        // SaveConfigRemovesDuplicateLinesFromDamagedConfig
+        let damaged = b"# existing config\n\
+            Server1.Active=yes\n\
+            Server2.Active=yes\n\
+            Server2.Active=yes\n\
+            server2.active=yes\n\
+            Server2.Host=news.example.com\n";
+        let entries2: &[(&[u8], &[u8])] = &[
+            (b"Server1.Active", b"yes"),
+            (b"Server2.Active", b"no"),
+            (b"Server2.Host", b"news.example.com"),
+        ];
+        let merged2 = script_config_merge_bytes(damaged, entries2);
+        assert_eq!(
+            merged2,
+            b"# existing config\n\
+            Server1.Active=yes\n\
+            Server2.Active=no\n\
+            Server2.Host=news.example.com\n"
+        );
+
+        // SaveConfigKeepsLastValueWhenConfigHasDuplicateLines
+        let dup_cfg = b"# existing config\n\
+            Server2.Active=yes\n\
+            Server2.Name=xsusenet\n\
+            server2.active=no\n";
+        let entries3: &[(&[u8], &[u8])] = &[
+            (b"Server2.Active", b"yes"),
+            (b"Server2.Name", b"xsusenet"),
+            (b"server2.active", b"no"),
+        ];
+        let merged3 = script_config_merge_bytes(dup_cfg, entries3);
+        assert_eq!(
+            merged3,
+            b"# existing config\n\
+            Server2.Active=no\n\
+            Server2.Name=xsusenet\n"
+        );
+
+        // SaveConfigDropsOrphanedOptionLines
+        let orphan_cfg = b"# existing config\n\
+            ActiveOption=yes\n\
+            RemovedExtension.Option=old_value\n";
+        let entries4: &[(&[u8], &[u8])] = &[(b"ActiveOption", b"yes")];
+        let merged4 = script_config_merge_bytes(orphan_cfg, entries4);
+        assert_eq!(merged4, b"# existing config\nActiveOption=yes\n");
+
+        // SaveConfigNormalizesOptionNameCasing
+        let case_cfg = b"# existing config\nserver2.active=yes\n";
+        let entries5: &[(&[u8], &[u8])] = &[(b"Server2.Active", b"no")];
+        let merged5 = script_config_merge_bytes(case_cfg, entries5);
+        assert_eq!(merged5, b"# existing config\nServer2.Active=no\n");
+
+        // SaveConfigLastLineWithoutLineEnd
+        let no_nl_cfg = b"# existing config";
+        let entries6: &[(&[u8], &[u8])] = &[(b"Extension.Option", b"value")];
+        let merged6 = script_config_merge_bytes(no_nl_cfg, entries6);
+        assert_eq!(merged6, b"# existing config\nExtension.Option=value\n");
+    }
 }

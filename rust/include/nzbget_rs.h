@@ -2326,7 +2326,6 @@ int nzbget_rs_snh_nntp_health_classify_stat_reply(const char* line);
 int nzbget_rs_snh_http_get_calc_watchdog_wait(
     int64_t deadline_ms, int64_t now_ms, int64_t file_size, size_t max_bytes,
     int64_t* out_wait_ms);
-size_t nzbget_rs_snh_xml_reader_local_name_offset(const char* name);
 
 int nzbget_rs_snh_http_client_find_header_colon(
     const char* line, size_t len, size_t* out_colon_pos);
@@ -2959,16 +2958,6 @@ uint64_t nzbget_rs_dupe_identity_calc_min_inner_bytes(
 int nzbget_rs_nntp_health_classify_body_fetch_result(
     int success, int transient, int ans_present, int ans_body_bad,
     int* out_throw_error);
-int nzbget_rs_dupesearch_valid_message_id(
-    const char* id, size_t id_len);
-int64_t nzbget_rs_dupesearch_accum_segment_bytes(
-    int64_t file_bytes, int64_t seg_bytes, int is_par, int geometry_valid,
-    int* out_geometry_valid, int* out_push_article_size);
-void nzbget_rs_dupesearch_accum_file_data_totals(
-    int is_par, int64_t file_bytes, int first_id_empty, int data_files,
-    int64_t data_bytes, int geometry_valid, int* out_data_files,
-    int64_t* out_data_bytes, int* out_geometry_valid,
-    int* out_push_parity_head, int* out_push_data_head);
 void nzbget_rs_dupesearch_fnv1a_fingerprint(
     const char* const* ids, const size_t* id_lens, size_t id_count,
     char* out_hex16);
@@ -3778,10 +3767,6 @@ void nzbget_rs_df_build_newznab_queries(
         const char* const* keys, const size_t* key_lens,
         const char* const* vals, const size_t* val_lens,
         size_t param_count));
-ptrdiff_t nzbget_rs_dupesearch_select_main_file(
-    const int64_t* sizes, const uint8_t* is_par, size_t count, int64_t* out_total_bytes);
-size_t nzbget_rs_dupesearch_select_top_heads(
-    const int64_t* head_bytes, size_t count, size_t* out_indices, size_t out_cap);
 void nzbget_rs_twin_visit_par2_sigs(
     const uint8_t* data, size_t len, void* ctx,
     void (*visit)(
@@ -4153,9 +4138,34 @@ int nzbget_rs_newznab_parse_response(
     void (*on_item)(void* ctx, const uint8_t* title_ptr, size_t title_len,
         const uint8_t* link_ptr, size_t link_len, int64_t size, int32_t grabs,
         int64_t date, const uint8_t* indexer_ptr, size_t indexer_len));
-int nzbget_rs_dqh_nzb_reader_classify_start_element(const char* name, int in_file);
-int nzbget_rs_dqh_nzb_reader_classify_end_element(
-    const char* name, int has_meta_type, int in_segment, int in_file);
+typedef struct {
+    int32_t files;
+    int64_t total_bytes;
+    int32_t data_files;
+    int64_t data_bytes;
+    uint64_t listed_parts;
+    uint64_t declared_parts;
+    uint64_t data_listed_parts;
+    uint64_t data_declared_parts;
+    uint64_t article_bytes;
+    int32_t geometry_valid;
+} RsNzbSummaryScalars;
+int nzbget_rs_nzb_reader_parse(
+    const uint8_t* xml_ptr, size_t xml_len, RsNzbSummaryScalars* out_scalars,
+    void* ctx,
+    void (*on_strings)(void* ctx,
+        const uint8_t* poster_ptr, size_t poster_len,
+        const uint8_t* main_name_ptr, size_t main_name_len,
+        const uint8_t* par_name_ptr, size_t par_name_len,
+        const uint8_t* par_id_ptr, size_t par_id_len,
+        int64_t par_bytes),
+    void (*on_slice)(void* ctx, int kind,
+        const uint8_t* ptr1, size_t len1,
+        const uint8_t* ptr2, size_t len2,
+        int64_t bytes),
+    void (*on_recovery_bytes)(void* ctx, const uint64_t* ptr, size_t len));
+int nzbget_rs_posting_sketch_of_file(
+    const char* path, uint32_t* out, size_t cap, size_t* out_len);
 int nzbget_rs_dqh_tls_resolve_probe_result(
     int connected, const char* negotiated_cipher, const char* expected_cipher,
     int negotiated_version, int protocol, int tls13_ver, int tls12_ver,

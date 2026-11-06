@@ -415,4 +415,149 @@ mod tests {
         assert_eq!(extract_elements(b"some text"), (vec![b"some text".to_vec()], ""));
         assert_eq!(extract_elements(b""), (vec![], ","));
     }
+
+    #[test]
+    fn extension_v1_loader_fixture_test() {
+        let data = include_bytes!("../../tests/testdata/extension/V1/Extension.py");
+        let s = parse(data, &space_left).expect("V1 Extension.py should parse");
+
+        // PostScript + QueueScript => 1 | 4 = 5
+        assert_eq!(s.kind, 5);
+        assert_eq!(s.about, b"About1.\nAbout2.\n");
+        assert_eq!(
+            s.description,
+            vec![b"Description1".to_vec(), b"Description2".to_vec()]
+        );
+        assert_eq!(s.task_time, b"*;*:00;*:30");
+        assert_eq!(
+            s.queue_events,
+            b"NZB_ADDED, NZB_DOWNLOADED, FILE_DOWNLOADED"
+        );
+        assert_eq!(
+            s.requirements,
+            vec![b"This script requires Python to be installed on your system.".to_vec()]
+        );
+
+        assert_eq!(s.commands.len(), 3);
+        assert_eq!(s.commands[0].name, b"ConnectionTest");
+        assert!(!s.commands[0].section.multi);
+        assert_eq!(s.commands[0].section.name, b"options");
+        assert_eq!(s.commands[0].section.prefix, b"");
+        assert_eq!(s.commands[0].action, b"Send Test E-Mail");
+        assert_eq!(
+            s.commands[0].description,
+            vec![b"To check connection parameters click the button.".to_vec()]
+        );
+
+        assert_eq!(s.commands[1].name, b"Test");
+        assert!(!s.commands[1].section.multi);
+        assert_eq!(s.commands[1].section.name, b"options");
+        assert_eq!(s.commands[1].action, b"Send Test");
+        assert_eq!(
+            s.commands[1].description,
+            vec![b"Test (0 1).".to_vec(), b"description.".to_vec()]
+        );
+
+        assert_eq!(s.commands[2].name, b"TestFeed");
+        assert!(s.commands[2].section.multi);
+        assert_eq!(s.commands[2].section.prefix, b"Feed");
+        assert_eq!(s.commands[2].section.name, b"FEEDS");
+        assert_eq!(s.commands[2].action, b"Test Test");
+        assert_eq!(s.commands[2].description, vec![b"Feed Test.".to_vec()]);
+
+        assert_eq!(s.options.len(), 19);
+        assert_eq!(s.options[0].name, b"FileList");
+        assert_eq!(s.options[0].value, Select::Str(b"yes".to_vec()));
+        assert_eq!(
+            s.options[0].select,
+            vec![Select::Str(b"yes".to_vec()), Select::Str(b"no".to_vec())]
+        );
+
+        assert_eq!(s.options[1].name, b"Port");
+        assert_eq!(s.options[1].value, Select::Num(25.0));
+        assert_eq!(
+            s.options[1].select,
+            vec![Select::Num(1.0), Select::Num(65535.0)]
+        );
+
+        assert_eq!(s.options[2].name, b"SendMail");
+        assert_eq!(s.options[2].value, Select::Str(b"Always".to_vec()));
+        assert_eq!(
+            s.options[2].select,
+            vec![
+                Select::Str(b"Always".to_vec()),
+                Select::Str(b"OnFailure".to_vec())
+            ]
+        );
+
+        assert_eq!(s.options[3].name, b"Encryption");
+        assert_eq!(s.options[3].value, Select::Str(b"yes".to_vec()));
+        assert_eq!(
+            s.options[3].select,
+            vec![
+                Select::Str(b"yes".to_vec()),
+                Select::Str(b"no".to_vec()),
+                Select::Str(b"force".to_vec())
+            ]
+        );
+
+        assert_eq!(s.options[4].name, b"To");
+        assert_eq!(
+            s.options[4].value,
+            Select::Str(b"myaccount@gmail.com".to_vec())
+        );
+        assert!(s.options[4].select.is_empty());
+
+        assert_eq!(s.options[5].name, b"BannedExtensions");
+        assert_eq!(s.options[5].value, Select::Str(b"".to_vec()));
+        assert!(s.options[5].select.is_empty());
+
+        assert_eq!(s.options[6].name, b"MoviesFormat");
+        assert_eq!(s.options[6].value, Select::Str(b"%t (%y)".to_vec()));
+        assert!(s.options[6].select.is_empty());
+
+        assert_eq!(s.options[7].name, b"outputVideoExtension");
+        assert_eq!(s.options[7].value, Select::Str(b".mp4".to_vec()));
+        assert_eq!(s.options[8].name, b"outputVideoCodec");
+        assert!(s.options[8].description.is_empty());
+        assert_eq!(s.options[8].value, Select::Str(b"libx264".to_vec()));
+
+        assert_eq!(s.options[9].name, b"outputDefault");
+        assert_eq!(s.options[9].value, Select::Str(b"None".to_vec()));
+        assert_eq!(s.options[9].select.len(), 6);
+
+        assert_eq!(s.options[10].name, b"auto_update");
+        assert_eq!(s.options[10].value, Select::Str(b"0".to_vec()));
+        assert_eq!(
+            s.options[10].select,
+            vec![Select::Str(b"0".to_vec()), Select::Str(b"1".to_vec())]
+        );
+
+        assert_eq!(s.options[11].name, b"niceness");
+        assert_eq!(s.options[11].value, Select::Str(b"10".to_vec()));
+
+        assert_eq!(s.options[12].name, b"ionice_class");
+        assert_eq!(s.options[12].value, Select::Str(b"2".to_vec()));
+        assert_eq!(s.options[12].select.len(), 4);
+
+        assert_eq!(s.options[13].name, b"ionice_class");
+        assert_eq!(s.options[13].value, Select::Str(b"2".to_vec()));
+        assert!(s.options[13].select.is_empty());
+
+        assert_eq!(s.options[16].section.name, b"CATEGORIES");
+        assert!(s.options[16].section.multi);
+        assert_eq!(s.options[16].section.prefix, b"Category");
+        assert_eq!(s.options[16].name, b"Name");
+
+        assert_eq!(s.options[17].section.name, b"CATEGORIES");
+        assert!(s.options[17].section.multi);
+        assert_eq!(s.options[17].section.prefix, b"Category");
+        assert_eq!(s.options[17].name, b"DownloadRate");
+        assert_eq!(s.options[17].value, Select::Str(b"0".to_vec()));
+
+        assert_eq!(s.options[18].section.name, b"FEEDS");
+        assert!(s.options[18].section.multi);
+        assert_eq!(s.options[18].section.prefix, b"Feed");
+        assert_eq!(s.options[18].name, b"Name");
+    }
 }

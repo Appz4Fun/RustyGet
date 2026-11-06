@@ -369,4 +369,247 @@ mod tests {
         assert_eq!(sniff_extension(b"\x1a\x45\xdf\xa3....webm"), c".webm");
         assert_eq!(sniff_extension(b"...."), c"");
     }
+
+    #[test]
+    fn filetypes_full_suite_port_from_cpp() {
+        // FileTypesRarFileTest
+        assert!(is_rar_file(b"archive.rar"));
+        assert!(is_rar_file(b"ARCHIVE.RAR"));
+        assert!(is_rar_file(b"archive.part01.rar"));
+        assert!(is_rar_file(b"archive.r00"));
+        assert!(is_rar_file(b"archive.r99"));
+        assert!(is_rar_file(b"archive.s01"));
+        assert!(is_rar_file(b"archive.z50"));
+        assert!(is_rar_file(b"archive.rar.001"));
+        assert!(is_rar_file(b"/path/to/archive.rar.012"));
+        assert!(is_rar_file(b"C:\\path\\to\\archive.r00"));
+
+        assert!(!is_rar_file(b""));
+        assert!(!is_rar_file(b"noext"));
+        assert!(!is_rar_file(b"archive.7z.001"));
+        assert!(!is_rar_file(b"archive.001"));
+        assert!(!is_rar_file(b"archive.q00"));
+        assert!(!is_rar_file(b"archive.r0a"));
+        assert!(!is_rar_file(b"archive.r000"));
+        assert!(!is_rar_file(b"video.mkv"));
+
+        // FileTypesSevenZipFileTest
+        assert!(is_seven_zip_file(b"archive.7z"));
+        assert!(is_seven_zip_file(b"ARCHIVE.ZIP"));
+        assert!(is_seven_zip_file(b"archive.tar"));
+        assert!(is_seven_zip_file(b"archive.gz"));
+        assert!(is_seven_zip_file(b"archive.bz"));
+        assert!(is_seven_zip_file(b"archive.bz2"));
+        assert!(is_seven_zip_file(b"archive.tgz"));
+        assert!(is_seven_zip_file(b"archive.txz"));
+        assert!(is_seven_zip_file(b"archive.xz"));
+        assert!(is_seven_zip_file(b"archive.7z.001"));
+        assert!(is_seven_zip_file(b"archive.zip.001"));
+        assert!(is_seven_zip_file(b"archive.tar.gz"));
+        assert!(is_seven_zip_file(b"archive.tar.bz2"));
+        assert!(is_seven_zip_file(b"archive.tar.xz"));
+
+        assert!(!is_seven_zip_file(b""));
+        assert!(!is_seven_zip_file(b"noext"));
+        assert!(!is_seven_zip_file(b"archive.7z.002"));
+        assert!(!is_seven_zip_file(b"archive.001"));
+        assert!(!is_seven_zip_file(b"archive.rar"));
+        assert!(!is_seven_zip_file(b"archive.rar.001"));
+        assert!(!is_seven_zip_file(b"video.mkv"));
+
+        // FileTypesArchiveFileTest
+        assert!(is_archive_file(b"archive.rar"));
+        assert!(is_archive_file(b"archive.r01"));
+        assert!(is_archive_file(b"archive.7z"));
+        assert!(is_archive_file(b"archive.7z.001"));
+        assert!(is_archive_file(b"archive.rar.001"));
+        assert!(!is_archive_file(b"archive.001"));
+        assert!(!is_archive_file(b"video.mkv"));
+
+        assert!(is_archive_ext(b".rar"));
+        assert!(is_archive_ext(b".r00"));
+        assert!(is_archive_ext(b".7z"));
+        assert!(is_archive_ext(b".001"));
+        assert!(!is_archive_ext(b".0001"));
+        assert!(is_all_digits_ext(b".0001"));
+        assert!(!is_all_digits_ext(b".00a"));
+        assert!(!is_all_digits_ext(b"001"));
+
+        // FileTypesSampleTest
+        assert!(is_sample_stem(b"sample"));
+        assert!(is_sample_stem(b"SAMPLE"));
+        assert!(is_sample_stem(b"movie-sample"));
+        assert!(is_sample_stem(b"movie.sample"));
+        assert!(is_sample_stem(b"movie_sample"));
+        assert!(is_sample_stem(b"Movie.2024.1080p-SAMPLE"));
+
+        assert!(!is_sample_stem(b""));
+        assert!(!is_sample_stem(b"sampler"));
+        assert!(!is_sample_stem(b"samples"));
+        assert!(!is_sample_stem(b"sample-movie"));
+        assert!(!is_sample_stem(b"movie.sample.extra"));
+
+        assert!(is_sample_file(b"sample.mkv"));
+        assert!(is_sample_file(b"/downloads/Movie/movie-sample.mkv"));
+        assert!(is_sample_file(b"C:\\downloads\\Movie\\movie_sample.mp4"));
+        assert!(!is_sample_file(b"Movie.2024.1080p.mkv"));
+        assert!(!is_sample_file(b"SampleMovie.mkv"));
+
+        // FileTypesDiscAndClutterTest
+        assert!(is_disc_structure_ext(b".vob"));
+        assert!(is_disc_structure_ext(b".M2TS"));
+        assert!(is_disc_structure_ext(b".bdmv"));
+        assert!(is_disc_structure_ext(b".ifo"));
+        assert!(!is_disc_structure_ext(b".mkv"));
+
+        assert!(is_disc_structure_dir(b"BDMV"));
+        assert!(is_disc_structure_dir(b"/path/to/VIDEO_TS"));
+        assert!(is_disc_structure_dir(b"C:\\disc\\avchd"));
+        assert!(!is_disc_structure_dir(b"Movies"));
+
+        assert!(is_disc_descriptor_ext(b".cue"));
+        assert!(is_disc_descriptor_ext(b".MDS"));
+        assert!(is_disc_image_ext(b".iso"));
+        assert!(is_disc_image_ext(b".mdf"));
+        assert!(is_generic_disc_image_ext(b".bin"));
+        assert!(is_generic_disc_image_ext(b".IMG"));
+
+        assert!(is_clutter_dir(b"@eaDir"));
+        assert!(is_clutter_dir(b"/volume1/video/__MACOSX"));
+        assert!(is_clutter_dir(b".Spotlight-V100"));
+        assert!(!is_clutter_dir(b"Subs"));
+
+        assert!(is_clutter_file(b".DS_Store"));
+        assert!(is_clutter_file(b"Thumbs.db"));
+        assert!(is_clutter_file(b"desktop.ini"));
+        assert!(is_clutter_file(b"._Movie.mkv"));
+        assert!(is_clutter_file(b"/path/to/._Movie.mkv"));
+        assert!(!is_clutter_file(b"._"));
+        assert!(!is_clutter_file(b".hidden.mkv"));
+        assert!(!is_clutter_file(b"Movie.mkv"));
+
+        // FileTypesMediaExtensionsTest
+        assert!(is_parity_ext(b".par2"));
+        assert!(is_parity_ext(b".PAR2"));
+        assert!(is_parity_ext(b".sfv"));
+        assert!(!is_parity_ext(b".par"));
+
+        assert!(is_video_ext(b".mkv"));
+        assert!(is_video_ext(b".MP4"));
+        assert!(!is_video_ext(b".mp3"));
+
+        assert!(is_audio_ext(b".flac"));
+        assert!(is_audio_ext(b".MP3"));
+        assert!(!is_audio_ext(b".mkv"));
+
+        assert!(is_subtitle_ext(b".srt"));
+        assert!(is_subtitle_ext(b".SUP"));
+        assert!(is_nfo_ext(b".nfo"));
+        assert!(is_nfo_ext(b".INFO"));
+        assert!(is_book_ext(b".epub"));
+        assert!(is_book_ext(b".PDF"));
+        assert!(is_image_ext(b".jpg"));
+        assert!(is_image_ext(b".PNG"));
+
+        // FileTypesKnownCollectionExtensionTest
+        assert!(is_known_collection_ext(b".mkv"));
+        assert!(is_known_collection_ext(b".flac"));
+        assert!(is_known_collection_ext(b".srt"));
+        assert!(is_known_collection_ext(b".nfo"));
+        assert!(is_known_collection_ext(b".epub"));
+        assert!(is_known_collection_ext(b".jpg"));
+        assert!(is_known_collection_ext(b".rar"));
+        assert!(is_known_collection_ext(b".r00"));
+        assert!(is_known_collection_ext(b".001"));
+        assert!(is_known_collection_ext(b".par2"));
+        assert!(is_known_collection_ext(b".vob"));
+        assert!(is_known_collection_ext(b".iso"));
+        assert!(is_known_collection_ext(b".cue"));
+        assert!(is_known_collection_ext(b".bin"));
+
+        assert!(!is_known_collection_ext(b""));
+        assert!(!is_known_collection_ext(b"mkv"));
+        assert!(!is_known_collection_ext(b".0001"));
+        assert!(!is_known_collection_ext(b".a1b2"));
+
+        // FileTypesSniffExtensionHeaderTest
+        assert_eq!(sniff_extension(b"%PDF-1.7\n"), c".pdf");
+        assert_eq!(sniff_extension(b"\x1a\x45\xdf\xa3\x93\x42\x82\x88matroska"), c".mkv");
+        assert_eq!(sniff_extension(b"\x1a\x45\xdf\xa3\x93\x42\x82\x84webm"), c".webm");
+        assert_eq!(sniff_extension(b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00"), c".mp4");
+        assert_eq!(sniff_extension(b"\x00\x00\x00\x18ftypM4V \x00\x00\x00\x00"), c".m4v");
+        assert_eq!(sniff_extension(b"\x00\x00\x00\x18ftypM4A \x00\x00\x00\x00"), c".m4a");
+        assert_eq!(sniff_extension(b"\x00\x00\x00\x18ftypM4B \x00\x00\x00\x00"), c".m4b");
+        assert_eq!(sniff_extension(b"\x00\x00\x00\x14ftypqt  \x20\x05\x03\x00"), c".mov");
+        assert_eq!(sniff_extension(b"\x00\x00\x00\x1cmoovlmvhd"), c".mp4");
+        assert_eq!(sniff_extension(b"RIFF\x24\x00\x00\x00AVI LIST"), c".avi");
+        assert_eq!(sniff_extension(b"RIFF\x24\x00\x00\x00WAVEfmt "), c".wav");
+        assert_eq!(sniff_extension(b"RIFF\x24\x00\x00\x00WEBPVP8 "), c".webp");
+        assert_eq!(sniff_extension(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"), c".png");
+        assert_eq!(sniff_extension(b"GIF89a\x01\x00\x01\x00"), c".gif");
+        assert_eq!(sniff_extension(b"\xff\xd8\xff\xe0\x00\x10JFIF"), c".jpg");
+        assert_eq!(
+            sniff_extension(b"BM\x36\x00\x00\x00\x00\x00\x00\x00\x36\x00\x00\x00"),
+            c".bmp"
+        );
+        assert_eq!(sniff_extension(b"fLaC\x00\x00\x00\x22"), c".flac");
+        assert_eq!(sniff_extension(b"ID3\x04\x00\x00\x00\x00\x00\x00"), c".mp3");
+        assert_eq!(sniff_extension(b"\xff\xfb\x90\x64\x00\x00"), c".mp3");
+        assert_eq!(sniff_extension(b"OggS\x00\x02\x00\x00"), c".ogg");
+        assert_eq!(
+            sniff_extension(b"PK\x03\x04\x14\x00\x00\x00\x08\x00file.txt"),
+            c".zip"
+        );
+        assert_eq!(
+            sniff_extension(
+                b"PK\x03\x04\x14\x00\x00\x00\x00\x00mimetypeapplication/epub+zip"
+            ),
+            c".epub"
+        );
+        assert_eq!(sniff_extension(b"AT&TFORM\x00\x00\x01\x00DJVUINFO"), c".djvu");
+        assert_eq!(sniff_extension(b"Rar!\x1a\x07\x00\xcf\x90"), c".rar");
+        assert_eq!(sniff_extension(b"7z\xbc\xaf\x27\x1c\x00\x04"), c".7z");
+        assert_eq!(sniff_extension(b"\x1f\x8b\x08\x00\x00\x00\x00\x00"), c".gz");
+        assert_eq!(sniff_extension(b"BZh91AY&SY"), c".bz2");
+        assert_eq!(sniff_extension(b"\xfd7zXZ\x00\x00\x04"), c".xz");
+        assert_eq!(sniff_extension(b"\x1f\x9d\x90"), c".Z");
+
+        let mut ts = vec![0u8; 377];
+        ts[0] = 0x47;
+        ts[188] = 0x47;
+        ts[376] = 0x47;
+        assert_eq!(sniff_extension(&ts), c".ts");
+
+        let mut mobi = vec![0u8; 68];
+        mobi[60..68].copy_from_slice(b"BOOKMOBI");
+        assert_eq!(sniff_extension(&mobi), c".mobi");
+
+        let mut tar = vec![0u8; 263];
+        tar[257..262].copy_from_slice(b"ustar");
+        assert_eq!(sniff_extension(&tar), c".tar");
+
+        let asf_hdr = b"\x30\x26\xb2\x75\x8e\x66\xcf\x11\xa6\xd9\x00\xaa\x00\x62\xce\x6c";
+        let asf_vid = b"\xc0\xef\x19\xbc\x4d\x5b\xcf\x11\xa8\xfd\x00\x80\x5f\x5c\x44\x2b";
+        let asf_aud = b"\x40\x9e\x69\xf8\x4d\x5b\xcf\x11\xa8\xfd\x00\x80\x5f\x5c\x44\x2b";
+        assert_eq!(sniff_extension(asf_hdr), c"");
+        let mut wmv = asf_hdr.to_vec();
+        wmv.extend_from_slice(asf_vid);
+        assert_eq!(sniff_extension(&wmv), c".wmv");
+        let mut wma = asf_hdr.to_vec();
+        wma.extend_from_slice(asf_aud);
+        assert_eq!(sniff_extension(&wma), c".wma");
+
+        assert_eq!(sniff_extension(b""), c"");
+        assert_eq!(sniff_extension(b"plain text file contents"), c"");
+
+        // FileTypesSniffExtensionFileTest
+        let tmp_path = std::env::temp_dir().join(format!(
+            "nzbget-filetypes-sniff-rust-{}.bin",
+            std::process::id()
+        ));
+        std::fs::write(&tmp_path, b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR").unwrap();
+        assert_eq!(sniff_extension_file(&tmp_path), c".png");
+        let _ = std::fs::remove_file(&tmp_path);
+        assert_eq!(sniff_extension_file(&tmp_path), c"");
+    }
 }

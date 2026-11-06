@@ -14480,16 +14480,6 @@ pub unsafe extern "C" fn nzbget_rs_snh_http_get_calc_watchdog_wait(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_snh_xml_reader_local_name_offset(name: *const c_char) -> usize {
-    let s = if name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(name).to_bytes()
-    };
-    crate::dupesearch_nzb::xml_reader_local_name_offset(s)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_snh_http_client_find_header_colon(
     line: *const c_char,
     len: usize,
@@ -18565,84 +18555,6 @@ pub unsafe extern "C" fn nzbget_rs_nntp_health_classify_body_fetch_result(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupesearch_valid_message_id(
-    id: *const c_char,
-    id_len: usize,
-) -> c_int {
-    let slice = if id.is_null() || id_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(id.cast::<u8>(), id_len)
-    };
-    i32::from(crate::dupesearch_nzb::valid_message_id(slice))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupesearch_accum_segment_bytes(
-    file_bytes: i64,
-    seg_bytes: i64,
-    is_par: c_int,
-    geometry_valid: c_int,
-    out_geometry_valid: *mut c_int,
-    out_push_article_size: *mut c_int,
-) -> i64 {
-    let (new_bytes, new_geom, push_art) =
-        crate::dupesearch_nzb::accum_segment_bytes(
-            file_bytes,
-            seg_bytes,
-            is_par != 0,
-            geometry_valid != 0,
-        );
-    if !out_geometry_valid.is_null() {
-        *out_geometry_valid = i32::from(new_geom);
-    }
-    if !out_push_article_size.is_null() {
-        *out_push_article_size = i32::from(push_art);
-    }
-    new_bytes
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupesearch_accum_file_data_totals(
-    is_par: c_int,
-    file_bytes: i64,
-    first_id_empty: c_int,
-    data_files: c_int,
-    data_bytes: i64,
-    geometry_valid: c_int,
-    out_data_files: *mut c_int,
-    out_data_bytes: *mut i64,
-    out_geometry_valid: *mut c_int,
-    out_push_parity_head: *mut c_int,
-    out_push_data_head: *mut c_int,
-) {
-    let (nf, nb, ng, pph, pdh) =
-        crate::dupesearch_nzb::accum_file_data_totals(
-            is_par != 0,
-            file_bytes,
-            first_id_empty != 0,
-            data_files,
-            data_bytes,
-            geometry_valid != 0,
-        );
-    if !out_data_files.is_null() {
-        *out_data_files = nf;
-    }
-    if !out_data_bytes.is_null() {
-        *out_data_bytes = nb;
-    }
-    if !out_geometry_valid.is_null() {
-        *out_geometry_valid = i32::from(ng);
-    }
-    if !out_push_parity_head.is_null() {
-        *out_push_parity_head = i32::from(pph);
-    }
-    if !out_push_data_head.is_null() {
-        *out_push_data_head = i32::from(pdh);
-    }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dupesearch_fnv1a_fingerprint(
     ids: *const *const c_char,
     id_lens: *const usize,
@@ -19913,46 +19825,6 @@ pub unsafe extern "C" fn nzbget_rs_df_build_newznab_queries(
             query.len(),
         );
     }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupesearch_select_main_file(
-    sizes: *const i64,
-    is_par: *const u8,
-    count: usize,
-    out_total_bytes: *mut i64,
-) -> isize {
-    let s_slice = if sizes.is_null() || count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(sizes, count)
-    };
-    let p_slice = if is_par.is_null() || count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(is_par, count)
-    };
-    let (total, idx) = crate::dupesearch_nzb::select_main_file(s_slice, p_slice);
-    if !out_total_bytes.is_null() {
-        *out_total_bytes = total;
-    }
-    idx
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupesearch_select_top_heads(
-    head_bytes: *const i64,
-    count: usize,
-    out_indices: *mut usize,
-    out_cap: usize,
-) -> usize {
-    if head_bytes.is_null() || count == 0 || out_indices.is_null() || out_cap == 0 {
-        return 0;
-    }
-    crate::dupesearch_nzb::select_top_heads(
-        std::slice::from_raw_parts(head_bytes, count),
-        std::slice::from_raw_parts_mut(out_indices, out_cap),
-    )
 }
 
 #[no_mangle]
@@ -22829,39 +22701,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_bytes_eq_ignore_case(
         CStr::from_ptr(b).to_bytes()
     };
     c_int::from(crate::util::bytes_eq_ignore_case(sa, sb))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_nzb_reader_classify_start_element(
-    name: *const c_char,
-    in_file: c_int,
-) -> c_int {
-    let n = if name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(name).to_bytes()
-    };
-    crate::dupesearch_nzb::nzb_reader_classify_start_element(n, in_file != 0)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_nzb_reader_classify_end_element(
-    name: *const c_char,
-    has_meta_type: c_int,
-    in_segment: c_int,
-    in_file: c_int,
-) -> c_int {
-    let n = if name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(name).to_bytes()
-    };
-    crate::dupesearch_nzb::nzb_reader_classify_end_element(
-        n,
-        has_meta_type != 0,
-        in_segment != 0,
-        in_file != 0,
-    )
 }
 
 #[no_mangle]

@@ -27,27 +27,6 @@
 #include "FileSystem.h"
 #include "ContentMap.h"
 
-#ifndef DISABLE_TLS
-#include "OpenSSL.h"
-#endif
-
-/* sequential parse cursor over a ContentSource, mirroring the DiskFile
- * read/seek/eof surface the rar parser was written against */
-class RarSourceCursor
-{
-public:
-	RarSourceCursor(ContentSource& source) : m_source(source) {}
-	int64 Read(void* buffer, int64 size);
-	bool Seek(int64 position, DiskFile::ESeekOrigin origin = DiskFile::soSet);
-	int64 Position() { return m_position; }
-	bool Eof() { return m_eof; }
-
-private:
-	ContentSource& m_source;
-	int64 m_position = 0;
-	bool m_eof = false;
-};
-
 class RarFile
 {
 public:
@@ -112,9 +91,6 @@ public:
 		, m_decryptKey{}
 		, m_decryptIV{}
 		, m_decryptBuf{}
-#ifndef DISABLE_TLS
-		, m_context{ nullptr, &EVP_CIPHER_CTX_free }
-#endif
 		{}
 
 	bool Read();
@@ -148,16 +124,7 @@ private:
 	uint8 m_decryptBuf[16];
 	uint8 m_decryptPos = 16;
 
-#ifndef DISABLE_TLS
-	OpenSSL::EVPCipherCtxPtr m_context;
-#endif
-
 	void LogDebugInfo();
-	bool DecryptRar3Prepare(const uint8 salt[8]);
-	bool DecryptRar5Prepare(uint8 kdfCount, const uint8 salt[16]);
-	bool DecryptInit(int keyLength);
-	bool DecryptBuf(const uint8 in[16], uint8 out[16]);
-	void DecryptFree();
 };
 
 #endif

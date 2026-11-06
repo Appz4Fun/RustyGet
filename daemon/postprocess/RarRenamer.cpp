@@ -23,186 +23,76 @@
 #include "RarRenamer.h"
 #include <exception>
 #include "nzbget_rs.h"
-#include "Log.h"
-#include "Util.h"
-#include "FileSystem.h"
 
 void RarRenamer::Execute()
 {
-	m_progressLabel.Format("Checkingrar-files for %s", *m_infoName);
-	m_stageProgress = 0;
-	UpdateProgress();
-
-	BuildDirList(m_destDir);
-
-	for (CString& destDir : m_dirList)
-	{
-		debug("Checking %s", *destDir);
-		CheckFiles(destDir);
-	}
-}
-
-void RarRenamer::BuildDirList(const char* destDir)
-{
-	m_dirList.push_back(destDir);
-
-	DirBrowser dirBrowser(destDir);
-
-	while (const char* filename = dirBrowser.Next())
-	{
-		if (!IsStopped())
-		{
-			BString<1024> fullFilename("%s%c%s", destDir, PATH_SEPARATOR, filename);
-			if (FileSystem::DirectoryExists(fullFilename))
-			{
-				BuildDirList(fullFilename);
-			}
-			else
-			{
-				m_fileCount++;
-			}
-		}
-	}
-}
-
-void RarRenamer::CheckFiles(const char* destDir)
-{
-	DirBrowser dir(destDir);
-	while (const char* filename = dir.Next())
-	{
-		if (!IsStopped())
-		{
-			BString<1024> fullFilename("%s%c%s", destDir, PATH_SEPARATOR, filename);
-
-			if (!FileSystem::DirectoryExists(fullFilename))
-			{
-				m_progressLabel.Format("Checking file %s", filename);
-				m_stageProgress = m_fileCount > 0 ? m_curFile * 1000 / m_fileCount : 1000;
-				UpdateProgress();
-				m_curFile++;
-
-				CheckOneFile(fullFilename);
-			}
-		}
-	}
-
-	if (!m_volumes.empty())
-	{
-		RenameFiles(destDir);
-	}
-
-	// the next directory starts afresh: kept, this one's volumes (under the
-	// names they had before the rename) were renamed again into each subfolder
-	m_volumes.clear();
-}
-
-void RarRenamer::CheckOneFile(const char* filename)
-{
-	if (m_ignoreExt && Util::MatchFileExt(FileSystem::BaseFileName(filename), m_ignoreExt, ",;"))
-	{
-		return;
-	}
-
-	RarVolume volume(filename);
-	volume.SetPassword(m_password);
-	if (volume.Read())
-	{
-		m_volumes.push_back(std::move(volume));
-	}
-}
-
-void RarRenamer::RenameFile(const char* srcFilename, const char* destFileName)
-{
-	PrintMessage(Message::mkInfo, "Renaming %s to %s", FileSystem::BaseFileName(srcFilename), FileSystem::BaseFileName(destFileName));
-	if (!FileSystem::MoveFile(srcFilename, destFileName))
-	{
-		PrintMessage(Message::mkError, "Could not rename %s to %s: %s", srcFilename, destFileName,
-			*FileSystem::GetLastErrorMessage());
-		return;
-	}
-
-	m_renamedCount++;
-
-	// notify about new file name
-	RegisterRenamedFile(FileSystem::BaseFileName(srcFilename), FileSystem::BaseFileName(destFileName));
-}
-
-void RarRenamer::RenameFiles(const char* destDir)
-{
-	// rust/src/rarrenamer.rs builds the sets and picks the new names; the
-	// file checks, the regular expression and the moves stay here
-	std::vector<std::vector<NzbgetRsRarRenFile>> files;
-	std::vector<NzbgetRsRarRenVolume> volumes;
-	files.reserve(m_volumes.size());
-	volumes.reserve(m_volumes.size());
-	for (RarVolume& volume : m_volumes)
-	{
-		files.emplace_back();
-		for (RarFile& file : *volume.GetFiles())
-		{
-			files.back().push_back({file.GetFilename(), strlen(file.GetFilename()), file.GetSize(),
-				file.GetSplitBefore(), file.GetSplitAfter()});
-		}
-		volumes.push_back({volume.GetFilename(), strlen(volume.GetFilename()), volume.GetVersion(),
-			volume.GetVolumeNo(), volume.GetMultiVolume(), volume.GetHasNextVolume(), volume.GetNewNaming(),
-			files.back().data(), files.back().size()});
-	}
-
 	struct Context
 	{
-		RarRenamer* renamer;
-		RegEx regExPart{".*.part([0-9]+)\\.rar$"};
-		std::exception_ptr error{};
-	} context{this};
+		RarRenamer* self;
+		std::exception_ptr error;
 
-	NzbgetRsRarRenEnv env{};
+		int Fail()
+		{
+			error = std::current_exception();
+			return -1;
+		}
+	} context{this, nullptr};
+
+	NzbgetRsRarRenamerRunEnv env{};
 	env.ctx = &context;
-	env.fileExists = [](void* ctx, const char* path) -> int
+	env.stopped = [](void* ctx) noexcept -> int
 	{
-		Context* c = static_cast<Context*>(ctx);
-		if (c->error) return 0;
+		Context& c = *static_cast<Context*>(ctx);
+		if (c.error) return -1;
+		try { return c.self->IsStopped() ? 1 : 0; } catch (...) { return c.Fail(); }
+	};
+	env.progress = [](void* ctx, const char* label, int stage) noexcept -> int
+	{
+		Context& c = *static_cast<Context*>(ctx);
+		if (c.error) return -1;
 		try
 		{
-			return FileSystem::FileExists(path) ? 1 : 0;
-		}
-		catch (...)
-		{
-			c->error = std::current_exception();
+			c.self->m_progressLabel = label;
+			c.self->m_stageProgress = stage;
+			c.self->UpdateProgress();
 			return 0;
 		}
+		catch (...) { return c.Fail(); }
 	};
-	env.matchPart = [](void* ctx, const char* name, size_t* start, size_t* len) -> int
+	env.message = [](void* ctx, int kind, const char* text) noexcept -> int
 	{
-		Context* c = static_cast<Context*>(ctx);
-		if (c->error) return 0;
+		Context& c = *static_cast<Context*>(ctx);
+		if (c.error) return -1;
 		try
 		{
-			if (!c->regExPart.Match(name)) return 0;
-			*start = (size_t)c->regExPart.GetMatchStart(1);
-			*len = (size_t)c->regExPart.GetMatchLen(1);
-			return 1;
-		}
-		catch (...)
-		{
-			c->error = std::current_exception();
+			c.self->PrintMessage(
+				kind == 0 ? Message::mkInfo : kind == 1 ? Message::mkWarning : Message::mkError,
+				"%s", text);
 			return 0;
 		}
+		catch (...) { return c.Fail(); }
 	};
-	env.rename = [](void* ctx, size_t index, const char* dest)
+	env.registerRenamed = [](void* ctx, const char* oldBase, const char* newBase) noexcept -> int
 	{
-		Context* c = static_cast<Context*>(ctx);
-		if (c->error) return;
+		Context& c = *static_cast<Context*>(ctx);
+		if (c.error) return -1;
 		try
 		{
-			c->renamer->RenameFile(c->renamer->m_volumes[index].GetFilename(), dest);
+			c.self->RegisterRenamedFile(oldBase, newBase);
+			return 0;
 		}
-		catch (...)
-		{
-			c->error = std::current_exception();
-		}
+		catch (...) { return c.Fail(); }
 	};
 
-	nzbget_rs_rar_rename_files(destDir, volumes.data(), volumes.size(), &env);
+#ifndef DISABLE_TLS
+	const int tlsEnabled = 1;
+#else
+	const int tlsEnabled = 0;
+#endif
+
+	nzbget_rs_rar_renamer_execute(
+		&env, *m_destDir, *m_infoName, *m_password, *m_ignoreExt, tlsEnabled, &m_renamedCount);
+
 	if (context.error)
 	{
 		std::rethrow_exception(context.error);

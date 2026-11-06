@@ -24,54 +24,10 @@
 #include "RarReader.h"
 #include <exception>
 #include "nzbget_rs.h"
-#include "StreamCrypto.h"
 #include "Log.h"
 #include "Util.h"
 #include "FileSystem.h"
 #include "ContentMap.h"
-
-int64 RarSourceCursor::Read(void* buffer, int64 size)
-{
-	int64 rem = (int64)((uint64)m_source.Size() - (uint64)m_position);
-	int64 clampedRem = rem > 0 ? rem : 0;
-	int64 available = size < clampedRem ? size : clampedRem;
-	if (available < size)
-	{
-		m_eof = true;	// mimic feof: only a read past the end raises it
-	}
-	if (available <= 0)
-	{
-		return 0;
-	}
-	if (!m_source.Read(m_position, buffer, available))
-	{
-		return 0;	// source refused (donor article missing / target hole)
-	}
-	m_position = (int64)((uint64)m_position + (uint64)available);
-	return available;
-}
-
-bool RarSourceCursor::Seek(int64 position, DiskFile::ESeekOrigin origin)
-{
-	// Header sizes can wrap the cursor. Use unsigned arithmetic explicitly:
-	// signed overflow here is undefined even though the parser needs wrapping.
-	int64 target = position;
-	if (origin == DiskFile::soCur)
-	{
-		target = (int64)((uint64)m_position + (uint64)position);
-	}
-	else if (origin == DiskFile::soEnd)
-	{
-		target = (int64)((uint64)m_source.Size() + (uint64)position);
-	}
-	if (target < 0)
-	{
-		return false;
-	}
-	m_position = target;
-	m_eof = false;	// like fseek clearing the eof indicator
-	return true;
-}
 
 bool RarVolume::Read()
 {
@@ -150,33 +106,6 @@ bool RarVolume::ReadFrom(ContentSource& source)
 			return ok ? 1 : 0;
 		});
 	};
-	io.rar3Prepare = [](void* ctx, const uint8_t* salt) -> int
-	{
-		return RarCall(ctx, 0, [=](RarContext* c) { return c->volume->DecryptRar3Prepare(salt) ? 1 : 0; });
-	};
-	io.rar5Prepare = [](void* ctx, uint8_t kdfCount, const uint8_t* salt) -> int
-	{
-		return RarCall(ctx, 0, [=](RarContext* c) { return c->volume->DecryptRar5Prepare(kdfCount, salt) ? 1 : 0; });
-	};
-	io.init = [](void* ctx, int keyBits, const uint8_t* iv) -> int
-	{
-		return RarCall(ctx, 0, [=](RarContext* c)
-		{
-			if (iv)
-			{
-				memcpy(c->volume->m_decryptIV, iv, sizeof(c->volume->m_decryptIV));
-			}
-			return c->volume->DecryptInit(keyBits) ? 1 : 0;
-		});
-	};
-	io.decrypt = [](void* ctx, const uint8_t* in, uint8_t* out) -> int
-	{
-		return RarCall(ctx, 0, [=](RarContext* c) { return c->volume->DecryptBuf(in, out) ? 1 : 0; });
-	};
-	io.free = [](void* ctx)
-	{
-		RarCall(ctx, 0, [](RarContext* c) { c->volume->DecryptFree(); return 0; });
-	};
 	io.addFile = [](void* ctx, const NzbgetRsRarFile* f) -> int
 	{
 		return RarCall(ctx, 0, [f](RarContext* c)
@@ -232,6 +161,13 @@ bool RarVolume::ReadFrom(ContentSource& source)
 	state.hasPassword = !m_password.empty();
 	memcpy(state.decryptBuf, m_decryptBuf, sizeof(m_decryptBuf));
 	state.decryptPos = m_decryptPos;
+#ifndef DISABLE_TLS
+	state.useNativeCipher = 1;
+	state.password = m_password.c_str();
+	state.passwordLen = m_password.size();
+	memcpy(state.decryptKey, m_decryptKey, sizeof(m_decryptKey));
+	memcpy(state.decryptIv, m_decryptIV, sizeof(m_decryptIV));
+#endif
 
 	bool ok = nzbget_rs_rar_read(&io, &state) != 0;
 
@@ -248,10 +184,13 @@ bool RarVolume::ReadFrom(ContentSource& source)
 	m_encrypted = state.encrypted;
 	memcpy(m_decryptBuf, state.decryptBuf, sizeof(m_decryptBuf));
 	m_decryptPos = state.decryptPos;
+#ifndef DISABLE_TLS
+	memcpy(m_decryptKey, state.decryptKey, sizeof(m_decryptKey));
+	memcpy(m_decryptIV, state.decryptIv, sizeof(m_decryptIV));
+#endif
 
 	if (context.error)
 	{
-		DecryptFree();
 		std::rethrow_exception(context.error);
 	}
 
@@ -273,58 +212,5 @@ void RarVolume::LogDebugInfo()
 			file.m_time, file.m_size, file.m_attr,
 			file.m_splitBefore, file.m_splitAfter, file.m_filename.c_str());
 	}
-#endif
-}
-
-bool RarVolume::DecryptRar3Prepare(const uint8 salt[8])
-{
-	// key schedule lives in StreamCrypto so header decryption here and M3 stream
-	// repair derive identical keys; writes m_decryptKey[0..15] and m_decryptIV
-	return StreamCrypto::DeriveRar3(m_password.c_str(), salt, m_decryptKey, m_decryptIV);
-}
-
-bool RarVolume::DecryptRar5Prepare(uint8 kdfCount, const uint8 salt[16])
-{
-	return StreamCrypto::DeriveRar5(m_password.c_str(), kdfCount, salt, m_decryptKey);
-}
-
-bool RarVolume::DecryptInit(int keyLength)
-{
-#ifndef DISABLE_TLS
-	m_context.reset(EVP_CIPHER_CTX_new());
-	if (!m_context) 
-		return false;
-
-	if (!EVP_DecryptInit(m_context.get(),
-		keyLength == 128 ? EVP_aes_128_cbc() : EVP_aes_256_cbc(),
-		m_decryptKey, m_decryptIV))
-		return false;
-	// RAR encrypts headers/data as raw CBC with no PKCS#7 padding. Leaving
-	// OpenSSL's default padding on makes EVP_DecryptUpdate buffer the final
-	// block, so a single 16-byte call yields nothing (outlen 0) and the block
-	// stream comes back garbage - which is why -hp header parsing never worked.
-	EVP_CIPHER_CTX_set_padding(m_context.get(), 0);
-	return true;
-#else
-	return false;
-#endif
-}
-
-bool RarVolume::DecryptBuf(const uint8 in[16], uint8 out[16])
-{
-#ifndef DISABLE_TLS
-	// padding is disabled in DecryptInit, so one 16-byte block in yields exactly
-	// one 16-byte block out
-	int outlen = 0;
-	return EVP_DecryptUpdate(m_context.get(), out, &outlen, in, 16) != 0 && outlen == 16;
-#else
-	return false;
-#endif
-}
-
-void RarVolume::DecryptFree()
-{
-#ifndef DISABLE_TLS
-	m_context.reset();
 #endif
 }

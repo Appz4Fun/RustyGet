@@ -4101,6 +4101,20 @@ impl NativeRarCipher {
             ..Self::default()
         }
     }
+
+    pub fn with_state(password: &[u8], key: [u8; 32], iv: [u8; 16]) -> Self {
+        Self {
+            password: password.to_vec(),
+            key,
+            iv,
+            aes: None,
+            cv: [0; 16],
+        }
+    }
+
+    pub fn state(&self) -> ([u8; 32], [u8; 16]) {
+        (self.key, self.iv)
+    }
 }
 
 impl crate::rarreader::Cipher for NativeRarCipher {

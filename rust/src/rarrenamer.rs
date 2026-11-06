@@ -42,6 +42,186 @@ pub trait Env {
     fn rename(&mut self, index: usize, dest: &[u8]);
 }
 
+/// Matches `RegEx(".*.part([0-9]+)\\.rar$")` (`REG_EXTENDED | REG_ICASE`, without `REG_NEWLINE`)
+/// on `name` (up to its first NUL), returning capture group 1's `(start, len)`.
+pub fn match_part_regex(name: &[u8]) -> Option<(usize, usize)> {
+    let s = c(name);
+    if s.len() < 9 || !s[s.len() - 4..].eq_ignore_ascii_case(b".rar") {
+        return None;
+    }
+    let stem = &s[..s.len() - 4];
+    let digit_start = stem.iter().rposition(|b| !b.is_ascii_digit()).map_or(0, |p| p + 1);
+    if digit_start == stem.len() || digit_start < 5 {
+        return None;
+    }
+    if !stem[digit_start - 4..digit_start].eq_ignore_ascii_case(b"part") {
+        return None;
+    }
+    Some((digit_start, stem.len() - digit_start))
+}
+
+/// Host callbacks for `RarRenamer::Execute` (`daemon/postprocess/RarRenamer.cpp`).
+pub trait RunCallbacks {
+    fn stopped(&mut self) -> Result<bool, ()>;
+    fn progress(&mut self, label: &[u8], stage_progress: i32) -> Result<(), ()>;
+    fn message(&mut self, kind: i32, text: &[u8]) -> Result<(), ()>;
+    fn register_renamed(&mut self, old_base: &[u8], new_base: &[u8]) -> Result<(), ()>;
+}
+
+/// `RarRenamer::Execute` (`daemon/postprocess/RarRenamer.cpp`):
+/// Recursively scans `dest_dir`, parses RAR3/RAR5 volumes, and renames any
+/// misnamed complete archive sets in each directory.
+pub fn execute_all(
+    dest_dir: &[u8],
+    info_name: &[u8],
+    password: &[u8],
+    ignore_ext: &[u8],
+    tls_enabled: bool,
+    renamed_count: &mut i32,
+    cb: &mut dyn RunCallbacks,
+) -> Result<(), ()> {
+    let init_label = cut(&[b"Checkingrar-files for ", c(info_name)].concat()).to_vec();
+    cb.progress(&init_label, 0)?;
+
+    let mut dir_list: Vec<Vec<u8>> = Vec::new();
+    let mut file_count: i32 = 0;
+    let mut cur_file: i32 = 0;
+
+    fn build_dir_list(
+        dir: &[u8],
+        dir_list: &mut Vec<Vec<u8>>,
+        file_count: &mut i32,
+        cb: &mut dyn RunCallbacks,
+    ) -> Result<(), ()> {
+        dir_list.push(c(dir).to_vec());
+        for filename in crate::fsops::list_dir_entries(dir) {
+            if !cb.stopped()? {
+                let full = cut(&[c(dir), &[crate::paths::PATH_SEPARATOR], c(&filename)].concat()).to_vec();
+                if crate::fsops::directory_exists(&full, &crate::fsops::posix_stat) {
+                    build_dir_list(&full, dir_list, file_count, cb)?;
+                } else {
+                    *file_count = file_count.wrapping_add(1);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    build_dir_list(dest_dir, &mut dir_list, &mut file_count, cb)?;
+
+    let ignore_c = c(ignore_ext);
+    let pass_c = c(password);
+
+    for dir in dir_list {
+        let mut volumes: Vec<Volume> = Vec::new();
+        for filename in crate::fsops::list_dir_entries(&dir) {
+            if !cb.stopped()? {
+                let full = cut(&[c(&dir), &[crate::paths::PATH_SEPARATOR], c(&filename)].concat()).to_vec();
+                if !crate::fsops::directory_exists(&full, &crate::fsops::posix_stat) {
+                    let label = cut(&[b"Checking file ", c(&filename)].concat()).to_vec();
+                    let stage = if file_count > 0 {
+                        cur_file.wrapping_mul(1000) / file_count
+                    } else {
+                        1000
+                    };
+                    cb.progress(&label, stage)?;
+                    cur_file = cur_file.wrapping_add(1);
+
+                    let ascii_fold = crate::wildmask::Lower::Fold(&|b| b.to_ascii_lowercase() as i32);
+                    if !ignore_c.is_empty()
+                        && crate::util::match_file_ext(base_name(&full), ignore_c, b",;", &ascii_fold, &ascii_fold)
+                    {
+                        continue;
+                    }
+
+                    let (ok, rvol, rfiles) =
+                        crate::rarreader::read_volume_file(&full, pass_c, tls_enabled);
+                    if ok {
+                        let files = rfiles
+                            .into_iter()
+                            .map(|f| File {
+                                name: f.filename,
+                                size: f.size,
+                                split_before: f.split_before,
+                                split_after: f.split_after,
+                            })
+                            .collect();
+                        volumes.push(Volume {
+                            filename: full,
+                            version: rvol.version,
+                            volume_no: rvol.volume_no,
+                            multi_volume: rvol.multi_volume,
+                            has_next_volume: rvol.has_next_volume,
+                            new_naming: rvol.new_naming,
+                            files,
+                        });
+                    }
+                }
+            }
+        }
+
+        if !volumes.is_empty() {
+            struct NativeRenEnv<'a> {
+                volumes: &'a [Volume],
+                renamed_count: &'a mut i32,
+                cb: &'a mut dyn RunCallbacks,
+                aborted: bool,
+            }
+            impl Env for NativeRenEnv<'_> {
+                fn file_exists(&mut self, path: &[u8]) -> bool {
+                    if self.aborted {
+                        return false;
+                    }
+                    crate::fsops::file_exists(path, &crate::fsops::posix_stat)
+                }
+                fn match_part(&mut self, name: &[u8]) -> Option<(usize, usize)> {
+                    if self.aborted {
+                        return None;
+                    }
+                    match_part_regex(name)
+                }
+                fn rename(&mut self, index: usize, dest: &[u8]) {
+                    if self.aborted {
+                        return;
+                    }
+                    let src = &self.volumes[index].filename;
+                    let info_msg = [b"Renaming ", base_name(src), b" to ", base_name(dest)].concat();
+                    if self.cb.message(0, &info_msg).is_err() {
+                        self.aborted = true;
+                        return;
+                    }
+                    let src_c = std::ffi::CString::new(c(src)).unwrap_or_default();
+                    let dst_c = std::ffi::CString::new(c(dest)).unwrap_or_default();
+                    if !crate::fsops::move_file(&src_c, &dst_c) {
+                        let err = crate::fsops::error_message(crate::fsops::last_errno());
+                        let err_msg = [b"Could not rename ", c(src), b" to ", c(dest), b": ", &err].concat();
+                        if self.cb.message(2, &err_msg).is_err() {
+                            self.aborted = true;
+                        }
+                        return;
+                    }
+                    *self.renamed_count = self.renamed_count.wrapping_add(1);
+                    if self.cb.register_renamed(base_name(src), base_name(dest)).is_err() {
+                        self.aborted = true;
+                    }
+                }
+            }
+            let mut env = NativeRenEnv {
+                volumes: &volumes,
+                renamed_count,
+                cb,
+                aborted: false,
+            };
+            rename_files(&dir, &volumes, &mut env);
+            if env.aborted {
+                return Err(());
+            }
+        }
+    }
+
+    Ok(())
+}
+
 const BSTRING_MAX: usize = 1023;
 
 fn cut(s: &[u8]) -> &[u8] {
@@ -306,122 +486,44 @@ mod tests {
 
     #[test]
     fn rar_renamer_full_suite_port_from_cpp() {
-        struct BytesSource(Vec<u8>);
-        impl crate::rarreader::Source for BytesSource {
-            fn size(&mut self) -> i64 { self.0.len() as i64 }
-            fn read(&mut self, offset: i64, buf: &mut [u8]) -> bool {
-                let Some(slice) = self.0.get(offset as usize..offset as usize + buf.len()) else { return false };
-                buf.copy_from_slice(slice);
-                true
-            }
-        }
-
-        struct FsRarEnv<'a> {
-            volumes: &'a [Volume],
-            renamed_count: i32,
+        #[derive(Default)]
+        struct TestCallbacks {
             errors: i32,
+            renamed_pairs: Vec<(Vec<u8>, Vec<u8>)>,
         }
-
-        impl Env for FsRarEnv<'_> {
-            fn file_exists(&mut self, path: &[u8]) -> bool {
-                std::path::Path::new(std::str::from_utf8(path).unwrap()).is_file()
+        impl RunCallbacks for TestCallbacks {
+            fn stopped(&mut self) -> Result<bool, ()> {
+                Ok(false)
             }
-            fn match_part(&mut self, name: &[u8]) -> Option<(usize, usize)> {
-                // RegEx(".*.part([0-9]+)\\.rar$") with greedy ".*." before "part"
-                let s = c(name);
-                if !s.ends_with(b".rar") || s.len() < 9 {
-                    return None;
-                }
-                let stem = &s[..s.len() - 4];
-                let digit_start = stem.iter().rposition(|b| !b.is_ascii_digit()).map_or(0, |p| p + 1);
-                if digit_start == stem.len() || digit_start < 5 {
-                    return None;
-                }
-                if &stem[digit_start - 4..digit_start] != b"part" {
-                    return None;
-                }
-                Some((digit_start, stem.len() - digit_start))
+            fn progress(&mut self, _label: &[u8], _stage_progress: i32) -> Result<(), ()> {
+                Ok(())
             }
-            fn rename(&mut self, index: usize, dest: &[u8]) {
-                let src_path = std::path::Path::new(std::str::from_utf8(&self.volumes[index].filename).unwrap());
-                let dst_path = std::path::Path::new(std::str::from_utf8(dest).unwrap());
-                if std::fs::rename(src_path, dst_path).is_ok() {
-                    self.renamed_count += 1;
-                } else {
+            fn message(&mut self, kind: i32, _text: &[u8]) -> Result<(), ()> {
+                if kind == 2 {
                     self.errors += 1;
                 }
+                Ok(())
             }
-        }
-
-        fn build_dir_list(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-            out.push(dir.to_path_buf());
-            if let Ok(entries) = std::fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    let p = entry.path();
-                    if p.is_dir() {
-                        build_dir_list(&p, out);
-                    }
-                }
+            fn register_renamed(&mut self, old_base: &[u8], new_base: &[u8]) -> Result<(), ()> {
+                self.renamed_pairs.push((old_base.to_vec(), new_base.to_vec()));
+                Ok(())
             }
         }
 
         fn execute_rar_renamer(dest_dir: &std::path::Path, password: Option<&[u8]>) -> (i32, i32) {
-            let mut dirs = Vec::new();
-            build_dir_list(dest_dir, &mut dirs);
-            let mut total_renamed = 0;
-            let mut total_errors = 0;
-
-            for dir in dirs {
-                let mut volumes = Vec::new();
-                if let Ok(entries) = std::fs::read_dir(&dir) {
-                    for entry in entries.flatten() {
-                        let p = entry.path();
-                        if p.is_dir() {
-                            continue;
-                        }
-                        let Ok(bytes) = std::fs::read(&p) else { continue };
-                        let mut source = BytesSource(bytes);
-                        let mut rvol = crate::rarreader::Volume {
-                            has_password: password.is_some(),
-                            ..crate::rarreader::Volume::default()
-                        };
-                        let mut cipher = crate::streamrepair::NativeRarCipher::new(password.unwrap_or(b""));
-                        let mut rfiles: Vec<crate::rarreader::RarFile> = Vec::new();
-                        if crate::rarreader::read_from(&mut rvol, &mut source, &mut cipher, &mut rfiles) {
-                            let files = rfiles
-                                .into_iter()
-                                .map(|f| File {
-                                    name: f.filename,
-                                    size: f.size,
-                                    split_before: f.split_before,
-                                    split_after: f.split_after,
-                                })
-                                .collect();
-                            volumes.push(Volume {
-                                filename: p.to_string_lossy().as_bytes().to_vec(),
-                                version: rvol.version,
-                                volume_no: rvol.volume_no,
-                                multi_volume: rvol.multi_volume,
-                                has_next_volume: rvol.has_next_volume,
-                                new_naming: rvol.new_naming,
-                                files,
-                            });
-                        }
-                    }
-                }
-                if !volumes.is_empty() {
-                    let mut env = FsRarEnv {
-                        volumes: &volumes,
-                        renamed_count: 0,
-                        errors: 0,
-                    };
-                    let dir_bytes = dir.to_string_lossy().as_bytes().to_vec();
-                    rename_files(&dir_bytes, &volumes, &mut env);
-                    total_renamed += env.renamed_count;
-                    total_errors += env.errors;
-                }
-            }
-            (total_renamed, total_errors)
+            let mut renamed_count = 0;
+            let mut cb = TestCallbacks::default();
+            execute_all(
+                dest_dir.to_string_lossy().as_bytes(),
+                b"test",
+                password.unwrap_or(b""),
+                b"",
+                true,
+                &mut renamed_count,
+                &mut cb,
+            )
+            .unwrap();
+            (renamed_count, cb.errors)
         }
 
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -633,5 +735,70 @@ mod tests {
                 assert_eq!(errors, 0);
             },
         );
+    }
+
+    #[test]
+    fn rar_renamer_metadata_port_from_cpp() {
+        struct ProbeEnv<'a> {
+            volumes: &'a [Volume],
+            trace: Vec<Vec<u8>>,
+            checks: i32,
+            collisions: i32,
+        }
+        impl Env for ProbeEnv<'_> {
+            fn file_exists(&mut self, path: &[u8]) -> bool {
+                self.trace.push([b"exists:".as_slice(), c(path)].concat());
+                self.checks += 1;
+                self.checks <= self.collisions
+            }
+            fn match_part(&mut self, name: &[u8]) -> Option<(usize, usize)> {
+                self.trace.push([b"match:".as_slice(), c(name)].concat());
+                match_part_regex(name)
+            }
+            fn rename(&mut self, index: usize, dest: &[u8]) {
+                let src = c(&self.volumes[index].filename);
+                self.trace.push([b"rename:".as_slice(), src, b">", c(dest)].concat());
+            }
+        }
+
+        // Verify match_part_regex on all edge cases from rarrenamer_metadata.cpp
+        assert_eq!(match_part_regex(b"a.part1.rar"), Some((6, 1)));
+        assert_eq!(match_part_regex(b"a.PART1.RAR"), Some((6, 1)));
+        assert_eq!(match_part_regex(b"apart1.rar"), Some((5, 1)));
+        assert_eq!(match_part_regex(b"part1.rar"), None);
+        assert_eq!(match_part_regex(b"a.part1.rar\n"), None);
+        assert_eq!(match_part_regex(b"a\n.part1.rar"), Some((7, 1)));
+        assert_eq!(match_part_regex(b"a.part4294967297.rar"), Some((6, 10)));
+        assert_eq!(match_part_regex(b"a.part9999999999999999999999.rar"), Some((6, 22)));
+
+        let run_probe = |vols: &[Volume], collisions: i32| -> Vec<Vec<u8>> {
+            let mut env = ProbeEnv {
+                volumes: vols,
+                trace: Vec::new(),
+                checks: 0,
+                collisions,
+            };
+            rename_files(b"/dir", vols, &mut env);
+            env.trace
+        };
+
+        // Bounded BString<1024> truncation and collision suffixes
+        for &n in &[0usize, 1, 1018, 1019, 1020, 1022, 1023, 1024, 1100] {
+            for ext in [b".mkv".as_slice(), b".long".as_slice()] {
+                let mut name = vec![b'a'; n];
+                name.extend_from_slice(ext);
+                let v = Volume {
+                    filename: b"/dir/obfuscated".to_vec(),
+                    version: 5,
+                    volume_no: 0,
+                    multi_volume: true,
+                    has_next_volume: false,
+                    new_naming: true,
+                    files: vec![File { name, size: 100, split_before: false, split_after: false }],
+                };
+                let trace = run_probe(&[v], 3);
+                assert_eq!(trace.len(), 6); // match, 4 exists checks (3 collisions + 1 free), 1 rename
+            }
+        }
     }
 }

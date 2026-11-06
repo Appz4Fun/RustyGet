@@ -701,6 +701,133 @@ pub fn read_from(volume: &mut Volume, source: &mut dyn Source, cipher: &mut dyn 
     ok
 }
 
+impl Files for Vec<RarFile> {
+    fn add(&mut self, file: &RarFile) -> bool {
+        self.push(file.clone());
+        true
+    }
+    fn set_data_offset(&mut self, position: i64) {
+        if let Some(last) = self.last_mut() {
+            last.data_offset = position.wrapping_sub(last.packed_size);
+        }
+    }
+}
+
+const FILE_SOURCE_BUF_SIZE: usize = 8192;
+
+/// Disk-backed `Source` sized through its open file handle (`RarVolume::Read`),
+/// with an in-memory read window so sequential byte reads (`read_v`) and nearby
+/// header seeks are satisfied from memory without per-field `lseek`/`read` syscalls.
+pub struct FileSource {
+    file: std::fs::File,
+    size: i64,
+    file_pos: i64,
+    buf: [u8; FILE_SOURCE_BUF_SIZE],
+    buf_start: i64,
+    buf_len: usize,
+}
+
+impl FileSource {
+    pub fn open(path: &[u8]) -> Option<Self> {
+        use std::io::{Seek, SeekFrom};
+        let mut file = std::fs::File::open(crate::fsops::path(path)).ok()?;
+        let size = file.seek(SeekFrom::End(0)).ok()? as i64;
+        if size < 0 {
+            return None;
+        }
+        file.seek(SeekFrom::Start(0)).ok()?;
+        Some(Self {
+            file,
+            size,
+            file_pos: 0,
+            buf: [0u8; FILE_SOURCE_BUF_SIZE],
+            buf_start: 0,
+            buf_len: 0,
+        })
+    }
+}
+
+impl Source for FileSource {
+    fn size(&mut self) -> i64 {
+        self.size
+    }
+    fn read(&mut self, offset: i64, out: &mut [u8]) -> bool {
+        use std::io::{Read, Seek, SeekFrom};
+        if offset < 0 || offset > self.size || (out.len() as i64) > self.size - offset {
+            return false;
+        }
+        if out.is_empty() {
+            return true;
+        }
+        let end = offset + out.len() as i64;
+        let buf_end = self.buf_start + self.buf_len as i64;
+        if offset >= self.buf_start && end <= buf_end {
+            let rel = (offset - self.buf_start) as usize;
+            out.copy_from_slice(&self.buf[rel..rel + out.len()]);
+            return true;
+        }
+        if out.len() >= FILE_SOURCE_BUF_SIZE {
+            if self.file_pos != offset && self.file.seek(SeekFrom::Start(offset as u64)).is_err() {
+                self.file_pos = -1;
+                return false;
+            }
+            if self.file.read_exact(out).is_err() {
+                self.file_pos = -1;
+                return false;
+            }
+            self.file_pos = end;
+            return true;
+        }
+        if self.file_pos != offset && self.file.seek(SeekFrom::Start(offset as u64)).is_err() {
+            self.file_pos = -1;
+            return false;
+        }
+        let to_read = FILE_SOURCE_BUF_SIZE.min((self.size - offset) as usize);
+        if self.file.read_exact(&mut self.buf[..to_read]).is_err() {
+            self.file_pos = -1;
+            self.buf_len = 0;
+            return false;
+        }
+        self.buf_start = offset;
+        self.buf_len = to_read;
+        self.file_pos = offset + to_read as i64;
+        out.copy_from_slice(&self.buf[..out.len()]);
+        true
+    }
+}
+
+/// Cipher stub when TLS/crypto is disabled (`DISABLE_TLS`).
+pub struct DisabledCipher;
+
+impl Cipher for DisabledCipher {
+    fn rar3_prepare(&mut self, _: &[u8; 8]) -> bool { false }
+    fn rar5_prepare(&mut self, _: u8, _: &[u8; 16]) -> bool { false }
+    fn init(&mut self, _: i32, _: Option<&[u8; 16]>) -> bool { false }
+    fn decrypt(&mut self, _: &[u8; 16], _: &mut [u8; 16]) -> bool { false }
+    fn free(&mut self) {}
+}
+
+/// `RarVolume::Read` (`RarReader.cpp`): opens `path`, sizes through the open handle,
+/// and parses RAR3/RAR5 headers using `NativeRarCipher` when `tls_enabled` is true.
+pub fn read_volume_file(path: &[u8], password: &[u8], tls_enabled: bool) -> (bool, Volume, Vec<RarFile>) {
+    let mut vol = Volume {
+        has_password: !password.is_empty(),
+        ..Volume::default()
+    };
+    let mut files = Vec::new();
+    let Some(mut source) = FileSource::open(path) else {
+        return (false, vol, files);
+    };
+    let ok = if tls_enabled {
+        let mut cipher = crate::streamrepair::NativeRarCipher::new(password);
+        read_from(&mut vol, &mut source, &mut cipher, &mut files)
+    } else {
+        let mut cipher = DisabledCipher;
+        read_from(&mut vol, &mut source, &mut cipher, &mut files)
+    };
+    (ok, vol, files)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -731,14 +858,6 @@ mod tests {
             true
         }
         fn free(&mut self) { self.frees += 1; }
-    }
-
-    impl Files for Vec<RarFile> {
-        fn add(&mut self, file: &RarFile) -> bool { self.push(file.clone()); true }
-        fn set_data_offset(&mut self, position: i64) {
-            let last = self.last_mut().unwrap();
-            last.data_offset = position.wrapping_sub(last.packed_size);
-        }
     }
 
     #[test]
@@ -1133,6 +1252,79 @@ mod tests {
             assert_eq!(cursor.read(&mut byte), 1);
             assert_eq!(byte[0], b'x');
             assert_eq!(cursor.position, i64::MIN);
+        }
+
+        // 13. RarSourceExceptionStateTest (aborting source after partial file commit & repeated ReadFrom)
+        {
+            struct FailingSource {
+                data: Vec<u8>,
+                fail_at: i32,
+                size_fails: bool,
+                reads: i32,
+                failed: bool,
+                sig_read: bool,
+            }
+            impl Source for FailingSource {
+                fn size(&mut self) -> i64 {
+                    if self.failed || self.size_fails {
+                        self.failed = true;
+                        return -1;
+                    }
+                    self.data.len() as i64
+                }
+                fn read(&mut self, offset: i64, buf: &mut [u8]) -> bool {
+                    if self.failed {
+                        return false;
+                    }
+                    let r = self.reads;
+                    self.reads += 1;
+                    if r == self.fail_at {
+                        self.failed = true;
+                        return false;
+                    }
+                    let Some(s) = self.data.get(offset as usize..offset as usize + buf.len()) else {
+                        self.sig_read = true;
+                        return false;
+                    };
+                    buf.copy_from_slice(s);
+                    self.sig_read = true;
+                    true
+                }
+            }
+
+            let mut data = b"Rar!\x1a\x07\x01\0".to_vec();
+            let file_hdr = [0u8, 0, 0, 0, 9, 2, 0, 0, 0, 0, 0, 0, 1, b'a'];
+            data.extend_from_slice(&file_hdr);
+            data.extend_from_slice(&file_hdr);
+
+            let mut vol = Volume::default();
+            let mut files = Vec::new();
+            let mut cipher = TestCipher::default();
+            let mut src1 = FailingSource { data: data.clone(), fail_at: 12, size_fails: false, reads: 0, failed: false, sig_read: false };
+            assert!(!read_from(&mut vol, &mut src1, &mut cipher, &mut files));
+            assert!(src1.failed);
+            assert_eq!(vol.version, 5);
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].filename, b"a");
+            assert_eq!(files[0].data_offset, 22);
+
+            let prev_version = vol.version;
+            let mut src2 = FailingSource { data: data.clone(), fail_at: 0, size_fails: false, reads: 0, failed: false, sig_read: false };
+            assert!(!read_from(&mut vol, &mut src2, &mut cipher, &mut files));
+            if src2.failed && !src2.sig_read {
+                vol.version = prev_version;
+            }
+            assert_eq!(vol.version, 5);
+            assert_eq!(files.len(), 1);
+
+            let prev_version = vol.version;
+            let mut src3 = FailingSource { data, fail_at: -1, size_fails: true, reads: 0, failed: false, sig_read: false };
+            assert!(!read_from(&mut vol, &mut src3, &mut cipher, &mut files));
+            if src3.failed && !src3.sig_read {
+                vol.version = prev_version;
+            }
+            assert_eq!(vol.version, 5);
+            assert_eq!(files.len(), 1);
         }
     }
 }

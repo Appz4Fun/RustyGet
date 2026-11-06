@@ -23,8 +23,27 @@ extern "C" {
 /// BString<1024>'s capacity
 const BSTRING_MAX: usize = 1023;
 
-fn path(p: &[u8]) -> &Path {
-    Path::new(OsStr::from_bytes(p))
+pub(crate) fn path(p: &[u8]) -> &Path {
+    let nul = p.iter().position(|&b| b == 0).unwrap_or(p.len());
+    Path::new(OsStr::from_bytes(&p[..nul]))
+}
+
+pub(crate) fn posix_stat(p: &[u8]) -> i32 {
+    match std::fs::metadata(path(p)) {
+        Ok(m) if m.is_file() => 1,
+        Ok(m) if m.is_dir() => 2,
+        Ok(_) => 0,
+        Err(e) => -e.raw_os_error().unwrap_or(1),
+    }
+}
+
+pub(crate) fn list_dir_entries(dir: &[u8]) -> Vec<Vec<u8>> {
+    let mut entries = Vec::new();
+    let Ok(rd) = std::fs::read_dir(path(dir)) else { return entries };
+    for entry in rd.flatten() {
+        entries.push(entry.file_name().as_bytes().to_vec());
+    }
+    entries
 }
 
 /// The text of an errno value, cut to BString<1024> (GetLastErrorMessage).
@@ -162,7 +181,7 @@ pub fn expand_home_path(filename: Option<&CStr>, home: Option<&[u8]>) -> Vec<u8>
     b.to_vec()
 }
 
-fn last_errno() -> i32 {
+pub(crate) fn last_errno() -> i32 {
     std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
 

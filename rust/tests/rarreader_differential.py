@@ -299,8 +299,7 @@ int main(int argc, char** argv)
 #ifndef DISABLE_TLS
 	if (!encryptedBoundaries()) return 1;
 #endif
-	if (!wrappingRead<OldRarSourceCursor>() || !wrappingRead<PortRarSourceCursor>() ||
-		!wrappingRead<FallbackRarSourceCursor>()) return 1;
+	if (!wrappingRead<OldRarSourceCursor>() || !wrappingRead<FallbackRarSourceCursor>()) return 1;
 	// Exercise the reference filter as well as agreement between both readers.
 	for (int wrapped = 0; wrapped < 2; ++wrapped)
 	{

@@ -2791,6 +2791,11 @@ pub struct RarVolumeState {
     pub has_password: c_int,
     pub decrypt_buf: [u8; 16],
     pub decrypt_pos: u8,
+    pub use_native_cipher: c_int,
+    pub password: *const c_char,
+    pub password_len: usize,
+    pub decrypt_key: [u8; 32],
+    pub decrypt_iv: [u8; 16],
 }
 
 /// NzbgetRsRarFile: one file of the volume (borrowed for the add_file call).
@@ -2914,9 +2919,24 @@ pub unsafe extern "C" fn nzbget_rs_rar_read(io: *const RarIo, state: *mut RarVol
         decrypt_pos: st.decrypt_pos,
     };
     let mut source = FfiRar(io);
-    let mut cipher = FfiRar(io);
     let mut files = FfiRar(io);
-    let ok = crate::rarreader::read_from(&mut v, &mut source, &mut cipher, &mut files);
+    let ok = if st.use_native_cipher != 0 {
+        let pw = if st.password.is_null() || st.password_len == 0 {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts(st.password.cast::<u8>(), st.password_len)
+        };
+        let mut cipher =
+            crate::streamrepair::NativeRarCipher::with_state(pw, st.decrypt_key, st.decrypt_iv);
+        let res = crate::rarreader::read_from(&mut v, &mut source, &mut cipher, &mut files);
+        let (key, iv) = cipher.state();
+        st.decrypt_key = key;
+        st.decrypt_iv = iv;
+        res
+    } else {
+        let mut cipher = FfiRar(io);
+        crate::rarreader::read_from(&mut v, &mut source, &mut cipher, &mut files)
+    };
     st.version = v.version;
     st.volume_no = v.volume_no;
     st.new_naming = v.new_naming as c_int;
@@ -2928,108 +2948,94 @@ pub unsafe extern "C" fn nzbget_rs_rar_read(io: *const RarIo, state: *mut RarVol
     ok as c_int
 }
 
-/// NzbgetRsRarRenFile
-#[repr(C)]
-pub struct RarRenFile {
-    pub name: *const c_char,
-    pub name_len: usize,
-    pub size: i64,
-    pub split_before: c_int,
-    pub split_after: c_int,
-}
-
-/// NzbgetRsRarRenVolume
-#[repr(C)]
-pub struct RarRenVolume {
-    pub filename: *const c_char,
-    pub filename_len: usize,
-    pub version: c_int,
-    pub volume_no: u32,
-    pub multi_volume: c_int,
-    pub has_next_volume: c_int,
-    pub new_naming: c_int,
-    pub files: *const RarRenFile,
-    pub file_count: usize,
-}
-
-/// NzbgetRsRarRenEnv
-#[repr(C)]
-pub struct RarRenEnv {
-    pub ctx: *mut std::ffi::c_void,
-    pub file_exists: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char) -> c_int>,
-    pub match_part: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *mut usize, *mut usize) -> c_int>,
-    pub rename: Option<unsafe extern "C" fn(*mut std::ffi::c_void, usize, *const c_char)>,
-}
-
-struct FfiRarRen<'a>(&'a RarRenEnv);
-
 fn c_string(b: &[u8]) -> std::ffi::CString {
     // the names come from C strings (no NUL inside)
     std::ffi::CString::new(b).unwrap_or_default()
 }
 
-impl crate::rarrenamer::Env for FfiRarRen<'_> {
-    fn file_exists(&mut self, path: &[u8]) -> bool {
-        let p = c_string(path);
-        self.0.file_exists.is_some_and(|f| unsafe { f(self.0.ctx, p.as_ptr()) } != 0)
+/// NzbgetRsRarRenamerRunEnv
+#[repr(C)]
+pub struct RarRenamerRunEnv {
+    pub ctx: *mut std::ffi::c_void,
+    pub stopped: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
+    pub progress: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, c_int) -> c_int>,
+    pub message: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char) -> c_int>,
+    pub register_renamed:
+        Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *const c_char) -> c_int>,
+}
+
+struct FfiRarRenamerRun<'a>(&'a RarRenamerRunEnv);
+
+impl crate::rarrenamer::RunCallbacks for FfiRarRenamerRun<'_> {
+    fn stopped(&mut self) -> Result<bool, ()> {
+        let Some(f) = self.0.stopped else { return Ok(false) };
+        match unsafe { f(self.0.ctx) } {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(()),
+        }
     }
-    fn match_part(&mut self, name: &[u8]) -> Option<(usize, usize)> {
-        let n = c_string(name);
-        let f = self.0.match_part?;
-        let (mut start, mut len) = (0usize, 0usize);
-        (unsafe { f(self.0.ctx, n.as_ptr(), &mut start, &mut len) } != 0).then_some((start, len))
+    fn progress(&mut self, label: &[u8], stage_progress: i32) -> Result<(), ()> {
+        let Some(f) = self.0.progress else { return Ok(()) };
+        let l = c_string(label);
+        if unsafe { f(self.0.ctx, l.as_ptr(), stage_progress) } == 0 {
+            Ok(())
+        } else {
+            Err(())
+        }
     }
-    fn rename(&mut self, index: usize, dest: &[u8]) {
-        let d = c_string(dest);
-        if let Some(f) = self.0.rename {
-            unsafe { f(self.0.ctx, index, d.as_ptr()) }
+    fn message(&mut self, kind: i32, text: &[u8]) -> Result<(), ()> {
+        let Some(f) = self.0.message else { return Ok(()) };
+        let t = c_string(text);
+        if unsafe { f(self.0.ctx, kind, t.as_ptr()) } == 0 {
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+    fn register_renamed(&mut self, old_base: &[u8], new_base: &[u8]) -> Result<(), ()> {
+        let Some(f) = self.0.register_renamed else { return Ok(()) };
+        let o = c_string(old_base);
+        let n = c_string(new_base);
+        if unsafe { f(self.0.ctx, o.as_ptr(), n.as_ptr()) } == 0 {
+            Ok(())
+        } else {
+            Err(())
         }
     }
 }
 
-/// RarRenamer::RenameFiles for the volumes read from `dir`: renames the sets
-/// not properly named through the callbacks.
+/// RarRenamer::Execute (`rust/src/rarrenamer.rs`): recursively scans `dest_dir`,
+/// parses RAR3/RAR5 volumes, and renames misnamed archive sets. Returns 0 on
+/// completion or -1 if a callback returned nonzero (exception).
 ///
 /// # Safety
-/// `dir` is NUL-terminated; `volumes` points to `count` volumes whose strings
-/// (readable for their stated byte lengths) and file arrays are valid for the
-/// call; `env` is valid and its callbacks don't unwind. Null pointers are
-/// accepted as documented in nzbget_rs.h. Callback strings are borrowed only
-/// for that callback and must not be freed. Rust panics abort at this ABI
-/// boundary rather than unwinding into C++.
+/// `env` and `renamed_count` must be valid pointers; string arguments are null or
+/// NUL-terminated.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rar_rename_files(dir: *const c_char, volumes: *const RarRenVolume, count: usize, env: *const RarRenEnv) {
-    let Some(env) = env.as_ref() else { return };
-    if dir.is_null() || (volumes.is_null() && count > 0) {
-        return;
-    }
-    let raw: &[RarRenVolume] = if count == 0 { &[] } else { std::slice::from_raw_parts(volumes, count) };
-    let text = |p: *const c_char, len: usize| if p.is_null() || len == 0 { Vec::new() } else { std::slice::from_raw_parts(p.cast::<u8>(), len).to_vec() };
-    let vols: Vec<crate::rarrenamer::Volume> = raw
-        .iter()
-        .map(|v| crate::rarrenamer::Volume {
-            filename: text(v.filename, v.filename_len),
-            version: v.version,
-            volume_no: v.volume_no,
-            multi_volume: v.multi_volume != 0,
-            has_next_volume: v.has_next_volume != 0,
-            new_naming: v.new_naming != 0,
-            files: if v.files.is_null() || v.file_count == 0 {
-                Vec::new()
-            } else {
-                std::slice::from_raw_parts(v.files, v.file_count)
-                    .iter()
-                    .map(|f| crate::rarrenamer::File {
-                        name: text(f.name, f.name_len),
-                        size: f.size,
-                        split_before: f.split_before != 0,
-                        split_after: f.split_after != 0,
-                    })
-                    .collect()
-            },
-        })
-        .collect();
-    crate::rarrenamer::rename_files(input(dir), &vols, &mut FfiRarRen(env));
+pub unsafe extern "C" fn nzbget_rs_rar_renamer_execute(
+    env: *const RarRenamerRunEnv,
+    dest_dir: *const c_char,
+    info_name: *const c_char,
+    password: *const c_char,
+    ignore_ext: *const c_char,
+    tls_enabled: c_int,
+    renamed_count: *mut c_int,
+) -> c_int {
+    let (Some(env), Some(renamed_count)) = (env.as_ref(), renamed_count.as_mut()) else {
+        return -1;
+    };
+    let info = if info_name.is_null() { &b"(null)"[..] } else { input(info_name) };
+    let res = crate::rarrenamer::execute_all(
+        input(dest_dir),
+        info,
+        input(password),
+        input(ignore_ext),
+        tls_enabled != 0,
+        renamed_count,
+        &mut FfiRarRenamerRun(env),
+    );
+    if res.is_ok() { 0 } else { -1 }
 }
 
 /// DirectRenamer's RenameContentAnalyzer: a new analyzer (free with
@@ -4759,35 +4765,26 @@ mod tests {
     #[test]
     fn rarrenamer_nulls_and_borrowed_callback_strings() {
         use std::ptr::{null, null_mut};
-        unsafe extern "C" fn rename(ctx: *mut std::ffi::c_void, index: usize, dest: *const c_char) {
-            let out = &mut *ctx.cast::<Vec<(usize, Vec<u8>)>>();
-            // Copy while borrowed, and retain the copy after the call returns.
-            out.push((index, CStr::from_ptr(dest).to_bytes().to_vec()));
+        unsafe extern "C" fn progress(ctx: *mut std::ffi::c_void, label: *const c_char, stage: c_int) -> c_int {
+            let out = &mut *ctx.cast::<Vec<(Vec<u8>, c_int)>>();
+            out.push((CStr::from_ptr(label).to_bytes().to_vec(), stage));
+            0
         }
-        let mut out: Vec<(usize, Vec<u8>)> = Vec::new();
-        let mut env = RarRenEnv { ctx: (&mut out as *mut Vec<(usize, Vec<u8>)>).cast(),
-            file_exists: None, match_part: None, rename: Some(rename) };
-        let file = RarRenFile { name: c"movie.mkv".as_ptr(), name_len: 9, size: 1,
-            split_before: 0, split_after: 0 };
-        let mut volume = RarRenVolume { filename: c"obfuscated".as_ptr(), filename_len: 10,
-            version: 5, volume_no: 0, multi_volume: 0, has_next_volume: 0,
-            new_naming: 1, files: &file, file_count: 1 };
+        let mut out: Vec<(Vec<u8>, c_int)> = Vec::new();
+        let env = RarRenamerRunEnv {
+            ctx: (&mut out as *mut Vec<(Vec<u8>, c_int)>).cast(),
+            stopped: None,
+            progress: Some(progress),
+            message: None,
+            register_renamed: None,
+        };
+        let mut renamed = 0;
         unsafe {
-            nzbget_rs_rar_rename_files(null(), null(), 0, null());
-            nzbget_rs_rar_rename_files(null(), &volume, 1, &env);
-            nzbget_rs_rar_rename_files(c"dir".as_ptr(), null(), 1, &env);
-            nzbget_rs_rar_rename_files(c"dir".as_ptr(), null(), 0, &env);
-            assert!(out.is_empty());
-            nzbget_rs_rar_rename_files(c"dir".as_ptr(), &volume, 1, &env);
-            assert_eq!(out, vec![(0, [b"dir".as_slice(), &[crate::paths::PATH_SEPARATOR], b"movie.part0001.rar"].concat())]);
-            volume.files = null();
-            volume.filename = null();
-            nzbget_rs_rar_rename_files(c"dir".as_ptr(), &volume, 1, &env);
-            assert_eq!(out.len(), 1);
-            env.ctx = null_mut();
-            env.rename = None;
-            volume.files = &file;
-            nzbget_rs_rar_rename_files(c"dir".as_ptr(), &volume, 1, &env);
+            assert_eq!(nzbget_rs_rar_renamer_execute(null(), null(), null(), null(), null(), 1, null_mut()), -1);
+            assert_eq!(nzbget_rs_rar_renamer_execute(&env, null(), null(), null(), null(), 1, null_mut()), -1);
+            assert_eq!(nzbget_rs_rar_renamer_execute(&env, c"/nonexistent_dir_12345".as_ptr(), c"job".as_ptr(), null(), null(), 1, &mut renamed), 0);
+            assert_eq!(renamed, 0);
+            assert_eq!(out, vec![(b"Checkingrar-files for job".to_vec(), 0)]);
         }
     }
 
@@ -4828,6 +4825,8 @@ mod tests {
             version: 0, volume_no: 0, new_naming: 0, has_next_volume: 0,
             multi_volume: 0, encrypted: 0, has_password: 0,
             decrypt_buf: [0; 16], decrypt_pos: 16,
+            use_native_cipher: 0, password: null(), password_len: 0,
+            decrypt_key: [0; 32], decrypt_iv: [0; 16],
         };
         let mut io = RarIo {
             ctx: null_mut(), size: None, read: None, rar3_prepare: None,
@@ -22969,24 +22968,6 @@ pub extern "C" fn nzbget_rs_dqh_script_ctrl_can_send_break(pid: c_int, completed
         pid,
         completed != 0,
     ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_par_renamer_needs_create_target_dir(
-    old_path: *const c_char,
-    new_path: *const c_char,
-) -> c_int {
-    let o = if old_path.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(old_path).to_bytes()
-    };
-    let n = if new_path.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(new_path).to_bytes()
-    };
-    i32::from(crate::parrenamer::par_renamer_needs_create_target_dir(o, n))
 }
 
 #[no_mangle]

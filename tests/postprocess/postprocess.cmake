@@ -1,7 +1,6 @@
 list(APPEND TESTS_SRC
 	${CMAKE_CURRENT_SOURCE_DIR}/postprocess/ContentMap.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/postprocess/DirectUnpack.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/postprocess/RarReader.cpp
 )
 
 if(NOT DISABLE_PARCHECK)

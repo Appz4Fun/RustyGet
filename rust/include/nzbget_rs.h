@@ -652,47 +652,29 @@ typedef struct NzbgetRsRarVolume
 	int hasPassword;
 	uint8_t decryptBuf[16];
 	uint8_t decryptPos;
+	int useNativeCipher;
+	const char* password;
+	size_t passwordLen;
+	uint8_t decryptKey[32];
+	uint8_t decryptIv[16];
 } NzbgetRsRarVolume;
 int nzbget_rs_rar_read(const NzbgetRsRarIo* io, NzbgetRsRarVolume* state);
 
-// RarRenamer::RenameFiles (rust/src/rarrenamer.rs): the volumes read from dir
-// gathered into sets; the sets not properly named are renamed through rename
-// (index into volumes, the new path). fileExists is FileSystem::FileExists;
-// matchPart the RegEx ".*.part([0-9]+)\\.rar$" (group 1's start and length).
-// All input buffers are borrowed for the call. Callback strings are borrowed
-// only until the callback returns; callbacks must copy them to retain them and
-// must not free them or throw. No allocation crosses the ownership boundary.
-// NULL dir/env or NULL volumes with nonzero count makes the call a no-op.
-// NULL names and file arrays are treated as empty. Rust panics abort, never
-// unwind through C++.
-typedef struct NzbgetRsRarRenFile
-{
-	const char* name;
-	size_t nameLen;
-	int64_t size;
-	int splitBefore;
-	int splitAfter;
-} NzbgetRsRarRenFile;
-typedef struct NzbgetRsRarRenVolume
-{
-	const char* filename;
-	size_t filenameLen;
-	int version;
-	uint32_t volumeNo;
-	int multiVolume;
-	int hasNextVolume;
-	int newNaming;
-	const NzbgetRsRarRenFile* files;
-	size_t fileCount;
-} NzbgetRsRarRenVolume;
-typedef struct NzbgetRsRarRenEnv
+// RarRenamer::Execute (rust/src/rarrenamer.rs): recursively scans dest_dir,
+// parses RAR3/RAR5 volumes, and renames misnamed archive sets. Callbacks return
+// 0 on success or nonzero if an exception occurred (stopped returns 0 for false,
+// 1 for true, or -1 on exception).
+typedef struct NzbgetRsRarRenamerRunEnv
 {
 	void* ctx;
-	int (*fileExists)(void* ctx, const char* path);
-	int (*matchPart)(void* ctx, const char* name, size_t* start, size_t* len);
-	void (*rename)(void* ctx, size_t index, const char* dest);
-} NzbgetRsRarRenEnv;
-void nzbget_rs_rar_rename_files(const char* dir, const NzbgetRsRarRenVolume* volumes, size_t count, const NzbgetRsRarRenEnv* env);
+	int (*stopped)(void* ctx);
+	int (*progress)(void* ctx, const char* label, int stageProgress);
+	int (*message)(void* ctx, int kind, const char* text);
+	int (*registerRenamed)(void* ctx, const char* oldBase, const char* newBase);
+} NzbgetRsRarRenamerRunEnv;
+int nzbget_rs_rar_renamer_execute(
+	const NzbgetRsRarRenamerRunEnv* env, const char* destDir, const char* infoName,
+	const char* password, const char* ignoreExt, int tlsEnabled, int* renamedCount);
 
 // DirectRenamer's RenameContentAnalyzer (rust/src/renameanalyzer.rs): the PAR2
 // packet header and MD5 of a file's first 16 KiB, fed article by article.
@@ -4149,8 +4131,6 @@ int nzbget_rs_dqh_log_classify_init_logfile_action(
 int nzbget_rs_dqh_script_ctrl_is_terminate_ok(
     int child_pid, int kill_res, int completed);
 int nzbget_rs_dqh_script_ctrl_can_send_break(int pid, int completed);
-int nzbget_rs_dqh_par_renamer_needs_create_target_dir(
-    const char* old_path, const char* new_path);
 int nzbget_rs_dqh_dupematcher_should_wait_rar_lister(
     int is_running, int64_t start_time, int timeout_sec, int64_t cur_time);
 int nzbget_rs_dqh_article_dl_is_terminal_loop_status(

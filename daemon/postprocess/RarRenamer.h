@@ -24,7 +24,6 @@
 #include "NString.h"
 #include "Log.h"
 #include "FileSystem.h"
-#include "RarReader.h"
 
 class RarRenamer
 {
@@ -48,26 +47,13 @@ protected:
 	int GetStageProgress() { return m_stageProgress; }
 
 private:
-	typedef std::deque<CString> DirList;
-	typedef std::deque<RarVolume> RarVolumeList;
-
 	CString m_infoName;
 	CString m_destDir;
 	CString m_progressLabel;
 	int m_stageProgress = 0;
-	DirList m_dirList;
-	int m_fileCount = 0;
-	int m_curFile = 0;
 	int m_renamedCount = 0;
-	RarVolumeList m_volumes;
 	CString m_password;
 	CString m_ignoreExt;
-
-	void BuildDirList(const char* destDir);
-	void CheckFiles(const char* destDir);
-	void CheckOneFile(const char* filename);
-	void RenameFile(const char* srcFilename, const char* destFileName);
-	void RenameFiles(const char* destDir);
 };
 
 #endif

@@ -231,15 +231,9 @@ def instrument(src, hdr, prefix, fallback=False):
     return renamed(src, hdr.replace("private:", "public:"), prefix, fallback)
 
 
-probe_source = (probe_prelude + instrument(old_src, old_header, "ProbeOld")
-                + instrument(new_src, header, "ProbeRust")
-                + instrument(fallback_src, fallback_header, "ProbeFallback", fallback=True)
-                + (ROOT / "rust/tests/rarrenamer_metadata.cpp").read_text())
-
 with tempfile.TemporaryDirectory(prefix="nzbget-rarrenamer-") as temp:
     temp = Path(temp)
     (temp / "main.cpp").write_text(main)
-    (temp / "metadata.cpp").write_text(probe_source)
     (temp / "old.cpp").write_text(renamed(old_src, old_header, "Old"))
     (temp / "fallback.cpp").write_text(renamed(fallback_src, fallback_header, "Fallback", fallback=True))
     binary = temp / "rarrenamer"
@@ -249,7 +243,13 @@ with tempfile.TemporaryDirectory(prefix="nzbget-rarrenamer-") as temp:
                         str(temp / "fallback.cpp"), "-o", str(binary),
                         *[str(BUILD / l) if not l.startswith(("-", "/")) else l for l in libs]], check=True, cwd=BUILD)
         subprocess.run([str(binary), rounds, str(temp / "t"), *volumes], check=True)
-        subprocess.run([*shlex.split(os.environ.get("CXX", "c++")), *shlex.split(get("CXX_FLAGS")), *shlex.split(get("CXX_DEFINES")),
-                        *extra, "-w", *shlex.split(get("CXX_INCLUDES")), str(temp / "metadata.cpp"), "-o", str(binary),
-                        *[str(BUILD / l) if not l.startswith(("-", "/")) else l for l in libs]], check=True, cwd=BUILD)
-        subprocess.run([str(binary)], check=True)
+        if "void RarRenamer::RenameFile(" in new_src:
+            probe_source = (probe_prelude + instrument(old_src, old_header, "ProbeOld")
+                            + instrument(new_src, header, "ProbeRust")
+                            + instrument(fallback_src, fallback_header, "ProbeFallback", fallback=True)
+                            + (ROOT / "rust/tests/rarrenamer_metadata.cpp").read_text())
+            (temp / "metadata.cpp").write_text(probe_source)
+            subprocess.run([*shlex.split(os.environ.get("CXX", "c++")), *shlex.split(get("CXX_FLAGS")), *shlex.split(get("CXX_DEFINES")),
+                            *extra, "-w", *shlex.split(get("CXX_INCLUDES")), str(temp / "metadata.cpp"), "-o", str(binary),
+                            *[str(BUILD / l) if not l.startswith(("-", "/")) else l for l in libs]], check=True, cwd=BUILD)
+            subprocess.run([str(binary)], check=True)

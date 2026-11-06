@@ -4,7 +4,7 @@
 //! as the C library's strncasecmp and numbers parse as its atoi (current
 //! locale). Reading the request and answering it stay C++.
 
-use std::ffi::{c_char, c_int, CString};
+use std::ffi::{c_char, c_int, CStr, CString};
 
 use crate::bytes::{find, find_byte};
 use crate::wildmask::{wild_match, Lower};
@@ -391,6 +391,122 @@ Set-Cookie: Auth-Type=",
     out.extend_from_slice(version);
     out.extend_from_slice(b"\r\n\r\n");
     truncate_bstring_1024(out)
+}
+
+/// `WebProcessor::Execute`:
+/// Checks whether an unauthorized HTTP request must immediately receive a 401 response.
+#[inline]
+pub fn web_proc_should_send_auth_response(
+    form_auth: bool,
+    rpc_request: bool,
+    authorized: bool,
+) -> bool {
+    (!form_auth || rpc_request) && !authorized
+}
+
+/// `WebProcessor::SendBodyResponse`:
+/// Checks whether `old_etag` is non-null and equal to `new_etag`.
+///
+/// # Safety
+/// `old_etag` and `new_etag` must be either null or valid null-terminated C strings.
+#[inline]
+pub unsafe fn web_proc_is_etag_unchanged(
+    old_etag: *const c_char,
+    new_etag: *const c_char,
+) -> bool {
+    if old_etag.is_null() || new_etag.is_null() {
+        return false;
+    }
+    CStr::from_ptr(old_etag).to_bytes() == CStr::from_ptr(new_etag).to_bytes()
+}
+
+/// Selects `SecurePort` when `tls` is enabled, otherwise `ControlPort`.
+pub fn remote_server_select_port(tls: bool, secure_port: i32, control_port: i32) -> i32 {
+    if tls {
+        secure_port
+    } else {
+        control_port
+    }
+}
+
+/// Evaluates whether `RemoteServer::Run` has reached the active request processor cap
+/// and whether the rate-limited warning should be logged (`now - last_warn >= 60`).
+pub fn remote_server_should_warn_cap(
+    active_count: i32,
+    max_processors: i32,
+    now: i64,
+    last_warn: i64,
+) -> (bool, bool) {
+    let at_cap = active_count >= max_processors;
+    let should_warn = at_cap && now.saturating_sub(last_warn) >= 60;
+    (at_cap, should_warn)
+}
+
+/// Returns the maximum allowed HTTP POST `Content-Length` for `WebProcessor::Execute`.
+pub fn web_proc_max_post_content_len(authorized: bool) -> i32 {
+    if authorized {
+        768 * 1024 * 1024
+    } else {
+        64 * 1024
+    }
+}
+
+/// Validates whether an HTTP POST `Content-Length` is within bounds for `authorized`.
+pub fn web_proc_is_content_len_valid(content_len: i32, authorized: bool) -> bool {
+    content_len >= 0 && content_len <= web_proc_max_post_content_len(authorized)
+}
+
+/// Returns whether `WebProcessor::SendBodyResponse` should attempt gzip compression.
+pub fn web_proc_should_use_gzip(
+    gzip_enabled: bool,
+    body_len: i32,
+    max_uncompressed_size: i32,
+) -> bool {
+    gzip_enabled && body_len > max_uncompressed_size
+}
+
+/// Returns `"index.html\0"` when `url` ends with `'/'`, else `"\0"`.
+pub fn web_proc_default_resource(url: &[u8]) -> &'static [u8] {
+    if url.last() == Some(&b'/') {
+        b"index.html\0"
+    } else {
+        b"\0"
+    }
+}
+
+/// Classifies the 4-byte connection signature in `RequestProcessor::Execute`.
+pub fn remote_classify_signature(sig_bytes: &[u8; 4], nzb_magic_be: u32) -> i32 {
+    if u32::from_be_bytes(*sig_bytes) == nzb_magic_be {
+        1
+    } else if sig_bytes == b"POST" || sig_bytes == b"GET " || sig_bytes == b"OPTI" {
+        2
+    } else {
+        0
+    }
+}
+
+/// Parses the HTTP method and URL slice from the remaining request line after the 4-byte
+/// signature in `RequestProcessor::ServWebRequest`.
+pub fn remote_parse_web_request_line(
+    sig_bytes: &[u8; 4],
+    line: &[u8],
+) -> Option<(i32, usize, usize)> {
+    let (http_method, start_offset) = if sig_bytes == b"POST" {
+        if line.is_empty() {
+            return None;
+        }
+        (0, 1usize)
+    } else if sig_bytes == b"OPTI" && line.len() > 4 {
+        (2, 4usize)
+    } else if sig_bytes == b"GET " {
+        (1, 0usize)
+    } else {
+        return None;
+    };
+
+    let rest = &line[start_offset..];
+    let url_len = rest.iter().position(|&b| b == b' ').unwrap_or(rest.len());
+    Some((http_method, start_offset, url_len))
 }
 
 #[cfg(test)]

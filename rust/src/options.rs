@@ -570,3 +570,396 @@ mod tests {
         assert!(!is_category_extensions_opt(c"Category12.Name"));
     }
 }
+
+/// `Options::CheckDir`: determines whether `dir` is relative to a non-empty
+/// `parent_dir` and how they should be joined.
+pub fn options_check_dir_join_mode(
+    dir: &[u8],
+    parent_dir: &[u8],
+    path_sep: u8,
+    alt_path_sep: u8,
+) -> i32 {
+    if parent_dir.is_empty() {
+        return 0;
+    }
+    let d0 = dir.first().copied().unwrap_or(0);
+    let d1 = dir.get(1).copied().unwrap_or(0);
+    let is_abs = d0 == path_sep || d0 == alt_path_sep || (d0 != 0 && d1 == b':');
+    if is_abs {
+        return 0;
+    }
+    let last_parent = parent_dir[parent_dir.len() - 1];
+    if last_parent == path_sep || last_parent == alt_path_sep {
+        1
+    } else {
+        2
+    }
+}
+
+/// `Options::InitOptions`: normalizes and clamps `MemoryPressureInterval` and
+/// the `Dupe*` integer options.
+#[allow(clippy::too_many_arguments)]
+pub fn options_normalize_dupe_and_mem_options(
+    mem_pressure_interval: i32,
+    dupe_stream_timeout: i32,
+    dupe_search_delay: i32,
+    dupe_search_max_donors: i32,
+    dupe_health_percent: i32,
+    dupe_health_min: i32,
+    dupe_health_max: i32,
+    dupe_body_checks: i32,
+    dupe_health_budget: i32,
+    dupe_min_alive: i32,
+    dupe_fast_donors: i32,
+) -> (i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32) {
+    let norm_mem = if mem_pressure_interval > 0 {
+        mem_pressure_interval
+    } else {
+        500
+    };
+    let norm_stream_timeout = dupe_stream_timeout.max(0);
+    let norm_search_delay = dupe_search_delay.max(0);
+    let norm_max_donors = dupe_search_max_donors.max(0);
+    let norm_health_pct = dupe_health_percent.max(1).min(100);
+    let norm_health_min = dupe_health_min.max(1);
+    let norm_health_max = dupe_health_max.max(norm_health_min);
+    let norm_body_checks = dupe_body_checks.max(0);
+    let norm_health_budget = dupe_health_budget.max(5);
+    let norm_min_alive = dupe_min_alive.max(0).min(100);
+    let norm_fast_donors = dupe_fast_donors.max(0);
+    (
+        norm_mem,
+        norm_stream_timeout,
+        norm_search_delay,
+        norm_max_donors,
+        norm_health_pct,
+        norm_health_min,
+        norm_health_max,
+        norm_body_checks,
+        norm_health_budget,
+        norm_min_alive,
+        norm_fast_donors,
+    )
+}
+
+/// `Options::InitServers`: classifies server option definition completeness.
+pub fn options_check_server_def(
+    has_any_field: bool,
+    has_host: bool,
+    has_port: bool,
+    has_connections: bool,
+) -> i32 {
+    if !has_any_field {
+        0
+    } else if has_host && has_port && has_connections {
+        1
+    } else {
+        2
+    }
+}
+
+/// `Options::InitCategories` & `Options::InitFeeds`: classifies category or feed
+/// definition completeness.
+pub fn options_check_category_or_feed_def(has_any_field: bool, has_required: bool) -> i32 {
+    if !has_any_field {
+        0
+    } else if has_required {
+        1
+    } else {
+        2
+    }
+}
+
+/// `Options::CheckOptions`: reconciles `DirectWrite` and `DirectRename`.
+pub fn options_reconcile_write_flags(
+    raw_article: bool,
+    skip_write: bool,
+    direct_write: bool,
+    direct_rename: bool,
+) -> (bool, bool) {
+    let out_direct_write = if raw_article { false } else { direct_write };
+    let out_direct_rename = if skip_write { false } else { direct_rename };
+    (out_direct_write, out_direct_rename)
+}
+
+/// Rule 7.1 in `Options::CheckOptions`: returns 1 when `ServerX.Encryption` is disabled
+/// while `ServerX.Cipher` is non-empty.
+pub unsafe fn roc_options_server_cipher_without_tls(
+    tls_enabled: c_int,
+    cipher: *const c_char,
+) -> c_int {
+    if tls_enabled == 0 && !cipher.is_null() && unsafe { *cipher != 0 } {
+        1
+    } else {
+        0
+    }
+}
+
+/// Evaluates Rules 7.2, 7.3, and 7.4 in `Options::CheckOptions`.
+pub unsafe fn roc_options_reconcile_conflict_rules(
+    dupe_search: c_int,
+    health_check: c_int,
+    hc_park: c_int,
+    flush_queue: c_int,
+    direct_write: c_int,
+    unpack_pause_queue: c_int,
+    direct_unpack: c_int,
+    out_disable_dupe_search: *mut c_int,
+    out_enable_flush_queue: *mut c_int,
+    out_enforce_unpack_mutex: *mut c_int,
+) {
+    let disable_dupe = if dupe_search != 0 && health_check == hc_park {
+        1
+    } else {
+        0
+    };
+    let enable_flush = if flush_queue == 0 && direct_write != 0 {
+        1
+    } else {
+        0
+    };
+    let enforce_mutex = if unpack_pause_queue == 0 && direct_unpack != 0 {
+        1
+    } else {
+        0
+    };
+    if !out_disable_dupe_search.is_null() {
+        unsafe { *out_disable_dupe_search = disable_dupe };
+    }
+    if !out_enable_flush_queue.is_null() {
+        unsafe { *out_enable_flush_queue = enable_flush };
+    }
+    if !out_enforce_unpack_mutex.is_null() {
+        unsafe { *out_enforce_unpack_mutex = enforce_mutex };
+    }
+}
+
+/// Evaluates `DirectClientMode` in `NZBGet::BootConfig`.
+pub fn roc_nzbget_boot_is_direct_client_mode(
+    test_backtrace: c_int,
+    web_get: c_int,
+    sig_verify: c_int,
+    client_op: c_int,
+    op_no_operation: c_int,
+    print_options: c_int,
+) -> c_int {
+    if test_backtrace != 0
+        || web_get != 0
+        || sig_verify != 0
+        || client_op != op_no_operation
+        || print_options != 0
+    {
+        1
+    } else {
+        0
+    }
+}
+
+/// Returns 1 when `NZBGet::BootConfig` should pause all activities due to configuration errors.
+pub fn roc_nzbget_boot_should_pause_on_config_errors(
+    config_errors: c_int,
+    client_op: c_int,
+    op_no_operation: c_int,
+) -> c_int {
+    if config_errors != 0 && client_op == op_no_operation {
+        1
+    } else {
+        0
+    }
+}
+
+/// Computes the clamped debounce offset in milliseconds from `g_reloadFirstRequestTime`
+/// during burst reload requests in `Reload()`.
+pub fn roc_nzbget_reload_clamp_debounce_ms(
+    elapsed_since_first_ms: i64,
+    debounce_delay_ms: i64,
+    max_burst_delay_ms: i64,
+) -> i64 {
+    let candidate = elapsed_since_first_ms.saturating_add(debounce_delay_ms);
+    if candidate < max_burst_delay_ms {
+        candidate
+    } else {
+        max_burst_delay_ms
+    }
+}
+
+/// Checks whether `umask_val` is a valid octal mask (`uMask < 01000`) in `NZBGet::Phase1_Init`.
+pub fn nzbget_is_valid_umask(umask_val: u32) -> bool {
+    umask_val < 0o1000
+}
+
+/// Determines whether `NZBGet::StartRemoteServer` should start the secure control server.
+pub fn nzbget_should_start_secure_server(
+    secure_control: bool,
+    is_unix: bool,
+    control_ip: &[u8],
+) -> bool {
+    if !secure_control {
+        return false;
+    }
+    if is_unix && !control_ip.is_empty() && control_ip[0] == b'/' {
+        return false;
+    }
+    true
+}
+
+/// Determines whether `NZBGet::DoMainLoop` should stop standalone coordinators.
+pub fn nzbget_should_stop_standalone(
+    server_mode: bool,
+    queue_more: bool,
+    url_more: bool,
+    post_more: bool,
+) -> bool {
+    !server_mode && !queue_more && !url_more && !post_more
+}
+
+/// Computes the exit code for `NZBGet::ProcessWebGet` (`status == ad_finished ? 0 : 1`).
+pub fn nzbget_webget_exit_code(status: i32, ad_finished: i32) -> i32 {
+    if status == ad_finished {
+        0
+    } else {
+        1
+    }
+}
+
+/// Computes the exit code for `NZBGet::ProcessSigVerify` (`ok ? 93 : 1`).
+pub fn nzbget_sigverify_exit_code(ok: bool) -> i32 {
+    if ok {
+        93
+    } else {
+        1
+    }
+}
+
+/// Finds the first `${Var}` reference in `s` for `Options::SetOption`.
+pub fn options_find_var_reference(s: &[u8]) -> Option<(usize, usize)> {
+    let mut i = 0;
+    while i + 1 < s.len() {
+        if s[i] == b'$' && s[i + 1] == b'{' {
+            let rest = &s[i + 2..];
+            let end_offset = rest.iter().position(|&b| b == b'}')?;
+            return Some((i, end_offset));
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Strips a single trailing `\n` and then a single trailing `\r` from `line[..len]`
+/// and checks whether the line should be skipped.
+pub fn options_trim_and_check_config_line(line: &[u8]) -> (usize, bool) {
+    let mut len = line.len();
+    if len > 0 && line[len - 1] == b'\n' {
+        len -= 1;
+    }
+    if len > 0 && line[len - 1] == b'\r' {
+        len -= 1;
+    }
+    let trimmed = &line[..len];
+    let skip =
+        trimmed.is_empty() || trimmed[0] == b'#' || trimmed.iter().all(|&b| b == b' ');
+    (len, skip)
+}
+
+const SCHEDULER_COMMAND_MAP: [(&[u8], i32); 27] = [
+    (b"pausedownload", 0),
+    (b"pause", 0),
+    (b"unpausedownload", 1),
+    (b"resumedownload", 1),
+    (b"unpause", 1),
+    (b"resume", 1),
+    (b"pausepostprocess", 2),
+    (b"unpausepostprocess", 3),
+    (b"resumepostprocess", 3),
+    (b"pausepost", 2),
+    (b"unpausepost", 3),
+    (b"resumepost", 3),
+    (b"downloadrate", 4),
+    (b"setdownloadrate", 4),
+    (b"rate", 4),
+    (b"speed", 4),
+    (b"script", 5),
+    (b"process", 6),
+    (b"pausescan", 7),
+    (b"unpausescan", 8),
+    (b"resumescan", 8),
+    (b"activateserver", 9),
+    (b"activateservers", 9),
+    (b"deactivateserver", 10),
+    (b"deactivateservers", 10),
+    (b"fetchfeed", 11),
+    (b"fetchfeeds", 11),
+];
+
+/// Case-insensitively maps a scheduler command string to `Options::ESchedulerCommand` (`0..=11`),
+/// or `-1` if unknown.
+pub fn options_lookup_scheduler_command(cmd: &[u8]) -> i32 {
+    for &(name, val) in &SCHEDULER_COMMAND_MAP {
+        if cmd.eq_ignore_ascii_case(name) {
+            return val;
+        }
+    }
+    -1
+}
+
+/// Validates `TaskX.Param` for `Options::InitScheduler`.
+pub fn options_validate_scheduler_param(
+    task_command: i32,
+    param: Option<&[u8]>,
+    split_cmd_empty: bool,
+) -> i32 {
+    if let Some(p) = param {
+        if !p.is_empty() && task_command == 6 && split_cmd_empty {
+            return 1;
+        }
+    }
+
+    if task_command == 4 {
+        let Some(p) = param else {
+            return 3;
+        };
+        let mut idx = 0;
+        while idx < p.len() && matches!(p[idx], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+            idx += 1;
+        }
+        let rest = &p[idx..];
+        if !rest.is_empty() {
+            let (neg, digits) = if rest[0] == b'-' {
+                (true, &rest[1..])
+            } else if rest[0] == b'+' {
+                (false, &rest[1..])
+            } else {
+                (false, rest)
+            };
+            if digits.is_empty() || !digits.iter().all(|b| b.is_ascii_digit()) {
+                return 2;
+            }
+            let mut val: std::os::raw::c_long = 0;
+            for &d in digits {
+                let digit = (d - b'0') as std::os::raw::c_long;
+                val = val.saturating_mul(10);
+                val = if neg {
+                    val.saturating_sub(digit)
+                } else {
+                    val.saturating_add(digit)
+                };
+            }
+            if (val as i32) < 0 {
+                return 2;
+            }
+        }
+    }
+
+    if matches!(task_command, 5 | 6 | 9 | 10 | 11) {
+        let is_empty = match param {
+            None => true,
+            Some(p) => p.is_empty(),
+        };
+        if is_empty {
+            return 3;
+        }
+    }
+
+    0
+}
+

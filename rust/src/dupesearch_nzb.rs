@@ -496,6 +496,35 @@ pub fn dupesearch_calc_expand_budget_ms(
     chosen.clamp(1, i64::from(i32::MAX)) as i32
 }
 
+/// Port of watchdog wait & stop calculation in `HttpGet::Fetch`.
+/// Returns `(should_stop, wait_ms)`.
+pub fn http_get_calc_watchdog_wait(
+    deadline_ms: i64,
+    now_ms: i64,
+    file_size: i64,
+    max_bytes: usize,
+) -> (bool, i64) {
+    let left = if deadline_ms > 0 {
+        deadline_ms.saturating_sub(now_ms)
+    } else {
+        250
+    };
+    if left <= 0 || file_size > (max_bytes as i64) {
+        (true, 0)
+    } else {
+        (false, left.min(250))
+    }
+}
+
+/// Port of `LocalName` in `XmlReader.cpp`.
+/// Returns the byte offset of the local name (after the last `':'`, or `0`).
+pub fn xml_reader_local_name_offset(name: &[u8]) -> usize {
+    match name.iter().rposition(|&b| b == b':') {
+        Some(pos) => pos + 1,
+        None => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

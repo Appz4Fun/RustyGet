@@ -140,6 +140,46 @@ pub fn patch_config(original: &[u8], changes: &BTreeMap<u32, String>) -> Result<
     Ok(out)
 }
 
+/// Returns whether `TlsSocket::Start` should verify the peer certificate.
+pub fn tls_should_verify_peer(has_store: bool, cert_verif_level: i32, cv_none: i32) -> bool {
+    has_store && cert_verif_level > cv_none
+}
+
+/// Returns whether an OpenSSL error code represents an explicit TLS handshake rejection.
+#[allow(clippy::too_many_arguments)]
+pub fn tls_is_explicit_handshake_rejection(
+    err_lib: i32,
+    err_lib_ssl: i32,
+    reason: i32,
+    r_handshake_fail: i32,
+    r_proto_ver: i32,
+    r_no_shared_cipher: i32,
+    r_unsupported_proto: i32,
+) -> bool {
+    err_lib == err_lib_ssl
+        && (reason == r_handshake_fail
+            || reason == r_proto_ver
+            || reason == r_no_shared_cipher
+            || reason == r_unsupported_proto)
+}
+
+/// Returns whether `TlsSocket::ValidateCert` should perform hostname verification.
+pub fn tls_should_check_host(cert_verif_level: i32, cv_minimal: i32, host_empty: bool) -> bool {
+    cert_verif_level > cv_minimal && !host_empty
+}
+
+/// Classifies an `SSL_get_error` code for `SSL_ERROR_WANT_READ` / `SSL_ERROR_WANT_WRITE`.
+/// Returns `(retryable, want_read, want_write)`.
+pub fn tls_classify_want_io(
+    ssl_err: i32,
+    want_read: i32,
+    want_write: i32,
+) -> (bool, bool, bool) {
+    let r = ssl_err == want_read;
+    let w = ssl_err == want_write;
+    (r || w, r, w)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

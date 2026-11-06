@@ -171,6 +171,194 @@ pub fn resolve_body_end_status(
     (cur, warn_incomplete)
 }
 
+/// Port of header line colon search in `HttpClient::ReadHeaders`.
+pub fn http_client_find_header_colon(line: &[u8]) -> Option<usize> {
+    line.iter().position(|&b| b == b':')
+}
+
+/// Port of HTTP status-line version validation in `HttpClient::ReadStatusCode`.
+pub fn http_client_validate_version(http_version: &[u8], stream_ok: bool) -> bool {
+    stream_ok && http_version.windows(5).any(|w| w == b"HTTP/")
+}
+
+/// Port of `HttpClient::GetHeaders`.
+pub fn http_client_build_headers(
+    method: &[u8],
+    host: &[u8],
+    version: &[u8],
+    include_gzip: bool,
+) -> Vec<u8> {
+    let mut headers = Vec::with_capacity(
+        method.len() + host.len() + version.len() + 112,
+    );
+    headers.extend_from_slice(method);
+    headers.extend_from_slice(b" / HTTP/1.1\r\nHost: ");
+    headers.extend_from_slice(host);
+    headers.extend_from_slice(b"\r\nUser-Agent: nzbget/");
+    headers.extend_from_slice(version);
+    headers.extend_from_slice(b"\r\n");
+    if include_gzip {
+        headers.extend_from_slice(b"Accept-Encoding: gzip\r\n");
+    }
+    headers.extend_from_slice(b"Accept: */*\r\nConnection: close\r\n\r\n");
+    headers
+}
+
+/// Port of `SpeedTest::CalculateSpeedInMbps`.
+pub fn speed_test_calc_mbps(bytes: u32, time_sec: f64) -> f64 {
+    let bits = (bytes as f64) * 8.0;
+    let speed = bits / time_sec;
+    speed / 1_000_000.0
+}
+
+/// Port of `SpeedTest::IsRequiredMoreTests`.
+pub fn speed_test_is_required_more(dataset_len: usize, curr_median: f64, prev_p25: f64) -> bool {
+    if dataset_len < 2 {
+        return true;
+    }
+    curr_median > prev_p25
+}
+
+/// Port of `SpeedTest::HasExceededMaxFailures`.
+pub fn speed_test_exceeded_max_failures(failures: i32, iterations: i32) -> bool {
+    failures > (iterations / 2).max(2)
+}
+
+/// Port of `SpeedTest::GetFinalSpeed`.
+pub fn speed_test_final_speed(first_median: f64, p90s: &[f64]) -> f64 {
+    let mut max_speed = first_median;
+    for &speed in p90s {
+        if max_speed < speed {
+            max_speed = speed;
+        }
+    }
+    max_speed
+}
+
+/// Port of `SpeedTest::MakeRequest`.
+pub fn speed_test_make_request(
+    path: &[u8],
+    query: &[u8],
+    filesize: u32,
+    host: &[u8],
+) -> Vec<u8> {
+    let size_str = filesize.to_string();
+    let mut req = Vec::with_capacity(
+        path.len() + query.len() + size_str.len() + host.len() + 56,
+    );
+    req.extend_from_slice(b"GET /");
+    req.extend_from_slice(path);
+    req.extend_from_slice(query);
+    req.extend_from_slice(size_str.as_bytes());
+    req.extend_from_slice(b" HTTP/1.1\r\nHost: ");
+    req.extend_from_slice(host);
+    req.extend_from_slice(b"\r\nConnection: close\r\n\r\n");
+    req
+}
+
+/// Computes initial `(remained_download_retries, remained_connect_retries)` for `WebDownloader::Run`.
+pub fn webdl_calc_initial_retries(url_retries: i32, retry_enabled: bool) -> (i32, i32) {
+    let dl = if !retry_enabled {
+        1
+    } else if url_retries > 0 {
+        url_retries
+    } else {
+        1
+    };
+    let conn = if !retry_enabled {
+        1
+    } else if dl > 10 {
+        dl
+    } else {
+        10
+    };
+    (dl, conn)
+}
+
+/// Returns whether `WebDownloader::Run` should sleep `UrlInterval` seconds before retrying.
+#[allow(clippy::too_many_arguments)]
+pub fn webdl_should_wait_before_retry(
+    status: i32,
+    ad_failed: i32,
+    ad_connect_error: i32,
+    rem_dl: i32,
+    rem_conn: i32,
+    is_stopped: bool,
+    force: bool,
+    pause_download: bool,
+) -> bool {
+    ((status == ad_failed && rem_dl > 1) || (status == ad_connect_error && rem_conn > 1))
+        && !is_stopped
+        && !(!force && pause_download)
+}
+
+/// Returns whether `(protocol, port)` uses the standard HTTP/HTTPS port (`80`/`443` or `0`).
+pub fn webdl_is_default_http_port(protocol: &[u8], port: i32) -> bool {
+    (protocol.eq_ignore_ascii_case(b"http") && (port == 80 || port == 0))
+        || (protocol.eq_ignore_ascii_case(b"https") && (port == 443 || port == 0))
+}
+
+/// Returns whether the first byte of an HTTP header line marks the end of headers (`\r` or `\n`).
+pub fn webdl_is_header_end_line(first_ch: u8) -> bool {
+    first_ch == b'\r' || first_ch == b'\n'
+}
+
+/// Returns the byte length of `url` before any `'?'` query string.
+pub fn webdl_strip_query_len(url: &[u8]) -> usize {
+    url.iter().position(|&b| b == b'?').unwrap_or(url.len())
+}
+
+/// Validates URL protocol and resolves default ports for `WebDownloader::CreateConnection`.
+/// Returns `(result_code, resolved_port, is_tls)`.
+pub fn webdl_resolve_protocol_port(
+    is_valid: bool,
+    protocol: &[u8],
+    port: i32,
+    tls_disabled: bool,
+) -> (i32, i32, bool) {
+    if !is_valid {
+        return (-1, port, false);
+    }
+    let is_http = protocol.eq_ignore_ascii_case(b"http");
+    let is_https = protocol.eq_ignore_ascii_case(b"https");
+    if !is_http && !is_https {
+        return (-2, port, false);
+    }
+    let mut resolved_port = port;
+    if resolved_port == 0 && is_http {
+        resolved_port = 80;
+    }
+    if resolved_port == 0 && is_https {
+        resolved_port = 443;
+    }
+    if tls_disabled && is_https {
+        return (-3, resolved_port, true);
+    }
+    (0, resolved_port, is_https)
+}
+
+/// Evaluates the body read/write completion state in `WebDownloader::DownloadBody`.
+pub fn webdl_check_body_chunk(
+    chunk_len: i32,
+    content_len: i32,
+    written_len: i32,
+    gzip: bool,
+    confirmed_length: bool,
+) -> i32 {
+    if chunk_len <= 0 {
+        if chunk_len == 0 && content_len == -1 && written_len > 0 {
+            return 1;
+        }
+        return -1;
+    }
+    let new_written = written_len.saturating_add(chunk_len);
+    if new_written == content_len || (content_len == -1 && gzip && confirmed_length) {
+        2
+    } else {
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

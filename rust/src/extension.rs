@@ -247,7 +247,167 @@ pub fn script_config_save(
 /// Checks whether `target_name` is in the `,;`-separated `extensions_list` (exact byte match),
 /// matching `ExtensionManager::Manager::CreateTasks`.
 pub fn ext_is_in_list(extensions_list: &[u8], target_name: &[u8]) -> bool {
-    crate::frontexthealth::ext_is_in_list(extensions_list, target_name)
+    fn trim_tokenizer_ws(mut s: &[u8]) -> &[u8] {
+        while let Some(&b) = s.first() {
+            if matches!(b, b' ' | b'\t' | b'\n' | b'\r') {
+                s = &s[1..];
+            } else {
+                break;
+            }
+        }
+        while let Some(&b) = s.last() {
+            if matches!(b, b' ' | b'\t' | b'\n' | b'\r') {
+                s = &s[..s.len() - 1];
+            } else {
+                break;
+            }
+        }
+        s
+    }
+
+    for raw_tok in extensions_list.split(|&b| b == b',' || b == b';') {
+        let tok = trim_tokenizer_ws(raw_tok);
+        if !tok.is_empty() && tok == target_name {
+            return true;
+        }
+    }
+    false
+}
+
+/// Computes the sorted index permutation for `ExtensionManager::Manager::Sort`.
+pub fn ext_sort_indices(names: &[&[u8]], order_str: &[u8]) -> Vec<usize> {
+    let mut indices: Vec<usize> = (0..names.len()).collect();
+    fn trim_tok(mut s: &[u8]) -> &[u8] {
+        while let Some(&b) = s.first() {
+            if b <= b' ' {
+                s = &s[1..];
+            } else {
+                break;
+            }
+        }
+        while let Some(&b) = s.last() {
+            if b <= b' ' {
+                s = &s[..s.len() - 1];
+            } else {
+                break;
+            }
+        }
+        s
+    }
+
+    let mut order: Vec<&[u8]> = Vec::new();
+    for raw in order_str.split(|&b| b == b',' || b == b';') {
+        let tok = trim_tok(raw);
+        if !tok.is_empty() && !order.contains(&tok) {
+            order.push(tok);
+        }
+    }
+
+    if order.is_empty() {
+        indices.sort_by(|&a, &b| names[a].cmp(names[b]));
+        return indices;
+    }
+
+    let mut count = 0usize;
+    for target in &order {
+        if let Some(pos) = indices.iter().position(|&idx| names[idx] == *target) {
+            indices.swap(count, pos);
+            count += 1;
+        }
+    }
+
+    indices[count..].sort_by(|&a, &b| names[a].cmp(names[b]));
+    indices
+}
+
+/// Extracts the string value for `"<key>"` from `package-info.json` in `Maintenance::ReadPackageInfoStr`.
+/// Returns `Some((value_start, value_len))` if found and `value_len < max_len`.
+pub fn maintenance_extract_package_info_str(
+    json: &[u8],
+    key: &[u8],
+    max_len: usize,
+) -> Option<(usize, usize)> {
+    let mut quoted_key = Vec::with_capacity(key.len() + 2);
+    quoted_key.push(b'"');
+    let key_trunc = if key.len() > 97 { &key[..97] } else { key };
+    quoted_key.extend_from_slice(key_trunc);
+    if quoted_key.len() < 99 {
+        quoted_key.push(b'"');
+    }
+
+    let key_pos = json
+        .windows(quoted_key.len())
+        .position(|w| w == quoted_key.as_slice())?;
+    let after_key = key_pos + quoted_key.len();
+    let quote_open_rel = json[after_key..].iter().position(|&b| b == b'"')?;
+    let val_start = after_key + quote_open_rel + 1;
+    let quote_close_rel = json[val_start..].iter().position(|&b| b == b'"')?;
+    if quote_close_rel >= max_len {
+        return None;
+    }
+    Some((val_start, quote_close_rel))
+}
+
+/// Classifies a script output line (after stripping `m_prefixLen`) in `UpdateScriptController::AddMessage`:
+/// - `0`: regular log line (does not start with `"[NZB] "`)
+/// - `1`: `"[NZB] QUIT"` command
+/// - `-1`: invalid `"[NZB] ..."` command
+pub fn maintenance_classify_update_message(text: &[u8]) -> i32 {
+    if !text.starts_with(b"[NZB] ") {
+        0
+    } else if &text[6..] == b"QUIT" {
+        1
+    } else {
+        -1
+    }
+}
+
+/// Classifies a script output line (after stripping `m_prefixLen`) in `UpdateInfoScriptController::AddMessage`:
+/// - `0`: regular log line (does not start with `"[NZB] "`)
+/// - `1`: `"[NZB] [UPDATEINFO]..."` command (payload starts at `text + 18`)
+/// - `-1`: invalid `"[NZB] ..."` command
+pub fn maintenance_classify_update_info_message(text: &[u8]) -> i32 {
+    if !text.starts_with(b"[NZB] ") {
+        0
+    } else if text[6..].starts_with(b"[UPDATEINFO]") {
+        1
+    } else {
+        -1
+    }
+}
+
+/// Decodes a hex-encoded RSA-SHA256 signature line tail in `Signature::ReadSignature`
+/// (starting after `sigTitle`, trimming 2 trailing bytes when `sig_len > 2`, and decoding
+/// up to 256 bytes into `out_sig`). Returns `true` iff exactly 256 bytes were decoded.
+pub fn maintenance_decode_hex_signature(hex_sig: &[u8], out_sig: &mut [u8; 256]) -> bool {
+    let eff_len = if hex_sig.len() > 2 {
+        hex_sig.len() - 2
+    } else {
+        hex_sig.len()
+    };
+    let slice = &hex_sig[..eff_len];
+    let mut in_idx = 0;
+    let mut out_idx = 0;
+    while in_idx + 1 < slice.len() && out_idx < 256 {
+        let c1 = slice[in_idx];
+        let c2 = slice[in_idx + 1];
+        in_idx += 2;
+        let n1 = match c1 {
+            b'0'..=b'9' => c1 - b'0',
+            b'A'..=b'F' => c1 - b'A' + 10,
+            b'a'..=b'f' => c1 - b'a' + 10,
+            _ => 0,
+        };
+        let n2 = match c2 {
+            b'0'..=b'9' => c2 - b'0',
+            b'A'..=b'F' => c2 - b'A' + 10,
+            b'a'..=b'f' => c2 - b'a' + 10,
+            _ => 0,
+        };
+        out_sig[out_idx] = (n1 << 4).wrapping_add(n2);
+        out_idx += 1;
+    }
+    out_idx == 256
 }
 
 /// Phase 1 of `ExtensionManager::Manager::UpdateExtension`: validates lookup and

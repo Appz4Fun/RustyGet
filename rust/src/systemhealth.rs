@@ -2430,3 +2430,138 @@ mod tests {
         );
     }
 }
+
+// ============================================================================
+// System (`SystemInfo`, `OS`, `CPU`) Helpers
+// ============================================================================
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    if needle.len() > haystack.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    find_subslice(haystack, needle).is_some()
+}
+
+/// Port of `SystemInfo::GetPythonVersion` string extraction after initial `Util::Trim`.
+/// Given `trimmed_line`, locates `"Python"`, skips `"Python"` + 1 byte (matching
+/// `pos + sizeof("Python")`), trims ASCII whitespace/control bytes (`<= b' '`),
+/// and returns `Some((start_offset, len))`.
+pub fn sys_extract_python_version(trimmed_line: &[u8]) -> Option<(usize, usize)> {
+    const MARKER: &[u8] = b"Python";
+    const SKIP_LEN: usize = MARKER.len() + 1; // sizeof("Python") == 7
+    let pos = find_subslice(trimmed_line, MARKER)?;
+    if pos + SKIP_LEN >= trimmed_line.len() {
+        return Some((trimmed_line.len(), 0));
+    }
+    let mut start = pos + SKIP_LEN;
+    let mut end = trimmed_line.len();
+    while start < end && trimmed_line[start] <= b' ' {
+        start += 1;
+    }
+    while end > start && trimmed_line[end - 1] <= b' ' {
+        end -= 1;
+    }
+    Some((start, end - start))
+}
+
+/// Port of `SystemInfo::ParseUnpackerVersion`.
+/// Finds the first `[0-9]+\.[0-9]+` span in `line` and returns `Some((start, len))`.
+pub fn sys_parse_unpacker_version(line: &[u8]) -> Option<(usize, usize)> {
+    let mut i = 0;
+    let n = line.len();
+    while i < n {
+        if line[i].is_ascii_digit() {
+            let start = i;
+            while i < n && line[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i < n && line[i] == b'.' && i + 1 < n && line[i + 1].is_ascii_digit() {
+                i += 1;
+                while i < n && line[i].is_ascii_digit() {
+                    i += 1;
+                }
+                return Some((start, i - start));
+            }
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+/// Port of `SystemInfo::ParseParVersion`.
+/// Returns the index of the last `' '` byte in `line` (matching `line.find_last_of(" ")`).
+pub fn sys_parse_par_version(line: &[u8]) -> Option<usize> {
+    line.iter().rposition(|&b| b == b' ')
+}
+
+/// Port of `OS::TrimQuotes`.
+/// Strips at most one leading `"` and at most one trailing `"` and returns `(start, len)`.
+pub fn os_trim_quotes(s: &[u8]) -> (usize, usize) {
+    let mut start = 0;
+    let mut end = s.len();
+    if start < end && s[start] == b'"' {
+        start += 1;
+    }
+    if start < end && s[end - 1] == b'"' {
+        end -= 1;
+    }
+    (start, end - start)
+}
+
+/// Port of `OS::Init` (`__APPLE__`) field extraction from `sw_vers` output.
+/// Finds `prefix` in `output` and returns `(val_start, val_len)` up to the next `'\n'`.
+pub fn os_parse_sw_vers_field(output: &[u8], prefix: &[u8]) -> Option<(usize, usize)> {
+    let pos = find_subslice(output, prefix)?;
+    let val_start = pos + prefix.len();
+    let end_pos = output[pos..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map(|rel| pos + rel)
+        .unwrap_or(output.len());
+    let val_len = end_pos.saturating_sub(val_start);
+    Some((val_start, val_len))
+}
+
+/// Port of `CPU::GetCanonicalCPUArch`.
+/// Returns `Some(canonical_cstr)` if `arch` maps to a canonical architecture, or `None`
+/// if `arch` should be returned unchanged.
+pub fn cpu_canonical_arch(arch: &[u8]) -> Option<&'static std::ffi::CStr> {
+    if arch == b"i386" || arch == b"x86" {
+        return Some(c"i686");
+    }
+    if arch == b"amd64" || arch == b"AMD64" {
+        return Some(c"x86_64");
+    }
+    if contains_subslice(arch, b"armv5") || contains_subslice(arch, b"armv6") {
+        return Some(c"armel");
+    }
+    if contains_subslice(arch, b"armv7") || contains_subslice(arch, b"armv8") {
+        return Some(c"armhf");
+    }
+    None
+}
+
+/// Port of `CPU::GetCPUModelFromCPUInfo` line matching.
+/// If `line` contains one of the recognized CPU model keys and a `':'`, returns
+/// `Some(colon_pos + 1)`.
+pub fn cpu_parse_cpuinfo_line(line: &[u8]) -> Option<usize> {
+    let matched = contains_subslice(line, b"model name")
+        || contains_subslice(line, b"Processor")
+        || contains_subslice(line, b"cpu model")
+        || contains_subslice(line, b"Hardware")
+        || contains_subslice(line, b"system type");
+    if !matched {
+        return None;
+    }
+    let colon_pos = line.iter().position(|&b| b == b':')?;
+    Some(colon_pos + 1)
+}
+

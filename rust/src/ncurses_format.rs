@@ -72,7 +72,7 @@ pub fn format_status_bar(spec: &NcursesStatusSpec) -> Vec<u8> {
 
     if cur_speed > 0 && spec.pause_download == 0 {
         let remain_sec = spec.remaining_size / cur_speed;
-        let (h, m, s) = crate::connclientmain::remote_client_calc_hms(remain_sec);
+        let (h, m, s) = crate::binrpc::remote_client_calc_hms(remain_sec);
         out.extend_from_slice(b" (~ ");
         push_hms(&mut out, h, m, s);
         out.push(b')');
@@ -88,14 +88,14 @@ pub fn format_status_bar(spec: &NcursesStatusSpec) -> Vec<u8> {
         });
     }
 
-    let pause_suffix = crate::schedfrontweb::frontend_select_pause_status_suffix(
+    let pause_suffix = frontend_select_pause_status_suffix(
         spec.pause_download != 0,
         spec.stand_by != 0,
     );
     out.extend_from_slice(pause_suffix.to_bytes());
 
     if spec.download_limit > 0 {
-        let limit_kb = crate::schedfrontweb::frontend_calc_limit_kb(spec.download_limit as i32);
+        let limit_kb = frontend_calc_limit_kb(spec.download_limit as i32);
         out.extend_from_slice(b", Limit ");
         out.extend_from_slice(limit_kb.to_string().as_bytes());
         out.extend_from_slice(b" KB/s");
@@ -139,7 +139,7 @@ pub fn format_colored_status_bar(
     crate::util::format_size_into(&mut out, remaining_size);
     out.extend_from_slice(b" remaining");
 
-    if let Some((h, m, s)) = crate::frontexthealth::frontend_calc_remaining_hms(
+    if let Some((h, m, s)) = frontend_calc_remaining_hms(
         remaining_size,
         current_download_speed,
         stand_by != 0,
@@ -160,14 +160,14 @@ pub fn format_colored_status_bar(
         });
     }
 
-    let pause_suffix = crate::schedfrontweb::frontend_select_pause_status_suffix(
+    let pause_suffix = frontend_select_pause_status_suffix(
         pause_download != 0,
         stand_by != 0,
     );
     out.extend_from_slice(pause_suffix.to_bytes());
 
     if download_limit > 0 {
-        let limit_kb = crate::schedfrontweb::frontend_calc_limit_kb(download_limit as i32);
+        let limit_kb = frontend_calc_limit_kb(download_limit as i32);
         out.extend_from_slice(b", Limit ");
         out.extend_from_slice(limit_kb.to_string().as_bytes());
         out.extend_from_slice(b" KB/s");
@@ -223,7 +223,7 @@ pub fn format_top_header(header: &[u8], screen_width: i32, up_time: bool, time_s
     let header_len = header.len() as i32;
     let chars_left = screen_width.wrapping_sub(header_len).wrapping_sub(2);
 
-    let (d, h, m, s) = crate::frontexthealth::ncurses_calc_top_header_time(time_sec);
+    let (d, h, m, s) = ncurses_calc_top_header_time(time_sec);
     let mut time_str = Vec::with_capacity(32);
     if d == 0 {
         push_hms(&mut time_str, h, m, s);
@@ -260,7 +260,7 @@ pub fn format_top_header(header: &[u8], screen_width: i32, up_time: bool, time_s
     let short_cap_len = short_cap.len() as i32;
     let long_cap_len = long_cap.len() as i32;
 
-    let cap_mode = crate::schedfrontweb::ncurses_select_top_header_caption(
+    let cap_mode = ncurses_select_top_header_caption(
         chars_left,
         time_len,
         long_cap_len,
@@ -403,7 +403,7 @@ unsafe fn cstr_bytes<'a>(ptr: *const u8) -> &'a [u8] {
 
 /// Format a single file row in `NCursesFrontend::PrintFilename`, returning `(text, color)`.
 pub fn format_file_row(spec: &NcursesFileRowSpec) -> (Vec<u8>, i32) {
-    let (color, brace1, brace2) = crate::schedfrontweb::ncurses_select_row_highlight(
+    let (color, brace1, brace2) = ncurses_select_row_highlight(
         spec.edit_queue_mode != 0,
         spec.selected != 0,
         spec.use_color != 0,
@@ -441,7 +441,7 @@ pub fn format_file_row(spec: &NcursesFileRowSpec) -> (Vec<u8>, i32) {
     out.extend_from_slice(b" (");
     crate::util::format_size_into(&mut out, spec.size);
 
-    let completed_pct = crate::connclientmain::remote_client_calc_file_completed_pct(
+    let completed_pct = crate::binrpc::remote_client_calc_file_completed_pct(
         spec.remaining_size,
         spec.size,
     );
@@ -490,7 +490,7 @@ pub fn format_group_row(
     col_width_total: &mut i32,
     col_width_left: &mut i32,
 ) -> (Vec<u8>, i32) {
-    let (color, brace1, brace2) = crate::schedfrontweb::ncurses_select_row_highlight(
+    let (color, brace1, brace2) = ncurses_select_row_highlight(
         spec.edit_queue_mode != 0,
         spec.selected != 0,
         spec.use_color != 0,
@@ -498,7 +498,7 @@ pub fn format_group_row(
         spec.color_text,
     );
 
-    let name_len = crate::connclientmain::ncurses_calc_group_name_len(
+    let name_len = ncurses_calc_group_name_len(
         spec.screen_width,
         spec.calc_col_width != 0,
         *col_width_files,
@@ -549,7 +549,7 @@ pub fn format_group_row(
         } else {
             crate::util::format_size_into(&mut remaining, unpaused_rem);
             if let Some((h, m, s)) =
-                crate::schedfrontweb::ncurses_calc_group_remain_hms_capped(
+                ncurses_calc_group_remain_hms_capped(
                     unpaused_rem,
                     cur_speed,
                     spec.pause_download != 0,
@@ -610,6 +610,368 @@ pub fn format_group_row(
         out.push(b' ');
         out.extend_from_slice(name_bytes);
         (truncate_bstring_1024(out), color)
+    }
+}
+
+/// Computes the starting message index and whether to call `PrintSkip()` in `LoggableFrontend::Update`.
+pub fn frontend_calc_log_start_index(needed_first_id: i32, first_msg_id: i32) -> (i32, bool) {
+    let start = needed_first_id.wrapping_sub(first_msg_id).wrapping_add(1);
+    if start < 0 {
+        (0, true)
+    } else {
+        (start, false)
+    }
+}
+
+/// Computes `(hours, minutes, seconds)` for the remaining download time in
+/// `ColoredFrontend::PrintStatus` and `NCursesFrontend::PrintStatus`.
+pub fn frontend_calc_remaining_hms(
+    remaining_size: i64,
+    current_speed: i64,
+    stand_by: bool,
+    pause_download: bool,
+) -> Option<(i32, i32, i32)> {
+    let speed = if stand_by { 0 } else { current_speed };
+    if speed > 0 && !pause_download {
+        let remain_sec = remaining_size / speed;
+        let h = (remain_sec / 3600) as i32;
+        let m = ((remain_sec % 3600) / 60) as i32;
+        let s = (remain_sec % 60) as i32;
+        Some((h, m, s))
+    } else {
+        None
+    }
+}
+
+/// Calculates clamped column width and window heights in `NCursesFrontend::CalcWindowSizes`.
+pub fn ncurses_calc_window_sizes(
+    nr_rows: i32,
+    nr_columns: i32,
+    max_screen_width: i32,
+    queue_win_pct: i32,
+    queue_size: i32,
+) -> (i32, i32, i32, i32, i32, i32) {
+    let clamped_cols = nr_columns.clamp(9, max_screen_width);
+    let mut queue_win_height = (nr_rows - 2) * queue_win_pct / 100;
+    if queue_win_height - 1 > queue_size {
+        queue_win_height = if queue_size > 0 { queue_size + 1 } else { 2 };
+    }
+    let mut queue_win_client_height = queue_win_height - 1;
+    if queue_win_client_height < 0 {
+        queue_win_client_height = 0;
+    }
+    let messages_win_top = queue_win_height;
+    let messages_win_height = nr_rows - queue_win_height - 2;
+    let mut messages_win_client_height = messages_win_height - 1;
+    if messages_win_client_height < 0 {
+        messages_win_client_height = 0;
+    }
+    (
+        clamped_cols,
+        queue_win_height,
+        queue_win_client_height,
+        messages_win_top,
+        messages_win_height,
+        messages_win_client_height,
+    )
+}
+
+/// Computes the updated `(selected_entry, scroll_offset)` in `NCursesFrontend::SetCurrentQueueEntry`.
+pub fn ncurses_calc_scroll_and_selection(
+    mut entry: i32,
+    queue_size: i32,
+    mut scroll_offset: i32,
+    client_height: i32,
+) -> (i32, i32) {
+    if entry < 0 {
+        entry = 0;
+    } else if entry > queue_size - 1 {
+        entry = queue_size - 1;
+    }
+
+    if entry > scroll_offset + client_height || entry < scroll_offset - client_height {
+        scroll_offset = entry - client_height / 2;
+    } else if entry < scroll_offset {
+        scroll_offset -= client_height;
+    } else if entry >= scroll_offset + client_height {
+        scroll_offset += client_height;
+    }
+
+    if scroll_offset > queue_size - client_height {
+        scroll_offset = queue_size - client_height;
+    }
+    if scroll_offset < 0 {
+        scroll_offset = 0;
+    }
+
+    (entry, scroll_offset)
+}
+
+/// Decomposes `time_sec` into `(days, hours, minutes, seconds)` for `NCursesFrontend::PrintTopHeader`.
+pub fn ncurses_calc_top_header_time(time_sec: i32) -> (i32, i32, i32, i32) {
+    let d = time_sec / 3600 / 24;
+    let h = (time_sec % (3600 * 24)) / 3600;
+    let m = (time_sec % 3600) / 60;
+    let s = time_sec % 60;
+    (d, h, m, s)
+}
+
+/// Resolves the pause/resume/extra-par file edit action in `NCursesFrontend::EditQueue`.
+pub fn ncurses_resolve_group_pause_action(
+    action: i32,
+    remaining_size: i64,
+    paused_size: i64,
+    remaining_par_count: i32,
+    last_pause_pars: bool,
+    last_edit_entry: i32,
+    selected_entry: i32,
+) -> (i32, bool) {
+    if action != 4 {
+        return (action, last_pause_pars);
+    }
+    if remaining_size == paused_size {
+        (5, last_pause_pars)
+    } else if paused_size == 0
+        && remaining_par_count > 0
+        && !(last_pause_pars && last_edit_entry == selected_entry)
+    {
+        (8, true)
+    } else {
+        (4, false)
+    }
+}
+
+/// Processes a single key in `NCursesFrontend::UpdateInput` when `m_inputMode == downloadRate`.
+pub fn ncurses_step_rate_input(
+    key: i32,
+    key_backspace: i32,
+    mut input_number_index: i32,
+    mut input_value: i32,
+) -> (i32, i32, i32) {
+    if input_number_index < 5 && key >= (b'0' as i32) && key <= (b'9' as i32) {
+        input_value = (input_value * 10) + (key - (b'0' as i32));
+        input_number_index += 1;
+        (0, input_number_index, input_value)
+    } else if key == 10 || key == 13 {
+        (1, input_number_index, input_value)
+    } else if key == 27 {
+        (2, input_number_index, input_value)
+    } else if input_number_index > 0 && key == key_backspace {
+        let remain = input_value % 10;
+        input_value = (input_value - remain) / 10;
+        input_number_index -= 1;
+        (0, input_number_index, input_value)
+    } else {
+        (0, input_number_index, input_value)
+    }
+}
+
+/// `Frontend::RequestMessages`: resolves `LogRequest.m_idFrom` in host byte order.
+#[inline]
+pub fn frontend_resolve_log_id_from(needed_log_entries: u32, needed_log_first_id: u32) -> u32 {
+    if needed_log_entries == 0 {
+        if needed_log_first_id > 0 {
+            needed_log_first_id
+        } else {
+            1
+        }
+    } else {
+        0
+    }
+}
+
+/// `ColoredFrontend::PrintStatus` / `NCursesFrontend::PrintStatus`: selects the pause status suffix string.
+#[inline]
+pub fn frontend_select_pause_status_suffix(
+    pause_download: bool,
+    stand_by: bool,
+) -> &'static std::ffi::CStr {
+    if pause_download {
+        if stand_by {
+            c", Paused"
+        } else {
+            c", Pausing"
+        }
+    } else {
+        c""
+    }
+}
+
+/// `ColoredFrontend::PrintStatus` / `NCursesFrontend::PrintStatus`: computes the speed limit in KB/s.
+#[inline]
+pub fn frontend_calc_limit_kb(download_limit: i32) -> i32 {
+    if download_limit > 0 {
+        download_limit / 1024
+    } else {
+        0
+    }
+}
+
+/// `NCursesFrontend::Run`: decides `(update_now, new_update_next_time)` for a loop iteration.
+#[inline]
+pub fn ncurses_decide_loop_update(
+    key_pressed: bool,
+    update_next_time: bool,
+    data_update_pos: i32,
+) -> (bool, bool) {
+    if key_pressed {
+        (true, true)
+    } else if update_next_time {
+        (true, false)
+    } else if data_update_pos <= 0 {
+        (true, false)
+    } else {
+        (false, update_next_time)
+    }
+}
+
+/// `NCursesFrontend::Run`: selects the sleep interval in milliseconds (`100` in normal mode, `10` otherwise).
+#[inline]
+pub fn ncurses_select_sleep_interval(is_normal_mode: bool) -> i32 {
+    if is_normal_mode {
+        100
+    } else {
+        10
+    }
+}
+
+/// `NCursesFrontend::PrintKeyInputBar`: checks whether the temporary hint banner is still within its 5-second window.
+#[inline]
+pub fn ncurses_is_hint_active(time: i64, start_hint: i64) -> bool {
+    time.wrapping_sub(start_hint) < 5
+}
+
+/// `NCursesFrontend::PrintKeyInputBar`: selects the normal-mode keybar text.
+#[inline]
+pub fn ncurses_select_normal_keybar(group_files: bool) -> &'static std::ffi::CStr {
+    if group_files {
+        c"(Q)uit | (E)dit | (P)ause | (R)ate | (W)indow | (G)roup | (T)ime"
+    } else {
+        c"(Q)uit | (E)dit | (P)ause | (R)ate | (W)indow | (G)roup | (T)ime | n(Z)b"
+    }
+}
+
+/// `NCursesFrontend::PrintFilename` / `NCursesFrontend::PrintGroupname`: resolves `(color, brace1, brace2)`.
+#[inline]
+pub fn ncurses_select_row_highlight(
+    is_edit_queue: bool,
+    selected: bool,
+    use_color: bool,
+    highl_color: i32,
+    text_color: i32,
+) -> (i32, u8, u8) {
+    if is_edit_queue && selected {
+        if use_color {
+            (highl_color, b'[', b']')
+        } else {
+            (highl_color, b'<', b'>')
+        }
+    } else {
+        (text_color, b'[', b']')
+    }
+}
+
+/// `NCursesFrontend::PrintTopHeader`: selects which right-aligned uptime/download-time caption fits in `chars_left`.
+#[inline]
+pub fn ncurses_select_top_header_caption(
+    chars_left: i32,
+    time_len: i32,
+    long_cap_len: i32,
+    short_cap_len: i32,
+) -> i32 {
+    if chars_left - time_len - long_cap_len >= 0 {
+        2
+    } else if chars_left - time_len - short_cap_len >= 0 {
+        1
+    } else if chars_left - time_len >= 0 {
+        0
+    } else {
+        -1
+    }
+}
+
+/// `NCursesFrontend::PrintGroupname`: computes `(h, m, s)` for a group's remaining download time.
+#[inline]
+pub fn ncurses_calc_group_remain_hms_capped(
+    unpaused_remaining_size: i64,
+    current_download_speed: i64,
+    pause_download: bool,
+) -> Option<(i32, i32, i32)> {
+    if current_download_speed <= 0 || pause_download {
+        return None;
+    }
+    let remain_sec = unpaused_remaining_size / current_download_speed;
+    let h = (remain_sec / 3600) as i32;
+    let m = ((remain_sec % 3600) / 60) as i32;
+    let s = (remain_sec % 60) as i32;
+    if h < 100 {
+        Some((h, m, s))
+    } else {
+        Some((99, 99, 99))
+    }
+}
+
+/// Calculates the wrapped message line count and window width in `NCursesFrontend::PrintMessage`.
+pub fn ncurses_calc_msg_lines(text_len: i32, screen_width: i32) -> (i32, i32) {
+    let win_width = screen_width.wrapping_sub(8);
+    if win_width <= 0 {
+        return (win_width, 0);
+    }
+    let mut msg_lines = text_len / win_width;
+    if text_len % win_width > 0 {
+        msg_lines += 1;
+    }
+    (win_width, msg_lines)
+}
+
+/// Sanitizes control characters (`\n`, `\r`, `\b`) to spaces in `NCursesFrontend::PrintMessage`.
+pub fn ncurses_sanitize_message_chars(buf: &mut [u8]) {
+    for b in buf.iter_mut() {
+        if *b == b'\n' || *b == b'\r' || *b == b'\x08' {
+            *b = b' ';
+        }
+    }
+}
+
+/// Selects the edit-queue keybar status string in `NCursesFrontend::PrintKeyInputBar`.
+pub fn ncurses_select_edit_queue_keybar(
+    selected_entry: i32,
+    queue_size: i32,
+) -> &'static [u8] {
+    if selected_entry > 0 && queue_size > 1 && selected_entry == queue_size - 1 {
+        b"(Q)uit | (E)xit | (P)ause | (D)elete | (U)p/(T)op\0"
+    } else if queue_size > 1 && selected_entry == 0 {
+        b"(Q)uit | (E)xit | (P)ause | (D)elete | dow(N)/(B)ottom\0"
+    } else if queue_size > 1 {
+        b"(Q)uit | (E)xit | (P)ause | (D)elete | (U)p/dow(N)/(T)op/(B)ottom\0"
+    } else {
+        b"(Q)uit | (E)xit | (P)ause | (D)elete\0"
+    }
+}
+
+/// Computes `nameLen` in `NCursesFrontend::PrintGroupname`.
+pub fn ncurses_calc_group_name_len(
+    screen_width: i32,
+    calc_col_width: bool,
+    col_files: i32,
+    col_total: i32,
+    col_left: i32,
+) -> i32 {
+    if calc_col_width {
+        screen_width - 1 - 9 - 11 - 11 - 9
+    } else {
+        screen_width - 1 - col_files - 2 - col_total - 2 - col_left - 2 - 9
+    }
+}
+
+/// Cycles `m_queueWindowPercentage` on key `'w'` in `NCursesFrontend::UpdateInput`.
+pub fn ncurses_next_queue_win_pct(cur_pct: i32, is_edit_queue: bool) -> i32 {
+    if cur_pct == 50 {
+        100
+    } else if cur_pct == 100 && !is_edit_queue {
+        0
+    } else {
+        50
     }
 }
 

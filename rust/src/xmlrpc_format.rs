@@ -1,6 +1,6 @@
 //! XML-RPC and JSON-RPC response serialization and command routing (`daemon/remote/XmlRpc.cpp`).
 
-use std::ffi::{c_char, c_int};
+use std::ffi::{c_char, c_int, CStr};
 use std::io::Write;
 
 use crate::ffi::{input, into_buf, RsBuf};
@@ -482,7 +482,7 @@ pub unsafe extern "C" fn nzbget_rs_xmlrpc_format_status(
     let (dl_size_hi, dl_size_lo) = split_i64(s.all_bytes);
 
     let avg_dl_rate =
-        crate::rpcoptlogutil::xmlrpc_calc_average_download_rate(s.download_time_sec, s.all_bytes);
+        xmlrpc_calc_average_download_rate(s.download_time_sec, s.all_bytes);
     let (avg_rate_hi, avg_rate_lo) = split_i64(avg_dl_rate);
 
     let (month_hi, month_lo) = split_i64(s.month_bytes);
@@ -491,7 +491,7 @@ pub unsafe extern "C" fn nzbget_rs_xmlrpc_format_status(
     let (mut rem_mb, mut forced_mb, mut cache_mb, mut dl_mb, mut month_mb, mut day_mb) =
         (0, 0, 0, 0, 0, 0);
     unsafe {
-        crate::rpcoptclient::roc_xmlrpc_status_calc_mbytes(
+        roc_xmlrpc_status_calc_mbytes(
             s.remaining_size,
             s.forced_size,
             s.article_cache,
@@ -511,7 +511,7 @@ pub unsafe extern "C" fn nzbget_rs_xmlrpc_format_status(
     let mut total_inter = s.total_inter_disk_space;
     let (mut free_disk_mb, mut total_disk_mb, mut free_inter_mb, mut total_inter_mb) = (0, 0, 0, 0);
     unsafe {
-        crate::rpcoptclient::roc_xmlrpc_status_calc_disk_space_mb(
+        roc_xmlrpc_status_calc_disk_space_mb(
             s.free_disk_space,
             s.total_disk_space,
             s.inter_dir_empty,
@@ -1016,7 +1016,7 @@ pub unsafe extern "C" fn nzbget_rs_xmlrpc_format_nzb_info_fields(
     let (dupe_hi, dupe_lo) = split_i64(n.dupe_recovered_bytes);
 
     let (message_count, post_total_time_sec) =
-        crate::rpcoptlogutil::xmlrpc_nzb_message_and_post_time(
+        xmlrpc_nzb_message_and_post_time(
             n.message_count,
             n.cached_message_count,
             n.post_total_sec,
@@ -1365,7 +1365,7 @@ pub unsafe extern "C" fn nzbget_rs_xmlrpc_format_post_info_fields(
         let mut st_sec = 0;
         let mut tot_sec = 0;
         unsafe {
-            crate::rpcoptclient::roc_xmlrpc_post_info_elapsed_sec(
+            roc_xmlrpc_post_info_elapsed_sec(
                 cur_time,
                 stage_time,
                 start_time,
@@ -1460,7 +1460,7 @@ pub unsafe extern "C" fn nzbget_rs_xmlrpc_format_group_item_start(
     let mut rem_mb = 0;
     let mut pau_mb = 0;
     unsafe {
-        crate::rpcoptclient::roc_xmlrpc_list_groups_calc_mb(
+        roc_xmlrpc_list_groups_calc_mb(
             remaining_size,
             paused_size,
             &mut rem_mb,
@@ -1809,7 +1809,7 @@ pub unsafe extern "C" fn nzbget_rs_xmlrpc_format_config_list(
         out.extend_from_slice(b"<array><data>\n");
     }
     for (idx, entry) in slice.iter().enumerate() {
-        let mask = crate::rpcoptclient::roc_xmlrpc_config_should_mask_value(
+        let mask = roc_xmlrpc_config_should_mask_value(
             user_access,
             ua_restricted,
             entry.restricted,
@@ -2015,7 +2015,7 @@ pub unsafe extern "C" fn nzbget_rs_xmlrpc_format_server_volume_item(
     let mut total_mb: u32 = 0;
     let mut custom_mb: u32 = 0;
     unsafe {
-        crate::rpcoptclient::roc_xmlrpc_server_volumes_calc_mb(
+        roc_xmlrpc_server_volumes_calc_mb(
             v.total_bytes,
             v.custom_bytes,
             &mut total_mb,
@@ -2446,3 +2446,975 @@ mod tests {
         }
     }
 }
+
+extern "C" {
+    fn strcasecmp(s1: *const c_char, s2: *const c_char) -> c_int;
+}
+
+/// Computes `MiB/s` from `bytes` and `ms` in `XmlRpc.cpp`.
+pub fn xmlrpc_mib_per_sec(bytes: u64, ms: f64) -> f64 {
+    if ms > 0.0 {
+        (bytes as f64 / 1024.0 / 1024.0) / (ms / 1000.0)
+    } else {
+        0.0
+    }
+}
+
+/// Checks whether `XmlRpcProcessor::CreateCommand` should deny `method_name` for `user_access`.
+pub fn xmlrpc_check_user_access_denied(
+    user_access: i32,
+    ua_add: i32,
+    ua_restricted: i32,
+    method_name: &[u8],
+) -> i32 {
+    if user_access == ua_add {
+        let allowed = method_name.eq_ignore_ascii_case(b"append")
+            || method_name.eq_ignore_ascii_case(b"appendurl")
+            || method_name.eq_ignore_ascii_case(b"appendfleet")
+            || method_name.eq_ignore_ascii_case(b"version");
+        if !allowed {
+            return 1;
+        }
+    } else if user_access == ua_restricted {
+        let forbidden = method_name.eq_ignore_ascii_case(b"saveconfig")
+            || method_name.eq_ignore_ascii_case(b"tlscipherstart")
+            || method_name.eq_ignore_ascii_case(b"tlscipherstatus")
+            || method_name.eq_ignore_ascii_case(b"tlsciphercancel");
+        if forbidden {
+            return 2;
+        }
+    }
+    0
+}
+
+/// Parses `"score"`, `"all"`, or `"force"` (case-insensitive) into `EDupeMode`, or `-1` on invalid.
+pub fn xmlrpc_parse_dupe_mode(
+    dupe_mode_str: &[u8],
+    dm_score: i32,
+    dm_all: i32,
+    dm_force: i32,
+) -> i32 {
+    if dupe_mode_str.eq_ignore_ascii_case(b"score") {
+        dm_score
+    } else if dupe_mode_str.eq_ignore_ascii_case(b"all") {
+        dm_all
+    } else if dupe_mode_str.eq_ignore_ascii_case(b"force") {
+        dm_force
+    } else {
+        -1
+    }
+}
+
+/// Returns whether `content` begins with `"http://"` or `"https://"` (case-insensitive).
+pub fn xmlrpc_is_http_url(content: &[u8]) -> bool {
+    (content.len() >= 7 && content[..7].eq_ignore_ascii_case(b"http://"))
+        || (content.len() >= 8 && content[..8].eq_ignore_ascii_case(b"https://"))
+}
+
+/// Parses `CategorySource` (`"FeedFile"`, `"Auto"`, or default `NZBFile`) in `ViewFeedXmlCommand`.
+pub fn xmlrpc_parse_category_source(
+    cat_src_str: &[u8],
+    cs_nzb_file: i32,
+    cs_feed_file: i32,
+    cs_auto: i32,
+) -> i32 {
+    if cat_src_str.eq_ignore_ascii_case(b"FeedFile") {
+        cs_feed_file
+    } else if cat_src_str.eq_ignore_ascii_case(b"Auto") {
+        cs_auto
+    } else {
+        cs_nzb_file
+    }
+}
+
+/// Classifies `counter` in `ResetServerVolumeXmlCommand`.
+pub fn xmlrpc_validate_reset_counter(counter: &[u8]) -> i32 {
+    if counter.is_empty() {
+        1
+    } else if counter == b"CUSTOM" {
+        2
+    } else {
+        0
+    }
+}
+
+/// `SetDownloadRateXmlCommand::Execute`: validates that `rate` (in KiB/s) is
+/// in `0..=i32::MAX / 1024` and computes `rate * 1024` (in B/s).
+pub fn xmlrpc_validate_download_rate(rate: i32) -> (bool, i32) {
+    if rate < 0 || rate > i32::MAX / 1024 {
+        (false, 0)
+    } else {
+        (true, rate * 1024)
+    }
+}
+
+/// `StatusXmlCommand::Execute`: computes `averageDownloadRate`.
+pub fn xmlrpc_calc_average_download_rate(download_time_sec: i32, all_bytes: i64) -> i64 {
+    if download_time_sec > 0 {
+        all_bytes / i64::from(download_time_sec)
+    } else {
+        0
+    }
+}
+
+/// `NzbInfoXmlCommand::AppendNzbInfoFields`: resolves effective `messageCount` and `postTotalTimeSec`.
+pub fn xmlrpc_nzb_message_and_post_time(
+    message_count: i32,
+    cached_message_count: i32,
+    post_total_sec: i32,
+    has_post_start_time: bool,
+    cur_time: i64,
+    post_start_time: i64,
+) -> (i32, i32) {
+    let eff_msg_count = if message_count > 0 {
+        message_count
+    } else {
+        cached_message_count
+    };
+    let active_post_sec = if has_post_start_time {
+        cur_time.wrapping_sub(post_start_time)
+    } else {
+        0
+    };
+    let post_total_time_sec = i64::from(post_total_sec).wrapping_add(active_post_sec) as i32;
+    (eff_msg_count, post_total_time_sec)
+}
+
+/// `NzbInfoXmlCommand::AppendPostInfoFields`: computes `(should_iter, start, clamped_log_entries)`.
+pub fn xmlrpc_post_info_log_slice(log_entries: i32, messages_size: i32) -> (bool, i32, i32) {
+    if log_entries > 0 && messages_size > 0 {
+        let clamped = log_entries.min(messages_size);
+        let start = messages_size - clamped;
+        (true, start, clamped)
+    } else {
+        (false, 0, log_entries)
+    }
+}
+
+/// `SaveConfigXmlCommand::Execute`: validates JSON option entry keys `(key1, key2)`.
+pub unsafe fn xmlrpc_save_config_check_json_keys(
+    key1: *const c_char,
+    key2: *const c_char,
+) -> i32 {
+    if key1.is_null() || key2.is_null() {
+        return 0;
+    }
+    let name_lit = b"Name\0".as_ptr().cast::<c_char>();
+    let value_lit = b"Value\0".as_ptr().cast::<c_char>();
+    if strcasecmp(key1, value_lit) == 0 && strcasecmp(key2, name_lit) == 0 {
+        2
+    } else if strcasecmp(key1, name_lit) == 0 && strcasecmp(key2, value_lit) == 0 {
+        1
+    } else {
+        0
+    }
+}
+
+/// `SaveConfigXmlCommand::Execute`: checks that the raw `_TlsCipherBaseline` value is valid.
+pub fn xmlrpc_save_config_raw_baseline_valid(raw_value: &[u8]) -> bool {
+    !raw_value.windows(6).any(|w| w == b"\\u0000")
+        && !raw_value.windows(2).any(|w| w == b"&#")
+}
+
+/// `SaveConfigXmlCommand::Execute`: checks that the decoded `_TlsCipherBaseline` value is valid.
+pub fn xmlrpc_save_config_decoded_baseline_valid(
+    has_cipher_baseline: bool,
+    decoded_value: &[u8],
+) -> bool {
+    !has_cipher_baseline
+        && decoded_value.len() <= 1024 * 1024
+        && decoded_value.starts_with(b"v1\n")
+}
+
+/// `ViewFeedXmlCommand::Execute`: checks whether a feed item should be included and computes `sizeMB`.
+pub fn xmlrpc_view_feed_should_include(
+    include_non_matching: bool,
+    match_status: i32,
+    ms_accepted: i32,
+    size_bytes: i64,
+) -> (bool, i32) {
+    let include = include_non_matching || match_status == ms_accepted;
+    let size_mb = if include {
+        (size_bytes / 1024 / 1024) as i32
+    } else {
+        0
+    };
+    (include, size_mb)
+}
+
+/// `TestServerXmlCommand::Execute`: resolves effective connection timeout.
+pub fn xmlrpc_test_server_effective_timeout(param_timeout: i32, article_timeout: i32) -> i32 {
+    if param_timeout == 0 {
+        article_timeout
+    } else {
+        param_timeout
+    }
+}
+
+/// `TestServerXmlCommand::Execute`: checks whether the NNTP `ARTICLE` response starts with `'4'` or `'2'`.
+pub fn xmlrpc_test_server_response_ok(has_response: bool, first_char: u8) -> bool {
+    has_response && (first_char == b'4' || first_char == b'2')
+}
+
+/// Scans a NUL-terminated C string linearly until `"</struct>"` is matched or NUL is reached.
+pub unsafe fn xmlrpc_multicall_find_struct_end_cstr(
+    request_ptr: *const c_char,
+) -> Option<usize> {
+    if request_ptr.is_null() {
+        return None;
+    }
+    const NEEDLE: &[u8; 9] = b"</struct>";
+    let base = request_ptr.cast::<u8>();
+    let mut i = 0usize;
+    loop {
+        let mut matched = 0usize;
+        while matched < NEEDLE.len() {
+            let b = *base.add(i + matched);
+            if b == 0 {
+                return None;
+            }
+            if b != NEEDLE[matched] {
+                break;
+            }
+            matched += 1;
+        }
+        if matched == NEEDLE.len() {
+            return Some(i);
+        }
+        if *base.add(i) == 0 {
+            return None;
+        }
+        i += 1;
+    }
+}
+
+/// Locates `"</name>"` and optional `"params</name>"` within a `<struct>` slice.
+pub fn xmlrpc_multicall_locate_parts(call_slice: &[u8]) -> Option<(usize, usize)> {
+    let name_off = call_slice.windows(7).position(|w| w == b"</name>")?;
+    let params_off = call_slice[name_off..]
+        .windows(13)
+        .position(|w| w == b"params</name>")
+        .map(|rel| name_off + rel)
+        .unwrap_or(0);
+    Some((name_off, params_off))
+}
+
+/// Returns 1 when an XML-RPC multicall sub-response is neither a `<fault>` nor an `<array>`.
+pub unsafe fn roc_xmlrpc_multicall_needs_array_wrap(resp: *const c_char) -> c_int {
+    if resp.is_null() {
+        return 1;
+    }
+    let bytes = unsafe { CStr::from_ptr(resp).to_bytes() };
+    let fault = bytes.starts_with(b"<fault>");
+    let array = !fault && bytes.starts_with(b"<array>");
+    if !fault && !array {
+        1
+    } else {
+        0
+    }
+}
+
+/// Returns 1 when a TLS cipher optimizer RPC call has control access over JSON-RPC POST.
+pub fn roc_xmlrpc_tls_cipher_access_allowed(
+    user_access: c_int,
+    ua_control: c_int,
+    protocol: c_int,
+    rp_json_rpc: c_int,
+    http_method: c_int,
+    hm_post: c_int,
+) -> c_int {
+    if user_access == ua_control && protocol == rp_json_rpc && http_method == hm_post {
+        1
+    } else {
+        0
+    }
+}
+
+/// Validates TLS cipher optimizer job ID parameter arity, string type, length (<= 128),
+/// non-emptiness, and absence of embedded NUL bytes.
+pub unsafe fn roc_xmlrpc_tls_cipher_validate_job_id(
+    operation: c_int,
+    param_count: usize,
+    first_is_string: c_int,
+    id_ptr: *const c_char,
+    id_len: usize,
+) -> c_int {
+    if (operation == 0 && param_count != 0)
+        || (operation == 1 && param_count > 1)
+        || (operation == 2 && param_count != 1)
+    {
+        return 0;
+    }
+    if param_count > 0 {
+        if first_is_string == 0 || id_ptr.is_null() || id_len == 0 || id_len > 128 {
+            return 0;
+        }
+        let slice = unsafe { std::slice::from_raw_parts(id_ptr as *const u8, id_len) };
+        if slice.contains(&0) {
+            return 0;
+        }
+    }
+    1
+}
+
+/// Computes megabyte fields for `StatusXmlCommand::Execute`.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn roc_xmlrpc_status_calc_mbytes(
+    remaining_size: i64,
+    forced_size: i64,
+    article_cache: i64,
+    all_bytes: i64,
+    month_bytes: i64,
+    day_bytes: i64,
+    out_remaining_mb: *mut c_int,
+    out_forced_mb: *mut c_int,
+    out_cache_mb: *mut c_int,
+    out_downloaded_mb: *mut c_int,
+    out_month_mb: *mut c_int,
+    out_day_mb: *mut c_int,
+) {
+    if !out_remaining_mb.is_null() {
+        unsafe { *out_remaining_mb = (remaining_size / 1024 / 1024) as c_int };
+    }
+    if !out_forced_mb.is_null() {
+        unsafe { *out_forced_mb = (forced_size / 1024 / 1024) as c_int };
+    }
+    if !out_cache_mb.is_null() {
+        unsafe { *out_cache_mb = (article_cache / 1024 / 1024) as c_int };
+    }
+    if !out_downloaded_mb.is_null() {
+        unsafe { *out_downloaded_mb = (all_bytes / 1024 / 1024) as c_int };
+    }
+    if !out_month_mb.is_null() {
+        unsafe { *out_month_mb = (month_bytes / 1024 / 1024) as c_int };
+    }
+    if !out_day_mb.is_null() {
+        unsafe { *out_day_mb = (day_bytes / 1024 / 1024) as c_int };
+    }
+}
+
+/// Resolves `InterDir` disk space fallback when `InterDir` is empty and computes MB values.
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn roc_xmlrpc_status_calc_disk_space_mb(
+    free_disk: i64,
+    total_disk: i64,
+    inter_dir_empty: c_int,
+    free_inter: i64,
+    total_inter: i64,
+    out_free_inter: *mut i64,
+    out_total_inter: *mut i64,
+    out_free_disk_mb: *mut c_int,
+    out_total_disk_mb: *mut c_int,
+    out_free_inter_mb: *mut c_int,
+    out_total_inter_mb: *mut c_int,
+) {
+    let eff_free_inter = if inter_dir_empty != 0 {
+        free_disk
+    } else {
+        free_inter
+    };
+    let eff_total_inter = if inter_dir_empty != 0 {
+        total_disk
+    } else {
+        total_inter
+    };
+    if !out_free_inter.is_null() {
+        unsafe { *out_free_inter = eff_free_inter };
+    }
+    if !out_total_inter.is_null() {
+        unsafe { *out_total_inter = eff_total_inter };
+    }
+    if !out_free_disk_mb.is_null() {
+        unsafe { *out_free_disk_mb = (free_disk / 1024 / 1024) as c_int };
+    }
+    if !out_total_disk_mb.is_null() {
+        unsafe { *out_total_disk_mb = (total_disk / 1024 / 1024) as c_int };
+    }
+    if !out_free_inter_mb.is_null() {
+        unsafe { *out_free_inter_mb = (eff_free_inter / 1024 / 1024) as c_int };
+    }
+    if !out_total_inter_mb.is_null() {
+        unsafe { *out_total_inter_mb = (eff_total_inter / 1024 / 1024) as c_int };
+    }
+}
+
+/// Validates `LogXmlCommand` parameters (`!(nr_entries > 0 && id_from > 0)`).
+pub fn roc_xmlrpc_log_params_valid(id_from: c_int, nr_entries: c_int) -> c_int {
+    if nr_entries > 0 && id_from > 0 {
+        0
+    } else {
+        1
+    }
+}
+
+/// Validates `ListFilesXmlCommand` range and `nzbId` parameters.
+pub fn roc_xmlrpc_list_files_params_valid(
+    has_id_start: c_int,
+    has_id_end: c_int,
+    id_start: c_int,
+    id_end: c_int,
+    nzb_id: c_int,
+) -> c_int {
+    if has_id_start != 0 && (has_id_end == 0 || id_end < id_start) {
+        return 0;
+    }
+    if nzb_id > 0 && (id_start != 0 || id_end != 0) {
+        return 0;
+    }
+    1
+}
+
+/// Computes `StageTimeSec` and `TotalTimeSec` for `NzbInfoXmlCommand::AppendPostInfoFields`.
+pub unsafe fn roc_xmlrpc_post_info_elapsed_sec(
+    cur_time: i64,
+    stage_time: i64,
+    start_time: i64,
+    out_stage_sec: *mut c_int,
+    out_total_sec: *mut c_int,
+) {
+    let stage_sec = if stage_time != 0 {
+        (cur_time - stage_time) as c_int
+    } else {
+        0
+    };
+    let total_sec = if start_time != 0 {
+        (cur_time - start_time) as c_int
+    } else {
+        0
+    };
+    if !out_stage_sec.is_null() {
+        unsafe { *out_stage_sec = stage_sec };
+    }
+    if !out_total_sec.is_null() {
+        unsafe { *out_total_sec = total_sec };
+    }
+}
+
+/// Computes `RemainingSizeMB` and `PausedSizeMB` for `ListGroupsXmlCommand::Execute`.
+pub unsafe fn roc_xmlrpc_list_groups_calc_mb(
+    remaining_size: i64,
+    paused_size: i64,
+    out_remaining_mb: *mut c_int,
+    out_paused_mb: *mut c_int,
+) {
+    if !out_remaining_mb.is_null() {
+        unsafe { *out_remaining_mb = (remaining_size / 1024 / 1024) as c_int };
+    }
+    if !out_paused_mb.is_null() {
+        unsafe { *out_paused_mb = (paused_size / 1024 / 1024) as c_int };
+    }
+}
+
+/// Returns 1 when a `HistoryInfo` entry of kind `hkDup` should be skipped because `dup` is false.
+pub fn roc_xmlrpc_history_should_skip_dup(
+    kind: c_int,
+    hk_dup: c_int,
+    include_dup: c_int,
+) -> c_int {
+    if kind == hk_dup && include_dup == 0 {
+        1
+    } else {
+        0
+    }
+}
+
+/// Returns 1 when an option value should be masked as `"***"` for restricted RPC users.
+pub fn roc_xmlrpc_config_should_mask_value(
+    user_access: c_int,
+    ua_restricted: c_int,
+    opt_restricted: c_int,
+) -> c_int {
+    if user_access == ua_restricted && opt_restricted != 0 {
+        1
+    } else {
+        0
+    }
+}
+
+/// Computes `totalSizeMB` and `customSizeMB` for `ServerVolumesXmlCommand::Execute`.
+pub unsafe fn roc_xmlrpc_server_volumes_calc_mb(
+    total_bytes: i64,
+    custom_bytes: i64,
+    out_total_mb: *mut u32,
+    out_custom_mb: *mut u32,
+) {
+    if !out_total_mb.is_null() {
+        unsafe { *out_total_mb = ((total_bytes / 1024 / 1024) as i32) as u32 };
+    }
+    if !out_custom_mb.is_null() {
+        unsafe { *out_custom_mb = ((custom_bytes / 1024 / 1024) as i32) as u32 };
+    }
+}
+
+/// Validates target server availability for `TestServerSpeedXmlCommand::Execute`.
+pub fn roc_xmlrpc_test_server_speed_check_server(
+    has_server: c_int,
+    is_active: c_int,
+    max_connections: c_int,
+) -> c_int {
+    if has_server == 0 {
+        1
+    } else if is_active == 0 {
+        2
+    } else if max_connections == 0 {
+        3
+    } else {
+        0
+    }
+}
+
+/// Validates `TestDiskSpeedXmlCommand::Execute` parameters and computes byte sizes.
+pub unsafe fn roc_xmlrpc_test_disk_speed_validate_params(
+    write_buffer_kib: c_int,
+    max_file_size_gib: c_int,
+    timeout_sec: c_int,
+    out_buffer_bytes: *mut usize,
+    out_max_file_bytes: *mut u64,
+) -> c_int {
+    if write_buffer_kib < 0 {
+        return 1;
+    }
+    if max_file_size_gib < 1 {
+        return 2;
+    }
+    if timeout_sec < 1 {
+        return 3;
+    }
+    if !out_buffer_bytes.is_null() {
+        unsafe { *out_buffer_bytes = (write_buffer_kib as usize) * 1024usize };
+    }
+    if !out_max_file_bytes.is_null() {
+        unsafe {
+            *out_max_file_bytes = (max_file_size_gib as u64) * 1024u64 * 1024u64 * 1024u64;
+        }
+    }
+    0
+}
+
+/// Checks whether a request URL targets one of the XML-RPC / JSON-RPC / JSONP-RPC endpoints.
+pub fn rpc_is_rpc_request(url: &[u8]) -> bool {
+    url == b"/xmlrpc"
+        || url.starts_with(b"/xmlrpc/")
+        || url == b"/jsonrpc"
+        || url.starts_with(b"/jsonrpc/")
+        || url == b"/jsonprpc"
+        || url.starts_with(b"/jsonprpc/")
+}
+
+/// Computes `(start_index, effective_nr_entries)` for `LogXmlCommand::Execute`.
+pub fn rpc_log_slice_range(
+    messages_len: i32,
+    front_id: i32,
+    id_from: i32,
+    nr_entries: i32,
+) -> (i32, i32) {
+    let mut start = messages_len;
+    let mut eff_entries = nr_entries;
+    if eff_entries > 0 {
+        if eff_entries > messages_len {
+            eff_entries = messages_len;
+        }
+        start = messages_len - eff_entries;
+    }
+    if id_from > 0 && messages_len > 0 {
+        eff_entries = messages_len;
+        start = id_from - front_id;
+        if start < 0 {
+            start = 0;
+        }
+    }
+    (start, eff_entries)
+}
+
+/// Evaluates whether a `FileInfo` matches the `ListFilesXmlCommand` filter and computes its permille progress.
+#[allow(clippy::too_many_arguments)]
+pub fn rpc_list_files_match_and_progress(
+    nzb_id: i32,
+    file_nzb_id: i32,
+    file_id: i32,
+    id_start: i32,
+    id_end: i32,
+    size: i64,
+    remaining_size: i64,
+    missed_size: i64,
+    failed_size: i64,
+    success_size: i64,
+) -> Option<i32> {
+    let matches = (nzb_id > 0 && nzb_id == file_nzb_id)
+        || (nzb_id == 0 && (id_start == 0 || (id_start <= file_id && file_id <= id_end)));
+    if !matches {
+        return None;
+    }
+    let progress = if failed_size == 0 && success_size == 0 {
+        0
+    } else {
+        let denom = size - missed_size;
+        if denom <= 0 {
+            0
+        } else {
+            (1000 - (remaining_size * 1000) / denom) as i32
+        }
+    };
+    Some(progress)
+}
+
+const POST_STAGE_CS_NAMES: [&CStr; 15] = [
+    c"PP_QUEUED",
+    c"LOADING_PARS",
+    c"VERIFYING_SOURCES",
+    c"REPAIRING",
+    c"VERIFYING_REPAIRED",
+    c"RENAMING",
+    c"RENAMING",
+    c"UNPACKING",
+    c"MOVING",
+    c"MOVING",
+    c"POST_UNPACK_RENAMING",
+    c"EXECUTING_SCRIPT",
+    c"PP_FINISHED",
+    c"POST_DOWNLOAD_RENAMING",
+    c"STREAM_REPAIRING",
+];
+
+/// Maps `NzbInfo` state to the RPC group status string for `ListGroupsXmlCommand::DetectStatus`.
+#[allow(clippy::too_many_arguments)]
+pub fn rpc_detect_group_status(
+    has_post_info: bool,
+    post_stage: i32,
+    has_queue_script_job: bool,
+    queue_script_active: bool,
+    direct_unpack_status: i32,
+    active_downloads: i32,
+    kind: i32,
+    paused_size: i64,
+    remaining_size: i64,
+) -> &'static CStr {
+    if has_post_info {
+        if post_stage == 0 && has_queue_script_job {
+            if queue_script_active {
+                c"QS_EXECUTING"
+            } else {
+                c"QS_QUEUED"
+            }
+        } else if direct_unpack_status == 1 {
+            c"UNPACKING"
+        } else if (0..POST_STAGE_CS_NAMES.len() as i32).contains(&post_stage) {
+            POST_STAGE_CS_NAMES[post_stage as usize]
+        } else {
+            c"PP_QUEUED"
+        }
+    } else if active_downloads > 0 {
+        if kind == 1 {
+            c"FETCHING"
+        } else {
+            c"DOWNLOADING"
+        }
+    } else if paused_size > 0 && remaining_size == paused_size {
+        c"PAUSED"
+    } else {
+        c"QUEUED"
+    }
+}
+
+const EDIT_COMMAND_MAP: [(&[u8], i32); 51] = [
+    (b"FileMoveOffset", 1),
+    (b"FileMoveTop", 2),
+    (b"FileMoveBottom", 3),
+    (b"FilePause", 4),
+    (b"FileResume", 5),
+    (b"FileDelete", 6),
+    (b"FilePauseAllPars", 7),
+    (b"FilePauseExtraPars", 8),
+    (b"FileReorder", 9),
+    (b"FileSplit", 10),
+    (b"GroupMoveOffset", 11),
+    (b"GroupMoveTop", 12),
+    (b"GroupMoveBottom", 13),
+    (b"GroupMoveBefore", 14),
+    (b"GroupMoveAfter", 15),
+    (b"GroupPause", 16),
+    (b"GroupResume", 17),
+    (b"GroupDelete", 18),
+    (b"GroupParkDelete", 19),
+    (b"GroupDupeDelete", 20),
+    (b"GroupFinalDelete", 21),
+    (b"GroupPauseAllPars", 22),
+    (b"GroupPauseExtraPars", 23),
+    (b"GroupSetPriority", 24),
+    (b"GroupSetCategory", 25),
+    (b"GroupApplyCategory", 26),
+    (b"GroupMerge", 27),
+    (b"GroupSetParameter", 28),
+    (b"GroupSetName", 29),
+    (b"GroupSetDupeKey", 30),
+    (b"GroupSetDupeScore", 31),
+    (b"GroupSetDupeMode", 32),
+    (b"GroupSort", 33),
+    (b"GroupSortFiles", 34),
+    (b"PostDelete", 35),
+    (b"HistoryDelete", 36),
+    (b"HistoryFinalDelete", 37),
+    (b"HistoryReturn", 38),
+    (b"HistoryProcess", 39),
+    (b"HistoryRedownload", 40),
+    (b"HistoryRetryFailed", 41),
+    (b"HistorySetParameter", 42),
+    (b"HistorySetDupeKey", 43),
+    (b"HistorySetDupeScore", 44),
+    (b"HistorySetDupeMode", 45),
+    (b"HistorySetDupeBackup", 46),
+    (b"HistoryMarkBad", 47),
+    (b"HistoryMarkGood", 48),
+    (b"HistoryMarkSuccess", 49),
+    (b"HistorySetCategory", 50),
+    (b"HistorySetName", 51),
+];
+
+/// Looks up `DownloadQueue::EEditAction` (`1..=51`) by case-insensitive command name.
+pub fn rpc_lookup_edit_command(edit_command: &[u8]) -> i32 {
+    for &(name, action_id) in &EDIT_COMMAND_MAP {
+        if edit_command.eq_ignore_ascii_case(name) {
+            return action_id;
+        }
+    }
+    -1
+}
+
+/// Parses an integer prefix like `strtoll(text, &end, 10)` and checks `INT_MIN..=INT_MAX`.
+pub fn rpc_parse_int_param(text: &[u8]) -> Option<i32> {
+    let mut i = 0;
+    while i < text.len() && matches!(text[i], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+        i += 1;
+    }
+    let rest = &text[i..];
+    if rest.is_empty() {
+        return None;
+    }
+    let (neg, digits_slice) = if rest[0] == b'-' {
+        (true, &rest[1..])
+    } else if rest[0] == b'+' {
+        (false, &rest[1..])
+    } else {
+        (false, rest)
+    };
+    let d_len = digits_slice
+        .iter()
+        .take_while(|b| b.is_ascii_digit())
+        .count();
+    if d_len == 0 {
+        return None;
+    }
+    let mut acc: i64 = 0;
+    for &b in &digits_slice[..d_len] {
+        let digit = (b - b'0') as i64;
+        acc = acc.checked_mul(10)?;
+        acc = if neg {
+            acc.checked_sub(digit)?
+        } else {
+            acc.checked_add(digit)?
+        };
+    }
+    i32::try_from(acc).ok()
+}
+
+/// Validates `EditQueueXmlCommand::Execute` arguments for score/priority, parameter, and dupe mode actions.
+pub fn rpc_validate_edit_queue_args(action: i32, args: &[u8], parsed_int_ok: bool) -> bool {
+    if (action == 24 || action == 31 || action == 44)
+        && !(parsed_int_ok && rpc_parse_int_param(args).is_some())
+    {
+        return false;
+    }
+    if (action == 28 || action == 42)
+        && (args.is_empty() || args[0] == b'=' || !args.contains(&b'='))
+    {
+        return false;
+    }
+    if action == 32 || action == 45 {
+        let valid_mode = args.eq_ignore_ascii_case(b"SCORE")
+            || args.eq_ignore_ascii_case(b"ALL")
+            || args.eq_ignore_ascii_case(b"FORCE");
+        if !valid_mode {
+            return false;
+        }
+    }
+    true
+}
+
+/// Parses the log message kind string in `WriteLogXmlCommand::Execute`.
+pub fn rpc_parse_write_log_kind(kind: &[u8]) -> i32 {
+    match kind {
+        b"INFO" => 0,
+        b"WARNING" => 1,
+        b"ERROR" => 2,
+        b"DEBUG" => 3,
+        b"DETAIL" => 4,
+        _ => -1,
+    }
+}
+
+const HISTORY_DUP_STATUS_CS_NAMES: [&CStr; 7] = [
+    c"FAILURE/INTERNAL_ERROR",
+    c"SUCCESS/HIDDEN",
+    c"FAILURE/HIDDEN",
+    c"DELETED/MANUAL",
+    c"DELETED/DUPE",
+    c"FAILURE/BAD",
+    c"SUCCESS/GOOD",
+];
+
+/// Maps `DupInfo::EStatus` (`0..=6`) to its RPC status string for `HistoryXmlCommand::DetectStatus`.
+pub fn rpc_detect_history_dup_status(dup_status: i32) -> &'static CStr {
+    if (0..HISTORY_DUP_STATUS_CS_NAMES.len() as i32).contains(&dup_status) {
+        HISTORY_DUP_STATUS_CS_NAMES[dup_status as usize]
+    } else {
+        c"FAILURE/INTERNAL_ERROR"
+    }
+}
+
+/// Parses the branch name in `StartUpdateXmlCommand::Execute`.
+pub fn rpc_parse_update_branch(branch_name: &[u8]) -> i32 {
+    if branch_name.eq_ignore_ascii_case(b"stable") {
+        0
+    } else if branch_name.eq_ignore_ascii_case(b"testing") {
+        1
+    } else if branch_name.eq_ignore_ascii_case(b"devel") {
+        2
+    } else {
+        -1
+    }
+}
+
+/// Parses a boolean option string in `SaveConfigXmlCommand::Execute`, falling back to `def_val`.
+pub fn rpc_save_config_parse_bool(val: Option<&[u8]>, def_val: bool) -> bool {
+    let Some(v) = val else {
+        return def_val;
+    };
+    if v.eq_ignore_ascii_case(b"yes")
+        || v.eq_ignore_ascii_case(b"true")
+        || v == b"1"
+        || v.eq_ignore_ascii_case(b"on")
+        || v.eq_ignore_ascii_case(b"enable")
+        || v.eq_ignore_ascii_case(b"enabled")
+    {
+        return true;
+    }
+    if v.eq_ignore_ascii_case(b"no")
+        || v.eq_ignore_ascii_case(b"false")
+        || v == b"0"
+        || v.eq_ignore_ascii_case(b"off")
+        || v.eq_ignore_ascii_case(b"disable")
+        || v.eq_ignore_ascii_case(b"disabled")
+    {
+        return false;
+    }
+    def_val
+}
+
+/// Evaluates global configuration conflict rules R7.2, R7.3, and R7.4 in `SaveConfigXmlCommand::Execute`.
+pub fn rpc_save_config_check_global_conflicts(
+    dupe_search_val: Option<&[u8]>,
+    health_check_val: Option<&[u8]>,
+    flush_queue_val: Option<&[u8]>,
+    direct_write_val: Option<&[u8]>,
+    unpack_pause_queue_val: Option<&[u8]>,
+    direct_unpack_val: Option<&[u8]>,
+) -> i32 {
+    if dupe_search_val.is_some() || health_check_val.is_some() {
+        let dupe_search = rpc_save_config_parse_bool(dupe_search_val, false);
+        let health_check_park = health_check_val.is_some_and(|v| {
+            v.eq_ignore_ascii_case(b"park") || v.eq_ignore_ascii_case(b"hcpark")
+        });
+        if dupe_search && health_check_park {
+            return 2;
+        }
+    }
+
+    if flush_queue_val.is_some() || direct_write_val.is_some() {
+        let flush_queue = rpc_save_config_parse_bool(flush_queue_val, true);
+        let direct_write = rpc_save_config_parse_bool(direct_write_val, true);
+        if direct_write && !flush_queue {
+            return 3;
+        }
+    }
+
+    if unpack_pause_queue_val.is_some() || direct_unpack_val.is_some() {
+        let unpack_pause_queue = rpc_save_config_parse_bool(unpack_pause_queue_val, false);
+        let direct_unpack = rpc_save_config_parse_bool(direct_unpack_val, false);
+        if direct_unpack && !unpack_pause_queue {
+            return 4;
+        }
+    }
+
+    0
+}
+
+fn parse_server_dot_index(after_server: &[u8]) -> Option<i32> {
+    let mut i = 0;
+    while i < after_server.len()
+        && matches!(after_server[i], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
+    {
+        i += 1;
+    }
+    let rest = &after_server[i..];
+    if rest.is_empty() {
+        return None;
+    }
+    let (neg, digits) = if rest[0] == b'-' {
+        (true, &rest[1..])
+    } else if rest[0] == b'+' {
+        (false, &rest[1..])
+    } else {
+        (false, rest)
+    };
+    let d_len = digits.iter().take_while(|b| b.is_ascii_digit()).count();
+    if d_len == 0 || digits.get(d_len) != Some(&b'.') || neg {
+        return None;
+    }
+    let s_idx = std::str::from_utf8(&digits[..d_len]).ok()?.parse::<i32>().ok()?;
+    if s_idx > 0 {
+        Some(s_idx)
+    } else {
+        None
+    }
+}
+
+/// Evaluates Rule 7.1 in `SaveConfigXmlCommand::Execute`.
+pub fn rpc_save_config_find_cipher_conflict(names: &[&[u8]], values: &[&[u8]]) -> i32 {
+    let count = names.len().min(values.len());
+    let mut checked = Vec::new();
+    for i in 0..count {
+        let entry_name = names[i];
+        if entry_name.len() > 6 && entry_name[..6].eq_ignore_ascii_case(b"Server") {
+            if let Some(s_index) = parse_server_dot_index(&entry_name[6..]) {
+                if checked.contains(&s_index) {
+                    continue;
+                }
+                checked.push(s_index);
+
+                let cipher_opt = format!("Server{}.Cipher", s_index);
+                let enc_opt = format!("Server{}.Encryption", s_index);
+
+                let cipher_val = (0..count)
+                    .find(|&j| names[j].eq_ignore_ascii_case(cipher_opt.as_bytes()))
+                    .map(|j| values[j]);
+
+                if let Some(cv) = cipher_val {
+                    if !cv.is_empty() {
+                        let enc_val = (0..count)
+                            .find(|&j| names[j].eq_ignore_ascii_case(enc_opt.as_bytes()))
+                            .map(|j| values[j]);
+                        let enc_disabled = match enc_val {
+                            Some(ev) => !rpc_save_config_parse_bool(Some(ev), false),
+                            None => true,
+                        };
+                        if enc_disabled {
+                            return s_index;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    0
+}
+

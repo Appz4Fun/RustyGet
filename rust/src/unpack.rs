@@ -487,6 +487,125 @@ pub fn unpack_ctrl_readline_step(
     false
 }
 
+/// Matches the overwrite mode switch in `Unrar::MakeArgs()`:
+/// `0 (Skip) -> "-o-"`, `1 (Overwrite) -> "-o+"`, `2 (AutoRename) -> "-or"`.
+pub fn unrar_overwrite_switch(mode: i32) -> &'static std::ffi::CStr {
+    match mode {
+        0 => c"-o-",
+        1 => c"-o+",
+        2 => c"-or",
+        _ => c"-o-",
+    }
+}
+
+/// Matches the `.part` / `\\.part0*1\\.rar$` check in `Unrar::IsSupported` after
+/// `FileTypes::IsRarExt` has already returned `true`.
+pub fn unrar_is_part1_or_unsplit_rar(filename: &[u8]) -> bool {
+    let has_part = filename
+        .windows(5)
+        .any(|w| w.eq_ignore_ascii_case(b".part"));
+    if !has_part {
+        return true;
+    }
+    if filename.len() < 10 {
+        return false;
+    }
+    let suffix_start = filename.len() - 4;
+    if !filename[suffix_start..].eq_ignore_ascii_case(b".rar") {
+        return false;
+    }
+    let before_rar = &filename[..suffix_start];
+    if !before_rar.ends_with(b"1") {
+        return false;
+    }
+    let mut i = before_rar.len() - 1;
+    while i > 0 && before_rar[i - 1] == b'0' {
+        i -= 1;
+    }
+    if i < 5 {
+        return false;
+    }
+    before_rar[i - 5..i].eq_ignore_ascii_case(b".part")
+}
+
+/// Matches `Unrar::DecodeExitCode(ec)`:
+/// Returns `(is_success, known_error_msg)`.
+pub fn unrar_decode_exit_code(ec: i32) -> (bool, &'static std::ffi::CStr) {
+    match ec {
+        0 => (true, c""),
+        1 => (
+            false,
+            c"Extraction finished, but some files might be missing or incomplete",
+        ),
+        2 => (
+            false,
+            c"The process could not start or was interrupted unexpectedly",
+        ),
+        3 => (
+            false,
+            c"The archive is damaged. The extracted files are likely corrupt",
+        ),
+        4 => (
+            false,
+            c"This archive is locked and cannot be modified or unpacked",
+        ),
+        5 => (
+            false,
+            c"Could not write files to the destination. Please check your permissions and disk space",
+        ),
+        6 => (
+            false,
+            c"Couldn't open the archive. The file may be missing or you don't have permission to read it",
+        ),
+        7 => (false, c"An internal program error occurred"),
+        8 => (
+            false,
+            c"Your computer ran out of memory. Please try closing other applications first",
+        ),
+        9 => (
+            false,
+            c"Couldn't create files in the destination folder. Please check your permissions",
+        ),
+        10 => (
+            false,
+            c"There were no files inside the archive to extract",
+        ),
+        11 => (false, c"The password you entered was incorrect"),
+        _ => (false, c""),
+    }
+}
+
+/// Matches the overwrite mode switch in `SevenZip::MakeArgs()`:
+/// `0 (Skip) -> "-aos"`, `1 (Overwrite) -> "-aoa"`, `2 (AutoRename) -> "-aou"`.
+pub fn sevenzip_overwrite_switch(mode: i32) -> &'static std::ffi::CStr {
+    match mode {
+        0 => c"-aos",
+        1 => c"-aoa",
+        2 => c"-aou",
+        _ => c"-aos",
+    }
+}
+
+/// Matches `SevenZip::DecodeExitCode(ec)`:
+/// Returns `(is_success, known_error_msg)`.
+pub fn sevenzip_decode_exit_code(ec: i32) -> (bool, &'static std::ffi::CStr) {
+    match ec {
+        0 => (true, c""),
+        1 => (
+            false,
+            c"Completed with warnings. Some files may have been skipped because they were in use",
+        ),
+        2 => (
+            false,
+            c"A fatal error occurred. Check for permission issues, a corrupt archive, password, disk space",
+        ),
+        7 => (false, c"Command line error"),
+        8 => (false, c"Not enough memory for operation"),
+        255 => (false, c"User stopped the process"),
+        _ => (false, c""),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

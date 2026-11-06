@@ -577,6 +577,7 @@ pub fn nntp_health_classify_body_fetch_result(
 }
 
 #[cfg(test)]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -661,3 +662,190 @@ mod tests {
         assert_eq!(io.errors, [b"%s|Authorization for news (news.example) failed: 502 no".to_vec()]);
     }
 }
+
+// ============================================================================
+// NntpHealthServer, NntpConnection, ServerPool, and Connection Helpers
+// ============================================================================
+
+/// Port of `NntpHealthServer::CapFor`.
+pub fn nntp_health_cap_for(connections: i32, max_cap: i32) -> i32 {
+    1.max(max_cap.min(connections / 2))
+}
+
+/// Port of STAT reply classification in `NntpHealthServer::Exchange`.
+/// Returns `0` (`Answer::Present`), `1` (`Answer::Missing`), or `2` (`Answer::Error`).
+pub fn nntp_health_classify_stat_reply(line: &[u8]) -> i32 {
+    if line.starts_with(b"223") {
+        0
+    } else if line.starts_with(b"430") {
+        1
+    } else {
+        2
+    }
+}
+
+/// Maps NewsServer IP version (`4` / `6` / other) to `Connection::EIPVersion`.
+pub fn nntp_map_ip_version(ip_version: i32, ip_v4: i32, ip_v6: i32, ip_auto: i32) -> i32 {
+    if ip_version == 4 {
+        ip_v4
+    } else if ip_version == 6 {
+        ip_v6
+    } else {
+        ip_auto
+    }
+}
+
+/// Returns whether `ServerPool::GetConnection` can advance past `level` given a server's state.
+pub fn server_pool_can_advance_level(
+    norm_level: i32,
+    level: i32,
+    active: bool,
+    optional: bool,
+    blocked: bool,
+) -> bool {
+    !(norm_level == level && active && !(optional && blocked))
+}
+
+/// Returns whether a candidate server matches `wantServer` (or its group).
+pub fn server_pool_match_want_server(
+    has_want: bool,
+    cand_id: i32,
+    want_id: i32,
+    want_group: i32,
+    cand_group: i32,
+) -> bool {
+    !has_want || cand_id == want_id || (want_group > 0 && want_group == cand_group)
+}
+
+/// Returns whether a candidate server matches an ignored server (or its same-level group).
+pub fn server_pool_match_ignore_server(
+    cand_id: i32,
+    ign_id: i32,
+    ign_group: i32,
+    cand_group: i32,
+    ign_norm_level: i32,
+    cand_norm_level: i32,
+) -> bool {
+    cand_id == ign_id
+        || (ign_group > 0 && ign_group == cand_group && ign_norm_level == cand_norm_level)
+}
+
+/// Computes remaining block seconds before `ServerPool::LogDebugInfo` unblocks a server.
+pub fn server_pool_calc_remaining_block_sec(
+    block_time: i64,
+    retry_interval: i32,
+    cur_time: i64,
+) -> i32 {
+    if block_time == 0 {
+        return 0;
+    }
+    let end = block_time.saturating_add(i64::from(retry_interval));
+    if end > cur_time {
+        (end - cur_time).clamp(0, i64::from(i32::MAX)) as i32
+    } else {
+        0
+    }
+}
+
+/// Selects `addrinfo.ai_family` for `Connection::Bind` and `Connection::DoConnect`:
+/// `m_ipVersion == ipV4 ? AF_INET : m_ipVersion == ipV6 ? AF_INET6 : AF_UNSPEC`.
+pub fn conn_select_ai_family(
+    ip_version: i32,
+    ip_v4: i32,
+    ip_v6: i32,
+    af_inet: i32,
+    af_inet6: i32,
+    af_unspec: i32,
+) -> i32 {
+    if ip_version == ip_v4 {
+        af_inet
+    } else if ip_version == ip_v6 {
+        af_inet6
+    } else {
+        af_unspec
+    }
+}
+
+/// Checks whether `host` is a Unix domain socket path (`!m_host.empty() && m_host.front() == '/'`).
+pub fn conn_is_unix_domain_path(host: &[u8]) -> bool {
+    !host.is_empty() && host[0] == b'/'
+}
+
+/// Calculates the buffered chunk length in `Connection::Recv`:
+/// `size > m_bufAvail ? m_bufAvail : size`.
+pub fn conn_recv_buffered_chunk_len(size: i32, buf_avail: i32) -> i32 {
+    if size > buf_avail {
+        buf_avail
+    } else {
+        size
+    }
+}
+
+/// Calculates the `poll()` timeout in milliseconds for `Connection::ConnectWithTimeout`:
+/// `m_timeout ? m_timeout * 1000 : -1`.
+pub fn conn_poll_timeout_ms(timeout_sec: i32) -> i32 {
+    if timeout_sec != 0 {
+        timeout_sec.wrapping_mul(1000)
+    } else {
+        -1
+    }
+}
+
+/// Checks whether `pollfd.revents` has any ready/error bits set (`revents & mask != 0`).
+pub fn conn_poll_revents_ready(revents: i32, mask: i32) -> bool {
+    (revents & mask) != 0
+}
+
+/// Computes the chunk length and newline presence for a single `Connection::ReadLine` buffer step.
+/// Returns `(copy_len, found_newline)`.
+pub fn conn_read_line_chunk(buf: &[u8], max_out: usize) -> (usize, bool) {
+    let found_pos = buf.iter().position(|&b| b == b'\n');
+    let raw_len = match found_pos {
+        Some(idx) => idx + 1,
+        None => buf.len(),
+    };
+    let copy_len = raw_len.min(max_out);
+    (copy_len, found_pos.is_some())
+}
+
+/// Classifies `errno` after a failed `accept()` in `Connection::Accept`:
+/// - `1`: transient connection-aborted/network errno -> retry `accept()` immediately
+/// - `2`: descriptor/buffer exhaustion (`EMFILE`, `ENFILE`, `ENOBUFS`, `ENOMEM`) -> set `m_acceptBusy = true` and break
+/// - `0`: other error -> set `m_acceptBusy = false` and break
+#[allow(clippy::too_many_arguments)]
+pub fn conn_classify_accept_errno(
+    err: i32,
+    eintr: i32,
+    econnaborted: i32,
+    eproto: i32,
+    enetdown: i32,
+    enoprotoopt: i32,
+    ehostdown: i32,
+    ehostunreach: i32,
+    eopnotsupp: i32,
+    enetunreach: i32,
+    enonet: i32,
+    emfile: i32,
+    enfile: i32,
+    enobufs: i32,
+    enomem: i32,
+) -> i32 {
+    if err == eintr
+        || err == econnaborted
+        || err == eproto
+        || err == enetdown
+        || err == enoprotoopt
+        || err == ehostdown
+        || err == ehostunreach
+        || err == eopnotsupp
+        || err == enetunreach
+        || (enonet != 0 && err == enonet)
+    {
+        1
+    } else if err == emfile || err == enfile || err == enobufs || err == enomem {
+        2
+    } else {
+        0
+    }
+}
+

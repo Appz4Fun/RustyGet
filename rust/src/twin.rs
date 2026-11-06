@@ -789,7 +789,39 @@ pub fn select_min_par2_index(is_par2: &[u8], sizes: &[i64], max_index_size: i64)
 /// `TwinCheckJob::Run` (`TwinCheck.cpp`): parses the trailing `-<files>` count from a
 /// PAR2 fingerprint string (`"<hash>-<count>"`).
 pub fn parse_fingerprint_files(fingerprint: &[u8]) -> i32 {
-    crate::connclientmain::twin_check_parse_fingerprint_files(fingerprint)
+    if fingerprint.is_empty() {
+        return 0;
+    }
+    let start = match fingerprint.iter().rposition(|&b| b == b'-') {
+        Some(pos) => pos + 1,
+        None => 0,
+    };
+    let bytes = &fingerprint[start..];
+    let mut i = 0;
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let mut neg = false;
+    if i < bytes.len() {
+        if bytes[i] == b'-' {
+            neg = true;
+            i += 1;
+        } else if bytes[i] == b'+' {
+            i += 1;
+        }
+    }
+    let mut acc: i64 = 0;
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        acc = acc
+            .wrapping_mul(10)
+            .wrapping_add((bytes[i] - b'0') as i64);
+        i += 1;
+    }
+    if neg {
+        (-acc) as i32
+    } else {
+        acc as i32
+    }
 }
 
 /// `TwinCheckJob::Sample` (`TwinCheck.cpp`): returns `true` when entry `a` sorts before `b`
@@ -867,7 +899,14 @@ pub fn eval_sample_verdict(
 /// `TwinCheck::Identity` (`TwinCheck.cpp`): formats `<files_param>#<posting>`,
 /// or returns an empty buffer if `files_param` is empty, `"none"`, or `"lost"`.
 pub fn format_identity(files_param: &[u8], posting: &[u8]) -> Vec<u8> {
-    crate::connclientmain::twin_check_format_identity(files_param, posting)
+    if files_param.is_empty() || files_param == b"none" || files_param == b"lost" {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(files_param.len() + 1 + posting.len());
+    out.extend_from_slice(files_param);
+    out.push(b'#');
+    out.extend_from_slice(posting);
+    out
 }
 
 /// `TwinCheck::PutPar2` (`TwinCheck.cpp`): splits a `"<print>\t<1|0>"` string returned by
@@ -904,14 +943,11 @@ pub fn is_dupe_item(
     ds_dupe: i32,
     ds_copy: i32,
 ) -> bool {
-    crate::connclientmain::twin_check_is_dupe_item(
-        queued,
-        remaining_size,
-        paused_size,
-        delete_status,
-        ds_dupe,
-        ds_copy,
-    )
+    if queued {
+        remaining_size > 0 && paused_size >= remaining_size
+    } else {
+        delete_status == ds_dupe || delete_status == ds_copy
+    }
 }
 
 /// `TwinCheck::ServiceWork` (`TwinCheck.cpp`): returns `true` when `print` is non-empty and

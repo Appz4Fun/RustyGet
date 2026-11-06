@@ -2239,7 +2239,6 @@ size_t nzbget_rs_rco_wstring_decode_utf8_to_utf16(
 int nzbget_rs_rco_string_builder_calc_reserve_capacity(
     int old_capacity, int requested_capacity, int exact);
 
-int nzbget_rs_feh_frontend_is_any_ip(const char* control_ip);
 int nzbget_rs_feh_frontend_calc_log_start_index(
     int needed_first_id, int first_msg_id, int* out_skip);
 int nzbget_rs_feh_frontend_calc_remaining_hms(
@@ -2281,7 +2280,6 @@ void nzbget_rs_snh_os_trim_quotes(
 int nzbget_rs_snh_os_parse_sw_vers_field(
     const char* output, size_t output_len, const char* prefix, size_t prefix_len,
     size_t* out_start, size_t* out_len);
-const char* nzbget_rs_snh_os_map_windows_build(int64_t build_num);
 const char* nzbget_rs_snh_cpu_canonical_arch(const char* arch, size_t len);
 int nzbget_rs_snh_cpu_parse_cpuinfo_line(
     const char* line, size_t len, size_t* out_val_offset);
@@ -2321,7 +2319,6 @@ void nzbget_rs_nserv_build_cmd_opts(
     void (*push_opt_cb)(void* ctx, const char* opt));
 
 int nzbget_rs_snh_nntp_health_cap_for(int connections, int max_cap);
-int nzbget_rs_snh_nntp_health_is_bracketed(const char* msg_id, size_t len);
 int nzbget_rs_snh_nntp_health_classify_stat_reply(const char* line);
 int nzbget_rs_snh_http_get_calc_watchdog_wait(
     int64_t deadline_ms, int64_t now_ms, int64_t file_size, size_t max_bytes,
@@ -2442,7 +2439,6 @@ int nzbget_rs_ccm_conn_recv_buffered_chunk_len(int size, int buf_avail);
 int nzbget_rs_ccm_conn_poll_timeout_ms(int timeout_sec);
 int nzbget_rs_ccm_conn_poll_revents_ready(int revents, int mask);
 
-int nzbget_rs_ccm_remote_client_is_wildcard_control_ip(const char* control_ip);
 int nzbget_rs_ccm_remote_client_is_http_url(const char* nzb_content);
 int nzbget_rs_ccm_remote_client_calc_file_completed_pct(
     int64_t remaining_size, int64_t total_size);
@@ -2453,7 +2449,6 @@ int nzbget_rs_ccm_remote_client_calc_avg_speed(
 size_t nzbget_rs_ccm_remote_client_format_server_state(
     int download_paused, int download2_paused, int download_standby,
     uint32_t post_job_count, int post_paused, char* out_buf, size_t out_cap);
-int nzbget_rs_ccm_remote_client_align4(int len);
 
 int nzbget_rs_ccm_nzbget_is_valid_umask(uint32_t umask_val);
 int nzbget_rs_ccm_nzbget_should_start_secure_server(
@@ -2519,7 +2514,6 @@ const char* nzbget_rs_ntw_web_proc_default_resource(const char* url);
 double nzbget_rs_ntw_xmlrpc_mib_per_sec(uint64_t bytes, double ms);
 int nzbget_rs_ntw_xmlrpc_check_user_access_denied(
     int user_access, int ua_add, int ua_restricted, const char* method_name);
-const char* nzbget_rs_ntw_xmlrpc_ex_par_status(int extra_par_blocks);
 int nzbget_rs_ntw_xmlrpc_parse_dupe_mode(
     const char* dupe_mode_str, int dm_score, int dm_all, int dm_force);
 int nzbget_rs_ntw_xmlrpc_is_http_url(const char* content);
@@ -2657,11 +2651,8 @@ int nzbget_rs_statmeter_calc_month_slots_prev_month(
 int nzbget_rs_statmeter_calc_month_slots_same_month(
     int tm_mday, int quota_start_day);
 
-/* QueueScript, PostScript, ScriptConfig, ScanScript, CommandScript, SchedulerScript, FeedFile & FeedInfo Hot-Path FFI (`scriptfeedcfg.rs`) */
-int nzbget_rs_sfc_sched_script_should_format_task_suffix(int task_id);
-
 // Scheduler, Frontend, ColoredFrontend, NCursesFrontend, RemoteClient &
-// WebServer Hot-Path C ABI (rust/src/schedfrontweb.rs)
+// WebServer Hot-Path C ABI
 int nzbget_rs_sfw_scheduler_task_less(
     int hours1, int minutes1, int hours2, int minutes2);
 int nzbget_rs_sfw_scheduler_should_execute_process(
@@ -2703,9 +2694,7 @@ int nzbget_rs_sfw_web_proc_should_send_auth_response(
 int nzbget_rs_sfw_web_proc_is_etag_unchanged(
     const char* old_etag, const char* new_etag);
 
-// XmlRpc, Options, Log & NString Hot-Path C ABI (rust/src/rpcoptlogutil.rs)
-int nzbget_rs_rol_xmlrpc_json_step(char next_char);
-const char* nzbget_rs_rol_xmlrpc_bool_to_str(int is_json, int value);
+// XmlRpc, Options, Log & NString Hot-Path C ABI
 int nzbget_rs_rol_xmlrpc_validate_download_rate(
     int rate, int* out_bytes_per_sec);
 int64_t nzbget_rs_rol_xmlrpc_calc_average_download_rate(
@@ -2760,7 +2749,7 @@ int nzbget_rs_rol_nstring_cstring_replace_bounds(
 size_t nzbget_rs_rol_nstring_cstring_trim_right_len(
     const char* s, size_t len);
 
-// Util, FileSystem, ScriptController, UnpackController & ScriptConfig Hot-Path C ABI (rust/src/utilfsscript.rs)
+// Util, FileSystem, ScriptController, UnpackController & ScriptConfig Hot-Path C ABI
 int64_t nzbget_rs_ufs_util_join_int64(uint32_t hi, uint32_t lo);
 void nzbget_rs_ufs_util_split_int64(
     int64_t int64_val, uint32_t* out_hi, uint32_t* out_lo);
@@ -2789,8 +2778,6 @@ int nzbget_rs_ufs_script_ctrl_normalize_fork_exit_code(
     int exit_code, int fork_error_exit_code, int start_error);
 int nzbget_rs_ufs_script_ctrl_calc_signal_exit_code(int term_sig);
 int nzbget_rs_ufs_script_ctrl_select_kill_pid(int child_pid, int child_pgid);
-int nzbget_rs_ufs_unpack_ctrl_parse_backspace_progress(
-    const char* backspace, int* out_progress);
 
 // DownloadInfo & DiskState C ABI (rust/src/downloadinfo.rs, rust/src/diskstatepp.rs)
 typedef struct NzbgetRsDpsCurrentStatsAcc {
@@ -2847,7 +2834,7 @@ void nzbget_rs_queue_coord_discard_downloaded_articles_counters(
     int64_t* out_nzb_cur_fail_size, int64_t* out_nzb_par_cur_fail_size,
     int64_t* out_file_rem_size);
 
-// XmlRpc, Options, NZBGet & RemoteClient Hot-Path C ABI (rust/src/rpcoptclient.rs)
+// XmlRpc, Options, NZBGet & RemoteClient Hot-Path C ABI
 int nzbget_rs_roc_xmlrpc_multicall_needs_array_wrap(const char* resp);
 int nzbget_rs_roc_xmlrpc_tls_cipher_access_allowed(
     int user_access, int ua_control, int protocol, int rp_json_rpc,

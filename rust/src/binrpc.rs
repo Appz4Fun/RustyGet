@@ -821,7 +821,7 @@ fn push_two_digits(out: &mut Vec<u8>, value: i32) {
 }
 
 fn push_hms(out: &mut Vec<u8>, total_sec: i64) {
-    let (h, m, s) = crate::connclientmain::remote_client_calc_hms(total_sec);
+    let (h, m, s) = remote_client_calc_hms(total_sec);
     push_two_digits(out, h);
     push_listing(out, b':');
     push_two_digits(out, m);
@@ -848,7 +848,7 @@ pub fn file_listing(entries: &[FileListingEntry], has_pattern: bool) -> Vec<u8> 
     let nr_file_entries = entries.len() as i32;
 
     for e in entries {
-        let completed_pct = crate::connclientmain::remote_client_calc_file_completed_pct(
+        let completed_pct = remote_client_calc_file_completed_pct(
             e.remaining_size,
             e.size,
         );
@@ -934,7 +934,7 @@ pub fn group_listing(entries: &[GroupListingEntry], has_pattern: bool) -> Vec<u8
         let mut has_th = 0;
         let mut th_pl = 0;
         let unpaused_rem = unsafe {
-            crate::rpcoptclient::roc_remote_client_calc_group_unpaused_remaining(
+            roc_remote_client_calc_group_unpaused_remaining(
                 e.remaining_size,
                 e.paused_size,
                 e.active_downloads,
@@ -1064,7 +1064,7 @@ pub fn status_summary(spec: &StatusSummarySpec) -> Vec<u8> {
         push_listing(&mut out, b'\n');
     }
 
-    if crate::schedfrontweb::remote_client_should_print_remaining_time(
+    if remote_client_should_print_remaining_time(
         spec.download_rate,
         spec.download_paused,
         spec.download2_paused,
@@ -1080,7 +1080,7 @@ pub fn status_summary(spec: &StatusSummarySpec) -> Vec<u8> {
     append_listing(&mut out, &crate::util::format_speed(spec.download_rate as i64));
     push_listing(&mut out, b'\n');
 
-    let avg_speed = crate::connclientmain::remote_client_calc_avg_speed(
+    let avg_speed = remote_client_calc_avg_speed(
         spec.downloaded_bytes,
         spec.download_time_sec as i64,
     );
@@ -1120,7 +1120,7 @@ pub fn status_summary(spec: &StatusSummarySpec) -> Vec<u8> {
         append_listing(&mut out, b"Scan state: Paused\n");
     }
 
-    let server_state = crate::connclientmain::remote_client_format_server_state(
+    let server_state = remote_client_format_server_state(
         spec.download_paused != 0,
         spec.download2_paused != 0,
         spec.download_stand_by != 0,
@@ -2193,3 +2193,124 @@ mod tests {
         assert_eq!(gl_wire, gl);
     }
 }
+
+/// Validates a binary RPC response header after converting fields to host byte order.
+#[inline]
+pub fn rpc_is_response_header_valid(
+    read_ok: bool,
+    resp_sig_host: u32,
+    expected_sig: u32,
+    resp_struct_size_host: u32,
+    expected_struct_size: u32,
+) -> bool {
+    read_ok
+        && (resp_sig_host as i32) == (expected_sig as i32)
+        && resp_struct_size_host == expected_struct_size
+}
+
+/// Checks whether the remaining download time line should be printed in `RemoteClient::RequestServerList`.
+#[inline]
+pub fn remote_client_should_print_remaining_time(
+    download_rate: u32,
+    download_paused: u32,
+    download2_paused: u32,
+    download_standby: u32,
+) -> bool {
+    download_rate > 0
+        && download_paused == 0
+        && download2_paused == 0
+        && download_standby == 0
+}
+
+/// Computes unpaused remaining group bytes and active download thread flags for
+/// `RemoteClient::RequestServerList`.
+pub unsafe fn roc_remote_client_calc_group_unpaused_remaining(
+    remaining_size: i64,
+    paused_size: i64,
+    active_downloads: std::ffi::c_int,
+    out_has_threads: *mut std::ffi::c_int,
+    out_threads_plural: *mut std::ffi::c_int,
+) -> i64 {
+    if !out_has_threads.is_null() {
+        unsafe { *out_has_threads = if active_downloads > 0 { 1 } else { 0 } };
+    }
+    if !out_threads_plural.is_null() {
+        unsafe { *out_threads_plural = if active_downloads > 1 { 1 } else { 0 } };
+    }
+    remaining_size - paused_size
+}
+
+/// Checks whether `nzb_content` starts with `"http:/"` or `"https:/"`.
+pub fn remote_client_is_http_url(nzb_content: &[u8]) -> bool {
+    is_url(nzb_content)
+}
+
+/// Calculates the file completion percentage in `RemoteClient::RequestServerList` and
+/// `NCursesFrontend::PrintFilename`.
+pub fn remote_client_calc_file_completed_pct(remaining_size: i64, total_size: i64) -> i32 {
+    if remaining_size < total_size && total_size != 0 {
+        (100i64.wrapping_sub(remaining_size.wrapping_mul(100) / total_size)) as i32
+    } else {
+        -1
+    }
+}
+
+/// Splits `sec` into `(hours, minutes, seconds)` for `RemoteClient::RequestServerList`
+/// and `NCursesFrontend`.
+pub fn remote_client_calc_hms(sec: i64) -> (i32, i32, i32) {
+    let h = (sec / 3600) as i32;
+    let m = ((sec % 3600) / 60) as i32;
+    let s = (sec % 60) as i32;
+    (h, m, s)
+}
+
+/// Calculates the session average download speed in `RemoteClient::RequestServerList`.
+pub fn remote_client_calc_avg_speed(all_bytes: i64, download_time_sec: i64) -> i32 {
+    if download_time_sec > 0 {
+        (all_bytes / download_time_sec) as i32
+    } else {
+        0
+    }
+}
+
+/// Formats `serverState` in `RemoteClient::RequestServerList`.
+pub fn remote_client_format_server_state(
+    download_paused: bool,
+    download2_paused: bool,
+    download_standby: bool,
+    post_job_count: u32,
+    post_paused: bool,
+) -> Vec<u8> {
+    let mut state = Vec::with_capacity(48);
+    if download_paused || download2_paused {
+        state.extend_from_slice(if download_standby {
+            b"Paused"
+        } else {
+            b"Pausing"
+        });
+        if download_paused && download2_paused {
+            state.extend_from_slice(b" (+2)");
+        } else if download2_paused {
+            state.extend_from_slice(b" (2)");
+        }
+    } else if !download_standby {
+        state.extend_from_slice(b"Downloading");
+    }
+
+    if post_job_count > 0 || post_paused {
+        if !state.is_empty() {
+            state.extend_from_slice(b", Post-Processing");
+        } else {
+            state.extend_from_slice(b"Post-Processing");
+        }
+        if post_paused {
+            state.extend_from_slice(b" paused");
+        }
+    }
+
+    if state.is_empty() {
+        state.extend_from_slice(b"Stand-By");
+    }
+    state
+}
+

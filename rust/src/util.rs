@@ -453,6 +453,469 @@ pub fn parse_rfc822_date_time(s: &CStr) -> i64 {
     timegm_c(year, mon, day, hours, minutes, seconds) - zone_offset.wrapping_mul(60) as i64
 }
 
+/// Matches `DataAnalytics::CalculatePercentile(percentile)` on an already-sorted slice.
+pub fn data_analytics_percentile(sorted: &[f64], percentile: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    if percentile == 0.0 {
+        return sorted[0];
+    }
+    if percentile == 1.0 {
+        return sorted[sorted.len() - 1];
+    }
+
+    let rank = percentile * ((sorted.len() - 1) as f64);
+    let idx = rank as usize;
+    let fraction = rank - (idx as f64);
+
+    if idx + 1 < sorted.len() {
+        sorted[idx] * (1.0 - fraction) + sorted[idx + 1] * fraction
+    } else {
+        sorted[idx]
+    }
+}
+
+/// Matches `DataAnalytics::Compute()` in-place on `measurements`, returning
+/// `(min, max, avg, median, p25, p75, p90)`.
+pub fn data_analytics_compute(
+    measurements: &mut [f64],
+) -> Option<(f64, f64, f64, f64, f64, f64, f64)> {
+    if measurements.is_empty() {
+        return None;
+    }
+    measurements.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let min = measurements[0];
+    let max = measurements[measurements.len() - 1];
+    let sum: f64 = measurements.iter().copied().fold(0.0, |acc, x| acc + x);
+    let avg = sum / (measurements.len() as f64);
+    let median = data_analytics_percentile(measurements, 0.5);
+    let p25 = data_analytics_percentile(measurements, 0.25);
+    let p75 = data_analytics_percentile(measurements, 0.75);
+    let p90 = data_analytics_percentile(measurements, 0.90);
+    Some((min, max, avg, median, p25, p75, p90))
+}
+
+/// Matches `DiskBenchmark::LimitByFreeSpace(requested, available)`.
+pub fn benchmark_limit_by_free_space(requested: u64, available: u64, reserve: u64) -> u64 {
+    if available <= reserve {
+        0
+    } else {
+        requested.min(available - reserve)
+    }
+}
+
+/// Matches the per-iteration write chunk calculation in `DiskBenchmark::Run`.
+pub fn benchmark_calc_write_chunk(block_size: usize, max_bytes: u64, write_bytes: u64) -> usize {
+    if write_bytes >= max_bytes {
+        return 0;
+    }
+    let rem = max_bytes - write_bytes;
+    (block_size as u64).min(rem) as usize
+}
+
+/// Matches the readiness check in `ServiceCoordinator::Run`.
+pub fn service_should_work_now(
+    service_interval: i32,
+    service_now: i32,
+    cur_time: i64,
+    last_work: i64,
+) -> bool {
+    if service_interval < service_now {
+        return false;
+    }
+    let diff = cur_time.wrapping_sub(last_work).wrapping_abs();
+    diff >= i64::from(service_interval)
+}
+
+/// Matches the remaining wait calculation in `ServiceCoordinator::Run`:
+/// Returns `(remaining, next_wait_interval)`.
+pub fn service_calc_remaining_wait(
+    service_interval: i32,
+    service_now: i32,
+    service_sleep: i32,
+    cur_time: i64,
+    last_work: i64,
+    cur_wait_interval: i32,
+) -> (i32, i32) {
+    let mut remaining = service_sleep;
+    let mut wait_interval = cur_wait_interval;
+    if service_interval >= service_now {
+        let elapsed = cur_time.wrapping_sub(last_work) as i32;
+        remaining = service_interval.min(service_interval.wrapping_sub(elapsed));
+        wait_interval = wait_interval.min(remaining);
+    }
+    (remaining, wait_interval)
+}
+
+/// Matches `DiskService::ServiceInterval()`.
+pub fn disk_service_interval(
+    waiting_required_dir: bool,
+    disk_space_mb: i32,
+    downloading: bool,
+    sleep_val: i32,
+) -> i32 {
+    if waiting_required_dir {
+        1
+    } else if disk_space_mb <= 0 {
+        sleep_val
+    } else if !downloading {
+        10
+    } else {
+        1
+    }
+}
+
+/// Matches the free space check in `DiskService::CheckDiskSpace()`.
+pub fn disk_service_is_low_space(available_bytes: i64, disk_space_mb: i32) -> bool {
+    if disk_space_mb < 0 {
+        return false;
+    }
+    (available_bytes / 1024 / 1024) < i64::from(disk_space_mb)
+}
+
+/// Joins two 32-bit unsigned integers (`hi`, `lo`) into a 64-bit signed integer (`Util::JoinInt64`).
+pub fn util_join_int64(hi: u32, lo: u32) -> i64 {
+    ((hi as i64) << 32) | (lo as i64)
+}
+
+/// Splits a 64-bit signed integer into `(hi, lo)` 32-bit unsigned integers (`Util::SplitInt64`).
+pub fn util_split_int64(int64_val: i64) -> (u32, u32) {
+    let u = int64_val as u64;
+    ((u >> 32) as u32, (u & 0xFFFF_FFFF) as u32)
+}
+
+/// Matches a `Tokenizer` token `shellover` (of the form `ext=cmd`) against
+/// `file_ext`, returning `Some(cmd_offset)` when `file_ext` equals the prefix
+/// before `'='` (`Util::FindShellOverriddenExecutor`).
+pub fn util_match_shell_overridden_token(shellover: &[u8], file_ext: &[u8]) -> Option<usize> {
+    let eq_pos = shellover.iter().position(|&b| b == b'=')?;
+    if &shellover[..eq_pos] == file_ext {
+        Some(eq_pos + 1)
+    } else {
+        None
+    }
+}
+
+/// Resolves `path` against colon-separated directories in `env_path`, returning the
+/// first directory entry where `dir/path` exists and is a regular file (`Util::ResolvePathFromEnv`).
+pub fn util_resolve_path_from_env(path: &[u8], env_path: &[u8]) -> Option<Vec<u8>> {
+    if path.is_empty() || env_path.is_empty() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let rel = std::path::Path::new(std::ffi::OsStr::from_bytes(path));
+        for dir in env_path.split(|&b| b == b':') {
+            if dir.is_empty() {
+                continue;
+            }
+            let base = std::path::Path::new(std::ffi::OsStr::from_bytes(dir));
+            let candidate = base.join(rel);
+            if candidate.exists() && candidate.is_file() {
+                return Some(candidate.as_os_str().as_bytes().to_vec());
+            }
+        }
+    }
+    None
+}
+
+/// Converts a broken-down UTC `tm` tuple into seconds since the Unix epoch (`Util::Timegm`).
+pub fn util_internal_timegm(
+    tm_year: i32,
+    tm_mon: i32,
+    tm_mday: i32,
+    tm_hour: i32,
+    tm_min: i32,
+    tm_sec: i32,
+) -> i64 {
+    let mut year = tm_year.wrapping_add(1900);
+    let mut month = tm_mon;
+    if month > 11 {
+        year = year.wrapping_add(month / 12);
+        month %= 12;
+    } else if month < 0 {
+        let years_diff = month.wrapping_neg().wrapping_add(11) / 12;
+        year = year.wrapping_sub(years_diff);
+        month = month.wrapping_add(12_i32.wrapping_mul(years_diff));
+    }
+    timegm_c(year, month.clamp(0, 11), tm_mday, tm_hour, tm_min, tm_sec)
+}
+
+/// Computes the bounded copy length for an XML tag value into a buffer of size
+/// `value_buf_size` (`WebUtil::XmlParseTagValue`).
+pub fn webutil_xml_calc_copy_len(value_len: i32, value_buf_size: i32) -> i32 {
+    if value_len < value_buf_size {
+        value_len
+    } else {
+        value_buf_size.wrapping_sub(1)
+    }
+}
+
+/// Computes the match length `rm_eo - rm_so` for a regex capture group (`RegEx::GetMatchLen`).
+pub fn regex_calc_match_len(rm_so: i32, rm_eo: i32) -> i32 {
+    rm_eo.wrapping_sub(rm_so)
+}
+
+/// Returns `1` when a tokenizer input string of length `len` fits in the inline
+/// short-string buffer of capacity `capacity` (`Tokenizer::Tokenizer`).
+pub fn tokenizer_fits_short_string(len: i32, capacity: i32) -> i32 {
+    i32::from(len < capacity)
+}
+
+/// Validates a file size for `FileSystem::LoadFileIntoBuffer` (`0 <= file_size <= INT_MAX - 1`)
+/// and returns `Some((size, buf_size))`.
+pub fn fs_validate_load_file_size(file_size: i64, add_trailing_null: i32) -> Option<(i32, i32)> {
+    if file_size < 0 || file_size > (i32::MAX as i64) - 1 {
+        return None;
+    }
+    let size = file_size as i32;
+    let buf_size = size + if add_trailing_null != 0 { 1 } else { 0 };
+    Some((size, buf_size))
+}
+
+/// Computes the next write chunk size (`min(remaining, zeros_size)`) when
+/// pre-allocating a file with zeroes (`FileSystem::AllocateFile`).
+pub fn fs_calc_allocate_chunk_size(remaining: i64, zeros_size: i64) -> i64 {
+    remaining.min(zeros_size)
+}
+
+/// Classifies whether `filename` requires relative-to-cwd expansion (`1` if non-empty
+/// and not starting with `'/'`, `0` otherwise) and returns the leading `"./"` skip offset.
+pub fn fs_classify_expand_file_name(filename: &[u8]) -> (i32, usize) {
+    if filename.is_empty() || filename[0] == b'/' {
+        return (0, 0);
+    }
+    let skip = if filename.len() >= 2 && filename[0] == b'.' && filename[1] == b'/' {
+        2
+    } else {
+        0
+    };
+    (1, skip)
+}
+
+/// Returns `1` when `filename` is `"."` or `".."`, `0` otherwise (`DirBrowser::Next`).
+pub fn dir_browser_is_dot_or_dotdot(filename: &[u8]) -> i32 {
+    i32::from(filename == b"." || filename == b"..")
+}
+
+/// Maps `DiskFile::ESeekOrigin` to the C stdio `SEEK_*` origin constant (`DiskFile::Seek`).
+pub fn disk_file_select_seek_origin(
+    origin: i32,
+    so_cur: i32,
+    so_end: i32,
+    seek_set: i32,
+    seek_cur: i32,
+    seek_end: i32,
+) -> i32 {
+    if origin == so_cur {
+        seek_cur
+    } else if origin == so_end {
+        seek_end
+    } else {
+        seek_set
+    }
+}
+
+/// Returns `1` when `opt_name` starts with `strip_prefix` (of length `prefix_len`)
+/// and has at least one character after the prefix (`ScriptController::PrepareEnvOptions`).
+pub fn script_ctrl_matches_env_prefix(
+    opt_name: &[u8],
+    strip_prefix: Option<&[u8]>,
+    prefix_len: i32,
+) -> i32 {
+    let Some(prefix) = strip_prefix else {
+        return 0;
+    };
+    if prefix_len < 0 {
+        return 0;
+    }
+    let plen = prefix_len as usize;
+    let cmp_prefix = if plen <= prefix.len() {
+        &prefix[..plen]
+    } else {
+        prefix
+    };
+    i32::from(
+        opt_name.len() > plen
+            && opt_name.len() >= cmp_prefix.len()
+            && &opt_name[..cmp_prefix.len()] == cmp_prefix,
+    )
+}
+
+/// Returns `1` when the first output line from a child process begins with
+/// `"[ERROR] Could not start "` (`ScriptController::Execute`).
+pub fn script_ctrl_is_fork_start_error_line(first_line: i32, buf: &[u8]) -> i32 {
+    const PREFIX: &[u8] = b"[ERROR] Could not start ";
+    i32::from(first_line != 0 && buf.starts_with(PREFIX))
+}
+
+/// Normalizes a child exit code to `-1` when `exit_code == fork_error_exit_code` and
+/// `start_error != 0` (`ScriptController::Execute`).
+pub fn script_ctrl_normalize_fork_exit_code(
+    exit_code: i32,
+    fork_error_exit_code: i32,
+    start_error: i32,
+) -> i32 {
+    if exit_code == fork_error_exit_code && start_error != 0 {
+        -1
+    } else {
+        exit_code
+    }
+}
+
+/// Computes the shell-convention exit code `128 + term_sig` for a process terminated
+/// by a signal (`ScriptController::WaitProcess`).
+pub fn script_ctrl_calc_signal_exit_code(term_sig: i32) -> i32 {
+    128_i32.wrapping_add(term_sig)
+}
+
+/// Selects the target PID/PGID argument for `kill()` when terminating a child process (`ScriptController::Terminate`).
+pub fn script_ctrl_select_kill_pid(child_pid: i32, child_pgid: i32) -> i32 {
+    if child_pid > 0 && child_pgid == child_pid {
+        child_pid.wrapping_neg()
+    } else {
+        child_pid
+    }
+}
+
+/// `Log::IntervalCheck` & `Log::RotateLog`:
+pub fn log_should_close_idle(cur_time: i64, last_written: i64) -> bool {
+    cur_time.wrapping_sub(last_written).saturating_abs() > 1
+}
+
+pub fn log_should_delete_old_rotated(file_day: i32, cur_day: i32, rotate_log: i32) -> bool {
+    file_day <= cur_day.wrapping_sub(rotate_log)
+}
+
+/// `BString<size>::Set` & `BString<size>::Append`: computes bounded copy length.
+pub fn nstring_bstring_set_len(size: i32, len: i32) -> i32 {
+    let cap = size.saturating_sub(1).max(0);
+    if len > 0 {
+        cap.min(len)
+    } else {
+        cap
+    }
+}
+
+pub fn nstring_bstring_append_len(size: i32, cur_len: i32, str_len: i32) -> i32 {
+    let avail = size.wrapping_sub(cur_len).wrapping_sub(1);
+    avail.min(str_len)
+}
+
+/// `CString::Replace(int pos, int len, const char* str, int strLen)`:
+/// computes `(valid, add_len, del_len, new_len)` where `valid` is `pos <= cur_len`.
+pub fn nstring_cstring_replace_bounds(
+    pos: i32,
+    len: i32,
+    cur_len: i32,
+    raw_str_len: i32,
+    str_len_param: i32,
+) -> (bool, i32, i32, i32) {
+    if pos > cur_len {
+        return (false, 0, 0, 0);
+    }
+    let add_len = if str_len_param > 0 {
+        raw_str_len.min(str_len_param)
+    } else {
+        raw_str_len
+    };
+    let del_len = if pos.wrapping_add(len) <= cur_len {
+        len
+    } else {
+        cur_len.wrapping_sub(pos)
+    };
+    let new_len = cur_len.wrapping_sub(del_len).wrapping_add(add_len);
+    (true, add_len, del_len, new_len)
+}
+
+/// `CString::TrimRight`: returns the length of `s` after stripping trailing
+/// `'\n'`, `'\r'`, `' '`, and `'\t'` bytes.
+pub fn nstring_cstring_trim_right_len(s: &[u8]) -> usize {
+    let mut end = s.len();
+    while end > 0 {
+        let ch = s[end - 1];
+        if ch == b'\n' || ch == b'\r' || ch == b' ' || ch == b'\t' {
+            end -= 1;
+        } else {
+            break;
+        }
+    }
+    end
+}
+
+/// Evaluates whether `Log::Filelog` should rotate the log file on a day boundary.
+pub fn log_should_rotate(rawtime: i64, last_written: i64, write_log_mode: i32) -> bool {
+    const DAY: i32 = 86400;
+    (rawtime as i32) / DAY != (last_written as i32) / DAY && write_log_mode == 3
+}
+
+/// Determines `(write_to_file, keep_in_screen_log)` for a message target in `Log::InitOptions`.
+pub fn log_init_message_disposition(target: i32) -> (bool, bool) {
+    let write_to_file = target == 2 || target == 3;
+    let keep_in_screen = target == 1 || target == 3;
+    (write_to_file, keep_in_screen)
+}
+
+/// Decodes a UTF-8 byte slice into UTF-16 code units following `WString::WString(const char* utfstr)`.
+pub fn wstring_decode_utf8_to_utf16(utf8: &[u8], out: &mut [u16]) -> usize {
+    let mut written = 0usize;
+    let mut codepoint: u32 = 0;
+    let mut i = 0usize;
+    while i < utf8.len() && utf8[i] != 0 {
+        let ch = utf8[i];
+        if ch <= 0x7f {
+            codepoint = ch as u32;
+        } else if ch <= 0xbf {
+            codepoint = (codepoint << 6) | ((ch & 0x3f) as u32);
+        } else if ch <= 0xdf {
+            codepoint = (ch & 0x1f) as u32;
+        } else if ch <= 0xef {
+            codepoint = (ch & 0x0f) as u32;
+        } else {
+            codepoint = (ch & 0x07) as u32;
+        }
+        i += 1;
+        let next_byte = if i < utf8.len() { utf8[i] } else { 0 };
+        if (next_byte & 0xc0) != 0x80 && codepoint <= 0x10ffff {
+            if codepoint > 0xffff {
+                if written + 1 < out.len() {
+                    out[written] = (0xd800 + (codepoint >> 10)) as u16;
+                    out[written + 1] = (0xdc00 + (codepoint & 0x03ff)) as u16;
+                    written += 2;
+                }
+            } else if !(0xd800..0xe000).contains(&codepoint) && written < out.len() {
+                out[written] = codepoint as u16;
+                written += 1;
+            }
+        }
+    }
+    written
+}
+
+/// Computes the target allocation capacity for `StringBuilder::Reserve(int capacity, bool exact)`.
+pub fn string_builder_calc_reserve_capacity(
+    old_capacity: i32,
+    requested_capacity: i32,
+    exact: bool,
+) -> i32 {
+    if requested_capacity > old_capacity || old_capacity == 0 {
+        let smart_capacity = if exact {
+            0
+        } else {
+            ((old_capacity as f64) * 1.5) as i32
+        };
+        if smart_capacity > requested_capacity {
+            smart_capacity
+        } else {
+            requested_capacity
+        }
+    } else {
+        -1
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,5 +984,17 @@ mod tests {
         assert!(m(b"x.r01", b"*.r??"));
         assert!(!m(b"a.nzb", b".zip"));
         assert_eq!(tokens(b" a ,, b\t;", b",;").collect::<Vec<_>>(), [b"a" as &[u8], b"b"]);
+    }
+
+    #[test]
+    fn internal_timegm_normalizes_months() {
+        assert_eq!(
+            util_internal_timegm(124, -1, 15, 0, 0, 0),
+            util_internal_timegm(123, 11, 15, 0, 0, 0)
+        );
+        assert_eq!(
+            util_internal_timegm(123, 12, 15, 0, 0, 0),
+            util_internal_timegm(124, 0, 15, 0, 0, 0)
+        );
     }
 }

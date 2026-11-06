@@ -155,6 +155,87 @@ pub fn check_tasks(
     r
 }
 
+extern "C" {
+    fn strcasecmp(a: *const std::ffi::c_char, b: *const std::ffi::c_char) -> std::ffi::c_int;
+}
+
+/// `Scheduler::FirstCheck`:
+/// Comparator ordering scheduler tasks by `(hours, minutes)`.
+#[inline]
+pub fn scheduler_task_less(hours1: i32, minutes1: i32, hours2: i32, minutes2: i32) -> bool {
+    (hours1 < hours2) || ((hours1 == hours2) && (minutes1 < minutes2))
+}
+
+/// `Scheduler::ExecuteTask`:
+/// Checks whether process/extension/feed commands should be executed.
+#[inline]
+pub fn scheduler_should_execute_process(
+    execute_process: bool,
+    task_hours: i32,
+    startup_task: i32,
+) -> bool {
+    execute_process || task_hours == startup_task
+}
+
+/// `Scheduler::ExecuteTask`:
+/// Converts KB/s speed limit to bytes/s.
+#[inline]
+pub fn scheduler_calc_speed_limit_bytes(kb_per_sec: i32) -> i32 {
+    kb_per_sec.wrapping_mul(1024)
+}
+
+/// `Scheduler::EditServer`:
+/// Checks whether a server matches `server_ref` by numeric ID or case-insensitive name.
+///
+/// # Safety
+/// `server_name` and `server_ref` must be valid null-terminated C strings (or null).
+#[inline]
+pub unsafe fn scheduler_matches_server_ref(
+    id: i32,
+    server_id: i32,
+    server_name: *const std::ffi::c_char,
+    server_ref: *const std::ffi::c_char,
+) -> bool {
+    if id > 0 && server_id == id {
+        return true;
+    }
+    if server_name.is_null() || server_ref.is_null() {
+        return false;
+    }
+    strcasecmp(server_name, server_ref) == 0
+}
+
+/// `Scheduler::FetchFeed`:
+/// Checks whether a feed matches `feed_ref` by numeric ID, case-insensitive name, or `"0"`,
+/// and resolves the target feed ID to fetch (`0` for `"0"`, else `feed_id`).
+///
+/// # Safety
+/// `feed_name` and `feed_ref` must be valid null-terminated C strings (or null).
+#[inline]
+pub unsafe fn scheduler_matches_feed_ref(
+    id: i32,
+    feed_id: i32,
+    feed_name: *const std::ffi::c_char,
+    feed_ref: *const std::ffi::c_char,
+) -> (bool, i32) {
+    if feed_ref.is_null() {
+        return (feed_id == id, feed_id);
+    }
+    let is_zero = strcasecmp(c"0".as_ptr(), feed_ref) == 0;
+    let matched = feed_id == id
+        || (!feed_name.is_null() && strcasecmp(feed_name, feed_ref) == 0)
+        || is_zero;
+    let target_id = if is_zero { 0 } else { feed_id };
+    (matched, target_id)
+}
+
+/// `Scheduler::CheckScheduledResume`:
+/// Checks whether scheduled auto-resume is due.
+#[inline]
+pub fn scheduler_should_autoresume(resume_time: i64, current_time: i64) -> bool {
+    resume_time > 0 && current_time >= resume_time
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -62,10 +62,9 @@ class CString
 {
 public:
 	CString() {}
-	~CString() 
-	{ 
-		free(m_data);
-		m_data = nullptr;
+	~CString()
+	{
+		Clear();
 	}
 	CString(const char* str, int len = 0) { Set(str, len); }
 	CString(CString&& other) noexcept
@@ -77,7 +76,7 @@ public:
 	CString& operator=(const CString& other) = delete;
 	CString& operator=(CString&& other) noexcept
 	{
-		free(m_data);
+		Clear();
 		m_data = other.m_data;
 		other.m_data = nullptr;
 		return *this;
@@ -91,11 +90,7 @@ public:
 	const char* Str() const { return m_data ? m_data : ""; }
 	int Length() const { return m_data ? (int)strlen(m_data) : 0; }
 	bool Empty() const { return !m_data || !*m_data; }
-	void Clear()
-	{
-		free(m_data);
-		m_data = nullptr;
-	}
+	void Clear();
 	void Reserve(int capacity);
 	void Bind(char* str);
 	char* Unbind();
@@ -145,10 +140,9 @@ StringBuilder preallocates storage space and is best suitable for often "Append"
 class StringBuilder
 {
 public:
-	~StringBuilder() 
-	{ 
-		free(m_data);
-		m_data = nullptr;
+	~StringBuilder()
+	{
+		Clear();
 	}
 	StringBuilder() = default;
 	StringBuilder(const StringBuilder& other) = delete;
@@ -181,42 +175,13 @@ class CharBuffer
 {
 public:
 	CharBuffer() {}
-	CharBuffer(int size)
-	{
-		if (size <= 0) return;
-
-		char* data = static_cast<char*>(malloc(static_cast<size_t>(size)));
-		if (data)
-		{
-			m_data = data;
-			m_size = size;
-		}
-	}
+	CharBuffer(int size) { Reserve(size); }
 	CharBuffer(CharBuffer& other) : m_data(other.m_data), m_size(other.m_size) { other.m_data = nullptr; other.m_size = 0; }
-	~CharBuffer() 
-	{ 
-		free(m_data);
-		m_data = nullptr;
-	}
+	~CharBuffer() { Clear(); }
 	CharBuffer& operator=(CharBuffer&& other) = delete;
 	int Size() { return m_size; }
-	void Reserve(int size) 
-	{
-		if (size <= 0) return;
-
-		char* data = static_cast<char*>(realloc(m_data, static_cast<size_t>(size)));
-		if (data)
-		{
-			m_data = data; 
-			m_size = size; 
-		}
-	}
-	void Clear()
-	{
-		free(m_data);
-		m_data = nullptr;
-		m_size = 0;
-	}
+	void Reserve(int size);
+	void Clear();
 	operator char*() const { return m_data; }
 	char* operator*() const { return m_data; }
 

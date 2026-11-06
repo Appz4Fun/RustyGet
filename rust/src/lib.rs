@@ -31,6 +31,7 @@ pub mod json;
 pub mod manifest;
 pub mod nntp;
 pub mod nserv;
+pub mod nstring;
 pub mod nzbfile;
 pub mod options;
 pub mod parchecker;

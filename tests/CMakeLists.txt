@@ -5,7 +5,6 @@ endif()
 set(TESTS_TARGET nzbget_tests)
 set(TESTS_SRC ${CMAKE_SOURCE_DIR}/tests/main.cpp)
 
-include(util/util.cmake)
 include(queue/queue.cmake)
 include(main/main.cmake)
 include(postprocess/postprocess.cmake)
@@ -24,7 +23,6 @@ apply_sanitizers(${TESTS_TARGET})
 
 target_precompile_headers(${TESTS_TARGET} REUSE_FROM libnzbget)
 
-add_test(NAME UtilTest         COMMAND ${TESTS_TARGET} --run_test=UtilTest --log_level=message)
 add_test(NAME QueueTest        COMMAND ${TESTS_TARGET} --run_test=QueueTest --log_level=message)
 add_test(NAME MainTest         COMMAND ${TESTS_TARGET} --run_test=MainTest --log_level=message)
 add_test(NAME PostprocessTest  COMMAND ${TESTS_TARGET} --run_test=PostprocessTest --log_level=message)

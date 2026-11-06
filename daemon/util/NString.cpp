@@ -3,7 +3,7 @@
  *
  *  Copyright (C) 2015-2019 Andrey Prygunkov <hugbug@users.sourceforge.net>
  *  Copyright (C) 2025 Denis <denis@nzbget.com>
- * 
+ *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
  *  the Free Software Foundation; either version 2 of the License, or
@@ -23,6 +23,21 @@
 #include "nzbget_rs.h"
 #include <vector>
 
+namespace
+{
+struct VsnprintfCtx
+{
+	const char* format;
+	va_list* ap;
+};
+
+int RunVsnprintf(void* ctx, char* dst, size_t size)
+{
+	auto* v = static_cast<VsnprintfCtx*>(ctx);
+	return vsnprintf(dst, size, v->format, *v->ap);
+}
+}
+
 template <int size>
 BString<size>::BString(const char* format, ...)
 {
@@ -35,27 +50,13 @@ BString<size>::BString(const char* format, ...)
 template <int size>
 void BString<size>::Set(const char* str, int len)
 {
-	m_data[0] = '\0';
-	int addLen = nzbget_rs_rol_nstring_bstring_set_len(size, len);
-	strncpy(m_data, str, addLen);
-	m_data[addLen] = '\0';
+	nzbget_rs_bstring_set(m_data, size, str, len);
 }
 
 template <int size>
 void BString<size>::Append(const char* str, int len)
 {
-	if (len == 0)
-	{
-		len = strlen(str);
-	}
-
-	int curLen = strlen(m_data);
-	int addLen = nzbget_rs_rol_nstring_bstring_append_len(size, curLen, len);
-	if (addLen > 0)
-	{
-		strncpy(m_data + curLen, str, addLen);
-		m_data[curLen + addLen] = '\0';
-	}
+	nzbget_rs_bstring_append(m_data, size, str, len);
 }
 
 template <int size>
@@ -70,12 +71,11 @@ void BString<size>::AppendFmt(const char* format, ...)
 template <int size>
 void BString<size>::AppendFmtV(const char* format, va_list ap)
 {
-	int curLen = strlen(m_data);
-	int avail = size - curLen;
-	if (avail > 0)
-	{
-		vsnprintf(m_data + curLen, static_cast<size_t>(avail), format, ap);
-	}
+	va_list apCopy;
+	va_copy(apCopy, ap);
+	VsnprintfCtx ctx{ format, &apCopy };
+	nzbget_rs_bstring_append_fmt(m_data, size, &ctx, RunVsnprintf);
+	va_end(apCopy);
 }
 
 template <int size>
@@ -91,62 +91,37 @@ int BString<size>::Format(const char* format, ...)
 template <int size>
 int BString<size>::FormatV(const char* format, va_list ap)
 {
-	// ensure result isn't negative (in case of bad argument)
-	int len = std::max(vsnprintf(m_data, static_cast<size_t>(size), format, ap), 0);
+	va_list apCopy;
+	va_copy(apCopy, ap);
+	VsnprintfCtx ctx{ format, &apCopy };
+	int len = nzbget_rs_bstring_format(m_data, size, &ctx, RunVsnprintf);
+	va_end(apCopy);
 	return len;
 }
 
 bool CString::operator==(const CString& other) const
 {
-	return (!m_data && !other.m_data) ||
-		(m_data && other.m_data && nzbget_rs_dqh_bytes_equal(m_data, other.m_data) != 0);
+	return nzbget_rs_cstring_eq(m_data, other.m_data) != 0;
 }
 
 bool CString::operator==(const char* other) const
 {
-	return (!m_data && !other) ||
-		(m_data && other && nzbget_rs_dqh_bytes_equal(m_data, other) != 0);
+	return nzbget_rs_cstring_eq(m_data, other) != 0;
+}
+
+void CString::Clear()
+{
+	nzbget_rs_cstring_clear(&m_data);
 }
 
 void CString::Set(const char* str, int len)
 {
-	if (str)
-	{
-		if (len <= 0)
-		{
-			len = strlen(str);
-		}
-		char* data = static_cast<char*>(realloc(m_data, static_cast<size_t>(len + 1)));
-		if (data)
-		{
-			m_data = data;
-			strncpy(m_data, str, len);
-			m_data[len] = '\0';
-		}
-	}
-	else
-	{
-		free(m_data);
-		m_data = nullptr;
-	}
+	nzbget_rs_cstring_set(&m_data, str, len);
 }
 
 void CString::Append(const char* str, int len)
 {
-	if (len == 0)
-	{
-		len = strlen(str);
-	}
-
-	int curLen = Length();
-	int newLen = curLen + len;
-	char* data = static_cast<char*>(realloc(m_data, static_cast<size_t>(newLen + 1)));
-	if (data)
-	{
-		m_data = data;
-		strncpy(m_data + curLen, str, len);
-		m_data[newLen] = '\0';
-	}
+	nzbget_rs_cstring_append(&m_data, str, len);
 }
 
 void CString::AppendFmt(const char* format, ...)
@@ -161,31 +136,12 @@ void CString::AppendFmtV(const char* format, va_list ap)
 {
 	va_list ap2;
 	va_copy(ap2, ap);
-
 	int addLen = vsnprintf(nullptr, 0, format, ap);
-	if (addLen <= 0)
+	if (addLen > 0)
 	{
-		va_end(ap2);
-		return;
+		VsnprintfCtx ctx{ format, &ap2 };
+		nzbget_rs_cstring_append_fmt(&m_data, addLen, &ctx, RunVsnprintf);
 	}
-
-	int curLen = Length();
-	int newLen = curLen + addLen;
-	char* data = static_cast<char*>(realloc(m_data, static_cast<size_t>(newLen + 1)));
-	if (!data)
-	{
-		va_end(ap2);
-		return;
-	}
-
-	// the block is ours from here: realloc may have freed the old one, and
-	// freeing this one on a failed write left m_data pointing to freed memory
-	m_data = data;
-	if (vsnprintf(m_data + curLen, static_cast<size_t>(addLen + 1), format, ap2) < 0)
-	{
-		m_data[curLen] = '\0';
-	}
-
 	va_end(ap2);
 }
 
@@ -202,109 +158,45 @@ int CString::FormatV(const char* format, va_list ap)
 {
 	va_list ap2;
 	va_copy(ap2, ap);
-
 	int newLen = vsnprintf(nullptr, 0, format, ap);
-	if (newLen < 0)
+	int res = 0;
+	if (newLen >= 0)
 	{
-		va_end(ap2);
-		return 0;
+		VsnprintfCtx ctx{ format, &ap2 };
+		res = nzbget_rs_cstring_format(&m_data, newLen, &ctx, RunVsnprintf);
 	}
-
-	newLen += 1; // for null-terminator
-	char* data = static_cast<char*>(realloc(m_data, static_cast<size_t>(newLen)));
-	if (!data)
-	{
-		va_end(ap2);
-		return 0;
-	}
-
-	// the block is ours from here (see AppendFmtV). An empty result (a "%s" of
-	// "") wrote 0 characters, freed the block and left m_data dangling: the
-	// string was freed twice later
-	m_data = data;
-	if (vsnprintf(m_data, static_cast<size_t>(newLen), format, ap2) < 0)
-	{
-		m_data[0] = '\0';
-		va_end(ap2);
-		return 0;
-	}
-
 	va_end(ap2);
-	return newLen;
+	return res;
 }
 
 int CString::Find(const char* str, int pos)
 {
-	if (!m_data || !str)
-	{
-		return -1;
-	}
-	return nzbget_rs_dqh_nstring_find_substr_from(m_data, str, pos);
+	return nzbget_rs_cstring_find(m_data, str, pos);
 }
 
 void CString::Replace(int pos, int len, const char* str, int strLen)
 {
-	int curLen = Length();
-	int addLen = 0;
-	int delLen = 0;
-	int newLen = 0;
-	if (!nzbget_rs_rol_nstring_cstring_replace_bounds(
-		pos, len, curLen, (int)strlen(str), strLen,
-		&addLen, &delLen, &newLen))
-	{
-		return; // bad argument
-	}
-
-	char* newvalue = static_cast<char*>(malloc(static_cast<size_t>(newLen + 1)));
-	if (!newvalue) return;
-
-	strncpy(newvalue, m_data, pos);
-	strncpy(newvalue + pos, str, addLen);
-	// the tail starts after what was deleted (len may reach past the end)
-	strcpy(newvalue + pos + addLen, m_data + pos + delLen);
-
-	free(m_data);
-	m_data = newvalue;
-	m_data[newLen] = '\0';
+	nzbget_rs_cstring_replace_range(&m_data, pos, len, str, strLen);
 }
 
 void CString::Replace(const char* from, const char* to)
 {
-	int fromLen = strlen(from);
-	int toLen = strlen(to);
-	int pos = 0;
-	while ((pos = Find(from, pos)) != -1)
-	{
-		Replace(pos, fromLen, to);
-		pos += toLen;
-	}
+	nzbget_rs_cstring_replace_all(&m_data, from, to);
 }
 
 void CString::Bind(char* str)
 {
-	free(m_data);
-	m_data = str;
+	nzbget_rs_cstring_bind(&m_data, str);
 }
 
 char* CString::Unbind()
 {
-	char* olddata = m_data;
-	m_data = nullptr;
-	return olddata;
+	return nzbget_rs_cstring_unbind(&m_data);
 }
 
 void CString::Reserve(int capacity)
 {
-	int curLen = Length();
-	if (capacity > 0 && capacity > curLen || curLen == 0)
-	{
-		char* data = static_cast<char*>(realloc(m_data, static_cast<size_t>(capacity + 1)));
-		if (data)
-		{
-			m_data = data;
-			m_data[curLen] = '\0';
-		}
-	}
+	nzbget_rs_cstring_reserve(&m_data, capacity);
 }
 
 CString CString::FormatStr(const char* format, ...)
@@ -319,20 +211,8 @@ CString CString::FormatStr(const char* format, ...)
 
 void CString::TrimRight()
 {
-	int len = Length();
-
-	if (len == 0)
-	{
-		return;
-	}
-
-	size_t newLen = nzbget_rs_rol_nstring_cstring_trim_right_len(m_data, (size_t)len);
-	for (size_t i = newLen; i < (size_t)len; i++)
-	{
-		m_data[i] = '\0';
-	}
+	nzbget_rs_cstring_trim_right(m_data);
 }
-
 
 WString::WString(const char* utfstr)
 {
@@ -352,58 +232,24 @@ WString::WString(const char* utfstr)
 	m_data[written] = '\0';
 }
 
-
 void StringBuilder::Clear()
 {
-	free(m_data);
-	m_data = nullptr;
-	m_length = 0;
-	m_capacity = 0;
+	nzbget_rs_string_builder_clear(&m_data, &m_length, &m_capacity);
 }
 
 char* StringBuilder::Unbind()
 {
-	char* olddata = m_data;
-	m_data = nullptr;
-	m_length = 0;
-	m_capacity = 0;
-	return olddata;
+	return nzbget_rs_string_builder_unbind(&m_data, &m_length, &m_capacity);
 }
 
 void StringBuilder::Reserve(int capacity, bool exact)
 {
-	int oldCapacity = Capacity();
-	int newCapacity = nzbget_rs_rco_string_builder_calc_reserve_capacity(
-		oldCapacity, capacity, exact ? 1 : 0);
-	if (newCapacity >= 0)
-	{
-		char* oldData = m_data;
-		char* data = static_cast<char*>(realloc(m_data, static_cast<size_t>(newCapacity + 1)));
-		if (!data) return;
-
-		m_capacity = newCapacity;
-		m_data = data;
-		if (!oldData)
-		{
-			m_data[0] = '\0';
-		}
-	}
+	nzbget_rs_string_builder_reserve(&m_data, &m_capacity, capacity, exact ? 1 : 0);
 }
 
 void StringBuilder::Append(const char* str, int len)
 {
-	if (len == 0)
-	{
-		len = strlen(str);
-	}
-	int curLen = Length();
-	int newLen = curLen + len;
-
-	Reserve(newLen, false);
-
-	strncpy(m_data + curLen, str, len);
-	m_data[curLen + len] = '\0';
-	m_length = newLen;
+	nzbget_rs_string_builder_append(&m_data, &m_length, &m_capacity, str, len);
 }
 
 void StringBuilder::AppendFmt(const char* format, ...)
@@ -418,28 +264,25 @@ void StringBuilder::AppendFmtV(const char* format, va_list ap)
 {
 	va_list ap2;
 	va_copy(ap2, ap);
-
 	int addLen = vsnprintf(nullptr, 0, format, ap);
-	if (addLen <= 0)
+	if (addLen > 0)
 	{
-		va_end(ap2);
-		return;
+		VsnprintfCtx ctx{ format, &ap2 };
+		nzbget_rs_string_builder_append_fmt(
+			&m_data, &m_length, &m_capacity, addLen, &ctx, RunVsnprintf);
 	}
-
-	int curLen = Length();
-	int newLen = curLen + addLen;
-
-	Reserve(newLen, false);
-
-	if (vsnprintf(m_data + curLen, static_cast<size_t>(newLen + 1), format, ap2) > 0)
-	{
-		m_length = newLen;
-		m_data[newLen] = '\0';
-	}
-
 	va_end(ap2);
 }
 
+void CharBuffer::Reserve(int size)
+{
+	nzbget_rs_char_buffer_reserve(&m_data, &m_size, size);
+}
+
+void CharBuffer::Clear()
+{
+	nzbget_rs_char_buffer_clear(&m_data, &m_size);
+}
 
 // Instantiate all classes used in our project
 template class BString<1024>;

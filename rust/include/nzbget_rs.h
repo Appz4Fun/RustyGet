@@ -2182,8 +2182,6 @@ void nzbget_rs_rco_log_init_message_disposition(
     int target, int* out_write_to_file, int* out_keep_in_screen);
 size_t nzbget_rs_rco_wstring_decode_utf8_to_utf16(
     const char* utf8, uint16_t* out, size_t out_cap);
-int nzbget_rs_rco_string_builder_calc_reserve_capacity(
-    int old_capacity, int requested_capacity, int exact);
 
 int nzbget_rs_feh_frontend_calc_log_start_index(
     int needed_first_id, int first_msg_id, int* out_skip);
@@ -2703,14 +2701,6 @@ void nzbget_rs_rol_options_reconcile_write_flags(
 int nzbget_rs_rol_log_should_close_idle(int64_t cur_time, int64_t last_written);
 int nzbget_rs_rol_log_should_delete_old_rotated(
     int file_day, int cur_day, int rotate_log);
-int nzbget_rs_rol_nstring_bstring_set_len(int size, int len);
-int nzbget_rs_rol_nstring_bstring_append_len(
-    int size, int cur_len, int str_len);
-int nzbget_rs_rol_nstring_cstring_replace_bounds(
-    int pos, int len, int cur_len, int raw_str_len, int str_len_param,
-    int* out_add_len, int* out_del_len, int* out_new_len);
-size_t nzbget_rs_rol_nstring_cstring_trim_right_len(
-    const char* s, size_t len);
 
 // Util, FileSystem, ScriptController, UnpackController & ScriptConfig Hot-Path C ABI
 int64_t nzbget_rs_ufs_util_join_int64(uint32_t hi, uint32_t lo);
@@ -4128,8 +4118,6 @@ int nzbget_rs_dqh_parse_c_atoi(const char* text);
 int nzbget_rs_dqh_parse_c_atoi_or_default(const char* text, int default_val);
 int nzbget_rs_dqh_diskstate_parse_queue_file_id_and_suffix(
     const char* filename, int* out_id, char* out_suffix);
-int nzbget_rs_dqh_nstring_find_substr_from(
-    const char* haystack, const char* needle, int pos);
 void nzbget_rs_dqh_log_parse_rotated_date_fields(
     const char* filename, size_t year_off, size_t mon_off, size_t mday_off,
     int* out_year, int* out_mon, int* out_mday);
@@ -5717,6 +5705,40 @@ int nzbget_rs_fs_get_disk_state(
     int (*statvfs_cb)(const char*, uint64_t*, uint64_t*, uint64_t*),
     int64_t* out_available,
     int64_t* out_total);
+
+void nzbget_rs_bstring_set(char* buf, int size, const char* str_ptr, int len);
+void nzbget_rs_bstring_append(char* buf, int size, const char* str_ptr, int len);
+void nzbget_rs_bstring_append_fmt(
+    char* buf, int size, void* ctx, int (*fmt_cb)(void*, char*, size_t));
+int nzbget_rs_bstring_format(
+    char* buf, int size, void* ctx, int (*fmt_cb)(void*, char*, size_t));
+int nzbget_rs_cstring_eq(const char* a, const char* b);
+void nzbget_rs_cstring_clear(char** m_data);
+void nzbget_rs_cstring_bind(char** m_data, char* str_ptr);
+char* nzbget_rs_cstring_unbind(char** m_data);
+void nzbget_rs_cstring_set(char** m_data, const char* str_ptr, int len);
+void nzbget_rs_cstring_append(char** m_data, const char* str_ptr, int len);
+void nzbget_rs_cstring_append_fmt(
+    char** m_data, int add_len, void* ctx, int (*fmt_cb)(void*, char*, size_t));
+int nzbget_rs_cstring_format(
+    char** m_data, int new_len_no_nul, void* ctx, int (*fmt_cb)(void*, char*, size_t));
+int nzbget_rs_cstring_find(const char* m_data, const char* str_ptr, int pos);
+void nzbget_rs_cstring_replace_range(
+    char** m_data, int pos, int len, const char* str_ptr, int str_len);
+void nzbget_rs_cstring_replace_all(
+    char** m_data, const char* from_ptr, const char* to_ptr);
+void nzbget_rs_cstring_reserve(char** m_data, int capacity);
+void nzbget_rs_cstring_trim_right(char* m_data);
+void nzbget_rs_string_builder_clear(char** m_data, int* m_length, int* m_capacity);
+char* nzbget_rs_string_builder_unbind(char** m_data, int* m_length, int* m_capacity);
+void nzbget_rs_string_builder_reserve(char** m_data, int* m_capacity, int capacity, int exact);
+void nzbget_rs_string_builder_append(
+    char** m_data, int* m_length, int* m_capacity, const char* str_ptr, int len);
+void nzbget_rs_string_builder_append_fmt(
+    char** m_data, int* m_length, int* m_capacity, int add_len,
+    void* ctx, int (*fmt_cb)(void*, char*, size_t));
+void nzbget_rs_char_buffer_reserve(char** m_data, int* m_size, int size);
+void nzbget_rs_char_buffer_clear(char** m_data, int* m_size);
 
 #include "nzbget_tls_cipher.h"
 

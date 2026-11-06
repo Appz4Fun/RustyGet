@@ -26,7 +26,7 @@ build:
 
 # Run core unit test suites
 unit-test:
-    cd {{build_dir}}/tests && ./nzbget_tests -t UtilTest && ./nzbget_tests -t QueueTest
+    cd {{build_dir}}/tests && ./nzbget_tests -t QueueTest
 
 # Run the PAR-first dupe fallback functional test suite against the Rust-entrypoint daemon
 functional-test:

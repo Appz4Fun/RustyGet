@@ -2711,6 +2711,7 @@ mod tests {
 
 extern "C" {
     fn strcasecmp(s1: *const c_char, s2: *const c_char) -> c_int;
+    fn tolower(c: c_int) -> c_int;
 }
 
 /// Computes `MiB/s` from `bytes` and `ms` in `XmlRpc.cpp`.
@@ -3679,4 +3680,1526 @@ pub fn rpc_save_config_find_cipher_conflict(names: &[&[u8]], values: &[&[u8]]) -
     }
     0
 }
+
+pub fn format_error_bytes(is_json: bool, err_code: i32, err_text: &[u8]) -> Vec<u8> {
+    let encoded = encode_str(is_json, err_text);
+    let mut out = Vec::with_capacity(256);
+    if is_json {
+        let _ = write!(
+            out,
+            "{{\n\"name\" : \"JSONRPCError\",\n\"code\" : {},\n\"message\" : \"{}\"\n}}",
+            err_code, encoded
+        );
+    } else {
+        let _ = write!(
+            out,
+            "<struct>\n<member><name>faultCode</name><value><i4>{}</i4></value></member>\n<member><name>faultString</name><value><string>{}</string></value></member>\n</struct>\n",
+            err_code, encoded
+        );
+    }
+    if out.len() > 1023 {
+        out.truncate(1023);
+    }
+    out
+}
+
+pub fn format_bool_bytes(is_json: bool, ok: bool) -> Vec<u8> {
+    let b = bool_str(is_json, ok);
+    let mut out = Vec::with_capacity(32);
+    if is_json {
+        out.extend_from_slice(b.as_bytes());
+    } else {
+        let _ = write!(out, "<boolean>{}</boolean>", b);
+    }
+    out
+}
+
+pub fn format_int_bytes(is_json: bool, value: i32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(32);
+    if is_json {
+        let _ = write!(out, "{}", value);
+    } else {
+        let _ = write!(out, "<i4>{}</i4>", value);
+    }
+    out
+}
+
+pub fn format_string_bytes(is_json: bool, raw: &[u8], encode: bool, max_len: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(raw.len() + 32);
+    if is_json {
+        out.push(b'"');
+        if encode {
+            crate::escape::json_encode(raw, &mut out);
+        } else {
+            out.extend_from_slice(raw);
+        }
+        out.push(b'"');
+    } else {
+        out.extend_from_slice(b"<string>");
+        if encode {
+            crate::escape::xml_encode(raw, &mut out);
+        } else {
+            out.extend_from_slice(raw);
+        }
+        out.extend_from_slice(b"</string>");
+    }
+    if max_len > 0 && out.len() > max_len {
+        out.truncate(max_len);
+    }
+    out
+}
+
+pub fn format_config_list_bytes(
+    is_json: bool,
+    user_access: i32,
+    ua_restricted: i32,
+    entries: &[(&[u8], &[u8], bool)],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(entries.len() * 96 + 32);
+    if is_json {
+        out.extend_from_slice(b"[\n");
+    } else {
+        out.extend_from_slice(b"<array><data>\n");
+    }
+    for (idx, &(name, value, restricted)) in entries.iter().enumerate() {
+        let mask = roc_xmlrpc_config_should_mask_value(
+            user_access,
+            ua_restricted,
+            i32::from(restricted),
+        ) != 0;
+        let name_enc = encode_str(is_json, name);
+        let val_enc = if mask {
+            "***".to_string()
+        } else {
+            encode_str(is_json, value)
+        };
+        if is_json {
+            if idx > 0 {
+                out.extend_from_slice(b",\n");
+            }
+            let _ = write!(
+                out,
+                "{{\n\"Name\" : \"{}\",\n\"Value\" : \"{}\"\n}}",
+                name_enc, val_enc
+            );
+        } else {
+            let _ = write!(
+                out,
+                "<value><struct>\n<member><name>Name</name><value><string>{}</string></value></member>\n<member><name>Value</name><value><string>{}</string></value></member>\n</struct></value>\n",
+                name_enc, val_enc
+            );
+        }
+    }
+    if is_json {
+        out.extend_from_slice(b"\n]");
+    } else {
+        out.extend_from_slice(b"</data></array>\n");
+    }
+    out
+}
+
+/// Normalizes an RPC URL (`XmlRpcProcessor::SetUrl`): splits path and query at `'?'`,
+/// URL-decodes the path portion only, and reattaches the raw query string.
+pub fn xmlrpc_normalize_url(url: &[u8]) -> Vec<u8> {
+    let (path_set_len, query_offset) = xmlrpc_split_url_path_and_query(url);
+    let n = path_set_len as c_int;
+    let mut path = if n > 0 {
+        url[..(n as usize).min(url.len())].to_vec()
+    } else {
+        url.to_vec()
+    };
+    let decoded_len = crate::text::url_decode(&mut path);
+    path.truncate(decoded_len);
+    xmlrpc_concat_decoded_path_and_query(
+        &path,
+        url,
+        query_offset.is_some(),
+        query_offset.unwrap_or(0),
+    )
+}
+
+#[cfg(test)]
+fn raw_param_at(buf: &[u8], val_off: usize) -> &[u8] {
+    let len = buf[val_off..].iter().position(|&b| b == 0).unwrap_or(0);
+    &buf[val_off..val_off + len]
+}
+
+struct ParamCursor<'a> {
+    raw: crate::rpcparams::Raw,
+    xml_buf: Option<&'a mut [u8]>,
+    cur_off: usize,
+    kind: crate::rpcparams::Kind,
+}
+
+impl<'a> ParamCursor<'a> {
+    unsafe fn from_raw(raw: crate::rpcparams::Raw, is_get: bool, is_json: bool) -> Self {
+        let kind = if is_get {
+            crate::rpcparams::Kind::Get
+        } else if is_json {
+            crate::rpcparams::Kind::Json
+        } else {
+            crate::rpcparams::Kind::Xml
+        };
+        let xml_buf = if kind == crate::rpcparams::Kind::Xml {
+            Some(raw.terminated())
+        } else {
+            None
+        };
+        Self {
+            raw,
+            xml_buf,
+            cur_off: 0,
+            kind,
+        }
+    }
+
+    fn from_slice(buf: &'a mut [u8], is_get: bool, is_json: bool) -> Option<Self> {
+        let end = crate::bytes::find_byte(buf, 0)?;
+        let terminated = &mut buf[..=end];
+        let raw = unsafe { crate::rpcparams::Raw::new(terminated.as_mut_ptr()) };
+        let kind = if is_get {
+            crate::rpcparams::Kind::Get
+        } else if is_json {
+            crate::rpcparams::Kind::Json
+        } else {
+            crate::rpcparams::Kind::Xml
+        };
+        let xml_buf = if kind == crate::rpcparams::Kind::Xml {
+            Some(terminated)
+        } else {
+            None
+        };
+        Some(Self {
+            raw,
+            xml_buf,
+            cur_off: 0,
+            kind,
+        })
+    }
+
+    fn next_str(&mut self) -> Option<usize> {
+        let (step, rel_val) = match self.kind {
+            crate::rpcparams::Kind::Get | crate::rpcparams::Kind::Json => unsafe {
+                self.raw.add(self.cur_off).next_str(self.kind)
+            },
+            crate::rpcparams::Kind::Xml => {
+                let xml = self.xml_buf.as_deref_mut()?;
+                if self.cur_off >= xml.len() {
+                    return None;
+                }
+                crate::rpcparams::next_str_terminated(&mut xml[self.cur_off..], self.kind)
+            }
+        };
+        let rel = rel_val?;
+        let val_off = self.cur_off + rel;
+        self.cur_off += step;
+        Some(val_off)
+    }
+
+    fn next_int(&mut self) -> Option<i32> {
+        let (step, val) = match self.kind {
+            crate::rpcparams::Kind::Get | crate::rpcparams::Kind::Json => unsafe {
+                self.raw.add(self.cur_off).next_int(self.kind)
+            },
+            crate::rpcparams::Kind::Xml => {
+                let xml = self.xml_buf.as_deref_mut()?;
+                if self.cur_off >= xml.len() {
+                    return None;
+                }
+                crate::rpcparams::next_int_terminated(&mut xml[self.cur_off..], self.kind)
+            }
+        };
+        let v = val?;
+        self.cur_off += step;
+        Some(v)
+    }
+
+    fn raw_at(&self, val_off: usize) -> &[u8] {
+        unsafe { self.raw.bytes_at(val_off) }
+    }
+
+    fn decode_at(&mut self, val_off: usize, is_json: bool) -> Vec<u8> {
+        unsafe {
+            self.raw
+                .decode_at(val_off, is_json, &|c| tolower(c as c_int))
+        }
+    }
+}
+
+fn xmlrpc_execute_save_config_cursor(
+    mut cur: ParamCursor<'_>,
+    is_json: bool,
+    config_filename: Option<&[u8]>,
+) -> (usize, bool, Vec<u8>) {
+    let mut opt_entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    let mut cipher_baseline: Option<Vec<u8>> = None;
+    let mut malformed = false;
+
+    loop {
+        let (name_off, val_off) = if is_json {
+            let Some(key1_off) = cur.next_str() else {
+                break;
+            };
+            let Some(mut n_off) = cur.next_str() else {
+                malformed = true;
+                break;
+            };
+            let Some(key2_off) = cur.next_str() else {
+                malformed = true;
+                break;
+            };
+            let Some(mut v_off) = cur.next_str() else {
+                malformed = true;
+                break;
+            };
+            let k1 = cur.raw_at(key1_off);
+            let k2 = cur.raw_at(key2_off);
+            if k1.eq_ignore_ascii_case(b"Value") && k2.eq_ignore_ascii_case(b"Name") {
+                std::mem::swap(&mut n_off, &mut v_off);
+            } else if !(k1.eq_ignore_ascii_case(b"Name") && k2.eq_ignore_ascii_case(b"Value")) {
+                malformed = true;
+                break;
+            }
+            (n_off, v_off)
+        } else {
+            let Some(n_off) = cur.next_str() else {
+                break;
+            };
+            let Some(v_off) = cur.next_str() else {
+                malformed = true;
+                break;
+            };
+            (n_off, v_off)
+        };
+
+        let name = cur.decode_at(name_off, is_json);
+        let baseline_entry = xmlrpc_is_tls_cipher_baseline_entry(&name);
+        if baseline_entry && !xmlrpc_save_config_raw_baseline_valid(cur.raw_at(val_off)) {
+            malformed = true;
+            break;
+        }
+        let value = cur.decode_at(val_off, is_json);
+        if baseline_entry {
+            if !xmlrpc_save_config_decoded_baseline_valid(cipher_baseline.is_some(), &value) {
+                malformed = true;
+                break;
+            }
+            cipher_baseline = Some(value);
+            continue;
+        }
+        opt_entries.push((name, value));
+    }
+
+    let cur_off = cur.cur_off;
+    if malformed || opt_entries.is_empty() {
+        return (
+            cur_off,
+            true,
+            format_error_bytes(is_json, 2, b"Invalid parameter"),
+        );
+    }
+
+    let names_refs: Vec<&[u8]> = opt_entries.iter().map(|(n, _)| n.as_slice()).collect();
+    let values_refs: Vec<&[u8]> = opt_entries.iter().map(|(_, v)| v.as_slice()).collect();
+    let cipher_conflict_server = rpc_save_config_find_cipher_conflict(&names_refs, &values_refs);
+    if cipher_conflict_server > 0 {
+        let msg = format!(
+            "Configuration conflict: Server{cipher_conflict_server}.Cipher cannot be configured when Server{cipher_conflict_server}.Encryption is disabled. Clear the cipher suite or enable encryption."
+        );
+        return (
+            cur_off,
+            true,
+            format_error_bytes(is_json, 3, msg.as_bytes()),
+        );
+    }
+
+    let opt_val = |target: &[u8]| -> Option<&[u8]> {
+        opt_entries
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(target))
+            .map(|(_, v)| v.as_slice())
+    };
+    let conflict_rule = rpc_save_config_check_global_conflicts(
+        opt_val(b"DupeSearch"),
+        opt_val(b"HealthCheck"),
+        opt_val(b"FlushQueue"),
+        opt_val(b"DirectWrite"),
+        opt_val(b"UnpackPauseQueue"),
+        opt_val(b"DirectUnpack"),
+    );
+    if conflict_rule == 2 {
+        return (
+            cur_off,
+            true,
+            format_error_bytes(
+                is_json,
+                3,
+                b"Configuration conflict: 'DupeSearch=yes' is incompatible with 'HealthCheck=park'. DupeSearch requires 'HealthCheck=dupe' to fetch alternative donor releases when an NZB fails.",
+            ),
+        );
+    }
+    if conflict_rule == 3 {
+        return (
+            cur_off,
+            true,
+            format_error_bytes(
+                is_json,
+                3,
+                b"Configuration conflict: 'DirectWrite=yes' requires 'FlushQueue=yes'. Disabling queue flushing during direct disk writes causes disk state desynchronization and corruption upon unexpected shutdown.",
+            ),
+        );
+    }
+    if conflict_rule == 4 {
+        return (
+            cur_off,
+            true,
+            format_error_bytes(
+                is_json,
+                3,
+                b"Configuration conflict: 'DirectUnpack=yes' requires 'UnpackPauseQueue=yes'. Disabling queue pause during direct unpack causes concurrent unpack disk thrashing.",
+            ),
+        );
+    }
+
+    let (ok, conflict) = match config_filename {
+        Some(fname) if !fname.is_empty() => {
+            let pairs: Vec<(&[u8], &[u8])> = opt_entries
+                .iter()
+                .map(|(n, v)| (n.as_slice(), v.as_slice()))
+                .collect();
+            crate::extension::script_config_save(fname, &pairs, cipher_baseline.as_deref())
+        }
+        _ => (false, false),
+    };
+    if conflict {
+        return (
+            cur_off,
+            true,
+            format_error_bytes(
+                is_json,
+                3,
+                b"News server settings changed in another operation. Refresh Settings before saving; your edits have been retained.",
+            ),
+        );
+    }
+
+    (cur_off, false, format_bool_bytes(is_json, ok))
+}
+
+/// Executes `SaveConfigXmlCommand::Execute` over a NUL-terminated request buffer.
+/// Returns `(new_offset, fault, response_bytes)`.
+pub fn xmlrpc_execute_save_config(
+    buf: &mut [u8],
+    is_get: bool,
+    is_json: bool,
+    config_filename: Option<&[u8]>,
+) -> (usize, bool, Vec<u8>) {
+    let Some(cur) = ParamCursor::from_slice(buf, is_get, is_json) else {
+        return (
+            0,
+            true,
+            format_error_bytes(is_json, 2, b"Invalid parameter"),
+        );
+    };
+    xmlrpc_execute_save_config_cursor(cur, is_json, config_filename)
+}
+
+pub(crate) unsafe fn xmlrpc_execute_save_config_raw(
+    raw: crate::rpcparams::Raw,
+    is_get: bool,
+    is_json: bool,
+    config_filename: Option<&[u8]>,
+) -> (usize, bool, Vec<u8>) {
+    let cur = ParamCursor::from_raw(raw, is_get, is_json);
+    xmlrpc_execute_save_config_cursor(cur, is_json, config_filename)
+}
+
+/// Executes `LoadConfigXmlCommand::Execute`: reads the configuration file via
+/// `extension::script_config_load` and formats the RPC config list.
+pub fn xmlrpc_execute_load_config(
+    is_json: bool,
+    user_access: i32,
+    ua_restricted: i32,
+    config_filename: Option<&[u8]>,
+) -> (bool, Vec<u8>) {
+    let Some(fname) = config_filename.filter(|f| !f.is_empty()) else {
+        return (
+            true,
+            format_error_bytes(is_json, 3, b"Could not read configuration file"),
+        );
+    };
+    let Some(loaded) = crate::extension::script_config_load(fname) else {
+        return (
+            true,
+            format_error_bytes(is_json, 3, b"Could not read configuration file"),
+        );
+    };
+    let items: Vec<(&[u8], &[u8], bool)> = loaded
+        .iter()
+        .map(|(n, v)| {
+            (
+                n.to_bytes(),
+                v.to_bytes(),
+                crate::options::option_restricted(n, c_char::MIN < 0),
+            )
+        })
+        .collect();
+    (
+        false,
+        format_config_list_bytes(is_json, user_access, ua_restricted, &items),
+    )
+}
+
+/// Executes `TlsCipherXmlCommand::Execute` (`tlscipherstart`, `tlscipherstatus`, `tlsciphercancel`).
+#[allow(clippy::too_many_arguments)]
+pub fn xmlrpc_execute_tls_cipher(
+    operation: i32,
+    user_access: i32,
+    ua_control: i32,
+    protocol: i32,
+    rp_json_rpc: i32,
+    http_method: i32,
+    hm_post: i32,
+    is_json: bool,
+    request: Option<&[u8]>,
+    limits: crate::json::Limits,
+    backend_fn: impl FnOnce(i32, Option<&[u8]>) -> Vec<u8>,
+) -> (bool, Vec<u8>) {
+    if roc_xmlrpc_tls_cipher_access_allowed(
+        user_access,
+        ua_control,
+        protocol,
+        rp_json_rpc,
+        http_method,
+        hm_post,
+    ) == 0
+    {
+        return (
+            true,
+            format_error_bytes(
+                is_json,
+                401,
+                b"TLS cipher optimization requires control-account JSON-RPC POST access",
+            ),
+        );
+    }
+
+    let parsed_req = request.and_then(|r| crate::json::parse(r, limits));
+    let Some(crate::json::Value::Array(params)) = parsed_req
+        .as_ref()
+        .and_then(|v| v.get(b"params"))
+    else {
+        return (
+            true,
+            format_error_bytes(is_json, 2, b"Invalid cipher optimizer parameters"),
+        );
+    };
+
+    let first_str = params.first().and_then(|v| match v {
+        crate::json::Value::String(s) => Some(s.as_slice()),
+        _ => None,
+    });
+    let valid_job = unsafe {
+        roc_xmlrpc_tls_cipher_validate_job_id(
+            operation,
+            params.len(),
+            i32::from(first_str.is_some()),
+            first_str.map_or(std::ptr::null(), |s| s.as_ptr().cast()),
+            first_str.map_or(0, |s| s.len()),
+        ) != 0
+    };
+    if !valid_job {
+        return (
+            true,
+            format_error_bytes(is_json, 2, b"Invalid cipher job ID"),
+        );
+    }
+
+    let op_kind = xmlrpc_classify_tls_cipher_op(operation);
+    let response = backend_fn(op_kind, first_str.filter(|s| !s.is_empty()));
+
+    let Some(parsed_resp @ crate::json::Value::Object(_)) =
+        crate::json::parse(&response, limits)
+    else {
+        return (
+            true,
+            format_error_bytes(is_json, 3, b"Invalid TLS optimizer response"),
+        );
+    };
+    if let Some(crate::json::Value::String(err_bytes)) = parsed_resp.get(b"Error") {
+        let nul_pos = err_bytes
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(err_bytes.len());
+        let err_slice = &err_bytes[..nul_pos.min(1023)];
+        return (true, format_error_bytes(is_json, 3, err_slice));
+    }
+    (false, response)
+}
+
+fn xmlrpc_parse_edit_queue_cursor(
+    mut cur: ParamCursor<'_>,
+    is_json: bool,
+    ea_file_move_offset: i32,
+    ea_group_move_offset: i32,
+) -> Result<(usize, i32, Vec<u8>, Vec<i32>), (usize, i32, &'static [u8])> {
+    let Some(cmd_off) = cur.next_str() else {
+        return Err((cur.cur_off, 2, b"Invalid parameter"));
+    };
+    let action = rpc_lookup_edit_command(cur.raw_at(cmd_off));
+    if action == -1 {
+        return Err((cur.cur_off, 3, b"Invalid action"));
+    }
+
+    let opt_offset = cur.next_int();
+
+    let Some(args_off) = cur.next_str() else {
+        return Err((cur.cur_off, 2, b"Invalid parameter"));
+    };
+    let mut args = cur.decode_at(args_off, is_json);
+    if !rpc_validate_edit_queue_args(action, &args, true) {
+        return Err((cur.cur_off, 2, b"Invalid parameter"));
+    }
+    if xmlrpc_should_use_edit_offset(
+        opt_offset.is_some(),
+        action,
+        ea_file_move_offset,
+        ea_group_move_offset,
+    ) {
+        args = opt_offset.unwrap_or(0).to_string().into_bytes();
+    }
+
+    let mut ids = Vec::new();
+    while let Some(id) = cur.next_int() {
+        ids.push(id);
+    }
+    Ok((cur.cur_off, action, args, ids))
+}
+
+/// Parses and validates `EditQueueXmlCommand::Execute` parameters over a NUL-terminated buffer.
+/// Returns `Ok((new_offset, action, args_bytes, ids))` or `Err((new_offset, err_code, err_text))`.
+pub fn xmlrpc_parse_edit_queue(
+    buf: &mut [u8],
+    is_get: bool,
+    is_json: bool,
+    ea_file_move_offset: i32,
+    ea_group_move_offset: i32,
+) -> Result<(usize, i32, Vec<u8>, Vec<i32>), (usize, i32, &'static [u8])> {
+    let Some(cur) = ParamCursor::from_slice(buf, is_get, is_json) else {
+        return Err((0, 2, b"Invalid parameter"));
+    };
+    xmlrpc_parse_edit_queue_cursor(cur, is_json, ea_file_move_offset, ea_group_move_offset)
+}
+
+pub(crate) unsafe fn xmlrpc_parse_edit_queue_raw(
+    raw: crate::rpcparams::Raw,
+    is_get: bool,
+    is_json: bool,
+    ea_file_move_offset: i32,
+    ea_group_move_offset: i32,
+) -> Result<(usize, i32, Vec<u8>, Vec<i32>), (usize, i32, &'static [u8])> {
+    let cur = ParamCursor::from_raw(raw, is_get, is_json);
+    xmlrpc_parse_edit_queue_cursor(cur, is_json, ea_file_move_offset, ea_group_move_offset)
+}
+
+#[allow(clippy::type_complexity)]
+fn xmlrpc_parse_start_script_cursor(
+    mut cur: ParamCursor<'_>,
+    is_json: bool,
+) -> Option<(usize, Vec<u8>, Vec<u8>, Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>)> {
+    let script_off = cur.next_str()?;
+    let cmd_off = cur.next_str()?;
+    let ctx_off = cur.next_str()?;
+    let script = cur.decode_at(script_off, is_json);
+    let command = cur.decode_at(cmd_off, is_json);
+    let context = cur.decode_at(ctx_off, is_json);
+
+    let mut entries = Vec::new();
+    loop {
+        let (name_off, val_off) = if is_json {
+            let Some(_d1) = cur.next_str() else {
+                break;
+            };
+            let Some(n_off) = cur.next_str() else {
+                break;
+            };
+            let Some(_d2) = cur.next_str() else {
+                break;
+            };
+            let Some(v_off) = cur.next_str() else {
+                break;
+            };
+            (n_off, v_off)
+        } else {
+            let Some(n_off) = cur.next_str() else {
+                break;
+            };
+            let Some(v_off) = cur.next_str() else {
+                break;
+            };
+            (n_off, v_off)
+        };
+        let name = cur.decode_at(name_off, is_json);
+        let value = cur.decode_at(val_off, is_json);
+        entries.push((name, value));
+    }
+    Some((cur.cur_off, script, command, context, entries))
+}
+
+/// Parses `StartScriptXmlCommand::Execute` parameters over a NUL-terminated buffer.
+#[allow(clippy::type_complexity)]
+pub fn xmlrpc_parse_start_script(
+    buf: &mut [u8],
+    is_get: bool,
+    is_json: bool,
+) -> Option<(usize, Vec<u8>, Vec<u8>, Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>)> {
+    let cur = ParamCursor::from_slice(buf, is_get, is_json)?;
+    xmlrpc_parse_start_script_cursor(cur, is_json)
+}
+
+#[allow(clippy::type_complexity)]
+pub(crate) unsafe fn xmlrpc_parse_start_script_raw(
+    raw: crate::rpcparams::Raw,
+    is_get: bool,
+    is_json: bool,
+) -> Option<(usize, Vec<u8>, Vec<u8>, Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>)> {
+    let cur = ParamCursor::from_raw(raw, is_get, is_json);
+    xmlrpc_parse_start_script_cursor(cur, is_json)
+}
+
+fn xmlrpc_parse_test_disk_speed_cursor(
+    mut cur: ParamCursor<'_>,
+    is_json: bool,
+) -> Result<(usize, Vec<u8>, usize, u64, i32), (usize, &'static CStr)> {
+    let Some(path_off) = cur.next_str() else {
+        return Err((cur.cur_off, c"Invalid argument (Path)"));
+    };
+    let dir_path = cur.decode_at(path_off, is_json);
+
+    let Some(write_buffer_kib) = cur.next_int() else {
+        return Err((cur.cur_off, c"Invalid argument (Write Buffer)"));
+    };
+    if xmlrpc_check_disk_speed_arg_ranges(write_buffer_kib, 1, 1) == 1 {
+        return Err((cur.cur_off, c"Write Buffer cannot be negative"));
+    }
+
+    let Some(max_file_size_gib) = cur.next_int() else {
+        return Err((cur.cur_off, c"Invalid argument (Max file size)"));
+    };
+    if xmlrpc_check_disk_speed_arg_ranges(write_buffer_kib, max_file_size_gib, 1) == 2 {
+        return Err((cur.cur_off, c"Max file size must be positive"));
+    }
+
+    let Some(timeout_sec) = cur.next_int() else {
+        return Err((cur.cur_off, c"Invalid argument (Timeout)"));
+    };
+    if xmlrpc_check_disk_speed_arg_ranges(write_buffer_kib, max_file_size_gib, timeout_sec) == 3 {
+        return Err((cur.cur_off, c"Timeout must be positive"));
+    }
+
+    let mut buffer_bytes = 0usize;
+    let mut max_file_bytes = 0u64;
+    let rc = unsafe {
+        roc_xmlrpc_test_disk_speed_validate_params(
+            write_buffer_kib,
+            max_file_size_gib,
+            timeout_sec,
+            &mut buffer_bytes,
+            &mut max_file_bytes,
+        )
+    };
+    if rc != 0 {
+        return Err((cur.cur_off, c"Invalid parameter"));
+    }
+    Ok((cur.cur_off, dir_path, buffer_bytes, max_file_bytes, timeout_sec))
+}
+
+/// Parses and validates `TestDiskSpeedXmlCommand::Execute` parameters over a NUL-terminated buffer.
+pub fn xmlrpc_parse_test_disk_speed(
+    buf: &mut [u8],
+    is_get: bool,
+    is_json: bool,
+) -> Result<(usize, Vec<u8>, usize, u64, i32), (usize, &'static CStr)> {
+    let Some(cur) = ParamCursor::from_slice(buf, is_get, is_json) else {
+        return Err((0, c"Invalid argument (Path)"));
+    };
+    xmlrpc_parse_test_disk_speed_cursor(cur, is_json)
+}
+
+pub(crate) unsafe fn xmlrpc_parse_test_disk_speed_raw(
+    raw: crate::rpcparams::Raw,
+    is_get: bool,
+    is_json: bool,
+) -> Result<(usize, Vec<u8>, usize, u64, i32), (usize, &'static CStr)> {
+    let cur = ParamCursor::from_raw(raw, is_get, is_json);
+    xmlrpc_parse_test_disk_speed_cursor(cur, is_json)
+}
+
+#[cfg(test)]
+mod remote_xmlrpc_tests {
+    use super::*;
+    use crate::options::{OptionsHost, RustOptions};
+    use crate::rpcparams::{next_bool, next_int, next_str, skip_to_params, Kind};
+    use crate::rpcroute::{
+        access, decide, envelope, protocol, route, DP_EXECUTE, DP_REFUSE, DP_REFUSE_IN_CALLBACK,
+        HM_POST, RP_JSONP_RPC, RP_JSON_RPC, RP_UNDEFINED, UA_CONTROL, UA_RESTRICTED,
+    };
+
+    const HM_GET: i32 = 1;
+    const UA_ADD: i32 = 2;
+
+    /// Pure-Rust equivalent of `XmlCommand` parameter cursor (`daemon/remote/XmlRpc.cpp`).
+    struct RustXmlCommand {
+        buf: Vec<u8>,
+        pos: usize,
+        protocol: i32,
+        http_method: i32,
+        callback_func: Option<Vec<u8>>,
+    }
+
+    impl RustXmlCommand {
+        fn new(request: &[u8], protocol: i32, http_method: i32) -> Self {
+            let mut buf = request.to_vec();
+            if !buf.ends_with(&[0]) {
+                buf.push(0);
+            }
+            Self {
+                buf,
+                pos: 0,
+                protocol,
+                http_method,
+                callback_func: None,
+            }
+        }
+
+        fn is_json(&self) -> bool {
+            xmlrpc_is_json_protocol(self.protocol, RP_JSON_RPC, RP_JSONP_RPC)
+        }
+
+        fn kind(&self) -> Kind {
+            if self.http_method == HM_GET {
+                Kind::Get
+            } else if self.is_json() {
+                Kind::Json
+            } else {
+                Kind::Xml
+            }
+        }
+
+        fn prepare_params(&mut self) {
+            if xmlrpc_should_skip_to_json_post_params(self.is_json(), self.http_method, HM_POST) {
+                let step = skip_to_params(&mut self.buf[self.pos..]);
+                self.pos += step;
+            }
+            if self.protocol == RP_JSONP_RPC {
+                self.callback_func = self.next_param_as_str();
+            }
+        }
+
+        fn next_param_as_int(&mut self) -> Option<i32> {
+            let k = self.kind();
+            let (step, val) = next_int(&mut self.buf[self.pos..], k);
+            let v = val?;
+            self.pos += step;
+            Some(v)
+        }
+
+        fn next_param_as_bool(&mut self) -> Option<bool> {
+            let k = self.kind();
+            let json = self.is_json();
+            let (step, val) = next_bool(&mut self.buf[self.pos..], k, json);
+            self.pos += step;
+            val
+        }
+
+        fn next_param_as_str(&mut self) -> Option<Vec<u8>> {
+            let k = self.kind();
+            let (step, rel_off) = next_str(&mut self.buf[self.pos..], k);
+            let rel = rel_off?;
+            let val_off = self.pos + rel;
+            self.pos += step;
+            Some(raw_param_at(&self.buf, val_off).to_vec())
+        }
+    }
+
+    /// Pure-Rust equivalent of `XmlRpcProcessor::Execute` (`daemon/remote/XmlRpc.cpp`).
+    fn rpc_reply_with_options(
+        url: &str,
+        http_method: i32,
+        user_access: i32,
+        body: &str,
+        json_p: bool,
+        options: Option<&RustOptions<'_>>,
+    ) -> String {
+        let norm_url = xmlrpc_normalize_url(url.as_bytes());
+        let proto = protocol(&norm_url);
+        if proto == RP_UNDEFINED {
+            return String::new();
+        }
+        let is_get = http_method == HM_GET;
+        let r = route(&norm_url, body.as_bytes(), is_get, proto);
+        let eff_access = access(proto, user_access);
+        let req_id: Option<Vec<u8>> = r
+            .id
+            .map(|(start, len)| body.as_bytes()[start..start + (len as usize)].to_vec());
+
+        let param_slice: &[u8] = match r.params {
+            Some(off) if is_get => &norm_url[off.min(norm_url.len())..],
+            _ => body.as_bytes(),
+        };
+        let mut cmd = RustXmlCommand::new(param_slice, proto, http_method);
+        cmd.prepare_params();
+        let is_json = cmd.is_json();
+
+        let access_denied =
+            xmlrpc_check_user_access_denied(eff_access, UA_ADD, UA_RESTRICTED, &r.method);
+        let cmd_id = match_command(&r.method);
+        let is_error = access_denied != 0 || cmd_id == 0;
+        let is_safe = !is_error
+            && matches!(
+                cmd_id,
+                5 | 6 | 8 | 9 | 10 | 11 | 12 | 13 | 17 | 20 | 27 | 28 | 29 | 30 | 31 | 37 | 45
+                    | 46 | 56
+            );
+
+        let dec = decide(proto, http_method, is_safe, is_error, json_p);
+        let (fault, payload, cb_override) = match dec.dispatch {
+            DP_EXECUTE => {
+                if access_denied != 0 {
+                    (
+                        true,
+                        format_error_bytes(is_json, 401, b"Access denied"),
+                        cmd.callback_func.as_deref(),
+                    )
+                } else {
+                    let (f, p) = match cmd_id {
+                        5 => (
+                            false,
+                            format_string_bytes(is_json, b"26.0", false, 1023),
+                        ),
+                        14 => match xmlrpc_parse_edit_queue(
+                            &mut cmd.buf[cmd.pos..],
+                            is_get,
+                            is_json,
+                            1,
+                            11,
+                        ) {
+                            Ok(_) => (false, format_bool_bytes(is_json, true)),
+                            Err((_, code, msg)) => (true, format_error_bytes(is_json, code, msg)),
+                        },
+                        15 => {
+                            let Some(_fname) = cmd.next_param_as_str() else {
+                                return wrap_reply(
+                                    proto,
+                                    true,
+                                    &format_error_bytes(is_json, 2, b"Invalid parameter (Filename)"),
+                                    cmd.callback_func.as_deref(),
+                                    req_id.as_deref(),
+                                );
+                            };
+                            (false, format_bool_bytes(is_json, true))
+                        }
+                        29 => {
+                            let items: Vec<(&[u8], &[u8], bool)> = match options {
+                                Some(opts) => opts
+                                    .opt_entries
+                                    .iter()
+                                    .map(|e| {
+                                        (
+                                            e.name.to_bytes(),
+                                            e.value.as_ref().map_or(&b""[..], |v| v.to_bytes()),
+                                            e.restricted(),
+                                        )
+                                    })
+                                    .collect(),
+                                None => Vec::new(),
+                            };
+                            (
+                                false,
+                                format_config_list_bytes(
+                                    is_json,
+                                    eff_access,
+                                    UA_RESTRICTED,
+                                    &items,
+                                ),
+                            )
+                        }
+                        36 => {
+                            let cfg_file = options
+                                .and_then(|o| o.config_filename.as_ref().map(|c| c.to_bytes()));
+                            let (_off, f, p) = xmlrpc_execute_save_config(
+                                &mut cmd.buf[cmd.pos..],
+                                is_get,
+                                is_json,
+                                cfg_file,
+                            );
+                            (f, p)
+                        }
+                        42 => {
+                            let Some(_url) = cmd.next_param_as_str() else {
+                                return wrap_reply(
+                                    proto,
+                                    true,
+                                    &format_error_bytes(is_json, 2, b"Invalid parameter"),
+                                    cmd.callback_func.as_deref(),
+                                    req_id.as_deref(),
+                                );
+                            };
+                            (false, format_string_bytes(is_json, b"", true, 0))
+                        }
+                        48..=50 => {
+                            let op = cmd_id - 48;
+                            xmlrpc_execute_tls_cipher(
+                                op,
+                                eff_access,
+                                UA_CONTROL,
+                                proto,
+                                RP_JSON_RPC,
+                                http_method,
+                                HM_POST,
+                                is_json,
+                                Some(body.as_bytes()),
+                                crate::json::TEST_LIMITS,
+                                |op_kind, id_opt| {
+                                    let id_cstr = id_opt
+                                        .and_then(|s| std::ffi::CString::new(s).ok());
+                                    let id_ptr = id_cstr
+                                        .as_ref()
+                                        .map_or(std::ptr::null(), |c| c.as_ptr());
+                                    let buf = unsafe {
+                                        match op_kind {
+                                            0 => crate::ffi::nzbget_rs_tls_cipher_start(
+                                                std::ptr::null(),
+                                            ),
+                                            1 => crate::ffi::nzbget_rs_tls_cipher_status(id_ptr),
+                                            _ => crate::ffi::nzbget_rs_tls_cipher_cancel(id_ptr),
+                                        }
+                                    };
+                                    let out = unsafe {
+                                        std::slice::from_raw_parts(buf.data as *const u8, buf.len)
+                                            .to_vec()
+                                    };
+                                    unsafe { crate::ffi::nzbget_rs_free(buf) };
+                                    out
+                                },
+                            )
+                        }
+                        _ => (true, format_error_bytes(is_json, 1, b"Invalid procedure")),
+                    };
+                    (f, p, cmd.callback_func.as_deref())
+                }
+            }
+            DP_REFUSE_IN_CALLBACK => {
+                let txt = dec.text.map_or(&b""[..], |c| c.to_bytes());
+                (
+                    true,
+                    format_error_bytes(is_json, dec.code, txt),
+                    cmd.callback_func.as_deref(),
+                )
+            }
+            DP_REFUSE => {
+                let txt = dec.text.map_or(&b""[..], |c| c.to_bytes());
+                (true, format_error_bytes(is_json, dec.code, txt), Some(&b""[..]))
+            }
+            _ => unreachable!(),
+        };
+
+        wrap_reply(proto, fault, &payload, cb_override, req_id.as_deref())
+    }
+
+    fn wrap_reply(
+        proto: i32,
+        fault: bool,
+        payload: &[u8],
+        callback: Option<&[u8]>,
+        req_id: Option<&[u8]>,
+    ) -> String {
+        let (head, tail) = envelope(proto, fault, callback, req_id);
+        let mut out = head;
+        out.extend_from_slice(payload);
+        out.extend_from_slice(&tail);
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    fn rpc_reply(url: &str, http_method: i32, body: &str, json_p: bool) -> String {
+        rpc_reply_with_options(url, http_method, UA_CONTROL, body, json_p, None)
+    }
+
+    fn has_error_code(reply: &str, code: i32) -> bool {
+        reply.contains(&format!("\"code\" : {code},"))
+    }
+
+    #[test]
+    fn test_save_config_params_port_from_cpp() {
+        let json_input = r#"{
+	"method":"saveconfig",
+	"params":[[
+		{"Name":"OptionName1","Value":"OptionValue1"},
+		{"Name":"OptionName2","Value":"OptionValue2"}
+	]],
+	"id":1}"#;
+
+        let mut cmd = RustXmlCommand::new(json_input.as_bytes(), RP_JSON_RPC, HM_POST);
+        cmd.prepare_params();
+
+        assert_eq!(cmd.next_param_as_str().as_deref(), Some(&b"Name"[..]));
+        assert_eq!(cmd.next_param_as_str().as_deref(), Some(&b"OptionName1"[..]));
+        assert_eq!(cmd.next_param_as_str().as_deref(), Some(&b"Value"[..]));
+        assert_eq!(cmd.next_param_as_str().as_deref(), Some(&b"OptionValue1"[..]));
+
+        assert_eq!(cmd.next_param_as_str().as_deref(), Some(&b"Name"[..]));
+        assert_eq!(cmd.next_param_as_str().as_deref(), Some(&b"OptionName2"[..]));
+        assert_eq!(cmd.next_param_as_str().as_deref(), Some(&b"Value"[..]));
+        assert_eq!(cmd.next_param_as_str().as_deref(), Some(&b"OptionValue2"[..]));
+    }
+
+    #[test]
+    fn test_next_param_as_types_port_from_cpp() {
+        {
+            let mut cmd = RustXmlCommand::new(b"{\"params\":[123,456]}", RP_JSON_RPC, HM_POST);
+            cmd.prepare_params();
+            assert_eq!(cmd.next_param_as_int(), Some(123));
+            assert_eq!(cmd.next_param_as_int(), Some(456));
+            assert_eq!(cmd.next_param_as_int(), None);
+        }
+        {
+            let mut cmd =
+                RustXmlCommand::new(b"{\"params\":[true,false]}", RP_JSON_RPC, HM_POST);
+            cmd.prepare_params();
+            assert_eq!(cmd.next_param_as_bool(), Some(true));
+            assert_eq!(cmd.next_param_as_bool(), Some(false));
+            assert_eq!(cmd.next_param_as_bool(), None);
+        }
+        {
+            let mut cmd =
+                RustXmlCommand::new(b"{\"params\":[\"abc\",\"def\"]}", RP_JSON_RPC, HM_POST);
+            cmd.prepare_params();
+            assert_eq!(cmd.next_param_as_str().as_deref(), Some(&b"abc"[..]));
+            assert_eq!(cmd.next_param_as_str().as_deref(), Some(&b"def"[..]));
+            assert_eq!(cmd.next_param_as_str(), None);
+        }
+    }
+
+    #[test]
+    fn test_config_commands_parsing_port_from_cpp() {
+        {
+            let mut cmd = RustXmlCommand::new(b"{\"params\":[true]}", RP_JSON_RPC, HM_POST);
+            cmd.prepare_params();
+            assert_eq!(cmd.next_param_as_bool(), Some(true));
+        }
+        {
+            let mut cmd = RustXmlCommand::new(b"{\"params\":[]}", RP_JSON_RPC, HM_POST);
+            cmd.prepare_params();
+            assert_eq!(cmd.next_param_as_bool(), None);
+        }
+    }
+
+    #[test]
+    fn test_append_command_port_from_cpp() {
+        let json_input = br#"{"method":"append","params":["test.nzb","PD94bWw...","",0,false,false,"",0,"FORCE"],"id":1}"#;
+        let mut cmd = RustXmlCommand::new(json_input, RP_JSON_RPC, HM_POST);
+        cmd.prepare_params();
+
+        assert_eq!(cmd.next_param_as_str().as_deref(), Some(&b"test.nzb"[..]));
+        assert_eq!(cmd.next_param_as_str().as_deref(), Some(&b"PD94bWw..."[..]));
+        assert_eq!(cmd.next_param_as_str().as_deref(), Some(&b""[..]));
+        assert_eq!(cmd.next_param_as_int(), Some(0));
+        assert_eq!(cmd.next_param_as_bool(), Some(false));
+        assert_eq!(cmd.next_param_as_bool(), Some(false));
+        assert_eq!(cmd.next_param_as_str().as_deref(), Some(&b""[..]));
+        assert_eq!(cmd.next_param_as_int(), Some(0));
+        assert_eq!(cmd.next_param_as_str().as_deref(), Some(&b"FORCE"[..]));
+        assert_eq!(cmd.next_param_as_str(), None);
+    }
+
+    #[test]
+    fn test_edit_queue_with_id_after_port_from_cpp() {
+        let json_input = br#"{"params":["PausePost", "", [123, 456]],"id":1}"#;
+        let mut cmd = RustXmlCommand::new(json_input, RP_JSON_RPC, HM_POST);
+        cmd.prepare_params();
+
+        assert_eq!(cmd.next_param_as_str().as_deref(), Some(&b"PausePost"[..]));
+        assert_eq!(cmd.next_param_as_int(), None);
+        assert_eq!(cmd.next_param_as_str().as_deref(), Some(&b""[..]));
+        assert_eq!(cmd.next_param_as_int(), Some(123));
+        assert_eq!(cmd.next_param_as_int(), Some(456));
+        assert_eq!(cmd.next_param_as_int(), None);
+    }
+
+    #[test]
+    fn test_whitespace_after_last_param_port_from_cpp() {
+        for input in [
+            &b"{\"params\":[123 ],\"id\":1}"[..],
+            &b"{\"params\":[123\n],\"id\":1}"[..],
+        ] {
+            let mut cmd = RustXmlCommand::new(input, RP_JSON_RPC, HM_POST);
+            cmd.prepare_params();
+            assert_eq!(cmd.next_param_as_int(), Some(123));
+            assert_eq!(cmd.next_param_as_int(), None);
+        }
+        {
+            let mut cmd = RustXmlCommand::new(
+                b"{\"params\":[\"abc\" ],\"id\":1}",
+                RP_JSON_RPC,
+                HM_POST,
+            );
+            cmd.prepare_params();
+            assert_eq!(cmd.next_param_as_str().as_deref(), Some(&b"abc"[..]));
+            assert_eq!(cmd.next_param_as_str(), None);
+        }
+    }
+
+    #[test]
+    fn cipher_save_metadata_rejects_malformed_and_never_leaks_into_file_port_from_cpp() {
+        for body in [
+            r#"{"method":"saveconfig","params":[[{"Name":"_TlsCipherBaseline","Value":"v1\n"}]],"id":1}"#,
+            r#"{"method":"saveconfig","params":[[{"Name":"_TlsCipherBaseline","Value":"v2\n"},{"Name":"X","Value":"y"}]],"id":1}"#,
+            r#"{"method":"saveconfig","params":[[{"Name":"_TlsCipherBaseline","Value":"v1\n\u0000bad"},{"Name":"X","Value":"y"}]],"id":1}"#,
+            r#"{"method":"saveconfig","params":[[{"Name":"_TlsCipherBaseline","Value":"v1\n"},{"Name":"_TlsCipherBaseline","Value":"v1\n"},{"Name":"X","Value":"y"}]],"id":1}"#,
+        ] {
+            assert!(has_error_code(
+                &rpc_reply("/jsonrpc", HM_POST, body, true),
+                2
+            ));
+        }
+
+        let dir = std::env::temp_dir().join(format!(
+            "nzbget-cipher-rpc-rs-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("nzbget.conf");
+        std::fs::write(
+            &path,
+            b"Server1.Host=example.invalid\nServer1.Encryption=yes\nServer1.Cipher=old\n",
+        )
+        .unwrap();
+
+        let path_cstr = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        let mut options = RustOptions::new_no_config(None, None);
+        options.config_filename = Some(path_cstr.clone());
+
+        let loaded = crate::extension::script_config_load(path_cstr.to_bytes()).unwrap();
+        let names_refs: Vec<&[u8]> = loaded.iter().map(|(n, _)| n.to_bytes()).collect();
+        let values_refs: Vec<&[u8]> = loaded.iter().map(|(_, v)| v.to_bytes()).collect();
+        let token_bytes = crate::extension::build_cipher_baseline(&names_refs, &values_refs);
+        let mut token_escaped = Vec::new();
+        crate::escape::json_encode(&token_bytes, &mut token_escaped);
+        let token_json = String::from_utf8(token_escaped).unwrap();
+
+        let body = format!(
+            r#"{{"method":"saveconfig","params":[[{{"Name":"Server1.Host","Value":"example.invalid"}},{{"Name":"Server1.Encryption","Value":"yes"}},{{"Name":"Server1.Cipher","Value":"optimized"}},{{"Name":"_TlsCipherBaseline","Value":"{token_json}"}}]],"id":1}}"#
+        );
+        let reply1 = rpc_reply_with_options(
+            "/jsonrpc",
+            HM_POST,
+            UA_CONTROL,
+            &body,
+            true,
+            Some(&options),
+        );
+        assert!(reply1.contains("true"), "unexpected reply1: {reply1}");
+
+        let saved_bytes =
+            crate::extension::script_config_read_cipher_snapshot(path_cstr.to_bytes()).unwrap();
+        let saved = String::from_utf8(saved_bytes).unwrap();
+        assert!(!saved.contains("_TlsCipherBaseline"));
+        assert!(saved.contains("Server1.Cipher=optimized"));
+
+        let reply2 = rpc_reply_with_options(
+            "/jsonrpc",
+            HM_POST,
+            UA_CONTROL,
+            &body,
+            true,
+            Some(&options),
+        );
+        assert!(has_error_code(&reply2, 3));
+        let unchanged = String::from_utf8(
+            crate::extension::script_config_read_cipher_snapshot(path_cstr.to_bytes()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(unchanged, saved);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn test_jsonp_and_http_method_safety_port_from_cpp() {
+        for method in ["editqueue", "readurl", "append"] {
+            let reply = rpc_reply(&format!("/jsonprpc/{method}?=cb"), HM_GET, "", true);
+            assert!(has_error_code(&reply, 4));
+            assert!(!has_error_code(&reply, 2));
+            assert!(reply.starts_with("cb("));
+            assert!(reply.ends_with(')'));
+        }
+
+        let ver_reply = rpc_reply("/jsonprpc/version?=cb", HM_GET, "", true);
+        assert!(ver_reply.starts_with("cb("));
+        assert!(ver_reply.contains("\"result\""));
+        assert!(!ver_reply.contains("\"error\""));
+
+        let get_edit = rpc_reply("/jsonrpc/editqueue", HM_GET, "", true);
+        assert!(has_error_code(&get_edit, 4));
+
+        let post_edit = rpc_reply(
+            "/jsonrpc",
+            HM_POST,
+            r#"{"method":"editqueue","params":[],"id":1}"#,
+            true,
+        );
+        assert!(has_error_code(&post_edit, 2));
+        assert!(!has_error_code(&post_edit, 4));
+
+        let jsonp_off = rpc_reply("/jsonprpc/version?=cb", HM_GET, "", false);
+        assert!(has_error_code(&jsonp_off, 403));
+        assert!(!jsonp_off.contains("\"result\""));
+        assert!(jsonp_off.starts_with("cb("));
+    }
+
+    #[test]
+    fn test_jsonp_reads_as_restricted_user_and_protected_options_port_from_cpp() {
+        let options =
+            RustOptions::new_no_config(Some(&[c"SevenZipCmd=7z", c"UnrarCmd=unrar"]), None);
+        let masked_needle = "\"Name\" : \"ControlPassword\",\n\"Value\" : \"***\"";
+
+        let reply = rpc_reply_with_options(
+            "/jsonprpc/config?=cb",
+            HM_GET,
+            UA_CONTROL,
+            "",
+            true,
+            Some(&options),
+        );
+        assert!(reply.starts_with("cb("));
+        assert!(reply.contains(masked_needle));
+        assert!(!reply.contains("tegbzn6789"));
+
+        let direct = rpc_reply_with_options(
+            "/jsonrpc",
+            HM_POST,
+            UA_CONTROL,
+            r#"{"method":"config","params":[],"id":1}"#,
+            true,
+            Some(&options),
+        );
+        assert!(!direct.contains(masked_needle));
+        assert!(direct.contains("\"Name\" : \"ControlPassword\",\n\"Value\" : \"tegbzn6789\""));
+
+        assert!(crate::options::option_restricted(c"ControlPassword", true));
+        assert!(crate::options::option_restricted(c"Server1.Username", true));
+        assert!(crate::options::option_restricted(c"DupeSearchApiKey", true));
+        assert!(crate::options::option_restricted(c"JsonP", true));
+        assert!(!crate::options::option_restricted(c"DupeSearchUrl", true));
+        assert!(!crate::options::option_restricted(c"DupeCheck", true));
+    }
+
+    #[test]
+    fn tls_cipher_rpc_security_and_status_port_from_cpp() {
+        for method in ["tlscipherstart", "tlscipherstatus", "tlsciphercancel"] {
+            for access_lvl in [UA_RESTRICTED, UA_ADD] {
+                let req = format!("{{\"method\":\"{method}\",\"params\":[],\"id\":1}}");
+                let reply = rpc_reply_with_options(
+                    "/jsonrpc",
+                    HM_POST,
+                    access_lvl,
+                    &req,
+                    true,
+                    None,
+                );
+                assert!(reply.contains("Access denied"));
+            }
+
+            let get_reply = rpc_reply(&format!("/jsonrpc/{method}"), HM_GET, "", true);
+            assert!(get_reply.contains("\"error\""));
+        }
+
+        for req in [
+            r#"{"method":"tlscipherstart","params":["host.invalid"],"id":1}"#,
+            r#"{"method":"tlscipherstatus","params":[42],"id":1}"#,
+            r#"{"method":"tlsciphercancel","params":[],"id":1}"#,
+            r#"{"method":"tlscipherstatus","params":["bad\u0000id"],"id":1}"#,
+            r#"{"method":"tlscipherstatus","params":["one","two"],"id":1}"#,
+        ] {
+            let reply = rpc_reply("/jsonrpc", HM_POST, req, true);
+            assert!(reply.contains("Invalid cipher"), "unexpected reply: {reply}");
+        }
+
+        let status_reply = rpc_reply(
+            "/jsonrpc",
+            HM_POST,
+            r#"{"method":"tlscipherstatus","params":[],"id":1}"#,
+            true,
+        );
+        let doc = crate::json::parse(status_reply.as_bytes(), crate::json::TEST_LIMITS).unwrap();
+        let res = doc.get(b"result").unwrap();
+        assert_eq!(res.get(b"Available"), Some(&crate::json::Value::Bool(true)));
+        let stale = rpc_reply(
+            "/jsonrpc",
+            HM_POST,
+            r#"{"method":"tlscipherstatus","params":["unknown-fixture-job"],"id":1}"#,
+            true,
+        );
+        assert!(stale.contains("unknown cipher job"));
+        assert!(status_reply.len() <= 1024 * 1024);
+    }
+
+    #[test]
+    fn save_config_rejects_conflicting_settings_and_boot_reconciliation_port_from_cpp() {
+        // Rule 7.1
+        {
+            let reply = rpc_reply(
+                "/jsonrpc",
+                HM_POST,
+                r#"{"method":"saveconfig","params":[[{"Name":"Server1.Encryption","Value":"no"},{"Name":"Server1.Cipher","Value":"AES128"}]],"id":1}"#,
+                true,
+            );
+            assert!(has_error_code(&reply, 3));
+            assert!(reply.contains(
+                "Server1.Cipher cannot be configured when Server1.Encryption is disabled"
+            ));
+        }
+        // Rule 7.2
+        {
+            let reply = rpc_reply(
+                "/jsonrpc",
+                HM_POST,
+                r#"{"method":"saveconfig","params":[[{"Name":"DupeSearch","Value":"yes"},{"Name":"HealthCheck","Value":"park"}]],"id":1}"#,
+                true,
+            );
+            assert!(has_error_code(&reply, 3));
+            assert!(reply.contains("DupeSearch=yes"));
+            assert!(reply.contains("HealthCheck=park"));
+        }
+        // Rule 7.3
+        {
+            let reply = rpc_reply(
+                "/jsonrpc",
+                HM_POST,
+                r#"{"method":"saveconfig","params":[[{"Name":"DirectWrite","Value":"yes"},{"Name":"FlushQueue","Value":"no"}]],"id":1}"#,
+                true,
+            );
+            assert!(has_error_code(&reply, 3));
+            assert!(reply.contains("DirectWrite=yes"));
+            assert!(reply.contains("FlushQueue=yes"));
+        }
+        // Rule 7.4
+        {
+            let reply = rpc_reply(
+                "/jsonrpc",
+                HM_POST,
+                r#"{"method":"saveconfig","params":[[{"Name":"DirectUnpack","Value":"yes"},{"Name":"UnpackPauseQueue","Value":"no"}]],"id":1}"#,
+                true,
+            );
+            assert!(has_error_code(&reply, 3));
+            assert!(reply.contains("DirectUnpack=yes"));
+            assert!(reply.contains("UnpackPauseQueue=yes"));
+        }
+        // Omitted DirectWrite defaults to yes
+        {
+            let reply = rpc_reply(
+                "/jsonrpc",
+                HM_POST,
+                r#"{"method":"saveconfig","params":[[{"Name":"FlushQueue","Value":"no"}]],"id":1}"#,
+                true,
+            );
+            assert!(has_error_code(&reply, 3));
+            assert!(reply.contains("DirectWrite=yes"));
+        }
+
+        // BootTimeConfigReconciliationTest
+        let mut options = RustOptions::new_no_config(
+            Some(&[
+                c"Server1.Host=example.com",
+                c"Server1.Port=119",
+                c"Server1.Encryption=no",
+                c"Server1.Cipher=AES128-GCM-SHA256",
+                c"DupeSearch=yes",
+                c"HealthCheck=park",
+                c"DirectWrite=yes",
+                c"FlushQueue=no",
+                c"DirectUnpack=yes",
+                c"UnpackPauseQueue=no",
+            ]),
+            None,
+        );
+        let cipher = options.get_option(c"Server1.Cipher");
+        assert!(cipher.is_none_or(|c| c.to_bytes().is_empty()));
+        assert_eq!(options.scalars.dupe_search, 0);
+        assert_eq!(options.scalars.flush_queue, 1);
+        assert_eq!(options.scalars.unpack_mutex_enforced, 1);
+        assert_eq!(
+            options
+                .get_option(c"_UnpackMutexEnforced")
+                .as_deref()
+                .map(|c| c.to_bytes()),
+            Some(&b"yes"[..])
+        );
+    }
+
+    #[test]
+    fn test_edit_queue_start_script_and_disk_speed_parsers() {
+        // Large editqueue ID array after PrepareParams (verifying incremental linear parsing)
+        let mut ids_str = String::with_capacity(70_000);
+        for i in 1..=10_000 {
+            if i > 1 {
+                ids_str.push(',');
+            }
+            ids_str.push_str(&i.to_string());
+        }
+        let full_req = format!(
+            r#"{{"method":"editqueue","params":["GroupMoveOffset",-3,"",[{ids_str}]],"id":1}}"#
+        );
+        let mut cmd = RustXmlCommand::new(full_req.as_bytes(), RP_JSON_RPC, HM_POST);
+        cmd.prepare_params();
+        let (_, action, args, ids) =
+            xmlrpc_parse_edit_queue(&mut cmd.buf[cmd.pos..], false, true, 1, 11).unwrap();
+        assert_eq!(action, 11);
+        assert_eq!(args, b"-3");
+        assert_eq!(ids.len(), 10_000);
+        assert_eq!(ids[0], 1);
+        assert_eq!(ids[9_999], 10_000);
+
+        // StartScript JSON-RPC POST
+        let script_req = br#"{"method":"startscript","params":["Notify.py","test_cmd","settings",[{"Name":"Opt1","Value":"Val\\1"}]],"id":1}"#;
+        let mut scmd = RustXmlCommand::new(script_req, RP_JSON_RPC, HM_POST);
+        scmd.prepare_params();
+        let (_, script, command, context, entries) =
+            xmlrpc_parse_start_script(&mut scmd.buf[scmd.pos..], false, true).unwrap();
+        assert_eq!(script, b"Notify.py");
+        assert_eq!(command, b"test_cmd");
+        assert_eq!(context, b"settings");
+        assert_eq!(entries, vec![(b"Opt1".to_vec(), b"Val\\1".to_vec())]);
+
+        // TestDiskSpeed JSON-RPC POST
+        let disk_req = br#"{"method":"testdiskspeed","params":["/tmp/test",1024,1,5],"id":1}"#;
+        let mut dcmd = RustXmlCommand::new(disk_req, RP_JSON_RPC, HM_POST);
+        dcmd.prepare_params();
+        let (_, dir_path, buf_bytes, max_bytes, timeout_sec) =
+            xmlrpc_parse_test_disk_speed(&mut dcmd.buf[dcmd.pos..], false, true).unwrap();
+        assert_eq!(dir_path, b"/tmp/test");
+        assert_eq!(buf_bytes, 1024 * 1024);
+        assert_eq!(max_bytes, 1024 * 1024 * 1024);
+        assert_eq!(timeout_sec, 5);
+
+        // Decoded parameter containing embedded NUL (%00) truncates at first NUL
+        let nul_req = b"?a=Notify.py%00extra&b=cmd%00extra&c=settings%00extra&k1=Name&v1=ControlPassword%00suffix&k2=Value&v2=secret%00tail";
+        let mut ncmd = RustXmlCommand::new(nul_req, RP_JSON_RPC, HM_GET);
+        ncmd.prepare_params();
+        let (_, n_script, n_cmd, n_ctx, entries) =
+            xmlrpc_parse_start_script(&mut ncmd.buf[ncmd.pos..], true, true).unwrap();
+        assert_eq!(n_script, b"Notify.py");
+        assert_eq!(n_cmd, b"cmd");
+        assert_eq!(n_ctx, b"settings");
+        assert_eq!(
+            entries,
+            vec![(b"ControlPassword".to_vec(), b"secret".to_vec())]
+        );
+    }
+}
+
 

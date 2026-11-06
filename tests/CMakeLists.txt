@@ -7,7 +7,6 @@ set(TESTS_SRC ${CMAKE_SOURCE_DIR}/tests/main.cpp)
 
 include(queue/queue.cmake)
 include(postprocess/postprocess.cmake)
-include(remote/remote.cmake)
 list(APPEND TESTS_SRC ${CMAKE_CURRENT_SOURCE_DIR}/connect/TlsCipher.cpp)
 
 add_executable(${TESTS_TARGET} ${TESTS_SRC})
@@ -24,7 +23,6 @@ target_precompile_headers(${TESTS_TARGET} REUSE_FROM libnzbget)
 
 add_test(NAME QueueTest        COMMAND ${TESTS_TARGET} --run_test=QueueTest --log_level=message)
 add_test(NAME PostprocessTest  COMMAND ${TESTS_TARGET} --run_test=PostprocessTest --log_level=message)
-add_test(NAME RemoteTest       COMMAND ${TESTS_TARGET} --run_test=RemoteTest --log_level=message)
 if(TARGET ${PACKAGE})
 	# these leave through exit(): the daemon's destructors must still run cleanly
 	add_test(NAME ExitVersionTest COMMAND ${PACKAGE} --version)

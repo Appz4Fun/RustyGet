@@ -103,7 +103,7 @@ pub fn next_int(buf: &mut [u8], kind: Kind) -> (usize, Option<i32>) {
 }
 
 /// next_int on a buffer that ends with its first NUL.
-fn next_int_terminated(buf: &mut [u8], kind: Kind) -> (usize, Option<i32>) {
+pub(crate) fn next_int_terminated(buf: &mut [u8], kind: Kind) -> (usize, Option<i32>) {
     let r = match kind {
         Kind::Get => (|| {
             let param = find(text(buf), b"=")? + 1;
@@ -151,7 +151,7 @@ pub fn next_str(buf: &mut [u8], kind: Kind) -> (usize, Option<usize>) {
 }
 
 /// next_str on a buffer that ends with its first NUL.
-fn next_str_terminated(buf: &mut [u8], kind: Kind) -> (usize, Option<usize>) {
+pub(crate) fn next_str_terminated(buf: &mut [u8], kind: Kind) -> (usize, Option<usize>) {
     let r = match kind {
         Kind::Get => (|| {
             let param = find(text(buf), b"=")? + 1;
@@ -315,9 +315,47 @@ impl Raw {
     }
 
     /// The whole request up to its NUL, for XML-RPC.
-    unsafe fn terminated(self) -> &'static mut [u8] {
+    pub(crate) unsafe fn terminated(self) -> &'static mut [u8] {
         let len = CStr::from_ptr(self.0.cast()).to_bytes().len();
         std::slice::from_raw_parts_mut(self.0, len + 1)
+    }
+
+    /// Advances the pointer by `off` bytes.
+    ///
+    /// # Safety
+    /// `off` is at most the index of the first NUL from `self`.
+    pub(crate) unsafe fn add(self, off: usize) -> Raw {
+        Raw(self.0.add(off))
+    }
+
+    /// Reads the NUL-terminated byte slice starting at `off`.
+    ///
+    /// # Safety
+    /// `self.0.add(off)` points to a valid NUL-terminated string within the buffer.
+    pub(crate) unsafe fn bytes_at(self, off: usize) -> &'static [u8] {
+        CStr::from_ptr(self.0.add(off).cast()).to_bytes()
+    }
+
+    /// Decodes the NUL-terminated parameter at `off` in-place (JSON or XML decode)
+    /// and returns the decoded bytes.
+    ///
+    /// # Safety
+    /// `self.0.add(off)` points to a writable NUL-terminated string within the buffer.
+    pub(crate) unsafe fn decode_at(
+        self,
+        off: usize,
+        is_json: bool,
+        tolower_fn: &dyn Fn(u8) -> c_int,
+    ) -> Vec<u8> {
+        let len = CStr::from_ptr(self.0.add(off).cast()).to_bytes().len();
+        let slice = std::slice::from_raw_parts_mut(self.0.add(off), len);
+        let n = if is_json {
+            crate::decode::json_decode(slice)
+        } else {
+            crate::text::xml_decode(slice, tolower_fn)
+        };
+        *self.0.add(off + n) = 0;
+        CStr::from_ptr(self.0.add(off).cast()).to_bytes().to_vec()
     }
 
     /// next_int.

@@ -451,38 +451,31 @@ public:
 	explicit TlsCipherXmlCommand(int operation) : m_operation(operation) {}
 	void Execute() override
 	{
-		if (!nzbget_rs_roc_xmlrpc_tls_cipher_access_allowed(
+		const NzbgetRsJsonLimits limits{
+			Json::string::max_size(),
+			Json::JsonArray::max_size(),
+			Json::JsonObject::max_size()
+		};
+		int fault = 0;
+		NzbgetRsBuf buf = nzbget_rs_xmlrpc_execute_tls_cipher(
+			m_operation,
 			(int)m_userAccess, (int)XmlRpcProcessor::uaControl,
 			(int)m_protocol, (int)XmlRpcProcessor::rpJsonRpc,
-			(int)m_httpMethod, (int)XmlRpcProcessor::hmPost))
-		{
-			BuildErrorResponse(401, "TLS cipher optimization requires control-account JSON-RPC POST access"); return;
-		}
-		auto request = m_request ? Json::Deserialize(m_request) : std::nullopt;
-		if (!request || !request->is_object() || !request->as_object().contains("params") || !request->as_object().at("params").is_array())
-		{
-			BuildErrorResponse(2, "Invalid cipher optimizer parameters"); return;
-		}
-		const auto& params = request->as_object().at("params").as_array();
-		std::string id;
-		bool firstIsStr = !params.empty() && params[0].is_string();
-		const char* firstPtr = firstIsStr ? params[0].as_string().data() : nullptr;
-		size_t firstLen = firstIsStr ? params[0].as_string().size() : 0;
-		if (!nzbget_rs_roc_xmlrpc_tls_cipher_validate_job_id(
-			m_operation, params.size(), firstIsStr ? 1 : 0, firstPtr, firstLen))
-		{
-			BuildErrorResponse(2, "Invalid cipher job ID"); return;
-		}
-		if (!params.empty()) id = Json::value_to<std::string>(params[0]);
-		int opKind = nzbget_rs_dqh_xmlrpc_classify_tls_cipher_op(m_operation);
-		std::string response = opKind == 0 ? TlsCipherBackend::Start() :
-			opKind == 1 ? TlsCipherBackend::Status(id.empty() ? nullptr : id.c_str()) : TlsCipherBackend::Cancel(id.c_str());
-		auto parsed = Json::Deserialize(response);
-		if (!parsed || !parsed->is_object()) { BuildErrorResponse(3, "Invalid TLS optimizer response"); return; }
-		const auto& object = parsed->as_object();
-		if (object.contains("Error") && object.at("Error").is_string())
-			BuildErrorResponse(3, "%s", Json::value_to<std::string>(object.at("Error")).c_str());
-		else AppendResponse(response.c_str());
+			(int)m_httpMethod, (int)XmlRpcProcessor::hmPost,
+			IsJson() ? 1 : 0,
+			m_request,
+			limits,
+			nullptr,
+			[](void*, int opKind, const char* jobId) -> NzbgetRsBuf
+			{
+				std::string resp = opKind == 0 ? TlsCipherBackend::Start() :
+					opKind == 1 ? TlsCipherBackend::Status(jobId) :
+					TlsCipherBackend::Cancel(jobId ? jobId : "");
+				return nzbget_rs_alloc_buf(resp.data(), resp.size());
+			},
+			&fault);
+		m_fault = fault != 0;
+		AppendRsBuf(m_response, buf);
 	}
 private:
 	int m_operation;
@@ -524,16 +517,7 @@ protected:
 
 void XmlRpcProcessor::SetUrl(const char* url)
 {
-	// the path is decoded here, each query parameter after it is split off: decoded
-	// first, an encoded "&" (%26) inside a value split that value in two
-	size_t pathSetLen = 0;
-	size_t queryOffset = 0;
-	bool hasQuery = nzbget_rs_tpr_xmlrpc_split_url_path_and_query(url, &pathSetLen, &queryOffset) != 0;
-	CString path;
-	path.Set(url, (int)pathSetLen);
-	WebUtil::UrlDecode(path);
-	NzbgetRsBuf urlBuf = nzbget_rs_dqh_xmlrpc_concat_decoded_path_and_query(
-		*path, url, hasQuery ? 1 : 0, queryOffset);
+	NzbgetRsBuf urlBuf = nzbget_rs_xmlrpc_normalize_url(url);
 	m_url.Set(urlBuf.data ? urlBuf.data : "", (int)urlBuf.len);
 	nzbget_rs_free(urlBuf);
 }
@@ -1469,65 +1453,34 @@ const char* ListGroupsXmlCommand::DetectStatus(NzbInfo* nzbInfo)
 //    bool editqueue(string Command, int Offset, string Args, int[] IDs)
 void EditQueueXmlCommand::Execute()
 {
-	char* editCommand;
-	if (!NextParamAsStr(&editCommand))
-	{
-		BuildErrorResponse(2, "Invalid parameter");
-		return;
-	}
-	debug("EditCommand=%s", editCommand);
-
-	int action = nzbget_rs_rco_rpc_lookup_edit_command(editCommand);
-
-	if (action == -1)
-	{
-		BuildErrorResponse(3, "Invalid action");
-		return;
-	}
-
-	int offset = 0;
-	bool hasOffset = NextParamAsInt(&offset);
-
-	char* args;
-	if (!NextParamAsStr(&args))
-	{
-		BuildErrorResponse(2, "Invalid parameter");
-		return;
-	}
-	debug("Args=%s", args);
-
-	DecodeStr(args);
-
-	// a number past the int range wrapped around (F27: a score of 2147483648 was
-	// stored as -2147483648, the lowest), a parameter needs a name and a value,
-	// and a dupe mode is one of three (the edit refused others, but the call said true)
-	if (!nzbget_rs_rco_rpc_validate_edit_queue_args(action, args, 1))
-	{
-		BuildErrorResponse(2, "Invalid parameter");
-		return;
-	}
-
-	NzbgetRsBuf offsetStrBuf = nzbget_rs_dqh_conn_format_port_str(offset);
-	BString<100> offsetStr;
-	offsetStr.Set(offsetStrBuf.data ? offsetStrBuf.data : "", (int)offsetStrBuf.len);
-	nzbget_rs_free(offsetStrBuf);
-	if (nzbget_rs_tpr_xmlrpc_should_use_edit_offset(
-		hasOffset ? 1 : 0, action,
-		(int)DownloadQueue::eaFileMoveOffset,
-		(int)DownloadQueue::eaGroupMoveOffset) != 0)
-	{
-		args = *offsetStr;
-	}
-
+	int action = -1;
+	NzbgetRsBuf argsOrErr{nullptr, 0};
+	int errCode = 0;
 	IdList idList;
-	int id = 0;
-	while (NextParamAsInt(&id))
+	int okParse = nzbget_rs_xmlrpc_parse_edit_queue(
+		&m_requestPtr,
+		m_httpMethod == XmlRpcProcessor::hmGet ? 1 : 0,
+		IsJson() ? 1 : 0,
+		(int)DownloadQueue::eaFileMoveOffset,
+		(int)DownloadQueue::eaGroupMoveOffset,
+		&action,
+		&argsOrErr,
+		&errCode,
+		&idList,
+		[](void* ctx, int id)
+		{
+			static_cast<IdList*>(ctx)->push_back(id);
+		});
+	if (!okParse)
 	{
-		idList.push_back(id);
+		BuildErrorResponse(errCode, "%s", argsOrErr.data ? argsOrErr.data : "Invalid parameter");
+		nzbget_rs_free(argsOrErr);
+		return;
 	}
 
 	bool ok = DownloadQueue::Guard()->EditList(&idList, nullptr, DownloadQueue::mmId,
-		(DownloadQueue::EEditAction)action, args);
+		(DownloadQueue::EEditAction)action, argsOrErr.data ? argsOrErr.data : "");
+	nzbget_rs_free(argsOrErr);
 
 	BuildBoolResponse(ok);
 }
@@ -2058,30 +2011,15 @@ void ConfigXmlCommand::Execute()
 // struct[] loadconfig()
 void LoadConfigXmlCommand::Execute()
 {
-	Options::OptEntries optEntries;
-	if (!g_ScriptConfig->LoadConfig(&optEntries))
-	{
-		BuildErrorResponse(3, "Could not read configuration file");
-		return;
-	}
-
-	std::vector<NzbgetRsRpcConfigItem> entries;
-	entries.reserve(optEntries.size());
-	for (Options::OptEntry& optEntry : optEntries)
-	{
-		entries.push_back(NzbgetRsRpcConfigItem{
-			optEntry.GetName(),
-			optEntry.GetValue(),
-			optEntry.Restricted() ? 1 : 0
-		});
-	}
-
-	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_config_list(
+	int fault = 0;
+	NzbgetRsBuf buf = nzbget_rs_xmlrpc_execute_load_config(
 		IsJson() ? 1 : 0,
 		(int)m_userAccess,
 		(int)XmlRpcProcessor::uaRestricted,
-		entries.data(),
-		entries.size()));
+		g_Options ? g_Options->GetConfigFilename() : nullptr,
+		&fault);
+	m_fault = fault != 0;
+	AppendRsBuf(m_response, buf);
 }
 
 void LoadExtensionsXmlCommand::Execute()
@@ -2266,143 +2204,15 @@ void TestExtensionXmlCommand::Execute()
 // bool saveconfig(struct[] data)
 void SaveConfigXmlCommand::Execute()
 {
-	Options::OptEntries optEntries;
-	std::string cipherBaseline;
-	bool hasCipherBaseline = false;
-
-	// The file is rewritten from the entries given: options left out are dropped.
-	// An entry that doesn't read as a name and a string value (a number, or "Value"
-	// before "Name") ended the list where it stood, and every option after it - all
-	// of them for an empty list - was deleted, the call reporting success.
-	char* name;
-	char* value;
-	bool malformed = false;
-	while (true)
-	{
-		if (IsJson())
-		{
-			char* key1;
-			char* key2;
-			if (!NextParamAsStr(&key1))
-			{
-				break;
-			}
-			if (!NextParamAsStr(&name) || !NextParamAsStr(&key2) || !NextParamAsStr(&value))
-			{
-				malformed = true;
-				break;
-			}
-			int keyKind = nzbget_rs_rol_xmlrpc_save_config_check_json_keys(key1, key2);
-			if (keyKind == 2)
-			{
-				std::swap(name, value);
-			}
-			else if (keyKind != 1)
-			{
-				malformed = true;
-				break;
-			}
-		}
-		else
-		{
-			if (!NextParamAsStr(&name))
-			{
-				break;
-			}
-			if (!NextParamAsStr(&value))
-			{
-				malformed = true;
-				break;
-			}
-		}
-		DecodeStr(name);
-		bool baselineEntry = nzbget_rs_dqh_xmlrpc_is_tls_cipher_baseline_entry(name) != 0;
-		// The token contains only ASCII field names and hex-encoded UTF-8.
-		// Reject encoded NUL rather than accepting a decoder-truncated token.
-		if (baselineEntry && !nzbget_rs_rol_xmlrpc_save_config_raw_baseline_valid(value))
-		{
-			malformed = true;
-			break;
-		}
-		DecodeStr(value);
-		if (baselineEntry)
-		{
-			if (!nzbget_rs_rol_xmlrpc_save_config_decoded_baseline_valid(
-				hasCipherBaseline ? 1 : 0, value))
-			{
-				malformed = true;
-				break;
-			}
-			hasCipherBaseline = true;
-			cipherBaseline = value;
-			continue; // RPC metadata is never a configuration option.
-		}
-		optEntries.emplace_back(name, value);
-	}
-
-	if (malformed || optEntries.empty())
-	{
-		BuildErrorResponse(2, "Invalid parameter");
-		return;
-	}
-
-	// Configuration Conflict Validation (R7)
-	// Rule 7.1: ServerX.Encryption=no with ServerX.Cipher configured
-	std::vector<const char*> optNames;
-	std::vector<const char*> optValues;
-	optNames.reserve(optEntries.size());
-	optValues.reserve(optEntries.size());
-	for (const auto& entry : optEntries)
-	{
-		optNames.push_back(entry.GetName() ? entry.GetName() : "");
-		optValues.push_back(entry.GetValue() ? entry.GetValue() : "");
-	}
-	int cipherConflictServer = nzbget_rs_rco_rpc_save_config_find_cipher_conflict(
-		optNames.data(), optValues.data(), optNames.size());
-	if (cipherConflictServer > 0)
-	{
-		BuildErrorResponse(3, "Configuration conflict: Server%i.Cipher cannot be configured when Server%i.Encryption is disabled. Clear the cipher suite or enable encryption.", cipherConflictServer, cipherConflictServer);
-		return;
-	}
-
-	auto optVal = [&optEntries](const char* name) -> const char*
-	{
-		if (Options::OptEntry* entry = optEntries.FindOption(name))
-		{
-			return entry->GetValue() ? entry->GetValue() : "";
-		}
-		return nullptr;
-	};
-	int conflictRule = nzbget_rs_rco_rpc_save_config_check_global_conflicts(
-		optVal("DupeSearch"), optVal("HealthCheck"),
-		optVal("FlushQueue"), optVal("DirectWrite"),
-		optVal("UnpackPauseQueue"), optVal("DirectUnpack"));
-	if (conflictRule == 2)
-	{
-		BuildErrorResponse(3, "Configuration conflict: 'DupeSearch=yes' is incompatible with 'HealthCheck=park'. DupeSearch requires 'HealthCheck=dupe' to fetch alternative donor releases when an NZB fails.");
-		return;
-	}
-	if (conflictRule == 3)
-	{
-		BuildErrorResponse(3, "Configuration conflict: 'DirectWrite=yes' requires 'FlushQueue=yes'. Disabling queue flushing during direct disk writes causes disk state desynchronization and corruption upon unexpected shutdown.");
-		return;
-	}
-	if (conflictRule == 4)
-	{
-		BuildErrorResponse(3, "Configuration conflict: 'DirectUnpack=yes' requires 'UnpackPauseQueue=yes'. Disabling queue pause during direct unpack causes concurrent unpack disk thrashing.");
-		return;
-	}
-
-	// save to config file
-	bool conflict = false;
-	bool ok = g_ScriptConfig->SaveConfig(&optEntries, hasCipherBaseline ? cipherBaseline.c_str() : nullptr, &conflict);
-	if (conflict)
-	{
-		BuildErrorResponse(3, "News server settings changed in another operation. Refresh Settings before saving; your edits have been retained.");
-		return;
-	}
-
-	BuildBoolResponse(ok);
+	int fault = 0;
+	NzbgetRsBuf buf = nzbget_rs_xmlrpc_execute_save_config(
+		&m_requestPtr,
+		m_httpMethod == XmlRpcProcessor::hmGet ? 1 : 0,
+		IsJson() ? 1 : 0,
+		g_Options ? g_Options->GetConfigFilename() : nullptr,
+		&fault);
+	m_fault = fault != 0;
+	AppendRsBuf(m_response, buf);
 }
 
 // struct[] configtemplates(bool loadFromDisk)
@@ -3085,84 +2895,49 @@ void TestServerSpeedXmlCommand::Execute()
 
 void TestDiskSpeedXmlCommand::Execute()
 {
-	char* dirPath;
-	int writeBufferKiB;
-	int maxFileSizeGiB;
-	int timeoutSec;
-
-	if (!NextParamAsStr(&dirPath))
+	NzbgetRsBuf dirPathBuf{nullptr, 0};
+	size_t bufferSizeBytes = 0;
+	uint64_t maxFileSizeBytes = 0;
+	int timeoutSec = 0;
+	const char* errMsg = nullptr;
+	if (!nzbget_rs_xmlrpc_parse_test_disk_speed(
+		&m_requestPtr,
+		m_httpMethod == XmlRpcProcessor::hmGet ? 1 : 0,
+		IsJson() ? 1 : 0,
+		&dirPathBuf,
+		&bufferSizeBytes,
+		&maxFileSizeBytes,
+		&timeoutSec,
+		&errMsg))
 	{
-		BuildErrorResponse(2, "Invalid argument (Path)");
+		nzbget_rs_free(dirPathBuf);
+		BuildErrorResponse(2, "%s", errMsg ? errMsg : "Invalid parameter");
 		return;
 	}
-	DecodeStr(dirPath);
-
-	if (!NextParamAsInt(&writeBufferKiB))
-	{
-		BuildErrorResponse(2, "Invalid argument (Write Buffer)");
-		return;
-	}
-
-	if (nzbget_rs_dqh_xmlrpc_check_disk_speed_arg_ranges(writeBufferKiB, 1, 1) == 1)
-	{
-		BuildErrorResponse(2, "Write Buffer cannot be negative");
-		return;
-	}
-
-	if (!NextParamAsInt(&maxFileSizeGiB))
-	{
-		BuildErrorResponse(2, "Invalid argument (Max file size)");
-		return;
-	}
-
-	if (nzbget_rs_dqh_xmlrpc_check_disk_speed_arg_ranges(writeBufferKiB, maxFileSizeGiB, 1) == 2)
-	{
-		BuildErrorResponse(2, "Max file size must be positive");
-		return;
-	}
-
-	if (!NextParamAsInt(&timeoutSec))
-	{
-		BuildErrorResponse(2, "Invalid argument (Timeout)");
-		return;
-	}
-
-	if (nzbget_rs_dqh_xmlrpc_check_disk_speed_arg_ranges(writeBufferKiB, maxFileSizeGiB, timeoutSec) == 3)
-	{
-		BuildErrorResponse(2, "Timeout must be positive");
-		return;
-	}
+	CString dirPath(dirPathBuf.data ? dirPathBuf.data : "");
+	nzbget_rs_free(dirPathBuf);
 
 	try
 	{
-		size_t bufferSizeBytes = 0;
-		uint64_t maxFileSizeBytes = 0;
-		if (nzbget_rs_roc_xmlrpc_test_disk_speed_validate_params(
-			writeBufferKiB, maxFileSizeGiB, timeoutSec, &bufferSizeBytes, &maxFileSizeBytes) != 0)
-		{
-			BuildErrorResponse(2, "Invalid parameter");
-			return;
-		}
-
 		PauseGuard pauseGuard;
 
 		Benchmark::DiskBenchmark db;
 		Benchmark::Result res = db.Run(
-			dirPath,
+			*dirPath,
 			bufferSizeBytes,
 			maxFileSizeBytes,
 			std::chrono::seconds(timeoutSec)
 		);
 
 		info("Disk speed test for %s: write %.1f MiB/s, read %.1f MiB/s",
-			dirPath, MiBPerSec(res.writeBytes, res.writeMs), MiBPerSec(res.readBytes, res.readMs));
+			*dirPath, MiBPerSec(res.writeBytes, res.writeMs), MiBPerSec(res.readBytes, res.readMs));
 
 		AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_disk_speed(
 			IsJson() ? 1 : 0, res.writeBytes, res.writeMs, res.readBytes, res.readMs));
 	}
 	catch (const std::exception& e)
 	{
-		warn("Disk speed test for %s failed: %s", dirPath, e.what());
+		warn("Disk speed test for %s failed: %s", *dirPath, e.what());
 		BuildErrorResponse(2, "%s", e.what());
 	}
 }
@@ -3187,41 +2962,37 @@ void TestNetworkSpeedXmlCommand::Execute()
 // bool startscript(string script, string command, string context, struct[] options);
 void StartScriptXmlCommand::Execute()
 {
-	char* script;
-	char* command;
-	char* context;
-	if (!NextParamAsStr(&script) || !NextParamAsStr(&command) || !NextParamAsStr(&context))
+	NzbgetRsBuf scriptBuf{nullptr, 0};
+	NzbgetRsBuf commandBuf{nullptr, 0};
+	NzbgetRsBuf contextBuf{nullptr, 0};
+	std::unique_ptr<Options::OptEntries> optEntries = std::make_unique<Options::OptEntries>();
+	if (!nzbget_rs_xmlrpc_parse_start_script(
+		&m_requestPtr,
+		m_httpMethod == XmlRpcProcessor::hmGet ? 1 : 0,
+		IsJson() ? 1 : 0,
+		&scriptBuf,
+		&commandBuf,
+		&contextBuf,
+		optEntries.get(),
+		[](void* ctx, const char* name, const char* val)
+		{
+			static_cast<Options::OptEntries*>(ctx)->emplace_back(name, val);
+		}))
 	{
+		nzbget_rs_free(scriptBuf);
+		nzbget_rs_free(commandBuf);
+		nzbget_rs_free(contextBuf);
 		BuildErrorResponse(2, "Invalid parameter");
 		return;
 	}
-	DecodeStr(script);
-	DecodeStr(command);
-	DecodeStr(context);
+	nzbget_rs_free(contextBuf);
 
-	std::unique_ptr<Options::OptEntries> optEntries = std::make_unique<Options::OptEntries>();
-
-	char* name;
-	char* value;
-	char* dummy;
-	while (true)
-	{
-		bool isJson = IsJson();
-		bool p1 = isJson ? NextParamAsStr(&dummy) : NextParamAsStr(&name);
-		bool p2 = p1 && (isJson ? NextParamAsStr(&name) : NextParamAsStr(&value));
-		bool p3 = isJson && p2 && NextParamAsStr(&dummy);
-		bool p4 = isJson && p3 && NextParamAsStr(&value);
-		if (!nzbget_rs_dqh_xmlrpc_classify_start_script_param_mode(
-			isJson ? 1 : 0, p1 ? 1 : 0, p2 ? 1 : 0, p3 ? 1 : 0, p4 ? 1 : 0))
-		{
-			break;
-		}
-		DecodeStr(name);
-		DecodeStr(value);
-		optEntries->emplace_back(name, value);
-	}
-
-	bool ok = CommandScriptController::StartScript(script, command, std::move(optEntries));
+	bool ok = CommandScriptController::StartScript(
+		scriptBuf.data ? scriptBuf.data : "",
+		commandBuf.data ? commandBuf.data : "",
+		std::move(optEntries));
+	nzbget_rs_free(scriptBuf);
+	nzbget_rs_free(commandBuf);
 
 	BuildBoolResponse(ok);
 }

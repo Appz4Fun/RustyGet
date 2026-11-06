@@ -512,4 +512,81 @@ mod tests {
     fn calc_current_or_momentary() -> i64 {
         calc_momentary_download_speed(50, 50, 1024)
     }
+
+    #[test]
+    fn server_volume_test_port_from_cpp() {
+        let mut sec_bytes = vec![0i64; 60];
+        let mut min_bytes = vec![0i64; 60];
+        let mut hour_bytes = vec![0i64; 24];
+        let mut day_bytes: Vec<i64> = Vec::new();
+        let mut day_articles: Vec<(i32, i32)> = Vec::new();
+        let mut first_day = 0i32;
+        let mut data_time = 0i64;
+        let mut prev_min = -1;
+        let mut prev_hour = -1;
+        let mut total_bytes = 0i64;
+        let mut custom_bytes = 0i64;
+
+        let now = 1_791_635_696i64;
+        for &(bytes, failed, success) in &[(100i64, 10i32, 20i32), (200i64, 30i32, 40i32)] {
+            let slots = calc_slots(now, &mut first_day);
+            let req = server_volume_required_day_len(slots.day, day_bytes.len());
+            if req > 0 {
+                day_bytes.resize(req, 0);
+                day_articles.resize(req, (0, 0));
+            }
+            add_stats(
+                &mut sec_bytes,
+                &mut min_bytes,
+                &mut hour_bytes,
+                &slots,
+                prev_min,
+                prev_hour,
+                now,
+                data_time,
+                bytes,
+            );
+            prev_min = slots.min;
+            prev_hour = slots.hour;
+            data_time = now;
+            let day_idx = slots.day as usize;
+            day_bytes[day_idx] += bytes;
+            day_articles[day_idx].0 += failed;
+            day_articles[day_idx].1 += success;
+            total_bytes += bytes;
+            custom_bytes += bytes;
+        }
+
+        let slots1 = calc_slots(now, &mut first_day);
+        assert_eq!(day_bytes.len(), 1);
+        assert_eq!(day_articles[slots1.day as usize], (40, 60));
+        assert_eq!(sec_bytes[slots1.sec as usize], 300);
+        assert_eq!(min_bytes[slots1.min as usize], 300);
+        assert_eq!(hour_bytes[slots1.hour as usize], 300);
+        assert_eq!(day_bytes[slots1.day as usize], 300);
+        assert_eq!(total_bytes, 300);
+        assert_eq!(custom_bytes, 300);
+
+        let next_day = now + 86400;
+        let slots2 = calc_slots(next_day, &mut first_day);
+        let req2 = server_volume_required_day_len(slots2.day, day_bytes.len());
+        if req2 > 0 {
+            day_bytes.resize(req2, 0);
+            day_articles.resize(req2, (0, 0));
+        }
+        assert_eq!(slots2.day, slots1.day + 1);
+        assert_eq!(day_bytes.len(), 2);
+        assert_eq!(day_articles.len(), 2);
+
+        custom_bytes = 0;
+        assert_eq!(custom_bytes, 0);
+        assert_eq!(sec_bytes[slots1.sec as usize], 300);
+        assert_eq!(min_bytes[slots1.min as usize], 300);
+        assert_eq!(hour_bytes[slots1.hour as usize], 300);
+        assert_eq!(day_bytes[slots1.day as usize], 300);
+        assert_eq!(day_bytes[slots2.day as usize], 0);
+        assert_eq!(day_articles[slots1.day as usize], (40, 60));
+        assert_eq!(day_articles[slots2.day as usize], (0, 0));
+        assert_eq!(total_bytes, 300);
+    }
 }

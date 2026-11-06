@@ -855,13 +855,46 @@ pub fn sample_indices(
     dupe_seg_bytes: &[i64],
     sample_count: usize,
 ) -> Option<Vec<(usize, usize)>> {
-    crate::diskstatepp::twin_sample_indices(
-        primary_seg_counts,
-        primary_seg_bytes,
-        dupe_seg_counts,
-        dupe_seg_bytes,
-        sample_count,
-    )
+    if primary_seg_counts.is_empty()
+        || primary_seg_counts.len() != dupe_seg_counts.len()
+        || sample_count == 0
+    {
+        return None;
+    }
+
+    let mut places = Vec::new();
+    let mut p_off = 0usize;
+    let mut d_off = 0usize;
+
+    for i in 0..primary_seg_counts.len() {
+        let p_cnt = primary_seg_counts[i];
+        let d_cnt = dupe_seg_counts[i];
+        if p_cnt != d_cnt
+            || p_off + p_cnt > primary_seg_bytes.len()
+            || d_off + d_cnt > dupe_seg_bytes.len()
+        {
+            return None;
+        }
+        for k in 0..p_cnt {
+            if primary_seg_bytes[p_off + k] != dupe_seg_bytes[d_off + k] {
+                return None;
+            }
+            places.push((i, k));
+        }
+        p_off += p_cnt;
+        d_off += d_cnt;
+    }
+
+    if places.is_empty() {
+        return None;
+    }
+
+    let mut sampled = Vec::with_capacity(sample_count);
+    for n in 0..sample_count {
+        let idx = ((2 * n + 1) * places.len()) / (2 * sample_count);
+        sampled.push(places[idx]);
+    }
+    Some(sampled)
 }
 
 /// `TwinCheckJob::Sample` (`TwinCheck.cpp`): updates `(compared, differ)` for a sampled pair.
@@ -972,7 +1005,34 @@ pub fn is_print_usable(print: &[u8]) -> bool {
 
 /// `TwinCheck::ServiceWork` (`TwinCheck.cpp`): selects the primary download index within a `dupe_key` group.
 pub fn select_primary(queued: &[u8], is_dupe: &[u8], scores: &[i32]) -> i32 {
-    crate::diskstatepp::twin_select_primary(queued, is_dupe, scores)
+    let n = queued.len().min(is_dupe.len()).min(scores.len());
+    let mut primary: i32 = -1;
+
+    for i in 0..n {
+        if queued[i] != 0
+            && is_dupe[i] == 0
+            && (primary < 0 || scores[i] > scores[primary as usize])
+        {
+            primary = i as i32;
+        }
+    }
+    if primary < 0 {
+        for i in 0..n {
+            if queued[i] == 0 && is_dupe[i] == 0 {
+                primary = i as i32;
+                break;
+            }
+        }
+    }
+    if primary < 0 {
+        for i in 0..n {
+            if queued[i] != 0 && (primary < 0 || scores[i] > scores[primary as usize]) {
+                primary = i as i32;
+            }
+        }
+    }
+
+    primary
 }
 
 /// `TwinCheck::ServiceWork` (`TwinCheck.cpp`): evaluates `(sampleable, sampled_now)`.
@@ -1009,17 +1069,26 @@ pub fn resolve_kind(
     sampled_now: bool,
     sampled_val: &[u8],
 ) -> Vec<u8> {
-    crate::diskstatepp::twin_resolve_kind(
-        is_primary,
-        is_dupe,
-        by_par2,
-        by_files,
-        listed,
-        same_print,
-        sampleable,
-        sampled_now,
-        sampled_val,
-    )
+    if is_primary || !is_dupe {
+        return Vec::new();
+    }
+    if by_par2 {
+        if !by_files.is_empty() || listed {
+            return by_files.to_vec();
+        } else if same_print {
+            return b"twin".to_vec();
+        } else {
+            return b"alt".to_vec();
+        }
+    }
+    if sampleable && sampled_now {
+        if sampled_val == b"twin" {
+            return b"twin".to_vec();
+        } else if sampled_val == b"alt" {
+            return b"alt".to_vec();
+        }
+    }
+    Vec::new()
 }
 
 /// The crate's parser, as par2_set and block_size used it before the walk

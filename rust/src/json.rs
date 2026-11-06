@@ -595,4 +595,18 @@ mod tests {
         assert_eq!(n("1e99999999999"), Value::Double(f64::INFINITY));
         assert_eq!(n("1e-99999999999"), Value::Double(0.0));
     }
+
+    #[test]
+    fn json_deserialize_test_port_from_cpp() {
+        let valid_json = br#"{"name": "John", "secondName": "Doe"}"#;
+        let parsed = parse(valid_json).expect("valid JSON");
+        assert_eq!(parsed.get(b"name"), Some(&Value::String(b"John".to_vec())));
+        assert_eq!(
+            parsed.get(b"secondName"),
+            Some(&Value::String(b"Doe".to_vec()))
+        );
+
+        let invalid_json = br#"{"name": "John", "secondName":}"#;
+        assert!(parse(invalid_json).is_none());
+    }
 }

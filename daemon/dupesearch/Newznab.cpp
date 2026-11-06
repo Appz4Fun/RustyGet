@@ -29,116 +29,38 @@
 #include "HttpGet.h"
 #include "DonorHealth.h"
 #include "ReleaseName.h"
-#include "XmlReader.h"
 #include "Log.h"
 #include "Util.h"
-
-#include "DupeUtil.h"
 #include "nzbget_rs.h"
-
-using DupeUtil::Lower;
-using DupeUtil::Trim;
-
-namespace
-{
-
-long long ToInt(const std::string& text)
-{
-	return nzbget_rs_dqh_parse_c_atoll(text.c_str());
-}
-
-class PageReader : public XmlReader::Handler
-{
-public:
-	explicit PageReader(Newznab::Page& page) : m_page(page) {}
-
-	void Start(const std::string& name, const XmlReader::Attrs& attrs) override
-	{
-		m_depth++;
-		m_text.clear();
-		switch (nzbget_rs_dqh_newznab_classify_start_element(
-			m_depth, m_inItem ? 1 : 0, name.c_str()))
-		{
-			case 1:
-				m_page.error = true;
-				m_page.errorCode = nzbget_rs_dqh_parse_c_atoi(XmlReader::Attr(attrs, "code").c_str());
-				m_page.errorText = XmlReader::Attr(attrs, "description");
-				break;
-			case 2:
-				m_inItem = true;
-				m_item = Newznab::Result();
-				m_attrSize = 0;
-				m_elementSize = 0;
-				break;
-			case 3:
-			{
-				std::string key = XmlReader::Attr(attrs, "name");
-				std::string value = XmlReader::Attr(attrs, "value");
-				switch (nzbget_rs_dqh_newznab_classify_item_attr_key(key.c_str()))
-				{
-					case 1:
-						m_attrSize = ToInt(value);
-						break;
-					case 2:
-						m_item.grabs = (int)ToInt(value);
-						break;
-					case 3:
-						m_item.date = Newznab::ParseDate(value);
-						break;
-					case 4:
-						m_item.indexer = value;
-						break;
-				}
-				break;
-			}
-		}
-	}
-
-	void End(const std::string& name) override
-	{
-		switch (nzbget_rs_dqh_newznab_classify_end_element(m_inItem ? 1 : 0, name.c_str()))
-		{
-			case 1:
-				m_item.title = Trim(m_text);
-				break;
-			case 2:
-				m_item.link = Trim(m_text);
-				break;
-			case 3:
-				m_elementSize = ToInt(m_text);
-				break;
-			case 4:
-				m_item.size = m_attrSize > 0 ? m_attrSize : m_elementSize;
-				m_page.items.push_back(m_item);
-				m_inItem = false;
-				break;
-		}
-		m_depth--;
-		m_text.clear();
-	}
-
-	void Text(const std::string& text) override
-	{
-		m_text += text;
-	}
-
-private:
-	Newznab::Page& m_page;
-	Newznab::Result m_item;
-	std::string m_text;
-	int m_depth = 0;
-	bool m_inItem = false;
-	long long m_attrSize = 0;
-	long long m_elementSize = 0;
-};
-
-}
 
 bool Newznab::ParseResponse(const std::string& xml, Page& page)
 {
 	page = Page();
-	PageReader reader(page);
-	return XmlReader::Parse(xml, reader);
+	return nzbget_rs_newznab_parse_response(
+		reinterpret_cast<const uint8_t*>(xml.data()),
+		xml.size(),
+		&page,
+		[](void* ctx, int errorCode, const uint8_t* errorTextPtr, size_t errorTextLen) noexcept
+		{
+			auto* out = static_cast<Page*>(ctx);
+			out->error = true;
+			out->errorCode = errorCode;
+			out->errorText.assign(reinterpret_cast<const char*>(errorTextPtr), errorTextLen);
+		},
+		[](void* ctx, const uint8_t* titlePtr, size_t titleLen,
+		   const uint8_t* linkPtr, size_t linkLen, int64_t size, int32_t grabs,
+		   int64_t date, const uint8_t* indexerPtr, size_t indexerLen) noexcept
+		{
+			auto* out = static_cast<Page*>(ctx);
+			Result r;
+			r.title.assign(reinterpret_cast<const char*>(titlePtr), titleLen);
+			r.link.assign(reinterpret_cast<const char*>(linkPtr), linkLen);
+			r.size = (long long)size;
+			r.grabs = grabs;
+			r.date = (time_t)date;
+			r.indexer.assign(reinterpret_cast<const char*>(indexerPtr), indexerLen);
+			out->items.push_back(std::move(r));
+		}) != 0;
 }
 
 time_t Newznab::ParseDate(const std::string& text)

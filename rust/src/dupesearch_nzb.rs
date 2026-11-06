@@ -2120,6 +2120,363 @@ pub fn newznab_format_query_label(keys: &[&[u8]], vals: &[&[u8]]) -> Vec<u8> {
     out
 }
 
+/// One `<item>` parsed from a Newznab RSS/XML response (`Newznab::Result` in `Newznab.h`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NewznabResult {
+    pub title: Vec<u8>,
+    pub link: Vec<u8>,
+    pub size: i64,
+    pub grabs: i32,
+    pub date: i64,
+    pub indexer: Vec<u8>,
+}
+
+/// A parsed Newznab RSS/XML response (`Newznab::Page` in `Newznab.h`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NewznabPage {
+    pub items: Vec<NewznabResult>,
+    pub error: bool,
+    pub error_code: i32,
+    pub error_text: Vec<u8>,
+}
+
+fn trim_ascii_slice(text: &[u8]) -> Vec<u8> {
+    match dupe_util_trim_bounds(text, b" \t\r\n") {
+        Some((start, len)) => text[start..start + len].to_vec(),
+        None => Vec::new(),
+    }
+}
+
+fn normalize_xml_eol(s: &str) -> std::borrow::Cow<'_, str> {
+    if !s.as_bytes().contains(&b'\r') {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\r' {
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            out.push('\n');
+        } else {
+            out.push(c);
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+fn normalize_xml_attr_ws(s: &str) -> std::borrow::Cow<'_, str> {
+    if !s.bytes().any(|b| matches!(b, b'\r' | b'\n' | b'\t')) {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\r' {
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            out.push(' ');
+        } else if c == '\n' || c == '\t' {
+            out.push(' ');
+        } else {
+            out.push(c);
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// Parses a Newznab RSS/XML response (`Newznab::ParseResponse` in `Newznab.cpp`),
+/// rejecting empty documents, unclosed elements, and DTD `<!ENTITY` declarations.
+pub fn parse_newznab_response(xml: &[u8]) -> Option<NewznabPage> {
+    use quick_xml::events::Event;
+    if xml.is_empty() {
+        return None;
+    }
+    let mut reader = quick_xml::Reader::from_reader(xml);
+    let mut page = NewznabPage::default();
+    let mut item = NewznabResult::default();
+    let mut text = Vec::new();
+    let mut depth: i32 = 0;
+    let mut in_item = false;
+    let mut attr_size: i64 = 0;
+    let mut element_size: i64 = 0;
+    let mut saw_root = false;
+    let mut root_closed = false;
+    let mut buf = Vec::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                if root_closed {
+                    return None;
+                }
+                saw_root = true;
+                let mut attrs = Vec::new();
+                for attr_res in e.attributes() {
+                    let a = attr_res.ok()?;
+                    let decoded = reader.decoder().decode(&a.value).ok()?;
+                    let norm = normalize_xml_attr_ws(&decoded);
+                    let unescaped = quick_xml::escape::unescape(&norm).ok()?;
+                    attrs.push((
+                        a.key.local_name().as_ref().to_vec(),
+                        unescaped.into_owned().into_bytes(),
+                    ));
+                }
+                let local = e.local_name();
+                depth += 1;
+                text.clear();
+                let find_attr = |k: &[u8]| -> &[u8] {
+                    attrs
+                        .iter()
+                        .find(|(ak, _)| ak == k)
+                        .map(|(_, av)| av.as_slice())
+                        .unwrap_or(b"")
+                };
+                match newznab_classify_start_element(depth, in_item, local.as_ref()) {
+                    1 => {
+                        page.error = true;
+                        page.error_code = c_atoi_bytes(find_attr(b"code"));
+                        page.error_text = find_attr(b"description").to_vec();
+                    }
+                    2 => {
+                        in_item = true;
+                        item = NewznabResult::default();
+                        attr_size = 0;
+                        element_size = 0;
+                    }
+                    3 => {
+                        let key = find_attr(b"name");
+                        let val = find_attr(b"value");
+                        match newznab_classify_item_attr_key(key) {
+                            1 => attr_size = c_atoll_bytes(val),
+                            2 => item.grabs = c_atoll_bytes(val) as i32,
+                            3 => item.date = parse_newznab_date(val),
+                            4 => item.indexer = val.to_vec(),
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                if root_closed {
+                    return None;
+                }
+                saw_root = true;
+                let mut attrs = Vec::new();
+                for attr_res in e.attributes() {
+                    let a = attr_res.ok()?;
+                    let decoded = reader.decoder().decode(&a.value).ok()?;
+                    let norm = normalize_xml_attr_ws(&decoded);
+                    let unescaped = quick_xml::escape::unescape(&norm).ok()?;
+                    attrs.push((
+                        a.key.local_name().as_ref().to_vec(),
+                        unescaped.into_owned().into_bytes(),
+                    ));
+                }
+                let local = e.local_name().as_ref().to_vec();
+                depth += 1;
+                text.clear();
+                let find_attr = |k: &[u8]| -> &[u8] {
+                    attrs
+                        .iter()
+                        .find(|(ak, _)| ak == k)
+                        .map(|(_, av)| av.as_slice())
+                        .unwrap_or(b"")
+                };
+                match newznab_classify_start_element(depth, in_item, &local) {
+                    1 => {
+                        page.error = true;
+                        page.error_code = c_atoi_bytes(find_attr(b"code"));
+                        page.error_text = find_attr(b"description").to_vec();
+                    }
+                    2 => {
+                        in_item = true;
+                        item = NewznabResult::default();
+                        attr_size = 0;
+                        element_size = 0;
+                    }
+                    3 => {
+                        let key = find_attr(b"name");
+                        let val = find_attr(b"value");
+                        match newznab_classify_item_attr_key(key) {
+                            1 => attr_size = c_atoll_bytes(val),
+                            2 => item.grabs = c_atoll_bytes(val) as i32,
+                            3 => item.date = parse_newznab_date(val),
+                            4 => item.indexer = val.to_vec(),
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+                match newznab_classify_end_element(in_item, &local) {
+                    1 => item.title = trim_ascii_slice(&text),
+                    2 => item.link = trim_ascii_slice(&text),
+                    3 => element_size = c_atoll_bytes(&text),
+                    4 => {
+                        item.size = if attr_size > 0 { attr_size } else { element_size };
+                        page.items.push(std::mem::take(&mut item));
+                        in_item = false;
+                    }
+                    _ => {}
+                }
+                depth -= 1;
+                if depth == 0 {
+                    root_closed = true;
+                }
+                text.clear();
+            }
+            Ok(Event::Text(t)) => {
+                let decoded = t.decode().ok()?;
+                let norm = normalize_xml_eol(&decoded);
+                if depth == 0 {
+                    let rest = norm.strip_prefix('\u{feff}').unwrap_or(&norm);
+                    if !rest.bytes().all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n')) {
+                        return None;
+                    }
+                } else {
+                    text.extend_from_slice(norm.as_bytes());
+                }
+            }
+            Ok(Event::CData(c)) => {
+                if depth == 0 {
+                    return None;
+                }
+                let decoded = c.decode().ok()?;
+                let norm = normalize_xml_eol(&decoded);
+                text.extend_from_slice(norm.as_bytes());
+            }
+            Ok(Event::GeneralRef(r)) => {
+                if depth == 0 {
+                    return None;
+                }
+                let ent = match r.as_ref() {
+                    b"lt" => Some(b"<".to_vec()),
+                    b"gt" => Some(b">".to_vec()),
+                    b"amp" => Some(b"&".to_vec()),
+                    b"quot" => Some(b"\"".to_vec()),
+                    b"apos" => Some(b"'".to_vec()),
+                    _ => r
+                        .resolve_char_ref()
+                        .ok()
+                        .flatten()
+                        .map(|c| c.to_string().into_bytes()),
+                };
+                if let Some(bytes) = ent {
+                    text.extend_from_slice(&bytes);
+                } else {
+                    return None;
+                }
+            }
+            Ok(Event::Decl(_)) => {
+                if saw_root {
+                    return None;
+                }
+            }
+            Ok(Event::DocType(d)) => {
+                if saw_root || d.windows(8).any(|w| w.eq_ignore_ascii_case(b"<!entity")) {
+                    return None;
+                }
+            }
+            Ok(Event::End(e)) => {
+                let local = e.local_name();
+                match newznab_classify_end_element(in_item, local.as_ref()) {
+                    1 => item.title = trim_ascii_slice(&text),
+                    2 => item.link = trim_ascii_slice(&text),
+                    3 => element_size = c_atoll_bytes(&text),
+                    4 => {
+                        item.size = if attr_size > 0 { attr_size } else { element_size };
+                        page.items.push(std::mem::take(&mut item));
+                        in_item = false;
+                    }
+                    _ => {}
+                }
+                depth -= 1;
+                if depth < 0 {
+                    return None;
+                }
+                if depth == 0 {
+                    root_closed = true;
+                }
+                text.clear();
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => return None,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    (saw_root && root_closed && depth == 0).then_some(page)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_newznab_parse_response(
+    xml_ptr: *const u8,
+    xml_len: usize,
+    ctx: *mut std::ffi::c_void,
+    on_error: Option<
+        unsafe extern "C" fn(
+            ctx: *mut std::ffi::c_void,
+            error_code: std::ffi::c_int,
+            error_text_ptr: *const u8,
+            error_text_len: usize,
+        ),
+    >,
+    on_item: Option<
+        unsafe extern "C" fn(
+            ctx: *mut std::ffi::c_void,
+            title_ptr: *const u8,
+            title_len: usize,
+            link_ptr: *const u8,
+            link_len: usize,
+            size: i64,
+            grabs: i32,
+            date: i64,
+            indexer_ptr: *const u8,
+            indexer_len: usize,
+        ),
+    >,
+) -> std::ffi::c_int {
+    let xml = if xml_ptr.is_null() || xml_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(xml_ptr, xml_len)
+    };
+    let Some(page) = parse_newznab_response(xml) else {
+        return 0;
+    };
+    if page.error {
+        if let Some(cb) = on_error {
+            cb(
+                ctx,
+                page.error_code,
+                page.error_text.as_ptr(),
+                page.error_text.len(),
+            );
+        }
+    }
+    if let Some(cb) = on_item {
+        for item in &page.items {
+            cb(
+                ctx,
+                item.title.as_ptr(),
+                item.title.len(),
+                item.link.as_ptr(),
+                item.link.len(),
+                item.size,
+                item.grabs,
+                item.date,
+                item.indexer.as_ptr(),
+                item.indexer.len(),
+            );
+        }
+    }
+    1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2242,5 +2599,257 @@ mod tests {
             mask_newznab_text(b"http://u:p@h/api?APIKEY=SECRET&q=x"),
             b"http://***@h/api?APIKEY=***&q=x"
         );
+    }
+
+    #[test]
+    fn newznab_full_suite_port_from_cpp() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("tests/testdata/dupesearch");
+
+        // NewznabParseSearchPageTest
+        let search_xml = std::fs::read(root.join("search_industry_s03e07.xml")).unwrap();
+        let page = parse_newznab_response(&search_xml).unwrap();
+        assert!(!page.error);
+        assert_eq!(page.items.len(), 25);
+
+        let first = &page.items[0];
+        assert_eq!(
+            first.title,
+            b"Industry.S03E07.Useful.Idiot.2160p.MAX.WEB-DL.DDP5.1.Atmos.DV.H.265-FLUX"
+        );
+        assert_eq!(
+            first.link,
+            b"http://127.0.0.1:5076/getnzb/api/2114962605753885140?apikey=APIKEY"
+        );
+        assert_eq!(first.size, 10896716818);
+        assert_eq!(first.grabs, 111);
+        assert_eq!(first.date, 1749517805);
+        assert_eq!(first.indexer, b"altHUB");
+
+        let second = &page.items[1];
+        assert_eq!(
+            second.title,
+            b"Industry.S03E07.Useful.Idiot.2160p.MAX.WEB-DL.DDP5.1.Atmos.DV.HDR.H.265-FLUX"
+        );
+        assert_eq!(second.size, 10893813254);
+        assert_eq!(second.grabs, 0);
+        assert_eq!(second.date, 1728651862);
+        assert_eq!(second.indexer, b"Square Eyed");
+
+        let last = &page.items[24];
+        assert_eq!(
+            last.title,
+            b"Industry S03E07 Useful Idiot 2160p MAX WEB-DL DDP5 1 Atmos DV H 265-FLUX"
+        );
+        assert_eq!(last.size, 11692039895);
+        assert_eq!(last.grabs, 6);
+        assert_eq!(last.indexer, b"miatrix");
+        assert_eq!(page.items[5].date, 0);
+        assert_eq!(page.items[10].date, 0);
+        assert!(page.items[0].date > 0);
+
+        // NewznabParseErrorTest
+        let err_xml = std::fs::read(root.join("error_bad_apikey.xml")).unwrap();
+        let err_page = parse_newznab_response(&err_xml).unwrap();
+        assert!(err_page.error);
+        assert_eq!(err_page.error_code, 100);
+        assert_eq!(err_page.error_text, b"Wrong api key");
+        assert!(err_page.items.is_empty());
+
+        let limit_page = parse_newznab_response(
+            b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<error code=\"429\" description=\"Request limit reached\"/>",
+        )
+        .unwrap();
+        assert!(limit_page.error);
+        assert_eq!(limit_page.error_code, 429);
+
+        // NewznabParseSizeAndMalformedTest
+        let sz_page = parse_newznab_response(
+            b"<rss xmlns:newznab=\"n\"><channel><item><title> A </title><link>http://x/1</link><size>100</size></item><item><title>B</title><link>http://x/2</link><size>100</size><newznab:attr name=\"size\" value=\"200\"/></item><item><title>C</title><link>http://x/3</link></item></channel></rss>",
+        )
+        .unwrap();
+        assert_eq!(sz_page.items.len(), 3);
+        assert_eq!(sz_page.items[0].title, b"A");
+        assert_eq!(sz_page.items[0].size, 100);
+        assert_eq!(sz_page.items[1].size, 200);
+        assert_eq!(sz_page.items[2].size, 0);
+        assert!(parse_newznab_response(b"").is_none());
+        assert!(parse_newznab_response(b"<html><body>Forbidden").is_none());
+        assert!(parse_newznab_response(b"<rss><channel><item>").is_none());
+
+        // NewznabRejectsEntityDeclarationsTest
+        let bomb = b"<?xml version=\"1.0\"?><!DOCTYPE n [<!ENTITY a \"aaaa\"><!ENTITY b \"&a;&a;&a;&a;\">]><rss><channel><item><title>&b;</title><link>http://x/1</link></item></channel></rss>";
+        assert!(parse_newznab_response(bomb).is_none());
+        let ok_doctype = parse_newznab_response(
+            b"<?xml version=\"1.0\"?><!DOCTYPE rss PUBLIC \"-//x//DTD//EN\" \"http://x/dtd\"><rss><channel><item><title>T</title><link>http://x/1</link></item></channel></rss>",
+        )
+        .unwrap();
+        assert_eq!(ok_doctype.items.len(), 1);
+
+        // NewznabParseDateTest
+        assert_eq!(parse_newznab_date(b"Thu, 01 Jan 1970 00:00:00 GMT"), 0);
+        assert_eq!(parse_newznab_date(b"Thu, 01 Jan 1970 01:00:00 +0100"), 0);
+        assert_eq!(
+            parse_newznab_date(b"10 Jun 2025 01:10:05 -0200"),
+            1749517805 + 7200
+        );
+        assert_eq!(
+            parse_newznab_date(b"Sun, 22 Sep 2024 00:00:00 +0000"),
+            1726963200
+        );
+        assert_eq!(
+            parse_newznab_date(b"10 Jun 2025 01:10:05 EDT"),
+            1749517805 + 4 * 3600
+        );
+        assert_eq!(
+            parse_newznab_date(b"10 Jun 2025 01:10:05 PST"),
+            1749517805 + 8 * 3600
+        );
+        assert_eq!(
+            parse_newznab_date(b"10 Jun 2025 01:10:05 CDT"),
+            1749517805 + 5 * 3600
+        );
+        assert_eq!(parse_newznab_date(b"10 Jun 2025 01:10:05 UT"), 1749517805);
+        assert_eq!(parse_newznab_date(b"10 Jun 2025 01:10:05 Z"), 1749517805);
+        assert_eq!(
+            parse_newznab_date(b"Tue, 10 Jun 25 01:10:05 +0000"),
+            1749517805
+        );
+        assert_eq!(parse_newznab_date(b"2025-06-10T01:10:05Z"), 1749517805);
+        assert_eq!(parse_newznab_date(b"2025-06-10 01:10:05"), 1749517805);
+        assert_eq!(parse_newznab_date(b""), 0);
+        assert_eq!(parse_newznab_date(b"yesterday"), 0);
+        assert_eq!(
+            parse_newznab_date(b"Tue, 10 Foo 2025 01:10:05 +0000"),
+            0
+        );
+        assert_eq!(parse_newznab_date(b"Tue, 40 Jun 2025 01:10:05 +0000"), 0);
+
+        // NewznabBuildQueriesTest
+        let describe = |q: &[(Vec<u8>, Vec<u8>)]| -> String {
+            q.iter()
+                .map(|(k, v)| {
+                    format!(
+                        "{}={}",
+                        String::from_utf8_lossy(k),
+                        String::from_utf8_lossy(v)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("&")
+        };
+        let title = b"Lucifer.S02E14.Candy.Morningstar.1080p.DTS-HD.MA.5.1.AVC.REMUX-FraMeSToR";
+        let q1 = build_newznab_queries(title, b"", b"");
+        assert_eq!(q1.len(), 3);
+        assert_eq!(
+            describe(&q1[0]),
+            "t=search&q=lucifer s02e14 candy morningstar 1080p dts hd ma 5 1 avc remux framestor"
+        );
+        assert_eq!(describe(&q1[1]), "t=search&q=lucifer s02e14 1080p");
+        assert_eq!(
+            describe(&q1[2]),
+            "t=search&q=lucifer s02e14 1080p framestor"
+        );
+
+        let q2 = build_newznab_queries(title, b"tt1234567", b"tvdb-371796");
+        assert_eq!(q2.len(), 5);
+        assert_eq!(describe(&q2[3]), "t=movie&imdbid=1234567");
+        assert_eq!(
+            describe(&q2[4]),
+            "t=tvsearch&tvdbid=371796&season=2&ep=14"
+        );
+
+        let q3 = build_newznab_queries(b"Some.Movie.2020", b"", b"55");
+        assert_eq!(q3.len(), 1);
+        assert_eq!(describe(&q3[0]), "t=search&q=some movie 2020");
+
+        let q4 = build_newznab_queries(b"Some.Movie.2020.Extended.2160p.UHD-GRP", b"", b"");
+        assert_eq!(q4.len(), 3);
+        assert_eq!(describe(&q4[1]), "t=search&q=some movie 2020 2160p");
+        assert_eq!(describe(&q4[2]), "t=search&q=some movie 2020 2160p grp");
+
+        let q5 = build_newznab_queries(b"NoMarkers-GRP", b"", b"");
+        assert_eq!(q5.len(), 1);
+
+        // NewznabBuildUrlAndMaskTest
+        assert_eq!(
+            build_newznab_url(
+                b"http://127.0.0.1:5076/api",
+                &[b"t", b"q", b"limit"],
+                &[b"search", b"show s01e02 1080p", b"100"],
+                b"k&y 1"
+            ),
+            b"http://127.0.0.1:5076/api?t=search&q=show+s01e02+1080p&limit=100&apikey=k%26y+1"
+        );
+        assert_eq!(
+            build_newznab_url(b"http://h/api?x=1", &[], &[], b"key"),
+            b"http://h/api?x=1&apikey=key"
+        );
+        assert_eq!(
+            build_newznab_url(b"http://h:5076", &[], &[], b"key"),
+            b"http://h:5076/api?apikey=key"
+        );
+        assert_eq!(
+            build_newznab_url(b"http://h:5076/", &[], &[], b"key"),
+            b"http://h:5076/api?apikey=key"
+        );
+        assert_eq!(
+            build_newznab_url(b"https://h?x=1", &[], &[], b"key"),
+            b"https://h/api?x=1&apikey=key"
+        );
+        assert_eq!(
+            build_newznab_url(b"http://h/nzbhydra/api", &[], &[], b"key"),
+            b"http://h/nzbhydra/api?apikey=key"
+        );
+        assert_eq!(
+            mask_newznab_text(b"http://h/api?t=search&apikey=SECRET&q=x"),
+            b"http://h/api?t=search&apikey=***&q=x"
+        );
+        assert_eq!(
+            mask_newznab_text(b"http://h/api?APIKEY=SECRET"),
+            b"http://h/api?APIKEY=***"
+        );
+        assert_eq!(
+            mask_newznab_text(b"http://u:p@h/jsonrpc /admin:pw/jsonrpc"),
+            b"http://***@h/jsonrpc /admin:pw/jsonrpc"
+        );
+        assert_eq!(mask_newznab_text(b"nothing to hide"), b"nothing to hide");
+
+        // HostileLengthsTest & NzbReaderMessageIdTest
+        let mut long_date = vec![b' '; 1_000_000];
+        long_date.extend_from_slice(b"2025-06-10T01:10:05Z");
+        assert_eq!(parse_newznab_date(&long_date), 0);
+
+        let mut long_key = b"apikey=".to_vec();
+        long_key.extend(std::iter::repeat_n(b'k', 1_000_000));
+        assert!(mask_newznab_text(&long_key).len() <= 1024);
+
+        assert!(valid_message_id(b"good1@test"));
+        assert!(!valid_message_id(b"bad\r\nQUIT\r\nx@test"));
+        assert!(!valid_message_id(b"bad space@test"));
+
+        assert!(parse_newznab_response(
+            br#"<rss><channel><item><newznab:attr name="size" name="dup" value="1"/></item></channel></rss>"#
+        )
+        .is_none());
+        assert!(parse_newznab_response(
+            br#"<rss><channel><item><title>a</title></item></channel></rss><rss><channel><item><title>b</title></item></channel></rss>"#
+        )
+        .is_none());
+        assert!(parse_newznab_response(
+            br#"<rss><channel><item><title>a</title></item></channel></rss>trailing"#
+        )
+        .is_none());
+        let cdata_ent = parse_newznab_response(
+            br#"<rss><channel><item><title><![CDATA[Understanding <!ENTITY declarations]]></title><link>http://x/c.nzb</link></item></channel></rss>"#,
+        )
+        .unwrap();
+        assert_eq!(cdata_ent.items[0].title, b"Understanding <!ENTITY declarations");
+        let latin1_cdata = b"<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><rss><channel><item><title><![CDATA[Caf\xe9\r\nBeta\rGamma]]></title><link>http://x/c.nzb</link><newznab:attr name=\"hydraIndexerName\" value=\"Idx\tOne\r\nTwo&#9;Tab\"/></item></channel></rss>";
+        let page_latin1 = parse_newznab_response(latin1_cdata).unwrap();
+        assert_eq!(page_latin1.items[0].title, "Café\nBeta\nGamma".as_bytes());
+        assert_eq!(page_latin1.items[0].indexer, b"Idx One Two\tTab");
     }
 }

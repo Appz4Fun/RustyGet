@@ -22,11 +22,10 @@
 #define DEADPOSTINGS_H
 
 #include <ctime>
-#include <mutex>
 #include <string>
-#include <utility>
-#include <vector>
 #include "Posting.h"
+
+struct NzbgetRsDeadPostingsStore;
 
 /*
  * Postings found dead (their articles are gone from the news servers), by
@@ -41,6 +40,11 @@ class DeadPostings
 public:
 	static constexpr int DeadTtlSec = 3 * 24 * 3600;
 
+	DeadPostings();
+	~DeadPostings();
+	DeadPostings(const DeadPostings&) = delete;
+	DeadPostings& operator=(const DeadPostings&) = delete;
+
 	void SetStatePath(const std::string& path);
 	void Load();
 
@@ -49,13 +53,8 @@ public:
 	void Add(const Posting::Sketch& sketch, time_t now = 0, bool save = true);
 
 private:
-	std::mutex m_mutex;
-	std::vector<std::pair<time_t, Posting::Sketch>> m_dead;
-	std::vector<std::pair<time_t, Posting::Sketch>> m_unsaved;
+	NzbgetRsDeadPostingsStore* m_store;
 	std::string m_statePath;
-
-	void Prune(time_t now);
-	void Save();
 };
 
 #endif

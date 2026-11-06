@@ -45,23 +45,9 @@ void FeedFile::LogDebugInfo()
 bool FeedFile::Parse()
 {
 	nzbget_rs_feed_file_parser_free(m_parser);
-	m_parser = nzbget_rs_feed_file_parser_new();
-
-	xmlSAXHandler SAX_handler{};
-	SAX_handler.startElement = reinterpret_cast<startElementSAXFunc>(SAX_StartElement);
-	SAX_handler.endElement = reinterpret_cast<endElementSAXFunc>(SAX_EndElement);
-	SAX_handler.error = reinterpret_cast<errorSAXFunc>(SAX_error);
-	SAX_handler.getEntity = reinterpret_cast<getEntitySAXFunc>(SAX_getEntity);
-	SAX_handler.characters = reinterpret_cast<charactersSAXFunc>(SAX_textHandler);
-	SAX_handler.cdataBlock = reinterpret_cast<cdataBlockSAXFunc>(SAX_textHandler);
-
-	m_ignoreNextError = false;
-
-	int ret = xmlSAXUserParseFile(&SAX_handler, this, m_fileName.c_str());
-	if (ret != 0)
+	m_parser = nzbget_rs_feed_file_parser_parse_file(m_fileName.c_str());
+	if (!m_parser)
 	{
-		nzbget_rs_feed_file_parser_free(m_parser);
-		m_parser = nullptr;
 		error("Failed to parse rss feed %s", m_infoName.c_str());
 		return false;
 	}
@@ -104,49 +90,4 @@ bool FeedFile::Parse()
 	nzbget_rs_feed_file_parser_free(m_parser);
 	m_parser = nullptr;
 	return true;
-}
-
-void FeedFile::SAX_StartElement(FeedFile* file, const char *name, const char **atts)
-{
-	nzbget_rs_feed_file_parser_start_element(file->m_parser, name, atts);
-}
-
-void FeedFile::SAX_EndElement(FeedFile* file, const char *name)
-{
-	nzbget_rs_feed_file_parser_end_element(file->m_parser, name);
-}
-
-void FeedFile::SAX_textHandler(FeedFile* file, const char* xmlstr, int len)
-{
-	nzbget_rs_feed_file_parser_text(file->m_parser, xmlstr, len);
-}
-
-xmlEntityPtr FeedFile::SAX_getEntity(FeedFile* file, const xmlChar* name)
-{
-	xmlEntityPtr e = xmlGetPredefinedEntity(name);
-	if (!e)
-	{
-		warn("entity not found");
-		file->m_ignoreNextError = true;
-	}
-	return e;
-}
-
-void FeedFile::SAX_error(FeedFile* file, const char *msg, ...)
-{
-	if (file->m_ignoreNextError)
-	{
-		file->m_ignoreNextError = false;
-		return;
-	}
-
-	va_list argp;
-	va_start(argp, msg);
-	char errMsg[1024];
-	vsnprintf(errMsg, sizeof(errMsg), msg, argp);
-	errMsg[sizeof(errMsg) - 1] = '\0';
-	va_end(argp);
-
-	errMsg[nzbget_rs_feed_file_trim_sax_error(errMsg)] = '\0';
-	error("Error parsing rss feed %s: %s", file->m_infoName.c_str(), errMsg);
 }

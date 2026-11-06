@@ -1,7 +1,5 @@
 list(APPEND TESTS_SRC
-	${CMAKE_CURRENT_SOURCE_DIR}/dupesearch/Newznab.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/dupesearch/Posting.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/dupesearch/DeadPostings.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/dupesearch/DonorHealth.cpp
 )
 

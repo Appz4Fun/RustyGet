@@ -43,9 +43,6 @@ public:
 	~NzbInfoCreator() = default;
 
 	std::unique_ptr<NzbInfo> Create(const FeedInfo& feedInfo, const FeedItemInfo& feedItemInfo) const;
-
-private:
-	void ApplyCategory(NzbInfo& nzbInfo, const FeedInfo& feedInfo, const FeedItemInfo& feedItemInfo) const;
 };
 
 class FeedCoordinator : public Thread, public Observer, public Subject, public Debuggable

@@ -26,6 +26,8 @@
 #include "Posting.h"
 #include "Util.h"
 #include "NzbFetcher.h"
+#include "FileSystem.h"
+#include <fstream>
 #include <thread>
 #include <atomic>
 #include <stdexcept>
@@ -739,6 +741,43 @@ BOOST_AUTO_TEST_CASE(PostingOrderPostingsTest)
 	BOOST_CHECK_EQUAL(Posting::OrderPostings(many, 5000, 2).size(), 6U);
 	BOOST_CHECK_EQUAL(Posting::OrderPostings(many, 5000, 0).size(), 20U);
 	BOOST_CHECK_EQUAL(Posting::OrderPostings(many, 5000, -1).size(), 20U);
+}
+
+BOOST_AUTO_TEST_CASE(PostingSketchOfFileTest)
+{
+	fs::path path = fs::temp_directory_path() / "nzbget-sketch-of-file-test.nzb";
+	auto write = [&](const std::string& prefix)
+	{
+		std::ofstream file(path, std::ios::trunc);
+		file << "<?xml version=\"1.0\"?><nzb><file poster=\"p\" subject=\"&quot;a.mkv&quot;\"><segments>";
+		for (int i = 0; i < 30; i++)
+		{
+			file << "<segment bytes=\"10\" number=\"" << i + 1 << "\">" << prefix << i << "@x</segment>";
+		}
+		file << "</segments></file></nzb>";
+	};
+
+	write("a");
+	Posting::Sketch first;
+	BOOST_REQUIRE(Posting::SketchOfFile(path.string(), first));
+	BOOST_CHECK_EQUAL(first.size(), 30U);
+	BOOST_CHECK(Posting::SameSketch(first, Posting::MakeSketch(Ids("a", 30))));
+
+	// a changed file (another size) is read again, not served from the cache
+	write("bb");
+	Posting::Sketch second;
+	BOOST_REQUIRE(Posting::SketchOfFile(path.string(), second));
+	BOOST_CHECK(!Posting::SameSketch(first, second));
+
+	// missing and malformed files
+	fs::remove(path);
+	BOOST_CHECK(!Posting::SketchOfFile(path.string(), second));
+	{
+		std::ofstream file(path, std::ios::trunc);
+		file << "<html>not an nzb";
+	}
+	BOOST_CHECK(!Posting::SketchOfFile(path.string(), second));
+	fs::remove(path);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

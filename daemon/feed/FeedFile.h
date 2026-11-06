@@ -43,13 +43,6 @@ private:
 	std::string m_fileName;
 	std::string m_infoName;
 	NzbgetRsFeedFileParser* m_parser = nullptr;
-	bool m_ignoreNextError = false;
-
-	static void SAX_StartElement(FeedFile* file, const char *name, const char **atts);
-	static void SAX_EndElement(FeedFile* file, const char *name);
-	static void SAX_textHandler(FeedFile* file, const char *  xmlstr, int len);
-	static xmlEntityPtr SAX_getEntity(FeedFile* file, const xmlChar*  name);
-	static void SAX_error(FeedFile* file, const char *msg, ...);
 };
 
 #endif

@@ -741,3 +741,262 @@ impl FeedFilter {
 pub fn field_name_known(name: &CStr) -> bool {
     field_of(Some(name.to_bytes())).is_some()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ascii_lower(b: u8) -> c_int {
+        b.to_ascii_lowercase() as c_int
+    }
+
+    struct MockFeedItem {
+        title: Vec<u8>,
+        filename: Vec<u8>,
+        category: Vec<u8>,
+        size: i64,
+        age_sec: i64,
+        rage_id: i32,
+        season: Vec<u8>,
+        episode: Vec<u8>,
+        priority: i32,
+        dupe_score: i32,
+        dupe_key: Vec<u8>,
+        match_status: i32,
+        match_rule: i32,
+        patterns: Vec<Vec<u8>>,
+        lower: Lower<'static>,
+    }
+
+    impl Default for MockFeedItem {
+        fn default() -> Self {
+            Self {
+                title: Vec::new(),
+                filename: Vec::new(),
+                category: Vec::new(),
+                size: 0,
+                age_sec: 0,
+                rage_id: 0,
+                season: Vec::new(),
+                episode: Vec::new(),
+                priority: 0,
+                dupe_score: 0,
+                dupe_key: Vec::new(),
+                match_status: 0,
+                match_rule: 0,
+                patterns: Vec::new(),
+                lower: Lower::Fold(&ascii_lower),
+            }
+        }
+    }
+
+    impl Item for MockFeedItem {
+        fn field(&mut self, field: Field, _attr: &[u8]) -> (Option<Vec<u8>>, i64) {
+            match field {
+                Field::Title => (Some(self.title.clone()), 0),
+                Field::Filename => (Some(self.filename.clone()), 0),
+                Field::Category => (Some(self.category.clone()), 0),
+                Field::Size => (None, self.size),
+                Field::Age => (None, self.age_sec),
+                Field::RageId => (None, self.rage_id as i64),
+                Field::Season => (
+                    Some(self.season.clone()),
+                    crate::feed::parse_prefixed_int(&self.season) as i64,
+                ),
+                Field::Episode => (
+                    Some(self.episode.clone()),
+                    crate::feed::parse_prefixed_int(&self.episode) as i64,
+                ),
+                Field::Priority => (None, self.priority as i64),
+                Field::DupeKey => (Some(self.dupe_key.clone()), 0),
+                Field::DupeScore => (None, self.dupe_score as i64),
+                _ => (Some(Vec::new()), 0),
+            }
+        }
+
+        fn season_episode(&mut self, episode: bool) -> Option<Vec<u8>> {
+            Some(if episode {
+                self.episode.clone()
+            } else {
+                self.season.clone()
+            })
+        }
+
+        fn regex_new(&mut self, pattern: &[u8], _buf_size: i32) -> usize {
+            self.patterns.push(pattern.to_vec());
+            self.patterns.len()
+        }
+
+        fn regex_match(&mut self, handle: usize, text: &[u8]) -> Option<Vec<(i32, i32)>> {
+            let pat = self.patterns.get(handle.checked_sub(1)?)?;
+            let text_lower: Vec<u8> = text.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if pat == b"game.*\\.s02e[0-9]*\\..*" {
+                if text_lower.starts_with(b"game") && text_lower.windows(7).any(|w| w == b".s02e06") {
+                    return Some(vec![(0, text.len() as i32)]);
+                }
+                return None;
+            }
+            if pat == b".+S([0-9]{1,2})E([0-9]{1,2})" {
+                for i in 1..text_lower.len().saturating_sub(5) {
+                    if text_lower[i] == b's'
+                        && text_lower[i + 1].is_ascii_digit()
+                        && text_lower[i + 2].is_ascii_digit()
+                        && text_lower[i + 3] == b'e'
+                        && text_lower[i + 4].is_ascii_digit()
+                        && text_lower[i + 5].is_ascii_digit()
+                    {
+                        return Some(vec![
+                            (0, (i + 6) as i32),
+                            ((i + 1) as i32, 2),
+                            ((i + 4) as i32, 2),
+                        ]);
+                    }
+                }
+                return None;
+            }
+            None
+        }
+
+        fn apply(&mut self, options: &Applied<'_>) {
+            if let Some(p) = options.priority {
+                self.priority = p;
+            }
+            if let Some(ap) = options.add_priority {
+                self.priority = self.priority.wrapping_add(ap);
+            }
+            if let Some(ds) = options.dupe_score {
+                self.dupe_score = ds;
+            }
+            if let Some(ads) = options.add_dupe_score {
+                self.dupe_score = self.dupe_score.wrapping_add(ads);
+            }
+            if let Some(Some(dk)) = options.dupe_key {
+                self.dupe_key = dk.to_vec();
+            }
+        }
+
+        fn set_match(&mut self, status: i32, rule: i32) {
+            self.match_status = status;
+            self.match_rule = rule;
+        }
+
+        fn lower(&self) -> &Lower<'_> {
+            &self.lower
+        }
+    }
+
+    #[test]
+    fn feed_filter_tests_port_from_cpp() {
+        // FeedFilterAgeOverflow
+        {
+            let mut item = MockFeedItem {
+                // CurrentTime() - i64::MIN wraps to negative in signed 64-bit arithmetic
+                age_sec: -100,
+                ..Default::default()
+            };
+            let mut filter = FeedFilter::new(b"age:<0");
+            filter.matches(&mut item);
+            assert_eq!(item.match_status, 1);
+            assert_eq!(item.match_rule, 1);
+        }
+
+        // FeedFilterOptionOverflow
+        {
+            let mut item = MockFeedItem {
+                title: b"example".to_vec(),
+                ..Default::default()
+            };
+            let mut filter = FeedFilter::new(b"A(r:2147483647,r+:1,ds:-2147483648,ds+:-1): **");
+            filter.matches(&mut item);
+            assert_eq!(item.match_status, 1);
+            assert_eq!(item.priority, i32::MIN);
+            assert_eq!(item.dupe_score, i32::MAX);
+        }
+
+        // FeedFilterTest
+        let mut item = MockFeedItem {
+            title: b"Game.of.Clowns.S02E06.REAL.1080p.HDTV.X264-Group.WEB-DL".to_vec(),
+            filename: b"Game.of.Clowns.S02E06.REAL.1080p.HDTV.X264-Group.WEB-DL".to_vec(),
+            size: 1600 * 1024 * 1024,
+            age_sec: 60 * 60 * 15,
+            category: b"TV > HD".to_vec(),
+            rage_id: 123456,
+            season: b"02".to_vec(),
+            episode: b"06".to_vec(),
+            ..Default::default()
+        };
+
+        let check = |item: &mut MockFeedItem, def: &[u8], expected: i32| {
+            item.match_status = 0;
+            item.match_rule = 0;
+            let mut filter = FeedFilter::new(def);
+            filter.matches(item);
+            assert_eq!(
+                item.match_status,
+                expected,
+                "filter: {}",
+                String::from_utf8_lossy(def)
+            );
+        };
+
+        // 0 = msIgnored, 1 = msAccepted, 2 = msRejected
+        check(&mut item, b"game", 1);
+        check(&mut item, b"games", 0);
+        check(&mut item, b"gam", 0);
+        check(&mut item, b"gam*", 1);
+        check(&mut item, b"am*", 0);
+        check(&mut item, b"*am*", 1);
+        check(&mut item, b"game of clowns", 1);
+        check(&mut item, b"game of clown", 0);
+        check(&mut item, b"game of clown*", 1);
+        check(&mut item, b"game.of?clowns", 1);
+        check(&mut item, b"game*of*clowns", 0);
+        check(&mut item, b"game*of*clowns*", 0);
+        check(&mut item, b"*game*of*clowns*", 1);
+        check(&mut item, b"game of clowns WEB-DL", 1);
+        check(&mut item, b"game of clowns -WEB-DL", 0);
+        check(&mut item, b"+title:@game", 1);
+        check(&mut item, b"-game", 0);
+        check(&mut item, b"-kings", 1);
+        check(&mut item, b"title:game.of.clowns size:<4GB", 1);
+        check(&mut item, b"title:game.of?clowns", 1);
+        check(&mut item, b"@game", 1);
+        check(&mut item, b"size:<1.4GB", 0);
+        check(
+            &mut item,
+            b"HDTV category:*hd* -badgroup s02e* size:>600MB size:<2000MB",
+            1,
+        );
+        check(&mut item, b"size:<2000MB", 1);
+        check(&mut item, b"age:<10", 1);
+        check(&mut item, b"age:<=10", 1);
+        check(&mut item, b"age:>1h", 1);
+        check(&mut item, b"age:>=1h", 1);
+        check(&mut item, b"$game.*\\.s02e[0-9]*\\..*", 1);
+        check(&mut item, b"R:  game  of", 2);
+        check(
+            &mut item,
+            b"A(category:my series, pause:yes, priority:100):game",
+            1,
+        );
+        check(
+            &mut item,
+            b"A(c:my series, p:n, r:100, s:1000, k:1080p):game",
+            1,
+        );
+        check(&mut item, b"A(my series, paused, 100):game", 1);
+        check(
+            &mut item,
+            b"A(k:series=GOT-${1}-${2}): Game of clowns S##E##",
+            1,
+        );
+        assert_eq!(item.dupe_key, b"series=GOT-02-06");
+        check(
+            &mut item,
+            b"A(k:series=GOT-${1}-${2}): $.+S([0-9]{1,2})E([0-9]{1,2})",
+            1,
+        );
+        assert_eq!(item.dupe_key, b"series=GOT-02-06");
+        check(&mut item, b"A(category:Series)", 0);
+    }
+}

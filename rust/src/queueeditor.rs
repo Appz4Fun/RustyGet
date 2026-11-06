@@ -1,6 +1,6 @@
 //! `QueueEditor` and `GroupSorter` (`daemon/queue/QueueEditor.cpp`) end-to-end Rust implementation.
 
-use crate::queuehotpath::strcasecmp_bytes;
+use crate::queuecoord::strcasecmp_bytes;
 
 pub const SORT_CRITERIA_NAME: i32 = 0;
 pub const SORT_CRITERIA_SIZE: i32 = 1;

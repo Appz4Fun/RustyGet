@@ -1,7 +1,7 @@
 //! End-to-end Rust implementation of `daemon/feed/` (`FeedInfo`, `FeedItemInfo`,
 //! `FeedFile`, `NzbInfoCreator`, and `FeedCoordinator`).
 
-use std::ffi::{c_char, c_int, CStr, CString};
+use std::ffi::{c_char, c_int, CString};
 
 extern "C" {
     fn tolower(c: c_int) -> c_int;
@@ -424,9 +424,7 @@ impl FeedFileParser {
             if let Some(item) = self.items.last_mut() {
                 for &(attr_name, attr_val) in atts {
                     if attr_name == b"url" {
-                        let mut decoded = truncate_at_nul(attr_val);
-                        let new_len = crate::text::xml_decode(&mut decoded, &xml_digit_lower);
-                        decoded.truncate(new_len);
+                        let decoded = truncate_at_nul(attr_val);
                         item.url = cstring_lossy(&decoded);
                     } else if attr_name == b"length" {
                         item.size = c_atoll_bytes(attr_val);
@@ -546,6 +544,175 @@ impl FeedFileParser {
         }
         &self.items
     }
+
+    fn normalize_xml_eol(s: &str) -> std::borrow::Cow<'_, str> {
+        if !s.as_bytes().contains(&b'\r') {
+            return std::borrow::Cow::Borrowed(s);
+        }
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\r' {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                out.push('\n');
+            } else {
+                out.push(c);
+            }
+        }
+        std::borrow::Cow::Owned(out)
+    }
+
+    fn normalize_xml_attr_ws(s: &str) -> std::borrow::Cow<'_, str> {
+        if !s.bytes().any(|b| matches!(b, b'\r' | b'\n' | b'\t')) {
+            return std::borrow::Cow::Borrowed(s);
+        }
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\r' {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                out.push(' ');
+            } else if c == '\n' || c == '\t' {
+                out.push(' ');
+            } else {
+                out.push(c);
+            }
+        }
+        std::borrow::Cow::Owned(out)
+    }
+
+    pub fn parse_xml(xml: &[u8]) -> Option<Self> {
+        use quick_xml::events::Event;
+        if xml.is_empty() {
+            return None;
+        }
+        let mut reader = quick_xml::Reader::from_reader(xml);
+        let mut parser = Self::new();
+        let mut buf = Vec::new();
+        let mut saw_root = false;
+        let mut root_closed = false;
+        let mut depth: i32 = 0;
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(Event::Start(e)) => {
+                    if root_closed {
+                        return None;
+                    }
+                    saw_root = true;
+                    depth += 1;
+                    let mut attrs = Vec::new();
+                    for attr_res in e.attributes() {
+                        let a = attr_res.ok()?;
+                        let decoded = reader.decoder().decode(&a.value).ok()?;
+                        let norm = Self::normalize_xml_attr_ws(&decoded);
+                        let unescaped = quick_xml::escape::unescape(&norm).ok()?;
+                        attrs.push((a.key.as_ref().to_vec(), unescaped.into_owned().into_bytes()));
+                    }
+                    let attr_refs: Vec<(&[u8], &[u8])> = attrs
+                        .iter()
+                        .map(|(k, v)| (k.as_slice(), v.as_slice()))
+                        .collect();
+                    parser.start_element(e.name().as_ref(), &attr_refs);
+                }
+                Ok(Event::Empty(e)) => {
+                    if root_closed {
+                        return None;
+                    }
+                    saw_root = true;
+                    let mut attrs = Vec::new();
+                    for attr_res in e.attributes() {
+                        let a = attr_res.ok()?;
+                        let decoded = reader.decoder().decode(&a.value).ok()?;
+                        let norm = Self::normalize_xml_attr_ws(&decoded);
+                        let unescaped = quick_xml::escape::unescape(&norm).ok()?;
+                        attrs.push((a.key.as_ref().to_vec(), unescaped.into_owned().into_bytes()));
+                    }
+                    let attr_refs: Vec<(&[u8], &[u8])> = attrs
+                        .iter()
+                        .map(|(k, v)| (k.as_slice(), v.as_slice()))
+                        .collect();
+                    parser.start_element(e.name().as_ref(), &attr_refs);
+                    parser.end_element(e.name().as_ref());
+                    if depth == 0 {
+                        root_closed = true;
+                    }
+                }
+                Ok(Event::Text(t)) => {
+                    let decoded = t.decode().ok()?;
+                    let norm = Self::normalize_xml_eol(&decoded);
+                    if depth == 0 {
+                        let rest = norm.strip_prefix('\u{feff}').unwrap_or(&norm);
+                        if !rest.bytes().all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n')) {
+                            return None;
+                        }
+                    } else {
+                        parser.text(norm.as_bytes());
+                    }
+                }
+                Ok(Event::CData(c)) => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    let decoded = c.decode().ok()?;
+                    let norm = Self::normalize_xml_eol(&decoded);
+                    parser.text(norm.as_bytes());
+                }
+                Ok(Event::GeneralRef(r)) => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    let entity = match r.as_ref() {
+                        b"lt" => Some(b"<".to_vec()),
+                        b"gt" => Some(b">".to_vec()),
+                        b"amp" => Some(b"&".to_vec()),
+                        b"quot" => Some(b"\"".to_vec()),
+                        b"apos" => Some(b"'".to_vec()),
+                        _ => r
+                            .resolve_char_ref()
+                            .ok()
+                            .flatten()
+                            .map(|c| c.to_string().into_bytes()),
+                    }?;
+                    parser.text(&entity);
+                }
+                Ok(Event::Decl(_)) => {
+                    if saw_root {
+                        return None;
+                    }
+                }
+                Ok(Event::DocType(d)) => {
+                    if saw_root || d.windows(8).any(|w| w.eq_ignore_ascii_case(b"<!entity")) {
+                        return None;
+                    }
+                }
+                Ok(Event::End(e)) => {
+                    depth -= 1;
+                    if depth < 0 {
+                        return None;
+                    }
+                    parser.end_element(e.name().as_ref());
+                    if depth == 0 {
+                        root_closed = true;
+                    }
+                }
+                Ok(Event::Eof) => break,
+                Err(_) => return None,
+                _ => {}
+            }
+            buf.clear();
+        }
+        (saw_root && root_closed && depth == 0).then_some(parser)
+    }
+
+    /// Reads an RSS/XML file from disk and parses it into a `FeedFileParser` (`FeedFile::Parse`).
+    pub fn parse_file(path: &std::path::Path) -> Option<Self> {
+        let bytes = std::fs::read(path).ok()?;
+        Self::parse_xml(&bytes)
+    }
 }
 
 // ============================================================================
@@ -588,6 +755,84 @@ pub fn resolve_category<'a>(
         item_cat
     } else {
         b""
+    }
+}
+
+/// Feed-level inputs for `create_nzb_info` (`NzbInfoCreator::Create`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FeedCreationInput<'a> {
+    pub id: i32,
+    pub category: &'a [u8],
+    pub category_source: i32,
+}
+
+/// Item-level inputs for `create_nzb_info` (`NzbInfoCreator::Create`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FeedItemCreationInput<'a> {
+    pub url: &'a [u8],
+    pub filename: &'a [u8],
+    pub category: &'a [u8],
+    pub add_category: &'a [u8],
+    pub size: i64,
+    pub time: i64,
+    pub priority: i32,
+    pub pause_nzb: bool,
+    pub dupe_key: &'a [u8],
+    pub dupe_score: i32,
+    pub dupe_mode: i32,
+}
+
+/// Output fields of `NzbInfoCreator::Create` (`daemon/feed/FeedCoordinator.cpp`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreatedNzbInfo {
+    pub kind: i32,
+    pub feed_id: i32,
+    pub url: Vec<u8>,
+    pub filename: Vec<u8>,
+    pub category: Vec<u8>,
+    pub priority: i32,
+    pub add_url_paused: bool,
+    pub dupe_key: Vec<u8>,
+    pub dupe_score: i32,
+    pub dupe_mode: i32,
+    pub size: i64,
+    pub min_time: i64,
+    pub max_time: i64,
+}
+
+/// End-to-end implementation of `NzbInfoCreator::Create` + `NzbInfoCreator::ApplyCategory`
+/// (`daemon/feed/FeedCoordinator.cpp`): normalizes and sanitizes the `.nzb` filename,
+/// applies `add_category` override or `resolve_category`, and populates all `NzbInfo` fields.
+pub fn create_nzb_info(
+    feed: &FeedCreationInput<'_>,
+    item: &FeedItemCreationInput<'_>,
+) -> CreatedNzbInfo {
+    let norm = normalize_feed_nzb_name(item.filename);
+    let filename = if norm.is_empty() {
+        Vec::new()
+    } else {
+        let truncated = &norm[..norm.len().min(1023)];
+        crate::paths::make_valid_filename(truncated, false)
+    };
+    let category = if !item.add_category.is_empty() {
+        item.add_category.to_vec()
+    } else {
+        resolve_category(feed.category, feed.category_source, item.category).to_vec()
+    };
+    CreatedNzbInfo {
+        kind: 1, // NzbInfo::nkUrl
+        feed_id: feed.id,
+        url: item.url.to_vec(),
+        filename,
+        category,
+        priority: item.priority,
+        add_url_paused: item.pause_nzb,
+        dupe_key: item.dupe_key.to_vec(),
+        dupe_score: item.dupe_score,
+        dupe_mode: item.dupe_mode,
+        size: item.size,
+        min_time: item.time,
+        max_time: item.time,
     }
 }
 
@@ -781,8 +1026,8 @@ pub unsafe extern "C" fn nzbget_rs_feed_info_init(
     out_default_name: *mut crate::ffi::RsBuf,
     out_filter_hash: *mut u32,
 ) {
-    let name_bytes = crate::diskstatepp::cstr_to_bytes(name);
-    let filter_bytes = crate::diskstatepp::cstr_to_bytes(filter);
+    let name_bytes = crate::diskstate_format::cstr_to_bytes(name);
+    let filter_bytes = crate::diskstate_format::cstr_to_bytes(filter);
     let (default_name, hash) = feed_info_init(id, name_bytes, filter_bytes);
     if !out_default_name.is_null() {
         *out_default_name = match default_name {
@@ -797,7 +1042,7 @@ pub unsafe extern "C" fn nzbget_rs_feed_info_init(
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_feed_parse_prefixed_int(value: *const c_char) -> c_int {
-    parse_prefixed_int(crate::diskstatepp::cstr_to_bytes(value))
+    parse_prefixed_int(crate::diskstate_format::cstr_to_bytes(value))
 }
 
 #[no_mangle]
@@ -811,10 +1056,10 @@ pub unsafe extern "C" fn nzbget_rs_feed_has_any_series_id(
     item_tvmaze_id: c_int,
 ) -> c_int {
     i32::from(has_any_series_id(
-        crate::diskstatepp::cstr_to_bytes(series),
-        crate::diskstatepp::cstr_to_bytes(rage_id),
-        crate::diskstatepp::cstr_to_bytes(tvdb_id),
-        crate::diskstatepp::cstr_to_bytes(tvmaze_id),
+        crate::diskstate_format::cstr_to_bytes(series),
+        crate::diskstate_format::cstr_to_bytes(rage_id),
+        crate::diskstate_format::cstr_to_bytes(tvdb_id),
+        crate::diskstate_format::cstr_to_bytes(tvmaze_id),
         item_rage_id,
         item_tvdb_id,
         item_tvmaze_id,
@@ -837,18 +1082,18 @@ pub unsafe extern "C" fn nzbget_rs_feed_build_dupe_key(
     episode: *const c_char,
 ) -> crate::ffi::RsBuf {
     crate::ffi::into_buf(build_feed_dupe_key(
-        crate::diskstatepp::cstr_to_bytes(rage_id),
-        crate::diskstatepp::cstr_to_bytes(tvdb_id),
-        crate::diskstatepp::cstr_to_bytes(tvmaze_id),
-        crate::diskstatepp::cstr_to_bytes(series),
+        crate::diskstate_format::cstr_to_bytes(rage_id),
+        crate::diskstate_format::cstr_to_bytes(tvdb_id),
+        crate::diskstate_format::cstr_to_bytes(tvmaze_id),
+        crate::diskstate_format::cstr_to_bytes(series),
         item_rage_id,
         item_tvdb_id,
         item_tvmaze_id,
         item_imdb_id,
         season_num,
         episode_num,
-        crate::diskstatepp::cstr_to_bytes(season),
-        crate::diskstatepp::cstr_to_bytes(episode),
+        crate::diskstate_format::cstr_to_bytes(season),
+        crate::diskstate_format::cstr_to_bytes(episode),
     ))
 }
 
@@ -875,8 +1120,27 @@ pub unsafe extern "C" fn nzbget_rs_feed_format_season_episode(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_feed_file_parser_new() -> *mut FeedFileParser {
-    Box::into_raw(Box::new(FeedFileParser::new()))
+pub unsafe extern "C" fn nzbget_rs_feed_file_parser_parse_file(
+    filename: *const c_char,
+) -> *mut FeedFileParser {
+    let bytes = crate::diskstate_format::cstr_to_bytes(filename);
+    if bytes.is_empty() {
+        return std::ptr::null_mut();
+    }
+    #[cfg(unix)]
+    let path = {
+        use std::os::unix::ffi::OsStrExt;
+        std::path::Path::new(std::ffi::OsStr::from_bytes(bytes))
+    };
+    #[cfg(not(unix))]
+    let path_buf = std::path::PathBuf::from(String::from_utf8_lossy(bytes).into_owned());
+    #[cfg(not(unix))]
+    let path = path_buf.as_path();
+
+    match FeedFileParser::parse_file(path) {
+        Some(parser) => Box::into_raw(Box::new(parser)),
+        None => std::ptr::null_mut(),
+    }
 }
 
 #[no_mangle]
@@ -884,61 +1148,6 @@ pub unsafe extern "C" fn nzbget_rs_feed_file_parser_free(parser: *mut FeedFilePa
     if !parser.is_null() {
         drop(Box::from_raw(parser));
     }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feed_file_parser_start_element(
-    parser: *mut FeedFileParser,
-    name: *const c_char,
-    atts: *const *const c_char,
-) {
-    if parser.is_null() || name.is_null() {
-        return;
-    }
-    let name_bytes = CStr::from_ptr(name).to_bytes();
-    let mut pairs = Vec::new();
-    if !atts.is_null() {
-        let mut p = atts;
-        while !(*p).is_null() {
-            let k = CStr::from_ptr(*p).to_bytes();
-            let v_ptr = *p.add(1);
-            let v = if v_ptr.is_null() {
-                &[][..]
-            } else {
-                CStr::from_ptr(v_ptr).to_bytes()
-            };
-            pairs.push((k, v));
-            if v_ptr.is_null() {
-                break;
-            }
-            p = p.add(2);
-        }
-    }
-    (*parser).start_element(name_bytes, &pairs);
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feed_file_parser_end_element(
-    parser: *mut FeedFileParser,
-    name: *const c_char,
-) {
-    if parser.is_null() || name.is_null() {
-        return;
-    }
-    (*parser).end_element(CStr::from_ptr(name).to_bytes());
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feed_file_parser_text(
-    parser: *mut FeedFileParser,
-    xmlstr: *const c_char,
-    len: c_int,
-) {
-    if parser.is_null() || xmlstr.is_null() || len <= 0 {
-        return;
-    }
-    let chunk = std::slice::from_raw_parts(xmlstr as *const u8, len as usize);
-    (*parser).text(chunk);
 }
 
 #[no_mangle]
@@ -986,24 +1195,49 @@ pub unsafe extern "C" fn nzbget_rs_feed_file_parser_get_item(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feed_file_trim_sax_error(err_msg: *const c_char) -> usize {
-    trim_sax_error_len(crate::diskstatepp::cstr_to_bytes(err_msg))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feed_extract_size_from_description(
-    description: *const c_char,
-) -> i64 {
-    extract_size_from_description(crate::diskstatepp::cstr_to_bytes(description))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feed_normalize_nzb_name(
-    filename: *const c_char,
-) -> crate::ffi::RsBuf {
-    crate::ffi::into_buf(normalize_feed_nzb_name(crate::diskstatepp::cstr_to_bytes(
-        filename,
-    )))
+pub unsafe extern "C" fn nzbget_rs_feed_create_nzb_info(
+    feed_id: c_int,
+    feed_cat: *const c_char,
+    category_source: c_int,
+    item_url: *const c_char,
+    item_filename: *const c_char,
+    item_cat: *const c_char,
+    item_add_cat: *const c_char,
+    item_size: i64,
+    item_time: i64,
+    item_priority: c_int,
+    item_pause_nzb: c_int,
+    item_dupe_key: *const c_char,
+    item_dupe_score: c_int,
+    item_dupe_mode: c_int,
+    out_filename: *mut crate::ffi::RsBuf,
+    out_category: *mut crate::ffi::RsBuf,
+) {
+    let feed = FeedCreationInput {
+        id: feed_id,
+        category: crate::diskstate_format::cstr_to_bytes(feed_cat),
+        category_source,
+    };
+    let item = FeedItemCreationInput {
+        url: crate::diskstate_format::cstr_to_bytes(item_url),
+        filename: crate::diskstate_format::cstr_to_bytes(item_filename),
+        category: crate::diskstate_format::cstr_to_bytes(item_cat),
+        add_category: crate::diskstate_format::cstr_to_bytes(item_add_cat),
+        size: item_size,
+        time: item_time,
+        priority: item_priority,
+        pause_nzb: item_pause_nzb != 0,
+        dupe_key: crate::diskstate_format::cstr_to_bytes(item_dupe_key),
+        dupe_score: item_dupe_score,
+        dupe_mode: item_dupe_mode,
+    };
+    let created = create_nzb_info(&feed, &item);
+    if !out_filename.is_null() {
+        *out_filename = crate::ffi::into_buf(created.filename);
+    }
+    if !out_category.is_null() {
+        *out_category = crate::ffi::into_buf(created.category);
+    }
 }
 
 #[no_mangle]
@@ -1012,8 +1246,8 @@ pub unsafe extern "C" fn nzbget_rs_feed_resolve_category(
     category_source: c_int,
     item_cat: *const c_char,
 ) -> *const c_char {
-    let f_slice = crate::diskstatepp::cstr_to_bytes(feed_cat);
-    let i_slice = crate::diskstatepp::cstr_to_bytes(item_cat);
+    let f_slice = crate::diskstate_format::cstr_to_bytes(feed_cat);
+    let i_slice = crate::diskstate_format::cstr_to_bytes(item_cat);
     let res = resolve_category(f_slice, category_source, i_slice);
     if res.is_empty() {
         c"".as_ptr()
@@ -1081,7 +1315,7 @@ pub unsafe extern "C" fn nzbget_rs_feed_format_temp_filename(
     preview_num: c_int,
 ) -> crate::ffi::RsBuf {
     crate::ffi::into_buf(format_temp_filename(
-        crate::diskstatepp::cstr_to_bytes(temp_dir),
+        crate::diskstate_format::cstr_to_bytes(temp_dir),
         sep as u8,
         id,
         preview != 0,
@@ -1146,7 +1380,7 @@ pub unsafe extern "C" fn nzbget_rs_feed_should_delete_history_entry(
     match should_delete_history_entry(
         last_seen,
         border_date,
-        crate::diskstatepp::cstr_to_bytes(url),
+        crate::diskstate_format::cstr_to_bytes(url),
     ) {
         Some(len) => {
             if !out_url_len_without_query.is_null() {
@@ -1217,7 +1451,7 @@ mod tests {
         parser.text(b"<b>Total Size</b> : 299.6 MB | MultiUp");
         parser.end_element(b"description");
 
-        parser.start_element(b"enclosure", &[(b"url", b"http://x/a.nzb&amp;k=1")]);
+        parser.start_element(b"enclosure", &[(b"url", b"http://x/a.nzb&k=1")]);
         parser.end_element(b"enclosure");
 
         parser.start_element(
@@ -1261,5 +1495,301 @@ mod tests {
         assert_eq!(c_atoll_bytes(b"-9223372036854775809"), i64::MIN);
         assert_eq!(parse_prefixed_int(b"S4294967296"), i32::MAX);
         assert_eq!(parse_prefixed_int(b"E-4294967296"), i32::MIN);
+    }
+
+    #[test]
+    fn feed_info_and_nzb_info_creator_ports_from_cpp() {
+        // Ported from tests/feed/FeedInfo.cpp
+        let ep1 = build_feed_dupe_key(
+            b"", b"", b"", b"", 0, 439270, 0, 28369634, 2, 69, b"S02", b"E69",
+        );
+        let ep2 = build_feed_dupe_key(
+            b"", b"", b"", b"", 0, 439270, 0, 28369634, 2, 71, b"S02", b"E71",
+        );
+        assert_eq!(ep1, b"tvdbid=439270-S02-E69");
+        assert_eq!(ep2, b"tvdbid=439270-S02-E71");
+        assert_ne!(ep1, ep2);
+
+        let movie = build_feed_dupe_key(b"", b"", b"", b"", 0, 0, 0, 28369634, 0, 0, b"", b"");
+        assert_eq!(movie, b"imdb=28369634");
+
+        let ep_no_series = build_feed_dupe_key(
+            b"", b"", b"", b"", 0, 0, 0, 28369634, 2, 69, b"S02", b"E69",
+        );
+        assert_eq!(ep_no_series, b"imdb=28369634");
+
+        // Series identifier priority: series > rageid > tvdbid > tvmazeid
+        assert_eq!(
+            build_feed_dupe_key(
+                b"",
+                b"",
+                b"",
+                b"Landarztpraxis",
+                12345,
+                439270,
+                123456,
+                28369634,
+                2,
+                69,
+                b"S02",
+                b"E69"
+            ),
+            b"series=Landarztpraxis-S02-E69"
+        );
+        assert_eq!(
+            build_feed_dupe_key(
+                b"", b"", b"", b"", 12345, 439270, 123456, 28369634, 2, 69, b"S02", b"E69"
+            ),
+            b"rageid=12345-S02-E69"
+        );
+        assert_eq!(
+            build_feed_dupe_key(
+                b"", b"", b"", b"", 0, 439270, 123456, 28369634, 2, 69, b"S02", b"E69"
+            ),
+            b"tvdbid=439270-S02-E69"
+        );
+        assert_eq!(
+            build_feed_dupe_key(
+                b"", b"", b"", b"", 0, 0, 123456, 28369634, 2, 69, b"S02", b"E69"
+            ),
+            b"tvmazeid=123456-S02-E69"
+        );
+        assert_eq!(
+            extract_size_from_description(b"Size: 1e3 MB"),
+            1000 * 1024 * 1024
+        );
+
+        // Ported from tests/feed/NzbInfoCreator.cpp: full create_nzb_info tests
+        let default_feed = FeedCreationInput {
+            id: 42,
+            category: b"Movies",
+            category_source: 0, // Auto
+        };
+        let default_item = FeedItemCreationInput {
+            url: b"https://example.com/file.nzb",
+            filename: b"TestFile",
+            category: b"",
+            add_category: b"",
+            size: 12345,
+            time: 1000,
+            priority: 5,
+            pause_nzb: true,
+            dupe_key: b"dupe-key",
+            dupe_score: 7,
+            dupe_mode: 2, // dmAll
+        };
+        let created_default = create_nzb_info(&default_feed, &default_item);
+        assert_eq!(created_default.kind, 1); // nkUrl
+        assert_eq!(created_default.feed_id, 42);
+        assert_eq!(created_default.url, b"https://example.com/file.nzb");
+        assert_eq!(created_default.filename, b"TestFile.nzb");
+        assert_eq!(created_default.category, b"Movies");
+        assert_eq!(created_default.priority, 5);
+        assert!(created_default.add_url_paused);
+        assert_eq!(created_default.dupe_key, b"dupe-key");
+        assert_eq!(created_default.dupe_score, 7);
+        assert_eq!(created_default.dupe_mode, 2);
+        assert_eq!(created_default.size, 12345);
+        assert_eq!(created_default.min_time, 1000);
+        assert_eq!(created_default.max_time, 1000);
+
+        // FilenameExtensionHandlingTest via create_nzb_info
+        for (raw_name, expected_name) in [
+            (&b"Alpha.Beta"[..], &b"Alpha.Beta.nzb"[..]),
+            (&b"Gamma.nZb"[..], &b"Gamma.nzb"[..]),
+            (&b""[..], &b""[..]),
+            (&b"Bad:Name?.nzb"[..], &b"Bad_Name_.nzb"[..]),
+        ] {
+            let mut it = default_item;
+            it.filename = raw_name;
+            assert_eq!(create_nzb_info(&default_feed, &it).filename, expected_name);
+        }
+
+        // ApplyCategoryOverridesTest + ApplyCategoryFeedFileSourceTest + ApplyCategoryNzbFileSourceTest + ApplyCategoryAutoSourceTest
+        for (feed_cat, source, item_cat, add_cat, expected_cat) in [
+            (&b"FeedCategory"[..], 0, &b"ItemCategory"[..], &b"OverrideCategory"[..], &b"OverrideCategory"[..]),
+            (&b"FeedCategory"[..], 2, &b"ItemCategory"[..], &b""[..], &b"FeedCategory"[..]),
+            (&b""[..], 2, &b"ItemCategory"[..], &b""[..], &b""[..]),
+            (&b"   "[..], 2, &b"   "[..], &b""[..], &b"   "[..]),
+            (&b"FeedCategory"[..], 1, &b"ItemCategory"[..], &b""[..], &b"FeedCategory"[..]),
+            (&b""[..], 1, &b"ItemCategory"[..], &b""[..], &b"ItemCategory"[..]),
+            (&b""[..], 1, &b""[..], &b""[..], &b""[..]),
+            (&b"FeedCategory"[..], 0, &b"ItemCategory"[..], &b""[..], &b"FeedCategory"[..]),
+            (&b""[..], 0, &b"ItemCategory"[..], &b""[..], &b"ItemCategory"[..]),
+            (&b""[..], 0, &b""[..], &b""[..], &b""[..]),
+        ] {
+            let f = FeedCreationInput {
+                id: 1,
+                category: feed_cat,
+                category_source: source,
+            };
+            let mut it = default_item;
+            it.category = item_cat;
+            it.add_category = add_cat;
+            assert_eq!(create_nzb_info(&f, &it).category, expected_cat);
+        }
+
+        // CreateNzbInfoAllPropertiesTest
+        let all_feed = FeedCreationInput {
+            id: 42,
+            category: b"Movies>HD",
+            category_source: 0,
+        };
+        let all_item = FeedItemCreationInput {
+            url: b"https://example.com/movie.nzb",
+            filename: b"Movie.Title.2024",
+            category: b"Movies>HD",
+            add_category: b"OverrideCategory",
+            size: 987_654_321,
+            time: 2000,
+            priority: 15,
+            pause_nzb: false,
+            dupe_key: b"movie-key-123",
+            dupe_score: 10,
+            dupe_mode: 0, // dmScore
+        };
+        let created_all = create_nzb_info(&all_feed, &all_item);
+        assert_eq!(created_all.kind, 1);
+        assert_eq!(created_all.feed_id, 42);
+        assert_eq!(created_all.url, b"https://example.com/movie.nzb");
+        assert_eq!(created_all.filename, b"Movie.Title.2024.nzb");
+        assert_eq!(created_all.category, b"OverrideCategory");
+        assert_eq!(created_all.priority, 15);
+        assert!(!created_all.add_url_paused);
+        assert_eq!(created_all.dupe_key, b"movie-key-123");
+        assert_eq!(created_all.dupe_score, 10);
+        assert_eq!(created_all.dupe_mode, 0);
+        assert_eq!(created_all.size, 987_654_321);
+        assert_eq!(created_all.min_time, 2000);
+        assert_eq!(created_all.max_time, 2000);
+
+        // CategorySource: 0 = Auto, 1 = NZBFile, 2 = FeedFile
+        assert_eq!(resolve_category(b"FeedCat", 1, b"ItemCat"), b"FeedCat");
+        assert_eq!(resolve_category(b"FeedCat", 0, b"ItemCat"), b"FeedCat");
+        assert_eq!(resolve_category(b"FeedCat", 2, b"ItemCat"), b"FeedCat");
+        assert_eq!(resolve_category(b"FeedCat", 1, b""), b"FeedCat");
+        assert_eq!(resolve_category(b"FeedCat", 0, b""), b"FeedCat");
+        assert_eq!(resolve_category(b"", 1, b"ItemCat"), b"ItemCat");
+        assert_eq!(resolve_category(b"", 0, b"ItemCat"), b"ItemCat");
+        assert_eq!(resolve_category(b"", 1, b""), b"");
+        assert_eq!(resolve_category(b"", 0, b""), b"");
+        assert_eq!(resolve_category(b"", 2, b"ItemCat"), b"");
+        assert_eq!(resolve_category(b"   ", 2, b"   "), b"   ");
+    }
+
+    #[test]
+    fn feed_file_tests_port_from_cpp() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("tests/testdata/feed");
+
+        // FeedFileTest (feed.xml via parse_file)
+        let mut p1 = FeedFileParser::parse_file(&root.join("feed.xml")).unwrap();
+        let items1 = p1.finalize_items();
+        assert_eq!(items1.len(), 6);
+        assert_eq!(items1[0].title.as_bytes(), b"Crows.And.Sparrows");
+        assert_eq!(items1[0].filename.as_bytes(), b"Crows.And.Sparrows");
+        assert_eq!(items1[0].category.as_bytes(), b"Movies>HD");
+        assert_eq!(items1[0].time, 1701668883);
+        assert_eq!(items1[0].episode.as_bytes(), b"1");
+        assert_eq!(parse_prefixed_int(items1[0].episode.as_bytes()), 1);
+        assert_eq!(items1[0].season.as_bytes(), b"S03");
+        assert_eq!(parse_prefixed_int(items1[0].season.as_bytes()), 3);
+        assert_eq!(items1[0].tvmaze_id, 33877);
+        assert_eq!(items1[0].tvdb_id, 33877);
+        assert_eq!(items1[0].rage_id, 33877);
+        assert_eq!(items1[0].imdb_id, 42054);
+        assert_eq!(
+            items1[0].url.as_bytes(),
+            b"https://indexer.com/getnzb/nzb.nzb"
+        );
+        assert_eq!(
+            items1[0].description.as_bytes(),
+            b"   Title:     Test.Title         Added to index:     09/05/2025 14:05:12        Total Size         : 200.0 B         Weblink:     N/A"
+        );
+        assert_eq!(items1[0].size, 7445312955);
+
+        assert_eq!(items1[1].title.as_bytes(), b"Deep.Path.Item");
+        assert_eq!(items1[1].category.as_bytes(), b"Movies>HD>4K");
+        assert_eq!(items1[2].title.as_bytes(), b"Spaced.Category.Item");
+        assert_eq!(items1[2].category.as_bytes(), b"Movies>HD");
+        assert_eq!(items1[3].title.as_bytes(), b"Empty.Category.Item");
+        assert_eq!(items1[3].category.as_bytes(), b"");
+        assert_eq!(items1[4].title.as_bytes(), b"Preserved.Spaces.Item");
+        assert_eq!(items1[4].category.as_bytes(), b"My Movies");
+        assert_eq!(items1[5].title.as_bytes(), b"Literal.Gt.Item");
+        assert_eq!(items1[5].category.as_bytes(), b"Movies > HD");
+
+        // FeedFile2Test (feed2.xml)
+        let xml2 = std::fs::read(root.join("feed2.xml")).unwrap();
+        let mut p2 = FeedFileParser::parse_xml(&xml2).unwrap();
+        let items2 = p2.finalize_items();
+        let last2 = items2.last().unwrap();
+        let expected_title2 = b"[Judas] Kimi to Boku no Saigo no Senjou, Aruiwa Sekai ga Hajimaru Seisen (Our Last Crusade or the Rise of a New World) - S02E08 [1080p][HEVC x265 10bit][Multi-Subs] (Weekly)";
+        assert_eq!(last2.category.as_bytes(), b"");
+        assert_eq!(last2.time, 1748526661);
+        assert_eq!(last2.episode.as_bytes(), b"");
+        assert_eq!(last2.season.as_bytes(), b"");
+        assert_eq!(last2.tvmaze_id, 0);
+        assert_eq!(last2.tvdb_id, 0);
+        assert_eq!(last2.rage_id, 0);
+        assert_eq!(last2.imdb_id, 0);
+        assert_eq!(
+            last2.url.as_bytes(),
+            b"http://storage.animetosho.org/nzbs/000a9b44/%5BJudas%5D%20Kimisen%20-%20S02E08.nzb"
+        );
+        assert_eq!(
+            last2.description.as_bytes(),
+            b"        Total Size         : 299.6 MB              |                                                    MultiUp    "
+        );
+        assert_eq!(last2.filename.as_bytes(), expected_title2);
+        assert_eq!(last2.title.as_bytes(), expected_title2);
+        assert_eq!(last2.size, (299.6f64 * 1024.0 * 1024.0).round() as i64);
+
+        // FeedFileNoAttributesTest
+        let xml3 = br#"<?xml version="1.0"?><rss xmlns:newznab="http://www.newznab.com/DTD/2010/feeds/attributes/"><channel><item><title>a</title><description>Size: 300</description><enclosure/><newznab:attr/><enclosure url="http://x/a.nzb"/></item></channel></rss>"#;
+        let mut p3 = FeedFileParser::parse_xml(xml3).unwrap();
+        let items3 = p3.finalize_items();
+        assert_eq!(items3.len(), 1);
+        assert_eq!(items3[0].url.as_bytes(), b"http://x/a.nzb");
+        assert_eq!(items3[0].size, 300);
+
+        // Duplicate/malformed attributes and multiple roots are rejected, and ISO-8859-1 CDATA is decoded to UTF-8
+        assert!(FeedFileParser::parse_xml(
+            br#"<rss><channel><item><enclosure url="a" url="b"/></item></channel></rss>"#
+        )
+        .is_none());
+        assert!(FeedFileParser::parse_xml(
+            br#"<rss><channel><item><title>a</title></item></channel></rss><rss><channel><item><title>b</title></item></channel></rss>"#
+        )
+        .is_none());
+        assert!(FeedFileParser::parse_xml(
+            br#"<rss><channel><item><title>a</title></item></channel></rss>trailing"#
+        )
+        .is_none());
+        assert!(FeedFileParser::parse_xml(
+            br#"<!DOCTYPE rss [<!ENTITY xxe "secret">]><rss><channel><item><title>a</title></item></channel></rss>"#
+        )
+        .is_none());
+        let cdata_entity_literal = br#"<rss><channel><item><title><![CDATA[Understanding <!ENTITY declarations]]></title></item></channel></rss>"#;
+        let mut p_cdata_ent = FeedFileParser::parse_xml(cdata_entity_literal).unwrap();
+        assert_eq!(
+            p_cdata_ent.finalize_items()[0].title.as_bytes(),
+            b"Understanding <!ENTITY declarations"
+        );
+        let latin1_cdata = b"<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><rss><channel><item><title><![CDATA[Caf\xe9\r\nBeta\rGamma]]></title><enclosure url=\"http://x/?q=&amp;amp;\"/><newznab:attr name=\"tag\" value=\"Group\tName\r\nNext&#9;Tab\"/></item></channel></rss>";
+        let mut p4 = FeedFileParser::parse_xml(latin1_cdata).unwrap();
+        let items4 = p4.finalize_items();
+        assert_eq!(items4[0].title.as_bytes(), "Café\nBeta\nGamma".as_bytes());
+        assert_eq!(items4[0].url.as_bytes(), b"http://x/?q=&amp;");
+        assert_eq!(items4[0].attr_values[0].as_bytes(), b"Group Name Next\tTab");
+        assert_eq!(
+            crate::paths::make_valid_filename(
+                &normalize_feed_nzb_name(items4[0].filename.as_bytes()),
+                false
+            ),
+            "Café_Beta_Gamma.nzb".as_bytes()
+        );
     }
 }

@@ -1,6 +1,6 @@
 //! `HistoryCoordinator` (`daemon/queue/HistoryCoordinator.cpp`) end-to-end Rust implementation.
 
-use crate::queuehotpath::{
+use crate::queuecoord::{
     ARTICLE_FAILED, ARTICLE_FINISHED, ARTICLE_UNDEFINED, DELETE_COPY, DELETE_DUPE, DELETE_GOOD,
     DELETE_MANUAL, DELETE_NONE, DUP_STATUS_BAD, DUP_STATUS_DELETED, DUP_STATUS_DUPE,
     DUP_STATUS_FAILED, DUP_STATUS_GOOD, DUP_STATUS_SUCCESS, MARK_BAD, MARK_GOOD, MARK_SUCCESS,

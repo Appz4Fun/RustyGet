@@ -286,4 +286,21 @@ mod tests {
         let n = unsafe { base64_in_place(v.as_ptr(), v.len(), v.as_mut_ptr()) };
         assert_eq!(&v[..n], b"hello world!");
     }
+
+    #[test]
+    fn json_decode_test_port_from_cpp() {
+        for (input, expected) in [
+            (&b"Test \\\"quoted\\\" text"[..], &b"Test \"quoted\" text"[..]),
+            (b"Test \\u0026 ampersand", b"Test & ampersand"),
+            (b"Test \\u0026 \\u0026 \\u0026", b"Test & & &"),
+            (
+                b"Test \\\"quote\\\" \\u0026 \\n newline",
+                b"Test \"quote\" & \n newline",
+            ),
+        ] {
+            let mut buf = input.to_vec();
+            let n = json_decode(&mut buf);
+            assert_eq!(&buf[..n], expected);
+        }
+    }
 }

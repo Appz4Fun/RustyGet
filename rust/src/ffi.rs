@@ -9120,9 +9120,9 @@ pub unsafe extern "C" fn nzbget_rs_dupe_fallback_own_article_matches(
     i32::from(crate::dupefallback::own_article_matches(
         own_part_number,
         part_number,
-        crate::queuehotpath::cstr_to_bytes(own_msg_id),
-        crate::queuehotpath::cstr_to_bytes(orig_msg_id),
-        crate::queuehotpath::cstr_to_bytes(cur_msg_id),
+        crate::queuecoord::cstr_to_bytes(own_msg_id),
+        crate::queuecoord::cstr_to_bytes(orig_msg_id),
+        crate::queuecoord::cstr_to_bytes(cur_msg_id),
     ))
 }
 
@@ -9150,9 +9150,9 @@ pub unsafe extern "C" fn nzbget_rs_dupe_fallback_is_twin_kind(
     kind: *const c_char,
 ) -> c_int {
     i32::from(crate::dupefallback::is_twin_kind(
-        crate::queuehotpath::cstr_to_bytes(own_identity),
-        crate::queuehotpath::cstr_to_bytes(donor_identity),
-        crate::queuehotpath::cstr_to_bytes(kind),
+        crate::queuecoord::cstr_to_bytes(own_identity),
+        crate::queuecoord::cstr_to_bytes(donor_identity),
+        crate::queuecoord::cstr_to_bytes(kind),
     ))
 }
 
@@ -9186,9 +9186,9 @@ pub unsafe extern "C" fn nzbget_rs_dupe_fallback_should_reset_non_twin_lead(
     i32::from(crate::dupefallback::should_reset_non_twin_lead(
         twin_only != 0,
         lead_id,
-        crate::queuehotpath::cstr_to_bytes(own_identity),
-        crate::queuehotpath::cstr_to_bytes(lead_identity),
-        crate::queuehotpath::cstr_to_bytes(kind),
+        crate::queuecoord::cstr_to_bytes(own_identity),
+        crate::queuecoord::cstr_to_bytes(lead_identity),
+        crate::queuecoord::cstr_to_bytes(kind),
     ))
 }
 
@@ -9211,8 +9211,8 @@ pub unsafe extern "C" fn nzbget_rs_dupe_fallback_classify_content_name_match(
     by_content: *const c_char,
 ) -> c_int {
     crate::dupefallback::classify_content_name_match(
-        crate::queuehotpath::cstr_to_bytes(donor_filename),
-        crate::queuehotpath::cstr_to_bytes(by_content),
+        crate::queuecoord::cstr_to_bytes(donor_filename),
+        crate::queuecoord::cstr_to_bytes(by_content),
     )
 }
 
@@ -9231,9 +9231,9 @@ pub unsafe extern "C" fn nzbget_rs_dupe_fallback_is_donor_filename_match(
     donor_filename: *const c_char,
 ) -> c_int {
     i32::from(crate::dupefallback::is_donor_filename_match(
-        crate::queuehotpath::cstr_to_bytes(target_filename),
-        crate::queuehotpath::cstr_to_bytes(target_nzb_filename),
-        crate::queuehotpath::cstr_to_bytes(donor_filename),
+        crate::queuecoord::cstr_to_bytes(target_filename),
+        crate::queuecoord::cstr_to_bytes(target_nzb_filename),
+        crate::queuecoord::cstr_to_bytes(donor_filename),
     ))
 }
 
@@ -11047,7 +11047,7 @@ pub extern "C" fn nzbget_rs_qhp_calc_write_buffer_size(
     write_buffer_kb: c_int,
     rec_size: c_int,
 ) -> c_int {
-    crate::queuehotpath::calc_write_buffer_size(write_buffer_kb, rec_size)
+    crate::artwritercore::calc_write_buffer_size(write_buffer_kb, rec_size)
 }
 
 #[no_mangle]
@@ -11057,7 +11057,7 @@ pub extern "C" fn nzbget_rs_qhp_classify_completed_file_status(
     missed_articles: c_int,
     failed_articles: c_int,
 ) -> c_int {
-    crate::queuehotpath::classify_completed_file_status(
+    crate::queuecoord::classify_completed_file_status(
         total_articles,
         success_articles,
         missed_articles,
@@ -11075,12 +11075,12 @@ pub unsafe extern "C" fn nzbget_rs_qhp_resolve_completed_filename(
     path_sep: c_char,
     output_file_exists: c_int,
 ) -> RsBuf {
-    let mut out = crate::queuehotpath::resolve_completed_filename(
+    let mut out = crate::queuecoord::resolve_completed_filename(
         completed != 0,
         file_status,
-        crate::queuehotpath::cstr_to_bytes(output_filename),
-        crate::queuehotpath::cstr_to_bytes(file_filename),
-        crate::queuehotpath::cstr_to_bytes(dest_dir),
+        crate::queuecoord::cstr_to_bytes(output_filename),
+        crate::queuecoord::cstr_to_bytes(file_filename),
+        crate::queuecoord::cstr_to_bytes(dest_dir),
         path_sep as u8,
         output_file_exists != 0,
     );
@@ -11100,7 +11100,7 @@ pub unsafe extern "C" fn nzbget_rs_qhp_article_cache_should_flush(
     out_flush_everything: *mut c_int,
     out_need_emergency_flush: *mut c_int,
 ) -> c_int {
-    let (should, flush_all, emerg) = crate::queuehotpath::article_cache_should_flush(
+    let (should, flush_all, emerg) = crate::artwritercore::article_cache_should_flush(
         allocated,
         effective_limit,
         tier,
@@ -11137,7 +11137,7 @@ pub unsafe extern "C" fn nzbget_rs_qhp_memory_monitor_step(
         *consecutive_samples
     };
     let (next, transitioned) =
-        crate::queuehotpath::memory_monitor_step(raw_sample, current_tier, &mut cand, &mut consec);
+        crate::artwritercore::memory_monitor_step(raw_sample, current_tier, &mut cand, &mut consec);
     if !candidate_tier.is_null() {
         *candidate_tier = cand;
     }
@@ -11160,7 +11160,7 @@ pub unsafe extern "C" fn nzbget_rs_qhp_adjust_downloads_limit(
     if count == 0 || norm_levels.is_null() || actives.is_null() || max_conns.is_null() {
         return 2;
     }
-    crate::queuehotpath::calc_downloads_limit(
+    crate::queuecoord::calc_downloads_limit(
         std::slice::from_raw_parts(norm_levels, count),
         std::slice::from_raw_parts(actives, count),
         std::slice::from_raw_parts(max_conns, count),
@@ -11173,12 +11173,12 @@ pub extern "C" fn nzbget_rs_qhp_is_propagation_wait(
     propagation_delay: c_int,
     cur_date: i64,
 ) -> c_int {
-    crate::queuehotpath::is_propagation_wait(post_time, propagation_delay, cur_date) as c_int
+    crate::queuecoord::is_propagation_wait(post_time, propagation_delay, cur_date) as c_int
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_qhp_select_next_file(
-    files: *const crate::queuehotpath::RsCandidateFile,
+    files: *const crate::queuecoord::RsCandidateFile,
     count: usize,
     propagation_delay: c_int,
     cur_date: i64,
@@ -11191,7 +11191,7 @@ pub unsafe extern "C" fn nzbget_rs_qhp_select_next_file(
         std::slice::from_raw_parts(files, count)
     };
     let (best, prop) =
-        crate::queuehotpath::select_next_file(slice, propagation_delay, cur_date);
+        crate::queuecoord::select_next_file(slice, propagation_delay, cur_date);
     if !out_best_idx.is_null() {
         *out_best_idx = best;
     }
@@ -11202,12 +11202,12 @@ pub unsafe extern "C" fn nzbget_rs_qhp_select_next_file(
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_qhp_is_data_filename(filename: *const c_char) -> c_int {
-    crate::queuehotpath::is_data_filename(crate::queuehotpath::cstr_to_bytes(filename)) as c_int
+    crate::queuecoord::is_data_filename(crate::queuecoord::cstr_to_bytes(filename)) as c_int
 }
 
 #[no_mangle]
 pub extern "C" fn nzbget_rs_qhp_size_near(size1: i64, size2: i64) -> c_int {
-    crate::queuehotpath::size_near(size1, size2) as c_int
+    crate::queuecoord::size_near(size1, size2) as c_int
 }
 
 #[no_mangle]
@@ -11216,7 +11216,7 @@ pub extern "C" fn nzbget_rs_qhp_download_hopeless(
     current_success: c_int,
     current_failed: c_int,
 ) -> c_int {
-    crate::queuehotpath::download_hopeless(total, current_success, current_failed) as c_int
+    crate::queuecoord::download_hopeless(total, current_success, current_failed) as c_int
 }
 
 #[no_mangle]
@@ -11231,12 +11231,12 @@ pub unsafe extern "C" fn nzbget_rs_qhp_eval_dead_download(
     par_edge_margin: c_int,
     files_tried: c_int,
     probing_sec: c_int,
-    out_eval: *mut crate::queuehotpath::RsDeadDownloadEval,
+    out_eval: *mut crate::queuecoord::RsDeadDownloadEval,
 ) {
     if out_eval.is_null() {
         return;
     }
-    *out_eval = crate::queuehotpath::eval_dead_download(
+    *out_eval = crate::queuecoord::eval_dead_download(
         current_success,
         dupe_recovered,
         current_failed,
@@ -11255,9 +11255,9 @@ pub unsafe extern "C" fn nzbget_rs_qhp_is_side_file(
     filename: *const c_char,
     ext_cleanup_disk: *const c_char,
 ) -> c_int {
-    crate::queuehotpath::is_side_file(
-        crate::queuehotpath::cstr_to_bytes(filename),
-        crate::queuehotpath::cstr_to_bytes(ext_cleanup_disk),
+    crate::queuecoord::is_side_file(
+        crate::queuecoord::cstr_to_bytes(filename),
+        crate::queuecoord::cstr_to_bytes(ext_cleanup_disk),
     ) as c_int
 }
 
@@ -11268,7 +11268,7 @@ pub extern "C" fn nzbget_rs_qhp_is_hanging_download(
     article_timeout: c_int,
     is_running: c_int,
 ) -> c_int {
-    crate::queuehotpath::is_hanging_download(now, last_update, article_timeout, is_running != 0)
+    crate::queuecoord::is_hanging_download(now, last_update, article_timeout, is_running != 0)
         as c_int
 }
 
@@ -11322,7 +11322,7 @@ pub unsafe extern "C" fn nzbget_rs_qhp_parse_dupe_mode(
     text: *const c_char,
     out_mode: *mut c_int,
 ) -> c_int {
-    if let Some(m) = crate::queueeditor::parse_dupe_mode(crate::queuehotpath::cstr_to_bytes(text)) {
+    if let Some(m) = crate::queueeditor::parse_dupe_mode(crate::queuecoord::cstr_to_bytes(text)) {
         if !out_mode.is_null() {
             *out_mode = m;
         }
@@ -11339,7 +11339,7 @@ pub unsafe extern "C" fn nzbget_rs_qhp_parse_sort_spec(
     out_order: *mut c_int,
 ) -> c_int {
     if let Some((crit, ord)) =
-        crate::queueeditor::parse_sort_spec(crate::queuehotpath::cstr_to_bytes(sort))
+        crate::queueeditor::parse_sort_spec(crate::queuecoord::cstr_to_bytes(sort))
     {
         if !out_criteria.is_null() {
             *out_criteria = crit;
@@ -11403,10 +11403,10 @@ pub unsafe extern "C" fn nzbget_rs_qhp_compare_inner_files(
     same_par_collection: c_int,
 ) -> c_int {
     crate::queueeditor::compare_inner_files(
-        crate::queuehotpath::cstr_to_bytes(name1),
+        crate::queuecoord::cstr_to_bytes(name1),
         par1 != 0,
         size1,
-        crate::queuehotpath::cstr_to_bytes(name2),
+        crate::queuecoord::cstr_to_bytes(name2),
         par2 != 0,
         size2,
         same_par_collection != 0,
@@ -11421,7 +11421,7 @@ pub unsafe extern "C" fn nzbget_rs_qhp_compare_inner_files(
 pub unsafe extern "C" fn nzbget_rs_dsp_parse_format_version(
     format_signature: *const c_char,
 ) -> c_int {
-    crate::diskstatepp::parse_format_version(crate::diskstatepp::cstr_to_bytes(format_signature))
+    crate::diskstate_format::parse_format_version(crate::diskstate_format::cstr_to_bytes(format_signature))
 }
 
 #[no_mangle]
@@ -11430,7 +11430,7 @@ pub unsafe extern "C" fn nzbget_rs_dsp_sanitize_line_breaks(buf: *mut c_char, le
         return;
     }
     let slice = std::slice::from_raw_parts_mut(buf as *mut u8, len);
-    crate::diskstatepp::sanitize_line_breaks_in_place(slice);
+    crate::diskstate_format::sanitize_line_breaks_in_place(slice);
 }
 
 #[no_mangle]
@@ -11440,7 +11440,7 @@ pub unsafe extern "C" fn nzbget_rs_dsp_parse_ids_file(
     out_file_id: *mut c_int,
 ) -> c_int {
     if let Some((nzb_id, file_id)) =
-        crate::diskstatepp::parse_ids_file(crate::diskstatepp::cstr_to_bytes(text))
+        crate::diskstate_format::parse_ids_file(crate::diskstate_format::cstr_to_bytes(text))
     {
         if !out_nzb_id.is_null() {
             *out_nzb_id = nzb_id;
@@ -11460,7 +11460,7 @@ pub unsafe extern "C" fn nzbget_rs_dsp_classify_queue_dir_id(
     out_is_nzb_log: *mut c_int,
 ) -> c_int {
     if let Some((id, is_nzb_log)) =
-        crate::diskstatepp::classify_queue_dir_id(crate::diskstatepp::cstr_to_bytes(filename))
+        crate::diskstate_format::classify_queue_dir_id(crate::diskstate_format::cstr_to_bytes(filename))
     {
         if !out_is_nzb_log.is_null() {
             *out_is_nzb_log = if is_nzb_log { 1 } else { 0 };
@@ -11480,9 +11480,9 @@ pub unsafe extern "C" fn nzbget_rs_dsp_classify_legacy_file_state(
     out_id: *mut c_int,
     out_suffix_kind: *mut c_int,
 ) -> c_int {
-    if let Some((id, suffix_kind)) = crate::diskstatepp::classify_legacy_file_state(
-        crate::diskstatepp::cstr_to_bytes(filename),
-        crate::diskstatepp::cstr_to_bytes(header_line),
+    if let Some((id, suffix_kind)) = crate::diskstate_format::classify_legacy_file_state(
+        crate::diskstate_format::cstr_to_bytes(filename),
+        crate::diskstate_format::cstr_to_bytes(header_line),
         file_version,
         legacy_version,
     ) {
@@ -11508,7 +11508,7 @@ pub unsafe extern "C" fn nzbget_rs_dsp_validate_repair_hole(
     out_offset: *mut i64,
     out_size: *mut i64,
 ) -> c_int {
-    if let Some((offset, size)) = crate::diskstatepp::validate_repair_hole(
+    if let Some((offset, size)) = crate::diskstate_format::validate_repair_hole(
         offset_hi,
         offset_lo,
         size_hi,
@@ -11534,7 +11534,7 @@ pub unsafe extern "C" fn nzbget_rs_dsp_has_dupe_extras(
     recovered_holes: c_int,
     repair_jobs_count: usize,
 ) -> c_int {
-    if crate::diskstatepp::has_dupe_extras(
+    if crate::diskstate_format::has_dupe_extras(
         recovered_articles,
         recovered_bytes,
         recovered_holes,
@@ -11551,7 +11551,7 @@ pub unsafe extern "C" fn nzbget_rs_dsp_pack_unpack_tried_flags(
     unpack_tried: c_int,
     par_repaired: c_int,
 ) -> c_int {
-    crate::diskstatepp::pack_unpack_tried_flags(unpack_tried != 0, par_repaired != 0)
+    crate::diskstate_format::pack_unpack_tried_flags(unpack_tried != 0, par_repaired != 0)
 }
 
 #[no_mangle]
@@ -11566,10 +11566,10 @@ pub unsafe extern "C" fn nzbget_rs_dsp_parse_unpack_state_lines(
     out_par_repaired: *mut c_int,
     out_last_unpack_status: *mut c_int,
 ) -> c_int {
-    if let Some((ds, ut, pr, lus)) = crate::diskstatepp::parse_unpack_state_lines(
-        crate::diskstatepp::cstr_to_bytes(line1),
-        crate::diskstatepp::cstr_to_bytes(line2),
-        crate::diskstatepp::cstr_to_bytes(line3),
+    if let Some((ds, ut, pr, lus)) = crate::diskstate_format::parse_unpack_state_lines(
+        crate::diskstate_format::cstr_to_bytes(line1),
+        crate::diskstate_format::cstr_to_bytes(line2),
+        crate::diskstate_format::cstr_to_bytes(line3),
         ns_running,
         ns_none,
     ) {
@@ -11597,7 +11597,7 @@ pub unsafe extern "C" fn nzbget_rs_dsp_normalize_post_stage(
     format_version: c_int,
     pt_finished: c_int,
 ) -> c_int {
-    crate::diskstatepp::normalize_post_stage(post_stage, format_version, pt_finished)
+    crate::diskstate_format::normalize_post_stage(post_stage, format_version, pt_finished)
 }
 
 #[no_mangle]
@@ -11616,9 +11616,9 @@ pub unsafe extern "C" fn nzbget_rs_dsp_eval_article_load_state(
     has_result_filename: c_int,
     completed_articles_in: c_int,
     total_size: c_int,
-    out_eval: *mut crate::diskstatepp::RsArticleLoadEval,
+    out_eval: *mut crate::diskstate_format::RsArticleLoadEval,
 ) -> c_int {
-    let eval = crate::diskstatepp::eval_article_load_state(
+    let eval = crate::diskstate_format::eval_article_load_state(
         format_version,
         completed != 0,
         fields,
@@ -11652,7 +11652,7 @@ pub unsafe extern "C" fn nzbget_rs_dsp_reconcile_direct_write_output(
     out_new_output_initialized: *mut c_int,
     out_pick_path_kind: *mut c_int,
 ) {
-    let (new_init, pick_kind) = crate::diskstatepp::reconcile_direct_write_output(
+    let (new_init, pick_kind) = crate::diskstate_format::reconcile_direct_write_output(
         output_initialized != 0,
         has_own_out_file != 0,
         has_out_tmp != 0,
@@ -11676,7 +11676,7 @@ pub unsafe extern "C" fn nzbget_rs_dsp_classify_temp_file(
     out_part: *mut c_int,
 ) -> c_int {
     let (kind, id, part) =
-        crate::diskstatepp::classify_temp_file(crate::diskstatepp::cstr_to_bytes(filename));
+        crate::diskstate_format::classify_temp_file(crate::diskstate_format::cstr_to_bytes(filename));
     if !out_file_id.is_null() {
         *out_file_id = id;
     }
@@ -11704,8 +11704,8 @@ pub unsafe extern "C" fn nzbget_rs_dsp_is_orphan_queue_file(
     } else {
         std::slice::from_raw_parts(sorted_nzb_ids, nzb_ids_len)
     };
-    if crate::diskstatepp::is_orphan_queue_file(
-        crate::diskstatepp::cstr_to_bytes(filename),
+    if crate::diskstate_format::is_orphan_queue_file(
+        crate::diskstate_format::cstr_to_bytes(filename),
         file_ids,
         nzb_ids,
     ) {
@@ -11751,22 +11751,22 @@ pub unsafe extern "C" fn nzbget_rs_dsp_match_servers(
 
     let mut servers = Vec::with_capacity(server_count);
     for i in 0..server_count {
-        servers.push(crate::diskstatepp::ServerMatchInput {
-            name: crate::diskstatepp::cstr_to_bytes(*server_names.add(i)),
-            host: crate::diskstatepp::cstr_to_bytes(*server_hosts.add(i)),
+        servers.push(crate::diskstate_format::ServerMatchInput {
+            name: crate::diskstate_format::cstr_to_bytes(*server_names.add(i)),
+            host: crate::diskstate_format::cstr_to_bytes(*server_hosts.add(i)),
             port: *server_ports.add(i),
-            user: crate::diskstatepp::cstr_to_bytes(*server_users.add(i)),
+            user: crate::diskstate_format::cstr_to_bytes(*server_users.add(i)),
         });
     }
 
     let mut refs = Vec::with_capacity(ref_count);
     for i in 0..ref_count {
-        refs.push(crate::diskstatepp::ServerRefEntry {
+        refs.push(crate::diskstate_format::ServerRefEntry {
             state_id: *ref_state_ids.add(i),
-            name: crate::diskstatepp::cstr_to_bytes(*ref_names.add(i)),
-            host: crate::diskstatepp::cstr_to_bytes(*ref_hosts.add(i)),
+            name: crate::diskstate_format::cstr_to_bytes(*ref_names.add(i)),
+            host: crate::diskstate_format::cstr_to_bytes(*ref_hosts.add(i)),
             port: *ref_ports.add(i),
-            user: crate::diskstatepp::cstr_to_bytes(*ref_users.add(i)),
+            user: crate::diskstate_format::cstr_to_bytes(*ref_users.add(i)),
             matched: false,
             perfect: false,
         });
@@ -11777,7 +11777,7 @@ pub unsafe extern "C" fn nzbget_rs_dsp_match_servers(
     } else {
         std::slice::from_raw_parts_mut(out_server_state_ids, server_count)
     };
-    if crate::diskstatepp::match_servers(&servers, &mut refs, out_ids) {
+    if crate::diskstate_format::match_servers(&servers, &mut refs, out_ids) {
         1
     } else {
         0
@@ -11790,7 +11790,7 @@ pub unsafe extern "C" fn nzbget_rs_dsp_sanitize_log_text(buf: *mut c_char, len: 
         return;
     }
     let slice = std::slice::from_raw_parts_mut(buf as *mut u8, len);
-    crate::diskstatepp::sanitize_log_text_in_place(slice);
+    crate::diskstate_format::sanitize_log_text_in_place(slice);
 }
 
 #[no_mangle]
@@ -11801,7 +11801,7 @@ pub unsafe extern "C" fn nzbget_rs_dsp_parse_log_line(
     out_text_offset: *mut usize,
 ) -> c_int {
     if let Some((time, kind, offset)) =
-        crate::diskstatepp::parse_log_line(crate::diskstatepp::cstr_to_bytes(line))
+        crate::diskstate_format::parse_log_line(crate::diskstate_format::cstr_to_bytes(line))
     {
         if !out_time.is_null() {
             *out_time = time;
@@ -12353,7 +12353,7 @@ pub unsafe extern "C" fn nzbget_rs_dsp_scanner_next_pass(
 pub unsafe extern "C" fn nzbget_rs_dsp_can_process_extension(
     full_filename: *const c_char,
 ) -> c_int {
-    if crate::scanner::can_process_extension(crate::diskstatepp::cstr_to_bytes(full_filename)) {
+    if crate::scanner::can_process_extension(crate::diskstate_format::cstr_to_bytes(full_filename)) {
         1
     } else {
         0
@@ -12445,8 +12445,8 @@ pub unsafe extern "C" fn nzbget_rs_dsp_normalize_external_nzb_name(
     is_nzb: c_int,
 ) -> RsBuf {
     let out = crate::scanner::normalize_external_nzb_name(
-        crate::diskstatepp::cstr_to_bytes(nzb_name),
-        crate::diskstatepp::cstr_to_bytes(valid_name),
+        crate::diskstate_format::cstr_to_bytes(nzb_name),
+        crate::diskstate_format::cstr_to_bytes(valid_name),
         is_nzb != 0,
     );
     into_buf(out)
@@ -12459,7 +12459,7 @@ pub unsafe extern "C" fn nzbget_rs_dsp_normalize_external_nzb_name(
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_df_lower_key(key: *const c_char) -> RsBuf {
-    into_buf(crate::dupesearch_nzb::lower_key(crate::diskstatepp::cstr_to_bytes(key)))
+    into_buf(crate::dupesearch_nzb::lower_key(crate::diskstate_format::cstr_to_bytes(key)))
 }
 
 #[no_mangle]
@@ -12614,10 +12614,10 @@ pub unsafe extern "C" fn nzbget_rs_df_eval_pick_gone(
         deleting != 0,
         delete_status,
         ds_manual,
-        crate::diskstatepp::cstr_to_bytes(pick_eff_key),
-        crate::diskstatepp::cstr_to_bytes(job_dupe_key),
-        crate::diskstatepp::cstr_to_bytes(pick_norm_name),
-        crate::diskstatepp::cstr_to_bytes(job_norm_name),
+        crate::diskstate_format::cstr_to_bytes(pick_eff_key),
+        crate::diskstate_format::cstr_to_bytes(job_dupe_key),
+        crate::diskstate_format::cstr_to_bytes(pick_norm_name),
+        crate::diskstate_format::cstr_to_bytes(job_norm_name),
     )
 }
 
@@ -12630,8 +12630,8 @@ pub unsafe extern "C" fn nzbget_rs_df_format_pending_meta(
     date: i64,
 ) -> RsBuf {
     let out = crate::dupesearch_nzb::format_pending_meta(
-        crate::diskstatepp::cstr_to_bytes(title),
-        crate::diskstatepp::cstr_to_bytes(indexer),
+        crate::diskstate_format::cstr_to_bytes(title),
+        crate::diskstate_format::cstr_to_bytes(indexer),
         grabs,
         size,
         date,
@@ -12841,15 +12841,15 @@ pub unsafe extern "C" fn nzbget_rs_df_build_newznab_url(
     let mut vals: Vec<&[u8]> = Vec::with_capacity(param_count);
     if !param_keys.is_null() && !param_vals.is_null() {
         for i in 0..param_count {
-            keys.push(crate::diskstatepp::cstr_to_bytes(*param_keys.add(i)));
-            vals.push(crate::diskstatepp::cstr_to_bytes(*param_vals.add(i)));
+            keys.push(crate::diskstate_format::cstr_to_bytes(*param_keys.add(i)));
+            vals.push(crate::diskstate_format::cstr_to_bytes(*param_vals.add(i)));
         }
     }
     let out = crate::dupesearch_nzb::build_newznab_url(
-        crate::diskstatepp::cstr_to_bytes(base),
+        crate::diskstate_format::cstr_to_bytes(base),
         &keys,
         &vals,
-        crate::diskstatepp::cstr_to_bytes(api_key),
+        crate::diskstate_format::cstr_to_bytes(api_key),
     );
     into_buf(out)
 }
@@ -13052,12 +13052,12 @@ pub unsafe extern "C" fn nzbget_rs_sus_eval_quota_status(
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_sus_web_classify_get_dispatch(url: *const c_char) -> c_int {
-    crate::webserver::web_classify_get_dispatch(crate::diskstatepp::cstr_to_bytes(url))
+    crate::webserver::web_classify_get_dispatch(crate::diskstate_format::cstr_to_bytes(url))
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_sus_web_is_ignorable_404(base_name: *const c_char) -> c_int {
-    if crate::webserver::web_is_ignorable_404(crate::diskstatepp::cstr_to_bytes(base_name)) {
+    if crate::webserver::web_is_ignorable_404(crate::diskstate_format::cstr_to_bytes(base_name)) {
         1
     } else {
         0
@@ -13068,7 +13068,7 @@ pub unsafe extern "C" fn nzbget_rs_sus_web_is_ignorable_404(base_name: *const c_
 pub unsafe extern "C" fn nzbget_rs_sus_web_detect_content_type(
     filename: *const c_char,
 ) -> *const c_char {
-    match crate::webserver::web_detect_content_type(crate::diskstatepp::cstr_to_bytes(filename))
+    match crate::webserver::web_detect_content_type(crate::diskstate_format::cstr_to_bytes(filename))
     {
         Some(ct) => ct.as_ptr() as *const c_char,
         None => std::ptr::null(),
@@ -13083,7 +13083,7 @@ pub unsafe extern "C" fn nzbget_rs_sus_parse_queue_script_cmd(
     out_cmd: *mut crate::extension::RsQueueScriptCmd,
 ) -> c_int {
     let cmd = crate::extension::parse_queue_script_cmd(
-        crate::diskstatepp::cstr_to_bytes(msg_text),
+        crate::diskstate_format::cstr_to_bytes(msg_text),
         event,
         qe_nzb_downloaded,
     );
@@ -13131,19 +13131,19 @@ pub unsafe extern "C" fn nzbget_rs_sus_is_usable_queue_script(
     let mut pvals: Vec<&[u8]> = Vec::with_capacity(param_count);
     if !param_names.is_null() && !param_values.is_null() {
         for i in 0..param_count {
-            pnames.push(crate::diskstatepp::cstr_to_bytes(*param_names.add(i)));
-            pvals.push(crate::diskstatepp::cstr_to_bytes(*param_values.add(i)));
+            pnames.push(crate::diskstate_format::cstr_to_bytes(*param_names.add(i)));
+            pvals.push(crate::diskstate_format::cstr_to_bytes(*param_values.add(i)));
         }
     }
     if crate::extension::is_usable_queue_script(
         is_queue_script != 0,
-        crate::diskstatepp::cstr_to_bytes(queue_events),
-        crate::diskstatepp::cstr_to_bytes(script_name),
+        crate::diskstate_format::cstr_to_bytes(queue_events),
+        crate::diskstate_format::cstr_to_bytes(script_name),
         event,
         qe_url_completed,
         &pnames,
         &pvals,
-        crate::diskstatepp::cstr_to_bytes(url_extensions),
+        crate::diskstate_format::cstr_to_bytes(url_extensions),
     ) {
         1
     } else {
@@ -13188,8 +13188,8 @@ pub unsafe extern "C" fn nzbget_rs_sus_build_enabled_script_comma_list(
     let mut pvals: Vec<&[u8]> = Vec::with_capacity(param_count);
     if !param_names.is_null() && !param_values.is_null() {
         for i in 0..param_count {
-            pnames.push(crate::diskstatepp::cstr_to_bytes(*param_names.add(i)));
-            pvals.push(crate::diskstatepp::cstr_to_bytes(*param_values.add(i)));
+            pnames.push(crate::diskstate_format::cstr_to_bytes(*param_names.add(i)));
+            pvals.push(crate::diskstate_format::cstr_to_bytes(*param_values.add(i)));
         }
     }
     into_buf(crate::extension::build_enabled_script_comma_list(
@@ -13232,7 +13232,7 @@ pub unsafe extern "C" fn nzbget_rs_sus_parse_post_script_cmd(
     msg_text: *const c_char,
     out_cmd: *mut crate::extension::RsPostScriptCmd,
 ) -> c_int {
-    let cmd = crate::extension::parse_post_script_cmd(crate::diskstatepp::cstr_to_bytes(
+    let cmd = crate::extension::parse_post_script_cmd(crate::diskstate_format::cstr_to_bytes(
         msg_text,
     ));
     let kind = cmd.kind;
@@ -13247,7 +13247,7 @@ pub unsafe extern "C" fn nzbget_rs_sus_parse_scan_script_cmd(
     msg_text: *const c_char,
     out_cmd: *mut crate::extension::RsScanScriptCmd,
 ) -> c_int {
-    let cmd = crate::extension::parse_scan_script_cmd(crate::diskstatepp::cstr_to_bytes(
+    let cmd = crate::extension::parse_scan_script_cmd(crate::diskstate_format::cstr_to_bytes(
         msg_text,
     ));
     let kind = cmd.kind;
@@ -13267,8 +13267,8 @@ pub unsafe extern "C" fn nzbget_rs_sus_build_cipher_baseline(
     let mut val_slices: Vec<&[u8]> = Vec::with_capacity(count);
     if !names.is_null() && !values.is_null() {
         for i in 0..count {
-            name_slices.push(crate::diskstatepp::cstr_to_bytes(*names.add(i)));
-            val_slices.push(crate::diskstatepp::cstr_to_bytes(*values.add(i)));
+            name_slices.push(crate::diskstate_format::cstr_to_bytes(*names.add(i)));
+            val_slices.push(crate::diskstate_format::cstr_to_bytes(*values.add(i)));
         }
     }
     into_buf(crate::extension::build_cipher_baseline(
@@ -13279,7 +13279,7 @@ pub unsafe extern "C" fn nzbget_rs_sus_build_cipher_baseline(
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_sus_is_nzbget_internal_env_var(var: *const c_char) -> c_int {
-    if crate::extension::is_nzbget_internal_env_var(crate::diskstatepp::cstr_to_bytes(var)) {
+    if crate::extension::is_nzbget_internal_env_var(crate::diskstate_format::cstr_to_bytes(var)) {
         1
     } else {
         0
@@ -13291,7 +13291,7 @@ pub unsafe extern "C" fn nzbget_rs_sus_normalize_special_env_var_name(
     varname: *const c_char,
 ) -> RsBuf {
     into_buf(crate::extension::normalize_special_env_var_name(
-        crate::diskstatepp::cstr_to_bytes(varname),
+        crate::diskstate_format::cstr_to_bytes(varname),
     ))
 }
 
@@ -13304,7 +13304,7 @@ pub unsafe extern "C" fn nzbget_rs_sus_classify_script_output_line(
     if line.is_null() {
         return 0;
     }
-    let bytes = crate::diskstatepp::cstr_to_bytes(line);
+    let bytes = crate::diskstate_format::cstr_to_bytes(line);
     let (trimmed_len, kind, offset) = crate::extension::classify_script_output_line(bytes);
     *line.add(trimmed_len) = 0;
     if trimmed_len == 0 {
@@ -13334,7 +13334,7 @@ pub unsafe extern "C" fn nzbget_rs_sus_check_env_size_limit(
     for i in 0..count {
         let p = *env_vars.add(i);
         if !p.is_null() {
-            lens.push(crate::diskstatepp::cstr_to_bytes(p).len());
+            lens.push(crate::diskstate_format::cstr_to_bytes(p).len());
         }
     }
     if let Some(total) = crate::extension::check_env_size_limit(&lens, ptr_size, limit) {
@@ -13354,7 +13354,7 @@ pub unsafe extern "C" fn nzbget_rs_sus_check_env_size_limit(
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_rco_rpc_is_rpc_request(url: *const c_char) -> c_int {
-    if crate::xmlrpc_format::rpc_is_rpc_request(crate::diskstatepp::cstr_to_bytes(url)) {
+    if crate::xmlrpc_format::rpc_is_rpc_request(crate::diskstate_format::cstr_to_bytes(url)) {
         1
     } else {
         0
@@ -13445,7 +13445,7 @@ pub unsafe extern "C" fn nzbget_rs_rco_rpc_detect_group_status(
 pub unsafe extern "C" fn nzbget_rs_rco_rpc_lookup_edit_command(
     edit_command: *const c_char,
 ) -> c_int {
-    crate::xmlrpc_format::rpc_lookup_edit_command(crate::diskstatepp::cstr_to_bytes(edit_command))
+    crate::xmlrpc_format::rpc_lookup_edit_command(crate::diskstate_format::cstr_to_bytes(edit_command))
 }
 
 #[no_mangle]
@@ -13456,7 +13456,7 @@ pub unsafe extern "C" fn nzbget_rs_rco_rpc_validate_edit_queue_args(
 ) -> c_int {
     if crate::xmlrpc_format::rpc_validate_edit_queue_args(
         action,
-        crate::diskstatepp::cstr_to_bytes(args),
+        crate::diskstate_format::cstr_to_bytes(args),
         parsed_int_ok != 0,
     ) {
         1
@@ -13467,7 +13467,7 @@ pub unsafe extern "C" fn nzbget_rs_rco_rpc_validate_edit_queue_args(
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_rco_rpc_parse_write_log_kind(kind: *const c_char) -> c_int {
-    crate::xmlrpc_format::rpc_parse_write_log_kind(crate::diskstatepp::cstr_to_bytes(kind))
+    crate::xmlrpc_format::rpc_parse_write_log_kind(crate::diskstate_format::cstr_to_bytes(kind))
 }
 
 #[no_mangle]
@@ -13481,7 +13481,7 @@ pub unsafe extern "C" fn nzbget_rs_rco_rpc_detect_history_dup_status(
 pub unsafe extern "C" fn nzbget_rs_rco_rpc_parse_update_branch(
     branch_name: *const c_char,
 ) -> c_int {
-    crate::xmlrpc_format::rpc_parse_update_branch(crate::diskstatepp::cstr_to_bytes(branch_name))
+    crate::xmlrpc_format::rpc_parse_update_branch(crate::diskstate_format::cstr_to_bytes(branch_name))
 }
 
 #[no_mangle]
@@ -13492,7 +13492,7 @@ pub unsafe extern "C" fn nzbget_rs_rco_rpc_save_config_parse_bool(
     let opt = if val.is_null() {
         None
     } else {
-        Some(crate::diskstatepp::cstr_to_bytes(val))
+        Some(crate::diskstate_format::cstr_to_bytes(val))
     };
     if crate::xmlrpc_format::rpc_save_config_parse_bool(opt, def_val != 0) {
         1
@@ -13514,7 +13514,7 @@ pub unsafe extern "C" fn nzbget_rs_rco_rpc_save_config_check_global_conflicts(
         if p.is_null() {
             None
         } else {
-            Some(crate::diskstatepp::cstr_to_bytes(p))
+            Some(crate::diskstate_format::cstr_to_bytes(p))
         }
     };
     crate::xmlrpc_format::rpc_save_config_check_global_conflicts(
@@ -13553,7 +13553,7 @@ pub unsafe extern "C" fn nzbget_rs_rco_remote_parse_web_request_line(
     }
     let slice = std::slice::from_raw_parts(sig_ptr.cast::<u8>(), 4);
     let arr: [u8; 4] = [slice[0], slice[1], slice[2], slice[3]];
-    let line_bytes = crate::diskstatepp::cstr_to_bytes(line);
+    let line_bytes = crate::diskstate_format::cstr_to_bytes(line);
     if let Some((method, offset, len)) =
         crate::webserver::remote_parse_web_request_line(&arr, line_bytes)
     {
@@ -13641,7 +13641,7 @@ pub unsafe extern "C" fn nzbget_rs_rco_webdl_resolve_protocol_port(
 ) -> c_int {
     let (code, resolved_port, is_tls) = crate::webdownload::webdl_resolve_protocol_port(
         is_valid != 0,
-        crate::diskstatepp::cstr_to_bytes(protocol),
+        crate::diskstate_format::cstr_to_bytes(protocol),
         port,
         tls_disabled != 0,
     );
@@ -13678,7 +13678,7 @@ pub unsafe extern "C" fn nzbget_rs_rco_options_find_var_reference(
     out_var_len: *mut usize,
 ) -> c_int {
     if let Some((pos, len)) =
-        crate::options::options_find_var_reference(crate::diskstatepp::cstr_to_bytes(s))
+        crate::options::options_find_var_reference(crate::diskstate_format::cstr_to_bytes(s))
     {
         if !out_dollar_pos.is_null() {
             *out_dollar_pos = pos;
@@ -13699,7 +13699,7 @@ pub unsafe extern "C" fn nzbget_rs_rco_options_trim_and_check_config_line(
     if line.is_null() {
         return 1;
     }
-    let bytes = crate::diskstatepp::cstr_to_bytes(line);
+    let bytes = crate::diskstate_format::cstr_to_bytes(line);
     let (new_len, skip) = crate::options::options_trim_and_check_config_line(bytes);
     *line.add(new_len) = 0;
     if skip { 1 } else { 0 }
@@ -13709,7 +13709,7 @@ pub unsafe extern "C" fn nzbget_rs_rco_options_trim_and_check_config_line(
 pub unsafe extern "C" fn nzbget_rs_rco_options_lookup_scheduler_command(
     cmd: *const c_char,
 ) -> c_int {
-    crate::options::options_lookup_scheduler_command(crate::diskstatepp::cstr_to_bytes(cmd))
+    crate::options::options_lookup_scheduler_command(crate::diskstate_format::cstr_to_bytes(cmd))
 }
 
 #[no_mangle]
@@ -13721,7 +13721,7 @@ pub unsafe extern "C" fn nzbget_rs_rco_options_validate_scheduler_param(
     let opt = if param.is_null() {
         None
     } else {
-        Some(crate::diskstatepp::cstr_to_bytes(param))
+        Some(crate::diskstate_format::cstr_to_bytes(param))
     };
     crate::options::options_validate_scheduler_param(task_command, opt, split_cmd_empty != 0)
 }
@@ -13764,7 +13764,7 @@ pub unsafe extern "C" fn nzbget_rs_rco_wstring_decode_utf8_to_utf16(
     if utf8.is_null() || out.is_null() || out_cap == 0 {
         return 0;
     }
-    let bytes = crate::diskstatepp::cstr_to_bytes(utf8);
+    let bytes = crate::diskstate_format::cstr_to_bytes(utf8);
     let out_slice = std::slice::from_raw_parts_mut(out, out_cap);
     crate::util::wstring_decode_utf8_to_utf16(bytes, out_slice)
 }
@@ -13977,8 +13977,8 @@ pub unsafe extern "C" fn nzbget_rs_feh_maintenance_extract_package_info_str(
     if json.is_null() || key.is_null() {
         return 0;
     }
-    let json_bytes = crate::diskstatepp::cstr_to_bytes(json);
-    let key_bytes = crate::diskstatepp::cstr_to_bytes(key);
+    let json_bytes = crate::diskstate_format::cstr_to_bytes(json);
+    let key_bytes = crate::diskstate_format::cstr_to_bytes(key);
     match crate::extension::maintenance_extract_package_info_str(
         json_bytes,
         key_bytes,
@@ -14004,7 +14004,7 @@ pub unsafe extern "C" fn nzbget_rs_feh_maintenance_classify_update_message(
     if text.is_null() {
         return 0;
     }
-    let bytes = crate::diskstatepp::cstr_to_bytes(text);
+    let bytes = crate::diskstate_format::cstr_to_bytes(text);
     crate::extension::maintenance_classify_update_message(bytes)
 }
 
@@ -14015,7 +14015,7 @@ pub unsafe extern "C" fn nzbget_rs_feh_maintenance_classify_update_info_message(
     if text.is_null() {
         return 0;
     }
-    let bytes = crate::diskstatepp::cstr_to_bytes(text);
+    let bytes = crate::diskstate_format::cstr_to_bytes(text);
     crate::extension::maintenance_classify_update_info_message(bytes)
 }
 
@@ -14027,7 +14027,7 @@ pub unsafe extern "C" fn nzbget_rs_feh_maintenance_decode_hex_signature(
     if hex_sig.is_null() || out_sig.is_null() {
         return 0;
     }
-    let bytes = crate::diskstatepp::cstr_to_bytes(hex_sig);
+    let bytes = crate::diskstate_format::cstr_to_bytes(hex_sig);
     let out_arr = &mut *out_sig.cast::<[u8; 256]>();
     c_int::from(crate::extension::maintenance_decode_hex_signature(
         bytes, out_arr,
@@ -15876,7 +15876,7 @@ pub extern "C" fn nzbget_rs_queue_coord_is_smaller_dupe_file(
     size2: i64,
     idx2: c_int,
 ) -> c_int {
-    i32::from(crate::queuehotpath::is_smaller_dupe_file(
+    i32::from(crate::queuecoord::is_smaller_dupe_file(
         size1, idx1, size2, idx2,
     ))
 }
@@ -15896,7 +15896,7 @@ pub extern "C" fn nzbget_rs_queue_coord_should_skip_health_check(
     success_articles: c_int,
     total_articles: c_int,
 ) -> c_int {
-    i32::from(crate::queuehotpath::should_skip_health_check(
+    i32::from(crate::queuecoord::should_skip_health_check(
         health_check,
         hc_none,
         hc_park,
@@ -15927,7 +15927,7 @@ pub extern "C" fn nzbget_rs_queue_coord_is_queued_dupe_active(
     direct_unpack_status: c_int,
     ns_running: c_int,
 ) -> c_int {
-    i32::from(crate::queuehotpath::is_queued_dupe_active(
+    i32::from(crate::queuecoord::is_queued_dupe_active(
         deleting != 0,
         delete_status,
         ds_none,
@@ -16087,7 +16087,7 @@ pub extern "C" fn nzbget_rs_dsp_validate_dupe_extras_header(
     recovered_articles: c_int,
     recovered_holes: c_int,
 ) -> c_int {
-    i32::from(crate::diskstatepp::validate_dupe_extras_header(
+    i32::from(crate::diskstate_format::validate_dupe_extras_header(
         scan_cnt,
         recovered_articles,
         recovered_holes,
@@ -16102,7 +16102,7 @@ pub extern "C" fn nzbget_rs_dsp_validate_repair_job_header(
     par_file: c_int,
     failed_articles: c_int,
 ) -> c_int {
-    i32::from(crate::diskstatepp::validate_repair_job_header(
+    i32::from(crate::diskstate_format::validate_repair_job_header(
         scan_cnt,
         expected_cnt,
         file_id,
@@ -16120,7 +16120,7 @@ pub extern "C" fn nzbget_rs_dsp_eval_restored_output_init(
     has_out_tmp: c_int,
     has_force_dest: c_int,
 ) -> c_int {
-    i32::from(crate::diskstatepp::eval_restored_output_init(
+    i32::from(crate::diskstate_format::eval_restored_output_init(
         output_initialized,
         direct_write != 0,
         force_direct_write != 0,
@@ -16140,7 +16140,7 @@ pub unsafe extern "C" fn nzbget_rs_dsp_calc_staged_fallback(
     ai_undefined: c_int,
     out_saved_status: *mut c_int,
 ) -> c_int {
-    let (staged, saved_status) = crate::diskstatepp::calc_staged_fallback(
+    let (staged, saved_status) = crate::diskstate_format::calc_staged_fallback(
         completed != 0,
         article_status,
         ai_finished,
@@ -16160,7 +16160,7 @@ pub extern "C" fn nzbget_rs_dsp_validate_article_count(
     has_articles: c_int,
     articles_len: c_int,
 ) -> c_int {
-    i32::from(crate::diskstatepp::validate_article_count(
+    i32::from(crate::diskstate_format::validate_article_count(
         size,
         has_articles != 0,
         articles_len,
@@ -16180,7 +16180,7 @@ pub extern "C" fn nzbget_rs_dsp_need_staged_file_check(
     direct_write: c_int,
     force_direct_write: c_int,
 ) -> c_int {
-    i32::from(crate::diskstatepp::need_staged_file_check(
+    i32::from(crate::diskstate_format::need_staged_file_check(
         completed != 0,
         format_version,
         status_int,
@@ -16201,7 +16201,7 @@ pub unsafe extern "C" fn nzbget_rs_dsp_calc_volume_slot_size(
     out_target_size: *mut c_int,
 ) -> c_int {
     let (valid, target_size) =
-        crate::diskstatepp::calc_volume_slot_size(slot_index, arr_size);
+        crate::diskstate_format::calc_volume_slot_size(slot_index, arr_size);
     if !out_target_size.is_null() {
         *out_target_size = target_size;
     }
@@ -16220,7 +16220,7 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_calc_propagation_wait_log_mins(
     out_posted_min: *mut c_int,
     out_start_min: *mut c_int,
 ) {
-    let (posted_min, start_min) = crate::queuehotpath::calc_propagation_wait_log_mins(
+    let (posted_min, start_min) = crate::queuecoord::calc_propagation_wait_log_mins(
         file_time,
         propagation_delay,
         cur_date,
@@ -16258,7 +16258,7 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_eval_dupe_recovery_and_cutover(
         CStr::from_ptr(orig_msg_id).to_bytes()
     };
     let (recovered, next_file_rec, next_nzb_rec, trigger_cutover) =
-        crate::queuehotpath::eval_dupe_recovery_and_cutover(
+        crate::queuecoord::eval_dupe_recovery_and_cutover(
             dupe_fallback_round,
             dupe_proactive != 0,
             m,
@@ -16295,7 +16295,7 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_advance_article_completion_counte
     out_completed_articles: *mut c_int,
 ) -> c_int {
     let (rf, rn, ps, ca, fc) =
-        crate::queuehotpath::advance_article_completion_counters(
+        crate::queuecoord::advance_article_completion_counters(
             rem_file_size,
             rem_nzb_size,
             paused_size,
@@ -16330,7 +16330,7 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_eval_file_completion_and_assembly
     out_file_completed: *mut c_int,
 ) -> c_int {
     let (fc, complete_parts) =
-        crate::queuehotpath::eval_file_completion_and_assembly(
+        crate::queuecoord::eval_file_completion_and_assembly(
             file_completed != 0,
             parking != 0,
             active_downloads,
@@ -16369,7 +16369,7 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_apply_assembly_failure_counters(
     {
         return;
     }
-    crate::queuehotpath::apply_assembly_failure_counters(
+    crate::queuecoord::apply_assembly_failure_counters(
         success_articles,
         success_size,
         is_par_file != 0,
@@ -16429,7 +16429,7 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_demote_article_counters(
     } else {
         CStr::from_ptr(orig_msg_id).to_bytes()
     };
-    crate::queuehotpath::demote_article_counters(
+    crate::queuecoord::demote_article_counters(
         article_size,
         is_par_file != 0,
         dupe_proactive != 0,
@@ -16463,7 +16463,7 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_should_defer_dupe_failover(
     failover_checked: c_int,
     out_update_checked: *mut c_int,
 ) -> c_int {
-    let (defer, update_checked) = crate::queuehotpath::should_defer_dupe_failover(
+    let (defer, update_checked) = crate::queuecoord::should_defer_dupe_failover(
         fallback_enabled != 0,
         attempted,
         recovered,
@@ -16494,7 +16494,7 @@ pub extern "C" fn nzbget_rs_queue_coord_should_park_dead_without_backup(
     below: c_int,
 ) -> c_int {
     i32::from(
-        crate::queuehotpath::should_park_dead_without_backup(
+        crate::queuecoord::should_park_dead_without_backup(
             fallback_enabled != 0,
             defer_state,
             dp_deferred,
@@ -16523,7 +16523,7 @@ pub extern "C" fn nzbget_rs_queue_coord_should_wait_for_borrowing_on_par_damage(
     recovered: c_int,
 ) -> c_int {
     i32::from(
-        crate::queuehotpath::should_wait_for_borrowing_on_par_damage(
+        crate::queuecoord::should_wait_for_borrowing_on_par_damage(
             fallback_enabled != 0,
             raw_article != 0,
             dupe_mode,
@@ -16550,7 +16550,7 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_eval_discard_direct_rename_file(
     out_discard_infos: *mut c_int,
 ) -> c_int {
     let (discard_par, discard_infos) =
-        crate::queuehotpath::eval_discard_direct_rename_file(
+        crate::queuecoord::eval_discard_direct_rename_file(
             is_par_file != 0,
             completed_articles,
             active_downloads,
@@ -16572,7 +16572,7 @@ pub extern "C" fn nzbget_rs_queue_coord_validate_split_file_state(
     has_post_info: c_int,
     same_nzb: c_int,
 ) -> c_int {
-    crate::queuehotpath::validate_split_file_state(
+    crate::queuecoord::validate_split_file_state(
         active_downloads,
         completed_articles,
         has_post_info != 0,
@@ -17382,7 +17382,7 @@ pub unsafe extern "C" fn nzbget_rs_ufs_util_match_shell_overridden_token(
         std::slice::from_raw_parts(file_ext.cast::<u8>(), file_ext_len)
     };
     if let Some(off) = crate::util::util_match_shell_overridden_token(
-        crate::queuehotpath::cstr_to_bytes(shellover),
+        crate::queuecoord::cstr_to_bytes(shellover),
         ext_slice,
     ) {
         if !out_cmd_offset.is_null() {
@@ -17460,7 +17460,7 @@ pub unsafe extern "C" fn nzbget_rs_ufs_fs_classify_expand_file_name(
     out_skip_dot_slash: *mut usize,
 ) -> c_int {
     let (is_rel, skip) = crate::util::fs_classify_expand_file_name(
-        crate::queuehotpath::cstr_to_bytes(filename),
+        crate::queuecoord::cstr_to_bytes(filename),
     );
     if !out_skip_dot_slash.is_null() {
         *out_skip_dot_slash = skip;
@@ -17472,7 +17472,7 @@ pub unsafe extern "C" fn nzbget_rs_ufs_fs_classify_expand_file_name(
 pub unsafe extern "C" fn nzbget_rs_ufs_dir_browser_is_dot_or_dotdot(
     filename: *const c_char,
 ) -> c_int {
-    crate::util::dir_browser_is_dot_or_dotdot(crate::queuehotpath::cstr_to_bytes(filename))
+    crate::util::dir_browser_is_dot_or_dotdot(crate::queuecoord::cstr_to_bytes(filename))
 }
 
 #[no_mangle]
@@ -17498,10 +17498,10 @@ pub unsafe extern "C" fn nzbget_rs_ufs_script_ctrl_matches_env_prefix(
     let prefix = if strip_prefix.is_null() {
         None
     } else {
-        Some(crate::queuehotpath::cstr_to_bytes(strip_prefix))
+        Some(crate::queuecoord::cstr_to_bytes(strip_prefix))
     };
     crate::util::script_ctrl_matches_env_prefix(
-        crate::queuehotpath::cstr_to_bytes(opt_name),
+        crate::queuecoord::cstr_to_bytes(opt_name),
         prefix,
         prefix_len,
     )
@@ -17514,7 +17514,7 @@ pub unsafe extern "C" fn nzbget_rs_ufs_script_ctrl_is_fork_start_error_line(
 ) -> c_int {
     crate::util::script_ctrl_is_fork_start_error_line(
         first_line,
-        crate::queuehotpath::cstr_to_bytes(buf),
+        crate::queuecoord::cstr_to_bytes(buf),
     )
 }
 
@@ -17554,7 +17554,7 @@ pub unsafe extern "C" fn nzbget_rs_dsp_inspect_read_line(
     out_needs_scroll: *mut c_int,
     out_new_len: *mut usize,
 ) -> c_int {
-    let bytes = crate::queuehotpath::cstr_to_bytes(buf);
+    let bytes = crate::queuecoord::cstr_to_bytes(buf);
     if bytes.is_empty() {
         if !out_needs_scroll.is_null() {
             *out_needs_scroll = 0;
@@ -17564,7 +17564,7 @@ pub unsafe extern "C" fn nzbget_rs_dsp_inspect_read_line(
         }
         0
     } else {
-        let (needs_scroll, new_len) = crate::diskstatepp::inspect_read_line(bytes);
+        let (needs_scroll, new_len) = crate::diskstate_format::inspect_read_line(bytes);
         if !out_needs_scroll.is_null() {
             *out_needs_scroll = needs_scroll as c_int;
         }
@@ -17583,7 +17583,7 @@ pub unsafe extern "C" fn nzbget_rs_dsp_check_queue_format_version(
     out_load_inline_history: *mut c_int,
 ) -> c_int {
     let (status, is_legacy, load_inline_history) =
-        crate::diskstatepp::check_queue_format_version(format_version, queue_version);
+        crate::diskstate_format::check_queue_format_version(format_version, queue_version);
     if !out_is_legacy.is_null() {
         *out_is_legacy = is_legacy as c_int;
     }
@@ -17599,8 +17599,8 @@ pub unsafe extern "C" fn nzbget_rs_dsp_parse_legacy_file_state_trailer(
     out_decoded_size: *mut i64,
     out_output_initialized: *mut c_int,
 ) -> c_int {
-    let (kind, decoded, init) = crate::diskstatepp::parse_legacy_file_state_trailer(
-        crate::queuehotpath::cstr_to_bytes(line),
+    let (kind, decoded, init) = crate::diskstate_format::parse_legacy_file_state_trailer(
+        crate::queuecoord::cstr_to_bytes(line),
     );
     if !out_decoded_size.is_null() {
         *out_decoded_size = decoded;
@@ -17621,12 +17621,12 @@ pub unsafe extern "C" fn nzbget_rs_dsp_feed_status_matches(
     feed_filter_hash: u32,
     filter_hash: u32,
 ) -> c_int {
-    crate::diskstatepp::feed_status_matches(
-        crate::queuehotpath::cstr_to_bytes(feed_url),
-        crate::queuehotpath::cstr_to_bytes(url),
+    crate::diskstate_format::feed_status_matches(
+        crate::queuecoord::cstr_to_bytes(feed_url),
+        crate::queuecoord::cstr_to_bytes(url),
         format_version,
-        crate::queuehotpath::cstr_to_bytes(feed_filter),
-        crate::queuehotpath::cstr_to_bytes(filter),
+        crate::queuecoord::cstr_to_bytes(feed_filter),
+        crate::queuecoord::cstr_to_bytes(filter),
         feed_filter_hash,
         filter_hash,
     )
@@ -17645,11 +17645,11 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_select_dupe_donor_id(
     } else {
         std::slice::from_raw_parts(donors_ptr, donors_len)
     };
-    crate::queuehotpath::select_dupe_donor_id(
+    crate::queuecoord::select_dupe_donor_id(
         dupe_fallback_round,
         donors,
-        crate::queuehotpath::cstr_to_bytes(msg_id),
-        crate::queuehotpath::cstr_to_bytes(orig_msg_id),
+        crate::queuecoord::cstr_to_bytes(msg_id),
+        crate::queuecoord::cstr_to_bytes(orig_msg_id),
     )
 }
 
@@ -17672,7 +17672,7 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_apply_failed_article_counters(
     out_nzb_cur_failed_articles: *mut c_int,
 ) {
     let (r, ffs, ncfs, npcfs, ffa, ncfa) =
-        crate::queuehotpath::apply_failed_article_counters(
+        crate::queuecoord::apply_failed_article_counters(
             part_number,
             par_file,
             article_size,
@@ -17715,7 +17715,7 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_eval_delete_file_diskstate_flags(
     out_save_partial: *mut c_int,
 ) {
     let (delete_data, save_partial) =
-        crate::queuehotpath::eval_delete_file_diskstate_flags(
+        crate::queuecoord::eval_delete_file_diskstate_flags(
             file_status,
             cf_success,
             cf_partial,
@@ -17759,7 +17759,7 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_discard_downloaded_articles_count
     out_file_rem_size: *mut i64,
 ) {
     let (n_rem, n_pau, n_csa, n_css, n_pcss, n_cfa, n_cfs, n_pcfs, f_rem) =
-        crate::queuehotpath::discard_downloaded_articles_counters(
+        crate::queuecoord::discard_downloaded_articles_counters(
             nzb_rem_size,
             nzb_paused_size,
             nzb_cur_succ_art,
@@ -18303,7 +18303,7 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_apply_success_article_counters(
     out_nzb_cur_success_articles: *mut c_int,
 ) {
     let (fs, ns, ps, fa, na) =
-        crate::queuehotpath::apply_success_article_counters(
+        crate::queuecoord::apply_success_article_counters(
             article_size,
             is_par_file != 0,
             file_success_size,
@@ -19132,22 +19132,22 @@ pub unsafe extern "C" fn nzbget_rs_dupe_watch_format_searched_state_line(
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_queue_coord_merge_counters(
-    dest: *mut crate::queuehotpath::NzbgetRsNzbMergeSplitCounters,
-    src: *const crate::queuehotpath::NzbgetRsNzbMergeSplitCounters,
+    dest: *mut crate::queuecoord::NzbgetRsNzbMergeSplitCounters,
+    src: *const crate::queuecoord::NzbgetRsNzbMergeSplitCounters,
 ) {
     if !dest.is_null() && !src.is_null() {
-        crate::queuehotpath::merge_counters(&mut *dest, &*src);
+        crate::queuecoord::merge_counters(&mut *dest, &*src);
     }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_queue_coord_split_transfer_file(
-    src: *mut crate::queuehotpath::NzbgetRsNzbMergeSplitCounters,
-    dst: *mut crate::queuehotpath::NzbgetRsNzbMergeSplitCounters,
-    file: *const crate::queuehotpath::NzbgetRsSplitFileCounters,
+    src: *mut crate::queuecoord::NzbgetRsNzbMergeSplitCounters,
+    dst: *mut crate::queuecoord::NzbgetRsNzbMergeSplitCounters,
+    file: *const crate::queuecoord::NzbgetRsSplitFileCounters,
 ) {
     if !src.is_null() && !dst.is_null() && !file.is_null() {
-        crate::queuehotpath::split_transfer_file(&mut *src, &mut *dst, &*file);
+        crate::queuecoord::split_transfer_file(&mut *src, &mut *dst, &*file);
     }
 }
 
@@ -19842,49 +19842,6 @@ pub unsafe extern "C" fn nzbget_rs_dupe_fallback_borrowed_par2_mismatches(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_deadpostings_is_stale(now: i64, recorded: i64) -> i32 {
-    i32::from(crate::deadpostings::is_stale_timestamp(now, recorded))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_deadpostings_entry_matches(
-    now: i64,
-    recorded: i64,
-    query_ptr: *const u32,
-    query_len: usize,
-    entry_ptr: *const u32,
-    entry_len: usize,
-) -> i32 {
-    let query = if query_ptr.is_null() || query_len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(query_ptr, query_len)
-    };
-    let entry = if entry_ptr.is_null() || entry_len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(entry_ptr, entry_len)
-    };
-    i32::from(crate::deadpostings::is_active_entry_match(
-        now, recorded, query, entry,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_deadpostings_format_line(
-    stamp: i64,
-    hashes_ptr: *const u32,
-    hashes_len: usize,
-) -> RsBuf {
-    let hashes = if hashes_ptr.is_null() || hashes_len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(hashes_ptr, hashes_len)
-    };
-    into_buf(crate::deadpostings::format_deadpostings_line(stamp, hashes))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_donorscore_take_rank(
     alive: f64,
     twin: i32,
@@ -20111,7 +20068,7 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_find_dupe_file_indices(
     for i in 0..count {
         name_slices.push(input(*filenames.add(i)));
     }
-    crate::queuehotpath::find_dupe_file_indices(
+    crate::queuecoord::find_dupe_file_indices(
         &name_slices,
         std::slice::from_raw_parts(sizes, count),
         std::slice::from_raw_parts_mut(out_dupe_indices, out_cap),
@@ -21188,7 +21145,7 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_format_donor_id_list(
     } else {
         std::slice::from_raw_parts(donor_ids_ptr, len)
     };
-    let (uniq, formatted) = crate::queuehotpath::format_donor_id_list(ids);
+    let (uniq, formatted) = crate::queuecoord::format_donor_id_list(ids);
     if !out_unique_ids_ptr.is_null() && uniq.len() <= len {
         std::ptr::copy_nonoverlapping(uniq.as_ptr(), out_unique_ids_ptr, uniq.len());
     }
@@ -21214,7 +21171,7 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_is_size_twin(
     } else {
         std::slice::from_raw_parts(other_file_sizes_ptr, other_file_sizes_len)
     };
-    if crate::queuehotpath::is_size_twin(
+    if crate::queuecoord::is_size_twin(
         is_self != 0,
         same_name_or_key != 0,
         self_size,
@@ -22199,7 +22156,7 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_format_par_damage_summary(
     recovery_blocks: i32,
 ) -> RsBuf {
     into_buf(
-        crate::queuehotpath::format_par_damage_summary(
+        crate::queuecoord::format_par_damage_summary(
             certain != 0,
             damaged_blocks,
             projected_blocks,
@@ -22872,45 +22829,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_bytes_eq_ignore_case(
         CStr::from_ptr(b).to_bytes()
     };
     c_int::from(crate::util::bytes_eq_ignore_case(sa, sb))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_newznab_classify_start_element(
-    depth: c_int,
-    in_item: c_int,
-    name: *const c_char,
-) -> c_int {
-    let n = if name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(name).to_bytes()
-    };
-    crate::dupesearch_nzb::newznab_classify_start_element(depth, in_item != 0, n)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_newznab_classify_item_attr_key(
-    key: *const c_char,
-) -> c_int {
-    let k = if key.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(key).to_bytes()
-    };
-    crate::dupesearch_nzb::newznab_classify_item_attr_key(k)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_newznab_classify_end_element(
-    in_item: c_int,
-    name: *const c_char,
-) -> c_int {
-    let n = if name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(name).to_bytes()
-    };
-    crate::dupesearch_nzb::newznab_classify_end_element(in_item != 0, n)
 }
 
 #[no_mangle]
@@ -25688,8 +25606,8 @@ pub unsafe extern "C" fn nzbget_rs_move_controller_move_files(
     rename_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *const c_char)>,
 ) -> c_int {
     let inter_path =
-        crate::cleanup::bytes_to_path_buf(crate::diskstatepp::cstr_to_bytes(inter_dir));
-    let dest_path = crate::cleanup::bytes_to_path_buf(crate::diskstatepp::cstr_to_bytes(dest_dir));
+        crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(inter_dir));
+    let dest_path = crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(dest_dir));
     let ok = crate::cleanup::move_files(
         &inter_path,
         &dest_path,
@@ -25729,8 +25647,8 @@ pub unsafe extern "C" fn nzbget_rs_move_controller_remove_stale_hardlinks(
     log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
 ) {
     let hl_path =
-        crate::cleanup::bytes_to_path_buf(crate::diskstatepp::cstr_to_bytes(hard_link_path));
-    let dst_path = crate::cleanup::bytes_to_path_buf(crate::diskstatepp::cstr_to_bytes(dest_dir));
+        crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(hard_link_path));
+    let dst_path = crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(dest_dir));
     crate::cleanup::remove_stale_hardlinks(&hl_path, &dst_path, |kind, msg| {
         if let Some(cb) = log_cb {
             let c_msg = bytes_to_cstr_buf(msg);
@@ -25761,9 +25679,9 @@ pub unsafe extern "C" fn nzbget_rs_cleanup_controller_run(
     log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
     out_cleanup_status: *mut c_int,
 ) -> c_int {
-    let dst_path = crate::cleanup::bytes_to_path_buf(crate::diskstatepp::cstr_to_bytes(dest_dir));
-    let fin_path = crate::cleanup::bytes_to_path_buf(crate::diskstatepp::cstr_to_bytes(final_dir));
-    let ext_bytes = crate::diskstatepp::cstr_to_bytes(ext_cleanup_disk);
+    let dst_path = crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(dest_dir));
+    let fin_path = crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(final_dir));
+    let ext_bytes = crate::diskstate_format::cstr_to_bytes(ext_cleanup_disk);
     let (outcome, status) =
         crate::cleanup::run_cleanup(&dst_path, &fin_path, ext_bytes, |kind, msg| {
             if let Some(cb) = log_cb {
@@ -25863,10 +25781,10 @@ pub unsafe extern "C" fn nzbget_rs_post_renamer_run(
     log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
     rename_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *const c_char)>,
 ) -> c_int {
-    let meta_bytes = crate::diskstatepp::cstr_to_bytes(meta_name);
-    let nzb_bytes = crate::diskstatepp::cstr_to_bytes(nzb_name);
-    let dst_path = crate::cleanup::bytes_to_path_buf(crate::diskstatepp::cstr_to_bytes(dst_dir));
-    let ignore_bytes = crate::diskstatepp::cstr_to_bytes(ignore_ext);
+    let meta_bytes = crate::diskstate_format::cstr_to_bytes(meta_name);
+    let nzb_bytes = crate::diskstate_format::cstr_to_bytes(nzb_name);
+    let dst_path = crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(dst_dir));
+    let ignore_bytes = crate::diskstate_format::cstr_to_bytes(ignore_ext);
 
     crate::cleanup::run_post_renamer(
         is_post_unpack != 0,
@@ -25916,11 +25834,11 @@ pub unsafe extern "C" fn nzbget_rs_archive_processor_handle_extract_failure(
     log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
 ) {
     let archive_path =
-        crate::cleanup::bytes_to_path_buf(crate::diskstatepp::cstr_to_bytes(archive_file));
+        crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(archive_file));
     let unpack_path =
-        crate::cleanup::bytes_to_path_buf(crate::diskstatepp::cstr_to_bytes(unpack_dir));
+        crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(unpack_dir));
     let broken_path =
-        crate::cleanup::bytes_to_path_buf(crate::diskstatepp::cstr_to_bytes(broken_dir));
+        crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(broken_dir));
 
     crate::cleanup::archive_handle_extract_failure(
         &archive_path,
@@ -25947,12 +25865,12 @@ pub unsafe extern "C" fn nzbget_rs_archive_processor_finish(
     moved_nzb_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
 ) {
     let archive_path =
-        crate::cleanup::bytes_to_path_buf(crate::diskstatepp::cstr_to_bytes(archive_file));
+        crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(archive_file));
     let unpack_path =
-        crate::cleanup::bytes_to_path_buf(crate::diskstatepp::cstr_to_bytes(unpack_dir));
-    let dest_path = crate::cleanup::bytes_to_path_buf(crate::diskstatepp::cstr_to_bytes(dest_dir));
+        crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(unpack_dir));
+    let dest_path = crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(dest_dir));
     let processed_path =
-        crate::cleanup::bytes_to_path_buf(crate::diskstatepp::cstr_to_bytes(processed_dir));
+        crate::cleanup::bytes_to_path_buf(crate::diskstate_format::cstr_to_bytes(processed_dir));
 
     crate::cleanup::archive_finish_extracted(
         &archive_path,

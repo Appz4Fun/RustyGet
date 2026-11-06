@@ -1212,12 +1212,18 @@ int nzbget_rs_dupe_lenient_ok(const char* title, size_t titleLen, const char* ma
 size_t nzbget_rs_stream_patch_parts(const void* donors, size_t donorCount,
     const void* holes, size_t holeCount, int32_t margin, int32_t* output);
 
-// Dead-posting persistence line parser (rust/src/deadpostings.rs).
-// data points to len bytes, or is null with len zero. visit receives one complete
-// sorted unique sketch, borrowed only during the callback. visit must not throw.
-// False means the entire line is invalid; no partial callback is made.
-bool nzbget_rs_deadpostings_parse(const uint8_t* data, size_t len, void* context,
-	void (*visit)(void* context, int64_t stamp, const uint32_t* hashes, size_t count));
+// Dead-posting store (rust/src/deadpostings.rs).
+struct NzbgetRsDeadPostingsStore;
+typedef struct NzbgetRsDeadPostingsStore NzbgetRsDeadPostingsStore;
+NzbgetRsDeadPostingsStore* nzbget_rs_deadpostings_store_new(void);
+void nzbget_rs_deadpostings_store_free(NzbgetRsDeadPostingsStore* store);
+void nzbget_rs_deadpostings_store_set_state_path(
+	const NzbgetRsDeadPostingsStore* store, const uint8_t* path, size_t len);
+void nzbget_rs_deadpostings_store_load(const NzbgetRsDeadPostingsStore* store, int64_t now);
+int32_t nzbget_rs_deadpostings_store_is_dead(
+	const NzbgetRsDeadPostingsStore* store, const uint32_t* sketch_ptr, size_t sketch_len, int64_t now);
+int32_t nzbget_rs_deadpostings_store_add(
+	const NzbgetRsDeadPostingsStore* store, const uint32_t* sketch_ptr, size_t sketch_len, int64_t now, int32_t save);
 // Watcher flags are snapshots of daemon objects, not queue mutation requests.
 enum NzbgetRsDupeWatchFlags {
     rsDupeEnabled = 1u << 0, rsDupeCheck = 1u << 1, rsDupePresent = 1u << 2,
@@ -3760,13 +3766,6 @@ size_t nzbget_rs_dupe_fallback_borrowed_par2_mismatches(
     uint32_t (*crc_cb)(const uint8_t* data, size_t len),
     int32_t* out_indices, size_t out_cap);
 
-int32_t nzbget_rs_deadpostings_is_stale(int64_t now, int64_t recorded);
-int32_t nzbget_rs_deadpostings_entry_matches(
-    int64_t now, int64_t recorded,
-    const uint32_t* query_ptr, size_t query_len,
-    const uint32_t* entry_ptr, size_t entry_len);
-NzbgetRsBuf nzbget_rs_deadpostings_format_line(
-    int64_t stamp, const uint32_t* hashes_ptr, size_t hashes_len);
 int32_t nzbget_rs_donorscore_take_rank(
     double alive, int32_t twin, const int32_t* used_ptr, size_t used_len);
 void nzbget_rs_df_build_newznab_queries(
@@ -4148,10 +4147,12 @@ int nzbget_rs_dqh_sysinfo_line_contains_marker(
     const char* line, const char* marker);
 int nzbget_rs_dqh_bytes_equal(const char* a, const char* b);
 int nzbget_rs_dqh_bytes_eq_ignore_case(const char* a, const char* b);
-int nzbget_rs_dqh_newznab_classify_start_element(
-    int depth, int in_item, const char* name);
-int nzbget_rs_dqh_newznab_classify_item_attr_key(const char* key);
-int nzbget_rs_dqh_newznab_classify_end_element(int in_item, const char* name);
+int nzbget_rs_newznab_parse_response(
+    const uint8_t* xml_ptr, size_t xml_len, void* ctx,
+    void (*on_error)(void* ctx, int error_code, const uint8_t* error_text_ptr, size_t error_text_len),
+    void (*on_item)(void* ctx, const uint8_t* title_ptr, size_t title_len,
+        const uint8_t* link_ptr, size_t link_len, int64_t size, int32_t grabs,
+        int64_t date, const uint8_t* indexer_ptr, size_t indexer_len));
 int nzbget_rs_dqh_nzb_reader_classify_start_element(const char* name, int in_file);
 int nzbget_rs_dqh_nzb_reader_classify_end_element(
     const char* name, int has_meta_type, int in_segment, int in_file);
@@ -4860,22 +4861,21 @@ void nzbget_rs_feed_format_season_episode(
     int season_num, const char* ep_raw, size_t ep_raw_len,
     NzbgetRsBuf* out_season, NzbgetRsBuf* out_episode);
 
-NzbgetRsFeedFileParser* nzbget_rs_feed_file_parser_new(void);
+NzbgetRsFeedFileParser* nzbget_rs_feed_file_parser_parse_file(const char* filename);
 void nzbget_rs_feed_file_parser_free(NzbgetRsFeedFileParser* parser);
-void nzbget_rs_feed_file_parser_start_element(
-    NzbgetRsFeedFileParser* parser, const char* name, const char* const* atts);
-void nzbget_rs_feed_file_parser_end_element(
-    NzbgetRsFeedFileParser* parser, const char* name);
-void nzbget_rs_feed_file_parser_text(
-    NzbgetRsFeedFileParser* parser, const char* xmlstr, int len);
 size_t nzbget_rs_feed_file_parser_finalize(NzbgetRsFeedFileParser* parser);
 int nzbget_rs_feed_file_parser_get_item(
     const NzbgetRsFeedFileParser* parser, size_t index,
     NzbgetRsParsedFeedItemView* out_view);
-size_t nzbget_rs_feed_file_trim_sax_error(const char* err_msg);
-int64_t nzbget_rs_feed_extract_size_from_description(const char* description);
 
-NzbgetRsBuf nzbget_rs_feed_normalize_nzb_name(const char* filename);
+void nzbget_rs_feed_create_nzb_info(
+    int feed_id, const char* feed_cat, int category_source,
+    const char* item_url, const char* item_filename,
+    const char* item_cat, const char* item_add_cat,
+    int64_t item_size, int64_t item_time, int item_priority,
+    int item_pause_nzb, const char* item_dupe_key,
+    int item_dupe_score, int item_dupe_mode,
+    NzbgetRsBuf* out_filename, NzbgetRsBuf* out_category);
 const char* nzbget_rs_feed_resolve_category(
     const char* feed_cat, int category_source, const char* item_cat);
 NzbgetRsBuf nzbget_rs_feed_format_dupe_status_mask(int dupe_status);

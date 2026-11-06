@@ -4,7 +4,32 @@
 //! workflows, PAR/stream-repair coverage decisions, job scheduling strategies, stage
 //! transitions, pause-state management, and direct-unpack triggers into a single module.
 
-pub use crate::diskstatepp::{RsPostJobCandidate, RsPostStageDecision};
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RsPostJobCandidate {
+    pub has_post_info: u8,
+    pub working: u8,
+    pub has_queue_script_job: u8,
+    pub direct_unpack_running: u8,
+    pub has_live_repair_thread: u8,
+    pub priority: i32,
+    pub force_priority: u8,
+    pub need_par_check: u8,
+    pub need_unpack: u8,
+    pub in_active_jobs: u8,
+    pub download_completed: u8,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RsPostStageDecision {
+    pub unpack: i32,
+    pub skip_unpack_due_to_par: i32,
+    pub cleanup: i32,
+    pub move_inter: i32,
+    pub post_download_renaming: i32,
+    pub post_unpack_renaming: i32,
+}
 
 /// `PrePostProcessor::SanitisePostQueue` stage & `RequestParCheck` transition.
 pub fn sanitise_post_stage(
@@ -17,16 +42,12 @@ pub fn sanitise_post_stage(
     par_status: i32,
     ps_skipped: i32,
 ) -> (i32, bool) {
-    crate::diskstatepp::sanitise_post_stage(
-        stage,
-        pt_executing_script,
-        pt_finished,
-        pt_queued,
-        dest_dir_exists,
-        unpack_tried,
-        par_status,
-        ps_skipped,
-    )
+    if stage == pt_executing_script || !dest_dir_exists {
+        (pt_finished, false)
+    } else {
+        let request_par = unpack_tried && par_status <= ps_skipped;
+        (pt_queued, request_par)
+    }
 }
 
 /// `PrePostProcessor::DownloadQueueUpdate` `eaFileCompleted` / `eaFileDeleted` classifier.
@@ -46,17 +67,20 @@ pub fn classify_file_event(
     download_completed_ignore_paused: bool,
     download_completed_all: bool,
 ) -> i32 {
-    crate::diskstatepp::classify_file_event(
-        is_file_completed,
-        is_file_deleted,
-        dupe_deleted,
-        delete_status,
-        ds_none,
-        ds_health,
-        has_post_info,
-        download_completed_ignore_paused,
-        download_completed_all,
-    )
+    if (is_file_completed || dupe_deleted)
+        && delete_status != ds_health
+        && !has_post_info
+        && download_completed_ignore_paused
+    {
+        1
+    } else if (is_file_deleted || (is_file_completed && delete_status > ds_none))
+        && !has_post_info
+        && download_completed_all
+    {
+        2
+    } else {
+        0
+    }
 }
 
 /// `PrePostProcessor::CheckDownloadCompleted`: whether completion should trigger after `DirectRename`.
@@ -156,21 +180,23 @@ pub fn eval_nzb_completed(
     ds_scan: i32,
     ds_copy: i32,
 ) -> (bool, bool, bool, bool) {
-    crate::diskstatepp::eval_nzb_completed(
-        dupe_hint,
-        dh_redownload_auto,
-        keep_history,
-        avoid_history,
-        dupe_check,
-        dupe_mode,
-        dm_force,
-        fails_over,
-        delete_status,
-        ds_none,
-        ds_health,
-        ds_bad,
-        ds_scan,
-        ds_copy,
+    let download_dupe = dupe_hint == dh_redownload_auto;
+    let add_to_history = keep_history > 0 && !avoid_history;
+    let call_dupe_completed = dupe_check
+        && (dupe_mode != dm_force || fails_over)
+        && (delete_status == ds_none
+            || delete_status == ds_health
+            || delete_status == ds_bad
+            || delete_status == ds_scan
+            || (delete_status == ds_copy && download_dupe));
+    let enqueue_deleted_script =
+        delete_status > ds_none && delete_status != ds_health && delete_status != ds_bad;
+    let need_save = true;
+    (
+        add_to_history,
+        call_dupe_completed,
+        enqueue_deleted_script,
+        need_save,
     )
 }
 
@@ -271,13 +297,31 @@ pub fn can_run_more_jobs(
     pt_repairing: i32,
     post_strategy: i32,
 ) -> (bool, bool) {
-    crate::diskstatepp::can_run_more_jobs(
-        job_stages,
-        pt_loading_pars,
-        pt_verifying_repaired,
-        pt_repairing,
-        post_strategy,
-    )
+    let total_jobs = job_stages.len() as i32;
+    let mut par_jobs = 0;
+    let mut other_jobs = 0;
+    let mut repair_jobs = false;
+
+    for &stage in job_stages {
+        let par_job = stage >= pt_loading_pars && stage <= pt_verifying_repaired;
+        repair_jobs |= stage == pt_repairing;
+        if par_job {
+            par_jobs += 1;
+        } else {
+            other_jobs += 1;
+        }
+    }
+
+    match post_strategy {
+        0 => (total_jobs == 0, true), // ppSequential
+        1 => (
+            other_jobs == 0 && (par_jobs == 0 || repair_jobs),
+            par_jobs == 0,
+        ), // ppBalanced
+        2 => (total_jobs < 3, par_jobs < 1), // ppAggressive
+        3 => (total_jobs < 6, par_jobs < 2), // ppRocket
+        _ => (false, false),
+    }
 }
 
 /// `PrePostProcessor::PickNextJob` candidate selector.
@@ -288,12 +332,28 @@ pub fn pick_next_post_job(
     has_active_unpack: bool,
     pause_post_process: bool,
 ) -> i32 {
-    crate::diskstatepp::pick_next_post_job(
-        candidates,
-        allow_par,
-        has_active_unpack,
-        pause_post_process,
-    )
+    let mut best_idx: i32 = -1;
+    let mut best_priority: i32 = i32::MIN;
+
+    for (idx, c) in candidates.iter().enumerate() {
+        if c.has_post_info != 0
+            && c.working == 0
+            && c.has_queue_script_job == 0
+            && c.direct_unpack_running == 0
+            && c.has_live_repair_thread == 0
+            && (best_idx < 0 || c.priority > best_priority)
+            && (!pause_post_process || c.force_priority != 0)
+            && (allow_par || c.need_par_check == 0)
+            && (!has_active_unpack || c.need_unpack == 0)
+            && c.in_active_jobs == 0
+            && c.download_completed != 0
+        {
+            best_idx = idx as i32;
+            best_priority = c.priority;
+        }
+    }
+
+    best_idx
 }
 
 /// Classify skipped par-check health action in `PrePostProcessor::StartJob`:
@@ -371,9 +431,11 @@ pub fn eval_post_stages(
     opt_rename_after_unpack: bool,
     post_unpack_renaming_status: i32,
 ) -> RsPostStageDecision {
-    let in_inter_dir =
-        !inter_dir.is_empty() && dest_dir.len() > inter_dir.len() && dest_dir.starts_with(inter_dir) && dest_dir[inter_dir.len()] == sep;
-    crate::diskstatepp::eval_post_stages(
+    let in_inter_dir = !inter_dir.is_empty()
+        && dest_dir.len() > inter_dir.len()
+        && dest_dir.starts_with(inter_dir)
+        && dest_dir[inter_dir.len()] == sep;
+    eval_post_stages_in_inter(
         want_unpack,
         unpack_status,
         delete_status,
@@ -393,6 +455,115 @@ pub fn eval_post_stages(
     )
 }
 
+/// `PrePostProcessor::StartJob` stage eligibility calculator with precomputed `in_inter_dir`.
+#[allow(clippy::too_many_arguments)]
+pub fn eval_post_stages_in_inter(
+    want_unpack: bool,
+    unpack_status: i32,
+    delete_status: i32,
+    par_status: i32,
+    cleanup_status: i32,
+    has_ext_cleanup_disk: bool,
+    health: i32,
+    move_status: i32,
+    in_inter_dir: bool,
+    direct_unpack_status: i32,
+    opt_post_download_rename: bool,
+    post_download_renaming_status: i32,
+    has_dest_dir: bool,
+    has_name: bool,
+    opt_rename_after_unpack: bool,
+    post_unpack_renaming_status: i32,
+) -> RsPostStageDecision {
+    const DS_NONE: i32 = 0;
+    const PS_NONE: i32 = 0;
+    const PS_SKIPPED: i32 = 1;
+    const PS_FAILURE: i32 = 2;
+    const PS_SUCCESS: i32 = 3;
+    const PS_REPAIR_POSSIBLE: i32 = 4;
+    const PS_MANUAL: i32 = 5;
+    const US_NONE: i32 = 0;
+    const US_SKIPPED: i32 = 1;
+    const US_FAILURE: i32 = 2;
+    const US_SUCCESS: i32 = 3;
+    const US_SPACE: i32 = 4;
+    const US_PASSWORD: i32 = 5;
+    const CS_NONE: i32 = 0;
+    const MS_NONE: i32 = 0;
+    const MS_SUCCESS: i32 = 2;
+    const NS_SUCCESS: i32 = 3;
+
+    let mut unpack = want_unpack && unpack_status == US_NONE && delete_status == DS_NONE;
+    let par_failed =
+        par_status == PS_FAILURE || par_status == PS_REPAIR_POSSIBLE || par_status == PS_MANUAL;
+
+    let cleanup = !unpack
+        && want_unpack
+        && cleanup_status == CS_NONE
+        && has_ext_cleanup_disk
+        && ((par_status == PS_SUCCESS
+            && unpack_status != US_FAILURE
+            && unpack_status != US_SPACE
+            && unpack_status != US_PASSWORD)
+            || (unpack_status == US_SUCCESS && par_status != PS_FAILURE)
+            || ((unpack_status == US_NONE || unpack_status == US_SKIPPED)
+                && (par_status == PS_NONE || par_status == PS_SKIPPED)
+                && health == 1000));
+
+    let move_inter = !unpack
+        && move_status == MS_NONE
+        && unpack_status != US_FAILURE
+        && unpack_status != US_SPACE
+        && unpack_status != US_PASSWORD
+        && par_status != PS_FAILURE
+        && par_status != PS_MANUAL
+        && delete_status == DS_NONE
+        && !((unpack_status == US_NONE || unpack_status == US_SKIPPED)
+            && (par_status == PS_NONE || par_status == PS_SKIPPED)
+            && health < 1000)
+        && in_inter_dir;
+
+    let mut skip_unpack_due_to_par = false;
+    let mut effective_unpack_status = unpack_status;
+    if unpack && par_failed && direct_unpack_status != NS_SUCCESS {
+        skip_unpack_due_to_par = true;
+        effective_unpack_status = US_SKIPPED;
+        unpack = false;
+    }
+
+    let post_download_renaming = opt_post_download_rename
+        && post_download_renaming_status == 0
+        && has_dest_dir
+        && has_name
+        && (effective_unpack_status == US_NONE || effective_unpack_status == US_SKIPPED)
+        && effective_unpack_status != US_FAILURE
+        && effective_unpack_status != US_SPACE
+        && effective_unpack_status != US_PASSWORD
+        && par_status != PS_FAILURE
+        && par_status != PS_MANUAL
+        && !move_inter
+        && (move_status == MS_SUCCESS || move_status == MS_NONE);
+
+    let post_unpack_renaming = opt_rename_after_unpack
+        && post_unpack_renaming_status == 0
+        && has_dest_dir
+        && has_name
+        && effective_unpack_status == US_SUCCESS
+        && par_status != PS_FAILURE
+        && par_status != PS_MANUAL
+        && !move_inter
+        && (move_status == MS_SUCCESS || move_status == MS_NONE);
+
+    RsPostStageDecision {
+        unpack: if unpack { 1 } else { 0 },
+        skip_unpack_due_to_par: if skip_unpack_due_to_par { 1 } else { 0 },
+        cleanup: if cleanup { 1 } else { 0 },
+        move_inter: if move_inter { 1 } else { 0 },
+        post_download_renaming: if post_download_renaming { 1 } else { 0 },
+        post_unpack_renaming: if post_unpack_renaming { 1 } else { 0 },
+    }
+}
+
 /// `PrePostProcessor::UpdatePauseState` pause-download evaluator.
 pub fn calc_post_pause_state(
     job_stages: &[i32],
@@ -400,12 +571,16 @@ pub fn calc_post_pause_state(
     unpack_pause_queue: bool,
     script_pause_queue: bool,
 ) -> bool {
-    crate::diskstatepp::calc_post_pause_state(
-        job_stages,
-        par_pause_queue,
-        unpack_pause_queue,
-        script_pause_queue,
-    )
+    let mut need_pause = false;
+    for &stage in job_stages {
+        match stage {
+            1..=5 | 14 => need_pause |= par_pause_queue,
+            6..=10 | 13 => need_pause |= unpack_pause_queue,
+            11 => need_pause |= script_pause_queue,
+            _ => {}
+        }
+    }
+    need_pause
 }
 
 /// Classify direct-unpack action in `PrePostProcessor::FileDownloaded`:

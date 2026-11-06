@@ -1445,7 +1445,7 @@ pub fn is_bad_donor_in_cooldown(now_sec: i64, bad_since_sec: i64, retry_sec: i64
 pub fn classify_content_name_match(donor_filename: &[u8], by_content: &[u8]) -> i32 {
     if donor_filename == by_content {
         1
-    } else if crate::queuehotpath::strcasecmp_bytes(donor_filename, by_content) {
+    } else if crate::queuecoord::strcasecmp_bytes(donor_filename, by_content) {
         2
     } else {
         0
@@ -1473,9 +1473,9 @@ pub fn is_donor_filename_match(
     target_nzb_filename: &[u8],
     donor_filename: &[u8],
 ) -> bool {
-    crate::queuehotpath::strcasecmp_bytes(target_filename, donor_filename)
+    crate::queuecoord::strcasecmp_bytes(target_filename, donor_filename)
         || (!target_nzb_filename.is_empty()
-            && crate::queuehotpath::strcasecmp_bytes(target_nzb_filename, donor_filename))
+            && crate::queuecoord::strcasecmp_bytes(target_nzb_filename, donor_filename))
 }
 
 /// `DupeArticleFallback::MatchDonorFile`:

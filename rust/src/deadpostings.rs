@@ -1,4 +1,10 @@
-//! Pure persisted dead-posting line parsing; C++ owns storage and locking.
+//! End-to-end Rust implementation of `DeadPostings` (`daemon/dupesearch/DeadPostings.cpp`):
+//! persisted dead-posting line parsing, TTL/clock-skew pruning, sketch matching,
+//! and atomic state-file persistence (`DeadPostingsStore`).
+
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 unsafe extern "C" {
     #[link_name = "isspace"]
@@ -108,21 +114,216 @@ pub fn format_deadpostings_line(stamp: i64, hashes: &[u32]) -> Vec<u8> {
     out.into_bytes()
 }
 
-/// Parse one persisted line and visit its complete sorted sketch once.
-///
-/// # Safety
-/// `data` must identify `len` readable bytes (or be null with zero length).
-/// `visit` must not unwind and must use the borrowed sketch only during the
-/// callback; `context` is passed through unchanged to that callback.
+fn path_from_bytes(bytes: &[u8]) -> Option<PathBuf> {
+    if bytes.is_empty() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        Some(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
+    }
+    #[cfg(not(unix))]
+    {
+        Some(PathBuf::from(String::from_utf8_lossy(bytes).into_owned()))
+    }
+}
+
+fn write_atomic(path: &Path, data: &[u8]) -> bool {
+    let mut temp_os = path.as_os_str().to_os_string();
+    temp_os.push(".new");
+    let temp = PathBuf::from(temp_os);
+    let write_res = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&temp)?;
+        f.write_all(data)?;
+        f.flush()?;
+        Ok(())
+    })();
+    if write_res.is_err() {
+        let _ = std::fs::remove_file(&temp);
+        return false;
+    }
+    match std::fs::rename(&temp, path) {
+        Ok(()) => return true,
+        Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
+            if std::fs::copy(&temp, path).is_ok() && std::fs::remove_file(&temp).is_ok() {
+                return true;
+            }
+        }
+        Err(_) => {}
+    }
+    let _ = std::fs::remove_file(&temp);
+    false
+}
+
+#[derive(Default)]
+struct DeadPostingsInner {
+    dead: Vec<(i64, Vec<u32>)>,
+    unsaved: Vec<(i64, Vec<u32>)>,
+    state_path: Option<PathBuf>,
+}
+
+impl DeadPostingsInner {
+    fn prune(&mut self, now: i64) {
+        self.dead.retain(|(ts, _)| !is_stale_timestamp(now, *ts));
+        self.unsaved.retain(|(ts, _)| !is_stale_timestamp(now, *ts));
+    }
+
+    fn save(&self) -> bool {
+        let Some(ref path) = self.state_path else {
+            return true;
+        };
+        let mut text = Vec::new();
+        for (ts, sketch) in &self.dead {
+            text.extend_from_slice(&format_deadpostings_line(*ts, sketch));
+        }
+        write_atomic(path, &text)
+    }
+}
+
+/// Thread-safe, atomically persisted store of dead postings (`DeadPostings` in `daemon/dupesearch/DeadPostings.cpp`).
+#[derive(Default)]
+pub struct DeadPostingsStore {
+    inner: Mutex<DeadPostingsInner>,
+}
+
+impl DeadPostingsStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set_state_path(&self, path: &[u8]) {
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.state_path = path_from_bytes(path);
+        }
+    }
+
+    pub fn set_state_path_buf(&self, path: impl Into<PathBuf>) {
+        if let Ok(mut guard) = self.inner.lock() {
+            let pb = path.into();
+            guard.state_path = (!pb.as_os_str().is_empty()).then_some(pb);
+        }
+    }
+
+    pub fn load(&self, now: i64) {
+        let Ok(mut guard) = self.inner.lock() else {
+            return;
+        };
+        if let Some(ref path) = guard.state_path {
+            if let Ok(bytes) = std::fs::read(path) {
+                for line in bytes.split(|&b| b == b'\n') {
+                    let line = line.strip_suffix(b"\r").unwrap_or(line);
+                    if let Some((stamp, sketch)) = parse_line(line, std::ffi::c_ulong::BITS) {
+                        guard.dead.push((stamp, sketch));
+                    }
+                }
+            }
+        }
+        guard.prune(now);
+    }
+
+    pub fn is_dead(&self, sketch: &[u32], now: i64) -> bool {
+        let Ok(guard) = self.inner.lock() else {
+            return false;
+        };
+        guard
+            .dead
+            .iter()
+            .chain(guard.unsaved.iter())
+            .any(|(ts, entry)| is_active_entry_match(now, *ts, sketch, entry))
+    }
+
+    /// Adds a dead posting sketch at `now`. Returns `false` only when `save` is true,
+    /// a `state_path` is configured, and the atomic write fails.
+    pub fn add(&self, sketch: Vec<u32>, now: i64, save: bool) -> bool {
+        let Ok(mut guard) = self.inner.lock() else {
+            return false;
+        };
+        guard.prune(now);
+        if save {
+            guard.dead.push((now, sketch));
+            guard.save()
+        } else {
+            guard.unsaved.push((now, sketch));
+            true
+        }
+    }
+}
+
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_deadpostings_parse(
-    data: *const u8, len: usize, context: *mut std::ffi::c_void,
-    visit: unsafe extern "C" fn(*mut std::ffi::c_void, i64, *const u32, usize),
-) -> bool {
-    let line = if len == 0 { &[] } else { unsafe { std::slice::from_raw_parts(data, len) } };
-    let Some((stamp, sketch)) = parse_line(line, std::ffi::c_ulong::BITS) else { return false; };
-    unsafe { visit(context, stamp, sketch.as_ptr(), sketch.len()); }
-    true
+pub extern "C" fn nzbget_rs_deadpostings_store_new() -> *mut DeadPostingsStore {
+    Box::into_raw(Box::new(DeadPostingsStore::new()))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_deadpostings_store_free(store: *mut DeadPostingsStore) {
+    if !store.is_null() {
+        drop(Box::from_raw(store));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_deadpostings_store_set_state_path(
+    store: *const DeadPostingsStore,
+    path: *const u8,
+    len: usize,
+) {
+    if store.is_null() {
+        return;
+    }
+    let slice = if path.is_null() || len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(path, len)
+    };
+    (*store).set_state_path(slice);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_deadpostings_store_load(
+    store: *const DeadPostingsStore,
+    now: i64,
+) {
+    if !store.is_null() {
+        (*store).load(now);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_deadpostings_store_is_dead(
+    store: *const DeadPostingsStore,
+    sketch_ptr: *const u32,
+    sketch_len: usize,
+    now: i64,
+) -> i32 {
+    if store.is_null() {
+        return 0;
+    }
+    let sketch = if sketch_ptr.is_null() || sketch_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(sketch_ptr, sketch_len)
+    };
+    i32::from((*store).is_dead(sketch, now))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_deadpostings_store_add(
+    store: *const DeadPostingsStore,
+    sketch_ptr: *const u32,
+    sketch_len: usize,
+    now: i64,
+    save: i32,
+) -> i32 {
+    if store.is_null() {
+        return 0;
+    }
+    let sketch = if sketch_ptr.is_null() || sketch_len == 0 {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(sketch_ptr, sketch_len).to_vec()
+    };
+    i32::from((*store).add(sketch, now, save != 0))
 }
 
 #[cfg(test)]
@@ -175,5 +376,184 @@ mod tests {
         for line in [b"".as_slice(),b"1",b"1\t",b"1\t\t",b"\t1\t",b"+\t1\t",b"1 \t1\t",b"1\t1,x,2\t",b"1\t,1\t",b"1\t1,,2\t",b"1\t1 \t",b"1\t18446744073709551616\t"] {
             assert_eq!(parse_line(line,64),None,"{line:?}");
         }
+    }
+
+    fn make_ids_sketch(prefix: &str, count: usize, from: usize) -> Vec<u32> {
+        let ids: Vec<Vec<u8>> = (from..from + count)
+            .map(|i| format!("{prefix}{i}@x").into_bytes())
+            .collect();
+        crate::posting::make_sketch(ids.iter().map(|v| v.as_slice()))
+    }
+
+    #[test]
+    fn dead_postings_full_suite_port_from_cpp() {
+        // DeadPostingsRememberedTest
+        let dead = DeadPostingsStore::new();
+        let now = 1_000_000i64;
+        let posting = make_ids_sketch("a", 6000, 0);
+        assert!(!dead.is_dead(&posting, now));
+        assert!(dead.add(posting.clone(), now, true));
+        assert!(dead.is_dead(&posting, now));
+
+        let mut relisted_ids: Vec<Vec<u8>> = (2..6000)
+            .map(|i| format!("a{i}@x").into_bytes())
+            .collect();
+        relisted_ids.push(b"z1@x".to_vec());
+        relisted_ids.push(b"z2@x".to_vec());
+        let relisted = crate::posting::make_sketch(relisted_ids.iter().map(|v| v.as_slice()));
+        assert!(dead.is_dead(&relisted, now));
+        assert!(!dead.is_dead(&make_ids_sketch("b", 6000, 0), now));
+
+        // DeadPostingsExpireTest
+        let exp = DeadPostingsStore::new();
+        let p_short = make_ids_sketch("a", 100, 0);
+        exp.add(p_short.clone(), now, true);
+        assert!(exp.is_dead(&p_short, now + DEAD_TTL_SEC as i64 - 1));
+        assert!(!exp.is_dead(&p_short, now + DEAD_TTL_SEC as i64));
+        exp.add(
+            make_ids_sketch("b", 100, 0),
+            now + DEAD_TTL_SEC as i64 + 10,
+            true,
+        );
+        assert!(!exp.is_dead(&p_short, now + 5));
+
+        // DeadPostingsTimeBoundsTest
+        let low = i64::MIN;
+        let high = i64::MAX;
+        for save in [false, true] {
+            let expired = DeadPostingsStore::new();
+            expired.add(vec![1], low, save);
+            assert!(expired.is_dead(&[1], low + DEAD_TTL_SEC as i64 - 1));
+            assert!(!expired.is_dead(&[1], low + DEAD_TTL_SEC as i64));
+            assert!(!expired.is_dead(&[1], high));
+            expired.add(vec![2], high, save);
+            assert!(!expired.is_dead(&[1], low + 1));
+
+            let future = DeadPostingsStore::new();
+            future.add(vec![3], high, save);
+            assert!(future.is_dead(&[3], low));
+            future.add(vec![4], low, save);
+            assert!(!future.is_dead(&[3], high));
+
+            let exact = DeadPostingsStore::new();
+            exact.add(vec![9], now, save);
+            exact.add(vec![10], now + DEAD_TTL_SEC as i64, save);
+            assert!(!exact.is_dead(&[9], now));
+
+            let boundaries = DeadPostingsStore::new();
+            boundaries.add(vec![5], now + 24 * 3600, save);
+            boundaries.add(vec![6], now, save);
+            assert!(boundaries.is_dead(&[5], now));
+            boundaries.add(vec![7], now + 24 * 3600 + 1, save);
+            boundaries.add(vec![8], now, save);
+            assert!(!boundaries.is_dead(&[7], now + 24 * 3600 + 1));
+        }
+
+        // DeadPostingsPersistTest (real atomic file write + reload)
+        let pid = std::process::id();
+        let path_persist = std::env::temp_dir().join(format!("nzbget-dead-postings-persist-{pid}"));
+        let path_persist_new = PathBuf::from(format!("{}.new", path_persist.display()));
+        let _ = std::fs::remove_file(&path_persist);
+        let _ = std::fs::remove_file(&path_persist_new);
+
+        let p500 = make_ids_sketch("a", 500, 0);
+        {
+            let store = DeadPostingsStore::new();
+            store.set_state_path_buf(&path_persist);
+            assert!(store.add(p500.clone(), now, true));
+        }
+        assert!(path_persist.exists());
+        assert!(!path_persist_new.exists());
+
+        let reloaded = DeadPostingsStore::new();
+        reloaded.set_state_path_buf(&path_persist);
+        reloaded.load(now);
+        assert!(reloaded.is_dead(&p500, now));
+        assert!(!reloaded.is_dead(&make_ids_sketch("b", 500, 0), now));
+
+        std::fs::write(&path_persist, b"garbage\n\t\nnot\ta\tnumber\n").unwrap();
+        let broken = DeadPostingsStore::new();
+        broken.set_state_path_buf(&path_persist);
+        broken.load(now);
+        assert!(!broken.is_dead(&p500, now));
+        let _ = std::fs::remove_file(&path_persist);
+
+        // DeadPostingsUnsavedTest (real file check)
+        let path_unsaved = std::env::temp_dir().join(format!("nzbget-dead-postings-unsaved-{pid}"));
+        let _ = std::fs::remove_file(&path_unsaved);
+        let tentative = make_ids_sketch("t", 500, 0);
+        let real = make_ids_sketch("r", 500, 0);
+        {
+            let store = DeadPostingsStore::new();
+            store.set_state_path_buf(&path_unsaved);
+            assert!(store.add(tentative.clone(), now, false));
+            assert!(store.is_dead(&tentative, now));
+            assert!(!path_unsaved.exists());
+            assert!(store.add(real.clone(), now, true));
+            assert!(path_unsaved.exists());
+        }
+        let reloaded_u = DeadPostingsStore::new();
+        reloaded_u.set_state_path_buf(&path_unsaved);
+        reloaded_u.load(now);
+        assert!(reloaded_u.is_dead(&real, now));
+        assert!(!reloaded_u.is_dead(&tentative, now));
+        let _ = std::fs::remove_file(&path_unsaved);
+
+        // DeadPostingsRobustLoadTest
+        let path_robust = std::env::temp_dir().join(format!("nzbget-dead-postings-robust-{pid}"));
+        let posting_u = make_ids_sketch("u", 500, 0);
+        let future_f = make_ids_sketch("f", 500, 0);
+        {
+            let mut content = format!("{now}\t");
+            for (i, h) in posting_u.iter().rev().enumerate() {
+                if i > 0 {
+                    content.push(',');
+                }
+                content.push_str(&h.to_string());
+            }
+            content.push_str("\t\n");
+            let far_future = now + 10 * 365 * 24 * 3600;
+            content.push_str(&format!("{far_future}\t"));
+            for (i, h) in future_f.iter().enumerate() {
+                if i > 0 {
+                    content.push(',');
+                }
+                content.push_str(&h.to_string());
+            }
+            content.push_str("\t\n");
+            content.push_str(&format!("{now}\t12,x7,99\t\n"));
+            std::fs::write(&path_robust, content.as_bytes()).unwrap();
+        }
+        let loaded_r = DeadPostingsStore::new();
+        loaded_r.set_state_path_buf(&path_robust);
+        loaded_r.load(now);
+        assert!(loaded_r.is_dead(&posting_u, now));
+        assert!(!loaded_r.is_dead(&future_f, now));
+        assert!(!loaded_r.is_dead(&[0, 12, 99], now));
+        let _ = std::fs::remove_file(&path_robust);
+
+        // DeadPostingsStateFieldsTest
+        let path_fields = std::env::temp_dir().join(format!("nzbget-dead-postings-fields-{pid}"));
+        let stamp = now.to_string();
+        let mut raw = Vec::new();
+        raw.extend_from_slice(format!("{stamp}\t3,1,3,2,\tignored\n").as_bytes());
+        raw.extend_from_slice(stamp.as_bytes());
+        raw.extend_from_slice(b"\0tail\t9\0tail,7\t\n");
+        raw.extend_from_slice(format!("{stamp}\t12,x7,99\t\n").as_bytes());
+        raw.extend_from_slice(format!("{stamp}\t,77\t\n").as_bytes());
+        std::fs::write(&path_fields, &raw).unwrap();
+
+        let state_store = DeadPostingsStore::new();
+        state_store.set_state_path_buf(&path_fields);
+        state_store.load(now);
+        assert!(state_store.is_dead(&[1], now));
+        assert!(state_store.is_dead(&[7], now));
+        assert!(!state_store.is_dead(&[12], now));
+        assert!(!state_store.is_dead(&[77], now));
+        assert!(state_store.add(vec![42], now, true));
+        let saved_on_disk = std::fs::read(&path_fields).unwrap();
+        let expected_saved = format!("{stamp}\t1,2,3\t\n{stamp}\t7,9\t\n{stamp}\t42\t\n");
+        assert_eq!(saved_on_disk, expected_saved.into_bytes());
+        let _ = std::fs::remove_file(&path_fields);
     }
 }

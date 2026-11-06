@@ -37,20 +37,37 @@
 
 std::unique_ptr<NzbInfo> NzbInfoCreator::Create(const FeedInfo& feedInfo, const FeedItemInfo& feedItemInfo) const
 {
+	NzbgetRsBuf fnBuf{};
+	NzbgetRsBuf catBuf{};
+	nzbget_rs_feed_create_nzb_info(
+		feedInfo.GetId(),
+		feedInfo.GetCategory(),
+		static_cast<int>(feedInfo.GetCategorySource()),
+		feedItemInfo.GetUrl(),
+		feedItemInfo.GetFilename(),
+		feedItemInfo.GetCategory(),
+		feedItemInfo.GetAddCategory().c_str(),
+		feedItemInfo.GetSize(),
+		(int64_t)feedItemInfo.GetTime(),
+		feedItemInfo.GetPriority(),
+		feedItemInfo.GetPauseNzb() ? 1 : 0,
+		feedItemInfo.GetDupeKey(),
+		feedItemInfo.GetDupeScore(),
+		(int)feedItemInfo.GetDupeMode(),
+		&fnBuf,
+		&catBuf);
+
 	std::unique_ptr<NzbInfo> nzbInfo = std::make_unique<NzbInfo>();
 	nzbInfo->SetKind(NzbInfo::nkUrl);
 	nzbInfo->SetFeedId(feedInfo.GetId());
 	nzbInfo->SetUrl(feedItemInfo.GetUrl());
-
-	NzbgetRsBuf normBuf = nzbget_rs_feed_normalize_nzb_name(feedItemInfo.GetFilename());
-	if (normBuf.len > 0 && normBuf.data)
+	if (fnBuf.len > 0 && fnBuf.data)
 	{
-		BString<1024> nzbName2("%s", normBuf.data);
-		nzbInfo->SetFilename(FileSystem::MakeValidFilename(nzbName2));
+		nzbInfo->SetFilename(fnBuf.data);
 	}
-	nzbget_rs_free(normBuf);
-
-	ApplyCategory(*nzbInfo, feedInfo, feedItemInfo);
+	nzbInfo->SetCategory(catBuf.data ? catBuf.data : "");
+	nzbget_rs_free(fnBuf);
+	nzbget_rs_free(catBuf);
 
 	nzbInfo->SetPriority(feedItemInfo.GetPriority());
 	nzbInfo->SetAddUrlPaused(feedItemInfo.GetPauseNzb());
@@ -62,18 +79,6 @@ std::unique_ptr<NzbInfo> NzbInfoCreator::Create(const FeedInfo& feedInfo, const 
 	nzbInfo->SetMaxTime(feedItemInfo.GetTime());
 
 	return nzbInfo;
-}
-
-void NzbInfoCreator::ApplyCategory(NzbInfo& nzbInfo, const FeedInfo& feedInfo, const FeedItemInfo& feedItemInfo) const
-{
-	const std::string& addCategory = feedItemInfo.GetAddCategory();
-	if (!addCategory.empty())
-	{
-		nzbInfo.SetCategory(addCategory.c_str());
-		return;
-	}
-
-	nzbInfo.SetCategory(FeedCoordinator::ResolveCategory(feedInfo, feedItemInfo).c_str());
 }
 
 std::unique_ptr<RegEx>& FeedCoordinator::FilterHelper::GetRegEx(int id)

@@ -130,7 +130,7 @@ pub fn files_on_disk(final_dir: &[u8], dest_dir: &[u8], ext_cleanup_disk: &[u8])
         #[cfg(not(unix))]
         let fname_bytes = fname_str.as_bytes();
 
-        if crate::queuehotpath::is_side_file(fname_bytes, ext_cleanup_disk) {
+        if crate::queuecoord::is_side_file(fname_bytes, ext_cleanup_disk) {
             continue;
         }
         if let Ok(meta) = std::fs::metadata(entry.path()) {

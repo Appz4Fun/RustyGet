@@ -622,6 +622,94 @@ pub fn memory_monitor_should_keep_sleeping(
     !is_stopped && slept < interval
 }
 
+/// `ArticleWriter::SetWriteBuffer` (`ArticleWriter.cpp`).
+pub fn calc_write_buffer_size(write_buffer_kb: i32, rec_size: i32) -> i32 {
+    if write_buffer_kb <= 0 {
+        return 0;
+    }
+    let max_bytes = write_buffer_kb.saturating_mul(1024);
+    if rec_size > 0 && rec_size < max_bytes {
+        rec_size
+    } else {
+        max_bytes
+    }
+}
+
+pub const PRESSURE_NORMAL: i32 = 0;
+pub const PRESSURE_CONSTRAINED: i32 = 1;
+pub const PRESSURE_CRITICAL: i32 = 2;
+
+/// `ArticleCache::Run` (`ArticleWriter.cpp`):
+/// Evaluates whether the cache loop should call `CheckFlush` and with what flags.
+#[allow(clippy::too_many_arguments)]
+pub fn article_cache_should_flush(
+    allocated: usize,
+    effective_limit: usize,
+    tier: i32,
+    just_flushed: bool,
+    reset_counter: i32,
+    is_stopped: bool,
+    direct_write: bool,
+) -> (bool, bool, bool) {
+    let is_critical = tier == PRESSURE_CRITICAL;
+    let is_constrained = tier == PRESSURE_CONSTRAINED;
+    let fill_threshold = if effective_limit > 0 {
+        (effective_limit / 100) * 90
+    } else {
+        0
+    };
+    let need_emergency_flush = is_critical && allocated > 0;
+    let need_constrained_flush = is_constrained && allocated > effective_limit;
+
+    let should_flush = (just_flushed
+        || reset_counter >= 1000
+        || is_stopped
+        || need_emergency_flush
+        || need_constrained_flush
+        || (direct_write && allocated >= fill_threshold))
+        && allocated > 0;
+
+    let flush_everything = is_stopped || need_emergency_flush || allocated >= fill_threshold;
+    (should_flush, flush_everything, need_emergency_flush)
+}
+
+/// `MemoryMonitor::UpdateState` (`ArticleWriter.cpp`):
+/// Immediate escalation on higher pressure (1 sample) and 2-sample hysteresis on de-escalation.
+/// Returns `(next_tier, transitioned)`.
+pub fn memory_monitor_step(
+    raw_sample: i32,
+    current_tier: i32,
+    candidate_tier: &mut i32,
+    consecutive_samples: &mut i32,
+) -> (i32, bool) {
+    let mut next_tier = current_tier;
+    let mut transitioned = false;
+
+    if raw_sample > current_tier {
+        next_tier = raw_sample;
+        *candidate_tier = raw_sample;
+        *consecutive_samples = 0;
+        transitioned = true;
+    } else if raw_sample < current_tier {
+        if raw_sample == *candidate_tier {
+            *consecutive_samples += 1;
+            if *consecutive_samples >= 2 {
+                next_tier = raw_sample;
+                *consecutive_samples = 0;
+                transitioned = true;
+            }
+        } else {
+            *candidate_tier = raw_sample;
+            *consecutive_samples = 1;
+        }
+    } else {
+        *candidate_tier = raw_sample;
+        *consecutive_samples = 0;
+    }
+
+    (next_tier, transitioned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -690,5 +778,23 @@ mod tests {
             memory_monitor_classify_tier_transition_action(0, 2, 0, 1, 2),
             1
         );
+        assert_eq!(calc_write_buffer_size(1024, 500_000), 500_000);
+        assert_eq!(calc_write_buffer_size(512, 600_000), 512 * 1024);
+
+        let mut cand = PRESSURE_NORMAL;
+        let mut consec = 0;
+        let (next1, trans1) =
+            memory_monitor_step(PRESSURE_CRITICAL, PRESSURE_NORMAL, &mut cand, &mut consec);
+        assert_eq!(next1, PRESSURE_CRITICAL);
+        assert!(trans1);
+
+        let (next2, trans2) =
+            memory_monitor_step(PRESSURE_NORMAL, PRESSURE_CRITICAL, &mut cand, &mut consec);
+        assert_eq!(next2, PRESSURE_CRITICAL);
+        assert!(!trans2);
+        let (next3, trans3) =
+            memory_monitor_step(PRESSURE_NORMAL, PRESSURE_CRITICAL, &mut cand, &mut consec);
+        assert_eq!(next3, PRESSURE_NORMAL);
+        assert!(trans3);
     }
 }

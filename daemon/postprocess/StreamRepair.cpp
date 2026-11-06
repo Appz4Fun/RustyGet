@@ -1435,22 +1435,70 @@ StreamRepairController::ERepairOutcome StreamRepairController::RepairWholeFile(c
 		donorGroups->emplace_back(*group);
 	}
 	ArticleList* donorArticles = donorFile->GetArticles();
-	std::vector<size_t> sizeProbes = { 0, 1, donorArticles->size() / 2, donorArticles->size() - 1 };
-	ArticleFetcher::FetchedArticle fetched;
-	bool sized = false;
-	std::set<size_t> probed;
-	for (size_t index : sizeProbes)
+	struct SizeProbeCtx
 	{
-		if (sized || IsStopped() || index >= donorArticles->size() || !probed.insert(index).second)
+		StreamRepairController* Controller;
+		FileInfo* DonorFile;
+		std::shared_ptr<std::vector<CString>> DonorGroups;
+		ArticleFetcher::FetchedArticle CurrentFetched;
+		std::exception_ptr Error;
+	} probeCtx{this, donorFile, std::move(donorGroups), {}, nullptr};
+
+	int64 decodedFileSize = 0;
+	bool sized = nzbget_rs_stream_probe_whole_file_donor_size(
+		donorArticles->size(),
+		target.EncodedSize,
+		&probeCtx,
+		[](void* rawCtx) -> int
 		{
-			continue;
-		}
-		std::vector<ArticleBatchFetcher::Request> requests;
-		requests.push_back({(*donorArticles)[index]->GetMessageId(), donorGroups});
-		m_batchFetcher.Begin(std::move(requests));
-		sized = m_batchFetcher.Next(fetched) && fetched.Success &&
-			DupeStreamRepair::DecodedSizePlausible(fetched.FileSize, target.EncodedSize);
-		m_batchFetcher.CancelRemaining();
+			return RepairMapCall<SizeProbeCtx>(rawCtx, 1, [](SizeProbeCtx* c)
+			{
+				return c->Controller->IsStopped() ? 1 : 0;
+			});
+		},
+		[](void* rawCtx, const int32_t* partIndices, size_t count)
+		{
+			RepairMapCallVoid<SizeProbeCtx>(rawCtx, [=](SizeProbeCtx* c)
+			{
+				std::vector<ArticleBatchFetcher::Request> requests;
+				requests.reserve(count);
+				for (size_t i = 0; i < count; i++)
+				{
+					ArticleInfo* article = (*c->DonorFile->GetArticles())[partIndices[i]].get();
+					requests.push_back({article->GetMessageId(), c->DonorGroups});
+				}
+				c->Controller->m_batchFetcher.Begin(std::move(requests));
+			});
+		},
+		[](void* rawCtx, int* outSuccess, int64_t* outOffset, int64_t* outFileSize,
+			const uint8_t** outData, size_t* outDataLen) -> int
+		{
+			return RepairMapCall<SizeProbeCtx>(rawCtx, 0, [=](SizeProbeCtx* c)
+			{
+				c->CurrentFetched = ArticleFetcher::FetchedArticle();
+				if (!c->Controller->m_batchFetcher.Next(c->CurrentFetched))
+				{
+					return 0;
+				}
+				*outSuccess = c->CurrentFetched.Success ? 1 : 0;
+				*outOffset = c->CurrentFetched.Offset;
+				*outFileSize = c->CurrentFetched.FileSize;
+				*outData = reinterpret_cast<const uint8_t*>(c->CurrentFetched.Data.data());
+				*outDataLen = c->CurrentFetched.Data.size();
+				return 1;
+			});
+		},
+		[](void* rawCtx)
+		{
+			RepairMapCallVoid<SizeProbeCtx>(rawCtx, [](SizeProbeCtx* c)
+			{
+				c->Controller->m_batchFetcher.CancelRemaining();
+			});
+		},
+		&decodedFileSize) != 0;
+	if (probeCtx.Error)
+	{
+		std::rethrow_exception(probeCtx.Error);
 	}
 	if (IsStopped())
 	{
@@ -1476,7 +1524,7 @@ StreamRepairController::ERepairOutcome StreamRepairController::RepairWholeFile(c
 		// not written back): it is started over. Refused, it stayed a sparse, partly
 		// zero file that every later pass reported as "no duplicate could supply"
 		int64 existing = FileSystem::FileSize(filePath);
-		if (existing != fetched.FileSize && existing != 0)
+		if (existing != decodedFileSize && existing != 0)
 		{
 			PrintMessage(Message::mkWarning, "Could not recreate %s: file already exists", *filePath);
 			return roNoCost;
@@ -1485,7 +1533,7 @@ StreamRepairController::ERepairOutcome StreamRepairController::RepairWholeFile(c
 		FileSystem::DeleteFile(filePath);
 	}
 	CString errmsg;
-	if (!FileSystem::AllocateFile(filePath, fetched.FileSize, true, errmsg))
+	if (!FileSystem::AllocateFile(filePath, decodedFileSize, true, errmsg))
 	{
 		PrintMessage(Message::mkWarning, "Could not recreate %s: %s", *filePath, *errmsg);
 		return roNoCost;
@@ -1503,11 +1551,11 @@ StreamRepairController::ERepairOutcome StreamRepairController::RepairWholeFile(c
 		"Recreating %s (no article of the file was available) from file %s of duplicate %s",
 		*target.Filename, donorFile->GetFilename(), donorName);
 
-	target.DecodedFileSize = fetched.FileSize;
-	target.Holes = { {0, fetched.FileSize} };
+	target.DecodedFileSize = decodedFileSize;
+	target.Holes = { {0, decodedFileSize} };
 	claimed.insert(donorFile);
 
-	StreamRangeList donorRanges = DupeStreamRepair::EstimateDonorRanges(donorFile, fetched.FileSize);
+	StreamRangeList donorRanges = DupeStreamRepair::EstimateDonorRanges(donorFile, decodedFileSize);
 	int recoveredParts = PatchFromDonor(file, target, donorFile, donorRanges, donorName);
 	file.Close();
 
@@ -2641,164 +2689,157 @@ bool StreamRepairController::MaterializeDonorSet(NzbInfo* donorNzb,
 	const std::vector<SetMember>& donorMembers, const MemberSet& set,
 	const char* tempDir, const char* donorName, int64& totalBytes)
 {
-	// index-aligned with donorMembers (DonorSetSources::BuildMembers walks
-	// the same list in the same order)
 	std::vector<FileInfo*> files;
+	std::vector<const char*> fileNames;
+	std::vector<int32_t> fileArticleCounts;
 	for (FileInfo* fileInfo : donorNzb->GetFileList())
 	{
+		size_t idx = files.size();
 		files.push_back(fileInfo);
+		fileNames.push_back(idx < donorMembers.size() ? donorMembers[idx].Name.c_str() : "");
+		fileArticleCounts.push_back((int32_t)fileInfo->GetArticles()->size());
 	}
-	int64 totalArticles = 0;
-	for (int memberIndex : set.Members)
+
+	struct MaterializeCtx
 	{
-		if (memberIndex < 0 || memberIndex >= (int)files.size() ||
-			files[memberIndex]->GetArticles()->empty())
+		StreamRepairController* Controller;
+		const std::vector<FileInfo*>* Files;
+		const std::vector<SetMember>* DonorMembers;
+		const char* TempDir;
+		DiskFile CurrentFile;
+		BString<1024> CurrentPath;
+		ArticleFetcher::FetchedArticle CurrentFetched;
+		std::exception_ptr Error;
+	} ctx{this, &files, &donorMembers, tempDir, {}, {}, {}, nullptr};
+
+	bool ok = nzbget_rs_stream_materialize_donor_set(
+		set.Members.data(),
+		set.Members.size(),
+		fileNames.data(),
+		fileArticleCounts.data(),
+		files.size(),
+		donorName,
+		&totalBytes,
+		&ctx,
+		[](void* rawCtx) -> int
 		{
-			return false;
-		}
-		totalArticles += (int64)files[memberIndex]->GetArticles()->size();
-	}
-	int64 completedArticles = 0;
-
-	// per-attempt (whole donor set) accounting: totalBytes bounds the decoded
-	// bytes actually written; totalExtent bounds the on-disk file EXTENTS - N
-	// members each declaring a huge size (one tiny high-offset article) would
-	// otherwise seek-write up to N x MaxDecompressBytes of zero-fill on a
-	// non-sparse filesystem before we ever try to extract
-	int64 totalExtent = 0;
-	int memberNumber = 0;
-
-	for (int memberIndex : set.Members)
+			return RepairMapCall<MaterializeCtx>(rawCtx, 1, [](MaterializeCtx* c)
+			{
+				return c->Controller->IsStopped() ? 1 : 0;
+			});
+		},
+		[](void* rawCtx, int32_t memberIndex) -> int
+		{
+			return RepairMapCall<MaterializeCtx>(rawCtx, 0, [memberIndex](MaterializeCtx* c)
+			{
+				NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+					c->TempDir, PATH_SEPARATOR, (*c->DonorMembers)[memberIndex].Name.c_str());
+				c->CurrentPath.Set(pathBuf.data ? pathBuf.data : "", (int)pathBuf.len);
+				nzbget_rs_free(pathBuf);
+				if (!c->CurrentFile.Open(c->CurrentPath, DiskFile::omWrite))
+				{
+					c->Controller->PrintMessage(Message::mkWarning,
+						"Could not create %s for donor materialization: %s",
+						*c->CurrentPath, *FileSystem::GetLastErrorMessage());
+					return 0;
+				}
+				return 1;
+			});
+		},
+		[](void* rawCtx, int64_t offset, const uint8_t* data, int64_t size) -> int
+		{
+			return RepairMapCall<MaterializeCtx>(rawCtx, 0, [=](MaterializeCtx* c)
+			{
+				c->CurrentFile.Seek(offset);
+				if (c->CurrentFile.Position() != offset ||
+					c->CurrentFile.Write(data, size) != size ||
+					!c->CurrentFile.Flush())
+				{
+					c->Controller->PrintMessage(Message::mkWarning,
+						"Could not write to %s during donor materialization: %s",
+						*c->CurrentPath, *WriteErrorMessage());
+					return 0;
+				}
+				return 1;
+			});
+		},
+		[](void* rawCtx)
+		{
+			RepairMapCallVoid<MaterializeCtx>(rawCtx, [](MaterializeCtx* c)
+			{
+				c->CurrentFile.Close();
+			});
+		},
+		[](void* rawCtx, int32_t memberIndex)
+		{
+			RepairMapCallVoid<MaterializeCtx>(rawCtx, [memberIndex](MaterializeCtx* c)
+			{
+				FileInfo* donorFile = (*c->Files)[memberIndex];
+				auto donorGroups = std::make_shared<std::vector<CString>>();
+				for (const CString& group : *donorFile->GetGroups())
+				{
+					donorGroups->emplace_back(*group);
+				}
+				std::vector<ArticleBatchFetcher::Request> requests;
+				requests.reserve(donorFile->GetArticles()->size());
+				for (std::unique_ptr<ArticleInfo>& article : *donorFile->GetArticles())
+				{
+					requests.push_back({article->GetMessageId(), donorGroups});
+				}
+				c->Controller->m_batchFetcher.Begin(std::move(requests));
+			});
+		},
+		[](void* rawCtx, int* outSuccess, int64_t* outOffset, int64_t* outFileSize,
+			const uint8_t** outData, size_t* outDataLen) -> int
+		{
+			return RepairMapCall<MaterializeCtx>(rawCtx, 0, [=](MaterializeCtx* c)
+			{
+				c->CurrentFetched = ArticleFetcher::FetchedArticle();
+				if (!c->Controller->m_batchFetcher.Next(c->CurrentFetched))
+				{
+					return 0;
+				}
+				*outSuccess = c->CurrentFetched.Success ? 1 : 0;
+				*outOffset = c->CurrentFetched.Offset;
+				*outFileSize = c->CurrentFetched.FileSize;
+				*outData = reinterpret_cast<const uint8_t*>(c->CurrentFetched.Data.data());
+				*outDataLen = c->CurrentFetched.Data.size();
+				return 1;
+			});
+		},
+		[](void* rawCtx)
+		{
+			RepairMapCallVoid<MaterializeCtx>(rawCtx, [](MaterializeCtx* c)
+			{
+				c->Controller->m_batchFetcher.CancelRemaining();
+			});
+		},
+		[](void* rawCtx, const char* label, int32_t stageProgress)
+		{
+			RepairMapCallVoid<MaterializeCtx>(rawCtx, [=](MaterializeCtx* c)
+			{
+				if (c->Controller->m_postInfo)
+				{
+					GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+					c->Controller->m_postInfo->SetProgressLabel(label ? label : "");
+					c->Controller->m_postInfo->SetStageProgress(stageProgress);
+				}
+			});
+		},
+		[](void* rawCtx, int32_t kind, const char* text)
+		{
+			RepairMapCallVoid<MaterializeCtx>(rawCtx, [=](MaterializeCtx* c)
+			{
+				Message::EKind msgKind = kind == 2 ? Message::mkError :
+					kind == 1 ? Message::mkWarning : Message::mkInfo;
+				c->Controller->PrintMessage(msgKind, "%s", text);
+			});
+		}) != 0;
+	if (ctx.Error)
 	{
-		memberNumber++;
-		FileInfo* donorFile = files[memberIndex];
-
-		NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-			tempDir, PATH_SEPARATOR, donorMembers[memberIndex].Name.c_str());
-		BString<1024> path;
-		path.Set(pathBuf.data ? pathBuf.data : "", (int)pathBuf.len);
-		nzbget_rs_free(pathBuf);
-		DiskFile file;
-		if (!file.Open(path, DiskFile::omWrite))
-		{
-			PrintMessage(Message::mkWarning,
-				"Could not create %s for donor materialization: %s",
-				*path, *FileSystem::GetLastErrorMessage());
-			return false;
-		}
-
-		int64 memberExtent = 0;	// this member's highest write end (its real size)
-		int64 memberSize = -1;
-		StreamRangeList memberHoles;
-		int deliveredArticles = 0;
-		auto updateProgress = [&]()
-		{
-			if (m_postInfo)
-			{
-				GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-				NzbgetRsBuf progBuf = nzbget_rs_stream_format_materialize_progress(
-					donorName, memberNumber, (int)set.Members.size(), deliveredArticles,
-					(int)donorFile->GetArticles()->size(), totalBytes);
-				m_postInfo->SetProgressLabel(progBuf.data ? progBuf.data : "");
-				nzbget_rs_free(progBuf);
-				m_postInfo->SetStageProgress(
-					totalArticles > 0 ? (int)(completedArticles * 1000 / totalArticles) : 0);
-			}
-		};
-		updateProgress();
-		// requests OWN a shared copy of the group list: donorNzb is destroyed
-		// per donor iteration while cancelled workers may still be fetching
-		// (same pattern as VerifyDonor/PatchFromDonor after the UAF fix)
-		auto donorGroups = std::make_shared<std::vector<CString>>();
-		for (const CString& group : *donorFile->GetGroups())
-		{
-			donorGroups->emplace_back(*group);
-		}
-		std::vector<ArticleBatchFetcher::Request> requests;
-		requests.reserve(donorFile->GetArticles()->size());
-		for (std::unique_ptr<ArticleInfo>& article : *donorFile->GetArticles())
-		{
-			requests.push_back({article->GetMessageId(), donorGroups});
-		}
-		m_batchFetcher.Begin(std::move(requests));
-
-		ArticleFetcher::FetchedArticle fetched;
-		while (m_batchFetcher.Next(fetched))
-		{
-			if (IsStopped())
-			{
-				m_batchFetcher.CancelRemaining();
-				return false;
-			}
-			if (!nzbget_rs_stream_materialize_article_valid(
-				fetched.Success ? 1 : 0, fetched.Data.size(), fetched.Offset,
-				fetched.FileSize, memberSize))
-			{
-				m_batchFetcher.CancelRemaining();
-				PrintMessage(Message::mkInfo,
-					"Stopping download of duplicate %s: article %i of %i in %s is unavailable or invalid",
-					donorName, deliveredArticles + 1, (int)donorFile->GetArticles()->size(),
-					donorMembers[memberIndex].Name.c_str());
-				return false;
-			}
-			if (memberSize < 0)
-			{
-				memberSize = fetched.FileSize;
-				memberHoles.push_back({0, memberSize});
-			}
-			int64 writeEnd = fetched.Offset + (int64)fetched.Data.size();
-			// the caps bound BOTH the accumulated decoded bytes AND the
-			// accumulated file extents across ALL members: prior members by
-			// their real materialized extent, this member by its declared size
-			// (a stable per-member upper bound that bails before its download).
-			// Checked in delivery order BEFORE each write, exactly as the
-			// serial loop did - the fetch window may run ahead, the caps never
-			if (DupeStreamRepair::ExceedsDecompressCap(totalBytes,
-				(int64)fetched.Data.size(), totalExtent, fetched.FileSize))
-			{
-				m_batchFetcher.CancelRemaining();
-				return false;
-			}
-			file.Seek(fetched.Offset);
-			if (file.Position() != fetched.Offset ||
-				file.Write(fetched.Data.data(), fetched.Data.size()) !=
-					(int64)fetched.Data.size() ||
-				!file.Flush())
-			{
-				PrintMessage(Message::mkWarning,
-					"Could not write to %s during donor materialization: %s",
-					*path, *WriteErrorMessage());
-				m_batchFetcher.CancelRemaining();
-				return false;
-			}
-			totalBytes += fetched.Data.size();
-			memberExtent = std::max(memberExtent, writeEnd);
-			DupeStreamRepair::SubtractCovered(memberHoles,
-				{fetched.Offset, (int64)fetched.Data.size()});
-			deliveredArticles++;
-			completedArticles++;
-			updateProgress();
-		}
-		// a stop ends Next() before the in-loop guard can fire, so re-check
-		// here: materialization must fail-fast on stop, never fall through to
-		// return true and drive the extractor on truncated donor files
-		if (IsStopped())
-		{
-			m_batchFetcher.CancelRemaining();
-			return false;
-		}
-		if (memberSize < 0 || !memberHoles.empty())
-		{
-			m_batchFetcher.CancelRemaining();
-			PrintMessage(Message::mkInfo,
-				"Stopping download of duplicate %s: %s has missing ranges after all listed articles",
-				donorName, donorMembers[memberIndex].Name.c_str());
-			return false;
-		}
-		totalExtent += memberExtent;
-		file.Close();
+		std::rethrow_exception(ctx.Error);
 	}
-	return true;
+	return ok;
 }
 
 bool StreamRepairController::VerifyDonorInnerFile(RepairSetData& repairSet,

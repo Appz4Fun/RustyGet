@@ -6038,6 +6038,199 @@ pub fn patch_from_donor_file(
     }
 }
 
+/// Probes a whole-file donor's articles (`{0, 1, count / 2, count - 1}`) to learn a plausible
+/// decoded file size (`StreamRepairController::RepairWholeFile` in `StreamRepair.cpp`).
+pub fn probe_whole_file_donor_size(
+    article_count: usize,
+    target_encoded_size: i64,
+    batch_client: &mut dyn DonorBatchClient,
+) -> Option<i64> {
+    if article_count == 0 {
+        return None;
+    }
+    let size_probes = [0usize, 1, article_count / 2, article_count - 1];
+    let mut probed = std::collections::BTreeSet::<usize>::new();
+    for index in size_probes {
+        if batch_client.is_stopped() || index >= article_count || !probed.insert(index) {
+            continue;
+        }
+        let req = [index as i32];
+        batch_client.begin_batch(&req);
+        let sized = batch_client
+            .next_article()
+            .filter(|fetched| {
+                fetched.success && decoded_size_plausible(fetched.file_size, target_encoded_size)
+            })
+            .map(|fetched| fetched.file_size);
+        batch_client.cancel_remaining();
+        if let Some(file_size) = sized {
+            return Some(file_size);
+        }
+    }
+    None
+}
+
+/// Callback boundary for materializing a donor archive set on disk
+/// (`StreamRepairController::MaterializeDonorSet` in `StreamRepair.cpp`).
+pub trait DonorMaterializeClient {
+    fn is_stopped(&mut self) -> bool;
+    fn open_member(&mut self, member_index: i32) -> bool;
+    fn write_member(&mut self, offset: i64, data: &[u8]) -> bool;
+    fn close_member(&mut self);
+    fn begin_member_batch(&mut self, member_index: i32);
+    fn next_article(&mut self) -> Option<FetchedDonorArticle>;
+    fn cancel_remaining(&mut self);
+    fn update_progress(&mut self, label: &[u8], stage_progress: i32);
+    fn emit_message_bytes(&mut self, kind: TargetMessageKind, text: &[u8]);
+}
+
+/// Materializes all member files of `set_members` into `temp_dir` via `client`, enforcing
+/// article validity, hole coverage, and `exceeds_decompress_cap`
+/// (`StreamRepairController::MaterializeDonorSet` in `StreamRepair.cpp`).
+pub fn materialize_donor_set(
+    set_members: &[i32],
+    file_names: &[&[u8]],
+    file_article_counts: &[i32],
+    donor_name: &[u8],
+    total_bytes: &mut i64,
+    client: &mut dyn DonorMaterializeClient,
+) -> bool {
+    let mut total_articles: i64 = 0;
+    for &member_index in set_members {
+        if member_index < 0 || (member_index as usize) >= file_article_counts.len() {
+            return false;
+        }
+        let article_count = file_article_counts[member_index as usize];
+        if article_count <= 0 {
+            return false;
+        }
+        total_articles += article_count as i64;
+    }
+
+    let mut completed_articles: i64 = 0;
+    let mut total_extent: i64 = 0;
+    let mut member_number: i32 = 0;
+    let set_member_count = set_members.len() as i32;
+
+    for &member_index in set_members {
+        member_number += 1;
+        let member_idx = member_index as usize;
+        let member_name = file_names.get(member_idx).copied().unwrap_or(b"");
+        let member_article_count = file_article_counts[member_idx];
+
+        if !client.open_member(member_index) {
+            return false;
+        }
+
+        let mut member_extent: i64 = 0;
+        let mut member_size: i64 = -1;
+        let mut member_holes: Vec<NzbgetRsByteRange> = Vec::new();
+        let mut delivered_articles: i32 = 0;
+
+        let report_progress =
+            |client: &mut dyn DonorMaterializeClient, delivered: i32, completed: i64, bytes: i64| {
+                let label = format_materialize_progress(
+                    donor_name,
+                    member_number,
+                    set_member_count,
+                    delivered,
+                    member_article_count,
+                    bytes,
+                );
+                let stage_progress = if total_articles > 0 {
+                    (completed * 1000 / total_articles) as i32
+                } else {
+                    0
+                };
+                client.update_progress(&label, stage_progress);
+            };
+
+        report_progress(client, delivered_articles, completed_articles, *total_bytes);
+        client.begin_member_batch(member_index);
+
+        while let Some(fetched) = client.next_article() {
+            if client.is_stopped() {
+                client.cancel_remaining();
+                return false;
+            }
+            if !materialize_article_valid(
+                fetched.success,
+                fetched.data.len(),
+                fetched.offset,
+                fetched.file_size,
+                member_size,
+            ) {
+                client.cancel_remaining();
+                let mut msg = b"Stopping download of duplicate ".to_vec();
+                msg.extend_from_slice(donor_name);
+                msg.extend_from_slice(
+                    format!(
+                        ": article {} of {} in ",
+                        delivered_articles + 1,
+                        member_article_count
+                    )
+                    .as_bytes(),
+                );
+                msg.extend_from_slice(member_name);
+                msg.extend_from_slice(b" is unavailable or invalid");
+                client.emit_message_bytes(TargetMessageKind::Info, &msg);
+                return false;
+            }
+            if member_size < 0 {
+                member_size = fetched.file_size;
+                member_holes.push(NzbgetRsByteRange {
+                    offset: 0,
+                    size: member_size,
+                });
+            }
+            let write_end = fetched.offset + (fetched.data.len() as i64);
+            if exceeds_decompress_cap(
+                *total_bytes,
+                fetched.data.len() as i64,
+                total_extent,
+                fetched.file_size,
+            ) {
+                client.cancel_remaining();
+                return false;
+            }
+            if !client.write_member(fetched.offset, &fetched.data) {
+                client.cancel_remaining();
+                return false;
+            }
+            *total_bytes += fetched.data.len() as i64;
+            member_extent = member_extent.max(write_end);
+            member_holes = subtract_covered(
+                &member_holes,
+                NzbgetRsByteRange {
+                    offset: fetched.offset,
+                    size: fetched.data.len() as i64,
+                },
+            );
+            delivered_articles += 1;
+            completed_articles += 1;
+            report_progress(client, delivered_articles, completed_articles, *total_bytes);
+        }
+
+        if client.is_stopped() {
+            client.cancel_remaining();
+            return false;
+        }
+        if member_size < 0 || !member_holes.is_empty() {
+            client.cancel_remaining();
+            let mut msg = b"Stopping download of duplicate ".to_vec();
+            msg.extend_from_slice(donor_name);
+            msg.extend_from_slice(b": ");
+            msg.extend_from_slice(member_name);
+            msg.extend_from_slice(b" has missing ranges after all listed articles");
+            client.emit_message_bytes(TargetMessageKind::Info, &msg);
+            return false;
+        }
+        total_extent += member_extent;
+        client.close_member();
+    }
+    true
+}
+
 /// Pure-Rust `ContentMapper` mirroring `daemon/postprocess/ContentMap.h`.
 pub struct ContentMapper;
 
@@ -10481,5 +10674,1451 @@ mod tests {
             target.messages[0].1,
             b"Recovered 0.0 MB (1 donor article(s)) of movie-\x80\xff.mkv from duplicate Donor-\xfe.1080p"
         );
+    }
+
+    fn reference_probe_parts(
+        donor_ranges: &[NzbgetRsByteRange],
+        holes: &[NzbgetRsByteRange],
+        probe_count: i32,
+    ) -> Vec<i32> {
+        let mut excluded = vec![false; donor_ranges.len()];
+        for (i, &dr) in donor_ranges.iter().enumerate() {
+            for &hole in holes {
+                if dr.offset < range_end(hole) && hole.offset < range_end(dr) {
+                    excluded[i] = true;
+                    if i > 0 {
+                        excluded[i - 1] = true;
+                    }
+                    if i + 1 < donor_ranges.len() {
+                        excluded[i + 1] = true;
+                    }
+                    break;
+                }
+            }
+        }
+        let candidates: Vec<i32> = excluded
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &ex)| (!ex).then_some(i as i32))
+            .collect();
+        if probe_count <= 0 {
+            return Vec::new();
+        }
+        let wanted = probe_count as usize;
+        if candidates.len() <= wanted {
+            return candidates;
+        }
+        let mut probes = Vec::with_capacity(wanted);
+        for k in 0..wanted {
+            probes.push(candidates[candidates.len() * (2 * k + 1) / (2 * wanted)]);
+        }
+        probes
+    }
+
+    /// Full pure-Rust port of `tests/queue/DupeStreamRepair.cpp` (all `BOOST_AUTO_TEST_CASE` tests).
+    #[test]
+    fn dupe_stream_repair_full_suite_port_from_cpp() {
+        let br = |offset: i64, size: i64| NzbgetRsByteRange { offset, size };
+
+        // 1. StreamRepairEligibilityTest
+        assert!(is_stream_eligible(b"movie.mkv"));
+        assert!(is_stream_eligible(b"MOVIE.MKV"));
+        assert!(is_stream_eligible(b"clip.mp4"));
+        assert!(is_stream_eligible(b"show.ts"));
+        assert!(!is_stream_eligible(b"release.r01"));
+        assert!(!is_stream_eligible(b"archive.rar"));
+        assert!(!is_stream_eligible(b"movie.par2"));
+        assert!(!is_stream_eligible(b"noextension"));
+        assert!(!is_stream_eligible(b""));
+        assert_eq!(
+            unsafe { crate::ffi::nzbget_rs_stream_is_eligible(std::ptr::null()) },
+            0
+        );
+
+        // 2. StreamRepairComputeHolesTest
+        let holes = compute_holes(&[br(0, 300), br(500, 300)], 1000);
+        assert_eq!(holes, vec![br(300, 200), br(800, 200)]);
+        assert_eq!(total_size(&holes), 400);
+
+        // 3. StreamRepairComputeHolesLeadingHoleTest
+        let leading = compute_holes(&[br(200, 400)], 600);
+        assert_eq!(leading, vec![br(0, 200)]);
+
+        // 4. StreamRepairComputeHolesCompleteAndUnknownTest
+        assert!(compute_holes(&[br(0, 300), br(300, 400)], 700).is_empty());
+        assert!(compute_holes(&[br(0, 300)], 0).is_empty());
+
+        // 5. StreamRepairComputeHolesOverlapTest
+        let overlap = compute_holes(&[br(500, 300), br(0, 400), br(300, 300)], 1000);
+        assert_eq!(overlap, vec![br(800, 200)]);
+
+        // 6. StreamRepairEstimateDonorRangesTest
+        let uniform = estimate_donor_ranges(&[250, 250, 250, 250], 1000);
+        assert_eq!(
+            uniform,
+            vec![br(0, 250), br(250, 250), br(500, 250), br(750, 250)]
+        );
+        let uneven = estimate_donor_ranges(&[300, 100, 100], 1000);
+        assert_eq!(uneven, vec![br(0, 600), br(600, 200), br(800, 200)]);
+        assert!(estimate_donor_ranges(&[], 1000).is_empty());
+        assert!(estimate_donor_ranges(&[250, 250, 250, 250], 0).is_empty());
+
+        // 7. StreamRepairSelectPatchPartsTest
+        let pr = |offset: i64, size: i64| crate::streampatchparts::Range { offset, size };
+        let donor_patch_ranges: Vec<_> = (0..10).map(|i| pr(i * 100, 100)).collect();
+        let mut patch_out = vec![0i32; 10];
+        let n_picks =
+            crate::streampatchparts::select(&donor_patch_ranges, &[pr(450, 100)], 1, &mut patch_out);
+        assert_eq!(&patch_out[..n_picks], &[3, 4, 5, 6]);
+        let n_edge =
+            crate::streampatchparts::select(&donor_patch_ranges, &[pr(0, 50)], 2, &mut patch_out);
+        assert_eq!(&patch_out[..n_edge], &[0, 1, 2]);
+        assert_eq!(
+            crate::streampatchparts::select(&donor_patch_ranges, &[], 2, &mut patch_out),
+            0
+        );
+
+        // 8. StreamRepairSelectProbePartsTest
+        let donor_ranges: Vec<_> = (0..10).map(|i| br(i * 100, 100)).collect();
+        assert_eq!(
+            select_probe_parts(&donor_ranges, &[br(450, 100)], 2),
+            vec![1, 8]
+        );
+        assert!(select_probe_parts(&donor_ranges, &[br(0, 1000)], 2).is_empty());
+        assert!(select_probe_parts(&donor_ranges, &[br(0, 850)], 2).is_empty());
+
+        // 9. StreamRepairSelectProbePartsBoundaryAndSamplingTest
+        let donors5 = vec![
+            br(0, 100),
+            br(100, 100),
+            br(200, 100),
+            br(300, 100),
+            br(400, 100),
+        ];
+        let boundary_cases: Vec<(Vec<NzbgetRsByteRange>, Vec<NzbgetRsByteRange>, i32, Vec<i32>)> =
+            vec![
+                (vec![], vec![br(0, 100)], 2, vec![]),
+                (vec![br(0, 100)], vec![], 2, vec![0]),
+                (vec![br(0, 100)], vec![br(100, 100)], 2, vec![0]),
+                (vec![br(0, 100)], vec![br(0, 100)], 2, vec![]),
+                (donors5.clone(), vec![], 0, vec![]),
+                (donors5.clone(), vec![], -2, vec![]),
+                (donors5.clone(), vec![], 1, vec![2]),
+                (donors5.clone(), vec![], 2, vec![1, 3]),
+                (donors5.clone(), vec![], 5, vec![0, 1, 2, 3, 4]),
+                (donors5.clone(), vec![], 8, vec![0, 1, 2, 3, 4]),
+                (
+                    donors5.clone(),
+                    vec![br(-100, 100), br(500, 100)],
+                    5,
+                    vec![0, 1, 2, 3, 4],
+                ),
+                (
+                    donors5.clone(),
+                    vec![br(-100, 100), br(0, 50)],
+                    5,
+                    vec![2, 3, 4],
+                ),
+                (donors5.clone(), vec![br(100, 100)], 5, vec![3, 4]),
+                (donors5.clone(), vec![br(0, 150)], 3, vec![3, 4]),
+                (donors5.clone(), vec![br(400, 100)], 5, vec![0, 1, 2]),
+                (donors5.clone(), vec![br(100, 0)], 5, vec![0, 1, 2, 3, 4]),
+                (donors5, vec![br(150, 0)], 5, vec![3, 4]),
+            ];
+        for (donors, holes, count, expected) in boundary_cases {
+            assert_eq!(select_probe_parts(&donors, &holes, count), expected);
+        }
+
+        // 10. StreamRepairSelectProbePartsIrregularGeometryTest
+        let end = i64::MAX;
+        let start = i64::MIN;
+        let irregular_cases: Vec<(Vec<NzbgetRsByteRange>, Vec<NzbgetRsByteRange>, Vec<i32>)> = vec![
+            (
+                vec![
+                    br(300, 100),
+                    br(0, 100),
+                    br(100, 100),
+                    br(400, 100),
+                    br(200, 100),
+                ],
+                vec![br(150, 10)],
+                vec![0, 4],
+            ),
+            (
+                vec![
+                    br(0, 300),
+                    br(100, 20),
+                    br(500, 100),
+                    br(600, 100),
+                    br(700, 100),
+                ],
+                vec![br(250, 10)],
+                vec![2, 3, 4],
+            ),
+            (
+                vec![
+                    br(0, 100),
+                    br(100, 100),
+                    br(200, 100),
+                    br(300, 100),
+                    br(400, 100),
+                ],
+                vec![br(140, 60), br(170, 60)],
+                vec![4],
+            ),
+            (
+                vec![
+                    br(0, 100),
+                    br(100, 100),
+                    br(200, 100),
+                    br(300, 100),
+                    br(400, 100),
+                    br(500, 100),
+                    br(600, 100),
+                    br(700, 100),
+                ],
+                vec![br(650, 10), br(150, 10)],
+                vec![3, 4],
+            ),
+            (
+                vec![
+                    br(0, 100),
+                    br(150, 0),
+                    br(200, 100),
+                    br(300, 100),
+                    br(400, 100),
+                ],
+                vec![br(100, 100)],
+                vec![3, 4],
+            ),
+            (
+                vec![
+                    br(0, 100),
+                    br(100, 0),
+                    br(200, 100),
+                    br(300, 100),
+                    br(400, 100),
+                ],
+                vec![br(100, 100)],
+                vec![0, 1, 2, 3, 4],
+            ),
+            (
+                vec![br(0, 300), br(300, 100), br(400, 100), br(500, 100)],
+                vec![br(200, -100)],
+                vec![2, 3],
+            ),
+            (
+                vec![
+                    br(end - 500, 100),
+                    br(end - 400, 100),
+                    br(end - 300, 100),
+                    br(end - 200, 100),
+                    br(end - 100, 100),
+                ],
+                vec![br(end - 300, 100)],
+                vec![0, 4],
+            ),
+            (vec![br(end, 1), br(end, 1)], vec![], vec![0, 1]),
+            (vec![br(end, 1), br(end, 1)], vec![br(0, 1)], vec![0, 1]),
+            (vec![br(0, 1), br(end - 10, 20)], vec![br(0, end)], vec![]),
+            (
+                vec![br(start, -1), br(0, 100)],
+                vec![br(start, 0)],
+                vec![0, 1],
+            ),
+            (
+                vec![br(300, 1), br(0, 1), br(end - 10, 20)],
+                vec![br(0, end)],
+                vec![],
+            ),
+            (
+                vec![br(0, 100), br(50, 100), br(end - 10, 20)],
+                vec![br(0, end)],
+                vec![],
+            ),
+            (
+                vec![br(0, 0), br(100, 1), br(end - 10, 20)],
+                vec![br(0, end)],
+                vec![],
+            ),
+            (
+                vec![br(end - 1, 1), br(end, 0)],
+                vec![br(end - 2, 1)],
+                vec![0, 1],
+            ),
+            (
+                vec![br(start + 1, -1), br(0, 100)],
+                vec![br(start, 0)],
+                vec![0, 1],
+            ),
+            (vec![br(start, 1), br(start, -1)], vec![br(start, 1)], vec![]),
+        ];
+        for (donors, holes, expected) in irregular_cases {
+            assert_eq!(
+                select_probe_parts(&donors, &holes, donors.len() as i32),
+                expected
+            );
+        }
+
+        // 11. StreamRepairSelectProbePartsDifferentialTest
+        let mut rng_state: u64 = 0x51ec7;
+        let mut next_u32 = || -> u32 {
+            rng_state = rng_state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (rng_state >> 32) as u32
+        };
+        for iteration in 0..2000 {
+            let donor_count = (next_u32() % 80) as usize;
+            let hole_count = (next_u32() % 25) as usize;
+            let mut donors = Vec::with_capacity(donor_count);
+            let mut holes = Vec::with_capacity(hole_count);
+            for i in 0..donor_count {
+                donors.push(if iteration % 2 == 0 {
+                    br((i as i64) * 100, 100)
+                } else {
+                    br(
+                        (next_u32() % 1000) as i64 - 50,
+                        (next_u32() % 120) as i64 - 10,
+                    )
+                });
+            }
+            for i in 0..hole_count {
+                holes.push(if iteration % 3 == 0 {
+                    br((i as i64) * 250 + 50, 50)
+                } else {
+                    br(
+                        (next_u32() % 1000) as i64 - 50,
+                        (next_u32() % 120) as i64 - 10,
+                    )
+                });
+            }
+            for probe_count in [
+                0,
+                -1,
+                1,
+                2,
+                donor_count as i32,
+                (donor_count as i32) + 1,
+            ] {
+                let expected = reference_probe_parts(&donors, &holes, probe_count);
+                let actual = select_probe_parts(&donors, &holes, probe_count);
+                assert_eq!(actual, expected);
+            }
+        }
+
+        // 12. StreamRepairSubtractCoveredTest
+        let mut sub_holes = vec![br(300, 200), br(800, 200)];
+        sub_holes = subtract_covered(&sub_holes, br(350, 100));
+        assert_eq!(sub_holes, vec![br(300, 50), br(450, 50), br(800, 200)]);
+        sub_holes = subtract_covered(&sub_holes, br(800, 200));
+        assert_eq!(sub_holes, vec![br(300, 50), br(450, 50)]);
+        sub_holes = subtract_covered(&sub_holes, br(600, 100));
+        assert_eq!(sub_holes, vec![br(300, 50), br(450, 50)]);
+
+        // 13. StreamRepairBuildRepairJobTest & 14. StreamRepairWholeFileJobTest & 20. StreamRepairDoesNotCaptureParFilesTest
+        assert_eq!(
+            eval_build_repair_job(
+                2, 2, false, false, b"movie.mkv", true, 0, 0, 3, false, false, false, false, 2,
+                1000, 1000
+            ),
+            2
+        );
+        assert_eq!(
+            eval_build_repair_job(
+                2, 2, false, false, b"release.r01", true, 0, 0, 3, false, false, false, false, 1,
+                1000, 1000
+            ),
+            2
+        );
+        // Post-process active -> 0
+        assert_eq!(
+            eval_build_repair_job(
+                2, 2, false, false, b"late.par2", true, 0, 0, 3, false, false, true, false, 1,
+                1000, 1000
+            ),
+            0
+        );
+        // Below "stream" mode -> 0
+        assert_eq!(
+            eval_build_repair_job(
+                0, 2, false, false, b"movie.mkv", true, 0, 0, 3, false, false, false, false, 1,
+                1000, 1000
+            ),
+            0
+        );
+        // Whole-file missing -> 1
+        assert_eq!(
+            eval_build_repair_job(
+                2, 2, false, false, b"ZGWRiqtR4jt2nswwN.part03.rar", true, 0, 0, 3, false, false,
+                false, false, 0, 2_400_000, 0
+            ),
+            1
+        );
+        // Sizeless whole file -> 0
+        assert_eq!(
+            eval_build_repair_job(
+                2, 2, false, false, b"x.r00", true, 0, 0, 3, false, false, false, false, 0, 0, 0
+            ),
+            0
+        );
+        // PAR files (by flag or by confirmed/disk .par2 name) -> 0
+        assert_eq!(
+            eval_build_repair_job(
+                2, 2, false, true, b"obfuscated.bin", true, 0, 0, 3, false, false, false, false, 1,
+                1000, 1000
+            ),
+            0
+        );
+        assert_eq!(
+            eval_build_repair_job(
+                2, 2, false, false, b"release.PaR2", true, 0, 0, 3, false, false, false, false, 1,
+                1000, 1000
+            ),
+            0
+        );
+        assert_eq!(
+            eval_build_repair_job(
+                2, 2, false, false, b"release.vol01+02.PAR2", true, 0, 0, 3, false, false, false,
+                false, 1, 1000, 1000
+            ),
+            0
+        );
+
+        // 15. StreamRepairDecodedSizePlausibleTest
+        assert!(decoded_size_plausible(1_000_000, 1_020_000));
+        assert!(decoded_size_plausible(1_020_000, 1_020_000));
+        assert!(!decoded_size_plausible(1_020_001, 1_020_000));
+        assert!(!decoded_size_plausible(800_000, 1_020_000));
+        assert!(!decoded_size_plausible(0, 1_020_000));
+        assert!(!decoded_size_plausible(1000, 0));
+
+        // 16. StreamRepairSelectWholeFileDonorTest
+        let flat = vec![768_000i32; 12];
+        let twin = vec![
+            770_318, 768_951, 771_402, 769_037, 770_660, 769_845, 768_590, 771_113, 769_722,
+            771_000, 769_500, 398_760,
+        ];
+        let other = vec![
+            769_211, 770_840, 768_392, 771_005, 769_930, 768_777, 770_123, 769_504, 771_288,
+            770_100, 769_400, 398_760,
+        ];
+        let shifted = |sizes: &[i32], shift: i32| -> Vec<i32> {
+            sizes.iter().map(|&s| s + shift).collect()
+        };
+        let sum_i64 = |sizes: &[i32]| -> i64 { sizes.iter().map(|&s| s as i64).sum() };
+
+        {
+            let target_hash = crate::dupefallback::article_size_steps_hash(&twin);
+            assert_ne!(target_hash, 0);
+            let other_shifted = shifted(&other, 27);
+            let twin_shifted = shifted(&twin, 27);
+            let donor_names: &[&[u8]] = &[b"aaa.bin", b"ccc.bin"];
+            let donor_sizes = [sum_i64(&other_shifted), sum_i64(&twin_shifted)];
+            let donor_hashes = [
+                crate::dupefallback::article_size_steps_hash(&other_shifted),
+                crate::dupefallback::article_size_steps_hash(&twin_shifted),
+            ];
+            let idx = select_whole_file_donor(
+                b"Q8aZ1kLmN0pR",
+                sum_i64(&twin),
+                12,
+                target_hash,
+                b"",
+                donor_names,
+                &donor_sizes,
+                &[0, 0],
+                &[1, 1],
+                &[0, 0],
+                &donor_hashes,
+            );
+            assert_eq!(idx, 1);
+            // Claimed member is skipped
+            assert_eq!(
+                select_whole_file_donor(
+                    b"Q8aZ1kLmN0pR",
+                    sum_i64(&twin),
+                    12,
+                    target_hash,
+                    b"",
+                    donor_names,
+                    &donor_sizes,
+                    &[0, 0],
+                    &[1, 1],
+                    &[0, 1],
+                    &donor_hashes,
+                ),
+                -1
+            );
+        }
+        {
+            let flat_sum = sum_i64(&flat);
+            let donor_names: &[&[u8]] = &[
+                b"LN2ttWTMLC4N1DkTm.part02.rar",
+                b"LN2ttWTMLC4N1DkTm.part03.rar",
+                b"LN2ttWTMLC4N1DkTm.part04.rar",
+                b"rel.vol00+08.par2",
+            ];
+            let donor_sizes = [flat_sum; 4];
+            let donor_is_par = [0, 0, 0, 1];
+            let donor_has_art = [1, 1, 1, 1];
+            let donor_claimed = [0, 0, 0, 0];
+            let donor_hashes = [0u64; 4];
+
+            assert_eq!(
+                select_whole_file_donor(
+                    b"x8Tdn3e3iFf1MaWLu.part03.rar",
+                    flat_sum,
+                    12,
+                    0,
+                    b"",
+                    donor_names,
+                    &donor_sizes,
+                    &donor_is_par,
+                    &donor_has_art,
+                    &donor_claimed,
+                    &donor_hashes,
+                ),
+                1
+            );
+            assert_eq!(
+                select_whole_file_donor(
+                    b"ln2ttwtmlc4n1dktm.PART04.RAR",
+                    flat_sum,
+                    12,
+                    0,
+                    b"",
+                    donor_names,
+                    &donor_sizes,
+                    &donor_is_par,
+                    &donor_has_art,
+                    &donor_claimed,
+                    &donor_hashes,
+                ),
+                2
+            );
+            assert_eq!(
+                select_whole_file_donor(
+                    b"x8Tdn3e3iFf1MaWLu",
+                    flat_sum,
+                    12,
+                    0,
+                    b"",
+                    donor_names,
+                    &donor_sizes,
+                    &donor_is_par,
+                    &donor_has_art,
+                    &donor_claimed,
+                    &donor_hashes,
+                ),
+                -1
+            );
+            assert_eq!(
+                select_whole_file_donor(
+                    b"x8Tdn3e3iFf1MaWLu.part03.rar",
+                    flat_sum,
+                    20,
+                    0,
+                    b"",
+                    donor_names,
+                    &donor_sizes,
+                    &donor_is_par,
+                    &donor_has_art,
+                    &donor_claimed,
+                    &donor_hashes,
+                ),
+                1
+            );
+            assert_eq!(
+                select_whole_file_donor(
+                    b"x8Tdn3e3iFf1MaWLu.part03.rar",
+                    flat_sum * 2,
+                    12,
+                    0,
+                    b"",
+                    donor_names,
+                    &donor_sizes,
+                    &donor_is_par,
+                    &donor_has_art,
+                    &donor_claimed,
+                    &donor_hashes,
+                ),
+                -1
+            );
+            assert_eq!(
+                select_whole_file_donor(
+                    b"rel.vol00+08.par2",
+                    flat_sum,
+                    12,
+                    0,
+                    b"",
+                    donor_names,
+                    &donor_sizes,
+                    &donor_is_par,
+                    &donor_has_art,
+                    &donor_claimed,
+                    &donor_hashes,
+                ),
+                -1
+            );
+        }
+
+        // 17. StreamRepairVolumeSetKeyTest
+        assert_eq!(volume_set_key(b"Rel.part03.rar"), b"rel.part#.rar");
+        assert_eq!(volume_set_key(b"REL.part1.RAR"), b"rel.part#.rar");
+        assert_eq!(volume_set_key(b"Rel.r07"), b"rel.r#");
+        assert_eq!(volume_set_key(b"Rel.rar"), b"rel.r#");
+        assert_eq!(volume_set_key(b"Rel.s00"), b"rel.r#");
+        assert_eq!(volume_set_key(b"Rel.t12"), b"rel.r#");
+        assert_eq!(volume_set_key(b"Rel.7z.002"), b"rel.7z.#");
+        assert_eq!(volume_set_key(b"movie.mkv.001"), b"movie.mkv.#");
+        assert_eq!(volume_set_key(b"Rel.z01"), b"rel.z#");
+        assert_eq!(volume_set_key(b"Rel.zip"), b"rel.z#");
+        assert_eq!(
+            volume_set_key(b"dir/x8Tdn3e3iFf1MaWLu.part12.rar"),
+            b"x8tdn3e3iff1mawlu.part#.rar"
+        );
+        assert!(volume_set_key(b"Rel.nfo").is_empty());
+        assert!(volume_set_key(b"Rel.sample.mkv").is_empty());
+        assert!(volume_set_key(b"movie.mkv").is_empty());
+        assert!(volume_set_key(b"Rel.srr").is_empty());
+        assert!(volume_set_key(b"track.mp3").is_empty());
+        assert!(volume_set_key(b"Rel.s001").is_empty());
+        assert!(volume_set_key(b"Rel.part2").is_empty());
+        assert!(volume_set_key(b"").is_empty());
+        assert_ne!(
+            volume_set_key(b"Rel.nfo"),
+            volume_set_key(b"Rel.part01.rar")
+        );
+
+        // 18. StreamRepairVolumeKeyTest
+        assert_eq!(volume_key(b"Rel.part003.rar"), b"part3.rar");
+        assert_eq!(volume_key(b"Other.part03.rar"), b"part3.rar");
+        assert_eq!(volume_key(b"X.r007"), b"r7");
+        assert_eq!(volume_key(b"Y.R07"), b"r7");
+        assert_eq!(volume_key(b"x.7z.001"), b"7z.1");
+        assert_eq!(volume_key(b"x.r00"), b"r0");
+        assert_eq!(volume_key(b"Rel.part10.rar"), b"part10.rar");
+        assert_eq!(volume_key(b"Movie.x264.mkv"), b"x264.mkv");
+        assert_ne!(
+            volume_key(b"Rel.part10.rar"),
+            volume_key(b"Rel.part01.rar")
+        );
+        assert!(volume_key(b"").is_empty());
+
+        // 19. StreamRepairSuffixKeyTest
+        assert_eq!(suffix_key(b"Rel.part03.rar"), b"part03.rar");
+        assert_eq!(suffix_key(b"REL.R00"), b"r00");
+        assert_eq!(suffix_key(b"movie.mkv"), b"mkv");
+        assert_eq!(suffix_key(b"a.vol07+08.par2"), b"vol07+08.par2");
+        assert_eq!(suffix_key(b"archive.7z.001"), b"7z.001");
+        assert!(suffix_key(b"noextension").is_empty());
+        assert!(suffix_key(b"").is_empty());
+        unsafe {
+            let null_suf = crate::ffi::nzbget_rs_stream_suffix_key(std::ptr::null());
+            assert_eq!(null_suf.len, 0);
+            crate::ffi::nzbget_rs_free(null_suf);
+        }
+
+        // 20. StreamRepairRefusesParTargetCandidatesTest & StreamRepairExcludesParDonorCandidatesTest
+        assert!(select_donor_candidates(
+            b"release.PAR2",
+            980,
+            0,
+            2,
+            3,
+            0,
+            &[b"release.PAR2", b"renamed.bin"],
+            &[1000, 1000],
+            &[0, 0],
+            &[1, 1],
+            &[0, 0],
+            &[0, 0],
+        )
+        .is_empty());
+        assert_eq!(
+            select_donor_candidates(
+                b"release.r01",
+                980,
+                0,
+                3,
+                3,
+                0,
+                &[b"release.r01", b"release.PaR2", b"renamed.bin"],
+                &[1000, 1000, 1000],
+                &[1, 0, 0],
+                &[1, 1, 1],
+                &[0, 0, 0],
+                &[0, 0, 0],
+            ),
+            vec![2]
+        );
+
+        // 21. StreamRepairStepFingerprintCandidateTest, StreamRepairSelectDonorCandidatesTest, StreamRepairObfuscatedSiblingCandidatesTest
+        {
+            let twin10 = [
+                770_318, 768_951, 771_402, 769_037, 770_660, 769_845, 768_590, 771_113, 769_722,
+                398_760,
+            ];
+            let other10 = [
+                769_211, 770_840, 768_392, 771_005, 769_930, 768_777, 770_123, 769_504, 771_288,
+                398_760,
+            ];
+            let third10 = [
+                768_845, 771_230, 769_918, 770_402, 768_611, 771_077, 769_283, 770_936, 768_458,
+                398_760,
+            ];
+            let target_hash = crate::dupefallback::article_size_steps_hash(&twin10);
+            assert_ne!(target_hash, 0);
+            let s_other = shifted(&other10, 27);
+            let s_twin = shifted(&twin10, 27);
+            let s_third = shifted(&third10, 27);
+            let cands = select_donor_candidates(
+                b"Q8aZ1kLmN0pR",
+                7_300_000,
+                -1,
+                0,
+                3,
+                target_hash,
+                &[b"aaa.bin", b"ccc.bin", b"bbb.bin"],
+                &[sum_i64(&s_other), sum_i64(&s_twin), sum_i64(&s_third)],
+                &[0, 0, 0],
+                &[1, 1, 1],
+                &[0, 0, 0],
+                &[
+                    crate::dupefallback::article_size_steps_hash(&s_other),
+                    crate::dupefallback::article_size_steps_hash(&s_twin),
+                    crate::dupefallback::article_size_steps_hash(&s_third),
+                ],
+            );
+            assert_eq!(cands[0], 1);
+            assert_eq!(
+                crate::dupefallback::article_size_steps_hash(&vec![750_000i32; 10]),
+                0
+            );
+        }
+        {
+            let repost_names: &[&[u8]] = &[
+                b"rel.part01.rar",
+                b"rel.part02.rar",
+                b"rel.part03.rar",
+                b"info.nfo",
+            ];
+            let repost_sizes = [1000i64, 1000, 1000, 50];
+            let by_name = select_donor_candidates(
+                b"rel.part02.rar",
+                980,
+                -1,
+                0,
+                3,
+                0,
+                repost_names,
+                &repost_sizes,
+                &[0; 4],
+                &[1; 4],
+                &[0; 4],
+                &[0; 4],
+            );
+            assert_eq!(by_name[0], 1);
+            assert!(!by_name.contains(&3));
+            assert!(by_name.len() <= 3);
+
+            let by_suffix = select_donor_candidates(
+                b"other.part03.rar",
+                980,
+                -1,
+                0,
+                3,
+                0,
+                repost_names,
+                &repost_sizes,
+                &[0; 4],
+                &[1; 4],
+                &[0; 4],
+                &[0; 4],
+            );
+            assert_eq!(by_suffix[0], 2);
+
+            let obf_names: &[&[u8]] = &[b"ccc.bin", b"aaa.bin", b"bbb.bin"];
+            let obf_sizes = [1000i64; 3];
+            let by_rank = select_donor_candidates(
+                b"zz.dat",
+                980,
+                1,
+                3,
+                3,
+                0,
+                obf_names,
+                &obf_sizes,
+                &[0; 3],
+                &[1; 3],
+                &[0; 3],
+                &[0; 3],
+            );
+            assert_eq!(by_rank[0], 2); // "bbb.bin" is rank 1 in sorted ["aaa.bin", "bbb.bin", "ccc.bin"]
+
+            let bad_window = select_donor_candidates(
+                b"zz.dat",
+                980,
+                1,
+                4,
+                3,
+                0,
+                obf_names,
+                &obf_sizes,
+                &[0; 3],
+                &[1; 3],
+                &[0; 3],
+                &[0; 3],
+            );
+            assert_eq!(bad_window.len(), 3);
+
+            let bad_rank = select_donor_candidates(
+                b"zz.dat",
+                980,
+                99,
+                3,
+                3,
+                0,
+                obf_names,
+                &obf_sizes,
+                &[0; 3],
+                &[1; 3],
+                &[0; 3],
+                &[0; 3],
+            );
+            assert_eq!(bad_rank.len(), 3);
+
+            let bare_ext = select_donor_candidates(
+                b"zzz.mkv",
+                980,
+                -1,
+                0,
+                3,
+                0,
+                &[b"aaa.mkv", b"bbb.mkv"],
+                &[1000, 980],
+                &[0, 0],
+                &[1, 1],
+                &[0, 0],
+                &[0, 0],
+            );
+            assert_eq!(bare_ext, vec![1, 0]);
+
+            let digit_ext = select_donor_candidates(
+                b"zzz.mp4",
+                980,
+                -1,
+                0,
+                3,
+                0,
+                &[b"ep1.mp4", b"ep2.mp4"],
+                &[1000, 980],
+                &[0, 0],
+                &[1, 1],
+                &[0, 0],
+                &[0, 0],
+            );
+            assert_eq!(digit_ext, vec![1, 0]);
+        }
+        {
+            let obf16_owned: Vec<Vec<u8>> = (0..16u8)
+                .map(|i| format!("obf{}{}", 100 + i, (b'q' - i) as char).into_bytes())
+                .collect();
+            let obf16_refs: Vec<&[u8]> = obf16_owned.iter().map(Vec::as_slice).collect();
+            let sizes16 = [1000i64; 16];
+            let all16 = select_donor_candidates(
+                b"zz.dat",
+                980,
+                -1,
+                0,
+                64,
+                0,
+                &obf16_refs,
+                &sizes16,
+                &[0; 16],
+                &[1; 16],
+                &[0; 16],
+                &[0; 16],
+            );
+            assert_eq!(all16.len(), 16);
+
+            let mut claimed16 = [0u8; 16];
+            claimed16[all16[0] as usize] = 1;
+            claimed16[all16[5] as usize] = 1;
+            let rest14 = select_donor_candidates(
+                b"zz.dat",
+                980,
+                -1,
+                0,
+                64,
+                0,
+                &obf16_refs,
+                &sizes16,
+                &[0; 16],
+                &[1; 16],
+                &claimed16,
+                &[0; 16],
+            );
+            assert_eq!(rest14.len(), 14);
+            assert!(!rest14.contains(&all16[0]));
+            assert!(!rest14.contains(&all16[5]));
+
+            let named_idx = all16[3] as usize;
+            let mut claimed_named = [0u8; 16];
+            claimed_named[named_idx] = 1;
+            let by_name_unclaimed = select_donor_candidates(
+                obf16_refs[named_idx],
+                980,
+                -1,
+                0,
+                64,
+                0,
+                &obf16_refs,
+                &sizes16,
+                &[0; 16],
+                &[1; 16],
+                &claimed_named,
+                &[0; 16],
+            );
+            assert!(!by_name_unclaimed.is_empty());
+            assert_ne!(by_name_unclaimed[0], named_idx as i32);
+        }
+
+        // 22. StreamRepairRequiredCompareFloorTest
+        let cr = |offset: i64, size: i64| crate::streamcompare::Range { offset, size };
+        assert_eq!(
+            crate::streamcompare::required_compare_floor(
+                1_500_000,
+                &[cr(0, 1000)],
+                &[cr(0, 500_000), cr(500_000, 500_000), cr(1_000_000, 500_000)],
+                &[1, 2]
+            ),
+            16 * 1024
+        );
+        assert_eq!(
+            crate::streamcompare::required_compare_floor(
+                80_000,
+                &[cr(0, 70_000)],
+                &[cr(0, 80_000)],
+                &[0]
+            ),
+            10_000
+        );
+        assert_eq!(
+            crate::streamcompare::required_compare_floor(
+                30_000,
+                &[cr(2000, 8000), cr(12_000, 8000), cr(22_000, 8000)],
+                &[cr(0, 10_000), cr(10_000, 10_000), cr(20_000, 10_000)],
+                &[0]
+            ),
+            2000
+        );
+        assert_eq!(
+            crate::streamcompare::required_compare_floor(
+                1_000_000,
+                &[cr(60, 999_940)],
+                &[cr(0, 500_000), cr(500_000, 500_000)],
+                &[0]
+            ),
+            64
+        );
+
+        // 23. SelectExtractedInnerTest
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let unique_id = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let temp_dir =
+                std::env::temp_dir().join(format!("nzbget_select_extracted_{unique_id}"));
+            let outside_dir =
+                std::env::temp_dir().join(format!("nzbget_select_outside_{unique_id}"));
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            let _ = std::fs::remove_dir_all(&outside_dir);
+            std::fs::create_dir_all(&temp_dir).unwrap();
+            std::fs::create_dir_all(&outside_dir).unwrap();
+
+            let name_match = temp_dir.join("movie.mkv");
+            let other_same_size = temp_dir.join("extracted.bin");
+            let wrong_size = temp_dir.join("readme.txt");
+            std::fs::write(&name_match, vec![b'x'; 1000]).unwrap();
+            std::fs::write(&other_same_size, vec![b'x'; 1000]).unwrap();
+            std::fs::write(&wrong_size, vec![b'x'; 50]).unwrap();
+
+            let dir_bytes = temp_dir.as_os_str().as_bytes();
+            let name_match_bytes = name_match.as_os_str().as_bytes().to_vec();
+            let other_same_bytes = other_same_size.as_os_str().as_bytes().to_vec();
+
+            assert_eq!(
+                select_extracted_inner(dir_bytes, 1000, b"MOVIE.MKV"),
+                (name_match_bytes.clone(), false)
+            );
+            let expected_first = name_match_bytes.min(other_same_bytes);
+            assert_eq!(
+                select_extracted_inner(dir_bytes, 1000, b"nomatch.mkv"),
+                (expected_first, false)
+            );
+            assert_eq!(
+                select_extracted_inner(dir_bytes, 999_999, b"movie.mkv"),
+                (Vec::new(), false)
+            );
+
+            let outside_target = outside_dir.join("secret.mkv");
+            std::fs::write(&outside_target, vec![b'x'; 1000]).unwrap();
+            if std::os::unix::fs::symlink(&outside_target, temp_dir.join("escape.mkv")).is_ok() {
+                let (selected, found_symlink) =
+                    select_extracted_inner(dir_bytes, 1000, b"escape.mkv");
+                assert!(selected.is_empty());
+                assert!(found_symlink);
+            }
+
+            let _ = std::fs::remove_dir_all(&outside_dir);
+            let _ = std::fs::remove_dir_all(&temp_dir);
+        }
+
+        // 24. DonorPostingIdentityPreservesRepairAlternativesTest
+        {
+            let original = build_donor_key(
+                b"",
+                &[b"movie.7z"],
+                &[1000],
+                &[0],
+                &[0],
+                &[],
+                &[2],
+                &[1, 2],
+                &[500, 500],
+                &[b"donor-1@example.com", b"donor-2@example.com"],
+            );
+            let copy = build_donor_key(
+                b"",
+                &[b"movie.7z"],
+                &[1000],
+                &[0],
+                &[0],
+                &[],
+                &[2],
+                &[1, 2],
+                &[500, 500],
+                &[b"donor-1@example.com", b"donor-2@example.com"],
+            );
+            assert_eq!(original, copy);
+
+            let with_pw = build_donor_key(
+                b"corrected-password",
+                &[b"movie.7z"],
+                &[1000],
+                &[0],
+                &[0],
+                &[],
+                &[2],
+                &[1, 2],
+                &[500, 500],
+                &[b"donor-1@example.com", b"donor-2@example.com"],
+            );
+            assert_ne!(original, with_pw);
+
+            let with_grp = build_donor_key(
+                b"",
+                &[b"movie.7z"],
+                &[1000],
+                &[0],
+                &[1],
+                &[b"alt.binaries.other"],
+                &[2],
+                &[1, 2],
+                &[500, 500],
+                &[b"donor-1@example.com", b"donor-2@example.com"],
+            );
+            assert_ne!(original, with_grp);
+
+            let with_new_msgid = build_donor_key(
+                b"",
+                &[b"movie.7z"],
+                &[1000],
+                &[0],
+                &[0],
+                &[],
+                &[2],
+                &[1, 2],
+                &[500, 500],
+                &[b"replacement@example.com", b"donor-2@example.com"],
+            );
+            assert_ne!(original, with_new_msgid);
+        }
+
+        // 25. ExceedsDecompressCapTest
+        assert!(!exceeds_decompress_cap(
+            MAX_DECOMPRESS_BYTES - 100,
+            100,
+            0,
+            0
+        ));
+        assert!(exceeds_decompress_cap(MAX_DECOMPRESS_BYTES - 99, 100, 0, 0));
+        assert!(!exceeds_decompress_cap(0, 0, MAX_DECOMPRESS_BYTES - 50, 50));
+        assert!(exceeds_decompress_cap(0, 0, MAX_DECOMPRESS_BYTES - 49, 50));
+        assert!(exceeds_decompress_cap(MAX_DECOMPRESS_BYTES, 1, 0, 0));
+        assert!(exceeds_decompress_cap(0, 0, MAX_DECOMPRESS_BYTES, 1));
+        assert!(!exceeds_decompress_cap(0, 1024, 0, 1024));
+
+        // 26. ParDamageBlocksTouchedTest
+        let block = 1000u64;
+        assert_eq!(crate::dupefallback::blocks_touched(&[br(100, 200)], block), 1);
+        assert_eq!(crate::dupefallback::blocks_touched(&[br(900, 200)], block), 2);
+        assert_eq!(
+            crate::dupefallback::blocks_touched(
+                &[br(5300, 10), br(100, 10), br(150, 10), br(5900, 200)],
+                block
+            ),
+            3
+        );
+        assert_eq!(crate::dupefallback::blocks_touched(&[br(0, 1000)], block), 1);
+        assert_eq!(crate::dupefallback::blocks_touched(&[br(0, 1001)], block), 2);
+        assert_eq!(
+            crate::dupefallback::blocks_touched(&[br(0, 10_000), br(3500, 10)], block),
+            10
+        );
+        assert_eq!(crate::dupefallback::blocks_touched(&[], block), 0);
+        assert_eq!(crate::dupefallback::blocks_touched(&[br(0, 10)], 0), 0);
+
+        // 27. StreamRepairRustFfiBoundaryTest
+        unsafe {
+            assert_eq!(
+                crate::ffi::nzbget_rs_stream_is_eligible(c"movie.mkv".as_ptr()),
+                1
+            );
+            assert_eq!(
+                crate::ffi::nzbget_rs_stream_is_eligible(c"movie.par2".as_ptr()),
+                0
+            );
+            assert_eq!(
+                crate::ffi::nzbget_rs_stream_decoded_size_plausible(980, 1000),
+                1
+            );
+            assert_eq!(
+                crate::ffi::nzbget_rs_stream_exceeds_decompress_cap(0, 1024, 0, 1024),
+                0
+            );
+
+            let vol_set = crate::ffi::nzbget_rs_stream_volume_set_key(c"Show.part01.rar".as_ptr());
+            assert_eq!(
+                std::slice::from_raw_parts(vol_set.data.cast::<u8>(), vol_set.len),
+                b"show.part#.rar"
+            );
+            crate::ffi::nzbget_rs_free(vol_set);
+
+            let vol_key = crate::ffi::nzbget_rs_stream_volume_key(c"Show.part01.rar".as_ptr());
+            assert_eq!(
+                std::slice::from_raw_parts(vol_key.data.cast::<u8>(), vol_key.len),
+                b"part1.rar"
+            );
+            crate::ffi::nzbget_rs_free(vol_key);
+
+            let suf_key = crate::ffi::nzbget_rs_stream_suffix_key(c"Show.part01.rar".as_ptr());
+            assert_eq!(
+                std::slice::from_raw_parts(suf_key.data.cast::<u8>(), suf_key.len),
+                b"part01.rar"
+            );
+            crate::ffi::nzbget_rs_free(suf_key);
+
+            let r = [br(0, 100), br(200, 100)];
+            assert_eq!(crate::ffi::nzbget_rs_stream_total_size(r.as_ptr(), 2), 200);
+            assert_eq!(
+                crate::ffi::nzbget_rs_stream_intersects_any(br(50, 20), r.as_ptr(), 2),
+                1
+            );
+            assert_eq!(
+                crate::ffi::nzbget_rs_stream_intersects_any(br(110, 50), r.as_ptr(), 2),
+                0
+            );
+
+            let mut out_holes = [br(0, 0); 4];
+            assert_eq!(
+                crate::ffi::nzbget_rs_stream_compute_holes(
+                    r.as_ptr(),
+                    2,
+                    300,
+                    out_holes.as_mut_ptr(),
+                    4
+                ),
+                1
+            );
+            assert_eq!(out_holes[0], br(100, 100));
+
+            let adv_sizes = [150i32, 150];
+            let mut est = [br(0, 0); 2];
+            assert_eq!(
+                crate::ffi::nzbget_rs_stream_estimate_donor_ranges(
+                    adv_sizes.as_ptr(),
+                    2,
+                    300,
+                    est.as_mut_ptr()
+                ),
+                2
+            );
+
+            let mut probes = [0i32; 2];
+            assert!(
+                crate::ffi::nzbget_rs_stream_select_probe_parts(
+                    r.as_ptr(),
+                    2,
+                    out_holes.as_ptr(),
+                    1,
+                    2,
+                    probes.as_mut_ptr(),
+                    2
+                ) >= 1
+            );
+
+            let mut sub = [br(0, 0); 4];
+            assert_eq!(
+                crate::ffi::nzbget_rs_stream_subtract_covered(
+                    r.as_ptr(),
+                    2,
+                    br(0, 100),
+                    sub.as_mut_ptr(),
+                    4
+                ),
+                1
+            );
+
+            let mut win = [br(0, 0); 4];
+            assert!(
+                crate::ffi::nzbget_rs_stream_build_probe_windows(
+                    300,
+                    out_holes.as_ptr(),
+                    1,
+                    out_holes.as_ptr(),
+                    1,
+                    2,
+                    16,
+                    win.as_mut_ptr(),
+                    4
+                ) >= 1
+            );
+
+            let five_holes = [br(0, 100), br(100_000, 100), br(200_000, 100)];
+            let mut five_win = [br(0, 0); 5];
+            assert_eq!(
+                crate::ffi::nzbget_rs_stream_build_probe_windows(
+                    300_000,
+                    five_holes.as_ptr(),
+                    3,
+                    five_holes.as_ptr(),
+                    3,
+                    2,
+                    16,
+                    five_win.as_mut_ptr(),
+                    5
+                ),
+                5
+            );
+
+            let runs = [NzbgetRsContentRun {
+                inner_offset: 0,
+                member_index: 0,
+                member_offset: 0,
+                size: 1_000_000,
+            }];
+            assert_eq!(
+                crate::ffi::nzbget_rs_stream_plain_compare_floor(
+                    runs.as_ptr(),
+                    1,
+                    out_holes.as_ptr(),
+                    1,
+                    r.as_ptr(),
+                    1
+                ),
+                100
+            );
+
+            assert_eq!(
+                crate::ffi::nzbget_rs_stream_encrypted_chain_start(
+                    32,
+                    64,
+                    16,
+                    out_holes.as_ptr(),
+                    1
+                ),
+                32
+            );
+
+            let varied = [1u8, 2, 3, 4];
+            assert_eq!(
+                crate::ffi::nzbget_rs_stream_buffer_has_varied_data(varied.as_ptr(), 4),
+                1
+            );
+
+            let names = [c"b.rar".as_ptr(), c"a.rar".as_ptr()];
+            let sizes = [1000i64, 1000];
+            let mut rank = -1i32;
+            let mut window = 0i32;
+            crate::ffi::nzbget_rs_stream_compute_positional_rank(
+                names.as_ptr(),
+                sizes.as_ptr(),
+                2,
+                c"b.rar".as_ptr(),
+                980,
+                &mut rank,
+                &mut window,
+            );
+            assert_eq!(rank, 1);
+            assert_eq!(window, 2);
+        }
+
+        // 22. probe_whole_file_donor_size and materialize_donor_set
+        {
+            struct MockProbeClient {
+                articles: Vec<FetchedDonorArticle>,
+                current: Option<FetchedDonorArticle>,
+                requested: Vec<i32>,
+            }
+            impl DonorBatchClient for MockProbeClient {
+                fn is_stopped(&self) -> bool {
+                    false
+                }
+                fn begin_batch(&mut self, part_indices: &[i32]) {
+                    self.requested.extend_from_slice(part_indices);
+                    self.current = part_indices
+                        .first()
+                        .and_then(|&idx| self.articles.get(idx as usize).cloned());
+                }
+                fn next_article(&mut self) -> Option<FetchedDonorArticle> {
+                    self.current.take()
+                }
+                fn cancel_remaining(&mut self) {}
+            }
+
+            let mut probe_client = MockProbeClient {
+                articles: vec![
+                    FetchedDonorArticle {
+                        success: false,
+                        offset: 0,
+                        file_size: 0,
+                        data: Vec::new(),
+                    },
+                    FetchedDonorArticle {
+                        success: true,
+                        offset: 500,
+                        file_size: 970,
+                        data: vec![1; 500],
+                    },
+                ],
+                current: None,
+                requested: Vec::new(),
+            };
+            assert_eq!(
+                probe_whole_file_donor_size(2, 1000, &mut probe_client),
+                Some(970)
+            );
+            assert_eq!(probe_client.requested, vec![0, 1]);
+
+            struct MockMatClient {
+                member_articles: Vec<Vec<FetchedDonorArticle>>,
+                queue: std::collections::VecDeque<FetchedDonorArticle>,
+                written: Vec<(i32, i64, Vec<u8>)>,
+                cur_member: i32,
+                messages: Vec<String>,
+                progress: Vec<(String, i32)>,
+            }
+            impl DonorMaterializeClient for MockMatClient {
+                fn is_stopped(&mut self) -> bool {
+                    false
+                }
+                fn open_member(&mut self, member_index: i32) -> bool {
+                    self.cur_member = member_index;
+                    true
+                }
+                fn write_member(&mut self, offset: i64, data: &[u8]) -> bool {
+                    self.written.push((self.cur_member, offset, data.to_vec()));
+                    true
+                }
+                fn close_member(&mut self) {}
+                fn begin_member_batch(&mut self, member_index: i32) {
+                    self.queue = self.member_articles[member_index as usize]
+                        .iter()
+                        .cloned()
+                        .collect();
+                }
+                fn next_article(&mut self) -> Option<FetchedDonorArticle> {
+                    self.queue.pop_front()
+                }
+                fn cancel_remaining(&mut self) {
+                    self.queue.clear();
+                }
+                fn update_progress(&mut self, label: &[u8], stage_progress: i32) {
+                    self.progress.push((
+                        String::from_utf8_lossy(label).into_owned(),
+                        stage_progress,
+                    ));
+                }
+                fn emit_message_bytes(&mut self, _kind: TargetMessageKind, text: &[u8]) {
+                    self.messages
+                        .push(String::from_utf8_lossy(text).into_owned());
+                }
+            }
+
+            let mut mat_client = MockMatClient {
+                member_articles: vec![vec![
+                    FetchedDonorArticle {
+                        success: true,
+                        offset: 0,
+                        file_size: 8,
+                        data: vec![1, 2, 3, 4],
+                    },
+                    FetchedDonorArticle {
+                        success: true,
+                        offset: 4,
+                        file_size: 8,
+                        data: vec![5, 6, 7, 8],
+                    },
+                ]],
+                queue: std::collections::VecDeque::new(),
+                written: Vec::new(),
+                cur_member: -1,
+                messages: Vec::new(),
+                progress: Vec::new(),
+            };
+            let mut total_bytes = 0i64;
+            assert!(materialize_donor_set(
+                &[0],
+                &[b"Show.part01.rar"],
+                &[2],
+                b"Dupe.Show",
+                &mut total_bytes,
+                &mut mat_client,
+            ));
+            assert_eq!(total_bytes, 8);
+            assert_eq!(mat_client.written.len(), 2);
+            assert_eq!(mat_client.progress.last().unwrap().1, 1000);
+
+            // Incomplete hole after all articles fails materialization and emits info message
+            let mut incomplete_client = MockMatClient {
+                member_articles: vec![vec![FetchedDonorArticle {
+                    success: true,
+                    offset: 0,
+                    file_size: 8,
+                    data: vec![1, 2, 3, 4],
+                }]],
+                queue: std::collections::VecDeque::new(),
+                written: Vec::new(),
+                cur_member: -1,
+                messages: Vec::new(),
+                progress: Vec::new(),
+            };
+            let mut inc_bytes = 0i64;
+            assert!(!materialize_donor_set(
+                &[0],
+                &[b"Show.part01.rar"],
+                &[1],
+                b"Dupe.Show",
+                &mut inc_bytes,
+                &mut incomplete_client,
+            ));
+            assert!(incomplete_client.messages[0]
+                .contains("Show.part01.rar has missing ranges after all listed articles"));
+        }
     }
 }

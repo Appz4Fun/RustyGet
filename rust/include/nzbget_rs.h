@@ -6084,6 +6084,47 @@ int nzbget_rs_stream_patch_from_donor_file(
     int64_t* out_recovered_bytes,
     int* out_credit_recovery);
 
+int nzbget_rs_stream_probe_whole_file_donor_size(
+    size_t article_count,
+    int64_t target_encoded_size,
+    void* ctx,
+    int (*is_stopped_cb)(void* ctx),
+    void (*begin_batch_cb)(void* ctx, const int32_t* part_indices, size_t count),
+    int (*next_article_cb)(
+        void* ctx,
+        int* out_success,
+        int64_t* out_offset,
+        int64_t* out_file_size,
+        const uint8_t** out_data,
+        size_t* out_data_len),
+    void (*cancel_batch_cb)(void* ctx),
+    int64_t* out_file_size);
+
+int nzbget_rs_stream_materialize_donor_set(
+    const int32_t* set_members,
+    size_t set_member_count,
+    const char* const* file_names,
+    const int32_t* file_article_counts,
+    size_t file_count,
+    const char* donor_name,
+    int64_t* inout_total_bytes,
+    void* ctx,
+    int (*is_stopped_cb)(void* ctx),
+    int (*open_member_cb)(void* ctx, int32_t member_index),
+    int (*write_member_cb)(void* ctx, int64_t offset, const uint8_t* data, int64_t size),
+    void (*close_member_cb)(void* ctx),
+    void (*begin_member_batch_cb)(void* ctx, int32_t member_index),
+    int (*next_article_cb)(
+        void* ctx,
+        int* out_success,
+        int64_t* out_offset,
+        int64_t* out_file_size,
+        const uint8_t** out_data,
+        size_t* out_data_len),
+    void (*cancel_batch_cb)(void* ctx),
+    void (*update_progress_cb)(void* ctx, const char* label, int32_t stage_progress),
+    void (*emit_message_cb)(void* ctx, int32_t kind, const char* text));
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

@@ -35184,5 +35184,205 @@ pub unsafe extern "C" fn nzbget_rs_stream_patch_from_donor_file(
     result.recovered_parts
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_probe_whole_file_donor_size(
+    article_count: usize,
+    target_encoded_size: i64,
+    ctx: *mut std::ffi::c_void,
+    is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
+    begin_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const i32, usize)>,
+    next_article_cb: DonorNextArticleFn,
+    cancel_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+    out_file_size: *mut i64,
+) -> c_int {
+    let mut batch_client = FfiDonorBatchClient {
+        ctx,
+        is_stopped_cb,
+        begin_batch_cb,
+        next_article_cb,
+        cancel_batch_cb,
+    };
+    if let Some(sz) = crate::streamrepair::probe_whole_file_donor_size(
+        article_count,
+        target_encoded_size,
+        &mut batch_client,
+    ) {
+        if !out_file_size.is_null() {
+            *out_file_size = sz;
+        }
+        1
+    } else {
+        0
+    }
+}
+
+struct FfiDonorMaterializeClient {
+    ctx: *mut std::ffi::c_void,
+    is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
+    open_member_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32) -> c_int>,
+    write_member_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i64, *const u8, i64) -> c_int>,
+    close_member_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+    begin_member_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32)>,
+    next_article_cb: DonorNextArticleFn,
+    cancel_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+    update_progress_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, i32)>,
+    emit_message_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, *const c_char)>,
+}
+
+impl crate::streamrepair::DonorMaterializeClient for FfiDonorMaterializeClient {
+    fn is_stopped(&mut self) -> bool {
+        self.is_stopped_cb
+            .is_some_and(|cb| unsafe { cb(self.ctx) != 0 })
+    }
+
+    fn open_member(&mut self, member_index: i32) -> bool {
+        self.open_member_cb
+            .is_some_and(|cb| unsafe { cb(self.ctx, member_index) != 0 })
+    }
+
+    fn write_member(&mut self, offset: i64, data: &[u8]) -> bool {
+        self.write_member_cb.is_some_and(|cb| unsafe {
+            cb(self.ctx, offset, data.as_ptr(), data.len() as i64) != 0
+        })
+    }
+
+    fn close_member(&mut self) {
+        if let Some(cb) = self.close_member_cb {
+            unsafe { cb(self.ctx) };
+        }
+    }
+
+    fn begin_member_batch(&mut self, member_index: i32) {
+        if let Some(cb) = self.begin_member_batch_cb {
+            unsafe { cb(self.ctx, member_index) };
+        }
+    }
+
+    fn next_article(&mut self) -> Option<crate::streamrepair::FetchedDonorArticle> {
+        let cb = self.next_article_cb?;
+        let mut success: c_int = 0;
+        let mut offset: i64 = 0;
+        let mut file_size: i64 = 0;
+        let mut data_ptr: *const u8 = std::ptr::null();
+        let mut data_len: usize = 0;
+        let has_next = unsafe {
+            cb(
+                self.ctx,
+                &mut success,
+                &mut offset,
+                &mut file_size,
+                &mut data_ptr,
+                &mut data_len,
+            )
+        };
+        if has_next == 0 {
+            return None;
+        }
+        let data = if data_ptr.is_null() || data_len == 0 {
+            Vec::new()
+        } else {
+            unsafe { std::slice::from_raw_parts(data_ptr, data_len).to_vec() }
+        };
+        Some(crate::streamrepair::FetchedDonorArticle {
+            success: success != 0,
+            offset,
+            file_size,
+            data,
+        })
+    }
+
+    fn cancel_remaining(&mut self) {
+        if let Some(cb) = self.cancel_batch_cb {
+            unsafe { cb(self.ctx) };
+        }
+    }
+
+    fn update_progress(&mut self, label: &[u8], stage_progress: i32) {
+        let Some(cb) = self.update_progress_cb else {
+            return;
+        };
+        let mut buf: Vec<u8> = label.iter().copied().filter(|&b| b != 0).collect();
+        buf.push(0);
+        unsafe { cb(self.ctx, buf.as_ptr() as *const c_char, stage_progress) };
+    }
+
+    fn emit_message_bytes(&mut self, kind: crate::streamrepair::TargetMessageKind, text: &[u8]) {
+        let Some(cb) = self.emit_message_cb else {
+            return;
+        };
+        let mut buf: Vec<u8> = text.iter().copied().filter(|&b| b != 0).collect();
+        buf.push(0);
+        unsafe { cb(self.ctx, kind as i32, buf.as_ptr() as *const c_char) };
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_materialize_donor_set(
+    set_members: *const i32,
+    set_member_count: usize,
+    file_names: *const *const c_char,
+    file_article_counts: *const i32,
+    file_count: usize,
+    donor_name: *const c_char,
+    inout_total_bytes: *mut i64,
+    ctx: *mut std::ffi::c_void,
+    is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
+    open_member_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32) -> c_int>,
+    write_member_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i64, *const u8, i64) -> c_int>,
+    close_member_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+    begin_member_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32)>,
+    next_article_cb: DonorNextArticleFn,
+    cancel_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+    update_progress_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, i32)>,
+    emit_message_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, *const c_char)>,
+) -> c_int {
+    let members = if set_members.is_null() || set_member_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(set_members, set_member_count)
+    };
+    let mut names_vec = Vec::with_capacity(file_count);
+    if !file_names.is_null() && file_count > 0 {
+        for &ptr in std::slice::from_raw_parts(file_names, file_count) {
+            names_vec.push(input(ptr));
+        }
+    }
+    let counts = if file_article_counts.is_null() || file_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(file_article_counts, file_count)
+    };
+    let mut total_bytes = if inout_total_bytes.is_null() {
+        0
+    } else {
+        *inout_total_bytes
+    };
+    let mut client = FfiDonorMaterializeClient {
+        ctx,
+        is_stopped_cb,
+        open_member_cb,
+        write_member_cb,
+        close_member_cb,
+        begin_member_batch_cb,
+        next_article_cb,
+        cancel_batch_cb,
+        update_progress_cb,
+        emit_message_cb,
+    };
+    let ok = crate::streamrepair::materialize_donor_set(
+        members,
+        &names_vec,
+        counts,
+        input(donor_name),
+        &mut total_bytes,
+        &mut client,
+    );
+    if !inout_total_bytes.is_null() {
+        *inout_total_bytes = total_bytes;
+    }
+    c_int::from(ok)
+}
+
 
 

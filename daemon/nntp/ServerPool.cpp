@@ -148,111 +148,113 @@ NntpConnection* ServerPool::GetConnection(int level, NewsServer* wantServer, Raw
 {
 	Guard guard(m_connectionsMutex);
 
-	// an inactive server's level is -1 (a desired server disabled since)
-	if (level < 0)
+	if (level < 0 || m_sortedServers.empty() || m_connections.empty())
 	{
 		return nullptr;
 	}
 
-	for (; nzbget_rs_dqh_server_pool_has_available_level_conns(
-		level, m_levels.size(),
-		(level >= 0 && level < (int)m_levels.size()) ? m_levels[level] : 0) != 0; level++)
+	size_t srvCount = m_sortedServers.size();
+	std::vector<int32_t> srvIds(srvCount);
+	std::vector<int32_t> srvGroups(srvCount);
+	std::vector<int32_t> srvNormLevels(srvCount);
+	std::vector<uint8_t> srvActive(srvCount);
+	std::vector<uint8_t> srvOptional(srvCount);
+	std::vector<uint8_t> srvBlocked(srvCount);
+	for (size_t i = 0; i < srvCount; ++i)
 	{
-		NntpConnection* connection = LockedGetConnection(level, wantServer, ignoreServers);
-		if (connection)
-		{
-			return connection;
-		}
+		NewsServer* srv = m_sortedServers[i];
+		srvIds[i] = srv->GetId();
+		srvGroups[i] = srv->GetGroup();
+		srvNormLevels[i] = srv->GetNormLevel();
+		srvActive[i] = srv->GetActive() ? 1 : 0;
+		srvOptional[i] = srv->GetOptional() ? 1 : 0;
+		srvBlocked[i] = IsServerBlocked(srv) ? 1 : 0;
+	}
 
-		for (NewsServer* newsServer : m_sortedServers)
+	size_t connCount = m_connections.size();
+	std::vector<size_t> connSrvIndices(connCount);
+	std::vector<uint8_t> connInUse(connCount);
+	std::vector<uint8_t> connConnected(connCount);
+	for (size_t i = 0; i < connCount; ++i)
+	{
+		PooledConnection* conn = m_connections[i].get();
+		NewsServer* srv = conn->GetNewsServer();
+		size_t sIdx = srvCount;
+		for (size_t j = 0; j < srvCount; ++j)
 		{
-			if (!nzbget_rs_ntw_server_pool_can_advance_level(
-				newsServer->GetNormLevel(), level,
-				newsServer->GetActive() ? 1 : 0,
-				newsServer->GetOptional() ? 1 : 0,
-				IsServerBlocked(newsServer) ? 1 : 0))
+			if (m_sortedServers[j] == srv)
 			{
-				return nullptr;
+				sIdx = j;
+				break;
 			}
 		}
+		connSrvIndices[i] = sIdx;
+		connInUse[i] = conn->GetInUse() ? 1 : 0;
+		connConnected[i] = conn->GetStatus() == Connection::csConnected ? 1 : 0;
+	}
+
+	std::vector<int32_t> ignIds;
+	std::vector<int32_t> ignGroups;
+	std::vector<int32_t> ignNormLevels;
+	if (ignoreServers && !wantServer)
+	{
+		ignIds.reserve(ignoreServers->size());
+		ignGroups.reserve(ignoreServers->size());
+		ignNormLevels.reserve(ignoreServers->size());
+		for (NewsServer* ign : *ignoreServers)
+		{
+			ignIds.push_back(ign->GetId());
+			ignGroups.push_back(ign->GetGroup());
+			ignNormLevels.push_back(ign->GetNormLevel());
+		}
+	}
+
+	std::vector<size_t> unblockIndices(srvCount);
+	size_t unblockCount = 0;
+	size_t chosenConnIdx = 0;
+	int32_t chosenLevel = 0;
+	int found = nzbget_rs_server_pool_select_connection(
+		level,
+		m_levels.empty() ? nullptr : m_levels.data(),
+		m_levels.size(),
+		srvIds.data(),
+		srvGroups.data(),
+		srvNormLevels.data(),
+		srvActive.data(),
+		srvOptional.data(),
+		srvBlocked.data(),
+		srvCount,
+		connSrvIndices.data(),
+		connInUse.data(),
+		connConnected.data(),
+		connCount,
+		wantServer ? 1 : 0,
+		wantServer ? wantServer->GetId() : 0,
+		wantServer ? wantServer->GetGroup() : 0,
+		ignIds.empty() ? nullptr : ignIds.data(),
+		ignGroups.empty() ? nullptr : ignGroups.data(),
+		ignNormLevels.empty() ? nullptr : ignNormLevels.data(),
+		ignIds.size(),
+		rand(),
+		unblockIndices.data(),
+		&unblockCount,
+		&chosenConnIdx,
+		&chosenLevel);
+
+	for (size_t i = 0; i < unblockCount; ++i)
+	{
+		m_sortedServers[unblockIndices[i]]->SetBlockTime(0);
+	}
+
+	if (found != 0)
+	{
+		PooledConnection* connection = m_connections[chosenConnIdx].get();
+		connection->SetInUse(true);
+		m_levels[chosenLevel]--;
+		return connection;
 	}
 
 	return nullptr;
-}
-
-NntpConnection* ServerPool::LockedGetConnection(int level, NewsServer* wantServer, RawServerList* ignoreServers)
-{
-	if (!nzbget_rs_dqh_server_pool_has_available_level_conns(
-		level, m_levels.size(),
-		(level >= 0 && level < (int)m_levels.size()) ? m_levels[level] : 0))
-	{
-		return nullptr;
-	}
-
-	PooledConnection* connection = nullptr;
-	std::vector<PooledConnection*> candidates;
-	candidates.reserve(m_connections.size());
-
-	for (PooledConnection* candidateConnection : &m_connections)
-	{
-		NewsServer* candidateServer = candidateConnection->GetNewsServer();
-		int matchWant = nzbget_rs_ntw_server_pool_match_want_server(
-			wantServer ? 1 : 0,
-			candidateServer->GetId(),
-			wantServer ? wantServer->GetId() : 0,
-			wantServer ? wantServer->GetGroup() : 0,
-			candidateServer->GetGroup());
-		bool isConn = candidateConnection->GetStatus() == Connection::csConnected;
-		bool isBlocked = !isConn && IsServerBlocked(candidateServer);
-		if (!candidateConnection->GetInUse() && candidateServer->GetActive() &&
-			candidateServer->GetNormLevel() == level && matchWant != 0 &&
-			(isConn || !isBlocked))
-		{
-			// free connection found, check if it's not from the server which should be ignored
-			bool useConnection = true;
-			if (ignoreServers && !wantServer)
-			{
-				for (NewsServer* ignoreServer : ignoreServers)
-				{
-					if (nzbget_rs_ntw_server_pool_match_ignore_server(
-						candidateServer->GetId(),
-						ignoreServer->GetId(),
-						ignoreServer->GetGroup(),
-						candidateServer->GetGroup(),
-						ignoreServer->GetNormLevel(),
-						candidateServer->GetNormLevel()) != 0)
-					{
-						useConnection = false;
-						break;
-					}
-				}
-			}
-
-			candidateServer->SetBlockTime(0);
-
-			if (useConnection)
-			{
-				candidates.push_back(candidateConnection);
-			}
-		}
-	}
-
-	if (!candidates.empty())
-	{
-		// Peeking a random free connection. This is better than taking the first
-		// available connection because provides better distribution across news servers,
-		// especially when one of servers becomes unavailable or doesn't have requested articles.
-		size_t randomIndex = nzbget_rs_dqh_server_pool_pick_candidate_index(rand(), candidates.size());
-		connection = candidates[randomIndex];
-		connection->SetInUse(true);
-	}
-
-	if (connection)
-	{
-		m_levels[level]--;
-	}
-
-	return connection;
 }
 
 void ServerPool::FreeConnection(NntpConnection* connection, bool used)

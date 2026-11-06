@@ -80,7 +80,6 @@ private:
 	int m_generation = 0;
 
 	void NormalizeLevels();
-	NntpConnection* LockedGetConnection(int level, NewsServer* wantServer, RawServerList* ignoreServers);
 };
 
 extern ServerPool* g_ServerPool;

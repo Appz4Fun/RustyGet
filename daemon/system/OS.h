@@ -35,13 +35,6 @@ namespace System
 		void Init();
 		std::string m_name;
 		std::string m_version;
-
-#ifdef __linux__
-		bool IsRunningInDocker() const;
-		bool IsRunningInContainer() const;
-		void TrimQuotes(std::string& str) const;
-		void InitOSInfoFromOSRelease();
-#endif
 	};
 }
 

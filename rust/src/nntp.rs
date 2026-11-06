@@ -1402,6 +1402,429 @@ impl Drop for ArticleBatchFetcher {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServerPoolServerView {
+    pub id: i32,
+    pub group: i32,
+    pub norm_level: i32,
+    pub active: bool,
+    pub optional: bool,
+    pub blocked: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServerPoolConnView {
+    pub server_index: usize,
+    pub in_use: bool,
+    pub connected: bool,
+}
+
+/// Pure Rust implementation of `ServerPool::GetConnection` + `ServerPool::LockedGetConnection`.
+/// Scans levels starting at `start_level`, unblocking any servers whose connections pass the
+/// availability/want/active/blocked check (recording their indices in `out_unblock_server_indices`),
+/// filtering against `ignore_servers`, and selecting a candidate or advancing to the next level
+/// if all active servers on the current level are optional and blocked.
+pub fn server_pool_select_connection(
+    start_level: i32,
+    levels: &[i32],
+    servers: &[ServerPoolServerView],
+    conns: &[ServerPoolConnView],
+    want_server: Option<(i32, i32)>,
+    ignore_servers: &[(i32, i32, i32)],
+    rand_val: i32,
+    out_unblock_server_indices: &mut Vec<usize>,
+) -> Option<(usize, i32)> {
+    out_unblock_server_indices.clear();
+    if start_level < 0 {
+        return None;
+    }
+
+    let mut server_blocked: Vec<bool> = servers.iter().map(|s| s.blocked).collect();
+    let mut unblocked_set = vec![false; servers.len()];
+
+    let mut level = start_level;
+    while server_pool_has_available_level_conns(
+        level,
+        levels.len(),
+        if level >= 0 && (level as usize) < levels.len() {
+            levels[level as usize]
+        } else {
+            0
+        },
+    ) {
+        let mut candidates = Vec::new();
+        for (conn_idx, conn) in conns.iter().enumerate() {
+            if conn.server_index >= servers.len() {
+                continue;
+            }
+            let srv = &servers[conn.server_index];
+            let (has_want, want_id, want_group) = match want_server {
+                Some((id, group)) => (true, id, group),
+                None => (false, 0, 0),
+            };
+            let match_want =
+                server_pool_match_want_server(has_want, srv.id, want_id, want_group, srv.group);
+            let is_blocked = !conn.connected && server_blocked[conn.server_index];
+            if !conn.in_use
+                && srv.active
+                && srv.norm_level == level
+                && match_want
+                && (conn.connected || !is_blocked)
+            {
+                let mut use_conn = true;
+                if !has_want {
+                    for &(ig_id, ig_group, ig_norm_level) in ignore_servers {
+                        if server_pool_match_ignore_server(
+                            srv.id,
+                            ig_id,
+                            ig_group,
+                            srv.group,
+                            ig_norm_level,
+                            srv.norm_level,
+                        ) {
+                            use_conn = false;
+                            break;
+                        }
+                    }
+                }
+                server_blocked[conn.server_index] = false;
+                if !unblocked_set[conn.server_index] {
+                    unblocked_set[conn.server_index] = true;
+                    out_unblock_server_indices.push(conn.server_index);
+                }
+                if use_conn {
+                    candidates.push(conn_idx);
+                }
+            }
+        }
+
+        if !candidates.is_empty() {
+            let pick = server_pool_pick_candidate_index(rand_val, candidates.len());
+            return Some((candidates[pick], level));
+        }
+
+        for (srv_idx, srv) in servers.iter().enumerate() {
+            if !server_pool_can_advance_level(
+                srv.norm_level,
+                level,
+                srv.active,
+                srv.optional,
+                server_blocked[srv_idx],
+            ) {
+                return None;
+            }
+        }
+
+        level += 1;
+    }
+
+    None
+}
+
+#[derive(Debug, Clone)]
+pub struct RsNewsServer {
+    pub id: i32,
+    pub active: bool,
+    pub level: i32,
+    pub norm_level: i32,
+    pub optional: bool,
+    pub group: i32,
+    pub max_connections: i32,
+    pub block_time: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct RsPooledConnection {
+    pub server_id: i32,
+    pub in_use: bool,
+    pub connected: bool,
+    pub free_time: i64,
+}
+
+/// Pure Rust domain model of `ServerPool` exercising the exact Rust production algorithms
+/// (`server_pool_normalize_levels`, `server_pool_select_connection`, `server_pool_is_blocked`,
+/// `server_pool_eval_block_server`, `server_pool_level_should_close`,
+/// `server_pool_should_disconnect_idle_level_conn`).
+#[derive(Debug, Default)]
+pub struct ServerPoolModel {
+    pub servers: Vec<RsNewsServer>,
+    pub sorted_server_ids: Vec<i32>,
+    pub connections: Vec<RsPooledConnection>,
+    pub levels: Vec<i32>,
+    pub max_norm_level: i32,
+    pub retry_interval: i32,
+    pub generation: i32,
+}
+
+impl ServerPoolModel {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn add_server(
+        &mut self,
+        id: i32,
+        active: bool,
+        level: i32,
+        optional: bool,
+        group: i32,
+        max_connections: i32,
+    ) {
+        self.servers.push(RsNewsServer {
+            id,
+            active,
+            level,
+            norm_level: 0,
+            optional,
+            group,
+            max_connections,
+            block_time: 0,
+        });
+        self.sorted_server_ids.push(id);
+    }
+
+    pub fn get_server_by_id(&self, id: i32) -> Option<&RsNewsServer> {
+        self.servers.iter().find(|s| s.id == id)
+    }
+
+    pub fn get_server_by_id_mut(&mut self, id: i32) -> Option<&mut RsNewsServer> {
+        self.servers.iter_mut().find(|s| s.id == id)
+    }
+
+    pub fn normalize_levels(&mut self) {
+        if self.servers.is_empty() {
+            return;
+        }
+        let orig_ids = self.sorted_server_ids.clone();
+        let inputs: Vec<crate::dupefallback::NzbgetRsServerNormInput> = orig_ids
+            .iter()
+            .map(|&id| {
+                let s = self.servers.iter().find(|srv| srv.id == id).unwrap();
+                crate::dupefallback::NzbgetRsServerNormInput {
+                    level: s.level,
+                    active: i32::from(s.active),
+                    max_connections: s.max_connections,
+                }
+            })
+            .collect();
+        let mut sorted_indices = vec![0usize; inputs.len()];
+        let mut norm_levels = vec![0i32; inputs.len()];
+        self.max_norm_level = crate::dupefallback::server_pool_normalize_levels(
+            &inputs,
+            &mut sorted_indices,
+            &mut norm_levels,
+        );
+        for (i, &id) in orig_ids.iter().enumerate() {
+            if let Some(s) = self.servers.iter_mut().find(|srv| srv.id == id) {
+                s.norm_level = norm_levels[i];
+            }
+            self.sorted_server_ids[i] = orig_ids[sorted_indices[i]];
+        }
+    }
+
+    pub fn init_connections(&mut self) {
+        self.normalize_levels();
+        self.levels.clear();
+        let sorted_ids = self.sorted_server_ids.clone();
+        for id in sorted_ids {
+            let (norm_level, active, max_conns) = {
+                let srv = self.servers.iter_mut().find(|s| s.id == id).unwrap();
+                srv.block_time = 0;
+                (srv.norm_level, srv.active, srv.max_connections)
+            };
+            if norm_level > -1 {
+                if (self.levels.len() as i32) <= norm_level {
+                    self.levels.push(0);
+                }
+                if active {
+                    let mut conns = self
+                        .connections
+                        .iter()
+                        .filter(|c| c.server_id == id)
+                        .count() as i32;
+                    while conns < max_conns {
+                        self.connections.push(RsPooledConnection {
+                            server_id: id,
+                            in_use: false,
+                            connected: false,
+                            free_time: 0,
+                        });
+                        conns += 1;
+                    }
+                    self.levels[norm_level as usize] += conns;
+                }
+            }
+        }
+        self.generation += 1;
+    }
+
+    pub fn block_server(&mut self, server_id: i32, cur_time: i64) {
+        if let Some(srv) = self.servers.iter_mut().find(|s| s.id == server_id) {
+            let (_new_block, _warn) =
+                server_pool_eval_block_server(srv.block_time, cur_time, self.retry_interval);
+            srv.block_time = cur_time;
+        }
+    }
+
+    pub fn is_server_blocked(&self, server_id: i32, cur_time: i64) -> bool {
+        if let Some(srv) = self.servers.iter().find(|s| s.id == server_id) {
+            if srv.block_time == 0 {
+                return false;
+            }
+            crate::dupefallback::server_pool_is_blocked(
+                srv.block_time,
+                cur_time,
+                self.retry_interval,
+            )
+        } else {
+            false
+        }
+    }
+
+    pub fn get_connection(
+        &mut self,
+        level: i32,
+        want_server_id: Option<i32>,
+        ignore_server_ids: &[i32],
+        cur_time: i64,
+    ) -> Option<usize> {
+        let srv_views: Vec<ServerPoolServerView> = self
+            .sorted_server_ids
+            .iter()
+            .map(|&id| {
+                let s = self.servers.iter().find(|srv| srv.id == id).unwrap();
+                let blocked = s.block_time != 0
+                    && crate::dupefallback::server_pool_is_blocked(
+                        s.block_time,
+                        cur_time,
+                        self.retry_interval,
+                    );
+                ServerPoolServerView {
+                    id: s.id,
+                    group: s.group,
+                    norm_level: s.norm_level,
+                    active: s.active,
+                    optional: s.optional,
+                    blocked,
+                }
+            })
+            .collect();
+        let conn_views: Vec<ServerPoolConnView> = self
+            .connections
+            .iter()
+            .map(|c| {
+                let server_index = self
+                    .sorted_server_ids
+                    .iter()
+                    .position(|&id| id == c.server_id)
+                    .unwrap();
+                ServerPoolConnView {
+                    server_index,
+                    in_use: c.in_use,
+                    connected: c.connected,
+                }
+            })
+            .collect();
+        let want_tuple = want_server_id.and_then(|wid| {
+            self.servers
+                .iter()
+                .find(|s| s.id == wid)
+                .map(|s| (s.id, s.group))
+        });
+        let ignore_tuples: Vec<(i32, i32, i32)> = ignore_server_ids
+            .iter()
+            .filter_map(|&iid| {
+                self.servers
+                    .iter()
+                    .find(|s| s.id == iid)
+                    .map(|s| (s.id, s.group, s.norm_level))
+            })
+            .collect();
+        let mut unblock_indices = Vec::new();
+        let result = server_pool_select_connection(
+            level,
+            &self.levels,
+            &srv_views,
+            &conn_views,
+            want_tuple,
+            &ignore_tuples,
+            0,
+            &mut unblock_indices,
+        );
+        for idx in unblock_indices {
+            let sid = self.sorted_server_ids[idx];
+            if let Some(s) = self.servers.iter_mut().find(|srv| srv.id == sid) {
+                s.block_time = 0;
+            }
+        }
+        if let Some((conn_idx, chosen_level)) = result {
+            self.connections[conn_idx].in_use = true;
+            self.levels[chosen_level as usize] -= 1;
+            Some(conn_idx)
+        } else {
+            None
+        }
+    }
+
+    pub fn free_connection(&mut self, conn_idx: usize, used: bool, cur_time: i64) {
+        self.connections[conn_idx].in_use = false;
+        if used {
+            self.connections[conn_idx].free_time = cur_time;
+        }
+        let sid = self.connections[conn_idx].server_id;
+        if let Some(srv) = self.servers.iter().find(|s| s.id == sid) {
+            if srv.norm_level > -1 && srv.active {
+                self.levels[srv.norm_level as usize] += 1;
+            }
+        }
+    }
+
+    pub fn close_unused_connections(&mut self, cur_time: i64) {
+        let servers = &self.servers;
+        self.connections.retain(|c| {
+            let srv = servers.iter().find(|s| s.id == c.server_id).unwrap();
+            !(!c.in_use && (srv.norm_level == -1 || !srv.active))
+        });
+        for level in 0..=self.max_norm_level {
+            let mut in_use = Vec::new();
+            let mut connected = Vec::new();
+            let mut free_times = Vec::new();
+            for c in &self.connections {
+                let srv = self.servers.iter().find(|s| s.id == c.server_id).unwrap();
+                if srv.norm_level == level {
+                    in_use.push(u8::from(c.in_use));
+                    connected.push(u8::from(c.connected));
+                    free_times.push(c.free_time);
+                }
+            }
+            if crate::dupefallback::server_pool_level_should_close(
+                &in_use,
+                &connected,
+                &free_times,
+                cur_time,
+                5,
+            ) {
+                for c in &mut self.connections {
+                    let srv = self.servers.iter().find(|s| s.id == c.server_id).unwrap();
+                    if server_pool_should_disconnect_idle_level_conn(
+                        srv.norm_level,
+                        level,
+                        i32::from(c.connected),
+                        1,
+                    ) {
+                        c.connected = false;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn changed(&mut self, cur_time: i64) {
+        self.init_connections();
+        self.close_unused_connections(cur_time);
+    }
+}
+
 #[cfg(test)]
 mod article_fetcher_tests {
     use super::*;
@@ -1729,6 +2152,251 @@ mod article_fetcher_tests {
             assert!(batch.next().is_some());
             assert!(groups_intact.load(Ordering::SeqCst));
             assert!(batch.next().is_none());
+        }
+    }
+
+    #[test]
+    fn server_pool_full_suite_port_from_cpp() {
+        let test_block_servers = |group: i32| {
+            let mut pool = ServerPoolModel::new();
+            pool.add_server(1, true, 0, false, group, 2);
+            pool.add_server(2, true, 0, false, group, 2);
+            pool.add_server(3, true, 1, false, 0, 2);
+            pool.init_connections();
+            pool.retry_interval = 60;
+
+            pool.block_server(1, 1000);
+
+            let con1 = pool.get_connection(0, None, &[], 1000);
+            let con2 = pool.get_connection(0, None, &[], 1000);
+            let con3 = pool.get_connection(0, None, &[], 1000);
+            let con4 = pool.get_connection(0, None, &[], 1000);
+            assert!(con1.is_some());
+            assert!(con2.is_some());
+            assert!(con3.is_none());
+            assert!(con4.is_none());
+            let sid2 = pool.connections[con2.unwrap()].server_id;
+            assert_eq!(pool.get_server_by_id(sid2).unwrap().level, 0);
+
+            if let Some(c1) = con1 {
+                pool.free_connection(c1, false, 1000);
+            }
+            if let Some(c2) = con2 {
+                pool.free_connection(c2, false, 1000);
+            }
+        };
+
+        let test_optional_block_servers = |group: i32| {
+            let mut pool = ServerPoolModel::new();
+            pool.add_server(1, true, 0, true, group, 2);
+            pool.add_server(2, true, 0, true, group, 2);
+            pool.add_server(3, true, 1, false, 0, 2);
+            pool.init_connections();
+            pool.retry_interval = 60;
+
+            pool.block_server(1, 1000);
+            pool.block_server(2, 1000);
+
+            let con1 = pool.get_connection(0, None, &[], 1000);
+            let con2 = pool.get_connection(0, None, &[], 1000);
+            let con3 = pool.get_connection(0, None, &[], 1000);
+            let con4 = pool.get_connection(0, None, &[], 1000);
+
+            assert!(con1.is_some());
+            assert!(con2.is_some());
+            assert!(con3.is_none());
+            assert!(con4.is_none());
+            let sid1 = pool.connections[con1.unwrap()].server_id;
+            let sid2 = pool.connections[con2.unwrap()].server_id;
+            assert_eq!(pool.get_server_by_id(sid1).unwrap().level, 1);
+            assert_eq!(pool.get_server_by_id(sid2).unwrap().level, 1);
+        };
+
+        let test_block_optional_and_non_optional_servers = |group: i32| {
+            let mut pool = ServerPoolModel::new();
+            pool.add_server(1, true, 0, true, group, 2);
+            pool.add_server(2, true, 0, false, group, 2);
+            pool.add_server(3, true, 1, false, 0, 2);
+            pool.init_connections();
+            pool.retry_interval = 60;
+
+            pool.block_server(1, 1000);
+            pool.block_server(2, 1000);
+
+            let con1 = pool.get_connection(0, None, &[], 1000);
+            let con2 = pool.get_connection(0, None, &[], 1000);
+            let con3 = pool.get_connection(0, None, &[], 1000);
+            let con4 = pool.get_connection(0, None, &[], 1000);
+
+            assert!(con1.is_none());
+            assert!(con2.is_none());
+            assert!(con3.is_none());
+            assert!(con4.is_none());
+        };
+
+        // 1. SimpleLevelsTest
+        {
+            let mut pool = ServerPoolModel::new();
+            pool.add_server(1, true, 2, false, 0, 2);
+            pool.init_connections();
+            assert_eq!(pool.max_norm_level, 0);
+
+            pool.add_server(2, true, 10, false, 0, 3);
+            pool.init_connections();
+            assert_eq!(pool.max_norm_level, 1);
+
+            let con1 = pool.get_connection(0, None, &[], 1000);
+            let con2 = pool.get_connection(0, None, &[], 1000);
+            let con3 = pool.get_connection(0, None, &[], 1000);
+            assert!(con1.is_some());
+            assert!(con2.is_some());
+            assert!(con3.is_none());
+
+            pool.free_connection(con1.unwrap(), false, 1000);
+            let con3 = pool.get_connection(0, None, &[], 1000);
+            assert!(con3.is_some());
+
+            let con1 = pool.get_connection(1, None, &[], 1000);
+            let con2 = pool.get_connection(1, None, &[], 1000);
+            let con3 = pool.get_connection(1, None, &[], 1000);
+            let con4 = pool.get_connection(1, None, &[], 1000);
+            assert!(con1.is_some());
+            assert!(con2.is_some());
+            assert!(con3.is_some());
+            assert!(con4.is_none());
+        }
+
+        // 2. WantServerTest
+        {
+            let mut pool = ServerPoolModel::new();
+            pool.add_server(1, true, 0, false, 0, 2);
+            pool.add_server(2, true, 0, false, 0, 1);
+            pool.add_server(3, true, 1, false, 0, 3);
+            pool.init_connections();
+
+            let con1 = pool.get_connection(0, Some(1), &[], 1000).unwrap();
+            let con2 = pool.get_connection(0, Some(1), &[], 1000).unwrap();
+            assert_eq!(pool.connections[con1].server_id, 1);
+            assert_eq!(pool.connections[con2].server_id, 1);
+
+            assert!(pool.get_connection(0, Some(1), &[], 1000).is_none());
+
+            let con3 = pool.get_connection(0, None, &[], 1000).unwrap();
+            assert_ne!(pool.connections[con3].server_id, 1);
+        }
+
+        // 3. ActiveOnOffTest
+        {
+            let mut pool = ServerPoolModel::new();
+            pool.add_server(1, true, 0, false, 0, 2);
+            pool.add_server(2, true, 0, false, 0, 1);
+            pool.init_connections();
+
+            let con1 = pool.get_connection(0, None, &[], 1000);
+            let con2 = pool.get_connection(0, None, &[], 1000);
+            let con3 = pool.get_connection(0, None, &[], 1000);
+            let con4 = pool.get_connection(0, None, &[], 1000);
+            assert!(con1.is_some());
+            assert!(con2.is_some());
+            assert!(con3.is_some());
+            assert!(con4.is_none());
+
+            pool.free_connection(con1.unwrap(), false, 1000);
+            pool.free_connection(con2.unwrap(), false, 1000);
+            pool.free_connection(con3.unwrap(), false, 1000);
+
+            assert_eq!(pool.generation, 1);
+
+            pool.get_server_by_id_mut(1).unwrap().active = false;
+            pool.changed(1000);
+            assert_eq!(pool.generation, 2);
+
+            let con1 = pool.get_connection(0, None, &[], 1000);
+            let con2 = pool.get_connection(0, None, &[], 1000);
+            let con3 = pool.get_connection(0, None, &[], 1000);
+            assert!(con1.is_some());
+            assert!(con2.is_none());
+            assert!(con3.is_none());
+        }
+
+        // 4. IgnoreServersTest
+        {
+            let mut pool = ServerPoolModel::new();
+            pool.add_server(1, true, 0, false, 0, 2);
+            pool.add_server(2, true, 0, false, 0, 2);
+            pool.init_connections();
+
+            let con1 = pool.get_connection(0, None, &[1], 1000);
+            let con2 = pool.get_connection(0, None, &[1], 1000);
+            let con3 = pool.get_connection(0, None, &[1], 1000);
+            let con4 = pool.get_connection(0, None, &[1], 1000);
+            assert!(con1.is_some());
+            assert!(con2.is_some());
+            assert!(con3.is_none());
+            assert!(con4.is_none());
+        }
+
+        // 5. IgnoreServersGroupedTest
+        {
+            let mut pool = ServerPoolModel::new();
+            pool.add_server(1, true, 0, false, 1, 2);
+            pool.add_server(2, true, 0, false, 1, 2);
+            pool.init_connections();
+
+            let con1 = pool.get_connection(0, None, &[1], 1000);
+            let con2 = pool.get_connection(0, None, &[1], 1000);
+            let con3 = pool.get_connection(0, None, &[1], 1000);
+            let con4 = pool.get_connection(0, None, &[1], 1000);
+            assert!(con1.is_none());
+            assert!(con2.is_none());
+            assert!(con3.is_none());
+            assert!(con4.is_none());
+
+            pool.add_server(3, true, 0, false, 2, 2);
+            pool.init_connections();
+
+            let con1 = pool.get_connection(0, None, &[1], 1000);
+            let con2 = pool.get_connection(0, None, &[1], 1000);
+            let con3 = pool.get_connection(0, None, &[1], 1000);
+            assert!(con1.is_some());
+            assert!(con2.is_some());
+            assert!(con3.is_none());
+        }
+
+        // 6-11. BlockServers variants
+        test_block_servers(0);
+        test_block_servers(1);
+        test_optional_block_servers(0);
+        test_optional_block_servers(1);
+        test_block_optional_and_non_optional_servers(0);
+        test_block_optional_and_non_optional_servers(1);
+
+        // 12. SpeedTestServerSelection
+        {
+            let mut pool = ServerPoolModel::new();
+            pool.add_server(1, true, 1, false, 0, 1);
+            pool.add_server(2, true, 2, false, 0, 1);
+            pool.init_connections();
+
+            let con1 = pool.get_connection(0, Some(1), &[], 1000).unwrap();
+            assert_eq!(pool.connections[con1].server_id, 1);
+            assert!(pool.get_connection(0, Some(1), &[], 1000).is_none());
+        }
+
+        // 13. VerifyNormLevelCorrectness
+        {
+            let mut pool = ServerPoolModel::new();
+            pool.add_server(1, true, 5, false, 0, 1);
+            pool.init_connections();
+
+            let norm_level = pool.get_server_by_id(1).unwrap().norm_level;
+            assert_eq!(norm_level, 0);
+
+            let con = pool.get_connection(norm_level, Some(1), &[], 1000);
+            assert!(con.is_some());
+            if let Some(c) = con {
+                pool.free_connection(c, false, 1000);
+            }
         }
     }
 }

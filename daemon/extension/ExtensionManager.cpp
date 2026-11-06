@@ -229,23 +229,28 @@ namespace ExtensionManager
 	std::optional<std::string>
 	Manager::GetExtensionPath(const Extension::Script& extension, fs::path& path)
 	{
-		const char* location = extension.GetLocation();
+		const char* location = extension.GetLocation() ? extension.GetLocation() : "";
+		const char* entry = extension.GetEntry() ? extension.GetEntry() : "";
 
-		ptrdiff_t count = std::count_if(
-			std::begin(m_extensions),
-			std::end(m_extensions),
-			[&location](const auto& ext) { return strcmp(location, ext->GetLocation()) == 0; }
-		);
-
-		if (count > 1)
+		std::vector<const char*> allLocs;
+		std::vector<size_t> allLens;
+		allLocs.reserve(m_extensions.size());
+		allLens.reserve(m_extensions.size());
+		for (const auto& ext : m_extensions)
 		{
-			// for backward compatibility, when multiple V1 extensions placed 
-			// in the same directory in which case we have to delete an entry file,
-			// not the entire directory.
-			location = extension.GetEntry();
+			const char* l = ext->GetLocation() ? ext->GetLocation() : "";
+			allLocs.push_back(l);
+			allLens.push_back(strlen(l));
 		}
 
-		path = fs::path(location);
+		NzbgetRsBuf buf = nzbget_rs_ext_mgr_resolve_extension_path(
+			location, strlen(location),
+			entry, strlen(entry),
+			allLocs.empty() ? nullptr : allLocs.data(),
+			allLens.empty() ? nullptr : allLens.data(),
+			allLocs.size());
+		path = fs::path(std::string(buf.data ? buf.data : "", buf.len));
+		nzbget_rs_free(buf);
 		return std::nullopt;
 	}
 	
@@ -345,12 +350,10 @@ namespace ExtensionManager
 
 	std::string Manager::GetExtensionName(const std::string& fileName) const
 	{
-		size_t dotPos = fileName.find_last_of('.');
-		if (dotPos != std::string::npos)
-		{
-			return fileName.substr(0, dotPos);
-		}
-		return fileName;
+		NzbgetRsBuf buf = nzbget_rs_ext_mgr_get_extension_name(fileName.data(), fileName.size());
+		std::string res(buf.data ? buf.data : "", buf.len);
+		nzbget_rs_free(buf);
+		return res;
 	}
 
 	Extensions::const_iterator Manager::GetByName(const std::string& name) const

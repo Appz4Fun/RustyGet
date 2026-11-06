@@ -2226,14 +2226,6 @@ int nzbget_rs_snh_sys_parse_unpacker_version(
     const char* line, size_t len, size_t* out_start, size_t* out_len);
 int nzbget_rs_snh_sys_parse_par_version(
     const char* line, size_t len, size_t* out_pos);
-void nzbget_rs_snh_os_trim_quotes(
-    const char* s, size_t len, size_t* out_start, size_t* out_len);
-int nzbget_rs_snh_os_parse_sw_vers_field(
-    const char* output, size_t output_len, const char* prefix, size_t prefix_len,
-    size_t* out_start, size_t* out_len);
-const char* nzbget_rs_snh_cpu_canonical_arch(const char* arch, size_t len);
-int nzbget_rs_snh_cpu_parse_cpuinfo_line(
-    const char* line, size_t len, size_t* out_val_offset);
 
 typedef struct NzbgetRsYEncoderFile NzbgetRsYEncoderFile;
 
@@ -2441,13 +2433,6 @@ int nzbget_rs_ntw_webdl_is_default_http_port(const char* protocol, int port);
 int nzbget_rs_ntw_webdl_is_header_end_line(int first_ch);
 size_t nzbget_rs_ntw_webdl_strip_query_len(const char* url);
 
-int nzbget_rs_ntw_server_pool_can_advance_level(
-    int norm_level, int level, int active, int optional, int blocked);
-int nzbget_rs_ntw_server_pool_match_want_server(
-    int has_want, int cand_id, int want_id, int want_group, int cand_group);
-int nzbget_rs_ntw_server_pool_match_ignore_server(
-    int cand_id, int ign_id, int ign_group, int cand_group,
-    int ign_norm_level, int cand_norm_level);
 int nzbget_rs_ntw_server_pool_calc_remaining_block_sec(
     int64_t block_time, int retry_interval, int64_t cur_time);
 
@@ -4135,9 +4120,6 @@ void nzbget_rs_dqh_log_parse_rotated_date_fields(
 int nzbget_rs_dqh_mem_slices_equal(const void* a, const void* b, size_t len);
 int nzbget_rs_dqh_tls_is_cipher_list(const char* cipher, size_t cipher_len);
 NzbgetRsBuf nzbget_rs_dqh_sysinfo_extract_version_after_space(const char* text);
-int nzbget_rs_dqh_os_classify_os_release_line(
-    const char* line, size_t line_len, int has_name, int has_version,
-    size_t* out_val_offset);
 int nzbget_rs_dqh_dupe_util_trim_bounds(
     const char* text, size_t text_len, const char* chars,
     size_t* out_start, size_t* out_len);
@@ -4283,9 +4265,6 @@ int nzbget_rs_dqh_article_dl_should_fail_for_desired_server(
     int has_want_server, int has_desired_server);
 int nzbget_rs_dqh_article_dl_should_continue_read_loop(int is_stopped, int decoder_eof);
 int nzbget_rs_dqh_article_dl_should_run_decode_check(int status, int ad_running);
-int nzbget_rs_dqh_server_pool_has_available_level_conns(
-    int level, size_t levels_len, int level_free_count);
-size_t nzbget_rs_dqh_server_pool_pick_candidate_index(int rand_val, size_t candidates_len);
 int nzbget_rs_dqh_server_pool_should_disconnect_idle_level_conn(
     int conn_norm_level, int level, int conn_status, int cs_connected);
 int nzbget_rs_dqh_statmeter_has_any_quota_configured(int daily_quota, int monthly_quota);
@@ -5514,6 +5493,176 @@ int nzbget_rs_article_batch_fetcher_next(
 void nzbget_rs_article_batch_fetcher_cancel_remaining(void* handle);
 void nzbget_rs_article_batch_fetcher_stop(void* handle);
 NzbgetRsBuf nzbget_rs_alloc_buf(const char* data, size_t len);
+
+NzbgetRsBuf nzbget_rs_extension_to_json(
+    const char* entry_ptr, size_t entry_len,
+    const char* loc_ptr, size_t loc_len,
+    const char* root_ptr, size_t root_len,
+    const char* name_ptr, size_t name_len,
+    const char* disp_ptr, size_t disp_len,
+    const char* about_ptr, size_t about_len,
+    const char* author_ptr, size_t author_len,
+    const char* home_ptr, size_t home_len,
+    const char* lic_ptr, size_t lic_len,
+    const char* ver_ptr, size_t ver_len,
+    const char* min_ver_ptr, size_t min_ver_len,
+    int post_script, int scan_script, int queue_script, int sched_script, int feed_script,
+    const char* qevents_ptr, size_t qevents_len,
+    const char* task_time_ptr, size_t task_time_len,
+    const char* const* desc_ptrs, const size_t* desc_lens, size_t desc_count,
+    const char* const* req_ptrs, const size_t* req_lens, size_t req_count,
+    size_t opt_count, size_t cmd_count, void* ctx,
+    void (*get_opt_cb)(
+        void* ctx, size_t idx,
+        const char** out_name_ptr, size_t* out_name_len,
+        const char** out_disp_ptr, size_t* out_disp_len,
+        const char** out_sec_ptr, size_t* out_sec_len,
+        int* out_multi,
+        const char** out_pref_ptr, size_t* out_pref_len,
+        int* out_val_is_num,
+        const char** out_val_str_ptr, size_t* out_val_str_len,
+        double* out_val_num,
+        size_t* out_desc_cnt, size_t* out_sel_cnt),
+    void (*get_opt_desc_cb)(
+        void* ctx, size_t opt_idx, size_t desc_idx,
+        const char** out_ptr, size_t* out_len),
+    void (*get_opt_sel_cb)(
+        void* ctx, size_t opt_idx, size_t sel_idx,
+        int* out_is_num,
+        const char** out_str_ptr, size_t* out_str_len,
+        double* out_num),
+    void (*get_cmd_cb)(
+        void* ctx, size_t idx,
+        const char** out_name_ptr, size_t* out_name_len,
+        const char** out_disp_ptr, size_t* out_disp_len,
+        const char** out_act_ptr, size_t* out_act_len,
+        const char** out_sec_ptr, size_t* out_sec_len,
+        int* out_multi,
+        const char** out_pref_ptr, size_t* out_pref_len,
+        size_t* out_desc_cnt),
+    void (*get_cmd_desc_cb)(
+        void* ctx, size_t cmd_idx, size_t desc_idx,
+        const char** out_ptr, size_t* out_len));
+
+NzbgetRsBuf nzbget_rs_extension_to_xml(
+    const char* entry_ptr, size_t entry_len,
+    const char* loc_ptr, size_t loc_len,
+    const char* root_ptr, size_t root_len,
+    const char* name_ptr, size_t name_len,
+    const char* disp_ptr, size_t disp_len,
+    const char* about_ptr, size_t about_len,
+    const char* author_ptr, size_t author_len,
+    const char* home_ptr, size_t home_len,
+    const char* lic_ptr, size_t lic_len,
+    const char* ver_ptr, size_t ver_len,
+    const char* min_ver_ptr, size_t min_ver_len,
+    int post_script, int scan_script, int queue_script, int sched_script, int feed_script,
+    const char* qevents_ptr, size_t qevents_len,
+    const char* task_time_ptr, size_t task_time_len,
+    const char* const* desc_ptrs, const size_t* desc_lens, size_t desc_count,
+    const char* const* req_ptrs, const size_t* req_lens, size_t req_count,
+    size_t opt_count, size_t cmd_count, void* ctx,
+    void (*get_opt_cb)(
+        void* ctx, size_t idx,
+        const char** out_name_ptr, size_t* out_name_len,
+        const char** out_disp_ptr, size_t* out_disp_len,
+        const char** out_sec_ptr, size_t* out_sec_len,
+        int* out_multi,
+        const char** out_pref_ptr, size_t* out_pref_len,
+        int* out_val_is_num,
+        const char** out_val_str_ptr, size_t* out_val_str_len,
+        double* out_val_num,
+        size_t* out_desc_cnt, size_t* out_sel_cnt),
+    void (*get_opt_desc_cb)(
+        void* ctx, size_t opt_idx, size_t desc_idx,
+        const char** out_ptr, size_t* out_len),
+    void (*get_opt_sel_cb)(
+        void* ctx, size_t opt_idx, size_t sel_idx,
+        int* out_is_num,
+        const char** out_str_ptr, size_t* out_str_len,
+        double* out_num),
+    void (*get_cmd_cb)(
+        void* ctx, size_t idx,
+        const char** out_name_ptr, size_t* out_name_len,
+        const char** out_disp_ptr, size_t* out_disp_len,
+        const char** out_act_ptr, size_t* out_act_len,
+        const char** out_sec_ptr, size_t* out_sec_len,
+        int* out_multi,
+        const char** out_pref_ptr, size_t* out_pref_len,
+        size_t* out_desc_cnt),
+    void (*get_cmd_desc_cb)(
+        void* ctx, size_t cmd_idx, size_t desc_idx,
+        const char** out_ptr, size_t* out_len));
+
+NzbgetRsBuf nzbget_rs_ext_mgr_get_extension_name(
+    const char* filename_ptr, size_t filename_len);
+NzbgetRsBuf nzbget_rs_ext_mgr_resolve_extension_path(
+    const char* ext_loc_ptr, size_t ext_loc_len,
+    const char* ext_entry_ptr, size_t ext_entry_len,
+    const char* const* all_locs_ptrs, const size_t* all_locs_lens, size_t all_locs_count);
+
+void nzbget_rs_cpu_detect_info(
+    const char* raw_uts_machine, size_t raw_uts_machine_len,
+    NzbgetRsBuf* out_model, NzbgetRsBuf* out_arch);
+void nzbget_rs_os_detect_info(
+    const char* fallback_sysname, size_t fallback_sysname_len,
+    const char* fallback_release, size_t fallback_release_len,
+    NzbgetRsBuf* out_name, NzbgetRsBuf* out_version);
+NzbgetRsBuf nzbget_rs_system_info_to_json(
+    const char* os_name_ptr, size_t os_name_len,
+    const char* os_ver_ptr, size_t os_ver_len,
+    const char* cpu_model_ptr, size_t cpu_model_len,
+    const char* cpu_arch_ptr, size_t cpu_arch_len,
+    const char* pub_ip_ptr, size_t pub_ip_len,
+    const char* priv_ip_ptr, size_t priv_ip_len,
+    const char* const* tool_names, const size_t* tool_name_lens,
+    const char* const* tool_vers, const size_t* tool_ver_lens,
+    const char* const* tool_paths, const size_t* tool_path_lens,
+    size_t tool_count,
+    const char* const* lib_names, const size_t* lib_name_lens,
+    const char* const* lib_vers, const size_t* lib_ver_lens,
+    size_t lib_count);
+NzbgetRsBuf nzbget_rs_system_info_to_xml(
+    const char* os_name_ptr, size_t os_name_len,
+    const char* os_ver_ptr, size_t os_ver_len,
+    const char* cpu_model_ptr, size_t cpu_model_len,
+    const char* cpu_arch_ptr, size_t cpu_arch_len,
+    const char* pub_ip_ptr, size_t pub_ip_len,
+    const char* priv_ip_ptr, size_t priv_ip_len,
+    const char* const* tool_names, const size_t* tool_name_lens,
+    const char* const* tool_vers, const size_t* tool_ver_lens,
+    const char* const* tool_paths, const size_t* tool_path_lens,
+    size_t tool_count,
+    const char* const* lib_names, const size_t* lib_name_lens,
+    const char* const* lib_vers, const size_t* lib_ver_lens,
+    size_t lib_count);
+NzbgetRsBuf nzbget_rs_system_info_to_display_text(
+    const char* os_name_ptr, size_t os_name_len,
+    const char* os_ver_ptr, size_t os_ver_len,
+    const char* cpu_model_ptr, size_t cpu_model_len,
+    const char* cpu_arch_ptr, size_t cpu_arch_len,
+    const char* const* tool_names, const size_t* tool_name_lens,
+    const char* const* tool_vers, const size_t* tool_ver_lens,
+    const char* const* tool_paths, const size_t* tool_path_lens,
+    size_t tool_count,
+    const char* const* lib_names, const size_t* lib_name_lens,
+    const char* const* lib_vers, const size_t* lib_ver_lens,
+    size_t lib_count);
+
+int nzbget_rs_server_pool_select_connection(
+    int start_level,
+    const int32_t* levels_ptr, size_t levels_len,
+    const int32_t* srv_ids, const int32_t* srv_groups, const int32_t* srv_norm_levels,
+    const uint8_t* srv_active, const uint8_t* srv_optional, const uint8_t* srv_blocked,
+    size_t srv_count,
+    const size_t* conn_srv_indices, const uint8_t* conn_in_use, const uint8_t* conn_connected,
+    size_t conn_count,
+    int has_want, int32_t want_id, int32_t want_group,
+    const int32_t* ign_ids, const int32_t* ign_groups, const int32_t* ign_norm_levels,
+    size_t ign_count,
+    int rand_val,
+    size_t* out_unblock_indices, size_t* out_unblock_count,
+    size_t* out_conn_index, int32_t* out_chosen_level);
 
 #include "nzbget_tls_cipher.h"
 

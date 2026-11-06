@@ -20,15 +20,13 @@
 
 #include "nzbget.h"
 
+#include <sys/utsname.h>
+
 #include "OS.h"
-#include "Log.h"
-#include "Util.h"
 #include "nzbget_rs.h"
 
 namespace System
 {
-	static const int BUFFER_SIZE = 128;
-
 	OS::OS()
 	{
 		Init();
@@ -44,197 +42,25 @@ namespace System
 		return m_version;
 	}
 
-#ifdef __linux__
-#include <fstream>
-#include <sys/utsname.h>
-
-	bool OS::IsRunningInDocker() const
-	{
-		return FileSystem::FileExists("/.dockerenv");
-	}
-
-	bool OS::IsRunningInContainer() const
-	{
-		if (std::getenv("container") != nullptr)
-		{
-			return true;
-		}
-
-		if (FileSystem::FileExists("/run/systemd/container") || FileSystem::FileExists("/run/.containerenv"))
-		{
-			return true;
-		}
-
-		return false;
-	}
-
-	void OS::TrimQuotes(std::string& str) const
-	{
-		size_t start = 0;
-		size_t len = 0;
-		nzbget_rs_snh_os_trim_quotes(str.c_str(), str.size(), &start, &len);
-		str = str.substr(start, len);
-	}
-
 	void OS::Init()
 	{
-		InitOSInfoFromOSRelease();
-
-		if (m_name.empty() || m_version.empty())
+		struct utsname uts{};
+		const char* sysname = "";
+		const char* release = "";
+		if (uname(&uts) == 0)
 		{
-			struct utsname uts;
-			if (uname(&uts) == 0)
-			{
-				if (m_name.empty() && uts.sysname[0] != '\0')
-				{
-					m_name = uts.sysname;
-				}
-
-				if (m_version.empty() && uts.release[0] != '\0')
-				{
-					m_version = uts.release;
-				}
-			}
-			else
-			{
-				debug("Failed to get OS info from uname(2)");
-			}
+			sysname = uts.sysname;
+			release = uts.release;
 		}
-
-		if (IsRunningInDocker())
-		{
-			m_version += " (Running in Docker)";
-		}
-		else if (IsRunningInContainer())
-		{
-			m_version += " (Running in Container)";
-		}
+		NzbgetRsBuf nameBuf{};
+		NzbgetRsBuf verBuf{};
+		nzbget_rs_os_detect_info(
+			sysname, strlen(sysname),
+			release, strlen(release),
+			&nameBuf, &verBuf);
+		m_name.assign(nameBuf.data ? nameBuf.data : "", nameBuf.len);
+		m_version.assign(verBuf.data ? verBuf.data : "", verBuf.len);
+		nzbget_rs_free(nameBuf);
+		nzbget_rs_free(verBuf);
 	}
-
-	void OS::InitOSInfoFromOSRelease()
-	{
-		std::ifstream osInfo("/etc/os-release");
-		if (!osInfo.is_open())
-		{
-			return;
-		}
-
-		std::string line;
-		while (std::getline(osInfo, line))
-		{
-			if (!m_name.empty() && !m_version.empty())
-			{
-				return;
-			}
-
-			size_t valOffset = 0;
-			int lineKind = nzbget_rs_dqh_os_classify_os_release_line(
-				line.data(), line.size(),
-				!m_name.empty() ? 1 : 0,
-				!m_version.empty() ? 1 : 0,
-				&valOffset);
-			if (lineKind == 1)
-			{
-				m_name = line.substr(valOffset);
-				Util::Trim(m_name);
-				TrimQuotes(m_name);
-			}
-			else if (lineKind == 2)
-			{
-				m_version = line.substr(valOffset);
-				Util::Trim(m_version);
-				TrimQuotes(m_version);
-			}
-			else if (lineKind == 3)
-			{
-				m_version = line.substr(valOffset);
-				Util::Trim(m_version);
-			}
-		}
-	}
-#endif
-
-#ifdef __APPLE__
-	void OS::Init()
-	{
-		std::string cmd = std::string("sw_vers");
-		auto pipe = Util::MakePipe(cmd);
-		if (!pipe)
-		{
-			debug("Failed to get OS info: couldn't run 'sw_vers'");
-			return;
-		}
-
-		char buffer[BUFFER_SIZE];
-		std::string result;
-		while (!feof(pipe.get()))
-		{
-			if (fgets(buffer, BUFFER_SIZE, pipe.get()))
-			{
-				result += buffer;
-			}
-		};
-
-		std::string productName = "ProductName:";
-		size_t valStart = 0;
-		size_t valLen = 0;
-		if (nzbget_rs_snh_os_parse_sw_vers_field(
-			result.c_str(), result.size(), productName.c_str(), productName.size(), &valStart, &valLen))
-		{
-			m_name = result.substr(valStart, valLen);
-			Util::Trim(m_name);
-		}
-		else
-		{
-			debug("Failed to get OS name: 'ProductName' not found in sw_vers output");
-		}
-
-		std::string productVersion = "ProductVersion:";
-		if (nzbget_rs_snh_os_parse_sw_vers_field(
-			result.c_str(), result.size(), productVersion.c_str(), productVersion.size(), &valStart, &valLen))
-		{
-			m_version = result.substr(valStart, valLen);
-			Util::Trim(m_version);
-		}
-		else
-		{
-			debug("Failed to get OS version: 'ProductVersion' not found in sw_vers output");
-		}
-	}
-#endif
-
-#if __BSD__
-	void OS::Init()
-	{
-		int mib[2];
-		size_t len = BUFFER_SIZE;
-		char buffer[BUFFER_SIZE];
-
-		mib[0] = CTL_KERN;
-		mib[1] = KERN_OSTYPE;
-		if (sysctl(mib, 2, buffer, &len, nullptr, 0) != -1)
-		{
-			m_name = buffer;
-			Util::Trim(m_name);
-		}
-		else
-		{
-			debug("Failed to get OS name from sysctl(2): KERN_OSTYPE");
-		}
-
-		len = BUFFER_SIZE;
-
-		mib[1] = KERN_OSRELEASE;
-		if (sysctl(mib, 2, buffer, &len, nullptr, 0) != -1)
-		{
-			m_version = buffer;
-			Util::Trim(m_version);
-		}
-		else
-		{
-			debug("Failed to get OS version from sysctl(2): KERN_OSRELEASE");
-		}
-	}
-#endif
-
 }

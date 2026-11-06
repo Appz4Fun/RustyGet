@@ -340,124 +340,163 @@ namespace System
 
 	std::ostream& operator<<(std::ostream& os, const SystemInfo& sysinfo)
 	{
-		os << "OS: ";
-		os << sysinfo.GetOSInfo().GetName() << " ";
-		os << sysinfo.GetOSInfo().GetVersion() << "\n";
-		os << "CPU: ";
-		os << sysinfo.GetCPUInfo().GetModel() << "\n";
-		os << "Arch: ";
-		os << sysinfo.GetCPUInfo().GetArch() << "\n";
+		const auto& osInfo = sysinfo.GetOSInfo();
+		const auto& cpu = sysinfo.GetCPUInfo();
+		const auto tools = sysinfo.GetTools();
+		const auto& libraries = sysinfo.GetLibraries();
 
-		for (const auto& tool : sysinfo.GetTools())
+		std::vector<const char*> tNames(tools.size()), tVers(tools.size()), tPaths(tools.size());
+		std::vector<size_t> tNameLens(tools.size()), tVerLens(tools.size()), tPathLens(tools.size());
+		for (size_t i = 0; i < tools.size(); ++i)
 		{
-			os << tool.name << " " << tool.version << " ";
-			os << tool.path << "\n";
+			tNames[i] = tools[i].name.data();
+			tNameLens[i] = tools[i].name.size();
+			tVers[i] = tools[i].version.data();
+			tVerLens[i] = tools[i].version.size();
+			tPaths[i] = tools[i].path.data();
+			tPathLens[i] = tools[i].path.size();
 		}
 
-		for (const auto& lib : sysinfo.GetLibraries())
+		std::vector<const char*> lNames(libraries.size()), lVers(libraries.size());
+		std::vector<size_t> lNameLens(libraries.size()), lVerLens(libraries.size());
+		for (size_t i = 0; i < libraries.size(); ++i)
 		{
-			os << lib.name << " " << lib.version << "\n";
+			lNames[i] = libraries[i].name.data();
+			lNameLens[i] = libraries[i].name.size();
+			lVers[i] = libraries[i].version.data();
+			lVerLens[i] = libraries[i].version.size();
 		}
 
+		NzbgetRsBuf buf = nzbget_rs_system_info_to_display_text(
+			osInfo.GetName().data(), osInfo.GetName().size(),
+			osInfo.GetVersion().data(), osInfo.GetVersion().size(),
+			cpu.GetModel().data(), cpu.GetModel().size(),
+			cpu.GetArch().data(), cpu.GetArch().size(),
+			tNames.empty() ? nullptr : tNames.data(),
+			tNameLens.empty() ? nullptr : tNameLens.data(),
+			tVers.empty() ? nullptr : tVers.data(),
+			tVerLens.empty() ? nullptr : tVerLens.data(),
+			tPaths.empty() ? nullptr : tPaths.data(),
+			tPathLens.empty() ? nullptr : tPathLens.data(),
+			tools.size(),
+			lNames.empty() ? nullptr : lNames.data(),
+			lNameLens.empty() ? nullptr : lNameLens.data(),
+			lVers.empty() ? nullptr : lVers.data(),
+			lVerLens.empty() ? nullptr : lVerLens.data(),
+			libraries.size());
+		if (buf.data && buf.len > 0)
+		{
+			os.write(buf.data, static_cast<std::streamsize>(buf.len));
+		}
+		nzbget_rs_free(buf);
 		return os;
 	}
 
 	std::string ToJsonStr(const SystemInfo& sysInfo)
 	{
-		Json::JsonObject json;
-		Json::JsonObject osJson;
-		Json::JsonObject networkJson;
-		Json::JsonObject cpuJson;
-		Json::JsonArray toolsJson;
-		Json::JsonArray librariesJson;
-
 		const auto& os = sysInfo.GetOSInfo();
-		const auto& network = sysInfo.GetNetworkInfo();
+		const auto network = sysInfo.GetNetworkInfo();
 		const auto& cpu = sysInfo.GetCPUInfo();
-		const auto& tools = sysInfo.GetTools();
+		const auto tools = sysInfo.GetTools();
 		const auto& libraries = sysInfo.GetLibraries();
 
-		osJson["Name"] = os.GetName();
-		osJson["Version"] = os.GetVersion();
-		networkJson["PublicIP"] = network.publicIP;
-		networkJson["PrivateIP"] = network.privateIP;
-		cpuJson["Model"] = cpu.GetModel();
-		cpuJson["Arch"] = cpu.GetArch();
-
-		for (const auto& tool : tools)
+		std::vector<const char*> tNames(tools.size()), tVers(tools.size()), tPaths(tools.size());
+		std::vector<size_t> tNameLens(tools.size()), tVerLens(tools.size()), tPathLens(tools.size());
+		for (size_t i = 0; i < tools.size(); ++i)
 		{
-			Json::JsonObject toolJson;
-			toolJson["Name"] = tool.name;
-			toolJson["Version"] = tool.version;
-			toolJson["Path"] = tool.path;
-			toolsJson.push_back(std::move(toolJson));
+			tNames[i] = tools[i].name.data();
+			tNameLens[i] = tools[i].name.size();
+			tVers[i] = tools[i].version.data();
+			tVerLens[i] = tools[i].version.size();
+			tPaths[i] = tools[i].path.data();
+			tPathLens[i] = tools[i].path.size();
 		}
 
-		for (const auto& library : libraries)
+		std::vector<const char*> lNames(libraries.size()), lVers(libraries.size());
+		std::vector<size_t> lNameLens(libraries.size()), lVerLens(libraries.size());
+		for (size_t i = 0; i < libraries.size(); ++i)
 		{
-			Json::JsonObject libraryJson;
-			libraryJson["Name"] = library.name;
-			libraryJson["Version"] = library.version;
-			librariesJson.push_back(std::move(libraryJson));
+			lNames[i] = libraries[i].name.data();
+			lNameLens[i] = libraries[i].name.size();
+			lVers[i] = libraries[i].version.data();
+			lVerLens[i] = libraries[i].version.size();
 		}
 
-		json["OS"] = std::move(osJson);
-		json["CPU"] = std::move(cpuJson);
-		json["Network"] = std::move(networkJson);
-		json["Tools"] = std::move(toolsJson);
-		json["Libraries"] = std::move(librariesJson);
-
-		return Json::Serialize(json);
+		NzbgetRsBuf buf = nzbget_rs_system_info_to_json(
+			os.GetName().data(), os.GetName().size(),
+			os.GetVersion().data(), os.GetVersion().size(),
+			cpu.GetModel().data(), cpu.GetModel().size(),
+			cpu.GetArch().data(), cpu.GetArch().size(),
+			network.publicIP.data(), network.publicIP.size(),
+			network.privateIP.data(), network.privateIP.size(),
+			tNames.empty() ? nullptr : tNames.data(),
+			tNameLens.empty() ? nullptr : tNameLens.data(),
+			tVers.empty() ? nullptr : tVers.data(),
+			tVerLens.empty() ? nullptr : tVerLens.data(),
+			tPaths.empty() ? nullptr : tPaths.data(),
+			tPathLens.empty() ? nullptr : tPathLens.data(),
+			tools.size(),
+			lNames.empty() ? nullptr : lNames.data(),
+			lNameLens.empty() ? nullptr : lNameLens.data(),
+			lVers.empty() ? nullptr : lVers.data(),
+			lVerLens.empty() ? nullptr : lVerLens.data(),
+			libraries.size());
+		std::string result(buf.data ? buf.data : "", buf.len);
+		nzbget_rs_free(buf);
+		return result;
 	}
 
 	std::string ToXmlStr(const SystemInfo& sysInfo)
 	{
-		xmlNodePtr rootNode = xmlNewNode(nullptr, BAD_CAST "value");
-		xmlNodePtr structNode = xmlNewNode(nullptr, BAD_CAST "struct");
-		xmlNodePtr osNode = xmlNewNode(nullptr, BAD_CAST "OS");
-		xmlNodePtr cpuNode = xmlNewNode(nullptr, BAD_CAST "CPU");
-		xmlNodePtr networkNode = xmlNewNode(nullptr, BAD_CAST "Network");
-		xmlNodePtr toolsNode = xmlNewNode(nullptr, BAD_CAST "Tools");
-		xmlNodePtr librariesNode = xmlNewNode(nullptr, BAD_CAST "Libraries");
-
 		const auto& os = sysInfo.GetOSInfo();
-		const auto& network = sysInfo.GetNetworkInfo();
+		const auto network = sysInfo.GetNetworkInfo();
 		const auto& cpu = sysInfo.GetCPUInfo();
-		const auto& tools = sysInfo.GetTools();
+		const auto tools = sysInfo.GetTools();
 		const auto& libraries = sysInfo.GetLibraries();
 
-		Xml::AddNewNode(osNode, "Name", "string", os.GetName().c_str());
-		Xml::AddNewNode(osNode, "Version", "string", os.GetVersion().c_str());
-		Xml::AddNewNode(networkNode, "PublicIP", "string", network.publicIP.c_str());
-		Xml::AddNewNode(networkNode, "PrivateIP", "string", network.privateIP.c_str());
-		Xml::AddNewNode(cpuNode, "Model", "string", cpu.GetModel().c_str());
-		Xml::AddNewNode(cpuNode, "Arch", "string", cpu.GetArch().c_str());
-
-		for (const auto& tool : tools)
+		std::vector<const char*> tNames(tools.size()), tVers(tools.size()), tPaths(tools.size());
+		std::vector<size_t> tNameLens(tools.size()), tVerLens(tools.size()), tPathLens(tools.size());
+		for (size_t i = 0; i < tools.size(); ++i)
 		{
-			Xml::AddNewNode(toolsNode, "Name", "string", tool.name.c_str());
-			Xml::AddNewNode(toolsNode, "Version", "string", tool.version.c_str());
-			Xml::AddNewNode(toolsNode, "Path", "string", tool.path.c_str());
+			tNames[i] = tools[i].name.data();
+			tNameLens[i] = tools[i].name.size();
+			tVers[i] = tools[i].version.data();
+			tVerLens[i] = tools[i].version.size();
+			tPaths[i] = tools[i].path.data();
+			tPathLens[i] = tools[i].path.size();
 		}
 
-		for (const auto& library : libraries)
+		std::vector<const char*> lNames(libraries.size()), lVers(libraries.size());
+		std::vector<size_t> lNameLens(libraries.size()), lVerLens(libraries.size());
+		for (size_t i = 0; i < libraries.size(); ++i)
 		{
-			Xml::AddNewNode(librariesNode, "Name", "string", library.name.c_str());
-			Xml::AddNewNode(librariesNode, "Version", "string", library.version.c_str());
+			lNames[i] = libraries[i].name.data();
+			lNameLens[i] = libraries[i].name.size();
+			lVers[i] = libraries[i].version.data();
+			lVerLens[i] = libraries[i].version.size();
 		}
 
-		xmlAddChild(structNode, osNode);
-		xmlAddChild(structNode, cpuNode);
-		xmlAddChild(structNode, networkNode);
-		xmlAddChild(structNode, toolsNode);
-		xmlAddChild(structNode, librariesNode);
-		xmlAddChild(rootNode, structNode);
-
-		std::string result = Xml::Serialize(rootNode);
-
-		xmlFreeNode(rootNode);
-
+		NzbgetRsBuf buf = nzbget_rs_system_info_to_xml(
+			os.GetName().data(), os.GetName().size(),
+			os.GetVersion().data(), os.GetVersion().size(),
+			cpu.GetModel().data(), cpu.GetModel().size(),
+			cpu.GetArch().data(), cpu.GetArch().size(),
+			network.publicIP.data(), network.publicIP.size(),
+			network.privateIP.data(), network.privateIP.size(),
+			tNames.empty() ? nullptr : tNames.data(),
+			tNameLens.empty() ? nullptr : tNameLens.data(),
+			tVers.empty() ? nullptr : tVers.data(),
+			tVerLens.empty() ? nullptr : tVerLens.data(),
+			tPaths.empty() ? nullptr : tPaths.data(),
+			tPathLens.empty() ? nullptr : tPathLens.data(),
+			tools.size(),
+			lNames.empty() ? nullptr : lNames.data(),
+			lNameLens.empty() ? nullptr : lNameLens.data(),
+			lVers.empty() ? nullptr : lVers.data(),
+			lVerLens.empty() ? nullptr : lVerLens.data(),
+			libraries.size());
+		std::string result(buf.data ? buf.data : "", buf.len);
+		nzbget_rs_free(buf);
 		return result;
 	}
-
 }

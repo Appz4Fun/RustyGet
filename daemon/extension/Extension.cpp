@@ -19,229 +19,226 @@
 
 #include "nzbget.h"
 
-#include "Xml.h"
 #include "Extension.h"
+#include "nzbget_rs.h"
 
 namespace Extension
 {
+	namespace
+	{
+		void GetOptCb(
+			void* ctx, size_t idx,
+			const char** outNamePtr, size_t* outNameLen,
+			const char** outDispPtr, size_t* outDispLen,
+			const char** outSecPtr, size_t* outSecLen,
+			int* outMulti,
+			const char** outPrefPtr, size_t* outPrefLen,
+			int* outValIsNum,
+			const char** outValStrPtr, size_t* outValStrLen,
+			double* outValNum,
+			size_t* outDescCnt, size_t* outSelCnt)
+		{
+			try
+			{
+				const auto& opt = static_cast<const Script*>(ctx)->GetOptions()[idx];
+				*outNamePtr = opt.name.data();
+				*outNameLen = opt.name.size();
+				*outDispPtr = opt.displayName.data();
+				*outDispLen = opt.displayName.size();
+				*outSecPtr = opt.section.name.data();
+				*outSecLen = opt.section.name.size();
+				*outMulti = opt.section.multi ? 1 : 0;
+				*outPrefPtr = opt.section.prefix.data();
+				*outPrefLen = opt.section.prefix.size();
+				if (const std::string* val = std::get_if<std::string>(&opt.value))
+				{
+					*outValIsNum = 0;
+					*outValStrPtr = val->data();
+					*outValStrLen = val->size();
+				}
+				else if (const double* val = std::get_if<double>(&opt.value))
+				{
+					*outValIsNum = 1;
+					*outValNum = *val;
+				}
+				*outDescCnt = opt.description.size();
+				*outSelCnt = opt.select.size();
+			}
+			catch (...)
+			{
+			}
+		}
+
+		void GetOptDescCb(
+			void* ctx, size_t optIdx, size_t descIdx,
+			const char** outPtr, size_t* outLen)
+		{
+			try
+			{
+				const auto& s = static_cast<const Script*>(ctx)->GetOptions()[optIdx].description[descIdx];
+				*outPtr = s.data();
+				*outLen = s.size();
+			}
+			catch (...)
+			{
+			}
+		}
+
+		void GetOptSelCb(
+			void* ctx, size_t optIdx, size_t selIdx,
+			int* outIsNum,
+			const char** outStrPtr, size_t* outStrLen,
+			double* outNum)
+		{
+			try
+			{
+				const auto& sel = static_cast<const Script*>(ctx)->GetOptions()[optIdx].select[selIdx];
+				if (const std::string* val = std::get_if<std::string>(&sel))
+				{
+					*outIsNum = 0;
+					*outStrPtr = val->data();
+					*outStrLen = val->size();
+				}
+				else if (const double* val = std::get_if<double>(&sel))
+				{
+					*outIsNum = 1;
+					*outNum = *val;
+				}
+			}
+			catch (...)
+			{
+			}
+		}
+
+		void GetCmdCb(
+			void* ctx, size_t idx,
+			const char** outNamePtr, size_t* outNameLen,
+			const char** outDispPtr, size_t* outDispLen,
+			const char** outActPtr, size_t* outActLen,
+			const char** outSecPtr, size_t* outSecLen,
+			int* outMulti,
+			const char** outPrefPtr, size_t* outPrefLen,
+			size_t* outDescCnt)
+		{
+			try
+			{
+				const auto& cmd = static_cast<const Script*>(ctx)->GetCommands()[idx];
+				*outNamePtr = cmd.name.data();
+				*outNameLen = cmd.name.size();
+				*outDispPtr = cmd.displayName.data();
+				*outDispLen = cmd.displayName.size();
+				*outActPtr = cmd.action.data();
+				*outActLen = cmd.action.size();
+				*outSecPtr = cmd.section.name.data();
+				*outSecLen = cmd.section.name.size();
+				*outMulti = cmd.section.multi ? 1 : 0;
+				*outPrefPtr = cmd.section.prefix.data();
+				*outPrefLen = cmd.section.prefix.size();
+				*outDescCnt = cmd.description.size();
+			}
+			catch (...)
+			{
+			}
+		}
+
+		void GetCmdDescCb(
+			void* ctx, size_t cmdIdx, size_t descIdx,
+			const char** outPtr, size_t* outLen)
+		{
+			try
+			{
+				const auto& s = static_cast<const Script*>(ctx)->GetCommands()[cmdIdx].description[descIdx];
+				*outPtr = s.data();
+				*outLen = s.size();
+			}
+			catch (...)
+			{
+			}
+		}
+
+		std::string SerializeScript(const Script& script, bool asXml)
+		{
+			const char* entry = script.GetEntry() ? script.GetEntry() : "";
+			const char* loc = script.GetLocation() ? script.GetLocation() : "";
+			const char* root = script.GetRootDir() ? script.GetRootDir() : "";
+			const char* name = script.GetName() ? script.GetName() : "";
+			const char* disp = script.GetDisplayName() ? script.GetDisplayName() : "";
+			const char* about = script.GetAbout() ? script.GetAbout() : "";
+			const char* author = script.GetAuthor() ? script.GetAuthor() : "";
+			const char* home = script.GetHomepage() ? script.GetHomepage() : "";
+			const char* lic = script.GetLicense() ? script.GetLicense() : "";
+			const char* ver = script.GetVersion() ? script.GetVersion() : "";
+			const char* minVer = script.GetNzbgetMinVersion() ? script.GetNzbgetMinVersion() : "";
+			const char* qevents = script.GetQueueEvents() ? script.GetQueueEvents() : "";
+			const char* taskTime = script.GetTaskTime() ? script.GetTaskTime() : "";
+
+			std::vector<const char*> descPtrs;
+			std::vector<size_t> descLens;
+			descPtrs.reserve(script.GetDescription().size());
+			descLens.reserve(script.GetDescription().size());
+			for (const auto& line : script.GetDescription())
+			{
+				descPtrs.push_back(line.data());
+				descLens.push_back(line.size());
+			}
+
+			std::vector<const char*> reqPtrs;
+			std::vector<size_t> reqLens;
+			reqPtrs.reserve(script.GetRequirements().size());
+			reqLens.reserve(script.GetRequirements().size());
+			for (const auto& line : script.GetRequirements())
+			{
+				reqPtrs.push_back(line.data());
+				reqLens.push_back(line.size());
+			}
+
+			auto fn = asXml ? nzbget_rs_extension_to_xml : nzbget_rs_extension_to_json;
+			NzbgetRsBuf buf = fn(
+				entry, strlen(entry),
+				loc, strlen(loc),
+				root, strlen(root),
+				name, strlen(name),
+				disp, strlen(disp),
+				about, strlen(about),
+				author, strlen(author),
+				home, strlen(home),
+				lic, strlen(lic),
+				ver, strlen(ver),
+				minVer, strlen(minVer),
+				script.GetPostScript() ? 1 : 0,
+				script.GetScanScript() ? 1 : 0,
+				script.GetQueueScript() ? 1 : 0,
+				script.GetSchedulerScript() ? 1 : 0,
+				script.GetFeedScript() ? 1 : 0,
+				qevents, strlen(qevents),
+				taskTime, strlen(taskTime),
+				descPtrs.empty() ? nullptr : descPtrs.data(),
+				descLens.empty() ? nullptr : descLens.data(),
+				descPtrs.size(),
+				reqPtrs.empty() ? nullptr : reqPtrs.data(),
+				reqLens.empty() ? nullptr : reqLens.data(),
+				reqPtrs.size(),
+				script.GetOptions().size(),
+				script.GetCommands().size(),
+				const_cast<Script*>(&script),
+				&GetOptCb,
+				&GetOptDescCb,
+				&GetOptSelCb,
+				&GetCmdCb,
+				&GetCmdDescCb);
+			std::string result(buf.data ? buf.data : "", buf.len);
+			nzbget_rs_free(buf);
+			return result;
+		}
+	}
+
 	std::string ToJsonStr(const Script& script)
 	{
-		Json::JsonObject json;
-		Json::JsonArray descriptionJson;
-		Json::JsonArray requirementsJson;
-		Json::JsonArray optionsJson;
-		Json::JsonArray commandsJson;
-
-		json["Entry"] = script.GetEntry();
-		json["Location"] = script.GetLocation();
-		json["RootDir"] = script.GetRootDir();
-		json["Name"] = script.GetName();
-		json["DisplayName"] = script.GetDisplayName();
-		json["About"] = script.GetAbout();
-		json["Author"] = script.GetAuthor();
-		json["Homepage"] = script.GetHomepage();
-		json["License"] = script.GetLicense();
-		json["Version"] = script.GetVersion();
-		json["NZBGetMinVersion"] = script.GetNzbgetMinVersion();
-		json["PostScript"] = script.GetPostScript();
-		json["ScanScript"] = script.GetScanScript();
-		json["QueueScript"] = script.GetQueueScript();
-		json["SchedulerScript"] = script.GetSchedulerScript();
-		json["FeedScript"] = script.GetFeedScript();
-		json["QueueEvents"] = script.GetQueueEvents();
-		json["TaskTime"] = script.GetTaskTime();
-
-		for (const auto& line : script.GetDescription())
-		{
-			descriptionJson.push_back(Json::JsonValue(line));
-		}
-
-		for (const auto& line : script.GetRequirements())
-		{
-			requirementsJson.push_back(Json::JsonValue(line));
-		}
-
-		for (const auto& option : script.GetOptions())
-		{
-			Json::JsonObject optionJson;
-			Json::JsonArray descriptionJson;
-			Json::JsonArray selectJson;
-
-			optionJson["Name"] = option.name;
-			optionJson["DisplayName"] = option.displayName;
-			optionJson["Section"] = option.section.name;
-			optionJson["Multi"] = option.section.multi;
-			optionJson["Prefix"] = option.section.prefix;
-
-			if (const std::string* val = std::get_if<std::string>(&option.value))
-			{
-				optionJson["Value"] = *val;
-			}
-			else if (const double* val = std::get_if<double>(&option.value))
-			{
-				optionJson["Value"] = *val;
-			}
-
-			for (const auto& line : option.description)
-			{
-				descriptionJson.push_back(Json::JsonValue(line));
-			}
-
-			for (const auto& value : option.select)
-			{
-				if (const std::string* val = std::get_if<std::string>(&value))
-				{
-					selectJson.push_back(Json::JsonValue(*val));
-				}
-				else if (const double* val = std::get_if<double>(&value))
-				{
-					selectJson.push_back(Json::JsonValue(*val));
-				}
-			}
-
-			optionJson["Description"] = std::move(descriptionJson);
-			optionJson["Select"] = std::move(selectJson);
-			optionsJson.push_back(std::move(optionJson));
-		}
-
-		for (const auto& command : script.GetCommands())
-		{
-			Json::JsonObject commandJson;
-			Json::JsonArray descriptionJson;
-
-			commandJson["Name"] = command.name;
-			commandJson["DisplayName"] = command.displayName;
-			commandJson["Action"] = command.action;
-			commandJson["Section"] = command.section.name;
-			commandJson["Multi"] = command.section.multi;
-			commandJson["Prefix"] = command.section.prefix;
-
-			for (const auto& line : command.description)
-			{
-				descriptionJson.push_back(Json::JsonValue(line));
-			}
-
-			commandJson["Description"] = std::move(descriptionJson);
-			commandsJson.push_back(std::move(commandJson));
-		}
-
-		json["Description"] = std::move(descriptionJson);
-		json["Requirements"] = std::move(requirementsJson);
-		json["Options"] = std::move(optionsJson);
-		json["Commands"] = std::move(commandsJson);
-
-		return Json::Serialize(json);
+		return SerializeScript(script, false);
 	}
 
 	std::string ToXmlStr(const Script& script)
 	{
-		xmlNodePtr rootNode = xmlNewNode(nullptr, BAD_CAST "value");
-		xmlNodePtr structNode = xmlNewNode(nullptr, BAD_CAST "struct");
-
-		Xml::AddNewNode(structNode, "Entry", "string", script.GetEntry());
-		Xml::AddNewNode(structNode, "Location", "string", script.GetLocation());
-		Xml::AddNewNode(structNode, "RootDir", "string", script.GetRootDir());
-		Xml::AddNewNode(structNode, "Name", "string", script.GetName());
-		Xml::AddNewNode(structNode, "DisplayName", "string", script.GetDisplayName());
-		Xml::AddNewNode(structNode, "About", "string", script.GetAbout());
-		Xml::AddNewNode(structNode, "Author", "string", script.GetAuthor());
-		Xml::AddNewNode(structNode, "Homepage", "string", script.GetHomepage());
-		Xml::AddNewNode(structNode, "License", "string", script.GetLicense());
-		Xml::AddNewNode(structNode, "Version", "string", script.GetVersion());
-		Xml::AddNewNode(structNode, "NZBGetMinVersion", "string", script.GetNzbgetMinVersion());
-
-		Xml::AddNewNode(structNode, "PostScript", "boolean", Xml::BoolToStr(script.GetPostScript()));
-		Xml::AddNewNode(structNode, "ScanScript", "boolean", Xml::BoolToStr(script.GetScanScript()));
-		Xml::AddNewNode(structNode, "QueueScript", "boolean", Xml::BoolToStr(script.GetQueueScript()));
-		Xml::AddNewNode(structNode, "SchedulerScript", "boolean", Xml::BoolToStr(script.GetSchedulerScript()));
-		Xml::AddNewNode(structNode, "FeedScript", "boolean", Xml::BoolToStr(script.GetFeedScript()));
-
-		Xml::AddNewNode(structNode, "QueueEvents", "string", script.GetQueueEvents());
-		Xml::AddNewNode(structNode, "TaskTime", "string", script.GetTaskTime());
-
-		xmlNodePtr descriptionNode = xmlNewNode(nullptr, BAD_CAST "Description");
-		for (const std::string& line : script.GetDescription())
-		{
-			Xml::AddNewNode(descriptionNode, "Value", "string", line.c_str());
-		}
-
-		xmlNodePtr requirementsNode = xmlNewNode(nullptr, BAD_CAST "Requirements");
-		for (const std::string& line : script.GetRequirements())
-		{
-			Xml::AddNewNode(requirementsNode, "Value", "string", line.c_str());
-		}
-
-		xmlNodePtr commandsNode = xmlNewNode(nullptr, BAD_CAST "Commands");
-		for (const ManifestFile::Command& command : script.GetCommands())
-		{
-			Xml::AddNewNode(commandsNode, "Name", "string", command.name.c_str());
-			Xml::AddNewNode(commandsNode, "DisplayName", "string", command.displayName.c_str());
-			Xml::AddNewNode(commandsNode, "Action", "string", command.action.c_str());
-			Xml::AddNewNode(commandsNode, "Multi", "boolean", Xml::BoolToStr(command.section.multi));
-			Xml::AddNewNode(commandsNode, "Section", "string", command.section.name.c_str());
-			Xml::AddNewNode(commandsNode, "Prefix", "string", command.section.prefix.c_str());
-
-			xmlNodePtr descriptionNode = xmlNewNode(nullptr, BAD_CAST "Description");
-			for (const std::string& line : command.description)
-			{
-				Xml::AddNewNode(descriptionNode, "Value", "string", line.c_str());
-			}
-			xmlAddChild(commandsNode, descriptionNode);
-		}
-
-		xmlNodePtr optionsNode = xmlNewNode(nullptr, BAD_CAST "Options");
-		for (const ManifestFile::Option& option : script.GetOptions())
-		{
-			Xml::AddNewNode(optionsNode, "Name", "string", option.name.c_str());
-			Xml::AddNewNode(optionsNode, "DisplayName", "string", option.displayName.c_str());
-			Xml::AddNewNode(optionsNode, "Multi", "boolean", Xml::BoolToStr(option.section.multi));
-			Xml::AddNewNode(optionsNode, "Section", "string", option.section.name.c_str());
-			Xml::AddNewNode(optionsNode, "Prefix", "string", option.section.prefix.c_str());
-
-			if (const std::string* val = std::get_if<std::string>(&option.value))
-			{
-				Xml::AddNewNode(optionsNode, "Value", "string", val->c_str());
-			}
-			else if (const double* val = std::get_if<double>(&option.value))
-			{
-				std::string valStr = std::to_string(*val);
-				Xml::AddNewNode(optionsNode, "Value", "double", valStr.c_str());
-			}
-
-			xmlNodePtr selectNode = xmlNewNode(nullptr, BAD_CAST "Select");
-			for (const auto& selectOption : option.select)
-			{
-				if (const std::string* val = std::get_if<std::string>(&selectOption))
-				{
-					Xml::AddNewNode(selectNode, "Value", "string", val->c_str());
-				}
-				else if (const double* val = std::get_if<double>(&selectOption))
-				{
-					std::string valStr = std::to_string(*val);
-					Xml::AddNewNode(selectNode, "Value", "double", valStr.c_str());
-				}
-			}
-
-			xmlNodePtr descriptionNode = xmlNewNode(nullptr, BAD_CAST "Description");
-			for (const std::string& line : option.description)
-			{
-				Xml::AddNewNode(descriptionNode, "Value", "string", line.c_str());
-			}
-
-			xmlAddChild(optionsNode, descriptionNode);
-			xmlAddChild(optionsNode, selectNode);
-		}
-
-		xmlAddChild(structNode, descriptionNode);
-		xmlAddChild(structNode, requirementsNode);
-		xmlAddChild(structNode, commandsNode);
-		xmlAddChild(structNode, optionsNode);
-		xmlAddChild(rootNode, structNode);
-
-		std::string result = Xml::Serialize(rootNode);
-
-		xmlFreeNode(rootNode);
-
-		return result;
+		return SerializeScript(script, true);
 	}
 }

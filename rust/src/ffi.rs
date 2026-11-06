@@ -13830,98 +13830,6 @@ pub unsafe extern "C" fn nzbget_rs_snh_sys_parse_par_version(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_snh_os_trim_quotes(
-    s: *const c_char,
-    len: usize,
-    out_start: *mut usize,
-    out_len: *mut usize,
-) {
-    let bytes = if s.is_null() || len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(s.cast::<u8>(), len)
-    };
-    let (st, ln) = crate::systemhealth::os_trim_quotes(bytes);
-    if !out_start.is_null() {
-        *out_start = st;
-    }
-    if !out_len.is_null() {
-        *out_len = ln;
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_snh_os_parse_sw_vers_field(
-    output: *const c_char,
-    output_len: usize,
-    prefix: *const c_char,
-    prefix_len: usize,
-    out_start: *mut usize,
-    out_len: *mut usize,
-) -> c_int {
-    let out_bytes = if output.is_null() || output_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(output.cast::<u8>(), output_len)
-    };
-    let pre_bytes = if prefix.is_null() || prefix_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(prefix.cast::<u8>(), prefix_len)
-    };
-    match crate::systemhealth::os_parse_sw_vers_field(out_bytes, pre_bytes) {
-        Some((st, ln)) => {
-            if !out_start.is_null() {
-                *out_start = st;
-            }
-            if !out_len.is_null() {
-                *out_len = ln;
-            }
-            1
-        }
-        None => 0,
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_snh_cpu_canonical_arch(
-    arch: *const c_char,
-    len: usize,
-) -> *const c_char {
-    let bytes = if arch.is_null() || len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(arch.cast::<u8>(), len)
-    };
-    match crate::systemhealth::cpu_canonical_arch(bytes) {
-        Some(cstr) => cstr.as_ptr(),
-        None => std::ptr::null(),
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_snh_cpu_parse_cpuinfo_line(
-    line: *const c_char,
-    len: usize,
-    out_val_offset: *mut usize,
-) -> c_int {
-    let bytes = if line.is_null() || len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(line.cast::<u8>(), len)
-    };
-    match crate::systemhealth::cpu_parse_cpuinfo_line(bytes) {
-        Some(off) => {
-            if !out_val_offset.is_null() {
-                *out_val_offset = off;
-            }
-            1
-        }
-        None => 0,
-    }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_yencoder_open(
     filename: *const c_char,
     offset: i64,
@@ -15410,59 +15318,6 @@ pub extern "C" fn nzbget_rs_ntw_webdl_is_header_end_line(first_ch: c_int) -> c_i
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_ntw_webdl_strip_query_len(url: *const c_char) -> usize {
     crate::webdownload::webdl_strip_query_len(input(url))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ntw_server_pool_can_advance_level(
-    norm_level: c_int,
-    level: c_int,
-    active: c_int,
-    optional: c_int,
-    blocked: c_int,
-) -> c_int {
-    i32::from(crate::nntp::server_pool_can_advance_level(
-        norm_level,
-        level,
-        active != 0,
-        optional != 0,
-        blocked != 0,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ntw_server_pool_match_want_server(
-    has_want: c_int,
-    cand_id: c_int,
-    want_id: c_int,
-    want_group: c_int,
-    cand_group: c_int,
-) -> c_int {
-    i32::from(crate::nntp::server_pool_match_want_server(
-        has_want != 0,
-        cand_id,
-        want_id,
-        want_group,
-        cand_group,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ntw_server_pool_match_ignore_server(
-    cand_id: c_int,
-    ign_id: c_int,
-    ign_group: c_int,
-    cand_group: c_int,
-    ign_norm_level: c_int,
-    cand_norm_level: c_int,
-) -> c_int {
-    i32::from(crate::nntp::server_pool_match_ignore_server(
-        cand_id,
-        ign_id,
-        ign_group,
-        cand_group,
-        ign_norm_level,
-        cand_norm_level,
-    ))
 }
 
 #[no_mangle]
@@ -22651,30 +22506,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_sysinfo_extract_version_after_space(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_os_classify_os_release_line(
-    line: *const c_char,
-    line_len: usize,
-    has_name: c_int,
-    has_version: c_int,
-    out_val_offset: *mut usize,
-) -> c_int {
-    let l = if line.is_null() || line_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(line as *const u8, line_len)
-    };
-    let (kind, off) = crate::systemhealth::os_classify_os_release_line(
-        l,
-        has_name != 0,
-        has_version != 0,
-    );
-    if !out_val_offset.is_null() {
-        *out_val_offset = off;
-    }
-    kind
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_dupe_util_trim_bounds(
     text: *const c_char,
     text_len: usize,
@@ -23876,29 +23707,6 @@ pub extern "C" fn nzbget_rs_dqh_article_dl_should_run_decode_check(
     i32::from(
         crate::artwritercore::article_dl_should_run_decode_check(status, ad_running),
     )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_server_pool_has_available_level_conns(
-    level: c_int,
-    levels_len: usize,
-    level_free_count: c_int,
-) -> c_int {
-    i32::from(
-        crate::nntp::server_pool_has_available_level_conns(
-            level,
-            levels_len,
-            level_free_count,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_server_pool_pick_candidate_index(
-    rand_val: c_int,
-    candidates_len: usize,
-) -> usize {
-    crate::nntp::server_pool_pick_candidate_index(rand_val, candidates_len)
 }
 
 #[no_mangle]
@@ -31924,6 +31732,947 @@ pub unsafe extern "C" fn nzbget_rs_article_batch_fetcher_stop(handle: *mut std::
 pub unsafe extern "C" fn nzbget_rs_alloc_buf(data: *const c_char, len: usize) -> RsBuf {
     into_buf(bytes(data, len).to_vec())
 }
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn build_extension_script_view_from_ffi(
+    entry_ptr: *const c_char,
+    entry_len: usize,
+    loc_ptr: *const c_char,
+    loc_len: usize,
+    root_ptr: *const c_char,
+    root_len: usize,
+    name_ptr: *const c_char,
+    name_len: usize,
+    disp_ptr: *const c_char,
+    disp_len: usize,
+    about_ptr: *const c_char,
+    about_len: usize,
+    author_ptr: *const c_char,
+    author_len: usize,
+    home_ptr: *const c_char,
+    home_len: usize,
+    lic_ptr: *const c_char,
+    lic_len: usize,
+    ver_ptr: *const c_char,
+    ver_len: usize,
+    min_ver_ptr: *const c_char,
+    min_ver_len: usize,
+    post_script: c_int,
+    scan_script: c_int,
+    queue_script: c_int,
+    sched_script: c_int,
+    feed_script: c_int,
+    qevents_ptr: *const c_char,
+    qevents_len: usize,
+    task_time_ptr: *const c_char,
+    task_time_len: usize,
+    desc_ptrs: *const *const c_char,
+    desc_lens: *const usize,
+    desc_count: usize,
+    req_ptrs: *const *const c_char,
+    req_lens: *const usize,
+    req_count: usize,
+    opt_count: usize,
+    cmd_count: usize,
+    ctx: *mut std::ffi::c_void,
+    get_opt_cb: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            usize,
+            *mut *const c_char,
+            *mut usize,
+            *mut *const c_char,
+            *mut usize,
+            *mut *const c_char,
+            *mut usize,
+            *mut c_int,
+            *mut *const c_char,
+            *mut usize,
+            *mut c_int,
+            *mut *const c_char,
+            *mut usize,
+            *mut f64,
+            *mut usize,
+            *mut usize,
+        ),
+    >,
+    get_opt_desc_cb: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            usize,
+            usize,
+            *mut *const c_char,
+            *mut usize,
+        ),
+    >,
+    get_opt_sel_cb: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            usize,
+            usize,
+            *mut c_int,
+            *mut *const c_char,
+            *mut usize,
+            *mut f64,
+        ),
+    >,
+    get_cmd_cb: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            usize,
+            *mut *const c_char,
+            *mut usize,
+            *mut *const c_char,
+            *mut usize,
+            *mut *const c_char,
+            *mut usize,
+            *mut *const c_char,
+            *mut usize,
+            *mut c_int,
+            *mut *const c_char,
+            *mut usize,
+            *mut usize,
+        ),
+    >,
+    get_cmd_desc_cb: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            usize,
+            usize,
+            *mut *const c_char,
+            *mut usize,
+        ),
+    >,
+) -> crate::extension::ExtensionScriptView {
+    let mut description = Vec::with_capacity(desc_count);
+    for i in 0..desc_count {
+        if !desc_ptrs.is_null() && !desc_lens.is_null() {
+            description.push(bytes(*desc_ptrs.add(i), *desc_lens.add(i)).to_vec());
+        }
+    }
+    let mut requirements = Vec::with_capacity(req_count);
+    for i in 0..req_count {
+        if !req_ptrs.is_null() && !req_lens.is_null() {
+            requirements.push(bytes(*req_ptrs.add(i), *req_lens.add(i)).to_vec());
+        }
+    }
+    let mut options = Vec::with_capacity(opt_count);
+    if let Some(ocb) = get_opt_cb {
+        for i in 0..opt_count {
+            let mut on_ptr: *const c_char = std::ptr::null();
+            let mut on_len: usize = 0;
+            let mut od_ptr: *const c_char = std::ptr::null();
+            let mut od_len: usize = 0;
+            let mut os_ptr: *const c_char = std::ptr::null();
+            let mut os_len: usize = 0;
+            let mut omulti: c_int = 0;
+            let mut op_ptr: *const c_char = std::ptr::null();
+            let mut op_len: usize = 0;
+            let mut val_is_num: c_int = 0;
+            let mut vs_ptr: *const c_char = std::ptr::null();
+            let mut vs_len: usize = 0;
+            let mut vnum: f64 = 0.0;
+            let mut odesc_cnt: usize = 0;
+            let mut osel_cnt: usize = 0;
+            ocb(
+                ctx,
+                i,
+                &mut on_ptr,
+                &mut on_len,
+                &mut od_ptr,
+                &mut od_len,
+                &mut os_ptr,
+                &mut os_len,
+                &mut omulti,
+                &mut op_ptr,
+                &mut op_len,
+                &mut val_is_num,
+                &mut vs_ptr,
+                &mut vs_len,
+                &mut vnum,
+                &mut odesc_cnt,
+                &mut osel_cnt,
+            );
+            let mut opt_desc = Vec::with_capacity(odesc_cnt);
+            if let Some(dcb) = get_opt_desc_cb {
+                for j in 0..odesc_cnt {
+                    let mut dp: *const c_char = std::ptr::null();
+                    let mut dl: usize = 0;
+                    dcb(ctx, i, j, &mut dp, &mut dl);
+                    opt_desc.push(bytes(dp, dl).to_vec());
+                }
+            }
+            let mut opt_sel = Vec::with_capacity(osel_cnt);
+            if let Some(scb) = get_opt_sel_cb {
+                for j in 0..osel_cnt {
+                    let mut sin: c_int = 0;
+                    let mut sp: *const c_char = std::ptr::null();
+                    let mut sl: usize = 0;
+                    let mut sn: f64 = 0.0;
+                    scb(ctx, i, j, &mut sin, &mut sp, &mut sl, &mut sn);
+                    if sin != 0 {
+                        opt_sel.push(crate::extension::ExtensionSelectVal::Num(sn));
+                    } else {
+                        opt_sel.push(crate::extension::ExtensionSelectVal::Str(
+                            bytes(sp, sl).to_vec(),
+                        ));
+                    }
+                }
+            }
+            let value = if val_is_num != 0 {
+                crate::extension::ExtensionSelectVal::Num(vnum)
+            } else {
+                crate::extension::ExtensionSelectVal::Str(bytes(vs_ptr, vs_len).to_vec())
+            };
+            options.push(crate::extension::ExtensionOptionView {
+                name: bytes(on_ptr, on_len).to_vec(),
+                display_name: bytes(od_ptr, od_len).to_vec(),
+                description: opt_desc,
+                value,
+                select: opt_sel,
+                section: crate::extension::ExtensionSectionView {
+                    multi: omulti != 0,
+                    name: bytes(os_ptr, os_len).to_vec(),
+                    prefix: bytes(op_ptr, op_len).to_vec(),
+                },
+            });
+        }
+    }
+
+    let mut commands = Vec::with_capacity(cmd_count);
+    if let Some(ccb) = get_cmd_cb {
+        for i in 0..cmd_count {
+            let mut cn_ptr: *const c_char = std::ptr::null();
+            let mut cn_len: usize = 0;
+            let mut cd_ptr: *const c_char = std::ptr::null();
+            let mut cd_len: usize = 0;
+            let mut ca_ptr: *const c_char = std::ptr::null();
+            let mut ca_len: usize = 0;
+            let mut cs_ptr: *const c_char = std::ptr::null();
+            let mut cs_len: usize = 0;
+            let mut cmulti: c_int = 0;
+            let mut cp_ptr: *const c_char = std::ptr::null();
+            let mut cp_len: usize = 0;
+            let mut cdesc_cnt: usize = 0;
+            ccb(
+                ctx,
+                i,
+                &mut cn_ptr,
+                &mut cn_len,
+                &mut cd_ptr,
+                &mut cd_len,
+                &mut ca_ptr,
+                &mut ca_len,
+                &mut cs_ptr,
+                &mut cs_len,
+                &mut cmulti,
+                &mut cp_ptr,
+                &mut cp_len,
+                &mut cdesc_cnt,
+            );
+            let mut cmd_desc = Vec::with_capacity(cdesc_cnt);
+            if let Some(dcb) = get_cmd_desc_cb {
+                for j in 0..cdesc_cnt {
+                    let mut dp: *const c_char = std::ptr::null();
+                    let mut dl: usize = 0;
+                    dcb(ctx, i, j, &mut dp, &mut dl);
+                    cmd_desc.push(bytes(dp, dl).to_vec());
+                }
+            }
+            commands.push(crate::extension::ExtensionCommandView {
+                name: bytes(cn_ptr, cn_len).to_vec(),
+                display_name: bytes(cd_ptr, cd_len).to_vec(),
+                action: bytes(ca_ptr, ca_len).to_vec(),
+                description: cmd_desc,
+                section: crate::extension::ExtensionSectionView {
+                    multi: cmulti != 0,
+                    name: bytes(cs_ptr, cs_len).to_vec(),
+                    prefix: bytes(cp_ptr, cp_len).to_vec(),
+                },
+            });
+        }
+    }
+
+    crate::extension::ExtensionScriptView {
+        entry: bytes(entry_ptr, entry_len).to_vec(),
+        location: bytes(loc_ptr, loc_len).to_vec(),
+        root_dir: bytes(root_ptr, root_len).to_vec(),
+        name: bytes(name_ptr, name_len).to_vec(),
+        display_name: bytes(disp_ptr, disp_len).to_vec(),
+        about: bytes(about_ptr, about_len).to_vec(),
+        author: bytes(author_ptr, author_len).to_vec(),
+        homepage: bytes(home_ptr, home_len).to_vec(),
+        license: bytes(lic_ptr, lic_len).to_vec(),
+        version: bytes(ver_ptr, ver_len).to_vec(),
+        nzbget_min_version: bytes(min_ver_ptr, min_ver_len).to_vec(),
+        post_script: post_script != 0,
+        scan_script: scan_script != 0,
+        queue_script: queue_script != 0,
+        scheduler_script: sched_script != 0,
+        feed_script: feed_script != 0,
+        queue_events: bytes(qevents_ptr, qevents_len).to_vec(),
+        task_time: bytes(task_time_ptr, task_time_len).to_vec(),
+        description,
+        requirements,
+        options,
+        commands,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_extension_to_json(
+    entry_ptr: *const c_char,
+    entry_len: usize,
+    loc_ptr: *const c_char,
+    loc_len: usize,
+    root_ptr: *const c_char,
+    root_len: usize,
+    name_ptr: *const c_char,
+    name_len: usize,
+    disp_ptr: *const c_char,
+    disp_len: usize,
+    about_ptr: *const c_char,
+    about_len: usize,
+    author_ptr: *const c_char,
+    author_len: usize,
+    home_ptr: *const c_char,
+    home_len: usize,
+    lic_ptr: *const c_char,
+    lic_len: usize,
+    ver_ptr: *const c_char,
+    ver_len: usize,
+    min_ver_ptr: *const c_char,
+    min_ver_len: usize,
+    post_script: c_int,
+    scan_script: c_int,
+    queue_script: c_int,
+    sched_script: c_int,
+    feed_script: c_int,
+    qevents_ptr: *const c_char,
+    qevents_len: usize,
+    task_time_ptr: *const c_char,
+    task_time_len: usize,
+    desc_ptrs: *const *const c_char,
+    desc_lens: *const usize,
+    desc_count: usize,
+    req_ptrs: *const *const c_char,
+    req_lens: *const usize,
+    req_count: usize,
+    opt_count: usize,
+    cmd_count: usize,
+    ctx: *mut std::ffi::c_void,
+    get_opt_cb: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            usize,
+            *mut *const c_char,
+            *mut usize,
+            *mut *const c_char,
+            *mut usize,
+            *mut *const c_char,
+            *mut usize,
+            *mut c_int,
+            *mut *const c_char,
+            *mut usize,
+            *mut c_int,
+            *mut *const c_char,
+            *mut usize,
+            *mut f64,
+            *mut usize,
+            *mut usize,
+        ),
+    >,
+    get_opt_desc_cb: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            usize,
+            usize,
+            *mut *const c_char,
+            *mut usize,
+        ),
+    >,
+    get_opt_sel_cb: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            usize,
+            usize,
+            *mut c_int,
+            *mut *const c_char,
+            *mut usize,
+            *mut f64,
+        ),
+    >,
+    get_cmd_cb: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            usize,
+            *mut *const c_char,
+            *mut usize,
+            *mut *const c_char,
+            *mut usize,
+            *mut *const c_char,
+            *mut usize,
+            *mut *const c_char,
+            *mut usize,
+            *mut c_int,
+            *mut *const c_char,
+            *mut usize,
+            *mut usize,
+        ),
+    >,
+    get_cmd_desc_cb: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            usize,
+            usize,
+            *mut *const c_char,
+            *mut usize,
+        ),
+    >,
+) -> RsBuf {
+    let view = build_extension_script_view_from_ffi(
+        entry_ptr,
+        entry_len,
+        loc_ptr,
+        loc_len,
+        root_ptr,
+        root_len,
+        name_ptr,
+        name_len,
+        disp_ptr,
+        disp_len,
+        about_ptr,
+        about_len,
+        author_ptr,
+        author_len,
+        home_ptr,
+        home_len,
+        lic_ptr,
+        lic_len,
+        ver_ptr,
+        ver_len,
+        min_ver_ptr,
+        min_ver_len,
+        post_script,
+        scan_script,
+        queue_script,
+        sched_script,
+        feed_script,
+        qevents_ptr,
+        qevents_len,
+        task_time_ptr,
+        task_time_len,
+        desc_ptrs,
+        desc_lens,
+        desc_count,
+        req_ptrs,
+        req_lens,
+        req_count,
+        opt_count,
+        cmd_count,
+        ctx,
+        get_opt_cb,
+        get_opt_desc_cb,
+        get_opt_sel_cb,
+        get_cmd_cb,
+        get_cmd_desc_cb,
+    );
+    into_buf(crate::extension::extension_to_json(&view))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_extension_to_xml(
+    entry_ptr: *const c_char,
+    entry_len: usize,
+    loc_ptr: *const c_char,
+    loc_len: usize,
+    root_ptr: *const c_char,
+    root_len: usize,
+    name_ptr: *const c_char,
+    name_len: usize,
+    disp_ptr: *const c_char,
+    disp_len: usize,
+    about_ptr: *const c_char,
+    about_len: usize,
+    author_ptr: *const c_char,
+    author_len: usize,
+    home_ptr: *const c_char,
+    home_len: usize,
+    lic_ptr: *const c_char,
+    lic_len: usize,
+    ver_ptr: *const c_char,
+    ver_len: usize,
+    min_ver_ptr: *const c_char,
+    min_ver_len: usize,
+    post_script: c_int,
+    scan_script: c_int,
+    queue_script: c_int,
+    sched_script: c_int,
+    feed_script: c_int,
+    qevents_ptr: *const c_char,
+    qevents_len: usize,
+    task_time_ptr: *const c_char,
+    task_time_len: usize,
+    desc_ptrs: *const *const c_char,
+    desc_lens: *const usize,
+    desc_count: usize,
+    req_ptrs: *const *const c_char,
+    req_lens: *const usize,
+    req_count: usize,
+    opt_count: usize,
+    cmd_count: usize,
+    ctx: *mut std::ffi::c_void,
+    get_opt_cb: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            usize,
+            *mut *const c_char,
+            *mut usize,
+            *mut *const c_char,
+            *mut usize,
+            *mut *const c_char,
+            *mut usize,
+            *mut c_int,
+            *mut *const c_char,
+            *mut usize,
+            *mut c_int,
+            *mut *const c_char,
+            *mut usize,
+            *mut f64,
+            *mut usize,
+            *mut usize,
+        ),
+    >,
+    get_opt_desc_cb: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            usize,
+            usize,
+            *mut *const c_char,
+            *mut usize,
+        ),
+    >,
+    get_opt_sel_cb: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            usize,
+            usize,
+            *mut c_int,
+            *mut *const c_char,
+            *mut usize,
+            *mut f64,
+        ),
+    >,
+    get_cmd_cb: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            usize,
+            *mut *const c_char,
+            *mut usize,
+            *mut *const c_char,
+            *mut usize,
+            *mut *const c_char,
+            *mut usize,
+            *mut *const c_char,
+            *mut usize,
+            *mut c_int,
+            *mut *const c_char,
+            *mut usize,
+            *mut usize,
+        ),
+    >,
+    get_cmd_desc_cb: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            usize,
+            usize,
+            *mut *const c_char,
+            *mut usize,
+        ),
+    >,
+) -> RsBuf {
+    let view = build_extension_script_view_from_ffi(
+        entry_ptr,
+        entry_len,
+        loc_ptr,
+        loc_len,
+        root_ptr,
+        root_len,
+        name_ptr,
+        name_len,
+        disp_ptr,
+        disp_len,
+        about_ptr,
+        about_len,
+        author_ptr,
+        author_len,
+        home_ptr,
+        home_len,
+        lic_ptr,
+        lic_len,
+        ver_ptr,
+        ver_len,
+        min_ver_ptr,
+        min_ver_len,
+        post_script,
+        scan_script,
+        queue_script,
+        sched_script,
+        feed_script,
+        qevents_ptr,
+        qevents_len,
+        task_time_ptr,
+        task_time_len,
+        desc_ptrs,
+        desc_lens,
+        desc_count,
+        req_ptrs,
+        req_lens,
+        req_count,
+        opt_count,
+        cmd_count,
+        ctx,
+        get_opt_cb,
+        get_opt_desc_cb,
+        get_opt_sel_cb,
+        get_cmd_cb,
+        get_cmd_desc_cb,
+    );
+    into_buf(crate::extension::extension_to_xml(&view))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ext_mgr_get_extension_name(
+    filename_ptr: *const c_char,
+    filename_len: usize,
+) -> RsBuf {
+    into_buf(crate::extension::ext_mgr_get_extension_name(bytes(
+        filename_ptr,
+        filename_len,
+    )))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_ext_mgr_resolve_extension_path(
+    ext_loc_ptr: *const c_char,
+    ext_loc_len: usize,
+    ext_entry_ptr: *const c_char,
+    ext_entry_len: usize,
+    all_locs_ptrs: *const *const c_char,
+    all_locs_lens: *const usize,
+    all_locs_count: usize,
+) -> RsBuf {
+    let mut locs = Vec::with_capacity(all_locs_count);
+    for i in 0..all_locs_count {
+        if !all_locs_ptrs.is_null() && !all_locs_lens.is_null() {
+            locs.push(bytes(*all_locs_ptrs.add(i), *all_locs_lens.add(i)));
+        }
+    }
+    let resolved = crate::extension::ext_mgr_resolve_extension_path(
+        bytes(ext_loc_ptr, ext_loc_len),
+        bytes(ext_entry_ptr, ext_entry_len),
+        &locs,
+    );
+    into_buf(resolved.to_vec())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_cpu_detect_info(
+    raw_uts_machine: *const c_char,
+    raw_uts_machine_len: usize,
+    out_model: *mut RsBuf,
+    out_arch: *mut RsBuf,
+) {
+    let (model, arch) =
+        crate::systemhealth::cpu_detect_info(bytes(raw_uts_machine, raw_uts_machine_len));
+    if !out_model.is_null() {
+        *out_model = into_buf(model);
+    }
+    if !out_arch.is_null() {
+        *out_arch = into_buf(arch);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_os_detect_info(
+    fallback_sysname: *const c_char,
+    fallback_sysname_len: usize,
+    fallback_release: *const c_char,
+    fallback_release_len: usize,
+    out_name: *mut RsBuf,
+    out_version: *mut RsBuf,
+) {
+    let (name, version) = crate::systemhealth::os_detect_info(
+        bytes(fallback_sysname, fallback_sysname_len),
+        bytes(fallback_release, fallback_release_len),
+    );
+    if !out_name.is_null() {
+        *out_name = into_buf(name);
+    }
+    if !out_version.is_null() {
+        *out_version = into_buf(version);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_system_info_to_json(
+    os_name_ptr: *const c_char,
+    os_name_len: usize,
+    os_ver_ptr: *const c_char,
+    os_ver_len: usize,
+    cpu_model_ptr: *const c_char,
+    cpu_model_len: usize,
+    cpu_arch_ptr: *const c_char,
+    cpu_arch_len: usize,
+    pub_ip_ptr: *const c_char,
+    pub_ip_len: usize,
+    priv_ip_ptr: *const c_char,
+    priv_ip_len: usize,
+    tool_names: *const *const c_char,
+    tool_name_lens: *const usize,
+    tool_vers: *const *const c_char,
+    tool_ver_lens: *const usize,
+    tool_paths: *const *const c_char,
+    tool_path_lens: *const usize,
+    tool_count: usize,
+    lib_names: *const *const c_char,
+    lib_name_lens: *const usize,
+    lib_vers: *const *const c_char,
+    lib_ver_lens: *const usize,
+    lib_count: usize,
+) -> RsBuf {
+    let mut tools = Vec::with_capacity(tool_count);
+    for i in 0..tool_count {
+        tools.push(crate::systemhealth::SystemToolView {
+            name: bytes(*tool_names.add(i), *tool_name_lens.add(i)),
+            version: bytes(*tool_vers.add(i), *tool_ver_lens.add(i)),
+            path: bytes(*tool_paths.add(i), *tool_path_lens.add(i)),
+        });
+    }
+    let mut libs = Vec::with_capacity(lib_count);
+    for i in 0..lib_count {
+        libs.push(crate::systemhealth::SystemLibraryView {
+            name: bytes(*lib_names.add(i), *lib_name_lens.add(i)),
+            version: bytes(*lib_vers.add(i), *lib_ver_lens.add(i)),
+        });
+    }
+    let view = crate::systemhealth::SystemInfoView {
+        os_name: bytes(os_name_ptr, os_name_len),
+        os_version: bytes(os_ver_ptr, os_ver_len),
+        cpu_model: bytes(cpu_model_ptr, cpu_model_len),
+        cpu_arch: bytes(cpu_arch_ptr, cpu_arch_len),
+        public_ip: bytes(pub_ip_ptr, pub_ip_len),
+        private_ip: bytes(priv_ip_ptr, priv_ip_len),
+        tools: &tools,
+        libraries: &libs,
+    };
+    into_buf(crate::systemhealth::system_info_to_json(&view))
+}
+
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_system_info_to_xml(
+    os_name_ptr: *const c_char,
+    os_name_len: usize,
+    os_ver_ptr: *const c_char,
+    os_ver_len: usize,
+    cpu_model_ptr: *const c_char,
+    cpu_model_len: usize,
+    cpu_arch_ptr: *const c_char,
+    cpu_arch_len: usize,
+    pub_ip_ptr: *const c_char,
+    pub_ip_len: usize,
+    priv_ip_ptr: *const c_char,
+    priv_ip_len: usize,
+    tool_names: *const *const c_char,
+    tool_name_lens: *const usize,
+    tool_vers: *const *const c_char,
+    tool_ver_lens: *const usize,
+    tool_paths: *const *const c_char,
+    tool_path_lens: *const usize,
+    tool_count: usize,
+    lib_names: *const *const c_char,
+    lib_name_lens: *const usize,
+    lib_vers: *const *const c_char,
+    lib_ver_lens: *const usize,
+    lib_count: usize,
+) -> RsBuf {
+    let mut tools = Vec::with_capacity(tool_count);
+    for i in 0..tool_count {
+        tools.push(crate::systemhealth::SystemToolView {
+            name: bytes(*tool_names.add(i), *tool_name_lens.add(i)),
+            version: bytes(*tool_vers.add(i), *tool_ver_lens.add(i)),
+            path: bytes(*tool_paths.add(i), *tool_path_lens.add(i)),
+        });
+    }
+    let mut libs = Vec::with_capacity(lib_count);
+    for i in 0..lib_count {
+        libs.push(crate::systemhealth::SystemLibraryView {
+            name: bytes(*lib_names.add(i), *lib_name_lens.add(i)),
+            version: bytes(*lib_vers.add(i), *lib_ver_lens.add(i)),
+        });
+    }
+    let view = crate::systemhealth::SystemInfoView {
+        os_name: bytes(os_name_ptr, os_name_len),
+        os_version: bytes(os_ver_ptr, os_ver_len),
+        cpu_model: bytes(cpu_model_ptr, cpu_model_len),
+        cpu_arch: bytes(cpu_arch_ptr, cpu_arch_len),
+        public_ip: bytes(pub_ip_ptr, pub_ip_len),
+        private_ip: bytes(priv_ip_ptr, priv_ip_len),
+        tools: &tools,
+        libraries: &libs,
+    };
+    into_buf(crate::systemhealth::system_info_to_xml(&view))
+}
+
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_system_info_to_display_text(
+    os_name_ptr: *const c_char,
+    os_name_len: usize,
+    os_ver_ptr: *const c_char,
+    os_ver_len: usize,
+    cpu_model_ptr: *const c_char,
+    cpu_model_len: usize,
+    cpu_arch_ptr: *const c_char,
+    cpu_arch_len: usize,
+    tool_names: *const *const c_char,
+    tool_name_lens: *const usize,
+    tool_vers: *const *const c_char,
+    tool_ver_lens: *const usize,
+    tool_paths: *const *const c_char,
+    tool_path_lens: *const usize,
+    tool_count: usize,
+    lib_names: *const *const c_char,
+    lib_name_lens: *const usize,
+    lib_vers: *const *const c_char,
+    lib_ver_lens: *const usize,
+    lib_count: usize,
+) -> RsBuf {
+    let mut tools = Vec::with_capacity(tool_count);
+    for i in 0..tool_count {
+        tools.push(crate::systemhealth::SystemToolView {
+            name: bytes(*tool_names.add(i), *tool_name_lens.add(i)),
+            version: bytes(*tool_vers.add(i), *tool_ver_lens.add(i)),
+            path: bytes(*tool_paths.add(i), *tool_path_lens.add(i)),
+        });
+    }
+    let mut libs = Vec::with_capacity(lib_count);
+    for i in 0..lib_count {
+        libs.push(crate::systemhealth::SystemLibraryView {
+            name: bytes(*lib_names.add(i), *lib_name_lens.add(i)),
+            version: bytes(*lib_vers.add(i), *lib_ver_lens.add(i)),
+        });
+    }
+    let view = crate::systemhealth::SystemInfoView {
+        os_name: bytes(os_name_ptr, os_name_len),
+        os_version: bytes(os_ver_ptr, os_ver_len),
+        cpu_model: bytes(cpu_model_ptr, cpu_model_len),
+        cpu_arch: bytes(cpu_arch_ptr, cpu_arch_len),
+        public_ip: b"",
+        private_ip: b"",
+        tools: &tools,
+        libraries: &libs,
+    };
+    into_buf(crate::systemhealth::system_info_to_display_text(&view))
+}
+
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_server_pool_select_connection(
+    start_level: c_int,
+    levels_ptr: *const i32,
+    levels_len: usize,
+    srv_ids: *const i32,
+    srv_groups: *const i32,
+    srv_norm_levels: *const i32,
+    srv_active: *const u8,
+    srv_optional: *const u8,
+    srv_blocked: *const u8,
+    srv_count: usize,
+    conn_srv_indices: *const usize,
+    conn_in_use: *const u8,
+    conn_connected: *const u8,
+    conn_count: usize,
+    has_want: c_int,
+    want_id: i32,
+    want_group: i32,
+    ign_ids: *const i32,
+    ign_groups: *const i32,
+    ign_norm_levels: *const i32,
+    ign_count: usize,
+    rand_val: c_int,
+    out_unblock_indices: *mut usize,
+    out_unblock_count: *mut usize,
+    out_conn_index: *mut usize,
+    out_chosen_level: *mut i32,
+) -> c_int {
+    let levels = if levels_ptr.is_null() || levels_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(levels_ptr, levels_len)
+    };
+    let mut servers = Vec::with_capacity(srv_count);
+    for i in 0..srv_count {
+        servers.push(crate::nntp::ServerPoolServerView {
+            id: *srv_ids.add(i),
+            group: *srv_groups.add(i),
+            norm_level: *srv_norm_levels.add(i),
+            active: *srv_active.add(i) != 0,
+            optional: *srv_optional.add(i) != 0,
+            blocked: *srv_blocked.add(i) != 0,
+        });
+    }
+    let mut conns = Vec::with_capacity(conn_count);
+    for i in 0..conn_count {
+        conns.push(crate::nntp::ServerPoolConnView {
+            server_index: *conn_srv_indices.add(i),
+            in_use: *conn_in_use.add(i) != 0,
+            connected: *conn_connected.add(i) != 0,
+        });
+    }
+    let want = if has_want != 0 {
+        Some((want_id, want_group))
+    } else {
+        None
+    };
+    let mut ignores = Vec::with_capacity(ign_count);
+    for i in 0..ign_count {
+        ignores.push((*ign_ids.add(i), *ign_groups.add(i), *ign_norm_levels.add(i)));
+    }
+    let mut unblock = Vec::new();
+    let res = crate::nntp::server_pool_select_connection(
+        start_level,
+        levels,
+        &servers,
+        &conns,
+        want,
+        &ignores,
+        rand_val,
+        &mut unblock,
+    );
+    if !out_unblock_count.is_null() {
+        *out_unblock_count = unblock.len();
+    }
+    if !out_unblock_indices.is_null() {
+        for (i, &idx) in unblock.iter().enumerate() {
+            *out_unblock_indices.add(i) = idx;
+        }
+    }
+    if let Some((conn_idx, chosen_level)) = res {
+        if !out_conn_index.is_null() {
+            *out_conn_index = conn_idx;
+        }
+        if !out_chosen_level.is_null() {
+            *out_chosen_level = chosen_level;
+        }
+        1
+    } else {
+        0
+    }
+}
+
 
 
 

@@ -2769,6 +2769,469 @@ pub fn cpu_parse_cpuinfo_line(line: &[u8]) -> Option<usize> {
     Some(colon_pos + 1)
 }
 
+fn trim_ascii_ctrl_ws(mut s: &[u8]) -> &[u8] {
+    while let Some(&b) = s.first() {
+        if b <= b' ' {
+            s = &s[1..];
+        } else {
+            break;
+        }
+    }
+    while let Some(&b) = s.last() {
+        if b <= b' ' {
+            s = &s[..s.len() - 1];
+        } else {
+            break;
+        }
+    }
+    s
+}
+
+/// Parses `/proc/cpuinfo` bytes and extracts the first non-empty CPU model name.
+pub fn cpu_parse_cpuinfo_bytes(content: &[u8]) -> Option<Vec<u8>> {
+    for line in content.split(|&b| b == b'\n') {
+        if let Some(val_off) = cpu_parse_cpuinfo_line(line) {
+            let trimmed = trim_ascii_ctrl_ws(&line[val_off..]);
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_vec());
+            }
+        }
+    }
+    None
+}
+
+/// Detects `(cpu_model, cpu_arch)` natively in Rust (`daemon/system/CPU.cpp`).
+pub fn cpu_detect_info(raw_uts_machine: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    #[cfg(target_os = "macos")]
+    extern "C" {
+        fn sysctlbyname(
+            name: *const std::ffi::c_char,
+            oldp: *mut std::ffi::c_void,
+            oldlenp: *mut usize,
+            newp: *const std::ffi::c_void,
+            newlen: usize,
+        ) -> std::ffi::c_int;
+    }
+
+    #[cfg(any(
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    extern "C" {
+        fn sysctl(
+            name: *mut std::ffi::c_int,
+            namelen: std::ffi::c_uint,
+            oldp: *mut std::ffi::c_void,
+            oldlenp: *mut usize,
+            newp: *const std::ffi::c_void,
+            newlen: usize,
+        ) -> std::ffi::c_int;
+    }
+
+    let raw_arch: Vec<u8> = if !raw_uts_machine.is_empty() {
+        raw_uts_machine.to_vec()
+    } else {
+        std::env::consts::ARCH.as_bytes().to_vec()
+    };
+    let arch = if let Some(canon) = cpu_canonical_arch(&raw_arch) {
+        canon.to_bytes().to_vec()
+    } else {
+        raw_arch
+    };
+
+    #[allow(unused_mut)]
+    let mut model = Vec::new();
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(bytes) = std::fs::read("/proc/cpuinfo") {
+            if let Some(m) = cpu_parse_cpuinfo_bytes(&bytes) {
+                model = m;
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    unsafe {
+        let mut buf = [0u8; 256];
+        let mut len = buf.len();
+        if sysctlbyname(
+            c"machdep.cpu.brand_string".as_ptr(),
+            buf.as_mut_ptr().cast::<std::ffi::c_void>(),
+            &mut len,
+            std::ptr::null(),
+            0,
+        ) == 0
+        {
+            let slice = &buf[..len.min(buf.len())];
+            let nul_pos = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
+            model = trim_ascii_ctrl_ws(&slice[..nul_pos]).to_vec();
+        }
+    }
+
+    #[cfg(any(
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    unsafe {
+        // CTL_HW = 6, HW_MODEL = 2 across BSDs
+        let mut mib: [std::ffi::c_int; 2] = [6, 2];
+        let mut buf = [0u8; 256];
+        let mut len = buf.len();
+        if sysctl(
+            mib.as_mut_ptr(),
+            2,
+            buf.as_mut_ptr().cast::<std::ffi::c_void>(),
+            &mut len,
+            std::ptr::null(),
+            0,
+        ) != -1
+        {
+            let slice = &buf[..len.min(buf.len())];
+            let nul_pos = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
+            model = trim_ascii_ctrl_ws(&slice[..nul_pos]).to_vec();
+        }
+    }
+
+    (model, arch)
+}
+
+/// Parses `/etc/os-release` bytes into `(name, version)` matching `OS::InitOSInfoFromOSRelease`.
+pub fn os_parse_os_release_bytes(content: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let mut name = Vec::new();
+    let mut version = Vec::new();
+    for raw_line in content.split(|&b| b == b'\n') {
+        if !name.is_empty() && !version.is_empty() {
+            break;
+        }
+        let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
+        let (kind, val_off) =
+            os_classify_os_release_line(line, !name.is_empty(), !version.is_empty());
+        if kind == 1 {
+            let trimmed = trim_ascii_ctrl_ws(&line[val_off..]);
+            let (qs, ql) = os_trim_quotes(trimmed);
+            name = trimmed[qs..qs + ql].to_vec();
+        } else if kind == 2 {
+            let trimmed = trim_ascii_ctrl_ws(&line[val_off..]);
+            let (qs, ql) = os_trim_quotes(trimmed);
+            version = trimmed[qs..qs + ql].to_vec();
+        } else if kind == 3 {
+            version = trim_ascii_ctrl_ws(&line[val_off..]).to_vec();
+        }
+    }
+    (name, version)
+}
+
+/// Parses `sw_vers` stdout into `(name, version)` matching `OS::Init` on macOS.
+pub fn os_parse_sw_vers_output(output: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let name = os_parse_sw_vers_field(output, b"ProductName:")
+        .map(|(s, l)| trim_ascii_ctrl_ws(&output[s..s + l]).to_vec())
+        .unwrap_or_default();
+    let version = os_parse_sw_vers_field(output, b"ProductVersion:")
+        .map(|(s, l)| trim_ascii_ctrl_ws(&output[s..s + l]).to_vec())
+        .unwrap_or_default();
+    (name, version)
+}
+
+/// Detects `(os_name, os_version)` natively in Rust (`daemon/system/OS.cpp`).
+pub fn os_detect_info(fallback_sysname: &[u8], fallback_release: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let _ = (fallback_sysname, fallback_release);
+    #[cfg(target_os = "linux")]
+    {
+        let (mut name, mut version) = std::fs::read("/etc/os-release")
+            .map(|b| os_parse_os_release_bytes(&b))
+            .unwrap_or_default();
+        if name.is_empty() {
+            if !fallback_sysname.is_empty() {
+                name = fallback_sysname.to_vec();
+            } else if let Ok(b) = std::fs::read("/proc/sys/kernel/ostype") {
+                name = trim_ascii_ctrl_ws(&b).to_vec();
+            }
+        }
+        if version.is_empty() {
+            if !fallback_release.is_empty() {
+                version = fallback_release.to_vec();
+            } else if let Ok(b) = std::fs::read("/proc/sys/kernel/osrelease") {
+                version = trim_ascii_ctrl_ws(&b).to_vec();
+            }
+        }
+        if Path::new("/.dockerenv").is_file() {
+            version.extend_from_slice(b" (Running in Docker)");
+        } else if std::env::var_os("container").is_some()
+            || Path::new("/run/systemd/container").is_file()
+            || Path::new("/run/.containerenv").is_file()
+        {
+            version.extend_from_slice(b" (Running in Container)");
+        }
+        return (name, version);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(out) = std::process::Command::new("sw_vers").output() {
+            return os_parse_sw_vers_output(&out.stdout);
+        }
+        return (Vec::new(), Vec::new());
+    }
+
+    #[cfg(any(
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    unsafe {
+        extern "C" {
+            fn sysctl(
+                name: *mut std::ffi::c_int,
+                namelen: std::ffi::c_uint,
+                oldp: *mut std::ffi::c_void,
+                oldlenp: *mut usize,
+                newp: *const std::ffi::c_void,
+                newlen: usize,
+            ) -> std::ffi::c_int;
+        }
+        let mut name = Vec::new();
+        let mut version = Vec::new();
+        // CTL_KERN = 1, KERN_OSTYPE = 1, KERN_OSRELEASE = 2 across BSDs
+        let mut mib: [std::ffi::c_int; 2] = [1, 1];
+        let mut buf = [0u8; 128];
+        let mut len = buf.len();
+        if sysctl(
+            mib.as_mut_ptr(),
+            2,
+            buf.as_mut_ptr().cast::<std::ffi::c_void>(),
+            &mut len,
+            std::ptr::null(),
+            0,
+        ) != -1
+        {
+            let slice = &buf[..len.min(buf.len())];
+            let nul_pos = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
+            name = trim_ascii_ctrl_ws(&slice[..nul_pos]).to_vec();
+        }
+        len = buf.len();
+        mib[1] = 2;
+        if sysctl(
+            mib.as_mut_ptr(),
+            2,
+            buf.as_mut_ptr().cast::<std::ffi::c_void>(),
+            &mut len,
+            std::ptr::null(),
+            0,
+        ) != -1
+        {
+            let slice = &buf[..len.min(buf.len())];
+            let nul_pos = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
+            version = trim_ascii_ctrl_ws(&slice[..nul_pos]).to_vec();
+        }
+        return (name, version);
+    }
+
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    )))]
+    {
+        (fallback_sysname.to_vec(), fallback_release.to_vec())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemToolView<'a> {
+    pub name: &'a [u8],
+    pub version: &'a [u8],
+    pub path: &'a [u8],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemLibraryView<'a> {
+    pub name: &'a [u8],
+    pub version: &'a [u8],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemInfoView<'a> {
+    pub os_name: &'a [u8],
+    pub os_version: &'a [u8],
+    pub cpu_model: &'a [u8],
+    pub cpu_arch: &'a [u8],
+    pub public_ip: &'a [u8],
+    pub private_ip: &'a [u8],
+    pub tools: &'a [SystemToolView<'a>],
+    pub libraries: &'a [SystemLibraryView<'a>],
+}
+
+fn write_boost_json_str(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.push(b'"');
+    for &b in bytes {
+        match b {
+            b'"' => out.extend_from_slice(b"\\\""),
+            b'\\' => out.extend_from_slice(b"\\\\"),
+            b'\x08' => out.extend_from_slice(b"\\b"),
+            b'\x0C' => out.extend_from_slice(b"\\f"),
+            b'\n' => out.extend_from_slice(b"\\n"),
+            b'\r' => out.extend_from_slice(b"\\r"),
+            b'\t' => out.extend_from_slice(b"\\t"),
+            0x00..=0x1F => {
+                let hex = format!("\\u{b:04x}");
+                out.extend_from_slice(hex.as_bytes());
+            }
+            _ => out.push(b),
+        }
+    }
+    out.push(b'"');
+}
+
+fn write_libxml2_member(out: &mut Vec<u8>, name: &[u8], tag: &[u8], value: &[u8]) {
+    out.extend_from_slice(b"<member><name>");
+    write_libxml2_escaped(out, name);
+    out.extend_from_slice(b"</name><value>");
+    if value.is_empty() {
+        out.push(b'<');
+        out.extend_from_slice(tag);
+        out.extend_from_slice(b"/>");
+    } else {
+        out.push(b'<');
+        out.extend_from_slice(tag);
+        out.push(b'>');
+        write_libxml2_escaped(out, value);
+        out.extend_from_slice(b"</");
+        out.extend_from_slice(tag);
+        out.push(b'>');
+    }
+    out.extend_from_slice(b"</value></member>");
+}
+
+fn write_libxml2_escaped(out: &mut Vec<u8>, bytes: &[u8]) {
+    for &b in bytes {
+        match b {
+            b'&' => out.extend_from_slice(b"&amp;"),
+            b'<' => out.extend_from_slice(b"&lt;"),
+            b'>' => out.extend_from_slice(b"&gt;"),
+            b'\r' => out.extend_from_slice(b"&#13;"),
+            _ => out.push(b),
+        }
+    }
+}
+
+/// Formats `System::SystemInfo` as JSON matching `System::ToJsonStr` (`daemon/system/SystemInfo.cpp`).
+pub fn system_info_to_json(view: &SystemInfoView<'_>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(512);
+    out.extend_from_slice(b"{\"OS\":{\"Name\":");
+    write_boost_json_str(&mut out, view.os_name);
+    out.extend_from_slice(b",\"Version\":");
+    write_boost_json_str(&mut out, view.os_version);
+    out.extend_from_slice(b"},\"CPU\":{\"Model\":");
+    write_boost_json_str(&mut out, view.cpu_model);
+    out.extend_from_slice(b",\"Arch\":");
+    write_boost_json_str(&mut out, view.cpu_arch);
+    out.extend_from_slice(b"},\"Network\":{\"PublicIP\":");
+    write_boost_json_str(&mut out, view.public_ip);
+    out.extend_from_slice(b",\"PrivateIP\":");
+    write_boost_json_str(&mut out, view.private_ip);
+    out.extend_from_slice(b"},\"Tools\":[");
+    for (i, tool) in view.tools.iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        out.extend_from_slice(b"{\"Name\":");
+        write_boost_json_str(&mut out, tool.name);
+        out.extend_from_slice(b",\"Version\":");
+        write_boost_json_str(&mut out, tool.version);
+        out.extend_from_slice(b",\"Path\":");
+        write_boost_json_str(&mut out, tool.path);
+        out.push(b'}');
+    }
+    out.extend_from_slice(b"],\"Libraries\":[");
+    for (i, lib) in view.libraries.iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        out.extend_from_slice(b"{\"Name\":");
+        write_boost_json_str(&mut out, lib.name);
+        out.extend_from_slice(b",\"Version\":");
+        write_boost_json_str(&mut out, lib.version);
+        out.push(b'}');
+    }
+    out.extend_from_slice(b"]}");
+    out
+}
+
+/// Formats `System::SystemInfo` as XML-RPC `<value><struct>...</struct></value>` matching `System::ToXmlStr`.
+pub fn system_info_to_xml(view: &SystemInfoView<'_>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1024);
+    out.extend_from_slice(b"<value><struct><OS>");
+    write_libxml2_member(&mut out, b"Name", b"string", view.os_name);
+    write_libxml2_member(&mut out, b"Version", b"string", view.os_version);
+    out.extend_from_slice(b"</OS><CPU>");
+    write_libxml2_member(&mut out, b"Model", b"string", view.cpu_model);
+    write_libxml2_member(&mut out, b"Arch", b"string", view.cpu_arch);
+    out.extend_from_slice(b"</CPU><Network>");
+    write_libxml2_member(&mut out, b"PublicIP", b"string", view.public_ip);
+    write_libxml2_member(&mut out, b"PrivateIP", b"string", view.private_ip);
+    out.extend_from_slice(b"</Network><Tools>");
+    for tool in view.tools {
+        write_libxml2_member(&mut out, b"Name", b"string", tool.name);
+        write_libxml2_member(&mut out, b"Version", b"string", tool.version);
+        write_libxml2_member(&mut out, b"Path", b"string", tool.path);
+    }
+    out.extend_from_slice(b"</Tools><Libraries>");
+    for lib in view.libraries {
+        write_libxml2_member(&mut out, b"Name", b"string", lib.name);
+        write_libxml2_member(&mut out, b"Version", b"string", lib.version);
+    }
+    out.extend_from_slice(b"</Libraries></struct></value>");
+    out
+}
+
+/// Formats `System::SystemInfo` human-readable text matching `operator<<`.
+pub fn system_info_to_display_text(view: &SystemInfoView<'_>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(256);
+    out.extend_from_slice(b"OS: ");
+    out.extend_from_slice(view.os_name);
+    out.push(b' ');
+    out.extend_from_slice(view.os_version);
+    out.push(b'\n');
+    out.extend_from_slice(b"CPU: ");
+    out.extend_from_slice(view.cpu_model);
+    out.push(b'\n');
+    out.extend_from_slice(b"Arch: ");
+    out.extend_from_slice(view.cpu_arch);
+    out.push(b'\n');
+    for tool in view.tools {
+        out.extend_from_slice(tool.name);
+        out.push(b' ');
+        out.extend_from_slice(tool.version);
+        out.push(b' ');
+        out.extend_from_slice(tool.path);
+        out.push(b'\n');
+    }
+    for lib in view.libraries {
+        out.extend_from_slice(lib.name);
+        out.push(b' ');
+        out.extend_from_slice(lib.version);
+        out.push(b'\n');
+    }
+    out
+}
+
+/// Formats a single `<struct><member>...</member></struct>` XML node matching `Xml::CreateStructNode` + `Xml::AddNewNode` + `Xml::Serialize`.
+pub fn xml_serialize_struct_member(name: &[u8], tag: &[u8], value: &[u8]) -> Vec<u8> {
+    let mut out = Vec::from(&b"<struct>"[..]);
+    write_libxml2_member(&mut out, name, tag, value);
+    out.extend_from_slice(b"</struct>");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3214,6 +3677,151 @@ mod tests {
             validate_extension_list(b"Missing.py", &loaded).severity,
             Severity::Warning
         );
+    }
+
+    #[test]
+    fn system_info_full_suite_port_from_cpp() {
+        let (os_name, os_ver) = os_detect_info(b"", b"");
+        let (cpu_model, cpu_arch) = cpu_detect_info(b"");
+
+        assert!(!os_name.is_empty());
+        assert!(!os_ver.is_empty());
+        assert!(!cpu_arch.is_empty());
+
+        let tools = [
+            SystemToolView {
+                name: b"Python",
+                version: b"3.12.3",
+                path: b"/usr/bin/python3",
+            },
+            SystemToolView {
+                name: b"7-Zip",
+                version: b"",
+                path: b"",
+            },
+            SystemToolView {
+                name: b"UnRAR",
+                version: b"7.01",
+                path: b"/usr/local/bin/unrar",
+            },
+        ];
+        let libs = [
+            SystemLibraryView {
+                name: b"LibXML2",
+                version: b"2.9.13",
+            },
+            SystemLibraryView {
+                name: b"OpenSSL",
+                version: b"3.3.1",
+            },
+        ];
+
+        let view = SystemInfoView {
+            os_name: &os_name,
+            os_version: &os_ver,
+            cpu_model: &cpu_model,
+            cpu_arch: &cpu_arch,
+            public_ip: b"1.2.3.4",
+            private_ip: b"192.168.1.5",
+            tools: &tools,
+            libraries: &libs,
+        };
+
+        let json_res = system_info_to_json(&view);
+        let xml_res = system_info_to_xml(&view);
+
+        let expected_json = format!(
+            concat!(
+                "{{\"OS\":{{\"Name\":\"{}\",\"Version\":\"{}\"}},",
+                "\"CPU\":{{\"Model\":\"{}\",\"Arch\":\"{}\"}},",
+                "\"Network\":{{\"PublicIP\":\"1.2.3.4\",\"PrivateIP\":\"192.168.1.5\"}},",
+                "\"Tools\":[",
+                "{{\"Name\":\"Python\",\"Version\":\"3.12.3\",\"Path\":\"/usr/bin/python3\"}},",
+                "{{\"Name\":\"7-Zip\",\"Version\":\"\",\"Path\":\"\"}},",
+                "{{\"Name\":\"UnRAR\",\"Version\":\"7.01\",\"Path\":\"/usr/local/bin/unrar\"}}",
+                "],",
+                "\"Libraries\":[",
+                "{{\"Name\":\"LibXML2\",\"Version\":\"2.9.13\"}},",
+                "{{\"Name\":\"OpenSSL\",\"Version\":\"3.3.1\"}}",
+                "]}}"
+            ),
+            String::from_utf8_lossy(&os_name),
+            String::from_utf8_lossy(&os_ver),
+            String::from_utf8_lossy(&cpu_model),
+            String::from_utf8_lossy(&cpu_arch),
+        );
+        assert_eq!(json_res, expected_json.as_bytes());
+
+        let expected_xml = format!(
+            concat!(
+                "<value><struct>",
+                "<OS>",
+                "<member><name>Name</name><value><string>{}</string></value></member>",
+                "<member><name>Version</name><value><string>{}</string></value></member>",
+                "</OS>",
+                "<CPU>",
+                "<member><name>Model</name><value>{}</value></member>",
+                "<member><name>Arch</name><value><string>{}</string></value></member>",
+                "</CPU>",
+                "<Network>",
+                "<member><name>PublicIP</name><value><string>1.2.3.4</string></value></member>",
+                "<member><name>PrivateIP</name><value><string>192.168.1.5</string></value></member>",
+                "</Network>",
+                "<Tools>",
+                "<member><name>Name</name><value><string>Python</string></value></member>",
+                "<member><name>Version</name><value><string>3.12.3</string></value></member>",
+                "<member><name>Path</name><value><string>/usr/bin/python3</string></value></member>",
+                "<member><name>Name</name><value><string>7-Zip</string></value></member>",
+                "<member><name>Version</name><value><string/></value></member>",
+                "<member><name>Path</name><value><string/></value></member>",
+                "<member><name>Name</name><value><string>UnRAR</string></value></member>",
+                "<member><name>Version</name><value><string>7.01</string></value></member>",
+                "<member><name>Path</name><value><string>/usr/local/bin/unrar</string></value></member>",
+                "</Tools>",
+                "<Libraries>",
+                "<member><name>Name</name><value><string>LibXML2</string></value></member>",
+                "<member><name>Version</name><value><string>2.9.13</string></value></member>",
+                "<member><name>Name</name><value><string>OpenSSL</string></value></member>",
+                "<member><name>Version</name><value><string>3.3.1</string></value></member>",
+                "</Libraries>",
+                "</struct></value>"
+            ),
+            String::from_utf8_lossy(&os_name),
+            String::from_utf8_lossy(&os_ver),
+            if cpu_model.is_empty() {
+                "<string/>".to_string()
+            } else {
+                format!("<string>{}</string>", String::from_utf8_lossy(&cpu_model))
+            },
+            String::from_utf8_lossy(&cpu_arch),
+        );
+        assert_eq!(xml_res, expected_xml.as_bytes());
+
+        // XmlValueWithAmpersandTest and non-ASCII UTF-8 preservation
+        let xml_amp = xml_serialize_struct_member(b"Path", b"string", "/opt/R&D/café/unrar".as_bytes());
+        assert_eq!(
+            std::str::from_utf8(&xml_amp).unwrap(),
+            "<struct><member><name>Path</name><value><string>/opt/R&amp;D/café/unrar</string></value></member></struct>"
+        );
+        let utf8_tools = [SystemToolView {
+            name: b"Python",
+            version: b"3.12",
+            path: "/opt/café/python3".as_bytes(),
+        }];
+        let utf8_view = SystemInfoView {
+            os_name: b"Linux",
+            os_version: b"6.8",
+            cpu_model: b"ARM",
+            cpu_arch: b"aarch64",
+            public_ip: b"",
+            private_ip: b"",
+            tools: &utf8_tools,
+            libraries: &[],
+        };
+        let utf8_json = system_info_to_json(&utf8_view);
+        assert!(std::str::from_utf8(&utf8_json).unwrap().contains("\"/opt/café/python3\""));
+        let utf8_xml = system_info_to_xml(&utf8_view);
+        assert!(std::str::from_utf8(&utf8_xml).unwrap().contains("<string>/opt/café/python3</string>"));
     }
 }
 

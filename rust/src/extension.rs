@@ -1480,6 +1480,788 @@ pub fn script_ctrl_can_send_break(pid: i32, completed: bool) -> bool {
     pid > 0 && !completed
 }
 
+// ============================================================================
+// 11. Extension Serialization & ExtensionManager (`Extension.cpp`, `ExtensionManager.cpp`)
+// ============================================================================
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExtensionSelectVal {
+    Str(Vec<u8>),
+    Num(f64),
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ExtensionSectionView {
+    pub multi: bool,
+    pub name: Vec<u8>,
+    pub prefix: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtensionOptionView {
+    pub section: ExtensionSectionView,
+    pub name: Vec<u8>,
+    pub display_name: Vec<u8>,
+    pub description: Vec<Vec<u8>>,
+    pub value: ExtensionSelectVal,
+    pub select: Vec<ExtensionSelectVal>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ExtensionCommandView {
+    pub section: ExtensionSectionView,
+    pub name: Vec<u8>,
+    pub display_name: Vec<u8>,
+    pub action: Vec<u8>,
+    pub description: Vec<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ExtensionScriptView {
+    pub entry: Vec<u8>,
+    pub location: Vec<u8>,
+    pub root_dir: Vec<u8>,
+    pub name: Vec<u8>,
+    pub display_name: Vec<u8>,
+    pub about: Vec<u8>,
+    pub author: Vec<u8>,
+    pub homepage: Vec<u8>,
+    pub license: Vec<u8>,
+    pub version: Vec<u8>,
+    pub nzbget_min_version: Vec<u8>,
+    pub post_script: bool,
+    pub scan_script: bool,
+    pub queue_script: bool,
+    pub scheduler_script: bool,
+    pub feed_script: bool,
+    pub queue_events: Vec<u8>,
+    pub task_time: Vec<u8>,
+    pub description: Vec<Vec<u8>>,
+    pub requirements: Vec<Vec<u8>>,
+    pub options: Vec<ExtensionOptionView>,
+    pub commands: Vec<ExtensionCommandView>,
+}
+
+pub fn json_append_escaped_str(out: &mut Vec<u8>, bytes: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    out.push(b'"');
+    for &b in bytes {
+        match b {
+            b'"' => out.extend_from_slice(b"\\\""),
+            b'\\' => out.extend_from_slice(b"\\\\"),
+            0x08 => out.extend_from_slice(b"\\b"),
+            0x09 => out.extend_from_slice(b"\\t"),
+            0x0A => out.extend_from_slice(b"\\n"),
+            0x0C => out.extend_from_slice(b"\\f"),
+            0x0D => out.extend_from_slice(b"\\r"),
+            0x00..=0x1F => {
+                out.extend_from_slice(b"\\u00");
+                out.push(HEX[(b >> 4) as usize]);
+                out.push(HEX[(b & 0x0F) as usize]);
+            }
+            _ => out.push(b),
+        }
+    }
+    out.push(b'"');
+}
+
+pub fn json_append_f64(out: &mut Vec<u8>, val: f64) {
+    if !val.is_finite() {
+        out.extend_from_slice(b"null");
+        return;
+    }
+    if val == 0.0 {
+        if val.is_sign_negative() {
+            out.extend_from_slice(b"-0E0");
+        } else {
+            out.extend_from_slice(b"0E0");
+        }
+        return;
+    }
+    let formatted = format!("{val:E}");
+    out.extend_from_slice(formatted.as_bytes());
+}
+
+fn json_append_select_val(out: &mut Vec<u8>, val: &ExtensionSelectVal) {
+    match val {
+        ExtensionSelectVal::Str(s) => json_append_escaped_str(out, s),
+        ExtensionSelectVal::Num(n) => json_append_f64(out, *n),
+    }
+}
+
+fn json_append_str_array(out: &mut Vec<u8>, items: &[Vec<u8>]) {
+    out.push(b'[');
+    for (idx, item) in items.iter().enumerate() {
+        if idx > 0 {
+            out.push(b',');
+        }
+        json_append_escaped_str(out, item);
+    }
+    out.push(b']');
+}
+
+/// End-to-end implementation of `Extension::ToJsonStr` (`daemon/extension/Extension.cpp`).
+pub fn extension_to_json(script: &ExtensionScriptView) -> Vec<u8> {
+    let mut out = Vec::with_capacity(512);
+    out.push(b'{');
+
+    let str_fields: &[(&[u8], &[u8])] = &[
+        (b"Entry", &script.entry),
+        (b"Location", &script.location),
+        (b"RootDir", &script.root_dir),
+        (b"Name", &script.name),
+        (b"DisplayName", &script.display_name),
+        (b"About", &script.about),
+        (b"Author", &script.author),
+        (b"Homepage", &script.homepage),
+        (b"License", &script.license),
+        (b"Version", &script.version),
+        (b"NZBGetMinVersion", &script.nzbget_min_version),
+    ];
+    for (idx, &(k, v)) in str_fields.iter().enumerate() {
+        if idx > 0 {
+            out.push(b',');
+        }
+        json_append_escaped_str(&mut out, k);
+        out.push(b':');
+        json_append_escaped_str(&mut out, v);
+    }
+
+    let bool_fields: &[(&[u8], bool)] = &[
+        (b"PostScript", script.post_script),
+        (b"ScanScript", script.scan_script),
+        (b"QueueScript", script.queue_script),
+        (b"SchedulerScript", script.scheduler_script),
+        (b"FeedScript", script.feed_script),
+    ];
+    for &(k, v) in bool_fields {
+        out.push(b',');
+        json_append_escaped_str(&mut out, k);
+        out.extend_from_slice(if v { b":true" } else { b":false" });
+    }
+
+    out.extend_from_slice(b",\"QueueEvents\":");
+    json_append_escaped_str(&mut out, &script.queue_events);
+    out.extend_from_slice(b",\"TaskTime\":");
+    json_append_escaped_str(&mut out, &script.task_time);
+
+    out.extend_from_slice(b",\"Description\":");
+    json_append_str_array(&mut out, &script.description);
+    out.extend_from_slice(b",\"Requirements\":");
+    json_append_str_array(&mut out, &script.requirements);
+
+    out.extend_from_slice(b",\"Options\":[");
+    for (idx, opt) in script.options.iter().enumerate() {
+        if idx > 0 {
+            out.push(b',');
+        }
+        out.extend_from_slice(b"{\"Name\":");
+        json_append_escaped_str(&mut out, &opt.name);
+        out.extend_from_slice(b",\"DisplayName\":");
+        json_append_escaped_str(&mut out, &opt.display_name);
+        out.extend_from_slice(b",\"Section\":");
+        json_append_escaped_str(&mut out, &opt.section.name);
+        out.extend_from_slice(if opt.section.multi {
+            b",\"Multi\":true,\"Prefix\":"
+        } else {
+            b",\"Multi\":false,\"Prefix\":"
+        });
+        json_append_escaped_str(&mut out, &opt.section.prefix);
+        out.extend_from_slice(b",\"Value\":");
+        json_append_select_val(&mut out, &opt.value);
+        out.extend_from_slice(b",\"Description\":");
+        json_append_str_array(&mut out, &opt.description);
+        out.extend_from_slice(b",\"Select\":[");
+        for (s_idx, sel) in opt.select.iter().enumerate() {
+            if s_idx > 0 {
+                out.push(b',');
+            }
+            json_append_select_val(&mut out, sel);
+        }
+        out.extend_from_slice(b"]}");
+    }
+    out.push(b']');
+
+    out.extend_from_slice(b",\"Commands\":[");
+    for (idx, cmd) in script.commands.iter().enumerate() {
+        if idx > 0 {
+            out.push(b',');
+        }
+        out.extend_from_slice(b"{\"Name\":");
+        json_append_escaped_str(&mut out, &cmd.name);
+        out.extend_from_slice(b",\"DisplayName\":");
+        json_append_escaped_str(&mut out, &cmd.display_name);
+        out.extend_from_slice(b",\"Action\":");
+        json_append_escaped_str(&mut out, &cmd.action);
+        out.extend_from_slice(b",\"Section\":");
+        json_append_escaped_str(&mut out, &cmd.section.name);
+        out.extend_from_slice(if cmd.section.multi {
+            b",\"Multi\":true,\"Prefix\":"
+        } else {
+            b",\"Multi\":false,\"Prefix\":"
+        });
+        json_append_escaped_str(&mut out, &cmd.section.prefix);
+        out.extend_from_slice(b",\"Description\":");
+        json_append_str_array(&mut out, &cmd.description);
+        out.push(b'}');
+    }
+    out.extend_from_slice(b"]}");
+
+    out
+}
+
+pub fn xml_escape_text(out: &mut Vec<u8>, bytes: &[u8]) {
+    for &b in bytes {
+        match b {
+            b'&' => out.extend_from_slice(b"&amp;"),
+            b'<' => out.extend_from_slice(b"&lt;"),
+            b'>' => out.extend_from_slice(b"&gt;"),
+            b'\r' => out.extend_from_slice(b"&#13;"),
+            _ => out.push(b),
+        }
+    }
+}
+
+pub fn xml_append_member_node(out: &mut Vec<u8>, name: &[u8], val_type: &[u8], value: &[u8]) {
+    out.extend_from_slice(b"<member>");
+    if name.is_empty() {
+        out.extend_from_slice(b"<name/>");
+    } else {
+        out.extend_from_slice(b"<name>");
+        xml_escape_text(out, name);
+        out.extend_from_slice(b"</name>");
+    }
+    out.extend_from_slice(b"<value>");
+    if value.is_empty() {
+        out.push(b'<');
+        out.extend_from_slice(val_type);
+        out.extend_from_slice(b"/>");
+    } else {
+        out.push(b'<');
+        out.extend_from_slice(val_type);
+        out.push(b'>');
+        xml_escape_text(out, value);
+        out.extend_from_slice(b"</");
+        out.extend_from_slice(val_type);
+        out.push(b'>');
+    }
+    out.extend_from_slice(b"</value></member>");
+}
+
+fn xml_append_string_list_node(out: &mut Vec<u8>, tag: &[u8], items: &[Vec<u8>]) {
+    if items.is_empty() {
+        out.push(b'<');
+        out.extend_from_slice(tag);
+        out.extend_from_slice(b"/>");
+        return;
+    }
+    out.push(b'<');
+    out.extend_from_slice(tag);
+    out.push(b'>');
+    for line in items {
+        xml_append_member_node(out, b"Value", b"string", line);
+    }
+    out.extend_from_slice(b"</");
+    out.extend_from_slice(tag);
+    out.push(b'>');
+}
+
+fn xml_append_select_member(out: &mut Vec<u8>, val: &ExtensionSelectVal) {
+    match val {
+        ExtensionSelectVal::Str(s) => xml_append_member_node(out, b"Value", b"string", s),
+        ExtensionSelectVal::Num(n) => {
+            let val_str = format!("{n:.6}");
+            xml_append_member_node(out, b"Value", b"double", val_str.as_bytes());
+        }
+    }
+}
+
+/// End-to-end implementation of `Extension::ToXmlStr` (`daemon/extension/Extension.cpp`).
+pub fn extension_to_xml(script: &ExtensionScriptView) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1024);
+    out.extend_from_slice(b"<value><struct>");
+
+    let str_fields: &[(&[u8], &[u8])] = &[
+        (b"Entry", &script.entry),
+        (b"Location", &script.location),
+        (b"RootDir", &script.root_dir),
+        (b"Name", &script.name),
+        (b"DisplayName", &script.display_name),
+        (b"About", &script.about),
+        (b"Author", &script.author),
+        (b"Homepage", &script.homepage),
+        (b"License", &script.license),
+        (b"Version", &script.version),
+        (b"NZBGetMinVersion", &script.nzbget_min_version),
+    ];
+    for &(k, v) in str_fields {
+        xml_append_member_node(&mut out, k, b"string", v);
+    }
+
+    let bool_fields: &[(&[u8], bool)] = &[
+        (b"PostScript", script.post_script),
+        (b"ScanScript", script.scan_script),
+        (b"QueueScript", script.queue_script),
+        (b"SchedulerScript", script.scheduler_script),
+        (b"FeedScript", script.feed_script),
+    ];
+    for &(k, v) in bool_fields {
+        xml_append_member_node(&mut out, k, b"boolean", if v { b"1" } else { b"0" });
+    }
+
+    xml_append_member_node(&mut out, b"QueueEvents", b"string", &script.queue_events);
+    xml_append_member_node(&mut out, b"TaskTime", b"string", &script.task_time);
+
+    xml_append_string_list_node(&mut out, b"Description", &script.description);
+    xml_append_string_list_node(&mut out, b"Requirements", &script.requirements);
+
+    if script.commands.is_empty() {
+        out.extend_from_slice(b"<Commands/>");
+    } else {
+        out.extend_from_slice(b"<Commands>");
+        for cmd in &script.commands {
+            xml_append_member_node(&mut out, b"Name", b"string", &cmd.name);
+            xml_append_member_node(&mut out, b"DisplayName", b"string", &cmd.display_name);
+            xml_append_member_node(&mut out, b"Action", b"string", &cmd.action);
+            xml_append_member_node(
+                &mut out,
+                b"Multi",
+                b"boolean",
+                if cmd.section.multi { b"1" } else { b"0" },
+            );
+            xml_append_member_node(&mut out, b"Section", b"string", &cmd.section.name);
+            xml_append_member_node(&mut out, b"Prefix", b"string", &cmd.section.prefix);
+            xml_append_string_list_node(&mut out, b"Description", &cmd.description);
+        }
+        out.extend_from_slice(b"</Commands>");
+    }
+
+    if script.options.is_empty() {
+        out.extend_from_slice(b"<Options/>");
+    } else {
+        out.extend_from_slice(b"<Options>");
+        for opt in &script.options {
+            xml_append_member_node(&mut out, b"Name", b"string", &opt.name);
+            xml_append_member_node(&mut out, b"DisplayName", b"string", &opt.display_name);
+            xml_append_member_node(
+                &mut out,
+                b"Multi",
+                b"boolean",
+                if opt.section.multi { b"1" } else { b"0" },
+            );
+            xml_append_member_node(&mut out, b"Section", b"string", &opt.section.name);
+            xml_append_member_node(&mut out, b"Prefix", b"string", &opt.section.prefix);
+            xml_append_select_member(&mut out, &opt.value);
+            xml_append_string_list_node(&mut out, b"Description", &opt.description);
+            if opt.select.is_empty() {
+                out.extend_from_slice(b"<Select/>");
+            } else {
+                out.extend_from_slice(b"<Select>");
+                for sel in &opt.select {
+                    xml_append_select_member(&mut out, sel);
+                }
+                out.extend_from_slice(b"</Select>");
+            }
+        }
+        out.extend_from_slice(b"</Options>");
+    }
+
+    out.extend_from_slice(b"</struct></value>");
+    out
+}
+
+/// Strips the last `.ext` from `file_name` (`ExtensionManager::Manager::GetExtensionName`).
+pub fn ext_mgr_get_extension_name(file_name: &[u8]) -> Vec<u8> {
+    match file_name.iter().rposition(|&b| b == b'.') {
+        Some(dot_pos) => file_name[..dot_pos].to_vec(),
+        None => file_name.to_vec(),
+    }
+}
+
+/// Resolves the target path for deleting or updating an extension (`ExtensionManager::Manager::GetExtensionPath`).
+/// When multiple loaded extensions share `location`, returns `entry`, otherwise `location`.
+pub fn ext_mgr_resolve_extension_path<'a>(
+    location: &'a [u8],
+    entry: &'a [u8],
+    all_locations: &[&[u8]],
+) -> &'a [u8] {
+    let count = all_locations.iter().filter(|&&loc| loc == location).count();
+    if count > 1 {
+        entry
+    } else {
+        location
+    }
+}
+
+fn join_path_sep(directory: &[u8], path_sep: u8, name: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(directory.len() + 1 + name.len());
+    out.extend_from_slice(directory);
+    out.push(path_sep);
+    out.extend_from_slice(name);
+    out
+}
+
+/// Loads a V2 extension from `directory` (`ExtensionLoader::V2::Load`).
+pub fn ext_loader_v2_load_from_dir(
+    directory: &[u8],
+    root_dir: &[u8],
+    path_sep: u8,
+) -> Option<ExtensionScriptView> {
+    let manifest_file_bytes = join_path_sep(directory, path_sep, b"manifest.json");
+    let path = bytes_to_path(&manifest_file_bytes);
+    let raw = std::fs::read(&path).ok()?;
+    let limits = crate::json::Limits {
+        string: usize::MAX,
+        array: usize::MAX,
+        object: usize::MAX,
+    };
+    let crate::manifest::Outcome::Loaded(m) = crate::manifest::load(&raw, limits) else {
+        return None;
+    };
+    let get_field = |idx: usize| m.fields[idx].clone().unwrap_or_default();
+    let main_file = get_field(1);
+    let entry = join_path_sep(directory, path_sep, &main_file);
+    let kind_bits = crate::extload::script_kind(&get_field(7));
+
+    let mut options: Vec<ExtensionOptionView> = m
+        .options
+        .into_iter()
+        .map(|opt| ExtensionOptionView {
+            section: ExtensionSectionView {
+                multi: opt.section.multi,
+                name: opt.section.name,
+                prefix: opt.section.prefix,
+            },
+            name: opt.name,
+            display_name: opt.display_name,
+            description: opt.description,
+            value: match opt.value {
+                crate::manifest::Select::Number(n) => ExtensionSelectVal::Num(n),
+                crate::manifest::Select::String(s) => ExtensionSelectVal::Str(s),
+            },
+            select: opt
+                .select
+                .into_iter()
+                .map(|s| match s {
+                    crate::manifest::Select::Number(n) => ExtensionSelectVal::Num(n),
+                    crate::manifest::Select::String(st) => ExtensionSelectVal::Str(st),
+                })
+                .collect(),
+        })
+        .collect();
+
+    let mut commands: Vec<ExtensionCommandView> = m
+        .commands
+        .into_iter()
+        .map(|cmd| ExtensionCommandView {
+            section: ExtensionSectionView {
+                multi: cmd.section.multi,
+                name: cmd.section.name,
+                prefix: cmd.section.prefix,
+            },
+            name: cmd.name,
+            display_name: cmd.display_name,
+            action: cmd.action,
+            description: cmd.description,
+        })
+        .collect();
+
+    for sec in m.sections {
+        let sec_view = ExtensionSectionView {
+            multi: sec.multi,
+            name: sec.name,
+            prefix: sec.prefix,
+        };
+        for opt in &mut options {
+            if opt.section.name == sec_view.name {
+                opt.section = sec_view.clone();
+            }
+        }
+        for cmd in &mut commands {
+            if cmd.section.name == sec_view.name {
+                cmd.section = sec_view.clone();
+            }
+        }
+    }
+
+    Some(ExtensionScriptView {
+        entry,
+        location: directory.to_vec(),
+        root_dir: root_dir.to_vec(),
+        author: get_field(0),
+        homepage: get_field(2),
+        about: get_field(3),
+        version: get_field(4),
+        name: get_field(5),
+        display_name: get_field(6),
+        license: get_field(8),
+        task_time: get_field(9),
+        queue_events: get_field(10),
+        nzbget_min_version: get_field(11),
+        post_script: (kind_bits & 1) != 0,
+        scan_script: (kind_bits & 2) != 0,
+        queue_script: (kind_bits & 4) != 0,
+        scheduler_script: (kind_bits & 8) != 0,
+        feed_script: (kind_bits & 16) != 0,
+        description: m.description,
+        requirements: m.requirements,
+        options,
+        commands,
+    })
+}
+
+/// Loads a V1 extension from `entry` (`ExtensionLoader::V1::Load`).
+pub fn ext_loader_v1_load_from_file(
+    entry: &[u8],
+    name: &[u8],
+    location: &[u8],
+    root_dir: &[u8],
+) -> Option<ExtensionScriptView> {
+    let path = bytes_to_path(entry);
+    let raw = std::fs::read(&path).ok()?;
+    let parsed = crate::extload::parse(&raw, &|b| b.is_ascii_whitespace())?;
+
+    let stripped = crate::unpack::unpack_ctrl_strip_last_extension(name);
+    let base_off = crate::paths::base_file_name(&stripped);
+    let display_name = stripped[base_off..].to_vec();
+
+    let mut about = parsed.about;
+    while about.last().is_some_and(|&b| b.is_ascii_whitespace()) {
+        about.pop();
+    }
+
+    let options = parsed
+        .options
+        .into_iter()
+        .map(|opt| ExtensionOptionView {
+            section: ExtensionSectionView {
+                multi: opt.section.multi,
+                name: opt.section.name,
+                prefix: opt.section.prefix,
+            },
+            display_name: opt.name.clone(),
+            name: opt.name,
+            description: opt.description,
+            value: match opt.value {
+                crate::extload::Select::Num(n) => ExtensionSelectVal::Num(n),
+                crate::extload::Select::Str(s) => ExtensionSelectVal::Str(s),
+            },
+            select: opt
+                .select
+                .into_iter()
+                .map(|s| match s {
+                    crate::extload::Select::Num(n) => ExtensionSelectVal::Num(n),
+                    crate::extload::Select::Str(st) => ExtensionSelectVal::Str(st),
+                })
+                .collect(),
+        })
+        .collect();
+
+    let commands = parsed
+        .commands
+        .into_iter()
+        .map(|cmd| ExtensionCommandView {
+            section: ExtensionSectionView {
+                multi: cmd.section.multi,
+                name: cmd.section.name,
+                prefix: cmd.section.prefix,
+            },
+            display_name: cmd.name.clone(),
+            name: cmd.name,
+            action: cmd.action,
+            description: cmd.description,
+        })
+        .collect();
+
+    Some(ExtensionScriptView {
+        entry: entry.to_vec(),
+        location: location.to_vec(),
+        root_dir: root_dir.to_vec(),
+        name: name.to_vec(),
+        display_name,
+        about,
+        author: Vec::new(),
+        homepage: Vec::new(),
+        license: Vec::new(),
+        version: Vec::new(),
+        nzbget_min_version: Vec::new(),
+        post_script: (parsed.kind & 1) != 0,
+        scan_script: (parsed.kind & 2) != 0,
+        queue_script: (parsed.kind & 4) != 0,
+        scheduler_script: (parsed.kind & 8) != 0,
+        feed_script: (parsed.kind & 16) != 0,
+        queue_events: parsed.queue_events,
+        task_time: parsed.task_time,
+        description: parsed.description,
+        requirements: parsed.requirements,
+        options,
+        commands,
+    })
+}
+
+fn load_extension_dir_recursive(
+    directory: &[u8],
+    is_sub_dir: bool,
+    root_dir: &[u8],
+    path_sep: u8,
+    extensions: &mut Vec<std::sync::Arc<ExtensionScriptView>>,
+) {
+    if let Some(v2_ext) = ext_loader_v2_load_from_dir(directory, root_dir, path_sep) {
+        if !extensions.iter().any(|e| e.name == v2_ext.name) {
+            extensions.push(std::sync::Arc::new(v2_ext));
+            return;
+        }
+    }
+
+    let dir_path = bytes_to_path(directory);
+    let Ok(read_dir) = std::fs::read_dir(&dir_path) else {
+        return;
+    };
+    for entry_res in read_dir.flatten() {
+        let file_name_os = entry_res.file_name();
+        let filename = crate::cleanup::os_str_to_bytes(&file_name_os);
+        if filename.is_empty() || filename[0] == b'.' || filename[0] == b'_' {
+            continue;
+        }
+        let entry = join_path_sep(directory, path_sep, filename);
+        let is_dir = std::fs::metadata(bytes_to_path(&entry)).is_ok_and(|m| m.is_dir());
+        if !is_dir {
+            let name = ext_mgr_get_extension_name(filename);
+            if extensions.iter().any(|e| e.name == name) {
+                continue;
+            }
+            let location = if is_sub_dir { directory } else { &entry };
+            if let Some(v1_ext) = ext_loader_v1_load_from_file(&entry, &name, location, root_dir) {
+                extensions.push(std::sync::Arc::new(v1_ext));
+            }
+        } else if !is_sub_dir {
+            load_extension_dir_recursive(&entry, true, root_dir, path_sep, extensions);
+        }
+    }
+}
+
+/// Pure-Rust `ExtensionManager` (`daemon/extension/ExtensionManager.cpp`).
+pub struct RsExtensionManager {
+    extensions: std::sync::RwLock<Vec<std::sync::Arc<ExtensionScriptView>>>,
+}
+
+impl Default for RsExtensionManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RsExtensionManager {
+    pub fn new() -> Self {
+        Self {
+            extensions: std::sync::RwLock::new(Vec::new()),
+        }
+    }
+
+    pub fn load_extensions(
+        &self,
+        script_dir: &[u8],
+        script_order: &[u8],
+        path_sep: u8,
+    ) -> Result<(), String> {
+        if script_dir.is_empty() {
+            return Err("\"ScriptDir\" is not specified".to_string());
+        }
+        let mut loaded = Vec::new();
+        for raw_dir in script_dir.split(|&b| b == b',' || b == b';') {
+            let dir = trim_ascii_spaces(raw_dir);
+            if dir.is_empty() {
+                continue;
+            }
+            load_extension_dir_recursive(dir, false, dir, path_sep, &mut loaded);
+        }
+        if !loaded.is_empty() {
+            let names: Vec<&[u8]> = loaded.iter().map(|e| e.name.as_slice()).collect();
+            let sorted_indices = ext_sort_indices(&names, script_order);
+            let mut sorted = Vec::with_capacity(loaded.len());
+            for idx in sorted_indices {
+                sorted.push(std::sync::Arc::clone(&loaded[idx]));
+            }
+            loaded = sorted;
+        }
+        *self.extensions.write().unwrap() = loaded;
+        Ok(())
+    }
+
+    pub fn for_each(&self, mut cb: impl FnMut(&std::sync::Arc<ExtensionScriptView>)) {
+        let guard = self.extensions.read().unwrap();
+        for ext in guard.iter() {
+            cb(ext);
+        }
+    }
+
+    pub fn find_if(
+        &self,
+        mut pred: impl FnMut(&std::sync::Arc<ExtensionScriptView>) -> bool,
+    ) -> Option<std::sync::Arc<ExtensionScriptView>> {
+        let guard = self.extensions.read().unwrap();
+        guard.iter().find(|ext| pred(ext)).cloned()
+    }
+
+    pub fn delete_extension(&self, name: &[u8]) -> Result<(), String> {
+        let mut guard = self.extensions.write().unwrap();
+        let pos = guard.iter().position(|e| e.name == name);
+        let found = pos.is_some();
+        let use_count = pos.map_or(0, |i| std::sync::Arc::strong_count(&guard[i]) as i64);
+        let target_path = if let Some(i) = pos {
+            let all_locs: Vec<&[u8]> = guard.iter().map(|e| e.location.as_slice()).collect();
+            ext_mgr_resolve_extension_path(&guard[i].location, &guard[i].entry, &all_locs).to_vec()
+        } else {
+            Vec::new()
+        };
+        if let Some(err_bytes) = ext_mgr_delete_extension(name, found, use_count, &target_path) {
+            return Err(String::from_utf8_lossy(&err_bytes).into_owned());
+        }
+        if let Some(i) = pos {
+            guard.remove(i);
+        }
+        Ok(())
+    }
+
+    pub fn update_extension(
+        &self,
+        archive_path: &[u8],
+        ext_name: &[u8],
+        install_fn: impl FnOnce(&[u8], &[u8]) -> Option<Vec<u8>>,
+    ) -> Result<(), String> {
+        let mut guard = self.extensions.write().unwrap();
+        let pos = guard.iter().position(|e| e.name == ext_name);
+        let found = pos.is_some();
+        let use_count = pos.map_or(0, |i| std::sync::Arc::strong_count(&guard[i]) as i64);
+        let (target_path, root_dir) = if let Some(i) = pos {
+            let all_locs: Vec<&[u8]> = guard.iter().map(|e| e.location.as_slice()).collect();
+            let tp = ext_mgr_resolve_extension_path(&guard[i].location, &guard[i].entry, &all_locs)
+                .to_vec();
+            (tp, guard[i].root_dir.clone())
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let (backup_path, prep_err) =
+            ext_mgr_prepare_update(ext_name, found, use_count, &target_path, archive_path);
+        if let Some(err_bytes) = prep_err {
+            return Err(String::from_utf8_lossy(&err_bytes).into_owned());
+        }
+        let install_err = install_fn(archive_path, &root_dir);
+        if let Some(finish_err) = ext_mgr_finish_update(
+            &target_path,
+            &backup_path,
+            archive_path,
+            install_err.as_deref(),
+        ) {
+            return Err(String::from_utf8_lossy(&finish_err).into_owned());
+        }
+        if let Some(i) = pos {
+            guard.remove(i);
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1742,5 +2524,269 @@ mod tests {
         let entries6: &[(&[u8], &[u8])] = &[(b"Extension.Option", b"value")];
         let merged6 = script_config_merge_bytes(no_nl_cfg, entries6);
         assert_eq!(merged6, b"# existing config\nExtension.Option=value\n");
+    }
+
+    #[test]
+    fn extension_to_json_and_xml_suite_port_from_cpp() {
+        let script = ExtensionScriptView {
+            entry: b"/v1/main.py".to_vec(),
+            location: b"/v1".to_vec(),
+            root_dir: b"/".to_vec(),
+            author: b"Author".to_vec(),
+            about: b"About".to_vec(),
+            homepage: b"Homepage".to_vec(),
+            description: vec![b"Description".to_vec()],
+            display_name: b"DisplayName".to_vec(),
+            post_script: true,
+            scan_script: false,
+            queue_script: false,
+            scheduler_script: false,
+            feed_script: false,
+            license: b"License".to_vec(),
+            name: b"Name".to_vec(),
+            requirements: vec![b"Requirements".to_vec()],
+            queue_events: b"QueueEvents".to_vec(),
+            task_time: b"TaskTime".to_vec(),
+            version: b"Version".to_vec(),
+            nzbget_min_version: b"23.1".to_vec(),
+            options: vec![ExtensionOptionView {
+                name: b"name".to_vec(),
+                display_name: b"displayName".to_vec(),
+                description: vec![b"description".to_vec()],
+                value: ExtensionSelectVal::Num(5.0),
+                select: vec![
+                    ExtensionSelectVal::Num(0.0),
+                    ExtensionSelectVal::Num(10.0),
+                ],
+                section: ExtensionSectionView {
+                    multi: true,
+                    prefix: b"Prefix".to_vec(),
+                    name: b"Section".to_vec(),
+                },
+            }],
+            commands: vec![ExtensionCommandView {
+                name: b"name".to_vec(),
+                action: b"action".to_vec(),
+                display_name: b"displayName".to_vec(),
+                description: vec![b"description".to_vec()],
+                section: ExtensionSectionView {
+                    multi: true,
+                    prefix: b"Prefix".to_vec(),
+                    name: b"Section".to_vec(),
+                },
+            }],
+        };
+
+        // ToJsonStrTest
+        let json_res = extension_to_json(&script);
+        let expected_json = concat!(
+            "{\"Entry\":\"/v1/main.py\",",
+            "\"Location\":\"/v1\",",
+            "\"RootDir\":\"/\",",
+            "\"Name\":\"Name\",",
+            "\"DisplayName\":\"DisplayName\",",
+            "\"About\":\"About\",",
+            "\"Author\":\"Author\",",
+            "\"Homepage\":\"Homepage\",",
+            "\"License\":\"License\",",
+            "\"Version\":\"Version\",",
+            "\"NZBGetMinVersion\":\"23.1\",",
+            "\"PostScript\":true,",
+            "\"ScanScript\":false,",
+            "\"QueueScript\":false,",
+            "\"SchedulerScript\":false,",
+            "\"FeedScript\":false,",
+            "\"QueueEvents\":\"QueueEvents\",",
+            "\"TaskTime\":\"TaskTime\",",
+            "\"Description\":[\"Description\"],",
+            "\"Requirements\":[\"Requirements\"],",
+            "\"Options\":[{\"Name\":\"name\",\"DisplayName\":\"displayName\",\"Section\":\"Section\",",
+            "\"Multi\":true,\"Prefix\":\"Prefix\",\"Value\":5E0,\"Description\":[\"description\"],\"Select\":[0E0,1E1]}],",
+            "\"Commands\":[{\"Name\":\"name\",\"DisplayName\":\"displayName\",\"Action\":\"action\",\"Section\":\"Section\",",
+            "\"Multi\":true,\"Prefix\":\"Prefix\",\"Description\":[\"description\"]}]}"
+        );
+        assert_eq!(std::str::from_utf8(&json_res).unwrap(), expected_json);
+
+        // ToXmlStrTest
+        let xml_res = extension_to_xml(&script);
+        let expected_xml = concat!(
+            "<value><struct>",
+            "<member><name>Entry</name><value><string>/v1/main.py</string></value></member>",
+            "<member><name>Location</name><value><string>/v1</string></value></member>",
+            "<member><name>RootDir</name><value><string>/</string></value></member>",
+            "<member><name>Name</name><value><string>Name</string></value></member>",
+            "<member><name>DisplayName</name><value><string>DisplayName</string></value></member>",
+            "<member><name>About</name><value><string>About</string></value></member>",
+            "<member><name>Author</name><value><string>Author</string></value></member>",
+            "<member><name>Homepage</name><value><string>Homepage</string></value></member>",
+            "<member><name>License</name><value><string>License</string></value></member>",
+            "<member><name>Version</name><value><string>Version</string></value></member>",
+            "<member><name>NZBGetMinVersion</name><value><string>23.1</string></value></member>",
+            "<member><name>PostScript</name><value><boolean>1</boolean></value></member>",
+            "<member><name>ScanScript</name><value><boolean>0</boolean></value></member>",
+            "<member><name>QueueScript</name><value><boolean>0</boolean></value></member>",
+            "<member><name>SchedulerScript</name><value><boolean>0</boolean></value></member>",
+            "<member><name>FeedScript</name><value><boolean>0</boolean></value></member>",
+            "<member><name>QueueEvents</name><value><string>QueueEvents</string></value></member>",
+            "<member><name>TaskTime</name><value><string>TaskTime</string></value></member>",
+            "<Description>",
+            "<member><name>Value</name><value><string>Description</string></value></member>",
+            "</Description>",
+            "<Requirements>",
+            "<member><name>Value</name><value><string>Requirements</string></value></member>",
+            "</Requirements>",
+            "<Commands>",
+            "<member><name>Name</name><value><string>name</string></value></member>",
+            "<member><name>DisplayName</name><value><string>displayName</string></value></member>",
+            "<member><name>Action</name><value><string>action</string></value></member>",
+            "<member><name>Multi</name><value><boolean>1</boolean></value></member>",
+            "<member><name>Section</name><value><string>Section</string></value></member>",
+            "<member><name>Prefix</name><value><string>Prefix</string></value></member>",
+            "<Description>",
+            "<member><name>Value</name><value><string>description</string></value></member>",
+            "</Description>",
+            "</Commands>",
+            "<Options>",
+            "<member><name>Name</name><value><string>name</string></value></member>",
+            "<member><name>DisplayName</name><value><string>displayName</string></value></member>",
+            "<member><name>Multi</name><value><boolean>1</boolean></value></member>",
+            "<member><name>Section</name><value><string>Section</string></value></member>",
+            "<member><name>Prefix</name><value><string>Prefix</string></value></member>",
+            "<member><name>Value</name><value><double>5.000000</double></value></member>",
+            "<Description>",
+            "<member><name>Value</name><value><string>description</string></value></member>",
+            "</Description>",
+            "<Select>",
+            "<member><name>Value</name><value><double>0.000000</double></value></member>",
+            "<member><name>Value</name><value><double>10.000000</double></value></member>",
+            "</Select>",
+            "</Options>",
+            "</struct></value>"
+        );
+        assert_eq!(std::str::from_utf8(&xml_res).unwrap(), expected_xml);
+    }
+
+    #[test]
+    fn extension_manager_full_suite_port_from_cpp() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::path::{Path, PathBuf};
+
+        fn copy_dir_recursive(src: &Path, dst: &Path) {
+            std::fs::create_dir_all(dst).unwrap();
+            for entry in std::fs::read_dir(src).unwrap() {
+                let entry = entry.unwrap();
+                let ty = entry.file_type().unwrap();
+                let dst_path = dst.join(entry.file_name());
+                if ty.is_dir() {
+                    copy_dir_recursive(&entry.path(), &dst_path);
+                } else {
+                    std::fs::copy(entry.path(), dst_path).unwrap();
+                }
+            }
+        }
+
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let scripts_dir = manifest_dir
+            .parent()
+            .unwrap()
+            .join("tests/testdata/extension/scripts");
+        let order = b"Extension2, Extension1, email; Extension1; Extension1";
+
+        // 1. LoadExtensionsTest
+        {
+            let manager = RsExtensionManager::new();
+            assert!(
+                manager
+                    .load_extensions(scripts_dir.as_os_str().as_bytes(), order, b'/')
+                    .is_ok()
+            );
+            let correct_order = [b"Extension2".as_slice(), b"Extension1", b"email"];
+            let mut idx = 0usize;
+            manager.for_each(|script| {
+                if idx < correct_order.len() {
+                    assert_eq!(script.name.as_slice(), correct_order[idx]);
+                }
+                idx += 1;
+            });
+            assert_eq!(idx, 4);
+        }
+
+        // 2. ShouldNotDeleteExtensionIfExtensionIsBusyTest
+        {
+            let manager = RsExtensionManager::new();
+            assert!(
+                manager
+                    .load_extensions(scripts_dir.as_os_str().as_bytes(), order, b'/')
+                    .is_ok()
+            );
+            let busy_ext = manager.find_if(|_| true).unwrap();
+            let err = manager.delete_extension(&busy_ext.name).unwrap_err();
+            let expected_err = format!(
+                "Deletion failed: Extension '{}' is currently in use",
+                String::from_utf8_lossy(&busy_ext.name)
+            );
+            assert_eq!(err, expected_err);
+        }
+
+        // 3. DeleteExtensionTest
+        {
+            let working_dir = std::env::temp_dir().join(format!(
+                "nzbget_rs_delete_ext_test_{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&working_dir);
+            copy_dir_recursive(&scripts_dir, &working_dir);
+
+            let manager = RsExtensionManager::new();
+            assert!(
+                manager
+                    .load_extensions(working_dir.as_os_str().as_bytes(), order, b'/')
+                    .is_ok()
+            );
+            assert!(manager.delete_extension(b"email").is_ok());
+            assert!(manager.find_if(|s| s.name == b"email").is_none());
+            assert!(!working_dir.join("email").exists());
+
+            let _ = std::fs::remove_dir_all(&working_dir);
+        }
+
+        // 4. FailedUpdateKeepsExtensionTest
+        {
+            let working_dir = std::env::temp_dir().join(format!(
+                "nzbget_rs_failed_update_ext_test_{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&working_dir);
+            copy_dir_recursive(&scripts_dir, &working_dir);
+
+            let manager = RsExtensionManager::new();
+            assert!(
+                manager
+                    .load_extensions(working_dir.as_os_str().as_bytes(), order, b'/')
+                    .is_ok()
+            );
+            let location = {
+                let email = manager.find_if(|s| s.name == b"email").unwrap();
+                PathBuf::from(std::ffi::OsStr::from_bytes(&email.location))
+            };
+            assert!(location.exists());
+
+            let archive = working_dir.join("update.zip");
+            std::fs::write(&archive, b"not an archive").unwrap();
+
+            let res = manager.update_extension(
+                archive.as_os_str().as_bytes(),
+                b"email",
+                |_, _| Some(b"Failed to extract archive".to_vec()),
+            );
+            assert!(res.is_err());
+            assert!(location.exists());
+            let mut backup = location.as_os_str().to_os_string();
+            backup.push(".update-backup");
+            assert!(!Path::new(&backup).exists());
+            assert!(manager.find_if(|s| s.name == b"email").is_some());
+
+            let _ = std::fs::remove_dir_all(&working_dir);
+        }
     }
 }

@@ -29,7 +29,7 @@ namespace Utf8
 {
 	std::optional<std::wstring> Utf8ToWide(std::string_view str)
 	{
-		if (nzbget_rs_awc_utf8_is_empty_len(str.size()) != 0) return L"";
+		if (str.empty()) return L"";
 
 		int requiredSize = MultiByteToWideChar(CP_UTF8, 0, str.data(), -1, nullptr, 0);
 		if (requiredSize <= 0) return std::nullopt;

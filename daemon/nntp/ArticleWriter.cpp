@@ -82,19 +82,15 @@ bool ArticleWriter::Start(Decoder::EFormat format, const char* filename, int64 f
 	m_outFile.Close();
 	m_format = format;
 	m_articleOffset = articleOffset;
-	m_articleSize = nzbget_rs_cwp_article_writer_select_article_size(articleSize, m_articleInfo->GetSize());
+	m_articleSize = articleSize > 0 ? articleSize : m_articleInfo->GetSize();
 	m_articlePtr = 0;
 
 	// prepare file for writing
 	if (m_format == Decoder::efYenc)
 	{
-		if (nzbget_rs_dad_article_writer_should_check_dupe_file(
-			(int)m_format,
-			(int)Decoder::efYenc,
-			g_Options->GetDupeCheck() ? 1 : 0,
-			(int)m_fileInfo->GetNzbInfo()->GetDupeMode(),
-			(int)dmForce,
-			m_fileInfo->GetNzbInfo()->GetManyDupeFiles() ? 1 : 0) != 0)
+		if (g_Options->GetDupeCheck() &&
+			m_fileInfo->GetNzbInfo()->GetDupeMode() != dmForce &&
+			!m_fileInfo->GetNzbInfo()->GetManyDupeFiles())
 		{
 			bool outputInitialized;
 			{
@@ -123,13 +119,8 @@ bool ArticleWriter::Start(Decoder::EFormat format, const char* filename, int64 f
 					 FileSystem::SameFilename(m_fileInfo->GetOutputFilename().c_str(), destFilePath));
 			}
 
-			bool destExists = !outputInitialized && !isOwnOutputFile && filename &&
-				FileSystem::FileExists(destFilePath);
-			if (nzbget_rs_dad_article_writer_is_duplicate_dest(
-				outputInitialized ? 1 : 0,
-				isOwnOutputFile ? 1 : 0,
-				filename ? 1 : 0,
-				destExists ? 1 : 0) != 0)
+			if (!outputInitialized && !isOwnOutputFile && filename &&
+				FileSystem::FileExists(destFilePath))
 			{
 				m_duplicate = true;
 				return false;
@@ -139,11 +130,8 @@ bool ArticleWriter::Start(Decoder::EFormat format, const char* filename, int64 f
 		if (g_Options->GetDirectWrite() && !IsDupeFallbackArticle())
 		{
 			Guard guard = m_fileInfo->GuardOutputFile();
-			bool outInit = m_fileInfo->GetOutputInitialized();
-			bool skipDisk = GetSkipDiskWrite();
-			bool outExists = (outInit && !skipDisk) ? FileSystem::FileExists(m_outputFilename.c_str()) : true;
-			if (nzbget_rs_aws_article_writer_should_init_direct_write_file(
-				1, 0, outInit ? 1 : 0, skipDisk ? 1 : 0, outExists ? 1 : 0) != 0)
+			if (!m_fileInfo->GetOutputInitialized() ||
+				(!GetSkipDiskWrite() && !FileSystem::FileExists(m_outputFilename.c_str())))
 			{
 				if (!GetSkipDiskWrite() && !CreateOutputFile(fileSize))
 				{
@@ -161,20 +149,13 @@ bool ArticleWriter::Start(Decoder::EFormat format, const char* filename, int64 f
 	// allocate cache buffer; yEnc only: a cached article is written at its offset,
 	// and only yEnc tells it (uuencoded parts all have 0 and overwrote each other,
 	// uncached they're appended in order)
-	if (nzbget_rs_dad_article_writer_can_use_article_cache(
-		g_Options->GetArticleCache(),
-		g_Options->GetRawArticle() ? 1 : 0,
-		(int)m_format,
-		(int)Decoder::efYenc,
-		IsDupeFallbackArticle() ? 1 : 0,
-		isCritical ? 1 : 0) != 0)
+	if (g_Options->GetArticleCache() > 0 && !g_Options->GetRawArticle() &&
+		m_format == Decoder::efYenc && !IsDupeFallbackArticle() && !isCritical)
 	{
 		m_articleData = g_ArticleCache->Alloc(m_articleSize);
 
-		while (nzbget_rs_aws_article_writer_should_wait_for_cache_flush(
-			m_articleData.GetData() ? 1 : 0,
-			g_ArticleCache->GetFlushing() ? 1 : 0,
-			(g_MemoryMonitor && g_MemoryMonitor->GetTier() == NZBGET_RS_PRESSURE_CRITICAL) ? 1 : 0) != 0)
+		while (!m_articleData.GetData() && g_ArticleCache->GetFlushing() &&
+			!(g_MemoryMonitor && g_MemoryMonitor->GetTier() == NZBGET_RS_PRESSURE_CRITICAL))
 		{
 			Util::Sleep(5);
 			m_articleData = g_ArticleCache->Alloc(m_articleSize);
@@ -193,12 +174,8 @@ bool ArticleWriter::Start(Decoder::EFormat format, const char* filename, int64 f
 			return true;
 		}
 
-		bool directWrite = nzbget_rs_cwp_article_writer_is_direct_write_enabled(
-			g_Options->GetDirectWrite() ? 1 : 0,
-			m_fileInfo->GetForceDirectWrite() ? 1 : 0,
-			(int)m_format,
-			(int)Decoder::efYenc,
-			IsDupeFallbackArticle() ? 1 : 0) != 0;
+		bool directWrite = (g_Options->GetDirectWrite() || m_fileInfo->GetForceDirectWrite()) &&
+			m_format == Decoder::efYenc && !IsDupeFallbackArticle();
 		const char* outFilename = directWrite ? m_outputFilename.c_str() : m_tempFilename.c_str();
 		if (!m_outFile.Open(outFilename, directWrite ? DiskFile::omReadWrite : DiskFile::omWrite))
 		{
@@ -220,16 +197,13 @@ bool ArticleWriter::Start(Decoder::EFormat format, const char* filename, int64 f
 
 bool ArticleWriter::GetSkipDiskWrite()
 {
-	bool hasFileAndNzb = m_fileInfo && m_fileInfo->GetNzbInfo();
-	return nzbget_rs_cwp_article_writer_should_skip_disk_write(
-		hasFileAndNzb ? 1 : 0,
-		(hasFileAndNzb && m_fileInfo->GetNzbInfo()->GetSkipDiskWrite()) ? 1 : 0,
-		g_Options->GetSkipWrite() ? 1 : 0) != 0;
+	return (m_fileInfo && m_fileInfo->GetNzbInfo() && m_fileInfo->GetNzbInfo()->GetSkipDiskWrite()) ||
+		g_Options->GetSkipWrite();
 }
 
 bool ArticleWriter::Write(char* buffer, int len)
 {
-	if (nzbget_rs_dad_article_writer_advance_and_check_range(
+	if (nzbget_rs_awc_article_writer_advance_and_check_range(
 		g_Options->GetRawArticle() ? 1 : 0,
 		&m_articlePtr,
 		len,
@@ -238,8 +212,7 @@ bool ArticleWriter::Write(char* buffer, int len)
 		return true;
 	}
 
-	if (nzbget_rs_aws_article_writer_should_memcpy_cached_segment(
-		g_Options->GetRawArticle() ? 1 : 0, m_articleData.GetData() ? 1 : 0) != 0)
+	if (!g_Options->GetRawArticle() && m_articleData.GetData())
 	{
 		memcpy(m_articleData.GetData() + m_articlePtr - len, buffer, len);
 		return true;
@@ -267,17 +240,12 @@ void ArticleWriter::Finish(bool success)
 		return;
 	}
 
-	bool directWrite = nzbget_rs_cwp_article_writer_is_direct_write_enabled(
-		g_Options->GetDirectWrite() ? 1 : 0,
-		m_fileInfo->GetForceDirectWrite() ? 1 : 0,
-		(int)m_format,
-		(int)Decoder::efYenc,
-		IsDupeFallbackArticle() ? 1 : 0) != 0;
+	bool directWrite = (g_Options->GetDirectWrite() || m_fileInfo->GetForceDirectWrite()) &&
+		m_format == Decoder::efYenc && !IsDupeFallbackArticle();
 
 	if (!g_Options->GetRawArticle())
 	{
-		if (nzbget_rs_aws_article_writer_should_move_temp_to_result(
-			directWrite ? 1 : 0, m_articleData.GetData() ? 1 : 0, GetSkipDiskWrite() ? 1 : 0) != 0)
+		if (!directWrite && !m_articleData.GetData() && !GetSkipDiskWrite())
 		{
 			if (!FileSystem::MoveFile(m_tempFilename.c_str(), m_resultFilename.c_str()))
 			{
@@ -290,7 +258,7 @@ void ArticleWriter::Finish(bool success)
 
 		if (m_articleData.GetData())
 		{
-			if (nzbget_rs_aws_article_writer_should_realloc_cached_segment(m_articleSize, m_articlePtr) != 0)
+			if (m_articleSize != m_articlePtr)
 			{
 				g_ArticleCache->Realloc(&m_articleData, m_articlePtr);
 			}
@@ -485,7 +453,7 @@ bool ArticleWriter::CompleteFileParts()
 		hasForceDest = !hasOwnOut && forceDirectWrite && FileSystem::FileExists(destPath);
 	}
 	int newOutputInit = curOutputInit ? 1 : 0;
-	bool directWrite = nzbget_rs_dad_article_writer_resolve_direct_write_ready(
+	bool directWrite = nzbget_rs_awc_article_writer_resolve_direct_write_ready(
 		directWriteOpt ? 1 : 0,
 		forceDirectWrite ? 1 : 0,
 		curOutputInit ? 1 : 0,
@@ -656,7 +624,7 @@ ArticleWriter::SetupOutputFile(DiskFile &outfile,
 		}
 	}
 
-	int setupScenario = nzbget_rs_aws_article_writer_classify_setup_output_scenario(
+	int setupScenario = nzbget_rs_awc_article_writer_classify_setup_output_scenario(
 		g_Options->GetRawArticle() ? 1 : 0, directWrite ? 1 : 0);
 	// Scenario A: Standard Assembly (Write to .tmp)
 	if (setupScenario == 1)
@@ -738,18 +706,14 @@ uint32 ArticleWriter::ProcessArticles(DiskFile& outfile,
 		if (pa->GetStatus() != ArticleInfo::aiFinished) continue;
 
 		// 1. Fill gaps (Direct Write)
-		if (nzbget_rs_dad_article_writer_need_gap_fill(
-			g_Options->GetRawArticle() ? 1 : 0,
-			directWrite ? 1 : 0,
-			pa->GetSegmentOffset(),
-			outfile.Position()) != 0)
+		if (!g_Options->GetRawArticle() && !directWrite &&
+			pa->GetSegmentOffset() > -1 && pa->GetSegmentOffset() > outfile.Position() && outfile.Position() > -1)
 		{
 			memset(buffer, 0, static_cast<size_t>(buffer.Size()));
 			if (!GetSkipDiskWrite())
 			{
 				while (pa->GetSegmentOffset() > outfile.Position() && outfile.Position() > -1 &&
-					outfile.Write(buffer, nzbget_rs_cwp_article_writer_calc_gap_fill_chunk(
-						pa->GetSegmentOffset(), outfile.Position(), static_cast<int64_t>(buffer.Size()))));
+					outfile.Write(buffer, std::min(pa->GetSegmentOffset() - outfile.Position(), static_cast<int64_t>(buffer.Size()))));
 			}
 		}
 
@@ -776,9 +740,8 @@ uint32 ArticleWriter::ProcessArticles(DiskFile& outfile,
 			}
 			pa->DiscardSegment();
 		}
-		else if (nzbget_rs_aws_article_writer_is_staged_dupe_commit_needed(
-			directWrite ? 1 : 0, pa->GetDupeFallbackRound(),
-			pa->GetResultFilename() ? 1 : 0, GetSkipDiskWrite() ? 1 : 0) != 0)
+		else if (directWrite && pa->GetDupeFallbackRound() > 0 &&
+			pa->GetResultFilename() && !GetSkipDiskWrite())
 		{
 			// Duplicate articles are staged in their per-article temp file even
 			// when DirectWrite is enabled.  Copy only after the queue coordinator
@@ -829,8 +792,7 @@ uint32 ArticleWriter::ProcessArticles(DiskFile& outfile,
 				m_commitError = true;
 			}
 		}
-		else if (nzbget_rs_aws_article_writer_is_standard_part_append_needed(
-			g_Options->GetRawArticle() ? 1 : 0, directWrite ? 1 : 0, GetSkipDiskWrite() ? 1 : 0) != 0)
+		else if (!g_Options->GetRawArticle() && !directWrite && !GetSkipDiskWrite())
 		{
 			// Read from partial file and append to outfile
 			DiskFile infile;
@@ -979,9 +941,7 @@ bool ArticleWriter::CleanupOldData(bool directWrite,
 		}
 	}
 
-	if (nzbget_rs_aws_article_writer_should_cleanup_hardlinked_temp(
-		finalOutputPath.empty() ? 1 : 0, m_fileInfo->IsHardLinked() ? 1 : 0,
-		Util::EmptyStr(g_Options->GetInterDir()) ? 1 : 0) != 0)
+	if (finalOutputPath.empty() && m_fileInfo->IsHardLinked() && Util::EmptyStr(g_Options->GetInterDir()))
 	{
 		if (FileSystem::DeleteFile(m_outputFilename.c_str()))
 		{
@@ -1283,19 +1243,14 @@ bool ArticleWriter::MoveCompletedFiles(NzbInfo* nzbInfo, const char* oldDestDir)
 		{
 			if (pendingWrites) break;
 
-			bool outInit = fileInfo->GetOutputInitialized();
-			bool outEmpty = fileInfo->GetOutputFilename().empty();
-			int activeDl = fileInfo->GetActiveDownloads();
-			bool guardedInit = false;
-			if (outInit && !outEmpty && activeDl > 0)
+			if (fileInfo->GetOutputInitialized() && !fileInfo->GetOutputFilename().empty() &&
+				fileInfo->GetActiveDownloads() > 0)
 			{
 				Guard guard = fileInfo->GuardOutputFile();
-				guardedInit = fileInfo->GetOutputInitialized();
-			}
-			if (nzbget_rs_aws_article_writer_has_pending_file_writes(
-				outInit ? 1 : 0, outEmpty ? 1 : 0, activeDl, guardedInit ? 1 : 0) != 0)
-			{
-				pendingWrites = true;
+				if (fileInfo->GetOutputInitialized())
+				{
+					pendingWrites = true;
+				}
 			}
 		}
 
@@ -1318,7 +1273,7 @@ CachedSegmentData ArticleCache::Alloc(int size)
 		nzbget_rs_tpr_article_cache_mb_to_bytes(g_Options->GetArticleCache());
 
 	int wasEmpty = 0;
-	if (nzbget_rs_dad_article_cache_can_alloc(effectiveLimit, m_allocated, (size_t)size, &wasEmpty) != 0)
+	if (nzbget_rs_awc_article_cache_can_alloc(effectiveLimit, m_allocated, (size_t)size, &wasEmpty) != 0)
 	{
 		p = malloc(size);
 		if (p)
@@ -1349,8 +1304,7 @@ bool ArticleCache::Realloc(CachedSegmentData* segment, int newSize)
 	void* p = realloc(segment->m_data, newSize);
 	if (p)
 	{
-		m_allocated = (size_t)((ptrdiff_t)m_allocated +
-			nzbget_rs_cwp_article_cache_calc_realloc_delta(newSize, segment->m_size));
+		m_allocated += newSize - segment->m_size;
 		segment->m_size = newSize;
 		segment->m_data = (char*)p;
 	}
@@ -1532,7 +1486,7 @@ void MemoryMonitor::Run()
 		UpdateState();
 
 		int interval = g_Options ? g_Options->GetMemoryPressureInterval() : 500;
-		interval = nzbget_rs_cwp_memory_monitor_clamp_interval(interval);
+		if (interval < 100) interval = 100;
 
 		int slept = 0;
 		while (nzbget_rs_dqh_memory_monitor_should_keep_sleeping(
@@ -1572,7 +1526,7 @@ int MemoryMonitor::GetEffectiveParBufferMB(int configuredMB) const
 {
 	int tier = m_tier.load(std::memory_order_acquire);
 	int mb = 0;
-	if (nzbget_rs_dad_memory_monitor_calc_critical_or_normal_par_buffer(
+	if (nzbget_rs_awc_memory_monitor_calc_critical_or_normal_par_buffer(
 		tier, configuredMB, (int)NZBGET_RS_PRESSURE_CRITICAL, (int)NZBGET_RS_PRESSURE_NORMAL, &mb) != 0)
 	{
 		return mb;
@@ -1610,7 +1564,7 @@ void MemoryMonitor::UpdateState()
 		nextTier != NZBGET_RS_PRESSURE_NORMAL && rawSample == nextTier) ?
 		nzbget_rs_memory_pressure_effective_par_buffer(cfgPar) : 0;
 	uint32_t effCache = 0, effPar = 0, effLimit = 0;
-	nzbget_rs_dad_memory_monitor_resolve_tier_limits(
+	nzbget_rs_awc_memory_monitor_resolve_tier_limits(
 		nextTier,
 		rawSample,
 		cfgCache,
@@ -1637,7 +1591,7 @@ void MemoryMonitor::UpdateState()
 
 void MemoryMonitor::ApplyTierTransition(NzbgetRsPressureTier oldTier, NzbgetRsPressureTier newTier)
 {
-	int action = nzbget_rs_aws_memory_monitor_classify_tier_transition_action(
+	int action = nzbget_rs_awc_memory_monitor_classify_tier_transition_action(
 		(int)oldTier, (int)newTier,
 		(int)NZBGET_RS_PRESSURE_NORMAL,
 		(int)NZBGET_RS_PRESSURE_CONSTRAINED,

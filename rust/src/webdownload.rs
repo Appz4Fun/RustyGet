@@ -133,6 +133,44 @@ pub fn redirect(old_url: &CStr, location: &CStr) -> Vec<u8> {
     out
 }
 
+/// `WebDownloader::Run`:
+/// Updates `(remainedDownloadRetries, remainedConnectRetries)` after an unsuccessful attempt.
+pub fn step_retry_counters(
+    status: i32,
+    ad_connect_error: i32,
+    rem_dl: i32,
+    rem_conn: i32,
+) -> (i32, i32) {
+    if status != ad_connect_error {
+        (rem_dl.wrapping_sub(1), rem_conn)
+    } else {
+        (rem_dl, rem_conn.wrapping_sub(1))
+    }
+}
+
+/// `WebDownloader::DownloadBody`:
+/// Resolves final body status from `(end, status, is_stopped)`:
+/// returns `(new_status, warn_incomplete)`.
+pub fn resolve_body_end_status(
+    end: bool,
+    status: i32,
+    is_stopped: bool,
+    ad_running: i32,
+    ad_failed: i32,
+    ad_finished: i32,
+) -> (i32, bool) {
+    let mut cur = status;
+    let mut warn_incomplete = false;
+    if !end && cur == ad_running && !is_stopped {
+        warn_incomplete = true;
+        cur = ad_failed;
+    }
+    if end {
+        cur = ad_finished;
+    }
+    (cur, warn_incomplete)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

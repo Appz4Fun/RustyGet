@@ -633,6 +633,119 @@ pub fn parse_log_line(line: &[u8]) -> Option<(i32, i32, usize)> {
     Some((time, kind, text_offset))
 }
 
+/// Validates the 4-field header of `DiskState::LoadDupeExtras`.
+#[inline]
+pub fn validate_dupe_extras_header(
+    scan_cnt: i32,
+    recovered_articles: i32,
+    recovered_holes: i32,
+) -> bool {
+    scan_cnt == 4 && recovered_articles >= 0 && recovered_holes >= 0
+}
+
+/// Validates a per-repair-job header line in `DiskState::LoadDupeExtras`.
+#[inline]
+pub fn validate_repair_job_header(
+    scan_cnt: i32,
+    expected_cnt: i32,
+    file_id: i32,
+    par_file: i32,
+    failed_articles: i32,
+) -> bool {
+    scan_cnt == expected_cnt && failed_articles >= 0 && file_id > 0 && (0..=1).contains(&par_file)
+}
+
+/// Evaluates whether a restored `OutputInitialized` flag remains valid in `DiskState::LoadFileInfo`.
+#[inline]
+pub fn eval_restored_output_init(
+    output_initialized: i32,
+    direct_write: bool,
+    force_direct_write: bool,
+    has_own_out_file: bool,
+    has_out_tmp: bool,
+    has_force_dest: bool,
+) -> bool {
+    let restored = output_initialized != 0;
+    if restored && (direct_write || force_direct_write) {
+        has_own_out_file || has_out_tmp || has_force_dest
+    } else {
+        restored
+    }
+}
+
+/// Computes `(staged_fallback, saved_status)` when serializing an `ArticleInfo` in `DiskState::SaveFileState`.
+#[inline]
+pub fn calc_staged_fallback(
+    completed: bool,
+    article_status: i32,
+    ai_finished: i32,
+    dupe_fallback_round: i32,
+    has_result_filename: bool,
+    ai_undefined: i32,
+) -> (i32, i32) {
+    let staged = if !completed
+        && article_status == ai_finished
+        && dupe_fallback_round > 0
+        && has_result_filename
+    {
+        1
+    } else {
+        0
+    };
+    let saved_status = if staged != 0 {
+        ai_undefined
+    } else {
+        article_status
+    };
+    (staged, saved_status)
+}
+
+/// Validates the article count header in `DiskState::LoadFileState`.
+#[inline]
+pub fn validate_article_count(size: i32, has_articles: bool, articles_len: i32) -> bool {
+    !(size < 0 || (has_articles && size > articles_len) || size > 10_000_000)
+}
+
+/// Determines whether `DiskState::LoadFileState` needs to probe the temp directory for a staged part file.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub fn need_staged_file_check(
+    completed: bool,
+    format_version: i32,
+    status_int: i32,
+    ai_finished: i32,
+    segment_offset: i64,
+    segment_size: i32,
+    staged_fallback: i32,
+    part_number: i32,
+    direct_write: bool,
+    force_direct_write: bool,
+) -> bool {
+    let range_valid =
+        completed || (segment_offset >= 0 && (0..=1024 * 1024 * 1024).contains(&segment_size));
+    let effective_finished = status_int == ai_finished && (format_version < 2 || range_valid);
+    part_number > 0
+        && ((format_version >= 2 && staged_fallback == 1 && range_valid)
+            || (!completed
+                && format_version < 9
+                && effective_finished
+                && (direct_write || force_direct_write)))
+}
+
+/// Validates and computes the target array length for a server volume slot in `DiskState::LoadVolumeStat`.
+#[inline]
+pub fn calc_volume_slot_size(slot_index: i32, arr_size: i32) -> (bool, i32) {
+    if !(0..=100_000).contains(&arr_size) {
+        return (false, 0);
+    }
+    let fixed = match slot_index {
+        0 | 1 => 60,
+        2 => 24,
+        _ => 0,
+    };
+    (true, if fixed > 0 { fixed } else { arr_size })
+}
+
 // ============================================================================
 // 2. PrePostProcessor (`daemon/postprocess/PrePostProcessor.cpp`)
 // ============================================================================
@@ -965,136 +1078,7 @@ pub fn calc_post_pause_state(
 }
 
 // ============================================================================
-// 3. Scanner (`daemon/queue/Scanner.cpp`)
-// ============================================================================
-
-/// `Scanner::ServiceWork` multi-pass interval & pass counter update.
-pub fn scanner_next_pass(
-    nzb_dir_interval: i32,
-    nzb_dir_file_age: i32,
-    has_scan_script: bool,
-    current_pass: i32,
-) -> (i32, i32) {
-    let mut next_interval = nzb_dir_interval;
-    let mut next_pass = current_pass;
-    if nzb_dir_interval > 0 && nzb_dir_file_age < nzb_dir_interval {
-        let max_pass = if has_scan_script { 3 } else { 1 };
-        if current_pass < max_pass {
-            next_interval = nzb_dir_file_age;
-            next_pass = current_pass + 1;
-        } else {
-            next_pass = 0;
-        }
-    }
-    (next_interval, next_pass)
-}
-
-/// `Scanner::CanProcessFile` extension filter.
-pub fn can_process_extension(full_filename: &[u8]) -> bool {
-    let dot_pos = match full_filename.iter().rposition(|&b| b == b'.') {
-        Some(pos) => pos,
-        None => return false,
-    };
-    let ext = &full_filename[dot_pos..];
-    !eq_ignore_ascii_case(ext, b".queued")
-        && !eq_ignore_ascii_case(ext, b".error")
-        && !eq_ignore_ascii_case(ext, b".processed")
-}
-
-/// `Scanner::CanProcessFile` file size & age stabilization check.
-/// Returns `(can_process, updated_size, updated_last_change)`.
-pub fn eval_file_age(
-    old_size: i64,
-    new_size: i64,
-    last_change: i64,
-    current_time: i64,
-    file_age: i32,
-) -> (bool, i64, i64) {
-    if old_size == new_size && current_time - last_change >= file_age as i64 {
-        (true, old_size, last_change)
-    } else if old_size != new_size {
-        (false, new_size, current_time)
-    } else {
-        (false, old_size, last_change)
-    }
-}
-
-/// `Scanner::DropOldFiles` stale entry predicate.
-pub fn should_drop_scan_file(
-    last_change: i64,
-    current_time: i64,
-    nzb_dir_interval: i32,
-    nzb_dir_file_age: i32,
-) -> bool {
-    let threshold = ((nzb_dir_interval as i64) + (nzb_dir_file_age as i64)) * 2;
-    (current_time - last_change >= threshold) || current_time < last_change
-}
-
-/// `Scanner::AddFileToQueue` missed-articles severity classifier.
-/// Returns `0` (none), `1` (`Message::mkDetail`), `2` (`Message::mkWarning`).
-pub fn classify_missed_articles(
-    missed_articles: i32,
-    total_articles: i32,
-    is_cut_short: bool,
-) -> i32 {
-    if missed_articles <= 0 {
-        return 0;
-    }
-    let large = missed_articles >= 100 || missed_articles.saturating_mul(10) >= total_articles;
-    if is_cut_short || large {
-        2
-    } else {
-        1
-    }
-}
-
-/// `Scanner::AddExternalFile` XML/NZB header detector (matches `BString<1024>` truncation).
-pub fn is_nzb_xml_prefix(buf: &[u8]) -> bool {
-    let max_len = buf.len().min(1023);
-    let slice = &buf[..max_len];
-    let slice = match slice.iter().position(|&b| b == 0) {
-        Some(nul) => &slice[..nul],
-        None => slice,
-    };
-    slice.starts_with(b"<?xml") && slice.windows(4).any(|w| w == b"<nzb")
-}
-
-/// `Scanner::AddExternalFile` filename normalizer (leading `.` -> `_`, UTF-8-aware 200-byte truncation, `.nzb` suffix).
-pub fn normalize_external_nzb_name(nzb_name: &[u8], valid_name: &[u8], is_nzb: bool) -> Vec<u8> {
-    let mut name = Vec::with_capacity(valid_name.len() + 6);
-    if valid_name.first() == Some(&b'.') {
-        name.push(b'_');
-    }
-    name.extend_from_slice(valid_name);
-
-    if name.len() > 200 {
-        let ext = match name.iter().rposition(|&b| b == b'.') {
-            Some(dot) if name.len() - dot <= 16 => name[dot..].to_vec(),
-            _ => Vec::new(),
-        };
-        let mut cut = 200usize.saturating_sub(ext.len());
-        while cut > 0 && (name[cut] & 0xC0) == 0x80 {
-            cut -= 1;
-        }
-        name.truncate(cut);
-        name.extend_from_slice(&ext);
-    }
-
-    if is_nzb {
-        let has_nzb_ext = match nzb_name.iter().rposition(|&b| b == b'.') {
-            Some(dot) => eq_ignore_ascii_case(&nzb_name[dot..], b".nzb"),
-            None => false,
-        };
-        if !has_nzb_ext {
-            name.extend_from_slice(b".nzb");
-        }
-    }
-
-    name
-}
-
-// ============================================================================
-// 4. TwinCheck (`daemon/queue/TwinCheck.cpp`)
+// 3. TwinCheck (`daemon/queue/TwinCheck.cpp`)
 // ============================================================================
 
 /// `TwinCheckJob::Sample` layout verifier and sample midpoint index calculator.
@@ -1376,16 +1360,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scanner_and_twincheck() {
-        assert!(!can_process_extension(b"movie.nzb.queued"));
-        assert!(can_process_extension(b"movie.nzb"));
-        assert_eq!(classify_missed_articles(2, 50, false), 1);
-        assert_eq!(classify_missed_articles(10, 50, false), 2);
-        assert!(is_nzb_xml_prefix(b"<?xml version=\"1.0\"?><nzb></nzb>"));
-
-        let norm = normalize_external_nzb_name(b".release", b".release", true);
-        assert_eq!(norm, b"_.release.nzb");
-
+    fn test_twincheck_and_consolidated_diskstate() {
         let indices =
             twin_sample_indices(&[2, 2], &[100, 200, 300, 400], &[2, 2], &[100, 200, 300, 400], 2)
                 .unwrap();
@@ -1396,5 +1371,12 @@ mod tests {
             twin_resolve_kind(false, true, true, b"", false, true, false, false, b""),
             b"twin"
         );
+        assert!(validate_dupe_extras_header(4, 0, 0));
+        assert!(validate_repair_job_header(7, 7, 10, 0, 0));
+        assert!(eval_restored_output_init(1, true, false, true, false, false));
+        assert_eq!(calc_staged_fallback(false, 2, 2, 1, true, 0), (1, 0));
+        assert!(validate_article_count(50, true, 100));
+        assert!(need_staged_file_check(false, 9, 0, 2, 1024, 512, 1, 3, true, false));
+        assert_eq!(calc_volume_slot_size(0, 10), (true, 60));
     }
 }

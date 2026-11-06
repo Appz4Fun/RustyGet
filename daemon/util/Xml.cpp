@@ -84,5 +84,5 @@ void AddArrayNode(xmlNodePtr structNode, const char* name, const std::vector<xml
 	xmlAddChild(structNode, memberNode);
 }
 
-const char* BoolToStr(bool value) noexcept { return nzbget_rs_awc_xml_bool_to_str(value ? 1 : 0); }
+const char* BoolToStr(bool value) noexcept { return value ? "1" : "0"; }
 }  // namespace Xml

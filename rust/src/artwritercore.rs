@@ -1,13 +1,7 @@
-// Hot-path Rust implementations for `ArticleWriter`, `ArticleCache`, `MemoryMonitor`,
-// `Extension`, `SectionValidator`, `SectionGroupValidator`, `SchedulerTasksValidator`,
-// `FeedsValidator`, `CategoriesValidator`, `Unpack`, `Thread`, `Xml`, `Json`,
-// `Network`, `Observer`, `WorkState`, `NewsServer`, `OpenSSL`, and `Utf8`.
+//! Rust domain logic for `ArticleWriter`, `ArticleCache`, and `MemoryMonitor`
+//! (`daemon/nntp/ArticleWriter.cpp`).
 
 use std::ffi::CStr;
-
-// ============================================================================
-// ArticleWriter, ArticleCache & MemoryMonitor (`daemon/nntp/ArticleWriter.cpp`)
-// ============================================================================
 
 /// Formats `<tmp_dir><sep><file_id>.<part_num:03>` as in `ArticleWriter::BuildOutputFilename`.
 pub fn article_writer_format_result_filename(
@@ -67,6 +61,60 @@ pub fn article_writer_classify_completion_status(
     }
 }
 
+/// Advances the article write pointer (when not in raw mode) and checks whether the article boundary was exceeded.
+#[inline]
+pub fn article_writer_advance_and_check_range(
+    raw_article: bool,
+    cur_ptr: i32,
+    len: i32,
+    article_size: i32,
+) -> (i32, bool) {
+    let new_ptr = if !raw_article {
+        cur_ptr.wrapping_add(len)
+    } else {
+        cur_ptr
+    };
+    (new_ptr, new_ptr > article_size)
+}
+
+/// Resolves `(new_output_initialized, direct_write)` in `ArticleWriter::CompleteFileParts`.
+#[inline]
+pub fn article_writer_resolve_direct_write_ready(
+    direct_write_opt: bool,
+    force_direct_write: bool,
+    output_initialized: bool,
+    has_own_out: bool,
+    has_force_dest: bool,
+) -> (bool, bool) {
+    let want_direct = direct_write_opt || force_direct_write;
+    let new_init = if want_direct
+        && !output_initialized
+        && (has_own_out || (force_direct_write && has_force_dest))
+    {
+        true
+    } else {
+        output_initialized
+    };
+    (new_init, want_direct && new_init)
+}
+
+/// Classifies the output file setup scenario in `ArticleWriter::SetupOutputFile`:
+/// `1` = standard assembly (`.tmp`), `2` = direct write (`omReadWrite`), `3` = raw mode (create dir), `0` = none.
+pub fn article_writer_classify_setup_output_scenario(
+    raw_article: bool,
+    direct_write: bool,
+) -> i32 {
+    if !raw_article && !direct_write {
+        1
+    } else if direct_write {
+        2
+    } else if raw_article {
+        3
+    } else {
+        0
+    }
+}
+
 /// Matches `fileInfo->GetCachedArticles() > 0 && (fileInfo->GetActiveDownloads() == 0 || flushEverything) && (!fileInfo->GetNzbInfo()->GetSkipDiskWrite() || flushEverything)`
 /// in `ArticleCache::CheckFlush`.
 pub fn article_cache_can_flush_file(
@@ -78,6 +126,20 @@ pub fn article_cache_can_flush_file(
     cached_articles > 0
         && (active_downloads == 0 || flush_everything)
         && (!skip_disk_write || flush_everything)
+}
+
+/// Evaluates whether `ArticleCache::Alloc` can allocate `size` bytes within `effective_limit` and whether the cache was previously empty.
+#[inline]
+pub fn article_cache_can_alloc(
+    effective_limit: usize,
+    allocated: usize,
+    size: usize,
+) -> (bool, bool) {
+    let can_alloc = effective_limit > 0
+        && allocated
+            .checked_add(size)
+            .is_some_and(|sum| sum <= effective_limit);
+    (can_alloc, allocated == 0)
 }
 
 /// Matches `MemoryMonitor::GetTierName`.
@@ -107,131 +169,96 @@ pub fn memory_monitor_effective_downloads_limit(
     }
 }
 
-// ============================================================================
-// Extension & Xml (`daemon/extension/Extension.cpp`, `daemon/util/Xml.cpp`)
-// ============================================================================
-
-/// Matches `Xml::BoolToStr(bool value)` (`"1"` or `"0"`).
-pub fn xml_bool_to_str(value: bool) -> &'static CStr {
-    if value {
-        c"1"
+/// Computes the effective par buffer MB when the pressure tier is Critical or Normal in `MemoryMonitor::GetEffectiveParBufferMB`.
+#[inline]
+pub fn memory_monitor_calc_critical_or_normal_par_buffer(
+    tier: i32,
+    configured_mb: i32,
+    tier_critical: i32,
+    tier_normal: i32,
+) -> (bool, i32) {
+    if tier == tier_critical {
+        let mb = if configured_mb == 0 {
+            0
+        } else {
+            configured_mb.min(16).max(8)
+        };
+        (true, mb)
+    } else if tier == tier_normal {
+        (true, configured_mb)
     } else {
-        c"0"
+        (false, 0)
     }
 }
 
-/// Selects one of the 5 script kind flags (`0=post, 1=scan, 2=queue, 3=scheduler, 4=feed`).
-pub fn extension_select_kind_flag(
-    post: bool,
-    scan: bool,
-    queue: bool,
-    scheduler: bool,
-    feed: bool,
-    which: i32,
-) -> bool {
-    match which {
-        0 => post,
-        1 => scan,
-        2 => queue,
-        3 => scheduler,
-        4 => feed,
-        _ => false,
-    }
-}
-
-// ============================================================================
-// SystemHealth Validators (`SectionValidator`, `SectionGroupValidator`,
-// `SchedulerTasksValidator`, `FeedsValidator`, `CategoriesValidator`)
-// ============================================================================
-
-// ============================================================================
-// Unpack (`daemon/util/Unpack.cpp`)
-// ============================================================================
-
-/// Matches `ExtractorBase::MakePassword`: `"-p-"` when empty, else `"-p<password>"`.
-pub fn unpack_make_password_arg(password: &[u8]) -> Vec<u8> {
-    if password.is_empty() {
-        b"-p-".to_vec()
+/// Computes `(eff_cache, eff_par, eff_limit)` in `MemoryMonitor::UpdateState`.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub fn memory_monitor_resolve_tier_limits(
+    next_tier: i32,
+    raw_sample: i32,
+    cfg_cache: u32,
+    cfg_par: u32,
+    cfg_limit: u32,
+    tier_normal: i32,
+    tier_constrained: i32,
+    tier_critical: i32,
+    rs_eff_cache: u32,
+    rs_eff_par: u32,
+) -> (u32, u32, u32) {
+    let eff_cache = if next_tier == tier_critical {
+        0
+    } else if next_tier == tier_normal {
+        cfg_cache
+    } else if raw_sample == next_tier {
+        rs_eff_cache
     } else {
-        let mut out = Vec::with_capacity(2 + password.len());
-        out.extend_from_slice(b"-p");
-        out.extend_from_slice(password);
-        out
-    }
+        cfg_cache / 2
+    };
+
+    let eff_par = if next_tier == tier_critical {
+        if cfg_par == 0 {
+            0
+        } else {
+            cfg_par.min(16).max(8)
+        }
+    } else if next_tier == tier_normal {
+        cfg_par
+    } else if raw_sample == next_tier {
+        rs_eff_par
+    } else {
+        (cfg_par / 2).max(16)
+    };
+
+    let eff_limit = if next_tier == tier_critical {
+        (cfg_limit / 4).max(1)
+    } else if next_tier == tier_constrained {
+        (cfg_limit / 2).max(2)
+    } else {
+        cfg_limit
+    };
+
+    (eff_cache, eff_par, eff_limit)
 }
 
-/// Classifies tool path check in `Unpack::MakeExtractor::validateTool`:
-/// - `1`: `tool_empty` (not configured)
-/// - `2`: `has_err` (failed to access)
-/// - `3`: `!exists` (doesn't exist)
-/// - `0`: valid
-pub fn unpack_validate_tool_status(tool_empty: bool, has_err: bool, exists: bool) -> i32 {
-    if tool_empty {
+/// Classifies the action for `MemoryMonitor::ApplyTierTransition`:
+/// `1` = CRITICAL transition, `2` = CONSTRAINED transition, `3` = return to NORMAL, `0` = no-op.
+pub fn memory_monitor_classify_tier_transition_action(
+    old_tier: i32,
+    new_tier: i32,
+    tier_normal: i32,
+    tier_constrained: i32,
+    tier_critical: i32,
+) -> i32 {
+    if new_tier == tier_critical {
         1
-    } else if has_err {
+    } else if new_tier == tier_constrained {
         2
-    } else if !exists {
+    } else if new_tier == tier_normal && old_tier != tier_normal {
         3
     } else {
         0
     }
-}
-
-// ============================================================================
-// Thread, Json, Network, Observer, WorkState, NewsServer, OpenSSL, Utf8
-// ============================================================================
-
-/// Matches `if (terminated) { --m_threadCount; }` in `Thread::Kill`.
-pub fn thread_adjust_count_on_kill(terminated: bool, cur_count: i32) -> i32 {
-    if terminated {
-        cur_count - 1
-    } else {
-        cur_count
-    }
-}
-
-/// Matches `if (ec) return std::nullopt;` in `Json::Deserialize`.
-pub fn json_has_error(err_val: i32) -> bool {
-    err_val != 0
-}
-
-/// Matches `result.statusCode == 200` in `System::GetNetwork`.
-pub fn network_is_http_status_ok(status_code: i32) -> bool {
-    status_code == 200
-}
-
-/// Finds the index of `target` in `observers` for `Subject::Detach`.
-pub fn observer_find_index(observers: &[usize], target: usize) -> isize {
-    for (idx, &obs) in observers.iter().enumerate() {
-        if obs == target {
-            return idx as isize;
-        }
-    }
-    -1
-}
-
-/// Returns `true` when `WorkState::Changed` should notify observers with `nullptr`.
-pub fn work_state_should_notify() -> bool {
-    true
-}
-
-/// Formats default `NewsServer` name (`server<id>`) when `name` is empty.
-pub fn news_server_format_default_name(name: &[u8], id: i32) -> Vec<u8> {
-    if !name.is_empty() {
-        name.to_vec()
-    } else {
-        format!("server{id}").into_bytes()
-    }
-}
-
-/// Returns `true` when `OpenSSL::StopSSLThread` should invoke `OPENSSL_thread_stop()`.
-pub fn openssl_should_stop_thread(is_libressl: bool) -> bool {
-    !is_libressl
-}
-
-/// Returns `true` when a UTF-8 / wide input string view is empty in `Utf8::Utf8ToWide` / `WideToUtf8`.
-pub fn utf8_is_empty_len(len: usize) -> bool {
-    len == 0
 }
 
 #[cfg(test)]
@@ -263,9 +290,26 @@ mod tests {
         assert_eq!(article_writer_classify_completion_status(10, 10, 0, 0), 1);
         assert_eq!(article_writer_classify_completion_status(10, 8, 2, 0), 2);
         assert_eq!(article_writer_classify_completion_status(10, 8, 0, 0), 0);
+        assert_eq!(
+            article_writer_advance_and_check_range(false, 100, 50, 200),
+            (150, false)
+        );
+        assert_eq!(
+            article_writer_advance_and_check_range(false, 180, 50, 200),
+            (230, true)
+        );
+        assert_eq!(
+            article_writer_resolve_direct_write_ready(true, false, false, true, false),
+            (true, true)
+        );
+        assert_eq!(article_writer_classify_setup_output_scenario(false, false), 1);
+        assert_eq!(article_writer_classify_setup_output_scenario(false, true), 2);
+        assert_eq!(article_writer_classify_setup_output_scenario(true, false), 3);
         assert!(article_cache_can_flush_file(3, 0, false, false));
         assert!(!article_cache_can_flush_file(3, 1, false, false));
         assert!(article_cache_can_flush_file(3, 1, true, true));
+        assert_eq!(article_cache_can_alloc(1000, 0, 500), (true, true));
+        assert_eq!(article_cache_can_alloc(1000, 600, 500), (false, false));
         assert_eq!(
             memory_monitor_tier_name(2, 1, 2).to_bytes(),
             b"CRITICAL"
@@ -273,26 +317,17 @@ mod tests {
         assert_eq!(memory_monitor_effective_downloads_limit(2, 20, 1, 2), 5);
         assert_eq!(memory_monitor_effective_downloads_limit(1, 20, 1, 2), 10);
         assert_eq!(memory_monitor_effective_downloads_limit(0, 20, 1, 2), 20);
-    }
-
-    #[test]
-    fn test_validators_and_utility_helpers() {
-        assert_eq!(xml_bool_to_str(true).to_bytes(), b"1");
-        assert_eq!(xml_bool_to_str(false).to_bytes(), b"0");
-        assert!(extension_select_kind_flag(true, false, false, false, false, 0));
-        assert!(!extension_select_kind_flag(true, false, false, false, false, 1));
-        assert_eq!(unpack_make_password_arg(b""), b"-p-");
-        assert_eq!(unpack_make_password_arg(b"secret"), b"-psecret");
-        assert_eq!(unpack_validate_tool_status(false, false, true), 0);
-        assert_eq!(unpack_validate_tool_status(true, false, false), 1);
-        assert_eq!(thread_adjust_count_on_kill(true, 4), 3);
-        assert!(json_has_error(1));
-        assert!(network_is_http_status_ok(200));
-        assert_eq!(observer_find_index(&[10, 20, 30], 20), 1);
-        assert_eq!(observer_find_index(&[10, 20, 30], 99), -1);
-        assert!(work_state_should_notify());
-        assert_eq!(news_server_format_default_name(b"", 3), b"server3");
-        assert!(openssl_should_stop_thread(false));
-        assert!(utf8_is_empty_len(0));
+        assert_eq!(
+            memory_monitor_calc_critical_or_normal_par_buffer(2, 64, 2, 0),
+            (true, 16)
+        );
+        assert_eq!(
+            memory_monitor_resolve_tier_limits(2, 2, 500, 250, 20, 0, 1, 2, 125, 64),
+            (0, 16, 5)
+        );
+        assert_eq!(
+            memory_monitor_classify_tier_transition_action(0, 2, 0, 1, 2),
+            1
+        );
     }
 }

@@ -36,7 +36,7 @@ namespace System
 		{
 			::Network::HttpClient httpClient;
 			auto result = httpClient.GET(IP_SERVICE).get();
-			if (nzbget_rs_awc_network_is_http_status_ok((int)result.statusCode) != 0)
+			if (result.statusCode == 200)
 			{
 				network.publicIP = std::move(result.body);
 				network.privateIP = httpClient.GetLocalIP();

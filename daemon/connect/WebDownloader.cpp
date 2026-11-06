@@ -96,8 +96,7 @@ void WebDownloader::Run()
 			}
 		}
 
-		if (nzbget_rs_rrd_webdl_should_abort_retry_loop(
-			IsStopped() ? 1 : 0, m_force ? 1 : 0, g_WorkState->GetPauseDownload() ? 1 : 0) != 0)
+		if (IsStopped() || (!m_force && g_WorkState->GetPauseDownload()))
 		{
 			Status = adRetry;
 			break;
@@ -109,14 +108,16 @@ void WebDownloader::Run()
 			break;
 		}
 
-		nzbget_rs_rrd_webdl_step_retry_counters(
+		nzbget_rs_webdl_step_retry_counters(
 			(int)Status, (int)adConnectError,
 			remainedDownloadRetries, remainedConnectRetries,
 			&remainedDownloadRetries, &remainedConnectRetries);
 	}
 
-	Status = (EStatus)nzbget_rs_rrd_webdl_resolve_final_loop_status(
-		(int)Status, (int)adFinished, (int)adRetry, (int)adFailed);
+	if (Status != adFinished && Status != adRetry)
+	{
+		Status = adFailed;
+	}
 
 	if (Status == adFailed)
 	{
@@ -410,7 +411,7 @@ WebDownloader::EStatus WebDownloader::DownloadBody()
 	m_outFile.Close();
 
 	int warnIncomplete = 0;
-	Status = (EStatus)nzbget_rs_rrd_webdl_resolve_body_end_status(
+	Status = (EStatus)nzbget_rs_webdl_resolve_body_end_status(
 		end ? 1 : 0, (int)Status, IsStopped() ? 1 : 0,
 		(int)adRunning, (int)adFailed, (int)adFinished, &warnIncomplete);
 	if (warnIncomplete)

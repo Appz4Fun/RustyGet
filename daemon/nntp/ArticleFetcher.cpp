@@ -305,12 +305,12 @@ ArticleFetcher::FetchedArticle ArticleFetcher::FetchFromConnection(NntpConnectio
 		for (const CString& group : groups)
 		{
 			response = connection->JoinGroup(group);
-			if (nzbget_rs_rrd_article_dl_is_join_group_ok(response) != 0)
+			if (nzbget_rs_nntp_article_dl_is_join_group_ok(response) != 0)
 			{
 				break;
 			}
 		}
-		if (nzbget_rs_rrd_article_dl_is_join_group_ok(response) == 0)
+		if (nzbget_rs_nntp_article_dl_is_join_group_ok(response) == 0)
 		{
 			detail("Stream repair: could not join groups on %s for %s",
 				connection->GetNewsServer()->GetName(), messageId);
@@ -338,7 +338,7 @@ ArticleFetcher::FetchedArticle ArticleFetcher::FetchFromConnection(NntpConnectio
 		result.Transient = true;
 		return result;
 	}
-	if (nzbget_rs_rrd_article_dl_is_join_group_ok(response) == 0)
+	if (nzbget_rs_nntp_article_dl_is_join_group_ok(response) == 0)
 	{
 		detail("Stream repair: article %s not available on %s",
 			messageId, connection->GetNewsServer()->GetName());

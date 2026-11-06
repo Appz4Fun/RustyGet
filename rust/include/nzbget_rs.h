@@ -2360,23 +2360,41 @@ int nzbget_rs_euh_disk_service_interval(
     int waiting_required_dir, int disk_space_mb, int downloading, int sleep_val);
 int nzbget_rs_euh_disk_service_is_low_space(int64_t available_bytes, int disk_space_mb);
 
-int nzbget_rs_dur_article_dl_is_retention_failure(
+int nzbget_rs_nntp_article_dl_is_retention_failure(
     int retention_days, int64_t file_time, int64_t cur_time, int* out_age_days);
-int nzbget_rs_dur_article_dl_all_servers_on_level_failed(
+int nzbget_rs_nntp_article_dl_all_servers_on_level_failed(
     int level, const int32_t* cand_ids, const int32_t* cand_levels,
     const int32_t* cand_groups, const uint8_t* cand_avail, size_t cand_count,
     const int32_t* failed_ids, const int32_t* failed_levels,
     const int32_t* failed_groups, size_t failed_count);
-int nzbget_rs_dur_article_dl_resolve_final_status(
+int nzbget_rs_nntp_article_dl_resolve_final_status(
     int status, int is_duplicate, int is_stopped, int ad_finished,
     int ad_failed, int ad_retry, int ad_fatal_error);
-int nzbget_rs_dur_article_dl_should_throttle_bandwidth(
-    int is_stopped, float speed_limit, float cur_speed, float mom_speed);
-int nzbget_rs_dur_article_dl_classify_decode_status(
+int nzbget_rs_nntp_article_dl_classify_decode_status(
     int raw_article, int decoder_status, int is_yenc, int range_exceeded);
-
-int nzbget_rs_dur_direct_unpack_is_insert_disk_prompt(
-    const char* buf, size_t i, int ch);
+void nzbget_rs_nntp_article_dl_eval_level_exhaustion(
+    int all_failed, int level, int max_norm_level,
+    int* out_advance_level, int* out_new_level, int* out_break_all_failed);
+int nzbget_rs_nntp_article_dl_handle_content_rejected(
+    int content_rejected, int dupe_fallback_round, int cur_status,
+    int ad_failed, int remained_retries, int* out_should_break,
+    int* out_status, int* out_content_rejected, int* out_remained_retries);
+int nzbget_rs_nntp_article_dl_classify_write_failure(
+    int local_write_error, int ad_fatal_error, int ad_failed,
+    int* out_content_rejected);
+void nzbget_rs_nntp_article_dl_normalize_connect_and_decrement_retries(
+    int connected, int status, int ad_connect_error, int ad_failed, int remained_retries,
+    int* out_connected, int* out_status, int* out_retries);
+int nzbget_rs_nntp_article_dl_is_join_group_ok(const char* response);
+int nzbget_rs_nntp_article_dl_classify_attempt_stat(
+    int status, int ad_finished, int ad_failed, int ad_not_found, int ad_crc_error,
+    int* out_success, int* out_failed);
+int nzbget_rs_nntp_article_dl_should_advance_server_list(
+    int has_want_server, int connected, int retention_failure,
+    int optional_blocked, int auth_rejected, int* out_push_failed_server);
+void nzbget_rs_nntp_server_pool_eval_block_server(
+    int64_t prev_block_time, int64_t cur_time, int retry_interval,
+    int* out_new_block, int* out_should_warn);
 
 size_t nzbget_rs_awc_article_writer_format_result_filename(
     const char* tmp_dir, char sep, int file_id, int part_num,
@@ -2390,30 +2408,31 @@ int nzbget_rs_awc_article_writer_is_within_dest_dir(
     char sep1, char sep2);
 int nzbget_rs_awc_article_writer_classify_completion_status(
     int total_articles, int success_articles, int missed_articles, int failed_articles);
+int nzbget_rs_awc_article_writer_advance_and_check_range(
+    int raw_article, int* inout_ptr, int len, int article_size);
+int nzbget_rs_awc_article_writer_resolve_direct_write_ready(
+    int direct_write_opt, int force_direct_write, int output_initialized,
+    int has_own_out, int has_force_dest, int* out_output_initialized);
+int nzbget_rs_awc_article_writer_classify_setup_output_scenario(
+    int raw_article, int direct_write);
 int nzbget_rs_awc_article_cache_can_flush_file(
     int cached_articles, int active_downloads, int skip_disk_write, int flush_everything);
+int nzbget_rs_awc_article_cache_can_alloc(
+    size_t effective_limit, size_t allocated, size_t size, int* out_was_empty);
 const char* nzbget_rs_awc_memory_monitor_tier_name(
     int tier, int constrained, int critical);
 int nzbget_rs_awc_memory_monitor_effective_downloads_limit(
     int tier, int configured_limit, int constrained, int critical);
-
-const char* nzbget_rs_awc_xml_bool_to_str(int value);
-
-size_t nzbget_rs_awc_unpack_make_password_arg(
-    const char* password, size_t password_len, char* out_buf, size_t out_cap);
-int nzbget_rs_awc_unpack_validate_tool_status(
-    int tool_empty, int has_err, int exists);
-
-int nzbget_rs_awc_thread_adjust_count_on_kill(int terminated, int cur_count);
-int nzbget_rs_awc_json_has_error(int err_val);
-int nzbget_rs_awc_network_is_http_status_ok(int status_code);
-ptrdiff_t nzbget_rs_awc_observer_find_index(
-    const uintptr_t* observers, size_t count, uintptr_t target);
-int nzbget_rs_awc_work_state_should_notify(void);
-size_t nzbget_rs_awc_news_server_format_default_name(
-    const char* name, int id, char* out_buf, size_t out_cap);
-int nzbget_rs_awc_openssl_should_stop_thread(int is_libressl);
-int nzbget_rs_awc_utf8_is_empty_len(size_t len);
+int nzbget_rs_awc_memory_monitor_calc_critical_or_normal_par_buffer(
+    int tier, int configured_mb, int tier_critical, int tier_normal, int* out_mb);
+void nzbget_rs_awc_memory_monitor_resolve_tier_limits(
+    int next_tier, int raw_sample, uint32_t cfg_cache, uint32_t cfg_par,
+    uint32_t cfg_limit, int tier_normal, int tier_constrained, int tier_critical,
+    uint32_t rs_eff_cache, uint32_t rs_eff_par,
+    uint32_t* out_eff_cache, uint32_t* out_eff_par, uint32_t* out_eff_limit);
+int nzbget_rs_awc_memory_monitor_classify_tier_transition_action(
+    int old_tier, int new_tier, int tier_normal, int tier_constrained,
+    int tier_critical);
 
 int nzbget_rs_ccm_conn_select_ai_family(
     int ip_version, int ip_v4, int ip_v6,
@@ -2542,72 +2561,25 @@ int nzbget_rs_cdn_article_batch_can_claim_next(
     size_t next_claim, size_t requests_len, size_t next_deliver,
     int window_parts, int64_t buffered_bytes, int64_t max_buffered_bytes);
 
-int nzbget_rs_dad_diskstate_validate_dupe_extras_header(
+int nzbget_rs_dsp_validate_dupe_extras_header(
     int scan_cnt, int recovered_articles, int recovered_holes);
-int nzbget_rs_dad_diskstate_validate_repair_job_header(
+int nzbget_rs_dsp_validate_repair_job_header(
     int scan_cnt, int expected_cnt, int file_id, int par_file, int failed_articles);
-int nzbget_rs_dad_diskstate_should_apply_url_status(
-    int kind, int nk_nzb, int url_status, int ls_failed);
-int nzbget_rs_dad_diskstate_normalize_script_status(
-    int status, int format_version);
-int nzbget_rs_dad_diskstate_eval_restored_output_init(
+int nzbget_rs_dsp_eval_restored_output_init(
     int output_initialized, int direct_write, int force_direct_write,
     int has_own_out_file, int has_out_tmp, int has_force_dest);
-int nzbget_rs_dad_diskstate_calc_staged_fallback(
+int nzbget_rs_dsp_calc_staged_fallback(
     int completed, int article_status, int ai_finished,
     int dupe_fallback_round, int has_result_filename,
     int ai_undefined, int* out_saved_status);
-int nzbget_rs_dad_diskstate_validate_article_count(
+int nzbget_rs_dsp_validate_article_count(
     int size, int has_articles, int articles_len);
-int nzbget_rs_dad_diskstate_need_staged_file_check(
+int nzbget_rs_dsp_need_staged_file_check(
     int completed, int format_version, int status_int, int ai_finished,
     int64_t segment_offset, int segment_size, int staged_fallback,
     int part_number, int direct_write, int force_direct_write);
-int nzbget_rs_dad_diskstate_is_digits_only_filename(const char* filename);
-int nzbget_rs_dad_diskstate_should_load_file_state(
-    char suffix, int continue_partial, int cache_was_active);
-int nzbget_rs_dad_diskstate_calc_volume_slot_size(
+int nzbget_rs_dsp_calc_volume_slot_size(
     int slot_index, int arr_size, int* out_target_size);
-
-int nzbget_rs_dad_article_writer_should_check_dupe_file(
-    int format, int ef_yenc, int dupe_check, int dupe_mode,
-    int dm_force, int many_dupe_files);
-int nzbget_rs_dad_article_writer_is_duplicate_dest(
-    int output_initialized, int is_own_output_file,
-    int has_filename, int dest_exists);
-int nzbget_rs_dad_article_writer_can_use_article_cache(
-    int article_cache_mb, int raw_article, int format, int ef_yenc,
-    int is_dupe_fallback, int is_critical);
-int nzbget_rs_dad_article_writer_advance_and_check_range(
-    int raw_article, int* inout_ptr, int len, int article_size);
-int nzbget_rs_dad_article_writer_resolve_direct_write_ready(
-    int direct_write_opt, int force_direct_write, int output_initialized,
-    int has_own_out, int has_force_dest, int* out_output_initialized);
-int nzbget_rs_dad_article_writer_need_gap_fill(
-    int raw_article, int direct_write, int64_t segment_offset, int64_t out_pos);
-int nzbget_rs_dad_article_cache_can_alloc(
-    size_t effective_limit, size_t allocated, size_t size, int* out_was_empty);
-int nzbget_rs_dad_memory_monitor_calc_critical_or_normal_par_buffer(
-    int tier, int configured_mb, int tier_critical, int tier_normal, int* out_mb);
-void nzbget_rs_dad_memory_monitor_resolve_tier_limits(
-    int next_tier, int raw_sample, uint32_t cfg_cache, uint32_t cfg_par,
-    uint32_t cfg_limit, int tier_normal, int tier_constrained, int tier_critical,
-    uint32_t rs_eff_cache, uint32_t rs_eff_par,
-    uint32_t* out_eff_cache, uint32_t* out_eff_par, uint32_t* out_eff_limit);
-
-int nzbget_rs_dad_article_dl_should_abort_for_work_state(
-    int is_stopped, int pause_download, int quota_reached, int force,
-    int download_held, int extra_priority, int gen_changed);
-int nzbget_rs_dad_article_dl_classify_attempt_stat(
-    int status, int ad_finished, int ad_failed, int ad_not_found, int ad_crc_error,
-    int* out_success, int* out_failed);
-int nzbget_rs_dad_article_dl_should_retry_same_server(
-    int connected, int status, int ad_failed, int remained_retries, int retention_failure);
-int nzbget_rs_dad_article_dl_should_advance_server_list(
-    int has_want_server, int connected, int retention_failure,
-    int optional_blocked, int auth_rejected, int* out_push_failed_server);
-int nzbget_rs_dad_article_dl_should_pace_critical_uncached(
-    int is_stopped, int has_cached_buffer, int is_critical, int is_flushing);
 
 void nzbget_rs_queue_coord_calc_propagation_wait_log_mins(
     int64_t file_time, int propagation_delay, int64_t cur_date,
@@ -2661,44 +2633,29 @@ int nzbget_rs_queue_coord_eval_discard_direct_rename_file(
 int nzbget_rs_queue_coord_validate_split_file_state(
     int active_downloads, int completed_articles, int has_post_info, int same_nzb);
 
-/* DirectRenamer, RarReader, Repair, ArticleDownloader, WebDownloader & NzbFile Hot-Path FFI (`renamerarrepdl.rs`) */
-int nzbget_rs_rrd_article_dl_resolve_initial_retries(int opt_article_retries);
-void nzbget_rs_rrd_article_dl_normalize_connect_and_decrement_retries(
-    int connected, int status, int ad_connect_error, int ad_failed, int remained_retries,
-    int* out_connected, int* out_status, int* out_retries);
-int nzbget_rs_rrd_article_dl_is_join_group_ok(const char* response);
-int nzbget_rs_rrd_article_dl_should_disconnect_on_free(
-    int keep_connected, int conn_status, int cs_cancelled);
-int nzbget_rs_rrd_webdl_should_abort_retry_loop(
-    int is_stopped, int force, int pause_download);
-void nzbget_rs_rrd_webdl_step_retry_counters(
+/* Consolidated WebDownloader & StatMeter FFI (`webdownload.rs`, `statmeter.rs`) */
+void nzbget_rs_webdl_step_retry_counters(
     int status, int ad_connect_error, int rem_dl, int rem_conn,
     int* out_rem_dl, int* out_rem_conn);
-int nzbget_rs_rrd_webdl_resolve_final_loop_status(
-    int status, int ad_finished, int ad_retry, int ad_failed);
-int nzbget_rs_rrd_webdl_resolve_body_end_status(
+int nzbget_rs_webdl_resolve_body_end_status(
     int end, int status, int is_stopped,
     int ad_running, int ad_failed, int ad_finished, int* out_warn_incomplete);
 
-/* ServerPool, StatMeter, PrePostProcessor, RarRenamer, DupeMatcher, Rename & ParChecker Hot-Path FFI (`poolstatprepost.rs`) */
-int nzbget_rs_psp_server_pool_should_increment_level_on_free(
-    int norm_level, int active);
-void nzbget_rs_psp_server_pool_eval_block_server(
-    int64_t prev_block_time, int64_t cur_time, int retry_interval,
-    int* out_new_block, int* out_should_warn);
-int nzbget_rs_psp_server_pool_should_erase_disabled_connection(
-    int in_use, int norm_level, int active);
-int nzbget_rs_psp_statmeter_calc_local_time_offset(
+void nzbget_rs_statmeter_accum_day_and_total_volume(
+    int day_slot, int64_t cur_day_bytes, int cur_day_failed,
+    int cur_day_success, int64_t cur_total_bytes, int64_t cur_custom_bytes,
+    int64_t add_bytes, int add_failed, int add_success,
+    int* out_update_day, int64_t* out_day_bytes, int* out_day_failed,
+    int* out_day_success, int64_t* out_total_bytes, int64_t* out_custom_bytes);
+int nzbget_rs_statmeter_calc_local_time_offset(
     int64_t utc_time, int64_t loc_time, int time_correction,
     int* out_local_delta);
-int64_t nzbget_rs_psp_statmeter_calc_resumed_download_start(
+int64_t nzbget_rs_statmeter_calc_resumed_download_start(
     int64_t prev_start_download, int64_t cur_time, int64_t paused_from);
-int nzbget_rs_psp_statmeter_calc_month_slots_prev_month(
+int nzbget_rs_statmeter_calc_month_slots_prev_month(
     int64_t loc_cur_time, int64_t prev_month_time);
-int nzbget_rs_psp_statmeter_calc_month_slots_same_month(
+int nzbget_rs_statmeter_calc_month_slots_same_month(
     int tm_mday, int quota_start_day);
-void nzbget_rs_psp_rar_renamer_calc_old_extension_parts(
-    int volume_no, uint8_t* out_ch, int* out_num);
 
 /* QueueScript, PostScript, ScriptConfig, ScanScript, CommandScript, SchedulerScript, FeedFile & FeedInfo Hot-Path FFI (`scriptfeedcfg.rs`) */
 int nzbget_rs_sfc_sched_script_should_format_task_suffix(int task_id);
@@ -2897,26 +2854,6 @@ void nzbget_rs_queue_coord_discard_downloaded_articles_counters(
     int64_t* out_nzb_par_cur_succ_size, int* out_nzb_cur_fail_art,
     int64_t* out_nzb_cur_fail_size, int64_t* out_nzb_par_cur_fail_size,
     int64_t* out_file_rem_size);
-int nzbget_rs_cwp_article_dl_handle_content_rejected(
-    int content_rejected, int dupe_fallback_round, int cur_status,
-    int ad_failed, int remained_retries, int* out_should_break,
-    int* out_status, int* out_content_rejected, int* out_remained_retries);
-int nzbget_rs_cwp_article_dl_calc_line_buf_capacity(int read_chunk);
-int nzbget_rs_cwp_article_dl_classify_write_failure(
-    int local_write_error, int ad_fatal_error, int ad_failed,
-    int* out_content_rejected);
-int nzbget_rs_cwp_article_writer_select_article_size(int article_size, int info_size);
-int nzbget_rs_cwp_article_writer_is_direct_write_enabled(
-    int opt_direct_write, int force_direct_write, int format, int ef_yenc,
-    int is_dupe_fallback);
-int nzbget_rs_cwp_article_writer_should_skip_disk_write(
-    int has_file_and_nzb, int nzb_skip_disk_write, int opt_skip_write);
-int64_t nzbget_rs_cwp_article_writer_calc_gap_fill_chunk(
-    int64_t segment_offset, int64_t position, int64_t buffer_size);
-ptrdiff_t nzbget_rs_cwp_article_cache_calc_realloc_delta(int new_size, int old_size);
-int nzbget_rs_cwp_memory_monitor_clamp_interval(int interval);
-int nzbget_rs_cwp_server_pool_calc_missing_connections(
-    int existing_connections, int max_connections);
 
 // XmlRpc, Options, NZBGet & RemoteClient Hot-Path C ABI (rust/src/rpcoptclient.rs)
 int nzbget_rs_roc_xmlrpc_multicall_needs_array_wrap(const char* resp);
@@ -3160,57 +3097,6 @@ uint64_t nzbget_rs_din_nzb_reader_select_median_article_bytes(
     const uint64_t* sorted_sizes, size_t len);
 int nzbget_rs_din_posting_should_clear_sketch_cache(
     size_t cache_len, size_t max_entries);
-
-int nzbget_rs_aws_article_dl_should_wait_for_connection(
-    int has_conn, int is_stopped, int config_gen, int pool_gen);
-int nzbget_rs_aws_article_dl_eval_auth_rejected(
-    int connected, int has_conn, int conn_auth_rejected);
-int nzbget_rs_aws_article_dl_should_block_failed_server(
-    int connected, int has_conn, int is_stopped);
-int nzbget_rs_aws_article_dl_keep_conn_on_no_retry(
-    int status, int ad_finished, int ad_not_found);
-void nzbget_rs_aws_article_dl_eval_level_exhaustion(
-    int all_failed, int level, int max_norm_level,
-    int* out_advance_level, int* out_new_level, int* out_break_all_failed);
-int nzbget_rs_aws_article_writer_should_init_direct_write_file(
-    int direct_write, int is_dupe_fallback, int output_initialized,
-    int skip_disk_write, int file_exists);
-int nzbget_rs_aws_article_writer_should_wait_for_cache_flush(
-    int has_data, int cache_flushing, int is_critical);
-int nzbget_rs_aws_article_writer_should_memcpy_cached_segment(
-    int raw_article, int has_cached_data);
-int nzbget_rs_aws_article_writer_should_move_temp_to_result(
-    int direct_write, int has_cached_data, int skip_disk_write);
-int nzbget_rs_aws_article_writer_should_realloc_cached_segment(
-    int article_size, int article_ptr);
-int nzbget_rs_aws_article_writer_classify_setup_output_scenario(
-    int raw_article, int direct_write);
-int nzbget_rs_aws_article_writer_is_staged_dupe_commit_needed(
-    int direct_write, int dupe_fallback_round, int has_result_filename,
-    int skip_disk_write);
-int nzbget_rs_aws_article_writer_is_standard_part_append_needed(
-    int raw_article, int direct_write, int skip_disk_write);
-int nzbget_rs_aws_article_writer_should_cleanup_hardlinked_temp(
-    int final_path_empty, int is_hard_linked, int inter_dir_empty);
-int nzbget_rs_aws_article_writer_has_pending_file_writes(
-    int output_initialized, int output_filename_empty, int active_downloads,
-    int guarded_output_initialized);
-int nzbget_rs_aws_memory_monitor_classify_tier_transition_action(
-    int old_tier, int new_tier, int tier_normal, int tier_constrained,
-    int tier_critical);
-void nzbget_rs_aws_statmeter_accum_day_and_total_volume(
-    int day_slot, int64_t cur_day_bytes, int cur_day_failed,
-    int cur_day_success, int64_t cur_total_bytes, int64_t cur_custom_bytes,
-    int64_t add_bytes, int add_failed, int add_success,
-    int* out_update_day, int64_t* out_day_bytes, int* out_day_failed,
-    int* out_day_success, int64_t* out_total_bytes, int64_t* out_custom_bytes);
-int nzbget_rs_aws_statmeter_calc_initial_speed_start_slot(
-    int64_t cur_time, int slot_size);
-int nzbget_rs_aws_server_pool_is_candidate_connection_eligible(
-    int in_use, int server_active, int server_norm_level, int level,
-    int match_want_server, int is_connected, int server_blocked);
-int nzbget_rs_aws_xml_reader_is_parse_success(
-    int sax_result, int entity_declared);
 
 typedef struct {
     int64_t remaining_size;

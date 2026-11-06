@@ -405,43 +405,6 @@ pub fn dupe_probe_select_server_order(
     order.into_iter().map(|(_, id)| id).collect()
 }
 
-/// Executes one character step of `DirectUnpack::ReadLine`:
-/// updates `buf` and `backspace`, and returns `(final_i_if_break, should_break)`.
-pub fn direct_unpack_readline_step(
-    buf: &mut [u8],
-    i: usize,
-    ch: i32,
-    backspace: &mut bool,
-) -> (usize, bool) {
-    if i + 1 >= buf.len() {
-        return (i, true);
-    }
-    if ch == i32::from(b'\x08') {
-        *backspace = true;
-        buf[i] = 0;
-    }
-    if !*backspace {
-        buf[i] = ch as u8;
-        buf[i + 1] = 0;
-    }
-    if ch == -1 {
-        return (i, true);
-    }
-    if ch == i32::from(b'\n') {
-        return (i + 1, true);
-    }
-    if i > 35 && ch == i32::from(b' ') {
-        let nul_end = buf[..=i + 1]
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(i + 1);
-        if crate::dlunpackrepair::direct_unpack_is_insert_disk_prompt(&buf[..nul_end], i, ch) {
-            return (i + 1, true);
-        }
-    }
-    (i, false)
-}
-
 /// Compares two NZB entries by `(filename.is_empty() ? subject : filename)` (`TwinCheckJob::Sample`).
 pub fn twin_check_compare_entry_names(
     a_filename: &[u8],
@@ -1886,12 +1849,12 @@ mod tests {
         let mut buf = [0u8; 64];
         let mut bs = false;
         assert_eq!(
-            direct_unpack_readline_step(&mut buf, 0, i32::from(b'A'), &mut bs),
+            crate::unpack::direct_unpack_readline_step(&mut buf, 0, i32::from(b'A'), &mut bs),
             (0, false)
         );
         assert_eq!(buf[0], b'A');
         assert_eq!(
-            direct_unpack_readline_step(&mut buf, 1, i32::from(b'\n'), &mut bs),
+            crate::unpack::direct_unpack_readline_step(&mut buf, 1, i32::from(b'\n'), &mut bs),
             (2, true)
         );
 

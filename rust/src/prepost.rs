@@ -247,16 +247,18 @@ pub fn eval_cleanup_job_state(
     cur_time: i64,
     prev_post_total_sec: i32,
 ) -> (bool, bool, bool, i32) {
-    crate::poolstatprepost::prepost_eval_cleanup_job_state(
-        working,
-        has_running_thread,
-        stage,
-        pt_finished,
-        deleted,
-        start_time,
-        cur_time,
-        prev_post_total_sec,
-    )
+    if working || has_running_thread {
+        return (false, false, false, prev_post_total_sec);
+    }
+    let update_total_sec = start_time > 0;
+    let new_total_sec = if update_total_sec {
+        let elapsed = cur_time.wrapping_sub(start_time) as i32;
+        prev_post_total_sec.wrapping_add(elapsed)
+    } else {
+        prev_post_total_sec
+    };
+    let is_completed = stage == pt_finished || deleted;
+    (true, update_total_sec, is_completed, new_total_sec)
 }
 
 /// `PrePostProcessor::CanRunMoreJobs` scheduler evaluator.

@@ -87,7 +87,7 @@ bool Thread::Kill()
 	warn("Could not kill thread: thread cancelling isn't supported on this platform");
 #endif
 
-	if (nzbget_rs_awc_thread_adjust_count_on_kill(terminated ? 1 : 0, 1) == 0)
+	if (terminated)
 	{
 		--m_threadCount;
 	}

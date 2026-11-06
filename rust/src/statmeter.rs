@@ -118,6 +118,81 @@ pub fn add_stats(
     add(hours, s.hour, bytes);
 }
 
+/// Accumulates day slot and total/custom volume stats in `ServerVolume::AddStats`.
+/// Returns `(update_day, new_day_bytes, new_day_failed, new_day_success, new_total_bytes, new_custom_bytes)`.
+#[allow(clippy::too_many_arguments)]
+pub fn accum_day_and_total_volume(
+    day_slot: i32,
+    cur_day_bytes: i64,
+    cur_day_failed: i32,
+    cur_day_success: i32,
+    cur_total_bytes: i64,
+    cur_custom_bytes: i64,
+    add_bytes: i64,
+    add_failed: i32,
+    add_success: i32,
+) -> (bool, i64, i32, i32, i64, i64) {
+    let new_total = cur_total_bytes.wrapping_add(add_bytes);
+    let new_custom = cur_custom_bytes.wrapping_add(add_bytes);
+    if day_slot >= 0 {
+        (
+            true,
+            cur_day_bytes.wrapping_add(add_bytes),
+            cur_day_failed.wrapping_add(add_failed),
+            cur_day_success.wrapping_add(add_success),
+            new_total,
+            new_custom,
+        )
+    } else {
+        (
+            false,
+            cur_day_bytes,
+            cur_day_failed,
+            cur_day_success,
+            new_total,
+            new_custom,
+        )
+    }
+}
+
+/// `StatMeter::AdjustTimeOffset`:
+/// Computes `(local_time_delta, total_offset)` from `utc_time`, `loc_time`, and `time_correction`.
+#[inline]
+pub fn calc_local_time_offset(
+    utc_time: i64,
+    loc_time: i64,
+    time_correction: i32,
+) -> (i32, i32) {
+    let delta = utc_time.wrapping_sub(loc_time) as i32;
+    (delta, delta.wrapping_add(time_correction))
+}
+
+/// `StatMeter::EnterLeaveStandBy`:
+/// Computes the updated `m_startDownload` timestamp when leaving standby.
+#[inline]
+pub fn calc_resumed_download_start(
+    prev_start_download: i64,
+    cur_time: i64,
+    paused_from: i64,
+) -> i64 {
+    prev_start_download.wrapping_add(cur_time.wrapping_sub(paused_from))
+}
+
+/// `StatMeter::CalcMonthSlots`:
+/// Computes elapsed days when `QuotaStartDay > dayparts.tm_mday` using the previous month start timestamp.
+#[inline]
+pub fn calc_month_slots_prev_month(loc_cur_time: i64, prev_month_time: i64) -> i32 {
+    let diff = loc_cur_time.wrapping_sub(prev_month_time) as i32;
+    (diff / 60 / 60 / 24).wrapping_add(1)
+}
+
+/// `StatMeter::CalcMonthSlots`:
+/// Computes elapsed days when `QuotaStartDay <= dayparts.tm_mday` within the current month.
+#[inline]
+pub fn calc_month_slots_same_month(tm_mday: i32, quota_start_day: i32) -> i32 {
+    tm_mday.wrapping_sub(quota_start_day).wrapping_add(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

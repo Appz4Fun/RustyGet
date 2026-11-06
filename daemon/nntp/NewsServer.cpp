@@ -33,8 +33,6 @@ NewsServer::NewsServer(int id, bool active, const char* name, const char* host, 
 {
 	if (m_name.Empty())
 	{
-		char buf[64];
-		nzbget_rs_awc_news_server_format_default_name(*m_name, id, buf, sizeof(buf));
-		m_name = buf;
+		m_name.Format("Server%i", id);
 	}
 }

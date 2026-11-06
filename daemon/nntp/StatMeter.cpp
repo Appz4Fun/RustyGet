@@ -80,7 +80,7 @@ void ServerVolume::AddStats(Stats stats)
 	int updateDay = 0;
 	int64 newDayBytes = 0, newTotalBytes = 0, newCustomBytes = 0;
 	int newDayFailed = 0, newDaySuccess = 0;
-	nzbget_rs_aws_statmeter_accum_day_and_total_volume(
+	nzbget_rs_statmeter_accum_day_and_total_volume(
 		m_daySlot, curDayBytes, curDayFailed, curDaySuccess,
 		m_totalBytes, m_customBytes, bytes, stats.articles.failed, stats.articles.success,
 		&updateDay, &newDayBytes, &newDayFailed, &newDaySuccess, &newTotalBytes, &newCustomBytes);
@@ -184,7 +184,7 @@ void StatMeter::AdjustTimeOffset()
 	tmSplittedTime.tm_isdst = -1;
 	time_t locTime = mktime(&tmSplittedTime);
 	int localDelta = 0;
-	int totalOffset = nzbget_rs_psp_statmeter_calc_local_time_offset(
+	int totalOffset = nzbget_rs_statmeter_calc_local_time_offset(
 		(int64_t)utcTime, (int64_t)locTime, g_Options->GetTimeCorrection(), &localDelta);
 	g_WorkState->SetLocalTimeOffset(totalOffset);
 	m_lastTimeOffset = utcTime;
@@ -246,7 +246,7 @@ void StatMeter::EnterLeaveStandBy(bool enter)
 		time_t startDownload = 0;
 		if (!m_startDownload.compare_exchange_strong(startDownload, Util::CurrentTime()))
 		{
-			m_startDownload = (time_t)nzbget_rs_psp_statmeter_calc_resumed_download_start(
+			m_startDownload = (time_t)nzbget_rs_statmeter_calc_resumed_download_start(
 				(int64_t)m_startDownload.load(),
 				(int64_t)Util::CurrentTime(),
 				(int64_t)m_pausedFrom.load());
@@ -346,8 +346,7 @@ void StatMeter::AddSpeedReading(int bytes)
 void StatMeter::ResetSpeedStat()
 {
 	time_t curTime = Util::CurrentTime();
-	m_speedStartTime = nzbget_rs_aws_statmeter_calc_initial_speed_start_slot(
-		(int64_t)curTime, SPEEDMETER_SLOTSIZE);
+	m_speedStartTime = (int)curTime / SPEEDMETER_SLOTSIZE - 1;
 	for (int i = 0; i < SPEEDMETER_SLOTS; i++)
 	{
 		m_speedBytes[i] = 0;
@@ -516,12 +515,12 @@ int StatMeter::CalcMonthSlots(const ServerVolume& volume)
 			dayparts.tm_mon++;
 			prevMonth = Util::Timegm(&dayparts);
 		}
-		elapsedDays = nzbget_rs_psp_statmeter_calc_month_slots_prev_month(
+		elapsedDays = nzbget_rs_statmeter_calc_month_slots_prev_month(
 			(int64_t)locCurTime, (int64_t)prevMonth);
 	}
 	else
 	{
-		elapsedDays = nzbget_rs_psp_statmeter_calc_month_slots_same_month(
+		elapsedDays = nzbget_rs_statmeter_calc_month_slots_same_month(
 			dayparts.tm_mday, g_Options->GetQuotaStartDay());
 	}
 

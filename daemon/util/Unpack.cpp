@@ -73,17 +73,7 @@ bool ExtractorBase::CheckPrerequisites() const
 
 std::string ExtractorBase::MakePassword() const
 {
-	char buf[512];
-	size_t len = nzbget_rs_awc_unpack_make_password_arg(
-		m_password.data(), m_password.size(), buf, sizeof(buf));
-	if (len < sizeof(buf))
-	{
-		return std::string(buf, len);
-	}
-	std::string out(len, '\0');
-	nzbget_rs_awc_unpack_make_password_arg(
-		m_password.data(), m_password.size(), out.data(), len + 1);
-	return out;
+	return "-p" + (m_password.empty() ? "-" : m_password);
 }
 
 bool IsArchive(const fs::path& file)
@@ -98,21 +88,19 @@ ExtractorPtr MakeExtractor(fs::path archive, fs::path outputDir,
 
 	auto validateTool = [&archiveName](const fs::path& toolPath, std::string_view optionName) -> std::optional<fs::path>
 	{
-		fs::error_code ec;
-		bool exists = !toolPath.empty() && fs::exists(toolPath, ec);
-		int status = nzbget_rs_awc_unpack_validate_tool_status(
-			toolPath.empty() ? 1 : 0, ec ? 1 : 0, exists ? 1 : 0);
-		if (status == 1)
+		if (toolPath.empty())
 		{
 			error("Unpack: Could not process '%s': %s is not configured", archiveName.c_str(), std::string(optionName).c_str());
 			return std::nullopt;
 		}
-		if (status == 2)
+		fs::error_code ec;
+		bool exists = fs::exists(toolPath, ec);
+		if (ec)
 		{
 			error("Unpack: Could not process '%s': Failed to access '%s': %s", archiveName.c_str(), fs::u8string(toolPath).c_str(), ec.message().c_str());
 			return std::nullopt;
 		}
-		if (status == 3)
+		if (!exists)
 		{
 			error("Unpack: Could not process '%s': %s doesn't exist", archiveName.c_str(), fs::u8string(toolPath).c_str());
 			return std::nullopt;

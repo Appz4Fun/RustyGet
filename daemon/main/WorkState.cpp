@@ -24,8 +24,5 @@
 
 void WorkState::Changed()
 {
-	if (nzbget_rs_awc_work_state_should_notify() != 0)
-	{
-		Notify(nullptr);
-	}
+	Notify(nullptr);
 }

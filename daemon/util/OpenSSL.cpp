@@ -30,10 +30,7 @@ namespace OpenSSL
 #ifndef LIBRESSL_VERSION_NUMBER
 		// OpenSSL specific: cleanly shut down OpenSSL's thread handling.
 		// LibreSSL doesn't require or provide OPENSSL_thread_stop().
-		if (nzbget_rs_awc_openssl_should_stop_thread(0) != 0)
-		{
-			OPENSSL_thread_stop();
-		}
+		OPENSSL_thread_stop();
 #endif
 	}
 }

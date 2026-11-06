@@ -89,7 +89,7 @@ void ArticleDownloader::Run()
 	m_articleWriter.Prepare();
 
 	EStatus status = adFailed;
-	int retries = nzbget_rs_rrd_article_dl_resolve_initial_retries(g_Options->GetArticleRetries());
+	int retries = g_Options->GetArticleRetries() > 0 ? g_Options->GetArticleRetries() : 1;
 	int remainedRetries = retries;
 	ServerPool::RawServerList failedServers;
 	failedServers.reserve(g_ServerPool->GetServers()->size());
@@ -104,8 +104,7 @@ void ArticleDownloader::Run()
 		status = adFailed;
 
 		SetStatus(adWaiting);
-		while (nzbget_rs_aws_article_dl_should_wait_for_connection(
-			m_connection ? 1 : 0, IsStopped() ? 1 : 0, serverConfigGeneration, g_ServerPool->GetGeneration()) != 0)
+		while (!m_connection && !IsStopped() && serverConfigGeneration == g_ServerPool->GetGeneration())
 		{
 			m_connection = g_ServerPool->GetConnection(level, wantServer, &failedServers);
 			Util::Sleep(5);
@@ -113,14 +112,10 @@ void ArticleDownloader::Run()
 		SetLastUpdateTimeNow();
 		SetStatus(adRunning);
 
-		if (nzbget_rs_dad_article_dl_should_abort_for_work_state(
-			IsStopped() ? 1 : 0,
-			g_WorkState->GetPauseDownload() ? 1 : 0,
-			g_WorkState->GetQuotaReached() ? 1 : 0,
-			force ? 1 : 0,
-			g_WorkState->GetDownloadHeld() ? 1 : 0,
-			m_fileInfo->GetExtraPriority() ? 1 : 0,
-			serverConfigGeneration != g_ServerPool->GetGeneration() ? 1 : 0) != 0)
+		if (IsStopped() ||
+			((g_WorkState->GetPauseDownload() || g_WorkState->GetQuotaReached()) && !force) ||
+			(g_WorkState->GetDownloadHeld() && !m_fileInfo->GetExtraPriority()) ||
+			serverConfigGeneration != g_ServerPool->GetGeneration())
 		{
 			status = adRetry;
 			break;
@@ -146,7 +141,7 @@ void ArticleDownloader::Run()
 		// a file without a date (none in the nzb) has time 0: its age isn't known,
 		// and counting from 1970 failed every article on a server with a retention
 		int fileAgeDays = 0;
-		bool retentionFailure = nzbget_rs_dur_article_dl_is_retention_failure(
+		bool retentionFailure = nzbget_rs_nntp_article_dl_is_retention_failure(
 			m_connection->GetNewsServer()->GetRetention(),
 			(int64)m_fileInfo->GetTime(),
 			(int64)Util::CurrentTime(),
@@ -170,9 +165,7 @@ void ArticleDownloader::Run()
 		// a server that refuses the login for good (502) can't serve this article: it
 		// counts as tried. Waited for, a server with a broken account stalled every
 		// download that had failed on the other servers of its level
-		bool authRejected = nzbget_rs_aws_article_dl_eval_auth_rejected(
-			connected ? 1 : 0, m_connection ? 1 : 0,
-			(m_connection && m_connection->GetAuthRejected()) ? 1 : 0) != 0;
+		bool authRejected = !connected && m_connection && m_connection->GetAuthRejected();
 		if (connected && !IsStopped())
 		{
 			NewsServer* newsServer = m_connection->GetNewsServer();
@@ -181,7 +174,7 @@ void ArticleDownloader::Run()
 			status = Download();
 
 			int success = 0, failed = 0;
-			if (nzbget_rs_dad_article_dl_classify_attempt_stat(
+			if (nzbget_rs_nntp_article_dl_classify_attempt_stat(
 				(int)status,
 				(int)adFinished,
 				(int)adFailed,
@@ -209,7 +202,7 @@ void ArticleDownloader::Run()
 			int shouldBreak = 0;
 			int statusInt = (int)status;
 			int crInt = m_contentRejected ? 1 : 0;
-			if (nzbget_rs_cwp_article_dl_handle_content_rejected(
+			if (nzbget_rs_nntp_article_dl_handle_content_rejected(
 				crInt,
 				m_articleInfo->GetDupeFallbackRound(),
 				statusInt,
@@ -237,34 +230,27 @@ void ArticleDownloader::Run()
 
 		int connInt = connected ? 1 : 0;
 		int statusInt = (int)status;
-		nzbget_rs_rrd_article_dl_normalize_connect_and_decrement_retries(
+		nzbget_rs_nntp_article_dl_normalize_connect_and_decrement_retries(
 			connInt, statusInt, (int)adConnectError, (int)adFailed, remainedRetries,
 			&connInt, &statusInt, &remainedRetries);
 		connected = connInt != 0;
 		status = (EStatus)statusInt;
 
 		bool optionalBlocked = false;
-		if (nzbget_rs_aws_article_dl_should_block_failed_server(
-			connected ? 1 : 0, m_connection ? 1 : 0, IsStopped() ? 1 : 0) != 0)
+		if (!connected && m_connection && !IsStopped())
 		{
 			g_ServerPool->BlockServer(lastServer);
 			optionalBlocked = lastServer->GetOptional();
 		}
 
 		wantServer = nullptr;
-		if (nzbget_rs_dad_article_dl_should_retry_same_server(
-			connected ? 1 : 0,
-			(int)status,
-			(int)adFailed,
-			remainedRetries,
-			retentionFailure ? 1 : 0) != 0)
+		if (connected && status == adFailed && remainedRetries > 0 && !retentionFailure)
 		{
 			wantServer = lastServer;
 		}
 		else
 		{
-			FreeConnection(nzbget_rs_aws_article_dl_keep_conn_on_no_retry(
-				(int)status, (int)adFinished, (int)adNotFound) != 0);
+			FreeConnection(status == adFinished || status == adNotFound);
 		}
 
 		if (nzbget_rs_dqh_article_dl_is_terminal_loop_status(
@@ -273,14 +259,10 @@ void ArticleDownloader::Run()
 			break;
 		}
 
-		if (nzbget_rs_dad_article_dl_should_abort_for_work_state(
-			IsStopped() ? 1 : 0,
-			g_WorkState->GetPauseDownload() ? 1 : 0,
-			g_WorkState->GetQuotaReached() ? 1 : 0,
-			force ? 1 : 0,
-			g_WorkState->GetDownloadHeld() ? 1 : 0,
-			m_fileInfo->GetExtraPriority() ? 1 : 0,
-			serverConfigGeneration != g_ServerPool->GetGeneration() ? 1 : 0) != 0)
+		if (IsStopped() ||
+			((g_WorkState->GetPauseDownload() || g_WorkState->GetQuotaReached()) && !force) ||
+			(g_WorkState->GetDownloadHeld() && !m_fileInfo->GetExtraPriority()) ||
+			serverConfigGeneration != g_ServerPool->GetGeneration())
 		{
 			status = adRetry;
 			break;
@@ -295,7 +277,7 @@ void ArticleDownloader::Run()
 		}
 
 		int pushFailedServer = 0;
-		if (nzbget_rs_dad_article_dl_should_advance_server_list(
+		if (nzbget_rs_nntp_article_dl_should_advance_server_list(
 			wantServer ? 1 : 0,
 			connected ? 1 : 0,
 			retentionFailure ? 1 : 0,
@@ -335,14 +317,14 @@ void ArticleDownloader::Run()
 				failLevels[fi] = failedServers[fi]->GetNormLevel();
 				failGroups[fi] = failedServers[fi]->GetGroup();
 			}
-			bool allServersOnLevelFailed = nzbget_rs_dur_article_dl_all_servers_on_level_failed(
+			bool allServersOnLevelFailed = nzbget_rs_nntp_article_dl_all_servers_on_level_failed(
 				level, candIds.data(), candLevels.data(), candGroups.data(), candAvail.data(), candCount,
 				failIds.data(), failLevels.data(), failGroups.data(), failCount) != 0;
 
 			int advanceLevel = 0;
 			int newLevel = level;
 			int breakAllFailed = 0;
-			nzbget_rs_aws_article_dl_eval_level_exhaustion(
+			nzbget_rs_nntp_article_dl_eval_level_exhaustion(
 				allServersOnLevelFailed ? 1 : 0, level, g_ServerPool->GetMaxNormLevel(),
 				&advanceLevel, &newLevel, &breakAllFailed);
 			if (advanceLevel != 0)
@@ -364,7 +346,7 @@ void ArticleDownloader::Run()
 	FreeConnection(status == adFinished);
 
 	bool stopped = IsStopped();
-	status = (EStatus)nzbget_rs_dur_article_dl_resolve_final_status(
+	status = (EStatus)nzbget_rs_nntp_article_dl_resolve_final_status(
 		(int)status,
 		m_articleWriter.GetDuplicate() ? 1 : 0,
 		stopped ? 1 : 0,
@@ -410,7 +392,7 @@ ArticleDownloader::EStatus ArticleDownloader::Download()
 		for (CString& group : m_fileInfo->GetGroups())
 		{
 			response = m_connection->JoinGroup(group);
-			if (nzbget_rs_rrd_article_dl_is_join_group_ok(response) != 0)
+			if (nzbget_rs_nntp_article_dl_is_join_group_ok(response) != 0)
 			{
 				break;
 			}
@@ -445,7 +427,7 @@ ArticleDownloader::EStatus ArticleDownloader::Download()
 	// (128 bytes past what is read into it: the decoder may write up to one uuencoded
 	// line's worth more than it was given)
 	int readChunk = g_Options->GetArticleReadChunkSize();
-	CharBuffer lineBuf(nzbget_rs_cwp_article_dl_calc_line_buf_capacity(readChunk));
+	CharBuffer lineBuf(readChunk + 128);
 
 	while (nzbget_rs_dqh_article_dl_should_continue_read_loop(
 		IsStopped() ? 1 : 0, m_decoder.GetEof() ? 1 : 0) != 0)
@@ -453,21 +435,17 @@ ArticleDownloader::EStatus ArticleDownloader::Download()
 		// Memory pressure throttling: pace uncached network reads if memory is Critical and cache is flushing.
 		// Never block an article that already allocated a cache buffer before pressure turned Critical,
 		// as its buffer only becomes flushable after Download() finishes and calls ArticleWriter::Finish().
-		if (nzbget_rs_dad_article_dl_should_pace_critical_uncached(
-			IsStopped() ? 1 : 0,
-			m_articleWriter.HasCachedBuffer() ? 1 : 0,
-			(g_MemoryMonitor && g_MemoryMonitor->GetTier() == NZBGET_RS_PRESSURE_CRITICAL) ? 1 : 0,
-			(g_ArticleCache && g_ArticleCache->GetFlushing()) ? 1 : 0) != 0)
+		if (!IsStopped() && !m_articleWriter.HasCachedBuffer() &&
+			g_MemoryMonitor && g_MemoryMonitor->GetTier() == NZBGET_RS_PRESSURE_CRITICAL &&
+			g_ArticleCache && g_ArticleCache->GetFlushing())
 		{
 			Util::Sleep(10);
 		}
 
 		// throttle the bandwidth
-		while (nzbget_rs_dur_article_dl_should_throttle_bandwidth(
-			IsStopped() ? 1 : 0,
-			g_WorkState->GetSpeedLimit(),
-			g_StatMeter->CalcCurrentDownloadSpeed(),
-			g_StatMeter->CalcMomentaryDownloadSpeed()) != 0)
+		while (!IsStopped() && (g_WorkState->GetSpeedLimit() > 0.0f) &&
+			(g_StatMeter->CalcCurrentDownloadSpeed() > g_WorkState->GetSpeedLimit() ||
+			 g_StatMeter->CalcMomentaryDownloadSpeed() > g_WorkState->GetSpeedLimit()))
 		{
 			SetLastUpdateTimeNow();
 			Util::Sleep(10);
@@ -514,7 +492,7 @@ ArticleDownloader::EStatus ArticleDownloader::Download()
 		if (len > 0 && !Write(buffer, len))
 		{
 			int crInt = 0;
-			status = (EStatus)nzbget_rs_cwp_article_dl_classify_write_failure(
+			status = (EStatus)nzbget_rs_nntp_article_dl_classify_write_failure(
 				m_localWriteError ? 1 : 0, (int)adFatalError, (int)adFailed, &crInt);
 			if (crInt != 0)
 			{
@@ -661,7 +639,7 @@ ArticleDownloader::EStatus ArticleDownloader::DecodeCheck()
 	}
 	Decoder::EStatus status = m_decoder.Check();
 	bool isYenc = m_decoder.GetFormat() == Decoder::efYenc;
-	switch (nzbget_rs_dur_article_dl_classify_decode_status(
+	switch (nzbget_rs_nntp_article_dl_classify_decode_status(
 		0, (int)status, isYenc ? 1 : 0, m_articleWriter.GetRangeExceeded() ? 1 : 0))
 	{
 		case 1:
@@ -727,10 +705,7 @@ void ArticleDownloader::FreeConnection(bool keepConnected)
 	{
 		debug("Releasing connection");
 		Guard guard(m_connectionMutex);
-		if (nzbget_rs_rrd_article_dl_should_disconnect_on_free(
-			keepConnected ? 1 : 0,
-			(int)m_connection->GetStatus(),
-			(int)Connection::csCancelled) != 0)
+		if (!keepConnected || m_connection->GetStatus() == Connection::csCancelled)
 		{
 			m_connection->Disconnect();
 		}

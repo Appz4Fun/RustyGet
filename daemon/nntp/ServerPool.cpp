@@ -125,9 +125,7 @@ void ServerPool::InitConnections()
 					}
 				}
 
-				int missingConns = nzbget_rs_cwp_server_pool_calc_missing_connections(
-					connections, newsServer->GetMaxConnections());
-				for (int i = 0; i < missingConns; i++)
+				for (int i = connections; i < newsServer->GetMaxConnections(); i++)
 				{
 					std::unique_ptr<PooledConnection> connection = std::make_unique<PooledConnection>(newsServer);
 					connection->SetTimeout(m_timeout);
@@ -206,14 +204,9 @@ NntpConnection* ServerPool::LockedGetConnection(int level, NewsServer* wantServe
 			candidateServer->GetGroup());
 		bool isConn = candidateConnection->GetStatus() == Connection::csConnected;
 		bool isBlocked = !isConn && IsServerBlocked(candidateServer);
-		if (nzbget_rs_aws_server_pool_is_candidate_connection_eligible(
-			candidateConnection->GetInUse() ? 1 : 0,
-			candidateServer->GetActive() ? 1 : 0,
-			candidateServer->GetNormLevel(),
-			level,
-			matchWant,
-			isConn ? 1 : 0,
-			isBlocked ? 1 : 0) != 0)
+		if (!candidateConnection->GetInUse() && candidateServer->GetActive() &&
+			candidateServer->GetNormLevel() == level && matchWant != 0 &&
+			(isConn || !isBlocked))
 		{
 			// free connection found, check if it's not from the server which should be ignored
 			bool useConnection = true;
@@ -277,9 +270,7 @@ void ServerPool::FreeConnection(NntpConnection* connection, bool used)
 		((PooledConnection*)connection)->SetFreeTimeNow();
 	}
 
-	if (nzbget_rs_psp_server_pool_should_increment_level_on_free(
-		connection->GetNewsServer()->GetNormLevel(),
-		connection->GetNewsServer()->GetActive() ? 1 : 0) != 0)
+	if (connection->GetNewsServer()->GetNormLevel() > -1 && connection->GetNewsServer()->GetActive())
 	{
 		m_levels[connection->GetNewsServer()->GetNormLevel()]++;
 	}
@@ -292,7 +283,7 @@ void ServerPool::BlockServer(NewsServer* newsServer)
 	{
 		Guard guard(m_connectionsMutex);
 		time_t curTime = Util::CurrentTime();
-		nzbget_rs_psp_server_pool_eval_block_server(
+		nzbget_rs_nntp_server_pool_eval_block_server(
 			(int64_t)newsServer->GetBlockTime(),
 			(int64_t)curTime,
 			m_retryInterval,
@@ -328,10 +319,8 @@ void ServerPool::CloseUnusedConnections()
 	m_connections.erase(std::remove_if(m_connections.begin(), m_connections.end(),
 		[](std::unique_ptr<PooledConnection>& connection)
 		{
-			if (nzbget_rs_psp_server_pool_should_erase_disabled_connection(
-				connection->GetInUse() ? 1 : 0,
-				connection->GetNewsServer()->GetNormLevel(),
-				connection->GetNewsServer()->GetActive() ? 1 : 0) != 0)
+			if (!connection->GetInUse() &&
+				(connection->GetNewsServer()->GetNormLevel() == -1 || !connection->GetNewsServer()->GetActive()))
 			{
 				debug("Closing (and deleting) unused connection to server%i", connection->GetNewsServer()->GetId());
 				if (connection->GetStatus() == Connection::csConnected)

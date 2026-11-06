@@ -30,17 +30,7 @@ void Subject::Attach(Observer* observer)
 
 void Subject::Detach(Observer* observer)
 {
-	std::vector<uintptr_t> ptrs(m_observers.size());
-	for (size_t i = 0; i < m_observers.size(); ++i)
-	{
-		ptrs[i] = reinterpret_cast<uintptr_t>(m_observers[i]);
-	}
-	ptrdiff_t idx = nzbget_rs_awc_observer_find_index(
-		ptrs.data(), ptrs.size(), reinterpret_cast<uintptr_t>(observer));
-	if (idx >= 0)
-	{
-		m_observers.erase(m_observers.begin() + idx);
-	}
+	m_observers.erase(std::remove(m_observers.begin(), m_observers.end(), observer), m_observers.end());
 }
 
 void Subject::Notify(void* aspect)

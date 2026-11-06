@@ -51,7 +51,7 @@ namespace Json
 		ErrorCode ec;
 		JsonValue value = parse(jsonStr, ec);
 
-		if (nzbget_rs_awc_json_has_error(ec ? 1 : 0) != 0) return std::nullopt;
+		if (ec) return std::nullopt;
 
 		return value;
 	}

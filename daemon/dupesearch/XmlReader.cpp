@@ -100,7 +100,7 @@ bool XmlReader::Parse(const std::string& data, Handler& handler)
 	Context context;
 	context.handler = &handler;
 	int result = xmlSAXUserParseMemory(&sax, &context, data.data(), (int)data.size());
-	return nzbget_rs_aws_xml_reader_is_parse_success(result, context.entityDeclared ? 1 : 0) != 0;
+	return result == 0 && !context.entityDeclared;
 }
 
 std::string XmlReader::Attr(const Attrs& attrs, const char* name)

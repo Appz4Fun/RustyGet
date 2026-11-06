@@ -272,6 +272,245 @@ pub unsafe fn join_group(io: &mut dyn Io, auth: &mut Auth, group: *const c_char)
     Ok((answer, false))
 }
 
+// ============================================================================
+// ArticleDownloader (`daemon/nntp/ArticleDownloader.cpp`)
+// ============================================================================
+
+/// Evaluates level exhaustion in `ArticleDownloader::Run`.
+/// Returns `(advance_level, new_level, break_all_failed)`.
+pub fn article_dl_eval_level_exhaustion(
+    all_failed: bool,
+    level: i32,
+    max_norm_level: i32,
+) -> (bool, i32, bool) {
+    if !all_failed {
+        return (false, level, false);
+    }
+    if level < max_norm_level {
+        (true, level.saturating_add(1), false)
+    } else {
+        (false, level, true)
+    }
+}
+
+/// Evaluates content-rejected handling in `ArticleDownloader::Run`.
+/// Returns `(handled, should_break, next_status, next_content_rejected, next_remained_retries)`.
+#[inline]
+pub fn article_dl_handle_content_rejected(
+    content_rejected: i32,
+    dupe_fallback_round: i32,
+    cur_status: i32,
+    ad_failed: i32,
+    remained_retries: i32,
+) -> (bool, bool, i32, bool, i32) {
+    if content_rejected != 0 {
+        if dupe_fallback_round > 0 {
+            (true, true, ad_failed, true, remained_retries)
+        } else {
+            (true, false, ad_failed, false, 0)
+        }
+    } else {
+        (false, false, cur_status, false, remained_retries)
+    }
+}
+
+/// Classifies a write failure in `ArticleDownloader::Download` into
+/// `(status, content_rejected)`.
+#[inline]
+pub fn article_dl_classify_write_failure(
+    local_write_error: i32,
+    ad_fatal_error: i32,
+    ad_failed: i32,
+) -> (i32, bool) {
+    if local_write_error != 0 {
+        (ad_fatal_error, false)
+    } else {
+        (ad_failed, true)
+    }
+}
+
+/// Matches the server retention check in `ArticleDownloader::Run`:
+/// returns `(is_failure, age_days)`.
+pub fn article_dl_is_retention_failure(
+    retention_days: i32,
+    file_time: i64,
+    cur_time: i64,
+) -> (bool, i32) {
+    if retention_days <= 0 || file_time <= 0 {
+        return (false, 0);
+    }
+    let age_days = (cur_time.wrapping_sub(file_time) / 86400) as i32;
+    (age_days > retention_days, age_days)
+}
+
+/// Matches the `allServersOnLevelFailed` loop in `ArticleDownloader::Run`.
+pub fn article_dl_all_servers_on_level_failed(
+    level: i32,
+    cand_ids: &[i32],
+    cand_levels: &[i32],
+    cand_groups: &[i32],
+    cand_avail: &[u8],
+    failed_ids: &[i32],
+    failed_levels: &[i32],
+    failed_groups: &[i32],
+) -> bool {
+    let n = cand_ids
+        .len()
+        .min(cand_levels.len())
+        .min(cand_groups.len())
+        .min(cand_avail.len());
+    let f = failed_ids
+        .len()
+        .min(failed_levels.len())
+        .min(failed_groups.len());
+
+    for i in 0..n {
+        if cand_levels[i] != level {
+            continue;
+        }
+        if cand_avail[i] == 0 {
+            continue;
+        }
+        let cid = cand_ids[i];
+        let clvl = cand_levels[i];
+        let cgrp = cand_groups[i];
+        let mut server_failed = false;
+        for j in 0..f {
+            if failed_ids[j] == cid
+                || (failed_groups[j] > 0 && failed_groups[j] == cgrp && failed_levels[j] == clvl)
+            {
+                server_failed = true;
+                break;
+            }
+        }
+        if !server_failed {
+            return false;
+        }
+    }
+    true
+}
+
+/// Matches the post-loop status normalization in `ArticleDownloader::Run`.
+pub fn article_dl_resolve_final_status(
+    mut status: i32,
+    is_duplicate: bool,
+    is_stopped: bool,
+    ad_finished: i32,
+    ad_failed: i32,
+    ad_retry: i32,
+    ad_fatal_error: i32,
+) -> i32 {
+    if is_duplicate {
+        status = ad_finished;
+    }
+    if status != ad_finished && status != ad_retry && status != ad_fatal_error {
+        status = ad_failed;
+    }
+    if is_stopped {
+        status = ad_retry;
+    }
+    status
+}
+
+/// Matches `ArticleDownloader::DecodeCheck()`.
+pub fn article_dl_classify_decode_status(
+    raw_article: bool,
+    decoder_status: i32,
+    is_yenc: bool,
+    range_exceeded: bool,
+) -> i32 {
+    if raw_article {
+        return 0;
+    }
+    if decoder_status == 1 && is_yenc && range_exceeded {
+        return 2;
+    }
+    match decoder_status {
+        1 => 1,
+        3 => 3,
+        2 => 4,
+        4 => 5,
+        5 => 6,
+        _ => 7,
+    }
+}
+
+/// Evaluates `adConnectError` normalization and `remainedRetries` decrement in `ArticleDownloader::Run`.
+pub fn article_dl_normalize_connect_and_decrement_retries(
+    connected: bool,
+    status: i32,
+    ad_connect_error: i32,
+    ad_failed: i32,
+    remained_retries: i32,
+) -> (bool, i32, i32) {
+    let (new_connected, new_status) = if status == ad_connect_error {
+        (false, ad_failed)
+    } else {
+        (connected, status)
+    };
+    let new_retries = if new_connected && new_status == ad_failed {
+        remained_retries.wrapping_sub(1)
+    } else {
+        remained_retries
+    };
+    (new_connected, new_status, new_retries)
+}
+
+/// `if (response && !strncmp(response, "2", 1))`
+pub fn article_dl_is_join_group_ok(response: Option<&[u8]>) -> bool {
+    matches!(response, Some(r) if r.first() == Some(&b'2'))
+}
+
+/// Classifies an article download attempt status into `(record, success, failed)` server stats.
+#[inline]
+pub fn article_dl_classify_attempt_stat(
+    status: i32,
+    ad_finished: i32,
+    ad_failed: i32,
+    ad_not_found: i32,
+    ad_crc_error: i32,
+) -> (bool, i32, i32) {
+    let record = status == ad_finished
+        || status == ad_failed
+        || status == ad_not_found
+        || status == ad_crc_error;
+    if !record {
+        (false, 0, 0)
+    } else if status == ad_finished {
+        (true, 1, 0)
+    } else {
+        (true, 0, 1)
+    }
+}
+
+/// Determines whether `ArticleDownloader::Run` should advance through the server list and whether `lastServer` should be added to `failedServers`.
+#[inline]
+pub fn article_dl_should_advance_server_list(
+    has_want_server: bool,
+    connected: bool,
+    retention_failure: bool,
+    optional_blocked: bool,
+    auth_rejected: bool,
+) -> (bool, bool) {
+    let advance =
+        !has_want_server && (connected || retention_failure || optional_blocked || auth_rejected);
+    (advance, advance && !optional_blocked)
+}
+
+/// `ServerPool::BlockServer`:
+/// Determines whether the block timestamp changed (`new_block`) and whether to log a warning
+/// (`should_warn = new_block && retry_interval > 0`).
+#[inline]
+pub fn server_pool_eval_block_server(
+    prev_block_time: i64,
+    cur_time: i64,
+    retry_interval: i32,
+) -> (bool, bool) {
+    let new_block = prev_block_time != cur_time;
+    let should_warn = new_block && retry_interval > 0;
+    (new_block, should_warn)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

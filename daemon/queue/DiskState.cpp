@@ -891,7 +891,7 @@ bool DiskState::LoadDupeExtras(NzbInfo* nzbInfo, StateDiskFile& infile, int form
 	int headerScanCnt;
 	headerScanCnt = infile.ScanLine("%i,%u,%u,%i", &recoveredArticles, &recoveredHigh, &recoveredLow,
 		&recoveredHoles);
-	if (headerScanCnt != 4 || !nzbget_rs_dad_diskstate_validate_dupe_extras_header(
+	if (headerScanCnt != 4 || !nzbget_rs_dsp_validate_dupe_extras_header(
 		headerScanCnt, recoveredArticles, recoveredHoles)) goto error;
 	nzbInfo->SetDupeRecoveredArticles(recoveredArticles);
 	nzbInfo->SetDupeRecoveredBytes(Util::JoinInt64(recoveredHigh, recoveredLow));
@@ -916,7 +916,7 @@ bool DiskState::LoadDupeExtras(NzbInfo* nzbInfo, StateDiskFile& infile, int form
 			infile.ScanLine("%i,%u,%u,%u,%u,%u,%u,%i,%i", &fileId, &decodedHigh,
 				&decodedLow, &failedHigh, &failedLow, &missedHigh, &missedLow, &parFile,
 				&failedArticles);
-		if (jobScanCnt != expectedJobFields || !nzbget_rs_dad_diskstate_validate_repair_job_header(
+		if (jobScanCnt != expectedJobFields || !nzbget_rs_dsp_validate_repair_job_header(
 			jobScanCnt, expectedJobFields, fileId, parFile, failedArticles)) goto error;
 		if (!infile.ReadLine(buf, sizeof(buf))) goto error;
 		int holeCount;
@@ -1303,8 +1303,7 @@ bool DiskState::LoadNzbInfo(NzbInfo* nzbInfo, Servers* servers, StateDiskFile& i
 	nzbInfo->SetDirectRenameStatus((NzbInfo::EDirectRenameStatus)directRenameStatus);
 	nzbInfo->SetDeleteStatus((NzbInfo::EDeleteStatus)deleteStatus);
 	nzbInfo->SetMarkStatus((NzbInfo::EMarkStatus)markStatus);
-	if (nzbget_rs_dad_diskstate_should_apply_url_status(
-		(int)nzbInfo->GetKind(), (int)NzbInfo::nkNzb, urlStatus, (int)NzbInfo::lsFailed) != 0)
+	if (nzbInfo->GetKind() == NzbInfo::nkNzb || (NzbInfo::EUrlStatus)urlStatus >= NzbInfo::lsFailed)
 	{
 		nzbInfo->SetUrlStatus((NzbInfo::EUrlStatus)urlStatus);
 	}
@@ -1494,8 +1493,8 @@ bool DiskState::LoadNzbInfo(NzbInfo* nzbInfo, Servers* servers, StateDiskFile& i
 		if (nzbget_rs_dqh_diskstate_find_char_pos(buf, ',', &commaPos) != 0)
 		{
 			const char* scriptName = buf + commaPos + 1;
-		int status = nzbget_rs_dad_diskstate_normalize_script_status(
-			nzbget_rs_dqh_parse_c_atoi(buf), formatVersion);
+			int status = atoi(buf);
+			if (status > 1 && formatVersion < 25) status--;
 			nzbInfo->GetScriptStatuses()->emplace_back(scriptName, (ScriptStatus::EStatus)status);
 		}
 	}
@@ -1769,7 +1768,7 @@ bool DiskState::LoadFileInfo(FileInfo* fileInfo, StateDiskFile& infile, int form
 					nzbget_rs_free(forceDestBuf);
 				}
 			}
-			bool restoredOutputInit = nzbget_rs_dad_diskstate_eval_restored_output_init(
+			bool restoredOutputInit = nzbget_rs_dsp_eval_restored_output_init(
 				outputInitialized,
 				directWriteOpt ? 1 : 0,
 				forceDirectWrite ? 1 : 0,
@@ -1888,7 +1887,7 @@ bool DiskState::SaveFileState(FileInfo* fileInfo, StateDiskFile& outfile, bool c
 	for (ArticleInfo* articleInfo : fileInfo->GetArticles())
 	{
 		int savedStatus = 0;
-		int stagedFallback = nzbget_rs_dad_diskstate_calc_staged_fallback(
+		int stagedFallback = nzbget_rs_dsp_calc_staged_fallback(
 			completed ? 1 : 0,
 			(int)articleInfo->GetStatus(),
 			(int)ArticleInfo::aiFinished,
@@ -1987,7 +1986,7 @@ bool DiskState::LoadFileState(FileInfo* fileInfo, Servers* servers, StateDiskFil
 	// the state of a file with its articles loaded can't list more (a stale or
 	// damaged state file did: at() threw out of the queue coordinator). Fewer is
 	// fine, as upstream has it: older queues saved some states with none
-	if (!nzbget_rs_dad_diskstate_validate_article_count(
+	if (!nzbget_rs_dsp_validate_article_count(
 		size, hasArticles ? 1 : 0, (int)fileInfo->GetArticles()->size()))
 	{
 		goto error;
@@ -2016,7 +2015,7 @@ bool DiskState::LoadFileState(FileInfo* fileInfo, Servers* servers, StateDiskFil
 		{
 			fields = infile.ScanLine("%i", &statusInt);
 		}
-		bool needStagedCheck = nzbget_rs_dad_diskstate_need_staged_file_check(
+		bool needStagedCheck = nzbget_rs_dsp_need_staged_file_check(
 			completed ? 1 : 0,
 			formatVersion,
 			statusInt,
@@ -2350,7 +2349,15 @@ void DiskState::DiscardDownloadQueue()
 	while (const char* filename = dir.Next())
 	{
 		// delete all files whose names have only characters '0'..'9'
-		bool onlyNums = nzbget_rs_dad_diskstate_is_digits_only_filename(filename) != 0;
+		bool onlyNums = true;
+		for (const char* p = filename; *p; p++)
+		{
+			if (*p < '0' || *p > '9')
+			{
+				onlyNums = false;
+				break;
+			}
+		}
 		if (onlyNums)
 		{
 			for (char suffix : { '\0', 's', 'c' })
@@ -2846,8 +2853,7 @@ bool DiskState::LoadAllFileStates(DownloadQueue* downloadQueue, Servers* servers
 		char suffix = '\0';
 		if (nzbget_rs_dqh_diskstate_parse_queue_file_id_and_suffix(filename, &id, &suffix) != 0)
 		{
-			if (nzbget_rs_dad_diskstate_should_load_file_state(
-				suffix, g_Options->GetContinuePartial() ? 1 : 0, cacheWasActive ? 1 : 0) != 0)
+			if (suffix == 'c' || (g_Options->GetContinuePartial() && !cacheWasActive))
 			{
 				for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
 				{
@@ -2906,9 +2912,6 @@ bool DiskState::LoadAllFileStates(DownloadQueue* downloadQueue, Servers* servers
 	}
 
 	return true;
-
-error:
-	return false;
 }
 
 bool DiskState::SaveStats(Servers* servers, ServerVolumes* serverVolumes)
@@ -3221,7 +3224,7 @@ bool DiskState::LoadVolumeStat(Servers* servers, ServerVolumes* serverVolumes, S
 			int arrSize;
 			if (infile.ScanLine("%i", &arrSize) != 1) goto error;
 			int targetVolumeSize = 0;
-			if (!nzbget_rs_dad_diskstate_calc_volume_slot_size(k, arrSize, &targetVolumeSize)) goto error;
+			if (!nzbget_rs_dsp_calc_volume_slot_size(k, arrSize, &targetVolumeSize)) goto error;
 			if (volumeArray) volumeArray->assign(targetVolumeSize, 0);
 
 			for (int j = 0; j < arrSize; j++)

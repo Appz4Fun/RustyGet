@@ -5996,6 +5996,94 @@ int64_t nzbget_rs_stream_patch_from_donor_inner_file(
     int* out_holes_filled,
     int* out_credit_recovery);
 
+typedef struct NzbgetRsDonorMemberSource NzbgetRsDonorMemberSource;
+
+NzbgetRsDonorMemberSource* nzbget_rs_donor_member_source_new(
+    const int32_t* article_sizes,
+    size_t article_count);
+void nzbget_rs_donor_member_source_free(NzbgetRsDonorMemberSource* source);
+int nzbget_rs_donor_member_source_take_served_parts(NzbgetRsDonorMemberSource* source);
+int64_t nzbget_rs_donor_member_source_size(
+    NzbgetRsDonorMemberSource* source,
+    void* ctx,
+    int (*fetch_part_cb)(
+        void* ctx,
+        int32_t part_index,
+        int* out_success,
+        int64_t* out_offset,
+        int64_t* out_file_size,
+        const uint8_t** out_data,
+        size_t* out_data_len));
+int nzbget_rs_donor_member_source_read(
+    NzbgetRsDonorMemberSource* source,
+    int64_t offset,
+    uint8_t* buffer,
+    int64_t size,
+    int allow_prefetch,
+    void* ctx,
+    int (*fetch_part_cb)(
+        void* ctx,
+        int32_t part_index,
+        int* out_success,
+        int64_t* out_offset,
+        int64_t* out_file_size,
+        const uint8_t** out_data,
+        size_t* out_data_len),
+    void (*begin_batch_cb)(void* ctx, const int32_t* part_indices, size_t count),
+    int (*next_batch_cb)(
+        void* ctx,
+        int* out_success,
+        int64_t* out_offset,
+        int64_t* out_file_size,
+        const uint8_t** out_data,
+        size_t* out_data_len),
+    void (*cancel_batch_cb)(void* ctx));
+
+int nzbget_rs_stream_verify_donor_file(
+    int64_t target_decoded_size,
+    const NzbgetRsByteRange* target_holes,
+    size_t target_hole_count,
+    const NzbgetRsByteRange* donor_ranges,
+    size_t donor_range_count,
+    void* ctx,
+    int (*is_stopped_cb)(void* ctx),
+    void (*begin_batch_cb)(void* ctx, const int32_t* part_indices, size_t count),
+    int (*next_article_cb)(
+        void* ctx,
+        int* out_success,
+        int64_t* out_offset,
+        int64_t* out_file_size,
+        const uint8_t** out_data,
+        size_t* out_data_len),
+    void (*cancel_batch_cb)(void* ctx),
+    int (*read_target_cb)(void* ctx, int64_t offset, uint8_t* buf, int64_t size));
+
+int nzbget_rs_stream_patch_from_donor_file(
+    const char* target_filename,
+    int64_t target_decoded_size,
+    const NzbgetRsByteRange* target_holes,
+    size_t target_hole_count,
+    const NzbgetRsByteRange* donor_ranges,
+    size_t donor_range_count,
+    const char* donor_name,
+    void* ctx,
+    int (*is_stopped_cb)(void* ctx),
+    void (*begin_batch_cb)(void* ctx, const int32_t* part_indices, size_t count),
+    int (*next_article_cb)(
+        void* ctx,
+        int* out_success,
+        int64_t* out_offset,
+        int64_t* out_file_size,
+        const uint8_t** out_data,
+        size_t* out_data_len),
+    void (*cancel_batch_cb)(void* ctx),
+    int (*write_target_cb)(void* ctx, int64_t offset, const uint8_t* data, int64_t size),
+    void (*add_progress_cb)(void* ctx, int64_t bytes),
+    void (*emit_message_cb)(void* ctx, int32_t kind, const char* text),
+    void (*update_holes_cb)(void* ctx, const NzbgetRsByteRange* holes, size_t hole_count),
+    int64_t* out_recovered_bytes,
+    int* out_credit_recovery);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

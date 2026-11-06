@@ -37,6 +37,7 @@
 #include "ContentMap.h"
 
 class DiskFile;
+struct NzbgetRsDonorMemberSource;
 
 /* target-side member files in DestDir, opened read-only on demand */
 class DiskSourceSet : public ContentSourceSet
@@ -65,9 +66,11 @@ private:
 class DonorMemberSource : public ContentSource
 {
 public:
-	DonorMemberSource(ArticleFetcher& fetcher, FileInfo* donorFile) :
-		m_fetcher(fetcher), m_donorFile(donorFile) {}
-	virtual int64 Size() { return EnsureInit() ? m_size : 0; }
+	DonorMemberSource(ArticleFetcher& fetcher, FileInfo* donorFile);
+	~DonorMemberSource();
+	DonorMemberSource(const DonorMemberSource&) = delete;
+	DonorMemberSource& operator=(const DonorMemberSource&) = delete;
+	virtual int64 Size();
 	virtual bool Read(int64 offset, void* buffer, int64 size);
 	void SetFetchBudget(int* budget) { m_fetchBudget = budget; }
 	// patch reads fetch the parts of a range in parallel through it (no
@@ -76,29 +79,11 @@ public:
 	int TakeServedParts();
 
 private:
-	static constexpr int MaxCachedParts = 16;
-	// at most this many parts are fetched ahead for one read, so a read
-	// never evicts parts it is about to use from the cache
-	static constexpr int MaxPrefetchParts = MaxCachedParts / 2;
-	static constexpr int MaxResolveSteps = 6;
-
 	ArticleFetcher& m_fetcher;
 	FileInfo* m_donorFile;
-	StreamRangeList m_ranges;
-	std::map<int, ArticleFetcher::FetchedArticle> m_cache;
-	std::deque<int> m_cacheOrder;
-	std::set<int> m_servedParts;
-	int64 m_size = -1;
-	int64 m_drift = 0;
+	NzbgetRsDonorMemberSource* m_inner = nullptr;
 	int* m_fetchBudget = nullptr;
 	ArticleBatchFetcher* m_batchFetcher = nullptr;
-	bool m_bad = false;
-
-	bool EnsureInit();
-	const ArticleFetcher::FetchedArticle* FetchPart(int partIndex);
-	const ArticleFetcher::FetchedArticle* StoreFetched(int partIndex, ArticleFetcher::FetchedArticle&& fetched);
-	void Prefetch(int64 offset, int64 size);
-	const ArticleFetcher::FetchedArticle* PartForOffset(int64 offset, int& partIndex);
 };
 
 /* all members of one donor posting, lazily sourced */
@@ -359,14 +344,8 @@ private:
 		const std::set<FileInfo*>& claimed);
 	bool VerifyDonor(DiskFile& file, const RepairTarget& target, FileInfo* donorFile,
 		const StreamRangeList& donorRanges);
-	/* Byte-compares the batch fetcher's delivered probes against the target's
-	 * present regions. False on any mismatch, a size disagreement or a stop;
-	 * probes the donor could not supply are counted in missing. */
-	bool CompareProbes(DiskFile& file, const RepairTarget& target, int64& totalCompared,
-		bool& sawVariedData, int& missing);
 	int PatchFromDonor(DiskFile& file, RepairTarget& target, FileInfo* donorFile,
 		const StreamRangeList& donorRanges, const char* donorName);
-	static bool CompareToFile(DiskFile& file, int64 offset, const char* data, int64 size);
 
 	// cross-packing (M2/M3): repairs holes through inner-content maps after
 	// the per-member same-bytes pass (M1) exhausted all donors

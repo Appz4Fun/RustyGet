@@ -34749,4 +34749,440 @@ pub unsafe extern "C" fn nzbget_rs_stream_patch_from_donor_inner_file(
     written
 }
 
+pub struct NzbgetRsDonorMemberSource(pub crate::streamrepair::DonorMemberSource);
+
+type DonorFetchPartFn = Option<
+    unsafe extern "C" fn(
+        *mut std::ffi::c_void,
+        i32,
+        *mut c_int,
+        *mut i64,
+        *mut i64,
+        *mut *const u8,
+        *mut usize,
+    ) -> c_int,
+>;
+
+type DonorNextArticleFn = Option<
+    unsafe extern "C" fn(
+        *mut std::ffi::c_void,
+        *mut c_int,
+        *mut i64,
+        *mut i64,
+        *mut *const u8,
+        *mut usize,
+    ) -> c_int,
+>;
+
+struct FfiDonorArticleTransport {
+    ctx: *mut std::ffi::c_void,
+    allow_prefetch: bool,
+    fetch_part_cb: DonorFetchPartFn,
+    begin_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const i32, usize)>,
+    next_batch_cb: DonorNextArticleFn,
+    cancel_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+}
+
+impl crate::streamrepair::DonorArticleTransport for FfiDonorArticleTransport {
+    fn has_prefetch_batch(&self) -> bool {
+        self.allow_prefetch
+    }
+
+    fn fetch_part(&mut self, part_index: i32) -> Option<crate::streamrepair::FetchedDonorArticle> {
+        let cb = self.fetch_part_cb?;
+        let mut success: c_int = 0;
+        let mut offset: i64 = 0;
+        let mut file_size: i64 = 0;
+        let mut data_ptr: *const u8 = std::ptr::null();
+        let mut data_len: usize = 0;
+        let fetched = unsafe {
+            cb(
+                self.ctx,
+                part_index,
+                &mut success,
+                &mut offset,
+                &mut file_size,
+                &mut data_ptr,
+                &mut data_len,
+            )
+        };
+        if fetched == 0 {
+            return None;
+        }
+        let data = if data_ptr.is_null() || data_len == 0 {
+            Vec::new()
+        } else {
+            unsafe { std::slice::from_raw_parts(data_ptr, data_len).to_vec() }
+        };
+        Some(crate::streamrepair::FetchedDonorArticle {
+            success: success != 0,
+            offset,
+            file_size,
+            data,
+        })
+    }
+
+    fn begin_prefetch_batch(&mut self, part_indices: &[i32]) {
+        if let Some(cb) = self.begin_batch_cb {
+            unsafe { cb(self.ctx, part_indices.as_ptr(), part_indices.len()) };
+        }
+    }
+
+    fn next_prefetch_part(&mut self) -> Option<crate::streamrepair::FetchedDonorArticle> {
+        let cb = self.next_batch_cb?;
+        let mut success: c_int = 0;
+        let mut offset: i64 = 0;
+        let mut file_size: i64 = 0;
+        let mut data_ptr: *const u8 = std::ptr::null();
+        let mut data_len: usize = 0;
+        let ok = unsafe {
+            cb(
+                self.ctx,
+                &mut success,
+                &mut offset,
+                &mut file_size,
+                &mut data_ptr,
+                &mut data_len,
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        let data = if data_ptr.is_null() || data_len == 0 {
+            Vec::new()
+        } else {
+            unsafe { std::slice::from_raw_parts(data_ptr, data_len).to_vec() }
+        };
+        Some(crate::streamrepair::FetchedDonorArticle {
+            success: success != 0,
+            offset,
+            file_size,
+            data,
+        })
+    }
+
+    fn cancel_prefetch_batch(&mut self) {
+        if let Some(cb) = self.cancel_batch_cb {
+            unsafe { cb(self.ctx) };
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_donor_member_source_new(
+    article_sizes: *const i32,
+    article_count: usize,
+) -> *mut NzbgetRsDonorMemberSource {
+    let sizes = if article_sizes.is_null() || article_count == 0 {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(article_sizes, article_count).to_vec()
+    };
+    Box::into_raw(Box::new(NzbgetRsDonorMemberSource(
+        crate::streamrepair::DonorMemberSource::new(sizes),
+    )))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_donor_member_source_free(
+    source: *mut NzbgetRsDonorMemberSource,
+) {
+    if !source.is_null() {
+        drop(Box::from_raw(source));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_donor_member_source_take_served_parts(
+    source: *mut NzbgetRsDonorMemberSource,
+) -> c_int {
+    let Some(source) = source.as_mut() else {
+        return 0;
+    };
+    source.0.take_served_parts()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_donor_member_source_size(
+    source: *mut NzbgetRsDonorMemberSource,
+    ctx: *mut std::ffi::c_void,
+    fetch_part_cb: DonorFetchPartFn,
+) -> i64 {
+    let Some(source) = source.as_mut() else {
+        return 0;
+    };
+    let mut transport = FfiDonorArticleTransport {
+        ctx,
+        allow_prefetch: false,
+        fetch_part_cb,
+        begin_batch_cb: None,
+        next_batch_cb: None,
+        cancel_batch_cb: None,
+    };
+    source.0.size_with_transport(&mut transport)
+}
+
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_donor_member_source_read(
+    source: *mut NzbgetRsDonorMemberSource,
+    offset: i64,
+    buffer: *mut u8,
+    size: i64,
+    allow_prefetch: c_int,
+    ctx: *mut std::ffi::c_void,
+    fetch_part_cb: DonorFetchPartFn,
+    begin_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const i32, usize)>,
+    next_batch_cb: DonorNextArticleFn,
+    cancel_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+) -> c_int {
+    let Some(source) = source.as_mut() else {
+        return 0;
+    };
+    if size < 0 || (size > 0 && buffer.is_null()) {
+        return 0;
+    }
+    let out_slice = if size == 0 {
+        &mut [][..]
+    } else {
+        std::slice::from_raw_parts_mut(buffer, size as usize)
+    };
+    let mut transport = FfiDonorArticleTransport {
+        ctx,
+        allow_prefetch: allow_prefetch != 0,
+        fetch_part_cb,
+        begin_batch_cb,
+        next_batch_cb,
+        cancel_batch_cb,
+    };
+    c_int::from(source.0.read_with_transport(&mut transport, offset, out_slice))
+}
+
+struct FfiDonorBatchClient {
+    ctx: *mut std::ffi::c_void,
+    is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
+    begin_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const i32, usize)>,
+    next_article_cb: DonorNextArticleFn,
+    cancel_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+}
+
+impl crate::streamrepair::DonorBatchClient for FfiDonorBatchClient {
+    fn is_stopped(&self) -> bool {
+        self.is_stopped_cb
+            .is_some_and(|cb| unsafe { cb(self.ctx) != 0 })
+    }
+
+    fn begin_batch(&mut self, part_indices: &[i32]) {
+        if let Some(cb) = self.begin_batch_cb {
+            unsafe { cb(self.ctx, part_indices.as_ptr(), part_indices.len()) };
+        }
+    }
+
+    fn next_article(&mut self) -> Option<crate::streamrepair::FetchedDonorArticle> {
+        let cb = self.next_article_cb?;
+        let mut success: c_int = 0;
+        let mut offset: i64 = 0;
+        let mut file_size: i64 = 0;
+        let mut data_ptr: *const u8 = std::ptr::null();
+        let mut data_len: usize = 0;
+        let ok = unsafe {
+            cb(
+                self.ctx,
+                &mut success,
+                &mut offset,
+                &mut file_size,
+                &mut data_ptr,
+                &mut data_len,
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        let data = if data_ptr.is_null() || data_len == 0 {
+            Vec::new()
+        } else {
+            unsafe { std::slice::from_raw_parts(data_ptr, data_len).to_vec() }
+        };
+        Some(crate::streamrepair::FetchedDonorArticle {
+            success: success != 0,
+            offset,
+            file_size,
+            data,
+        })
+    }
+
+    fn cancel_remaining(&mut self) {
+        if let Some(cb) = self.cancel_batch_cb {
+            unsafe { cb(self.ctx) };
+        }
+    }
+}
+
+struct FfiTargetFileCallbacks {
+    ctx: *mut std::ffi::c_void,
+    read_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i64, *mut u8, i64) -> c_int>,
+    write_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i64, *const u8, i64) -> c_int>,
+    add_progress_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i64)>,
+    emit_message_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, *const c_char)>,
+}
+
+impl crate::streamrepair::TargetFileReader for FfiTargetFileCallbacks {
+    fn read_range(&mut self, offset: i64, buf: &mut [u8]) -> bool {
+        let Some(cb) = self.read_cb else {
+            return false;
+        };
+        unsafe { cb(self.ctx, offset, buf.as_mut_ptr(), buf.len() as i64) != 0 }
+    }
+}
+
+impl crate::streamrepair::TargetFilePatcher for FfiTargetFileCallbacks {
+    fn write_range(&mut self, offset: i64, data: &[u8]) -> bool {
+        let Some(cb) = self.write_cb else {
+            return false;
+        };
+        unsafe { cb(self.ctx, offset, data.as_ptr(), data.len() as i64) != 0 }
+    }
+
+    fn add_progress(&mut self, bytes: i64) {
+        if let Some(cb) = self.add_progress_cb {
+            unsafe { cb(self.ctx, bytes) };
+        }
+    }
+
+    fn emit_message_bytes(&mut self, kind: crate::streamrepair::TargetMessageKind, text: &[u8]) {
+        let Some(cb) = self.emit_message_cb else {
+            return;
+        };
+        let mut buf: Vec<u8> = text.iter().copied().filter(|&b| b != 0).collect();
+        buf.push(0);
+        unsafe { cb(self.ctx, kind as i32, buf.as_ptr() as *const c_char) };
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_verify_donor_file(
+    target_decoded_size: i64,
+    target_holes: *const crate::dupefallback::NzbgetRsByteRange,
+    target_hole_count: usize,
+    donor_ranges: *const crate::dupefallback::NzbgetRsByteRange,
+    donor_range_count: usize,
+    ctx: *mut std::ffi::c_void,
+    is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
+    begin_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const i32, usize)>,
+    next_article_cb: DonorNextArticleFn,
+    cancel_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+    read_target_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i64, *mut u8, i64) -> c_int>,
+) -> c_int {
+    let holes = if target_holes.is_null() || target_hole_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(target_holes, target_hole_count)
+    };
+    let donors = if donor_ranges.is_null() || donor_range_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(donor_ranges, donor_range_count)
+    };
+    let mut batch_client = FfiDonorBatchClient {
+        ctx,
+        is_stopped_cb,
+        begin_batch_cb,
+        next_article_cb,
+        cancel_batch_cb,
+    };
+    let mut target_reader = FfiTargetFileCallbacks {
+        ctx,
+        read_cb: read_target_cb,
+        write_cb: None,
+        add_progress_cb: None,
+        emit_message_cb: None,
+    };
+    c_int::from(crate::streamrepair::verify_donor_file(
+        target_decoded_size,
+        holes,
+        donors,
+        &mut batch_client,
+        &mut target_reader,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_stream_patch_from_donor_file(
+    target_filename: *const c_char,
+    target_decoded_size: i64,
+    target_holes: *const crate::dupefallback::NzbgetRsByteRange,
+    target_hole_count: usize,
+    donor_ranges: *const crate::dupefallback::NzbgetRsByteRange,
+    donor_range_count: usize,
+    donor_name: *const c_char,
+    ctx: *mut std::ffi::c_void,
+    is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
+    begin_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const i32, usize)>,
+    next_article_cb: DonorNextArticleFn,
+    cancel_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+    write_target_cb: Option<
+        unsafe extern "C" fn(*mut std::ffi::c_void, i64, *const u8, i64) -> c_int,
+    >,
+    add_progress_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i64)>,
+    emit_message_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, *const c_char)>,
+    update_holes_cb: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            *const crate::dupefallback::NzbgetRsByteRange,
+            usize,
+        ),
+    >,
+    out_recovered_bytes: *mut i64,
+    out_credit_recovery: *mut c_int,
+) -> c_int {
+    let mut holes_vec = if target_holes.is_null() || target_hole_count == 0 {
+        Vec::new()
+    } else {
+        std::slice::from_raw_parts(target_holes, target_hole_count).to_vec()
+    };
+    let donors = if donor_ranges.is_null() || donor_range_count == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(donor_ranges, donor_range_count)
+    };
+    let target_name_bytes = input(target_filename);
+    let donor_name_bytes = input(donor_name);
+    let mut batch_client = FfiDonorBatchClient {
+        ctx,
+        is_stopped_cb,
+        begin_batch_cb,
+        next_article_cb,
+        cancel_batch_cb,
+    };
+    let mut target_patcher = FfiTargetFileCallbacks {
+        ctx,
+        read_cb: None,
+        write_cb: write_target_cb,
+        add_progress_cb,
+        emit_message_cb,
+    };
+    let result = crate::streamrepair::patch_from_donor_file(
+        target_name_bytes,
+        target_decoded_size,
+        &mut holes_vec,
+        donors,
+        donor_name_bytes,
+        &mut batch_client,
+        &mut target_patcher,
+    );
+    if let Some(cb) = update_holes_cb {
+        cb(ctx, holes_vec.as_ptr(), holes_vec.len());
+    }
+    if !out_recovered_bytes.is_null() {
+        *out_recovered_bytes = result.recovered_bytes;
+    }
+    if !out_credit_recovery.is_null() {
+        *out_credit_recovery = c_int::from(result.credit_recovery);
+    }
+    result.recovered_parts
+}
+
+
 

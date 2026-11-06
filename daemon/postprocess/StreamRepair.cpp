@@ -54,6 +54,155 @@ namespace
 		}
 		return message;
 	}
+
+	template <typename Ctx, typename R, typename F>
+	R RepairMapCall(void* rawCtx, R failed, F f) noexcept
+	{
+		Ctx* c = static_cast<Ctx*>(rawCtx);
+		if (c->Error)
+		{
+			return failed;
+		}
+		try
+		{
+			return f(c);
+		}
+		catch (...)
+		{
+			c->Error = std::current_exception();
+			return failed;
+		}
+	}
+
+	template <typename Ctx, typename F>
+	void RepairMapCallVoid(void* rawCtx, F f) noexcept
+	{
+		Ctx* c = static_cast<Ctx*>(rawCtx);
+		if (c->Error)
+		{
+			return;
+		}
+		try
+		{
+			f(c);
+		}
+		catch (...)
+		{
+			c->Error = std::current_exception();
+		}
+	}
+
+	struct DonorTransportCtx
+	{
+		ArticleFetcher* Fetcher;
+		FileInfo* DonorFile;
+		int* FetchBudget;
+		ArticleBatchFetcher* BatchFetcher;
+		ArticleFetcher::FetchedArticle CurrentFetched;
+		std::exception_ptr Error;
+	};
+
+	int DonorFetchPartCb(
+		void* rawCtx,
+		int32_t partIndex,
+		int* outSuccess,
+		int64_t* outOffset,
+		int64_t* outFileSize,
+		const uint8_t** outData,
+		size_t* outDataLen) noexcept
+	{
+		return RepairMapCall<DonorTransportCtx>(rawCtx, 0, [=](DonorTransportCtx* c)
+		{
+			if (!c->DonorFile || partIndex < 0 ||
+				(size_t)partIndex >= c->DonorFile->GetArticles()->size())
+			{
+				return 0;
+			}
+			if (c->FetchBudget)
+			{
+				if (*c->FetchBudget <= 0)
+				{
+					return 0;
+				}
+				(*c->FetchBudget)--;
+			}
+			ArticleInfo* article = (*c->DonorFile->GetArticles())[partIndex].get();
+			c->CurrentFetched = c->Fetcher->Fetch(
+				article->GetMessageId(), *c->DonorFile->GetGroups());
+			*outSuccess = c->CurrentFetched.Success ? 1 : 0;
+			*outOffset = c->CurrentFetched.Offset;
+			*outFileSize = c->CurrentFetched.FileSize;
+			*outData = reinterpret_cast<const uint8_t*>(c->CurrentFetched.Data.data());
+			*outDataLen = c->CurrentFetched.Data.size();
+			return 1;
+		});
+	}
+
+	void DonorBeginBatchCb(void* rawCtx, const int32_t* partIndices, size_t count) noexcept
+	{
+		RepairMapCallVoid<DonorTransportCtx>(rawCtx, [=](DonorTransportCtx* c)
+		{
+			if (!c->BatchFetcher || !c->DonorFile)
+			{
+				return;
+			}
+			auto groups = std::make_shared<std::vector<CString>>();
+			for (const CString& group : *c->DonorFile->GetGroups())
+			{
+				groups->emplace_back(*group);
+			}
+			std::vector<ArticleBatchFetcher::Request> requests;
+			requests.reserve(count);
+			for (size_t i = 0; i < count; i++)
+			{
+				int partIndex = partIndices[i];
+				requests.push_back({
+					(*c->DonorFile->GetArticles())[partIndex]->GetMessageId(),
+					groups
+				});
+			}
+			c->BatchFetcher->Begin(std::move(requests));
+		});
+	}
+
+	int DonorNextBatchCb(
+		void* rawCtx,
+		int* outSuccess,
+		int64_t* outOffset,
+		int64_t* outFileSize,
+		const uint8_t** outData,
+		size_t* outDataLen) noexcept
+	{
+		return RepairMapCall<DonorTransportCtx>(rawCtx, 0, [=](DonorTransportCtx* c)
+		{
+			if (!c->BatchFetcher)
+			{
+				return 0;
+			}
+			c->CurrentFetched = ArticleFetcher::FetchedArticle();
+			if (!c->BatchFetcher->Next(c->CurrentFetched))
+			{
+				return 0;
+			}
+			*outSuccess = c->CurrentFetched.Success ? 1 : 0;
+			*outOffset = c->CurrentFetched.Offset;
+			*outFileSize = c->CurrentFetched.FileSize;
+			*outData = reinterpret_cast<const uint8_t*>(c->CurrentFetched.Data.data());
+			*outDataLen = c->CurrentFetched.Data.size();
+			return 1;
+		});
+	}
+
+	void DonorCancelBatchCb(void* rawCtx) noexcept
+	{
+		RepairMapCallVoid<DonorTransportCtx>(rawCtx, [](DonorTransportCtx* c)
+		{
+			if (c->BatchFetcher)
+			{
+				c->BatchFetcher->CancelRemaining();
+			}
+		});
+	}
 }
 
 ContentSource* DiskSourceSet::GetSource(int memberIndex)
@@ -83,207 +232,66 @@ ContentSource* DiskSourceSet::GetSource(int memberIndex)
 	return entry.Source.get();
 }
 
+DonorMemberSource::DonorMemberSource(ArticleFetcher& fetcher, FileInfo* donorFile) :
+	m_fetcher(fetcher), m_donorFile(donorFile)
+{
+	std::vector<int32_t> articleSizes;
+	if (donorFile && donorFile->GetArticles())
+	{
+		articleSizes.reserve(donorFile->GetArticles()->size());
+		for (ArticleInfo* article : donorFile->GetArticles())
+		{
+			articleSizes.push_back(article->GetSize());
+		}
+	}
+	m_inner = nzbget_rs_donor_member_source_new(articleSizes.data(), articleSizes.size());
+}
+
+DonorMemberSource::~DonorMemberSource()
+{
+	nzbget_rs_donor_member_source_free(m_inner);
+}
+
 int DonorMemberSource::TakeServedParts()
 {
-	int count = (int)m_servedParts.size();
-	m_servedParts.clear();
-	return count;
+	return nzbget_rs_donor_member_source_take_served_parts(m_inner);
 }
 
-bool DonorMemberSource::EnsureInit()
+int64 DonorMemberSource::Size()
 {
-	if (m_size >= 0)
+	DonorTransportCtx ctx{&m_fetcher, m_donorFile, m_fetchBudget, m_batchFetcher, {}, nullptr};
+	int64 size = nzbget_rs_donor_member_source_size(m_inner, &ctx, DonorFetchPartCb);
+	if (ctx.Error)
 	{
-		return true;
+		std::rethrow_exception(ctx.Error);
 	}
-	if (m_bad || m_donorFile->GetArticles()->empty())
-	{
-		return false;
-	}
-	const ArticleFetcher::FetchedArticle* first = FetchPart(0);
-	if (!first || !first->Success || first->Offset != 0)
-	{
-		m_bad = true;	// without article 0 neither headers nor size exist
-		return false;
-	}
-	m_size = first->FileSize;
-	m_ranges = DupeStreamRepair::EstimateDonorRanges(m_donorFile, m_size);
-	if (m_ranges.empty())
-	{
-		// a malformed donor nzb (all-zero segment sizes) yields no estimates:
-		// without them offsets cannot resolve, and a committed m_size would
-		// let a later Read pass the fast-path into indexing an empty vector
-		m_bad = true;
-		m_size = -1;
-		return false;
-	}
-	return true;
-}
-
-const ArticleFetcher::FetchedArticle* DonorMemberSource::FetchPart(int partIndex)
-{
-	if (m_bad || partIndex < 0 || (size_t)partIndex >= m_donorFile->GetArticles()->size())
-	{
-		return nullptr;
-	}
-	auto cached = m_cache.find(partIndex);
-	if (cached != m_cache.end())
-	{
-		return cached->second.Success ? &cached->second : nullptr;
-	}
-	if (m_fetchBudget)
-	{
-		if (*m_fetchBudget <= 0)
-		{
-			return nullptr;
-		}
-		(*m_fetchBudget)--;
-	}
-
-	ArticleInfo* article = (*m_donorFile->GetArticles())[partIndex].get();
-	return StoreFetched(partIndex, m_fetcher.Fetch(article->GetMessageId(), *m_donorFile->GetGroups()));
-}
-
-const ArticleFetcher::FetchedArticle* DonorMemberSource::StoreFetched(int partIndex,
-	ArticleFetcher::FetchedArticle&& fetched)
-{
-	// consistency: every article of the member must declare the same
-	// decoded size and stay inside it, or the whole member is unusable
-	int markBad = 0;
-	if (nzbget_rs_stream_donor_check_fetched_part(
-		fetched.Success ? 1 : 0, fetched.Data.size(), fetched.Offset,
-		fetched.FileSize, m_size, &markBad) != 0)
-	{
-		m_bad = markBad != 0;
-		fetched.Success = false;
-	}
-
-	if ((int)m_cache.size() >= MaxCachedParts && !m_cacheOrder.empty())
-	{
-		m_cache.erase(m_cacheOrder.front());
-		m_cacheOrder.pop_front();
-	}
-	m_cacheOrder.push_back(partIndex);
-	auto inserted = m_cache.emplace(partIndex, std::move(fetched)).first;
-	return inserted->second.Success ? &inserted->second : nullptr;
-}
-
-const ArticleFetcher::FetchedArticle* DonorMemberSource::PartForOffset(int64 offset,
-	int& partIndex)
-{
-	// index guess from the estimates, corrected by the measured drift
-	int index = nzbget_rs_stream_donor_index_for_offset(
-		offset, m_drift,
-		reinterpret_cast<const NzbgetRsByteRange*>(m_ranges.data()),
-		m_ranges.size());
-
-	for (int step = 0; step < MaxResolveSteps; step++)
-	{
-		const ArticleFetcher::FetchedArticle* fetched = FetchPart(index);
-		if (!fetched)
-		{
-			return nullptr;
-		}
-		m_drift = fetched->Offset - m_ranges[index].Offset;
-		int newIndex = index;
-		int stepStatus = nzbget_rs_stream_donor_step_part_for_offset(
-			offset, fetched->Offset, fetched->Data.size(), index, m_ranges.size(), &newIndex);
-		if (stepStatus == 0)
-		{
-			return nullptr;
-		}
-		if (stepStatus == 1)
-		{
-			index = newIndex;
-		}
-		else
-		{
-			partIndex = index;
-			return fetched;
-		}
-	}
-	return nullptr;
-}
-
-void DonorMemberSource::Prefetch(int64 offset, int64 size)
-{
-	if (!m_batchFetcher || m_fetchBudget || m_bad || m_ranges.empty() || size <= 0)
-	{
-		return;
-	}
-
-	// the parts the estimates (corrected by the measured drift) put under the
-	// range, one more on each side for estimation error
-	auto indexOf = [this](int64 offset)
-	{
-		return nzbget_rs_stream_donor_index_for_offset(
-			offset, m_drift,
-			reinterpret_cast<const NzbgetRsByteRange*>(m_ranges.data()),
-			m_ranges.size());
-	};
-	int first = 0, last = 0;
-	nzbget_rs_stream_donor_calc_prefetch_bounds(
-		indexOf(offset), indexOf(offset + size - 1), m_ranges.size(), &first, &last);
-
-	auto groups = std::make_shared<std::vector<CString>>();
-	for (const CString& group : *m_donorFile->GetGroups())
-	{
-		groups->emplace_back(*group);
-	}
-	std::vector<ArticleBatchFetcher::Request> requests;
-	std::vector<int> parts;
-	for (int index = first; index <= last && (int)parts.size() < MaxPrefetchParts; index++)
-	{
-		if (!m_cache.count(index))
-		{
-			requests.push_back({(*m_donorFile->GetArticles())[index]->GetMessageId(), groups});
-			parts.push_back(index);
-		}
-	}
-	if (parts.size() < 2)
-	{
-		return;	// nothing to gain over the serial fetch
-	}
-
-	m_batchFetcher->Begin(std::move(requests));
-	ArticleFetcher::FetchedArticle fetched;
-	for (size_t i = 0; i < parts.size() && m_batchFetcher->Next(fetched); i++)
-	{
-		StoreFetched(parts[i], std::move(fetched));
-		fetched = ArticleFetcher::FetchedArticle();
-	}
-	// a stop ends Next() early: drop what is still in flight
-	m_batchFetcher->CancelRemaining();
+	return size;
 }
 
 bool DonorMemberSource::Read(int64 offset, void* buffer, int64 size)
 {
-	if (!EnsureInit() || !(offset >= 0 && size >= 0 && offset <= m_size && size <= m_size - offset))
+	if (size < 0)
 	{
 		return false;
 	}
-
-	Prefetch(offset, size);
-
-	char* out = (char*)buffer;
-	int64 pos = offset;
-	while (pos < offset + size)
+	DonorTransportCtx ctx{&m_fetcher, m_donorFile, m_fetchBudget, m_batchFetcher, {}, nullptr};
+	int allowPrefetch = (m_batchFetcher && !m_fetchBudget) ? 1 : 0;
+	bool ok = nzbget_rs_donor_member_source_read(
+		m_inner,
+		offset,
+		static_cast<uint8_t*>(buffer),
+		size,
+		allowPrefetch,
+		&ctx,
+		DonorFetchPartCb,
+		DonorBeginBatchCb,
+		DonorNextBatchCb,
+		DonorCancelBatchCb) != 0;
+	if (ctx.Error)
 	{
-		int partIndex;
-		const ArticleFetcher::FetchedArticle* fetched = PartForOffset(pos, partIndex);
-		if (!fetched)
-		{
-			return false;
-		}
-		int64 from = 0, len = 0;
-		nzbget_rs_stream_donor_calc_read_chunk(
-			pos, fetched->Offset, fetched->Data.size(), offset + size, &from, &len);
-		memcpy(out, fetched->Data.data() + from, len);
-		m_servedParts.insert(partIndex);
-		out += len;
-		pos += len;
+		std::rethrow_exception(ctx.Error);
 	}
-	return true;
+	return ok;
 }
 
 DonorSetSources::DonorSetSources(ArticleFetcher& fetcher, NzbInfo* donorNzb) :
@@ -1562,298 +1570,225 @@ std::vector<FileInfo*> StreamRepairController::FindDonorFiles(const RepairTarget
 bool StreamRepairController::VerifyDonor(DiskFile& file, const RepairTarget& target,
 	FileInfo* donorFile, const StreamRangeList& donorRanges)
 {
-	std::vector<int> probeParts(donorRanges.size());
-	std::vector<int> reserve(donorRanges.size());
-	size_t probeLen = 0, reserveLen = 0;
-	nzbget_rs_stream_select_verify_donor_probes(
-		reinterpret_cast<const NzbgetRsByteRange*>(donorRanges.data()), donorRanges.size(),
-		reinterpret_cast<const NzbgetRsByteRange*>(target.Holes.data()), target.Holes.size(),
-		target.DecodedFileSize, DupeStreamRepair::ProbeCount,
-		probeParts.data(), probeParts.size(), &probeLen,
-		reserve.data(), reserve.size(), &reserveLen);
-	probeParts.resize(probeLen);
-	reserve.resize(reserveLen);
-
-	int64 totalCompared = 0;
-	bool sawVariedData = false;
-
-	// requests own a shared copy of the donor's group list: CancelRemaining
-	// does not quiesce in-flight workers, which may still dereference their
-	// request after this donor's NzbInfo (and its FileInfos) is destroyed
 	auto donorGroups = std::make_shared<std::vector<CString>>();
 	for (const CString& group : *donorFile->GetGroups())
 	{
 		donorGroups->emplace_back(*group);
 	}
 
-	std::vector<int> attempted;
-	std::vector<int> batch = std::move(probeParts);
-	while (!batch.empty())
+	struct VerifyFileCtx
 	{
-		attempted.insert(attempted.end(), batch.begin(), batch.end());
+		StreamRepairController* Controller;
+		DiskFile* File;
+		FileInfo* DonorFile;
+		std::shared_ptr<std::vector<CString>> DonorGroups;
+		ArticleFetcher::FetchedArticle CurrentFetched;
+		std::exception_ptr Error;
+	} ctx{this, &file, donorFile, std::move(donorGroups), {}, nullptr};
 
-		std::vector<ArticleBatchFetcher::Request> requests;
-		requests.reserve(batch.size());
-		for (int partIndex : batch)
+	bool ok = nzbget_rs_stream_verify_donor_file(
+		target.DecodedFileSize,
+		reinterpret_cast<const NzbgetRsByteRange*>(target.Holes.data()),
+		target.Holes.size(),
+		reinterpret_cast<const NzbgetRsByteRange*>(donorRanges.data()),
+		donorRanges.size(),
+		&ctx,
+		[](void* rawCtx) -> int
 		{
-			ArticleInfo* article = (*donorFile->GetArticles())[partIndex].get();
-			requests.push_back({article->GetMessageId(), donorGroups});
-		}
-		m_batchFetcher.Begin(std::move(requests));
-
-		int missing = 0;
-		if (!CompareProbes(file, target, totalCompared, sawVariedData, missing))
+			return RepairMapCall<VerifyFileCtx>(rawCtx, 1, [](VerifyFileCtx* c)
+			{
+				return c->Controller->IsStopped() ? 1 : 0;
+			});
+		},
+		[](void* rawCtx, const int32_t* partIndices, size_t count)
 		{
-			return false;
-		}
-
-		// the compare floor scales down for small files (a repost's par2
-		// volumes) and clamps to what the attempted probes can reach;
-		// below 64 reachable bytes identity is unknowable and par2 owns it.
-		// Compared bytes accumulate ACROSS probes.
-		int64 requiredCompare = DupeStreamRepair::RequiredCompareFloor(
-			target.DecodedFileSize, target.Holes, donorRanges, attempted);
-		if (IsStopped())
+			RepairMapCallVoid<VerifyFileCtx>(rawCtx, [=](VerifyFileCtx* c)
+			{
+				std::vector<ArticleBatchFetcher::Request> requests;
+				requests.reserve(count);
+				for (size_t i = 0; i < count; i++)
+				{
+					ArticleInfo* article = (*c->DonorFile->GetArticles())[partIndices[i]].get();
+					requests.push_back({article->GetMessageId(), c->DonorGroups});
+				}
+				c->Controller->m_batchFetcher.Begin(std::move(requests));
+			});
+		},
+		[](void* rawCtx, int* outSuccess, int64_t* outOffset, int64_t* outFileSize,
+			const uint8_t** outData, size_t* outDataLen) -> int
 		{
-			return false;
-		}
-		if (totalCompared >= requiredCompare && sawVariedData)
+			return RepairMapCall<VerifyFileCtx>(rawCtx, 0, [=](VerifyFileCtx* c)
+			{
+				c->CurrentFetched = ArticleFetcher::FetchedArticle();
+				if (!c->Controller->m_batchFetcher.Next(c->CurrentFetched))
+				{
+					return 0;
+				}
+				*outSuccess = c->CurrentFetched.Success ? 1 : 0;
+				*outOffset = c->CurrentFetched.Offset;
+				*outFileSize = c->CurrentFetched.FileSize;
+				*outData = reinterpret_cast<const uint8_t*>(c->CurrentFetched.Data.data());
+				*outDataLen = c->CurrentFetched.Data.size();
+				return 1;
+			});
+		},
+		[](void* rawCtx)
 		{
-			return true;
-		}
-
-		// a repost misses articles of its own; replace each probe the donor
-		// could not supply, spread over the remaining eligible parts
-		batch.resize(reserve.size());
-		size_t repCount = nzbget_rs_stream_select_probe_replacements(
-			missing, reserve.data(), reserve.size(),
-			DupeStreamRepair::MaxProbeFetches, attempted.size(),
-			batch.data(), batch.size());
-		batch.resize(repCount);
-		for (int partIndex : batch)
+			RepairMapCallVoid<VerifyFileCtx>(rawCtx, [](VerifyFileCtx* c)
+			{
+				c->Controller->m_batchFetcher.CancelRemaining();
+			});
+		},
+		[](void* rawCtx, int64_t offset, uint8_t* buf, int64_t size) -> int
 		{
-			reserve.erase(std::find(reserve.begin(), reserve.end(), partIndex));
-		}
-	}
-
-	return false;
-}
-
-bool StreamRepairController::CompareProbes(DiskFile& file, const RepairTarget& target,
-	int64& totalCompared, bool& sawVariedData, int& missing)
-{
-	ArticleFetcher::FetchedArticle fetched;
-	while (m_batchFetcher.Next(fetched))
+			return RepairMapCall<VerifyFileCtx>(rawCtx, 0, [=](VerifyFileCtx* c)
+			{
+				c->File->Seek(offset);
+				if (c->File->Position() != offset ||
+					(size > 0 && c->File->Read(buf, size) != size))
+				{
+					return 0;
+				}
+				return 1;
+			});
+		}) != 0;
+	if (ctx.Error)
 	{
-		if (IsStopped())
-		{
-			m_batchFetcher.CancelRemaining();
-			return false;
-		}
-		int isMissing = 0;
-		if (!nzbget_rs_stream_check_probe_article(
-			fetched.Success ? 1 : 0, fetched.Data.size(),
-			fetched.FileSize, fetched.Offset, target.DecodedFileSize, &isMissing))
-		{
-			if (isMissing)
-			{
-				missing++;
-				continue;
-			}
-			m_batchFetcher.CancelRemaining();
-			return false;
-		}
-
-		// byte-compare the fetched article against the regions we downloaded
-		// ourselves (everything in the article's range that is not a hole)
-		StreamRangeList present = { {fetched.Offset, (int64)fetched.Data.size()} };
-		for (const StreamRange& hole : target.Holes)
-		{
-			DupeStreamRepair::SubtractCovered(present, hole);
-		}
-
-		for (const StreamRange& range : present)
-		{
-			const char* rangeData = fetched.Data.data() + (range.Offset - fetched.Offset);
-			if (!CompareToFile(file, range.Offset, rangeData, range.Size))
-			{
-				m_batchFetcher.CancelRemaining();
-				return false; // same size but different content - wrong donor
-			}
-			totalCompared += range.Size;
-
-			// constant-byte runs (zero padding, sparse regions) match ANY
-			// same-size sibling and prove nothing; identity needs at least
-			// one compared range with two distinct byte values
-			if (!sawVariedData && range.Size > 1)
-			{
-				sawVariedData = nzbget_rs_stream_buffer_has_varied_data(
-					reinterpret_cast<const uint8_t*>(rangeData), (size_t)range.Size) != 0;
-			}
-		}
+		std::rethrow_exception(ctx.Error);
 	}
-
-	return true;
+	return ok;
 }
 
 int StreamRepairController::PatchFromDonor(DiskFile& file, RepairTarget& target,
 	FileInfo* donorFile, const StreamRangeList& donorRanges, const char* donorName)
 {
-	int recoveredParts = 0;
-	int64 recoveredBytes = 0;
-	int64 drift = 0;
-	std::set<int> tried;
-
-	// requests own a shared copy of the donor's group list: CancelRemaining
-	// does not quiesce in-flight workers, which may still dereference their
-	// request after this donor's NzbInfo (and its FileInfos) is destroyed
 	auto donorGroups = std::make_shared<std::vector<CString>>();
 	for (const CString& group : *donorFile->GetGroups())
 	{
 		donorGroups->emplace_back(*group);
 	}
 
-	// two selection passes: pass 2 re-selects with the measured drift between
-	// estimated and actual donor offsets. A donor nzb with missing segment
-	// entries (or regionally varying yEnc overhead) shifts ALL estimates by
-	// whole parts, which a fixed margin alone cannot absorb.
-	for (int pass = 0; pass < 2 && !target.Holes.empty() && !IsStopped(); pass++)
+	struct PatchFileCtx
 	{
-		// select donor parts as if the estimate were exact: if actual offsets
-		// sit at estimate+drift, the part covering hole h has estimate h-drift
-		StreamRangeList shiftedHoles = target.Holes;
-		for (StreamRange& hole : shiftedHoles)
+		StreamRepairController* Controller;
+		DiskFile* File;
+		RepairTarget* Target;
+		FileInfo* DonorFile;
+		std::shared_ptr<std::vector<CString>> DonorGroups;
+		ArticleFetcher::FetchedArticle CurrentFetched;
+		std::exception_ptr Error;
+	} ctx{this, &file, &target, donorFile, std::move(donorGroups), {}, nullptr};
+
+	int64 recoveredBytes = 0;
+	int creditRecovery = 0;
+	int recoveredParts = nzbget_rs_stream_patch_from_donor_file(
+		target.Filename,
+		target.DecodedFileSize,
+		reinterpret_cast<const NzbgetRsByteRange*>(target.Holes.data()),
+		target.Holes.size(),
+		reinterpret_cast<const NzbgetRsByteRange*>(donorRanges.data()),
+		donorRanges.size(),
+		donorName,
+		&ctx,
+		[](void* rawCtx) -> int
 		{
-			hole.Offset -= drift;
-		}
-
-		std::vector<int> patchParts = DupeStreamRepair::SelectPatchParts(
-			donorRanges, shiftedHoles, DupeStreamRepair::PatchMarginParts);
-
-		std::vector<ArticleBatchFetcher::Request> requests;
-		std::vector<int> requestParts;
-		requests.reserve(patchParts.size());
-		requestParts.reserve(patchParts.size());
-		// marking parts "tried" BEFORE Begin (rather than as each result
-		// arrives) is safe only because the pass-loop guard (pass < 2 &&
-		// !Holes.empty() && !IsStopped()) prevents pass 2 exactly when an
-		// early break cancelled undelivered requests
-		for (int partIndex : patchParts)
+			return RepairMapCall<PatchFileCtx>(rawCtx, 1, [](PatchFileCtx* c)
+			{
+				return c->Controller->IsStopped() ? 1 : 0;
+			});
+		},
+		[](void* rawCtx, const int32_t* partIndices, size_t count)
 		{
-			if (!tried.insert(partIndex).second)
+			RepairMapCallVoid<PatchFileCtx>(rawCtx, [=](PatchFileCtx* c)
 			{
-				continue; // already fetched in the previous pass
-			}
-			ArticleInfo* article = (*donorFile->GetArticles())[partIndex].get();
-			requests.push_back({article->GetMessageId(), donorGroups});
-			requestParts.push_back(partIndex);
-		}
-		m_batchFetcher.Begin(std::move(requests));
-
-		bool fetchedAny = false;
-		size_t resultIndex = 0;
-		ArticleFetcher::FetchedArticle fetched;
-
-		for (; m_batchFetcher.Next(fetched); resultIndex++)
-		{
-			int partIndex = requestParts[resultIndex];
-			if (IsStopped() || target.Holes.empty())
-			{
-				m_batchFetcher.CancelRemaining();
-				break;
-			}
-			if (!nzbget_rs_stream_is_patch_article_usable(
-				fetched.Success ? 1 : 0, fetched.FileSize, target.DecodedFileSize,
-				fetched.Data.size(), fetched.Offset))
-			{
-				continue; // the donor misses this article too - the hole stays for par2
-			}
-
-			fetchedAny = true;
-			drift = fetched.Offset - donorRanges[partIndex].Offset;
-
-			StreamRange fetchedRange = { fetched.Offset, (int64)fetched.Data.size() };
-
-			// write ONLY the bytes that fall into holes: everything else is
-			// already on disk (and was used to verify this donor)
-			StreamRangeList written;
-			for (const StreamRange& hole : target.Holes)
-			{
-				int64 from = 0, to = 0;
-				if (nzbget_rs_stream_clip_hole_to_fetched(
-					hole.Offset, hole.Size, fetched.Offset, fetched.Data.size(), &from, &to) != 0)
+				std::vector<ArticleBatchFetcher::Request> requests;
+				requests.reserve(count);
+				for (size_t i = 0; i < count; i++)
 				{
-					file.Seek(from);
-					if (file.Position() != from ||
-						file.Write(fetched.Data.data() + (from - fetched.Offset), to - from) != to - from ||
-						!file.Flush())
-					{
-						PrintMessage(Message::mkError,
-							"Could not write to %s during stream repair: %s",
-							*target.Filename, *WriteErrorMessage());
-						m_batchFetcher.CancelRemaining();
-						return recoveredParts;
-					}
-					written.push_back({from, to - from});
+					ArticleInfo* article = (*c->DonorFile->GetArticles())[partIndices[i]].get();
+					requests.push_back({article->GetMessageId(), c->DonorGroups});
 				}
-			}
-
-			for (const StreamRange& range : written)
-			{
-				DupeStreamRepair::SubtractCovered(target.Holes, range);
-				recoveredBytes += range.Size;
-				m_progressBytes += range.Size;
-			}
-
-			if (!written.empty())
-			{
-				recoveredParts++;
-			}
-		}
-
-		if (!fetchedAny || drift == 0)
+				c->Controller->m_batchFetcher.Begin(std::move(requests));
+			});
+		},
+		[](void* rawCtx, int* outSuccess, int64_t* outOffset, int64_t* outFileSize,
+			const uint8_t** outData, size_t* outDataLen) -> int
 		{
-			break; // nothing measured, or estimates were exact - pass 2 would repeat pass 1
-		}
+			return RepairMapCall<PatchFileCtx>(rawCtx, 0, [=](PatchFileCtx* c)
+			{
+				c->CurrentFetched = ArticleFetcher::FetchedArticle();
+				if (!c->Controller->m_batchFetcher.Next(c->CurrentFetched))
+				{
+					return 0;
+				}
+				*outSuccess = c->CurrentFetched.Success ? 1 : 0;
+				*outOffset = c->CurrentFetched.Offset;
+				*outFileSize = c->CurrentFetched.FileSize;
+				*outData = reinterpret_cast<const uint8_t*>(c->CurrentFetched.Data.data());
+				*outDataLen = c->CurrentFetched.Data.size();
+				return 1;
+			});
+		},
+		[](void* rawCtx)
+		{
+			RepairMapCallVoid<PatchFileCtx>(rawCtx, [](PatchFileCtx* c)
+			{
+				c->Controller->m_batchFetcher.CancelRemaining();
+			});
+		},
+		[](void* rawCtx, int64_t offset, const uint8_t* data, int64_t size) -> int
+		{
+			return RepairMapCall<PatchFileCtx>(rawCtx, 0, [=](PatchFileCtx* c)
+			{
+				c->File->Seek(offset);
+				if (c->File->Position() != offset ||
+					c->File->Write(data, size) != size ||
+					!c->File->Flush())
+				{
+					c->Controller->PrintMessage(Message::mkError,
+						"Could not write to %s during stream repair: %s",
+						*c->Target->Filename, *WriteErrorMessage());
+					return 0;
+				}
+				return 1;
+			});
+		},
+		[](void* rawCtx, int64_t bytes)
+		{
+			RepairMapCallVoid<PatchFileCtx>(rawCtx, [bytes](PatchFileCtx* c)
+			{
+				c->Controller->m_progressBytes += bytes;
+			});
+		},
+		[](void* rawCtx, int32_t kind, const char* text)
+		{
+			RepairMapCallVoid<PatchFileCtx>(rawCtx, [=](PatchFileCtx* c)
+			{
+				Message::EKind msgKind = kind == 2 ? Message::mkError :
+					kind == 1 ? Message::mkWarning : Message::mkInfo;
+				c->Controller->PrintMessage(msgKind, "%s", text);
+			});
+		},
+		[](void* rawCtx, const NzbgetRsByteRange* holes, size_t holeCount)
+		{
+			RepairMapCallVoid<PatchFileCtx>(rawCtx, [=](PatchFileCtx* c)
+			{
+				c->Target->Holes.assign(
+					reinterpret_cast<const StreamRange*>(holes),
+					reinterpret_cast<const StreamRange*>(holes) + holeCount);
+			});
+		},
+		&recoveredBytes,
+		&creditRecovery);
+	if (ctx.Error)
+	{
+		std::rethrow_exception(ctx.Error);
 	}
-
-	if (recoveredParts > 0)
+	if (creditRecovery && recoveredParts > 0)
 	{
 		m_recoveredBytes += recoveredBytes;
-		PrintMessage(Message::mkInfo,
-			"Recovered %.1f MB (%i donor article(s)) of %s from duplicate %s",
-			nzbget_rs_dqh_stream_repair_bytes_to_mb(recoveredBytes),
-			recoveredParts, *target.Filename, donorName);
 	}
-
 	return recoveredParts;
-}
-
-bool StreamRepairController::CompareToFile(DiskFile& file, int64 offset, const char* data,
-	int64 size)
-{
-	file.Seek(offset);
-	if (file.Position() != offset)
-	{
-		return false;
-	}
-
-	CharBuffer buffer(64 * 1024);
-	int64 remaining = size;
-	while (remaining > 0)
-	{
-		int64 chunk = std::min(remaining, (int64)buffer.Size());
-		if (file.Read(buffer, chunk) != chunk)
-		{
-			return false; // short read (e.g. join-mode file shorter than expected)
-		}
-		if (!nzbget_rs_dqh_mem_slices_equal(buffer, data + (size - remaining), (size_t)chunk))
-		{
-			return false;
-		}
-		remaining -= chunk;
-	}
-	return true;
 }
 
 void StreamRepairController::ReportRemainingHoles(std::vector<RepairTarget>& targets)
@@ -2145,43 +2080,6 @@ void StreamRepairController::ExecCrossPackRepair(const char* destDir,
 
 namespace
 {
-	template <typename Ctx, typename R, typename F>
-	R RepairMapCall(void* rawCtx, R failed, F f) noexcept
-	{
-		Ctx* c = static_cast<Ctx*>(rawCtx);
-		if (c->Error)
-		{
-			return failed;
-		}
-		try
-		{
-			return f(c);
-		}
-		catch (...)
-		{
-			c->Error = std::current_exception();
-			return failed;
-		}
-	}
-
-	template <typename Ctx, typename F>
-	void RepairMapCallVoid(void* rawCtx, F f) noexcept
-	{
-		Ctx* c = static_cast<Ctx*>(rawCtx);
-		if (c->Error)
-		{
-			return;
-		}
-		try
-		{
-			f(c);
-		}
-		catch (...)
-		{
-			c->Error = std::current_exception();
-		}
-	}
-
 	struct FlatContentMap
 	{
 		const char* InnerName = "";

@@ -5520,6 +5520,524 @@ impl RepairSetData {
     }
 }
 
+pub const DONOR_MAX_CACHED_PARTS: usize = 16;
+pub const DONOR_MAX_PREFETCH_PARTS: usize = DONOR_MAX_CACHED_PARTS / 2;
+pub const DONOR_MAX_RESOLVE_STEPS: usize = 6;
+
+pub const DONOR_PROBE_COUNT: i32 = 2;
+pub const DONOR_MAX_PROBE_FETCHES: i32 = 8;
+pub const DONOR_PATCH_MARGIN_PARTS: i32 = 2;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FetchedDonorArticle {
+    pub success: bool,
+    pub offset: i64,
+    pub file_size: i64,
+    pub data: Vec<u8>,
+}
+
+/// Transport adapter for fetching and prefetching donor member articles on demand.
+pub trait DonorArticleTransport {
+    fn has_prefetch_batch(&self) -> bool;
+    fn fetch_part(&mut self, part_index: i32) -> Option<FetchedDonorArticle>;
+    fn begin_prefetch_batch(&mut self, part_indices: &[i32]);
+    fn next_prefetch_part(&mut self) -> Option<FetchedDonorArticle>;
+    fn cancel_prefetch_batch(&mut self);
+}
+
+/// Donor-side byte access to one member of a duplicate posting (`DonorMemberSource` in `StreamRepair.h`).
+/// Articles are fetched and decoded on demand, offsets resolve through estimated ranges with
+/// measured-drift correction, and recent articles stay cached up to `DONOR_MAX_CACHED_PARTS`.
+#[derive(Debug, Default)]
+pub struct DonorMemberSource {
+    article_sizes: Vec<i32>,
+    ranges: Vec<NzbgetRsByteRange>,
+    cache: std::collections::BTreeMap<i32, FetchedDonorArticle>,
+    cache_order: std::collections::VecDeque<i32>,
+    served_parts: std::collections::BTreeSet<i32>,
+    size: i64,
+    drift: i64,
+    bad: bool,
+}
+
+impl DonorMemberSource {
+    pub fn new(article_sizes: Vec<i32>) -> Self {
+        Self {
+            article_sizes,
+            ranges: Vec::new(),
+            cache: std::collections::BTreeMap::new(),
+            cache_order: std::collections::VecDeque::new(),
+            served_parts: std::collections::BTreeSet::new(),
+            size: -1,
+            drift: 0,
+            bad: false,
+        }
+    }
+
+    pub fn take_served_parts(&mut self) -> i32 {
+        let count = self.served_parts.len() as i32;
+        self.served_parts.clear();
+        count
+    }
+
+    pub fn store_fetched(&mut self, part_index: i32, mut fetched: FetchedDonorArticle) -> bool {
+        let (invalid, mark_bad) = donor_check_fetched_part(
+            fetched.success,
+            fetched.data.len(),
+            fetched.offset,
+            fetched.file_size,
+            self.size,
+        );
+        if invalid {
+            self.bad = mark_bad;
+            fetched.success = false;
+        }
+        if self.cache.len() >= DONOR_MAX_CACHED_PARTS {
+            if let Some(oldest) = self.cache_order.pop_front() {
+                self.cache.remove(&oldest);
+            }
+        }
+        self.cache_order.push_back(part_index);
+        self.cache.entry(part_index).or_insert(fetched).success
+    }
+
+    pub fn fetch_part(
+        &mut self,
+        transport: &mut dyn DonorArticleTransport,
+        part_index: i32,
+    ) -> Option<&FetchedDonorArticle> {
+        if self.bad || part_index < 0 || (part_index as usize) >= self.article_sizes.len() {
+            return None;
+        }
+        if self.cache.contains_key(&part_index) {
+            let cached = self.cache.get(&part_index)?;
+            return cached.success.then_some(cached);
+        }
+        let fetched = transport.fetch_part(part_index)?;
+        if self.store_fetched(part_index, fetched) {
+            self.cache.get(&part_index)
+        } else {
+            None
+        }
+    }
+
+    pub fn ensure_init(&mut self, transport: &mut dyn DonorArticleTransport) -> bool {
+        if self.size >= 0 {
+            return true;
+        }
+        if self.bad || self.article_sizes.is_empty() {
+            return false;
+        }
+        let (first_ok, first_file_size) = match self.fetch_part(transport, 0) {
+            Some(first) if first.success && first.offset == 0 => (true, first.file_size),
+            _ => (false, 0),
+        };
+        if !first_ok {
+            self.bad = true;
+            return false;
+        }
+        self.size = first_file_size;
+        self.ranges = estimate_donor_ranges(&self.article_sizes, self.size);
+        if self.ranges.is_empty() {
+            self.bad = true;
+            self.size = -1;
+            return false;
+        }
+        true
+    }
+
+    pub fn size_with_transport(&mut self, transport: &mut dyn DonorArticleTransport) -> i64 {
+        if self.ensure_init(transport) {
+            self.size
+        } else {
+            0
+        }
+    }
+
+    fn part_for_offset(
+        &mut self,
+        transport: &mut dyn DonorArticleTransport,
+        offset: i64,
+    ) -> Option<(i32, &FetchedDonorArticle)> {
+        let mut index = donor_index_for_offset(offset, self.drift, &self.ranges);
+        for _step in 0..DONOR_MAX_RESOLVE_STEPS {
+            let (fetched_offset, fetched_len) = {
+                let fetched = self.fetch_part(transport, index)?;
+                (fetched.offset, fetched.data.len())
+            };
+            self.drift = fetched_offset - self.ranges[index as usize].offset;
+            let (status, new_index) = donor_step_part_for_offset(
+                offset,
+                fetched_offset,
+                fetched_len,
+                index,
+                self.ranges.len(),
+            );
+            if status == 0 {
+                return None;
+            }
+            if status == 1 {
+                index = new_index;
+            } else {
+                let fetched = self.cache.get(&index)?;
+                return fetched.success.then_some((index, fetched));
+            }
+        }
+        None
+    }
+
+    fn prefetch(&mut self, transport: &mut dyn DonorArticleTransport, offset: i64, size: i64) {
+        if !transport.has_prefetch_batch() || self.bad || self.ranges.is_empty() || size <= 0 {
+            return;
+        }
+        let first_est = donor_index_for_offset(offset, self.drift, &self.ranges);
+        let last_est = donor_index_for_offset(offset + size - 1, self.drift, &self.ranges);
+        let (first, last) = donor_calc_prefetch_bounds(first_est, last_est, self.ranges.len());
+        let mut parts = Vec::new();
+        let mut index = first;
+        while index <= last && parts.len() < DONOR_MAX_PREFETCH_PARTS {
+            if !self.cache.contains_key(&index) {
+                parts.push(index);
+            }
+            index += 1;
+        }
+        if parts.len() < 2 {
+            return;
+        }
+        transport.begin_prefetch_batch(&parts);
+        for &part_index in &parts {
+            let Some(fetched) = transport.next_prefetch_part() else {
+                break;
+            };
+            self.store_fetched(part_index, fetched);
+        }
+        transport.cancel_prefetch_batch();
+    }
+
+    pub fn read_with_transport(
+        &mut self,
+        transport: &mut dyn DonorArticleTransport,
+        offset: i64,
+        buffer: &mut [u8],
+    ) -> bool {
+        let size = buffer.len() as i64;
+        if !self.ensure_init(transport)
+            || !(offset >= 0 && size >= 0 && offset <= self.size && size <= self.size - offset)
+        {
+            return false;
+        }
+        self.prefetch(transport, offset, size);
+        let mut pos = offset;
+        let end_offset = offset + size;
+        let mut out_pos = 0usize;
+        while pos < end_offset {
+            let Some((part_index, fetched)) = self.part_for_offset(transport, pos) else {
+                return false;
+            };
+            let (from, len) =
+                donor_calc_read_chunk(pos, fetched.offset, fetched.data.len(), end_offset);
+            let from_usize = from as usize;
+            let len_usize = len as usize;
+            buffer[out_pos..out_pos + len_usize]
+                .copy_from_slice(&fetched.data[from_usize..from_usize + len_usize]);
+            self.served_parts.insert(part_index);
+            out_pos += len_usize;
+            pos += len;
+        }
+        true
+    }
+}
+
+/// Batch fetcher adapter for M1 per-file donor verification and patching.
+pub trait DonorBatchClient {
+    fn is_stopped(&self) -> bool;
+    fn begin_batch(&mut self, part_indices: &[i32]);
+    fn next_article(&mut self) -> Option<FetchedDonorArticle>;
+    fn cancel_remaining(&mut self);
+}
+
+/// Target file reader for M1 per-file verification (`CompareToFile` in `StreamRepair.cpp`).
+pub trait TargetFileReader {
+    fn read_range(&mut self, offset: i64, buf: &mut [u8]) -> bool;
+
+    fn compare_range(&mut self, offset: i64, expected: &[u8]) -> bool {
+        if expected.is_empty() {
+            return self.read_range(offset, &mut []);
+        }
+        const CHUNK: usize = 64 * 1024;
+        let mut buf = vec![0u8; expected.len().min(CHUNK)];
+        let mut done = 0usize;
+        while done < expected.len() {
+            let n = (expected.len() - done).min(CHUNK);
+            if !self.read_range(offset + done as i64, &mut buf[..n]) {
+                return false;
+            }
+            if buf[..n] != expected[done..done + n] {
+                return false;
+            }
+            done += n;
+        }
+        true
+    }
+}
+
+/// Target file writer and progress/message sink for M1 per-file patching (`PatchFromDonor`).
+pub trait TargetFilePatcher {
+    fn write_range(&mut self, offset: i64, data: &[u8]) -> bool;
+    fn add_progress(&mut self, bytes: i64);
+    fn emit_message_bytes(&mut self, kind: TargetMessageKind, text: &[u8]);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DonorFilePatchResult {
+    pub recovered_parts: i32,
+    pub recovered_bytes: i64,
+    pub credit_recovery: bool,
+}
+
+/// M1 per-file donor identity verification (`StreamRepairController::VerifyDonor`
+/// and `StreamRepairController::CompareProbes` in `StreamRepair.cpp`).
+pub fn verify_donor_file(
+    target_decoded_size: i64,
+    target_holes: &[NzbgetRsByteRange],
+    donor_ranges: &[NzbgetRsByteRange],
+    batch_client: &mut dyn DonorBatchClient,
+    target_reader: &mut dyn TargetFileReader,
+) -> bool {
+    let (probe_parts, mut reserve) = select_verify_donor_probes(
+        donor_ranges,
+        target_holes,
+        target_decoded_size,
+        DONOR_PROBE_COUNT,
+    );
+    let hole_cmp_ranges: Vec<crate::streamcompare::Range> = target_holes
+        .iter()
+        .map(|h| crate::streamcompare::Range {
+            offset: h.offset,
+            size: h.size,
+        })
+        .collect();
+    let donor_cmp_ranges: Vec<crate::streamcompare::Range> = donor_ranges
+        .iter()
+        .map(|d| crate::streamcompare::Range {
+            offset: d.offset,
+            size: d.size,
+        })
+        .collect();
+
+    let mut total_compared: i64 = 0;
+    let mut saw_varied_data = false;
+    let mut attempted: Vec<i32> = Vec::new();
+    let mut batch = probe_parts;
+
+    while !batch.is_empty() {
+        attempted.extend_from_slice(&batch);
+        batch_client.begin_batch(&batch);
+
+        let mut missing: i32 = 0;
+        while let Some(fetched) = batch_client.next_article() {
+            if batch_client.is_stopped() {
+                batch_client.cancel_remaining();
+                return false;
+            }
+            let (is_valid, is_missing) = check_probe_article(
+                fetched.success,
+                fetched.data.len(),
+                fetched.file_size,
+                fetched.offset,
+                target_decoded_size,
+            );
+            if !is_valid {
+                if is_missing {
+                    missing += 1;
+                    continue;
+                }
+                batch_client.cancel_remaining();
+                return false;
+            }
+
+            let mut present = vec![NzbgetRsByteRange {
+                offset: fetched.offset,
+                size: fetched.data.len() as i64,
+            }];
+            for &hole in target_holes {
+                present = subtract_covered(&present, hole);
+            }
+
+            for range in present {
+                let rel_start = (range.offset - fetched.offset) as usize;
+                let rel_end = rel_start + (range.size as usize);
+                let range_data = &fetched.data[rel_start..rel_end];
+                if !target_reader.compare_range(range.offset, range_data) {
+                    batch_client.cancel_remaining();
+                    return false;
+                }
+                total_compared += range.size;
+                if !saw_varied_data && range.size > 1 {
+                    saw_varied_data = buffer_has_varied_data(range_data);
+                }
+            }
+        }
+
+        let required_compare = crate::streamcompare::required_compare_floor(
+            target_decoded_size,
+            &hole_cmp_ranges,
+            &donor_cmp_ranges,
+            &attempted,
+        );
+        if batch_client.is_stopped() {
+            return false;
+        }
+        if total_compared >= required_compare && saw_varied_data {
+            return true;
+        }
+
+        batch = select_probe_replacements(
+            missing,
+            &reserve,
+            DONOR_MAX_PROBE_FETCHES,
+            attempted.len(),
+        );
+        for &part_index in &batch {
+            if let Some(pos) = reserve.iter().position(|&p| p == part_index) {
+                reserve.remove(pos);
+            }
+        }
+    }
+
+    false
+}
+
+/// M1 per-file hole patching from a verified donor (`StreamRepairController::PatchFromDonor`).
+pub fn patch_from_donor_file(
+    target_filename: &[u8],
+    target_decoded_size: i64,
+    target_holes: &mut Vec<NzbgetRsByteRange>,
+    donor_ranges: &[NzbgetRsByteRange],
+    donor_name: &[u8],
+    batch_client: &mut dyn DonorBatchClient,
+    target_patcher: &mut dyn TargetFilePatcher,
+) -> DonorFilePatchResult {
+    let mut recovered_parts: i32 = 0;
+    let mut recovered_bytes: i64 = 0;
+    let mut drift: i64 = 0;
+    let mut tried = std::collections::BTreeSet::<i32>::new();
+    let donor_patch_ranges: Vec<crate::streampatchparts::Range> = donor_ranges
+        .iter()
+        .map(|d| crate::streampatchparts::Range {
+            offset: d.offset,
+            size: d.size,
+        })
+        .collect();
+
+    for _pass in 0..2 {
+        if target_holes.is_empty() || batch_client.is_stopped() {
+            break;
+        }
+        let shifted_holes: Vec<crate::streampatchparts::Range> = target_holes
+            .iter()
+            .map(|h| crate::streampatchparts::Range {
+                offset: h.offset.wrapping_sub(drift),
+                size: h.size,
+            })
+            .collect();
+        let mut patch_parts = vec![0i32; donor_patch_ranges.len()];
+        let patch_count = crate::streampatchparts::select(
+            &donor_patch_ranges,
+            &shifted_holes,
+            DONOR_PATCH_MARGIN_PARTS,
+            &mut patch_parts,
+        );
+        patch_parts.truncate(patch_count);
+
+        let mut request_parts = Vec::with_capacity(patch_parts.len());
+        for part_index in patch_parts {
+            if tried.insert(part_index) {
+                request_parts.push(part_index);
+            }
+        }
+        batch_client.begin_batch(&request_parts);
+
+        let mut fetched_any = false;
+        let mut result_index = 0usize;
+        while let Some(fetched) = batch_client.next_article() {
+            let part_index = request_parts[result_index];
+            result_index += 1;
+            if batch_client.is_stopped() || target_holes.is_empty() {
+                batch_client.cancel_remaining();
+                break;
+            }
+            if !is_patch_article_usable(
+                fetched.success,
+                fetched.file_size,
+                target_decoded_size,
+                fetched.data.len(),
+                fetched.offset,
+            ) {
+                continue;
+            }
+
+            fetched_any = true;
+            drift = fetched.offset - donor_ranges[part_index as usize].offset;
+
+            let mut written = Vec::new();
+            for &hole in target_holes.iter() {
+                if let Some((from, to)) = clip_hole_to_fetched(
+                    hole.offset,
+                    hole.size,
+                    fetched.offset,
+                    fetched.data.len(),
+                ) {
+                    let rel_start = (from - fetched.offset) as usize;
+                    let rel_end = (to - fetched.offset) as usize;
+                    if !target_patcher.write_range(from, &fetched.data[rel_start..rel_end]) {
+                        batch_client.cancel_remaining();
+                        return DonorFilePatchResult {
+                            recovered_parts,
+                            recovered_bytes,
+                            credit_recovery: false,
+                        };
+                    }
+                    written.push(NzbgetRsByteRange {
+                        offset: from,
+                        size: to - from,
+                    });
+                }
+            }
+
+            for &range in &written {
+                *target_holes = subtract_covered(target_holes, range);
+                recovered_bytes += range.size;
+                target_patcher.add_progress(range.size);
+            }
+
+            if !written.is_empty() {
+                recovered_parts += 1;
+            }
+        }
+
+        if !fetched_any || drift == 0 {
+            break;
+        }
+    }
+
+    if recovered_parts > 0 {
+        let mb = stream_repair_bytes_to_mb(recovered_bytes);
+        let mut msg =
+            format!("Recovered {mb:.1} MB ({recovered_parts} donor article(s)) of ").into_bytes();
+        msg.extend_from_slice(target_filename);
+        msg.extend_from_slice(b" from duplicate ");
+        msg.extend_from_slice(donor_name);
+        target_patcher.emit_message_bytes(TargetMessageKind::Info, &msg);
+    }
+
+    DonorFilePatchResult {
+        recovered_parts,
+        recovered_bytes,
+        credit_recovery: recovered_parts > 0,
+    }
+}
+
 /// Pure-Rust `ContentMapper` mirroring `daemon/postprocess/ContentMap.h`.
 pub struct ContentMapper;
 
@@ -9718,5 +10236,250 @@ mod tests {
         assert_eq!(holes_filled_m4, 1);
         assert!(credit_m4);
         assert_eq!(target_files_m4.files[0], cipher);
+    }
+
+    struct MockDonorTransport {
+        parts: Vec<FetchedDonorArticle>,
+        budget: Option<i32>,
+        allow_prefetch: bool,
+        prefetch_queue: std::collections::VecDeque<FetchedDonorArticle>,
+        single_fetches: usize,
+        batch_begins: usize,
+    }
+
+    impl DonorArticleTransport for MockDonorTransport {
+        fn has_prefetch_batch(&self) -> bool {
+            self.allow_prefetch && self.budget.is_none()
+        }
+
+        fn fetch_part(&mut self, part_index: i32) -> Option<FetchedDonorArticle> {
+            if let Some(budget) = &mut self.budget {
+                if *budget <= 0 {
+                    return None;
+                }
+                *budget -= 1;
+            }
+            self.single_fetches += 1;
+            self.parts.get(part_index as usize).cloned()
+        }
+
+        fn begin_prefetch_batch(&mut self, part_indices: &[i32]) {
+            self.batch_begins += 1;
+            self.prefetch_queue.clear();
+            for &idx in part_indices {
+                if let Some(article) = self.parts.get(idx as usize).cloned() {
+                    self.prefetch_queue.push_back(article);
+                }
+            }
+        }
+
+        fn next_prefetch_part(&mut self) -> Option<FetchedDonorArticle> {
+            self.prefetch_queue.pop_front()
+        }
+
+        fn cancel_prefetch_batch(&mut self) {
+            self.prefetch_queue.clear();
+        }
+    }
+
+    #[test]
+    fn donor_member_source_caches_prefetches_and_resolves_drift() {
+        // 20 parts of 100 bytes each (total 2000 bytes), but actual offsets are shifted
+        // by +50 bytes on parts 1..19 (part 0 is 150 bytes, part 19 is 50 bytes) to test drift resolution.
+        let mut parts = Vec::new();
+        let mut full_data = Vec::new();
+        for i in 0..20i32 {
+            let (offset, len) = if i == 0 {
+                (0i64, 150usize)
+            } else if i == 19 {
+                (1950i64, 50usize)
+            } else {
+                (150 + ((i - 1) as i64) * 100, 100usize)
+            };
+            let data: Vec<u8> = (0..len)
+                .map(|b| (((offset as usize) + b) * 37 + 11) as u8)
+                .collect();
+            full_data.extend_from_slice(&data);
+            parts.push(FetchedDonorArticle {
+                success: true,
+                offset,
+                file_size: 2000,
+                data,
+            });
+        }
+        let article_sizes = vec![110i32; 20];
+        let mut src = DonorMemberSource::new(article_sizes);
+        let mut transport = MockDonorTransport {
+            parts,
+            budget: Some(1),
+            allow_prefetch: true,
+            prefetch_queue: std::collections::VecDeque::new(),
+            single_fetches: 0,
+            batch_begins: 0,
+        };
+
+        // Size consumes the 1-article budget for part 0
+        assert_eq!(src.size_with_transport(&mut transport), 2000);
+        assert_eq!(transport.single_fetches, 1);
+
+        // Reading part 5 with exhausted budget fails without poisoning cache
+        let mut buf = vec![0u8; 250];
+        assert!(!src.read_with_transport(&mut transport, 500, &mut buf));
+
+        // Removing budget allows prefetch + drift-corrected read across parts
+        transport.budget = None;
+        assert!(src.read_with_transport(&mut transport, 500, &mut buf));
+        assert_eq!(&buf[..], &full_data[500..750]);
+        assert!(transport.batch_begins >= 1);
+        let served = src.take_served_parts();
+        assert!(served >= 3);
+        assert_eq!(src.take_served_parts(), 0);
+    }
+
+    struct MockBatchClient {
+        articles: Vec<FetchedDonorArticle>,
+        queue: std::collections::VecDeque<FetchedDonorArticle>,
+        stopped: bool,
+    }
+
+    impl DonorBatchClient for MockBatchClient {
+        fn is_stopped(&self) -> bool {
+            self.stopped
+        }
+
+        fn begin_batch(&mut self, part_indices: &[i32]) {
+            self.queue.clear();
+            for &idx in part_indices {
+                if let Some(a) = self.articles.get(idx as usize).cloned() {
+                    self.queue.push_back(a);
+                }
+            }
+        }
+
+        fn next_article(&mut self) -> Option<FetchedDonorArticle> {
+            self.queue.pop_front()
+        }
+
+        fn cancel_remaining(&mut self) {
+            self.queue.clear();
+        }
+    }
+
+    struct MockFileTarget {
+        bytes: Vec<u8>,
+        progress: i64,
+        messages: Vec<(TargetMessageKind, Vec<u8>)>,
+    }
+
+    impl TargetFileReader for MockFileTarget {
+        fn read_range(&mut self, offset: i64, buf: &mut [u8]) -> bool {
+            if offset < 0 {
+                return false;
+            }
+            let start = offset as usize;
+            let end = start.saturating_add(buf.len());
+            if end > self.bytes.len() {
+                return false;
+            }
+            buf.copy_from_slice(&self.bytes[start..end]);
+            true
+        }
+    }
+
+    impl TargetFilePatcher for MockFileTarget {
+        fn write_range(&mut self, offset: i64, data: &[u8]) -> bool {
+            if offset < 0 {
+                return false;
+            }
+            let start = offset as usize;
+            let end = start.saturating_add(data.len());
+            if end > self.bytes.len() {
+                return false;
+            }
+            self.bytes[start..end].copy_from_slice(data);
+            true
+        }
+
+        fn add_progress(&mut self, bytes: i64) {
+            self.progress += bytes;
+        }
+
+        fn emit_message_bytes(&mut self, kind: TargetMessageKind, text: &[u8]) {
+            self.messages.push((kind, text.to_vec()));
+        }
+    }
+
+    #[test]
+    fn m1_verify_and_patch_donor_file_handles_missing_probes_and_drift() {
+        let file_size = 100_000usize;
+        let canonical: Vec<u8> = (0..file_size).map(|i| ((i * 73 + 19) & 0xff) as u8).collect();
+        let mut damaged = canonical.clone();
+        // Hole at [40_000, 50_000)
+        damaged[40_000..50_000].fill(0);
+        let mut holes = vec![NzbgetRsByteRange {
+            offset: 40_000,
+            size: 10_000,
+        }];
+
+        // 10 donor parts of 10_000 bytes each; mark first probe part missing so replacement probe is exercised
+        let mut donor_ranges = Vec::new();
+        let mut articles = Vec::new();
+        for i in 0..10usize {
+            let offset = (i * 10_000) as i64;
+            donor_ranges.push(NzbgetRsByteRange {
+                offset,
+                size: 10_000,
+            });
+            articles.push(FetchedDonorArticle {
+                success: i != 1, // force a missing probe to test replacement selection
+                offset,
+                file_size: file_size as i64,
+                data: if i == 1 {
+                    Vec::new()
+                } else {
+                    canonical[i * 10_000..(i + 1) * 10_000].to_vec()
+                },
+            });
+        }
+
+        let mut batch_client = MockBatchClient {
+            articles,
+            queue: std::collections::VecDeque::new(),
+            stopped: false,
+        };
+        let mut target = MockFileTarget {
+            bytes: damaged,
+            progress: 0,
+            messages: Vec::new(),
+        };
+
+        assert!(verify_donor_file(
+            file_size as i64,
+            &holes,
+            &donor_ranges,
+            &mut batch_client,
+            &mut target,
+        ));
+
+        let res = patch_from_donor_file(
+            b"movie-\x80\xff.mkv",
+            file_size as i64,
+            &mut holes,
+            &donor_ranges,
+            b"Donor-\xfe.1080p",
+            &mut batch_client,
+            &mut target,
+        );
+        assert_eq!(res.recovered_parts, 1);
+        assert_eq!(res.recovered_bytes, 10_000);
+        assert!(res.credit_recovery);
+        assert!(holes.is_empty());
+        assert_eq!(target.bytes, canonical);
+        assert_eq!(target.progress, 10_000);
+        assert_eq!(target.messages.len(), 1);
+        assert_eq!(
+            target.messages[0].1,
+            b"Recovered 0.0 MB (1 donor article(s)) of movie-\x80\xff.mkv from duplicate Donor-\xfe.1080p"
+        );
     }
 }

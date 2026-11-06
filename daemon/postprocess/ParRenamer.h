@@ -57,26 +57,14 @@ protected:
 	int GetStageProgress() { return m_stageProgress; }
 
 private:
-	class NullStreamBuf final : public std::streambuf {};
-	NullStreamBuf m_nullbuf;
-	std::ostream m_nout{&m_nullbuf};
-
-	typedef std::deque<CString> NameList;
-
 	CString m_infoName;
 	CString m_destDir;
 	CString m_progressLabel;
 	int m_stageProgress = 0;
-	NameList m_dirList;
-	int m_fileCount = 0;
-	int m_curFile = 0;
 	int m_renamedCount = 0;
 	bool m_hasMissedFiles = false;
 	bool m_detectMissing = false;
 	bool m_hasDamagedParFiles = false;
-
-	void RenameFile(const char* srcFilename, const char* destFileName);
-	std::string MakeRelativeName(const char* fullFilename);
 };
 
 #endif

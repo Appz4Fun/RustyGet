@@ -22,23 +22,12 @@
 #include "nzbget.h"
 
 #include <cstddef>
-#include <sstream>
-#include <iostream>
-#include <iomanip>
+#include <memory>
 #include "DirectRenamer.h"
 #include "Options.h"
 #include "FileSystem.h"
 #include "ParParser.h"
-#include <exception>
-#include <locale>
-#include <memory>
 #include "nzbget_rs.h"
-#ifndef DISABLE_PARCHECK
-#include <par2/libpar2.h>
-#include <par2/par2repairer.h>
-#include <par2/par2fileformat.h>
-#include <par2/md5.h>
-#endif
 
 class RenameContentAnalyzer : public ArticleContentAnalyzer
 {
@@ -62,24 +51,11 @@ private:
 };
 
 #ifndef DISABLE_PARCHECK
-class DirectParRepairer : public Par2::Par2Repairer
-{
-public:
-	DirectParRepairer() : Par2::Par2Repairer(m_nout, m_nout, Par2::nlNormal) {};
-	friend class DirectParLoader;
-
-private:
-	class NullStreamBuf : public std::streambuf {};
-	NullStreamBuf m_nullbuf;
-	std::ostream m_nout{&m_nullbuf};
-};
-
 class DirectParLoader : public Thread
 {
 public:
 	static void StartLoader(DirectRenamer* owner, NzbInfo* nzbInfo);
 	virtual void Run();
-	std::string GetSafeLocalFilename(std::string filename);
 
 private:
 	typedef std::vector<CString> ParFiles;
@@ -87,26 +63,10 @@ private:
 	DirectRenamer* m_owner;
 	ParFiles m_parFiles;
 	DirectRenamer::FileHashList m_parHashes;
-
-    std::ostream& m_sout = std::cout;
-    std::ostream& m_serr = std::cerr;
-
 	int m_nzbId;
 
 	void LoadParFile(const char* parFile);
 };
-
-std::string DirectParLoader::GetSafeLocalFilename(std::string filename)
-{
-	std::string localFilename = Par2::DescriptionPacket::TranslateFilenameFromPar2ToLocal(
-		m_sout,
-		m_serr,
-		Par2::nlNormal,
-		std::move(filename)
-	);
-
-	return localFilename;
-}
 
 void DirectParLoader::StartLoader(DirectRenamer* owner, NzbInfo* nzbInfo)
 {
@@ -157,43 +117,49 @@ void DirectParLoader::Run()
 
 void DirectParLoader::LoadParFile(const char* parFile)
 {
-	DirectParRepairer repairer;
+	struct LoaderCtx
+	{
+		DirectParLoader* self;
+		const char* parFile;
+		NzbInfo* nzbInfo;
+		std::optional<GuardedDownloadQueue> guard;
+	} ctx{this, parFile, nullptr, std::nullopt};
 
-	if (!repairer.LoadPacketsFromFile(parFile))
+	if (!nzbget_rs_par_renamer_load_par_entries(
+		parFile,
+		&ctx,
+		[](void* rawCtx) noexcept -> int
+		{
+			auto* c = static_cast<LoaderCtx*>(rawCtx);
+			c->guard.emplace(DownloadQueue::Guard());
+			c->nzbInfo = (*c->guard)->GetQueue()->Find(c->self->m_nzbId);
+			if (!c->nzbInfo)
+			{
+				return 0;
+			}
+			c->nzbInfo->PrintMessage(Message::mkInfo, "Loaded par2-file %s for direct-rename",
+				FileSystem::BaseFileName(c->parFile));
+			return 1;
+		},
+		[](void* rawCtx, int damaged, const char* name, const char* hash) noexcept -> int
+		{
+			auto* c = static_cast<LoaderCtx*>(rawCtx);
+			if (c->self->IsStopped())
+			{
+				return 0;
+			}
+			if (damaged != 0)
+			{
+				c->nzbInfo->PrintMessage(Message::mkWarning, "Damaged par2-file detected: %s",
+					FileSystem::BaseFileName(c->parFile));
+				return 0;
+			}
+			debug("file: %s, hash-16k: %s", name ? name : "", hash ? hash : "");
+			c->self->m_parHashes.emplace_back(name ? name : "", hash ? hash : "");
+			return 1;
+		}))
 	{
 		warn("Could not load par2-file %s", parFile);
-		return;
-	}
-
-	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
-
-	NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_nzbId);
-	if (!nzbInfo)
-	{
-		// nzb isn't in queue anymore
-		return;
-	}
-
-	nzbInfo->PrintMessage(Message::mkInfo, "Loaded par2-file %s for direct-rename", FileSystem::BaseFileName(parFile));
-
-	for (std::pair<const Par2::MD5Hash, Par2::Par2RepairerSourceFile*>& entry : repairer.sourcefilemap)
-	{
-		if (IsStopped())
-		{
-			break;
-		}
-
-		Par2::Par2RepairerSourceFile* sourceFile = entry.second;
-		if (!sourceFile || !sourceFile->GetDescriptionPacket())
-		{
-			nzbInfo->PrintMessage(Message::mkWarning, "Damaged par2-file detected: %s", FileSystem::BaseFileName(parFile));
-			return;
-		}
-		std::string filename = GetSafeLocalFilename(sourceFile->GetDescriptionPacket()->FileName());
-		std::string hash = sourceFile->GetDescriptionPacket()->Hash16k().print();
-
-		debug("file: %s, hash-16k: %s", filename.c_str(), hash.c_str());
-		m_parHashes.emplace_back(filename.c_str(), hash.c_str());
 	}
 }
 #endif
@@ -639,60 +605,10 @@ std::string DirectRenamer::BuildNewRegularName(const char* oldName, FileHashList
 
 std::string DirectRenamer::BuildNewParName(const char* oldName, const char* destDir, const char* setId, int& vol)
 {
-	// rust/src/directrenamer.rs; an exception from FileExists ends the search
-	// and is rethrown here
-	struct Context
-	{
-		std::exception_ptr error;
-		std::stringstream stream;
-		std::string name;
-		const char* setId;
-	} context;
-	context.setId = setId;
-	// Keep num_put facets (including digit grouping) from the original
-	// stringstream. The usual classic locale is formatted entirely in Rust.
-	NzbgetRsFormatParName format = nullptr;
-	if (context.stream.getloc() != std::locale::classic())
-	{
-		format = [](void* ctx, int vol, const char** data, size_t* len) noexcept -> int
-		{
-			Context& context = *static_cast<Context*>(ctx);
-			try
-			{
-				context.stream << context.setId << ".vol" << std::setfill('0') << std::setw(3) << vol << "+01.PAR2";
-				context.name = context.stream.str();
-				context.stream.str("");
-				context.stream.clear();
-				*data = context.name.data();
-				*len = context.name.size();
-				return 1;
-			}
-			catch (...)
-			{
-				context.error = std::current_exception();
-				return 0;
-			}
-		};
-	}
-	NzbgetRsBuf name = nzbget_rs_direct_par_name(oldName, destDir, setId, PATH_SEPARATOR, &vol,
-		[](void* ctx, const char* path) noexcept -> int
-		{
-			try
-			{
-				return FileSystem::FileExists(path);
-			}
-			catch (...)
-			{
-				static_cast<Context*>(ctx)->error = std::current_exception();
-				return 0;
-			}
-		}, format, &context);
-	std::unique_ptr<NzbgetRsBuf, void(*)(NzbgetRsBuf*)> guard(&name, [](NzbgetRsBuf* buf) { nzbget_rs_free(*buf); });
-	if (context.error)
-	{
-		std::rethrow_exception(context.error);
-	}
-	return std::string(name.data, name.len);
+	NzbgetRsBuf name = nzbget_rs_direct_par_name(oldName, destDir, setId, PATH_SEPARATOR, &vol);
+	std::string res(name.data ? name.data : "", name.len);
+	nzbget_rs_free(name);
+	return res;
 }
 
 bool DirectRenamer::NeedRenamePars(NzbInfo* nzbInfo)

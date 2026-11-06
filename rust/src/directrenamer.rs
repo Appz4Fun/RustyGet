@@ -58,6 +58,27 @@ pub fn par_name(
     })
 }
 
+/// `BuildNewParName` checking candidate file existence directly on disk.
+pub fn par_name_on_disk(
+    old_name: &[u8],
+    dest_dir: &[u8],
+    set_id: &[u8],
+    separator: u8,
+    vol: &mut i32,
+) -> Vec<u8> {
+    let mut exists = |path: &[u8]| {
+        #[cfg(unix)]
+        let p = {
+            use std::os::unix::ffi::OsStrExt;
+            std::path::Path::new(std::ffi::OsStr::from_bytes(path))
+        };
+        #[cfg(not(unix))]
+        let p = std::path::Path::new(std::str::from_utf8(path).unwrap_or(""));
+        p.is_file()
+    };
+    par_name(old_name, dest_dir, set_id, separator, vol, &mut exists)
+}
+
 /// A non-classic C++ locale may group digits or install a custom `num_put`
 /// facet. Let that stream format candidates; `None` stops after an exception.
 pub fn par_name_formatted(

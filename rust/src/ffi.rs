@@ -3137,33 +3137,24 @@ pub unsafe extern "C" fn nzbget_rs_direct_regular_name(old_name: *const c_char, 
 ///
 /// # Safety
 /// The names are null (empty) or NUL-terminated; `vol` is null (counting
-/// from 1, not written back) or a valid int. `exists` (null: nothing exists)
-/// gets a borrowed NUL-terminated full path and must not unwind.
-/// `format` is null (classic formatting) or writes a borrowed candidate
-/// buffer and length, valid until the next callback, and returns 1; 0 stops
-/// the search. Neither callback may unwind or access `vol` during the call.
+/// from 1, not written back) or a valid int.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_direct_par_name(old_name: *const c_char, dest_dir: *const c_char, set_id: *const c_char,
-    separator: c_char, vol: *mut c_int, exists: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char) -> c_int>,
-    format: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *mut *const c_char, *mut usize) -> c_int>,
-    ctx: *mut std::ffi::c_void) -> RsBuf {
+pub unsafe extern "C" fn nzbget_rs_direct_par_name(
+    old_name: *const c_char,
+    dest_dir: *const c_char,
+    set_id: *const c_char,
+    separator: c_char,
+    vol: *mut c_int,
+) -> RsBuf {
     let mut local = 1;
     let vol = if vol.is_null() { &mut local } else { &mut *vol };
-    let mut exists = |path: &[u8]| {
-        let Some(exists) = exists else { return false };
-        let mut path = path.to_vec();
-        path.push(0);
-        exists(ctx, path.as_ptr().cast()) != 0
-    };
-    let name = if let Some(format) = format {
-        crate::directrenamer::par_name_formatted(input(old_name), input(dest_dir), input(set_id), separator as u8, vol, &mut exists, &mut |v| {
-            let (mut data, mut len) = (std::ptr::null(), 0);
-            if format(ctx, v, &mut data, &mut len) == 0 { return None; }
-            Some(bytes_arg(data.cast(), len).to_vec())
-        })
-    } else {
-        crate::directrenamer::par_name(input(old_name), input(dest_dir), input(set_id), separator as u8, vol, &mut exists)
-    };
+    let name = crate::directrenamer::par_name_on_disk(
+        input(old_name),
+        input(dest_dir),
+        input(set_id),
+        separator as u8,
+        vol,
+    );
     into_buf(name)
 }
 
@@ -3352,55 +3343,6 @@ pub unsafe extern "C" fn nzbget_rs_test_server_params(request: *const c_char, li
     }
 }
 
-/// NzbgetRsParRenamerEnv: ParRenamer's callbacks. Strings are borrowed for
-/// the call and NUL-terminated; an int result of -1 (an int64 of -1 for
-/// read) reports a C++ exception, which ends the run.
-#[repr(C)]
-#[derive(Default)]
-pub struct ParRenamerEnv {
-    pub ctx: *mut std::ffi::c_void,
-    pub stopped: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
-    pub progress: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, c_int) -> c_int>,
-    pub message: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char) -> c_int>,
-    pub debug: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char) -> c_int>,
-    pub list_dir: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *mut std::ffi::c_void,
-        unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)) -> c_int>,
-    pub dir_exists: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char) -> c_int>,
-    pub file_exists: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char) -> c_int>,
-    pub file_size: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *mut i64) -> c_int>,
-    pub read: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *mut u8, usize) -> i64>,
-    pub load_par: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *mut usize) -> c_int>,
-    pub par_entry: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void,
-        unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char, *const c_char)) -> c_int>,
-    pub close_par: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
-    pub find_main_pars: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *mut std::ffi::c_void,
-        unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)) -> c_int>,
-    pub register_parred: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char) -> c_int>,
-    pub rename: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *const c_char) -> c_int>,
-    pub ignored_ext: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char) -> c_int>,
-    pub fold: Option<extern "C" fn(c_int) -> c_int>,
-    pub state_changed: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *mut ParRenamerState)>,
-    pub previous_dirs: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *mut std::ffi::c_void,
-        unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)) -> c_int>,
-    pub remember_dir: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char) -> c_int>,
-    pub destination: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *mut std::ffi::c_void,
-        unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)) -> c_int>,
-}
-
-/// NzbgetRsParRenamerState: ParRenamer's members, read and written back.
-#[repr(C)]
-#[derive(Default, Debug, PartialEq)]
-pub struct ParRenamerState {
-    pub file_count: c_int,
-    pub cur_file: c_int,
-    pub renamed_count: c_int,
-    pub has_missed_files: c_int,
-    pub has_damaged_par_files: c_int,
-    pub detect_missing: c_int,
-}
-
-struct ParRenamerFfi<'a>(&'a ParRenamerEnv);
-
 fn nul(s: &[u8]) -> Vec<u8> {
     let mut v: Vec<u8> = s.iter().take_while(|&&b| b != 0).copied().collect();
     v.push(0);
@@ -3411,169 +3353,147 @@ unsafe extern "C" fn par_renamer_add_name(sink: *mut std::ffi::c_void, name: *co
     (*sink.cast::<Vec<Vec<u8>>>()).push(input(name).to_vec());
 }
 
-unsafe extern "C" fn par_renamer_add_entry(sink: *mut std::ffi::c_void, damaged: c_int, name: *const c_char, hash: *const c_char) {
-    use crate::parrenamer::ParEntry;
-    let entry = if damaged != 0 { ParEntry::Damaged } else { ParEntry::File { name: input(name).to_vec(), hash: input(hash).to_vec() } };
-    (*sink.cast::<Vec<crate::parrenamer::ParEntry>>()).push(entry);
-}
-
-impl ParRenamerFfi<'_> {
-    fn int(r: c_int) -> crate::parrenamer::R<c_int> {
-        if r < 0 { Err(crate::parrenamer::Abort) } else { Ok(r) }
-    }
-
-    fn names(&self, f: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *mut std::ffi::c_void,
-        unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)) -> c_int>, dir: &[u8]) -> crate::parrenamer::R<Vec<Vec<u8>>> {
-        let mut names: Vec<Vec<u8>> = Vec::new();
-        if let Some(f) = f {
-            let dir = nul(dir);
-            Self::int(unsafe { f(self.0.ctx, dir.as_ptr().cast(), (&mut names as *mut Vec<Vec<u8>>).cast(), par_renamer_add_name) })?;
-        }
-        Ok(names)
-    }
-
-    fn path_int(&self, f: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char) -> c_int>, path: &[u8]) -> crate::parrenamer::R<c_int> {
-        let Some(f) = f else { return Ok(0) };
-        let path = nul(path);
-        Self::int(unsafe { f(self.0.ctx, path.as_ptr().cast()) })
-    }
-}
-
-impl crate::parrenamer::Env for ParRenamerFfi<'_> {
-    fn destination(&mut self, initial: &[u8]) -> crate::parrenamer::R<Vec<u8>> {
-        if self.0.destination.is_none() { return Ok(initial.to_vec()) }
-        self.names(self.0.destination, b"")?.pop().ok_or(crate::parrenamer::Abort)
-    }
-    fn state_changed(&mut self, state: &mut crate::parrenamer::State) {
-        if let Some(f) = self.0.state_changed {
-            let mut st = ParRenamerState {
-                file_count: state.file_count, cur_file: state.cur_file, renamed_count: state.renamed_count,
-                has_missed_files: state.has_missed_files as c_int,
-                has_damaged_par_files: state.has_damaged_par_files as c_int,
-                detect_missing: state.detect_missing as c_int,
-            };
-            unsafe { f(self.0.ctx, &mut st) };
-            state.detect_missing = st.detect_missing != 0;
-        }
-    }
-    fn previous_dirs(&mut self) -> crate::parrenamer::R<Vec<Vec<u8>>> {
-        self.names(self.0.previous_dirs, b"")
-    }
-    fn remember_dir(&mut self, dir: &[u8]) -> crate::parrenamer::R<()> {
-        self.path_int(self.0.remember_dir, dir).map(drop)
-    }
-    fn stopped(&mut self) -> crate::parrenamer::R<bool> {
-        let Some(f) = self.0.stopped else { return Ok(false) };
-        Ok(Self::int(unsafe { f(self.0.ctx) })? != 0)
-    }
-    fn progress(&mut self, label: &[u8], stage: i32) -> crate::parrenamer::R<()> {
-        let Some(f) = self.0.progress else { return Ok(()) };
-        let label = nul(label);
-        Self::int(unsafe { f(self.0.ctx, label.as_ptr().cast(), stage) }).map(drop)
-    }
-    fn message(&mut self, kind: crate::parrenamer::Kind, text: &[u8]) -> crate::parrenamer::R<()> {
-        let Some(f) = self.0.message else { return Ok(()) };
-        let text = nul(text);
-        Self::int(unsafe { f(self.0.ctx, kind as c_int, text.as_ptr().cast()) }).map(drop)
-    }
-    fn debug(&mut self, text: &[u8]) -> crate::parrenamer::R<()> {
-        self.path_int(self.0.debug, text).map(drop)
-    }
-    fn list_dir(&mut self, dir: &[u8]) -> crate::parrenamer::R<Vec<Vec<u8>>> {
-        self.names(self.0.list_dir, dir)
-    }
-    fn dir_exists(&mut self, path: &[u8]) -> crate::parrenamer::R<bool> {
-        Ok(self.path_int(self.0.dir_exists, path)? != 0)
-    }
-    fn file_exists(&mut self, path: &[u8]) -> crate::parrenamer::R<bool> {
-        Ok(self.path_int(self.0.file_exists, path)? != 0)
-    }
-    fn file_size(&mut self, path: &[u8]) -> crate::parrenamer::R<i64> {
-        let Some(f) = self.0.file_size else { return Ok(0) };
-        let path = nul(path);
-        let mut size = 0;
-        Self::int(unsafe { f(self.0.ctx, path.as_ptr().cast(), &mut size) })?;
-        Ok(size)
-    }
-    fn read(&mut self, path: &[u8], buf: &mut [u8]) -> crate::parrenamer::R<crate::parrenamer::Read> {
-        use crate::parrenamer::Read;
-        let Some(f) = self.0.read else { return Ok(Read::OpenFailed) };
-        let path = nul(path);
-        match unsafe { f(self.0.ctx, path.as_ptr().cast(), buf.as_mut_ptr(), buf.len()) } {
-            -2 => Ok(Read::OpenFailed),
-            -3 => Ok(Read::ReadFailed),
-            n if n >= 0 => Ok(Read::Bytes(n as usize)),
-            _ => Err(crate::parrenamer::Abort),
-        }
-    }
-    fn load_par(&mut self, path: &[u8]) -> crate::parrenamer::R<Option<usize>> {
-        let Some(f) = self.0.load_par else { return Ok(None) };
-        let path = nul(path);
-        let mut count = 0;
-        let loaded = Self::int(unsafe { f(self.0.ctx, path.as_ptr().cast(), &mut count) })?;
-        Ok((loaded != 0).then_some(count))
-    }
-    fn par_entry(&mut self) -> crate::parrenamer::R<crate::parrenamer::ParEntry> {
-        let Some(f) = self.0.par_entry else { return Err(crate::parrenamer::Abort) };
-        let mut entries: Vec<crate::parrenamer::ParEntry> = Vec::new();
-        Self::int(unsafe { f(self.0.ctx, (&mut entries as *mut Vec<crate::parrenamer::ParEntry>).cast(),
-            par_renamer_add_entry) })?;
-        entries.pop().ok_or(crate::parrenamer::Abort)
-    }
-    fn close_par(&mut self) {
-        if let Some(f) = self.0.close_par { unsafe { f(self.0.ctx) }; }
-    }
-    fn find_main_pars(&mut self, dir: &[u8]) -> crate::parrenamer::R<Vec<Vec<u8>>> {
-        self.names(self.0.find_main_pars, dir)
-    }
-    fn register_parred(&mut self, name: &[u8]) -> crate::parrenamer::R<()> {
-        self.path_int(self.0.register_parred, name).map(drop)
-    }
-    fn rename(&mut self, src: &[u8], dst: &[u8]) -> crate::parrenamer::R<bool> {
-        let Some(f) = self.0.rename else { return Ok(false) };
-        let (src, dst) = (nul(src), nul(dst));
-        Ok(Self::int(unsafe { f(self.0.ctx, src.as_ptr().cast(), dst.as_ptr().cast()) })? != 0)
-    }
-    fn ignored_ext(&mut self, name: &[u8]) -> crate::parrenamer::R<bool> {
-        Ok(self.path_int(self.0.ignored_ext, name)? != 0)
-    }
-    fn fold(&self, byte: u8) -> u8 {
-        match self.0.fold {
-            Some(f) => f(byte as c_int) as u8,
-            None => byte,
-        }
-    }
-}
-
-/// ParRenamer::Execute: 1 when the run ended, 0 when a callback reported an
-/// exception (the state then holds what was done until then).
-///
-/// # Safety
-/// `env` and `state` are null (returns 1 without doing anything) or valid;
-/// `state` is exclusively borrowed for the call. `info_name` and `dest_dir`
-/// are null (empty) or NUL-terminated. The callbacks follow
-/// NzbgetRsParRenamerEnv's contract and must not unwind.
+/// Runs `ParRenamer::Execute` end-to-end on the filesystem in Rust.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_par_renamer_execute(env: *const ParRenamerEnv, state: *mut ParRenamerState,
-    info_name: *const c_char, dest_dir: *const c_char, separator: c_char) -> c_int {
-    let (Some(env), Some(st)) = (env.as_ref(), state.as_mut()) else { return 1 };
-    let mut rs = crate::parrenamer::State {
-        file_count: st.file_count, cur_file: st.cur_file, renamed_count: st.renamed_count,
-        has_missed_files: st.has_missed_files != 0, has_damaged_par_files: st.has_damaged_par_files != 0,
-        detect_missing: st.detect_missing != 0,
+pub unsafe extern "C" fn nzbget_rs_par_renamer_execute(
+    info_name: *const c_char,
+    dest_dir: *const c_char,
+    ignore_ext: *const c_char,
+    detect_missing: c_int,
+    separator: c_char,
+    ctx: *mut std::ffi::c_void,
+    is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
+    update_progress_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, c_int)>,
+    print_message_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
+    register_parred_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
+    register_renamed_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, *const c_char)>,
+    out_renamed_count: *mut c_int,
+    out_has_missed_files: *mut c_int,
+    out_has_damaged_par_files: *mut c_int,
+) {
+    let info_bytes = input(info_name).to_vec();
+    let dest_bytes = input(dest_dir).to_vec();
+    let ignore_bytes = input(ignore_ext).to_vec();
+
+    let mut is_stopped = || is_stopped_cb.is_some_and(|cb| cb(ctx) != 0);
+    let mut on_progress = |label: &[u8], stage: i32| {
+        if let Some(cb) = update_progress_cb {
+            let c_label = nul(label);
+            cb(ctx, c_label.as_ptr().cast(), stage);
+        }
     };
-    // A callback may replace the caller's CString members. Do not keep Rust
-    // references to their allocations alive while calling back into C++.
-    let info_name = input(info_name).to_vec();
-    let dest_dir = input(dest_dir).to_vec();
-    let result = crate::parrenamer::execute(&mut ParRenamerFfi(env), &mut rs, &info_name, &dest_dir, separator as u8);
-    st.file_count = rs.file_count;
-    st.cur_file = rs.cur_file;
-    st.renamed_count = rs.renamed_count;
-    st.has_missed_files = rs.has_missed_files as c_int;
-    st.has_damaged_par_files = rs.has_damaged_par_files as c_int;
-    st.detect_missing = rs.detect_missing as c_int;
-    result.is_ok() as c_int
+    let mut on_message = |kind: crate::parrenamer::Kind, text: &[u8]| {
+        if let Some(cb) = print_message_cb {
+            let c_text = nul(text);
+            cb(ctx, kind as c_int, c_text.as_ptr().cast());
+        }
+    };
+    let mut on_register_parred = |name: &[u8]| {
+        if let Some(cb) = register_parred_cb {
+            let c_name = nul(name);
+            cb(ctx, c_name.as_ptr().cast());
+        }
+    };
+    let mut on_register_renamed = |old_rel: &[u8], new_rel: &[u8]| {
+        if let Some(cb) = register_renamed_cb {
+            let c_old = nul(old_rel);
+            let c_new = nul(new_rel);
+            cb(ctx, c_old.as_ptr().cast(), c_new.as_ptr().cast());
+        }
+    };
+
+    let state = crate::parrenamer::execute_all(
+        &info_bytes,
+        &dest_bytes,
+        &ignore_bytes,
+        detect_missing != 0,
+        separator as u8,
+        &mut is_stopped,
+        &mut on_progress,
+        &mut on_message,
+        &mut on_register_parred,
+        &mut on_register_renamed,
+    );
+
+    if !out_renamed_count.is_null() {
+        *out_renamed_count = state.renamed_count;
+    }
+    if !out_has_missed_files.is_null() {
+        *out_has_missed_files = state.has_missed_files as c_int;
+    }
+    if !out_has_damaged_par_files.is_null() {
+        *out_has_damaged_par_files = state.has_damaged_par_files as c_int;
+    }
+}
+
+/// `ParRenamer::ListParredFiles`: loads description packets from `par_filename` (if at most
+/// `max_index_par_size` bytes) and emits each base filename via `add_cb`.
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_renamer_list_parred_files(
+    par_filename: *const c_char,
+    max_index_par_size: i64,
+    ctx: *mut std::ffi::c_void,
+    add_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
+) -> c_int {
+    if par_filename.is_null() {
+        return 0;
+    }
+    let path = cstr_to_path_buf(par_filename);
+    let Some(files) = crate::parrenamer::list_parred_files(&path, max_index_par_size) else {
+        return 0;
+    };
+    if let Some(cb) = add_cb {
+        for f in files {
+            let c_name = nul(&f);
+            cb(ctx, c_name.as_ptr().cast());
+        }
+    }
+    1
+}
+
+/// `DirectParLoader::LoadParFile`: parses `par_filename`'s PAR2 packets in Rust and emits
+/// each entry (`damaged = 1` or `damaged = 0` with translated local `filename` and 16k `hash`)
+/// to `entry_cb`. Returns `1` if the file was loaded, `0` if missing or empty.
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_renamer_load_par_entries(
+    par_filename: *const c_char,
+    ctx: *mut std::ffi::c_void,
+    on_loaded_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
+    entry_cb: Option<
+        unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char, *const c_char) -> c_int,
+    >,
+) -> c_int {
+    if par_filename.is_null() {
+        return 0;
+    }
+    let path = cstr_to_path_buf(par_filename);
+    let Some(entries) = crate::parrenamer::load_par_entries_from_file(&path) else {
+        return 0;
+    };
+    if let Some(loaded) = on_loaded_cb {
+        if loaded(ctx) == 0 {
+            return 1;
+        }
+    }
+    if let Some(cb) = entry_cb {
+        for entry in entries {
+            match entry {
+                crate::parrenamer::ParEntry::Damaged => {
+                    if cb(ctx, 1, std::ptr::null(), std::ptr::null()) == 0 {
+                        break;
+                    }
+                }
+                crate::parrenamer::ParEntry::File { name, hash } => {
+                    let c_name = nul(&name);
+                    let c_hash = nul(&hash);
+                    if cb(ctx, 0, c_name.as_ptr().cast(), c_hash.as_ptr().cast()) == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    1
 }
 
 /// NzbgetRsFsOps: FileSystem's calls for the deletes and RenameBak. Strings
@@ -4710,35 +4630,31 @@ mod tests {
     }
 
     #[test]
-    fn parrenamer_nulls_borrowed_names_and_exception_state() {
+    fn parrenamer_ffi_nulls() {
         use std::ptr::{null, null_mut};
-        unsafe extern "C" fn list(_: *mut std::ffi::c_void, _: *const c_char,
-            sink: *mut std::ffi::c_void, add: unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)) -> c_int {
-            let name = std::ffi::CString::new("file").unwrap();
-            add(sink, name.as_ptr());
-            // The name is destroyed before Rust consumes the directory snapshot.
-            0
-        }
-        unsafe extern "C" fn fail(_: *mut std::ffi::c_void, _: c_int, _: *const c_char) -> c_int { -1 }
-        unsafe extern "C" fn changed(ctx: *mut std::ffi::c_void, st: *mut ParRenamerState) {
-            let counts = &mut *ctx.cast::<Vec<(i32, i32)>>();
-            counts.push(((*st).file_count, (*st).cur_file));
-        }
         unsafe {
-            let mut st = ParRenamerState::default();
-            let mut env = ParRenamerEnv::default();
-            assert_eq!(nzbget_rs_par_renamer_execute(null(), &mut st, null(), null(), b'/' as c_char), 1);
-            assert_eq!(nzbget_rs_par_renamer_execute(&env, null_mut(), null(), null(), b'/' as c_char), 1);
-            assert_eq!(nzbget_rs_par_renamer_execute(&env, &mut st, null(), null(), b'/' as c_char), 1);
-            assert_eq!(st, ParRenamerState::default());
-            let mut counts = Vec::<(i32, i32)>::new();
-            env.ctx = (&mut counts as *mut Vec<(i32, i32)>).cast();
-            env.list_dir = Some(list);
-            env.message = Some(fail);
-            env.state_changed = Some(changed);
-            assert_eq!(nzbget_rs_par_renamer_execute(&env, &mut st, null(), null(), b'/' as c_char), 0);
-            assert_eq!((st.file_count, st.cur_file, st.renamed_count), (1, 1, 0));
-            assert_eq!(counts.last(), Some(&(1, 1)));
+            let mut renamed = -1;
+            let mut missed = -1;
+            let mut damaged = -1;
+            nzbget_rs_par_renamer_execute(
+                null(),
+                null(),
+                null(),
+                0,
+                b'/' as c_char,
+                null_mut(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                &mut renamed,
+                &mut missed,
+                &mut damaged,
+            );
+            assert_eq!((renamed, missed, damaged), (0, 0, 0));
+            assert_eq!(nzbget_rs_par_renamer_list_parred_files(null(), 1024, null_mut(), None), 0);
+            assert_eq!(nzbget_rs_par_renamer_load_par_entries(null(), null_mut(), None, None), 0);
         }
     }
 
@@ -9985,32 +9901,6 @@ pub unsafe extern "C" fn nzbget_rs_dupecoord_select_dupe_backup(
                 false
             }
         },
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dupematcher_size_diff_ok(
-    size1: i64,
-    size2: i64,
-    max_diff_percent: c_int,
-) -> c_int {
-    crate::postrepair::size_diff_ok(size1, size2, max_diff_percent) as c_int
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupematcher_parse_rar_lister_line(
-    text: *const c_char,
-    expected_size: i64,
-    max_size: *mut i64,
-    compressed: *mut c_int,
-    last_size_max: *mut c_int,
-) -> c_int {
-    crate::postrepair::parse_rar_lister_line_cstr(
-        text,
-        expected_size,
-        max_size,
-        compressed,
-        last_size_max,
     )
 }
 
@@ -22971,23 +22861,6 @@ pub extern "C" fn nzbget_rs_dqh_script_ctrl_can_send_break(pid: c_int, completed
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_dupematcher_should_wait_rar_lister(
-    is_running: c_int,
-    start_time: i64,
-    timeout_sec: c_int,
-    cur_time: i64,
-) -> c_int {
-    i32::from(
-        crate::dupecoord::dupematcher_should_wait_rar_lister(
-            is_running != 0,
-            start_time,
-            timeout_sec,
-            cur_time,
-        ),
-    )
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_article_dl_is_terminal_loop_status(
     status: c_int,
     ad_finished: c_int,
@@ -24180,105 +24053,6 @@ pub extern "C" fn nzbget_rs_par_damage_first_report(nzb_id: c_int) -> c_int {
 #[no_mangle]
 pub extern "C" fn nzbget_rs_par_damage_forget(nzb_id: c_int) {
     crate::pardamage::forget(nzb_id);
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupematcher_find_largest_file(
-    directory: *const c_char,
-    filename_buf: *mut c_char,
-    buf_len: c_int,
-    out_max_size: *mut i64,
-    out_compressed: *mut c_int,
-    aliases_member_max: c_int,
-    expected_rar_size: i64,
-    rar_lister_cb: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            *mut c_char,
-            c_int,
-            i64,
-            *mut i64,
-            *mut c_int,
-        ),
-    >,
-    rar_lister_ctx: *mut std::ffi::c_void,
-) {
-    if directory.is_null() {
-        return;
-    }
-    let dir_bytes = CStr::from_ptr(directory).to_bytes();
-    #[cfg(unix)]
-    let dir_path = {
-        use std::os::unix::ffi::OsStrExt;
-        std::path::Path::new(std::ffi::OsStr::from_bytes(dir_bytes))
-    };
-    #[cfg(not(unix))]
-    let dir_path = std::path::Path::new(std::str::from_utf8(dir_bytes).unwrap_or(""));
-
-    let mut local_buf = vec![0u8; buf_len.max(0) as usize];
-    let mut max_size: i64 = 0;
-    let mut compressed = false;
-    let exp_opt = if aliases_member_max != 0 {
-        None
-    } else {
-        Some(expected_rar_size)
-    };
-
-    crate::pardamage::find_largest_file(
-        dir_path,
-        &mut local_buf,
-        &mut max_size,
-        &mut compressed,
-        exp_opt,
-        |fbuf, exp_sz, m_sz, comp| {
-            if let Some(cb) = rar_lister_cb {
-                let mut c_comp: c_int = i32::from(*comp);
-                cb(
-                    rar_lister_ctx,
-                    fbuf.as_mut_ptr() as *mut c_char,
-                    fbuf.len() as c_int,
-                    exp_sz,
-                    m_sz,
-                    &mut c_comp,
-                );
-                *comp = c_comp != 0;
-            }
-        },
-    );
-
-    if !filename_buf.is_null() && !local_buf.is_empty() {
-        std::ptr::copy_nonoverlapping(
-            local_buf.as_ptr() as *const c_char,
-            filename_buf,
-            local_buf.len(),
-        );
-    }
-    if !out_max_size.is_null() {
-        *out_max_size = max_size;
-    }
-    if !out_compressed.is_null() {
-        *out_compressed = i32::from(compressed);
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dupematcher_size_mismatch_suffix(ok: c_int) -> *const c_char {
-    crate::pardamage::size_mismatch_suffix(ok != 0).as_ptr() as *const c_char
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dupematcher_is_content_match(
-    dupe_max_size: i64,
-    max_size: i64,
-    dupe_compressed: c_int,
-    compressed: c_int,
-) -> c_int {
-    i32::from(crate::pardamage::is_dupe_content_match(
-        dupe_max_size,
-        max_size,
-        dupe_compressed != 0,
-        compressed != 0,
-    ))
 }
 
 // =========================================================================
@@ -29464,12 +29238,10 @@ pub unsafe extern "C" fn nzbget_rs_qhp_rename_completed_file(
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dupematcher_prepare(
     dest_dir: *const c_char,
+    unrar_cmd: *const c_char,
     expected_size: i64,
     out_max_size: *mut i64,
     out_compressed: *mut c_int,
-    on_rar_archive: Option<
-        unsafe extern "C" fn(*mut c_void, *mut c_char, c_int, i64, *mut i64, *mut c_int),
-    >,
     on_detail_log: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
     ctx: *mut c_void,
 ) -> c_int {
@@ -29477,27 +29249,15 @@ pub unsafe extern "C" fn nzbget_rs_dupematcher_prepare(
         return 0;
     }
     let dir_path = cstr_to_path_buf(dest_dir);
+    let unrar_bytes = input(unrar_cmd);
     let mut max_size = *out_max_size;
     let mut compressed = *out_compressed != 0;
     let ok = crate::pardamage::dupe_matcher_prepare(
         &dir_path,
+        unrar_bytes,
         expected_size,
         &mut max_size,
         &mut compressed,
-        |buf, rar_expected, ms, comp| {
-            if let Some(cb) = on_rar_archive {
-                let mut c_comp: c_int = i32::from(*comp);
-                cb(
-                    ctx,
-                    buf.as_mut_ptr().cast::<c_char>(),
-                    buf.len() as c_int,
-                    rar_expected,
-                    ms,
-                    &mut c_comp,
-                );
-                *comp = c_comp != 0;
-            }
-        },
         |msg| {
             if let Some(log_cb) = on_detail_log {
                 let c_msg = std::ffi::CString::new(msg).unwrap_or_default();
@@ -29513,11 +29273,9 @@ pub unsafe extern "C" fn nzbget_rs_dupematcher_prepare(
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dupematcher_match_dupe_content(
     dupe_dir: *const c_char,
+    unrar_cmd: *const c_char,
     max_size: i64,
     compressed: c_int,
-    on_rar_archive: Option<
-        unsafe extern "C" fn(*mut c_void, *mut c_char, c_int, i64, *mut i64, *mut c_int),
-    >,
     on_detail_log: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
     ctx: *mut c_void,
 ) -> c_int {
@@ -29525,24 +29283,12 @@ pub unsafe extern "C" fn nzbget_rs_dupematcher_match_dupe_content(
         return 0;
     }
     let dir_path = cstr_to_path_buf(dupe_dir);
+    let unrar_bytes = input(unrar_cmd);
     let ok = crate::pardamage::dupe_matcher_match_dupe_content(
         &dir_path,
+        unrar_bytes,
         max_size,
         compressed != 0,
-        |buf, rar_expected, ms, comp| {
-            if let Some(cb) = on_rar_archive {
-                let mut c_comp: c_int = i32::from(*comp);
-                cb(
-                    ctx,
-                    buf.as_mut_ptr().cast::<c_char>(),
-                    buf.len() as c_int,
-                    rar_expected,
-                    ms,
-                    &mut c_comp,
-                );
-                *comp = c_comp != 0;
-            }
-        },
         |msg| {
             if let Some(log_cb) = on_detail_log {
                 let c_msg = std::ffi::CString::new(msg).unwrap_or_default();

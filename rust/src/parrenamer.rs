@@ -457,6 +457,541 @@ pub fn is_splitted_fragment(filename: &[u8], correct_name: &[u8]) -> bool {
     digits.iter().all(u8::is_ascii_digit) && unsafe { atoi(base[base_len + 1..].as_ptr().cast()) } <= 1
 }
 
+fn latin1_to_utf8(latin1: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(latin1.len() * 2);
+    for &ch in latin1 {
+        if ch < 128 {
+            out.push(ch);
+        } else {
+            out.push(0xc2 + u8::from(ch > 0xbf));
+            out.push((ch & 0x3f) + 0x80);
+        }
+    }
+    out
+}
+
+fn url_encode_char(ch: u8) -> [u8; 3] {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    [b'%', HEX[(ch >> 4) as usize], HEX[(ch & 0x0f) as usize]]
+}
+
+pub fn translate_filename_from_par2_to_local(par2_name: &[u8]) -> Vec<u8> {
+    let mut local = Vec::with_capacity(par2_name.len());
+    for &raw in par2_name {
+        let mut ch = raw;
+        let ok = ch >= 32;
+        if ch == b'\\' {
+            ch = b'/';
+        }
+        if ok {
+            local.push(ch);
+        } else {
+            local.extend_from_slice(&url_encode_char(ch));
+        }
+    }
+    if local.first() == Some(&b'/') {
+        let enc = url_encode_char(b'/');
+        local.splice(0..1, enc);
+    }
+    while let Some(idx) = local.windows(3).position(|w| w == b"../") {
+        let dot = url_encode_char(b'.');
+        let mut rep = Vec::with_capacity(6);
+        rep.extend_from_slice(&dot);
+        rep.extend_from_slice(&dot);
+        local.splice(idx..idx + 2, rep);
+    }
+    local
+}
+
+trait Par2ByteSource {
+    fn len(&self) -> u64;
+    fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> bool;
+}
+
+impl Par2ByteSource for &[u8] {
+    fn len(&self) -> u64 {
+        <[u8]>::len(self) as u64
+    }
+    fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> bool {
+        let Ok(start) = usize::try_from(offset) else {
+            return false;
+        };
+        let Some(end) = start.checked_add(buf.len()) else {
+            return false;
+        };
+        if end > <[u8]>::len(self) {
+            return false;
+        }
+        buf.copy_from_slice(&self[start..end]);
+        true
+    }
+}
+
+struct FilePar2Source {
+    file: std::fs::File,
+    len: u64,
+}
+
+impl Par2ByteSource for FilePar2Source {
+    fn len(&self) -> u64 {
+        self.len
+    }
+    fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt as _;
+            self.file.read_exact_at(buf, offset).is_ok()
+        }
+        #[cfg(not(unix))]
+        {
+            use std::io::{Read as _, Seek as _, SeekFrom};
+            self.file.seek(SeekFrom::Start(offset)).is_ok() && self.file.read_exact(buf).is_ok()
+        }
+    }
+}
+
+fn parse_par2_packets_from_source<S: Par2ByteSource>(mut source: S) -> Option<Vec<ParEntry>> {
+    let filesize = source.len();
+    if filesize == 0 {
+        return None;
+    }
+    const FILE_DESC_TYPE: &[u8; 16] = b"PAR 2.0\0FileDesc";
+    const IFSC_TYPE: &[u8; 16] = b"PAR 2.0\0IFSC\0\0\0\0";
+    const MAIN_TYPE: &[u8; 16] = b"PAR 2.0\0Main\0\0\0\0";
+    const CREATOR_TYPE: &[u8; 16] = b"PAR 2.0\0Creator\0";
+    const RECV_TYPE: &[u8; 16] = b"PAR 2.0\0RecvSlic";
+
+    let buf_size = filesize.min(1_048_576) as usize;
+    let mut buffer = vec![0u8; buf_size];
+
+    // Key is reversed fileid so BTreeMap orders identically to Par2::MD5Hash::operator<
+    let mut source_map: std::collections::BTreeMap<[u8; 16], Option<(Vec<u8>, Vec<u8>)>> =
+        std::collections::BTreeMap::new();
+    let mut set_id: Option<[u8; 16]> = None;
+    let mut packets = 0usize;
+    let mut offset = 0u64;
+    let header_len = HEADER as u64;
+
+    while offset <= filesize.saturating_sub(header_len) {
+        let mut header = [0u8; HEADER];
+        if !source.read_exact_at(offset, &mut header) {
+            break;
+        }
+        if &header[..8] != MAGIC {
+            offset += 1;
+            while offset <= filesize.saturating_sub(header_len) {
+                let want = (buffer.len() as u64).min(filesize - offset) as usize;
+                if want < HEADER || !source.read_exact_at(offset, &mut buffer[..want]) {
+                    offset = filesize;
+                    break;
+                }
+                let scan_limit = want - HEADER;
+                if let Some(pos) = buffer[..scan_limit + 8].windows(8).position(|w| w == MAGIC) {
+                    offset += pos as u64;
+                    header.copy_from_slice(&buffer[pos..pos + HEADER]);
+                    break;
+                }
+                offset += (scan_limit + 1) as u64;
+            }
+            if offset > filesize.saturating_sub(header_len) {
+                break;
+            }
+        }
+
+        let length = u64::from_le_bytes(header[8..16].try_into().unwrap());
+        if length < header_len || (length & 3) != 0 || length > filesize - offset {
+            offset += 1;
+            continue;
+        }
+
+        let mut hasher = Md5::new();
+        hasher.update(&header[32..HEADER]);
+        let mut current = offset + header_len;
+        let limit = offset + length;
+        while current < limit {
+            let want = (buffer.len() as u64).min(limit - current) as usize;
+            if !source.read_exact_at(current, &mut buffer[..want]) {
+                break;
+            }
+            hasher.update(&buffer[..want]);
+            current += want as u64;
+        }
+        if current < limit {
+            offset += 1;
+            continue;
+        }
+        let digest = hasher.finalize();
+        if digest.as_slice() != &header[16..32] {
+            offset += 1;
+            continue;
+        }
+
+        let pkt_set_id: [u8; 16] = header[32..48].try_into().unwrap();
+        if set_id.is_none() {
+            set_id = Some(pkt_set_id);
+        }
+        if set_id == Some(pkt_set_id) {
+            let pkt_type = &header[48..64];
+            if pkt_type == FILE_DESC_TYPE {
+                if length > 120 && length - 120 <= 100_000 {
+                    let body_len = (length - header_len) as usize;
+                    let body = &buffer[..body_len];
+                    let mut key: [u8; 16] = body[0..16].try_into().unwrap();
+                    key.reverse();
+                    let hashfull = &body[16..32];
+                    let hash16k = &body[32..48];
+                    let file_len = u64::from_le_bytes(body[48..56].try_into().unwrap());
+                    if !(file_len <= 16384 && hash16k != hashfull) {
+                        let raw_name = &body[56..body_len];
+                        let nul = raw_name.iter().position(|&b| b == 0).unwrap_or(raw_name.len());
+                        let utf8_name = latin1_to_utf8(&raw_name[..nul]);
+                        let local_name = translate_filename_from_par2_to_local(&utf8_name);
+                        let printed_hash = crate::renameanalyzer::print(hash16k)[..32].to_vec();
+                        let entry = source_map.entry(key).or_insert(None);
+                        if entry.is_none() {
+                            *entry = Some((local_name, printed_hash));
+                            packets += 1;
+                        }
+                    }
+                }
+            } else if pkt_type == IFSC_TYPE {
+                if length >= 80 && (length - 80) % 20 == 0 {
+                    let mut key = [0u8; 16];
+                    if source.read_exact_at(offset + header_len, &mut key) {
+                        key.reverse();
+                        source_map.entry(key).or_insert(None);
+                        packets += 1;
+                    }
+                }
+            } else if pkt_type == MAIN_TYPE || pkt_type == CREATOR_TYPE || pkt_type == RECV_TYPE {
+                packets += 1;
+            }
+        }
+        offset += length;
+    }
+    if packets == 0 {
+        return None;
+    }
+    Some(
+        source_map
+            .into_values()
+            .map(|opt| match opt {
+                Some((name, hash)) => ParEntry::File { name, hash },
+                None => ParEntry::Damaged,
+            })
+            .collect(),
+    )
+}
+
+/// Parses PAR2 packets (`FileDesc` and `IFSC`) from `bytes` into `ParEntry` items
+/// ordered identically to `Par2::Par2Repairer::sourcefilemap`.
+pub fn parse_par2_packets(bytes: &[u8]) -> Option<Vec<ParEntry>> {
+    parse_par2_packets_from_source(bytes)
+}
+
+/// Loads `ParEntry` items from a `.par2` file on disk (`DirectParLoader::LoadParFile`)
+/// by streaming packets with a bounded 1 MiB buffer.
+pub fn load_par_entries_from_file(par_filename: &std::path::Path) -> Option<Vec<ParEntry>> {
+    let file = std::fs::File::open(par_filename).ok()?;
+    let meta = file.metadata().ok()?;
+    if meta.is_dir() {
+        return None;
+    }
+    parse_par2_packets_from_source(FilePar2Source {
+        file,
+        len: meta.len(),
+    })
+}
+
+/// `ParRenamer::ListParredFiles`: returns base names of all files listed in `par_filename`'s
+/// description packets, or `None` if `par_filename` cannot be read or exceeds `max_index_par_size`.
+pub fn list_parred_files(par_filename: &std::path::Path, max_index_par_size: i64) -> Option<Vec<Vec<u8>>> {
+    let file = std::fs::File::open(par_filename).ok()?;
+    let meta = file.metadata().ok()?;
+    if meta.is_dir() || (meta.len() as i64) > max_index_par_size {
+        return None;
+    }
+    if meta.len() == 0 {
+        return Some(Vec::new());
+    }
+    let entries = parse_par2_packets_from_source(FilePar2Source {
+        file,
+        len: meta.len(),
+    })?;
+    let mut out = Vec::new();
+    for entry in entries {
+        if let ParEntry::File { name, .. } = entry {
+            let name_c = c(&name);
+            let trimmed = &name_c[..name_c.len() - 1];
+            out.push(base_name(trimmed).to_vec());
+        }
+    }
+    Some(out)
+}
+
+#[cfg(unix)]
+fn bytes_to_path_buf(bytes: &[u8]) -> std::path::PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    std::path::PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
+}
+
+#[cfg(not(unix))]
+fn bytes_to_path_buf(bytes: &[u8]) -> std::path::PathBuf {
+    std::path::PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
+}
+
+#[cfg(unix)]
+fn path_to_bytes(path: &std::path::Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    path.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(not(unix))]
+fn path_to_bytes(path: &std::path::Path) -> Vec<u8> {
+    path.to_string_lossy().as_bytes().to_vec()
+}
+
+fn weakly_canonical(path: &std::path::Path) -> std::path::PathBuf {
+    if let Ok(canon) = std::fs::canonicalize(path) {
+        return canon;
+    }
+    let mut tail = Vec::new();
+    let mut cur = path;
+    while let Some(parent) = cur.parent() {
+        if let Some(name) = cur.file_name() {
+            tail.push(name.to_os_string());
+        }
+        if let Ok(mut canon) = std::fs::canonicalize(parent) {
+            for comp in tail.into_iter().rev() {
+                canon.push(comp);
+            }
+            return canon;
+        }
+        cur = parent;
+    }
+    path.to_path_buf()
+}
+
+/// `ParRenamer::MakeRelativeName`: weakly-canonical path relative to `dest_dir`,
+/// falling back to the filename if outside `dest_dir`.
+pub fn make_relative_name(dest_dir: &[u8], full_filename: &[u8]) -> Vec<u8> {
+    let canon_dest = weakly_canonical(&bytes_to_path_buf(dest_dir));
+    let canon_file = weakly_canonical(&bytes_to_path_buf(full_filename));
+    if let Ok(rel) = canon_file.strip_prefix(&canon_dest) {
+        if !rel.as_os_str().is_empty() {
+            return path_to_bytes(rel);
+        }
+    }
+    canon_file
+        .file_name()
+        .map(|n| path_to_bytes(std::path::Path::new(n)))
+        .unwrap_or_else(|| base_name(full_filename).to_vec())
+}
+
+struct FsParRenamerEnv<'a> {
+    dest_dir: Vec<u8>,
+    ignore_ext: Vec<u8>,
+    dir_list: Vec<Vec<u8>>,
+    loaded_entries: std::vec::IntoIter<ParEntry>,
+    is_stopped: &'a mut dyn FnMut() -> bool,
+    on_progress: &'a mut dyn FnMut(&[u8], i32),
+    on_message: &'a mut dyn FnMut(Kind, &[u8]),
+    on_register_parred: &'a mut dyn FnMut(&[u8]),
+    on_register_renamed: &'a mut dyn FnMut(&[u8], &[u8]),
+}
+
+impl Env for FsParRenamerEnv<'_> {
+    fn destination(&mut self, _initial: &[u8]) -> R<Vec<u8>> {
+        Ok(self.dest_dir.clone())
+    }
+    fn state_changed(&mut self, _state: &mut State) {}
+    fn previous_dirs(&mut self) -> R<Vec<Vec<u8>>> {
+        Ok(self.dir_list.clone())
+    }
+    fn remember_dir(&mut self, dir: &[u8]) -> R<()> {
+        self.dir_list.push(dir.to_vec());
+        Ok(())
+    }
+    fn stopped(&mut self) -> R<bool> {
+        Ok((self.is_stopped)())
+    }
+    fn progress(&mut self, label: &[u8], stage: i32) -> R<()> {
+        (self.on_progress)(label, stage);
+        Ok(())
+    }
+    fn message(&mut self, kind: Kind, text: &[u8]) -> R<()> {
+        (self.on_message)(kind, text);
+        Ok(())
+    }
+    fn debug(&mut self, _text: &[u8]) -> R<()> {
+        Ok(())
+    }
+    fn list_dir(&mut self, dir: &[u8]) -> R<Vec<Vec<u8>>> {
+        let path = bytes_to_path_buf(dir);
+        let mut out = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&path) {
+            for entry in entries.flatten() {
+                out.push(path_to_bytes(std::path::Path::new(&entry.file_name())));
+            }
+        }
+        Ok(out)
+    }
+    fn dir_exists(&mut self, path: &[u8]) -> R<bool> {
+        Ok(bytes_to_path_buf(path).is_dir())
+    }
+    fn file_exists(&mut self, path: &[u8]) -> R<bool> {
+        Ok(bytes_to_path_buf(path).is_file())
+    }
+    fn file_size(&mut self, path: &[u8]) -> R<i64> {
+        Ok(std::fs::metadata(bytes_to_path_buf(path))
+            .map(|m| m.len() as i64)
+            .unwrap_or(-1))
+    }
+    fn read(&mut self, path: &[u8], buf: &mut [u8]) -> R<Read> {
+        use std::io::Read as _;
+        let Ok(mut f) = std::fs::File::open(bytes_to_path_buf(path)) else {
+            return Ok(Read::OpenFailed);
+        };
+        let mut total = 0;
+        while total < buf.len() {
+            match f.read(&mut buf[total..]) {
+                Ok(0) => break,
+                Ok(n) => total += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return Ok(Read::ReadFailed),
+            }
+        }
+        Ok(Read::Bytes(total))
+    }
+    fn load_par(&mut self, path: &[u8]) -> R<Option<usize>> {
+        let Some(entries) = load_par_entries_from_file(&bytes_to_path_buf(path)) else {
+            return Ok(None);
+        };
+        let count = entries.len();
+        self.loaded_entries = entries.into_iter();
+        Ok(Some(count))
+    }
+    fn par_entry(&mut self) -> R<ParEntry> {
+        Ok(self.loaded_entries.next().unwrap_or(ParEntry::Damaged))
+    }
+    fn close_par(&mut self) {
+        self.loaded_entries = Vec::new().into_iter();
+    }
+    fn find_main_pars(&mut self, dir: &[u8]) -> R<Vec<Vec<u8>>> {
+        let p = bytes_to_path_buf(dir);
+        let mut list = Vec::new();
+        let fold = |b: u8| unsafe { tolower(b as c_int) as u8 };
+        crate::parparser::find_main_pars(&p, true, &fold, |name| {
+            list.push(name.to_vec());
+        });
+        Ok(list)
+    }
+    fn register_parred(&mut self, name: &[u8]) -> R<()> {
+        (self.on_register_parred)(name);
+        Ok(())
+    }
+    fn rename(&mut self, src: &[u8], dst: &[u8]) -> R<bool> {
+        let src_c_vec = c(src);
+        let dst_c_vec = c(dst);
+        let (Ok(src_c), Ok(dst_c)) = (
+            std::ffi::CStr::from_bytes_with_nul(&src_c_vec),
+            std::ffi::CStr::from_bytes_with_nul(&dst_c_vec),
+        ) else {
+            return Ok(false);
+        };
+        let (old_path, old_name) = crate::paths::split_path_and_filename(src_c.to_bytes());
+        let (new_path, new_name) = crate::paths::split_path_and_filename(dst_c.to_bytes());
+        (self.on_message)(Kind::Info, &text(&[b"Renaming ", old_name, b" to ", new_name]));
+
+        if old_path != new_path {
+            let mut errmsg = Vec::new();
+            if !crate::fsops::force_directories(new_path, &mut errmsg, &crate::fsops::posix_stat) {
+                (self.on_message)(
+                    Kind::Error,
+                    &text(&[
+                        b"Failed to rename file ",
+                        old_name,
+                        b" to ",
+                        new_name,
+                        b". Could not create the target directory \"",
+                        new_path,
+                        b"\"",
+                    ]),
+                );
+                return Ok(false);
+            }
+        }
+
+        if !crate::fsops::move_file(src_c, dst_c) {
+            let err_msg = crate::fsops::error_message(crate::fsops::last_errno());
+            (self.on_message)(
+                Kind::Error,
+                &text(&[
+                    b"Failed to rename file ",
+                    src,
+                    b" to ",
+                    dst,
+                    b": ",
+                    &err_msg,
+                ]),
+            );
+            return Ok(false);
+        }
+
+        let old_rel = make_relative_name(&self.dest_dir, src);
+        let new_rel = make_relative_name(&self.dest_dir, dst);
+        (self.on_register_renamed)(&old_rel, &new_rel);
+        Ok(true)
+    }
+    fn ignored_ext(&mut self, name: &[u8]) -> R<bool> {
+        let fold = crate::wildmask::Lower::Fold(&|b| unsafe { tolower(b as c_int) });
+        Ok(crate::util::match_file_ext(
+            name,
+            &self.ignore_ext,
+            b",;",
+            &fold,
+            &fold,
+        ))
+    }
+    fn fold(&self, byte: u8) -> u8 {
+        unsafe { tolower(byte as c_int) as u8 }
+    }
+}
+
+/// Runs `ParRenamer::Execute` end-to-end on the filesystem using native Rust PAR2 packet
+/// parsing, directory traversal, file hashing, and file moving.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_all(
+    info_name: &[u8],
+    dest_dir: &[u8],
+    ignore_ext: &[u8],
+    detect_missing: bool,
+    sep: u8,
+    is_stopped: &mut dyn FnMut() -> bool,
+    on_progress: &mut dyn FnMut(&[u8], i32),
+    on_message: &mut dyn FnMut(Kind, &[u8]),
+    on_register_parred: &mut dyn FnMut(&[u8]),
+    on_register_renamed: &mut dyn FnMut(&[u8], &[u8]),
+) -> State {
+    let mut env = FsParRenamerEnv {
+        dest_dir: dest_dir.to_vec(),
+        ignore_ext: ignore_ext.to_vec(),
+        dir_list: Vec::new(),
+        loaded_entries: Vec::new().into_iter(),
+        is_stopped,
+        on_progress,
+        on_message,
+        on_register_parred,
+        on_register_renamed,
+    };
+    let mut state = State {
+        detect_missing,
+        ..State::default()
+    };
+    let _ = execute(&mut env, &mut state, info_name, dest_dir, sep);
+    state
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,271 +1015,6 @@ mod tests {
         assert_eq!(join(&[b'a'; 1020], b'/', b"bcdef").len(), 1023);
     }
 
-    fn latin1_to_utf8(latin1: &[u8]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(latin1.len() * 2);
-        for &ch in latin1 {
-            if ch < 128 {
-                out.push(ch);
-            } else {
-                out.push(0xc2 + u8::from(ch > 0xbf));
-                out.push((ch & 0x3f) + 0x80);
-            }
-        }
-        out
-    }
-
-    fn url_encode_char(ch: u8) -> [u8; 3] {
-        const HEX: &[u8; 16] = b"0123456789ABCDEF";
-        [b'%', HEX[(ch >> 4) as usize], HEX[(ch & 0x0f) as usize]]
-    }
-
-    fn translate_filename_from_par2_to_local(par2_name: &[u8]) -> Vec<u8> {
-        let mut local = Vec::with_capacity(par2_name.len());
-        for &raw in par2_name {
-            let mut ch = raw;
-            let ok = ch >= 32;
-            if ch == b'\\' {
-                ch = b'/';
-            }
-            if ok {
-                local.push(ch);
-            } else {
-                local.extend_from_slice(&url_encode_char(ch));
-            }
-        }
-        if local.first() == Some(&b'/') {
-            let enc = url_encode_char(b'/');
-            local.splice(0..1, enc);
-        }
-        while let Some(idx) = local.windows(3).position(|w| w == b"../") {
-            let dot = url_encode_char(b'.');
-            let mut rep = Vec::with_capacity(6);
-            rep.extend_from_slice(&dot);
-            rep.extend_from_slice(&dot);
-            local.splice(idx..idx + 2, rep);
-        }
-        local
-    }
-
-    fn parse_par2_packets(bytes: &[u8]) -> Option<Vec<ParEntry>> {
-        if bytes.is_empty() {
-            return None;
-        }
-        const FILE_DESC_TYPE: &[u8; 16] = b"PAR 2.0\0FileDesc";
-        const IFSC_TYPE: &[u8; 16] = b"PAR 2.0\0IFSC\0\0\0\0";
-        const MAIN_TYPE: &[u8; 16] = b"PAR 2.0\0Main\0\0\0\0";
-        const CREATOR_TYPE: &[u8; 16] = b"PAR 2.0\0Creator\0";
-        const RECV_TYPE: &[u8; 16] = b"PAR 2.0\0RecvSlic";
-
-        // Key is reversed fileid so BTreeMap orders identically to Par2::MD5Hash::operator<
-        let mut source_map: std::collections::BTreeMap<[u8; 16], Option<(Vec<u8>, Vec<u8>)>> =
-            std::collections::BTreeMap::new();
-        let mut set_id: Option<[u8; 16]> = None;
-        let mut packets = 0usize;
-        let mut offset = 0usize;
-
-        while offset + HEADER <= bytes.len() {
-            if &bytes[offset..offset + 8] != MAGIC {
-                offset += 1;
-                if let Some(pos) = bytes[offset..].windows(8).position(|w| w == MAGIC) {
-                    offset += pos;
-                } else {
-                    break;
-                }
-                if offset + HEADER > bytes.len() {
-                    break;
-                }
-            }
-            let length = u64::from_le_bytes(bytes[offset + 8..offset + 16].try_into().unwrap()) as usize;
-            if length < HEADER || (length & 3) != 0 || offset + length > bytes.len() {
-                offset += 1;
-                continue;
-            }
-            let digest = Md5::digest(&bytes[offset + 32..offset + length]);
-            if digest.as_slice() != &bytes[offset + 16..offset + 32] {
-                offset += 1;
-                continue;
-            }
-            let pkt_set_id: [u8; 16] = bytes[offset + 32..offset + 48].try_into().unwrap();
-            if set_id.is_none() {
-                set_id = Some(pkt_set_id);
-            }
-            if set_id == Some(pkt_set_id) {
-                let pkt_type = &bytes[offset + 48..offset + 64];
-                if pkt_type == FILE_DESC_TYPE {
-                    if length > 120 && length - 120 <= 100_000 {
-                        let mut key: [u8; 16] = bytes[offset + 64..offset + 80].try_into().unwrap();
-                        key.reverse();
-                        let hashfull = &bytes[offset + 80..offset + 96];
-                        let hash16k = &bytes[offset + 96..offset + 112];
-                        let file_len = u64::from_le_bytes(bytes[offset + 112..offset + 120].try_into().unwrap());
-                        if !(file_len <= 16384 && hash16k != hashfull) {
-                            let raw_name = &bytes[offset + 120..offset + length];
-                            let nul = raw_name.iter().position(|&b| b == 0).unwrap_or(raw_name.len());
-                            let utf8_name = latin1_to_utf8(&raw_name[..nul]);
-                            let local_name = translate_filename_from_par2_to_local(&utf8_name);
-                            let printed_hash = crate::renameanalyzer::print(hash16k)[..32].to_vec();
-                            let entry = source_map.entry(key).or_insert(None);
-                            if entry.is_none() {
-                                *entry = Some((local_name, printed_hash));
-                                packets += 1;
-                            }
-                        }
-                    }
-                } else if pkt_type == IFSC_TYPE {
-                    if length >= 80 && (length - 80) % 20 == 0 {
-                        let mut key: [u8; 16] = bytes[offset + 64..offset + 80].try_into().unwrap();
-                        key.reverse();
-                        source_map.entry(key).or_insert(None);
-                        packets += 1;
-                    }
-                } else if pkt_type == MAIN_TYPE || pkt_type == CREATOR_TYPE || pkt_type == RECV_TYPE {
-                    packets += 1;
-                }
-            }
-            offset += length;
-        }
-        let _ = packets;
-        Some(
-            source_map
-                .into_values()
-                .map(|opt| match opt {
-                    Some((name, hash)) => ParEntry::File { name, hash },
-                    None => ParEntry::Damaged,
-                })
-                .collect(),
-        )
-    }
-
-    struct FsParRenamerEnv {
-        dest_dir: Vec<u8>,
-        dir_list: Vec<Vec<u8>>,
-        loaded_entries: std::vec::IntoIter<ParEntry>,
-    }
-
-    impl FsParRenamerEnv {
-        fn new(dest_dir: &std::path::Path) -> Self {
-            Self {
-                dest_dir: dest_dir.to_string_lossy().as_bytes().to_vec(),
-                dir_list: Vec::new(),
-                loaded_entries: Vec::new().into_iter(),
-            }
-        }
-    }
-
-    impl Env for FsParRenamerEnv {
-        fn destination(&mut self, _initial: &[u8]) -> R<Vec<u8>> {
-            Ok(self.dest_dir.clone())
-        }
-        fn state_changed(&mut self, _state: &mut State) {}
-        fn previous_dirs(&mut self) -> R<Vec<Vec<u8>>> {
-            Ok(self.dir_list.clone())
-        }
-        fn remember_dir(&mut self, dir: &[u8]) -> R<()> {
-            self.dir_list.push(dir.to_vec());
-            Ok(())
-        }
-        fn stopped(&mut self) -> R<bool> {
-            Ok(false)
-        }
-        fn progress(&mut self, _label: &[u8], _stage: i32) -> R<()> {
-            Ok(())
-        }
-        fn message(&mut self, _kind: Kind, _text: &[u8]) -> R<()> {
-            Ok(())
-        }
-        fn debug(&mut self, _text: &[u8]) -> R<()> {
-            Ok(())
-        }
-        fn list_dir(&mut self, dir: &[u8]) -> R<Vec<Vec<u8>>> {
-            let path = std::path::Path::new(std::str::from_utf8(dir).unwrap());
-            let mut out = Vec::new();
-            if let Ok(entries) = std::fs::read_dir(path) {
-                for entry in entries.flatten() {
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::ffi::OsStrExt;
-                        out.push(entry.file_name().as_bytes().to_vec());
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        out.push(entry.file_name().to_string_lossy().as_bytes().to_vec());
-                    }
-                }
-            }
-            Ok(out)
-        }
-        fn dir_exists(&mut self, path: &[u8]) -> R<bool> {
-            let p = std::path::Path::new(std::str::from_utf8(path).unwrap());
-            Ok(p.is_dir())
-        }
-        fn file_exists(&mut self, path: &[u8]) -> R<bool> {
-            let p = std::path::Path::new(std::str::from_utf8(path).unwrap());
-            Ok(p.is_file())
-        }
-        fn file_size(&mut self, path: &[u8]) -> R<i64> {
-            let p = std::path::Path::new(std::str::from_utf8(path).unwrap());
-            Ok(std::fs::metadata(p).map(|m| m.len() as i64).unwrap_or(-1))
-        }
-        fn read(&mut self, path: &[u8], buf: &mut [u8]) -> R<Read> {
-            use std::io::Read as _;
-            let p = std::path::Path::new(std::str::from_utf8(path).unwrap());
-            let Ok(mut f) = std::fs::File::open(p) else {
-                return Ok(Read::OpenFailed);
-            };
-            match f.read(buf) {
-                Ok(n) => Ok(Read::Bytes(n)),
-                Err(_) => Ok(Read::ReadFailed),
-            }
-        }
-        fn load_par(&mut self, path: &[u8]) -> R<Option<usize>> {
-            let p = std::path::Path::new(std::str::from_utf8(path).unwrap());
-            let Ok(bytes) = std::fs::read(p) else {
-                return Ok(None);
-            };
-            let Some(entries) = parse_par2_packets(&bytes) else {
-                return Ok(None);
-            };
-            let count = entries.len();
-            self.loaded_entries = entries.into_iter();
-            Ok(Some(count))
-        }
-        fn par_entry(&mut self) -> R<ParEntry> {
-            Ok(self.loaded_entries.next().unwrap_or(ParEntry::Damaged))
-        }
-        fn close_par(&mut self) {
-            self.loaded_entries = Vec::new().into_iter();
-        }
-        fn find_main_pars(&mut self, dir: &[u8]) -> R<Vec<Vec<u8>>> {
-            let p = std::path::Path::new(std::str::from_utf8(dir).unwrap());
-            let mut list = Vec::new();
-            let fold = |b: u8| b.to_ascii_lowercase();
-            crate::parparser::find_main_pars(p, true, &fold, |name| {
-                list.push(name.to_vec());
-            });
-            Ok(list)
-        }
-        fn register_parred(&mut self, _name: &[u8]) -> R<()> {
-            Ok(())
-        }
-        fn rename(&mut self, src: &[u8], dst: &[u8]) -> R<bool> {
-            let s = std::path::Path::new(std::str::from_utf8(src).unwrap());
-            let d = std::path::Path::new(std::str::from_utf8(dst).unwrap());
-            if let (Some(sp), Some(dp)) = (s.parent(), d.parent()) {
-                if sp != dp {
-                    let _ = std::fs::create_dir_all(dp);
-                }
-            }
-            Ok(std::fs::rename(s, d).is_ok())
-        }
-        fn ignored_ext(&mut self, _name: &[u8]) -> R<bool> {
-            Ok(false)
-        }
-        fn fold(&self, byte: u8) -> u8 {
-            byte.to_ascii_lowercase()
-        }
-    }
-
     #[test]
     fn par_renamer_full_suite_port_from_cpp() {
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -765,13 +1035,19 @@ mod tests {
             let work_dir = std::env::temp_dir().join(format!("nzbget_rs_parrenamer_{}_{}", std::process::id(), name));
             copy_dir(src_dir, &work_dir);
             setup(&work_dir);
-            let mut env = FsParRenamerEnv::new(&work_dir);
-            let mut state = State {
-                detect_missing,
-                ..State::default()
-            };
             let dest_bytes = work_dir.to_string_lossy().as_bytes().to_vec();
-            execute(&mut env, &mut state, b"test", &dest_bytes, crate::paths::PATH_SEPARATOR).unwrap();
+            let state = execute_all(
+                b"test",
+                &dest_bytes,
+                b"",
+                detect_missing,
+                crate::paths::PATH_SEPARATOR,
+                &mut || false,
+                &mut |_, _| {},
+                &mut |_, _| {},
+                &mut |_| {},
+                &mut |_, _| {},
+            );
             let _ = std::fs::remove_dir_all(&work_dir);
             state
         };
@@ -814,5 +1090,59 @@ mod tests {
         let st = run_case("Utf8Par2Test", &parchecker_utf8_dir, false, &|_| {});
         assert_eq!(st.renamed_count, 1);
         assert!(!st.has_missed_files);
+
+        // 7. list_parred_files test
+        let listed = list_parred_files(&parchecker_dir.join("testfile.par2"), 16 * 1024 * 1024).unwrap();
+        assert_eq!(listed.len(), 2);
+    }
+
+    #[test]
+    fn parse_par2_packets_rejects_overflowing_packet_length() {
+        let mut buf = vec![0u8; 160];
+        // Header at offset 64 with length 0xfffffffffffffffc that would wrap offset + length to 60
+        buf[64..72].copy_from_slice(MAGIC);
+        buf[72..80].copy_from_slice(&0xffff_ffff_ffff_fffcu64.to_le_bytes());
+        assert!(parse_par2_packets(&buf).is_none());
+    }
+
+    #[test]
+    fn fs_par_renamer_rename_does_not_overwrite_destination_on_permission_error() {
+        use std::os::unix::fs::PermissionsExt as _;
+        if unsafe { libc_geteuid() } == 0 {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "nzbget_rs_parrenamer_perm_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("damaged.par2");
+        let dst = dir.join("damaged.par2.bad");
+        std::fs::write(&src, b"new-damaged-content").unwrap();
+        std::fs::write(&dst, b"original-bad-content").unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let mut env = FsParRenamerEnv {
+            dest_dir: path_to_bytes(&dir),
+            ignore_ext: Vec::new(),
+            dir_list: Vec::new(),
+            loaded_entries: Vec::new().into_iter(),
+            is_stopped: &mut || false,
+            on_progress: &mut |_, _| {},
+            on_message: &mut |_, _| {},
+            on_register_parred: &mut |_| {},
+            on_register_renamed: &mut |_, _| {},
+        };
+        let ok = env.rename(&path_to_bytes(&src), &path_to_bytes(&dst)).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!ok);
+        assert_eq!(std::fs::read(&dst).unwrap(), b"original-bad-content");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    extern "C" {
+        #[link_name = "geteuid"]
+        fn libc_geteuid() -> u32;
     }
 }

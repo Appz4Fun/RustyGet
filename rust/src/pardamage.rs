@@ -419,17 +419,199 @@ fn format_dupe_matcher_detail_msg(filename_buf: &[u8], max_size: i64, ok: bool) 
     msg
 }
 
-/// `DupeMatcher::Prepare` (`daemon/postprocess/DupeMatcher.cpp`).
-pub fn dupe_matcher_prepare<R, L>(
-    dest_dir: &Path,
-    expected_size: i64,
+#[cfg(unix)]
+extern "C" {
+    fn kill(pid: std::ffi::c_int, sig: std::ffi::c_int) -> std::ffi::c_int;
+}
+
+fn kill_process_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let pid = child.id() as std::ffi::c_int;
+        if pid > 0 {
+            unsafe {
+                kill(-pid, 9);
+            }
+        }
+    }
+    let _ = child.kill();
+}
+
+/// Runs `RarLister::FindLargestFile` (`<unrar> lt *.rar` in `directory` with a bounded timeout),
+/// updating `filename_buf`, `max_size`, and `compressed`, and emitting `"Reading file ..."`
+/// detail log messages via `on_detail_log`.
+pub fn run_rar_lister_in_dir<L>(
+    directory: &Path,
+    unrar_cmd: &[u8],
+    filename_buf: &mut [u8],
+    rar_expected_size: i64,
+    timeout_sec: u64,
     max_size: &mut i64,
     compressed: &mut bool,
-    on_rar_archive: R,
     mut on_detail_log: L,
 ) -> bool
 where
-    R: FnMut(&mut [u8], i64, &mut i64, &mut bool),
+    L: FnMut(&[u8]),
+{
+    let cmd_args = crate::util::split_command_line(unrar_cmd);
+    let Some(first_arg) = cmd_args.first().filter(|a| !a.is_empty()) else {
+        return false;
+    };
+    #[cfg(unix)]
+    let unrar_prog = {
+        use std::os::unix::ffi::OsStrExt;
+        std::path::PathBuf::from(std::ffi::OsStr::from_bytes(first_arg))
+    };
+    #[cfg(not(unix))]
+    let unrar_prog = std::path::PathBuf::from(String::from_utf8_lossy(first_arg).into_owned());
+
+    *max_size = -1;
+    *compressed = false;
+
+    let mut cmd = std::process::Command::new(&unrar_prog);
+    cmd.current_dir(directory)
+        .args(["lt", "*.rar"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        cmd.process_group(0);
+    }
+
+    let Ok(mut child) = cmd.spawn() else {
+        return true;
+    };
+
+    let Some(stdout) = child.stdout.take() else {
+        kill_process_tree(&mut child);
+        let _ = child.wait();
+        return true;
+    };
+
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let reader_handle = std::thread::spawn(move || {
+        use std::io::BufRead as _;
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut buf = Vec::new();
+        while let Ok(n) = reader.read_until(b'\n', &mut buf) {
+            if n == 0 {
+                break;
+            }
+            while matches!(buf.last(), Some(b'\n' | b'\r')) {
+                buf.pop();
+            }
+            if tx.send(std::mem::take(&mut buf)).is_err() {
+                break;
+            }
+        }
+        drop(done_tx);
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_sec);
+    let mut last_size_max: std::ffi::c_int = 0;
+    let mut comp_flag: std::ffi::c_int = 0;
+    let mut last_filename = Vec::<u8>::new();
+    let mut killed = false;
+
+    loop {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            kill_process_tree(&mut child);
+            killed = true;
+            break;
+        }
+        let wait_dur = (deadline - now).min(std::time::Duration::from_millis(200));
+        match rx.recv_timeout(wait_dur) {
+            Ok(line) => {
+                let mut c_line = line.clone();
+                if let Some(nul) = c_line.iter().position(|&b| b == 0) {
+                    c_line.truncate(nul);
+                }
+                c_line.push(0);
+                let action = unsafe {
+                    crate::postrepair::parse_rar_lister_line_cstr(
+                        c_line.as_ptr().cast(),
+                        rar_expected_size,
+                        max_size,
+                        &mut comp_flag,
+                        &mut last_size_max,
+                    )
+                };
+                *compressed = comp_flag != 0;
+                if action == 1 && line.len() >= 9 {
+                    let mut msg = Vec::with_capacity(13 + line.len() - 9);
+                    msg.extend_from_slice(b"Reading file ");
+                    msg.extend_from_slice(&line[9..]);
+                    on_detail_log(&msg);
+                } else if action == 2 && line.len() >= 14 {
+                    last_filename = line[14..].to_vec();
+                } else if action == 3 {
+                    let n = last_filename.len().min(filename_buf.len().saturating_sub(1));
+                    filename_buf[..n].copy_from_slice(&last_filename[..n]);
+                    if !filename_buf.is_empty() {
+                        filename_buf[n] = 0;
+                    }
+                } else if action == 5 {
+                    kill_process_tree(&mut child);
+                    killed = true;
+                    break;
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    drop(rx);
+    let mut reaped = false;
+    if !killed {
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) | Err(_) => {
+                    reaped = true;
+                    break;
+                }
+                Ok(None) => {
+                    let now = std::time::Instant::now();
+                    if now >= deadline {
+                        kill_process_tree(&mut child);
+                        break;
+                    }
+                    std::thread::sleep(
+                        (deadline - now).min(std::time::Duration::from_millis(10)),
+                    );
+                }
+            }
+        }
+    }
+    if !reaped {
+        let _ = child.wait();
+    }
+
+    let reader_wait = deadline
+        .saturating_duration_since(std::time::Instant::now())
+        .max(std::time::Duration::from_millis(20));
+    if matches!(
+        done_rx.recv_timeout(reader_wait),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+    ) {
+        let _ = reader_handle.join();
+    }
+    true
+}
+
+/// `DupeMatcher::Prepare` (`daemon/postprocess/DupeMatcher.cpp`).
+pub fn dupe_matcher_prepare<L>(
+    dest_dir: &Path,
+    unrar_cmd: &[u8],
+    expected_size: i64,
+    max_size: &mut i64,
+    compressed: &mut bool,
+    mut on_detail_log: L,
+) -> bool
+where
     L: FnMut(&[u8]),
 {
     let mut filename = [0u8; 1024];
@@ -439,7 +621,18 @@ where
         max_size,
         compressed,
         None,
-        on_rar_archive,
+        |buf, rar_expected, ms, comp| {
+            run_rar_lister_in_dir(
+                dest_dir,
+                unrar_cmd,
+                buf,
+                rar_expected,
+                60,
+                ms,
+                comp,
+                &mut on_detail_log,
+            );
+        },
     );
     let size_ok = crate::postrepair::size_diff_ok(*max_size, expected_size, 20);
     let msg = format_dupe_matcher_detail_msg(&filename, *max_size, size_ok);
@@ -448,15 +641,14 @@ where
 }
 
 /// `DupeMatcher::MatchDupeContent` (`daemon/postprocess/DupeMatcher.cpp`).
-pub fn dupe_matcher_match_dupe_content<R, L>(
+pub fn dupe_matcher_match_dupe_content<L>(
     dupe_dir: &Path,
+    unrar_cmd: &[u8],
     max_size: i64,
     compressed: bool,
-    on_rar_archive: R,
     mut on_detail_log: L,
 ) -> bool
 where
-    R: FnMut(&mut [u8], i64, &mut i64, &mut bool),
     L: FnMut(&[u8]),
 {
     let mut filename = [0u8; 1024];
@@ -468,7 +660,18 @@ where
         &mut dupe_max_size,
         &mut dupe_compressed,
         Some(max_size),
-        on_rar_archive,
+        |buf, rar_expected, ms, comp| {
+            run_rar_lister_in_dir(
+                dupe_dir,
+                unrar_cmd,
+                buf,
+                rar_expected,
+                60,
+                ms,
+                comp,
+                &mut on_detail_log,
+            );
+        },
     );
     let ok = is_dupe_content_match(dupe_max_size, max_size, dupe_compressed, compressed);
     let msg = format_dupe_matcher_detail_msg(&filename, max_size, ok);
@@ -595,8 +798,6 @@ mod tests {
         else {
             return;
         };
-        let unrar_path = std::path::PathBuf::from(String::from_utf8_lossy(&unrar_bytes).into_owned());
-
         let testdata_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
@@ -632,145 +833,132 @@ mod tests {
             .unwrap()
             .len() as i64;
 
-        let run_rar_lister = |dir: &Path,
-                              filename_buf: &mut [u8],
-                              rar_expected_size: i64,
-                              max_size: &mut i64,
-                              compressed: &mut bool| {
-            *max_size = -1;
-            *compressed = false;
-            let mut last_size_max: std::ffi::c_int = 0;
-            let mut comp_flag: std::ffi::c_int = 0;
-            let mut last_filename = Vec::<u8>::new();
-
-            let mut rar_args = vec!["lt".to_string()];
-            let mut rar_files: Vec<String> = std::fs::read_dir(dir)
-                .unwrap()
-                .flatten()
-                .filter_map(|e| {
-                    let name = e.file_name().to_string_lossy().into_owned();
-                    name.to_ascii_lowercase()
-                        .ends_with(".rar")
-                        .then_some(name)
-                })
-                .collect();
-            rar_files.sort();
-            rar_args.extend(rar_files);
-
-            let out = std::process::Command::new(&unrar_path)
-                .current_dir(dir)
-                .args(&rar_args)
-                .output()
-                .unwrap();
-            for line in String::from_utf8_lossy(&out.stdout).lines() {
-                let Ok(c_line) = std::ffi::CString::new(line) else {
-                    continue;
-                };
-                let action = unsafe {
-                    crate::postrepair::parse_rar_lister_line_cstr(
-                        c_line.as_ptr(),
-                        rar_expected_size,
-                        max_size,
-                        &mut comp_flag,
-                        &mut last_size_max,
-                    )
-                };
-                *compressed = comp_flag != 0;
-                if action == 2 && line.len() >= 14 {
-                    last_filename = line.as_bytes()[14..].to_vec();
-                } else if action == 3 {
-                    let n = last_filename.len().min(filename_buf.len().saturating_sub(1));
-                    filename_buf[..n].copy_from_slice(&last_filename[..n]);
-                    if !filename_buf.is_empty() {
-                        filename_buf[n] = 0;
-                    }
-                } else if action == 5 {
-                    break;
-                }
-            }
-        };
-
-        struct RustDupeMatcher<'a, F> {
+        struct RustDupeMatcher<'a> {
             dest_dir: std::path::PathBuf,
+            unrar_cmd: &'a [u8],
             expected_size: i64,
             max_size: i64,
             compressed: bool,
-            rar_lister: &'a F,
         }
 
-        impl<'a, F> RustDupeMatcher<'a, F>
-        where
-            F: Fn(&Path, &mut [u8], i64, &mut i64, &mut bool),
-        {
-            fn new(dest_dir: &Path, expected_size: i64, rar_lister: &'a F) -> Self {
+        impl<'a> RustDupeMatcher<'a> {
+            fn new(dest_dir: &Path, expected_size: i64, unrar_cmd: &'a [u8]) -> Self {
                 Self {
                     dest_dir: dest_dir.to_path_buf(),
+                    unrar_cmd,
                     expected_size,
                     max_size: -1,
                     compressed: false,
-                    rar_lister,
                 }
             }
 
             fn prepare(&mut self) -> bool {
                 let dir = self.dest_dir.clone();
-                let lister = self.rar_lister;
                 dupe_matcher_prepare(
                     &dir,
+                    self.unrar_cmd,
                     self.expected_size,
                     &mut self.max_size,
                     &mut self.compressed,
-                    |buf, exp_sz, max_sz, comp| lister(&dir, buf, exp_sz, max_sz, comp),
                     |_| {},
                 )
             }
 
             fn match_dupe_content(&self, dupe_dir: &Path) -> bool {
-                let lister = self.rar_lister;
                 dupe_matcher_match_dupe_content(
                     dupe_dir,
+                    self.unrar_cmd,
                     self.max_size,
                     self.compressed,
-                    |buf, exp_sz, max_sz, comp| lister(dupe_dir, buf, exp_sz, max_sz, comp),
                     |_| {},
                 )
             }
         }
 
-        let mut dupe1_m = RustDupeMatcher::new(&dupe1, expected_size, &run_rar_lister);
+        let mut dupe1_m = RustDupeMatcher::new(&dupe1, expected_size, &unrar_bytes);
         assert!(dupe1_m.prepare());
         assert!(dupe1_m.match_dupe_content(&dupe2));
         assert!(dupe1_m.match_dupe_content(&rardupe1));
         assert!(dupe1_m.match_dupe_content(&rardupe2));
         assert!(!dupe1_m.match_dupe_content(&nondupe));
 
-        let mut dupe2_m = RustDupeMatcher::new(&dupe2, expected_size, &run_rar_lister);
+        let mut dupe2_m = RustDupeMatcher::new(&dupe2, expected_size, &unrar_bytes);
         assert!(dupe2_m.prepare());
         assert!(dupe2_m.match_dupe_content(&dupe1));
         assert!(dupe2_m.match_dupe_content(&rardupe1));
         assert!(dupe2_m.match_dupe_content(&rardupe2));
         assert!(!dupe2_m.match_dupe_content(&nondupe));
 
-        let mut non_dupe_m = RustDupeMatcher::new(&nondupe, expected_size, &run_rar_lister);
+        let mut non_dupe_m = RustDupeMatcher::new(&nondupe, expected_size, &unrar_bytes);
         assert!(!non_dupe_m.prepare());
         assert!(!non_dupe_m.match_dupe_content(&dupe1));
         assert!(!non_dupe_m.match_dupe_content(&dupe2));
         assert!(!non_dupe_m.match_dupe_content(&rardupe1));
         assert!(!non_dupe_m.match_dupe_content(&rardupe2));
 
-        let mut rardupe1_m = RustDupeMatcher::new(&rardupe1, expected_size, &run_rar_lister);
+        let mut rardupe1_m = RustDupeMatcher::new(&rardupe1, expected_size, &unrar_bytes);
         assert!(rardupe1_m.prepare());
         assert!(rardupe1_m.match_dupe_content(&dupe1));
         assert!(rardupe1_m.match_dupe_content(&dupe2));
         assert!(rardupe1_m.match_dupe_content(&rardupe2));
         assert!(!rardupe1_m.match_dupe_content(&nondupe));
 
-        let mut rardupe2_m = RustDupeMatcher::new(&rardupe2, expected_size, &run_rar_lister);
+        let mut rardupe2_m = RustDupeMatcher::new(&rardupe2, expected_size, &unrar_bytes);
         assert!(rardupe2_m.prepare());
         assert!(rardupe2_m.match_dupe_content(&rardupe1));
         assert!(rardupe2_m.match_dupe_content(&dupe1));
         assert!(rardupe2_m.match_dupe_content(&dupe2));
         assert!(!rardupe2_m.match_dupe_content(&nondupe));
+
+        let _ = std::fs::remove_dir_all(&work_dir);
+    }
+
+    #[test]
+    fn run_rar_lister_in_dir_enforces_timeout_on_wrapper_descendants_and_closed_stdout() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let work_dir = std::env::temp_dir().join(format!(
+            "nzbget_rs_rarlister_timeout_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&work_dir);
+        std::fs::create_dir_all(&work_dir).unwrap();
+
+        // Case 1: wrapper leaves a background descendant holding stdout open
+        let wrapper1 = work_dir.join("wrap_descendant.sh");
+        std::fs::write(&wrapper1, b"#!/bin/sh\nsleep 30 &\nexit 0\n").unwrap();
+        std::fs::set_permissions(&wrapper1, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut filename = [0u8; 64];
+        let mut max_size = -1;
+        let mut compressed = false;
+        let start1 = std::time::Instant::now();
+        assert!(run_rar_lister_in_dir(
+            &work_dir,
+            wrapper1.to_string_lossy().as_bytes(),
+            &mut filename,
+            100,
+            1,
+            &mut max_size,
+            &mut compressed,
+            |_| {},
+        ));
+        assert!(start1.elapsed() < std::time::Duration::from_secs(5));
+
+        // Case 2: wrapper closes stdout immediately then sleeps
+        let wrapper2 = work_dir.join("wrap_closed_stdout.sh");
+        std::fs::write(&wrapper2, b"#!/bin/sh\nexec >/dev/null 2>&1\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&wrapper2, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let start2 = std::time::Instant::now();
+        assert!(run_rar_lister_in_dir(
+            &work_dir,
+            wrapper2.to_string_lossy().as_bytes(),
+            &mut filename,
+            100,
+            1,
+            &mut max_size,
+            &mut compressed,
+            |_| {},
+        ));
+        assert!(start2.elapsed() < std::time::Duration::from_secs(5));
 
         let _ = std::fs::remove_dir_all(&work_dir);
     }

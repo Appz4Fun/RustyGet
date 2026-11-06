@@ -709,9 +709,8 @@ void nzbget_rs_rename_analyzer_finish(NzbgetRsRenameAnalyzer* a, char* hash);
 typedef void (*NzbgetRsParHashAt)(void* ctx, size_t index, const char** filename, const char** hash);
 ptrdiff_t nzbget_rs_direct_regular_name(const char* oldName, const char* hash16k, size_t count,
 	NzbgetRsParHashAt at, void* ctx);
-typedef int (*NzbgetRsFormatParName)(void* ctx, int vol, const char** data, size_t* len);
 NzbgetRsBuf nzbget_rs_direct_par_name(const char* oldName, const char* destDir, const char* setId,
-	char separator, int* vol, int (*exists)(void* ctx, const char* path), NzbgetRsFormatParName format, void* ctx);
+	char separator, int* vol);
 typedef struct NzbgetRsParName
 {
 	const char* filename;
@@ -807,69 +806,24 @@ typedef struct NzbgetRsTestServerParams
 int nzbget_rs_test_server_params(const char* request, NzbgetRsJsonLimits limits, void* ctx,
 	void (*parsed)(void* ctx, const NzbgetRsTestServerParams* params));
 
-// ParRenamer::Execute (rust/src/parrenamer.rs). The callbacks get borrowed
-// NUL-terminated strings, valid for the call only, and return -1 (read: -1)
-// for a C++ exception, which ends the run (execute then returns 0; the state
-// holds what was done until then). stopped: 1 stopped. progress: the label
-// and stage set, then UpdateProgress. message kinds: 0 info, 1 warning,
-// 2 error. listDir / findMainPars call add for each name (DirBrowser's
-// snapshot / ParParser::FindMainPars). dirExists / fileExists /
-// ignoredExt (Util::MatchFileExt with ParIgnoreExt): 1 yes. fileSize writes
-// FileSystem::FileSize. read: the bytes DiskFile read from the start of the
-// file into buf (at most len), -2 when it could not be opened, -3 when the
-// read failed. loadPar: 1 loaded (writes the source map size), 0 when the
-// packets could not be loaded or the file is empty. parEntry translates the
-// next source map entry and calls add once (damaged or local name/hash).
-// closePar releases the loaded repairer; the caller must also release it on
-// an aborted run. stateChanged publishes members before callbacks, cannot
-// fail or unwind, and must not retain the borrowed state pointer. It writes
-// back detectMissing, which callbacks can change through the C++ setter.
-// previousDirs / rememberDir retain the directory list across runs.
-// destination calls add once with the current destination after initial progress;
-// a NULL callback uses execute's destDir argument instead. All input strings
-// are copied before callbacks may replace the caller's storage. All sink
-// and add pointers are borrowed, non-NULL, and valid only during the callback.
-// No buffers or objects transfer ownership across the ABI. rename: RenameFile
-// without the count, 1 when moved. fold is ParParser::FilenameFold. NULL
-// callbacks mean: not stopped, nothing printed, empty lists, no files, reads
-// that can't open, nothing loaded, no renames, identity fold.
-typedef struct NzbgetRsParRenamerState
-{
-	int fileCount;
-	int curFile;
-	int renamedCount;
-	int hasMissedFiles;
-	int hasDamagedParFiles;
-	int detectMissing;
-} NzbgetRsParRenamerState;
-typedef struct NzbgetRsParRenamerEnv
-{
-	void* ctx;
-	int (*stopped)(void* ctx);
-	int (*progress)(void* ctx, const char* label, int stage);
-	int (*message)(void* ctx, int kind, const char* text);
-	int (*debug)(void* ctx, const char* text);
-	int (*listDir)(void* ctx, const char* dir, void* sink, void (*add)(void* sink, const char* name));
-	int (*dirExists)(void* ctx, const char* path);
-	int (*fileExists)(void* ctx, const char* path);
-	int (*fileSize)(void* ctx, const char* path, int64_t* size);
-	int64_t (*read)(void* ctx, const char* path, uint8_t* buf, size_t len);
-	int (*loadPar)(void* ctx, const char* path, size_t* count);
-	int (*parEntry)(void* ctx, void* sink,
-		void (*add)(void* sink, int damaged, const char* name, const char* hash));
-	void (*closePar)(void* ctx);
-	int (*findMainPars)(void* ctx, const char* dir, void* sink, void (*add)(void* sink, const char* name));
-	int (*registerParred)(void* ctx, const char* name);
-	int (*rename)(void* ctx, const char* src, const char* dst);
-	int (*ignoredExt)(void* ctx, const char* name);
-	int (*fold)(int byte);
-	void (*stateChanged)(void* ctx, NzbgetRsParRenamerState* state);
-	int (*previousDirs)(void* ctx, const char* unused, void* sink, void (*add)(void* sink, const char* name));
-	int (*rememberDir)(void* ctx, const char* dir);
-	int (*destination)(void* ctx, const char* unused, void* sink, void (*add)(void* sink, const char* dir));
-} NzbgetRsParRenamerEnv;
-int nzbget_rs_par_renamer_execute(const NzbgetRsParRenamerEnv* env, NzbgetRsParRenamerState* state,
-	const char* infoName, const char* destDir, char separator);
+// ParRenamer::Execute, ParRenamer::ListParredFiles, and DirectParLoader::LoadParFile
+// (rust/src/parrenamer.rs).
+void nzbget_rs_par_renamer_execute(
+	const char* infoName, const char* destDir, const char* ignoreExt,
+	int detectMissing, char separator, void* ctx,
+	int (*isStoppedCb)(void* ctx),
+	void (*updateProgressCb)(void* ctx, const char* label, int stage),
+	void (*printMessageCb)(void* ctx, int kind, const char* text),
+	void (*registerParredCb)(void* ctx, const char* name),
+	void (*registerRenamedCb)(void* ctx, const char* oldRel, const char* newRel),
+	int* outRenamedCount, int* outHasMissedFiles, int* outHasDamagedParFiles);
+int nzbget_rs_par_renamer_list_parred_files(
+	const char* parFilename, int64_t maxIndexParSize, void* ctx,
+	void (*addCb)(void* ctx, const char* name));
+int nzbget_rs_par_renamer_load_par_entries(
+	const char* parFilename, void* ctx,
+	int (*onLoadedCb)(void* ctx),
+	int (*entryCb)(void* ctx, int damaged, const char* name, const char* hash));
 
 // FileSystem's deletes and RenameBak (rust/src/fsdelete.rs). The callbacks
 // get borrowed NUL-terminated paths and return -1 for a C++ exception (the
@@ -1585,10 +1539,6 @@ int nzbget_rs_dupecoord_select_dupe_backup(
     const NzbgetRsDupeHistoryCandidate* history, size_t history_count,
     const NzbgetRsDupeQueueCandidate* queue, size_t queue_count,
     void* ctx, int (*file_exists_cb)(void* ctx, size_t history_index));
-
-int nzbget_rs_dupematcher_size_diff_ok(int64_t size1, int64_t size2, int max_diff_percent);
-int nzbget_rs_dupematcher_parse_rar_lister_line(
-    const char* text, int64_t expected_size, int64_t* max_size, int* compressed, int* last_size_max);
 
 size_t nzbget_rs_repair_select_more_pars(
     const int* sorted_block_counts, size_t count, int block_needed,
@@ -4131,8 +4081,6 @@ int nzbget_rs_dqh_log_classify_init_logfile_action(
 int nzbget_rs_dqh_script_ctrl_is_terminate_ok(
     int child_pid, int kill_res, int completed);
 int nzbget_rs_dqh_script_ctrl_can_send_break(int pid, int completed);
-int nzbget_rs_dqh_dupematcher_should_wait_rar_lister(
-    int is_running, int64_t start_time, int timeout_sec, int64_t cur_time);
 int nzbget_rs_dqh_article_dl_is_terminal_loop_status(
     int status, int ad_finished, int ad_fatal_error);
 int nzbget_rs_dqh_article_dl_should_fail_for_desired_server(
@@ -4323,21 +4271,6 @@ void nzbget_rs_par_damage_judge(
 
 int nzbget_rs_par_damage_first_report(int nzb_id);
 void nzbget_rs_par_damage_forget(int nzb_id);
-
-void nzbget_rs_dupematcher_find_largest_file(
-    const char* directory,
-    char* filename_buf,
-    int buf_len,
-    int64_t* out_max_size,
-    int* out_compressed,
-    int aliases_member_max,
-    int64_t expected_rar_size,
-    void (*rar_lister_cb)(void* ctx, char* filename_buf, int buf_len, int64_t expected_size, int64_t* out_max_size, int* out_compressed),
-    void* rar_lister_ctx);
-
-const char* nzbget_rs_dupematcher_size_mismatch_suffix(int ok);
-int nzbget_rs_dupematcher_is_content_match(
-    int64_t dupe_max_size, int64_t max_size, int dupe_compressed, int compressed);
 
 int nzbget_rs_move_controller_move_files(
     const char* inter_dir,
@@ -5189,12 +5122,10 @@ int nzbget_rs_qhp_rename_completed_file(
     void (*set_cb)(void* ctx, size_t idx, const char* new_filename, const char* new_origname));
 
 int nzbget_rs_dupematcher_prepare(
-    const char* dest_dir, int64_t expected_size, int64_t* out_max_size, int* out_compressed,
-    void (*on_rar_archive)(void* ctx, char* filename_buf, int buf_len, int64_t expected_size, int64_t* out_max_size, int* out_compressed),
+    const char* dest_dir, const char* unrar_cmd, int64_t expected_size, int64_t* out_max_size, int* out_compressed,
     void (*on_detail_log)(void* ctx, const char* msg), void* ctx);
 int nzbget_rs_dupematcher_match_dupe_content(
-    const char* dupe_dir, int64_t max_size, int compressed,
-    void (*on_rar_archive)(void* ctx, char* filename_buf, int buf_len, int64_t expected_size, int64_t* out_max_size, int* out_compressed),
+    const char* dupe_dir, const char* unrar_cmd, int64_t max_size, int compressed,
     void (*on_detail_log)(void* ctx, const char* msg), void* ctx);
 
 int nzbget_rs_archive_processor_process(

@@ -5769,6 +5769,76 @@ int nzbget_rs_zipview_inspect_file(
     uint64_t* out_total_uncompressed, int* out_has_encrypted,
     int* out_has_compressed, int* out_has_symlinks, int* out_has_nzb);
 
+int nzbget_rs_content_map_read_inner_decrypted(
+    int64_t inner_size,
+    const NzbgetRsContentRun* runs,
+    const int64_t* cipher_data_offsets,
+    const int64_t* cipher_sizes,
+    const uint8_t* has_crypto,
+    size_t run_count,
+    const uint8_t* key,
+    size_t key_len,
+    const uint8_t* iv,
+    NzbgetRsByteRange inner_range,
+    uint8_t* out_buf,
+    void* ctx,
+    int (*has_source_cb)(void* ctx, int32_t member_index),
+    int64_t (*size_cb)(void* ctx, int32_t member_index),
+    int (*read_cb)(void* ctx, int32_t member_index, int64_t offset, uint8_t* buf, int64_t size));
+
+int nzbget_rs_content_mapper_build_map(
+    const char* const* member_names,
+    const int64_t* member_sizes,
+    size_t member_count,
+    int32_t set_format,
+    const int32_t* set_members,
+    size_t set_member_count,
+    const char* password,
+    int tls_enabled,
+    void* ctx,
+    int (*has_source_cb)(void* ctx, int32_t member_index),
+    int64_t (*size_cb)(void* ctx, int32_t member_index),
+    int (*read_cb)(void* ctx, int32_t member_index, int64_t offset, uint8_t* buf, int64_t size),
+    void (*on_rar_volume_cb)(
+        void* ctx, const char* filename, int32_t version, int multi_volume,
+        uint32_t volume_no, int new_naming, int has_next_volume, int encrypted,
+        size_t file_count, const uint32_t* file_times, const int64_t* file_sizes,
+        const uint32_t* file_attrs, const uint8_t* file_split_before,
+        const uint8_t* file_split_after, const char* const* file_names),
+    void (*on_map_cb)(
+        void* ctx, const char* inner_name, size_t inner_name_len, int64_t inner_size,
+        const NzbgetRsContentRun* runs, size_t run_count,
+        int encrypted, const uint8_t* key, size_t key_len, const uint8_t* iv,
+        const int64_t* cipher_data_offsets, const int64_t* cipher_sizes),
+    void (*on_skip_cb)(void* ctx, const char* reason));
+
+void nzbget_rs_content_mapper_build_repair_sets(
+    const char* const* member_names,
+    const int64_t* member_sizes,
+    size_t member_count,
+    const size_t* hole_counts,
+    const NzbgetRsByteRange* holes_flat,
+    const char* password,
+    int tls_enabled,
+    void* ctx,
+    int (*has_source_cb)(void* ctx, int32_t member_index),
+    int64_t (*size_cb)(void* ctx, int32_t member_index),
+    int (*read_cb)(void* ctx, int32_t member_index, int64_t offset, uint8_t* buf, int64_t size),
+    void (*on_rar_volume_cb)(
+        void* ctx, const char* filename, int32_t version, int multi_volume,
+        uint32_t volume_no, int new_naming, int has_next_volume, int encrypted,
+        size_t file_count, const uint32_t* file_times, const int64_t* file_sizes,
+        const uint32_t* file_attrs, const uint8_t* file_split_before,
+        const uint8_t* file_split_after, const char* const* file_names),
+    void (*on_set_cb)(
+        void* ctx, int32_t set_format, const int32_t* set_members, size_t set_member_count,
+        int has_map, const char* inner_name, size_t inner_name_len, int64_t inner_size,
+        const NzbgetRsContentRun* runs, size_t run_count,
+        int encrypted, const uint8_t* key, size_t key_len, const uint8_t* iv,
+        const int64_t* cipher_data_offsets, const int64_t* cipher_sizes,
+        const NzbgetRsByteRange* inner_holes, size_t inner_hole_count,
+        const char* skip_reason));
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

@@ -214,3 +214,47 @@ void RarVolume::LogDebugInfo()
 	}
 #endif
 }
+
+void RarVolume::LogDebugVolume(const char* filename, int version, bool multiVolume,
+	uint32 volumeNo, bool newNaming, bool hasNextVolume, bool encrypted,
+	size_t fileCount, const uint32* fileTimes, const int64* fileSizes,
+	const uint32* fileAttrs, const uint8* fileSplitBefore,
+	const uint8* fileSplitAfter, const char* const* fileNames)
+{
+#ifdef DEBUG
+	RarVolume vol(filename);
+	vol.m_version = version;
+	vol.m_multiVolume = multiVolume;
+	vol.m_volumeNo = volumeNo;
+	vol.m_newNaming = newNaming;
+	vol.m_hasNextVolume = hasNextVolume;
+	vol.m_encrypted = encrypted;
+	for (size_t i = 0; i < fileCount; i++)
+	{
+		RarFile file;
+		file.m_filename = (fileNames && fileNames[i]) ? fileNames[i] : "";
+		file.m_time = fileTimes ? fileTimes[i] : 0;
+		file.m_size = fileSizes ? fileSizes[i] : 0;
+		file.m_attr = fileAttrs ? fileAttrs[i] : 0;
+		file.m_splitBefore = fileSplitBefore && fileSplitBefore[i] != 0;
+		file.m_splitAfter = fileSplitAfter && fileSplitAfter[i] != 0;
+		vol.m_files.push_back(std::move(file));
+	}
+	vol.LogDebugInfo();
+#else
+	(void)filename;
+	(void)version;
+	(void)multiVolume;
+	(void)volumeNo;
+	(void)newNaming;
+	(void)hasNextVolume;
+	(void)encrypted;
+	(void)fileCount;
+	(void)fileTimes;
+	(void)fileSizes;
+	(void)fileAttrs;
+	(void)fileSplitBefore;
+	(void)fileSplitAfter;
+	(void)fileNames;
+#endif
+}

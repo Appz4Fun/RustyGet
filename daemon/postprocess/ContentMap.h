@@ -137,25 +137,6 @@ struct MemberRange
 	StreamRange Range;
 };
 
-/* presents ordered members as one logical byte stream (spanned zip volumes,
- * .7z.001 splits) and translates logical ranges back to member coordinates */
-class CompositeSource : public ContentSource
-{
-public:
-	CompositeSource(ContentSourceSet& sources, std::vector<int> memberIndexes,
-		std::vector<int64> memberSizes);
-	virtual int64 Size() { return m_totalSize; }
-	virtual bool Read(int64 offset, void* buffer, int64 size);
-	std::vector<MemberRange> ToMembers(const StreamRange& logicalRange) const;
-
-private:
-	ContentSourceSet& m_sources;
-	std::vector<int> m_memberIndexes;
-	std::vector<int64> m_memberSizes;
-	std::vector<int64> m_memberBases;
-	int64 m_totalSize = 0;
-};
-
 /* wraps another source, refusing reads that intersect captured holes: a
  * hole's bytes exist on disk (preallocated) but are garbage, and parsing
  * them would build maps out of noise */
@@ -192,6 +173,7 @@ class ContentMap
 public:
 	const char* GetInnerName() const { return m_innerName.c_str(); }
 	void SetInnerName(const char* innerName) { m_innerName = innerName ? innerName : ""; }
+	void SetInnerName(std::string innerName) { m_innerName = std::move(innerName); }
 	int64 GetInnerSize() const { return m_innerSize; }
 	void SetInnerSize(int64 innerSize) { m_innerSize = innerSize; }
 	std::vector<ContentRun>* GetRuns() { return &m_runs; }
@@ -239,16 +221,11 @@ public:
 	/* where innerRange lives in member coordinates, split across runs */
 	std::vector<MemberRange> MapFromInner(const StreamRange& innerRange) const;
 
-	/* drop all runs of one member (unreadable headers): its bytes become
-	 * unmappable in both directions while the rest of the set still maps */
-	void ExcludeMember(int memberIndex);
-
 private:
 	std::string m_innerName;
 	int64 m_innerSize = 0;
 	std::vector<ContentRun> m_runs;
-	// parallel to m_runs when encrypted (one entry per run), empty when plain;
-	// ExcludeMember keeps the two in lockstep
+	// parallel to m_runs when encrypted (one entry per run), empty when plain
 	std::vector<RunCrypto> m_runCryptos;
 };
 
@@ -309,24 +286,6 @@ public:
 	static std::vector<RepairSetData> BuildRepairSets(const std::vector<SetMember>& members,
 		const std::vector<StreamRangeList>& memberHoles, ContentSourceSet& sources,
 		const char* password = nullptr);
-
-	/* sorts by offset and merges overlapping/adjacent ranges into a disjoint
-	 * ascending list: probe windows hugging neighboring holes can land on
-	 * the same present island, and shared bytes must only count once */
-	static StreamRangeList CoalesceRanges(std::vector<StreamRange> ranges);
-
-private:
-	static std::unique_ptr<ContentMap> BuildBareMap(const std::vector<SetMember>& members,
-		const MemberSet& set, ContentSourceSet& sources, std::string& skipReason);
-	static std::unique_ptr<ContentMap> BuildSplitMap(const std::vector<SetMember>& members,
-		const MemberSet& set, ContentSourceSet& sources, std::string& skipReason);
-	static std::unique_ptr<ContentMap> BuildRarMap(const std::vector<SetMember>& members,
-		const MemberSet& set, ContentSourceSet& sources, std::string& skipReason,
-		const char* password = nullptr);
-	static std::unique_ptr<ContentMap> BuildZipMap(const std::vector<SetMember>& members,
-		const MemberSet& set, ContentSourceSet& sources, std::string& skipReason);
-	static std::unique_ptr<ContentMap> BuildSevenZipMap(const std::vector<SetMember>& members,
-		const MemberSet& set, ContentSourceSet& sources, std::string& skipReason);
 };
 
 #endif

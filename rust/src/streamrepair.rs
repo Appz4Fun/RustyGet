@@ -4087,6 +4087,24 @@ impl RarCryptoContext {
         let iv = prev_cipher_block.unwrap_or(&self.iv);
         streamcrypto_crypt_cbc(true, &self.key, iv, plain, cipher, blocks)
     }
+
+    pub fn key(&self) -> &[u8] {
+        &self.key
+    }
+
+    pub fn iv(&self) -> &[u8; 16] {
+        &self.iv
+    }
+
+    pub fn from_key_iv(key: &[u8], iv: [u8; 16]) -> Option<Self> {
+        if key.len() != 16 && key.len() != 32 {
+            return None;
+        }
+        Some(Self {
+            key: key.to_vec(),
+            iv,
+        })
+    }
 }
 
 /// Pure-Rust implementation of `crate::rarreader::Cipher` for parsing header-encrypted (`-hp`) RAR3/RAR5 volumes.
@@ -4169,6 +4187,871 @@ impl crate::rarreader::Cipher for NativeRarCipher {
 
     fn free(&mut self) {
         self.aes = None;
+    }
+}
+
+/// Pure-Rust `ContentSource` trait mirroring `daemon/postprocess/ContentMap.h`.
+pub trait ContentSource {
+    fn size(&self) -> i64;
+    fn read(&self, offset: i64, buf: &mut [u8]) -> bool;
+}
+
+/// Pure-Rust `ContentSourceSet` trait mirroring `daemon/postprocess/ContentMap.h`.
+pub trait ContentSourceSet {
+    fn get_source(&self, member_index: i32) -> Option<&dyn ContentSource>;
+
+    fn aborted(&self) -> bool {
+        false
+    }
+
+    fn on_rar_volume_parsed(
+        &self,
+        _member_name: &[u8],
+        _vol: &crate::rarreader::Volume,
+        _files: &[crate::rarreader::RarFile],
+    ) {
+    }
+}
+
+struct ContentSourceRarAdapter<'a>(&'a dyn ContentSource);
+
+impl crate::rarreader::Source for ContentSourceRarAdapter<'_> {
+    fn size(&mut self) -> i64 {
+        self.0.size()
+    }
+    fn read(&mut self, offset: i64, buf: &mut [u8]) -> bool {
+        self.0.read(offset, buf)
+    }
+}
+
+/// A member file of a posting (`SetMember` in `ContentMap.h`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SetMember {
+    pub name: Vec<u8>,
+    pub size: i64,
+}
+
+impl SetMember {
+    pub fn new(name: impl AsRef<[u8]>, size: i64) -> Self {
+        Self {
+            name: name.as_ref().to_vec(),
+            size,
+        }
+    }
+}
+
+/// Container format for `MemberSet` (`MemberSet::EFormat` in `ContentMap.h`).
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemberFormat {
+    Bare = FORMAT_BARE,
+    Split = FORMAT_SPLIT,
+    Rar = FORMAT_RAR,
+    Zip = FORMAT_ZIP,
+    SevenZip = FORMAT_SEVEN_ZIP,
+}
+
+impl MemberFormat {
+    pub fn from_i32(v: i32) -> Option<Self> {
+        match v {
+            FORMAT_BARE => Some(Self::Bare),
+            FORMAT_SPLIT => Some(Self::Split),
+            FORMAT_RAR => Some(Self::Rar),
+            FORMAT_ZIP => Some(Self::Zip),
+            FORMAT_SEVEN_ZIP => Some(Self::SevenZip),
+            _ => None,
+        }
+    }
+}
+
+/// Member files grouped into one container set, in data order (`MemberSet` in `ContentMap.h`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemberSet {
+    pub format: MemberFormat,
+    pub members: Vec<i32>,
+}
+
+/// Presents ordered members as one logical byte stream (`CompositeSource` in `ContentMap.h`).
+pub struct CompositeSource<'a> {
+    sources: &'a dyn ContentSourceSet,
+    member_indexes: Vec<i32>,
+    member_sizes: Vec<i64>,
+    member_bases: Vec<i64>,
+    total_size: i64,
+}
+
+impl<'a> CompositeSource<'a> {
+    pub fn new(
+        sources: &'a dyn ContentSourceSet,
+        member_indexes: Vec<i32>,
+        member_sizes: Vec<i64>,
+    ) -> Self {
+        let mut member_bases = vec![0i64; member_sizes.len()];
+        let total_size = composite_compute_member_bases(&member_sizes, &mut member_bases);
+        Self {
+            sources,
+            member_indexes,
+            member_sizes,
+            member_bases,
+            total_size,
+        }
+    }
+
+    pub fn to_members(&self, logical_range: NzbgetRsByteRange) -> Vec<NzbgetRsMemberRange> {
+        composite_to_members(
+            &self.member_indexes,
+            &self.member_bases,
+            &self.member_sizes,
+            logical_range,
+        )
+    }
+}
+
+impl ContentSource for CompositeSource<'_> {
+    fn size(&self) -> i64 {
+        self.total_size
+    }
+
+    fn read(&self, offset: i64, buf: &mut [u8]) -> bool {
+        let size = buf.len() as i64;
+        if offset < 0 || size < 0 || offset > self.total_size || size > self.total_size - offset {
+            return false;
+        }
+        let mut filled = 0usize;
+        for piece in self.to_members(NzbgetRsByteRange { offset, size }) {
+            let Some(source) = self.sources.get_source(piece.member_index) else {
+                return false;
+            };
+            let len = piece.size as usize;
+            if !source.read(piece.offset, &mut buf[filled..filled + len]) {
+                return false;
+            }
+            filled += len;
+        }
+        true
+    }
+}
+
+/// Wraps another `ContentSource`, refusing reads that intersect captured holes (`HoledSource` in `ContentMap.h`).
+pub struct HoledSource<'a> {
+    inner: &'a dyn ContentSource,
+    holes: Vec<NzbgetRsByteRange>,
+}
+
+impl<'a> HoledSource<'a> {
+    pub fn new(inner: &'a dyn ContentSource, holes: Vec<NzbgetRsByteRange>) -> Self {
+        Self { inner, holes }
+    }
+}
+
+impl ContentSource for HoledSource<'_> {
+    fn size(&self) -> i64 {
+        self.inner.size()
+    }
+
+    fn read(&self, offset: i64, buf: &mut [u8]) -> bool {
+        if holed_source_intersects(&self.holes, offset, buf.len() as i64) {
+            return false;
+        }
+        self.inner.read(offset, buf)
+    }
+}
+
+/// Per-member hole-aware view over another source set (`HoledSourceSet` in `ContentMap.h`).
+pub struct HoledSourceSet<'a> {
+    inner: &'a dyn ContentSourceSet,
+    wrapped: Vec<Option<HoledSource<'a>>>,
+}
+
+impl<'a> HoledSourceSet<'a> {
+    pub fn new(inner: &'a dyn ContentSourceSet, member_holes: &[Vec<NzbgetRsByteRange>]) -> Self {
+        let wrapped = member_holes
+            .iter()
+            .enumerate()
+            .map(|(i, holes)| {
+                inner
+                    .get_source(i as i32)
+                    .map(|src| HoledSource::new(src, holes.clone()))
+            })
+            .collect();
+        Self { inner, wrapped }
+    }
+}
+
+impl ContentSourceSet for HoledSourceSet<'_> {
+    fn get_source(&self, member_index: i32) -> Option<&dyn ContentSource> {
+        if member_index < 0 {
+            return None;
+        }
+        self.wrapped
+            .get(member_index as usize)?
+            .as_ref()
+            .map(|h| h as &dyn ContentSource)
+    }
+
+    fn aborted(&self) -> bool {
+        self.inner.aborted()
+    }
+
+    fn on_rar_volume_parsed(
+        &self,
+        member_name: &[u8],
+        vol: &crate::rarreader::Volume,
+        files: &[crate::rarreader::RarFile],
+    ) {
+        self.inner.on_rar_volume_parsed(member_name, vol, files);
+    }
+}
+
+/// Crypto annotation for a run whose member bytes are RAR-encrypted ciphertext (`RunCrypto` in `ContentMap.h`).
+#[derive(Clone)]
+pub struct RunCrypto {
+    pub crypto: Option<std::sync::Arc<RarCryptoContext>>,
+    pub cipher_data_offset: i64,
+    pub cipher_size: i64,
+}
+
+/// Where the inner content stream lives inside a member set (`ContentMap` in `ContentMap.h`).
+#[derive(Clone, Default)]
+pub struct ContentMap {
+    inner_name: Vec<u8>,
+    inner_size: i64,
+    runs: Vec<NzbgetRsContentRun>,
+    run_cryptos: Vec<RunCrypto>,
+}
+
+impl ContentMap {
+    pub fn inner_name_bytes(&self) -> &[u8] {
+        &self.inner_name
+    }
+
+    pub fn inner_name(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(&self.inner_name)
+    }
+
+    pub fn set_inner_name_bytes(&mut self, name: &[u8]) {
+        self.inner_name = name.to_vec();
+    }
+
+    pub fn set_inner_name(&mut self, name: &str) {
+        self.inner_name = name.as_bytes().to_vec();
+    }
+
+    pub fn inner_size(&self) -> i64 {
+        self.inner_size
+    }
+
+    pub fn set_inner_size(&mut self, size: i64) {
+        self.inner_size = size;
+    }
+
+    pub fn runs(&self) -> &[NzbgetRsContentRun] {
+        &self.runs
+    }
+
+    pub fn runs_mut(&mut self) -> &mut Vec<NzbgetRsContentRun> {
+        &mut self.runs
+    }
+
+    pub fn run_cryptos(&self) -> &[RunCrypto] {
+        &self.run_cryptos
+    }
+
+    pub fn run_cryptos_mut(&mut self) -> &mut Vec<RunCrypto> {
+        &mut self.run_cryptos
+    }
+
+    pub fn run_crypto(&self, run_index: usize) -> Option<&RunCrypto> {
+        self.run_cryptos
+            .get(run_index)
+            .filter(|rc| rc.crypto.is_some())
+    }
+
+    pub fn encrypted(&self) -> bool {
+        !self.run_cryptos.is_empty()
+    }
+
+    pub fn cipher_stream_size(&self) -> i64 {
+        let sizes: Vec<i64> = self.run_cryptos.iter().map(|rc| rc.cipher_size).collect();
+        content_map_sum_cipher_sizes(&sizes)
+    }
+
+    pub fn map_cipher_range(&self, cipher_range: NzbgetRsByteRange) -> Vec<NzbgetRsMemberRange> {
+        if cipher_range.offset < 0
+            || cipher_range.size <= 0
+            || self.run_cryptos.len() != self.runs.len()
+        {
+            return Vec::new();
+        }
+        let cipher_offsets: Vec<i64> = self
+            .run_cryptos
+            .iter()
+            .map(|rc| rc.cipher_data_offset)
+            .collect();
+        let cipher_sizes: Vec<i64> = self.run_cryptos.iter().map(|rc| rc.cipher_size).collect();
+        let has_crypto: Vec<u8> = self
+            .run_cryptos
+            .iter()
+            .map(|rc| u8::from(rc.crypto.is_some()))
+            .collect();
+        content_map_cipher_range(
+            &self.runs,
+            &cipher_offsets,
+            &cipher_sizes,
+            &has_crypto,
+            cipher_range,
+        )
+    }
+
+    pub fn read_cipher_range(
+        &self,
+        sources: &dyn ContentSourceSet,
+        cipher_range: NzbgetRsByteRange,
+        buffer: &mut [u8],
+    ) -> bool {
+        if cipher_range.size == 0 {
+            return true;
+        }
+        if (buffer.len() as i64) < cipher_range.size {
+            return false;
+        }
+        let pieces = self.map_cipher_range(cipher_range);
+        if pieces.is_empty() {
+            return false;
+        }
+        let mut filled = 0usize;
+        for piece in pieces {
+            let Some(source) = sources.get_source(piece.member_index) else {
+                return false;
+            };
+            let len = piece.size as usize;
+            if !source.read(piece.offset, &mut buffer[filled..filled + len]) {
+                return false;
+            }
+            filled += len;
+        }
+        true
+    }
+
+    pub fn read_inner_decrypted(
+        &self,
+        sources: &dyn ContentSourceSet,
+        inner_range: NzbgetRsByteRange,
+        buffer: &mut [u8],
+    ) -> bool {
+        let block_size = RarCryptoContext::CRYPTO_BLOCK_SIZE as i64;
+        let (ok, empty, cipher_from, cipher_to) = content_map_calc_decrypt_cipher_bounds(
+            inner_range.offset,
+            inner_range.size,
+            self.inner_size,
+            block_size,
+            self.cipher_stream_size(),
+        );
+        if !ok {
+            return false;
+        }
+        if empty {
+            return true;
+        }
+        if (buffer.len() as i64) < inner_range.size {
+            return false;
+        }
+        let Some(rc) = self.run_crypto(0) else {
+            return false;
+        };
+        let Some(crypto) = &rc.crypto else {
+            return false;
+        };
+        let mut prev = [0u8; RarCryptoContext::CRYPTO_BLOCK_SIZE];
+        if cipher_from > 0
+            && !self.read_cipher_range(
+                sources,
+                NzbgetRsByteRange {
+                    offset: cipher_from - block_size,
+                    size: block_size,
+                },
+                &mut prev,
+            )
+        {
+            return false;
+        }
+        let total_cipher = (cipher_to - cipher_from) as usize;
+        let mut cipher = vec![0u8; total_cipher];
+        let mut plain = vec![0u8; total_cipher];
+        if !self.read_cipher_range(
+            sources,
+            NzbgetRsByteRange {
+                offset: cipher_from,
+                size: cipher_to - cipher_from,
+            },
+            &mut cipher,
+        ) || !crypto.decrypt_range(
+            if cipher_from > 0 { Some(&prev) } else { None },
+            &cipher,
+            &mut plain,
+            (cipher_to - cipher_from) / block_size,
+        ) {
+            return false;
+        }
+        let rel = (inner_range.offset - cipher_from) as usize;
+        let len = inner_range.size as usize;
+        buffer[..len].copy_from_slice(&plain[rel..rel + len]);
+        true
+    }
+
+    pub fn map_to_inner(
+        &self,
+        member_index: i32,
+        member_range: NzbgetRsByteRange,
+    ) -> Vec<NzbgetRsByteRange> {
+        content_map_to_inner(&self.runs, member_index, member_range)
+    }
+
+    pub fn map_from_inner(&self, inner_range: NzbgetRsByteRange) -> Vec<NzbgetRsMemberRange> {
+        content_map_from_inner(&self.runs, inner_range)
+    }
+
+    pub fn exclude_member(&mut self, member_index: i32) {
+        let parallel = self.run_cryptos.len() == self.runs.len();
+        let mut kept_runs = Vec::new();
+        let mut kept_cryptos = Vec::new();
+        for i in 0..self.runs.len() {
+            if self.runs[i].member_index == member_index {
+                continue;
+            }
+            kept_runs.push(self.runs[i]);
+            if parallel {
+                kept_cryptos.push(self.run_cryptos[i].clone());
+            }
+        }
+        self.runs = kept_runs;
+        if parallel {
+            self.run_cryptos = kept_cryptos;
+        }
+    }
+}
+
+/// One target-side set the repair stage can work on (`RepairSetData` in `ContentMap.h`).
+pub struct RepairSetData {
+    pub set: MemberSet,
+    pub map: Option<ContentMap>,
+    pub inner_holes: Vec<NzbgetRsByteRange>,
+    pub original_inner_holes: Vec<NzbgetRsByteRange>,
+    pub skip_reason: String,
+}
+
+/// Pure-Rust `ContentMapper` mirroring `daemon/postprocess/ContentMap.h`.
+pub struct ContentMapper;
+
+impl ContentMapper {
+    pub const SKIP_ENCRYPTED_DATA: &'static str = "encrypted archive data";
+    pub const SKIP_ENCRYPTED_HEADERS: &'static str = "encrypted archive headers";
+
+    pub fn is_compressible_archive(set: &MemberSet) -> bool {
+        content_mapper_is_compressible_archive(set.format as i32)
+    }
+
+    pub fn group_sets(members: &[SetMember]) -> Vec<MemberSet> {
+        let names: Vec<&[u8]> = members.iter().map(|m| m.name.as_slice()).collect();
+        content_mapper_group_sets(&names)
+            .into_iter()
+            .filter_map(|(fmt, idxs)| {
+                Some(MemberSet {
+                    format: MemberFormat::from_i32(fmt)?,
+                    members: idxs,
+                })
+            })
+            .collect()
+    }
+
+    pub fn build_map(
+        members: &[SetMember],
+        set: &MemberSet,
+        sources: &dyn ContentSourceSet,
+        password: Option<&str>,
+    ) -> Result<ContentMap, String> {
+        Self::build_map_with_tls(members, set, sources, password.map(str::as_bytes), true)
+    }
+
+    pub fn build_map_with_tls(
+        members: &[SetMember],
+        set: &MemberSet,
+        sources: &dyn ContentSourceSet,
+        password: Option<&[u8]>,
+        tls_enabled: bool,
+    ) -> Result<ContentMap, String> {
+        match set.format {
+            MemberFormat::Bare => Self::build_bare_map(members, set, sources),
+            MemberFormat::Split => Self::build_split_map(members, set, sources),
+            MemberFormat::Rar => {
+                Self::build_rar_map(members, set, sources, password, tls_enabled)
+            }
+            MemberFormat::Zip => Self::build_zip_map(set, sources),
+            MemberFormat::SevenZip => Self::build_seven_zip_map(set, sources),
+        }
+    }
+
+    fn build_bare_map(
+        members: &[SetMember],
+        set: &MemberSet,
+        sources: &dyn ContentSourceSet,
+    ) -> Result<ContentMap, String> {
+        let member_index = set.members[0];
+        let Some(source) = sources.get_source(member_index) else {
+            return Err("member unreadable".to_string());
+        };
+        let sz = source.size();
+        if sz <= 0 {
+            return Err("member unreadable".to_string());
+        }
+        let mut map = ContentMap::default();
+        map.set_inner_name_bytes(&members[member_index as usize].name);
+        map.set_inner_size(sz);
+        map.runs_mut().push(NzbgetRsContentRun {
+            inner_offset: 0,
+            member_index,
+            member_offset: 0,
+            size: sz,
+        });
+        Ok(map)
+    }
+
+    fn build_split_map(
+        members: &[SetMember],
+        set: &MemberSet,
+        sources: &dyn ContentSourceSet,
+    ) -> Result<ContentMap, String> {
+        let first_name = &members[set.members[0] as usize].name;
+        let inner_bytes = content_mapper_split_inner_name(first_name);
+        if inner_bytes.is_empty() {
+            return Err("inner file is not a media file".to_string());
+        }
+        let mut map = ContentMap::default();
+        map.set_inner_name_bytes(&inner_bytes);
+        let mut inner_offset = 0i64;
+        for &member_index in &set.members {
+            let Some(source) = sources.get_source(member_index) else {
+                return Err(format!(
+                    "member {} unreadable",
+                    String::from_utf8_lossy(&members[member_index as usize].name)
+                ));
+            };
+            let sz = source.size();
+            if sz <= 0 {
+                return Err(format!(
+                    "member {} unreadable",
+                    String::from_utf8_lossy(&members[member_index as usize].name)
+                ));
+            };
+            map.runs_mut().push(NzbgetRsContentRun {
+                inner_offset,
+                member_index,
+                member_offset: 0,
+                size: sz,
+            });
+            inner_offset += sz;
+        }
+        map.set_inner_size(inner_offset);
+        Ok(map)
+    }
+
+    fn build_rar_map(
+        members: &[SetMember],
+        set: &MemberSet,
+        sources: &dyn ContentSourceSet,
+        password: Option<&[u8]>,
+        tls_enabled: bool,
+    ) -> Result<ContentMap, String> {
+        let mut volumes: Vec<Option<(crate::rarreader::Volume, Vec<crate::rarreader::RarFile>)>> =
+            vec![None; set.members.len()];
+        let mut unknown_volume: i32 = -1;
+
+        for (i, &member_index) in set.members.iter().enumerate() {
+            if sources.aborted() {
+                return Err(String::new());
+            }
+            let source = sources.get_source(member_index);
+            if sources.aborted() {
+                return Err(String::new());
+            }
+            let mut vol = crate::rarreader::Volume {
+                has_password: password.is_some_and(|pw| !pw.is_empty()),
+                ..crate::rarreader::Volume::default()
+            };
+            let mut files = Vec::new();
+            let parsed = if let Some(src) = source {
+                let mut adapter = ContentSourceRarAdapter(src);
+                let ok = if tls_enabled {
+                    let mut cipher = NativeRarCipher::new(password.unwrap_or(&[]));
+                    crate::rarreader::read_from(&mut vol, &mut adapter, &mut cipher, &mut files)
+                } else {
+                    let mut cipher = crate::rarreader::DisabledCipher;
+                    crate::rarreader::read_from(&mut vol, &mut adapter, &mut cipher, &mut files)
+                };
+                if sources.aborted() {
+                    return Err(String::new());
+                }
+                let member_name = members
+                    .get(member_index as usize)
+                    .map_or(&[][..], |m| m.name.as_slice());
+                sources.on_rar_volume_parsed(member_name, &vol, &files);
+                if sources.aborted() {
+                    return Err(String::new());
+                }
+                ok
+            } else {
+                false
+            };
+            if parsed {
+                volumes[i] = Some((vol, files));
+                continue;
+            }
+            match content_mapper_classify_unreadable_rar_vol(
+                source.is_some(),
+                vol.encrypted,
+                unknown_volume,
+            ) {
+                1 => return Err(Self::SKIP_ENCRYPTED_HEADERS.to_string()),
+                2 => return Err("unreadable headers in more than one volume".to_string()),
+                _ => unknown_volume = i as i32,
+            }
+        }
+
+        let mut vol_readable = vec![0u8; set.members.len()];
+        let mut vol_versions = vec![0i32; set.members.len()];
+        let mut vol_member_indices = vec![0i32; set.members.len()];
+        let mut vol_has_source = vec![0u8; set.members.len()];
+        let mut vol_source_sizes = vec![0i64; set.members.len()];
+        let mut entries = Vec::new();
+        let mut entry_files: Vec<&crate::rarreader::RarFile> = Vec::new();
+
+        for (i, &member_index) in set.members.iter().enumerate() {
+            let source = sources.get_source(member_index);
+            vol_readable[i] = u8::from(volumes[i].is_some());
+            vol_versions[i] = volumes[i].as_ref().map_or(0, |(v, _)| v.version);
+            vol_member_indices[i] = member_index;
+            vol_has_source[i] = u8::from(source.is_some());
+            vol_source_sizes[i] = source.map_or(0, |s| s.size());
+            let Some((_, files)) = &volumes[i] else {
+                continue;
+            };
+            for rf in files {
+                let (has_crypt, crypt_version, crypt_kdf_count, crypt_salt, crypt_iv) =
+                    if let Some(c) = &rf.crypt {
+                        (true, c.version as i32, c.kdf_count as i32, c.salt, c.iv)
+                    } else {
+                        (false, 0, 0, [0u8; 16], [0u8; 16])
+                    };
+                entries.push(RarFileEntryInput {
+                    volume_index: i as i32,
+                    filename: &rf.filename,
+                    size: rf.size,
+                    packed_size: rf.packed_size,
+                    data_offset: rf.data_offset,
+                    stored: rf.stored,
+                    encrypted_data: rf.encrypted_data,
+                    has_salt: rf.has_salt,
+                    salt: rf.salt,
+                    has_crypt,
+                    crypt_version,
+                    crypt_kdf_count,
+                    crypt_salt,
+                    crypt_iv,
+                });
+                entry_files.push(rf);
+            }
+        }
+
+        let mut crypto_ctx: Option<std::sync::Arc<RarCryptoContext>> = None;
+        let pw_bytes = password.unwrap_or(&[]);
+        let out = content_mapper_build_rar_map(
+            unknown_volume,
+            password.is_some(),
+            &vol_readable,
+            &vol_versions,
+            &vol_member_indices,
+            &vol_has_source,
+            &vol_source_sizes,
+            &entries,
+            |entry_idx, version| {
+                if !tls_enabled {
+                    return false;
+                }
+                let Some(&rf) = entry_files.get(entry_idx) else {
+                    return false;
+                };
+                if version == 3 {
+                    crypto_ctx = RarCryptoContext::make_rar3(pw_bytes, &rf.salt)
+                        .map(std::sync::Arc::new);
+                } else if version == 5 {
+                    if let Some(crypt) = &rf.crypt {
+                        crypto_ctx = RarCryptoContext::make_rar5(pw_bytes, crypt)
+                            .map(std::sync::Arc::new);
+                    }
+                }
+                crypto_ctx.is_some()
+            },
+        )
+        .map_err(str::to_string)?;
+
+        let mut map = ContentMap::default();
+        map.set_inner_name_bytes(&out.inner_name);
+        map.set_inner_size(out.inner_size);
+        for (i, run) in out.runs.into_iter().enumerate() {
+            map.runs_mut().push(run);
+            if out.encrypted {
+                map.run_cryptos_mut().push(RunCrypto {
+                    crypto: crypto_ctx.clone(),
+                    cipher_data_offset: out.cipher_data_offsets[i],
+                    cipher_size: out.cipher_sizes[i],
+                });
+            }
+        }
+        Ok(map)
+    }
+
+    fn build_zip_map(
+        set: &MemberSet,
+        sources: &dyn ContentSourceSet,
+    ) -> Result<ContentMap, String> {
+        let mut member_sizes = Vec::with_capacity(set.members.len());
+        for &member_index in &set.members {
+            let Some(source) = sources.get_source(member_index) else {
+                return Err("member unreadable".to_string());
+            };
+            let sz = source.size();
+            if sz <= 0 {
+                return Err("member unreadable".to_string());
+            }
+            member_sizes.push(sz);
+        }
+        let (inner_name, inner_size, runs) = content_mapper_build_zip_map(
+            &set.members,
+            &member_sizes,
+            |member_index, offset, buf| {
+                sources
+                    .get_source(member_index)
+                    .is_some_and(|s| s.read(offset, buf))
+            },
+        )
+        .map_err(str::to_string)?;
+        let mut map = ContentMap::default();
+        map.set_inner_name_bytes(&inner_name);
+        map.set_inner_size(inner_size);
+        *map.runs_mut() = runs;
+        Ok(map)
+    }
+
+    fn build_seven_zip_map(
+        set: &MemberSet,
+        sources: &dyn ContentSourceSet,
+    ) -> Result<ContentMap, String> {
+        let mut member_sizes = Vec::with_capacity(set.members.len());
+        for &member_index in &set.members {
+            let Some(source) = sources.get_source(member_index) else {
+                return Err("member unreadable".to_string());
+            };
+            let sz = source.size();
+            if sz <= 0 {
+                return Err("member unreadable".to_string());
+            }
+            member_sizes.push(sz);
+        }
+        let (inner_name, inner_size, runs) = content_mapper_build_seven_zip_map(
+            &set.members,
+            &member_sizes,
+            |member_index, offset, buf| {
+                sources
+                    .get_source(member_index)
+                    .is_some_and(|s| s.read(offset, buf))
+            },
+        )
+        .map_err(str::to_string)?;
+        let mut map = ContentMap::default();
+        map.set_inner_name_bytes(&inner_name);
+        map.set_inner_size(inner_size);
+        *map.runs_mut() = runs;
+        Ok(map)
+    }
+
+    pub fn build_repair_sets(
+        members: &[SetMember],
+        member_holes: &[Vec<NzbgetRsByteRange>],
+        sources: &dyn ContentSourceSet,
+        password: Option<&str>,
+    ) -> Vec<RepairSetData> {
+        Self::build_repair_sets_with_tls(
+            members,
+            member_holes,
+            sources,
+            password.map(str::as_bytes),
+            true,
+        )
+    }
+
+    pub fn build_repair_sets_with_tls(
+        members: &[SetMember],
+        member_holes: &[Vec<NzbgetRsByteRange>],
+        sources: &dyn ContentSourceSet,
+        password: Option<&[u8]>,
+        tls_enabled: bool,
+    ) -> Vec<RepairSetData> {
+        let mut repair_sets = Vec::new();
+        for set in Self::group_sets(members) {
+            let any_holes = set
+                .members
+                .iter()
+                .any(|&idx| !member_holes[idx as usize].is_empty());
+            if !any_holes {
+                continue;
+            }
+            let mut data = RepairSetData {
+                set: set.clone(),
+                map: None,
+                inner_holes: Vec::new(),
+                original_inner_holes: Vec::new(),
+                skip_reason: String::new(),
+            };
+            match Self::build_map_with_tls(members, &set, sources, password, tls_enabled) {
+                Ok(map) => {
+                    if sources.aborted() {
+                        break;
+                    }
+                    let mut hole_members = Vec::new();
+                    let mut hole_ranges = Vec::new();
+                    for &member_index in &set.members {
+                        for &hole in &member_holes[member_index as usize] {
+                            hole_members.push(member_index);
+                            hole_ranges.push(hole);
+                        }
+                    }
+                    data.inner_holes = content_mapper_collect_inner_holes(
+                        map.runs(),
+                        &hole_members,
+                        &hole_ranges,
+                    );
+                    data.original_inner_holes = data.inner_holes.clone();
+                    if data.inner_holes.is_empty() {
+                        data.skip_reason =
+                            "holes lie outside the mappable inner stream".to_string();
+                    } else {
+                        data.map = Some(map);
+                    }
+                }
+                Err(reason) => {
+                    if sources.aborted() {
+                        break;
+                    }
+                    data.skip_reason = reason;
+                }
+            }
+            repair_sets.push(data);
+        }
+        repair_sets
+    }
+
+    pub fn coalesce_ranges(ranges: &[NzbgetRsByteRange]) -> Vec<NzbgetRsByteRange> {
+        content_mapper_coalesce_ranges(ranges)
     }
 }
 
@@ -4980,5 +5863,2749 @@ mod tests {
         big.kdf_count = 200;
         assert!(RarCryptoContext::make_rar5(b"pw", &big).is_none());
         assert!(RarCryptoContext::make_rar5(b"", &crypt5).is_none());
+    }
+
+    struct MemoryContentSource(Vec<u8>);
+
+    impl ContentSource for MemoryContentSource {
+        fn size(&self) -> i64 {
+            self.0.len() as i64
+        }
+        fn read(&self, offset: i64, buf: &mut [u8]) -> bool {
+            let sz = buf.len() as i64;
+            if offset < 0 || sz < 0 || offset + sz > self.0.len() as i64 {
+                return false;
+            }
+            let start = offset as usize;
+            buf.copy_from_slice(&self.0[start..start + buf.len()]);
+            true
+        }
+    }
+
+    #[derive(Default)]
+    struct MemorySourceSet {
+        sources: Vec<Option<MemoryContentSource>>,
+    }
+
+    impl MemorySourceSet {
+        fn push(&mut self, data: Vec<u8>) {
+            self.sources.push(Some(MemoryContentSource(data)));
+        }
+        fn push_null(&mut self) {
+            self.sources.push(None);
+        }
+    }
+
+    impl ContentSourceSet for MemorySourceSet {
+        fn get_source(&self, member_index: i32) -> Option<&dyn ContentSource> {
+            if member_index < 0 {
+                return None;
+            }
+            self.sources
+                .get(member_index as usize)?
+                .as_ref()
+                .map(|s| s as &dyn ContentSource)
+        }
+    }
+
+    fn cm_pattern(size: usize, seed: u8) -> Vec<u8> {
+        (0..size)
+            .map(|i| seed.wrapping_add((i as u8).wrapping_mul(7)))
+            .collect()
+    }
+
+    fn cm_put_le16(out: &mut Vec<u8>, value: u16) {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn cm_put_le32(out: &mut Vec<u8>, value: u32) {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn cm_put_vint(out: &mut Vec<u8>, mut value: u64) {
+        loop {
+            let seven = (value & 0x7f) as u8;
+            value >>= 7;
+            out.push(seven | if value != 0 { 0x80 } else { 0 });
+            if value == 0 {
+                break;
+            }
+        }
+    }
+
+    fn build_rar3_store_volume(
+        slice: &[u8],
+        full_size: i64,
+        split_before: bool,
+        split_after: bool,
+        inner_name: impl AsRef<[u8]>,
+        method: u8,
+    ) -> Vec<u8> {
+        let mut out = vec![0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00];
+        cm_put_le16(&mut out, 0);
+        out.push(0x73);
+        cm_put_le16(&mut out, 0x0011);
+        cm_put_le16(&mut out, 13);
+        out.extend_from_slice(&[0u8; 6]);
+
+        let name_bytes = inner_name.as_ref();
+        let name_len = name_bytes.len() as u16;
+        cm_put_le16(&mut out, 0);
+        out.push(0x74);
+        cm_put_le16(
+            &mut out,
+            0x8000
+                | if split_before { 0x0001 } else { 0 }
+                | if split_after { 0x0002 } else { 0 },
+        );
+        cm_put_le16(&mut out, 32 + name_len);
+        cm_put_le32(&mut out, slice.len() as u32);
+        cm_put_le32(&mut out, full_size as u32);
+        out.push(0);
+        cm_put_le32(&mut out, 0);
+        cm_put_le32(&mut out, 0);
+        out.push(29);
+        out.push(method);
+        cm_put_le16(&mut out, name_len);
+        cm_put_le32(&mut out, 0x20);
+        out.extend_from_slice(name_bytes);
+        out.extend_from_slice(slice);
+
+        cm_put_le16(&mut out, 0);
+        out.push(0x7b);
+        cm_put_le16(&mut out, 0);
+        cm_put_le16(&mut out, 7);
+        out
+    }
+
+    fn build_rar5_store_volume(
+        slice: &[u8],
+        full_size: i64,
+        split_before: bool,
+        split_after: bool,
+        inner_name: &str,
+        method: u64,
+    ) -> Vec<u8> {
+        let mut out = vec![0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00];
+        let mut main_header = Vec::new();
+        cm_put_vint(&mut main_header, 1);
+        cm_put_vint(&mut main_header, 0);
+        cm_put_vint(&mut main_header, 0x01);
+        cm_put_le32(&mut out, 0);
+        cm_put_vint(&mut out, main_header.len() as u64);
+        out.extend_from_slice(&main_header);
+
+        let mut file_header = Vec::new();
+        cm_put_vint(&mut file_header, 2);
+        cm_put_vint(
+            &mut file_header,
+            0x02 | if split_before { 0x08 } else { 0 } | if split_after { 0x10 } else { 0 },
+        );
+        cm_put_vint(&mut file_header, slice.len() as u64);
+        cm_put_vint(&mut file_header, 0);
+        cm_put_vint(&mut file_header, full_size as u64);
+        cm_put_vint(&mut file_header, 0);
+        cm_put_vint(&mut file_header, method << 7);
+        cm_put_vint(&mut file_header, 0);
+        cm_put_vint(&mut file_header, inner_name.len() as u64);
+        file_header.extend_from_slice(inner_name.as_bytes());
+        cm_put_le32(&mut out, 0);
+        cm_put_vint(&mut out, file_header.len() as u64);
+        out.extend_from_slice(&file_header);
+        out.extend_from_slice(slice);
+
+        let mut end_header = Vec::new();
+        cm_put_vint(&mut end_header, 5);
+        cm_put_vint(&mut end_header, 0);
+        cm_put_vint(&mut end_header, 0);
+        cm_put_le32(&mut out, 0);
+        cm_put_vint(&mut out, end_header.len() as u64);
+        out.extend_from_slice(&end_header);
+        out
+    }
+
+    fn build_rar3_encrypted_data_volume(slice: &[u8], full_size: i64, inner_name: &str) -> Vec<u8> {
+        let mut out = vec![0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00];
+        cm_put_le16(&mut out, 0);
+        out.push(0x73);
+        cm_put_le16(&mut out, 0x0011);
+        cm_put_le16(&mut out, 13);
+        out.extend_from_slice(&[0u8; 6]);
+
+        let name_bytes = inner_name.as_bytes();
+        let name_len = name_bytes.len() as u16;
+        cm_put_le16(&mut out, 0);
+        out.push(0x74);
+        cm_put_le16(&mut out, 0x8000 | 0x0004);
+        cm_put_le16(&mut out, 32 + name_len);
+        cm_put_le32(&mut out, slice.len() as u32);
+        cm_put_le32(&mut out, full_size as u32);
+        out.push(0);
+        cm_put_le32(&mut out, 0);
+        cm_put_le32(&mut out, 0);
+        out.push(29);
+        out.push(0x30);
+        cm_put_le16(&mut out, name_len);
+        cm_put_le32(&mut out, 0x20);
+        out.extend_from_slice(name_bytes);
+        out.extend_from_slice(slice);
+
+        cm_put_le16(&mut out, 0);
+        out.push(0x7b);
+        cm_put_le16(&mut out, 0);
+        cm_put_le16(&mut out, 7);
+        out
+    }
+
+    fn build_rar3_encrypted_header_volume() -> Vec<u8> {
+        let mut out = vec![0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00];
+        cm_put_le16(&mut out, 0);
+        out.push(0x73);
+        cm_put_le16(&mut out, 0x0091);
+        cm_put_le16(&mut out, 13);
+        out.extend_from_slice(&[0u8; 6]);
+        out
+    }
+
+    fn build_rar3_enc_store_volume(
+        cipher: &[u8],
+        full_size: i64,
+        split_before: bool,
+        split_after: bool,
+        salt: &[u8; 8],
+        inner_name: &str,
+    ) -> Vec<u8> {
+        let mut out = vec![0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00];
+        cm_put_le16(&mut out, 0);
+        out.push(0x73);
+        cm_put_le16(&mut out, 0x0011);
+        cm_put_le16(&mut out, 13);
+        out.extend_from_slice(&[0u8; 6]);
+
+        let name_bytes = inner_name.as_bytes();
+        let name_len = name_bytes.len() as u16;
+        cm_put_le16(&mut out, 0);
+        out.push(0x74);
+        cm_put_le16(
+            &mut out,
+            0x8000
+                | 0x0400
+                | 0x0004
+                | if split_before { 0x0001 } else { 0 }
+                | if split_after { 0x0002 } else { 0 },
+        );
+        cm_put_le16(&mut out, 32 + name_len + 8);
+        cm_put_le32(&mut out, cipher.len() as u32);
+        cm_put_le32(&mut out, full_size as u32);
+        out.push(0);
+        cm_put_le32(&mut out, 0);
+        cm_put_le32(&mut out, 0);
+        out.push(29);
+        out.push(0x30);
+        cm_put_le16(&mut out, name_len);
+        cm_put_le32(&mut out, 0x20);
+        out.extend_from_slice(name_bytes);
+        out.extend_from_slice(salt);
+        out.extend_from_slice(cipher);
+
+        cm_put_le16(&mut out, 0);
+        out.push(0x7b);
+        cm_put_le16(&mut out, 0);
+        cm_put_le16(&mut out, 7);
+        out
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_rar5_enc_store_volume(
+        cipher: &[u8],
+        full_size: i64,
+        split_before: bool,
+        split_after: bool,
+        kdf_count: u8,
+        salt: &[u8; 16],
+        iv: &[u8; 16],
+        check: Option<&[u8; 12]>,
+        inner_name: &str,
+    ) -> Vec<u8> {
+        let mut out = vec![0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00];
+        let mut main_header = Vec::new();
+        cm_put_vint(&mut main_header, 1);
+        cm_put_vint(&mut main_header, 0);
+        cm_put_vint(&mut main_header, 0x01);
+        cm_put_le32(&mut out, 0);
+        cm_put_vint(&mut out, main_header.len() as u64);
+        out.extend_from_slice(&main_header);
+
+        let mut content = Vec::new();
+        cm_put_vint(&mut content, 0);
+        cm_put_vint(&mut content, if check.is_some() { 0x01 } else { 0 });
+        content.push(kdf_count);
+        content.extend_from_slice(salt);
+        content.extend_from_slice(iv);
+        if let Some(chk) = check {
+            content.extend_from_slice(chk);
+        }
+        let mut record = Vec::new();
+        cm_put_vint(&mut record, 0x01);
+        record.extend_from_slice(&content);
+        let mut extra = Vec::new();
+        cm_put_vint(&mut extra, record.len() as u64);
+        extra.extend_from_slice(&record);
+
+        let mut file_header = Vec::new();
+        cm_put_vint(&mut file_header, 2);
+        cm_put_vint(
+            &mut file_header,
+            0x01 | 0x02 | if split_before { 0x08 } else { 0 } | if split_after { 0x10 } else { 0 },
+        );
+        cm_put_vint(&mut file_header, extra.len() as u64);
+        cm_put_vint(&mut file_header, cipher.len() as u64);
+        cm_put_vint(&mut file_header, 0);
+        cm_put_vint(&mut file_header, full_size as u64);
+        cm_put_vint(&mut file_header, 0);
+        cm_put_vint(&mut file_header, 0);
+        cm_put_vint(&mut file_header, 0);
+        cm_put_vint(&mut file_header, inner_name.len() as u64);
+        file_header.extend_from_slice(inner_name.as_bytes());
+        file_header.extend_from_slice(&extra);
+        cm_put_le32(&mut out, 0);
+        cm_put_vint(&mut out, file_header.len() as u64);
+        out.extend_from_slice(&file_header);
+        out.extend_from_slice(cipher);
+
+        let mut end_header = Vec::new();
+        cm_put_vint(&mut end_header, 5);
+        cm_put_vint(&mut end_header, 0);
+        cm_put_vint(&mut end_header, 0);
+        cm_put_le32(&mut out, 0);
+        cm_put_vint(&mut out, end_header.len() as u64);
+        out.extend_from_slice(&end_header);
+        out
+    }
+
+    fn build_stored_zip(files: &[(impl AsRef<[u8]>, &[u8])], method: u16, flags: u16) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut local_offsets = Vec::new();
+        for (name, data) in files {
+            let name_bytes = name.as_ref();
+            local_offsets.push(out.len() as u32);
+            cm_put_le32(&mut out, 0x04034b50);
+            cm_put_le16(&mut out, 20);
+            cm_put_le16(&mut out, flags);
+            cm_put_le16(&mut out, method);
+            cm_put_le16(&mut out, 0);
+            cm_put_le16(&mut out, 0);
+            cm_put_le32(&mut out, 0);
+            cm_put_le32(&mut out, data.len() as u32);
+            cm_put_le32(&mut out, data.len() as u32);
+            cm_put_le16(&mut out, name_bytes.len() as u16);
+            cm_put_le16(&mut out, 0);
+            out.extend_from_slice(name_bytes);
+            out.extend_from_slice(data);
+        }
+        let cd_start = out.len() as u32;
+        for (i, (name, data)) in files.iter().enumerate() {
+            let name_bytes = name.as_ref();
+            cm_put_le32(&mut out, 0x02014b50);
+            cm_put_le16(&mut out, 20);
+            cm_put_le16(&mut out, 20);
+            cm_put_le16(&mut out, flags);
+            cm_put_le16(&mut out, method);
+            cm_put_le16(&mut out, 0);
+            cm_put_le16(&mut out, 0);
+            cm_put_le32(&mut out, 0);
+            cm_put_le32(&mut out, data.len() as u32);
+            cm_put_le32(&mut out, data.len() as u32);
+            cm_put_le16(&mut out, name_bytes.len() as u16);
+            cm_put_le16(&mut out, 0);
+            cm_put_le16(&mut out, 0);
+            cm_put_le16(&mut out, 0);
+            cm_put_le16(&mut out, 0);
+            cm_put_le32(&mut out, 0);
+            cm_put_le32(&mut out, local_offsets[i]);
+            out.extend_from_slice(name_bytes);
+        }
+        let cd_size = (out.len() as u32) - cd_start;
+        cm_put_le32(&mut out, 0x06054b50);
+        cm_put_le16(&mut out, 0);
+        cm_put_le16(&mut out, 0);
+        cm_put_le16(&mut out, files.len() as u16);
+        cm_put_le16(&mut out, files.len() as u16);
+        cm_put_le32(&mut out, cd_size);
+        cm_put_le32(&mut out, cd_start);
+        cm_put_le16(&mut out, 0);
+        out
+    }
+
+    fn cm_put_7z_number(out: &mut Vec<u8>, value: u64) {
+        let mut first_byte: u8 = 0;
+        let mut mask: u8 = 0x80;
+        let mut extra_bytes = 0usize;
+        while extra_bytes < 8 && value >= (1u64 << (7 * (extra_bytes + 1))) {
+            first_byte |= mask;
+            mask >>= 1;
+            extra_bytes += 1;
+        }
+        if extra_bytes < 8 {
+            first_byte |= (value >> (8 * extra_bytes)) as u8;
+        }
+        out.push(first_byte);
+        for i in 0..extra_bytes {
+            out.push(((value >> (8 * i)) & 0xff) as u8);
+        }
+    }
+
+    fn build_7z_copy(files: &[(&str, &[u8])], coder_id: u8) -> Vec<u8> {
+        let mut header = vec![0x01, 0x04, 0x06];
+        cm_put_7z_number(&mut header, 0);
+        cm_put_7z_number(&mut header, files.len() as u64);
+        header.push(0x09);
+        for &(_, data) in files {
+            cm_put_7z_number(&mut header, data.len() as u64);
+        }
+        header.push(0x00);
+        header.push(0x07);
+        header.push(0x0b);
+        cm_put_7z_number(&mut header, files.len() as u64);
+        header.push(0x00);
+        for _ in 0..files.len() {
+            cm_put_7z_number(&mut header, 1);
+            header.push(0x01);
+            header.push(coder_id);
+        }
+        header.push(0x0c);
+        for &(_, data) in files {
+            cm_put_7z_number(&mut header, data.len() as u64);
+        }
+        header.push(0x00);
+        header.push(0x00);
+        header.push(0x05);
+        cm_put_7z_number(&mut header, files.len() as u64);
+        let mut names = vec![0x00];
+        for &(name, _) in files {
+            for &ch in name.as_bytes() {
+                names.push(ch);
+                names.push(0x00);
+            }
+            names.push(0x00);
+            names.push(0x00);
+        }
+        header.push(0x11);
+        cm_put_7z_number(&mut header, names.len() as u64);
+        header.extend_from_slice(&names);
+        header.push(0x00);
+        header.push(0x00);
+
+        let mut data = Vec::new();
+        for &(_, bytes) in files {
+            data.extend_from_slice(bytes);
+        }
+        wrap_7z_header(&header, &data)
+    }
+
+    fn wrap_7z_header(header: &[u8], data: &[u8]) -> Vec<u8> {
+        let mut out = vec![b'7', b'z', 0xbc, 0xaf, 0x27, 0x1c, 0, 4];
+        cm_put_le32(&mut out, 0);
+        out.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        out.extend_from_slice(&(header.len() as u64).to_le_bytes());
+        cm_put_le32(&mut out, 0);
+        out.extend_from_slice(data);
+        out.extend_from_slice(header);
+        out
+    }
+
+    fn append_7z_single_file_info(header: &mut Vec<u8>, name: &str) {
+        header.push(0x05);
+        cm_put_7z_number(header, 1);
+        let mut names = vec![0x00];
+        for &ch in name.as_bytes() {
+            names.push(ch);
+            names.push(0x00);
+        }
+        names.push(0x00);
+        names.push(0x00);
+        header.push(0x11);
+        cm_put_7z_number(header, names.len() as u64);
+        header.extend_from_slice(&names);
+        header.push(0x00);
+    }
+
+    fn encrypt_padded(ctx: &RarCryptoContext, plain: &[u8]) -> Vec<u8> {
+        let padded = (plain.len() + 15) / 16 * 16;
+        let mut input = vec![0u8; padded];
+        input[..plain.len()].copy_from_slice(plain);
+        let mut out = vec![0u8; padded];
+        assert!(ctx.encrypt_range(None, &input, &mut out, (padded / 16) as i64));
+        out
+    }
+
+    /// Full pure-Rust port of `tests/postprocess/ContentMap.cpp` (all 27 `BOOST_AUTO_TEST_CASE` tests).
+    #[test]
+    fn content_map_full_suite_port_from_cpp() {
+        // 1. ContentMapModelTest
+        {
+            let mut map = ContentMap::default();
+            map.set_inner_name("movie.mkv");
+            map.set_inner_size(100);
+            map.runs_mut().push(NzbgetRsContentRun {
+                inner_offset: 0,
+                member_index: 0,
+                member_offset: 20,
+                size: 60,
+            });
+            map.runs_mut().push(NzbgetRsContentRun {
+                inner_offset: 60,
+                member_index: 1,
+                member_offset: 20,
+                size: 40,
+            });
+
+            let inner = map.map_to_inner(0, NzbgetRsByteRange { offset: 0, size: 30 });
+            assert_eq!(inner, vec![NzbgetRsByteRange { offset: 0, size: 10 }]);
+
+            let pieces = map.map_from_inner(NzbgetRsByteRange { offset: 50, size: 20 });
+            assert_eq!(
+                pieces,
+                vec![
+                    NzbgetRsMemberRange {
+                        member_index: 0,
+                        offset: 70,
+                        size: 10,
+                    },
+                    NzbgetRsMemberRange {
+                        member_index: 1,
+                        offset: 20,
+                        size: 10,
+                    },
+                ]
+            );
+
+            assert!(map
+                .map_to_inner(0, NzbgetRsByteRange { offset: 0, size: 20 })
+                .is_empty());
+
+            map.exclude_member(0);
+            assert!(map
+                .map_to_inner(0, NzbgetRsByteRange { offset: 20, size: 60 })
+                .is_empty());
+            let after = map.map_from_inner(NzbgetRsByteRange { offset: 0, size: 100 });
+            assert_eq!(after.len(), 1);
+            assert_eq!(after[0].member_index, 1);
+        }
+
+        // 2. CompositeSourceTest
+        {
+            let mut sources = MemorySourceSet::default();
+            sources.push(cm_pattern(10, 1));
+            sources.push(cm_pattern(20, 2));
+            sources.push(cm_pattern(5, 3));
+
+            let composite = CompositeSource::new(&sources, vec![0, 1, 2], vec![10, 20, 5]);
+            assert_eq!(composite.size(), 35);
+
+            let mut buffer = [0u8; 15];
+            assert!(composite.read(5, &mut buffer));
+            let member0 = cm_pattern(10, 1);
+            let member1 = cm_pattern(20, 2);
+            assert_eq!(&buffer[..5], &member0[5..10]);
+            assert_eq!(&buffer[5..15], &member1[..10]);
+
+            assert!(!composite.read(30, &mut buffer[..10]));
+
+            let pieces = composite.to_members(NzbgetRsByteRange { offset: 8, size: 24 });
+            assert_eq!(
+                pieces,
+                vec![
+                    NzbgetRsMemberRange {
+                        member_index: 0,
+                        offset: 8,
+                        size: 2,
+                    },
+                    NzbgetRsMemberRange {
+                        member_index: 1,
+                        offset: 0,
+                        size: 20,
+                    },
+                    NzbgetRsMemberRange {
+                        member_index: 2,
+                        offset: 0,
+                        size: 2,
+                    },
+                ]
+            );
+        }
+
+        // 3. ContentMapperGroupSetsTest
+        {
+            let members: Vec<SetMember> = [
+                "Rel.part02.rar",
+                "Rel.part01.rar",
+                "old.r00",
+                "old.rar",
+                "old.r01",
+                "span.z01",
+                "span.zip",
+                "span.z02",
+                "seven.7z.002",
+                "seven.7z.001",
+                "movie.mkv.001",
+                "movie.mkv.002",
+                "bare.mkv",
+                "Rel.vol00+01.par2",
+                "gap.part01.rar",
+                "gap.part03.rar",
+                "readme.txt",
+            ]
+            .into_iter()
+            .map(|n| SetMember::new(n, 100))
+            .collect();
+
+            let sets = ContentMapper::group_sets(&members);
+            assert_eq!(sets.len(), 6);
+            assert_eq!(
+                sets[0],
+                MemberSet {
+                    format: MemberFormat::Rar,
+                    members: vec![1, 0],
+                }
+            );
+            assert_eq!(
+                sets[1],
+                MemberSet {
+                    format: MemberFormat::Rar,
+                    members: vec![3, 2, 4],
+                }
+            );
+            assert_eq!(
+                sets[2],
+                MemberSet {
+                    format: MemberFormat::Zip,
+                    members: vec![5, 7, 6],
+                }
+            );
+            assert_eq!(
+                sets[3],
+                MemberSet {
+                    format: MemberFormat::SevenZip,
+                    members: vec![9, 8],
+                }
+            );
+            assert_eq!(
+                sets[4],
+                MemberSet {
+                    format: MemberFormat::Split,
+                    members: vec![10, 11],
+                }
+            );
+            assert_eq!(
+                sets[5],
+                MemberSet {
+                    format: MemberFormat::Bare,
+                    members: vec![12],
+                }
+            );
+        }
+
+        // 4. ContentMapperSplitAndBareMapTest
+        {
+            let members = vec![
+                SetMember::new("movie.mkv.001", 0),
+                SetMember::new("movie.mkv.002", 0),
+                SetMember::new("bare.mkv", 0),
+            ];
+            let mut sources = MemorySourceSet::default();
+            sources.push(cm_pattern(30, 1));
+            sources.push(cm_pattern(12, 2));
+            sources.push(cm_pattern(50, 3));
+
+            let split_set = MemberSet {
+                format: MemberFormat::Split,
+                members: vec![0, 1],
+            };
+            let split_map = ContentMapper::build_map(&members, &split_set, &sources, None).unwrap();
+            assert_eq!(split_map.inner_name(), "movie.mkv");
+            assert_eq!(split_map.inner_size(), 42);
+            assert_eq!(split_map.runs().len(), 2);
+            assert_eq!(split_map.runs()[1].inner_offset, 30);
+            assert_eq!(split_map.runs()[1].member_offset, 0);
+
+            let bare_set = MemberSet {
+                format: MemberFormat::Bare,
+                members: vec![2],
+            };
+            let bare_map = ContentMapper::build_map(&members, &bare_set, &sources, None).unwrap();
+            assert_eq!(bare_map.inner_name(), "bare.mkv");
+            assert_eq!(bare_map.inner_size(), 50);
+            assert_eq!(bare_map.runs().len(), 1);
+            assert_eq!(bare_map.runs()[0].member_offset, 0);
+
+            let mut holed = MemorySourceSet::default();
+            holed.push(cm_pattern(30, 1));
+            let bad_set = MemberSet {
+                format: MemberFormat::Split,
+                members: vec![0, 1],
+            };
+            assert!(ContentMapper::build_map(&members, &bad_set, &holed, None).is_err());
+
+            let rar_set = MemberSet {
+                format: MemberFormat::Rar,
+                members: vec![0],
+            };
+            assert!(ContentMapper::build_map(&members, &rar_set, &sources, None).is_err());
+        }
+
+        // 5. ContentMapperRarStoreMapTest
+        {
+            let inner = cm_pattern(100, 5);
+            let slice0 = &inner[..40];
+            let slice1 = &inner[40..80];
+            let slice2 = &inner[80..];
+
+            let members = vec![
+                SetMember::new("rel.part01.rar", 0),
+                SetMember::new("rel.part02.rar", 0),
+                SetMember::new("rel.part03.rar", 0),
+            ];
+            let mut sources = MemorySourceSet::default();
+            sources.push(build_rar3_store_volume(
+                slice0,
+                100,
+                false,
+                true,
+                "inner.mkv",
+                0x30,
+            ));
+            sources.push(build_rar3_store_volume(
+                slice1,
+                100,
+                true,
+                true,
+                "inner.mkv",
+                0x30,
+            ));
+            sources.push(build_rar3_store_volume(
+                slice2,
+                100,
+                true,
+                false,
+                "inner.mkv",
+                0x30,
+            ));
+
+            let set = MemberSet {
+                format: MemberFormat::Rar,
+                members: vec![0, 1, 2],
+            };
+            let map = ContentMapper::build_map(&members, &set, &sources, None).unwrap();
+            assert_eq!(map.inner_name(), "inner.mkv");
+            assert_eq!(map.inner_size(), 100);
+            assert_eq!(map.runs().len(), 3);
+
+            let mut reassembled = vec![0u8; 100];
+            for piece in map.map_from_inner(NzbgetRsByteRange { offset: 0, size: 100 }) {
+                let source = sources.get_source(piece.member_index).unwrap();
+                let inner_pos = map.map_to_inner(
+                    piece.member_index,
+                    NzbgetRsByteRange {
+                        offset: piece.offset,
+                        size: piece.size,
+                    },
+                );
+                assert_eq!(inner_pos.len(), 1);
+                let dst = inner_pos[0].offset as usize;
+                assert!(source.read(
+                    piece.offset,
+                    &mut reassembled[dst..dst + piece.size as usize]
+                ));
+            }
+            assert_eq!(reassembled, inner);
+
+            let mut sources5 = MemorySourceSet::default();
+            sources5.push(build_rar5_store_volume(
+                slice0,
+                100,
+                false,
+                true,
+                "inner.mkv",
+                0,
+            ));
+            sources5.push(build_rar5_store_volume(
+                slice1,
+                100,
+                true,
+                true,
+                "inner.mkv",
+                0,
+            ));
+            sources5.push(build_rar5_store_volume(
+                slice2,
+                100,
+                true,
+                false,
+                "inner.mkv",
+                0,
+            ));
+            let map5 = ContentMapper::build_map(&members, &set, &sources5, None).unwrap();
+            assert_eq!(map5.inner_size(), 100);
+            assert_eq!(map5.runs().len(), 3);
+
+            // non-UTF8 CP437 inner filename preserves exact raw bytes
+            let mut non_utf8_sources = MemorySourceSet::default();
+            non_utf8_sources.push(build_rar3_store_volume(
+                &inner,
+                100,
+                false,
+                false,
+                b"caf\x82.mkv",
+                0x30,
+            ));
+            let single_set = MemberSet {
+                format: MemberFormat::Rar,
+                members: vec![0],
+            };
+            let non_utf8_map =
+                ContentMapper::build_map(&members, &single_set, &non_utf8_sources, None).unwrap();
+            assert_eq!(non_utf8_map.inner_name_bytes(), b"caf\x82.mkv");
+        }
+
+        // 6. ContentMapperRarMapDegradationTest
+        {
+            let inner = cm_pattern(100, 6);
+            let slice0 = &inner[..40];
+            let slice1 = &inner[40..80];
+            let slice2 = &inner[80..];
+            let members = vec![
+                SetMember::new("rel.part01.rar", 0),
+                SetMember::new("rel.part02.rar", 0),
+                SetMember::new("rel.part03.rar", 0),
+            ];
+            let set = MemberSet {
+                format: MemberFormat::Rar,
+                members: vec![0, 1, 2],
+            };
+
+            // one unreadable volume
+            {
+                let mut sources = MemorySourceSet::default();
+                sources.push(build_rar3_store_volume(
+                    slice0,
+                    100,
+                    false,
+                    true,
+                    "inner.mkv",
+                    0x30,
+                ));
+                sources.push_null();
+                sources.push(build_rar3_store_volume(
+                    slice2,
+                    100,
+                    true,
+                    false,
+                    "inner.mkv",
+                    0x30,
+                ));
+                let map = ContentMapper::build_map(&members, &set, &sources, None).unwrap();
+                assert_eq!(map.runs().len(), 2);
+                assert!(map
+                    .map_from_inner(NzbgetRsByteRange { offset: 40, size: 40 })
+                    .is_empty());
+                assert_eq!(map.runs()[1].inner_offset, 80);
+            }
+
+            // two unreadable volumes
+            {
+                let mut sources = MemorySourceSet::default();
+                sources.push(build_rar3_store_volume(
+                    slice0,
+                    100,
+                    false,
+                    true,
+                    "inner.mkv",
+                    0x30,
+                ));
+                sources.push_null();
+                sources.push_null();
+                assert!(ContentMapper::build_map(&members, &set, &sources, None).is_err());
+            }
+
+            // compressed method
+            {
+                let mut sources = MemorySourceSet::default();
+                sources.push(build_rar3_store_volume(
+                    slice0,
+                    100,
+                    false,
+                    false,
+                    "inner.mkv",
+                    0x33,
+                ));
+                let single = MemberSet {
+                    format: MemberFormat::Rar,
+                    members: vec![0],
+                };
+                let err = ContentMapper::build_map(&members, &single, &sources, None).err().unwrap();
+                assert!(err.contains("store"));
+            }
+
+            // non-media inner file
+            {
+                let whole = cm_pattern(40, 7);
+                let mut sources = MemorySourceSet::default();
+                sources.push(build_rar3_store_volume(
+                    &whole,
+                    40,
+                    false,
+                    false,
+                    "inner.iso",
+                    0x30,
+                ));
+                let single = MemberSet {
+                    format: MemberFormat::Rar,
+                    members: vec![0],
+                };
+                let err = ContentMapper::build_map(&members, &single, &sources, None).err().unwrap();
+                assert_eq!(err, "inner file is not a media file");
+            }
+
+            // packed sizes that do not sum to inner size
+            {
+                let mut sources = MemorySourceSet::default();
+                sources.push(build_rar3_store_volume(
+                    slice0,
+                    100,
+                    false,
+                    true,
+                    "inner.mkv",
+                    0x30,
+                ));
+                sources.push(build_rar3_store_volume(
+                    slice1,
+                    100,
+                    true,
+                    true,
+                    "inner.mkv",
+                    0x30,
+                ));
+                sources.push(build_rar3_store_volume(
+                    &slice2[..slice2.len() - 5],
+                    100,
+                    true,
+                    false,
+                    "inner.mkv",
+                    0x30,
+                ));
+                let err = ContentMapper::build_map(&members, &set, &sources, None).err().unwrap();
+                assert!(err.contains("sum"));
+            }
+
+            // packed sizes exceed inner size
+            {
+                let mut sources = MemorySourceSet::default();
+                sources.push(build_rar3_store_volume(
+                    &cm_pattern(60, 10),
+                    100,
+                    false,
+                    true,
+                    "inner.mkv",
+                    0x30,
+                ));
+                sources.push_null();
+                sources.push(build_rar3_store_volume(
+                    &cm_pattern(60, 11),
+                    100,
+                    true,
+                    false,
+                    "inner.mkv",
+                    0x30,
+                ));
+                let err = ContentMapper::build_map(&members, &set, &sources, None).err().unwrap();
+                assert!(err.contains("exceed"));
+            }
+
+            // encrypted archive headers without password
+            {
+                let mut sources = MemorySourceSet::default();
+                sources.push(build_rar3_encrypted_header_volume());
+                let single = MemberSet {
+                    format: MemberFormat::Rar,
+                    members: vec![0],
+                };
+                let err = ContentMapper::build_map(&members, &single, &sources, None).err().unwrap();
+                assert_eq!(err, "encrypted archive headers");
+            }
+
+            // encrypted archive data without password
+            {
+                let mut sources = MemorySourceSet::default();
+                sources.push(build_rar3_encrypted_data_volume(
+                    &cm_pattern(100, 12),
+                    100,
+                    "inner.mkv",
+                ));
+                let single = MemberSet {
+                    format: MemberFormat::Rar,
+                    members: vec![0],
+                };
+                let err = ContentMapper::build_map(&members, &single, &sources, None).err().unwrap();
+                assert_eq!(err, "encrypted archive data");
+            }
+
+            // inconsistent inner file size
+            {
+                let mut sources = MemorySourceSet::default();
+                sources.push(build_rar3_store_volume(
+                    &cm_pattern(100, 13),
+                    100,
+                    false,
+                    false,
+                    "inner.mkv",
+                    0x30,
+                ));
+                sources.push(build_rar3_store_volume(
+                    &cm_pattern(30, 14),
+                    90,
+                    false,
+                    false,
+                    "inner.mkv",
+                    0x30,
+                ));
+                let pair = MemberSet {
+                    format: MemberFormat::Rar,
+                    members: vec![0, 1],
+                };
+                let err = ContentMapper::build_map(&members, &pair, &sources, None).err().unwrap();
+                assert_eq!(err, "inconsistent inner file size across volumes");
+            }
+        }
+
+        // 7. ContentMapperZipStoreMapTest
+        {
+            let inner = cm_pattern(90, 8);
+            let nfo = cm_pattern(10, 9);
+            let zip_bytes = build_stored_zip(
+                &[("release/info.nfo", &nfo), ("release/movie.mkv", &inner)],
+                0,
+                0,
+            );
+
+            // lone .zip
+            {
+                let members = vec![SetMember::new("rel.zip", 0)];
+                let mut sources = MemorySourceSet::default();
+                sources.push(zip_bytes.clone());
+                let set = MemberSet {
+                    format: MemberFormat::Zip,
+                    members: vec![0],
+                };
+                let map = ContentMapper::build_map(&members, &set, &sources, None).unwrap();
+                assert_eq!(map.inner_name(), "movie.mkv");
+                assert_eq!(map.inner_size(), 90);
+                assert_eq!(map.runs().len(), 1);
+                let mut data = vec![0u8; 90];
+                let run = &map.runs()[0];
+                assert!(sources.get_source(0).unwrap().read(run.member_offset, &mut data));
+                assert_eq!(data, inner);
+            }
+
+            // non-UTF8 CP437 entry in .zip preserves exact raw bytes
+            {
+                let members = vec![SetMember::new("rel.zip", 0)];
+                let mut sources = MemorySourceSet::default();
+                sources.push(build_stored_zip(
+                    &[(&b"release/caf\x82.mkv"[..], &inner)],
+                    0,
+                    0,
+                ));
+                let set = MemberSet {
+                    format: MemberFormat::Zip,
+                    members: vec![0],
+                };
+                let map = ContentMapper::build_map(&members, &set, &sources, None).unwrap();
+                assert_eq!(map.inner_name_bytes(), b"caf\x82.mkv");
+            }
+
+            // spanned zip
+            {
+                let members = vec![
+                    SetMember::new("rel.z01", 0),
+                    SetMember::new("rel.z02", 0),
+                    SetMember::new("rel.zip", 0),
+                ];
+                let mut sources = MemorySourceSet::default();
+                sources.push(zip_bytes[..40].to_vec());
+                sources.push(zip_bytes[40..95].to_vec());
+                sources.push(zip_bytes[95..].to_vec());
+                let set = MemberSet {
+                    format: MemberFormat::Zip,
+                    members: vec![0, 1, 2],
+                };
+                let map = ContentMapper::build_map(&members, &set, &sources, None).unwrap();
+                assert_eq!(map.inner_size(), 90);
+
+                let mut reassembled = vec![0u8; 90];
+                for piece in map.map_from_inner(NzbgetRsByteRange { offset: 0, size: 90 }) {
+                    let inner_pos = map.map_to_inner(
+                        piece.member_index,
+                        NzbgetRsByteRange {
+                            offset: piece.offset,
+                            size: piece.size,
+                        },
+                    );
+                    assert_eq!(inner_pos.len(), 1);
+                    let dst = inner_pos[0].offset as usize;
+                    assert!(sources.get_source(piece.member_index).unwrap().read(
+                        piece.offset,
+                        &mut reassembled[dst..dst + piece.size as usize]
+                    ));
+                }
+                assert_eq!(reassembled, inner);
+            }
+        }
+
+        // 8. ContentMapperZipDegradationTest
+        {
+            let inner = cm_pattern(50, 10);
+            let members = vec![SetMember::new("rel.zip", 0)];
+            let set = MemberSet {
+                format: MemberFormat::Zip,
+                members: vec![0],
+            };
+
+            // compressed
+            {
+                let mut sources = MemorySourceSet::default();
+                sources.push(build_stored_zip(&[("movie.mkv", &inner)], 8, 0));
+                let err = ContentMapper::build_map(&members, &set, &sources, None).err().unwrap();
+                assert!(err.contains("stored"));
+            }
+
+            // encrypted
+            {
+                let mut sources = MemorySourceSet::default();
+                sources.push(build_stored_zip(&[("movie.mkv", &inner)], 0, 1));
+                let err = ContentMapper::build_map(&members, &set, &sources, None).err().unwrap();
+                assert!(err.contains("encrypted"));
+            }
+
+            // zip64 per-entry extra
+            {
+                let zip_bytes = build_stored_zip(&[("movie.mkv", &inner)], 0, 0);
+                let eocd = zip_bytes.len() - 22;
+                let cd_start = u32::from_le_bytes(zip_bytes[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
+                let mut rebuilt = zip_bytes[..cd_start].to_vec();
+                let mut entry = zip_bytes[cd_start..eocd].to_vec();
+                entry[20..28].fill(0xff);
+                entry[42..46].fill(0xff);
+                entry[30] = 28;
+                entry[31] = 0;
+                let mut extra = Vec::new();
+                cm_put_le16(&mut extra, 0x0001);
+                cm_put_le16(&mut extra, 24);
+                for _ in 0..2 {
+                    extra.push(50);
+                    extra.extend_from_slice(&[0u8; 7]);
+                }
+                extra.extend_from_slice(&[0u8; 8]);
+                entry.extend_from_slice(&extra);
+                let new_cd_size = entry.len() as u16;
+                rebuilt.extend_from_slice(&entry);
+                let mut trailer = zip_bytes[eocd..].to_vec();
+                trailer[12] = (new_cd_size & 0xff) as u8;
+                trailer[13] = (new_cd_size >> 8) as u8;
+                rebuilt.extend_from_slice(&trailer);
+
+                let mut sources = MemorySourceSet::default();
+                sources.push(rebuilt);
+                let map = ContentMapper::build_map(&members, &set, &sources, None).unwrap();
+                assert_eq!(map.inner_size(), 50);
+            }
+        }
+
+        // 9. ContentMapperSevenZipCopyMapTest
+        {
+            let inner = cm_pattern(90, 11);
+            let nfo = cm_pattern(10, 12);
+            let archive = build_7z_copy(&[("info.nfo", &nfo), ("movie.mkv", &inner)], 0x00);
+
+            // lone .7z
+            {
+                let members = vec![SetMember::new("rel.7z", 0)];
+                let mut sources = MemorySourceSet::default();
+                sources.push(archive.clone());
+                let set = MemberSet {
+                    format: MemberFormat::SevenZip,
+                    members: vec![0],
+                };
+                let map = ContentMapper::build_map(&members, &set, &sources, None).unwrap();
+                assert_eq!(map.inner_name(), "movie.mkv");
+                assert_eq!(map.inner_size(), 90);
+                assert_eq!(map.runs().len(), 1);
+                assert_eq!(map.runs()[0].member_offset, 32 + 10);
+            }
+
+            // .7z.001/.7z.002 splits
+            {
+                let members = vec![
+                    SetMember::new("rel.7z.001", 0),
+                    SetMember::new("rel.7z.002", 0),
+                ];
+                let mut sources = MemorySourceSet::default();
+                sources.push(archive[..60].to_vec());
+                sources.push(archive[60..].to_vec());
+                let set = MemberSet {
+                    format: MemberFormat::SevenZip,
+                    members: vec![0, 1],
+                };
+                let map = ContentMapper::build_map(&members, &set, &sources, None).unwrap();
+                assert_eq!(map.inner_size(), 90);
+                let mut reassembled = vec![0u8; 90];
+                for piece in map.map_from_inner(NzbgetRsByteRange { offset: 0, size: 90 }) {
+                    let inner_pos = map.map_to_inner(
+                        piece.member_index,
+                        NzbgetRsByteRange {
+                            offset: piece.offset,
+                            size: piece.size,
+                        },
+                    );
+                    assert_eq!(inner_pos.len(), 1);
+                    let dst = inner_pos[0].offset as usize;
+                    assert!(sources.get_source(piece.member_index).unwrap().read(
+                        piece.offset,
+                        &mut reassembled[dst..dst + piece.size as usize]
+                    ));
+                }
+                assert_eq!(reassembled, inner);
+            }
+        }
+
+        // 10. ContentMapperSevenZipDegradationTest
+        {
+            let inner = cm_pattern(50, 13);
+            let members = vec![SetMember::new("rel.7z", 0)];
+            let set = MemberSet {
+                format: MemberFormat::SevenZip,
+                members: vec![0],
+            };
+
+            {
+                let mut sources = MemorySourceSet::default();
+                sources.push(build_7z_copy(&[("movie.mkv", &inner)], 0x21));
+                let err = ContentMapper::build_map(&members, &set, &sources, None).err().unwrap();
+                assert!(err.contains("opy"));
+            }
+            {
+                let mut sources = MemorySourceSet::default();
+                sources.push(cm_pattern(64, 14));
+                assert!(ContentMapper::build_map(&members, &set, &sources, None).is_err());
+            }
+            {
+                let mut sources = MemorySourceSet::default();
+                sources.push(build_7z_copy(&[("backup.iso", &inner)], 0x00));
+                let err = ContentMapper::build_map(&members, &set, &sources, None).err().unwrap();
+                assert_eq!(err, "inner file is not a media file");
+            }
+        }
+
+        // 11. ContentMapperSevenZipEncodedHeaderTest
+        {
+            let inner = cm_pattern(30, 15);
+            let plain = build_7z_copy(&[("movie.mkv", &inner)], 0x00);
+            let real_header = &plain[32 + 30..];
+
+            let build_encoded = |header_coder_id: u8| -> Vec<u8> {
+                let mut top = vec![0x17, 0x06];
+                cm_put_7z_number(&mut top, 30);
+                cm_put_7z_number(&mut top, 1);
+                top.push(0x09);
+                cm_put_7z_number(&mut top, real_header.len() as u64);
+                top.push(0x00);
+                top.push(0x07);
+                top.push(0x0b);
+                cm_put_7z_number(&mut top, 1);
+                top.push(0x00);
+                cm_put_7z_number(&mut top, 1);
+                top.push(0x01);
+                top.push(header_coder_id);
+                top.push(0x0c);
+                cm_put_7z_number(&mut top, real_header.len() as u64);
+                top.push(0x00);
+                top.push(0x00);
+
+                let mut data = inner.clone();
+                data.extend_from_slice(real_header);
+                wrap_7z_header(&top, &data)
+            };
+
+            let members = vec![SetMember::new("rel.7z", 0)];
+            let set = MemberSet {
+                format: MemberFormat::SevenZip,
+                members: vec![0],
+            };
+
+            {
+                let mut sources = MemorySourceSet::default();
+                sources.push(build_encoded(0x00));
+                let map = ContentMapper::build_map(&members, &set, &sources, None).unwrap();
+                assert_eq!(map.inner_name(), "movie.mkv");
+                assert_eq!(map.inner_size(), 30);
+                assert_eq!(map.runs().len(), 1);
+                assert_eq!(map.runs()[0].member_offset, 32);
+            }
+            {
+                let mut sources = MemorySourceSet::default();
+                sources.push(build_encoded(0x21));
+                let err = ContentMapper::build_map(&members, &set, &sources, None).err().unwrap();
+                assert_eq!(err, "compressed 7z header");
+            }
+        }
+
+        // 12. ContentMapperSevenZipAdversarialTest
+        {
+            let members = vec![SetMember::new("rel.7z", 0)];
+            let set = MemberSet {
+                format: MemberFormat::SevenZip,
+                members: vec![0],
+            };
+            let rejects = |header: &[u8], data: &[u8]| -> String {
+                let mut sources = MemorySourceSet::default();
+                sources.push(wrap_7z_header(header, data));
+                ContentMapper::build_map(&members, &set, &sources, None)
+                    .err()
+                    .unwrap()
+            };
+
+            {
+                let mut header = vec![0x01, 0x02, 0x03];
+                cm_put_7z_number(&mut header, 1u64 << 63);
+                rejects(&header, &[]);
+            }
+            {
+                let mut header = vec![0x01, 0x04, 0x06];
+                cm_put_7z_number(&mut header, 0);
+                cm_put_7z_number(&mut header, 1u64 << 60);
+                header.push(0x0a);
+                header.push(0x00);
+                rejects(&header, &[]);
+            }
+            {
+                let mut header = vec![0x17, 0x06];
+                cm_put_7z_number(&mut header, 0);
+                cm_put_7z_number(&mut header, 1);
+                header.push(0x09);
+                cm_put_7z_number(&mut header, 1u64 << 60);
+                header.push(0x00);
+                header.push(0x07);
+                header.push(0x0b);
+                cm_put_7z_number(&mut header, 1);
+                header.push(0x00);
+                cm_put_7z_number(&mut header, 1);
+                header.push(0x01);
+                header.push(0x00);
+                header.push(0x0c);
+                cm_put_7z_number(&mut header, 1u64 << 60);
+                header.push(0x00);
+                header.push(0x00);
+                rejects(&header, &[]);
+            }
+            {
+                let mut header = vec![0x01, 0x04, 0x06];
+                cm_put_7z_number(&mut header, (1u64 << 63) - 16);
+                cm_put_7z_number(&mut header, 1);
+                header.push(0x09);
+                cm_put_7z_number(&mut header, 10);
+                header.push(0x00);
+                header.push(0x07);
+                header.push(0x0b);
+                cm_put_7z_number(&mut header, 1);
+                header.push(0x00);
+                cm_put_7z_number(&mut header, 1);
+                header.push(0x01);
+                header.push(0x00);
+                header.push(0x0c);
+                cm_put_7z_number(&mut header, 10);
+                header.push(0x00);
+                header.push(0x00);
+                append_7z_single_file_info(&mut header, "movie.mkv");
+                header.push(0x00);
+                let err = rejects(&header, &cm_pattern(10, 17));
+                assert_eq!(err, "implausible data run geometry");
+            }
+            {
+                let mut header = vec![0x01, 0x04, 0x06];
+                cm_put_7z_number(&mut header, 0);
+                cm_put_7z_number(&mut header, 1);
+                header.push(0x09);
+                cm_put_7z_number(&mut header, 10);
+                header.push(0x00);
+                header.push(0x07);
+                header.push(0x0b);
+                cm_put_7z_number(&mut header, 1);
+                header.push(0x00);
+                cm_put_7z_number(&mut header, 0);
+                header.push(0x0c);
+                cm_put_7z_number(&mut header, 10);
+                header.push(0x00);
+                header.push(0x00);
+                append_7z_single_file_info(&mut header, "movie.mkv");
+                header.push(0x00);
+                rejects(&header, &cm_pattern(10, 19));
+            }
+            {
+                let mut header = vec![0x01, 0x04, 0x06];
+                cm_put_7z_number(&mut header, 0);
+                cm_put_7z_number(&mut header, 1u64 << 60);
+                header.push(0x09);
+                rejects(&header, &[]);
+            }
+            {
+                let mut header = vec![0x01, 0x04, 0x06];
+                cm_put_7z_number(&mut header, 0);
+                cm_put_7z_number(&mut header, 1);
+                header.push(0x09);
+                cm_put_7z_number(&mut header, 10);
+                header.push(0x00);
+                header.push(0x07);
+                header.push(0x0b);
+                cm_put_7z_number(&mut header, 1);
+                header.push(0x00);
+                cm_put_7z_number(&mut header, 1);
+                header.push(0x01);
+                header.push(0x00);
+                header.push(0x0c);
+                cm_put_7z_number(&mut header, 10);
+                header.push(0x00);
+                header.push(0x08);
+                header.push(0x0d);
+                cm_put_7z_number(&mut header, 1u64 << 40);
+                header.push(0x09);
+                rejects(&header, &cm_pattern(10, 16));
+            }
+            {
+                let folder_count = 4096u64;
+                let mut header = vec![0x01, 0x04, 0x06];
+                cm_put_7z_number(&mut header, 0);
+                cm_put_7z_number(&mut header, folder_count);
+                header.push(0x09);
+                for _ in 0..folder_count {
+                    cm_put_7z_number(&mut header, 1);
+                }
+                header.push(0x00);
+                header.push(0x07);
+                header.push(0x0b);
+                cm_put_7z_number(&mut header, folder_count);
+                header.push(0x00);
+                for _ in 0..folder_count {
+                    cm_put_7z_number(&mut header, 1);
+                    header.push(0x01);
+                    header.push(0x00);
+                }
+                header.push(0x0c);
+                rejects(&header, &[]);
+            }
+            {
+                let mut archive = build_7z_copy(&[("movie.mkv", &cm_pattern(20, 18))], 0x00);
+                archive.truncate(archive.len() - 5);
+                let mut sources = MemorySourceSet::default();
+                sources.push(archive);
+                assert!(ContentMapper::build_map(&members, &set, &sources, None).is_err());
+            }
+        }
+
+        // 13. ContentMapperSevenZipSubstreamsTest
+        {
+            let nfo = cm_pattern(40, 24);
+            let inner = cm_pattern(60, 25);
+            let mut data = nfo.clone();
+            data.extend_from_slice(&inner);
+
+            let mut header = vec![0x01, 0x04, 0x06];
+            cm_put_7z_number(&mut header, 0);
+            cm_put_7z_number(&mut header, 1);
+            header.push(0x09);
+            cm_put_7z_number(&mut header, 100);
+            header.push(0x00);
+            header.push(0x07);
+            header.push(0x0b);
+            cm_put_7z_number(&mut header, 1);
+            header.push(0x00);
+            cm_put_7z_number(&mut header, 1);
+            header.push(0x01);
+            header.push(0x00);
+            header.push(0x0c);
+            cm_put_7z_number(&mut header, 100);
+            header.push(0x00);
+            header.push(0x08);
+            header.push(0x0d);
+            cm_put_7z_number(&mut header, 2);
+            header.push(0x09);
+            cm_put_7z_number(&mut header, 40);
+            header.push(0x00);
+            header.push(0x00);
+            header.push(0x05);
+            cm_put_7z_number(&mut header, 3);
+            header.push(0x0e);
+            cm_put_7z_number(&mut header, 1);
+            header.push(0x80);
+            let mut names = vec![0x00];
+            for name in ["sample", "info.nfo", "movie.mkv"] {
+                for &ch in name.as_bytes() {
+                    names.push(ch);
+                    names.push(0x00);
+                }
+                names.push(0x00);
+                names.push(0x00);
+            }
+            header.push(0x11);
+            cm_put_7z_number(&mut header, names.len() as u64);
+            header.extend_from_slice(&names);
+            header.push(0x00);
+            header.push(0x00);
+
+            let members = vec![SetMember::new("rel.7z", 0)];
+            let mut sources = MemorySourceSet::default();
+            sources.push(wrap_7z_header(&header, &data));
+            let set = MemberSet {
+                format: MemberFormat::SevenZip,
+                members: vec![0],
+            };
+            let map = ContentMapper::build_map(&members, &set, &sources, None).unwrap();
+            assert_eq!(map.inner_name(), "movie.mkv");
+            assert_eq!(map.inner_size(), 60);
+            assert_eq!(map.runs().len(), 1);
+            assert_eq!(map.runs()[0].member_offset, 32 + 40);
+            let mut reassembled = vec![0u8; 60];
+            assert!(sources
+                .get_source(0)
+                .unwrap()
+                .read(map.runs()[0].member_offset, &mut reassembled));
+            assert_eq!(reassembled, inner);
+        }
+
+        // 14. ContentMapperSevenZipDigestSkipTest
+        {
+            let nfo = cm_pattern(20, 26);
+            let notes = cm_pattern(30, 27);
+            let inner = cm_pattern(60, 28);
+            let mut data = nfo.clone();
+            data.extend_from_slice(&notes);
+            data.extend_from_slice(&inner);
+
+            let mut header = vec![0x01, 0x04, 0x06];
+            cm_put_7z_number(&mut header, 0);
+            cm_put_7z_number(&mut header, 2);
+            header.push(0x09);
+            cm_put_7z_number(&mut header, 20);
+            cm_put_7z_number(&mut header, 90);
+            header.push(0x0a);
+            header.push(0x00);
+            header.push(0x40);
+            cm_put_le32(&mut header, 0xdead_beef);
+            header.push(0x00);
+            header.push(0x07);
+            header.push(0x0b);
+            cm_put_7z_number(&mut header, 2);
+            header.push(0x00);
+            for _ in 0..2 {
+                cm_put_7z_number(&mut header, 1);
+                header.push(0x01);
+                header.push(0x00);
+            }
+            header.push(0x0c);
+            cm_put_7z_number(&mut header, 20);
+            cm_put_7z_number(&mut header, 90);
+            header.push(0x0a);
+            header.push(0x01);
+            cm_put_le32(&mut header, 0xdead_beef);
+            cm_put_le32(&mut header, 0xfeed_face);
+            header.push(0x00);
+            header.push(0x08);
+            header.push(0x0d);
+            cm_put_7z_number(&mut header, 1);
+            cm_put_7z_number(&mut header, 2);
+            header.push(0x09);
+            cm_put_7z_number(&mut header, 30);
+            header.push(0x0a);
+            header.push(0x01);
+            cm_put_le32(&mut header, 0xdead_beef);
+            cm_put_le32(&mut header, 0xfeed_face);
+            header.push(0x00);
+            header.push(0x00);
+            header.push(0x05);
+            cm_put_7z_number(&mut header, 3);
+            let mut names = vec![0x00];
+            for name in ["info.nfo", "notes.txt", "movie.mkv"] {
+                for &ch in name.as_bytes() {
+                    names.push(ch);
+                    names.push(0x00);
+                }
+                names.push(0x00);
+                names.push(0x00);
+            }
+            header.push(0x11);
+            cm_put_7z_number(&mut header, names.len() as u64);
+            header.extend_from_slice(&names);
+            header.push(0x00);
+            header.push(0x00);
+
+            let members = vec![SetMember::new("rel.7z", 0)];
+            let mut sources = MemorySourceSet::default();
+            sources.push(wrap_7z_header(&header, &data));
+            let set = MemberSet {
+                format: MemberFormat::SevenZip,
+                members: vec![0],
+            };
+            let map = ContentMapper::build_map(&members, &set, &sources, None).unwrap();
+            assert_eq!(map.inner_name(), "movie.mkv");
+            assert_eq!(map.inner_size(), 60);
+            assert_eq!(map.runs().len(), 1);
+            assert_eq!(map.runs()[0].member_offset, 32 + 20 + 30);
+            let mut reassembled = vec![0u8; 60];
+            assert!(sources
+                .get_source(0)
+                .unwrap()
+                .read(map.runs()[0].member_offset, &mut reassembled));
+            assert_eq!(reassembled, inner);
+        }
+
+        // 15. HoledSourceTest
+        {
+            let inner = MemoryContentSource(cm_pattern(100, 17));
+            let holed = HoledSource::new(&inner, vec![NzbgetRsByteRange { offset: 30, size: 10 }]);
+            let mut buf = [0u8; 100];
+            assert!(holed.read(0, &mut buf[..30]));
+            assert!(holed.read(40, &mut buf[..60]));
+            assert!(!holed.read(25, &mut buf[..10]));
+            assert!(!holed.read(35, &mut buf[..1]));
+            assert!(!holed.read(0, &mut buf[..100]));
+            assert_eq!(holed.size(), 100);
+        }
+
+        // 16. ContentMapperBuildRepairSetsTest
+        {
+            let inner = cm_pattern(100, 18);
+            let slice0 = &inner[..40];
+            let slice1 = &inner[40..80];
+            let slice2 = &inner[80..];
+            let vol0 = build_rar3_store_volume(slice0, 100, false, true, "inner.mkv", 0x30);
+            let vol1 = build_rar3_store_volume(slice1, 100, true, true, "inner.mkv", 0x30);
+            let vol2 = build_rar3_store_volume(slice2, 100, true, false, "inner.mkv", 0x30);
+            let data_start = 61i64;
+
+            let members = vec![
+                SetMember::new("rel.part01.rar", vol0.len() as i64),
+                SetMember::new("rel.part02.rar", vol1.len() as i64),
+                SetMember::new("rel.part03.rar", vol2.len() as i64),
+                SetMember::new("bare.mkv", 50),
+            ];
+            let mut raw = MemorySourceSet::default();
+            raw.push(vol0);
+            raw.push(vol1);
+            raw.push(vol2);
+            raw.push(cm_pattern(50, 19));
+
+            let member_holes = vec![
+                vec![],
+                vec![NzbgetRsByteRange {
+                    offset: data_start + 5,
+                    size: 10,
+                }],
+                vec![NzbgetRsByteRange { offset: 0, size: 20 }],
+                vec![NzbgetRsByteRange { offset: 10, size: 5 }],
+            ];
+            let sources = HoledSourceSet::new(&raw, &member_holes);
+            let sets = ContentMapper::build_repair_sets(&members, &member_holes, &sources, None);
+            assert_eq!(sets.len(), 2);
+
+            let m0 = sets[0].map.as_ref().unwrap();
+            assert_eq!(m0.inner_size(), 100);
+            assert_eq!(m0.runs().len(), 2);
+            assert_eq!(
+                sets[0].inner_holes,
+                vec![NzbgetRsByteRange { offset: 45, size: 10 }]
+            );
+            assert_eq!(sets[0].original_inner_holes, sets[0].inner_holes);
+
+            let m1 = sets[1].map.as_ref().unwrap();
+            assert_eq!(m1.inner_size(), 50);
+            assert_eq!(
+                sets[1].inner_holes,
+                vec![NzbgetRsByteRange { offset: 10, size: 5 }]
+            );
+            assert_eq!(sets[1].original_inner_holes, sets[1].inner_holes);
+
+            // unmappable set still reports
+            {
+                let comp_members = vec![SetMember::new("c.rar", 0)];
+                let mut comp_raw = MemorySourceSet::default();
+                comp_raw.push(build_rar3_store_volume(
+                    slice0,
+                    100,
+                    false,
+                    false,
+                    "inner.mkv",
+                    0x33,
+                ));
+                let comp_holes = vec![vec![NzbgetRsByteRange { offset: 70, size: 5 }]];
+                let comp_sources = HoledSourceSet::new(&comp_raw, &comp_holes);
+                let comp_sets =
+                    ContentMapper::build_repair_sets(&comp_members, &comp_holes, &comp_sources, None);
+                assert_eq!(comp_sets.len(), 1);
+                assert!(comp_sets[0].map.is_none());
+                assert!(!comp_sets[0].skip_reason.is_empty());
+            }
+
+            // sets without holes never appear
+            {
+                let no_holes = vec![vec![]; 4];
+                let clean_sources = HoledSourceSet::new(&raw, &no_holes);
+                assert!(ContentMapper::build_repair_sets(&members, &no_holes, &clean_sources, None)
+                    .is_empty());
+            }
+        }
+
+        // 17. ContentMapperCoalesceRangesTest
+        {
+            assert!(ContentMapper::coalesce_ranges(&[]).is_empty());
+            let disjoint = ContentMapper::coalesce_ranges(&[
+                NzbgetRsByteRange {
+                    offset: 100,
+                    size: 10,
+                },
+                NzbgetRsByteRange { offset: 0, size: 10 },
+            ]);
+            assert_eq!(
+                disjoint,
+                vec![
+                    NzbgetRsByteRange { offset: 0, size: 10 },
+                    NzbgetRsByteRange {
+                        offset: 100,
+                        size: 10,
+                    },
+                ]
+            );
+            let overlap = ContentMapper::coalesce_ranges(&[
+                NzbgetRsByteRange { offset: 0, size: 20 },
+                NzbgetRsByteRange { offset: 10, size: 30 },
+            ]);
+            assert_eq!(overlap, vec![NzbgetRsByteRange { offset: 0, size: 40 }]);
+            let adjacent = ContentMapper::coalesce_ranges(&[
+                NzbgetRsByteRange { offset: 0, size: 10 },
+                NzbgetRsByteRange { offset: 10, size: 5 },
+                NzbgetRsByteRange { offset: 2, size: 3 },
+            ]);
+            assert_eq!(adjacent, vec![NzbgetRsByteRange { offset: 0, size: 15 }]);
+            let windows = ContentMapper::coalesce_ranges(&[
+                NzbgetRsByteRange {
+                    offset: 100000,
+                    size: 40,
+                },
+                NzbgetRsByteRange {
+                    offset: 100000,
+                    size: 40,
+                },
+            ]);
+            assert_eq!(
+                windows,
+                vec![NzbgetRsByteRange {
+                    offset: 100000,
+                    size: 40,
+                }]
+            );
+        }
+
+        // 18. ContentMapperRar3EncryptedStoreMapTest
+        {
+            let inner = cm_pattern(100, 5);
+            let salt = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+            let ctx = RarCryptoContext::make_rar3(b"123", &salt).unwrap();
+            let cipher = encrypt_padded(&ctx, &inner);
+            assert_eq!(cipher.len(), 112);
+
+            let members = vec![
+                SetMember::new("rel.part01.rar", 0),
+                SetMember::new("rel.part02.rar", 0),
+                SetMember::new("rel.part03.rar", 0),
+            ];
+            let mut sources = MemorySourceSet::default();
+            sources.push(build_rar3_enc_store_volume(
+                &cipher[..48],
+                100,
+                false,
+                true,
+                &salt,
+                "inner.mkv",
+            ));
+            sources.push(build_rar3_enc_store_volume(
+                &cipher[48..96],
+                100,
+                true,
+                true,
+                &salt,
+                "inner.mkv",
+            ));
+            sources.push(build_rar3_enc_store_volume(
+                &cipher[96..],
+                100,
+                true,
+                false,
+                &salt,
+                "inner.mkv",
+            ));
+
+            let set = MemberSet {
+                format: MemberFormat::Rar,
+                members: vec![0, 1, 2],
+            };
+            let map = ContentMapper::build_map(&members, &set, &sources, Some("123")).unwrap();
+            assert_eq!(map.inner_name(), "inner.mkv");
+            assert_eq!(map.inner_size(), 100);
+            assert!(map.encrypted());
+            assert_eq!(map.runs().len(), 3);
+            assert_eq!(map.runs()[0].inner_offset, 0);
+            assert_eq!(map.runs()[0].size, 48);
+            assert_eq!(map.runs()[1].inner_offset, 48);
+            assert_eq!(map.runs()[1].size, 48);
+            assert_eq!(map.runs()[2].inner_offset, 96);
+            assert_eq!(map.runs()[2].size, 4);
+
+            let rc0 = map.run_crypto(0).unwrap();
+            for i in 0..map.runs().len() {
+                let rc = map.run_crypto(i).unwrap();
+                assert!(std::sync::Arc::ptr_eq(
+                    rc.crypto.as_ref().unwrap(),
+                    rc0.crypto.as_ref().unwrap()
+                ));
+                assert_eq!(rc.cipher_data_offset, map.runs()[i].member_offset);
+            }
+            let mut plain_out = vec![0u8; cipher.len()];
+            assert!(rc0.crypto.as_ref().unwrap().decrypt_range(
+                None,
+                &cipher,
+                &mut plain_out,
+                (cipher.len() / 16) as i64
+            ));
+            assert_eq!(&plain_out[..100], &inner[..]);
+        }
+
+        // 19. ContentMapperRar5EncryptedStoreMapTest
+        {
+            let inner = cm_pattern(50, 9);
+            let salt = [
+                0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad,
+                0xae, 0xaf,
+            ];
+            let iv = [
+                0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd,
+                0xbe, 0xbf,
+            ];
+            let kdf = 12u8;
+            let check8 = streamcrypto_derive_rar5_psw_check(b"123", kdf, &salt).unwrap();
+            let mut check = [0u8; 12];
+            check[..8].copy_from_slice(&check8);
+
+            let crypt = crate::rarreader::Rar5Crypt {
+                version: 0,
+                flags: 1,
+                kdf_count: kdf,
+                salt,
+                iv,
+                check_value: check,
+                has_check: true,
+            };
+            let ctx = RarCryptoContext::make_rar5(b"123", &crypt).unwrap();
+            let cipher = encrypt_padded(&ctx, &inner);
+            assert_eq!(cipher.len(), 64);
+
+            let members = vec![SetMember::new("rel.part01.rar", 0)];
+            let mut sources = MemorySourceSet::default();
+            sources.push(build_rar5_enc_store_volume(
+                &cipher,
+                50,
+                false,
+                false,
+                kdf,
+                &salt,
+                &iv,
+                Some(&check),
+                "inner.mkv",
+            ));
+            let set = MemberSet {
+                format: MemberFormat::Rar,
+                members: vec![0],
+            };
+            let map = ContentMapper::build_map(&members, &set, &sources, Some("123")).unwrap();
+            assert_eq!(map.inner_size(), 50);
+            assert!(map.encrypted());
+            assert_eq!(map.runs().len(), 1);
+            assert_eq!(map.runs()[0].size, 50);
+            let rc = map.run_crypto(0).unwrap();
+            let mut plain_out = vec![0u8; cipher.len()];
+            assert!(rc.crypto.as_ref().unwrap().decrypt_range(
+                None,
+                &cipher,
+                &mut plain_out,
+                (cipher.len() / 16) as i64
+            ));
+            assert_eq!(&plain_out[..50], &inner[..]);
+        }
+
+        // 20. ContentMapperRarEncryptedRejectionsTest
+        {
+            let inner = cm_pattern(50, 3);
+            let salt3 = [1, 2, 3, 4, 5, 6, 7, 8];
+            let salt5 = [
+                0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
+                0x1e, 0x1f,
+            ];
+            let iv5 = [
+                0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d,
+                0x2e, 0x2f,
+            ];
+            let kdf = 11u8;
+            let check8 = streamcrypto_derive_rar5_psw_check(b"123", kdf, &salt5).unwrap();
+            let mut check = [0u8; 12];
+            check[..8].copy_from_slice(&check8);
+
+            let ctx3 = RarCryptoContext::make_rar3(b"123", &salt3).unwrap();
+            let cipher3 = encrypt_padded(&ctx3, &inner);
+
+            let single = MemberSet {
+                format: MemberFormat::Rar,
+                members: vec![0],
+            };
+            let members = vec![SetMember::new("rel.part01.rar", 0)];
+
+            // wrong RAR5 password
+            {
+                let crypt = crate::rarreader::Rar5Crypt {
+                    version: 0,
+                    flags: 1,
+                    kdf_count: kdf,
+                    salt: salt5,
+                    iv: iv5,
+                    check_value: check,
+                    has_check: true,
+                };
+                let ctx5 = RarCryptoContext::make_rar5(b"123", &crypt).unwrap();
+                let cipher5 = encrypt_padded(&ctx5, &inner);
+                let mut sources = MemorySourceSet::default();
+                sources.push(build_rar5_enc_store_volume(
+                    &cipher5,
+                    50,
+                    false,
+                    false,
+                    kdf,
+                    &salt5,
+                    &iv5,
+                    Some(&check),
+                    "inner.mkv",
+                ));
+                let err = ContentMapper::build_map(&members, &single, &sources, Some("wrongpw"))
+                    .err()
+                    .unwrap();
+                assert_eq!(err, "archive password rejected");
+            }
+
+            // no password
+            {
+                let mut sources = MemorySourceSet::default();
+                sources.push(build_rar3_enc_store_volume(
+                    &cipher3,
+                    50,
+                    false,
+                    false,
+                    &salt3,
+                    "inner.mkv",
+                ));
+                let err = ContentMapper::build_map(&members, &single, &sources, None)
+                    .err()
+                    .unwrap();
+                assert_eq!(err, "encrypted archive data");
+            }
+
+            // non-16-aligned non-last volume (47 + 17 = 64)
+            let pair = vec![
+                SetMember::new("rel.part01.rar", 0),
+                SetMember::new("rel.part02.rar", 0),
+            ];
+            let two_vol = MemberSet {
+                format: MemberFormat::Rar,
+                members: vec![0, 1],
+            };
+            {
+                let mut sources = MemorySourceSet::default();
+                sources.push(build_rar3_enc_store_volume(
+                    &cipher3[..47],
+                    50,
+                    false,
+                    true,
+                    &salt3,
+                    "inner.mkv",
+                ));
+                sources.push(build_rar3_enc_store_volume(
+                    &cipher3[47..],
+                    50,
+                    true,
+                    false,
+                    &salt3,
+                    "inner.mkv",
+                ));
+                let map = ContentMapper::build_map(&pair, &two_vol, &sources, Some("123")).unwrap();
+                assert_eq!(map.runs().len(), 2);
+                assert_eq!(map.runs()[0].size, 47);
+                assert_eq!(map.runs()[1].size, 3);
+                assert_eq!(map.run_crypto(0).unwrap().cipher_size, 47);
+                assert_eq!(map.run_crypto(1).unwrap().cipher_size, 17);
+                assert_eq!(map.cipher_stream_size(), 64);
+            }
+
+            // slabs not totaling ceil16(innerSize)
+            {
+                let mut sources = MemorySourceSet::default();
+                sources.push(build_rar3_enc_store_volume(
+                    &cipher3[..47],
+                    50,
+                    false,
+                    true,
+                    &salt3,
+                    "inner.mkv",
+                ));
+                sources.push(build_rar3_enc_store_volume(
+                    &cipher3[47..60],
+                    50,
+                    true,
+                    false,
+                    &salt3,
+                    "inner.mkv",
+                ));
+                let err = ContentMapper::build_map(&pair, &two_vol, &sources, Some("123"))
+                    .err()
+                    .unwrap();
+                assert_eq!(err, "encrypted volume geometry does not fit store mode");
+            }
+
+            // padding-only last volume (52 >= 50)
+            {
+                let mut sources = MemorySourceSet::default();
+                sources.push(build_rar3_enc_store_volume(
+                    &cipher3[..52],
+                    50,
+                    false,
+                    true,
+                    &salt3,
+                    "inner.mkv",
+                ));
+                sources.push(build_rar3_enc_store_volume(
+                    &cipher3[52..],
+                    50,
+                    true,
+                    false,
+                    &salt3,
+                    "inner.mkv",
+                ));
+                let err = ContentMapper::build_map(&pair, &two_vol, &sources, Some("123"))
+                    .err()
+                    .unwrap();
+                assert_eq!(err, "encrypted volume geometry does not fit store mode");
+            }
+
+            // single volume whose packed size is not ceil16(innerSize)
+            {
+                let mut sources = MemorySourceSet::default();
+                sources.push(build_rar3_enc_store_volume(
+                    &cipher3[..60],
+                    50,
+                    false,
+                    false,
+                    &salt3,
+                    "inner.mkv",
+                ));
+                let err = ContentMapper::build_map(&members, &single, &sources, Some("123"))
+                    .err()
+                    .unwrap();
+                assert_eq!(err, "encrypted volume geometry does not fit store mode");
+            }
+        }
+
+        // 21. ContentMapperRarEncryptedCompositeTest
+        {
+            let inner = cm_pattern(100, 41);
+            let salt = [0x9a, 0x8b, 0x7c, 0x6d, 0x5e, 0x4f, 0x30, 0x21];
+            let ctx = RarCryptoContext::make_rar3(b"123", &salt).unwrap();
+            let cipher = encrypt_padded(&ctx, &inner);
+            assert_eq!(cipher.len(), 112);
+
+            let c0 = &cipher[..45];
+            let c1 = &cipher[45..82];
+            let c2 = &cipher[82..];
+
+            let members = vec![
+                SetMember::new("rel.part01.rar", 0),
+                SetMember::new("rel.part02.rar", 0),
+                SetMember::new("rel.part03.rar", 0),
+            ];
+            let mut sources = MemorySourceSet::default();
+            sources.push(build_rar3_enc_store_volume(
+                c0,
+                100,
+                false,
+                true,
+                &salt,
+                "inner.mkv",
+            ));
+            sources.push(build_rar3_enc_store_volume(
+                c1,
+                100,
+                true,
+                true,
+                &salt,
+                "inner.mkv",
+            ));
+            sources.push(build_rar3_enc_store_volume(
+                c2,
+                100,
+                true,
+                false,
+                &salt,
+                "inner.mkv",
+            ));
+
+            let set = MemberSet {
+                format: MemberFormat::Rar,
+                members: vec![0, 1, 2],
+            };
+            let map = ContentMapper::build_map(&members, &set, &sources, Some("123")).unwrap();
+            assert!(map.encrypted());
+            assert_eq!(map.inner_size(), 100);
+            assert_eq!(map.cipher_stream_size(), 112);
+            assert_eq!(map.runs().len(), 3);
+            let run_sizes = [45, 37, 18];
+            let slab_sizes = [45, 37, 30];
+            let rc0 = map.run_crypto(0).unwrap();
+            for i in 0..3 {
+                let run = &map.runs()[i];
+                let rc = map.run_crypto(i).unwrap();
+                assert!(std::sync::Arc::ptr_eq(
+                    rc.crypto.as_ref().unwrap(),
+                    rc0.crypto.as_ref().unwrap()
+                ));
+                assert_eq!(run.size, run_sizes[i]);
+                assert_eq!(rc.cipher_size, slab_sizes[i]);
+                assert_eq!(rc.cipher_data_offset, run.member_offset);
+            }
+
+            let data_off0 = map.runs()[0].member_offset;
+            let data_off1 = map.runs()[1].member_offset;
+            let pieces = map.map_cipher_range(NzbgetRsByteRange { offset: 32, size: 32 });
+            assert_eq!(
+                pieces,
+                vec![
+                    NzbgetRsMemberRange {
+                        member_index: 0,
+                        offset: data_off0 + 32,
+                        size: 13,
+                    },
+                    NzbgetRsMemberRange {
+                        member_index: 1,
+                        offset: data_off1,
+                        size: 19,
+                    },
+                ]
+            );
+            assert!(map
+                .map_cipher_range(NzbgetRsByteRange { offset: 0, size: 113 })
+                .is_empty());
+            assert!(map
+                .map_cipher_range(NzbgetRsByteRange { offset: 112, size: 16 })
+                .is_empty());
+            assert!(map
+                .map_cipher_range(NzbgetRsByteRange { offset: -1, size: 4 })
+                .is_empty());
+
+            let mut out = vec![0u8; 100];
+            assert!(map.read_inner_decrypted(
+                &sources,
+                NzbgetRsByteRange { offset: 0, size: 100 },
+                &mut out
+            ));
+            assert_eq!(out, inner);
+            for probe in [
+                NzbgetRsByteRange { offset: 40, size: 10 },
+                NzbgetRsByteRange { offset: 80, size: 10 },
+                NzbgetRsByteRange { offset: 95, size: 5 },
+                NzbgetRsByteRange { offset: 0, size: 1 },
+                NzbgetRsByteRange { offset: 99, size: 1 },
+                NzbgetRsByteRange { offset: 44, size: 3 },
+            ] {
+                let mut piece = vec![0u8; probe.size as usize];
+                assert!(map.read_inner_decrypted(&sources, probe, &mut piece));
+                let p_off = probe.offset as usize;
+                assert_eq!(piece, &inner[p_off..p_off + probe.size as usize]);
+            }
+            assert!(map.read_inner_decrypted(
+                &sources,
+                NzbgetRsByteRange { offset: 50, size: 0 },
+                &mut out
+            ));
+            assert!(!map.read_inner_decrypted(
+                &sources,
+                NzbgetRsByteRange { offset: 96, size: 10 },
+                &mut out
+            ));
+            assert!(!map.read_inner_decrypted(
+                &sources,
+                NzbgetRsByteRange { offset: -16, size: 16 },
+                &mut out
+            ));
+
+            let mut partial = MemorySourceSet::default();
+            partial.push(build_rar3_enc_store_volume(
+                c0,
+                100,
+                false,
+                true,
+                &salt,
+                "inner.mkv",
+            ));
+            partial.push_null();
+            partial.push(build_rar3_enc_store_volume(
+                c2,
+                100,
+                true,
+                false,
+                &salt,
+                "inner.mkv",
+            ));
+            assert!(map.read_inner_decrypted(
+                &partial,
+                NzbgetRsByteRange { offset: 0, size: 32 },
+                &mut out
+            ));
+            assert_eq!(&out[..32], &inner[..32]);
+            assert!(!map.read_inner_decrypted(
+                &partial,
+                NzbgetRsByteRange { offset: 50, size: 10 },
+                &mut out
+            ));
+            assert!(!map.read_inner_decrypted(
+                &partial,
+                NzbgetRsByteRange { offset: 0, size: 48 },
+                &mut out
+            ));
+            assert!(!map.read_inner_decrypted(
+                &partial,
+                NzbgetRsByteRange { offset: 96, size: 4 },
+                &mut out
+            ));
+        }
+
+        // 22. ContentMapperRar5EncryptedNonAlignedTest
+        {
+            let inner = cm_pattern(60, 27);
+            let salt = [
+                0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd,
+                0xce, 0xcf,
+            ];
+            let iv = [
+                0xd0, 0xd1, 0xd2, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xdb, 0xdc, 0xdd,
+                0xde, 0xdf,
+            ];
+            let kdf = 10u8;
+            let check8 = streamcrypto_derive_rar5_psw_check(b"123", kdf, &salt).unwrap();
+            let mut check = [0u8; 12];
+            check[..8].copy_from_slice(&check8);
+            let crypt = crate::rarreader::Rar5Crypt {
+                version: 0,
+                flags: 1,
+                kdf_count: kdf,
+                salt,
+                iv,
+                check_value: check,
+                has_check: true,
+            };
+            let ctx = RarCryptoContext::make_rar5(b"123", &crypt).unwrap();
+            let cipher = encrypt_padded(&ctx, &inner);
+            let c0 = &cipher[..23];
+            let c1 = &cipher[23..];
+            let members = vec![
+                SetMember::new("rel.part01.rar", 0),
+                SetMember::new("rel.part02.rar", 0),
+            ];
+            let set = MemberSet {
+                format: MemberFormat::Rar,
+                members: vec![0, 1],
+            };
+            {
+                let mut sources = MemorySourceSet::default();
+                sources.push(build_rar5_enc_store_volume(
+                    c0,
+                    60,
+                    false,
+                    true,
+                    kdf,
+                    &salt,
+                    &iv,
+                    Some(&check),
+                    "inner.mkv",
+                ));
+                sources.push(build_rar5_enc_store_volume(
+                    c1,
+                    60,
+                    true,
+                    false,
+                    kdf,
+                    &salt,
+                    &iv,
+                    Some(&check),
+                    "inner.mkv",
+                ));
+                let map = ContentMapper::build_map(&members, &set, &sources, Some("123")).unwrap();
+                assert_eq!(map.runs().len(), 2);
+                assert_eq!(map.runs()[0].size, 23);
+                assert_eq!(map.runs()[1].size, 37);
+                assert_eq!(map.run_crypto(1).unwrap().cipher_size, 41);
+                let mut out = vec![0u8; 60];
+                assert!(map.read_inner_decrypted(
+                    &sources,
+                    NzbgetRsByteRange { offset: 0, size: 60 },
+                    &mut out
+                ));
+                assert_eq!(out, inner);
+                assert!(map.read_inner_decrypted(
+                    &sources,
+                    NzbgetRsByteRange { offset: 20, size: 10 },
+                    &mut out
+                ));
+                assert_eq!(&out[..10], &inner[20..30]);
+            }
+            {
+                let mut other_iv = iv;
+                other_iv[0] ^= 0x01;
+                let mut sources = MemorySourceSet::default();
+                sources.push(build_rar5_enc_store_volume(
+                    c0,
+                    60,
+                    false,
+                    true,
+                    kdf,
+                    &salt,
+                    &iv,
+                    Some(&check),
+                    "inner.mkv",
+                ));
+                sources.push(build_rar5_enc_store_volume(
+                    c1,
+                    60,
+                    true,
+                    false,
+                    kdf,
+                    &salt,
+                    &other_iv,
+                    Some(&check),
+                    "inner.mkv",
+                ));
+                let err = ContentMapper::build_map(&members, &set, &sources, Some("123"))
+                    .err()
+                    .unwrap();
+                assert_eq!(err, "encrypted volume geometry does not fit store mode");
+            }
+        }
+
+        // 23. ContentMapperEncryptedRepairSetsTest
+        {
+            let inner = cm_pattern(50, 33);
+            let salt = [8, 7, 6, 5, 4, 3, 2, 1];
+            let ctx = RarCryptoContext::make_rar3(b"123", &salt).unwrap();
+            let cipher = encrypt_padded(&ctx, &inner);
+            let volume = build_rar3_enc_store_volume(&cipher, 50, false, false, &salt, "inner.mkv");
+            let data_start = 69i64;
+
+            let members = vec![SetMember::new("rel.part01.rar", volume.len() as i64)];
+            let member_holes = vec![vec![NzbgetRsByteRange {
+                offset: data_start + 20,
+                size: 10,
+            }]];
+            let mut raw = MemorySourceSet::default();
+            raw.push(volume);
+            let sources = HoledSourceSet::new(&raw, &member_holes);
+
+            let without = ContentMapper::build_repair_sets(&members, &member_holes, &sources, None);
+            assert_eq!(without.len(), 1);
+            assert!(without[0].map.is_none());
+            assert_eq!(without[0].skip_reason, "encrypted archive data");
+
+            let with =
+                ContentMapper::build_repair_sets(&members, &member_holes, &sources, Some("123"));
+            assert_eq!(with.len(), 1);
+            let map = with[0].map.as_ref().unwrap();
+            assert!(map.encrypted());
+            assert_eq!(
+                with[0].inner_holes,
+                vec![NzbgetRsByteRange { offset: 20, size: 10 }]
+            );
+        }
+
+        // 24. ContentMapperEncryptedTargetHeaderHoleTest
+        {
+            let inner = cm_pattern(50, 71);
+            let salt = [0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03, 0x04];
+            let ctx = RarCryptoContext::make_rar3(b"123", &salt).unwrap();
+            let cipher = encrypt_padded(&ctx, &inner);
+            let volume = build_rar3_enc_store_volume(&cipher, 50, false, false, &salt, "inner.mkv");
+            let data_start = 69i64;
+            let members = vec![SetMember::new("rel.part01.rar", volume.len() as i64)];
+
+            {
+                let member_holes = vec![vec![NzbgetRsByteRange { offset: 30, size: 12 }]];
+                let mut raw = MemorySourceSet::default();
+                raw.push(volume.clone());
+                let sources = HoledSourceSet::new(&raw, &member_holes);
+                let sets = ContentMapper::build_repair_sets(
+                    &members,
+                    &member_holes,
+                    &sources,
+                    Some("123"),
+                );
+                assert_eq!(sets.len(), 1);
+                assert!(sets[0].map.is_none());
+                assert!(!sets[0].skip_reason.is_empty());
+            }
+            {
+                let member_holes = vec![vec![NzbgetRsByteRange {
+                    offset: data_start + 16,
+                    size: 10,
+                }]];
+                let mut raw = MemorySourceSet::default();
+                raw.push(volume);
+                let sources = HoledSourceSet::new(&raw, &member_holes);
+                let sets = ContentMapper::build_repair_sets(
+                    &members,
+                    &member_holes,
+                    &sources,
+                    Some("123"),
+                );
+                assert_eq!(sets.len(), 1);
+                let map = sets[0].map.as_ref().unwrap();
+                assert!(map.encrypted());
+                assert_eq!(
+                    sets[0].inner_holes,
+                    vec![NzbgetRsByteRange { offset: 16, size: 10 }]
+                );
+            }
+        }
+
+        // 25. ContentMapperRarEncryptedHpDonorTest
+        {
+            let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../tests/testdata/rarrenamer");
+            for file in ["testfile3encnam.part01.rar", "testfile5encnam.part01.rar"] {
+                let bytes = std::fs::read(dir.join(file)).unwrap();
+                assert!(bytes.len() > 100);
+                let members = vec![SetMember::new(file, 0)];
+                let single = MemberSet {
+                    format: MemberFormat::Rar,
+                    members: vec![0],
+                };
+                let mut no_pw = MemorySourceSet::default();
+                no_pw.push(bytes.clone());
+                let reason = ContentMapper::build_map(&members, &single, &no_pw, None)
+                    .err()
+                    .unwrap();
+                assert_eq!(reason, "encrypted archive headers");
+
+                let mut with_pw = MemorySourceSet::default();
+                with_pw.push(bytes);
+                let reason2 = ContentMapper::build_map(&members, &single, &with_pw, Some("123"))
+                    .err()
+                    .unwrap();
+                assert_ne!(reason2, "encrypted archive headers");
+                assert!(!reason2.is_empty());
+            }
+        }
+
+        // 26. ContentMapperIsCompressibleArchiveTest
+        {
+            assert!(ContentMapper::is_compressible_archive(&MemberSet {
+                format: MemberFormat::Rar,
+                members: vec![0],
+            }));
+            assert!(ContentMapper::is_compressible_archive(&MemberSet {
+                format: MemberFormat::Zip,
+                members: vec![0],
+            }));
+            assert!(ContentMapper::is_compressible_archive(&MemberSet {
+                format: MemberFormat::SevenZip,
+                members: vec![0],
+            }));
+            assert!(!ContentMapper::is_compressible_archive(&MemberSet {
+                format: MemberFormat::Bare,
+                members: vec![0],
+            }));
+            assert!(!ContentMapper::is_compressible_archive(&MemberSet {
+                format: MemberFormat::Split,
+                members: vec![0, 1],
+            }));
+        }
+
+        // 27. ContentMapRustFfiBoundaryTest (calls the actual exported extern "C" ABI functions)
+        unsafe {
+            let m_ids = [10i32, 20];
+            let d_bases = [0i64, 100];
+            let m_sizes = [100i64, 100];
+            let mut out_members = [NzbgetRsMemberRange {
+                member_index: 0,
+                offset: 0,
+                size: 0,
+            }; 4];
+            let n_comp = crate::ffi::nzbget_rs_composite_to_members(
+                m_ids.as_ptr(),
+                d_bases.as_ptr(),
+                m_sizes.as_ptr(),
+                2,
+                NzbgetRsByteRange {
+                    offset: 50,
+                    size: 100,
+                },
+                out_members.as_mut_ptr(),
+                out_members.len(),
+            );
+            assert_eq!(n_comp, 2);
+
+            let holes = [NzbgetRsByteRange { offset: 10, size: 20 }];
+            assert_eq!(
+                crate::ffi::nzbget_rs_holed_source_intersects(holes.as_ptr(), 1, 15, 5),
+                1
+            );
+            assert_eq!(
+                crate::ffi::nzbget_rs_holed_source_intersects(holes.as_ptr(), 1, 0, 10),
+                0
+            );
+
+            let runs = [NzbgetRsContentRun {
+                inner_offset: 0,
+                member_index: 0,
+                member_offset: 100,
+                size: 50,
+            }];
+            let mut out_ranges = [NzbgetRsByteRange { offset: 0, size: 0 }; 4];
+            assert_eq!(
+                crate::ffi::nzbget_rs_content_map_to_inner(
+                    runs.as_ptr(),
+                    1,
+                    0,
+                    NzbgetRsByteRange {
+                        offset: 110,
+                        size: 20,
+                    },
+                    out_ranges.as_mut_ptr(),
+                    out_ranges.len(),
+                ),
+                1
+            );
+            assert_eq!(
+                crate::ffi::nzbget_rs_content_map_from_inner(
+                    runs.as_ptr(),
+                    1,
+                    NzbgetRsByteRange { offset: 10, size: 20 },
+                    out_members.as_mut_ptr(),
+                    out_members.len(),
+                ),
+                1
+            );
+            let c_offs = [100i64];
+            let c_sizes = [64i64];
+            let has_c = [1u8];
+            assert_eq!(
+                crate::ffi::nzbget_rs_content_map_cipher_range(
+                    runs.as_ptr(),
+                    c_offs.as_ptr(),
+                    c_sizes.as_ptr(),
+                    has_c.as_ptr(),
+                    1,
+                    NzbgetRsByteRange { offset: 0, size: 32 },
+                    out_members.as_mut_ptr(),
+                    out_members.len(),
+                ),
+                1
+            );
+
+            unsafe extern "C" fn collect_group_set(
+                ctx: *mut std::ffi::c_void,
+                format: i32,
+                members: *const i32,
+                count: usize,
+            ) {
+                let out = unsafe { &mut *(ctx as *mut Vec<(i32, Vec<i32>)>) };
+                let slice = unsafe { std::slice::from_raw_parts(members, count) };
+                out.push((format, slice.to_vec()));
+            }
+            let c_names = [c"movie.part01.rar".as_ptr(), c"movie.part02.rar".as_ptr()];
+            let mut grouped: Vec<(i32, Vec<i32>)> = Vec::new();
+            crate::ffi::nzbget_rs_content_mapper_group_sets(
+                c_names.as_ptr(),
+                c_names.len(),
+                (&mut grouped as *mut Vec<(i32, Vec<i32>)>).cast(),
+                Some(collect_group_set),
+            );
+            assert_eq!(grouped.len(), 1);
+
+            let uncoalesced = [
+                NzbgetRsByteRange { offset: 0, size: 10 },
+                NzbgetRsByteRange { offset: 10, size: 10 },
+            ];
+            assert_eq!(
+                crate::ffi::nzbget_rs_content_mapper_coalesce_ranges(
+                    uncoalesced.as_ptr(),
+                    uncoalesced.len(),
+                    out_ranges.as_mut_ptr(),
+                    out_ranges.len(),
+                ),
+                1
+            );
+
+            unsafe extern "C" fn fail_read_cb(
+                _ctx: *mut std::ffi::c_void,
+                _idx: i32,
+                _off: i64,
+                _buf: *mut u8,
+                _size: i64,
+            ) -> i32 {
+                0
+            }
+            unsafe extern "C" fn noop_ok_cb(
+                _ctx: *mut std::ffi::c_void,
+                _name: *const std::ffi::c_char,
+                _size: i64,
+                _runs: *const NzbgetRsContentRun,
+                _count: usize,
+            ) {
+            }
+            unsafe extern "C" fn capture_skip_cb(
+                ctx: *mut std::ffi::c_void,
+                reason: *const std::ffi::c_char,
+            ) {
+                let s = unsafe { &mut *(ctx as *mut String) };
+                *s = unsafe { std::ffi::CStr::from_ptr(reason) }
+                    .to_string_lossy()
+                    .into_owned();
+            }
+            let member_idx = [0i32];
+            let member_sz = [10i64];
+            let mut zip_skip = String::new();
+            crate::ffi::nzbget_rs_content_mapper_build_zip_map(
+                member_idx.as_ptr(),
+                member_sz.as_ptr(),
+                1,
+                (&mut zip_skip as *mut String).cast(),
+                Some(fail_read_cb),
+                Some(noop_ok_cb),
+                Some(capture_skip_cb),
+            );
+            assert!(!zip_skip.is_empty());
+
+            let mut seven_skip = String::new();
+            crate::ffi::nzbget_rs_content_mapper_build_seven_zip_map(
+                member_idx.as_ptr(),
+                member_sz.as_ptr(),
+                1,
+                (&mut seven_skip as *mut String).cast(),
+                Some(fail_read_cb),
+                Some(noop_ok_cb),
+                Some(capture_skip_cb),
+            );
+            assert!(!seven_skip.is_empty());
+
+            // Verify on_rar_volume_cb is invoked for RAR volume mapping diagnostics.
+            let rar_vol =
+                build_rar5_store_volume(&[b'M'; 64], 64, false, false, "movie.mkv", 0);
+            struct RarDiagCtx {
+                vol_bytes: Vec<u8>,
+                logged_vols: Vec<(String, i32, usize, String)>,
+            }
+            unsafe extern "C" fn rar_has_src(ctx: *mut std::ffi::c_void, idx: i32) -> i32 {
+                let _ = ctx;
+                i32::from(idx == 0)
+            }
+            unsafe extern "C" fn rar_size(ctx: *mut std::ffi::c_void, _idx: i32) -> i64 {
+                let c = unsafe { &*(ctx as *const RarDiagCtx) };
+                c.vol_bytes.len() as i64
+            }
+            unsafe extern "C" fn rar_read(
+                ctx: *mut std::ffi::c_void,
+                _idx: i32,
+                off: i64,
+                buf: *mut u8,
+                size: i64,
+            ) -> i32 {
+                let c = unsafe { &*(ctx as *const RarDiagCtx) };
+                if off < 0 || size < 0 || (off + size) as usize > c.vol_bytes.len() {
+                    return 0;
+                }
+                let dst = unsafe { std::slice::from_raw_parts_mut(buf, size as usize) };
+                dst.copy_from_slice(&c.vol_bytes[off as usize..(off + size) as usize]);
+                1
+            }
+            unsafe extern "C" fn rar_on_vol(
+                ctx: *mut std::ffi::c_void,
+                filename: *const std::ffi::c_char,
+                version: i32,
+                _multi_volume: std::ffi::c_int,
+                _volume_no: u32,
+                _new_naming: std::ffi::c_int,
+                _has_next_volume: std::ffi::c_int,
+                _encrypted: std::ffi::c_int,
+                file_count: usize,
+                _file_times: *const u32,
+                _file_sizes: *const i64,
+                _file_attrs: *const u32,
+                _file_split_before: *const u8,
+                _file_split_after: *const u8,
+                file_names: *const *const std::ffi::c_char,
+            ) {
+                let c = unsafe { &mut *(ctx as *mut RarDiagCtx) };
+                let vname = unsafe { std::ffi::CStr::from_ptr(filename) }
+                    .to_string_lossy()
+                    .into_owned();
+                let fname = if file_count > 0 && !file_names.is_null() {
+                    unsafe { std::ffi::CStr::from_ptr(*file_names) }
+                        .to_string_lossy()
+                        .into_owned()
+                } else {
+                    String::new()
+                };
+                c.logged_vols.push((vname, version, file_count, fname));
+            }
+            let mut diag_ctx = RarDiagCtx {
+                vol_bytes: rar_vol,
+                logged_vols: Vec::new(),
+            };
+            let rar_name_ptrs = [c"show.rar".as_ptr()];
+            let rar_sizes = [diag_ctx.vol_bytes.len() as i64];
+            let rar_set_members = [0i32];
+            assert_eq!(
+                crate::ffi::nzbget_rs_content_mapper_build_map(
+                    rar_name_ptrs.as_ptr(),
+                    rar_sizes.as_ptr(),
+                    1,
+                    FORMAT_RAR,
+                    rar_set_members.as_ptr(),
+                    1,
+                    std::ptr::null(),
+                    1,
+                    (&mut diag_ctx as *mut RarDiagCtx).cast(),
+                    Some(rar_has_src),
+                    Some(rar_size),
+                    Some(rar_read),
+                    Some(rar_on_vol),
+                    None,
+                    None,
+                ),
+                1
+            );
+            assert_eq!(
+                diag_ctx.logged_vols,
+                vec![("show.rar".to_string(), 5, 1, "movie.mkv".to_string())]
+            );
+        }
     }
 }

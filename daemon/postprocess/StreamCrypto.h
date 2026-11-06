@@ -87,6 +87,13 @@ public:
 	static std::unique_ptr<RarCryptoContext> MakeRar5(const char* password,
 		const RarFile::Rar5Crypt& crypt);
 
+	static std::unique_ptr<RarCryptoContext> MakeFromKeyIv(const uint8* key,
+		int keyLength, const uint8 iv[16]);
+
+	const uint8* GetKey() const { return m_key; }
+	int GetKeyLength() const { return m_keyLength; }
+	const uint8* GetIv() const { return m_iv; }
+
 	// Decrypt `blocks` consecutive cipher blocks. prevCipherBlock is C_{i-1}
 	// for the first block, or nullptr to chain from the header IV (block 0 of
 	// the stream). Returns false on a negative count or when TLS is

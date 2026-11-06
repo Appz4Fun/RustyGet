@@ -1,5 +1,4 @@
 list(APPEND TESTS_SRC
-	${CMAKE_CURRENT_SOURCE_DIR}/postprocess/ContentMap.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/postprocess/DirectUnpack.cpp
 )
 

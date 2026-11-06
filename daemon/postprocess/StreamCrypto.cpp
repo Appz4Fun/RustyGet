@@ -110,6 +110,20 @@ std::unique_ptr<RarCryptoContext> RarCryptoContext::MakeRar5(const char* passwor
 	return ctx;
 }
 
+std::unique_ptr<RarCryptoContext> RarCryptoContext::MakeFromKeyIv(const uint8* key,
+	int keyLength, const uint8 iv[16])
+{
+	if (!key || !iv || (keyLength != 16 && keyLength != 32))
+	{
+		return nullptr;
+	}
+	std::unique_ptr<RarCryptoContext> ctx(new RarCryptoContext());
+	ctx->m_keyLength = keyLength;
+	memcpy(ctx->m_key, key, (size_t)keyLength);
+	memcpy(ctx->m_iv, iv, 16);
+	return ctx;
+}
+
 bool RarCryptoContext::Crypt(bool encrypt, const uint8* prevCipherBlock,
 	const uint8* in, uint8* out, int64 blocks) const
 {

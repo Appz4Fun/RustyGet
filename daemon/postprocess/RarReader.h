@@ -106,6 +106,12 @@ public:
 	void SetPassword(const char* password) { m_password = password ? password : ""; }
 	FileList* GetFiles() { return &m_files; }
 
+	static void LogDebugVolume(const char* filename, int version, bool multiVolume,
+		uint32 volumeNo, bool newNaming, bool hasNextVolume, bool encrypted,
+		size_t fileCount, const uint32* fileTimes, const int64* fileSizes,
+		const uint32* fileAttrs, const uint8* fileSplitBefore,
+		const uint8* fileSplitAfter, const char* const* fileNames);
+
 private:
 	FileList m_files;
 

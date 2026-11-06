@@ -10299,32 +10299,6 @@ pub unsafe extern "C" fn nzbget_rs_dupematcher_parse_rar_lister_line(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_streamcrypto_rar3_swizzle_key(
-    digest20: *const u8,
-    key16_out: *mut u8,
-) {
-    if digest20.is_null() || key16_out.is_null() {
-        return;
-    }
-    let d: &[u8; 20] = &*(digest20 as *const [u8; 20]);
-    let k: &mut [u8; 16] = &mut *(key16_out as *mut [u8; 16]);
-    crate::postrepair::rar3_swizzle_key(d, k);
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_streamcrypto_rar5_fold_psw_check(
-    value32: *const u8,
-    check8_out: *mut u8,
-) {
-    if value32.is_null() || check8_out.is_null() {
-        return;
-    }
-    let v: &[u8; 32] = &*(value32 as *const [u8; 32]);
-    let c: &mut [u8; 8] = &mut *(check8_out as *mut [u8; 8]);
-    crate::postrepair::rar5_fold_psw_check(v, c);
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_repair_select_more_pars(
     sorted_block_counts: *const c_int,
     count: usize,
@@ -14616,16 +14590,42 @@ pub unsafe extern "C" fn nzbget_rs_euh_unrar_overwrite_switch(mode: c_int) -> *c
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_euh_unrar_is_part1_or_unsplit_rar(
-    filename: *const c_char,
+pub unsafe extern "C" fn nzbget_rs_euh_unrar_is_supported(
+    path: *const c_char,
     len: usize,
 ) -> c_int {
-    let s = if filename.is_null() || len == 0 {
+    let s = if path.is_null() || len == 0 {
         &[][..]
     } else {
-        std::slice::from_raw_parts(filename.cast::<u8>(), len)
+        std::slice::from_raw_parts(path.cast::<u8>(), len)
     };
-    i32::from(crate::unpack::unrar_is_part1_or_unsplit_rar(s))
+    i32::from(crate::unpack::unrar_is_supported(s))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_sevenzip_is_supported(
+    path: *const c_char,
+    len: usize,
+) -> c_int {
+    let s = if path.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(path.cast::<u8>(), len)
+    };
+    i32::from(crate::unpack::sevenzip_is_supported(s))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_euh_extractor_make_password(
+    password: *const c_char,
+    len: usize,
+) -> RsBuf {
+    let s = if password.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(password.cast::<u8>(), len)
+    };
+    into_buf(crate::unpack::extractor_make_password(s))
 }
 
 #[no_mangle]
@@ -29539,55 +29539,97 @@ pub unsafe extern "C" fn nzbget_rs_twin_resolve_kind(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_streamcrypto_fill_rar3_seed(
-    wchars: *const u32,
-    wchar_len: usize,
-    salt: *const u8,
-    out_seed: *mut u8,
-    out_seed_len: usize,
+pub unsafe extern "C" fn nzbget_rs_streamcrypto_derive_rar3(
+    password: *const c_char,
+    salt8: *const u8,
+    key16_out: *mut u8,
+    iv16_out: *mut u8,
 ) -> c_int {
-    if wchars.is_null() || salt.is_null() || out_seed.is_null() {
+    if salt8.is_null() || key16_out.is_null() || iv16_out.is_null() {
         return 0;
     }
-    let w_slice = std::slice::from_raw_parts(wchars, wchar_len);
-    let mut salt_arr = [0u8; 8];
-    std::ptr::copy_nonoverlapping(salt, salt_arr.as_mut_ptr(), 8);
-    let out_slice = std::slice::from_raw_parts_mut(out_seed, out_seed_len);
-    i32::from(crate::streamrepair::streamcrypto_fill_rar3_seed(
-        w_slice, &salt_arr, out_slice,
-    ))
+    let salt: &[u8; 8] = &*(salt8 as *const [u8; 8]);
+    let Some((key, iv)) = crate::streamrepair::streamcrypto_derive_rar3(input(password), salt) else {
+        return 0;
+    };
+    std::ptr::copy_nonoverlapping(key.as_ptr(), key16_out, 16);
+    std::ptr::copy_nonoverlapping(iv.as_ptr(), iv16_out, 16);
+    1
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_streamcrypto_rar5_iterations(
+pub unsafe extern "C" fn nzbget_rs_streamcrypto_derive_rar5(
+    password: *const c_char,
     kdf_count: u8,
-    add_psw_check_offset: c_int,
-    out_iterations: *mut c_int,
+    salt16: *const u8,
+    key32_out: *mut u8,
 ) -> c_int {
-    match crate::streamrepair::streamcrypto_rar5_iterations(kdf_count, add_psw_check_offset != 0) {
-        Some(iters) => {
-            if !out_iterations.is_null() {
-                *out_iterations = iters;
-            }
-            1
-        }
-        None => 0,
+    if salt16.is_null() || key32_out.is_null() {
+        return 0;
     }
+    let salt: &[u8; 16] = &*(salt16 as *const [u8; 16]);
+    let Some(key) = crate::streamrepair::streamcrypto_derive_rar5(input(password), kdf_count, salt)
+    else {
+        return 0;
+    };
+    std::ptr::copy_nonoverlapping(key.as_ptr(), key32_out, 32);
+    1
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_streamcrypto_next_batch(
-    done_blocks: i64,
-    total_blocks: i64,
-    block_size: i64,
-    out_len: *mut c_int,
-) -> i64 {
-    let (batch, len) =
-        crate::streamrepair::streamcrypto_next_batch(done_blocks, total_blocks, block_size);
-    if !out_len.is_null() {
-        *out_len = len;
+pub unsafe extern "C" fn nzbget_rs_streamcrypto_derive_rar5_psw_check(
+    password: *const c_char,
+    kdf_count: u8,
+    salt16: *const u8,
+    check8_out: *mut u8,
+) -> c_int {
+    if salt16.is_null() || check8_out.is_null() {
+        return 0;
     }
-    batch
+    let salt: &[u8; 16] = &*(salt16 as *const [u8; 16]);
+    let Some(check) =
+        crate::streamrepair::streamcrypto_derive_rar5_psw_check(input(password), kdf_count, salt)
+    else {
+        return 0;
+    };
+    std::ptr::copy_nonoverlapping(check.as_ptr(), check8_out, 8);
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_streamcrypto_crypt_cbc(
+    encrypt: c_int,
+    key: *const u8,
+    key_len: usize,
+    iv16: *const u8,
+    in_buf: *const u8,
+    out_buf: *mut u8,
+    blocks: i64,
+) -> c_int {
+    if blocks < 0 {
+        return 0;
+    }
+    if blocks == 0 {
+        return 1;
+    }
+    if key.is_null() || iv16.is_null() || in_buf.is_null() || out_buf.is_null() {
+        return 0;
+    }
+    let Some(byte_len) = (blocks as usize).checked_mul(16) else {
+        return 0;
+    };
+    let key_slice = std::slice::from_raw_parts(key, key_len);
+    let iv_arr: &[u8; 16] = &*(iv16 as *const [u8; 16]);
+    let in_slice = std::slice::from_raw_parts(in_buf, byte_len);
+    let out_slice = std::slice::from_raw_parts_mut(out_buf, byte_len);
+    i32::from(crate::streamrepair::streamcrypto_crypt_cbc(
+        encrypt != 0,
+        key_slice,
+        iv_arr,
+        in_slice,
+        out_slice,
+        blocks,
+    ))
 }
 
 #[no_mangle]

@@ -6,14 +6,11 @@ list(APPEND TESTS_SRC
 	${CMAKE_CURRENT_SOURCE_DIR}/postprocess/MoveController.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/postprocess/PrePostProcessor.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/postprocess/RarReader.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/postprocess/RarRenamer.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/postprocess/StreamCrypto.cpp
 )
 
 if(NOT DISABLE_PARCHECK)
 	list(APPEND TESTS_SRC
 		${CMAKE_CURRENT_SOURCE_DIR}/postprocess/ParChecker.cpp
-		${CMAKE_CURRENT_SOURCE_DIR}/postprocess/ParRenamer.cpp
 	)
 endif()
 

@@ -1660,9 +1660,6 @@ int nzbget_rs_dupematcher_size_diff_ok(int64_t size1, int64_t size2, int max_dif
 int nzbget_rs_dupematcher_parse_rar_lister_line(
     const char* text, int64_t expected_size, int64_t* max_size, int* compressed, int* last_size_max);
 
-void nzbget_rs_streamcrypto_rar3_swizzle_key(const uint8_t* digest20, uint8_t* key16_out);
-void nzbget_rs_streamcrypto_rar5_fold_psw_check(const uint8_t* value32, uint8_t* check8_out);
-
 size_t nzbget_rs_repair_select_more_pars(
     const int* sorted_block_counts, size_t count, int block_needed,
     size_t* out_indices, size_t cap, int* out_remaining_needed);
@@ -2345,7 +2342,9 @@ uint64_t nzbget_rs_euh_benchmark_limit_by_free_space(
 size_t nzbget_rs_euh_benchmark_calc_write_chunk(
     size_t block_size, uint64_t max_bytes, uint64_t write_bytes);
 const char* nzbget_rs_euh_unrar_overwrite_switch(int mode);
-int nzbget_rs_euh_unrar_is_part1_or_unsplit_rar(const char* filename, size_t len);
+int nzbget_rs_euh_unrar_is_supported(const char* path, size_t len);
+int nzbget_rs_euh_sevenzip_is_supported(const char* path, size_t len);
+NzbgetRsBuf nzbget_rs_euh_extractor_make_password(const char* password, size_t len);
 int nzbget_rs_euh_unrar_decode_exit_code(int ec, const char** out_msg);
 const char* nzbget_rs_euh_sevenzip_overwrite_switch(int mode);
 int nzbget_rs_euh_sevenzip_decode_exit_code(int ec, const char** out_msg);
@@ -5267,13 +5266,15 @@ NzbgetRsBuf nzbget_rs_twin_resolve_kind(
     int is_primary, int is_dupe, int by_par2, const char* by_files, int listed, int same_print,
     int sampleable, int sampled_now, const char* sampled_val);
 
-int nzbget_rs_streamcrypto_fill_rar3_seed(
-    const uint32_t* wchars, size_t wchar_len, const uint8_t* salt,
-    uint8_t* out_seed, size_t out_seed_len);
-int nzbget_rs_streamcrypto_rar5_iterations(
-    uint8_t kdf_count, int add_psw_check_offset, int* out_iterations);
-int64_t nzbget_rs_streamcrypto_next_batch(
-    int64_t done_blocks, int64_t total_blocks, int64_t block_size, int* out_len);
+int nzbget_rs_streamcrypto_derive_rar3(
+    const char* password, const uint8_t* salt8, uint8_t* key16_out, uint8_t* iv16_out);
+int nzbget_rs_streamcrypto_derive_rar5(
+    const char* password, uint8_t kdf_count, const uint8_t* salt16, uint8_t* key32_out);
+int nzbget_rs_streamcrypto_derive_rar5_psw_check(
+    const char* password, uint8_t kdf_count, const uint8_t* salt16, uint8_t* check8_out);
+int nzbget_rs_streamcrypto_crypt_cbc(
+    int encrypt, const uint8_t* key, size_t key_len, const uint8_t* iv16,
+    const uint8_t* in_buf, uint8_t* out_buf, int64_t blocks);
 
 int nzbget_rs_stream_eval_build_repair_job(
     int fallback_mode, int daf_stream, int raw_article, int is_par_file,

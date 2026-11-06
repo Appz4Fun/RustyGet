@@ -3353,6 +3353,806 @@ pub fn stream_repair_bytes_to_mb(bytes: i64) -> f64 {
     (bytes as f64) / 1024.0 / 1024.0
 }
 
+// ============================================================================
+// Pure-Rust StreamCrypto & RarCryptoContext (`daemon/postprocess/StreamCrypto.cpp`)
+// ============================================================================
+
+#[derive(Clone)]
+struct Sha1 {
+    h: [u32; 5],
+    buf: [u8; 64],
+    buf_len: usize,
+    total_len: u64,
+}
+
+impl Sha1 {
+    fn new() -> Self {
+        Self {
+            h: [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0],
+            buf: [0u8; 64],
+            buf_len: 0,
+            total_len: 0,
+        }
+    }
+
+    #[inline]
+    fn compress(h: &mut [u32; 5], block: &[u8; 64]) {
+        let mut w = [0u32; 80];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes([
+                block[i * 4],
+                block[i * 4 + 1],
+                block[i * 4 + 2],
+                block[i * 4 + 3],
+            ]);
+        }
+        for i in 16..80 {
+            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+        }
+
+        let mut a = h[0];
+        let mut b = h[1];
+        let mut c = h[2];
+        let mut d = h[3];
+        let mut e = h[4];
+
+        for (i, &wi) in w.iter().enumerate() {
+            let (f, k) = match i {
+                0..=19 => ((b & c) | (!b & d), 0x5A827999u32),
+                20..=39 => (b ^ c ^ d, 0x6ED9EBA1u32),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1BBCDCu32),
+                _ => (b ^ c ^ d, 0xCA62C1D6u32),
+            };
+            let temp = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(wi);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = temp;
+        }
+
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+    }
+
+    fn update(&mut self, mut data: &[u8]) {
+        self.total_len = self.total_len.wrapping_add(data.len() as u64);
+        if self.buf_len > 0 {
+            let take = (64 - self.buf_len).min(data.len());
+            self.buf[self.buf_len..self.buf_len + take].copy_from_slice(&data[..take]);
+            self.buf_len += take;
+            data = &data[take..];
+            if self.buf_len == 64 {
+                Self::compress(&mut self.h, &self.buf);
+                self.buf_len = 0;
+            }
+        }
+        while data.len() >= 64 {
+            let block: &[u8; 64] = data[..64].try_into().unwrap();
+            Self::compress(&mut self.h, block);
+            data = &data[64..];
+        }
+        if !data.is_empty() {
+            self.buf[..data.len()].copy_from_slice(data);
+            self.buf_len = data.len();
+        }
+    }
+
+    fn finalize(&self) -> [u8; 20] {
+        let mut h = self.h;
+        let mut block = self.buf;
+        let mut pos = self.buf_len;
+        block[pos] = 0x80;
+        pos += 1;
+        if pos > 56 {
+            block[pos..64].fill(0);
+            Self::compress(&mut h, &block);
+            block.fill(0);
+        } else {
+            block[pos..56].fill(0);
+        }
+        let bits = self.total_len.wrapping_mul(8);
+        block[56..64].copy_from_slice(&bits.to_be_bytes());
+        Self::compress(&mut h, &block);
+
+        let mut out = [0u8; 20];
+        for (i, &word) in h.iter().enumerate() {
+            out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
+        }
+        out
+    }
+}
+
+const SHA256_K: [u32; 64] = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+    0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+    0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+    0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+    0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+    0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+    0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+    0xc67178f2,
+];
+
+const SHA256_H0: [u32; 8] = [
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+    0x5be0cd19,
+];
+
+#[inline]
+fn sha256_compress(h: &mut [u32; 8], block: &[u8; 64]) {
+    let mut w = [0u32; 64];
+    for i in 0..16 {
+        w[i] = u32::from_be_bytes([
+            block[i * 4],
+            block[i * 4 + 1],
+            block[i * 4 + 2],
+            block[i * 4 + 3],
+        ]);
+    }
+    for i in 16..64 {
+        let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+        let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16]
+            .wrapping_add(s0)
+            .wrapping_add(w[i - 7])
+            .wrapping_add(s1);
+    }
+
+    let mut a = h[0];
+    let mut b = h[1];
+    let mut c = h[2];
+    let mut d = h[3];
+    let mut e = h[4];
+    let mut f = h[5];
+    let mut g = h[6];
+    let mut hh = h[7];
+
+    for i in 0..64 {
+        let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+        let ch = (e & f) ^ (!e & g);
+        let temp1 = hh
+            .wrapping_add(s1)
+            .wrapping_add(ch)
+            .wrapping_add(SHA256_K[i])
+            .wrapping_add(w[i]);
+        let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+        let maj = (a & b) ^ (a & c) ^ (b & c);
+        let temp2 = s0.wrapping_add(maj);
+
+        hh = g;
+        g = f;
+        f = e;
+        e = d.wrapping_add(temp1);
+        d = c;
+        c = b;
+        b = a;
+        a = temp1.wrapping_add(temp2);
+    }
+
+    h[0] = h[0].wrapping_add(a);
+    h[1] = h[1].wrapping_add(b);
+    h[2] = h[2].wrapping_add(c);
+    h[3] = h[3].wrapping_add(d);
+    h[4] = h[4].wrapping_add(e);
+    h[5] = h[5].wrapping_add(f);
+    h[6] = h[6].wrapping_add(g);
+    h[7] = h[7].wrapping_add(hh);
+}
+
+#[derive(Clone)]
+struct Sha256 {
+    h: [u32; 8],
+    buf: [u8; 64],
+    buf_len: usize,
+    total_len: u64,
+}
+
+impl Sha256 {
+    fn new() -> Self {
+        Self {
+            h: SHA256_H0,
+            buf: [0u8; 64],
+            buf_len: 0,
+            total_len: 0,
+        }
+    }
+
+    fn update(&mut self, mut data: &[u8]) {
+        self.total_len = self.total_len.wrapping_add(data.len() as u64);
+        if self.buf_len > 0 {
+            let take = (64 - self.buf_len).min(data.len());
+            self.buf[self.buf_len..self.buf_len + take].copy_from_slice(&data[..take]);
+            self.buf_len += take;
+            data = &data[take..];
+            if self.buf_len == 64 {
+                sha256_compress(&mut self.h, &self.buf);
+                self.buf_len = 0;
+            }
+        }
+        while data.len() >= 64 {
+            let block: &[u8; 64] = data[..64].try_into().unwrap();
+            sha256_compress(&mut self.h, block);
+            data = &data[64..];
+        }
+        if !data.is_empty() {
+            self.buf[..data.len()].copy_from_slice(data);
+            self.buf_len = data.len();
+        }
+    }
+
+    fn finalize(&self) -> [u8; 32] {
+        let mut h = self.h;
+        let mut block = self.buf;
+        let mut pos = self.buf_len;
+        block[pos] = 0x80;
+        pos += 1;
+        if pos > 56 {
+            block[pos..64].fill(0);
+            sha256_compress(&mut h, &block);
+            block.fill(0);
+        } else {
+            block[pos..56].fill(0);
+        }
+        let bits = self.total_len.wrapping_mul(8);
+        block[56..64].copy_from_slice(&bits.to_be_bytes());
+        sha256_compress(&mut h, &block);
+
+        let mut out = [0u8; 32];
+        for (i, &word) in h.iter().enumerate() {
+            out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
+        }
+        out
+    }
+}
+
+fn pbkdf2_hmac_sha256_32(password: &[u8], salt: &[u8; 16], iterations: usize) -> [u8; 32] {
+    let mut key_block = [0u8; 64];
+    if password.len() > 64 {
+        let mut s = Sha256::new();
+        s.update(password);
+        let d = s.finalize();
+        key_block[..32].copy_from_slice(&d);
+    } else {
+        key_block[..password.len()].copy_from_slice(password);
+    }
+
+    let mut ipad = [0x36u8; 64];
+    let mut opad = [0x5cu8; 64];
+    for i in 0..64 {
+        ipad[i] ^= key_block[i];
+        opad[i] ^= key_block[i];
+    }
+
+    let mut ipad_h = SHA256_H0;
+    sha256_compress(&mut ipad_h, &ipad);
+    let mut opad_h = SHA256_H0;
+    sha256_compress(&mut opad_h, &opad);
+
+    // Iteration 1: HMAC(password, salt || 0x00000001)
+    let mut inner0 = Sha256 {
+        h: ipad_h,
+        buf: [0u8; 64],
+        buf_len: 0,
+        total_len: 64,
+    };
+    inner0.update(salt);
+    inner0.update(&[0, 0, 0, 1]);
+    let u_inner = inner0.finalize();
+
+    let mut block = [0u8; 64];
+    block[..32].copy_from_slice(&u_inner);
+    block[32] = 0x80;
+    // total_len = 64 + 32 = 96 bytes = 768 bits (0x0300)
+    block[62] = 0x03;
+    block[63] = 0x00;
+
+    let mut h_out = opad_h;
+    sha256_compress(&mut h_out, &block);
+    let mut u_words = h_out;
+    let mut dk_words = u_words;
+
+    for _ in 1..iterations {
+        for (i, &w) in u_words.iter().enumerate() {
+            block[i * 4..i * 4 + 4].copy_from_slice(&w.to_be_bytes());
+        }
+        let mut h_in = ipad_h;
+        sha256_compress(&mut h_in, &block);
+        for (i, &w) in h_in.iter().enumerate() {
+            block[i * 4..i * 4 + 4].copy_from_slice(&w.to_be_bytes());
+        }
+        let mut h_o = opad_h;
+        sha256_compress(&mut h_o, &block);
+        u_words = h_o;
+        for i in 0..8 {
+            dk_words[i] ^= u_words[i];
+        }
+    }
+
+    let mut out = [0u8; 32];
+    for (i, &w) in dk_words.iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&w.to_be_bytes());
+    }
+    out
+}
+
+/// `StreamCrypto::DeriveRar3`: derives the 16-byte AES-128 key and 16-byte CBC IV from UTF-8 `password` and 8-byte `salt`.
+pub fn streamcrypto_derive_rar3(password: &[u8], salt: &[u8; 8]) -> Option<([u8; 16], [u8; 16])> {
+    let nul_pos = password.iter().position(|&b| b == 0).unwrap_or(password.len());
+    let pwd = &password[..nul_pos];
+    if pwd.is_empty() {
+        return None;
+    }
+    let mut utf16 = vec![0u16; pwd.len() * 2 + 1];
+    let written = crate::util::wstring_decode_utf8_to_utf16(pwd, &mut utf16);
+    if written == 0 {
+        return None;
+    }
+    let wchars: Vec<u32> = utf16[..written].iter().map(|&u| u32::from(u)).collect();
+    let mut seed = vec![0u8; wchars.len() * 2 + 8];
+    if !streamcrypto_fill_rar3_seed(&wchars, salt, &mut seed) {
+        return None;
+    }
+
+    const ROUNDS: usize = 0x40000;
+    let mut sha1 = Sha1::new();
+    let mut iv = [0u8; 16];
+    for i in 0..ROUNDS {
+        sha1.update(&seed);
+        let buf = [i as u8, (i >> 8) as u8, (i >> 16) as u8];
+        sha1.update(&buf);
+        if i % (ROUNDS / 16) == 0 {
+            let d = sha1.finalize();
+            iv[i / (ROUNDS / 16)] = d[19];
+        }
+    }
+    let digest = sha1.finalize();
+    let mut key = [0u8; 16];
+    crate::postrepair::rar3_swizzle_key(&digest, &mut key);
+    Some((key, iv))
+}
+
+/// `StreamCrypto::DeriveRar5`: derives the 32-byte AES-256 key via PBKDF2-HMAC-SHA256.
+pub fn streamcrypto_derive_rar5(
+    password: &[u8],
+    kdf_count: u8,
+    salt: &[u8; 16],
+) -> Option<[u8; 32]> {
+    let iterations = streamcrypto_rar5_iterations(kdf_count, false)? as usize;
+    let nul_pos = password.iter().position(|&b| b == 0).unwrap_or(password.len());
+    let pwd = &password[..nul_pos];
+    Some(pbkdf2_hmac_sha256_32(pwd, salt, iterations))
+}
+
+/// `StreamCrypto::DeriveRar5PswCheck`: derives the 8-byte RAR5 password check value.
+pub fn streamcrypto_derive_rar5_psw_check(
+    password: &[u8],
+    kdf_count: u8,
+    salt: &[u8; 16],
+) -> Option<[u8; 8]> {
+    let iterations = streamcrypto_rar5_iterations(kdf_count, true)? as usize;
+    let nul_pos = password.iter().position(|&b| b == 0).unwrap_or(password.len());
+    let pwd = &password[..nul_pos];
+    let value = pbkdf2_hmac_sha256_32(pwd, salt, iterations);
+    let mut check = [0u8; 8];
+    crate::postrepair::rar5_fold_psw_check(&value, &mut check);
+    Some(check)
+}
+
+const AES_SBOX: [u8; 256] = [
+    0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab,
+    0x76, 0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4,
+    0x72, 0xc0, 0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71,
+    0xd8, 0x31, 0x15, 0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a, 0x07, 0x12, 0x80, 0xe2,
+    0xeb, 0x27, 0xb2, 0x75, 0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0, 0x52, 0x3b, 0xd6,
+    0xb3, 0x29, 0xe3, 0x2f, 0x84, 0x53, 0xd1, 0x00, 0xed, 0x20, 0xfc, 0xb1, 0x5b, 0x6a, 0xcb,
+    0xbe, 0x39, 0x4a, 0x4c, 0x58, 0xcf, 0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85, 0x45,
+    0xf9, 0x02, 0x7f, 0x50, 0x3c, 0x9f, 0xa8, 0x51, 0xa3, 0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5,
+    0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2, 0xcd, 0x0c, 0x13, 0xec, 0x5f, 0x97, 0x44,
+    0x17, 0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73, 0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a,
+    0x90, 0x88, 0x46, 0xee, 0xb8, 0x14, 0xde, 0x5e, 0x0b, 0xdb, 0xe0, 0x32, 0x3a, 0x0a, 0x49,
+    0x06, 0x24, 0x5c, 0xc2, 0xd3, 0xac, 0x62, 0x91, 0x95, 0xe4, 0x79, 0xe7, 0xc8, 0x37, 0x6d,
+    0x8d, 0xd5, 0x4e, 0xa9, 0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a, 0xae, 0x08, 0xba, 0x78, 0x25,
+    0x2e, 0x1c, 0xa6, 0xb4, 0xc6, 0xe8, 0xdd, 0x74, 0x1f, 0x4b, 0xbd, 0x8b, 0x8a, 0x70, 0x3e,
+    0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e, 0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e, 0xe1,
+    0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
+    0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb,
+    0x16,
+];
+
+const AES_INV_SBOX: [u8; 256] = [
+    0x52, 0x09, 0x6a, 0xd5, 0x30, 0x36, 0xa5, 0x38, 0xbf, 0x40, 0xa3, 0x9e, 0x81, 0xf3, 0xd7,
+    0xfb, 0x7c, 0xe3, 0x39, 0x82, 0x9b, 0x2f, 0xff, 0x87, 0x34, 0x8e, 0x43, 0x44, 0xc4, 0xde,
+    0xe9, 0xcb, 0x54, 0x7b, 0x94, 0x32, 0xa6, 0xc2, 0x23, 0x3d, 0xee, 0x4c, 0x95, 0x0b, 0x42,
+    0xfa, 0xc3, 0x4e, 0x08, 0x2e, 0xa1, 0x66, 0x28, 0xd9, 0x24, 0xb2, 0x76, 0x5b, 0xa2, 0x49,
+    0x6d, 0x8b, 0xd1, 0x25, 0x72, 0xf8, 0xf6, 0x64, 0x86, 0x68, 0x98, 0x16, 0xd4, 0xa4, 0x5c,
+    0xcc, 0x5d, 0x65, 0xb6, 0x92, 0x6c, 0x70, 0x48, 0x50, 0xfd, 0xed, 0xb9, 0xda, 0x5e, 0x15,
+    0x46, 0x57, 0xa7, 0x8d, 0x9d, 0x84, 0x90, 0xd8, 0xab, 0x00, 0x8c, 0xbc, 0xd3, 0x0a, 0xf7,
+    0xe4, 0x58, 0x05, 0xb8, 0xb3, 0x45, 0x06, 0xd0, 0x2c, 0x1e, 0x8f, 0xca, 0x3f, 0x0f, 0x02,
+    0xc1, 0xaf, 0xbd, 0x03, 0x01, 0x13, 0x8a, 0x6b, 0x3a, 0x91, 0x11, 0x41, 0x4f, 0x67, 0xdc,
+    0xea, 0x97, 0xf2, 0xcf, 0xce, 0xf0, 0xb4, 0xe6, 0x73, 0x96, 0xac, 0x74, 0x22, 0xe7, 0xad,
+    0x35, 0x85, 0xe2, 0xf9, 0x37, 0xe8, 0x1c, 0x75, 0xdf, 0x6e, 0x47, 0xf1, 0x1a, 0x71, 0x1d,
+    0x29, 0xc5, 0x89, 0x6f, 0xb7, 0x62, 0x0e, 0xaa, 0x18, 0xbe, 0x1b, 0xfc, 0x56, 0x3e, 0x4b,
+    0xc6, 0xd2, 0x79, 0x20, 0x9a, 0xdb, 0xc0, 0xfe, 0x78, 0xcd, 0x5a, 0xf4, 0x1f, 0xdd, 0xa8,
+    0x33, 0x88, 0x07, 0xc7, 0x31, 0xb1, 0x12, 0x10, 0x59, 0x27, 0x80, 0xec, 0x5f, 0x60, 0x51,
+    0x7f, 0xa9, 0x19, 0xb5, 0x4a, 0x0d, 0x2d, 0xe5, 0x7a, 0x9f, 0x93, 0xc9, 0x9c, 0xef, 0xa0,
+    0xe0, 0x3b, 0x4d, 0xae, 0x2a, 0xf5, 0xb0, 0xc8, 0xeb, 0xbb, 0x3c, 0x83, 0x53, 0x99, 0x61,
+    0x17, 0x2b, 0x04, 0x7e, 0xba, 0x77, 0xd6, 0x26, 0xe1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0c,
+    0x7d,
+];
+
+const AES_RCON: [u32; 10] = [
+    0x01000000, 0x02000000, 0x04000000, 0x08000000, 0x10000000, 0x20000000, 0x40000000,
+    0x80000000, 0x1b000000, 0x36000000,
+];
+
+#[inline]
+fn aes_sub_word(w: u32) -> u32 {
+    let b = w.to_be_bytes();
+    u32::from_be_bytes([
+        AES_SBOX[b[0] as usize],
+        AES_SBOX[b[1] as usize],
+        AES_SBOX[b[2] as usize],
+        AES_SBOX[b[3] as usize],
+    ])
+}
+
+#[inline]
+fn aes_xtime(x: u8) -> u8 {
+    (x << 1) ^ if x & 0x80 != 0 { 0x1b } else { 0 }
+}
+
+#[inline]
+fn aes_gmul(mut a: u8, mut b: u8) -> u8 {
+    let mut p = 0u8;
+    for _ in 0..8 {
+        if b & 1 != 0 {
+            p ^= a;
+        }
+        a = aes_xtime(a);
+        b >>= 1;
+    }
+    p
+}
+
+#[derive(Clone)]
+struct AesRoundKeys {
+    rounds: usize,
+    rk: [[u8; 16]; 15],
+}
+
+impl AesRoundKeys {
+    fn new(key: &[u8]) -> Option<Self> {
+        let (nk, nr) = match key.len() {
+            16 => (4usize, 10usize),
+            32 => (8usize, 14usize),
+            _ => return None,
+        };
+        let total_words = 4 * (nr + 1);
+        let mut w = [0u32; 60];
+        for i in 0..nk {
+            w[i] = u32::from_be_bytes([key[i * 4], key[i * 4 + 1], key[i * 4 + 2], key[i * 4 + 3]]);
+        }
+        for i in nk..total_words {
+            let mut temp = w[i - 1];
+            if i % nk == 0 {
+                temp = aes_sub_word(temp.rotate_left(8)) ^ AES_RCON[i / nk - 1];
+            } else if nk == 8 && i % nk == 4 {
+                temp = aes_sub_word(temp);
+            }
+            w[i] = w[i - nk] ^ temp;
+        }
+        let mut rk = [[0u8; 16]; 15];
+        for r in 0..=nr {
+            for c in 0..4 {
+                rk[r][c * 4..c * 4 + 4].copy_from_slice(&w[r * 4 + c].to_be_bytes());
+            }
+        }
+        Some(Self { rounds: nr, rk })
+    }
+
+    #[inline]
+    fn encrypt_block(&self, input: &[u8; 16]) -> [u8; 16] {
+        let mut s = *input;
+        for i in 0..16 {
+            s[i] ^= self.rk[0][i];
+        }
+        for r in 1..self.rounds {
+            for b in &mut s {
+                *b = AES_SBOX[*b as usize];
+            }
+            // ShiftRows
+            let t1 = s[1];
+            s[1] = s[5];
+            s[5] = s[9];
+            s[9] = s[13];
+            s[13] = t1;
+            s.swap(2, 10);
+            s.swap(6, 14);
+            let t3 = s[15];
+            s[15] = s[11];
+            s[11] = s[7];
+            s[7] = s[3];
+            s[3] = t3;
+            // MixColumns
+            for c in 0..4 {
+                let i = c * 4;
+                let (s0, s1, s2, s3) = (s[i], s[i + 1], s[i + 2], s[i + 3]);
+                let tm = s0 ^ s1 ^ s2 ^ s3;
+                s[i] ^= tm ^ aes_xtime(s0 ^ s1);
+                s[i + 1] ^= tm ^ aes_xtime(s1 ^ s2);
+                s[i + 2] ^= tm ^ aes_xtime(s2 ^ s3);
+                s[i + 3] ^= tm ^ aes_xtime(s3 ^ s0);
+            }
+            for i in 0..16 {
+                s[i] ^= self.rk[r][i];
+            }
+        }
+        for b in &mut s {
+            *b = AES_SBOX[*b as usize];
+        }
+        let t1 = s[1];
+        s[1] = s[5];
+        s[5] = s[9];
+        s[9] = s[13];
+        s[13] = t1;
+        s.swap(2, 10);
+        s.swap(6, 14);
+        let t3 = s[15];
+        s[15] = s[11];
+        s[11] = s[7];
+        s[7] = s[3];
+        s[3] = t3;
+        for i in 0..16 {
+            s[i] ^= self.rk[self.rounds][i];
+        }
+        s
+    }
+
+    #[inline]
+    fn decrypt_block(&self, input: &[u8; 16]) -> [u8; 16] {
+        let mut s = *input;
+        for i in 0..16 {
+            s[i] ^= self.rk[self.rounds][i];
+        }
+        for r in (1..self.rounds).rev() {
+            // InvShiftRows
+            let t1 = s[13];
+            s[13] = s[9];
+            s[9] = s[5];
+            s[5] = s[1];
+            s[1] = t1;
+            s.swap(2, 10);
+            s.swap(6, 14);
+            let t3 = s[3];
+            s[3] = s[7];
+            s[7] = s[11];
+            s[11] = s[15];
+            s[15] = t3;
+            // InvSubBytes & AddRoundKey
+            for i in 0..16 {
+                s[i] = AES_INV_SBOX[s[i] as usize] ^ self.rk[r][i];
+            }
+            // InvMixColumns
+            for c in 0..4 {
+                let i = c * 4;
+                let (s0, s1, s2, s3) = (s[i], s[i + 1], s[i + 2], s[i + 3]);
+                s[i] = aes_gmul(s0, 14) ^ aes_gmul(s1, 11) ^ aes_gmul(s2, 13) ^ aes_gmul(s3, 9);
+                s[i + 1] =
+                    aes_gmul(s0, 9) ^ aes_gmul(s1, 14) ^ aes_gmul(s2, 11) ^ aes_gmul(s3, 13);
+                s[i + 2] =
+                    aes_gmul(s0, 13) ^ aes_gmul(s1, 9) ^ aes_gmul(s2, 14) ^ aes_gmul(s3, 11);
+                s[i + 3] =
+                    aes_gmul(s0, 11) ^ aes_gmul(s1, 13) ^ aes_gmul(s2, 9) ^ aes_gmul(s3, 14);
+            }
+        }
+        let t1 = s[13];
+        s[13] = s[9];
+        s[9] = s[5];
+        s[5] = s[1];
+        s[1] = t1;
+        s.swap(2, 10);
+        s.swap(6, 14);
+        let t3 = s[3];
+        s[3] = s[7];
+        s[7] = s[11];
+        s[11] = s[15];
+        s[15] = t3;
+        for i in 0..16 {
+            s[i] = AES_INV_SBOX[s[i] as usize] ^ self.rk[0][i];
+        }
+        s
+    }
+}
+
+/// Pure-Rust `RarCryptoContext::Crypt` (AES-128-CBC or AES-256-CBC with padding disabled).
+pub fn streamcrypto_crypt_cbc(
+    encrypt: bool,
+    key: &[u8],
+    iv: &[u8; 16],
+    input: &[u8],
+    output: &mut [u8],
+    blocks: i64,
+) -> bool {
+    if blocks < 0 {
+        return false;
+    }
+    if blocks == 0 {
+        return true;
+    }
+    let Some(byte_len) = (blocks as usize).checked_mul(16) else {
+        return false;
+    };
+    if input.len() < byte_len || output.len() < byte_len {
+        return false;
+    }
+    let Some(aes) = AesRoundKeys::new(key) else {
+        return false;
+    };
+    let mut cv = *iv;
+    if encrypt {
+        for b in 0..blocks as usize {
+            let off = b * 16;
+            let mut block = [0u8; 16];
+            for i in 0..16 {
+                block[i] = input[off + i] ^ cv[i];
+            }
+            cv = aes.encrypt_block(&block);
+            output[off..off + 16].copy_from_slice(&cv);
+        }
+    } else {
+        for b in 0..blocks as usize {
+            let off = b * 16;
+            let c_block: [u8; 16] = input[off..off + 16].try_into().unwrap();
+            let mut dec = aes.decrypt_block(&c_block);
+            for i in 0..16 {
+                dec[i] ^= cv[i];
+            }
+            output[off..off + 16].copy_from_slice(&dec);
+            cv = c_block;
+        }
+    }
+    true
+}
+
+/// Pure-Rust `RarCryptoContext` mirroring `daemon/postprocess/StreamCrypto.h`.
+#[derive(Clone)]
+pub struct RarCryptoContext {
+    key: Vec<u8>,
+    iv: [u8; 16],
+}
+
+impl RarCryptoContext {
+    pub const CRYPTO_BLOCK_SIZE: usize = 16;
+
+    pub fn make_rar3(password: &[u8], salt: &[u8; 8]) -> Option<Self> {
+        let (key, iv) = streamcrypto_derive_rar3(password, salt)?;
+        Some(Self {
+            key: key.to_vec(),
+            iv,
+        })
+    }
+
+    pub fn make_rar5(password: &[u8], crypt: &crate::rarreader::Rar5Crypt) -> Option<Self> {
+        let nul_pos = password.iter().position(|&b| b == 0).unwrap_or(password.len());
+        if nul_pos == 0 || crypt.version != 0 {
+            return None;
+        }
+        let key = streamcrypto_derive_rar5(password, crypt.kdf_count, &crypt.salt)?;
+        if crypt.has_check {
+            let check = streamcrypto_derive_rar5_psw_check(password, crypt.kdf_count, &crypt.salt)?;
+            if check != crypt.check_value[..8] {
+                return None;
+            }
+        }
+        Some(Self {
+            key: key.to_vec(),
+            iv: crypt.iv,
+        })
+    }
+
+    pub fn decrypt_range(
+        &self,
+        prev_cipher_block: Option<&[u8; 16]>,
+        cipher: &[u8],
+        plain: &mut [u8],
+        blocks: i64,
+    ) -> bool {
+        let iv = prev_cipher_block.unwrap_or(&self.iv);
+        streamcrypto_crypt_cbc(false, &self.key, iv, cipher, plain, blocks)
+    }
+
+    pub fn encrypt_range(
+        &self,
+        prev_cipher_block: Option<&[u8; 16]>,
+        plain: &[u8],
+        cipher: &mut [u8],
+        blocks: i64,
+    ) -> bool {
+        let iv = prev_cipher_block.unwrap_or(&self.iv);
+        streamcrypto_crypt_cbc(true, &self.key, iv, plain, cipher, blocks)
+    }
+}
+
+/// Pure-Rust implementation of `crate::rarreader::Cipher` for parsing header-encrypted (`-hp`) RAR3/RAR5 volumes.
+#[derive(Clone, Default)]
+pub struct NativeRarCipher {
+    password: Vec<u8>,
+    key: [u8; 32],
+    iv: [u8; 16],
+    aes: Option<AesRoundKeys>,
+    cv: [u8; 16],
+}
+
+impl NativeRarCipher {
+    pub fn new(password: &[u8]) -> Self {
+        Self {
+            password: password.to_vec(),
+            ..Self::default()
+        }
+    }
+}
+
+impl crate::rarreader::Cipher for NativeRarCipher {
+    fn rar3_prepare(&mut self, salt: &[u8; 8]) -> bool {
+        let Some((key, iv)) = streamcrypto_derive_rar3(&self.password, salt) else {
+            return false;
+        };
+        self.key[..16].copy_from_slice(&key);
+        self.iv = iv;
+        true
+    }
+
+    fn rar5_prepare(&mut self, kdf_count: u8, salt: &[u8; 16]) -> bool {
+        let Some(key) = streamcrypto_derive_rar5(&self.password, kdf_count, salt) else {
+            return false;
+        };
+        self.key = key;
+        true
+    }
+
+    fn init(&mut self, key_bits: i32, iv: Option<&[u8; 16]>) -> bool {
+        if let Some(iv) = iv {
+            self.iv = *iv;
+        }
+        let key_slice = match key_bits {
+            128 => &self.key[..16],
+            256 => &self.key[..32],
+            _ => return false,
+        };
+        self.aes = AesRoundKeys::new(key_slice);
+        self.cv = self.iv;
+        self.aes.is_some()
+    }
+
+    fn decrypt(&mut self, input: &[u8; 16], output: &mut [u8; 16]) -> bool {
+        let Some(aes) = &self.aes else {
+            return false;
+        };
+        let mut dec = aes.decrypt_block(input);
+        for i in 0..16 {
+            dec[i] ^= self.cv[i];
+        }
+        *output = dec;
+        self.cv = *input;
+        true
+    }
+
+    fn free(&mut self) {
+        self.aes = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3643,5 +4443,523 @@ mod tests {
         );
         assert_eq!(calc_encrypted_chunk_end(16, 64, 32, 16), (48, 2));
         assert!(materialize_article_valid(true, 100, 0, 1000, -1));
+    }
+
+    struct MemSource(Vec<u8>);
+    impl crate::rarreader::Source for MemSource {
+        fn size(&mut self) -> i64 {
+            self.0.len() as i64
+        }
+        fn read(&mut self, offset: i64, buf: &mut [u8]) -> bool {
+            if offset < 0 {
+                return false;
+            }
+            let Some(end) = (offset as usize).checked_add(buf.len()) else {
+                return false;
+            };
+            let Some(slice) = self.0.get(offset as usize..end) else {
+                return false;
+            };
+            buf.copy_from_slice(slice);
+            true
+        }
+    }
+
+    struct VecFiles(Vec<crate::rarreader::RarFile>);
+    impl crate::rarreader::Files for VecFiles {
+        fn add(&mut self, file: &crate::rarreader::RarFile) -> bool {
+            self.0.push(file.clone());
+            true
+        }
+        fn set_data_offset(&mut self, position: i64) {
+            if let Some(last) = self.0.last_mut() {
+                last.data_offset = position.wrapping_sub(last.packed_size);
+            }
+        }
+    }
+
+    fn parse_rar_bytes(
+        bytes: Vec<u8>,
+        password: &[u8],
+    ) -> (bool, crate::rarreader::Volume, Vec<crate::rarreader::RarFile>) {
+        let mut vol = crate::rarreader::Volume {
+            has_password: !password.is_empty(),
+            ..crate::rarreader::Volume::default()
+        };
+        let mut src = MemSource(bytes);
+        let mut cipher = NativeRarCipher::new(password);
+        let mut files = VecFiles(Vec::new());
+        let ok = crate::rarreader::read_from(&mut vol, &mut src, &mut cipher, &mut files);
+        (ok, vol, files.0)
+    }
+
+    fn put_vint(out: &mut Vec<u8>, mut value: u64) {
+        loop {
+            let seven = (value & 0x7f) as u8;
+            value >>= 7;
+            out.push(seven | if value != 0 { 0x80 } else { 0 });
+            if value == 0 {
+                break;
+            }
+        }
+    }
+
+    fn build_rar3_salt_volume(
+        data: &[u8],
+        name: &[u8],
+        salt: &[u8],
+        trailing: bool,
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"Rar!\x1a\x07\x00");
+        // MAIN: VOLUME | NEWNUMBERING
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.push(0x73);
+        out.extend_from_slice(&0x0011u16.to_le_bytes());
+        out.extend_from_slice(&13u16.to_le_bytes());
+        out.extend_from_slice(&[0u8; 6]);
+
+        let name_len = name.len() as u16;
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.push(0x74);
+        out.extend_from_slice(&(0x8000u16 | 0x0400 | 0x0004).to_le_bytes());
+        out.extend_from_slice(&(32 + name_len + 8).to_le_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.push(0);
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.push(29);
+        out.push(0x30);
+        out.extend_from_slice(&name_len.to_le_bytes());
+        out.extend_from_slice(&0x20u32.to_le_bytes());
+        out.extend_from_slice(name);
+        out.extend_from_slice(salt);
+        if !trailing {
+            return out;
+        }
+        out.extend_from_slice(data);
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.push(0x7b);
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&7u16.to_le_bytes());
+        out
+    }
+
+    struct Rar5CryptSpec {
+        version: u64,
+        flags: u64,
+        kdf_count: u8,
+        include_salt: bool,
+        include_iv: bool,
+        include_check: bool,
+        record_size_override: Option<u64>,
+        trailing: bool,
+    }
+
+    impl Default for Rar5CryptSpec {
+        fn default() -> Self {
+            Self {
+                version: 0,
+                flags: 0x01,
+                kdf_count: 15,
+                include_salt: true,
+                include_iv: true,
+                include_check: true,
+                record_size_override: None,
+                trailing: true,
+            }
+        }
+    }
+
+    fn build_rar5_crypt_volume(
+        data: &[u8],
+        name: &[u8],
+        spec: &Rar5CryptSpec,
+        salt: &[u8; 16],
+        iv: &[u8; 16],
+        check: &[u8; 12],
+    ) -> (Vec<u8>, usize) {
+        let mut content = Vec::new();
+        put_vint(&mut content, spec.version);
+        put_vint(&mut content, spec.flags);
+        content.push(spec.kdf_count);
+        let salt_in_content = content.len();
+        if spec.include_salt {
+            content.extend_from_slice(salt);
+        }
+        if spec.include_iv {
+            content.extend_from_slice(iv);
+        }
+        if spec.include_check {
+            content.extend_from_slice(check);
+        }
+
+        let mut record = Vec::new();
+        put_vint(&mut record, 0x01);
+        let salt_in_record = record.len() + salt_in_content;
+        record.extend_from_slice(&content);
+
+        let record_size = spec.record_size_override.unwrap_or(record.len() as u64);
+        let mut extra = Vec::new();
+        put_vint(&mut extra, record_size);
+        let salt_in_extra = extra.len() + salt_in_record;
+        extra.extend_from_slice(&record);
+
+        let mut fh = Vec::new();
+        put_vint(&mut fh, 2);
+        put_vint(&mut fh, 0x01 | 0x02);
+        put_vint(&mut fh, extra.len() as u64);
+        put_vint(&mut fh, data.len() as u64);
+        put_vint(&mut fh, 0);
+        put_vint(&mut fh, data.len() as u64);
+        put_vint(&mut fh, 0);
+        put_vint(&mut fh, 0);
+        put_vint(&mut fh, 0);
+        put_vint(&mut fh, name.len() as u64);
+        fh.extend_from_slice(name);
+        let extra_in_fh = fh.len();
+        fh.extend_from_slice(&extra);
+
+        let mut out = Vec::new();
+        out.extend_from_slice(b"Rar!\x1a\x07\x01\x00");
+        let mut mh = Vec::new();
+        put_vint(&mut mh, 1);
+        put_vint(&mut mh, 0);
+        put_vint(&mut mh, 0x01);
+        out.extend_from_slice(&0u32.to_le_bytes());
+        put_vint(&mut out, mh.len() as u64);
+        out.extend_from_slice(&mh);
+
+        out.extend_from_slice(&0u32.to_le_bytes());
+        put_vint(&mut out, fh.len() as u64);
+        let fh_start = out.len();
+        out.extend_from_slice(&fh);
+        let salt_offset = fh_start + extra_in_fh + salt_in_extra;
+        out.extend_from_slice(data);
+
+        if spec.trailing {
+            let mut eh = Vec::new();
+            put_vint(&mut eh, 5);
+            put_vint(&mut eh, 0);
+            put_vint(&mut eh, 0);
+            out.extend_from_slice(&0u32.to_le_bytes());
+            put_vint(&mut out, eh.len() as u64);
+            out.extend_from_slice(&eh);
+        }
+        (out, salt_offset)
+    }
+
+    fn seed_bytes(n: usize, seed: u8) -> Vec<u8> {
+        (0..n).map(|i| seed.wrapping_add((i as u8).wrapping_mul(3))).collect()
+    }
+
+    #[test]
+    fn stream_crypto_full_suite_port_from_cpp() {
+        // 1. StreamCryptoDeriveRar3VectorTest
+        let salt3: [u8; 8] = [0x92, 0x80, 0x37, 0x09, 0x6e, 0x88, 0x92, 0xdb];
+        let expect_key3: [u8; 16] = [
+            0x56, 0xb3, 0x08, 0x9b, 0xf3, 0x26, 0x3f, 0xfa, 0x21, 0xae, 0x16, 0x43, 0x5e, 0x80,
+            0x72, 0xf6,
+        ];
+        let expect_iv3: [u8; 16] = [
+            0x8c, 0x84, 0x7e, 0xfd, 0x84, 0x80, 0xe0, 0x41, 0x95, 0x50, 0xee, 0x18, 0xb6, 0x88,
+            0x61, 0xff,
+        ];
+        let (key3, iv3) = streamcrypto_derive_rar3(b"123", &salt3).unwrap();
+        assert_eq!(key3, expect_key3);
+        assert_eq!(iv3, expect_iv3);
+        assert!(streamcrypto_derive_rar3(b"", &salt3).is_none());
+
+        // 2. StreamCryptoDeriveRar5VectorTest
+        let salt5: [u8; 16] = [
+            0x99, 0xaa, 0x76, 0x9b, 0x5d, 0x9c, 0x20, 0x19, 0xbd, 0x73, 0xb1, 0x72, 0xb1, 0x51,
+            0xcf, 0xe9,
+        ];
+        let expect_key5: [u8; 32] = [
+            0x26, 0x53, 0xc2, 0x2b, 0xb5, 0x33, 0x32, 0xa9, 0x77, 0xc1, 0x4b, 0x7e, 0x1b, 0x9b,
+            0xc0, 0xdc, 0x54, 0xb8, 0x51, 0x26, 0x3d, 0xd7, 0xf9, 0x87, 0xc1, 0xb0, 0x5f, 0x26,
+            0xcd, 0x33, 0xe7, 0x00,
+        ];
+        let key5 = streamcrypto_derive_rar5(b"123", 15, &salt5).unwrap();
+        assert_eq!(key5, expect_key5);
+        assert!(streamcrypto_derive_rar5(b"123", 25, &salt5).is_none());
+        assert!(streamcrypto_derive_rar5(b"123", 200, &salt5).is_none());
+
+        // 3. RarReaderRar3SaltFieldTest & RarReaderRar3TruncatedSaltTest
+        let s8: [u8; 8] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        let (ok, _, files) = parse_rar_bytes(
+            build_rar3_salt_volume(&seed_bytes(48, 5), b"movie.mkv", &s8, true),
+            b"",
+        );
+        assert!(ok);
+        assert_eq!(files.len(), 1);
+        assert!(files[0].has_salt);
+        assert!(files[0].encrypted_data);
+        assert_eq!(files[0].salt, s8);
+
+        let (ok_trunc, _, _) = parse_rar_bytes(
+            build_rar3_salt_volume(&[], b"movie.mkv", &[0x11, 0x22, 0x33], false),
+            b"",
+        );
+        assert!(!ok_trunc);
+
+        // 4. RarReaderRar5CryptFieldTest, NoCheckTest, ShortCryptRecordTest, TruncatedCryptRecordTest, OversizeKdfCountTest
+        let salt_r5: [u8; 16] = [
+            0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad,
+            0xae, 0xaf,
+        ];
+        let iv_r5: [u8; 16] = [
+            0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0xbc, 0xbd,
+            0xbe, 0xbf,
+        ];
+        let check_r5: [u8; 12] = [
+            0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb,
+        ];
+        let spec = Rar5CryptSpec::default();
+        let (vol_bytes, _) = build_rar5_crypt_volume(
+            &seed_bytes(48, 7),
+            b"movie.mkv",
+            &spec,
+            &salt_r5,
+            &iv_r5,
+            &check_r5,
+        );
+        let (ok, _, files) = parse_rar_bytes(vol_bytes, b"");
+        assert!(ok);
+        assert!(files[0].encrypted_data);
+        let crypt = files[0].crypt.unwrap();
+        assert_eq!(crypt.version, 0);
+        assert_eq!(crypt.flags, 0x01);
+        assert_eq!(crypt.kdf_count, 15);
+        assert!(crypt.has_check);
+        assert_eq!(crypt.salt, salt_r5);
+        assert_eq!(crypt.iv, iv_r5);
+        assert_eq!(crypt.check_value, check_r5);
+
+        let spec_no_check = Rar5CryptSpec {
+            flags: 0,
+            include_check: false,
+            ..Rar5CryptSpec::default()
+        };
+        let (vol_nc, _) = build_rar5_crypt_volume(
+            &seed_bytes(32, 9),
+            b"movie.mkv",
+            &spec_no_check,
+            &salt_r5,
+            &iv_r5,
+            &[0u8; 12],
+        );
+        let (ok, _, files) = parse_rar_bytes(vol_nc, b"");
+        assert!(ok);
+        let crypt = files[0].crypt.unwrap();
+        assert!(!crypt.has_check);
+        assert_eq!(crypt.flags, 0);
+
+        let spec_short = Rar5CryptSpec {
+            include_iv: false,
+            include_check: false,
+            ..Rar5CryptSpec::default()
+        };
+        let (vol_short, _) = build_rar5_crypt_volume(
+            &seed_bytes(16, 11),
+            b"movie.mkv",
+            &spec_short,
+            &salt_r5,
+            &iv_r5,
+            &[0u8; 12],
+        );
+        let (ok, _, files) = parse_rar_bytes(vol_short, b"");
+        assert!(ok);
+        assert!(files[0].encrypted_data);
+        assert!(files[0].crypt.is_none());
+
+        let spec_trunc = Rar5CryptSpec {
+            trailing: false,
+            ..Rar5CryptSpec::default()
+        };
+        let (mut vol_trunc, salt_offset) =
+            build_rar5_crypt_volume(&[], b"movie.mkv", &spec_trunc, &salt_r5, &iv_r5, &check_r5);
+        vol_trunc.truncate(salt_offset + 3);
+        let (ok, _, _) = parse_rar_bytes(vol_trunc, b"");
+        assert!(!ok);
+
+        let spec_oversize = Rar5CryptSpec {
+            kdf_count: 200,
+            ..Rar5CryptSpec::default()
+        };
+        let (vol_over, _) = build_rar5_crypt_volume(
+            &seed_bytes(32, 13),
+            b"movie.mkv",
+            &spec_oversize,
+            &salt_r5,
+            &iv_r5,
+            &check_r5,
+        );
+        let (ok, _, files) = parse_rar_bytes(vol_over, b"");
+        assert!(ok);
+        let crypt = files[0].crypt.unwrap();
+        assert_eq!(crypt.kdf_count, 200);
+        assert!(streamcrypto_derive_rar5(b"123", crypt.kdf_count, &crypt.salt).is_none());
+
+        // 5. Real WinRAR testdata tests: StreamCryptoRar5PswCheckVectorTest, StreamCryptoRar5RealCiphertextCrossCheckTest,
+        // StreamCryptoRar3HeaderCrossCheckTest, StreamCryptoRar3WrongPasswordTest
+        let rar_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("tests/testdata/rarrenamer");
+
+        let r5_bytes = std::fs::read(rar_dir.join("testfile5encdata.part01.rar")).unwrap();
+        let (ok, _, files) = parse_rar_bytes(r5_bytes.clone(), b"");
+        assert!(ok);
+        let inner = &files[0];
+        let crypt = inner.crypt.unwrap();
+        assert!(crypt.has_check);
+
+        let check = streamcrypto_derive_rar5_psw_check(b"123", crypt.kdf_count, &crypt.salt).unwrap();
+        assert_eq!(check, crypt.check_value[..8]);
+        let wrong = streamcrypto_derive_rar5_psw_check(b"456", crypt.kdf_count, &crypt.salt).unwrap();
+        assert_ne!(wrong, crypt.check_value[..8]);
+        assert!(streamcrypto_derive_rar5_psw_check(b"123", 25, &crypt.salt).is_none());
+
+        assert!(RarCryptoContext::make_rar5(b"123", &crypt).is_some());
+        assert!(RarCryptoContext::make_rar5(b"wrongpass", &crypt).is_none());
+        assert!(RarCryptoContext::make_rar5(b"", &crypt).is_none());
+
+        let ctx = RarCryptoContext::make_rar5(b"123", &crypt).unwrap();
+        let data_offset = inner.data_offset as usize;
+        let blocks = 16;
+        let cipher_slice = &r5_bytes[data_offset..data_offset + blocks * 16];
+        let mut plain = vec![0u8; blocks * 16];
+        assert!(ctx.decrypt_range(None, cipher_slice, &mut plain, blocks as i64));
+        let expect0: [u8; 16] = [
+            0xcd, 0xf2, 0x36, 0x53, 0x40, 0x75, 0x44, 0x43, 0x33, 0x44, 0x44, 0x00, 0x57, 0x65,
+            0xfb, 0x6a,
+        ];
+        assert_eq!(&plain[..16], &expect0);
+        let mut recip = vec![0u8; blocks * 16];
+        assert!(ctx.encrypt_range(None, &plain, &mut recip, blocks as i64));
+        assert_eq!(recip, cipher_slice);
+
+        // StreamCryptoRar3HeaderCrossCheckTest & WrongPasswordTest
+        let r3_bytes = std::fs::read(rar_dir.join("testfile3encnam.part01.rar")).unwrap();
+        let main_size = u16::from_le_bytes([r3_bytes[12], r3_bytes[13]]) as usize;
+        let salt_off = 7 + main_size;
+        let cipher_off = salt_off + 8;
+        let salt_hdr: &[u8; 8] = r3_bytes[salt_off..salt_off + 8].try_into().unwrap();
+        let ctx3 = RarCryptoContext::make_rar3(b"123", salt_hdr).unwrap();
+        let mut plain3 = [0u8; 64];
+        assert!(ctx3.decrypt_range(None, &r3_bytes[cipher_off..cipher_off + 64], &mut plain3, 4));
+        assert_eq!(plain3[2], 0x74);
+        let name_len = u16::from_le_bytes([plain3[26], plain3[27]]) as usize;
+        assert_eq!(name_len, 19);
+        assert_eq!(&plain3[32..32 + name_len], b"testfile3encnam.dat");
+
+        let (ok, _, files3) = parse_rar_bytes(r3_bytes.clone(), b"123");
+        assert!(ok);
+        assert_eq!(files3[0].filename, b"testfile3encnam.dat");
+
+        let wrong3 = RarCryptoContext::make_rar3(b"wrongpw", salt_hdr).unwrap();
+        let mut p_right = [0u8; 16];
+        let mut p_wrong = [0u8; 16];
+        assert!(ctx3.decrypt_range(None, &r3_bytes[cipher_off..cipher_off + 16], &mut p_right, 1));
+        assert!(wrong3.decrypt_range(None, &r3_bytes[cipher_off..cipher_off + 16], &mut p_wrong, 1));
+        assert_eq!(p_right[2], 0x74);
+        assert_ne!(p_right, p_wrong);
+        assert!(RarCryptoContext::make_rar3(b"", salt_hdr).is_none());
+
+        // 6. StreamCryptoRoundTripTest, MultiBatchRoundTripTest, RandomAccessConsistencyTest,
+        // ZeroAndNegativeBlocksTest, MakeRar5RejectsTest
+        let r3_rt = RarCryptoContext::make_rar3(b"secret", &[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+        let mut crypt5 = crate::rarreader::Rar5Crypt {
+            version: 0,
+            flags: 0,
+            kdf_count: 12,
+            salt: [0; 16],
+            iv: [0; 16],
+            check_value: [0; 12],
+            has_check: false,
+        };
+        for i in 0..16 {
+            crypt5.salt[i] = (i + 1) as u8;
+            crypt5.iv[i] = (0x40 + i) as u8;
+        }
+        let r5_rt = RarCryptoContext::make_rar5(b"secret", &crypt5).unwrap();
+
+        let plain_rt: Vec<u8> = (0..5 * 16).map(|i| (i * 7 + 1) as u8).collect();
+        let prev_rt: [u8; 16] = core::array::from_fn(|i| (0xA0 + i) as u8);
+        for ctx in [&r3_rt, &r5_rt] {
+            let mut cipher = vec![0u8; 5 * 16];
+            let mut back = vec![0u8; 5 * 16];
+            assert!(ctx.encrypt_range(Some(&prev_rt), &plain_rt, &mut cipher, 5));
+            assert!(ctx.decrypt_range(Some(&prev_rt), &cipher, &mut back, 5));
+            assert_eq!(back, plain_rt);
+            assert_ne!(cipher, plain_rt);
+
+            let mut cipher0 = vec![0u8; 5 * 16];
+            let mut back0 = vec![0u8; 5 * 16];
+            assert!(ctx.encrypt_range(None, &plain_rt, &mut cipher0, 5));
+            assert!(ctx.decrypt_range(None, &cipher0, &mut back0, 5));
+            assert_eq!(back0, plain_rt);
+            assert_ne!(&cipher[..16], &cipher0[..16]);
+        }
+
+        // MultiBatchRoundTripTest (70000 blocks > 65536)
+        let mut crypt_mb = crypt5;
+        crypt_mb.kdf_count = 8;
+        for i in 0..16 {
+            crypt_mb.salt[i] = (i * 3) as u8;
+            crypt_mb.iv[i] = (i * 5 + 1) as u8;
+        }
+        let ctx_mb = RarCryptoContext::make_rar5(b"secret", &crypt_mb).unwrap();
+        let blocks_mb: usize = 70000;
+        let plain_mb: Vec<u8> = (0..blocks_mb * 16).map(|i| (i * 131 + 7) as u8).collect();
+        let mut cipher_mb = vec![0u8; blocks_mb * 16];
+        let mut back_mb = vec![0u8; blocks_mb * 16];
+        assert!(ctx_mb.encrypt_range(None, &plain_mb, &mut cipher_mb, blocks_mb as i64));
+        assert!(ctx_mb.decrypt_range(None, &cipher_mb, &mut back_mb, blocks_mb as i64));
+        assert_eq!(back_mb, plain_mb);
+        let edge = 65536usize;
+        let prev_edge: &[u8; 16] = cipher_mb[(edge - 1) * 16..edge * 16].try_into().unwrap();
+        let mut one = [0u8; 16];
+        assert!(ctx_mb.decrypt_range(
+            Some(prev_edge),
+            &cipher_mb[edge * 16..(edge + 1) * 16],
+            &mut one,
+            1
+        ));
+        assert_eq!(&one[..], &plain_mb[edge * 16..(edge + 1) * 16]);
+
+        // RandomAccessConsistencyTest
+        let start = 3;
+        let mut cipher8 = vec![0u8; 8 * 16];
+        let plain8: Vec<u8> = (0..8 * 16).map(|i| (i * 5 + 3) as u8).collect();
+        assert!(r3_rt.encrypt_range(None, &plain8, &mut cipher8, 8));
+        let prev_block: &[u8; 16] = cipher8[(start - 1) * 16..start * 16].try_into().unwrap();
+        let mut part = vec![0u8; (8 - start) * 16];
+        assert!(r3_rt.decrypt_range(
+            Some(prev_block),
+            &cipher8[start * 16..],
+            &mut part,
+            (8 - start) as i64
+        ));
+        assert_eq!(part, &plain8[start * 16..]);
+
+        // ZeroAndNegativeBlocksTest
+        let mut out16 = [0xABu8; 16];
+        assert!(r3_rt.decrypt_range(None, &[0u8; 16], &mut out16, 0));
+        assert!(r3_rt.encrypt_range(None, &[0u8; 16], &mut out16, 0));
+        assert_eq!(out16[0], 0xAB);
+        assert!(!r3_rt.decrypt_range(None, &[0u8; 16], &mut out16, -1));
+        assert!(!r3_rt.encrypt_range(None, &[0u8; 16], &mut out16, -4));
+
+        // MakeRar5RejectsTest
+        let mut v1 = crypt5;
+        v1.version = 1;
+        assert!(RarCryptoContext::make_rar5(b"pw", &v1).is_none());
+        let mut big = crypt5;
+        big.kdf_count = 200;
+        assert!(RarCryptoContext::make_rar5(b"pw", &big).is_none());
+        assert!(RarCryptoContext::make_rar5(b"", &crypt5).is_none());
     }
 }

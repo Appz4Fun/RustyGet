@@ -303,4 +303,335 @@ mod tests {
         let twin = Volume { filename: b"z.part01.rar".to_vec(), ..first.clone() };
         assert_eq!(make_sets(&[first, decoy, second, twin]), vec![vec![0, 2], vec![3, 1]]);
     }
+
+    #[test]
+    fn rar_renamer_full_suite_port_from_cpp() {
+        struct BytesSource(Vec<u8>);
+        impl crate::rarreader::Source for BytesSource {
+            fn size(&mut self) -> i64 { self.0.len() as i64 }
+            fn read(&mut self, offset: i64, buf: &mut [u8]) -> bool {
+                let Some(slice) = self.0.get(offset as usize..offset as usize + buf.len()) else { return false };
+                buf.copy_from_slice(slice);
+                true
+            }
+        }
+
+        struct FsRarEnv<'a> {
+            volumes: &'a [Volume],
+            renamed_count: i32,
+            errors: i32,
+        }
+
+        impl Env for FsRarEnv<'_> {
+            fn file_exists(&mut self, path: &[u8]) -> bool {
+                std::path::Path::new(std::str::from_utf8(path).unwrap()).is_file()
+            }
+            fn match_part(&mut self, name: &[u8]) -> Option<(usize, usize)> {
+                // RegEx(".*.part([0-9]+)\\.rar$") with greedy ".*." before "part"
+                let s = c(name);
+                if !s.ends_with(b".rar") || s.len() < 9 {
+                    return None;
+                }
+                let stem = &s[..s.len() - 4];
+                let digit_start = stem.iter().rposition(|b| !b.is_ascii_digit()).map_or(0, |p| p + 1);
+                if digit_start == stem.len() || digit_start < 5 {
+                    return None;
+                }
+                if &stem[digit_start - 4..digit_start] != b"part" {
+                    return None;
+                }
+                Some((digit_start, stem.len() - digit_start))
+            }
+            fn rename(&mut self, index: usize, dest: &[u8]) {
+                let src_path = std::path::Path::new(std::str::from_utf8(&self.volumes[index].filename).unwrap());
+                let dst_path = std::path::Path::new(std::str::from_utf8(dest).unwrap());
+                if std::fs::rename(src_path, dst_path).is_ok() {
+                    self.renamed_count += 1;
+                } else {
+                    self.errors += 1;
+                }
+            }
+        }
+
+        fn build_dir_list(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            out.push(dir.to_path_buf());
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.is_dir() {
+                        build_dir_list(&p, out);
+                    }
+                }
+            }
+        }
+
+        fn execute_rar_renamer(dest_dir: &std::path::Path, password: Option<&[u8]>) -> (i32, i32) {
+            let mut dirs = Vec::new();
+            build_dir_list(dest_dir, &mut dirs);
+            let mut total_renamed = 0;
+            let mut total_errors = 0;
+
+            for dir in dirs {
+                let mut volumes = Vec::new();
+                if let Ok(entries) = std::fs::read_dir(&dir) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        if p.is_dir() {
+                            continue;
+                        }
+                        let Ok(bytes) = std::fs::read(&p) else { continue };
+                        let mut source = BytesSource(bytes);
+                        let mut rvol = crate::rarreader::Volume {
+                            has_password: password.is_some(),
+                            ..crate::rarreader::Volume::default()
+                        };
+                        let mut cipher = crate::streamrepair::NativeRarCipher::new(password.unwrap_or(b""));
+                        let mut rfiles: Vec<crate::rarreader::RarFile> = Vec::new();
+                        if crate::rarreader::read_from(&mut rvol, &mut source, &mut cipher, &mut rfiles) {
+                            let files = rfiles
+                                .into_iter()
+                                .map(|f| File {
+                                    name: f.filename,
+                                    size: f.size,
+                                    split_before: f.split_before,
+                                    split_after: f.split_after,
+                                })
+                                .collect();
+                            volumes.push(Volume {
+                                filename: p.to_string_lossy().as_bytes().to_vec(),
+                                version: rvol.version,
+                                volume_no: rvol.volume_no,
+                                multi_volume: rvol.multi_volume,
+                                has_next_volume: rvol.has_next_volume,
+                                new_naming: rvol.new_naming,
+                                files,
+                            });
+                        }
+                    }
+                }
+                if !volumes.is_empty() {
+                    let mut env = FsRarEnv {
+                        volumes: &volumes,
+                        renamed_count: 0,
+                        errors: 0,
+                    };
+                    let dir_bytes = dir.to_string_lossy().as_bytes().to_vec();
+                    rename_files(&dir_bytes, &volumes, &mut env);
+                    total_renamed += env.renamed_count;
+                    total_errors += env.errors;
+                }
+            }
+            (total_renamed, total_errors)
+        }
+
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let testdata_dir = manifest_dir.parent().unwrap().join("tests/testdata/rarrenamer");
+
+        let run_case = |name: &str, pwd: Option<&[u8]>, setup: &dyn Fn(&std::path::Path), verify: &dyn Fn(&std::path::Path, i32, i32)| {
+            let work_dir = std::env::temp_dir().join(format!("nzbget_rs_rarrenamer_{}_{}", std::process::id(), name));
+            let _ = std::fs::remove_dir_all(&work_dir);
+            std::fs::create_dir_all(&work_dir).unwrap();
+            for entry in std::fs::read_dir(&testdata_dir).unwrap() {
+                let entry = entry.unwrap();
+                std::fs::copy(entry.path(), work_dir.join(entry.file_name())).unwrap();
+            }
+            setup(&work_dir);
+            let (renamed, errors) = execute_rar_renamer(&work_dir, pwd);
+            verify(&work_dir, renamed, errors);
+            let _ = std::fs::remove_dir_all(&work_dir);
+        };
+
+        // 1. RarRenameNotNeededTest
+        run_case("RarRenameNotNeededTest", None, &|_| {}, &|_, renamed, _| assert_eq!(renamed, 0));
+
+        // 2. RarRenameNotNeeded2Test
+        run_case(
+            "RarRenameNotNeeded2Test",
+            None,
+            &|w| {
+                std::fs::copy(w.join("testfile5.part02.rar"), w.join("12348")).unwrap();
+                std::fs::copy(w.join("testfile3oldnam.r00"), w.join("testfile3oldnamB.r00")).unwrap();
+            },
+            &|_, renamed, _| assert_eq!(renamed, 0),
+        );
+
+        // 3. RarRenameSlowDataTest
+        run_case(
+            "RarRenameSlowDataTest",
+            None,
+            &|w| {
+                std::fs::copy(w.join("testfile3.part01.rar"), w.join("12348")).unwrap();
+                std::fs::copy(w.join("testfile3.part02.rar"), w.join("12342")).unwrap();
+                std::fs::copy(w.join("testfile3.part03.rar"), w.join("12346")).unwrap();
+            },
+            &|_, renamed, _| assert_eq!(renamed, 3),
+        );
+
+        // 4. RenameRar5Test
+        run_case(
+            "RenameRar5Test",
+            None,
+            &|w| {
+                std::fs::copy(w.join("testfile5.part01.rar"), w.join("12348")).unwrap();
+                std::fs::copy(w.join("testfile5.part02.rar"), w.join("12342")).unwrap();
+                std::fs::copy(w.join("testfile5.part03.rar"), w.join("12346")).unwrap();
+            },
+            &|_, renamed, _| assert_eq!(renamed, 3),
+        );
+
+        // 5. MissingPartsTest
+        run_case(
+            "MissingPartsTest",
+            None,
+            &|w| {
+                std::fs::copy(w.join("testfile5.part01.rar"), w.join("12348")).unwrap();
+                std::fs::copy(w.join("testfile5.part02.rar"), w.join("12343")).unwrap();
+                std::fs::remove_file(w.join("testfile5.part03.rar")).unwrap();
+            },
+            &|_, renamed, _| assert_eq!(renamed, 0),
+        );
+
+        // 6. RenameRar3BadNamingTest
+        run_case(
+            "RenameRar3BadNamingTest",
+            None,
+            &|w| {
+                std::fs::rename(w.join("testfile3.part01.rar"), w.join("testfile3.part04.rar")).unwrap();
+                std::fs::rename(w.join("testfile3.part02.rar"), w.join("testfile3.part01.rar")).unwrap();
+            },
+            &|_, renamed, _| assert_eq!(renamed, 3),
+        );
+
+        // 7. Rar3BadNaming2
+        run_case(
+            "Rar3BadNaming2",
+            None,
+            &|w| {
+                std::fs::rename(w.join("testfile3.part02.rar"), w.join("testfile3.part2.rar")).unwrap();
+            },
+            &|_, renamed, _| assert_eq!(renamed, 3),
+        );
+
+        // 8. RenameRar3BadNaming3Test
+        run_case(
+            "RenameRar3BadNaming3Test",
+            None,
+            &|w| {
+                std::fs::rename(w.join("testfile3.part02.rar"), w.join("testfile3-1.part02.rar")).unwrap();
+            },
+            &|_, renamed, _| assert_eq!(renamed, 3),
+        );
+
+        // 9. RenameRar3BadNaming4Test
+        run_case(
+            "RenameRar3BadNaming4Test",
+            None,
+            &|w| {
+                std::fs::rename(w.join("testfile3.part02.rar"), w.join("testfil-3.part02.rar")).unwrap();
+            },
+            &|_, renamed, _| assert_eq!(renamed, 3),
+        );
+
+        // 10. RenameRar3BadNaming5Test
+        run_case(
+            "RenameRar3BadNaming5Test",
+            None,
+            &|w| {
+                std::fs::rename(w.join("testfile3oldnam.rar"), w.join("testfile3oldnamA.rar")).unwrap();
+            },
+            &|_, renamed, _| assert_eq!(renamed, 1),
+        );
+
+        // 11. RenameRar3BadNaming6Test
+        run_case(
+            "RenameRar3BadNaming6Test",
+            None,
+            &|w| {
+                std::fs::rename(w.join("testfile3oldnam.rar"), w.join("testfile3oldnamA.rar")).unwrap();
+                std::fs::rename(w.join("testfile3oldnam.r00"), w.join("testfile3oldnamB.r00")).unwrap();
+                std::fs::rename(w.join("testfile3oldnam.r01"), w.join("testfile3oldnamA.r01")).unwrap();
+            },
+            &|_, renamed, _| assert_eq!(renamed, 3),
+        );
+
+        // 12. RenameTwoSetsTest
+        run_case(
+            "RenameTwoSetsTest",
+            None,
+            &|w| {
+                std::fs::rename(w.join("testfile3.part01.rar"), w.join("12345")).unwrap();
+                std::fs::rename(w.join("testfile3.part02.rar"), w.join("12342")).unwrap();
+                std::fs::rename(w.join("testfile3.part03.rar"), w.join("12346")).unwrap();
+                std::fs::rename(w.join("testfile5.part01.rar"), w.join("12348")).unwrap();
+                std::fs::rename(w.join("testfile5.part02.rar"), w.join("12343")).unwrap();
+                std::fs::rename(w.join("testfile5.part03.rar"), w.join("12344")).unwrap();
+            },
+            &|_, renamed, _| assert_eq!(renamed, 6),
+        );
+
+        // 13. RenameDuplicateTest
+        run_case(
+            "RenameDuplicateTest",
+            None,
+            &|w| {
+                std::fs::rename(w.join("testfile3.part01.rar"), w.join("12345")).unwrap();
+                std::fs::rename(w.join("testfile3.part02.rar"), w.join("12342")).unwrap();
+                std::fs::rename(w.join("testfile3.part03.rar"), w.join("12346")).unwrap();
+                std::fs::rename(w.join("testfile5.part01.rar"), w.join("testfile3.dat.part0001.rar")).unwrap();
+                std::fs::remove_file(w.join("testfile5.part02.rar")).unwrap();
+                std::fs::remove_file(w.join("testfile5.part03.rar")).unwrap();
+            },
+            &|_, renamed, _| assert_eq!(renamed, 3),
+        );
+
+        // 14. RenameRar5EncryptedTest
+        run_case(
+            "RenameRar5EncryptedTest",
+            Some(b"123"),
+            &|w| {
+                std::fs::rename(w.join("testfile5encnam.part01.rar"), w.join("12348")).unwrap();
+                std::fs::rename(w.join("testfile5encnam.part02.rar"), w.join("12343")).unwrap();
+                std::fs::rename(w.join("testfile5encnam.part03.rar"), w.join("12344")).unwrap();
+            },
+            &|_, renamed, _| assert_eq!(renamed, 3),
+        );
+
+        // 15. RenameRar3EncryptedTest
+        run_case(
+            "RenameRar3EncryptedTest",
+            Some(b"123"),
+            &|w| {
+                std::fs::rename(w.join("testfile3encnam.part01.rar"), w.join("12348")).unwrap();
+                std::fs::rename(w.join("testfile3encnam.part02.rar"), w.join("12343")).unwrap();
+                std::fs::rename(w.join("testfile3encnam.part03.rar"), w.join("12344")).unwrap();
+            },
+            &|_, renamed, _| assert_eq!(renamed, 3),
+        );
+
+        // 16. RarRenameSubfolderTest
+        run_case(
+            "RarRenameSubfolderTest",
+            None,
+            &|w| {
+                let sub = w.join("sub");
+                std::fs::create_dir(&sub).unwrap();
+                let names = ["12348", "12342", "12346"];
+                for (i, name) in names.iter().enumerate() {
+                    std::fs::copy(w.join(format!("testfile3.part0{}.rar", i + 1)), w.join(name)).unwrap();
+                    std::fs::copy(w.join(format!("testfile5.part0{}.rar", i + 1)), sub.join(name)).unwrap();
+                }
+                for orig in ["testfile3.part01.rar", "testfile3.part02.rar", "testfile3.part03.rar"] {
+                    std::fs::remove_file(w.join(orig)).unwrap();
+                }
+            },
+            &|w, renamed, errors| {
+                let sub = w.join("sub");
+                assert_eq!(renamed, 6);
+                assert!(w.join("testfile3.part0001.rar").exists());
+                assert!(sub.join("testfile5.part0001.rar").exists());
+                assert!(!sub.join("testfile3.part0001.rar").exists());
+                assert_eq!(errors, 0);
+            },
+        );
+    }
 }

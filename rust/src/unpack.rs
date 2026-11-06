@@ -632,9 +632,119 @@ pub fn post_capitalize_first_ascii(buf: &mut [u8]) {
     }
 }
 
+fn path_filename(path: &[u8]) -> &[u8] {
+    match path.iter().rposition(|&b| b == b'/' || b == b'\\') {
+        Some(pos) => &path[pos + 1..],
+        None => path,
+    }
+}
+
+/// `Unpack::SevenZip::IsSupported(const fs::path& path)`.
+pub fn sevenzip_is_supported(path: &[u8]) -> bool {
+    let filename = path_filename(path);
+    if filename.is_empty() || filename == b"." || filename == b".." || !filename[1..].contains(&b'.') {
+        return false;
+    }
+    crate::filetypes::is_seven_zip_file(filename)
+}
+
+/// `Unpack::Unrar::IsSupported(const fs::path& path)`.
+pub fn unrar_is_supported(path: &[u8]) -> bool {
+    let filename = path_filename(path);
+    if filename.is_empty() || filename == b"." || filename == b".." {
+        return false;
+    }
+    let ext = match filename.iter().rposition(|&b| b == b'.') {
+        Some(pos) if pos > 0 => &filename[pos..],
+        _ => b"",
+    };
+    if !crate::filetypes::is_rar_ext(ext) {
+        return false;
+    }
+    unrar_is_part1_or_unsplit_rar(filename)
+}
+
+/// `Unpack::ExtractorBase::MakePassword()`.
+pub fn extractor_make_password(password: &[u8]) -> Vec<u8> {
+    if password.is_empty() {
+        b"-p-".to_vec()
+    } else {
+        let mut out = Vec::with_capacity(2 + password.len());
+        out.extend_from_slice(b"-p");
+        out.extend_from_slice(password);
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unpack_util_full_suite_port_from_cpp() {
+        // IsSupportedTests
+        assert!(sevenzip_is_supported(b"Unpack.7z"));
+        assert!(sevenzip_is_supported(b"Unpack.zip"));
+        assert!(sevenzip_is_supported(b"Unpack.tar"));
+        assert!(sevenzip_is_supported(b"Unpack.gz"));
+        assert!(sevenzip_is_supported(b"Unpack.bz2"));
+
+        assert!(sevenzip_is_supported(b"Unpack.tar.gz"));
+        assert!(sevenzip_is_supported(b"Unpack.tgz"));
+        assert!(sevenzip_is_supported(b"Unpack.txz"));
+
+        assert!(sevenzip_is_supported(b"Unpack.7z.001"));
+
+        assert!(sevenzip_is_supported(b"Unpack.ZIP"));
+        assert!(sevenzip_is_supported(b"DATA.TXZ"));
+
+        assert!(!sevenzip_is_supported(b"Unpack.7z.002"));
+        assert!(!sevenzip_is_supported(b"document.docx"));
+        assert!(!sevenzip_is_supported(b"image.jpg"));
+        assert!(!sevenzip_is_supported(b"Unpack.zip.bak"));
+
+        assert!(unrar_is_supported(b"Unpack.rar"));
+        assert!(unrar_is_supported(b"Unpack.part1.rar"));
+        assert!(unrar_is_supported(b"Unpack.part01.rar"));
+        assert!(unrar_is_supported(b"Unpack.part001.rar"));
+
+        assert!(unrar_is_supported(b"Unpack.RAR"));
+        assert!(unrar_is_supported(b"DATA.Part1.Rar"));
+
+        assert!(!unrar_is_supported(b"Unpack.r01"));
+        assert!(!unrar_is_supported(b"Unpack.part2.rar"));
+        assert!(!unrar_is_supported(b"Unpack.zip"));
+        assert!(!unrar_is_supported(b"not_an_Unpack.txt"));
+        assert!(!unrar_is_supported(b"Unpack.tar.gz"));
+        assert!(!unrar_is_supported(b"Unpack.rar.bak"));
+
+        assert!(!unrar_is_supported("Архив.r01".as_bytes()));
+        assert!(!unrar_is_supported("Архив.part2.rar".as_bytes()));
+        assert!(!unrar_is_supported("Архив.zip".as_bytes()));
+
+        assert!(!sevenzip_is_supported(b"noextension"));
+        assert!(!sevenzip_is_supported(b"/some/path/"));
+
+        assert!(sevenzip_is_supported(b"archive.nzb.zip"));
+        assert!(sevenzip_is_supported(b"archive.tar.gz"));
+        assert!(!sevenzip_is_supported(b"archive.tar.gz.bak"));
+
+        assert!(!unrar_is_supported(b"archive.part02.rar"));
+        assert!(unrar_is_supported(b"/path/with/spaces/Unpack.part001.RAR"));
+
+        assert!(sevenzip_is_supported(b"/tmp/archive.TGZ"));
+        assert!(unrar_is_supported(b"/tmp/Unpack.part1.rar"));
+
+        assert!(unrar_is_supported("Архив.part001.rar".as_bytes()));
+
+        assert!(sevenzip_is_supported(b"archive.tar.bz2"));
+        assert!(!sevenzip_is_supported(b"archive.tar.bz2.backup"));
+
+        // MakePasswordTest
+        assert_eq!(extractor_make_password(b""), b"-p-");
+        assert_eq!(extractor_make_password(b"mysecret"), b"-pmysecret");
+        assert_eq!(extractor_make_password(b"pass with space"), b"-ppass with space");
+    }
 
     #[test]
     fn test_rar_signature_and_archive_classification() {

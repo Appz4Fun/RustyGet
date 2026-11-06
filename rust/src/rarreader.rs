@@ -939,4 +939,200 @@ mod tests {
             assert!(read_from(&mut volume, &mut source, &mut cipher, &mut files));
         }
     }
+
+    #[test]
+    fn rar_reader_full_suite_port_from_cpp() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let testdata_dir = manifest_dir.parent().unwrap().join("tests/testdata/rarrenamer");
+
+        let read_vol = |name: &str, password: Option<&[u8]>| -> (bool, Volume, Vec<RarFile>, i64) {
+            let path = testdata_dir.join(name);
+            let bytes = std::fs::read(&path).unwrap();
+            let size = bytes.len() as i64;
+            let mut source = Bytes(bytes);
+            let mut volume = Volume {
+                has_password: password.is_some(),
+                ..Volume::default()
+            };
+            let mut cipher = crate::streamrepair::NativeRarCipher::new(password.unwrap_or(b""));
+            let mut files = Vec::new();
+            let ok = read_from(&mut volume, &mut source, &mut cipher, &mut files);
+            (ok, volume, files, size)
+        };
+
+        // 1. Rar3Test
+        for (i, name) in ["testfile3.part01.rar", "testfile3.part02.rar", "testfile3.part03.rar"].iter().enumerate() {
+            let (ok, vol, _, _) = read_vol(name, None);
+            assert!(ok);
+            assert_eq!(vol.version, 3);
+            assert!(vol.multi_volume);
+            assert!(vol.new_naming);
+            assert_eq!(vol.volume_no, i as u32);
+        }
+
+        // 2. Rar5OverlongVintTest
+        {
+            let mut bytes = vec![b'R', b'a', b'r', b'!', 0x1a, 0x07, 0x01, 0x00, 0, 0, 0, 0];
+            bytes.extend([0xffu8; 16]);
+            bytes.push(0x01);
+            bytes.extend([0u8; 64]);
+            let mut source = Bytes(bytes);
+            let mut vol = Volume::default();
+            let mut cipher = crate::streamrepair::NativeRarCipher::new(b"");
+            let mut files = Vec::new();
+            assert!(!read_from(&mut vol, &mut source, &mut cipher, &mut files));
+        }
+
+        // 3. Rar3ZeroAdvanceTest
+        {
+            let bytes = vec![b'R', b'a', b'r', b'!', 0x1a, 0x07, 0x00, 0x00, 0x00, 0x73, 0x00, 0x00, 0x00, 0x00];
+            let mut source = Bytes(bytes);
+            let mut vol = Volume::default();
+            let mut cipher = crate::streamrepair::NativeRarCipher::new(b"");
+            let mut files = Vec::new();
+            assert!(!read_from(&mut vol, &mut source, &mut cipher, &mut files));
+        }
+
+        // 4. Rar5Test
+        for (i, name) in ["testfile5.part01.rar", "testfile5.part02.rar", "testfile5.part03.rar"].iter().enumerate() {
+            let (ok, vol, _, _) = read_vol(name, None);
+            assert!(ok);
+            assert_eq!(vol.version, 5);
+            assert!(vol.multi_volume);
+            assert!(vol.new_naming);
+            assert_eq!(vol.volume_no, i as u32);
+        }
+
+        // 5. Rar3OldNamingTest
+        for (i, name) in ["testfile3oldnam.rar", "testfile3oldnam.r00", "testfile3oldnam.r01"].iter().enumerate() {
+            let (ok, vol, _, _) = read_vol(name, None);
+            assert!(ok);
+            assert_eq!(vol.version, 3);
+            assert!(vol.multi_volume);
+            assert!(!vol.new_naming);
+            assert_eq!(vol.volume_no, i as u32);
+        }
+
+        // 6. Rar3EncryptedDataTest
+        for (i, name) in ["testfile3encdata.part01.rar", "testfile3encdata.part02.rar", "testfile3encdata.part03.rar"].iter().enumerate() {
+            let (ok, vol, _, _) = read_vol(name, None);
+            assert!(ok);
+            assert_eq!(vol.version, 3);
+            assert!(vol.multi_volume);
+            assert!(vol.new_naming);
+            assert_eq!(vol.volume_no, i as u32);
+        }
+
+        // 7. Rar5EncryptedDataTest
+        for (i, name) in ["testfile5encdata.part01.rar", "testfile5encdata.part02.rar", "testfile5encdata.part03.rar"].iter().enumerate() {
+            let (ok, vol, _, _) = read_vol(name, None);
+            assert!(ok);
+            assert_eq!(vol.version, 5);
+            assert!(vol.multi_volume);
+            assert!(vol.new_naming);
+            assert_eq!(vol.volume_no, i as u32);
+        }
+
+        // 8. Rar3EcryptedNamesTest (no password)
+        {
+            let (ok, vol, _, _) = read_vol("testfile3encnam.part01.rar", None);
+            assert!(!ok);
+            assert_eq!(vol.version, 3);
+            assert!(vol.encrypted);
+        }
+
+        // 9. Rar3EncryptedNamesKdfTest (with password "123")
+        for (i, name) in ["testfile3encnam.part01.rar", "testfile3encnam.part02.rar", "testfile3encnam.part03.rar"].iter().enumerate() {
+            let (ok, vol, files, _) = read_vol(name, Some(b"123"));
+            assert!(ok);
+            assert_eq!(vol.version, 3);
+            assert!(vol.multi_volume);
+            assert!(vol.new_naming);
+            assert_eq!(vol.volume_no, i as u32);
+            assert!(vol.encrypted);
+            assert!(!files.is_empty());
+            assert_eq!(files[0].filename, b"testfile3encnam.dat");
+        }
+
+        // 10. Rar5EncryptedNamesKdfTest (with password "123" and without password)
+        for (i, name) in ["testfile5encnam.part01.rar", "testfile5encnam.part02.rar", "testfile5encnam.part03.rar"].iter().enumerate() {
+            let (ok, vol, files, _) = read_vol(name, Some(b"123"));
+            assert!(ok);
+            assert_eq!(vol.version, 5);
+            assert!(vol.multi_volume);
+            assert!(vol.new_naming);
+            assert_eq!(vol.volume_no, i as u32);
+            assert!(vol.encrypted);
+            assert!(!files.is_empty());
+            assert_eq!(files[0].filename, b"testfile5encnam.dat");
+        }
+        {
+            let (ok, vol, _, _) = read_vol("testfile5encnam.part01.rar", None);
+            assert!(!ok);
+            assert_eq!(vol.version, 5);
+            assert!(vol.encrypted);
+        }
+
+        // 11. RarStoreFieldsTest
+        {
+            let (ok, _, files, vol_size) = read_vol("testfile3.part01.rar", None);
+            assert!(ok);
+            let inner = &files[0];
+            assert!(inner.packed_size > 0);
+            assert!(inner.data_offset > 0);
+            assert!(inner.data_offset + inner.packed_size <= vol_size);
+            assert_ne!(inner.method, 0);
+            assert!(!inner.encrypted_data);
+        }
+        {
+            let (ok, _, files, vol_size) = read_vol("testfile5.part01.rar", None);
+            assert!(ok);
+            let inner = &files[0];
+            assert!(inner.packed_size > 0);
+            assert!(inner.data_offset > 0);
+            assert!(inner.data_offset + inner.packed_size <= vol_size);
+            assert!(!inner.encrypted_data);
+        }
+        {
+            let (ok, _, files, _) = read_vol("testfile3encdata.part01.rar", None);
+            assert!(ok);
+            assert!(files[0].encrypted_data);
+        }
+        {
+            let (ok, _, files, _) = read_vol("testfile5encdata.part01.rar", None);
+            assert!(ok);
+            assert!(files[0].encrypted_data);
+        }
+
+        // 12. RarCursorWrappingSeekTest & RarCursorWrappingReadTest
+        {
+            let mut source = Bytes(vec![0u8; 8]);
+            let mut cursor = Cursor { source: &mut source, position: 0, eof: false };
+            assert!(cursor.seek(i64::MAX, SO_SET));
+            assert!(!cursor.seek(1, SO_CUR));
+            assert_eq!(cursor.position, i64::MAX);
+            assert!(!cursor.seek(i64::MAX, SO_END));
+            assert_eq!(cursor.position, i64::MAX);
+        }
+        {
+            struct WrappingSource;
+            impl Source for WrappingSource {
+                fn size(&mut self) -> i64 { i64::MIN }
+                fn read(&mut self, offset: i64, buf: &mut [u8]) -> bool {
+                    if offset != i64::MAX || buf.len() != 1 {
+                        return false;
+                    }
+                    buf[0] = b'x';
+                    true
+                }
+            }
+            let mut source = WrappingSource;
+            let mut cursor = Cursor { source: &mut source, position: 0, eof: false };
+            assert!(cursor.seek(i64::MAX, SO_SET));
+            let mut byte = [0u8; 1];
+            assert_eq!(cursor.read(&mut byte), 1);
+            assert_eq!(byte[0], b'x');
+            assert_eq!(cursor.position, i64::MIN);
+        }
+    }
 }

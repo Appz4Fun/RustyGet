@@ -484,4 +484,340 @@ mod tests {
     fn bstring_cut() {
         assert_eq!(join(&[b'a'; 1020], b'/', b"bcdef").len(), 1023);
     }
+
+    fn latin1_to_utf8(latin1: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(latin1.len() * 2);
+        for &ch in latin1 {
+            if ch < 128 {
+                out.push(ch);
+            } else {
+                out.push(0xc2 + u8::from(ch > 0xbf));
+                out.push((ch & 0x3f) + 0x80);
+            }
+        }
+        out
+    }
+
+    fn url_encode_char(ch: u8) -> [u8; 3] {
+        const HEX: &[u8; 16] = b"0123456789ABCDEF";
+        [b'%', HEX[(ch >> 4) as usize], HEX[(ch & 0x0f) as usize]]
+    }
+
+    fn translate_filename_from_par2_to_local(par2_name: &[u8]) -> Vec<u8> {
+        let mut local = Vec::with_capacity(par2_name.len());
+        for &raw in par2_name {
+            let mut ch = raw;
+            let ok = ch >= 32;
+            if ch == b'\\' {
+                ch = b'/';
+            }
+            if ok {
+                local.push(ch);
+            } else {
+                local.extend_from_slice(&url_encode_char(ch));
+            }
+        }
+        if local.first() == Some(&b'/') {
+            let enc = url_encode_char(b'/');
+            local.splice(0..1, enc);
+        }
+        while let Some(idx) = local.windows(3).position(|w| w == b"../") {
+            let dot = url_encode_char(b'.');
+            let mut rep = Vec::with_capacity(6);
+            rep.extend_from_slice(&dot);
+            rep.extend_from_slice(&dot);
+            local.splice(idx..idx + 2, rep);
+        }
+        local
+    }
+
+    fn parse_par2_packets(bytes: &[u8]) -> Option<Vec<ParEntry>> {
+        if bytes.is_empty() {
+            return None;
+        }
+        const FILE_DESC_TYPE: &[u8; 16] = b"PAR 2.0\0FileDesc";
+        const IFSC_TYPE: &[u8; 16] = b"PAR 2.0\0IFSC\0\0\0\0";
+        const MAIN_TYPE: &[u8; 16] = b"PAR 2.0\0Main\0\0\0\0";
+        const CREATOR_TYPE: &[u8; 16] = b"PAR 2.0\0Creator\0";
+        const RECV_TYPE: &[u8; 16] = b"PAR 2.0\0RecvSlic";
+
+        // Key is reversed fileid so BTreeMap orders identically to Par2::MD5Hash::operator<
+        let mut source_map: std::collections::BTreeMap<[u8; 16], Option<(Vec<u8>, Vec<u8>)>> =
+            std::collections::BTreeMap::new();
+        let mut set_id: Option<[u8; 16]> = None;
+        let mut packets = 0usize;
+        let mut offset = 0usize;
+
+        while offset + HEADER <= bytes.len() {
+            if &bytes[offset..offset + 8] != MAGIC {
+                offset += 1;
+                if let Some(pos) = bytes[offset..].windows(8).position(|w| w == MAGIC) {
+                    offset += pos;
+                } else {
+                    break;
+                }
+                if offset + HEADER > bytes.len() {
+                    break;
+                }
+            }
+            let length = u64::from_le_bytes(bytes[offset + 8..offset + 16].try_into().unwrap()) as usize;
+            if length < HEADER || (length & 3) != 0 || offset + length > bytes.len() {
+                offset += 1;
+                continue;
+            }
+            let digest = Md5::digest(&bytes[offset + 32..offset + length]);
+            if digest.as_slice() != &bytes[offset + 16..offset + 32] {
+                offset += 1;
+                continue;
+            }
+            let pkt_set_id: [u8; 16] = bytes[offset + 32..offset + 48].try_into().unwrap();
+            if set_id.is_none() {
+                set_id = Some(pkt_set_id);
+            }
+            if set_id == Some(pkt_set_id) {
+                let pkt_type = &bytes[offset + 48..offset + 64];
+                if pkt_type == FILE_DESC_TYPE {
+                    if length > 120 && length - 120 <= 100_000 {
+                        let mut key: [u8; 16] = bytes[offset + 64..offset + 80].try_into().unwrap();
+                        key.reverse();
+                        let hashfull = &bytes[offset + 80..offset + 96];
+                        let hash16k = &bytes[offset + 96..offset + 112];
+                        let file_len = u64::from_le_bytes(bytes[offset + 112..offset + 120].try_into().unwrap());
+                        if !(file_len <= 16384 && hash16k != hashfull) {
+                            let raw_name = &bytes[offset + 120..offset + length];
+                            let nul = raw_name.iter().position(|&b| b == 0).unwrap_or(raw_name.len());
+                            let utf8_name = latin1_to_utf8(&raw_name[..nul]);
+                            let local_name = translate_filename_from_par2_to_local(&utf8_name);
+                            let printed_hash = crate::renameanalyzer::print(hash16k)[..32].to_vec();
+                            let entry = source_map.entry(key).or_insert(None);
+                            if entry.is_none() {
+                                *entry = Some((local_name, printed_hash));
+                                packets += 1;
+                            }
+                        }
+                    }
+                } else if pkt_type == IFSC_TYPE {
+                    if length >= 80 && (length - 80) % 20 == 0 {
+                        let mut key: [u8; 16] = bytes[offset + 64..offset + 80].try_into().unwrap();
+                        key.reverse();
+                        source_map.entry(key).or_insert(None);
+                        packets += 1;
+                    }
+                } else if pkt_type == MAIN_TYPE || pkt_type == CREATOR_TYPE || pkt_type == RECV_TYPE {
+                    packets += 1;
+                }
+            }
+            offset += length;
+        }
+        let _ = packets;
+        Some(
+            source_map
+                .into_values()
+                .map(|opt| match opt {
+                    Some((name, hash)) => ParEntry::File { name, hash },
+                    None => ParEntry::Damaged,
+                })
+                .collect(),
+        )
+    }
+
+    struct FsParRenamerEnv {
+        dest_dir: Vec<u8>,
+        dir_list: Vec<Vec<u8>>,
+        loaded_entries: std::vec::IntoIter<ParEntry>,
+    }
+
+    impl FsParRenamerEnv {
+        fn new(dest_dir: &std::path::Path) -> Self {
+            Self {
+                dest_dir: dest_dir.to_string_lossy().as_bytes().to_vec(),
+                dir_list: Vec::new(),
+                loaded_entries: Vec::new().into_iter(),
+            }
+        }
+    }
+
+    impl Env for FsParRenamerEnv {
+        fn destination(&mut self, _initial: &[u8]) -> R<Vec<u8>> {
+            Ok(self.dest_dir.clone())
+        }
+        fn state_changed(&mut self, _state: &mut State) {}
+        fn previous_dirs(&mut self) -> R<Vec<Vec<u8>>> {
+            Ok(self.dir_list.clone())
+        }
+        fn remember_dir(&mut self, dir: &[u8]) -> R<()> {
+            self.dir_list.push(dir.to_vec());
+            Ok(())
+        }
+        fn stopped(&mut self) -> R<bool> {
+            Ok(false)
+        }
+        fn progress(&mut self, _label: &[u8], _stage: i32) -> R<()> {
+            Ok(())
+        }
+        fn message(&mut self, _kind: Kind, _text: &[u8]) -> R<()> {
+            Ok(())
+        }
+        fn debug(&mut self, _text: &[u8]) -> R<()> {
+            Ok(())
+        }
+        fn list_dir(&mut self, dir: &[u8]) -> R<Vec<Vec<u8>>> {
+            let path = std::path::Path::new(std::str::from_utf8(dir).unwrap());
+            let mut out = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::ffi::OsStrExt;
+                        out.push(entry.file_name().as_bytes().to_vec());
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        out.push(entry.file_name().to_string_lossy().as_bytes().to_vec());
+                    }
+                }
+            }
+            Ok(out)
+        }
+        fn dir_exists(&mut self, path: &[u8]) -> R<bool> {
+            let p = std::path::Path::new(std::str::from_utf8(path).unwrap());
+            Ok(p.is_dir())
+        }
+        fn file_exists(&mut self, path: &[u8]) -> R<bool> {
+            let p = std::path::Path::new(std::str::from_utf8(path).unwrap());
+            Ok(p.is_file())
+        }
+        fn file_size(&mut self, path: &[u8]) -> R<i64> {
+            let p = std::path::Path::new(std::str::from_utf8(path).unwrap());
+            Ok(std::fs::metadata(p).map(|m| m.len() as i64).unwrap_or(-1))
+        }
+        fn read(&mut self, path: &[u8], buf: &mut [u8]) -> R<Read> {
+            use std::io::Read as _;
+            let p = std::path::Path::new(std::str::from_utf8(path).unwrap());
+            let Ok(mut f) = std::fs::File::open(p) else {
+                return Ok(Read::OpenFailed);
+            };
+            match f.read(buf) {
+                Ok(n) => Ok(Read::Bytes(n)),
+                Err(_) => Ok(Read::ReadFailed),
+            }
+        }
+        fn load_par(&mut self, path: &[u8]) -> R<Option<usize>> {
+            let p = std::path::Path::new(std::str::from_utf8(path).unwrap());
+            let Ok(bytes) = std::fs::read(p) else {
+                return Ok(None);
+            };
+            let Some(entries) = parse_par2_packets(&bytes) else {
+                return Ok(None);
+            };
+            let count = entries.len();
+            self.loaded_entries = entries.into_iter();
+            Ok(Some(count))
+        }
+        fn par_entry(&mut self) -> R<ParEntry> {
+            Ok(self.loaded_entries.next().unwrap_or(ParEntry::Damaged))
+        }
+        fn close_par(&mut self) {
+            self.loaded_entries = Vec::new().into_iter();
+        }
+        fn find_main_pars(&mut self, dir: &[u8]) -> R<Vec<Vec<u8>>> {
+            let p = std::path::Path::new(std::str::from_utf8(dir).unwrap());
+            let mut list = Vec::new();
+            let fold = |b: u8| b.to_ascii_lowercase();
+            crate::parparser::find_main_pars(p, true, &fold, |name| {
+                list.push(name.to_vec());
+            });
+            Ok(list)
+        }
+        fn register_parred(&mut self, _name: &[u8]) -> R<()> {
+            Ok(())
+        }
+        fn rename(&mut self, src: &[u8], dst: &[u8]) -> R<bool> {
+            let s = std::path::Path::new(std::str::from_utf8(src).unwrap());
+            let d = std::path::Path::new(std::str::from_utf8(dst).unwrap());
+            if let (Some(sp), Some(dp)) = (s.parent(), d.parent()) {
+                if sp != dp {
+                    let _ = std::fs::create_dir_all(dp);
+                }
+            }
+            Ok(std::fs::rename(s, d).is_ok())
+        }
+        fn ignored_ext(&mut self, _name: &[u8]) -> R<bool> {
+            Ok(false)
+        }
+        fn fold(&self, byte: u8) -> u8 {
+            byte.to_ascii_lowercase()
+        }
+    }
+
+    #[test]
+    fn par_renamer_full_suite_port_from_cpp() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let testdata_root = manifest_dir.parent().unwrap().join("tests/testdata");
+        let parchecker_dir = testdata_root.join("parchecker");
+        let parchecker_utf8_dir = testdata_root.join("parcheckerUtf8");
+
+        let copy_dir = |src: &std::path::Path, dst: &std::path::Path| {
+            let _ = std::fs::remove_dir_all(dst);
+            std::fs::create_dir_all(dst).unwrap();
+            for entry in std::fs::read_dir(src).unwrap() {
+                let entry = entry.unwrap();
+                std::fs::copy(entry.path(), dst.join(entry.file_name())).unwrap();
+            }
+        };
+
+        let run_case = |name: &str, src_dir: &std::path::Path, detect_missing: bool, setup: &dyn Fn(&std::path::Path)| -> State {
+            let work_dir = std::env::temp_dir().join(format!("nzbget_rs_parrenamer_{}_{}", std::process::id(), name));
+            copy_dir(src_dir, &work_dir);
+            setup(&work_dir);
+            let mut env = FsParRenamerEnv::new(&work_dir);
+            let mut state = State {
+                detect_missing,
+                ..State::default()
+            };
+            let dest_bytes = work_dir.to_string_lossy().as_bytes().to_vec();
+            execute(&mut env, &mut state, b"test", &dest_bytes, crate::paths::PATH_SEPARATOR).unwrap();
+            let _ = std::fs::remove_dir_all(&work_dir);
+            state
+        };
+
+        // 1. RenameNotNeededTest
+        let st = run_case("RenameNotNeededTest", &parchecker_dir, false, &|_| {});
+        assert_eq!(st.renamed_count, 0);
+
+        // 2. RenameSuccessfulTest
+        let st = run_case("RenameSuccessfulTest", &parchecker_dir, false, &|w| {
+            std::fs::rename(w.join("testfile.dat"), w.join("123456")).unwrap();
+        });
+        assert_eq!(st.renamed_count, 1);
+        assert!(!st.has_missed_files);
+
+        // 3. DetectingMissingTest
+        let st = run_case("DetectingMissingTest", &parchecker_dir, true, &|w| {
+            std::fs::rename(w.join("testfile.dat"), w.join("123456")).unwrap();
+            std::fs::remove_file(w.join("testfile.nfo")).unwrap();
+        });
+        assert_eq!(st.renamed_count, 1);
+        assert!(st.has_missed_files);
+
+        // 4. RenameDupeParTest
+        let st = run_case("RenameDupeParTest", &parchecker_dir, true, &|w| {
+            std::fs::rename(w.join("testfile.dat"), w.join("123456")).unwrap();
+            std::fs::rename(w.join("testfile.vol00+1.PAR2"), w.join("testfil2.par2")).unwrap();
+        });
+        assert_eq!(st.renamed_count, 5);
+        assert!(!st.has_missed_files);
+
+        // 5. NoParExtensionTest
+        let st = run_case("NoParExtensionTest", &parchecker_dir, true, &|w| {
+            std::fs::rename(w.join("testfile.par2"), w.join("testfile")).unwrap();
+        });
+        assert_eq!(st.renamed_count, 4);
+        assert!(!st.has_missed_files);
+
+        // 6. Utf8Par2Test
+        let st = run_case("Utf8Par2Test", &parchecker_utf8_dir, false, &|_| {});
+        assert_eq!(st.renamed_count, 1);
+        assert!(!st.has_missed_files);
+    }
 }

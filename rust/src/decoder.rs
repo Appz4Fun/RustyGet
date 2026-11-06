@@ -864,4 +864,206 @@ mod tests {
             nzbget_rs_decoder_free(d);
         }
     }
+
+    unsafe extern "C" fn test_yenc_decode(
+        src: *mut *const c_void,
+        dst: *mut *mut c_void,
+        len: usize,
+        _state: *mut c_int,
+    ) -> c_int {
+        let s = std::slice::from_raw_parts(*src as *const u8, len);
+        let out = *dst as *mut u8;
+        let mut written = 0usize;
+        let mut i = 0usize;
+        let mut endseq = 0;
+        while i < s.len() {
+            if i + 4 <= s.len() && &s[i..i + 4] == b"\r\n=y" {
+                i += 4;
+                endseq = 1;
+                break;
+            }
+            if i + 5 <= s.len() && &s[i..i + 5] == b"\r\n.\r\n" {
+                i += 5;
+                endseq = 2;
+                break;
+            }
+            let b = s[i];
+            i += 1;
+            if b == b'\r' || b == b'\n' {
+                continue;
+            }
+            *out.add(written) = b.wrapping_sub(42);
+            written += 1;
+        }
+        *src = (*src).byte_add(i);
+        *dst = (*dst).byte_add(written);
+        endseq
+    }
+
+    unsafe extern "C" fn test_yenc_crc(src: *const c_void, len: usize, init: u32) -> u32 {
+        let slice = std::slice::from_raw_parts(src as *const u8, len);
+        let mut acc = crate::crc::Crc32::new();
+        acc.append(slice);
+        crate::crc::combine(init, acc.finish(), len as u32)
+    }
+
+    fn yenc_encode(data: &[u8]) -> Vec<u8> {
+        data.iter().map(|&c| c.wrapping_add(42)).collect()
+    }
+
+    #[test]
+    fn decoder_yenc_and_uu_full_suite_port_from_cpp() {
+        // 1. SingleMessageTest
+        {
+            let mut decoder = Decoder::new(test_yenc_decode, test_yenc_crc);
+            decoder.crc_check = true;
+            let data = b"nzbget";
+            let encoded = yenc_encode(data);
+            let mut msg = Vec::new();
+            msg.extend_from_slice(
+                format!(
+                    "=ybegin line=128 size={} name=name.dat\r\n",
+                    data.len()
+                )
+                .as_bytes(),
+            );
+            msg.extend_from_slice(&encoded);
+            msg.extend_from_slice(
+                format!("\r\n=yend size={} crc32=a30bff0d\r\n.\r\n", data.len()).as_bytes(),
+            );
+            let len = unsafe { decoder.decode_buffer(msg.as_mut_ptr(), msg.len()) };
+            assert_eq!(decoder.check(), Status::Finished);
+            assert_eq!(decoder.article_filename, b"name.dat");
+            assert_eq!(decoder.size, 6);
+            assert_eq!(decoder.calculated_crc, 0xa30bff0d);
+            assert_eq!(decoder.format, Format::Yenc);
+            assert!(decoder.eof);
+            assert_eq!(&msg[..len], b"nzbget");
+        }
+
+        // 2. MultipartMessageTest & 3. UnusualMultipartMessageTest
+        for unusual in [false, true] {
+            let mut decoder = Decoder::new(test_yenc_decode, test_yenc_crc);
+            decoder.crc_check = true;
+            let data1 = b"nzb";
+            let data2 = b"get";
+            let enc1 = yenc_encode(data1);
+            let enc2 = yenc_encode(data2);
+            let total_size = data1.len() + data2.len();
+            let sep = if unusual { "" } else { "\r\n" };
+
+            let mut msg1 = Vec::new();
+            msg1.extend_from_slice(
+                format!(
+                    "=ybegin part=1 total=2 line=128 size={total_size} name=name.dat{sep}=ypart begin=1 end={}\r\n",
+                    data1.len()
+                )
+                .as_bytes(),
+            );
+            msg1.extend_from_slice(&enc1);
+            msg1.extend_from_slice(
+                format!(
+                    "\r\n=yend size={} pcrc32=cb64ae30\r\n.\r\n",
+                    data1.len()
+                )
+                .as_bytes(),
+            );
+
+            let mut msg2 = Vec::new();
+            msg2.extend_from_slice(
+                format!(
+                    "=ybegin part=2 total=2 line=128 size={total_size} name=name.dat{sep}=ypart begin={} end={total_size}\r\n",
+                    data1.len() + 1
+                )
+                .as_bytes(),
+            );
+            msg2.extend_from_slice(&enc2);
+            msg2.extend_from_slice(
+                format!(
+                    "\r\n=yend size={} pcrc32=fd3b2e70 crc32=a30bff0d\r\n.\r\n",
+                    data2.len()
+                )
+                .as_bytes(),
+            );
+
+            let len1 = unsafe { decoder.decode_buffer(msg1.as_mut_ptr(), msg1.len()) };
+            assert_eq!(decoder.check(), Status::Finished);
+            assert_eq!(decoder.article_filename, b"name.dat");
+            assert_eq!(decoder.size, total_size as i64);
+            assert_eq!(decoder.calculated_crc, 0xcb64ae30);
+            assert_eq!(decoder.format, Format::Yenc);
+            assert!(decoder.eof);
+            assert_eq!(&msg1[..len1], b"nzb");
+
+            decoder.clear();
+            decoder.crc_check = true;
+            let len2 = unsafe { decoder.decode_buffer(msg2.as_mut_ptr(), msg2.len()) };
+            assert_eq!(decoder.article_filename, b"name.dat");
+            assert_eq!(decoder.check(), Status::Finished);
+            assert_eq!(len1, data2.len());
+            assert_eq!(len1 + len2, total_size);
+            assert_eq!(decoder.size, total_size as i64);
+            assert_eq!(decoder.calculated_crc, 0xfd3b2e70);
+            assert!(decoder.eof);
+            assert_eq!(&msg2[..len2], b"get");
+        }
+
+        // 4. BufferOverflowTest
+        {
+            let mut decoder = Decoder::new(decode, crc);
+            decoder.raw_mode = true;
+            let mut buf = vec![b'x'; 4096];
+            let len = unsafe { decoder.decode_buffer(buf.as_mut_ptr(), 4096) };
+            assert_eq!(len, 4096);
+            assert!(!decoder.eof);
+        }
+
+        // 5. UuDecodeOutputBoundTest
+        {
+            let mut decoder = Decoder::new(decode, crc);
+            let mut first = b"begin 644 f.bin\r\n_".to_vec();
+            first.extend_from_slice(&[b'A'; 62]);
+            let first_len = first.len();
+            first.resize(first_len + 128, 0);
+            unsafe {
+                decoder.decode_buffer(first.as_mut_ptr(), first_len);
+            }
+
+            let mut next = vec![b'A'; 22];
+            next.extend_from_slice(b"\r\n");
+            while next.len() < 512 - 87 {
+                next.push(b'_');
+                next.extend_from_slice(&[b'A'; 84]);
+                next.extend_from_slice(b"\r\n");
+            }
+            let next_len = next.len();
+            let mut second = vec![b'Z'; next_len + 128];
+            second[..next_len].copy_from_slice(&next);
+            let outlen = unsafe { decoder.decode_buffer(second.as_mut_ptr(), next_len) };
+            assert!(outlen > 0);
+            assert!(outlen <= next_len + 63);
+        }
+
+        // 6. UuDecodeShortLineTest
+        {
+            let decode_uu_line = |line: &[u8]| -> Vec<u8> {
+                let mut decoder = Decoder::new(decode, crc);
+                let mut text = b"begin 644 f.bin\r\n".to_vec();
+                text.extend_from_slice(line);
+                text.extend_from_slice(b"\r\n");
+                let text_len = text.len();
+                let mut buffer = vec![b'Z'; text_len + 128];
+                buffer[..text_len].copy_from_slice(&text);
+                let outlen = unsafe { decoder.decode_buffer(buffer.as_mut_ptr(), text_len) };
+                buffer[..outlen].to_vec()
+            };
+            let mut short_line = vec![b'M'];
+            short_line.extend_from_slice(&[b'!'; 46]);
+            let mut full_line = short_line.clone();
+            full_line.extend_from_slice(&[b' '; 14]);
+            let got = decode_uu_line(&short_line);
+            assert_eq!(got.len(), 45);
+            assert_eq!(got, decode_uu_line(&full_line));
+        }
+    }
 }

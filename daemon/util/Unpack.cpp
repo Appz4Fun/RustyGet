@@ -73,7 +73,93 @@ bool ExtractorBase::CheckPrerequisites() const
 
 std::string ExtractorBase::MakePassword() const
 {
-	return "-p" + (m_password.empty() ? "-" : m_password);
+	NzbgetRsBuf buf = nzbget_rs_euh_extractor_make_password(m_password.data(), m_password.size());
+	std::string out(buf.data ? buf.data : "", buf.len);
+	nzbget_rs_free(buf);
+	return out;
+}
+
+ScriptController::ArgList SevenZip::MakeArgs() const
+{
+	ScriptController::ArgList args;
+
+	args.push_back(fs::u8string(m_tool).c_str());
+	args.push_back("x");
+	args.push_back("-y");
+
+	args.push_back(nzbget_rs_euh_sevenzip_overwrite_switch(static_cast<int>(m_mode)));
+
+	args.push_back(MakePassword().c_str());
+	args.push_back(("-o" + fs::u8string(m_outputDir)).c_str());
+	args.push_back(fs::u8string(m_archive).c_str());
+
+	return args;
+}
+
+bool SevenZip::IsSupported(const fs::path& path)
+{
+	auto s = fs::u8string(path);
+	return nzbget_rs_euh_sevenzip_is_supported(s.data(), s.size()) != 0;
+}
+
+bool SevenZip::DecodeExitCode(int ec) const
+{
+	const char* msg = nullptr;
+	if (nzbget_rs_euh_sevenzip_decode_exit_code(ec, &msg) != 0)
+	{
+		return true;
+	}
+	if (msg && *msg)
+	{
+		error("%s", msg);
+	}
+	else
+	{
+		error("Unknown 7-Zip error (%d)", ec);
+	}
+	return false;
+}
+
+ScriptController::ArgList Unrar::MakeArgs() const
+{
+	ScriptController::ArgList args;
+
+	args.push_back(fs::u8string(m_tool).c_str());
+	args.push_back("x");
+	args.push_back("-y");
+	args.push_back("-ai");
+
+	args.push_back(nzbget_rs_euh_unrar_overwrite_switch(static_cast<int>(m_mode)));
+
+	args.push_back(MakePassword().c_str());
+	args.push_back(fs::u8string(m_archive).c_str());
+	args.push_back(fs::u8string(m_outputDir).c_str());
+
+	return args;
+}
+
+bool Unrar::IsSupported(const fs::path& path)
+{
+	auto s = fs::u8string(path);
+	return nzbget_rs_euh_unrar_is_supported(s.data(), s.size()) != 0;
+}
+
+bool Unrar::DecodeExitCode(int ec) const
+{
+	const char* msg = nullptr;
+	if (nzbget_rs_euh_unrar_decode_exit_code(ec, &msg) != 0)
+	{
+		return true;
+	}
+	if (msg && *msg)
+	{
+		error("%s", msg);
+	}
+	else
+	{
+		error("Unknown error %d", ec);
+	}
+	return false;
 }
 
 bool IsArchive(const fs::path& file)

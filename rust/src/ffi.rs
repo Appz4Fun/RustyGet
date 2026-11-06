@@ -10994,21 +10994,6 @@ pub extern "C" fn nzbget_rs_qhp_classify_dup_status(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_qhp_should_reset_article(
-    article_status: c_int,
-    partial_state: c_int,
-    all_failed: c_int,
-    reset_failed: c_int,
-) -> c_int {
-    crate::historycoord::should_reset_article(
-        article_status,
-        partial_state,
-        all_failed != 0,
-        reset_failed != 0,
-    ) as c_int
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_qhp_parse_dupe_mode(
     text: *const c_char,
     out_mode: *mut c_int,
@@ -17340,14 +17325,6 @@ pub unsafe extern "C" fn nzbget_rs_ufs_fs_validate_load_file_size(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_ufs_fs_calc_allocate_chunk_size(
-    remaining: i64,
-    zeros_size: i64,
-) -> i64 {
-    crate::util::fs_calc_allocate_chunk_size(remaining, zeros_size)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_ufs_fs_classify_expand_file_name(
     filename: *const c_char,
     out_skip_dot_slash: *mut usize,
@@ -21726,16 +21703,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_format_new_path(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_format_ids_line(
-    nzb_id: i32,
-    file_id: i32,
-) -> RsBuf {
-    into_buf(crate::diskstate_format::diskstate_format_ids_line(
-        nzb_id, file_id,
-    ))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_legacy_suffix_str(
     suffix_kind: i32,
 ) -> *const c_char {
@@ -23792,34 +23759,6 @@ pub extern "C" fn nzbget_rs_dqh_script_ctrl_can_send_break(pid: c_int, completed
     i32::from(crate::extension::script_ctrl_can_send_break(
         pid,
         completed != 0,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_fs_should_fallback_move_to_copy(
-    rename_ok: c_int,
-    err_no: c_int,
-    exdev: c_int,
-) -> c_int {
-    i32::from(crate::util::fs_should_fallback_move_to_copy(
-        rename_ok != 0,
-        err_no,
-        exdev,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_fs_is_copied_file_valid(
-    close_ok: c_int,
-    loop_ok: c_int,
-    copied_bytes: i64,
-    src_size: i64,
-) -> c_int {
-    i32::from(crate::util::fs_is_copied_file_valid(
-        close_ok != 0,
-        loop_ok != 0,
-        copied_bytes,
-        src_size,
     ))
 }
 
@@ -28513,169 +28452,263 @@ pub extern "C" fn nzbget_rs_history_coord_eval_requeue_loaded_file(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_history_coord_has_retryable_article(
-    statuses: *const c_int,
-    len: usize,
-    reset_failed: c_int,
-    ai_undefined: c_int,
-    ai_failed: c_int,
+pub extern "C" fn nzbget_rs_history_coord_should_park_completed_file(
+    status: c_int,
+    cf_none: c_int,
+    cf_partial: c_int,
+    is_last: c_int,
 ) -> c_int {
-    let slice = if statuses.is_null() || len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(statuses, len)
-    };
-    crate::historycoord::has_retryable_article(slice, reset_failed != 0, ai_undefined, ai_failed)
+    crate::historycoord::should_park_completed_file(status, cf_none, cf_partial, is_last != 0)
         as c_int
 }
 
 #[allow(clippy::too_many_arguments)]
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_history_coord_reset_articles_header(
-    all_failed: c_int,
-    is_par_file: c_int,
-    file_size: i64,
-    file_missed_size: i64,
-    file_total_articles: c_int,
-    file_missed_articles: c_int,
-    cur_file_failed_size: i64,
-    cur_file_failed_articles: c_int,
-    cur_file_remaining_size: i64,
-    cur_file_completed_articles: c_int,
-    file_success_size: i64,
-    file_success_articles: c_int,
-    cur_nzb_failed_size: i64,
-    cur_nzb_success_size: i64,
-    cur_nzb_failed_articles: c_int,
-    cur_nzb_success_articles: c_int,
-    cur_nzb_par_failed_size: i64,
-    cur_nzb_par_success_size: i64,
-    out_file_failed_size: *mut i64,
-    out_file_failed_articles: *mut c_int,
-    out_file_remaining_size: *mut i64,
-    out_file_completed_articles: *mut c_int,
-    out_nzb_failed_size: *mut i64,
-    out_nzb_success_size: *mut i64,
-    out_nzb_failed_articles: *mut c_int,
-    out_nzb_success_articles: *mut c_int,
-    out_nzb_par_failed_size: *mut i64,
-    out_nzb_par_success_size: *mut i64,
+pub unsafe extern "C" fn nzbget_rs_history_coord_prepare_requeued_loaded_file(
+    dest_dir: *const c_char,
+    path_sep: c_char,
+    recorded_name: *const c_char,
+    current_file_filename: *const c_char,
+    success_articles: c_int,
+    current_partial_state: c_int,
+    ps_none: c_int,
+    ps_completed: c_int,
+    reprocess: c_int,
+    reset_failed: c_int,
+    article_statuses: *const c_int,
+    article_statuses_len: usize,
+    ai_undefined: c_int,
+    ai_failed: c_int,
+    ctx: *mut c_void,
+    file_size_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char) -> i64>,
+    delete_file_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+    file_exists_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int>,
+    out_set_recorded_filename: *mut c_int,
+    out_new_partial_state: *mut c_int,
+    out_warn_missing_on_disk: *mut c_int,
+    out_no_retryable_articles: *mut c_int,
 ) {
-    let (
-        ff_sz,
-        ff_art,
-        fr_sz,
-        fc_art,
-        nf_sz,
-        ns_sz,
-        nf_art,
-        ns_art,
-        npf_sz,
-        nps_sz,
-    ) = crate::historycoord::reset_articles_header(
-        all_failed != 0,
-        is_par_file != 0,
-        file_size,
-        file_missed_size,
-        file_total_articles,
-        file_missed_articles,
-        cur_file_failed_size,
-        cur_file_failed_articles,
-        cur_file_remaining_size,
-        cur_file_completed_articles,
-        file_success_size,
-        file_success_articles,
-        cur_nzb_failed_size,
-        cur_nzb_success_size,
-        cur_nzb_failed_articles,
-        cur_nzb_success_articles,
-        cur_nzb_par_failed_size,
-        cur_nzb_par_success_size,
+    let statuses = if article_statuses.is_null() || article_statuses_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(article_statuses, article_statuses_len)
+    };
+    let outcome = crate::historycoord::prepare_requeued_loaded_file(
+        crate::queuecoord::cstr_to_bytes(dest_dir),
+        path_sep as u8,
+        crate::queuecoord::cstr_to_bytes(recorded_name),
+        crate::queuecoord::cstr_to_bytes(current_file_filename),
+        success_articles,
+        current_partial_state,
+        ps_none,
+        ps_completed,
+        reprocess != 0,
+        reset_failed != 0,
+        statuses,
+        ai_undefined,
+        ai_failed,
+        |p| {
+            let Some(cb) = file_size_cb else { return -1 };
+            let mut cstr = p.to_vec();
+            cstr.push(0);
+            unsafe { cb(ctx, cstr.as_ptr().cast()) }
+        },
+        |p| {
+            if let Some(cb) = delete_file_cb {
+                let mut cstr = p.to_vec();
+                cstr.push(0);
+                unsafe { cb(ctx, cstr.as_ptr().cast()) };
+            }
+        },
+        |p| {
+            let Some(cb) = file_exists_cb else {
+                return false;
+            };
+            let mut cstr = p.to_vec();
+            cstr.push(0);
+            unsafe { cb(ctx, cstr.as_ptr().cast()) != 0 }
+        },
     );
-    if !out_file_failed_size.is_null() {
-        *out_file_failed_size = ff_sz;
+    if !out_set_recorded_filename.is_null() {
+        *out_set_recorded_filename = outcome.set_recorded_filename as c_int;
     }
-    if !out_file_failed_articles.is_null() {
-        *out_file_failed_articles = ff_art;
+    if !out_new_partial_state.is_null() {
+        *out_new_partial_state = outcome.new_partial_state;
     }
-    if !out_file_remaining_size.is_null() {
-        *out_file_remaining_size = fr_sz;
+    if !out_warn_missing_on_disk.is_null() {
+        *out_warn_missing_on_disk = outcome.warn_missing_on_disk as c_int;
     }
-    if !out_file_completed_articles.is_null() {
-        *out_file_completed_articles = fc_art;
-    }
-    if !out_nzb_failed_size.is_null() {
-        *out_nzb_failed_size = nf_sz;
-    }
-    if !out_nzb_success_size.is_null() {
-        *out_nzb_success_size = ns_sz;
-    }
-    if !out_nzb_failed_articles.is_null() {
-        *out_nzb_failed_articles = nf_art;
-    }
-    if !out_nzb_success_articles.is_null() {
-        *out_nzb_success_articles = ns_art;
-    }
-    if !out_nzb_par_failed_size.is_null() {
-        *out_nzb_par_failed_size = npf_sz;
-    }
-    if !out_nzb_par_success_size.is_null() {
-        *out_nzb_par_success_size = nps_sz;
+    if !out_no_retryable_articles.is_null() {
+        *out_no_retryable_articles = outcome.no_retryable_articles as c_int;
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_history_coord_apply_article_reset_delta(
-    pa_status: c_int,
-    ai_failed: c_int,
-    ai_undefined: c_int,
-    ai_finished: c_int,
-    pa_size: c_int,
-    cur_completed_articles: c_int,
-    cur_remaining_size: i64,
-    cur_failed_articles: c_int,
-    cur_failed_size: i64,
-    cur_success_articles: c_int,
-    cur_success_size: i64,
-    out_completed_articles: *mut c_int,
-    out_remaining_size: *mut i64,
-    out_failed_articles: *mut c_int,
-    out_failed_size: *mut i64,
-    out_success_articles: *mut c_int,
-    out_success_size: *mut i64,
+pub unsafe extern "C" fn nzbget_rs_history_coord_reset_articles_batch(
+    all_failed: c_int,
+    reset_failed: c_int,
+    is_par_file: c_int,
+    partial_state: c_int,
+    file_size: i64,
+    file_missed_size: i64,
+    file_total_articles: c_int,
+    file_missed_articles: c_int,
+    inout_file_failed_size: *mut i64,
+    inout_file_failed_articles: *mut c_int,
+    inout_file_remaining_size: *mut i64,
+    inout_file_completed_articles: *mut c_int,
+    inout_file_success_size: *mut i64,
+    inout_file_success_articles: *mut c_int,
+    inout_nzb_failed_size: *mut i64,
+    inout_nzb_success_size: *mut i64,
+    inout_nzb_failed_articles: *mut c_int,
+    inout_nzb_success_articles: *mut c_int,
+    inout_nzb_par_failed_size: *mut i64,
+    inout_nzb_par_success_size: *mut i64,
+    inout_article_statuses: *mut c_int,
+    article_sizes: *const c_int,
+    out_reset_flags: *mut u8,
+    articles_len: usize,
 ) {
-    let (comp, rem, fail_art, fail_sz, succ_art, succ_sz) =
-        crate::historycoord::apply_article_reset_delta(
-            pa_status,
-            ai_failed,
-            ai_undefined,
-            ai_finished,
-            pa_size,
-            cur_completed_articles,
-            cur_remaining_size,
-            cur_failed_articles,
-            cur_failed_size,
-            cur_success_articles,
-            cur_success_size,
-        );
-    if !out_completed_articles.is_null() {
-        *out_completed_articles = comp;
+    let mut ff_sz = if inout_file_failed_size.is_null() {
+        0
+    } else {
+        *inout_file_failed_size
+    };
+    let mut ff_art = if inout_file_failed_articles.is_null() {
+        0
+    } else {
+        *inout_file_failed_articles
+    };
+    let mut fr_sz = if inout_file_remaining_size.is_null() {
+        0
+    } else {
+        *inout_file_remaining_size
+    };
+    let mut fc_art = if inout_file_completed_articles.is_null() {
+        0
+    } else {
+        *inout_file_completed_articles
+    };
+    let mut fs_sz = if inout_file_success_size.is_null() {
+        0
+    } else {
+        *inout_file_success_size
+    };
+    let mut fs_art = if inout_file_success_articles.is_null() {
+        0
+    } else {
+        *inout_file_success_articles
+    };
+    let mut nf_sz = if inout_nzb_failed_size.is_null() {
+        0
+    } else {
+        *inout_nzb_failed_size
+    };
+    let mut ns_sz = if inout_nzb_success_size.is_null() {
+        0
+    } else {
+        *inout_nzb_success_size
+    };
+    let mut nf_art = if inout_nzb_failed_articles.is_null() {
+        0
+    } else {
+        *inout_nzb_failed_articles
+    };
+    let mut ns_art = if inout_nzb_success_articles.is_null() {
+        0
+    } else {
+        *inout_nzb_success_articles
+    };
+    let mut npf_sz = if inout_nzb_par_failed_size.is_null() {
+        0
+    } else {
+        *inout_nzb_par_failed_size
+    };
+    let mut nps_sz = if inout_nzb_par_success_size.is_null() {
+        0
+    } else {
+        *inout_nzb_par_success_size
+    };
+
+    let statuses_slice = if inout_article_statuses.is_null() || articles_len == 0 {
+        &mut [][..]
+    } else {
+        std::slice::from_raw_parts_mut(inout_article_statuses, articles_len)
+    };
+    let sizes_slice = if article_sizes.is_null() || articles_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(article_sizes, articles_len)
+    };
+    let flags_slice = if out_reset_flags.is_null() || articles_len == 0 {
+        &mut [][..]
+    } else {
+        std::slice::from_raw_parts_mut(out_reset_flags, articles_len)
+    };
+
+    crate::historycoord::reset_articles_batch(
+        all_failed != 0,
+        reset_failed != 0,
+        is_par_file != 0,
+        partial_state,
+        file_size,
+        file_missed_size,
+        file_total_articles,
+        file_missed_articles,
+        &mut ff_sz,
+        &mut ff_art,
+        &mut fr_sz,
+        &mut fc_art,
+        &mut fs_sz,
+        &mut fs_art,
+        &mut nf_sz,
+        &mut ns_sz,
+        &mut nf_art,
+        &mut ns_art,
+        &mut npf_sz,
+        &mut nps_sz,
+        statuses_slice,
+        sizes_slice,
+        flags_slice,
+    );
+
+    if !inout_file_failed_size.is_null() {
+        *inout_file_failed_size = ff_sz;
     }
-    if !out_remaining_size.is_null() {
-        *out_remaining_size = rem;
+    if !inout_file_failed_articles.is_null() {
+        *inout_file_failed_articles = ff_art;
     }
-    if !out_failed_articles.is_null() {
-        *out_failed_articles = fail_art;
+    if !inout_file_remaining_size.is_null() {
+        *inout_file_remaining_size = fr_sz;
     }
-    if !out_failed_size.is_null() {
-        *out_failed_size = fail_sz;
+    if !inout_file_completed_articles.is_null() {
+        *inout_file_completed_articles = fc_art;
     }
-    if !out_success_articles.is_null() {
-        *out_success_articles = succ_art;
+    if !inout_file_success_size.is_null() {
+        *inout_file_success_size = fs_sz;
     }
-    if !out_success_size.is_null() {
-        *out_success_size = succ_sz;
+    if !inout_file_success_articles.is_null() {
+        *inout_file_success_articles = fs_art;
+    }
+    if !inout_nzb_failed_size.is_null() {
+        *inout_nzb_failed_size = nf_sz;
+    }
+    if !inout_nzb_success_size.is_null() {
+        *inout_nzb_success_size = ns_sz;
+    }
+    if !inout_nzb_failed_articles.is_null() {
+        *inout_nzb_failed_articles = nf_art;
+    }
+    if !inout_nzb_success_articles.is_null() {
+        *inout_nzb_success_articles = ns_art;
+    }
+    if !inout_nzb_par_failed_size.is_null() {
+        *inout_nzb_par_failed_size = npf_sz;
+    }
+    if !inout_nzb_par_success_size.is_null() {
+        *inout_nzb_par_success_size = nps_sz;
     }
 }
 
@@ -33089,5 +33122,196 @@ pub unsafe extern "C" fn nzbget_rs_transient_retries_set_remained_retries(
         tr.set_remained_retries(server_key, remained);
     }
 }
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fs_file_size(filename: *const c_char) -> i64 {
+    if filename.is_null() {
+        return -1;
+    }
+    crate::fsops::file_size(CStr::from_ptr(filename))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fs_delete_file(filename: *const c_char) -> c_int {
+    if filename.is_null() {
+        return 0;
+    }
+    c_int::from(crate::fsops::delete_file(CStr::from_ptr(filename)))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fs_create_directory_exclusive(
+    dir_filename: *const c_char,
+) -> c_int {
+    if dir_filename.is_null() {
+        return 0;
+    }
+    c_int::from(crate::fsops::create_directory_exclusive(CStr::from_ptr(
+        dir_filename,
+    )))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fs_remove_directory(dir_filename: *const c_char) -> c_int {
+    if dir_filename.is_null() {
+        return 0;
+    }
+    c_int::from(crate::fsops::remove_directory(CStr::from_ptr(dir_filename)))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fs_open_cloexec_fd(
+    filename: *const c_char,
+    mode: c_int,
+    om_read: c_int,
+    om_read_write: c_int,
+    om_write: c_int,
+) -> c_int {
+    if filename.is_null() {
+        return -1;
+    }
+    crate::fsops::open_cloexec_fd(
+        CStr::from_ptr(filename),
+        mode,
+        om_read,
+        om_read_write,
+        om_write,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fs_flush_file_buffers(
+    file_descriptor: c_int,
+    out_errmsg: *mut RsBuf,
+) -> c_int {
+    let mut errmsg = Vec::new();
+    let ok = crate::fsops::flush_file_buffers(file_descriptor, &mut errmsg);
+    if !out_errmsg.is_null() {
+        *out_errmsg = into_buf(errmsg);
+    }
+    c_int::from(ok)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fs_flush_dir_buffers(
+    filename: *const c_char,
+    path_sep: c_char,
+    out_errmsg: *mut RsBuf,
+) -> c_int {
+    if filename.is_null() {
+        return 0;
+    }
+    let mut errmsg = Vec::new();
+    let ok = crate::fsops::flush_dir_buffers(
+        CStr::from_ptr(filename),
+        path_sep as u8,
+        &mut errmsg,
+    );
+    if !out_errmsg.is_null() {
+        *out_errmsg = into_buf(errmsg);
+    }
+    c_int::from(ok)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fs_allocate_file(
+    filename: *const c_char,
+    size: i64,
+    out_errmsg: *mut RsBuf,
+) -> c_int {
+    if filename.is_null() {
+        return 0;
+    }
+    let mut errmsg = Vec::new();
+    let ok = crate::fsops::allocate_file(CStr::from_ptr(filename), size, &mut errmsg);
+    if !out_errmsg.is_null() {
+        *out_errmsg = into_buf(errmsg);
+    }
+    c_int::from(ok)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fs_copy_file(
+    src_filename: *const c_char,
+    dst_filename: *const c_char,
+) -> c_int {
+    if src_filename.is_null() || dst_filename.is_null() {
+        return 0;
+    }
+    c_int::from(crate::fsops::copy_file(
+        CStr::from_ptr(src_filename),
+        CStr::from_ptr(dst_filename),
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fs_move_file(
+    src_filename: *const c_char,
+    dst_filename: *const c_char,
+) -> c_int {
+    if src_filename.is_null() || dst_filename.is_null() {
+        return 0;
+    }
+    c_int::from(crate::fsops::move_file(
+        CStr::from_ptr(src_filename),
+        CStr::from_ptr(dst_filename),
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fs_move_file_no_overwrite(
+    src_filename: *const c_char,
+    dst_filename: *const c_char,
+) -> c_int {
+    if src_filename.is_null() || dst_filename.is_null() {
+        return crate::fsops::sys::EINVAL;
+    }
+    match crate::fsops::move_file_no_overwrite(
+        CStr::from_ptr(src_filename),
+        CStr::from_ptr(dst_filename),
+    ) {
+        Ok(()) => 0,
+        Err(err) => err,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fs_get_disk_state(
+    path: *const c_char,
+    statvfs_cb: Option<unsafe extern "C" fn(*const c_char, *mut u64, *mut u64, *mut u64) -> c_int>,
+    out_available: *mut i64,
+    out_total: *mut i64,
+) -> c_int {
+    if path.is_null() {
+        return 0;
+    }
+    let c_path = CStr::from_ptr(path);
+    let state = match statvfs_cb {
+        Some(cb) => crate::fsops::get_disk_state_with(c_path, &|p| {
+            let mut bavail = 0u64;
+            let mut blocks = 0u64;
+            let mut frsize = 0u64;
+            if cb(p.as_ptr(), &mut bavail, &mut blocks, &mut frsize) != 0 {
+                Some((bavail, blocks, frsize))
+            } else {
+                None
+            }
+        }),
+        None => crate::fsops::get_disk_state(c_path),
+    };
+    match state {
+        Some((avail, total)) => {
+            if !out_available.is_null() {
+                *out_available = avail;
+            }
+            if !out_total.is_null() {
+                *out_total = total;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
 
 

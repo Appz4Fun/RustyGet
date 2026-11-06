@@ -185,8 +185,11 @@ void HistoryCoordinator::AddToHistory(DownloadQueue* downloadQueue, NzbInfo* nzb
 	for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
 	{
 		bool isLast = &completedFile == &*nzbInfo->GetCompletedFiles()->rbegin();
-		if (completedFile.GetStatus() == CompletedFile::cfNone ||
-			(completedFile.GetStatus() == CompletedFile::cfPartial && isLast))
+		if (nzbget_rs_history_coord_should_park_completed_file(
+			(int)completedFile.GetStatus(),
+			(int)CompletedFile::cfNone,
+			(int)CompletedFile::cfPartial,
+			isLast ? 1 : 0) != 0)
 		{
 			nzbInfo->PrintMessage(Message::mkDetail, "Parking file %s", completedFile.GetFilename());
 			nzbInfo->SetParkedFileCount(nzbInfo->GetParkedFileCount() + 1);
@@ -777,55 +780,66 @@ void HistoryCoordinator::HistoryRetry(DownloadQueue* downloadQueue, HistoryList:
 				// name ("<id>.out.tmp"): its data is there, but it keeps the name its
 				// nzb-file gives it, which a recreation from a duplicate pairs by
 				std::string recordedName = completedFile.GetFilename();
-				bool temporaryName = recordedName.size() >= 8 &&
-					recordedName.compare(recordedName.size() - 8, 8, ".out.tmp") == 0;
-				if (!temporaryName || Util::EmptyStr(fileInfo->GetFilename()))
+				ArticleList* articles = fileInfo->GetArticles();
+				std::vector<int> artStatuses;
+				artStatuses.reserve(articles->size());
+				for (const std::unique_ptr<ArticleInfo>& article : *articles)
+				{
+					artStatuses.push_back((int)article->GetStatus());
+				}
+
+				auto fileSizeCb = [](void*, const char* path) -> int64_t {
+					return FileSystem::FileSize(path);
+				};
+				auto deleteFileCb = [](void*, const char* path) {
+					FileSystem::DeleteFile(path);
+				};
+				auto fileExistsCb = [](void*, const char* path) -> int {
+					return FileSystem::FileExists(path) ? 1 : 0;
+				};
+
+				int setRecordedFilename = 0;
+				int newPartialState = (int)fileInfo->GetPartialState();
+				int warnMissingOnDisk = 0;
+				int noRetryableArticles = 0;
+				nzbget_rs_history_coord_prepare_requeued_loaded_file(
+					nzbInfo->GetDestDir(),
+					PATH_SEPARATOR,
+					recordedName.c_str(),
+					fileInfo->GetFilename() ? fileInfo->GetFilename() : "",
+					fileInfo->GetSuccessArticles(),
+					(int)fileInfo->GetPartialState(),
+					(int)FileInfo::psNone,
+					(int)FileInfo::psCompleted,
+					reprocess ? 1 : 0,
+					resetFailed ? 1 : 0,
+					artStatuses.data(),
+					artStatuses.size(),
+					(int)ArticleInfo::aiUndefined,
+					(int)ArticleInfo::aiFailed,
+					nullptr,
+					fileSizeCb,
+					deleteFileCb,
+					fileExistsCb,
+					&setRecordedFilename,
+					&newPartialState,
+					&warnMissingOnDisk,
+					&noRetryableArticles);
+
+				if (setRecordedFilename)
 				{
 					fileInfo->SetFilename(recordedName.c_str());
 				}
 				fileInfo->SetNzbInfo(nzbInfo);
-
-				BString<1024> outputFilename("%s%c%s", nzbInfo->GetDestDir(), PATH_SEPARATOR, recordedName.c_str());
-
-				int64 outFileSize = fileInfo->GetSuccessArticles() == 0 ? 0 : FileSystem::FileSize(outputFilename);
-				if (fileInfo->GetSuccessArticles() == 0 || outFileSize == 0)
+				if (warnMissingOnDisk)
 				{
-					FileSystem::DeleteFile(outputFilename);
+					nzbInfo->PrintMessage(Message::mkWarning, "File %s could not be found on disk, downloading again", fileInfo->GetFilename());
 				}
-
-				if (fileInfo->GetSuccessArticles() > 0)
-				{
-					if (FileSystem::FileExists(outputFilename))
-					{
-						fileInfo->SetPartialState(FileInfo::psCompleted);
-					}
-					else if (!reprocess)
-					{
-						nzbInfo->PrintMessage(Message::mkWarning, "File %s could not be found on disk, downloading again", fileInfo->GetFilename());
-						fileInfo->SetPartialState(FileInfo::psNone);
-					}
-				}
+				fileInfo->SetPartialState((FileInfo::EPartialState)newPartialState);
 
 				// A partial file may contain only entries missing from the NZB.
 				// They have no message IDs to retry. Keep its completed record and
 				// statistics intact instead of queueing an all-finished article list.
-				ArticleList* articles = fileInfo->GetArticles();
-				bool noRetryableArticles = false;
-				if (fileInfo->GetPartialState() == FileInfo::psCompleted)
-				{
-					std::vector<int> artStatuses;
-					artStatuses.reserve(articles->size());
-					for (const std::unique_ptr<ArticleInfo>& article : *articles)
-					{
-						artStatuses.push_back((int)article->GetStatus());
-					}
-					noRetryableArticles = nzbget_rs_history_coord_has_retryable_article(
-						artStatuses.data(),
-						artStatuses.size(),
-						resetFailed ? 1 : 0,
-						(int)ArticleInfo::aiUndefined,
-						(int)ArticleInfo::aiFailed) == 0;
-				}
 				if (noRetryableArticles)
 				{
 					++it;
@@ -879,53 +893,57 @@ void HistoryCoordinator::HistoryRetry(DownloadQueue* downloadQueue, HistoryList:
 void HistoryCoordinator::ResetArticles(FileInfo* fileInfo, bool allFailed, bool resetFailed)
 {
 	NzbInfo* nzbInfo = fileInfo->GetNzbInfo();
+	ArticleList* articles = fileInfo->GetArticles();
+	std::vector<int> artStatuses;
+	std::vector<int> artSizes;
+	std::vector<uint8_t> resetFlags(articles->size(), 0);
+	artStatuses.reserve(articles->size());
+	artSizes.reserve(articles->size());
+	for (ArticleInfo* pa : articles)
+	{
+		artStatuses.push_back((int)pa->GetStatus());
+		artSizes.push_back(pa->GetSize());
+	}
 
 	int64 fileFailedSize = fileInfo->GetFailedSize();
 	int fileFailedArticles = fileInfo->GetFailedArticles();
 	int64 fileRemainingSize = fileInfo->GetRemainingSize();
 	int fileCompletedArticles = fileInfo->GetCompletedArticles();
+	int64 fileSuccessSize = fileInfo->GetSuccessSize();
+	int fileSuccessArticles = fileInfo->GetSuccessArticles();
 	int64 nzbFailedSize = nzbInfo->GetFailedSize();
 	int64 nzbSuccessSize = nzbInfo->GetSuccessSize();
 	int nzbFailedArticles = nzbInfo->GetFailedArticles();
 	int nzbSuccessArticles = nzbInfo->GetSuccessArticles();
 	int64 nzbParFailedSize = nzbInfo->GetParFailedSize();
 	int64 nzbParSuccessSize = nzbInfo->GetParSuccessSize();
-	nzbget_rs_history_coord_reset_articles_header(
+
+	nzbget_rs_history_coord_reset_articles_batch(
 		allFailed ? 1 : 0,
+		resetFailed ? 1 : 0,
 		fileInfo->GetParFile() ? 1 : 0,
+		(int)fileInfo->GetPartialState(),
 		fileInfo->GetSize(),
 		fileInfo->GetMissedSize(),
 		fileInfo->GetTotalArticles(),
 		fileInfo->GetMissedArticles(),
-		fileFailedSize,
-		fileFailedArticles,
-		fileRemainingSize,
-		fileCompletedArticles,
-		fileInfo->GetSuccessSize(),
-		fileInfo->GetSuccessArticles(),
-		nzbFailedSize,
-		nzbSuccessSize,
-		nzbFailedArticles,
-		nzbSuccessArticles,
-		nzbParFailedSize,
-		nzbParSuccessSize,
 		&fileFailedSize,
 		&fileFailedArticles,
 		&fileRemainingSize,
 		&fileCompletedArticles,
+		&fileSuccessSize,
+		&fileSuccessArticles,
 		&nzbFailedSize,
 		&nzbSuccessSize,
 		&nzbFailedArticles,
 		&nzbSuccessArticles,
 		&nzbParFailedSize,
-		&nzbParSuccessSize);
-	if (allFailed)
-	{
-		fileInfo->SetFailedSize(fileFailedSize);
-		fileInfo->SetFailedArticles(fileFailedArticles);
-		fileInfo->SetRemainingSize(fileRemainingSize);
-		fileInfo->SetCompletedArticles(fileCompletedArticles);
-	}
+		&nzbParSuccessSize,
+		artStatuses.data(),
+		artSizes.data(),
+		resetFlags.data(),
+		articles->size());
+
 	nzbInfo->GetServerStats()->ListOp(fileInfo->GetServerStats(), ServerStatList::soSubtract);
 	nzbInfo->SetFailedSize(nzbFailedSize);
 	nzbInfo->SetSuccessSize(nzbSuccessSize);
@@ -936,48 +954,19 @@ void HistoryCoordinator::ResetArticles(FileInfo* fileInfo, bool allFailed, bool 
 		nzbInfo->SetParFailedSize(nzbParFailedSize);
 		nzbInfo->SetParSuccessSize(nzbParSuccessSize);
 	}
+	fileInfo->SetFailedSize(fileFailedSize);
+	fileInfo->SetFailedArticles(fileFailedArticles);
+	fileInfo->SetRemainingSize(fileRemainingSize);
+	fileInfo->SetCompletedArticles(fileCompletedArticles);
+	fileInfo->SetSuccessSize(fileSuccessSize);
+	fileInfo->SetSuccessArticles(fileSuccessArticles);
 
-	for (ArticleInfo* pa : fileInfo->GetArticles())
+	for (size_t i = 0; i < articles->size(); ++i)
 	{
-		if (nzbget_rs_qhp_should_reset_article(
-			(int)pa->GetStatus(),
-			(int)fileInfo->GetPartialState(),
-			allFailed ? 1 : 0,
-			resetFailed ? 1 : 0
-		) != 0)
+		if (resetFlags[i])
 		{
-			int compArt = fileInfo->GetCompletedArticles();
-			int64 remSize = fileInfo->GetRemainingSize();
-			int failArt = fileInfo->GetFailedArticles();
-			int64 failSize = fileInfo->GetFailedSize();
-			int succArt = fileInfo->GetSuccessArticles();
-			int64 succSize = fileInfo->GetSuccessSize();
-			nzbget_rs_history_coord_apply_article_reset_delta(
-				(int)pa->GetStatus(),
-				(int)ArticleInfo::aiFailed,
-				(int)ArticleInfo::aiUndefined,
-				(int)ArticleInfo::aiFinished,
-				pa->GetSize(),
-				compArt,
-				remSize,
-				failArt,
-				failSize,
-				succArt,
-				succSize,
-				&compArt,
-				&remSize,
-				&failArt,
-				&failSize,
-				&succArt,
-				&succSize);
-			fileInfo->SetCompletedArticles(compArt);
-			fileInfo->SetRemainingSize(remSize);
-			fileInfo->SetFailedArticles(failArt);
-			fileInfo->SetFailedSize(failSize);
-			fileInfo->SetSuccessArticles(succArt);
-			fileInfo->SetSuccessSize(succSize);
-
-			pa->SetStatus(ArticleInfo::aiUndefined);
+			ArticleInfo* pa = (*articles)[i].get();
+			pa->SetStatus((ArticleInfo::EStatus)artStatuses[i]);
 			pa->SetCrc(0);
 			pa->SetSegmentOffset(0);
 			pa->SetSegmentSize(0);

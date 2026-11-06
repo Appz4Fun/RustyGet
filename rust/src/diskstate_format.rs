@@ -1505,6 +1505,57 @@ pub fn parse_ids_file(text: &[u8]) -> Option<(i32, i32)> {
     }
 }
 
+/// `DiskState::SaveIdFloor` (`daemon/queue/DiskState.cpp`):
+/// Atomically writes `"nzb <nzb_id> file <file_id>\n"` to `<queue_dir>/ids.new`
+/// and renames it over `<queue_dir>/ids`, cleaning up `<queue_dir>/ids.new` on failure.
+pub fn save_id_floor_file(queue_dir: &[u8], sep: u8, nzb_id: i32, file_id: i32) -> bool {
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+
+    let ids_bytes =
+        crate::artwritercore::article_writer_format_dest_file_path(queue_dir, sep, b"ids");
+    let temp_bytes = diskstate_format_new_path(&ids_bytes);
+    let text = diskstate_format_ids_line(nzb_id, file_id);
+
+    #[cfg(unix)]
+    let (ids_path, temp_path) = (
+        Path::new(std::ffi::OsStr::from_bytes(&ids_bytes)),
+        Path::new(std::ffi::OsStr::from_bytes(&temp_bytes)),
+    );
+    #[cfg(not(unix))]
+    let (ids_str, temp_str) = (
+        String::from_utf8_lossy(&ids_bytes).into_owned(),
+        String::from_utf8_lossy(&temp_bytes).into_owned(),
+    );
+    #[cfg(not(unix))]
+    let (ids_path, temp_path) = (Path::new(&ids_str), Path::new(&temp_str));
+
+    if std::fs::write(temp_path, &text).is_err() {
+        let _ = std::fs::remove_file(temp_path);
+        return false;
+    }
+
+    if std::fs::rename(temp_path, ids_path).is_err() {
+        let _ = std::fs::remove_file(temp_path);
+        return false;
+    }
+    true
+}
+
+/// # Safety
+/// `queue_dir` must be a valid NUL-terminated C string or null.
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_diskstate_save_id_floor(
+    queue_dir: *const c_char,
+    sep: c_char,
+    nzb_id: c_int,
+    file_id: c_int,
+) -> c_int {
+    let qd = unsafe { cstr_to_bytes(queue_dir) };
+    c_int::from(save_id_floor_file(qd, sep as u8, nzb_id, file_id))
+}
+
 /// `DiskState::RaiseIdsPastQueueDir` filename classifier.
 /// Returns `Some((id, is_nzb_log))` when the filename is `"n<id>.log"` or `"<id>"` / `"<id>s"` / `"<id>c"`.
 pub fn classify_queue_dir_id(filename: &[u8]) -> Option<(i32, bool)> {

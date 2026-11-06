@@ -588,31 +588,8 @@ void DiskState::RaiseIdsPastQueueDir()
  */
 void DiskState::SaveIdFloor()
 {
-	NzbgetRsBuf idsPathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-		g_Options->GetQueueDir(), PATH_SEPARATOR, "ids");
-	BString<1024> idsFilename = idsPathBuf.data ? idsPathBuf.data : "";
-	nzbget_rs_free(idsPathBuf);
-	NzbgetRsBuf tempPathBuf = nzbget_rs_dqh_diskstate_format_new_path(*idsFilename);
-	BString<1024> tempFilename = tempPathBuf.data ? tempPathBuf.data : "";
-	nzbget_rs_free(tempPathBuf);
-	NzbgetRsBuf textBuf = nzbget_rs_dqh_diskstate_format_ids_line(
-		NzbInfo::LastGenId(), FileInfo::LastGenId());
-	BString<100> text = textBuf.data ? textBuf.data : "";
-	nzbget_rs_free(textBuf);
-	if (!FileSystem::SaveBufferIntoFile(tempFilename, text, text.Length()))
-	{
-		FileSystem::DeleteFile(tempFilename);
-		return;
-	}
-
-	// Replace the previous floor in one step, including on Windows, where
-	// FileSystem::MoveFile's _wrename cannot replace an existing file.
-	fs::error_code ec;
-	fs::rename(fs::u8path(*tempFilename), fs::u8path(*idsFilename), ec);
-	if (ec)
-	{
-		FileSystem::DeleteFile(tempFilename);
-	}
+	nzbget_rs_diskstate_save_id_floor(
+		g_Options->GetQueueDir(), PATH_SEPARATOR, NzbInfo::LastGenId(), FileInfo::LastGenId());
 }
 
 bool DiskState::SaveDownloadProgress(DownloadQueue* downloadQueue)

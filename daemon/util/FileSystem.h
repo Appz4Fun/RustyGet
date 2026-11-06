@@ -75,34 +75,7 @@ inline fs::path make_unique_filename(const fs::path& targetPath)
 	return uniquePath;
 }
 
-inline void move_file(const fs::path& src, const fs::path& dest, fs::error_code& ec) noexcept
-{
-	if (fs::exists(dest, ec))
-	{
-		ec = std::make_error_code(std::errc::file_exists);
-		return;
-	}
-	if (ec) return;
-
-	fs::rename(src, dest, ec);
-	if (ec == std::errc::cross_device_link)
-	{
-		// a copy that failed part way (disk full) is removed, and so is a copy whose
-		// source couldn't be removed: left, a retry found the name taken and put the
-		// file next to it as "name (1)", the cut copy keeping the real name
-		ec.clear();
-		fs::copy_file(src, dest, fs::copy_options::overwrite_existing, ec);
-		if (!ec)
-		{
-			fs::remove(src, ec);
-		}
-		if (ec)
-		{
-			fs::error_code ignored;
-			fs::remove(dest, ignored);
-		}
-	}
-}
+void move_file(const fs::path& src, const fs::path& dest, fs::error_code& ec) noexcept;
 
 inline void move_file(const fs::path& src, const fs::path& dest)
 {

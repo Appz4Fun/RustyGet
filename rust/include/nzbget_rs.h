@@ -1761,8 +1761,6 @@ int nzbget_rs_qhp_should_cleanup_parked_files(
     int par_status, int unpack_status, int64_t failed_size, int64_t par_failed_size,
     int delete_status, int parking, int unpack_cleaned_up_disk);
 int nzbget_rs_qhp_classify_dup_status(int mark_status, int delete_status, int is_dupe_success);
-int nzbget_rs_qhp_should_reset_article(
-    int article_status, int partial_state, int all_failed, int reset_failed);
 int nzbget_rs_qhp_parse_dupe_mode(const char* text, int* out_mode);
 
 int nzbget_rs_qhp_parse_sort_spec(const char* sort, int* out_criteria, int* out_order);
@@ -2728,8 +2726,6 @@ int nzbget_rs_ufs_regex_calc_match_len(int rm_so, int rm_eo);
 int nzbget_rs_ufs_tokenizer_fits_short_string(int len, int capacity);
 int nzbget_rs_ufs_fs_validate_load_file_size(
     int64_t file_size, int add_trailing_null, int* out_size, int* out_buf_size);
-int64_t nzbget_rs_ufs_fs_calc_allocate_chunk_size(
-    int64_t remaining, int64_t zeros_size);
 int nzbget_rs_ufs_fs_classify_expand_file_name(
     const char* filename, size_t* out_skip_dot_slash);
 int nzbget_rs_ufs_dir_browser_is_dot_or_dotdot(const char* filename);
@@ -4001,7 +3997,6 @@ NzbgetRsBuf nzbget_rs_tpr_options_format_joined_dir(
     const char* parent_dir, char sep, const char* dir, int32_t join_mode);
 int32_t nzbget_rs_tpr_options_minutes_to_seconds_i32(int32_t minutes);
 NzbgetRsBuf nzbget_rs_dqh_diskstate_format_new_path(const char* base_path);
-NzbgetRsBuf nzbget_rs_dqh_diskstate_format_ids_line(int32_t nzb_id, int32_t file_id);
 const char* nzbget_rs_dqh_diskstate_legacy_suffix_str(int32_t suffix_kind);
 NzbgetRsBuf nzbget_rs_dqh_diskstate_format_unreadable_path(const char* filename, int64_t now);
 NzbgetRsBuf nzbget_rs_dqh_diskstate_format_out_tmp_path(
@@ -4263,10 +4258,6 @@ int nzbget_rs_dqh_log_classify_init_logfile_action(
 int nzbget_rs_dqh_script_ctrl_is_terminate_ok(
     int child_pid, int kill_res, int completed);
 int nzbget_rs_dqh_script_ctrl_can_send_break(int pid, int completed);
-int nzbget_rs_dqh_fs_should_fallback_move_to_copy(
-    int rename_ok, int err_no, int exdev);
-int nzbget_rs_dqh_fs_is_copied_file_valid(
-    int close_ok, int loop_ok, int64_t copied_bytes, int64_t src_size);
 int nzbget_rs_dqh_par_renamer_needs_create_target_dir(
     const char* old_path, const char* new_path);
 int nzbget_rs_dqh_dupematcher_should_wait_rar_lister(
@@ -5102,27 +5093,32 @@ void nzbget_rs_history_coord_retry_action_labels(
 int nzbget_rs_history_coord_eval_requeue_loaded_file(
     int status, int cf_none, int cf_failure, int cf_partial,
     int reset_failed, int state_loaded, int64_t remaining_size);
-int nzbget_rs_history_coord_has_retryable_article(
-    const int* statuses, size_t len, int reset_failed, int ai_undefined, int ai_failed);
-void nzbget_rs_history_coord_reset_articles_header(
-    int all_failed, int is_par_file, int64_t file_size, int64_t file_missed_size,
-    int file_total_articles, int file_missed_articles, int64_t cur_file_failed_size,
-    int cur_file_failed_articles, int64_t cur_file_remaining_size,
-    int cur_file_completed_articles, int64_t file_success_size, int file_success_articles,
-    int64_t cur_nzb_failed_size, int64_t cur_nzb_success_size,
-    int cur_nzb_failed_articles, int cur_nzb_success_articles,
-    int64_t cur_nzb_par_failed_size, int64_t cur_nzb_par_success_size,
-    int64_t* out_file_failed_size, int* out_file_failed_articles,
-    int64_t* out_file_remaining_size, int* out_file_completed_articles,
-    int64_t* out_nzb_failed_size, int64_t* out_nzb_success_size,
-    int* out_nzb_failed_articles, int* out_nzb_success_articles,
-    int64_t* out_nzb_par_failed_size, int64_t* out_nzb_par_success_size);
-void nzbget_rs_history_coord_apply_article_reset_delta(
-    int pa_status, int ai_failed, int ai_undefined, int ai_finished, int pa_size,
-    int cur_completed_articles, int64_t cur_remaining_size, int cur_failed_articles,
-    int64_t cur_failed_size, int cur_success_articles, int64_t cur_success_size,
-    int* out_completed_articles, int64_t* out_remaining_size, int* out_failed_articles,
-    int64_t* out_failed_size, int* out_success_articles, int64_t* out_success_size);
+int nzbget_rs_history_coord_should_park_completed_file(
+    int status, int cf_none, int cf_partial, int is_last);
+void nzbget_rs_history_coord_prepare_requeued_loaded_file(
+    const char* dest_dir, char path_sep, const char* recorded_name,
+    const char* current_file_filename, int success_articles, int current_partial_state,
+    int ps_none, int ps_completed, int reprocess, int reset_failed,
+    const int* article_statuses, size_t article_statuses_len,
+    int ai_undefined, int ai_failed, void* ctx,
+    int64_t (*file_size_cb)(void* ctx, const char* path),
+    void (*delete_file_cb)(void* ctx, const char* path),
+    int (*file_exists_cb)(void* ctx, const char* path),
+    int* out_set_recorded_filename, int* out_new_partial_state,
+    int* out_warn_missing_on_disk, int* out_no_retryable_articles);
+void nzbget_rs_history_coord_reset_articles_batch(
+    int all_failed, int reset_failed, int is_par_file, int partial_state,
+    int64_t file_size, int64_t file_missed_size, int file_total_articles, int file_missed_articles,
+    int64_t* inout_file_failed_size, int* inout_file_failed_articles,
+    int64_t* inout_file_remaining_size, int* inout_file_completed_articles,
+    int64_t* inout_file_success_size, int* inout_file_success_articles,
+    int64_t* inout_nzb_failed_size, int64_t* inout_nzb_success_size,
+    int* inout_nzb_failed_articles, int* inout_nzb_success_articles,
+    int64_t* inout_nzb_par_failed_size, int64_t* inout_nzb_par_success_size,
+    int* inout_article_statuses, const int* article_sizes, uint8_t* out_reset_flags,
+    size_t articles_len);
+int nzbget_rs_diskstate_save_id_floor(
+    const char* queue_dir, char sep, int nzb_id, int file_id);
 int nzbget_rs_history_coord_parse_dupe_backup_flag(
     const char* text, int ds_dupe, int ds_manual);
 
@@ -5704,6 +5700,23 @@ int nzbget_rs_transient_retries_is_empty(const NzbgetRsTransientRetries* ptr);
 int nzbget_rs_transient_retries_is_exhausted(const NzbgetRsTransientRetries* ptr);
 int nzbget_rs_transient_retries_remained_retries(const NzbgetRsTransientRetries* ptr, uintptr_t server_key);
 void nzbget_rs_transient_retries_set_remained_retries(NzbgetRsTransientRetries* ptr, uintptr_t server_key, int remained);
+
+int64_t nzbget_rs_fs_file_size(const char* filename);
+int nzbget_rs_fs_delete_file(const char* filename);
+int nzbget_rs_fs_create_directory_exclusive(const char* dir_filename);
+int nzbget_rs_fs_remove_directory(const char* dir_filename);
+int nzbget_rs_fs_open_cloexec_fd(const char* filename, int mode, int om_read, int om_read_write, int om_write);
+int nzbget_rs_fs_flush_file_buffers(int file_descriptor, NzbgetRsBuf* out_errmsg);
+int nzbget_rs_fs_flush_dir_buffers(const char* filename, char path_sep, NzbgetRsBuf* out_errmsg);
+int nzbget_rs_fs_allocate_file(const char* filename, int64_t size, NzbgetRsBuf* out_errmsg);
+int nzbget_rs_fs_copy_file(const char* src_filename, const char* dst_filename);
+int nzbget_rs_fs_move_file(const char* src_filename, const char* dst_filename);
+int nzbget_rs_fs_move_file_no_overwrite(const char* src_filename, const char* dst_filename);
+int nzbget_rs_fs_get_disk_state(
+    const char* path,
+    int (*statvfs_cb)(const char*, uint64_t*, uint64_t*, uint64_t*),
+    int64_t* out_available,
+    int64_t* out_total);
 
 #include "nzbget_tls_cipher.h"
 

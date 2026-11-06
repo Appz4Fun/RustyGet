@@ -47,6 +47,19 @@ static int RustStat(const char* path)
 	return S_ISREG(buffer.st_mode) ? 1 : S_ISDIR(buffer.st_mode) ? 2 : 0;
 }
 
+static int RustStatvfs(const char* path, uint64_t* bavail, uint64_t* blocks, uint64_t* frsize)
+{
+	struct statvfs diskdata;
+	if (statvfs(path, &diskdata) != 0)
+	{
+		return 0;
+	}
+	*bavail = static_cast<uint64_t>(diskdata.f_bavail);
+	*blocks = static_cast<uint64_t>(diskdata.f_blocks);
+	*frsize = static_cast<uint64_t>(diskdata.f_frsize);
+	return 1;
+}
+
 CString FileSystem::GetLastErrorMessage()
 {
 	// rust/src/fsops.rs: the XSI strerror_r (glibc's GNU strerror_r left the
@@ -189,59 +202,17 @@ bool FileSystem::SaveBufferIntoFile(const char* filename, const char* buffer, in
 
 bool FileSystem::AllocateFile(const char* filename, int64 size, [[maybe_unused]] bool sparse, CString& errmsg)
 {
-	errmsg.Clear();
-	bool ok = false;
-	// create file; DiskFile opens it close-on-exec, so a script started by
-	// another thread at this moment does not inherit the descriptor
+	NzbgetRsBuf errBuf{};
+	bool ok = nzbget_rs_fs_allocate_file(filename, size, &errBuf) != 0;
+	if (errBuf.len == 0)
 	{
-		DiskFile file;
-		if (!file.Open(filename, DiskFile::omAppend))
-		{
-			errmsg = GetLastErrorMessage();
-			return false;
-		}
+		errmsg.Clear();
 	}
-
-	// there are no reliable function to expand file on POSIX, so we must try different approaches,
-	// starting with the fastest one and hoping it will work
-	// 1) set file size using function "truncate" (this is fast, if it works)
-	truncate(filename, size);
-	// check if it worked
-	ok = FileSize(filename) == size;
-	if (!ok)
+	else
 	{
-		// 2) truncate did not work, expanding the file by writing to it (that's slow)
-		truncate(filename, 0);
-		DiskFile file;
-		if (!file.Open(filename, DiskFile::omAppend))
-		{
-			errmsg = GetLastErrorMessage();
-			return false;
-		}
-
-		// write zeros in 16K chunks
-		CharBuffer zeros(16 * 1024);
-		memset(zeros, 0, zeros.Size());
-		for (int64 remaining = size; remaining > 0;)
-		{
-			int64 needbytes = nzbget_rs_ufs_fs_calc_allocate_chunk_size(remaining, (int64)zeros.Size());
-			int64 written = file.Write(zeros, needbytes);
-			if (written != needbytes)
-			{
-				errmsg = GetLastErrorMessage();
-				file.Close();
-				return false;
-			}
-			remaining -= written;
-		}
-		file.Close();
-
-		ok = FileSize(filename) == size;
-		if (!ok)
-		{
-			errmsg = "created file has wrong size";
-		}
+		errmsg.Set(errBuf.data ? errBuf.data : "", (int)errBuf.len);
 	}
+	nzbget_rs_free(errBuf);
 	return ok;
 }
 
@@ -304,68 +275,32 @@ CString FileSystem::MakeUniqueFilename(const char* destDir, const char* basename
 	return result;
 }
 
+void fs::move_file(const fs::path& src, const fs::path& dest, fs::error_code& ec) noexcept
+{
+	int err = nzbget_rs_fs_move_file_no_overwrite(src.c_str(), dest.c_str());
+	if (err == 0)
+	{
+		ec.clear();
+	}
+	else
+	{
+		ec = std::make_error_code(static_cast<std::errc>(err));
+	}
+}
+
 bool FileSystem::MoveFile(const char* srcFilename, const char* dstFilename)
 {
-	bool ok = rename(srcFilename, dstFilename) == 0;
-	if (nzbget_rs_dqh_fs_should_fallback_move_to_copy(ok ? 1 : 0, errno, EXDEV) != 0)
-	{
-		ok = CopyFile(srcFilename, dstFilename) && DeleteFile(srcFilename);
-	}
-	return ok;
+	return nzbget_rs_fs_move_file(srcFilename, dstFilename) != 0;
 }
 
 bool FileSystem::CopyFile(const char* srcFilename, const char* dstFilename)
 {
-	DiskFile infile;
-	if (!infile.Open(srcFilename, DiskFile::omRead))
-	{
-		return false;
-	}
-
-	DiskFile outfile;
-	if (!outfile.Open(dstFilename, DiskFile::omWrite))
-	{
-		return false;
-	}
-
-	CharBuffer buffer(1024 * 50);
-
-	// a failed write (disk full) or read must fail the copy: MoveFile deletes
-	// the source after it
-	bool ok = true;
-	int64 copied = 0;
-	while (true)
-	{
-		int64 cnt = infile.Read(buffer, buffer.Size());
-		if (cnt <= 0)
-		{
-			break;
-		}
-		if (outfile.Write(buffer, cnt) != cnt)
-		{
-			ok = false;
-			break;
-		}
-		copied += cnt;
-	}
-
-	infile.Close();
-	bool closeOk = outfile.Close();
-	ok = closeOk && ok &&
-		nzbget_rs_dqh_fs_is_copied_file_valid(
-			closeOk ? 1 : 0, ok ? 1 : 0, copied, FileSize(srcFilename)) != 0;
-
-	if (!ok)
-	{
-		DeleteFile(dstFilename);
-	}
-
-	return ok;
+	return nzbget_rs_fs_copy_file(srcFilename, dstFilename) != 0;
 }
 
 bool FileSystem::DeleteFile(const char* filename)
 {
-	return remove(filename) == 0;
+	return nzbget_rs_fs_delete_file(filename) != 0;
 }
 
 bool FileSystem::FileExists(const char* filename)
@@ -382,18 +317,18 @@ bool FileSystem::DirectoryExists(const char* dirFilename)
 
 bool FileSystem::CreateDirectory(const char* dirFilename)
 {
-	mkdir(dirFilename, S_DIRMODE);
+	nzbget_rs_fs_create_directory_exclusive(dirFilename);
 	return DirectoryExists(dirFilename);
 }
 
 bool FileSystem::CreateDirectoryExclusive(const char* dirFilename)
 {
-	return mkdir(dirFilename, S_DIRMODE) == 0;
+	return nzbget_rs_fs_create_directory_exclusive(dirFilename) != 0;
 }
 
 bool FileSystem::RemoveDirectory(const char* dirFilename)
 {
-	return rmdir(dirFilename) == 0;
+	return nzbget_rs_fs_remove_directory(dirFilename) != 0;
 }
 
 
@@ -596,19 +531,15 @@ bool FileSystem::DeleteDirectoryWithContent(const char* dirFilename, CString& er
 
 int64 FileSystem::FileSize(const char* filename)
 {
-	struct stat buffer;
-	// stat does not promise usable output on failure. A watchdog checking an
-	// output file before it exists must not mistake that data for a huge file.
-	return stat(filename, &buffer) == 0 ? buffer.st_size : -1;
+	return nzbget_rs_fs_file_size(filename);
 }
 
 std::optional<FileSystem::DiskState> FileSystem::GetDiskState(const char* path)
 {
-	struct statvfs diskdata;
-	if (!statvfs(path, &diskdata))
+	int64 available = 0;
+	int64 total = 0;
+	if (nzbget_rs_fs_get_disk_state(path, RustStatvfs, &available, &total) != 0)
 	{
-		int64 available = Util::SafeIntCast<uint64, int64>(diskdata.f_bavail * diskdata.f_frsize);
-		int64 total = Util::SafeIntCast<uint64, int64>(diskdata.f_blocks * diskdata.f_frsize);
 		return FileSystem::DiskState{ available, total };
 	}
 	return std::nullopt;
@@ -726,35 +657,25 @@ bool FileSystem::SameFilename(const char* filename1, const char* filename2)
 
 bool FileSystem::FlushFileBuffers(int fileDescriptor, CString& errmsg)
 {
-#ifdef HAVE_FULLFSYNC
-	int ret = fcntl(fileDescriptor, F_FULLFSYNC) == -1 ? 1 : 0;
-#elif HAVE_FDATASYNC
-	int ret = fdatasync(fileDescriptor);
-#else
-	int ret = fsync(fileDescriptor);
-#endif
-	if (ret != 0)
+	NzbgetRsBuf errBuf{};
+	bool ok = nzbget_rs_fs_flush_file_buffers(fileDescriptor, &errBuf) != 0;
+	if (!ok)
 	{
-		errmsg = GetLastErrorMessage();
+		errmsg.Set(errBuf.data ? errBuf.data : "", (int)errBuf.len);
 	}
-	return ret == 0;
+	nzbget_rs_free(errBuf);
+	return ok;
 }
 
 bool FileSystem::FlushDirBuffers(const char* filename, CString& errmsg)
 {
-	NzbgetRsBuf parentBuf = nzbget_rs_dqh_fs_extract_parent_dir_path(filename, PATH_SEPARATOR);
-	// the directory is opened close-on-exec through DiskFile: the descriptor
-	// is short-lived, but a script forked meanwhile must not inherit it
-	DiskFile dir;
-	if (!dir.Open(parentBuf.data ? parentBuf.data : "", DiskFile::omRead))
+	NzbgetRsBuf errBuf{};
+	bool ok = nzbget_rs_fs_flush_dir_buffers(filename, PATH_SEPARATOR, &errBuf) != 0;
+	if (!ok)
 	{
-		nzbget_rs_free(parentBuf);
-		errmsg = GetLastErrorMessage();
-		return false;
+		errmsg.Set(errBuf.data ? errBuf.data : "", (int)errBuf.len);
 	}
-	nzbget_rs_free(parentBuf);
-	bool ok = FlushFileBuffers(dir.GetFileDescriptor(), errmsg);
-	dir.Close();
+	nzbget_rs_free(errBuf);
 	return ok;
 }
 
@@ -901,12 +822,8 @@ bool DiskFile::Open(const char* filename, EOpenMode mode)
 {
 	const char* strmode = mode == omRead ? FOPEN_RB : mode == omReadWrite ?
 		FOPEN_RBP : mode == omWrite ? FOPEN_WB : FOPEN_AB;
-	// Close-on-exec from the start: the scripts nzbget starts don't inherit
-	// the log, the queue state files and the articles being written. (The
-	// "e" letter of fopen does that on glibc, while macOS ignores it.)
-	int flags = mode == omRead ? O_RDONLY : mode == omReadWrite ? O_RDWR :
-		mode == omWrite ? O_WRONLY | O_CREAT | O_TRUNC : O_WRONLY | O_CREAT | O_APPEND;
-	int fd = open(filename, flags | O_CLOEXEC, 0666);
+	int fd = nzbget_rs_fs_open_cloexec_fd(
+		filename, (int)mode, (int)omRead, (int)omReadWrite, (int)omWrite);
 	if (fd == -1)
 	{
 		return false;

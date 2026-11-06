@@ -19,29 +19,65 @@
 
 #include "nzbget.h"
 
+#include <thread>
 #include "ExtensionManager.h"
 #include "SystemHealthService.h"
-#include "PathsValidator.h"
-#include "IncomingNzbValidator.h"
-#include "SchedulerTasksValidator.h"
-#include "NewsServersValidator.h"
-#include "LoggingValidator.h"
-#include "ExtensionScriptsValidator.h"
-#include "ConnectionValidator.h"
-#include "DownloadQueueValidator.h"
-#include "SecurityValidator.h"
-#include "CheckAndRepairValidator.h"
-#include "FeedsValidator.h"
-#include "CategoriesValidator.h"
-#include "UnpackValidator.h"
-#include "DisplayValidator.h"
-#include "Status.h"
+#include "Log.h"
 #include "Json.h"
 #include "Xml.h"
 #include "nzbget_rs.h"
 
 namespace SystemHealth
 {
+namespace
+{
+void AppendOptionCallback(
+	void* ctx,
+	const char* opt_ptr,
+	size_t opt_len,
+	int severity,
+	const char* msg_ptr,
+	size_t msg_len)
+{
+	auto* options = static_cast<std::vector<OptionStatus>*>(ctx);
+	Severity sev = Severity::Ok;
+	if (severity == 1) sev = Severity::Info;
+	else if (severity == 2) sev = Severity::Warning;
+	else if (severity == 3) sev = Severity::Error;
+	if (sev != Severity::Ok)
+	{
+		options->push_back({
+			std::string(opt_ptr ? opt_ptr : "", opt_len),
+			Status::FromRaw(sev, std::string(msg_ptr ? msg_ptr : "", msg_len))
+		});
+	}
+}
+
+void AppendIssueCallback(
+	void* ctx,
+	const char*,
+	size_t,
+	int severity,
+	const char* msg_ptr,
+	size_t msg_len)
+{
+	auto* issues = static_cast<std::vector<Status>*>(ctx);
+	Severity sev = Severity::Ok;
+	if (severity == 1) sev = Severity::Info;
+	else if (severity == 2) sev = Severity::Warning;
+	else if (severity == 3) sev = Severity::Error;
+	if (sev != Severity::Ok)
+	{
+		issues->push_back(Status::FromRaw(sev, std::string(msg_ptr ? msg_ptr : "", msg_len)));
+	}
+}
+}  // namespace
+
+std::string_view SeverityToStr(Severity severity)
+{
+	return nzbget_rs_health_severity_to_str(static_cast<int>(severity));
+}
+
 Alert::Alert(Severity severity, std::string category, std::string source, std::string message)
 	: m_severity(severity)
 	, m_category(std::move(category))
@@ -54,38 +90,467 @@ Service::Service(const Options& options, const Servers& servers, const ::Feeds& 
 				 const ::Scheduler::TaskList& tasks, const ::Log& log)
 	: m_options(options), m_servers(servers), m_feeds(feeds), m_tasks(tasks), m_log(log)
 {
-	m_validators.reserve(12);
-	m_validators.push_back(std::make_unique<Paths::PathsValidator>(m_options, m_log));
-	m_validators.push_back(std::make_unique<NewsServers::NewsServersValidator>(m_servers));
-	m_validators.push_back(std::make_unique<Display::DisplayValidator>(m_options));
-	m_validators.push_back(std::make_unique<Logging::LoggingValidator>(m_options));
-	m_validators.push_back(std::make_unique<ExtensionScripts::ExtensionScriptsValidator>(
-		m_options, *g_ExtensionManager));
-	m_validators.push_back(std::make_unique<Connection::ConnectionValidator>(m_options));
-	m_validators.push_back(std::make_unique<DownloadQueue::DownloadQueueValidator>(m_options));
-	m_validators.push_back(std::make_unique<Security::SecurityValidator>(m_options));
-	m_validators.push_back(std::make_unique<IncomingNzb::IncomingNzbValidator>(m_options));
-	m_validators.push_back(std::make_unique<CheckAndRepair::CheckAndRepairValidator>(m_options));
-	m_validators.push_back(std::make_unique<Unpack::UnpackValidator>(m_options));
-	m_validators.push_back(std::make_unique<Scheduler::SchedulerTasksValidator>(m_tasks));
-	m_validators.push_back(
-		std::make_unique<Category::CategoriesValidator>(m_options, *m_options.GetCategories()));
-	m_validators.push_back(std::make_unique<Feeds::FeedsValidator>(m_feeds, m_options));
 }
 
 HealthReport Service::Diagnose() const
 {
 	HealthReport report;
-	report.sections.reserve(m_validators.size());
+	report.sections.reserve(14);
 
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
 		report.alerts = m_alerts;
 	}
 
-	for (const auto& validator : m_validators)
+	// 1. Paths
 	{
-		report.sections.push_back(validator->Validate());
+		SectionReport sec;
+		sec.name = "Paths";
+		std::string mainDir = m_options.GetMainDirPath().string();
+		std::string destDir = m_options.GetDestDirPath().string();
+		std::string interDir = m_options.GetInterDirPath().string();
+		std::string nzbDir = m_options.GetNzbDirPath().string();
+		std::string queueDir = m_options.GetQueueDirPath().string();
+		std::string webDir = m_options.GetWebDirPath().string();
+		std::string tempDir = m_options.GetTempDirPath().string();
+		std::string configTemplate = m_options.GetConfigTemplatePath().string();
+		std::string configFile = m_options.GetConfigFilePath().string();
+		std::string logFile = m_log.GetLogFilePath().string();
+		std::string_view certStore = m_options.GetCertStore();
+		std::string certStorePath = m_options.GetCertStorePath().string();
+		std::string lockFile = m_options.GetLockFilePath().string();
+
+		const auto& scriptDirPaths = m_options.GetScriptDirPaths();
+		std::vector<std::string> scriptDirStrs;
+		scriptDirStrs.reserve(scriptDirPaths.size());
+		std::vector<const char*> scriptDirPtrs;
+		std::vector<size_t> scriptDirLens;
+		scriptDirPtrs.reserve(scriptDirPaths.size());
+		scriptDirLens.reserve(scriptDirPaths.size());
+		for (const auto& dir : scriptDirPaths)
+		{
+			scriptDirStrs.push_back(dir.string());
+			scriptDirPtrs.push_back(scriptDirStrs.back().data());
+			scriptDirLens.push_back(scriptDirStrs.back().size());
+		}
+
+		nzbget_rs_health_validate_paths_section(
+			mainDir.data(), mainDir.size(),
+			destDir.data(), destDir.size(),
+			interDir.data(), interDir.size(),
+			nzbDir.data(), nzbDir.size(),
+			queueDir.data(), queueDir.size(),
+			webDir.data(), webDir.size(),
+			tempDir.data(), tempDir.size(),
+			scriptDirPtrs.data(), scriptDirLens.data(), scriptDirPaths.size(),
+			configTemplate.data(), configTemplate.size(),
+			logFile.data(), logFile.size(),
+			certStore.data(), certStore.size(),
+			certStorePath.data(), certStorePath.size(),
+			configFile.data(), configFile.size(),
+			lockFile.data(), lockFile.size(),
+			static_cast<int>(m_options.GetWriteLog()),
+			m_options.GetCertCheck() ? 1 : 0,
+			m_options.GetDaemonMode() ? 1 : 0,
+			&sec.options,
+			&AppendOptionCallback);
+		report.sections.push_back(std::move(sec));
+	}
+
+	// 2. NewsServers
+	{
+		SectionReport sec;
+		sec.name = "NewsServers";
+		sec.subsections.reserve(m_servers.size());
+		std::vector<const char*> hostPtrs;
+		std::vector<size_t> hostLens;
+		std::vector<uint8_t> actives;
+		std::vector<int32_t> maxConns;
+		std::vector<int32_t> levels;
+		hostPtrs.reserve(m_servers.size());
+		hostLens.reserve(m_servers.size());
+		actives.reserve(m_servers.size());
+		maxConns.reserve(m_servers.size());
+		levels.reserve(m_servers.size());
+
+		for (const auto& server : m_servers)
+		{
+			SubsectionReport sub;
+			sub.name = "Server" + std::to_string(server->GetId());
+			std::string_view name = server->GetName();
+			std::string_view host = server->GetHost();
+			std::string_view user = server->GetUser();
+			std::string_view pass = server->GetPassword();
+			std::string_view cipher = server->GetCipher();
+
+			nzbget_rs_health_validate_news_server_section(
+				server->GetActive() ? 1 : 0,
+				name.data(), name.size(),
+				server->GetLevel(),
+				server->GetOptional() ? 1 : 0,
+				server->GetGroup(),
+				host.data(), host.size(),
+				server->GetPort(),
+				user.data(), user.size(),
+				pass.data(), pass.size(),
+				server->GetTls() ? 1 : 0,
+				cipher.data(), cipher.size(),
+				server->GetMaxConnections(),
+				server->GetRetention(),
+				static_cast<uint32_t>(server->GetCertVerificationLevel()),
+				server->GetIpVersion(),
+				(g_Options && g_Options->GetDupeSearch()) ? 1 : 0,
+				&sub.options,
+				&AppendOptionCallback);
+			sec.subsections.push_back(std::move(sub));
+
+			hostPtrs.push_back(host.data());
+			hostLens.push_back(host.size());
+			actives.push_back(server->GetActive() ? 1 : 0);
+			maxConns.push_back(server->GetMaxConnections());
+			levels.push_back(server->GetLevel());
+		}
+
+		nzbget_rs_health_validate_news_servers_group(
+			hostPtrs.data(),
+			hostLens.data(),
+			actives.data(),
+			maxConns.data(),
+			levels.data(),
+			m_servers.size(),
+			&sec.issues,
+			&AppendIssueCallback);
+		report.sections.push_back(std::move(sec));
+	}
+
+	// 3. Display
+	{
+		SectionReport sec;
+		sec.name = "Display";
+		nzbget_rs_health_validate_display_section(
+			static_cast<int>(m_options.GetOutputMode()),
+			m_options.GetUpdateInterval(),
+			m_options.GetCursesNzbName() ? 1 : 0,
+			m_options.GetCursesGroup() ? 1 : 0,
+			m_options.GetCursesTime() ? 1 : 0,
+			&sec.options,
+			&AppendOptionCallback);
+		report.sections.push_back(std::move(sec));
+	}
+
+	// 4. Logging
+	{
+		SectionReport sec;
+		sec.name = "Logging";
+		std::string logFile = m_options.GetLogFilePath().string();
+		nzbget_rs_health_validate_logging_section(
+			static_cast<int>(m_options.GetWriteLog()),
+			logFile.data(), logFile.size(),
+			m_options.GetRotateLog(),
+			m_options.GetLogBuffer(),
+			m_options.GetCrashDump() ? 1 : 0,
+			m_options.GetTimeCorrection(),
+			&sec.options,
+			&AppendOptionCallback);
+		report.sections.push_back(std::move(sec));
+	}
+
+	// 5. ExtensionScripts
+	{
+		SectionReport sec;
+		sec.name = "ExtensionScripts";
+		std::string_view extensions = m_options.GetExtensions();
+		std::string_view shellOverride = m_options.GetShellOverride();
+
+		std::vector<ExtensionManager::ExtensionPtr> extHolders;
+		std::vector<const char*> extNamePtrs;
+		std::vector<size_t> extNameLens;
+		std::vector<const char*> extEntryPtrs;
+		std::vector<size_t> extEntryLens;
+		if (g_ExtensionManager)
+		{
+			g_ExtensionManager->ForEach([&](const ExtensionManager::ExtensionPtr ext)
+			{
+				extHolders.push_back(ext);
+				std::string_view name = ext->GetName();
+				std::string_view entry = ext->GetEntry();
+				extNamePtrs.push_back(name.data());
+				extNameLens.push_back(name.size());
+				extEntryPtrs.push_back(entry.data());
+				extEntryLens.push_back(entry.size());
+			});
+		}
+
+		nzbget_rs_health_validate_extension_scripts_section(
+			extensions.data(), extensions.size(),
+			extNamePtrs.data(), extNameLens.data(),
+			extEntryPtrs.data(), extEntryLens.data(),
+			extNamePtrs.size(),
+			shellOverride.data(), shellOverride.size(),
+			m_options.GetEventInterval(),
+			&sec.options,
+			&AppendOptionCallback);
+		report.sections.push_back(std::move(sec));
+	}
+
+	// 6. Connection
+	{
+		SectionReport sec;
+		sec.name = "Connection";
+		nzbget_rs_health_validate_connection_section(
+			m_options.GetArticleRetries(),
+			m_options.GetHealthCheck() == Options::hcDupe ? 1 : 0,
+			m_options.GetDupeSearch() ? 1 : 0,
+			m_options.GetArticleInterval(),
+			m_options.GetArticleTimeout(),
+			m_options.GetArticleReadChunkSize(),
+			m_options.GetUrlRetries(),
+			m_options.GetUrlInterval(),
+			m_options.GetUrlTimeout(),
+			m_options.GetUrlConnections(),
+			m_options.GetRemoteTimeout(),
+			m_options.GetDownloadRate(),
+			m_options.GetMonthlyQuota(),
+			m_options.GetQuotaStartDay(),
+			m_options.GetDailyQuota(),
+			&sec.options,
+			&AppendOptionCallback);
+		report.sections.push_back(std::move(sec));
+	}
+
+	// 7. DownloadQueue
+	{
+		SectionReport sec;
+		sec.name = "DownloadQueue";
+		nzbget_rs_health_validate_download_queue_section(
+			m_options.GetFlushQueue() ? 1 : 0,
+			m_options.GetContinuePartial() ? 1 : 0,
+			m_options.GetPropagationDelay(),
+			m_options.GetArticleCache(),
+			m_options.GetDirectWrite() ? 1 : 0,
+			m_options.GetWriteBuffer(),
+			static_cast<int>(m_options.GetFileNaming()),
+			static_cast<int>(m_options.GetPostStrategy()),
+			m_options.GetDiskSpace(),
+			m_options.GetNzbCleanupDisk() ? 1 : 0,
+			m_options.GetKeepHistory(),
+			m_options.GetFeedHistory(),
+			m_options.GetSkipWrite() ? 1 : 0,
+			m_options.GetRawArticle() ? 1 : 0,
+			&sec.options,
+			&AppendOptionCallback);
+		report.sections.push_back(std::move(sec));
+	}
+
+	// 8. Security
+	{
+		SectionReport sec;
+		sec.name = "Security";
+		std::string_view controlIp = m_options.GetControlIp();
+		std::string_view controlUser = m_options.GetControlUsername();
+		std::string_view controlPass = m_options.GetControlPassword();
+		std::string_view restrictedUser = m_options.GetRestrictedUsername();
+		std::string_view restrictedPass = m_options.GetRestrictedPassword();
+		std::string_view addUser = m_options.GetAddUsername();
+		std::string_view addPass = m_options.GetAddPassword();
+		std::string_view secureCert = m_options.GetSecureCert();
+		std::string_view secureKey = m_options.GetSecureKey();
+		std::string_view daemonUser = m_options.GetDaemonUsername();
+
+		nzbget_rs_health_validate_security_section(
+			controlIp.data(), controlIp.size(),
+			m_options.GetControlPort(),
+			controlUser.data(), controlUser.size(),
+			controlPass.data(), controlPass.size(),
+			restrictedUser.data(), restrictedUser.size(),
+			restrictedPass.data(), restrictedPass.size(),
+			addUser.data(), addUser.size(),
+			addPass.data(), addPass.size(),
+			m_options.GetFormAuth() ? 1 : 0,
+			m_options.GetSecureControl() ? 1 : 0,
+			secureCert.data(), secureCert.size(),
+			secureKey.data(), secureKey.size(),
+			m_options.GetSecurePort(),
+			m_options.GetCertCheck() ? 1 : 0,
+			m_options.GetCertStorePath().empty() ? 1 : 0,
+			m_options.GetDaemonMode() ? 1 : 0,
+			daemonUser.data(), daemonUser.size(),
+			m_options.GetUMask(),
+			&sec.options,
+			&AppendOptionCallback);
+		report.sections.push_back(std::move(sec));
+	}
+
+	// 9. IncomingNzbs
+	{
+		SectionReport sec;
+		sec.name = "IncomingNzbs";
+		nzbget_rs_health_validate_incoming_nzb_section(
+			m_options.GetAppendCategoryDir() ? 1 : 0,
+			m_options.GetNzbDirInterval(),
+			m_options.GetNzbDirFileAge(),
+			m_options.GetDupeCheck() ? 1 : 0,
+			m_options.GetDupeSearch() ? 1 : 0,
+			static_cast<int>(m_options.GetHealthCheck()),
+			&sec.options,
+			&AppendOptionCallback);
+		report.sections.push_back(std::move(sec));
+	}
+
+	// 10. CheckAndRepair
+	{
+		SectionReport sec;
+		sec.name = "CheckAndRepair";
+		const size_t hwThreads = std::thread::hardware_concurrency();
+		nzbget_rs_health_validate_check_and_repair_section(
+			m_options.GetCrcCheck() ? 1 : 0,
+			static_cast<int>(m_options.GetParCheck()),
+			m_options.GetParRepair() ? 1 : 0,
+			m_options.GetParQuick() ? 1 : 0,
+			m_options.GetParBuffer(),
+			m_options.GetParThreads(),
+			hwThreads,
+			m_options.GetParRename() ? 1 : 0,
+			m_options.GetRarRename() ? 1 : 0,
+			m_options.GetDirectRename() ? 1 : 0,
+			m_options.GetHardLinking() ? 1 : 0,
+			static_cast<int>(m_options.GetHealthCheck()),
+			m_options.GetParTimeLimit(),
+			&sec.options,
+			&AppendOptionCallback);
+		report.sections.push_back(std::move(sec));
+	}
+
+	// 11. Unpack
+	{
+		SectionReport sec;
+		sec.name = "Unpack";
+		std::string unrarPath = m_options.GetUnrarPath().string();
+		std::string sevenZipPath = m_options.GetSevenZipPath().string();
+		std::string_view extCleanup = m_options.GetExtCleanupDisk();
+		std::string_view unpackPassFile = m_options.GetUnpackPassFile();
+		std::string_view unpackIgnoreExt = m_options.GetUnpackIgnoreExt();
+
+		nzbget_rs_health_validate_unpack_section(
+			m_options.GetUnpack() ? 1 : 0,
+			m_options.GetDirectUnpack() ? 1 : 0,
+			m_options.GetUnpackPauseQueue() ? 1 : 0,
+			unrarPath.data(), unrarPath.size(),
+			sevenZipPath.data(), sevenZipPath.size(),
+			extCleanup.data(), extCleanup.size(),
+			unpackPassFile.data(), unpackPassFile.size(),
+			unpackIgnoreExt.data(), unpackIgnoreExt.size(),
+			&sec.options,
+			&AppendOptionCallback);
+		report.sections.push_back(std::move(sec));
+	}
+
+	// 12. Scheduler
+	{
+		SectionReport sec;
+		sec.name = "Scheduler";
+		sec.subsections.reserve(m_tasks.size());
+		for (const auto& task : m_tasks)
+		{
+			SubsectionReport sub;
+			sub.name = "Task" + std::to_string(task->GetId());
+			nzbget_rs_health_validate_scheduler_task_section(
+				task->GetHours(),
+				task->GetMinutes(),
+				task->GetWeeDaysBits(),
+				&sub.options,
+				&AppendOptionCallback);
+			sec.subsections.push_back(std::move(sub));
+		}
+		report.sections.push_back(std::move(sec));
+	}
+
+	// 13. Categories
+	{
+		SectionReport sec;
+		sec.name = "Categories";
+		const auto* categories = m_options.GetCategories();
+		if (categories)
+		{
+			sec.subsections.reserve(categories->size());
+			std::vector<const char*> ptrs(categories->size());
+			std::vector<size_t> lens(categories->size());
+			for (size_t i = 0; i < categories->size(); ++i)
+			{
+				const auto& cat = (*categories)[i];
+				std::string_view name = cat.GetName();
+				ptrs[i] = name.data();
+				lens[i] = name.size();
+
+				SubsectionReport sub;
+				sub.name = "Category" + std::to_string(i + 1);
+				nzbget_rs_health_validate_category_section(
+					name.data(), name.size(),
+					m_options.GetUnpack() ? 1 : 0,
+					cat.GetUnpack() ? 1 : 0,
+					&sub.options,
+					&AppendOptionCallback);
+				sec.subsections.push_back(std::move(sub));
+			}
+			if (!categories->empty())
+			{
+				NzbgetRsBuf msg{nullptr, 0, 0};
+				int sev = nzbget_rs_health_validate_duplicate_category_names(
+					ptrs.data(), lens.data(), categories->size(), &msg);
+				Status dup = Status::FromRust(sev, msg);
+				if (!dup.IsOk())
+				{
+					sec.issues.push_back(std::move(dup));
+				}
+			}
+		}
+		report.sections.push_back(std::move(sec));
+	}
+
+	// 14. Feeds
+	{
+		SectionReport sec;
+		sec.name = "Feeds";
+		sec.subsections.reserve(m_feeds.size());
+		std::vector<const char*> namePtrs(m_feeds.size());
+		std::vector<size_t> nameLens(m_feeds.size());
+		std::vector<const char*> urlPtrs(m_feeds.size());
+		std::vector<size_t> urlLens(m_feeds.size());
+		for (size_t i = 0; i < m_feeds.size(); ++i)
+		{
+			const auto& feed = m_feeds[i];
+			std::string_view name = feed->GetName();
+			std::string_view url = feed->GetUrl();
+			namePtrs[i] = name.data();
+			nameLens[i] = name.size();
+			urlPtrs[i] = url.data();
+			urlLens[i] = url.size();
+
+			SubsectionReport sub;
+			sub.name = "Feed" + std::to_string(feed->GetId());
+			nzbget_rs_health_validate_feed_section(
+				name.data(), name.size(),
+				url.data(), url.size(),
+				feed->GetInterval(),
+				static_cast<uint32_t>(feed->GetCertVerificationLevel()),
+				&sub.options,
+				&AppendOptionCallback);
+			sec.subsections.push_back(std::move(sub));
+		}
+		if (!m_feeds.empty())
+		{
+			NzbgetRsBuf msg{nullptr, 0, 0};
+			int sev = nzbget_rs_health_validate_duplicate_feed_urls(
+				namePtrs.data(), nameLens.data(),
+				urlPtrs.data(), urlLens.data(),
+				m_feeds.size(), &msg);
+			Status dup = Status::FromRust(sev, msg);
+			if (!dup.IsOk())
+			{
+				sec.issues.push_back(std::move(dup));
+			}
+		}
+		report.sections.push_back(std::move(sec));
 	}
 
 	return report;
@@ -169,6 +634,69 @@ void Log(const Alert& alert)
 			 alert.GetMessage().c_str());
 }
 
+Json::JsonObject ToJson(const Status& status)
+{
+	Json::JsonObject json;
+	json["Severity"] = SeverityToStr(status.GetSeverity());
+	json["Message"] = status.GetMessage();
+	return json;
+}
+
+Json::JsonObject ToJson(const OptionStatus& status)
+{
+	Json::JsonObject json;
+	json["Name"] = status.name;
+	json["Severity"] = SeverityToStr(status.status.GetSeverity());
+	json["Message"] = status.status.GetMessage();
+	return json;
+}
+
+Json::JsonObject ToJson(const SubsectionReport& report)
+{
+	Json::JsonObject json;
+	Json::JsonArray optionsArrayJson;
+
+	for (const auto& option : report.options)
+	{
+		optionsArrayJson.push_back(ToJson(option));
+	}
+
+	json["Name"] = report.name;
+	json["Options"] = std::move(optionsArrayJson);
+
+	return json;
+}
+
+Json::JsonObject ToJson(const SectionReport& report)
+{
+	Json::JsonObject json;
+	Json::JsonArray issuesArrayJson;
+	Json::JsonArray optionsArrayJson;
+	Json::JsonArray sectionsArrayJson;
+
+	for (const auto& issue : report.issues)
+	{
+		issuesArrayJson.push_back(ToJson(issue));
+	}
+
+	for (const auto& option : report.options)
+	{
+		optionsArrayJson.push_back(ToJson(option));
+	}
+
+	for (const auto& section : report.subsections)
+	{
+		sectionsArrayJson.push_back(ToJson(section));
+	}
+
+	json["Name"] = report.name;
+	json["Issues"] = std::move(issuesArrayJson);
+	json["Options"] = std::move(optionsArrayJson);
+	json["Subsections"] = std::move(sectionsArrayJson);
+
+	return json;
+}
+
 Json::JsonObject ToJson(const Alert& alert)
 {
 	Json::JsonObject alertJson;
@@ -203,13 +731,80 @@ std::string ToJsonStr(const HealthReport& report)
 	return Json::serialize(reportJson);
 }
 
-// <Alert>
-//   <Source>...</Source>
-//   <Category>...</Category>
-//   <Severity>...</Severity>
-//   <Message>...</Message>
-//   <Timestamp>123456789</Timestamp>
-// </Alert>
+Xml::XmlNodePtr ToXml(const Status& status)
+{
+	std::string_view severity = SeverityToStr(status.GetSeverity());
+	const std::string& message = status.GetMessage();
+
+	xmlNodePtr node = Xml::CreateStructNode();
+	Xml::AddNewNode(node, "Severity", "string", severity.data());
+	Xml::AddNewNode(node, "Message", "string", message.c_str());
+
+	return node;
+}
+
+Xml::XmlNodePtr ToXml(const OptionStatus& status)
+{
+	xmlNodePtr structNode = Xml::CreateStructNode();
+
+	const auto severity = SeverityToStr(status.status.GetSeverity());
+	Xml::AddNewNode(structNode, "Name", "string", status.name.c_str());
+	Xml::AddNewNode(structNode, "Severity", "string", severity.data());
+	Xml::AddNewNode(structNode, "Message", "string", status.status.GetMessage().c_str());
+
+	return structNode->parent;
+}
+
+Xml::XmlNodePtr ToXml(const SubsectionReport& report)
+{
+	xmlNodePtr structNode = Xml::CreateStructNode();
+
+	Xml::AddNewNode(structNode, "Name", "string", report.name.c_str());
+
+	std::vector<xmlNodePtr> optionsNodes;
+	for (const auto& option : report.options)
+	{
+		optionsNodes.push_back(ToXml(option));
+	}
+	Xml::AddArrayNode(structNode, "Options", optionsNodes);
+
+	return structNode->parent;
+}
+
+Xml::XmlNodePtr ToXml(const SectionReport& report)
+{
+	xmlNodePtr structNode = Xml::CreateStructNode();
+
+	Xml::AddNewNode(structNode, "Name", "string", report.name.c_str());
+
+	std::vector<xmlNodePtr> issueNodes;
+	for (const auto& issue : report.issues)
+	{
+		xmlNodePtr sNode = Xml::CreateStructNode();
+		const auto severity = SeverityToStr(issue.GetSeverity());
+		Xml::AddNewNode(sNode, "Severity", "string", severity.data());
+		Xml::AddNewNode(sNode, "Message", "string", issue.GetMessage().c_str());
+		issueNodes.push_back(sNode->parent);
+	}
+	Xml::AddArrayNode(structNode, "Issues", issueNodes);
+
+	std::vector<xmlNodePtr> optionNodes;
+	for (const auto& option : report.options)
+	{
+		optionNodes.push_back(ToXml(option));
+	}
+	Xml::AddArrayNode(structNode, "Options", optionNodes);
+
+	std::vector<xmlNodePtr> subNodes;
+	for (const auto& sub : report.subsections)
+	{
+		subNodes.push_back(ToXml(sub));
+	}
+	Xml::AddArrayNode(structNode, "Subsections", subNodes);
+
+	return structNode->parent;
+}
+
 Xml::XmlNodePtr ToXml(const Alert& alert)
 {
 	xmlNodePtr structNode = Xml::CreateStructNode();

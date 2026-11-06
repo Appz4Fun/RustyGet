@@ -4597,49 +4597,6 @@ typedef void (*NzbgetRsHealthOptionEmitCb)(
     int severity, const char* msg_ptr, size_t msg_len);
 
 const char* nzbget_rs_health_severity_to_str(int severity);
-int nzbget_rs_health_required_option(
-    const char* name, size_t name_len, const char* val, size_t val_len,
-    NzbgetRsBuf* out_msg);
-int nzbget_rs_health_unique_path(
-    const char* name, size_t name_len, const char* path, size_t path_len,
-    const char* const* other_name_ptrs, const size_t* other_name_lens,
-    const char* const* other_path_ptrs, const size_t* other_path_lens,
-    size_t other_count, NzbgetRsBuf* out_msg);
-int nzbget_rs_health_check_password(
-    const char* password, size_t password_len, NzbgetRsBuf* out_msg);
-int nzbget_rs_health_check_positive_num(
-    const char* name, size_t name_len, int val, NzbgetRsBuf* out_msg);
-int nzbget_rs_health_file_exists(
-    const char* path, size_t path_len, NzbgetRsBuf* out_msg);
-int nzbget_rs_health_file_readable(
-    const char* path, size_t path_len, NzbgetRsBuf* out_msg);
-int nzbget_rs_health_file_writable(
-    const char* path, size_t path_len, NzbgetRsBuf* out_msg);
-int nzbget_rs_health_file_executable(
-    const char* path, size_t path_len, NzbgetRsBuf* out_msg);
-int nzbget_rs_health_file_null_or_console_device(const char* path, size_t path_len);
-int nzbget_rs_health_directory_exists(
-    const char* path, size_t path_len, NzbgetRsBuf* out_msg);
-int nzbget_rs_health_directory_readable(
-    const char* path, size_t path_len, NzbgetRsBuf* out_msg);
-int nzbget_rs_health_directory_writable(
-    const char* path, size_t path_len, NzbgetRsBuf* out_msg);
-int nzbget_rs_health_network_valid_host(
-    const char* hostname, size_t hostname_len, int ipv, NzbgetRsBuf* out_msg);
-int nzbget_rs_health_network_valid_port(int port, NzbgetRsBuf* out_msg);
-int nzbget_rs_health_validate_required_writable_dir(
-    const char* name, size_t name_len, const char* path, size_t path_len,
-    NzbgetRsBuf* out_msg);
-int nzbget_rs_health_validate_inter_dir_path(
-    const char* path, size_t path_len, NzbgetRsBuf* out_msg);
-int nzbget_rs_health_validate_web_dir_path(
-    const char* path, size_t path_len, NzbgetRsBuf* out_msg);
-int nzbget_rs_health_validate_log_file_path(
-    const char* path, size_t path_len, int write_log, NzbgetRsBuf* out_msg);
-int nzbget_rs_health_validate_cert_store_path(
-    const char* path, size_t path_len, int cert_check, NzbgetRsBuf* out_msg);
-int nzbget_rs_health_validate_lock_file_path(
-    const char* path, size_t path_len, int daemon_mode, NzbgetRsBuf* out_msg);
 void nzbget_rs_health_validate_paths_section(
     const char* main_dir, size_t main_dir_len,
     const char* dest_dir, size_t dest_dir_len,
@@ -4667,10 +4624,6 @@ void nzbget_rs_health_validate_display_section(
     int output_mode, int update_interval, int curses_nzb_name,
     int curses_group, int curses_time,
     void* ctx, NzbgetRsHealthOptionEmitCb emit_cb);
-int nzbget_rs_health_validate_write_log(
-    int write_log, const char* log_file, size_t log_file_len, NzbgetRsBuf* out_msg);
-int nzbget_rs_health_validate_rotate_log(
-    int write_log, int rotate_log, NzbgetRsBuf* out_msg);
 void nzbget_rs_health_validate_logging_section(
     int write_log, const char* log_file, size_t log_file_len,
     int rotate_log, int log_buffer, int crash_dump, int time_correction,
@@ -4678,8 +4631,6 @@ void nzbget_rs_health_validate_logging_section(
 void nzbget_rs_health_validate_scheduler_task_section(
     int hours, int minutes, int weekdays_bits,
     void* ctx, NzbgetRsHealthOptionEmitCb emit_cb);
-int nzbget_rs_health_validate_feed_cert(
-    const char* url, size_t url_len, uint32_t cert_level, NzbgetRsBuf* out_msg);
 void nzbget_rs_health_validate_feed_section(
     const char* name, size_t name_len, const char* url, size_t url_len,
     int interval, uint32_t cert_level,
@@ -4713,10 +4664,6 @@ void nzbget_rs_health_validate_download_queue_section(
     int nzb_cleanup_disk, int keep_history, int feed_history,
     int skip_write, int raw_article,
     void* ctx, NzbgetRsHealthOptionEmitCb emit_cb);
-int nzbget_rs_health_validate_article_retries(
-    int val, int hc_dupe, int dupe_search, NzbgetRsBuf* out_msg);
-int nzbget_rs_health_validate_article_read_chunk_size(
-    int bytes, NzbgetRsBuf* out_msg);
 void nzbget_rs_health_validate_connection_section(
     int article_retries, int hc_dupe, int dupe_search,
     int article_interval, int article_timeout, int article_read_chunk_size,
@@ -4724,11 +4671,6 @@ void nzbget_rs_health_validate_connection_section(
     int url_connections, int remote_timeout, int download_rate,
     int monthly_quota, int quota_start_day, int daily_quota,
     void* ctx, NzbgetRsHealthOptionEmitCb emit_cb);
-int nzbget_rs_health_validate_control_password(
-    const char* password, size_t password_len, NzbgetRsBuf* out_msg);
-int nzbget_rs_health_validate_form_auth(
-    int form_auth, int secure_control, int no_control_pass,
-    int no_add_user, int no_restricted_user, NzbgetRsBuf* out_msg);
 void nzbget_rs_health_validate_security_section(
     const char* control_ip, size_t control_ip_len,
     int control_port,
@@ -4744,27 +4686,6 @@ void nzbget_rs_health_validate_security_section(
     int secure_port, int cert_check, int cert_store_path_empty,
     int daemon_mode, const char* daemon_username, size_t daemon_username_len,
     int umask, void* ctx, NzbgetRsHealthOptionEmitCb emit_cb);
-int nzbget_rs_health_validate_server_active(int active, NzbgetRsBuf* out_msg);
-int nzbget_rs_health_validate_server_optional(
-    int active, int optional, int level, NzbgetRsBuf* out_msg);
-int nzbget_rs_health_validate_server_host(
-    int active, const char* host, size_t host_len, int ip_version, NzbgetRsBuf* out_msg);
-int nzbget_rs_health_validate_server_port(
-    int active, int port, int tls, NzbgetRsBuf* out_msg);
-int nzbget_rs_health_validate_server_username(
-    int active, const char* username, size_t username_len, NzbgetRsBuf* out_msg);
-int nzbget_rs_health_validate_server_password(
-    int active, const char* password, size_t password_len, NzbgetRsBuf* out_msg);
-int nzbget_rs_health_validate_server_encryption(
-    int active, int tls, NzbgetRsBuf* out_msg);
-int nzbget_rs_health_validate_server_cipher(
-    int active, const char* cipher, size_t cipher_len, int tls, NzbgetRsBuf* out_msg);
-int nzbget_rs_health_validate_server_connections(
-    int active, int max_connections, int dupe_search, NzbgetRsBuf* out_msg);
-int nzbget_rs_health_validate_server_retention(
-    int active, int retention, NzbgetRsBuf* out_msg);
-int nzbget_rs_health_validate_server_cert_verification(
-    int active, int tls, uint32_t cert_level, NzbgetRsBuf* out_msg);
 void nzbget_rs_health_validate_news_server_section(
     int active, const char* name, size_t name_len,
     int level, int optional, int group,
@@ -4775,19 +4696,11 @@ void nzbget_rs_health_validate_news_server_section(
     int max_connections, int retention, uint32_t cert_level,
     int ip_version, int dupe_search,
     void* ctx, NzbgetRsHealthOptionEmitCb emit_cb);
-int nzbget_rs_health_validate_primary_server_exists(
-    const int32_t* levels_ptr, const uint8_t* actives_ptr, size_t count,
-    NzbgetRsBuf* out_msg);
 void nzbget_rs_health_validate_news_servers_group(
     const char* const* host_ptrs, const size_t* host_lens,
     const uint8_t* actives_ptr, const int32_t* max_conns_ptr,
     const int32_t* levels_ptr, size_t count,
     void* ctx, NzbgetRsHealthOptionEmitCb emit_cb);
-int nzbget_rs_health_validate_extension_list(
-    const char* extensions_opt, size_t extensions_opt_len,
-    const char* const* ext_name_ptrs, const size_t* ext_name_lens,
-    const char* const* ext_entry_ptrs, const size_t* ext_entry_lens,
-    size_t ext_count, NzbgetRsBuf* out_msg);
 void nzbget_rs_health_validate_extension_scripts_section(
     const char* extensions_opt, size_t extensions_opt_len,
     const char* const* ext_name_ptrs, const size_t* ext_name_lens,

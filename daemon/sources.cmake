@@ -134,28 +134,6 @@ target_sources(libnzbget PRIVATE
 	${CMAKE_SOURCE_DIR}/daemon/system/Network.cpp
 
 	${CMAKE_SOURCE_DIR}/daemon/systemhealth/SystemHealthService.cpp
-	${CMAKE_SOURCE_DIR}/daemon/systemhealth/Status.cpp
-	${CMAKE_SOURCE_DIR}/daemon/systemhealth/Validators.cpp
-	${CMAKE_SOURCE_DIR}/daemon/systemhealth/SectionValidator.cpp
-	${CMAKE_SOURCE_DIR}/daemon/systemhealth/SectionGroupValidator.cpp
-	${CMAKE_SOURCE_DIR}/daemon/systemhealth/PathsValidator.cpp
-	${CMAKE_SOURCE_DIR}/daemon/systemhealth/NewsServerValidator.cpp
-	${CMAKE_SOURCE_DIR}/daemon/systemhealth/NewsServersValidator.cpp
-	${CMAKE_SOURCE_DIR}/daemon/systemhealth/SchedulerTasksValidator.cpp
-	${CMAKE_SOURCE_DIR}/daemon/systemhealth/SchedulerTaskValidator.cpp
-	${CMAKE_SOURCE_DIR}/daemon/systemhealth/LoggingValidator.cpp
-	${CMAKE_SOURCE_DIR}/daemon/systemhealth/ExtensionScriptsValidator.cpp
-	${CMAKE_SOURCE_DIR}/daemon/systemhealth/UnpackValidator.cpp
-	${CMAKE_SOURCE_DIR}/daemon/systemhealth/SecurityValidator.cpp
-	${CMAKE_SOURCE_DIR}/daemon/systemhealth/IncomingNzbValidator.cpp
-	${CMAKE_SOURCE_DIR}/daemon/systemhealth/FeedValidator.cpp
-	${CMAKE_SOURCE_DIR}/daemon/systemhealth/FeedsValidator.cpp
-	${CMAKE_SOURCE_DIR}/daemon/systemhealth/DownloadQueueValidator.cpp
-	${CMAKE_SOURCE_DIR}/daemon/systemhealth/CheckAndRepairValidator.cpp
-	${CMAKE_SOURCE_DIR}/daemon/systemhealth/CategoryValidator.cpp
-	${CMAKE_SOURCE_DIR}/daemon/systemhealth/CategoriesValidator.cpp
-	${CMAKE_SOURCE_DIR}/daemon/systemhealth/ConnectionValidator.cpp
-	${CMAKE_SOURCE_DIR}/daemon/systemhealth/DisplayValidator.cpp
 )
 
 target_include_directories(libnzbget PUBLIC

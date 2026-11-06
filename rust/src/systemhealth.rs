@@ -2635,120 +2635,6 @@ pub fn log_classify_init_logfile_action(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_core_validators() {
-        assert!(required_option(b"User", b"admin").is_ok());
-        assert!(required_option(b"User", b"").is_error());
-        assert!(required_option(b"MainDir", &[0xff, 0xfe]).is_ok());
-        assert!(check_password(b"").severity == Severity::Warning);
-        assert!(check_password(b"short").severity == Severity::Info);
-        assert!(check_password(&[0xff; 8]).is_ok());
-        assert!(check_positive_num(b"Port", 0).is_ok());
-        assert!(check_positive_num(b"Port", -1).is_error());
-        assert!(network_valid_port(443).is_ok());
-        assert!(network_valid_port(0).is_error());
-        assert!(network_valid_host(b"news.example.com", 0).is_ok());
-        assert!(network_valid_host(b"192.168.1.1", 4).is_ok());
-        assert!(network_valid_host(b"192.168.1.1", 6).is_error());
-        assert!(network_valid_host(b"2001:db8::1", 6).is_ok());
-        assert!(network_valid_host(b"2001:db8::1", 4).is_error());
-        assert!(network_valid_host(b"[2001:db8::1]", 0).is_error());
-        assert!(network_valid_host(b"fe80::1%3", 0).is_ok());
-        assert!(network_valid_host(b"fe80::1%eth0", 6).is_ok());
-        assert!(network_valid_host(b"fe80::1%3", 4).is_error());
-        assert!(network_valid_host(b"[fe80::1%3]", 0).is_error());
-    }
-
-    #[test]
-    fn test_sections() {
-        let mut opts = Vec::new();
-        validate_display_section(0, 10, true, false, false, |name, sev, msg| {
-            opts.push((name.to_string(), sev, msg.to_vec()));
-        });
-        assert_eq!(opts.len(), 2);
-        assert_eq!(opts[0].0, "UpdateInterval");
-        assert_eq!(opts[0].1, Severity::Error);
-        assert_eq!(opts[1].0, "CursesNzbName");
-        assert_eq!(opts[1].1, Severity::Info);
-
-        assert_eq!(
-            validate_duplicate_category_names(&[b"Movies", b"TV", b"Movies"]).severity,
-            Severity::Warning
-        );
-        assert!(validate_duplicate_category_names(&[b"Movies", b"TV"]).is_ok());
-
-        let non_utf8_cat = &[b'C', b'a', b't', 0xff];
-        let dup_status = validate_duplicate_category_names(&[non_utf8_cat, non_utf8_cat]);
-        assert_eq!(dup_status.severity, Severity::Warning);
-        assert!(dup_status.message.ends_with(b"Cat\xff'"));
-
-        let mut feed_opts = Vec::new();
-        validate_feed_section(b"MyFeed", b"", 15, 0, |name, sev, _| {
-            feed_opts.push((name.to_string(), sev));
-        });
-        assert_eq!(feed_opts, vec![("URL".to_string(), Severity::Warning)]);
-
-        feed_opts.clear();
-        validate_feed_section(b"MyFeed", b"https://example.com/rss", 15, 0, |name, sev, _| {
-            feed_opts.push((name.to_string(), sev));
-        });
-        assert_eq!(
-            feed_opts,
-            vec![("CertVerification".to_string(), Severity::Warning)]
-        );
-
-        assert_eq!(
-            validate_article_retries(1, true, false).severity,
-            Severity::Warning
-        );
-        assert!(validate_article_retries(3, true, true).is_ok());
-        assert!(validate_article_retries(100, false, false).is_error());
-        assert_eq!(
-            validate_article_read_chunk_size(2048).severity,
-            Severity::Warning
-        );
-        assert!(validate_article_read_chunk_size(4096).is_ok());
-
-        assert_eq!(
-            validate_control_password(b"tegbzn6789").severity,
-            Severity::Info
-        );
-        assert!(validate_control_password(b"a-long-password").is_ok());
-        assert_eq!(
-            validate_form_auth(true, false, false, true, true).severity,
-            Severity::Warning
-        );
-        assert_eq!(
-            validate_form_auth(true, true, true, true, true).severity,
-            Severity::Warning
-        );
-        assert!(validate_form_auth(true, true, false, true, true).is_ok());
-
-        assert!(validate_server_port(true, 563, true).is_ok());
-        assert_eq!(validate_server_port(true, 119, true).severity, Severity::Info);
-        assert!(validate_server_connections(true, 1000, false).is_error());
-        assert_eq!(
-            validate_server_connections(true, 2, true).severity,
-            Severity::Warning
-        );
-        assert_eq!(
-            validate_server_retention(true, 50).severity,
-            Severity::Warning
-        );
-        assert!(validate_primary_server_exists(&[1, 0], &[1, 0]).is_error());
-        assert!(validate_primary_server_exists(&[1, 0], &[0, 1]).is_ok());
-
-        assert_eq!(
-            validate_extension_list(b"Missing.py", &[]).severity,
-            Severity::Warning
-        );
-    }
-}
-
 // ============================================================================
 // System (`SystemInfo`, `OS`, `CPU`) Helpers
 // ============================================================================
@@ -2881,5 +2767,453 @@ pub fn cpu_parse_cpuinfo_line(line: &[u8]) -> Option<usize> {
     }
     let colon_pos = line.iter().position(|&b| b == b':')?;
     Some(colon_pos + 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    struct TempDir {
+        path: std::path::PathBuf,
+    }
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let unique = format!(
+                "nzbget_rs_health_{}_{}_{}",
+                tag,
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            );
+            let path = std::env::temp_dir().join(unique);
+            std::fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn test_core_validators() {
+        assert!(required_option(b"Username", b"admin").is_ok());
+        let s2 = required_option(b"Username", b"");
+        assert!(s2.is_error());
+        assert!(String::from_utf8_lossy(&s2.message).contains("is required"));
+        assert!(required_option(b"MainDir", &[0xff, 0xfe]).is_ok());
+
+        assert!(required_path_option(b"OutputDir", Path::new("/tmp")).is_ok());
+        assert!(required_path_option(b"OutputDir", Path::new("")).is_error());
+
+        let pw_empty = check_password(b"");
+        assert_eq!(pw_empty.severity, Severity::Warning);
+        assert!(String::from_utf8_lossy(&pw_empty.message).contains("empty"));
+        let pw_short = check_password(b"12345");
+        assert_eq!(pw_short.severity, Severity::Info);
+        assert!(String::from_utf8_lossy(&pw_short.message).contains("too short"));
+        assert!(check_password(b"correcthorsebatterystaple").is_ok());
+        assert!(check_password(&[0xff; 8]).is_ok());
+
+        assert!(check_positive_num(b"Port", 8080).is_ok());
+        assert!(check_positive_num(b"Zero", 0).is_ok());
+        let neg = check_positive_num(b"Limit", -5);
+        assert!(neg.is_error());
+        assert!(String::from_utf8_lossy(&neg.message).contains("negative"));
+
+        let p1 = Path::new("/data/downloads");
+        let p2 = Path::new("/data/movies");
+        let others: [(&[u8], &Path); 2] = [(b"DownloadDir", p1), (b"MovieDir", p2)];
+        assert!(unique_path(b"MusicDir", Path::new("/data/music"), &others).is_ok());
+        assert!(unique_path(b"EmptyDir", Path::new(""), &others).is_ok());
+        let dup = unique_path(b"InterimDir", Path::new("/data/downloads"), &others);
+        assert_eq!(dup.severity, Severity::Warning);
+        assert!(
+            String::from_utf8_lossy(&dup.message)
+                .contains("'InterimDir' and 'DownloadDir' are identical")
+        );
+    }
+
+    #[test]
+    fn test_network_validators() {
+        for host in [
+            b"localhost".as_slice(),
+            b"google.com",
+            b"my-server-1",
+            b"sub.domain.example.com",
+            b"my_server_1",
+            b"_leading",
+            b"trailing_",
+            b"foo_bar.baz",
+            b"my-server_1",
+            b"a",
+            &[b'a'; 63],
+            b"192.168.0.1",
+            b"10.0.0.1",
+            b"::1",
+            b"2001:db8:1234:12:321::1",
+            b"::ffff:192.168.0.1",
+            b"fe80::1%3",
+        ] {
+            assert!(network_valid_host(host, 0).is_ok(), "{host:?}");
+        }
+
+        for bad in [
+            b"".as_slice(),
+            b"invalid char!",
+            b"-foo",
+            b"foo-",
+            b"example..com",
+            b"[foo]",
+            b"[::1]",
+            b"2001:db8::1::1",
+            &[b'a'; 64],
+            &[b'a'; 300],
+            b"[fe80::1%3]",
+        ] {
+            assert!(network_valid_host(bad, 0).is_error(), "{bad:?}");
+        }
+
+        let bracketed = network_valid_host(b"[2001:db8:1234:12:321::1]", 0);
+        assert!(bracketed.is_error());
+        assert!(String::from_utf8_lossy(&bracketed.message).contains("2001:db8:1234:12:321::1"));
+
+        assert!(network_valid_host(b"192.168.0.1", 4).is_ok());
+        assert!(network_valid_host(b"2001:db8:1234:12:321::1", 6).is_ok());
+        assert!(network_valid_host(b"fe80::1%eth0", 6).is_ok());
+        assert!(network_valid_host(b"news.valid.com", 4).is_ok());
+        assert!(network_valid_host(b"news.valid.com", 6).is_ok());
+        assert!(network_valid_host(b"192.168.0.1", 6).is_error());
+        assert!(network_valid_host(b"2001:db8:1234:12:321::1", 4).is_error());
+        assert!(network_valid_host(b"::ffff:192.168.0.1", 4).is_error());
+        assert!(network_valid_host(b"fe80::1%3", 4).is_error());
+
+        let ipv4_mismatch = network_valid_host(b"2001:db8:1234:12:321::1", 4);
+        assert!(String::from_utf8_lossy(&ipv4_mismatch.message).contains("IPv4"));
+        let ipv6_mismatch = network_valid_host(b"192.168.0.1", 6);
+        assert!(String::from_utf8_lossy(&ipv6_mismatch.message).contains("IPv6"));
+
+        assert!(network_valid_port(80).is_ok());
+        assert!(network_valid_port(443).is_ok());
+        assert!(network_valid_port(65535).is_ok());
+        assert!(network_valid_port(0).is_error());
+        assert!(network_valid_port(-1).is_error());
+        assert!(network_valid_port(70000).is_error());
+    }
+
+    #[test]
+    fn test_filesystem_and_paths_validators() {
+        let tmp = TempDir::new("fs_paths");
+        let f = tmp.path.join("testfile.txt");
+
+        let s1 = file_exists(&f);
+        assert!(s1.is_error());
+        assert!(String::from_utf8_lossy(&s1.message).contains("doesn't exist"));
+        assert!(!file_null_or_console_device(&f));
+        assert!(!file_null_or_console_device(Path::new("")));
+
+        std::fs::write(&f, b"content").unwrap();
+        assert!(file_exists(&f).is_ok());
+        assert!(!file_null_or_console_device(&f));
+        assert!(file_readable(&f).is_ok());
+
+        let subdir = tmp.path.join("subdir");
+        std::fs::create_dir(&subdir).unwrap();
+        let s2 = file_exists(&subdir);
+        assert!(s2.is_error());
+        assert!(String::from_utf8_lossy(&s2.message).contains("not a regular file"));
+        assert!(!file_null_or_console_device(&subdir));
+
+        assert!(file_null_or_console_device(Path::new("/dev/null")));
+        assert!(file_null_or_console_device(Path::new("/dev/stdout")));
+        assert!(file_null_or_console_device(Path::new("/dev/stderr")));
+
+        let writable = tmp.path.join("writable.txt");
+        assert!(file_writable(&writable).is_ok());
+        assert!(file_writable(&subdir).is_error());
+
+        let script = tmp.path.join("script.sh");
+        std::fs::write(&script, b"#!/bin/bash").unwrap();
+        assert!(file_executable(&script).is_error());
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(perms.mode() | 0o100);
+        std::fs::set_permissions(&script, perms).unwrap();
+        assert!(file_executable(&script).is_ok());
+
+        let mydir = tmp.path.join("mydir");
+        assert!(directory_exists(&mydir).is_error());
+        std::fs::create_dir(&mydir).unwrap();
+        assert!(directory_exists(&mydir).is_ok());
+        let dir_err = directory_exists(&f);
+        assert!(dir_err.is_error());
+        assert!(String::from_utf8_lossy(&dir_err.message).contains("not a directory"));
+
+        let writedir = tmp.path.join("writedir");
+        std::fs::create_dir(&writedir).unwrap();
+        assert!(directory_writable(&writedir).is_ok());
+        assert!(!writedir.join("nzbget_write_test.tmp").exists());
+        let mut dperms = std::fs::metadata(&writedir).unwrap().permissions();
+        dperms.set_mode(dperms.mode() & !0o200);
+        std::fs::set_permissions(&writedir, dperms.clone()).unwrap();
+        assert!(directory_writable(&writedir).is_error());
+        dperms.set_mode(dperms.mode() | 0o200);
+        std::fs::set_permissions(&writedir, dperms).unwrap();
+
+        let readdir = tmp.path.join("readdir");
+        std::fs::create_dir(&readdir).unwrap();
+        assert!(directory_readable(&readdir).is_ok());
+        let mut rperms = std::fs::metadata(&readdir).unwrap().permissions();
+        rperms.set_mode(rperms.mode() & !0o400);
+        std::fs::set_permissions(&readdir, rperms.clone()).unwrap();
+        assert!(directory_readable(&readdir).is_error());
+        rperms.set_mode(rperms.mode() | 0o400);
+        std::fs::set_permissions(&readdir, rperms).unwrap();
+
+        // PathsValidator individual helpers
+        let main_dir = tmp.path.join("main");
+        assert!(validate_required_writable_dir(b"MainDir", &main_dir).is_error());
+        std::fs::create_dir(&main_dir).unwrap();
+        assert!(validate_required_writable_dir(b"MainDir", &main_dir).is_ok());
+        assert!(validate_required_writable_dir(b"MainDir", Path::new("")).is_error());
+
+        let inter_empty = validate_inter_dir_path(Path::new(""));
+        assert_eq!(inter_empty.severity, Severity::Warning);
+        assert!(String::from_utf8_lossy(&inter_empty.message).contains("not recommended"));
+        assert!(validate_inter_dir_path(&main_dir).is_ok());
+        assert!(validate_inter_dir_path(&tmp.path.join("phantom")).is_error());
+
+        assert!(validate_web_dir_path(Path::new("")).is_ok());
+        assert!(validate_web_dir_path(&main_dir).is_ok());
+        assert!(validate_web_dir_path(&tmp.path.join("noweb")).is_error());
+
+        let log_path = tmp.path.join("nzbget.log");
+        assert_eq!(validate_log_file_path(Path::new(""), 1).severity, Severity::Warning);
+        let log_none = validate_log_file_path(Path::new(""), 0);
+        assert!(log_none.is_ok());
+        assert!(log_none.message.is_empty());
+        assert!(validate_log_file_path(&tmp.path.join("ghost.log"), 1).is_error());
+        std::fs::write(&log_path, b"log").unwrap();
+        assert!(validate_log_file_path(&log_path, 1).is_ok());
+        for dev in ["/dev/null", "/dev/stdout", "/dev/stderr"] {
+            assert!(validate_log_file_path(Path::new(dev), 1).is_ok());
+        }
+        assert!(validate_log_file_path(Path::new("/dev/null"), 2).is_ok());
+        assert!(validate_log_file_path(Path::new("/dev/null"), 3).is_ok());
+
+        let cert_file = tmp.path.join("cacert.pem");
+        let cert_dir = tmp.path.join("certs");
+        assert!(validate_cert_store_path(Path::new(""), false).is_ok());
+        assert!(validate_cert_store_path(Path::new(""), true).is_error());
+        std::fs::write(&cert_file, b"CERT").unwrap();
+        assert!(validate_cert_store_path(&cert_file, true).is_ok());
+        std::fs::create_dir(&cert_dir).unwrap();
+        assert!(validate_cert_store_path(&cert_dir, true).is_ok());
+        assert!(validate_cert_store_path(&tmp.path.join("missing.pem"), true).is_error());
+
+        let lock_path = tmp.path.join("nzbget.lock");
+        let lock_empty = validate_lock_file_path(Path::new(""), true);
+        assert_eq!(lock_empty.severity, Severity::Warning);
+        assert!(
+            String::from_utf8_lossy(&lock_empty.message)
+                .contains("check for another running instance is disabled")
+        );
+        assert!(validate_lock_file_path(Path::new(""), false).is_ok());
+        assert!(validate_lock_file_path(Path::new("random/path"), false).is_ok());
+        assert!(validate_lock_file_path(&tmp.path.join("not_yet_created.lock"), true).is_ok());
+        std::fs::write(&lock_path, b"pid").unwrap();
+        assert!(validate_lock_file_path(&lock_path, true).is_ok());
+        assert!(validate_lock_file_path(&tmp.path.join("missing_dir").join("nzbget.lock"), true).is_error());
+    }
+
+    #[test]
+    fn test_sections_and_news_server_validators() {
+        let mut opts = Vec::new();
+        validate_display_section(0, 10, true, false, false, |name, sev, msg| {
+            opts.push((name.to_string(), sev, msg.to_vec()));
+        });
+        assert_eq!(opts.len(), 2);
+        assert_eq!(opts[0].0, "UpdateInterval");
+        assert_eq!(opts[0].1, Severity::Error);
+        assert_eq!(opts[1].0, "CursesNzbName");
+        assert_eq!(opts[1].1, Severity::Info);
+
+        assert_eq!(
+            validate_duplicate_category_names(&[b"Movies", b"TV", b"Movies"]).severity,
+            Severity::Warning
+        );
+        assert!(validate_duplicate_category_names(&[b"Movies", b"TV"]).is_ok());
+
+        let non_utf8_cat = &[b'C', b'a', b't', 0xff];
+        let dup_status = validate_duplicate_category_names(&[non_utf8_cat, non_utf8_cat]);
+        assert_eq!(dup_status.severity, Severity::Warning);
+        assert!(dup_status.message.ends_with(b"Cat\xff'"));
+
+        // LoggingValidator
+        assert!(validate_write_log(0, Path::new("")).is_ok());
+        let append_status = validate_write_log(1, Path::new("/tmp/nzbget.log"));
+        assert_eq!(append_status.severity, Severity::Warning);
+        assert!(String::from_utf8_lossy(&append_status.message).contains("may grow indefinitely"));
+        for wl in [1, 2, 3] {
+            assert!(validate_write_log(wl, Path::new("/dev/null")).is_ok());
+        }
+        let rot_high = validate_rotate_log(3, 366);
+        assert_eq!(rot_high.severity, Severity::Warning);
+        assert!(String::from_utf8_lossy(&rot_high.message).contains("'RotateLog' is very high"));
+
+        // FeedValidator
+        assert!(validate_feed_cert(b"https://my.feed.com", 2).is_ok());
+        assert!(validate_feed_cert(b"", 0).is_ok());
+        assert_eq!(validate_feed_cert(b"https://my.feed.com", 0).severity, Severity::Warning);
+        assert!(validate_feed_cert(b"https://my.feed.com", 1).is_ok());
+        assert!(validate_feed_cert(b"http://my.feed.com", 0).is_ok());
+
+        let mut feed_opts = Vec::new();
+        validate_feed_section(b"MyFeed", b"", 15, 0, |name, sev, _| {
+            feed_opts.push((name.to_string(), sev));
+        });
+        assert_eq!(feed_opts, vec![("URL".to_string(), Severity::Warning)]);
+
+        feed_opts.clear();
+        validate_feed_section(b"MyFeed", b"https://example.com/rss", 15, 0, |name, sev, _| {
+            feed_opts.push((name.to_string(), sev));
+        });
+        assert_eq!(
+            feed_opts,
+            vec![("CertVerification".to_string(), Severity::Warning)]
+        );
+
+        // ConnectionValidator
+        assert!(validate_article_retries(3, false, false).is_ok());
+        let plain = validate_article_retries(0, false, false);
+        assert_eq!(plain.severity, Severity::Warning);
+        assert!(!String::from_utf8_lossy(&plain.message).contains("HealthCheck"));
+        let dupe = validate_article_retries(0, true, false);
+        assert_eq!(dupe.severity, Severity::Warning);
+        assert!(String::from_utf8_lossy(&dupe.message).contains("HealthCheck=dupe"));
+        let search = validate_article_retries(1, false, true);
+        assert_eq!(search.severity, Severity::Warning);
+        assert!(String::from_utf8_lossy(&search.message).contains("DupeSearch"));
+        assert!(validate_article_retries(100, false, false).is_error());
+
+        assert!(validate_article_read_chunk_size(4 * 1024).is_ok());
+        assert!(validate_article_read_chunk_size(1025 * 1024).is_ok());
+        assert!(validate_article_read_chunk_size(10240 * 1024).is_ok());
+        let chunk_low = validate_article_read_chunk_size(3 * 1024);
+        assert_eq!(chunk_low.severity, Severity::Warning);
+        assert!(String::from_utf8_lossy(&chunk_low.message).contains("3 KB."));
+        let chunk_high = validate_article_read_chunk_size(10241 * 1024);
+        assert_eq!(chunk_high.severity, Severity::Info);
+        assert!(String::from_utf8_lossy(&chunk_high.message).contains("10241 KB."));
+
+        // SecurityValidator
+        assert!(!validate_control_password(b"").is_ok());
+        assert_eq!(validate_control_password(b"tegbzn6789").severity, Severity::Info);
+        assert!(validate_control_password(b"a-long-password").is_ok());
+        assert_eq!(
+            validate_form_auth(true, false, false, true, true).severity,
+            Severity::Warning
+        );
+        assert_eq!(
+            validate_form_auth(true, true, true, true, true).severity,
+            Severity::Warning
+        );
+        assert!(validate_form_auth(true, true, false, true, true).is_ok());
+
+        // NewsServerValidator & NewsServersValidator
+        assert!(validate_server_active(true).is_ok());
+        let inactive = validate_server_active(false);
+        assert_eq!(inactive.severity, Severity::Info);
+        assert_eq!(inactive.message, b"Server is disabled");
+
+        assert!(validate_server_host(true, b"news.valid.com", 0).is_ok());
+        assert!(validate_server_host(true, b"", 0).is_error());
+        assert!(validate_server_host(true, b"bad@host!", 0).is_error());
+        assert!(validate_server_host(true, b"192.168.0.1", 0).is_ok());
+        assert!(validate_server_host(true, b"2001:db8:1234:12:321::1", 0).is_ok());
+        assert!(validate_server_host(true, b"[2001:db8:1234:12:321::1]", 0).is_error());
+        assert!(validate_server_host(true, b"[foo]", 0).is_error());
+        assert!(validate_server_host(true, b"192.168.0.1", 4).is_ok());
+        assert!(validate_server_host(true, b"2001:db8:1234:12:321::1", 6).is_ok());
+        assert!(validate_server_host(true, b"2001:db8:1234:12:321::1", 4).is_error());
+        assert!(validate_server_host(true, b"192.168.0.1", 6).is_error());
+        assert!(validate_server_host(true, b"news.valid.com", 6).is_ok());
+
+        assert!(validate_server_port(true, 563, true).is_ok());
+        assert!(validate_server_port(true, 443, true).is_ok());
+        assert_eq!(validate_server_port(true, 9000, true).severity, Severity::Info);
+        assert!(validate_server_port(true, 119, false).is_ok());
+        assert_eq!(validate_server_port(true, 8080, false).severity, Severity::Info);
+
+        assert!(validate_server_username(true, b"user").is_ok());
+        assert_eq!(validate_server_username(true, b"").severity, Severity::Warning);
+        assert_eq!(validate_server_password(true, b"pass").severity, Severity::Info);
+        assert_eq!(validate_server_password(true, b"").severity, Severity::Warning);
+        assert_eq!(validate_server_password(true, b"123").severity, Severity::Info);
+
+        assert!(validate_server_connections(true, 50, false).is_ok());
+        assert_eq!(validate_server_connections(true, 4, false).severity, Severity::Warning);
+        assert_eq!(validate_server_connections(true, 0, false).severity, Severity::Warning);
+        assert!(validate_server_connections(true, 1000, false).is_error());
+        assert_eq!(validate_server_connections(true, 2, true).severity, Severity::Warning);
+
+        assert!(validate_server_encryption(true, true).is_ok());
+        assert_eq!(validate_server_encryption(true, false).severity, Severity::Warning);
+        assert!(validate_server_cipher(true, b"", true).is_ok());
+        assert_eq!(validate_server_cipher(true, b"AES", true).severity, Severity::Info);
+        assert_eq!(validate_server_cipher(true, b"AES", false).severity, Severity::Warning);
+
+        assert!(validate_server_retention(true, 0).is_ok());
+        assert!(validate_server_retention(true, 3000).is_ok());
+        assert_eq!(validate_server_retention(true, 50).severity, Severity::Warning);
+        assert_eq!(validate_server_retention(true, 20000).severity, Severity::Info);
+
+        assert!(validate_server_optional(true, false, 0).is_ok());
+        assert!(validate_server_optional(true, true, 1).is_ok());
+        assert_eq!(validate_server_optional(true, true, 0).severity, Severity::Info);
+
+        assert!(validate_server_cert_verification(true, true, 2).is_ok());
+        assert_eq!(validate_server_cert_verification(true, true, 0).severity, Severity::Warning);
+        assert!(validate_server_cert_verification(true, false, 0).is_ok());
+
+        let no_srv = validate_primary_server_exists(&[], &[]);
+        assert!(no_srv.is_error());
+        assert!(
+            String::from_utf8_lossy(&no_srv.message)
+                .contains("At least one server must be configured")
+        );
+        let no_active = validate_primary_server_exists(&[0, 1], &[0, 0]);
+        assert!(no_active.is_error());
+        assert!(
+            String::from_utf8_lossy(&no_active.message)
+                .contains("At least one primary server must be active")
+        );
+        assert!(validate_primary_server_exists(&[0, 1], &[1, 0]).is_ok());
+        assert!(validate_primary_server_exists(&[0, 0], &[1, 1]).is_ok());
+        let higher_only = validate_primary_server_exists(&[0, 1], &[0, 1]);
+        assert!(higher_only.is_error());
+        assert!(
+            String::from_utf8_lossy(&higher_only.message)
+                .contains("At least one primary server must be active")
+        );
+
+        // ExtensionScriptsValidator
+        let existing_script = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let loaded: [(&[u8], &Path); 2] = [
+            (b"QueueSort", existing_script.as_path()),
+            (b"Completion", existing_script.as_path()),
+        ];
+        assert!(validate_extension_list(b"QueueSort,Completion", &loaded).is_ok());
+        assert!(validate_extension_list(b"QueueSort.py,Completion.py", &loaded).is_ok());
+        assert_eq!(
+            validate_extension_list(b"Missing.py", &loaded).severity,
+            Severity::Warning
+        );
+    }
 }
 

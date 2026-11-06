@@ -21,6 +21,5 @@
 #define SYSTEM_HEALTH_H
 
 #include "SystemHealthService.h"
-#include "Status.h"
 
 #endif

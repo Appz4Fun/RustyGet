@@ -28,10 +28,6 @@
 #include "Log.h"
 #include "FileSystem.h"
 
-const char* BoolNames[] = { "yes", "no", "true", "false", "1", "0", "on", "off", "enable", "disable", "enabled", "disabled" };
-const int BoolValues[] = { 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0 };
-const int BoolCount = 12;
-
 const char* PossibleConfigLocations[] =
 	{
 		"~/.nzbget",
@@ -67,7 +63,7 @@ Options::OptEntry* Options::OptEntries::FindOption(const char* name)
 		return nullptr;
 	}
 
-	for (OptEntry& optEntry : this)
+	for (OptEntry& optEntry : *this)
 	{
 		if (nzbget_rs_dqh_bytes_eq_ignore_case(optEntry.GetName(), name) != 0)
 		{
@@ -85,7 +81,7 @@ Options::Category* Options::Categories::FindCategory(const char* name, bool sear
 		return nullptr;
 	}
 
-	for (Category& category : this)
+	for (Category& category : *this)
 	{
 		if (nzbget_rs_dqh_bytes_eq_ignore_case(category.GetName(), name) != 0)
 		{
@@ -95,15 +91,18 @@ Options::Category* Options::Categories::FindCategory(const char* name, bool sear
 
 	if (searchAliases)
 	{
-		for (Category& category : this)
+		for (Category& category : *this)
 		{
-			for (CString& alias : category.GetAliases())
+			std::vector<const char*> aliasPtrs;
+			aliasPtrs.reserve(category.GetAliases()->size());
+			for (const CString& alias : *category.GetAliases())
 			{
-				WildMask mask(alias);
-				if (mask.Match(name))
-				{
-					return &category;
-				}
+				aliasPtrs.push_back(alias ? *alias : "");
+			}
+			if (nzbget_rs_options_category_alias_list_matches(
+				aliasPtrs.data(), aliasPtrs.size(), name, (char)-1 < 0) != 0)
+			{
+				return &category;
 			}
 		}
 	}
@@ -198,6 +197,336 @@ Options::~Options()
 	g_Options = nullptr;
 }
 
+NzbgetRsOptionsHost Options::MakeHost()
+{
+	NzbgetRsOptionsHost host{};
+	host.ctx = this;
+	host.find_entry = [](void* ctx, const char* name, const char** outVal, const char** outDefVal, int* outLineNo) -> int
+	{
+		auto* self = static_cast<Options*>(ctx);
+		OptEntry* optEntry = self->FindOption(name);
+		if (!optEntry)
+		{
+			return 0;
+		}
+		if (outVal) *outVal = optEntry->GetValue();
+		if (outDefVal) *outDefVal = optEntry->GetDefValue();
+		if (outLineNo) *outLineNo = optEntry->GetLineNo();
+		return 1;
+	};
+	host.set_entry_raw_value = [](void* ctx, const char* name, const char* value)
+	{
+		auto* self = static_cast<Options*>(ctx);
+		if (OptEntry* optEntry = self->FindOption(name))
+		{
+			optEntry->SetValue(value);
+		}
+	};
+	host.set_option = [](void* ctx, const char* name, const char* value)
+	{
+		static_cast<Options*>(ctx)->SetOption(name, value);
+	};
+	host.set_config_line = [](void* ctx, int line)
+	{
+		static_cast<Options*>(ctx)->m_configLine = line;
+	};
+	host.get_config_line = [](void* ctx) -> int
+	{
+		return static_cast<Options*>(ctx)->m_configLine;
+	};
+	host.config_error = [](void* ctx, const char* msg)
+	{
+		static_cast<Options*>(ctx)->ConfigError("%s", msg);
+	};
+	host.config_warn = [](void* ctx, const char* msg)
+	{
+		static_cast<Options*>(ctx)->ConfigWarn("%s", msg);
+	};
+	host.file_exists = [](void* /*ctx*/, const char* path) -> int
+	{
+		return FileSystem::FileExists(path) ? 1 : 0;
+	};
+	host.ensure_directory = [](void* ctx, const char* dir, char* errBuf, size_t errCap) -> int
+	{
+		auto* self = static_cast<Options*>(ctx);
+		CString errmsg;
+		if (!FileSystem::ForceDirectories(dir, errmsg))
+		{
+			if (errBuf && errCap > 0)
+			{
+				snprintf(errBuf, errCap, "%s", errmsg ? *errmsg : "");
+			}
+			return 0;
+		}
+		if (getuid() == 0 || geteuid() == 0)
+		{
+			struct passwd* pwd = getpwnam(self->GetOption(DAEMONUSERNAME.data()));
+			if (pwd != nullptr)
+			{
+				chown(dir, pwd->pw_uid, pwd->pw_gid);
+			}
+		}
+		return 1;
+	};
+	host.add_news_server = [](void* ctx, int id, int active, const char* name, const char* host,
+		int port, int ipVersion, const char* user, const char* pass, int joinGroup, int tls,
+		const char* cipher, int maxConnections, int retention, int level, int group, int optional,
+		uint32_t certVerifLevel)
+	{
+		auto* self = static_cast<Options*>(ctx);
+		if (self->m_extender)
+		{
+			self->m_extender->AddNewsServer(id, active != 0, name, host, port, ipVersion,
+				user, pass, joinGroup != 0, tls != 0, cipher, maxConnections, retention,
+				level, group, optional != 0, certVerifLevel);
+		}
+	};
+	host.add_feed = [](void* ctx, int id, const char* name, const char* url, int interval,
+		const char* filter, int backlog, int pauseNzb, const char* category, int categorySource,
+		int priority, const char* extensions, uint32_t certVerifLevel)
+	{
+		auto* self = static_cast<Options*>(ctx);
+		if (self->m_extender)
+		{
+			self->m_extender->AddFeed(id, name, url, interval, filter, backlog != 0, pauseNzb != 0,
+				category, static_cast<FeedInfo::CategorySource>(categorySource), priority,
+				extensions, certVerifLevel);
+		}
+	};
+	host.add_task = [](void* ctx, int id, int hours, int minutes, int weekDaysBits,
+		int command, const char* param)
+	{
+		auto* self = static_cast<Options*>(ctx);
+		if (self->m_extender)
+		{
+			self->m_extender->AddTask(id, hours, minutes, weekDaysBits,
+				static_cast<ESchedulerCommand>(command), param);
+		}
+	};
+	host.add_category = [](void* ctx, const char* name, const char* destDir, int unpack,
+		const char* extensions, const char* const* aliases, size_t aliasesLen)
+	{
+		auto* self = static_cast<Options*>(ctx);
+		self->m_categories.emplace_back(name, destDir, unpack != 0, extensions);
+		Category& category = self->m_categories.back();
+		for (size_t i = 0; i < aliasesLen; ++i)
+		{
+			category.GetAliases()->push_back(aliases[i]);
+		}
+	};
+	return host;
+}
+
+NzbgetRsParsedOptions Options::ExportParsedScalars() const
+{
+	NzbgetRsParsedOptions s{};
+	s.download_rate = m_downloadRate;
+	s.article_timeout = m_articleTimeout;
+	s.article_read_chunk_size = m_articleReadChunkSize;
+	s.url_timeout = m_urlTimeout;
+	s.remote_timeout = m_remoteTimeout;
+	s.article_retries = m_articleRetries;
+	s.article_interval = m_articleInterval;
+	s.url_retries = m_urlRetries;
+	s.url_interval = m_urlInterval;
+	s.control_port = m_controlPort;
+	s.secure_port = m_securePort;
+	s.url_connections = m_urlConnections;
+	s.log_buffer = m_logBuffer;
+	s.rotate_log = m_rotateLog;
+	s.umask = m_umask;
+	s.update_interval = m_updateInterval;
+	s.write_buffer = m_writeBuffer;
+	s.nzb_dir_interval = m_nzbDirInterval;
+	s.nzb_dir_file_age = m_nzbDirFileAge;
+	s.nzb_dir_archive_scan = m_nzbDirArchiveScan ? 1 : 0;
+	s.nzb_dir_archive_action = (int)m_nzbDirArchiveAction;
+	s.disk_space = m_diskSpace;
+	s.par_time_limit = m_parTimeLimit;
+	s.keep_history = m_keepHistory;
+	s.feed_history = m_feedHistory;
+	s.time_correction = m_timeCorrection;
+	s.propagation_delay = m_propagationDelay;
+	s.article_cache = m_articleCache;
+	s.memory_pressure_interval = m_memoryPressureInterval;
+	s.event_interval = m_eventInterval;
+	s.par_buffer = m_parBuffer;
+	s.par_threads = m_parThreads;
+	s.monthly_quota = m_monthlyQuota;
+	s.quota_start_day = m_quotaStartDay;
+	s.daily_quota = m_dailyQuota;
+	s.system_health_check = m_systemHealthCheck ? 1 : 0;
+	s.nzb_log = m_nzbLog ? 1 : 0;
+	s.append_category_dir = m_appendCategoryDir ? 1 : 0;
+	s.continue_partial = m_continuePartial ? 1 : 0;
+	s.flush_queue = m_flushQueue ? 1 : 0;
+	s.dupe_check = m_dupeCheck ? 1 : 0;
+	s.par_repair = m_parRepair ? 1 : 0;
+	s.par_quick = m_parQuick ? 1 : 0;
+	s.par_rename = m_parRename ? 1 : 0;
+	s.rar_rename = m_rarRename ? 1 : 0;
+	s.direct_rename = m_directRename ? 1 : 0;
+	s.hard_linking = m_hardLinking ? 1 : 0;
+	s.curses_nzb_name = m_cursesNzbName ? 1 : 0;
+	s.curses_time = m_cursesTime ? 1 : 0;
+	s.curses_group = m_cursesGroup ? 1 : 0;
+	s.crc_check = m_crcCheck ? 1 : 0;
+	s.direct_write = m_directWrite ? 1 : 0;
+	s.raw_article = m_rawArticle ? 1 : 0;
+	s.skip_write = m_skipWrite ? 1 : 0;
+	s.crash_trace = m_crashTrace ? 1 : 0;
+	s.crash_dump = m_crashDump ? 1 : 0;
+	s.par_pause_queue = m_parPauseQueue ? 1 : 0;
+	s.script_pause_queue = m_scriptPauseQueue ? 1 : 0;
+	s.nzb_cleanup_disk = m_nzbCleanupDisk ? 1 : 0;
+	s.form_auth = m_formAuth ? 1 : 0;
+	s.json_p = m_jsonP ? 1 : 0;
+	s.secure_control = m_secureControl ? 1 : 0;
+	s.unpack = m_unpack ? 1 : 0;
+	s.direct_unpack = m_directUnpack ? 1 : 0;
+	s.use_temp_unpack_dir = m_useTempUnpackDir ? 1 : 0;
+	s.unpack_cleanup_disk = m_unpackCleanupDisk ? 1 : 0;
+	s.unpack_pause_queue = m_unpackPauseQueue ? 1 : 0;
+	s.unpack_mutex_enforced = m_unpackMutexEnforced ? 1 : 0;
+	s.url_force = m_urlForce ? 1 : 0;
+	s.cert_check = m_certCheck ? 1 : 0;
+	s.reorder_files = m_reorderFiles ? 1 : 0;
+	s.post_download_rename = m_postDownloadRename ? 1 : 0;
+	s.rename_after_unpack = m_renameAfterUnpack ? 1 : 0;
+	s.output_mode = (int)m_outputMode;
+	s.par_check = (int)m_parCheck;
+	s.par_scan = (int)m_parScan;
+	s.dupe_article_fallback = (int)m_dupeArticleFallback;
+	s.dupe_stream_decompress = m_dupeStreamDecompress ? 1 : 0;
+	s.dupe_stream_timeout = m_dupeStreamTimeout;
+	s.dupe_search = m_dupeSearch ? 1 : 0;
+	s.dupe_search_dry_run = m_dupeSearchDryRun ? 1 : 0;
+	s.dupe_search_delay = m_dupeSearchDelay;
+	s.dupe_search_max_donors = m_dupeSearchMaxDonors;
+	s.dupe_health_percent = m_dupeHealthPercent;
+	s.dupe_health_min = m_dupeHealthMin;
+	s.dupe_health_max = m_dupeHealthMax;
+	s.dupe_body_checks = m_dupeBodyChecks;
+	s.dupe_health_budget = m_dupeHealthBudget;
+	s.dupe_min_alive = m_dupeMinAlive;
+	s.dupe_fast_donors = m_dupeFastDonors;
+	s.post_strategy = (int)m_postStrategy;
+	s.file_naming = (int)m_fileNaming;
+	s.health_check = (int)m_healthCheck;
+	s.info_target = (int)m_infoTarget;
+	s.warning_target = (int)m_warningTarget;
+	s.error_target = (int)m_errorTarget;
+	s.debug_target = (int)m_debugTarget;
+	s.detail_target = (int)m_detailTarget;
+	s.write_log = (int)m_writeLog;
+	s.tls = m_tls ? 1 : 0;
+	return s;
+}
+
+void Options::ApplyParsedScalars(const NzbgetRsParsedOptions& s)
+{
+	m_downloadRate = s.download_rate;
+	m_articleTimeout = s.article_timeout;
+	m_articleReadChunkSize = s.article_read_chunk_size;
+	m_urlTimeout = s.url_timeout;
+	m_remoteTimeout = s.remote_timeout;
+	m_articleRetries = s.article_retries;
+	m_articleInterval = s.article_interval;
+	m_urlRetries = s.url_retries;
+	m_urlInterval = s.url_interval;
+	m_controlPort = s.control_port;
+	m_securePort = s.secure_port;
+	m_urlConnections = s.url_connections;
+	m_logBuffer = s.log_buffer;
+	m_rotateLog = s.rotate_log;
+	m_umask = s.umask;
+	m_updateInterval = s.update_interval;
+	m_writeBuffer = s.write_buffer;
+	m_nzbDirInterval = s.nzb_dir_interval;
+	m_nzbDirFileAge = s.nzb_dir_file_age;
+	m_nzbDirArchiveScan = s.nzb_dir_archive_scan != 0;
+	m_nzbDirArchiveAction = (ENzbDirArchiveAction)s.nzb_dir_archive_action;
+	m_diskSpace = s.disk_space;
+	m_parTimeLimit = s.par_time_limit;
+	m_keepHistory = s.keep_history;
+	m_feedHistory = s.feed_history;
+	m_timeCorrection = s.time_correction;
+	m_propagationDelay = s.propagation_delay;
+	m_articleCache = s.article_cache;
+	m_memoryPressureInterval = s.memory_pressure_interval;
+	m_eventInterval = s.event_interval;
+	m_parBuffer = s.par_buffer;
+	m_parThreads = s.par_threads;
+	m_monthlyQuota = s.monthly_quota;
+	m_quotaStartDay = s.quota_start_day;
+	m_dailyQuota = s.daily_quota;
+	m_systemHealthCheck = s.system_health_check != 0;
+	m_nzbLog = s.nzb_log != 0;
+	m_appendCategoryDir = s.append_category_dir != 0;
+	m_continuePartial = s.continue_partial != 0;
+	m_flushQueue = s.flush_queue != 0;
+	m_dupeCheck = s.dupe_check != 0;
+	m_parRepair = s.par_repair != 0;
+	m_parQuick = s.par_quick != 0;
+	m_parRename = s.par_rename != 0;
+	m_rarRename = s.rar_rename != 0;
+	m_directRename = s.direct_rename != 0;
+	m_hardLinking = s.hard_linking != 0;
+	m_cursesNzbName = s.curses_nzb_name != 0;
+	m_cursesTime = s.curses_time != 0;
+	m_cursesGroup = s.curses_group != 0;
+	m_crcCheck = s.crc_check != 0;
+	m_directWrite = s.direct_write != 0;
+	m_rawArticle = s.raw_article != 0;
+	m_skipWrite = s.skip_write != 0;
+	m_crashTrace = s.crash_trace != 0;
+	m_crashDump = s.crash_dump != 0;
+	m_parPauseQueue = s.par_pause_queue != 0;
+	m_scriptPauseQueue = s.script_pause_queue != 0;
+	m_nzbCleanupDisk = s.nzb_cleanup_disk != 0;
+	m_formAuth = s.form_auth != 0;
+	m_jsonP = s.json_p != 0;
+	m_secureControl = s.secure_control != 0;
+	m_unpack = s.unpack != 0;
+	m_directUnpack = s.direct_unpack != 0;
+	m_useTempUnpackDir = s.use_temp_unpack_dir != 0;
+	m_unpackCleanupDisk = s.unpack_cleanup_disk != 0;
+	m_unpackPauseQueue = s.unpack_pause_queue != 0;
+	m_unpackMutexEnforced = s.unpack_mutex_enforced != 0;
+	m_urlForce = s.url_force != 0;
+	m_certCheck = s.cert_check != 0;
+	m_reorderFiles = s.reorder_files != 0;
+	m_postDownloadRename = s.post_download_rename != 0;
+	m_renameAfterUnpack = s.rename_after_unpack != 0;
+	m_outputMode = (EOutputMode)s.output_mode;
+	m_parCheck = (EParCheck)s.par_check;
+	m_parScan = (EParScan)s.par_scan;
+	m_dupeArticleFallback = (EDupeArticleFallback)s.dupe_article_fallback;
+	m_dupeStreamDecompress = s.dupe_stream_decompress != 0;
+	m_dupeStreamTimeout = s.dupe_stream_timeout;
+	m_dupeSearch = s.dupe_search != 0;
+	m_dupeSearchDryRun = s.dupe_search_dry_run != 0;
+	m_dupeSearchDelay = s.dupe_search_delay;
+	m_dupeSearchMaxDonors = s.dupe_search_max_donors;
+	m_dupeHealthPercent = s.dupe_health_percent;
+	m_dupeHealthMin = s.dupe_health_min;
+	m_dupeHealthMax = s.dupe_health_max;
+	m_dupeBodyChecks = s.dupe_body_checks;
+	m_dupeHealthBudget = s.dupe_health_budget;
+	m_dupeMinAlive = s.dupe_min_alive;
+	m_dupeFastDonors = s.dupe_fast_donors;
+	m_postStrategy = (EPostStrategy)s.post_strategy;
+	m_fileNaming = (EFileNaming)s.file_naming;
+	m_healthCheck = (EHealthCheck)s.health_check;
+	m_infoTarget = (EMessageTarget)s.info_target;
+	m_warningTarget = (EMessageTarget)s.warning_target;
+	m_errorTarget = (EMessageTarget)s.error_target;
+	m_debugTarget = (EMessageTarget)s.debug_target;
+	m_detailTarget = (EMessageTarget)s.detail_target;
+	m_writeLog = (EWriteLog)s.write_log;
+	m_tls = s.tls != 0;
+}
+
 void Options::ConfigError(const char* msg, ...)
 {
 	char tmp2[1024];
@@ -229,156 +558,20 @@ void Options::ConfigWarn(const char* msg, ...)
 	warn("%s(%i): %s", filename, m_configLine, tmp2);
 }
 
-void Options::LocateOptionSrcPos(const char *optionName)
-{
-	OptEntry* optEntry = FindOption(optionName);
-	m_configLine = nzbget_rs_dqh_options_resolve_locate_src_line(
-		optEntry ? 1 : 0, optEntry ? optEntry->GetLineNo() : 0);
-}
-
 void Options::InitDefaults()
 {
-	SetOption(MAINDIR.data(), "~/downloads");
-	SetOption(WEBDIR.data(), "");
-	SetOption(CONFIGTEMPLATE.data(), "");
-	SetOption(TEMPDIR.data(), "${MainDir}/tmp");
-	SetOption(DESTDIR.data(), "${MainDir}/dst");
-	SetOption(INTERDIR.data(), "");
-	SetOption(QUEUEDIR.data(), "${MainDir}/queue");
-	SetOption(NZBDIR.data(), "${MainDir}/nzb");
-	SetOption(LOCKFILE.data(), "${MainDir}/nzbget.lock");
-	SetOption(LOGFILE.data(), "${MainDir}/nzbget.log");
-	SetOption(SCRIPTDIR.data(), "${MainDir}/scripts");
-	SetOption(REQUIREDDIR.data(), "");
-	SetOption(WRITELOG.data(), "append");
-	SetOption(ROTATELOG.data(), "3");
-	SetOption(APPENDCATEGORYDIR.data(), "yes");
 #ifdef DISABLE_CURSES
-	SetOption(OUTPUTMODE.data(), "color");
+	int disableCurses = 1;
 #else
-	SetOption(OUTPUTMODE.data(), "curses");
+	int disableCurses = 0;
 #endif
-	SetOption(DUPECHECK.data(), "yes");
-	SetOption(DUPEARTICLEFALLBACK.data(), "no");
-	SetOption(DUPESTREAMDECOMPRESS.data(), "no");
-	SetOption(DUPESTREAMTIMEOUT.data(), "60");
-	SetOption(DUPESEARCH.data(), "no");
-	SetOption(DUPESEARCHDRYRUN.data(), "no");
-	SetOption(DUPESEARCHURL.data(), "");
-	SetOption(DUPESEARCHAPIKEY.data(), "");
-	SetOption(DUPESEARCHDELAY.data(), "20");
-	SetOption(DUPESEARCHMAXDONORS.data(), "0");
-	SetOption(DUPEHEALTHPERCENT.data(), "5");
-	SetOption(DUPEHEALTHMIN.data(), "50");
-	SetOption(DUPEHEALTHMAX.data(), "1000");
-	SetOption(DUPEBODYCHECKS.data(), "20");
-	SetOption(DUPEHEALTHBUDGET.data(), "120");
-	SetOption(DUPEMINALIVE.data(), "50");
-	SetOption(DUPEFASTDONORS.data(), "5");
-	SetOption(DOWNLOADRATE.data(), "0");
-	SetOption(CONTROLIP.data(), "0.0.0.0");
-	SetOption(CONTROLUSERNAME.data(), "nzbget");
-	SetOption(CONTROLPASSWORD.data(), "tegbzn6789");
-	SetOption(RESTRICTEDUSERNAME.data(), "");
-	SetOption(RESTRICTEDPASSWORD.data(), "");
-	SetOption(ADDUSERNAME.data(), "");
-	SetOption(ADDPASSWORD.data(), "");
-	SetOption(CONTROLPORT.data(), "6789");
-	SetOption(FORMAUTH.data(), "no");
-	SetOption(JSONP.data(), "no");
-	SetOption(SECURECONTROL.data(), "no");
-	SetOption(SECUREPORT.data(), "6791");
-	SetOption(SECURECERT.data(), "");
-	SetOption(SECUREKEY.data(), "");
-	SetOption(CERTSTORE.data(), "");
-	SetOption(CERTCHECK.data(), "no");
-	SetOption(AUTHORIZEDIP.data(), "");
-	SetOption(ARTICLETIMEOUT.data(), "60");
-	SetOption(ARTICLEREADCHUNKSIZE.data(), "4");
-	SetOption(URLTIMEOUT.data(), "60");
-	SetOption(REMOTETIMEOUT.data(), "90");
-	SetOption(FLUSHQUEUE.data(), "yes");
-	SetOption(SYSTEMHEALTHCHECK.data(), "yes");
-	SetOption(NZBLOG.data(), "yes");
-	SetOption(RAWARTICLE.data(), "no");
-	SetOption(SKIPWRITE.data(), "no");
-	SetOption(ARTICLERETRIES.data(), "3");
-	SetOption(ARTICLEINTERVAL.data(), "10");
-	SetOption(URLRETRIES.data(), "3");
-	SetOption(URLINTERVAL.data(), "10");
-	SetOption(CONTINUEPARTIAL.data(), "no");
-	SetOption(URLCONNECTIONS.data(), "4");
-	SetOption(LOGBUFFER.data(), "1000");
-	SetOption(INFOTARGET.data(), "both");
-	SetOption(WARNINGTARGET.data(), "both");
-	SetOption(ERRORTARGET.data(), "both");
-	SetOption(DEBUGTARGET.data(), "none");
-	SetOption(DETAILTARGET.data(), "both");
-	SetOption(PARCHECK.data(), "auto");
-	SetOption(PARREPAIR.data(), "yes");
-	SetOption(PARSCAN.data(), "extended");
-	SetOption(PARQUICK.data(), "yes");
-	SetOption(POSTSTRATEGY.data(), "sequential");
-	SetOption(FILENAMING.data(), "article");
-	SetOption(POSTDOWNLOADRENAME.data(), "yes");
-	SetOption(RENAMEAFTERUNPACK.data(), "yes");
-	SetOption(RENAMEIGNOREEXT.data(), "");
-	SetOption(PARRENAME.data(), "yes");
-	SetOption(PARBUFFER.data(), "16");
-	SetOption(PARTHREADS.data(), "0");
-	SetOption(RARRENAME.data(), "yes");
-	SetOption(HEALTHCHECK.data(), "none");
-	SetOption(DIRECTRENAME.data(), "no");
-	SetOption(HARDLINKING.data(), "no");
-	SetOption(HARDLINKINGIGNOREEXT.data(), ".zip, .7z, .rar, *.7z.###, *.r##");
-	SetOption(SCRIPTORDER.data(), "");
-	SetOption(EXTENSIONS.data(), "");
-	SetOption(DAEMONUSERNAME.data(), "root");
-	SetOption(UMASK.data(), "1000");
-	SetOption(UPDATEINTERVAL.data(), "200");
-	SetOption(CURSESNZBNAME.data(), "yes");
-	SetOption(CURSESTIME.data(), "no");
-	SetOption(CURSESGROUP.data(), "no");
-	SetOption(CRCCHECK.data(), "yes");
-	SetOption(DIRECTWRITE.data(), "yes");
-	SetOption(WRITEBUFFER.data(), "0");
-	SetOption(NZBDIRINTERVAL.data(), "5");
-	SetOption(NZBDIRFILEAGE.data(), "60");
-	SetOption(NZBDIRARCHIVESCAN.data(), "yes");
-	SetOption(NZBDIRARCHIVEACTION.data(), "delete");
-	SetOption(DISKSPACE.data(), "250");
-	SetOption(CRASHTRACE.data(), "no");
-	SetOption(CRASHDUMP.data(), "no");
-	SetOption(PARPAUSEQUEUE.data(), "no");
-	SetOption(SCRIPTPAUSEQUEUE.data(), "no");
-	SetOption(NZBCLEANUPDISK.data(), "no");
-	SetOption(PARTIMELIMIT.data(), "0");
-	SetOption(KEEPHISTORY.data(), "7");
-	SetOption(UNPACK.data(), "no");
-	SetOption(DIRECTUNPACK.data(), "no");
-	SetOption(USETEMPUNPACKDIR.data(), "yes");
-	SetOption(UNPACKCLEANUPDISK.data(), "no");
-	SetOption(UNRARCMD.data(), "unrar");
-	SetOption(SEVENZIPCMD.data(), "7z");
-	SetOption(UNPACKPASSFILE.data(), "");
-	SetOption(UNPACKPAUSEQUEUE.data(), "no");
-	SetOption(EXTCLEANUPDISK.data(), "");
-	SetOption(PARIGNOREEXT.data(), "");
-	SetOption(UNPACKIGNOREEXT.data(), "");
-	SetOption(FEEDHISTORY.data(), "7");
-	SetOption(URLFORCE.data(), "yes");
-	SetOption(TIMECORRECTION.data(), "0");
-	SetOption(PROPAGATIONDELAY.data(), "0");
-	SetOption(ARTICLECACHE.data(), "0");
-	SetOption(MEMORYPRESSUREINTERVAL.data(), "500");
-	SetOption(MEMORYPRESSUREPATH.data(), "");
-	SetOption(EVENTINTERVAL.data(), "0");
-	SetOption(SHELLOVERRIDE.data(), "");
-	SetOption(MONTHLYQUOTA.data(), "0");
-	SetOption(QUOTASTARTDAY.data(), "1");
-	SetOption(DAILYQUOTA.data(), "0");
-	SetOption(REORDERFILES.data(), "no");
-	SetOption(UPDATECHECK.data(), "none");
+	nzbget_rs_options_init_defaults(
+		disableCurses,
+		[](void* ctx, const char* name, const char* value)
+		{
+			static_cast<Options*>(ctx)->SetOption(name, value);
+		},
+		this);
 }
 
 void Options::InitOptFile()
@@ -435,103 +628,39 @@ void Options::InitOptFile()
 void Options::CheckDir(CString& dir, const char* optionName,
 	const char* parentDir, bool allowEmpty, bool create)
 {
-	const char* tempdir = GetOption(optionName);
-
-	if (m_noDiskAccess)
+	NzbgetRsOptionsHost host = MakeHost();
+	int hasDir = 0;
+	NzbgetRsBuf buf = nzbget_rs_options_check_dir(
+		&host, m_noDiskAccess ? 1 : 0, optionName, parentDir,
+		allowEmpty ? 1 : 0, create ? 1 : 0, &hasDir);
+	if (hasDir)
 	{
-		dir = tempdir;
-		return;
+		dir = buf.data ? buf.data : "";
 	}
-
-	if (Util::EmptyStr(tempdir))
+	else
 	{
-		if (!allowEmpty)
-		{
-			ConfigError("Invalid value for option \"%s\": <empty>", optionName);
-		}
-		dir = "";
-		return;
+		dir = nullptr;
 	}
-
-	dir = tempdir;
-	FileSystem::NormalizePathSeparators((char*)dir);
-	size_t strippedLen = nzbget_rs_tpr_options_strip_trailing_sep(dir, PATH_SEPARATOR);
-	if (strippedLen < (size_t)dir.Length())
-	{
-		// remove trailing slash
-		dir[(int)strippedLen] = '\0';
-	}
-
-	int joinMode = nzbget_rs_rol_options_check_dir_join_mode(
-		dir, parentDir, PATH_SEPARATOR, ALT_PATH_SEPARATOR);
-	if (joinMode != 0)
-	{
-		BString<1024> usedir2;
-		{
-			NzbgetRsBuf joinBuf = nzbget_rs_tpr_options_format_joined_dir(
-				parentDir, PATH_SEPARATOR, *dir, joinMode);
-			usedir2.Set(joinBuf.data ? joinBuf.data : "", (int)joinBuf.len);
-			nzbget_rs_free(joinBuf);
-		}
-
-		FileSystem::NormalizePathSeparators((char*)usedir2);
-		dir = usedir2;
-		SetOption(optionName, usedir2);
-	}
-
-	// Ensure the dir is created
-	CString errmsg;
-	if (create)
-	{
-		if (!FileSystem::ForceDirectories(dir, errmsg))
-		{
-			ConfigError("Invalid value for option \"%s\" (%s): %s", optionName, *dir, *errmsg);
-			return;
-		}
-
-		if (getuid() == 0 || geteuid() == 0)
-		{
-			struct passwd* pwd = getpwnam(GetOption(DAEMONUSERNAME.data()));
-			if (pwd != nullptr)
-			{
-				chown(dir, pwd->pw_uid, pwd->pw_gid);
-			}
-		}
-	}
+	nzbget_rs_free(buf);
 }
 
 // ScriptDir may list several folders: each is made absolute and created on
 // its own (as one path, "a;b" created junk folders such as "a;")
 void Options::CheckScriptDir()
 {
-	const char* value = GetOption(SCRIPTDIR.data());
-	if (nzbget_rs_dqh_options_should_check_single_script_dir(
-		m_noDiskAccess ? 1 : 0, value) != 0)
+	NzbgetRsOptionsHost host = MakeHost();
+	int hasDir = 0;
+	NzbgetRsBuf buf = nzbget_rs_options_check_script_dir(
+		&host, m_noDiskAccess ? 1 : 0, m_mainDir, &hasDir);
+	if (hasDir)
 	{
-		CheckDir(m_scriptDir, SCRIPTDIR.data(), m_mainDir, true, true);
-		return;
+		m_scriptDir = buf.data ? buf.data : "";
 	}
-
-	CString list = value;
-	CString result;
-	Tokenizer tok(list, ",;");
-	while (const char* item = tok.Next())
+	else
 	{
-		SetOption(SCRIPTDIR.data(), item);
-		CString dir;
-		CheckDir(dir, SCRIPTDIR.data(), m_mainDir, true, true);
-		if (!dir.Empty())
-		{
-			if (!result.Empty())
-			{
-				result.Append(";");
-			}
-			result.Append(dir);
-		}
+		m_scriptDir = nullptr;
 	}
-
-	SetOption(SCRIPTDIR.data(), result);
-	m_scriptDir = *result;
+	nzbget_rs_free(buf);
 }
 
 void Options::CheckDirs()
@@ -606,218 +735,32 @@ void Options::InitOptions()
 
 	m_renameIgnoreExt 	    = GetOption(RENAMEIGNOREEXT.data());
 
-	m_downloadRate			= nzbget_rs_tpr_webdl_kb_to_bytes(ParseIntValue(DOWNLOADRATE.data(), 10));
-	m_articleTimeout		= ParseIntValue(ARTICLETIMEOUT.data(), 10);
-	m_articleReadChunkSize  = nzbget_rs_tpr_webdl_kb_to_bytes(ParseIntValue(ARTICLEREADCHUNKSIZE.data(), 10));
-	m_urlTimeout			= ParseIntValue(URLTIMEOUT.data(), 10);
-	m_remoteTimeout			= ParseIntValue(REMOTETIMEOUT.data(), 10);
-	m_articleRetries		= ParseIntValue(ARTICLERETRIES.data(), 10);
-	m_articleInterval		= ParseIntValue(ARTICLEINTERVAL.data(), 10);
-	m_urlRetries			= ParseIntValue(URLRETRIES.data(), 10);
-	m_urlInterval			= ParseIntValue(URLINTERVAL.data(), 10);
-	m_controlPort			= ParseIntValue(CONTROLPORT.data(), 10);
-	m_securePort			= ParseIntValue(SECUREPORT.data(), 10);
-	m_urlConnections		= ParseIntValue(URLCONNECTIONS.data(), 10);
-	m_logBuffer				= ParseIntValue(LOGBUFFER.data(), 10);
-	m_rotateLog				= ParseIntValue(ROTATELOG.data(), 10);
-	m_umask					= ParseIntValue(UMASK.data(), 8);
-	m_updateInterval		= ParseIntValue(UPDATEINTERVAL.data(), 10);
-	m_writeBuffer			= ParseIntValue(WRITEBUFFER.data(), 10);
-	m_nzbDirInterval		= ParseIntValue(NZBDIRINTERVAL.data(), 10);
-	m_nzbDirFileAge			= ParseIntValue(NZBDIRFILEAGE.data(), 10);
-	m_nzbDirArchiveScan		= (bool)ParseEnumValue(NZBDIRARCHIVESCAN.data(), BoolCount, BoolNames, BoolValues);
-	const char* ArchiveActions[] = { "move", "delete" };
-	const int ArchiveActionValues[] = { ENzbDirArchiveAction::Move, ENzbDirArchiveAction::Delete };
-	const int ArchiveActionsCount = 2;
-	m_nzbDirArchiveAction 	= (ENzbDirArchiveAction)ParseEnumValue(NZBDIRARCHIVEACTION.data(), ArchiveActionsCount, ArchiveActions, ArchiveActionValues);
-	m_diskSpace				= ParseIntValue(DISKSPACE.data(), 10);
-	m_parTimeLimit			= ParseIntValue(PARTIMELIMIT.data(), 10);
-	m_keepHistory			= ParseIntValue(KEEPHISTORY.data(), 10);
-	m_feedHistory			= ParseIntValue(FEEDHISTORY.data(), 10);
-	m_timeCorrection = nzbget_rs_options_normalize_time_correction(
-		ParseIntValue(TIMECORRECTION.data(), 10));
-	m_propagationDelay		= nzbget_rs_tpr_options_minutes_to_seconds_i32(ParseIntValue(PROPAGATIONDELAY.data(), 10));
-	m_articleCache			= ParseIntValue(ARTICLECACHE.data(), 10);
-	m_memoryPressurePath	= GetOption(MEMORYPRESSUREPATH.data());
-	int memoryPressureInterval = ParseIntValue(MEMORYPRESSUREINTERVAL.data(), 10);
-	m_memoryPressureInterval = memoryPressureInterval > 0 ? memoryPressureInterval : 500;
-	m_eventInterval			= ParseIntValue(EVENTINTERVAL.data(), 10);
-	m_parBuffer				= ParseIntValue(PARBUFFER.data(), 10);
-	m_parThreads			= ParseIntValue(PARTHREADS.data(), 10);
-	m_monthlyQuota			= ParseIntValue(MONTHLYQUOTA.data(), 10);
-	m_quotaStartDay			= ParseIntValue(QUOTASTARTDAY.data(), 10);
-	m_dailyQuota			= ParseIntValue(DAILYQUOTA.data(), 10);
+	NzbgetRsOptionsHost host = MakeHost();
+	NzbgetRsParsedOptions scalars{};
+	int hasMemPath = 0, hasHlExt = 0, hasDupeUrl = 0, hasDupeKey = 0, warnDupeNoUrl = 0;
+	NzbgetRsBuf memPathBuf{}, hlExtBuf{}, dupeUrlBuf{}, dupeKeyBuf{};
+	nzbget_rs_options_init_scalars(
+		&host, &scalars,
+		&hasMemPath, &memPathBuf,
+		&hasHlExt, &hlExtBuf,
+		&hasDupeUrl, &dupeUrlBuf,
+		&hasDupeKey, &dupeKeyBuf,
+		&warnDupeNoUrl);
+	m_memoryPressurePath = hasMemPath ? (memPathBuf.data ? memPathBuf.data : "") : nullptr;
+	m_hardLinkingIgnoreExt = hasHlExt ? (hlExtBuf.data ? hlExtBuf.data : "") : nullptr;
+	m_dupeSearchUrl = hasDupeUrl ? (dupeUrlBuf.data ? dupeUrlBuf.data : "") : nullptr;
+	m_dupeSearchApiKey = hasDupeKey ? (dupeKeyBuf.data ? dupeKeyBuf.data : "") : nullptr;
+	nzbget_rs_free(memPathBuf);
+	nzbget_rs_free(hlExtBuf);
+	nzbget_rs_free(dupeUrlBuf);
+	nzbget_rs_free(dupeKeyBuf);
+	ApplyParsedScalars(scalars);
 
-	m_systemHealthCheck		= (bool)ParseEnumValue(SYSTEMHEALTHCHECK.data(), BoolCount, BoolNames, BoolValues);
-	m_nzbLog				= (bool)ParseEnumValue(NZBLOG.data(), BoolCount, BoolNames, BoolValues);
-	m_appendCategoryDir		= (bool)ParseEnumValue(APPENDCATEGORYDIR.data(), BoolCount, BoolNames, BoolValues);
-	m_continuePartial		= (bool)ParseEnumValue(CONTINUEPARTIAL.data(), BoolCount, BoolNames, BoolValues);
-	m_flushQueue			= (bool)ParseEnumValue(FLUSHQUEUE.data(), BoolCount, BoolNames, BoolValues);
-	m_dupeCheck				= (bool)ParseEnumValue(DUPECHECK.data(), BoolCount, BoolNames, BoolValues);
-	m_parRepair				= (bool)ParseEnumValue(PARREPAIR.data(), BoolCount, BoolNames, BoolValues);
-	m_parQuick				= (bool)ParseEnumValue(PARQUICK.data(), BoolCount, BoolNames, BoolValues);
-	m_parRename				= (bool)ParseEnumValue(PARRENAME.data(), BoolCount, BoolNames, BoolValues);
-	m_rarRename				= (bool)ParseEnumValue(RARRENAME.data(), BoolCount, BoolNames, BoolValues);
-	m_directRename			= (bool)ParseEnumValue(DIRECTRENAME.data(), BoolCount, BoolNames, BoolValues);
-	m_hardLinking			= (bool)ParseEnumValue(HARDLINKING.data(), BoolCount, BoolNames, BoolValues);
-	m_hardLinkingIgnoreExt = GetOption(HARDLINKINGIGNOREEXT.data());
-	m_cursesNzbName			= (bool)ParseEnumValue(CURSESNZBNAME.data(), BoolCount, BoolNames, BoolValues);
-	m_cursesTime			= (bool)ParseEnumValue(CURSESTIME.data(), BoolCount, BoolNames, BoolValues);
-	m_cursesGroup			= (bool)ParseEnumValue(CURSESGROUP.data(), BoolCount, BoolNames, BoolValues);
-	m_crcCheck				= (bool)ParseEnumValue(CRCCHECK.data(), BoolCount, BoolNames, BoolValues);
-	m_directWrite			= (bool)ParseEnumValue(DIRECTWRITE.data(), BoolCount, BoolNames, BoolValues);
-	m_rawArticle			= (bool)ParseEnumValue(RAWARTICLE.data(), BoolCount, BoolNames, BoolValues);
-	m_skipWrite				= (bool)ParseEnumValue(SKIPWRITE.data(), BoolCount, BoolNames, BoolValues);
-	m_crashTrace			= (bool)ParseEnumValue(CRASHTRACE.data(), BoolCount, BoolNames, BoolValues);
-	m_crashDump				= (bool)ParseEnumValue(CRASHDUMP.data(), BoolCount, BoolNames, BoolValues);
-	m_parPauseQueue			= (bool)ParseEnumValue(PARPAUSEQUEUE.data(), BoolCount, BoolNames, BoolValues);
-	m_scriptPauseQueue		= (bool)ParseEnumValue(SCRIPTPAUSEQUEUE.data(), BoolCount, BoolNames, BoolValues);
-	m_nzbCleanupDisk		= (bool)ParseEnumValue(NZBCLEANUPDISK.data(), BoolCount, BoolNames, BoolValues);
-	m_formAuth				= (bool)ParseEnumValue(FORMAUTH.data(), BoolCount, BoolNames, BoolValues);
-	m_jsonP					= (bool)ParseEnumValue(JSONP.data(), BoolCount, BoolNames, BoolValues);
-	m_secureControl			= (bool)ParseEnumValue(SECURECONTROL.data(), BoolCount, BoolNames, BoolValues);
-	m_unpack				= (bool)ParseEnumValue(UNPACK.data(), BoolCount, BoolNames, BoolValues);
-	m_directUnpack			= (bool)ParseEnumValue(DIRECTUNPACK.data(), BoolCount, BoolNames, BoolValues);
-	m_useTempUnpackDir		= (bool)ParseEnumValue(USETEMPUNPACKDIR.data(), BoolCount, BoolNames, BoolValues);
-	m_unpackCleanupDisk		= (bool)ParseEnumValue(UNPACKCLEANUPDISK.data(), BoolCount, BoolNames, BoolValues);
-	m_unpackPauseQueue		= (bool)ParseEnumValue(UNPACKPAUSEQUEUE.data(), BoolCount, BoolNames, BoolValues);
-	m_urlForce				= (bool)ParseEnumValue(URLFORCE.data(), BoolCount, BoolNames, BoolValues);
-	m_certCheck				= (bool)ParseEnumValue(CERTCHECK.data(), BoolCount, BoolNames, BoolValues);
-	m_reorderFiles			= (bool)ParseEnumValue(REORDERFILES.data(), BoolCount, BoolNames, BoolValues);
-	m_postDownloadRename    = (bool)ParseEnumValue(POSTDOWNLOADRENAME.data(), BoolCount, BoolNames, BoolValues);
-	m_renameAfterUnpack     = (bool)ParseEnumValue(RENAMEAFTERUNPACK.data(), BoolCount, BoolNames, BoolValues);
-
-	const char* OutputModeNames[] = { "loggable", "logable", "log", "colored", "color", "ncurses", "curses" };
-	const int OutputModeValues[] = { omLoggable, omLoggable, omLoggable, omColored, omColored, omNCurses, omNCurses };
-	const int OutputModeCount = 7;
-	m_outputMode = (EOutputMode)ParseEnumValue(OUTPUTMODE.data(), OutputModeCount, OutputModeNames, OutputModeValues);
-
-	const char* ParCheckNames[] = { "auto", "always", "force", "manual" };
-	const int ParCheckValues[] = { pcAuto, pcAlways, pcForce, pcManual };
-	const int ParCheckCount = (int)std::size(ParCheckNames);
-	m_parCheck = (EParCheck)ParseEnumValue(PARCHECK.data(), ParCheckCount, ParCheckNames, ParCheckValues);
-
-	const char* ParScanNames[] = { "limited", "extended", "full", "dupe" };
-	const int ParScanValues[] = { psLimited, psExtended, psFull, psDupe };
-	const int ParScanCount = 4;
-	m_parScan = (EParScan)ParseEnumValue(PARSCAN.data(), ParScanCount, ParScanNames, ParScanValues);
-
-	// "yes" is accepted for compatibility with the former boolean option and
-	// is normalized to "article" by ParseEnumValue (first name with same value)
-	const char* DupeArticleFallbackNames[] = { "no", "article", "stream", "live", "yes" };
-	const int DupeArticleFallbackValues[] = { dafNone, dafArticle, dafStream, dafLive, dafArticle };
-	const int DupeArticleFallbackCount = 5;
-	m_dupeArticleFallback = (EDupeArticleFallback)ParseEnumValue(DUPEARTICLEFALLBACK.data(),
-		DupeArticleFallbackCount, DupeArticleFallbackNames, DupeArticleFallbackValues);
-	m_dupeStreamDecompress	= (bool)ParseEnumValue(DUPESTREAMDECOMPRESS.data(), BoolCount, BoolNames, BoolValues);
-	int rawStreamTimeout = ParseIntValue(DUPESTREAMTIMEOUT.data(), 10);
-	m_dupeSearch			= (bool)ParseEnumValue(DUPESEARCH.data(), BoolCount, BoolNames, BoolValues);
-	m_dupeSearchDryRun		= (bool)ParseEnumValue(DUPESEARCHDRYRUN.data(), BoolCount, BoolNames, BoolValues);
-	m_dupeSearchUrl			= GetOption(DUPESEARCHURL.data());
-	m_dupeSearchApiKey		= GetOption(DUPESEARCHAPIKEY.data());
-	int rawSearchDelay = ParseIntValue(DUPESEARCHDELAY.data(), 10);
-	int rawSearchMaxDonors = ParseIntValue(DUPESEARCHMAXDONORS.data(), 10);
-	int rawHealthPercent = ParseIntValue(DUPEHEALTHPERCENT.data(), 10);
-	int rawHealthMin = ParseIntValue(DUPEHEALTHMIN.data(), 10);
-	int rawHealthMax = ParseIntValue(DUPEHEALTHMAX.data(), 10);
-	int rawBodyChecks = ParseIntValue(DUPEBODYCHECKS.data(), 10);
-	int rawHealthBudget = ParseIntValue(DUPEHEALTHBUDGET.data(), 10);
-	int rawMinAlive = ParseIntValue(DUPEMINALIVE.data(), 10);
-	int rawFastDonors = ParseIntValue(DUPEFASTDONORS.data(), 10);
-	nzbget_rs_rol_options_normalize_dupe_and_mem_options(
-		memoryPressureInterval, rawStreamTimeout, rawSearchDelay,
-		rawSearchMaxDonors, rawHealthPercent, rawHealthMin, rawHealthMax,
-		rawBodyChecks, rawHealthBudget, rawMinAlive, rawFastDonors,
-		&m_memoryPressureInterval, &m_dupeStreamTimeout, &m_dupeSearchDelay,
-		&m_dupeSearchMaxDonors, &m_dupeHealthPercent, &m_dupeHealthMin,
-		&m_dupeHealthMax, &m_dupeBodyChecks, &m_dupeHealthBudget,
-		&m_dupeMinAlive, &m_dupeFastDonors);
-	if (m_dupeSearch && Util::EmptyStr(m_dupeSearchUrl))
+	if (warnDupeNoUrl)
 	{
 		warn("Option <%s> is enabled but option <%s> is empty: no duplicates will be searched",
 			DUPESEARCH.data(), DUPESEARCHURL.data());
-		m_dupeSearch = false;
 	}
-
-	const char* PostStrategyNames[] = { "sequential", "balanced", "aggressive", "rocket" };
-	const int PostStrategyValues[] = { ppSequential, ppBalanced, ppAggressive, ppRocket };
-	const int PostStrategyCount = 4;
-	m_postStrategy = (EPostStrategy)ParseEnumValue(POSTSTRATEGY.data(), PostStrategyCount, PostStrategyNames, PostStrategyValues);
-
-	const char* FileNamingNames[] = { "auto", "article", "nzb" };
-	const int FileNamingValues[] = { nfAuto, nfArticle, nfNzb };
-	const int FileNamingCount = (int)std::size(FileNamingNames);
-	m_fileNaming = (EFileNaming)ParseEnumValue(FILENAMING.data(), FileNamingCount, FileNamingNames, FileNamingValues);
-
-	const char* HealthCheckNames[] = { "pause", "delete", "park", "none", "dupe" };
-	const int HealthCheckValues[] = { hcPause, hcDelete, hcPark, hcNone, hcDupe };
-	const int HealthCheckCount = 5;
-	m_healthCheck = (EHealthCheck)ParseEnumValue(HEALTHCHECK.data(), HealthCheckCount, HealthCheckNames, HealthCheckValues);
-
-	const char* TargetNames[] = { "screen", "log", "both", "none" };
-	const int TargetValues[] = { mtScreen, mtLog, mtBoth, mtNone };
-	const int TargetCount = 4;
-	m_infoTarget = (EMessageTarget)ParseEnumValue(INFOTARGET.data(), TargetCount, TargetNames, TargetValues);
-	m_warningTarget = (EMessageTarget)ParseEnumValue(WARNINGTARGET.data(), TargetCount, TargetNames, TargetValues);
-	m_errorTarget = (EMessageTarget)ParseEnumValue(ERRORTARGET.data(), TargetCount, TargetNames, TargetValues);
-	m_debugTarget = (EMessageTarget)ParseEnumValue(DEBUGTARGET.data(), TargetCount, TargetNames, TargetValues);
-	m_detailTarget = (EMessageTarget)ParseEnumValue(DETAILTARGET.data(), TargetCount, TargetNames, TargetValues);
-
-	const char* WriteLogNames[] = { "none", "append", "reset", "rotate" };
-	const int WriteLogValues[] = { wlNone, wlAppend, wlReset, wlRotate };
-	const int WriteLogCount = 4;
-	m_writeLog = (EWriteLog)ParseEnumValue(WRITELOG.data(), WriteLogCount, WriteLogNames, WriteLogValues);
-}
-
-int Options::ParseEnumValue(const char* OptName, int argc, const char * argn[], const int argv[])
-{
-	OptEntry* optEntry = FindOption(OptName);
-	if (!optEntry)
-	{
-		ConfigError("Undefined value for option \"%s\"", OptName);
-		return argv[0];
-	}
-
-	int parsedVal = argv[0];
-	int normIdx = -1;
-	if (nzbget_rs_options_parse_enum_value(
-		optEntry->GetValue(), optEntry->GetDefValue(), argc, argn, argv, &parsedVal, &normIdx))
-	{
-		if (normIdx >= 0 && normIdx < argc)
-		{
-			optEntry->SetValue(argn[normIdx]);
-		}
-		return parsedVal;
-	}
-
-	m_configLine = optEntry->GetLineNo();
-	ConfigError("Invalid value for option \"%s\": \"%s\"", OptName, optEntry->GetValue());
-	if (normIdx >= 0 && normIdx < argc)
-	{
-		optEntry->SetValue(argn[normIdx]);
-	}
-	return parsedVal;
-}
-
-int Options::ParseIntValue(const char* OptName, int base)
-{
-	OptEntry* optEntry = FindOption(OptName);
-	if (!optEntry)
-	{
-		ConfigError("Undefined value for option \"%s\"", OptName);
-		return 0;
-	}
-
-	int val = 0;
-	if (!nzbget_rs_options_parse_int_value(
-		optEntry->GetValue(), optEntry->GetDefValue(), base, &val))
-	{
-		m_configLine = optEntry->GetLineNo();
-		ConfigError("Invalid value for option \"%s\": \"%s\"", OptName, optEntry->GetValue());
-		optEntry->SetValue(optEntry->GetDefValue());
-	}
-
-	return val;
 }
 
 void Options::SetOption(const char* optname, const char* value)
@@ -842,22 +785,17 @@ void Options::SetOption(const char* optname, const char* value)
 
 	optEntry->SetLineNo(m_configLine);
 
-	// expand variables
-	size_t dollarPos = 0;
-	size_t varLen = 0;
-	while (nzbget_rs_rco_options_find_var_reference(curvalue, &dollarPos, &varLen))
+	if (curvalue)
 	{
-		BString<100> variable;
-		variable.Set((const char*)curvalue + dollarPos + 2, (int)varLen);
-		const char* varvalue = GetOption(variable);
-		if (varvalue)
-		{
-			curvalue.Replace((int)dollarPos, 2 + (int)varLen + 1, varvalue);
-		}
-		else
-		{
-			break;
-		}
+		NzbgetRsBuf expanded = nzbget_rs_options_expand_variables(
+			curvalue,
+			[](void* ctx, const char* name) -> const char*
+			{
+				return static_cast<Options*>(ctx)->GetOption(name);
+			},
+			this);
+		curvalue.Set(expanded.data ? expanded.data : "", (int)expanded.len);
+		nzbget_rs_free(expanded);
 	}
 
 	optEntry->SetValue(curvalue);
@@ -867,38 +805,10 @@ void Options::SetToolPathOption(fs::path& pathOpt, std::string_view value)
 {
 	if (value.empty()) return;
 
-	fs::path directPath = fs::u8path(value);
-
-	fs::error_code ec;
-	if (fs::exists(directPath, ec) && fs::is_regular_file(directPath, ec))
-	{
-		pathOpt.swap(directPath);
-		return;
-	}
-
-	ec.clear();
-
-	// Clean the input: "'C:\\Program Files\\unrar' -x" -> "C:\\Program Files\\unrar"
-	const auto args = Util::SplitCommandLine(value.data());
-	const auto tool = !args.empty() ? *args[0] : std::string(value);
-	directPath = fs::u8path(tool);
-
-	if (directPath.has_parent_path())
-	{
-		if (fs::exists(directPath, ec) && fs::is_regular_file(directPath, ec))
-		{
-			pathOpt.swap(directPath);
-			return;
-		}
-	}
-
-	auto res = Util::ResolvePathFromEnv(tool);
-	if (res)
-	{
-		pathOpt.swap(*res);
-		return;
-	}
-
+	NzbgetRsBuf resolved = nzbget_rs_options_resolve_tool_path(value.data(), value.size());
+	std::string_view sv(resolved.data ? resolved.data : "", resolved.len);
+	fs::path directPath = fs::u8path(sv);
+	nzbget_rs_free(resolved);
 	pathOpt.swap(directPath);
 }
 
@@ -927,415 +837,42 @@ const char* Options::GetOption(const char* optname)
 	return nullptr;
 }
 
-namespace
-{
-BString<100> IndexedOptName(const char* prefix, int n, const char* field)
-{
-	NzbgetRsBuf buf = nzbget_rs_dqh_options_format_indexed_opt_name(prefix, n, field);
-	BString<100> res;
-	res.Set(buf.data ? buf.data : "", (int)buf.len);
-	nzbget_rs_free(buf);
-	return res;
-}
-}
-
 void Options::InitServers()
 {
-	int n = 1;
-	while (true)
-	{
-		BString<100> activeOpt = IndexedOptName("Server", n, "Active");
-		const char* nactive = GetOption(activeOpt);
-		bool active = true;
-		if (nactive)
-		{
-			active = (bool)ParseEnumValue(activeOpt, BoolCount, BoolNames, BoolValues);
-		}
-
-		const char* nname = GetOption(IndexedOptName("Server", n, "Name"));
-		const char* nlevel = GetOption(IndexedOptName("Server", n, "Level"));
-		const char* ngroup = GetOption(IndexedOptName("Server", n, "Group"));
-		const char* nhost = GetOption(IndexedOptName("Server", n, "Host"));
-		const char* nport = GetOption(IndexedOptName("Server", n, "Port"));
-		const char* nusername = GetOption(IndexedOptName("Server", n, "Username"));
-		const char* npassword = GetOption(IndexedOptName("Server", n, "Password"));
-
-		BString<100> joinGroupOpt = IndexedOptName("Server", n, "JoinGroup");
-		const char* njoingroup = GetOption(joinGroupOpt);
-		bool joinGroup = false;
-		if (njoingroup)
-		{
-			joinGroup = (bool)ParseEnumValue(joinGroupOpt, BoolCount, BoolNames, BoolValues);
-		}
-
-		BString<100> optionalOpt = IndexedOptName("Server", n, "Optional");
-		const char* noptional = GetOption(optionalOpt);
-		bool optional = false;
-		if (noptional)
-		{
-			optional = (bool)ParseEnumValue(optionalOpt, BoolCount, BoolNames, BoolValues);
-		}
-
-		BString<100> tlsOpt = IndexedOptName("Server", n, "Encryption");
-		const char* ntls = GetOption(tlsOpt);
-		bool tls = false;
-		if (ntls)
-		{
-			tls = (bool)ParseEnumValue(tlsOpt, BoolCount, BoolNames, BoolValues);
+	NzbgetRsOptionsHost host = MakeHost();
+	NzbgetRsParsedOptions scalars = ExportParsedScalars();
 #ifdef DISABLE_TLS
-			if (tls)
-			{
-				ConfigError("Invalid value for option \"%s\": program was compiled without TLS/SSL-support",
-					*tlsOpt);
-				tls = false;
-			}
+	int disableTls = 1;
+#else
+	int disableTls = 0;
 #endif
-			m_tls |= tls;
-		}
-
-		BString<100> certVerifOpt = IndexedOptName("Server", n, "CertVerification");
-		const char* ncertveriflevel = GetOption(certVerifOpt);
-		int certveriflevel = ECertVerifLevel::cvStrict;
-		if (ncertveriflevel)
-		{
-			const char* CertVerifNames[] = { "none", "minimal", "strict" };
-			const int CertVerifValues[] = { ECertVerifLevel::cvNone, ECertVerifLevel::cvMinimal, ECertVerifLevel::cvStrict };
-			const int CertVerifCount = ECertVerifLevel::Count;
-			certveriflevel = ParseEnumValue(certVerifOpt, CertVerifCount, CertVerifNames, CertVerifValues);
-		}
-
-		BString<100> ipVerOpt = IndexedOptName("Server", n, "IpVersion");
-		const char* nipversion = GetOption(ipVerOpt);
-		int ipversion = 0;
-		if (nipversion)
-		{
-			const char* IpVersionNames[] = {"auto", "ipv4", "ipv6"};
-			const int IpVersionValues[] = {0, 4, 6};
-			const int IpVersionCount = 3;
-			ipversion = ParseEnumValue(ipVerOpt, IpVersionCount, IpVersionNames, IpVersionValues);
-		}
-
-		const char* ncipher = GetOption(IndexedOptName("Server", n, "Cipher"));
-		const char* nconnections = GetOption(IndexedOptName("Server", n, "Connections"));
-		const char* nretention = GetOption(IndexedOptName("Server", n, "Retention"));
-
-		bool definition = nactive || nname || nlevel || ngroup || nhost || nport || noptional ||
-			nusername || npassword || nconnections || njoingroup || ntls || ncipher || nretention;
-		int serverDefState = nzbget_rs_rol_options_check_server_def(
-			definition ? 1 : 0, nhost != nullptr ? 1 : 0,
-			nport != nullptr ? 1 : 0, nconnections != nullptr ? 1 : 0);
-		if (serverDefState == 0)
-		{
-			break;
-		}
-		bool completed = serverDefState == 1;
-
-		if (completed)
-		{
-			if (m_extender)
-			{
-				m_extender->AddNewsServer(n, active, nname,
-					nhost,
-					nzbget_rs_dqh_parse_c_atoi_or_default(nport, 119),
-					ipversion,
-					nusername, npassword,
-					joinGroup, tls, ncipher,
-					nzbget_rs_dqh_parse_c_atoi_or_default(nconnections, 1),
-					nzbget_rs_dqh_parse_c_atoi_or_default(nretention, 0),
-					nzbget_rs_dqh_parse_c_atoi_or_default(nlevel, 0),
-					nzbget_rs_dqh_parse_c_atoi_or_default(ngroup, 0),
-					optional, certveriflevel);
-			}
-		}
-		else
-		{
-			ConfigError("Server definition not complete for \"Server%i\"", n);
-		}
-
-		n++;
-	}
+	nzbget_rs_options_init_servers(&host, disableTls, &scalars);
+	ApplyParsedScalars(scalars);
 }
 
 void Options::InitCategories()
 {
-	int n = 1;
-	while (true)
-	{
-		const char* nname = GetOption(IndexedOptName("Category", n, "Name"));
-		BString<100> destDirOpt = IndexedOptName("Category", n, "DestDir");
-		const char* ndestdir = GetOption(destDirOpt);
-
-		BString<100> unpackOpt = IndexedOptName("Category", n, "Unpack");
-		const char* nunpack = GetOption(unpackOpt);
-		bool unpack = true;
-		if (nunpack)
-		{
-			unpack = (bool)ParseEnumValue(unpackOpt, BoolCount, BoolNames, BoolValues);
-		}
-
-		const char* nextensions = GetOption(IndexedOptName("Category", n, "Extensions"));
-		const char* naliases = GetOption(IndexedOptName("Category", n, "Aliases"));
-
-		bool definition = nname || ndestdir || nunpack || nextensions || naliases;
-		int catDefState = nzbget_rs_rol_options_check_category_or_feed_def(
-			definition ? 1 : 0, !Util::EmptyStr(nname) ? 1 : 0);
-		if (catDefState == 0)
-		{
-			break;
-		}
-		bool completed = catDefState == 1;
-
-		if (completed)
-		{
-			CString destDir;
-			if (ndestdir && ndestdir[0] != '\0')
-			{
-				CheckDir(destDir, destDirOpt, m_destDir, false, false);
-			}
-
-			m_categories.emplace_back(nname, destDir, unpack, nextensions);
-			Category& category = m_categories.back();
-
-			// split Aliases into tokens and create items for each token
-			if (naliases)
-			{
-				Tokenizer tok(naliases, ",;");
-				while (const char* aliasName = tok.Next())
-				{
-					category.GetAliases()->push_back(aliasName);
-				}
-			}
-		}
-		else
-		{
-			ConfigError("Category definition not complete for \"Category%i\"", n);
-		}
-
-		n++;
-	}
+	NzbgetRsOptionsHost host = MakeHost();
+	nzbget_rs_options_init_categories(&host, m_noDiskAccess ? 1 : 0, m_destDir);
 }
 
 void Options::InitFeeds()
 {
-	int n = 1;
-	while (true)
-	{
-		const char* nname = GetOption(IndexedOptName("Feed", n, "Name"));
-		const char* nurl = GetOption(IndexedOptName("Feed", n, "URL"));
-		const char* nfilter = GetOption(IndexedOptName("Feed", n, "Filter"));
-		const char* ncategory = GetOption(IndexedOptName("Feed", n, "Category"));
-		const char* nextensions = GetOption(IndexedOptName("Feed", n, "Extensions"));
-
-		BString<100> backlogOpt = IndexedOptName("Feed", n, "Backlog");
-		const char* nbacklog = GetOption(backlogOpt);
-		bool backlog = true;
-		if (nbacklog)
-		{
-			backlog = (bool)ParseEnumValue(backlogOpt, BoolCount, BoolNames, BoolValues);
-		}
-
-		BString<100> pauseNzbOpt = IndexedOptName("Feed", n, "PauseNzb");
-		const char* npausenzb = GetOption(pauseNzbOpt);
-		bool pauseNzb = false;
-		if (npausenzb)
-		{
-			pauseNzb = (bool)ParseEnumValue(pauseNzbOpt, BoolCount, BoolNames, BoolValues);
-		}
-
-		const char* ncategorySource = GetOption(IndexedOptName("Feed", n, "CategorySource"));
-		const auto categorySource = ParseCategorySource(ncategorySource);
-
-		const char* ninterval = GetOption(IndexedOptName("Feed", n, "Interval"));
-		const char* npriority = GetOption(IndexedOptName("Feed", n, "Priority"));
-
-		BString<100> certVerifOpt = IndexedOptName("Feed", n, "CertVerification");
-		const char* ncertveriflevel = GetOption(certVerifOpt);
-		int certveriflevel = ECertVerifLevel::cvStrict;
-		if (ncertveriflevel)
-		{
-			const char* CertVerifNames[] = { "none", "minimal", "strict" };
-			const int CertVerifValues[] = { ECertVerifLevel::cvNone, ECertVerifLevel::cvMinimal, ECertVerifLevel::cvStrict };
-			const int CertVerifCount = ECertVerifLevel::Count;
-			certveriflevel = ParseEnumValue(certVerifOpt, CertVerifCount, CertVerifNames, CertVerifValues);
-		}
-
-		bool definition = nname || nurl || nfilter || ncategory || nbacklog || npausenzb ||
-			ninterval || npriority || nextensions;
-		int feedDefState = nzbget_rs_rol_options_check_category_or_feed_def(
-			definition ? 1 : 0, nurl != nullptr ? 1 : 0);
-		if (feedDefState == 0)
-		{
-			break;
-		}
-		bool completed = feedDefState == 1;
-
-		if (completed)
-		{
-			if (m_extender)
-			{
-			m_extender->AddFeed(
-				n,
-				nname,
-				nurl,
-				nzbget_rs_dqh_parse_c_atoi_or_default(ninterval, 0),
-				nfilter,
-				backlog,
-				pauseNzb,
-				ncategory,
-				categorySource,
-				nzbget_rs_dqh_parse_c_atoi_or_default(npriority, 0),
-				nextensions,
-				certveriflevel
-			);
-			}
-		}
-		else
-		{
-			ConfigError("Feed definition not complete for \"Feed%i\"", n);
-		}
-
-		n++;
-	}
+	NzbgetRsOptionsHost host = MakeHost();
+	nzbget_rs_options_init_feeds(&host);
 }
 
 void Options::InitScheduler()
 {
-	for (int n = 1; ; n++)
-	{
-		const char* time = GetOption(IndexedOptName("Task", n, "Time"));
-		const char* weekDays = GetOption(IndexedOptName("Task", n, "WeekDays"));
-		BString<100> cmdOpt = IndexedOptName("Task", n, "Command");
-		const char* command = GetOption(cmdOpt);
-		const char* downloadRate = GetOption(IndexedOptName("Task", n, "DownloadRate"));
-		const char* process = GetOption(IndexedOptName("Task", n, "Process"));
-		const char* param = GetOption(IndexedOptName("Task", n, "Param"));
-
-		int paramSource = 0, definition = 0, completed = 0;
-		nzbget_rs_tpr_options_resolve_scheduler_task_state(
-			time != nullptr ? 1 : 0, weekDays != nullptr ? 1 : 0,
-			command != nullptr ? 1 : 0, downloadRate != nullptr ? 1 : 0,
-			param != nullptr ? 1 : 0,
-			Util::EmptyStr(param) ? 1 : 0,
-			Util::EmptyStr(process) ? 1 : 0,
-			Util::EmptyStr(downloadRate) ? 1 : 0,
-			&paramSource, &definition, &completed);
-		if (paramSource == 1)
-		{
-			param = process;
-		}
-		else if (paramSource == 2)
-		{
-			param = downloadRate;
-		}
-
-		if (!definition)
-		{
-			break;
-		}
-
-		if (!completed)
-		{
-			ConfigError("Task definition not complete for \"Task%i\"", n);
-			continue;
-		}
-
-		const char* CommandNames[] = { "pausedownload", "pause", "unpausedownload", "resumedownload", "unpause", "resume",
-			"pausepostprocess", "unpausepostprocess", "resumepostprocess", "pausepost", "unpausepost", "resumepost",
-			"downloadrate", "setdownloadrate", "rate", "speed", "script", "process", "pausescan", "unpausescan", "resumescan",
-			"activateserver", "activateservers", "deactivateserver", "deactivateservers", "fetchfeed", "fetchfeeds" };
-		const int CommandValues[] = { scPauseDownload, scPauseDownload, scUnpauseDownload,
-			scUnpauseDownload, scUnpauseDownload, scUnpauseDownload,
-			scPausePostProcess, scUnpausePostProcess, scUnpausePostProcess,
-			scPausePostProcess, scUnpausePostProcess, scUnpausePostProcess,
-			scDownloadRate, scDownloadRate, scDownloadRate, scDownloadRate,
-			scScript, scProcess, scPauseScan, scUnpauseScan, scUnpauseScan,
-			scActivateServer, scActivateServer, scDeactivateServer,
-			scDeactivateServer, scFetchFeed, scFetchFeed };
-		const int CommandCount = 27;
-		bool knownCommand = nzbget_rs_rco_options_lookup_scheduler_command(command) >= 0;
-		ESchedulerCommand taskCommand = (ESchedulerCommand)ParseEnumValue(
-			cmdOpt, CommandCount, CommandNames, CommandValues);
-		if (!knownCommand)
-		{
-			continue;
-		}
-
-		bool splitCmdEmpty = (!Util::EmptyStr(param) && taskCommand == scProcess)
-			? Util::SplitCommandLine(param).empty() : false;
-		int paramCheck = nzbget_rs_rco_options_validate_scheduler_param(
-			(int)taskCommand, param, splitCmdEmpty ? 1 : 0);
-		if (paramCheck == 1)
-		{
-			ConfigError("Invalid value for option \"Task%i.Param\"", n);
-			continue;
-		}
-		if (paramCheck == 2)
-		{
-			ConfigError("Invalid value for option \"Task%i.Param\": \"%s\"", n, downloadRate);
-			continue;
-		}
-		if (paramCheck == 3)
-		{
-			ConfigError("Task definition not complete for \"Task%i\". Option \"Task%i.Param\" is missing", n, n);
-			continue;
-		}
-
-		CreateSchedulerTask(n, time, weekDays, taskCommand, param);
-	}
+	NzbgetRsOptionsHost host = MakeHost();
+	nzbget_rs_options_init_scheduler(&host);
 }
 
 void Options::CreateSchedulerTask(int id, const char* time, const char* weekDays,
 	ESchedulerCommand command, const char* param)
 {
-	if (!id)
-	{
-		m_configLine = 0;
-	}
-
-	int weekDaysVal = 0;
-	if (weekDays && !ParseWeekDays(weekDays, &weekDaysVal))
-	{
-		ConfigError("Invalid value for option \"Task%i.WeekDays\": \"%s\"", id, weekDays);
-		return;
-	}
-
-	int hours, minutes;
-	Tokenizer tok(time, ";,");
-	while (const char* oneTime = tok.Next())
-	{
-		if (!ParseTime(oneTime, &hours, &minutes))
-		{
-			ConfigError("Invalid value for option \"Task%i.Time\": \"%s\"", id, oneTime);
-			return;
-		}
-
-		if (m_extender)
-		{
-			if (nzbget_rs_dqh_options_is_every_hour_task(hours) != 0)
-			{
-				for (int everyHour = 0; everyHour < 24; everyHour++)
-				{
-					m_extender->AddTask(id, everyHour, minutes, weekDaysVal, command, param);
-				}
-			}
-			else
-			{
-				m_extender->AddTask(id, hours, minutes, weekDaysVal, command, param);
-			}
-		}
-	}
-}
-
-bool Options::ParseTime(const char* time, int* hours, int* minutes)
-{
-	// rust/src/options.rs
-	return nzbget_rs_parse_time(time, hours, minutes) != 0;
-}
-
-bool Options::ParseWeekDays(const char* weekDays, int* weekDaysBits)
-{
-	// rust/src/options.rs
-	return nzbget_rs_parse_week_days(weekDays, weekDaysBits) != 0;
+	NzbgetRsOptionsHost host = MakeHost();
+	nzbget_rs_options_create_scheduler_task(&host, id, time, weekDays, (int)command, param);
 }
 
 void Options::LoadConfigFile()
@@ -1412,16 +949,16 @@ bool Options::SetOptionString(const char* option)
  */
 bool Options::SplitOptionString(const char* option, CString& optName, CString& optValue)
 {
-	size_t nameLen = 0, valOffset = 0;
-	if (!nzbget_rs_tpr_options_split_option_string(option, &nameLen, &valOffset))
+	NzbgetRsBuf nameBuf{}, valBuf{};
+	if (!nzbget_rs_options_split_and_convert(option, &nameBuf, &valBuf))
 	{
 		return false;
 	}
 
-	optName.Set(option, (int)nameLen);
-	optValue.Set(option + valOffset);
-
-	ConvertOldOption(optName, optValue);
+	optName.Set(nameBuf.data ? nameBuf.data : "", (int)nameBuf.len);
+	optValue.Set(valBuf.data ? valBuf.data : "", (int)valBuf.len);
+	nzbget_rs_free(nameBuf);
+	nzbget_rs_free(valBuf);
 
 	return true;
 }
@@ -1459,199 +996,47 @@ bool Options::ValidateOptionName(const char* optname, const char* optvalue)
 	}
 }
 
-void Options::ConvertOldOption(CString& option, CString& value)
-{
-	// rust/src/options.rs
-	NzbgetRsBuf newOption, newValue;
-	nzbget_rs_convert_old_option(option, value, &newOption, &newValue);
-	// Decide before changing option: callers may pass the same CString twice.
-	// An unchanged null value must also remain null.
-	bool valueChanged = value ? nzbget_rs_dqh_bytes_equal(value, newValue.data) == 0 : newValue.len != 0;
-	if (!option || nzbget_rs_dqh_bytes_equal(option, newOption.data) == 0)
-	{
-		option = newOption.data;
-	}
-	if (valueChanged)
-	{
-		value = newValue.data;
-	}
-	nzbget_rs_free(newOption);
-	nzbget_rs_free(newValue);
-}
-
 void Options::CheckOptions()
 {
+	NzbgetRsOptionsHost host = MakeHost();
+	NzbgetRsParsedOptions scalars = ExportParsedScalars();
 #ifdef DISABLE_PARCHECK
-	if (m_parCheck != pcManual)
-	{
-		LocateOptionSrcPos(PARCHECK.data());
-		ConfigError("Invalid value for option \"%s\": program was compiled without parcheck-support", PARCHECK.data());
-	}
-	if (m_parRename)
-	{
-		LocateOptionSrcPos(PARRENAME.data());
-		ConfigError("Invalid value for option \"%s\": program was compiled without parcheck-support", PARRENAME.data());
-	}
-	if (m_directRename)
-	{
-		LocateOptionSrcPos(DIRECTRENAME.data());
-		ConfigError("Invalid value for option \"%s\": program was compiled without parcheck-support", DIRECTRENAME.data());
-	}
+	int disableParcheck = 1;
+#else
+	int disableParcheck = 0;
 #endif
-
 #ifdef DISABLE_CURSES
-	if (m_outputMode == omNCurses)
-	{
-		LocateOptionSrcPos(OUTPUTMODE.data());
-		ConfigError("Invalid value for option \"%s\": program was compiled without curses-support", OUTPUTMODE.data());
-	}
+	int disableCurses = 1;
+#else
+	int disableCurses = 0;
 #endif
-
 #ifdef DISABLE_TLS
-	if (m_secureControl)
-	{
-		LocateOptionSrcPos(SECURECONTROL.data());
-		ConfigError("Invalid value for option \"%s\": program was compiled without TLS/SSL-support", SECURECONTROL.data());
-	}
-
-	if (m_certCheck)
-	{
-		LocateOptionSrcPos(CERTCHECK.data());
-		ConfigError("Invalid value for option \"%s\": program was compiled without TLS/SSL-support", CERTCHECK.data());
-	}
+	int disableTls = 1;
+#else
+	int disableTls = 0;
 #endif
-
-#ifndef DISABLE_TLS
-#ifndef HAVE_X509_CHECK_HOST
-	if (m_certCheck)
-	{
-		LocateOptionSrcPos(CERTCHECK.data());
-		ConfigWarn("TLS certificate verification (option \"%s\") is limited because the program "
-			"was compiled with older OpenSSL version not supporting hostname validation (at least OpenSSL 1.0.2d is required)", CERTCHECK.data());
-	}
+#ifdef HAVE_X509_CHECK_HOST
+	int haveX509CheckHost = 1;
+#else
+	int haveX509CheckHost = 0;
 #endif
-#endif
-
-	if (m_certCheck && m_certStore.Empty())
+	int ctChanged = 0;
+	NzbgetRsBuf ctBuf = nzbget_rs_options_check_options(
+		&host, &scalars,
+		m_noDiskAccess ? 1 : 0,
+		sizeof(void*) == 4 ? 1 : 0,
+		disableParcheck, disableCurses, disableTls, haveX509CheckHost,
+		m_certStore.Empty() ? 1 : 0,
+		m_webDir ? *m_webDir : "",
+		m_configTemplate ? *m_configTemplate : nullptr,
+		m_unpackPassFile ? *m_unpackPassFile : nullptr,
+		&ctChanged);
+	if (ctChanged)
 	{
-		LocateOptionSrcPos(CERTCHECK.data());
-		ConfigError("Option \"%s\" requires proper configuration of option \"%s\"", CERTCHECK.data(), CERTSTORE.data());
-		m_certCheck = false;
-	}
-
-	int newDirectWrite = m_directWrite ? 1 : 0;
-	int newDirectRename = m_directRename ? 1 : 0;
-	nzbget_rs_rol_options_reconcile_write_flags(
-		m_rawArticle ? 1 : 0, m_skipWrite ? 1 : 0,
-		newDirectWrite, newDirectRename,
-		&newDirectWrite, &newDirectRename);
-	m_directWrite = newDirectWrite != 0;
-	m_directRename = newDirectRename != 0;
-
-	// if option "ConfigTemplate" is not set, use "WebDir" as default location for template
-	// (for compatibility with versions 9 and 10).
-	if (m_configTemplate.Empty() && !m_noDiskAccess && !m_webDir.Empty())
-	{
-		NzbgetRsBuf ctBuf = nzbget_rs_tpr_options_format_default_conf_path(*m_webDir, PATH_SEPARATOR);
 		m_configTemplate.Set(ctBuf.data ? ctBuf.data : "", (int)ctBuf.len);
-		nzbget_rs_free(ctBuf);
-		if (!FileSystem::FileExists(m_configTemplate))
-		{
-			m_configTemplate = "";
-		}
 	}
-
-	int origArticleCache = m_articleCache;
-	int origParBuffer = m_parBuffer;
-	int memErr = nzbget_rs_options_clamp_32bit_memory_limits(
-		sizeof(void*) == 4 ? 1 : 0, m_articleCache, m_parBuffer,
-		&m_articleCache, &m_parBuffer);
-	if (memErr == 1)
-	{
-		ConfigError("Invalid value for option \"ArticleCache\": %i. Changed to 1900", origArticleCache);
-	}
-	else if (memErr == 2)
-	{
-		ConfigError("Invalid value for option \"ParBuffer\": %i. Changed to 1900", origParBuffer);
-	}
-	else if (memErr == 3)
-	{
-		if (origArticleCache > 1900)
-		{
-			ConfigError("Invalid value for option \"ArticleCache\": %i. Changed to 1900", origArticleCache);
-		}
-		else if (origParBuffer > 1900)
-		{
-			ConfigError("Invalid value for option \"ParBuffer\": %i. Changed to 1900", origParBuffer);
-		}
-		ConfigError("Options \"ArticleCache\" and \"ParBuffer\" in total cannot use more than 1900MB of memory in 32-Bit mode. Changed to 1500 and 400");
-	}
-
-	if (!m_unpackPassFile.Empty() && !FileSystem::FileExists(m_unpackPassFile))
-	{
-		ConfigError("Invalid value for option \"UnpackPassFile\": %s. File not found", *m_unpackPassFile);
-	}
-
-	// Configuration Conflict Reconciliation (R7)
-	// Rule 7.1: ServerX.Encryption=no with ServerX.Cipher configured
-	for (int n = 1; ; n++)
-	{
-		BString<100> encOpt = IndexedOptName("Server", n, "Encryption");
-		BString<100> cipherOpt = IndexedOptName("Server", n, "Cipher");
-		const char* ntls = GetOption(encOpt);
-		const char* ncipher = GetOption(cipherOpt);
-		if (!ntls && !ncipher && !GetOption(IndexedOptName("Server", n, "Host")) && !GetOption(IndexedOptName("Server", n, "Name")))
-		{
-			break;
-		}
-
-		bool tls = false;
-		if (ntls)
-		{
-			tls = (bool)ParseEnumValue(encOpt, BoolCount, BoolNames, BoolValues);
-		}
-
-		if (nzbget_rs_roc_options_server_cipher_without_tls(tls ? 1 : 0, ncipher))
-		{
-			LocateOptionSrcPos(cipherOpt);
-			ConfigWarn("Option %s ('%s') is ignored because %s is disabled for Server%i.",
-				*cipherOpt, ncipher, *encOpt, n);
-			SetOption(cipherOpt, "");
-		}
-	}
-
-	int disableDupeSearch = 0;
-	int enableFlushQueue = 0;
-	int enforceUnpackMutex = 0;
-	nzbget_rs_roc_options_reconcile_conflict_rules(
-		m_dupeSearch ? 1 : 0, (int)m_healthCheck, (int)hcPark,
-		m_flushQueue ? 1 : 0, m_directWrite ? 1 : 0,
-		m_unpackPauseQueue ? 1 : 0, m_directUnpack ? 1 : 0,
-		&disableDupeSearch, &enableFlushQueue, &enforceUnpackMutex);
-
-	if (disableDupeSearch)
-	{
-		LocateOptionSrcPos(DUPESEARCH.data());
-		ConfigWarn("Option 'DupeSearch' automatically disabled: 'HealthCheck' is set to 'park', which suspends failed downloads without triggering duplicate donor resolution.");
-		m_dupeSearch = false;
-		SetOption(DUPESEARCH.data(), "no");
-	}
-
-	if (enableFlushQueue)
-	{
-		LocateOptionSrcPos(FLUSHQUEUE.data());
-		ConfigWarn("Option 'FlushQueue=no' is incompatible with 'DirectWrite=yes'. Automatically enabling 'FlushQueue=yes' to ensure queue crash-recovery and prevent duplicate file corruption.");
-		m_flushQueue = true;
-		SetOption(FLUSHQUEUE.data(), "yes");
-	}
-
-	if (enforceUnpackMutex)
-	{
-		LocateOptionSrcPos(DIRECTUNPACK.data());
-		ConfigWarn("Option 'DirectUnpack=yes' with 'UnpackPauseQueue=no' can cause severe disk thrashing. Unpack concurrency will be serialized across jobs to protect I/O throughput.");
-		m_unpackMutexEnforced = true;
-		SetOption("_UnpackMutexEnforced", "yes");
-	}
+	nzbget_rs_free(ctBuf);
+	ApplyParsedScalars(scalars);
 }
 
 void Options::ConvertOldOptions(OptEntries* optEntries)
@@ -1661,7 +1046,7 @@ void Options::ConvertOldOptions(OptEntries* optEntries)
 	std::vector<const char*> values;
 	names.reserve(optEntries->size());
 	values.reserve(optEntries->size());
-	for (const OptEntry& opt : optEntries)
+	for (const OptEntry& opt : *optEntries)
 	{
 		names.push_back(opt.GetName() ? opt.GetName() : "");
 		values.push_back(opt.GetValue() ? opt.GetValue() : "");
@@ -1683,16 +1068,4 @@ void Options::ConvertOldOptions(OptEntries* optEntries)
 				entries->emplace_back(name, value);
 			}
 		});
-}
-
-bool Options::HasScript(const char* scriptList, const char* scriptName)
-{
-	// rust/src/options.rs
-	return nzbget_rs_has_script(scriptList, scriptName) != 0;
-}
-
-FeedInfo::CategorySource Options::ParseCategorySource(const char* value)
-{
-	// rust/src/options.rs
-	return static_cast<FeedInfo::CategorySource>(nzbget_rs_parse_category_source(value));
 }

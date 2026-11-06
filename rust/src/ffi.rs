@@ -13348,27 +13348,6 @@ pub unsafe extern "C" fn nzbget_rs_rco_webdl_check_body_chunk(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rco_options_find_var_reference(
-    s: *const c_char,
-    out_dollar_pos: *mut usize,
-    out_var_len: *mut usize,
-) -> c_int {
-    if let Some((pos, len)) =
-        crate::options::options_find_var_reference(crate::diskstate_format::cstr_to_bytes(s))
-    {
-        if !out_dollar_pos.is_null() {
-            *out_dollar_pos = pos;
-        }
-        if !out_var_len.is_null() {
-            *out_var_len = len;
-        }
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_rco_options_trim_and_check_config_line(
     line: *mut c_char,
 ) -> c_int {
@@ -13379,27 +13358,6 @@ pub unsafe extern "C" fn nzbget_rs_rco_options_trim_and_check_config_line(
     let (new_len, skip) = crate::options::options_trim_and_check_config_line(bytes);
     *line.add(new_len) = 0;
     if skip { 1 } else { 0 }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rco_options_lookup_scheduler_command(
-    cmd: *const c_char,
-) -> c_int {
-    crate::options::options_lookup_scheduler_command(crate::diskstate_format::cstr_to_bytes(cmd))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rco_options_validate_scheduler_param(
-    task_command: c_int,
-    param: *const c_char,
-    split_cmd_empty: c_int,
-) -> c_int {
-    let opt = if param.is_null() {
-        None
-    } else {
-        Some(crate::diskstate_format::cstr_to_bytes(param))
-    };
-    crate::options::options_validate_scheduler_param(task_command, opt, split_cmd_empty != 0)
 }
 
 #[no_mangle]
@@ -15809,33 +15767,6 @@ pub extern "C" fn nzbget_rs_queue_coord_is_queued_dupe_active(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_options_normalize_time_correction(raw_val: c_int) -> c_int {
-    crate::options::normalize_time_correction(raw_val)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_options_clamp_32bit_memory_limits(
-    is_32bit: c_int,
-    article_cache: c_int,
-    par_buffer: c_int,
-    out_article_cache: *mut c_int,
-    out_par_buffer: *mut c_int,
-) -> c_int {
-    let (ac, pb, err) = crate::options::clamp_32bit_memory_limits(
-        is_32bit != 0,
-        article_cache,
-        par_buffer,
-    );
-    if !out_article_cache.is_null() {
-        *out_article_cache = ac;
-    }
-    if !out_par_buffer.is_null() {
-        *out_par_buffer = pb;
-    }
-    err
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dupesearch_classify_search_retry_reason(
     queries: c_int,
     failed: c_int,
@@ -16995,142 +16926,6 @@ pub unsafe extern "C" fn nzbget_rs_rol_xmlrpc_test_server_response_ok(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rol_options_check_dir_join_mode(
-    dir: *const c_char,
-    parent_dir: *const c_char,
-    path_sep: c_char,
-    alt_path_sep: c_char,
-) -> c_int {
-    crate::options::options_check_dir_join_mode(
-        input(dir),
-        input(parent_dir),
-        path_sep as u8,
-        alt_path_sep as u8,
-    )
-}
-
-#[no_mangle]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn nzbget_rs_rol_options_normalize_dupe_and_mem_options(
-    mem_pressure_interval: c_int,
-    dupe_stream_timeout: c_int,
-    dupe_search_delay: c_int,
-    dupe_search_max_donors: c_int,
-    dupe_health_percent: c_int,
-    dupe_health_min: c_int,
-    dupe_health_max: c_int,
-    dupe_body_checks: c_int,
-    dupe_health_budget: c_int,
-    dupe_min_alive: c_int,
-    dupe_fast_donors: c_int,
-    out_mem_pressure_interval: *mut c_int,
-    out_dupe_stream_timeout: *mut c_int,
-    out_dupe_search_delay: *mut c_int,
-    out_dupe_search_max_donors: *mut c_int,
-    out_dupe_health_percent: *mut c_int,
-    out_dupe_health_min: *mut c_int,
-    out_dupe_health_max: *mut c_int,
-    out_dupe_body_checks: *mut c_int,
-    out_dupe_health_budget: *mut c_int,
-    out_dupe_min_alive: *mut c_int,
-    out_dupe_fast_donors: *mut c_int,
-) {
-    let (v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10) =
-        crate::options::options_normalize_dupe_and_mem_options(
-            mem_pressure_interval,
-            dupe_stream_timeout,
-            dupe_search_delay,
-            dupe_search_max_donors,
-            dupe_health_percent,
-            dupe_health_min,
-            dupe_health_max,
-            dupe_body_checks,
-            dupe_health_budget,
-            dupe_min_alive,
-            dupe_fast_donors,
-        );
-    if !out_mem_pressure_interval.is_null() {
-        *out_mem_pressure_interval = v0;
-    }
-    if !out_dupe_stream_timeout.is_null() {
-        *out_dupe_stream_timeout = v1;
-    }
-    if !out_dupe_search_delay.is_null() {
-        *out_dupe_search_delay = v2;
-    }
-    if !out_dupe_search_max_donors.is_null() {
-        *out_dupe_search_max_donors = v3;
-    }
-    if !out_dupe_health_percent.is_null() {
-        *out_dupe_health_percent = v4;
-    }
-    if !out_dupe_health_min.is_null() {
-        *out_dupe_health_min = v5;
-    }
-    if !out_dupe_health_max.is_null() {
-        *out_dupe_health_max = v6;
-    }
-    if !out_dupe_body_checks.is_null() {
-        *out_dupe_body_checks = v7;
-    }
-    if !out_dupe_health_budget.is_null() {
-        *out_dupe_health_budget = v8;
-    }
-    if !out_dupe_min_alive.is_null() {
-        *out_dupe_min_alive = v9;
-    }
-    if !out_dupe_fast_donors.is_null() {
-        *out_dupe_fast_donors = v10;
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_rol_options_check_server_def(
-    has_any_field: c_int,
-    has_host: c_int,
-    has_port: c_int,
-    has_connections: c_int,
-) -> c_int {
-    crate::options::options_check_server_def(
-        has_any_field != 0,
-        has_host != 0,
-        has_port != 0,
-        has_connections != 0,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_rol_options_check_category_or_feed_def(
-    has_any_field: c_int,
-    has_required: c_int,
-) -> c_int {
-    crate::options::options_check_category_or_feed_def(has_any_field != 0, has_required != 0)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rol_options_reconcile_write_flags(
-    raw_article: c_int,
-    skip_write: c_int,
-    direct_write: c_int,
-    direct_rename: c_int,
-    out_direct_write: *mut c_int,
-    out_direct_rename: *mut c_int,
-) {
-    let (dw, dr) = crate::options::options_reconcile_write_flags(
-        raw_article != 0,
-        skip_write != 0,
-        direct_write != 0,
-        direct_rename != 0,
-    );
-    if !out_direct_write.is_null() {
-        *out_direct_write = i32::from(dw);
-    }
-    if !out_direct_rename.is_null() {
-        *out_direct_rename = i32::from(dr);
-    }
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_rol_log_should_close_idle(
     cur_time: i64,
     last_written: i64,
@@ -17841,43 +17636,6 @@ pub unsafe extern "C" fn nzbget_rs_roc_xmlrpc_test_disk_speed_validate_params(
             timeout_sec,
             out_buffer_bytes,
             out_max_file_bytes,
-        )
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_roc_options_server_cipher_without_tls(
-    tls_enabled: c_int,
-    cipher: *const c_char,
-) -> c_int {
-    unsafe { crate::options::roc_options_server_cipher_without_tls(tls_enabled, cipher) }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_roc_options_reconcile_conflict_rules(
-    dupe_search: c_int,
-    health_check: c_int,
-    hc_park: c_int,
-    flush_queue: c_int,
-    direct_write: c_int,
-    unpack_pause_queue: c_int,
-    direct_unpack: c_int,
-    out_disable_dupe_search: *mut c_int,
-    out_enable_flush_queue: *mut c_int,
-    out_enforce_unpack_mutex: *mut c_int,
-) {
-    unsafe {
-        crate::options::roc_options_reconcile_conflict_rules(
-            dupe_search,
-            health_check,
-            hc_park,
-            flush_queue,
-            direct_write,
-            unpack_pause_queue,
-            direct_unpack,
-            out_disable_dupe_search,
-            out_enable_flush_queue,
-            out_enforce_unpack_mutex,
         )
     }
 }
@@ -18715,67 +18473,6 @@ pub unsafe extern "C" fn nzbget_rs_rco_rpc_save_config_find_cipher_conflict(
     let n_slices: Vec<&[u8]> = n_ptrs.iter().map(|&p| input(p)).collect();
     let v_slices: Vec<&[u8]> = v_ptrs.iter().map(|&p| input(p)).collect();
     crate::xmlrpc_format::rpc_save_config_find_cipher_conflict(&n_slices, &v_slices)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_options_parse_enum_value(
-    val: *const c_char,
-    def_val: *const c_char,
-    argc: c_int,
-    argn: *const *const c_char,
-    argv: *const c_int,
-    out_value: *mut c_int,
-    out_norm_idx: *mut c_int,
-) -> c_int {
-    let count = argc.max(0) as usize;
-    if val.is_null() || def_val.is_null() || argn.is_null() || argv.is_null() || count == 0 {
-        return 0;
-    }
-    let n_ptrs = std::slice::from_raw_parts(argn, count);
-    let n_cstrs: Vec<&CStr> = n_ptrs
-        .iter()
-        .map(|&p| if p.is_null() { c"" } else { CStr::from_ptr(p) })
-        .collect();
-    let v_slice = std::slice::from_raw_parts(argv, count);
-    let (valid, parsed, norm_idx) = crate::options::parse_enum_value(
-        CStr::from_ptr(val),
-        CStr::from_ptr(def_val),
-        &n_cstrs,
-        v_slice,
-    );
-    if !out_value.is_null() {
-        *out_value = parsed;
-    }
-    if !out_norm_idx.is_null() {
-        *out_norm_idx = norm_idx.map(|i| i as c_int).unwrap_or(-1);
-    }
-    if valid {
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_options_parse_int_value(
-    val: *const c_char,
-    def_val: *const c_char,
-    base: c_int,
-    out_value: *mut c_int,
-) -> c_int {
-    if val.is_null() || def_val.is_null() {
-        return 0;
-    }
-    let (valid, parsed) =
-        crate::options::parse_int_value(CStr::from_ptr(val), CStr::from_ptr(def_val), base);
-    if !out_value.is_null() {
-        *out_value = parsed;
-    }
-    if valid {
-        1
-    } else {
-        0
-    }
 }
 
 #[no_mangle]
@@ -20719,62 +20416,6 @@ pub unsafe extern "C" fn nzbget_rs_tpr_ncurses_calc_page_nav(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_options_resolve_scheduler_task_state(
-    has_time: i32,
-    has_weekdays: i32,
-    has_command: i32,
-    has_download_rate: i32,
-    has_param_ptr: i32,
-    param_empty: i32,
-    process_empty: i32,
-    download_rate_empty: i32,
-    out_param_source: *mut i32,
-    out_definition: *mut i32,
-    out_completed: *mut i32,
-) {
-    let (src, def, comp) = crate::options::options_resolve_scheduler_task_state(
-        has_time != 0,
-        has_weekdays != 0,
-        has_command != 0,
-        has_download_rate != 0,
-        has_param_ptr != 0,
-        param_empty != 0,
-        process_empty != 0,
-        download_rate_empty != 0,
-    );
-    if !out_param_source.is_null() {
-        *out_param_source = src;
-    }
-    if !out_definition.is_null() {
-        *out_definition = if def { 1 } else { 0 };
-    }
-    if !out_completed.is_null() {
-        *out_completed = if comp { 1 } else { 0 };
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_options_split_option_string(
-    option: *const c_char,
-    out_name_len: *mut usize,
-    out_value_offset: *mut usize,
-) -> i32 {
-    let s = input(option);
-    match crate::options::options_split_option_string(s) {
-        Some((name, _)) => {
-            if !out_name_len.is_null() {
-                *out_name_len = name.len();
-            }
-            if !out_value_offset.is_null() {
-                *out_value_offset = name.len() + 1;
-            }
-            1
-        }
-        None => 0,
-    }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_tpr_script_resolve_single_arg_executor(
     has_found: i32,
     found_executor: *const c_char,
@@ -21577,49 +21218,6 @@ pub unsafe extern "C" fn nzbget_rs_tpr_options_format_default_conf_path(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_options_strip_trailing_sep(
-    dir: *const c_char,
-    sep: c_char,
-) -> usize {
-    let d = if dir.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(dir).to_bytes()
-    };
-    crate::options::options_strip_trailing_sep(d, sep as u8)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_options_format_joined_dir(
-    parent_dir: *const c_char,
-    sep: c_char,
-    dir: *const c_char,
-    join_mode: i32,
-) -> RsBuf {
-    let pd = if parent_dir.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(parent_dir).to_bytes()
-    };
-    let d = if dir.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(dir).to_bytes()
-    };
-    into_buf(crate::options::options_format_joined_dir(
-        pd,
-        sep as u8,
-        d,
-        join_mode,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_tpr_options_minutes_to_seconds_i32(minutes: i32) -> i32 {
-    crate::options::options_minutes_to_seconds_i32(minutes)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_format_new_path(
     base_path: *const c_char,
 ) -> RsBuf {
@@ -22049,27 +21647,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_log_format_rotated_path(
     };
     into_buf(crate::systemhealth::log_format_rotated_path(
         d, sep as u8, n, year, month, mday, e,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_options_format_indexed_opt_name(
-    prefix: *const c_char,
-    idx: c_int,
-    field: *const c_char,
-) -> RsBuf {
-    let p = if prefix.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(prefix).to_bytes()
-    };
-    let f = if field.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(field).to_bytes()
-    };
-    into_buf(crate::options::options_format_indexed_opt_name(
-        p, idx, f,
     ))
 }
 
@@ -22737,22 +22314,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_slice_eq_ignore_case(
         std::slice::from_raw_parts(b as *const u8, b_len)
     };
     i32::from(crate::util::bytes_eq_ignore_case(sa, sb))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_options_should_check_single_script_dir(
-    no_disk_access: c_int,
-    value: *const c_char,
-) -> c_int {
-    let v = if value.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(value).to_bytes()
-    };
-    i32::from(crate::options::options_should_check_single_script_dir(
-        no_disk_access != 0,
-        v,
-    ))
 }
 
 #[no_mangle]
@@ -23568,24 +23129,11 @@ pub extern "C" fn nzbget_rs_dqh_maintenance_has_update_info(len: c_int) -> c_int
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_options_resolve_locate_src_line(
-    found: c_int,
-    line_no: c_int,
-) -> c_int {
-    crate::options::options_resolve_locate_src_line(found != 0, line_no)
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_options_update_config_line_on_get(
     line_no: c_int,
     cur_config_line: c_int,
 ) -> c_int {
     crate::options::options_update_config_line_on_get(line_no, cur_config_line)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_options_is_every_hour_task(hours: c_int) -> c_int {
-    i32::from(crate::options::options_is_every_hour_task(hours))
 }
 
 #[no_mangle]
@@ -33452,6 +33000,688 @@ pub unsafe extern "C" fn nzbget_rs_char_buffer_clear(
 ) {
     crate::nstring::char_buffer_clear_raw(m_data, m_size);
 }
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NzbgetRsOptionsHost {
+    pub ctx: *mut c_void,
+    pub find_entry: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            *const c_char,
+            *mut *const c_char,
+            *mut *const c_char,
+            *mut c_int,
+        ) -> c_int,
+    >,
+    pub set_entry_raw_value:
+        Option<unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char)>,
+    pub set_option: Option<unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char)>,
+    pub set_config_line: Option<unsafe extern "C" fn(*mut c_void, c_int)>,
+    pub get_config_line: Option<unsafe extern "C" fn(*mut c_void) -> c_int>,
+    pub config_error: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+    pub config_warn: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+    pub file_exists: Option<unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int>,
+    pub ensure_directory:
+        Option<unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_char, usize) -> c_int>,
+    pub add_news_server: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            c_int,
+            c_int,
+            *const c_char,
+            *const c_char,
+            c_int,
+            c_int,
+            *const c_char,
+            *const c_char,
+            c_int,
+            c_int,
+            *const c_char,
+            c_int,
+            c_int,
+            c_int,
+            c_int,
+            c_int,
+            u32,
+        ),
+    >,
+    pub add_feed: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            c_int,
+            *const c_char,
+            *const c_char,
+            c_int,
+            *const c_char,
+            c_int,
+            c_int,
+            *const c_char,
+            c_int,
+            c_int,
+            *const c_char,
+            u32,
+        ),
+    >,
+    pub add_task: Option<
+        unsafe extern "C" fn(*mut c_void, c_int, c_int, c_int, c_int, c_int, *const c_char),
+    >,
+    pub add_category: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            *const c_char,
+            *const c_char,
+            c_int,
+            *const c_char,
+            *const *const c_char,
+            usize,
+        ),
+    >,
+}
+
+struct FfiOptionsHost<'a>(&'a NzbgetRsOptionsHost);
+
+impl crate::options::OptionsHost for FfiOptionsHost<'_> {
+    fn find_entry(
+        &mut self,
+        name: &CStr,
+    ) -> Option<(
+        Option<std::ffi::CString>,
+        Option<std::ffi::CString>,
+        i32,
+    )> {
+        let cb = self.0.find_entry?;
+        let mut val_ptr: *const c_char = std::ptr::null();
+        let mut def_ptr: *const c_char = std::ptr::null();
+        let mut line_no: c_int = 0;
+        let found = unsafe {
+            cb(
+                self.0.ctx,
+                name.as_ptr(),
+                &mut val_ptr,
+                &mut def_ptr,
+                &mut line_no,
+            )
+        };
+        if found == 0 {
+            return None;
+        }
+        let val = if val_ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { CStr::from_ptr(val_ptr) }.to_owned())
+        };
+        let def = if def_ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { CStr::from_ptr(def_ptr) }.to_owned())
+        };
+        Some((val, def, line_no))
+    }
+
+    fn set_entry_raw_value(&mut self, name: &CStr, value: &CStr) {
+        if let Some(cb) = self.0.set_entry_raw_value {
+            unsafe { cb(self.0.ctx, name.as_ptr(), value.as_ptr()) };
+        }
+    }
+
+    fn set_option(&mut self, name: &CStr, value: &CStr) {
+        if let Some(cb) = self.0.set_option {
+            unsafe { cb(self.0.ctx, name.as_ptr(), value.as_ptr()) };
+        }
+    }
+
+    fn set_config_line(&mut self, line: i32) {
+        if let Some(cb) = self.0.set_config_line {
+            unsafe { cb(self.0.ctx, line) };
+        }
+    }
+
+    fn get_config_line(&self) -> i32 {
+        match self.0.get_config_line {
+            Some(cb) => unsafe { cb(self.0.ctx) },
+            None => 0,
+        }
+    }
+
+    fn config_error(&mut self, msg: &CStr) {
+        if let Some(cb) = self.0.config_error {
+            unsafe { cb(self.0.ctx, msg.as_ptr()) };
+        }
+    }
+
+    fn config_warn(&mut self, msg: &CStr) {
+        if let Some(cb) = self.0.config_warn {
+            unsafe { cb(self.0.ctx, msg.as_ptr()) };
+        }
+    }
+
+    fn file_exists(&self, path: &CStr) -> bool {
+        match self.0.file_exists {
+            Some(cb) => unsafe { cb(self.0.ctx, path.as_ptr()) != 0 },
+            None => false,
+        }
+    }
+
+    fn ensure_directory(&mut self, dir: &CStr) -> Result<(), std::ffi::CString> {
+        let Some(cb) = self.0.ensure_directory else {
+            return Ok(());
+        };
+        let mut err_buf = [0 as c_char; 1024];
+        let ok = unsafe { cb(self.0.ctx, dir.as_ptr(), err_buf.as_mut_ptr(), err_buf.len()) };
+        if ok != 0 {
+            Ok(())
+        } else {
+            err_buf[err_buf.len() - 1] = 0;
+            let err_cstr = unsafe { CStr::from_ptr(err_buf.as_ptr()) };
+            Err(err_cstr.to_owned())
+        }
+    }
+
+    fn add_news_server(
+        &mut self,
+        id: i32,
+        active: bool,
+        name: Option<&CStr>,
+        host: Option<&CStr>,
+        port: i32,
+        ip_version: i32,
+        user: Option<&CStr>,
+        pass: Option<&CStr>,
+        join_group: bool,
+        tls: bool,
+        cipher: Option<&CStr>,
+        max_connections: i32,
+        retention: i32,
+        level: i32,
+        group: i32,
+        optional: bool,
+        cert_verif_level: u32,
+    ) {
+        if let Some(cb) = self.0.add_news_server {
+            unsafe {
+                cb(
+                    self.0.ctx,
+                    id,
+                    c_int::from(active),
+                    name.map_or(std::ptr::null(), CStr::as_ptr),
+                    host.map_or(std::ptr::null(), CStr::as_ptr),
+                    port,
+                    ip_version,
+                    user.map_or(std::ptr::null(), CStr::as_ptr),
+                    pass.map_or(std::ptr::null(), CStr::as_ptr),
+                    c_int::from(join_group),
+                    c_int::from(tls),
+                    cipher.map_or(std::ptr::null(), CStr::as_ptr),
+                    max_connections,
+                    retention,
+                    level,
+                    group,
+                    c_int::from(optional),
+                    cert_verif_level,
+                )
+            };
+        }
+    }
+
+    fn add_feed(
+        &mut self,
+        id: i32,
+        name: Option<&CStr>,
+        url: Option<&CStr>,
+        interval: i32,
+        filter: Option<&CStr>,
+        backlog: bool,
+        pause_nzb: bool,
+        category: Option<&CStr>,
+        category_source: i32,
+        priority: i32,
+        extensions: Option<&CStr>,
+        cert_verif_level: u32,
+    ) {
+        if let Some(cb) = self.0.add_feed {
+            unsafe {
+                cb(
+                    self.0.ctx,
+                    id,
+                    name.map_or(std::ptr::null(), CStr::as_ptr),
+                    url.map_or(std::ptr::null(), CStr::as_ptr),
+                    interval,
+                    filter.map_or(std::ptr::null(), CStr::as_ptr),
+                    c_int::from(backlog),
+                    c_int::from(pause_nzb),
+                    category.map_or(std::ptr::null(), CStr::as_ptr),
+                    category_source,
+                    priority,
+                    extensions.map_or(std::ptr::null(), CStr::as_ptr),
+                    cert_verif_level,
+                )
+            };
+        }
+    }
+
+    fn add_task(
+        &mut self,
+        id: i32,
+        hours: i32,
+        minutes: i32,
+        week_days_bits: i32,
+        command: i32,
+        param: Option<&CStr>,
+    ) {
+        if let Some(cb) = self.0.add_task {
+            unsafe {
+                cb(
+                    self.0.ctx,
+                    id,
+                    hours,
+                    minutes,
+                    week_days_bits,
+                    command,
+                    param.map_or(std::ptr::null(), CStr::as_ptr),
+                )
+            };
+        }
+    }
+
+    fn add_category(
+        &mut self,
+        name: &CStr,
+        dest_dir: Option<&CStr>,
+        unpack: bool,
+        extensions: Option<&CStr>,
+        aliases: &[std::ffi::CString],
+    ) {
+        if let Some(cb) = self.0.add_category {
+            let ptrs: Vec<*const c_char> = aliases.iter().map(|a| a.as_ptr()).collect();
+            unsafe {
+                cb(
+                    self.0.ctx,
+                    name.as_ptr(),
+                    dest_dir.map_or(std::ptr::null(), CStr::as_ptr),
+                    c_int::from(unpack),
+                    extensions.map_or(std::ptr::null(), CStr::as_ptr),
+                    ptrs.as_ptr(),
+                    ptrs.len(),
+                )
+            };
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_options_init_defaults(
+    disable_curses: c_int,
+    set_opt: Option<unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char)>,
+    ctx: *mut c_void,
+) {
+    let Some(cb) = set_opt else { return };
+    crate::options::init_defaults_with(disable_curses != 0, |name, val| {
+        cb(ctx, name.as_ptr(), val.as_ptr());
+    });
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_options_expand_variables(
+    initial_value: *const c_char,
+    get_opt: Option<unsafe extern "C" fn(*mut c_void, *const c_char) -> *const c_char>,
+    ctx: *mut c_void,
+) -> RsBuf {
+    let init_slice = input(initial_value);
+    let expanded = crate::options::expand_option_variables(init_slice, |var_name| {
+        let cb = get_opt?;
+        let ptr = cb(ctx, var_name.as_ptr());
+        if ptr.is_null() {
+            None
+        } else {
+            Some(CStr::from_ptr(ptr).to_bytes().to_vec())
+        }
+    });
+    into_buf(expanded)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_options_split_and_convert(
+    option: *const c_char,
+    out_name: *mut RsBuf,
+    out_value: *mut RsBuf,
+) -> c_int {
+    if option.is_null() {
+        return 0;
+    }
+    let Some((name, val)) =
+        crate::options::split_and_convert_option_string(CStr::from_ptr(option))
+    else {
+        return 0;
+    };
+    if !out_name.is_null() {
+        *out_name = into_buf(name.into_bytes());
+    }
+    if !out_value.is_null() {
+        *out_value = into_buf(val.into_bytes());
+    }
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_options_resolve_tool_path(
+    value: *const c_char,
+    len: usize,
+) -> RsBuf {
+    let slice = if value.is_null() || len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(value.cast::<u8>(), len)
+    };
+    into_buf(crate::options::resolve_tool_path_option(slice))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_options_category_alias_list_matches(
+    aliases: *const *const c_char,
+    aliases_len: usize,
+    name: *const c_char,
+    signed_char: c_int,
+) -> c_int {
+    if aliases.is_null() || aliases_len == 0 || name.is_null() {
+        return 0;
+    }
+    let slice_ptrs = std::slice::from_raw_parts(aliases, aliases_len);
+    let alias_slices: Vec<&[u8]> = slice_ptrs.iter().map(|&p| input(p)).collect();
+    c_int::from(crate::options::category_alias_list_matches(
+        &alias_slices,
+        input(name),
+        signed_char != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_options_check_dir(
+    host: *const NzbgetRsOptionsHost,
+    no_disk_access: c_int,
+    option_name: *const c_char,
+    parent_dir: *const c_char,
+    allow_empty: c_int,
+    create: c_int,
+    out_has_dir: *mut c_int,
+) -> RsBuf {
+    if host.is_null() || option_name.is_null() {
+        if !out_has_dir.is_null() {
+            *out_has_dir = 0;
+        }
+        return into_buf(Vec::new());
+    }
+    let mut adapter = FfiOptionsHost(&*host);
+    let parent_opt = if parent_dir.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(parent_dir))
+    };
+    match crate::options::check_dir_host(
+        &mut adapter,
+        no_disk_access != 0,
+        CStr::from_ptr(option_name),
+        parent_opt,
+        allow_empty != 0,
+        create != 0,
+    ) {
+        Some(dir) => {
+            if !out_has_dir.is_null() {
+                *out_has_dir = 1;
+            }
+            into_buf(dir.into_bytes())
+        }
+        None => {
+            if !out_has_dir.is_null() {
+                *out_has_dir = 0;
+            }
+            into_buf(Vec::new())
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_options_check_script_dir(
+    host: *const NzbgetRsOptionsHost,
+    no_disk_access: c_int,
+    main_dir: *const c_char,
+    out_has_dir: *mut c_int,
+) -> RsBuf {
+    if host.is_null() {
+        if !out_has_dir.is_null() {
+            *out_has_dir = 0;
+        }
+        return into_buf(Vec::new());
+    }
+    let mut adapter = FfiOptionsHost(&*host);
+    let main_opt = if main_dir.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(main_dir))
+    };
+    match crate::options::check_script_dir_host(&mut adapter, no_disk_access != 0, main_opt) {
+        Some(dir) => {
+            if !out_has_dir.is_null() {
+                *out_has_dir = 1;
+            }
+            into_buf(dir.into_bytes())
+        }
+        None => {
+            if !out_has_dir.is_null() {
+                *out_has_dir = 0;
+            }
+            into_buf(Vec::new())
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_options_init_scalars(
+    host: *const NzbgetRsOptionsHost,
+    out_scalars: *mut crate::options::NzbgetRsParsedOptions,
+    out_has_mem_path: *mut c_int,
+    out_mem_path: *mut RsBuf,
+    out_has_hl_ext: *mut c_int,
+    out_hl_ext: *mut RsBuf,
+    out_has_dupe_url: *mut c_int,
+    out_dupe_url: *mut RsBuf,
+    out_has_dupe_key: *mut c_int,
+    out_dupe_key: *mut RsBuf,
+    out_warn_dupe_no_url: *mut c_int,
+) {
+    if host.is_null() || out_scalars.is_null() {
+        return;
+    }
+    let mut adapter = FfiOptionsHost(&*host);
+    let mut mem_path = None;
+    let mut hl_ext = None;
+    let mut dupe_url = None;
+    let mut dupe_key = None;
+    let mut warn_no_url = false;
+    let scalars = crate::options::init_scalar_options_host(
+        &mut adapter,
+        &mut mem_path,
+        &mut hl_ext,
+        &mut dupe_url,
+        &mut dupe_key,
+        &mut warn_no_url,
+    );
+    *out_scalars = scalars;
+    if !out_warn_dupe_no_url.is_null() {
+        *out_warn_dupe_no_url = c_int::from(warn_no_url);
+    }
+    let write_opt_buf = |opt: Option<std::ffi::CString>, has: *mut c_int, buf: *mut RsBuf| {
+        if let Some(c) = opt {
+            if !has.is_null() {
+                *has = 1;
+            }
+            if !buf.is_null() {
+                *buf = into_buf(c.into_bytes());
+            }
+        } else {
+            if !has.is_null() {
+                *has = 0;
+            }
+            if !buf.is_null() {
+                *buf = into_buf(Vec::new());
+            }
+        }
+    };
+    write_opt_buf(mem_path, out_has_mem_path, out_mem_path);
+    write_opt_buf(hl_ext, out_has_hl_ext, out_hl_ext);
+    write_opt_buf(dupe_url, out_has_dupe_url, out_dupe_url);
+    write_opt_buf(dupe_key, out_has_dupe_key, out_dupe_key);
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn nzbget_rs_options_check_options(
+    host: *const NzbgetRsOptionsHost,
+    scalars: *mut crate::options::NzbgetRsParsedOptions,
+    no_disk_access: c_int,
+    is_32bit: c_int,
+    disable_parcheck: c_int,
+    disable_curses: c_int,
+    disable_tls: c_int,
+    have_x509_check_host: c_int,
+    cert_store_empty: c_int,
+    web_dir: *const c_char,
+    config_template: *const c_char,
+    unpack_pass_file: *const c_char,
+    out_ct_changed: *mut c_int,
+) -> RsBuf {
+    if host.is_null() || scalars.is_null() {
+        if !out_ct_changed.is_null() {
+            *out_ct_changed = 0;
+        }
+        return into_buf(Vec::new());
+    }
+    let mut adapter = FfiOptionsHost(&*host);
+    let mut ct_opt = if config_template.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(config_template).to_owned())
+    };
+    let orig_ct = ct_opt.clone();
+    let upf_opt = if unpack_pass_file.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(unpack_pass_file))
+    };
+    crate::options::check_options_host(
+        &mut adapter,
+        &mut *scalars,
+        no_disk_access != 0,
+        is_32bit != 0,
+        disable_parcheck != 0,
+        disable_curses != 0,
+        disable_tls != 0,
+        have_x509_check_host != 0,
+        cert_store_empty != 0,
+        input(web_dir),
+        &mut ct_opt,
+        upf_opt,
+    );
+    if ct_opt != orig_ct {
+        if !out_ct_changed.is_null() {
+            *out_ct_changed = 1;
+        }
+        into_buf(ct_opt.unwrap_or_default().into_bytes())
+    } else {
+        if !out_ct_changed.is_null() {
+            *out_ct_changed = 0;
+        }
+        into_buf(Vec::new())
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_options_init_servers(
+    host: *const NzbgetRsOptionsHost,
+    disable_tls: c_int,
+    scalars: *mut crate::options::NzbgetRsParsedOptions,
+) {
+    if host.is_null() || scalars.is_null() {
+        return;
+    }
+    let mut adapter = FfiOptionsHost(&*host);
+    crate::options::init_servers_host(&mut adapter, disable_tls != 0, &mut *scalars);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_options_init_categories(
+    host: *const NzbgetRsOptionsHost,
+    no_disk_access: c_int,
+    dest_dir: *const c_char,
+) {
+    if host.is_null() {
+        return;
+    }
+    let mut adapter = FfiOptionsHost(&*host);
+    let dd_opt = if dest_dir.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(dest_dir))
+    };
+    crate::options::init_categories_host(&mut adapter, no_disk_access != 0, dd_opt);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_options_init_feeds(host: *const NzbgetRsOptionsHost) {
+    if host.is_null() {
+        return;
+    }
+    let mut adapter = FfiOptionsHost(&*host);
+    crate::options::init_feeds_host(&mut adapter);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_options_init_scheduler(host: *const NzbgetRsOptionsHost) {
+    if host.is_null() {
+        return;
+    }
+    let mut adapter = FfiOptionsHost(&*host);
+    crate::options::init_scheduler_host(&mut adapter);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_options_create_scheduler_task(
+    host: *const NzbgetRsOptionsHost,
+    id: c_int,
+    time: *const c_char,
+    week_days: *const c_char,
+    command: c_int,
+    param: *const c_char,
+) {
+    if host.is_null() {
+        return;
+    }
+    let mut adapter = FfiOptionsHost(&*host);
+    let time_opt = if time.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(time))
+    };
+    let wd_opt = if week_days.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(week_days))
+    };
+    let param_opt = if param.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(param))
+    };
+    crate::options::create_scheduler_task_host(
+        &mut adapter,
+        id,
+        time_opt,
+        wd_opt,
+        command,
+        param_opt,
+    );
+}
+
 
 
 

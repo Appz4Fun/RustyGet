@@ -797,9 +797,9 @@ private:
 	void InitFeeds();
 	void InitCommandLineOptions(CmdOptList* commandLineOptions);
 	void CheckOptions();
-	int ParseEnumValue(const char* OptName, int argc, const char* argn[], const int argv[]);
-	int ParseIntValue(const char* OptName, int base);
-	FeedInfo::CategorySource ParseCategorySource(const char* value);
+	NzbgetRsOptionsHost MakeHost();
+	NzbgetRsParsedOptions ExportParsedScalars() const;
+	void ApplyParsedScalars(const NzbgetRsParsedOptions& s);
 	OptEntry* FindOption(const char* optname);
 	void SetOption(const char* optname, const char* value);
 	void SetToolPathOption(fs::path& pathOpt, std::string_view value);
@@ -808,13 +808,8 @@ private:
 	void LoadConfigFile();
 	void CheckDir(CString& dir, const char* optionName, const char* parentDir,
 		bool allowEmpty, bool create);
-	bool ParseTime(const char* time, int* hours, int* minutes);
-	bool ParseWeekDays(const char* weekDays, int* weekDaysBits);
 	void ConfigError(const char* msg, ...);
 	void ConfigWarn(const char* msg, ...);
-	void LocateOptionSrcPos(const char *optionName);
-	static void ConvertOldOption(CString& option, CString& value);
-	static bool HasScript(const char* scriptList, const char* scriptName);
 };
 
 extern Options* g_Options;

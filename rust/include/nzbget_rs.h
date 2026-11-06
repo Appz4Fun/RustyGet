@@ -2169,12 +2169,7 @@ int nzbget_rs_rco_webdl_resolve_protocol_port(
 int nzbget_rs_rco_webdl_check_body_chunk(
     int chunk_len, int content_len, int written_len, int gzip, int confirmed_length);
 
-int nzbget_rs_rco_options_find_var_reference(
-    const char* s, size_t* out_dollar_pos, size_t* out_var_len);
 int nzbget_rs_rco_options_trim_and_check_config_line(char* line);
-int nzbget_rs_rco_options_lookup_scheduler_command(const char* cmd);
-int nzbget_rs_rco_options_validate_scheduler_param(
-    int task_command, const char* param, int split_cmd_empty);
 
 int nzbget_rs_rco_log_should_rotate(
     int64_t rawtime, int64_t last_written, int write_log_mode);
@@ -2494,11 +2489,6 @@ int nzbget_rs_queue_coord_is_queued_dupe_active(
     int extra_priority, int self_completed_empty, int direct_unpack_status,
     int ns_running);
 
-int nzbget_rs_options_normalize_time_correction(int raw_val);
-int nzbget_rs_options_clamp_32bit_memory_limits(
-    int is_32bit, int article_cache, int par_buffer,
-    int* out_article_cache, int* out_par_buffer);
-
 int nzbget_rs_dupesearch_classify_search_retry_reason(
     int queries, int failed, int verified_empty, int fetched_empty,
     int refused, int fetch_err, int not_tried);
@@ -2678,26 +2668,6 @@ int nzbget_rs_rol_xmlrpc_view_feed_should_include(
 int nzbget_rs_rol_xmlrpc_test_server_effective_timeout(
     int param_timeout, int article_timeout);
 int nzbget_rs_rol_xmlrpc_test_server_response_ok(const char* response);
-int nzbget_rs_rol_options_check_dir_join_mode(
-    const char* dir, const char* parent_dir, char path_sep, char alt_path_sep);
-void nzbget_rs_rol_options_normalize_dupe_and_mem_options(
-    int mem_pressure_interval, int dupe_stream_timeout, int dupe_search_delay,
-    int dupe_search_max_donors, int dupe_health_percent, int dupe_health_min,
-    int dupe_health_max, int dupe_body_checks, int dupe_health_budget,
-    int dupe_min_alive, int dupe_fast_donors,
-    int* out_mem_pressure_interval, int* out_dupe_stream_timeout,
-    int* out_dupe_search_delay, int* out_dupe_search_max_donors,
-    int* out_dupe_health_percent, int* out_dupe_health_min,
-    int* out_dupe_health_max, int* out_dupe_body_checks,
-    int* out_dupe_health_budget, int* out_dupe_min_alive,
-    int* out_dupe_fast_donors);
-int nzbget_rs_rol_options_check_server_def(
-    int has_any_field, int has_host, int has_port, int has_connections);
-int nzbget_rs_rol_options_check_category_or_feed_def(
-    int has_any_field, int has_required);
-void nzbget_rs_rol_options_reconcile_write_flags(
-    int raw_article, int skip_write, int direct_write, int direct_rename,
-    int* out_direct_write, int* out_direct_rename);
 int nzbget_rs_rol_log_should_close_idle(int64_t cur_time, int64_t last_written);
 int nzbget_rs_rol_log_should_delete_old_rotated(
     int file_day, int cur_day, int rotate_log);
@@ -2825,14 +2795,6 @@ int nzbget_rs_roc_xmlrpc_test_server_speed_check_server(
 int nzbget_rs_roc_xmlrpc_test_disk_speed_validate_params(
     int write_buffer_kib, int max_file_size_gib, int timeout_sec,
     size_t* out_buffer_bytes, uint64_t* out_max_file_bytes);
-int nzbget_rs_roc_options_server_cipher_without_tls(
-    int tls_enabled, const char* cipher);
-void nzbget_rs_roc_options_reconcile_conflict_rules(
-    int dupe_search, int health_check, int hc_park,
-    int flush_queue, int direct_write,
-    int unpack_pause_queue, int direct_unpack,
-    int* out_disable_dupe_search, int* out_enable_flush_queue,
-    int* out_enforce_unpack_mutex);
 int nzbget_rs_roc_nzbget_boot_is_direct_client_mode(
     int test_backtrace, int web_get, int sig_verify,
     int client_op, int op_no_operation, int print_options);
@@ -3528,13 +3490,6 @@ NzbgetRsBuf nzbget_rs_xmlrpc_format_network_speed(
 int nzbget_rs_rco_rpc_save_config_find_cipher_conflict(
     const char* const* names, const char* const* values, size_t len);
 
-int nzbget_rs_options_parse_enum_value(
-    const char* val, const char* def_val, int argc,
-    const char* const* argn, const int* argv,
-    int* out_value, int* out_norm_idx);
-int nzbget_rs_options_parse_int_value(
-    const char* val, const char* def_val, int base, int* out_value);
-
 uint32_t nzbget_rs_dupe_watch_build_item_flags(
     int kind, int in_history, int dupe_success, int deleting,
     int delete_status, int has_post_info, int dupe_mode,
@@ -3880,13 +3835,6 @@ int32_t nzbget_rs_tpr_ncurses_calc_page_nav(
     int32_t is_page_down, int32_t selected, int32_t queue_size,
     int32_t scroll_offset, int32_t win_height,
     int32_t* out_scroll_offset, int32_t* out_entry);
-void nzbget_rs_tpr_options_resolve_scheduler_task_state(
-    int32_t has_time, int32_t has_weekdays, int32_t has_command,
-    int32_t has_download_rate, int32_t has_param_ptr,
-    int32_t param_empty, int32_t process_empty, int32_t download_rate_empty,
-    int32_t* out_param_source, int32_t* out_definition, int32_t* out_completed);
-int32_t nzbget_rs_tpr_options_split_option_string(
-    const char* option, size_t* out_name_len, size_t* out_value_offset);
 void nzbget_rs_tpr_script_resolve_single_arg_executor(
     int32_t has_found, const char* found_executor, const char* arg0,
     int32_t* out_use_found, int32_t* out_prepend_arg);
@@ -3982,10 +3930,6 @@ NzbgetRsBuf nzbget_rs_tpr_article_writer_format_tmp_path(const char* base_path);
 size_t nzbget_rs_tpr_article_cache_mb_to_bytes(int32_t mb);
 size_t nzbget_rs_tpr_server_volume_required_day_len(int32_t day_slot, size_t current_len);
 NzbgetRsBuf nzbget_rs_tpr_options_format_default_conf_path(const char* dir, char sep);
-size_t nzbget_rs_tpr_options_strip_trailing_sep(const char* dir, char sep);
-NzbgetRsBuf nzbget_rs_tpr_options_format_joined_dir(
-    const char* parent_dir, char sep, const char* dir, int32_t join_mode);
-int32_t nzbget_rs_tpr_options_minutes_to_seconds_i32(int32_t minutes);
 NzbgetRsBuf nzbget_rs_dqh_diskstate_format_new_path(const char* base_path);
 const char* nzbget_rs_dqh_diskstate_legacy_suffix_str(int32_t suffix_kind);
 NzbgetRsBuf nzbget_rs_dqh_diskstate_format_unreadable_path(const char* filename, int64_t now);
@@ -4032,8 +3976,6 @@ NzbgetRsBuf nzbget_rs_dqh_log_format_deleting_old_msg(const char* filename);
 NzbgetRsBuf nzbget_rs_dqh_log_format_rotated_path(
     const char* directory, char sep, const char* base_name,
     int32_t year, int32_t month, int32_t mday, const char* base_ext);
-NzbgetRsBuf nzbget_rs_dqh_options_format_indexed_opt_name(
-    const char* prefix, int32_t idx, const char* field);
 NzbgetRsBuf nzbget_rs_dqh_nzbget_format_pid_line(int32_t pid);
 NzbgetRsBuf nzbget_rs_dqh_ncurses_format_plot_line(
     const char* text, int32_t screen_width, int32_t pos, int32_t max_screen_width);
@@ -4134,8 +4076,6 @@ int nzbget_rs_dqh_util_classify_executor_ext(
     const char* filename, size_t filename_len, size_t* out_dot_idx);
 int nzbget_rs_dqh_slice_eq_ignore_case(
     const char* a, size_t a_len, const char* b, size_t b_len);
-int nzbget_rs_dqh_options_should_check_single_script_dir(
-    int no_disk_access, const char* value);
 void nzbget_rs_dqh_webserver_encode_hex_token(
     const uint8_t* bytes, size_t bytes_len, char* out_token, size_t out_cap);
 NzbgetRsBuf nzbget_rs_dqh_script_format_prefixed_message(
@@ -4231,9 +4171,7 @@ int nzbget_rs_dqh_disk_service_eval_missing_required_dir(
     int file_exists, int dir_exists, int was_waiting_reported, int cur_waiting_reported,
     int* out_should_log_waiting, int* out_next_waiting_reported);
 int nzbget_rs_dqh_maintenance_has_update_info(int len);
-int nzbget_rs_dqh_options_resolve_locate_src_line(int found, int line_no);
 int nzbget_rs_dqh_options_update_config_line_on_get(int line_no, int cur_config_line);
-int nzbget_rs_dqh_options_is_every_hour_task(int hours);
 int nzbget_rs_dqh_nzbget_should_run_system_health_check(
     int server_mode, int system_health_check);
 int nzbget_rs_dqh_nzbget_classify_boot_usage_or_error(
@@ -5739,6 +5677,185 @@ void nzbget_rs_string_builder_append_fmt(
     void* ctx, int (*fmt_cb)(void*, char*, size_t));
 void nzbget_rs_char_buffer_reserve(char** m_data, int* m_size, int size);
 void nzbget_rs_char_buffer_clear(char** m_data, int* m_size);
+
+typedef struct NzbgetRsParsedOptions {
+    int32_t download_rate;
+    int32_t article_timeout;
+    int32_t article_read_chunk_size;
+    int32_t url_timeout;
+    int32_t remote_timeout;
+    int32_t article_retries;
+    int32_t article_interval;
+    int32_t url_retries;
+    int32_t url_interval;
+    int32_t control_port;
+    int32_t secure_port;
+    int32_t url_connections;
+    int32_t log_buffer;
+    int32_t rotate_log;
+    int32_t umask;
+    int32_t update_interval;
+    int32_t write_buffer;
+    int32_t nzb_dir_interval;
+    int32_t nzb_dir_file_age;
+    int32_t nzb_dir_archive_scan;
+    int32_t nzb_dir_archive_action;
+    int32_t disk_space;
+    int32_t par_time_limit;
+    int32_t keep_history;
+    int32_t feed_history;
+    int32_t time_correction;
+    int32_t propagation_delay;
+    int32_t article_cache;
+    int32_t memory_pressure_interval;
+    int32_t event_interval;
+    int32_t par_buffer;
+    int32_t par_threads;
+    int32_t monthly_quota;
+    int32_t quota_start_day;
+    int32_t daily_quota;
+    int32_t system_health_check;
+    int32_t nzb_log;
+    int32_t append_category_dir;
+    int32_t continue_partial;
+    int32_t flush_queue;
+    int32_t dupe_check;
+    int32_t par_repair;
+    int32_t par_quick;
+    int32_t par_rename;
+    int32_t rar_rename;
+    int32_t direct_rename;
+    int32_t hard_linking;
+    int32_t curses_nzb_name;
+    int32_t curses_time;
+    int32_t curses_group;
+    int32_t crc_check;
+    int32_t direct_write;
+    int32_t raw_article;
+    int32_t skip_write;
+    int32_t crash_trace;
+    int32_t crash_dump;
+    int32_t par_pause_queue;
+    int32_t script_pause_queue;
+    int32_t nzb_cleanup_disk;
+    int32_t form_auth;
+    int32_t json_p;
+    int32_t secure_control;
+    int32_t unpack;
+    int32_t direct_unpack;
+    int32_t use_temp_unpack_dir;
+    int32_t unpack_cleanup_disk;
+    int32_t unpack_pause_queue;
+    int32_t unpack_mutex_enforced;
+    int32_t url_force;
+    int32_t cert_check;
+    int32_t reorder_files;
+    int32_t post_download_rename;
+    int32_t rename_after_unpack;
+    int32_t output_mode;
+    int32_t par_check;
+    int32_t par_scan;
+    int32_t dupe_article_fallback;
+    int32_t dupe_stream_decompress;
+    int32_t dupe_stream_timeout;
+    int32_t dupe_search;
+    int32_t dupe_search_dry_run;
+    int32_t dupe_search_delay;
+    int32_t dupe_search_max_donors;
+    int32_t dupe_health_percent;
+    int32_t dupe_health_min;
+    int32_t dupe_health_max;
+    int32_t dupe_body_checks;
+    int32_t dupe_health_budget;
+    int32_t dupe_min_alive;
+    int32_t dupe_fast_donors;
+    int32_t post_strategy;
+    int32_t file_naming;
+    int32_t health_check;
+    int32_t info_target;
+    int32_t warning_target;
+    int32_t error_target;
+    int32_t debug_target;
+    int32_t detail_target;
+    int32_t write_log;
+    int32_t tls;
+} NzbgetRsParsedOptions;
+
+typedef struct NzbgetRsOptionsHost {
+    void* ctx;
+    int (*find_entry)(
+        void* ctx, const char* name,
+        const char** out_val, const char** out_def_val, int* out_line_no);
+    void (*set_entry_raw_value)(void* ctx, const char* name, const char* value);
+    void (*set_option)(void* ctx, const char* name, const char* value);
+    void (*set_config_line)(void* ctx, int line);
+    int (*get_config_line)(void* ctx);
+    void (*config_error)(void* ctx, const char* msg);
+    void (*config_warn)(void* ctx, const char* msg);
+    int (*file_exists)(void* ctx, const char* path);
+    int (*ensure_directory)(void* ctx, const char* dir, char* err_buf, size_t err_cap);
+    void (*add_news_server)(
+        void* ctx, int id, int active, const char* name, const char* host,
+        int port, int ip_version, const char* user, const char* pass,
+        int join_group, int tls, const char* cipher, int max_connections,
+        int retention, int level, int group, int optional, uint32_t cert_verif_level);
+    void (*add_feed)(
+        void* ctx, int id, const char* name, const char* url, int interval,
+        const char* filter, int backlog, int pause_nzb, const char* category,
+        int category_source, int priority, const char* extensions, uint32_t cert_verif_level);
+    void (*add_task)(
+        void* ctx, int id, int hours, int minutes, int week_days_bits,
+        int command, const char* param);
+    void (*add_category)(
+        void* ctx, const char* name, const char* dest_dir, int unpack,
+        const char* extensions, const char* const* aliases, size_t aliases_len);
+} NzbgetRsOptionsHost;
+
+void nzbget_rs_options_init_defaults(
+    int disable_curses,
+    void (*set_opt)(void* ctx, const char* name, const char* value),
+    void* ctx);
+NzbgetRsBuf nzbget_rs_options_expand_variables(
+    const char* initial_value,
+    const char* (*get_opt)(void* ctx, const char* name),
+    void* ctx);
+int nzbget_rs_options_split_and_convert(
+    const char* option, NzbgetRsBuf* out_name, NzbgetRsBuf* out_value);
+NzbgetRsBuf nzbget_rs_options_resolve_tool_path(const char* value, size_t len);
+int nzbget_rs_options_category_alias_list_matches(
+    const char* const* aliases, size_t aliases_len, const char* name, int signed_char);
+NzbgetRsBuf nzbget_rs_options_check_dir(
+    const NzbgetRsOptionsHost* host, int no_disk_access,
+    const char* option_name, const char* parent_dir,
+    int allow_empty, int create, int* out_has_dir);
+NzbgetRsBuf nzbget_rs_options_check_script_dir(
+    const NzbgetRsOptionsHost* host, int no_disk_access,
+    const char* main_dir, int* out_has_dir);
+void nzbget_rs_options_init_scalars(
+    const NzbgetRsOptionsHost* host,
+    NzbgetRsParsedOptions* out_scalars,
+    int* out_has_mem_path, NzbgetRsBuf* out_mem_path,
+    int* out_has_hl_ext, NzbgetRsBuf* out_hl_ext,
+    int* out_has_dupe_url, NzbgetRsBuf* out_dupe_url,
+    int* out_has_dupe_key, NzbgetRsBuf* out_dupe_key,
+    int* out_warn_dupe_no_url);
+NzbgetRsBuf nzbget_rs_options_check_options(
+    const NzbgetRsOptionsHost* host,
+    NzbgetRsParsedOptions* scalars,
+    int no_disk_access, int is_32bit,
+    int disable_parcheck, int disable_curses, int disable_tls,
+    int have_x509_check_host, int cert_store_empty,
+    const char* web_dir, const char* config_template, const char* unpack_pass_file,
+    int* out_ct_changed);
+void nzbget_rs_options_init_servers(
+    const NzbgetRsOptionsHost* host, int disable_tls, NzbgetRsParsedOptions* scalars);
+void nzbget_rs_options_init_categories(
+    const NzbgetRsOptionsHost* host, int no_disk_access, const char* dest_dir);
+void nzbget_rs_options_init_feeds(const NzbgetRsOptionsHost* host);
+void nzbget_rs_options_init_scheduler(const NzbgetRsOptionsHost* host);
+void nzbget_rs_options_create_scheduler_task(
+    const NzbgetRsOptionsHost* host, int id, const char* time,
+    const char* week_days, int command, const char* param);
 
 #include "nzbget_tls_cipher.h"
 

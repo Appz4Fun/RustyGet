@@ -1164,3 +1164,572 @@ pub fn conn_classify_accept_errno(
     }
 }
 
+// ============================================================================
+// ArticleBatchFetcher (`daemon/nntp/ArticleFetcher.cpp`)
+// ============================================================================
+
+pub const ARTICLE_BATCH_MAX_WINDOW_PARTS: i32 = 8;
+pub const ARTICLE_BATCH_MAX_BUFFERED_BYTES: i64 = 128 * 1024 * 1024;
+
+#[derive(Clone, Debug, Default)]
+pub struct BatchRequest {
+    pub message_id: Vec<u8>,
+    pub groups: std::sync::Arc<Vec<Vec<u8>>>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BatchFetchedArticle {
+    pub data: Vec<u8>,
+    pub offset: i64,
+    pub file_size: i64,
+    pub success: bool,
+    pub retry: bool,
+    pub transient: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+struct BatchSlot {
+    result: BatchFetchedArticle,
+    ready: bool,
+}
+
+#[derive(Default)]
+struct BatchInner {
+    requests: Vec<BatchRequest>,
+    slots: Vec<BatchSlot>,
+    next_claim: usize,
+    next_deliver: usize,
+    buffered_bytes: i64,
+    batch_id: i32,
+    cancelled: bool,
+    worker_count: i32,
+}
+
+impl BatchInner {
+    fn window_parts(&self) -> i32 {
+        self.worker_count
+            .saturating_mul(2)
+            .max(ARTICLE_BATCH_MAX_WINDOW_PARTS)
+    }
+
+    fn claim_next(&mut self, batch_id: i32, stopped: bool) -> Option<(usize, BatchRequest)> {
+        if !article_batch_can_claim_next(
+            batch_id,
+            self.batch_id,
+            self.cancelled,
+            stopped,
+            self.next_claim,
+            self.requests.len(),
+            self.next_deliver,
+            self.window_parts(),
+            self.buffered_bytes,
+            ARTICLE_BATCH_MAX_BUFFERED_BYTES,
+        ) {
+            return None;
+        }
+        let index = self.next_claim;
+        self.next_claim += 1;
+        let req = std::mem::take(&mut self.requests[index]);
+        Some((index, req))
+    }
+
+    fn store_result(&mut self, batch_id: i32, index: usize, result: BatchFetchedArticle) {
+        if !article_batch_can_store_result(batch_id, self.batch_id, self.cancelled) {
+            return;
+        }
+        if index < self.slots.len() {
+            self.buffered_bytes += result.data.len() as i64;
+            self.slots[index].result = result;
+            self.slots[index].ready = true;
+        }
+    }
+}
+
+pub type BatchFetchFn =
+    dyn Fn(usize, &BatchRequest) -> Result<BatchFetchedArticle, String> + Send + Sync;
+
+pub struct ArticleBatchFetcher {
+    inner: std::sync::Arc<std::sync::Mutex<BatchInner>>,
+    stopped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    workers: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>,
+    fetch_fn: std::sync::Arc<BatchFetchFn>,
+    stop_hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl ArticleBatchFetcher {
+    pub fn new(
+        fetch_fn: impl Fn(usize, &BatchRequest) -> Result<BatchFetchedArticle, String>
+            + Send
+            + Sync
+            + 'static,
+        stop_hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    ) -> Self {
+        Self {
+            inner: std::sync::Arc::new(std::sync::Mutex::new(BatchInner::default())),
+            stopped: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            workers: std::sync::Mutex::new(Vec::new()),
+            fetch_fn: std::sync::Arc::new(fetch_fn),
+            stop_hook,
+        }
+    }
+
+    pub fn set_worker_count(&self, worker_count: i32) {
+        let mut guard = self.inner.lock().unwrap();
+        guard.worker_count = worker_count;
+    }
+
+    pub fn get_window_parts(&self) -> i32 {
+        let guard = self.inner.lock().unwrap();
+        guard.window_parts()
+    }
+
+    fn ensure_workers(&self, target_count: i32) {
+        use std::sync::atomic::Ordering;
+        let mut workers = self.workers.lock().unwrap();
+        while (workers.len() as i32) < target_count {
+            let worker_idx = workers.len();
+            let inner = std::sync::Arc::clone(&self.inner);
+            let stopped = std::sync::Arc::clone(&self.stopped);
+            let fetch_fn = std::sync::Arc::clone(&self.fetch_fn);
+            let handle = std::thread::spawn(move || {
+                while !stopped.load(Ordering::SeqCst) {
+                    let batch_id = inner.lock().unwrap().batch_id;
+                    let claimed = inner
+                        .lock()
+                        .unwrap()
+                        .claim_next(batch_id, stopped.load(Ordering::SeqCst));
+                    if let Some((index, req)) = claimed {
+                        let fetched = (fetch_fn)(worker_idx, &req).unwrap_or_default();
+                        inner.lock().unwrap().store_result(batch_id, index, fetched);
+                    } else {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                }
+            });
+            workers.push(handle);
+        }
+    }
+
+    pub fn begin(&self, requests: Vec<BatchRequest>) {
+        use std::sync::atomic::Ordering;
+        let worker_count = {
+            let mut guard = self.inner.lock().unwrap();
+            guard.batch_id = guard.batch_id.wrapping_add(1);
+            guard.slots = vec![BatchSlot::default(); requests.len()];
+            guard.requests = requests;
+            guard.next_claim = 0;
+            guard.next_deliver = 0;
+            guard.buffered_bytes = 0;
+            guard.cancelled = false;
+            guard.worker_count
+        };
+        if article_batch_should_ensure_workers(worker_count, self.stopped.load(Ordering::SeqCst)) {
+            self.ensure_workers(worker_count);
+        }
+    }
+
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&self) -> Option<BatchFetchedArticle> {
+        use std::sync::atomic::Ordering;
+        let (index, worker_count) = {
+            let guard = self.inner.lock().unwrap();
+            if !article_batch_can_deliver_next(
+                guard.cancelled,
+                self.stopped.load(Ordering::SeqCst),
+                guard.next_deliver,
+                guard.requests.len(),
+            ) {
+                return None;
+            }
+            (guard.next_deliver, guard.worker_count)
+        };
+
+        if worker_count == 0 {
+            let req = {
+                let guard = self.inner.lock().unwrap();
+                guard.requests[index].clone()
+            };
+            let result = (self.fetch_fn)(usize::MAX, &req).unwrap_or_default();
+            let mut guard = self.inner.lock().unwrap();
+            guard.next_deliver += 1;
+            if self.stopped.load(Ordering::SeqCst) {
+                return None;
+            }
+            return Some(result);
+        }
+
+        while !self.stopped.load(Ordering::SeqCst) {
+            {
+                let mut guard = self.inner.lock().unwrap();
+                if guard.cancelled {
+                    return None;
+                }
+                if guard.slots[index].ready {
+                    let result = std::mem::take(&mut guard.slots[index].result);
+                    guard.slots[index].ready = false;
+                    guard.buffered_bytes -= result.data.len() as i64;
+                    guard.next_deliver += 1;
+                    return Some(result);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        None
+    }
+
+    pub fn cancel_remaining(&self) {
+        let mut guard = self.inner.lock().unwrap();
+        guard.cancelled = true;
+        guard.buffered_bytes = 0;
+    }
+
+    pub fn stop(&self) {
+        use std::sync::atomic::Ordering;
+        self.stopped.store(true, Ordering::SeqCst);
+        if let Some(ref hook) = self.stop_hook {
+            hook();
+        }
+    }
+}
+
+impl Drop for ArticleBatchFetcher {
+    fn drop(&mut self) {
+        self.stop();
+        let mut workers = self.workers.lock().unwrap();
+        for worker in workers.drain(..) {
+            let _ = worker.join();
+        }
+    }
+}
+
+#[cfg(test)]
+mod article_fetcher_tests {
+    use super::*;
+    use crate::dupefallback::{
+        article_fetch_add_decoded_bytes, article_fetch_add_raw_bytes,
+        article_fetch_header_within_limit, ARTICLE_FETCH_MAX_DECODED_BYTES,
+        ARTICLE_FETCH_MAX_HEADER_BYTES, ARTICLE_FETCH_MAX_RAW_BYTES,
+    };
+    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    fn make_result(tag: u8, size: usize) -> BatchFetchedArticle {
+        BatchFetchedArticle {
+            data: vec![tag; size],
+            offset: 0,
+            file_size: size as i64,
+            success: true,
+            retry: false,
+            transient: false,
+        }
+    }
+
+    #[test]
+    fn article_fetch_limits_suite_port_from_cpp() {
+        // 1. ArticleFetchLimitsRejectUnboundedHeader
+        let mut raw = 0i64;
+        assert!(article_fetch_add_raw_bytes(&mut raw, ARTICLE_FETCH_MAX_HEADER_BYTES));
+        assert!(article_fetch_header_within_limit(raw, false));
+        assert!(article_fetch_add_raw_bytes(&mut raw, 1));
+        assert!(!article_fetch_header_within_limit(raw, false));
+        assert!(article_fetch_header_within_limit(raw, true));
+
+        // 2. ArticleFetchLimitsRejectUnboundedWireBody
+        let mut raw = 0i64;
+        assert!(article_fetch_add_raw_bytes(&mut raw, ARTICLE_FETCH_MAX_RAW_BYTES));
+        assert!(!article_fetch_add_raw_bytes(&mut raw, 1));
+
+        // 3. ArticleFetchLimitsEnforceDeclaredDecodedRange
+        let mut dec = 0i64;
+        assert!(!article_fetch_add_decoded_bytes(&mut dec, 1, 0, 10, 100));
+        assert!(!article_fetch_add_decoded_bytes(&mut dec, 1, 11, 10, 100));
+        assert!(!article_fetch_add_decoded_bytes(&mut dec, 1, 91, 101, 100));
+        assert!(article_fetch_add_decoded_bytes(&mut dec, 4, 11, 20, 100));
+        assert!(article_fetch_add_decoded_bytes(&mut dec, 6, 11, 20, 100));
+        assert!(!article_fetch_add_decoded_bytes(&mut dec, 1, 11, 20, 100));
+
+        // 4. ArticleFetchLimitsEnforceHardDecodedCap
+        let mut dec = 0i64;
+        let too_large_end = ARTICLE_FETCH_MAX_DECODED_BYTES + 1;
+        assert!(!article_fetch_add_decoded_bytes(
+            &mut dec,
+            1,
+            1,
+            too_large_end,
+            too_large_end
+        ));
+        assert!(article_fetch_add_decoded_bytes(
+            &mut dec,
+            ARTICLE_FETCH_MAX_DECODED_BYTES,
+            1,
+            ARTICLE_FETCH_MAX_DECODED_BYTES,
+            ARTICLE_FETCH_MAX_DECODED_BYTES
+        ));
+        assert!(!article_fetch_add_decoded_bytes(
+            &mut dec,
+            1,
+            1,
+            ARTICLE_FETCH_MAX_DECODED_BYTES,
+            ARTICLE_FETCH_MAX_DECODED_BYTES
+        ));
+    }
+
+    #[test]
+    fn article_batch_fetcher_suite_port_from_cpp() {
+        let no_groups = Arc::new(Vec::<Vec<u8>>::new());
+
+        // 5. ArticleBatchFetcherDeliversInSubmissionOrder
+        {
+            let batch = ArticleBatchFetcher::new(
+                |_, req| {
+                    let index: usize = std::str::from_utf8(&req.message_id)
+                        .unwrap()
+                        .parse()
+                        .unwrap();
+                    std::thread::sleep(Duration::from_millis((40 - index * 10) as u64));
+                    Ok(make_result(b'a' + (index as u8), 4))
+                },
+                None,
+            );
+            batch.set_worker_count(3);
+            let requests = (0..4)
+                .map(|i| BatchRequest {
+                    message_id: format!("{i}").into_bytes(),
+                    groups: Arc::clone(&no_groups),
+                })
+                .collect();
+            batch.begin(requests);
+            for i in 0..4u8 {
+                let fetched = batch.next().unwrap();
+                assert_eq!(fetched.data[0], b'a' + i);
+            }
+            assert!(batch.next().is_none());
+        }
+
+        // 6. ArticleBatchFetcherHonorsWindowBound
+        for workers in [3, ARTICLE_BATCH_MAX_WINDOW_PARTS * 2] {
+            let window = ARTICLE_BATCH_MAX_WINDOW_PARTS.max(workers * 2);
+            let started = Arc::new(AtomicI32::new(0));
+            let started_cb = Arc::clone(&started);
+            let batch = ArticleBatchFetcher::new(
+                move |_, _| {
+                    started_cb.fetch_add(1, Ordering::SeqCst);
+                    Ok(make_result(b'w', 4))
+                },
+                None,
+            );
+            batch.set_worker_count(workers);
+            assert_eq!(batch.get_window_parts(), window);
+            let requests = (0..(window * 3))
+                .map(|_| BatchRequest {
+                    message_id: b"m".to_vec(),
+                    groups: Arc::clone(&no_groups),
+                })
+                .collect();
+            batch.begin(requests);
+            std::thread::sleep(Duration::from_millis(120));
+            assert_eq!(started.load(Ordering::SeqCst), window);
+            let mut delivered = 0;
+            while batch.next().is_some() {
+                delivered += 1;
+            }
+            assert_eq!(delivered, window * 3);
+        }
+
+        // 7. ArticleBatchFetcherByteCapThrottlesClaims
+        {
+            let started = Arc::new(AtomicI32::new(0));
+            let started_cb = Arc::clone(&started);
+            let batch = ArticleBatchFetcher::new(
+                move |_, _| {
+                    started_cb.fetch_add(1, Ordering::SeqCst);
+                    Ok(make_result(
+                        b'b',
+                        (ARTICLE_BATCH_MAX_BUFFERED_BYTES as usize) + 1,
+                    ))
+                },
+                None,
+            );
+            batch.set_worker_count(1);
+            let requests = (0..3)
+                .map(|_| BatchRequest {
+                    message_id: b"m".to_vec(),
+                    groups: Arc::clone(&no_groups),
+                })
+                .collect();
+            batch.begin(requests);
+            std::thread::sleep(Duration::from_millis(150));
+            assert_eq!(started.load(Ordering::SeqCst), 1);
+            assert!(batch.next().is_some());
+            std::thread::sleep(Duration::from_millis(150));
+            assert_eq!(started.load(Ordering::SeqCst), 2);
+            batch.cancel_remaining();
+        }
+
+        // 8. ArticleBatchFetcherCancelStopsClaims
+        {
+            let started = Arc::new(AtomicI32::new(0));
+            let started_cb = Arc::clone(&started);
+            let batch = ArticleBatchFetcher::new(
+                move |_, _| {
+                    started_cb.fetch_add(1, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(40));
+                    Ok(make_result(b'c', 4))
+                },
+                None,
+            );
+            batch.set_worker_count(2);
+            let requests = (0..20)
+                .map(|_| BatchRequest {
+                    message_id: b"m".to_vec(),
+                    groups: Arc::clone(&no_groups),
+                })
+                .collect();
+            batch.begin(requests);
+            assert!(batch.next().is_some());
+            batch.cancel_remaining();
+            let claimed_at_cancel = started.load(Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(started.load(Ordering::SeqCst) <= claimed_at_cancel + 2);
+            assert!(batch.next().is_none());
+        }
+
+        // 9. ArticleBatchFetcherInlineModeFetchesOnCallerThread
+        {
+            let calls = Arc::new(AtomicI32::new(0));
+            let calls_cb = Arc::clone(&calls);
+            let batch = ArticleBatchFetcher::new(
+                move |_, req| {
+                    calls_cb.fetch_add(1, Ordering::SeqCst);
+                    let idx: u8 = std::str::from_utf8(&req.message_id)
+                        .unwrap()
+                        .parse()
+                        .unwrap();
+                    Ok(make_result(b'a' + idx, 4))
+                },
+                None,
+            );
+            batch.set_worker_count(0);
+            let requests = (0..3)
+                .map(|i| BatchRequest {
+                    message_id: format!("{i}").into_bytes(),
+                    groups: Arc::clone(&no_groups),
+                })
+                .collect();
+            batch.begin(requests);
+            let f0 = batch.next().unwrap();
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(f0.data[0], b'a');
+            let f1 = batch.next().unwrap();
+            assert_eq!(f1.data[0], b'b');
+            assert!(batch.next().is_some());
+            assert!(batch.next().is_none());
+            assert_eq!(calls.load(Ordering::SeqCst), 3);
+        }
+
+        // 10. ArticleBatchFetcherThrowingFetchDeliversFailedResult
+        {
+            let batch = ArticleBatchFetcher::new(
+                |_, req| {
+                    let idx: u8 = std::str::from_utf8(&req.message_id)
+                        .unwrap()
+                        .parse()
+                        .unwrap();
+                    if idx == 1 {
+                        return Err("simulated fetch failure".to_string());
+                    }
+                    Ok(make_result(b'a' + idx, 4))
+                },
+                None,
+            );
+            batch.set_worker_count(2);
+            let requests = (0..4)
+                .map(|i| BatchRequest {
+                    message_id: format!("{i}").into_bytes(),
+                    groups: Arc::clone(&no_groups),
+                })
+                .collect();
+            batch.begin(requests);
+            for i in 0..4u8 {
+                let fetched = batch.next().unwrap();
+                if i == 1 {
+                    assert!(!fetched.success);
+                } else {
+                    assert!(fetched.success);
+                    assert_eq!(fetched.data[0], b'a' + i);
+                }
+            }
+            assert!(batch.next().is_none());
+        }
+
+        // 11. ArticleBatchFetcherStopUnblocksConsumer
+        {
+            let release = Arc::new(AtomicBool::new(false));
+            let release_cb = Arc::clone(&release);
+            let stop_hook_called = Arc::new(AtomicBool::new(false));
+            let stop_hook_cb = Arc::clone(&stop_hook_called);
+            let batch = Arc::new(ArticleBatchFetcher::new(
+                move |_, _| {
+                    while !release_cb.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Ok(make_result(b's', 4))
+                },
+                Some(Arc::new(move || {
+                    stop_hook_cb.store(true, Ordering::SeqCst);
+                })),
+            ));
+            batch.set_worker_count(1);
+            let requests = (0..2)
+                .map(|_| BatchRequest {
+                    message_id: b"m".to_vec(),
+                    groups: Arc::clone(&no_groups),
+                })
+                .collect();
+            batch.begin(requests);
+            let batch_for_stop = Arc::clone(&batch);
+            let stopper = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                batch_for_stop.stop();
+            });
+            assert!(batch.next().is_none());
+            assert!(stop_hook_called.load(Ordering::SeqCst));
+            release.store(true, Ordering::SeqCst);
+            stopper.join().unwrap();
+        }
+
+        // 12. ArticleBatchFetcherRequestsOwnTheirGroups
+        {
+            let release = Arc::new(AtomicBool::new(false));
+            let release_cb = Arc::clone(&release);
+            let groups_intact = Arc::new(AtomicBool::new(false));
+            let groups_cb = Arc::clone(&groups_intact);
+            let batch = ArticleBatchFetcher::new(
+                move |_, req| {
+                    while !release_cb.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    let ok = req.groups.len() == 1
+                        && req.groups[0].as_slice() == b"alt.binaries.ownership";
+                    groups_cb.store(ok, Ordering::SeqCst);
+                    Ok(make_result(b'g', 4))
+                },
+                None,
+            );
+            batch.set_worker_count(1);
+            let source_groups = Arc::new(vec![b"alt.binaries.ownership".to_vec()]);
+            let requests = vec![BatchRequest {
+                message_id: b"m".to_vec(),
+                groups: Arc::clone(&source_groups),
+            }];
+            batch.begin(requests);
+            drop(source_groups);
+            release.store(true, Ordering::SeqCst);
+            assert!(batch.next().is_some());
+            assert!(groups_intact.load(Ordering::SeqCst));
+            assert!(batch.next().is_none());
+        }
+    }
+}
+

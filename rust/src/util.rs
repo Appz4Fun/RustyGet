@@ -16,6 +16,17 @@ extern "C" {
     fn isdigit(c: c_int) -> c_int;
     fn tolower(c: c_int) -> c_int;
     fn atoi(s: *const c_char) -> c_int;
+    fn strtod(nptr: *const c_char, endptr: *mut *mut c_char) -> f64;
+    fn strtoll(
+        nptr: *const c_char,
+        endptr: *mut *mut c_char,
+        base: c_int,
+    ) -> std::ffi::c_longlong;
+    fn strtoull(
+        nptr: *const c_char,
+        endptr: *mut *mut c_char,
+        base: c_int,
+    ) -> std::ffi::c_ulonglong;
     fn strncasecmp(a: *const c_char, b: *const c_char, n: usize) -> c_int;
     fn strcasecmp(a: *const c_char, b: *const c_char) -> c_int;
 }
@@ -1101,6 +1112,462 @@ pub fn fs_is_copied_file_valid(
     close_ok && loop_ok && copied_bytes == src_size
 }
 
+// ============================================================================
+// DiskBenchmark (`daemon/util/Benchmark.cpp`)
+// ============================================================================
+
+pub const BENCHMARK_DEFAULT_BLOCK_SIZE: usize = 1024 * 1024;
+pub const BENCHMARK_MAX_BLOCK_SIZE: usize = 512 * 1024 * 1024;
+pub const BENCHMARK_FREE_SPACE_RESERVE: u64 = 100 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct DiskBenchmarkResult {
+    pub write_bytes: u64,
+    pub write_ms: f64,
+    pub read_bytes: u64,
+    pub read_ms: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiskBenchmarkError {
+    InvalidArgument(String),
+    Runtime(String),
+}
+
+struct TestFileRemover {
+    path: std::path::PathBuf,
+}
+
+impl Drop for TestFileRemover {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Port of `Benchmark::DiskBenchmark::Run`.
+pub fn disk_benchmark_run(
+    dir: &str,
+    block_size_bytes: usize,
+    max_file_size_bytes: u64,
+    timeout: std::time::Duration,
+    available_space: Result<u64, String>,
+) -> Result<DiskBenchmarkResult, DiskBenchmarkError> {
+    disk_benchmark_run_bytes(
+        dir.as_bytes(),
+        block_size_bytes,
+        max_file_size_bytes,
+        timeout,
+        available_space,
+    )
+}
+
+/// Port of `Benchmark::DiskBenchmark::Run` accepting raw OS path bytes.
+pub fn disk_benchmark_run_bytes(
+    dir_bytes: &[u8],
+    block_size_bytes: usize,
+    max_file_size_bytes: u64,
+    timeout: std::time::Duration,
+    available_space: Result<u64, String>,
+) -> Result<DiskBenchmarkResult, DiskBenchmarkError> {
+    use std::io::{BufReader, BufWriter, Read, Write};
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+    if block_size_bytes > BENCHMARK_MAX_BLOCK_SIZE {
+        return Err(DiskBenchmarkError::InvalidArgument(
+            "The buffer size is too big".to_string(),
+        ));
+    }
+    let block_size = if block_size_bytes == 0 {
+        BENCHMARK_DEFAULT_BLOCK_SIZE
+    } else {
+        block_size_bytes
+    };
+
+    #[cfg(unix)]
+    let dir_path = {
+        use std::os::unix::ffi::OsStrExt;
+        std::path::Path::new(std::ffi::OsStr::from_bytes(dir_bytes)).to_path_buf()
+    };
+    #[cfg(not(unix))]
+    let dir_path = std::path::PathBuf::from(String::from_utf8_lossy(dir_bytes).into_owned());
+
+    let dir_display = String::from_utf8_lossy(dir_bytes);
+    if !dir_path.is_dir() {
+        return Err(DiskBenchmarkError::Runtime(format!(
+            "Directory does not exist: {dir_display}"
+        )));
+    }
+
+    let available = available_space.map_err(|msg| {
+        DiskBenchmarkError::Runtime(format!(
+            "Could not determine free disk space for {dir_display}: {msg}"
+        ))
+    })?;
+    if available < BENCHMARK_FREE_SPACE_RESERVE.saturating_add(block_size as u64) {
+        return Err(DiskBenchmarkError::Runtime(
+            "Not enough free disk space for the test".to_string(),
+        ));
+    }
+    let max_bytes =
+        benchmark_limit_by_free_space(max_file_size_bytes, available, BENCHMARK_FREE_SPACE_RESERVE);
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let unique_name = format!("nzbget_bench_{nanos}.tmp");
+    let file_path = dir_path.join(unique_name);
+
+    let mut buffer = vec![0u8; block_size];
+    let mut seed = (nanos as u64) ^ 0x9e37_79b9_7f4a_7c15;
+    for b in &mut buffer {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        *b = seed as u8;
+    }
+
+    let _remover = TestFileRemover {
+        path: file_path.clone(),
+    };
+    let mut result = DiskBenchmarkResult::default();
+
+    {
+        let file = std::fs::File::create(&file_path).map_err(|_| {
+            DiskBenchmarkError::Runtime("Failed to create test file".to_string())
+        })?;
+        let mut writer = BufWriter::new(file);
+        let start = Instant::now();
+        while result.write_bytes < max_bytes && start.elapsed() < timeout {
+            let bytes_to_write =
+                benchmark_calc_write_chunk(block_size, max_bytes, result.write_bytes);
+            writer.write_all(&buffer[..bytes_to_write]).map_err(|_| {
+                DiskBenchmarkError::Runtime("Failed to write data to the test file".to_string())
+            })?;
+            result.write_bytes += bytes_to_write as u64;
+        }
+        writer.flush().map_err(|_| {
+            DiskBenchmarkError::Runtime("Failed to write data to the test file".to_string())
+        })?;
+        drop(writer);
+        result.write_ms = start.elapsed().as_secs_f64() * 1000.0;
+    }
+
+    {
+        let file = std::fs::File::open(&file_path).map_err(|_| {
+            DiskBenchmarkError::Runtime("Failed to open test file for reading".to_string())
+        })?;
+        let mut reader = BufReader::new(file);
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            let mut got = 0usize;
+            while got < block_size {
+                match reader.read(&mut buffer[got..block_size]) {
+                    Ok(0) => break,
+                    Ok(n) => got += n,
+                    Err(_) => break,
+                }
+            }
+            result.read_bytes += got as u64;
+            if got < block_size {
+                break;
+            }
+        }
+        result.read_ms = start.elapsed().as_secs_f64() * 1000.0;
+    }
+
+    std::fs::remove_file(&file_path).map_err(|e| {
+        DiskBenchmarkError::Runtime(format!(
+            "Failed to delete test file {}: {}",
+            file_path.display(),
+            e
+        ))
+    })?;
+
+    Ok(result)
+}
+
+// ============================================================================
+// Util::IsControlChar, Util::StrToNum, Util::SafeIntCast, and RegEx (`Util.h`/`Util.cpp`)
+// ============================================================================
+
+/// Port of `Util::IsControlChar(char c)`.
+pub const fn util_is_control_char(c: u8) -> bool {
+    c < 32 || c == 127
+}
+
+fn c_terminated(s: &[u8]) -> Vec<c_char> {
+    let end = s.iter().position(|&b| b == 0).unwrap_or(s.len());
+    let mut out = Vec::with_capacity(end + 1);
+    out.extend(s[..end].iter().map(|&b| b as c_char));
+    out.push(0);
+    out
+}
+
+/// Port of `Util::StrToNum<T>` for floating-point types.
+pub fn util_str_to_f64_checked(s: &[u8], min_val: f64, max_val: f64) -> Option<f64> {
+    let cbuf = c_terminated(s);
+    let start = cbuf.as_ptr();
+    let mut end: *mut c_char = std::ptr::null_mut();
+    let val = unsafe { strtod(start, &mut end) };
+    if end.cast_const() == start || val < min_val || val > max_val || val.is_nan() {
+        None
+    } else {
+        Some(val)
+    }
+}
+
+/// Port of `Util::StrToNum<T>` for signed integral types.
+pub fn util_str_to_i64_checked(s: &[u8], min_val: i64, max_val: i64) -> Option<i64> {
+    let cbuf = c_terminated(s);
+    let start = cbuf.as_ptr();
+    let mut end: *mut c_char = std::ptr::null_mut();
+    let val = unsafe { strtoll(start, &mut end, 10) } as i64;
+    if end.cast_const() == start || val < min_val || val > max_val {
+        None
+    } else {
+        Some(val)
+    }
+}
+
+/// Port of `Util::StrToNum<T>` for unsigned integral types.
+pub fn util_str_to_u64_checked(s: &[u8], max_val: u64) -> Option<u64> {
+    let cbuf = c_terminated(s);
+    let start = cbuf.as_ptr();
+    let mut end: *mut c_char = std::ptr::null_mut();
+    let val = unsafe { strtoull(start, &mut end, 10) } as u64;
+    if end.cast_const() == start || val > max_val {
+        None
+    } else {
+        Some(val)
+    }
+}
+
+pub trait StrToNumTarget: Sized {
+    fn parse_str_to_num(s: &[u8]) -> Option<Self>;
+}
+
+impl StrToNumTarget for f32 {
+    fn parse_str_to_num(s: &[u8]) -> Option<Self> {
+        util_str_to_f64_checked(s, f32::MIN as f64, f32::MAX as f64).map(|v| v as f32)
+    }
+}
+
+impl StrToNumTarget for f64 {
+    fn parse_str_to_num(s: &[u8]) -> Option<Self> {
+        util_str_to_f64_checked(s, f64::MIN, f64::MAX)
+    }
+}
+
+macro_rules! impl_str_to_signed {
+    ($($t:ty),*) => {
+        $(impl StrToNumTarget for $t {
+            fn parse_str_to_num(s: &[u8]) -> Option<Self> {
+                util_str_to_i64_checked(s, <$t>::MIN as i64, <$t>::MAX as i64).map(|v| v as $t)
+            }
+        })*
+    };
+}
+
+macro_rules! impl_str_to_unsigned {
+    ($($t:ty),*) => {
+        $(impl StrToNumTarget for $t {
+            fn parse_str_to_num(s: &[u8]) -> Option<Self> {
+                util_str_to_u64_checked(s, <$t>::MAX as u64).map(|v| v as $t)
+            }
+        })*
+    };
+}
+
+impl_str_to_signed!(i8, i16, i32, i64);
+impl_str_to_unsigned!(u8, u16, u32, u64);
+
+pub fn util_str_to_num<T: StrToNumTarget>(s: &str) -> Option<T> {
+    T::parse_str_to_num(s.as_bytes())
+}
+
+/// Port of `Util::SafeIntCast<From, To>` for signed -> signed.
+pub const fn util_safe_int_cast_i64_to_i64(num: i64, min_to: i64, max_to: i64) -> i64 {
+    if num < min_to || num > max_to {
+        0
+    } else {
+        num
+    }
+}
+
+/// Port of `Util::SafeIntCast<From, To>` for unsigned -> signed.
+pub const fn util_safe_int_cast_u64_to_i64(num: u64, max_to: u64) -> i64 {
+    if num > max_to {
+        0
+    } else {
+        num as i64
+    }
+}
+
+/// Port of `Util::SafeIntCast<From, To>` for signed -> unsigned.
+pub const fn util_safe_int_cast_i64_to_u64(num: i64, max_to: u64) -> u64 {
+    if num < 0 || (num as u64) > max_to {
+        0
+    } else {
+        num as u64
+    }
+}
+
+/// Port of `Util::SafeIntCast<From, To>` for unsigned -> unsigned.
+pub const fn util_safe_int_cast_u64_to_u64(num: u64, max_to: u64) -> u64 {
+    if num > max_to {
+        0
+    } else {
+        num
+    }
+}
+
+/// State & match-buffer manager for `RegEx` (`daemon/util/Util.cpp`).
+pub struct PosixRegEx {
+    valid: bool,
+    match_buf_size: usize,
+    matches: Vec<(i32, i32)>,
+    #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+    raw_ctx: Option<Box<[u64; 16]>>,
+}
+
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct RawRegMatch {
+    #[cfg(target_os = "macos")]
+    rm_so: i64,
+    #[cfg(target_os = "macos")]
+    rm_eo: i64,
+    #[cfg(not(target_os = "macos"))]
+    rm_so: c_int,
+    #[cfg(not(target_os = "macos"))]
+    rm_eo: c_int,
+}
+
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+extern "C" {
+    fn regcomp(preg: *mut u64, pattern: *const c_char, cflags: c_int) -> c_int;
+    fn regexec(
+        preg: *const u64,
+        string: *const c_char,
+        nmatch: usize,
+        pmatch: *mut RawRegMatch,
+        eflags: c_int,
+    ) -> c_int;
+    fn regfree(preg: *mut u64);
+}
+
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+impl Drop for PosixRegEx {
+    fn drop(&mut self) {
+        if let Some(ref mut ctx) = self.raw_ctx {
+            unsafe { regfree(ctx.as_mut_ptr()) };
+        }
+    }
+}
+
+impl PosixRegEx {
+    pub fn new_with(valid: bool, match_buf_size: i32) -> Self {
+        let cap = if match_buf_size > 0 {
+            match_buf_size as usize
+        } else {
+            0
+        };
+        Self {
+            valid,
+            match_buf_size: cap,
+            matches: vec![(-1, -1); cap],
+            #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+            raw_ctx: None,
+        }
+    }
+
+    #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+    pub fn compile(pattern: &CStr, match_buf_size: i32) -> Self {
+        const REG_EXTENDED: c_int = 1;
+        const REG_ICASE: c_int = 2;
+        #[cfg(target_os = "macos")]
+        const REG_NOSUB: c_int = 4;
+        #[cfg(not(target_os = "macos"))]
+        const REG_NOSUB: c_int = 8;
+
+        let mut ctx = Box::new([0u64; 16]);
+        let flags = REG_EXTENDED | REG_ICASE | if match_buf_size > 0 { 0 } else { REG_NOSUB };
+        let rc = unsafe { regcomp(ctx.as_mut_ptr(), pattern.as_ptr(), flags) };
+        let valid = rc == 0;
+        let mut rx = Self::new_with(valid, match_buf_size);
+        if valid {
+            rx.raw_ctx = Some(ctx);
+        } else {
+            unsafe { regfree(ctx.as_mut_ptr()) };
+        }
+        rx
+    }
+
+    #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+    pub fn match_cstr(&mut self, text: &CStr) -> bool {
+        let Some(ctx_ptr) = self.raw_ctx.as_ref().map(|b| b.as_ptr()) else {
+            return false;
+        };
+        let nmatch = self.match_buf_size;
+        self.exec_with(|matches| {
+            let mut raw = vec![RawRegMatch::default(); nmatch];
+            let pmatch = if nmatch > 0 {
+                raw.as_mut_ptr()
+            } else {
+                std::ptr::null_mut()
+            };
+            let ok = unsafe { regexec(ctx_ptr, text.as_ptr(), nmatch, pmatch, 0) == 0 };
+            if ok {
+                for (i, slot) in matches.iter_mut().enumerate() {
+                    *slot = (raw[i].rm_so as i32, raw[i].rm_eo as i32);
+                }
+            }
+            ok
+        })
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.valid
+    }
+
+    pub fn exec_with(&mut self, exec_fn: impl FnOnce(&mut [(i32, i32)]) -> bool) -> bool {
+        if !self.valid {
+            return false;
+        }
+        for slot in &mut self.matches {
+            *slot = (-1, -1);
+        }
+        exec_fn(&mut self.matches)
+    }
+
+    pub fn match_count(&self) -> i32 {
+        let mut count = 0usize;
+        while count < self.match_buf_size && self.matches[count].0 > -1 {
+            count += 1;
+        }
+        count as i32
+    }
+
+    pub fn match_start(&self, index: i32) -> i32 {
+        if index < 0 || (index as usize) >= self.matches.len() {
+            0
+        } else {
+            self.matches[index as usize].0
+        }
+    }
+
+    pub fn match_len(&self, index: i32) -> i32 {
+        if index < 0 || (index as usize) >= self.matches.len() {
+            0
+        } else {
+            let (so, eo) = self.matches[index as usize];
+            regex_calc_match_len(so, eo)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1196,5 +1663,476 @@ mod tests {
             data_analytics_compute(&mut s2),
             Some((2.0, 15.0, 8.0, 8.0, 5.0, 10.0, 13.0))
         );
+    }
+
+    struct BenchTempDir {
+        path: std::path::PathBuf,
+    }
+
+    impl BenchTempDir {
+        fn new(prefix: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!("{prefix}{nanos}_{}", std::process::id()));
+            std::fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+
+        fn str(&self) -> String {
+            self.path.to_string_lossy().into_owned()
+        }
+
+        fn file_count(&self) -> usize {
+            std::fs::read_dir(&self.path)
+                .map(|it| it.count())
+                .unwrap_or(0)
+        }
+    }
+
+    impl Drop for BenchTempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn disk_benchmark_suite_port_from_cpp() {
+        use std::time::Duration;
+        const MIB: u64 = 1024 * 1024;
+        const GIB: u64 = 1024 * MIB;
+        let plenty = Ok(u64::MAX / 2);
+
+        // 1. BenchmarkRejectsTooBigBufferTest
+        let too_big = 1024usize * 1024 * 1024;
+        assert!(matches!(
+            disk_benchmark_run("./", too_big, 1024, Duration::from_secs(1), plenty.clone()),
+            Err(DiskBenchmarkError::InvalidArgument(_))
+        ));
+
+        // 2. BenchmarkFailsOnInvalidPathTest
+        assert!(matches!(
+            disk_benchmark_run(
+                "InvalidPath_nonexistent_dir_xyz",
+                1024,
+                1024,
+                Duration::from_secs(1),
+                plenty.clone()
+            ),
+            Err(DiskBenchmarkError::Runtime(_))
+        ));
+
+        // 3. BenchmarkReportsMissingDirectoryTest
+        let dir = BenchTempDir::new("nzbget_bench_missing_");
+        let missing = format!("{}/missing", dir.str());
+        match disk_benchmark_run(&missing, 1024, 1024, Duration::from_secs(1), plenty.clone()) {
+            Err(DiskBenchmarkError::Runtime(msg)) => {
+                assert!(msg.contains("Directory does not exist"));
+            }
+            other => panic!("expected Runtime error, got {other:?}"),
+        }
+        assert!(!std::path::Path::new(&missing).exists());
+
+        // 4. BenchmarkMeasuresWriteAndReadTest
+        let dir = BenchTempDir::new("nzbget_bench_rw_");
+        let res = disk_benchmark_run(
+            &dir.str(),
+            64 * 1024,
+            4 * MIB,
+            Duration::from_secs(5),
+            plenty.clone(),
+        )
+        .unwrap();
+        assert_eq!(res.write_bytes, 4 * MIB);
+        assert_eq!(res.read_bytes, res.write_bytes);
+        assert!(res.write_ms > 0.0);
+        assert!(res.read_ms > 0.0);
+        assert_eq!(dir.file_count(), 0);
+
+        // 5. BenchmarkUtf8DirectoryTest
+        let dir = BenchTempDir::new("nzbget_l\u{00e4}_\u{4f60}\u{597d}_");
+        let res =
+            disk_benchmark_run(&dir.str(), 0, MIB, Duration::from_secs(5), plenty.clone()).unwrap();
+        assert!(res.write_bytes >= MIB);
+        assert_eq!(res.read_bytes, res.write_bytes);
+        assert_eq!(dir.file_count(), 0);
+
+        // 6. BenchmarkStopsOnTimeoutTest
+        let dir = BenchTempDir::new("nzbget_bench_timeout_");
+        let res = disk_benchmark_run(
+            &dir.str(),
+            4096,
+            1024 * GIB,
+            Duration::from_millis(250),
+            plenty.clone(),
+        )
+        .unwrap();
+        assert!(res.write_bytes > 0);
+        assert!(res.write_bytes < 1024 * GIB);
+        assert!(res.read_bytes > 0);
+        assert!(res.read_bytes <= res.write_bytes);
+        assert_eq!(dir.file_count(), 0);
+
+        // 7. BenchmarkZeroBlockSizeUsesDefaultTest
+        let dir = BenchTempDir::new("nzbget_bench_zero_");
+        let res = disk_benchmark_run(
+            &dir.str(),
+            0,
+            4 * MIB,
+            Duration::from_secs(5),
+            plenty.clone(),
+        )
+        .unwrap();
+        assert_eq!(res.write_bytes, 4 * MIB);
+        assert_eq!(res.read_bytes, res.write_bytes);
+
+        // 8. BenchmarkOddBlockSizeTest
+        let dir = BenchTempDir::new("nzbget_bench_odd_");
+        let res = disk_benchmark_run(
+            &dir.str(),
+            1000,
+            10000,
+            Duration::from_secs(5),
+            plenty,
+        )
+        .unwrap();
+        assert_eq!(res.write_bytes, 10000);
+        assert_eq!(res.read_bytes, 10000);
+
+        // 9. BenchmarkLimitByFreeSpaceTest
+        let reserve = BENCHMARK_FREE_SPACE_RESERVE;
+        assert_eq!(benchmark_limit_by_free_space(10 * GIB, 0, reserve), 0);
+        assert_eq!(benchmark_limit_by_free_space(10 * GIB, reserve, reserve), 0);
+        assert_eq!(
+            benchmark_limit_by_free_space(10 * GIB, reserve + GIB, reserve),
+            GIB
+        );
+        assert_eq!(
+            benchmark_limit_by_free_space(MIB, reserve + GIB, reserve),
+            MIB
+        );
+
+        // 10. Non-UTF-8 directory bytes do not cause UB and report missing directory cleanly
+        match disk_benchmark_run_bytes(
+            b"NonUtf8MissingPath_\xff\xfe",
+            0,
+            MIB,
+            Duration::from_secs(5),
+            Ok(100 * GIB),
+        ) {
+            Err(DiskBenchmarkError::Runtime(msg)) => {
+                assert!(msg.contains("Directory does not exist"));
+            }
+            other => panic!("expected Runtime error for non-UTF-8 missing path, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn util_full_suite_port_from_cpp() {
+        fn ascii_lower(b: u8) -> std::ffi::c_int {
+            b.to_ascii_lowercase() as std::ffi::c_int
+        }
+        fn ascii_alpha(b: u8) -> bool {
+            b.is_ascii_alphabetic()
+        }
+
+        // 1. XmlStripTagsTest
+        let mut xml = b"<div><img style=\"margin-left:10px;margin-bottom:10px;float:right;\" src=\"https://xxx/cover.jpg\"/><ul><li>ID: 12345678</li><li>Name: <a href=\"https://xxx/12344\">Show name</a></li><li>Size: 3.00 GB </li><li>Attributes: Category - <a href=\"https://xxx/2040\">Movies > HD</a></li></li></ul></div>".to_vec();
+        let expected_strip = b"                                                                                                        ID: 12345678         Name:                             Show name             Size: 3.00 GB          Attributes: Category -                            Movies > HD                         ";
+        crate::text::xml_strip_tags(&mut xml);
+        assert_eq!(xml.as_slice(), expected_strip);
+
+        // 2. XmlDecodeTest
+        let mut xml = b"Poster: Bob &lt;bob@home&gt; bad&mdash;and there&#039;s one thing".to_vec();
+        let len = crate::text::xml_decode(&mut xml, &ascii_lower);
+        assert_eq!(
+            &xml[..len],
+            b"Poster: Bob <bob@home> bad&mdash;and there's one thing"
+        );
+
+        // 3. XmlRemoveEntitiesTest & XmlRemoveEntitiesAtEndTest
+        let mut xml = b"Poster: Bob &lt;bob@home&gt; bad&mdash;and there&#039;s one thing".to_vec();
+        let len = crate::text::xml_remove_entities(&mut xml, &ascii_alpha);
+        assert_eq!(
+            &xml[..len],
+            b"Poster: Bob  bob@home  bad and there s one thing"
+        );
+        let mut xml_end = b"R&D AT&T".to_vec();
+        let len = crate::text::xml_remove_entities(&mut xml_end, &ascii_alpha);
+        assert_eq!(&xml_end[..len], b"R&D AT&T");
+
+        // 4. HttpUnquoteEscapesTest
+        for (raw, expected) in [
+            (&b"\"a\\\"b.nzb\""[..], &b"a\"b.nzb"[..]),
+            (&b"\"my\\ file.nzb\""[..], &b"my file.nzb"[..]),
+            (&b"\"a\\\\b\""[..], &b"a\\b"[..]),
+        ] {
+            let mut buf = raw.to_vec();
+            let len = crate::text::http_unquote(&mut buf);
+            assert_eq!(&buf[..len], expected);
+        }
+
+        // 5. EncodeByte80Test & JsonEncodeNonBmpTest
+        let mut json80 = Vec::new();
+        crate::escape::json_encode(b"a\x80b", &mut json80);
+        let mut xml80 = Vec::new();
+        crate::escape::xml_encode(b"a\x80b", &mut xml80);
+        assert!(!json80.contains(&0x80));
+        assert!(!xml80.contains(&0x80));
+
+        let mut non_bmp = Vec::new();
+        crate::escape::json_encode(b"x\xF0\x9F\x98\x80y", &mut non_bmp);
+        assert_eq!(non_bmp, b"x\\ud83d\\ude00y");
+        let mut decoded = non_bmp;
+        let len = crate::decode::json_decode(&mut decoded);
+        assert_eq!(&decoded[..len], b"x\xF0\x9F\x98\x80y");
+
+        // 6. XmlDecodeCdataTest & URLEncodeTest
+        let mut cdata = b"a<![CDATA[x<&amp;>y]]>b&amp;c".to_vec();
+        let len = crate::text::xml_decode(&mut cdata, &ascii_lower);
+        assert_eq!(&cdata[..len], b"ax<&amp;>yb&c");
+        let mut open = b"a<![CDATA[x".to_vec();
+        let len = crate::text::xml_decode(&mut open, &ascii_lower);
+        assert_eq!(&open[..len], b"ax");
+        let mut url_out = Vec::new();
+        crate::text::url_encode(
+            b"http://www.example.com/nzb_get/12344/Debian V7 6 64 bit OS.nzb",
+            &mut url_out,
+        );
+        assert_eq!(
+            url_out,
+            b"http://www.example.com/nzb_get/12344/Debian%20V7%206%2064%20bit%20OS.nzb"
+        );
+
+        // 7. ParseRfc822DateTimeTest
+        let t = 1372208574i64;
+        assert_eq!(parse_rfc822_date_time(c"Wed, 26 Jun 2013 01:02:54 +0000"), t);
+        assert_eq!(parse_rfc822_date_time(c"Wed, 26 Jun 2013 01:02:54 GMT"), t);
+        assert_eq!(parse_rfc822_date_time(c"26 Jun 2013 01:02:54 +0000"), t);
+        assert_eq!(parse_rfc822_date_time(c"Wed, 26 Jun 2013 03:02:54 +0200"), t);
+        assert_eq!(parse_rfc822_date_time(c"Tue, 25 Jun 2013 19:02:54 -0600"), t);
+        assert_eq!(parse_rfc822_date_time(c"Wed, 26 Jun 2013 00:32:54 -0030"), t);
+        assert_eq!(parse_rfc822_date_time(c"Tue, 25 Jun 2013 21:02:54 EDT"), t);
+        assert_eq!(parse_rfc822_date_time(c"26 Jun 2013 01:02 +0000"), t - 54);
+        assert_eq!(parse_rfc822_date_time(c"not a date"), 0);
+
+        // 8. ParseContentDispositionFilenameTest
+        let lower = Lower::Fold(&ascii_lower);
+        let cd = |hdr: &[u8]| {
+            crate::webutil::content_disposition_filename(hdr, &lower).unwrap_or_default()
+        };
+        assert_eq!(cd(b"Content-Disposition: attachment; filename=\"fname.ext\""), b"fname.ext");
+        assert_eq!(cd(b"Content-Disposition: attachement;filename=fname.ext"), b"fname.ext");
+        assert_eq!(cd(b"Content-Disposition: attachement;filename=fname.ext;"), b"fname.ext");
+        assert_eq!(
+            cd(b"Content-Disposition: attachment; filename=1313961.nzb; filename*=UTF-8''1313961.nzb"),
+            b"1313961.nzb"
+        );
+        assert_eq!(
+            cd(b"Content-Disposition: attachment; filename=fallback.nzb; filename*=UTF-8''na%C3%AFve%20file.nzb"),
+            b"na\xC3\xAFve file.nzb"
+        );
+        assert_eq!(
+            cd(b"Content-Disposition: attachment; filename*=UTF-8'en'fname.ext"),
+            b"fname.ext"
+        );
+        assert_eq!(
+            cd(b"Content-Disposition: attachment; filename*=ISO-8859-1''na%EFve.nzb"),
+            b"na\xC3\xAFve.nzb"
+        );
+        assert_eq!(
+            cd(b"Content-Disposition: attachment; filename=\"semi;colon.nzb\"; foo=bar"),
+            b"semi;colon.nzb"
+        );
+        assert_eq!(
+            cd(b"Content-Disposition: attachment; FileName=\"fname.ext\""),
+            b"fname.ext"
+        );
+        assert_eq!(
+            cd(b"Content-Disposition: attachment; filename=fname.ext\r\n"),
+            b"fname.ext"
+        );
+        assert!(cd(b"Content-Disposition: inline").is_empty());
+        assert!(cd(b"Content-Disposition: attachment; filename=").is_empty());
+        assert_eq!(
+            cd(b"Content-Disposition: attachment; filename*=UTF-8''fname%"),
+            b"fname%"
+        );
+
+        // 9. WildMaskTest & WildMaskCaptureBacktrackingTest
+        assert!(!crate::wildmask::wild_match(&lower, b"*.par2", b"Debian V7 6 64 bit OS.nzb", None));
+        assert!(!crate::wildmask::wild_match(&lower, b"*.par2", b"Debian V7 6 64 bit OS.par2.nzb", None));
+        assert!(crate::wildmask::wild_match(&lower, b"*.par2", b"Debian V7 6 64 bit OS.par2", None));
+        assert!(crate::wildmask::wild_match(&lower, b"*.par2", b".par2", None));
+        assert!(!crate::wildmask::wild_match(&lower, b"*.par2", b"par2", None));
+
+        let mut text = vec![b'a'; 200];
+        text.push(b'b');
+        let mut caps = Vec::new();
+        assert!(crate::wildmask::wild_match(&lower, b"*?ab", &text, Some(&mut caps)));
+        assert_eq!(caps.len(), 200);
+        assert_eq!(caps[0], (0, 0));
+        assert_eq!(caps[199], (198, 2));
+
+        let mut failed_caps = Vec::new();
+        assert!(!crate::wildmask::wild_match(&lower, b"?x", b"ay", Some(&mut failed_caps)));
+        assert_eq!(failed_caps, vec![(0, 1)]);
+
+        // 10. RegExTest (PosixRegEx)
+        #[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
+        {
+            let mut rx_rar = PosixRegEx::compile(c".*\\.rar$", 100);
+            let mut rx_rar_seq = PosixRegEx::compile(c".*\\.[r-z][0-9][0-9]$", 100);
+            let mut rx_7z = PosixRegEx::compile(c".*\\.7z$|.*\\.7z\\.[0-9]+$", 100);
+            let mut rx_num = PosixRegEx::compile(c".*\\.[0-9]+$", 100);
+            assert!(rx_rar.match_cstr(c"filename.rar"));
+            assert!(rx_rar.match_cstr(c"filename.part001.rar"));
+            assert!(!rx_rar.match_cstr(c"filename.rar.txt"));
+            assert!(!rx_rar_seq.match_cstr(c"filename.rar"));
+            assert!(rx_rar_seq.match_cstr(c"filename.r01"));
+            assert!(rx_rar_seq.match_cstr(c"filename.r99"));
+            assert!(!rx_rar_seq.match_cstr(c"filename.r001"));
+            assert!(rx_rar_seq.match_cstr(c"filename.s01"));
+            assert!(rx_rar_seq.match_cstr(c"filename.t99"));
+            assert!(rx_7z.match_cstr(c"filename.7z"));
+            assert!(!rx_7z.match_cstr(c"filename.7z.rar"));
+            assert!(rx_7z.match_cstr(c"filename.7z.1"));
+            assert!(rx_7z.match_cstr(c"filename.7z.001"));
+            assert!(rx_7z.match_cstr(c"filename.7z.123"));
+            assert!(rx_7z.match_cstr(c"filename.7z.999"));
+            assert!(rx_num.match_cstr(c"filename.7z.1"));
+            assert!(rx_num.match_cstr(c"filename.7z.9"));
+            assert!(rx_num.match_cstr(c"filename.7z.001"));
+            assert!(rx_num.match_cstr(c"filename.7z.123"));
+            assert!(rx_num.match_cstr(c"filename.7z.999"));
+
+            let mut se = PosixRegEx::compile(c".*S([0-9]+)E([0-9]+).*", 100);
+            assert!(se.is_valid());
+            assert!(se.match_cstr(c"My.Show.Name.S01E02.ABC.720"));
+            assert_eq!(se.match_count(), 3);
+            assert_eq!(se.match_start(1), 14);
+            assert_eq!(se.match_len(1), 2);
+        }
+        let mut rx = PosixRegEx::new_with(true, 100);
+        assert!(rx.is_valid());
+        assert!(rx.exec_with(|matches| {
+            matches[0] = (0, 27);
+            matches[1] = (14, 16);
+            matches[2] = (17, 19);
+            true
+        }));
+        assert_eq!(rx.match_count(), 3);
+        assert_eq!(rx.match_start(1), 14);
+        assert_eq!(rx.match_len(1), 2);
+        let mut invalid_rx = PosixRegEx::new_with(false, 10);
+        assert!(!invalid_rx.is_valid());
+        assert!(!invalid_rx.exec_with(|_| true));
+
+        // 11. StrToNumTest
+        assert!((util_str_to_num::<f32>("3.14").unwrap() - 3.14f32).abs() <= f32::EPSILON);
+        assert!((util_str_to_num::<f32>("3.14 abc").unwrap() - 3.14f32).abs() <= f32::EPSILON);
+        assert_eq!(util_str_to_num::<f64>("3."), Some(3.0));
+        assert_eq!(util_str_to_num::<i32>("3."), Some(3));
+        assert_eq!(util_str_to_num::<i32>("3"), Some(3));
+        assert_eq!(util_str_to_num::<i32>("-3"), Some(-3));
+        assert_eq!(util_str_to_num::<i32>("+3"), Some(3));
+        assert_eq!(util_str_to_num::<i32>("   3"), Some(3));
+        assert_eq!(util_str_to_num::<i32>("3   "), Some(3));
+        assert_eq!(util_str_to_num::<i32>("3 not a number"), Some(3));
+        assert_eq!(util_str_to_num::<u8>("256"), None);
+        assert_eq!(util_str_to_num::<i32>("not a number"), None);
+        assert_eq!(util_str_to_num::<f32>(""), None);
+        assert_eq!(util_str_to_num::<f32>("  "), None);
+
+        // 12. StrCaseCmpTest, SplitInt64Test, FormatSpeedTest
+        assert!(bytes_eq_ignore_case(b"OPTIONS", b"options"));
+        assert!(!bytes_eq_ignore_case(b"OPTIONS", b"opt1ons"));
+        assert!(bytes_eq_ignore_case(b"0PTIONS", b"0ptions"));
+        assert!(bytes_eq_ignore_case(b"", b""));
+        assert!(!bytes_eq_ignore_case(b"3.14", b"3.12"));
+
+        for val in [i64::MAX, i64::MIN, 0i64] {
+            let (hi, lo) = util_split_int64(val);
+            assert_eq!(util_join_int64(hi, lo), val);
+        }
+
+        const K: i64 = 1024;
+        assert_eq!(format_speed(K * K * K), b"1.00 GB/s");
+        assert_eq!(format_speed(10 * K * K * K), b"10.0 GB/s");
+        assert_eq!(format_speed(100 * K * K * K), b"100 GB/s");
+        assert_eq!(format_speed(K * K), b"1.00 MB/s");
+        assert_eq!(format_speed(10 * K * K), b"10.0 MB/s");
+        assert_eq!(format_speed(100 * K * K), b"100 MB/s");
+        assert_eq!(format_speed(K), b"1 KB/s");
+        assert_eq!(format_speed(10 * K), b"10 KB/s");
+        assert_eq!(format_speed(100 * K), b"100 KB/s");
+
+        // 13. SafeIntCastTest
+        let i32_min = i32::MIN as i64;
+        let i32_max = i32::MAX as i64;
+        assert_eq!(util_safe_int_cast_i64_to_i64(i64::MAX, i32_min, i32_max), 0);
+        assert_eq!(util_safe_int_cast_i64_to_i64(i64::MIN, i32_min, i32_max), 0);
+        assert_eq!(util_safe_int_cast_i64_to_i64(i32_max, i32_min, i32_max), i32_max);
+        assert_eq!(util_safe_int_cast_i64_to_i64(i32_min, i32_min, i32_max), i32_min);
+        assert_eq!(util_safe_int_cast_u64_to_i64(u64::MAX, i32::MAX as u64), 0);
+        assert_eq!(util_safe_int_cast_u64_to_i64(0, i32::MAX as u64), 0);
+        assert_eq!(
+            util_safe_int_cast_u64_to_i64(i32::MAX as u64, i32::MAX as u64),
+            i32_max
+        );
+        assert_eq!(
+            util_safe_int_cast_i64_to_u64(i32_max, u32::MAX as u64),
+            i32::MAX as u64
+        );
+        assert_eq!(util_safe_int_cast_i64_to_u64(i32_min, u32::MAX as u64), 0);
+
+        // 14. TrimTest & SanitizeLineTest & IsControlChar
+        assert!(util_is_control_char(0));
+        assert!(util_is_control_char(b'\r'));
+        assert!(util_is_control_char(b'\n'));
+        assert!(util_is_control_char(b'\t'));
+        assert!(util_is_control_char(127));
+        assert!(!util_is_control_char(b' '));
+        assert!(!util_is_control_char(b'A'));
+        assert!(!util_is_control_char(b'z'));
+        assert!(!util_is_control_char(0xC3));
+        assert!(!util_is_control_char(0xA9));
+
+        for (raw, expected) in [
+            ("\r\n\t  hello  \r\n", "hello"),
+            ("TV\r\nHD", "TV  HD"),
+            ("Movies\t4K", "Movies 4K"),
+            ("\r\n  S\u{00e9}ries / Vid\u{00e9}o  \n", "S\u{00e9}ries / Vid\u{00e9}o"),
+            ("M\u{00e4}dchen\r\n4K", "M\u{00e4}dchen  4K"),
+        ] {
+            let mut s = raw.as_bytes().to_vec();
+            let (st, en) = sanitize_line(&mut s, |b| b.is_ascii_whitespace());
+            assert_eq!(&s[st..en], expected.as_bytes());
+        }
+
+        // 15. JsonNextValue & JsonDecodeStopsAtEndTest & XmlDecodeStopsAtEndTest & NumericEscapesDecodeToUtf8Test
+        assert_eq!(
+            crate::decode::json_next_value(br#""hello\"\"\\ world""#),
+            Some((0, 19))
+        );
+        assert_eq!(
+            crate::decode::json_next_value(br#"  "hello world"  "#),
+            Some((2, 13))
+        );
+        assert_eq!(crate::decode::json_next_value(b"12345,"), Some((0, 5)));
+        assert_eq!(crate::decode::json_next_value(b"  true  }"), Some((2, 4)));
+        assert_eq!(crate::decode::json_next_value(b"\tnull\n"), Some((1, 4)));
+        assert_eq!(crate::decode::json_next_value(b""), None);
+        assert_eq!(crate::decode::json_next_value(b"   \t\n "), None);
+        assert_eq!(crate::decode::json_next_value(br#""dangling\""#), None);
+
+        let mut short_escape = b"ab\\u4".to_vec();
+        let len = crate::decode::json_decode(&mut short_escape);
+        assert_eq!(&short_escape[..len], b"ab");
+
+        let mut numeric_xml = b"ab&#65".to_vec();
+        let len = crate::text::xml_decode(&mut numeric_xml, &ascii_lower);
+        assert_eq!(&numeric_xml[..len], b"abA");
     }
 }

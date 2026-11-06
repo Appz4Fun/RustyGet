@@ -50,53 +50,42 @@ public:
 	static int64 JoinInt64(uint32 Hi, uint32 Lo);
 	static void SplitInt64(int64 Int64, uint32* Hi, uint32* Lo);
 
+	static std::optional<double> StrToFloatChecked(std::string_view str, double minVal, double maxVal);
+	static std::optional<int64_t> StrToSignedChecked(std::string_view str, int64_t minVal, int64_t maxVal);
+	static std::optional<uint64_t> StrToUnsignedChecked(std::string_view str, uint64_t maxVal);
+	static int64_t SafeCastSignedToSigned(int64_t num, int64_t minTo, int64_t maxTo) noexcept;
+	static int64_t SafeCastUnsignedToSigned(uint64_t num, uint64_t maxTo) noexcept;
+	static uint64_t SafeCastSignedToUnsigned(int64_t num, uint64_t maxTo) noexcept;
+	static uint64_t SafeCastUnsignedToUnsigned(uint64_t num, uint64_t maxTo) noexcept;
+
 	template <typename T>
 	static std::optional<T> StrToNum(std::string_view str)
 	{
 		static_assert(std::is_arithmetic_v<T>, "T must be an arithmetic type");
 
-		T result{};
-		errno = 0;
-		auto start = str.data();
-		char* end{};
-
 		if constexpr (std::is_floating_point_v<T>)
 		{
-			double value = std::strtod(start, &end);
-			if (value < std::numeric_limits<T>::lowest() || value > std::numeric_limits<T>::max())
-			{
-				return std::nullopt;
-			}
-			result = static_cast<T>(value);
+			auto v = StrToFloatChecked(
+				str,
+				static_cast<double>(std::numeric_limits<T>::lowest()),
+				static_cast<double>(std::numeric_limits<T>::max()));
+			return v ? std::optional<T>(static_cast<T>(*v)) : std::nullopt;
+		}
+		else if constexpr (std::is_signed_v<T>)
+		{
+			auto v = StrToSignedChecked(
+				str,
+				static_cast<int64_t>(std::numeric_limits<T>::min()),
+				static_cast<int64_t>(std::numeric_limits<T>::max()));
+			return v ? std::optional<T>(static_cast<T>(*v)) : std::nullopt;
 		}
 		else
 		{
-			if constexpr (std::is_signed_v<T>)
-			{
-				int64_t value = std::strtoll(start, &end, 10);
-				if (value < std::numeric_limits<T>::min() || value > std::numeric_limits<T>::max())
-				{
-					return std::nullopt;
-				}
-				result = static_cast<T>(value);
-			}
-			else
-			{
-				uint64_t value = std::strtoull(start, &end, 10);
-				if (value < std::numeric_limits<T>::min() || value > std::numeric_limits<T>::max())
-				{
-					return std::nullopt;
-				}
-				result = static_cast<T>(value);
-			}
+			auto v = StrToUnsignedChecked(
+				str,
+				static_cast<uint64_t>(std::numeric_limits<T>::max()));
+			return v ? std::optional<T>(static_cast<T>(*v)) : std::nullopt;
 		}
-
-		if (start == end)
-		{
-			return std::nullopt;
-		}
-
-		return result;
 	}
 
 	static void TrimRight(char* str);
@@ -104,12 +93,7 @@ public:
 	static void TrimLeft(std::string& str);
 	static char* Trim(char* str);
 	static void Trim(std::string& str);
-	static constexpr bool IsControlChar(char c) noexcept
-	{
-		constexpr unsigned char ASCII_SPACE = 32;
-		constexpr unsigned char ASCII_DEL = 127;
-		return static_cast<unsigned char>(c) < ASCII_SPACE || static_cast<unsigned char>(c) == ASCII_DEL;
-	}
+	static bool IsControlChar(char c) noexcept;
 	static void SanitizeLine(std::string& str);
 	static bool EmptyStr(const char* str) { return !str || !*str; }
 	static std::vector<CString> SplitStr(const char* str, const char* separators);
@@ -177,33 +161,32 @@ public:
 	
 	template <typename From, typename To,
 	 	typename std::enable_if_t<std::is_integral_v<From> && std::is_integral_v<To>, bool> = true>
-	static constexpr To SafeIntCast(From num) noexcept
+	static To SafeIntCast(From num) noexcept
 	{
 		if constexpr (std::is_unsigned_v<From> && std::is_signed_v<To>)
 		{
-			if (CmpGreater(num, std::numeric_limits<To>::max()))
-			{
-				return 0;
-			}
-
-			return static_cast<To>(num);
+			return static_cast<To>(SafeCastUnsignedToSigned(
+				static_cast<uint64_t>(num),
+				static_cast<uint64_t>(std::numeric_limits<To>::max())));
 		}
 		else if constexpr (std::is_signed_v<From> && std::is_unsigned_v<To>)
 		{
-			if (num < 0)
-			{
-				return 0;
-			}
-
-			return static_cast<To>(num);
+			return static_cast<To>(SafeCastSignedToUnsigned(
+				static_cast<int64_t>(num),
+				static_cast<uint64_t>(std::numeric_limits<To>::max())));
 		}
-		else if (CmpGreater(num, std::numeric_limits<To>::max()) || CmpLess(num, std::numeric_limits<To>::min()))
+		else if constexpr (std::is_signed_v<From> && std::is_signed_v<To>)
 		{
-			return 0;
+			return static_cast<To>(SafeCastSignedToSigned(
+				static_cast<int64_t>(num),
+				static_cast<int64_t>(std::numeric_limits<To>::min()),
+				static_cast<int64_t>(std::numeric_limits<To>::max())));
 		}
 		else
 		{
-			return static_cast<To>(num);
+			return static_cast<To>(SafeCastUnsignedToUnsigned(
+				static_cast<uint64_t>(num),
+				static_cast<uint64_t>(std::numeric_limits<To>::max())));
 		}
 	}
 	
@@ -380,7 +363,7 @@ class RegEx
 public:
 	RegEx(const char *pattern, int matchBufSize = 100);
 	~RegEx();
-	bool IsValid() { return m_valid; }
+	bool IsValid();
 	bool Match(const char* str);
 	int GetMatchCount();
 	int GetMatchStart(int index);
@@ -389,10 +372,8 @@ public:
 private:
 #ifdef HAVE_REGEX_H
 	regex_t m_context;
-	std::unique_ptr<regmatch_t[]> m_matches;
 #endif
-	bool m_valid;
-	int m_matchBufSize;
+	void* m_rsRegex = nullptr;
 };
 
 class WildMask

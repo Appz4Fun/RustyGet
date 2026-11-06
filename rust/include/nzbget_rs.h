@@ -5459,6 +5459,62 @@ int nzbget_rs_dupe_identity_read(
         const char** out_data_ptr, size_t* out_data_len),
     NzbgetRsBuf* out_name, NzbgetRsBuf* out_ext, uint64_t* out_bytes);
 
+int nzbget_rs_benchmark_run(
+    const char* dir_ptr, size_t dir_len, size_t block_size_bytes,
+    uint64_t max_file_size_bytes, int64_t timeout_secs,
+    int space_ok, uint64_t available_bytes,
+    const char* space_err_ptr, size_t space_err_len,
+    uint64_t* out_write_bytes, double* out_write_ms,
+    uint64_t* out_read_bytes, double* out_read_ms,
+    NzbgetRsBuf* out_err);
+
+int nzbget_rs_util_is_control_char(uint8_t c);
+int nzbget_rs_util_str_to_f64_checked(
+    const char* s, size_t s_len, double min_val, double max_val, double* out_val);
+int nzbget_rs_util_str_to_i64_checked(
+    const char* s, size_t s_len, int64_t min_val, int64_t max_val, int64_t* out_val);
+int nzbget_rs_util_str_to_u64_checked(
+    const char* s, size_t s_len, uint64_t max_val, uint64_t* out_val);
+int64_t nzbget_rs_util_safe_int_cast_i64_to_i64(int64_t num, int64_t min_to, int64_t max_to);
+int64_t nzbget_rs_util_safe_int_cast_u64_to_i64(uint64_t num, uint64_t max_to);
+uint64_t nzbget_rs_util_safe_int_cast_i64_to_u64(int64_t num, uint64_t max_to);
+uint64_t nzbget_rs_util_safe_int_cast_u64_to_u64(uint64_t num, uint64_t max_to);
+
+void* nzbget_rs_regex_new(int valid, int match_buf_size);
+void nzbget_rs_regex_free(void* handle);
+int nzbget_rs_regex_is_valid(const void* handle);
+int nzbget_rs_regex_match(
+    void* handle, void* ctx,
+    int (*exec_cb)(void* ctx, int32_t* out_so, int32_t* out_eo, size_t nmatch));
+int nzbget_rs_regex_get_match_count(const void* handle);
+int nzbget_rs_regex_get_match_start(const void* handle, int index);
+int nzbget_rs_regex_get_match_len(const void* handle, int index);
+
+void* nzbget_rs_article_batch_fetcher_new(
+    void* ctx,
+    int (*fetch_cb)(
+        void* ctx, size_t worker_idx, const char* msg_id,
+        const char* const* groups, size_t group_count,
+        NzbgetRsBuf* out_data, int64_t* out_offset, int64_t* out_file_size,
+        int* out_success, int* out_retry, int* out_transient),
+    void (*stop_cb)(void* ctx));
+void nzbget_rs_article_batch_fetcher_free(void* handle);
+void nzbget_rs_article_batch_fetcher_set_worker_count(void* handle, int worker_count);
+int nzbget_rs_article_batch_fetcher_get_window_parts(const void* handle);
+void nzbget_rs_article_batch_fetcher_begin(
+    void* handle, size_t req_count, void* ctx,
+    size_t (*get_req_cb)(
+        void* ctx, size_t idx, const char** out_mid_ptr, size_t* out_mid_len),
+    void (*get_group_cb)(
+        void* ctx, size_t req_idx, size_t grp_idx,
+        const char** out_grp_ptr, size_t* out_grp_len));
+int nzbget_rs_article_batch_fetcher_next(
+    void* handle, NzbgetRsBuf* out_data, int64_t* out_offset, int64_t* out_file_size,
+    int* out_success, int* out_retry, int* out_transient);
+void nzbget_rs_article_batch_fetcher_cancel_remaining(void* handle);
+void nzbget_rs_article_batch_fetcher_stop(void* handle);
+NzbgetRsBuf nzbget_rs_alloc_buf(const char* data, size_t len);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

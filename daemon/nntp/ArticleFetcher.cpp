@@ -471,196 +471,176 @@ ArticleFetcher::FetchedArticle ArticleFetcher::FetchFromConnection(NntpConnectio
 	return result;
 }
 
-class ArticleBatchFetcher::Worker : public Thread
-{
-public:
-	Worker(ArticleBatchFetcher& owner) : m_owner(owner) {}
-	virtual void Run() { m_owner.WorkerLoop(m_fetcher); }
-	ArticleFetcher& GetFetcher() { return m_fetcher; }
-
-private:
-	ArticleBatchFetcher& m_owner;
-	ArticleFetcher m_fetcher;
-};
-
 ArticleBatchFetcher::ArticleBatchFetcher()
 {
+	InitRsBatch();
 }
 
 ArticleBatchFetcher::ArticleBatchFetcher(FetchFunc fetchFunc) :
 	m_fetchFunc(std::move(fetchFunc))
 {
+	InitRsBatch();
 }
 
 ArticleBatchFetcher::~ArticleBatchFetcher()
 {
-	Stop();
-	for (std::unique_ptr<Worker>& worker : m_workers)
+	nzbget_rs_article_batch_fetcher_free(m_rsBatch);
+	m_rsBatch = nullptr;
+}
+
+void ArticleBatchFetcher::InitRsBatch()
+{
+	m_rsBatch = nzbget_rs_article_batch_fetcher_new(
+		this,
+		[](void* raw, size_t workerIdx, const char* msgId,
+			const char* const* groups, size_t groupCount,
+			NzbgetRsBuf* outData, int64_t* outOffset, int64_t* outFileSize,
+			int* outSuccess, int* outRetry, int* outTransient) -> int {
+			auto* self = static_cast<ArticleBatchFetcher*>(raw);
+			ArticleFetcher::FetchedArticle fetched;
+			try
+			{
+				auto grpVec = std::make_shared<std::vector<CString>>();
+				grpVec->reserve(groupCount);
+				for (size_t i = 0; i < groupCount; i++)
+				{
+					grpVec->emplace_back(groups[i] ? groups[i] : "");
+				}
+				if (self->m_fetchFunc)
+				{
+					Request req{CString(msgId ? msgId : ""), grpVec};
+					fetched = self->m_fetchFunc(req);
+				}
+				else
+				{
+					ArticleFetcher* fetcher = &self->m_inlineFetcher;
+					if (workerIdx != SIZE_MAX)
+					{
+						Guard guard(self->m_mutex);
+						if (workerIdx < self->m_workerFetchers.size())
+						{
+							fetcher = self->m_workerFetchers[workerIdx].get();
+						}
+					}
+					fetched = fetcher->Fetch(msgId ? msgId : "", *grpVec);
+				}
+			}
+			catch (const std::exception& e)
+			{
+				detail("Batch fetch of %s failed: %s", msgId ? msgId : "", e.what());
+				return 0;
+			}
+			catch (...)
+			{
+				detail("Batch fetch of %s failed", msgId ? msgId : "");
+				return 0;
+			}
+			*outData = nzbget_rs_alloc_buf(fetched.Data.data(), fetched.Data.size());
+			*outOffset = fetched.Offset;
+			*outFileSize = fetched.FileSize;
+			*outSuccess = fetched.Success ? 1 : 0;
+			*outRetry = fetched.Retry ? 1 : 0;
+			*outTransient = fetched.Transient ? 1 : 0;
+			return 1;
+		},
+		[](void* raw) {
+			auto* self = static_cast<ArticleBatchFetcher*>(raw);
+			try
+			{
+				Guard guard(self->m_mutex);
+				self->m_inlineFetcher.Stop();
+				for (auto& wf : self->m_workerFetchers)
+				{
+					wf->Stop();
+				}
+			}
+			catch (...)
+			{
+			}
+		});
+}
+
+void ArticleBatchFetcher::SetWorkerCount(int workerCount)
+{
+	m_workerCount = workerCount;
+	nzbget_rs_article_batch_fetcher_set_worker_count(m_rsBatch, workerCount);
+}
+
+void ArticleBatchFetcher::SetWaitCounter(std::atomic<int>* counter)
+{
+	Guard guard(m_mutex);
+	m_waitCounter = counter;
+	m_inlineFetcher.SetWaitCounter(counter);
+	for (auto& wf : m_workerFetchers)
 	{
-		while (worker->IsRunning())
-		{
-			Util::Sleep(5);
-		}
+		wf->SetWaitCounter(counter);
 	}
 }
 
-void ArticleBatchFetcher::EnsureWorkers()
+int ArticleBatchFetcher::GetWindowParts() const
 {
-	while ((int)m_workers.size() < m_workerCount)
+	return nzbget_rs_article_batch_fetcher_get_window_parts(m_rsBatch);
+}
+
+void ArticleBatchFetcher::EnsureWorkerFetchers()
+{
+	Guard guard(m_mutex);
+	while ((int)m_workerFetchers.size() < m_workerCount)
 	{
-		m_workers.push_back(std::make_unique<Worker>(*this));
-		m_workers.back()->GetFetcher().SetWaitCounter(m_waitCounter);
-		m_workers.back()->SetAutoDestroy(false);
-		m_workers.back()->Start();
+		m_workerFetchers.push_back(std::make_unique<ArticleFetcher>());
+		m_workerFetchers.back()->SetWaitCounter(m_waitCounter);
 	}
 }
 
 void ArticleBatchFetcher::Begin(std::vector<Request> requests)
 {
-	Guard guard(m_mutex);
-	m_batchId++;
-	m_requests = std::move(requests);
-	m_slots.assign(m_requests.size(), Slot());
-	m_nextClaim = 0;
-	m_nextDeliver = 0;
-	m_bufferedBytes = 0;
-	m_cancelled = false;
-	if (nzbget_rs_dqh_article_batch_should_ensure_workers(
-		m_workerCount, m_stopped ? 1 : 0) != 0)
-	{
-		EnsureWorkers();
-	}
-}
-
-bool ArticleBatchFetcher::ClaimNext(int batchId, size_t& index, Request& request)
-{
-	Guard guard(m_mutex);
-	if (!nzbget_rs_nntp_article_batch_can_claim_next(
-		batchId, m_batchId, m_cancelled ? 1 : 0, m_stopped ? 1 : 0,
-		m_nextClaim, m_requests.size(), m_nextDeliver, GetWindowParts(),
-		m_bufferedBytes, MaxBufferedBytes))
-	{
-		return false;
-	}
-	index = m_nextClaim++;
-	// CString's copy-assignment is deleted; move instead (safe - each index
-	// is claimed exactly once, so m_requests[index] is never read again)
-	request = std::move(m_requests[index]);
-	return true;
-}
-
-void ArticleBatchFetcher::StoreResult(int batchId, size_t index,
-	ArticleFetcher::FetchedArticle&& result)
-{
-	Guard guard(m_mutex);
-	if (!nzbget_rs_dqh_article_batch_can_store_result(
-		batchId, m_batchId, m_cancelled ? 1 : 0))
-	{
-		return;	// stale batch or the consumer bailed: discard
-	}
-	m_bufferedBytes += (int64)result.Data.size();
-	m_slots[index].Result = std::move(result);
-	m_slots[index].Ready = true;
-}
-
-void ArticleBatchFetcher::WorkerLoop(ArticleFetcher& fetcher)
-{
-	while (!m_stopped)
-	{
-		int batchId;
-		{
-			Guard guard(m_mutex);
-			batchId = m_batchId;
-		}
-		size_t index;
-		Request request;
-		if (ClaimNext(batchId, index, request))
-		{
-			ArticleFetcher::FetchedArticle fetched;
-			try
-			{
-				fetched = m_fetchFunc
-					? m_fetchFunc(request)
-					: fetcher.Fetch(request.MessageId, *request.Groups);
-			}
-			catch (const std::exception& e)
-			{
-				// a throwing fetch (e.g. bad_alloc on a huge decode buffer) must
-				// not kill the daemon nor wedge the window on a never-ready slot:
-				// store a failed result so the consumer's Next() keeps moving
-				detail("Batch fetch of %s failed: %s", *request.MessageId, e.what());
-				fetched = ArticleFetcher::FetchedArticle();
-			}
-			StoreResult(batchId, index, std::move(fetched));
-		}
-		else
-		{
-			Util::Sleep(5);	// window full, batch drained, or between batches
-		}
-	}
+	EnsureWorkerFetchers();
+	nzbget_rs_article_batch_fetcher_begin(
+		m_rsBatch, requests.size(), &requests,
+		[](void* raw, size_t idx, const char** outMidPtr, size_t* outMidLen) -> size_t {
+			auto* reqs = static_cast<std::vector<Request>*>(raw);
+			const Request& r = (*reqs)[idx];
+			*outMidPtr = r.MessageId ? *r.MessageId : "";
+			*outMidLen = r.MessageId.Length();
+			return r.Groups ? r.Groups->size() : 0;
+		},
+		[](void* raw, size_t reqIdx, size_t grpIdx, const char** outGrpPtr, size_t* outGrpLen) {
+			auto* reqs = static_cast<std::vector<Request>*>(raw);
+			const CString& g = (*(*reqs)[reqIdx].Groups)[grpIdx];
+			*outGrpPtr = g ? *g : "";
+			*outGrpLen = g.Length();
+		});
 }
 
 bool ArticleBatchFetcher::Next(ArticleFetcher::FetchedArticle& result)
 {
-	size_t index;
+	NzbgetRsBuf dataBuf{nullptr, 0};
+	int64_t offset = 0;
+	int64_t fileSize = 0;
+	int success = 0;
+	int retry = 0;
+	int transient = 0;
+	if (!nzbget_rs_article_batch_fetcher_next(
+		m_rsBatch, &dataBuf, &offset, &fileSize, &success, &retry, &transient))
 	{
-		Guard guard(m_mutex);
-		if (!nzbget_rs_dqh_article_batch_can_deliver_next(
-			m_cancelled ? 1 : 0, m_stopped ? 1 : 0, m_nextDeliver, m_requests.size()))
-		{
-			return false;
-		}
-		index = m_nextDeliver;
+		return false;
 	}
-
-	if (m_workerCount == 0)
-	{
-		// inline (serial) mode: fetch lazily on the caller's thread
-		const Request& request = m_requests[index];
-		result = m_fetchFunc ? m_fetchFunc(request)
-			: m_inlineFetcher.Fetch(request.MessageId, *request.Groups);
-		Guard guard(m_mutex);
-		m_nextDeliver++;
-		return !m_stopped;
-	}
-
-	while (!m_stopped)
-	{
-		{
-			Guard guard(m_mutex);
-			if (m_cancelled)
-			{
-				return false;
-			}
-			if (m_slots[index].Ready)
-			{
-				result = std::move(m_slots[index].Result);
-				m_slots[index].Ready = false;
-				m_bufferedBytes -= (int64)result.Data.size();
-				m_nextDeliver++;
-				return true;
-			}
-		}
-		Util::Sleep(5);
-	}
-	return false;
+	result.Data.assign(dataBuf.data ? dataBuf.data : "", (dataBuf.data ? dataBuf.data : "") + dataBuf.len);
+	nzbget_rs_free(dataBuf);
+	result.Offset = offset;
+	result.FileSize = fileSize;
+	result.Success = success != 0;
+	result.Retry = retry != 0;
+	result.Transient = transient != 0;
+	return true;
 }
 
 void ArticleBatchFetcher::CancelRemaining()
 {
-	Guard guard(m_mutex);
-	m_cancelled = true;
-	m_bufferedBytes = 0;
+	nzbget_rs_article_batch_fetcher_cancel_remaining(m_rsBatch);
 }
 
 void ArticleBatchFetcher::Stop()
 {
-	m_stopped = true;
-	Guard guard(m_mutex);
-	m_inlineFetcher.Stop();
-	for (std::unique_ptr<Worker>& worker : m_workers)
-	{
-		worker->Stop();
-		worker->GetFetcher().Stop();	// cancels an in-flight connection
-	}
+	nzbget_rs_article_batch_fetcher_stop(m_rsBatch);
 }

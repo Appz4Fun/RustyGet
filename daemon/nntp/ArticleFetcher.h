@@ -158,53 +158,30 @@ public:
 	static constexpr int MaxWindowParts = 8;
 	static constexpr int64 MaxBufferedBytes = 128LL * 1024 * 1024;
 
-	// defined in the .cpp, after Worker is complete: std::vector<unique_ptr<Worker>>
-	// needs the full type available to generate exception-unwind cleanup here
 	ArticleBatchFetcher();
-	// test seam: a blocking FetchFunc is NOT interruptible by Stop() (unlike a
-	// real ArticleFetcher), so tests must release their gates before destruction
-	// - the destructor joins the workers
 	explicit ArticleBatchFetcher(FetchFunc fetchFunc);
 	~ArticleBatchFetcher();
 
-	void SetWorkerCount(int workerCount) { m_workerCount = workerCount; }
+	void SetWorkerCount(int workerCount);
 	/* the workers count their waits for a connection into counter (see ArticleFetcher) */
-	void SetWaitCounter(std::atomic<int>* counter) { m_waitCounter = counter; }
-	int GetWindowParts() const { return std::max(MaxWindowParts, m_workerCount * 2); }
+	void SetWaitCounter(std::atomic<int>* counter);
+	int GetWindowParts() const;
 	void Begin(std::vector<Request> requests);
 	bool Next(ArticleFetcher::FetchedArticle& result);
 	void CancelRemaining();
 	void Stop();
 
 private:
-	class Worker;
-
-	struct Slot
-	{
-		ArticleFetcher::FetchedArticle Result;
-		bool Ready = false;
-	};
-
 	Mutex m_mutex;
-	std::vector<Request> m_requests;
-	std::vector<Slot> m_slots;
-	size_t m_nextClaim = 0;
-	size_t m_nextDeliver = 0;
-	int64 m_bufferedBytes = 0;
-	int m_batchId = 0;
-	bool m_cancelled = false;
-	std::atomic<bool> m_stopped{false};
 	int m_workerCount = 0;
 	std::atomic<int>* m_waitCounter = nullptr;
-	std::vector<std::unique_ptr<Worker>> m_workers;
+	std::vector<std::unique_ptr<ArticleFetcher>> m_workerFetchers;
 	FetchFunc m_fetchFunc;			// test seam; production uses real fetchers
 	ArticleFetcher m_inlineFetcher;	// worker count 0 (live mode)
+	void* m_rsBatch = nullptr;
 
-	void WorkerLoop(ArticleFetcher& fetcher);
-	bool ClaimNext(int batchId, size_t& index, Request& request);
-	void StoreResult(int batchId, size_t index, ArticleFetcher::FetchedArticle&& result);
-	void EnsureWorkers();
-	friend class Worker;
+	void InitRsBatch();
+	void EnsureWorkerFetchers();
 };
 
 #endif

@@ -165,6 +165,61 @@ void Util::SplitInt64(int64 Int64, uint32* Hi, uint32* Lo)
 	nzbget_rs_ufs_util_split_int64(Int64, Hi, Lo);
 }
 
+std::optional<double> Util::StrToFloatChecked(std::string_view str, double minVal, double maxVal)
+{
+	double out = 0.0;
+	if (nzbget_rs_util_str_to_f64_checked(str.data(), str.size(), minVal, maxVal, &out) != 0)
+	{
+		return out;
+	}
+	return std::nullopt;
+}
+
+std::optional<int64_t> Util::StrToSignedChecked(std::string_view str, int64_t minVal, int64_t maxVal)
+{
+	int64_t out = 0;
+	if (nzbget_rs_util_str_to_i64_checked(str.data(), str.size(), minVal, maxVal, &out) != 0)
+	{
+		return out;
+	}
+	return std::nullopt;
+}
+
+std::optional<uint64_t> Util::StrToUnsignedChecked(std::string_view str, uint64_t maxVal)
+{
+	uint64_t out = 0;
+	if (nzbget_rs_util_str_to_u64_checked(str.data(), str.size(), maxVal, &out) != 0)
+	{
+		return out;
+	}
+	return std::nullopt;
+}
+
+int64_t Util::SafeCastSignedToSigned(int64_t num, int64_t minTo, int64_t maxTo) noexcept
+{
+	return nzbget_rs_util_safe_int_cast_i64_to_i64(num, minTo, maxTo);
+}
+
+int64_t Util::SafeCastUnsignedToSigned(uint64_t num, uint64_t maxTo) noexcept
+{
+	return nzbget_rs_util_safe_int_cast_u64_to_i64(num, maxTo);
+}
+
+uint64_t Util::SafeCastSignedToUnsigned(int64_t num, uint64_t maxTo) noexcept
+{
+	return nzbget_rs_util_safe_int_cast_i64_to_u64(num, maxTo);
+}
+
+uint64_t Util::SafeCastUnsignedToUnsigned(uint64_t num, uint64_t maxTo) noexcept
+{
+	return nzbget_rs_util_safe_int_cast_u64_to_u64(num, maxTo);
+}
+
+bool Util::IsControlChar(char c) noexcept
+{
+	return nzbget_rs_util_is_control_char(static_cast<uint8_t>(c)) != 0;
+}
+
 CString Util::FormatSize(int64 fileSize)
 {
 	// rust/src/util.rs
@@ -698,73 +753,75 @@ void URL::ParseUrl()
 }
 
 
-RegEx::RegEx(const char *pattern, int matchBufSize) :
-	m_matchBufSize(matchBufSize)
+RegEx::RegEx(const char *pattern, int matchBufSize)
 {
 #ifdef HAVE_REGEX_H
-	m_valid = regcomp(&m_context, pattern, REG_EXTENDED | REG_ICASE | (matchBufSize > 0 ? 0 : REG_NOSUB)) == 0;
-	if (matchBufSize > 0)
-	{
-		m_matches = std::make_unique<regmatch_t[]>(matchBufSize);
-	}
-	else
-	{
-		m_matches = nullptr;
-	}
+	bool valid = regcomp(&m_context, pattern, REG_EXTENDED | REG_ICASE | (matchBufSize > 0 ? 0 : REG_NOSUB)) == 0;
 #else
-	m_valid = false;
+	bool valid = false;
 #endif
+	m_rsRegex = nzbget_rs_regex_new(valid ? 1 : 0, matchBufSize);
 }
 
 RegEx::~RegEx()
 {
+	nzbget_rs_regex_free(m_rsRegex);
+	m_rsRegex = nullptr;
 #ifdef HAVE_REGEX_H
 	regfree(&m_context);
 #endif
 }
 
+bool RegEx::IsValid()
+{
+	return nzbget_rs_regex_is_valid(m_rsRegex) != 0;
+}
+
 bool RegEx::Match(const char *str)
 {
 #ifdef HAVE_REGEX_H
-	return m_valid ? regexec(&m_context, str, m_matchBufSize, m_matches.get(), 0) == 0 : false;
+	struct ExecCtx
+	{
+		regex_t* context;
+		const char* str;
+	} ctx{&m_context, str};
+
+	return nzbget_rs_regex_match(
+		m_rsRegex, &ctx,
+		[](void* raw, int32_t* outSo, int32_t* outEo, size_t nmatch) -> int {
+			auto* c = static_cast<ExecCtx*>(raw);
+			std::vector<regmatch_t> matches(nmatch);
+			regmatch_t* pmatch = nmatch > 0 ? matches.data() : nullptr;
+			if (regexec(c->context, c->str, nmatch, pmatch, 0) != 0)
+			{
+				return 0;
+			}
+			for (size_t i = 0; i < nmatch; i++)
+			{
+				outSo[i] = static_cast<int32_t>(matches[i].rm_so);
+				outEo[i] = static_cast<int32_t>(matches[i].rm_eo);
+			}
+			return 1;
+		}) != 0;
 #else
+	(void)str;
 	return false;
 #endif
 }
 
 int RegEx::GetMatchCount()
 {
-#ifdef HAVE_REGEX_H
-	int count = 0;
-	if (m_matches)
-	{
-		while (count < m_matchBufSize && m_matches[count].rm_so > -1)
-		{
-			count++;
-		}
-	}
-	return count;
-#else
-	return 0;
-#endif
+	return nzbget_rs_regex_get_match_count(m_rsRegex);
 }
 
 int RegEx::GetMatchStart(int index)
 {
-#ifdef HAVE_REGEX_H
-	return m_matches[index].rm_so;
-#else
-	return 0;
-#endif
+	return nzbget_rs_regex_get_match_start(m_rsRegex, index);
 }
 
 int RegEx::GetMatchLen(int index)
 {
-#ifdef HAVE_REGEX_H
-	return nzbget_rs_ufs_regex_calc_match_len(m_matches[index].rm_so, m_matches[index].rm_eo);
-#else
-	return 0;
-#endif
+	return nzbget_rs_regex_get_match_len(m_rsRegex, index);
 }
 
 

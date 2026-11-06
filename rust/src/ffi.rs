@@ -31450,6 +31450,481 @@ pub unsafe extern "C" fn nzbget_rs_dupe_identity_read(
     }
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_benchmark_run(
+    dir_ptr: *const c_char,
+    dir_len: usize,
+    block_size_bytes: usize,
+    max_file_size_bytes: u64,
+    timeout_secs: i64,
+    space_ok: c_int,
+    available_bytes: u64,
+    space_err_ptr: *const c_char,
+    space_err_len: usize,
+    out_write_bytes: *mut u64,
+    out_write_ms: *mut f64,
+    out_read_bytes: *mut u64,
+    out_read_ms: *mut f64,
+    out_err: *mut RsBuf,
+) -> c_int {
+    let space_res = if space_ok != 0 {
+        Ok(available_bytes)
+    } else {
+        Err(String::from_utf8_lossy(bytes(space_err_ptr, space_err_len)).into_owned())
+    };
+    let timeout = std::time::Duration::from_secs(timeout_secs.max(0) as u64);
+    match crate::util::disk_benchmark_run_bytes(
+        bytes(dir_ptr, dir_len),
+        block_size_bytes,
+        max_file_size_bytes,
+        timeout,
+        space_res,
+    ) {
+        Ok(res) => {
+            if !out_write_bytes.is_null() {
+                *out_write_bytes = res.write_bytes;
+            }
+            if !out_write_ms.is_null() {
+                *out_write_ms = res.write_ms;
+            }
+            if !out_read_bytes.is_null() {
+                *out_read_bytes = res.read_bytes;
+            }
+            if !out_read_ms.is_null() {
+                *out_read_ms = res.read_ms;
+            }
+            0
+        }
+        Err(crate::util::DiskBenchmarkError::InvalidArgument(msg)) => {
+            if !out_err.is_null() {
+                *out_err = into_buf(msg.into_bytes());
+            }
+            1
+        }
+        Err(crate::util::DiskBenchmarkError::Runtime(msg)) => {
+            if !out_err.is_null() {
+                *out_err = into_buf(msg.into_bytes());
+            }
+            2
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_util_is_control_char(c: u8) -> c_int {
+    if crate::util::util_is_control_char(c) {
+        1
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_util_str_to_f64_checked(
+    s: *const c_char,
+    s_len: usize,
+    min_val: f64,
+    max_val: f64,
+    out_val: *mut f64,
+) -> c_int {
+    match crate::util::util_str_to_f64_checked(bytes(s, s_len), min_val, max_val) {
+        Some(v) => {
+            if !out_val.is_null() {
+                *out_val = v;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_util_str_to_i64_checked(
+    s: *const c_char,
+    s_len: usize,
+    min_val: i64,
+    max_val: i64,
+    out_val: *mut i64,
+) -> c_int {
+    match crate::util::util_str_to_i64_checked(bytes(s, s_len), min_val, max_val) {
+        Some(v) => {
+            if !out_val.is_null() {
+                *out_val = v;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_util_str_to_u64_checked(
+    s: *const c_char,
+    s_len: usize,
+    max_val: u64,
+    out_val: *mut u64,
+) -> c_int {
+    match crate::util::util_str_to_u64_checked(bytes(s, s_len), max_val) {
+        Some(v) => {
+            if !out_val.is_null() {
+                *out_val = v;
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_util_safe_int_cast_i64_to_i64(
+    num: i64,
+    min_to: i64,
+    max_to: i64,
+) -> i64 {
+    crate::util::util_safe_int_cast_i64_to_i64(num, min_to, max_to)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_util_safe_int_cast_u64_to_i64(num: u64, max_to: u64) -> i64 {
+    crate::util::util_safe_int_cast_u64_to_i64(num, max_to)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_util_safe_int_cast_i64_to_u64(num: i64, max_to: u64) -> u64 {
+    crate::util::util_safe_int_cast_i64_to_u64(num, max_to)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_util_safe_int_cast_u64_to_u64(num: u64, max_to: u64) -> u64 {
+    crate::util::util_safe_int_cast_u64_to_u64(num, max_to)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_regex_new(
+    valid: c_int,
+    match_buf_size: c_int,
+) -> *mut std::ffi::c_void {
+    Box::into_raw(Box::new(crate::util::PosixRegEx::new_with(
+        valid != 0,
+        match_buf_size,
+    )))
+    .cast()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_regex_free(handle: *mut std::ffi::c_void) {
+    if !handle.is_null() {
+        drop(Box::from_raw(handle.cast::<crate::util::PosixRegEx>()));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_regex_is_valid(handle: *const std::ffi::c_void) -> c_int {
+    if handle.is_null() {
+        return 0;
+    }
+    let rx = &*handle.cast::<crate::util::PosixRegEx>();
+    if rx.is_valid() { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_regex_match(
+    handle: *mut std::ffi::c_void,
+    ctx: *mut std::ffi::c_void,
+    exec_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *mut i32, *mut i32, usize) -> c_int>,
+) -> c_int {
+    if handle.is_null() {
+        return 0;
+    }
+    let rx = &mut *handle.cast::<crate::util::PosixRegEx>();
+    let matched = rx.exec_with(|matches| {
+        let Some(cb) = exec_cb else {
+            return false;
+        };
+        let n = matches.len();
+        let mut so = vec![-1i32; n];
+        let mut eo = vec![-1i32; n];
+        let ok = unsafe { cb(ctx, so.as_mut_ptr(), eo.as_mut_ptr(), n) != 0 };
+        if ok {
+            for i in 0..n {
+                matches[i] = (so[i], eo[i]);
+            }
+        }
+        ok
+    });
+    if matched { 1 } else { 0 }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_regex_get_match_count(
+    handle: *const std::ffi::c_void,
+) -> c_int {
+    if handle.is_null() {
+        return 0;
+    }
+    let rx = &*handle.cast::<crate::util::PosixRegEx>();
+    rx.match_count()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_regex_get_match_start(
+    handle: *const std::ffi::c_void,
+    index: c_int,
+) -> c_int {
+    if handle.is_null() {
+        return 0;
+    }
+    let rx = &*handle.cast::<crate::util::PosixRegEx>();
+    rx.match_start(index)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_regex_get_match_len(
+    handle: *const std::ffi::c_void,
+    index: c_int,
+) -> c_int {
+    if handle.is_null() {
+        return 0;
+    }
+    let rx = &*handle.cast::<crate::util::PosixRegEx>();
+    rx.match_len(index)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_article_batch_fetcher_new(
+    ctx: *mut std::ffi::c_void,
+    fetch_cb: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            usize,
+            *const c_char,
+            *const *const c_char,
+            usize,
+            *mut RsBuf,
+            *mut i64,
+            *mut i64,
+            *mut c_int,
+            *mut c_int,
+            *mut c_int,
+        ) -> c_int,
+    >,
+    stop_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+) -> *mut std::ffi::c_void {
+    let ctx_addr = ctx as usize;
+    let hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>> = stop_cb.map(|cb| {
+        std::sync::Arc::new(move || unsafe {
+            cb(ctx_addr as *mut std::ffi::c_void);
+        }) as std::sync::Arc<dyn Fn() + Send + Sync>
+    });
+    let batch = crate::nntp::ArticleBatchFetcher::new(
+        move |worker_idx, req| {
+            let Some(cb) = fetch_cb else {
+                return Err("no fetch callback".to_string());
+            };
+            let mut mid_c = Vec::with_capacity(req.message_id.len() + 1);
+            mid_c.extend_from_slice(&req.message_id);
+            mid_c.push(0);
+
+            let mut grp_c: Vec<Vec<u8>> = Vec::with_capacity(req.groups.len());
+            for g in req.groups.iter() {
+                let mut gc = Vec::with_capacity(g.len() + 1);
+                gc.extend_from_slice(g);
+                gc.push(0);
+                grp_c.push(gc);
+            }
+            let grp_ptrs: Vec<*const c_char> =
+                grp_c.iter().map(|g| g.as_ptr().cast::<c_char>()).collect();
+
+            let mut data_buf = RsBuf {
+                data: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            };
+            let mut offset: i64 = 0;
+            let mut file_size: i64 = 0;
+            let mut success: c_int = 0;
+            let mut retry: c_int = 0;
+            let mut transient: c_int = 0;
+            let ok = unsafe {
+                cb(
+                    ctx_addr as *mut std::ffi::c_void,
+                    worker_idx,
+                    mid_c.as_ptr().cast::<c_char>(),
+                    grp_ptrs.as_ptr(),
+                    grp_ptrs.len(),
+                    &mut data_buf,
+                    &mut offset,
+                    &mut file_size,
+                    &mut success,
+                    &mut retry,
+                    &mut transient,
+                )
+            };
+            let data = if !data_buf.data.is_null() {
+                unsafe {
+                    Vec::from_raw_parts(data_buf.data.cast::<u8>(), data_buf.len, data_buf.cap)
+                }
+            } else {
+                Vec::new()
+            };
+            if ok == 0 {
+                return Err("fetch exception".to_string());
+            }
+            Ok(crate::nntp::BatchFetchedArticle {
+                data,
+                offset,
+                file_size,
+                success: success != 0,
+                retry: retry != 0,
+                transient: transient != 0,
+            })
+        },
+        hook,
+    );
+    Box::into_raw(Box::new(batch)).cast()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_article_batch_fetcher_free(handle: *mut std::ffi::c_void) {
+    if !handle.is_null() {
+        drop(Box::from_raw(handle.cast::<crate::nntp::ArticleBatchFetcher>()));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_article_batch_fetcher_set_worker_count(
+    handle: *mut std::ffi::c_void,
+    worker_count: c_int,
+) {
+    if !handle.is_null() {
+        let batch = &*handle.cast::<crate::nntp::ArticleBatchFetcher>();
+        batch.set_worker_count(worker_count);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_article_batch_fetcher_get_window_parts(
+    handle: *const std::ffi::c_void,
+) -> c_int {
+    if handle.is_null() {
+        return crate::nntp::ARTICLE_BATCH_MAX_WINDOW_PARTS;
+    }
+    let batch = &*handle.cast::<crate::nntp::ArticleBatchFetcher>();
+    batch.get_window_parts()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_article_batch_fetcher_begin(
+    handle: *mut std::ffi::c_void,
+    req_count: usize,
+    ctx: *mut std::ffi::c_void,
+    get_req_cb: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            usize,
+            *mut *const c_char,
+            *mut usize,
+        ) -> usize,
+    >,
+    get_group_cb: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            usize,
+            usize,
+            *mut *const c_char,
+            *mut usize,
+        ),
+    >,
+) {
+    if handle.is_null() {
+        return;
+    }
+    let batch = &*handle.cast::<crate::nntp::ArticleBatchFetcher>();
+    let mut requests = Vec::with_capacity(req_count);
+    for i in 0..req_count {
+        let mut mid_ptr: *const c_char = std::ptr::null();
+        let mut mid_len: usize = 0;
+        let grp_count = get_req_cb.map_or(0, |cb| unsafe { cb(ctx, i, &mut mid_ptr, &mut mid_len) });
+        let mut groups = Vec::with_capacity(grp_count);
+        if let Some(gcb) = get_group_cb {
+            for g in 0..grp_count {
+                let mut g_ptr: *const c_char = std::ptr::null();
+                let mut g_len: usize = 0;
+                unsafe { gcb(ctx, i, g, &mut g_ptr, &mut g_len) };
+                groups.push(bytes(g_ptr, g_len).to_vec());
+            }
+        }
+        requests.push(crate::nntp::BatchRequest {
+            message_id: bytes(mid_ptr, mid_len).to_vec(),
+            groups: std::sync::Arc::new(groups),
+        });
+    }
+    batch.begin(requests);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_article_batch_fetcher_next(
+    handle: *mut std::ffi::c_void,
+    out_data: *mut RsBuf,
+    out_offset: *mut i64,
+    out_file_size: *mut i64,
+    out_success: *mut c_int,
+    out_retry: *mut c_int,
+    out_transient: *mut c_int,
+) -> c_int {
+    if handle.is_null() {
+        return 0;
+    }
+    let batch = &*handle.cast::<crate::nntp::ArticleBatchFetcher>();
+    match batch.next() {
+        Some(res) => {
+            if !out_data.is_null() {
+                *out_data = into_buf(res.data);
+            }
+            if !out_offset.is_null() {
+                *out_offset = res.offset;
+            }
+            if !out_file_size.is_null() {
+                *out_file_size = res.file_size;
+            }
+            if !out_success.is_null() {
+                *out_success = if res.success { 1 } else { 0 };
+            }
+            if !out_retry.is_null() {
+                *out_retry = if res.retry { 1 } else { 0 };
+            }
+            if !out_transient.is_null() {
+                *out_transient = if res.transient { 1 } else { 0 };
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_article_batch_fetcher_cancel_remaining(
+    handle: *mut std::ffi::c_void,
+) {
+    if !handle.is_null() {
+        let batch = &*handle.cast::<crate::nntp::ArticleBatchFetcher>();
+        batch.cancel_remaining();
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_article_batch_fetcher_stop(handle: *mut std::ffi::c_void) {
+    if !handle.is_null() {
+        let batch = &*handle.cast::<crate::nntp::ArticleBatchFetcher>();
+        batch.stop();
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_alloc_buf(data: *const c_char, len: usize) -> RsBuf {
+    into_buf(bytes(data, len).to_vec())
+}
+
 
 
 

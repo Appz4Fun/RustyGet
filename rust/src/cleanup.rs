@@ -1320,7 +1320,42 @@ where
     start_msg.push(b'\'');
     on_log(CleanupLogKind::Info, &start_msg);
 
-    let (supported, extracted) = extract_fn(archive_file, unpack_dir);
+    if filename_bytes.len() >= 4
+        && filename_bytes[filename_bytes.len() - 4..].eq_ignore_ascii_case(b".zip")
+    {
+        if let Ok(info) = crate::unpack::inspect_zip_file(archive_file) {
+            let detail = format!(
+                "ArchiveProcessor: zipview identified {:?} with {} file(s) ({} bytes) in '{}'",
+                info.kind,
+                info.file_count,
+                info.total_uncompressed_size,
+                String::from_utf8_lossy(filename_bytes)
+            );
+            on_log(CleanupLogKind::Detail, detail.as_bytes());
+        }
+    }
+
+    let (supported, extracted) = if crate::unpack::can_extract_with_zipfast(archive_file) {
+        let ok = crate::unpack::extract_archive_with_zipfast(
+            archive_file,
+            unpack_dir,
+            "",
+            1,
+            |kind, msg| {
+                let log_kind = match kind {
+                    1 => CleanupLogKind::Error,
+                    2 => CleanupLogKind::Warning,
+                    0 => CleanupLogKind::Info,
+                    _ => CleanupLogKind::Detail,
+                };
+                on_log(log_kind, msg.as_bytes());
+            },
+        )
+        .is_ok();
+        (true, ok)
+    } else {
+        extract_fn(archive_file, unpack_dir)
+    };
     if !supported {
         return false;
     }

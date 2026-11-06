@@ -1,6 +1,8 @@
 //! `DirectUnpack` (`daemon/postprocess/DirectUnpack.cpp`) and `UnpackController`
 //! (`daemon/postprocess/UnpackController.cpp`) end-to-end Rust implementation.
 
+use std::ffi::{c_char, c_int, CStr};
+
 pub use crate::postrepair::NzbgetRsUnpackMessageInfo;
 
 #[inline]
@@ -676,6 +678,747 @@ pub fn extractor_make_password(password: &[u8]) -> Vec<u8> {
     }
 }
 
+// ============================================================================
+// ZIP Content Identification (`zipview`) & Native Archive Extraction (`zipfast`)
+// ============================================================================
+
+/// High-level classification of what is inside a ZIP container, determined by [`inspect_zip_bytes`].
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZipContentKind {
+    /// Archive contains no file entries.
+    Empty = 0,
+    /// Archive contains one or more `.nzb` files (for `Incoming::ArchiveProcessor` / `Scanner`).
+    NzbArchive = 1,
+    /// Archive contains an NZBGet extension package (`manifest.json`).
+    ExtensionPackage = 2,
+    /// Archive contains video, audio, or disc-image media files.
+    MediaArchive = 3,
+    /// Archive contains nested archives or parity files (`.rar`, `.7z`, `.zip`, `.par2`, etc.).
+    NestedArchive = 4,
+    /// ZIP-based document or application container (`.epub`, `.docx`/`.xlsx`/`.pptx`, `.odt`/`.ods`/`.odp`, `.cbz`, `.jar`/`.apk`).
+    DocumentContainer = 5,
+    /// Archive contains other regular files.
+    GeneralFiles = 6,
+}
+
+/// Metadata for a single entry inside a ZIP archive inspected by `zipview`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZipEntryInfo {
+    pub name: String,
+    pub uncompressed_size: u64,
+    pub compressed_size: u64,
+    pub compression_method: u16,
+    pub effective_compression: u16,
+    pub compression_name: &'static str,
+    pub crc32: u32,
+    pub local_header_offset: u64,
+    pub is_dir: bool,
+    pub is_encrypted: bool,
+    pub is_symlink: bool,
+}
+
+/// Summary of a ZIP archive's contents produced by [`inspect_zip_bytes`] / [`inspect_zip_file`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZipArchiveInspection {
+    pub kind: ZipContentKind,
+    pub entries: Vec<ZipEntryInfo>,
+    pub file_count: usize,
+    pub dir_count: usize,
+    pub total_uncompressed_size: u64,
+    pub total_compressed_size: u64,
+    pub has_encrypted_entries: bool,
+    pub has_compressed_entries: bool,
+    pub has_symlinks: bool,
+    pub has_nzb_files: bool,
+    /// `(entry_name, uncompressed_size, is_compressed)` of the largest regular file entry.
+    pub largest_file: Option<(String, u64, bool)>,
+}
+
+fn is_image_ext(ext: &[u8]) -> bool {
+    matches!(
+        ext,
+        b".jpg" | b".jpeg" | b".png" | b".webp" | b".gif" | b".bmp" | b".avif" | b".jxl"
+    )
+}
+
+fn entry_base_and_lower_ext(name: &str) -> (&str, Vec<u8>) {
+    let trimmed = name.trim_end_matches(['/', '\\']);
+    let base = trimmed
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(trimmed);
+    let ext = match base.rfind('.') {
+        Some(pos) if pos > 0 => base[pos..].bytes().map(|b| b.to_ascii_lowercase()).collect(),
+        _ => Vec::new(),
+    };
+    (base, ext)
+}
+
+/// Inspects an in-memory ZIP archive using `zipview::ZipReader`, enumerating all entries
+/// and classifying the archive's payload (`ZipContentKind`).
+pub fn inspect_zip_bytes(bytes: &[u8]) -> Result<ZipArchiveInspection, zipview::ZipReadError> {
+    let reader = zipview::ZipReader::new(bytes)?;
+    let mut entries = Vec::with_capacity(reader.len());
+    let mut file_count = 0usize;
+    let mut dir_count = 0usize;
+    let mut total_uncompressed_size = 0u64;
+    let mut total_compressed_size = 0u64;
+    let mut has_encrypted_entries = false;
+    let mut has_compressed_entries = false;
+    let mut has_symlinks = false;
+    let mut has_nzb_files = false;
+    let mut has_extension_manifest = false;
+    let mut has_media_files = false;
+    let mut has_nested_archives = false;
+    let mut has_document_marker = false;
+    let mut image_file_count = 0usize;
+    let mut largest_file: Option<(String, u64, bool)> = None;
+
+    if reader.contains("[Content_Types].xml")
+        || reader.contains("META-INF/container.xml")
+        || reader.contains("META-INF/manifest.xml")
+        || reader.contains("META-INF/MANIFEST.MF")
+        || reader.contains("AndroidManifest.xml")
+    {
+        has_document_marker = true;
+    } else if reader.contains("mimetype") {
+        if let Ok(mime) = reader.read_to_string("mimetype") {
+            let trimmed = mime.trim();
+            if trimmed.starts_with("application/epub+zip")
+                || trimmed.starts_with("application/vnd.oasis.opendocument")
+            {
+                has_document_marker = true;
+            }
+        }
+    }
+
+    for entry in reader.entries() {
+        let is_dir = entry.is_dir()
+            || entry
+                .unix_mode()
+                .is_some_and(|m| (m & 0o170000) == 0o040000);
+        let is_symlink = entry
+            .unix_mode()
+            .is_some_and(|m| (m & 0o170000) == 0o120000);
+        let is_encrypted = entry.is_encrypted();
+        let eff_comp = entry.effective_compression();
+        let is_compressed = !is_dir && eff_comp != 0;
+
+        has_symlinks |= is_symlink;
+        has_encrypted_entries |= is_encrypted;
+
+        if is_dir {
+            dir_count += 1;
+        } else {
+            file_count += 1;
+            total_uncompressed_size = total_uncompressed_size.saturating_add(entry.size());
+            total_compressed_size = total_compressed_size.saturating_add(entry.compressed_size());
+            has_compressed_entries |= is_compressed;
+
+            let (base, ext) = entry_base_and_lower_ext(entry.name());
+            if base.eq_ignore_ascii_case("manifest.json") {
+                if is_encrypted {
+                    has_extension_manifest = true;
+                } else if let Ok(manifest_text) = reader.read_to_string(entry.name()) {
+                    if manifest_text.contains("\"name\"") && manifest_text.contains("\"main\"") {
+                        has_extension_manifest = true;
+                    }
+                }
+            }
+            if ext == b".nzb" {
+                has_nzb_files = true;
+            } else if crate::filetypes::is_video_ext(&ext)
+                || crate::filetypes::is_audio_ext(&ext)
+                || crate::filetypes::is_disc_structure_ext(&ext)
+                || crate::filetypes::is_disc_descriptor_ext(&ext)
+                || ext == b".iso"
+                || ext == b".img"
+            {
+                has_media_files = true;
+            } else if crate::filetypes::is_rar_ext(&ext)
+                || crate::filetypes::is_seven_zip_ext(&ext)
+                || ext == b".par2"
+            {
+                has_nested_archives = true;
+            } else if is_image_ext(&ext) {
+                image_file_count += 1;
+            }
+
+            if !is_symlink
+                && largest_file
+                    .as_ref()
+                    .is_none_or(|(_, max_sz, _)| entry.size() > *max_sz)
+            {
+                largest_file = Some((base.to_string(), entry.size(), is_compressed));
+            }
+        }
+
+        entries.push(ZipEntryInfo {
+            name: entry.name().to_string(),
+            uncompressed_size: entry.size(),
+            compressed_size: entry.compressed_size(),
+            compression_method: entry.compression(),
+            effective_compression: eff_comp,
+            compression_name: entry.compression_name(),
+            crc32: entry.crc32(),
+            local_header_offset: entry.local_header_offset(),
+            is_dir,
+            is_encrypted,
+            is_symlink,
+        });
+    }
+
+    let kind = if file_count == 0 {
+        ZipContentKind::Empty
+    } else if has_extension_manifest {
+        ZipContentKind::ExtensionPackage
+    } else if has_nzb_files {
+        ZipContentKind::NzbArchive
+    } else if has_document_marker || (image_file_count == file_count && file_count >= 2) {
+        ZipContentKind::DocumentContainer
+    } else if has_media_files {
+        ZipContentKind::MediaArchive
+    } else if has_nested_archives {
+        ZipContentKind::NestedArchive
+    } else {
+        ZipContentKind::GeneralFiles
+    };
+
+    Ok(ZipArchiveInspection {
+        kind,
+        entries,
+        file_count,
+        dir_count,
+        total_uncompressed_size,
+        total_compressed_size,
+        has_encrypted_entries,
+        has_compressed_entries,
+        has_symlinks,
+        has_nzb_files,
+        largest_file,
+    })
+}
+
+/// Maximum archive size (64 MiB) read wholly into memory for `zipview::ZipReader` payload inspection.
+/// Larger ZIP files on disk are inspected via bounded central-directory seeks (`zipfast::zip::Archive::open`).
+pub const MAX_IN_MEMORY_ZIP_INSPECT_BYTES: u64 = 64 * 1024 * 1024;
+
+fn compression_method_name(method: u16) -> &'static str {
+    match method {
+        0 => "Stored",
+        8 => "Deflate",
+        9 => "Deflate64",
+        12 => "BZip2",
+        14 => "LZMA",
+        93 => "Zstandard",
+        95 => "XZ",
+        99 => "WinZip AES",
+        _ => "Unknown",
+    }
+}
+
+/// Inspects a ZIP file's central directory via bounded file seeks without reading entry payloads into memory.
+pub fn inspect_zip_file_via_central_directory(
+    path: &std::path::Path,
+) -> Result<ZipArchiveInspection, String> {
+    let archive = zipfast::zip::Archive::open(path).map_err(|e| e.to_string())?;
+    let mut entries = Vec::with_capacity(archive.entries.len());
+    let mut file_count = 0usize;
+    let mut dir_count = 0usize;
+    let mut total_uncompressed_size = 0u64;
+    let mut total_compressed_size = 0u64;
+    let mut has_encrypted_entries = false;
+    let mut has_compressed_entries = false;
+    let mut has_symlinks = false;
+    let mut has_nzb_files = false;
+    let mut has_extension_manifest = false;
+    let mut has_media_files = false;
+    let mut has_nested_archives = false;
+    let mut has_document_marker = false;
+    let mut image_file_count = 0usize;
+    let mut largest_file: Option<(String, u64, bool)> = None;
+
+    for entry in &archive.entries {
+        let is_dir = entry.is_dir();
+        let is_symlink = entry.is_link();
+        let is_encrypted = entry.encrypted();
+        let eff_comp = entry.effective_method();
+        let is_compressed = !is_dir && eff_comp != 0;
+
+        has_symlinks |= is_symlink;
+        has_encrypted_entries |= is_encrypted;
+
+        if matches!(
+            entry.name.as_str(),
+            "[Content_Types].xml"
+                | "META-INF/container.xml"
+                | "META-INF/manifest.xml"
+                | "META-INF/MANIFEST.MF"
+                | "AndroidManifest.xml"
+                | "mimetype"
+        ) {
+            has_document_marker = true;
+        }
+
+        if is_dir {
+            dir_count += 1;
+        } else {
+            file_count += 1;
+            total_uncompressed_size = total_uncompressed_size.saturating_add(entry.size);
+            total_compressed_size = total_compressed_size.saturating_add(entry.packed);
+            has_compressed_entries |= is_compressed;
+
+            let (base, ext) = entry_base_and_lower_ext(&entry.name);
+            if base.eq_ignore_ascii_case("manifest.json") {
+                has_extension_manifest = true;
+            }
+            if ext == b".nzb" {
+                has_nzb_files = true;
+            } else if crate::filetypes::is_video_ext(&ext)
+                || crate::filetypes::is_audio_ext(&ext)
+                || crate::filetypes::is_disc_structure_ext(&ext)
+                || crate::filetypes::is_disc_descriptor_ext(&ext)
+                || ext == b".iso"
+                || ext == b".img"
+            {
+                has_media_files = true;
+            } else if crate::filetypes::is_rar_ext(&ext)
+                || crate::filetypes::is_seven_zip_ext(&ext)
+                || ext == b".par2"
+            {
+                has_nested_archives = true;
+            } else if is_image_ext(&ext) {
+                image_file_count += 1;
+            }
+
+            if !is_symlink
+                && largest_file
+                    .as_ref()
+                    .is_none_or(|(_, max_sz, _)| entry.size > *max_sz)
+            {
+                largest_file = Some((base.to_string(), entry.size, is_compressed));
+            }
+        }
+
+        entries.push(ZipEntryInfo {
+            name: entry.name.clone(),
+            uncompressed_size: entry.size,
+            compressed_size: entry.packed,
+            compression_method: entry.method,
+            effective_compression: eff_comp,
+            compression_name: compression_method_name(eff_comp),
+            crc32: entry.crc32,
+            local_header_offset: entry.local_at,
+            is_dir,
+            is_encrypted,
+            is_symlink,
+        });
+    }
+
+    let kind = if file_count == 0 {
+        ZipContentKind::Empty
+    } else if has_extension_manifest {
+        ZipContentKind::ExtensionPackage
+    } else if has_nzb_files {
+        ZipContentKind::NzbArchive
+    } else if has_document_marker || (image_file_count == file_count && file_count >= 2) {
+        ZipContentKind::DocumentContainer
+    } else if has_media_files {
+        ZipContentKind::MediaArchive
+    } else if has_nested_archives {
+        ZipContentKind::NestedArchive
+    } else {
+        ZipContentKind::GeneralFiles
+    };
+
+    Ok(ZipArchiveInspection {
+        kind,
+        entries,
+        file_count,
+        dir_count,
+        total_uncompressed_size,
+        total_compressed_size,
+        has_encrypted_entries,
+        has_compressed_entries,
+        has_symlinks,
+        has_nzb_files,
+        largest_file,
+    })
+}
+
+/// Inspects a ZIP file on disk using `zipview::ZipReader` when `<= 64 MiB`,
+/// or via bounded central-directory seeks (`zipfast::zip::Archive::open`) for larger files.
+pub fn inspect_zip_file(path: &std::path::Path) -> Result<ZipArchiveInspection, String> {
+    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if meta.len() <= MAX_IN_MEMORY_ZIP_INSPECT_BYTES {
+        let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+        inspect_zip_bytes(&bytes).map_err(|e| e.to_string())
+    } else {
+        inspect_zip_file_via_central_directory(path)
+    }
+}
+
+/// Verifies whether `password` satisfies the encryption header check of encrypted entries
+/// in an in-memory ZIP archive using `zipview::PasswordCheck`.
+/// Returns `Ok(true)` if the archive has no encrypted entries or `password` is accepted by all
+/// verifiable encrypted entries; `Ok(false)` if rejected.
+pub fn verify_zip_password_bytes(
+    bytes: &[u8],
+    password: &str,
+) -> Result<bool, zipview::ZipReadError> {
+    let reader = zipview::ZipReader::new(bytes)?;
+    for entry in reader.entries() {
+        if entry.is_encrypted() {
+            if password.is_empty() {
+                return Ok(false);
+            }
+            if let Some(check) = reader.password_check(entry) {
+                if !check.accepts(password) {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// Verifies whether `password` is accepted for a ZIP file on disk using `zipview::PasswordCheck`
+/// (bounded to archives `<= 64 MiB`).
+pub fn verify_zip_password_file(path: &std::path::Path, password: &str) -> Result<bool, String> {
+    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if meta.len() > MAX_IN_MEMORY_ZIP_INSPECT_BYTES {
+        return Err("ZIP archive exceeds in-memory inspection limit".to_string());
+    }
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    verify_zip_password_bytes(&bytes, password).map_err(|e| e.to_string())
+}
+
+/// Reads and decompresses a single named entry from an in-memory ZIP archive using `zipview`.
+pub fn read_zip_entry_bytes(
+    bytes: &[u8],
+    name: &str,
+    password: Option<&str>,
+) -> Result<Vec<u8>, zipview::ZipReadError> {
+    let reader = zipview::ZipReader::new(bytes)?;
+    reader.read_by_name_with_password(name, password)
+}
+
+fn has_suffix_icase(path: &[u8], suffix: &[u8]) -> bool {
+    path.len() >= suffix.len() && path[path.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+}
+
+/// Returns `true` if `path` has an archive filename extension natively supported by `zipfast`
+/// without needing to inspect magic bytes on disk (`.zip`, `.cbz`, `.tar`, `.gz`, `.tgz`,
+/// `.bz2`, `.tbz2`, `.tbz`, `.xz`, `.txz`, `.zst`, `.tzst`).
+pub fn is_zipfast_supported_extension(path: &[u8]) -> bool {
+    has_suffix_icase(path, b".zip")
+        || has_suffix_icase(path, b".cbz")
+        || has_suffix_icase(path, b".tar")
+        || has_suffix_icase(path, b".gz")
+        || has_suffix_icase(path, b".tgz")
+        || has_suffix_icase(path, b".bz2")
+        || has_suffix_icase(path, b".tbz2")
+        || has_suffix_icase(path, b".tbz")
+        || has_suffix_icase(path, b".xz")
+        || has_suffix_icase(path, b".txz")
+        || has_suffix_icase(path, b".zst")
+        || has_suffix_icase(path, b".tzst")
+}
+
+#[cfg(unix)]
+fn path_to_bytes(path: &std::path::Path) -> &[u8] {
+    use std::os::unix::ffi::OsStrExt;
+    path.as_os_str().as_bytes()
+}
+
+#[cfg(not(unix))]
+fn path_to_bytes(path: &std::path::Path) -> &[u8] {
+    path.to_str().map(str::as_bytes).unwrap_or(b"")
+}
+
+/// Returns `true` if `path` can be extracted natively in-process by `zipfast`.
+///
+/// - `.7z` archives (or files with the 7z signature) return `false` so `SevenZip` handles them.
+/// - `.rar` archives return `true` when the file on disk has a RAR 5.0 header (`Rar!\x1a\x07\x01\x00`),
+///   and `false` for RAR 1.5–4.x (`Rar!\x1a\x07\x00`) so `Unrar` handles legacy RAR volumes.
+/// - `.zip`, `.tar`, `.gz`, `.bz2`, `.xz`, `.tgz`, `.tbz2`, `.txz`, `.zst`, `.tzst` return `true`.
+pub fn can_extract_with_zipfast(path: &std::path::Path) -> bool {
+    let bytes = path_to_bytes(path);
+    let fname = path_filename(bytes);
+    if matches!(classify_archive_file(fname), 2 | 3) {
+        return false;
+    }
+    if let Ok(mut file) = std::fs::File::open(path) {
+        use std::io::Read;
+        let mut head = [0u8; 512];
+        let n = file.read(&mut head).unwrap_or(0);
+        if n >= 6 && head[..6] == [b'7', b'z', 0xbc, 0xaf, 0x27, 0x1c] {
+            return false;
+        }
+        if n >= 6 && &head[..6] == b"Rar!\x1a\x07" {
+            return n >= 8 && detect_rar_signature(&head[..8]) == 5;
+        }
+        if matches!(classify_archive_file(fname), 1 | 5) {
+            return false;
+        }
+        if is_zipfast_supported_extension(bytes) {
+            return true;
+        }
+        let slice = &head[..n];
+        return zipfast::zip::sniff(slice)
+            || zipfast::stream::Codec::sniff(slice).is_some()
+            || zipfast::tar::sniff_tar(slice);
+    }
+    is_zipfast_supported_extension(bytes)
+}
+
+/// Lists archive entries using `zipfast::extract::list_with_password`.
+pub fn list_archive_with_zipfast(
+    path: &std::path::Path,
+    password: Option<&str>,
+) -> Result<Vec<zipfast::extract::Entry>, String> {
+    let pw = password.filter(|s| !s.is_empty());
+    zipfast::extract::list_with_password(path, pw).map_err(|e| e.to_string())
+}
+
+/// Extracts `archive_path` into `output_dir` natively in-process using `zipfast` (with pre-inspection
+/// via `zipview` for ZIP containers).
+///
+/// `overwrite_mode`: `0 = Skip`, `1 = Overwrite`, `2 = AutoRename`.
+/// `log_cb(kind, message)` uses `Message::EKind` values (`0 = mkInfo`, `1 = mkError`, `2 = mkWarning`, `4 = mkDetail`).
+pub fn extract_archive_with_zipfast<F>(
+    archive_path: &std::path::Path,
+    output_dir: &std::path::Path,
+    password: &str,
+    overwrite_mode: i32,
+    mut log_cb: F,
+) -> Result<zipfast::extract::Summary, String>
+where
+    F: FnMut(i32, &str),
+{
+    let overwrite = match overwrite_mode {
+        0 => zipfast::extract::Overwrite::Skip,
+        _ => zipfast::extract::Overwrite::Always,
+    };
+
+    if let Err(e) = std::fs::create_dir_all(output_dir) {
+        let msg = format!("Could not create output directory {}: {e}", output_dir.display());
+        log_cb(1, &msg);
+        return Err(msg);
+    }
+
+    let pw_opt = (!password.is_empty()).then_some(password);
+
+    // Pre-inspect ZIP archives with `zipview` when within reasonable in-memory bounds (<= 64 MiB)
+    // to identify inner contents, reject symlinks before writing any file, and verify passwords.
+    let path_bytes = path_to_bytes(archive_path);
+    if has_suffix_icase(path_bytes, b".zip") || has_suffix_icase(path_bytes, b".cbz") {
+        if let Ok(meta) = std::fs::metadata(archive_path) {
+            if meta.len() <= 64 * 1024 * 1024 {
+                if let Ok(bytes) = std::fs::read(archive_path) {
+                    if let Ok(inspection) = inspect_zip_bytes(&bytes) {
+                        log_cb(
+                            4,
+                            &format!(
+                                "zipview identified {:?} with {} file(s) ({} bytes uncompressed)",
+                                inspection.kind,
+                                inspection.file_count,
+                                inspection.total_uncompressed_size
+                            ),
+                        );
+                        if inspection.has_symlinks {
+                            log_cb(1, "ERROR: Dangerous link path was ignored");
+                            log_cb(0, "Stream repair: archive contains link");
+                            return Err("archive contains link".to_string());
+                        }
+                        if inspection.has_encrypted_entries {
+                            if password.is_empty() {
+                                let msg = "Archive is encrypted and requires a password";
+                                log_cb(1, msg);
+                                return Err(msg.to_string());
+                            }
+                            if let Ok(false) = verify_zip_password_bytes(&bytes, password) {
+                                let msg = "Archive password rejected by zipview verifier";
+                                log_cb(1, msg);
+                                return Err(msg.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Also check `zipfast` entry list for symlinks before extracting so no partial files are written
+    // when an archive contains a symlink entry.
+    if let Ok(entries) = zipfast::extract::list_with_password(archive_path, pw_opt) {
+        if entries.iter().any(|e| e.link.is_some()) {
+            log_cb(1, "ERROR: Dangerous link path was ignored");
+            log_cb(0, "Stream repair: archive contains link");
+            return Err("archive contains link".to_string());
+        }
+    }
+
+    let opts = zipfast::extract::Options {
+        mode: zipfast::extract::Mode::Extract,
+        dest: output_dir.to_path_buf(),
+        overwrite,
+        flatten: false,
+        threads: Some(3),
+        parallel_min: None,
+    };
+
+    let summary = zipfast::extract::run_with_password(archive_path, &opts, pw_opt, |line| {
+        log_cb(4, line);
+    })
+    .map_err(|e| {
+        let msg = e.to_string();
+        log_cb(1, &msg);
+        msg
+    })?;
+
+    if !summary.errors.is_empty() {
+        for err in &summary.errors {
+            if err.contains("links are not supported") || err.contains("link") {
+                log_cb(1, "ERROR: Dangerous link path was ignored");
+                log_cb(0, "Stream repair: archive contains link");
+            }
+            log_cb(1, err);
+        }
+        return Err(summary.errors.join("; "));
+    }
+
+    log_cb(
+        4,
+        &format!(
+            "Extracted {} file(s) ({} bytes) with zipfast",
+            summary.files, summary.bytes
+        ),
+    );
+    log_cb(4, "Everything is Ok");
+    Ok(summary)
+}
+
+#[cfg(unix)]
+fn cstr_to_path(ptr: *const c_char) -> Option<std::path::PathBuf> {
+    if ptr.is_null() {
+        return None;
+    }
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = unsafe { CStr::from_ptr(ptr).to_bytes() };
+    if bytes.is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
+}
+
+#[cfg(not(unix))]
+fn cstr_to_path(ptr: *const c_char) -> Option<std::path::PathBuf> {
+    if ptr.is_null() {
+        return None;
+    }
+    let s = unsafe { CStr::from_ptr(ptr).to_str().ok()? };
+    if s.is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(s))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_unpack_is_zipfast_supported_extension(
+    archive_path: *const c_char,
+) -> c_int {
+    if archive_path.is_null() {
+        return 0;
+    }
+    let bytes = unsafe { CStr::from_ptr(archive_path).to_bytes() };
+    i32::from(is_zipfast_supported_extension(bytes))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_unpack_can_extract_with_zipfast(
+    archive_path: *const c_char,
+) -> c_int {
+    let Some(path) = cstr_to_path(archive_path) else {
+        return 0;
+    };
+    i32::from(can_extract_with_zipfast(&path))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_unpack_extract_with_zipfast(
+    archive_path: *const c_char,
+    output_dir: *const c_char,
+    password: *const c_char,
+    overwrite_mode: c_int,
+    log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
+    log_ctx: *mut std::ffi::c_void,
+) -> c_int {
+    let Some(arch) = cstr_to_path(archive_path) else {
+        return 0;
+    };
+    let Some(out) = cstr_to_path(output_dir) else {
+        return 0;
+    };
+    let pw = if password.is_null() {
+        ""
+    } else {
+        unsafe { CStr::from_ptr(password).to_str().unwrap_or("") }
+    };
+    let res = extract_archive_with_zipfast(&arch, &out, pw, overwrite_mode, |kind, msg| {
+        if let Some(cb) = log_cb {
+            if let Ok(cmsg) = std::ffi::CString::new(msg) {
+                unsafe { cb(log_ctx, kind, cmsg.as_ptr()) };
+            }
+        }
+    });
+    i32::from(res.is_ok())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_zipview_inspect_file(
+    archive_path: *const c_char,
+    out_kind: *mut c_int,
+    out_file_count: *mut usize,
+    out_total_uncompressed: *mut u64,
+    out_has_encrypted: *mut c_int,
+    out_has_compressed: *mut c_int,
+    out_has_symlinks: *mut c_int,
+    out_has_nzb: *mut c_int,
+) -> c_int {
+    let Some(path) = cstr_to_path(archive_path) else {
+        return 0;
+    };
+    let Ok(info) = inspect_zip_file(&path) else {
+        return 0;
+    };
+    unsafe {
+        if !out_kind.is_null() {
+            *out_kind = info.kind as c_int;
+        }
+        if !out_file_count.is_null() {
+            *out_file_count = info.file_count;
+        }
+        if !out_total_uncompressed.is_null() {
+            *out_total_uncompressed = info.total_uncompressed_size;
+        }
+        if !out_has_encrypted.is_null() {
+            *out_has_encrypted = i32::from(info.has_encrypted_entries);
+        }
+        if !out_has_compressed.is_null() {
+            *out_has_compressed = i32::from(info.has_compressed_entries);
+        }
+        if !out_has_symlinks.is_null() {
+            *out_has_symlinks = i32::from(info.has_symlinks);
+        }
+        if !out_has_nzb.is_null() {
+            *out_has_nzb = i32::from(info.has_nzb_files);
+        }
+    }
+    1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -794,5 +1537,362 @@ mod tests {
             &mut dif_size_min
         ));
         assert!(check_joinable_fragments(count, min, max, dif_size_min, false));
+    }
+
+    fn test_crc32(data: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &b in data {
+            let mut c = (crc ^ u32::from(b)) & 0xFF;
+            for _ in 0..8 {
+                c = if c & 1 != 0 {
+                    (c >> 1) ^ 0xEDB8_8320
+                } else {
+                    c >> 1
+                };
+            }
+            crc = (crc >> 8) ^ c;
+        }
+        !crc
+    }
+
+    /// Builds a valid ZIP archive in memory from `(name, payload, unix_mode, flags, encrypted_payload)`.
+    fn build_test_zip(entries: &[(&str, &[u8], Option<u32>, u16, Option<&[u8]>)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut cd = Vec::new();
+
+        for &(name, plain_data, unix_mode, flags, enc_override) in entries {
+            let local_offset = out.len() as u32;
+            let crc = test_crc32(plain_data);
+            let stored_bytes = enc_override.unwrap_or(plain_data);
+            let comp_size = stored_bytes.len() as u32;
+            let uncomp_size = plain_data.len() as u32;
+            let name_bytes = name.as_bytes();
+
+            // Local file header
+            out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+            out.extend_from_slice(&20u16.to_le_bytes()); // version needed
+            out.extend_from_slice(&flags.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes()); // Stored (method 0)
+            out.extend_from_slice(&0u16.to_le_bytes()); // mod time
+            out.extend_from_slice(&0u16.to_le_bytes()); // mod date
+            out.extend_from_slice(&crc.to_le_bytes());
+            out.extend_from_slice(&comp_size.to_le_bytes());
+            out.extend_from_slice(&uncomp_size.to_le_bytes());
+            out.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes()); // extra len
+            out.extend_from_slice(name_bytes);
+            out.extend_from_slice(stored_bytes);
+
+            // Central directory header
+            let version_made_by: u16 = if unix_mode.is_some() { (3 << 8) | 20 } else { 20 };
+            let ext_attr: u32 = unix_mode.map_or(0, |m| m << 16);
+            cd.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+            cd.extend_from_slice(&version_made_by.to_le_bytes());
+            cd.extend_from_slice(&20u16.to_le_bytes());
+            cd.extend_from_slice(&flags.to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes()); // Stored
+            cd.extend_from_slice(&0u16.to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes());
+            cd.extend_from_slice(&crc.to_le_bytes());
+            cd.extend_from_slice(&comp_size.to_le_bytes());
+            cd.extend_from_slice(&uncomp_size.to_le_bytes());
+            cd.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes()); // extra len
+            cd.extend_from_slice(&0u16.to_le_bytes()); // comment len
+            cd.extend_from_slice(&0u16.to_le_bytes()); // disk start
+            cd.extend_from_slice(&0u16.to_le_bytes()); // internal attr
+            cd.extend_from_slice(&ext_attr.to_le_bytes());
+            cd.extend_from_slice(&local_offset.to_le_bytes());
+            cd.extend_from_slice(name_bytes);
+        }
+
+        let cd_offset = out.len() as u32;
+        let cd_size = cd.len() as u32;
+        let count = entries.len() as u16;
+        out.extend_from_slice(&cd);
+
+        // EOCD
+        out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&count.to_le_bytes());
+        out.extend_from_slice(&count.to_le_bytes());
+        out.extend_from_slice(&cd_size.to_le_bytes());
+        out.extend_from_slice(&cd_offset.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out
+    }
+
+    fn zipcrypto_encrypt(password: &str, check_byte: u8, plain: &[u8]) -> Vec<u8> {
+        fn crc_byte(crc: u32, b: u8) -> u32 {
+            let mut c = (crc ^ u32::from(b)) & 0xff;
+            for _ in 0..8 {
+                c = if c & 1 != 0 {
+                    (c >> 1) ^ 0xedb8_8320
+                } else {
+                    c >> 1
+                };
+            }
+            (crc >> 8) ^ c
+        }
+        fn update(keys: &mut [u32; 3], b: u8) {
+            keys[0] = crc_byte(keys[0], b);
+            keys[1] = keys[1]
+                .wrapping_add(keys[0] & 0xff)
+                .wrapping_mul(134_775_813)
+                .wrapping_add(1);
+            keys[2] = crc_byte(keys[2], (keys[1] >> 24) as u8);
+        }
+        fn stream_byte(keys: &[u32; 3]) -> u8 {
+            let t = keys[2] | 2;
+            (t.wrapping_mul(t ^ 1) >> 8) as u8
+        }
+
+        let mut keys = [0x1234_5678u32, 0x2345_6789, 0x3456_7890];
+        for &b in password.as_bytes() {
+            update(&mut keys, b);
+        }
+        let mut header = [0x42u8; 12];
+        header[11] = check_byte;
+        let mut out = Vec::with_capacity(12 + plain.len());
+        for &p in &header {
+            let k = stream_byte(&keys);
+            update(&mut keys, p);
+            out.push(p ^ k);
+        }
+        for &p in plain {
+            let k = stream_byte(&keys);
+            update(&mut keys, p);
+            out.push(p ^ k);
+        }
+        out
+    }
+
+    #[test]
+    fn test_zipview_content_identification_and_passwords() {
+        // 1. Empty ZIP
+        let empty_zip = build_test_zip(&[]);
+        let info = inspect_zip_bytes(&empty_zip).unwrap();
+        assert_eq!(info.kind, ZipContentKind::Empty);
+        assert_eq!(info.file_count, 0);
+
+        // 2. NZB Archive
+        let nzb_zip = build_test_zip(&[
+            ("releases/movie.nzb", b"<nzb></nzb>", None, 0, None),
+            ("releases/readme.txt", b"info", None, 0, None),
+        ]);
+        let info = inspect_zip_bytes(&nzb_zip).unwrap();
+        assert_eq!(info.kind, ZipContentKind::NzbArchive);
+        assert!(info.has_nzb_files);
+        assert_eq!(info.file_count, 2);
+        assert_eq!(
+            read_zip_entry_bytes(&nzb_zip, "releases/movie.nzb", None).unwrap(),
+            b"<nzb></nzb>"
+        );
+
+        // 3. Extension Package
+        let manifest = br#"{"name": "Email", "main": "main.py"}"#;
+        let ext_zip = build_test_zip(&[
+            ("Email/manifest.json", manifest, None, 0, None),
+            ("Email/main.py", b"print('hi')", None, 0, None),
+        ]);
+        let info = inspect_zip_bytes(&ext_zip).unwrap();
+        assert_eq!(info.kind, ZipContentKind::ExtensionPackage);
+
+        // 4. Media Archive + largest_file
+        let media_zip = build_test_zip(&[
+            ("release/sample.nfo", b"nfo", None, 0, None),
+            ("release/movie.mkv", &[0xAA; 1024], None, 0, None),
+        ]);
+        let info = inspect_zip_bytes(&media_zip).unwrap();
+        assert_eq!(info.kind, ZipContentKind::MediaArchive);
+        assert_eq!(
+            info.largest_file,
+            Some(("movie.mkv".to_string(), 1024, false))
+        );
+
+        // 5. Document Container (EPUB & CBZ)
+        let epub_zip = build_test_zip(&[
+            ("mimetype", b"application/epub+zip", None, 0, None),
+            ("OEBPS/content.opf", b"<package/>", None, 0, None),
+        ]);
+        assert_eq!(
+            inspect_zip_bytes(&epub_zip).unwrap().kind,
+            ZipContentKind::DocumentContainer
+        );
+
+        let cbz_zip = build_test_zip(&[
+            ("001.jpg", b"img1", None, 0, None),
+            ("002.png", b"img2", None, 0, None),
+        ]);
+        assert_eq!(
+            inspect_zip_bytes(&cbz_zip).unwrap().kind,
+            ZipContentKind::DocumentContainer
+        );
+
+        // 6. Symlink detection
+        let sym_zip = build_test_zip(&[
+            ("movie.mkv", b"data", Some(0o100644), 0, None),
+            ("link.mkv", b"movie.mkv", Some(0o120777), 0, None),
+        ]);
+        let sym_info = inspect_zip_bytes(&sym_zip).unwrap();
+        assert!(sym_info.has_symlinks);
+        assert!(sym_info.entries[1].is_symlink);
+
+        // 7. ZipCrypto password verification and decryption via zipview
+        let plain = b"secret movie payload bytes";
+        let crc = test_crc32(plain);
+        let check_byte = (crc >> 24) as u8;
+        let enc_bytes = zipcrypto_encrypt("hunter2", check_byte, plain);
+        let enc_zip = build_test_zip(&[("secret.mkv", plain, None, 0x0001, Some(&enc_bytes))]);
+        let enc_info = inspect_zip_bytes(&enc_zip).unwrap();
+        assert!(enc_info.has_encrypted_entries);
+        assert!(!verify_zip_password_bytes(&enc_zip, "").unwrap());
+        assert!(!verify_zip_password_bytes(&enc_zip, "wrongpass").unwrap());
+        assert!(verify_zip_password_bytes(&enc_zip, "hunter2").unwrap());
+        assert_eq!(
+            read_zip_entry_bytes(&enc_zip, "secret.mkv", Some("hunter2")).unwrap(),
+            plain
+        );
+    }
+
+    #[test]
+    fn test_zipfast_extraction_and_symlink_rejection() {
+        let work_dir =
+            std::env::temp_dir().join(format!("rustyget_zipfast_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&work_dir);
+        std::fs::create_dir_all(&work_dir).unwrap();
+
+        // 1. Plain multi-file ZIP extraction + Overwrite modes
+        let zip_path = work_dir.join("bundle.zip");
+        let out_dir = work_dir.join("out");
+        let zip_bytes = build_test_zip(&[
+            ("sub/hello.txt", b"hello world", Some(0o100644), 0, None),
+            ("root.nzb", b"<nzb>content</nzb>", Some(0o100644), 0, None),
+        ]);
+        std::fs::write(&zip_path, &zip_bytes).unwrap();
+
+        assert!(can_extract_with_zipfast(&zip_path));
+        let listed = list_archive_with_zipfast(&zip_path, None).unwrap();
+        assert_eq!(listed.len(), 2);
+
+        let mut logs = Vec::new();
+        let summary = extract_archive_with_zipfast(&zip_path, &out_dir, "", 1, |kind, msg| {
+            logs.push((kind, msg.to_string()));
+        })
+        .unwrap();
+        assert_eq!(summary.files, 2);
+        assert_eq!(
+            std::fs::read(out_dir.join("sub/hello.txt")).unwrap(),
+            b"hello world"
+        );
+        assert_eq!(
+            std::fs::read(out_dir.join("root.nzb")).unwrap(),
+            b"<nzb>content</nzb>"
+        );
+        assert!(logs.iter().any(|(_, m)| m.contains("zipview identified")));
+
+        // OverwriteMode::Skip (0) preserves modified file on disk
+        std::fs::write(out_dir.join("root.nzb"), b"modified").unwrap();
+        let skip_summary =
+            extract_archive_with_zipfast(&zip_path, &out_dir, "", 0, |_, _| {}).unwrap();
+        assert_eq!(skip_summary.skipped, 2);
+        assert_eq!(std::fs::read(out_dir.join("root.nzb")).unwrap(), b"modified");
+
+        // OverwriteMode::Overwrite (1) replaces modified file on disk
+        let ov_summary =
+            extract_archive_with_zipfast(&zip_path, &out_dir, "", 1, |_, _| {}).unwrap();
+        assert_eq!(ov_summary.files, 2);
+        assert_eq!(
+            std::fs::read(out_dir.join("root.nzb")).unwrap(),
+            b"<nzb>content</nzb>"
+        );
+
+        // 2. Encrypted ZIP extraction via zipfast + zipview password verifier
+        let plain = b"encrypted archive payload for zipfast";
+        let crc = test_crc32(plain);
+        let enc_payload = zipcrypto_encrypt("correct-pw", (crc >> 24) as u8, plain);
+        let enc_zip_path = work_dir.join("enc.zip");
+        let enc_out_dir = work_dir.join("enc_out");
+        std::fs::write(
+            &enc_zip_path,
+            build_test_zip(&[("movie.mkv", plain, None, 0x0001, Some(&enc_payload))]),
+        )
+        .unwrap();
+
+        assert!(extract_archive_with_zipfast(&enc_zip_path, &enc_out_dir, "wrong-pw", 1, |_, _| {})
+            .is_err());
+        let enc_summary =
+            extract_archive_with_zipfast(&enc_zip_path, &enc_out_dir, "correct-pw", 1, |_, _| {})
+                .unwrap();
+        assert_eq!(enc_summary.files, 1);
+        assert_eq!(std::fs::read(enc_out_dir.join("movie.mkv")).unwrap(), plain);
+
+        // 3. Symlink ZIP is rejected before writing any file
+        let sym_zip_path = work_dir.join("sym.zip");
+        let sym_out_dir = work_dir.join("sym_out");
+        std::fs::write(
+            &sym_zip_path,
+            build_test_zip(&[
+                ("movie.mkv", b"payload", Some(0o100644), 0, None),
+                ("movie-link.mkv", b"movie.mkv", Some(0o120777), 0, None),
+            ]),
+        )
+        .unwrap();
+        let mut sym_logs = Vec::new();
+        let sym_res = extract_archive_with_zipfast(&sym_zip_path, &sym_out_dir, "", 0, |k, m| {
+            sym_logs.push((k, m.to_string()));
+        });
+        assert!(sym_res.is_err());
+        assert!(sym_logs
+            .iter()
+            .any(|(_, m)| m.contains("ERROR: Dangerous link path was ignored")));
+        assert!(sym_logs
+            .iter()
+            .any(|(_, m)| m.contains("archive contains link")));
+        assert!(!sym_out_dir.join("movie.mkv").exists());
+
+        // 4. RAR5 vs RAR3 detection in can_extract_with_zipfast
+        let rar5_path = work_dir.join("sample5.rar");
+        let rar3_path = work_dir.join("sample3.rar");
+        std::fs::write(&rar5_path, b"Rar!\x1a\x07\x01\x00\x00\x00\x00\x00").unwrap();
+        std::fs::write(&rar3_path, b"Rar!\x1a\x07\x00\x99\x00\x00\x00\x00").unwrap();
+        assert!(can_extract_with_zipfast(&rar5_path));
+        assert!(!can_extract_with_zipfast(&rar3_path));
+
+        // 5. Bounded central-directory inspection matches in-memory zipview inspection
+        let cd_info = inspect_zip_file_via_central_directory(&sym_zip_path).unwrap();
+        assert!(cd_info.has_symlinks);
+        assert_eq!(cd_info.kind, ZipContentKind::MediaArchive);
+        assert_eq!(
+            cd_info.largest_file,
+            Some(("movie.mkv".to_string(), 7, false))
+        );
+
+        // 6. DupeMatcher::FindLargestFile keeps larger movie when a supplementary ZIP is present
+        let dupe_dir = work_dir.join("dupe_mix");
+        std::fs::create_dir_all(&dupe_dir).unwrap();
+        std::fs::write(
+            dupe_dir.join("00_subs.zip"),
+            build_test_zip(&[("subs.srt", b"small subtitle", None, 0, None)]),
+        )
+        .unwrap();
+        std::fs::write(dupe_dir.join("zz_movie.mkv"), &[0x55u8; 4096]).unwrap();
+        let mut fname_buf = [0u8; 256];
+        let mut max_size = 0i64;
+        let mut compressed = false;
+        crate::pardamage::find_largest_file(
+            &dupe_dir,
+            &mut fname_buf,
+            &mut max_size,
+            &mut compressed,
+            None,
+            |_, _, _, _| {},
+        );
+        assert_eq!(max_size, 4096);
+        assert!(!compressed);
+        assert!(fname_buf.starts_with(b"zz_movie.mkv\0"));
+
+        let _ = std::fs::remove_dir_all(&work_dir);
     }
 }

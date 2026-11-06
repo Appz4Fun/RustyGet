@@ -365,9 +365,32 @@ pub fn find_largest_file<R>(
 
         let file_name = entry.file_name();
         let name_bytes = os_str_bytes(&file_name);
+        let ext = crate::filetypes::file_extension(name_bytes);
+
+        if ext.eq_ignore_ascii_case(b".zip") {
+            if let Ok(info) = crate::unpack::inspect_zip_file(&entry_path) {
+                if let Some((inner_name, inner_size, is_compressed)) = info.largest_file {
+                    let inner_size_i64 = inner_size as i64;
+                    if inner_size_i64 > *max_size {
+                        *max_size = inner_size_i64;
+                        *compressed = is_compressed;
+                        if !filename_buf.is_empty() {
+                            let inner_bytes = inner_name.as_bytes();
+                            let copy_len = inner_bytes.len().min(filename_buf.len() - 1);
+                            filename_buf[..copy_len].copy_from_slice(&inner_bytes[..copy_len]);
+                            for b in &mut filename_buf[copy_len..] {
+                                *b = 0;
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
+        }
 
         if file_size > *max_size {
             *max_size = file_size;
+            *compressed = false;
             if !filename_buf.is_empty() {
                 let copy_len = name_bytes.len().min(filename_buf.len() - 1);
                 filename_buf[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
@@ -377,7 +400,7 @@ pub fn find_largest_file<R>(
             }
         }
 
-        if crate::filetypes::is_rar_ext(crate::filetypes::file_extension(name_bytes)) {
+        if crate::filetypes::is_rar_ext(ext) {
             let rar_expected = expected_rar_size.unwrap_or(*max_size);
             on_rar_archive(filename_buf, rar_expected, max_size, compressed);
             return;

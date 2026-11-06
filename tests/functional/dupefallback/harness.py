@@ -2627,15 +2627,12 @@ def scenario_xdecomp_zip(daemon, t):
     from a REAL DEFLATE-compressed zip donor (generators.zip_deflated)
     holding the identical movie.mkv. M2 never maps this (BuildZipMap rejects
     any Method != 0 entry), so only the M4 ladder - materialize the donor's
-    articles, shell out to the configured SevenZipCmd to extract movie.mkv,
+    articles, extract movie.mkv via in-process zipfast/zipview (or SevenZipCmd),
     verify the extracted bytes against the target's own downloaded bytes,
     then patch the holes - can repair it. Requires DupeStreamDecompress=yes
-    (see SCENARIO_OPTIONS) and a local 7z (generators.HAVE_7Z); SKIPs
-    gracefully without one. No par2 and the hole is fully filled, so the
+    (see SCENARIO_OPTIONS). No par2 and the hole is fully filled, so the
     byte-based health recount takes the item to SUCCESS - asserted directly
     below as the decompression proof of the recount."""
-    if not generators.HAVE_7Z:
-        return ('xdecomp_zip', None, 'SKIP: 7z not installed')
     size = 4_000_000
     data = _payload(size, 8200)
     pp = _place_copy(t, 'xdzA', data, 'movie.mkv')
@@ -2830,8 +2827,6 @@ def scenario_xdecomp_symlink(daemon, t):
     "verify" trivially. Cleanup must unlink the extracted symlink, preserve
     the outside sentinel, and remove every stream-decompression scratch
     directory."""
-    if not generators.HAVE_7Z:
-        return ('xdecomp_symlink', None, 'SKIP: 7z not installed')
     if t.name != 'local':
         return ('xdecomp_symlink', None, 'SKIP: POSIX local target required')
 

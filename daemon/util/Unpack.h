@@ -119,6 +119,21 @@ private:
 	bool DecodeExitCode(int ec) const override;
 };
 
+class ZipFastExtractor final : public Extractor
+{
+public:
+	ZipFastExtractor(fs::path archive, fs::path outputDir,
+		std::string password, OverwriteMode mode);
+	bool Extract() override;
+	static bool IsSupported(const fs::path& path);
+
+private:
+	const fs::path m_archive;
+	const fs::path m_outputDir;
+	const std::string m_password;
+	const OverwriteMode m_mode;
+};
+
 using ExtractorPtr = std::unique_ptr<Extractor>;
 ExtractorPtr MakeExtractor(fs::path archive, fs::path outputDir,
 						std::string password, OverwriteMode mode);

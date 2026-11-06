@@ -162,15 +162,68 @@ bool Unrar::DecodeExitCode(int ec) const
 	return false;
 }
 
+ZipFastExtractor::ZipFastExtractor(fs::path archive, fs::path outputDir,
+								   std::string password, OverwriteMode mode)
+	: m_archive(std::move(archive)),
+	  m_outputDir(std::move(outputDir)),
+	  m_password(std::move(password)),
+	  m_mode(mode)
+{
+}
+
+bool ZipFastExtractor::IsSupported(const fs::path& path)
+{
+	auto s = fs::u8string(path);
+	return nzbget_rs_unpack_can_extract_with_zipfast(s.c_str()) != 0;
+}
+
+bool ZipFastExtractor::Extract()
+{
+	auto archiveStr = fs::u8string(m_archive);
+	auto outputStr = fs::u8string(m_outputDir);
+	auto logCb = [](void* /*ctx*/, int kind, const char* msg)
+	{
+		if (!msg) return;
+		switch (kind)
+		{
+			case 0:
+				info("%s", msg);
+				break;
+			case 1:
+				error("%s", msg);
+				break;
+			case 2:
+				warn("%s", msg);
+				break;
+			default:
+				detail("%s", msg);
+				break;
+		}
+	};
+	return nzbget_rs_unpack_extract_with_zipfast(
+		archiveStr.c_str(),
+		outputStr.c_str(),
+		m_password.c_str(),
+		static_cast<int>(m_mode),
+		logCb,
+		nullptr) != 0;
+}
+
 bool IsArchive(const fs::path& file)
 {
-	return SevenZip::IsSupported(file) || Unrar::IsSupported(file);
+	return ZipFastExtractor::IsSupported(file) || SevenZip::IsSupported(file) || Unrar::IsSupported(file);
 }
 
 ExtractorPtr MakeExtractor(fs::path archive, fs::path outputDir,
 						   std::string password, OverwriteMode mode)
 {
 	const std::string archiveName = fs::u8string(archive.filename());
+
+	if (ZipFastExtractor::IsSupported(archive))
+	{
+		return std::make_unique<ZipFastExtractor>(std::move(archive), std::move(outputDir),
+												  std::move(password), mode);
+	}
 
 	auto validateTool = [&archiveName](const fs::path& toolPath, std::string_view optionName) -> std::optional<fs::path>
 	{

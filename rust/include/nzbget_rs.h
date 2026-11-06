@@ -5758,6 +5758,17 @@ int nzbget_rs_xmlrpc_parse_test_disk_speed(
     NzbgetRsBuf* out_dir_path, size_t* out_buffer_bytes, uint64_t* out_max_file_bytes,
     int* out_timeout_sec, const char** out_err_msg);
 
+int nzbget_rs_unpack_is_zipfast_supported_extension(const char* archive_path);
+int nzbget_rs_unpack_can_extract_with_zipfast(const char* archive_path);
+int nzbget_rs_unpack_extract_with_zipfast(
+    const char* archive_path, const char* output_dir, const char* password,
+    int overwrite_mode,
+    void (*log_cb)(void* ctx, int kind, const char* msg), void* log_ctx);
+int nzbget_rs_zipview_inspect_file(
+    const char* archive_path, int* out_kind, size_t* out_file_count,
+    uint64_t* out_total_uncompressed, int* out_has_encrypted,
+    int* out_has_compressed, int* out_has_symlinks, int* out_has_nzb);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

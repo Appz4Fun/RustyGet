@@ -931,6 +931,11 @@ where
             if !logical_read(cd_pos + 46 + (name_len as i64), &mut extra) {
                 return Err("corrupt zip directory");
             }
+            let (z64_uncomp, z64_comp) = zipview::zip64_sizes(
+                &extra,
+                uncomp_size.min(u32::MAX as u64) as u32,
+                comp_size.min(u32::MAX as u64) as u32,
+            );
             let mut field_pos = 0usize;
             while field_pos + 4 <= extra_len {
                 let field_id = get_le16(&extra[field_pos..field_pos + 2]);
@@ -939,11 +944,9 @@ where
                     let mut val_pos = field_pos + 4;
                     let field_end = (field_pos + 4 + field_size).min(extra_len);
                     if uncomp_size == 0xffff_ffff && val_pos + 8 <= field_end {
-                        uncomp_size = get_le64(&extra[val_pos..val_pos + 8]);
                         val_pos += 8;
                     }
                     if comp_size == 0xffff_ffff && val_pos + 8 <= field_end {
-                        comp_size = get_le64(&extra[val_pos..val_pos + 8]);
                         val_pos += 8;
                     }
                     if local_offset == 0xffff_ffff && val_pos + 8 <= field_end {
@@ -956,6 +959,8 @@ where
                 }
                 field_pos += 4 + field_size;
             }
+            uncomp_size = z64_uncomp;
+            comp_size = z64_comp;
         }
 
         cd_pos += 46 + (name_len as i64) + (extra_len as i64) + (comment_len as i64);

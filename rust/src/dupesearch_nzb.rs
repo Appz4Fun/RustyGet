@@ -1089,6 +1089,1204 @@ pub fn resolve_unsettled_vote(votes: &[i32]) -> i32 {
     }
 }
 
+/// Standard 32-bit Mersenne Twister (`std::mt19937`) for deterministic `DonorHealth::Sample` and `Plan`.
+pub struct Mt19937 {
+    state: [u32; 624],
+    index: usize,
+}
+
+impl Mt19937 {
+    pub fn new(seed: u32) -> Self {
+        let mut state = [0u32; 624];
+        state[0] = seed;
+        for i in 1..624 {
+            let prev = state[i - 1];
+            state[i] = 1812433253u32
+                .wrapping_mul(prev ^ (prev >> 30))
+                .wrapping_add(i as u32);
+        }
+        Self { state, index: 624 }
+    }
+
+    fn twist(&mut self) {
+        const MATRIX_A: u32 = 0x9908_B0DF;
+        const UPPER_MASK: u32 = 0x8000_0000;
+        const LOWER_MASK: u32 = 0x7FFF_FFFF;
+        for i in 0..624 {
+            let y = (self.state[i] & UPPER_MASK) | (self.state[(i + 1) % 624] & LOWER_MASK);
+            self.state[i] = self.state[(i + 397) % 624] ^ (y >> 1) ^ if y & 1 != 0 { MATRIX_A } else { 0 };
+        }
+        self.index = 0;
+    }
+
+    pub fn next_u32(&mut self) -> u32 {
+        if self.index >= 624 {
+            self.twist();
+        }
+        let mut y = self.state[self.index];
+        self.index += 1;
+        y ^= y >> 11;
+        y ^= (y << 7) & 0x9D2C_5680;
+        y ^= (y << 15) & 0xEFC6_0000;
+        y ^= y >> 18;
+        y
+    }
+
+    pub fn uniform_percent(&mut self) -> f64 {
+        let r0 = self.next_u32() as f64;
+        let r1 = self.next_u32() as f64;
+        (r0 + r1 * 4_294_967_296.0) / 18_446_744_073_709_551_616.0 * 100.0
+    }
+}
+
+pub const DONOR_MIN_KNOWN: i32 = 5;
+pub const DONOR_SERVER_GIVE_UP: i32 = 3;
+pub const DONOR_PIPELINE_START: i32 = 4;
+pub const DONOR_PIPELINE_MAX: i32 = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum DonorAnswer {
+    None = 0,
+    Present = 1,
+    Missing = 2,
+    BodyBad = 3,
+    Error = 4,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DonorHealthResult {
+    pub checked: i32,
+    pub present: i32,
+    pub missing: i32,
+    pub error: i32,
+    pub body_checked: i32,
+    pub body_bad: i32,
+}
+
+impl DonorHealthResult {
+    pub fn answered(&self) -> i32 {
+        self.present + self.missing + self.error
+    }
+
+    pub fn alive(&self) -> f64 {
+        donor_health_alive(self.present, self.missing, self.error, DONOR_MIN_KNOWN)
+    }
+}
+
+impl std::ops::AddAssign for DonorHealthResult {
+    fn add_assign(&mut self, other: Self) {
+        self.checked += other.checked;
+        self.present += other.present;
+        self.missing += other.missing;
+        self.error += other.error;
+        self.body_checked += other.body_checked;
+        self.body_bad += other.body_bad;
+    }
+}
+
+pub fn donor_dead_probe(health: &DonorHealthResult) -> bool {
+    donor_health_dead_probe(health.present, health.missing, DONOR_MIN_KNOWN)
+}
+
+#[derive(Debug, Clone)]
+pub struct DonorItem {
+    pub message_id: String,
+    pub body: bool,
+    pub groups: std::sync::Arc<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DonorSampleOptions {
+    pub percent: i32,
+    pub minimum: i32,
+    pub maximum: i32,
+    pub body_percent: i32,
+    pub max_body: i32,
+    pub seed: u32,
+}
+
+impl Default for DonorSampleOptions {
+    fn default() -> Self {
+        Self {
+            percent: 5,
+            minimum: 50,
+            maximum: 1000,
+            body_percent: 20,
+            max_body: 20,
+            seed: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DonorOptions {
+    pub sample: DonorSampleOptions,
+    pub probe: i32,
+    pub budget_ms: i32,
+    pub deadline_ms: i64,
+}
+
+impl Default for DonorOptions {
+    fn default() -> Self {
+        Self {
+            sample: DonorSampleOptions::default(),
+            probe: 10,
+            budget_ms: 120_000,
+            deadline_ms: 0,
+        }
+    }
+}
+
+pub fn donor_sample(
+    ids: &[String],
+    percent: i32,
+    minimum: i32,
+    maximum: i32,
+    seed: u32,
+) -> Vec<String> {
+    let mut sorted = ids.to_vec();
+    sorted.sort();
+    let count = donor_sample_count(sorted.len(), percent, minimum, maximum);
+    let mut rng = Mt19937::new(seed);
+    for i in 0..count {
+        let j = i + (rng.next_u32() as usize) % (sorted.len() - i);
+        sorted.swap(i, j);
+    }
+    sorted.truncate(count);
+    sorted
+}
+
+pub fn donor_plan(
+    ids: &[String],
+    groups: &std::sync::Arc<Vec<String>>,
+    options: &DonorSampleOptions,
+) -> Vec<DonorItem> {
+    let mut rng = Mt19937::new(options.seed.wrapping_add(1));
+    let mut bodies = 0;
+    let sampled = donor_sample(ids, options.percent, options.minimum, options.maximum, options.seed);
+    let mut items = Vec::with_capacity(sampled.len());
+    for id in sampled {
+        let body = bodies < options.max_body && rng.uniform_percent() < (options.body_percent as f64);
+        if body {
+            bodies += 1;
+        }
+        items.push(DonorItem {
+            message_id: id,
+            body,
+            groups: groups.clone(),
+        });
+    }
+    items
+}
+
+pub struct DonorBodyGate {
+    lock: std::sync::Mutex<()>,
+    ok: std::sync::atomic::AtomicBool,
+    settled: Box<dyn Fn() -> bool + Send + Sync>,
+}
+
+impl DonorBodyGate {
+    pub fn new<F: Fn() -> bool + Send + Sync + 'static>(settled: F) -> Self {
+        Self {
+            lock: std::sync::Mutex::new(()),
+            ok: std::sync::atomic::AtomicBool::new(false),
+            settled: Box::new(settled),
+        }
+    }
+
+    pub fn done(&self) -> bool {
+        self.ok.load(std::sync::atomic::Ordering::SeqCst) || (self.settled)()
+    }
+
+    pub fn body_once<F: FnOnce() -> DonorAnswer>(&self, download: F) -> DonorAnswer {
+        self.body_once_fallible::<(), _>(|| Ok(download())).unwrap()
+    }
+
+    pub fn body_once_fallible<E, F: FnOnce() -> Result<DonorAnswer, E>>(
+        &self,
+        download: F,
+    ) -> Result<DonorAnswer, E> {
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        if self.done() {
+            return Ok(DonorAnswer::Present);
+        }
+        let ans = download()?;
+        self.ok
+            .store(ans == DonorAnswer::Present, std::sync::atomic::Ordering::SeqCst);
+        Ok(ans)
+    }
+}
+
+#[derive(Clone)]
+pub struct DonorRequest {
+    pub message_id: String,
+    pub gate: Option<std::sync::Arc<DonorBodyGate>>,
+    pub groups: std::sync::Arc<Vec<String>>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct DonorExchangeError {
+    pub answers: Vec<DonorAnswer>,
+    pub busy: bool,
+}
+
+static DONOR_STOPPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static DONOR_WALKERS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+static DONOR_EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+pub fn donor_now_ms() -> i64 {
+    DONOR_EPOCH
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as i64
+}
+
+pub fn donor_stop_all() {
+    DONOR_STOPPING.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn donor_reset() {
+    DONOR_STOPPING.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn donor_stopping() -> bool {
+    DONOR_STOPPING.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+pub fn donor_wait_all() {
+    while DONOR_WALKERS.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+pub trait DonorServerExchange: Send + Sync {
+    fn exchange(&self, batch: &[DonorRequest]) -> Result<Vec<DonorAnswer>, DonorExchangeError>;
+}
+
+pub struct DonorServer {
+    cap: i32,
+    retry_after_ms: std::sync::atomic::AtomicI32,
+    depth: std::sync::atomic::AtomicI32,
+    errors: std::sync::atomic::AtomicI32,
+    down_until_ms: std::sync::atomic::AtomicI64,
+    slot_mutex: std::sync::Mutex<i32>,
+    slot_cond: std::sync::Condvar,
+    max_active: std::sync::atomic::AtomicI32,
+    transport: Box<dyn DonorServerExchange>,
+}
+
+impl DonorServer {
+    pub fn new<T: DonorServerExchange + 'static>(cap: i32, transport: T) -> Self {
+        Self {
+            cap: cap.max(1),
+            retry_after_ms: std::sync::atomic::AtomicI32::new(30_000),
+            depth: std::sync::atomic::AtomicI32::new(DONOR_PIPELINE_START),
+            errors: std::sync::atomic::AtomicI32::new(0),
+            down_until_ms: std::sync::atomic::AtomicI64::new(0),
+            slot_mutex: std::sync::Mutex::new(0),
+            slot_cond: std::sync::Condvar::new(),
+            max_active: std::sync::atomic::AtomicI32::new(0),
+            transport: Box::new(transport),
+        }
+    }
+
+    pub fn cap(&self) -> i32 {
+        self.cap
+    }
+
+    pub fn depth(&self) -> i32 {
+        self.depth.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn paused(&self) -> bool {
+        self.down_until_ms.load(std::sync::atomic::Ordering::SeqCst) > donor_now_ms()
+    }
+
+    pub fn max_active(&self) -> i32 {
+        self.max_active.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn set_retry_after_ms(&self, ms: i32) {
+        self.retry_after_ms
+            .store(ms, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn transport(&self) -> &dyn DonorServerExchange {
+        &*self.transport
+    }
+
+    pub fn ask<F: Fn() -> bool>(&self, batch: &[DonorRequest], cancelled: F) -> Vec<DonorAnswer> {
+        let over = || donor_stopping() || cancelled();
+        while self.down_until_ms.load(std::sync::atomic::Ordering::SeqCst) - donor_now_ms() > 0
+            && !over()
+        {
+            let rem = (self.down_until_ms.load(std::sync::atomic::Ordering::SeqCst)
+                - donor_now_ms())
+            .clamp(1, 50) as u64;
+            std::thread::sleep(std::time::Duration::from_millis(rem));
+        }
+
+        {
+            let mut active = self.slot_mutex.lock().unwrap_or_else(|e| e.into_inner());
+            while *active >= self.cap && !over() {
+                let (guard, _) = self
+                    .slot_cond
+                    .wait_timeout(active, std::time::Duration::from_millis(50))
+                    .unwrap_or_else(|e| e.into_inner());
+                active = guard;
+            }
+            if over() {
+                return vec![DonorAnswer::Error; batch.len()];
+            }
+            *active += 1;
+            let cur = *active;
+            self.max_active
+                .fetch_max(cur, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        let start = donor_now_ms();
+        let mut answers = match self.transport.exchange(batch) {
+            Ok(ans) => {
+                let took = donor_now_ms() - start;
+                let new_depth = adjust_pipeline_depth(self.depth(), took, DONOR_PIPELINE_MAX);
+                self.depth
+                    .store(new_depth, std::sync::atomic::Ordering::SeqCst);
+                self.errors.store(0, std::sync::atomic::Ordering::SeqCst);
+                ans
+            }
+            Err(err) => {
+                if !err.busy {
+                    let errs = self
+                        .errors
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                        + 1;
+                    if errs >= DONOR_SERVER_GIVE_UP {
+                        let retry = self
+                            .retry_after_ms
+                            .load(std::sync::atomic::Ordering::SeqCst)
+                            as i64;
+                        self.down_until_ms
+                            .store(donor_now_ms() + retry, std::sync::atomic::Ordering::SeqCst);
+                        self.errors.store(0, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+                err.answers
+            }
+        };
+
+        answers.resize(batch.len(), DonorAnswer::Error);
+        for ans in &mut answers {
+            if *ans == DonorAnswer::None {
+                *ans = DonorAnswer::Error;
+            }
+        }
+
+        {
+            let mut active = self.slot_mutex.lock().unwrap_or_else(|e| e.into_inner());
+            *active -= 1;
+        }
+        self.slot_cond.notify_one();
+        answers
+    }
+}
+
+pub fn donor_check_items(
+    servers: &[std::sync::Arc<DonorServer>],
+    items: &[DonorItem],
+    budget_ms: i32,
+) -> DonorHealthResult {
+    donor_check_items_guarded(servers, items, budget_ms, None)
+}
+
+pub fn donor_check_items_guarded(
+    servers: &[std::sync::Arc<DonorServer>],
+    items: &[DonorItem],
+    budget_ms: i32,
+    keepalive: Option<std::sync::Arc<dyn Send + Sync>>,
+) -> DonorHealthResult {
+    let mut health = DonorHealthResult {
+        checked: items.len() as i32,
+        ..Default::default()
+    };
+    if items.is_empty() {
+        return health;
+    }
+
+    struct SharedCheckState {
+        items: Vec<DonorItem>,
+        servers: Vec<std::sync::Arc<DonorServer>>,
+        final_verdict: Vec<std::sync::atomic::AtomicI32>,
+        stop: std::sync::atomic::AtomicBool,
+        mutex: std::sync::Mutex<(Vec<Vec<DonorAnswer>>, Vec<bool>, usize)>,
+        cond: std::sync::Condvar,
+        _keepalive: Option<std::sync::Arc<dyn Send + Sync>>,
+    }
+
+    let count = items.len();
+    for item in items {
+        if item.body {
+            health.body_checked += 1;
+        }
+    }
+
+    let state = std::sync::Arc::new(SharedCheckState {
+        items: items.to_vec(),
+        servers: servers.to_vec(),
+        final_verdict: (0..count)
+            .map(|_| std::sync::atomic::AtomicI32::new(0))
+            .collect(),
+        stop: std::sync::atomic::AtomicBool::new(false),
+        mutex: std::sync::Mutex::new((
+            vec![vec![DonorAnswer::None; servers.len()]; count],
+            vec![false; count],
+            count,
+        )),
+        cond: std::sync::Condvar::new(),
+        _keepalive: keepalive,
+    });
+    // Rebind gates so their settled closure reads `state.final_verdict[i]`
+    let mut gates_bound = Vec::with_capacity(count);
+    for (i, item) in items.iter().enumerate() {
+        if item.body {
+            let st = state.clone();
+            gates_bound.push(Some(std::sync::Arc::new(DonorBodyGate::new(move || {
+                st.final_verdict[i].load(std::sync::atomic::Ordering::SeqCst) != 0
+            }))));
+        } else {
+            gates_bound.push(None);
+        }
+    }
+    let gates_arc = std::sync::Arc::new(gates_bound);
+
+    for s in 0..servers.len() {
+        DONOR_WALKERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let st = state.clone();
+        let gt = gates_arc.clone();
+        std::thread::spawn(move || {
+            struct WalkerGuard;
+            impl Drop for WalkerGuard {
+                fn drop(&mut self) {
+                    DONOR_WALKERS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            let _guard = WalkerGuard;
+            let server = &st.servers[s];
+            let mut cursor = 0usize;
+            while cursor < st.items.len() {
+                if st.stop.load(std::sync::atomic::Ordering::SeqCst) || donor_stopping() {
+                    return;
+                }
+                let mut todo = Vec::new();
+                while cursor < st.items.len() && (todo.len() as i32) < server.depth() {
+                    if st.final_verdict[cursor].load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                        todo.push(cursor);
+                    }
+                    cursor += 1;
+                }
+                if todo.is_empty() {
+                    continue;
+                }
+                let others_can_answer = st
+                    .servers
+                    .iter()
+                    .enumerate()
+                    .any(|(idx, srv)| idx != s && !srv.paused());
+                let answers = if server.paused() && others_can_answer {
+                    vec![DonorAnswer::Error; todo.len()]
+                } else {
+                    let batch: Vec<DonorRequest> = todo
+                        .iter()
+                        .map(|&idx| DonorRequest {
+                            message_id: st.items[idx].message_id.clone(),
+                            gate: gt[idx].clone(),
+                            groups: st.items[idx].groups.clone(),
+                        })
+                        .collect();
+                    let st_cancel = st.clone();
+                    server.ask(&batch, move || {
+                        st_cancel.stop.load(std::sync::atomic::Ordering::SeqCst)
+                    })
+                };
+
+                let mut guard = st.mutex.lock().unwrap_or_else(|e| e.into_inner());
+                if st.stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
+                for (k, &idx) in todo.iter().enumerate() {
+                    guard.0[idx][s] = answers[k];
+                    if answers[k] == DonorAnswer::BodyBad {
+                        guard.1[idx] = true;
+                    }
+                    let vote_vals: Vec<i32> = guard.0[idx].iter().map(|&v| v as i32).collect();
+                    let verdict = eval_article_votes(&vote_vals);
+                    if verdict != 0
+                        && st.final_verdict[idx]
+                            .compare_exchange(
+                                0,
+                                verdict,
+                                std::sync::atomic::Ordering::SeqCst,
+                                std::sync::atomic::Ordering::SeqCst,
+                            )
+                            .is_ok()
+                    {
+                        guard.2 -= 1;
+                        if guard.2 == 0 {
+                            st.cond.notify_all();
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_millis(budget_ms.max(10) as u64);
+    let mut guard = state.mutex.lock().unwrap_or_else(|e| e.into_inner());
+    while guard.2 > 0 && !donor_stopping() && std::time::Instant::now() < deadline {
+        let now = std::time::Instant::now();
+        let wait_dur = deadline
+            .saturating_duration_since(now)
+            .min(std::time::Duration::from_millis(100));
+        let (g, _) = state
+            .cond
+            .wait_timeout(guard, wait_dur)
+            .unwrap_or_else(|e| e.into_inner());
+        guard = g;
+    }
+    state
+        .stop
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    for i in 0..count {
+        if state.final_verdict[i].load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            let vote_vals: Vec<i32> = guard.0[i].iter().map(|&v| v as i32).collect();
+            let resolved = resolve_unsettled_vote(&vote_vals);
+            if resolved != 0 {
+                state.final_verdict[i].store(resolved, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let v = state.final_verdict[i].load(std::sync::atomic::Ordering::SeqCst);
+        donor_health_accum_verdict_counts(
+            v,
+            1,
+            2,
+            3,
+            guard.1[i],
+            &mut health.present,
+            &mut health.missing,
+            &mut health.error,
+            &mut health.body_bad,
+        );
+    }
+    health
+}
+
+pub fn donor_check_posting(
+    servers: &[std::sync::Arc<DonorServer>],
+    ids: &[String],
+    groups: &std::sync::Arc<Vec<String>>,
+    options: &DonorOptions,
+    full: bool,
+) -> DonorHealthResult {
+    donor_check_posting_guarded(servers, ids, groups, options, full, None)
+}
+
+pub fn donor_check_posting_guarded(
+    servers: &[std::sync::Arc<DonorServer>],
+    ids: &[String],
+    groups: &std::sync::Arc<Vec<String>>,
+    options: &DonorOptions,
+    full: bool,
+    keepalive: Option<std::sync::Arc<dyn Send + Sync>>,
+) -> DonorHealthResult {
+    let items = donor_plan(ids, groups, &options.sample);
+    let first = if (items.len() as i32) >= options.probe {
+        items[..options.probe as usize].to_vec()
+    } else {
+        let mut probe_sample = options.sample;
+        probe_sample.percent = 0;
+        probe_sample.minimum = options.probe;
+        probe_sample.maximum = options.probe;
+        donor_plan(ids, groups, &probe_sample)
+    };
+
+    let deadline = donor_now_ms() + (options.budget_ms as i64);
+    let mut health = donor_check_items_guarded(servers, &first, options.budget_ms, keepalive.clone());
+    if full && !donor_dead_probe(&health) {
+        let probed: std::collections::BTreeSet<&str> =
+            first.iter().map(|it| it.message_id.as_str()).collect();
+        let rest: Vec<DonorItem> = items
+            .into_iter()
+            .filter(|it| !probed.contains(it.message_id.as_str()))
+            .collect();
+        let rem_budget = (deadline - donor_now_ms()).max(10) as i32;
+        health += donor_check_items_guarded(servers, &rest, rem_budget, keepalive);
+    }
+    health
+}
+
+pub struct DonorPosting {
+    pub key: String,
+    pub ids: Vec<String>,
+    pub groups: std::sync::Arc<Vec<String>>,
+}
+
+pub fn donor_check_postings<F>(
+    servers: &[std::sync::Arc<DonorServer>],
+    postings: &[DonorPosting],
+    options: &DonorOptions,
+    full: bool,
+    concurrency: i32,
+    emit: F,
+) where
+    F: Fn(&str, &DonorHealthResult) + Send + Sync,
+{
+    donor_check_postings_guarded(servers, postings, options, full, concurrency, None, emit);
+}
+
+pub fn donor_check_postings_guarded<F>(
+    servers: &[std::sync::Arc<DonorServer>],
+    postings: &[DonorPosting],
+    options: &DonorOptions,
+    full: bool,
+    concurrency: i32,
+    keepalive: Option<std::sync::Arc<dyn Send + Sync>>,
+    emit: F,
+) where
+    F: Fn(&str, &DonorHealthResult) + Send + Sync,
+{
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let thread_count = postings.len().min(concurrency.max(1) as usize);
+    let next_ref = &next;
+    let emit_ref = &emit;
+    std::thread::scope(|s| {
+        for _ in 0..thread_count {
+            let ka = keepalive.clone();
+            s.spawn(move || {
+                loop {
+                    let idx = next_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if idx >= postings.len() {
+                        break;
+                    }
+                    let mut own = *options;
+                    if options.deadline_ms > 0 {
+                        let left = options.deadline_ms - donor_now_ms();
+                        if left <= 0 {
+                            continue;
+                        }
+                        own.budget_ms = own.budget_ms.min(left as i32);
+                    }
+                    let p = &postings[idx];
+                    let h = donor_check_posting_guarded(
+                        servers,
+                        &p.ids,
+                        &p.groups,
+                        &own,
+                        full,
+                        ka.clone(),
+                    );
+                    emit_ref(&p.key, &h);
+                }
+            });
+        }
+    });
+}
+
+// ============================================================================
+// 3b. DupeIdentity::FetchArticle / Read & NzbFetcher (`DupeIdentity.cpp`, `NzbFetcher.cpp`)
+// ============================================================================
+
+#[derive(Debug, Clone, Default)]
+pub struct FetchedArticleResult {
+    pub success: bool,
+    pub offset: i64,
+    pub file_size: i64,
+    pub data: Vec<u8>,
+}
+
+/// `DupeIdentity::FetchArticle` (`daemon/dupesearch/DupeIdentity.cpp`).
+pub fn dupe_identity_fetch_article<N, S, F, C>(
+    message_id: &[u8],
+    groups: &[String],
+    deadline: i64,
+    now_fn: N,
+    stopped_fn: S,
+    fetch_fn: F,
+    stop_fetch_fn: C,
+) -> FetchedArticleResult
+where
+    N: Fn() -> i64,
+    S: Fn() -> bool,
+    F: FnOnce(&[u8], &[String]) -> Result<FetchedArticleResult, ()> + Send,
+    C: FnOnce(),
+{
+    if message_id.is_empty() || now_fn() >= deadline || stopped_fn() || donor_stopping() {
+        return FetchedArticleResult::default();
+    }
+    let bracketed_id = crate::nntp::nntp_health_format_bracketed_id(message_id);
+    let done = std::sync::atomic::AtomicBool::new(false);
+    let mut out = FetchedArticleResult::default();
+    std::thread::scope(|s| {
+        let done_ref = &done;
+        let out_ref = &mut out;
+        let id_slice = bracketed_id.as_slice();
+        let handle = s.spawn(move || {
+            if let Ok(res) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                fetch_fn(id_slice, groups)
+            })) {
+                if let Ok(article) = res {
+                    *out_ref = article;
+                }
+            }
+            done_ref.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        while !done.load(std::sync::atomic::Ordering::SeqCst)
+            && now_fn() < deadline
+            && !stopped_fn()
+            && !donor_stopping()
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if !done.load(std::sync::atomic::Ordering::SeqCst) {
+            stop_fetch_fn();
+        }
+        let _ = handle.join();
+    });
+    if now_fn() >= deadline || stopped_fn() || donor_stopping() || out.offset != 0 {
+        return FetchedArticleResult::default();
+    }
+    out
+}
+
+/// `DupeIdentity::Read` (`daemon/dupesearch/DupeIdentity.cpp`).
+pub fn dupe_identity_read<N, S, F>(
+    data_bytes: i64,
+    heads: &[(Vec<u8>, Vec<u8>, i64)],
+    groups: &[String],
+    deadline: i64,
+    now_fn: N,
+    stopped_fn: S,
+    mut fetch_article_fn: F,
+) -> Option<crate::dupeidentity::Identity>
+where
+    N: Fn() -> i64,
+    S: Fn() -> bool,
+    F: FnMut(&[u8], &[String], i64) -> FetchedArticleResult,
+{
+    let minimum = crate::dupeidentity::calc_min_inner_bytes(data_bytes);
+    for (name, message_id, _bytes) in heads {
+        let article = fetch_article_fn(message_id, groups, deadline);
+        if article.success {
+            let total = if article.file_size > 0 {
+                article.file_size as u64
+            } else {
+                0
+            };
+            if let Some(found) =
+                crate::dupeidentity::inner_entry(&article.data, name, total, minimum)
+            {
+                return Some(found);
+            }
+        }
+        if now_fn() >= deadline || stopped_fn() || donor_stopping() {
+            break;
+        }
+    }
+    None
+}
+
+pub const NZB_FETCHER_COOLDOWN_SEC: i64 = 30 * 60;
+pub const NZB_FETCHER_RETRY_DELAY_SEC: i64 = 2;
+pub const NZB_FETCHER_MAX_NZB_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+pub enum NzbFetchReason {
+    Ok = 0,
+    Fetch = 1,
+    Parse = 2,
+    Refused = 3,
+    Budget = 4,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NzbFetcherStats {
+    pub ok: i32,
+    pub fetch: i32,
+    pub parse: i32,
+    pub refused: i32,
+    pub relisted: i32,
+    pub listing_mismatch: i32,
+    pub budget: i32,
+}
+
+impl NzbFetcherStats {
+    pub fn add(&mut self, other: &Self) {
+        self.ok += other.ok;
+        self.fetch += other.fetch;
+        self.parse += other.parse;
+        self.refused += other.refused;
+        self.relisted += other.relisted;
+        self.listing_mismatch += other.listing_mismatch;
+        self.budget += other.budget;
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NzbFetched {
+    pub listing: NewznabResult,
+    pub reason: NzbFetchReason,
+    pub data: Vec<u8>,
+    pub info: NzbSummaryData,
+    pub same_inner: bool,
+    pub lenient: bool,
+}
+
+impl Default for NzbFetched {
+    fn default() -> Self {
+        Self {
+            listing: NewznabResult::default(),
+            reason: NzbFetchReason::Fetch,
+            data: Vec::new(),
+            info: NzbSummaryData::default(),
+            same_inner: false,
+            lenient: false,
+        }
+    }
+}
+
+pub fn dupe_write_atomic(path: &std::path::Path, data: &[u8]) -> bool {
+    let mut temp_os = path.as_os_str().to_os_string();
+    temp_os.push(".new");
+    let temp = std::path::PathBuf::from(temp_os);
+    if std::fs::write(&temp, data).is_err() {
+        let _ = std::fs::remove_file(&temp);
+        return false;
+    }
+    std::fs::rename(&temp, path).is_ok()
+}
+
+pub struct NzbFetcherCore {
+    state_path: std::sync::Mutex<String>,
+    refused_until: std::sync::Mutex<std::collections::BTreeMap<Vec<u8>, i64>>,
+    indexer_locks:
+        std::sync::Mutex<std::collections::BTreeMap<Vec<u8>, std::sync::Arc<std::sync::Mutex<()>>>>,
+}
+
+impl Default for NzbFetcherCore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl NzbFetcherCore {
+    pub fn new() -> Self {
+        Self {
+            state_path: std::sync::Mutex::new(String::new()),
+            refused_until: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            indexer_locks: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+        }
+    }
+
+    pub fn set_state_path(&self, path: &str) {
+        if let Ok(mut guard) = self.state_path.lock() {
+            *guard = path.to_string();
+        }
+    }
+
+    pub fn load(&self, now: i64) {
+        let path = self
+            .state_path
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        if path.is_empty() {
+            return;
+        }
+        let Ok(content) = std::fs::read(&path) else {
+            return;
+        };
+        let mut map = self
+            .refused_until
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for line in content.split(|&b| b == b'\n') {
+            if let Some((idx, when)) = parse_cooldown_line(line, now) {
+                map.insert(idx, when);
+            }
+        }
+    }
+
+    fn save_locked(
+        &self,
+        map: &std::collections::BTreeMap<Vec<u8>, i64>,
+        now: i64,
+    ) -> Result<(), String> {
+        let path = self
+            .state_path
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        if path.is_empty() {
+            return Ok(());
+        }
+        let mut text = Vec::new();
+        for (idx, &when) in map.iter() {
+            let line = format_cooldown_line(idx, when, now);
+            if !line.is_empty() {
+                text.extend_from_slice(&line);
+            }
+        }
+        if !dupe_write_atomic(std::path::Path::new(&path), &text) {
+            return Err(path);
+        }
+        Ok(())
+    }
+
+    pub fn save(&self, now: i64) -> Result<(), String> {
+        let map = self
+            .refused_until
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        self.save_locked(&map, now)
+    }
+
+    fn indexer_lock(&self, indexer: &[u8]) -> std::sync::Arc<std::sync::Mutex<()>> {
+        let mut locks = self
+            .indexer_locks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        locks
+            .entry(indexer.to_vec())
+            .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(())))
+            .clone()
+    }
+
+    pub fn is_refused(&self, indexer: &[u8], now: i64) -> bool {
+        let map = self
+            .refused_until
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        map.get(indexer).is_some_and(|&until| until > now)
+    }
+
+    pub fn refuse(&self, indexer: &[u8], now: i64) -> Result<(), String> {
+        let mut map = self
+            .refused_until
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        map.insert(indexer.to_vec(), now + NZB_FETCHER_COOLDOWN_SEC);
+        self.save_locked(&map, now)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn fetch_with<N, M, S, W, H, LI, LW>(
+        &self,
+        listing: &NewznabResult,
+        deadline: i64,
+        retries: i32,
+        budget: Option<&crate::dupewatch::FetchBudget>,
+        now_fn: N,
+        now_ms_fn: M,
+        stopped_fn: S,
+        sleep_100ms_fn: W,
+        mut http_fetch_fn: H,
+        mut log_info_fn: LI,
+        mut log_warn_fn: LW,
+    ) -> NzbFetched
+    where
+        N: Fn() -> i64,
+        M: Fn() -> i64,
+        S: Fn() -> bool,
+        W: Fn(),
+        H: FnMut(&[u8], &[u8], usize, i64) -> (bool, i32, Vec<u8>),
+        LI: FnMut(&str),
+        LW: FnMut(&str),
+    {
+        let mut fetched = NzbFetched {
+            listing: listing.clone(),
+            reason: NzbFetchReason::Fetch,
+            ..Default::default()
+        };
+        if let Some(b) = budget {
+            if b.spent() {
+                fetched.reason = NzbFetchReason::Budget;
+                return fetched;
+            }
+        }
+        if stopped_fn() || now_fn() >= deadline {
+            return fetched;
+        }
+
+        let lock_arc = self.indexer_lock(&listing.indexer);
+        let _indexer_guard = lock_arc.lock().unwrap_or_else(|e| e.into_inner());
+        if self.is_refused(&listing.indexer, now_fn()) {
+            fetched.reason = NzbFetchReason::Refused;
+            return fetched;
+        }
+
+        let mut status = 0i32;
+        for attempt in 0..=retries {
+            if stopped_fn() || now_fn() >= deadline {
+                break;
+            }
+            if let Some(b) = budget {
+                if !b.take() {
+                    fetched.reason = NzbFetchReason::Budget;
+                    return fetched;
+                }
+            }
+            let fetch_deadline_ms = 1i64.max(now_ms_fn() + (deadline - now_fn()) * 1000);
+            let mut label = b"DupeSearch nzb of ".to_vec();
+            label.extend_from_slice(&listing.indexer);
+            let (ok, reply_status, reply_body) = http_fetch_fn(
+                &listing.link,
+                &label,
+                NZB_FETCHER_MAX_NZB_BYTES,
+                fetch_deadline_ms,
+            );
+            let why = if ok {
+                status = 0;
+                if let Some(info) = parse_nzb_summary(&reply_body) {
+                    fetched.reason = NzbFetchReason::Ok;
+                    fetched.data = reply_body;
+                    fetched.info = info;
+                    return fetched;
+                }
+                fetched.reason = NzbFetchReason::Parse;
+                String::from_utf8_lossy(&nzb_fetcher_format_parse_err(&reply_body)).into_owned()
+            } else {
+                status = reply_status;
+                fetched.reason = NzbFetchReason::Fetch;
+                String::from_utf8_lossy(&nzb_fetcher_format_http_status_err(reply_status))
+                    .into_owned()
+            };
+            log_info_fn(&format!(
+                "DupeSearch: the nzb-file of {} from {} failed (attempt {}): {}",
+                String::from_utf8_lossy(&listing.title),
+                String::from_utf8_lossy(&listing.indexer),
+                attempt + 1,
+                why
+            ));
+
+            if let Some(b) = budget {
+                if b.spent() {
+                    break;
+                }
+            }
+            if attempt < retries {
+                if now_fn() + NZB_FETCHER_RETRY_DELAY_SEC >= deadline {
+                    break;
+                }
+                for _ in 0..(NZB_FETCHER_RETRY_DELAY_SEC * 10) {
+                    if stopped_fn() {
+                        break;
+                    }
+                    sleep_100ms_fn();
+                }
+            }
+            if stopped_fn() {
+                break;
+            }
+        }
+
+        if (status == 403 || status == 429) && !listing.indexer.is_empty() {
+            if let Err(failed_path) = self.refuse(&listing.indexer, now_fn()) {
+                log_warn_fn(&format!("DupeSearch: could not save {failed_path}"));
+            }
+            log_info_fn(&format!(
+                "DupeSearch: indexer {} refused nzb-file downloads (HTTP {}): not asking it for {} minutes",
+                String::from_utf8_lossy(&listing.indexer),
+                status,
+                NZB_FETCHER_COOLDOWN_SEC / 60
+            ));
+        }
+        fetched
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn fetch_posting_with<N, M, S, W, H, LI, LW>(
+        &self,
+        listings: &[NewznabResult],
+        deadline: i64,
+        stats: &mut NzbFetcherStats,
+        budget: Option<&crate::dupewatch::FetchBudget>,
+        now_fn: N,
+        now_ms_fn: M,
+        stopped_fn: S,
+        sleep_100ms_fn: W,
+        mut http_fetch_fn: H,
+        mut log_info_fn: LI,
+        mut log_warn_fn: LW,
+    ) -> NzbFetched
+    where
+        N: Fn() -> i64 + Copy,
+        M: Fn() -> i64 + Copy,
+        S: Fn() -> bool + Copy,
+        W: Fn() + Copy,
+        H: FnMut(&[u8], &[u8], usize, i64) -> (bool, i32, Vec<u8>),
+        LI: FnMut(&str),
+        LW: FnMut(&str),
+    {
+        let mut last = NzbFetched::default();
+        if listings.is_empty() {
+            stats.parse += 1;
+            return last;
+        }
+        last.listing = listings[0].clone();
+        let mut other: Option<NzbFetched> = None;
+
+        for (i, listing) in listings.iter().enumerate() {
+            let fetched = self.fetch_with(
+                listing,
+                deadline,
+                1,
+                budget,
+                now_fn,
+                now_ms_fn,
+                stopped_fn,
+                sleep_100ms_fn,
+                &mut http_fetch_fn,
+                &mut log_info_fn,
+                &mut log_warn_fn,
+            );
+            if fetched.reason == NzbFetchReason::Budget {
+                stats.budget += 1;
+                last = fetched;
+                break;
+            }
+            if fetched.reason == NzbFetchReason::Ok
+                && !crate::posting::listing_mismatch(listing.size, fetched.info.total_bytes)
+            {
+                stats.ok += 1;
+                stats.relisted += (listings.len() - i - 1) as i32;
+                return fetched;
+            }
+            if fetched.reason == NzbFetchReason::Ok {
+                if other.is_none() {
+                    other = Some(fetched);
+                }
+                continue;
+            }
+            match fetched.reason {
+                NzbFetchReason::Fetch => stats.fetch += 1,
+                NzbFetchReason::Parse => stats.parse += 1,
+                NzbFetchReason::Refused => stats.refused += 1,
+                _ => {}
+            }
+            last = fetched;
+        }
+
+        if let Some(other_fetched) = other {
+            stats.ok += 1;
+            stats.listing_mismatch += 1;
+            return other_fetched;
+        }
+        last
+    }
+}
+
 // ============================================================================
 // 4. Newznab (`daemon/dupesearch/Newznab.cpp`)
 // ============================================================================
@@ -3173,10 +4371,9 @@ pub struct RsNzbSummaryScalars {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nzb_reader_parse(
-    xml_ptr: *const u8,
-    xml_len: usize,
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn emit_nzb_summary_to_ffi(
+    summary: &NzbSummaryData,
     out_scalars: *mut RsNzbSummaryScalars,
     ctx: *mut std::ffi::c_void,
     on_strings: Option<
@@ -3207,15 +4404,7 @@ pub unsafe extern "C" fn nzbget_rs_nzb_reader_parse(
     on_recovery_bytes: Option<
         unsafe extern "C" fn(ctx: *mut std::ffi::c_void, ptr: *const u64, len: usize),
     >,
-) -> std::ffi::c_int {
-    let xml = if xml_ptr.is_null() || xml_len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(xml_ptr, xml_len)
-    };
-    let Some(summary) = parse_nzb_summary(xml) else {
-        return 0;
-    };
+) {
     if !out_scalars.is_null() {
         *out_scalars = RsNzbSummaryScalars {
             files: summary.files,
@@ -3282,6 +4471,59 @@ pub unsafe extern "C" fn nzbget_rs_nzb_reader_parse(
             );
         }
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nzb_reader_parse(
+    xml_ptr: *const u8,
+    xml_len: usize,
+    out_scalars: *mut RsNzbSummaryScalars,
+    ctx: *mut std::ffi::c_void,
+    on_strings: Option<
+        unsafe extern "C" fn(
+            ctx: *mut std::ffi::c_void,
+            poster_ptr: *const u8,
+            poster_len: usize,
+            main_name_ptr: *const u8,
+            main_name_len: usize,
+            par_name_ptr: *const u8,
+            par_name_len: usize,
+            par_id_ptr: *const u8,
+            par_id_len: usize,
+            par_bytes: i64,
+        ),
+    >,
+    on_slice: Option<
+        unsafe extern "C" fn(
+            ctx: *mut std::ffi::c_void,
+            kind: std::ffi::c_int,
+            ptr1: *const u8,
+            len1: usize,
+            ptr2: *const u8,
+            len2: usize,
+            bytes: i64,
+        ),
+    >,
+    on_recovery_bytes: Option<
+        unsafe extern "C" fn(ctx: *mut std::ffi::c_void, ptr: *const u64, len: usize),
+    >,
+) -> std::ffi::c_int {
+    let xml = if xml_ptr.is_null() || xml_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(xml_ptr, xml_len)
+    };
+    let Some(summary) = parse_nzb_summary(xml) else {
+        return 0;
+    };
+    emit_nzb_summary_to_ffi(
+        &summary,
+        out_scalars,
+        ctx,
+        on_strings,
+        on_slice,
+        on_recovery_bytes,
+    );
     1
 }
 
@@ -4112,5 +5354,630 @@ mod tests {
         }
         // Single-byte stream falsely claiming UTF-16 is rejected
         assert!(parse_nzb_summary(utf8_src.as_bytes()).is_none());
+    }
+
+    static DONOR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn donor_health_full_suite_port_from_cpp() {
+        let _donor_guard = DONOR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        donor_stop_all();
+        donor_wait_all();
+        donor_reset();
+        use std::collections::BTreeSet;
+        use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        struct FakeTransport {
+            has: Mutex<BTreeSet<String>>,
+            has_all: AtomicBool,
+            answers_451: AtomicBool,
+            body_gone: AtomicBool,
+            auth_fails: AtomicBool,
+            fail_first: AtomicI32,
+            delay_ms: AtomicI32,
+            drop_on_first_body: AtomicBool,
+            pool_busy: AtomicBool,
+            stats: AtomicI32,
+            bodies: AtomicI32,
+            pipelined: AtomicI32,
+            sessions: AtomicI32,
+            exchanges: AtomicI32,
+        }
+
+        impl FakeTransport {
+            fn new() -> Arc<Self> {
+                Arc::new(Self {
+                    has: Mutex::new(BTreeSet::new()),
+                    has_all: AtomicBool::new(false),
+                    answers_451: AtomicBool::new(false),
+                    body_gone: AtomicBool::new(false),
+                    auth_fails: AtomicBool::new(false),
+                    fail_first: AtomicI32::new(0),
+                    delay_ms: AtomicI32::new(0),
+                    drop_on_first_body: AtomicBool::new(false),
+                    pool_busy: AtomicBool::new(false),
+                    stats: AtomicI32::new(0),
+                    bodies: AtomicI32::new(0),
+                    pipelined: AtomicI32::new(0),
+                    sessions: AtomicI32::new(0),
+                    exchanges: AtomicI32::new(0),
+                })
+            }
+        }
+
+        impl DonorServerExchange for Arc<FakeTransport> {
+            fn exchange(&self, batch: &[DonorRequest]) -> Result<Vec<DonorAnswer>, DonorExchangeError> {
+                if self.pool_busy.load(Ordering::SeqCst) {
+                    self.exchanges.fetch_add(1, Ordering::SeqCst);
+                    return Err(DonorExchangeError {
+                        answers: Vec::new(),
+                        busy: true,
+                    });
+                }
+                let prev_ex = self.exchanges.fetch_add(1, Ordering::SeqCst);
+                let broken = self.auth_fails.load(Ordering::SeqCst)
+                    || prev_ex < self.fail_first.load(Ordering::SeqCst);
+                if broken || self.sessions.load(Ordering::SeqCst) == 0 {
+                    self.sessions.fetch_add(1, Ordering::SeqCst);
+                }
+                if broken {
+                    return Err(DonorExchangeError::default());
+                }
+
+                let delay = self.delay_ms.load(Ordering::SeqCst);
+                if delay > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        (delay as u64) * (batch.len() as u64),
+                    ));
+                }
+                self.stats.fetch_add(batch.len() as i32, Ordering::SeqCst);
+                if batch.len() > 1 {
+                    self.pipelined
+                        .fetch_add(batch.len() as i32, Ordering::SeqCst);
+                }
+
+                let has_all = self.has_all.load(Ordering::SeqCst);
+                let ans_451 = self.answers_451.load(Ordering::SeqCst);
+                let has_set = self.has.lock().unwrap();
+                let mut out: Vec<DonorAnswer> = batch
+                    .iter()
+                    .map(|req| {
+                        let present = has_all || has_set.contains(&req.message_id);
+                        if present {
+                            DonorAnswer::Present
+                        } else if ans_451 {
+                            DonorAnswer::Error
+                        } else {
+                            DonorAnswer::Missing
+                        }
+                    })
+                    .collect();
+                drop(has_set);
+
+                for i in 0..batch.len() {
+                    let Some(gate) = &batch[i].gate else {
+                        continue;
+                    };
+                    if out[i] != DonorAnswer::Present {
+                        continue;
+                    }
+                    if self.drop_on_first_body.load(Ordering::SeqCst)
+                        && self.bodies.load(Ordering::SeqCst) == 0
+                    {
+                        self.bodies.fetch_add(1, Ordering::SeqCst);
+                        self.sessions.fetch_add(1, Ordering::SeqCst);
+                        let mut err_ans = out.clone();
+                        err_ans[i] = DonorAnswer::Error;
+                        return Err(DonorExchangeError {
+                            answers: err_ans,
+                            busy: false,
+                        });
+                    }
+                    out[i] = gate.body_once(|| {
+                        self.bodies.fetch_add(1, Ordering::SeqCst);
+                        if delay > 0 {
+                            std::thread::sleep(std::time::Duration::from_millis(delay as u64));
+                        }
+                        if self.body_gone.load(Ordering::SeqCst) {
+                            DonorAnswer::BodyBad
+                        } else {
+                            DonorAnswer::Present
+                        }
+                    });
+                }
+                Ok(out)
+            }
+        }
+
+        let make_server = |cap: i32| -> (Arc<DonorServer>, Arc<FakeTransport>) {
+            let t = FakeTransport::new();
+            let s = Arc::new(DonorServer::new(cap, t.clone()));
+            (s, t)
+        };
+        let ids = |prefix: &str, count: usize| -> Vec<String> {
+            (0..count).map(|i| format!("{prefix}{i}@x")).collect()
+        };
+        let no_groups = || Arc::new(Vec::<String>::new());
+        let everything = |body_percent: i32| DonorOptions {
+            sample: DonorSampleOptions {
+                percent: 100,
+                minimum: 1,
+                maximum: 100_000,
+                body_percent,
+                max_body: 1000,
+                seed: 0,
+            },
+            probe: 10,
+            budget_ms: 10_000,
+            deadline_ms: 0,
+        };
+
+        donor_reset();
+
+        // 1. DonorHealthSampleTest
+        assert_eq!(donor_sample(&ids("a", 100), 2, 20, 300, 0).len(), 20);
+        assert_eq!(donor_sample(&ids("a", 5000), 2, 20, 300, 0).len(), 100);
+        assert_eq!(donor_sample(&ids("a", 100_000), 2, 20, 300, 0).len(), 300);
+        assert_eq!(donor_sample(&ids("a", 20_000), 5, 50, 1000, 0).len(), 1000);
+        assert_eq!(donor_sample(&ids("a", 300), 5, 50, 1000, 0).len(), 50);
+        assert_eq!(donor_sample(&ids("a", 12), 5, 50, 1000, 0).len(), 12);
+
+        let a = donor_sample(&ids("a", 5000), 2, 20, 300, 7);
+        assert_eq!(a, donor_sample(&ids("a", 5000), 2, 20, 300, 7));
+        assert_ne!(a, donor_sample(&ids("a", 5000), 2, 20, 300, 8));
+        let unique: BTreeSet<_> = a.iter().collect();
+        assert_eq!(unique.len(), a.len());
+
+        // 2. DonorHealthPlanBodyTest
+        let mut s_opts = DonorSampleOptions {
+            percent: 30,
+            minimum: 20,
+            maximum: 300,
+            body_percent: 20,
+            max_body: 5,
+            seed: 0,
+        };
+        let planned = donor_plan(&ids("a", 1000), &no_groups(), &s_opts);
+        assert_eq!(planned.len(), 300);
+        assert_eq!(planned.iter().filter(|it| it.body).count(), 5);
+        s_opts.max_body = 1000;
+        let planned2 = donor_plan(&ids("a", 1000), &no_groups(), &s_opts);
+        let bodies = planned2.iter().filter(|it| it.body).count();
+        assert!(bodies > 30 && bodies < 90);
+
+        // 3. DonorHealthVerdictTest
+        let mk_h = |checked, present, missing, error| DonorHealthResult {
+            checked,
+            present,
+            missing,
+            error,
+            body_checked: 0,
+            body_bad: 0,
+        };
+        assert_eq!(mk_h(300, 0, 1, 299).alive(), 0.0);
+        assert_eq!(mk_h(300, 150, 0, 150).alive(), 0.5);
+        assert_eq!(mk_h(300, 10, 0, 0).alive(), 1.0);
+        assert_eq!(mk_h(300, 0, 2, 2).alive(), -1.0);
+        assert!(donor_dead_probe(&mk_h(10, 0, 5, 5)));
+        assert!(donor_dead_probe(&mk_h(10, 0, 10, 0)));
+        assert!(!donor_dead_probe(&mk_h(10, 0, 4, 6)));
+        assert!(!donor_dead_probe(&mk_h(10, 1, 9, 0)));
+        assert!(!donor_dead_probe(&mk_h(10, 0, 0, 10)));
+
+        // 4. DonorHealthAllServersTest
+        let id_list = ids("a", 40);
+        let (sa, ta) = make_server(1);
+        let (sb, tb) = make_server(1);
+        for (i, id) in id_list.iter().enumerate() {
+            if i < 20 {
+                ta.has.lock().unwrap().insert(id.clone());
+            } else {
+                tb.has.lock().unwrap().insert(id.clone());
+            }
+        }
+        let h = donor_check_items(
+            &[sa, sb],
+            &donor_plan(&id_list, &no_groups(), &everything(0).sample),
+            5000,
+        );
+        assert_eq!(h.checked, 40);
+        assert_eq!(h.present, 40);
+
+        // 5. DonorHealthDeadProbeAsksEveryServerTest
+        let (sa, ta) = make_server(1);
+        let (sb, tb) = make_server(1);
+        let h = donor_check_posting(&[sa, sb], &ids("dead", 30), &no_groups(), &everything(0), false);
+        assert_eq!(h.checked, 10);
+        assert_eq!(h.missing, 10);
+        assert_eq!(h.present, 0);
+        assert_eq!(ta.stats.load(Ordering::SeqCst), 10);
+        assert_eq!(tb.stats.load(Ordering::SeqCst), 10);
+        assert!(donor_dead_probe(&h));
+
+        // 6. DonorHealthSlowServerNeverHoldsUpTheOthersTest
+        let (fast_s, fast_t) = make_server(1);
+        fast_t.has_all.store(true, Ordering::SeqCst);
+        let (slow_s, slow_t) = make_server(1);
+        slow_t.has_all.store(true, Ordering::SeqCst);
+        slow_t.delay_ms.store(500, Ordering::SeqCst);
+        let start = donor_now_ms();
+        let h = donor_check_items(
+            &[fast_s, slow_s],
+            &donor_plan(&ids("a", 20), &no_groups(), &everything(0).sample),
+            10_000,
+        );
+        assert_eq!(h.present, 20);
+        assert!(donor_now_ms() - start < 3000);
+        assert!(slow_t.stats.load(Ordering::SeqCst) < 20);
+
+        // 7. DonorHealthBadAuthServerTest
+        let (bad_s, bad_t) = make_server(1);
+        bad_t.auth_fails.store(true, Ordering::SeqCst);
+        let (good_s, _) = make_server(1);
+        let h = donor_check_items(
+            &[bad_s, good_s],
+            &donor_plan(&ids("dead", 20), &no_groups(), &everything(0).sample),
+            5000,
+        );
+        assert_eq!(h.missing, 20);
+        assert_eq!(h.error, 0);
+
+        let (bad2_s, bad2_t) = make_server(1);
+        bad2_t.auth_fails.store(true, Ordering::SeqCst);
+        let h = donor_check_items(
+            &[bad2_s],
+            &donor_plan(&ids("a", 20), &no_groups(), &everything(0).sample),
+            5000,
+        );
+        assert_eq!(h.missing, 0);
+        assert_eq!(h.present, 0);
+        assert!(!donor_dead_probe(&h));
+
+        // 8. DonorHealth451IsAnAnswerTest
+        let (sa, ta) = make_server(1);
+        ta.answers_451.store(true, Ordering::SeqCst);
+        sa.set_retry_after_ms(30_000);
+        let (sb, _) = make_server(1);
+        let start = donor_now_ms();
+        let h = donor_check_items(
+            &[sa, sb],
+            &donor_plan(&ids("dead", 20), &no_groups(), &everything(0).sample),
+            10_000,
+        );
+        assert_eq!(h.missing, 20);
+        assert!(donor_now_ms() - start < 3000);
+        assert_eq!(ta.sessions.load(Ordering::SeqCst), 1);
+        assert_eq!(ta.stats.load(Ordering::SeqCst), 20);
+
+        let (sc, tc) = make_server(1);
+        tc.answers_451.store(true, Ordering::SeqCst);
+        let h = donor_check_items(
+            &[sc],
+            &donor_plan(&ids("dead", 20), &no_groups(), &everything(0).sample),
+            5000,
+        );
+        assert_eq!(h.missing, 0);
+        assert_eq!(h.error, 20);
+        assert!(!donor_dead_probe(&h));
+
+        // 9. DonorHealthPausedServerAbstainsTest
+        let (bad_s, bad_t) = make_server(1);
+        bad_t.auth_fails.store(true, Ordering::SeqCst);
+        bad_s.set_retry_after_ms(30_000);
+        let (good_s, good_t) = make_server(1);
+        good_t.delay_ms.store(5, Ordering::SeqCst);
+        let start = donor_now_ms();
+        let h = donor_check_items(
+            &[bad_s, good_s],
+            &donor_plan(&ids("dead", 40), &no_groups(), &everything(0).sample),
+            10_000,
+        );
+        assert_eq!(h.missing, 40);
+        assert!(donor_now_ms() - start < 5000);
+
+        // 10. DonorHealthBusyPoolDoesNotPauseTest & 11. DonorHealthPausedAskIsInterruptibleTest
+        let (busy_s, busy_t) = make_server(1);
+        busy_t.pool_busy.store(true, Ordering::SeqCst);
+        busy_s.set_retry_after_ms(30_000);
+        let batch1 = vec![DonorRequest {
+            message_id: "a@x".to_string(),
+            gate: None,
+            groups: no_groups(),
+        }];
+        for _ in 0..(DONOR_SERVER_GIVE_UP * 2) {
+            busy_s.ask(&batch1, || false);
+        }
+        assert!(!busy_s.paused());
+        assert_eq!(busy_t.exchanges.load(Ordering::SeqCst), DONOR_SERVER_GIVE_UP * 2);
+
+        let (paused_s, paused_t) = make_server(1);
+        paused_t.auth_fails.store(true, Ordering::SeqCst);
+        paused_s.set_retry_after_ms(30_000);
+        for _ in 0..DONOR_SERVER_GIVE_UP {
+            paused_s.ask(&batch1, || false);
+        }
+        assert!(paused_s.paused());
+        let before = paused_t.exchanges.load(Ordering::SeqCst);
+        let ans = paused_s.ask(&batch1, || true);
+        assert_eq!(ans, vec![DonorAnswer::Error]);
+        assert_eq!(paused_t.exchanges.load(Ordering::SeqCst), before);
+
+        donor_stop_all();
+        paused_s.ask(&batch1, || false);
+        assert_eq!(paused_t.exchanges.load(Ordering::SeqCst), before);
+        donor_reset();
+
+        // 12. DonorHealthSingleServerRecoversTest
+        let (srv, tr) = make_server(1);
+        tr.has_all.store(true, Ordering::SeqCst);
+        tr.fail_first.store(3, Ordering::SeqCst);
+        srv.set_retry_after_ms(20);
+        let h = donor_check_items(
+            &[srv],
+            &donor_plan(&ids("a", 60), &no_groups(), &everything(0).sample),
+            10_000,
+        );
+        assert!(h.present >= 60 - 3 * 4);
+        assert_eq!(h.present + h.error, 60);
+
+        // 13. DonorHealthBudgetEndBiasTest & 14. DonorHealthSlowServerBudgetTest
+        let id20 = ids("a", 20);
+        let (sa, ta) = make_server(1);
+        let (sb, _) = make_server(1);
+        let (sc, tc) = make_server(1);
+        for id in id20.iter().take(10) {
+            ta.has.lock().unwrap().insert(id.clone());
+        }
+        tc.has_all.store(true, Ordering::SeqCst);
+        tc.delay_ms.store(1000, Ordering::SeqCst);
+        let h = donor_check_items(
+            &[sa, sb, sc],
+            &donor_plan(&id20, &no_groups(), &everything(0).sample),
+            200,
+        );
+        assert_eq!(h.present, 10);
+        assert_eq!(h.missing, 10);
+        assert_eq!(h.alive(), 0.5);
+
+        // 15. DonorHealthBodyChecksTest, 16. OneServerPerBody, 17. DropsDuringBody, Pipelining, Cap, ProbeEndsDead
+        let id30 = ids("a", 30);
+        let (soft_s, soft_t) = make_server(1);
+        soft_t.has_all.store(true, Ordering::SeqCst);
+        soft_t.body_gone.store(true, Ordering::SeqCst);
+        let h = donor_check_items(
+            &[soft_s.clone()],
+            &donor_plan(&id30, &no_groups(), &everything(0).sample),
+            5000,
+        );
+        assert_eq!(h.alive(), 1.0);
+        let h = donor_check_items(
+            &[soft_s],
+            &donor_plan(&id30, &no_groups(), &everything(100).sample),
+            5000,
+        );
+        assert_eq!(h.alive(), 0.0);
+        assert_eq!(h.body_checked, 30);
+        assert_eq!(h.body_bad, 30);
+
+        let (s1, t1) = make_server(1);
+        let (s2, t2) = make_server(1);
+        let (s3, t3) = make_server(1);
+        for t in [&t1, &t2, &t3] {
+            t.has_all.store(true, Ordering::SeqCst);
+        }
+        let h = donor_check_items(
+            &[s1, s2, s3],
+            &donor_plan(&ids("a", 10), &no_groups(), &everything(100).sample),
+            5000,
+        );
+        assert_eq!(h.present, 10);
+        assert_eq!(
+            t1.bodies.load(Ordering::SeqCst)
+                + t2.bodies.load(Ordering::SeqCst)
+                + t3.bodies.load(Ordering::SeqCst),
+            10
+        );
+
+        let (drop_s, drop_t) = make_server(1);
+        drop_t.has_all.store(true, Ordering::SeqCst);
+        drop_t.drop_on_first_body.store(true, Ordering::SeqCst);
+        let h = donor_check_items(
+            &[drop_s],
+            &donor_plan(&ids("a", 40), &no_groups(), &everything(100).sample),
+            10_000,
+        );
+        assert!(h.present >= 40 - 4 * 2);
+        assert_eq!(h.present + h.error, 40);
+
+        let (pipe_s, pipe_t) = make_server(1);
+        pipe_t.has_all.store(true, Ordering::SeqCst);
+        let h = donor_check_items(
+            &[pipe_s.clone()],
+            &donor_plan(&ids("a", 64), &no_groups(), &everything(0).sample),
+            5000,
+        );
+        assert_eq!(h.present, 64);
+        assert_eq!(pipe_t.sessions.load(Ordering::SeqCst), 1);
+        assert!(pipe_t.pipelined.load(Ordering::SeqCst) >= 32);
+        assert_eq!(pipe_s.depth(), DONOR_PIPELINE_MAX);
+
+        let (cap_s, cap_t) = make_server(4);
+        cap_t.has_all.store(true, Ordering::SeqCst);
+        cap_t.delay_ms.store(2, Ordering::SeqCst);
+        let postings: Vec<DonorPosting> = (0..15)
+            .map(|i| DonorPosting {
+                key: format!("p{i}"),
+                ids: ids(&format!("p{i}-"), 20),
+                groups: no_groups(),
+            })
+            .collect();
+        let done = AtomicI32::new(0);
+        let alive = AtomicI32::new(0);
+        donor_check_postings(&[cap_s.clone()], &postings, &everything(0), true, 8, |_, h| {
+            done.fetch_add(1, Ordering::SeqCst);
+            if h.present == 20 {
+                alive.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        assert_eq!(done.load(Ordering::SeqCst), 15);
+        assert_eq!(alive.load(Ordering::SeqCst), 15);
+        assert!(cap_s.max_active() <= 4);
+
+        let (dead_s, dead_t) = make_server(1);
+        let h = donor_check_posting(&[dead_s], &ids("dead", 500), &no_groups(), &everything(0), true);
+        assert_eq!(h.checked, 10);
+        assert!(donor_dead_probe(&h));
+        assert_eq!(dead_t.stats.load(Ordering::SeqCst), 10);
+
+        let (live_s, live_t) = make_server(1);
+        live_t.has_all.store(true, Ordering::SeqCst);
+        let h = donor_check_posting(&[live_s], &ids("a", 500), &no_groups(), &everything(0), true);
+        assert_eq!(h.checked, 500);
+        assert_eq!(h.present, 500);
+
+        // Regression test: soft BodyBad is counted even when final verdict remains unsettled on timeout
+        let (bad_s, bad_t) = make_server(1);
+        let (slow_s, slow_t) = make_server(1);
+        bad_t.has_all.store(true, Ordering::SeqCst);
+        bad_t.body_gone.store(true, Ordering::SeqCst);
+        slow_t.delay_ms.store(300, Ordering::SeqCst);
+        let unsettled_body_items = vec![DonorItem {
+            message_id: "unsettled_body".to_string(),
+            body: true,
+            groups: no_groups(),
+        }];
+        let h_unsettled = donor_check_items(&[bad_s, slow_s], &unsettled_body_items, 40);
+        assert_eq!(h_unsettled.checked, 1);
+        assert_eq!(h_unsettled.answered(), 0);
+        assert_eq!(h_unsettled.body_checked, 1);
+        assert_eq!(h_unsettled.body_bad, 1);
+
+        donor_stop_all();
+        donor_wait_all();
+        donor_reset();
+    }
+
+    #[test]
+    fn posting_identity_and_budget_suite_port_from_cpp() {
+        let _donor_guard = DONOR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        donor_stop_all();
+        donor_wait_all();
+        donor_reset();
+        // Port of tests/dupesearch/Posting.cpp exercising production Rust functions:
+        // 1. NativeIdentityFetchExceptionTest
+        let heads = vec![
+            (b"first.mkv".to_vec(), b"a@x".to_vec(), 100i64),
+            (b"second.mkv".to_vec(), b"b@x".to_vec(), 100i64),
+        ];
+        let groups = vec!["alt.binaries.test".to_string()];
+        let mut attempts = 0;
+        let now_sec = 1000i64;
+        let deadline = now_sec + 10;
+        let found = dupe_identity_read(
+            200,
+            &heads,
+            &groups,
+            deadline,
+            || now_sec,
+            || false,
+            |msg_id, grp, dl| {
+                attempts += 1;
+                let call_no = attempts;
+                dupe_identity_fetch_article(
+                    msg_id,
+                    grp,
+                    dl,
+                    || now_sec,
+                    || false,
+                    move |_bracketed_id, _g| {
+                        if call_no == 1 {
+                            panic!("fake transport exception");
+                        }
+                        Ok(FetchedArticleResult {
+                            success: true,
+                            offset: 0,
+                            file_size: 1000,
+                            data: b"v".to_vec(),
+                        })
+                    },
+                    || {},
+                )
+            },
+        );
+        assert_eq!(attempts, 2);
+        let found = found.expect("identity should be recovered from second head");
+        assert_eq!(found.bytes, 1000);
+
+        // 2. NativeFetchBudgetChargesRetriesTest
+        let mut calls = 0;
+        let fetcher = NzbFetcherCore::new();
+        let budget = crate::dupewatch::FetchBudget::from_max_donors(1);
+        let mut listing = NewznabResult::default();
+        listing.indexer = b"idx".to_vec();
+        listing.title = b"Title".to_vec();
+        listing.link = b"http://127.0.0.1/nzb".to_vec();
+        let fetched = fetcher.fetch_with(
+            &listing,
+            now_sec + 20,
+            3,
+            Some(&budget),
+            || now_sec,
+            donor_now_ms,
+            || false,
+            || {},
+            |_, _, _, _| {
+                calls += 1;
+                (true, 200, b"<html>indexer error</html>".to_vec())
+            },
+            |_| {},
+            |_| {},
+        );
+        assert_eq!(fetched.reason, NzbFetchReason::Parse);
+        assert_eq!(calls, 3);
+        assert!(budget.spent());
+
+        // 3. NativeFetchBudgetCooldownIsFreeTest
+        let mut calls2 = 0;
+        let fetcher2 = NzbFetcherCore::new();
+        let budget2 = crate::dupewatch::FetchBudget::from_max_donors(1);
+        let first = fetcher2.fetch_with(
+            &listing,
+            now_sec + 20,
+            0,
+            Some(&budget2),
+            || now_sec,
+            donor_now_ms,
+            || false,
+            || {},
+            |_, _, _, _| {
+                calls2 += 1;
+                (false, 403, Vec::new())
+            },
+            |_| {},
+            |_| {},
+        );
+        assert_eq!(first.reason, NzbFetchReason::Fetch);
+        let second = fetcher2.fetch_with(
+            &listing,
+            now_sec + 20,
+            0,
+            Some(&budget2),
+            || now_sec,
+            donor_now_ms,
+            || false,
+            || {},
+            |_, _, _, _| {
+                calls2 += 1;
+                (false, 403, Vec::new())
+            },
+            |_| {},
+            |_| {},
+        );
+        assert_eq!(second.reason, NzbFetchReason::Refused);
+        assert_eq!(calls2, 1);
+        assert!(budget2.take());
+        assert!(budget2.take());
+        assert!(!budget2.take());
     }
 }

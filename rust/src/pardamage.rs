@@ -404,6 +404,78 @@ pub fn is_dupe_content_match(
     dupe_max_size == max_size && dupe_compressed == compressed
 }
 
+fn format_dupe_matcher_detail_msg(filename_buf: &[u8], max_size: i64, ok: bool) -> Vec<u8> {
+    let end = filename_buf
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(filename_buf.len());
+    let fname = &filename_buf[..end];
+    let suffix = size_mismatch_suffix(ok).to_bytes();
+    let mut msg = Vec::with_capacity(36 + fname.len() + suffix.len());
+    msg.extend_from_slice(b"Found main file ");
+    msg.extend_from_slice(fname);
+    msg.extend_from_slice(format!(" with size {max_size} bytes").as_bytes());
+    msg.extend_from_slice(suffix);
+    msg
+}
+
+/// `DupeMatcher::Prepare` (`daemon/postprocess/DupeMatcher.cpp`).
+pub fn dupe_matcher_prepare<R, L>(
+    dest_dir: &Path,
+    expected_size: i64,
+    max_size: &mut i64,
+    compressed: &mut bool,
+    on_rar_archive: R,
+    mut on_detail_log: L,
+) -> bool
+where
+    R: FnMut(&mut [u8], i64, &mut i64, &mut bool),
+    L: FnMut(&[u8]),
+{
+    let mut filename = [0u8; 1024];
+    find_largest_file(
+        dest_dir,
+        &mut filename,
+        max_size,
+        compressed,
+        None,
+        on_rar_archive,
+    );
+    let size_ok = crate::postrepair::size_diff_ok(*max_size, expected_size, 20);
+    let msg = format_dupe_matcher_detail_msg(&filename, *max_size, size_ok);
+    on_detail_log(&msg);
+    size_ok
+}
+
+/// `DupeMatcher::MatchDupeContent` (`daemon/postprocess/DupeMatcher.cpp`).
+pub fn dupe_matcher_match_dupe_content<R, L>(
+    dupe_dir: &Path,
+    max_size: i64,
+    compressed: bool,
+    on_rar_archive: R,
+    mut on_detail_log: L,
+) -> bool
+where
+    R: FnMut(&mut [u8], i64, &mut i64, &mut bool),
+    L: FnMut(&[u8]),
+{
+    let mut filename = [0u8; 1024];
+    let mut dupe_max_size = 0i64;
+    let mut dupe_compressed = false;
+    find_largest_file(
+        dupe_dir,
+        &mut filename,
+        &mut dupe_max_size,
+        &mut dupe_compressed,
+        Some(max_size),
+        on_rar_archive,
+    );
+    let ok = is_dupe_content_match(dupe_max_size, max_size, dupe_compressed, compressed);
+    let msg = format_dupe_matcher_detail_msg(&filename, max_size, ok);
+    on_detail_log(&msg);
+    ok
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,5 +585,193 @@ mod tests {
         assert_eq!(seen_prepared, 99_999);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dupe_matcher_full_suite_port_from_cpp() {
+        let env_path = std::env::var("PATH").unwrap_or_default();
+        let Some(unrar_bytes) =
+            crate::util::util_resolve_path_from_env(b"unrar", env_path.as_bytes())
+        else {
+            return;
+        };
+        let unrar_path = std::path::PathBuf::from(String::from_utf8_lossy(&unrar_bytes).into_owned());
+
+        let testdata_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("tests/testdata");
+        let work_dir = std::env::temp_dir().join(format!(
+            "nzbget_rust_dupematcher_suite_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&work_dir);
+        std::fs::create_dir_all(&work_dir).unwrap();
+
+        let copy_dir = |src: &Path, dst: &Path| {
+            std::fs::create_dir_all(dst).unwrap();
+            for entry in std::fs::read_dir(src).unwrap().flatten() {
+                if entry.path().is_file() {
+                    std::fs::copy(entry.path(), dst.join(entry.file_name())).unwrap();
+                }
+            }
+        };
+
+        let dupe1 = work_dir.join("dupe1");
+        copy_dir(&testdata_dir.join("parchecker"), &dupe1);
+        let dupe2 = work_dir.join("dupe2");
+        copy_dir(&testdata_dir.join("parchecker"), &dupe2);
+        let _ = std::fs::remove_file(dupe2.join("testfile.nfo"));
+        let rardupe1 = testdata_dir.join("dupematcher1");
+        let rardupe2 = testdata_dir.join("dupematcher2");
+        let nondupe = work_dir.join("nondupe");
+        copy_dir(&testdata_dir.join("parchecker"), &nondupe);
+        let _ = std::fs::remove_file(nondupe.join("testfile.dat"));
+
+        let expected_size = std::fs::metadata(dupe1.join("testfile.dat"))
+            .unwrap()
+            .len() as i64;
+
+        let run_rar_lister = |dir: &Path,
+                              filename_buf: &mut [u8],
+                              rar_expected_size: i64,
+                              max_size: &mut i64,
+                              compressed: &mut bool| {
+            *max_size = -1;
+            *compressed = false;
+            let mut last_size_max: std::ffi::c_int = 0;
+            let mut comp_flag: std::ffi::c_int = 0;
+            let mut last_filename = Vec::<u8>::new();
+
+            let mut rar_args = vec!["lt".to_string()];
+            let mut rar_files: Vec<String> = std::fs::read_dir(dir)
+                .unwrap()
+                .flatten()
+                .filter_map(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    name.to_ascii_lowercase()
+                        .ends_with(".rar")
+                        .then_some(name)
+                })
+                .collect();
+            rar_files.sort();
+            rar_args.extend(rar_files);
+
+            let out = std::process::Command::new(&unrar_path)
+                .current_dir(dir)
+                .args(&rar_args)
+                .output()
+                .unwrap();
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                let Ok(c_line) = std::ffi::CString::new(line) else {
+                    continue;
+                };
+                let action = unsafe {
+                    crate::postrepair::parse_rar_lister_line_cstr(
+                        c_line.as_ptr(),
+                        rar_expected_size,
+                        max_size,
+                        &mut comp_flag,
+                        &mut last_size_max,
+                    )
+                };
+                *compressed = comp_flag != 0;
+                if action == 2 && line.len() >= 14 {
+                    last_filename = line.as_bytes()[14..].to_vec();
+                } else if action == 3 {
+                    let n = last_filename.len().min(filename_buf.len().saturating_sub(1));
+                    filename_buf[..n].copy_from_slice(&last_filename[..n]);
+                    if !filename_buf.is_empty() {
+                        filename_buf[n] = 0;
+                    }
+                } else if action == 5 {
+                    break;
+                }
+            }
+        };
+
+        struct RustDupeMatcher<'a, F> {
+            dest_dir: std::path::PathBuf,
+            expected_size: i64,
+            max_size: i64,
+            compressed: bool,
+            rar_lister: &'a F,
+        }
+
+        impl<'a, F> RustDupeMatcher<'a, F>
+        where
+            F: Fn(&Path, &mut [u8], i64, &mut i64, &mut bool),
+        {
+            fn new(dest_dir: &Path, expected_size: i64, rar_lister: &'a F) -> Self {
+                Self {
+                    dest_dir: dest_dir.to_path_buf(),
+                    expected_size,
+                    max_size: -1,
+                    compressed: false,
+                    rar_lister,
+                }
+            }
+
+            fn prepare(&mut self) -> bool {
+                let dir = self.dest_dir.clone();
+                let lister = self.rar_lister;
+                dupe_matcher_prepare(
+                    &dir,
+                    self.expected_size,
+                    &mut self.max_size,
+                    &mut self.compressed,
+                    |buf, exp_sz, max_sz, comp| lister(&dir, buf, exp_sz, max_sz, comp),
+                    |_| {},
+                )
+            }
+
+            fn match_dupe_content(&self, dupe_dir: &Path) -> bool {
+                let lister = self.rar_lister;
+                dupe_matcher_match_dupe_content(
+                    dupe_dir,
+                    self.max_size,
+                    self.compressed,
+                    |buf, exp_sz, max_sz, comp| lister(dupe_dir, buf, exp_sz, max_sz, comp),
+                    |_| {},
+                )
+            }
+        }
+
+        let mut dupe1_m = RustDupeMatcher::new(&dupe1, expected_size, &run_rar_lister);
+        assert!(dupe1_m.prepare());
+        assert!(dupe1_m.match_dupe_content(&dupe2));
+        assert!(dupe1_m.match_dupe_content(&rardupe1));
+        assert!(dupe1_m.match_dupe_content(&rardupe2));
+        assert!(!dupe1_m.match_dupe_content(&nondupe));
+
+        let mut dupe2_m = RustDupeMatcher::new(&dupe2, expected_size, &run_rar_lister);
+        assert!(dupe2_m.prepare());
+        assert!(dupe2_m.match_dupe_content(&dupe1));
+        assert!(dupe2_m.match_dupe_content(&rardupe1));
+        assert!(dupe2_m.match_dupe_content(&rardupe2));
+        assert!(!dupe2_m.match_dupe_content(&nondupe));
+
+        let mut non_dupe_m = RustDupeMatcher::new(&nondupe, expected_size, &run_rar_lister);
+        assert!(!non_dupe_m.prepare());
+        assert!(!non_dupe_m.match_dupe_content(&dupe1));
+        assert!(!non_dupe_m.match_dupe_content(&dupe2));
+        assert!(!non_dupe_m.match_dupe_content(&rardupe1));
+        assert!(!non_dupe_m.match_dupe_content(&rardupe2));
+
+        let mut rardupe1_m = RustDupeMatcher::new(&rardupe1, expected_size, &run_rar_lister);
+        assert!(rardupe1_m.prepare());
+        assert!(rardupe1_m.match_dupe_content(&dupe1));
+        assert!(rardupe1_m.match_dupe_content(&dupe2));
+        assert!(rardupe1_m.match_dupe_content(&rardupe2));
+        assert!(!rardupe1_m.match_dupe_content(&nondupe));
+
+        let mut rardupe2_m = RustDupeMatcher::new(&rardupe2, expected_size, &run_rar_lister);
+        assert!(rardupe2_m.prepare());
+        assert!(rardupe2_m.match_dupe_content(&rardupe1));
+        assert!(rardupe2_m.match_dupe_content(&dupe1));
+        assert!(rardupe2_m.match_dupe_content(&dupe2));
+        assert!(!rardupe2_m.match_dupe_content(&nondupe));
+
+        let _ = std::fs::remove_dir_all(&work_dir);
     }
 }

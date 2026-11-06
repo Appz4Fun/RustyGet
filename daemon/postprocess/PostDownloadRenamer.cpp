@@ -21,7 +21,6 @@
 #include "nzbget.h"
 
 #include "PostDownloadRenamer.h"
-#include "CollectionAnalyzer.h"
 #include "FileSystem.h"
 #include "Options.h"
 #include "nzbget_rs.h"

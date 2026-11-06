@@ -429,21 +429,21 @@ void PrePostProcessor::NzbAdded(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 
 void PrePostProcessor::CheckDownloadCompleted(DownloadQueue* downloadQueue, NzbInfo* nzbInfo)
 {
-	if (IsStopped())
-	{
-		return;
-	}
 	// Direct rename can pause the last PAR volumes after the data files
 	// finished. Their in-flight articles may still be draining; the last
 	// such request does not complete a file, so check both transitions.
-	if (nzbInfo->GetDirectRenameStatus() == NzbInfo::tsSuccess &&
-		!nzbInfo->GetPostInfo() &&
-		nzbInfo->GetDeleteStatus() == NzbInfo::dsNone &&
-		(!nzbInfo->GetCompletedFiles()->empty() ||
-			g_Options->GetRawArticle() ||
-			g_Options->GetSkipWrite() ||
-			nzbInfo->GetSkipDiskWrite()) &&
-		nzbInfo->IsDownloadCompleted(true))
+	if (nzbget_rs_prepost_should_complete_after_direct_rename(
+		IsStopped() ? 1 : 0,
+		(int)nzbInfo->GetDirectRenameStatus(),
+		(int)NzbInfo::tsSuccess,
+		nzbInfo->GetPostInfo() ? 1 : 0,
+		(int)nzbInfo->GetDeleteStatus(),
+		(int)NzbInfo::dsNone,
+		!nzbInfo->GetCompletedFiles()->empty() ? 1 : 0,
+		nzbInfo->IsDownloadCompleted(true) ? 1 : 0,
+		g_Options->GetRawArticle() ? 1 : 0,
+		g_Options->GetSkipWrite() ? 1 : 0,
+		nzbInfo->GetSkipDiskWrite() ? 1 : 0) != 0)
 	{
 		nzbInfo->PrintMessage(Message::mkInfo,
 			"Collection %s completely downloaded", nzbInfo->GetName());

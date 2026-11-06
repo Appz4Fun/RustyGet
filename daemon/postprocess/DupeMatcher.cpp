@@ -169,25 +169,36 @@ bool DupeMatcher::SizeDiffOK(int64 size1, int64 size2, int maxDiffPercent)
 
 bool DupeMatcher::Prepare()
 {
-	char filename[1024];
-	FindLargestFile(m_destDir, filename, sizeof(filename), &m_maxSize, &m_compressed);
-	bool sizeOK = SizeDiffOK(m_maxSize, m_expectedSize, 20);
-	PrintMessage(Message::mkDetail, "Found main file %s with size %" PRIi64 " bytes%s",
-		filename, m_maxSize, nzbget_rs_dupematcher_size_mismatch_suffix(sizeOK ? 1 : 0));
+	RarListerCtx ctx{ this, m_destDir };
+	int comp = m_compressed ? 1 : 0;
+	bool sizeOK = nzbget_rs_dupematcher_prepare(
+		m_destDir,
+		m_expectedSize,
+		&m_maxSize,
+		&comp,
+		OnRarArchive,
+		[](void* rawCtx, const char* msg) {
+			static_cast<RarListerCtx*>(rawCtx)->owner->PrintMessage(
+				Message::mkDetail, "%s", msg ? msg : "");
+		},
+		&ctx) != 0;
+	m_compressed = comp != 0;
 	return sizeOK;
 }
 
 bool DupeMatcher::MatchDupeContent(const char* dupeDir)
 {
-	int64 dupeMaxSize = 0;
-	bool dupeCompressed = false;
-	char filename[1024];
-	FindLargestFile(dupeDir, filename, sizeof(filename), &dupeMaxSize, &dupeCompressed);
-	bool ok = nzbget_rs_dupematcher_is_content_match(
-		dupeMaxSize, m_maxSize, dupeCompressed ? 1 : 0, m_compressed ? 1 : 0) != 0;
-	PrintMessage(Message::mkDetail, "Found main file %s with size %" PRIi64 " bytes%s",
-		filename, m_maxSize, nzbget_rs_dupematcher_size_mismatch_suffix(ok ? 1 : 0));
-	return ok;
+	RarListerCtx ctx{ this, dupeDir };
+	return nzbget_rs_dupematcher_match_dupe_content(
+		dupeDir,
+		m_maxSize,
+		m_compressed ? 1 : 0,
+		OnRarArchive,
+		[](void* rawCtx, const char* msg) {
+			static_cast<RarListerCtx*>(rawCtx)->owner->PrintMessage(
+				Message::mkDetail, "%s", msg ? msg : "");
+		},
+		&ctx) != 0;
 }
 
 void DupeMatcher::FindLargestFile(const char* directory, char* filenameBuf, int bufLen,

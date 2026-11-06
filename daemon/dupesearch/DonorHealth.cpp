@@ -20,10 +20,6 @@
 
 #include "nzbget.h"
 
-#include <algorithm>
-#include <random>
-#include <set>
-#include <thread>
 #include "DonorHealth.h"
 #include "nzbget_rs.h"
 
@@ -32,8 +28,7 @@ using Health = DonorHealth::Health;
 
 long long DonorHealth::NowMs()
 {
-	return std::chrono::duration_cast<std::chrono::milliseconds>(
-		std::chrono::steady_clock::now().time_since_epoch()).count();
+	return (long long)nzbget_rs_donor_now_ms();
 }
 
 double DonorHealth::Health::Alive() const
@@ -57,52 +52,169 @@ bool DonorHealth::DeadProbe(const Health& health)
 std::vector<std::string> DonorHealth::Sample(const std::vector<std::string>& ids, int percent, int minimum,
 	int maximum, unsigned seed)
 {
-	std::vector<std::string> sorted = ids;
-	std::sort(sorted.begin(), sorted.end());
-
-	size_t count = nzbget_rs_df_donor_sample_count(sorted.size(), percent, minimum, maximum);
-
-	// a deterministic random pick: a partial shuffle
-	std::mt19937 random(seed);
-	for (size_t i = 0; i < count; i++)
+	std::vector<const char*> ptrs(ids.size());
+	std::vector<size_t> lens(ids.size());
+	for (size_t i = 0; i < ids.size(); i++)
 	{
-		size_t j = i + random() % (sorted.size() - i);
-		std::swap(sorted[i], sorted[j]);
+		ptrs[i] = ids[i].data();
+		lens[i] = ids[i].size();
 	}
-	sorted.resize(count);
-	return sorted;
+	std::vector<std::string> out;
+	nzbget_rs_donor_sample(
+		ptrs.data(), lens.data(), ids.size(), percent, minimum, maximum, seed, &out,
+		[](void* rawCtx, const char* idPtr, size_t idLen) {
+			static_cast<std::vector<std::string>*>(rawCtx)->emplace_back(idPtr ? idPtr : "", idLen);
+		});
+	return out;
 }
 
 std::vector<DonorHealth::Item> DonorHealth::Plan(const std::vector<std::string>& ids,
 	const std::shared_ptr<std::vector<std::string>>& groups, const SampleOptions& options)
 {
-	std::mt19937 random(options.seed + 1);
-	std::uniform_real_distribution<double> percent(0.0, 100.0);
-	int bodies = 0;
-	std::vector<Item> items;
-	for (const std::string& id : Sample(ids, options.percent, options.minimum, options.maximum, options.seed))
+	std::vector<const char*> ptrs(ids.size());
+	std::vector<size_t> lens(ids.size());
+	for (size_t i = 0; i < ids.size(); i++)
 	{
-		Item item;
-		item.messageId = id;
-		item.groups = groups;
-		item.body = bodies < options.maxBody && percent(random) < options.bodyPercent;
-		bodies += item.body;
-		items.push_back(std::move(item));
+		ptrs[i] = ids[i].data();
+		lens[i] = ids[i].size();
 	}
-	return items;
+	struct PlanCtx
+	{
+		const std::shared_ptr<std::vector<std::string>>& groups;
+		std::vector<Item> items;
+	} ctx{ groups, {} };
+	nzbget_rs_donor_plan(
+		ptrs.data(), lens.data(), ids.size(),
+		options.percent, options.minimum, options.maximum, options.bodyPercent, options.maxBody,
+		options.seed, &ctx,
+		[](void* rawCtx, const char* idPtr, size_t idLen, int body) {
+			auto* c = static_cast<PlanCtx*>(rawCtx);
+			Item item;
+			item.messageId.assign(idPtr ? idPtr : "", idLen);
+			item.groups = c->groups;
+			item.body = body != 0;
+			c->items.push_back(std::move(item));
+		});
+	return ctx.items;
 }
 
-bool DonorHealth::Server::Paused() const
+bool DonorHealth::BodyGate::Done()
 {
-	return m_downUntilMs > NowMs();
+	if (rustGate)
+	{
+		return nzbget_rs_donor_body_gate_done(rustGate) != 0;
+	}
+	return ok || (settled && settled());
+}
+
+DonorHealth::Server::Server(int cap)
+{
+	m_rust = nzbget_rs_donor_server_new(this, cap, &Server::ExchangeTrampoline);
+}
+
+DonorHealth::Server::~Server()
+{
+	nzbget_rs_donor_server_free(m_rust);
+}
+
+int DonorHealth::Server::Cap() const { return nzbget_rs_donor_server_cap(m_rust); }
+int DonorHealth::Server::Depth() const { return nzbget_rs_donor_server_depth(m_rust); }
+bool DonorHealth::Server::Paused() const { return nzbget_rs_donor_server_paused(m_rust) != 0; }
+int DonorHealth::Server::MaxActive() const { return nzbget_rs_donor_server_max_active(m_rust); }
+void DonorHealth::Server::SetRetryAfterMs(int ms) { nzbget_rs_donor_server_set_retry_after_ms(m_rust, ms); }
+
+int DonorHealth::Server::ExchangeTrampoline(
+	void* cppServer, size_t count, const char* const* msgIds, const size_t* msgLens,
+	void* const* rustGates, const char* const* const* groupPtrs,
+	const size_t* const* groupLens, const size_t* groupCounts,
+	int* outAnswers, size_t* outCount, int* outBusy)
+{
+	auto* self = static_cast<Server*>(cppServer);
+	std::vector<BodyGate> gates(count);
+	std::vector<Request> batch(count);
+	for (size_t i = 0; i < count; i++)
+	{
+		batch[i].messageId.assign(msgIds[i] ? msgIds[i] : "", msgLens[i]);
+		if (rustGates[i])
+		{
+			gates[i].rustGate = rustGates[i];
+			batch[i].gate = &gates[i];
+		}
+		if (groupCounts && groupCounts[i] > 0 && groupPtrs && groupPtrs[i] && groupLens && groupLens[i])
+		{
+			auto g = std::make_shared<std::vector<std::string>>();
+			g->reserve(groupCounts[i]);
+			for (size_t j = 0; j < groupCounts[i]; j++)
+			{
+				g->emplace_back(groupPtrs[i][j] ? groupPtrs[i][j] : "", groupLens[i][j]);
+			}
+			batch[i].groups = std::move(g);
+		}
+	}
+	try
+	{
+		std::vector<Answer> answers = self->Exchange(batch);
+		size_t n = std::min(count, answers.size());
+		for (size_t i = 0; i < n; i++)
+		{
+			outAnswers[i] = (int)answers[i];
+		}
+		*outCount = n;
+		*outBusy = 0;
+		return 0;
+	}
+	catch (ExchangeError& error)
+	{
+		size_t n = std::min(count, error.answers.size());
+		for (size_t i = 0; i < n; i++)
+		{
+			outAnswers[i] = (int)error.answers[i];
+		}
+		*outCount = n;
+		*outBusy = error.busy ? 1 : 0;
+		return 1;
+	}
+	catch (...)
+	{
+		*outCount = 0;
+		*outBusy = 0;
+		return 1;
+	}
 }
 
 DonorHealth::Answer DonorHealth::Server::BodyOnce(BodyGate* gate, const std::function<Answer()>& download)
 {
+	if (gate && gate->rustGate)
+	{
+		struct BodyOnceCtx
+		{
+			const std::function<Answer()>* download;
+			std::exception_ptr error;
+		} ctx{&download, nullptr};
+		int ans = nzbget_rs_donor_body_once(
+			gate->rustGate,
+			&ctx,
+			[](void* rawCtx) -> int {
+				auto* c = static_cast<BodyOnceCtx*>(rawCtx);
+				try
+				{
+					return c->download && *c->download ? (int)(*c->download)() : (int)Answer::Error;
+				}
+				catch (...)
+				{
+					c->error = std::current_exception();
+					return -1;
+				}
+			});
+		if (ctx.error)
+		{
+			std::rethrow_exception(ctx.error);
+		}
+		return static_cast<Answer>(ans);
+	}
 	std::lock_guard<std::mutex> guard(gate->lock);
 	if (gate->Done())
 	{
-		// another server delivered valid data meanwhile
 		return Answer::Present;
 	}
 	Answer answer = download();
@@ -110,341 +222,157 @@ DonorHealth::Answer DonorHealth::Server::BodyOnce(BodyGate* gate, const std::fun
 	return answer;
 }
 
-namespace
-{
-	std::atomic<bool> g_healthStopping{false};
-	std::atomic<int> g_walkers{0};
-}
-
-void DonorHealth::StopAll() { g_healthStopping = true; }
-void DonorHealth::Reset() { g_healthStopping = false; }
-bool DonorHealth::Stopping() { return g_healthStopping; }
-
-void DonorHealth::WaitAll()
-{
-	while (g_walkers > 0)
-	{
-		std::this_thread::sleep_for(std::chrono::milliseconds(20));
-	}
-}
+void DonorHealth::StopAll() { nzbget_rs_donor_stop_all(); }
+void DonorHealth::Reset() { nzbget_rs_donor_reset(); }
+bool DonorHealth::Stopping() { return nzbget_rs_donor_stopping() != 0; }
+void DonorHealth::WaitAll() { nzbget_rs_donor_wait_all(); }
 
 std::vector<DonorHealth::Answer> DonorHealth::Server::Ask(const std::vector<Request>& batch,
 	const std::function<bool()>& cancelled)
 {
-	auto over = [&cancelled]() { return g_healthStopping || (cancelled && cancelled()); };
+	size_t count = batch.size();
+	std::vector<const char*> msgIds(count);
+	std::vector<size_t> msgLens(count);
+	std::vector<void*> rustGates(count, nullptr);
+	std::vector<std::vector<const char*>> groupStrs(count);
+	std::vector<std::vector<size_t>> groupLens(count);
+	std::vector<const char* const*> groupPtrsOuter(count, nullptr);
+	std::vector<const size_t*> groupLensOuter(count, nullptr);
+	std::vector<size_t> groupCounts(count, 0);
 
-	// a server that kept failing gets a pause, then another try
-	while (m_downUntilMs - NowMs() > 0 && !over())
+	for (size_t i = 0; i < count; i++)
 	{
-		std::this_thread::sleep_for(std::chrono::milliseconds(
-			std::min<long long>(50, m_downUntilMs - NowMs())));
-	}
-
-	{
-		std::unique_lock<std::mutex> lock(m_slotMutex);
-		while (m_active >= m_cap && !over())
+		msgIds[i] = batch[i].messageId.data();
+		msgLens[i] = batch[i].messageId.size();
+		if (batch[i].gate)
 		{
-			m_slotCond.wait_for(lock, std::chrono::milliseconds(50));
+			rustGates[i] = batch[i].gate->rustGate;
 		}
-		if (over())
+		if (batch[i].groups && !batch[i].groups->empty())
 		{
-			// nothing asked: the check is over, or nzbget shuts down
-			return std::vector<Answer>(batch.size(), Answer::Error);
-		}
-		m_active++;
-		if (m_active > m_maxActive)
-		{
-			m_maxActive = m_active;
-		}
-	}
-
-	std::vector<Answer> answers;
-	long long start = NowMs();
-	try
-	{
-		answers = Exchange(batch);
-		// latency-bound servers gain from deeper batches, busy ones only hold a batch past the budget
-		long long took = NowMs() - start;
-		m_depth = nzbget_rs_df_adjust_pipeline_depth(m_depth, took, PipelineMax);
-		m_errors = 0;
-	}
-	catch (ExchangeError& error)
-	{
-		// a busy pool says nothing about the server: it doesn't count toward the pause
-		// that keeps a failing server out of the checks (F12: starved checks paused
-		// every server, and the next fleet measured nothing)
-		m_errors += nzbget_rs_dqh_donor_health_error_increment(error.busy ? 1 : 0);
-		if (nzbget_rs_dqh_donor_health_should_pause_server(m_errors.load(), ServerGiveUp) != 0)
-		{
-			m_downUntilMs = NowMs() + m_retryAfterMs;
-		}
-		// the answers read before the connection broke stay
-		answers = std::move(error.answers);
-	}
-	if (nzbget_rs_dqh_donor_health_should_pause_server(m_errors.load(), ServerGiveUp) != 0)
-	{
-		m_errors = 0;
-	}
-	answers.resize(batch.size(), Answer::Error);
-	for (Answer& answer : answers)
-	{
-		if (answer == Answer::None)
-		{
-			answer = Answer::Error;
-		}
-	}
-
-	{
-		std::lock_guard<std::mutex> lock(m_slotMutex);
-		m_active--;
-	}
-	m_slotCond.notify_one();
-	return answers;
-}
-
-namespace
-{
-
-enum Final { fUnsettled = 0, fPresent = 1, fMissing = 2, fError = 3 };
-
-struct CheckState
-{
-	std::vector<DonorHealth::Item> items;
-	DonorHealth::ServerList servers;
-	std::unique_ptr<std::atomic<int>[]> final;
-	std::vector<std::vector<Answer>> votes;			// [article][server]
-	std::vector<char> soft;							// a server had the article but its data was bad
-	std::vector<std::unique_ptr<DonorHealth::BodyGate>> gates;
-	std::mutex mutex;
-	std::condition_variable cond;
-	int left = 0;
-	std::atomic<bool> stop{false};
-};
-
-// with state->mutex held
-void Settle(CheckState& state, size_t index, int verdict)
-{
-	int expected = fUnsettled;
-	if (state.final[index].compare_exchange_strong(expected, verdict))
-	{
-		if (--state.left == 0)
-		{
-			state.cond.notify_all();
-		}
-	}
-}
-
-// one server's pass over the articles, skipping the ones already found
-void Walk(std::shared_ptr<CheckState> state, size_t serverIndex)
-{
-	// counted from its start (CheckItems) until it ends: shutdown waits for every
-	// walker (DonorHealth::WaitAll)
-	struct Counted
-	{
-		~Counted() { g_walkers--; }
-	} counted;
-	DonorHealth::Server& server = *state->servers[serverIndex];
-	size_t count = state->items.size();
-	size_t cursor = 0;
-	while (cursor < count)
-	{
-		{
-			std::lock_guard<std::mutex> guard(state->mutex);
-			if (state->stop || DonorHealth::Stopping())
+			const auto& g = *batch[i].groups;
+			groupStrs[i].resize(g.size());
+			groupLens[i].resize(g.size());
+			for (size_t j = 0; j < g.size(); j++)
 			{
-				return;
+				groupStrs[i][j] = g[j].data();
+				groupLens[i][j] = g[j].size();
 			}
-		}
-
-		// the next articles nobody has found yet
-		std::vector<size_t> todo;
-		while (cursor < count && (int)todo.size() < server.Depth())
-		{
-			if (state->final[cursor] == fUnsettled)
-			{
-				todo.push_back(cursor);
-			}
-			cursor++;
-		}
-		if (todo.empty())
-		{
-			continue;
-		}
-
-		std::vector<Answer> answers;
-		bool othersCanAnswer = false;
-		for (size_t s = 0; s < state->servers.size(); s++)
-		{
-			othersCanAnswer |= s != serverIndex && !state->servers[s]->Paused();
-		}
-		if (server.Paused() && othersCanAnswer)
-		{
-			// a server in its pause abstains while others can answer
-			answers.assign(todo.size(), Answer::Error);
-		}
-		else
-		{
-			std::vector<DonorHealth::Request> batch;
-			for (size_t index : todo)
-			{
-				DonorHealth::Request request;
-				request.messageId = state->items[index].messageId;
-				request.gate = state->gates[index].get();
-				request.groups = state->items[index].groups;
-				batch.push_back(std::move(request));
-			}
-			answers = server.Ask(batch, [&state]() { return state->stop.load(); });
-		}
-
-		std::lock_guard<std::mutex> guard(state->mutex);
-		if (state->stop)
-		{
-			return;
-		}
-		for (size_t k = 0; k < todo.size(); k++)
-		{
-			size_t index = todo[k];
-			state->votes[index][serverIndex] = answers[k];
-			state->soft[index] = state->soft[index] || answers[k] == Answer::BodyBad;
-			std::vector<int> voteVals(state->votes[index].size());
-			for (size_t v = 0; v < state->votes[index].size(); v++)
-			{
-				voteVals[v] = (int)state->votes[index][v];
-			}
-			int verdict = nzbget_rs_df_eval_article_votes(voteVals.data(), voteVals.size());
-			if (verdict != fUnsettled)
-			{
-				Settle(*state, index, verdict);
-			}
+			groupPtrsOuter[i] = groupStrs[i].data();
+			groupLensOuter[i] = groupLens[i].data();
+			groupCounts[i] = g.size();
 		}
 	}
-}
 
+	std::vector<int> outAnswers(count, (int)Answer::Error);
+	nzbget_rs_donor_server_ask(
+		m_rust, count, msgIds.data(), msgLens.data(), rustGates.data(),
+		groupPtrsOuter.data(), groupLensOuter.data(), groupCounts.data(),
+		const_cast<std::function<bool()>*>(&cancelled),
+		[](void* rawCtx) -> int {
+			auto* fn = static_cast<const std::function<bool()>*>(rawCtx);
+			return fn && *fn && (*fn)() ? 1 : 0;
+		},
+		outAnswers.data());
+
+	std::vector<Answer> res(count);
+	for (size_t i = 0; i < count; i++)
+	{
+		res[i] = static_cast<Answer>(outAnswers[i]);
+	}
+	return res;
 }
 
 Health DonorHealth::CheckItems(const ServerList& servers, const std::vector<Item>& items, int budgetMs)
 {
-	Health health;
-	size_t count = items.size();
-	health.checked = (int)count;
-	if (!count)
+	std::vector<void*> handles(servers.size());
+	for (size_t i = 0; i < servers.size(); i++)
 	{
-		return health;
+		handles[i] = servers[i] ? servers[i]->RustHandle() : nullptr;
 	}
+	auto* keepalive = new ServerList(servers);
+	size_t count = items.size();
+	std::vector<const char*> msgIds(count);
+	std::vector<size_t> msgLens(count);
+	std::vector<int> bodies(count);
+	std::vector<std::vector<const char*>> groupStrs(count);
+	std::vector<std::vector<size_t>> groupLens(count);
+	std::vector<const char* const*> groupPtrsOuter(count, nullptr);
+	std::vector<const size_t*> groupLensOuter(count, nullptr);
+	std::vector<size_t> groupCounts(count, 0);
 
-	auto state = std::make_shared<CheckState>();
-	state->items = items;
-	state->servers = servers;
-	state->final.reset(new std::atomic<int>[count]);
-	state->votes.assign(count, std::vector<Answer>(servers.size(), Answer::None));
-	state->soft.assign(count, 0);
-	state->left = (int)count;
-	CheckState* raw = state.get();
 	for (size_t i = 0; i < count; i++)
 	{
-		state->final[i] = fUnsettled;
-		std::unique_ptr<BodyGate> gate;
-		if (items[i].body)
+		msgIds[i] = items[i].messageId.data();
+		msgLens[i] = items[i].messageId.size();
+		bodies[i] = items[i].body ? 1 : 0;
+		if (items[i].groups && !items[i].groups->empty())
 		{
-			gate = std::make_unique<BodyGate>();
-			gate->settled = [raw, i]() { return raw->final[i] != fUnsettled; };
-			health.bodyChecked++;
+			const auto& g = *items[i].groups;
+			groupStrs[i].resize(g.size());
+			groupLens[i].resize(g.size());
+			for (size_t j = 0; j < g.size(); j++)
+			{
+				groupStrs[i][j] = g[j].data();
+				groupLens[i][j] = g[j].size();
+			}
+			groupPtrsOuter[i] = groupStrs[i].data();
+			groupLensOuter[i] = groupLens[i].data();
+			groupCounts[i] = g.size();
 		}
-		state->gates.push_back(std::move(gate));
 	}
 
-	// every server walks the articles at its own pace; a request still in
-	// flight when the check ends is for an article already settled (or the
-	// budget ran out), and its answer is ignored
-	for (size_t s = 0; s < servers.size(); s++)
-	{
-		g_walkers++;
-		std::thread(Walk, state, s).detach();
-	}
-
-	{
-		std::unique_lock<std::mutex> lock(state->mutex);
-		// until every article is settled or the budget is over - or nzbget shuts
-		// down (StopAll doesn't know this check's condition: polled)
-		auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(std::max(10, budgetMs));
-		while (state->left > 0 && !DonorHealth::Stopping() && std::chrono::steady_clock::now() < end)
-		{
-			state->cond.wait_until(lock, std::min(end, std::chrono::steady_clock::now() + std::chrono::milliseconds(100)));
-		}
-		state->stop = true;
-
-		// the budget is over: an unsettled article is missing where at least
-		// half of the servers said so (the ones that exist settle at once, so
-		// leaving these out would inflate the share alive)
-		for (size_t i = 0; i < count; i++)
-		{
-			if (state->final[i] != fUnsettled)
-			{
-				continue;
-			}
-			std::vector<int> voteVals(state->votes[i].size());
-			for (size_t v = 0; v < state->votes[i].size(); v++)
-			{
-				voteVals[v] = (int)state->votes[i][v];
-			}
-			int resolved = nzbget_rs_df_resolve_unsettled_vote(voteVals.data(), voteVals.size());
-			if (resolved != fUnsettled)
-			{
-				state->final[i] = resolved;
-			}
-		}
-
-		for (size_t i = 0; i < count; i++)
-		{
-			int verdict = state->final[i];
-			nzbget_rs_dqh_donor_health_accum_verdict_counts(
-				verdict, (int)fPresent, (int)fMissing, (int)fError,
-				state->soft[i] != 0 ? 1 : 0,
-				&health.present, &health.missing, &health.error, &health.bodyBad);
-		}
-	}
+	Health health;
+	nzbget_rs_donor_check_items(
+		handles.data(), handles.size(),
+		keepalive, [](void* p) { delete static_cast<ServerList*>(p); },
+		msgIds.data(), msgLens.data(), bodies.data(),
+		groupPtrsOuter.data(), groupLensOuter.data(), groupCounts.data(),
+		count, budgetMs,
+		&health.checked, &health.present, &health.missing, &health.error,
+		&health.bodyChecked, &health.bodyBad);
 	return health;
 }
 
 Health DonorHealth::CheckPosting(const ServerList& servers, const std::vector<std::string>& ids,
 	const std::shared_ptr<std::vector<std::string>>& groups, const Options& options, bool full)
 {
-	std::vector<Item> items = Plan(ids, groups, options.sample);
-	std::vector<Item> first;
-	if ((int)items.size() >= options.probe)
+	std::vector<void*> handles(servers.size());
+	for (size_t i = 0; i < servers.size(); i++)
 	{
-		first.assign(items.begin(), items.begin() + options.probe);
+		handles[i] = servers[i] ? servers[i]->RustHandle() : nullptr;
 	}
-	else
+	auto* keepalive = new ServerList(servers);
+	std::vector<const char*> idPtrs(ids.size());
+	std::vector<size_t> idLens(ids.size());
+	for (size_t i = 0; i < ids.size(); i++)
 	{
-		// ("small" is a macro on Windows)
-		SampleOptions probeSample = options.sample;
-		probeSample.percent = 0;
-		probeSample.minimum = options.probe;
-		probeSample.maximum = options.probe;
-		first = Plan(ids, groups, probeSample);
+		idPtrs[i] = ids[i].data();
+		idLens[i] = ids[i].size();
 	}
-
-	long long deadline = NowMs() + options.budgetMs;
-	Health health = CheckItems(servers, first, options.budgetMs);
-	if (full && !DeadProbe(health))
+	std::vector<const char*> groupPtrs;
+	std::vector<size_t> groupLens;
+	if (groups)
 	{
-		// nothing found and enough definitive misses ends it: otherwise the rest of the sample
-		std::set<std::string> probed;
-		for (const Item& item : first)
+		groupPtrs.resize(groups->size());
+		groupLens.resize(groups->size());
+		for (size_t i = 0; i < groups->size(); i++)
 		{
-			probed.insert(item.messageId);
+			groupPtrs[i] = (*groups)[i].data();
+			groupLens[i] = (*groups)[i].size();
 		}
-		std::vector<Item> rest;
-		for (const Item& item : items)
-		{
-			if (!probed.count(item.messageId))
-			{
-				rest.push_back(item);
-			}
-		}
-		health += CheckItems(servers, rest, (int)std::max(10LL, deadline - NowMs()));
 	}
+	Health health;
+	nzbget_rs_donor_check_posting(
+		handles.data(), handles.size(),
+		keepalive, [](void* p) { delete static_cast<ServerList*>(p); },
+		idPtrs.data(), idLens.data(), ids.size(),
+		groupPtrs.data(), groupLens.data(), groupPtrs.size(),
+		options.sample.percent, options.sample.minimum, options.sample.maximum,
+		options.sample.bodyPercent, options.sample.maxBody, options.sample.seed,
+		options.probe, options.budgetMs, (int64_t)options.deadlineMs, full ? 1 : 0,
+		&health.checked, &health.present, &health.missing, &health.error,
+		&health.bodyChecked, &health.bodyBad);
 	return health;
 }
 
@@ -452,33 +380,81 @@ void DonorHealth::CheckPostings(const ServerList& servers, const std::vector<Pos
 	const Options& options, bool full, int concurrency,
 	const std::function<void(const std::string&, const Health&)>& emit)
 {
-	std::atomic<size_t> next{0};
-	auto worker = [&]()
+	std::vector<void*> handles(servers.size());
+	for (size_t i = 0; i < servers.size(); i++)
 	{
-		for (size_t index = next++; index < postings.size(); index = next++)
-		{
-			// a few at a time, each with the time left: with a budget of its own, the
-			// checks of a wide fleet added up past its limit (F30: 48 postings, 30 s
-			// limit, 85 s); one not started by the deadline stays unmeasured
-			Options own = options;
-			if (!nzbget_rs_dqh_donor_health_calc_worker_budget_ms(
-				options.deadlineMs, NowMs(), own.budgetMs, &own.budgetMs))
-			{
-				continue;
-			}
-			const Posting& posting = postings[index];
-			emit(posting.key, CheckPosting(servers, posting.ids, posting.groups, own, full));
-		}
-	};
+		handles[i] = servers[i] ? servers[i]->RustHandle() : nullptr;
+	}
+	auto* keepalive = new ServerList(servers);
+	size_t pcount = postings.size();
+	std::vector<const char*> keyPtrs(pcount);
+	std::vector<size_t> keyLens(pcount);
+	std::vector<std::vector<const char*>> idStrs(pcount);
+	std::vector<std::vector<size_t>> idLens(pcount);
+	std::vector<const char* const*> idPtrsOuter(pcount, nullptr);
+	std::vector<const size_t*> idLensOuter(pcount, nullptr);
+	std::vector<size_t> idCounts(pcount, 0);
+	std::vector<std::vector<const char*>> groupStrs(pcount);
+	std::vector<std::vector<size_t>> groupLens(pcount);
+	std::vector<const char* const*> groupPtrsOuter(pcount, nullptr);
+	std::vector<const size_t*> groupLensOuter(pcount, nullptr);
+	std::vector<size_t> groupCounts(pcount, 0);
 
-	std::vector<std::thread> threads;
-	size_t count = nzbget_rs_dqh_donor_health_calc_thread_count(postings.size(), concurrency);
-	for (size_t i = 0; i < count; i++)
+	for (size_t i = 0; i < pcount; i++)
 	{
-		threads.emplace_back(worker);
+		keyPtrs[i] = postings[i].key.data();
+		keyLens[i] = postings[i].key.size();
+		idStrs[i].resize(postings[i].ids.size());
+		idLens[i].resize(postings[i].ids.size());
+		for (size_t j = 0; j < postings[i].ids.size(); j++)
+		{
+			idStrs[i][j] = postings[i].ids[j].data();
+			idLens[i][j] = postings[i].ids[j].size();
+		}
+		idPtrsOuter[i] = idStrs[i].data();
+		idLensOuter[i] = idLens[i].data();
+		idCounts[i] = postings[i].ids.size();
+
+		if (postings[i].groups && !postings[i].groups->empty())
+		{
+			const auto& g = *postings[i].groups;
+			groupStrs[i].resize(g.size());
+			groupLens[i].resize(g.size());
+			for (size_t j = 0; j < g.size(); j++)
+			{
+				groupStrs[i][j] = g[j].data();
+				groupLens[i][j] = g[j].size();
+			}
+			groupPtrsOuter[i] = groupStrs[i].data();
+			groupLensOuter[i] = groupLens[i].data();
+			groupCounts[i] = g.size();
+		}
 	}
-	for (std::thread& thread : threads)
-	{
-		thread.join();
-	}
+
+	nzbget_rs_donor_check_postings(
+		handles.data(), handles.size(),
+		keepalive, [](void* p) { delete static_cast<ServerList*>(p); },
+		pcount, keyPtrs.data(), keyLens.data(),
+		idPtrsOuter.data(), idLensOuter.data(), idCounts.data(),
+		groupPtrsOuter.data(), groupLensOuter.data(), groupCounts.data(),
+		options.sample.percent, options.sample.minimum, options.sample.maximum,
+		options.sample.bodyPercent, options.sample.maxBody, options.sample.seed,
+		options.probe, options.budgetMs, (int64_t)options.deadlineMs,
+		full ? 1 : 0, concurrency,
+		const_cast<std::function<void(const std::string&, const Health&)>*>(&emit),
+		[](void* rawCtx, const char* keyPtr, size_t keyLen,
+			int checked, int present, int missing, int error, int bodyChecked, int bodyBad) {
+			auto* fn = static_cast<const std::function<void(const std::string&, const Health&)>*>(rawCtx);
+			if (fn && *fn)
+			{
+				Health h;
+				h.checked = checked;
+				h.present = present;
+				h.missing = missing;
+				h.error = error;
+				h.bodyChecked = bodyChecked;
+				h.bodyBad = bodyBad;
+				(*fn)(std::string(keyPtr ? keyPtr : "", keyLen), h);
+			}
+		});
 }

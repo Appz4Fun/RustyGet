@@ -237,55 +237,6 @@ int nzbget_rs_reserved_char(char c);
 // path is NULL (no-op) or a writable NUL-terminated string, owned by the caller.
 void nzbget_rs_normalize_path_separators(char* path);
 
-// CollectionAnalyzer (rust/src/collection.rs): files as text and length;
-// an analysis by index (-1: none), index arrays with room for every file;
-// a plan through callbacks (exists, ignored by the ignoreExt list, each
-// rename), the effective base name returned (free with nzbget_rs_free).
-// NULL files/text means empty, regardless of length. NULL analysis output is
-// ignored; NULL index arrays report counts only. Non-NULL arrays hold count
-// indices and must not overlap the output struct. NULL plan table/flags
-// returns an empty buffer and clears non-NULL flags. NULL exists/ignored
-// returns false; NULL action discards actions. Callback strings are borrowed
-// only during each call; callbacks must not throw or invalidate table/flags.
-// Panics abort; input storage remains caller-owned.
-typedef struct
-{
-	const char* path; size_t pathLen;
-	// UTF-8 parent_path() / "x", with the final "x" removed.
-	const char* renamePrefix; size_t renamePrefixLen;
-	const char* filename; size_t filenameLen;
-	const char* stem; size_t stemLen;
-	const char* ext; size_t extLen;
-	unsigned long long size;
-} NzbgetRsFileEntry;
-typedef struct
-{
-	ptrdiff_t mainVideo, sampleVideo, mainBook;
-	size_t* subtitles; size_t subtitleCount;
-	size_t* nfos; size_t nfoCount;
-	size_t* otherFiles; size_t otherCount;
-	int ambiguous, discStructure, hasAudio;
-} NzbgetRsAnalysis;
-typedef struct
-{
-	void* user;
-	int (*exists)(void* user, const char* path, size_t len);
-	int (*ignored)(void* user, const char* path, size_t len);
-	void (*action)(void* user, size_t file, const char* dstPath, size_t dstLen, const char* newName, size_t newLen);
-	// the stem of a path as fs::path has it, into out (room for cap); returns
-	// its length (more than cap: called again with that room); NULL: as is
-	size_t (*stem)(void* user, const char* path, size_t len, char* out, size_t cap);
-} NzbgetRsPlanCallbacks;
-typedef struct
-{
-	int ambiguous, discStructure, canRename, targetNameObfuscated;
-} NzbgetRsPlanFlags;
-void nzbget_rs_collection_analyze(const NzbgetRsFileEntry* files, size_t count, NzbgetRsAnalysis* out);
-NzbgetRsBuf nzbget_rs_collection_plan(const NzbgetRsFileEntry* files, size_t count, int discDir,
-	const char* target, size_t targetLen, const NzbgetRsPlanCallbacks* callbacks, NzbgetRsPlanFlags* flags);
-NzbgetRsBuf nzbget_rs_collection_name(int op, const char* a, size_t aLen, const char* b, size_t bLen,
-	const char* c, size_t cLen);
-
 // WebProcessor's request decisions (rust/src/webserver.rs). Header kinds:
 // 0 other, 1 Content-Length (number), 2 credentials (value), 3 credentials
 // too long, 4 Accept-Encoding (number: gzip), 5 Origin, 6 Auth-Token cookie,
@@ -4137,7 +4088,7 @@ int nzbget_rs_newznab_parse_response(
     void (*on_item)(void* ctx, const uint8_t* title_ptr, size_t title_len,
         const uint8_t* link_ptr, size_t link_len, int64_t size, int32_t grabs,
         int64_t date, const uint8_t* indexer_ptr, size_t indexer_len));
-typedef struct {
+typedef struct RsNzbSummaryScalars {
     int32_t files;
     int64_t total_bytes;
     int32_t data_files;
@@ -5366,6 +5317,147 @@ void nzbget_rs_stream_resolve_completion_par_action(
     int* out_update_par_status, int* out_new_par_status,
     int* out_log_reenabling, int* out_request_par_check,
     int* out_log_remaining_holes);
+
+int nzbget_rs_qhp_rename_completed_file(
+    size_t count, const char* old_name, const char* new_name, void* ctx,
+    void (*get_cb)(void* ctx, size_t idx, const char** out_filename, const char** out_origname),
+    void (*set_cb)(void* ctx, size_t idx, const char* new_filename, const char* new_origname));
+
+int nzbget_rs_dupematcher_prepare(
+    const char* dest_dir, int64_t expected_size, int64_t* out_max_size, int* out_compressed,
+    void (*on_rar_archive)(void* ctx, char* filename_buf, int buf_len, int64_t expected_size, int64_t* out_max_size, int* out_compressed),
+    void (*on_detail_log)(void* ctx, const char* msg), void* ctx);
+int nzbget_rs_dupematcher_match_dupe_content(
+    const char* dupe_dir, int64_t max_size, int compressed,
+    void (*on_rar_archive)(void* ctx, char* filename_buf, int buf_len, int64_t expected_size, int64_t* out_max_size, int* out_compressed),
+    void (*on_detail_log)(void* ctx, const char* msg), void* ctx);
+
+int nzbget_rs_archive_processor_process(
+    const char* archive_file, const char* unpack_dir, const char* dest_dir,
+    const char* processed_dir, const char* broken_dir, int config_action, void* ctx,
+    int (*extract_cb)(void* ctx, const char* archive_file, const char* unpack_dir, int* out_extracted),
+    void (*log_cb)(void* ctx, int kind, const char* msg),
+    void (*moved_cb)(void* ctx, const char* moved_path));
+
+int64_t nzbget_rs_donor_now_ms(void);
+void nzbget_rs_donor_stop_all(void);
+void nzbget_rs_donor_wait_all(void);
+void nzbget_rs_donor_reset(void);
+int nzbget_rs_donor_stopping(void);
+void nzbget_rs_donor_sample(
+    const char* const* ids_ptr, const size_t* ids_lens, size_t ids_count,
+    int percent, int minimum, int maximum, uint32_t seed, void* ctx,
+    void (*emit_cb)(void* ctx, const char* id_ptr, size_t id_len));
+void nzbget_rs_donor_plan(
+    const char* const* ids_ptr, const size_t* ids_lens, size_t ids_count,
+    int percent, int minimum, int maximum, int body_percent, int max_body,
+    uint32_t seed, void* ctx,
+    void (*emit_cb)(void* ctx, const char* id_ptr, size_t id_len, int body));
+int nzbget_rs_donor_body_gate_done(void* rust_gate);
+int nzbget_rs_donor_body_once(
+    void* rust_gate, void* ctx, int (*download_cb)(void* ctx));
+void* nzbget_rs_donor_server_new(
+    void* cpp_server, int cap,
+    int (*exchange_cb)(
+        void* cpp_server, size_t count, const char* const* msg_ids, const size_t* msg_lens,
+        void* const* rust_gates, const char* const* const* group_ptrs,
+        const size_t* const* group_lens, const size_t* group_counts,
+        int* out_answers, size_t* out_count, int* out_busy));
+void nzbget_rs_donor_server_free(void* handle);
+int nzbget_rs_donor_server_cap(const void* handle);
+int nzbget_rs_donor_server_depth(const void* handle);
+int nzbget_rs_donor_server_paused(const void* handle);
+int nzbget_rs_donor_server_max_active(const void* handle);
+void nzbget_rs_donor_server_set_retry_after_ms(const void* handle, int ms);
+void nzbget_rs_donor_server_ask(
+    const void* handle, size_t count, const char* const* msg_ids, const size_t* msg_lens,
+    void* const* rust_gates, const char* const* const* group_ptrs,
+    const size_t* const* group_lens, const size_t* group_counts,
+    void* cancel_ctx, int (*cancel_cb)(void* cancel_ctx), int* out_answers);
+void nzbget_rs_donor_check_items(
+    void* const* server_handles, size_t server_count,
+    void* keepalive_ptr, void (*keepalive_drop)(void* keepalive_ptr),
+    const char* const* msg_ids, const size_t* msg_lens, const int* bodies,
+    const char* const* const* group_ptrs, const size_t* const* group_lens,
+    const size_t* group_counts, size_t item_count, int budget_ms,
+    int* out_checked, int* out_present, int* out_missing, int* out_error,
+    int* out_body_checked, int* out_body_bad);
+void nzbget_rs_donor_check_posting(
+    void* const* server_handles, size_t server_count,
+    void* keepalive_ptr, void (*keepalive_drop)(void* keepalive_ptr),
+    const char* const* ids_ptr, const size_t* ids_lens, size_t ids_count,
+    const char* const* group_ptrs, const size_t* group_lens, size_t group_count,
+    int percent, int minimum, int maximum, int body_percent, int max_body, uint32_t seed,
+    int probe, int budget_ms, int64_t deadline_ms, int full,
+    int* out_checked, int* out_present, int* out_missing, int* out_error,
+    int* out_body_checked, int* out_body_bad);
+void nzbget_rs_donor_check_postings(
+    void* const* server_handles, size_t server_count,
+    void* keepalive_ptr, void (*keepalive_drop)(void* keepalive_ptr),
+    size_t posting_count, const char* const* key_ptrs, const size_t* key_lens,
+    const char* const* const* ids_ptrs, const size_t* const* ids_lens, const size_t* ids_counts,
+    const char* const* const* group_ptrs, const size_t* const* group_lens, const size_t* group_counts,
+    int percent, int minimum, int maximum, int body_percent, int max_body, uint32_t seed,
+    int probe, int budget_ms, int64_t deadline_ms, int full, int concurrency,
+    void* emit_ctx,
+    void (*emit_cb)(
+        void* emit_ctx, const char* key_ptr, size_t key_len,
+        int checked, int present, int missing, int error, int body_checked, int body_bad));
+
+void* nzbget_rs_nzb_fetcher_new(void);
+void nzbget_rs_nzb_fetcher_free(void* handle);
+void nzbget_rs_nzb_fetcher_set_state_path(void* handle, const char* path, size_t path_len);
+void nzbget_rs_nzb_fetcher_load(void* handle, int64_t now);
+int nzbget_rs_nzb_fetcher_is_refused(void* handle, const char* indexer, size_t indexer_len, int64_t now);
+int nzbget_rs_nzb_fetcher_refuse(void* handle, const char* indexer, size_t indexer_len, int64_t now);
+int nzbget_rs_nzb_fetcher_fetch(
+    void* handle, const char* indexer, size_t indexer_len,
+    const char* title, size_t title_len, const char* link, size_t link_len,
+    int64_t size, int grabs, int64_t date, int64_t deadline, int retries,
+    void* budget_handle, void* ctx,
+    int64_t (*now_cb)(void* ctx), int (*stopped_cb)(void* ctx),
+    void (*sleep_100ms_cb)(void* ctx),
+    int (*http_fetch_cb)(
+        void* ctx, const char* url, size_t url_len, const char* label, size_t label_len,
+        size_t max_bytes, int64_t deadline_ms, int* out_status,
+        const char** out_body_ptr, size_t* out_body_len),
+    void (*log_info_cb)(void* ctx, const char* msg),
+    void (*log_warn_cb)(void* ctx, const char* msg),
+    NzbgetRsBuf* out_data,
+    RsNzbSummaryScalars* out_scalars,
+    void* summary_ctx,
+    void (*on_strings)(
+        void* ctx, const uint8_t* poster_ptr, size_t poster_len,
+        const uint8_t* main_name_ptr, size_t main_name_len,
+        const uint8_t* par_name_ptr, size_t par_name_len,
+        const uint8_t* par_id_ptr, size_t par_id_len, int64_t par_bytes),
+    void (*on_slice)(
+        void* ctx, int kind, const uint8_t* ptr1, size_t len1,
+        const uint8_t* ptr2, size_t len2, int64_t bytes),
+    void (*on_recovery_bytes)(void* ctx, const uint64_t* ptr, size_t len));
+
+int nzbget_rs_downloadinfo_is_download_completed(
+    int active_downloads, int ignore_paused_pars, size_t file_count, void* ctx,
+    void (*get_file_cb)(
+        void* ctx, size_t idx, int* out_paused, int* out_par_file, int* out_deleted));
+
+int nzbget_rs_dupe_identity_fetch_article(
+    const char* msg_id, size_t msg_id_len, int64_t deadline, void* ctx,
+    int64_t (*now_cb)(void* ctx), int (*stopped_cb)(void* ctx),
+    int (*fetch_cb)(
+        void* ctx, const char* bracketed_id, size_t bracketed_len,
+        int* out_success, int64_t* out_offset, int64_t* out_file_size),
+    void (*stop_fetch_cb)(void* ctx));
+int nzbget_rs_dupe_identity_read(
+    int64_t data_bytes, const char* const* head_names, const size_t* head_name_lens,
+    const char* const* head_msg_ids, const size_t* head_msg_id_lens,
+    const int64_t* head_bytes, size_t head_count, int64_t deadline, void* ctx,
+    int64_t (*now_cb)(void* ctx), int (*stopped_cb)(void* ctx),
+    void (*fetch_head_cb)(
+        void* ctx, const char* msg_id, size_t msg_id_len, int64_t dl,
+        int* out_success, int64_t* out_file_size,
+        const char** out_data_ptr, size_t* out_data_len),
+    NzbgetRsBuf* out_name, NzbgetRsBuf* out_ext, uint64_t* out_bytes);
 
 #include "nzbget_tls_cipher.h"
 

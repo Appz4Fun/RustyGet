@@ -88,14 +88,18 @@ public:
 		Budget& operator=(const Budget&) = delete;
 		bool Take();
 		bool Spent() const;
+		void* RustHandle() const { return m_rust; }
 	private:
 		void* m_rust = nullptr;
 		std::atomic<unsigned long long> m_left;
 		bool m_unlimited;
 	};
 	using FetchFunc = std::function<HttpGet::Reply(const std::string&, const std::string&, size_t, long long)>;
-	NzbFetcher() = default;
-	explicit NzbFetcher(FetchFunc fetch) : m_fetch(std::move(fetch)) {}
+	NzbFetcher();
+	explicit NzbFetcher(FetchFunc fetch);
+	~NzbFetcher();
+	NzbFetcher(const NzbFetcher&) = delete;
+	NzbFetcher& operator=(const NzbFetcher&) = delete;
 
 	/* the file the cooldowns are kept in (empty: not kept) */
 	void SetStatePath(const std::string& path);
@@ -113,15 +117,8 @@ public:
 	bool IsRefused(const std::string& indexer);
 
 private:
-	std::mutex m_mutex;
-	std::map<std::string, std::unique_ptr<std::mutex>> m_indexerLocks;
-	std::map<std::string, time_t> m_refusedUntil;
-	std::string m_statePath;
+	void* m_rust = nullptr;
 	FetchFunc m_fetch;
-
-	std::mutex& IndexerLock(const std::string& indexer);
-	void Refuse(const std::string& indexer);
-	void Save();
 };
 
 #endif

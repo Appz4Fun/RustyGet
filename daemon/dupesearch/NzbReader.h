@@ -65,12 +65,26 @@ struct NzbSummary
 	std::string Fingerprint() const;
 };
 
+struct RsNzbSummaryScalars;
+
 class NzbReader
 {
 public:
 	/* false for a malformed nzb-file, one without files or articles, or one
 	 * that declares XML entities */
 	static bool Parse(const std::string& data, NzbSummary& summary);
+	static void OnStrings(void* ctx,
+		const uint8_t* posterPtr, size_t posterLen,
+		const uint8_t* mainNamePtr, size_t mainNameLen,
+		const uint8_t* parNamePtr, size_t parNameLen,
+		const uint8_t* parIdPtr, size_t parIdLen,
+		int64_t parBytes);
+	static void OnSlice(void* ctx, int kind,
+		const uint8_t* ptr1, size_t len1,
+		const uint8_t* ptr2, size_t len2,
+		int64_t bytes);
+	static void OnRecoveryBytes(void* ctx, const uint64_t* ptr, size_t len);
+	static void ApplyScalars(NzbSummary& summary, const RsNzbSummaryScalars& scalars);
 };
 
 #endif

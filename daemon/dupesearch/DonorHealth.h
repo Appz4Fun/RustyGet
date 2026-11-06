@@ -120,10 +120,11 @@ public:
 
 	struct BodyGate
 	{
+		void* rustGate = nullptr;
 		std::mutex lock;
 		std::atomic<bool> ok{false};
 		std::function<bool()> settled;
-		bool Done() { return ok || settled(); }
+		bool Done();
 	};
 
 	struct Request
@@ -147,13 +148,13 @@ public:
 	class Server
 	{
 	public:
-		explicit Server(int cap) : m_cap(cap < 1 ? 1 : cap) {}
-		virtual ~Server() = default;
+		explicit Server(int cap);
+		virtual ~Server();
 
-		int Cap() const { return m_cap; }
-		int Depth() const { return m_depth; }
+		int Cap() const;
+		int Depth() const;
 		bool Paused() const;
-		int MaxActive() const { return m_maxActive; }
+		int MaxActive() const;
 
 		/* the answers for a batch of articles; waits for a connection slot. Every
 		 * wait ends early, with Error answers and nothing asked, once <cancelled>
@@ -161,7 +162,8 @@ public:
 		std::vector<Answer> Ask(const std::vector<Request>& batch,
 			const std::function<bool()>& cancelled = nullptr);
 
-		void SetRetryAfterMs(int ms) { m_retryAfterMs = ms; }
+		void SetRetryAfterMs(int ms);
+		void* RustHandle() const { return m_rust; }
 
 	protected:
 		/* all STATs of the batch in one write, then their replies in order, then
@@ -173,15 +175,12 @@ public:
 		static Answer BodyOnce(BodyGate* gate, const std::function<Answer()>& download);
 
 	private:
-		int m_cap;
-		int m_retryAfterMs = 30000;
-		std::atomic<int> m_depth{PipelineStart};
-		std::atomic<int> m_errors{0};
-		std::atomic<long long> m_downUntilMs{0};
-		std::mutex m_slotMutex;
-		std::condition_variable m_slotCond;
-		int m_active = 0;
-		std::atomic<int> m_maxActive{0};
+		void* m_rust = nullptr;
+		static int ExchangeTrampoline(
+			void* cppServer, size_t count, const char* const* msgIds, const size_t* msgLens,
+			void* const* rustGates, const char* const* const* groupPtrs,
+			const size_t* const* groupLens, const size_t* groupCounts,
+			int* outAnswers, size_t* outCount, int* outBusy);
 	};
 
 	using ServerList = std::vector<std::shared_ptr<Server>>;

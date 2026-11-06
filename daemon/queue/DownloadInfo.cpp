@@ -257,25 +257,24 @@ int NzbInfo::CalcHealth()
 
 bool NzbInfo::RenameCompletedFile(const char* oldName, const char* newAbsoluteOrRelativePath)
 {
-	if (Util::EmptyStr(oldName) || Util::EmptyStr(newAbsoluteOrRelativePath))
-	{
-		return false;
-	}
-
-	for (CompletedFile& cf : m_completedFiles)
-	{
-		if (cf.SameFilename(oldName))
-		{
-			if (Util::EmptyStr(cf.GetOrigname()))
+	return nzbget_rs_qhp_rename_completed_file(
+		m_completedFiles.size(),
+		oldName,
+		newAbsoluteOrRelativePath,
+		&m_completedFiles,
+		[](void* rawCtx, size_t idx, const char** outFilename, const char** outOrigname) {
+			auto& list = *static_cast<CompletedFileList*>(rawCtx);
+			*outFilename = list[idx].GetFilename();
+			*outOrigname = list[idx].GetOrigname();
+		},
+		[](void* rawCtx, size_t idx, const char* newFilename, const char* newOrigname) {
+			auto& list = *static_cast<CompletedFileList*>(rawCtx);
+			if (newOrigname)
 			{
-				cf.SetOrigname(cf.GetFilename());
+				list[idx].SetOrigname(newOrigname);
 			}
-
-			cf.SetFilename(newAbsoluteOrRelativePath);
-			return true;
-		}
-	}
-	return false;
+			list[idx].SetFilename(newFilename);
+		}) != 0;
 }
 
 int NzbInfo::CalcCriticalHealth(bool allowEstimation)
@@ -581,21 +580,18 @@ void NzbInfo::UpdateDeletedStats(FileInfo* fileInfo)
 
 bool NzbInfo::IsDownloadCompleted(bool ignorePausedPars)
 {
-	if (m_activeDownloads)
-	{
-		return false;
-	}
-
-	for (FileInfo* fileInfo : &m_fileList)
-	{
-		if (((!fileInfo->GetPaused() || !ignorePausedPars) || !fileInfo->GetParFile()) &&
-			!fileInfo->GetDeleted())
-		{
-			return false;
-		}
-	}
-
-	return true;
+	return nzbget_rs_downloadinfo_is_download_completed(
+		m_activeDownloads,
+		ignorePausedPars ? 1 : 0,
+		m_fileList.size(),
+		&m_fileList,
+		[](void* rawCtx, size_t idx, int* outPaused, int* outParFile, int* outDeleted) {
+			auto* list = static_cast<FileList*>(rawCtx);
+			FileInfo* fi = (*list)[idx].get();
+			*outPaused = fi->GetPaused() ? 1 : 0;
+			*outParFile = fi->GetParFile() ? 1 : 0;
+			*outDeleted = fi->GetDeleted() ? 1 : 0;
+		}) != 0;
 }
 
 void ArticleInfo::AttachSegment(std::unique_ptr<SegmentData> content, int64 offset, int size)

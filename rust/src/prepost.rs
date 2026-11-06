@@ -654,4 +654,140 @@ mod tests {
         );
         assert_eq!(dec.move_inter, 1);
     }
+
+    #[test]
+    fn prepost_processor_full_suite_port_from_cpp() {
+        // Port of tests/postprocess/PrePostProcessor.cpp:
+        // DirectRenameSchedulesCompletedDownload, DirectRenameWaitsForRemainingData,
+        // DirectRenameWaitsForActiveDownloads, DirectRenameWaitsForRenamerToFinish,
+        // DirectRenameDoesNotCompleteHealthDeletion, DirectRenameSchedulesAfterPausedRequestsDrain
+        const TS_RUNNING: i32 = 1;
+        const TS_SUCCESS: i32 = 3;
+        const DS_NONE: i32 = 0;
+        const DS_HEALTH: i32 = 2;
+
+        struct SimCompletionFixture {
+            direct_rename_status: i32,
+            has_post_info: bool,
+            delete_status: i32,
+            completed_not_empty: bool,
+            par_file_only_remaining: bool,
+            active_downloads: i32,
+            job_count: usize,
+        }
+
+        impl SimCompletionFixture {
+            fn new() -> Self {
+                Self {
+                    direct_rename_status: TS_SUCCESS,
+                    has_post_info: false,
+                    delete_status: DS_NONE,
+                    completed_not_empty: true,
+                    par_file_only_remaining: true,
+                    active_downloads: 0,
+                    job_count: 0,
+                }
+            }
+
+            fn is_download_completed(&self, ignore_paused_pars: bool) -> bool {
+                let files = if self.par_file_only_remaining {
+                    [(true, true, false)]
+                } else {
+                    [(false, false, false)]
+                };
+                crate::downloadinfo::is_download_completed(
+                    self.active_downloads,
+                    ignore_paused_pars,
+                    &files,
+                )
+            }
+
+            fn check_download_completed(&mut self) {
+                if should_complete_after_direct_rename(
+                    false,
+                    self.direct_rename_status,
+                    TS_SUCCESS,
+                    self.has_post_info,
+                    self.delete_status,
+                    DS_NONE,
+                    self.completed_not_empty,
+                    self.is_download_completed(true),
+                    false,
+                    false,
+                    false,
+                ) {
+                    let (route, _, _) = classify_nzb_downloaded_entry(
+                        false,
+                        false,
+                        false,
+                        self.delete_status,
+                        DS_HEALTH,
+                        4,
+                        self.has_post_info,
+                        false,
+                        0,
+                        0,
+                        0,
+                        2,
+                        3,
+                    );
+                    if route == 2 {
+                        self.has_post_info = true;
+                        self.job_count += 1;
+                    }
+                }
+            }
+        }
+
+        // 1. DirectRenameSchedulesCompletedDownload
+        let mut f = SimCompletionFixture::new();
+        assert!(f.is_download_completed(true));
+        assert!(!f.has_post_info);
+        f.check_download_completed();
+        assert!(f.has_post_info);
+        assert_eq!(f.job_count, 1);
+        f.check_download_completed();
+        assert_eq!(f.job_count, 1);
+
+        // 2. DirectRenameWaitsForRemainingData
+        let mut f = SimCompletionFixture::new();
+        f.par_file_only_remaining = false;
+        assert!(!f.is_download_completed(true));
+        f.check_download_completed();
+        assert!(!f.has_post_info);
+        assert_eq!(f.job_count, 0);
+
+        // 3. DirectRenameWaitsForActiveDownloads
+        let mut f = SimCompletionFixture::new();
+        f.active_downloads = 1;
+        f.check_download_completed();
+        assert!(!f.has_post_info);
+        assert_eq!(f.job_count, 0);
+
+        // 4. DirectRenameWaitsForRenamerToFinish
+        let mut f = SimCompletionFixture::new();
+        f.direct_rename_status = TS_RUNNING;
+        f.check_download_completed();
+        assert!(!f.has_post_info);
+        assert_eq!(f.job_count, 0);
+
+        // 5. DirectRenameDoesNotCompleteHealthDeletion
+        let mut f = SimCompletionFixture::new();
+        f.delete_status = DS_HEALTH;
+        f.check_download_completed();
+        assert!(!f.has_post_info);
+        assert_eq!(f.job_count, 0);
+
+        // 6. DirectRenameSchedulesAfterPausedRequestsDrain
+        let mut f = SimCompletionFixture::new();
+        f.active_downloads = 1;
+        f.check_download_completed();
+        assert!(!f.has_post_info);
+        f.active_downloads = 0;
+        f.check_download_completed();
+        assert!(f.has_post_info);
+        assert_eq!(f.job_count, 1);
+        f.check_download_completed();
+        assert_eq!(f.job_count, 1);
+    }
 }

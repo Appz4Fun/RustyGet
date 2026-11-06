@@ -33,44 +33,104 @@ DupeIdentity::Identity DupeIdentity::FromArticle(const std::vector<char>& data, 
 ArticleFetcher::FetchedArticle DupeIdentity::FetchArticle(const NzbSummary::Head& head,
     const std::vector<std::string>& names, time_t deadline, const FetchFunc& fetch)
 {
-    ArticleFetcher::FetchedArticle article;
-    if (head.messageId.empty() || Util::CurrentTime() >= deadline || HttpGet::Stopped() || DonorHealth::Stopping()) return article;
-    std::vector<CString> groups;
-    for (const std::string& name : names) groups.emplace_back(name.c_str());
-    ArticleFetcher fetcher;
-    std::atomic<bool> done{false};
-    NzbgetRsBuf idBuf = nzbget_rs_dqh_nntp_health_format_bracketed_id(
-        head.messageId.data(), head.messageId.size());
-    std::string id(idBuf.data ? idBuf.data : "", idBuf.len);
-    nzbget_rs_free(idBuf);
-    std::thread worker([&]() {
-        try { article = fetch ? fetch(id, groups) : fetcher.Fetch(id.c_str(), groups); }
-        catch (...) { article = ArticleFetcher::FetchedArticle(); }
-        done = true;
-    });
-    while (!done && Util::CurrentTime() < deadline && !HttpGet::Stopped() && !DonorHealth::Stopping()) Util::Sleep(20);
-    if (!done) fetcher.Stop();
-    worker.join();
-    if (Util::CurrentTime() >= deadline || HttpGet::Stopped() || DonorHealth::Stopping() || article.Offset != 0)
+    struct FetchCtx
+    {
+        const std::vector<std::string>* names;
+        const FetchFunc* fetch;
+        ArticleFetcher fetcher;
+        ArticleFetcher::FetchedArticle article;
+    } ctx{&names, &fetch, {}, {}};
+
+    int ok = nzbget_rs_dupe_identity_fetch_article(
+        head.messageId.data(), head.messageId.size(), (int64_t)deadline, &ctx,
+        [](void*) -> int64_t { return (int64_t)Util::CurrentTime(); },
+        [](void*) -> int { return HttpGet::Stopped() ? 1 : 0; },
+        [](void* raw, const char* bracketedId, size_t bracketedLen,
+           int* outSuccess, int64_t* outOffset, int64_t* outFileSize) -> int {
+            auto* c = static_cast<FetchCtx*>(raw);
+            std::vector<CString> groups;
+            for (const std::string& name : *c->names) groups.emplace_back(name.c_str());
+            std::string id(bracketedId ? bracketedId : "", bracketedLen);
+            try
+            {
+                c->article = (*c->fetch) ? (*c->fetch)(id, groups) : c->fetcher.Fetch(id.c_str(), groups);
+            }
+            catch (...)
+            {
+                c->article = ArticleFetcher::FetchedArticle();
+                return 0;
+            }
+            *outSuccess = c->article.Success ? 1 : 0;
+            *outOffset = c->article.Offset;
+            *outFileSize = c->article.FileSize;
+            return 1;
+        },
+        [](void* raw) {
+            static_cast<FetchCtx*>(raw)->fetcher.Stop();
+        });
+    if (!ok)
         return ArticleFetcher::FetchedArticle();
-    return article;
+    return ctx.article;
 }
 
 DupeIdentity::Identity DupeIdentity::Read(const NzbSummary& info, time_t deadline, const FetchFunc& fetch)
 {
-    unsigned long long minimum = nzbget_rs_dupe_identity_calc_min_inner_bytes((int64_t)info.dataBytes);
-    for (const NzbSummary::Head& head : info.heads)
+    std::vector<const char*> headNames(info.heads.size());
+    std::vector<size_t> headNameLens(info.heads.size());
+    std::vector<const char*> headMsgIds(info.heads.size());
+    std::vector<size_t> headMsgIdLens(info.heads.size());
+    std::vector<int64_t> headBytes(info.heads.size());
+    for (size_t i = 0; i < info.heads.size(); ++i)
     {
-        auto article = FetchArticle(head, info.groups, deadline, fetch);
-        if (article.Success)
-        {
-            Identity found = FromArticle(article.Data, head.name,
-                article.FileSize > 0 ? (unsigned long long)article.FileSize : 0, minimum);
-            if (found) return found;
-        }
-        if (Util::CurrentTime() >= deadline || HttpGet::Stopped() || DonorHealth::Stopping()) break;
+        headNames[i] = info.heads[i].name.data();
+        headNameLens[i] = info.heads[i].name.size();
+        headMsgIds[i] = info.heads[i].messageId.data();
+        headMsgIdLens[i] = info.heads[i].messageId.size();
+        headBytes[i] = info.heads[i].bytes;
     }
-    return Identity();
+    struct ReadCtx
+    {
+        const NzbSummary* info;
+        const FetchFunc* fetch;
+        ArticleFetcher::FetchedArticle lastArticle;
+    } ctx{&info, &fetch, {}};
+
+    NzbgetRsBuf nameBuf{nullptr, 0, 0};
+    NzbgetRsBuf extBuf{nullptr, 0, 0};
+    uint64_t bytes = 0;
+    int found = nzbget_rs_dupe_identity_read(
+        info.dataBytes,
+        headNames.empty() ? nullptr : headNames.data(),
+        headNameLens.empty() ? nullptr : headNameLens.data(),
+        headMsgIds.empty() ? nullptr : headMsgIds.data(),
+        headMsgIdLens.empty() ? nullptr : headMsgIdLens.data(),
+        headBytes.empty() ? nullptr : headBytes.data(),
+        info.heads.size(), (int64_t)deadline, &ctx,
+        [](void*) -> int64_t { return (int64_t)Util::CurrentTime(); },
+        [](void*) -> int { return HttpGet::Stopped() ? 1 : 0; },
+        [](void* raw, const char* msgId, size_t msgIdLen, int64_t dl,
+           int* outSuccess, int64_t* outFileSize,
+           const char** outDataPtr, size_t* outDataLen) {
+            auto* c = static_cast<ReadCtx*>(raw);
+            NzbSummary::Head head;
+            head.messageId.assign(msgId ? msgId : "", msgIdLen);
+            c->lastArticle = FetchArticle(head, c->info->groups, (time_t)dl, *c->fetch);
+            *outSuccess = c->lastArticle.Success ? 1 : 0;
+            *outFileSize = c->lastArticle.FileSize;
+            *outDataPtr = c->lastArticle.Data.empty() ? nullptr : c->lastArticle.Data.data();
+            *outDataLen = c->lastArticle.Data.size();
+        },
+        &nameBuf, &extBuf, &bytes);
+    Identity identity;
+    if (found)
+    {
+        if (nameBuf.data && nameBuf.len > 0) identity.name.assign(nameBuf.data, nameBuf.len);
+        if (extBuf.data && extBuf.len > 0) identity.extension.assign(extBuf.data, extBuf.len);
+        identity.bytes = bytes;
+    }
+    nzbget_rs_free(nameBuf);
+    nzbget_rs_free(extBuf);
+    return identity;
 }
 
 unsigned long long DupeIdentity::WholeBytes(const NzbSummary& info)

@@ -56,29 +56,36 @@ namespace
 
 std::optional<std::vector<fs::path>> ArchiveProcessor::Process(const fs::path& archiveFile, const fs::path& destDir) const
 {
-	const std::string filenameStr = fs::u8string(archiveFile.filename());
-	info("%s Extracting '%s'", LOG_PREFIX, filenameStr.c_str());
-
 	const auto unpackDir = m_config.unpackDir / fs::make_unique_filename();
-
-	if (!Extract(archiveFile, unpackDir))
-	{
-		return std::nullopt;
-	}
-
 	std::vector<fs::path> to;
 	const std::string archiveStr = fs::u8string(archiveFile);
 	const std::string unpackStr = fs::u8string(unpackDir);
 	const std::string destStr = fs::u8string(destDir);
 	const std::string processedStr = fs::u8string(m_config.processedDir);
+	const std::string brokenStr = fs::u8string(m_config.brokenDir);
 
-	nzbget_rs_archive_processor_finish(
+	if (!nzbget_rs_archive_processor_process(
 		archiveStr.c_str(),
 		unpackStr.c_str(),
 		destStr.c_str(),
 		processedStr.c_str(),
+		brokenStr.c_str(),
 		(int)m_config.action,
 		&to,
+		[](void* /*rawCtx*/, const char* arcPath, const char* unpPath, int* outExtracted) -> int {
+			const auto extractor = Unpack::MakeExtractor(
+				fs::u8path(arcPath ? arcPath : ""),
+				fs::u8path(unpPath ? unpPath : ""),
+				"",
+				Unpack::OverwriteMode::Overwrite);
+			if (!extractor)
+			{
+				*outExtracted = 0;
+				return 0;
+			}
+			*outExtracted = extractor->Extract() ? 1 : 0;
+			return 1;
+		},
 		&ArchiveLogCb,
 		[](void* rawCtx, const char* movedPath) {
 			auto* out = static_cast<std::vector<fs::path>*>(rawCtx);
@@ -86,7 +93,10 @@ std::optional<std::vector<fs::path>> ArchiveProcessor::Process(const fs::path& a
 			{
 				out->push_back(fs::u8path(movedPath));
 			}
-		});
+		}))
+	{
+		return std::nullopt;
+	}
 
 	return to;
 }

@@ -666,6 +666,41 @@ pub fn update_deleted_stats(
     }
 }
 
+/// `NzbInfo::IsDownloadCompleted` (`DownloadInfo.cpp`):
+/// Returns `true` when `active_downloads == 0` and no non-deleted file blocks completion
+/// (when `ignore_paused_pars` is true, paused PAR files do not block completion).
+pub fn is_download_completed_with<F>(
+    active_downloads: i32,
+    ignore_paused_pars: bool,
+    file_count: usize,
+    mut get_file: F,
+) -> bool
+where
+    F: FnMut(usize) -> (bool, bool, bool),
+{
+    if active_downloads != 0 {
+        return false;
+    }
+    for i in 0..file_count {
+        let (paused, par_file, deleted) = get_file(i);
+        if ((!paused || !ignore_paused_pars) || !par_file) && !deleted {
+            return false;
+        }
+    }
+    true
+}
+
+/// Slice helper for `NzbInfo::IsDownloadCompleted` over `(paused, par_file, deleted)` tuples.
+pub fn is_download_completed(
+    active_downloads: i32,
+    ignore_paused_pars: bool,
+    files: &[(bool, bool, bool)],
+) -> bool {
+    is_download_completed_with(active_downloads, ignore_paused_pars, files.len(), |i| {
+        files[i]
+    })
+}
+
 /// `CompletedFile::SameFilename` (`DownloadInfo.cpp`):
 /// Case-insensitive comparison normalizing `\` to `/`.
 pub fn completed_same_filename(a: &[u8], b: &[u8]) -> bool {
@@ -677,6 +712,82 @@ pub fn completed_same_filename(a: &[u8], b: &[u8]) -> bool {
         let n2 = if c2 == b'\\' { b'/' } else { c2 };
         c_lower(n1) == c_lower(n2)
     })
+}
+
+/// Pure-Rust representation of a `CompletedFile` entry for `NzbInfo::RenameCompletedFile`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletedFileRecord {
+    pub id: i32,
+    pub filename: Vec<u8>,
+    pub origname: Vec<u8>,
+    pub status: i32,
+    pub crc: u32,
+    pub par_file: bool,
+    pub hash16k: Vec<u8>,
+    pub par_set_id: Vec<u8>,
+}
+
+/// `NzbInfo::RenameCompletedFile` (`DownloadInfo.cpp`):
+/// Iterates `count` completed file entries via `get_names(index) -> (filename, origname)`,
+/// finds the first matching `old_name` via `completed_same_filename`, and calls
+/// `set_names(index, new_filename, new_origname_if_was_empty)`.
+pub fn rename_completed_file_with<G, S>(
+    count: usize,
+    old_name: &[u8],
+    new_name: &[u8],
+    mut get_names: G,
+    mut set_names: S,
+) -> bool
+where
+    G: FnMut(usize) -> (Vec<u8>, Vec<u8>),
+    S: FnMut(usize, &[u8], Option<&[u8]>),
+{
+    if old_name.is_empty() || new_name.is_empty() {
+        return false;
+    }
+    for i in 0..count {
+        let (filename, origname) = get_names(i);
+        if completed_same_filename(&filename, old_name) {
+            let new_orig = if origname.is_empty() {
+                Some(filename.as_slice())
+            } else {
+                None
+            };
+            set_names(i, new_name, new_orig);
+            return true;
+        }
+    }
+    false
+}
+
+/// `NzbInfo::RenameCompletedFile` (`DownloadInfo.cpp`) on a slice of `CompletedFileRecord`.
+pub fn rename_completed_file(
+    completed_files: &mut [CompletedFileRecord],
+    old_name: &[u8],
+    new_name: &[u8],
+) -> bool {
+    let mut matched = None;
+    let ok = rename_completed_file_with(
+        completed_files.len(),
+        old_name,
+        new_name,
+        |i| {
+            (
+                completed_files[i].filename.clone(),
+                completed_files[i].origname.clone(),
+            )
+        },
+        |i, new_fn, new_orig| {
+            matched = Some((i, new_fn.to_vec(), new_orig.map(<[u8]>::to_vec)));
+        },
+    );
+    if let Some((i, new_fn, new_orig)) = matched {
+        if let Some(orig) = new_orig {
+            completed_files[i].origname = orig;
+        }
+        completed_files[i].filename = new_fn;
+    }
+    ok
 }
 
 #[cfg(test)]
@@ -721,5 +832,71 @@ mod tests {
             SCRIPT_STATUS_FAILURE
         );
         assert!(completed_same_filename(b"sub\\file.rar", b"SUB/FILE.RAR"));
+    }
+
+    #[test]
+    fn completed_file_full_suite_port_from_cpp() {
+        // 1. CompletedFileSameFilenameTest
+        let rec = b"DISORDER_2025-FLT/2c0837e5fa42c8cfb5d5e583168a2af4.mkv";
+        assert!(completed_same_filename(
+            rec,
+            b"DISORDER_2025-FLT/2c0837e5fa42c8cfb5d5e583168a2af4.mkv"
+        ));
+        assert!(completed_same_filename(
+            rec,
+            b"DISORDER_2025-FLT\\2c0837e5fa42c8cfb5d5e583168a2af4.mkv"
+        ));
+        assert!(completed_same_filename(
+            rec,
+            b"disorder_2025-flt/2C0837E5FA42C8CFB5D5E583168A2AF4.MKV"
+        ));
+        assert!(!completed_same_filename(
+            rec,
+            b"2c0837e5fa42c8cfb5d5e583168a2af4.mkv"
+        ));
+        assert!(!completed_same_filename(rec, b"other.mkv"));
+        assert!(!completed_same_filename(
+            rec,
+            b"OTHER_DIR/2c0837e5fa42c8cfb5d5e583168a2af4.mkv"
+        ));
+
+        let bare = b"5KzdcWdGVGUG83Q9jv8KXht4O2k57w.mkv";
+        assert!(completed_same_filename(
+            bare,
+            b"5KzdcWdGVGUG83Q9jv8KXht4O2k57w.mkv"
+        ));
+        assert!(!completed_same_filename(
+            bare,
+            b"Some.Dir/5KzdcWdGVGUG83Q9jv8KXht4O2k57w.mkv"
+        ));
+        assert!(!completed_same_filename(
+            bare,
+            b"5KzdcWdGVGUG83Q9jv8KXht4O2k57w.mp4"
+        ));
+
+        // 2. RenameCompletedFileMatchesPathQualifiedRecordTest
+        let mut completed_files = vec![CompletedFileRecord {
+            id: 1,
+            filename: b"parent/2c0837e5fa42c8cfb5d5e583168a2af4.mkv".to_vec(),
+            origname: Vec::new(),
+            status: 1,
+            crc: 0,
+            par_file: false,
+            hash16k: Vec::new(),
+            par_set_id: Vec::new(),
+        }];
+        assert!(rename_completed_file(
+            &mut completed_files,
+            b"parent/2c0837e5fa42c8cfb5d5e583168a2af4.mkv",
+            b"parent/Some.Release.mkv"
+        ));
+        assert_eq!(
+            completed_files[0].filename,
+            b"parent/Some.Release.mkv"
+        );
+        assert_eq!(
+            completed_files[0].origname,
+            b"parent/2c0837e5fa42c8cfb5d5e583168a2af4.mkv"
+        );
     }
 }

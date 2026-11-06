@@ -211,4 +211,59 @@ mod tests {
         }
         let mut a=Analyzer::default();assert!(!a.append(&[b'x';2472]));assert!(!a.par_file);
     }
+
+    #[test]
+    fn direct_renamer_content_full_suite_port_from_cpp() {
+        let mut header = [0u8; HEADER];
+        header[..8].copy_from_slice(MAGIC);
+
+        // 1. CompleteHeaderIsVisibleBeforeArticleDownloaded
+        for size in [64usize, 2472usize] {
+            let mut a = Analyzer::default();
+            let mut bytes = vec![0u8; size];
+            bytes[..HEADER].copy_from_slice(&header);
+            a.reset();
+            assert!(a.append(&bytes));
+            assert!(a.par_file);
+        }
+
+        // 2. SplitHeaderIsVisibleOnItsCompletingPiece
+        for split in 1..HEADER {
+            let mut a = Analyzer::default();
+            a.reset();
+            assert!(!a.append(&header[..split]));
+            assert!(!a.par_file);
+            assert!(a.append(&header[split..]));
+            assert!(a.par_file);
+        }
+
+        // 3. CommittedParIndexIsVisibleFromOneAppend
+        let par_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("tests/testdata/parchecker/testfile.par2");
+        let bytes = std::fs::read(&par_path).unwrap();
+        assert_eq!(bytes.len(), 4608);
+        assert_eq!(&bytes[..8], MAGIC);
+        let mut a = Analyzer::default();
+        a.reset();
+        assert!(a.append(&bytes));
+        assert!(a.par_file);
+
+        // 4. PartialAndNonParDataCannotAuthorizeBorrowing
+        for size in 0..HEADER {
+            let mut a = Analyzer::default();
+            a.reset();
+            assert!(!a.append(&header[..size]));
+            assert!(!a.par_file);
+        }
+        for byte in 0..8 {
+            let mut invalid = header;
+            invalid[byte] ^= 1;
+            let mut a = Analyzer::default();
+            a.reset();
+            assert!(!a.append(&invalid));
+            assert!(!a.par_file);
+        }
+    }
 }

@@ -1,7 +1,7 @@
 //! C ABI. Strings come in as NUL-terminated C strings; results go out as a
 //! buffer the caller copies and then frees with nzbget_rs_free.
 
-use std::ffi::{c_char, c_int, CStr};
+use std::ffi::{c_char, c_int, c_void, CStr};
 
 #[path = "tlscipher/native.rs"]
 mod tls_cipher_native;
@@ -1129,212 +1129,6 @@ pub unsafe extern "C" fn nzbget_rs_normalize_path_separators(path: *mut c_char) 
     in_place(path, |b| {
         crate::paths::normalize_path_separators(b);
         b.len()
-    })
-}
-
-/// A CollectionAnalyzer::FileEntry (rust/src/collection.rs).
-#[repr(C)]
-pub struct FileEntryC {
-    pub path: *const c_char,
-    pub path_len: usize,
-    pub rename_prefix: *const c_char,
-    pub rename_prefix_len: usize,
-    pub filename: *const c_char,
-    pub filename_len: usize,
-    pub stem: *const c_char,
-    pub stem_len: usize,
-    pub ext: *const c_char,
-    pub ext_len: usize,
-    pub size: u64,
-}
-
-unsafe fn entries(files: *const FileEntryC, count: usize) -> Vec<crate::collection::Entry> {
-    if files.is_null() || count == 0 {
-        return Vec::new();
-    }
-    std::slice::from_raw_parts(files, count)
-        .iter()
-        .map(|f| crate::collection::Entry {
-            path: bytes(f.path, f.path_len).to_vec(),
-            rename_prefix: bytes(f.rename_prefix, f.rename_prefix_len).to_vec(),
-            filename: bytes(f.filename, f.filename_len).to_vec(),
-            stem: bytes(f.stem, f.stem_len).to_vec(),
-            ext: bytes(f.ext, f.ext_len).to_vec(),
-            size: f.size,
-        })
-        .collect()
-}
-
-/// AnalysisResult by index into the files (-1: an empty FileEntry); the
-/// index arrays have room for `count` each.
-#[repr(C)]
-pub struct AnalysisC {
-    pub main_video: isize,
-    pub sample_video: isize,
-    pub main_book: isize,
-    pub subtitles: *mut usize,
-    pub subtitle_count: usize,
-    pub nfos: *mut usize,
-    pub nfo_count: usize,
-    pub other_files: *mut usize,
-    pub other_count: usize,
-    pub ambiguous: c_int,
-    pub disc_structure: c_int,
-    pub has_audio: c_int,
-}
-
-/// CollectionAnalyzer::Analyze.
-///
-/// # Safety
-/// `files` is null (empty) or holds `count` valid entries. Entry strings
-/// are null (empty) or readable for their lengths. `out` is null or writable;
-/// its arrays are null (counts only) or have room for `count` indices and
-/// are disjoint from `out`. All storage remains caller-owned.
-/// Panics abort rather than crossing the ABI.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_collection_analyze(files: *const FileEntryC, count: usize, out: *mut AnalysisC) {
-    if out.is_null() {
-        return;
-    }
-    let a = crate::collection::analyze(&entries(files, count));
-    let o = &mut *out;
-    let idx = |i: Option<usize>| i.map_or(-1, |k| k as isize);
-    o.main_video = idx(a.main_video);
-    o.sample_video = idx(a.sample_video);
-    o.main_book = idx(a.main_book);
-    let fill = |dst: *mut usize, src: &[usize]| {
-        if !dst.is_null() {
-            for (k, &v) in src.iter().take(count).enumerate() {
-                *dst.add(k) = v;
-            }
-        }
-        src.len().min(count)
-    };
-    o.subtitle_count = fill(o.subtitles, &a.subtitles);
-    o.nfo_count = fill(o.nfos, &a.nfos);
-    o.other_count = fill(o.other_files, &a.other_files);
-    o.ambiguous = a.ambiguous as c_int;
-    o.disc_structure = a.disc_structure as c_int;
-    o.has_audio = a.has_audio as c_int;
-}
-
-/// What CollectionAnalyzer::BuildPlan asks of the C++ side, and where it
-/// puts the plan.
-#[repr(C)]
-pub struct PlanCallbacks {
-    pub user: *mut std::ffi::c_void,
-    pub exists: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, usize) -> c_int>,
-    pub ignored: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, usize) -> c_int>,
-    /// a rename: the file's index, the new path, the new file name
-    pub action: Option<unsafe extern "C" fn(*mut std::ffi::c_void, usize, *const c_char, usize, *const c_char, usize)>,
-    /// the stem of a path as the platform's path has it, written to `out`
-    /// (room for `cap` bytes); returns its length (more than `cap`: called
-    /// again with that room); None: the stem of the bytes as they are
-    pub stem: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, usize, *mut c_char, usize) -> usize>,
-}
-
-/// RenamePlan's flags; the effective base name is returned.
-#[repr(C)]
-#[derive(Default)]
-pub struct PlanFlagsC {
-    pub ambiguous: c_int,
-    pub disc_structure: c_int,
-    pub can_rename: c_int,
-    pub target_name_obfuscated: c_int,
-}
-
-struct CDisk<'c>(&'c PlanCallbacks);
-
-impl crate::collection::Disk for CDisk<'_> {
-    fn stem(&mut self, path: &[u8]) -> Vec<u8> {
-        let Some(f) = self.0.stem else {
-            let name = path.iter().rposition(|&b| b == b'/' || b == b'\\').map_or(path, |k| &path[k + 1..]);
-            return crate::collection::stem_ext(name).0.to_vec();
-        };
-        let mut buf = vec![0u8; path.len() * 3 + 16];
-        loop {
-            let n = unsafe { f(self.0.user, path.as_ptr().cast(), path.len(), buf.as_mut_ptr().cast(), buf.len()) };
-            if n <= buf.len() {
-                buf.truncate(n);
-                return buf;
-            }
-            buf.resize(n, 0);
-        }
-    }
-
-    fn exists(&mut self, path: &[u8]) -> bool {
-        self.0.exists.is_some_and(|f| unsafe { f(self.0.user, path.as_ptr().cast(), path.len()) != 0 })
-    }
-    fn ignored(&mut self, path: &[u8]) -> bool {
-        self.0.ignored.is_some_and(|f| unsafe { f(self.0.user, path.as_ptr().cast(), path.len()) != 0 })
-    }
-}
-
-/// CollectionAnalyzer::BuildPlan for the walked files; free the returned
-/// effective base name with nzbget_rs_free.
-///
-/// # Safety
-/// `files` is null (empty) or holds `count` valid entries, with strings null
-/// (empty) or readable for their lengths. `target` is null (empty) or readable
-/// for `target_len`. `callbacks` is null or a valid table; its functions must
-/// not unwind or invalidate the table/flags. Callback strings are borrowed
-/// only for the call. `flags` is null or writable and disjoint from the table.
-/// Null table/flags returns an empty buffer, clearing non-null flags. Null
-/// exists/ignored means false; null action discards actions. Panics abort.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_collection_plan(
-    files: *const FileEntryC,
-    count: usize,
-    disc_dir: c_int,
-    target: *const c_char,
-    target_len: usize,
-    callbacks: *const PlanCallbacks,
-    flags: *mut PlanFlagsC,
-) -> RsBuf {
-    if !flags.is_null() {
-        *flags = PlanFlagsC::default();
-    }
-    if callbacks.is_null() || flags.is_null() {
-        return into_buf(Vec::new());
-    }
-    let cb = &*callbacks;
-    let plan = crate::collection::build_plan(&entries(files, count), disc_dir != 0, bytes(target, target_len), &mut CDisk(cb));
-    for a in &plan.actions {
-        if let Some(action) = cb.action {
-            action(cb.user, a.src, a.dst_path.as_ptr().cast(), a.dst_path.len(), a.new_filename.as_ptr().cast(), a.new_filename.len());
-        }
-    }
-    *flags = PlanFlagsC {
-        ambiguous: plan.ambiguous as c_int,
-        disc_structure: plan.disc_structure as c_int,
-        can_rename: plan.can_rename as c_int,
-        target_name_obfuscated: plan.target_name_obfuscated as c_int,
-    };
-    into_buf(plan.effective_base_name)
-}
-
-/// CollectionAnalyzer's names: 0 ResolveTargetName(a: meta, b: nzb),
-/// 1 ResolveSubtitleName(a: base, b: stem, c: ext), 2 ResolveSampleName(a:
-/// base, b: ext); free the result with nzbget_rs_free.
-///
-/// # Safety
-/// Each text is null or readable for its length.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_collection_name(
-    op: c_int,
-    a: *const c_char,
-    a_len: usize,
-    b: *const c_char,
-    b_len: usize,
-    c: *const c_char,
-    c_len: usize,
-) -> RsBuf {
-    let (a, b, c) = (bytes(a, a_len), bytes(b, b_len), bytes(c, c_len));
-    into_buf(match op {
-        0 => crate::collection::resolve_target_name(a, b),
-        1 => crate::collection::resolve_subtitle_name(a, b, c),
-        2 => crate::collection::resolve_sample_name(a, b),
-        _ => Vec::new(),
     })
 }
 
@@ -5676,57 +5470,6 @@ mod tests {
             assert_eq!(nzbget_rs_web_header(std::ptr::null(), 42, 1, &mut start, &mut len, &mut number), 10);
             assert_eq!((start, len, number), (0, 0, 0));
             assert_eq!(nzbget_rs_web_authorized_ip(std::ptr::null(), std::ptr::null(), std::ptr::null(), 1, None), 0);
-        }
-    }
-
-    #[test]
-    fn collection_null_inputs_and_callbacks() {
-        unsafe {
-            let mut out = AnalysisC {
-                main_video: 0, sample_video: 0, main_book: 0,
-                subtitles: std::ptr::null_mut(), subtitle_count: 99,
-                nfos: std::ptr::null_mut(), nfo_count: 99,
-                other_files: std::ptr::null_mut(), other_count: 99,
-                ambiguous: 1, disc_structure: 1, has_audio: 1,
-            };
-            nzbget_rs_collection_analyze(std::ptr::null(), usize::MAX, &mut out);
-            assert_eq!((out.main_video, out.sample_video, out.main_book), (-1, -1, -1));
-            assert_eq!((out.subtitle_count, out.nfo_count, out.other_count), (0, 0, 0));
-            assert_eq!((out.ambiguous, out.disc_structure, out.has_audio), (0, 0, 0));
-            nzbget_rs_collection_analyze(std::ptr::null(), 0, std::ptr::null_mut());
-
-            let cb = PlanCallbacks { user: std::ptr::null_mut(), exists: None, ignored: None, action: None, stem: None };
-            let mut flags = PlanFlagsC { can_rename: 1, ..PlanFlagsC::default() };
-            let empty = nzbget_rs_collection_plan(std::ptr::null(), 99, 0, std::ptr::null(), 99, std::ptr::null(), &mut flags);
-            assert_eq!(empty.len, 0);
-            assert_eq!(flags.can_rename, 0);
-            nzbget_rs_free(empty);
-            let empty = nzbget_rs_collection_plan(std::ptr::null(), 99, 1, std::ptr::null(), 99, &cb, &mut flags);
-            assert_eq!(flags.disc_structure, 1);
-            assert_eq!(flags.can_rename, 0);
-            nzbget_rs_free(empty);
-            let empty = nzbget_rs_collection_plan(std::ptr::null(), 0, 0, std::ptr::null(), 0, &cb, std::ptr::null_mut());
-            nzbget_rs_free(empty);
-
-            let file = FileEntryC {
-                path: c"/d/abc.mkv".as_ptr(), path_len: 10,
-                rename_prefix: c"/d/".as_ptr(), rename_prefix_len: 3,
-                filename: c"abc.mkv".as_ptr(), filename_len: 7,
-                stem: c"abc".as_ptr(), stem_len: 3,
-                ext: c".mkv".as_ptr(), ext_len: 4, size: 1,
-            };
-            let base = nzbget_rs_collection_plan(&file, 1, 0, c"Movie.2026".as_ptr(), 10, &cb, &mut flags);
-            assert_eq!(flags.can_rename, 1);
-            assert_eq!(std::slice::from_raw_parts(base.data.cast::<u8>(), base.len), b"Movie.2026");
-            // Another result must neither overwrite nor free the first one.
-            for op in 0..=2 {
-                let name = nzbget_rs_collection_name(op, std::ptr::null(), 99, std::ptr::null(), 99, std::ptr::null(), 99);
-                let expected: &[u8] = if op == 2 { b"-sample" } else { b"" };
-                assert_eq!(std::slice::from_raw_parts(name.data.cast::<u8>(), name.len), expected);
-                nzbget_rs_free(name);
-            }
-            assert_eq!(std::slice::from_raw_parts(base.data.cast::<u8>(), base.len), b"Movie.2026");
-            nzbget_rs_free(base);
         }
     }
 
@@ -30359,6 +30102,1355 @@ pub unsafe extern "C" fn nzbget_rs_stream_resolve_completion_par_action(
         *out_log_remaining_holes = i32::from(log_rem);
     }
 }
+
+unsafe fn cstr_to_path_buf(ptr: *const c_char) -> std::path::PathBuf {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        std::path::PathBuf::from(std::ffi::OsStr::from_bytes(input(ptr)))
+    }
+    #[cfg(not(unix))]
+    {
+        std::path::PathBuf::from(String::from_utf8_lossy(input(ptr)).into_owned())
+    }
+}
+
+fn cstring_lossy(bytes: &[u8]) -> std::ffi::CString {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    std::ffi::CString::new(&bytes[..end]).unwrap_or_default()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_qhp_rename_completed_file(
+    count: usize,
+    old_name: *const c_char,
+    new_name: *const c_char,
+    ctx: *mut c_void,
+    get_cb: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            usize,
+            *mut *const c_char,
+            *mut *const c_char,
+        ),
+    >,
+    set_cb: Option<unsafe extern "C" fn(*mut c_void, usize, *const c_char, *const c_char)>,
+) -> c_int {
+    let old_s = input(old_name);
+    let new_s = input(new_name);
+    let (Some(get_fn), Some(set_fn)) = (get_cb, set_cb) else {
+        return 0;
+    };
+    let ok = crate::downloadinfo::rename_completed_file_with(
+        count,
+        old_s,
+        new_s,
+        |idx| {
+            let mut fn_ptr: *const c_char = std::ptr::null();
+            let mut orig_ptr: *const c_char = std::ptr::null();
+            get_fn(ctx, idx, &mut fn_ptr, &mut orig_ptr);
+            (input(fn_ptr).to_vec(), input(orig_ptr).to_vec())
+        },
+        |idx, new_fn, new_orig| {
+            let new_fn_c = std::ffi::CString::new(new_fn).unwrap_or_default();
+            let orig_c = new_orig.map(|o| std::ffi::CString::new(o).unwrap_or_default());
+            set_fn(
+                ctx,
+                idx,
+                new_fn_c.as_ptr(),
+                orig_c
+                    .as_ref()
+                    .map_or(std::ptr::null(), |c| c.as_ptr()),
+            );
+        },
+    );
+    i32::from(ok)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupematcher_prepare(
+    dest_dir: *const c_char,
+    expected_size: i64,
+    out_max_size: *mut i64,
+    out_compressed: *mut c_int,
+    on_rar_archive: Option<
+        unsafe extern "C" fn(*mut c_void, *mut c_char, c_int, i64, *mut i64, *mut c_int),
+    >,
+    on_detail_log: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+    ctx: *mut c_void,
+) -> c_int {
+    if dest_dir.is_null() || out_max_size.is_null() || out_compressed.is_null() {
+        return 0;
+    }
+    let dir_path = cstr_to_path_buf(dest_dir);
+    let mut max_size = *out_max_size;
+    let mut compressed = *out_compressed != 0;
+    let ok = crate::pardamage::dupe_matcher_prepare(
+        &dir_path,
+        expected_size,
+        &mut max_size,
+        &mut compressed,
+        |buf, rar_expected, ms, comp| {
+            if let Some(cb) = on_rar_archive {
+                let mut c_comp: c_int = i32::from(*comp);
+                cb(
+                    ctx,
+                    buf.as_mut_ptr().cast::<c_char>(),
+                    buf.len() as c_int,
+                    rar_expected,
+                    ms,
+                    &mut c_comp,
+                );
+                *comp = c_comp != 0;
+            }
+        },
+        |msg| {
+            if let Some(log_cb) = on_detail_log {
+                let c_msg = std::ffi::CString::new(msg).unwrap_or_default();
+                log_cb(ctx, c_msg.as_ptr());
+            }
+        },
+    );
+    *out_max_size = max_size;
+    *out_compressed = i32::from(compressed);
+    i32::from(ok)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupematcher_match_dupe_content(
+    dupe_dir: *const c_char,
+    max_size: i64,
+    compressed: c_int,
+    on_rar_archive: Option<
+        unsafe extern "C" fn(*mut c_void, *mut c_char, c_int, i64, *mut i64, *mut c_int),
+    >,
+    on_detail_log: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+    ctx: *mut c_void,
+) -> c_int {
+    if dupe_dir.is_null() {
+        return 0;
+    }
+    let dir_path = cstr_to_path_buf(dupe_dir);
+    let ok = crate::pardamage::dupe_matcher_match_dupe_content(
+        &dir_path,
+        max_size,
+        compressed != 0,
+        |buf, rar_expected, ms, comp| {
+            if let Some(cb) = on_rar_archive {
+                let mut c_comp: c_int = i32::from(*comp);
+                cb(
+                    ctx,
+                    buf.as_mut_ptr().cast::<c_char>(),
+                    buf.len() as c_int,
+                    rar_expected,
+                    ms,
+                    &mut c_comp,
+                );
+                *comp = c_comp != 0;
+            }
+        },
+        |msg| {
+            if let Some(log_cb) = on_detail_log {
+                let c_msg = std::ffi::CString::new(msg).unwrap_or_default();
+                log_cb(ctx, c_msg.as_ptr());
+            }
+        },
+    );
+    i32::from(ok)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_archive_processor_process(
+    archive_file: *const c_char,
+    unpack_dir: *const c_char,
+    dest_dir: *const c_char,
+    processed_dir: *const c_char,
+    broken_dir: *const c_char,
+    config_action: c_int,
+    ctx: *mut c_void,
+    extract_cb: Option<
+        unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, *mut c_int) -> c_int,
+    >,
+    log_cb: Option<unsafe extern "C" fn(*mut c_void, c_int, *const c_char)>,
+    moved_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+) -> c_int {
+    let archive_path = cstr_to_path_buf(archive_file);
+    let unpack_path = cstr_to_path_buf(unpack_dir);
+    let dest_path = cstr_to_path_buf(dest_dir);
+    let processed_path = cstr_to_path_buf(processed_dir);
+    let broken_path = cstr_to_path_buf(broken_dir);
+
+    let ok = crate::cleanup::archive_processor_process(
+        &archive_path,
+        &unpack_path,
+        &dest_path,
+        &processed_path,
+        &broken_path,
+        config_action,
+        |_, _| {
+            let Some(ext_fn) = extract_cb else {
+                return (false, false);
+            };
+            let mut extracted: c_int = 0;
+            let supported = ext_fn(ctx, archive_file, unpack_dir, &mut extracted);
+            (supported != 0, extracted != 0)
+        },
+        |kind, msg| {
+            if let Some(cb) = log_cb {
+                let c_msg = cstring_lossy(msg);
+                cb(ctx, kind as c_int, c_msg.as_ptr());
+            }
+        },
+        |moved_path| {
+            if let Some(cb) = moved_cb {
+                let c_path = cstring_lossy(moved_path);
+                cb(ctx, c_path.as_ptr());
+            }
+        },
+    );
+    i32::from(ok)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_donor_now_ms() -> i64 {
+    crate::dupesearch_nzb::donor_now_ms()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_donor_stop_all() {
+    crate::dupesearch_nzb::donor_stop_all();
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_donor_wait_all() {
+    crate::dupesearch_nzb::donor_wait_all();
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_donor_reset() {
+    crate::dupesearch_nzb::donor_reset();
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_donor_stopping() -> c_int {
+    i32::from(crate::dupesearch_nzb::donor_stopping())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_donor_sample(
+    ids_ptr: *const *const c_char,
+    ids_lens: *const usize,
+    ids_count: usize,
+    percent: c_int,
+    minimum: c_int,
+    maximum: c_int,
+    seed: u32,
+    ctx: *mut c_void,
+    emit_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize)>,
+) {
+    let mut ids = Vec::with_capacity(ids_count);
+    if !ids_ptr.is_null() && !ids_lens.is_null() {
+        for i in 0..ids_count {
+            let p = *ids_ptr.add(i);
+            let l = *ids_lens.add(i);
+            ids.push(String::from_utf8_lossy(bytes(p, l)).into_owned());
+        }
+    }
+    let sampled = crate::dupesearch_nzb::donor_sample(&ids, percent, minimum, maximum, seed);
+    if let Some(cb) = emit_cb {
+        for s in &sampled {
+            cb(ctx, s.as_ptr().cast::<c_char>(), s.len());
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_donor_plan(
+    ids_ptr: *const *const c_char,
+    ids_lens: *const usize,
+    ids_count: usize,
+    percent: c_int,
+    minimum: c_int,
+    maximum: c_int,
+    body_percent: c_int,
+    max_body: c_int,
+    seed: u32,
+    ctx: *mut c_void,
+    emit_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize, c_int)>,
+) {
+    let mut ids = Vec::with_capacity(ids_count);
+    if !ids_ptr.is_null() && !ids_lens.is_null() {
+        for i in 0..ids_count {
+            let p = *ids_ptr.add(i);
+            let l = *ids_lens.add(i);
+            ids.push(String::from_utf8_lossy(bytes(p, l)).into_owned());
+        }
+    }
+    let groups = std::sync::Arc::new(Vec::new());
+    let opts = crate::dupesearch_nzb::DonorSampleOptions {
+        percent,
+        minimum,
+        maximum,
+        body_percent,
+        max_body,
+        seed,
+    };
+    let items = crate::dupesearch_nzb::donor_plan(&ids, &groups, &opts);
+    if let Some(cb) = emit_cb {
+        for item in &items {
+            cb(
+                ctx,
+                item.message_id.as_ptr().cast::<c_char>(),
+                item.message_id.len(),
+                i32::from(item.body),
+            );
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_donor_body_gate_done(rust_gate: *mut c_void) -> c_int {
+    if rust_gate.is_null() {
+        return 0;
+    }
+    let gate = &*(rust_gate as *const crate::dupesearch_nzb::DonorBodyGate);
+    i32::from(gate.done())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_donor_body_once(
+    rust_gate: *mut c_void,
+    ctx: *mut c_void,
+    download_cb: Option<unsafe extern "C" fn(*mut c_void) -> c_int>,
+) -> c_int {
+    if rust_gate.is_null() {
+        return 4;
+    }
+    let gate = &*(rust_gate as *const crate::dupesearch_nzb::DonorBodyGate);
+    match gate.body_once_fallible(|| {
+        let code = download_cb.map_or(4, |cb| unsafe { cb(ctx) });
+        if code < 0 {
+            return Err(code);
+        }
+        Ok(match code {
+            0 => crate::dupesearch_nzb::DonorAnswer::None,
+            1 => crate::dupesearch_nzb::DonorAnswer::Present,
+            2 => crate::dupesearch_nzb::DonorAnswer::Missing,
+            3 => crate::dupesearch_nzb::DonorAnswer::BodyBad,
+            _ => crate::dupesearch_nzb::DonorAnswer::Error,
+        })
+    }) {
+        Ok(ans) => ans as c_int,
+        Err(err_code) => err_code,
+    }
+}
+
+struct CppDonorTransport {
+    cpp_server: usize,
+    exchange_cb: unsafe extern "C" fn(
+        *mut c_void,
+        usize,
+        *const *const c_char,
+        *const usize,
+        *const *mut c_void,
+        *const *const *const c_char,
+        *const *const usize,
+        *const usize,
+        *mut c_int,
+        *mut usize,
+        *mut c_int,
+    ) -> c_int,
+}
+
+impl crate::dupesearch_nzb::DonorServerExchange for CppDonorTransport {
+    fn exchange(
+        &self,
+        batch: &[crate::dupesearch_nzb::DonorRequest],
+    ) -> Result<Vec<crate::dupesearch_nzb::DonorAnswer>, crate::dupesearch_nzb::DonorExchangeError>
+    {
+        let count = batch.len();
+        let mut msg_ptrs = Vec::with_capacity(count);
+        let mut msg_lens = Vec::with_capacity(count);
+        let mut gate_ptrs = Vec::with_capacity(count);
+        let mut group_str_vecs: Vec<Vec<*const c_char>> = Vec::with_capacity(count);
+        let mut group_len_vecs: Vec<Vec<usize>> = Vec::with_capacity(count);
+        for req in batch {
+            msg_ptrs.push(req.message_id.as_ptr().cast::<c_char>());
+            msg_lens.push(req.message_id.len());
+            gate_ptrs.push(
+                req.gate
+                    .as_ref()
+                    .map_or(std::ptr::null_mut(), |g| std::sync::Arc::as_ptr(g) as *mut c_void),
+            );
+            let mut g_ptrs = Vec::with_capacity(req.groups.len());
+            let mut g_lens = Vec::with_capacity(req.groups.len());
+            for g in req.groups.iter() {
+                g_ptrs.push(g.as_ptr().cast::<c_char>());
+                g_lens.push(g.len());
+            }
+            group_str_vecs.push(g_ptrs);
+            group_len_vecs.push(g_lens);
+        }
+        let mut group_ptrs_outer = Vec::with_capacity(count);
+        let mut group_lens_outer = Vec::with_capacity(count);
+        let mut group_counts = Vec::with_capacity(count);
+        for i in 0..count {
+            group_ptrs_outer.push(group_str_vecs[i].as_ptr());
+            group_lens_outer.push(group_len_vecs[i].as_ptr());
+            group_counts.push(group_str_vecs[i].len());
+        }
+
+        let mut out_answers = vec![0 as c_int; count];
+        let mut out_count: usize = 0;
+        let mut out_busy: c_int = 0;
+        let threw = unsafe {
+            (self.exchange_cb)(
+                self.cpp_server as *mut c_void,
+                count,
+                msg_ptrs.as_ptr(),
+                msg_lens.as_ptr(),
+                gate_ptrs.as_ptr(),
+                group_ptrs_outer.as_ptr(),
+                group_lens_outer.as_ptr(),
+                group_counts.as_ptr(),
+                out_answers.as_mut_ptr(),
+                &mut out_count,
+                &mut out_busy,
+            )
+        };
+        let to_answer = |v: c_int| match v {
+            0 => crate::dupesearch_nzb::DonorAnswer::None,
+            1 => crate::dupesearch_nzb::DonorAnswer::Present,
+            2 => crate::dupesearch_nzb::DonorAnswer::Missing,
+            3 => crate::dupesearch_nzb::DonorAnswer::BodyBad,
+            _ => crate::dupesearch_nzb::DonorAnswer::Error,
+        };
+        let answers: Vec<crate::dupesearch_nzb::DonorAnswer> = out_answers
+            .into_iter()
+            .take(out_count.min(count))
+            .map(to_answer)
+            .collect();
+        if threw != 0 {
+            Err(crate::dupesearch_nzb::DonorExchangeError {
+                answers,
+                busy: out_busy != 0,
+            })
+        } else {
+            Ok(answers)
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_donor_server_new(
+    cpp_server: *mut c_void,
+    cap: c_int,
+    exchange_cb: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            usize,
+            *const *const c_char,
+            *const usize,
+            *const *mut c_void,
+            *const *const *const c_char,
+            *const *const usize,
+            *const usize,
+            *mut c_int,
+            *mut usize,
+            *mut c_int,
+        ) -> c_int,
+    >,
+) -> *mut c_void {
+    let Some(cb) = exchange_cb else {
+        return std::ptr::null_mut();
+    };
+    let srv = std::sync::Arc::new(crate::dupesearch_nzb::DonorServer::new(
+        cap,
+        CppDonorTransport {
+            cpp_server: cpp_server as usize,
+            exchange_cb: cb,
+        },
+    ));
+    Box::into_raw(Box::new(srv)).cast::<c_void>()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_donor_server_free(handle: *mut c_void) {
+    if !handle.is_null() {
+        drop(Box::from_raw(
+            handle.cast::<std::sync::Arc<crate::dupesearch_nzb::DonorServer>>(),
+        ));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_donor_server_cap(handle: *const c_void) -> c_int {
+    if handle.is_null() {
+        return 1;
+    }
+    let srv = &*handle.cast::<std::sync::Arc<crate::dupesearch_nzb::DonorServer>>();
+    srv.cap()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_donor_server_depth(handle: *const c_void) -> c_int {
+    if handle.is_null() {
+        return 4;
+    }
+    let srv = &*handle.cast::<std::sync::Arc<crate::dupesearch_nzb::DonorServer>>();
+    srv.depth()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_donor_server_paused(handle: *const c_void) -> c_int {
+    if handle.is_null() {
+        return 0;
+    }
+    let srv = &*handle.cast::<std::sync::Arc<crate::dupesearch_nzb::DonorServer>>();
+    i32::from(srv.paused())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_donor_server_max_active(handle: *const c_void) -> c_int {
+    if handle.is_null() {
+        return 0;
+    }
+    let srv = &*handle.cast::<std::sync::Arc<crate::dupesearch_nzb::DonorServer>>();
+    srv.max_active()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_donor_server_set_retry_after_ms(
+    handle: *const c_void,
+    ms: c_int,
+) {
+    if !handle.is_null() {
+        let srv = &*handle.cast::<std::sync::Arc<crate::dupesearch_nzb::DonorServer>>();
+        srv.set_retry_after_ms(ms);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_donor_server_ask(
+    handle: *const c_void,
+    count: usize,
+    msg_ids: *const *const c_char,
+    msg_lens: *const usize,
+    rust_gates: *const *mut c_void,
+    group_ptrs: *const *const *const c_char,
+    group_lens: *const *const usize,
+    group_counts: *const usize,
+    cancel_ctx: *mut c_void,
+    cancel_cb: Option<unsafe extern "C" fn(*mut c_void) -> c_int>,
+    out_answers: *mut c_int,
+) {
+    if handle.is_null() || out_answers.is_null() {
+        return;
+    }
+    let srv = &*handle.cast::<std::sync::Arc<crate::dupesearch_nzb::DonorServer>>();
+    let mut batch = Vec::with_capacity(count);
+    for i in 0..count {
+        let mid = if !msg_ids.is_null() && !msg_lens.is_null() {
+            String::from_utf8_lossy(bytes(*msg_ids.add(i), *msg_lens.add(i))).into_owned()
+        } else {
+            String::new()
+        };
+        let gate_ptr = if !rust_gates.is_null() {
+            *rust_gates.add(i)
+        } else {
+            std::ptr::null_mut()
+        };
+        let gate = if !gate_ptr.is_null() {
+            let arc = std::sync::Arc::from_raw(
+                gate_ptr as *const crate::dupesearch_nzb::DonorBodyGate,
+            );
+            let cloned = arc.clone();
+            let _ = std::sync::Arc::into_raw(arc);
+            Some(cloned)
+        } else {
+            None
+        };
+        let mut groups = Vec::new();
+        if !group_ptrs.is_null() && !group_lens.is_null() && !group_counts.is_null() {
+            let g_cnt = *group_counts.add(i);
+            let g_p = *group_ptrs.add(i);
+            let g_l = *group_lens.add(i);
+            if !g_p.is_null() && !g_l.is_null() {
+                for j in 0..g_cnt {
+                    groups.push(String::from_utf8_lossy(bytes(*g_p.add(j), *g_l.add(j))).into_owned());
+                }
+            }
+        }
+        batch.push(crate::dupesearch_nzb::DonorRequest {
+            message_id: mid,
+            gate,
+            groups: std::sync::Arc::new(groups),
+        });
+    }
+    let answers = srv.ask(&batch, || {
+        cancel_cb.is_some_and(|cb| unsafe { cb(cancel_ctx) != 0 })
+    });
+    for (i, ans) in answers.into_iter().take(count).enumerate() {
+        *out_answers.add(i) = ans as c_int;
+    }
+}
+
+struct CppKeepAlive {
+    ptr: usize,
+    drop_fn: unsafe extern "C" fn(*mut c_void),
+}
+
+impl Drop for CppKeepAlive {
+    fn drop(&mut self) {
+        if self.ptr != 0 {
+            unsafe { (self.drop_fn)(self.ptr as *mut c_void) };
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_donor_check_items(
+    server_handles: *const *mut c_void,
+    server_count: usize,
+    keepalive_ptr: *mut c_void,
+    keepalive_drop: Option<unsafe extern "C" fn(*mut c_void)>,
+    msg_ids: *const *const c_char,
+    msg_lens: *const usize,
+    bodies: *const c_int,
+    group_ptrs: *const *const *const c_char,
+    group_lens: *const *const usize,
+    group_counts: *const usize,
+    item_count: usize,
+    budget_ms: c_int,
+    out_checked: *mut c_int,
+    out_present: *mut c_int,
+    out_missing: *mut c_int,
+    out_error: *mut c_int,
+    out_body_checked: *mut c_int,
+    out_body_bad: *mut c_int,
+) {
+    let keepalive: Option<std::sync::Arc<dyn Send + Sync>> =
+        keepalive_drop.map(|drop_fn| {
+            std::sync::Arc::new(CppKeepAlive {
+                ptr: keepalive_ptr as usize,
+                drop_fn,
+            }) as std::sync::Arc<dyn Send + Sync>
+        });
+    let mut servers = Vec::with_capacity(server_count);
+    if !server_handles.is_null() {
+        for i in 0..server_count {
+            let h = *server_handles.add(i);
+            if !h.is_null() {
+                let srv = &*h.cast::<std::sync::Arc<crate::dupesearch_nzb::DonorServer>>();
+                servers.push(srv.clone());
+            }
+        }
+    }
+    let mut items = Vec::with_capacity(item_count);
+    for i in 0..item_count {
+        let mid = if !msg_ids.is_null() && !msg_lens.is_null() {
+            String::from_utf8_lossy(bytes(*msg_ids.add(i), *msg_lens.add(i))).into_owned()
+        } else {
+            String::new()
+        };
+        let body = !bodies.is_null() && *bodies.add(i) != 0;
+        let mut groups = Vec::new();
+        if !group_ptrs.is_null() && !group_lens.is_null() && !group_counts.is_null() {
+            let g_cnt = *group_counts.add(i);
+            let g_p = *group_ptrs.add(i);
+            let g_l = *group_lens.add(i);
+            if !g_p.is_null() && !g_l.is_null() {
+                for j in 0..g_cnt {
+                    groups.push(String::from_utf8_lossy(bytes(*g_p.add(j), *g_l.add(j))).into_owned());
+                }
+            }
+        }
+        items.push(crate::dupesearch_nzb::DonorItem {
+            message_id: mid,
+            body,
+            groups: std::sync::Arc::new(groups),
+        });
+    }
+    let res = crate::dupesearch_nzb::donor_check_items_guarded(
+        &servers, &items, budget_ms, keepalive,
+    );
+    if !out_checked.is_null() {
+        *out_checked = res.checked;
+    }
+    if !out_present.is_null() {
+        *out_present = res.present;
+    }
+    if !out_missing.is_null() {
+        *out_missing = res.missing;
+    }
+    if !out_error.is_null() {
+        *out_error = res.error;
+    }
+    if !out_body_checked.is_null() {
+        *out_body_checked = res.body_checked;
+    }
+    if !out_body_bad.is_null() {
+        *out_body_bad = res.body_bad;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_donor_check_posting(
+    server_handles: *const *mut c_void,
+    server_count: usize,
+    keepalive_ptr: *mut c_void,
+    keepalive_drop: Option<unsafe extern "C" fn(*mut c_void)>,
+    ids_ptr: *const *const c_char,
+    ids_lens: *const usize,
+    ids_count: usize,
+    group_ptrs: *const *const c_char,
+    group_lens: *const usize,
+    group_count: usize,
+    percent: c_int,
+    minimum: c_int,
+    maximum: c_int,
+    body_percent: c_int,
+    max_body: c_int,
+    seed: u32,
+    probe: c_int,
+    budget_ms: c_int,
+    deadline_ms: i64,
+    full: c_int,
+    out_checked: *mut c_int,
+    out_present: *mut c_int,
+    out_missing: *mut c_int,
+    out_error: *mut c_int,
+    out_body_checked: *mut c_int,
+    out_body_bad: *mut c_int,
+) {
+    let keepalive: Option<std::sync::Arc<dyn Send + Sync>> =
+        keepalive_drop.map(|drop_fn| {
+            std::sync::Arc::new(CppKeepAlive {
+                ptr: keepalive_ptr as usize,
+                drop_fn,
+            }) as std::sync::Arc<dyn Send + Sync>
+        });
+    let mut servers = Vec::with_capacity(server_count);
+    if !server_handles.is_null() {
+        for i in 0..server_count {
+            let h = *server_handles.add(i);
+            if !h.is_null() {
+                let srv = &*h.cast::<std::sync::Arc<crate::dupesearch_nzb::DonorServer>>();
+                servers.push(srv.clone());
+            }
+        }
+    }
+    let mut ids = Vec::with_capacity(ids_count);
+    if !ids_ptr.is_null() && !ids_lens.is_null() {
+        for i in 0..ids_count {
+            ids.push(String::from_utf8_lossy(bytes(*ids_ptr.add(i), *ids_lens.add(i))).into_owned());
+        }
+    }
+    let mut groups = Vec::with_capacity(group_count);
+    if !group_ptrs.is_null() && !group_lens.is_null() {
+        for i in 0..group_count {
+            groups.push(
+                String::from_utf8_lossy(bytes(*group_ptrs.add(i), *group_lens.add(i))).into_owned(),
+            );
+        }
+    }
+    let options = crate::dupesearch_nzb::DonorOptions {
+        sample: crate::dupesearch_nzb::DonorSampleOptions {
+            percent,
+            minimum,
+            maximum,
+            body_percent,
+            max_body,
+            seed,
+        },
+        probe,
+        budget_ms,
+        deadline_ms,
+    };
+    let res = crate::dupesearch_nzb::donor_check_posting_guarded(
+        &servers,
+        &ids,
+        &std::sync::Arc::new(groups),
+        &options,
+        full != 0,
+        keepalive,
+    );
+    if !out_checked.is_null() {
+        *out_checked = res.checked;
+    }
+    if !out_present.is_null() {
+        *out_present = res.present;
+    }
+    if !out_missing.is_null() {
+        *out_missing = res.missing;
+    }
+    if !out_error.is_null() {
+        *out_error = res.error;
+    }
+    if !out_body_checked.is_null() {
+        *out_body_checked = res.body_checked;
+    }
+    if !out_body_bad.is_null() {
+        *out_body_bad = res.body_bad;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_donor_check_postings(
+    server_handles: *const *mut c_void,
+    server_count: usize,
+    keepalive_ptr: *mut c_void,
+    keepalive_drop: Option<unsafe extern "C" fn(*mut c_void)>,
+    posting_count: usize,
+    key_ptrs: *const *const c_char,
+    key_lens: *const usize,
+    ids_ptrs: *const *const *const c_char,
+    ids_lens: *const *const usize,
+    ids_counts: *const usize,
+    group_ptrs: *const *const *const c_char,
+    group_lens: *const *const usize,
+    group_counts: *const usize,
+    percent: c_int,
+    minimum: c_int,
+    maximum: c_int,
+    body_percent: c_int,
+    max_body: c_int,
+    seed: u32,
+    probe: c_int,
+    budget_ms: c_int,
+    deadline_ms: i64,
+    full: c_int,
+    concurrency: c_int,
+    emit_ctx: *mut c_void,
+    emit_cb: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            *const c_char,
+            usize,
+            c_int,
+            c_int,
+            c_int,
+            c_int,
+            c_int,
+            c_int,
+        ),
+    >,
+) {
+    let keepalive: Option<std::sync::Arc<dyn Send + Sync>> =
+        keepalive_drop.map(|drop_fn| {
+            std::sync::Arc::new(CppKeepAlive {
+                ptr: keepalive_ptr as usize,
+                drop_fn,
+            }) as std::sync::Arc<dyn Send + Sync>
+        });
+    let mut servers = Vec::with_capacity(server_count);
+    if !server_handles.is_null() {
+        for i in 0..server_count {
+            let h = *server_handles.add(i);
+            if !h.is_null() {
+                let srv = &*h.cast::<std::sync::Arc<crate::dupesearch_nzb::DonorServer>>();
+                servers.push(srv.clone());
+            }
+        }
+    }
+    let mut postings = Vec::with_capacity(posting_count);
+    for i in 0..posting_count {
+        let key = if !key_ptrs.is_null() && !key_lens.is_null() {
+            String::from_utf8_lossy(bytes(*key_ptrs.add(i), *key_lens.add(i))).into_owned()
+        } else {
+            String::new()
+        };
+        let mut ids = Vec::new();
+        if !ids_ptrs.is_null() && !ids_lens.is_null() && !ids_counts.is_null() {
+            let cnt = *ids_counts.add(i);
+            let p = *ids_ptrs.add(i);
+            let l = *ids_lens.add(i);
+            if !p.is_null() && !l.is_null() {
+                for j in 0..cnt {
+                    ids.push(String::from_utf8_lossy(bytes(*p.add(j), *l.add(j))).into_owned());
+                }
+            }
+        }
+        let mut groups = Vec::new();
+        if !group_ptrs.is_null() && !group_lens.is_null() && !group_counts.is_null() {
+            let cnt = *group_counts.add(i);
+            let p = *group_ptrs.add(i);
+            let l = *group_lens.add(i);
+            if !p.is_null() && !l.is_null() {
+                for j in 0..cnt {
+                    groups.push(String::from_utf8_lossy(bytes(*p.add(j), *l.add(j))).into_owned());
+                }
+            }
+        }
+        postings.push(crate::dupesearch_nzb::DonorPosting {
+            key,
+            ids,
+            groups: std::sync::Arc::new(groups),
+        });
+    }
+    let options = crate::dupesearch_nzb::DonorOptions {
+        sample: crate::dupesearch_nzb::DonorSampleOptions {
+            percent,
+            minimum,
+            maximum,
+            body_percent,
+            max_body,
+            seed,
+        },
+        probe,
+        budget_ms,
+        deadline_ms,
+    };
+    let emit_ctx_addr = emit_ctx as usize;
+    crate::dupesearch_nzb::donor_check_postings_guarded(
+        &servers,
+        &postings,
+        &options,
+        full != 0,
+        concurrency,
+        keepalive,
+        |key, h| {
+            if let Some(cb) = emit_cb {
+                unsafe {
+                    cb(
+                        emit_ctx_addr as *mut c_void,
+                        key.as_ptr().cast::<c_char>(),
+                        key.len(),
+                        h.checked,
+                        h.present,
+                        h.missing,
+                        h.error,
+                        h.body_checked,
+                        h.body_bad,
+                    );
+                }
+            }
+        },
+    );
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nzb_fetcher_new() -> *mut c_void {
+    Box::into_raw(Box::new(crate::dupesearch_nzb::NzbFetcherCore::new())).cast::<c_void>()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nzb_fetcher_free(handle: *mut c_void) {
+    if !handle.is_null() {
+        drop(Box::from_raw(
+            handle.cast::<crate::dupesearch_nzb::NzbFetcherCore>(),
+        ));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nzb_fetcher_set_state_path(
+    handle: *mut c_void,
+    path: *const c_char,
+    path_len: usize,
+) {
+    if !handle.is_null() {
+        let core = &*handle.cast::<crate::dupesearch_nzb::NzbFetcherCore>();
+        let s = String::from_utf8_lossy(bytes(path, path_len));
+        core.set_state_path(&s);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nzb_fetcher_load(handle: *mut c_void, now: i64) {
+    if !handle.is_null() {
+        let core = &*handle.cast::<crate::dupesearch_nzb::NzbFetcherCore>();
+        core.load(now);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nzb_fetcher_is_refused(
+    handle: *mut c_void,
+    indexer: *const c_char,
+    indexer_len: usize,
+    now: i64,
+) -> c_int {
+    if handle.is_null() {
+        return 0;
+    }
+    let core = &*handle.cast::<crate::dupesearch_nzb::NzbFetcherCore>();
+    i32::from(core.is_refused(bytes(indexer, indexer_len), now))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nzb_fetcher_refuse(
+    handle: *mut c_void,
+    indexer: *const c_char,
+    indexer_len: usize,
+    now: i64,
+) -> c_int {
+    if handle.is_null() {
+        return 0;
+    }
+    let core = &*handle.cast::<crate::dupesearch_nzb::NzbFetcherCore>();
+    i32::from(core.refuse(bytes(indexer, indexer_len), now).is_ok())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_nzb_fetcher_fetch(
+    handle: *mut c_void,
+    indexer: *const c_char,
+    indexer_len: usize,
+    title: *const c_char,
+    title_len: usize,
+    link: *const c_char,
+    link_len: usize,
+    size: i64,
+    grabs: c_int,
+    date: i64,
+    deadline: i64,
+    retries: c_int,
+    budget_handle: *mut c_void,
+    ctx: *mut c_void,
+    now_cb: Option<unsafe extern "C" fn(*mut c_void) -> i64>,
+    stopped_cb: Option<unsafe extern "C" fn(*mut c_void) -> c_int>,
+    sleep_100ms_cb: Option<unsafe extern "C" fn(*mut c_void)>,
+    http_fetch_cb: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            *const c_char,
+            usize,
+            *const c_char,
+            usize,
+            usize,
+            i64,
+            *mut c_int,
+            *mut *const c_char,
+            *mut usize,
+        ) -> c_int,
+    >,
+    log_info_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+    log_warn_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+    out_data: *mut RsBuf,
+    out_scalars: *mut crate::dupesearch_nzb::RsNzbSummaryScalars,
+    summary_ctx: *mut c_void,
+    on_strings: Option<
+        unsafe extern "C" fn(
+            ctx: *mut c_void,
+            poster_ptr: *const u8,
+            poster_len: usize,
+            main_name_ptr: *const u8,
+            main_name_len: usize,
+            par_name_ptr: *const u8,
+            par_name_len: usize,
+            par_id_ptr: *const u8,
+            par_id_len: usize,
+            par_bytes: i64,
+        ),
+    >,
+    on_slice: Option<
+        unsafe extern "C" fn(
+            ctx: *mut c_void,
+            kind: c_int,
+            ptr1: *const u8,
+            len1: usize,
+            ptr2: *const u8,
+            len2: usize,
+            bytes: i64,
+        ),
+    >,
+    on_recovery_bytes: Option<
+        unsafe extern "C" fn(ctx: *mut c_void, ptr: *const u64, len: usize),
+    >,
+) -> c_int {
+    if handle.is_null() {
+        return 1;
+    }
+    let core = &*handle.cast::<crate::dupesearch_nzb::NzbFetcherCore>();
+    let budget = if budget_handle.is_null() {
+        None
+    } else {
+        Some(&*budget_handle.cast::<crate::dupewatch::FetchBudget>())
+    };
+    let listing = crate::dupesearch_nzb::NewznabResult {
+        indexer: bytes(indexer, indexer_len).to_vec(),
+        title: bytes(title, title_len).to_vec(),
+        link: bytes(link, link_len).to_vec(),
+        size,
+        grabs,
+        date,
+        ..Default::default()
+    };
+    let fetched = core.fetch_with(
+        &listing,
+        deadline,
+        retries,
+        budget,
+        || now_cb.map_or(0, |cb| unsafe { cb(ctx) }),
+        crate::dupesearch_nzb::donor_now_ms,
+        || stopped_cb.is_some_and(|cb| unsafe { cb(ctx) != 0 }),
+        || {
+            if let Some(cb) = sleep_100ms_cb {
+                unsafe { cb(ctx) };
+            }
+        },
+        |url, label, max_bytes, deadline_ms| {
+            let Some(cb) = http_fetch_cb else {
+                return (false, 0, Vec::new());
+            };
+            let mut status: c_int = 0;
+            let mut body_ptr: *const c_char = std::ptr::null();
+            let mut body_len: usize = 0;
+            let ok = unsafe {
+                cb(
+                    ctx,
+                    url.as_ptr().cast::<c_char>(),
+                    url.len(),
+                    label.as_ptr().cast::<c_char>(),
+                    label.len(),
+                    max_bytes,
+                    deadline_ms,
+                    &mut status,
+                    &mut body_ptr,
+                    &mut body_len,
+                )
+            };
+            let body_vec = bytes(body_ptr, body_len).to_vec();
+            (ok != 0, status, body_vec)
+        },
+        |msg| {
+            if let Some(cb) = log_info_cb {
+                if let Ok(c_msg) = std::ffi::CString::new(msg) {
+                    unsafe { cb(ctx, c_msg.as_ptr()) };
+                }
+            }
+        },
+        |msg| {
+            if let Some(cb) = log_warn_cb {
+                if let Ok(c_msg) = std::ffi::CString::new(msg) {
+                    unsafe { cb(ctx, c_msg.as_ptr()) };
+                }
+            }
+        },
+    );
+    if fetched.reason == crate::dupesearch_nzb::NzbFetchReason::Ok {
+        crate::dupesearch_nzb::emit_nzb_summary_to_ffi(
+            &fetched.info,
+            out_scalars,
+            summary_ctx,
+            on_strings,
+            on_slice,
+            on_recovery_bytes,
+        );
+        if !out_data.is_null() {
+            *out_data = into_buf(fetched.data);
+        }
+    }
+    fetched.reason as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_downloadinfo_is_download_completed(
+    active_downloads: c_int,
+    ignore_paused_pars: c_int,
+    file_count: usize,
+    ctx: *mut c_void,
+    get_file_cb: Option<
+        unsafe extern "C" fn(
+            ctx: *mut c_void,
+            idx: usize,
+            out_paused: *mut c_int,
+            out_par_file: *mut c_int,
+            out_deleted: *mut c_int,
+        ),
+    >,
+) -> c_int {
+    let ok = crate::downloadinfo::is_download_completed_with(
+        active_downloads,
+        ignore_paused_pars != 0,
+        file_count,
+        |idx| {
+            let Some(cb) = get_file_cb else {
+                return (false, false, false);
+            };
+            let mut paused: c_int = 0;
+            let mut par_file: c_int = 0;
+            let mut deleted: c_int = 0;
+            unsafe {
+                cb(ctx, idx, &mut paused, &mut par_file, &mut deleted);
+            }
+            (paused != 0, par_file != 0, deleted != 0)
+        },
+    );
+    i32::from(ok)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_identity_fetch_article(
+    msg_id: *const c_char,
+    msg_id_len: usize,
+     deadline: i64,
+    ctx: *mut c_void,
+    now_cb: Option<unsafe extern "C" fn(*mut c_void) -> i64>,
+    stopped_cb: Option<unsafe extern "C" fn(*mut c_void) -> c_int>,
+    fetch_cb: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            *const c_char,
+            usize,
+            *mut c_int,
+            *mut i64,
+            *mut i64,
+        ) -> c_int,
+    >,
+    stop_fetch_cb: Option<unsafe extern "C" fn(*mut c_void)>,
+) -> c_int {
+    struct SendCtx(*mut c_void);
+    unsafe impl Send for SendCtx {}
+    unsafe impl Sync for SendCtx {}
+    let send_ctx = SendCtx(ctx);
+    let groups: [String; 0] = [];
+    let res = crate::dupesearch_nzb::dupe_identity_fetch_article(
+        bytes(msg_id, msg_id_len),
+        &groups,
+        deadline,
+        || now_cb.map_or(0, |cb| unsafe { cb(send_ctx.0) }),
+        || stopped_cb.is_some_and(|cb| unsafe { cb(send_ctx.0) != 0 }),
+        |bracketed_id, _groups| {
+            let sctx = &send_ctx;
+            let Some(cb) = fetch_cb else {
+                return Err(());
+            };
+            let mut success: c_int = 0;
+            let mut offset: i64 = 0;
+            let mut file_size: i64 = 0;
+            let ok = unsafe {
+                cb(
+                    sctx.0,
+                    bracketed_id.as_ptr().cast::<c_char>(),
+                    bracketed_id.len(),
+                    &mut success,
+                    &mut offset,
+                    &mut file_size,
+                )
+            };
+            if ok == 0 {
+                return Err(());
+            }
+            Ok(crate::dupesearch_nzb::FetchedArticleResult {
+                success: success != 0,
+                data: Vec::new(),
+                offset,
+                file_size,
+            })
+        },
+        || {
+            if let Some(cb) = stop_fetch_cb {
+                unsafe { cb(send_ctx.0) };
+            }
+        },
+    );
+    i32::from(res.success)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_identity_read(
+    data_bytes: i64,
+    head_names: *const *const c_char,
+    head_name_lens: *const usize,
+    head_msg_ids: *const *const c_char,
+    head_msg_id_lens: *const usize,
+    head_bytes: *const i64,
+    head_count: usize,
+    deadline: i64,
+    ctx: *mut c_void,
+    now_cb: Option<unsafe extern "C" fn(*mut c_void) -> i64>,
+    stopped_cb: Option<unsafe extern "C" fn(*mut c_void) -> c_int>,
+    fetch_head_cb: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            *const c_char,
+            usize,
+            i64,
+            *mut c_int,
+            *mut i64,
+            *mut *const c_char,
+            *mut usize,
+        ),
+    >,
+    out_name: *mut RsBuf,
+    out_ext: *mut RsBuf,
+    out_bytes: *mut u64,
+) -> c_int {
+    let mut heads = Vec::with_capacity(head_count);
+    for i in 0..head_count {
+        let name = if head_names.is_null() || head_name_lens.is_null() {
+            Vec::new()
+        } else {
+            bytes(*head_names.add(i), *head_name_lens.add(i)).to_vec()
+        };
+        let mid = if head_msg_ids.is_null() || head_msg_id_lens.is_null() {
+            Vec::new()
+        } else {
+            bytes(*head_msg_ids.add(i), *head_msg_id_lens.add(i)).to_vec()
+        };
+        let b = if head_bytes.is_null() {
+            0
+        } else {
+            *head_bytes.add(i)
+        };
+        heads.push((name, mid, b));
+    }
+    let groups: [String; 0] = [];
+    let found = crate::dupesearch_nzb::dupe_identity_read(
+        data_bytes,
+        &heads,
+        &groups,
+        deadline,
+        || now_cb.map_or(0, |cb| unsafe { cb(ctx) }),
+        || stopped_cb.is_some_and(|cb| unsafe { cb(ctx) != 0 }),
+        |msg_id, _groups, dl| {
+            let Some(cb) = fetch_head_cb else {
+                return crate::dupesearch_nzb::FetchedArticleResult::default();
+            };
+            let mut success: c_int = 0;
+            let mut file_size: i64 = 0;
+            let mut data_ptr: *const c_char = std::ptr::null();
+            let mut data_len: usize = 0;
+            unsafe {
+                cb(
+                    ctx,
+                    msg_id.as_ptr().cast::<c_char>(),
+                    msg_id.len(),
+                    dl,
+                    &mut success,
+                    &mut file_size,
+                    &mut data_ptr,
+                    &mut data_len,
+                );
+            }
+            let data = bytes(data_ptr, data_len).to_vec();
+            crate::dupesearch_nzb::FetchedArticleResult {
+                success: success != 0,
+                data,
+                offset: 0,
+                file_size,
+            }
+        },
+    );
+    if let Some(ident) = found {
+        if !out_name.is_null() {
+            *out_name = into_buf(ident.name);
+        }
+        if !out_ext.is_null() {
+            *out_ext = into_buf(ident.extension);
+        }
+        if !out_bytes.is_null() {
+            *out_bytes = ident.bytes;
+        }
+        1
+    } else {
+        0
+    }
+}
+
+
 
 
 

@@ -213,4 +213,65 @@ mod tests {
             b"6 of 10 failed articles exist on the servers: retrying failed articles"
         );
     }
+
+    #[test]
+    fn dupe_probe_full_suite_port_from_cpp() {
+        // 1. DupeProbeSampleIndexesTest
+        let indexes = sample_indexes(100, 10);
+        assert_eq!(indexes.len(), 10);
+        assert_eq!(*indexes.first().unwrap(), 5);
+        assert_eq!(*indexes.last().unwrap(), 95);
+        for i in 1..indexes.len() {
+            assert_eq!(indexes[i] - indexes[i - 1], 10);
+        }
+
+        let indexes4 = sample_indexes(4, 10);
+        assert_eq!(indexes4.len(), 4);
+        assert_eq!(indexes4[0], 0);
+        assert_eq!(indexes4[3], 3);
+
+        for total in 1..300 {
+            let idx = sample_indexes(total, 10);
+            for i in 0..idx.len() {
+                assert!(idx[i] < total);
+                assert!(i == 0 || idx[i] > idx[i - 1]);
+            }
+        }
+        assert!(sample_indexes(0, 10).is_empty());
+        assert!(sample_indexes(10, 0).is_empty());
+
+        // 2. DupeProbeClassifyTest
+        assert_eq!(classify(Some(b"223 0 <id> article exists")), DUPE_PROBE_EXISTS);
+        assert_eq!(classify(Some(b"430 No Such Article Found")), DUPE_PROBE_MISSING);
+        assert_eq!(classify(Some(b"423 No such article number")), DUPE_PROBE_MISSING);
+        assert_eq!(classify(Some(b"412 no newsgroup selected")), DUPE_PROBE_MISSING);
+        assert_eq!(classify(Some(b"451 Article not found")), DUPE_PROBE_MISSING);
+
+        assert_eq!(classify(None), DUPE_PROBE_UNKNOWN);
+        assert_eq!(
+            classify(Some(b"400 service temporarily unavailable")),
+            DUPE_PROBE_UNKNOWN
+        );
+        assert_eq!(classify(Some(b"499 connection limit")), DUPE_PROBE_UNKNOWN);
+        assert_eq!(classify(Some(b"481 authentication failed")), DUPE_PROBE_UNKNOWN);
+        assert_eq!(classify(Some(b"502 too many connections")), DUPE_PROBE_UNKNOWN);
+        assert_eq!(classify(Some(b"500 unknown command")), DUPE_PROBE_UNKNOWN);
+
+        // 3. DupeProbeIsDeadTest
+        assert!(is_dead(0, 8, 8));
+        assert!(!is_dead(0, 7, 8));
+        assert!(!is_dead(0, 5, 8));
+
+        assert!(is_dead(0, 1, 1));
+        assert!(is_dead(0, 3, 3));
+        assert!(!is_dead(0, 2, 3));
+
+        assert!(is_dead(1, 8, 8));
+        assert!(!is_dead(2, 8, 8));
+        assert!(!is_dead(3, 5, 5));
+        assert!(!is_dead(1, 4, 8));
+
+        assert!(!is_dead(0, 0, 0));
+        assert!(!is_dead(0, 0, 6));
+    }
 }

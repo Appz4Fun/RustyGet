@@ -39,69 +39,60 @@ std::string NzbSummary::Fingerprint() const
 	return std::string(buffer, 16);
 }
 
-bool NzbReader::Parse(const std::string& data, NzbSummary& summary)
+void NzbReader::OnStrings(void* ctx,
+	const uint8_t* posterPtr, size_t posterLen,
+	const uint8_t* mainNamePtr, size_t mainNameLen,
+	const uint8_t* parNamePtr, size_t parNameLen,
+	const uint8_t* parIdPtr, size_t parIdLen,
+	int64_t parBytes)
 {
-	summary = NzbSummary();
-	RsNzbSummaryScalars scalars{};
-	int ok = nzbget_rs_nzb_reader_parse(
-		reinterpret_cast<const uint8_t*>(data.data()),
-		data.size(),
-		&scalars,
-		&summary,
-		[](void* ctx,
-			const uint8_t* posterPtr, size_t posterLen,
-			const uint8_t* mainNamePtr, size_t mainNameLen,
-			const uint8_t* parNamePtr, size_t parNameLen,
-			const uint8_t* parIdPtr, size_t parIdLen,
-			int64_t parBytes)
-		{
-			NzbSummary* s = static_cast<NzbSummary*>(ctx);
-			s->poster.assign(reinterpret_cast<const char*>(posterPtr), posterLen);
-			s->mainName.assign(reinterpret_cast<const char*>(mainNamePtr), mainNameLen);
-			s->parIndex.name.assign(reinterpret_cast<const char*>(parNamePtr), parNameLen);
-			s->parIndex.messageId.assign(reinterpret_cast<const char*>(parIdPtr), parIdLen);
-			s->parIndex.bytes = parBytes;
-		},
-		[](void* ctx, int kind,
-			const uint8_t* ptr1, size_t len1,
-			const uint8_t* ptr2, size_t len2,
-			int64_t bytes)
-		{
-			NzbSummary* s = static_cast<NzbSummary*>(ctx);
-			const char* c1 = reinterpret_cast<const char*>(ptr1);
-			const char* c2 = reinterpret_cast<const char*>(ptr2);
-			switch (kind)
-			{
-				case 1:
-					s->groups.emplace_back(c1, len1);
-					break;
-				case 2:
-					s->meta.emplace(std::string(c1, len1), std::string(c2, len2));
-					break;
-				case 3:
-					s->filenames.emplace(c1, len1);
-					break;
-				case 4:
-					s->messageIds.emplace_back(c1, len1);
-					break;
-				case 5:
-					s->dataMessageIds.emplace_back(c1, len1);
-					break;
-				case 6:
-					s->heads.push_back({std::string(c1, len1), std::string(c2, len2), bytes});
-					break;
-			}
-		},
-		[](void* ctx, const uint64_t* ptr, size_t len)
-		{
-			NzbSummary* s = static_cast<NzbSummary*>(ctx);
-			s->recoveryBytes.assign(ptr, ptr + len);
-		});
-	if (ok == 0)
+	NzbSummary* s = static_cast<NzbSummary*>(ctx);
+	s->poster.assign(reinterpret_cast<const char*>(posterPtr), posterLen);
+	s->mainName.assign(reinterpret_cast<const char*>(mainNamePtr), mainNameLen);
+	s->parIndex.name.assign(reinterpret_cast<const char*>(parNamePtr), parNameLen);
+	s->parIndex.messageId.assign(reinterpret_cast<const char*>(parIdPtr), parIdLen);
+	s->parIndex.bytes = parBytes;
+}
+
+void NzbReader::OnSlice(void* ctx, int kind,
+	const uint8_t* ptr1, size_t len1,
+	const uint8_t* ptr2, size_t len2,
+	int64_t bytes)
+{
+	NzbSummary* s = static_cast<NzbSummary*>(ctx);
+	const char* c1 = reinterpret_cast<const char*>(ptr1);
+	const char* c2 = reinterpret_cast<const char*>(ptr2);
+	switch (kind)
 	{
-		summary = NzbSummary();
-		return false;
+		case 1:
+			s->groups.emplace_back(c1, len1);
+			break;
+		case 2:
+			s->meta.emplace(std::string(c1, len1), std::string(c2, len2));
+			break;
+		case 3:
+			s->filenames.emplace(c1, len1);
+			break;
+		case 4:
+			s->messageIds.emplace_back(c1, len1);
+			break;
+		case 5:
+			s->dataMessageIds.emplace_back(c1, len1);
+			break;
+		case 6:
+			s->heads.push_back({std::string(c1, len1), std::string(c2, len2), bytes});
+			break;
 	}
+}
+
+void NzbReader::OnRecoveryBytes(void* ctx, const uint64_t* ptr, size_t len)
+{
+	NzbSummary* s = static_cast<NzbSummary*>(ctx);
+	s->recoveryBytes.assign(ptr, ptr + len);
+}
+
+void NzbReader::ApplyScalars(NzbSummary& summary, const RsNzbSummaryScalars& scalars)
+{
 	summary.files = scalars.files;
 	summary.totalBytes = scalars.total_bytes;
 	summary.dataFiles = scalars.data_files;
@@ -111,5 +102,25 @@ bool NzbReader::Parse(const std::string& data, NzbSummary& summary)
 	summary.dataListedParts = scalars.data_listed_parts;
 	summary.dataDeclaredParts = scalars.data_declared_parts;
 	summary.articleBytes = scalars.article_bytes;
+}
+
+bool NzbReader::Parse(const std::string& data, NzbSummary& summary)
+{
+	summary = NzbSummary();
+	RsNzbSummaryScalars scalars{};
+	int ok = nzbget_rs_nzb_reader_parse(
+		reinterpret_cast<const uint8_t*>(data.data()),
+		data.size(),
+		&scalars,
+		&summary,
+		NzbReader::OnStrings,
+		NzbReader::OnSlice,
+		NzbReader::OnRecoveryBytes);
+	if (ok == 0)
+	{
+		summary = NzbSummary();
+		return false;
+	}
+	ApplyScalars(summary, scalars);
 	return true;
 }

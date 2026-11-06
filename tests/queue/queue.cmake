@@ -1,8 +1,5 @@
 list(APPEND TESTS_SRC
 	${CMAKE_CURRENT_SOURCE_DIR}/queue/DupeArticleFallback.cpp
-	${CMAKE_CURRENT_SOURCE_DIR}/queue/DupeCoordinator.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/queue/DupeStreamRepair.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/queue/HistoryCoordinator.cpp
 )
-
-file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/testdata/nzbfile DESTINATION ${CMAKE_CURRENT_BINARY_DIR})

@@ -335,83 +335,63 @@ void ArticleWriter::BuildOutputFilename()
 
 	const char* tmpDir = g_Options->GetTempDir();
 	const char* destDir = m_fileInfo->GetNzbInfo()->GetDestDir();
-	if (Util::EmptyStr(tmpDir) || Util::EmptyStr(destDir))
+	const bool directWrite = g_Options->GetDirectWrite();
+	const bool forceDirectWrite = m_fileInfo->GetForceDirectWrite();
+	std::optional<Guard> guard;
+	if (directWrite || forceDirectWrite)
+	{
+		guard.emplace(m_fileInfo->GuardOutputFile());
+	}
+	const std::string& existingOutputFilename = m_fileInfo->GetOutputFilename();
+
+	auto fileExistsCb = [](void*, const char* path) -> int {
+		return FileSystem::FileExists(path) ? 1 : 0;
+	};
+
+	NzbgetRsBuf resultBuf{};
+	NzbgetRsBuf tempBuf{};
+	NzbgetRsBuf outputBuf{};
+	int hasOutputFilename = 0;
+	int updateFileInfoOutput = 0;
+	if (!nzbget_rs_awc_article_writer_build_output_filenames(
+		tmpDir,
+		destDir,
+		PATH_SEPARATOR,
+		m_fileInfo->GetId(),
+		m_articleInfo->GetPartNumber(),
+		directWrite ? 1 : 0,
+		forceDirectWrite ? 1 : 0,
+		existingOutputFilename.c_str(),
+		m_fileInfo->GetOutputInitialized() ? 1 : 0,
+		m_fileInfo->GetFilename(),
+		nullptr,
+		fileExistsCb,
+		&resultBuf,
+		&tempBuf,
+		&outputBuf,
+		&hasOutputFilename,
+		&updateFileInfoOutput))
+	{
 		return;
-
-	char fmtBuf[1024];
-	size_t fmtLen = nzbget_rs_awc_article_writer_format_result_filename(
-		tmpDir, PATH_SEPARATOR, m_fileInfo->GetId(), m_articleInfo->GetPartNumber(),
-		fmtBuf, sizeof(fmtBuf));
-	std::string filename;
-	if (fmtLen < sizeof(fmtBuf))
-	{
-		filename.assign(fmtBuf, fmtLen);
-	}
-	else
-	{
-		filename.resize(fmtLen);
-		nzbget_rs_awc_article_writer_format_result_filename(
-			tmpDir, PATH_SEPARATOR, m_fileInfo->GetId(), m_articleInfo->GetPartNumber(),
-			filename.data(), fmtLen + 1);
 	}
 
-	m_articleInfo->SetResultFilename(filename.c_str());
+	std::string resultFilename(resultBuf.data ? resultBuf.data : "", resultBuf.len);
+	nzbget_rs_free(resultBuf);
+	m_articleInfo->SetResultFilename(resultFilename.c_str());
+
+	m_tempFilename.assign(tempBuf.data ? tempBuf.data : "", tempBuf.len);
+	nzbget_rs_free(tempBuf);
+
+	if (hasOutputFilename)
 	{
-		NzbgetRsBuf tmpBuf = nzbget_rs_tpr_article_writer_format_tmp_path(filename.c_str());
-		m_tempFilename.assign(tmpBuf.data ? tmpBuf.data : "", tmpBuf.len);
-		nzbget_rs_free(tmpBuf);
+		m_outputFilename.assign(outputBuf.data ? outputBuf.data : "", outputBuf.len);
+		if (updateFileInfoOutput)
+		{
+			m_fileInfo->SetOutputFilename(m_outputFilename);
+		}
 	}
-
-	if (g_Options->GetDirectWrite() || m_fileInfo->GetForceDirectWrite())
-	{
-		Guard guard = m_fileInfo->GuardOutputFile();
-		const std::string& outputFilename = m_fileInfo->GetOutputFilename();
-
-		BString<1024> destPath;
-		bool destExists = false;
-		if (outputFilename.empty() && m_fileInfo->GetForceDirectWrite() && m_fileInfo->GetOutputInitialized())
-		{
-			NzbgetRsBuf dpBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-				destDir, PATH_SEPARATOR, m_fileInfo->GetFilename());
-			destPath.Set(dpBuf.data ? dpBuf.data : "", (int)dpBuf.len);
-			nzbget_rs_free(dpBuf);
-			destExists = FileSystem::FileExists(destPath);
-		}
-		int directMode = nzbget_rs_dqh_article_writer_select_direct_output_mode(
-			g_Options->GetDirectWrite() ? 1 : 0,
-			m_fileInfo->GetForceDirectWrite() ? 1 : 0,
-			!outputFilename.empty() ? 1 : 0,
-			m_fileInfo->GetOutputInitialized() ? 1 : 0,
-			destExists ? 1 : 0);
-		if (directMode == 1)
-		{
-			filename = outputFilename;
-		}
-		else if (directMode == 2)
-		{
-			filename = destPath.Str();
-			m_fileInfo->SetOutputFilename(filename);
-		}
-		else if (directMode == 3)
-		{
-			size_t outLen = nzbget_rs_awc_article_writer_format_direct_out_tmp(
-				destDir, PATH_SEPARATOR, m_fileInfo->GetId(), fmtBuf, sizeof(fmtBuf));
-			if (outLen < sizeof(fmtBuf))
-			{
-				filename.assign(fmtBuf, outLen);
-			}
-			else
-			{
-				filename.resize(outLen);
-				nzbget_rs_awc_article_writer_format_direct_out_tmp(
-					destDir, PATH_SEPARATOR, m_fileInfo->GetId(), filename.data(), outLen + 1);
-			}
-			m_fileInfo->SetOutputFilename(filename);
-		}
-
-		m_outputFilename = std::move(filename);
-	}
- }
+	nzbget_rs_free(outputBuf);
+}
 
 bool ArticleWriter::CompleteFileParts()
 {
@@ -579,96 +559,113 @@ ArticleWriter::SetupOutputFile(DiskFile &outfile,
 							bool directWrite,
 							bool cached)
 {
-	OutputPaths paths;
-	std::string targetPath;
-	{
-		NzbgetRsBuf tpBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-			destDir.data(), PATH_SEPARATOR, filename.data());
-		targetPath.assign(tpBuf.data ? tpBuf.data : "", tpBuf.len);
-		nzbget_rs_free(tpBuf);
-	}
-	if (nzbget_rs_dqh_article_writer_use_target_path_directly(
-		m_fileInfo->GetForceDirectWrite() ? 1 : 0,
+	struct SetupCtx {
+		DiskFile* outfile;
+		CString forceDirsErr;
+	} ctx{&outfile, {}};
+
+	auto sameFilenameCb = [](void*, const char* a, const char* b) -> int {
+		return FileSystem::SameFilename(a, b) ? 1 : 0;
+	};
+	auto makeUniqueCb = [](void*, const char* dir, const char* fname, char* outBuf, size_t outCap) -> size_t {
+		CString uniq = FileSystem::MakeUniqueFilename(dir, fname);
+		size_t len = uniq.Length();
+		if (outBuf && outCap > 0)
+		{
+			size_t copyLen = len < outCap ? len : outCap - 1;
+			memcpy(outBuf, *uniq, copyLen);
+			outBuf[copyLen] = '\0';
+		}
+		return len;
+	};
+	auto fileExistsCb = [](void*, const char* path) -> int {
+		return FileSystem::FileExists(path) ? 1 : 0;
+	};
+	auto forceDirsCb = [](void* rawCtx, const char* path) -> int {
+		auto* c = static_cast<SetupCtx*>(rawCtx);
+		return FileSystem::ForceDirectories(path, c->forceDirsErr) ? 1 : 0;
+	};
+	auto deleteFileCb = [](void*, const char* path) -> int {
+		return FileSystem::DeleteFile(path) ? 1 : 0;
+	};
+	auto openFileCb = [](void* rawCtx, const char* path, int readWrite) -> int {
+		auto* c = static_cast<SetupCtx*>(rawCtx);
+		return c->outfile->Open(path, readWrite ? DiskFile::omReadWrite : DiskFile::omWrite) ? 1 : 0;
+	};
+	auto createDirCb = [](void*, const char* path) -> int {
+		return FileSystem::CreateDirectory(path) ? 1 : 0;
+	};
+
+	NzbgetRsBuf finalBuf{};
+	NzbgetRsBuf tempBuf{};
+	NzbgetRsBuf updatedOutBuf{};
+	NzbgetRsBuf parentFailedBuf{};
+	NzbgetRsBuf errPathBuf{};
+	int hasParentFailed = 0;
+	int errKind = 0;
+	int ok = nzbget_rs_awc_article_writer_execute_setup_output_file(
+		destDir.data(),
+		destDir.size(),
+		filename.data(),
+		filename.size(),
+		PATH_SEPARATOR,
+		g_Options->GetRawArticle() ? 1 : 0,
 		directWrite ? 1 : 0,
-		m_outputFilename.empty() ? 1 : 0,
-		(!m_outputFilename.empty() && FileSystem::SameFilename(m_outputFilename.c_str(), targetPath.c_str())) ? 1 : 0))
+		m_fileInfo->GetForceDirectWrite() ? 1 : 0,
+		m_outputFilename.data(),
+		m_outputFilename.size(),
+		&ctx,
+		sameFilenameCb,
+		makeUniqueCb,
+		fileExistsCb,
+		forceDirsCb,
+		deleteFileCb,
+		openFileCb,
+		createDirCb,
+		&finalBuf,
+		&tempBuf,
+		&updatedOutBuf,
+		&parentFailedBuf,
+		&hasParentFailed,
+		&errKind,
+		&errPathBuf);
+
+	OutputPaths paths;
+	paths.finalPath.assign(finalBuf.data ? finalBuf.data : "", finalBuf.len);
+	nzbget_rs_free(finalBuf);
+	paths.tempPath.assign(tempBuf.data ? tempBuf.data : "", tempBuf.len);
+	nzbget_rs_free(tempBuf);
+	m_outputFilename.assign(updatedOutBuf.data ? updatedOutBuf.data : "", updatedOutBuf.len);
+	nzbget_rs_free(updatedOutBuf);
+	std::string parentFailed(parentFailedBuf.data ? parentFailedBuf.data : "", parentFailedBuf.len);
+	nzbget_rs_free(parentFailedBuf);
+	std::string errPath(errPathBuf.data ? errPathBuf.data : "", errPathBuf.len);
+	nzbget_rs_free(errPathBuf);
+
+	if (hasParentFailed)
 	{
-		paths.finalPath = targetPath;
-	}
-	else
-	{
-		paths.finalPath = FileSystem::MakeUniqueFilename(destDir.data(), filename.data()).Str();
+		m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "Could not create directory %s: %s",
+			parentFailed.c_str(), *ctx.forceDirsErr);
 	}
 
+	if (!ok)
 	{
-		NzbgetRsBuf tmpBuf = nzbget_rs_tpr_article_writer_format_tmp_path(paths.finalPath.c_str());
-		paths.tempPath.assign(tmpBuf.data ? tmpBuf.data : "", tmpBuf.len);
-		nzbget_rs_free(tmpBuf);
-	}
-
-	// a name with a folder (DirectRename gives a file in progress the relative
-	// path par2 lists, "Sub/file"): the folder may not exist yet, and both the
-	// move of the temporary file and the creation of the joined file failed
-	size_t parentLen = 0;
-	if (nzbget_rs_dqh_article_writer_parent_dir_len(
-		filename.data(), filename.size(),
-		paths.finalPath.data(), paths.finalPath.size(),
-		PATH_SEPARATOR, &parentLen) != 0)
-	{
-		CString errmsg;
-		std::string parentDir = paths.finalPath.substr(0, parentLen);
-		if (!FileSystem::ForceDirectories(parentDir.c_str(), errmsg))
+		if (errKind == 1)
+		{
+			m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "Could not create file %s: %s",
+				errPath.c_str(), *FileSystem::GetLastErrorMessage());
+		}
+		else if (errKind == 2)
+		{
+			m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "Could not open file %s: %s",
+				errPath.c_str(), *FileSystem::GetLastErrorMessage());
+		}
+		else if (errKind == 3)
 		{
 			m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "Could not create directory %s: %s",
-				parentDir.c_str(), *errmsg);
+				errPath.c_str(), *FileSystem::GetLastErrorMessage());
 		}
-	}
-
-	int setupScenario = nzbget_rs_awc_article_writer_classify_setup_output_scenario(
-		g_Options->GetRawArticle() ? 1 : 0, directWrite ? 1 : 0);
-	// Scenario A: Standard Assembly (Write to .tmp)
-	if (setupScenario == 1)
-	{
-		FileSystem::DeleteFile(paths.tempPath.c_str());
-		if (!outfile.Open(paths.tempPath.c_str(), DiskFile::omWrite))
-		{
-			m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "Could not create file %s: %s", paths.tempPath.c_str(), *FileSystem::GetLastErrorMessage());
-			return std::nullopt;
-		}
-	}
-	// Scenario B: Direct Write (Append/Modify existing)
-	else if (setupScenario == 2)
-	{
-		const char* openPath = m_outputFilename.c_str();
-		bool openExists = FileSystem::FileExists(openPath);
-		if (nzbget_rs_dqh_article_writer_should_fallback_open_to_final_path(
-			openExists ? 1 : 0,
-			!openExists && FileSystem::FileExists(paths.finalPath.c_str()) ? 1 : 0) != 0)
-		{
-			openPath = paths.finalPath.c_str();
-			m_outputFilename = paths.finalPath;
-		}
-
-		if (!outfile.Open(openPath, DiskFile::omReadWrite))
-		{
-			m_fileInfo->GetNzbInfo()->PrintMessage(
-				Message::mkError, "Could not open file %s: %s",
-				openPath, *FileSystem::GetLastErrorMessage());
-			return std::nullopt;
-		}
-		paths.tempPath = m_outputFilename;
-	}
-	// Scenario C: Raw Mode (Directory creation)
-	else if (setupScenario == 3)
-	{
-		FileSystem::DeleteFile(paths.tempPath.c_str());
-		if (!FileSystem::CreateDirectory(paths.finalPath.c_str()))
-		{
-			m_fileInfo->GetNzbInfo()->PrintMessage(
-				Message::mkError, "Could not create directory %s: %s",
-				paths.finalPath.c_str(), *FileSystem::GetLastErrorMessage());
-			return std::nullopt;
-		}
+		return std::nullopt;
 	}
 
 	if (outfile.Active())
@@ -884,69 +881,100 @@ bool ArticleWriter::CleanupOldData(bool directWrite,
 						std::string_view nzbDestDir,
 						std::string_view finalOutputPath)
 {
-	if (directWrite)
+	std::vector<int> dupeFallbackRounds;
+	std::vector<const char*> resultFilenames;
+	dupeFallbackRounds.reserve(m_fileInfo->GetArticles()->size());
+	resultFilenames.reserve(m_fileInfo->GetArticles()->size());
+	for (ArticleInfo* pa : m_fileInfo->GetArticles())
 	{
-		for (ArticleInfo* pa : m_fileInfo->GetArticles())
-		{
-			if (nzbget_rs_dqh_article_writer_is_staged_dupe_article_file(
-				pa->GetDupeFallbackRound(), pa->GetResultFilename() ? 1 : 0) != 0)
-			{
-				FileSystem::DeleteFile(pa->GetResultFilename());
-			}
-		}
-		bool finalEmpty = finalOutputPath.empty();
-		bool sameFilename = !finalEmpty && FileSystem::SameFilename(m_outputFilename.c_str(), finalOutputPath.data());
-		bool outputExists = finalEmpty && FileSystem::FileExists(m_outputFilename.c_str());
-		int cleanupAction = nzbget_rs_dqh_article_writer_classify_direct_final_cleanup(
-			finalEmpty ? 1 : 0, sameFilename ? 1 : 0, outputExists ? 1 : 0);
-		if (cleanupAction == 1)
-		{
-			// a failed rename is logged only, see CommitDiskFile
-			if (!FileSystem::MoveFile(m_outputFilename.c_str(), finalOutputPath.data()))
-			{
-				m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "Could not move file %s to %s: %s",
-					m_outputFilename.c_str(), finalOutputPath.data(), *FileSystem::GetLastErrorMessage());
-			}
-		}
-		else if (cleanupAction == 2)
-		{
-			FileSystem::DeleteFile(m_outputFilename.c_str());
-		}
-
-		// Clean up old directory if empty
-		if (nzbget_rs_awc_article_writer_is_within_dest_dir(
-				nzbDestDir.data(), nzbDestDir.size(),
-				m_outputFilename.c_str(), m_outputFilename.size(),
-				PATH_SEPARATOR, ALT_PATH_SEPARATOR) == 0)
-		{
-			debug("Checking old dir for: %s", m_outputFilename.c_str());
-			BString<1024> oldDestDir;
-			oldDestDir.Set(m_outputFilename.c_str(), static_cast<int>(FileSystem::BaseFileName(m_outputFilename.c_str()) - m_outputFilename.c_str()));
-			if (FileSystem::DirEmpty(oldDestDir))
-			{
-				debug("Deleting old dir: %s", *oldDestDir);
-				FileSystem::RemoveDirectory(oldDestDir);
-			}
-		}
-	}
-	else
-	{
-		// Delete partial files
-		for (ArticleInfo* pa : m_fileInfo->GetArticles())
-		{
-			if (pa->GetResultFilename())
-			{
-				FileSystem::DeleteFile(pa->GetResultFilename());
-			}
-		}
+		dupeFallbackRounds.push_back(pa->GetDupeFallbackRound());
+		resultFilenames.push_back(pa->GetResultFilename());
 	}
 
-	if (finalOutputPath.empty() && m_fileInfo->IsHardLinked() && Util::EmptyStr(g_Options->GetInterDir()))
-	{
-		if (FileSystem::DeleteFile(m_outputFilename.c_str()))
+	auto sameFilenameCb = [](void*, const char* a, const char* b) -> int {
+		return FileSystem::SameFilename(a, b) ? 1 : 0;
+	};
+	auto fileExistsCb = [](void*, const char* path) -> int {
+		return FileSystem::FileExists(path) ? 1 : 0;
+	};
+	CString moveErrorMessage;
+	auto deleteFileCb = [](void*, const char* path) -> int {
+		return FileSystem::DeleteFile(path) ? 1 : 0;
+	};
+	auto moveFileCb = [](void* ctx, const char* from, const char* to) -> int {
+		if (FileSystem::MoveFile(from, to))
 		{
-			m_fileInfo->SetOutputFilename(nullptr);
+			return 1;
 		}
+		if (ctx)
+		{
+			*static_cast<CString*>(ctx) = FileSystem::GetLastErrorMessage();
+		}
+		return 0;
+	};
+	auto dirEmptyCb = [](void*, const char* dir) -> int {
+		return FileSystem::DirEmpty(dir) ? 1 : 0;
+	};
+	auto removeDirCb = [](void*, const char* dir) -> int {
+		return FileSystem::RemoveDirectory(dir) ? 1 : 0;
+	};
+
+	NzbgetRsBuf checkedOldDirBuf{};
+	NzbgetRsBuf deletedOldDirBuf{};
+	int moveFailed = 0;
+	int hasCheckedOldDir = 0;
+	int hasDeletedOldDir = 0;
+	int clearOutputFilename = 0;
+	nzbget_rs_awc_article_writer_execute_cleanup_old_data(
+		directWrite ? 1 : 0,
+		nzbDestDir.data(),
+		nzbDestDir.size(),
+		finalOutputPath.data(),
+		finalOutputPath.size(),
+		m_outputFilename.data(),
+		m_outputFilename.size(),
+		m_fileInfo->IsHardLinked() ? 1 : 0,
+		Util::EmptyStr(g_Options->GetInterDir()) ? 1 : 0,
+		PATH_SEPARATOR,
+		ALT_PATH_SEPARATOR,
+		dupeFallbackRounds.data(),
+		resultFilenames.data(),
+		dupeFallbackRounds.size(),
+		&moveErrorMessage,
+		sameFilenameCb,
+		fileExistsCb,
+		deleteFileCb,
+		moveFileCb,
+		dirEmptyCb,
+		removeDirCb,
+		&moveFailed,
+		&checkedOldDirBuf,
+		&hasCheckedOldDir,
+		&deletedOldDirBuf,
+		&hasDeletedOldDir,
+		&clearOutputFilename);
+
+	std::string checkedOldDir(checkedOldDirBuf.data ? checkedOldDirBuf.data : "", checkedOldDirBuf.len);
+	nzbget_rs_free(checkedOldDirBuf);
+	std::string deletedOldDir(deletedOldDirBuf.data ? deletedOldDirBuf.data : "", deletedOldDirBuf.len);
+	nzbget_rs_free(deletedOldDirBuf);
+
+	if (moveFailed)
+	{
+		m_fileInfo->GetNzbInfo()->PrintMessage(Message::mkError, "Could not move file %s to %s: %s",
+			m_outputFilename.c_str(), finalOutputPath.data(), *moveErrorMessage);
+	}
+	if (hasCheckedOldDir)
+	{
+		debug("Checking old dir for: %s", m_outputFilename.c_str());
+	}
+	if (hasDeletedOldDir)
+	{
+		debug("Deleting old dir: %s", deletedOldDir.c_str());
+	}
+	if (clearOutputFilename)
+	{
+		m_fileInfo->SetOutputFilename(nullptr);
 	}
 	return true;
 }

@@ -9952,33 +9952,6 @@ pub extern "C" fn nzbget_rs_dupecoord_fails_over(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dupecoord_format_no_backup_reason(
-    total: c_int,
-    not_backup: c_int,
-    forced: c_int,
-    no_file: c_int,
-    unhealthy: c_int,
-    bad: c_int,
-    dead: c_int,
-) -> RsBuf {
-    into_buf(crate::dupecoord::format_no_backup_reason(
-        total, not_backup, forced, no_file, unhealthy, bad, dead,
-    ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupecoord_status_from_text(
-    text_status: *const c_char,
-) -> c_int {
-    let s = if text_status.is_null() {
-        b""
-    } else {
-        CStr::from_ptr(text_status).to_bytes()
-    };
-    crate::dupecoord::status_from_text(s)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dupecoord_select_dupe_backup(
     has_self_nzb: c_int,
     self_full_content_hash: u32,
@@ -14690,74 +14663,416 @@ unsafe fn write_bytes_to_c_buf(src: &[u8], out_buf: *mut c_char, out_cap: usize)
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_awc_article_writer_format_result_filename(
+pub unsafe extern "C" fn nzbget_rs_awc_article_writer_build_output_filenames(
     tmp_dir: *const c_char,
+    dest_dir: *const c_char,
     sep: c_char,
     file_id: c_int,
     part_num: c_int,
-    out_buf: *mut c_char,
-    out_cap: usize,
-) -> usize {
-    let dir = if tmp_dir.is_null() {
+    direct_write: c_int,
+    force_direct_write: c_int,
+    existing_output_filename: *const c_char,
+    output_initialized: c_int,
+    file_filename: *const c_char,
+    cb_ctx: *mut std::ffi::c_void,
+    file_exists_cb: Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, path: *const c_char) -> c_int>,
+    out_result_filename: *mut RsBuf,
+    out_temp_filename: *mut RsBuf,
+    out_output_filename: *mut RsBuf,
+    out_has_output_filename: *mut c_int,
+    out_update_file_info_output_filename: *mut c_int,
+) -> c_int {
+    let t_dir = if tmp_dir.is_null() {
         &[][..]
     } else {
         CStr::from_ptr(tmp_dir).to_bytes()
     };
-    let formatted = crate::artwritercore::article_writer_format_result_filename(
-        dir,
-        sep as u8,
-        file_id,
-        part_num,
-    );
-    write_bytes_to_c_buf(&formatted, out_buf, out_cap)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_awc_article_writer_format_direct_out_tmp(
-    dest_dir: *const c_char,
-    sep: c_char,
-    file_id: c_int,
-    out_buf: *mut c_char,
-    out_cap: usize,
-) -> usize {
-    let dir = if dest_dir.is_null() {
+    let d_dir = if dest_dir.is_null() {
         &[][..]
     } else {
         CStr::from_ptr(dest_dir).to_bytes()
     };
-    let formatted = crate::artwritercore::article_writer_format_direct_out_tmp(
-        dir,
+    let existing = if existing_output_filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(existing_output_filename).to_bytes()
+    };
+    let fname = if file_filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(file_filename).to_bytes()
+    };
+    let Some(built) = crate::artwritercore::article_writer_build_output_filenames(
+        t_dir,
+        d_dir,
         sep as u8,
         file_id,
-    );
-    write_bytes_to_c_buf(&formatted, out_buf, out_cap)
+        part_num,
+        direct_write != 0,
+        force_direct_write != 0,
+        existing,
+        output_initialized != 0,
+        fname,
+        |path_bytes| {
+            let Some(cb) = file_exists_cb else {
+                return false;
+            };
+            let mut c_path = Vec::with_capacity(path_bytes.len() + 1);
+            c_path.extend_from_slice(path_bytes);
+            c_path.push(0);
+            cb(cb_ctx, c_path.as_ptr().cast()) != 0
+        },
+    ) else {
+        return 0;
+    };
+    if !out_result_filename.is_null() {
+        *out_result_filename = into_buf(built.result_filename);
+    }
+    if !out_temp_filename.is_null() {
+        *out_temp_filename = into_buf(built.temp_filename);
+    }
+    if !out_has_output_filename.is_null() {
+        *out_has_output_filename = i32::from(built.output_filename.is_some());
+    }
+    if !out_output_filename.is_null() {
+        *out_output_filename = into_buf(built.output_filename.unwrap_or_default());
+    }
+    if !out_update_file_info_output_filename.is_null() {
+        *out_update_file_info_output_filename = i32::from(built.update_file_info_output_filename);
+    }
+    1
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_awc_article_writer_is_within_dest_dir(
-    nzb_dest_dir: *const c_char,
-    nzb_dest_dir_len: usize,
+pub unsafe extern "C" fn nzbget_rs_awc_article_writer_execute_setup_output_file(
+    dest_dir: *const c_char,
+    dest_dir_len: usize,
+    filename: *const c_char,
+    filename_len: usize,
+    sep: c_char,
+    raw_article: c_int,
+    direct_write: c_int,
+    force_direct_write: c_int,
     output_filename: *const c_char,
     output_filename_len: usize,
-    sep1: c_char,
-    sep2: c_char,
+    cb_ctx: *mut std::ffi::c_void,
+    same_filename_cb: Option<
+        unsafe extern "C" fn(ctx: *mut std::ffi::c_void, a: *const c_char, b: *const c_char) -> c_int,
+    >,
+    make_unique_cb: Option<
+        unsafe extern "C" fn(
+            ctx: *mut std::ffi::c_void,
+            dir: *const c_char,
+            fname: *const c_char,
+            out_buf: *mut c_char,
+            out_cap: usize,
+        ) -> usize,
+    >,
+    file_exists_cb: Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, path: *const c_char) -> c_int>,
+    force_dirs_cb: Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, path: *const c_char) -> c_int>,
+    delete_file_cb: Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, path: *const c_char) -> c_int>,
+    open_file_cb: Option<
+        unsafe extern "C" fn(ctx: *mut std::ffi::c_void, path: *const c_char, read_write: c_int) -> c_int,
+    >,
+    create_dir_cb: Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, path: *const c_char) -> c_int>,
+    out_final_path: *mut RsBuf,
+    out_temp_path: *mut RsBuf,
+    out_updated_output_filename: *mut RsBuf,
+    out_parent_dir_failed: *mut RsBuf,
+    out_has_parent_dir_failed: *mut c_int,
+    out_error_kind: *mut c_int,
+    out_error_path: *mut RsBuf,
 ) -> c_int {
-    let dir = if nzb_dest_dir.is_null() || nzb_dest_dir_len == 0 {
+    let d_dir = if dest_dir.is_null() || dest_dir_len == 0 {
         &[][..]
     } else {
-        std::slice::from_raw_parts(nzb_dest_dir.cast::<u8>(), nzb_dest_dir_len)
+        std::slice::from_raw_parts(dest_dir.cast::<u8>(), dest_dir_len)
     };
-    let out = if output_filename.is_null() || output_filename_len == 0 {
+    let fname = if filename.is_null() || filename_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(filename.cast::<u8>(), filename_len)
+    };
+    let out_fn = if output_filename.is_null() || output_filename_len == 0 {
         &[][..]
     } else {
         std::slice::from_raw_parts(output_filename.cast::<u8>(), output_filename_len)
     };
-    i32::from(crate::artwritercore::article_writer_is_within_dest_dir(
-        dir,
-        out,
+    let res = crate::artwritercore::article_writer_execute_setup_output_file(
+        d_dir,
+        fname,
+        sep as u8,
+        raw_article != 0,
+        direct_write != 0,
+        force_direct_write != 0,
+        out_fn,
+        |a, b| {
+            let Some(cb) = same_filename_cb else {
+                return a == b;
+            };
+            let mut ca = Vec::with_capacity(a.len() + 1);
+            ca.extend_from_slice(a);
+            ca.push(0);
+            let mut cb_vec = Vec::with_capacity(b.len() + 1);
+            cb_vec.extend_from_slice(b);
+            cb_vec.push(0);
+            cb(cb_ctx, ca.as_ptr().cast(), cb_vec.as_ptr().cast()) != 0
+        },
+        |dir_bytes, fname_bytes| {
+            let Some(cb) = make_unique_cb else {
+                return [dir_bytes, &[sep as u8], fname_bytes].concat();
+            };
+            let mut c_dir = Vec::with_capacity(dir_bytes.len() + 1);
+            c_dir.extend_from_slice(dir_bytes);
+            c_dir.push(0);
+            let mut c_fn = Vec::with_capacity(fname_bytes.len() + 1);
+            c_fn.extend_from_slice(fname_bytes);
+            c_fn.push(0);
+            let mut buf = vec![0u8; 1024];
+            let len = cb(
+                cb_ctx,
+                c_dir.as_ptr().cast(),
+                c_fn.as_ptr().cast(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+            );
+            if len < buf.len() {
+                buf.truncate(len);
+                buf
+            } else {
+                let mut big = vec![0u8; len + 1];
+                let len2 = cb(
+                    cb_ctx,
+                    c_dir.as_ptr().cast(),
+                    c_fn.as_ptr().cast(),
+                    big.as_mut_ptr().cast(),
+                    big.len(),
+                );
+                big.truncate(len2.min(len));
+                big
+            }
+        },
+        |path_bytes| {
+            let Some(cb) = file_exists_cb else {
+                return false;
+            };
+            let mut c_path = Vec::with_capacity(path_bytes.len() + 1);
+            c_path.extend_from_slice(path_bytes);
+            c_path.push(0);
+            cb(cb_ctx, c_path.as_ptr().cast()) != 0
+        },
+        |path_bytes| {
+            let Some(cb) = force_dirs_cb else {
+                return true;
+            };
+            let mut c_path = Vec::with_capacity(path_bytes.len() + 1);
+            c_path.extend_from_slice(path_bytes);
+            c_path.push(0);
+            cb(cb_ctx, c_path.as_ptr().cast()) != 0
+        },
+        |path_bytes| {
+            let Some(cb) = delete_file_cb else {
+                return true;
+            };
+            let mut c_path = Vec::with_capacity(path_bytes.len() + 1);
+            c_path.extend_from_slice(path_bytes);
+            c_path.push(0);
+            cb(cb_ctx, c_path.as_ptr().cast()) != 0
+        },
+        |path_bytes, read_write| {
+            let Some(cb) = open_file_cb else {
+                return false;
+            };
+            let mut c_path = Vec::with_capacity(path_bytes.len() + 1);
+            c_path.extend_from_slice(path_bytes);
+            c_path.push(0);
+            cb(cb_ctx, c_path.as_ptr().cast(), i32::from(read_write)) != 0
+        },
+        |path_bytes| {
+            let Some(cb) = create_dir_cb else {
+                return false;
+            };
+            let mut c_path = Vec::with_capacity(path_bytes.len() + 1);
+            c_path.extend_from_slice(path_bytes);
+            c_path.push(0);
+            cb(cb_ctx, c_path.as_ptr().cast()) != 0
+        },
+    );
+    if !out_final_path.is_null() {
+        *out_final_path = into_buf(res.final_path);
+    }
+    if !out_temp_path.is_null() {
+        *out_temp_path = into_buf(res.temp_path);
+    }
+    if !out_updated_output_filename.is_null() {
+        *out_updated_output_filename = into_buf(res.updated_output_filename);
+    }
+    if !out_has_parent_dir_failed.is_null() {
+        *out_has_parent_dir_failed = i32::from(res.parent_dir_failed.is_some());
+    }
+    if !out_parent_dir_failed.is_null() {
+        *out_parent_dir_failed = into_buf(res.parent_dir_failed.unwrap_or_default());
+    }
+    if !out_error_kind.is_null() {
+        *out_error_kind = res.error_kind;
+    }
+    if !out_error_path.is_null() {
+        *out_error_path = into_buf(res.error_path);
+    }
+    i32::from(res.ok)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_awc_article_writer_execute_cleanup_old_data(
+    direct_write: c_int,
+    nzb_dest_dir: *const c_char,
+    nzb_dest_dir_len: usize,
+    final_output_path: *const c_char,
+    final_output_path_len: usize,
+    output_filename: *const c_char,
+    output_filename_len: usize,
+    is_hard_linked: c_int,
+    inter_dir_empty: c_int,
+    sep1: c_char,
+    sep2: c_char,
+    dupe_fallback_rounds: *const c_int,
+    result_filenames: *const *const c_char,
+    articles_len: usize,
+    cb_ctx: *mut std::ffi::c_void,
+    same_filename_cb: Option<
+        unsafe extern "C" fn(ctx: *mut std::ffi::c_void, a: *const c_char, b: *const c_char) -> c_int,
+    >,
+    file_exists_cb: Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, path: *const c_char) -> c_int>,
+    delete_file_cb: Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, path: *const c_char) -> c_int>,
+    move_file_cb: Option<
+        unsafe extern "C" fn(ctx: *mut std::ffi::c_void, from: *const c_char, to: *const c_char) -> c_int,
+    >,
+    dir_empty_cb: Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, dir: *const c_char) -> c_int>,
+    remove_dir_cb: Option<unsafe extern "C" fn(ctx: *mut std::ffi::c_void, dir: *const c_char) -> c_int>,
+    out_move_failed: *mut c_int,
+    out_checked_old_dest_dir: *mut RsBuf,
+    out_has_checked_old_dest_dir: *mut c_int,
+    out_deleted_old_dest_dir: *mut RsBuf,
+    out_has_deleted_old_dest_dir: *mut c_int,
+    out_clear_output_filename: *mut c_int,
+) {
+    let d_dir = if nzb_dest_dir.is_null() || nzb_dest_dir_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(nzb_dest_dir.cast::<u8>(), nzb_dest_dir_len)
+    };
+    let final_path = if final_output_path.is_null() || final_output_path_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(final_output_path.cast::<u8>(), final_output_path_len)
+    };
+    let out_fn = if output_filename.is_null() || output_filename_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(output_filename.cast::<u8>(), output_filename_len)
+    };
+    let mut articles = Vec::with_capacity(articles_len);
+    if !dupe_fallback_rounds.is_null() && !result_filenames.is_null() && articles_len > 0 {
+        let rounds = std::slice::from_raw_parts(dupe_fallback_rounds, articles_len);
+        let rfs = std::slice::from_raw_parts(result_filenames, articles_len);
+        for (&r, &rf_ptr) in rounds.iter().zip(rfs.iter()) {
+            let rf = if rf_ptr.is_null() {
+                None
+            } else {
+                Some(CStr::from_ptr(rf_ptr).to_bytes())
+            };
+            articles.push((r, rf));
+        }
+    }
+    let res = crate::artwritercore::article_writer_execute_cleanup_old_data(
+        direct_write != 0,
+        d_dir,
+        final_path,
+        out_fn,
+        is_hard_linked != 0,
+        inter_dir_empty != 0,
         sep1 as u8,
         sep2 as u8,
-    ))
+        &articles,
+        |a, b| {
+            let Some(cb) = same_filename_cb else {
+                return a == b;
+            };
+            let mut ca = Vec::with_capacity(a.len() + 1);
+            ca.extend_from_slice(a);
+            ca.push(0);
+            let mut cb_vec = Vec::with_capacity(b.len() + 1);
+            cb_vec.extend_from_slice(b);
+            cb_vec.push(0);
+            cb(cb_ctx, ca.as_ptr().cast(), cb_vec.as_ptr().cast()) != 0
+        },
+        |path_bytes| {
+            let Some(cb) = file_exists_cb else {
+                return false;
+            };
+            let mut c_path = Vec::with_capacity(path_bytes.len() + 1);
+            c_path.extend_from_slice(path_bytes);
+            c_path.push(0);
+            cb(cb_ctx, c_path.as_ptr().cast()) != 0
+        },
+        |path_bytes| {
+            let Some(cb) = delete_file_cb else {
+                return false;
+            };
+            let mut c_path = Vec::with_capacity(path_bytes.len() + 1);
+            c_path.extend_from_slice(path_bytes);
+            c_path.push(0);
+            cb(cb_ctx, c_path.as_ptr().cast()) != 0
+        },
+        |from_bytes, to_bytes| {
+            let Some(cb) = move_file_cb else {
+                return false;
+            };
+            let mut c_from = Vec::with_capacity(from_bytes.len() + 1);
+            c_from.extend_from_slice(from_bytes);
+            c_from.push(0);
+            let mut c_to = Vec::with_capacity(to_bytes.len() + 1);
+            c_to.extend_from_slice(to_bytes);
+            c_to.push(0);
+            cb(cb_ctx, c_from.as_ptr().cast(), c_to.as_ptr().cast()) != 0
+        },
+        |dir_bytes| {
+            let Some(cb) = dir_empty_cb else {
+                return false;
+            };
+            let mut c_dir = Vec::with_capacity(dir_bytes.len() + 1);
+            c_dir.extend_from_slice(dir_bytes);
+            c_dir.push(0);
+            cb(cb_ctx, c_dir.as_ptr().cast()) != 0
+        },
+        |dir_bytes| {
+            let Some(cb) = remove_dir_cb else {
+                return false;
+            };
+            let mut c_dir = Vec::with_capacity(dir_bytes.len() + 1);
+            c_dir.extend_from_slice(dir_bytes);
+            c_dir.push(0);
+            cb(cb_ctx, c_dir.as_ptr().cast()) != 0
+        },
+    );
+    if !out_move_failed.is_null() {
+        *out_move_failed = i32::from(res.move_failed);
+    }
+    if !out_has_checked_old_dest_dir.is_null() {
+        *out_has_checked_old_dest_dir = i32::from(res.checked_old_dest_dir.is_some());
+    }
+    if !out_checked_old_dest_dir.is_null() {
+        *out_checked_old_dest_dir = into_buf(res.checked_old_dest_dir.unwrap_or_default());
+    }
+    if !out_has_deleted_old_dest_dir.is_null() {
+        *out_has_deleted_old_dest_dir = i32::from(res.deleted_old_dest_dir.is_some());
+    }
+    if !out_deleted_old_dest_dir.is_null() {
+        *out_deleted_old_dest_dir = into_buf(res.deleted_old_dest_dir.unwrap_or_default());
+    }
+    if !out_clear_output_filename.is_null() {
+        *out_clear_output_filename = i32::from(res.clear_output_filename);
+    }
 }
 
 #[no_mangle]
@@ -14816,17 +15131,6 @@ pub unsafe extern "C" fn nzbget_rs_awc_article_writer_resolve_direct_write_ready
         *out_output_initialized = i32::from(new_init);
     }
     i32::from(direct_write)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_awc_article_writer_classify_setup_output_scenario(
-    raw_article: c_int,
-    direct_write: c_int,
-) -> c_int {
-    crate::artwritercore::article_writer_classify_setup_output_scenario(
-        raw_article != 0,
-        direct_write != 0,
-    )
 }
 
 #[no_mangle]
@@ -20397,25 +20701,6 @@ pub extern "C" fn nzbget_rs_dqh_stream_repair_bytes_to_mb(bytes: i64) -> f64 {
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_article_writer_use_target_path_directly(
-    force_direct_write: i32,
-    direct_write: i32,
-    output_filename_empty: i32,
-    same_filename: i32,
-) -> i32 {
-    if crate::artwritercore::article_writer_use_target_path_directly(
-        force_direct_write != 0,
-        direct_write != 0,
-        output_filename_empty != 0,
-        same_filename != 0,
-    ) {
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_article_dl_is_server_available(
     active: i32,
     max_connections: i32,
@@ -20731,36 +21016,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_article_writer_format_info_path(
     into_buf(crate::artwritercore::article_writer_format_info_path(
         n, sep as u8, f,
     ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_article_writer_parent_dir_len(
-    filename: *const c_char,
-    filename_len: usize,
-    final_path: *const c_char,
-    final_path_len: usize,
-    sep: c_char,
-    out_parent_len: *mut usize,
-) -> i32 {
-    let f = if filename.is_null() || filename_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(filename as *const u8, filename_len)
-    };
-    let p = if final_path.is_null() || final_path_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(final_path as *const u8, final_path_len)
-    };
-    match crate::artwritercore::article_writer_parent_dir_len(f, p, sep as u8) {
-        Some(len) => {
-            if !out_parent_len.is_null() {
-                *out_parent_len = len;
-            }
-            1
-        }
-        None => 0,
-    }
 }
 
 #[no_mangle]
@@ -22953,36 +23208,6 @@ pub extern "C" fn nzbget_rs_dqh_article_writer_check_existing_output_file(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_article_writer_select_direct_output_mode(
-    direct_write: c_int,
-    force_direct_write: c_int,
-    has_existing_output: c_int,
-    output_initialized: c_int,
-    dest_exists: c_int,
-) -> c_int {
-    crate::artwritercore::article_writer_select_direct_output_mode(
-        direct_write != 0,
-        force_direct_write != 0,
-        has_existing_output != 0,
-        output_initialized != 0,
-        dest_exists != 0,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_article_writer_should_fallback_open_to_final_path(
-    open_exists: c_int,
-    final_exists: c_int,
-) -> c_int {
-    i32::from(
-        crate::artwritercore::article_writer_should_fallback_open_to_final_path(
-            open_exists != 0,
-            final_exists != 0,
-        ),
-    )
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_article_writer_validate_staged_dupe_size(
     actual_size: i64,
     segment_size: c_int,
@@ -23005,32 +23230,6 @@ pub extern "C" fn nzbget_rs_dqh_article_writer_eval_commit_post_close(
         flushed != 0,
         closed != 0,
         direct_write != 0,
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_article_writer_is_staged_dupe_article_file(
-    dupe_fallback_round: c_int,
-    has_result_filename: c_int,
-) -> c_int {
-    i32::from(
-        crate::artwritercore::article_writer_is_staged_dupe_article_file(
-            dupe_fallback_round,
-            has_result_filename != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_article_writer_classify_direct_final_cleanup(
-    final_empty: c_int,
-    same_filename: c_int,
-    output_exists: c_int,
-) -> c_int {
-    crate::artwritercore::article_writer_classify_direct_final_cleanup(
-        final_empty != 0,
-        same_filename != 0,
-        output_exists != 0,
     )
 }
 
@@ -27569,6 +27768,167 @@ pub unsafe extern "C" fn nzbget_rs_dupecoord_no_backup_reason(
                 false
             }
         },
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupecoord_is_downloaded_on_disk_candidate(
+    health_check: c_int,
+    target_dupe_key: *const c_char,
+    is_self: c_int,
+    delete_status: c_int,
+    is_dupe_success: c_int,
+    mark_status: c_int,
+    item_dupe_key: *const c_char,
+    item_final_dir: *const c_char,
+    item_dest_dir: *const c_char,
+    ext_cleanup_disk: *const c_char,
+) -> c_int {
+    let tk = if target_dupe_key.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(target_dupe_key).to_bytes()
+    };
+    let ik = if item_dupe_key.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(item_dupe_key).to_bytes()
+    };
+    let f = if item_final_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(item_final_dir).to_bytes()
+    };
+    let d = if item_dest_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(item_dest_dir).to_bytes()
+    };
+    let e = if ext_cleanup_disk.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(ext_cleanup_disk).to_bytes()
+    };
+    i32::from(crate::dupecoord::is_downloaded_on_disk_candidate(
+        health_check,
+        tk,
+        is_self != 0,
+        delete_status,
+        is_dupe_success != 0,
+        mark_status,
+        ik,
+        f,
+        d,
+        e,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupecoord_accumulate_queue_dupe_status(
+    current_statuses: c_int,
+    name: *const c_char,
+    dupe_key: *const c_char,
+    item_name: *const c_char,
+    item_dupe_key: *const c_char,
+    success_articles: c_int,
+    failed_articles: c_int,
+) -> c_int {
+    let n = if name.is_null() { &[][..] } else { CStr::from_ptr(name).to_bytes() };
+    let k = if dupe_key.is_null() { &[][..] } else { CStr::from_ptr(dupe_key).to_bytes() };
+    let iname = if item_name.is_null() { &[][..] } else { CStr::from_ptr(item_name).to_bytes() };
+    let ikey = if item_dupe_key.is_null() { &[][..] } else { CStr::from_ptr(item_dupe_key).to_bytes() };
+    crate::dupecoord::accumulate_queue_dupe_status(
+        current_statuses,
+        n,
+        k,
+        iname,
+        ikey,
+        success_articles,
+        failed_articles,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupecoord_accumulate_history_dupe_status(
+    current_statuses: c_int,
+    kind: c_int,
+    name: *const c_char,
+    dupe_key: *const c_char,
+    item_name: *const c_char,
+    item_dupe_key: *const c_char,
+    nzb_text_status: *const c_char,
+    dup_status: c_int,
+) -> c_int {
+    let n = if name.is_null() { &[][..] } else { CStr::from_ptr(name).to_bytes() };
+    let k = if dupe_key.is_null() { &[][..] } else { CStr::from_ptr(dupe_key).to_bytes() };
+    let iname = if item_name.is_null() { &[][..] } else { CStr::from_ptr(item_name).to_bytes() };
+    let ikey = if item_dupe_key.is_null() { &[][..] } else { CStr::from_ptr(item_dupe_key).to_bytes() };
+    let ts = if nzb_text_status.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(nzb_text_status).to_bytes()
+    };
+    crate::dupecoord::accumulate_history_dupe_status(
+        current_statuses,
+        kind,
+        n,
+        k,
+        iname,
+        ikey,
+        ts,
+        dup_status,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupecoord_should_cleanup_history_dupe(
+    kind: c_int,
+    dupe_mode: c_int,
+    delete_status: c_int,
+    is_mark_item: c_int,
+    item_name: *const c_char,
+    item_dupe_key: *const c_char,
+    mark_name: *const c_char,
+    mark_dupe_key: *const c_char,
+) -> c_int {
+    let iname = if item_name.is_null() { &[][..] } else { CStr::from_ptr(item_name).to_bytes() };
+    let ikey = if item_dupe_key.is_null() { &[][..] } else { CStr::from_ptr(item_dupe_key).to_bytes() };
+    let mname = if mark_name.is_null() { &[][..] } else { CStr::from_ptr(mark_name).to_bytes() };
+    let mkey = if mark_dupe_key.is_null() { &[][..] } else { CStr::from_ptr(mark_dupe_key).to_bytes() };
+    i32::from(crate::dupecoord::should_cleanup_history_dupe(
+        kind,
+        dupe_mode,
+        delete_status,
+        is_mark_item != 0,
+        iname,
+        ikey,
+        mname,
+        mkey,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupecoord_should_list_history_dupe(
+    target_dupe_mode: c_int,
+    history_kind: c_int,
+    item_dupe_mode: c_int,
+    item_name: *const c_char,
+    item_dupe_key: *const c_char,
+    target_name: *const c_char,
+    target_dupe_key: *const c_char,
+) -> c_int {
+    let iname = if item_name.is_null() { &[][..] } else { CStr::from_ptr(item_name).to_bytes() };
+    let ikey = if item_dupe_key.is_null() { &[][..] } else { CStr::from_ptr(item_dupe_key).to_bytes() };
+    let tname = if target_name.is_null() { &[][..] } else { CStr::from_ptr(target_name).to_bytes() };
+    let tkey = if target_dupe_key.is_null() { &[][..] } else { CStr::from_ptr(target_dupe_key).to_bytes() };
+    i32::from(crate::dupecoord::should_list_history_dupe(
+        target_dupe_mode,
+        history_kind,
+        item_dupe_mode,
+        iname,
+        ikey,
+        tname,
+        tkey,
     ))
 }
 

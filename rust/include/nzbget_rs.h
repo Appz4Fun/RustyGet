@@ -1598,9 +1598,6 @@ int nzbget_rs_dupecoord_same_name_or_key(
 int nzbget_rs_dupecoord_failover_warranted(int item_score, int health, int backup_score);
 int nzbget_rs_dupecoord_parse_alive_permille(const char* value);
 int nzbget_rs_dupecoord_fails_over(int dupe_check, int dupe_mode, int health_check);
-NzbgetRsBuf nzbget_rs_dupecoord_format_no_backup_reason(
-    int total, int not_backup, int forced, int no_file, int unhealthy, int bad, int dead);
-int nzbget_rs_dupecoord_status_from_text(const char* text_status);
 int nzbget_rs_dupecoord_select_dupe_backup(
     int has_self_nzb, uint32_t self_full_content_hash, int dupe_health,
     const NzbgetRsDupeHistoryCandidate* history, size_t history_count,
@@ -2337,16 +2334,49 @@ void nzbget_rs_nntp_server_pool_eval_block_server(
     int64_t prev_block_time, int64_t cur_time, int retry_interval,
     int* out_new_block, int* out_should_warn);
 
-size_t nzbget_rs_awc_article_writer_format_result_filename(
-    const char* tmp_dir, char sep, int file_id, int part_num,
-    char* out_buf, size_t out_cap);
-size_t nzbget_rs_awc_article_writer_format_direct_out_tmp(
-    const char* dest_dir, char sep, int file_id,
-    char* out_buf, size_t out_cap);
-int nzbget_rs_awc_article_writer_is_within_dest_dir(
-    const char* nzb_dest_dir, size_t nzb_dest_dir_len,
+int nzbget_rs_awc_article_writer_build_output_filenames(
+    const char* tmp_dir, const char* dest_dir, char sep, int file_id, int part_num,
+    int direct_write, int force_direct_write, const char* existing_output_filename,
+    int output_initialized, const char* file_filename,
+    void* cb_ctx, int (*file_exists_cb)(void* ctx, const char* path),
+    NzbgetRsBuf* out_result_filename, NzbgetRsBuf* out_temp_filename,
+    NzbgetRsBuf* out_output_filename, int* out_has_output_filename,
+    int* out_update_file_info_output_filename);
+int nzbget_rs_awc_article_writer_execute_setup_output_file(
+    const char* dest_dir, size_t dest_dir_len,
+    const char* filename, size_t filename_len,
+    char sep, int raw_article, int direct_write, int force_direct_write,
     const char* output_filename, size_t output_filename_len,
-    char sep1, char sep2);
+    void* cb_ctx,
+    int (*same_filename_cb)(void* ctx, const char* a, const char* b),
+    size_t (*make_unique_cb)(void* ctx, const char* dir, const char* fname, char* out_buf, size_t out_cap),
+    int (*file_exists_cb)(void* ctx, const char* path),
+    int (*force_dirs_cb)(void* ctx, const char* path),
+    int (*delete_file_cb)(void* ctx, const char* path),
+    int (*open_file_cb)(void* ctx, const char* path, int read_write),
+    int (*create_dir_cb)(void* ctx, const char* path),
+    NzbgetRsBuf* out_final_path, NzbgetRsBuf* out_temp_path,
+    NzbgetRsBuf* out_updated_output_filename,
+    NzbgetRsBuf* out_parent_dir_failed, int* out_has_parent_dir_failed,
+    int* out_error_kind, NzbgetRsBuf* out_error_path);
+void nzbget_rs_awc_article_writer_execute_cleanup_old_data(
+    int direct_write,
+    const char* nzb_dest_dir, size_t nzb_dest_dir_len,
+    const char* final_output_path, size_t final_output_path_len,
+    const char* output_filename, size_t output_filename_len,
+    int is_hard_linked, int inter_dir_empty, char sep1, char sep2,
+    const int* dupe_fallback_rounds, const char* const* result_filenames, size_t articles_len,
+    void* cb_ctx,
+    int (*same_filename_cb)(void* ctx, const char* a, const char* b),
+    int (*file_exists_cb)(void* ctx, const char* path),
+    int (*delete_file_cb)(void* ctx, const char* path),
+    int (*move_file_cb)(void* ctx, const char* from, const char* to),
+    int (*dir_empty_cb)(void* ctx, const char* dir),
+    int (*remove_dir_cb)(void* ctx, const char* dir),
+    int* out_move_failed,
+    NzbgetRsBuf* out_checked_old_dest_dir, int* out_has_checked_old_dest_dir,
+    NzbgetRsBuf* out_deleted_old_dest_dir, int* out_has_deleted_old_dest_dir,
+    int* out_clear_output_filename);
 int nzbget_rs_awc_article_writer_classify_completion_status(
     int total_articles, int success_articles, int missed_articles, int failed_articles);
 int nzbget_rs_awc_article_writer_advance_and_check_range(
@@ -2354,8 +2384,6 @@ int nzbget_rs_awc_article_writer_advance_and_check_range(
 int nzbget_rs_awc_article_writer_resolve_direct_write_ready(
     int direct_write_opt, int force_direct_write, int output_initialized,
     int has_own_out, int has_force_dest, int* out_output_initialized);
-int nzbget_rs_awc_article_writer_classify_setup_output_scenario(
-    int raw_article, int direct_write);
 int nzbget_rs_awc_article_cache_can_flush_file(
     int cached_articles, int active_downloads, int skip_disk_write, int flush_everything);
 int nzbget_rs_awc_article_cache_can_alloc(
@@ -3848,9 +3876,6 @@ int32_t nzbget_rs_tpr_article_fetcher_should_throttle_bandwidth(
     int32_t stopped, int32_t quota_reached, int64_t speed_limit,
     int64_t cur_speed, int64_t momentary_speed);
 double nzbget_rs_dqh_stream_repair_bytes_to_mb(int64_t bytes);
-int32_t nzbget_rs_dqh_article_writer_use_target_path_directly(
-    int32_t force_direct_write, int32_t direct_write,
-    int32_t output_filename_empty, int32_t same_filename);
 int32_t nzbget_rs_dqh_article_dl_is_server_available(
     int32_t active, int32_t max_connections, int32_t optional,
     int32_t is_blocked);
@@ -3895,10 +3920,6 @@ uint32_t nzbget_rs_dqh_article_dl_select_yenc_crc(
 const char* nzbget_rs_dqh_article_writer_open_verb(int32_t direct_write);
 NzbgetRsBuf nzbget_rs_dqh_article_writer_format_info_path(
     const char* nzb_name, char sep, const char* filename);
-int32_t nzbget_rs_dqh_article_writer_parent_dir_len(
-    const char* filename, size_t filename_len,
-    const char* final_path, size_t final_path_len,
-    char sep, size_t* out_parent_len);
 void nzbget_rs_dqh_article_writer_apply_missing_part_counters(
     int32_t failed_articles, int32_t success_articles,
     int32_t* out_failed_articles, int32_t* out_success_articles);
@@ -4167,19 +4188,10 @@ NzbgetRsBuf nzbget_rs_dqh_nntp_health_format_stat_batch(
     const char* const* ids, const size_t* lens, size_t count);
 int nzbget_rs_dqh_article_writer_check_existing_output_file(
     int exists, int64_t existing_size, int64_t target_size);
-int nzbget_rs_dqh_article_writer_select_direct_output_mode(
-    int direct_write, int force_direct_write, int has_existing_output,
-    int output_initialized, int dest_exists);
-int nzbget_rs_dqh_article_writer_should_fallback_open_to_final_path(
-    int open_exists, int final_exists);
 int nzbget_rs_dqh_article_writer_validate_staged_dupe_size(
     int64_t actual_size, int segment_size);
 int nzbget_rs_dqh_article_writer_eval_commit_post_close(
     int flushed, int closed, int direct_write);
-int nzbget_rs_dqh_article_writer_is_staged_dupe_article_file(
-    int dupe_fallback_round, int has_result_filename);
-int nzbget_rs_dqh_article_writer_classify_direct_final_cleanup(
-    int final_empty, int same_filename, int output_exists);
 int nzbget_rs_dqh_article_cache_should_write_cache_flag(
     int was_empty, int server_mode, int continue_partial, int skip_write);
 int nzbget_rs_dqh_article_cache_post_flush_action(
@@ -4999,6 +5011,26 @@ NzbgetRsBuf nzbget_rs_dupecoord_format_dupe_skip_message(
 NzbgetRsBuf nzbget_rs_dupecoord_no_backup_reason(
     int fails_over_flag, int dupe_mode, const NzbgetRsDupeHistoryCandidate* history,
     size_t history_len, void* cb_ctx, int (*file_exists_cb)(void* ctx, size_t history_index));
+int nzbget_rs_dupecoord_is_downloaded_on_disk_candidate(
+    int health_check, const char* target_dupe_key, int is_self, int delete_status,
+    int is_dupe_success, int mark_status, const char* item_dupe_key,
+    const char* item_final_dir, const char* item_dest_dir, const char* ext_cleanup_disk);
+int nzbget_rs_dupecoord_accumulate_queue_dupe_status(
+    int current_statuses, const char* name, const char* dupe_key,
+    const char* item_name, const char* item_dupe_key,
+    int success_articles, int failed_articles);
+int nzbget_rs_dupecoord_accumulate_history_dupe_status(
+    int current_statuses, int kind, const char* name, const char* dupe_key,
+    const char* item_name, const char* item_dupe_key,
+    const char* nzb_text_status, int dup_status);
+int nzbget_rs_dupecoord_should_cleanup_history_dupe(
+    int kind, int dupe_mode, int delete_status, int is_mark_item,
+    const char* item_name, const char* item_dupe_key,
+    const char* mark_name, const char* mark_dupe_key);
+int nzbget_rs_dupecoord_should_list_history_dupe(
+    int target_dupe_mode, int history_kind, int item_dupe_mode,
+    const char* item_name, const char* item_dupe_key,
+    const char* target_name, const char* target_dupe_key);
 
 int nzbget_rs_unpack_use_inter_dir(const char* dest_dir, const char* inter_dir, char sep);
 int nzbget_rs_unpack_is_main_archive(const char* filename);

@@ -427,9 +427,116 @@ pub fn dupematcher_should_wait_rar_lister(
     is_running && start_time + i64::from(timeout_sec) > cur_time && start_time >= cur_time
 }
 
+/// `DupeCoordinator::DownloadedOnDisk` candidate check.
+#[allow(clippy::too_many_arguments)]
+pub fn is_downloaded_on_disk_candidate(
+    health_check: i32,
+    self_dupe_key: &[u8],
+    is_self: bool,
+    item_delete_status: i32,
+    item_is_dupe_success: bool,
+    item_mark_status: i32,
+    item_dupe_key: &[u8],
+    item_final_dir: &[u8],
+    item_dest_dir: &[u8],
+    ext_cleanup_disk: &[u8],
+) -> bool {
+    let dupe_health = health_check == HEALTH_CHECK_DUPE || health_check == HEALTH_CHECK_PARK;
+    if !dupe_health || self_dupe_key.is_empty() || is_self {
+        return false;
+    }
+    item_delete_status == DELETE_STATUS_NONE
+        && item_is_dupe_success
+        && item_mark_status != MARK_STATUS_BAD
+        && strcasecmp_bytes(item_dupe_key, self_dupe_key)
+        && files_on_disk(item_final_dir, item_dest_dir, ext_cleanup_disk)
+}
+
+/// `DupeCoordinator::GetDupeStatus` per-queue-item bitmask accumulator.
+pub fn accumulate_queue_dupe_status(
+    current_statuses: i32,
+    name: &[u8],
+    dupe_key: &[u8],
+    item_name: &[u8],
+    item_dupe_key: &[u8],
+    success_articles: i32,
+    failed_articles: i32,
+) -> i32 {
+    if !same_name_or_key(name, dupe_key, item_name, item_dupe_key) {
+        return current_statuses;
+    }
+    if success_articles + failed_articles > 0 {
+        current_statuses | DUPE_STATUS_DOWNLOADING
+    } else {
+        current_statuses | DUPE_STATUS_QUEUED
+    }
+}
+
+/// `DupeCoordinator::GetDupeStatus` per-history-item bitmask accumulator.
+#[allow(clippy::too_many_arguments)]
+pub fn accumulate_history_dupe_status(
+    current_statuses: i32,
+    kind: i32,
+    name: &[u8],
+    dupe_key: &[u8],
+    item_name: &[u8],
+    item_dupe_key: &[u8],
+    text_status: &[u8],
+    dup_status: i32,
+) -> i32 {
+    if kind == HISTORY_KIND_NZB && same_name_or_key(name, dupe_key, item_name, item_dupe_key) {
+        return current_statuses | status_from_text(text_status);
+    }
+    if kind == HISTORY_KIND_DUP && same_name_or_key(name, dupe_key, item_name, item_dupe_key) {
+        if dup_status == DUP_STATUS_SUCCESS || dup_status == DUP_STATUS_GOOD {
+            return current_statuses | DUPE_STATUS_SUCCESS;
+        }
+        if dup_status == DUP_STATUS_FAILED || dup_status == DUP_STATUS_BAD {
+            return current_statuses | DUPE_STATUS_FAILURE;
+        }
+    }
+    current_statuses
+}
+
+/// `DupeCoordinator::HistoryCleanup` candidate predicate.
+#[allow(clippy::too_many_arguments)]
+pub fn should_cleanup_history_dupe(
+    kind: i32,
+    dupe_mode: i32,
+    delete_status: i32,
+    is_self: bool,
+    item_name: &[u8],
+    item_dupe_key: &[u8],
+    target_name: &[u8],
+    target_dupe_key: &[u8],
+) -> bool {
+    !is_self
+        && (kind == HISTORY_KIND_NZB || kind == HISTORY_KIND_URL)
+        && dupe_mode != DUPE_MODE_FORCE
+        && delete_status == DELETE_STATUS_DUPE
+        && same_name_or_key(item_name, item_dupe_key, target_name, target_dupe_key)
+}
+
+/// `DupeCoordinator::ListHistoryDupes` candidate predicate.
+pub fn should_list_history_dupe(
+    self_dupe_mode: i32,
+    kind: i32,
+    item_dupe_mode: i32,
+    item_name: &[u8],
+    item_dupe_key: &[u8],
+    self_name: &[u8],
+    self_dupe_key: &[u8],
+) -> bool {
+    self_dupe_mode != DUPE_MODE_FORCE
+        && kind == HISTORY_KIND_NZB
+        && item_dupe_mode != DUPE_MODE_FORCE
+        && same_name_or_key(item_name, item_dupe_key, self_name, self_dupe_key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::CString;
 
     #[test]
     fn dupe_coord_basics() {
@@ -452,5 +559,232 @@ mod tests {
             format_dupe_skip_message(b"Show.A", b"Show.A", false, true, false),
             b"Skipping duplicate Show.A, already queued"
         );
+    }
+
+    #[test]
+    fn dupe_coordinator_full_suite_port_from_cpp() {
+        // 1. DupeFailoverWarrantedTest
+        assert!(failover_warranted(90, 300, 27));
+        assert!(!failover_warranted(90, 300, 26));
+        assert!(failover_warranted(90, 0, 0));
+        assert!(failover_warranted(90, 0, -5));
+        assert!(failover_warranted(-10, 500, -20));
+        assert!(failover_warranted(90, 1000, 90));
+        assert!(!failover_warranted(90, 1000, 89));
+        assert!(failover_warranted(0, 1000, 0));
+        assert!(failover_warranted(-10, 500, 0));
+        assert!(!failover_warranted(90, 1500, 89));
+        assert!(failover_warranted(90, -7, 0));
+
+        // 2. DupeSuccessMatchesUnrepairedHealthFailure
+        let health = crate::downloadinfo::calc_health(1000, 0, 40, 0);
+        let crit_est = crate::downloadinfo::calc_critical_health(1000, 0, 0, true);
+        let crit_strict = crate::downloadinfo::calc_critical_health(1000, 0, 0, false);
+        assert_eq!(health, 960);
+        assert_eq!(crit_est, 850);
+        assert_eq!(crit_strict, 1000);
+        assert_eq!(
+            crate::downloadinfo::make_text_status_cstr(
+                0,
+                MARK_STATUS_NONE,
+                DELETE_STATUS_NONE,
+                crate::downloadinfo::PAR_SKIPPED,
+                crate::downloadinfo::UNPACK_NONE,
+                crate::downloadinfo::MOVE_NONE,
+                crate::downloadinfo::URL_NONE,
+                crate::downloadinfo::SCRIPT_STATUS_SUCCESS,
+                health,
+                crit_strict,
+            ),
+            b"FAILURE/HEALTH\0"
+        );
+        assert!(!crate::downloadinfo::is_dupe_success(
+            MARK_STATUS_NONE,
+            DELETE_STATUS_NONE,
+            crate::downloadinfo::PAR_SKIPPED,
+            crate::downloadinfo::UNPACK_NONE,
+            crate::downloadinfo::URL_NONE,
+            health,
+            crit_est,
+            crit_strict,
+            true,
+        ));
+        // A verified repair (PAR_SUCCESS) or explicit good mark takes precedence
+        assert!(crate::downloadinfo::is_dupe_success(
+            MARK_STATUS_NONE,
+            DELETE_STATUS_NONE,
+            crate::downloadinfo::PAR_SUCCESS,
+            crate::downloadinfo::UNPACK_NONE,
+            crate::downloadinfo::URL_NONE,
+            health,
+            crit_est,
+            crit_strict,
+            true,
+        ));
+        assert!(crate::downloadinfo::is_dupe_success(
+            MARK_STATUS_GOOD,
+            DELETE_STATUS_NONE,
+            crate::downloadinfo::PAR_SKIPPED,
+            crate::downloadinfo::UNPACK_NONE,
+            crate::downloadinfo::URL_NONE,
+            health,
+            crit_est,
+            crit_strict,
+            true,
+        ));
+        let full_health = crate::downloadinfo::calc_health(1000, 0, 0, 0);
+        assert!(crate::downloadinfo::is_dupe_success(
+            MARK_STATUS_NONE,
+            DELETE_STATUS_NONE,
+            crate::downloadinfo::PAR_SKIPPED,
+            crate::downloadinfo::UNPACK_NONE,
+            crate::downloadinfo::URL_NONE,
+            full_health,
+            crit_est,
+            crit_strict,
+            true,
+        ));
+
+        // 3. DupeAlivePermilleTest
+        let alive = |val: Option<&str>| -> i32 {
+            match val {
+                None => unsafe { parse_alive_permille_cstr(std::ptr::null()) },
+                Some(s) => {
+                    let c = CString::new(s).unwrap();
+                    unsafe { parse_alive_permille_cstr(c.as_ptr()) }
+                }
+            }
+        };
+        assert_eq!(alive(None), -1);
+        assert_eq!(alive(Some("100")), 1000);
+        assert_eq!(alive(Some("99.6")), 996);
+        assert_eq!(alive(Some("0")), 0);
+        assert_eq!(alive(Some("")), -1);
+        assert_eq!(alive(Some("abc")), -1);
+        assert_eq!(alive(Some("-5")), 0);
+        assert_eq!(alive(Some("1000")), 1000);
+        assert_eq!(alive(Some("nan")), -1);
+
+        // 4. DupeCoordinatorFindDupeBackupTest
+        let make_backup = |name: &[u8], key: &[u8], score: i32| -> NzbgetRsDupeHistoryCandidate {
+            NzbgetRsDupeHistoryCandidate {
+                kind: HISTORY_KIND_NZB,
+                dupe_mode: DUPE_MODE_SCORE,
+                dupe_score: score,
+                is_dupe_success: 0,
+                mark_status: MARK_STATUS_NONE,
+                delete_status: DELETE_STATUS_DUPE,
+                dup_status: DUP_STATUS_UNDEFINED,
+                full_content_hash: 0,
+                alive_permille: -1,
+                health: 1000,
+                critical_health: 1000,
+                same_name_or_key: i32::from(same_name_or_key(name, key, b"Rel.2026.1080p-A", b"imdb:1")),
+            }
+        };
+
+        let mut history: Vec<(NzbgetRsDupeHistoryCandidate, bool)> = Vec::new();
+        let mut queue = vec![NzbgetRsDupeQueueCandidate {
+            is_self: 1,
+            is_nzb_kind: 1,
+            dupe_mode: DUPE_MODE_SCORE,
+            dupe_score: 10,
+            same_name_or_key: 1,
+        }];
+
+        let run_find = |hist: &[(NzbgetRsDupeHistoryCandidate, bool)],
+                        q: &[NzbgetRsDupeQueueCandidate]|
+         -> i32 {
+            let candidates: Vec<NzbgetRsDupeHistoryCandidate> =
+                hist.iter().map(|(c, _)| *c).collect();
+            select_dupe_backup(true, 0, false, &candidates, q, |idx| hist[idx].1)
+        };
+
+        // nothing in history
+        assert_eq!(run_find(&history, &queue), -1);
+
+        // the highest-scored healthy backup of the same key wins; other keys are ignored
+        history.insert(0, (make_backup(b"Rel.2026.1080p-B", b"imdb:1", 50), true));
+        history.insert(0, (make_backup(b"Rel.2026.1080p-C", b"imdb:1", 90), true));
+        history.insert(0, (make_backup(b"Other.2026-X", b"imdb:2", 100), true));
+        let winner = run_find(&history, &queue);
+        assert!(winner >= 0);
+        assert_eq!(history[winner as usize].0.dupe_score, 90);
+
+        // a backup whose source nzb-file is gone can't be downloaded again
+        history.insert(0, (make_backup(b"Rel.2026.1080p-Z", b"imdb:1", 95), false));
+        let winner = run_find(&history, &queue);
+        assert!(winner >= 0);
+        assert_eq!(history[winner as usize].0.dupe_score, 90);
+        history[0].0.same_name_or_key = 0;
+
+        // a backup marked bad is no candidate
+        history[2].0.mark_status = MARK_STATUS_BAD;
+        let winner = run_find(&history, &queue);
+        assert!(winner >= 0);
+        assert_eq!(history[winner as usize].0.dupe_score, 50);
+
+        // a queued duplicate with a higher score than every backup blocks them
+        queue.push(NzbgetRsDupeQueueCandidate {
+            is_self: 0,
+            is_nzb_kind: 1,
+            dupe_mode: DUPE_MODE_SCORE,
+            dupe_score: 60,
+            same_name_or_key: 1,
+        });
+        assert_eq!(run_find(&history, &queue), -1);
+
+        // the item itself never counts as its own rival
+        queue[0].dupe_score = 99;
+        queue.pop();
+        let winner = run_find(&history, &queue);
+        assert!(winner >= 0);
+        assert_eq!(history[winner as usize].0.dupe_score, 50);
+
+        // a good-duplicate in history ends the search
+        let mut good = make_backup(b"Rel.2026.1080p-G", b"imdb:1", 1);
+        good.delete_status = DELETE_STATUS_NONE;
+        good.mark_status = MARK_STATUS_GOOD;
+        good.is_dupe_success = 1;
+        history.insert(0, (good, true));
+        assert_eq!(run_find(&history, &queue), -1);
+
+        // 5. RustDupeCoordinatorFfiParity
+        assert!(same_name_or_key(b"Movie.A", b"imdb:123", b"Movie.B", b"IMDB:123"));
+        assert!(!same_name_or_key(b"Movie.A", b"imdb:123", b"Movie.A", b"imdb:456"));
+        assert!(same_name_or_key(b"Movie.A", b"", b"movie.a", b""));
+        assert!(failover_warranted(1000, 300, 300));
+        assert!(!failover_warranted(1000, 300, 299));
+        assert_eq!(alive(Some("96.5")), 965);
+        assert_eq!(alive(Some("invalid")), -1);
+        assert_eq!(status_from_text(b"SUCCESS/ALL"), DUPE_STATUS_SUCCESS);
+        assert_eq!(status_from_text(b"FAILURE/PAR"), DUPE_STATUS_FAILURE);
+        assert_eq!(status_from_text(b"WARNING/SCRIPT"), DUPE_STATUS_WARNING);
+        let text = String::from_utf8(format_no_backup_reason(5, 1, 1, 1, 1, 0, 1)).unwrap();
+        assert!(text.contains("5 other item(s) of the key in history:"));
+        assert_eq!(crate::downloadinfo::calc_health(1000, 0, 100, 0), 900);
+        assert_eq!(crate::downloadinfo::calc_critical_health(1100, 100, 0, true), 900);
+        assert_eq!(
+            crate::artwritercore::calc_write_buffer_size(500, 1024 * 1024),
+            500 * 1024
+        );
+        assert!(crate::queuecoord::is_data_filename(b"Show.S01E01.mkv"));
+        assert!(!crate::queuecoord::is_data_filename(b"Show.S01E01.par2"));
+        assert!(crate::queuecoord::size_near(10_000, 10_025));
+        assert!(!crate::queuecoord::size_near(10_000, 10_035));
+        assert!(crate::queuecoord::download_hopeless(1000, 5, 95));
+        assert_eq!(
+            crate::queueeditor::parse_dupe_mode(b"score"),
+            Some(DUPE_MODE_SCORE)
+        );
+        assert_eq!(
+            crate::queueeditor::parse_dupe_mode(b"all"),
+            Some(DUPE_MODE_ALL)
+        );
+        assert_eq!(
+            crate::queueeditor::parse_dupe_mode(b"force"),
+            Some(DUPE_MODE_FORCE)
+        );
+        assert_eq!(crate::queueeditor::parse_dupe_mode(b"bad"), None);
     }
 }

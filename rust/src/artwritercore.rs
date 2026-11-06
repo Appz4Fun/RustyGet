@@ -522,6 +522,382 @@ pub fn article_writer_classify_direct_final_cleanup(
     }
 }
 
+/// Output filenames computed by `ArticleWriter::BuildOutputFilename`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArticleWriterBuiltFilenames {
+    pub result_filename: Vec<u8>,
+    pub temp_filename: Vec<u8>,
+    pub output_filename: Option<Vec<u8>>,
+    pub update_file_info_output_filename: bool,
+}
+
+/// Computes `result_filename`, `temp_filename`, and (when `direct_write || force_direct_write`)
+/// `output_filename` and `update_file_info_output_filename` for `ArticleWriter::BuildOutputFilename`.
+#[allow(clippy::too_many_arguments)]
+pub fn article_writer_build_output_filenames(
+    tmp_dir: &[u8],
+    dest_dir: &[u8],
+    sep: u8,
+    file_id: i32,
+    part_num: i32,
+    direct_write: bool,
+    force_direct_write: bool,
+    existing_output_filename: &[u8],
+    output_initialized: bool,
+    file_filename: &[u8],
+    file_exists: impl FnOnce(&[u8]) -> bool,
+) -> Option<ArticleWriterBuiltFilenames> {
+    if tmp_dir.is_empty() || dest_dir.is_empty() {
+        return None;
+    }
+    let result_filename = article_writer_format_result_filename(tmp_dir, sep, file_id, part_num);
+    let temp_filename = article_writer_format_tmp_path(&result_filename);
+    if !direct_write && !force_direct_write {
+        return Some(ArticleWriterBuiltFilenames {
+            result_filename,
+            temp_filename,
+            output_filename: None,
+            update_file_info_output_filename: false,
+        });
+    }
+    let has_existing_output = !existing_output_filename.is_empty();
+    let dest_path = if !has_existing_output && force_direct_write && output_initialized {
+        Some(article_writer_format_dest_file_path(
+            dest_dir,
+            sep,
+            file_filename,
+        ))
+    } else {
+        None
+    };
+    let dest_exists = dest_path.as_deref().is_some_and(file_exists);
+    let direct_mode = article_writer_select_direct_output_mode(
+        direct_write,
+        force_direct_write,
+        has_existing_output,
+        output_initialized,
+        dest_exists,
+    );
+    let (output_filename, update_file_info_output_filename) = match direct_mode {
+        1 => (Some(existing_output_filename.to_vec()), false),
+        2 => (dest_path, true),
+        3 => (
+            Some(article_writer_format_direct_out_tmp(dest_dir, sep, file_id)),
+            true,
+        ),
+        _ => (Some(result_filename.clone()), false),
+    };
+    Some(ArticleWriterBuiltFilenames {
+        result_filename,
+        temp_filename,
+        output_filename,
+        update_file_info_output_filename,
+    })
+}
+
+/// Output path setup plan computed by `ArticleWriter::SetupOutputFile`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArticleWriterSetupOutputPlan {
+    pub final_path: Vec<u8>,
+    pub temp_path: Vec<u8>,
+    pub parent_dir_to_create: Option<Vec<u8>>,
+    pub scenario: i32,
+    pub direct_open_path: Vec<u8>,
+    pub fallback_to_final_path: bool,
+}
+
+/// Plans `finalPath`, `tempPath`, optional `parentDir` creation, `setupScenario`, and
+/// direct-write open fallback for `ArticleWriter::SetupOutputFile`.
+#[allow(clippy::too_many_arguments)]
+pub fn article_writer_plan_setup_output_paths(
+    dest_dir: &[u8],
+    filename: &[u8],
+    sep: u8,
+    raw_article: bool,
+    direct_write: bool,
+    force_direct_write: bool,
+    output_filename: &[u8],
+    same_filename: impl FnOnce(&[u8], &[u8]) -> bool,
+    make_unique_filename: impl FnOnce(&[u8], &[u8]) -> Vec<u8>,
+    mut file_exists: impl FnMut(&[u8]) -> bool,
+) -> ArticleWriterSetupOutputPlan {
+    let target_path = article_writer_format_dest_file_path(dest_dir, sep, filename);
+    let is_same = !output_filename.is_empty() && same_filename(output_filename, &target_path);
+    let final_path = if article_writer_use_target_path_directly(
+        force_direct_write,
+        direct_write,
+        output_filename.is_empty(),
+        is_same,
+    ) {
+        target_path
+    } else {
+        make_unique_filename(dest_dir, filename)
+    };
+    let temp_path = article_writer_format_tmp_path(&final_path);
+    let parent_dir_to_create = article_writer_parent_dir_len(filename, &final_path, sep)
+        .map(|len| final_path[..len].to_vec());
+    let scenario = article_writer_classify_setup_output_scenario(raw_article, direct_write);
+    let (direct_open_path, fallback_to_final_path) = if scenario == 2 {
+        let open_exists = file_exists(output_filename);
+        let final_exists = !open_exists && file_exists(&final_path);
+        if article_writer_should_fallback_open_to_final_path(open_exists, final_exists) {
+            (final_path.clone(), true)
+        } else {
+            (output_filename.to_vec(), false)
+        }
+    } else {
+        (Vec::new(), false)
+    };
+    ArticleWriterSetupOutputPlan {
+        final_path,
+        temp_path,
+        parent_dir_to_create,
+        scenario,
+        direct_open_path,
+        fallback_to_final_path,
+    }
+}
+
+/// Cleanup plan computed for `ArticleWriter::CleanupOldData`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArticleWriterCleanupOldDataPlan {
+    pub direct_cleanup_action: i32,
+    pub old_dest_dir_to_prune: Option<Vec<u8>>,
+    pub delete_hardlinked_output: bool,
+}
+
+/// Plans the direct-write final file cleanup action (`1` = move, `2` = delete, `0` = none),
+/// optional old destination directory to prune if empty, and hardlink output deletion for `ArticleWriter::CleanupOldData`.
+#[allow(clippy::too_many_arguments)]
+pub fn article_writer_plan_cleanup_old_data(
+    direct_write: bool,
+    nzb_dest_dir: &[u8],
+    final_output_path: &[u8],
+    output_filename: &[u8],
+    is_hard_linked: bool,
+    inter_dir_empty: bool,
+    sep1: u8,
+    sep2: u8,
+    same_filename: impl FnOnce(&[u8], &[u8]) -> bool,
+    file_exists: impl FnOnce(&[u8]) -> bool,
+) -> ArticleWriterCleanupOldDataPlan {
+    let final_empty = final_output_path.is_empty();
+    let (direct_cleanup_action, old_dest_dir_to_prune) = if direct_write {
+        let is_same = !final_empty && same_filename(output_filename, final_output_path);
+        let out_exists = final_empty && file_exists(output_filename);
+        let action = article_writer_classify_direct_final_cleanup(final_empty, is_same, out_exists);
+        let old_dir = if !article_writer_is_within_dest_dir(
+            nzb_dest_dir,
+            output_filename,
+            sep1,
+            sep2,
+        ) {
+            let base_idx = output_filename
+                .iter()
+                .rposition(|&b| b == sep1 || b == sep2)
+                .map_or(0, |k| k + 1);
+            Some(output_filename[..base_idx.min(1023)].to_vec())
+        } else {
+            None
+        };
+        (action, old_dir)
+    } else {
+        (0, None)
+    };
+    let delete_hardlinked_output = final_empty && is_hard_linked && inter_dir_empty;
+    ArticleWriterCleanupOldDataPlan {
+        direct_cleanup_action,
+        old_dest_dir_to_prune,
+        delete_hardlinked_output,
+    }
+}
+
+/// Execution result of `ArticleWriter::SetupOutputFile`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArticleWriterSetupOutputResult {
+    pub ok: bool,
+    pub final_path: Vec<u8>,
+    pub temp_path: Vec<u8>,
+    pub updated_output_filename: Vec<u8>,
+    pub parent_dir_failed: Option<Vec<u8>>,
+    pub error_kind: i32, // 0 = none, 1 = could not create file, 2 = could not open file, 3 = could not create directory
+    pub error_path: Vec<u8>,
+}
+
+/// Executes `ArticleWriter::SetupOutputFile` end-to-end, invoking the caller's filesystem
+/// primitives (`force_directories`, `delete_file`, `open_file`, `create_directory`).
+#[allow(clippy::too_many_arguments)]
+pub fn article_writer_execute_setup_output_file(
+    dest_dir: &[u8],
+    filename: &[u8],
+    sep: u8,
+    raw_article: bool,
+    direct_write: bool,
+    force_direct_write: bool,
+    output_filename: &[u8],
+    same_filename: impl FnOnce(&[u8], &[u8]) -> bool,
+    make_unique_filename: impl FnOnce(&[u8], &[u8]) -> Vec<u8>,
+    file_exists: impl FnMut(&[u8]) -> bool,
+    force_directories: impl FnOnce(&[u8]) -> bool,
+    delete_file: impl FnOnce(&[u8]) -> bool,
+    open_file: impl FnOnce(&[u8], bool) -> bool,
+    create_directory: impl FnOnce(&[u8]) -> bool,
+) -> ArticleWriterSetupOutputResult {
+    let plan = article_writer_plan_setup_output_paths(
+        dest_dir,
+        filename,
+        sep,
+        raw_article,
+        direct_write,
+        force_direct_write,
+        output_filename,
+        same_filename,
+        make_unique_filename,
+        file_exists,
+    );
+    let mut parent_dir_failed = None;
+    if let Some(ref pdir) = plan.parent_dir_to_create {
+        if !force_directories(pdir) {
+            parent_dir_failed = Some(pdir.clone());
+        }
+    }
+    let mut updated_output_filename = output_filename.to_vec();
+    let mut temp_path = plan.temp_path.clone();
+    let mut error_kind = 0;
+    let mut error_path = Vec::new();
+    let mut ok = true;
+
+    match plan.scenario {
+        1 => {
+            let _ = delete_file(&temp_path);
+            if !open_file(&temp_path, false) {
+                ok = false;
+                error_kind = 1;
+                error_path = temp_path.clone();
+            }
+        }
+        2 => {
+            if plan.fallback_to_final_path {
+                updated_output_filename = plan.final_path.clone();
+            }
+            if !open_file(&plan.direct_open_path, true) {
+                ok = false;
+                error_kind = 2;
+                error_path = plan.direct_open_path.clone();
+            } else {
+                temp_path = updated_output_filename.clone();
+            }
+        }
+        3 => {
+            let _ = delete_file(&temp_path);
+            if !create_directory(&plan.final_path) {
+                ok = false;
+                error_kind = 3;
+                error_path = plan.final_path.clone();
+            }
+        }
+        _ => {}
+    }
+
+    ArticleWriterSetupOutputResult {
+        ok,
+        final_path: plan.final_path,
+        temp_path,
+        updated_output_filename,
+        parent_dir_failed,
+        error_kind,
+        error_path,
+    }
+}
+
+/// Execution result of `ArticleWriter::CleanupOldData`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArticleWriterCleanupOldDataResult {
+    pub move_failed: bool,
+    pub checked_old_dest_dir: Option<Vec<u8>>,
+    pub deleted_old_dest_dir: Option<Vec<u8>>,
+    pub clear_output_filename: bool,
+}
+
+/// Executes `ArticleWriter::CleanupOldData` end-to-end, invoking the caller's filesystem
+/// primitives (`delete_file`, `move_file`, `dir_empty`, `remove_directory`).
+#[allow(clippy::too_many_arguments)]
+pub fn article_writer_execute_cleanup_old_data(
+    direct_write: bool,
+    nzb_dest_dir: &[u8],
+    final_output_path: &[u8],
+    output_filename: &[u8],
+    is_hard_linked: bool,
+    inter_dir_empty: bool,
+    sep1: u8,
+    sep2: u8,
+    articles: &[(i32, Option<&[u8]>)],
+    same_filename: impl FnOnce(&[u8], &[u8]) -> bool,
+    file_exists: impl FnOnce(&[u8]) -> bool,
+    mut delete_file: impl FnMut(&[u8]) -> bool,
+    move_file: impl FnOnce(&[u8], &[u8]) -> bool,
+    dir_empty: impl FnOnce(&[u8]) -> bool,
+    remove_directory: impl FnOnce(&[u8]) -> bool,
+) -> ArticleWriterCleanupOldDataResult {
+    let plan = article_writer_plan_cleanup_old_data(
+        direct_write,
+        nzb_dest_dir,
+        final_output_path,
+        output_filename,
+        is_hard_linked,
+        inter_dir_empty,
+        sep1,
+        sep2,
+        same_filename,
+        file_exists,
+    );
+    let mut move_failed = false;
+    let mut checked_old_dest_dir = None;
+    let mut deleted_old_dest_dir = None;
+    let mut clear_output_filename = false;
+
+    if direct_write {
+        for &(dupe_fallback_round, result_filename) in articles {
+            if let Some(rf) = result_filename {
+                if article_writer_is_staged_dupe_article_file(dupe_fallback_round, true) {
+                    let _ = delete_file(rf);
+                }
+            }
+        }
+        if plan.direct_cleanup_action == 1 {
+            if !move_file(output_filename, final_output_path) {
+                move_failed = true;
+            }
+        } else if plan.direct_cleanup_action == 2 {
+            let _ = delete_file(output_filename);
+        }
+        if let Some(old_dir) = plan.old_dest_dir_to_prune {
+            if dir_empty(&old_dir) {
+                let _ = remove_directory(&old_dir);
+                deleted_old_dest_dir = Some(old_dir.clone());
+            }
+            checked_old_dest_dir = Some(old_dir);
+        }
+    } else {
+        for &(_, result_filename) in articles {
+            if let Some(rf) = result_filename {
+                let _ = delete_file(rf);
+            }
+        }
+    }
+
+    if plan.delete_hardlinked_output && delete_file(output_filename) {
+        clear_output_filename = true;
+    }
+
+    ArticleWriterCleanupOldDataResult {
+        move_failed,
+        checked_old_dest_dir,
+        deleted_old_dest_dir,
+        clear_output_filename,
+    }
+}
+
 /// Returns true when `ArticleCache::Alloc` should write the `acache` flag file on disk.
 pub fn article_cache_should_write_cache_flag(
     was_empty: bool,
@@ -796,5 +1172,313 @@ mod tests {
             memory_monitor_step(PRESSURE_NORMAL, PRESSURE_CRITICAL, &mut cand, &mut consec);
         assert_eq!(next3, PRESSURE_NORMAL);
         assert!(trans3);
+    }
+
+    #[test]
+    fn article_writer_full_suite_port_from_cpp() {
+        use std::ffi::CString;
+        #[cfg(unix)]
+        use std::os::unix::ffi::OsStrExt;
+        use std::path::Path;
+
+        fn fs_stat(p: &[u8]) -> i32 {
+            #[cfg(unix)]
+            let path = Path::new(std::ffi::OsStr::from_bytes(p));
+            #[cfg(not(unix))]
+            let path = Path::new(std::str::from_utf8(p).unwrap_or(""));
+            match std::fs::metadata(path) {
+                Ok(m) => {
+                    if m.is_file() {
+                        1
+                    } else if m.is_dir() {
+                        2
+                    } else {
+                        0
+                    }
+                }
+                Err(e) => -e.raw_os_error().unwrap_or(2),
+            }
+        }
+
+        // 1. ForcedDirectWriteKeepsExistingOutputInCollectionDirectory
+        {
+            let dir = std::env::temp_dir().join(format!(
+                "nzbget-artwriter-force-direct-{}-{}",
+                std::process::id(),
+                1
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let output_path = dir.join("part151.rar");
+            std::fs::write(&output_path, b"existing archive bytes").unwrap();
+
+            #[cfg(unix)]
+            let dir_bytes = dir.as_os_str().as_bytes();
+            #[cfg(not(unix))]
+            let dir_bytes = dir.to_string_lossy().as_bytes().to_vec();
+            #[cfg(unix)]
+            let out_bytes = output_path.as_os_str().as_bytes();
+            #[cfg(not(unix))]
+            let out_bytes = output_path.to_string_lossy().as_bytes().to_vec();
+
+            let built = article_writer_build_output_filenames(
+                b"/tmp",
+                dir_bytes,
+                crate::paths::PATH_SEPARATOR,
+                1,
+                1,
+                false,
+                true,
+                out_bytes,
+                true,
+                b"part151.rar",
+                |p| fs_stat(p) == 1,
+            )
+            .unwrap();
+            assert_eq!(built.output_filename.as_deref(), Some(out_bytes));
+            assert!(!built.update_file_info_output_filename);
+
+            let mut opened_handle: Option<std::fs::File> = None;
+            let setup = article_writer_execute_setup_output_file(
+                dir_bytes,
+                b"part151.rar",
+                crate::paths::PATH_SEPARATOR,
+                false,
+                true,
+                true,
+                built.output_filename.as_deref().unwrap(),
+                |a, b| a == b,
+                |d, f| {
+                    #[cfg(unix)]
+                    {
+                        let dc = CString::new(d).unwrap();
+                        let fc = CString::new(f).unwrap();
+                        crate::fsops::make_unique_filename(&dc, &fc, &fs_stat)
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        [d, &[crate::paths::PATH_SEPARATOR], f].concat()
+                    }
+                },
+                |p| fs_stat(p) == 1,
+                |p| {
+                    #[cfg(unix)]
+                    let path = Path::new(std::ffi::OsStr::from_bytes(p));
+                    #[cfg(not(unix))]
+                    let path = Path::new(std::str::from_utf8(p).unwrap_or(""));
+                    std::fs::create_dir_all(path).is_ok()
+                },
+                |p| {
+                    #[cfg(unix)]
+                    let path = Path::new(std::ffi::OsStr::from_bytes(p));
+                    #[cfg(not(unix))]
+                    let path = Path::new(std::str::from_utf8(p).unwrap_or(""));
+                    std::fs::remove_file(path).is_ok()
+                },
+                |p, read_write| {
+                    #[cfg(unix)]
+                    let path = Path::new(std::ffi::OsStr::from_bytes(p));
+                    #[cfg(not(unix))]
+                    let path = Path::new(std::str::from_utf8(p).unwrap_or(""));
+                    let res = if read_write {
+                        std::fs::OpenOptions::new().read(true).write(true).open(path)
+                    } else {
+                        std::fs::OpenOptions::new()
+                            .write(true)
+                            .create(true)
+                            .truncate(true)
+                            .open(path)
+                    };
+                    opened_handle = res.ok();
+                    opened_handle.is_some()
+                },
+                |p| {
+                    #[cfg(unix)]
+                    let path = Path::new(std::ffi::OsStr::from_bytes(p));
+                    #[cfg(not(unix))]
+                    let path = Path::new(std::str::from_utf8(p).unwrap_or(""));
+                    std::fs::create_dir(path).is_ok()
+                },
+            );
+            assert!(setup.ok);
+            drop(opened_handle);
+            assert_eq!(setup.final_path, out_bytes);
+            assert_eq!(setup.temp_path, out_bytes);
+
+            let cleanup = article_writer_execute_cleanup_old_data(
+                true,
+                dir_bytes,
+                &setup.final_path,
+                &setup.updated_output_filename,
+                false,
+                true,
+                crate::paths::PATH_SEPARATOR,
+                crate::paths::ALT_PATH_SEPARATOR,
+                &[(0, Some(built.result_filename.as_slice()))],
+                |a, b| a == b,
+                |p| fs_stat(p) == 1,
+                |p| {
+                    #[cfg(unix)]
+                    let path = Path::new(std::ffi::OsStr::from_bytes(p));
+                    #[cfg(not(unix))]
+                    let path = Path::new(std::str::from_utf8(p).unwrap_or(""));
+                    std::fs::remove_file(path).is_ok()
+                },
+                |from, to| {
+                    #[cfg(unix)]
+                    let src = Path::new(std::ffi::OsStr::from_bytes(from));
+                    #[cfg(not(unix))]
+                    let src = Path::new(std::str::from_utf8(from).unwrap_or(""));
+                    #[cfg(unix)]
+                    let dst = Path::new(std::ffi::OsStr::from_bytes(to));
+                    #[cfg(not(unix))]
+                    let dst = Path::new(std::str::from_utf8(to).unwrap_or(""));
+                    std::fs::rename(src, dst).is_ok()
+                },
+                |d| {
+                    #[cfg(unix)]
+                    let path = Path::new(std::ffi::OsStr::from_bytes(d));
+                    #[cfg(not(unix))]
+                    let path = Path::new(std::str::from_utf8(d).unwrap_or(""));
+                    std::fs::read_dir(path)
+                        .map(|mut it| it.next().is_none())
+                        .unwrap_or(false)
+                },
+                |d| {
+                    #[cfg(unix)]
+                    let path = Path::new(std::ffi::OsStr::from_bytes(d));
+                    #[cfg(not(unix))]
+                    let path = Path::new(std::str::from_utf8(d).unwrap_or(""));
+                    std::fs::remove_dir(path).is_ok()
+                },
+            );
+            assert!(!cleanup.move_failed);
+            assert_eq!(cleanup.checked_old_dest_dir, None);
+            assert!(!cleanup.clear_output_filename);
+            assert!(output_path.exists());
+            assert!(!dir.join("Release title").exists());
+            assert_eq!(
+                std::fs::read(&output_path).unwrap(),
+                b"existing archive bytes"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        // 2. DirectWritePreservesUnrelatedExistingOutputInCollectionDirectory
+        {
+            let dir = std::env::temp_dir().join(format!(
+                "nzbget-artwriter-direct-unrelated-{}-{}",
+                std::process::id(),
+                2
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let existing_path = dir.join("part151.rar");
+            std::fs::write(&existing_path, b"unrelated existing archive bytes").unwrap();
+            let temp_out_path = dir.join("42.out.tmp");
+            std::fs::write(&temp_out_path, b"newly downloaded archive bytes").unwrap();
+
+            #[cfg(unix)]
+            let dir_bytes = dir.as_os_str().as_bytes();
+            #[cfg(not(unix))]
+            let dir_bytes = dir.to_string_lossy().as_bytes().to_vec();
+            #[cfg(unix)]
+            let existing_bytes = existing_path.as_os_str().as_bytes();
+            #[cfg(not(unix))]
+            let existing_bytes = existing_path.to_string_lossy().as_bytes().to_vec();
+            #[cfg(unix)]
+            let temp_out_bytes = temp_out_path.as_os_str().as_bytes();
+            #[cfg(not(unix))]
+            let temp_out_bytes = temp_out_path.to_string_lossy().as_bytes().to_vec();
+
+            let built = article_writer_build_output_filenames(
+                b"/tmp",
+                dir_bytes,
+                crate::paths::PATH_SEPARATOR,
+                42,
+                1,
+                true,
+                false,
+                b"",
+                true,
+                b"part151.rar",
+                |p| fs_stat(p) == 1,
+            )
+            .unwrap();
+            assert_eq!(built.output_filename.as_deref(), Some(temp_out_bytes));
+            assert!(built.update_file_info_output_filename);
+
+            let mut opened_handle: Option<std::fs::File> = None;
+            let setup = article_writer_execute_setup_output_file(
+                dir_bytes,
+                b"part151.rar",
+                crate::paths::PATH_SEPARATOR,
+                false,
+                true,
+                false,
+                built.output_filename.as_deref().unwrap(),
+                |a, b| a == b,
+                |d, f| {
+                    #[cfg(unix)]
+                    {
+                        let dc = CString::new(d).unwrap();
+                        let fc = CString::new(f).unwrap();
+                        crate::fsops::make_unique_filename(&dc, &fc, &fs_stat)
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        [d, &[crate::paths::PATH_SEPARATOR], b"part151.duplicate1.rar"].concat()
+                    }
+                },
+                |p| fs_stat(p) == 1,
+                |p| {
+                    #[cfg(unix)]
+                    let path = Path::new(std::ffi::OsStr::from_bytes(p));
+                    #[cfg(not(unix))]
+                    let path = Path::new(std::str::from_utf8(p).unwrap_or(""));
+                    std::fs::create_dir_all(path).is_ok()
+                },
+                |p| {
+                    #[cfg(unix)]
+                    let path = Path::new(std::ffi::OsStr::from_bytes(p));
+                    #[cfg(not(unix))]
+                    let path = Path::new(std::str::from_utf8(p).unwrap_or(""));
+                    std::fs::remove_file(path).is_ok()
+                },
+                |p, read_write| {
+                    #[cfg(unix)]
+                    let path = Path::new(std::ffi::OsStr::from_bytes(p));
+                    #[cfg(not(unix))]
+                    let path = Path::new(std::str::from_utf8(p).unwrap_or(""));
+                    let res = if read_write {
+                        std::fs::OpenOptions::new().read(true).write(true).open(path)
+                    } else {
+                        std::fs::OpenOptions::new()
+                            .write(true)
+                            .create(true)
+                            .truncate(true)
+                            .open(path)
+                    };
+                    opened_handle = res.ok();
+                    opened_handle.is_some()
+                },
+                |p| {
+                    #[cfg(unix)]
+                    let path = Path::new(std::ffi::OsStr::from_bytes(p));
+                    #[cfg(not(unix))]
+                    let path = Path::new(std::str::from_utf8(p).unwrap_or(""));
+                    std::fs::create_dir(path).is_ok()
+                },
+            );
+            assert!(setup.ok);
+            drop(opened_handle);
+            assert_ne!(setup.final_path, existing_bytes);
+            assert!(setup.final_path.ends_with(b"part151.duplicate1.rar"));
+            assert_eq!(setup.temp_path, temp_out_bytes);
+            assert_eq!(
+                std::fs::read(&existing_path).unwrap(),
+                b"unrelated existing archive bytes"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }

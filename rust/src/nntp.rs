@@ -497,6 +497,107 @@ pub fn article_dl_should_advance_server_list(
     (advance, advance && !optional_blocked)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TransientServerState {
+    server_key: usize,
+    attempts: i32,
+    retry_time: i64,
+}
+
+/// Counts temporary NNTP errors one article met on each server and tracks per-server
+/// ordinary retry budgets so temporary errors switching servers do not consume another
+/// server's ordinary retry budget.
+#[derive(Debug, Clone)]
+pub struct TransientRetries {
+    attempts_limit: i32,
+    interval_sec: i32,
+    exhausted: bool,
+    servers: Vec<TransientServerState>,
+    ordinary_retries: Vec<(usize, i32)>,
+}
+
+impl TransientRetries {
+    pub const MAX_INTERVAL_SEC: i32 = 60;
+
+    pub fn new(attempts: i32, interval_sec: i32) -> Self {
+        Self {
+            attempts_limit: attempts,
+            interval_sec,
+            exhausted: false,
+            servers: Vec::new(),
+            ordinary_retries: Vec::new(),
+        }
+    }
+
+    /// Registers a temporary error on `server_key` at `now`.
+    /// Returns `true` if the server has an attempt left (and schedules a growing wait
+    /// up to `MAX_INTERVAL_SEC`), or `false` if attempts on that server are exhausted.
+    pub fn register(&mut self, server_key: usize, now: i64) -> bool {
+        let idx = if let Some(pos) = self.servers.iter().position(|s| s.server_key == server_key) {
+            pos
+        } else {
+            self.servers.push(TransientServerState {
+                server_key,
+                attempts: 0,
+                retry_time: 0,
+            });
+            self.servers.len() - 1
+        };
+
+        let state = &mut self.servers[idx];
+        state.attempts = state.attempts.saturating_add(1);
+        if state.attempts >= self.attempts_limit {
+            self.exhausted = true;
+            return false;
+        }
+
+        let mut interval = self.interval_sec;
+        let mut i = 1;
+        while i < state.attempts && interval < Self::MAX_INTERVAL_SEC {
+            interval = interval.saturating_mul(2);
+            i += 1;
+        }
+        let wait = interval.min(Self::MAX_INTERVAL_SEC) as i64;
+        state.retry_time = now.saturating_add(wait);
+        true
+    }
+
+    pub fn waiting_servers(&self, now: i64) -> Vec<usize> {
+        self.servers
+            .iter()
+            .filter(|s| now < s.retry_time)
+            .map(|s| s.server_key)
+            .collect()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.servers.is_empty()
+    }
+
+    pub fn is_exhausted(&self) -> bool {
+        self.exhausted
+    }
+
+    pub fn remained_retries(&self, server_key: usize) -> i32 {
+        self.ordinary_retries
+            .iter()
+            .find(|&&(k, _)| k == server_key)
+            .map_or(self.attempts_limit, |&(_, r)| r)
+    }
+
+    pub fn set_remained_retries(&mut self, server_key: usize, remained: i32) {
+        if let Some(entry) = self
+            .ordinary_retries
+            .iter_mut()
+            .find(|(k, _)| *k == server_key)
+        {
+            entry.1 = remained;
+        } else {
+            self.ordinary_retries.push((server_key, remained));
+        }
+    }
+}
+
 /// `ServerPool::BlockServer`:
 /// Determines whether the block timestamp changed (`new_block`) and whether to log a warning
 /// (`should_warn = new_block && retry_interval > 0`).
@@ -2398,6 +2499,81 @@ mod article_fetcher_tests {
                 pool.free_connection(c, false, 1000);
             }
         }
+    }
+
+    #[test]
+    fn transient_retries_wait_longer_then_give_up() {
+        let server = 1usize;
+        let mut retries = TransientRetries::new(3, 10);
+        let now = 1000i64;
+
+        assert!(retries.is_empty());
+        assert!(retries.waiting_servers(now).is_empty());
+
+        // 503, then success: the only trace is the wait
+        assert!(retries.register(server, now));
+        assert!(!retries.is_exhausted());
+        assert_eq!(retries.waiting_servers(now + 9), vec![server]);
+        assert!(retries.waiting_servers(now + 10).is_empty());
+
+        // a second one waits twice as long
+        assert!(retries.register(server, now + 10));
+        assert_eq!(retries.waiting_servers(now + 29), vec![server]);
+        assert!(retries.waiting_servers(now + 30).is_empty());
+
+        // repeated 503 uses up the attempts: the server is given up on, and not waited for
+        assert!(!retries.register(server, now + 30));
+        assert!(retries.is_exhausted());
+        assert!(retries.waiting_servers(now + 30).is_empty());
+    }
+
+    #[test]
+    fn transient_retries_count_each_server_and_cap_the_wait() {
+        let first = 1usize;
+        let second = 2usize;
+        let mut retries = TransientRetries::new(99, 50);
+        let now = 1000i64;
+
+        assert!(retries.register(first, now));
+        assert!(retries.register(first, now));
+        assert_eq!(
+            retries.waiting_servers(now + TransientRetries::MAX_INTERVAL_SEC as i64 - 1),
+            vec![first]
+        );
+        assert!(retries
+            .waiting_servers(now + TransientRetries::MAX_INTERVAL_SEC as i64)
+            .is_empty());
+
+        // the other server isn't waited for yet
+        assert_eq!(retries.waiting_servers(now), vec![first]);
+
+        // one attempt only: no retry at all (ArticleRetries=0 or 1)
+        let mut once = TransientRetries::new(1, 10);
+        assert!(!once.register(second, now));
+        assert!(once.is_exhausted());
+    }
+
+    #[test]
+    fn transient_retries_preserve_separate_ordinary_retry_budgets_per_server() {
+        let server_a = 10usize;
+        let server_b = 20usize;
+        let mut retries = TransientRetries::new(3, 10);
+
+        // Server A starts with 3 ordinary retries and consumes 2 of them
+        assert_eq!(retries.remained_retries(server_a), 3);
+        retries.set_remained_retries(server_a, 2);
+        retries.set_remained_retries(server_a, 1);
+        assert_eq!(retries.remained_retries(server_a), 1);
+
+        // Server A then encounters a transient 503 and enters backoff
+        assert!(retries.register(server_a, 1000));
+
+        // Switching to Server B gives Server B its own full ordinary retry budget (3),
+        // while preserving Server A's remaining budget (1)
+        assert_eq!(retries.remained_retries(server_b), 3);
+        retries.set_remained_retries(server_b, 2);
+        assert_eq!(retries.remained_retries(server_b), 2);
+        assert_eq!(retries.remained_retries(server_a), 1);
     }
 }
 

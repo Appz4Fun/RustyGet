@@ -55,6 +55,7 @@ public:
 		adCrcError,
 		adNotFound,
 		adConnectError,
+		adTransientError,
 		adFatalError
 	};
 

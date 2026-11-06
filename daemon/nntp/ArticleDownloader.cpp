@@ -69,6 +69,11 @@ void ArticleDownloader::SetInfoName(const char* infoName)
 		- try to download from server;
 		- if connection to server cannot be established or download fails due to interrupted connection,
 		  try again (as many times as needed without limit) the same server until connection is OK;
+		- if the server answers with a temporary error (503, a failed login, its connection pool
+		  is exhausted: see rust/src/dupefallback.rs), it says nothing about the article. Leave that
+		  server alone for a growing while, trying the other servers of the level meanwhile, as many
+		  times as defined by option <ArticleRetries>; if all attempts fail, add the server to
+		  failed server list;
 		- if download fails with error "Not-Found" (article or group not found) or with CRC error,
 		  add the server to failed server list;
 		- if download fails with general failure error (article incomplete, other unknown error
@@ -91,6 +96,9 @@ void ArticleDownloader::Run()
 	EStatus status = adFailed;
 	int retries = g_Options->GetArticleRetries() > 0 ? g_Options->GetArticleRetries() : 1;
 	int remainedRetries = retries;
+	std::unique_ptr<NzbgetRsTransientRetries, decltype(&nzbget_rs_transient_retries_free)> transientRetries(
+		nzbget_rs_transient_retries_new(retries, g_Options->GetArticleInterval()),
+		nzbget_rs_transient_retries_free);
 	ServerPool::RawServerList failedServers;
 	failedServers.reserve(g_ServerPool->GetServers()->size());
 	NewsServer* wantServer = nullptr;
@@ -106,7 +114,32 @@ void ArticleDownloader::Run()
 		SetStatus(adWaiting);
 		while (!m_connection && !IsStopped() && serverConfigGeneration == g_ServerPool->GetGeneration())
 		{
-			m_connection = g_ServerPool->GetConnection(level, wantServer, &failedServers);
+			if (nzbget_rs_transient_retries_is_empty(transientRetries.get()) != 0)
+			{
+				m_connection = g_ServerPool->GetConnection(level, wantServer, &failedServers);
+			}
+			else
+			{
+				ServerPool::RawServerList ignoreServers = failedServers;
+				std::vector<uintptr_t> waitingPtrs(g_ServerPool->GetServers()->size());
+				size_t waitingCount = nzbget_rs_transient_retries_waiting_servers(
+					transientRetries.get(), (int64)Util::CurrentTime(),
+					waitingPtrs.data(), waitingPtrs.size());
+				bool wantServerWaiting = false;
+				for (size_t wi = 0; wi < waitingCount; ++wi)
+				{
+					NewsServer* waitingServer = reinterpret_cast<NewsServer*>(waitingPtrs[wi]);
+					ignoreServers.push_back(waitingServer);
+					if (waitingServer == wantServer)
+					{
+						wantServerWaiting = true;
+					}
+				}
+				if (!wantServerWaiting)
+				{
+					m_connection = g_ServerPool->GetConnection(level, wantServer, &ignoreServers);
+				}
+			}
 			Util::Sleep(5);
 		}
 		SetLastUpdateTimeNow();
@@ -123,6 +156,8 @@ void ArticleDownloader::Run()
 
 		lastServer = m_connection->GetNewsServer();
 		level = lastServer->GetNormLevel();
+		remainedRetries = nzbget_rs_transient_retries_remained_retries(
+			transientRetries.get(), reinterpret_cast<uintptr_t>(lastServer));
 
 		m_connection->SetSuppressErrors(false);
 
@@ -162,16 +197,45 @@ void ArticleDownloader::Run()
 
 		// test connection
 		bool connected = m_connection && m_connection->Connect();
-		// a server that refuses the login for good (502) can't serve this article: it
-		// counts as tried. Waited for, a server with a broken account stalled every
-		// download that had failed on the other servers of its level
-		bool authRejected = !connected && m_connection && m_connection->GetAuthRejected();
+		// a server that refuses the login (502) may be out of connections, or may have
+		// a broken account: it's tried again, and then counts as tried. Waited for without
+		// a limit, a broken account stalled every download that had failed on the other
+		// servers of its level
+		bool transientRetryScheduled = false;
+		bool authRejected = false;
+		if (!connected && m_connection && m_connection->GetAuthRejected())
+		{
+			if (nzbget_rs_transient_retries_register(
+				transientRetries.get(), reinterpret_cast<uintptr_t>(lastServer), (int64)Util::CurrentTime()) != 0)
+			{
+				transientRetryScheduled = true;
+			}
+			else
+			{
+				authRejected = true;
+			}
+		}
 		if (connected && !IsStopped())
 		{
 			NewsServer* newsServer = m_connection->GetNewsServer();
 
 			// Download article
 			status = Download();
+
+			if (status == adTransientError)
+			{
+				if (nzbget_rs_transient_retries_register(
+					transientRetries.get(), reinterpret_cast<uintptr_t>(newsServer), (int64)Util::CurrentTime()) != 0)
+				{
+					status = adConnectError;
+					transientRetryScheduled = true;
+				}
+				else
+				{
+					status = adFailed;
+					remainedRetries = 0;
+				}
+			}
 
 			int success = 0, failed = 0;
 			if (nzbget_rs_nntp_article_dl_classify_attempt_stat(
@@ -235,6 +299,8 @@ void ArticleDownloader::Run()
 			&connInt, &statusInt, &remainedRetries);
 		connected = connInt != 0;
 		status = (EStatus)statusInt;
+		nzbget_rs_transient_retries_set_remained_retries(
+			transientRetries.get(), reinterpret_cast<uintptr_t>(lastServer), remainedRetries);
 
 		bool optionalBlocked = false;
 		if (!connected && m_connection && !IsStopped())
@@ -251,6 +317,10 @@ void ArticleDownloader::Run()
 		else
 		{
 			FreeConnection(status == adFinished || status == adNotFound);
+			if (transientRetryScheduled && m_fileInfo->GetNzbInfo()->HasDesiredServer())
+			{
+				wantServer = lastServer;
+			}
 		}
 
 		if (nzbget_rs_dqh_article_dl_is_terminal_loop_status(
@@ -356,7 +426,11 @@ void ArticleDownloader::Run()
 		detail("Download %s cancelled", *m_infoName);
 	}
 
-	if (status == adFailed)
+	if (status == adFailed && nzbget_rs_transient_retries_is_exhausted(transientRetries.get()) != 0)
+	{
+		detail("Download %s failed: temporary server errors outlasted all attempts, the article may still exist", *m_infoName);
+	}
+	else if (status == adFailed)
 	{
 		detail("Download %s failed", *m_infoName);
 	}

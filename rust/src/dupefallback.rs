@@ -34,6 +34,7 @@ pub const AD_FINISHED: i32 = 3;
 pub const AD_FAILED: i32 = 4;
 pub const AD_NOT_FOUND: i32 = 7;
 pub const AD_CONNECT_ERROR: i32 = 8;
+pub const AD_TRANSIENT_ERROR: i32 = 9;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1096,13 +1097,32 @@ pub fn article_fetch_add_decoded_bytes(
     true
 }
 
-/// Classifies an NNTP command response in `ArticleDownloader::CheckResponse`.
-pub fn article_downloader_check_response(response: Option<&[u8]>, auth_error: bool) -> i32 {
-    let Some(resp) = response else {
+fn contains_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|w| w.eq_ignore_ascii_case(needle))
+}
+
+/// Classifies a non-null NNTP response line in `ArticleDownloader::ClassifyResponse`.
+pub fn article_downloader_classify_response(resp: &[u8]) -> i32 {
+    if resp.starts_with(b"2") {
+        return AD_FINISHED;
+    }
+    if resp.starts_with(b"400") || resp.starts_with(b"499") {
         return AD_CONNECT_ERROR;
-    };
-    if auth_error || resp.starts_with(b"400") || resp.starts_with(b"499") {
-        return AD_CONNECT_ERROR;
+    }
+    if resp.starts_with(b"480")
+        || resp.starts_with(b"481")
+        || resp.starts_with(b"482")
+        || resp.starts_with(b"502")
+        || resp.starts_with(b"503")
+        || contains_ascii_case_insensitive(resp, b"connection unavailable")
+        || contains_ascii_case_insensitive(resp, b"pool exhausted")
+    {
+        return AD_TRANSIENT_ERROR;
     }
     if resp.starts_with(b"41")
         || resp.starts_with(b"42")
@@ -1111,10 +1131,18 @@ pub fn article_downloader_check_response(response: Option<&[u8]>, auth_error: bo
     {
         return AD_NOT_FOUND;
     }
-    if resp.starts_with(b"2") {
-        return AD_FINISHED;
-    }
     AD_FAILED
+}
+
+/// Classifies an NNTP command response in `ArticleDownloader::CheckResponse`.
+pub fn article_downloader_check_response(response: Option<&[u8]>, auth_error: bool) -> i32 {
+    let Some(resp) = response else {
+        return AD_CONNECT_ERROR;
+    };
+    if auth_error {
+        return AD_CONNECT_ERROR;
+    }
+    article_downloader_classify_response(resp)
 }
 
 /// Validates yEnc decoded range and duplicate-fallback expected bounds in `ArticleDownloader::Write`.
@@ -1732,6 +1760,56 @@ mod tests {
         assert_eq!(
             article_downloader_check_response(Some(b"222 body"), true),
             AD_CONNECT_ERROR
+        );
+
+        // ArticleResponsesTellMissingFromTemporary
+        assert_eq!(
+            article_downloader_classify_response(b"222 body follows"),
+            AD_FINISHED
+        );
+        assert_eq!(
+            article_downloader_classify_response(b"430 no such article"),
+            AD_NOT_FOUND
+        );
+        assert_eq!(
+            article_downloader_classify_response(b"423 no such article number"),
+            AD_NOT_FOUND
+        );
+        assert_eq!(
+            article_downloader_classify_response(b"411 no such group"),
+            AD_NOT_FOUND
+        );
+        assert_eq!(
+            article_downloader_classify_response(b"451 no such article"),
+            AD_NOT_FOUND
+        );
+        for response in [
+            &b"480 authentication required"[..],
+            &b"481 authentication failed"[..],
+            &b"482 out of sequence"[..],
+            &b"502 access denied"[..],
+            &b"503 temporarily unavailable"[..],
+        ] {
+            assert_eq!(
+                article_downloader_classify_response(response),
+                AD_TRANSIENT_ERROR
+            );
+        }
+        assert_eq!(
+            article_downloader_classify_response(b"436 Connection unavailable"),
+            AD_TRANSIENT_ERROR
+        );
+        assert_eq!(
+            article_downloader_classify_response(b"430 backend pool exhausted"),
+            AD_TRANSIENT_ERROR
+        );
+        assert_eq!(
+            article_downloader_classify_response(b"400 service discontinued"),
+            AD_CONNECT_ERROR
+        );
+        assert_eq!(
+            article_downloader_classify_response(b"500 command not recognized"),
+            AD_FAILED
         );
 
         assert_eq!(

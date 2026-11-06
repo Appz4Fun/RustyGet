@@ -33004,3 +33004,90 @@ pub unsafe extern "C" fn nzbget_rs_script_config_commit_cipher_patch(
     commit as c_int
 }
 
+pub type NzbgetRsTransientRetries = crate::nntp::TransientRetries;
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_transient_retries_new(
+    attempts: c_int,
+    interval_sec: c_int,
+) -> *mut NzbgetRsTransientRetries {
+    Box::into_raw(Box::new(crate::nntp::TransientRetries::new(
+        attempts,
+        interval_sec,
+    )))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_transient_retries_free(ptr: *mut NzbgetRsTransientRetries) {
+    if !ptr.is_null() {
+        drop(Box::from_raw(ptr));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_transient_retries_register(
+    ptr: *mut NzbgetRsTransientRetries,
+    server_key: usize,
+    now: i64,
+) -> c_int {
+    let Some(tr) = ptr.as_mut() else {
+        return 0;
+    };
+    c_int::from(tr.register(server_key, now))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_transient_retries_waiting_servers(
+    ptr: *const NzbgetRsTransientRetries,
+    now: i64,
+    out_keys: *mut usize,
+    max_keys: usize,
+) -> usize {
+    let Some(tr) = ptr.as_ref() else {
+        return 0;
+    };
+    let waiting = tr.waiting_servers(now);
+    let count = waiting.len().min(max_keys);
+    if !out_keys.is_null() && count > 0 {
+        for (i, &key) in waiting.iter().take(count).enumerate() {
+            *out_keys.add(i) = key;
+        }
+    }
+    count
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_transient_retries_is_empty(
+    ptr: *const NzbgetRsTransientRetries,
+) -> c_int {
+    ptr.as_ref().map_or(1, |tr| c_int::from(tr.is_empty()))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_transient_retries_is_exhausted(
+    ptr: *const NzbgetRsTransientRetries,
+) -> c_int {
+    ptr.as_ref().map_or(0, |tr| c_int::from(tr.is_exhausted()))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_transient_retries_remained_retries(
+    ptr: *const NzbgetRsTransientRetries,
+    server_key: usize,
+) -> c_int {
+    ptr.as_ref()
+        .map_or(0, |tr| tr.remained_retries(server_key))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_transient_retries_set_remained_retries(
+    ptr: *mut NzbgetRsTransientRetries,
+    server_key: usize,
+    remained: c_int,
+) {
+    if let Some(tr) = ptr.as_mut() {
+        tr.set_remained_retries(server_key, remained);
+    }
+}
+
+

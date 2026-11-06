@@ -4107,11 +4107,11 @@
     "description": "Description for the option RawArticle DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges."
   },
   "config_desc_articleretries": {
-    "message": "How many retries should be attempted if a download error occurs.\n\nIf download fails because of incomplete or damaged article or due to\nCRC-error the program tries to re-download the article from the same\nnews server as many times as defined in this option. If all attempts fail\nthe program tries another news server.\n\nIf download fails because of \"article or group not found error\" the\nprogram tries another news server without retrying on the failed server.",
+    "message": "How many retries should be attempted if a download error occurs.\n\nIf download fails because of incomplete or damaged article or due to\nCRC-error the program tries to re-download the article from the same\nnews server as many times as defined in this option. If all attempts fail\nthe program tries another news server.\n\nIf download fails because of \"article or group not found error\" the\nprogram tries another news server without retrying on the failed server.\n\nIf a news server answers with a temporary error (such as 503, a failed\nlogin or an exhausted connection pool) the program leaves that server alone\nfor a while and tries it again, as many times as defined in this option.\nOther news servers of the same level are tried meanwhile. An article that\nkeeps getting such errors fails only when all attempts are used.",
     "description": "Description for the option ArticleRetries DO NOT translate technical values enclosed in quotes. If 'News server' sounds like 'Newspaper' in your language, use 'Usenet server'."
   },
   "config_desc_articleinterval": {
-    "message": "Article retry interval.\n\nIf download of article fails because of interrupted connection\nthe server is temporary blocked until the retry interval expires.",
+    "message": "Article retry interval.\n\nIf download of article fails because of interrupted connection\nthe server is temporary blocked until the retry interval expires.\n\nAfter a temporary server error (see option <ArticleRetries>) the same wait\napplies, doubling with each attempt on that article up to 60 seconds.",
     "description": "Description for the option ArticleInterval"
   },
   "config_desc_articletimeout": {

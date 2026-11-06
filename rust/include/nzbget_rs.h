@@ -5695,6 +5695,16 @@ int nzbget_rs_script_config_commit_cipher_patch(
     int (*cancel_cb)(void*),
     void (*on_dir_sync_fail_cb)(void*));
 
+typedef struct NzbgetRsTransientRetries NzbgetRsTransientRetries;
+NzbgetRsTransientRetries* nzbget_rs_transient_retries_new(int attempts, int interval_sec);
+void nzbget_rs_transient_retries_free(NzbgetRsTransientRetries* ptr);
+int nzbget_rs_transient_retries_register(NzbgetRsTransientRetries* ptr, uintptr_t server_key, int64_t now);
+size_t nzbget_rs_transient_retries_waiting_servers(const NzbgetRsTransientRetries* ptr, int64_t now, uintptr_t* out_keys, size_t max_keys);
+int nzbget_rs_transient_retries_is_empty(const NzbgetRsTransientRetries* ptr);
+int nzbget_rs_transient_retries_is_exhausted(const NzbgetRsTransientRetries* ptr);
+int nzbget_rs_transient_retries_remained_retries(const NzbgetRsTransientRetries* ptr, uintptr_t server_key);
+void nzbget_rs_transient_retries_set_remained_retries(NzbgetRsTransientRetries* ptr, uintptr_t server_key, int remained);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

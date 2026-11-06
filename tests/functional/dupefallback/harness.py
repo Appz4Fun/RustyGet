@@ -1062,12 +1062,16 @@ class FirstFailNntpProxy(DelayingNntpProxy):
     """A news server in front of nserv that answers the FIRST body request for
     each message-id naming one of ``markers`` itself, with a transient error
     ("503"), and passes every other request: articles a single failed request
-    loses (ArticleRetries=0) though they exist on the server."""
+    loses (ArticleRetries=0) though they exist on the server. With ``always``
+    it answers every request for them that way: a server out of connections
+    for as long as the test looks. ``requests`` keeps when each was asked for."""
 
-    def __init__(self, listen_port, upstream_port, markers):
+    def __init__(self, listen_port, upstream_port, markers, always=False):
         self.markers = markers
+        self.always = always
         self.seen = set()
         self.failed = 0
+        self.requests = {}
         super().__init__(listen_port, upstream_port, [])
 
     def _pipe(self, src, dst, rewrite):
@@ -1078,10 +1082,12 @@ class FirstFailNntpProxy(DelayingNntpProxy):
                     break
                 if not rewrite:
                     found = re.findall(rb'(?:BODY|ARTICLE) <([^>]+)>', data)
-                    first = [m for m in found if any(k in m for k in self.markers) and m not in self.seen]
+                    first = [m for m in found if any(k in m for k in self.markers) and
+                             (self.always or m not in self.seen)]
                     if first and len(found) == 1:
                         self.seen.add(first[0])
                         self.failed += 1
+                        self.requests.setdefault(first[0], []).append(time.time())
                         src.sendall(b'503 temporarily unavailable\r\n')
                         continue
                 dst.sendall(data)
@@ -1394,6 +1400,60 @@ def scenario_recheckfailed(daemon, t):
     ok = rechecked == 1 and daemon.proxy.failed == 3 and 'SUCCESS' in final['Status'] and integ
     return ('recheckfailed', ok, 'first=%s rechecked_logs=%d final=%s integrity=%s failed_requests=%d'
             % (first['Status'], rechecked, final['Status'], integ, daemon.proxy.failed))
+
+
+def scenario_transientretry(daemon, t):
+    """The server answers the first request of three articles with 503: the
+    articles exist, so each is asked for again after ArticleInterval and none
+    counts as failed. Before, the retries were used up within a moment."""
+    size, seg = 2_000_000, 100_000
+    data = _payload(size, 9951)
+    pp = _place_copy(t, 'trA', data, 'file.bin')
+    api = daemon.wait_ready()
+    daemon.append(api, 'RelTr', build_nzb(pp, 'Tr.bin', size, seg, set()), False, 'tr-key', 100)
+    h = daemon.wait_history(api, 'RelTr', timeout=120)
+    integ = _verify_output(t, data)
+    failed = int(h.get('FailedArticles', 0))
+    ok = h['Status'].startswith('SUCCESS') and integ and failed == 0 and daemon.proxy.failed == 3
+    return ('transientretry', ok, 'status=%s failed_articles=%d failed_requests=%d integrity=%s'
+            % (h['Status'], failed, daemon.proxy.failed, integ))
+
+
+def scenario_transientexhausted(daemon, t):
+    """The server answers 503 to every request of three articles: each is
+    asked for ArticleRetries times, with a doubling wait between the requests,
+    then fails with a message that doesn't call it missing."""
+    size, seg = 2_000_000, 100_000
+    data = _payload(size, 9952)
+    pp = _place_copy(t, 'teA', data, 'file.bin')
+    api = daemon.wait_ready()
+    daemon.append(api, 'RelTe', build_nzb(pp, 'Te.bin', size, seg, set()), False, 'te-key', 100)
+    h = daemon.wait_history(api, 'RelTe', timeout=180)
+    failed = int(h.get('FailedArticles', 0))
+    logged = _grep_log(t, 'temporary server errors outlasted all attempts')
+    requests = daemon.proxy.requests.values()
+    counts = sorted(len(times) for times in requests)
+    # ArticleInterval=2: 2 then 4 seconds. Only the least is certain under load
+    spans = [times[-1] - times[0] for times in requests]
+    ok = failed == 3 and logged == 3 and counts == [3, 3, 3] and min(spans) >= 5
+    return ('transientexhausted', ok, 'status=%s failed_articles=%d distinct_logs=%d requests=%s min_span=%.1f'
+            % (h['Status'], failed, logged, counts, min(spans) if spans else -1))
+
+
+def scenario_transientotherserver(daemon, t):
+    """One of two servers of a level answers 503 to three articles for good:
+    the other one serves them meanwhile, and nothing fails."""
+    size, seg = 2_000_000, 100_000
+    data = _payload(size, 9953)
+    pp = _place_copy(t, 'toA', data, 'file.bin')
+    api = daemon.wait_ready()
+    daemon.append(api, 'RelTo', build_nzb(pp, 'To.bin', size, seg, set()), False, 'to-key', 100)
+    h = daemon.wait_history(api, 'RelTo', timeout=120)
+    integ = _verify_output(t, data)
+    failed = int(h.get('FailedArticles', 0))
+    ok = h['Status'].startswith('SUCCESS') and integ and failed == 0
+    return ('transientotherserver', ok, 'status=%s failed_articles=%d failed_requests=%d integrity=%s'
+            % (h['Status'], failed, daemon.proxy.failed, integ))
 
 
 def scenario_cutover(daemon, t):
@@ -11575,6 +11635,9 @@ SCENARIOS = {
     'declaredcountnopair': scenario_declaredcountnopair,
     'rejectnextserver': scenario_rejectnextserver,
     'cutover': scenario_cutover,
+    'transientretry': scenario_transientretry,
+    'transientexhausted': scenario_transientexhausted,
+    'transientotherserver': scenario_transientotherserver,
     'leadswitch': scenario_leadswitch,
     'cutovertruth': scenario_cutovertruth,
     'manydonors': scenario_manydonors,
@@ -12237,6 +12300,9 @@ SCENARIO_OPTIONS = {
     'deadpickservers': ['DupeArticleFallback=no', 'HealthCheck=dupe', 'Server1.Connections=2'],
     'deadpickfewservers': ['DupeArticleFallback=no', 'HealthCheck=dupe', 'Server1.Connections=2'],
     'notfound451': ['DupeArticleFallback=no', 'ArticleRetries=3', 'ArticleInterval=3'],
+    'transientretry': ['DupeArticleFallback=no', 'ArticleRetries=3', 'ArticleInterval=2'],
+    'transientexhausted': ['DupeArticleFallback=no', 'ArticleRetries=3', 'ArticleInterval=2'],
+    'transientotherserver': ['DupeArticleFallback=no', 'ArticleRetries=3', 'ArticleInterval=30'],
     'manualparnopar': ['DupeArticleFallback=stream', 'ParCheck=manual'],
     'xpackextensionless': ['DupeArticleFallback=stream', 'ParCheck=auto'],
     'xpackextensionlessneg': ['DupeArticleFallback=stream', 'ParCheck=auto'],
@@ -12317,7 +12383,8 @@ SCENARIO_NSERV_ARGS = {'finaldeletemidway': ['-w', '300'], 'finaldeleterestart':
 
 # extra news servers behind the same nserv: (servers answering, unreachable
 # optional servers); Server1 counts among the answering ones
-SCENARIO_EXTRA_SERVERS = {'deadpickservers': (5, 1), 'deadpickfewservers': (4, 2), 'rejectnextserver': (2, 0)}
+SCENARIO_EXTRA_SERVERS = {'deadpickservers': (5, 1), 'deadpickfewservers': (4, 2), 'rejectnextserver': (2, 0),
+                          'transientotherserver': (2, 0)}
 
 # scenarios whose extra servers join Server1's group (the same account): Group=1
 SCENARIO_GROUPED_SERVERS = {'streamgrouped': 2}
@@ -12365,7 +12432,10 @@ SCENARIO_EXTENSIONS = {'dupesearchwatchscript': {'watchevent.py': WATCH_EVENT_EX
                        'scriptparcheck': {'askpar.py': PARCHECK_POST_EXTENSION},
                        'scanlongcommand': {'longscan.py': LONG_COMMAND_EXTENSION}}
 
-SCENARIO_FIRST_FAIL_PROXY = {'recheckfailed': ((b'?5=', b'?10=', b'?15='),)}
+SCENARIO_FIRST_FAIL_PROXY = {'recheckfailed': ((b'?5=', b'?10=', b'?15='),),
+                             'transientretry': ((b'?5=', b'?10=', b'?15='),),
+                             'transientexhausted': ((b'?5=', b'?10=', b'?15='), True),
+                             'transientotherserver': ((b'?5=', b'?10=', b'?15='), True)}
 
 # scenarios with a FakeNewznab indexer (DupeSearchUrl points to it)
 SCENARIO_NEWZNAB = {'dupesearchheldbad', 'dupesearchheldforce', 'dupesearchheldhealthy', 'dupesearchheldpendingbad', 'dupesearchcappartial', 'dupesearchrankingrestart', 'dupesearchinterruptedmemo', 'dupesearchcapdead', 'dupesearchownedhistory', 'dupesearchtitlememo', 'dupesearchpardata', 'dupesearchfastdeadretry', 'dupesearchkeylessbackup', 'dupesearchranknoserver', 'dupesearchplacewhole', 'dupesearchpargap', 'dupesearchhistoryother', 'dupesearchhistoryrename', 'dupesearchstructuralcache', 'dupesearchwholeorder', 'dupesearchexplicitprefix', 'dupesearchownedlegacy', 'dupesearchretiredfleet', 'dupesearchvanishedbackup', 'dupesearchhistoryown', 'dupesearchbroaderretry', 'dupesearchzerolate', 'dupesearchwatchpersist', 'dupesearchpartialdead', 'dupesearchlegacyrename', 'dupesearchwatchscript', 'dupesearchwatchfetchrename', 'dupesearchwatchrestart', 'dupesearchwatchbackup', 'dupesearchlenientinner', 'dupesearchwatchrename', 'dupesearchbareurl', 'dupesearchgzip', 'dupesearchrestart', 'dupesearchsearch', 'dupesearchfetch', 'dupesearchfetcherror', 'dupesearchfilters', 'dupesearchdonors',

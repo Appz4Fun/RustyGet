@@ -603,6 +603,71 @@ pub fn web_format_single_file_path(web_dir: &[u8], url: &[u8], def_res: &[u8]) -
     out
 }
 
+/// Formats `" (forwarded for: <forwarded_for>)"` when non-empty else `""` for `WebProcessor::CheckCredentials`.
+pub fn webserver_format_forwarded_for_suffix(forwarded_for: &[u8]) -> Vec<u8> {
+    if forwarded_for.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(17 + forwarded_for.len() + 1);
+    out.extend_from_slice(b" (forwarded for: ");
+    out.extend_from_slice(forwarded_for);
+    out.push(b')');
+    out
+}
+
+/// Returns `true` when `content_type == Some(b"text/html")` for `WebProcessor::SendFileResponse`.
+pub fn webserver_is_html_content_type(content_type: Option<&[u8]>) -> bool {
+    content_type == Some(b"text/html")
+}
+
+/// Encodes `bytes` as lowercase hexadecimal ASCII bytes (`2 * bytes.len()`) for `GenerateSecureToken`.
+pub fn webserver_encode_hex_token(bytes: &[u8]) -> Vec<u8> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = Vec::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize]);
+        out.push(HEX[(b & 0x0f) as usize]);
+    }
+    out
+}
+
+/// Classifies the pre-URL HTTP method check in `WebProcessor::Execute`:
+/// `1` = reject POST with `content_len <= 0`, `2` = answer OPTIONS request, `0` = continue.
+pub fn webserver_classify_pre_parse_method(
+    http_method: i32,
+    hm_post: i32,
+    hm_options: i32,
+    content_len: i32,
+) -> i32 {
+    if http_method == hm_post && content_len <= 0 {
+        1
+    } else if http_method == hm_options {
+        2
+    } else {
+        0
+    }
+}
+
+/// Returns true when `RemoteServer::Run` detects a missing TLS cert or key file (`path.is_empty() || !file_exists`).
+pub fn remote_server_is_cert_or_key_missing(path: &[u8], file_exists: bool) -> bool {
+    path.is_empty() || !file_exists
+}
+
+/// Returns true when `RemoteServer::Run` should reset the listener and retry after a failed bind or accept (`!bind_ok || !has_accepted_conn`).
+pub fn remote_server_should_reset_listener(bind_ok: bool, has_accepted_conn: bool) -> bool {
+    !bind_ok || !has_accepted_conn
+}
+
+/// Returns true when `WebProcessor::Dispatch` routes a GET request to an extension resource (`get_route == 1 || get_route == 2`).
+pub fn webserver_classify_ext_route(get_route: i32) -> bool {
+    get_route == 1 || get_route == 2
+}
+
+/// Returns true when a canonicalized extension asset path resolves outside the script directory (`is_empty || first_char == b'.'`).
+pub fn webserver_is_rel_path_outside_root(is_empty: bool, first_char: u8) -> bool {
+    is_empty || first_char == b'.'
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

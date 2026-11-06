@@ -197,6 +197,11 @@ pub fn normalize_external_nzb_name(nzb_name: &[u8], valid_name: &[u8], is_nzb: b
     name
 }
 
+/// Finds the last occurrence of `ch` in `text` and returns its byte index (`Some(pos)`), or `None`.
+pub fn scanner_find_last_char_pos(text: &[u8], ch: u8) -> Option<usize> {
+    text.iter().rposition(|&b| b == ch)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

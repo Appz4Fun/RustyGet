@@ -3348,6 +3348,11 @@ pub fn resolve_completion_par_action(
     }
 }
 
+/// Converts a byte count into megabytes (`bytes / 1024.0 / 1024.0`).
+pub fn stream_repair_bytes_to_mb(bytes: i64) -> f64 {
+    (bytes as f64) / 1024.0 / 1024.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

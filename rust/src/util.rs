@@ -916,6 +916,191 @@ pub fn string_builder_calc_reserve_capacity(
     }
 }
 
+/// Formats `"<cur_dir>/<rel_filename>"` for `FileSystem::ExpandFileName`.
+pub fn fs_format_expanded_rel_path(cur_dir: &[u8], rel_filename: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(cur_dir.len() + 1 + rel_filename.len());
+    out.extend_from_slice(cur_dir);
+    out.push(b'/');
+    out.extend_from_slice(rel_filename);
+    out
+}
+
+/// Formats `"could not delete (null): <last_err>"` for `FileSystem::DeleteDirectoryWithContent`.
+pub fn fs_format_null_delete_errmsg(last_err: &[u8]) -> Vec<u8> {
+    let prefix = b"could not delete (null): ";
+    let mut out = Vec::with_capacity(prefix.len() + last_err.len());
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(last_err);
+    out
+}
+
+/// Extracts the parent directory path up to the last `sep` (or the whole `filename` if no `sep` exists)
+/// for `FileSystem::FlushDirBuffers`.
+pub fn fs_extract_parent_dir_path(filename: &[u8], sep: u8) -> Vec<u8> {
+    match filename.iter().rposition(|&b| b == sep) {
+        Some(pos) => filename[..pos].to_vec(),
+        None => filename.to_vec(),
+    }
+}
+
+/// Returns `true` when byte slices `a` and `b` are equal (`strcmp(a, b) == 0`).
+pub fn bytes_equal(a: &[u8], b: &[u8]) -> bool {
+    a == b
+}
+
+/// Returns `true` when byte slices `a` and `b` are equal under `releasename::c_lower` (`strcasecmp(a, b) == 0`)
+/// without allocating temporary buffers and stopping at the first mismatch.
+pub fn bytes_eq_ignore_case(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b.iter()).all(|(&x, &y)| {
+            x == y || crate::releasename::c_lower(x) == crate::releasename::c_lower(y)
+        })
+}
+
+/// Parses a leading signed base-10 integer from `text` following C `atoll` / `strtoll(..., 10)`
+/// semantics (skips leading ASCII whitespace, optional `+`/`-`, consecutive decimal digits).
+pub fn parse_c_atoll(text: &[u8]) -> i64 {
+    let mut i = 0;
+    while i < text.len() && matches!(text[i], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+        i += 1;
+    }
+    let mut neg = false;
+    if i < text.len() {
+        if text[i] == b'-' {
+            neg = true;
+            i += 1;
+        } else if text[i] == b'+' {
+            i += 1;
+        }
+    }
+    let mut acc: u64 = 0;
+    let mut any = false;
+    while i < text.len() && text[i].is_ascii_digit() {
+        any = true;
+        acc = acc
+            .saturating_mul(10)
+            .saturating_add(u64::from(text[i] - b'0'));
+        i += 1;
+    }
+    if !any {
+        return 0;
+    }
+    if neg {
+        let max_neg = (i64::MAX as u64) + 1;
+        if acc >= max_neg {
+            i64::MIN
+        } else {
+            -(acc as i64)
+        }
+    } else {
+        acc.min(i64::MAX as u64) as i64
+    }
+}
+
+/// Parses a leading signed base-10 integer from `text` following C `atoi` semantics.
+pub fn parse_c_atoi(text: &[u8]) -> i32 {
+    parse_c_atoll(text) as i32
+}
+
+/// Parses a leading signed base-10 integer from `text` when `Some`, or returns `default_val` when `None`.
+pub fn parse_c_atoi_or_default(text: Option<&[u8]>, default_val: i32) -> i32 {
+    match text {
+        Some(s) => parse_c_atoi(s),
+        None => default_val,
+    }
+}
+
+/// Finds the first occurrence of `needle` in `haystack` starting at `pos` for `CString::Find`.
+pub fn nstring_find_substr_from(haystack: &[u8], needle: &[u8], pos: i32) -> i32 {
+    if pos < 0 || (pos != 0 && (pos as usize) >= haystack.len()) {
+        return -1;
+    }
+    let start = pos as usize;
+    if needle.is_empty() {
+        return pos;
+    }
+    match haystack[start..]
+        .windows(needle.len())
+        .position(|w| w == needle)
+    {
+        Some(rel) => pos + (rel as i32),
+        None => -1,
+    }
+}
+
+/// Returns `true` when two byte slices are identical.
+pub fn mem_slices_equal(a: &[u8], b: &[u8]) -> bool {
+    a == b
+}
+
+/// Classifies the file extension in `Util::FindExecutorProgram`:
+/// returns `(0, 0)` when no `.` is present, or `(kind, dot_idx)` where `kind` is:
+/// `1` = `".py"`, `2` = `".sh"`, `3` = `".js"`, `4` = any other extension.
+pub fn util_classify_executor_ext(filename: &[u8]) -> (i32, usize) {
+    match filename.iter().rposition(|&b| b == b'.') {
+        None => (0, 0),
+        Some(idx) => {
+            let ext = &filename[idx..];
+            let kind = match ext {
+                b".py" => 1,
+                b".sh" => 2,
+                b".js" => 3,
+                _ => 4,
+            };
+            (kind, idx)
+        }
+    }
+}
+
+/// Finds the next non-empty trimmed token `(tok_start, tok_end, next_pos)` in `s`
+/// separated by any byte in `separators` and trimmed via `crate::util::trim_line`,
+/// for `Tokenizer::Next`.
+pub fn tokenizer_find_next_token(
+    s: &[u8],
+    separators: &[u8],
+) -> Option<(usize, usize, usize)> {
+    let mut pos = 0;
+    while pos < s.len() {
+        while pos < s.len() && separators.contains(&s[pos]) {
+            pos += 1;
+        }
+        if pos >= s.len() {
+            return None;
+        }
+        let raw_end = pos
+            + s[pos..]
+                .iter()
+                .take_while(|&&b| !separators.contains(&b))
+                .count();
+        let next_pos = if raw_end < s.len() {
+            raw_end + 1
+        } else {
+            raw_end
+        };
+        let (trim_start, trim_end) = crate::util::trim_line(&s[pos..raw_end]);
+        if trim_start < trim_end {
+            return Some((pos + trim_start, pos + trim_end, next_pos));
+        }
+        pos = next_pos;
+    }
+    None
+}
+
+/// Returns true when `FileSystem::MoveFile` should fall back from `rename` to `CopyFile` + `DeleteFile` (`!rename_ok && err_no == exdev`).
+pub fn fs_should_fallback_move_to_copy(rename_ok: bool, err_no: i32, exdev: i32) -> bool {
+    !rename_ok && err_no == exdev
+}
+
+/// Returns true when `FileSystem::CopyFile` closed cleanly, had no read/write error, and copied the exact source size.
+pub fn fs_is_copied_file_valid(
+    close_ok: bool,
+    loop_ok: bool,
+    copied_bytes: i64,
+    src_size: i64,
+) -> bool {
+    close_ok && loop_ok && copied_bytes == src_size
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -995,6 +1180,21 @@ mod tests {
         assert_eq!(
             util_internal_timegm(123, 12, 15, 0, 0, 0),
             util_internal_timegm(124, 0, 15, 0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn data_analytics_port_from_cpp() {
+        assert_eq!(data_analytics_compute(&mut []), None);
+        let mut s1 = [5.0, 10.0, 15.0];
+        assert_eq!(
+            data_analytics_compute(&mut s1),
+            Some((5.0, 15.0, 10.0, 10.0, 7.5, 12.5, 14.0))
+        );
+        let mut s2 = [5.0, 10.0, 15.0, 2.0, 8.0];
+        assert_eq!(
+            data_analytics_compute(&mut s2),
+            Some((2.0, 15.0, 8.0, 8.0, 5.0, 10.0, 13.0))
         );
     }
 }

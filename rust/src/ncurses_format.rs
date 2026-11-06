@@ -1079,6 +1079,147 @@ pub fn ncurses_pause_log_msg(pause_download: bool) -> &'static [u8] {
     }
 }
 
+/// Formats the padded/truncated line buffer for `NCursesFrontend::PlotLine`.
+pub fn ncurses_format_plot_line(
+    text: &[u8],
+    screen_width: i32,
+    pos: i32,
+    max_screen_width: i32,
+) -> Vec<u8> {
+    let w = screen_width.max(0) as usize;
+    let mut out = Vec::with_capacity(w);
+    let copy_len = text.len().min(w);
+    out.extend_from_slice(&text[..copy_len]);
+    if copy_len < w {
+        out.resize(w, b' ');
+    }
+    let size = (w + 1) as i64;
+    let rem = (screen_width - pos) as i64;
+    if size > rem && rem < max_screen_width as i64 {
+        let target_len = rem.max(0) as usize;
+        out.truncate(target_len);
+    }
+    out
+}
+
+/// Returns `Some(b"127.0.0.1\0")` when `control_ip` is `"0.0.0.0"`,
+/// or `None` when the caller's `control_ip` should be used as-is.
+pub fn frontend_resolve_control_ip(control_ip: &[u8]) -> Option<&'static [u8]> {
+    if control_ip == b"0.0.0.0" {
+        Some(b"127.0.0.1\0")
+    } else {
+        None
+    }
+}
+
+/// Returns the 8-character NUL-terminated message type prefix for `NCursesFrontend::PrintMessage`.
+/// When `first_line` is false, returns 8 spaces (`"        \0"`).
+pub fn ncurses_message_type_label(kind: i32, first_line: bool) -> &'static [u8] {
+    if !first_line {
+        return b"        \0";
+    }
+    match kind {
+        0 => b"INFO    \0",
+        1 => b"WARNING \0",
+        2 => b"ERROR   \0",
+        3 => b"DEBUG   \0",
+        4 => b"DETAIL  \0",
+        _ => b"        \0",
+    }
+}
+
+/// Maps `Message::EKind` (`0..=4`) to its ncurses color pair (`2..=6`).
+pub fn ncurses_message_color_pair(kind: i32) -> i32 {
+    match kind {
+        0 => 2, // NCURSES_COLORPAIR_INFO
+        1 => 3, // NCURSES_COLORPAIR_WARNING
+        2 => 4, // NCURSES_COLORPAIR_ERROR
+        3 => 5, // NCURSES_COLORPAIR_DEBUG
+        4 => 6, // NCURSES_COLORPAIR_DETAIL
+        _ => 1, // NCURSES_COLORPAIR_TEXT
+    }
+}
+
+/// Returns true when row `index` is within the visible scroll window in `NCursesFrontend`.
+pub fn ncurses_is_row_in_scroll_window(
+    index: i32,
+    scroll_offset: i32,
+    win_height: i32,
+) -> bool {
+    index >= scroll_offset && index < scroll_offset + win_height - 1
+}
+
+/// Accumulates file queue remaining bytes, paused bytes, and paused file count in `NCursesFrontend::PrintFileQueue`.
+pub fn ncurses_accum_file_queue_stats(
+    paused: bool,
+    file_rem_size: i64,
+    cur_rem: i64,
+    cur_paused: i64,
+    cur_paused_files: i32,
+) -> (i64, i64, i32) {
+    let next_rem = cur_rem + file_rem_size;
+    if paused {
+        (
+            next_rem,
+            cur_paused + file_rem_size,
+            cur_paused_files + 1,
+        )
+    } else {
+        (next_rem, cur_paused, cur_paused_files)
+    }
+}
+
+/// Accumulates group queue remaining bytes and paused bytes in `NCursesFrontend::PrintGroupQueue`.
+pub fn ncurses_accum_group_queue_stats(
+    group_rem_size: i64,
+    group_paused_size: i64,
+    cur_rem: i64,
+    cur_paused: i64,
+) -> (i64, i64) {
+    (cur_rem + group_rem_size, cur_paused + group_paused_size)
+}
+
+/// Evaluates whether `NCursesFrontend::UpdateInput` can enter `editQueue` mode and returns the updated queue window percentage.
+pub fn ncurses_enter_edit_queue_win_pct(queue_size: i32, cur_win_pct: i32) -> Option<i32> {
+    if queue_size > 0 {
+        Some(if cur_win_pct == 0 { 50 } else { cur_win_pct })
+    } else {
+        None
+    }
+}
+
+/// Computes the last valid queue index (`queue_size - 1` or `0` when empty) in `NCursesFrontend::UpdateInput`.
+pub fn ncurses_last_queue_index(queue_size: i32) -> i32 {
+    if queue_size > 0 {
+        queue_size - 1
+    } else {
+        0
+    }
+}
+
+/// Returns true when `Frontend::PrepareData` needs to request the remote file/summary list (`summary || file_list`).
+pub fn frontend_should_request_file_list(summary: bool, file_list: bool) -> bool {
+    summary || file_list
+}
+
+/// Returns true when `Frontend::RequestFileList` should populate the local queue via `RemoteClient::BuildFileList` (`file_list && trailing_data_len > 0`).
+pub fn frontend_should_build_remote_file_list(
+    file_list: bool,
+    trailing_data_len: u32,
+) -> bool {
+    file_list && trailing_data_len > 0
+}
+
+/// Returns true when `NCursesFrontend::Update` should exit `editQueue` mode because the queue became empty (`is_edit_queue && queue_size == 0`).
+pub fn ncurses_should_reset_empty_edit_queue(is_edit_queue: bool, queue_size: i32) -> bool {
+    is_edit_queue && queue_size == 0
+}
+
+/// Returns true when `RemoteClient::RequestServerEditQueue` has neither IDs nor names specified (`id_count == 0 && name_count == 0`).
+pub fn remote_client_is_empty_edit_target(id_count: usize, name_count: usize) -> bool {
+    id_count == 0 && name_count == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

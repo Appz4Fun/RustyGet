@@ -18336,7 +18336,7 @@ pub extern "C" fn nzbget_rs_dqh_fleet_clamp_timeout_sec(
     timeout_sec: c_int,
     max_timeout_sec: c_int,
 ) -> c_int {
-    crate::dupequeuehealth::dqh_fleet_clamp_timeout_sec(timeout_sec, max_timeout_sec)
+    crate::dupesearch_nzb::fleet_clamp_timeout_sec(timeout_sec, max_timeout_sec)
 }
 
 #[no_mangle]
@@ -18358,7 +18358,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_fleet_update_key_score_bounds(
     out_running_score: *mut c_int,
 ) {
     let (new_top, new_lowest, new_run_id, new_run_score) =
-        crate::dupequeuehealth::dqh_fleet_update_key_score_bounds(
+        crate::dupesearch_nzb::fleet_update_key_score_bounds(
             cur_top,
             cur_lowest,
             any_seen != 0,
@@ -18395,7 +18395,7 @@ pub extern "C" fn nzbget_rs_dqh_fleet_is_already_downloaded_history_item(
     ks_bad_val: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_fleet_is_already_downloaded_history_item(
+        crate::dupesearch_nzb::fleet_is_already_downloaded_history_item(
             has_item != 0,
             delete_status,
             ds_none_val,
@@ -18413,12 +18413,12 @@ pub extern "C" fn nzbget_rs_dqh_fleet_calc_member_add_score(
     top: i64,
     rank: c_int,
 ) -> c_int {
-    crate::dupequeuehealth::dqh_fleet_calc_member_add_score(running_id, lowest, top, rank)
+    crate::dupesearch_nzb::fleet_calc_member_add_score(running_id, lowest, top, rank)
 }
 
 #[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_donor_health_error_increment(busy: c_int) -> c_int {
-    crate::dupequeuehealth::dqh_donor_health_error_increment(busy != 0)
+    crate::dupesearch_nzb::donor_health_error_increment(busy != 0)
 }
 
 #[no_mangle]
@@ -18427,36 +18427,8 @@ pub extern "C" fn nzbget_rs_dqh_donor_health_should_pause_server(
     server_give_up: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_donor_health_should_pause_server(errors, server_give_up),
+        crate::dupesearch_nzb::donor_health_should_pause_server(errors, server_give_up),
     )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_donor_health_record_exchange_error(
-    cur_errors: c_int,
-    busy: c_int,
-    server_give_up: c_int,
-    now_ms: i64,
-    retry_after_ms: i64,
-    cur_down_until_ms: i64,
-    out_errors: *mut c_int,
-    out_down_until_ms: *mut i64,
-) {
-    let (new_errors, new_down_until) =
-        crate::dupequeuehealth::dqh_donor_health_record_exchange_error(
-            cur_errors,
-            busy != 0,
-            server_give_up,
-            now_ms,
-            retry_after_ms,
-            cur_down_until_ms,
-        );
-    if !out_errors.is_null() {
-        *out_errors = new_errors;
-    }
-    if !out_down_until_ms.is_null() {
-        *out_down_until_ms = new_down_until;
-    }
 }
 
 #[no_mangle]
@@ -18476,7 +18448,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_donor_health_accum_verdict_counts(
         && !io_error.is_null()
         && !io_body_bad.is_null()
     {
-        crate::dupequeuehealth::dqh_donor_health_accum_verdict_counts(
+        crate::dupesearch_nzb::donor_health_accum_verdict_counts(
             verdict,
             f_present,
             f_missing,
@@ -20258,7 +20230,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_fleet_ensure_nzb_ext(
     } else {
         std::slice::from_raw_parts(name_ptr.cast::<u8>(), name_len)
     };
-    into_buf(crate::dupequeuehealth::dqh_fleet_ensure_nzb_ext(slice))
+    into_buf(crate::dupesearch_nzb::fleet_ensure_nzb_ext(slice))
 }
 
 #[no_mangle]
@@ -20276,7 +20248,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_fleet_visit_pipe_names(
     } else {
         std::slice::from_raw_parts(names_ptr.cast::<u8>(), names_len)
     };
-    crate::dupequeuehealth::dqh_fleet_visit_pipe_names(slice, |part| {
+    crate::dupesearch_nzb::fleet_visit_pipe_names(slice, |part| {
         cb(ctx, part.as_ptr().cast::<c_char>(), part.len());
     });
 }
@@ -20620,7 +20592,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_donor_health_accum_health(
     {
         return;
     }
-    crate::dupequeuehealth::dqh_donor_health_accum_health(
+    crate::dupesearch_nzb::donor_health_accum_health(
         &mut *checked,
         &mut *present,
         &mut *missing,
@@ -20644,7 +20616,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_donor_health_calc_worker_budget_ms(
     out_budget_ms: *mut i32,
 ) -> i32 {
     let mut b = cur_budget_ms;
-    let ok = crate::dupequeuehealth::dqh_donor_health_calc_worker_budget_ms(
+    let ok = crate::dupesearch_nzb::donor_health_calc_worker_budget_ms(
         deadline_ms,
         now_ms,
         cur_budget_ms,
@@ -20661,12 +20633,12 @@ pub extern "C" fn nzbget_rs_dqh_donor_health_calc_thread_count(
     postings_len: usize,
     concurrency: i32,
 ) -> usize {
-    crate::dupequeuehealth::dqh_donor_health_calc_thread_count(postings_len, concurrency)
+    crate::dupesearch_nzb::donor_health_calc_thread_count(postings_len, concurrency)
 }
 
 #[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_fleet_format_fetch_error(status: i32) -> RsBuf {
-    into_buf(crate::dupequeuehealth::dqh_fleet_format_fetch_error(status))
+    into_buf(crate::dupesearch_nzb::fleet_format_fetch_error(status))
 }
 
 #[no_mangle]
@@ -20680,7 +20652,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_fleet_calc_check_budget_and_deadline(
     out_budget_ms: *mut i32,
     out_check_deadline_ms: *mut i64,
 ) {
-    let (smax, bms, dl) = crate::dupequeuehealth::dqh_fleet_calc_check_budget_and_deadline(
+    let (smax, bms, dl) = crate::dupesearch_nzb::fleet_calc_check_budget_and_deadline(
         opt_max,
         fleet_sample_max,
         deadline_ms,
@@ -20704,7 +20676,7 @@ pub extern "C" fn nzbget_rs_dqh_fleet_candidate_tier(
     dead: i32,
     alive: i32,
 ) -> i32 {
-    crate::dupequeuehealth::dqh_fleet_candidate_tier(has_error != 0, dead != 0, alive)
+    crate::dupesearch_nzb::fleet_candidate_tier(has_error != 0, dead != 0, alive)
 }
 
 #[no_mangle]
@@ -20715,7 +20687,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_fleet_format_summary_log(
     reason: *const c_char,
     complete: i32,
 ) -> RsBuf {
-    into_buf(crate::dupequeuehealth::dqh_fleet_format_summary_log(
+    into_buf(crate::dupesearch_nzb::fleet_format_summary_log(
         members_count,
         input(dupe_key),
         chosen,
@@ -20732,7 +20704,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_dupesearch_is_generated_key(
     nzb_id: i32,
     key: *const c_char,
 ) -> i32 {
-    if crate::dupequeuehealth::dqh_dupesearch_is_generated_key(
+    if crate::dupesearch_nzb::dupesearch_is_generated_key(
         dupe_key_empty != 0,
         has_owner != 0,
         input(owner_value),
@@ -20754,7 +20726,7 @@ pub extern "C" fn nzbget_rs_dqh_dupesearch_should_check_added_for_parent_rank(
     dm_score: i32,
     has_dupe_fleet_param: i32,
 ) -> i32 {
-    if crate::dupequeuehealth::dqh_dupesearch_should_check_added_for_parent_rank(
+    if crate::dupesearch_nzb::dupesearch_should_check_added_for_parent_rank(
         action,
         ea_nzb_added,
         is_donor != 0,
@@ -20783,7 +20755,7 @@ pub extern "C" fn nzbget_rs_dqh_dupesearch_is_better_parent_candidate(
     has_parent: i32,
     parent_score: i32,
 ) -> i32 {
-    if crate::dupequeuehealth::dqh_dupesearch_is_better_parent_candidate(
+    if crate::dupesearch_nzb::dupesearch_is_better_parent_candidate(
         is_same_item != 0,
         kind,
         nk_nzb,
@@ -20810,7 +20782,7 @@ pub extern "C" fn nzbget_rs_dqh_dupesearch_should_retain_peer(
     pick_score: i32,
     has_dupe_fleet_param: i32,
 ) -> i32 {
-    if crate::dupequeuehealth::dqh_dupesearch_should_retain_peer(
+    if crate::dupesearch_nzb::dupesearch_should_retain_peer(
         is_same_item != 0,
         item_score,
         pick_score,
@@ -20837,12 +20809,12 @@ pub unsafe extern "C" fn nzbget_rs_dqh_dupesearch_format_rejected_outcome(
     for &k in raw_keys {
         keys.push(input(k));
     }
-    into_buf(crate::dupequeuehealth::dqh_dupesearch_format_rejected_outcome(&keys, counts))
+    into_buf(crate::dupesearch_nzb::dupesearch_format_rejected_outcome(&keys, counts))
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_dupesearch_parse_pending_dir_id(name: *const c_char) -> i32 {
-    crate::dupequeuehealth::dqh_dupesearch_parse_pending_dir_id(input(name))
+    crate::dupesearch_nzb::dupesearch_parse_pending_dir_id(input(name))
 }
 
 #[no_mangle]
@@ -20868,7 +20840,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_dupesearch_pending_identity_matches(
             unsafe { std::slice::from_raw_parts(p, n) }
         }
     };
-    if crate::dupequeuehealth::dqh_dupesearch_pending_identity_matches(
+    if crate::dupesearch_nzb::dupesearch_pending_identity_matches(
         has_pick_title_file != 0,
         slice(saved_title_ptr, saved_title_len),
         slice(cur_norm_title_ptr, cur_norm_title_len),
@@ -20993,7 +20965,7 @@ pub extern "C" fn nzbget_rs_tpr_article_fetcher_should_throttle_bandwidth(
 
 #[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_stream_repair_bytes_to_mb(bytes: i64) -> f64 {
-    crate::dupequeuehealth::dqh_stream_repair_bytes_to_mb(bytes)
+    crate::streamrepair::stream_repair_bytes_to_mb(bytes)
 }
 
 #[no_mangle]
@@ -21003,7 +20975,7 @@ pub extern "C" fn nzbget_rs_dqh_article_writer_use_target_path_directly(
     output_filename_empty: i32,
     same_filename: i32,
 ) -> i32 {
-    if crate::dupequeuehealth::dqh_article_writer_use_target_path_directly(
+    if crate::artwritercore::article_writer_use_target_path_directly(
         force_direct_write != 0,
         direct_write != 0,
         output_filename_empty != 0,
@@ -21022,7 +20994,7 @@ pub extern "C" fn nzbget_rs_dqh_article_dl_is_server_available(
     optional: i32,
     is_blocked: i32,
 ) -> i32 {
-    if crate::dupequeuehealth::dqh_article_dl_is_server_available(
+    if crate::artwritercore::article_dl_is_server_available(
         active != 0,
         max_connections,
         optional != 0,
@@ -21272,7 +21244,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_article_dl_format_connection_name(
     } else {
         CStr::from_ptr(host).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_article_dl_format_connection_name(s, h))
+    into_buf(crate::artwritercore::article_dl_format_connection_name(s, h))
 }
 
 #[no_mangle]
@@ -21285,7 +21257,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_article_dl_format_fetch_command(
     } else {
         CStr::from_ptr(message_id).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_article_dl_format_fetch_command(
+    into_buf(crate::artwritercore::article_dl_format_fetch_command(
         raw_article != 0,
         m,
     ))
@@ -21297,7 +21269,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_article_dl_select_yenc_crc(
     calculated_crc: u32,
     expected_crc: u32,
 ) -> u32 {
-    crate::dupequeuehealth::dqh_article_dl_select_yenc_crc(
+    crate::artwritercore::article_dl_select_yenc_crc(
         crc_check != 0,
         calculated_crc,
         expected_crc,
@@ -21308,7 +21280,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_article_dl_select_yenc_crc(
 pub unsafe extern "C" fn nzbget_rs_dqh_article_writer_open_verb(
     direct_write: i32,
 ) -> *const c_char {
-    crate::dupequeuehealth::dqh_article_writer_open_verb(direct_write != 0).as_ptr()
+    crate::artwritercore::article_writer_open_verb(direct_write != 0).as_ptr()
         as *const c_char
 }
 
@@ -21328,7 +21300,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_article_writer_format_info_path(
     } else {
         CStr::from_ptr(filename).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_article_writer_format_info_path(
+    into_buf(crate::artwritercore::article_writer_format_info_path(
         n, sep as u8, f,
     ))
 }
@@ -21352,7 +21324,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_article_writer_parent_dir_len(
     } else {
         std::slice::from_raw_parts(final_path as *const u8, final_path_len)
     };
-    match crate::dupequeuehealth::dqh_article_writer_parent_dir_len(f, p, sep as u8) {
+    match crate::artwritercore::article_writer_parent_dir_len(f, p, sep as u8) {
         Some(len) => {
             if !out_parent_len.is_null() {
                 *out_parent_len = len;
@@ -21370,7 +21342,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_article_writer_apply_missing_part_counter
     out_failed_articles: *mut i32,
     out_success_articles: *mut i32,
 ) {
-    let (failed, success) = crate::dupequeuehealth::dqh_article_writer_apply_missing_part_counters(
+    let (failed, success) = crate::artwritercore::article_writer_apply_missing_part_counters(
         failed_articles,
         success_articles,
     );
@@ -21395,7 +21367,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_article_writer_format_raw_part_dest(
         std::slice::from_raw_parts(final_output_path as *const u8, final_output_path_len)
     };
     into_buf(
-        crate::dupequeuehealth::dqh_article_writer_format_raw_part_dest(p, sep as u8, part_number),
+        crate::artwritercore::article_writer_format_raw_part_dest(p, sep as u8, part_number),
     )
 }
 
@@ -21404,7 +21376,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_article_writer_calc_total_failed_articles
     missed_articles: i32,
     failed_articles: i32,
 ) -> i32 {
-    crate::dupequeuehealth::dqh_article_writer_calc_total_failed_articles(
+    crate::artwritercore::article_writer_calc_total_failed_articles(
         missed_articles,
         failed_articles,
     )
@@ -21420,7 +21392,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_statmeter_calc_debug_speed_and_timediff(
     out_time_diff: *mut i32,
 ) {
     let (speed_kb, time_diff) =
-        crate::dupequeuehealth::dqh_statmeter_calc_debug_speed_and_timediff(
+        crate::statmeter::statmeter_calc_debug_speed_and_timediff(
             current_download_speed,
             cur_time,
             speed_start_time,
@@ -21436,7 +21408,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_statmeter_calc_debug_speed_and_timediff(
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_statmeter_bytes_to_mb_i32(bytes: i64) -> i32 {
-    crate::dupequeuehealth::dqh_statmeter_bytes_to_mb_i32(bytes)
+    crate::statmeter::statmeter_bytes_to_mb_i32(bytes)
 }
 
 #[no_mangle]
@@ -21629,17 +21601,17 @@ pub unsafe extern "C" fn nzbget_rs_dqh_conn_calc_read_buffer_cap(
     read_buf_size: i32,
     decode_slack: i32,
 ) -> i32 {
-    crate::dupequeuehealth::dqh_conn_calc_read_buffer_cap(read_buf_size, decode_slack)
+    crate::nntp::conn_calc_read_buffer_cap(read_buf_size, decode_slack)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_conn_format_port_str(port: i32) -> RsBuf {
-    into_buf(crate::dupequeuehealth::dqh_conn_format_port_str(port))
+    into_buf(crate::nntp::conn_format_port_str(port))
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_conn_clamp_buf_avail(buf_avail: i32) -> i32 {
-    crate::dupequeuehealth::dqh_conn_clamp_buf_avail(buf_avail)
+    crate::nntp::conn_clamp_buf_avail(buf_avail)
 }
 
 #[no_mangle]
@@ -21659,7 +21631,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_conn_format_report_err_with_code(
         CStr::from_ptr(err_msg).to_bytes()
     };
     into_buf(
-        crate::dupequeuehealth::dqh_conn_format_report_err_with_code(p, err_code, m),
+        crate::nntp::conn_format_report_err_with_code(p, err_code, m),
     )
 }
 
@@ -21678,7 +21650,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_tls_format_report_err(
     } else {
         CStr::from_ptr(err_str).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_tls_format_report_err(m, s))
+    into_buf(crate::tlscipher::tls_format_report_err(m, s))
 }
 
 #[no_mangle]
@@ -21696,7 +21668,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_tls_format_cert_verify_err(
     } else {
         CStr::from_ptr(verify_err_str).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_tls_format_cert_verify_err(h, v))
+    into_buf(crate::tlscipher::tls_format_cert_verify_err(h, v))
 }
 
 #[no_mangle]
@@ -21706,7 +21678,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_tls_format_handshake_err(host: *const c_c
     } else {
         CStr::from_ptr(host).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_tls_format_handshake_err(h))
+    into_buf(crate::tlscipher::tls_format_handshake_err(h))
 }
 
 #[no_mangle]
@@ -21725,7 +21697,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_tls_format_hostname_mismatch_err(
         CStr::from_ptr(cert_host).to_bytes()
     };
     into_buf(
-        crate::dupequeuehealth::dqh_tls_format_hostname_mismatch_err(h, ch),
+        crate::tlscipher::tls_format_hostname_mismatch_err(h, ch),
     )
 }
 
@@ -21734,7 +21706,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_tls_select_io_err_msg(
     is_write: i32,
     peek_err_zero: i32,
 ) -> *const c_char {
-    crate::dupequeuehealth::dqh_tls_select_io_err_msg(is_write != 0, peek_err_zero != 0).as_ptr()
+    crate::tlscipher::tls_select_io_err_msg(is_write != 0, peek_err_zero != 0).as_ptr()
         as *const c_char
 }
 
@@ -21844,7 +21816,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_maintenance_resolve_script_path(
     } else {
         CStr::from_ptr(script).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_maintenance_resolve_script_path(
+    into_buf(crate::systemhealth::maintenance_resolve_script_path(
         ad,
         sep as u8,
         sc,
@@ -21862,7 +21834,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_maintenance_format_package_info_path(
         CStr::from_ptr(web_dir).to_bytes()
     };
     into_buf(
-        crate::dupequeuehealth::dqh_maintenance_format_package_info_path(wd, sep as u8),
+        crate::systemhealth::maintenance_format_package_info_path(wd, sep as u8),
     )
 }
 
@@ -21877,7 +21849,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_maintenance_format_script_info_name(
         CStr::from_ptr(base_name).to_bytes()
     };
     into_buf(
-        crate::dupequeuehealth::dqh_maintenance_format_script_info_name(
+        crate::systemhealth::maintenance_format_script_info_name(
             is_info_script != 0,
             bn,
         ),
@@ -21886,20 +21858,20 @@ pub unsafe extern "C" fn nzbget_rs_dqh_maintenance_format_script_info_name(
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_maintenance_branch_name(branch: i32) -> *const c_char {
-    crate::dupequeuehealth::dqh_maintenance_branch_name(branch).as_ptr() as *const c_char
+    crate::systemhealth::maintenance_branch_name(branch).as_ptr() as *const c_char
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_maintenance_run_mode_name(
     daemon_mode: i32,
 ) -> *const c_char {
-    crate::dupequeuehealth::dqh_maintenance_run_mode_name(daemon_mode != 0).as_ptr()
+    crate::systemhealth::maintenance_run_mode_name(daemon_mode != 0).as_ptr()
         as *const c_char
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_maintenance_format_cmdline_env_name(index: i32) -> RsBuf {
-    into_buf(crate::dupequeuehealth::dqh_maintenance_format_cmdline_env_name(index))
+    into_buf(crate::systemhealth::maintenance_format_cmdline_env_name(index))
 }
 
 #[no_mangle]
@@ -21914,7 +21886,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_maintenance_strip_ext_and_calc_prefix_len
         CStr::from_ptr(base_name).to_bytes()
     };
     let (stem, prefix_len) =
-        crate::dupequeuehealth::dqh_maintenance_strip_ext_and_calc_prefix_len(bn, max_len);
+        crate::systemhealth::maintenance_strip_ext_and_calc_prefix_len(bn, max_len);
     if !out_prefix_len.is_null() {
         *out_prefix_len = prefix_len;
     }
@@ -21930,26 +21902,26 @@ pub unsafe extern "C" fn nzbget_rs_dqh_maintenance_format_sig_title(
     } else {
         CStr::from_ptr(base_name).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_maintenance_format_sig_title(bn))
+    into_buf(crate::systemhealth::maintenance_format_sig_title(bn))
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_scheduler_bytes_to_kb(bytes: i32) -> i32 {
-    crate::dupequeuehealth::dqh_scheduler_bytes_to_kb(bytes)
+    crate::scheduler::scheduler_bytes_to_kb(bytes)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_scheduler_pause_action_str(
     paused: i32,
 ) -> *const c_char {
-    crate::dupequeuehealth::dqh_scheduler_pause_action_str(paused != 0).as_ptr() as *const c_char
+    crate::scheduler::scheduler_pause_action_str(paused != 0).as_ptr() as *const c_char
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_scheduler_server_action_str(
     active: i32,
 ) -> *const c_char {
-    crate::dupequeuehealth::dqh_scheduler_server_action_str(active != 0).as_ptr() as *const c_char
+    crate::scheduler::scheduler_server_action_str(active != 0).as_ptr() as *const c_char
 }
 
 #[no_mangle]
@@ -22067,7 +22039,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_format_new_path(
     } else {
         CStr::from_ptr(base_path).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_diskstate_format_new_path(bp))
+    into_buf(crate::diskstate_format::diskstate_format_new_path(bp))
 }
 
 #[no_mangle]
@@ -22075,7 +22047,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_format_ids_line(
     nzb_id: i32,
     file_id: i32,
 ) -> RsBuf {
-    into_buf(crate::dupequeuehealth::dqh_diskstate_format_ids_line(
+    into_buf(crate::diskstate_format::diskstate_format_ids_line(
         nzb_id, file_id,
     ))
 }
@@ -22084,7 +22056,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_format_ids_line(
 pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_legacy_suffix_str(
     suffix_kind: i32,
 ) -> *const c_char {
-    crate::dupequeuehealth::dqh_diskstate_legacy_suffix_str(suffix_kind).as_ptr() as *const c_char
+    crate::diskstate_format::diskstate_legacy_suffix_str(suffix_kind).as_ptr() as *const c_char
 }
 
 #[no_mangle]
@@ -22097,7 +22069,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_format_unreadable_path(
     } else {
         CStr::from_ptr(filename).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_diskstate_format_unreadable_path(f, now))
+    into_buf(crate::diskstate_format::diskstate_format_unreadable_path(f, now))
 }
 
 #[no_mangle]
@@ -22111,7 +22083,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_format_out_tmp_path(
     } else {
         CStr::from_ptr(dest_dir).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_diskstate_format_out_tmp_path(
+    into_buf(crate::diskstate_format::diskstate_format_out_tmp_path(
         dd,
         sep as u8,
         file_id,
@@ -22131,7 +22103,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_format_staged_part_path(
         CStr::from_ptr(temp_dir).to_bytes()
     };
     into_buf(
-        crate::dupequeuehealth::dqh_diskstate_format_staged_part_path(
+        crate::diskstate_format::diskstate_format_staged_part_path(
             td,
             sep as u8,
             file_id,
@@ -22145,7 +22117,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_format_file_state_name(
     file_id: i32,
     completed: i32,
 ) -> RsBuf {
-    into_buf(crate::dupequeuehealth::dqh_diskstate_format_file_state_name(
+    into_buf(crate::diskstate_format::diskstate_format_file_state_name(
         file_id,
         completed != 0,
     ))
@@ -22162,7 +22134,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_format_nzb_log_path(
     } else {
         CStr::from_ptr(queue_dir).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_diskstate_format_nzb_log_path(
+    into_buf(crate::diskstate_format::diskstate_format_nzb_log_path(
         qd,
         sep as u8,
         nzb_id,
@@ -22246,7 +22218,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_unpack_ctrl_strip_last_extension(
     } else {
         CStr::from_ptr(frag_base_name).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_unpack_ctrl_strip_last_extension(f))
+    into_buf(crate::unpack::unpack_ctrl_strip_last_extension(f))
 }
 
 #[no_mangle]
@@ -22258,7 +22230,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_article_fetcher_format_body_cmd(
     } else {
         CStr::from_ptr(message_id).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_article_fetcher_format_body_cmd(m))
+    into_buf(crate::nntp::article_fetcher_format_body_cmd(m))
 }
 
 #[no_mangle]
@@ -22270,7 +22242,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_webserver_format_forwarded_for_suffix(
     } else {
         CStr::from_ptr(forwarded_for).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_webserver_format_forwarded_for_suffix(f))
+    into_buf(crate::webserver::webserver_format_forwarded_for_suffix(f))
 }
 
 #[no_mangle]
@@ -22283,7 +22255,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_newznab_format_search_info_name(
     } else {
         CStr::from_ptr(label).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_newznab_format_search_info_name(
+    into_buf(crate::dupesearch_nzb::newznab_format_search_info_name(
         l,
         page_one_based,
     ))
@@ -22299,7 +22271,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_dupesearch_format_key_val_param(
     } else {
         CStr::from_ptr(param_name).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_dupesearch_format_key_val_param(
+    into_buf(crate::dupesearch_nzb::dupesearch_format_key_val_param(
         p, val,
     ))
 }
@@ -22315,7 +22287,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_dupesearch_format_pending_dir(
     } else {
         CStr::from_ptr(queue_dir).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_dupesearch_format_pending_dir(
+    into_buf(crate::dupesearch_nzb::dupesearch_format_pending_dir(
         q, sep as u8, nzb_id,
     ))
 }
@@ -22332,20 +22304,20 @@ pub unsafe extern "C" fn nzbget_rs_dqh_dupesearch_format_indexed_base_path(
         CStr::from_ptr(dir).to_bytes()
     };
     into_buf(
-        crate::dupequeuehealth::dqh_dupesearch_format_indexed_base_path(d, sep as u8, idx),
+        crate::dupesearch_nzb::dupesearch_format_indexed_base_path(d, sep as u8, idx),
     )
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_dupesearch_format_usize_str(idx: usize) -> RsBuf {
-    into_buf(crate::dupequeuehealth::dqh_dupesearch_format_usize_str(idx))
+    into_buf(crate::dupesearch_nzb::dupesearch_format_usize_str(idx))
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_nzb_fetcher_format_http_status_err(
     status: c_int,
 ) -> RsBuf {
-    into_buf(crate::dupequeuehealth::dqh_nzb_fetcher_format_http_status_err(status))
+    into_buf(crate::dupesearch_nzb::nzb_fetcher_format_http_status_err(status))
 }
 
 #[no_mangle]
@@ -22360,7 +22332,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_http_get_format_temp_path(
     } else {
         CStr::from_ptr(temp_dir).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_http_get_format_temp_path(
+    into_buf(crate::dupesearch_nzb::http_get_format_temp_path(
         t, sep as u8, now_sec, counter,
     ))
 }
@@ -22371,7 +22343,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_fleet_calc_check_lock_wait_ms(
     now_ms: i64,
     finish_reserve_ms: i64,
 ) -> i64 {
-    crate::dupequeuehealth::dqh_fleet_calc_check_lock_wait_ms(
+    crate::dupesearch_nzb::fleet_calc_check_lock_wait_ms(
         deadline_ms,
         now_ms,
         finish_reserve_ms,
@@ -22393,7 +22365,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_script_ctrl_format_env_assignment(
     } else {
         CStr::from_ptr(value).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_script_ctrl_format_env_assignment(n, v))
+    into_buf(crate::extension::script_ctrl_format_env_assignment(n, v))
 }
 
 #[no_mangle]
@@ -22411,7 +22383,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_script_ctrl_format_prefixed_varname(
     } else {
         CStr::from_ptr(name).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_script_ctrl_format_prefixed_varname(p, n))
+    into_buf(crate::extension::script_ctrl_format_prefixed_varname(p, n))
 }
 
 #[no_mangle]
@@ -22436,7 +22408,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_log_format_debug_line(
     } else {
         Some(CStr::from_ptr(funcname).to_bytes())
     };
-    into_buf(crate::dupequeuehealth::dqh_log_format_debug_line(
+    into_buf(crate::systemhealth::log_format_debug_line(
         m, b, line_nr, f,
     ))
 }
@@ -22456,7 +22428,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_log_format_rotate_mask(
     } else {
         CStr::from_ptr(base_ext).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_log_format_rotate_mask(n, e))
+    into_buf(crate::systemhealth::log_format_rotate_mask(n, e))
 }
 
 #[no_mangle]
@@ -22468,7 +22440,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_log_format_deleting_old_msg(
     } else {
         CStr::from_ptr(filename).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_log_format_deleting_old_msg(f))
+    into_buf(crate::systemhealth::log_format_deleting_old_msg(f))
 }
 
 #[no_mangle]
@@ -22496,7 +22468,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_log_format_rotated_path(
     } else {
         CStr::from_ptr(base_ext).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_log_format_rotated_path(
+    into_buf(crate::systemhealth::log_format_rotated_path(
         d, sep as u8, n, year, month, mday, e,
     ))
 }
@@ -22517,14 +22489,14 @@ pub unsafe extern "C" fn nzbget_rs_dqh_options_format_indexed_opt_name(
     } else {
         CStr::from_ptr(field).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_options_format_indexed_opt_name(
+    into_buf(crate::options::options_format_indexed_opt_name(
         p, idx, f,
     ))
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_nzbget_format_pid_line(pid: c_int) -> RsBuf {
-    into_buf(crate::dupequeuehealth::dqh_nzbget_format_pid_line(pid))
+    into_buf(crate::systemhealth::nzbget_format_pid_line(pid))
 }
 
 #[no_mangle]
@@ -22539,7 +22511,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_ncurses_format_plot_line(
     } else {
         CStr::from_ptr(text).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_ncurses_format_plot_line(
+    into_buf(crate::ncurses_format::ncurses_format_plot_line(
         t,
         screen_width,
         pos,
@@ -22562,14 +22534,14 @@ pub unsafe extern "C" fn nzbget_rs_dqh_fs_format_expanded_rel_path(
     } else {
         CStr::from_ptr(rel_filename).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_fs_format_expanded_rel_path(c, r))
+    into_buf(crate::util::fs_format_expanded_rel_path(c, r))
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_benchmark_format_unique_filename(
     epoch_ticks: i64,
 ) -> RsBuf {
-    into_buf(crate::dupequeuehealth::dqh_benchmark_format_unique_filename(epoch_ticks))
+    into_buf(crate::tlscipher::benchmark_format_unique_filename(epoch_ticks))
 }
 
 #[no_mangle]
@@ -22577,7 +22549,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_benchmark_resolve_block_size(
     block_size_bytes: usize,
     default_block_size: usize,
 ) -> usize {
-    crate::dupequeuehealth::dqh_benchmark_resolve_block_size(
+    crate::tlscipher::benchmark_resolve_block_size(
         block_size_bytes,
         default_block_size,
     )
@@ -22594,12 +22566,12 @@ pub unsafe extern "C" fn nzbget_rs_dqh_statmeter_format_indexed_bytes_line(
     } else {
         std::slice::from_raw_parts(values, count)
     };
-    into_buf(crate::dupequeuehealth::dqh_statmeter_format_indexed_bytes_line(first_idx, slice))
+    into_buf(crate::statmeter::statmeter_format_indexed_bytes_line(first_idx, slice))
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_sysinfo_format_rapidyenc_version(ver: c_int) -> RsBuf {
-    into_buf(crate::dupequeuehealth::dqh_sysinfo_format_rapidyenc_version(ver))
+    into_buf(crate::systemhealth::sysinfo_format_rapidyenc_version(ver))
 }
 
 #[no_mangle]
@@ -22611,7 +22583,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_fs_format_null_delete_errmsg(
     } else {
         CStr::from_ptr(last_err).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_fs_format_null_delete_errmsg(e))
+    into_buf(crate::util::fs_format_null_delete_errmsg(e))
 }
 
 #[no_mangle]
@@ -22624,7 +22596,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_fs_extract_parent_dir_path(
     } else {
         CStr::from_ptr(filename).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_fs_extract_parent_dir_path(
+    into_buf(crate::util::fs_extract_parent_dir_path(
         f, sep as u8,
     ))
 }
@@ -22638,7 +22610,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_is_candidate_queue_file_name(
     } else {
         CStr::from_ptr(filename).to_bytes()
     };
-    c_int::from(crate::dupequeuehealth::dqh_diskstate_is_candidate_queue_file_name(f))
+    c_int::from(crate::diskstate_format::diskstate_is_candidate_queue_file_name(f))
 }
 
 #[no_mangle]
@@ -22652,7 +22624,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_find_char_pos(
     } else {
         CStr::from_ptr(line).to_bytes()
     };
-    match crate::dupequeuehealth::dqh_diskstate_find_char_pos(l, sep as u8) {
+    match crate::diskstate_format::diskstate_find_char_pos(l, sep as u8) {
         Some(pos) => {
             if !out_pos.is_null() {
                 *out_pos = pos;
@@ -22672,7 +22644,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_tls_is_tls13_version_str(
     } else {
         CStr::from_ptr(ver).to_bytes()
     };
-    c_int::from(crate::dupequeuehealth::dqh_tls_is_tls13_version_str(v))
+    c_int::from(crate::tlscipher::tls_is_tls13_version_str(v))
 }
 
 #[no_mangle]
@@ -22685,7 +22657,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_tls_resolve_cipher_bits(
     } else {
         CStr::from_ptr(cipher_name).to_bytes()
     };
-    crate::dupequeuehealth::dqh_tls_resolve_cipher_bits(c, raw_bits)
+    crate::tlscipher::tls_resolve_cipher_bits(c, raw_bits)
 }
 
 #[no_mangle]
@@ -22703,7 +22675,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_tls_format_bulk_cipher_name(
     } else {
         CStr::from_ptr(cipher_name).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_tls_format_bulk_cipher_name(b, c))
+    into_buf(crate::tlscipher::tls_format_bulk_cipher_name(b, c))
 }
 
 #[no_mangle]
@@ -22713,7 +22685,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_tls_compute_suite_flags(
     auth_is_cert: c_int,
     kx_is_ephemeral: c_int,
 ) -> u32 {
-    crate::dupequeuehealth::dqh_tls_compute_suite_flags(
+    crate::tlscipher::tls_compute_suite_flags(
         is_aead != 0,
         tls13 != 0,
         auth_is_cert != 0,
@@ -22736,7 +22708,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_nntp_conn_is_already_in_group(
     } else {
         CStr::from_ptr(grp).to_bytes()
     };
-    c_int::from(crate::dupequeuehealth::dqh_nntp_conn_is_already_in_group(a, g))
+    c_int::from(crate::nntp::nntp_conn_is_already_in_group(a, g))
 }
 
 #[no_mangle]
@@ -22749,7 +22721,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_options_should_expand_home_value(
     } else {
         Some(CStr::from_ptr(value).to_bytes())
     };
-    c_int::from(crate::dupequeuehealth::dqh_options_should_expand_home_value(
+    c_int::from(crate::options::options_should_expand_home_value(
         v,
         no_disk_access != 0,
     ))
@@ -22764,7 +22736,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_nzbget_is_backward_compat_root_user(
     } else {
         CStr::from_ptr(username).to_bytes()
     };
-    c_int::from(crate::dupequeuehealth::dqh_nzbget_is_backward_compat_root_user(u))
+    c_int::from(crate::systemhealth::nzbget_is_backward_compat_root_user(u))
 }
 
 #[no_mangle]
@@ -22778,7 +22750,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_xmlrpc_is_multicall_post(
     } else {
         CStr::from_ptr(method_name).to_bytes()
     };
-    c_int::from(crate::dupequeuehealth::dqh_xmlrpc_is_multicall_post(
+    c_int::from(crate::xmlrpc_format::xmlrpc_is_multicall_post(
         m,
         is_xmlrpc_proto != 0,
         is_http_post != 0,
@@ -22794,7 +22766,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_xmlrpc_is_tls_cipher_baseline_entry(
     } else {
         CStr::from_ptr(name).to_bytes()
     };
-    c_int::from(crate::dupequeuehealth::dqh_xmlrpc_is_tls_cipher_baseline_entry(n))
+    c_int::from(crate::xmlrpc_format::xmlrpc_is_tls_cipher_baseline_entry(n))
 }
 
 #[no_mangle]
@@ -22806,7 +22778,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_webserver_is_html_content_type(
     } else {
         Some(CStr::from_ptr(content_type).to_bytes())
     };
-    c_int::from(crate::dupequeuehealth::dqh_webserver_is_html_content_type(c))
+    c_int::from(crate::webserver::webserver_is_html_content_type(c))
 }
 
 #[no_mangle]
@@ -22820,7 +22792,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_scanner_find_last_char_pos(
     } else {
         CStr::from_ptr(text).to_bytes()
     };
-    match crate::dupequeuehealth::dqh_scanner_find_last_char_pos(t, ch as u8) {
+    match crate::scanner::scanner_find_last_char_pos(t, ch as u8) {
         Some(pos) => {
             if !out_pos.is_null() {
                 *out_pos = pos;
@@ -22841,7 +22813,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_log_split_basename_and_ext(
     } else {
         CStr::from_ptr(base_name).to_bytes()
     };
-    let (stem, ext) = crate::dupequeuehealth::dqh_log_split_basename_and_ext(b);
+    let (stem, ext) = crate::systemhealth::log_split_basename_and_ext(b);
     if !out_ext.is_null() {
         *out_ext = into_buf(ext);
     }
@@ -22863,7 +22835,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_sysinfo_line_contains_marker(
     } else {
         CStr::from_ptr(marker).to_bytes()
     };
-    c_int::from(crate::dupequeuehealth::dqh_sysinfo_line_contains_marker(l, m))
+    c_int::from(crate::systemhealth::sysinfo_line_contains_marker(l, m))
 }
 
 #[no_mangle]
@@ -22881,7 +22853,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_bytes_equal(
     } else {
         CStr::from_ptr(b).to_bytes()
     };
-    c_int::from(crate::dupequeuehealth::dqh_bytes_equal(sa, sb))
+    c_int::from(crate::util::bytes_equal(sa, sb))
 }
 
 #[no_mangle]
@@ -22899,7 +22871,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_bytes_eq_ignore_case(
     } else {
         CStr::from_ptr(b).to_bytes()
     };
-    c_int::from(crate::dupequeuehealth::dqh_bytes_eq_ignore_case(sa, sb))
+    c_int::from(crate::util::bytes_eq_ignore_case(sa, sb))
 }
 
 #[no_mangle]
@@ -22913,7 +22885,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_newznab_classify_start_element(
     } else {
         CStr::from_ptr(name).to_bytes()
     };
-    crate::dupequeuehealth::dqh_newznab_classify_start_element(depth, in_item != 0, n)
+    crate::dupesearch_nzb::newznab_classify_start_element(depth, in_item != 0, n)
 }
 
 #[no_mangle]
@@ -22925,7 +22897,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_newznab_classify_item_attr_key(
     } else {
         CStr::from_ptr(key).to_bytes()
     };
-    crate::dupequeuehealth::dqh_newznab_classify_item_attr_key(k)
+    crate::dupesearch_nzb::newznab_classify_item_attr_key(k)
 }
 
 #[no_mangle]
@@ -22938,7 +22910,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_newznab_classify_end_element(
     } else {
         CStr::from_ptr(name).to_bytes()
     };
-    crate::dupequeuehealth::dqh_newznab_classify_end_element(in_item != 0, n)
+    crate::dupesearch_nzb::newznab_classify_end_element(in_item != 0, n)
 }
 
 #[no_mangle]
@@ -22951,7 +22923,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_nzb_reader_classify_start_element(
     } else {
         CStr::from_ptr(name).to_bytes()
     };
-    crate::dupequeuehealth::dqh_nzb_reader_classify_start_element(n, in_file != 0)
+    crate::dupesearch_nzb::nzb_reader_classify_start_element(n, in_file != 0)
 }
 
 #[no_mangle]
@@ -22966,7 +22938,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_nzb_reader_classify_end_element(
     } else {
         CStr::from_ptr(name).to_bytes()
     };
-    crate::dupequeuehealth::dqh_nzb_reader_classify_end_element(
+    crate::dupesearch_nzb::nzb_reader_classify_end_element(
         n,
         has_meta_type != 0,
         in_segment != 0,
@@ -22996,7 +22968,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_tls_resolve_probe_result(
     } else {
         CStr::from_ptr(expected_cipher).to_bytes()
     };
-    crate::dupequeuehealth::dqh_tls_resolve_probe_result(
+    crate::tlscipher::tls_resolve_probe_result(
         connected != 0,
         neg,
         exp,
@@ -23025,7 +22997,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_maintenance_match_sig_line_prefix(
     } else {
         CStr::from_ptr(sig_title).to_bytes()
     };
-    match crate::dupequeuehealth::dqh_maintenance_match_sig_line_prefix(l, s) {
+    match crate::systemhealth::maintenance_match_sig_line_prefix(l, s) {
         Some(off) => {
             if !out_offset.is_null() {
                 *out_offset = off;
@@ -23043,7 +23015,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_parse_c_atoll(text: *const c_char) -> i64
     } else {
         CStr::from_ptr(text).to_bytes()
     };
-    crate::dupequeuehealth::dqh_parse_c_atoll(s)
+    crate::util::parse_c_atoll(s)
 }
 
 #[no_mangle]
@@ -23053,7 +23025,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_parse_c_atoi(text: *const c_char) -> c_in
     } else {
         CStr::from_ptr(text).to_bytes()
     };
-    crate::dupequeuehealth::dqh_parse_c_atoi(s)
+    crate::util::parse_c_atoi(s)
 }
 
 #[no_mangle]
@@ -23066,7 +23038,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_parse_c_atoi_or_default(
     } else {
         Some(CStr::from_ptr(text).to_bytes())
     };
-    crate::dupequeuehealth::dqh_parse_c_atoi_or_default(s, default_val)
+    crate::util::parse_c_atoi_or_default(s, default_val)
 }
 
 #[no_mangle]
@@ -23080,7 +23052,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_parse_queue_file_id_and_suffix(
     } else {
         CStr::from_ptr(filename).to_bytes()
     };
-    match crate::dupequeuehealth::dqh_diskstate_parse_queue_file_id_and_suffix(f) {
+    match crate::diskstate_format::diskstate_parse_queue_file_id_and_suffix(f) {
         Some((id, suffix)) => {
             if !out_id.is_null() {
                 *out_id = id;
@@ -23105,7 +23077,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_nstring_find_substr_from(
     }
     let h = CStr::from_ptr(haystack).to_bytes();
     let n = CStr::from_ptr(needle).to_bytes();
-    crate::dupequeuehealth::dqh_nstring_find_substr_from(h, n, pos)
+    crate::util::nstring_find_substr_from(h, n, pos)
 }
 
 #[no_mangle]
@@ -23124,7 +23096,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_log_parse_rotated_date_fields(
         CStr::from_ptr(filename).to_bytes()
     };
     let (y, m, d) =
-        crate::dupequeuehealth::dqh_log_parse_rotated_date_fields(f, year_off, mon_off, mday_off);
+        crate::systemhealth::log_parse_rotated_date_fields(f, year_off, mon_off, mday_off);
     if !out_year.is_null() {
         *out_year = y;
     }
@@ -23150,7 +23122,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_mem_slices_equal(
     }
     let sa = std::slice::from_raw_parts(a, len);
     let sb = std::slice::from_raw_parts(b, len);
-    i32::from(crate::dupequeuehealth::dqh_mem_slices_equal(sa, sb))
+    i32::from(crate::util::mem_slices_equal(sa, sb))
 }
 
 #[no_mangle]
@@ -23163,7 +23135,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_tls_is_cipher_list(
     } else {
         std::slice::from_raw_parts(cipher as *const u8, cipher_len)
     };
-    i32::from(crate::dupequeuehealth::dqh_tls_is_cipher_list(s))
+    i32::from(crate::tlscipher::tls_is_cipher_list(s))
 }
 
 #[no_mangle]
@@ -23175,7 +23147,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_sysinfo_extract_version_after_space(
     } else {
         CStr::from_ptr(text).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_sysinfo_extract_version_after_space(s))
+    into_buf(crate::systemhealth::sysinfo_extract_version_after_space(s))
 }
 
 #[no_mangle]
@@ -23191,7 +23163,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_os_classify_os_release_line(
     } else {
         std::slice::from_raw_parts(line as *const u8, line_len)
     };
-    let (kind, off) = crate::dupequeuehealth::dqh_os_classify_os_release_line(
+    let (kind, off) = crate::systemhealth::os_classify_os_release_line(
         l,
         has_name != 0,
         has_version != 0,
@@ -23220,7 +23192,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_dupe_util_trim_bounds(
     } else {
         CStr::from_ptr(chars).to_bytes()
     };
-    match crate::dupequeuehealth::dqh_dupe_util_trim_bounds(t, c) {
+    match crate::dupesearch_nzb::dupe_util_trim_bounds(t, c) {
         Some((start, len)) => {
             if !out_start.is_null() {
                 *out_start = start;
@@ -23244,7 +23216,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_dupe_util_lower(
     } else {
         std::slice::from_raw_parts(text as *const u8, text_len)
     };
-    into_buf(crate::dupequeuehealth::dqh_dupe_util_lower(t))
+    into_buf(crate::dupesearch_nzb::dupe_util_lower(t))
 }
 
 #[no_mangle]
@@ -23257,7 +23229,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_nzb_fetcher_format_parse_err(
     } else {
         std::slice::from_raw_parts(body as *const u8, body_len)
     };
-    into_buf(crate::dupequeuehealth::dqh_nzb_fetcher_format_parse_err(b))
+    into_buf(crate::dupesearch_nzb::nzb_fetcher_format_parse_err(b))
 }
 
 #[no_mangle]
@@ -23271,31 +23243,11 @@ pub unsafe extern "C" fn nzbget_rs_dqh_util_classify_executor_ext(
     } else {
         std::slice::from_raw_parts(filename as *const u8, filename_len)
     };
-    let (kind, idx) = crate::dupequeuehealth::dqh_util_classify_executor_ext(f);
+    let (kind, idx) = crate::util::util_classify_executor_ext(f);
     if !out_dot_idx.is_null() {
         *out_dot_idx = idx;
     }
     kind
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_bytes_lt_ignore_case(
-    a: *const c_char,
-    a_len: usize,
-    b: *const c_char,
-    b_len: usize,
-) -> c_int {
-    let sa = if a.is_null() || a_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(a as *const u8, a_len)
-    };
-    let sb = if b.is_null() || b_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(b as *const u8, b_len)
-    };
-    i32::from(crate::dupequeuehealth::dqh_bytes_lt_ignore_case(sa, sb))
 }
 
 #[no_mangle]
@@ -23315,7 +23267,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_slice_eq_ignore_case(
     } else {
         std::slice::from_raw_parts(b as *const u8, b_len)
     };
-    i32::from(crate::dupequeuehealth::dqh_bytes_eq_ignore_case(sa, sb))
+    i32::from(crate::util::bytes_eq_ignore_case(sa, sb))
 }
 
 #[no_mangle]
@@ -23328,7 +23280,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_options_should_check_single_script_dir(
     } else {
         CStr::from_ptr(value).to_bytes()
     };
-    i32::from(crate::dupequeuehealth::dqh_options_should_check_single_script_dir(
+    i32::from(crate::options::options_should_check_single_script_dir(
         no_disk_access != 0,
         v,
     ))
@@ -23349,7 +23301,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_webserver_encode_hex_token(
     } else {
         std::slice::from_raw_parts(bytes, bytes_len)
     };
-    let hex = crate::dupequeuehealth::dqh_webserver_encode_hex_token(b);
+    let hex = crate::webserver::webserver_encode_hex_token(b);
     let copy_len = hex.len().min(out_cap - 1);
     std::ptr::copy_nonoverlapping(hex.as_ptr() as *const c_char, out_token, copy_len);
     *out_token.add(copy_len) = 0;
@@ -23370,7 +23322,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_script_format_prefixed_message(
     } else {
         CStr::from_ptr(text).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_script_format_prefixed_message(p, t))
+    into_buf(crate::extension::script_format_prefixed_message(p, t))
 }
 
 #[no_mangle]
@@ -23390,7 +23342,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_xmlrpc_concat_decoded_path_and_query(
     } else {
         CStr::from_ptr(url).to_bytes()
     };
-    into_buf(crate::dupequeuehealth::dqh_xmlrpc_concat_decoded_path_and_query(
+    into_buf(crate::xmlrpc_format::xmlrpc_concat_decoded_path_and_query(
         dp,
         u,
         has_query != 0,
@@ -23411,7 +23363,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_next_comma_token(
     } else {
         CStr::from_ptr(s).to_bytes()
     };
-    match crate::dupequeuehealth::dqh_diskstate_next_comma_token(bytes, cursor) {
+    match crate::diskstate_format::diskstate_next_comma_token(bytes, cursor) {
         Some((start, len, next)) => {
             if !out_tok_start.is_null() {
                 *out_tok_start = start;
@@ -23450,7 +23402,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_tokenizer_next(
     };
     let s = CStr::from_ptr(cur).to_bytes();
     let s_len = s.len();
-    match crate::dupequeuehealth::dqh_tokenizer_find_next_token(s, seps) {
+    match crate::util::tokenizer_find_next_token(s, seps) {
         Some((tok_start, tok_end, next_pos)) => {
             if tok_end < s_len {
                 *cur.add(tok_end) = 0;
@@ -23467,7 +23419,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_tokenizer_next(
 
 #[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_scheduler_command_name(command: c_int) -> *const c_char {
-    crate::dupequeuehealth::dqh_scheduler_command_name(command).as_ptr() as *const c_char
+    crate::scheduler::scheduler_command_name(command).as_ptr() as *const c_char
 }
 
 #[no_mangle]
@@ -23478,7 +23430,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_frontend_resolve_control_ip(
         return b"\0".as_ptr() as *const c_char;
     }
     let ip = CStr::from_ptr(control_ip).to_bytes();
-    match crate::dupequeuehealth::dqh_frontend_resolve_control_ip(ip) {
+    match crate::ncurses_format::frontend_resolve_control_ip(ip) {
         Some(resolved) => resolved.as_ptr() as *const c_char,
         None => control_ip,
     }
@@ -23489,20 +23441,20 @@ pub extern "C" fn nzbget_rs_dqh_ncurses_message_type_label(
     kind: c_int,
     first_line: c_int,
 ) -> *const c_char {
-    crate::dupequeuehealth::dqh_ncurses_message_type_label(kind, first_line != 0).as_ptr()
+    crate::ncurses_format::ncurses_message_type_label(kind, first_line != 0).as_ptr()
         as *const c_char
 }
 
 #[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_ncurses_message_color_pair(kind: c_int) -> c_int {
-    crate::dupequeuehealth::dqh_ncurses_message_color_pair(kind)
+    crate::ncurses_format::ncurses_message_color_pair(kind)
 }
 
 #[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_xmlrpc_response_content_type(
     is_xml_rpc: c_int,
 ) -> *const c_char {
-    crate::dupequeuehealth::dqh_xmlrpc_response_content_type(is_xml_rpc != 0).as_ptr()
+    crate::xmlrpc_format::xmlrpc_response_content_type(is_xml_rpc != 0).as_ptr()
         as *const c_char
 }
 
@@ -23510,18 +23462,18 @@ pub extern "C" fn nzbget_rs_dqh_xmlrpc_response_content_type(
 pub extern "C" fn nzbget_rs_dqh_xmlrpc_test_server_speed_err_msg(
     server_err: c_int,
 ) -> *const c_char {
-    crate::dupequeuehealth::dqh_xmlrpc_test_server_speed_err_msg(server_err).as_ptr()
+    crate::xmlrpc_format::xmlrpc_test_server_speed_err_msg(server_err).as_ptr()
         as *const c_char
 }
 
 #[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_binrpc_write_log_response_msg(ok: c_int) -> *const c_char {
-    crate::dupequeuehealth::dqh_binrpc_write_log_response_msg(ok != 0).as_ptr() as *const c_char
+    crate::binrpc::binrpc_write_log_response_msg(ok != 0).as_ptr() as *const c_char
 }
 
 #[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_binrpc_scan_response_msg(sync_mode: c_int) -> *const c_char {
-    crate::dupequeuehealth::dqh_binrpc_scan_response_msg(sync_mode != 0).as_ptr() as *const c_char
+    crate::binrpc::binrpc_scan_response_msg(sync_mode != 0).as_ptr() as *const c_char
 }
 
 #[no_mangle]
@@ -23532,7 +23484,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_article_writer_step_file_crc(
     segment_size: c_int,
     out_first_article: *mut c_int,
 ) -> u32 {
-    let (next_crc, next_first) = crate::dupequeuehealth::dqh_article_writer_step_file_crc(
+    let (next_crc, next_first) = crate::artwritercore::article_writer_step_file_crc(
         first_article != 0,
         current_crc,
         article_crc,
@@ -23552,7 +23504,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_post_capitalize_first_ascii(s: *mut c_cha
     let b = *(s as *const u8);
     if b != 0 {
         let mut arr = [b];
-        crate::dupequeuehealth::dqh_post_capitalize_first_ascii(&mut arr);
+        crate::unpack::post_capitalize_first_ascii(&mut arr);
         *(s as *mut u8) = arr[0];
     }
 }
@@ -23562,7 +23514,7 @@ pub extern "C" fn nzbget_rs_dqh_dupesearch_prepare_status_suffix(
     rank_only: c_int,
     history: c_int,
 ) -> *const c_char {
-    crate::dupequeuehealth::dqh_dupesearch_prepare_status_suffix(rank_only != 0, history != 0)
+    crate::dupesearch_nzb::dupesearch_prepare_status_suffix(rank_only != 0, history != 0)
         .as_ptr() as *const c_char
 }
 
@@ -23581,7 +23533,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_dupesearch_visit_expand_queries(
     } else {
         std::slice::from_raw_parts(name as *const u8, name_len)
     };
-    crate::dupequeuehealth::dqh_dupesearch_visit_expand_queries(n, |q| {
+    crate::dupesearch_nzb::dupesearch_visit_expand_queries(n, |q| {
         cb(ctx, q.as_ptr() as *const c_char, q.len());
     });
 }
@@ -23611,7 +23563,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_newznab_format_query_label(
             CStr::from_ptr(vp).to_bytes()
         });
     }
-    into_buf(crate::dupequeuehealth::dqh_newznab_format_query_label(
+    into_buf(crate::dupesearch_nzb::newznab_format_query_label(
         &k_vec, &v_vec,
     ))
 }
@@ -23626,7 +23578,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_nntp_health_format_bracketed_id(
     } else {
         std::slice::from_raw_parts(message_id as *const u8, len)
     };
-    into_buf(crate::dupequeuehealth::dqh_nntp_health_format_bracketed_id(
+    into_buf(crate::nntp::nntp_health_format_bracketed_id(
         mid,
     ))
 }
@@ -23650,7 +23602,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_nntp_health_format_stat_batch(
             std::slice::from_raw_parts(p as *const u8, l)
         });
     }
-    into_buf(crate::dupequeuehealth::dqh_nntp_health_format_stat_batch(
+    into_buf(crate::nntp::nntp_health_format_stat_batch(
         &slices,
     ))
 }
@@ -23661,7 +23613,7 @@ pub extern "C" fn nzbget_rs_dqh_article_writer_check_existing_output_file(
     existing_size: i64,
     target_size: i64,
 ) -> c_int {
-    crate::dupequeuehealth::dqh_article_writer_check_existing_output_file(
+    crate::artwritercore::article_writer_check_existing_output_file(
         exists != 0,
         existing_size,
         target_size,
@@ -23676,7 +23628,7 @@ pub extern "C" fn nzbget_rs_dqh_article_writer_select_direct_output_mode(
     output_initialized: c_int,
     dest_exists: c_int,
 ) -> c_int {
-    crate::dupequeuehealth::dqh_article_writer_select_direct_output_mode(
+    crate::artwritercore::article_writer_select_direct_output_mode(
         direct_write != 0,
         force_direct_write != 0,
         has_existing_output != 0,
@@ -23691,7 +23643,7 @@ pub extern "C" fn nzbget_rs_dqh_article_writer_should_fallback_open_to_final_pat
     final_exists: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_article_writer_should_fallback_open_to_final_path(
+        crate::artwritercore::article_writer_should_fallback_open_to_final_path(
             open_exists != 0,
             final_exists != 0,
         ),
@@ -23704,7 +23656,7 @@ pub extern "C" fn nzbget_rs_dqh_article_writer_validate_staged_dupe_size(
     segment_size: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_article_writer_validate_staged_dupe_size(
+        crate::artwritercore::article_writer_validate_staged_dupe_size(
             actual_size,
             segment_size,
         ),
@@ -23717,7 +23669,7 @@ pub extern "C" fn nzbget_rs_dqh_article_writer_eval_commit_post_close(
     closed: c_int,
     direct_write: c_int,
 ) -> c_int {
-    crate::dupequeuehealth::dqh_article_writer_eval_commit_post_close(
+    crate::artwritercore::article_writer_eval_commit_post_close(
         flushed != 0,
         closed != 0,
         direct_write != 0,
@@ -23730,7 +23682,7 @@ pub extern "C" fn nzbget_rs_dqh_article_writer_is_staged_dupe_article_file(
     has_result_filename: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_article_writer_is_staged_dupe_article_file(
+        crate::artwritercore::article_writer_is_staged_dupe_article_file(
             dupe_fallback_round,
             has_result_filename != 0,
         ),
@@ -23743,7 +23695,7 @@ pub extern "C" fn nzbget_rs_dqh_article_writer_classify_direct_final_cleanup(
     same_filename: c_int,
     output_exists: c_int,
 ) -> c_int {
-    crate::dupequeuehealth::dqh_article_writer_classify_direct_final_cleanup(
+    crate::artwritercore::article_writer_classify_direct_final_cleanup(
         final_empty != 0,
         same_filename != 0,
         output_exists != 0,
@@ -23758,7 +23710,7 @@ pub extern "C" fn nzbget_rs_dqh_article_cache_should_write_cache_flag(
     skip_write: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_article_cache_should_write_cache_flag(
+        crate::artwritercore::article_cache_should_write_cache_flag(
             was_empty != 0,
             server_mode != 0,
             continue_partial != 0,
@@ -23774,7 +23726,7 @@ pub extern "C" fn nzbget_rs_dqh_article_cache_post_flush_action(
     just_flushed: c_int,
     is_stopped: c_int,
 ) -> c_int {
-    crate::dupequeuehealth::dqh_article_cache_post_flush_action(
+    crate::artwritercore::article_cache_post_flush_action(
         need_emergency_flush != 0,
         allocated,
         just_flushed != 0,
@@ -23788,7 +23740,7 @@ pub extern "C" fn nzbget_rs_dqh_article_fetcher_should_clear_unreachable(
     transient: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_article_fetcher_should_clear_unreachable(
+        crate::nntp::article_fetcher_should_clear_unreachable(
             success != 0,
             transient != 0,
         ),
@@ -23801,7 +23753,7 @@ pub extern "C" fn nzbget_rs_dqh_article_fetcher_can_attempt_transient_retry(
     server_unreachable: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_article_fetcher_can_attempt_transient_retry(
+        crate::nntp::article_fetcher_can_attempt_transient_retry(
             transient != 0,
             server_unreachable != 0,
         ),
@@ -23814,7 +23766,7 @@ pub extern "C" fn nzbget_rs_dqh_article_fetcher_has_more_transient_attempts(
     max_transient_attempts: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_article_fetcher_has_more_transient_attempts(
+        crate::nntp::article_fetcher_has_more_transient_attempts(
             attempt,
             max_transient_attempts,
         ),
@@ -23827,7 +23779,7 @@ pub extern "C" fn nzbget_rs_dqh_article_batch_can_store_result(
     current_batch_id: c_int,
     cancelled: c_int,
 ) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_article_batch_can_store_result(
+    i32::from(crate::nntp::article_batch_can_store_result(
         batch_id,
         current_batch_id,
         cancelled != 0,
@@ -23841,7 +23793,7 @@ pub extern "C" fn nzbget_rs_dqh_article_batch_can_deliver_next(
     next_deliver: usize,
     total_requests: usize,
 ) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_article_batch_can_deliver_next(
+    i32::from(crate::nntp::article_batch_can_deliver_next(
         cancelled != 0,
         stopped != 0,
         next_deliver,
@@ -23856,7 +23808,7 @@ pub extern "C" fn nzbget_rs_dqh_webserver_classify_pre_parse_method(
     hm_options: c_int,
     content_len: c_int,
 ) -> c_int {
-    crate::dupequeuehealth::dqh_webserver_classify_pre_parse_method(
+    crate::webserver::webserver_classify_pre_parse_method(
         http_method,
         hm_post,
         hm_options,
@@ -23872,7 +23824,7 @@ pub extern "C" fn nzbget_rs_dqh_binrpc_classify_history_entry_fields(
     hk_url: c_int,
     show_hidden: c_int,
 ) -> c_int {
-    crate::dupequeuehealth::dqh_binrpc_classify_history_entry_fields(
+    crate::binrpc::binrpc_classify_history_entry_fields(
         kind,
         hk_nzb,
         hk_dup,
@@ -23887,7 +23839,7 @@ pub extern "C" fn nzbget_rs_dqh_diskstate_classify_begin_read_recovery(
     dest_exists: c_int,
     temp_exists: c_int,
 ) -> c_int {
-    crate::dupequeuehealth::dqh_diskstate_classify_begin_read_recovery(
+    crate::diskstate_format::diskstate_classify_begin_read_recovery(
         transactional != 0,
         dest_exists != 0,
         temp_exists != 0,
@@ -23911,12 +23863,12 @@ pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_select_volume_server_slot(
     } else {
         std::slice::from_raw_parts(server_ids, count)
     };
-    crate::dupequeuehealth::dqh_diskstate_select_volume_server_slot(index, s_ids, srv_ids)
+    crate::diskstate_format::diskstate_select_volume_server_slot(index, s_ids, srv_ids)
 }
 
 #[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_xmlrpc_classify_tls_cipher_op(operation: c_int) -> c_int {
-    crate::dupequeuehealth::dqh_xmlrpc_classify_tls_cipher_op(operation)
+    crate::xmlrpc_format::xmlrpc_classify_tls_cipher_op(operation)
 }
 
 #[no_mangle]
@@ -23926,7 +23878,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_xmlrpc_calc_schedule_resume_time(
     cur_time: i64,
     out_resume_time: *mut i64,
 ) -> c_int {
-    match crate::dupequeuehealth::dqh_xmlrpc_calc_schedule_resume_time(
+    match crate::xmlrpc_format::xmlrpc_calc_schedule_resume_time(
         has_param != 0,
         seconds,
         cur_time,
@@ -23959,7 +23911,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_xmlrpc_accum_queue_job_counts(
     } else {
         *inout_url_count
     };
-    let (next_post, next_url) = crate::dupequeuehealth::dqh_xmlrpc_accum_queue_job_counts(
+    let (next_post, next_url) = crate::xmlrpc_format::xmlrpc_accum_queue_job_counts(
         has_post_info != 0,
         kind,
         nk_url,
@@ -23979,7 +23931,7 @@ pub extern "C" fn nzbget_rs_dqh_xmlrpc_is_fleet_member_limit_reached(
     current_count: usize,
     max_members: c_int,
 ) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_xmlrpc_is_fleet_member_limit_reached(
+    i32::from(crate::xmlrpc_format::xmlrpc_is_fleet_member_limit_reached(
         current_count,
         max_members,
     ))
@@ -23992,7 +23944,7 @@ pub extern "C" fn nzbget_rs_dqh_xmlrpc_classify_history_entry_kind(
     hk_url: c_int,
     hk_dup: c_int,
 ) -> c_int {
-    crate::dupequeuehealth::dqh_xmlrpc_classify_history_entry_kind(kind, hk_nzb, hk_url, hk_dup)
+    crate::xmlrpc_format::xmlrpc_classify_history_entry_kind(kind, hk_nzb, hk_url, hk_dup)
 }
 
 #[no_mangle]
@@ -24000,7 +23952,7 @@ pub extern "C" fn nzbget_rs_dqh_xmlrpc_matches_edit_server_id(
     server_id: c_int,
     target_id: c_int,
 ) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_xmlrpc_matches_edit_server_id(
+    i32::from(crate::xmlrpc_format::xmlrpc_matches_edit_server_id(
         server_id, target_id,
     ))
 }
@@ -24011,7 +23963,7 @@ pub extern "C" fn nzbget_rs_dqh_xmlrpc_matches_reset_server_volume(
     server_id: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_xmlrpc_matches_reset_server_volume(index, server_id),
+        crate::xmlrpc_format::xmlrpc_matches_reset_server_volume(index, server_id),
     )
 }
 
@@ -24020,7 +23972,7 @@ pub extern "C" fn nzbget_rs_dqh_xmlrpc_is_valid_cert_verif_level(
     level: c_int,
     count: c_int,
 ) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_xmlrpc_is_valid_cert_verif_level(
+    i32::from(crate::xmlrpc_format::xmlrpc_is_valid_cert_verif_level(
         level, count,
     ))
 }
@@ -24035,7 +23987,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_xmlrpc_select_test_server_err_text(
     } else {
         CStr::from_ptr(err_text).to_bytes()
     };
-    let chosen = crate::dupequeuehealth::dqh_xmlrpc_select_test_server_err_text(ok != 0, err_slice);
+    let chosen = crate::xmlrpc_format::xmlrpc_select_test_server_err_text(ok != 0, err_slice);
     if chosen.is_empty() {
         b"\0".as_ptr().cast::<c_char>()
     } else if err_slice.is_empty() {
@@ -24051,7 +24003,7 @@ pub extern "C" fn nzbget_rs_dqh_xmlrpc_check_disk_speed_arg_ranges(
     max_file_size_gib: c_int,
     timeout_sec: c_int,
 ) -> c_int {
-    crate::dupequeuehealth::dqh_xmlrpc_check_disk_speed_arg_ranges(
+    crate::xmlrpc_format::xmlrpc_check_disk_speed_arg_ranges(
         write_buffer_kib,
         max_file_size_gib,
         timeout_sec,
@@ -24064,7 +24016,7 @@ pub extern "C" fn nzbget_rs_dqh_ncurses_is_row_in_scroll_window(
     scroll_offset: c_int,
     win_height: c_int,
 ) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_ncurses_is_row_in_scroll_window(
+    i32::from(crate::ncurses_format::ncurses_is_row_in_scroll_window(
         index,
         scroll_offset,
         win_height,
@@ -24091,7 +24043,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_ncurses_accum_file_queue_stats(
         *inout_paused_files
     };
     let (next_rem, next_paused, next_files) =
-        crate::dupequeuehealth::dqh_ncurses_accum_file_queue_stats(
+        crate::ncurses_format::ncurses_accum_file_queue_stats(
             paused != 0,
             file_rem_size,
             cur_rem,
@@ -24122,7 +24074,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_ncurses_accum_group_queue_stats(
     } else {
         *inout_paused
     };
-    let (next_rem, next_paused) = crate::dupequeuehealth::dqh_ncurses_accum_group_queue_stats(
+    let (next_rem, next_paused) = crate::ncurses_format::ncurses_accum_group_queue_stats(
         group_rem_size,
         group_paused_size,
         cur_rem,
@@ -24143,7 +24095,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_ncurses_enter_edit_queue_win_pct(
     out_win_pct: *mut c_int,
 ) -> c_int {
     if let Some(pct) =
-        crate::dupequeuehealth::dqh_ncurses_enter_edit_queue_win_pct(queue_size, cur_win_pct)
+        crate::ncurses_format::ncurses_enter_edit_queue_win_pct(queue_size, cur_win_pct)
     {
         if !out_win_pct.is_null() {
             *out_win_pct = pct;
@@ -24156,7 +24108,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_ncurses_enter_edit_queue_win_pct(
 
 #[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_ncurses_last_queue_index(queue_size: c_int) -> c_int {
-    crate::dupequeuehealth::dqh_ncurses_last_queue_index(queue_size)
+    crate::ncurses_format::ncurses_last_queue_index(queue_size)
 }
 
 #[no_mangle]
@@ -24165,7 +24117,7 @@ pub extern "C" fn nzbget_rs_dqh_disk_service_should_check_disk_space(
     is_downloading: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_disk_service_should_check_disk_space(
+        crate::systemhealth::disk_service_should_check_disk_space(
             disk_space_mb,
             is_downloading != 0,
         ),
@@ -24182,7 +24134,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_disk_service_eval_missing_required_dir(
     out_next_waiting_reported: *mut c_int,
 ) -> c_int {
     let (missing, should_log, next_reported) =
-        crate::dupequeuehealth::dqh_disk_service_eval_missing_required_dir(
+        crate::systemhealth::disk_service_eval_missing_required_dir(
             file_exists != 0,
             dir_exists != 0,
             was_waiting_reported != 0,
@@ -24199,7 +24151,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_disk_service_eval_missing_required_dir(
 
 #[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_maintenance_has_update_info(len: c_int) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_maintenance_has_update_info(len))
+    i32::from(crate::systemhealth::maintenance_has_update_info(len))
 }
 
 #[no_mangle]
@@ -24207,7 +24159,7 @@ pub extern "C" fn nzbget_rs_dqh_options_resolve_locate_src_line(
     found: c_int,
     line_no: c_int,
 ) -> c_int {
-    crate::dupequeuehealth::dqh_options_resolve_locate_src_line(found != 0, line_no)
+    crate::options::options_resolve_locate_src_line(found != 0, line_no)
 }
 
 #[no_mangle]
@@ -24215,12 +24167,12 @@ pub extern "C" fn nzbget_rs_dqh_options_update_config_line_on_get(
     line_no: c_int,
     cur_config_line: c_int,
 ) -> c_int {
-    crate::dupequeuehealth::dqh_options_update_config_line_on_get(line_no, cur_config_line)
+    crate::options::options_update_config_line_on_get(line_no, cur_config_line)
 }
 
 #[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_options_is_every_hour_task(hours: c_int) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_options_is_every_hour_task(hours))
+    i32::from(crate::options::options_is_every_hour_task(hours))
 }
 
 #[no_mangle]
@@ -24229,7 +24181,7 @@ pub extern "C" fn nzbget_rs_dqh_nzbget_should_run_system_health_check(
     system_health_check: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_nzbget_should_run_system_health_check(
+        crate::systemhealth::nzbget_should_run_system_health_check(
             server_mode != 0,
             system_health_check != 0,
         ),
@@ -24243,7 +24195,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_nzbget_classify_boot_usage_or_error(
     arg_count: c_int,
     out_exit_code: *mut c_int,
 ) -> c_int {
-    if let Some(code) = crate::dupequeuehealth::dqh_nzbget_classify_boot_usage_or_error(
+    if let Some(code) = crate::systemhealth::nzbget_classify_boot_usage_or_error(
         print_usage != 0,
         has_errors != 0,
         arg_count,
@@ -24263,7 +24215,7 @@ pub extern "C" fn nzbget_rs_dqh_nzbget_should_stop_frontend_immediately(
     stopped: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_nzbget_should_stop_frontend_immediately(
+        crate::systemhealth::nzbget_should_stop_frontend_immediately(
             remote_client_mode != 0,
             stopped != 0,
         ),
@@ -24280,7 +24232,7 @@ pub extern "C" fn nzbget_rs_dqh_log_classify_init_logfile_action(
     has_log_file: c_int,
     server_mode: c_int,
 ) -> c_int {
-    crate::dupequeuehealth::dqh_log_classify_init_logfile_action(
+    crate::systemhealth::log_classify_init_logfile_action(
         remote_client_mode != 0,
         direct_client_mode != 0,
         write_log,
@@ -24297,7 +24249,7 @@ pub extern "C" fn nzbget_rs_dqh_script_ctrl_is_terminate_ok(
     kill_res: c_int,
     completed: c_int,
 ) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_script_ctrl_is_terminate_ok(
+    i32::from(crate::extension::script_ctrl_is_terminate_ok(
         child_pid,
         kill_res,
         completed != 0,
@@ -24306,7 +24258,7 @@ pub extern "C" fn nzbget_rs_dqh_script_ctrl_is_terminate_ok(
 
 #[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_script_ctrl_can_send_break(pid: c_int, completed: c_int) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_script_ctrl_can_send_break(
+    i32::from(crate::extension::script_ctrl_can_send_break(
         pid,
         completed != 0,
     ))
@@ -24318,7 +24270,7 @@ pub extern "C" fn nzbget_rs_dqh_fs_should_fallback_move_to_copy(
     err_no: c_int,
     exdev: c_int,
 ) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_fs_should_fallback_move_to_copy(
+    i32::from(crate::util::fs_should_fallback_move_to_copy(
         rename_ok != 0,
         err_no,
         exdev,
@@ -24332,7 +24284,7 @@ pub extern "C" fn nzbget_rs_dqh_fs_is_copied_file_valid(
     copied_bytes: i64,
     src_size: i64,
 ) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_fs_is_copied_file_valid(
+    i32::from(crate::util::fs_is_copied_file_valid(
         close_ok != 0,
         loop_ok != 0,
         copied_bytes,
@@ -24355,7 +24307,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_par_renamer_needs_create_target_dir(
     } else {
         CStr::from_ptr(new_path).to_bytes()
     };
-    i32::from(crate::dupequeuehealth::dqh_par_renamer_needs_create_target_dir(o, n))
+    i32::from(crate::parrenamer::par_renamer_needs_create_target_dir(o, n))
 }
 
 #[no_mangle]
@@ -24366,7 +24318,7 @@ pub extern "C" fn nzbget_rs_dqh_dupematcher_should_wait_rar_lister(
     cur_time: i64,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_dupematcher_should_wait_rar_lister(
+        crate::dupecoord::dupematcher_should_wait_rar_lister(
             is_running != 0,
             start_time,
             timeout_sec,
@@ -24382,7 +24334,7 @@ pub extern "C" fn nzbget_rs_dqh_article_dl_is_terminal_loop_status(
     ad_fatal_error: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_article_dl_is_terminal_loop_status(
+        crate::artwritercore::article_dl_is_terminal_loop_status(
             status,
             ad_finished,
             ad_fatal_error,
@@ -24396,7 +24348,7 @@ pub extern "C" fn nzbget_rs_dqh_article_dl_should_fail_for_desired_server(
     has_desired_server: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_article_dl_should_fail_for_desired_server(
+        crate::artwritercore::article_dl_should_fail_for_desired_server(
             has_want_server != 0,
             has_desired_server != 0,
         ),
@@ -24409,7 +24361,7 @@ pub extern "C" fn nzbget_rs_dqh_article_dl_should_continue_read_loop(
     decoder_eof: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_article_dl_should_continue_read_loop(
+        crate::artwritercore::article_dl_should_continue_read_loop(
             is_stopped != 0,
             decoder_eof != 0,
         ),
@@ -24422,7 +24374,7 @@ pub extern "C" fn nzbget_rs_dqh_article_dl_should_run_decode_check(
     ad_running: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_article_dl_should_run_decode_check(status, ad_running),
+        crate::artwritercore::article_dl_should_run_decode_check(status, ad_running),
     )
 }
 
@@ -24433,7 +24385,7 @@ pub extern "C" fn nzbget_rs_dqh_server_pool_has_available_level_conns(
     level_free_count: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_server_pool_has_available_level_conns(
+        crate::nntp::server_pool_has_available_level_conns(
             level,
             levels_len,
             level_free_count,
@@ -24446,7 +24398,7 @@ pub extern "C" fn nzbget_rs_dqh_server_pool_pick_candidate_index(
     rand_val: c_int,
     candidates_len: usize,
 ) -> usize {
-    crate::dupequeuehealth::dqh_server_pool_pick_candidate_index(rand_val, candidates_len)
+    crate::nntp::server_pool_pick_candidate_index(rand_val, candidates_len)
 }
 
 #[no_mangle]
@@ -24457,7 +24409,7 @@ pub extern "C" fn nzbget_rs_dqh_server_pool_should_disconnect_idle_level_conn(
     cs_connected: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_server_pool_should_disconnect_idle_level_conn(
+        crate::nntp::server_pool_should_disconnect_idle_level_conn(
             conn_norm_level,
             level,
             conn_status,
@@ -24472,7 +24424,7 @@ pub extern "C" fn nzbget_rs_dqh_statmeter_has_any_quota_configured(
     monthly_quota: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_statmeter_has_any_quota_configured(
+        crate::statmeter::statmeter_has_any_quota_configured(
             daily_quota,
             monthly_quota,
         ),
@@ -24485,7 +24437,7 @@ pub extern "C" fn nzbget_rs_dqh_statmeter_is_before_quota_start_day(
     cur_mday: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_statmeter_is_before_quota_start_day(
+        crate::statmeter::statmeter_is_before_quota_start_day(
             quota_start_day,
             cur_mday,
         ),
@@ -24498,7 +24450,7 @@ pub extern "C" fn nzbget_rs_dqh_statmeter_did_prev_month_day_overflow(
     quota_start_day: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_statmeter_did_prev_month_day_overflow(
+        crate::statmeter::statmeter_did_prev_month_day_overflow(
             prev_mday,
             quota_start_day,
         ),
@@ -24507,7 +24459,7 @@ pub extern "C" fn nzbget_rs_dqh_statmeter_did_prev_month_day_overflow(
 
 #[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_nntp_conn_classify_handshake_result(result: c_int) -> c_int {
-    crate::dupequeuehealth::dqh_nntp_conn_classify_handshake_result(result)
+    crate::nntp::nntp_conn_classify_handshake_result(result)
 }
 
 #[no_mangle]
@@ -24517,7 +24469,7 @@ pub extern "C" fn nzbget_rs_dqh_article_fetcher_should_keep_waiting_retry(
     is_stopped: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_article_fetcher_should_keep_waiting_retry(
+        crate::nntp::article_fetcher_should_keep_waiting_retry(
             waited,
             seconds,
             is_stopped != 0,
@@ -24532,7 +24484,7 @@ pub extern "C" fn nzbget_rs_dqh_article_fetcher_should_disconnect_on_release(
     cs_cancelled: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_article_fetcher_should_disconnect_on_release(
+        crate::nntp::article_fetcher_should_disconnect_on_release(
             keep_connected != 0,
             conn_status,
             cs_cancelled,
@@ -24545,7 +24497,7 @@ pub extern "C" fn nzbget_rs_dqh_article_fetcher_is_join_group_failure_transient(
     has_response: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_article_fetcher_is_join_group_failure_transient(
+        crate::nntp::article_fetcher_is_join_group_failure_transient(
             has_response != 0,
         ),
     )
@@ -24557,7 +24509,7 @@ pub extern "C" fn nzbget_rs_dqh_article_batch_should_ensure_workers(
     is_stopped: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_article_batch_should_ensure_workers(
+        crate::nntp::article_batch_should_ensure_workers(
             worker_count,
             is_stopped != 0,
         ),
@@ -24570,7 +24522,7 @@ pub extern "C" fn nzbget_rs_dqh_article_writer_is_dupe_fallback_article(
     dupe_fallback_round: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_article_writer_is_dupe_fallback_article(
+        crate::artwritercore::article_writer_is_dupe_fallback_article(
             has_article_info != 0,
             dupe_fallback_round,
         ),
@@ -24594,7 +24546,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_article_writer_was_renamed_during_complet
         std::slice::from_raw_parts(orig_filename as *const u8, orig_len)
     };
     i32::from(
-        crate::dupequeuehealth::dqh_article_writer_was_renamed_during_completion(cur, orig),
+        crate::artwritercore::article_writer_was_renamed_during_completion(cur, orig),
     )
 }
 
@@ -24604,7 +24556,7 @@ pub extern "C" fn nzbget_rs_dqh_article_writer_should_delete_hardlinked_without_
     inter_dir_empty: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_article_writer_should_delete_hardlinked_without_interdir(
+        crate::artwritercore::article_writer_should_delete_hardlinked_without_interdir(
             is_hard_linked != 0,
             inter_dir_empty != 0,
         ),
@@ -24627,7 +24579,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_article_writer_did_dest_dir_change(
     } else {
         std::slice::from_raw_parts(orig_dest_dir as *const u8, orig_len)
     };
-    i32::from(crate::dupequeuehealth::dqh_article_writer_did_dest_dir_change(cur, orig))
+    i32::from(crate::artwritercore::article_writer_did_dest_dir_change(cur, orig))
 }
 
 #[no_mangle]
@@ -24636,7 +24588,7 @@ pub extern "C" fn nzbget_rs_dqh_article_cache_should_continue_run_loop(
     allocated: usize,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_article_cache_should_continue_run_loop(
+        crate::artwritercore::article_cache_should_continue_run_loop(
             is_stopped != 0,
             allocated,
         ),
@@ -24650,7 +24602,7 @@ pub extern "C" fn nzbget_rs_dqh_memory_monitor_should_keep_sleeping(
     interval: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_memory_monitor_should_keep_sleeping(
+        crate::artwritercore::memory_monitor_should_keep_sleeping(
             is_stopped != 0,
             slept,
             interval,
@@ -24665,7 +24617,7 @@ pub extern "C" fn nzbget_rs_dqh_webdl_should_continue_retry_loop(
     remained_connect_retries: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_webdl_should_continue_retry_loop(
+        crate::webdownload::webdl_should_continue_retry_loop(
             is_stopped != 0,
             remained_download_retries,
             remained_connect_retries,
@@ -24682,7 +24634,7 @@ pub extern "C" fn nzbget_rs_dqh_webdl_should_keep_waiting_retry_interval(
     pause_download: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_webdl_should_keep_waiting_retry_interval(
+        crate::webdownload::webdl_should_keep_waiting_retry_interval(
             is_stopped != 0,
             msec,
             url_interval_sec,
@@ -24700,7 +24652,7 @@ pub extern "C" fn nzbget_rs_dqh_webdl_is_terminal_retry_status(
     ad_not_found: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_webdl_is_terminal_retry_status(
+        crate::webdownload::webdl_is_terminal_retry_status(
             status,
             ad_finished,
             ad_fatal_error,
@@ -24714,7 +24666,7 @@ pub extern "C" fn nzbget_rs_dqh_conn_is_unix_path_too_long(
     host_len: usize,
     sun_path_cap: usize,
 ) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_conn_is_unix_path_too_long(
+    i32::from(crate::nntp::conn_is_unix_path_too_long(
         host_len,
         sun_path_cap,
     ))
@@ -24725,7 +24677,7 @@ pub extern "C" fn nzbget_rs_dqh_conn_resolve_gai_report_err_code(
     res: c_int,
     eai_system: c_int,
 ) -> c_int {
-    crate::dupequeuehealth::dqh_conn_resolve_gai_report_err_code(res, eai_system)
+    crate::nntp::conn_resolve_gai_report_err_code(res, eai_system)
 }
 
 #[no_mangle]
@@ -24734,7 +24686,7 @@ pub extern "C" fn nzbget_rs_dqh_conn_should_report_socket_create_failed(
     has_addr_list: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_conn_should_report_socket_create_failed(
+        crate::nntp::conn_should_report_socket_create_failed(
             is_invalid_socket != 0,
             has_addr_list != 0,
         ),
@@ -24747,7 +24699,7 @@ pub extern "C" fn nzbget_rs_dqh_conn_should_cleanup_unconnected_socket(
     is_invalid_socket: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_conn_should_cleanup_unconnected_socket(
+        crate::nntp::conn_should_cleanup_unconnected_socket(
             connected != 0,
             is_invalid_socket != 0,
         ),
@@ -24761,7 +24713,7 @@ pub extern "C" fn nzbget_rs_dqh_conn_should_unlink_listening_unix_socket(
     is_listening: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_conn_should_unlink_listening_unix_socket(
+        crate::nntp::conn_should_unlink_listening_unix_socket(
             is_unix_path != 0,
             getsockopt_res,
             is_listening,
@@ -24774,7 +24726,7 @@ pub extern "C" fn nzbget_rs_dqh_conn_resolve_report_err_code(
     err_code: c_int,
     last_net_err: c_int,
 ) -> c_int {
-    crate::dupequeuehealth::dqh_conn_resolve_report_err_code(err_code, last_net_err)
+    crate::nntp::conn_resolve_report_err_code(err_code, last_net_err)
 }
 
 #[no_mangle]
@@ -24782,7 +24734,7 @@ pub extern "C" fn nzbget_rs_dqh_tls_has_cert_and_key_files(
     cert_empty: c_int,
     key_empty: c_int,
 ) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_tls_has_cert_and_key_files(
+    i32::from(crate::tlscipher::tls_has_cert_and_key_files(
         cert_empty != 0,
         key_empty != 0,
     ))
@@ -24793,7 +24745,7 @@ pub extern "C" fn nzbget_rs_dqh_tls_should_set_sni_hostname(
     is_client: c_int,
     host_empty: c_int,
 ) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_tls_should_set_sni_hostname(
+    i32::from(crate::tlscipher::tls_should_set_sni_hostname(
         is_client != 0,
         host_empty != 0,
     ))
@@ -24804,7 +24756,7 @@ pub extern "C" fn nzbget_rs_dqh_tls_should_validate_client_cert(
     is_client: c_int,
     should_verify: c_int,
 ) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_tls_should_validate_client_cert(
+    i32::from(crate::tlscipher::tls_should_validate_client_cert(
         is_client != 0,
         should_verify != 0,
     ))
@@ -24817,7 +24769,7 @@ pub extern "C" fn nzbget_rs_dqh_tls_is_proto_version_out_of_bounds(
     maximum: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_tls_is_proto_version_out_of_bounds(version, minimum, maximum),
+        crate::tlscipher::tls_is_proto_version_out_of_bounds(version, minimum, maximum),
     )
 }
 
@@ -24827,7 +24779,7 @@ pub extern "C" fn nzbget_rs_dqh_tls_should_send_close_notify(
     connected: c_int,
     has_deadline: c_int,
 ) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_tls_should_send_close_notify(
+    i32::from(crate::tlscipher::tls_should_send_close_notify(
         has_session != 0,
         connected != 0,
         has_deadline != 0,
@@ -24839,7 +24791,7 @@ pub extern "C" fn nzbget_rs_dqh_webdl_is_connect_aborted(
     connected: c_int,
     is_stopped: c_int,
 ) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_webdl_is_connect_aborted(
+    i32::from(crate::webdownload::webdl_is_connect_aborted(
         connected != 0,
         is_stopped != 0,
     ))
@@ -24850,7 +24802,7 @@ pub extern "C" fn nzbget_rs_dqh_webdl_should_download_body(
     status: c_int,
     ad_running: c_int,
 ) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_webdl_should_download_body(
+    i32::from(crate::webdownload::webdl_should_download_body(
         status, ad_running,
     ))
 }
@@ -24860,7 +24812,7 @@ pub extern "C" fn nzbget_rs_dqh_webdl_should_delete_broken_output(
     status: c_int,
     ad_finished: c_int,
 ) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_webdl_should_delete_broken_output(
+    i32::from(crate::webdownload::webdl_should_delete_broken_output(
         status,
         ad_finished,
     ))
@@ -24868,7 +24820,7 @@ pub extern "C" fn nzbget_rs_dqh_webdl_should_delete_broken_output(
 
 #[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_webdl_needs_prepare_file(out_file_active: c_int) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_webdl_needs_prepare_file(
+    i32::from(crate::webdownload::webdl_needs_prepare_file(
         out_file_active != 0,
     ))
 }
@@ -24878,7 +24830,7 @@ pub extern "C" fn nzbget_rs_dqh_webdl_is_gunzip_write_failed(
     out_len: c_int,
     written_bytes: i64,
 ) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_webdl_is_gunzip_write_failed(
+    i32::from(crate::webdownload::webdl_is_gunzip_write_failed(
         out_len,
         written_bytes,
     ))
@@ -24889,7 +24841,7 @@ pub extern "C" fn nzbget_rs_dqh_webdl_should_disconnect_on_free(
     conn_status: c_int,
     cs_cancelled: c_int,
 ) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_webdl_should_disconnect_on_free(
+    i32::from(crate::webdownload::webdl_should_disconnect_on_free(
         conn_status,
         cs_cancelled,
     ))
@@ -24901,7 +24853,7 @@ pub extern "C" fn nzbget_rs_dqh_speed_test_is_iteration_failed(
     downloaded: u32,
     target_size: u32,
 ) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_speed_test_is_iteration_failed(
+    i32::from(crate::nntp::speed_test_is_iteration_failed(
         elapsed_sec,
         downloaded,
         target_size,
@@ -24915,7 +24867,7 @@ pub extern "C" fn nzbget_rs_dqh_speed_test_should_stop_recv_loop(
     timeout_sec: f64,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_speed_test_should_stop_recv_loop(
+        crate::nntp::speed_test_should_stop_recv_loop(
             received,
             elapsed_sec,
             timeout_sec,
@@ -24932,7 +24884,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_tls_cipher_fill_test_plaintext(
         return;
     }
     let slice = std::slice::from_raw_parts_mut(buf, len);
-    crate::dupequeuehealth::dqh_tls_cipher_fill_test_plaintext(slice);
+    crate::tlscipher::tls_cipher_fill_test_plaintext(slice);
 }
 
 #[no_mangle]
@@ -24941,7 +24893,7 @@ pub extern "C" fn nzbget_rs_dqh_tls_cipher_is_prepare_batch_valid(
     count: u32,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_tls_cipher_is_prepare_batch_valid(sequence, count),
+        crate::tlscipher::tls_cipher_is_prepare_batch_valid(sequence, count),
     )
 }
 
@@ -24956,7 +24908,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_tls_cipher_write_record_nonce(
     }
     let prefix: &[u8; 4] = &*(prefix4 as *const [u8; 4]);
     let out: &mut [u8; 12] = &mut *(out_nonce12 as *mut [u8; 12]);
-    crate::dupequeuehealth::dqh_tls_cipher_write_record_nonce(prefix, seq, out);
+    crate::tlscipher::tls_cipher_write_record_nonce(prefix, seq, out);
 }
 
 #[no_mangle]
@@ -24966,7 +24918,7 @@ pub extern "C" fn nzbget_rs_dqh_tls_cipher_is_record_seq_in_range(
     count: usize,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_tls_cipher_is_record_seq_in_range(sequence, first, count),
+        crate::tlscipher::tls_cipher_is_record_seq_in_range(sequence, first, count),
     )
 }
 
@@ -24977,7 +24929,7 @@ pub extern "C" fn nzbget_rs_dqh_tls_cipher_precheck_probe_args(
     verification: c_int,
     has_cert_store: c_int,
 ) -> c_int {
-    crate::dupequeuehealth::dqh_tls_cipher_precheck_probe_args(
+    crate::tlscipher::tls_cipher_precheck_probe_args(
         cancelled != 0,
         milliseconds,
         verification != 0,
@@ -24989,7 +24941,7 @@ pub extern "C" fn nzbget_rs_dqh_tls_cipher_precheck_probe_args(
 pub extern "C" fn nzbget_rs_dqh_tls_cipher_is_probe_addr_list_valid(
     addr_count: usize,
 ) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_tls_cipher_is_probe_addr_list_valid(addr_count))
+    i32::from(crate::tlscipher::tls_cipher_is_probe_addr_list_valid(addr_count))
 }
 
 #[no_mangle]
@@ -24997,7 +24949,7 @@ pub extern "C" fn nzbget_rs_dqh_diskstate_resolve_read_version(
     read_version: c_int,
     format_version: c_int,
 ) -> c_int {
-    crate::dupequeuehealth::dqh_diskstate_resolve_read_version(read_version, format_version)
+    crate::diskstate_format::diskstate_resolve_read_version(read_version, format_version)
 }
 
 #[no_mangle]
@@ -25006,7 +24958,7 @@ pub extern "C" fn nzbget_rs_dqh_diskstate_state_file_exists(
     transactional: c_int,
     temp_exists: c_int,
 ) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_diskstate_state_file_exists(
+    i32::from(crate::diskstate_format::diskstate_state_file_exists(
         dest_exists != 0,
         transactional != 0,
         temp_exists != 0,
@@ -25019,7 +24971,7 @@ pub extern "C" fn nzbget_rs_dqh_diskstate_should_flush_queue_file(
     flush_queue_opt: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_diskstate_should_flush_queue_file(
+        crate::diskstate_format::diskstate_should_flush_queue_file(
             flush != 0,
             flush_queue_opt != 0,
         ),
@@ -25032,7 +24984,7 @@ pub extern "C" fn nzbget_rs_dqh_diskstate_is_file_version_unsupported(
     read_version: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_diskstate_is_file_version_unsupported(
+        crate::diskstate_format::diskstate_is_file_version_unsupported(
             file_version,
             read_version,
         ),
@@ -25044,7 +24996,7 @@ pub extern "C" fn nzbget_rs_dqh_diskstate_should_load_separate_history_file(
     format_version: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_diskstate_should_load_separate_history_file(format_version),
+        crate::diskstate_format::diskstate_should_load_separate_history_file(format_version),
     )
 }
 
@@ -25054,7 +25006,7 @@ pub extern "C" fn nzbget_rs_dqh_diskstate_should_reload_fallback_file_infos(
     queue_empty: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_diskstate_should_reload_fallback_file_infos(
+        crate::diskstate_format::diskstate_should_reload_fallback_file_infos(
             file_infos_loaded != 0,
             queue_empty != 0,
         ),
@@ -25065,7 +25017,7 @@ pub extern "C" fn nzbget_rs_dqh_diskstate_should_reload_fallback_file_infos(
 pub extern "C" fn nzbget_rs_dqh_diskstate_expected_repair_job_fields(
     format_version: c_int,
 ) -> c_int {
-    crate::dupequeuehealth::dqh_diskstate_expected_repair_job_fields(format_version)
+    crate::diskstate_format::diskstate_expected_repair_job_fields(format_version)
 }
 
 #[no_mangle]
@@ -25074,13 +25026,13 @@ pub extern "C" fn nzbget_rs_dqh_diskstate_is_nonneg_count_scan_invalid(
     count: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_diskstate_is_nonneg_count_scan_invalid(scan_cnt, count),
+        crate::diskstate_format::diskstate_is_nonneg_count_scan_invalid(scan_cnt, count),
     )
 }
 
 #[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_diskstate_has_meta_name_field(format_version: c_int) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_diskstate_has_meta_name_field(
+    i32::from(crate::diskstate_format::diskstate_has_meta_name_field(
         format_version,
     ))
 }
@@ -25090,7 +25042,7 @@ pub extern "C" fn nzbget_rs_dqh_diskstate_matches_server_state_id(
     news_server_state_id: c_int,
     server_id: c_int,
 ) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_diskstate_matches_server_state_id(
+    i32::from(crate::diskstate_format::diskstate_matches_server_state_id(
         news_server_state_id,
         server_id,
     ))
@@ -25111,7 +25063,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_select_original_or_current_msg_
     } else {
         CStr::from_ptr(cur_msg_id).to_bytes()
     };
-    let chosen = crate::dupequeuehealth::dqh_diskstate_select_original_or_current_msg_id(orig, cur);
+    let chosen = crate::diskstate_format::diskstate_select_original_or_current_msg_id(orig, cur);
     if !orig.is_empty() && std::ptr::eq(chosen.as_ptr(), orig.as_ptr()) {
         orig_msg_id
     } else {
@@ -25126,7 +25078,7 @@ pub extern "C" fn nzbget_rs_dqh_diskstate_should_probe_direct_write_files(
     force_direct_write: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_diskstate_should_probe_direct_write_files(
+        crate::diskstate_format::diskstate_should_probe_direct_write_files(
             output_initialized,
             direct_write_opt != 0,
             force_direct_write != 0,
@@ -25142,7 +25094,7 @@ pub extern "C" fn nzbget_rs_dqh_diskstate_can_check_completed_dest_file(
     filename_empty: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_diskstate_can_check_completed_dest_file(
+        crate::diskstate_format::diskstate_can_check_completed_dest_file(
             completed != 0,
             force_direct_write != 0,
             dest_dir_empty != 0,
@@ -25160,7 +25112,7 @@ pub extern "C" fn nzbget_rs_dqh_diskstate_matches_history_nzb_id(
     target_id: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_diskstate_matches_history_nzb_id(
+        crate::diskstate_format::diskstate_matches_history_nzb_id(
             kind, hk_nzb, hk_url, nzb_id, target_id,
         ),
     )
@@ -25172,7 +25124,7 @@ pub extern "C" fn nzbget_rs_dqh_diskstate_should_discard_feeds_file(
     feed_history_empty: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_diskstate_should_discard_feeds_file(
+        crate::diskstate_format::diskstate_should_discard_feeds_file(
             feeds_empty != 0,
             feed_history_empty != 0,
         ),
@@ -25186,7 +25138,7 @@ pub extern "C" fn nzbget_rs_dqh_diskstate_can_store_volume_slot(
     array_size: usize,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_diskstate_can_store_volume_slot(
+        crate::diskstate_format::diskstate_can_store_volume_slot(
             has_volume_array != 0,
             index,
             array_size,
@@ -25195,21 +25147,10 @@ pub extern "C" fn nzbget_rs_dqh_diskstate_can_store_volume_slot(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_webdl_resolve_force_flag(
-    force: c_int,
-    url_force: c_int,
-) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_webdl_resolve_force_flag(
-        force != 0,
-        url_force != 0,
-    ))
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_webdl_should_try_recv_when_buf_empty(
     buf_len: c_int,
 ) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_webdl_should_try_recv_when_buf_empty(buf_len))
+    i32::from(crate::webdownload::webdl_should_try_recv_when_buf_empty(buf_len))
 }
 
 #[no_mangle]
@@ -25218,7 +25159,7 @@ pub extern "C" fn nzbget_rs_dqh_tls_should_verify_client_x509_store(
     has_x509_store: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_tls_should_verify_client_x509_store(
+        crate::tlscipher::tls_should_verify_client_x509_store(
             is_client != 0,
             has_x509_store != 0,
         ),
@@ -25231,7 +25172,7 @@ pub extern "C" fn nzbget_rs_dqh_tls_should_check_verify_result_on_handshake_fail
     should_verify: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_tls_should_check_verify_result_on_handshake_fail(
+        crate::tlscipher::tls_should_check_verify_result_on_handshake_fail(
             is_client != 0,
             should_verify != 0,
         ),
@@ -25244,7 +25185,7 @@ pub extern "C" fn nzbget_rs_dqh_tls_cipher_classify_probe_deadline_override(
     is_cancelled: c_int,
     deadline_expired: c_int,
 ) -> c_int {
-    crate::dupequeuehealth::dqh_tls_cipher_classify_probe_deadline_override(
+    crate::tlscipher::tls_cipher_classify_probe_deadline_override(
         current_result,
         is_cancelled != 0,
         deadline_expired != 0,
@@ -25257,7 +25198,7 @@ pub extern "C" fn nzbget_rs_dqh_frontend_should_request_file_list(
     file_list: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_frontend_should_request_file_list(
+        crate::ncurses_format::frontend_should_request_file_list(
             summary != 0,
             file_list != 0,
         ),
@@ -25270,7 +25211,7 @@ pub extern "C" fn nzbget_rs_dqh_frontend_should_build_remote_file_list(
     trailing_data_len: u32,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_frontend_should_build_remote_file_list(
+        crate::ncurses_format::frontend_should_build_remote_file_list(
             file_list != 0,
             trailing_data_len,
         ),
@@ -25283,7 +25224,7 @@ pub extern "C" fn nzbget_rs_dqh_ncurses_should_reset_empty_edit_queue(
     queue_size: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_ncurses_should_reset_empty_edit_queue(
+        crate::ncurses_format::ncurses_should_reset_empty_edit_queue(
             is_edit_queue != 0,
             queue_size,
         ),
@@ -25301,7 +25242,7 @@ pub unsafe extern "C" fn nzbget_rs_dqh_remote_server_is_cert_or_key_missing(
         CStr::from_ptr(path).to_bytes()
     };
     i32::from(
-        crate::dupequeuehealth::dqh_remote_server_is_cert_or_key_missing(
+        crate::webserver::remote_server_is_cert_or_key_missing(
             p,
             file_exists != 0,
         ),
@@ -25314,7 +25255,7 @@ pub extern "C" fn nzbget_rs_dqh_remote_server_should_reset_listener(
     has_accepted_conn: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_remote_server_should_reset_listener(
+        crate::webserver::remote_server_should_reset_listener(
             bind_ok != 0,
             has_accepted_conn != 0,
         ),
@@ -25327,7 +25268,7 @@ pub extern "C" fn nzbget_rs_dqh_remote_client_is_empty_edit_target(
     name_count: usize,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_remote_client_is_empty_edit_target(
+        crate::ncurses_format::remote_client_is_empty_edit_target(
             id_count,
             name_count,
         ),
@@ -25336,7 +25277,7 @@ pub extern "C" fn nzbget_rs_dqh_remote_client_is_empty_edit_target(
 
 #[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_webserver_classify_ext_route(get_route: c_int) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_webserver_classify_ext_route(get_route))
+    i32::from(crate::webserver::webserver_classify_ext_route(get_route))
 }
 
 #[no_mangle]
@@ -25345,7 +25286,7 @@ pub extern "C" fn nzbget_rs_dqh_webserver_is_rel_path_outside_root(
     first_char: c_char,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_webserver_is_rel_path_outside_root(
+        crate::webserver::webserver_is_rel_path_outside_root(
             is_empty != 0,
             first_char as u8,
         ),
@@ -25357,7 +25298,7 @@ pub extern "C" fn nzbget_rs_dqh_binrpc_should_lookup_unusual_file_owner(
     same_nzb_ptr: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_binrpc_should_lookup_unusual_file_owner(
+        crate::binrpc::binrpc_should_lookup_unusual_file_owner(
             same_nzb_ptr != 0,
         ),
     )
@@ -25368,7 +25309,7 @@ pub extern "C" fn nzbget_rs_dqh_binrpc_should_match_file_regex(
     has_regex: c_int,
     match_group: c_int,
 ) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_binrpc_should_match_file_regex(
+    i32::from(crate::binrpc::binrpc_should_match_file_regex(
         has_regex != 0,
         match_group != 0,
     ))
@@ -25380,7 +25321,7 @@ pub extern "C" fn nzbget_rs_dqh_xmlrpc_is_json_protocol(
     rp_json_rpc: c_int,
     rp_jsonp_rpc: c_int,
 ) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_xmlrpc_is_json_protocol(
+    i32::from(crate::xmlrpc_format::xmlrpc_is_json_protocol(
         protocol,
         rp_json_rpc,
         rp_jsonp_rpc,
@@ -25394,7 +25335,7 @@ pub extern "C" fn nzbget_rs_dqh_xmlrpc_should_skip_to_json_post_params(
     hm_post: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_xmlrpc_should_skip_to_json_post_params(
+        crate::xmlrpc_format::xmlrpc_should_skip_to_json_post_params(
             is_json != 0,
             http_method,
             hm_post,
@@ -25409,7 +25350,7 @@ pub extern "C" fn nzbget_rs_dqh_xmlrpc_should_check_queue_script_job(
     pt_queued: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_xmlrpc_should_check_queue_script_job(
+        crate::xmlrpc_format::xmlrpc_should_check_queue_script_job(
             has_post_info != 0,
             post_stage,
             pt_queued,
@@ -25422,7 +25363,7 @@ pub extern "C" fn nzbget_rs_dqh_xmlrpc_classify_append_result_mode(
     v13: c_int,
     nzb_id: c_int,
 ) -> c_int {
-    crate::dupequeuehealth::dqh_xmlrpc_classify_append_result_mode(v13 != 0, nzb_id)
+    crate::xmlrpc_format::xmlrpc_classify_append_result_mode(v13 != 0, nzb_id)
 }
 
 #[no_mangle]
@@ -25430,7 +25371,7 @@ pub extern "C" fn nzbget_rs_dqh_xmlrpc_should_emit_json_array_comma(
     is_json: c_int,
     index: c_int,
 ) -> c_int {
-    i32::from(crate::dupequeuehealth::dqh_xmlrpc_should_emit_json_array_comma(
+    i32::from(crate::xmlrpc_format::xmlrpc_should_emit_json_array_comma(
         is_json != 0,
         index,
     ))
@@ -25444,7 +25385,7 @@ pub extern "C" fn nzbget_rs_dqh_xmlrpc_should_parse_json_post_test_server(
     hm_post: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_xmlrpc_should_parse_json_post_test_server(
+        crate::xmlrpc_format::xmlrpc_should_parse_json_post_test_server(
             is_json != 0,
             has_request != 0,
             http_method,
@@ -25462,7 +25403,7 @@ pub extern "C" fn nzbget_rs_dqh_xmlrpc_classify_start_script_param_mode(
     has_p4: c_int,
 ) -> c_int {
     i32::from(
-        crate::dupequeuehealth::dqh_xmlrpc_classify_start_script_param_mode(
+        crate::xmlrpc_format::xmlrpc_classify_start_script_param_mode(
             is_json != 0,
             has_p1 != 0,
             has_p2 != 0,

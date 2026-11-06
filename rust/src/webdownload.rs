@@ -399,6 +399,73 @@ pub fn webdl_kb_to_bytes(kb: i32) -> i32 {
     kb.wrapping_mul(1024)
 }
 
+/// Returns true when `WebDownloader::Run` should continue its retry loop (`!is_stopped && remained_download_retries > 0 && remained_connect_retries > 0`).
+pub fn webdl_should_continue_retry_loop(
+    is_stopped: bool,
+    remained_download_retries: i32,
+    remained_connect_retries: i32,
+) -> bool {
+    !is_stopped && remained_download_retries > 0 && remained_connect_retries > 0
+}
+
+/// Returns true when `WebDownloader::Run` should keep sleeping during the retry interval (`!is_stopped && msec < url_interval_sec * 1000 && !(!force && pause_download)`).
+pub fn webdl_should_keep_waiting_retry_interval(
+    is_stopped: bool,
+    msec: i32,
+    url_interval_sec: i32,
+    force: bool,
+    pause_download: bool,
+) -> bool {
+    !is_stopped
+        && msec < url_interval_sec.saturating_mul(1000)
+        && !(!force && pause_download)
+}
+
+/// Returns true when `WebDownloader::Run` has reached a terminal status (`status == adFinished || status == adFatalError || status == adNotFound`).
+pub fn webdl_is_terminal_retry_status(
+    status: i32,
+    ad_finished: i32,
+    ad_fatal_error: i32,
+    ad_not_found: i32,
+) -> bool {
+    status == ad_finished || status == ad_fatal_error || status == ad_not_found
+}
+
+/// Returns true when `WebDownloader::Download` should abort right after `Connect()` (`!connected || is_stopped`).
+pub fn webdl_is_connect_aborted(connected: bool, is_stopped: bool) -> bool {
+    !connected || is_stopped
+}
+
+/// Returns true when `WebDownloader::Download` should proceed to `DownloadBody()` (`status == ad_running`).
+pub fn webdl_should_download_body(status: i32, ad_running: i32) -> bool {
+    status == ad_running
+}
+
+/// Returns true when `WebDownloader::Download` should delete a broken partial output file (`status != ad_finished`).
+pub fn webdl_should_delete_broken_output(status: i32, ad_finished: i32) -> bool {
+    status != ad_finished
+}
+
+/// Returns true when `WebDownloader::Write` needs to call `PrepareFile()` (`!out_file_active`).
+pub fn webdl_needs_prepare_file(out_file_active: bool) -> bool {
+    !out_file_active
+}
+
+/// Returns true when `WebDownloader::Write` should fail after gunzipping a chunk (`out_len > 0 && written_bytes <= 0`).
+pub fn webdl_is_gunzip_write_failed(out_len: i32, written_bytes: i64) -> bool {
+    out_len > 0 && written_bytes <= 0
+}
+
+/// Returns true when `WebDownloader::FreeConnection` should disconnect a cancelled connection (`conn_status == cs_cancelled`).
+pub fn webdl_should_disconnect_on_free(conn_status: i32, cs_cancelled: i32) -> bool {
+    conn_status == cs_cancelled
+}
+
+/// Returns true when `WebDownloader::DownloadBody` should call `TryRecv` after `ReadBuffer` (`buf_len == 0`).
+pub fn webdl_should_try_recv_when_buf_empty(buf_len: i32) -> bool {
+    buf_len == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

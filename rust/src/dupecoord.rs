@@ -417,6 +417,16 @@ where
     best_idx.map(|i| i as i32).unwrap_or(-1)
 }
 
+/// Returns true when `RarLister::FindLargestFile` in `DupeMatcher.cpp` should continue waiting for `unrar` (`is_running && start_time + timeout_sec > cur_time && start_time >= cur_time`).
+pub fn dupematcher_should_wait_rar_lister(
+    is_running: bool,
+    start_time: i64,
+    timeout_sec: i32,
+    cur_time: i64,
+) -> bool {
+    is_running && start_time + i64::from(timeout_sec) > cur_time && start_time >= cur_time
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -712,7 +712,146 @@ mod tests {
     #[test]
     fn short_query_and_same_release() {
         assert_eq!(short_query(b"Lucifer.S02E14.Candy.Morningstar.1080p.DTS-HD.MA.5.1.AVC.REMUX-FraMeST"), b"lucifer s02e14 1080p".to_vec());
+        assert_eq!(short_query(b"Some.Movie.2020.Extended.2160p.UHD-GRP"), b"some movie 2020 2160p".to_vec());
+        assert_eq!(short_query(b"NoMarkers-GRP"), b"".to_vec());
         assert!(same_release(b"Show.S01E02.1080p.WEB.H264-GRP", b"Show S01E02 1080p WEB-DL x264-GRP"));
         assert!(!same_release(b"Show.S01E02.1080p.WEB.H264-GRP", b"Show.S01E02.1080p.WEB.H264-OTHER"));
+
+        let short_tsv = include_str!("../../tests/testdata/dupesearch/short_query.tsv");
+        for line in short_tsv.lines() {
+            let fields: Vec<&str> = line.split('\t').collect();
+            assert_eq!(fields.len(), 2);
+            assert_eq!(short_query(fields[0].as_bytes()), fields[1].as_bytes());
+        }
+    }
+
+    #[test]
+    fn normalize_and_matching_vectors() {
+        assert_eq!(
+            normalize(b"Lucifer S02E14 1080p BluRay x264-DEFLATE.nzb"),
+            b"lucifer.s02e14.1080p.bluray.x264.deflate"
+        );
+        assert_eq!(
+            normalize(b"Some.Movie.2020.1080p.WEB-DL-GRP-xpost [nzbgeek].nzb"),
+            b"some.movie.2020.1080p.web.dl.grp"
+        );
+        assert_eq!(normalize(b"A_B--C.mkv"), b"a.b.c");
+        assert_eq!(
+            normalize(b"Show.S01E01.1080p.WEB.H264-GRP"),
+            b"show.s01e01.1080p.web.h264.grp"
+        );
+        assert_eq!(
+            normalize(b"Movie.2020.1080p.WEB.DDP5.1.H.265"),
+            b"movie.2020.1080p.web.ddp5.1.h.265"
+        );
+        assert_eq!(
+            normalize(b"Movie.2020.1080p.WEB-GRP.mkv.001"),
+            b"movie.2020.1080p.web.grp"
+        );
+
+        let luc = "Lucifer.S02E14.Candy.Morningstar.1080p.DTS-HD.MA.5.1.AVC.REMUX-FraMeSToR";
+        assert!(same_release(
+            luc.as_bytes(),
+            b"Lucifer S02E14 Candy Morningstar 1080p DTS-HD MA 5 1 AVC REMUX-FraMeSToR"
+        ));
+        assert!(same_release(
+            luc.as_bytes(),
+            b"lucifer.s02e14.candy.morningstar.1080p.dts-hd.ma.5.1.avc.remux-framestor.mkv"
+        ));
+        assert!(!same_release(luc.as_bytes(), luc.replacen("FraMeSToR", "EPSiLON", 1).as_bytes()));
+        assert!(!same_release(luc.as_bytes(), luc.replacen("1080p", "2160p", 1).as_bytes()));
+        assert!(!same_release(luc.as_bytes(), luc.replacen("S02E14", "S02E15", 1).as_bytes()));
+        assert!(!same_release(luc.as_bytes(), luc.replacen("1080p", "REPACK.1080p", 1).as_bytes()));
+        assert!(!same_release(luc.as_bytes(), luc.replacen("DTS-HD.MA.5.1", "DDP5.1", 1).as_bytes()));
+        assert!(!same_release(
+            b"Movie.2020.1080p.BluRay.x264-GRP",
+            b"Movie.2021.1080p.BluRay.x264-GRP"
+        ));
+        assert!(!same_release(
+            b"Show.S01E01.1080p.NF.WEB-DL.DDP5.1.H.264-GRP",
+            b"Show.S01E01.1080p.AMZN.WEB-DL.DDP5.1.H.264-GRP"
+        ));
+        assert!(same_release(luc.as_bytes(), b"Lucifer.S02E14.1080p.BluRay.REMUX.AVC-FraMeSToR"));
+        assert!(!same_release(luc.as_bytes(), b"Lucifer.S02E14.1080p.REMUX"));
+
+        let hdr_a = b"Shrinking.S02E06.2160p.ATVP.WEB-DL.DDPA5.1.HDR.DV.HEVC-NTb";
+        assert!(same_release(
+            hdr_a,
+            b"Shrinking.S02E06.In.a.Lonely.Place.2160p.ATVP.WEB-DL.DDP5.1.DV.HDR.H.265-NTb"
+        ));
+        assert!(!same_release(
+            hdr_a,
+            b"Shrinking.S02E06.In.a.Lonely.Place.2160p.ATVP.WEB-DL.DDP5.1.H.265-NTb"
+        ));
+        assert!(!same_release(
+            hdr_a,
+            b"Shrinking.S02E06.In.a.Lonely.Place.2160p.ATVP.WEB-DL.DDP5.1.DV.H.265-NTb"
+        ));
+        assert!(same_release(
+            b"Shrinking.S01E10.Closure.2160p.ATVP.WEB-DL.DDP5.1.DoVi.H.265-NTb",
+            b"Shrinking S01E10 Closure 2160p ATVP WEB-DL DDP5 1 DV H 265-NTb"
+        ));
+
+        assert!(!same_release(b"Movie.2020.1080p.WEB.DDP5.1.H.264", b"Movie.2020.1080p.WEB.DDP5.1.H.265"));
+        assert!(!same_release(b"Movie.2020.1080p.WEB.DDP5.1.H.264-GRP", b"Movie.2020.1080p.WEB.DDP5.1.H.265-GRP"));
+        assert!(same_release(b"Movie.2020.1080p.WEB.DDP5.1.H.265-GRP", b"Movie 2020 1080p WEB DDP5 1 x265-GRP"));
+
+        assert!(readable(b"Lucifer.S02E14.1080p.WEB.H264-GRP.mkv"));
+        assert!(!readable(b"53a9sd8antphskzkulcik6yrrktj1qft.7z.001"));
+        assert!(!readable(b"e630b420289687dc3c66cc3274207902.part01.rar"));
+
+        assert_eq!(parse(b"Show.S01E01-E02.1080p.WEB.h264-GRP").episodes, vec![1, 2]);
+        assert_eq!(parse(b"Show.S01E01-02.1080p.WEB.h264-GRP").episodes, vec![1, 2]);
+        assert!(!same_release(b"Show.S01E01-E02.1080p.WEB.h264-GRP", b"Show.S01E01.1080p.WEB.h264-GRP"));
+        assert!(same_release(b"Show.S01E01-E02.1080p.WEB.h264-GRP", b"Show.S01E01E02.1080p.WEB.h264-GRP"));
+        let yr = parse(b"Show.S01E01-2023.1080p.WEB.h264-GRP");
+        assert_eq!((yr.episodes, yr.year), (vec![1], 2023));
+        assert_eq!(parse(b"Show.S01E05-03.1080p.WEB.h264-GRP").episodes, vec![5]);
+        assert_eq!(parse(b"Show.S01E01-E02").episodes, vec![1, 2]);
+        assert_eq!(parse(b"Show.S01E01-E02.1080p").episodes, vec![1, 2]);
+
+        assert!(!same_release(b"Show.S01E01.REPACK2.1080p.WEB.h264-GRP", b"Show.S01E01.1080p.WEB.h264-GRP"));
+        assert!(!same_release(b"Show.S01E01.PROPER2.1080p.WEB.h264-GRP", b"Show.S01E01.1080p.WEB.h264-GRP"));
+        assert!(parse(b"Show.S01E01.RERIP3.1080p.WEB.h264-GRP").repack);
+        assert!(same_release(b"Show.S01E01.REPACK2.1080p.WEB.h264-GRP", b"Show S01E01 REPACK2 1080p WEB h264-GRP"));
+
+        for name in [
+            b"Movie.2020.2160p.DolbyVision.WEB.h265-GRP".as_slice(),
+            b"Movie.2020.2160p.Dolby-Vision.WEB.h265-GRP",
+            b"Movie.2020.2160p.Dolby_Vision.WEB.h265-GRP",
+            b"Movie 2020 2160p Dolby Vision WEB h265-GRP",
+        ] {
+            assert_eq!(parse(name).hdr, BTreeSet::from([b"dv".to_vec()]));
+            assert!(same_release(name, b"Movie.2020.2160p.DV.WEB.h265-GRP"));
+            assert!(!same_release(name, b"Movie.2020.2160p.WEB.h265-GRP"));
+        }
+
+        assert!(!same_release(
+            b"2001.A.Space.Odyssey.1968.1080p.BluRay.x264-GRP",
+            b"2001.Maniacs.2005.1080p.BluRay.x264-GRP"
+        ));
+        let odyssey = parse(b"2001.A.Space.Odyssey.1968.1080p.BluRay.x264-GRP");
+        assert_eq!((odyssey.title, odyssey.year), (b"2001aspaceodyssey".to_vec(), 1968));
+        let war = parse(b"1917.2019.1080p.BluRay.x264-GRP");
+        assert_eq!((war.title, war.year), (b"1917".to_vec(), 2019));
+        assert_eq!(parse(b"2012.1080p.BluRay.x264-GRP").title, b"2012");
+        assert!(readable(b"1917.2019.1080p.BluRay.x264-GRP.mkv"));
+        assert!(!same_release(b"1917.2019.1080p.BluRay.x264-GRP", b"2012.2009.1080p.BluRay.x264-GRP"));
+        let show = parse(b"The.Paper.2025.S01E01.1080p.WEB.h264-GRP");
+        assert_eq!((show.title, show.year), (b"thepaper".to_vec(), 2025));
+
+        assert!(!same_release(b"Show.S01E01.1080i.HDTV.h264-GRP", b"Show.S01E01.1080p.HDTV.h264-GRP"));
+        assert!(same_release(b"Show.S01E01.1080i.HDTV.h264-GRP", b"Show S01E01 1080i HDTV h264-GRP"));
+
+        let matching_tsv = include_str!("../../tests/testdata/dupesearch/release_matching.tsv");
+        let lines: Vec<&str> = matching_tsv.lines().collect();
+        assert_eq!(lines.len(), 144);
+        for line in lines {
+            let row: Vec<&str> = line.split('\t').collect();
+            assert_eq!(row.len(), 4);
+            let expected = row[2] == "1";
+            assert_eq!(same_release(row[0].as_bytes(), row[1].as_bytes()), expected);
+            assert_eq!(normalize(row[1].as_bytes()), row[3].as_bytes());
+        }
     }
 }

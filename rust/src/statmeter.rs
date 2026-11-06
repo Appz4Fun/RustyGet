@@ -385,6 +385,49 @@ pub fn server_volume_required_day_len(day_slot: i32, current_len: usize) -> usiz
     }
 }
 
+/// Computes `(speed_kb, time_diff)` in `StatMeter::LogDebugInfo`.
+pub fn statmeter_calc_debug_speed_and_timediff(
+    current_download_speed: i32,
+    cur_time: i32,
+    speed_start_time: i32,
+    slot_size: i32,
+) -> (i32, i32) {
+    (
+        current_download_speed / 1024,
+        cur_time.wrapping_sub(speed_start_time.wrapping_mul(slot_size)),
+    )
+}
+
+/// Converts bytes to megabytes (`(int)(bytes / 1024 / 1024)`) in `StatMeter::CalcQuotaUsage`.
+pub fn statmeter_bytes_to_mb_i32(bytes: i64) -> i32 {
+    (bytes / 1024 / 1024) as i32
+}
+
+/// Formats `"[first_idx]=v0 [first_idx+1]=v1 ... "` for `ServerVolume::LogDebugInfo`.
+pub fn statmeter_format_indexed_bytes_line(first_idx: i32, values: &[i64]) -> Vec<u8> {
+    let mut out = String::with_capacity(values.len() * 12);
+    for (i, &val) in values.iter().enumerate() {
+        use std::fmt::Write;
+        let _ = write!(out, "[{}]={val} ", first_idx.wrapping_add(i as i32));
+    }
+    out.into_bytes()
+}
+
+/// Returns true when `StatMeter::CheckQuota` has at least one quota configured (`daily_quota != 0 || monthly_quota != 0`).
+pub fn statmeter_has_any_quota_configured(daily_quota: i32, monthly_quota: i32) -> bool {
+    daily_quota != 0 || monthly_quota != 0
+}
+
+/// Returns true when `StatMeter::CalcMonthSlots` is before `QuotaStartDay` in the current month (`quota_start_day > cur_mday`).
+pub fn statmeter_is_before_quota_start_day(quota_start_day: i32, cur_mday: i32) -> bool {
+    quota_start_day > cur_mday
+}
+
+/// Returns true when `StatMeter::CalcMonthSlots` previous month day overflowed (`prev_mday != quota_start_day`).
+pub fn statmeter_did_prev_month_day_overflow(prev_mday: i32, quota_start_day: i32) -> bool {
+    prev_mday != quota_start_day
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

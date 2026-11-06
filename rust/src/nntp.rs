@@ -639,6 +639,259 @@ pub fn article_fetcher_should_throttle_bandwidth(
         && (cur_speed > speed_limit || momentary_speed > speed_limit)
 }
 
+/// Computes the read buffer capacity (`read_buf_size + 1 + decode_slack`) for `Connection::Connection`.
+pub fn conn_calc_read_buffer_cap(read_buf_size: i32, decode_slack: i32) -> i32 {
+    read_buf_size.saturating_add(1).saturating_add(decode_slack)
+}
+
+/// Formats `port` as a decimal byte string for `Connection::Bind` and `Connection::DoConnect`.
+pub fn conn_format_port_str(port: i32) -> Vec<u8> {
+    format!("{port}").into_bytes()
+}
+
+/// Clamps `buf_avail` to `>= 0` for `Connection::ReadLine`.
+pub fn conn_clamp_buf_avail(buf_avail: i32) -> i32 {
+    if buf_avail > 0 {
+        buf_avail
+    } else {
+        0
+    }
+}
+
+/// Formats `"<prefix>: Error <err_code> - <err_msg>"` for `Connection::ReportError`.
+pub fn conn_format_report_err_with_code(
+    prefix: &[u8],
+    err_code: i32,
+    err_msg: &[u8],
+) -> Vec<u8> {
+    let mid = format!(": Error {err_code} - ");
+    let mut out = Vec::with_capacity(prefix.len() + mid.len() + err_msg.len());
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(mid.as_bytes());
+    out.extend_from_slice(err_msg);
+    out
+}
+
+/// Formats `"BODY <message_id>\r\n"` for `ArticleFetcher::FetchOnConnection`.
+pub fn article_fetcher_format_body_cmd(message_id: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(5 + message_id.len() + 2);
+    out.extend_from_slice(b"BODY ");
+    out.extend_from_slice(message_id);
+    out.extend_from_slice(b"\r\n");
+    out
+}
+
+/// Returns `true` when `!active_group.is_empty() && active_group == grp` for `NntpConnection::JoinGroup`.
+pub fn nntp_conn_is_already_in_group(active_group: &[u8], grp: &[u8]) -> bool {
+    !active_group.is_empty() && active_group == grp
+}
+
+/// Formats an NNTP message-id in angle brackets (`<id>`) if not already bracketed.
+pub fn nntp_health_format_bracketed_id(message_id: &[u8]) -> Vec<u8> {
+    if message_id.first() == Some(&b'<') && message_id.last() == Some(&b'>') {
+        message_id.to_vec()
+    } else {
+        let mut out = Vec::with_capacity(message_id.len() + 2);
+        out.push(b'<');
+        out.extend_from_slice(message_id);
+        out.push(b'>');
+        out
+    }
+}
+
+/// Formats a pipelined batch of `"STAT <id>\r\n"` commands for `NntpHealthServer::Exchange`.
+pub fn nntp_health_format_stat_batch(ids: &[&[u8]]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(ids.len() * 48);
+    for id in ids {
+        out.extend_from_slice(b"STAT ");
+        if id.first() == Some(&b'<') && id.last() == Some(&b'>') {
+            out.extend_from_slice(id);
+        } else {
+            out.push(b'<');
+            out.extend_from_slice(id);
+            out.push(b'>');
+        }
+        out.extend_from_slice(b"\r\n");
+    }
+    out
+}
+
+/// Returns true when `ArticleFetcher::Fetch` should clear the unreachable flag for the server.
+pub fn article_fetcher_should_clear_unreachable(success: bool, transient: bool) -> bool {
+    success || !transient
+}
+
+/// Returns true when `ArticleFetcher::Fetch` should evaluate transient retry on an answering/reachable server.
+pub fn article_fetcher_can_attempt_transient_retry(
+    transient: bool,
+    server_unreachable: bool,
+) -> bool {
+    transient && !server_unreachable
+}
+
+/// Returns true when `ArticleFetcher::Fetch` has remaining transient retry attempts (`attempt < max_transient_attempts`).
+pub fn article_fetcher_has_more_transient_attempts(
+    attempt: i32,
+    max_transient_attempts: i32,
+) -> bool {
+    attempt < max_transient_attempts
+}
+
+/// Returns true when `ArticleBatchFetcher::StoreResult` should accept and store the fetched result.
+pub fn article_batch_can_store_result(
+    batch_id: i32,
+    current_batch_id: i32,
+    cancelled: bool,
+) -> bool {
+    batch_id == current_batch_id && !cancelled
+}
+
+/// Returns true when `ArticleBatchFetcher::Next` can deliver the next slot.
+pub fn article_batch_can_deliver_next(
+    cancelled: bool,
+    stopped: bool,
+    next_deliver: usize,
+    total_requests: usize,
+) -> bool {
+    !cancelled && !stopped && next_deliver < total_requests
+}
+
+/// Returns true when `ServerPool` has a valid level index with free connection slots (`level >= 0 && (level as usize) < levels_len && level_free_count > 0`).
+pub fn server_pool_has_available_level_conns(
+    level: i32,
+    levels_len: usize,
+    level_free_count: i32,
+) -> bool {
+    level >= 0 && (level as usize) < levels_len && level_free_count > 0
+}
+
+/// Computes `rand_val % candidates_len` for `ServerPool::LockedGetConnection`.
+pub fn server_pool_pick_candidate_index(rand_val: i32, candidates_len: usize) -> usize {
+    if candidates_len == 0 {
+        0
+    } else {
+        (rand_val.unsigned_abs() as usize) % candidates_len
+    }
+}
+
+/// Returns true when `ServerPool::CloseUnusedConnections` should disconnect a pooled connection on an idle level (`conn_norm_level == level && conn_status == cs_connected`).
+pub fn server_pool_should_disconnect_idle_level_conn(
+    conn_norm_level: i32,
+    level: i32,
+    conn_status: i32,
+    cs_connected: i32,
+) -> bool {
+    conn_norm_level == level && conn_status == cs_connected
+}
+
+/// Classifies `NntpConnection::Connect` handshake result:
+/// `0` = connected (`result == 0`),
+/// `1` = disconnect & fail (`result == 1`),
+/// `-1` = fail without disconnect (`result != 0 && result != 1`).
+pub fn nntp_conn_classify_handshake_result(result: i32) -> i32 {
+    if result == 1 {
+        1
+    } else if result == 0 {
+        0
+    } else {
+        -1
+    }
+}
+
+/// Returns true when `ArticleFetcher::WaitBeforeRetry` should keep sleeping (`waited < seconds * 10 && !is_stopped`).
+pub fn article_fetcher_should_keep_waiting_retry(
+    waited: i32,
+    seconds: i32,
+    is_stopped: bool,
+) -> bool {
+    waited < seconds.saturating_mul(10) && !is_stopped
+}
+
+/// Returns true when `ArticleFetcher::ReleaseConnection` should disconnect the connection (`!keep_connected || conn_status == cs_cancelled`).
+pub fn article_fetcher_should_disconnect_on_release(
+    keep_connected: bool,
+    conn_status: i32,
+    cs_cancelled: i32,
+) -> bool {
+    !keep_connected || conn_status == cs_cancelled
+}
+
+/// Returns true when `ArticleFetcher::FetchFromConnection` should treat a failed group join as transient and disconnect (`!has_response`).
+pub fn article_fetcher_is_join_group_failure_transient(has_response: bool) -> bool {
+    !has_response
+}
+
+/// Returns true when `ArticleBatchFetcher::Begin` should call `EnsureWorkers()` (`worker_count > 0 && !is_stopped`).
+pub fn article_batch_should_ensure_workers(worker_count: i32, is_stopped: bool) -> bool {
+    worker_count > 0 && !is_stopped
+}
+
+/// Returns true when a Unix-domain socket path length overflows `sun_path` (`host_len >= sun_path_cap`).
+pub fn conn_is_unix_path_too_long(host_len: usize, sun_path_cap: usize) -> bool {
+    host_len >= sun_path_cap
+}
+
+/// Resolves the `getaddrinfo` error code passed to `Connection::ReportError` (`if res != eai_system { res } else { 0 }`).
+pub fn conn_resolve_gai_report_err_code(res: i32, eai_system: i32) -> i32 {
+    if res != eai_system {
+        res
+    } else {
+        0
+    }
+}
+
+/// Returns true when `Connection::DoConnect` should log `"Socket creation failed"` (`is_invalid_socket && has_addr_list`).
+pub fn conn_should_report_socket_create_failed(
+    is_invalid_socket: bool,
+    has_addr_list: bool,
+) -> bool {
+    is_invalid_socket && has_addr_list
+}
+
+/// Returns true when `Connection::DoConnect` should report connection failure and close a created socket (`!connected && !is_invalid_socket`).
+pub fn conn_should_cleanup_unconnected_socket(
+    connected: bool,
+    is_invalid_socket: bool,
+) -> bool {
+    !connected && !is_invalid_socket
+}
+
+/// Returns true when `Connection::DoDisconnect` should `unlink` a listening Unix-domain socket (`is_unix_path && getsockopt_res == 0 && is_listening != 0`).
+pub fn conn_should_unlink_listening_unix_socket(
+    is_unix_path: bool,
+    getsockopt_res: i32,
+    is_listening: i32,
+) -> bool {
+    is_unix_path && getsockopt_res == 0 && is_listening != 0
+}
+
+/// Resolves the error code in `Connection::ReportError` (`if err_code == 0 { last_net_err } else { err_code }`).
+pub fn conn_resolve_report_err_code(err_code: i32, last_net_err: i32) -> i32 {
+    if err_code == 0 {
+        last_net_err
+    } else {
+        err_code
+    }
+}
+
+/// Returns true when `Network::SpeedTest::RunTest` should count an iteration as a failure (`elapsed_sec == 0.0 || downloaded < target_size`).
+pub fn speed_test_is_iteration_failed(
+    elapsed_sec: f64,
+    downloaded: u32,
+    target_size: u32,
+) -> bool {
+    elapsed_sec == 0.0 || downloaded < target_size
+}
+
+/// Returns true when `Network::SpeedTest::ExecuteTest` should break from its receive loop (`received <= 0 || elapsed_sec >= timeout_sec`).
+pub fn speed_test_should_stop_recv_loop(
+    received: i32,
+    elapsed_sec: f64,
+    timeout_sec: f64,
+) -> bool {
+    received <= 0 || elapsed_sec >= timeout_sec
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

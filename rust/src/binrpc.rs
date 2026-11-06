@@ -1449,6 +1449,54 @@ pub fn binrpc_format_file_match_name(nzb_name: &[u8], base_filename: &[u8]) -> V
     out
 }
 
+/// Returns the NUL-terminated response message for `WriteLogBinCommand::Execute`.
+pub fn binrpc_write_log_response_msg(ok: bool) -> &'static [u8] {
+    if ok {
+        b"Message added to log\0"
+    } else {
+        b"Invalid message-kind\0"
+    }
+}
+
+/// Returns the NUL-terminated response message for `ScanBinCommand::Execute`.
+pub fn binrpc_scan_response_msg(sync_mode: bool) -> &'static [u8] {
+    if sync_mode {
+        b"Scan-Command completed\0"
+    } else {
+        b"Scan-Command scheduled successfully\0"
+    }
+}
+
+/// Classifies which history entry fields to populate in `HistoryBinCommand::Execute`:
+/// `1` = NZB fields, `2` = Dup size fields, `3` = URL status field, `0` = none.
+pub fn binrpc_classify_history_entry_fields(
+    kind: i32,
+    hk_nzb: i32,
+    hk_dup: i32,
+    hk_url: i32,
+    show_hidden: bool,
+) -> i32 {
+    if kind == hk_nzb {
+        1
+    } else if kind == hk_dup && show_hidden {
+        2
+    } else if kind == hk_url {
+        3
+    } else {
+        0
+    }
+}
+
+/// Returns true when `ListBinCommand::Execute` must scan the queue for an unusual file owner (`!same_nzb_ptr`).
+pub fn binrpc_should_lookup_unusual_file_owner(same_nzb_ptr: bool) -> bool {
+    !same_nzb_ptr
+}
+
+/// Returns true when `ListBinCommand::Execute` should evaluate the regex against an individual file (`has_regex && !match_group`).
+pub fn binrpc_should_match_file_regex(has_regex: bool, match_group: bool) -> bool {
+    has_regex && !match_group
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

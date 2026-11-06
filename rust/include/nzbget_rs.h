@@ -2935,10 +2935,6 @@ int nzbget_rs_dqh_fleet_calc_member_add_score(
 int nzbget_rs_dqh_donor_health_error_increment(int busy);
 int nzbget_rs_dqh_donor_health_should_pause_server(
     int errors, int server_give_up);
-void nzbget_rs_dqh_donor_health_record_exchange_error(
-    int cur_errors, int busy, int server_give_up, int64_t now_ms,
-    int64_t retry_after_ms, int64_t cur_down_until_ms,
-    int* out_errors, int64_t* out_down_until_ms);
 void nzbget_rs_dqh_donor_health_accum_verdict_counts(
     int verdict, int f_present, int f_missing, int f_error, int soft,
     int* io_present, int* io_missing, int* io_error, int* io_body_bad);
@@ -4189,8 +4185,6 @@ NzbgetRsBuf nzbget_rs_dqh_nzb_fetcher_format_parse_err(
     const char* body, size_t body_len);
 int nzbget_rs_dqh_util_classify_executor_ext(
     const char* filename, size_t filename_len, size_t* out_dot_idx);
-int nzbget_rs_dqh_bytes_lt_ignore_case(
-    const char* a, size_t a_len, const char* b, size_t b_len);
 int nzbget_rs_dqh_slice_eq_ignore_case(
     const char* a, size_t a_len, const char* b, size_t b_len);
 int nzbget_rs_dqh_options_should_check_single_script_dir(
@@ -4426,7 +4420,6 @@ int nzbget_rs_dqh_diskstate_should_discard_feeds_file(
     int feeds_empty, int feed_history_empty);
 int nzbget_rs_dqh_diskstate_can_store_volume_slot(
     int has_volume_array, int index, size_t array_size);
-int nzbget_rs_dqh_webdl_resolve_force_flag(int force, int url_force);
 int nzbget_rs_dqh_webdl_should_try_recv_when_buf_empty(int buf_len);
 int nzbget_rs_dqh_tls_should_verify_client_x509_store(
     int is_client, int has_x509_store);

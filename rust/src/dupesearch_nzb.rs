@@ -1562,6 +1562,564 @@ pub fn build_newznab_queries(
     queries
 }
 
+/// Clamps a fleet request's timeout in seconds to `[5, max_timeout_sec]`
+/// (`Fleet::Append`).
+pub fn fleet_clamp_timeout_sec(timeout_sec: i32, max_timeout_sec: i32) -> i32 {
+    timeout_sec.min(max_timeout_sec).max(5)
+}
+
+/// Updates the key's `(top, lowest, running_id, running_score)` bounds for a
+/// matching item in queue or history (`Fleet::Append`).
+#[allow(clippy::too_many_arguments)]
+pub fn fleet_update_key_score_bounds(
+    cur_top: i64,
+    cur_lowest: i32,
+    any_seen: bool,
+    queued: bool,
+    deleting: bool,
+    delete_status: i32,
+    ds_none_val: i32,
+    cur_running_id: i32,
+    cur_running_score: i32,
+    item_id: i32,
+    item_score: i32,
+) -> (i64, i32, i32, i32) {
+    let new_top = cur_top.max(i64::from(item_score) + 1000);
+    let new_lowest = if any_seen {
+        cur_lowest.min(item_score)
+    } else {
+        item_score
+    };
+    let (new_running_id, new_running_score) = if queued
+        && !deleting
+        && delete_status == ds_none_val
+        && (cur_running_id == 0 || item_score > cur_running_score)
+    {
+        (item_id, item_score)
+    } else {
+        (cur_running_id, cur_running_score)
+    };
+    (new_top, new_lowest, new_running_id, new_running_score)
+}
+
+/// Returns whether a history item is an eligible successful download before
+/// checking `ReleaseName::Readable` and `FilesOnDisk` (`Fleet::Append`).
+pub fn fleet_is_already_downloaded_history_item(
+    has_item: bool,
+    delete_status: i32,
+    ds_none_val: i32,
+    is_dupe_success: bool,
+    mark_status: i32,
+    ks_bad_val: i32,
+) -> bool {
+    has_item && delete_status == ds_none_val && is_dupe_success && mark_status != ks_bad_val
+}
+
+/// Computes the clamped duplicate score for adding a ranked fleet member
+/// (`Fleet::Append`).
+pub fn fleet_calc_member_add_score(
+    running_id: i32,
+    lowest: i32,
+    top: i64,
+    rank: i32,
+) -> i32 {
+    let base: i64 = if running_id != 0 {
+        i64::from(lowest)
+    } else {
+        top.min(i64::from(i32::MAX))
+    };
+    let raw = base.saturating_sub(i64::from(rank));
+    raw.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+}
+
+/// Returns the atomic increment (`0` if busy, `1` otherwise) for `m_errors` on an
+/// exchange error (`DonorHealth::Server::Ask`).
+pub fn donor_health_error_increment(busy: bool) -> i32 {
+    if busy { 0 } else { 1 }
+}
+
+/// Returns whether the server's error counter has reached `server_give_up` and
+/// should trigger a pause and reset (`DonorHealth::Server::Ask`).
+pub fn donor_health_should_pause_server(errors: i32, server_give_up: i32) -> bool {
+    errors >= server_give_up
+}
+
+/// Accumulates an article's final verdict and soft body-bad flag into `Health`
+/// counters (`DonorHealth::CheckItems`).
+#[allow(clippy::too_many_arguments)]
+pub fn donor_health_accum_verdict_counts(
+    verdict: i32,
+    f_present: i32,
+    f_missing: i32,
+    f_error: i32,
+    soft: bool,
+    present: &mut i32,
+    missing: &mut i32,
+    error: &mut i32,
+    body_bad: &mut i32,
+) {
+    if verdict == f_present {
+        *present += 1;
+    }
+    if verdict == f_missing {
+        *missing += 1;
+    }
+    if verdict == f_error {
+        *error += 1;
+    }
+    if soft && verdict != f_present {
+        *body_bad += 1;
+    }
+}
+
+/// Ensures `name` ends with `.nzb` (case-insensitive), appending `.nzb` if not (`Fleet::Add`).
+pub fn fleet_ensure_nzb_ext(name: &[u8]) -> Vec<u8> {
+    let mut out = name.to_vec();
+    if name.len() < 4 || !name[name.len() - 4..].eq_ignore_ascii_case(b".nzb") {
+        out.extend_from_slice(b".nzb");
+    }
+    out
+}
+
+/// Visits each non-empty `|`-separated segment of `names` (`Fleet::Add`).
+pub fn fleet_visit_pipe_names(names: &[u8], mut visit: impl FnMut(&[u8])) {
+    for part in names.split(|&b| b == b'|') {
+        if !part.is_empty() {
+            visit(part);
+        }
+    }
+}
+
+/// Accumulates `DonorHealth::Health::operator+=` counters.
+#[allow(clippy::too_many_arguments)]
+pub fn donor_health_accum_health(
+    checked: &mut i32,
+    present: &mut i32,
+    missing: &mut i32,
+    error: &mut i32,
+    body_checked: &mut i32,
+    body_bad: &mut i32,
+    add_checked: i32,
+    add_present: i32,
+    add_missing: i32,
+    add_error: i32,
+    add_body_checked: i32,
+    add_body_bad: i32,
+) {
+    *checked = checked.wrapping_add(add_checked);
+    *present = present.wrapping_add(add_present);
+    *missing = missing.wrapping_add(add_missing);
+    *error = error.wrapping_add(add_error);
+    *body_checked = body_checked.wrapping_add(add_body_checked);
+    *body_bad = body_bad.wrapping_add(add_body_bad);
+}
+
+/// Computes a worker's remaining budget in `DonorHealth::CheckPostings`; returns `false` if the deadline has passed.
+pub fn donor_health_calc_worker_budget_ms(
+    deadline_ms: i64,
+    now_ms: i64,
+    cur_budget_ms: i32,
+    out_budget_ms: &mut i32,
+) -> bool {
+    if deadline_ms > 0 {
+        let left = deadline_ms.saturating_sub(now_ms);
+        if left <= 0 {
+            return false;
+        }
+        *out_budget_ms = i64::from(cur_budget_ms).min(left) as i32;
+    } else {
+        *out_budget_ms = cur_budget_ms;
+    }
+    true
+}
+
+/// Computes the worker thread count for `DonorHealth::CheckPostings`.
+pub fn donor_health_calc_thread_count(postings_len: usize, concurrency: i32) -> usize {
+    postings_len.min(1i32.max(concurrency) as usize)
+}
+
+/// Formats the HTTP fetch error message for `Fleet::Append`.
+pub fn fleet_format_fetch_error(status: i32) -> Vec<u8> {
+    if status != 0 {
+        format!("the nzb-file could not be fetched (HTTP {status})").into_bytes()
+    } else {
+        b"the nzb-file could not be fetched (connection failed)".to_vec()
+    }
+}
+
+/// Computes `(sample_maximum, budget_ms, check_deadline_ms)` for `Fleet::Append`.
+pub fn fleet_calc_check_budget_and_deadline(
+    opt_max: i32,
+    fleet_sample_max: i32,
+    deadline_ms: i64,
+    check_start_ms: i64,
+    finish_reserve_ms: i64,
+) -> (i32, i32, i64) {
+    let sample_maximum = opt_max.min(fleet_sample_max);
+    let budget_ms = 1000i64.max(deadline_ms - check_start_ms - finish_reserve_ms) as i32;
+    let check_deadline_ms = check_start_ms + i64::from(budget_ms);
+    (sample_maximum, budget_ms, check_deadline_ms)
+}
+
+/// Computes the candidate tier (`0..=3`) in `Fleet::Append`.
+pub fn fleet_candidate_tier(has_error: bool, dead: bool, alive: i32) -> i32 {
+    if has_error {
+        3
+    } else if dead {
+        2
+    } else if alive < 0 {
+        1
+    } else {
+        0
+    }
+}
+
+/// Formats the final `Fleet of ...` summary log message in `Fleet::Append`.
+pub fn fleet_format_summary_log(
+    members_count: i32,
+    dupe_key: &[u8],
+    chosen: i32,
+    reason: &[u8],
+    complete: bool,
+) -> Vec<u8> {
+    let mut out = format!("Fleet of {members_count} nzb-file(s) for ").into_bytes();
+    out.extend_from_slice(dupe_key);
+    out.extend_from_slice(b": ");
+    if chosen != 0 {
+        out.extend_from_slice(format!("queued #{chosen}").as_bytes());
+    } else {
+        out.extend_from_slice(reason);
+    }
+    if !complete {
+        out.extend_from_slice(b" (not every posting checked in time)");
+    }
+    out
+}
+
+/// Evaluates whether `DupeSearch::PrepareNative` generated the download's key (`DupeSearch::PrepareNative`).
+pub fn dupesearch_is_generated_key(
+    dupe_key_empty: bool,
+    has_owner: bool,
+    owner_value: &[u8],
+    nzb_id: i32,
+    key: &[u8],
+) -> bool {
+    if dupe_key_empty {
+        return true;
+    }
+    if !has_owner || !key.starts_with(b"dupes:") {
+        return false;
+    }
+    let mut expected = format!("{nzb_id}:").into_bytes();
+    expected.extend_from_slice(key);
+    owner_value == expected.as_slice()
+}
+
+/// Evaluates whether `DupeSearch::DownloadQueueUpdate` should inspect the queue to schedule
+/// rank-only re-scoring for an existing parent download (`DupeSearch::DownloadQueueUpdate`).
+pub fn dupesearch_should_check_added_for_parent_rank(
+    action: i32,
+    ea_nzb_added: i32,
+    is_donor: bool,
+    dupe_mode: i32,
+    dm_score: i32,
+    has_dupe_fleet_param: bool,
+) -> bool {
+    action == ea_nzb_added && !is_donor && dupe_mode == dm_score && !has_dupe_fleet_param
+}
+
+/// Evaluates whether a queued item is a better parent candidate for rank-only scheduling
+/// when a lower-scored external backup is added (`DupeSearch::DownloadQueueUpdate`).
+#[allow(clippy::too_many_arguments)]
+pub fn dupesearch_is_better_parent_candidate(
+    is_same_item: bool,
+    kind: i32,
+    nk_nzb: i32,
+    deleting: bool,
+    delete_status: i32,
+    ds_none: i32,
+    has_post_info: bool,
+    same_lower_key: bool,
+    item_score: i32,
+    added_score: i32,
+    has_parent: bool,
+    parent_score: i32,
+) -> bool {
+    !is_same_item
+        && kind == nk_nzb
+        && !deleting
+        && delete_status == ds_none
+        && !has_post_info
+        && same_lower_key
+        && item_score > added_score
+        && (!has_parent || item_score > parent_score)
+}
+
+/// Evaluates whether another queue/history item should be retained in the peer list
+/// for `DupeSearch::PrepareNative`.
+pub fn dupesearch_should_retain_peer(
+    is_same_item: bool,
+    item_score: i32,
+    pick_score: i32,
+    has_dupe_fleet_param: bool,
+) -> bool {
+    !is_same_item && (item_score > pick_score || has_dupe_fleet_param)
+}
+
+/// Formats comma-separated `"key: count"` rejection entries for `DupeSearch::Place`.
+pub fn dupesearch_format_rejected_outcome(keys: &[&[u8]], counts: &[i32]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (k, &c) in keys.iter().zip(counts.iter()) {
+        if c > 0 {
+            if !out.is_empty() {
+                out.extend_from_slice(b", ");
+            }
+            out.extend_from_slice(k);
+            out.extend_from_slice(b": ");
+            out.extend_from_slice(c.to_string().as_bytes());
+        }
+    }
+    out
+}
+
+/// Evaluates whether a directory entry name is a positive canonical integer ID (`DupeSearch::ResumePending`).
+pub fn dupesearch_parse_pending_dir_id(name: &[u8]) -> i32 {
+    if name.is_empty() || name[0] == b'0' || !name.iter().all(|b| b.is_ascii_digit()) {
+        return 0;
+    }
+    std::str::from_utf8(name)
+        .ok()
+        .and_then(|s| s.parse::<i32>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(0)
+}
+
+/// Evaluates whether the saved `pick-title`, `pick-key`, and `pick-posting` files match
+/// the current pick's normalized identity (`DupeSearch::ResumePending`).
+pub fn dupesearch_pending_identity_matches(
+    has_pick_title_file: bool,
+    saved_title: &[u8],
+    cur_norm_title: &[u8],
+    saved_key: &[u8],
+    cur_lower_key: &[u8],
+    saved_posting: &[u8],
+    cur_fingerprint: &[u8],
+) -> bool {
+    has_pick_title_file
+        && saved_title == cur_norm_title
+        && saved_key == cur_lower_key
+        && saved_posting == cur_fingerprint
+}
+
+/// Formats `"DupeSearch <label> page <page_one_based>"` for `Newznab::Search`.
+pub fn newznab_format_search_info_name(label: &[u8], page_one_based: i32) -> Vec<u8> {
+    let suffix = format!(" page {page_one_based}");
+    let mut out = Vec::with_capacity(11 + label.len() + suffix.len());
+    out.extend_from_slice(b"DupeSearch ");
+    out.extend_from_slice(label);
+    out.extend_from_slice(suffix.as_bytes());
+    out
+}
+
+/// Formats `"<param_name>=<val>"` for `DupeSearch`.
+pub fn dupesearch_format_key_val_param(param_name: &[u8], val: i32) -> Vec<u8> {
+    let val_str = format!("={val}");
+    let mut out = Vec::with_capacity(param_name.len() + val_str.len());
+    out.extend_from_slice(param_name);
+    out.extend_from_slice(val_str.as_bytes());
+    out
+}
+
+/// Formats `"<queue_dir><sep>dupesearch-pending<sep><nzb_id>"` when `nzb_id > 0`
+/// else `"<queue_dir><sep>dupesearch-pending"` for `DupeSearch::PendingDir`.
+pub fn dupesearch_format_pending_dir(queue_dir: &[u8], sep: u8, nzb_id: i32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(queue_dir.len() + 32);
+    out.extend_from_slice(queue_dir);
+    out.push(sep);
+    out.extend_from_slice(b"dupesearch-pending");
+    if nzb_id > 0 {
+        out.push(sep);
+        out.extend_from_slice(nzb_id.to_string().as_bytes());
+    }
+    out
+}
+
+/// Formats `"<dir><sep><idx>"` for `DupeSearch::SavePending` and `DupeSearch::ResumePending`.
+pub fn dupesearch_format_indexed_base_path(dir: &[u8], sep: u8, idx: usize) -> Vec<u8> {
+    let suffix = idx.to_string();
+    let mut out = Vec::with_capacity(dir.len() + 1 + suffix.len());
+    out.extend_from_slice(dir);
+    out.push(sep);
+    out.extend_from_slice(suffix.as_bytes());
+    out
+}
+
+/// Formats `idx` as a decimal string for `DupeSearch`.
+pub fn dupesearch_format_usize_str(idx: usize) -> Vec<u8> {
+    idx.to_string().into_bytes()
+}
+
+/// Formats `"HTTP <status>"` for `NzbFetcher::Fetch`.
+pub fn nzb_fetcher_format_http_status_err(status: i32) -> Vec<u8> {
+    format!("HTTP {status}").into_bytes()
+}
+
+/// Formats `"<temp_dir><sep>dupesearch-<now_sec>-<counter>.tmp"` for `HttpGet::Fetch`.
+pub fn http_get_format_temp_path(
+    temp_dir: &[u8],
+    sep: u8,
+    now_sec: i32,
+    counter: i32,
+) -> Vec<u8> {
+    let suffix = format!("dupesearch-{now_sec}-{counter}.tmp");
+    let mut out = Vec::with_capacity(temp_dir.len() + 1 + suffix.len());
+    out.extend_from_slice(temp_dir);
+    out.push(sep);
+    out.extend_from_slice(suffix.as_bytes());
+    out
+}
+
+/// Computes `max(0, deadline_ms - now_ms - finish_reserve_ms - 1000)` for `Fleet::Run`.
+pub fn fleet_calc_check_lock_wait_ms(
+    deadline_ms: i64,
+    now_ms: i64,
+    finish_reserve_ms: i64,
+) -> i64 {
+    deadline_ms
+        .saturating_sub(now_ms)
+        .saturating_sub(finish_reserve_ms)
+        .saturating_sub(1000)
+        .max(0)
+}
+
+/// Classifies an XML start element in `Newznab::PageReader::Start`:
+/// `1` (`depth == 1 && name == "error"`), `2` (`"item"`), `3` (`in_item && name == "attr"`), or `0` (other).
+pub fn newznab_classify_start_element(depth: i32, in_item: bool, name: &[u8]) -> i32 {
+    if depth == 1 && name == b"error" {
+        1
+    } else if name == b"item" {
+        2
+    } else if in_item && name == b"attr" {
+        3
+    } else {
+        0
+    }
+}
+
+/// Classifies a `<newznab:attr>` `name` attribute in `Newznab::PageReader::Start`:
+/// `1` (`"size"`), `2` (`"grabs"`), `3` (`"usenetdate"`), `4` (`"hydraIndexerName"`), or `0` (other).
+pub fn newznab_classify_item_attr_key(key: &[u8]) -> i32 {
+    match key {
+        b"size" => 1,
+        b"grabs" => 2,
+        b"usenetdate" => 3,
+        b"hydraIndexerName" => 4,
+        _ => 0,
+    }
+}
+
+/// Classifies an XML end element in `Newznab::PageReader::End` when `in_item` is `true`:
+/// `1` (`"title"`), `2` (`"link"`), `3` (`"size"`), `4` (`"item"`), or `0` (other / `!in_item`).
+pub fn newznab_classify_end_element(in_item: bool, name: &[u8]) -> i32 {
+    if !in_item {
+        return 0;
+    }
+    match name {
+        b"title" => 1,
+        b"link" => 2,
+        b"size" => 3,
+        b"item" => 4,
+        _ => 0,
+    }
+}
+
+/// Classifies an XML start element in `NzbReader::Reader::Start`:
+/// `1` (`"meta"`), `2` (`"file"`), `3` (`"segment"` when `in_file`), or `0` (other).
+pub fn nzb_reader_classify_start_element(name: &[u8], in_file: bool) -> i32 {
+    match name {
+        b"meta" => 1,
+        b"file" => 2,
+        b"segment" if in_file => 3,
+        _ => 0,
+    }
+}
+
+/// Classifies an XML end element in `NzbReader::Reader::End`:
+/// `1` (`"meta"` when `has_meta_type`), `2` (`"segment"` when `in_segment`),
+/// `3` (`"group"` when `in_file`), `4` (`"file"`), or `0` (other).
+pub fn nzb_reader_classify_end_element(
+    name: &[u8],
+    has_meta_type: bool,
+    in_segment: bool,
+    in_file: bool,
+) -> i32 {
+    match name {
+        b"meta" if has_meta_type => 1,
+        b"segment" if in_segment => 2,
+        b"group" if in_file => 3,
+        b"file" => 4,
+        _ => 0,
+    }
+}
+
+/// Computes `(start, len)` after trimming any byte in `chars` from both ends of `text`,
+/// or `None` when every byte in `text` is in `chars`, for `DupeUtil::Trim`.
+pub fn dupe_util_trim_bounds(text: &[u8], chars: &[u8]) -> Option<(usize, usize)> {
+    let begin = text.iter().position(|b| !chars.contains(b))?;
+    let end = text.iter().rposition(|b| !chars.contains(b))?;
+    Some((begin, end - begin + 1))
+}
+
+/// Lowercases `text` byte-by-byte using the active C locale (`c_lower`), for `DupeUtil::Lower`.
+pub fn dupe_util_lower(text: &[u8]) -> Vec<u8> {
+    crate::releasename::lower(text)
+}
+
+/// Formats `"not an nzb-file: <masked first 160 bytes>"` for `NzbFetcher::Fetch`.
+pub fn nzb_fetcher_format_parse_err(body: &[u8]) -> Vec<u8> {
+    let prefix = &body[..body.len().min(160)];
+    let masked = crate::dupesearch_nzb::mask_newznab_text(prefix);
+    let mut out = Vec::with_capacity(17 + masked.len());
+    out.extend_from_slice(b"not an nzb-file: ");
+    out.extend_from_slice(&masked);
+    out
+}
+
+/// Returns the NUL-terminated status suffix for `DupeSearch::PrepareNative` search log message.
+pub fn dupesearch_prepare_status_suffix(rank_only: bool, history: bool) -> &'static [u8] {
+    if rank_only {
+        b": ranking new backups\0"
+    } else if history {
+        b": it failed before its search was due\0"
+    } else {
+        b"\0"
+    }
+}
+
+/// Visits up to 8 non-empty lenient search queries for `DupeSearch::Expand`.
+pub fn dupesearch_visit_expand_queries<F: FnMut(&[u8])>(name: &[u8], mut cb: F) {
+    for q in crate::dupewatch::lenient_queries(name).into_iter().take(8) {
+        if !q.is_empty() {
+            cb(&q);
+        }
+    }
+}
+
+/// Formats `Newznab::Search` query label (`"key1=val1 key2=val2"`).
+pub fn newznab_format_query_label(keys: &[&[u8]], vals: &[&[u8]]) -> Vec<u8> {
+    let n = keys.len().min(vals.len());
+    let mut out = Vec::new();
+    for i in 0..n {
+        if !out.is_empty() {
+            out.push(b' ');
+        }
+        out.extend_from_slice(keys[i]);
+        out.push(b'=');
+        out.extend_from_slice(vals[i]);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

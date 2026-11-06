@@ -1443,6 +1443,43 @@ pub fn script_resolve_single_arg_executor(
     (has_found, has_found && found_executor != arg0)
 }
 
+/// Formats `"<name>=<value>"` for `ScriptController::SetEnvVar`.
+pub fn script_ctrl_format_env_assignment(name: &[u8], value: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(name.len() + 1 + value.len());
+    out.extend_from_slice(name);
+    out.push(b'=');
+    out.extend_from_slice(value);
+    out
+}
+
+/// Formats `"<prefix>_<name>"` for `ScriptController::SetEnvVarSpecial`.
+pub fn script_ctrl_format_prefixed_varname(prefix: &[u8], name: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(prefix.len() + 1 + name.len());
+    out.extend_from_slice(prefix);
+    out.push(b'_');
+    out.extend_from_slice(name);
+    out
+}
+
+/// Formats `"<prefix>: <text>"` for `ScriptController::PrintMessage`.
+pub fn script_format_prefixed_message(prefix: &[u8], text: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(prefix.len() + 2 + text.len());
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(b": ");
+    out.extend_from_slice(text);
+    out
+}
+
+/// Evaluates whether `ScriptController::Terminate` succeeded.
+pub fn script_ctrl_is_terminate_ok(child_pid: i32, kill_res: i32, completed: bool) -> bool {
+    child_pid <= 0 || kill_res == 0 || completed
+}
+
+/// Returns true when `ScriptController::Break` has an active uncompleted process to signal.
+pub fn script_ctrl_can_send_break(pid: i32, completed: bool) -> bool {
+    pid > 0 && !completed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -457,6 +457,11 @@ pub fn is_splitted_fragment(filename: &[u8], correct_name: &[u8]) -> bool {
     digits.iter().all(u8::is_ascii_digit) && unsafe { atoi(base[base_len + 1..].as_ptr().cast()) } <= 1
 }
 
+/// Returns true when `ParRenamer::RenameFile` needs to create target directories (`old_path != new_path`).
+pub fn par_renamer_needs_create_target_dir(old_path: &[u8], new_path: &[u8]) -> bool {
+    old_path != new_path
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

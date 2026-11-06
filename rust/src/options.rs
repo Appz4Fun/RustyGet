@@ -552,6 +552,52 @@ pub fn options_minutes_to_seconds_i32(minutes: i32) -> i32 {
     minutes.wrapping_mul(60)
 }
 
+/// Formats `"<prefix><idx>.<field>"` for `Options::InitServers`, `Options::InitCategories`,
+/// `Options::InitFeeds`, and `Options::InitScheduler`.
+pub fn options_format_indexed_opt_name(prefix: &[u8], idx: i32, field: &[u8]) -> Vec<u8> {
+    let idx_str = idx.to_string();
+    let mut out = Vec::with_capacity(prefix.len() + idx_str.len() + 1 + field.len());
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(idx_str.as_bytes());
+    out.push(b'.');
+    out.extend_from_slice(field);
+    out
+}
+
+/// Returns `true` when `!no_disk_access` and `value` starts with `"~/"` for `Options::SetOption`.
+pub fn options_should_expand_home_value(value: Option<&[u8]>, no_disk_access: bool) -> bool {
+    !no_disk_access && value.is_some_and(|v| v.starts_with(b"~/"))
+}
+
+/// Returns `true` when `no_disk_access` is set, `value` is empty, or `value` contains
+/// neither `,` nor `;`, for `Options::CheckScriptDir`.
+pub fn options_should_check_single_script_dir(no_disk_access: bool, value: &[u8]) -> bool {
+    no_disk_access || value.is_empty() || !value.iter().any(|&b| b == b',' || b == b';')
+}
+
+/// Resolves `m_configLine` in `Options::LocateOptionSrcPos`.
+pub fn options_resolve_locate_src_line(found: bool, line_no: i32) -> i32 {
+    if found {
+        line_no
+    } else {
+        0
+    }
+}
+
+/// Updates `m_configLine` in `Options::GetOption` when `line_no > 0`.
+pub fn options_update_config_line_on_get(line_no: i32, cur_config_line: i32) -> i32 {
+    if line_no > 0 {
+        line_no
+    } else {
+        cur_config_line
+    }
+}
+
+/// Returns true when a parsed scheduler task hour represents every hour (`hours == -2`).
+pub fn options_is_every_hour_task(hours: i32) -> bool {
+    hours == -2
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

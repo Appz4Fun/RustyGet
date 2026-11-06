@@ -617,6 +617,21 @@ pub fn post_format_info_name(prefix: &[u8], name: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Strips the last `.ext` from `frag_base_name` for `UnpackController::JoinFile`.
+pub fn unpack_ctrl_strip_last_extension(frag_base_name: &[u8]) -> Vec<u8> {
+    match frag_base_name.iter().rposition(|&b| b == b'.') {
+        Some(idx) => frag_base_name[..idx].to_vec(),
+        None => frag_base_name.to_vec(),
+    }
+}
+
+/// Uppercases the first byte of `buf` in-place if it is an ASCII lowercase letter (`a..=z`).
+pub fn post_capitalize_first_ascii(buf: &mut [u8]) {
+    if let Some(first) = buf.first_mut() {
+        *first = first.to_ascii_uppercase();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

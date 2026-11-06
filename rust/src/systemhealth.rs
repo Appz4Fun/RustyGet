@@ -2316,6 +2316,324 @@ fn bytes_to_path(bytes: &[u8]) -> std::path::PathBuf {
     std::path::PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
 }
 
+/// Resolves `script` against `app_dir` if `script` does not start with `sep` for `Maintenance::StartUpdate`.
+pub fn maintenance_resolve_script_path(app_dir: &[u8], sep: u8, script: &[u8]) -> Vec<u8> {
+    if script.first().copied() != Some(sep) {
+        let mut out = Vec::with_capacity(app_dir.len() + 1 + script.len());
+        out.extend_from_slice(app_dir);
+        out.push(sep);
+        out.extend_from_slice(script);
+        out
+    } else {
+        script.to_vec()
+    }
+}
+
+/// Formats `"<web_dir><sep>package-info.json"` for `Maintenance::ReadPackageInfoStr`.
+pub fn maintenance_format_package_info_path(web_dir: &[u8], sep: u8) -> Vec<u8> {
+    const SUFFIX: &[u8] = b"package-info.json";
+    let mut out = Vec::with_capacity(web_dir.len() + 1 + SUFFIX.len());
+    out.extend_from_slice(web_dir);
+    out.push(sep);
+    out.extend_from_slice(SUFFIX);
+    out
+}
+
+/// Formats `"update-script <base_name>"` or `"update-info-script <base_name>"`
+/// for `UpdateScriptController::Run` and `UpdateInfoScriptController::ExecuteScript`.
+pub fn maintenance_format_script_info_name(
+    is_info_script: bool,
+    base_name: &[u8],
+) -> Vec<u8> {
+    let prefix: &[u8] = if is_info_script {
+        b"update-info-script "
+    } else {
+        b"update-script "
+    };
+    let mut out = Vec::with_capacity(prefix.len() + base_name.len());
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(base_name);
+    out
+}
+
+/// Returns `"STABLE"`, `"TESTING"`, or `"DEVEL"` for `UpdateScriptController::Run`.
+pub fn maintenance_branch_name(branch: i32) -> &'static [u8] {
+    match branch {
+        1 => b"TESTING\0",
+        2 => b"DEVEL\0",
+        _ => b"STABLE\0",
+    }
+}
+
+/// Returns `"DAEMON"` or `"SERVER"` for `UpdateScriptController::Run`.
+pub fn maintenance_run_mode_name(daemon_mode: bool) -> &'static [u8] {
+    if daemon_mode {
+        b"DAEMON\0"
+    } else {
+        b"SERVER\0"
+    }
+}
+
+/// Formats `"NZBUP_CMDLINE<index>"` for `UpdateScriptController::Run`.
+pub fn maintenance_format_cmdline_env_name(index: i32) -> Vec<u8> {
+    format!("NZBUP_CMDLINE{index}").into_bytes()
+}
+
+/// Returns `(log_prefix, prefix_len)` after bounding `base_name` to `max_len` bytes
+/// and stripping the file extension for `UpdateScriptController::Run` and
+/// `UpdateInfoScriptController::ExecuteScript`.
+pub fn maintenance_strip_ext_and_calc_prefix_len(
+    base_name: &[u8],
+    max_len: usize,
+) -> (Vec<u8>, usize) {
+    let bounded = &base_name[..base_name.len().min(max_len)];
+    let stem_len = bounded
+        .iter()
+        .rposition(|&b| b == b'.')
+        .unwrap_or(bounded.len());
+    (bounded[..stem_len].to_vec(), stem_len.saturating_add(2))
+}
+
+/// Formats `"\"RSA-SHA256(<base_name>)\" : \""` for `Signature::ReadSignature`.
+pub fn maintenance_format_sig_title(base_name: &[u8]) -> Vec<u8> {
+    const PREFIX: &[u8] = b"\"RSA-SHA256(";
+    const SUFFIX: &[u8] = b")\" : \"";
+    let mut out = Vec::with_capacity(PREFIX.len() + base_name.len() + SUFFIX.len());
+    out.extend_from_slice(PREFIX);
+    out.extend_from_slice(base_name);
+    out.extend_from_slice(SUFFIX);
+    out
+}
+
+/// Formats `"<msg> (<base_filename>:<line_nr>:<funcname>)"` or `"<msg> (<base_filename>:<line_nr>)"` for `debug()`.
+pub fn log_format_debug_line(
+    msg: &[u8],
+    base_filename: &[u8],
+    line_nr: i32,
+    funcname: Option<&[u8]>,
+) -> Vec<u8> {
+    let line_str = format!(":{line_nr}");
+    let mut out = Vec::with_capacity(
+        msg.len() + 3 + base_filename.len() + line_str.len() + funcname.map_or(0, |f| 1 + f.len()),
+    );
+    out.extend_from_slice(msg);
+    out.extend_from_slice(b" (");
+    out.extend_from_slice(base_filename);
+    out.extend_from_slice(line_str.as_bytes());
+    if let Some(fn_bytes) = funcname {
+        out.push(b':');
+        out.extend_from_slice(fn_bytes);
+    }
+    out.push(b')');
+    out
+}
+
+/// Formats `"<base_name>-####-##-##<base_ext>"` for `Log::RotateLog`.
+pub fn log_format_rotate_mask(base_name: &[u8], base_ext: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(base_name.len() + 11 + base_ext.len());
+    out.extend_from_slice(base_name);
+    out.extend_from_slice(b"-####-##-##");
+    out.extend_from_slice(base_ext);
+    out
+}
+
+/// Formats `"Deleting old log-file <filename>\n"` for `Log::RotateLog`.
+pub fn log_format_deleting_old_msg(filename: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(22 + filename.len() + 1);
+    out.extend_from_slice(b"Deleting old log-file ");
+    out.extend_from_slice(filename);
+    out.push(b'\n');
+    out
+}
+
+/// Formats `"<directory><sep><base_name>-<year>-<month:02>-<mday:02><base_ext>"` for `Log::RotateLog`.
+pub fn log_format_rotated_path(
+    directory: &[u8],
+    sep: u8,
+    base_name: &[u8],
+    year: i32,
+    month: i32,
+    mday: i32,
+    base_ext: &[u8],
+) -> Vec<u8> {
+    let date_part = format!("-{year}-{month:02}-{mday:02}");
+    let mut out = Vec::with_capacity(
+        directory.len() + 1 + base_name.len() + date_part.len() + base_ext.len(),
+    );
+    out.extend_from_slice(directory);
+    out.push(sep);
+    out.extend_from_slice(base_name);
+    out.extend_from_slice(date_part.as_bytes());
+    out.extend_from_slice(base_ext);
+    out
+}
+
+/// Formats `"<pid>\n"` for `NZBGet::Daemonize`.
+pub fn nzbget_format_pid_line(pid: i32) -> Vec<u8> {
+    format!("{pid}\n").into_bytes()
+}
+
+/// Formats `"<major>.<minor>.<patch>"` from a packed 24-bit version integer for `SystemInfo`.
+pub fn sysinfo_format_rapidyenc_version(ver: i32) -> Vec<u8> {
+    let major = (ver >> 16) & 0xFF;
+    let minor = (ver >> 8) & 0xFF;
+    let patch = ver & 0xFF;
+    format!("{major}.{minor}.{patch}").into_bytes()
+}
+
+/// Returns `true` when `username == b"root"` for `NZBGet::Daemonize`.
+pub fn nzbget_is_backward_compat_root_user(username: &[u8]) -> bool {
+    username == b"root"
+}
+
+/// Splits `base_name` at the last `.` (when `pos > 0`) into `(stem, ext_with_dot)` for `Log::RotateLog`.
+pub fn log_split_basename_and_ext(base_name: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    match base_name.iter().rposition(|&b| b == b'.') {
+        Some(pos) if pos > 0 => (base_name[..pos].to_vec(), base_name[pos..].to_vec()),
+        _ => (base_name.to_vec(), Vec::new()),
+    }
+}
+
+/// Returns `true` when `line` contains `marker` as a contiguous byte slice for `SystemInfo::GetUnpackerVersion`.
+pub fn sysinfo_line_contains_marker(line: &[u8], marker: &[u8]) -> bool {
+    if marker.is_empty() {
+        return true;
+    }
+    line.windows(marker.len()).any(|w| w == marker)
+}
+
+/// Returns `Some(sig_title.len())` when `line` starts with `sig_title`, or `None` otherwise,
+/// for `Signature::ReadSignature`.
+pub fn maintenance_match_sig_line_prefix(line: &[u8], sig_title: &[u8]) -> Option<usize> {
+    if line.starts_with(sig_title) {
+        Some(sig_title.len())
+    } else {
+        None
+    }
+}
+
+/// Parses `(tm_year, tm_mon, tm_mday)` from a rotated log filename at the given match offsets
+/// for `Log::RotateLog`.
+pub fn log_parse_rotated_date_fields(
+    filename: &[u8],
+    year_off: usize,
+    mon_off: usize,
+    mday_off: usize,
+) -> (i32, i32, i32) {
+    let year = crate::util::parse_c_atoi(filename.get(year_off..).unwrap_or(b"")) - 1900;
+    let mon = crate::util::parse_c_atoi(filename.get(mon_off..).unwrap_or(b"")) - 1;
+    let mday = crate::util::parse_c_atoi(filename.get(mday_off..).unwrap_or(b""));
+    (year, mon, mday)
+}
+
+/// Extracts the substring after the first ASCII space in `text` (or `text` if no space exists),
+/// for `SystemInfo::InitLibraries`.
+pub fn sysinfo_extract_version_after_space(text: &[u8]) -> Vec<u8> {
+    match text.iter().position(|&b| b == b' ') {
+        Some(idx) => text[idx + 1..].to_vec(),
+        None => text.to_vec(),
+    }
+}
+
+/// Classifies an `/etc/os-release` line for `OS::InitOSInfoFromOSRelease`:
+/// `(1, 5)` for `NAME=`, `(2, 11)` for `VERSION_ID=`, `(3, 9)` for `BUILD_ID=`, or `(0, 0)`.
+pub fn os_classify_os_release_line(
+    line: &[u8],
+    has_name: bool,
+    has_version: bool,
+) -> (i32, usize) {
+    if !has_name && line.starts_with(b"NAME=") {
+        (1, 5)
+    } else if !has_version && line.starts_with(b"VERSION_ID=") {
+        (2, 11)
+    } else if !has_version && line.starts_with(b"BUILD_ID=") {
+        (3, 9)
+    } else {
+        (0, 0)
+    }
+}
+
+/// Returns true when `DiskService::ServiceWork` should check free disk space.
+pub fn disk_service_should_check_disk_space(disk_space_mb: i32, is_downloading: bool) -> bool {
+    disk_space_mb > 0 && is_downloading
+}
+
+/// Evaluates a required directory check in `DiskService::CheckRequiredDir`:
+/// returns `(is_missing, should_log_waiting, next_waiting_reported)`.
+pub fn disk_service_eval_missing_required_dir(
+    file_exists: bool,
+    dir_exists: bool,
+    was_waiting_reported: bool,
+    cur_waiting_reported: bool,
+) -> (bool, bool, bool) {
+    if !file_exists && !dir_exists {
+        let should_log = !was_waiting_reported;
+        let next_reported = if should_log {
+            true
+        } else {
+            cur_waiting_reported
+        };
+        (true, should_log, next_reported)
+    } else {
+        (false, false, cur_waiting_reported)
+    }
+}
+
+/// Returns true when `Maintenance::CheckUpdates` received non-empty update info output.
+pub fn maintenance_has_update_info(len: i32) -> bool {
+    len > 0
+}
+
+/// Returns true when `NZBGet::Phase1_Init` should run the system health check.
+pub fn nzbget_should_run_system_health_check(
+    server_mode: bool,
+    system_health_check: bool,
+) -> bool {
+    server_mode && system_health_check
+}
+
+/// Evaluates whether `NZBGet::BootConfig` should print usage and exit, returning the exit code (`0` or `1`).
+pub fn nzbget_classify_boot_usage_or_error(
+    print_usage: bool,
+    has_errors: bool,
+    arg_count: i32,
+) -> Option<i32> {
+    if print_usage || has_errors || arg_count <= 1 {
+        Some(if print_usage { 0 } else { 1 })
+    } else {
+        None
+    }
+}
+
+/// Returns true when `NZBGet::StopFrontend` should immediately stop the frontend thread before waiting.
+pub fn nzbget_should_stop_frontend_immediately(
+    remote_client_mode: bool,
+    stopped: bool,
+) -> bool {
+    !remote_client_mode || stopped
+}
+
+/// Classifies the log file initialization action in `Log::InitOptions`:
+/// `0` = skip, `1` = update log path only, `2` = update log path and reset log.
+pub fn log_classify_init_logfile_action(
+    remote_client_mode: bool,
+    direct_client_mode: bool,
+    write_log: i32,
+    wl_none: i32,
+    wl_reset: i32,
+    has_log_file: bool,
+    server_mode: bool,
+) -> i32 {
+    if !remote_client_mode && !direct_client_mode && write_log != wl_none && has_log_file {
+        if server_mode && write_log == wl_reset {
+            2
+        } else {
+            1
+        }
+    } else {
+        0
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -236,6 +236,48 @@ pub fn scheduler_should_autoresume(resume_time: i64, current_time: i64) -> bool 
     resume_time > 0 && current_time >= resume_time
 }
 
+/// Converts bytes per second to KB/s (`bytes / 1024`) for `Scheduler::PrintLog`.
+pub fn scheduler_bytes_to_kb(bytes: i32) -> i32 {
+    bytes / 1024
+}
+
+/// Returns `"pausing"` or `"unpausing"` for `Scheduler::PrintLog`.
+pub fn scheduler_pause_action_str(paused: bool) -> &'static [u8] {
+    if paused {
+        b"pausing\0"
+    } else {
+        b"unpausing\0"
+    }
+}
+
+/// Returns `"activating"` or `"deactivating"` for `Scheduler::PrintLog`.
+pub fn scheduler_server_action_str(active: bool) -> &'static [u8] {
+    if active {
+        b"activating\0"
+    } else {
+        b"deactivating\0"
+    }
+}
+
+/// Returns the NUL-terminated `Scheduler::ExecuteTask` debug command name.
+pub fn scheduler_command_name(command: i32) -> &'static [u8] {
+    match command {
+        0 => b"Pause\0",
+        1 => b"Unpause\0",
+        2 => b"Pause Post-processing\0",
+        3 => b"Unpause Post-processing\0",
+        4 => b"Set download rate\0",
+        5 => b"Execute process\0",
+        6 => b"Execute script\0",
+        7 => b"Pause Scan\0",
+        8 => b"Unpause Scan\0",
+        9 => b"Enable Server\0",
+        10 => b"Disable Server\0",
+        11 => b"Fetch Feed\0",
+        _ => b"Unknown\0",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

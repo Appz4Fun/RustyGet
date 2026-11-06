@@ -81,6 +81,7 @@ mod tests {
     #[test]
     fn base_never_below_zero() {
         assert_eq!(base(1_000_000), 999_000);
+        assert_eq!(base(23_859_118), 23_858_118);
         assert_eq!(base(500), 0);
     }
 
@@ -90,8 +91,36 @@ mod tests {
         assert_eq!(target(1.0, true), 90);
         assert_eq!(target(-1.0, false), 89);
         assert_eq!(target(0.5, false), 49);
+        assert_eq!(target(0.0, false), 9);
+        assert_eq!(target(0.95, false), 85);
+        assert_eq!(target(0.9, true), 82);
         assert_eq!(target(0.0125 * 0.5, false), 9); // 80 * share = 0.5 rounds to 0
         assert_eq!(target(f64::NAN, false), 89);
+    }
+
+    #[test]
+    fn ranks_are_unique_and_never_below_dead_plus_one() {
+        let mut used = Vec::new();
+        let s1 = take_rank(1.0, true, &used);
+        used.push(s1);
+        assert_eq!(s1, 90);
+        let s2 = take_rank(1.0, true, &used);
+        used.push(s2);
+        assert_eq!(s2, 89);
+        let s3 = take_rank(1.0, false, &used);
+        used.push(s3);
+        assert_eq!(s3, 88);
+        used.retain(|&x| x != 89);
+        let s4 = take_rank(1.0, false, &used);
+        used.push(s4);
+        assert_eq!(s4, 89);
+
+        let mut low_used = Vec::new();
+        for _ in 0..20 {
+            let s = take_rank(0.0, false, &low_used);
+            low_used.push(s);
+            assert!(s >= DEAD + 1);
+        }
     }
 
     #[test]
@@ -99,5 +128,20 @@ mod tests {
         let entries = [e(50, 0.9, false, 100, 0), e(50, 1.0, false, 300, 0), e(1, 1.0, false, 100, 0),
                        e(50, 1.0, true, 300, 0), e(50, 1.0, false, 100, 5)];
         assert_eq!(rerank(&entries, 100), vec![81, 88, 1, 90, 89]);
+
+        let wholeness = [
+            e(90, 0.9, true, 1000, 50),
+            e(89, 0.95, false, 1100, 40),
+            e(88, 1.0, true, 1000, 1),
+            e(87, 1.0, false, 1200, 1),
+        ];
+        assert_eq!(rerank(&wholeness, 1000), vec![82, 85, 90, 89]);
+
+        let dead_and_falling = [
+            e(1, 0.0, false, 1000, 5),
+            e(50, 1.0, false, 1000, 5),
+            e(49, 1.0, false, 1000, 4),
+        ];
+        assert_eq!(rerank(&dead_and_falling, 1000), vec![1, 89, 88]);
     }
 }

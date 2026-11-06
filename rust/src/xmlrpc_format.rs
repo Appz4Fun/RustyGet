@@ -2361,6 +2361,230 @@ pub fn xmlrpc_format_testserver_article_cmd(id: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Returns `true` when `is_xmlrpc_proto && is_http_post` and `method_name` matches `"system.multicall"`
+/// case-insensitively (`dqh_bytes_eq_ignore_case`) for `XmlRpcProcessor::Execute`.
+pub fn xmlrpc_is_multicall_post(
+    method_name: &[u8],
+    is_xmlrpc_proto: bool,
+    is_http_post: bool,
+) -> bool {
+    is_xmlrpc_proto
+        && is_http_post
+        && crate::util::bytes_eq_ignore_case(method_name, b"system.multicall")
+}
+
+/// Returns `true` when `name == b"_TlsCipherBaseline"` for `SaveConfigXmlCommand::Execute`.
+pub fn xmlrpc_is_tls_cipher_baseline_entry(name: &[u8]) -> bool {
+    name == b"_TlsCipherBaseline"
+}
+
+/// Concatenates `decoded_path` and (when `has_query` is true) `&url[query_offset..]`
+/// for `XmlRpcProcessor::SetUrl`.
+pub fn xmlrpc_concat_decoded_path_and_query(
+    decoded_path: &[u8],
+    url: &[u8],
+    has_query: bool,
+    query_offset: usize,
+) -> Vec<u8> {
+    let query = if has_query && query_offset <= url.len() {
+        &url[query_offset..]
+    } else {
+        &[][..]
+    };
+    let mut out = Vec::with_capacity(decoded_path.len() + query.len());
+    out.extend_from_slice(decoded_path);
+    out.extend_from_slice(query);
+    out
+}
+
+/// Returns the NUL-terminated HTTP `Content-Type` string for `XmlRpcProcessor::BuildResponse`.
+pub fn xmlrpc_response_content_type(is_xml_rpc: bool) -> &'static [u8] {
+    if is_xml_rpc {
+        b"text/xml\0"
+    } else {
+        b"application/json\0"
+    }
+}
+
+/// Returns the NUL-terminated server validation error message for `TestServerSpeedXmlCommand::Execute`.
+pub fn xmlrpc_test_server_speed_err_msg(server_err: i32) -> &'static [u8] {
+    match server_err {
+        1 => b"Server not found\0",
+        2 => b"Server is not active\0",
+        _ => b"Server has no connections configured\0",
+    }
+}
+
+/// Classifies the `TlsCipherXmlCommand::Execute` operation code:
+/// `0` = `Start`, `1` = `Status`, `2` = `Cancel`.
+pub fn xmlrpc_classify_tls_cipher_op(operation: i32) -> i32 {
+    if operation == 0 {
+        0
+    } else if operation == 1 {
+        1
+    } else {
+        2
+    }
+}
+
+/// Validates the `ScheduleResumeXmlCommand::Execute` parameter and computes the resume timestamp.
+pub fn xmlrpc_calc_schedule_resume_time(
+    has_param: bool,
+    seconds: i32,
+    cur_time: i64,
+) -> Option<i64> {
+    if has_param && seconds >= 0 {
+        Some(cur_time.saturating_add(i64::from(seconds)))
+    } else {
+        None
+    }
+}
+
+/// Steps the `(post_job_count, url_count)` accumulators in `StatusXmlCommand::Execute`.
+pub fn xmlrpc_accum_queue_job_counts(
+    has_post_info: bool,
+    kind: i32,
+    nk_url: i32,
+    cur_post_count: i32,
+    cur_url_count: i32,
+) -> (i32, i32) {
+    (
+        cur_post_count.saturating_add(i32::from(has_post_info)),
+        cur_url_count.saturating_add(i32::from(kind == nk_url)),
+    )
+}
+
+/// Returns true when `AppendFleetXmlCommand::Execute` has reached or exceeded `max_members`.
+pub fn xmlrpc_is_fleet_member_limit_reached(current_count: usize, max_members: i32) -> bool {
+    (current_count as i32) >= max_members
+}
+
+/// Classifies a history entry kind in `HistoryXmlCommand::Execute` and `HistoryXmlCommand::DetectStatus`:
+/// `1` = `hkNzb` or `hkUrl`, `2` = `hkDup`, `0` = other.
+pub fn xmlrpc_classify_history_entry_kind(
+    kind: i32,
+    hk_nzb: i32,
+    hk_url: i32,
+    hk_dup: i32,
+) -> i32 {
+    if kind == hk_nzb || kind == hk_url {
+        1
+    } else if kind == hk_dup {
+        2
+    } else {
+        0
+    }
+}
+
+/// Returns true when a server matches the target ID in `EditServerXmlCommand::Execute`.
+pub fn xmlrpc_matches_edit_server_id(server_id: i32, target_id: i32) -> bool {
+    server_id == target_id
+}
+
+/// Returns true when a server volume slot matches `server_id` in `ResetServerVolumeXmlCommand::Execute`.
+pub fn xmlrpc_matches_reset_server_volume(index: i32, server_id: i32) -> bool {
+    index == server_id || server_id == -1
+}
+
+/// Returns true when `certVerifLevel` is within `[0, count)` in `TestServerXmlCommand::Execute`.
+pub fn xmlrpc_is_valid_cert_verif_level(level: i32, count: i32) -> bool {
+    level >= 0 && level < count
+}
+
+/// Selects the response string for `TestServerXmlCommand::Execute`.
+pub fn xmlrpc_select_test_server_err_text(ok: bool, err_text: &[u8]) -> &[u8] {
+    if ok {
+        b""
+    } else if err_text.is_empty() {
+        b"Unknown error"
+    } else {
+        err_text
+    }
+}
+
+/// Checks individual argument bounds in `TestDiskSpeedXmlCommand::Execute`:
+/// `1` = `write_buffer_kib < 0`, `2` = `max_file_size_gib < 1`, `3` = `timeout_sec < 1`, `0` = valid.
+pub fn xmlrpc_check_disk_speed_arg_ranges(
+    write_buffer_kib: i32,
+    max_file_size_gib: i32,
+    timeout_sec: i32,
+) -> i32 {
+    if write_buffer_kib < 0 {
+        1
+    } else if max_file_size_gib < 1 {
+        2
+    } else if timeout_sec < 1 {
+        3
+    } else {
+        0
+    }
+}
+
+/// Returns true when `XmlCommand::IsJson` is active (`protocol == rp_json_rpc || protocol == rp_jsonp_rpc`).
+pub fn xmlrpc_is_json_protocol(protocol: i32, rp_json_rpc: i32, rp_jsonp_rpc: i32) -> bool {
+    protocol == rp_json_rpc || protocol == rp_jsonp_rpc
+}
+
+/// Returns true when `XmlCommand::PrepareParams` should advance `m_requestPtr` to `"params"` (`is_json && http_method == hm_post`).
+pub fn xmlrpc_should_skip_to_json_post_params(
+    is_json: bool,
+    http_method: i32,
+    hm_post: i32,
+) -> bool {
+    is_json && http_method == hm_post
+}
+
+/// Returns true when `ListGroupsXmlCommand::DetectStatus` should check `QueueScriptCoordinator::HasJob` (`has_post_info && post_stage == pt_queued`).
+pub fn xmlrpc_should_check_queue_script_job(
+    has_post_info: bool,
+    post_stage: i32,
+    pt_queued: i32,
+) -> bool {
+    has_post_info && post_stage == pt_queued
+}
+
+/// Classifies how `DownloadXmlCommand::Execute` formats the result of `AddExternalFile`:
+/// `1` = `BuildIntResponse(nzb_id)` (`v13`), `2` = `BuildBoolResponse(true)` (`!v13 && nzb_id > 0`), `0` = `BuildBoolResponse(false)`.
+pub fn xmlrpc_classify_append_result_mode(v13: bool, nzb_id: i32) -> i32 {
+    if v13 {
+        1
+    } else if nzb_id > 0 {
+        2
+    } else {
+        0
+    }
+}
+
+/// Returns true when `LoadExtensionsXmlCommand::Execute` should emit a leading comma before an item (`is_json && index > 0`).
+pub fn xmlrpc_should_emit_json_array_comma(is_json: bool, index: i32) -> bool {
+    is_json && index > 0
+}
+
+/// Returns true when `TestServerXmlCommand::Execute` should parse JSON-RPC POST parameters via `nzbget_rs_test_server_params` (`is_json && has_request && http_method == hm_post`).
+pub fn xmlrpc_should_parse_json_post_test_server(
+    is_json: bool,
+    has_request: bool,
+    http_method: i32,
+    hm_post: i32,
+) -> bool {
+    is_json && has_request && http_method == hm_post
+}
+
+/// Returns true when `StartScriptXmlCommand::Execute` has extracted a complete option `(name, value)` pair (`(is_json && has_p1 && has_p2 && has_p3 && has_p4) || (!is_json && has_p1 && has_p2)`).
+pub fn xmlrpc_classify_start_script_param_mode(
+    is_json: bool,
+    has_p1: bool,
+    has_p2: bool,
+    has_p3: bool,
+    has_p4: bool,
+) -> bool {
+    if is_json {
+        has_p1 && has_p2 && has_p3 && has_p4
+    } else {
+        has_p1 && has_p2
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

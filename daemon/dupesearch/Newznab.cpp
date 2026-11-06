@@ -108,8 +108,7 @@ public:
 				m_elementSize = ToInt(m_text);
 				break;
 			case 4:
-				m_item.size = nzbget_rs_dsf_newznab_resolve_item_size(
-					m_attrSize, m_elementSize);
+				m_item.size = m_attrSize > 0 ? m_attrSize : m_elementSize;
 				m_page.items.push_back(m_item);
 				m_inItem = false;
 				break;
@@ -239,13 +238,10 @@ std::vector<Newznab::Result> Newznab::Search(const std::string& base, const std:
 				NzbgetRsBuf infoBuf = nzbget_rs_dqh_newznab_format_search_info_name(label.c_str(), page + 1);
 				std::string infoName(infoBuf.data ? infoBuf.data : "", infoBuf.len);
 				nzbget_rs_free(infoBuf);
-				long long pageDeadlineMs = nzbget_rs_dsf_newznab_calc_page_deadline_ms(
-					DonorHealth::NowMs(), (int64_t)deadline, (int64_t)Util::CurrentTime());
+				long long pageDeadlineMs = std::max(1LL, DonorHealth::NowMs() + (long long)(deadline - Util::CurrentTime()) * 1000LL);
 				HttpGet::Reply reply = HttpGet::Fetch(BuildUrl(base, params, apiKey), infoName, 16 * 1024 * 1024,
 					pageDeadlineMs);
-				if (nzbget_rs_dsf_newznab_should_retry_dropped_fetch(
-					reply.ok ? 1 : 0, reply.status, HttpGet::Stopped() ? 1 : 0,
-					(int64_t)Util::CurrentTime(), (int64_t)deadline) != 0)
+				if (!reply.ok && reply.status == 0 && !HttpGet::Stopped() && Util::CurrentTime() < deadline)
 				{
 					reply = HttpGet::Fetch(BuildUrl(base, params, apiKey), infoName, 16 * 1024 * 1024,
 						pageDeadlineMs);
@@ -275,8 +271,7 @@ std::vector<Newznab::Result> Newznab::Search(const std::string& base, const std:
 				}
 
 				found[index].insert(found[index].end(), result.items.begin(), result.items.end());
-				if (nzbget_rs_dsf_newznab_should_stop_pagination(
-					result.items.size(), PageSize) != 0)
+				if ((int)result.items.size() < PageSize)
 				{
 					break;
 				}

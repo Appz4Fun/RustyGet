@@ -253,8 +253,11 @@ pub unsafe extern "C" fn nzbget_rs_diskstate_format_nzb_info(
     write_sanitized_line(unsafe { input(n.name) }, &mut out);
     write_sanitized_line(unsafe { input(n.category) }, &mut out);
 
-    let persisted_stage =
-        crate::ffi::nzbget_rs_dps_diskstate_calc_persisted_post_stage(n.has_post_info, n.post_stage);
+    let persisted_stage = if n.has_post_info != 0 {
+        n.post_stage + 1
+    } else {
+        0
+    };
     let _ = writeln!(
         out,
         "{},{},{},{},{}",

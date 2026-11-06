@@ -46,7 +46,7 @@ std::string NameOfSubject(const std::string& subject)
 
 bool ValidMessageId(const std::string& id)
 {
-	return nzbget_rs_din_nzb_reader_valid_message_id(id.data(), id.size()) != 0;
+	return nzbget_rs_dupesearch_valid_message_id(id.data(), id.size()) != 0;
 }
 
 bool IsParName(const std::string& name)
@@ -125,9 +125,7 @@ public:
             for (size_t i = 0; i < m_segments.size(); i++)
             {
                 const Segment& segment = m_segments[i];
-                if (nzbget_rs_din_nzb_reader_is_duplicate_segment_number(
-                    i, m_segments.size(), segment.number,
-                    i + 1 < m_segments.size() ? m_segments[i + 1].number : 0) != 0) continue;
+                if (i + 1 < m_segments.size() && m_segments[i + 1].number == segment.number) continue;
                 m_parts.push_back({ segment.number, segment.bytes });
                 // Invalid retained data still makes geometry unknown. Never
                 // resurrect an earlier valid duplicate in place of this ID.
@@ -142,7 +140,7 @@ public:
                 m_validParts++;
                 int geomValid = geometryValid ? 1 : 0;
                 int pushArticleSize = 0;
-                m_fileBytes = nzbget_rs_din_nzb_reader_accum_segment_bytes(
+                m_fileBytes = nzbget_rs_dupesearch_accum_segment_bytes(
                     m_fileBytes, segment.bytes, IsParName(m_name) ? 1 : 0,
                     geomValid, &geomValid, &pushArticleSize);
                 geometryValid = geomValid != 0;
@@ -168,7 +166,7 @@ public:
             int newGeomValid = geometryValid ? 1 : 0;
             int pushParityHead = 0;
             int pushDataHead = 0;
-            nzbget_rs_din_nzb_reader_accum_file_data_totals(
+            nzbget_rs_dupesearch_accum_file_data_totals(
                 IsParName(m_name) ? 1 : 0, m_fileBytes, m_firstId.empty() ? 1 : 0,
                 dataFiles, dataBytes, newGeomValid,
                 &newDataFiles, &newDataBytes, &newGeomValid, &pushParityHead, &pushDataHead);
@@ -239,7 +237,7 @@ std::string NzbSummary::Fingerprint() const
 		lens.push_back(id.size());
 	}
 	char buffer[17] = {};
-	nzbget_rs_din_nzb_reader_fnv1a_fingerprint(ptrs.data(), lens.data(), ptrs.size(), buffer);
+	nzbget_rs_dupesearch_fnv1a_fingerprint(ptrs.data(), lens.data(), ptrs.size(), buffer);
 	return std::string(buffer, 16);
 }
 
@@ -265,8 +263,7 @@ bool NzbReader::Parse(const std::string& data, NzbSummary& summary)
     if (!reader.articleSizes.empty())
     {
         std::sort(reader.articleSizes.begin(), reader.articleSizes.end());
-        summary.articleBytes = nzbget_rs_din_nzb_reader_select_median_article_bytes(
-            reader.articleSizes.data(), reader.articleSizes.size());
+        summary.articleBytes = reader.articleSizes[reader.articleSizes.size() / 2];
     }
     // File size does not identify a PAR2 index: an index can be larger than
     // a recovery volume. Use the shared filename parser and keep capacity
@@ -275,7 +272,7 @@ bool NzbReader::Parse(const std::string& data, NzbSummary& summary)
     {
         int baseLen = 0;
         bool parsedOk = ParParser::ParseParFilename(head.name.c_str(), true, &baseLen, nullptr);
-        if (nzbget_rs_din_nzb_reader_is_par_index_length(parsedOk ? 1 : 0, baseLen, head.name.size()) != 0)
+        if (parsedOk && baseLen >= 0 && (size_t)baseLen + 5 == head.name.size())
         {
             if (!summary.parIndex.messageId.empty() &&
                 !ParParser::SameParCollection(summary.parIndex.name.c_str(), head.name.c_str(), true))
@@ -294,7 +291,7 @@ bool NzbReader::Parse(const std::string& data, NzbSummary& summary)
         {
             int baseLen = 0;
             bool parsedOk = ParParser::ParseParFilename(head.name.c_str(), true, &baseLen, nullptr);
-            if (nzbget_rs_din_nzb_reader_is_par_volume_length(parsedOk ? 1 : 0, baseLen, head.name.size()) != 0 &&
+            if (parsedOk && baseLen >= 0 && (size_t)baseLen + 5 < head.name.size() &&
                 ParParser::SameParCollection(summary.parIndex.name.c_str(), head.name.c_str(), true))
                 summary.recoveryBytes.push_back((uint64_t)head.bytes);
         }
@@ -314,7 +311,7 @@ bool NzbReader::Parse(const std::string& data, NzbSummary& summary)
 		sizeIsPar.push_back(IsParName(entry.first) ? 1 : 0);
 	}
 	int64_t totalBytes = 0;
-	ptrdiff_t mainIdx = nzbget_rs_din_nzb_reader_select_main_file(
+	ptrdiff_t mainIdx = nzbget_rs_dupesearch_select_main_file(
 		sizeVals.data(), sizeIsPar.data(), sizeVals.size(), &totalBytes);
 	summary.totalBytes = totalBytes;
 	if (mainIdx >= 0 && (size_t)mainIdx < sizeNames.size())
@@ -332,7 +329,7 @@ bool NzbReader::Parse(const std::string& data, NzbSummary& summary)
 			headBytes.push_back(h.bytes);
 		}
 		size_t topIndices[3] = {};
-		size_t topCount = nzbget_rs_din_nzb_reader_select_top_heads(
+		size_t topCount = nzbget_rs_dupesearch_select_top_heads(
 			headBytes.data(), headBytes.size(), topIndices, 3);
 		summary.heads.reserve(topCount);
 		for (size_t i = 0; i < topCount; i++)

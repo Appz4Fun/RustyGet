@@ -10,6 +10,7 @@ use std::os::raw::{c_char, c_int};
 
 extern "C" {
     fn strtol(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> std::os::raw::c_long;
+    fn strtoul(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> std::os::raw::c_ulong;
 }
 
 /// Convert a C string pointer safely to a byte slice.
@@ -1200,6 +1201,95 @@ pub fn twin_resolve_kind(
         }
     }
     Vec::new()
+}
+
+/// `StateDiskFile::ReadLine` (`DiskState.cpp`):
+/// Given a NUL-terminated line buffer of length `len`, returns `(needs_scroll, new_len)`.
+pub fn inspect_read_line(buf: &[u8]) -> (bool, usize) {
+    if buf.is_empty() {
+        (false, 0)
+    } else {
+        let last = buf[buf.len() - 1];
+        (last != b'\n', buf.len() - 1)
+    }
+}
+
+/// `DiskState::LoadDownloadQueue` (`DiskState.cpp`):
+/// Evaluates `format_version` against `queue_version` (64).
+pub fn check_queue_format_version(
+    format_version: i32,
+    queue_version: i32,
+) -> (i32, bool, bool) {
+    let is_legacy = format_version != queue_version;
+    if format_version <= 0 {
+        (1, is_legacy, false)
+    } else if format_version < 47 {
+        (2, is_legacy, false)
+    } else {
+        (0, is_legacy, format_version < 57)
+    }
+}
+
+/// Parse `%u` style integer (base 10) like `sscanf("%u")` / `strtoul(..., 10)`.
+fn parse_scanf_u32(bytes: &[u8]) -> Option<(u32, &[u8])> {
+    let mut i = 0;
+    while i < bytes.len() && is_c_space(bytes[i]) {
+        i += 1;
+    }
+    if i >= bytes.len() {
+        return None;
+    }
+    let mut cbuf = Vec::with_capacity(bytes.len() - i + 1);
+    cbuf.extend_from_slice(&bytes[i..]);
+    cbuf.push(0);
+    let start_ptr = cbuf.as_ptr() as *const c_char;
+    let mut end_ptr: *mut c_char = std::ptr::null_mut();
+    let val = unsafe { strtoul(start_ptr, &mut end_ptr, 10) };
+    let consumed = unsafe { end_ptr.offset_from(start_ptr) as usize };
+    if consumed == 0 {
+        return None;
+    }
+    Some((val as u32, &bytes[i + consumed..]))
+}
+
+/// `DiskState::LoadFileState` (`DiskState.cpp`):
+/// Parses a `< 8` format trailer line (`#decoded <u32>,<u32>` or `OutputInitialized=<i32>`).
+pub fn parse_legacy_file_state_trailer(line: &[u8]) -> (i32, i64, i32) {
+    if let Some(rest) = line.strip_prefix(b"#decoded ") {
+        if let Some((hi, after_hi)) = parse_scanf_u32(rest) {
+            if let Some(after_comma) = after_hi.strip_prefix(b",") {
+                if let Some((lo, _)) = parse_scanf_u32(after_comma) {
+                    return (1, join_i64(hi, lo), 0);
+                }
+            }
+        }
+    }
+    if let Some(rest) = line.strip_prefix(b"OutputInitialized=") {
+        if let Some((val, _)) = parse_scanf_i32(rest) {
+            return (2, 0, if val != 0 { 1 } else { 0 });
+        }
+    }
+    (0, 0, 0)
+}
+
+/// `DiskState::LoadFeedStatus` (`DiskState.cpp`):
+/// Returns `1` if `feed_url == url` and the format-version-specific filter check matches.
+pub fn feed_status_matches(
+    feed_url: &[u8],
+    url: &[u8],
+    format_version: i32,
+    feed_filter: &[u8],
+    filter: &[u8],
+    feed_filter_hash: u32,
+    filter_hash: u32,
+) -> i32 {
+    if feed_url != url {
+        return 0;
+    }
+    let ok = format_version == 1
+        || (format_version == 2 && feed_filter == filter)
+        || (format_version >= 3 && feed_filter_hash == filter_hash);
+    i32::from(ok)
 }
 
 // ============================================================================

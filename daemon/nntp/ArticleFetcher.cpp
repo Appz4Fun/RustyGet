@@ -454,7 +454,7 @@ ArticleFetcher::FetchedArticle ArticleFetcher::FetchFromConnection(NntpConnectio
 	int64 decOffset = 0;
 	int64 decFileSize = 0;
 	int decSuccess = 0;
-	if (!nzbget_rs_cdn_article_fetcher_eval_decoded_yenc(
+	if (!nzbget_rs_nntp_article_fetcher_eval_decoded_yenc(
 		(int)decoder.Check(), (int)Decoder::dsFinished,
 		(int)decoder.GetFormat(), (int)Decoder::efYenc,
 		decoder.GetBeginPos(), decoder.GetEndPos(), decoder.GetSize(),
@@ -535,7 +535,7 @@ void ArticleBatchFetcher::Begin(std::vector<Request> requests)
 bool ArticleBatchFetcher::ClaimNext(int batchId, size_t& index, Request& request)
 {
 	Guard guard(m_mutex);
-	if (!nzbget_rs_cdn_article_batch_can_claim_next(
+	if (!nzbget_rs_nntp_article_batch_can_claim_next(
 		batchId, m_batchId, m_cancelled ? 1 : 0, m_stopped ? 1 : 0,
 		m_nextClaim, m_requests.size(), m_nextDeliver, GetWindowParts(),
 		m_bufferedBytes, MaxBufferedBytes))

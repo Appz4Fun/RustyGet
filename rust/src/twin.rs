@@ -855,12 +855,13 @@ pub fn eval_sample_verdict(
     differ: i32,
     sample_count: i32,
 ) -> i32 {
-    crate::contentdupenntp::twin_check_eval_sample_verdict(
-        is_stopped,
-        compared,
-        differ,
-        sample_count,
-    )
+    if is_stopped || (compared < sample_count / 2 && differ == 0) {
+        0
+    } else if differ > 0 {
+        2
+    } else {
+        1
+    }
 }
 
 /// `TwinCheck::Identity` (`TwinCheck.cpp`): formats `<files_param>#<posting>`,

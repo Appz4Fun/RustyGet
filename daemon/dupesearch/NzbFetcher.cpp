@@ -49,10 +49,13 @@ bool NzbFetcher::Budget::Spent() const
 
 void NzbFetcher::Stats::Add(const Stats& other)
 {
-	nzbget_rs_dsf_nzb_fetcher_accum_stats(
-		&ok, &fetch, &parse, &refused, &relisted, &listingMismatch, &budget,
-		other.ok, other.fetch, other.parse, other.refused, other.relisted,
-		other.listingMismatch, other.budget);
+	ok += other.ok;
+	fetch += other.fetch;
+	parse += other.parse;
+	refused += other.refused;
+	relisted += other.relisted;
+	listingMismatch += other.listingMismatch;
+	budget += other.budget;
 }
 
 void NzbFetcher::SetStatePath(const std::string& path)
@@ -71,7 +74,7 @@ void NzbFetcher::Load()
 	{
 		NzbgetRsBuf idxBuf{};
 		int64_t when = 0;
-		if (nzbget_rs_dsf_nzb_fetcher_parse_cooldown_line(
+		if (nzbget_rs_dupesearch_parse_cooldown_line(
 			line.data(), line.size(), (int64_t)now, &idxBuf, &when) != 0)
 		{
 			m_refusedUntil[std::string(idxBuf.data ? idxBuf.data : "", idxBuf.len)] = (time_t)when;
@@ -92,7 +95,7 @@ void NzbFetcher::Save()
 	time_t now = Util::CurrentTime();
 	for (const auto& entry : m_refusedUntil)
 	{
-		NzbgetRsBuf lineBuf = nzbget_rs_dsf_nzb_fetcher_format_cooldown_line(
+		NzbgetRsBuf lineBuf = nzbget_rs_dupesearch_format_cooldown_line(
 			entry.first.data(), entry.first.size(), (int64_t)entry.second, (int64_t)now);
 		if (lineBuf.data && lineBuf.len > 0)
 		{
@@ -121,9 +124,7 @@ bool NzbFetcher::IsRefused(const std::string& indexer)
 {
 	std::lock_guard<std::mutex> guard(m_mutex);
 	auto it = m_refusedUntil.find(indexer);
-	return it != m_refusedUntil.end() &&
-		nzbget_rs_dsf_nzb_fetcher_is_cooldown_active(
-			(int64_t)it->second, (int64_t)Util::CurrentTime()) != 0;
+	return it != m_refusedUntil.end() && it->second > Util::CurrentTime();
 }
 
 void NzbFetcher::Refuse(const std::string& indexer)
@@ -155,8 +156,7 @@ NzbFetcher::Fetched NzbFetcher::Fetch(const Newznab::Result& listing, time_t dea
         if (budget && !budget->Take()) { fetched.reason = frBudget; return fetched; }
 		std::string why;
 		// the deadline ends a download that drips, not only the retries
-		long long fetchDeadlineMs = nzbget_rs_dsf_newznab_calc_page_deadline_ms(
-			DonorHealth::NowMs(), (int64_t)deadline, (int64_t)Util::CurrentTime());
+		long long fetchDeadlineMs = std::max(1LL, DonorHealth::NowMs() + (long long)(deadline - Util::CurrentTime()) * 1000LL);
 		HttpGet::Reply reply = m_fetch ? m_fetch(listing.link, "DupeSearch nzb of " + listing.indexer, MaxNzbBytes, fetchDeadlineMs) :
 			HttpGet::Fetch(listing.link, "DupeSearch nzb of " + listing.indexer, MaxNzbBytes, fetchDeadlineMs);
 		if (reply.ok)
@@ -194,9 +194,7 @@ NzbFetcher::Fetched NzbFetcher::Fetch(const Newznab::Result& listing, time_t dea
 		{
 			// no time for the pause: no more attempts (they went out at once,
 			// each one an indexer grab, and a 429 was asked again unpaused)
-			if (nzbget_rs_dsf_nzb_fetcher_can_pause_before_retry(
-				attempt, retries, (int64_t)Util::CurrentTime(), RetryDelaySec,
-				(int64_t)deadline) == 0)
+			if (Util::CurrentTime() + RetryDelaySec >= deadline)
 			{
 				break;
 			}
@@ -211,8 +209,7 @@ NzbFetcher::Fetched NzbFetcher::Fetch(const Newznab::Result& listing, time_t dea
 		}
 	}
 
-	if (nzbget_rs_dsf_nzb_fetcher_should_refuse_indexer(
-		status, listing.indexer.empty() ? 1 : 0) != 0)
+	if ((status == 403 || status == 429) && !listing.indexer.empty())
 	{
 		Refuse(listing.indexer);
 		info("DupeSearch: indexer %s refused nzb-file downloads (HTTP %i): not asking it for %i minutes",

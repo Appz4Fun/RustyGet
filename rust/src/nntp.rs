@@ -511,6 +511,71 @@ pub fn server_pool_eval_block_server(
     (new_block, should_warn)
 }
 
+/// `ArticleFetcher::FetchFromConnection`:
+/// Validates a completed yEnc decode in `ArticleFetcher` and computes
+/// `(valid, offset, file_size, success)`.
+pub fn article_fetcher_eval_decoded_yenc(
+    check_status: i32,
+    ds_finished: i32,
+    format: i32,
+    ef_yenc: i32,
+    begin_pos: i64,
+    end_pos: i64,
+    size: i64,
+    data_len: usize,
+) -> (bool, i64, i64, bool) {
+    if check_status != ds_finished
+        || format != ef_yenc
+        || begin_pos <= 0
+        || end_pos <= 0
+        || data_len == 0
+    {
+        return (false, 0, 0, false);
+    }
+    let offset = begin_pos - 1;
+    let success = (data_len as i64) == end_pos.saturating_sub(begin_pos).saturating_add(1);
+    (true, offset, size, success)
+}
+
+/// `ArticleBatchFetcher::ClaimNext`:
+/// Checks whether a worker can claim the next request in the batch window.
+pub fn article_batch_can_claim_next(
+    batch_id: i32,
+    cur_batch_id: i32,
+    cancelled: bool,
+    stopped: bool,
+    next_claim: usize,
+    requests_len: usize,
+    next_deliver: usize,
+    window_parts: i32,
+    buffered_bytes: i64,
+    max_buffered_bytes: i64,
+) -> bool {
+    batch_id == cur_batch_id
+        && !cancelled
+        && !stopped
+        && next_claim < requests_len
+        && next_claim.saturating_sub(next_deliver) < (window_parts.max(0) as usize)
+        && buffered_bytes < max_buffered_bytes
+}
+
+/// Classifies an `ArticleFetcher::FetchedArticle` result in `NntpHealthServer::Exchange`
+/// (`(throw_exchange_error, answer_val)`).
+pub fn nntp_health_classify_body_fetch_result(
+    success: bool,
+    transient: bool,
+    ans_present: i32,
+    ans_body_bad: i32,
+) -> (bool, i32) {
+    if success {
+        (false, ans_present)
+    } else if transient {
+        (true, ans_body_bad)
+    } else {
+        (false, ans_body_bad)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

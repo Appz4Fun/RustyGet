@@ -197,15 +197,13 @@ WebDownloader::EStatus WebDownloader::DownloadWithRedirects(int maxRedirects)
 {
 	// do sync download, following redirects
 	EStatus status = adRedirect;
-	int tooManyRedirects = 0;
-	while (nzbget_rs_dds_webdl_redirect_loop_step(
-		(int)status, (int)adRedirect, maxRedirects, &tooManyRedirects) != 0)
+	while (status == adRedirect && maxRedirects >= 0)
 	{
 		maxRedirects--;
 		status = Download();
 	}
 
-	if (tooManyRedirects != 0)
+	if (status == adRedirect)
 	{
 		warn("Too many redirects for %s", *m_infoName);
 		status = adFailed;

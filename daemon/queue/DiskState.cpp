@@ -108,7 +108,7 @@ char* StateDiskFile::ReadLine(char* buffer, int64 size)
 	// remove traling '\n'
 	int needsScroll = 0;
 	size_t newLen = 0;
-	if (nzbget_rs_dps_diskstate_inspect_read_line(buffer, &needsScroll, &newLen) != 0)
+	if (nzbget_rs_dsp_inspect_read_line(buffer, &needsScroll, &newLen) != 0)
 	{
 		if (needsScroll != 0)
 		{
@@ -116,7 +116,7 @@ char* StateDiskFile::ReadLine(char* buffer, int64 size)
 			for (char skipbuf[1024]; DiskFile::ReadLine(skipbuf, 1024); )
 			{
 				int skipScroll = 0;
-				if (nzbget_rs_dps_diskstate_inspect_read_line(skipbuf, &skipScroll, nullptr) == 0 || skipScroll == 0)
+				if (nzbget_rs_dsp_inspect_read_line(skipbuf, &skipScroll, nullptr) == 0 || skipScroll == 0)
 				{
 					break;
 				}
@@ -426,7 +426,7 @@ bool DiskState::LoadDownloadQueue(DownloadQueue* downloadQueue, Servers* servers
 			formatVersion = stateFile.GetFileVersion();
 			int isLegacy = 0;
 			int loadInlineHistory = 0;
-			int verStatus = nzbget_rs_dps_diskstate_check_queue_format_version(
+			int verStatus = nzbget_rs_dsp_check_queue_format_version(
 				formatVersion, DISKSTATE_QUEUE_VERSION, &isLegacy, &loadInlineHistory);
 			m_legacyQueueRead |= isLegacy != 0;
 			if (verStatus == 1)
@@ -767,8 +767,7 @@ bool DiskState::LoadQueue(NzbList* queue, Servers* servers, StateDiskFile& infil
 	}
 
 	// (before format 57 the history follows in the same file: no trailer there)
-	if (nzbget_rs_dds_diskstate_should_load_dupe_trailer(
-		formatVersion, 57, DISKSTATE_QUEUE_VERSION) != 0 &&
+	if (formatVersion >= 57 && formatVersion <= DISKSTATE_QUEUE_VERSION &&
 		!LoadDupeTrailer([queue](int id) { return queue->Find(id); }, infile)) goto error;
 
 	return true;
@@ -901,7 +900,7 @@ bool DiskState::LoadDupeExtras(NzbInfo* nzbInfo, StateDiskFile& infile, int form
 	{
 		repairCount = 0;
 		int repairScanCnt = infile.ScanLine("%i", &repairCount);
-		if (nzbget_rs_dps_diskstate_validate_bounded_count(repairScanCnt, repairCount, 100000) == 0) goto error;
+		if (repairScanCnt != 1 || repairCount < 0 || repairCount > 100000) goto error;
 	}
 	for (int i = 0; i < repairCount; i++)
 	{
@@ -923,7 +922,7 @@ bool DiskState::LoadDupeExtras(NzbInfo* nzbInfo, StateDiskFile& infile, int form
 		{
 			holeCount = 0;
 			int holeScanCnt = infile.ScanLine("%i", &holeCount);
-			if (nzbget_rs_dps_diskstate_validate_bounded_count(holeScanCnt, holeCount, 1000000) == 0) goto error;
+			if (holeScanCnt != 1 || holeCount < 0 || holeCount > 1000000) goto error;
 		}
 		int64 decodedSize = Util::JoinInt64(decodedHigh, decodedLow);
 		StreamRangeList holes;
@@ -1047,7 +1046,10 @@ bool DiskState::LoadDupeTrailer(const std::function<NzbInfo*(int)>& find, StateD
 			std::vector<char> largeBuf(65536);
 			if (!infile.ReadLine(largeBuf.data(), largeBuf.size())) goto error;
 			char* archivesStr = largeBuf.data();
-			archivesStr += nzbget_rs_dps_diskstate_extracted_archives_prefix_len(archivesStr);
+			if (!strncmp(archivesStr, "ExtractedArchives=", 18))
+			{
+				archivesStr += 18;
+			}
 			std::vector<CString>* archives = target->GetExtractedArchives();
 			if (archives)
 			{
@@ -1460,9 +1462,8 @@ bool DiskState::LoadNzbInfo(NzbInfo* nzbInfo, Servers* servers, StateDiskFile& i
 		&desiredServerId);
 
 	{
-		int paramHeaderKind = nzbget_rs_dps_diskstate_classify_param_header_items(numItems);
-		if (paramHeaderKind == 0) goto error;
-		if (paramHeaderKind == 2)
+		if (numItems != 1 && numItems != 4) goto error;
+		if (numItems == 4)
 		{
 			nzbInfo->SetSkipScriptProcessing(static_cast<bool>(skipScriptProcessing));
 			nzbInfo->SetSkipDiskWrite(static_cast<bool>(skipDiskWrite));
@@ -1543,7 +1544,7 @@ bool DiskState::LoadNzbInfo(NzbInfo* nzbInfo, Servers* servers, StateDiskFile& i
 	nzbInfo->GetStreamRepairJobs()->clear();
 	// earlier builds of this branch wrote it inline (formats 65 and 66); the trailer
 	// of the queue file carries it since
-	if (nzbget_rs_dds_diskstate_should_load_inline_dupe_extras(formatVersion) != 0 &&
+	if ((formatVersion == 65 || formatVersion == 66) &&
 		!LoadDupeExtras(nzbInfo, infile, formatVersion)) goto error;
 
 	// restore unpack state (R3)
@@ -1567,7 +1568,10 @@ bool DiskState::LoadNzbInfo(NzbInfo* nzbInfo, Servers* servers, StateDiskFile& i
 		std::vector<char> largeBuf(65536);
 		if (!infile.ReadLine(largeBuf.data(), largeBuf.size())) goto error;
 		char* archivesStr = largeBuf.data();
-		archivesStr += nzbget_rs_dps_diskstate_extracted_archives_prefix_len(archivesStr);
+		if (!strncmp(archivesStr, "ExtractedArchives=", 18))
+		{
+			archivesStr += 18;
+		}
 		std::vector<CString>* archives = nzbInfo->GetExtractedArchives();
 		if (archives)
 		{
@@ -2082,7 +2086,7 @@ bool DiskState::LoadFileState(FileInfo* fileInfo, Servers* servers, StateDiskFil
 		{
 			int64 decodedSize = 0;
 			int outputInit = 0;
-			int trailerKind = nzbget_rs_dps_diskstate_parse_legacy_file_state_trailer(
+			int trailerKind = nzbget_rs_dsp_parse_legacy_file_state_trailer(
 				trailer, &decodedSize, &outputInit);
 			if (trailerKind == 1)
 			{
@@ -2164,8 +2168,7 @@ void DiskState::DiscardFiles(NzbInfo* nzbInfo, bool deleteLog)
 
 	for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
 	{
-		if (nzbget_rs_dds_diskstate_should_discard_completed_file(
-			(int)completedFile.GetStatus(), (int)CompletedFile::cfSuccess) != 0)
+		if (completedFile.GetStatus() != CompletedFile::cfSuccess)
 		{
 			DiscardFile(completedFile.GetId(), true, true, true);
 		}
@@ -2231,8 +2234,7 @@ void DiskState::SaveHistory(HistoryList* history, StateDiskFile& outfile)
 	{
 		outfile.PrintLine("%i,%i,%i", historyInfo->GetId(), (int)historyInfo->GetKind(), (int)historyInfo->GetTime());
 
-		if (nzbget_rs_dds_diskstate_history_has_nzb_info(
-			(int)historyInfo->GetKind(), (int)HistoryInfo::hkNzb, (int)HistoryInfo::hkUrl) != 0)
+		if (historyInfo->GetKind() == HistoryInfo::hkNzb || historyInfo->GetKind() == HistoryInfo::hkUrl)
 		{
 			SaveNzbInfo(historyInfo->GetNzbInfo(), outfile);
 		}
@@ -2245,8 +2247,7 @@ void DiskState::SaveHistory(HistoryList* history, StateDiskFile& outfile)
 	std::vector<NzbInfo*> nzbs;
 	for (HistoryInfo* historyInfo : history)
 	{
-		if (nzbget_rs_dds_diskstate_history_has_nzb_info(
-			(int)historyInfo->GetKind(), (int)HistoryInfo::hkNzb, (int)HistoryInfo::hkUrl) != 0)
+		if (historyInfo->GetKind() == HistoryInfo::hkNzb || historyInfo->GetKind() == HistoryInfo::hkUrl)
 		{
 			nzbs.push_back(historyInfo->GetNzbInfo());
 		}
@@ -2303,8 +2304,7 @@ bool DiskState::LoadHistory(HistoryList* history, Servers* servers, StateDiskFil
 		history->push_back(std::move(historyInfo));
 	}
 
-	if (nzbget_rs_dds_diskstate_should_load_dupe_trailer(
-		formatVersion, 57, DISKSTATE_QUEUE_VERSION) != 0 &&
+	if (formatVersion >= 57 && formatVersion <= DISKSTATE_QUEUE_VERSION &&
 		!LoadDupeTrailer([history](int id) -> NzbInfo*
 			{
 				for (HistoryInfo* historyInfo : history)
@@ -2648,7 +2648,7 @@ bool DiskState::LoadFeedStatus(Feeds* feeds, StateDiskFile& infile, int formatVe
 
 		for (FeedInfo* feedInfo : feeds)
 		{
-			if (nzbget_rs_dps_diskstate_feed_status_matches(
+			if (nzbget_rs_dsp_feed_status_matches(
 				feedInfo->GetUrl(),
 				url,
 				formatVersion,
@@ -2790,7 +2790,7 @@ bool DiskState::LoadAllFileInfos(DownloadQueue* downloadQueue)
 			}
 			int size = 0;
 			int scanCnt = infile->ScanLine("%i", &size);
-			useHibernate = nzbget_rs_dps_diskstate_hibernate_header_matches(scanCnt, size, fileCount) != 0;
+			useHibernate = scanCnt == 1 && size == fileCount;
 		}
 		if (!useHibernate)
 		{
@@ -2885,16 +2885,14 @@ bool DiskState::LoadAllFileStates(DownloadQueue* downloadQueue, Servers* servers
 								nzbget_rs_free(dmgFnBuf);
 								goto next;
 							}
-							if (nzbget_rs_dds_diskstate_should_save_updated_file_state_version(
-								m_lastFileStateVersion, DISKSTATE_FILE_VERSION) != 0)
+							if (m_lastFileStateVersion > DISKSTATE_FILE_VERSION)
 							{
 								// an earlier build of this branch wrote it: rewritten in the
 								// format an nzbget without duplicate repair reads too
 								SaveFileState(fileInfo, suffix == 'c');
 							}
 							fileInfo->GetArticles()->clear();
-							fileInfo->SetPartialState((FileInfo::EPartialState)nzbget_rs_dds_diskstate_select_partial_state(
-								suffix, (int)FileInfo::psCompleted, (int)FileInfo::psPartial));
+							fileInfo->SetPartialState(suffix == 'c' ? FileInfo::psCompleted : FileInfo::psPartial);
 							goto next;
 						}
 					}
@@ -3193,8 +3191,7 @@ bool DiskState::LoadVolumeStat(Servers* servers, ServerVolumes* serverVolumes, S
 			if (serverVolume)
 			{
 				serverVolume->SetCustomTime(static_cast<time_t>(customTime));
-				time_t firstDayTime = static_cast<time_t>(
-					nzbget_rs_dps_diskstate_calc_first_day_reset_time(firstDay));
+				time_t firstDayTime = static_cast<time_t>(firstDay * 86400);
 				serverVolume->SetCountersResetTime(firstDayTime);
 			}
 		}
@@ -3244,7 +3241,7 @@ bool DiskState::LoadVolumeStat(Servers* servers, ServerVolumes* serverVolumes, S
 		{
 			uint32 arrSize;
 			if (infile.ScanLine("%u", &arrSize) != 1) goto error;
-			if (nzbget_rs_dds_diskstate_validate_articles_per_day_count(arrSize, 100000) == 0) goto error;
+			if (arrSize > 100000) goto error;
 
 			ServerVolume::ArticlesArray articlesArr;
 			articlesArr.reserve(arrSize);

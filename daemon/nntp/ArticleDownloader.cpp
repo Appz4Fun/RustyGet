@@ -384,9 +384,7 @@ ArticleDownloader::EStatus ArticleDownloader::Download()
 	// a file without groups requests the article by its message-id alone: the
 	// join loop never ran, its empty answer counted as a connection error, and
 	// the article was retried forever
-	if (nzbget_rs_dds_article_dl_should_join_group(
-		m_connection->GetNewsServer()->GetJoinGroup() ? 1 : 0,
-		m_fileInfo->GetGroups()->empty() ? 1 : 0) != 0)
+	if (m_connection->GetNewsServer()->GetJoinGroup() && !m_fileInfo->GetGroups()->empty())
 	{
 		// change group
 		for (CString& group : m_fileInfo->GetGroups())

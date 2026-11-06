@@ -2339,8 +2339,10 @@ fn cmd_status(r: c_int) -> Result<(), crate::cmdline::Abort> {
 
 impl crate::cmdline::Sink for FfiCmdline<'_> {
     unsafe fn getopt_long(&mut self, argc: c_int, argv: *mut *mut c_char) -> c_int {
-        // Validated before parsing; never reference an unavailable libc symbol.
-        (self.0.getopt_long.unwrap())(argc, argv)
+        match self.0.getopt_long {
+            Some(f) => f(argc, argv),
+            None => crate::cmdline::default_getopt_long(argc, argv),
+        }
     }
     fn set_int(&mut self, field: i32, value: i32) -> Result<(), crate::cmdline::Abort> {
         let f = self.0.set_int.ok_or(crate::cmdline::Abort)?;
@@ -2395,14 +2397,13 @@ pub unsafe extern "C" fn nzbget_rs_cmdline_parse(argc: c_int, argv: *mut *mut c_
         || sink.set_int.is_none() || sink.set_str.is_none() || sink.steal.is_none()
         || sink.push_option.is_none() || sink.push_id.is_none()
         || sink.push_name.is_none() || sink.error.is_none()
-        || (use_long != 0 && sink.getopt_long.is_none())
     {
         return -1;
     }
-    match crate::cmdline::parse(argc, argv, use_long != 0, &mut FfiCmdline(sink)) {
+    crate::cmdline::with_getopt_lock(|| match crate::cmdline::parse(argc, argv, use_long != 0, &mut FfiCmdline(sink)) {
         Ok(()) => 0,
         Err(_) => -1,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -2543,8 +2544,8 @@ mod cmdline_tests {
         let mut argv = [c"nzbget".as_ptr().cast_mut(), std::ptr::null_mut()];
         calls.count = 0;
         unsafe {
-            assert_eq!(nzbget_rs_cmdline_parse(1, argv.as_mut_ptr(), 1, &sink), -1);
             sink.error = None;
+            assert_eq!(nzbget_rs_cmdline_parse(1, argv.as_mut_ptr(), 1, &sink), -1);
             assert_eq!(nzbget_rs_cmdline_parse(1, argv.as_mut_ptr(), 0, &sink), -1);
         }
         assert_eq!(calls.count, 0);
@@ -26728,97 +26729,12 @@ pub unsafe extern "C" fn nzbget_rs_nzbfile_parser_free(parser: *mut NzbgetRsNzbF
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nzbfile_parser_start_element(
+pub unsafe extern "C" fn nzbget_rs_nzbfile_parser_parse_file(
     parser: *mut NzbgetRsNzbFileParser,
-    name: *const c_char,
-    atts: *const *const c_char,
-    alloc_ctx: *mut std::ffi::c_void,
-    alloc_file_id_cb: NzbgetRsAllocFileIdCb,
-) {
-    if parser.is_null() || name.is_null() {
-        return;
-    }
-    let name_bytes = CStr::from_ptr(name).to_bytes();
-    let has_atts = !atts.is_null();
-    let mut att_vec: Vec<(&[u8], Option<&[u8]>)> = Vec::new();
-    if has_atts {
-        let mut i = 0;
-        loop {
-            let k_ptr = *atts.add(i);
-            if k_ptr.is_null() {
-                break;
-            }
-            let v_ptr = *atts.add(i + 1);
-            let k = CStr::from_ptr(k_ptr).to_bytes();
-            let v = if v_ptr.is_null() {
-                None
-            } else {
-                Some(CStr::from_ptr(v_ptr).to_bytes())
-            };
-            att_vec.push((k, v));
-            i += 2;
-        }
-    }
-    (*parser).start_element(name_bytes, has_atts, &att_vec, || {
-        if let Some(cb) = alloc_file_id_cb {
-            cb(alloc_ctx)
-        } else {
-            0
-        }
-    });
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nzbfile_parser_end_element(
-    parser: *mut NzbgetRsNzbFileParser,
-    name: *const c_char,
-) {
-    if parser.is_null() || name.is_null() {
-        return;
-    }
-    (*parser).end_element(CStr::from_ptr(name).to_bytes());
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nzbfile_parser_characters(
-    parser: *mut NzbgetRsNzbFileParser,
-    xmlstr: *const c_char,
-    len: c_int,
-) {
-    if parser.is_null() || xmlstr.is_null() || len <= 0 {
-        return;
-    }
-    let bytes = std::slice::from_raw_parts(xmlstr as *const u8, len as usize);
-    (*parser).characters(bytes);
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nzbfile_parser_on_missing_entity(
-    parser: *mut NzbgetRsNzbFileParser,
-) {
-    if parser.is_null() {
-        return;
-    }
-    (*parser).on_missing_entity();
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nzbfile_parser_on_sax_error(
-    parser: *mut NzbgetRsNzbFileParser,
-    err_msg: *const c_char,
-) {
-    if parser.is_null() || err_msg.is_null() {
-        return;
-    }
-    (*parser).on_sax_error(CStr::from_ptr(err_msg).to_bytes());
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nzbfile_parser_finalize(
-    parser: *mut NzbgetRsNzbFileParser,
-    sax_ret: c_int,
     par_ignore_ext: *const c_char,
     ct: *const RsCtype,
+    alloc_ctx: *mut std::ffi::c_void,
+    alloc_file_id_cb: NzbgetRsAllocFileIdCb,
     on_parsed_subject: Option<unsafe extern "C" fn(*const c_char, *const c_char)>,
     sort_indices: Option<unsafe extern "C" fn(*const *const c_char, *mut usize, usize)>,
     out_summary: *mut NzbgetRsNzbFileSummary,
@@ -26840,10 +26756,16 @@ pub unsafe extern "C" fn nzbget_rs_nzbfile_parser_finalize(
             cb(filenames.as_ptr(), indices.as_mut_ptr(), indices.len());
         }
     });
-    let ok = p.finalize_with(
-        sax_ret,
+    let ok = p.parse_file(
         pie_bytes,
         &ct_view,
+        || {
+            if let Some(cb) = alloc_file_id_cb {
+                cb(alloc_ctx)
+            } else {
+                0
+            }
+        },
         |subj, fname| {
             if let Some(cb) = on_parsed_subject {
                 cb(subj.as_ptr(), fname.as_ptr());
@@ -32673,8 +32595,52 @@ pub unsafe extern "C" fn nzbget_rs_server_pool_select_connection(
     }
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_script_config_read_cipher_snapshot(
+    filename: *const c_char,
+    out_bytes: *mut RsBuf,
+) -> c_int {
+    if filename.is_null() || out_bytes.is_null() {
+        return 0;
+    }
+    let fn_bytes = CStr::from_ptr(filename).to_bytes();
+    match crate::extension::script_config_read_cipher_snapshot(fn_bytes) {
+        Some(buf) => {
+            *out_bytes = into_buf(buf);
+            1
+        }
+        None => 0,
+    }
+}
 
-
-
-
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_script_config_commit_cipher_patch(
+    filename: *const c_char,
+    expected_ptr: *const c_char,
+    expected_len: usize,
+    replacement_ptr: *const c_char,
+    replacement_len: usize,
+    ctx: *mut std::ffi::c_void,
+    cancel_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
+    on_dir_sync_fail_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+) -> c_int {
+    if filename.is_null() {
+        return crate::extension::RsCipherCommit::Failed as c_int;
+    }
+    let fn_bytes = CStr::from_ptr(filename).to_bytes();
+    let expected = bytes(expected_ptr, expected_len);
+    let replacement = bytes(replacement_ptr, replacement_len);
+    let commit = crate::extension::script_config_commit_cipher_patch(
+        fn_bytes,
+        expected,
+        replacement,
+        || cancel_cb.is_some_and(|cb| unsafe { cb(ctx) != 0 }),
+        || {
+            if let Some(cb) = on_dir_sync_fail_cb {
+                unsafe { cb(ctx) };
+            }
+        },
+    );
+    commit as c_int
+}
 

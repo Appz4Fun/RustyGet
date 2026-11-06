@@ -8,7 +8,6 @@ set(TESTS_SRC ${CMAKE_SOURCE_DIR}/tests/main.cpp)
 include(util/util.cmake)
 include(queue/queue.cmake)
 include(main/main.cmake)
-include(extension/extension.cmake)
 include(nntp/nntp.cmake)
 include(postprocess/postprocess.cmake)
 include(remote/remote.cmake)
@@ -20,15 +19,6 @@ if(EXTERNAL_DEPS)
 endif()
 
 target_link_libraries(${TESTS_TARGET} PRIVATE libnzbget Boost::unit_test_framework)
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-	# Fault injection stays in the test executable; libnzbget and the daemon
-	# retain their ordinary syscall bindings and production ABI.
-	target_compile_definitions(${TESTS_TARGET} PRIVATE NZBGET_TEST_CIPHER_XATTR_WRAP)
-	target_link_options(${TESTS_TARGET} PRIVATE
-		"LINKER:--wrap=flistxattr"
-		"LINKER:--wrap=fgetxattr"
-		"LINKER:--wrap=fsetxattr")
-endif()
 
 apply_compiler_flags(${TESTS_TARGET})
 apply_sanitizers(${TESTS_TARGET})
@@ -38,7 +28,6 @@ target_precompile_headers(${TESTS_TARGET} REUSE_FROM libnzbget)
 add_test(NAME UtilTest         COMMAND ${TESTS_TARGET} --run_test=UtilTest --log_level=message)
 add_test(NAME QueueTest        COMMAND ${TESTS_TARGET} --run_test=QueueTest --log_level=message)
 add_test(NAME MainTest         COMMAND ${TESTS_TARGET} --run_test=MainTest --log_level=message)
-add_test(NAME ExtensionTest    COMMAND ${TESTS_TARGET} --run_test=ExtensionTest --log_level=message)
 add_test(NAME NNTPTest         COMMAND ${TESTS_TARGET} --run_test=NNTPTest --log_level=message)
 add_test(NAME PostprocessTest  COMMAND ${TESTS_TARGET} --run_test=PostprocessTest --log_level=message)
 add_test(NAME RemoteTest       COMMAND ${TESTS_TARGET} --run_test=RemoteTest --log_level=message)

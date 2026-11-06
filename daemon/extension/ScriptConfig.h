@@ -24,8 +24,6 @@
 #include "NString.h"
 #include "Container.h"
 #include "Options.h"
-#include <mutex>
-#include <atomic>
 #include <string_view>
 #include <functional>
 
@@ -58,10 +56,8 @@ public:
 
 private:
 	ConfigTemplates m_configTemplates;
-	inline static std::mutex m_configWriteMutex;
 
 	void InitConfigTemplates();
-	bool LoadConfigUnlocked(Options::OptEntries* optEntries);
 };
 
 extern ScriptConfig* g_ScriptConfig;

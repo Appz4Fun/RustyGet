@@ -10,6 +10,13 @@ extern "C" {
     static mut optind: c_int;
     static mut optarg: *mut c_char;
     fn getopt(argc: c_int, argv: *const *mut c_char, optstring: *const c_char) -> c_int;
+    fn getopt_long(
+        argc: c_int,
+        argv: *const *mut c_char,
+        optstring: *const c_char,
+        longopts: *const LongOption,
+        longindex: *mut c_int,
+    ) -> c_int;
     fn atoi(s: *const c_char) -> c_int;
     fn strcasecmp(a: *const c_char, b: *const c_char) -> c_int;
     fn strncasecmp(a: *const c_char, b: *const c_char, n: usize) -> c_int;
@@ -17,6 +24,57 @@ extern "C" {
 }
 
 const SHORT_OPTIONS: &CStr = c"c:hno:psvAB:DCE:G:K:LPR:STUQOVW:";
+
+#[repr(C)]
+struct LongOption {
+    name: *const c_char,
+    has_arg: c_int,
+    flag: *mut c_int,
+    val: c_int,
+}
+unsafe impl Sync for LongOption {}
+
+const NO_ARGUMENT: c_int = 0;
+const REQUIRED_ARGUMENT: c_int = 1;
+
+static LONG_OPTIONS: [LongOption; 25] = [
+    LongOption { name: c"help".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'h' as c_int },
+    LongOption { name: c"configfile".as_ptr(), has_arg: REQUIRED_ARGUMENT, flag: std::ptr::null_mut(), val: b'c' as c_int },
+    LongOption { name: c"noconfigfile".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'n' as c_int },
+    LongOption { name: c"printconfig".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'p' as c_int },
+    LongOption { name: c"server".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b's' as c_int },
+    LongOption { name: c"daemon".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'D' as c_int },
+    LongOption { name: c"version".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'v' as c_int },
+    LongOption { name: c"serverversion".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'V' as c_int },
+    LongOption { name: c"option".as_ptr(), has_arg: REQUIRED_ARGUMENT, flag: std::ptr::null_mut(), val: b'o' as c_int },
+    LongOption { name: c"append".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'A' as c_int },
+    LongOption { name: c"list".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'L' as c_int },
+    LongOption { name: c"pause".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'P' as c_int },
+    LongOption { name: c"unpause".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'U' as c_int },
+    LongOption { name: c"rate".as_ptr(), has_arg: REQUIRED_ARGUMENT, flag: std::ptr::null_mut(), val: b'R' as c_int },
+    LongOption { name: c"system".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'B' as c_int },
+    LongOption { name: c"log".as_ptr(), has_arg: REQUIRED_ARGUMENT, flag: std::ptr::null_mut(), val: b'G' as c_int },
+    LongOption { name: c"top".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'T' as c_int },
+    LongOption { name: c"edit".as_ptr(), has_arg: REQUIRED_ARGUMENT, flag: std::ptr::null_mut(), val: b'E' as c_int },
+    LongOption { name: c"connect".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'C' as c_int },
+    LongOption { name: c"quit".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'Q' as c_int },
+    LongOption { name: c"reload".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'O' as c_int },
+    LongOption { name: c"write".as_ptr(), has_arg: REQUIRED_ARGUMENT, flag: std::ptr::null_mut(), val: b'W' as c_int },
+    LongOption { name: c"category".as_ptr(), has_arg: REQUIRED_ARGUMENT, flag: std::ptr::null_mut(), val: b'K' as c_int },
+    LongOption { name: c"scan".as_ptr(), has_arg: NO_ARGUMENT, flag: std::ptr::null_mut(), val: b'S' as c_int },
+    LongOption { name: std::ptr::null(), has_arg: 0, flag: std::ptr::null_mut(), val: 0 },
+];
+
+pub unsafe fn default_getopt_long(argc: c_int, argv: *mut *mut c_char) -> c_int {
+    let mut index: c_int = 0;
+    getopt_long(
+        argc,
+        argv,
+        SHORT_OPTIONS.as_ptr(),
+        LONG_OPTIONS.as_ptr(),
+        &mut index,
+    )
+}
 
 /// A C++ callback threw: stop (the C++ rethrows).
 #[derive(Debug, PartialEq)]
@@ -964,6 +1022,212 @@ pub fn format_nserv_usage(base_name: &[u8]) -> Vec<u8> {
     out
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ParsedCommandLine {
+    pub errors: bool,
+    pub no_config: bool,
+    pub config_filename: Option<Vec<u8>>,
+    pub print_usage: bool,
+    pub print_version: bool,
+    pub print_options: bool,
+    pub server_mode: bool,
+    pub daemon_mode: bool,
+    pub remote_client_mode: bool,
+    pub client_operation: i32,
+    pub option_list: Vec<Vec<u8>>,
+    pub edit_queue_action: i32,
+    pub edit_queue_offset: i32,
+    pub edit_queue_id_list: Vec<i32>,
+    pub edit_queue_name_list: Vec<Vec<u8>>,
+    pub match_mode: i32,
+    pub edit_queue_text: Option<Vec<u8>>,
+    pub arg_filename: Option<Vec<u8>>,
+    pub add_category: Option<Vec<u8>>,
+    pub auto_category: bool,
+    pub add_priority: i32,
+    pub add_paused: bool,
+    pub add_nzb_filename: Option<Vec<u8>>,
+    pub last_arg: Option<Vec<u8>>,
+    pub add_top: bool,
+    pub add_dupe_key: Option<Vec<u8>>,
+    pub add_dupe_score: i32,
+    pub add_dupe_mode: i32,
+    pub set_rate: i32,
+    pub log_lines: i32,
+    pub write_log_kind: i32,
+    pub test_backtrace: bool,
+    pub web_get: bool,
+    pub web_get_filename: Option<Vec<u8>>,
+    pub sig_verify: bool,
+    pub pub_key_filename: Option<Vec<u8>>,
+    pub sig_filename: Option<Vec<u8>>,
+    pub pause_download: bool,
+    pub error_messages: Vec<Vec<u8>>,
+}
+
+static GETOPT_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquire the global `getopt` lock before invoking `parse` when concurrent threads may call it.
+pub fn with_getopt_lock<R>(f: impl FnOnce() -> R) -> R {
+    let _guard = GETOPT_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    f()
+}
+
+/// Parse a slice of command-line arguments in pure Rust (`CommandLineParser`).
+pub fn parse_command_line(args: &[&[u8]], use_long: bool) -> ParsedCommandLine {
+    let _guard = GETOPT_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    struct RustSink {
+        out: ParsedCommandLine,
+        cstrings: Vec<Option<std::ffi::CString>>,
+        argv: Vec<*mut c_char>,
+        stolen_nzb: Option<std::ffi::CString>,
+        stolen_dupe: Option<std::ffi::CString>,
+        stolen_edit: Option<std::ffi::CString>,
+    }
+    impl RustSink {
+        fn sync_args(&mut self) {
+            let mut moved = std::mem::take(&mut self.cstrings);
+            let mut next = vec![None; moved.len()];
+            for (i, ptr) in self.argv[..moved.len()].iter().copied().enumerate() {
+                if !ptr.is_null() {
+                    if let Some(pos) = moved.iter().position(|c| c.as_ref().is_some_and(|cs| cs.as_ptr().cast_mut() == ptr)) {
+                        next[i] = moved[pos].take();
+                    }
+                }
+            }
+            self.cstrings = next;
+        }
+    }
+    impl Sink for RustSink {
+        unsafe fn getopt_long(&mut self, argc: c_int, argv: *mut *mut c_char) -> c_int {
+            default_getopt_long(argc, argv)
+        }
+        fn set_int(&mut self, f: i32, v: i32) -> Result<(), Abort> {
+            match f {
+                field::NO_CONFIG => self.out.no_config = v != 0,
+                field::PRINT_USAGE => self.out.print_usage = v != 0,
+                field::PRINT_VERSION => self.out.print_version = v != 0,
+                field::PRINT_OPTIONS => self.out.print_options = v != 0,
+                field::SERVER_MODE => self.out.server_mode = v != 0,
+                field::DAEMON_MODE => self.out.daemon_mode = v != 0,
+                field::REMOTE_CLIENT_MODE => self.out.remote_client_mode = v != 0,
+                field::CLIENT_OPERATION => self.out.client_operation = v,
+                field::ADD_TOP => self.out.add_top = v != 0,
+                field::ADD_PAUSED => self.out.add_paused = v != 0,
+                field::ADD_PRIORITY => self.out.add_priority = v,
+                field::ADD_DUPE_SCORE => self.out.add_dupe_score = v,
+                field::ADD_DUPE_MODE => self.out.add_dupe_mode = v,
+                field::MATCH_MODE => self.out.match_mode = v,
+                field::TEST_BACKTRACE => self.out.test_backtrace = v != 0,
+                field::WEB_GET => self.out.web_get = v != 0,
+                field::SIG_VERIFY => self.out.sig_verify = v != 0,
+                field::LOG_LINES => self.out.log_lines = v,
+                field::EDIT_ACTION => self.out.edit_queue_action = v,
+                field::EDIT_OFFSET => self.out.edit_queue_offset = v,
+                field::WRITE_LOG_KIND => self.out.write_log_kind = v,
+                field::PAUSE_DOWNLOAD => self.out.pause_download = v != 0,
+                field::ERRORS => self.out.errors = v != 0,
+                _ => {}
+            }
+            Ok(())
+        }
+        fn set_str(&mut self, f: i32, value: *const c_char) -> Result<(), Abort> {
+            let bytes = (!value.is_null()).then(|| unsafe { CStr::from_ptr(value) }.to_bytes().to_vec());
+            match f {
+                field::CONFIG_FILENAME => self.out.config_filename = bytes,
+                field::WEB_GET_FILENAME => self.out.web_get_filename = bytes,
+                field::PUB_KEY_FILENAME => self.out.pub_key_filename = bytes,
+                field::SIG_FILENAME => self.out.sig_filename = bytes,
+                field::ADD_CATEGORY => {
+                    self.out.add_category = bytes;
+                    self.out.auto_category = false;
+                }
+                field::LAST_ARG => self.out.last_arg = bytes,
+                field::ARG_FILENAME => self.out.arg_filename = bytes,
+                field::SET_RATE_ARG => {
+                    let s = bytes.and_then(|b| String::from_utf8(b).ok()).unwrap_or_default();
+                    let rate = s.trim().parse::<f64>().unwrap_or(0.0);
+                    self.out.set_rate = (rate * 1024.0) as i32;
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+        fn steal(&mut self, f: i32, index: c_int) -> Result<(), Abort> {
+            self.sync_args();
+            let idx = index as usize;
+            let taken = self.cstrings.get_mut(idx).and_then(Option::take);
+            if let Some(slot) = self.argv.get_mut(idx) {
+                *slot = std::ptr::null_mut();
+            }
+            let bytes = taken.as_ref().map(|c| c.as_bytes().to_vec());
+            match f {
+                field::ADD_NZB_FILENAME => {
+                    self.out.add_nzb_filename = bytes;
+                    self.stolen_nzb = taken;
+                }
+                field::ADD_DUPE_KEY => {
+                    self.out.add_dupe_key = bytes;
+                    self.stolen_dupe = taken;
+                }
+                field::EDIT_QUEUE_TEXT => {
+                    self.out.edit_queue_text = bytes;
+                    self.stolen_edit = taken;
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+        fn push_option(&mut self, value: *const c_char) -> Result<(), Abort> {
+            if !value.is_null() {
+                self.out.option_list.push(unsafe { CStr::from_ptr(value) }.to_bytes().to_vec());
+            }
+            Ok(())
+        }
+        fn push_id(&mut self, id: i32) -> Result<(), Abort> {
+            self.out.edit_queue_id_list.push(id);
+            Ok(())
+        }
+        fn push_name(&mut self, value: *const c_char) -> Result<(), Abort> {
+            if !value.is_null() {
+                self.out.edit_queue_name_list.push(unsafe { CStr::from_ptr(value) }.to_bytes().to_vec());
+            }
+            Ok(())
+        }
+        fn error(&mut self, msg: &CStr) -> Result<(), Abort> {
+            self.out.errors = true;
+            self.out.error_messages.push(msg.to_bytes().to_vec());
+            Ok(())
+        }
+    }
+
+    let cstrings: Vec<Option<std::ffi::CString>> = args
+        .iter()
+        .map(|a| Some(std::ffi::CString::new(*a).unwrap_or_default()))
+        .collect();
+    let mut argv: Vec<*mut c_char> = cstrings
+        .iter()
+        .map(|c| c.as_ref().unwrap().as_ptr().cast_mut())
+        .collect();
+    argv.push(std::ptr::null_mut());
+    let mut sink = RustSink {
+        out: ParsedCommandLine {
+            match_mode: 1,
+            auto_category: true,
+            ..Default::default()
+        },
+        cstrings,
+        argv,
+        stolen_nzb: None,
+        stolen_dupe: None,
+        stolen_edit: None,
+    };
+    let argc = args.len() as c_int;
+    let argv_ptr = sink.argv.as_mut_ptr();
+    let _ = unsafe { parse(argc, argv_ptr, use_long, &mut sink) };
+    sink.out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -983,5 +1247,110 @@ mod tests {
 
         let nserv_u = String::from_utf8(format_nserv_usage(b"nzbget")).unwrap();
         assert!(nserv_u.starts_with("Usage:\n nzbget --nserv -d <data-dir>"));
+    }
+
+    #[test]
+    fn cmdline_parser_full_suite_port_from_cpp() {
+        // 1. InitWithoutConfigurationFileTest
+        let p = parse_command_line(&[b"nzbget", b"-n", b"-p"], true);
+        assert_eq!(p.config_filename, None);
+        assert_eq!(p.client_operation, op::NONE);
+
+        // 2. InitializingWithtConfigurationFile
+        let p = parse_command_line(&[b"nzbget", b"-c", b"/home/user/nzbget.conf", b"-p"], true);
+        assert_eq!(p.config_filename.as_deref(), Some(b"/home/user/nzbget.conf".as_slice()));
+        assert_eq!(p.client_operation, op::NONE);
+
+        // 3. ServerMode
+        let p = parse_command_line(&[b"nzbget", b"-n", b"-s"], true);
+        assert!(p.server_mode);
+        assert!(!p.pause_download);
+
+        // 4. PassingPause
+        let p = parse_command_line(&[b"nzbget", b"-n", b"-s", b"-P"], true);
+        assert!(p.pause_download);
+
+        // 5. ExtraOption1
+        let p = parse_command_line(
+            &[b"nzbget", b"-n", b"-o", b"myoption1=yes", b"-o", b"myoption2=no", b"-p"],
+            true,
+        );
+        assert_eq!(
+            p.option_list,
+            vec![b"myoption1=yes".to_vec(), b"myoption2=no".to_vec()]
+        );
+
+        // 6. ExtraOption2
+        let p = parse_command_line(
+            &[
+                b"nzbget",
+                b"-n",
+                b"-o",
+                b"myoption1=yes",
+                b"-o",
+                b"myoption2=no",
+                b"-o",
+                b"myoption1=no",
+                b"-p",
+            ],
+            true,
+        );
+        assert_eq!(
+            p.option_list,
+            vec![
+                b"myoption1=yes".to_vec(),
+                b"myoption2=no".to_vec(),
+                b"myoption1=no".to_vec(),
+            ]
+        );
+
+        // 7. OptionAfterArguments
+        let add_p = parse_command_line(
+            &[b"nzbget", b"-A", b"/tmp/file.nzb", b"-c", b"/etc/nzbget.conf"],
+            true,
+        );
+        assert_eq!(add_p.arg_filename.as_deref(), Some(b"/tmp/file.nzb".as_slice()));
+        assert_eq!(
+            add_p.config_filename.as_deref(),
+            Some(b"/etc/nzbget.conf".as_slice())
+        );
+
+        let edit_p = parse_command_line(
+            &[b"nzbget", b"-E", b"G", b"D", b"1-3", b"-c", b"conf"],
+            true,
+        );
+        assert!(!edit_p.errors);
+        assert_eq!(edit_p.edit_queue_id_list, vec![1, 2, 3]);
+
+        // 8. ClientModeNoLogFileBindingTest
+        // WriteLog=rotate (2), wlNone=0, wlReset=3, has_log_file=true
+        // Remote client mode -> no logfile binding (0)
+        assert_eq!(
+            crate::systemhealth::log_classify_init_logfile_action(
+                true, false, 2, 0, 3, true, false
+            ),
+            0
+        );
+        // Direct client mode (-p, -v, etc.) -> no logfile binding (0)
+        assert_eq!(
+            crate::systemhealth::log_classify_init_logfile_action(
+                false, true, 2, 0, 3, true, false
+            ),
+            0
+        );
+        // Standalone download mode -> bind logfile (1)
+        assert_eq!(
+            crate::systemhealth::log_classify_init_logfile_action(
+                false, false, 2, 0, 3, true, false
+            ),
+            1
+        );
+        // Server mode -> bind logfile (1)
+        assert_eq!(
+            crate::systemhealth::log_classify_init_logfile_action(
+                false, false, 2, 0, 3, true, true
+            ),
+            1
+        );
     }
 }

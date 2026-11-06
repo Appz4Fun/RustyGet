@@ -30,39 +30,6 @@
 #include <stdexcept>
 #include "nzbget_rs.h"
 
-#ifdef HAVE_GETOPT_LONG
-static struct option long_options[] =
-	{
-		{"help", no_argument, nullptr, 'h'},
-		{"configfile", required_argument, nullptr, 'c'},
-		{"noconfigfile", no_argument, nullptr, 'n'},
-		{"printconfig", no_argument, nullptr, 'p'},
-		{"server", no_argument, nullptr, 's' },
-		{"daemon", no_argument, nullptr, 'D' },
-		{"version", no_argument, nullptr, 'v'},
-		{"serverversion", no_argument, nullptr, 'V'},
-		{"option", required_argument, nullptr, 'o'},
-		{"append", no_argument, nullptr, 'A'},
-		{"list", no_argument, nullptr, 'L'},
-		{"pause", no_argument, nullptr, 'P'},
-		{"unpause", no_argument, nullptr, 'U'},
-		{"rate", required_argument, nullptr, 'R'},
-		{"system", no_argument, nullptr, 'B'},
-		{"log", required_argument, nullptr, 'G'},
-		{"top", no_argument, nullptr, 'T'},
-		{"edit", required_argument, nullptr, 'E'},
-		{"connect", no_argument, nullptr, 'C'},
-		{"quit", no_argument, nullptr, 'Q'},
-		{"reload", no_argument, nullptr, 'O'},
-		{"write", required_argument, nullptr, 'W'},
-		{"category", required_argument, nullptr, 'K'},
-		{"scan", no_argument, nullptr, 'S'},
-		{nullptr, 0, nullptr, 0}
-	};
-#endif
-
-static char short_options[] = "c:hno:psvAB:DCE:G:K:LPR:STUQOVW:";
-
 
 // a callback that threw stops the parser; the exception is rethrown after
 // Rust returned
@@ -204,14 +171,6 @@ int CommandLineParser::RsError(void* ctx, const char* msg)
 	return RsSink::Call(ctx, [msg](CommandLineParser* p) { p->ReportError(msg); });
 }
 
-#ifdef HAVE_GETOPT_LONG
-static int RsGetoptLong(int argc, char** argv) noexcept
-{
-	int index = 0;
-	return getopt_long(argc, argv, short_options, long_options, &index);
-}
-#endif
-
 CommandLineParser::CommandLineParser(int argc, const char* argv[])
 {
 	if (argc < 1 || !argv)
@@ -234,7 +193,6 @@ CommandLineParser::CommandLineParser(int argc, const char* argv[])
 	NzbgetRsCmdlineSink rsSink{nullptr, &sink, RsSetInt, RsSetStr, RsSteal, RsPushOption, RsPushId, RsPushName, RsError};
 #ifdef HAVE_GETOPT_LONG
 	const int useLong = 1;
-	rsSink.getoptLong = RsGetoptLong;
 #else
 	const int useLong = 0;
 #endif

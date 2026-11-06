@@ -4891,20 +4891,9 @@ typedef struct
 
 NzbgetRsNzbFileParser* nzbget_rs_nzbfile_parser_new(const char* file_name);
 void nzbget_rs_nzbfile_parser_free(NzbgetRsNzbFileParser* parser);
-void nzbget_rs_nzbfile_parser_start_element(
-    NzbgetRsNzbFileParser* parser, const char* name, const char* const* atts,
-    void* alloc_ctx, NzbgetRsAllocFileIdCb alloc_file_id_cb);
-void nzbget_rs_nzbfile_parser_end_element(
-    NzbgetRsNzbFileParser* parser, const char* name);
-void nzbget_rs_nzbfile_parser_characters(
-    NzbgetRsNzbFileParser* parser, const char* xmlstr, int len);
-void nzbget_rs_nzbfile_parser_on_missing_entity(
-    NzbgetRsNzbFileParser* parser);
-void nzbget_rs_nzbfile_parser_on_sax_error(
-    NzbgetRsNzbFileParser* parser, const char* err_msg);
-int nzbget_rs_nzbfile_parser_finalize(
-    NzbgetRsNzbFileParser* parser, int sax_ret,
-    const char* par_ignore_ext, const NzbgetRsCtype* ct,
+int nzbget_rs_nzbfile_parser_parse_file(
+    NzbgetRsNzbFileParser* parser, const char* par_ignore_ext,
+    const NzbgetRsCtype* ct, void* alloc_ctx, NzbgetRsAllocFileIdCb alloc_file_id_cb,
     void (*on_parsed_subject)(const char*, const char*),
     void (*sort_indices)(const char* const*, size_t*, size_t),
     NzbgetRsNzbFileSummary* out_summary);
@@ -5663,6 +5652,16 @@ int nzbget_rs_server_pool_select_connection(
     int rand_val,
     size_t* out_unblock_indices, size_t* out_unblock_count,
     size_t* out_conn_index, int32_t* out_chosen_level);
+
+int nzbget_rs_script_config_read_cipher_snapshot(
+    const char* filename, NzbgetRsBuf* out_bytes);
+int nzbget_rs_script_config_commit_cipher_patch(
+    const char* filename,
+    const char* expected_ptr, size_t expected_len,
+    const char* replacement_ptr, size_t replacement_len,
+    void* ctx,
+    int (*cancel_cb)(void*),
+    void (*on_dir_sync_fail_cb)(void*));
 
 #include "nzbget_tls_cipher.h"
 

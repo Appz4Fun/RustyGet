@@ -53,13 +53,6 @@ private:
 	std::string m_metaName;
 	std::string m_metaTitle;
 	std::set<FileInfo*> m_cutShortFiles;
-	struct NzbgetRsNzbFileParser* m_parser = nullptr;
-
-	static void SAX_StartElement(NzbFile* file, const char *name, const char **atts);
-	static void SAX_EndElement(NzbFile* file, const char *name);
-	static void SAX_characters(NzbFile* file, const char *  xmlstr, int len);
-	static void* SAX_getEntity(NzbFile* file, const char *  name);
-	static void SAX_error(NzbFile* file, const char *msg, ...);
 };
 
 #endif

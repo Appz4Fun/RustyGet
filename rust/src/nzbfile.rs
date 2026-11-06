@@ -897,6 +897,569 @@ impl NzbFileParser {
 
         true
     }
+
+    fn normalize_xml_eol(s: &str) -> std::borrow::Cow<'_, str> {
+        if !s.as_bytes().contains(&b'\r') {
+            return std::borrow::Cow::Borrowed(s);
+        }
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\r' {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                out.push('\n');
+            } else {
+                out.push(c);
+            }
+        }
+        std::borrow::Cow::Owned(out)
+    }
+
+    fn normalize_xml_attr_ws(s: &str) -> std::borrow::Cow<'_, str> {
+        if !s.bytes().any(|b| matches!(b, b'\r' | b'\n' | b'\t')) {
+            return std::borrow::Cow::Borrowed(s);
+        }
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\r' {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                out.push(' ');
+            } else if c == '\n' || c == '\t' {
+                out.push(' ');
+            } else {
+                out.push(c);
+            }
+        }
+        std::borrow::Cow::Owned(out)
+    }
+
+    fn parse_element_attrs<R>(
+        &mut self,
+        e: &quick_xml::events::BytesStart<'_>,
+        reader: &quick_xml::Reader<R>,
+    ) -> Result<(bool, Vec<(Vec<u8>, Vec<u8>)>), ()> {
+        let mut has_atts = false;
+        let mut attrs = Vec::new();
+        for attr_res in e.attributes() {
+            has_atts = true;
+            let a = match attr_res {
+                Ok(a) => a,
+                Err(err) => {
+                    self.on_sax_error(err.to_string().as_bytes());
+                    return Err(());
+                }
+            };
+            let decoded = match reader.decoder().decode(&a.value) {
+                Ok(d) => d,
+                Err(err) => {
+                    self.on_sax_error(err.to_string().as_bytes());
+                    return Err(());
+                }
+            };
+            let norm = Self::normalize_xml_attr_ws(&decoded);
+            let unescaped = match quick_xml::escape::unescape(&norm) {
+                Ok(u) => u,
+                Err(err) => {
+                    self.on_sax_error(err.to_string().as_bytes());
+                    return Err(());
+                }
+            };
+            attrs.push((a.key.as_ref().to_vec(), unescaped.into_owned().into_bytes()));
+        }
+        Ok((has_atts, attrs))
+    }
+
+    /// Streams and parses XML from `input` into `self` (`xmlSAXUserParseFile` replacement),
+    /// returning `0` on success or `-1` on XML syntax/entity/encoding error.
+    pub fn parse_xml_reader<R: std::io::Read>(
+        &mut self,
+        input: R,
+        mut alloc_file_id: impl FnMut() -> i32,
+    ) -> i32 {
+        use quick_xml::events::Event;
+        let stream = match XmlStreamReader::new(input) {
+            Ok(s) => s,
+            Err(err) => {
+                self.on_sax_error(err.to_string().as_bytes());
+                return -1;
+            }
+        };
+        if stream.is_empty() {
+            self.on_sax_error(b"Document is empty");
+            return -1;
+        }
+        let mut reader = quick_xml::Reader::from_reader(stream);
+        let mut buf = Vec::new();
+        let mut saw_root = false;
+        let mut root_closed = false;
+        let mut depth: i32 = 0;
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(Event::Start(e)) => {
+                    if root_closed {
+                        self.on_sax_error(b"Extra content at the end of the document");
+                        return -1;
+                    }
+                    saw_root = true;
+                    depth += 1;
+                    let Ok((has_atts, attrs)) = self.parse_element_attrs(&e, &reader) else {
+                        return -1;
+                    };
+                    let attr_refs: Vec<(&[u8], Option<&[u8]>)> = attrs
+                        .iter()
+                        .map(|(k, v)| (k.as_slice(), Some(v.as_slice())))
+                        .collect();
+                    self.start_element(e.name().as_ref(), has_atts, &attr_refs, &mut alloc_file_id);
+                }
+                Ok(Event::Empty(e)) => {
+                    if root_closed {
+                        self.on_sax_error(b"Extra content at the end of the document");
+                        return -1;
+                    }
+                    saw_root = true;
+                    let Ok((has_atts, attrs)) = self.parse_element_attrs(&e, &reader) else {
+                        return -1;
+                    };
+                    let attr_refs: Vec<(&[u8], Option<&[u8]>)> = attrs
+                        .iter()
+                        .map(|(k, v)| (k.as_slice(), Some(v.as_slice())))
+                        .collect();
+                    self.start_element(e.name().as_ref(), has_atts, &attr_refs, &mut alloc_file_id);
+                    self.end_element(e.name().as_ref());
+                    if depth == 0 {
+                        root_closed = true;
+                    }
+                }
+                Ok(Event::Text(t)) => {
+                    let Ok(decoded) = t.decode() else {
+                        self.on_sax_error(b"Invalid character encoding");
+                        return -1;
+                    };
+                    let norm = Self::normalize_xml_eol(&decoded);
+                    if depth == 0 {
+                        let rest = norm.strip_prefix('\u{feff}').unwrap_or(&norm);
+                        if !rest.bytes().all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n')) {
+                            self.on_sax_error(b"Extra content at the end of the document");
+                            return -1;
+                        }
+                    } else {
+                        self.characters(norm.as_bytes());
+                    }
+                }
+                Ok(Event::CData(c)) => {
+                    if depth == 0 {
+                        self.on_sax_error(b"CDATA section outside root element");
+                        return -1;
+                    }
+                    let Ok(decoded) = c.decode() else {
+                        self.on_sax_error(b"Invalid character encoding");
+                        return -1;
+                    };
+                    let norm = Self::normalize_xml_eol(&decoded);
+                    self.characters(norm.as_bytes());
+                }
+                Ok(Event::GeneralRef(r)) => {
+                    if depth == 0 {
+                        self.on_sax_error(b"Entity reference outside root element");
+                        return -1;
+                    }
+                    let entity = match r.as_ref() {
+                        b"lt" => Some(b"<".to_vec()),
+                        b"gt" => Some(b">".to_vec()),
+                        b"amp" => Some(b"&".to_vec()),
+                        b"quot" => Some(b"\"".to_vec()),
+                        b"apos" => Some(b"'".to_vec()),
+                        _ => r
+                            .resolve_char_ref()
+                            .ok()
+                            .flatten()
+                            .map(|c| c.to_string().into_bytes()),
+                    };
+                    match entity {
+                        Some(bytes) => self.characters(&bytes),
+                        None => {
+                            self.on_missing_entity();
+                            self.on_sax_error(b"Entity not defined");
+                            return -1;
+                        }
+                    }
+                }
+                Ok(Event::Decl(_)) => {
+                    if saw_root {
+                        self.on_sax_error(b"XML declaration allowed only at the start of the document");
+                        return -1;
+                    }
+                }
+                Ok(Event::DocType(d)) => {
+                    if saw_root || d.windows(8).any(|w| w.eq_ignore_ascii_case(b"<!entity")) {
+                        self.on_sax_error(b"Entity declarations are not supported");
+                        return -1;
+                    }
+                }
+                Ok(Event::End(e)) => {
+                    depth -= 1;
+                    if depth < 0 {
+                        self.on_sax_error(b"Unexpected closing tag");
+                        return -1;
+                    }
+                    self.end_element(e.name().as_ref());
+                    if depth == 0 {
+                        root_closed = true;
+                    }
+                }
+                Ok(Event::Eof) => break,
+                Err(err) => {
+                    self.on_sax_error(err.to_string().as_bytes());
+                    return -1;
+                }
+                _ => {}
+            }
+            buf.clear();
+        }
+        if saw_root && root_closed && depth == 0 {
+            0
+        } else {
+            self.on_sax_error(b"Premature end of data");
+            -1
+        }
+    }
+
+    /// Parses raw XML bytes into `self` (`xmlSAXUserParseFile` replacement),
+    /// returning `0` on success or `-1` on XML syntax/entity error.
+    pub fn parse_xml(
+        &mut self,
+        xml: &[u8],
+        alloc_file_id: impl FnMut() -> i32,
+    ) -> i32 {
+        self.parse_xml_reader(std::io::Cursor::new(xml), alloc_file_id)
+    }
+
+    /// Streams an `.nzb` file from disk, runs `parse_xml_reader`, and finalizes it (`NzbFile::Parse`).
+    pub fn parse_file(
+        &mut self,
+        par_ignore_ext: &[u8],
+        ct: &Ctype,
+        alloc_file_id: impl FnMut() -> i32,
+        on_parsed_subject: impl FnMut(&CStr, &CStr),
+        sort_indices: Option<impl FnOnce(&[*const c_char], &mut [usize])>,
+    ) -> bool {
+        #[cfg(unix)]
+        let path = {
+            use std::os::unix::ffi::OsStrExt;
+            std::path::Path::new(std::ffi::OsStr::from_bytes(self.file_name.as_bytes()))
+        };
+        #[cfg(not(unix))]
+        let path_str = String::from_utf8_lossy(self.file_name.as_bytes()).into_owned();
+        #[cfg(not(unix))]
+        let path = std::path::Path::new(&path_str);
+
+        let sax_ret = match std::fs::File::open(path) {
+            Ok(file) => self.parse_xml_reader(file, alloc_file_id),
+            Err(_) => -1,
+        };
+        self.finalize_with(sax_ret, par_ignore_ext, ct, on_parsed_subject, sort_indices)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum XmlInputEncoding {
+    Raw,
+    Utf16Le,
+    Utf16Be,
+}
+
+const XML_STREAM_CHUNK_SIZE: usize = 8192;
+
+struct XmlStreamReader<R> {
+    inner: R,
+    encoding: XmlInputEncoding,
+    raw_buf: Vec<u8>,
+    raw_pos: usize,
+    raw_len: usize,
+    out_buf: Vec<u8>,
+    out_pos: usize,
+    eof: bool,
+    empty: bool,
+    checked_xml_decl: bool,
+}
+
+impl<R: std::io::Read> XmlStreamReader<R> {
+    fn new(mut inner: R) -> std::io::Result<Self> {
+        let mut raw_buf = vec![0u8; XML_STREAM_CHUNK_SIZE];
+        let mut raw_len = 0usize;
+        let mut eof = false;
+        while raw_len < 4 {
+            match inner.read(&mut raw_buf[raw_len..]) {
+                Ok(0) => {
+                    eof = true;
+                    break;
+                }
+                Ok(n) => raw_len += n,
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        if raw_len == 0 {
+            return Ok(Self {
+                inner,
+                encoding: XmlInputEncoding::Raw,
+                raw_buf,
+                raw_pos: 0,
+                raw_len: 0,
+                out_buf: Vec::new(),
+                out_pos: 0,
+                eof: true,
+                empty: true,
+                checked_xml_decl: true,
+            });
+        }
+
+        let (encoding, raw_pos) = if raw_len >= 2
+            && raw_buf[0] == 0xFF
+            && raw_buf[1] == 0xFE
+            && !(raw_len >= 4 && raw_buf[2] == 0x00 && raw_buf[3] == 0x00)
+        {
+            (XmlInputEncoding::Utf16Le, 2)
+        } else if raw_len >= 2 && raw_buf[0] == 0xFE && raw_buf[1] == 0xFF {
+            (XmlInputEncoding::Utf16Be, 2)
+        } else if raw_len >= 4
+            && raw_buf[0] == b'<'
+            && raw_buf[1] == 0x00
+            && raw_buf[2] != 0x00
+            && raw_buf[3] == 0x00
+        {
+            (XmlInputEncoding::Utf16Le, 0)
+        } else if raw_len >= 4
+            && raw_buf[0] == 0x00
+            && raw_buf[1] == b'<'
+            && raw_buf[2] == 0x00
+            && raw_buf[3] != 0x00
+        {
+            (XmlInputEncoding::Utf16Be, 0)
+        } else {
+            (XmlInputEncoding::Raw, 0)
+        };
+
+        let mut out_buf = Vec::new();
+        let mut final_raw_pos = raw_pos;
+        let mut final_raw_len = raw_len;
+        if encoding == XmlInputEncoding::Raw {
+            out_buf.extend_from_slice(&raw_buf[..raw_len]);
+            final_raw_pos = 0;
+            final_raw_len = 0;
+        }
+
+        Ok(Self {
+            inner,
+            encoding,
+            raw_buf,
+            raw_pos: final_raw_pos,
+            raw_len: final_raw_len,
+            out_buf,
+            out_pos: 0,
+            eof,
+            empty: false,
+            checked_xml_decl: encoding == XmlInputEncoding::Raw,
+        })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.empty
+    }
+
+    fn rewrite_utf16_xml_decl(buf: &mut Vec<u8>) {
+        let start = if buf.starts_with(b"\xEF\xBB\xBF") {
+            3
+        } else {
+            0
+        };
+        let rest = &buf[start..];
+        let trimmed_offset = rest
+            .iter()
+            .position(|&b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+            .unwrap_or(rest.len());
+        let decl_start = start + trimmed_offset;
+        if !buf[decl_start..].starts_with(b"<?xml") {
+            return;
+        }
+        let Some(end_rel) = buf[decl_start..].windows(2).position(|w| w == b"?>") else {
+            return;
+        };
+        let decl_end = decl_start + end_rel + 2;
+        let decl = &buf[decl_start..decl_end];
+        let Some(enc_rel) = decl.windows(8).position(|w| w == b"encoding") else {
+            return;
+        };
+        let mut i = decl_start + enc_rel + 8;
+        while i < decl_end && matches!(buf[i], b' ' | b'\t' | b'\r' | b'\n') {
+            i += 1;
+        }
+        if i >= decl_end || buf[i] != b'=' {
+            return;
+        }
+        i += 1;
+        while i < decl_end && matches!(buf[i], b' ' | b'\t' | b'\r' | b'\n') {
+            i += 1;
+        }
+        if i >= decl_end || !matches!(buf[i], b'"' | b'\'') {
+            return;
+        }
+        let quote = buf[i];
+        let val_start = i + 1;
+        let Some(val_len) = buf[val_start..decl_end]
+            .iter()
+            .position(|&b| b == quote)
+        else {
+            return;
+        };
+        let val_end = val_start + val_len;
+        let val = &buf[val_start..val_end];
+        let is_utf16_family = val.len() >= 6 && val[..6].eq_ignore_ascii_case(b"utf-16")
+            || val.eq_ignore_ascii_case(b"ucs-2")
+            || val.eq_ignore_ascii_case(b"unicode");
+        if is_utf16_family {
+            buf.splice(val_start..val_end, b"UTF-8".iter().copied());
+        }
+    }
+
+    fn refill_out_buf(&mut self) -> std::io::Result<()> {
+        self.out_buf.clear();
+        self.out_pos = 0;
+
+        if self.encoding == XmlInputEncoding::Raw {
+            if self.eof {
+                return Ok(());
+            }
+            loop {
+                match self.inner.read(&mut self.raw_buf) {
+                    Ok(0) => {
+                        self.eof = true;
+                        return Ok(());
+                    }
+                    Ok(n) => {
+                        self.out_buf.extend_from_slice(&self.raw_buf[..n]);
+                        return Ok(());
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+
+        let min_bytes = if !self.checked_xml_decl { 512 } else { 4 };
+        while self.raw_len - self.raw_pos < min_bytes && !self.eof {
+            if self.raw_pos > 0 {
+                let rem = self.raw_len - self.raw_pos;
+                self.raw_buf.copy_within(self.raw_pos..self.raw_len, 0);
+                self.raw_len = rem;
+                self.raw_pos = 0;
+            }
+            match self.inner.read(&mut self.raw_buf[self.raw_len..]) {
+                Ok(0) => {
+                    self.eof = true;
+                    break;
+                }
+                Ok(n) => self.raw_len += n,
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
+
+        if self.raw_pos == self.raw_len {
+            return Ok(());
+        }
+        if self.eof && (self.raw_len - self.raw_pos) % 2 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Odd byte count in UTF-16 XML input",
+            ));
+        }
+
+        let mut char_buf = [0u8; 4];
+        while self.raw_len - self.raw_pos >= 2 {
+            let b0 = self.raw_buf[self.raw_pos];
+            let b1 = self.raw_buf[self.raw_pos + 1];
+            let u = match self.encoding {
+                XmlInputEncoding::Utf16Le => u16::from_le_bytes([b0, b1]),
+                XmlInputEncoding::Utf16Be => u16::from_be_bytes([b0, b1]),
+                XmlInputEncoding::Raw => unreachable!(),
+            };
+            if (0xD800..=0xDBFF).contains(&u) {
+                if self.raw_len - self.raw_pos < 4 {
+                    if self.eof {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "Unpaired high surrogate at EOF in UTF-16 XML input",
+                        ));
+                    }
+                    break;
+                }
+                let b2 = self.raw_buf[self.raw_pos + 2];
+                let b3 = self.raw_buf[self.raw_pos + 3];
+                let u2 = match self.encoding {
+                    XmlInputEncoding::Utf16Le => u16::from_le_bytes([b2, b3]),
+                    XmlInputEncoding::Utf16Be => u16::from_be_bytes([b2, b3]),
+                    XmlInputEncoding::Raw => unreachable!(),
+                };
+                if !(0xDC00..=0xDFFF).contains(&u2) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Unpaired high surrogate in UTF-16 XML input",
+                    ));
+                }
+                let cp = 0x10000 + (((u as u32 - 0xD800) << 10) | (u2 as u32 - 0xDC00));
+                let ch = char::from_u32(cp).unwrap();
+                let encoded = ch.encode_utf8(&mut char_buf);
+                self.out_buf.extend_from_slice(encoded.as_bytes());
+                self.raw_pos += 4;
+            } else if (0xDC00..=0xDFFF).contains(&u) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Unpaired low surrogate in UTF-16 XML input",
+                ));
+            } else {
+                let ch = char::from_u32(u as u32).unwrap();
+                let encoded = ch.encode_utf8(&mut char_buf);
+                self.out_buf.extend_from_slice(encoded.as_bytes());
+                self.raw_pos += 2;
+            }
+        }
+
+        if !self.checked_xml_decl {
+            self.checked_xml_decl = true;
+            Self::rewrite_utf16_xml_decl(&mut self.out_buf);
+        }
+
+        Ok(())
+    }
+}
+
+impl<R: std::io::Read> std::io::Read for XmlStreamReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let available = std::io::BufRead::fill_buf(self)?;
+        let n = available.len().min(buf.len());
+        buf[..n].copy_from_slice(&available[..n]);
+        std::io::BufRead::consume(self, n);
+        Ok(n)
+    }
+}
+
+impl<R: std::io::Read> std::io::BufRead for XmlStreamReader<R> {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        if self.out_pos >= self.out_buf.len() {
+            self.refill_out_buf()?;
+        }
+        Ok(&self.out_buf[self.out_pos..])
+    }
+
+    fn consume(&mut self, amt: usize) {
+        self.out_pos = (self.out_pos + amt).min(self.out_buf.len());
+    }
 }
 
 /// Computes the trimmed length of an XML/SAX error message after stripping trailing
@@ -1095,6 +1658,483 @@ mod tests {
                 parser.files[0].article_msg_ids[1].as_bytes(),
                 b"<msg2__@test>"
             );
+        });
+    }
+
+    #[test]
+    fn nzbfile_full_suite_port_from_cpp() {
+        with_c_locale(|ct| {
+            // 1. NZBParserTest over tests/testdata/nzbfile/*.nzb
+            let testdata_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("tests/testdata/nzbfile");
+            let cases = [
+                ("dotless", "Movies"),
+                ("plain", "TV>4K"),
+                ("literal_gt", "TV > 4K"),
+                ("passwd{{thisisthepassword}}", ""),
+                ("passwdMeta", ""),
+                ("passwdEntity", ""),
+            ];
+            for (test_filename, expected_category) in cases {
+                let nzb_path = testdata_dir.join(format!("{test_filename}.nzb"));
+                let info_path = testdata_dir.join(format!("{test_filename}.txt"));
+                let mut next_id = 1i32;
+                let mut parser = NzbFileParser::new(nzb_path.to_str().unwrap().as_bytes());
+                assert!(
+                    parser.parse_file(
+                        b".nfo",
+                        ct,
+                        || {
+                            let id = next_id;
+                            next_id += 1;
+                            id
+                        },
+                        |_, _| {},
+                        None::<fn(&[*const c_char], &mut [usize])>
+                    ),
+                    "failed to parse {test_filename}.nzb"
+                );
+                assert_eq!(
+                    parser.category.to_str().unwrap(),
+                    expected_category,
+                    "category mismatch for {test_filename}"
+                );
+                let info_text = std::fs::read_to_string(&info_path).unwrap();
+                let non_comment_lines: Vec<&str> = info_text
+                    .lines()
+                    .filter(|l| !l.starts_with('#'))
+                    .map(|l| l.trim_end_matches(['\r', '\n', ' ', '\t']))
+                    .collect();
+                let file_count: usize = non_comment_lines[0].parse().unwrap();
+                assert_eq!(parser.file_count as usize, file_count);
+                assert_eq!(parser.files.len(), file_count);
+                for i in 0..file_count {
+                    assert_eq!(
+                        parser.files[i].filename.to_str().unwrap(),
+                        non_comment_lines[1 + i]
+                    );
+                }
+                let expected_pw = non_comment_lines.get(1 + file_count).copied().unwrap_or("");
+                assert_eq!(parser.password.to_str().unwrap(), expected_pw);
+            }
+
+            // 2. SanitizePathSegmentTest
+            use crate::paths::{sanitize_path_segment, sanitize_relative_path, PATH_SEPARATOR};
+            assert_eq!(
+                sanitize_path_segment(b"Clean.Release.Name"),
+                b"Clean.Release.Name"
+            );
+            let test_path = sanitize_path_segment(b"../../etc/cron.d");
+            assert!(!test_path.contains(&b'/'));
+            assert!(!test_path.contains(&b'\\'));
+            assert!(!test_path.windows(2).any(|w| w == b".."));
+            assert_eq!(sanitize_path_segment(b".."), b"");
+            assert_eq!(sanitize_path_segment(b"."), b"");
+            assert_eq!(sanitize_path_segment(b""), b"");
+            assert_eq!(
+                sanitize_path_segment(b"name:with*bad?chars"),
+                b"name_with_bad_chars"
+            );
+            assert_eq!(
+                sanitize_path_segment(b"folder/sub\\name"),
+                b"folder_sub_name"
+            );
+            assert_eq!(
+                sanitize_path_segment(b"trailing.dots...   "),
+                b"trailing.dots"
+            );
+            assert_eq!(sanitize_path_segment(b"   leading.space"), b"leading.space");
+            assert_eq!(sanitize_path_segment(b"CON"), b"_CON");
+            assert_eq!(sanitize_path_segment(b"NUL.txt"), b"_NUL.txt");
+            assert_eq!(sanitize_path_segment(b"AUX"), b"_AUX");
+            assert_eq!(sanitize_path_segment(b"COM1"), b"_COM1");
+            assert_eq!(sanitize_path_segment(b"PRN.dat"), b"_PRN.dat");
+            assert_eq!(sanitize_path_segment(b"LPT1"), b"_LPT1");
+            assert_eq!(
+                sanitize_path_segment("Vidéo.2026.mkv".as_bytes()),
+                "Vidéo.2026.mkv".as_bytes()
+            );
+            assert_eq!(
+                sanitize_path_segment("Mädchen.mp4".as_bytes()),
+                "Mädchen.mp4".as_bytes()
+            );
+            assert_eq!(sanitize_path_segment(b"..."), b"");
+            assert_eq!(sanitize_path_segment(b".. "), b"");
+            assert_eq!(
+                sanitize_path_segment(b"prefix..middle...suffix"),
+                b"prefix_middle_suffix"
+            );
+            let dot_path1 = sanitize_path_segment(b".../");
+            assert!(!dot_path1.contains(&b'/'));
+            assert!(!dot_path1.windows(2).any(|w| w == b".."));
+            let dot_path2 = sanitize_path_segment(b"folder/...");
+            assert!(!dot_path2.contains(&b'/'));
+            assert!(!dot_path2.windows(2).any(|w| w == b".."));
+            assert_eq!(sanitize_path_segment(&vec![b'.'; 10_000]), b"");
+            assert_eq!(sanitize_path_segment(&vec![b'a'; 2000]).len(), 1024);
+            let mut split_utf8 = vec![b'a'; 1023];
+            split_utf8.extend_from_slice(b"\xC3\xA9tail");
+            let clean_split = sanitize_path_segment(&split_utf8);
+            assert_eq!(clean_split.len(), 1023);
+            assert_eq!(clean_split.last(), Some(&b'a'));
+            let mut intact_utf8 = vec![b'a'; 1022];
+            intact_utf8.extend_from_slice(b"\xC3\xA9tail");
+            let clean_intact = sanitize_path_segment(&intact_utf8);
+            assert_eq!(clean_intact.len(), 1024);
+            assert_eq!(&clean_intact[1022..], b"\xC3\xA9");
+            assert_eq!(sanitize_path_segment(b"C:\\Windows"), b"C__Windows");
+            assert_eq!(
+                sanitize_path_segment(b"\\\\server\\share"),
+                b"__server_share"
+            );
+
+            // 3. SanitizeRelativePathTest
+            let sep = PATH_SEPARATOR as char;
+            let srel = |s: &str| String::from_utf8(sanitize_relative_path(s.as_bytes())).unwrap();
+            assert_eq!(srel("Movies"), "Movies");
+            assert_eq!(srel("TV/HD"), format!("TV{sep}HD"));
+            assert_eq!(srel("TV / HD"), format!("TV{sep}HD"));
+            assert_eq!(srel("TV>HD"), "TV_HD");
+            assert_eq!(srel("TV > HD"), "TV _ HD");
+            assert_eq!(srel("TV\\Shows"), format!("TV{sep}Shows"));
+            assert_eq!(srel("TV/../../HD"), format!("TV{sep}HD"));
+            assert_eq!(srel("TV/./HD"), format!("TV{sep}HD"));
+            assert_eq!(srel("TV/.."), "TV");
+            assert_eq!(srel("TV/../../../../../etc"), format!("TV{sep}etc"));
+            assert_eq!(srel("../../Movies/4K"), format!("Movies{sep}4K"));
+            assert_eq!(srel("/var/www/"), format!("var{sep}www"));
+            assert_eq!(
+                srel("C:\\Movies\\SciFi"),
+                format!("C_{sep}Movies{sep}SciFi")
+            );
+            assert_eq!(srel("Séries/HD"), format!("Séries{sep}HD"));
+            assert_eq!(srel(".."), "");
+            assert_eq!(srel("../.."), "");
+            assert_eq!(srel(""), "");
+            assert_eq!(srel("myfolder/.../file"), format!("myfolder{sep}file"));
+            assert_eq!(srel("myfolder/.. /file"), format!("myfolder{sep}file"));
+            assert_eq!(srel(".../file"), "file");
+            assert_eq!(
+                srel("\\\\remote-server\\share\\data"),
+                format!("remote-server{sep}share{sep}data")
+            );
+            assert_eq!(
+                srel("//remote-server/share/data"),
+                format!("remote-server{sep}share{sep}data")
+            );
+            assert_eq!(
+                srel("C:\\Windows\\System32"),
+                format!("C_{sep}Windows{sep}System32")
+            );
+            assert_eq!(
+                srel("C:/Windows/System32"),
+                format!("C_{sep}Windows{sep}System32")
+            );
+            assert_eq!(srel("LPT1/subfolder"), format!("_LPT1{sep}subfolder"));
+            assert_eq!(
+                srel("movies/CON/item"),
+                format!("movies{sep}_CON{sep}item")
+            );
+
+            // Helper to parse inline NZB with given <head> meta content
+            let parse_head_nzb = |head_meta: &str| -> NzbFileParser {
+                let xml = format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+                     <!DOCTYPE nzb PUBLIC \"-//newzBin//DTD NZB 1.0//EN\" \"http://www.newzbin.com/DTD/nzb/nzb-1.0.dtd\">\n\
+                     <nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n\
+                     <head>\n{head_meta}\n</head>\n\
+                     <file poster=\"poster@test.com\" date=\"1335508618\" subject=\"&quot;testfile.mkv&quot; yEnc (1/1)\">\n\
+                     <groups><group>alt.binaries.test</group></groups>\n\
+                     <segments><segment bytes=\"100\" number=\"1\">test@msgid</segment></segments>\n\
+                     </file>\n</nzb>\n"
+                );
+                let mut p = NzbFileParser::new(b"/tmp/test.nzb");
+                let ret = p.parse_xml(xml.as_bytes(), || 1);
+                assert!(p.finalize(ret, b".nfo", ct));
+                p
+            };
+
+            // 4. NzbFileMetaParsingTest
+            let p = parse_head_nzb(
+                "<meta type=\"name\">My.Clean.Release.Name.S01E01 &amp; Special.Edition</meta>\n\
+                 <meta type=\"title\">My.Clean.Release.Name.S01E01.mkv</meta>\n\
+                 <meta type=\"category\">TV / HD</meta>\n\
+                 <meta type=\"password\">secret123</meta>",
+            );
+            assert_eq!(
+                p.meta_name.to_str().unwrap(),
+                "My.Clean.Release.Name.S01E01 & Special.Edition"
+            );
+            assert_eq!(
+                p.meta_title.to_str().unwrap(),
+                "My.Clean.Release.Name.S01E01.mkv"
+            );
+            assert_eq!(p.password.to_str().unwrap(), "secret123");
+            assert_eq!(p.category.to_str().unwrap(), "TV / HD");
+
+            // 5. NzbFileMetaTitleFallbackTest
+            let p = parse_head_nzb("<meta type=\"title\">Fallback.Release.Title.mkv</meta>");
+            assert_eq!(p.meta_name.to_str().unwrap(), "Fallback.Release.Title.mkv");
+            assert_eq!(p.meta_title.to_str().unwrap(), "Fallback.Release.Title.mkv");
+
+            // 6. NzbFileMetaPathValidationTest
+            let p = parse_head_nzb(
+                "<meta type=\"name\">../../../../test/folder/release</meta>\n\
+                 <meta type=\"category\">../../../../media/downloads</meta>",
+            );
+            let meta_name_str = p.meta_name.to_str().unwrap();
+            assert!(!meta_name_str.contains('/'));
+            assert!(!meta_name_str.contains('\\'));
+            assert!(!meta_name_str.contains(".."));
+            assert_eq!(
+                srel(p.category.to_str().unwrap()),
+                format!("media{sep}downloads")
+            );
+
+            // 7. NzbFileCategoryControlCharsTest
+            let p = parse_head_nzb("<meta type=\"category\">\r\n\t  Movies\r\n/\t4K  \r\n</meta>");
+            let cat_str = p.category.to_str().unwrap();
+            assert!(!cat_str.contains('\n'));
+            assert!(!cat_str.contains('\r'));
+            assert!(!cat_str.contains('\t'));
+            assert_eq!(srel(cat_str), format!("Movies{sep}4K"));
+
+            // 8. NzbFileSegmentNumbersTest
+            let seg_xml = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+                <nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n\
+                <file poster=\"p\" date=\"1335508618\" subject=\"&quot;a.mkv&quot; yEnc (1/4)\">\n\
+                <groups><group>alt.binaries.test</group></groups><segments>\n\
+                <segment bytes=\"100\" number=\"4\">d@x</segment>\n\
+                <segment bytes=\"100\" number=\"1\">a@x</segment>\n\
+                <segment bytes=\"100\" number=\"1\">a2@x</segment>\n\
+                <segment bytes=\"100\" number=\"2\">b@x</segment>\n\
+                </segments></file>\n\
+                <file poster=\"p\" date=\"1335508618\" subject=\"&quot;b.mkv&quot; yEnc (1/1)\">\n\
+                <groups><group>alt.binaries.test</group></groups><segments>\n\
+                <segment bytes=\"100\" number=\"2000000000\">z@x</segment>\n\
+                </segments></file>\n\
+                </nzb>\n";
+            let mut p = NzbFileParser::new(b"/tmp/seg.nzb");
+            let mut next_id = 1i32;
+            let ret = p.parse_xml(seg_xml, || {
+                let id = next_id;
+                next_id += 1;
+                id
+            });
+            assert!(p.finalize(ret, b".nfo", ct));
+            assert_eq!(p.files.len(), 2);
+            let first = p.files.iter().find(|f| f.total_articles == 4).unwrap();
+            let second = p.files.iter().find(|f| f.total_articles != 4).unwrap();
+            assert_eq!(first.article_msg_ids.len(), 3);
+            assert_eq!(first.article_msg_ids[0].as_bytes(), b"<a2@x>");
+            assert_eq!(first.article_msg_ids[1].as_bytes(), b"<b@x>");
+            assert_eq!(first.article_msg_ids[2].as_bytes(), b"<d@x>");
+            assert_eq!(first.missed_articles, 1);
+            assert_eq!(first.size, 400);
+            assert_eq!(first.missed_size, 100);
+            assert_eq!(second.article_msg_ids.len(), 1);
+            assert_eq!(second.total_articles, 2_000_000_000);
+
+            // 9. EmptyNzbNameFallbackTest
+            use crate::downloadinfo::{build_final_dir_name, make_nice_nzb_name};
+            assert_eq!(make_nice_nzb_name(b"   .nzb", true), b"nzb");
+            assert_eq!(make_nice_nzb_name(b".nzb", true), b"nzb");
+            assert_eq!(make_nice_nzb_name(b"...", true), b"nzb");
+            assert_eq!(make_nice_nzb_name(b"   ", true), b"nzb");
+            assert_eq!(make_nice_nzb_name(b"", true), b"nzb");
+            assert_eq!(make_nice_nzb_name(b"   .nzb", false), b".nzb");
+            assert_eq!(make_nice_nzb_name(b"My.Release.nzb", true), b"My.Release");
+            assert_eq!(
+                make_nice_nzb_name(b"My.Release.nzb", false),
+                b"My.Release.nzb"
+            );
+            assert_eq!(make_nice_nzb_name(b"My.Release", false), b"My.Release");
+            assert_eq!(
+                make_nice_nzb_name(b"My..Release...nzb", true),
+                b"My_Release"
+            );
+
+            // 10. BuildFinalDirNameUniqueIdTest
+            let final_dir1 = String::from_utf8(build_final_dir_name(
+                b"/downloads/dst",
+                b"",
+                b"",
+                false,
+                b"",
+                101,
+            ))
+            .unwrap();
+            let final_dir2 = String::from_utf8(build_final_dir_name(
+                b"/downloads/dst",
+                b"",
+                b"",
+                false,
+                b"",
+                102,
+            ))
+            .unwrap();
+            assert!(final_dir1.ends_with("nzb-101"));
+            assert!(final_dir2.ends_with("nzb-102"));
+            assert_ne!(final_dir1, final_dir2);
+
+            // 11. DeclaredPartsTest
+            assert_eq!(declared_parts(b"\"movie.mkv\" yEnc (1/3709)", ct), 3709);
+            assert_eq!(declared_parts(b"[01/12] - \"a.rar\" yEnc (1/50) ", ct), 50);
+            assert_eq!(declared_parts(b"[01/12] - \"a.rar\" yEnc", ct), 0);
+            assert_eq!(declared_parts(b"\"a.rar\" yEnc (1/50) 52428800", ct), 0);
+            assert_eq!(declared_parts(b"(/50)", ct), 0);
+            assert_eq!(declared_parts(b"(1/)", ct), 0);
+            assert_eq!(declared_parts(b"1/50)", ct), 0);
+            assert_eq!(declared_parts(b"x (1/99999999999)", ct), 0);
+            assert_eq!(declared_parts(b"", ct), 0);
+
+            // 12. PartlyListedFileTest
+            let partly_xml = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+                <nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n\
+                <file poster=\"p\" date=\"1\" subject=\"&quot;movie.mkv&quot; yEnc (1/300)\">\n\
+                <groups><group>alt.binaries.test</group></groups>\n<segments>\n\
+                <segment bytes=\"100\" number=\"1\">a1@test</segment>\n\
+                <segment bytes=\"100\" number=\"2\">a2@test</segment>\n\
+                <segment bytes=\"100\" number=\"4\">a4@test</segment>\n\
+                </segments>\n</file>\n</nzb>\n";
+            let mut p = NzbFileParser::new(b"/tmp/partly.nzb");
+            let ret = p.parse_xml(partly_xml, || 1);
+            assert!(p.finalize(ret, b".nfo", ct));
+            assert_eq!(p.files.len(), 1);
+            assert_eq!(p.files[0].total_articles, 300);
+            assert_eq!(p.files[0].missed_articles, 297);
+            assert_eq!(p.files[0].size, 30_000);
+            assert_eq!(p.files[0].missed_size, 29_700);
+            assert_eq!(p.failed_size, 29_700);
+
+            // 13. DeclaredTailGuardTest
+            let parse_tail = |name: &str, declared: i32, segments: &[(i32, i32)]| -> i32 {
+                let mut xml = format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+                     <nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n\
+                     <file poster=\"p\" date=\"1\" subject=\"&quot;{name}&quot; yEnc (1/{declared})\">\n\
+                     <groups><group>alt.binaries.test</group></groups>\n<segments>\n"
+                );
+                for &(number, bytes) in segments {
+                    xml.push_str(&format!(
+                        "<segment bytes=\"{bytes}\" number=\"{number}\">a{number}@test</segment>\n"
+                    ));
+                }
+                xml.push_str("</segments>\n</file>\n</nzb>\n");
+                let mut p = NzbFileParser::new(b"/tmp/tail.nzb");
+                let ret = p.parse_xml(xml.as_bytes(), || 1);
+                assert!(p.finalize(ret, b".nfo", ct));
+                p.files[0].total_articles
+            };
+            let mut nine: Vec<(i32, i32)> = (1..=9).map(|i| (i, 100)).collect();
+            assert_eq!(parse_tail("a.rar", 10, &nine), 9);
+            assert_eq!(parse_tail("a.rar", 100, &nine), 9);
+            assert_eq!(parse_tail("a.rar", 200, &nine), 200);
+            assert_eq!(parse_tail("a.vol00+10.par2", 200, &nine), 9);
+            nine.last_mut().unwrap().1 = 99;
+            assert_eq!(parse_tail("a.rar", 200, &nine), 9);
+            let mut varied = vec![(1, 1000), (2, 1003), (3, 998), (4, 995)];
+            assert_eq!(parse_tail("a.mkv", 300, &varied), 300);
+            varied.last_mut().unwrap().1 = 960;
+            assert_eq!(parse_tail("a.mkv", 300, &varied), 4);
+            assert_eq!(parse_tail("a.rar", 200, &[(1, 100)]), 1);
+
+            // 14. MessageIdControlCharsTest
+            let msgid_xml = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+                <nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n\
+                <file poster=\"p\" date=\"1\" subject=\"&quot;a.rar&quot; yEnc (1/1)\">\n\
+                <groups><group>alt.binaries.test</group></groups>\n<segments>\n\
+                <segment bytes=\"100\" number=\"1\">a&#13;&#10;QUIT&#13;&#10;b@test</segment>\n\
+                </segments>\n</file>\n</nzb>\n";
+            let mut p = NzbFileParser::new(b"/tmp/msgid.nzb");
+            let ret = p.parse_xml(msgid_xml, || 1);
+            assert!(p.finalize(ret, b".nfo", ct));
+            assert_eq!(p.files[0].article_msg_ids.len(), 1);
+            let id = p.files[0].article_msg_ids[0].to_str().unwrap();
+            assert!(!id.contains('\r') && !id.contains('\n'));
+            assert_eq!(id, "<a__QUIT__b@test>");
+
+            // 15. Utf16AndStreamingReaderTest
+            let encode_utf16 = |s: &str, le: bool, bom: bool| -> Vec<u8> {
+                let mut out = Vec::new();
+                if bom {
+                    out.extend_from_slice(if le { &[0xFF, 0xFE] } else { &[0xFE, 0xFF] });
+                }
+                for u in s.encode_utf16() {
+                    let bytes = if le { u.to_le_bytes() } else { u.to_be_bytes() };
+                    out.extend_from_slice(&bytes);
+                }
+                out
+            };
+
+            let mut utf16_doc = String::from(
+                "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n\
+                 <nzb xmlns=\"http://www.newzbin.com/DTD/2003/nzb\">\n\
+                 <head><meta type=\"password\">s\u{00E9}cret-\u{1F512}</meta></head>\n\
+                 <file poster=\"p\u{00FC}ster\" date=\"123\" subject=\"&quot;f\u{00FC}le-\u{1F680}.rar&quot; yEnc (1/120)\">\n\
+                 <groups><group>alt.binaries.utf16</group></groups>\n<segments>\n",
+            );
+            for i in 1..=120 {
+                utf16_doc.push_str(&format!(
+                    "<segment bytes=\"1000\" number=\"{i}\">seg-{i}-\u{1F680}@utf16.example</segment>\n"
+                ));
+            }
+            utf16_doc.push_str("</segments>\n</file>\n</nzb>\n");
+            assert!(utf16_doc.len() > XML_STREAM_CHUNK_SIZE);
+
+            for (le, bom, decl_enc) in [
+                (true, true, "UTF-16"),
+                (false, true, "UTF-16"),
+                (true, false, "UTF-16LE"),
+                (false, false, "UTF-16BE"),
+            ] {
+                let doc = utf16_doc.replace("encoding=\"UTF-16\"", &format!("encoding=\"{decl_enc}\""));
+                let bytes = encode_utf16(&doc, le, bom);
+                let tmp_path = std::env::temp_dir().join(format!(
+                    "nzbget_utf16_{}_{}_{}.nzb",
+                    std::process::id(),
+                    if le { "le" } else { "be" },
+                    if bom { "bom" } else { "nobom" }
+                ));
+                std::fs::write(&tmp_path, &bytes).unwrap();
+                let mut next_id = 0;
+                let mut p = NzbFileParser::new(tmp_path.to_string_lossy().as_bytes());
+                assert!(p.parse_file(
+                    b".nfo",
+                    ct,
+                    || {
+                        next_id += 1;
+                        next_id
+                    },
+                    |_, _| {},
+                    None::<fn(&[*const c_char], &mut [usize])>,
+                ));
+                let _ = std::fs::remove_file(&tmp_path);
+                assert_eq!(p.password.to_str().unwrap(), "s\u{00E9}cret-\u{1F512}");
+                assert_eq!(p.files.len(), 1);
+                assert_eq!(p.files[0].subject.to_str().unwrap(), "\"f\u{00FC}le-\u{1F680}.rar\" yEnc (1/120)");
+                assert_eq!(p.files[0].filename.to_str().unwrap(), "f\u{00FC}le-\u{1F680}.rar");
+                assert_eq!(p.files[0].total_articles, 120);
+                assert_eq!(p.files[0].size, 120_000);
+            }
+
+            // Invalid UTF-16 (odd byte count and unpaired surrogate) must fail cleanly
+            let mut truncated_utf16 = encode_utf16(&utf16_doc, true, true);
+            truncated_utf16.push(0x41);
+            let mut p_trunc = NzbFileParser::new(b"/tmp/trunc_utf16.nzb");
+            let ret_trunc = p_trunc.parse_xml(&truncated_utf16, || 1);
+            assert!(!p_trunc.finalize(ret_trunc, b".nfo", ct));
+            assert!(!p_trunc.messages.is_empty());
+
+            let mut unpaired_surrogate = vec![0xFF, 0xFE, b'<', 0x00, b'a', 0x00, b'>', 0x00];
+            unpaired_surrogate.extend_from_slice(&0xD800u16.to_le_bytes());
+            unpaired_surrogate.extend_from_slice(&[b'<', 0x00, b'/', 0x00, b'a', 0x00, b'>', 0x00]);
+            let mut p_surr = NzbFileParser::new(b"/tmp/surr_utf16.nzb");
+            let ret_surr = p_surr.parse_xml(&unpaired_surrogate, || 1);
+            assert!(!p_surr.finalize(ret_surr, b".nfo", ct));
+            assert!(!p_surr.messages.is_empty());
         });
     }
 }

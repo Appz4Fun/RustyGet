@@ -80,39 +80,53 @@ int NzbFile::DeclaredParts(const char* subject)
 
 bool NzbFile::Parse()
 {
-	xmlSAXHandler SAX_handler = {0};
-	SAX_handler.startElement = reinterpret_cast<startElementSAXFunc>(SAX_StartElement);
-	SAX_handler.endElement = reinterpret_cast<endElementSAXFunc>(SAX_EndElement);
-	SAX_handler.characters = reinterpret_cast<charactersSAXFunc>(SAX_characters);
-	SAX_handler.error = reinterpret_cast<errorSAXFunc>(SAX_error);
-	SAX_handler.getEntity = reinterpret_cast<getEntitySAXFunc>(SAX_getEntity);
-
 	std::unique_ptr<NzbgetRsNzbFileParser, void (*)(NzbgetRsNzbFileParser*)> parser(
 		nzbget_rs_nzbfile_parser_new(m_fileName.c_str()),
 		nzbget_rs_nzbfile_parser_free);
-	m_parser = parser.get();
-
-	int ret = xmlSAXUserParseFile(&SAX_handler, this, m_fileName.c_str());
 
 	NzbgetRsCtype ct = RsCtype();
 	NzbgetRsNzbFileSummary summary{};
-	bool ok = nzbget_rs_nzbfile_parser_finalize(
-		m_parser,
-		ret,
+	bool ok = nzbget_rs_nzbfile_parser_parse_file(
+		parser.get(),
 		g_Options ? g_Options->GetParIgnoreExt() : "",
 		&ct,
+		nullptr,
+		[](void*) -> int
+		{
+			try
+			{
+				FileInfo tmp;
+				return tmp.GetId();
+			}
+			catch (...)
+			{
+				return 0;
+			}
+		},
 		[](const char* subject, const char* filename)
 		{
-			detail("Extracting a filename from Subject %s", subject);
-			detail("Extracted Filename: %s", filename);
+			try
+			{
+				detail("Extracting a filename from Subject %s", subject);
+				detail("Extracted Filename: %s", filename);
+			}
+			catch (...)
+			{
+			}
 		},
 		[](const char* const* filenames, size_t* indices, size_t count)
 		{
-			std::sort(indices, indices + count,
-				[filenames](size_t a, size_t b)
-				{
-					return strcmp(filenames[a], filenames[b]) > 0;
-				});
+			try
+			{
+				std::sort(indices, indices + count,
+					[filenames](size_t a, size_t b)
+					{
+						return strcmp(filenames[a], filenames[b]) > 0;
+					});
+			}
+			catch (...)
+			{
+			}
 		},
 		&summary) != 0;
 
@@ -120,7 +134,7 @@ bool NzbFile::Parse()
 	{
 		int kind = 0;
 		const char* text = nullptr;
-		if (nzbget_rs_nzbfile_parser_get_message(m_parser, i, &kind, &text) && text)
+		if (nzbget_rs_nzbfile_parser_get_message(parser.get(), i, &kind, &text) && text)
 		{
 			m_nzbInfo->AddMessage(
 				kind == 2 ? Message::mkError : Message::mkWarning,
@@ -130,7 +144,6 @@ bool NzbFile::Parse()
 
 	if (!ok)
 	{
-		m_parser = nullptr;
 		return false;
 	}
 
@@ -153,7 +166,7 @@ bool NzbFile::Parse()
 	for (size_t i = 0; i < summary.kept_files_count; i++)
 	{
 		NzbgetRsNzbKeptFileView view{};
-		if (!nzbget_rs_nzbfile_parser_get_file(m_parser, i, &view))
+		if (!nzbget_rs_nzbfile_parser_get_file(parser.get(), i, &view))
 		{
 			continue;
 		}
@@ -214,52 +227,5 @@ bool NzbFile::Parse()
 		m_nzbInfo->SetMetaName(m_metaName);
 	}
 
-	m_parser = nullptr;
 	return true;
-}
-
-void NzbFile::SAX_StartElement(NzbFile* file, const char *name, const char **atts)
-{
-	nzbget_rs_nzbfile_parser_start_element(
-		file->m_parser,
-		name,
-		atts,
-		nullptr,
-		[](void*) -> int
-		{
-			FileInfo tmp;
-			return tmp.GetId();
-		});
-}
-
-void NzbFile::SAX_EndElement(NzbFile* file, const char *name)
-{
-	nzbget_rs_nzbfile_parser_end_element(file->m_parser, name);
-}
-
-void NzbFile::SAX_characters(NzbFile* file, const char * xmlstr, int len)
-{
-	nzbget_rs_nzbfile_parser_characters(file->m_parser, xmlstr, len);
-}
-
-void* NzbFile::SAX_getEntity(NzbFile* file, const char * name)
-{
-	xmlEntityPtr e = xmlGetPredefinedEntity(reinterpret_cast<const xmlChar*>(name));
-	if (!e)
-	{
-		nzbget_rs_nzbfile_parser_on_missing_entity(file->m_parser);
-	}
-	return e;
-}
-
-void NzbFile::SAX_error(NzbFile* file, const char *msg, ...)
-{
-	va_list argp;
-	va_start(argp, msg);
-	char errMsg[1024];
-	vsnprintf(errMsg, sizeof(errMsg), msg, argp);
-	errMsg[1024-1] = '\0';
-	va_end(argp);
-
-	nzbget_rs_nzbfile_parser_on_sax_error(file->m_parser, errMsg);
 }

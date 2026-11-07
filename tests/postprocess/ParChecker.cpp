@@ -21,7 +21,7 @@
 
 #include "nzbget.h"
 
-#include <boost/test/unit_test.hpp>
+#include "TestFramework.h"
 #include "ParParser.h"
 #include "Options.h"
 #include "ParChecker.h"

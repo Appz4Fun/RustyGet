@@ -1640,6 +1640,108 @@ int nzbget_rs_parchecker_smart_calc_range_crc(
     uint32_t* out_crc);
 int nzbget_rs_parchecker_classify_streambuf_line(const char* msg, size_t* out_offset);
 
+typedef struct NzbgetRsParRepairer NzbgetRsParRepairer;
+
+enum NzbgetRsParResult {
+    NZBGET_RS_PAR_RESULT_SUCCESS = 0,
+    NZBGET_RS_PAR_RESULT_REPAIR_POSSIBLE = 1,
+    NZBGET_RS_PAR_RESULT_REPAIR_NOT_POSSIBLE = 2,
+    NZBGET_RS_PAR_RESULT_INVALID_ARGS = 3,
+    NZBGET_RS_PAR_RESULT_INSUFFICIENT_CRITICAL_DATA = 4,
+    NZBGET_RS_PAR_RESULT_REPAIR_FAILED = 5,
+    NZBGET_RS_PAR_RESULT_FILE_IO_ERROR = 6,
+    NZBGET_RS_PAR_RESULT_LOGIC_ERROR = 7,
+    NZBGET_RS_PAR_RESULT_MEMORY_ERROR = 8,
+};
+
+typedef struct NzbgetRsParCallbacks {
+    void* ctx;
+    void (*on_filename)(void* ctx, const char* name);
+    void (*on_progress)(void* ctx, int progress);
+    void (*on_done)(void* ctx, const char* name, int available, int total, int target_exists, int is_complete);
+    int (*on_quick_verify)(
+        void* ctx,
+        const char* name,
+        uint32_t* out_crc,
+        const NzbgetRsParSegment** out_segs,
+        size_t* out_seg_len);
+    void (*on_quick_verified_inc)(void* ctx);
+} NzbgetRsParCallbacks;
+
+NzbgetRsParRepairer* nzbget_rs_par_repairer_new(
+    const char* base_dir,
+    int threads_to_use,
+    int mem_to_use_mb,
+    int par_quick,
+    int par_scan_full,
+    const char* par_ignore_ext);
+void nzbget_rs_par_repairer_free(NzbgetRsParRepairer* handle);
+void nzbget_rs_par_repairer_cancel(const NzbgetRsParRepairer* handle);
+int nzbget_rs_par_repairer_preprocess(
+    NzbgetRsParRepairer* handle,
+    const char* par_filename,
+    const NzbgetRsParCallbacks* cbs);
+int nzbget_rs_par_repairer_process(
+    NzbgetRsParRepairer* handle,
+    int do_repair,
+    const NzbgetRsParCallbacks* cbs);
+int nzbget_rs_par_repairer_load_extra_par2_file(
+    NzbgetRsParRepairer* handle,
+    const char* path,
+    const NzbgetRsParCallbacks* cbs);
+int nzbget_rs_par_repairer_verify_extra_file(
+    NzbgetRsParRepairer* handle,
+    const char* path,
+    int is_split_fragment,
+    const NzbgetRsParCallbacks* cbs);
+uint32_t nzbget_rs_par_repairer_missing_file_count(const NzbgetRsParRepairer* handle);
+uint32_t nzbget_rs_par_repairer_damaged_file_count(const NzbgetRsParRepairer* handle);
+uint32_t nzbget_rs_par_repairer_missing_block_count(const NzbgetRsParRepairer* handle);
+uint32_t nzbget_rs_par_repairer_recovery_block_count(const NzbgetRsParRepairer* handle);
+int64_t nzbget_rs_par_repairer_block_size(const NzbgetRsParRepairer* handle);
+NzbgetRsBuf nzbget_rs_par_repairer_creator(const NzbgetRsParRepairer* handle);
+size_t nzbget_rs_par_repairer_source_file_count(const NzbgetRsParRepairer* handle);
+int nzbget_rs_par_repairer_source_file_info(
+    const NzbgetRsParRepairer* handle,
+    size_t idx,
+    NzbgetRsBuf* out_target_filename,
+    NzbgetRsBuf* out_target_path,
+    int* out_target_exists,
+    int* out_is_complete_target,
+    uint32_t* out_block_count,
+    uint32_t* out_available_blocks);
+size_t nzbget_rs_par_repairer_leftover_count(const NzbgetRsParRepairer* handle);
+NzbgetRsBuf nzbget_rs_par_repairer_leftover_path(const NzbgetRsParRepairer* handle, size_t idx);
+
+int nzbget_rs_streaming_par_has_session(int nzb_id);
+int nzbget_rs_streaming_par_start(int nzb_id, const char* par2_path, const char* base_dir);
+int nzbget_rs_streaming_par_register_queued_volume(
+    int nzb_id, uint64_t volume_id, int blocks, int paused);
+int nzbget_rs_streaming_par_on_article_finished_by_name(
+    int nzb_id,
+    const char* name,
+    uint64_t offset,
+    uint64_t size,
+    uint32_t crc32,
+    const uint8_t* bytes,
+    size_t bytes_len);
+int nzbget_rs_streaming_par_on_article_failed_permanently_by_name(
+    int nzb_id,
+    const char* name,
+    uint64_t offset,
+    uint64_t size);
+int nzbget_rs_streaming_par_on_recovery_volume_arrived(
+    int nzb_id,
+    const char* path,
+    uint64_t queued_id,
+    int has_queued_id);
+int64_t nzbget_rs_streaming_par_blocks_needed_now(int nzb_id);
+size_t nzbget_rs_streaming_par_take_unpause_ids(
+    int nzb_id,
+    uint64_t* out_ids,
+    size_t max_ids);
+void nzbget_rs_streaming_par_forget(int nzb_id);
+
 int nzbget_rs_unpack_detect_rar_signature(const uint8_t* sig_bytes, size_t sig_len);
 int nzbget_rs_unpack_check_joinable_fragments(
     int count, int min_seg, int max_seg, int dif_size_min, int par_success);

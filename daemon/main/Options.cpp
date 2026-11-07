@@ -30,6 +30,14 @@
 
 const char* PossibleConfigLocations[] =
 	{
+		"~/.rustyget",
+		"~/.config/rustyget.conf",
+		"~/.config/rustyget/rustyget.conf",
+		"/etc/rustyget.conf",
+		"/usr/etc/rustyget.conf",
+		"/usr/local/etc/rustyget.conf",
+		"/opt/etc/rustyget.conf",
+		"~/usr/etc/rustyget.conf",
 		"~/.nzbget",
 		"~/.config/nzbget.conf",
 		"~/.config/nzbget/nzbget.conf",

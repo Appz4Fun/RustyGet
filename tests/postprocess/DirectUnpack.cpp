@@ -21,7 +21,7 @@
 
 #include "nzbget.h"
 
-#include <boost/test/unit_test.hpp>
+#include "TestFramework.h"
 #include "DirectUnpack.h"
 #include "Log.h"
 #include "Options.h"

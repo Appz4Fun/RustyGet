@@ -10843,6 +10843,393 @@ pub unsafe extern "C" fn nzbget_rs_parchecker_classify_streambuf_line(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_new(
+    base_dir: *const c_char,
+    threads_to_use: c_int,
+    mem_to_use_mb: c_int,
+    par_quick: c_int,
+    par_scan_full: c_int,
+    par_ignore_ext: *const c_char,
+) -> *mut crate::parchecker::RustParRepairer {
+    let dir_str = if base_dir.is_null() {
+        ""
+    } else {
+        CStr::from_ptr(base_dir).to_str().unwrap_or("")
+    };
+    let ignore_bytes = if par_ignore_ext.is_null() {
+        Vec::new()
+    } else {
+        CStr::from_ptr(par_ignore_ext).to_bytes().to_vec()
+    };
+    Box::into_raw(Box::new(crate::parchecker::RustParRepairer::new(
+        std::path::PathBuf::from(dir_str),
+        threads_to_use,
+        mem_to_use_mb,
+        par_quick != 0,
+        par_scan_full != 0,
+        ignore_bytes,
+    )))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_free(
+    handle: *mut crate::parchecker::RustParRepairer,
+) {
+    if !handle.is_null() {
+        drop(Box::from_raw(handle));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_cancel(
+    handle: *const crate::parchecker::RustParRepairer,
+) {
+    if let Some(r) = handle.as_ref() {
+        r.cancel();
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_preprocess(
+    handle: *mut crate::parchecker::RustParRepairer,
+    par_filename: *const c_char,
+    cbs: *const crate::parchecker::NzbgetRsParCallbacks,
+) -> c_int {
+    let Some(r) = handle.as_mut() else {
+        return crate::parchecker::PAR_RESULT_LOGIC_ERROR;
+    };
+    if par_filename.is_null() {
+        return crate::parchecker::PAR_RESULT_INVALID_ARGS;
+    }
+    let pf_str = CStr::from_ptr(par_filename).to_str().unwrap_or("");
+    r.preprocess(std::path::Path::new(pf_str), cbs.as_ref())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_process(
+    handle: *mut crate::parchecker::RustParRepairer,
+    do_repair: c_int,
+    cbs: *const crate::parchecker::NzbgetRsParCallbacks,
+) -> c_int {
+    let Some(r) = handle.as_mut() else {
+        return crate::parchecker::PAR_RESULT_LOGIC_ERROR;
+    };
+    let empty_cbs = crate::parchecker::NzbgetRsParCallbacks {
+        ctx: std::ptr::null_mut(),
+        on_filename: None,
+        on_progress: None,
+        on_done: None,
+        on_quick_verify: None,
+        on_quick_verified_inc: None,
+    };
+    let cbs_ref = cbs.as_ref().unwrap_or(&empty_cbs);
+    r.process(do_repair != 0, cbs_ref)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_load_extra_par2_file(
+    handle: *mut crate::parchecker::RustParRepairer,
+    path: *const c_char,
+    cbs: *const crate::parchecker::NzbgetRsParCallbacks,
+) -> c_int {
+    let Some(r) = handle.as_mut() else {
+        return 0;
+    };
+    if path.is_null() {
+        return 0;
+    }
+    let p_str = CStr::from_ptr(path).to_str().unwrap_or("");
+    c_int::from(r.load_extra_par2_file(std::path::Path::new(p_str), cbs.as_ref()))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_verify_extra_file(
+    handle: *mut crate::parchecker::RustParRepairer,
+    path: *const c_char,
+    is_split_fragment: c_int,
+    cbs: *const crate::parchecker::NzbgetRsParCallbacks,
+) -> c_int {
+    let Some(r) = handle.as_mut() else {
+        return 0;
+    };
+    if path.is_null() {
+        return 0;
+    }
+    let empty_cbs = crate::parchecker::NzbgetRsParCallbacks {
+        ctx: std::ptr::null_mut(),
+        on_filename: None,
+        on_progress: None,
+        on_done: None,
+        on_quick_verify: None,
+        on_quick_verified_inc: None,
+    };
+    let cbs_ref = cbs.as_ref().unwrap_or(&empty_cbs);
+    let p_str = CStr::from_ptr(path).to_str().unwrap_or("");
+    c_int::from(r.verify_extra_file(
+        std::path::Path::new(p_str),
+        is_split_fragment != 0,
+        cbs_ref,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_missing_file_count(
+    handle: *const crate::parchecker::RustParRepairer,
+) -> u32 {
+    handle.as_ref().map_or(0, |r| r.missing_file_count())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_damaged_file_count(
+    handle: *const crate::parchecker::RustParRepairer,
+) -> u32 {
+    handle.as_ref().map_or(0, |r| r.damaged_file_count())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_missing_block_count(
+    handle: *const crate::parchecker::RustParRepairer,
+) -> u32 {
+    handle.as_ref().map_or(0, |r| r.missing_block_count())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_recovery_block_count(
+    handle: *const crate::parchecker::RustParRepairer,
+) -> u32 {
+    handle.as_ref().map_or(0, |r| r.recovery_block_count())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_block_size(
+    handle: *const crate::parchecker::RustParRepairer,
+) -> i64 {
+    handle.as_ref().map_or(0, |r| r.block_size())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_creator(
+    handle: *const crate::parchecker::RustParRepairer,
+) -> RsBuf {
+    let Some(r) = handle.as_ref() else {
+        return into_buf(Vec::new());
+    };
+    into_buf(r.creator().into_bytes())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_source_file_count(
+    handle: *const crate::parchecker::RustParRepairer,
+) -> usize {
+    handle.as_ref().map_or(0, |r| r.source_files().len())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_source_file_info(
+    handle: *const crate::parchecker::RustParRepairer,
+    idx: usize,
+    out_target_filename: *mut RsBuf,
+    out_target_path: *mut RsBuf,
+    out_target_exists: *mut c_int,
+    out_is_complete_target: *mut c_int,
+    out_block_count: *mut u32,
+    out_available_blocks: *mut u32,
+) -> c_int {
+    let Some(r) = handle.as_ref() else {
+        return 0;
+    };
+    let Some(sf) = r.source_files().get(idx) else {
+        return 0;
+    };
+    if !out_target_filename.is_null() {
+        *out_target_filename = into_buf(sf.target_filename.as_bytes().to_vec());
+    }
+    if !out_target_path.is_null() {
+        *out_target_path = into_buf(sf.target_path.to_string_lossy().as_bytes().to_vec());
+    }
+    if !out_target_exists.is_null() {
+        *out_target_exists = c_int::from(sf.target_exists);
+    }
+    if !out_is_complete_target.is_null() {
+        let is_complete_target = sf.status == crate::parchecker::FileStatus::Complete
+            && sf.complete_file.as_ref() == Some(&sf.target_path);
+        *out_is_complete_target = c_int::from(is_complete_target);
+    }
+    if !out_block_count.is_null() {
+        *out_block_count = sf.block_count;
+    }
+    if !out_available_blocks.is_null() {
+        *out_available_blocks = sf.available_blocks;
+    }
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_leftover_count(
+    handle: *const crate::parchecker::RustParRepairer,
+) -> usize {
+    handle.as_ref().map_or(0, |r| r.leftovers().len())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_leftover_path(
+    handle: *const crate::parchecker::RustParRepairer,
+    idx: usize,
+) -> RsBuf {
+    let Some(r) = handle.as_ref() else {
+        return into_buf(Vec::new());
+    };
+    let Some(p) = r.leftovers().get(idx) else {
+        return into_buf(Vec::new());
+    };
+    into_buf(p.to_string_lossy().as_bytes().to_vec())
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_streaming_par_has_session(nzb_id: c_int) -> c_int {
+    c_int::from(crate::parchecker::streaming_session_has_session(nzb_id))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_streaming_par_start(
+    nzb_id: c_int,
+    par2_path: *const c_char,
+    base_dir: *const c_char,
+) -> c_int {
+    if par2_path.is_null() || base_dir.is_null() {
+        return 0;
+    }
+    let Some(p_str) = CStr::from_ptr(par2_path).to_str().ok() else {
+        return 0;
+    };
+    let Some(d_str) = CStr::from_ptr(base_dir).to_str().ok() else {
+        return 0;
+    };
+    c_int::from(
+        crate::parchecker::streaming_session_start(
+            nzb_id,
+            std::path::Path::new(p_str),
+            std::path::Path::new(d_str),
+            crate::parchecker::SessionOptions::default(),
+        )
+        .is_ok(),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_streaming_par_register_queued_volume(
+    nzb_id: c_int,
+    volume_id: u64,
+    blocks: c_int,
+    paused: c_int,
+) -> c_int {
+    c_int::from(crate::parchecker::streaming_session_register_queued_volume(
+        nzb_id,
+        volume_id,
+        blocks,
+        paused != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_streaming_par_on_article_finished_by_name(
+    nzb_id: c_int,
+    name: *const c_char,
+    offset: u64,
+    size: u64,
+    crc32: u32,
+    bytes: *const u8,
+    bytes_len: usize,
+) -> c_int {
+    if name.is_null() {
+        return 0;
+    }
+    let name_bytes = CStr::from_ptr(name).to_bytes();
+    let payload = if bytes.is_null() || bytes_len == 0 {
+        None
+    } else {
+        Some(std::slice::from_raw_parts(bytes, bytes_len))
+    };
+    c_int::from(
+        crate::parchecker::streaming_session_on_article_finished_by_name(
+            nzb_id, name_bytes, offset, size, crc32, payload,
+        )
+        .is_some_and(|r| r.is_ok()),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_streaming_par_on_article_failed_permanently_by_name(
+    nzb_id: c_int,
+    name: *const c_char,
+    offset: u64,
+    size: u64,
+) -> c_int {
+    if name.is_null() {
+        return 0;
+    }
+    let name_bytes = CStr::from_ptr(name).to_bytes();
+    c_int::from(
+        crate::parchecker::streaming_session_on_article_failed_permanently_by_name(
+            nzb_id, name_bytes, offset, size,
+        )
+        .is_some_and(|r| r.is_ok()),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_streaming_par_on_recovery_volume_arrived(
+    nzb_id: c_int,
+    path: *const c_char,
+    queued_id: u64,
+    has_queued_id: c_int,
+) -> c_int {
+    if path.is_null() {
+        return 0;
+    }
+    let Some(p_str) = CStr::from_ptr(path).to_str().ok() else {
+        return 0;
+    };
+    let qid = if has_queued_id != 0 {
+        Some(queued_id)
+    } else {
+        None
+    };
+    c_int::from(
+        crate::parchecker::streaming_session_on_recovery_volume_arrived(
+            nzb_id,
+            std::path::Path::new(p_str),
+            qid,
+        )
+        .is_some_and(|r| r.is_ok()),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_streaming_par_blocks_needed_now(nzb_id: c_int) -> i64 {
+    crate::parchecker::streaming_session_blocks_needed_now(nzb_id).unwrap_or(0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_streaming_par_take_unpause_ids(
+    nzb_id: c_int,
+    out_ids: *mut u64,
+    max_ids: usize,
+) -> usize {
+    let ids = crate::parchecker::streaming_session_take_unpause_ids(nzb_id);
+    let n = ids.len().min(max_ids);
+    if !out_ids.is_null() && n > 0 {
+        std::ptr::copy_nonoverlapping(ids.as_ptr(), out_ids, n);
+    }
+    n
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_streaming_par_forget(nzb_id: c_int) {
+    crate::parchecker::streaming_session_forget(nzb_id);
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_unpack_detect_rar_signature(
     sig_bytes: *const u8,
     sig_len: usize,

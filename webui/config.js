@@ -80,12 +80,9 @@ var Options = (new function($)
 			RPC.next();
 		});
 
-		// build list of post-processing parameters
-		RPC.call('loadextensions', [false], function(data)
-		{
-			_this.postParamConfig = initPostParamConfig(data);
-			data.forEach(function(ext) { if (ext.Name) I18n.loadExtensionTranslations(ext.Name); });
-		});
+		// build list of post-processing parameters (extensions disabled in RustyGet)
+		_this.postParamConfig = initPostParamConfig([]);
+		RPC.next();
 	}
 
 	this.setOnPageRenderedCallback = function(callback) {
@@ -363,7 +360,7 @@ var Options = (new function($)
 	function serverTemplateLoaded(data)
 	{
 		Options.serverTemplateData = data;
-		Options.loadExtensions();
+		Options.complete();
 	}
 
 	function extensionsLoaded(data) 
@@ -4148,7 +4145,8 @@ var ExtensionManager = (new function($)
 
 	this.setExtensions = function(exts)
 	{
-		var value = Config.findOptionByName(extensionsId).value;
+		var extOpt = Config.findOptionByName(extensionsId);
+		var value = extOpt ? extOpt.value : '';
 		var activeExtensions = splitString(value);
 		installedExtensions = exts.map(function(ext) 
 		{
@@ -4986,7 +4984,8 @@ var ExtensionManager = (new function($)
 
 	function sortExtensions()
 	{
-		var order = Config.getOptionValue(Config.findOptionByName(scriptOrderId));
+		var orderOpt = Config.findOptionByName(scriptOrderId);
+		var order = orderOpt ? Config.getOptionValue(orderOpt) : '';
 		if (order)
 		{
 			sortExtensionsByOrder(installedExtensions, splitString(order));

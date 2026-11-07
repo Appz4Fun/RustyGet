@@ -62,6 +62,42 @@ void ParDamage::FileCompleted(NzbInfo* nzbInfo, FileInfo* fileInfo, const std::s
 		filename.c_str(),
 		holes.empty() ? nullptr : reinterpret_cast<const NzbgetRsByteRange*>(holes.data()),
 		holes.size());
+
+	if (isPar && failedPlusMissed == 0 && !filename.empty())
+	{
+		if (nzbget_rs_streaming_par_has_session(nzbInfo->GetId()) == 0)
+		{
+			if (nzbget_rs_streaming_par_start(nzbInfo->GetId(), filename.c_str(), nzbInfo->GetDestDir()) != 0)
+			{
+				for (FileInfo* qFile : nzbInfo->GetFileList())
+				{
+					if (!qFile || qFile == fileInfo || qFile->GetDeleted())
+					{
+						continue;
+					}
+					int baseLen = 0;
+					int blocks = 0;
+					if (ParParser::ParseParFilename(qFile->GetFilename(), qFile->GetFilenameConfirmed(), &baseLen, &blocks) &&
+						blocks != 0)
+					{
+						nzbget_rs_streaming_par_register_queued_volume(
+							nzbInfo->GetId(),
+							static_cast<uint64_t>(qFile->GetId()),
+							blocks > 0 ? blocks : 1,
+							qFile->GetPaused() ? 1 : 0);
+					}
+				}
+			}
+		}
+		else
+		{
+			nzbget_rs_streaming_par_on_recovery_volume_arrived(
+				nzbInfo->GetId(),
+				filename.c_str(),
+				static_cast<uint64_t>(fileInfo->GetId()),
+				1);
+		}
+	}
 }
 
 int ParDamage::BlocksTouched(const StreamRangeList& holes, uint64 blockSize)
@@ -137,4 +173,5 @@ bool ParDamage::FirstReport(int nzbId)
 void ParDamage::Forget(int nzbId)
 {
 	nzbget_rs_par_damage_forget(nzbId);
+	nzbget_rs_streaming_par_forget(nzbId);
 }

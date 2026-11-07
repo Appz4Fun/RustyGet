@@ -113,10 +113,7 @@
 #include <span>
 #include <regex>
 
-#include <boost/asio.hpp>
-#include <boost/json.hpp>
 #ifndef DISABLE_TLS
-#include <boost/asio/ssl.hpp>
 #include "OpenSSL.h"
 #endif
 

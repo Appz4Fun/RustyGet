@@ -19,8 +19,7 @@
 
 #include "nzbget.h"
 
-#define BOOST_TEST_MODULE NZBGetTests
-#include <boost/test/included/unit_test.hpp>
+#include "TestFramework.h"
 
 #include "ServerPool.h"
 #include "Log.h"
@@ -111,3 +110,8 @@ struct InitGlobals
 };
 
 BOOST_GLOBAL_FIXTURE(InitGlobals);
+
+int main(int argc, char* argv[])
+{
+	return TestFramework::RunAll(argc, argv);
+}

@@ -1,7 +1,3 @@
-if(NOT TARGET Boost::unit_test_framework)
-	find_package(Boost COMPONENTS unit_test_framework REQUIRED)
-endif()
-
 set(TESTS_TARGET nzbget_tests)
 set(TESTS_SRC ${CMAKE_SOURCE_DIR}/tests/main.cpp)
 
@@ -9,11 +5,12 @@ include(postprocess/postprocess.cmake)
 list(APPEND TESTS_SRC ${CMAKE_CURRENT_SOURCE_DIR}/connect/TlsCipher.cpp)
 
 add_executable(${TESTS_TARGET} ${TESTS_SRC})
+target_include_directories(${TESTS_TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 if(EXTERNAL_DEPS)
 	add_dependencies(${TESTS_TARGET} ${EXTERNAL_DEPS})
 endif()
 
-target_link_libraries(${TESTS_TARGET} PRIVATE libnzbget Boost::unit_test_framework)
+target_link_libraries(${TESTS_TARGET} PRIVATE libnzbget)
 
 apply_compiler_flags(${TESTS_TARGET})
 apply_sanitizers(${TESTS_TARGET})

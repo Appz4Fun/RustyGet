@@ -46,12 +46,14 @@ namespace System
 
 	void SystemInfo::InitLibsInfo()
 	{
-		m_libraries.reserve(9);
+		m_libraries.reserve(11);
 		m_libraries.push_back({ "zipfast", "0.1.0" });
 		m_libraries.push_back({ "zipview", "0.1.0" });
+		m_libraries.push_back({ "par-rs", "0.2.0" });
 		m_libraries.push_back({ "nntmux-yenc", "0.1.0 (SIMD)" });
-		m_libraries.push_back({ "par-rs", "0.1.0 (in integration)" });
 		m_libraries.push_back({ "flate2 (zlib-rs)", "1.1.11" });
+		m_libraries.push_back({ "zstd", "0.14.0" });
+		m_libraries.push_back({ "bzip2", "0.6.1" });
 		m_libraries.push_back({ "crc32fast", "1.5.2" });
 		m_libraries.push_back({ "quick-xml", "0.41.0" });
 		m_libraries.push_back({ "md-5", "0.11.0" });
@@ -91,8 +93,8 @@ namespace System
 	std::vector<Tool> SystemInfo::GetTools() const
 	{
 		std::vector<Tool> tools{
-			{ "UnRAR / 7-Zip / Archive Engine", "Built-in", "zipfast + native Rust decoders" },
-			{ "Archive Inspector", "Built-in", "zipview (in-process)" },
+			{ "UnRAR / 7-Zip / Archive Engine", "Built-in", "zipfast + zipview + native Rust decoders" },
+			{ "Parity Verification & Repair", "Built-in", "par-rs (streaming + post-download)" },
 			{ "Extended Unpacker & Permission Fixer", "Built-in", "First-class native pipeline" },
 			{ "yEnc SIMD Decoder", "Built-in", "nntmux-yenc" },
 		};

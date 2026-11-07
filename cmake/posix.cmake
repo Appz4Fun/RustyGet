@@ -21,8 +21,6 @@ message(STATUS "  DISABLE GZIP:      ${DISABLE_GZIP}")
 message(STATUS "  DISABLE PARCHECK:  ${DISABLE_PARCHECK}")
 message(STATUS "  USE SANITIZERS:    ${USE_SANITIZERS}")
 
-set(BOOST_NEEDED_COMPONENTS json)
-
 if(APPLE)
 	# On macOS Cmake, when cross-compiling, sometimes CMAKE_SYSTEM_PROCESSOR wrongfully stays
 	# the same as CMAKE_HOST_SYSTEM_PROCESSOR regardless the target CPU.
@@ -68,7 +66,6 @@ else()
 	if(NOT DISABLE_TLS)
 		include(${CMAKE_SOURCE_DIR}/cmake/openssl.cmake)
 	endif()
-	include(${CMAKE_SOURCE_DIR}/cmake/boost.cmake)
 
 	find_package(Threads REQUIRED)
 
@@ -81,18 +78,11 @@ else()
 			set(INCLUDES ${INCLUDES} ${OPENSSL_INCLUDE_DIR})
 		endif()
 	endif()
-
-	set(LIBS ${LIBS} Boost::boost)
 endif()
 
 include(${CMAKE_SOURCE_DIR}/lib/sources.cmake)
 
 include(${CMAKE_SOURCE_DIR}/cmake/rust.cmake)
-
-if(NOT DISABLE_PARCHECK)
-	include(${CMAKE_SOURCE_DIR}/cmake/par2-turbo.cmake)
-	set(LIBS ${LIBS} par2-turbo::par2-turbo)
-endif()
 
 check_include_files(regex.h HAVE_SYSTEM_REGEX_H)
 

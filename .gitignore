@@ -23,59 +23,11 @@
 *.exe
 *.out
 
-# GNU Autotools
-.deps/
-config.h
-config.h.in~
-configure
-configure~
-config.log
-config.status
-Makefile
-Makefile.in
-aclocal.m4
-posix/config.guess
-posix/config.sub
-posix/depcomp
-posix/install-sh
-posix/missing
-posix/compile
-stamp-h1
-autom4te.cache/
-.dirstamp
-*.o-*
-
-# Visual Studio User-specific files
-*.suo
-*.user
-*.userosscache
-*.sln.docstates
-.vs/
-ipch/
-*.aps
-*.ncb
-*.opensdf
-*.sdf
-*.cachefile
-*.ilk
-*.pch
-*.pdb
-*.pgc
-*.pgd
-*.rsp
-*.sbr
-*.vspscc
-*.vssscc
-*.pidb
-*.svclog
-*.scc
-*.sln
-.vscode/
-
 # macOS
 .DS_Store
 
-# NZBGet specific
+# RustyGet specific
+rustyget
 nzbget
 build
 *.temp

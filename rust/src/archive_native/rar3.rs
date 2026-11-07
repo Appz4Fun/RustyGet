@@ -179,7 +179,7 @@ impl Rar29Decoder {
             tables_left: 0,
         };
         let init_tables = self.saved_tables.take();
-        let res = run_member(&mut st, init_tables, goal, goal, &mut self.window);
+        let res = run_member(&mut st, init_tables, usize::MAX, goal, &mut self.window);
         self.old_table = st.old_table;
         self.reps = st.reps;
         self.last_len = st.last_len;
@@ -266,6 +266,25 @@ pub fn rar29(data: &[u8], size: Option<u64>, limit: usize, complete: bool) -> (V
     (out, end)
 }
 
+fn finish_member_tables(st: &State<'_>, tables: Option<Tables>) -> Option<Option<Tables>> {
+    if let Some(lz) = &tables {
+        let mut peek = Bits {
+            data: st.bits.data,
+            addr: st.bits.addr,
+            bit: st.bits.bit,
+        };
+        if !peek.past_end() && usize::from(lz.ld.decode(&mut peek)) == 256 {
+            let field = peek.peek16();
+            if field & 0x8000 == 0 {
+                let new_table = (field & 0x4000) != 0;
+                return if new_table { None } else { Some(tables) };
+            }
+            return None;
+        }
+    }
+    Some(tables)
+}
+
 /// Decodes to `size` or `limit`, and when the limit falls inside a filter's block, on to the block's end, soo
 /// the filter can run on all of it.
 fn run_member(
@@ -286,29 +305,8 @@ fn run_member(
         None => read_tables(st)?,
     };
     loop {
-        if out.len() >= target {
-            return Ok(Some(tables));
-        }
-        if out.len() >= goal {
-            // kept as filters come, not scanned for each byte: thousands of filters would make that slow
-            if out.len() >= st.filters.reach {
-                if let Some(lz) = &tables {
-                    let mut peek = Bits {
-                        data: st.bits.data,
-                        addr: st.bits.addr,
-                        bit: st.bits.bit,
-                    };
-                    if !peek.past_end() && usize::from(lz.ld.decode(&mut peek)) == 256 {
-                        let field = peek.peek16();
-                        if field & 0x8000 == 0 {
-                            let new_table = (field & 0x4000) != 0;
-                            return Ok(if new_table { None } else { Some(tables) });
-                        }
-                        return Ok(None);
-                    }
-                }
-                return Ok(Some(tables));
-            }
+        if out.len() >= target || (out.len() >= goal && out.len() >= st.filters.reach) {
+            return Ok(finish_member_tables(st, tables));
         }
         if st.bits.addr > st.safe || st.bits.past_end() {
             return Err(Stop::Cut);

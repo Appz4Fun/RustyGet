@@ -641,6 +641,7 @@ where
         std::collections::VecDeque::new();
     let mut summary = zipfast::extract::Summary::default();
     let mut cur_vol = archive_path.to_path_buf();
+    let mut reached_final_volume = false;
 
     for _ in 0..4096 {
         let vol_name = cur_vol
@@ -679,6 +680,7 @@ where
                 log_cb(1, &msg);
                 return Err(msg);
             }
+            reached_final_volume = true;
             break;
         };
         if !next_vol.exists() {
@@ -697,10 +699,17 @@ where
                     return Err(msg);
                 }
             } else {
+                reached_final_volume = true;
                 break;
             }
         }
         cur_vol = next_vol;
+    }
+
+    if !reached_final_volume {
+        let msg = "Unrar: Archive exceeds maximum volume count".to_string();
+        log_cb(1, &msg);
+        return Err(msg);
     }
 
     process_ready_rar4_chunks(

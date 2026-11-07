@@ -128,7 +128,7 @@ Options::Options(const char* exeName, const char* configFilename, bool noConfig,
 
 Options::Options(CmdOptList* commandLineOptions, Extender* extender)
 {
-	Init("nzbget/nzbget", nullptr, true, commandLineOptions, true, extender);
+	Init("rustyget/rustyget", nullptr, true, commandLineOptions, true, extender);
 }
 
 void Options::Init(const char* exeName, const char* configFilename, bool noConfig,

@@ -3352,7 +3352,7 @@ var ConfigBackupRestore = (new function($)
 		var dt = new Date();
 		var datestr = dt.getFullYear() + pad(dt.getMonth() + 1) + pad(dt.getDate()) + '-' + pad(dt.getHours()) + pad(dt.getMinutes()) + pad(dt.getSeconds());
 
-		var filename = 'nzbget-' + datestr + '.conf';
+		var filename = 'rustyget-' + datestr + '.conf';
 
 		if (!Util.saveToLocalFile(settings, "text/plain;charset=utf-8", filename))
 		{

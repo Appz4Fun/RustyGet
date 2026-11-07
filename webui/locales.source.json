@@ -704,7 +704,7 @@
   },
   "stat_nzbget_version": {
     "message": "RustyGet version",
-    "description": "Label for the NZBGet version stat"
+    "description": "Label for the RustyGet version stat"
   },
   "stat_uptime": {
     "message": "Uptime",
@@ -2996,15 +2996,15 @@
   },
   "config_system_reload_desc": {
     "message": "If the configuration file was edited externally (in a text editor) or you have not reloaded RustyGet directly after saving the changes in web-interface you can do this here.",
-    "description": "Description text explaining when and why to reload NZBGet configuration."
+    "description": "Description text explaining when and why to reload RustyGet configuration."
   },
   "config_system_shutdown_label": {
     "message": "Shutdown RustyGet",
-    "description": "Label for the configuration option to shut down NZBGet."
+    "description": "Label for the configuration option to shut down RustyGet."
   },
   "config_system_shutdown_desc": {
     "message": "There is no way to start the program again from web-interface. Make sure you know how to do this.",
-    "description": "Warning description text explaining the consequences of shutting down NZBGet from the UI."
+    "description": "Warning description text explaining the consequences of shutting down RustyGet from the UI."
   },
   "config_system_backup_label": {
     "message": "Backup Settings",
@@ -3024,11 +3024,11 @@
   },
   "config_system_update_label": {
     "message": "Update RustyGet",
-    "description": "Label for the configuration option to update NZBGet."
+    "description": "Label for the configuration option to update RustyGet."
   },
   "config_system_update_desc": {
     "message": "Should a new version be found you'll be asked to install it.",
-    "description": "Description text explaining the update NZBGet feature."
+    "description": "Description text explaining the update RustyGet feature."
   },
   "label_paused": {
     "message": "Paused",
@@ -3520,7 +3520,7 @@
   },
   "label_dupe_score_prefix": {
     "message": "dupe-score: ",
-    "description": "Prefix for duplicate detection score (e.g., 'dupe-score: 500'). Part of NZBGet's duplicate checking system. 'dupe' means 'duplicate' - do NOT translate as 'double'."
+    "description": "Prefix for duplicate detection score (e.g., 'dupe-score: 500'). Part of RustyGet's duplicate checking system. 'dupe' means 'duplicate' - do NOT translate as 'double'."
   },
   "label_dupe_key_prefix": {
     "message": "dupe-key: ",
@@ -3580,7 +3580,7 @@
   },
   "config_system_update_title": {
     "message": "Check if a new version of RustyGet is available.",
-    "description": "Title or heading displayed in the settings area for updating NZBGet."
+    "description": "Title or heading displayed in the settings area for updating RustyGet."
   },
   "btn_refresh_title": {
     "message": "Refresh $1",
@@ -3628,7 +3628,7 @@
   },
   "btn_shutdown_confirm": {
     "message": "Shutdown",
-    "description": "Button text for confirming NZBGet shutdown"
+    "description": "Button text for confirming RustyGet shutdown"
   },
   "config_unit_kb": {
     "message": "KB",

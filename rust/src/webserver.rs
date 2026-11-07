@@ -124,8 +124,14 @@ pub fn parse_url(url: &[u8]) -> Url {
     // Like the header parser, preserve the original C string boundary even
     // when a bounded FFI input includes bytes after its terminator.
     let url = c_bytes(url);
-    let url = if url.starts_with(b"/nzbget/") { &url[7..] } else { url };
-    if url == b"/nzbget" {
+    let url = if url.starts_with(b"/rustyget/") {
+        &url[9..]
+    } else if url.starts_with(b"/nzbget/") {
+        &url[7..]
+    } else {
+        url
+    };
+    if url == b"/rustyget" || url == b"/nzbget" {
         // BString<1024>("%s/")
         let mut loc = [url, b"/"].concat();
         loc.truncate(1023);
@@ -246,7 +252,7 @@ pub fn format_auth_response(form_auth: bool, keep_alive: bool, version: &[u8]) -
     let mut out = Vec::with_capacity(256);
     out.extend_from_slice(b"HTTP/1.1 401 Unauthorized\r\n");
     if !form_auth {
-        out.extend_from_slice(b"WWW-Authenticate: Basic realm=\"NZBGet\"\r\n");
+        out.extend_from_slice(b"WWW-Authenticate: Basic realm=\"RustyGet\"\r\n");
     }
     out.extend_from_slice(b"Connection: ");
     out.extend_from_slice(if keep_alive { b"keep-alive" } else { b"close" });
@@ -254,7 +260,7 @@ pub fn format_auth_response(form_auth: bool, keep_alive: bool, version: &[u8]) -
         b"\r\n\
 Content-Type: text/plain\r\n\
 Content-Length: 0\r\n\
-Server: nzbget-",
+Server: RustyGet-",
     );
     out.extend_from_slice(version);
     out.extend_from_slice(b"\r\n\r\n");
@@ -278,7 +284,7 @@ Access-Control-Allow-Origin: ",
 Access-Control-Allow-Credentials: true\r\n\
 Access-Control-Max-Age: 86400\r\n\
 Access-Control-Allow-Headers: Content-Type, Authorization\r\n\
-Server: nzbget-",
+Server: RustyGet-",
     );
     out.extend_from_slice(version);
     out.extend_from_slice(b"\r\n\r\n");
@@ -306,7 +312,7 @@ pub fn format_error_response(
     header.extend_from_slice(if keep_alive { b"keep-alive" } else { b"close" });
     header.extend_from_slice(b"\r\nContent-Length: ");
     header.extend_from_slice((body.len() as i32).to_string().as_bytes());
-    header.extend_from_slice(b"\r\nContent-Type: text/html\r\nServer: nzbget-");
+    header.extend_from_slice(b"\r\nContent-Type: text/html\r\nServer: RustyGet-");
     header.extend_from_slice(version);
     header.extend_from_slice(b"\r\n\r\n");
     header = truncate_bstring_1024(header);
@@ -321,7 +327,7 @@ pub fn format_redirect_response(url: &[u8], keep_alive: bool, version: &[u8]) ->
     out.extend_from_slice(url);
     out.extend_from_slice(b"\r\nConnection: ");
     out.extend_from_slice(if keep_alive { b"keep-alive" } else { b"close" });
-    out.extend_from_slice(b"\r\nContent-Length: 0\r\nServer: nzbget-");
+    out.extend_from_slice(b"\r\nContent-Length: 0\r\nServer: RustyGet-");
     out.extend_from_slice(version);
     out.extend_from_slice(b"\r\n\r\n");
     truncate_bstring_1024(out)
@@ -387,7 +393,7 @@ Set-Cookie: Auth-Type=",
         let et_hdr = truncate_bstring_1024(et_hdr);
         out.extend_from_slice(&et_hdr);
     }
-    out.extend_from_slice(b"Server: nzbget-");
+    out.extend_from_slice(b"Server: RustyGet-");
     out.extend_from_slice(version);
     out.extend_from_slice(b"\r\n\r\n");
     truncate_bstring_1024(out)
@@ -718,8 +724,8 @@ mod tests {
     #[test]
     fn response_headers() {
         let auth = format_auth_response(false, true, b"26.0");
-        assert!(auth.starts_with(b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"NZBGet\"\r\nConnection: keep-alive\r\n"));
-        assert!(auth.ends_with(b"Server: nzbget-26.0\r\n\r\n"));
+        assert!(auth.starts_with(b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"RustyGet\"\r\nConnection: keep-alive\r\n"));
+        assert!(auth.ends_with(b"Server: RustyGet-26.0\r\n\r\n"));
 
         let (err_hdr, err_body) = format_error_response(b"404 Not Found", false, b"26.0");
         assert_eq!(

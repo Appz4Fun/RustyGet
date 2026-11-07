@@ -204,7 +204,7 @@ int NZBGet::Phase1_Init(bool reload)
 	m_reloading = reload;
 	m_log = std::make_unique<Log>();
 
-	debug("nzbget %s", Util::VersionRevision());
+	debug("RustyGet %s", Util::VersionRevision());
 
 	if (!m_reloading)
 	{
@@ -270,21 +270,21 @@ int NZBGet::Phase1_Init(bool reload)
 		{
 			Daemonize();
 		}
-		info("nzbget %s daemon-mode", Util::VersionRevision());
+		info("RustyGet %s daemon-mode", Util::VersionRevision());
 	}
 	else if (m_options->GetServerMode())
 	{
-		info("nzbget %s server-mode", Util::VersionRevision());
+		info("RustyGet %s server-mode", Util::VersionRevision());
 	}
 	else if (m_commandLineParser->GetRemoteClientMode())
 	{
-		info("nzbget %s remote-mode", Util::VersionRevision());
+		info("RustyGet %s remote-mode", Util::VersionRevision());
 	}
 
 	if (m_options->GetServerMode())
 	{
 		info("using %s", m_options->GetConfigFilename());
-		info("nzbget runs on %s:%i", m_options->GetControlIp(), m_options->GetControlPort());
+		info("RustyGet runs on %s:%i", m_options->GetControlIp(), m_options->GetControlPort());
 	}
 
 #ifdef DEBUG
@@ -404,7 +404,7 @@ void NZBGet::BootConfig()
 	m_commandLineParser = std::make_unique<CommandLineParser>(g_ArgumentCount, (const char**)(*g_Arguments));
 	if (m_commandLineParser->GetPrintVersion())
 	{
-		printf("nzbget version: %s\n", Util::VersionRevision());
+		printf("RustyGet version: %s\n", Util::VersionRevision());
 		exit(0);
 	}
 	int bootExitCode = 0;

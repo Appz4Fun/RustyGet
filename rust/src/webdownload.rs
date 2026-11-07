@@ -194,7 +194,7 @@ pub fn http_client_build_headers(
     headers.extend_from_slice(method);
     headers.extend_from_slice(b" / HTTP/1.1\r\nHost: ");
     headers.extend_from_slice(host);
-    headers.extend_from_slice(b"\r\nUser-Agent: nzbget/");
+    headers.extend_from_slice(b"\r\nUser-Agent: RustyGet/");
     headers.extend_from_slice(version);
     headers.extend_from_slice(b"\r\n");
     if include_gzip {
@@ -368,10 +368,10 @@ pub fn webdl_format_get_request_line(resource: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Formats `"User-Agent: nzbget/<version_rev>\r\n"` for `WebDownloader::SendHeaders`.
+/// Formats `"User-Agent: RustyGet/<version_rev>\r\n"` for `WebDownloader::SendHeaders`.
 pub fn webdl_format_user_agent_header(version_rev: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(version_rev.len() + 21);
-    out.extend_from_slice(b"User-Agent: nzbget/");
+    let mut out = Vec::with_capacity(version_rev.len() + 23);
+    out.extend_from_slice(b"User-Agent: RustyGet/");
     out.extend_from_slice(version_rev);
     out.extend_from_slice(b"\r\n");
     out

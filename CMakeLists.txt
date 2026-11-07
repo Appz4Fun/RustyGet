@@ -21,7 +21,7 @@ list(PREPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
 set(VERSION "27.0")
 set(PACKAGE "nzbget")
 
-set(PACKAGE_BUGREPORT "https://github.com/nzbgetcom/nzbget/issues")
+set(PACKAGE_BUGREPORT "https://github.com/xbmc4lyfe/RustyGet/issues")
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -46,7 +46,7 @@ set(USE_SANITIZERS "" CACHE STRING
 project(
 	nzbget
 	VERSION ${VERSION}
-	DESCRIPTION "NZBGet is a binary downloader, which downloads files from Usenet"
+	DESCRIPTION "RustyGet is a binary downloader, which downloads files from Usenet"
 	LANGUAGES C CXX
 )
 

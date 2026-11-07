@@ -509,7 +509,7 @@ Fleet::Result Fleet::Append(Request request)
 			entry.status = entry.nzbId == 0 ? "ERROR" : candidate->dead ? "DEAD" : "BACKUP";
 			if (entry.nzbId == 0)
 			{
-				entry.reason = "nzbget could not add the nzb-file";
+				entry.reason = "RustyGet could not add the nzb-file";
 			}
 		}
 		result.members.push_back(entry);
@@ -547,7 +547,7 @@ Fleet::Result Fleet::Append(Request request)
 				if (entry.nzbId == historyInfo->GetNzbInfo()->GetId())
 				{
 					entry.status = "COPY";
-					entry.reason = "the same nzb-file as an item nzbget has already";
+					entry.reason = "the same nzb-file as an item RustyGet has already";
 				}
 			}
 		}

@@ -7,7 +7,7 @@ ARG TARGETPLATFORM
 # install build packages
 RUN \
   echo "**** install build packages ****" && \
-  apk add --no-cache g++ gcc git just cargo rust openssl-dev curl
+  apk add --no-cache bash python3 pkgconf g++ gcc git just cargo rust openssl-dev curl
 
 # build rustyget
 COPY ./ /rustyget

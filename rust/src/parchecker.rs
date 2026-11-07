@@ -29,8 +29,8 @@ pub use par_rs::filenames::{
     ParName,
 };
 pub use par_rs::packet::{
-    load_par2_bytes, load_par2_file, FileDescPacket, FileId, IfscPacket, MainPacket, PacketSet,
-    RecoverySliceRef, ScanOptions, SetId, SliceChecksum,
+    load_par2_bytes, load_par2_collection, load_par2_file, FileDescPacket, FileId, IfscPacket,
+    MainPacket, PacketSet, RecoverySliceRef, ScanOptions, SetId, SliceChecksum,
 };
 pub use par_rs::renamer::{
     direct_par_name, is_split_fragment, maybe_split_fragment, ParRenamer, RenamerEvent,
@@ -74,13 +74,14 @@ pub const PAR_RESULT_MEMORY_ERROR: i32 = 8;
 /// Loads a `.par2` index file and any sibling volumes of the same collection in its directory
 /// into a [`PacketSet`].
 pub fn load_par2_set(main_path: &Path) -> Result<PacketSet, RepairError> {
-    let base_dir = main_path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let mut repairer = Par2Repairer::new(base_dir, RepairOptions::default());
-    repairer.load_par2_set(main_path)?;
-    Ok(repairer.packets().clone())
+    let (set, _files) =
+        load_par2_collection(main_path, ScanOptions::METADATA).map_err(|source| {
+            RepairError::Io {
+                context: format!("loading par2 collection of {}", main_path.display()),
+                source,
+            }
+        })?;
+    Ok(set)
 }
 
 /// Loads a `.par2` packet set directly from in-memory bytes.
@@ -713,53 +714,6 @@ impl RustParRepairer {
                 }
             }
         }
-        // If `ParIgnoreExt` contains wildcard patterns (e.g. `*`), match every FileDesc
-        // filename with `crate::util::match_file_ext` and ensure matched names are in
-        // `ignore_extensions` before finalizing.
-        if !self.par_ignore_ext.is_empty() {
-            let mut extra_ignores = Vec::new();
-            let lower_fn = |b: u8| i32::from(b.to_ascii_lowercase());
-            let lower = crate::wildmask::Lower::Fold(&lower_fn);
-            for fd in self.repairer.packets().file_descs.values() {
-                let local = fd.local_name();
-                if crate::util::match_file_ext(
-                    local.as_bytes(),
-                    &self.par_ignore_ext,
-                    b",;",
-                    &lower,
-                    &lower,
-                ) {
-                    extra_ignores.push(local);
-                }
-            }
-            if !extra_ignores.is_empty() {
-                let mut ignore_extensions = parse_ignore_ext_tokens(&self.par_ignore_ext);
-                for name in extra_ignores {
-                    if !ignore_extensions
-                        .iter()
-                        .any(|e| e.eq_ignore_ascii_case(&name))
-                    {
-                        ignore_extensions.push(name);
-                    }
-                }
-                let options = RepairOptions {
-                    num_threads: self.threads_to_use.max(1) as usize,
-                    mem_limit_bytes: (self.mem_to_use_mb.max(16) as u64) << 20,
-                    backup: BackupPolicy::RenameNumbered,
-                    verify_repaired: !self.par_quick,
-                    sync_repaired: false,
-                    rename_misnamed: true,
-                    full_file_md5: false,
-                    ignore_extensions,
-                    ..RepairOptions::default()
-                };
-                let mut rebuilt = Par2Repairer::new(&self.base_dir, options);
-                if rebuilt.load_par2_set(par_filename).is_err() {
-                    return PAR_RESULT_INSUFFICIENT_CRITICAL_DATA;
-                }
-                self.repairer = rebuilt;
-            }
-        }
         match self.repairer.finalize() {
             Ok(()) => PAR_RESULT_SUCCESS,
             Err(_) => PAR_RESULT_INSUFFICIENT_CRITICAL_DATA,
@@ -991,20 +945,18 @@ impl RustParRepairer {
     }
 }
 
+/// `ParIgnoreExt` as `RepairOptions::ignore_extensions`: the raw option bytes split on `,` /
+/// `;` and trimmed, as `Util::MatchFileExt` does, each token passed through verbatim. A token
+/// that is not UTF-8 is dropped on its own; the others stay. par-rs applies nzbget's rules to
+/// each: a case-insensitive suffix match on the local name (`.nfo`, `nfo`, a literal
+/// `readme.nfo`), and for a token with `*` or `?` a `WildMask` match over the whole local name
+/// (`*` any run, `?` one byte, `#` one digit).
 fn parse_ignore_ext_tokens(raw: &[u8]) -> Vec<String> {
-    let Ok(s) = std::str::from_utf8(raw) else {
-        return Vec::new();
-    };
-    s.split([',', ';', ' '])
-        .map(str::trim)
-        .filter(|t| !t.is_empty() && !t.contains('*') && !t.contains('?'))
-        .map(|t| {
-            if t.starts_with('.') {
-                t.to_string()
-            } else {
-                format!(".{t}")
-            }
-        })
+    raw.split(|b| *b == b',' || *b == b';')
+        .map(|t| t.trim_ascii())
+        .filter(|t| !t.is_empty())
+        .filter_map(|t| std::str::from_utf8(t).ok())
+        .map(str::to_string)
         .collect()
 }
 
@@ -1621,6 +1573,32 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_ignore_ext_tokens_keeps_wildcard_masks() {
+        // Tokens are nzbget's: split on `,` / `;`, trimmed, otherwise verbatim (a space inside a
+        // token is part of it; nothing is prefixed or dropped).
+        assert_eq!(parse_ignore_ext_tokens(b".sfv, nfo;.NZB"), vec![".sfv", "nfo", ".NZB"]);
+        assert_eq!(
+            parse_ignore_ext_tokens(b"*, *.nfo ; sample##.mkv,my file.txt, readme.nfo"),
+            vec!["*", "*.nfo", "sample##.mkv", "my file.txt", "readme.nfo"]
+        );
+        assert!(parse_ignore_ext_tokens(b"").is_empty());
+        assert!(parse_ignore_ext_tokens(b" ,; ").is_empty());
+        assert!(parse_ignore_ext_tokens(&[0xFF, 0xFE]).is_empty());
+        // One bad token does not take the good ones with it.
+        assert_eq!(parse_ignore_ext_tokens(b"*.nfo,\xff,.sfv"), vec!["*.nfo", ".sfv"]);
+        // par-rs applies MatchFileExt + WildMask semantics to each token.
+        let m = par_rs::repairer::ignore_name_matches;
+        for token in parse_ignore_ext_tokens(b"*, *.nfo, nfo, .NFO") {
+            assert!(m("release.nfo", &token), "{token}");
+        }
+        assert!(m("readme.nfo", "readme.nfo"), "literal file name");
+        assert!(!m("extras/clip.mkv", "clip*"), "masks see the whole local name, as nzbget's do");
+        assert!(m("sample01.mkv", "sample##.*"), "# is one digit");
+        assert!(!m("sample1.mkv", "sample##.*"));
+        assert!(!m("release.rar", "*.nfo"));
+    }
 
     #[test]
     fn test_repairer_resources_and_cli_args() {

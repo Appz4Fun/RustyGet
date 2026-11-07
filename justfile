@@ -281,11 +281,29 @@ test-daemon jobs="3": (debug jobs)
         os.path.join(root, "tests", "connect", "TlsCipher.cpp"),
     ]
 
+    def needs_rebuild(src, obj, depfile):
+        if not os.path.exists(obj) or not os.path.exists(depfile):
+            return True
+        obj_mtime = os.path.getmtime(obj)
+        if os.path.getmtime(src) > obj_mtime:
+            return True
+        try:
+            with open(depfile, "r", encoding="utf-8") as f:
+                content = f.read().replace("\\\n", " ")
+            parts = content.split(":", 1)
+            if len(parts) == 2:
+                for dep in parts[1].split():
+                    if not os.path.exists(dep) or os.path.getmtime(dep) > obj_mtime:
+                        return True
+        except Exception:
+            return True
+        return False
+
     def compile_test(src):
         rel = os.path.relpath(src, root).replace(os.sep, "__")
         obj = os.path.join(test_obj_dir, rel + ".o")
         dep = obj + ".d"
-        if not os.path.exists(obj) or os.path.getmtime(src) > os.path.getmtime(obj):
+        if needs_rebuild(src, obj, dep):
             cmd = ([ccache] if ccache else []) + [
                 cxx, *flags, *include_flags, "-MMD", "-MF", dep, "-c", src, "-o", obj,
             ]

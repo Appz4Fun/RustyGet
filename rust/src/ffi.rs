@@ -1043,11 +1043,6 @@ pub struct FeedItemCallbacks {
     pub regex_match: Option<unsafe extern "C" fn(*mut std::ffi::c_void, usize, *const c_char, *mut [c_int; 2], c_int) -> c_int>,
     pub apply: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const FeedOptions)>,
     pub set_match: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, c_int)>,
-    /// case folding for WildMask: glibc's tolower table (entries -128..=255,
-    /// pointing at entry zero) or null for `fold`
-    pub lower_table: *const c_int,
-    pub char_signed: c_int,
-    pub fold: Option<extern "C" fn(c_int) -> c_int>,
 }
 
 /// A matched rule's options for ApplyOptions; strings may be null.
@@ -1078,7 +1073,6 @@ pub struct FeedOptions {
 
 struct CItem<'c> {
     cb: &'c FeedItemCallbacks,
-    lower: crate::wildmask::Lower<'c>,
 }
 
 unsafe fn c_text(p: *const c_char) -> Option<Vec<u8>> {
@@ -1153,10 +1147,6 @@ impl crate::feedfilter::Item for CItem<'_> {
     fn set_match(&mut self, status: i32, rule: i32) {
         unsafe { (self.cb.set_match.expect("callbacks validated"))(self.cb.user, status, rule) }
     }
-
-    fn lower(&self) -> &crate::wildmask::Lower<'_> {
-        &self.lower
-    }
 }
 
 /// FeedFilter(filter): a compiled filter; free it with
@@ -1188,7 +1178,6 @@ pub unsafe extern "C" fn nzbget_rs_feed_filter_free(filter: *mut crate::feedfilt
 /// filter, or invalidate the table. Returned strings must be null or valid
 /// NUL-terminated strings until the next callback; passed strings are only
 /// borrowed for the callback. Regex handles must remain valid across calls.
-/// A nonnull lower_table spans entries -128..255 as described above.
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_feed_filter_match(filter: *mut crate::feedfilter::FeedFilter, item: *const FeedItemCallbacks) {
     if filter.is_null() || item.is_null() {
@@ -1197,18 +1186,10 @@ pub unsafe extern "C" fn nzbget_rs_feed_filter_match(filter: *mut crate::feedfil
     let cb = &*item;
     if cb.field.is_none() || cb.season_episode.is_none() || cb.regex_new.is_none()
         || cb.regex_match.is_none() || cb.apply.is_none() || cb.set_match.is_none()
-        || (cb.lower_table.is_null() && cb.fold.is_none())
     {
         return;
     }
-    let fold = cb.fold;
-    let call = move |b: u8| fold.expect("callbacks validated")(b as c_int);
-    let lower = if cb.lower_table.is_null() {
-        crate::wildmask::Lower::Fold(&call)
-    } else {
-        crate::wildmask::Lower::Table(&*cb.lower_table.sub(128).cast::<[c_int; 384]>(), cb.char_signed != 0)
-    };
-    let mut c_item = CItem { cb, lower };
+    let mut c_item = CItem { cb };
     (*filter).matches(&mut c_item);
 }
 
@@ -5723,13 +5704,11 @@ mod tests {
         unsafe extern "C" fn set_match(user: *mut c_void, status: c_int, rule: c_int) {
             probe(user).events.push(format!("match {status} {rule}"));
         }
-        extern "C" fn fold(c: c_int) -> c_int { c }
         let mut p = Probe::default();
         let cb = FeedItemCallbacks {
             user: (&mut p as *mut Probe).cast(), field: Some(field),
             season_episode: Some(season), regex_new: Some(regex_new), regex_match: Some(regex_match),
-            apply: Some(apply), set_match: Some(set_match), lower_table: std::ptr::null(),
-            char_signed: 1, fold: Some(fold),
+            apply: Some(apply), set_match: Some(set_match),
         };
         unsafe {
             nzbget_rs_feed_filter_free(std::ptr::null_mut());
@@ -5748,7 +5727,7 @@ mod tests {
             // must be representable and rejected without invoking anything.
             let zero: FeedItemCallbacks = std::mem::zeroed();
             nzbget_rs_feed_filter_match(filter, &zero);
-            for missing in 0..7 {
+            for missing in 0..6 {
                 let mut bad = FeedItemCallbacks { ..cb };
                 match missing {
                     0 => bad.field = None,
@@ -5756,8 +5735,7 @@ mod tests {
                     2 => bad.regex_new = None,
                     3 => bad.regex_match = None,
                     4 => bad.apply = None,
-                    5 => bad.set_match = None,
-                    _ => bad.fold = None,
+                    _ => bad.set_match = None,
                 }
                 nzbget_rs_feed_filter_match(filter, &bad);
             }

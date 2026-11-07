@@ -16,8 +16,6 @@ extern "C" {
         link_name = "__xpg_strerror_r"
     )]
     fn strerror_r(errnum: c_int, buf: *mut c_char, len: usize) -> c_int;
-    fn strcasecmp(a: *const c_char, b: *const c_char) -> c_int;
-    fn strncasecmp(a: *const c_char, b: *const c_char, n: usize) -> c_int;
 }
 
 /// BString<1024>'s capacity
@@ -147,12 +145,10 @@ pub fn make_unique_filename(dir: &CStr, basename: &CStr, stat: &Stat<'_>) -> Vec
                 let mut without = bstring(base);
                 without.truncate(ext_at.min(BSTRING_MAX));
                 let mut ext = &base[ext_at..];
-                let ext_c = &basename.to_bytes_with_nul()[ext_at..];
-                if unsafe { strcasecmp(ext_c.as_ptr().cast(), c".par2".as_ptr()) } == 0 {
+                if ext.eq_ignore_ascii_case(b".par2") {
                     if let Some(vol) = without.iter().rposition(|&b| b == b'.').filter(|&v| v > 0) {
-                        let mut tail = without[vol..].to_vec();
-                        tail.push(0);
-                        if unsafe { strncasecmp(tail.as_ptr().cast(), c".vol".as_ptr(), 4) } == 0 {
+                        let tail = &without[vol..];
+                        if tail.len() >= 4 && tail[..4].eq_ignore_ascii_case(b".vol") {
                             without.truncate(vol);
                             ext = &base[vol..];
                         }

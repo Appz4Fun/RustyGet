@@ -7,11 +7,6 @@
 //! where Boost's as_object threw.
 
 use crate::json::{self, Value};
-use std::ffi::c_int;
-
-extern "C" {
-    fn tolower(c: c_int) -> c_int;
-}
 
 pub const DEFAULT_SECTION_NAME: &[u8] = b"options";
 
@@ -149,9 +144,9 @@ fn commands(json: &Value, commands: &mut Vec<Command>) -> Result<bool, Thrown> {
     Ok(true)
 }
 
-/// Util::StrCaseCmp: equal lengths and equal bytes after tolower.
+/// Util::StrCaseCmp: equal lengths and equal bytes after ASCII lower.
 fn str_case_eq(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).all(|(&x, &y)| unsafe { tolower(x as c_int) == tolower(y as c_int) })
+    a.eq_ignore_ascii_case(b)
 }
 
 fn sections(json: &Value, sections: &mut Vec<Section>) -> Result<(), Thrown> {

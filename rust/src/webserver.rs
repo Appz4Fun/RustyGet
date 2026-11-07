@@ -4,38 +4,17 @@
 //! as the C library's strncasecmp and numbers parse as its atoi (current
 //! locale). Reading the request and answering it stay C++.
 
-use std::ffi::{c_char, c_int, CStr, CString};
+use std::ffi::{c_char, CStr};
 
 use crate::bytes::{find, find_byte};
 use crate::wildmask::{wild_match, Lower};
-
-extern "C" {
-    fn tolower(c: c_int) -> c_int;
-    fn atoi(s: *const c_char) -> c_int;
-}
 
 /// sizeof(m_authInfo) and TOKEN_SIZE of WebServer.h.
 pub const AUTH_INFO_SIZE: usize = 256 + 1;
 pub const TOKEN_SIZE: usize = 48 + 1;
 
-fn c(b: &[u8]) -> CString {
-    CString::new(b).unwrap_or_default()
-}
-
-/// strncasecmp(line, lit, strlen(lit)) == 0 on the line as a C string, in
-/// place: glibc's loop (the C library's tolower of unsigned bytes, a stop
-/// after an equal NUL), with the line's end read as its NUL.
 fn prefix(line: &[u8], lit: &str) -> bool {
-    for (i, &b) in lit.as_bytes().iter().enumerate() {
-        let a = line.get(i).copied().unwrap_or(0);
-        if a != b && unsafe { tolower(a as c_int) != tolower(b as c_int) } {
-            return false;
-        }
-        if a == 0 {
-            return true;
-        }
-    }
-    true
+    line.len() >= lit.len() && line[..lit.len()].eq_ignore_ascii_case(lit.as_bytes())
 }
 
 /// What a header line (its last '\r' cut off) does in ParseHeaders.
@@ -82,7 +61,7 @@ pub fn header(buffer: &[u8], auth_info_empty: bool) -> Header<'_> {
         None => c_bytes(&buffer[at.min(buffer.len())..]),
     };
     if prefix(line, "Content-Length: ") {
-        Header::ContentLength(unsafe { atoi(c(value(16)).as_ptr()) })
+        Header::ContentLength(crate::feed::c_atoi_bytes(value(16)))
     } else if prefix(line, "Authorization: Basic ") && auth_info_empty {
         auth(value(21))
     } else if prefix(line, "X-Authorization: Basic ") {
@@ -677,6 +656,7 @@ pub fn webserver_is_rel_path_outside_root(is_empty: bool, first_char: u8) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::c_int;
 
     fn ascii(b: u8) -> c_int {
         b.to_ascii_lowercase() as c_int

@@ -25,6 +25,10 @@
 #include <string_view>
 
 #include "DataAnalytics.h"
+#include "Connection.h"
+#include "Log.h"
+#include "Util.h"
+#include "nzbget_rs.h"
 
 namespace Network
 {
@@ -35,7 +39,28 @@ namespace Network
 		SpeedTest(const SpeedTest&) = delete;
 		SpeedTest operator=(const SpeedTest&) = delete;
 
-		double RunTest() noexcept(false);
+		double RunTest() noexcept(false)
+		{
+			info("Download speed test starting...");
+
+			for (TestSpec test : m_testSpecs)
+			{
+				if (!RunTest(test)) break;
+				if (!IsRequiredMoreTests()) break;
+			}
+
+			if (m_dataset.empty())
+			{
+				error("%s", m_errMsg.data());
+				throw std::runtime_error(m_errMsg.data());
+			}
+
+			double finalSpeed = GetFinalSpeed();
+
+			info("Download speed %.2f Mbps", finalSpeed);
+
+			return finalSpeed;
+		}
 
 	private:
 		struct TestSpec
@@ -74,13 +99,120 @@ namespace Network
 		static constexpr std::string_view m_query = "?bytes=";
 		static constexpr std::string_view m_errMsg = "No speed data was collected during the network speed test";
 
-		bool RunTest(TestSpec testSpec);
-		std::pair<uint32_t, std::chrono::duration<double>> ExecuteTest(const std::string& request, std::chrono::seconds timeout);
-		std::string MakeRequest(uint32_t filesize) const;
-		double CalculateSpeedInMbps(uint32_t bytes, double timeSec) const;
-		bool IsRequiredMoreTests() const;
-		bool HasExceededMaxFailures(int failures, int iterations) const;
-		double GetFinalSpeed() const;
+		bool RunTest(TestSpec testSpec)
+		{
+			DataAnalytics data;
+			auto [name, size, iterations, timeout] = testSpec;
+			int failures = 0;
+
+			while (--iterations)
+			{
+				auto [downloaded, elapsedTime] = ExecuteTest(MakeRequest(size), timeout);
+				if (nzbget_rs_dqh_speed_test_is_iteration_failed(
+					elapsedTime.count(), downloaded, size) != 0)
+				{
+					++failures;
+					if (HasExceededMaxFailures(failures, iterations))
+					{
+						return false;
+					}
+
+					continue;
+				}
+
+				double speed = CalculateSpeedInMbps(downloaded, elapsedTime.count());
+				data.AddMeasurement(speed);
+
+				info("Downloaded %s at %.2f Mbps", name, speed);
+			}
+
+			data.Compute();
+			m_dataset.push_back(std::move(data));
+
+			return true;
+		}
+
+		std::pair<uint32_t, std::chrono::duration<double>> ExecuteTest(const std::string& request, std::chrono::seconds timeout)
+		{
+			using namespace std::chrono;
+			Connection connection(m_host.data(), m_port, m_useTls);
+			connection.SetTimeout(1);
+
+			if (!connection.Connect())
+			{
+				return { 0, seconds{0} };
+			}
+
+			if (!connection.Send(request.c_str(), request.size()))
+			{
+				return { 0, seconds{0} };
+			}
+
+			uint32_t totalRecieved = 0;
+			char buffer[m_bufferSize];
+			auto start = steady_clock::now();
+			while (int recieved = connection.TryRecv(buffer, m_bufferSize))
+			{
+				if (nzbget_rs_dqh_speed_test_should_stop_recv_loop(
+					recieved,
+					duration<double>(steady_clock::now() - start).count(),
+					duration<double>(timeout).count()) != 0)
+				{
+					break;
+				}
+
+				totalRecieved += recieved;
+			}
+			auto finish = steady_clock::now();
+
+			return { totalRecieved, duration<double>(finish - start) };
+		}
+
+		std::string MakeRequest(uint32_t filesize) const
+		{
+			NzbgetRsBuf buf = nzbget_rs_snh_speed_test_make_request(
+				m_path.data(), m_path.size(),
+				m_query.data(), m_query.size(),
+				filesize,
+				m_host.data(), m_host.size());
+			std::string req(buf.data ? buf.data : "", buf.len);
+			nzbget_rs_free(buf);
+			return req;
+		}
+
+		double CalculateSpeedInMbps(uint32_t bytes, double timeSec) const
+		{
+			return nzbget_rs_snh_speed_test_calc_mbps(bytes, timeSec);
+		}
+
+		bool IsRequiredMoreTests() const
+		{
+			if (m_dataset.size() < 2)
+				return nzbget_rs_snh_speed_test_is_required_more(m_dataset.size(), 0.0, 0.0) != 0;
+
+			const DataAnalytics& curr = m_dataset.back();
+			const DataAnalytics& prev = m_dataset[m_dataset.size() - 2];
+			return nzbget_rs_snh_speed_test_is_required_more(
+				m_dataset.size(), curr.GetMedian(), prev.GetPercentile25()) != 0;
+		}
+
+		bool HasExceededMaxFailures(int failures, int iterations) const
+		{
+			return nzbget_rs_snh_speed_test_exceeded_max_failures(failures, iterations) != 0;
+		}
+
+		double GetFinalSpeed() const
+		{
+			const auto& dataAnalytics = m_dataset.front();
+			std::vector<double> p90s;
+			p90s.reserve(m_dataset.size());
+			for (const auto& analytics : m_dataset)
+			{
+				p90s.push_back(analytics.GetPercentile90());
+			}
+			return nzbget_rs_snh_speed_test_final_speed(
+				dataAnalytics.GetMedian(), p90s.data(), p90s.size());
+		}
 
 #ifdef DISABLE_TLS
 		bool m_useTls = false;

@@ -21,8 +21,10 @@
 #ifndef STREAMCRYPTO_H
 #define STREAMCRYPTO_H
 
+#include <cstring>
 #include <memory>
 #include "RarReader.h"	// RarFile::Rar5Crypt
+#include "nzbget_rs.h"
 
 /* Shared RAR key-derivation functions extracted from RarVolume so that both
  * archive-header decryption (RarReader) and, in later M3 tasks, stream repair
@@ -32,86 +34,148 @@
 class StreamCrypto
 {
 public:
-	// RAR3 (AES-128-CBC) key schedule. Reproduces WinRAR's rar3 KDF exactly:
-	// the password is expanded to UTF-16LE, concatenated with the 8-byte
-	// per-file salt, then hashed with SHA-1 over 0x40000 rounds (each round
-	// also folds in a 3-byte little-endian counter). The final digest is
-	// byte-swizzled per 4-byte group into the 16-byte key; the 16 IV bytes are
-	// sampled one-per-0x4000-rounds from the running digest's last byte.
-	// Returns false on an empty password or when TLS (OpenSSL) is unavailable.
 	static bool DeriveRar3(const char* password, const uint8 salt[8],
-		uint8 keyOut[16], uint8 ivOut[16]);
+		uint8 keyOut[16], uint8 ivOut[16])
+	{
+#ifndef DISABLE_TLS
+		return nzbget_rs_streamcrypto_derive_rar3(password ? password : "", salt, keyOut, ivOut) != 0;
+#else
+		(void)password;
+		(void)salt;
+		(void)keyOut;
+		(void)ivOut;
+		return false;
+#endif
+	}
 
-	// RAR5 (AES-256-CBC) key schedule: PBKDF2-HMAC-SHA256 over the 16-byte salt
-	// with 2^kdfCount iterations. Rejects kdfCount > 24 (a WinRAR bound; also
-	// caps the iteration count). Returns false when TLS is unavailable.
 	static bool DeriveRar5(const char* password, uint8 kdfCount,
-		const uint8 salt[16], uint8 keyOut[32]);
+		const uint8 salt[16], uint8 keyOut[32])
+	{
+#ifndef DISABLE_TLS
+		return nzbget_rs_streamcrypto_derive_rar5(password ? password : "", kdfCount, salt, keyOut) != 0;
+#else
+		(void)password;
+		(void)kdfCount;
+		(void)salt;
+		(void)keyOut;
+		return false;
+#endif
+	}
 
-	// RAR5 password-check value. unrar (crypt.cpp pbkdf2 / crypt5.cpp
-	// SetKey50) derives the AES key with PBKDF2 at 2^kdfCount iterations, then
-	// continues the SAME running XOR accumulator for 16 more iterations (the
-	// archive HashKey) and 16 again to produce the 32-byte PswCheckValue. Since
-	// a single PBKDF2 output block is exactly the XOR of U_1..U_c, that value
-	// equals PBKDF2 at (2^kdfCount + 32) iterations; the stored 8-byte check is
-	// that value folded by XOR into 8 bytes (check[i%8] ^= value[i]). Verified
-	// byte-exact against testfile5encdata's stored check (password "123").
-	// Returns false on kdfCount > 24 or when TLS is unavailable.
 	static bool DeriveRar5PswCheck(const char* password, uint8 kdfCount,
-		const uint8 salt[16], uint8 checkOut[8]);
+		const uint8 salt[16], uint8 checkOut[8])
+	{
+#ifndef DISABLE_TLS
+		return nzbget_rs_streamcrypto_derive_rar5_psw_check(password ? password : "", kdfCount, salt, checkOut) != 0;
+#else
+		(void)password;
+		(void)kdfCount;
+		(void)salt;
+		(void)checkOut;
+		return false;
+#endif
+	}
 };
 
-/* A derived-key binding (key + header IV + AES variant) that decrypts or
- * encrypts arbitrary 16-byte-aligned block ranges of a RAR data/header stream
- * in raw CBC with no padding - matching RarVolume's own block codec. The unit
- * is whole cipher blocks so a caller can decrypt/re-encrypt a hole without
- * touching the rest of the stream: CBC decryption of block i needs only the
- * preceding ciphertext block C_{i-1} as an XOR input (random access is
- * trivial), and encryption chains forward from that same predecessor. */
 class RarCryptoContext
 {
 public:
 	static constexpr int CryptoBlockSize = 16;
 
-	// rar3: derive AES-128 key + IV from the volume's 8-byte file-header salt.
-	// nullptr on empty password or no TLS. There is no rar3 password check, so
-	// a wrong password yields a context that decrypts to garbage (caught only
-	// by the repair probes downstream, never here).
 	static std::unique_ptr<RarCryptoContext> MakeRar3(const char* password,
-		const uint8 salt[8]);
+		const uint8 salt[8])
+	{
+		if (!password || !*password) return nullptr;
 
-	// rar5: derive AES-256 key from the file's crypt record; the record's IV is
-	// the header/chain-start IV. nullptr when the password is empty, TLS is
-	// unavailable, the record is a non-AES256 version, or a stored password
-	// check is present and does NOT match (wrong password => fail closed).
+		std::unique_ptr<RarCryptoContext> ctx(new RarCryptoContext());
+		if (!StreamCrypto::DeriveRar3(password, salt, ctx->m_key, ctx->m_iv))
+		{
+			return nullptr;
+		}
+		ctx->m_keyLength = 16;
+		return ctx;
+	}
+
 	static std::unique_ptr<RarCryptoContext> MakeRar5(const char* password,
-		const RarFile::Rar5Crypt& crypt);
+		const RarFile::Rar5Crypt& crypt)
+	{
+		if (!password || !*password) return nullptr;
+		if (crypt.Version != 0) return nullptr;	// only AES-256 (crypt version 0)
+
+		std::unique_ptr<RarCryptoContext> ctx(new RarCryptoContext());
+		if (!StreamCrypto::DeriveRar5(password, crypt.KdfCount, crypt.Salt, ctx->m_key))
+		{
+			return nullptr;
+		}
+
+		if (crypt.HasCheck)
+		{
+			uint8 check[8];
+			if (!StreamCrypto::DeriveRar5PswCheck(password, crypt.KdfCount, crypt.Salt, check))
+			{
+				return nullptr;
+			}
+			if (!nzbget_rs_dqh_mem_slices_equal(check, crypt.CheckValue, 8))
+			{
+				return nullptr;	// wrong password
+			}
+		}
+
+		ctx->m_keyLength = 32;
+		memcpy(ctx->m_iv, crypt.Iv, 16);	// crypt-record IV is the chain start
+		return ctx;
+	}
 
 	static std::unique_ptr<RarCryptoContext> MakeFromKeyIv(const uint8* key,
-		int keyLength, const uint8 iv[16]);
+		int keyLength, const uint8 iv[16])
+	{
+		if (!key || !iv || (keyLength != 16 && keyLength != 32))
+		{
+			return nullptr;
+		}
+		std::unique_ptr<RarCryptoContext> ctx(new RarCryptoContext());
+		ctx->m_keyLength = keyLength;
+		memcpy(ctx->m_key, key, (size_t)keyLength);
+		memcpy(ctx->m_iv, iv, 16);
+		return ctx;
+	}
 
 	const uint8* GetKey() const { return m_key; }
 	int GetKeyLength() const { return m_keyLength; }
 	const uint8* GetIv() const { return m_iv; }
 
-	// Decrypt `blocks` consecutive cipher blocks. prevCipherBlock is C_{i-1}
-	// for the first block, or nullptr to chain from the header IV (block 0 of
-	// the stream). Returns false on a negative count or when TLS is
-	// unavailable; blocks == 0 is a no-op success. The interface is blocks-only
-	// so a byte-misaligned length cannot be expressed.
 	bool DecryptRange(const uint8* prevCipherBlock, const uint8* cipher,
-		uint8* plain, int64 blocks) const;
+		uint8* plain, int64 blocks) const
+	{
+		return Crypt(false, prevCipherBlock, cipher, plain, blocks);
+	}
 
-	// Encrypt `blocks` consecutive plaintext blocks, chaining from
-	// prevCipherBlock (nullptr = header IV). Same return contract as
-	// DecryptRange.
 	bool EncryptRange(const uint8* prevCipherBlock, const uint8* plain,
-		uint8* cipher, int64 blocks) const;
+		uint8* cipher, int64 blocks) const
+	{
+		return Crypt(true, prevCipherBlock, plain, cipher, blocks);
+	}
 
 private:
 	RarCryptoContext() = default;
+
 	bool Crypt(bool encrypt, const uint8* prevCipherBlock, const uint8* in,
-		uint8* out, int64 blocks) const;
+		uint8* out, int64 blocks) const
+	{
+		if (blocks < 0) return false;
+		if (blocks == 0) return true;	// nothing to do
+		if (!in || !out) return false;
+
+#ifndef DISABLE_TLS
+		const uint8* iv = prevCipherBlock ? prevCipherBlock : m_iv;
+		return nzbget_rs_streamcrypto_crypt_cbc(
+			encrypt ? 1 : 0, m_key, (size_t)m_keyLength, iv, in, out, blocks) != 0;
+#else
+		(void)encrypt;
+		(void)prevCipherBlock;
+		return false;
+#endif
+	}
 
 	int m_keyLength = 0;	// 16 (rar3/AES-128) or 32 (rar5/AES-256)
 	uint8 m_key[32] = {};

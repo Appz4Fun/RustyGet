@@ -193,9 +193,6 @@ typedef struct NzbgetRsFeedItem
 	int (*regexMatch)(void* user, size_t regex, const char* text, int (*groups)[2], int capacity);
 	void (*apply)(void* user, const NzbgetRsFeedOptions* options);
 	void (*setMatch)(void* user, int status, int rule);
-	const int* lowerTable; // *__ctype_tolower_loc() or NULL for fold
-	int charSigned;
-	int (*fold)(int);
 } NzbgetRsFeedItem;
 typedef struct NzbgetRsFeedFilter NzbgetRsFeedFilter;
 // Copies filter (NULL means empty). The opaque handle is owned by Rust and
@@ -203,9 +200,7 @@ typedef struct NzbgetRsFeedFilter NzbgetRsFeedFilter;
 NzbgetRsFeedFilter* nzbget_rs_feed_filter_new(const char* filter);
 void nzbget_rs_feed_filter_free(NzbgetRsFeedFilter* filter);
 // NULL filter/item or missing callbacks are a no-op. All callbacks are
-// required except fold when lowerTable is supplied. lowerTable points to
-// entry zero of a valid int table spanning indices -128..255.
-// Matching requires exclusive access to the filter and its regex handles.
+// required. Matching requires exclusive access to the filter and its regex handles.
 void nzbget_rs_feed_filter_match(NzbgetRsFeedFilter* filter, const NzbgetRsFeedItem* item);
 
 // Deobfuscation (rust/src/deobfuscation.rs): text as pointer and length.

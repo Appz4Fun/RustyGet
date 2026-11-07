@@ -6,38 +6,21 @@
 //! (`format_dupe_skip_message`), and status classification (`status_from_text`).
 
 use std::collections::BTreeSet;
-use std::ffi::{c_char, c_int};
+use std::ffi::c_char;
 use std::path::Path;
 
 extern "C" {
-    fn tolower(c: c_int) -> c_int;
     fn strtod(nptr: *const c_char, endptr: *mut *mut c_char) -> f64;
 }
 
 #[inline]
-fn c_lower(b: u8) -> u8 {
-    unsafe { tolower(b as c_int) as u8 }
-}
-
-#[inline]
 pub fn strcasecmp_bytes(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter()
-        .zip(b.iter())
-        .all(|(&x, &y)| c_lower(x) == c_lower(y))
+    a.eq_ignore_ascii_case(b)
 }
 
 #[inline]
 pub fn strncasecmp_prefix(haystack: &[u8], prefix: &[u8]) -> bool {
-    if haystack.len() < prefix.len() {
-        return false;
-    }
-    haystack[..prefix.len()]
-        .iter()
-        .zip(prefix.iter())
-        .all(|(&x, &y)| c_lower(x) == c_lower(y))
+    haystack.len() >= prefix.len() && haystack[..prefix.len()].eq_ignore_ascii_case(prefix)
 }
 
 pub const DUPE_MODE_SCORE: i32 = 0;

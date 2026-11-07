@@ -1,4 +1,4 @@
-set(TESTS_TARGET nzbget_tests)
+set(TESTS_TARGET rustyget_tests)
 set(TESTS_SRC ${CMAKE_SOURCE_DIR}/tests/main.cpp)
 
 include(postprocess/postprocess.cmake)

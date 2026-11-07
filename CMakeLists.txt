@@ -19,7 +19,7 @@ option(BUILD_DEPS_FROM_SOURCE "Build external dependencies from source via Fetch
 list(PREPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
 
 set(VERSION "27.0")
-set(PACKAGE "nzbget")
+set(PACKAGE "rustyget")
 
 set(PACKAGE_BUGREPORT "https://github.com/xbmc4lyfe/RustyGet/issues")
 set(CMAKE_CXX_STANDARD 20)
@@ -44,7 +44,7 @@ set(USE_SANITIZERS "" CACHE STRING
     "Comma-separated sanitizers: address,undefined,thread,memory,leak (MSVC supports only address)")
 
 project(
-	nzbget
+	rustyget
 	VERSION ${VERSION}
 	DESCRIPTION "RustyGet is a binary downloader, which downloads files from Usenet"
 	LANGUAGES C CXX
@@ -58,7 +58,7 @@ set(EXTERNAL_DEPS "")
 include(cmake/common.cmake)
 
 add_library(libnzbget STATIC)
-set_target_properties(libnzbget PROPERTIES OUTPUT_NAME nzbget)
+set_target_properties(libnzbget PROPERTIES OUTPUT_NAME rustyget)
 target_include_directories(libnzbget PUBLIC ${CMAKE_SOURCE_DIR} ${CMAKE_BINARY_DIR})
 
 include(daemon/sources.cmake)

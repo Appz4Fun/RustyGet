@@ -68,10 +68,6 @@ else()
 	if(NOT DISABLE_TLS)
 		include(${CMAKE_SOURCE_DIR}/cmake/openssl.cmake)
 	endif()
-	if(NOT DISABLE_GZIP)
-		include(${CMAKE_SOURCE_DIR}/cmake/zlib.cmake)
-	endif()
-	include(${CMAKE_SOURCE_DIR}/cmake/libxml2.cmake)
 	include(${CMAKE_SOURCE_DIR}/cmake/boost.cmake)
 
 	find_package(Threads REQUIRED)
@@ -86,24 +82,8 @@ else()
 		endif()
 	endif()
 
-	if(NOT DISABLE_CURSES)
-		set(CURSES_NEED_NCURSES TRUE)
-		if(NOT APPLE)
-			set(CURSES_NEED_WIDE TRUE)
-		endif()
-		find_package(Curses REQUIRED)
-		set(LIBS ${LIBS} ${CURSES_LIBRARIES})
-	endif()
-
-	if(NOT DISABLE_GZIP)
-		set(LIBS ${LIBS} ZLIB::ZLIB)
-	endif()
-
-	set(LIBS ${LIBS} LibXml2::LibXml2 Boost::boost)
+	set(LIBS ${LIBS} Boost::boost)
 endif()
-
-include(${CMAKE_SOURCE_DIR}/cmake/rapidyenc.cmake)
-set(LIBS ${LIBS} rapidyenc::rapidyenc)
 
 include(${CMAKE_SOURCE_DIR}/lib/sources.cmake)
 

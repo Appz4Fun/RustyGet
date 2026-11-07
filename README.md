@@ -98,7 +98,12 @@ On 2026-10-09 the NZBGet maintainers closed it without merging, along with the r
 ## A rewrite, not a fork
 
 - **Left the fork network.** This repository is standalone on GitHub. It no longer tracks NZBGet's development or sends changes back as pull requests.
-- **Rewriting in Rust.** The C++ moves to Rust one module at a time. Each port matches the C++ output byte for byte, proven by differential tests against the old code under sanitizers, and the C++ stays as a fallback for builds without Rust. Some ports are much faster, such as CRC combination at 135 times the speed. See [Rust port status](https://appz4fun.github.io/RustyGet/rust-port.html).
+- **Rewriting in Rust with zero external helper binaries.** RustyGet rolls its own 7-Zip, UnRAR, yEnc, compression, XML, terminal UI, and parity engines directly into the Rust source:
+  - **Built-in UnRAR & 7-Zip (`zipfast` & `zipview`):** Archive inspection and extraction for RAR (RAR 1.5/2.0/2.9/4.x/5.0, multi-volume `.partNN.rar` and `.rNN`, password-encrypted data and headers), 7-Zip (`.7z` and split `.7z.001`), ZIP, TAR, Gzip, Bzip2, XZ, and Zstandard run 100% in-process in Rust without external `unrar` or `7z` executables.
+  - **First-class Extended Unpacker, Extended Unrar, and Permission Fixer:** Recursive extraction of nested archives, obfuscated archive header-magic detection, and POSIX permission normalization (`0644` for files, `0755` for directories) are built directly into the core unpack pipeline rather than relying on external Python extension scripts or an Extension Manager.
+  - **Built-in SIMD yEnc & Compression (`nntmux-yenc`, `crc32fast`, `flate2`):** Uses Atlas's SIMD yEnc crate (`nntmux-yenc`), `crc32fast`, `flate2` (`zlib-rs`), and `quick-xml` instead of legacy C/C++ `rapidyenc`, `zlib`, `libxml2`, `ncurses`, or `Boost`.
+  - **Built-in Parity (`par-rs`):** Purpose-built Rust PAR2 verification, repair, and deobfuscation engine integrated directly with RustyGet.
+- **Target platforms.** RustyGet targets macOS (Apple Silicon and Intel) and x86_64 Linux with tuned, zero-warning default settings out of the box.
 - **API compatibility may change.** Today RustyGet answers NZBGet's API, so Sonarr, Radarr, the Kodi add-on, and NZBGet extensions work unchanged. Future versions may break NZBGet API compatibility where the old behavior is unsafe or in the way, and may add a SABnzbd-compatible API.
 - **New name.** The project is RustyGet. During the move, the binary and the configuration file keep NZBGet's names, `nzbget` and `nzbget.conf`, so existing setups keep working.
 

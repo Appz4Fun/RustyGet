@@ -26,7 +26,9 @@ build:
 
 # Run core unit test suites
 unit-test:
-    cd {{build_dir}}/tests && ./nzbget_tests -t QueueTest
+    CARGO_BUILD_JOBS={{jobs}} cargo test --manifest-path rust/Cargo.toml --no-default-features -j {{jobs}} --lib dupefallback
+    CARGO_BUILD_JOBS={{jobs}} cargo test --manifest-path rust/Cargo.toml --no-default-features -j {{jobs}} --lib streamrepair
+    cd {{build_dir}}/tests && ./nzbget_tests -t PostprocessTest
 
 # Run the PAR-first dupe fallback functional test suite against the Rust-entrypoint daemon
 functional-test:

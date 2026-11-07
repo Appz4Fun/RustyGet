@@ -5,7 +5,6 @@ endif()
 set(TESTS_TARGET nzbget_tests)
 set(TESTS_SRC ${CMAKE_SOURCE_DIR}/tests/main.cpp)
 
-include(queue/queue.cmake)
 include(postprocess/postprocess.cmake)
 list(APPEND TESTS_SRC ${CMAKE_CURRENT_SOURCE_DIR}/connect/TlsCipher.cpp)
 
@@ -21,7 +20,6 @@ apply_sanitizers(${TESTS_TARGET})
 
 target_precompile_headers(${TESTS_TARGET} REUSE_FROM libnzbget)
 
-add_test(NAME QueueTest        COMMAND ${TESTS_TARGET} --run_test=QueueTest --log_level=message)
 add_test(NAME PostprocessTest  COMMAND ${TESTS_TARGET} --run_test=PostprocessTest --log_level=message)
 if(TARGET ${PACKAGE})
 	# these leave through exit(): the daemon's destructors must still run cleanly

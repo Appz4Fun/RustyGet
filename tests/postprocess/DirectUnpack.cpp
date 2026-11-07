@@ -254,18 +254,9 @@ int QueueParFailureTestNzb(DirectUnpackDownloadQueueMock& downloadQueue, const c
 
 BOOST_AUTO_TEST_CASE(DirectUnpackSimpleTest)
 {
-	if (!UNRAR_PATH)
-	{
-		BOOST_TEST_MESSAGE("unrar not available - skipping test");
-		BOOST_CHECK(true);
-		return;
-	}
-
-	const std::string unrarCmd = std::string("UnrarCmd=") + fs::u8string(UNRAR_PATH.value());
 	Options::CmdOptList cmdOpts;
 	cmdOpts.push_back("WriteLog=none");
 	cmdOpts.push_back("NzbLog=no");
-	cmdOpts.push_back(unrarCmd.c_str());
 	Options options(&cmdOpts, nullptr);
 
 	DirectUnpackDownloadQueueMock downloadQueue;
@@ -318,18 +309,9 @@ BOOST_AUTO_TEST_CASE(DirectUnpackSimpleTest)
 
 BOOST_AUTO_TEST_CASE(DirectUnpackTwoArchives)
 {
-	if (!UNRAR_PATH)
-	{
-		BOOST_TEST_MESSAGE("unrar not available - skipping test");
-		BOOST_CHECK(true);
-		return;
-	}
-
-	const std::string unrarCmd = std::string("UnrarCmd=") + UNRAR_PATH->string();
 	Options::CmdOptList cmdOpts;
 	cmdOpts.push_back("WriteLog=none");
 	cmdOpts.push_back("NzbLog=no");
-	cmdOpts.push_back(unrarCmd.c_str());
 	Options options(&cmdOpts, nullptr);
 
 	DirectUnpackDownloadQueueMock downloadQueue;
@@ -396,15 +378,7 @@ BOOST_AUTO_TEST_CASE(DirectUnpackTwoArchives)
 
 BOOST_AUTO_TEST_CASE(DirectUnpackParFailureStillFinalizesUnpack)
 {
-	if (!UNRAR_PATH)
-	{
-		BOOST_TEST_MESSAGE("unrar not available - skipping test");
-		BOOST_CHECK(true);
-		return;
-	}
-
-	const std::string unrarCmd = std::string("UnrarCmd=") + UNRAR_PATH->string();
-	Options::CmdOptList cmdOpts = MakeParFailureTestOpts(unrarCmd.c_str());
+	Options::CmdOptList cmdOpts = MakeParFailureTestOpts(nullptr);
 	RestoreOptionsGlobal restoreOptions;
 	Options options(&cmdOpts, nullptr);
 	DirectUnpackDownloadQueueMock downloadQueue;

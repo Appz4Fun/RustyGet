@@ -80,18 +80,8 @@ public:
 	static bool IsParFile(FileInfo* fileInfo);
 	/* what the file's first article holds, read from disk if not known yet */
 	static FileInfo::EFirstContent FirstContent(FileInfo* fileInfo);
-	/* a name ending in an extension of 1-4 letters or digits */
-	static bool HasExtension(const char* filename);
 	/* does the collection have par2 files (the only check a borrowed article's bytes get) */
 	static bool HasPar2(NzbInfo* nzbInfo);
-	/* the files the par2-files in <dir> describe: name, length and their set's block size */
-	struct Par2Desc
-	{
-		std::string name;
-		uint64 length = 0;
-		uint64 blockSize = 0;
-	};
-	static std::vector<Par2Desc> ListPar2Files(const char* dir);
 
 	/* Defer download-time donor recovery while parity is being discovered or
 	 * a known PAR set has not failed ordinary repair. Must be called within
@@ -120,25 +110,11 @@ public:
 	static FileInfo* MatchDonorFile(FileInfo* targetFile, NzbInfo* donorNzb,
 		const char* targetNzbFilename = nullptr, int donorNzbId = 0, const char* donorPrint = nullptr,
 		bool twinOnly = false);
-	/* Exact identity fingerprint used to pick among several structural
-	 * matches: equal steps between consecutive NZB article sizes. */
-	static bool ArticleSizeStepsMatch(FileInfo* targetFile, FileInfo* donorFile);
-	/* The same fingerprint as a 64-bit hash (0 = the file has too few or too
+	/* The step fingerprint as a 64-bit hash (0 = the file has too few or too
 	 * uniform articles to be identified this way), for pairing after the
 	 * target's article list is gone. */
 	static uint64 ArticleSizeStepsHash(FileInfo* fileInfo);
 	static const char* FindDonorMessageId(FileInfo* donorFile, int partNumber);
-	static bool SizesMatch(int64 size1, int64 size2, int div);
-	static std::vector<CString> BuildCandidateMessageIds(
-		const std::vector<NzbInfo*>& parsedDonors, FileInfo* targetFile, int partNumber);
-
-	/* Orders the message-ids an article is tried against. Reactive (not cut
-	 * over): donor candidates only (the primary was already tried normally).
-	 * Cut over: [top donor, remaining donors, primary revert last] so a
-	 * cut-over file leads with the duplicate and tries the other duplicates
-	 * before falling back to the proven-holed primary as the last resort. */
-	static std::vector<CString> OrderSources(const std::vector<CString>& donorCandidates,
-		bool cutover, const char* primaryMessageId);
 
 	/* Rotates the donor list so the donor with the given nzb-id comes first
 	 * (order among the others preserved); no-op when the id is 0 or absent. */
@@ -259,7 +235,6 @@ private:
 	std::map<int, std::unique_ptr<NzbInfo>> m_parsedDonors;
 	std::map<int, time_t> m_badDonors;	// donor id -> when its nzb-file couldn't be read
 	static constexpr int BadDonorRetrySec = 600;
-	static bool StructureMatches(FileInfo* targetFile, FileInfo* donorFile);
 	static void AppendDonorCandidate(std::vector<CString>& candidates,
 		std::vector<int>& contributors, int donorNzbId,
 		NzbInfo* parsedDonor, FileInfo* targetFile, int partNumber,

@@ -26,23 +26,7 @@
 
 #include "nzbget_rs.h"
 
-namespace
-{
-	int YencDecode(const void** src, void** dst, size_t len, int* state)
-	{
-		auto yencState = static_cast<RapidYencDecoderState>(*state);
-		int result = rapidyenc_decode_incremental(src, dst, len, &yencState);
-		*state = static_cast<int>(yencState);
-		return result;
-	}
-
-	unsigned int YencCrc(const void* src, size_t len, unsigned int init)
-	{
-		return rapidyenc_crc(src, len, init);
-	}
-}
-
-Decoder::Decoder() : m_decoder(nzbget_rs_decoder_new(YencDecode, YencCrc)) {}
+Decoder::Decoder() : m_decoder(nzbget_rs_decoder_new(nullptr, nullptr)) {}
 Decoder::~Decoder() { nzbget_rs_decoder_free(m_decoder); }
 Decoder::EStatus Decoder::Check() { return static_cast<EStatus>(nzbget_rs_decoder_check(m_decoder)); }
 void Decoder::Clear() { nzbget_rs_decoder_clear(m_decoder); }

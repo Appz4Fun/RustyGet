@@ -42,7 +42,7 @@ var TlsCipherDialog = (new function($)
 			.find('p').text((result.ExcludedSuites || []).join(', '));
 		$('#TlsCipherCancel').prop('disabled', !active(result));
 		$('#TlsCipherAgain').toggle(!active(result) && result.Available !== false && (result.State !== 'idle' || needsStatus));
-		$('#TlsCipherReload').text(text('reload', 'Cipher settings are saved. Reload NZBGet to use them for new connections.'))
+		$('#TlsCipherReload').text(text('reload', 'Cipher settings are saved. Reload RustyGet to use them for new connections.'))
 			.toggle(result.Saved === true && result.ReloadRequired === true);
 		var algorithms = $('#TlsCipherAlgorithms tbody').empty();
 		(result.Algorithms || []).forEach(function(item) {

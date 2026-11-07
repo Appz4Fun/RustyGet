@@ -1473,12 +1473,6 @@ var Config = (new function($)
 			{
 				$ConfigNav.append('<li class="divider"></li>');
 			}
-			if (k == 2) // Extensions section
-			{
-				$ConfigNav.append('<li class="divider"></li>');
-				$ConfigNav.append('<li><a class="text-uppercase" href="#' + ExtensionManager.id + '" data-i18n="config_title_extension_manager"></a></li>');
-				haveExtensions = true;
-			}
 			var conf = config[k];
 			var added = false;
 			for (var i=0; i < conf.sections.length; i++)
@@ -1513,13 +1507,6 @@ var Config = (new function($)
 				var html = $('<li></li>').append($('<a href="#' + conf.id + '"></a>').text(categoryName));
 				$ConfigNav.append(html);
 			}
-		}
-
-		// Show extensions manager even if there are no extensions
-		if (!haveExtensions)
-		{
-			$ConfigNav.append('<li class="divider"></li>');
-			$ConfigNav.append('<li><a class="text-uppercase" href="#' + ExtensionManager.id + '" data-i18n="config_title_extension_manager"></a></li>');
 		}
 
 		$ConfigNav.append('<li class="divider"></li>');

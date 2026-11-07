@@ -1349,6 +1349,26 @@ int nzbget_rs_dupe_fallback_resolve_structural_or_filename_match(
     size_t structural_matches_len);
 int nzbget_rs_dupe_fallback_classify_first_head(
     const uint8_t* head_ptr, size_t head_len);
+
+typedef struct {
+    const char* filename;
+    const char* subject;
+    int32_t total_articles;
+    int64_t size;
+    int32_t is_par_file;
+    const int32_t* parts;
+    const int32_t* sizes;
+    size_t article_count;
+} NzbgetRsDonorFileSpec;
+
+ptrdiff_t nzbget_rs_dupe_fallback_match_donor_file(
+    const NzbgetRsDonorFileSpec* target,
+    const char* target_nzb_filename,
+    const char* by_content,
+    int twin_allowed,
+    int twin_only,
+    const NzbgetRsDonorFileSpec* donor_files,
+    size_t donor_count);
 int nzbget_rs_par2_range_covered(
     const NzbgetRsByteRange* ranges, size_t count, int64_t from, int64_t to);
 void nzbget_rs_par2_scan_file(
@@ -6124,6 +6144,25 @@ int nzbget_rs_stream_materialize_donor_set(
     void (*cancel_batch_cb)(void* ctx),
     void (*update_progress_cb)(void* ctx, const char* label, int32_t stage_progress),
     void (*emit_message_cb)(void* ctx, int32_t kind, const char* text));
+
+uint32_t nzbget_rs_crc32_append(const uint8_t* block, uint32_t len, uint32_t init);
+uint32_t nzbget_rs_gzip_len(int input_len);
+uint32_t nzbget_rs_gzip_compress(
+    const uint8_t* in_buf, int in_len, uint8_t* out_buf, int out_len);
+typedef struct RsGUnzipStream RsGUnzipStream;
+RsGUnzipStream* nzbget_rs_gunzip_new(int buf_size);
+void nzbget_rs_gunzip_free(RsGUnzipStream* stream);
+void nzbget_rs_gunzip_write(RsGUnzipStream* stream, const uint8_t* in_buf, int in_len);
+int nzbget_rs_gunzip_read(RsGUnzipStream* stream, const void** out_ptr, int* out_len);
+
+int nzbget_rs_term_init(void);
+void nzbget_rs_term_shutdown(void);
+void nzbget_rs_term_get_size(int* rows, int* cols);
+void nzbget_rs_term_clear(void);
+void nzbget_rs_term_plot_text(
+    const char* text, int row, int col, int use_color, int color_pair, int blink);
+void nzbget_rs_term_refresh(int row, int col);
+int nzbget_rs_term_read_key(void);
 
 #include "nzbget_tls_cipher.h"
 

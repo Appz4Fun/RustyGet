@@ -24,31 +24,15 @@
 
 #ifndef DISABLE_CURSES
 
-// "ncurses.h" contains many global defines such as for "OK" or "clear" which we sure don't want
-// everywhere in the project. For that reason we include "ncurses.h" directly here instead of
-// putting it into global header file "nzbget.h".
-
-#ifdef HAVE_NCURSES_H
-#include <ncurses.h>
-#endif
-#ifdef HAVE_NCURSES_NCURSES_H
-#include <ncurses/ncurses.h>
-#endif
-
 #include "NCursesFrontend.h"
 #include "Options.h"
 #include "Util.h"
 #include "nzbget_rs.h"
 
-// curses.h on Solaris declares "clear()" via DEFINE. That causes problems, because
-// it also affects calls to deque's method "clear()", producing compiler errors.
-// We use function "curses_clear()" to call macro "clear" of curses, then
-// undefine macro "clear".
 void curses_clear()
 {
-	clear();
+	nzbget_rs_term_clear();
 }
-#undef clear
 
 extern void ExitProc();
 
@@ -67,7 +51,14 @@ const int NCURSES_COLORPAIR_HINT		= 12;
 
 const int MAX_SCREEN_WIDTH				= 512;
 
-static const int READKEY_EMPTY = ERR;
+static const int READKEY_EMPTY = -1;
+static const int KEY_DOWN      = 258;
+static const int KEY_UP        = 259;
+static const int KEY_HOME      = 262;
+static const int KEY_BACKSPACE = 263;
+static const int KEY_NPAGE     = 338;
+static const int KEY_PPAGE     = 339;
+static const int KEY_END       = 360;
 
 NCursesFrontend::NCursesFrontend()
 	: m_startHint(0)
@@ -83,44 +74,14 @@ NCursesFrontend::NCursesFrontend()
 	m_showTimestamp = g_Options->GetCursesTime();
 	m_groupFiles = g_Options->GetCursesGroup();
 
-	// Setup curses
-	m_window = initscr();
-	if (m_window == nullptr)
-	{
-		printf("ERROR: m_pWindow == nullptr\n");
-		exit(-1);
-	}
-	keypad(stdscr, true);
-	nodelay((WINDOW*)m_window, true);
-	noecho();
-	curs_set(0);
-	m_useColor = has_colors();
-
-	if (m_useColor)
-	{
-		start_color();
-		init_pair(0,							COLOR_WHITE,	COLOR_BLUE);
-		init_pair(NCURSES_COLORPAIR_TEXT,		COLOR_WHITE,	COLOR_BLACK);
-		init_pair(NCURSES_COLORPAIR_INFO,		COLOR_GREEN,	COLOR_BLACK);
-		init_pair(NCURSES_COLORPAIR_WARNING,	COLOR_MAGENTA,	COLOR_BLACK);
-		init_pair(NCURSES_COLORPAIR_ERROR,		COLOR_RED,		COLOR_BLACK);
-		init_pair(NCURSES_COLORPAIR_DEBUG,		COLOR_WHITE,	COLOR_BLACK);
-		init_pair(NCURSES_COLORPAIR_DETAIL,		COLOR_GREEN,	COLOR_BLACK);
-		init_pair(NCURSES_COLORPAIR_STATUS,		COLOR_BLUE,		COLOR_WHITE);
-		init_pair(NCURSES_COLORPAIR_KEYBAR,		COLOR_WHITE,	COLOR_BLUE);
-		init_pair(NCURSES_COLORPAIR_INFOLINE,	COLOR_WHITE,	COLOR_BLUE);
-		init_pair(NCURSES_COLORPAIR_TEXTHIGHL,	COLOR_BLACK,	COLOR_CYAN);
-		init_pair(NCURSES_COLORPAIR_CURSOR,		COLOR_BLACK,	COLOR_YELLOW);
-		init_pair(NCURSES_COLORPAIR_HINT,		COLOR_WHITE,	COLOR_RED);
-	}
+	int colorSupport = nzbget_rs_term_init();
+	m_window = reinterpret_cast<void*>(1);
+	m_useColor = colorSupport > 0;
 }
 
 NCursesFrontend::~NCursesFrontend()
 {
-	keypad(stdscr, false);
-	echo();
-	curs_set(1);
-	endwin();
+	nzbget_rs_term_shutdown();
 	printf("\n");
 	SetHint(nullptr);
 }
@@ -226,8 +187,8 @@ void NCursesFrontend::Update(int key)
 
 void NCursesFrontend::CalcWindowSizes()
 {
-	int nrRows, nrColumns;
-	getmaxyx(stdscr, nrRows, nrColumns);
+	int nrRows = 24, nrColumns = 80;
+	nzbget_rs_term_get_size(&nrRows, &nrColumns);
 	// the line buffers hold MAX_SCREEN_WIDTH columns (a wider terminal wrote past
 	// them), and messages wrap at the width less 8 (a divisor of zero at 8)
 	int queueSize = CalcQueueSize();
@@ -277,32 +238,12 @@ void NCursesFrontend::PlotLine(const char* str, int row, int pos, int colorPair)
 
 void NCursesFrontend::PlotText(const char * string, int row, int pos, int colorPair, bool blink)
 {
-	if( m_useColor )
-	{
-		attron(COLOR_PAIR(colorPair));
-		if (blink)
-		{
-			attron(A_BLINK);
-		}
-	}
-	mvaddstr(row, pos, (char*)string);
-	if( m_useColor )
-	{
-		attroff(COLOR_PAIR(colorPair));
-		if (blink)
-		{
-			attroff(A_BLINK);
-		}
-	}
+	nzbget_rs_term_plot_text(string, row, pos, m_useColor ? 1 : 0, colorPair, blink ? 1 : 0);
 }
 
 void NCursesFrontend::RefreshScreen()
 {
-	// Cursor placement
-	wmove((WINDOW*)m_window, m_screenHeight, m_screenWidth);
-
-	// NCurses refresh
-	refresh();
+	nzbget_rs_term_refresh(m_screenHeight, m_screenWidth);
 }
 
 void NCursesFrontend::PrintMessages()
@@ -917,7 +858,7 @@ void NCursesFrontend::UpdateInput(int initialKey)
 
 int NCursesFrontend::ReadConsoleKey()
 {
-	return getch();
+	return nzbget_rs_term_read_key();
 }
 
 #endif

@@ -20,7 +20,6 @@
 #include "nzbget.h"
 
 #include <regex>
-#include <boost/version.hpp>
 
 #include "SystemInfo.h"
 #include "Options.h"
@@ -29,16 +28,6 @@
 #include "Json.h"
 #include "Xml.h"
 #include "nzbget_rs.h"
-
-#ifdef HAVE_NCURSES_H
-#include <ncurses.h>
-#endif
-#ifdef HAVE_NCURSES_NCURSES_H
-#include <ncurses/ncurses.h>
-#endif
-#ifndef DISABLE_PARCHECK
-#include <par2/version.h>
-#endif
 
 namespace System
 {
@@ -57,16 +46,15 @@ namespace System
 
 	void SystemInfo::InitLibsInfo()
 	{
-		m_libraries.reserve(5);
-		m_libraries.push_back({ "LibXML2", LIBXML_DOTTED_VERSION });
-
-#if defined(HAVE_NCURSES_H) || defined(HAVE_NCURSES_NCURSES_H)
-		m_libraries.push_back({ "ncurses", NCURSES_VERSION });
-#endif
-
-#ifndef DISABLE_GZIP
-		m_libraries.push_back({ "Gzip", ZLIB_VERSION });
-#endif
+		m_libraries.reserve(9);
+		m_libraries.push_back({ "zipfast", "0.1.0" });
+		m_libraries.push_back({ "zipview", "0.1.0" });
+		m_libraries.push_back({ "nntmux-yenc", "0.1.0 (SIMD)" });
+		m_libraries.push_back({ "par-rs", "0.1.0 (in integration)" });
+		m_libraries.push_back({ "flate2 (zlib-rs)", "1.1.11" });
+		m_libraries.push_back({ "crc32fast", "1.5.2" });
+		m_libraries.push_back({ "quick-xml", "0.41.0" });
+		m_libraries.push_back({ "md-5", "0.11.0" });
 
 #ifndef DISABLE_TLS
 #ifdef LIBRESSL_VERSION_TEXT
@@ -80,20 +68,6 @@ namespace System
 		m_libraries.push_back({ "OpenSSL", std::string(verStrBuf.data ? verStrBuf.data : "", verStrBuf.len) });
 		nzbget_rs_free(verStrBuf);
 #endif
-#endif
-
-#ifndef DISABLE_PARCHECK 
-		m_libraries.push_back({ "Par2-turbo", PAR2_TURBO_LIB_VERSION });
-#endif
-
-#ifdef RAPIDYENC_VERSION
-		NzbgetRsBuf verBuf = nzbget_rs_dqh_sysinfo_format_rapidyenc_version(rapidyenc_version());
-		m_libraries.push_back({ "rapidyenc", verBuf.data ? verBuf.data : "" });
-		nzbget_rs_free(verBuf);
-#endif
-
-#ifdef BOOST_LIB_VERSION
-		m_libraries.push_back({ "Boost", BOOST_LIB_VERSION });
 #endif
 
 		m_libraries.shrink_to_fit();
@@ -117,9 +91,10 @@ namespace System
 	std::vector<Tool> SystemInfo::GetTools() const
 	{
 		std::vector<Tool> tools{
-			GetPython(),
-			GetSevenZip(),
-			GetUnrar(),
+			{ "UnRAR / 7-Zip / Archive Engine", "Built-in", "zipfast + native Rust decoders" },
+			{ "Archive Inspector", "Built-in", "zipview (in-process)" },
+			{ "Extended Unpacker & Permission Fixer", "Built-in", "First-class native pipeline" },
+			{ "yEnc SIMD Decoder", "Built-in", "nntmux-yenc" },
 		};
 
 		return tools;

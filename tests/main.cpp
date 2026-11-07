@@ -81,9 +81,6 @@ struct InitGlobals
 
 	InitGlobals()
 	{
-		rapidyenc_decode_init();
-		rapidyenc_crc_init();
-
 		m_cmdOpts.push_back("SevenZipCmd=7z");
 		m_cmdOpts.push_back("UnrarCmd=unrar");
 

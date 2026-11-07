@@ -1383,8 +1383,6 @@ void nzbget_c_set_process_args(int argc, char* argv[], char* argp[])
 void nzbget_c_util_init(void)
 {
 	Util::Init();
-	rapidyenc_decode_init();
-	rapidyenc_crc_init();
 }
 
 int nzbget_c_nserv_main(int argc, char* argv[])

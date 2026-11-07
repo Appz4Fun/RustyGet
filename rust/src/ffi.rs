@@ -515,6 +515,232 @@ pub extern "C" fn nzbget_rs_crc32_combine(crc1: u32, crc2: u32, len2: u32) -> u3
     crate::crc::combine(crc1, crc2, len2)
 }
 
+/// Crc32::Append: hardware-accelerated IEEE 802.3 CRC-32 update via `crc32fast`.
+///
+/// # Safety
+/// `block` is null with `len == 0`, or points to `len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_crc32_append(block: *const u8, len: u32, init: u32) -> u32 {
+    if block.is_null() || len == 0 {
+        return init;
+    }
+    let slice = std::slice::from_raw_parts(block, len as usize);
+    crate::crc::crc32_append(slice, init)
+}
+
+/// ZLib::GZipLen: returns upper bound on gzip-compressed output size.
+#[no_mangle]
+pub extern "C" fn nzbget_rs_gzip_len(input_len: c_int) -> u32 {
+    let n = input_len.max(0) as u32;
+    n.saturating_add(n >> 12)
+        .saturating_add(n >> 14)
+        .saturating_add(n >> 25)
+        .saturating_add(32)
+}
+
+/// ZLib::GZip: compresses `in_buf[..in_len]` into `out_buf[..out_len]` in gzip format via `flate2`.
+///
+/// # Safety
+/// `in_buf` is readable for `in_len` bytes; `out_buf` is writable for `out_len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_gzip_compress(
+    in_buf: *const u8,
+    in_len: c_int,
+    out_buf: *mut u8,
+    out_len: c_int,
+) -> u32 {
+    if out_buf.is_null() || out_len <= 0 || in_len < 0 || (in_len > 0 && in_buf.is_null()) {
+        return 0;
+    }
+    let in_slice = if in_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(in_buf, in_len as usize)
+    };
+    let out_slice = std::slice::from_raw_parts_mut(out_buf, out_len as usize);
+    let mut comp = flate2::Compress::new_gzip(flate2::Compression::default(), 15);
+    match comp.compress(in_slice, out_slice, flate2::FlushCompress::Finish) {
+        Ok(flate2::Status::StreamEnd) => comp.total_out() as u32,
+        _ => 0,
+    }
+}
+
+pub struct RsGUnzipStream {
+    decomp: flate2::Decompress,
+    out_buf: Vec<u8>,
+    next_in: *const u8,
+    avail_in: usize,
+}
+
+/// GUnzipStream::GUnzipStream: creates a streaming gzip decompressor backed by `flate2`.
+#[no_mangle]
+pub extern "C" fn nzbget_rs_gunzip_new(buf_size: c_int) -> *mut RsGUnzipStream {
+    let cap = buf_size.max(1) as usize;
+    Box::into_raw(Box::new(RsGUnzipStream {
+        decomp: flate2::Decompress::new_gzip(15),
+        out_buf: vec![0u8; cap],
+        next_in: std::ptr::null(),
+        avail_in: 0,
+    }))
+}
+
+/// GUnzipStream::~GUnzipStream: frees a streaming gzip decompressor.
+///
+/// # Safety
+/// `stream` is null or from `nzbget_rs_gunzip_new`.
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_gunzip_free(stream: *mut RsGUnzipStream) {
+    if !stream.is_null() {
+        drop(Box::from_raw(stream));
+    }
+}
+
+/// GUnzipStream::Write: sets the next compressed input slice.
+///
+/// # Safety
+/// `stream` is null or a valid `RsGUnzipStream`; `in_buf` is readable for `in_len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_gunzip_write(
+    stream: *mut RsGUnzipStream,
+    in_buf: *const u8,
+    in_len: c_int,
+) {
+    let Some(s) = stream.as_mut() else { return };
+    if in_buf.is_null() || in_len <= 0 {
+        s.next_in = std::ptr::null();
+        s.avail_in = 0;
+    } else {
+        s.next_in = in_buf;
+        s.avail_in = in_len as usize;
+    }
+}
+
+/// GUnzipStream::Read: decompresses the next chunk.
+/// Returns `0` (`zlError`), `1` (`zlFinished`), or `2` (`zlOK`).
+///
+/// # Safety
+/// `stream` is null or a valid `RsGUnzipStream`; `out_ptr` and `out_len` are valid output pointers.
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_gunzip_read(
+    stream: *mut RsGUnzipStream,
+    out_ptr: *mut *const c_void,
+    out_len: *mut c_int,
+) -> c_int {
+    if !out_len.is_null() {
+        *out_len = 0;
+    }
+    let Some(s) = stream.as_mut() else { return 0 };
+    let in_slice = if s.next_in.is_null() || s.avail_in == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(s.next_in, s.avail_in)
+    };
+    let before_in = s.decomp.total_in();
+    let before_out = s.decomp.total_out();
+    let status = s
+        .decomp
+        .decompress(in_slice, &mut s.out_buf, flate2::FlushDecompress::None);
+    let consumed = (s.decomp.total_in() - before_in) as usize;
+    let produced = (s.decomp.total_out() - before_out) as usize;
+    if consumed > 0 && !s.next_in.is_null() {
+        s.next_in = s.next_in.add(consumed);
+        s.avail_in = s.avail_in.saturating_sub(consumed);
+    }
+    match status {
+        Ok(flate2::Status::StreamEnd) => {
+            if !out_len.is_null() {
+                *out_len = produced as c_int;
+            }
+            if !out_ptr.is_null() {
+                *out_ptr = s.out_buf.as_ptr().cast();
+            }
+            1 // zlFinished
+        }
+        Ok(flate2::Status::Ok) => {
+            if !out_len.is_null() {
+                *out_len = produced as c_int;
+            }
+            if !out_ptr.is_null() {
+                *out_ptr = s.out_buf.as_ptr().cast();
+            }
+            2 // zlOK
+        }
+        Ok(flate2::Status::BufError) => {
+            if produced > 0 {
+                if !out_len.is_null() {
+                    *out_len = produced as c_int;
+                }
+                if !out_ptr.is_null() {
+                    *out_ptr = s.out_buf.as_ptr().cast();
+                }
+            }
+            2 // zlOK
+        }
+        Err(_) => 0, // zlError
+    }
+}
+
+// ---- Terminal / TUI FFI (replacing C ncurses) ----
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_term_init() -> c_int {
+    crate::ncurses_format::term_init()
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_term_shutdown() {
+    crate::ncurses_format::term_shutdown()
+}
+
+/// # Safety
+/// `rows` and `cols` are null or valid writable pointers.
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_term_get_size(rows: *mut c_int, cols: *mut c_int) {
+    let (r, c) = crate::ncurses_format::term_get_size();
+    if !rows.is_null() {
+        *rows = r;
+    }
+    if !cols.is_null() {
+        *cols = c;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_term_clear() {
+    crate::ncurses_format::term_clear()
+}
+
+/// # Safety
+/// `text` is null or a valid NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_term_plot_text(
+    text: *const c_char,
+    row: c_int,
+    col: c_int,
+    use_color: c_int,
+    color_pair: c_int,
+    blink: c_int,
+) {
+    crate::ncurses_format::term_plot_text(
+        input(text),
+        row,
+        col,
+        use_color != 0,
+        color_pair,
+        blink != 0,
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_term_refresh(row: c_int, col: c_int) {
+    crate::ncurses_format::term_refresh(row, col);
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_term_read_key() -> c_int {
+    crate::ncurses_format::term_read_key()
+}
+
 /// Runs an in-place text helper on the NUL-terminated `raw` and puts the NUL
 /// at the new end.
 unsafe fn in_place(raw: *mut c_char, f: impl FnOnce(&mut [u8]) -> usize) {
@@ -1323,10 +1549,17 @@ pub unsafe extern "C" fn nzbget_rs_web_authorized_ip(
     crate::webserver::is_authorized_ip(input(option), input(remote), &lower) as c_int
 }
 
-/// Decoder (rust/src/decoder.rs) with rapidyenc's decoder and CRC.
+/// Decoder (rust/src/decoder.rs) with built-in Rust `nntmux-yenc` + `crc32fast` (or custom callbacks).
 #[no_mangle]
 pub extern "C" fn nzbget_rs_decoder_new(decode: Option<crate::decoder::DecodeFn>, crc: Option<crate::decoder::CrcFn>) -> *mut crate::decoder::Decoder {
-    let (Some(decode), Some(crc)) = (decode, crc) else { return std::ptr::null_mut() };
+    let (decode, crc) = match (decode, crc) {
+        (Some(d), Some(c)) => (d, c),
+        (None, None) => (
+            crate::decoder::rust_yenc_decode_incremental as crate::decoder::DecodeFn,
+            crate::decoder::rust_yenc_crc as crate::decoder::CrcFn,
+        ),
+        _ => return std::ptr::null_mut(),
+    };
     Box::into_raw(Box::new(crate::decoder::Decoder::new(decode, crc)))
 }
 
@@ -8919,6 +9152,79 @@ pub unsafe extern "C" fn nzbget_rs_dupe_fallback_classify_first_head(
     }
     let slice = std::slice::from_raw_parts(head_ptr, head_len);
     crate::dupefallback::classify_first_head(slice)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_match_donor_file(
+    target: *const crate::dupefallback::NzbgetRsDonorFileSpec,
+    target_nzb_filename: *const c_char,
+    by_content: *const c_char,
+    twin_allowed: c_int,
+    twin_only: c_int,
+    donor_files: *const crate::dupefallback::NzbgetRsDonorFileSpec,
+    donor_count: usize,
+) -> isize {
+    if target.is_null() || (donor_count > 0 && donor_files.is_null()) {
+        return -1;
+    }
+    let to_spec = |raw: &crate::dupefallback::NzbgetRsDonorFileSpec| -> crate::dupefallback::DonorFileSpec<'_> {
+        let filename = if raw.filename.is_null() {
+            &[][..]
+        } else {
+            CStr::from_ptr(raw.filename).to_bytes()
+        };
+        let subject = if raw.subject.is_null() {
+            &[][..]
+        } else {
+            CStr::from_ptr(raw.subject).to_bytes()
+        };
+        let parts = if raw.parts.is_null() || raw.article_count == 0 {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts(raw.parts, raw.article_count)
+        };
+        let sizes = if raw.sizes.is_null() || raw.article_count == 0 {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts(raw.sizes, raw.article_count)
+        };
+        crate::dupefallback::DonorFileSpec {
+            filename,
+            subject,
+            total_articles: raw.total_articles,
+            size: raw.size,
+            is_par_file: raw.is_par_file != 0,
+            parts,
+            sizes,
+        }
+    };
+    let target_spec = to_spec(&*target);
+    let target_nzb_fn = if target_nzb_filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(target_nzb_filename).to_bytes()
+    };
+    let by_content_bytes = if by_content.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(by_content).to_bytes()
+    };
+    let raw_donors = if donor_count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(donor_files, donor_count)
+    };
+    let donor_specs: Vec<crate::dupefallback::DonorFileSpec<'_>> =
+        raw_donors.iter().map(to_spec).collect();
+    crate::dupefallback::match_donor_file(
+        &target_spec,
+        target_nzb_fn,
+        by_content_bytes,
+        twin_allowed != 0,
+        twin_only != 0,
+        &donor_specs,
+    )
+    .map_or(-1, |idx| idx as isize)
 }
 
 #[no_mangle]

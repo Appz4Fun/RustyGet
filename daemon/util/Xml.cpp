@@ -24,64 +24,127 @@
 
 namespace Xml
 {
-std::string Serialize(const xmlNodePtr rootNode)
+namespace
+{
+void AppendEscaped(std::string& out, const std::string& raw)
+{
+	NzbgetRsBuf buf = nzbget_rs_xml_encode(raw.c_str());
+	if (buf.data && buf.len > 0)
+	{
+		out.append(buf.data, buf.len);
+	}
+	nzbget_rs_free(buf);
+}
+
+void SerializeNode(const XmlNode* node, std::string& out)
+{
+	if (!node)
+	{
+		return;
+	}
+	out.push_back('<');
+	out.append(node->name);
+	out.push_back('>');
+	if (node->isText)
+	{
+		AppendEscaped(out, node->text);
+	}
+	else
+	{
+		for (const auto& child : node->children)
+		{
+			SerializeNode(child.get(), out);
+		}
+	}
+	out.append("</");
+	out.append(node->name);
+	out.push_back('>');
+}
+
+XmlNodePtr AddChild(XmlNodePtr parent, std::unique_ptr<XmlNode> child)
+{
+	child->parent = parent;
+	XmlNodePtr ptr = child.get();
+	parent->children.push_back(std::move(child));
+	return ptr;
+}
+}  // namespace
+
+std::string Serialize(const XmlNodePtr rootNode)
 {
 	std::string result;
-
-	xmlBufferPtr buffer = xmlBufferCreate();
-	if (buffer == nullptr)
-	{
-		return result;
-	}
-
-	int size = xmlNodeDump(buffer, rootNode->doc, rootNode, 0, 0);
-	if (size > 0)
-	{
-		result = std::string(reinterpret_cast<const char*>(buffer->content), size);
-	}
-
-	xmlBufferFree(buffer);
+	SerializeNode(rootNode, result);
 	return result;
 }
 
-void AddNewNode(xmlNodePtr rootNode, const char* name, const char* type, const char* value)
+void AddNewNode(XmlNodePtr rootNode, const char* name, const char* type, const char* value)
 {
-	xmlNodePtr memberNode = xmlNewNode(nullptr, BAD_CAST "member");
-	xmlNodePtr valueNode = xmlNewNode(nullptr, BAD_CAST "value");
-	// the text forms: xmlNewChild reads "&..." in a value as an entity, and a
-	// path or CPU name with "&" in it came out garbled
-	xmlNewTextChild(memberNode, nullptr, BAD_CAST "name", BAD_CAST name);
-	xmlNewTextChild(valueNode, nullptr, BAD_CAST type, BAD_CAST value);
-	xmlAddChild(memberNode, valueNode);
-	xmlAddChild(rootNode, memberNode);
+	auto memberNode = std::make_unique<XmlNode>();
+	memberNode->name = "member";
+
+	auto nameNode = std::make_unique<XmlNode>();
+	nameNode->name = "name";
+	nameNode->text = name ? name : "";
+	nameNode->isText = true;
+	AddChild(memberNode.get(), std::move(nameNode));
+
+	auto valueNode = std::make_unique<XmlNode>();
+	valueNode->name = "value";
+
+	auto typeNode = std::make_unique<XmlNode>();
+	typeNode->name = type ? type : "string";
+	typeNode->text = value ? value : "";
+	typeNode->isText = true;
+	AddChild(valueNode.get(), std::move(typeNode));
+
+	AddChild(memberNode.get(), std::move(valueNode));
+	AddChild(rootNode, std::move(memberNode));
 }
 
-xmlNodePtr CreateStructNode()
+XmlNodePtr CreateStructNode()
 {
-	xmlNodePtr valueNode = xmlNewNode(nullptr, BAD_CAST "value");
-	xmlNodePtr structNode = xmlNewNode(nullptr, BAD_CAST "struct");
-	xmlAddChild(valueNode, structNode);
-	return structNode;
+	auto* valueNode = new XmlNode();
+	valueNode->name = "value";
+	auto structNode = std::make_unique<XmlNode>();
+	structNode->name = "struct";
+	return AddChild(valueNode, std::move(structNode));
 }
 
-void AddArrayNode(xmlNodePtr structNode, const char* name, const std::vector<xmlNodePtr>& children)
+void AddArrayNode(XmlNodePtr structNode, const char* name, const std::vector<XmlNodePtr>& children)
 {
-	xmlNodePtr memberNode = xmlNewNode(nullptr, BAD_CAST "member");
-	xmlNewChild(memberNode, nullptr, BAD_CAST "name", BAD_CAST name);
+	auto memberNode = std::make_unique<XmlNode>();
+	memberNode->name = "member";
 
-	xmlNodePtr valueNode = xmlNewNode(nullptr, BAD_CAST "value");
-	xmlNodePtr arrayNode = xmlNewNode(nullptr, BAD_CAST "array");
-	xmlNodePtr dataNode = xmlNewNode(nullptr, BAD_CAST "data");
+	auto nameNode = std::make_unique<XmlNode>();
+	nameNode->name = "name";
+	nameNode->text = name ? name : "";
+	nameNode->isText = true;
+	AddChild(memberNode.get(), std::move(nameNode));
 
-	for (xmlNodePtr child : children)
+	auto valueNode = std::make_unique<XmlNode>();
+	valueNode->name = "value";
+	auto arrayNode = std::make_unique<XmlNode>();
+	arrayNode->name = "array";
+	auto dataNode = std::make_unique<XmlNode>();
+	dataNode->name = "data";
+
+	for (XmlNodePtr child : children)
 	{
-		xmlAddChild(dataNode, child);
+		if (child)
+		{
+			AddChild(dataNode.get(), std::unique_ptr<XmlNode>(child));
+		}
 	}
 
-	xmlAddChild(arrayNode, dataNode);
-	xmlAddChild(valueNode, arrayNode);
-	xmlAddChild(memberNode, valueNode);
-	xmlAddChild(structNode, memberNode);
+	AddChild(arrayNode.get(), std::move(dataNode));
+	AddChild(valueNode.get(), std::move(arrayNode));
+	AddChild(memberNode.get(), std::move(valueNode));
+	AddChild(structNode, std::move(memberNode));
+}
+
+void FreeRootNode(XmlNodePtr rootNode)
+{
+	delete rootNode;
 }
 
 const char* BoolToStr(bool value) noexcept { return value ? "1" : "0"; }

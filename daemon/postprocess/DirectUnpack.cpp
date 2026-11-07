@@ -182,48 +182,9 @@ void DirectUnpack::Run()
 
 void DirectUnpack::ExecuteUnrar(const char* archiveName)
 {
-	// Format:
-	//   unrar x -y -p- -o+ -vp <archive.part0001.rar> <dest-dir>/_unpack/
-
-	ParamList params;
-	if (!PrepareCmdParams(g_Options->GetUnrarCmd(), &params, "unrar"))
-	{
-		return;
-	}
-
-	if (!params.Exists("x") && !params.Exists("e"))
-	{
-		params.emplace_back("x");
-	}
-
-	params.emplace_back("-y");
-
-	if (!m_password.Empty())
-	{
-		params.emplace_back(BString<1024>("-p%s", *m_password));
-	}
-	else
-	{
-		params.emplace_back("-p-");
-	}
-
-	if (!params.Exists("-o+") && !params.Exists("-o-") && !params.Exists("-or"))
-	{
-		params.emplace_back("-o+");
-	}
-
-	params.emplace_back("-vp");
-
-	params.emplace_back(archiveName);
 	m_unpackExtendedDir = FileSystem::MakeExtendedPath(m_unpackDir, true);
-	params.emplace_back(BString<1024>("%s%c", *m_unpackExtendedDir, PATH_SEPARATOR));
-	SetArgs(std::move(params));
-	SetLogPrefix("Unrar");
-	ResetEnv();
-
 	m_allOkMessageReceived = false;
 
-	SetNeedWrite(true);
 	Guard unpackGuard(UnpackController::GetUnpackMutex());
 	if (IsStopped())
 	{
@@ -232,18 +193,42 @@ void DirectUnpack::ExecuteUnrar(const char* archiveName)
 	m_waitingVolume = false;
 	m_execThreadId = std::this_thread::get_id();
 	m_unpacking = true;
-	int exitCode = Execute();
+
+	BString<1024> fullArchivePath("%s%c%s", *m_destDir, PATH_SEPARATOR, archiveName);
+	auto logCb = [](void* ctx, int kind, const char* msg)
+	{
+		if (!ctx || !msg) return;
+		DirectUnpack* self = static_cast<DirectUnpack*>(ctx);
+		Message::EKind msgKind = Message::mkDetail;
+		switch (kind)
+		{
+			case 0: msgKind = Message::mkInfo; break;
+			case 1: msgKind = Message::mkError; break;
+			case 2: msgKind = Message::mkWarning; break;
+			case 4: msgKind = Message::mkInfo; break;
+			default: msgKind = Message::mkDetail; break;
+		}
+		self->AddMessage(msgKind, msg);
+		while (self->m_waitingVolume && !self->IsStopped() && !self->GetTerminated())
+		{
+			Util::Sleep(20);
+		}
+	};
+
+	const char* pw = m_password.Empty() ? "" : *m_password;
+	int ok = nzbget_rs_unpack_extract_with_zipfast(
+		fullArchivePath,
+		m_unpackDir,
+		pw,
+		1,
+		logCb,
+		this);
+
 	m_unpacking = false;
 	m_execThreadId = std::thread::id{};
 	m_waitingVolume = false;
-	SetLogPrefix(nullptr);
 
-	m_unpackOk = exitCode == 0 && m_allOkMessageReceived && !GetTerminated();
-	bool interrupted = !m_cancelled && (IsStopped() || GetTerminated());
-	if (!m_unpackOk && exitCode > 0 && !interrupted)
-	{
-		PrintMessage(Message::mkError, "Unrar error code: %i", exitCode);
-	}
+	m_unpackOk = ok != 0 && m_allOkMessageReceived && !GetTerminated() && !IsStopped();
 }
 
 bool DirectUnpack::PrepareCmdParams(const char* command, ParamList* params, const char* infoName)

@@ -219,48 +219,10 @@ ExtractorPtr MakeExtractor(fs::path archive, fs::path outputDir,
 {
 	const std::string archiveName = fs::u8string(archive.filename());
 
-	if (ZipFastExtractor::IsSupported(archive))
+	if (ZipFastExtractor::IsSupported(archive) || SevenZip::IsSupported(archive) || Unrar::IsSupported(archive))
 	{
 		return std::make_unique<ZipFastExtractor>(std::move(archive), std::move(outputDir),
 												  std::move(password), mode);
-	}
-
-	auto validateTool = [&archiveName](const fs::path& toolPath, std::string_view optionName) -> std::optional<fs::path>
-	{
-		if (toolPath.empty())
-		{
-			error("Unpack: Could not process '%s': %s is not configured", archiveName.c_str(), std::string(optionName).c_str());
-			return std::nullopt;
-		}
-		fs::error_code ec;
-		bool exists = fs::exists(toolPath, ec);
-		if (ec)
-		{
-			error("Unpack: Could not process '%s': Failed to access '%s': %s", archiveName.c_str(), fs::u8string(toolPath).c_str(), ec.message().c_str());
-			return std::nullopt;
-		}
-		if (!exists)
-		{
-			error("Unpack: Could not process '%s': %s doesn't exist", archiveName.c_str(), fs::u8string(toolPath).c_str());
-			return std::nullopt;
-		}
-		return toolPath;
-	};
-
-	if (SevenZip::IsSupported(archive))
-	{
-		const auto tool = validateTool(g_Options->GetSevenZipPath(), Options::SEVENZIPCMD);
-		if (!tool) return nullptr;
-		return std::make_unique<SevenZip>(*tool, std::move(archive), std::move(outputDir),
-										  std::move(password), mode);
-	}
-
-	if (Unrar::IsSupported(archive))
-	{
-		const auto tool = validateTool(g_Options->GetUnrarPath(), Options::UNRARCMD);
-		if (!tool) return nullptr;
-		return std::make_unique<Unrar>(*tool, std::move(archive), std::move(outputDir),
-									   std::move(password), mode);
 	}
 
 	error("Unpack: Could not process '%s': Unsupported archive format: %s", archiveName.c_str(), fs::u8string(archive.extension()).c_str());

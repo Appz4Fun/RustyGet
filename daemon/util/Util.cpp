@@ -894,88 +894,51 @@ bool WildMask::Match(const char* text)
 #ifndef DISABLE_GZIP
 uint32 ZLib::GZipLen(int inputBufferLength)
 {
-	z_stream zstr{};
-	return (uint32)deflateBound(&zstr, inputBufferLength);
+	return nzbget_rs_gzip_len(inputBufferLength);
 }
 
 uint32 ZLib::GZip(const void* inputBuffer, int inputBufferLength, void* outputBuffer, int outputBufferLength)
 {
-	z_stream zstr;
-	zstr.zalloc = Z_NULL;
-	zstr.zfree = Z_NULL;
-	zstr.opaque = Z_NULL;
-	zstr.next_in = (Bytef*)inputBuffer;
-	zstr.avail_in = inputBufferLength;
-	zstr.next_out = (Bytef*)outputBuffer;
-	zstr.avail_out = outputBufferLength;
-
-	/* add 16 to MAX_WBITS to enforce gzip format */
-	if (Z_OK != deflateInit2(&zstr, Z_DEFAULT_COMPRESSION, Z_DEFLATED, MAX_WBITS + 16, MAX_MEM_LEVEL, Z_DEFAULT_STRATEGY))
-	{
-		return 0;
-	}
-
-	uint32 total_out = 0;
-	if (deflate(&zstr, Z_FINISH) == Z_STREAM_END)
-	{
-		total_out = (uint32)zstr.total_out;
-	}
-
-	deflateEnd(&zstr);
-
-	return total_out;
+	return nzbget_rs_gzip_compress(
+		static_cast<const uint8_t*>(inputBuffer),
+		inputBufferLength,
+		static_cast<uint8_t*>(outputBuffer),
+		outputBufferLength);
 }
 
 GUnzipStream::GUnzipStream(int BufferSize)
-	: m_bufferSize(BufferSize)
-	, m_outputBuffer(std::make_unique<Bytef[]>(BufferSize))
+	: m_rsStream(nzbget_rs_gunzip_new(BufferSize))
 {
-
-	/* add 16 to MAX_WBITS to enforce gzip format */
-	int ret = inflateInit2(&m_zStream, MAX_WBITS + 16);
-	m_active = ret == Z_OK;
 }
 
 GUnzipStream::~GUnzipStream()
 {
-	if (m_active)
-	{
-		inflateEnd(&m_zStream);
-	}
+	nzbget_rs_gunzip_free(static_cast<RsGUnzipStream*>(m_rsStream));
+	m_rsStream = nullptr;
 }
 
 void GUnzipStream::Write(const void *inputBuffer, int inputBufferLength)
 {
-	m_zStream.next_in = (Bytef*)inputBuffer;
-	m_zStream.avail_in = inputBufferLength;
+	nzbget_rs_gunzip_write(
+		static_cast<RsGUnzipStream*>(m_rsStream),
+		static_cast<const uint8_t*>(inputBuffer),
+		inputBufferLength);
 }
 
 GUnzipStream::EStatus GUnzipStream::Read(const void **outputBuffer, int *outputBufferLength)
 {
-	m_zStream.next_out = (Bytef*)m_outputBuffer.get();
-	m_zStream.avail_out = m_bufferSize;
-
-	*outputBufferLength = 0;
-
-	if (!m_active)
+	int status = nzbget_rs_gunzip_read(
+		static_cast<RsGUnzipStream*>(m_rsStream),
+		outputBuffer,
+		outputBufferLength);
+	if (status == 1)
 	{
-		return zlError;
+		return zlFinished;
 	}
-
-	int ret = inflate(&m_zStream, Z_NO_FLUSH);
-
-	switch (ret)
+	if (status == 2)
 	{
-		case Z_STREAM_END:
-		case Z_OK:
-			*outputBufferLength = m_bufferSize - m_zStream.avail_out;
-			*outputBuffer = m_outputBuffer.get();
-			return ret == Z_STREAM_END ? zlFinished : zlOK;
-
-		case Z_BUF_ERROR:
-			return zlOK;
+		return zlOK;
 	}
-
 	return zlError;
 }
 #endif
@@ -1029,7 +992,7 @@ void Crc32::Reset()
 void Crc32::Append(uchar* block, uint32 length)
 {
 	uint32* currentCrc = static_cast<uint32*>(State());
-	*currentCrc = rapidyenc_crc(block, length, *currentCrc);
+	*currentCrc = nzbget_rs_crc32_append(block, length, *currentCrc);
 }
 
 uint32 Crc32::Finish()

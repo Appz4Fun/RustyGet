@@ -1,15 +1,7 @@
 //! End-to-end Rust implementation of `daemon/feed/` (`FeedInfo`, `FeedItemInfo`,
 //! `FeedFile`, `NzbInfoCreator`, and `FeedCoordinator`).
 
-use std::ffi::{c_char, c_int, CString};
-
-extern "C" {
-    fn tolower(c: c_int) -> c_int;
-    fn isspace(c: c_int) -> c_int;
-    fn isalpha(c: c_int) -> c_int;
-    fn strcasecmp(s1: *const c_char, s2: *const c_char) -> c_int;
-    fn strtod(nptr: *const c_char, endptr: *mut *mut c_char) -> f64;
-}
+use std::ffi::{c_char, c_int, CStr, CString};
 
 fn cstring_lossy(bytes: &[u8]) -> CString {
     if let Some(nul) = bytes.iter().position(|&b| b == 0) {
@@ -28,39 +20,15 @@ fn truncate_at_nul(bytes: &[u8]) -> Vec<u8> {
 }
 
 fn xml_digit_lower(byte: u8) -> i32 {
-    unsafe { tolower(byte as c_int) }
+    i32::from(byte.to_ascii_lowercase())
 }
 
 fn text_right_space(byte: u8) -> bool {
-    let ch = (byte as c_char) as c_int;
-    #[cfg(target_env = "gnu")]
-    {
-        unsafe { isspace(ch) != 0 }
-    }
-    #[cfg(not(target_env = "gnu"))]
-    {
-        if ch < 0 {
-            false
-        } else {
-            unsafe { isspace(ch) != 0 }
-        }
-    }
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
 }
 
 fn xml_entity_alpha(byte: u8) -> bool {
-    let ch = (byte as c_char) as c_int;
-    #[cfg(target_env = "gnu")]
-    {
-        unsafe { isalpha(ch) != 0 }
-    }
-    #[cfg(not(target_env = "gnu"))]
-    {
-        if ch < 0 {
-            false
-        } else {
-            unsafe { isalpha(ch) != 0 }
-        }
-    }
+    byte.is_ascii_alphabetic()
 }
 
 fn trim_string_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -144,7 +112,9 @@ pub unsafe fn attr_name_eq_ignore_case(
     if attr_name.is_null() || target_name.is_null() {
         return false;
     }
-    strcasecmp(attr_name, target_name) == 0
+    CStr::from_ptr(attr_name)
+        .to_bytes()
+        .eq_ignore_ascii_case(CStr::from_ptr(target_name).to_bytes())
 }
 
 /// Parses an integer optionally prefixed by a single non-digit character (`FeedItemInfo::ParsePrefixedInt`),
@@ -320,22 +290,11 @@ pub fn extract_size_from_description(description: &[u8]) -> i64 {
         }
         if !found_size {
             let tail = &description[pos..];
-            let mut c_buf = Vec::with_capacity(tail.len() + 1);
-            for &b in tail {
-                if b == 0 {
-                    break;
-                }
-                c_buf.push(b);
-            }
-            c_buf.push(0);
-            let mut end_ptr: *mut c_char = std::ptr::null_mut();
-            let val = unsafe {
-                strtod(
-                    c_buf.as_ptr() as *const c_char,
-                    &mut end_ptr as *mut *mut c_char,
-                )
+            let end = tail.iter().position(|&b| b == 0).unwrap_or(tail.len());
+            let Some(val) = crate::dupecoord::parse_f64_prefix(&tail[..end]) else {
+                break;
             };
-            if end_ptr == c_buf.as_ptr() as *mut c_char || !val.is_finite() {
+            if !val.is_finite() {
                 break;
             }
             found_size = true;

@@ -194,12 +194,12 @@ pub fn tls_format_report_err(err_msg: &[u8], err_str: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Formats `"TLS certificate verification failed for <host>: <verify_err_str>. For more info visit https://nzbget.com/documentation/certificate-verification/"`
+/// Formats `"TLS certificate verification failed for <host>: <verify_err_str>. For more info visit https://github.com/xbmc4lyfe/RustyGet"`
 /// for `TlsSocket::Start` and `TlsSocket::ValidateCert`.
 pub fn tls_format_cert_verify_err(host: &[u8], verify_err_str: &[u8]) -> Vec<u8> {
     const PREFIX: &[u8] = b"TLS certificate verification failed for ";
     const SUFFIX: &[u8] =
-        b". For more info visit https://nzbget.com/documentation/certificate-verification/";
+        b". For more info visit https://github.com/xbmc4lyfe/RustyGet";
     let mut out = Vec::with_capacity(PREFIX.len() + host.len() + 2 + verify_err_str.len() + SUFFIX.len());
     out.extend_from_slice(PREFIX);
     out.extend_from_slice(host);
@@ -217,13 +217,13 @@ pub fn tls_format_handshake_err(host: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Formats `"TLS certificate verification failed for <host>: certificate hostname mismatch (<cert_host>). For more info visit https://nzbget.com/documentation/certificate-verification/"`
+/// Formats `"TLS certificate verification failed for <host>: certificate hostname mismatch (<cert_host>). For more info visit https://github.com/xbmc4lyfe/RustyGet"`
 /// for `TlsSocket::ValidateCert`.
 pub fn tls_format_hostname_mismatch_err(host: &[u8], cert_host: &[u8]) -> Vec<u8> {
     const PREFIX: &[u8] = b"TLS certificate verification failed for ";
     const MID: &[u8] = b": certificate hostname mismatch (";
     const SUFFIX: &[u8] =
-        b"). For more info visit https://nzbget.com/documentation/certificate-verification/";
+        b"). For more info visit https://github.com/xbmc4lyfe/RustyGet";
     let mut out = Vec::with_capacity(
         PREFIX.len() + host.len() + MID.len() + cert_host.len() + SUFFIX.len(),
     );
@@ -245,9 +245,9 @@ pub fn tls_select_io_err_msg(is_write: bool, peek_err_zero: bool) -> &'static [u
     }
 }
 
-/// Formats `"nzbget_disktest_<epoch_ticks>.bin"` for `Benchmark::GetUniqueFilename`.
+/// Formats `"rustyget_disktest_<epoch_ticks>.bin"` for `Benchmark::GetUniqueFilename`.
 pub fn benchmark_format_unique_filename(epoch_ticks: i64) -> Vec<u8> {
-    format!("nzbget_disktest_{epoch_ticks}.bin").into_bytes()
+    format!("rustyget_disktest_{epoch_ticks}.bin").into_bytes()
 }
 
 /// Resolves the benchmark block size (`default_block_size` when `block_size_bytes == 0`).

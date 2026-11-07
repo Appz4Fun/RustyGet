@@ -1,5 +1,5 @@
 /*
- *  This file is part of nzbget. See <https://nzbget.com>.
+ *  This file is part of RustyGet.
  *
  *  Copyright (C) 2024-2026 Denis <denis@nzbget.com>
  *
@@ -14,20 +14,32 @@
  *  GNU General Public License for more details.
  *
  *  You should have received a copy of the GNU General Public License
- *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 
 #ifndef DEOBFUSCATION_H
 #define DEOBFUSCATION_H
 
+#include <memory>
 #include <string>
 #include <string_view>
+#include "nzbget_rs.h"
 
 namespace Deobfuscation
 {
-	bool IsExcessivelyObfuscated(std::string_view str);
-	std::string Deobfuscate(std::string_view str);
+	inline bool IsExcessivelyObfuscated(std::string_view str)
+	{
+		return nzbget_rs_is_excessively_obfuscated(str.data(), str.size()) != 0;
+	}
+
+	inline std::string Deobfuscate(std::string_view str)
+	{
+		NzbgetRsBuf buf = nzbget_rs_deobfuscate(str.data(), str.size());
+		auto release = [](NzbgetRsBuf* owned) { nzbget_rs_free(*owned); };
+		std::unique_ptr<NzbgetRsBuf, decltype(release)> owner(&buf, release);
+		return std::string(buf.data, buf.len);
+	}
 }
 
 #endif

@@ -105,7 +105,7 @@ impl PreparedSlot {
         -> Result<Self, PurgeError>
     {
         instance.open()?;
-        instance.prepared_slots.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+        instance.prepared_slots.try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
             if n < super::MAX_OPERATIONS { n.checked_add(1) } else { None }
         }).map_err(|_| PurgeError::LimitExceeded)?;
         let slot = Self { instance: Arc::clone(instance), producer, state: PreparedState::Owned };

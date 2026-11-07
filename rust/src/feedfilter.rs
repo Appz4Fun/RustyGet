@@ -8,36 +8,78 @@
 //! as the C library's strcasecmp/strncasecmp and numbers parse as its
 //! atof/atoi, in the current locale; regular expressions use the C++ RegEx.
 
-use std::ffi::{c_char, c_int, CStr, CString};
+use std::ffi::CStr;
 
 use crate::wildmask::{wild_match, Lower};
 
-extern "C" {
-    fn strcasecmp(a: *const c_char, b: *const c_char) -> c_int;
-    fn strncasecmp(a: *const c_char, b: *const c_char, n: usize) -> c_int;
-    fn atof(s: *const c_char) -> f64;
-    fn atoi(s: *const c_char) -> c_int;
-}
-
-/// A C string of `b` (texts here have no NUL: they come from C strings).
-fn c(b: &[u8]) -> CString {
-    CString::new(b).unwrap_or_default()
-}
-
 fn case_eq(a: &[u8], lit: &str) -> bool {
-    unsafe { strcasecmp(c(a).as_ptr(), c(lit.as_bytes()).as_ptr()) == 0 }
+    a.eq_ignore_ascii_case(lit.as_bytes())
 }
 
 fn case_prefix(a: &[u8], lit: &str) -> bool {
-    unsafe { strncasecmp(c(a).as_ptr(), c(lit.as_bytes()).as_ptr(), lit.len()) == 0 }
+    a.len() >= lit.len() && a[..lit.len()].eq_ignore_ascii_case(lit.as_bytes())
 }
 
 fn c_atof(b: &[u8]) -> f64 {
-    unsafe { atof(c(b).as_ptr()) }
+    let b = match b.iter().position(|&c| c == 0) {
+        Some(pos) => &b[..pos],
+        None => b,
+    };
+    let start = b.iter().position(|c| !c.is_ascii_whitespace()).unwrap_or(b.len());
+    let s = &b[start..];
+    if s.is_empty() {
+        return 0.0;
+    }
+    let mut i = 0;
+    if matches!(s.get(i), Some(b'+' | b'-')) {
+        i += 1;
+    }
+    let rest = &s[i..];
+    if rest.len() >= 8 && rest[..8].eq_ignore_ascii_case(b"infinity") {
+        i += 8;
+        return std::str::from_utf8(&s[..i]).ok().and_then(|t| t.parse::<f64>().ok()).unwrap_or(0.0);
+    }
+    if rest.len() >= 3 && (rest[..3].eq_ignore_ascii_case(b"inf") || rest[..3].eq_ignore_ascii_case(b"nan")) {
+        i += 3;
+        return std::str::from_utf8(&s[..i]).ok().and_then(|t| t.parse::<f64>().ok()).unwrap_or(0.0);
+    }
+    let mut has_digits = false;
+    while i < s.len() && s[i].is_ascii_digit() {
+        has_digits = true;
+        i += 1;
+    }
+    if i < s.len() && s[i] == b'.' {
+        i += 1;
+        while i < s.len() && s[i].is_ascii_digit() {
+            has_digits = true;
+            i += 1;
+        }
+    }
+    if !has_digits {
+        return 0.0;
+    }
+    if i < s.len() && matches!(s[i], b'e' | b'E') {
+        let exp_start = i;
+        i += 1;
+        if i < s.len() && matches!(s[i], b'+' | b'-') {
+            i += 1;
+        }
+        let digit_start = i;
+        while i < s.len() && s[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == digit_start {
+            i = exp_start;
+        }
+    }
+    std::str::from_utf8(&s[..i])
+        .ok()
+        .and_then(|t| t.parse::<f64>().ok())
+        .unwrap_or(0.0)
 }
 
 fn c_atoi(b: &[u8]) -> i32 {
-    unsafe { atoi(c(b).as_ptr()) }
+    crate::feed::c_atoi_bytes(b)
 }
 
 /// The C cast (int64)double: x86 gives INT64_MIN out of range (and for NaN);
@@ -135,8 +177,6 @@ pub trait Item {
     fn apply(&mut self, options: &Applied<'_>);
     /// SetMatchStatus/SetMatchRule: 0 ignored, 1 accepted, 2 rejected.
     fn set_match(&mut self, status: i32, rule: i32);
-    /// Case folding for the WildMask matches.
-    fn lower(&self) -> &Lower<'_>;
 }
 
 /// A matched rule's options, for ApplyOptions (C strings may be null).
@@ -339,7 +379,7 @@ impl Term {
         }
     }
 
-    fn match_text(&mut self, item: &mut dyn Item, value: &[u8], refs: &mut Vec<Vec<u8>>) -> bool {
+    fn match_text(&mut self, _item: &mut dyn Item, value: &[u8], refs: &mut Vec<Vec<u8>>) -> bool {
         let p = &self.param;
         let n = p.len();
         let both = n >= 2 && p[0] == b'*' && p[n - 1] == b'*';
@@ -349,7 +389,7 @@ impl Term {
         if !substr {
             // word search: each word of the value
             for word in crate::util::tokens(value, WORD_SEPARATORS) {
-                if wild_match(item.lower(), p, word, want.then_some(&mut positions)) {
+                if wild_match(&Lower::Ascii, p, word, want.then_some(&mut positions)) {
                     if want {
                         refs.extend(positions.iter().map(|&(s, l)| ref_value(word, s, l)));
                     }
@@ -368,7 +408,7 @@ impl Term {
             } else {
                 ([b"*", &p[..], b"*"].concat(), 1)
             };
-            let m = wild_match(item.lower(), &pattern, value, want.then_some(&mut positions));
+            let m = wild_match(&Lower::Ascii, &pattern, value, want.then_some(&mut positions));
             if m && want {
                 refs.extend(positions.iter().skip(ref_offset).map(|&(s, l)| ref_value(value, s, l)));
             }
@@ -746,10 +786,7 @@ pub fn field_name_known(name: &CStr) -> bool {
 mod tests {
     use super::*;
 
-    fn ascii_lower(b: u8) -> c_int {
-        b.to_ascii_lowercase() as c_int
-    }
-
+    #[derive(Default)]
     struct MockFeedItem {
         title: Vec<u8>,
         filename: Vec<u8>,
@@ -765,29 +802,6 @@ mod tests {
         match_status: i32,
         match_rule: i32,
         patterns: Vec<Vec<u8>>,
-        lower: Lower<'static>,
-    }
-
-    impl Default for MockFeedItem {
-        fn default() -> Self {
-            Self {
-                title: Vec::new(),
-                filename: Vec::new(),
-                category: Vec::new(),
-                size: 0,
-                age_sec: 0,
-                rage_id: 0,
-                season: Vec::new(),
-                episode: Vec::new(),
-                priority: 0,
-                dupe_score: 0,
-                dupe_key: Vec::new(),
-                match_status: 0,
-                match_rule: 0,
-                patterns: Vec::new(),
-                lower: Lower::Fold(&ascii_lower),
-            }
-        }
     }
 
     impl Item for MockFeedItem {
@@ -878,10 +892,6 @@ mod tests {
         fn set_match(&mut self, status: i32, rule: i32) {
             self.match_status = status;
             self.match_rule = rule;
-        }
-
-        fn lower(&self) -> &Lower<'_> {
-            &self.lower
         }
     }
 

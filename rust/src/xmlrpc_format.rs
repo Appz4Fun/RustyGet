@@ -2709,11 +2709,6 @@ mod tests {
     }
 }
 
-extern "C" {
-    fn strcasecmp(s1: *const c_char, s2: *const c_char) -> c_int;
-    fn tolower(c: c_int) -> c_int;
-}
-
 /// Computes `MiB/s` from `bytes` and `ms` in `XmlRpc.cpp`.
 pub fn xmlrpc_mib_per_sec(bytes: u64, ms: f64) -> f64 {
     if ms > 0.0 {
@@ -2862,11 +2857,11 @@ pub unsafe fn xmlrpc_save_config_check_json_keys(
     if key1.is_null() || key2.is_null() {
         return 0;
     }
-    let name_lit = b"Name\0".as_ptr().cast::<c_char>();
-    let value_lit = b"Value\0".as_ptr().cast::<c_char>();
-    if strcasecmp(key1, value_lit) == 0 && strcasecmp(key2, name_lit) == 0 {
+    let k1 = CStr::from_ptr(key1).to_bytes();
+    let k2 = CStr::from_ptr(key2).to_bytes();
+    if k1.eq_ignore_ascii_case(b"Value") && k2.eq_ignore_ascii_case(b"Name") {
         2
-    } else if strcasecmp(key1, name_lit) == 0 && strcasecmp(key2, value_lit) == 0 {
+    } else if k1.eq_ignore_ascii_case(b"Name") && k2.eq_ignore_ascii_case(b"Value") {
         1
     } else {
         0
@@ -3921,7 +3916,7 @@ impl<'a> ParamCursor<'a> {
     fn decode_at(&mut self, val_off: usize, is_json: bool) -> Vec<u8> {
         unsafe {
             self.raw
-                .decode_at(val_off, is_json, &|c| tolower(c as c_int))
+                .decode_at(val_off, is_json, &|c| c.to_ascii_lowercase() as c_int)
         }
     }
 }

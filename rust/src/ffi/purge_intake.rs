@@ -156,7 +156,7 @@ mod tests {
         c=empty();let mut file:FileC=unsafe{std::mem::zeroed()};file.subject.len=65536;
         c.files=&file;c.files_count=1;
         assert_eq!(unsafe{association_owned(&c)},Err(PurgeError::LimitExceeded));
-        file.subject.len=0;file.articles_count=1_000_001;
+        file.subject.len=0;file.articles_count=1_000_001;c.files=&file;
         assert_eq!(unsafe{association_owned(&c)},Err(PurgeError::LimitExceeded));
     }
     #[test]

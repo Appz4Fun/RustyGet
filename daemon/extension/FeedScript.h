@@ -22,21 +22,74 @@
 #define FEEDSCRIPT_H
 
 #include "NzbScript.h"
+#include "Options.h"
+#include "Log.h"
+#include "Util.h"
+#include "nzbget_rs.h"
 
 class FeedScriptController : public NzbScriptController
 {
 public:
-	static void ExecuteScripts(const char* feedScript, const char* feedFile, int feedId, bool* success);
+	static constexpr int FEED_SUCCESS = 93;
+
+	static void ExecuteScripts(const char* feedScript, const char* feedFile, int feedId, bool* success)
+	{
+		FeedScriptController scriptController;
+		scriptController.m_feedFile = feedFile;
+		scriptController.m_feedId = feedId;
+
+		scriptController.ExecuteScriptList(feedScript);
+
+		if (success)
+		{
+			*success = scriptController.m_success;
+		}
+	}
 
 protected:
-	virtual void ExecuteScript(std::shared_ptr<const Extension::Script> script);
+	virtual void ExecuteScript(std::shared_ptr<const Extension::Script> script)
+	{
+		if (!script->GetFeedScript())
+		{
+			return;
+		}
+
+		PrintMessage(Message::mkInfo, "Executing feed-script %s for Feed%i", script->GetName(), m_feedId);
+
+		SetArgs({script->GetEntry()});
+
+		BString<1024> infoName("feed-script %s for Feed%i", script->GetName(), m_feedId);
+		SetInfoName(infoName);
+
+		SetLogPrefix(script->GetDisplayName());
+		PrepareParams(script->GetName());
+
+		int exitCode = Execute();
+
+		if (exitCode != FEED_SUCCESS)
+		{
+			infoName[0] = 'F';
+			PrintMessage(Message::mkError, "%s failed", *infoName);
+			m_success = false;
+		}
+
+		SetLogPrefix(nullptr);
+	}
 
 private:
 	const char* m_feedFile;
 	int m_feedId;
 	bool m_success = true;
 
-	void PrepareParams(const char* scriptName);
+	void PrepareParams(const char* scriptName)
+	{
+		ResetEnv();
+
+		SetEnvVar("NZBFP_FILENAME", m_feedFile);
+		SetIntEnvVar("NZBFP_FEEDID", m_feedId);
+
+		PrepareEnvScript(nullptr, scriptName);
+	}
 };
 
 #endif

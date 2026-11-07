@@ -5,13 +5,325 @@
 //! included: the line buffer appends as strncpy (a NUL ends the copied text
 //! and the rest is zero-filled) and lines are found as strchr found them.
 
-use std::ffi::{c_char, c_int, c_longlong, c_ulong, c_void, CStr, CString};
+use std::ffi::{c_int, c_ulong, c_void, CStr};
 
 /// rapidyenc_decode_incremental: returns 0 (no end), 1 ("\r\n=y" found,
 /// `src` after the 'y') or 2 ("\r\n.\r\n" found, `src` after it).
 pub type DecodeFn = unsafe extern "C" fn(src: *mut *const c_void, dst: *mut *mut c_void, len: usize, state: *mut c_int) -> c_int;
 /// rapidyenc_crc.
 pub type CrcFn = unsafe extern "C" fn(src: *const c_void, len: usize, init: u32) -> u32;
+
+/// Built-in Rust incremental yEnc decoder powered by `nntmux_yenc` SIMD kernels
+/// and exact NNTP dot-unstuffing / control-line framing state machine.
+pub unsafe extern "C" fn rust_yenc_decode_incremental(
+    src: *mut *const c_void,
+    dst: *mut *mut c_void,
+    len: usize,
+    state: *mut c_int,
+) -> c_int {
+    if src.is_null() || dst.is_null() || (*src).is_null() || (*dst).is_null() || len == 0 {
+        return 0;
+    }
+    let s = (*src).cast::<u8>();
+    let mut p = (*dst).cast::<u8>();
+    let mut idx = 0usize;
+    let mut st = if state.is_null() { 0 } else { *state };
+
+    macro_rules! check_end {
+        ($new_state:expr) => {
+            if idx == len {
+                if !state.is_null() {
+                    *state = $new_state;
+                }
+                *src = s.add(len).cast();
+                *dst = p.cast();
+                return 0;
+            }
+        };
+    }
+
+    // 1. Resolve cross-chunk state from previous buffer
+    loop {
+        match st {
+            6 => {
+                // RYDEC_STATE_CRLFEQ
+                if *s.add(idx) == b'y' {
+                    if !state.is_null() {
+                        *state = 3; // RYDEC_STATE_NONE
+                    }
+                    *src = s.add(idx + 1).cast();
+                    *dst = p.cast();
+                    return 1; // RYDEC_END_CONTROL
+                }
+                st = 1; // Fall through to RYDEC_STATE_EQ
+            }
+            1 => {
+                // RYDEC_STATE_EQ
+                let c = *s.add(idx);
+                *p = c.wrapping_sub(42 + 64);
+                p = p.add(1);
+                idx += 1;
+                if c != b'\r' {
+                    break;
+                }
+                check_end!(2); // RYDEC_STATE_CR
+                st = 2;
+            }
+            2 => {
+                // RYDEC_STATE_CR
+                if *s.add(idx) != b'\n' {
+                    break;
+                }
+                idx += 1;
+                check_end!(0); // RYDEC_STATE_CRLF
+                st = 0;
+            }
+            0 => {
+                // RYDEC_STATE_CRLF
+                let c = *s.add(idx);
+                if c == b'.' {
+                    idx += 1;
+                    check_end!(4); // RYDEC_STATE_CRLFDT
+                    st = 4;
+                } else if c == b'=' {
+                    idx += 1;
+                    check_end!(6); // RYDEC_STATE_CRLFEQ
+                    st = 6;
+                } else {
+                    break;
+                }
+            }
+            4 => {
+                // RYDEC_STATE_CRLFDT
+                let c = *s.add(idx);
+                if c == b'\r' {
+                    idx += 1;
+                    check_end!(5); // RYDEC_STATE_CRLFDTCR
+                    st = 5;
+                } else if c == b'=' {
+                    idx += 1;
+                    check_end!(6); // RYDEC_STATE_CRLFEQ
+                    st = 6;
+                } else {
+                    break;
+                }
+            }
+            5 => {
+                // RYDEC_STATE_CRLFDTCR
+                if *s.add(idx) == b'\n' {
+                    if !state.is_null() {
+                        *state = 0; // RYDEC_STATE_CRLF
+                    }
+                    *src = s.add(idx + 1).cast();
+                    *dst = p.cast();
+                    return 2; // RYDEC_END_ARTICLE
+                }
+                break;
+            }
+            _ => {
+                // RYDEC_STATE_NONE
+                break;
+            }
+        }
+    }
+
+    // 2. Main body loop with `nntmux_yenc` SIMD fast-path on unstuffed interior spans
+    let mut next_simd_check = 0usize;
+    while len >= 2 && idx < len - 2 {
+        if idx >= next_simd_check {
+            // Scan ahead for a span free of `\r\n.`, `\r\n=`, `=\r`, `=\n`
+            let max_end = len - 2;
+            let mut raw_scan_end = idx;
+            while raw_scan_end < max_end {
+                let b = *s.add(raw_scan_end);
+                if b == b'\r' {
+                    let b1 = *s.add(raw_scan_end + 1);
+                    let b2 = *s.add(raw_scan_end + 2);
+                    if b1 == b'\n' && (b2 == b'.' || b2 == b'=') {
+                        break;
+                    }
+                } else if b == b'=' {
+                    let b1 = *s.add(raw_scan_end + 1);
+                    if b1 == b'\r' || b1 == b'\n' {
+                        break;
+                    }
+                }
+                raw_scan_end += 1;
+            }
+            let mut run_end = raw_scan_end;
+            // Back off trailing `=`, `\r`, `\n` so the SIMD span ends in clean RYDEC_STATE_NONE
+            while run_end > idx {
+                let last = *s.add(run_end - 1);
+                if last == b'=' || last == b'\r' || last == b'\n' {
+                    run_end -= 1;
+                } else {
+                    break;
+                }
+            }
+            let simd_len = run_end - idx;
+            if simd_len >= 64 {
+                let src_ptr = s.add(idx);
+                if p != src_ptr.cast_mut() {
+                    std::ptr::copy(src_ptr, p, simd_len);
+                }
+                let slice = std::slice::from_raw_parts_mut(p, simd_len);
+                let written = nntmux_yenc::decoder::decode_in_place(slice);
+                p = p.add(written);
+                idx = run_end;
+                next_simd_check = raw_scan_end.max(idx + 1);
+                if idx >= len - 2 {
+                    break;
+                }
+            } else {
+                next_simd_check = raw_scan_end.max(idx + 1);
+            }
+        }
+
+        let c = *s.add(idx);
+        match c {
+            b'\r' => {
+                if *s.add(idx + 1) == b'\n' {
+                    let b2 = *s.add(idx + 2);
+                    if b2 == b'.' {
+                        idx += 3;
+                        check_end!(4); // RYDEC_STATE_CRLFDT
+                        let next = *s.add(idx);
+                        if next == b'\r' {
+                            idx += 1;
+                            check_end!(5); // RYDEC_STATE_CRLFDTCR
+                            if *s.add(idx) == b'\n' {
+                                *src = s.add(idx + 1).cast();
+                                *dst = p.cast();
+                                if !state.is_null() {
+                                    *state = 0; // RYDEC_STATE_CRLF
+                                }
+                                return 2; // RYDEC_END_ARTICLE
+                            } else {
+                                idx -= 1;
+                            }
+                        } else if next == b'=' {
+                            idx += 1;
+                            check_end!(6); // RYDEC_STATE_CRLFEQ
+                            let esc = *s.add(idx);
+                            if esc == b'y' {
+                                *src = s.add(idx + 1).cast();
+                                *dst = p.cast();
+                                if !state.is_null() {
+                                    *state = 3; // RYDEC_STATE_NONE
+                                }
+                                return 1; // RYDEC_END_CONTROL
+                            } else {
+                                *p = esc.wrapping_sub(42 + 64);
+                                p = p.add(1);
+                                if esc == b'\r' {
+                                    idx -= 1;
+                                }
+                            }
+                        } else {
+                            idx -= 1;
+                        }
+                    } else if b2 == b'=' {
+                        idx += 3;
+                        check_end!(6); // RYDEC_STATE_CRLFEQ
+                        let esc = *s.add(idx);
+                        if esc == b'y' {
+                            *src = s.add(idx + 1).cast();
+                            *dst = p.cast();
+                            if !state.is_null() {
+                                *state = 3; // RYDEC_STATE_NONE
+                            }
+                            return 1; // RYDEC_END_CONTROL
+                        } else {
+                            *p = esc.wrapping_sub(42 + 64);
+                            p = p.add(1);
+                            if esc == b'\r' {
+                                idx -= 1;
+                            }
+                        }
+                    }
+                }
+                idx += 1;
+            }
+            b'\n' => {
+                idx += 1;
+            }
+            b'=' => {
+                let esc = *s.add(idx + 1);
+                *p = esc.wrapping_sub(42 + 64);
+                p = p.add(1);
+                idx += if esc != b'\r' { 2 } else { 1 };
+            }
+            _ => {
+                *p = c.wrapping_sub(42);
+                p = p.add(1);
+                idx += 1;
+            }
+        }
+    }
+
+    if !state.is_null() {
+        *state = 3; // RYDEC_STATE_NONE
+    }
+
+    // 2nd last char
+    if len >= 2 && idx == len - 2 {
+        let c = *s.add(idx);
+        match c {
+            b'\r' => {
+                if !state.is_null() && *s.add(idx + 1) == b'\n' {
+                    *state = 0; // RYDEC_STATE_CRLF
+                    *src = s.add(len).cast();
+                    *dst = p.cast();
+                    return 0;
+                }
+            }
+            b'\n' => {}
+            b'=' => {
+                let esc = *s.add(idx + 1);
+                *p = esc.wrapping_sub(42 + 64);
+                p = p.add(1);
+                if esc != b'\r' {
+                    idx += 1;
+                }
+            }
+            _ => {
+                *p = c.wrapping_sub(42);
+                p = p.add(1);
+            }
+        }
+        idx += 1;
+    }
+
+    // Final char
+    if idx + 1 == len {
+        let c = *s.add(idx);
+        if c != b'\n' && c != b'\r' && c != b'=' {
+            *p = c.wrapping_sub(42);
+            p = p.add(1);
+        } else if !state.is_null() {
+            *state = if c == b'=' {
+                1 // RYDEC_STATE_EQ
+            } else if c == b'\r' {
+                2 // RYDEC_STATE_CR
+            } else {
+                3 // RYDEC_STATE_NONE
+            };
+        }
+    }
+
+    *src = s.add(len).cast();
+    *dst = p.cast();
+    0
+}
+
+/// Built-in Rust CRC-32 function powered by `crc32fast` SIMD kernels.
+pub unsafe extern "C" fn rust_yenc_crc(src: *const c_void, len: usize, init: u32) -> u32 {
+    if src.is_null() || len == 0 {
+        return init;
+    }
+    let slice = std::slice::from_raw_parts(src.cast::<u8>(), len);
+    crate::crc::crc32_append(slice, init)
+}
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Format {
@@ -47,18 +359,9 @@ impl LineBuf {
         if self.data.len() < end + 1 {
             self.data.resize(end + 1, 0);
         }
-        // strncpy: the bytes up to a NUL, zeros after it - one pass in the C library
-        #[cfg(unix)]
-        unsafe {
-            strncpy(self.data.as_mut_ptr().add(self.len).cast(), src.as_ptr().cast(), src.len());
-        }
-        #[cfg(not(unix))]
-        {
-            let copy = find_byte(src, 0).unwrap_or(src.len());
-            self.data[self.len..self.len + copy].copy_from_slice(&src[..copy]);
-            self.data[self.len + copy..end].fill(0);
-        }
-        self.data[end] = 0;
+        let copy = find_byte(src, 0).unwrap_or(src.len());
+        self.data[self.len..self.len + copy].copy_from_slice(&src[..copy]);
+        self.data[self.len + copy..=end].fill(0);
         self.len = end;
     }
 
@@ -100,47 +403,67 @@ pub struct Decoder {
     crc32: u32,
 }
 
-// Use the same CRT as C++: whitespace follows the current C locale and
-// strtoul overflow follows the platform's unsigned long width (LLP64 on Windows).
-extern "C" {
-    #[link_name = "atoll"]
-    fn c_atoll(s: *const c_char) -> c_longlong;
-    #[cfg(unix)]
-    fn strncpy(dst: *mut c_char, src: *const c_char, n: usize) -> *mut c_char;
-    #[link_name = "isspace"]
-    fn c_isspace(c: c_int) -> c_int;
-    #[link_name = "strtoul"]
-    fn c_strtoul(s: *const c_char, end: *mut *mut c_char, base: c_int) -> c_ulong;
-}
-
-/// The part of `s` (a C string: up to its NUL) that atoll / strtoul(16) can
-/// read - leading white space (the C library's isspace), a sign, "0x" for
-/// hex, the digits - as a C string: the same number without copying the rest
-/// of the text after it (the rest of a read piece, up to 64 KiB).
-fn number_string(s: &[u8], hex: bool) -> CString {
-    let at = |i: usize| s.get(i).copied().unwrap_or(0);
-    let mut i = 0;
-    while at(i) != 0 && unsafe { c_isspace(at(i) as c_int) } != 0 {
-        i += 1;
-    }
-    if matches!(at(i), b'+' | b'-') {
-        i += 1;
-    }
-    if hex && at(i) == b'0' && at(i + 1) | 0x20 == b'x' {
-        i += 2;
-    }
-    while if hex { at(i).is_ascii_hexdigit() } else { at(i).is_ascii_digit() } {
-        i += 1;
-    }
-    CString::new(&s[..i]).expect("no NUL in the number")
+#[inline]
+fn is_c_space(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
 }
 
 fn atoll(s: &[u8]) -> i64 {
-    unsafe { c_atoll(number_string(s, false).as_ptr()) as i64 }
+    let at = |i: usize| s.get(i).copied().unwrap_or(0);
+    let mut i = 0;
+    while at(i) != 0 && is_c_space(at(i)) {
+        i += 1;
+    }
+    let mut neg = false;
+    if matches!(at(i), b'+' | b'-') {
+        neg = at(i) == b'-';
+        i += 1;
+    }
+    let mut acc: i64 = 0;
+    while at(i).is_ascii_digit() {
+        let d = (at(i) - b'0') as i64;
+        acc = if neg {
+            acc.saturating_mul(10).saturating_sub(d)
+        } else {
+            acc.saturating_mul(10).saturating_add(d)
+        };
+        i += 1;
+    }
+    acc
 }
 
 fn strtoul_hex(s: &[u8]) -> u32 {
-    unsafe { c_strtoul(number_string(s, true).as_ptr(), std::ptr::null_mut(), 16) as u32 }
+    let at = |i: usize| s.get(i).copied().unwrap_or(0);
+    let mut i = 0;
+    while at(i) != 0 && is_c_space(at(i)) {
+        i += 1;
+    }
+    let mut neg = false;
+    if matches!(at(i), b'+' | b'-') {
+        neg = at(i) == b'-';
+        i += 1;
+    }
+    if at(i) == b'0' && (at(i + 1) | 0x20) == b'x' && at(i + 2).is_ascii_hexdigit() {
+        i += 2;
+    }
+    let mut acc: c_ulong = 0;
+    let mut overflow = false;
+    while let Some(d) = (at(i) as char).to_digit(16) {
+        if let Some(next) = acc.checked_mul(16).and_then(|v| v.checked_add(d as c_ulong)) {
+            acc = next;
+        } else {
+            overflow = true;
+        }
+        i += 1;
+    }
+    let res = if overflow {
+        c_ulong::MAX
+    } else if neg {
+        acc.wrapping_neg()
+    } else {
+        acc
+    };
+    res as u32
 }
 
 use crate::bytes::{find, find_byte};
@@ -580,19 +903,15 @@ mod tests {
 
     #[test]
     fn control_key_search_matches_strstr() {
-        extern "C" {
-            fn strstr(s: *const c_char, key: *const c_char) -> *const c_char;
-        }
         for key in [b" size=".as_slice(), b" part=", b" name=", b" begin=", b" end=", b" crc32=", b" pcrc32="] {
-            let key_c = CString::new(key).unwrap();
             let text = [b"=ybegin x".as_slice(), key, b"1\r\n", key, b"2"].concat();
             for len in 0..=text.len() {
                 for nul in 0..=len {
                     let mut s = text[..len].to_vec();
                     s.push(0);
                     s[nul] = 0;
-                    let p = unsafe { strstr(s.as_ptr().cast(), key_c.as_ptr()) };
-                    let expected = (!p.is_null()).then(|| p as usize - s.as_ptr() as usize);
+                    let c_slice = &s[..s.iter().position(|&b| b == 0).unwrap_or(s.len())];
+                    let expected = c_slice.windows(key.len()).position(|w| w == key);
                     assert_eq!(cfind(&s[..len], key), expected, "len={len}, NUL={nul}, key={key:?}");
                 }
             }

@@ -1,6 +1,7 @@
 //! Rust parts of nzbget, called from C++ through a C ABI (see nzbget_rs.h).
 //! Each module replaces one C++ routine and must match its output byte for byte.
 
+pub mod archive_native;
 pub mod binrpc;
 pub mod bytes;
 pub mod cleanup;

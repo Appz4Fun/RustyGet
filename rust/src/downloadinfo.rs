@@ -2,15 +2,11 @@
 //! `CompletedFile`, `ServerStatList`, and `ScriptStatusList`
 //! (`daemon/queue/DownloadInfo.cpp`).
 
-use std::ffi::{c_int, CStr};
-
-extern "C" {
-    fn tolower(c: c_int) -> c_int;
-}
+use std::ffi::CStr;
 
 #[inline]
 fn c_lower(b: u8) -> u8 {
-    unsafe { tolower(b as c_int) as u8 }
+    b.to_ascii_lowercase()
 }
 
 pub const SCRIPT_STATUS_NONE: i32 = 0;

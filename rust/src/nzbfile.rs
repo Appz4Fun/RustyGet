@@ -7,13 +7,7 @@
 //! extraction and sanitization (`ProcessFiles`).
 
 use std::collections::HashMap;
-use std::ffi::{c_char, c_int, CStr, CString};
-
-extern "C" {
-    fn isspace(c: c_int) -> c_int;
-    #[cfg_attr(windows, link_name = "_stricmp")]
-    fn strcasecmp(s1: *const c_char, s2: *const c_char) -> c_int;
-}
+use std::ffi::{c_char, CStr, CString};
 
 fn cstring_lossy(bytes: &[u8]) -> CString {
     if let Some(nul) = bytes.iter().position(|&b| b == 0) {
@@ -32,19 +26,7 @@ fn truncate_at_nul(bytes: &[u8]) -> Vec<u8> {
 }
 
 fn text_right_space(byte: u8) -> bool {
-    let ch = (byte as c_char) as c_int;
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    {
-        unsafe { isspace(ch) != 0 }
-    }
-    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-    {
-        if ch < 0 {
-            false
-        } else {
-            unsafe { isspace(ch) != 0 }
-        }
-    }
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
 }
 
 /// The C library's character classes and lower case under the daemon's
@@ -355,21 +337,20 @@ pub fn accumulate_file_stats(
 }
 
 fn classify_meta_type(attr_name: &CStr, attr_val: &CStr) -> i32 {
-    unsafe {
-        if strcasecmp(attr_name.as_ptr(), c"type".as_ptr()) != 0 {
-            return 0;
-        }
-        if strcasecmp(attr_val.as_ptr(), c"password".as_ptr()) == 0 {
-            1
-        } else if strcasecmp(attr_val.as_ptr(), c"category".as_ptr()) == 0 {
-            2
-        } else if strcasecmp(attr_val.as_ptr(), c"name".as_ptr()) == 0 {
-            3
-        } else if strcasecmp(attr_val.as_ptr(), c"title".as_ptr()) == 0 {
-            4
-        } else {
-            0
-        }
+    if !attr_name.to_bytes().eq_ignore_ascii_case(b"type") {
+        return 0;
+    }
+    let val = attr_val.to_bytes();
+    if val.eq_ignore_ascii_case(b"password") {
+        1
+    } else if val.eq_ignore_ascii_case(b"category") {
+        2
+    } else if val.eq_ignore_ascii_case(b"name") {
+        3
+    } else if val.eq_ignore_ascii_case(b"title") {
+        4
+    } else {
+        0
     }
 }
 

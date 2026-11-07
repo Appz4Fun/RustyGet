@@ -1,5 +1,5 @@
 /*
- *  This file is part of nzbget. See <https://nzbget.com>.
+ *  This file is part of RustyGet.
  *
  *  Copyright (C) 2026 Denis <denis@nzbget.com>
  *
@@ -25,58 +25,112 @@
 #include <string>
 #include <vector>
 #include "Newznab.h"
+#include "nzbget_rs.h"
 
-/*
- * Postings: one upload of a release to Usenet, as the indexers list it
- * (an aggregator lists one posting once per indexer) and as nzbget sees it
- * (its message-ids). Telling them apart decides what is worth fetching and
- * what is a duplicate of something already held.
- */
 class Posting
 {
 public:
-	// listings of one size posted this close together are one posting on
-	// several indexers (each lists it with its own usenet date)
 	static constexpr int RelistWindowSec = 120;
-	// share of the articles two nzb-files may have in common before they
-	// count as one posting (a re-listed posting can carry a re-uploaded segment)
 	static constexpr double SamePostingShare = 0.01;
-	// message-id hashes kept in a posting's sketch
 	static constexpr size_t SketchSize = 64;
-	// an indexer may serve another indexer's nzb-file for a listing: more than
-	// this share off the listed size
 	static constexpr double ListingMismatchShare = 0.02;
 
 	using Sketch = std::vector<uint32_t>;
 	using Group = std::vector<Newznab::Result>;
 
-	/* the SketchSize smallest CRC32s of the message-ids: postings that share
-	 * most of their articles share most of their sketch, distinct postings
-	 * about none; small enough to keep for every posting seen */
-	static Sketch MakeSketch(const std::vector<std::string>& messageIds);
-	static bool SameSketch(const Sketch& a, const Sketch& b);
+	static Sketch MakeSketch(const std::vector<std::string>& messageIds)
+	{
+		Strings ids(messageIds);
+		Sketch sketch(SketchSize);
+		size_t len = 0;
+		nzbget_rs_posting_sketch(ids.data.data(), ids.lens.data(), ids.data.size(), sketch.data(), &len);
+		sketch.resize(len);
+		return sketch;
+	}
 
-	/* the sketch of an nzb-file on disk (the copies nzbget keeps of what it
-	 * downloaded); cached by path, modification time and size. False if the
-	 * file can't be read or isn't an nzb-file. */
-	static bool SketchOfFile(const std::string& path, Sketch& sketch);
+	static bool SameSketch(const Sketch& a, const Sketch& b)
+	{
+		return nzbget_rs_posting_same_sketch(a.data(), a.size(), b.data(), b.size()) != 0;
+	}
 
-	/* more than SamePostingShare of the articles in common (both sorted, unique) */
-	static bool SamePosting(const std::vector<std::string>& a, const std::vector<std::string>& b);
+	static bool SketchOfFile(const std::string& path, Sketch& sketch)
+	{
+		sketch.assign(SketchSize, 0);
+		size_t len = 0;
+		if (!nzbget_rs_posting_sketch_of_file(path.c_str(), sketch.data(), SketchSize, &len))
+		{
+			sketch.clear();
+			return false;
+		}
+		sketch.resize(len);
+		return true;
+	}
 
-	/* the listings of one posting together; a listing without a size or a date
-	 * stays alone */
-	static std::vector<Group> GroupListings(std::vector<Newznab::Result> results);
+	static bool SamePosting(const std::vector<std::string>& a, const std::vector<std::string>& b)
+	{
+		Strings x(a), y(b);
+		return nzbget_rs_posting_same_posting(x.data.data(), x.lens.data(), x.data.size(), y.data.data(), y.lens.data(),
+			y.data.size()) != 0;
+	}
 
-	/* the indexer served an nzb-file more than ListingMismatchShare off the size it lists */
-	static bool ListingMismatch(const Newznab::Result& listing, long long nzbBytes);
+	static std::vector<Group> GroupListings(std::vector<Newznab::Result> results)
+	{
+		std::vector<NzbgetRsListing> raw = Listings(results);
+		std::vector<size_t> indices(raw.size()), sizes(raw.size());
+		size_t count = 0;
+		nzbget_rs_posting_group(raw.data(), raw.size(), indices.data(), sizes.data(), &count);
+		return Groups(results, indices, sizes, count);
+	}
 
-	/* the order to fetch postings in: each posting's listings with the most
-	 * grabbed first, postings by closeness to the pick's size, then grabs,
-	 * then date, one posting of each distinct size before the rest; at most
-	 * maxPostings of them when that is above 0 */
+	static bool ListingMismatch(const Newznab::Result& listing, long long nzbBytes)
+	{
+		return nzbget_rs_posting_listing_mismatch((int64_t)listing.size, (int64_t)nzbBytes) != 0;
+	}
+
 	static std::vector<Group> OrderPostings(const std::vector<Newznab::Result>& candidates,
-		long long pickBytes, int maxPostings);
+		long long pickBytes, int maxPostings)
+	{
+		std::vector<NzbgetRsListing> raw = Listings(candidates);
+		std::vector<size_t> indices(raw.size()), sizes(raw.size());
+		size_t count = 0;
+		nzbget_rs_posting_order(raw.data(), raw.size(), (int64_t)pickBytes, maxPostings, indices.data(), sizes.data(), &count);
+		return Groups(candidates, indices, sizes, count);
+	}
+
+private:
+	struct Strings
+	{
+		std::vector<const char*> data;
+		std::vector<size_t> lens;
+		explicit Strings(const std::vector<std::string>& texts)
+		{
+			for (const std::string& t : texts) { data.push_back(t.data()); lens.push_back(t.size()); }
+		}
+	};
+
+	static std::vector<NzbgetRsListing> Listings(const std::vector<Newznab::Result>& results)
+	{
+		std::vector<NzbgetRsListing> raw;
+		for (const Newznab::Result& r : results)
+		{
+			raw.push_back({r.link.data(), r.link.size(), (int64_t)r.size, (int32_t)r.grabs, (int64_t)r.date});
+		}
+		return raw;
+	}
+
+	static std::vector<Group> Groups(const std::vector<Newznab::Result>& results, const std::vector<size_t>& indices,
+		const std::vector<size_t>& sizes, size_t count)
+	{
+		std::vector<Group> groups;
+		size_t at = 0;
+		for (size_t g = 0; g < count; g++)
+		{
+			Group group;
+			for (size_t k = 0; k < sizes[g]; k++) group.push_back(results[indices[at++]]);
+			groups.push_back(std::move(group));
+		}
+		return groups;
+	}
 };
 
 #endif

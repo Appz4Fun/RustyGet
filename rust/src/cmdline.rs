@@ -17,10 +17,15 @@ extern "C" {
         longopts: *const LongOption,
         longindex: *mut c_int,
     ) -> c_int;
-    fn atoi(s: *const c_char) -> c_int;
-    fn strcasecmp(a: *const c_char, b: *const c_char) -> c_int;
-    fn strncasecmp(a: *const c_char, b: *const c_char, n: usize) -> c_int;
-    fn getcwd(buf: *mut c_char, size: usize) -> *mut c_char;
+}
+
+#[inline]
+unsafe fn c_atoi_ptr(s: *const c_char) -> c_int {
+    if s.is_null() {
+        0
+    } else {
+        crate::diskstate_format::c_atoi(CStr::from_ptr(s).to_bytes())
+    }
 }
 
 const SHORT_OPTIONS: &CStr = c"c:hno:psvAB:DCE:G:K:LPR:STUQOVW:";
@@ -232,7 +237,10 @@ struct State<'a> {
 }
 
 fn eq(a: *const c_char, b: &CStr) -> bool {
-    !a.is_null() && unsafe { strcasecmp(a, b.as_ptr()) } == 0
+    !a.is_null()
+        && unsafe { CStr::from_ptr(a) }
+            .to_bytes()
+            .eq_ignore_ascii_case(b.to_bytes())
 }
 
 impl State<'_> {
@@ -309,7 +317,7 @@ fn append(s: &mut State, c: c_int) -> Result<Flow, Abort> {
             if !s.take_value(err)? {
                 return Ok(Flow::Stop);
             }
-            let v = unsafe { atoi(s.arg(optind - 1)) };
+            let v = unsafe { c_atoi_ptr(s.arg(optind - 1)) };
             s.set(field::ADD_PRIORITY, v)?;
         } else if eq(a, c"C") {
             if !s.take_value(err)? {
@@ -331,7 +339,7 @@ fn append(s: &mut State, c: c_int) -> Result<Flow, Abort> {
             if !s.take_value(err)? {
                 return Ok(Flow::Stop);
             }
-            let v = unsafe { atoi(s.arg(optind - 1)) };
+            let v = unsafe { c_atoi_ptr(s.arg(optind - 1)) };
             s.set(field::ADD_DUPE_SCORE, v)?;
         } else if eq(a, c"DM") {
             if !s.take_value(err)? {
@@ -585,7 +593,7 @@ fn edit(s: &mut State, arg: *mut c_char) -> Result<Flow, Abort> {
         }
         let t = s.edit_text;
         // atoi(text) == 0 && strcmp("0", text) (a null text read as empty)
-        let zero = t.is_null() || unsafe { atoi(t) } == 0;
+        let zero = t.is_null() || unsafe { c_atoi_ptr(t) } == 0;
         let is_zero_text = !t.is_null() && unsafe { CStr::from_ptr(t) }.to_bytes() == b"0";
         if zero && !is_zero_text {
             s.sink.error(err)?;
@@ -593,7 +601,7 @@ fn edit(s: &mut State, arg: *mut c_char) -> Result<Flow, Abort> {
         }
         return Ok(Flow::Next);
     } else {
-        let offset = if a.is_null() { 0 } else { unsafe { atoi(a) } };
+        let offset = if a.is_null() { 0 } else { unsafe { c_atoi_ptr(a) } };
         s.set(field::EDIT_OFFSET, offset)?;
         if offset == 0 {
             s.sink.error(err)?;
@@ -669,7 +677,7 @@ fn init_command_line(s: &mut State, use_long: bool) -> Result<(), Abort> {
             b'B' => system(s, arg)?,
             b'G' => {
                 s.set(field::CLIENT_OPERATION, op::LOG)?;
-                let v = unsafe { atoi(arg) };
+                let v = unsafe { c_atoi_ptr(arg) };
                 s.set(field::LOG_LINES, v)?;
                 if v == 0 {
                     s.sink.error(c"Could not parse value of option 'G'")?;
@@ -756,9 +764,7 @@ fn tokens(s: &[u8]) -> impl Iterator<Item = &[u8]> {
 }
 
 fn atoi_bytes(b: &[u8]) -> i32 {
-    let mut v = b.to_vec();
-    v.push(0);
-    unsafe { atoi(v.as_ptr().cast()) }
+    crate::diskstate_format::c_atoi(b)
 }
 
 /// ParseFileIdList
@@ -820,20 +826,30 @@ fn init_file_arg(s: &mut State) -> Result<(), Abort> {
         s.sink.set_str(field::LAST_ARG, a)?;
         // a moved-out argument (null) read as empty
         let name: &CStr = if a.is_null() { c"" } else { unsafe { CStr::from_ptr(a) } };
-        let absolute = name.to_bytes().first() == Some(&b'/')
-            || unsafe { strncasecmp(name.as_ptr(), c"http://".as_ptr(), 6) } == 0
-            || unsafe { strncasecmp(name.as_ptr(), c"https://".as_ptr(), 7) } == 0;
+        let nb = name.to_bytes();
+        let absolute = nb.first() == Some(&b'/')
+            || (nb.len() >= 6 && nb[..6].eq_ignore_ascii_case(b"http:/"))
+            || (nb.len() >= 7 && nb[..7].eq_ignore_ascii_case(b"https:/"));
         if absolute {
             s.sink.set_str(field::ARG_FILENAME, name.as_ptr())?;
         } else {
-            let mut buf = vec![0u8; 1024];
-            let cwd = unsafe { getcwd(buf.as_mut_ptr().cast(), buf.len()) };
-            if cwd.is_null() {
-                buf[0] = 0;
-            }
-            let mut path = CStr::from_bytes_until_nul(&buf).map(|c| c.to_bytes().to_vec()).unwrap_or_default();
+            let mut path = std::env::current_dir()
+                .ok()
+                .map(|p| {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::ffi::OsStrExt;
+                        p.as_os_str().as_bytes().to_vec()
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        p.to_string_lossy().into_owned().into_bytes()
+                    }
+                })
+                .filter(|b| b.len() < 1024 && !b.contains(&0))
+                .unwrap_or_default();
             path.push(b'/');
-            path.extend_from_slice(name.to_bytes());
+            path.extend_from_slice(nb);
             path.push(0);
             s.sink.set_str(field::ARG_FILENAME, path.as_ptr().cast())?;
         }
@@ -892,11 +908,11 @@ Switches:\n\
                             (required options must be passed with --option)\n\
   -p, --printconfig         Print configuration and exit\n\
   -o, --option <name=value> Set or override option in configuration-file\n\
-  -s, --server              Start nzbget as a server in console-mode\n",
+  -s, --server              Start RustyGet as a server in console-mode\n",
     );
     if include_daemon {
         out.extend_from_slice(
-            b"  -D, --daemon              Start nzbget as a server in daemon-mode\n",
+            b"  -D, --daemon              Start RustyGet as a server in daemon-mode\n",
         );
     }
     out.extend_from_slice(
@@ -1237,7 +1253,7 @@ mod tests {
         let out = format_usage(b"nzbget", b'/', true);
         let text = String::from_utf8(out).unwrap();
         assert!(text.starts_with("Usage:\n  nzbget [switches]\n\nSwitches:\n"));
-        assert!(text.contains("  -D, --daemon              Start nzbget as a server in daemon-mode\n"));
+        assert!(text.contains("  -D, --daemon              Start RustyGet as a server in daemon-mode\n"));
         assert!(text.contains("e. g.: \"my nzb download/myfile.nfo\" \"another nzb\"\n"));
 
         let out_no_daemon = format_usage(b"nzbget.exe", b'\\', false);

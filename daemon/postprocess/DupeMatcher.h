@@ -1,5 +1,5 @@
 /*
- *  This file is part of nzbget. See <https://nzbget.com>.
+ *  This file is part of RustyGet.
  *
  *  Copyright (C) 2015-2016 Andrey Prygunkov <hugbug@users.sourceforge.net>
  *
@@ -23,14 +23,46 @@
 
 #include "NString.h"
 #include "Log.h"
+#include "Options.h"
+#include "nzbget_rs.h"
 
 class DupeMatcher
 {
 public:
 	DupeMatcher(const char* destDir, int64 expectedSize) :
 		m_destDir(destDir), m_expectedSize(expectedSize) {}
-	bool Prepare();
-	bool MatchDupeContent(const char* dupeDir);
+
+	bool Prepare()
+	{
+		int comp = m_compressed ? 1 : 0;
+		bool sizeOK = nzbget_rs_dupematcher_prepare(
+			m_destDir,
+			g_Options ? g_Options->GetUnrarCmd() : "",
+			m_expectedSize,
+			&m_maxSize,
+			&comp,
+			+[](void* rawCtx, const char* msg) {
+				static_cast<DupeMatcher*>(rawCtx)->PrintMessage(
+					Message::mkDetail, "%s", msg ? msg : "");
+			},
+			this) != 0;
+		m_compressed = comp != 0;
+		return sizeOK;
+	}
+
+	bool MatchDupeContent(const char* dupeDir)
+	{
+		return nzbget_rs_dupematcher_match_dupe_content(
+			dupeDir,
+			g_Options ? g_Options->GetUnrarCmd() : "",
+			m_maxSize,
+			m_compressed ? 1 : 0,
+			+[](void* rawCtx, const char* msg) {
+				static_cast<DupeMatcher*>(rawCtx)->PrintMessage(
+					Message::mkDetail, "%s", msg ? msg : "");
+			},
+			this) != 0;
+	}
 
 protected:
 	virtual void PrintMessage([[maybe_unused]] Message::EKind kind,

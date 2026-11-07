@@ -1,5 +1,5 @@
 /*
- *  This file is part of nzbget. See <https://nzbget.com>.
+ *  This file is part of RustyGet.
  *
  *  Copyright (C) 2013-2016 Andrey Prygunkov <hugbug@users.sourceforge.net>
  *
@@ -27,11 +27,59 @@
 #include <vector>
 #include "NString.h"
 #include "Log.h"
+#include "Options.h"
+#include "nzbget_rs.h"
 
 class ParRenamer
 {
 public:
-	void Execute();
+	void Execute()
+	{
+		int renamedCount = 0;
+		int hasMissedFiles = 0;
+		int hasDamagedParFiles = 0;
+		nzbget_rs_par_renamer_execute(
+			m_infoName ? *m_infoName : "",
+			m_destDir ? *m_destDir : "",
+			g_Options ? g_Options->GetParIgnoreExt() : "",
+			m_detectMissing ? 1 : 0,
+			PATH_SEPARATOR,
+			this,
+			+[](void* rawCtx) noexcept -> int
+			{
+				return static_cast<ParRenamer*>(rawCtx)->IsStopped() ? 1 : 0;
+			},
+			+[](void* rawCtx, const char* label, int stage) noexcept
+			{
+				auto* self = static_cast<ParRenamer*>(rawCtx);
+				self->m_progressLabel = label ? label : "";
+				self->m_stageProgress = stage;
+				self->UpdateProgress();
+			},
+			+[](void* rawCtx, int kind, const char* text) noexcept
+			{
+				auto* self = static_cast<ParRenamer*>(rawCtx);
+				Message::EKind msgKind = kind == 0 ? Message::mkInfo : kind == 1 ? Message::mkWarning : Message::mkError;
+				self->PrintMessage(msgKind, "%s", text ? text : "");
+			},
+			+[](void* rawCtx, const char* name) noexcept
+			{
+				static_cast<ParRenamer*>(rawCtx)->RegisterParredFile(name ? name : "");
+			},
+			+[](void* rawCtx, const char* oldRel, const char* newRel) noexcept
+			{
+				static_cast<ParRenamer*>(rawCtx)->RegisterRenamedFile(
+					oldRel ? oldRel : "", newRel ? newRel : "");
+			},
+			&renamedCount,
+			&hasMissedFiles,
+			&hasDamagedParFiles);
+
+		m_renamedCount = renamedCount;
+		m_hasMissedFiles = hasMissedFiles != 0;
+		m_hasDamagedParFiles = hasDamagedParFiles != 0;
+	}
+
 	void SetDestDir(const char* destDir) { m_destDir = destDir; }
 	const char* GetInfoName() { return m_infoName; }
 	void SetInfoName(const char* infoName) { m_infoName = infoName; }
@@ -39,10 +87,22 @@ public:
 	bool HasMissedFiles() { return m_hasMissedFiles; }
 	bool HasDamagedParFiles() { return m_hasDamagedParFiles; }
 	void SetDetectMissing(bool detectMissing) { m_detectMissing = detectMissing; }
-	/* Base names of the files a par2-file's description packets list (only
-	 * that file's packets are read). False when it cannot be loaded or is
-	 * larger than MaxIndexParSize. */
-	static bool ListParredFiles(const char* parFilename, std::vector<std::string>& filenames);
+
+	static bool ListParredFiles(const char* parFilename, std::vector<std::string>& filenames)
+	{
+		return nzbget_rs_par_renamer_list_parred_files(
+			parFilename,
+			MaxIndexParSize,
+			&filenames,
+			+[](void* rawCtx, const char* name) noexcept
+			{
+				if (name)
+				{
+					static_cast<std::vector<std::string>*>(rawCtx)->emplace_back(name);
+				}
+			}) != 0;
+	}
+
 	static constexpr int64 MaxIndexParSize = 16 * 1024 * 1024;
 
 protected:

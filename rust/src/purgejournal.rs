@@ -4,6 +4,7 @@
 //!
 //! A failed/ambiguous publication poisons this registry until a checked complete
 //! journal scan is recovered. No subsequent mutation or lease allocation runs.
+#![allow(dead_code)]
 use crate::dupepurge::*;
 use md5::{Digest, Md5};
 

@@ -223,7 +223,7 @@
     "description": "Button to reload the application"
   },
   "btn_reload_nzbget": {
-    "message": "Reload NZBGet",
+    "message": "Reload RustyGet",
     "description": "Button to reload the application"
   },
   "btn_shutdown": {
@@ -703,8 +703,8 @@
     "description": "Title for the statistics dialog"
   },
   "stat_nzbget_version": {
-    "message": "NZBGet version",
-    "description": "Label for the NZBGet version stat"
+    "message": "RustyGet version",
+    "description": "Label for the RustyGet version stat"
   },
   "stat_uptime": {
     "message": "Uptime",
@@ -1215,11 +1215,11 @@
     "description": "Header when config is saved"
   },
   "config_saved_reload": {
-    "message": "Changes will take effect after $1NZBGet is reloaded$2.",
+    "message": "Changes will take effect after $1RustyGet is reloaded$2.",
     "description": "Reload message. Configuration UI text. $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag"
   },
   "config_info_nzbget_settings": {
-    "message": "NZBGet settings",
+    "message": "RustyGet settings",
     "description": "Header in Info section"
   },
   "config_info_nzbget_settings_desc": {
@@ -1239,7 +1239,7 @@
     "description": "Header in Info section"
   },
   "config_info_web_interface_settings_desc": {
-    "message": "Settings for $1web-interface$2 are saved in your browser. All other settings are stored in the configuration file on the computer where NZBGet is running.",
+    "message": "Settings for $1web-interface$2 are saved in your browser. All other settings are stored in the configuration file on the computer where RustyGet is running.",
     "description": "Description in Info section. $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag"
   },
   "config_info_backup_restore_settings": {
@@ -1259,7 +1259,7 @@
     "description": "Header for official website link"
   },
   "config_info_official_website_desc": {
-    "message": "The primary source for NZBGet downloads, news, and official documentation.",
+    "message": "The primary source for RustyGet downloads, news, and official documentation.",
     "description": "Description for official website link"
   },
   "config_info_github_desc": {
@@ -1535,7 +1535,7 @@
     "description": "OpenSSL exemption text"
   },
   "license_desc_par2": {
-    "message": "NZBGet uses $1Par2cmdline-turbo$2 and $3rapidyenc$4 by $5animetosho$6.",
+    "message": "RustyGet uses $1Par2cmdline-turbo$2 and $3rapidyenc$4 by $5animetosho$6.",
     "description": "License description. $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag; $3 is a dynamic value/HTML tag; $4 is a dynamic value/HTML tag; $5 is a dynamic value/HTML tag; $6 is a dynamic value/HTML tag"
   },
   "license_terms_par2": {
@@ -1543,7 +1543,7 @@
     "description": "License terms. $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag; $3 is a dynamic value/HTML tag; $4 is a dynamic value/HTML tag"
   },
   "license_desc_jquery": {
-    "message": "NZBGet web-interface uses $1jQuery$2. The jQuery Project is run by a distributed group of volunteers that all want to see jQuery become the best JavaScript tool possible.",
+    "message": "RustyGet web-interface uses $1jQuery$2. The jQuery Project is run by a distributed group of volunteers that all want to see jQuery become the best JavaScript tool possible.",
     "description": "License description. $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag"
   },
   "license_terms_jquery": {
@@ -1551,7 +1551,7 @@
     "description": "License terms. $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag"
   },
   "license_desc_bootstrap": {
-    "message": "NZBGet web-interface uses $1Bootstrap$2. Designed and built with all the love in the world $3@twitter$4 by $5@mdo$6 and $7@fat$8.",
+    "message": "RustyGet web-interface uses $1Bootstrap$2. Designed and built with all the love in the world $3@twitter$4 by $5@mdo$6 and $7@fat$8.",
     "description": "License description. $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag; $3 is a dynamic value/HTML tag; $4 is a dynamic value/HTML tag; $5 is a dynamic value/HTML tag; $6 is a dynamic value/HTML tag; $7 is a dynamic value/HTML tag; $8 is a dynamic value/HTML tag"
   },
   "license_terms_bootstrap": {
@@ -1559,7 +1559,7 @@
     "description": "License terms. $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag"
   },
   "license_desc_raphael": {
-    "message": "NZBGet web-interface makes use of $1Raphaël$2 built by $3Dmitry Baranovskiy$4.",
+    "message": "RustyGet web-interface makes use of $1Raphaël$2 built by $3Dmitry Baranovskiy$4.",
     "description": "License description. $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag; $3 is a dynamic value/HTML tag; $4 is a dynamic value/HTML tag"
   },
   "license_terms_raphael": {
@@ -1567,7 +1567,7 @@
     "description": "License terms. $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag"
   },
   "license_desc_elycharts": {
-    "message": "For charts NZBGet relies on $1Elycharts$2 by $3Void Labs s.n.c.$4.",
+    "message": "For charts RustyGet relies on $1Elycharts$2 by $3Void Labs s.n.c.$4.",
     "description": "License description. $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag; $3 is a dynamic value/HTML tag; $4 is a dynamic value/HTML tag"
   },
   "license_terms_elycharts": {
@@ -1575,11 +1575,11 @@
     "description": "License terms. $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag"
   },
   "license_desc_iconsweets": {
-    "message": "NZBGet web-interface includes selected icons from collections $1iconSweets$2 and $3iconSweets2$4 by $5Yummygum$6.",
+    "message": "RustyGet web-interface includes selected icons from collections $1iconSweets$2 and $3iconSweets2$4 by $5Yummygum$6.",
     "description": "License description. $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag; $3 is a dynamic value/HTML tag; $4 is a dynamic value/HTML tag; $5 is a dynamic value/HTML tag; $6 is a dynamic value/HTML tag"
   },
   "license_terms_iconsweets": {
-    "message": "The icons are generally licensed under a custom license but used in NZBGet with author's permission.",
+    "message": "The icons are generally licensed under a custom license but used in RustyGet with author's permission.",
     "description": "License terms"
   },
   "license_desc_selfhst": {
@@ -1591,7 +1591,7 @@
     "description": "License description. $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag; $3 is a dynamic value/HTML tag; $4 is a dynamic value/HTML tag"
   },
   "license_desc_boost": {
-    "message": "NZBGet uses $1Boost$2 by $3Boost organization and wider Boost community$4",
+    "message": "RustyGet uses $1Boost$2 by $3Boost organization and wider Boost community$4",
     "description": "License description. $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag; $3 is a dynamic value/HTML tag; $4 is a dynamic value/HTML tag"
   },
   "license_terms_boost": {
@@ -1599,7 +1599,7 @@
     "description": "License terms. $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag"
   },
   "extman_desc1": {
-    "message": "$1The Extension Manager$2 is a tool for downloading, updating and deleting NZBGet extensions with backwards compatibility with extensions based on header configuration definition.",
+    "message": "$1The Extension Manager$2 is a tool for downloading, updating and deleting RustyGet extensions with backwards compatibility with extensions based on header configuration definition.",
     "description": "Description text in the Extension Manager explaining its purpose and features. Parameters:; $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag"
   },
   "extman_desc2": {
@@ -1835,7 +1835,7 @@
     "description": "Help text. $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag"
   },
   "help_quick_filter_desc16": {
-    "message": "This is a short documentation. For more info visit $1nzbget.com/documentation/quick-filter/$2.",
+    "message": "This is a short documentation. For more info visit $1rustyget.com/documentation/quick-filter/$2.",
     "description": "Help text. $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag"
   },
   "edit_nzb_name": {
@@ -2199,7 +2199,7 @@
     "description": "Filter examples list."
   },
   "help_feed_filter_link": {
-    "message": "This is a short documentation. For more info visit $1nzbget.com/documentation/rss/$2.",
+    "message": "This is a short documentation. For more info visit $1rustyget.com/documentation/rss/$2.",
     "description": "Link to documentation. $1, $2 are <a> anchor tags for link."
   },
   "msg_filter_percent_error": {
@@ -2643,7 +2643,7 @@
     "description": "Help text. Configuration UI text"
   },
   "update_dialog_title": {
-    "message": "Update NZBGet",
+    "message": "Update RustyGet",
     "description": "Dialog title. Title or heading | Update dialog text"
   },
   "update_dialog_installed_info": {
@@ -2715,7 +2715,7 @@
     "description": "Help text. Update dialog text. $1, $2, $3, $4, $5, $6 are HTML tags. $7 is the translated name of the SECURITY section."
   },
   "update_progress_dialog_title": {
-    "message": "Updating NZBGet",
+    "message": "Updating RustyGet",
     "description": "Dialog title. Title or heading | Update dialog text"
   },
   "exec_script_dialog_status": {
@@ -2731,7 +2731,7 @@
     "description": "Dialog title. Title or heading"
   },
   "reload_dialog_text1": {
-    "message": "Reload NZBGet?",
+    "message": "Reload RustyGet?",
     "description": "Confirmation text"
   },
   "reload_dialog_text2": {
@@ -2739,7 +2739,7 @@
     "description": "Confirmation text"
   },
   "config_reloading_title": {
-    "message": "Reloading NZBGet",
+    "message": "Reloading RustyGet",
     "description": "Header text. Title or heading | Configuration UI text"
   },
   "config_reloading_action": {
@@ -2763,7 +2763,7 @@
     "description": "Dialog title. Title or heading"
   },
   "shutdown_dialog_text1": {
-    "message": "Shutdown NZBGet?",
+    "message": "Shutdown RustyGet?",
     "description": "Confirmation text"
   },
   "shutdown_dialog_text2": {
@@ -2771,7 +2771,7 @@
     "description": "Confirmation text"
   },
   "login_dialog_title": {
-    "message": "NZBGet Login",
+    "message": "RustyGet Login",
     "description": "Dialog header. Title or heading"
   },
   "login_dialog_username": {
@@ -2991,20 +2991,20 @@
     "description": "Pause dialog text. Pause dialog text"
   },
   "config_system_reload_label": {
-    "message": "Reload NZBGet",
+    "message": "Reload RustyGet",
     "description": "Config System section label"
   },
   "config_system_reload_desc": {
-    "message": "If the configuration file was edited externally (in a text editor) or you have not reloaded NZBGet directly after saving the changes in web-interface you can do this here.",
-    "description": "Description text explaining when and why to reload NZBGet configuration."
+    "message": "If the configuration file was edited externally (in a text editor) or you have not reloaded RustyGet directly after saving the changes in web-interface you can do this here.",
+    "description": "Description text explaining when and why to reload RustyGet configuration."
   },
   "config_system_shutdown_label": {
-    "message": "Shutdown NZBGet",
-    "description": "Label for the configuration option to shut down NZBGet."
+    "message": "Shutdown RustyGet",
+    "description": "Label for the configuration option to shut down RustyGet."
   },
   "config_system_shutdown_desc": {
     "message": "There is no way to start the program again from web-interface. Make sure you know how to do this.",
-    "description": "Warning description text explaining the consequences of shutting down NZBGet from the UI."
+    "description": "Warning description text explaining the consequences of shutting down RustyGet from the UI."
   },
   "config_system_backup_label": {
     "message": "Backup Settings",
@@ -3023,12 +3023,12 @@
     "description": "Description text explaining how the restore settings feature works."
   },
   "config_system_update_label": {
-    "message": "Update NZBGet",
-    "description": "Label for the configuration option to update NZBGet."
+    "message": "Update RustyGet",
+    "description": "Label for the configuration option to update RustyGet."
   },
   "config_system_update_desc": {
     "message": "Should a new version be found you'll be asked to install it.",
-    "description": "Description text explaining the update NZBGet feature."
+    "description": "Description text explaining the update RustyGet feature."
   },
   "label_paused": {
     "message": "Paused",
@@ -3283,7 +3283,7 @@
     "description": "Alert message. System message or dialog text. $1 is a dynamic value/HTML tag"
   },
   "msg_cannot_establish_connection": {
-    "message": "Cannot establish connection to NZBGet.",
+    "message": "Cannot establish connection to RustyGet.",
     "description": "Error message when connection fails"
   },
   "msg_no_stats_available": {
@@ -3315,7 +3315,7 @@
     "description": "Message when settings table is empty"
   },
   "msg_terminated_waiting": {
-    "message": "NZBGet has been terminated. Waiting for restart...",
+    "message": "RustyGet has been terminated. Waiting for restart...",
     "description": "Status message during update"
   },
   "msg_started_refreshing": {
@@ -3435,7 +3435,7 @@
     "description": "Error message. System message or dialog text. $1 is a dynamic value/HTML tag"
   },
   "msg_no_scripts_found": {
-    "message": "No scripts found. If you just changed option \"ScriptDir\", save settings and reload NZBGet.",
+    "message": "No scripts found. If you just changed option \"ScriptDir\", save settings and reload RustyGet.",
     "description": "Message when no scripts are found in ScriptListDialog"
   },
   "btn_show_dev_info": {
@@ -3447,11 +3447,11 @@
     "description": "Spoiler button label"
   },
   "msg_not_valid_backup": {
-    "message": "File $1 is not a valid NZBGet backup.",
+    "message": "File $1 is not a valid RustyGet backup.",
     "description": "Alert message during restore. $1 is a dynamic value/HTML tag"
   },
   "msg_no_filesystem_access_backup": {
-    "message": "Unfortunately your browser doesn't support access to local file system. To backup settings you can manually save file \"nzbget.conf\" ($1).",
+    "message": "Unfortunately your browser doesn't support access to local file system. To backup settings you can manually save file \"rustyget.conf\" ($1).",
     "description": "Alert message during backup. $1 is a dynamic value/HTML tag"
   },
   "config_loading_title": {
@@ -3463,15 +3463,15 @@
     "description": "Alert heading. Configuration UI text"
   },
   "config_load_template_error_desc": {
-    "message": "Could not load template configuration file $1nzbget.conf$2. The file contains descriptions of options and is needed to display settings page. The file comes with NZBGet distribution archive and is usually automatically installed into the right location. This does not seem to be the case with your installation though.",
+    "message": "Could not load template configuration file $1rustyget.conf$2. The file contains descriptions of options and is needed to display settings page. The file comes with RustyGet distribution archive and is usually automatically installed into the right location. This does not seem to be the case with your installation though.",
     "description": "Config loading error description. $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag"
   },
   "config_load_template_error_empty": {
-    "message": "Please put the template configuration file $1nzbget.conf$2 into the directory with web-interface files ($3$4$5).",
+    "message": "Please put the template configuration file $1rustyget.conf$2 into the directory with web-interface files ($3$4$5).",
     "description": "Config loading error detail. $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag; $3 is a dynamic value/HTML tag; $4 is a dynamic value/HTML tag; $5 is a dynamic value/HTML tag"
   },
   "config_load_template_error_not_found": {
-    "message": "Please edit your configuration file ($1$2$3) in a text editor and set the option $4ConfigTemplate$5 to point to the template configuration file $6nzbget.conf$7.",
+    "message": "Please edit your configuration file ($1$2$3) in a text editor and set the option $4ConfigTemplate$5 to point to the template configuration file $6rustyget.conf$7.",
     "description": "Config loading error detail. $1 is a dynamic value/HTML tag; $2 is a dynamic value/HTML tag; $3 is a dynamic value/HTML tag; $4 is a dynamic value/HTML tag; $5 is a dynamic value/HTML tag; $6 is a dynamic value/HTML tag; $7 is a dynamic value/HTML tag"
   },
   "msg_package_info_error": {
@@ -3520,7 +3520,7 @@
   },
   "label_dupe_score_prefix": {
     "message": "dupe-score: ",
-    "description": "Prefix for duplicate detection score (e.g., 'dupe-score: 500'). Part of NZBGet's duplicate checking system. 'dupe' means 'duplicate' - do NOT translate as 'double'."
+    "description": "Prefix for duplicate detection score (e.g., 'dupe-score: 500'). Part of RustyGet's duplicate checking system. 'dupe' means 'duplicate' - do NOT translate as 'double'."
   },
   "label_dupe_key_prefix": {
     "message": "dupe-key: ",
@@ -3551,7 +3551,7 @@
     "description": "Error message indicating that a requested feature or function is not currently available."
   },
   "history_success_dialog_text3": {
-    "message": "Records marked as success are considered successfully downloaded and processed. This is useful for downloads repaired or processed outside of NZBGet. Duplicates with higher duplicate scores may be downloaded in the future.",
+    "message": "Records marked as success are considered successfully downloaded and processed. This is useful for downloads repaired or processed outside of RustyGet. Duplicates with higher duplicate scores may be downloaded in the future.",
     "description": "Dialog text part 2. History UI text"
   },
   "history_good_dialog_text3": {
@@ -3579,8 +3579,8 @@
     "description": "Title or heading displayed in the settings area for restoring settings."
   },
   "config_system_update_title": {
-    "message": "Check if a new version of NZBGet is available.",
-    "description": "Title or heading displayed in the settings area for updating NZBGet."
+    "message": "Check if a new version of RustyGet is available.",
+    "description": "Title or heading displayed in the settings area for updating RustyGet."
   },
   "btn_refresh_title": {
     "message": "Refresh $1",
@@ -3611,7 +3611,7 @@
     "description": "Title for missing post-processing parameters message"
   },
   "msg_no_parameters_desc": {
-    "message": "The post-processing script you are currently using doesn't support post-processing parameters or the script configuration file is not properly set in NZBGet settings.",
+    "message": "The post-processing script you are currently using doesn't support post-processing parameters or the script configuration file is not properly set in RustyGet settings.",
     "description": "Description for missing post-processing parameters message"
   },
   "msg_not_implemented_title": {
@@ -3628,7 +3628,7 @@
   },
   "btn_shutdown_confirm": {
     "message": "Shutdown",
-    "description": "Button text for confirming NZBGet shutdown"
+    "description": "Button text for confirming RustyGet shutdown"
   },
   "config_unit_kb": {
     "message": "KB",
@@ -3731,11 +3731,11 @@
     "description": "Description for the option TempDir"
   },
   "config_desc_webdir": {
-    "message": "Directory with web-interface files.\n\nExample: /usr/local/share/nzbget/webui.\n\nNOTE: To disable web-interface set the option to an empty value.\nThis however doesn't disable the built-in web-server completely because\nit is also used to serve JSON-/XML-RPC requests.",
+    "message": "Directory with web-interface files.\n\nExample: /usr/local/share/rustyget/webui.\n\nNOTE: To disable web-interface set the option to an empty value.\nThis however doesn't disable the built-in web-server completely because\nit is also used to serve JSON-/XML-RPC requests.",
     "description": "Description for the option WebDir DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges."
   },
   "config_desc_scriptdir": {
-    "message": "Directory with post-processing and other scripts.\n\nThis option may contain multiple directories separated with commas or semicolons.\n\nNOTE: For information on writing scripts visit https://nzbget.com/documentation/extension-scripts/.",
+    "message": "Directory with post-processing and other scripts.\n\nThis option may contain multiple directories separated with commas or semicolons.\n\nNOTE: For information on writing scripts visit https://rustyget.com/documentation/extension-scripts/.",
     "description": "Description for the option ScriptDir DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges."
   },
   "config_desc_lockfile": {
@@ -3747,7 +3747,7 @@
     "description": "Description for the option LogFile DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges."
   },
   "config_desc_configtemplate": {
-    "message": "Configuration file template.\n\nPut the path to the example configuration file which comes with\nNZBGet. Web-interface needs this file to read option descriptions.\n\nDo not put here your actual configuration file (typically stored\nin your home directory or in /etc/nzbget.conf) but instead the unchanged\nexample configuration file (typically installed to\n/usr/local/share/nzbget/nzbget.conf).\n\nExample: /usr/local/share/nzbget/nzbget.conf.",
+    "message": "Configuration file template.\n\nPut the path to the example configuration file which comes with\nRustyGet. Web-interface needs this file to read option descriptions.\n\nDo not put here your actual configuration file (typically stored\nin your home directory or in /etc/rustyget.conf) but instead the unchanged\nexample configuration file (typically installed to\n/usr/local/share/rustyget/rustyget.conf).\n\nExample: /usr/local/share/rustyget/rustyget.conf.",
     "description": "Description for the option ConfigTemplate"
   },
   "config_desc_requireddir": {
@@ -3755,7 +3755,7 @@
     "description": "Description for the option RequiredDir DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges."
   },
   "config_desc_certstore": {
-    "message": "Certificate store file or directory.\n\nCertificate store contains root certificates used for server certificate\nverification when connecting to servers with encryption (TLS/SSL). This\nincludes communication with news-servers for article downloading and\nwith web-servers (via https) for fetching of rss feeds and nzb-files.\n\nThe option can point either to one big file containing all root\ncertificates or to a directory containing certificate files, in PEM format.\n\nExample: /etc/ssl/certs/ca-certificates.crt.\n\nNOTE: Certificate verification must be enabled separately via option <CertCheck>.\n\nNOTE: For more details visit https://nzbget.com/documentation/certificate-verification/.",
+    "message": "Certificate store file or directory.\n\nCertificate store contains root certificates used for server certificate\nverification when connecting to servers with encryption (TLS/SSL). This\nincludes communication with news-servers for article downloading and\nwith web-servers (via https) for fetching of rss feeds and nzb-files.\n\nThe option can point either to one big file containing all root\ncertificates or to a directory containing certificate files, in PEM format.\n\nExample: /etc/ssl/certs/ca-certificates.crt.\n\nNOTE: Certificate verification must be enabled separately via option <CertCheck>.\n\nNOTE: For more details visit https://rustyget.com/documentation/certificate-verification/.",
     "description": "Description for the option CertStore DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges. If 'News server' sounds like 'Newspaper' in your language, use 'Usenet server'."
   },
   "config_desc_server_active": {
@@ -3767,15 +3767,15 @@
     "description": "Description for the option Server1.Name If 'News server' sounds like 'Newspaper' in your language, use 'Usenet server'."
   },
   "config_desc_server_level": {
-    "message": "Level (priority) of news server.\n\nThe servers are ordered by their level. NZBGet first tries to download\nan article from one (any) of level-0-servers. If that server fails,\nNZBGet tries all other level-0-servers. If all servers fail, it proceeds\nwith the level-1-servers, etc.\n\nPut your major download servers at level 0 and your fill servers at\nlevels 1, 2, etc..\n\nSeveral servers with the same level may be defined, they have\nthe same priority.",
+    "message": "Level (priority) of news server.\n\nThe servers are ordered by their level. RustyGet first tries to download\nan article from one (any) of level-0-servers. If that server fails,\nRustyGet tries all other level-0-servers. If all servers fail, it proceeds\nwith the level-1-servers, etc.\n\nPut your major download servers at level 0 and your fill servers at\nlevels 1, 2, etc..\n\nSeveral servers with the same level may be defined, they have\nthe same priority.",
     "description": "Description for the option Server1.Level If 'News server' sounds like 'Newspaper' in your language, use 'Usenet server'."
   },
   "config_desc_server_optional": {
-    "message": "This is an optional non-reliable server.\n\nMarking server as optional tells NZBGet to ignore this server if a\nconnection to this server cannot be established. Normally NZBGet\ndoesn't try upper-level servers before all servers on current level\nwere tried. If a connection to server fails NZBGet waits until the\nserver becomes available (it may try others from current level at this\ntime). This is usually what you want to avoid exhausting of\n(costly) upper level servers if one of main servers is temporary\nunavailable. However, for less reliable servers you may prefer to ignore\nconnection errors and go on with higher-level servers instead.",
+    "message": "This is an optional non-reliable server.\n\nMarking server as optional tells RustyGet to ignore this server if a\nconnection to this server cannot be established. Normally RustyGet\ndoesn't try upper-level servers before all servers on current level\nwere tried. If a connection to server fails RustyGet waits until the\nserver becomes available (it may try others from current level at this\ntime). This is usually what you want to avoid exhausting of\n(costly) upper level servers if one of main servers is temporary\nunavailable. However, for less reliable servers you may prefer to ignore\nconnection errors and go on with higher-level servers instead.",
     "description": "Description for the option Server1.Optional"
   },
   "config_desc_server_group": {
-    "message": "Group of news server.\n\nIf you have multiple accounts with same conditions (retention, etc.)\non the same news server, set the same group (greater than 0) for all\nof them. If download fails on one news server, NZBGet does not try\nother servers from the same group.\n\nValue \"0\" means no group defined (default).",
+    "message": "Group of news server.\n\nIf you have multiple accounts with same conditions (retention, etc.)\non the same news server, set the same group (greater than 0) for all\nof them. If download fails on one news server, RustyGet does not try\nother servers from the same group.\n\nValue \"0\" means no group defined (default).",
     "description": "Description for the option Server1.Group DO NOT translate technical values enclosed in quotes. If 'News server' sounds like 'Newspaper' in your language, use 'Usenet server'."
   },
   "config_desc_server_host": {
@@ -3803,7 +3803,7 @@
     "description": "Description for the option Server1.JoinGroup DO NOT translate technical values enclosed in quotes."
   },
   "config_desc_server_cipher": {
-    "message": "Cipher to use for encrypted server connection.\n\nBy default (when the option is empty) the underlying encryption library\nchooses the cipher automatically. To achieve the best performance\nhowever you can manually select a faster cipher.\n\nSee https://nzbget.com/documentation/choosing-cipher/ for details.\n\nNOTE: You may get a TLS handshake error if the news server does\nnot support the chosen cipher. You can also get an error \"Could not\nselect cipher for TLS\" if the cipher string is not valid.",
+    "message": "Cipher to use for encrypted server connection.\n\nBy default (when the option is empty) the underlying encryption library\nchooses the cipher automatically. To achieve the best performance\nhowever you can manually select a faster cipher.\n\nSee https://rustyget.com/documentation/choosing-cipher/ for details.\n\nNOTE: You may get a TLS handshake error if the news server does\nnot support the chosen cipher. You can also get an error \"Could not\nselect cipher for TLS\" if the cipher string is not valid.",
     "description": "Description for the option Server1.Cipher DO NOT translate technical values enclosed in quotes. DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges. If 'News server' sounds like 'Newspaper' in your language, use 'Usenet server'."
   },
   "config_desc_server_connections": {
@@ -3827,23 +3827,23 @@
     "description": "Description for the option Server1.Notes"
   },
   "config_desc_controlip": {
-    "message": "IP on which NZBGet server listen and which clients use to contact NZBGet.\n\nIt could be a dns-hostname (e. g. \"mypc\") or an IP address (e. g. \"192.168.1.2\" or\n\"127.0.0.1\").\n\nYour computer may have multiple network interfaces and therefore multiple IP\naddresses. If you want NZBGet to listen to all interfaces and be available from\nall IP-addresses use value \"0.0.0.0\".\n\nNOTE: When you start NZBGet as client (to send remote commands to NZBGet server) and\nthe option <ControlIP> is set to \"0.0.0.0\" the client will use IP \"127.0.0.1\".\n\nNOTE: If you set the option to \"127.0.0.1\" you will be able to connect to NZBGet\nonly from the computer running NZBGet. This restriction applies to web-interface too.\n\nNOTE: NZBGet also supports listening on Unix domain sockets instead of TCP/IP\nsockets. To activate this mode set option <ControlIP> to a local path\n(e. g. \"ControlIP=/var/sock\").",
+    "message": "IP on which RustyGet server listen and which clients use to contact RustyGet.\n\nIt could be a dns-hostname (e. g. \"mypc\") or an IP address (e. g. \"192.168.1.2\" or\n\"127.0.0.1\").\n\nYour computer may have multiple network interfaces and therefore multiple IP\naddresses. If you want RustyGet to listen to all interfaces and be available from\nall IP-addresses use value \"0.0.0.0\".\n\nNOTE: When you start RustyGet as client (to send remote commands to RustyGet server) and\nthe option <ControlIP> is set to \"0.0.0.0\" the client will use IP \"127.0.0.1\".\n\nNOTE: If you set the option to \"127.0.0.1\" you will be able to connect to RustyGet\nonly from the computer running RustyGet. This restriction applies to web-interface too.\n\nNOTE: RustyGet also supports listening on Unix domain sockets instead of TCP/IP\nsockets. To activate this mode set option <ControlIP> to a local path\n(e. g. \"ControlIP=/var/sock\").",
     "description": "Description for the option ControlIP DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate technical values enclosed in quotes. DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges."
   },
   "config_desc_controlport": {
-    "message": "Port which NZBGet server and remote client use.\n\nNOTE: The communication via this port is not encrypted. For encrypted\ncommunication see option <SecurePort>.",
+    "message": "Port which RustyGet server and remote client use.\n\nNOTE: The communication via this port is not encrypted. For encrypted\ncommunication see option <SecurePort>.",
     "description": "Description for the option ControlPort DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges."
   },
   "config_desc_controlusername": {
-    "message": "User name which NZBGet server and remote client use.\n\nSet to empty value to disable user name check (check only password).\n\nNOTE: This option was added in NZBGet 11. Older versions used predefined\nnot changeable user name \"nzbget\". Third-party tools or web-sites written\nfor older NZBGet versions may not have an option to define user name. In\nthis case you should set option <ControlUsername> to the default value\n\"nzbget\" or use empty value.",
+    "message": "User name which RustyGet server and remote client use.\n\nSet to empty value to disable user name check (check only password).\n\nNOTE: This option was added in RustyGet 11. Older versions used predefined\nnot changeable user name \"rustyget\". Third-party tools or web-sites written\nfor older RustyGet versions may not have an option to define user name. In\nthis case you should set option <ControlUsername> to the default value\n\"rustyget\" or use empty value.",
     "description": "Description for the option ControlUsername DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate technical values enclosed in quotes. DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges."
   },
   "config_desc_controlpassword": {
-    "message": "Password which NZBGet server and remote client use.\n\nSet to empty value to disable authorization request.",
+    "message": "Password which RustyGet server and remote client use.\n\nSet to empty value to disable authorization request.",
     "description": "Description for the option ControlPassword"
   },
   "config_desc_restrictedusername": {
-    "message": "User name for restricted access.\n\nThe restricted user can control the program with a few restrictions.\nThey have access to the web-interface and can see most of the program\nsettings. They however, can not change program settings, view security\nrelated options or options provided by extension scripts.\n\nUse this user to connect to NZBGet from other programs and web-sites.\n\nIn terms of RPC-API the user:\n- cannot use method \"saveconfig\";\n- methods \"config\" and \"saveconfig\" return string \"***\" for\n  options those content is protected from the user.\n\nSet to empty value to disable restricted user.\n\nNOTE: Don't forget to change default username/password of the control\nuser (options <ControlUsername> and <ControlPassword>).",
+    "message": "User name for restricted access.\n\nThe restricted user can control the program with a few restrictions.\nThey have access to the web-interface and can see most of the program\nsettings. They however, can not change program settings, view security\nrelated options or options provided by extension scripts.\n\nUse this user to connect to RustyGet from other programs and web-sites.\n\nIn terms of RPC-API the user:\n- cannot use method \"saveconfig\";\n- methods \"config\" and \"saveconfig\" return string \"***\" for\n  options those content is protected from the user.\n\nSet to empty value to disable restricted user.\n\nNOTE: Don't forget to change default username/password of the control\nuser (options <ControlUsername> and <ControlPassword>).",
     "description": "Description for the option RestrictedUsername DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate technical values enclosed in quotes. DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges."
   },
   "config_desc_restrictedpassword": {
@@ -3851,7 +3851,7 @@
     "description": "Description for the option RestrictedPassword"
   },
   "config_desc_addusername": {
-    "message": "User name to add downloads via RPC-API.\n\nUse the AddUsername/AddPassword to give other programs or web-services\naccess to NZBGet with only two permissions:\n- add new downloads using RPC-method \"append\";\n- check program version using RPC-method \"version\".\n\nIn a case the program/web-service needs more rights use the restricted\nuser instead (options <RestrictedUsername> and <RestrictedPassword>).\n\nSet to empty value to disable add-user.\n\nNOTE: Don't forget to change default username/password of the control\nuser (options <ControlUsername> and <ControlPassword>).",
+    "message": "User name to add downloads via RPC-API.\n\nUse the AddUsername/AddPassword to give other programs or web-services\naccess to RustyGet with only two permissions:\n- add new downloads using RPC-method \"append\";\n- check program version using RPC-method \"version\".\n\nIn a case the program/web-service needs more rights use the restricted\nuser instead (options <RestrictedUsername> and <RestrictedPassword>).\n\nSet to empty value to disable add-user.\n\nNOTE: Don't forget to change default username/password of the control\nuser (options <ControlUsername> and <ControlPassword>).",
     "description": "Description for the option AddUsername DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate technical values enclosed in quotes. DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges."
   },
   "config_desc_addpassword": {
@@ -3859,15 +3859,15 @@
     "description": "Description for the option AddPassword"
   },
   "config_desc_formauth": {
-    "message": "Authenticate using web-form.\n\nThe preferred and default way to authenticate in web-interface is using\nHTTP authentication. Web-browsers show a special dialog to enter username\nand password which they then send back to NZBGet. Sometimes browser plugins\naided at storing and filling of passwords do not work properly with browser's\nbuilt-in dialog. To help with such tools NZBGet provide an alternative\nauthentication mechanism via web form.",
+    "message": "Authenticate using web-form.\n\nThe preferred and default way to authenticate in web-interface is using\nHTTP authentication. Web-browsers show a special dialog to enter username\nand password which they then send back to RustyGet. Sometimes browser plugins\naided at storing and filling of passwords do not work properly with browser's\nbuilt-in dialog. To help with such tools RustyGet provide an alternative\nauthentication mechanism via web form.",
     "description": "Description for the option FormAuth"
   },
   "config_desc_securecontrol": {
-    "message": "Secure control of NZBGet server.\n\nActivate the option if you want to access NZBGet built-in web-server\nvia HTTPS (web-interface and RPC). You should also provide certificate\nand key files, see option <SecureCert> and option <SecureKey>.",
+    "message": "Secure control of RustyGet server.\n\nActivate the option if you want to access RustyGet built-in web-server\nvia HTTPS (web-interface and RPC). You should also provide certificate\nand key files, see option <SecureCert> and option <SecureKey>.",
     "description": "Description for the option SecureControl DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>)."
   },
   "config_desc_secureport": {
-    "message": "Port which NZBGet server and remote client use for encrypted\ncommunication (1-65535).",
+    "message": "Port which RustyGet server and remote client use for encrypted\ncommunication (1-65535).",
     "description": "Description for the option SecurePort"
   },
   "config_desc_securecert": {
@@ -3879,11 +3879,11 @@
     "description": "Description for the option SecureKey"
   },
   "config_desc_authorizedip": {
-    "message": "IP-addresses allowed to connect without authorization.\n\nList of privileged IPs for easy access to NZBGet built-in web-server\n(web-interface and RPC). The connected clients have full unrestricted access.\n\nSeparate entries with commas or semicolons. Use wildcard characters\n* and ? for pattern matching.\n\nExample: 127.0.0.1, 192.168.178.*\n\nNOTE: Do not use this option if the program works behind another\nweb-server because all requests will have the address of this server.",
+    "message": "IP-addresses allowed to connect without authorization.\n\nList of privileged IPs for easy access to RustyGet built-in web-server\n(web-interface and RPC). The connected clients have full unrestricted access.\n\nSeparate entries with commas or semicolons. Use wildcard characters\n* and ? for pattern matching.\n\nExample: 127.0.0.1, 192.168.178.*\n\nNOTE: Do not use this option if the program works behind another\nweb-server because all requests will have the address of this server.",
     "description": "Description for the option AuthorizedIP DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges."
   },
   "config_desc_certcheck": {
-    "message": "TLS certificate verification.\n\nWhen connecting to a news server (for downloading) or a web server\n(for fetching of rss feeds and nzb-files) the authenticity of the server\nshould be validated using server security certificate. If the check\nfails that means the connection cannot be trusted and must be closed\nwith an error message explaining the security issue.\n\nSometimes servers are improperly configured and the certificate verification\nfails even if there is no hacker attack in place. In that case you should\ninform the server owner about the issue. If you still need to connect to\nservers with invalid certificates you can disable the certificate verification\nbut you should know that your connection is insecure and you might be\nconnecting to attacker's server without your awareness.\n\nNOTE: Certificate verification requires a list of trusted root certificates,\nwhich must be configured using option <CertStore>.\n\nNOTE: For more details visit https://nzbget.com/documentation/certificate-verification/.",
+    "message": "TLS certificate verification.\n\nWhen connecting to a news server (for downloading) or a web server\n(for fetching of rss feeds and nzb-files) the authenticity of the server\nshould be validated using server security certificate. If the check\nfails that means the connection cannot be trusted and must be closed\nwith an error message explaining the security issue.\n\nSometimes servers are improperly configured and the certificate verification\nfails even if there is no hacker attack in place. In that case you should\ninform the server owner about the issue. If you still need to connect to\nservers with invalid certificates you can disable the certificate verification\nbut you should know that your connection is insecure and you might be\nconnecting to attacker's server without your awareness.\n\nNOTE: Certificate verification requires a list of trusted root certificates,\nwhich must be configured using option <CertStore>.\n\nNOTE: For more details visit https://rustyget.com/documentation/certificate-verification/.",
     "description": "Description for the option CertCheck DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges. If 'News server' sounds like 'Newspaper' in your language, use 'Usenet server'."
   },
   "config_desc_updatecheck": {
@@ -3891,7 +3891,7 @@
     "description": "Description for the option UpdateCheck DO NOT translate configuration option values (None, Stable, Testing) as they are fixed configuration values."
   },
   "config_desc_daemonusername": {
-    "message": "User name for daemon-mode, POSIX only.\n\nSet the user that the daemon normally runs at (POSIX in daemon-mode only).\nSet MainDir with an absolute path to be sure where it will write.\nThis allows NZBGet daemon to be launched in rc.local (at boot), and\ndownload items as a specific user id.\n\nNOTE: If DaemonUsername is not \"root\" and doesn't exist the daemon will not start.\nNOTE: If the daemon is running as root (superuser) and DaemonUsername exists,\nnzbget will drop root privileges to the user specified by DaemonUsername.",
+    "message": "User name for daemon-mode, POSIX only.\n\nSet the user that the daemon normally runs at (POSIX in daemon-mode only).\nSet MainDir with an absolute path to be sure where it will write.\nThis allows RustyGet daemon to be launched in rc.local (at boot), and\ndownload items as a specific user id.\n\nNOTE: If DaemonUsername is not \"root\" and doesn't exist the daemon will not start.\nNOTE: If the daemon is running as root (superuser) and DaemonUsername exists,\nrustyget will drop root privileges to the user specified by DaemonUsername.",
     "description": "Description for the option DaemonUsername DO NOT translate technical values enclosed in quotes. DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges."
   },
   "config_desc_umask": {
@@ -3915,7 +3915,7 @@
     "description": "Description for the option Category1.Extensions DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>)."
   },
   "config_desc_category_aliases": {
-    "message": "List of aliases.\n\nWhen a nzb-file is added from URL, RSS or RPC the category name\nis usually supplied by nzb-site or by application accessing\nNZBGet. Using Aliases you can match their categories with your owns.\n\nSeparate aliases with commas or semicolons. Use wildcard characters\n* and ? for pattern matching.\n\nExample: TV - HD, TV - SD, TV*",
+    "message": "List of aliases.\n\nWhen a nzb-file is added from URL, RSS or RPC the category name\nis usually supplied by nzb-site or by application accessing\nRustyGet. Using Aliases you can match their categories with your owns.\n\nSeparate aliases with commas or semicolons. Use wildcard characters\n* and ? for pattern matching.\n\nExample: TV - HD, TV - SD, TV*",
     "description": "Description for the option Category1.Aliases"
   },
   "config_desc_feed_name": {
@@ -3927,7 +3927,7 @@
     "description": "Description for the option Feed1.URL"
   },
   "config_desc_feed_filter": {
-    "message": "Filter rules for items.\n\nUse filter to ignore unwanted items in the feed. In its simplest version\nthe filter is a space separated list of words which must be present in\nthe item title.\n\nExample: linux debian dvd.\n\nMORE INFO:\nNOTE: This is a short documentation, for more information visit\nhttps://nzbget.com/documentation/rss/.\n\nFeed filter consists of rules - one rule per line. Each rule defines\na search string and a command, which must be performed if the search\nstring matches. There are five kinds of rule-commands: Accept,\nReject, Require, Options, Comment.\n\nNOTE: Since options in the configuration file can not span multiple\nlines, the lines (rules) must be separated with %-character (percent).\n\nDefinition of a rule:\n [A:|A(options):|R:|Q:|O(options):|#] search-string\n\n A - declares Accept-rule. Rules are accept-rules by default, the\n     \"A:\" can be omitted. If the feed item matches to the rule the\n     item is considered good and no further rules are checked.\n R - declares Reject-rule. If the feed item matches to the rule the\n     item is considered bad and no further rules are checked.\n Q - declares Require-rule. If the feed item DOES NOT match to the rule\n     the item is considered bad and no further rules are checked.\n O - declares Options-rule. If the feed item matches to the rule the\n     options declared in the rule are set for the item. The item is\n     neither accepted nor rejected via this rule but can be accepted\n     later by one of Accept-rules. In this case the item will have its\n     options already set (unless the Accept-rule overrides them).\n # - lines starting with # are considered comments and are ignored. You\n     can use comments to explain complex rules or to temporary disable\n     rules for debugging.\n\nOptions allow to set properties on nzb-file. It's a comma-separated\nlist of property names with their values.\n\nDefinition of an option:\n name:value\n\nOptions can be defined using long option names or short names:\n category (cat, c)    - set category name, value is a string;\n pause (p)            - add nzb in paused or unpaused state, possible\n                        values are: yes (y), no (n);\n priority (pr, r)     - set priority, value is a signed integer number;\n priority+ (pr+, r+)  - increase priority, value is a signed integer number;\n dupescore (ds, s)    - set duplicate score, value is a signed integer number;\n dupescore+ (ds+, s+) - increase duplicate score, value is a signed integer number;\n dupekey (dk, k)      - set duplicate key, value is a string;\n dupekey+ (dk+, k+)   - add to duplicate key, value is a string;\n dupemode (dm, m)     - set duplicate check mode, possible values\n                        are: score (s), all (a), force (f);\n rageid\t\t\t\t- generate duplicate key using this rageid\n                        (integer number) and season/episode numbers;\n series\t\t\t\t- generate duplicate key using series identifier\n                        (any unique string) and season/episode numbers.\n\nExamples of option definitions:\n Accept(category:my series, pause:yes, priority:100): my show 1080p;\n Options(c:my series, p:y, r:100): 1080p;\n Options(s:1000): 1080p;\n Options(k+:1080p): 1080p;\n Options(dupemode:force): BluRay.\n\nRule-options override values set in feed-options.\n\nThe search-string is similar to used in search engines. It consists of\nsearch terms separated with spaces. Every term is checked for a feed\nitem and if they all succeed the rule is considered matching.\n\nDefinition of a term:\n [+|-][field:][command]param\n\n +       - declares a positive term. Terms are positive by default,\n           the \"+\" can be omitted;\n -       - declares a negative term. If the term succeeds the feed\n           item is ignored;\n field   - field to which apply the term. If not specified\n           the default field \"title\" is used;\n command - a special character defining how to interpret the\n           parameter (followed after the command):\n           @  - search for string \"param\". This is default command,\n                the \"@\" can be omitted;\n           $  - \"param\" defines a regular expression (using POSIX Extended\n                Regular Expressions syntax);\n           =  - equal;\n           <  - less than;\n           <= - equal or less than;\n           >  - greater than;\n           >= - equal or greater than;\n param   - parameter for command.\n\nCommands @ and $ are for use with text fields (title, filename, category,\nlink, description, dupekey). Commands =, <, <=, > and >= are for use\nwith numeric fields (size, age, imdbid, rageid, season, episode, priority,\ndupescore).\n\nOnly fields title, filename and age are always present. The availability of\nother fields depend on rss feed provider.\n\nAny newznab attribute (encoded as \"newznab:attr\" in the RSS feed) can\nbe used as search field with prefix \"attr-\", for example \"attr-genre\".\n\nText search (Command @) supports wildcard characters * (matches\nany number of any characters), ? (matches any one character)\nand # (matches one digit).\nText search is by default performed against words (word-search mode): the\nfield content is separated into words and then each word is checked\nagainst pattern. If the search pattern starts and ends with * (star)\nthe search is performed against the whole field content\n(substring-search mode). If the search pattern contains word separator\ncharacters (except * and ?) the search is performed on the whole\nfield (the word-search would be obviously never successful in this\ncase). Word separators are: !\\\"#$%&'()*+,-./:;<=>?@[\\\\]^_`{|}~.\n\nField \"size\" can have suffixes \"K\" or \"KB\" for kilobytes, \"M\" or \"MB\"\nfor megabytes and \"G\" or \"GB\" for gigabytes. Field \"age\" can have\nsuffixes \"m\" for minutes, \"h\" for hours and \"d\" for days. If suffix\nis not specified default is days.\n\nExamples (the trailing ; or . is not part of filter):\n1) A: s01* -category:anime;\n2) my show WEB-DL;\n3) *my?show* WEB-DL size:<1.8GB age:>2h;\n4) R: size:>9GB;\n5) Q: HDTV.\n\nNOTE: This is a short documentation, for more information visit\nhttps://nzbget.com/documentation/rss/.",
+    "message": "Filter rules for items.\n\nUse filter to ignore unwanted items in the feed. In its simplest version\nthe filter is a space separated list of words which must be present in\nthe item title.\n\nExample: linux debian dvd.\n\nMORE INFO:\nNOTE: This is a short documentation, for more information visit\nhttps://rustyget.com/documentation/rss/.\n\nFeed filter consists of rules - one rule per line. Each rule defines\na search string and a command, which must be performed if the search\nstring matches. There are five kinds of rule-commands: Accept,\nReject, Require, Options, Comment.\n\nNOTE: Since options in the configuration file can not span multiple\nlines, the lines (rules) must be separated with %-character (percent).\n\nDefinition of a rule:\n [A:|A(options):|R:|Q:|O(options):|#] search-string\n\n A - declares Accept-rule. Rules are accept-rules by default, the\n     \"A:\" can be omitted. If the feed item matches to the rule the\n     item is considered good and no further rules are checked.\n R - declares Reject-rule. If the feed item matches to the rule the\n     item is considered bad and no further rules are checked.\n Q - declares Require-rule. If the feed item DOES NOT match to the rule\n     the item is considered bad and no further rules are checked.\n O - declares Options-rule. If the feed item matches to the rule the\n     options declared in the rule are set for the item. The item is\n     neither accepted nor rejected via this rule but can be accepted\n     later by one of Accept-rules. In this case the item will have its\n     options already set (unless the Accept-rule overrides them).\n # - lines starting with # are considered comments and are ignored. You\n     can use comments to explain complex rules or to temporary disable\n     rules for debugging.\n\nOptions allow to set properties on nzb-file. It's a comma-separated\nlist of property names with their values.\n\nDefinition of an option:\n name:value\n\nOptions can be defined using long option names or short names:\n category (cat, c)    - set category name, value is a string;\n pause (p)            - add nzb in paused or unpaused state, possible\n                        values are: yes (y), no (n);\n priority (pr, r)     - set priority, value is a signed integer number;\n priority+ (pr+, r+)  - increase priority, value is a signed integer number;\n dupescore (ds, s)    - set duplicate score, value is a signed integer number;\n dupescore+ (ds+, s+) - increase duplicate score, value is a signed integer number;\n dupekey (dk, k)      - set duplicate key, value is a string;\n dupekey+ (dk+, k+)   - add to duplicate key, value is a string;\n dupemode (dm, m)     - set duplicate check mode, possible values\n                        are: score (s), all (a), force (f);\n rageid\t\t\t\t- generate duplicate key using this rageid\n                        (integer number) and season/episode numbers;\n series\t\t\t\t- generate duplicate key using series identifier\n                        (any unique string) and season/episode numbers.\n\nExamples of option definitions:\n Accept(category:my series, pause:yes, priority:100): my show 1080p;\n Options(c:my series, p:y, r:100): 1080p;\n Options(s:1000): 1080p;\n Options(k+:1080p): 1080p;\n Options(dupemode:force): BluRay.\n\nRule-options override values set in feed-options.\n\nThe search-string is similar to used in search engines. It consists of\nsearch terms separated with spaces. Every term is checked for a feed\nitem and if they all succeed the rule is considered matching.\n\nDefinition of a term:\n [+|-][field:][command]param\n\n +       - declares a positive term. Terms are positive by default,\n           the \"+\" can be omitted;\n -       - declares a negative term. If the term succeeds the feed\n           item is ignored;\n field   - field to which apply the term. If not specified\n           the default field \"title\" is used;\n command - a special character defining how to interpret the\n           parameter (followed after the command):\n           @  - search for string \"param\". This is default command,\n                the \"@\" can be omitted;\n           $  - \"param\" defines a regular expression (using POSIX Extended\n                Regular Expressions syntax);\n           =  - equal;\n           <  - less than;\n           <= - equal or less than;\n           >  - greater than;\n           >= - equal or greater than;\n param   - parameter for command.\n\nCommands @ and $ are for use with text fields (title, filename, category,\nlink, description, dupekey). Commands =, <, <=, > and >= are for use\nwith numeric fields (size, age, imdbid, rageid, season, episode, priority,\ndupescore).\n\nOnly fields title, filename and age are always present. The availability of\nother fields depend on rss feed provider.\n\nAny newznab attribute (encoded as \"newznab:attr\" in the RSS feed) can\nbe used as search field with prefix \"attr-\", for example \"attr-genre\".\n\nText search (Command @) supports wildcard characters * (matches\nany number of any characters), ? (matches any one character)\nand # (matches one digit).\nText search is by default performed against words (word-search mode): the\nfield content is separated into words and then each word is checked\nagainst pattern. If the search pattern starts and ends with * (star)\nthe search is performed against the whole field content\n(substring-search mode). If the search pattern contains word separator\ncharacters (except * and ?) the search is performed on the whole\nfield (the word-search would be obviously never successful in this\ncase). Word separators are: !\\\"#$%&'()*+,-./:;<=>?@[\\\\]^_`{|}~.\n\nField \"size\" can have suffixes \"K\" or \"KB\" for kilobytes, \"M\" or \"MB\"\nfor megabytes and \"G\" or \"GB\" for gigabytes. Field \"age\" can have\nsuffixes \"m\" for minutes, \"h\" for hours and \"d\" for days. If suffix\nis not specified default is days.\n\nExamples (the trailing ; or . is not part of filter):\n1) A: s01* -category:anime;\n2) my show WEB-DL;\n3) *my?show* WEB-DL size:<1.8GB age:>2h;\n4) R: size:>9GB;\n5) Q: HDTV.\n\nNOTE: This is a short documentation, for more information visit\nhttps://rustyget.com/documentation/rss/.",
     "description": "Description for the option Feed1.Filter DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate technical values enclosed in quotes. DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges. DO NOT translate configuration option values (A, O, Q, R, command, field, param, rageid, series) as they are fixed configuration values."
   },
   "config_desc_feed_interval": {
@@ -3955,7 +3955,7 @@
     "description": "Description for the option Feed1.Priority"
   },
   "config_desc_feed_extensions": {
-    "message": "List of rss feed extension scripts to execute for rss content.\n\nThe scripts in the list must be separated with commas or semicolons. All\nscripts must be stored in directory set by option <ScriptDir> and\npaths relative to <ScriptDir> must be entered here.\n\nNOTE: For developer documentation visit https://nzbget.com/documentation/extension-scripts/.",
+    "message": "List of rss feed extension scripts to execute for rss content.\n\nThe scripts in the list must be separated with commas or semicolons. All\nscripts must be stored in directory set by option <ScriptDir> and\npaths relative to <ScriptDir> must be entered here.\n\nNOTE: For developer documentation visit https://rustyget.com/documentation/extension-scripts/.",
     "description": "Description for the option Feed1.Extensions DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges."
   },
   "config_desc_appendcategorydir": {
@@ -3967,7 +3967,7 @@
     "description": "Description for the option NzbDirInterval DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate technical values enclosed in quotes. DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges."
   },
   "config_desc_nzbdirfileage": {
-    "message": "How old nzb-file should at least be for it to be loaded to queue.\n\nNZBGet checks if nzb-file was not modified in last few seconds, defined by\nthis option. That safety interval prevents the loading of files, which\nwere not yet completely saved to disk, for example if they are still being\ndownloaded in web-browser.",
+    "message": "How old nzb-file should at least be for it to be loaded to queue.\n\nRustyGet checks if nzb-file was not modified in last few seconds, defined by\nthis option. That safety interval prevents the loading of files, which\nwere not yet completely saved to disk, for example if they are still being\ndownloaded in web-browser.",
     "description": "Description for the option NzbDirFileAge"
   },
   "config_desc_nzbdirarchivescan": {
@@ -3979,23 +3979,23 @@
     "description": "Description for the option NzbDirArchiveAction DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges. DO NOT translate configuration option values (Delete, Move) as they are fixed configuration values."
   },
   "config_desc_dupecheck": {
-    "message": "Check for duplicate titles.\n\nIf this option is enabled the program checks by adding of a new nzb-file:\n1) if history contains the same title (see below) with success status\n   the nzb-file is not added to queue;\n2) if download queue already contains the same title the nzb-file is\n   added to queue for backup (if the first file fails);\n3) if nzb-file contains duplicate entries. This helps to find errors\n   in bad nzb-files.\n\n\"Same title\" means the nzb file name is same or the duplicate key is\nsame. Duplicate keys are set by fetching from RSS feeds using title\nidentifier fields provided by RSS provider (imdbid or rageid/season/episode).\n\nIf duplicates were detected only one of them is downloaded. If download\nfails another duplicate is tried. If download succeeds all remaining\nduplicates are deleted from queue.\n\nNOTE: For automatic duplicate handling option <HealthCheck> must be\nset to \"Delete\", \"Park\" or \"None\". If it is set to \"Pause\" you will need to\nmanually unpause another duplicate (if any exists in queue).\n\nNOTE: For more info on duplicates see https://nzbget.com/documentation/rss/.",
+    "message": "Check for duplicate titles.\n\nIf this option is enabled the program checks by adding of a new nzb-file:\n1) if history contains the same title (see below) with success status\n   the nzb-file is not added to queue;\n2) if download queue already contains the same title the nzb-file is\n   added to queue for backup (if the first file fails);\n3) if nzb-file contains duplicate entries. This helps to find errors\n   in bad nzb-files.\n\n\"Same title\" means the nzb file name is same or the duplicate key is\nsame. Duplicate keys are set by fetching from RSS feeds using title\nidentifier fields provided by RSS provider (imdbid or rageid/season/episode).\n\nIf duplicates were detected only one of them is downloaded. If download\nfails another duplicate is tried. If download succeeds all remaining\nduplicates are deleted from queue.\n\nNOTE: For automatic duplicate handling option <HealthCheck> must be\nset to \"Delete\", \"Park\" or \"None\". If it is set to \"Pause\" you will need to\nmanually unpause another duplicate (if any exists in queue).\n\nNOTE: For more info on duplicates see https://rustyget.com/documentation/rss/.",
     "description": "Description for the option DupeCheck DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate technical values enclosed in quotes. DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges."
   },
   "config_desc_dupearticlefallback": {
-    "message": "Fetch missing articles from duplicate collections.\n\nWhen an article cannot be downloaded from any news server, the program\nlooks for duplicates of the collection (same title or duplicate key, see\noption <DupeCheck>) in download queue and history and retries the article\nusing the message-id of the equivalent article of the duplicate. This can\nrescue downloads where each posting of the same content is incomplete on\nits own but the postings complete each other.\n\nIn stream/live modes, a collection's own PAR2 files are checked first.\nMatching recovery blocks are used before fetching duplicate data. Stream\nrecovery is attempted only for files PAR repair cannot restore; its changes\nare then verified by a full PAR check. PAR2 files themselves are never borrowed\nor patched through duplicate article or stream recovery.\n\nValue \"article\" borrows articles only from files which match the failed\nfile exactly in article count and closely in size; borrowed articles\ndeclaring a different file size are discarded. Small mismatches at\nsegment boundaries can remain and are repaired by par-check. Value \"yes\"\nis accepted as an alias for \"article\" for compatibility with older\nversions.\n\nWhen the primary posting proves to be missing many articles of a file,\nthe remaining articles of that file are requested from the duplicate\nfirst (with the primary kept as a final fallback), instead of paying\na failing sweep over all news servers per article. Independently, the\nduplicate that is tried first is not fixed: whenever it misses several\narticles in a row, the next duplicate (in duplicate-score order) takes\nits place, so one badly holed posting does not slow down recovery when\nother duplicates could serve the articles. All duplicates and the\nprimary remain fetch sources for every article regardless of which one\nis tried first.\n\nValue \"stream\" additionally repairs files on byte level after download:\nbyte ranges which no news server could supply are fetched from a\nduplicate posting that carries the same bytes, even when that posting\nwas split into articles differently. This recovers reposts of ANY\nrelease - including password-protected and compressed archives, since\nthe repair copies posted bytes without unpacking or decrypting them.\nIt also recovers across DIFFERENT packagings of the same inner media\nfile, as long as the content bytes were not transformed: a directly\nposted file, store-mode (uncompressed) rar volumes, stored zip (also\nspanned), 7-Zip in copy mode (also .001 splits) and raw file splits\ncan all donate to each other, even when volume sizes differ.\nCompressed archives can only donate to byte-identical reposts of\nthemselves: bridging two different compression runs is physically\nimpossible.\nWith option <DupeStreamDecompress> enabled and an extractor configured,\nbyte-level repair also bridges DIFFERENT compressions of the same inner\nmedia file by decompressing the donor first; without it, two different\ncompression runs still cannot donate to each other directly.\nPassword-protected store-mode rar archives (rar3 and rar5) are mapped\nand cross-packed the same way as unencrypted ones when nzbget knows the\narchive's password - supplied via the NZB's password field, not typed\nin here - including bridging two DIFFERENT passwords on either side of\na repair. Without a known password an encrypted archive can still only\ndonate to a byte-identical repost of itself.\nContent identity is verified against already downloaded bytes before\nanything is written; par-check remains active as final verification.\nA file none of whose articles is available anywhere is recreated whole\nfrom a duplicate which proved byte-identical on the collection's other\nfiles (its twin member found by name or volume numbering).\nThe damaged download must survive until post-processing for the repair\nto run (option <HealthCheck> values \"delete\" and \"park\" can remove it\nbefore that; value \"dupe\" keeps a repairable download alive and parks\nonly one the duplicates cannot complete).\n\nValue \"live\" includes everything \"stream\" does and additionally runs\nthe byte-level repair DURING download: as soon as a damaged file of the\ncollection completes (while its other files are still downloading), the\nmissing byte ranges can be fetched from duplicates before the download\nfinishes when no PAR2 files are known. Live recovery waits while direct\nrename identifies obfuscated files, and collections with parity use the\nnormal PAR check before donor recovery. Each damaged file gets one\nsuch early attempt (without the decompression step of option\n<DupeStreamDecompress>); post-processing remains the final authority -\nit retries whatever is left, applies the health accounting below and\nhands over to par-check as usual.\n\nNOTE: Health statistics are recounted for the bytes stream repair\nrecovers. A file is credited back to health only once ALL of its holes\nare filled, so a release whose files are therefore fully repaired\nreaches full health and completes normally (moved to its destination\ndirectory) even without par-files. A release that is only partially\nrepaired is credited nothing for its still-damaged files, so it keeps\nits failed status and its files remain in the intermediate directory;\nwith par-files present the requested par-check verifies the repaired\nfile and the download completes normally.\n\nDuplicates whose packaging stream repair cannot cross-map (e.g.\ncompressed archives, an encrypted archive whose password is unknown, or\nan unrelated inner file) cannot be merged this way; for these cases\nduplicate handling (option <DupeCheck>) and par-repair using files of\nduplicates (option <ParScan=dupe>) remain in effect.\n\nNOTE: The source nzb-files of duplicates must still exist in directory\n<NzbDir> (option <NzbCleanupDisk> must be disabled) for articles to be\nborrowed from history items.",
+    "message": "Fetch missing articles from duplicate collections.\n\nWhen an article cannot be downloaded from any news server, the program\nlooks for duplicates of the collection (same title or duplicate key, see\noption <DupeCheck>) in download queue and history and retries the article\nusing the message-id of the equivalent article of the duplicate. This can\nrescue downloads where each posting of the same content is incomplete on\nits own but the postings complete each other.\n\nIn stream/live modes, a collection's own PAR2 files are checked first.\nMatching recovery blocks are used before fetching duplicate data. Stream\nrecovery is attempted only for files PAR repair cannot restore; its changes\nare then verified by a full PAR check. PAR2 files themselves are never borrowed\nor patched through duplicate article or stream recovery.\n\nValue \"article\" borrows articles only from files which match the failed\nfile exactly in article count and closely in size; borrowed articles\ndeclaring a different file size are discarded. Small mismatches at\nsegment boundaries can remain and are repaired by par-check. Value \"yes\"\nis accepted as an alias for \"article\" for compatibility with older\nversions.\n\nWhen the primary posting proves to be missing many articles of a file,\nthe remaining articles of that file are requested from the duplicate\nfirst (with the primary kept as a final fallback), instead of paying\na failing sweep over all news servers per article. Independently, the\nduplicate that is tried first is not fixed: whenever it misses several\narticles in a row, the next duplicate (in duplicate-score order) takes\nits place, so one badly holed posting does not slow down recovery when\nother duplicates could serve the articles. All duplicates and the\nprimary remain fetch sources for every article regardless of which one\nis tried first.\n\nValue \"stream\" additionally repairs files on byte level after download:\nbyte ranges which no news server could supply are fetched from a\nduplicate posting that carries the same bytes, even when that posting\nwas split into articles differently. This recovers reposts of ANY\nrelease - including password-protected and compressed archives, since\nthe repair copies posted bytes without unpacking or decrypting them.\nIt also recovers across DIFFERENT packagings of the same inner media\nfile, as long as the content bytes were not transformed: a directly\nposted file, store-mode (uncompressed) rar volumes, stored zip (also\nspanned), 7-Zip in copy mode (also .001 splits) and raw file splits\ncan all donate to each other, even when volume sizes differ.\nCompressed archives can only donate to byte-identical reposts of\nthemselves: bridging two different compression runs is physically\nimpossible.\nWith option <DupeStreamDecompress> enabled and an extractor configured,\nbyte-level repair also bridges DIFFERENT compressions of the same inner\nmedia file by decompressing the donor first; without it, two different\ncompression runs still cannot donate to each other directly.\nPassword-protected store-mode rar archives (rar3 and rar5) are mapped\nand cross-packed the same way as unencrypted ones when rustyget knows the\narchive's password - supplied via the NZB's password field, not typed\nin here - including bridging two DIFFERENT passwords on either side of\na repair. Without a known password an encrypted archive can still only\ndonate to a byte-identical repost of itself.\nContent identity is verified against already downloaded bytes before\nanything is written; par-check remains active as final verification.\nA file none of whose articles is available anywhere is recreated whole\nfrom a duplicate which proved byte-identical on the collection's other\nfiles (its twin member found by name or volume numbering).\nThe damaged download must survive until post-processing for the repair\nto run (option <HealthCheck> values \"delete\" and \"park\" can remove it\nbefore that; value \"dupe\" keeps a repairable download alive and parks\nonly one the duplicates cannot complete).\n\nValue \"live\" includes everything \"stream\" does and additionally runs\nthe byte-level repair DURING download: as soon as a damaged file of the\ncollection completes (while its other files are still downloading), the\nmissing byte ranges can be fetched from duplicates before the download\nfinishes when no PAR2 files are known. Live recovery waits while direct\nrename identifies obfuscated files, and collections with parity use the\nnormal PAR check before donor recovery. Each damaged file gets one\nsuch early attempt (without the decompression step of option\n<DupeStreamDecompress>); post-processing remains the final authority -\nit retries whatever is left, applies the health accounting below and\nhands over to par-check as usual.\n\nNOTE: Health statistics are recounted for the bytes stream repair\nrecovers. A file is credited back to health only once ALL of its holes\nare filled, so a release whose files are therefore fully repaired\nreaches full health and completes normally (moved to its destination\ndirectory) even without par-files. A release that is only partially\nrepaired is credited nothing for its still-damaged files, so it keeps\nits failed status and its files remain in the intermediate directory;\nwith par-files present the requested par-check verifies the repaired\nfile and the download completes normally.\n\nDuplicates whose packaging stream repair cannot cross-map (e.g.\ncompressed archives, an encrypted archive whose password is unknown, or\nan unrelated inner file) cannot be merged this way; for these cases\nduplicate handling (option <DupeCheck>) and par-repair using files of\nduplicates (option <ParScan=dupe>) remain in effect.\n\nNOTE: The source nzb-files of duplicates must still exist in directory\n<NzbDir> (option <NzbCleanupDisk> must be disabled) for articles to be\nborrowed from history items.",
     "description": "Description for the option DupeArticleFallback DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate technical values enclosed in quotes. DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges. If 'News server' sounds like 'Newspaper' in your language, use 'Usenet server'. DO NOT translate configuration option values (release) as they are fixed configuration values."
   },
   "config_desc_dupestreamdecompress": {
-    "message": "Recover byte-identical content from compressed duplicate archives.\n\nOption <DupeArticleFallback> value \"stream\" only donates bytes that are\ncopyable without decompression (store-mode rar/zip/7z, raw splits, directly\nposted media). A duplicate posted as a normally-compressed archive (deflate\nzip, LZMA 7z, compressed rar) of the same inner media file cannot donate\nunder that scheme, because its posted bytes are a compression of the\ncontent, not the content itself.\n\nWhen this option is enabled and \"stream\" repair still has holes after\ntrying every store-mode/split/bare donor, nzbget materializes a compressed\nduplicate's member files to a temporary directory and runs the configured\nextractor (<UnrarCmd>/<SevenZipCmd>) on them to recover the inner file's\nplaintext bytes, which are then verified and patched exactly like any other\nstream-repair donor.\n\nThis is an opt-in, heavier last resort: it fetches and decompresses an\nentire duplicate archive (the fetched archive is bounded by an internal\nsize cap; the decompressed inner file it writes to the temporary directory\nis not, so ensure the intermediate directory has room) instead of only\nthe byte ranges needed, and requires a working extractor. It only helps a\ntarget that \"stream\" can otherwise map to its inner content (directly\nposted media, or store/copy-mode rar/zip/7z/split archives with holes); a\ncompressed target still cannot be repaired this way, since there is no\nplaintext location to write into a compressed member.\nA password-protected store-mode target IS supported: the extracted donor\nplaintext is re-encrypted under the target's own stream context (its\npassword taken from the NZB's password field, as for the non-decompression\nencrypted repair) before the bytes are written, so a compressed duplicate\ncan repair an encrypted store-mode archive too.",
+    "message": "Recover byte-identical content from compressed duplicate archives.\n\nOption <DupeArticleFallback> value \"stream\" only donates bytes that are\ncopyable without decompression (store-mode rar/zip/7z, raw splits, directly\nposted media). A duplicate posted as a normally-compressed archive (deflate\nzip, LZMA 7z, compressed rar) of the same inner media file cannot donate\nunder that scheme, because its posted bytes are a compression of the\ncontent, not the content itself.\n\nWhen this option is enabled and \"stream\" repair still has holes after\ntrying every store-mode/split/bare donor, rustyget materializes a compressed\nduplicate's member files to a temporary directory and runs the configured\nextractor (<UnrarCmd>/<SevenZipCmd>) on them to recover the inner file's\nplaintext bytes, which are then verified and patched exactly like any other\nstream-repair donor.\n\nThis is an opt-in, heavier last resort: it fetches and decompresses an\nentire duplicate archive (the fetched archive is bounded by an internal\nsize cap; the decompressed inner file it writes to the temporary directory\nis not, so ensure the intermediate directory has room) instead of only\nthe byte ranges needed, and requires a working extractor. It only helps a\ntarget that \"stream\" can otherwise map to its inner content (directly\nposted media, or store/copy-mode rar/zip/7z/split archives with holes); a\ncompressed target still cannot be repaired this way, since there is no\nplaintext location to write into a compressed member.\nA password-protected store-mode target IS supported: the extracted donor\nplaintext is re-encrypted under the target's own stream context (its\npassword taken from the NZB's password field, as for the non-decompression\nencrypted repair) before the bytes are written, so a compressed duplicate\ncan repair an encrypted store-mode archive too.",
     "description": "Description for the option DupeStreamDecompress DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate technical values enclosed in quotes."
   },
   "config_desc_dupesearch": {
-    "message": "Search for duplicates of a new download.\n\nWhen a download is added, nzbget asks the Newznab-compatible indexer\n(usually NZBHydra2) set in option <DupeSearchUrl> for other postings of\nthe same release, downloads their nzb-files, checks how much of each one\nstill exists on the news servers and queues the live ones paused, as\nduplicates of the download under the same duplicate key. If the download\nturns out dead or damaged beyond repair, the best duplicate takes its\nplace (see option <HealthCheck> value \"dupe\") or repairs it (see option\n<DupeArticleFallback>).\n\nNeeds option <DupeCheck> enabled. Only the top-scored item of a duplicate\nkey is searched for: duplicates, items returned from history and nzb-files\nthat this search added itself are not.",
+    "message": "Search for duplicates of a new download.\n\nWhen a download is added, rustyget asks the Newznab-compatible indexer\n(usually NZBHydra2) set in option <DupeSearchUrl> for other postings of\nthe same release, downloads their nzb-files, checks how much of each one\nstill exists on the news servers and queues the live ones paused, as\nduplicates of the download under the same duplicate key. If the download\nturns out dead or damaged beyond repair, the best duplicate takes its\nplace (see option <HealthCheck> value \"dupe\") or repairs it (see option\n<DupeArticleFallback>).\n\nNeeds option <DupeCheck> enabled. Only the top-scored item of a duplicate\nkey is searched for: duplicates, items returned from history and nzb-files\nthat this search added itself are not.",
     "description": "Description for the option DupeSearch DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>)."
   },
   "config_desc_dupesearchurl": {
-    "message": "Newznab-compatible search URL for option <DupeSearch>.\n\nThe URL of the api endpoint without parameters, for example\n\"http://127.0.0.1:5076/api\". Parameters (t, q, apikey, ...) are added\nby nzbget.",
+    "message": "Newznab-compatible search URL for option <DupeSearch>.\n\nThe URL of the api endpoint without parameters, for example\n\"http://127.0.0.1:5076/api\". Parameters (t, q, apikey, ...) are added\nby rustyget.",
     "description": "Description for the option DupeSearchUrl DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>)."
   },
   "config_desc_dupesearchapikey": {
@@ -4163,7 +4163,7 @@
     "description": "Description for the option DailyQuota DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate technical values enclosed in quotes."
   },
   "config_desc_systemhealthcheck": {
-    "message": "Activate system health monitoring.\n\nWhen enabled, NZBGet analyzes the configuration and system environment\nto detect setup issues, performance bottlenecks, and potential errors.",
+    "message": "Activate system health monitoring.\n\nWhen enabled, RustyGet analyzes the configuration and system environment\nto detect setup issues, performance bottlenecks, and potential errors.",
     "description": "Description for the option SystemHealthCheck"
   },
   "config_desc_writelog": {
@@ -4243,11 +4243,11 @@
     "description": "Description for the option Task1.WeekDays DO NOT translate technical values enclosed in quotes."
   },
   "config_desc_task_command": {
-    "message": "Command to be executed (PauseDownload, UnpauseDownload, PausePostProcess,\nUnpausePostProcess, PauseScan, UnpauseScan, DownloadRate, Script, Process,\nActivateServer, DeactivateServer, FetchFeed).\n\nPossible commands:\n  PauseDownload      - pause download;\n  UnpauseDownload    - resume download;\n  PausePostProcess   - pause post-processing;\n  UnpausePostProcess - resume post-processing;\n  PauseScan          - pause scan of incoming nzb-directory;\n  UnpauseScan        - resume scan of incoming nzb-directory;\n  DownloadRate       - set download rate limit;\n  Script             - execute one or multiple scheduler scripts. The scripts\n                       must be written specially for NZBGet;\n  Process            - execute an external (any) program;\n  ActivateServer     - activate news-server;\n  DeactivateServer   - deactivate news-server;\n  FetchFeed          - fetch RSS feed.\n\nOn start the program checks all tasks and determines current state\nfor download-pause, scan-pause, download-rate and active servers.",
+    "message": "Command to be executed (PauseDownload, UnpauseDownload, PausePostProcess,\nUnpausePostProcess, PauseScan, UnpauseScan, DownloadRate, Script, Process,\nActivateServer, DeactivateServer, FetchFeed).\n\nPossible commands:\n  PauseDownload      - pause download;\n  UnpauseDownload    - resume download;\n  PausePostProcess   - pause post-processing;\n  UnpausePostProcess - resume post-processing;\n  PauseScan          - pause scan of incoming nzb-directory;\n  UnpauseScan        - resume scan of incoming nzb-directory;\n  DownloadRate       - set download rate limit;\n  Script             - execute one or multiple scheduler scripts. The scripts\n                       must be written specially for RustyGet;\n  Process            - execute an external (any) program;\n  ActivateServer     - activate news-server;\n  DeactivateServer   - deactivate news-server;\n  FetchFeed          - fetch RSS feed.\n\nOn start the program checks all tasks and determines current state\nfor download-pause, scan-pause, download-rate and active servers.",
     "description": "Description for the option Task1.Command If 'News server' sounds like 'Newspaper' in your language, use 'Usenet server'. DO NOT translate configuration option values (ActivateServer, DeactivateServer, DownloadRate, FetchFeed, PauseDownload, PausePostProcess, PauseScan, Process, Script, UnpauseDownload, UnpausePostProcess, UnpauseScan) as they are fixed configuration values."
   },
   "config_desc_task_param": {
-    "message": "Parameters for the command if needed.\n\nSome scheduler commands require additional parameters:\n DownloadRate     - download rate limit to be set (kilobytes/sec).\n                    Example: 1000.\n                    NOTE: use value \"0\" to disable download limit (unlimited speed).\n Script           - list of scheduler scripts to execute. The scripts in the\n                    list must be separated with commas or semicolons. All\n                    scripts must be stored in directory set by option\n                    <ScriptDir> and paths relative to <ScriptDir> must be\n                    entered here. For developer documentation visit\n                    https://nzbget.com/documentation/extension-scripts/;\n Process          - path to the program to execute and its parameters.\n                    Example: /home/user/fetch.sh.\n                    If filename or any parameter contains spaces it\n                    must be surrounded with single quotation\n                    marks. If filename/parameter contains single quotation marks,\n                    each of them must be replaced (escaped) with two single quotation\n                    marks and the resulting filename/parameter must be\n                    surrounded with single quotation marks.\n                    Example: '/home/user/download/my scripts/task process.sh' 'world''s fun'.\n                    In this example one parameter (world's fun) is passed\n                    to the script (task process.sh).\n ActivateServer   - comma separated list of news server ids or server names.\n                    Example: 1,3.\n                    Example: my news server 1, my news server 2.\n                    NOTE: server names should not have commas.\n DeactivateServer - see ActivateServer.\n FetchFeed        - comma separated list of RSS feed ids or feed names.\n                    Example: 1,3.\n                    Example: bookmarks feed, another feed.\n                    NOTE: feed names should not have commas.\n                    NOTE: use feed id \"0\" to fetch all feeds.",
+    "message": "Parameters for the command if needed.\n\nSome scheduler commands require additional parameters:\n DownloadRate     - download rate limit to be set (kilobytes/sec).\n                    Example: 1000.\n                    NOTE: use value \"0\" to disable download limit (unlimited speed).\n Script           - list of scheduler scripts to execute. The scripts in the\n                    list must be separated with commas or semicolons. All\n                    scripts must be stored in directory set by option\n                    <ScriptDir> and paths relative to <ScriptDir> must be\n                    entered here. For developer documentation visit\n                    https://rustyget.com/documentation/extension-scripts/;\n Process          - path to the program to execute and its parameters.\n                    Example: /home/user/fetch.sh.\n                    If filename or any parameter contains spaces it\n                    must be surrounded with single quotation\n                    marks. If filename/parameter contains single quotation marks,\n                    each of them must be replaced (escaped) with two single quotation\n                    marks and the resulting filename/parameter must be\n                    surrounded with single quotation marks.\n                    Example: '/home/user/download/my scripts/task process.sh' 'world''s fun'.\n                    In this example one parameter (world's fun) is passed\n                    to the script (task process.sh).\n ActivateServer   - comma separated list of news server ids or server names.\n                    Example: 1,3.\n                    Example: my news server 1, my news server 2.\n                    NOTE: server names should not have commas.\n DeactivateServer - see ActivateServer.\n FetchFeed        - comma separated list of RSS feed ids or feed names.\n                    Example: 1,3.\n                    Example: bookmarks feed, another feed.\n                    NOTE: feed names should not have commas.\n                    NOTE: use feed id \"0\" to fetch all feeds.",
     "description": "Description for the option Task1.Param DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate technical values enclosed in quotes. DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges. If 'News server' sounds like 'Newspaper' in your language, use 'Usenet server'. DO NOT translate configuration option values (ActivateServer, DeactivateServer, DownloadRate, FetchFeed, Process, Script) as they are fixed configuration values."
   },
   "config_desc_crccheck": {
@@ -4267,7 +4267,7 @@
     "description": "Description for the option ParScan DO NOT translate configuration option values (Dupe, Extended, Full, Limited) as they are fixed configuration values."
   },
   "config_desc_parquick": {
-    "message": "Quick file verification during par-check.\n\nIf the option is active the files are quickly verified using\nchecksums calculated during download; quick verification is very fast\nbecause it doesn't require the reading of files from disk, NZBGet\nknows checksums of downloaded files and quickly compares them with\nchecksums stored in the par-file.\n\nIf the option is disabled the files are verified as usual. That's\nslow. Use this if the quick verification doesn't work properly.",
+    "message": "Quick file verification during par-check.\n\nIf the option is active the files are quickly verified using\nchecksums calculated during download; quick verification is very fast\nbecause it doesn't require the reading of files from disk, RustyGet\nknows checksums of downloaded files and quickly compares them with\nchecksums stored in the par-file.\n\nIf the option is disabled the files are verified as usual. That's\nslow. Use this if the quick verification doesn't work properly.",
     "description": "Description for the option ParQuick"
   },
   "config_desc_parbuffer": {
@@ -4307,7 +4307,7 @@
     "description": "Description for the option HealthCheck DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate technical values enclosed in quotes. DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges. DO NOT translate configuration option values (Delete, None, Park, Pause) as they are fixed configuration values."
   },
   "config_desc_partimelimit": {
-    "message": "Maximum allowed time for par-repair.\n\nIf you use NZBGet on a very slow computer like NAS-device, it may be good to\nlimit the time allowed for par-repair. NZBGet calculates the estimated time\nrequired for par-repair. If the estimated value exceeds the limit defined\nhere, NZBGet cancels the repair.\n\nTo avoid a false cancellation NZBGet compares the estimated time with\n<ParTimeLimit> after the first 5 minutes of repairing, when the calculated\nestimated time is more or less accurate. But in a case if <ParTimeLimit> is\nset to a value smaller than 5 minutes, the comparison is made after the first\nwhole minute.\n\nValue \"0\" means unlimited.\n\nNOTE: The option limits only the time required for repairing. It doesn't\naffect the first stage of parcheck - verification of files. However, the\nverification speed is constant, it doesn't depend on files integrity and\ntherefore it is not necessary to limit the time needed for the first stage.",
+    "message": "Maximum allowed time for par-repair.\n\nIf you use RustyGet on a very slow computer like NAS-device, it may be good to\nlimit the time allowed for par-repair. RustyGet calculates the estimated time\nrequired for par-repair. If the estimated value exceeds the limit defined\nhere, RustyGet cancels the repair.\n\nTo avoid a false cancellation RustyGet compares the estimated time with\n<ParTimeLimit> after the first 5 minutes of repairing, when the calculated\nestimated time is more or less accurate. But in a case if <ParTimeLimit> is\nset to a value smaller than 5 minutes, the comparison is made after the first\nwhole minute.\n\nValue \"0\" means unlimited.\n\nNOTE: The option limits only the time required for repairing. It doesn't\naffect the first stage of parcheck - verification of files. However, the\nverification speed is constant, it doesn't depend on files integrity and\ntherefore it is not necessary to limit the time needed for the first stage.",
     "description": "Description for the option ParTimeLimit DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate technical values enclosed in quotes. DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges."
   },
   "config_desc_parpausequeue": {
@@ -4335,7 +4335,7 @@
     "description": "Description for the option UnpackCleanupDisk"
   },
   "config_desc_unrarcmd": {
-    "message": "Full path to unrar executable.\n\nExample: /usr/bin/unrar.\n\nThe option can also contain extra switches to pass to unrar. To the\nhere defined command line NZBGet adds the following switches:\n   x -y -p- -o+ *.rar ./_unpack/\n\nSwitch \"x\" is added only if neither \"x\" nor \"e\" were defined in\nthe option (this allows you to use switch \"e\" instead of \"x\"). switch\n\"-o+\" is added only if neither \"-o+\" nor \"-o-\" were defined\nin the command line. All other parameters are always added. Parameter\n\"-p-\" is replaced with \"-ppassword\" if a password is set for nzb-file.\n\nExamples:\n1) ignore file attributes (permissions):\n/usr/bin/unrar x -ai;\n2) decrease priority of unrar-process:\nnice -n 19 unrar.\n\nFor other useful switches refer to unrar documentation.\n\nIf unrar is in your PATH you may leave the path part and set only\nthe executable name (\"unrar\" on POSIX or \"unrar.exe\" on Windows).",
+    "message": "Full path to unrar executable.\n\nExample: /usr/bin/unrar.\n\nThe option can also contain extra switches to pass to unrar. To the\nhere defined command line RustyGet adds the following switches:\n   x -y -p- -o+ *.rar ./_unpack/\n\nSwitch \"x\" is added only if neither \"x\" nor \"e\" were defined in\nthe option (this allows you to use switch \"e\" instead of \"x\"). switch\n\"-o+\" is added only if neither \"-o+\" nor \"-o-\" were defined\nin the command line. All other parameters are always added. Parameter\n\"-p-\" is replaced with \"-ppassword\" if a password is set for nzb-file.\n\nExamples:\n1) ignore file attributes (permissions):\n/usr/bin/unrar x -ai;\n2) decrease priority of unrar-process:\nnice -n 19 unrar.\n\nFor other useful switches refer to unrar documentation.\n\nIf unrar is in your PATH you may leave the path part and set only\nthe executable name (\"unrar\" on POSIX or \"unrar.exe\" on Windows).",
     "description": "Description for the option UnrarCmd DO NOT translate technical values enclosed in quotes."
   },
   "config_desc_sevenzipcmd": {
@@ -4355,7 +4355,7 @@
     "description": "Description for the option UnpackPassFile DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges."
   },
   "config_desc_extensions": {
-    "message": "List of active extension scripts for new downloads.\n\nExtension scripts associated with nzb-files are executed before, during\nor after download as defined by script developer.\n\nEach download (nzb-file) has its own list of extension scripts; the list\ncan be viewed and changed in web-interface in download details dialog or\nvia API. Option <Extensions> sets defaults for new downloads; changes\nto option <Extensions> do not affect downloads which are already in queue.\n\nWhen nzb-file is added to queue it can have a category assigned to it. In this\ncase option <CategoryX.Extensions> (if not empty) have precedence and\ndefines the scripts for that nzb-file; consequently global option <Extensions>\nhas no effect for that nzb-file.\n\nCertain extensions work globally for the whole program instead of\nper-nzb basis. Such extensions are activated once and cannot be overriden\nper category or per nzb.\n\nThe scripts in the list must be separated with commas or semicolons. All\nscripts must be stored in directory set by option <ScriptDir> and\npaths relative to <ScriptDir> must be entered here.\n\nExample: Cleanup.sh, Move.sh, EMail.py.\n\nNOTE: The script execution order is controlled by option <ScriptOrder>, not\nby their order in option <Extensions>.\n\nNOTE: For developer documentation visit https://nzbget.com/documentation/extension-scripts/.",
+    "message": "List of active extension scripts for new downloads.\n\nExtension scripts associated with nzb-files are executed before, during\nor after download as defined by script developer.\n\nEach download (nzb-file) has its own list of extension scripts; the list\ncan be viewed and changed in web-interface in download details dialog or\nvia API. Option <Extensions> sets defaults for new downloads; changes\nto option <Extensions> do not affect downloads which are already in queue.\n\nWhen nzb-file is added to queue it can have a category assigned to it. In this\ncase option <CategoryX.Extensions> (if not empty) have precedence and\ndefines the scripts for that nzb-file; consequently global option <Extensions>\nhas no effect for that nzb-file.\n\nCertain extensions work globally for the whole program instead of\nper-nzb basis. Such extensions are activated once and cannot be overriden\nper category or per nzb.\n\nThe scripts in the list must be separated with commas or semicolons. All\nscripts must be stored in directory set by option <ScriptDir> and\npaths relative to <ScriptDir> must be entered here.\n\nExample: Cleanup.sh, Move.sh, EMail.py.\n\nNOTE: The script execution order is controlled by option <ScriptOrder>, not\nby their order in option <Extensions>.\n\nNOTE: For developer documentation visit https://rustyget.com/documentation/extension-scripts/.",
     "description": "Description for the option Extensions DO NOT translate option names enclosed in angle brackets (e.g., <OptionName>). DO NOT translate the exact uppercase keywords (NOTE:, WARNING:, INFO:, INFO FOR DEVELOPERS:, MORE INFO:) as they are used to render UI badges."
   },
   "config_desc_scriptorder": {
@@ -4551,7 +4551,7 @@
     "description": "Filter example: set options with accept."
   },
   "help_feed_filter_doc_link": {
-    "message": "This is a short documentation. For more info visit $1nzbget.com/documentation/rss/$2.",
+    "message": "This is a short documentation. For more info visit $1rustyget.com/documentation/rss/$2.",
     "description": "Documentation link in Feed Filter Help."
   },
   "help_feed_filter_text_search_title": {
@@ -4611,7 +4611,7 @@
     "description": "Description for the option RowSelect"
   },
   "webui_config_desc_windowtitle": {
-    "message": "Window-title for browser.\n\nThe following variables can be used within placeholders to insert current data:\n   COUNT - number of items in queue;\n   SPEED - current download speed.\n   TIME - remaining time;\n   PAUSE - \"download paused\"-indicator.\n\nTo form a placeholder surround variable with percent-characters, for example: %COUNT%.\n\nTo improve formating there is a special syntax. If variable value is empty or null then nothing is inserted:\n%(VARNAME)% - show variable value inside parenthesis;\n%[VARNAME]% - show variable value inside square brackets;\n%VARNAME-% - append hyphen to variable value;\n%(VARNAME-)% - show variable value with hyphen inside parenthesis;\n%[VARNAME-]% - show variable value with hyphen inside square brackets.\n\nExamples:\n \"%(COUNT-)% NZBGet\" - show number of downloads in parenthesis followed by a hyphen; don't show \"(0) - \" if queue is empty;\n \"%PAUSE% %(COUNT-)% NZBGet\" - as above but also show pause-indicator if paused;\n \"%[COUNT]% %SPEED-% NZBGet\" - show number of downloads and speed if not null (default setting).",
+    "message": "Window-title for browser.\n\nThe following variables can be used within placeholders to insert current data:\n   COUNT - number of items in queue;\n   SPEED - current download speed.\n   TIME - remaining time;\n   PAUSE - \"download paused\"-indicator.\n\nTo form a placeholder surround variable with percent-characters, for example: %COUNT%.\n\nTo improve formating there is a special syntax. If variable value is empty or null then nothing is inserted:\n%(VARNAME)% - show variable value inside parenthesis;\n%[VARNAME]% - show variable value inside square brackets;\n%VARNAME-% - append hyphen to variable value;\n%(VARNAME-)% - show variable value with hyphen inside parenthesis;\n%[VARNAME-]% - show variable value with hyphen inside square brackets.\n\nExamples:\n \"%(COUNT-)% RustyGet\" - show number of downloads in parenthesis followed by a hyphen; don't show \"(0) - \" if queue is empty;\n \"%PAUSE% %(COUNT-)% RustyGet\" - as above but also show pause-indicator if paused;\n \"%[COUNT]% %SPEED-% RustyGet\" - show number of downloads and speed if not null (default setting).",
     "description": "Description for the option WindowTitle"
   },
   "webui_config_desc_refreshretries": {
@@ -4648,7 +4648,7 @@
     "message": "Testing algorithm"
   },
   "tls_cipher_explanation": {
-    "message": "Measure cipher speed on this NZBGet computer and test each encrypted news server. The fastest supported cipher is saved for each fully tested server. Tests briefly use CPU and server connections. A reload is required to activate saved settings."
+    "message": "Measure cipher speed on this RustyGet computer and test each encrypted news server. The fastest supported cipher is saved for each fully tested server. Tests briefly use CPU and server connections. A reload is required to activate saved settings."
   },
   "tls_cipher_algorithm": {
     "message": "Algorithm"
@@ -4690,7 +4690,7 @@
     "message": "None"
   },
   "tls_cipher_reload": {
-    "message": "Cipher settings are saved. Reload NZBGet to use them for new connections."
+    "message": "Cipher settings are saved. Reload RustyGet to use them for new connections."
   },
   "tls_cipher_browser_conflict": {
     "message": "Settings were saved, but your server editor changed. Refresh Settings to see the saved ciphers; your edits have been retained."

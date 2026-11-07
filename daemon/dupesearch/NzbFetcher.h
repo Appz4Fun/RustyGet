@@ -31,6 +31,9 @@
 #include "NzbReader.h"
 #include "Posting.h"
 #include "HttpGet.h"
+#include "Log.h"
+#include "Util.h"
+#include "nzbget_rs.h"
 
 /*
  * Downloads nzb-files from an indexer for the duplicate search. Every
@@ -73,7 +76,16 @@ public:
 		int relisted = 0;			// listings of a fetched posting that weren't needed
 		int listingMismatch = 0;	// postings only an nzb-file of another size was served for
 		int budget = 0;
-		void Add(const Stats& other);
+		void Add(const Stats& other)
+		{
+			ok += other.ok;
+			fetch += other.fetch;
+			parse += other.parse;
+			refused += other.refused;
+			relisted += other.relisted;
+			listingMismatch += other.listingMismatch;
+			budget += other.budget;
+		}
 	};
 
 	static constexpr int CooldownSec = 30 * 60;
@@ -82,12 +94,18 @@ public:
 	class Budget
 	{
 	public:
-		explicit Budget(int maxDonors);
-		~Budget();
+		explicit Budget(int maxDonors) : m_left(maxDonors > 0 ? (unsigned long long)maxDonors * 3 : 0), m_unlimited(maxDonors <= 0)
+		{
+			m_rust = nzbget_rs_dupe_budget_new(maxDonors > 0 ? (uint32_t)maxDonors : 0);
+		}
+		~Budget()
+		{
+			nzbget_rs_dupe_budget_free(m_rust);
+		}
 		Budget(const Budget&) = delete;
 		Budget& operator=(const Budget&) = delete;
-		bool Take();
-		bool Spent() const;
+		bool Take() { return nzbget_rs_dupe_budget_take(m_rust) != 0; }
+		bool Spent() const { return nzbget_rs_dupe_budget_spent(m_rust) != 0; }
 		void* RustHandle() const { return m_rust; }
 	private:
 		void* m_rust = nullptr;
@@ -95,26 +113,137 @@ public:
 		bool m_unlimited;
 	};
 	using FetchFunc = std::function<HttpGet::Reply(const std::string&, const std::string&, size_t, long long)>;
-	NzbFetcher();
-	explicit NzbFetcher(FetchFunc fetch);
-	~NzbFetcher();
+	NzbFetcher() : m_rust(nzbget_rs_nzb_fetcher_new()) {}
+	explicit NzbFetcher(FetchFunc fetch) : m_rust(nzbget_rs_nzb_fetcher_new()), m_fetch(std::move(fetch)) {}
+	~NzbFetcher()
+	{
+		nzbget_rs_nzb_fetcher_free(m_rust);
+	}
 	NzbFetcher(const NzbFetcher&) = delete;
 	NzbFetcher& operator=(const NzbFetcher&) = delete;
 
 	/* the file the cooldowns are kept in (empty: not kept) */
-	void SetStatePath(const std::string& path);
-	void Load();
+	void SetStatePath(const std::string& path)
+	{
+		nzbget_rs_nzb_fetcher_set_state_path(m_rust, path.data(), path.size());
+	}
+
+	void Load()
+	{
+		nzbget_rs_nzb_fetcher_load(m_rust, (int64_t)Util::CurrentTime());
+	}
 
 	/* downloads the nzb-file of one listing; the data of an nzb-file is returned only for frOk */
-	Fetched Fetch(const Newznab::Result& listing, time_t deadline, int retries = 1, Budget* budget = nullptr);
+	Fetched Fetch(const Newznab::Result& listing, time_t deadline, int retries = 1, Budget* budget = nullptr)
+	{
+		Fetched fetched;
+		fetched.listing = listing;
+		struct FetchCtx
+		{
+			NzbFetcher* self;
+			HttpGet::Reply lastReply;
+		} ctx{this, {}};
+		NzbgetRsBuf dataBuf{};
+		RsNzbSummaryScalars scalars{};
+		int reason = nzbget_rs_nzb_fetcher_fetch(
+			m_rust,
+			listing.indexer.data(), listing.indexer.size(),
+			listing.title.data(), listing.title.size(),
+			listing.link.data(), listing.link.size(),
+			listing.size, listing.grabs, (int64_t)listing.date,
+			(int64_t)deadline, retries,
+			budget ? budget->RustHandle() : nullptr,
+			&ctx,
+			[](void*) -> int64_t { return (int64_t)Util::CurrentTime(); },
+			[](void*) -> int { return HttpGet::Stopped() ? 1 : 0; },
+			[](void*) { Util::Sleep(100); },
+			[](void* rawCtx, const char* url, size_t urlLen, const char* label, size_t labelLen,
+				size_t maxBytes, int64_t deadlineMs, int* outStatus,
+				const char** outBodyPtr, size_t* outBodyLen) -> int {
+				auto* c = static_cast<FetchCtx*>(rawCtx);
+				std::string urlStr(url ? url : "", urlLen);
+				std::string labelStr(label ? label : "", labelLen);
+				c->lastReply = c->self->m_fetch
+					? c->self->m_fetch(urlStr, labelStr, maxBytes, deadlineMs)
+					: HttpGet::Fetch(urlStr, labelStr, maxBytes, deadlineMs);
+				*outStatus = c->lastReply.status;
+				*outBodyPtr = c->lastReply.body.empty() ? nullptr : c->lastReply.body.data();
+				*outBodyLen = c->lastReply.body.size();
+				return c->lastReply.ok ? 1 : 0;
+			},
+			[](void*, const char* msg) {
+				info("%s", msg ? msg : "");
+			},
+			[](void*, const char* msg) {
+				warn("%s", msg ? msg : "");
+			},
+			&dataBuf,
+			&scalars,
+			&fetched.info,
+			NzbReader::OnStrings,
+			NzbReader::OnSlice,
+			NzbReader::OnRecoveryBytes);
+		fetched.reason = static_cast<EReason>(reason);
+		if (fetched.reason == frOk && dataBuf.data)
+		{
+			fetched.data.assign(dataBuf.data, dataBuf.len);
+			NzbReader::ApplyScalars(fetched.info, scalars);
+		}
+		nzbget_rs_free(dataBuf);
+		return fetched;
+	}
 
-	/* one nzb-file of a posting: its listings in turn until one serves an
-	 * nzb-file of its listed size. A listing that serves another size (an
-	 * indexer may serve another indexer's nzb-file) is kept only if no
-	 * listing serves the posting itself. */
-	Fetched FetchPosting(const Posting::Group& listings, time_t deadline, Stats& stats, Budget* budget = nullptr);
+	Fetched FetchPosting(const Posting::Group& listings, time_t deadline, Stats& stats, Budget* budget = nullptr)
+	{
+		Fetched last;
+		if (listings.empty()) { stats.parse++; return last; }
+		last.listing = listings.front();
+		bool haveOther = false;
+		Fetched other;
 
-	bool IsRefused(const std::string& indexer);
+		for (size_t i = 0; i < listings.size(); i++)
+		{
+			Fetched fetched = Fetch(listings[i], deadline, 1, budget);
+			if (fetched.reason == frBudget) { stats.budget++; last = std::move(fetched); break; }
+			if (fetched.reason == frOk && !Posting::ListingMismatch(listings[i], fetched.info.totalBytes))
+			{
+				stats.ok++;
+				stats.relisted += (int)(listings.size() - i - 1);
+				return fetched;
+			}
+			if (fetched.reason == frOk)
+			{
+				if (!haveOther)
+				{
+					other = std::move(fetched);
+					haveOther = true;
+				}
+				continue;
+			}
+			switch (fetched.reason)
+			{
+				case frFetch: stats.fetch++; break;
+				case frParse: stats.parse++; break;
+				case frRefused: stats.refused++; break;
+				default: break;
+			}
+			last = std::move(fetched);
+		}
+
+		if (haveOther)
+		{
+			stats.ok++;
+			stats.listingMismatch++;
+			return other;
+		}
+		return last;
+	}
+
+	bool IsRefused(const std::string& indexer)
+	{
+		return nzbget_rs_nzb_fetcher_is_refused(
+			m_rust, indexer.data(), indexer.size(), (int64_t)Util::CurrentTime()) != 0;
+	}
 
 private:
 	void* m_rust = nullptr;

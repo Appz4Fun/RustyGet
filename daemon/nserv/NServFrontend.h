@@ -1,5 +1,5 @@
 /*
- *  This file is part of nzbget. See <https://nzbget.com>.
+ *  This file is part of RustyGet.
  *
  *  Copyright (C) 2016 Andrey Prygunkov <hugbug@users.sourceforge.net>
  *
@@ -21,24 +21,83 @@
 #ifndef NSERVFRONTEND_H
 #define NSERVFRONTEND_H
 
+#include <cstdio>
 #include "Thread.h"
 #include "Log.h"
+#include "Util.h"
+#include "nzbget_rs.h"
 
 class NServFrontend : public Thread
 {
 public:
-	NServFrontend();
+	NServFrontend() = default;
 
 private:
 	uint32 m_neededLogEntries = 0;
 	uint32 m_neededLogFirstId = 0;
 	bool m_needGoBack = false;
 
-	void Run();
-	void Update();
-	void BeforePrint();
-	void PrintMessage(Message& message);
-	void PrintSkip();
+	void Run()
+	{
+		while (!IsStopped())
+		{
+			Update();
+			Util::Sleep(100);
+		}
+		Update();
+	}
+
+	void Update()
+	{
+		BeforePrint();
+
+		{
+			GuardedMessageList messages = g_Log->GuardMessages();
+			if (!messages->empty())
+			{
+				Message& firstMessage = messages->front();
+				int needSkip = 0;
+				int start = nzbget_rs_nserv_frontend_calc_start_index(
+					m_neededLogFirstId, firstMessage.GetId(), &needSkip);
+				if (needSkip)
+				{
+					PrintSkip();
+				}
+				for (uint32 i = (uint32)start; i < messages->size(); i++)
+				{
+					PrintMessage(messages->at(i));
+					m_neededLogFirstId = messages->at(i).GetId();
+				}
+			}
+		}
+
+		fflush(stdout);
+	}
+
+	void BeforePrint()
+	{
+		if (m_needGoBack)
+		{
+			printf("\r\033[1A");
+			m_needGoBack = false;
+		}
+	}
+
+	void PrintMessage(Message& message)
+	{
+		NzbgetRsBuf line = nzbget_rs_frontend_format_log_message(
+			1, (int)message.GetKind(), message.GetText());
+		if (line.data)
+		{
+			fwrite(line.data, 1, line.len, stdout);
+		}
+		nzbget_rs_free(line);
+	}
+
+	void PrintSkip()
+	{
+		printf(".....\033[K\n");
+	}
 };
 
 #endif

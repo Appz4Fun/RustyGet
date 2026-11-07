@@ -23,23 +23,133 @@
 
 #include "Service.h"
 #include "Observer.h"
+#include "Options.h"
+#include "WorkState.h"
+#include "StatMeter.h"
+#include "Log.h"
+#include "Util.h"
+#include "FileSystem.h"
+#include "nzbget_rs.h"
 
 class DiskService : public Service, public Observer
 {
 public:
-	DiskService();
+	DiskService()
+	{
+		g_WorkState->Attach(this);
+	}
 
 protected:
-	virtual int ServiceInterval();
-	virtual void ServiceWork();
-	virtual void Update(Subject* caller, void* aspect);
+	virtual int ServiceInterval()
+	{
+		return nzbget_rs_euh_disk_service_interval(
+			m_waitingRequiredDir ? 1 : 0,
+			g_Options->GetDiskSpace(),
+			g_WorkState->GetDownloading() ? 1 : 0,
+			Service::Sleep);
+	}
+
+	virtual void ServiceWork()
+	{
+		debug("Disk service work");
+
+		if (nzbget_rs_dqh_disk_service_should_check_disk_space(
+			g_Options->GetDiskSpace(), g_WorkState->GetDownloading() ? 1 : 0) != 0)
+		{
+			// check free disk space every 1 second
+			CheckDiskSpace();
+		}
+
+		if (m_waitingRequiredDir)
+		{
+			CheckRequiredDir();
+		}
+	}
+
+	virtual void Update(Subject* caller, void* aspect)
+	{
+		WakeUp();
+	}
 
 private:
 	bool m_waitingRequiredDir = true;
 	bool m_waitingReported = false;
 
-	void CheckDiskSpace();
-	void CheckRequiredDir();
+	void CheckDiskSpace()
+	{
+		debug("Disk service work: check disk space");
+
+		auto res = FileSystem::GetDiskState(g_Options->GetDestDir());
+		if (res.has_value() && g_Options->GetDiskSpace() >= 0)
+		{
+			const auto& value = res.value();
+			if (nzbget_rs_euh_disk_service_is_low_space(value.available, g_Options->GetDiskSpace()) != 0)
+			{
+				warn("Low disk space on %s. Pausing download", g_Options->GetDestDir());
+				g_WorkState->SetPauseDownload(true);
+			}
+		}
+
+		if (!Util::EmptyStr(g_Options->GetInterDir()))
+		{
+			res = FileSystem::GetDiskState(g_Options->GetInterDir());
+			if (res.has_value() && g_Options->GetDiskSpace() >= 0)
+			{
+				const auto& value = res.value();
+				if (nzbget_rs_euh_disk_service_is_low_space(value.available, g_Options->GetDiskSpace()) != 0)
+				{
+					warn("Low disk space on %s. Pausing download", g_Options->GetInterDir());
+					g_WorkState->SetPauseDownload(true);
+				}
+			}
+		}
+	}
+
+	void CheckRequiredDir()
+	{
+		debug("Disk service work: check required dir");
+
+		if (!Util::EmptyStr(g_Options->GetRequiredDir()))
+		{
+			bool allExist = true;
+			bool wasWaitingReported = m_waitingReported;
+			// split RequiredDir into tokens
+			Tokenizer tok(g_Options->GetRequiredDir(), ",;");
+			while (const char* dir = tok.Next())
+			{
+				int shouldLogWaiting = 0;
+				int nextWaitingReported = m_waitingReported ? 1 : 0;
+				if (nzbget_rs_dqh_disk_service_eval_missing_required_dir(
+					FileSystem::FileExists(dir) ? 1 : 0,
+					FileSystem::DirectoryExists(dir) ? 1 : 0,
+					wasWaitingReported ? 1 : 0,
+					m_waitingReported ? 1 : 0,
+					&shouldLogWaiting,
+					&nextWaitingReported) != 0)
+				{
+					if (shouldLogWaiting != 0)
+					{
+						info("Waiting for required directory %s", dir);
+					}
+					m_waitingReported = nextWaitingReported != 0;
+					allExist = false;
+				}
+			}
+			if (!allExist)
+			{
+				return;
+			}
+		}
+
+		if (m_waitingReported)
+		{
+			info("All required directories available");
+		}
+
+		g_WorkState->SetTempPauseDownload(false);
+		g_WorkState->SetTempPausePostprocess(false);
+		m_waitingRequiredDir = false;
+	}
 };
 
 #endif

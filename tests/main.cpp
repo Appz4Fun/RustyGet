@@ -19,8 +19,7 @@
 
 #include "nzbget.h"
 
-#define BOOST_TEST_MODULE NZBGetTests
-#include <boost/test/included/unit_test.hpp>
+#include "TestFramework.h"
 
 #include "ServerPool.h"
 #include "Log.h"
@@ -81,12 +80,6 @@ struct InitGlobals
 
 	InitGlobals()
 	{
-		rapidyenc_decode_init();
-		rapidyenc_crc_init();
-
-		m_cmdOpts.push_back("SevenZipCmd=7z");
-		m_cmdOpts.push_back("UnrarCmd=unrar");
-
 		g_Log = new Log();
 		g_Options = new Options(&m_cmdOpts, nullptr);
 		g_EnvironmentVariables = (char*(*)[])environ;
@@ -114,3 +107,12 @@ struct InitGlobals
 };
 
 BOOST_GLOBAL_FIXTURE(InitGlobals);
+
+#include "postprocess/DirectUnpackTest.h"
+#include "postprocess/ParCheckerTest.h"
+#include "connect/TlsCipherTest.h"
+
+int main(int argc, char* argv[])
+{
+	return TestFramework::RunAll(argc, argv);
+}

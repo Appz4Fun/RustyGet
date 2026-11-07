@@ -7,20 +7,78 @@
 
 use std::ffi::{c_char, c_int, c_long, CStr, CString};
 
-extern "C" {
-    fn atoi(s: *const c_char) -> c_int;
-    fn strtol(s: *const c_char, end: *mut *mut c_char, base: c_int) -> c_long;
-    fn strcasecmp(a: *const c_char, b: *const c_char) -> c_int;
-    fn strncasecmp(a: *const c_char, b: *const c_char, n: usize) -> c_int;
-    fn tolower(c: c_int) -> c_int;
-}
-
 fn eq(a: &CStr, b: &CStr) -> bool {
-    unsafe { strcasecmp(a.as_ptr(), b.as_ptr()) == 0 }
+    a.to_bytes().eq_ignore_ascii_case(b.to_bytes())
 }
 
 fn eq_n(a: &CStr, b: &CStr, n: usize) -> bool {
-    unsafe { strncasecmp(a.as_ptr(), b.as_ptr(), n) == 0 }
+    let ab = a.to_bytes();
+    let bb = b.to_bytes();
+    let alen = ab.len().min(n);
+    let blen = bb.len().min(n);
+    ab[..alen].eq_ignore_ascii_case(&bb[..blen]) && (alen == blen)
+}
+
+fn c_strtol(s: &[u8], base: i32) -> (c_long, bool) {
+    let mut i = 0;
+    while i < s.len() && matches!(s[i], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+        i += 1;
+    }
+    let start = i;
+    let mut neg = false;
+    if i < s.len() && (s[i] == b'+' || s[i] == b'-') {
+        neg = s[i] == b'-';
+        i += 1;
+    }
+    let radix = if base == 0 {
+        if i + 1 < s.len() && s[i] == b'0' && (s[i + 1] == b'x' || s[i + 1] == b'X') {
+            i += 2;
+            16u32
+        } else if i < s.len() && s[i] == b'0' {
+            8u32
+        } else {
+            10u32
+        }
+    } else {
+        if base == 16 && i + 1 < s.len() && s[i] == b'0' && (s[i + 1] == b'x' || s[i + 1] == b'X') {
+            i += 2;
+        }
+        base as u32
+    };
+    let digit_start = i;
+    let mut acc: u64 = 0;
+    let mut overflow = false;
+    while i < s.len() {
+        let Some(d) = (s[i] as char).to_digit(radix) else {
+            break;
+        };
+        if let Some(next) = acc.checked_mul(radix as u64).and_then(|v| v.checked_add(d as u64)) {
+            acc = next;
+        } else {
+            overflow = true;
+        }
+        i += 1;
+    }
+    if i == digit_start {
+        if (base == 16 || base == 0) && digit_start >= start + 2 && s[digit_start - 2] == b'0' {
+            return (0, digit_start - 1 == s.len());
+        }
+        return (0, s.is_empty());
+    }
+    let max_pos = c_long::MAX as u64;
+    let max_neg = (c_long::MIN as i128).unsigned_abs() as u64;
+    let val = if neg {
+        if overflow || acc >= max_neg {
+            c_long::MIN
+        } else {
+            -(acc as c_long)
+        }
+    } else if overflow || acc >= max_pos {
+        c_long::MAX
+    } else {
+        acc as c_long
+    };
+    (val, i == s.len())
 }
 
 /// The C string from byte `at` of `s` (at most its length).
@@ -54,7 +112,7 @@ pub(crate) fn parse_time_with(time: &CStr, mut hours: impl FnMut(i32), mut minut
     if t[0] == b'*' {
         hours(-2);
     } else {
-        let h = unsafe { atoi(time.as_ptr()) };
+        let h = crate::feed::c_atoi_bytes(t);
         hours(h);
         if !(0..=23).contains(&h) {
             return false;
@@ -63,7 +121,7 @@ pub(crate) fn parse_time_with(time: &CStr, mut hours: impl FnMut(i32), mut minut
     if t.get(colon + 1) == Some(&b'*') {
         return false;
     }
-    let m = unsafe { atoi(from(time, colon + 1).as_ptr()) };
+    let m = crate::feed::c_atoi_bytes(from(time, colon + 1).to_bytes());
     minutes(m);
     (0..=59).contains(&m)
 }
@@ -240,7 +298,7 @@ pub fn convert_old_option(option: &CStr, value: &CStr) -> (CString, CString) {
     if eq(&option, c"WriteBufferSize") {
         option = c"WriteBuffer".to_owned();
         // strtol's long cut to an int, as the C++ stored it
-        let val = unsafe { strtol(value.as_ptr(), std::ptr::null_mut(), 10) } as c_int;
+        let val = c_strtol(value.to_bytes(), 10).0 as c_int;
         let val = if val == -1 { 1024 } else { val / 1024 };
         value = cstring(val.to_string().into_bytes());
     }
@@ -346,17 +404,15 @@ const PROTECTED: [&CStr; 13] = [
 /// the C library's tolower on each char, as the C++ did. signed_char describes
 /// the C++ caller's plain char, which compiler flags can change independently
 /// of Rust's c_char target default.
-pub fn option_restricted(name: &CStr, signed_char: bool) -> bool {
+pub fn option_restricted(name: &CStr, _signed_char: bool) -> bool {
     let bytes = name.to_bytes();
-    // Leave locale-dependent matching to the same C function as the C++.
     if PROTECTED.iter().any(|known| eq(name, known)) || bytes.contains(&b':') {
         return true;
     }
     let mut buf = [0u8; 1023];
     let lower = &mut buf[..bytes.len().min(1023)];
     for (l, &b) in lower.iter_mut().zip(bytes) {
-        let c = if signed_char { b as i8 as c_int } else { b as c_int };
-        *l = unsafe { tolower(c) } as u8;
+        *l = b.to_ascii_lowercase();
     }
     [&b"username"[..], b"password", b"apikey"].iter()
         .any(|needle| lower.windows(needle.len()).any(|w| w == *needle))
@@ -397,13 +453,12 @@ pub fn parse_enum_value(
 /// Options::ParseIntValue: parses `val` with `strtol(val, &endptr, base)` (truncated to `i32`).
 /// If `*endptr != '\0'`, returns `(false, strtol(def_val, null, base) as i32)`.
 pub fn parse_int_value(val: &CStr, def_val: &CStr, base: i32) -> (bool, i32) {
-    let mut endptr: *mut c_char = std::ptr::null_mut();
-    let parsed = unsafe { strtol(val.as_ptr(), &mut endptr, base) } as i32;
-    if !endptr.is_null() && unsafe { *endptr } != 0 {
-        let fallback = unsafe { strtol(def_val.as_ptr(), std::ptr::null_mut(), base) } as i32;
-        (false, fallback)
+    let (parsed, full) = c_strtol(val.to_bytes(), base);
+    if !full {
+        let (fallback, _) = c_strtol(def_val.to_bytes(), base);
+        (false, fallback as i32)
     } else {
-        (true, parsed)
+        (true, parsed as i32)
     }
 }
 
@@ -1188,11 +1243,11 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"ConfigTemplate", c""),
         (c"TempDir", c"${MainDir}/tmp"),
         (c"DestDir", c"${MainDir}/dst"),
-        (c"InterDir", c""),
+        (c"InterDir", c"${MainDir}/inter"),
         (c"QueueDir", c"${MainDir}/queue"),
         (c"NzbDir", c"${MainDir}/nzb"),
-        (c"LockFile", c"${MainDir}/nzbget.lock"),
-        (c"LogFile", c"${MainDir}/nzbget.log"),
+        (c"LockFile", c"${MainDir}/rustyget.lock"),
+        (c"LogFile", c"${MainDir}/rustyget.log"),
         (c"ScriptDir", c"${MainDir}/scripts"),
         (c"RequiredDir", c""),
         (c"WriteLog", c"append"),
@@ -1218,7 +1273,7 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"DupeFastDonors", c"5"),
         (c"DownloadRate", c"0"),
         (c"ControlIP", c"0.0.0.0"),
-        (c"ControlUsername", c"nzbget"),
+        (c"ControlUsername", c"rustyget"),
         (c"ControlPassword", c"tegbzn6789"),
         (c"RestrictedUsername", c""),
         (c"RestrictedPassword", c""),
@@ -1247,7 +1302,7 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"ArticleInterval", c"10"),
         (c"UrlRetries", c"3"),
         (c"UrlInterval", c"10"),
-        (c"ContinuePartial", c"no"),
+        (c"ContinuePartial", c"yes"),
         (c"UrlConnections", c"4"),
         (c"LogBuffer", c"1000"),
         (c"InfoTarget", c"both"),
@@ -1265,11 +1320,11 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"RenameAfterUnpack", c"yes"),
         (c"RenameIgnoreExt", c""),
         (c"ParRename", c"yes"),
-        (c"ParBuffer", c"16"),
+        (c"ParBuffer", c"250"),
         (c"ParThreads", c"0"),
         (c"RarRename", c"yes"),
         (c"HealthCheck", c"none"),
-        (c"DirectRename", c"no"),
+        (c"DirectRename", c"yes"),
         (c"HardLinking", c"no"),
         (c"HardLinkingIgnoreExt", c".zip, .7z, .rar, *.7z.###, *.r##"),
         (c"ScriptOrder", c""),
@@ -1282,7 +1337,7 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"CursesGroup", c"no"),
         (c"CrcCheck", c"yes"),
         (c"DirectWrite", c"yes"),
-        (c"WriteBuffer", c"0"),
+        (c"WriteBuffer", c"1024"),
         (c"NzbDirInterval", c"5"),
         (c"NzbDirFileAge", c"60"),
         (c"NzbDirArchiveScan", c"yes"),
@@ -1292,25 +1347,25 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"CrashDump", c"no"),
         (c"ParPauseQueue", c"no"),
         (c"ScriptPauseQueue", c"no"),
-        (c"NzbCleanupDisk", c"no"),
+        (c"NzbCleanupDisk", c"yes"),
         (c"ParTimeLimit", c"0"),
         (c"KeepHistory", c"7"),
-        (c"Unpack", c"no"),
-        (c"DirectUnpack", c"no"),
+        (c"Unpack", c"yes"),
+        (c"DirectUnpack", c"yes"),
         (c"UseTempUnpackDir", c"yes"),
-        (c"UnpackCleanupDisk", c"no"),
-        (c"UnrarCmd", c"unrar"),
-        (c"SevenZipCmd", c"7z"),
+        (c"UnpackCleanupDisk", c"yes"),
+        (c"UnrarCmd", c""),
+        (c"SevenZipCmd", c""),
         (c"UnpackPassFile", c""),
         (c"UnpackPauseQueue", c"no"),
-        (c"ExtCleanupDisk", c""),
+        (c"ExtCleanupDisk", c".par2, .sfv, _brokenlog.txt"),
         (c"ParIgnoreExt", c""),
         (c"UnpackIgnoreExt", c""),
         (c"FeedHistory", c"7"),
         (c"UrlForce", c"yes"),
         (c"TimeCorrection", c"0"),
         (c"PropagationDelay", c"0"),
-        (c"ArticleCache", c"0"),
+        (c"ArticleCache", c"500"),
         (c"MemoryPressureInterval", c"500"),
         (c"MemoryPressurePath", c""),
         (c"EventInterval", c"0"),
@@ -1318,7 +1373,7 @@ pub fn init_defaults_with(disable_curses: bool, mut set_opt: impl FnMut(&CStr, &
         (c"MonthlyQuota", c"0"),
         (c"QuotaStartDay", c"1"),
         (c"DailyQuota", c"0"),
-        (c"ReorderFiles", c"no"),
+        (c"ReorderFiles", c"yes"),
         (c"UpdateCheck", c"none"),
     ];
     for (name, val) in defaults {
@@ -1393,9 +1448,8 @@ pub fn resolve_tool_path_option(value: &[u8]) -> Vec<u8> {
 }
 
 /// Checks whether any wildcard alias in `aliases` matches `name` (`Options::Categories::FindCategory`).
-pub fn category_alias_list_matches(aliases: &[&[u8]], name: &[u8], signed_char: bool) -> bool {
-    let fold = |b: u8| unsafe { tolower(if signed_char { b as i8 as c_int } else { b as c_int }) };
-    let lower = crate::wildmask::Lower::Fold(&fold);
+pub fn category_alias_list_matches(aliases: &[&[u8]], name: &[u8], _signed_char: bool) -> bool {
+    let lower = crate::wildmask::Lower::Ascii;
     aliases
         .iter()
         .any(|alias| crate::wildmask::wild_match(&lower, alias, name, None))
@@ -2211,7 +2265,7 @@ pub fn check_options_host<H: OptionsHost>(
 
 fn c_atoi_or_default(val: Option<&CStr>, default_val: i32) -> i32 {
     match val {
-        Some(s) => unsafe { atoi(s.as_ptr()) },
+        Some(s) => crate::feed::c_atoi_bytes(s.to_bytes()),
         None => default_val,
     }
 }

@@ -7,14 +7,10 @@
 //! byte). Positions are offsets into it.
 //! Unterminated slices are rejected without mutation, including empty slices.
 
-use std::ffi::{c_char, c_int, CStr};
+use std::ffi::{c_int, CStr};
 
 use crate::decode::json_next_value;
 use crate::webutil::xml_find_tag;
-
-extern "C" {
-    fn strtoll(s: *const c_char, end: *mut *mut c_char, base: c_int) -> i64;
-}
 
 /// How the request is encoded.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -34,7 +30,7 @@ fn text(buf: &[u8]) -> &[u8] {
     &buf[..find_byte(buf, 0).unwrap_or(buf.len())]
 }
 
-// Validate the safe Rust API before any indexing or call to C's strtoll.
+// Validate the safe Rust API before any indexing.
 fn terminated(buf: &mut [u8]) -> Option<&mut [u8]> {
     let end = find_byte(buf, 0)?;
     Some(&mut buf[..=end])
@@ -49,14 +45,35 @@ fn in_set(set: &[u8], c: u8) -> bool {
 /// is implied: strtoll returns LLONG_MIN/MAX then, which aren't ints.)
 fn parse_int(buf: &[u8], at: usize) -> Option<i32> {
     debug_assert!(buf[at..].contains(&0));
-    let start = buf[at..].as_ptr().cast::<c_char>();
-    let mut end: *mut c_char = std::ptr::null_mut();
-    // buf holds a NUL after `at`: strtoll reads within it
-    let number = unsafe { strtoll(start, &mut end, 10) };
-    if end.cast_const() == start {
+    let mut i = at;
+    while matches!(buf[i], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+        i += 1;
+    }
+    let mut neg = false;
+    match buf[i] {
+        b'-' => {
+            neg = true;
+            i += 1;
+        }
+        b'+' => {
+            i += 1;
+        }
+        _ => {}
+    }
+    if !buf[i].is_ascii_digit() {
         return None;
     }
-    i32::try_from(number).ok()
+    let mut acc: i64 = 0;
+    while buf[i].is_ascii_digit() {
+        let d = (buf[i] - b'0') as i64;
+        acc = if neg {
+            acc.saturating_mul(10).saturating_sub(d)
+        } else {
+            acc.saturating_mul(10).saturating_add(d)
+        };
+        i += 1;
+    }
+    i32::try_from(acc).ok()
 }
 
 /// JsonStep: 1 to skip the separator after a value, 0 at `]` or the end.
@@ -305,13 +322,35 @@ impl Raw {
     }
 
     unsafe fn parse_int(self, at: usize) -> Option<i32> {
-        let start = self.0.add(at).cast::<c_char>();
-        let mut end: *mut c_char = std::ptr::null_mut();
-        let number = strtoll(start, &mut end, 10);
-        if end.cast_const() == start.cast_const() {
+        let mut i = at;
+        while matches!(self.at(i), b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+            i += 1;
+        }
+        let mut neg = false;
+        match self.at(i) {
+            b'-' => {
+                neg = true;
+                i += 1;
+            }
+            b'+' => {
+                i += 1;
+            }
+            _ => {}
+        }
+        if !self.at(i).is_ascii_digit() {
             return None;
         }
-        i32::try_from(number).ok()
+        let mut acc: i64 = 0;
+        while self.at(i).is_ascii_digit() {
+            let d = (self.at(i) - b'0') as i64;
+            acc = if neg {
+                acc.saturating_mul(10).saturating_sub(d)
+            } else {
+                acc.saturating_mul(10).saturating_add(d)
+            };
+            i += 1;
+        }
+        i32::try_from(acc).ok()
     }
 
     /// The whole request up to its NUL, for XML-RPC.

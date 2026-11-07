@@ -113,17 +113,7 @@
 #include <span>
 #include <regex>
 
-#include <libxml/parser.h>
-#include <libxml/xmlerror.h>
-#include <libxml/entities.h>
-#include <libxml/tree.h>
-
-#include <rapidyenc.h>
-
-#include <boost/asio.hpp>
-#include <boost/json.hpp>
 #ifndef DISABLE_TLS
-#include <boost/asio/ssl.hpp>
 #include "OpenSSL.h"
 #endif
 
@@ -135,10 +125,6 @@
 
 #ifdef HAVE_REGEX_H
 #include <regex.h>
-#endif
-
-#ifndef DISABLE_GZIP
-#include <zlib.h>
 #endif
 
 #ifndef DISABLE_PARCHECK

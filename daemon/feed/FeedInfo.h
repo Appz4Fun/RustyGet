@@ -20,12 +20,24 @@
 
 
 #ifndef FEEDINFO_H
-#define FEEDINFO_H
 
 #include <atomic>
 #include <string>
 #include "Util.h"
-#include "DownloadInfo.h"
+#include "nzbget_rs.h"
+
+#ifndef FEEDINFO_H
+#define FEEDINFO_H
+
+#ifndef EDUPEMODE_DEFINED
+#define EDUPEMODE_DEFINED
+enum EDupeMode
+{
+	dmScore,
+	dmAll,
+	dmForce
+};
+#endif
 
 class FeedInfo
 {
@@ -66,7 +78,28 @@ public:
 		int priority,
 		const char* extensions,
 		unsigned int certVerifLevel
-	);
+	)
+		: m_id{ id }
+		, m_name{ name ? name : "" }
+		, m_url{ url ? url : "" }
+		, m_filter{ filter ? filter : "" }
+		, m_category{ category ? category : "" }
+		, m_categorySource{ categorySource }
+		, m_extensions{ extensions ? extensions : "" }
+		, m_backlog{ backlog }
+		, m_interval{ interval }
+		, m_pauseNzb{ pauseNzb }
+		, m_priority{ priority }
+		, m_certVerifLevel{ certVerifLevel }
+	{
+		NzbgetRsBuf nameBuf{};
+		nzbget_rs_feed_info_init(m_id, m_name.c_str(), m_filter.c_str(), &nameBuf, &m_filterHash);
+		if (nameBuf.data)
+		{
+			m_name.assign(nameBuf.data, nameBuf.len);
+		}
+		nzbget_rs_free(nameBuf);
+	}
 	int GetId() const { return m_id; }
 	const char* GetName() const { return m_name.c_str(); }
 	const char* GetUrl() const { return m_url.c_str(); }
@@ -169,7 +202,21 @@ public:
 	class Attributes: public AttributesBase
 	{
 	public:
-		Attr* Find(const char* name);
+		Attr* Find(const char* name)
+		{
+			if (!name)
+			{
+				return nullptr;
+			}
+			for (Attr& attr : *this)
+			{
+				if (!strcasecmp(attr.GetName(), name))
+				{
+					return &attr;
+				}
+			}
+			return nullptr;
+		}
 	};
 
 	FeedItemInfo() {}
@@ -196,11 +243,33 @@ public:
 	const char* GetDescription() const { return m_description.c_str(); }
 	void SetDescription(const char* description) { m_description = description ? description: ""; }
 	const char* GetSeason() const { return m_season.c_str(); }
-	void SetSeason(const char* season);
+	void SetSeason(const char* season)
+	{
+		m_season = season ? season : "";
+		m_seasonNum = season ? ParsePrefixedInt(season) : 0;
+	}
 	const char* GetEpisode() const { return m_episode.c_str(); }
-	void SetEpisode(const char* episode);
-	int GetSeasonNum();
-	int GetEpisodeNum();
+	void SetEpisode(const char* episode)
+	{
+		m_episode = episode ? episode : "";
+		m_episodeNum = episode ? ParsePrefixedInt(episode) : 0;
+	}
+	int GetSeasonNum()
+	{
+		if (m_season.empty() && !m_seasonEpisodeParsed)
+		{
+			ParseSeasonEpisode();
+		}
+		return m_seasonNum;
+	}
+	int GetEpisodeNum()
+	{
+		if (m_episode.empty() && !m_seasonEpisodeParsed)
+		{
+			ParseSeasonEpisode();
+		}
+		return m_episodeNum;
+	}
 	const std::string& GetAddCategory() const { return m_addCategory; }
 	void SetAddCategory(const char* addCategory) { m_addCategory = addCategory ? addCategory : ""; }
 	bool GetPauseNzb() const { return m_pauseNzb; }
@@ -217,13 +286,42 @@ public:
 	void SetMatchRule(int matchRule) { m_matchRule = matchRule; }
 	const char* GetDupeKey() const { return m_dupeKey.c_str(); }
 	void SetDupeKey(const char* dupeKey) { m_dupeKey = dupeKey ? dupeKey : ""; }
-	void AppendDupeKey(const char* extraDupeKey);
-	void BuildDupeKey(const char* rageId, const char* tvdbId, const char* tvmazeId, const char* series);
+	void AppendDupeKey(const char* extraDupeKey)
+	{
+		if (!m_dupeKey.empty() && !Util::EmptyStr(extraDupeKey))
+		{
+			m_dupeKey += "-";
+			m_dupeKey += extraDupeKey;
+		}
+	}
+	void BuildDupeKey(const char* rageId, const char* tvdbId, const char* tvmazeId, const char* series)
+	{
+		bool anySeriesId = nzbget_rs_feed_has_any_series_id(
+			series, rageId, tvdbId, tvmazeId, m_rageId, m_tvdbId, m_tvmazeId) != 0;
+		int seasonNum = anySeriesId ? GetSeasonNum() : 0;
+		int episodeNum = (anySeriesId && seasonNum != 0) ? GetEpisodeNum() : 0;
+		NzbgetRsBuf buf = nzbget_rs_feed_build_dupe_key(
+			rageId, tvdbId, tvmazeId, series,
+			m_rageId, m_tvdbId, m_tvmazeId, m_imdbId,
+			seasonNum, episodeNum, m_season.c_str(), m_episode.c_str());
+		m_dupeKey.assign(buf.data ? buf.data : "", buf.len);
+		nzbget_rs_free(buf);
+		m_dupeKey.shrink_to_fit();
+	}
 	int GetDupeScore() const { return m_dupeScore; }
 	void SetDupeScore(int dupeScore) { m_dupeScore = dupeScore; }
 	EDupeMode GetDupeMode() const { return m_dupeMode; }
 	void SetDupeMode(EDupeMode dupeMode) { m_dupeMode = dupeMode; }
-	const char* GetDupeStatus();
+	const char* GetDupeStatus()
+	{
+		if (m_dupeStatus.empty())
+		{
+			BString<1024> statuses;
+			m_feedFilterHelper->CalcDupeStatus(m_title.c_str(), m_dupeKey.c_str(), statuses, statuses.Capacity());
+			m_dupeStatus = statuses;
+		}
+		return m_dupeStatus.c_str();
+	}
 	Attributes* GetAttributes() { return &m_attributes; }
 
 private:
@@ -256,8 +354,43 @@ private:
 	FeedFilterHelper* m_feedFilterHelper = nullptr;
 	Attributes m_attributes;
 
-	int ParsePrefixedInt(const char *value);
-	void ParseSeasonEpisode();
+	int ParsePrefixedInt(const char *value)
+	{
+		return nzbget_rs_feed_parse_prefixed_int(value);
+	}
+
+	void ParseSeasonEpisode()
+	{
+		if (!m_feedFilterHelper)
+		{
+			return;
+		}
+
+		m_seasonEpisodeParsed = true;
+
+		const char* pattern = "[^[:alnum:]]s?([0-9]+)[ex]([0-9]+(-?e[0-9]+)?)[^[:alnum:]]";
+
+		std::unique_ptr<RegEx>& regEx = m_feedFilterHelper->GetRegEx(1);
+		if (!regEx)
+		{
+			regEx = std::make_unique<RegEx>(pattern, 10);
+		}
+
+		if (regEx->Match(m_title.c_str()))
+		{
+			const char* season = m_title.c_str() + regEx->GetMatchStart(1);
+			int seasonNum = Util::StrToNum<int>(season).value_or(0);
+			const char* val = m_title.c_str() + regEx->GetMatchStart(2);
+			size_t valLen = (size_t)regEx->GetMatchLen(2);
+			NzbgetRsBuf seasonBuf{};
+			NzbgetRsBuf episodeBuf{};
+			nzbget_rs_feed_format_season_episode(seasonNum, val, valLen, &seasonBuf, &episodeBuf);
+			SetSeason(seasonBuf.data ? seasonBuf.data : "");
+			SetEpisode(episodeBuf.data ? episodeBuf.data : "");
+			nzbget_rs_free(seasonBuf);
+			nzbget_rs_free(episodeBuf);
+		}
+	}
 };
 
 typedef std::deque<FeedItemInfo> FeedItemList;
@@ -293,8 +426,38 @@ typedef std::deque<FeedHistoryInfo> FeedHistoryBase;
 class FeedHistory : public FeedHistoryBase
 {
 public:
-	void Remove(const char* url);
-	FeedHistoryInfo* Find(const char* url);
+	void Remove(const char* url)
+	{
+		if (!url)
+		{
+			return;
+		}
+		for (iterator it = begin(); it != end(); ++it)
+		{
+			if (!strcmp(it->GetUrl(), url))
+			{
+				erase(it);
+				break;
+			}
+		}
+	}
+
+	FeedHistoryInfo* Find(const char* url)
+	{
+		if (!url)
+		{
+			return nullptr;
+		}
+		for (FeedHistoryInfo& feedHistoryInfo : *this)
+		{
+			if (!strcmp(feedHistoryInfo.GetUrl(), url))
+			{
+				return &feedHistoryInfo;
+			}
+		}
+		return nullptr;
+	}
 };
 
+#endif
 #endif

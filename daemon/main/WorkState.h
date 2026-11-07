@@ -1,5 +1,5 @@
 /*
- *  This file is part of nzbget. See <https://nzbget.com>.
+ *  This file is part of RustyGet.
  *
  *  Copyright (C) 2019 Andrey Prygunkov <hugbug@users.sourceforge.net>
  *  Copyright (C) 2024 Denis <denis@nzbget.com>
@@ -70,7 +70,7 @@ private:
 	std::atomic<bool> m_downloading{false};
 	std::atomic<bool> m_quotaReached{false};
 
-	void Changed();
+	void Changed() { Notify(nullptr); }
 };
 
 extern WorkState* g_WorkState;

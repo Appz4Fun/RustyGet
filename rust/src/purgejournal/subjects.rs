@@ -1265,7 +1265,7 @@ fn held_output_capacity_arithmetic_overflow_is_checked_without_heap() {
 fn held_capacity_returned_surplus_is_charged_from_actual_vector() {
     let mut returned=Vec::<u8>::with_capacity(4096);returned.push(7);
     let actual=returned.capacity();assert!(actual>1);
-    let mut live=HeldCapacity::new(17).unwrap();
+    let live=HeldCapacity::new(17).unwrap();
     live.admit_vec(1,&returned).unwrap();
     assert_eq!(live.bytes(),17+actual);
 }
@@ -1274,7 +1274,7 @@ fn held_capacity_surplus_crosses_aggregate_without_changing_some() {
     let f=held_issued_fixture();let input=Some(held_input(&f));
     let before=held_input_fingerprint(input.as_ref().unwrap());let frames=f.host.frames.len();
     let returned=Vec::<u64>::with_capacity(64);let actual=returned.capacity()*std::mem::size_of::<u64>();
-    let mut live=HeldCapacity::new(MAX_PAYLOAD-actual+1).unwrap();let prior=live.bytes();
+    let live=HeldCapacity::new(MAX_PAYLOAD-actual+1).unwrap();let prior=live.bytes();
     assert!(matches!(live.admit_vec(1,&returned),Err(PurgeError::LimitExceeded)));
     assert_eq!(live.bytes(),prior); // rejected charge is transactional
     assert_eq!(held_input_fingerprint(input.as_ref().unwrap()),before);
@@ -1283,7 +1283,7 @@ fn held_capacity_surplus_crosses_aggregate_without_changing_some() {
 #[test]
 fn held_capacity_exact_aggregate_boundary_accepts_actual_capacity() {
     let returned=Vec::<u64>::with_capacity(64);let actual=returned.capacity()*std::mem::size_of::<u64>();
-    let mut live=HeldCapacity::new(MAX_PAYLOAD-actual).unwrap();
+    let live=HeldCapacity::new(MAX_PAYLOAD-actual).unwrap();
     live.admit_vec(1,&returned).unwrap();assert_eq!(live.bytes(),MAX_PAYLOAD);
     assert_eq!(live.preflight::<u8>(1),Err(PurgeError::LimitExceeded));
 }
@@ -1291,7 +1291,7 @@ fn held_capacity_exact_aggregate_boundary_accepts_actual_capacity() {
 fn held_capacity_scratch_drop_releases_only_its_actual_backing() {
     let scratch=Vec::<u8>::with_capacity(4096);let output=Vec::<u64>::with_capacity(32);
     let retained=output.capacity()*std::mem::size_of::<u64>();let scratch_bytes=scratch.capacity();
-    let mut live=HeldCapacity::new(13).unwrap();live.admit_vec(1,&scratch).unwrap();live.admit_vec(1,&output).unwrap();
+    let live=HeldCapacity::new(13).unwrap();live.admit_vec(1,&scratch).unwrap();live.admit_vec(1,&output).unwrap();
     assert_eq!(live.bytes(),13+scratch_bytes+retained);
     live.drop_scratch(scratch).unwrap();assert_eq!(live.bytes(),13+retained);
     // Ownership returned by a helper remains charged until the caller drops it.
@@ -1301,7 +1301,7 @@ fn held_capacity_scratch_drop_releases_only_its_actual_backing() {
 fn held_capacity_nested_backings_are_simultaneous_not_just_outer_length() {
     let mut nested=Vec::<Vec<u8>>::with_capacity(2);nested.push(Vec::with_capacity(17));nested.push(Vec::with_capacity(31));
     let outer=nested.capacity()*std::mem::size_of::<Vec<u8>>();let inner=nested.iter().map(Vec::capacity).sum::<usize>();
-    let mut live=HeldCapacity::new(MAX_PAYLOAD-outer-inner).unwrap();
+    let live=HeldCapacity::new(MAX_PAYLOAD-outer-inner).unwrap();
     live.admit_vec(nested.len(),&nested).unwrap();for row in &nested{live.admit_vec(row.len(),row).unwrap();}
     assert_eq!(live.bytes(),MAX_PAYLOAD);
 }

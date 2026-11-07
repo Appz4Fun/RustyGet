@@ -23,8 +23,8 @@
 <html lang="en">
 <head>
 	<meta charset="utf-8">
-	<title>NZBGet</title>
-	<meta name="description" content="NZBGet web-interface">
+	<title>RustyGet</title>
+	<meta name="description" content="RustyGet web-interface">
 
 	<!-- Mobile settings -->
 	<meta name="viewport" content="initial-scale=1.0, user-scalable=yes" />
@@ -122,7 +122,7 @@
 		<div class="container-fluid navbar-container" id="NavbarContainer">
 
 			<!-- LOGO -->
-			<div id="Logo" onclick="$('#DownloadsTabLink').click()"><img class="nzb-logo-icon" src="img/nzbget-icon-dark.svg" alt="" width="32" height="32"><span class="nzb-logo-name">NZBGet</span></div>
+			<div id="Logo" onclick="$('#DownloadsTabLink').click()"><img class="nzb-logo-icon" src="img/nzbget-icon-dark.svg" alt="" width="32" height="32"><span class="nzb-logo-name">RustyGet</span></div>
 
 			<!-- PLAY/PAUSE-BUTTON -->
 			<div id="PlayBlock">
@@ -638,77 +638,22 @@
 								</div>
 
 								<div id="ConfigInfo">
-									<h4 data-i18n="config_info_saving_changes"></h4>
-									<p data-i18n-html="config_info_saving_changes_desc" data-i18n-html-arg-1="<em><strong>" data-i18n-html-arg-2="</strong></em>"></p>
+									<h4>RustyGet Native Rust Engine</h4>
+									<p>RustyGet is a high-performance native Rust Usenet downloader engineered for macOS (Apple Silicon &amp; Intel) and x86_64 Linux. All core processing stages run in-process without external helper binaries or extension scripts:</p>
+									<ul>
+										<li><strong>Built-in Archive Inspection &amp; Extraction (<code>zipfast</code> &amp; <code>zipview</code>)</strong>: Native in-process RAR (RAR 1.5/2.0/2.9/4.x/5.0), 7-Zip (<code>.7z</code> / <code>.7z.001</code>), ZIP, TAR, Gzip, Bzip2, XZ, and Zstandard extraction with first-class Extended Unpacker (recursive nested archive extraction, obfuscated header magic detection, and password-list retry), Extended UnRAR, and Permission Fixer (POSIX file/directory mode normalization).</li>
+										<li><strong>Built-in Parity Verification &amp; Streaming Repair (<code>par-rs</code>)</strong>: Integrated PAR2 verification, repair-while-downloading, post-download Reed-Solomon repair, and deobfuscation rename engine rolled directly into RustyGet.</li>
+										<li><strong>Built-in SIMD yEnc &amp; Compression (<code>nntmux-yenc</code>, <code>crc32fast</code>, <code>flate2</code>)</strong>: Hardware-accelerated yEnc decoding, CRC32 verification, and Gzip/Zlib streaming via <code>zlib-rs</code>.</li>
+									</ul>
 
-									<h4 data-i18n="config_info_nzbget_settings"></h4>
-									<p data-i18n-html="config_info_nzbget_settings_desc" data-i18n-html-arg-1="<a class='option' href='#' data-category='S' onclick='Config.scrollToOption(event, this)'>" data-i18n-html-arg-2="</a>" data-i18n-html-arg-3="<a class='option' href='#' data-category='S' onclick='Config.navigateTo(&quot;NEWS-SERVERS&quot;)'>" data-i18n-html-arg-4="</a>"></p>
+									<h4>Saving Changes</h4>
+									<p>After changing settings on any page, click <em><strong>Save all changes</strong></em> at the top of the settings view and reload RustyGet when prompted so updated configuration values take effect.</p>
 
-									<h4 data-i18n="config_info_extension_manager"></h4>
-									<p data-i18n-html="config_info_extension_manager_desc" data-i18n-html-arg-1="<a class='option text-uppercase' href='#' data-category='S' onclick='Config.navigateTo(&quot;extension-manager&quot;)'>" data-i18n-html-arg-2="</a>" data-i18n-html-arg-3="<a class='option text-uppercase' href='#' data-category='S' onclick='Config.navigateTo(&quot;EXTENSION_SCRIPTS&quot;)'>" data-i18n-html-arg-4="</a>"></p>
+									<h4>Getting Started</h4>
+									<p>Configure your Usenet provider(s) under <a class="option" href="#" data-category="S" onclick="Config.navigateTo(&quot;NEWS-SERVERS&quot;)">NEWS-SERVERS</a> and review download directories under <a class="option" href="#" data-category="S" onclick="Config.navigateTo(&quot;PATHS&quot;)">PATHS</a>. Default settings are pre-tuned for modern macOS and x86_64 Linux systems with zero external tool dependencies.</p>
 
-									<h4 data-i18n="config_info_web_interface_settings"></h4>
-									<p data-i18n-html="config_info_web_interface_settings_desc" data-i18n-html-arg-1="<a class='option text-uppercase' href='#' data-category='S' onclick='Config.navigateTo(&quot;WEB-INTERFACE&quot;)'>" data-i18n-html-arg-2="</a>"></p>
-
-									<h4 data-i18n="config_info_backup_restore_settings"></h4>
-									<p data-i18n-html="config_info_backup_restore_settings_desc" data-i18n-html-arg-1="<a class='option text-uppercase' href='#' data-category='S' onclick='Config.navigateTo(&quot;Config-System&quot;)'>" data-i18n-html-arg-2="</a>"></p>
-
-									<br>
-
-									<section aria-labelledby="community-heading">
-										<h3 id="community-heading" class="text-uppercase" data-i18n="config_info_community_resources"></h3>
-
-										<hr>
-										<nav aria-label="Community links">
-											<ul style="list-style-type: none; margin: 0;">
-												<li class="flex">
-													<img src="img/nzbget.svg" alt="NZBGet logo." aria-hidden="true" width="25" height="25" style="margin-right:5px;"/>
-													<div>
-														<h4>
-															<a href="https://nzbget.com/" target="_blank" rel="noopener noreferrer" data-i18n="config_info_official_website"></a>
-														</h4>
-														<p data-i18n="config_info_official_website_desc"></p>
-													</div>
-												</li>
-
-												<li class="flex">
-													<img src="img/github.svg" alt="GitHub logo." aria-hidden="true" width="25" height="25" style="margin-right:5px;"/>
-													<div>
-														<h4>
-															<a href="https://github.com/nzbgetcom/nzbget" target="_blank" rel="noopener noreferrer">
-																GitHub
-															</a>
-														</h4>
-														<p data-i18n="config_info_github_desc"></p>
-													</div>
-												</li>
-
-												<li class="flex">
-													<img src="img/discord.svg" alt="Discord logo." aria-hidden="true" width="25" height="25" style="margin-right:5px;"/>
-													<div>
-														<h4>
-															<a href="https://discord.gg/mV9Vn9sM7C" target="_blank" rel="noopener noreferrer">
-																Discord
-															</a>
-														</h4>
-														<p data-i18n="config_info_discord_desc"></p>
-													</div>
-												</li>
-
-												<li class="flex">
-													<img src="img/reddit.svg" alt="Reddit logo." aria-hidden="true" width="25" height="25" style="margin-right:5px;"/>
-													<div>
-														<h4>
-															<a href="https://reddit.com/r/nzbget/" target="_blank" rel="noopener noreferrer">
-																Reddit
-															</a>
-														</h4>
-														<p data-i18n="config_info_reddit_desc"></p>
-													</div>
-												</li>
-											</ul>
-										</nav>
-									</section>
+									<h4>Backup &amp; Restore</h4>
+									<p>You can export or restore your RustyGet configuration at any time from the <a class="option text-uppercase" href="#" data-category="S" onclick="Config.navigateTo(&quot;Config-System&quot;)">SYSTEM</a> tab.</p>
 								</div>
 
 								<div>
@@ -1001,55 +946,6 @@
 													</p>
 												</div>
 											</div>
-
-											<section class="control-group config-static extension-manager">
-												<div class="alert alert-info alert-block" style="display:none;" id="ExtensionsLoadingBanner">
-													<h4 class="alert-heading" data-i18n="msg_loading"></h4>
-													<span data-i18n="msg_please_wait"></span>
-												</div>
-												<div class="alert alert-danger alert-block" style="display:none;" id="ExtensionsErrorAlert">
-													<h4 class="alert-heading" id="ExtensionsErrorAlert-title" data-i18n="sysinfo_error"></h4>
-													<p id="ExtensionsErrorAlert-text"></p>
-												</div>
-
-												<p class="help-block" id="ExtensionsHelpBlock" style="display:none;" >
-													<span class="help-option-title" data-i18n-html="extman_desc1" data-i18n-html-arg-1="<strong>" data-i18n-html-arg-2="</strong>"></span>
-													<br>
-													<br>
-													<span class="help-option-title" data-i18n-html="extman_desc2" data-i18n-html-arg-1="<a href='https://github.com/nzbgetcom/nzbget-extensions/blob/main/README.md' target='_blank'>" data-i18n-html-arg-2="</a>"></span>
-													<br>
-													<br>
-													<span class="label label-warning text-uppercase" data-i18n="extman_note"></span>
-													<span class="help-option-title" data-i18n-html="extman_note1" data-i18n-html-arg-1="<a href='https://github.com/nzbgetcom/nzbget-extensions/blob/main/extensions.json' target='_blank'>" data-i18n-html-arg-2="</a>"></span>
-													<br>
-													<br>
-													<span class="label label-warning text-uppercase" data-i18n="extman_note"></span>
-													<span class="help-option-title" data-i18n-html="extman_note2" data-i18n-html-arg-1="<a href='#' onclick='Config.scrollToOption(event, this)'>" data-i18n-html-arg-2="</a>"></span>
-												</p>
-
-												<br>
-
-												<table class="table table-striped table-bordered" id="ExtensionManagerTable">
-													<thead>
-														<tr>
-															<th class="text-uppercase text-center" data-i18n="extman_col_onoff"></th>
-															<th class="text-center" data-i18n="extman_col_name"></th>
-															<th class="text-center phone-hide" data-i18n="extman_col_about"></th>
-															<th class="text-center phone-hide" data-i18n="extman_col_version"></th>
-															<th class="text-center phone-hide" data-i18n="extman_col_homepage"></th>
-															<th class="text-center" data-i18n="extman_col_actions"></th>
-															<th class="text-center phone-hide" data-i18n="extman_col_order"></th>
-														</tr>
-													</thead>
-													<tbody id="ExtensionManagerTBody"></tbody>
-												</table>
-												
-												<!-- *** DELETE EXTENSION MENU -->
-												<ul class="dropdown-menu" id="DeleteExtensionMenu">
-													<li><a href="#" id="DeleteExtensionItem" onclick="" data-i18n-title="extman_delete_action"> <span data-i18n="extman_delete_action"></span></a></li>
-													<li><a href="#" id="DeleteExtensionWithSettingsItem" onclick="" data-i18n-title="extman_delete_with_settings"> <span data-i18n="extman_delete_with_settings"></span></a></li>
-												</ul>
-											</section>
 										</fieldset>
 										</form>
 									</div>
@@ -1063,10 +959,11 @@
 
 									<p data-i18n="license_text_openssl_exemption"></p>
 
-									<h4>Par2cmdline-turbo & rapidyenc</h4>
-									<p data-i18n-html="license_desc_par2" data-i18n-html-arg-1="<a href='https://github.com/nzbgetcom/par2cmdline-turbo'>" data-i18n-html-arg-2="</a>" data-i18n-html-arg-3="<a href='https://github.com/animetosho/rapidyenc'>" data-i18n-html-arg-4="</a>" data-i18n-html-arg-5="<a href='https://github.com/animetosho'>" data-i18n-html-arg-6="</a>"></p>
+									<h4>zipfast, zipview, nntmux-yenc &amp; par-rs</h4>
+									<p>RustyGet's built-in Rust archive inspection/extraction (<code>zipfast</code>, <code>zipview</code>), SIMD yEnc decoding (<code>nntmux-yenc</code>), and parity verification/repair (<code>par-rs</code>) engines.</p>
 
-									<p data-i18n-html="license_terms_par2" data-i18n-html-arg-1="<a href='https://www.gnu.org/licenses/old-licenses/gpl-2.0.en.html'>" data-i18n-html-arg-2="</a>" data-i18n-html-arg-3="<a href='https://creativecommons.org/publicdomain/zero/1.0/legalcode'>" data-i18n-html-arg-4="</a>"></p>
+									<h4>flate2 (zlib-rs), crc32fast &amp; quick-xml</h4>
+									<p>Pure-Rust compression, SIMD CRC32 checksum calculation, and XML/RSS parsing crates licensed under MIT / Apache-2.0.</p>
 
 									<h4>jQuery</h4>
 									<p data-i18n-html="license_desc_jquery" data-i18n-html-arg-1="<a href='http://jquery.com'>" data-i18n-html-arg-2="</a>"></p>
@@ -1098,11 +995,6 @@
 
 									<h4>Google Material Icons</h4>
 									<p data-i18n-html="license_desc_material_icons" data-i18n-html-arg-1="<a href='https://fonts.google.com/icons'>" data-i18n-html-arg-2="</a>" data-i18n-html-arg-3="<a href='https://www.apache.org/licenses/LICENSE-2.0'>" data-i18n-html-arg-4="</a>"></p>
-
-									<h4>Boost</h4>
-									<p data-i18n-html="license_desc_boost" data-i18n-html-arg-1="<a href='https://www.boost.org/'>" data-i18n-html-arg-2="</a>" data-i18n-html-arg-3="<a href='https://www.boost.org/community/'>" data-i18n-html-arg-4="</a>"></p>
-
-									<p data-i18n-html="license_terms_boost" data-i18n-html-arg-1="<a href='https://www.boost.org/LICENSE_1_0.txt'>" data-i18n-html-arg-2="</a>"></p>
 								</div>
 						</div>
 
@@ -3458,7 +3350,7 @@
 <div class="modal modal-padded hide" id="TlsCipherDialog" role="dialog" aria-modal="true" aria-labelledby="TlsCipherTitle">
   <div class="modal-header"><h3 id="TlsCipherTitle" data-i18n="tls_cipher_title">Optimize TLS ciphers</h3></div>
   <div class="modal-body">
-    <p data-i18n="tls_cipher_explanation">Measure cipher speed on this NZBGet computer and test each encrypted news server. The fastest supported cipher is saved for each fully tested server. Tests briefly use CPU and server connections. A reload is required to activate saved settings.</p>
+    <p data-i18n="tls_cipher_explanation">Measure cipher speed on this RustyGet computer and test each encrypted news server. The fastest supported cipher is saved for each fully tested server. Tests briefly use CPU and server connections. A reload is required to activate saved settings.</p>
     <p id="TlsCipherState" role="status" aria-live="polite"></p>
     <p id="TlsCipherProgress"></p>
     <div id="TlsCipherAlgorithms" class="tls-cipher-table" tabindex="0" role="region" aria-label="Cipher measurements">

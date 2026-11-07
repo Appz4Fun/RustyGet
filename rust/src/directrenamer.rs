@@ -4,12 +4,7 @@
 //! evaluation (`eval_direct_rename_article`), smallest-par-per-set selection
 //! (`select_pars_to_unpause`), and state-check helpers.
 
-use std::ffi::{c_char, c_int, CStr};
-
-extern "C" {
-    #[cfg_attr(windows, link_name = "_stricmp")]
-    fn strcasecmp(a: *const c_char, b: *const c_char) -> c_int;
-}
+use std::ffi::CStr;
 
 /// `BuildNewRegularName`: the par2 file name the first par2 hash equal to
 /// `hash16k` names, if that differs from `old_name` in more than case.
@@ -24,7 +19,7 @@ pub fn regular_name<'a>(
         return None;
     }
     let (index, (filename, _)) = hashes.enumerate().find(|(_, (_, hash))| *hash == hash16k)?;
-    (unsafe { strcasecmp(old_name.as_ptr(), filename.as_ptr()) } != 0).then_some(index)
+    (!old_name.to_bytes().eq_ignore_ascii_case(filename.to_bytes())).then_some(index)
 }
 
 /// `ostream << setfill('0') << setw(3) << vol`: padded on the left, also
@@ -97,9 +92,8 @@ pub fn par_name_formatted(
         .map(|i| &old_name[i..]);
     if let Some(suffix) = suffix {
         let extension = &suffix[suffix.iter().rposition(|&b| b == b'.').unwrap_or(0)..];
-        let mut ext = extension.to_vec();
-        ext.push(0);
-        if unsafe { strcasecmp(ext.as_ptr().cast(), c".par2".as_ptr()) } == 0 {
+        let ext_end = extension.iter().position(|&b| b == 0).unwrap_or(extension.len());
+        if extension[..ext_end].eq_ignore_ascii_case(b".par2") {
             let name = [set_id, suffix].concat();
             if !exists(&full(&name)) {
                 return name;
@@ -120,14 +114,18 @@ pub fn par_name_formatted(
 /// `NeedRenamePars`: a par2 file without the `".par2"` extension (any case), or
 /// two par2 files of one set that `ParParser::SameParCollection` does not put
 /// in the same collection.
-pub fn need_rename_pars(pars: &[(Option<&CStr>, &CStr)], fold: &dyn Fn(u8) -> u8) -> bool {
+pub fn need_rename_pars(pars: &[(Option<&CStr>, &CStr)]) -> bool {
     pars.iter().enumerate().any(|(i, &(name, set_id))| {
         let Some(name) = name else { return true };
         !crate::util::ends_with(name.to_bytes(), b".par2", false)
             || pars[i + 1..].iter().any(|&(name2, set_id2)| {
                 set_id == set_id2
                     && name2.is_none_or(|name2| {
-                        !crate::parparser::same_par_collection(name, name2, false, fold)
+                        !crate::parparser::same_par_collection(
+                            name.to_bytes(),
+                            name2.to_bytes(),
+                            false,
+                        )
                     })
             })
     })
@@ -359,8 +357,7 @@ mod tests {
 
     #[test]
     fn need_rename_pars_checks_extensions_and_sets() {
-        let fold = |b: u8| b.to_ascii_lowercase();
-        let need = |pars: &[(Option<&CStr>, &CStr)]| need_rename_pars(pars, &fold);
+        let need = |pars: &[(Option<&CStr>, &CStr)]| need_rename_pars(pars);
         assert!(!need(&[]));
         assert!(!need(&[
             (Some(c"a.PAR2"), c"S"),

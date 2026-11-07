@@ -1,5 +1,5 @@
 /*
- *  This file is part of nzbget. See <https://nzbget.com>.
+ *  This file is part of RustyGet.
  *
  *  Copyright (C) 2016 Andrey Prygunkov <hugbug@users.sourceforge.net>
  *
@@ -22,13 +22,40 @@
 #define NZBGENERATOR_H
 
 #include "NString.h"
+#include "Log.h"
+#include "nzbget_rs.h"
 
 class NzbGenerator
 {
 public:
 	NzbGenerator(const char* dataDir, int segmentSize) :
 		m_dataDir(dataDir), m_segmentSize(segmentSize) {};
-	void Execute();
+
+	void Execute()
+	{
+		auto logCb = +[](int kind, const char* msg)
+		{
+			switch (kind)
+			{
+			case 0:
+				info("Generating nzbs for %s", msg);
+				break;
+			case 1:
+				info("Generating nzb for %s", msg);
+				break;
+			case 2:
+				error("Could not create file %s", msg);
+				break;
+			case 3:
+				detail("Processing %s", msg);
+				break;
+			case 4:
+				info("Nzb generation finished");
+				break;
+			}
+		};
+		nzbget_rs_nzb_generator_execute(m_dataDir, m_segmentSize, logCb);
+	}
 
 private:
 	CString m_dataDir;

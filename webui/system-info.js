@@ -242,7 +242,7 @@ var SystemInfo = (new function($)
 	var sysInfoLoading = false;
 	var lastSysInfo = null;
 
-	var nzbFileTestPrefix = 'NZBGet Speed Test ';
+	var nzbFileTestPrefix = 'RustyGet Speed Test ';
 	var testNZBUrl = 'https://nzbget.com/nzb/';
 	function getTestNZBFiles() {
 		return [

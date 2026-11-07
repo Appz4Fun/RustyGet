@@ -2,14 +2,7 @@
 //! rar volumes of a directory gathered into complete sets (MakeSets), the sets
 //! not properly named (IsSetProperlyNamed) renamed after their largest file
 //! (FindMainFile) with new volume names (GenNewVolumeFilename) that don't
-//! overwrite other files, exactly as the C++ did. Reading the volumes, the
-//! regular expression, the file checks and the moves stay C++ (through `Env`).
-
-use std::ffi::{c_char, c_int};
-
-extern "C" {
-    fn atoi(s: *const c_char) -> c_int;
-}
+//! overwrite other files.
 
 /// A file of a volume.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -127,7 +120,7 @@ pub fn execute_all(
                     cb.progress(&label, stage)?;
                     cur_file = cur_file.wrapping_add(1);
 
-                    let ascii_fold = crate::wildmask::Lower::Fold(&|b| b.to_ascii_lowercase() as i32);
+                    let ascii_fold = crate::wildmask::Lower::Ascii;
                     if !ignore_c.is_empty()
                         && crate::util::match_file_ext(base_name(&full), ignore_c, b",;", &ascii_fold, &ascii_fold)
                     {
@@ -370,15 +363,12 @@ fn properly_named(volumes: &[Volume], set: &[usize], env: &mut dyn Env) -> bool 
         }
         if v.new_naming {
             let Some((start, _len)) = env.match_part(name) else { return false };
-            // BString<1024>'s format constructor: the name from the group on
-            // as the format (digits, then ".rar"), the length unused
-            let mut part = cut(&name[start.min(name.len())..]).to_vec();
+            let part = cut(&name[start.min(name.len())..]);
             if set_part_len == 0 {
                 set_part_len = part.len();
             }
             let plen = part.len();
-            part.push(0);
-            let number = unsafe { atoi(part.as_ptr().cast()) } as u32;
+            let number = crate::feed::c_atoi_bytes(part) as u32;
             if !(number == v.volume_no.wrapping_add(1) && plen == set_part_len && strncmp_eq(set_base, name, start)) {
                 return false;
             }

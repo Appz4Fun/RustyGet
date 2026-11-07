@@ -4,18 +4,14 @@
 //! for PAR2 recovery volume selection, twin PAR2 index/volume evaluation, file CRC
 //! status resolution, progress/stage transitions, and pause timestamp adjustment.
 
-use std::ffi::{c_char, c_int, CStr};
+use std::ffi::CStr;
 
 pub use crate::postrepair::{check_par_time_limit, pick_twin_volume, select_more_pars};
 
-extern "C" {
-    fn strcasecmp(a: *const c_char, b: *const c_char) -> c_int;
-}
-
-/// Case-insensitive filename equality check in the active C locale (`!strcasecmp(a, b)`),
+/// Case-insensitive filename equality check (`!strcasecmp(a, b)`),
 /// used by `RepairController::PostParChecker::IsParredFile`, `FindFileCrc`, and `FindFileOrigname`.
 pub fn filename_eq_ignore_case(a: &CStr, b: &CStr) -> bool {
-    unsafe { strcasecmp(a.as_ptr(), b.as_ptr()) == 0 }
+    a.to_bytes().eq_ignore_ascii_case(b.to_bytes())
 }
 
 /// Evaluates whether `FindFileCrc` should load partial article segment state from disk

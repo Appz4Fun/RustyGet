@@ -1,5 +1,5 @@
 /*
- *  This file is part of nzbget. See <https://nzbget.com>.
+ *  This file is part of RustyGet.
  *
  *  Copyright (C) 2024 Denis <denis@nzbget.com>
  *
@@ -20,7 +20,10 @@
 #ifndef NETWORK_H
 #define NETWORK_H
 
+#include <exception>
 #include <string>
+#include "HttpClient.h"
+#include "Log.h"
 
 namespace System
 {
@@ -32,7 +35,27 @@ namespace System
 		std::string privateIP;
 	};
 
-	Network GetNetwork();
+	inline Network GetNetwork()
+	{
+		Network network;
+
+		try
+		{
+			::Network::HttpClient httpClient;
+			auto result = httpClient.GET(IP_SERVICE).get();
+			if (result.statusCode == 200)
+			{
+				network.publicIP = std::move(result.body);
+				network.privateIP = httpClient.GetLocalIP();
+			}
+		}
+		catch (const std::exception& e)
+		{
+			detail("Failed to get public and private IP: %s", e.what());
+		}
+
+		return network;
+	}
 }
 
 #endif

@@ -1,15 +1,6 @@
 //! CollectionAnalyzer: what a download's files are (main video or book,
 //! sample, subtitles, NFOs, others; an ambiguous collection or a disc
-//! structure) and how to rename them to the release name. It matches the
-//! C++ code; the C++ side walks the directory and answers whether a path
-//! exists.
-
-use std::ffi::c_int;
-
-extern "C" {
-    fn isalpha(c: c_int) -> c_int;
-    fn tolower(c: c_int) -> c_int;
-}
+//! structure) and how to rename them to the release name.
 
 use crate::deobfuscation::is_excessively_obfuscated;
 use crate::filetypes::{is_audio_ext, is_book_ext, is_disc_descriptor_ext, is_disc_structure_ext, is_nfo_ext, is_sample_stem, is_subtitle_ext, is_video_ext};
@@ -115,9 +106,9 @@ impl Analysis {
     }
 }
 
-/// Util::StrCaseCmp (the C library's tolower).
+/// ASCII case-insensitive equality (`Util::StrCaseCmp`).
 fn str_case_eq(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).all(|(&x, &y)| unsafe { tolower(x as c_int) == tolower(y as c_int) })
+    a.eq_ignore_ascii_case(b)
 }
 
 /// std::filesystem's stem and extension of a file name: "." and ".." have
@@ -277,7 +268,7 @@ pub fn resolve_target_name(meta: &[u8], nzb: &[u8]) -> Vec<u8> {
 pub fn resolve_subtitle_name(base: &[u8], sub_stem: &[u8], sub_ext: &[u8]) -> Vec<u8> {
     if let Some(dot) = sub_stem.iter().rposition(|&b| b == b'.').filter(|&d| d > 0) {
         let tag = &sub_stem[dot + 1..];
-        if (2..=4).contains(&tag.len()) && tag.iter().all(|&c| unsafe { isalpha(c as c_int) } != 0) {
+        if (2..=4).contains(&tag.len()) && tag.iter().all(|&c| c.is_ascii_alphabetic()) {
             return [base, b".", tag, sub_ext].concat();
         }
     }

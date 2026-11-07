@@ -21,7 +21,18 @@
 #ifndef HTTPGET_H
 #define HTTPGET_H
 
+#include <atomic>
+#include <condition_variable>
+#include <fstream>
+#include <set>
 #include <string>
+#include <thread>
+#include "DonorHealth.h"
+#include "WebDownloader.h"
+#include "FileSystem.h"
+#include "Options.h"
+#include "Util.h"
+#include "nzbget_rs.h"
 
 /*
  * A blocking HTTP GET for the duplicate search (an indexer's search and its
@@ -45,11 +56,111 @@ public:
 	 * slowly the server answers: the read timeouts alone let a dripping server
 	 * hold it much longer */
 	static Reply Fetch(const std::string& url, const std::string& infoName, size_t maxBytes,
-		long long deadlineMs = 0);
-	static void StopAll();
+		long long deadlineMs = 0)
+	{
+		Reply reply;
+		if (g_stopped)
+		{
+			return reply;
+		}
+
+		NzbgetRsBuf pathBuf = nzbget_rs_dqh_http_get_format_temp_path(
+			g_Options->GetTempDir(), PATH_SEPARATOR, (int)Util::CurrentTime(), ++g_counter);
+		std::string path(pathBuf.data ? pathBuf.data : "", pathBuf.len);
+		nzbget_rs_free(pathBuf);
+
+		WebDownloader downloader;
+		downloader.SetUrl(url.c_str());
+		downloader.SetInfoName(infoName.c_str());
+		downloader.SetOutputFilename(path.c_str());
+		downloader.SetForce(true);
+		downloader.SetRetry(false);
+
+		{
+			Guard guard(g_mutex);
+			if (g_stopped)
+			{
+				return reply;
+			}
+			g_active.insert(&downloader);
+		}
+		// a watchdog stops the download when the deadline passes (F13) or the file
+		// grows past maxBytes: the size was checked only once all of it was on
+		// disk, and a server that kept sending (or a gzip bomb) filled TempDir
+		std::mutex doneMutex;
+		std::condition_variable doneCond;
+		bool done = false;
+		std::thread watchdog([&]()
+			{
+				std::unique_lock<std::mutex> lock(doneMutex);
+				while (!done)
+				{
+					int64_t waitMs = 250;
+					if (nzbget_rs_snh_http_get_calc_watchdog_wait(
+						deadlineMs, DonorHealth::NowMs(), FileSystem::FileSize(path.c_str()), maxBytes, &waitMs))
+					{
+						downloader.Stop();
+						return;
+					}
+					doneCond.wait_for(lock, std::chrono::milliseconds(waitMs), [&]() { return done; });
+				}
+			});
+		WebDownloader::EStatus status = downloader.DownloadWithRedirects(5);
+		if (watchdog.joinable())
+		{
+			{
+				std::lock_guard<std::mutex> lock(doneMutex);
+				done = true;
+			}
+			doneCond.notify_all();
+			watchdog.join();
+		}
+		{
+			Guard guard(g_mutex);
+			g_active.erase(&downloader);
+		}
+
+		reply.status = downloader.GetHttpStatus();
+		if (status == WebDownloader::adFinished)
+		{
+			int64 size = FileSystem::FileSize(path.c_str());
+			if (size >= 0 && (size_t)size <= maxBytes)
+			{
+				std::ifstream file(fs::u8path(path), std::ios::binary);
+				reply.body.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+				reply.ok = file.good() || file.eof();
+			}
+		}
+		FileSystem::DeleteFile(path.c_str());
+		return reply;
+	}
+
+	static void StopAll()
+	{
+		Guard guard(g_mutex);
+		g_stopped = true;
+		for (WebDownloader* downloader : g_active)
+		{
+			downloader->Stop();
+		}
+	}
+
 	/* allows requests again (nzbget reloads inside the same process) */
-	static void Reset();
-	static bool Stopped();
+	static void Reset()
+	{
+		g_stopped = false;
+	}
+
+	static bool Stopped()
+	{
+		return g_stopped;
+	}
+
+private:
+	inline static Mutex g_mutex;
+	inline static std::set<WebDownloader*> g_active;
+	inline static std::atomic<bool> g_stopped{false};
+	inline static std::atomic<int> g_counter{0};
 };
 
 #endif

@@ -581,12 +581,10 @@ NzbgetRsBuf nzbget_rs_expand_home_path(const char* filename, const char* home);
 // No ownership transfer or allocation crosses the ABI; panics abort.
 // table: glibc's tolower table (*__ctype_tolower_loc()) read for a char of
 // the given signedness instead of calling fold per byte; NULL calls fold.
-int nzbget_rs_parse_par_filename(const char* name, int confirmed, int* baseLen, int* blocks,
-	const int* table, int charSigned, int (*fold)(int));
-int nzbget_rs_same_par_collection(const char* name1, const char* name2, int confirmed,
-	const int* table, int charSigned, int (*fold)(int));
-int nzbget_rs_find_main_pars(const char* path, int collect, const int* table, int charSigned,
-	int (*fold)(int), void (*addFile)(void* ctx, const char* name, size_t len), void* ctx);
+int nzbget_rs_parse_par_filename(const char* name, int confirmed, int* baseLen, int* blocks);
+int nzbget_rs_same_par_collection(const char* name1, const char* name2, int confirmed);
+int nzbget_rs_find_main_pars(const char* path, int collect,
+	void (*addFile)(void* ctx, const char* name, size_t len), void* ctx);
 
 // RarVolume's header parsing (rust/src/rarreader.rs). rar_read parses the
 // content source into *state (read and written back) and calls addFile for each
@@ -716,7 +714,7 @@ typedef struct NzbgetRsParName
 	const char* filename;
 	const char* setId;
 } NzbgetRsParName;
-int nzbget_rs_direct_need_rename_pars(const NzbgetRsParName* pars, size_t count, int (*fold)(int));
+int nzbget_rs_direct_need_rename_pars(const NzbgetRsParName* pars, size_t count);
 
 // ManifestFile::Load (rust/src/manifest.rs, rust/src/json.rs: Boost.JSON's
 // parse with the default options) on the manifest text the C++ read: 1 when
@@ -4386,9 +4384,6 @@ void nzbget_rs_par_damage_judge(
     size_t queued_count,
     const NzbgetRsParDamageCompletedFile* completed,
     size_t completed_count,
-    const int* tolower_table,
-    int char_is_signed,
-    int (*fold)(int),
     NzbgetRsParDamageVerdict* out_verdict);
 
 int nzbget_rs_par_damage_first_report(int nzb_id);

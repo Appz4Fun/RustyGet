@@ -10,18 +10,7 @@
 //! (a snapshot), file checks and reads, moving a file and the messages stay
 //! with the caller (`Env`).
 
-use std::ffi::{c_char, c_int};
-
 use md5::{Digest, Md5};
-
-extern "C" {
-    #[cfg_attr(windows, link_name = "_stricmp")]
-    fn strcasecmp(a: *const c_char, b: *const c_char) -> c_int;
-    #[cfg_attr(windows, link_name = "_strnicmp")]
-    fn strncasecmp(a: *const c_char, b: *const c_char, n: usize) -> c_int;
-    fn tolower(c: c_int) -> c_int;
-    fn atoi(s: *const c_char) -> c_int;
-}
 
 /// A C++ exception in a callback: the run ends, the caller rethrows it.
 #[derive(Debug)]
@@ -83,8 +72,6 @@ pub trait Env {
     fn rename(&mut self, src: &[u8], dst: &[u8]) -> R<bool>;
     /// Util::MatchFileExt with ParIgnoreExt
     fn ignored_ext(&mut self, name: &[u8]) -> R<bool>;
-    /// ParParser::FilenameFold
-    fn fold(&self, byte: u8) -> u8;
 }
 
 /// The members the caller reads and sets.
@@ -221,8 +208,7 @@ impl<E: Env> ParRenamer<'_, E> {
     fn load_extra_par_files(&mut self, dir: &[u8]) -> R<()> {
         for name in self.env.list_dir(dir)? {
             let full = join(dir, self.sep, &name);
-            let env = &*self.env;
-            if crate::parparser::parse_par_filename(&full, true, &|b| env.fold(b)).is_some()
+            if crate::parparser::parse_par_filename(&full, true).is_some()
                 && !self.bad_pars.contains(&full) && !self.loaded_pars.contains(&full) {
                 self.load_par_file(&full)?;
             }
@@ -362,8 +348,10 @@ impl<E: Env> ParRenamer<'_, E> {
             return Ok(());
         }
 
-        let set_id: Vec<u8> = crate::renameanalyzer::print(&header[32..48])[..32].iter()
-            .map(|&b| unsafe { tolower(b as c_int) } as u8).collect();
+        let set_id: Vec<u8> = crate::renameanalyzer::print(&header[32..48])[..32]
+            .iter()
+            .map(u8::to_ascii_lowercase)
+            .collect();
 
         self.env.debug(&text(&[b"Storing: ", base_name(path), b"; setid: ", &set_id]))?;
         self.par_infos.push(ParInfo { filename: path.to_vec(), set_id });
@@ -383,23 +371,25 @@ impl<E: Env> ParRenamer<'_, E> {
 
     /// ParseParFilename's base length; 0 where the C++ read an uninitialized int.
     fn base_len(&self, name: &[u8]) -> usize {
-        crate::parparser::parse_par_filename(name, true, &|b| self.env.fold(b)).map_or(0, |(len, _)| len)
+        crate::parparser::parse_par_filename(name, true).map_or(0, |(len, _)| len)
     }
 
     fn need_rename_par_files(&self) -> bool {
         for (i, par1) in self.par_infos.iter().enumerate() {
-            let base1 = c(base_name(&par1.filename));
-            let Some(dot) = base1[..base1.len() - 1].iter().rposition(|&b| b == b'.') else { return true };
-            if unsafe { strcasecmp(base1[dot..].as_ptr().cast(), c".par2".as_ptr()) } != 0 {
+            let base1 = &c(base_name(&par1.filename));
+            let base1 = &base1[..base1.len() - 1];
+            let Some(dot) = base1.iter().rposition(|&b| b == b'.') else { return true };
+            if !base1[dot..].eq_ignore_ascii_case(b".par2") {
                 // file doesn't have "par2" extension
                 return true;
             }
-            let len1 = self.base_len(&base1[..base1.len() - 1]);
+            let len1 = self.base_len(base1);
             for par2 in &self.par_infos[i + 1..] {
                 if par1.set_id == par2.set_id {
-                    let base2 = c(base_name(&par2.filename));
-                    let len2 = self.base_len(&base2[..base2.len() - 1]);
-                    if len1 != len2 || unsafe { strncasecmp(base1.as_ptr().cast(), base2.as_ptr().cast(), len1) } != 0 {
+                    let base2 = &c(base_name(&par2.filename));
+                    let base2 = &base2[..base2.len() - 1];
+                    let len2 = self.base_len(base2);
+                    if len1 != len2 || !base1[..len1].eq_ignore_ascii_case(&base2[..len2]) {
                         // same setid but different base file names
                         return true;
                     }
@@ -440,21 +430,25 @@ impl<E: Env> ParRenamer<'_, E> {
 }
 
 /// ParRenamer::IsSplittedFragment: the disk file is "<correct name>.NNN"
-/// with NNN (all digits) at most 1 (.000 or .001; atoi's value).
+/// with NNN (all digits) at most 1 (.000 or .001).
 pub fn is_splitted_fragment(filename: &[u8], correct_name: &[u8]) -> bool {
     let base = c(base_name(filename));
+    let base = &base[..base.len() - 1];
     let correct = c(correct_name);
-    let base_len = correct.len() - 1;
-    let has_extension = base[..base.len() - 1].contains(&b'.');
-    if !has_extension || unsafe { strncasecmp(base.as_ptr().cast(), correct.as_ptr().cast(), base_len) } != 0 {
+    let correct = &correct[..correct.len() - 1];
+    let base_len = correct.len();
+    let has_extension = base.contains(&b'.');
+    if !has_extension || base.len() <= base_len || !base[..base_len].eq_ignore_ascii_case(correct) {
         return false;
     }
-    // strncasecmp matched base_len bytes, none of them the terminator
     if base.get(base_len) != Some(&b'.') {
         return false;
     }
-    let digits = &base[base_len + 1..base.len() - 1];
-    digits.iter().all(u8::is_ascii_digit) && unsafe { atoi(base[base_len + 1..].as_ptr().cast()) } <= 1
+    let digits = &base[base_len + 1..];
+    digits.iter().all(u8::is_ascii_digit)
+        && std::str::from_utf8(digits)
+            .ok()
+            .map_or(false, |s| s.is_empty() || s.parse::<u32>().is_ok_and(|n| n <= 1))
 }
 
 fn latin1_to_utf8(latin1: &[u8]) -> Vec<u8> {
@@ -880,8 +874,7 @@ impl Env for FsParRenamerEnv<'_> {
     fn find_main_pars(&mut self, dir: &[u8]) -> R<Vec<Vec<u8>>> {
         let p = bytes_to_path_buf(dir);
         let mut list = Vec::new();
-        let fold = |b: u8| unsafe { tolower(b as c_int) as u8 };
-        crate::parparser::find_main_pars(&p, true, &fold, |name| {
+        crate::parparser::find_main_pars(&p, true, |name| {
             list.push(name.to_vec());
         });
         Ok(list)
@@ -944,7 +937,7 @@ impl Env for FsParRenamerEnv<'_> {
         Ok(true)
     }
     fn ignored_ext(&mut self, name: &[u8]) -> R<bool> {
-        let fold = crate::wildmask::Lower::Fold(&|b| unsafe { tolower(b as c_int) });
+        let fold = crate::wildmask::Lower::Ascii;
         Ok(crate::util::match_file_ext(
             name,
             &self.ignore_ext,
@@ -952,9 +945,6 @@ impl Env for FsParRenamerEnv<'_> {
             &fold,
             &fold,
         ))
-    }
-    fn fold(&self, byte: u8) -> u8 {
-        unsafe { tolower(byte as c_int) as u8 }
     }
 }
 
@@ -1005,9 +995,7 @@ mod tests {
         assert!(!is_splitted_fragment(b"/d/movie.mkv.001x", b"movie.mkv"));
         assert!(!is_splitted_fragment(b"/d/movie.mkv", b"movie.mkv"));
         assert!(!is_splitted_fragment(b"/d/other.001", b"movie.mkv"));
-        let overflow = c"99999999999999999999999";
-        assert_eq!(is_splitted_fragment(b"/d/a.99999999999999999999999", b"a"),
-            unsafe { atoi(overflow.as_ptr()) } <= 1);
+        assert!(!is_splitted_fragment(b"/d/a.99999999999999999999999", b"a"));
     }
 
     #[test]

@@ -2532,26 +2532,6 @@ void StreamRepairController::ExecDecompressRepair(const char* destDir,
 		return;
 	}
 
-	// probe the extractor tool BEFORE materializing up to MaxDecompressBytes:
-	// a missing/unconfigured unrar/7z is a static config state, so without it
-	// the whole donor download would be wasted for every gated pair. Mirror
-	// the validation MakeExtractor itself does (dispatch order: 7z, then
-	// unrar); the real MakeExtractor call below stays the authoritative gate.
-	fs::path mainVolumePath(mainVolume);
-	if (!nzbget_rs_unpack_is_zipfast_supported_extension(mainVolume))
-	{
-		const fs::path& toolPath = Unpack::SevenZip::IsSupported(mainVolumePath) ?
-			g_Options->GetSevenZipPath() : g_Options->GetUnrarPath();
-		fs::error_code toolEc;
-		if (toolPath.empty() || !fs::exists(toolPath, toolEc) || toolEc)
-		{
-			PrintMessage(Message::mkInfo,
-				"Skipping decompression of %s of duplicate %s: no extraction tool configured",
-				setName, *donor.InfoName);
-			return;
-		}
-	}
-
 	// a unique scratch dir (a stale leftover from a crashed run is never reused)
 	BString<1024> tempDir;
 	for (int suffix = 0; ; suffix++)

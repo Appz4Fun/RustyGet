@@ -179,10 +179,9 @@ build profile="release" jobs="3":
     main_obj = obj_path_for(main_source)
 
     archive_path = os.path.join(build_dir, "librustyget.a")
-    if rebuilt_count > 0 or not os.path.exists(archive_path):
-        if os.path.exists(archive_path):
-            os.remove(archive_path)
-        subprocess.run(["ar", "rcs", archive_path, *lib_objs], check=True)
+    if os.path.exists(archive_path):
+        os.remove(archive_path)
+    subprocess.run(["ar", "rcs", archive_path, *lib_objs], check=True)
 
     bin_path = os.path.join(build_dir, "rustyget")
     link_flags = ["-pthread"]

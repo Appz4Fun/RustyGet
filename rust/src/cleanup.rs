@@ -438,27 +438,14 @@ where
             ok &= cleanup_dir_inner(&full_path, ext_cleanup_disk, deleted, on_log);
         }
 
-        unsafe extern "C" {
-            fn tolower(c: std::ffi::c_int) -> std::ffi::c_int;
-        }
-        let case_fold = |b: u8| unsafe { tolower(std::ffi::c_int::from(b)) };
-        let mask_fold = |b: u8| {
-            let ch = b as std::ffi::c_char as std::ffi::c_int;
-            if ch < 0 {
-                ch
-            } else {
-                unsafe { tolower(ch) }
-            }
-        };
-        let case_lower = crate::wildmask::Lower::Fold(&case_fold);
-        let mask_lower = crate::wildmask::Lower::Fold(&mask_fold);
+        let ascii_lower = crate::wildmask::Lower::Ascii;
         let delete_it = !is_dir
             && crate::util::match_file_ext(
                 filename_bytes,
                 ext_cleanup_disk,
                 b",;",
-                &case_lower,
-                &mask_lower,
+                &ascii_lower,
+                &ascii_lower,
             );
         if delete_it {
             let mut info_msg = b"Deleting file ".to_vec();
@@ -707,21 +694,8 @@ impl crate::collection::Disk for FsCollectionDisk<'_> {
         if self.ignore_ext.is_empty() {
             return false;
         }
-        unsafe extern "C" {
-            fn tolower(c: std::ffi::c_int) -> std::ffi::c_int;
-        }
-        let case_fold = |b: u8| unsafe { tolower(std::ffi::c_int::from(b)) };
-        let mask_fold = |b: u8| {
-            let ch = b as std::ffi::c_char as std::ffi::c_int;
-            if ch < 0 {
-                ch
-            } else {
-                unsafe { tolower(ch) }
-            }
-        };
-        let case_lower = crate::wildmask::Lower::Fold(&case_fold);
-        let mask_lower = crate::wildmask::Lower::Fold(&mask_fold);
-        crate::util::match_file_ext(path, self.ignore_ext, b",", &case_lower, &mask_lower)
+        let ascii_lower = crate::wildmask::Lower::Ascii;
+        crate::util::match_file_ext(path, self.ignore_ext, b",", &ascii_lower, &ascii_lower)
     }
 }
 

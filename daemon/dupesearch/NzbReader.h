@@ -1,5 +1,5 @@
 /*
- *  This file is part of nzbget. See <https://nzbget.com>.
+ *  This file is part of RustyGet.
  *
  *  Copyright (C) 2026 Denis <denis@nzbget.com>
  *
@@ -26,13 +26,8 @@
 #include <set>
 #include <string>
 #include <vector>
+#include "nzbget_rs.h"
 
-/*
- * What the duplicate search needs to know about an nzb-file: how big it is,
- * which files it names, which articles (message-ids) it points at, and the
- * meta data (imdb, tvdb) it carries. A cheap summary instead of the full
- * NzbFile parse, which builds a download queue entry.
- */
 struct NzbSummary
 {
 	struct Head
@@ -43,12 +38,12 @@ struct NzbSummary
 	};
 	int files = 0;
 	long long totalBytes = 0;
-	std::set<std::string> filenames;			// lowercase
+	std::set<std::string> filenames;
 	std::string poster;
-	std::vector<std::string> messageIds;		// sorted, unique
-	std::vector<std::string> groups;			// newsgroups, sorted, unique
-	std::map<std::string, std::string> meta;	// lowercase type -> text
-	std::string mainName;						// the largest file that isn't par2
+	std::vector<std::string> messageIds;
+	std::vector<std::string> groups;
+	std::map<std::string, std::string> meta;
+	std::string mainName;
 	uint64_t listedParts = 0;
 	uint64_t declaredParts = 0;
 	uint64_t articleBytes = 0;
@@ -56,35 +51,116 @@ struct NzbSummary
 	std::vector<uint64_t> recoveryBytes;
 	long long dataBytes = 0;
 	int dataFiles = 0;
-	std::vector<Head> heads;					// first parts of the largest data files
-	std::vector<std::string> dataMessageIds;	// sorted unique valid non-PAR IDs, including partial data
+	std::vector<Head> heads;
+	std::vector<std::string> dataMessageIds;
 	uint64_t dataListedParts = 0;
 	uint64_t dataDeclaredParts = 0;
 
-	/* identifies the posting: a hash of its message-ids */
-	std::string Fingerprint() const;
+	std::string Fingerprint() const
+	{
+		std::vector<const char*> ptrs;
+		std::vector<size_t> lens;
+		ptrs.reserve(messageIds.size());
+		lens.reserve(messageIds.size());
+		for (const std::string& id : messageIds)
+		{
+			ptrs.push_back(id.data());
+			lens.push_back(id.size());
+		}
+		char buffer[17] = {};
+		nzbget_rs_dupesearch_fnv1a_fingerprint(ptrs.data(), lens.data(), ptrs.size(), buffer);
+		return std::string(buffer, 16);
+	}
 };
-
-struct RsNzbSummaryScalars;
 
 class NzbReader
 {
 public:
-	/* false for a malformed nzb-file, one without files or articles, or one
-	 * that declares XML entities */
-	static bool Parse(const std::string& data, NzbSummary& summary);
+	static bool Parse(const std::string& data, NzbSummary& summary)
+	{
+		summary = NzbSummary();
+		RsNzbSummaryScalars scalars{};
+		int ok = nzbget_rs_nzb_reader_parse(
+			reinterpret_cast<const uint8_t*>(data.data()),
+			data.size(),
+			&scalars,
+			&summary,
+			NzbReader::OnStrings,
+			NzbReader::OnSlice,
+			NzbReader::OnRecoveryBytes);
+		if (ok == 0)
+		{
+			summary = NzbSummary();
+			return false;
+		}
+		ApplyScalars(summary, scalars);
+		return true;
+	}
+
 	static void OnStrings(void* ctx,
 		const uint8_t* posterPtr, size_t posterLen,
 		const uint8_t* mainNamePtr, size_t mainNameLen,
 		const uint8_t* parNamePtr, size_t parNameLen,
 		const uint8_t* parIdPtr, size_t parIdLen,
-		int64_t parBytes);
+		int64_t parBytes)
+	{
+		NzbSummary* s = static_cast<NzbSummary*>(ctx);
+		s->poster.assign(reinterpret_cast<const char*>(posterPtr), posterLen);
+		s->mainName.assign(reinterpret_cast<const char*>(mainNamePtr), mainNameLen);
+		s->parIndex.name.assign(reinterpret_cast<const char*>(parNamePtr), parNameLen);
+		s->parIndex.messageId.assign(reinterpret_cast<const char*>(parIdPtr), parIdLen);
+		s->parIndex.bytes = parBytes;
+	}
+
 	static void OnSlice(void* ctx, int kind,
 		const uint8_t* ptr1, size_t len1,
 		const uint8_t* ptr2, size_t len2,
-		int64_t bytes);
-	static void OnRecoveryBytes(void* ctx, const uint64_t* ptr, size_t len);
-	static void ApplyScalars(NzbSummary& summary, const RsNzbSummaryScalars& scalars);
+		int64_t bytes)
+	{
+		NzbSummary* s = static_cast<NzbSummary*>(ctx);
+		const char* c1 = reinterpret_cast<const char*>(ptr1);
+		const char* c2 = reinterpret_cast<const char*>(ptr2);
+		switch (kind)
+		{
+			case 1:
+				s->groups.emplace_back(c1, len1);
+				break;
+			case 2:
+				s->meta.emplace(std::string(c1, len1), std::string(c2, len2));
+				break;
+			case 3:
+				s->filenames.emplace(c1, len1);
+				break;
+			case 4:
+				s->messageIds.emplace_back(c1, len1);
+				break;
+			case 5:
+				s->dataMessageIds.emplace_back(c1, len1);
+				break;
+			case 6:
+				s->heads.push_back({std::string(c1, len1), std::string(c2, len2), bytes});
+				break;
+		}
+	}
+
+	static void OnRecoveryBytes(void* ctx, const uint64_t* ptr, size_t len)
+	{
+		NzbSummary* s = static_cast<NzbSummary*>(ctx);
+		s->recoveryBytes.assign(ptr, ptr + len);
+	}
+
+	static void ApplyScalars(NzbSummary& summary, const RsNzbSummaryScalars& scalars)
+	{
+		summary.files = scalars.files;
+		summary.totalBytes = scalars.total_bytes;
+		summary.dataFiles = scalars.data_files;
+		summary.dataBytes = scalars.data_bytes;
+		summary.listedParts = scalars.listed_parts;
+		summary.declaredParts = scalars.declared_parts;
+		summary.dataListedParts = scalars.data_listed_parts;
+		summary.dataDeclaredParts = scalars.data_declared_parts;
+		summary.articleBytes = scalars.article_bytes;
+	}
 };
 
 #endif

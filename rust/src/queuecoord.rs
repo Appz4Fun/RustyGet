@@ -1,24 +1,10 @@
 //! Rust implementation of `QueueCoordinator` (`daemon/queue/QueueCoordinator.cpp`).
 
-use std::ffi::{c_char, c_int, CStr};
-
-extern "C" {
-    fn tolower(c: c_int) -> c_int;
-}
-
-#[inline]
-fn c_lower(b: u8) -> u8 {
-    unsafe { tolower(b as c_int) as u8 }
-}
+use std::ffi::{c_char, CStr};
 
 #[inline]
 pub fn strcasecmp_bytes(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter()
-        .zip(b.iter())
-        .all(|(&x, &y)| c_lower(x) == c_lower(y))
+    a.eq_ignore_ascii_case(b)
 }
 
 #[inline]

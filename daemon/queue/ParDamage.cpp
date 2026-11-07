@@ -24,20 +24,6 @@
 #include "ParParser.h"
 #include "nzbget_rs.h"
 
-namespace
-{
-
-const int* ParFilenameTable()
-{
-#ifdef __GLIBC__
-	return reinterpret_cast<const int*>(*__ctype_tolower_loc());
-#else
-	return nullptr;
-#endif
-}
-
-}
-
 void ParDamage::FileCompleted(NzbInfo* nzbInfo, FileInfo* fileInfo, const std::string& filename)
 {
 	static_assert(sizeof(StreamRange) == sizeof(NzbgetRsByteRange) &&
@@ -150,9 +136,6 @@ ParDamage::Verdict ParDamage::Judge(NzbInfo* nzbInfo)
 		queued.size(),
 		completed.empty() ? nullptr : completed.data(),
 		completed.size(),
-		ParFilenameTable(),
-		CHAR_MIN < 0,
-		ParParser::FilenameFold,
 		&rsVerdict);
 
 	verdict.known = rsVerdict.known != 0;

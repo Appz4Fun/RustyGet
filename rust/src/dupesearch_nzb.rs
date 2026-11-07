@@ -60,44 +60,9 @@ pub fn unquoted_subject_range(subject: &[u8]) -> (usize, usize) {
     trim_range(subject, 0, subject.len())
 }
 
-#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-unsafe extern "C" {
-    fn tolower(ch: std::ffi::c_int) -> std::ffi::c_int;
-}
-
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-unsafe extern "C" {
-    fn __ctype_tolower_loc() -> *const *const std::ffi::c_int;
-}
-
-unsafe extern "C" {
-    fn isspace(ch: std::ffi::c_int) -> std::ffi::c_int;
-    fn isdigit(ch: std::ffi::c_int) -> std::ffi::c_int;
-}
-
-/// Keep C locale case folding used by DupeUtil::Lower, including unsigned bytes.
+/// Checks whether `name` ends with `.par2` (ASCII case-insensitively).
 pub fn is_par_name(name: &[u8]) -> bool {
-    if name.len() < 5 {
-        return false;
-    }
-    let tail = &name[name.len() - 5..];
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    {
-        // glibc's inline C/C++ tolower uses this per-thread locale table. Obtain it once,
-        // preserving every byte's locale mapping without five separate native calls.
-        // SAFETY: glibc guarantees entries for all unsigned char values; nothing escapes.
-        let table = unsafe { *__ctype_tolower_loc() };
-        tail.iter()
-            .zip(b".par2")
-            .all(|(&a, &b)| unsafe { *table.add(usize::from(a)) == i32::from(b) })
-    }
-    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-    {
-        tail.iter().zip(b".par2").all(|(&a, &b)| {
-            // SAFETY: an unsigned byte is always in the C tolower argument domain.
-            unsafe { tolower(a.into()) == i32::from(b) }
-        })
-    }
+    name.len() >= 5 && name[name.len() - 5..].eq_ignore_ascii_case(b".par2")
 }
 
 #[repr(C)]
@@ -3891,8 +3856,8 @@ impl NzbSummaryData {
 
 fn declared_parts_c_locale(subject: &[u8]) -> i32 {
     let s = &subject[..subject.iter().position(|&b| b == 0).unwrap_or(subject.len())];
-    let is_sp = |b: u8| unsafe { isspace(std::ffi::c_int::from(b)) != 0 };
-    let is_dg = |b: u8| unsafe { isdigit(std::ffi::c_int::from(b)) != 0 };
+    let is_sp = |b: u8| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c);
+    let is_dg = |b: u8| b.is_ascii_digit();
     let char_val = |b: u8| (b as std::ffi::c_char) as i32;
 
     let mut end = s.len();
@@ -3925,23 +3890,6 @@ fn declared_parts_c_locale(subject: &[u8]) -> i32 {
         total as i32
     } else {
         0
-    }
-}
-
-fn par_filename_fold(byte: u8) -> u8 {
-    let ch = (byte as std::ffi::c_char) as std::ffi::c_int;
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    {
-        let table = unsafe { *__ctype_tolower_loc() };
-        unsafe { *table.offset(ch as isize) as u8 }
-    }
-    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-    {
-        if ch < 0 {
-            ch as u8
-        } else {
-            unsafe { tolower(ch) as u8 }
-        }
     }
 }
 
@@ -4279,16 +4227,15 @@ pub fn parse_nzb_summary(xml: &[u8]) -> Option<NzbSummaryData> {
     for head in &parity_heads {
         let head_c = cstring_trunc(&head.name);
         if let Some((base_len, _blocks)) =
-            crate::parparser::parse_par_filename(head_c.as_bytes(), true, &par_filename_fold)
+            crate::parparser::parse_par_filename(head_c.as_bytes(), true)
         {
             if base_len + 5 == head.name.len() {
                 if !out.par_index.id.is_empty() {
                     let idx_c = cstring_trunc(&out.par_index.name);
                     if !crate::parparser::same_par_collection(
-                        idx_c.as_c_str(),
-                        head_c.as_c_str(),
+                        idx_c.as_bytes(),
+                        head_c.as_bytes(),
                         true,
-                        &par_filename_fold,
                     ) {
                         out.par_index = NzbSummaryHead::default();
                         break;
@@ -4305,14 +4252,13 @@ pub fn parse_nzb_summary(xml: &[u8]) -> Option<NzbSummaryData> {
         for head in &parity_heads {
             let head_c = cstring_trunc(&head.name);
             if let Some((base_len, _blocks)) =
-                crate::parparser::parse_par_filename(head_c.as_bytes(), true, &par_filename_fold)
+                crate::parparser::parse_par_filename(head_c.as_bytes(), true)
             {
                 if base_len + 5 < head.name.len()
                     && crate::parparser::same_par_collection(
-                        idx_c.as_c_str(),
-                        head_c.as_c_str(),
+                        idx_c.as_bytes(),
+                        head_c.as_bytes(),
                         true,
-                        &par_filename_fold,
                     )
                 {
                     out.recovery_bytes.push(head.bytes as u64);

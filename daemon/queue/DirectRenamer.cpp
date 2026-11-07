@@ -623,7 +623,7 @@ bool DirectRenamer::NeedRenamePars(NzbInfo* nzbInfo)
 	{
 		names.push_back({parFile.GetFilename(), parFile.GetSetId()});
 	}
-	return nzbget_rs_direct_need_rename_pars(names.data(), names.size(), ParParser::FilenameFold) != 0;
+	return nzbget_rs_direct_need_rename_pars(names.data(), names.size()) != 0;
 }
 
 bool DirectRenamer::RenameFile(NzbInfo* nzbInfo, const std::string& oldFullFilename, const std::string& newFullFilename)

@@ -1,5 +1,5 @@
 /*
- *  This file is part of nzbget. See <https://nzbget.com>.
+ *  This file is part of RustyGet.
  *
  *  Copyright (C) 2024-2026 Denis <denis@nzbget.com>
  *
@@ -20,20 +20,48 @@
 #ifndef CPU_H
 #define CPU_H
 
+#include <cstring>
 #include <string>
-#include <optional>
+#include <sys/utsname.h>
+#include "nzbget_rs.h"
 
 namespace System
 {
 	class CPU final
 	{
 	public:
-		CPU();
-		const std::string& GetModel() const;
-		const std::string& GetArch() const;
+		CPU()
+		{
+			Init();
+		}
+
+		const std::string& GetModel() const
+		{
+			return m_model;
+		}
+
+		const std::string& GetArch() const
+		{
+			return m_arch;
+		}
 
 	private:
-		void Init();
+		void Init()
+		{
+			struct utsname uts{};
+			const char* rawMachine = "";
+			if (uname(&uts) == 0 && uts.machine[0] != '\0')
+			{
+				rawMachine = uts.machine;
+			}
+			NzbgetRsBuf modelBuf{};
+			NzbgetRsBuf archBuf{};
+			nzbget_rs_cpu_detect_info(rawMachine, strlen(rawMachine), &modelBuf, &archBuf);
+			m_model.assign(modelBuf.data ? modelBuf.data : "", modelBuf.len);
+			m_arch.assign(archBuf.data ? archBuf.data : "", archBuf.len);
+			nzbget_rs_free(modelBuf);
+			nzbget_rs_free(archBuf);
+		}
 
 		std::string m_model;
 		std::string m_arch;

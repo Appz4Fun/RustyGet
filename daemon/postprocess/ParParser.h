@@ -1,5 +1,5 @@
 /*
- *  This file is part of nzbget. See <https://nzbget.com>.
+ *  This file is part of RustyGet.
  *
  *  Copyright (C) 2007-2016 Andrey Prygunkov <hugbug@users.sourceforge.net>
  *
@@ -23,17 +23,38 @@
 
 #include <string>
 #include "Container.h"
+#include "nzbget_rs.h"
 
 class ParParser
 {
 public:
 	typedef std::vector<std::string> ParFileList;
 
-	static bool FindMainPars(const char* path, ParFileList* fileList);
-	static bool ParseParFilename(const char* parFilename, bool confirmedFilename, int* baseNameLen, int* blocks);
-	static bool SameParCollection(const char* filename1, const char* filename2, bool confirmedFilenames);
-	/* the C++ tolower of a byte the Rust name checks fold with */
-	static int FilenameFold(int byte);
+	static bool FindMainPars(const char* path, ParFileList* fileList)
+	{
+		if (fileList)
+		{
+			fileList->clear();
+		}
+		return nzbget_rs_find_main_pars(
+			path,
+			fileList != nullptr ? 1 : 0,
+			fileList ? +[](void* ctx, const char* name, size_t len)
+			{
+				static_cast<ParFileList*>(ctx)->emplace_back(name, len);
+			} : nullptr,
+			fileList) != 0;
+	}
+
+	static bool ParseParFilename(const char* parFilename, bool confirmedFilename, int* baseNameLen, int* blocks)
+	{
+		return nzbget_rs_parse_par_filename(parFilename, confirmedFilename, baseNameLen, blocks) != 0;
+	}
+
+	static bool SameParCollection(const char* filename1, const char* filename2, bool confirmedFilenames)
+	{
+		return nzbget_rs_same_par_collection(filename1, filename2, confirmedFilenames) != 0;
+	}
 };
 
 #endif

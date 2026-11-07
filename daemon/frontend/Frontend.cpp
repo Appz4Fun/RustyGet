@@ -67,7 +67,7 @@ bool Frontend::PrepareData()
 			m_summary ? 1 : 0, m_fileList ? 1 : 0) != 0 && !RequestFileList()))
 		{
 			const char* controlIp = nzbget_rs_dqh_frontend_resolve_control_ip(g_Options->GetControlIp());
-			printf("\nUnable to send request to nzbget-server at %s (port %i)    \n", controlIp, g_Options->GetControlPort());
+			printf("\nUnable to send request to RustyGet server at %s (port %i)    \n", controlIp, g_Options->GetControlPort());
 			Stop();
 			return false;
 		}

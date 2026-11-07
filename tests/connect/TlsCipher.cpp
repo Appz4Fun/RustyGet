@@ -1,5 +1,5 @@
 #include "nzbget.h"
-#include <boost/test/unit_test.hpp>
+#include "TestFramework.h"
 #include "TlsCipherBackend.h"
 
 #if !defined(DISABLE_TLS) && (defined(__APPLE__) || defined(__linux__))

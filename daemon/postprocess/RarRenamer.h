@@ -1,5 +1,5 @@
 /*
- *  This file is part of nzbget. See <https://nzbget.com>.
+ *  This file is part of RustyGet.
  *
  *  Copyright (C) 2016-2017 Andrey Prygunkov <hugbug@users.sourceforge.net>
  *
@@ -21,14 +21,90 @@
 #ifndef RARRENAMER_H
 #define RARRENAMER_H
 
+#include <exception>
 #include "NString.h"
 #include "Log.h"
 #include "FileSystem.h"
+#include "nzbget_rs.h"
 
 class RarRenamer
 {
 public:
-	void Execute();
+	void Execute()
+	{
+		struct Context
+		{
+			RarRenamer* self;
+			std::exception_ptr error;
+
+			int Fail()
+			{
+				error = std::current_exception();
+				return -1;
+			}
+		} context{this, nullptr};
+
+		NzbgetRsRarRenamerRunEnv env{};
+		env.ctx = &context;
+		env.stopped = +[](void* ctx) noexcept -> int
+		{
+			Context& c = *static_cast<Context*>(ctx);
+			if (c.error) return -1;
+			try { return c.self->IsStopped() ? 1 : 0; } catch (...) { return c.Fail(); }
+		};
+		env.progress = +[](void* ctx, const char* label, int stage) noexcept -> int
+		{
+			Context& c = *static_cast<Context*>(ctx);
+			if (c.error) return -1;
+			try
+			{
+				c.self->m_progressLabel = label;
+				c.self->m_stageProgress = stage;
+				c.self->UpdateProgress();
+				return 0;
+			}
+			catch (...) { return c.Fail(); }
+		};
+		env.message = +[](void* ctx, int kind, const char* text) noexcept -> int
+		{
+			Context& c = *static_cast<Context*>(ctx);
+			if (c.error) return -1;
+			try
+			{
+				c.self->PrintMessage(
+					kind == 0 ? Message::mkInfo : kind == 1 ? Message::mkWarning : Message::mkError,
+					"%s", text);
+				return 0;
+			}
+			catch (...) { return c.Fail(); }
+		};
+		env.registerRenamed = +[](void* ctx, const char* oldBase, const char* newBase) noexcept -> int
+		{
+			Context& c = *static_cast<Context*>(ctx);
+			if (c.error) return -1;
+			try
+			{
+				c.self->RegisterRenamedFile(oldBase, newBase);
+				return 0;
+			}
+			catch (...) { return c.Fail(); }
+		};
+
+#ifndef DISABLE_TLS
+		const int tlsEnabled = 1;
+#else
+		const int tlsEnabled = 0;
+#endif
+
+		nzbget_rs_rar_renamer_execute(
+			&env, *m_destDir, *m_infoName, *m_password, *m_ignoreExt, tlsEnabled, &m_renamedCount);
+
+		if (context.error)
+		{
+			std::rethrow_exception(context.error);
+		}
+	}
+
 	void SetDestDir(const char* destDir) { m_destDir = destDir; }
 	const char* GetInfoName() { return m_infoName; }
 	void SetInfoName(const char* infoName) { m_infoName = infoName; }

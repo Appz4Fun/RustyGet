@@ -1,16 +1,10 @@
 //! WebDownloader's HTTP decisions (WebDownloader.cpp): the status line
 //! (CheckResponse), the response headers it acts on (ProcessHeader) and the
-//! URL a redirect leads to (ParseRedirect), as the C++ did them. Logging,
-//! the connection and the file stay C++.
+//! URL a redirect leads to (ParseRedirect).
 
-use std::ffi::{c_char, c_int, CStr};
+use std::ffi::CStr;
 
 use crate::url::{parse_url, Part};
-
-extern "C" {
-    fn atoi(s: *const c_char) -> c_int;
-    fn strncasecmp(a: *const c_char, b: *const c_char, n: usize) -> c_int;
-}
 
 /// What CheckResponse decided.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -38,7 +32,7 @@ pub fn check_response(response: Option<&CStr>) -> Response {
     };
     let at = space + 1;
     let status = &line[at..];
-    let http_status = unsafe { atoi(response.as_ptr().add(at)) };
+    let http_status = crate::feed::c_atoi_bytes(status);
     let is = |code: &[u8]| status.starts_with(code);
     let (result, warn) = if is(b"400") || is(b"499") {
         (2, 3)
@@ -54,19 +48,19 @@ pub fn check_response(response: Option<&CStr>) -> Response {
     Response { result, set_status: true, http_status, warn, status_offset: at }
 }
 
-/// ProcessHeader: 0 nothing, 1 Content-Length (its atoi in the second
+/// ProcessHeader: 0 nothing, 1 Content-Length (its integer value in the second
 /// value), 2 gzip, 3 Content-Disposition, 4 Location while redirecting (the
 /// address from the offset in the second value).
 pub fn process_header(line: &CStr, redirecting: bool) -> (i32, i32) {
-    let starts = |prefix: &CStr, n: usize| unsafe { strncasecmp(line.as_ptr(), prefix.as_ptr(), n) == 0 };
-    if starts(c"Content-Length: ", 16) {
-        // the line is at least 16 bytes: its prefix matched
-        (1, unsafe { atoi(line.as_ptr().add(16)) })
-    } else if starts(c"Content-Encoding: gzip", 22) {
+    let bytes = line.to_bytes();
+    let starts = |prefix: &[u8]| bytes.len() >= prefix.len() && bytes[..prefix.len()].eq_ignore_ascii_case(prefix);
+    if starts(b"Content-Length: ") {
+        (1, crate::feed::c_atoi_bytes(&bytes[16..]))
+    } else if starts(b"Content-Encoding: gzip") {
         (2, 0)
-    } else if starts(c"Content-Disposition: ", 21) {
+    } else if starts(b"Content-Disposition: ") {
         (3, 0)
-    } else if redirecting && starts(c"Location: ", 10) {
+    } else if redirecting && starts(b"Location: ") {
         (4, 10)
     } else {
         (0, 0)
@@ -194,7 +188,7 @@ pub fn http_client_build_headers(
     headers.extend_from_slice(method);
     headers.extend_from_slice(b" / HTTP/1.1\r\nHost: ");
     headers.extend_from_slice(host);
-    headers.extend_from_slice(b"\r\nUser-Agent: nzbget/");
+    headers.extend_from_slice(b"\r\nUser-Agent: RustyGet/");
     headers.extend_from_slice(version);
     headers.extend_from_slice(b"\r\n");
     if include_gzip {
@@ -368,10 +362,10 @@ pub fn webdl_format_get_request_line(resource: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Formats `"User-Agent: nzbget/<version_rev>\r\n"` for `WebDownloader::SendHeaders`.
+/// Formats `"User-Agent: RustyGet/<version_rev>\r\n"` for `WebDownloader::SendHeaders`.
 pub fn webdl_format_user_agent_header(version_rev: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(version_rev.len() + 21);
-    out.extend_from_slice(b"User-Agent: nzbget/");
+    let mut out = Vec::with_capacity(version_rev.len() + 23);
+    out.extend_from_slice(b"User-Agent: RustyGet/");
     out.extend_from_slice(version_rev);
     out.extend_from_slice(b"\r\n");
     out

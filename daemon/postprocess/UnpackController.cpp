@@ -278,103 +278,114 @@ void UnpackController::ExecuteUnpack(EUnpacker unpacker, const char* password, b
 
 void UnpackController::ExecuteUnrar(const char* password)
 {
-	// Format:
-	//   unrar x -y -p- -o+ *.rar ./_unpack/
-
-	ParamList params;
-	if (!PrepareCmdParams(g_Options->GetUnrarCmd(), &params, "unrar"))
-	{
-		return;
-	}
-
-	if (!params.Exists("x") && !params.Exists("e"))
-	{
-		params.emplace_back("x");
-	}
-
-	params.emplace_back("-y");
-
-	if (!Util::EmptyStr(password))
-	{
-		params.emplace_back(BString<1024>("-p%s", password));
-	}
-	else
-	{
-		params.emplace_back("-p-");
-	}
-
-	if (!params.Exists("-o+") && !params.Exists("-o-") && !params.Exists("-or"))
-	{
-		params.emplace_back("-o+");
-	}
-
-	params.emplace_back("*.rar");
 	m_unpackExtendedDir = FileSystem::MakeExtendedPath(m_unpackDir, true);
-	params.emplace_back(BString<1024>("%s%c", *m_unpackExtendedDir, PATH_SEPARATOR));
-	SetArgs(std::move(params));
-	SetLogPrefix("Unrar");
-	ResetEnv();
-
 	m_allOkMessageReceived = false;
 	m_unpacker = upUnrar;
+
+	std::vector<CString> archives;
+	{
+		DirBrowser dir(m_destDir);
+		while (const char* filename = dir.Next())
+		{
+			BString<1024> fullFilename("%s%c%s", *m_destDir, PATH_SEPARATOR, filename);
+			if (!FileSystem::DirectoryExists(fullFilename) && IsDownloadedFile(filename) &&
+				nzbget_rs_unpack_classify_archive_file(filename) == 1 &&
+				nzbget_rs_unpack_is_main_archive(filename) != 0)
+			{
+				archives.emplace_back(filename);
+			}
+		}
+	}
+	std::sort(archives.begin(), archives.end(), [](const CString& a, const CString& b)
+	{
+		return strcmp(*a, *b) < 0;
+	});
 
 	SetProgressLabel("");
 	Guard unpackGuard(GetUnpackMutex());
 	m_execThreadId = std::this_thread::get_id();
 	m_unpacking = true;
-	int exitCode = Execute();
+
+	auto logCb = [](void* ctx, int kind, const char* msg)
+	{
+		if (!ctx || !msg) return;
+		UnpackController* self = static_cast<UnpackController*>(ctx);
+		Message::EKind msgKind = Message::mkDetail;
+		switch (kind)
+		{
+			case 0: msgKind = Message::mkInfo; break;
+			case 1: msgKind = Message::mkError; break;
+			case 2: msgKind = Message::mkWarning; break;
+			case 4: msgKind = Message::mkInfo; break;
+			default: msgKind = Message::mkDetail; break;
+		}
+		self->AddMessage(msgKind, msg);
+	};
+
+	const char* pw = Util::EmptyStr(password) ? "" : password;
+	bool allOk = !archives.empty();
+	for (const CString& archive : archives)
+	{
+		if (IsStopped() || GetTerminated())
+		{
+			allOk = false;
+			break;
+		}
+		BString<1024> fullArchivePath("%s%c%s", *m_destDir, PATH_SEPARATOR, *archive);
+		m_allOkMessageReceived = false;
+		if (nzbget_rs_unpack_extract_with_zipfast(
+			fullArchivePath, m_unpackDir, pw, 1, logCb, this) == 0 || !m_allOkMessageReceived)
+		{
+			allOk = false;
+			break;
+		}
+	}
+
 	m_unpacking = false;
 	m_execThreadId = std::thread::id{};
 	SetLogPrefix(nullptr);
 	SetProgressLabel("");
 
-	m_unpackOk = exitCode == 0 && m_allOkMessageReceived && !GetTerminated();
-	m_unpackStartError = exitCode == -1 && !m_autoTerminated;
-	m_unpackSpaceError = exitCode == 5;
-	m_unpackPasswordError |= exitCode == 11;
-
-	if (!m_unpackOk && exitCode > 0 && !WillRetryWithPass() && !IsStopped() && !GetTerminated())
-	{
-		PrintMessage(Message::mkError, "Unrar error code: %i", exitCode);
-	}
+	m_unpackOk = allOk && m_allOkMessageReceived && !GetTerminated();
+	m_unpackStartError = false;
+	m_unpackSpaceError = false;
 }
 
 void UnpackController::ExecuteSevenZip(const char* password, bool multiVolumes)
 {
-	// Format:
-	//   7z x -y -p- -o./_unpack *.7z
-	// OR
-	//   7z x -y -p- -o./_unpack *.7z.001
-
-	ParamList params;
-	if (!PrepareCmdParams(g_Options->GetSevenZipCmd(), &params, "7-Zip"))
-	{
-		return;
-	}
-
-	if (!params.Exists("x") && !params.Exists("e"))
-	{
-		params.emplace_back("x");
-	}
-
-	params.emplace_back("-y");
-
-	if (!Util::EmptyStr(password))
-	{
-		params.emplace_back(BString<1024>("-p%s", password));
-	}
-	else
-	{
-		params.emplace_back("-p-");
-	}
-
-	params.emplace_back(BString<1024>("-o%s", *m_unpackDir));
-	params.emplace_back(multiVolumes ? "*.7z.001" : "*.7z");
-	SetArgs(std::move(params));
-	ResetEnv();
-
 	m_allOkMessageReceived = false;
 	m_unpacker = upSevenZip;
+
+	std::vector<CString> archives;
+	{
+		DirBrowser dir(m_destDir);
+		while (const char* filename = dir.Next())
+		{
+			BString<1024> fullFilename("%s%c%s", *m_destDir, PATH_SEPARATOR, filename);
+			if (FileSystem::DirectoryExists(fullFilename) || !IsDownloadedFile(filename))
+			{
+				continue;
+			}
+			const int archiveKind = nzbget_rs_unpack_classify_archive_file(filename);
+			if (multiVolumes)
+			{
+				if (archiveKind == 3 &&
+					nzbget_rs_euh_sevenzip_is_supported(filename, strlen(filename)) != 0)
+				{
+					archives.emplace_back(filename);
+				}
+			}
+			else if (archiveKind == 2 ||
+				(archiveKind == 0 && nzbget_rs_unpack_is_zipfast_supported_extension(filename) != 0))
+			{
+				archives.emplace_back(filename);
+			}
+		}
+	}
+	std::sort(archives.begin(), archives.end(), [](const CString& a, const CString& b)
+	{
+		return strcmp(*a, *b) < 0;
+	});
 
 	PrintMessage(Message::mkInfo, "Executing 7-Zip");
 	SetLogPrefix("7-Zip");
@@ -382,19 +393,49 @@ void UnpackController::ExecuteSevenZip(const char* password, bool multiVolumes)
 	Guard unpackGuard(GetUnpackMutex());
 	m_execThreadId = std::this_thread::get_id();
 	m_unpacking = true;
-	int exitCode = Execute();
+
+	auto logCb = [](void* ctx, int kind, const char* msg)
+	{
+		if (!ctx || !msg) return;
+		UnpackController* self = static_cast<UnpackController*>(ctx);
+		Message::EKind msgKind = Message::mkDetail;
+		switch (kind)
+		{
+			case 0: msgKind = Message::mkInfo; break;
+			case 1: msgKind = Message::mkError; break;
+			case 2: msgKind = Message::mkWarning; break;
+			case 4: msgKind = Message::mkInfo; break;
+			default: msgKind = Message::mkDetail; break;
+		}
+		self->AddMessage(msgKind, msg);
+	};
+
+	const char* pw = Util::EmptyStr(password) ? "" : password;
+	bool allOk = !archives.empty();
+	for (const CString& archive : archives)
+	{
+		if (IsStopped() || GetTerminated())
+		{
+			allOk = false;
+			break;
+		}
+		BString<1024> fullArchivePath("%s%c%s", *m_destDir, PATH_SEPARATOR, *archive);
+		m_allOkMessageReceived = false;
+		if (nzbget_rs_unpack_extract_with_zipfast(
+			fullArchivePath, m_unpackDir, pw, 1, logCb, this) == 0 || !m_allOkMessageReceived)
+		{
+			allOk = false;
+			break;
+		}
+	}
+
 	m_unpacking = false;
 	m_execThreadId = std::thread::id{};
 	SetLogPrefix(nullptr);
 	SetProgressLabel("");
 
-	m_unpackOk = exitCode == 0 && m_allOkMessageReceived && !GetTerminated();
-	m_unpackStartError = exitCode == -1 && !m_autoTerminated;
-
-	if (!m_unpackOk && exitCode > 0 && !WillRetryWithPass() && !IsStopped() && !GetTerminated())
-	{
-		PrintMessage(Message::mkError, "7-Zip error code: %i", exitCode);
-	}
+	m_unpackOk = allOk && m_allOkMessageReceived && !GetTerminated();
+	m_unpackStartError = false;
 }
 
 bool UnpackController::WillRetryWithPass()
@@ -729,7 +770,8 @@ void UnpackController::CheckArchiveFiles()
 				m_hasRarFiles = true;
 				m_hasNotUnpackedRarFiles |= std::find(begin, end, filename) == end;
 			}
-			else if (archiveKind == 2)
+			else if (archiveKind == 2 ||
+				(archiveKind == 0 && nzbget_rs_unpack_is_zipfast_supported_extension(filename) != 0))
 			{
 				m_hasSevenZipFiles = true;
 			}

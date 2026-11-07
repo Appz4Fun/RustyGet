@@ -19,8 +19,7 @@
 
 #include "nzbget.h"
 
-#define BOOST_TEST_MODULE NZBGetTests
-#include <boost/test/included/unit_test.hpp>
+#include "TestFramework.h"
 
 #include "ServerPool.h"
 #include "Log.h"
@@ -81,9 +80,6 @@ struct InitGlobals
 
 	InitGlobals()
 	{
-		rapidyenc_decode_init();
-		rapidyenc_crc_init();
-
 		m_cmdOpts.push_back("SevenZipCmd=7z");
 		m_cmdOpts.push_back("UnrarCmd=unrar");
 
@@ -114,3 +110,8 @@ struct InitGlobals
 };
 
 BOOST_GLOBAL_FIXTURE(InitGlobals);
+
+int main(int argc, char* argv[])
+{
+	return TestFramework::RunAll(argc, argv);
+}

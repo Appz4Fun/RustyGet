@@ -1,5 +1,5 @@
 /*
- *  This file if part of nzbget
+ *  This file is part of RustyGet.
  *
  *  Copyright (C) 2004 Sven Henkel <sidddy@users.sourceforge.net>
  *  Copyright (C) 2007-2015 Andrey Prygunkov <hugbug@users.sourceforge.net>
@@ -18,10 +18,6 @@
  *  You should have received a copy of the GNU General Public License
  *  along with this program; if not, write to the Free Software
  *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
- *
- * $Revision$
- * $Date$
- *
  */
 
 
@@ -36,7 +32,17 @@ public:
 	NewsServer(int id, bool active, const char* name, const char* host, int port, int ipVersion,
 		const char* user, const char* pass, bool joinGroup,
 		bool tls, const char* cipher, int maxConnections, int retention,
-		int level, int group, bool optional, unsigned int certVerificationfLevel);
+		int level, int group, bool optional, unsigned int certVerificationfLevel) :
+		m_id(id), m_active(active), m_name(name), m_host(host ? host : ""), m_port(port), m_ipVersion(ipVersion),
+		m_user(user ? user : ""), m_password(pass ? pass : ""), m_joinGroup(joinGroup), m_tls(tls),
+		m_cipher(cipher ? cipher : ""), m_maxConnections(maxConnections), m_retention(retention),
+		m_level(level), m_normLevel(level), m_group(group), m_optional(optional), m_certVerificationfLevel(certVerificationfLevel)
+	{
+		if (m_name.Empty())
+		{
+			m_name.Format("Server%i", id);
+		}
+	}
 	int GetId() const { return m_id; }
 	int GetStateId() const { return m_stateId; }
 	void SetStateId(int stateId) { m_stateId = stateId; }

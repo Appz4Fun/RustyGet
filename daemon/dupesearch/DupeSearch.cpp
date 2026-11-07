@@ -1074,7 +1074,7 @@ void DupeSearch::Place(const Job& job, const NzbSummary& pick, std::vector<NzbFe
 			{
 				pickCheck.join();
 			}
-			Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: nzbget shuts down, the search resumes after the restart",
+			Note(job.nzbId, Message::mkInfo, "DupeSearch: %s: RustyGet shuts down, the search resumes after the restart",
 				job.name.c_str());
 			return true;
 		};

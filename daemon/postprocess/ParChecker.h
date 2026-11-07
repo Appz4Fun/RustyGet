@@ -25,10 +25,13 @@
 #ifndef DISABLE_PARCHECK
 
 #include <atomic>
+#include <deque>
+#include <memory>
+#include <mutex>
+#include <ostream>
+#include <streambuf>
 #include <string>
 #include <vector>
-
-#include <par2/par2repairer.h>
 
 #include "FileSystem.h"
 #include "Log.h"
@@ -177,7 +180,6 @@ private:
 	};
 
 	typedef std::deque<std::string> FileList;
-	typedef std::deque<Par2::DiskFile*> SourceList;
 	typedef std::vector<bool> ValidBlocks;
 
 	std::string m_infoName;
@@ -200,7 +202,6 @@ private:
 
 	FileList m_queuedParFiles;
 	FileList m_processedFiles;
-	SourceList m_sourceFiles;
 	std::vector<std::string> m_verifiedFiles;
 	DupeSourceList m_dupeSources;
 	StreamBuf m_parOutStream{this, Message::mkDetail};
@@ -211,8 +212,7 @@ private:
 	std::mutex m_repairerMtx;
 	std::mutex m_signalMtx;
 
-	// "m_repairer" should be of type "Par2::Par2Repairer", however to prevent the
-	// including of libpar2-headers into this header-file we use an empty abstract class.
+	// "m_repairer" wraps the Rust par-rs repairer via an abstract class.
 	std::unique_ptr<AbstractRepairer> m_repairer;
 
 	std::atomic<bool> m_parQuick{false};
@@ -249,9 +249,6 @@ private:
 	void SignalFilename(std::string str);
 	void SignalProgress(int progress);
 	void SignalDone(std::string str, int available, int total);
-	EFileStatus VerifyDataFile(Par2::DiskFile& diskFile, Par2::Par2RepairerSourceFile& sourceFile, int& availableBlocks);
-	bool VerifySuccessDataFile(Par2::DiskFile& diskFile, Par2::Par2RepairerSourceFile& sourceFile, uint32 downloadCrc);
-	bool VerifyPartialDataFile(Par2::DiskFile& diskFile, Par2::Par2RepairerSourceFile& sourceFile, SegmentList& segments, ValidBlocks& validBlocks);
 	void FindExtraFiles(std::vector<std::string>& extrafiles, const char* directory, bool externalDir);
 	void SortExtraFiles(std::vector<std::string>& extrafiles);
 	bool SmartCalcFileRangeCrc(DiskFile& file, int64 start, int64 end, SegmentList& segments, uint32& downloadCrc);

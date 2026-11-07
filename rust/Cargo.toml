@@ -10,9 +10,15 @@ name = "nzbget_rs"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-rust-par2 = { git = "https://github.com/TheDancingDeveloper-org/Rust-PAR2", rev = "dac531170ab6a8954d5a0c2cf8da6d4adce0a2bf" }
+par-rs = { git = "https://github.com/xbmc4lyfe/par-rs", branch = "main" }
 zipfast = { git = "https://github.com/xbmc4lyfe/zipfast", rev = "4443e1c2923c2cbeb10d8559b56effd76c9e31b1" }
-zipview = { git = "https://github.com/xbmc4lyfe/zipview", rev = "a1c381b93b92d5eac51adb5e177c5394c2ca20bb" }
+zipview = { git = "https://github.com/xbmc4lyfe/zipview", rev = "e994bfcd0bb0bfd24cabcf97bfd8a72c1d84f67c" }
+nntmux-yenc = { git = "https://github.com/xbmc4lyfe/newznab-tmux", rev = "8dade08ca0372e046af2bd9d3040e23a47379bd4" }
+crc32fast = "1.5"
+flate2 = { version = "1.1", features = ["zlib-rs"] }
+bzip2 = "0.6"
+zstd = "0.14"
+libc = "0.2"
 quick-xml = { version = "0.41", features = ["encoding"] }
 md-5 = "0.11"
 

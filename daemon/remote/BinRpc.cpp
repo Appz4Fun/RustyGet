@@ -175,7 +175,7 @@ void BinRpcProcessor::Execute()
 	// Read the first package which needs to be a request
 	if (!m_connection->Recv(((char*)&m_messageBase) + sizeof(m_messageBase.m_signature), sizeof(m_messageBase) - sizeof(m_messageBase.m_signature)))
 	{
-		warn("Non-nzbget request received on port %i from %s", g_Options->GetControlPort(), m_connection->GetRemoteAddr());
+		warn("Non-RustyGet request received on port %i from %s", g_Options->GetControlPort(), m_connection->GetRemoteAddr());
 		return;
 	}
 
@@ -184,7 +184,7 @@ void BinRpcProcessor::Execute()
 	if (!nzbget_rs_binrpc_check(reinterpret_cast<const unsigned char*>(&m_messageBase), sizeof(m_messageBase),
 		g_Options->GetControlUsername(), g_Options->GetControlPassword(), &type))
 	{
-		warn("nzbget request received on port %i from %s, but username or password invalid", g_Options->GetControlPort(), m_connection->GetRemoteAddr());
+		warn("RustyGet request received on port %i from %s, but username or password invalid", g_Options->GetControlPort(), m_connection->GetRemoteAddr());
 		return;
 	}
 

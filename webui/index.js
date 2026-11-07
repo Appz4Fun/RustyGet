@@ -76,10 +76,10 @@ var UISettings = (new function($)
 		'%(VARNAME-)% - show variable value with hyphen inside parenthesis;\n' +
 		'%[VARNAME-]% - show variable value with hyphen inside square brackets.\n\n' +
 		'Examples:\n' +
-		' "%(COUNT-)% NZBGet" - show number of downloads in parenthesis followed by a hyphen; don\'t show "(0) - " if queue is empty;\n' +
-		' "%PAUSE% %(COUNT-)% NZBGet" - as above but also show pause-indicator if paused;\n' +
-		' "%[COUNT]% %SPEED-% NZBGet" - show number of downloads and speed if not null (default setting).';
-	this.windowTitle = '%[COUNT]% %SPEED-% NZBGet';
+		' "%(COUNT-)% RustyGet" - show number of downloads in parenthesis followed by a hyphen; don\'t show "(0) - " if queue is empty;\n' +
+		' "%PAUSE% %(COUNT-)% RustyGet" - as above but also show pause-indicator if paused;\n' +
+		' "%[COUNT]% %SPEED-% RustyGet" - show number of downloads and speed if not null (default setting).';
+	this.windowTitle = '%[COUNT]% %SPEED-% RustyGet';
 
 	this.description['refreshRetries'] = 'Number of refresh attempts if a communication error occurs (0-99).\n\n' +
 	  'If all attempts fail, an error is displayed and the automatic refresh stops.'

@@ -30,6 +30,14 @@
 
 const char* PossibleConfigLocations[] =
 	{
+		"~/.rustyget",
+		"~/.config/rustyget.conf",
+		"~/.config/rustyget/rustyget.conf",
+		"/etc/rustyget.conf",
+		"/usr/etc/rustyget.conf",
+		"/usr/local/etc/rustyget.conf",
+		"/opt/etc/rustyget.conf",
+		"~/usr/etc/rustyget.conf",
 		"~/.nzbget",
 		"~/.config/nzbget.conf",
 		"~/.config/nzbget/nzbget.conf",
@@ -120,7 +128,7 @@ Options::Options(const char* exeName, const char* configFilename, bool noConfig,
 
 Options::Options(CmdOptList* commandLineOptions, Extender* extender)
 {
-	Init("nzbget/nzbget", nullptr, true, commandLineOptions, true, extender);
+	Init("rustyget/rustyget", nullptr, true, commandLineOptions, true, extender);
 }
 
 void Options::Init(const char* exeName, const char* configFilename, bool noConfig,

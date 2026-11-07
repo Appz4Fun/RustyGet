@@ -892,11 +892,11 @@ Switches:\n\
                             (required options must be passed with --option)\n\
   -p, --printconfig         Print configuration and exit\n\
   -o, --option <name=value> Set or override option in configuration-file\n\
-  -s, --server              Start nzbget as a server in console-mode\n",
+  -s, --server              Start RustyGet as a server in console-mode\n",
     );
     if include_daemon {
         out.extend_from_slice(
-            b"  -D, --daemon              Start nzbget as a server in daemon-mode\n",
+            b"  -D, --daemon              Start RustyGet as a server in daemon-mode\n",
         );
     }
     out.extend_from_slice(
@@ -1237,7 +1237,7 @@ mod tests {
         let out = format_usage(b"nzbget", b'/', true);
         let text = String::from_utf8(out).unwrap();
         assert!(text.starts_with("Usage:\n  nzbget [switches]\n\nSwitches:\n"));
-        assert!(text.contains("  -D, --daemon              Start nzbget as a server in daemon-mode\n"));
+        assert!(text.contains("  -D, --daemon              Start RustyGet as a server in daemon-mode\n"));
         assert!(text.contains("e. g.: \"my nzb download/myfile.nfo\" \"another nzb\"\n"));
 
         let out_no_daemon = format_usage(b"nzbget.exe", b'\\', false);

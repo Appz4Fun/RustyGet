@@ -13,6 +13,311 @@ pub type DecodeFn = unsafe extern "C" fn(src: *mut *const c_void, dst: *mut *mut
 /// rapidyenc_crc.
 pub type CrcFn = unsafe extern "C" fn(src: *const c_void, len: usize, init: u32) -> u32;
 
+/// Built-in Rust incremental yEnc decoder powered by `nntmux_yenc` SIMD kernels
+/// and exact NNTP dot-unstuffing / control-line framing state machine.
+pub unsafe extern "C" fn rust_yenc_decode_incremental(
+    src: *mut *const c_void,
+    dst: *mut *mut c_void,
+    len: usize,
+    state: *mut c_int,
+) -> c_int {
+    if src.is_null() || dst.is_null() || (*src).is_null() || (*dst).is_null() || len == 0 {
+        return 0;
+    }
+    let s = (*src).cast::<u8>();
+    let mut p = (*dst).cast::<u8>();
+    let mut idx = 0usize;
+    let mut st = if state.is_null() { 0 } else { *state };
+
+    macro_rules! check_end {
+        ($new_state:expr) => {
+            if idx == len {
+                if !state.is_null() {
+                    *state = $new_state;
+                }
+                *src = s.add(len).cast();
+                *dst = p.cast();
+                return 0;
+            }
+        };
+    }
+
+    // 1. Resolve cross-chunk state from previous buffer
+    loop {
+        match st {
+            6 => {
+                // RYDEC_STATE_CRLFEQ
+                if *s.add(idx) == b'y' {
+                    if !state.is_null() {
+                        *state = 3; // RYDEC_STATE_NONE
+                    }
+                    *src = s.add(idx + 1).cast();
+                    *dst = p.cast();
+                    return 1; // RYDEC_END_CONTROL
+                }
+                st = 1; // Fall through to RYDEC_STATE_EQ
+            }
+            1 => {
+                // RYDEC_STATE_EQ
+                let c = *s.add(idx);
+                *p = c.wrapping_sub(42 + 64);
+                p = p.add(1);
+                idx += 1;
+                if c != b'\r' {
+                    break;
+                }
+                check_end!(2); // RYDEC_STATE_CR
+                st = 2;
+            }
+            2 => {
+                // RYDEC_STATE_CR
+                if *s.add(idx) != b'\n' {
+                    break;
+                }
+                idx += 1;
+                check_end!(0); // RYDEC_STATE_CRLF
+                st = 0;
+            }
+            0 => {
+                // RYDEC_STATE_CRLF
+                let c = *s.add(idx);
+                if c == b'.' {
+                    idx += 1;
+                    check_end!(4); // RYDEC_STATE_CRLFDT
+                    st = 4;
+                } else if c == b'=' {
+                    idx += 1;
+                    check_end!(6); // RYDEC_STATE_CRLFEQ
+                    st = 6;
+                } else {
+                    break;
+                }
+            }
+            4 => {
+                // RYDEC_STATE_CRLFDT
+                let c = *s.add(idx);
+                if c == b'\r' {
+                    idx += 1;
+                    check_end!(5); // RYDEC_STATE_CRLFDTCR
+                    st = 5;
+                } else if c == b'=' {
+                    idx += 1;
+                    check_end!(6); // RYDEC_STATE_CRLFEQ
+                    st = 6;
+                } else {
+                    break;
+                }
+            }
+            5 => {
+                // RYDEC_STATE_CRLFDTCR
+                if *s.add(idx) == b'\n' {
+                    if !state.is_null() {
+                        *state = 0; // RYDEC_STATE_CRLF
+                    }
+                    *src = s.add(idx + 1).cast();
+                    *dst = p.cast();
+                    return 2; // RYDEC_END_ARTICLE
+                }
+                break;
+            }
+            _ => {
+                // RYDEC_STATE_NONE
+                break;
+            }
+        }
+    }
+
+    // 2. Main body loop with `nntmux_yenc` SIMD fast-path on unstuffed interior spans
+    while len >= 2 && idx < len - 2 {
+        // Scan ahead for a span free of `\r\n.`, `\r\n=`, `=\r`, `=\n`
+        let max_end = len - 2;
+        let mut run_end = idx;
+        while run_end < max_end {
+            let b = *s.add(run_end);
+            if b == b'\r' {
+                let b1 = *s.add(run_end + 1);
+                let b2 = *s.add(run_end + 2);
+                if b1 == b'\n' && (b2 == b'.' || b2 == b'=') {
+                    break;
+                }
+            } else if b == b'=' {
+                let b1 = *s.add(run_end + 1);
+                if b1 == b'\r' || b1 == b'\n' {
+                    break;
+                }
+            }
+            run_end += 1;
+        }
+        // Back off trailing `=`, `\r`, `\n` so the SIMD span ends in clean RYDEC_STATE_NONE
+        while run_end > idx {
+            let last = *s.add(run_end - 1);
+            if last == b'=' || last == b'\r' || last == b'\n' {
+                run_end -= 1;
+            } else {
+                break;
+            }
+        }
+        let simd_len = run_end - idx;
+        if simd_len >= 64 {
+            let src_ptr = s.add(idx);
+            if p != src_ptr.cast_mut() {
+                std::ptr::copy(src_ptr, p, simd_len);
+            }
+            let slice = std::slice::from_raw_parts_mut(p, simd_len);
+            let written = nntmux_yenc::decoder::decode_in_place(slice);
+            p = p.add(written);
+            idx = run_end;
+            if idx >= len - 2 {
+                break;
+            }
+        }
+
+        let c = *s.add(idx);
+        match c {
+            b'\r' => {
+                if *s.add(idx + 1) == b'\n' {
+                    let b2 = *s.add(idx + 2);
+                    if b2 == b'.' {
+                        idx += 3;
+                        check_end!(4); // RYDEC_STATE_CRLFDT
+                        let next = *s.add(idx);
+                        if next == b'\r' {
+                            idx += 1;
+                            check_end!(5); // RYDEC_STATE_CRLFDTCR
+                            if *s.add(idx) == b'\n' {
+                                *src = s.add(idx + 1).cast();
+                                *dst = p.cast();
+                                if !state.is_null() {
+                                    *state = 0; // RYDEC_STATE_CRLF
+                                }
+                                return 2; // RYDEC_END_ARTICLE
+                            } else {
+                                idx -= 1;
+                            }
+                        } else if next == b'=' {
+                            idx += 1;
+                            check_end!(6); // RYDEC_STATE_CRLFEQ
+                            let esc = *s.add(idx);
+                            if esc == b'y' {
+                                *src = s.add(idx + 1).cast();
+                                *dst = p.cast();
+                                if !state.is_null() {
+                                    *state = 3; // RYDEC_STATE_NONE
+                                }
+                                return 1; // RYDEC_END_CONTROL
+                            } else {
+                                *p = esc.wrapping_sub(42 + 64);
+                                p = p.add(1);
+                                if esc == b'\r' {
+                                    idx -= 1;
+                                }
+                            }
+                        } else {
+                            idx -= 1;
+                        }
+                    } else if b2 == b'=' {
+                        idx += 3;
+                        check_end!(6); // RYDEC_STATE_CRLFEQ
+                        let esc = *s.add(idx);
+                        if esc == b'y' {
+                            *src = s.add(idx + 1).cast();
+                            *dst = p.cast();
+                            if !state.is_null() {
+                                *state = 3; // RYDEC_STATE_NONE
+                            }
+                            return 1; // RYDEC_END_CONTROL
+                        } else {
+                            *p = esc.wrapping_sub(42 + 64);
+                            p = p.add(1);
+                            if esc == b'\r' {
+                                idx -= 1;
+                            }
+                        }
+                    }
+                }
+                idx += 1;
+            }
+            b'\n' => {
+                idx += 1;
+            }
+            b'=' => {
+                let esc = *s.add(idx + 1);
+                *p = esc.wrapping_sub(42 + 64);
+                p = p.add(1);
+                idx += if esc != b'\r' { 2 } else { 1 };
+            }
+            _ => {
+                *p = c.wrapping_sub(42);
+                p = p.add(1);
+                idx += 1;
+            }
+        }
+    }
+
+    if !state.is_null() {
+        *state = 3; // RYDEC_STATE_NONE
+    }
+
+    // 2nd last char
+    if len >= 2 && idx == len - 2 {
+        let c = *s.add(idx);
+        match c {
+            b'\r' => {
+                if !state.is_null() && *s.add(idx + 1) == b'\n' {
+                    *state = 0; // RYDEC_STATE_CRLF
+                    *src = s.add(len).cast();
+                    *dst = p.cast();
+                    return 0;
+                }
+            }
+            b'\n' => {}
+            b'=' => {
+                let esc = *s.add(idx + 1);
+                *p = esc.wrapping_sub(42 + 64);
+                p = p.add(1);
+                if esc != b'\r' {
+                    idx += 1;
+                }
+            }
+            _ => {
+                *p = c.wrapping_sub(42);
+                p = p.add(1);
+            }
+        }
+        idx += 1;
+    }
+
+    // Final char
+    if idx + 1 == len {
+        let c = *s.add(idx);
+        if c != b'\n' && c != b'\r' && c != b'=' {
+            *p = c.wrapping_sub(42);
+            p = p.add(1);
+        } else if !state.is_null() {
+            *state = if c == b'=' {
+                1 // RYDEC_STATE_EQ
+            } else if c == b'\r' {
+                2 // RYDEC_STATE_CR
+            } else {
+                3 // RYDEC_STATE_NONE
+            };
+        }
+    }
+
+    *src = s.add(len).cast();
+    *dst = p.cast();
+    0
+}
+
+/// Built-in Rust CRC-32 function powered by `crc32fast` SIMD kernels.
+pub unsafe extern "C" fn rust_yenc_crc(src: *const c_void, len: usize, init: u32) -> u32 {
+    if src.is_null() || len == 0 {
+        return init;
+    }
+    let slice = std::slice::from_raw_parts(src.cast::<u8>(), len);
+    crate::crc::crc32_append(slice, init)
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Format {
     Unknown = 0,

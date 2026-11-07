@@ -1,5 +1,5 @@
 /*
- *  This file is part of nzbget. See <https://nzbget.com>.
+ *  This file is part of RustyGet.
  *
  *  Copyright (C) 2016 Andrey Prygunkov <hugbug@users.sourceforge.net>
  *
@@ -22,6 +22,7 @@
 #define YENCODER_H
 
 #include "NString.h"
+#include "nzbget_rs.h"
 
 struct NzbgetRsYEncoderFile;
 
@@ -32,9 +33,33 @@ public:
 
 	YEncoder(const char* filename, int part, int64 offset, int size, WriteFunc writeFunc) :
 		m_filename(filename), m_part(part), m_offset(offset), m_size(size), m_fileSize(0), m_writeFunc(writeFunc) {};
-	~YEncoder();
-	bool OpenFile(CString& errmsg);
-	void WriteSegment();
+	~YEncoder()
+	{
+		nzbget_rs_yencoder_free(m_handle);
+	}
+
+	bool OpenFile(CString& errmsg)
+	{
+		nzbget_rs_yencoder_free(m_handle);
+		const char* err = nullptr;
+		m_handle = nzbget_rs_yencoder_open(m_filename, m_offset, &m_size, &m_fileSize, &err);
+		if (!m_handle)
+		{
+			errmsg = err ? err : "";
+			return false;
+		}
+		return true;
+	}
+
+	void WriteSegment()
+	{
+		auto writeCb = +[](void* ctx, const char* buf, int size)
+		{
+			(*static_cast<WriteFunc*>(ctx))(buf, size);
+		};
+		nzbget_rs_yencoder_write_segment(
+			m_handle, m_filename, m_part, m_offset, m_size, m_fileSize, writeCb, &m_writeFunc);
+	}
 
 private:
 	NzbgetRsYEncoderFile* m_handle = nullptr;

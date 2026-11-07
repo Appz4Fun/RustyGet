@@ -1541,6 +1541,178 @@ pub fn classify_first_head(head8: &[u8]) -> i32 {
     }
 }
 
+/// Pure-Rust descriptor for a target or donor file in `match_donor_file`.
+#[derive(Debug, Clone)]
+pub struct DonorFileSpec<'a> {
+    pub filename: &'a [u8],
+    pub subject: &'a [u8],
+    pub total_articles: i32,
+    pub size: i64,
+    pub is_par_file: bool,
+    pub parts: &'a [i32],
+    pub sizes: &'a [i32],
+}
+
+/// FFI-compatible descriptor for a target or donor file in `nzbget_rs_dupe_fallback_match_donor_file`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct NzbgetRsDonorFileSpec {
+    pub filename: *const std::ffi::c_char,
+    pub subject: *const std::ffi::c_char,
+    pub total_articles: i32,
+    pub size: i64,
+    pub is_par_file: i32,
+    pub parts: *const i32,
+    pub sizes: *const i32,
+    pub article_count: usize,
+}
+
+/// `DupeArticleFallback::MatchDonorFile`:
+/// Finds the index of the donor file in `donor_files` corresponding to `target`:
+/// 1. Rejects PAR2 targets or `twin_only` when `!twin_allowed`.
+/// 2. Uses `by_content` (from PAR2 `FileDesc` content matching) when available.
+/// 3. Falls back to structural + case-insensitive filename/NZB-filename matching,
+///    and consecutive article size step-fingerprint tie-breaking.
+/// Returns `None` if no candidate or multiple ambiguous candidates match.
+pub fn match_donor_file(
+    target: &DonorFileSpec<'_>,
+    target_nzb_filename: &[u8],
+    by_content: &[u8],
+    twin_allowed: bool,
+    twin_only: bool,
+    donor_files: &[DonorFileSpec<'_>],
+) -> Option<usize> {
+    if target.is_par_file {
+        return None;
+    }
+    if twin_only && !twin_allowed {
+        return None;
+    }
+    if by_content == b"-" || (twin_only && by_content.is_empty()) {
+        return None;
+    }
+    let check_structure = |df: &DonorFileSpec<'_>| -> bool {
+        structure_matches(
+            target.subject,
+            target.total_articles,
+            target.size,
+            target.parts,
+            target.sizes,
+            df.subject,
+            df.total_articles,
+            df.size,
+            df.parts,
+            df.sizes,
+        )
+    };
+    if !by_content.is_empty() {
+        let mut exact = Vec::new();
+        let mut folded = Vec::new();
+        for (i, df) in donor_files.iter().enumerate() {
+            if df.is_par_file {
+                continue;
+            }
+            match classify_content_name_match(df.filename, by_content) {
+                1 => exact.push(i),
+                2 => folded.push(i),
+                _ => {}
+            }
+        }
+        let match_kind = select_named_content_match(exact.len(), folded.len());
+        let named = match match_kind {
+            1 => Some(exact[0]),
+            2 => Some(folded[0]),
+            _ => None,
+        };
+        if named.is_some() || twin_only {
+            return named.filter(|&idx| check_structure(&donor_files[idx]));
+        }
+    }
+
+    let mut structural_matches = Vec::new();
+    let mut filename_match = None;
+    let mut filename_ambiguous = false;
+
+    for (i, df) in donor_files.iter().enumerate() {
+        if df.is_par_file || !check_structure(df) {
+            continue;
+        }
+        if is_donor_filename_match(target.filename, target_nzb_filename, df.filename) {
+            if filename_match.is_some() {
+                filename_ambiguous = true;
+            } else {
+                filename_match = Some(i);
+            }
+            continue;
+        }
+        structural_matches.push(i);
+    }
+
+    match resolve_structural_or_filename_match(
+        filename_ambiguous,
+        filename_match.is_some(),
+        structural_matches.len(),
+    ) {
+        -1 => return None,
+        1 => return filename_match,
+        2 => return Some(structural_matches[0]),
+        _ => {}
+    }
+
+    let mut step_match = None;
+    for &idx in &structural_matches {
+        if article_size_steps_match(target.sizes, donor_files[idx].sizes) {
+            if step_match.is_some() {
+                return None;
+            }
+            step_match = Some(idx);
+        }
+    }
+    step_match
+}
+
+/// `DupeArticleFallback::FindDonorMessageId`:
+/// Returns the first non-empty message-id for `part_number` in `articles`.
+pub fn find_donor_message_id<'a>(
+    articles: &'a [(i32, &'a [u8])],
+    part_number: i32,
+) -> Option<&'a [u8]> {
+    articles
+        .iter()
+        .find(|&&(part, msg_id)| part == part_number && !msg_id.is_empty())
+        .map(|&(_, msg_id)| msg_id)
+}
+
+/// `DupeArticleFallback::OrderSources`:
+/// Orders the message-ids an article is tried against. Reactive (`!cutover`): donor candidates only.
+/// Cut over (`cutover`): `[donor_candidates..., primary_message_id]` when `donor_candidates` is non-empty.
+pub fn order_sources(
+    donor_candidates: &[Vec<u8>],
+    cutover: bool,
+    primary_message_id: &[u8],
+) -> Vec<Vec<u8>> {
+    let append_primary = cutover && !donor_candidates.is_empty();
+    let mut sources = Vec::with_capacity(donor_candidates.len() + usize::from(append_primary));
+    sources.extend_from_slice(donor_candidates);
+    if append_primary {
+        sources.push(primary_message_id.to_vec());
+    }
+    sources
+}
+
+/// `DupeArticleFallback::RotateToLead`:
+/// Rotates `donors` in-place so the donor whose ID equals `lead_nzb_id` comes first.
+pub fn rotate_to_lead<T, F>(donors: &mut [T], lead_nzb_id: i32, id_fn: F)
+where
+    F: Fn(&T) -> i32,
+{
+    let donor_ids: Vec<i32> = donors.iter().map(id_fn).collect();
+    let idx = find_rotate_offset(&donor_ids, lead_nzb_id);
+    if idx > 0 && idx < donors.len() {
+        donors.rotate_left(idx);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1911,5 +2083,1580 @@ mod tests {
         ));
         assert_eq!(resolve_structural_or_filename_match(false, true, 2), 1);
         assert_eq!(classify_first_head(b"PAR2\0PKT"), 1);
+    }
+
+    #[derive(Clone, Debug)]
+    struct TestArticle {
+        part_number: i32,
+        size: i32,
+        message_id: Vec<u8>,
+        status: i32,
+        segment_offset: i64,
+        segment_size: i32,
+        fallback_round: i32,
+        lead_snapshot: i32,
+        next_lead: i32,
+        donor_count: i32,
+        sources: Vec<Vec<u8>>,
+        source_donors: Vec<i32>,
+    }
+
+    #[derive(Clone, Debug)]
+    struct TestFile {
+        filename: Vec<u8>,
+        subject: Vec<u8>,
+        size: i64,
+        total_articles: i32,
+        decoded_file_size: i64,
+        par_file: bool,
+        filename_confirmed: bool,
+        first_content: i32,
+        lead_donor_id: i32,
+        lead_failures: i32,
+        lead_switches: i32,
+        articles: Vec<TestArticle>,
+    }
+
+    impl TestFile {
+        fn build(filename: &[u8], parts: &[(i32, i32)], msg_id_prefix: &[u8]) -> Self {
+            let mut size = 0i64;
+            let mut articles = Vec::with_capacity(parts.len());
+            for &(part_num, part_size) in parts {
+                size += part_size as i64;
+                let msg_id = format!(
+                    "{}-{}@example.com",
+                    String::from_utf8_lossy(msg_id_prefix),
+                    part_num
+                )
+                .into_bytes();
+                articles.push(TestArticle {
+                    part_number: part_num,
+                    size: part_size,
+                    message_id: msg_id,
+                    status: 0,
+                    segment_offset: 0,
+                    segment_size: 0,
+                    fallback_round: 0,
+                    lead_snapshot: 0,
+                    next_lead: 0,
+                    donor_count: 0,
+                    sources: Vec::new(),
+                    source_donors: Vec::new(),
+                });
+            }
+            Self {
+                filename: filename.to_vec(),
+                subject: Vec::new(),
+                size,
+                total_articles: parts.len() as i32,
+                decoded_file_size: 0,
+                par_file: false,
+                filename_confirmed: false,
+                first_content: 0,
+                lead_donor_id: 0,
+                lead_failures: 0,
+                lead_switches: 0,
+                articles,
+            }
+        }
+
+        fn is_par(&self) -> bool {
+            is_par_file(
+                self.par_file,
+                self.first_content,
+                1,
+                self.filename_confirmed,
+                &self.filename,
+            )
+        }
+
+        fn parts_and_sizes(&self) -> (Vec<i32>, Vec<i32>) {
+            let parts = self.articles.iter().map(|a| a.part_number).collect();
+            let sizes = self.articles.iter().map(|a| a.size).collect();
+            (parts, sizes)
+        }
+
+        fn finish_article(&mut self, index: usize, offset: i64, size: i32) {
+            let a = &mut self.articles[index];
+            a.status = ARTICLE_STATUS_FINISHED;
+            a.segment_offset = offset;
+            a.segment_size = size;
+        }
+
+        fn expected_offset(&self, index: usize) -> i64 {
+            let a = &self.articles[index];
+            let prev = if index > 0 {
+                Some(&self.articles[index - 1])
+            } else {
+                None
+            };
+            expected_segment_offset(
+                index as isize,
+                a.part_number,
+                prev.map_or(0, |p| p.part_number),
+                prev.map_or(0, |p| p.status),
+                prev.map_or(0, |p| p.segment_offset),
+                prev.map_or(0, |p| p.segment_size),
+            )
+        }
+
+        fn expected_end(&self, index: usize) -> i64 {
+            let a = &self.articles[index];
+            let next = self.articles.get(index + 1);
+            expected_segment_end(
+                index as isize,
+                self.articles.len(),
+                a.part_number,
+                self.decoded_file_size,
+                next.map_or(0, |n| n.part_number),
+                next.map_or(0, |n| n.status),
+                next.map_or(0, |n| n.segment_offset),
+                next.map_or(0, |n| n.segment_size),
+            )
+        }
+
+        fn segment_aligned(&self, index: usize) -> bool {
+            let a = &self.articles[index];
+            segment_aligned(
+                a.segment_offset,
+                a.segment_size,
+                self.expected_offset(index),
+                self.expected_end(index),
+            )
+        }
+
+        fn first_untiled(&self) -> Option<usize> {
+            let geom: Vec<NzbgetRsArticleGeom> = self
+                .articles
+                .iter()
+                .map(|a| NzbgetRsArticleGeom {
+                    part_number: a.part_number,
+                    status: a.status,
+                    segment_offset: a.segment_offset,
+                    segment_size: a.segment_size,
+                    fallback_round: a.fallback_round,
+                })
+                .collect();
+            let idx = first_untiled_article(&geom, self.decoded_file_size);
+            if idx >= 0 {
+                Some(idx as usize)
+            } else {
+                None
+            }
+        }
+
+        fn merge_decoded_size(&mut self, article_file_size: i64) -> bool {
+            let (conflict, new_size) =
+                merge_decoded_file_size(self.decoded_file_size, article_file_size);
+            self.decoded_file_size = new_size;
+            conflict
+        }
+
+        fn has_donor_articles(&self) -> bool {
+            self.articles.iter().any(|a| a.fallback_round > 0)
+        }
+
+        fn finish_pin(
+            &mut self,
+            article_idx: usize,
+            candidates: &[Vec<u8>],
+            contributors: &[i32],
+            cutover: bool,
+            primary_msg_id: &[u8],
+        ) {
+            let (lead_snapshot, next_lead, donor_count, new_file_lead) =
+                compute_pin_lead_state(contributors, self.lead_donor_id);
+            self.lead_donor_id = new_file_lead;
+            let a = &mut self.articles[article_idx];
+            a.lead_snapshot = lead_snapshot;
+            a.next_lead = next_lead;
+            a.donor_count = donor_count;
+            a.sources = order_sources(candidates, cutover, primary_msg_id);
+            a.source_donors = contributors.to_vec();
+        }
+
+        fn register_lead_failure(&mut self, article_idx: usize) -> bool {
+            let a = &self.articles[article_idx];
+            register_lead_failure(
+                a.fallback_round,
+                a.lead_snapshot,
+                a.donor_count,
+                a.next_lead,
+                &mut self.lead_donor_id,
+                &mut self.lead_failures,
+                &mut self.lead_switches,
+            )
+        }
+
+        fn register_lead_success(&mut self, article_idx: usize) {
+            let exp_off = self.expected_offset(article_idx);
+            let exp_end = self.expected_end(article_idx);
+            let a = &self.articles[article_idx];
+            register_lead_success(
+                a.fallback_round,
+                a.lead_snapshot,
+                self.lead_donor_id,
+                exp_off,
+                exp_end,
+                &mut self.lead_failures,
+                &mut self.lead_switches,
+            );
+        }
+
+        fn vacate_ghost_lead(&mut self, is_barred: bool, donor_ids: &[i32]) {
+            if should_vacate_ghost_lead(self.lead_donor_id, is_barred, donor_ids) {
+                self.lead_donor_id = 0;
+                self.lead_failures = 0;
+                self.lead_switches = 0;
+            }
+        }
+    }
+
+    fn match_test_donor<'a>(
+        target: &TestFile,
+        donor_files: &'a [TestFile],
+        target_nzb_filename: &[u8],
+        by_content: &[u8],
+        twin_allowed: bool,
+        twin_only: bool,
+    ) -> Option<&'a TestFile> {
+        let (t_parts, t_sizes) = target.parts_and_sizes();
+        let target_spec = DonorFileSpec {
+            filename: &target.filename,
+            subject: &target.subject,
+            total_articles: target.total_articles,
+            size: target.size,
+            is_par_file: target.is_par(),
+            parts: &t_parts,
+            sizes: &t_sizes,
+        };
+        let d_parts_sizes: Vec<(Vec<i32>, Vec<i32>)> =
+            donor_files.iter().map(|df| df.parts_and_sizes()).collect();
+        let donor_specs: Vec<DonorFileSpec<'_>> = donor_files
+            .iter()
+            .enumerate()
+            .map(|(i, df)| DonorFileSpec {
+                filename: &df.filename,
+                subject: &df.subject,
+                total_articles: df.total_articles,
+                size: df.size,
+                is_par_file: df.is_par(),
+                parts: &d_parts_sizes[i].0,
+                sizes: &d_parts_sizes[i].1,
+            })
+            .collect();
+        let idx = match_donor_file(
+            &target_spec,
+            target_nzb_filename,
+            by_content,
+            twin_allowed,
+            twin_only,
+            &donor_specs,
+        )?;
+        Some(&donor_files[idx])
+    }
+
+    fn build_candidate_message_ids(
+        parsed_donors: &[Vec<TestFile>],
+        target: &TestFile,
+        part_number: i32,
+    ) -> Vec<Vec<u8>> {
+        let mut candidates: Vec<Vec<u8>> = Vec::new();
+        for donor_files in parsed_donors {
+            let Some(matched) = match_test_donor(target, donor_files, b"", b"", false, false)
+            else {
+                continue;
+            };
+            let pairs: Vec<(i32, &[u8])> = matched
+                .articles
+                .iter()
+                .map(|a| (a.part_number, a.message_id.as_slice()))
+                .collect();
+            let Some(msg_id) = find_donor_message_id(&pairs, part_number) else {
+                continue;
+            };
+            if !candidates.iter().any(|c| c.as_slice() == msg_id) {
+                candidates.push(msg_id.to_vec());
+            }
+        }
+        candidates
+    }
+
+    #[test]
+    fn dupe_article_fallback_full_suite_port_from_cpp() {
+        // 1. DupeArticleFallbackRejectsDamagedPar2BlockSizeTest
+        {
+            let dir = std::env::temp_dir()
+                .join(format!("nzbget-par2-block-rs-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let data = vec![b'x'; 100];
+            let f_bin = dir.join("f.bin");
+            std::fs::write(&f_bin, &data).unwrap();
+
+            let packet = |pkt_type: &[u8; 16], body: &[u8]| -> Vec<u8> {
+                let mut out = Vec::from(&b"PAR2\0PKT"[..]);
+                let length = (64 + body.len()) as u64;
+                out.extend_from_slice(&length.to_le_bytes());
+                out.extend_from_slice(&[0u8; 32]);
+                out.extend_from_slice(pkt_type);
+                out.extend_from_slice(body);
+                out
+            };
+            let file_id = [1u8; 16];
+            let mut desc = Vec::new();
+            desc.extend_from_slice(&file_id);
+            desc.extend_from_slice(&[0u8; 32]);
+            desc.extend_from_slice(&(data.len() as u64).to_le_bytes());
+            desc.extend_from_slice(b"f.bin\0\0\0");
+            let mut ifsc = Vec::new();
+            ifsc.extend_from_slice(&file_id);
+            ifsc.extend_from_slice(&[0u8; 20]);
+
+            let write_par = |block_size: u64| {
+                let mut main_body = Vec::new();
+                main_body.extend_from_slice(&block_size.to_le_bytes());
+                main_body.extend_from_slice(&[0u8; 8]);
+                let mut par = packet(b"PAR 2.0\0Main\0\0\0\0", &main_body);
+                par.extend(packet(b"PAR 2.0\0FileDesc", &desc));
+                par.extend(packet(b"PAR 2.0\0IFSC\0\0\0\0", &ifsc));
+                std::fs::write(dir.join("f.par2"), par).unwrap();
+            };
+
+            write_par(100);
+            let mismatches = borrowed_par2_mismatches(
+                &f_bin,
+                &dir,
+                b"f.bin",
+                &[ARTICLE_STATUS_FINISHED],
+                &[1],
+                &[0],
+                &[0],
+                &[100],
+            );
+            assert_eq!(mismatches, vec![0]);
+
+            write_par(1u64 << 50);
+            let mismatches = borrowed_par2_mismatches(
+                &f_bin,
+                &dir,
+                b"f.bin",
+                &[ARTICLE_STATUS_FINISHED],
+                &[1],
+                &[0],
+                &[0],
+                &[100],
+            );
+            assert!(mismatches.is_empty());
+
+            let mismatches = borrowed_par2_mismatches(
+                &f_bin,
+                &dir,
+                b"f.bin",
+                &[ARTICLE_STATUS_FINISHED],
+                &[1],
+                &[0],
+                &[400],
+                &[100],
+            );
+            assert!(mismatches.is_empty());
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        // 2. DupeArticleFallbackPar2CheckUsesTheFilesOwnSetTest
+        {
+            let dir = std::env::temp_dir()
+                .join(format!("nzbget-par2-sets-rs-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let data = vec![b'x'; 100];
+            let f_bin = dir.join("f.bin");
+            std::fs::write(&f_bin, &data).unwrap();
+
+            let packet = |set_id: &[u8; 16], pkt_type: &[u8; 16], body: &[u8]| -> Vec<u8> {
+                let mut out = Vec::from(&b"PAR2\0PKT"[..]);
+                let length = (64 + body.len()) as u64;
+                out.extend_from_slice(&length.to_le_bytes());
+                out.extend_from_slice(&[0u8; 16]);
+                out.extend_from_slice(set_id);
+                out.extend_from_slice(pkt_type);
+                out.extend_from_slice(body);
+                out
+            };
+            let block_crc = crc32_ieee(&data);
+            let file_id = [1u8; 16];
+            let set_a = [b'A'; 16];
+            let set_b = [b'B'; 16];
+
+            let mut main_a = Vec::new();
+            main_a.extend_from_slice(&100u64.to_le_bytes());
+            main_a.extend_from_slice(&0u64.to_le_bytes());
+            let mut desc_a = Vec::new();
+            desc_a.extend_from_slice(&file_id);
+            desc_a.extend_from_slice(&[0u8; 32]);
+            desc_a.extend_from_slice(&(data.len() as u64).to_le_bytes());
+            desc_a.extend_from_slice(b"f.bin\0\0\0");
+            let mut ifsc_a = Vec::new();
+            ifsc_a.extend_from_slice(&file_id);
+            ifsc_a.extend_from_slice(&[0u8; 16]);
+            ifsc_a.extend_from_slice(&block_crc.to_le_bytes());
+            let mut par_a = packet(&set_a, b"PAR 2.0\0Main\0\0\0\0", &main_a);
+            par_a.extend(packet(&set_a, b"PAR 2.0\0FileDesc", &desc_a));
+            par_a.extend(packet(&set_a, b"PAR 2.0\0IFSC\0\0\0\0", &ifsc_a));
+
+            let mut main_b = Vec::new();
+            main_b.extend_from_slice(&200u64.to_le_bytes());
+            main_b.extend_from_slice(&0u64.to_le_bytes());
+            let mut desc_b = Vec::new();
+            desc_b.extend_from_slice(&[2u8; 16]);
+            desc_b.extend_from_slice(&[0u8; 32]);
+            desc_b.extend_from_slice(&64u64.to_le_bytes());
+            desc_b.extend_from_slice(b"g.bin\0\0\0");
+            let mut ifsc_b = Vec::new();
+            ifsc_b.extend_from_slice(&[2u8; 16]);
+            ifsc_b.extend_from_slice(&[0u8; 20]);
+            let mut par_b = packet(&set_b, b"PAR 2.0\0Main\0\0\0\0", &main_b);
+            par_b.extend(packet(&set_b, b"PAR 2.0\0FileDesc", &desc_b));
+            par_b.extend(packet(&set_b, b"PAR 2.0\0IFSC\0\0\0\0", &ifsc_b));
+
+            for first_a in [true, false] {
+                let mut combined = Vec::new();
+                if first_a {
+                    combined.extend_from_slice(&par_a);
+                    combined.extend_from_slice(&par_b);
+                } else {
+                    combined.extend_from_slice(&par_b);
+                    combined.extend_from_slice(&par_a);
+                }
+                std::fs::write(dir.join("set.par2"), combined).unwrap();
+                let mismatches = borrowed_par2_mismatches(
+                    &f_bin,
+                    &dir,
+                    b"f.bin",
+                    &[ARTICLE_STATUS_FINISHED],
+                    &[1],
+                    &[0],
+                    &[0],
+                    &[100],
+                );
+                assert!(mismatches.is_empty());
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        // 3. DupeArticleFallbackProactiveTryIsNotUnsourcedTest
+        for proactive in [true, false] {
+            let (_check_log_par_defer, inc_unsourced, _restore_orig) =
+                resolve_exhausted_sources(false, 0, proactive, 0, 0, true, false);
+            assert_eq!(if inc_unsourced { 1 } else { 0 }, if proactive { 0 } else { 1 });
+        }
+
+        // 4. DupeArticleFallbackSizesMatchTest
+        assert!(sizes_match(100000, 100000, 64));
+        assert!(sizes_match(100000, 101000, 64));
+        assert!(!sizes_match(100000, 103000, 64));
+        assert!(sizes_match(100000, 105000, 16));
+        assert!(!sizes_match(100000, 110000, 16));
+        assert!(sizes_match(0, 0, 64));
+
+        // 5. DupeArticleFallbackFilenameMatchTest
+        {
+            let target =
+                TestFile::build(b"release.r01", &[(1, 500000), (2, 500000), (3, 120000)], b"orig");
+            let donors = vec![
+                TestFile::build(
+                    b"release.r00",
+                    &[(1, 500000), (2, 500000), (3, 120000)],
+                    b"donor0",
+                ),
+                TestFile::build(
+                    b"Release.R01",
+                    &[(1, 500200), (2, 500200), (3, 120100)],
+                    b"donor1",
+                ),
+            ];
+            let m = match_test_donor(&target, &donors, b"", b"", false, false).unwrap();
+            assert_eq!(m.filename, b"Release.R01");
+        }
+
+        // 6. DupeArticleFallbackRefusesParTargetsTest
+        for flagged in [false, true] {
+            let filename: &[u8] = if flagged {
+                b"obfuscated.bin"
+            } else {
+                b"release.vol01+02.PaR2"
+            };
+            let mut target = TestFile::build(filename, &[(1, 500000)], b"orig");
+            target.par_file = flagged;
+            target.filename_confirmed = !flagged;
+            let donor = vec![TestFile::build(filename, &[(1, 500000)], b"foreign-par")];
+            assert!(match_test_donor(&target, &donor, b"", b"", false, false).is_none());
+            assert!(build_candidate_message_ids(&[donor], &target, 1).is_empty());
+        }
+
+        // 7. DupeArticleFallbackExcludesParDonorsTest
+        for flagged in [false, true] {
+            let target = TestFile::build(b"release.r01", &[(1, 500000)], b"orig");
+            let mut parity = TestFile::build(
+                if flagged {
+                    b"release.r01"
+                } else {
+                    b"release.PAR2"
+                },
+                &[(1, 500000)],
+                b"foreign-par",
+            );
+            parity.par_file = flagged;
+            parity.filename_confirmed = !flagged;
+            let mut donor = vec![parity];
+            assert!(match_test_donor(&target, &donor, b"", b"", false, false).is_none());
+
+            donor.push(TestFile::build(b"renamed.bin", &[(1, 500000)], b"data"));
+            let candidates = build_candidate_message_ids(&[donor], &target, 1);
+            assert_eq!(candidates, vec![b"data-1@example.com".to_vec()]);
+        }
+
+        // 8. DupeArticleFallbackStopsPinnedParSourcesTest
+        for flagged in [false, true] {
+            let mut target = TestFile::build(
+                if flagged {
+                    b"obfuscated.bin"
+                } else {
+                    b"release.PAR2"
+                },
+                &[(1, 500000)],
+                b"orig",
+            );
+            target.par_file = flagged;
+            target.filename_confirmed = !flagged;
+            assert!(!check_try_preconditions(
+                2,
+                0,
+                false,
+                target.is_par(),
+                target.first_content,
+                1,
+                0,
+                1,
+                &target.filename,
+                false,
+                false,
+                false,
+                0,
+                0,
+                0,
+                2,
+            ));
+        }
+
+        // 9. DupeArticleFallbackDefersDataToAvailableParTest
+        for kind in 0..10 {
+            let par_size = if kind == 0 || kind >= 6 { 500000 } else { 0 };
+            let direct_rename_status = if kind == 5 { 1 } else { 0 };
+            let par_status = match kind {
+                6 => 3, // psSkipped
+                7 => 4, // psRepairPossible
+                8 => 1, // psSuccess
+                9 => 5, // psManual
+                _ => 0,
+            };
+            let header = should_defer_to_par_header(
+                true,
+                direct_rename_status,
+                1,
+                false,
+                par_status,
+                2, // psFailure
+                par_size,
+            );
+            let should_defer = if header != 0 {
+                header > 0
+            } else if kind == 1 || kind == 3 {
+                is_par_file(
+                    kind == 1,
+                    0,
+                    1,
+                    kind == 3,
+                    if kind == 1 {
+                        b"obfuscated.bin"
+                    } else {
+                        b"release.PAR2"
+                    },
+                )
+            } else if kind == 2 || kind == 4 {
+                completed_file_is_par2(
+                    kind == 2,
+                    if kind == 2 {
+                        b"obfuscated.bin"
+                    } else {
+                        b"release.PAR2"
+                    },
+                )
+            } else {
+                false
+            };
+            assert!(should_defer, "fixture {kind} must defer to PAR");
+            let (defer, _, _) = eval_par_defer(should_defer, 2, 0, 1, 2, false, false, false);
+            assert!(defer);
+            assert!(should_abort_deferred_try(defer, 1, false, true));
+        }
+        // First article of a file (part_number == 1) is never deferred
+        {
+            let (defer, _, _) = eval_par_defer(true, 1, 0, 1, 2, false, false, false);
+            assert!(!defer);
+        }
+        // DirectRename running vs AllFirst vs ParSize
+        assert_eq!(should_defer_to_par_header(true, 1, 1, false, 0, 2, 0), 1);
+        assert_eq!(should_defer_to_par_header(true, 1, 1, true, 0, 2, 0), 0);
+        assert_eq!(should_defer_to_par_header(true, 1, 1, true, 0, 2, 500000), 1);
+
+        // 10. DupeArticleFallbackAllowsDataWithoutUsableParTest
+        for par_failed in [false, true] {
+            let par_size = if par_failed { 500000 } else { 0 };
+            let par_status = if par_failed { 2 } else { 0 };
+            let has_par2 = par_size > 0;
+            let should_defer =
+                should_defer_to_par_header(true, 2, 1, false, par_status, 2, par_size) > 0;
+            assert_eq!(has_par2 && !should_defer, par_failed);
+        }
+
+        // 11. DupeArticleFallbackLiftsDeferralWhenParCannotCoverTest
+        for (failed, expect_fallback) in [
+            (100000i64, false),
+            (479999, false),
+            (480001, true),
+            (2000000, true),
+        ] {
+            let should_defer =
+                should_defer_to_par_header(true, 2, 1, false, 0, 2, 500000) > 0;
+            assert!(should_defer);
+            let cannot_cover = par_cannot_cover(
+                500000,
+                20000,
+                failed + 20000,
+                0,
+                0,
+                0,
+                0,
+                0,
+                true,
+            );
+            assert_eq!(cannot_cover, expect_fallback);
+            let (defer, lift, _) =
+                eval_par_defer(should_defer, 2, 0, 1, 2, cannot_cover, false, false);
+            assert_eq!(!defer, expect_fallback);
+            assert_eq!(lift, expect_fallback);
+        }
+
+        // 12. DupeArticleFallbackArticleModePreservesRecoveryWithParTest
+        for kind in 0..3 {
+            let mut target = TestFile::build(
+                match kind {
+                    0 => b"release.r01",
+                    1 => b"release.PAR2",
+                    _ => b"obfuscated.bin",
+                },
+                &[(1, 500000)],
+                b"orig",
+            );
+            target.par_file = kind == 2;
+            target.filename_confirmed = kind != 2;
+            let allowed = check_try_preconditions(
+                1, // dafArticle
+                0,
+                false,
+                target.is_par(),
+                target.first_content,
+                1,
+                0,
+                1,
+                &target.filename,
+                false,
+                false,
+                false,
+                0,
+                0,
+                0,
+                2,
+            );
+            assert_eq!(allowed, kind == 0);
+        }
+
+        // 13. DupeArticleFallbackAmbiguousFilenameMatchTest
+        {
+            let target = TestFile::build(b"release.r01", &[(1, 500000), (2, 500000)], b"orig");
+            let donors = vec![
+                TestFile::build(b"release.r01", &[(1, 500000), (2, 500000)], b"donor0"),
+                TestFile::build(b"RELEASE.R01", &[(1, 500000), (2, 500000)], b"donor1"),
+            ];
+            assert!(match_test_donor(&target, &donors, b"", b"", false, false).is_none());
+        }
+
+        // 14. DupeArticleFallbackStructuralMatchTest
+        {
+            let target =
+                TestFile::build(b"release.r01", &[(1, 500000), (2, 500000), (3, 120000)], b"orig");
+            let donors = vec![
+                TestFile::build(
+                    b"adf7e6b1.bin",
+                    &[(1, 500100), (2, 500100), (3, 120050)],
+                    b"donor0",
+                ),
+                TestFile::build(b"b23f98c4.bin", &[(1, 500000), (2, 300000)], b"donor1"),
+            ];
+            let m = match_test_donor(&target, &donors, b"", b"", false, false).unwrap();
+            assert_eq!(m.filename, b"adf7e6b1.bin");
+        }
+
+        // 15. DupeArticleFallbackAmbiguousStructuralMatchTest
+        {
+            let target = TestFile::build(b"release.r01", &[(1, 500000), (2, 500000)], b"orig");
+            let donors = vec![
+                TestFile::build(b"adf7e6b1.bin", &[(1, 500000), (2, 500000)], b"donor0"),
+                TestFile::build(b"b23f98c4.bin", &[(1, 500000), (2, 500000)], b"donor1"),
+            ];
+            assert!(match_test_donor(&target, &donors, b"", b"", false, false).is_none());
+        }
+
+        // 16. DupeArticleFallbackStepFingerprintMatchTest
+        {
+            const SIZES: [[i32; 10]; 4] = [
+                [0; 10],
+                [
+                    769211, 770840, 768392, 771005, 769930, 768777, 770123, 769504, 771288,
+                    412004,
+                ],
+                [
+                    770318, 768951, 771402, 769037, 770660, 769845, 768590, 771113, 769722,
+                    398760,
+                ],
+                [
+                    768845, 771230, 769918, 770402, 768611, 771077, 769283, 770936, 768458,
+                    405391,
+                ],
+            ];
+            let volume = |seed: usize, shift: i32| -> Vec<(i32, i32)> {
+                (1..=10)
+                    .map(|i| (i as i32, SIZES[seed][i - 1] + shift))
+                    .collect()
+            };
+            let target = TestFile::build(b"release.part02.rar", &volume(2, 0), b"orig");
+            let mut donors = vec![
+                TestFile::build(b"x9d0a1.bin", &volume(1, 31), b"donor1"),
+                TestFile::build(b"q7c3e2.bin", &volume(2, 31), b"donor2"),
+                TestFile::build(b"m2b8f4.bin", &volume(3, 31), b"donor3"),
+            ];
+            let m = match_test_donor(&target, &donors, b"", b"", false, false).unwrap();
+            assert_eq!(m.filename, b"q7c3e2.bin");
+
+            donors.push(TestFile::build(b"z1y2x3.bin", &volume(2, 77), b"donor4"));
+            assert!(match_test_donor(&target, &donors, b"", b"", false, false).is_none());
+
+            assert!(!article_size_steps_match(
+                &[500000, 500100, 500050],
+                &[500020, 500120, 500070]
+            ));
+            assert!(!article_size_steps_match(&[750000; 10], &[750000; 10]));
+        }
+
+        // 17. DupeArticleFallbackNzbFilenameMatchTest
+        {
+            let flat: Vec<(i32, i32)> = (1..=10).map(|i| (i, 716800)).collect();
+            let target = TestFile::build(b"eywx5KxUK17tPqpAtlTI8cRgOZdSqZTV", &flat, b"orig");
+            let donors = vec![
+                TestFile::build(b"Release.part01.rar", &flat, b"donor1"),
+                TestFile::build(b"Release.part02.rar", &flat, b"donor2"),
+                TestFile::build(b"Release.part03.rar", &flat, b"donor3"),
+            ];
+            assert!(match_test_donor(&target, &donors, b"", b"", false, false).is_none());
+            let m =
+                match_test_donor(&target, &donors, b"Release.part02.rar", b"", false, false)
+                    .unwrap();
+            assert_eq!(m.filename, b"Release.part02.rar");
+        }
+
+        // 18. DupeArticleFallbackPartCountMismatchTest
+        {
+            let target = TestFile::build(b"release.r01", &[(1, 500000), (2, 500000)], b"orig");
+            let donors = vec![TestFile::build(
+                b"release.r01",
+                &[(1, 400000), (2, 400000), (3, 200000)],
+                b"donor0",
+            )];
+            assert!(match_test_donor(&target, &donors, b"", b"", false, false).is_none());
+        }
+
+        // 19. DupeArticleFallbackTotalSizeMismatchTest
+        {
+            let target = TestFile::build(b"release.r01", &[(1, 500000), (2, 500000)], b"orig");
+            let donors = vec![TestFile::build(
+                b"release.r01",
+                &[(1, 525000), (2, 525000)],
+                b"donor0",
+            )];
+            assert!(match_test_donor(&target, &donors, b"", b"", false, false).is_none());
+        }
+
+        // 20. DupeArticleFallbackPartSizeMismatchTest
+        {
+            let target = TestFile::build(b"release.r01", &[(1, 100000), (2, 100000)], b"orig");
+            let donors = vec![TestFile::build(
+                b"release.r01",
+                &[(1, 90000), (2, 110000)],
+                b"donor0",
+            )];
+            assert!(match_test_donor(&target, &donors, b"", b"", false, false).is_none());
+        }
+
+        // 21. DupeArticleFallbackCandidateListStableAcrossRoundsTest
+        {
+            let mut target = TestFile::build(b"release.r01", &[(1, 500000), (2, 500000)], b"orig");
+            let parsed_donors = vec![
+                vec![TestFile::build(
+                    b"release.r01",
+                    &[(1, 500000), (2, 500000)],
+                    b"donor0",
+                )],
+                vec![TestFile::build(
+                    b"release.r01",
+                    &[(1, 500100), (2, 500100)],
+                    b"donor1",
+                )],
+            ];
+            let round0 = build_candidate_message_ids(&parsed_donors, &target, 2);
+            assert_eq!(
+                round0,
+                vec![b"donor0-2@example.com".to_vec(), b"donor1-2@example.com".to_vec()]
+            );
+            target.articles[1].message_id = b"donor0-2@example.com".to_vec();
+            let round1 = build_candidate_message_ids(&parsed_donors, &target, 2);
+            assert_eq!(round1, round0);
+        }
+
+        // 22. DupeArticleFallbackCandidateListDedupeTest
+        {
+            let target = TestFile::build(b"release.r01", &[(1, 500000), (2, 500000)], b"orig");
+            let parsed_donors = vec![
+                vec![TestFile::build(
+                    b"release.r01",
+                    &[(1, 500000), (2, 500000)],
+                    b"shared",
+                )],
+                vec![TestFile::build(
+                    b"release.r01",
+                    &[(1, 500000), (2, 500000)],
+                    b"shared",
+                )],
+            ];
+            let candidates = build_candidate_message_ids(&parsed_donors, &target, 1);
+            assert_eq!(candidates, vec![b"shared-1@example.com".to_vec()]);
+        }
+
+        // 23–25. OrderSources (Reactive, Cutover, CutoverNoDonor)
+        {
+            let donors = vec![b"d0@example.com".to_vec(), b"d1@example.com".to_vec()];
+            assert_eq!(
+                order_sources(&donors, false, b"primary@example.com"),
+                donors
+            );
+            let donors3 = vec![
+                b"d0@example.com".to_vec(),
+                b"d1@example.com".to_vec(),
+                b"d2@example.com".to_vec(),
+            ];
+            assert_eq!(
+                order_sources(&donors3, true, b"primary@example.com"),
+                vec![
+                    b"d0@example.com".to_vec(),
+                    b"d1@example.com".to_vec(),
+                    b"d2@example.com".to_vec(),
+                    b"primary@example.com".to_vec(),
+                ]
+            );
+            assert!(order_sources(&[], true, b"primary@example.com").is_empty());
+        }
+
+        // 26. DupeArticleFallbackRotateToLeadTest
+        {
+            let mut donors = vec![11, 21, 31];
+            rotate_to_lead(&mut donors, 21, |&id| id);
+            assert_eq!(donors, vec![21, 31, 11]);
+            rotate_to_lead(&mut donors, 0, |&id| id);
+            assert_eq!(donors, vec![21, 31, 11]);
+            rotate_to_lead(&mut donors, 99, |&id| id);
+            assert_eq!(donors, vec![21, 31, 11]);
+        }
+
+        // 27 & 28. FinishPinTest & FinishPinNoDonorsTest
+        {
+            let mut file = TestFile::build(b"release.r01", &[(1, 1000), (2, 1000)], b"orig");
+            let candidates = vec![
+                b"a1@example.com".to_vec(),
+                b"b1@example.com".to_vec(),
+                b"a2@example.com".to_vec(),
+            ];
+            let contributors = vec![11, 21, 11];
+            file.finish_pin(0, &candidates, &contributors, false, b"primary@example.com");
+            assert_eq!(file.articles[0].lead_snapshot, 11);
+            assert_eq!(file.articles[0].next_lead, 21);
+            assert_eq!(file.articles[0].donor_count, 2);
+            assert_eq!(file.lead_donor_id, 11);
+            assert_eq!(file.articles[0].sources, candidates);
+
+            file.finish_pin(1, &candidates, &contributors, true, b"primary@example.com");
+            assert_eq!(file.articles[1].sources.len(), 4);
+            assert_eq!(file.articles[1].sources[3], b"primary@example.com");
+            assert_eq!(file.lead_donor_id, 11);
+
+            let mut file2 = TestFile::build(b"release.r01", &[(1, 1000)], b"orig");
+            file2.finish_pin(0, &[], &[], true, b"primary@example.com");
+            assert_eq!(file2.articles[0].lead_snapshot, 0);
+            assert_eq!(file2.articles[0].next_lead, 0);
+            assert_eq!(file2.articles[0].donor_count, 0);
+            assert_eq!(file2.lead_donor_id, 0);
+            assert!(file2.articles[0].sources.is_empty());
+        }
+
+        // Helper for FailedLeadArticle
+        let mark_failed_lead =
+            |file: &mut TestFile, idx: usize, next_lead: i32, donor_count: i32| {
+                let lead = file.lead_donor_id;
+                let a = &mut file.articles[idx];
+                a.fallback_round = 1;
+                a.lead_snapshot = lead;
+                a.next_lead = next_lead;
+                a.donor_count = donor_count;
+            };
+
+        // 29. DupeArticleFallbackLeadDemotionTest
+        {
+            let mut file = TestFile::build(
+                b"release.r01",
+                &[(1, 1000), (2, 1000), (3, 1000), (4, 1000)],
+                b"orig",
+            );
+            file.lead_donor_id = 11;
+            mark_failed_lead(&mut file, 0, 21, 2);
+            assert!(!file.register_lead_failure(0));
+            mark_failed_lead(&mut file, 1, 21, 2);
+            assert!(!file.register_lead_failure(1));
+            assert_eq!(file.lead_donor_id, 11);
+            assert_eq!(file.lead_failures, 2);
+
+            mark_failed_lead(&mut file, 2, 21, 2);
+            file.articles[2].fallback_round = 2;
+            assert!(!file.register_lead_failure(2));
+            assert_eq!(file.lead_failures, 2);
+
+            mark_failed_lead(&mut file, 3, 21, 2);
+            assert!(file.register_lead_failure(3));
+            assert_eq!(file.lead_donor_id, 21);
+            assert_eq!(file.lead_failures, 0);
+            assert_eq!(file.lead_switches, 1);
+        }
+
+        // 30. DupeArticleFallbackLeadSuccessResetsStreakTest
+        {
+            let mut file = TestFile::build(
+                b"release.r01",
+                &[(1, 1000), (2, 1000), (3, 1000), (4, 1000), (5, 1000)],
+                b"orig",
+            );
+            file.lead_donor_id = 11;
+            for i in 0..2 {
+                mark_failed_lead(&mut file, i, 21, 2);
+                assert!(!file.register_lead_failure(i));
+            }
+            mark_failed_lead(&mut file, 2, 21, 2);
+            file.register_lead_success(2);
+            assert_eq!(file.lead_failures, 0);
+            for i in 3..5 {
+                mark_failed_lead(&mut file, i, 21, 2);
+                assert!(!file.register_lead_failure(i));
+            }
+            assert_eq!(file.lead_donor_id, 11);
+        }
+
+        // 31. DupeArticleFallbackLeadStaleSnapshotTest
+        {
+            let mut file = TestFile::build(
+                b"release.r01",
+                &[
+                    (1, 1000),
+                    (2, 1000),
+                    (3, 1000),
+                    (4, 1000),
+                    (5, 1000),
+                    (6, 1000),
+                ],
+                b"orig",
+            );
+            file.lead_donor_id = 11;
+            mark_failed_lead(&mut file, 0, 21, 2);
+            mark_failed_lead(&mut file, 1, 21, 2);
+            mark_failed_lead(&mut file, 2, 21, 2);
+            assert!(!file.register_lead_failure(2));
+            mark_failed_lead(&mut file, 3, 21, 2);
+            assert!(!file.register_lead_failure(3));
+            mark_failed_lead(&mut file, 4, 21, 2);
+            assert!(file.register_lead_failure(4));
+            assert_eq!(file.lead_donor_id, 21);
+
+            assert!(!file.register_lead_failure(0));
+            assert!(!file.register_lead_failure(1));
+            assert_eq!(file.lead_failures, 0);
+            assert_eq!(file.lead_donor_id, 21);
+
+            mark_failed_lead(&mut file, 5, 11, 2);
+            assert!(!file.register_lead_failure(5));
+            assert_eq!(file.lead_failures, 1);
+            file.register_lead_success(0);
+            assert_eq!(file.lead_failures, 1);
+        }
+
+        // 32. DupeArticleFallbackLeadSingleDonorNoDemotionTest
+        {
+            let mut file = TestFile::build(
+                b"release.r01",
+                &[(1, 1000), (2, 1000), (3, 1000), (4, 1000)],
+                b"orig",
+            );
+            file.lead_donor_id = 11;
+            for i in 0..3 {
+                mark_failed_lead(&mut file, i, 0, 1);
+                assert!(!file.register_lead_failure(i));
+            }
+            assert_eq!(file.lead_donor_id, 11);
+            mark_failed_lead(&mut file, 3, 21, 2);
+            assert!(file.register_lead_failure(3));
+            assert_eq!(file.lead_donor_id, 21);
+        }
+
+        // 33. DupeArticleFallbackLeadRotationBoundedTest
+        {
+            let parts: Vec<(i32, i32)> = (1..=13).map(|i| (i, 1000)).collect();
+            let mut file = TestFile::build(b"release.r01", &parts, b"orig");
+            file.lead_donor_id = 11;
+            let miss_streak = |f: &mut TestFile, first_idx: usize, next_lead: i32| -> bool {
+                mark_failed_lead(f, first_idx, next_lead, 2);
+                assert!(!f.register_lead_failure(first_idx));
+                mark_failed_lead(f, first_idx + 1, next_lead, 2);
+                assert!(!f.register_lead_failure(first_idx + 1));
+                mark_failed_lead(f, first_idx + 2, next_lead, 2);
+                f.register_lead_failure(first_idx + 2)
+            };
+            assert!(miss_streak(&mut file, 0, 21));
+            assert_eq!(file.lead_donor_id, 21);
+            assert!(miss_streak(&mut file, 3, 11));
+            assert_eq!(file.lead_donor_id, 11);
+            assert_eq!(file.lead_switches, 2);
+
+            assert!(!miss_streak(&mut file, 6, 21));
+            assert_eq!(file.lead_donor_id, 11);
+
+            // Provisional success: resets failures, does NOT reset switches
+            mark_failed_lead(&mut file, 9, 21, 2);
+            file.register_lead_success(9);
+            assert_eq!(file.lead_failures, 0);
+            assert_eq!(file.lead_switches, 2);
+            assert!(!miss_streak(&mut file, 10, 21));
+
+            // Verifiable success (neighbours 8 and 10 finished): resets switches
+            file.finish_article(8, 8000, 1000);
+            file.finish_article(10, 10000, 1000);
+            mark_failed_lead(&mut file, 9, 21, 2);
+            file.register_lead_success(9);
+            assert_eq!(file.lead_switches, 0);
+            assert!(miss_streak(&mut file, 3, 21));
+            assert_eq!(file.lead_donor_id, 21);
+        }
+
+        // 34. DupeArticleFallbackVacateGhostLeadTest
+        {
+            let mut file = TestFile::build(b"release.r01", &[(1, 1000)], b"orig");
+            let donors = [11, 21];
+            file.lead_donor_id = 21;
+            file.lead_failures = 2;
+            file.vacate_ghost_lead(false, &donors);
+            assert_eq!(file.lead_donor_id, 21);
+            assert_eq!(file.lead_failures, 2);
+
+            file.lead_donor_id = 99;
+            file.lead_switches = 2;
+            file.vacate_ghost_lead(false, &donors);
+            assert_eq!(file.lead_donor_id, 0);
+            assert_eq!(file.lead_failures, 0);
+            assert_eq!(file.lead_switches, 0);
+        }
+
+        // 35. DupeArticleFallbackFindDonorMessageIdTest
+        {
+            let donor = TestFile::build(b"release.r01", &[(1, 500000), (3, 120000)], b"donor");
+            let pairs: Vec<(i32, &[u8])> = donor
+                .articles
+                .iter()
+                .map(|a| (a.part_number, a.message_id.as_slice()))
+                .collect();
+            assert_eq!(
+                find_donor_message_id(&pairs, 3),
+                Some(&b"donor-3@example.com"[..])
+            );
+            assert_eq!(find_donor_message_id(&pairs, 2), None);
+        }
+
+        // 36. DupeArticleFallbackExpectedSegmentOffsetTest
+        {
+            let mut target =
+                TestFile::build(b"release.r01", &[(1, 1300), (2, 1300), (3, 700)], b"orig");
+            assert_eq!(target.expected_offset(0), 0);
+            assert_eq!(target.expected_offset(1), -1);
+            assert_eq!(target.expected_end(1), -1);
+            assert_eq!(target.expected_end(2), -1);
+
+            target.finish_article(0, 0, 1000);
+            target.finish_article(2, 2000, 500);
+            target.decoded_file_size = 2500;
+            assert_eq!(target.expected_offset(1), 1000);
+            assert_eq!(target.expected_end(1), 2000);
+            assert_eq!(target.expected_end(2), 2500);
+            assert_eq!(target.expected_offset(2), -1);
+        }
+
+        // 37. DupeArticleFallbackStructureGapTest (B30)
+        {
+            let full: Vec<(i32, i32)> = (1..=20)
+                .map(|p| (p, if p == 20 { 70000 } else { 130000 }))
+                .collect();
+            let mut gap = full.clone();
+            gap.remove(3); // part 4 missing
+            let mut target = TestFile::build(b"release.r01", &gap, b"orig");
+            target.size += 130000;
+
+            let twin = vec![TestFile::build(b"other.r01", &full, b"donor")];
+            assert!(match_test_donor(&target, &twin, b"", b"", false, false).is_some());
+
+            let full_target = TestFile::build(b"release.r01", &full, b"orig");
+            let lacking = vec![TestFile::build(b"other.r01", &gap, b"donor")];
+            assert!(match_test_donor(&full_target, &lacking, b"", b"", false, false).is_none());
+
+            let mut longer = full.clone();
+            for p in 21..=30 {
+                longer.push((p, 130000));
+            }
+            let other = vec![TestFile::build(b"other.r01", &longer, b"donor")];
+            assert!(match_test_donor(&target, &other, b"", b"", false, false).is_none());
+
+            let mut resized = full.clone();
+            resized[10].1 = 60000;
+            let different = vec![TestFile::build(b"other.r01", &resized, b"donor")];
+            assert!(match_test_donor(&target, &different, b"", b"", false, false).is_none());
+        }
+
+        // 38. DupeArticleFallbackStructureGapStrictTest (B32)
+        {
+            let make_parts = |first: i32, last: i32, skip: &[i32]| -> Vec<(i32, i32)> {
+                (first..=last)
+                    .filter(|p| !skip.contains(p))
+                    .map(|p| (p, 130000))
+                    .collect()
+            };
+            let short160 = TestFile::build(b"release.r01", &make_parts(1, 160, &[]), b"orig");
+            let longer = vec![TestFile::build(
+                b"other.r01",
+                &make_parts(1, 170, &[]),
+                b"donor",
+            )];
+            assert!(match_test_donor(&short160, &longer, b"", b"", false, false).is_none());
+
+            let mut gaps =
+                TestFile::build(b"release.r01", &make_parts(1, 170, &[50, 51]), b"orig");
+            gaps.size += 2 * 130000;
+            assert!(match_test_donor(&gaps, &longer, b"", b"", false, false).is_some());
+
+            let one_short = TestFile::build(b"release.r01", &make_parts(1, 169, &[]), b"orig");
+            assert!(match_test_donor(&one_short, &longer, b"", b"", false, false).is_some());
+            let two_short = TestFile::build(b"release.r01", &make_parts(1, 168, &[]), b"orig");
+            assert!(match_test_donor(&two_short, &longer, b"", b"", false, false).is_none());
+        }
+
+        // 39. DupeArticleFallbackStructureDeclaredPartsTest (B39)
+        {
+            let make_parts =
+                |last: i32| -> Vec<(i32, i32)> { (1..=last).map(|p| (p, 100000)).collect() };
+            let donor_with = |last: i32, subject: &[u8]| -> Vec<TestFile> {
+                let mut f = TestFile::build(b"Healthy.bin", &make_parts(last), b"donor");
+                f.subject = subject.to_vec();
+                vec![f]
+            };
+            let mut complete = TestFile::build(b"chB0.bin", &make_parts(29), b"orig");
+            complete.subject = b"\"chB0.bin\" yEnc (1/29)".to_vec();
+            let healthy = donor_with(30, b"\"Healthy.bin\" yEnc (1/30)");
+            assert!(match_test_donor(&complete, &healthy, b"", b"", false, false).is_none());
+            let unnamed = donor_with(30, b"abc123");
+            assert!(match_test_donor(&complete, &unnamed, b"", b"", false, false).is_none());
+
+            let mut lacking = TestFile::build(b"chB0.bin", &make_parts(29), b"orig");
+            lacking.subject = b"\"chB0.bin\" yEnc (1/30)".to_vec();
+            assert!(match_test_donor(&lacking, &healthy, b"", b"", false, false).is_some());
+
+            let mut obfuscated = TestFile::build(b"chB0.bin", &make_parts(29), b"orig");
+            obfuscated.subject = b"a1b2c3 [2019/2020]".to_vec();
+            let plain = donor_with(30, b"d4e5f6");
+            assert!(match_test_donor(&obfuscated, &plain, b"", b"", false, false).is_some());
+        }
+
+        // 40. DupeArticleFallbackExpectedSegmentGapTest (B3)
+        {
+            let mut target = TestFile::build(
+                b"release.r01",
+                &[(1, 1300), (2, 1300), (3, 1300), (5, 700)],
+                b"orig",
+            );
+            target.finish_article(0, 0, 1000);
+            target.finish_article(1, 1000, 1000);
+            target.finish_article(2, 2000, 1000);
+            assert_eq!(target.expected_offset(3), -1);
+            target.finish_article(3, 4000, 500);
+            assert_eq!(target.expected_end(2), -1);
+
+            let no_first = TestFile::build(b"release.r01", &[(2, 1300), (3, 700)], b"orig");
+            assert_eq!(no_first.expected_offset(0), -1);
+        }
+
+        // 41. DupeArticleFallbackFirstUntiledTest (B7)
+        {
+            let mut target =
+                TestFile::build(b"release.r01", &[(1, 1300), (2, 1300), (3, 700)], b"orig");
+            target.decoded_file_size = 2500;
+            target.finish_article(0, 0, 1000);
+            target.finish_article(2, 2000, 500);
+            target.finish_article(1, 1000, 1000);
+            assert_eq!(target.first_untiled(), None);
+
+            target.finish_article(1, 1000, 960);
+            assert_eq!(target.first_untiled(), Some(1));
+
+            target.finish_article(1, 1000, 1040);
+            target.articles[1].fallback_round = 1;
+            assert_eq!(target.first_untiled(), Some(1));
+        }
+
+        // 42. DupeArticleFallbackSegmentAlignedTest
+        {
+            let mut target =
+                TestFile::build(b"release.r01", &[(1, 1300), (2, 1300), (3, 700)], b"orig");
+            target.finish_article(0, 0, 1000);
+            target.finish_article(2, 2000, 500);
+            target.decoded_file_size = 2500;
+
+            target.finish_article(1, 1000, 1000);
+            assert!(target.segment_aligned(1));
+            target.finish_article(1, 1040, 1000);
+            assert!(!target.segment_aligned(1));
+            target.finish_article(1, 960, 1000);
+            assert!(!target.segment_aligned(1));
+            target.finish_article(1, 1000, 960);
+            assert!(!target.segment_aligned(1));
+        }
+
+        // 43. DupeArticleFallbackSegmentAlignedUnknownNeighborsTest
+        {
+            let mut target =
+                TestFile::build(b"release.r01", &[(1, 1300), (2, 1300), (3, 700)], b"orig");
+            target.finish_article(1, 1040, 1000);
+            assert!(target.segment_aligned(1));
+            target.articles[1].segment_size = 0;
+            assert!(target.segment_aligned(1));
+
+            let mut target2 =
+                TestFile::build(b"release.r01", &[(1, 1300), (2, 1300), (3, 700)], b"orig");
+            target2.finish_article(0, 40, 1000);
+            assert!(!target2.segment_aligned(0));
+            target2.finish_article(0, 0, 1000);
+            assert!(target2.segment_aligned(0));
+
+            let mut target3 =
+                TestFile::build(b"release.r01", &[(1, 1300), (2, 1300), (3, 700)], b"orig");
+            target3.decoded_file_size = 2500;
+            target3.finish_article(2, 1960, 500);
+            assert!(!target3.segment_aligned(2));
+            target3.finish_article(2, 2000, 500);
+            assert!(target3.segment_aligned(2));
+        }
+
+        // 44. DupeArticleFallbackFirstUntiledArticleTest
+        {
+            let mut file =
+                TestFile::build(b"release.r01", &[(1, 1300), (2, 1300), (3, 700)], b"orig");
+            file.decoded_file_size = 2500;
+            file.finish_article(0, 0, 1000);
+            file.finish_article(1, 1000, 1000);
+            file.finish_article(2, 2000, 500);
+            assert_eq!(file.first_untiled(), None);
+
+            file.finish_article(1, 1040, 1000);
+            assert_eq!(file.articles[file.first_untiled().unwrap()].part_number, 2);
+
+            file.finish_article(0, 40, 1000);
+            file.finish_article(1, 1040, 1000);
+            file.finish_article(2, 2040, 500);
+            assert_eq!(file.articles[file.first_untiled().unwrap()].part_number, 1);
+
+            file.finish_article(0, 0, 1000);
+            file.finish_article(1, 1000, 1000);
+            file.finish_article(2, 2000, 460);
+            assert_eq!(file.articles[file.first_untiled().unwrap()].part_number, 3);
+
+            file.decoded_file_size = 0;
+            file.finish_article(0, 0, 1000);
+            file.finish_article(1, 0, 1000);
+            file.finish_article(2, 0, 500);
+            assert_eq!(file.first_untiled(), None);
+
+            let mut incomplete =
+                TestFile::build(b"release.r01", &[(1, 1300), (2, 1300), (3, 700)], b"orig");
+            incomplete.decoded_file_size = 2500;
+            incomplete.finish_article(0, 0, 1000);
+            incomplete.finish_article(2, 2000, 500);
+            assert_eq!(incomplete.first_untiled(), None);
+        }
+
+        // 45 & 46 & 47. MergeDecodedFileSizeTest, ObfuscatedSizeNotUntiledTest, HasDonorArticlesTest
+        {
+            let mut file = TestFile::build(b"release.r01", &[(1, 1300), (2, 700)], b"orig");
+            assert!(!file.merge_decoded_size(1500));
+            assert_eq!(file.decoded_file_size, 1500);
+            assert!(!file.merge_decoded_size(1500));
+            assert_eq!(file.decoded_file_size, 1500);
+            assert!(!file.merge_decoded_size(0));
+            assert_eq!(file.decoded_file_size, 1500);
+
+            let mut obf = TestFile::build(b"release.r01", &[(1, 1300), (2, 700)], b"orig");
+            assert!(!obf.merge_decoded_size(9731448));
+            assert!(obf.merge_decoded_size(10894771));
+            assert_eq!(obf.decoded_file_size, -1);
+            assert!(!obf.merge_decoded_size(9731448));
+            assert!(!obf.merge_decoded_size(7548362));
+            assert_eq!(obf.decoded_file_size, -1);
+
+            let mut vol =
+                TestFile::build(b"vol.part001.rar", &[(1, 1300), (2, 1300), (3, 700)], b"orig");
+            vol.merge_decoded_size(9731448);
+            vol.finish_article(0, 0, 1000);
+            vol.merge_decoded_size(10894771);
+            vol.finish_article(1, 1000, 1000);
+            vol.merge_decoded_size(7548362);
+            vol.finish_article(2, 2000, 500);
+            assert_eq!(vol.first_untiled(), None);
+            assert_eq!(vol.expected_end(2), -1);
+            assert!(!vol.has_donor_articles());
+            vol.articles[1].fallback_round = 1;
+            assert!(vol.has_donor_articles());
+        }
+
+        // 48 & 49. DupeArticleFallbackBorrowsFromOwnTwinWhileDeferringToParTest &
+        //          DupeArticleFallbackBorrowsOnlyFromOwnTwinAcrossTwoTwinPairsTest
+        {
+            use md5::{Digest, Md5};
+            let build_valid_par2_packet =
+                |set_id: &[u8; 16], pkt_type: &[u8; 16], body: &[u8]| -> Vec<u8> {
+                    let mut tail = Vec::with_capacity(32 + body.len());
+                    tail.extend_from_slice(set_id);
+                    tail.extend_from_slice(pkt_type);
+                    tail.extend_from_slice(body);
+                    let length = (32 + tail.len()) as u64;
+                    let hash = Md5::digest(&tail);
+                    let mut pkt = Vec::with_capacity(length as usize);
+                    pkt.extend_from_slice(b"PAR2\0PKT");
+                    pkt.extend_from_slice(&length.to_le_bytes());
+                    pkt.extend_from_slice(&hash);
+                    pkt.extend_from_slice(&tail);
+                    pkt
+                };
+            let build_valid_par2_set =
+                |specs: &[(&str, u64, u8)], block_size: u64| -> Vec<u8> {
+                    let set_id = [b'S'; 16];
+                    let mut main_body = Vec::new();
+                    main_body.extend_from_slice(&block_size.to_le_bytes());
+                    main_body.extend_from_slice(&(specs.len() as u32).to_le_bytes());
+                    let mut desc_packets = Vec::new();
+                    for (i, &(name, length, md5_fill)) in specs.iter().enumerate() {
+                        let file_id = [b'A' + (i as u8); 16];
+                        main_body.extend_from_slice(&file_id);
+                        let mut padded = name.as_bytes().to_vec();
+                        while !padded.len().is_multiple_of(4) {
+                            padded.push(0);
+                        }
+                        let mut desc_body = Vec::new();
+                        desc_body.extend_from_slice(&file_id);
+                        desc_body.extend_from_slice(&[md5_fill; 16]);
+                        desc_body.extend_from_slice(&[md5_fill; 16]);
+                        desc_body.extend_from_slice(&length.to_le_bytes());
+                        desc_body.extend_from_slice(&padded);
+                        desc_packets.extend(build_valid_par2_packet(
+                            &set_id,
+                            b"PAR 2.0\0FileDesc",
+                            &desc_body,
+                        ));
+                    }
+                    let mut out =
+                        build_valid_par2_packet(&set_id, b"PAR 2.0\0Main\0\0\0\0", &main_body);
+                    out.extend(desc_packets);
+                    out
+                };
+
+            let make_listed = |hash: u32, specs: &[(&str, u64, u8)]| -> crate::twin::Listed {
+                let par2 = build_valid_par2_set(specs, 1000);
+                let (sigs, complete) = crate::twin::par2_set(&par2);
+                assert!(complete);
+                let fp = crate::twin::fingerprint(&sigs);
+                assert!(!fp.is_empty());
+                crate::twin::Listed {
+                    sigs,
+                    complete,
+                    print: format!("{fp}#{hash:x}"),
+                }
+            };
+
+            // 48. BorrowsFromOwnTwinWhileDeferringToParTest
+            let primary_listed = make_listed(
+                1001,
+                &[
+                    ("vol1.rar", 1_000_000, b'1'),
+                    ("vol2.rar", 1_000_000, b'2'),
+                    ("vol3.rar", 1_000_000, b'3'),
+                ],
+            );
+            let near_twin_listed = make_listed(
+                1002,
+                &[
+                    ("vol1.rar", 1_000_000, b'1'),
+                    ("vol2-par2only.rar", 1_000_000, b'2'),
+                    ("vol3.rar", 1_000_000, b'9'),
+                ],
+            );
+            let alt_listed = make_listed(
+                1003,
+                &[
+                    ("vol1.rar", 1_000_000, b'1'),
+                    ("vol2.rar", 1_000_000, b'8'),
+                    ("vol3.rar", 1_000_000, b'7'),
+                ],
+            );
+
+            let near_kind = crate::twin::kind(&primary_listed, &near_twin_listed);
+            let alt_kind = crate::twin::kind(&primary_listed, &alt_listed);
+            assert!(is_twin_kind(
+                primary_listed.print.as_bytes(),
+                near_twin_listed.print.as_bytes(),
+                near_kind.as_bytes(),
+            ));
+            assert!(!is_twin_kind(
+                primary_listed.print.as_bytes(),
+                alt_listed.print.as_bytes(),
+                alt_kind.as_bytes(),
+            ));
+
+            let near_donor_files = vec![
+                TestFile::build(b"vol1.rar", &[(1, 500000), (2, 500000)], b"<a2-v1"),
+                TestFile::build(b"vol2.rar", &[(1, 500000), (2, 500000)], b"<a2-v2"),
+                TestFile::build(b"vol3.rar", &[(1, 500000), (2, 500000)], b"<a2-v3"),
+            ];
+            let alt_donor_files = vec![
+                TestFile::build(b"vol1.rar", &[(1, 500000), (2, 500000)], b"<alt-v1"),
+                TestFile::build(b"vol2.rar", &[(1, 500000), (2, 500000)], b"<alt-v2"),
+                TestFile::build(b"vol3.rar", &[(1, 500000), (2, 500000)], b"<alt-v3"),
+            ];
+
+            let match_by_content_bytes =
+                |own: &crate::twin::Listed, target_name: &str, donor: &crate::twin::Listed| -> Vec<u8> {
+                    match crate::twin::match_by_content(own, target_name, target_name, donor) {
+                        Some(s) if s.is_empty() => b"-".to_vec(),
+                        Some(s) => s.into_bytes(),
+                        None => Vec::new(),
+                    }
+                };
+
+            // vol1.rar is shared with nearTwin -> borrows from nearTwin
+            let vol1 = TestFile::build(b"vol1.rar", &[(1, 500000), (2, 500000)], b"a1-v1");
+            let bc1 = match_by_content_bytes(&primary_listed, "vol1.rar", &near_twin_listed);
+            let m1 =
+                match_test_donor(&vol1, &near_donor_files, b"vol1.rar", &bc1, true, true).unwrap();
+            assert_eq!(m1.filename, b"vol1.rar");
+
+            // vol2.rar has PAR2 name "vol2-par2only.rar" in nearTwin (not in nearTwin NZB) -> twinOnly refuses fallback
+            let vol2 = TestFile::build(b"vol2.rar", &[(1, 500000), (2, 500000)], b"a1-v2");
+            let bc2 = match_by_content_bytes(&primary_listed, "vol2.rar", &near_twin_listed);
+            assert_eq!(bc2, b"vol2-par2only.rar");
+            assert!(
+                match_test_donor(&vol2, &near_donor_files, b"vol2.rar", &bc2, true, true).is_none()
+            );
+
+            // vol3.rar differs in nearTwin ("-") and altDonor is not a twin (!twin_allowed) -> neither matches
+            let vol3 = TestFile::build(b"vol3.rar", &[(1, 500000), (2, 500000)], b"a1-v3");
+            let bc3_near = match_by_content_bytes(&primary_listed, "vol3.rar", &near_twin_listed);
+            assert_eq!(bc3_near, b"-");
+            assert!(
+                match_test_donor(&vol3, &near_donor_files, b"vol3.rar", &bc3_near, true, true)
+                    .is_none()
+            );
+            let bc3_alt = match_by_content_bytes(&primary_listed, "vol3.rar", &alt_listed);
+            assert!(
+                match_test_donor(&vol3, &alt_donor_files, b"vol3.rar", &bc3_alt, false, true)
+                    .is_none()
+            );
+
+            // 49. BorrowsOnlyFromOwnTwinAcrossTwoTwinPairsTest
+            let a1_listed = make_listed(
+                2001,
+                &[("vol1.rar", 1_000_000, b'a'), ("vol2.rar", 1_000_000, b'b')],
+            );
+            let a2_listed = make_listed(
+                2002,
+                &[("vol1.rar", 1_000_000, b'a'), ("vol2.rar", 1_000_000, b'b')],
+            );
+            let b1_listed = make_listed(
+                2003,
+                &[("vol1.rar", 1_000_000, b'k'), ("vol2.rar", 1_000_000, b'l')],
+            );
+            let b2_listed = make_listed(
+                2004,
+                &[("vol1.rar", 1_000_000, b'k'), ("vol2.rar", 1_000_000, b'l')],
+            );
+
+            // A1 sees only A2 as its twin (B1 and B2 are "alt" relative to A1)
+            assert!(is_twin_kind(
+                a1_listed.print.as_bytes(),
+                a2_listed.print.as_bytes(),
+                crate::twin::kind(&a1_listed, &a2_listed).as_bytes()
+            ));
+            assert!(!is_twin_kind(
+                a1_listed.print.as_bytes(),
+                b1_listed.print.as_bytes(),
+                crate::twin::kind(&a1_listed, &b1_listed).as_bytes()
+            ));
+            assert!(!is_twin_kind(
+                a1_listed.print.as_bytes(),
+                b2_listed.print.as_bytes(),
+                crate::twin::kind(&a1_listed, &b2_listed).as_bytes()
+            ));
+
+            // B1 sees only B2 as its twin (A1 and A2 are "alt" relative to B1)
+            assert!(is_twin_kind(
+                b1_listed.print.as_bytes(),
+                b2_listed.print.as_bytes(),
+                crate::twin::kind(&b1_listed, &b2_listed).as_bytes()
+            ));
+            assert!(!is_twin_kind(
+                b1_listed.print.as_bytes(),
+                a1_listed.print.as_bytes(),
+                crate::twin::kind(&b1_listed, &a1_listed).as_bytes()
+            ));
+            assert!(!is_twin_kind(
+                b1_listed.print.as_bytes(),
+                a2_listed.print.as_bytes(),
+                crate::twin::kind(&b1_listed, &a2_listed).as_bytes()
+            ));
+        }
     }
 }

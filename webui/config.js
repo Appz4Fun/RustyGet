@@ -80,12 +80,9 @@ var Options = (new function($)
 			RPC.next();
 		});
 
-		// build list of post-processing parameters
-		RPC.call('loadextensions', [false], function(data)
-		{
-			_this.postParamConfig = initPostParamConfig(data);
-			data.forEach(function(ext) { if (ext.Name) I18n.loadExtensionTranslations(ext.Name); });
-		});
+		// build list of post-processing parameters (extensions disabled in RustyGet)
+		_this.postParamConfig = initPostParamConfig([]);
+		RPC.next();
 	}
 
 	this.setOnPageRenderedCallback = function(callback) {
@@ -363,7 +360,7 @@ var Options = (new function($)
 	function serverTemplateLoaded(data)
 	{
 		Options.serverTemplateData = data;
-		Options.loadExtensions();
+		Options.complete();
 	}
 
 	function extensionsLoaded(data) 
@@ -1473,12 +1470,6 @@ var Config = (new function($)
 			{
 				$ConfigNav.append('<li class="divider"></li>');
 			}
-			if (k == 2) // Extensions section
-			{
-				$ConfigNav.append('<li class="divider"></li>');
-				$ConfigNav.append('<li><a class="text-uppercase" href="#' + ExtensionManager.id + '" data-i18n="config_title_extension_manager"></a></li>');
-				haveExtensions = true;
-			}
 			var conf = config[k];
 			var added = false;
 			for (var i=0; i < conf.sections.length; i++)
@@ -1513,13 +1504,6 @@ var Config = (new function($)
 				var html = $('<li></li>').append($('<a href="#' + conf.id + '"></a>').text(categoryName));
 				$ConfigNav.append(html);
 			}
-		}
-
-		// Show extensions manager even if there are no extensions
-		if (!haveExtensions)
-		{
-			$ConfigNav.append('<li class="divider"></li>');
-			$ConfigNav.append('<li><a class="text-uppercase" href="#' + ExtensionManager.id + '" data-i18n="config_title_extension_manager"></a></li>');
 		}
 
 		$ConfigNav.append('<li class="divider"></li>');
@@ -3368,7 +3352,7 @@ var ConfigBackupRestore = (new function($)
 		var dt = new Date();
 		var datestr = dt.getFullYear() + pad(dt.getMonth() + 1) + pad(dt.getDate()) + '-' + pad(dt.getHours()) + pad(dt.getMinutes()) + pad(dt.getSeconds());
 
-		var filename = 'nzbget-' + datestr + '.conf';
+		var filename = 'rustyget-' + datestr + '.conf';
 
 		if (!Util.saveToLocalFile(settings, "text/plain;charset=utf-8", filename))
 		{
@@ -4161,7 +4145,8 @@ var ExtensionManager = (new function($)
 
 	this.setExtensions = function(exts)
 	{
-		var value = Config.findOptionByName(extensionsId).value;
+		var extOpt = Config.findOptionByName(extensionsId);
+		var value = extOpt ? extOpt.value : '';
 		var activeExtensions = splitString(value);
 		installedExtensions = exts.map(function(ext) 
 		{
@@ -4999,7 +4984,8 @@ var ExtensionManager = (new function($)
 
 	function sortExtensions()
 	{
-		var order = Config.getOptionValue(Config.findOptionByName(scriptOrderId));
+		var orderOpt = Config.findOptionByName(scriptOrderId);
+		var order = orderOpt ? Config.getOptionValue(orderOpt) : '';
 		if (order)
 		{
 			sortExtensionsByOrder(installedExtensions, splitString(order));

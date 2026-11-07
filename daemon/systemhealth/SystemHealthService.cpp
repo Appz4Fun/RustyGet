@@ -255,44 +255,6 @@ HealthReport Service::Diagnose() const
 		report.sections.push_back(std::move(sec));
 	}
 
-	// 5. ExtensionScripts
-	{
-		SectionReport sec;
-		sec.name = "ExtensionScripts";
-		std::string_view extensions = m_options.GetExtensions();
-		std::string_view shellOverride = m_options.GetShellOverride();
-
-		std::vector<ExtensionManager::ExtensionPtr> extHolders;
-		std::vector<const char*> extNamePtrs;
-		std::vector<size_t> extNameLens;
-		std::vector<const char*> extEntryPtrs;
-		std::vector<size_t> extEntryLens;
-		if (g_ExtensionManager)
-		{
-			g_ExtensionManager->ForEach([&](const ExtensionManager::ExtensionPtr ext)
-			{
-				extHolders.push_back(ext);
-				std::string_view name = ext->GetName();
-				std::string_view entry = ext->GetEntry();
-				extNamePtrs.push_back(name.data());
-				extNameLens.push_back(name.size());
-				extEntryPtrs.push_back(entry.data());
-				extEntryLens.push_back(entry.size());
-			});
-		}
-
-		nzbget_rs_health_validate_extension_scripts_section(
-			extensions.data(), extensions.size(),
-			extNamePtrs.data(), extNameLens.data(),
-			extEntryPtrs.data(), extEntryLens.data(),
-			extNamePtrs.size(),
-			shellOverride.data(), shellOverride.size(),
-			m_options.GetEventInterval(),
-			&sec.options,
-			&AppendOptionCallback);
-		report.sections.push_back(std::move(sec));
-	}
-
 	// 6. Connection
 	{
 		SectionReport sec;
@@ -736,7 +698,7 @@ Xml::XmlNodePtr ToXml(const Status& status)
 	std::string_view severity = SeverityToStr(status.GetSeverity());
 	const std::string& message = status.GetMessage();
 
-	xmlNodePtr node = Xml::CreateStructNode();
+	Xml::XmlNodePtr node = Xml::CreateStructNode();
 	Xml::AddNewNode(node, "Severity", "string", severity.data());
 	Xml::AddNewNode(node, "Message", "string", message.c_str());
 
@@ -745,7 +707,7 @@ Xml::XmlNodePtr ToXml(const Status& status)
 
 Xml::XmlNodePtr ToXml(const OptionStatus& status)
 {
-	xmlNodePtr structNode = Xml::CreateStructNode();
+	Xml::XmlNodePtr structNode = Xml::CreateStructNode();
 
 	const auto severity = SeverityToStr(status.status.GetSeverity());
 	Xml::AddNewNode(structNode, "Name", "string", status.name.c_str());
@@ -757,11 +719,11 @@ Xml::XmlNodePtr ToXml(const OptionStatus& status)
 
 Xml::XmlNodePtr ToXml(const SubsectionReport& report)
 {
-	xmlNodePtr structNode = Xml::CreateStructNode();
+	Xml::XmlNodePtr structNode = Xml::CreateStructNode();
 
 	Xml::AddNewNode(structNode, "Name", "string", report.name.c_str());
 
-	std::vector<xmlNodePtr> optionsNodes;
+	std::vector<Xml::XmlNodePtr> optionsNodes;
 	for (const auto& option : report.options)
 	{
 		optionsNodes.push_back(ToXml(option));
@@ -773,14 +735,14 @@ Xml::XmlNodePtr ToXml(const SubsectionReport& report)
 
 Xml::XmlNodePtr ToXml(const SectionReport& report)
 {
-	xmlNodePtr structNode = Xml::CreateStructNode();
+	Xml::XmlNodePtr structNode = Xml::CreateStructNode();
 
 	Xml::AddNewNode(structNode, "Name", "string", report.name.c_str());
 
-	std::vector<xmlNodePtr> issueNodes;
+	std::vector<Xml::XmlNodePtr> issueNodes;
 	for (const auto& issue : report.issues)
 	{
-		xmlNodePtr sNode = Xml::CreateStructNode();
+		Xml::XmlNodePtr sNode = Xml::CreateStructNode();
 		const auto severity = SeverityToStr(issue.GetSeverity());
 		Xml::AddNewNode(sNode, "Severity", "string", severity.data());
 		Xml::AddNewNode(sNode, "Message", "string", issue.GetMessage().c_str());
@@ -788,14 +750,14 @@ Xml::XmlNodePtr ToXml(const SectionReport& report)
 	}
 	Xml::AddArrayNode(structNode, "Issues", issueNodes);
 
-	std::vector<xmlNodePtr> optionNodes;
+	std::vector<Xml::XmlNodePtr> optionNodes;
 	for (const auto& option : report.options)
 	{
 		optionNodes.push_back(ToXml(option));
 	}
 	Xml::AddArrayNode(structNode, "Options", optionNodes);
 
-	std::vector<xmlNodePtr> subNodes;
+	std::vector<Xml::XmlNodePtr> subNodes;
 	for (const auto& sub : report.subsections)
 	{
 		subNodes.push_back(ToXml(sub));
@@ -807,7 +769,7 @@ Xml::XmlNodePtr ToXml(const SectionReport& report)
 
 Xml::XmlNodePtr ToXml(const Alert& alert)
 {
-	xmlNodePtr structNode = Xml::CreateStructNode();
+	Xml::XmlNodePtr structNode = Xml::CreateStructNode();
 
 	Xml::AddNewNode(structNode, "Source", "string", alert.GetSource().c_str());
 	Xml::AddNewNode(structNode, "Category", "string", alert.GetCategory().c_str());
@@ -823,18 +785,16 @@ Xml::XmlNodePtr ToXml(const Alert& alert)
 
 std::string ToXmlStr(const HealthReport& report)
 {
-	xmlDocPtr doc = xmlNewDoc(BAD_CAST "1.0");
-	xmlNodePtr structNode = Xml::CreateStructNode();
-	xmlDocSetRootElement(doc, structNode->parent);
+	Xml::XmlNodePtr structNode = Xml::CreateStructNode();
 
-	std::vector<xmlNodePtr> alertNodes;
+	std::vector<Xml::XmlNodePtr> alertNodes;
 	for (const auto& alert : report.alerts)
 	{
 		alertNodes.push_back(ToXml(alert));
 	}
 	Xml::AddArrayNode(structNode, "Alerts", alertNodes);
 
-	std::vector<xmlNodePtr> sectionNodes;
+	std::vector<Xml::XmlNodePtr> sectionNodes;
 	for (const auto& section : report.sections)
 	{
 		sectionNodes.push_back(ToXml(section));
@@ -842,8 +802,7 @@ std::string ToXmlStr(const HealthReport& report)
 	Xml::AddArrayNode(structNode, "Sections", sectionNodes);
 
 	std::string result = Xml::Serialize(structNode->parent);
-
-	xmlFreeDoc(doc);
+	Xml::FreeRootNode(structNode->parent);
 
 	return result;
 }

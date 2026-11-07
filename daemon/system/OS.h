@@ -1,5 +1,5 @@
 /*
- *  This file is part of nzbget. See <https://nzbget.com>.
+ *  This file is part of RustyGet.
  *
  *  Copyright (C) 2024-2026 Denis <denis@nzbget.com>
  *
@@ -20,19 +20,54 @@
 #ifndef OS_H
 #define OS_H
 
+#include <cstring>
 #include <string>
+#include <sys/utsname.h>
+#include "nzbget_rs.h"
 
 namespace System
 {
 	class OS final
 	{
 	public:
-		OS();
-		const std::string& GetName() const;
-		const std::string& GetVersion() const;
+		OS()
+		{
+			Init();
+		}
+
+		const std::string& GetName() const
+		{
+			return m_name;
+		}
+
+		const std::string& GetVersion() const
+		{
+			return m_version;
+		}
 
 	private:
-		void Init();
+		void Init()
+		{
+			struct utsname uts{};
+			const char* sysname = "";
+			const char* release = "";
+			if (uname(&uts) == 0)
+			{
+				sysname = uts.sysname;
+				release = uts.release;
+			}
+			NzbgetRsBuf nameBuf{};
+			NzbgetRsBuf verBuf{};
+			nzbget_rs_os_detect_info(
+				sysname, strlen(sysname),
+				release, strlen(release),
+				&nameBuf, &verBuf);
+			m_name.assign(nameBuf.data ? nameBuf.data : "", nameBuf.len);
+			m_version.assign(verBuf.data ? verBuf.data : "", verBuf.len);
+			nzbget_rs_free(nameBuf);
+			nzbget_rs_free(verBuf);
+		}
+
 		std::string m_name;
 		std::string m_version;
 	};

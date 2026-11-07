@@ -314,31 +314,6 @@ bool DupeArticleFallback::TryFallback(DownloadQueue* downloadQueue, FileInfo* fi
 	return true;
 }
 
-std::vector<CString> DupeArticleFallback::OrderSources(const std::vector<CString>& donorCandidates,
-	bool cutover, const char* primaryMessageId)
-{
-	std::vector<CString> sources;
-	bool appendPrimary = cutover && !donorCandidates.empty();
-	sources.reserve(donorCandidates.size() + (appendPrimary ? 1 : 0));
-	for (const CString& candidate : donorCandidates)
-	{
-		sources.emplace_back((const char*)candidate);
-	}
-	if (appendPrimary)
-	{
-		// cut over: lead with the top donor, then the remaining donors, then the
-		// primary as the final fallback. The file cut over precisely because the
-		// primary is missing many articles, so on a lead-donor miss the other
-		// duplicates are better bets than paying a (likely failing) full server
-		// sweep on the primary; the primary still backstops parts every duplicate
-		// misses. NOTE: proactive fetches must never count as "recovered"
-		// regardless of round (see QueueCoordinator::ArticleCompleted) - with the
-		// primary last, no donor round proves the primary was missing the part
-		sources.emplace_back(primaryMessageId);
-	}
-	return sources;
-}
-
 void DupeArticleFallback::RotateToLead(RawNzbList& donors, int leadNzbId)
 {
 	std::vector<int32_t> donorIds;
@@ -421,8 +396,18 @@ void DupeArticleFallback::FinishPin(FileInfo* fileInfo, ArticleInfo* articleInfo
 	articleInfo->SetDupeDonorCount(donorCount);
 	fileInfo->SetDupeLeadDonorId(newFileLead);
 
-	*articleInfo->GetDupeSources() = OrderSources(candidates, cutover, primaryMessageId);
-	// OrderSources keeps the candidates' order (the primary goes last)
+	std::vector<CString>& sources = *articleInfo->GetDupeSources();
+	sources.clear();
+	bool appendPrimary = cutover && !candidates.empty();
+	sources.reserve(candidates.size() + (appendPrimary ? 1 : 0));
+	for (const CString& candidate : candidates)
+	{
+		sources.emplace_back((const char*)candidate);
+	}
+	if (appendPrimary)
+	{
+		sources.emplace_back(primaryMessageId);
+	}
 	*articleInfo->GetDupeSourceDonors() = contributors;
 }
 
@@ -714,30 +699,6 @@ void DupeArticleFallback::AppendDonorCandidate(std::vector<CString>& candidates,
 	}
 }
 
-/*
- * Pure candidate builder over already-live donors, used by unit tests. The
-	 * production path (PinSources) processes donors one at a time for
-	 * cache-safety; both share AppendDonorCandidate so the logic stays in sync.
-	 *
- * The candidate list must not depend on the current state of the article:
- * it is frozen on first fallback, so later donor insertion, removal, or lead
- * rotation cannot shift the round-to-source mapping.
- */
-std::vector<CString> DupeArticleFallback::BuildCandidateMessageIds(
-	const std::vector<NzbInfo*>& parsedDonors, FileInfo* targetFile, int partNumber)
-{
-	std::vector<CString> candidates;
-	std::vector<int> contributors;
-
-	for (NzbInfo* parsedDonor : parsedDonors)
-	{
-		AppendDonorCandidate(candidates, contributors, parsedDonor->GetId(),
-			parsedDonor, targetFile, partNumber);
-	}
-
-	return candidates;
-}
-
 std::unique_ptr<NzbInfo> DupeArticleFallback::ParseDonorNzb(const char* queuedFilename)
 {
 	if (Util::EmptyStr(queuedFilename) || !FileSystem::FileExists(queuedFilename))
@@ -818,18 +779,16 @@ FileInfo* DupeArticleFallback::MatchDonorFile(FileInfo* targetFile, NzbInfo* don
 		return nullptr;
 	}
 
-	// by content first, when the par2 file lists of both postings are known
-	// (twin.rs): a donor file with the target's MD5 and length is the same bytes
-	// under any name. "-": the donor's complete list has no file with these bytes;
-	// "": not known (incomplete or missing lists, several candidates)
 	NzbInfo* own = targetFile->GetNzbInfo();
 	std::string ownIdentity = own ? TwinCheck::Identity(own) : "";
+	bool twinAllowed = false;
 	if (twinOnly)
 	{
 		std::string kind = (donorNzbId && !ownIdentity.empty() && !Util::EmptyStr(donorPrint)) ?
 			TwinCheck::Kind(own->GetId(), ownIdentity.c_str(), donorNzbId, donorPrint) : "";
-		if (!donorNzbId || !nzbget_rs_dupe_fallback_is_twin_kind(
-			ownIdentity.c_str(), donorPrint, kind.c_str()))
+		twinAllowed = donorNzbId && nzbget_rs_dupe_fallback_is_twin_kind(
+			ownIdentity.c_str(), donorPrint, kind.c_str()) != 0;
+		if (!twinAllowed)
 		{
 			return nullptr;
 		}
@@ -837,109 +796,60 @@ FileInfo* DupeArticleFallback::MatchDonorFile(FileInfo* targetFile, NzbInfo* don
 	std::string byContent = (donorNzbId && !ownIdentity.empty() && !Util::EmptyStr(donorPrint)) ?
 		TwinCheck::MatchByContent(own->GetId(), ownIdentity.c_str(), targetFile->GetFilename(),
 			targetNzbFilename, donorNzbId, donorPrint) : "";
-	if (byContent == "-" || (twinOnly && byContent.empty()))
+
+	ArticleList* targetArticles = targetFile->GetArticles();
+	std::vector<int32_t> targetParts(targetArticles->size());
+	std::vector<int32_t> targetSizes(targetArticles->size());
+	for (size_t i = 0; i < targetArticles->size(); i++)
 	{
-		return nullptr;
+		targetParts[i] = (*targetArticles)[i]->GetPartNumber();
+		targetSizes[i] = (*targetArticles)[i]->GetSize();
 	}
-	if (!byContent.empty())
+	NzbgetRsDonorFileSpec targetSpec{};
+	targetSpec.filename = targetFile->GetFilename();
+	targetSpec.subject = targetFile->GetSubject();
+	targetSpec.total_articles = targetFile->GetTotalArticles();
+	targetSpec.size = targetFile->GetSize();
+	targetSpec.is_par_file = 0;
+	targetSpec.parts = targetParts.empty() ? nullptr : targetParts.data();
+	targetSpec.sizes = targetSizes.empty() ? nullptr : targetSizes.data();
+	targetSpec.article_count = targetParts.size();
+
+	FileList* fileList = donorNzb->GetFileList();
+	size_t n = fileList->size();
+	std::vector<std::vector<int32_t>> donorPartsBuf(n);
+	std::vector<std::vector<int32_t>> donorSizesBuf(n);
+	std::vector<NzbgetRsDonorFileSpec> donorSpecs(n);
+	for (size_t i = 0; i < n; i++)
 	{
-		// the donor's file of that name (exact case first): it holds our bytes, so
-		// if its articles don't fit ours, no other file of the donor is the one.
-		// A name the donor's nzb doesn't have (it names the file otherwise), or
-		// has twice, leaves it to the matching below
-		std::vector<FileInfo*> exact;
-		std::vector<FileInfo*> folded;
-		for (FileInfo* donorFile : donorNzb->GetFileList())
+		FileInfo* df = (*fileList)[i].get();
+		ArticleList* da = df->GetArticles();
+		donorPartsBuf[i].resize(da->size());
+		donorSizesBuf[i].resize(da->size());
+		for (size_t j = 0; j < da->size(); j++)
 		{
-			if (IsParFile(donorFile))
-			{
-				continue;
-			}
-			int nameMatchKind = nzbget_rs_dupe_fallback_classify_content_name_match(
-				donorFile->GetFilename(), byContent.c_str());
-			if (nameMatchKind == 1)
-			{
-				exact.push_back(donorFile);
-			}
-			else if (nameMatchKind == 2)
-			{
-				folded.push_back(donorFile);
-			}
+			donorPartsBuf[i][j] = (*da)[j]->GetPartNumber();
+			donorSizesBuf[i][j] = (*da)[j]->GetSize();
 		}
-		int matchKind = nzbget_rs_dupe_fallback_select_named_content_match(
-			exact.size(), folded.size());
-		FileInfo* named = matchKind == 1 ? exact[0] : matchKind == 2 ? folded[0] : nullptr;
-		if (named || twinOnly)
-		{
-			return named && StructureMatches(targetFile, named) ? named : nullptr;
-		}
+		donorSpecs[i].filename = df->GetFilename();
+		donorSpecs[i].subject = df->GetSubject();
+		donorSpecs[i].total_articles = df->GetTotalArticles();
+		donorSpecs[i].size = df->GetSize();
+		donorSpecs[i].is_par_file = IsParFile(df) ? 1 : 0;
+		donorSpecs[i].parts = donorPartsBuf[i].empty() ? nullptr : donorPartsBuf[i].data();
+		donorSpecs[i].sizes = donorSizesBuf[i].empty() ? nullptr : donorSizesBuf[i].data();
+		donorSpecs[i].article_count = donorPartsBuf[i].size();
 	}
 
-	std::vector<FileInfo*> structuralMatches;
-	FileInfo* filenameMatch = nullptr;
-	bool filenameAmbiguous = false;
-
-	for (FileInfo* donorFile : donorNzb->GetFileList())
-	{
-		if (IsParFile(donorFile) || !StructureMatches(targetFile, donorFile))
-		{
-			continue;
-		}
-
-		if (nzbget_rs_dupe_fallback_is_donor_filename_match(
-			targetFile->GetFilename(),
-			targetNzbFilename,
-			donorFile->GetFilename()) != 0)
-		{
-			if (filenameMatch)
-			{
-				filenameAmbiguous = true;
-			}
-			else
-			{
-				filenameMatch = donorFile;
-			}
-			continue;
-		}
-
-		structuralMatches.push_back(donorFile);
-	}
-
-	// An exact filename is preferred only when it is unique.  Choosing the
-	// first exact match is nondeterministic for multi-file duplicate NZBs.
-	int structOrNameAction = nzbget_rs_dupe_fallback_resolve_structural_or_filename_match(
-		filenameAmbiguous ? 1 : 0,
-		filenameMatch != nullptr ? 1 : 0,
-		structuralMatches.size());
-	if (structOrNameAction == -1)
-	{
-		return nullptr;
-	}
-	if (structOrNameAction == 1)
-	{
-		return filenameMatch;
-	}
-	if (structOrNameAction == 2)
-	{
-		return structuralMatches[0];
-	}
-
-	// Equal-size volumes of an obfuscated repost all match structurally;
-	// the identical member is the only one whose article sizes step exactly
-	// like the target's.
-	FileInfo* stepMatch = nullptr;
-	for (FileInfo* donorFile : structuralMatches)
-	{
-		if (ArticleSizeStepsMatch(targetFile, donorFile))
-		{
-			if (stepMatch)
-			{
-				return nullptr;
-			}
-			stepMatch = donorFile;
-		}
-	}
-	return stepMatch;
+	ptrdiff_t idx = nzbget_rs_dupe_fallback_match_donor_file(
+		&targetSpec,
+		targetNzbFilename,
+		byContent.c_str(),
+		twinAllowed ? 1 : 0,
+		twinOnly ? 1 : 0,
+		donorSpecs.empty() ? nullptr : donorSpecs.data(),
+		donorSpecs.size());
+	return (idx >= 0 && (size_t)idx < n) ? (*fileList)[(size_t)idx].get() : nullptr;
 }
 
 uint64 DupeArticleFallback::ArticleSizeStepsHash(FileInfo* fileInfo)
@@ -958,68 +868,6 @@ uint64 DupeArticleFallback::ArticleSizeStepsHash(FileInfo* fileInfo)
 	return nzbget_rs_dupe_fallback_steps_hash(sizes.data(), sizes.size());
 }
 
-bool DupeArticleFallback::ArticleSizeStepsMatch(FileInfo* targetFile, FileInfo* donorFile)
-{
-	// An NZB lists the encoded size of each article including its headers.
-	// Two postings of the same bytes with the same segmentation differ there
-	// only by a per-file constant (their subject lines differ), so the steps
-	// between consecutive article sizes are equal. Encoded sizes vary with
-	// the content (yEnc escaping), which makes the step sequence a strong
-	// identity fingerprint once a file has enough articles.
-	ArticleList* targetArticles = targetFile->GetArticles();
-	ArticleList* donorArticles = donorFile->GetArticles();
-	if ((int)targetArticles->size() < MinStepFingerprintArticles ||
-		targetArticles->size() != donorArticles->size())
-	{
-		return false;
-	}
-
-	std::vector<int> targetSizes(targetArticles->size());
-	std::vector<int> donorSizes(donorArticles->size());
-	for (size_t i = 0; i < targetArticles->size(); i++)
-	{
-		targetSizes[i] = (*targetArticles)[i]->GetSize();
-		donorSizes[i] = (*donorArticles)[i]->GetSize();
-	}
-	return nzbget_rs_dupe_fallback_steps_match(
-		targetSizes.data(), targetSizes.size(),
-		donorSizes.data(), donorSizes.size()) != 0;
-}
-
-
-bool DupeArticleFallback::StructureMatches(FileInfo* targetFile, FileInfo* donorFile)
-{
-	ArticleList* targetArticles = targetFile->GetArticles();
-	ArticleList* donorArticles = donorFile->GetArticles();
-
-	if (targetArticles->empty())
-	{
-		return false;
-	}
-
-	std::vector<int> targetParts(targetArticles->size());
-	std::vector<int> targetSizes(targetArticles->size());
-	for (size_t i = 0; i < targetArticles->size(); i++)
-	{
-		targetParts[i] = (*targetArticles)[i]->GetPartNumber();
-		targetSizes[i] = (*targetArticles)[i]->GetSize();
-	}
-	std::vector<int> donorParts(donorArticles->size());
-	std::vector<int> donorSizes(donorArticles->size());
-	for (size_t i = 0; i < donorArticles->size(); i++)
-	{
-		donorParts[i] = (*donorArticles)[i]->GetPartNumber();
-		donorSizes[i] = (*donorArticles)[i]->GetSize();
-	}
-	return nzbget_rs_dupe_fallback_structure_matches(
-		targetFile->GetSubject(), targetFile->GetTotalArticles(), targetFile->GetSize(),
-		targetParts.data(), targetSizes.data(), targetParts.size(),
-		donorFile->GetSubject(), donorFile->GetTotalArticles(), donorFile->GetSize(),
-		donorParts.empty() ? nullptr : donorParts.data(),
-		donorSizes.empty() ? nullptr : donorSizes.data(),
-		donorParts.size()) != 0;
-}
-
 const char* DupeArticleFallback::FindDonorMessageId(FileInfo* donorFile, int partNumber)
 {
 	for (ArticleInfo* article : donorFile->GetArticles())
@@ -1031,11 +879,6 @@ const char* DupeArticleFallback::FindDonorMessageId(FileInfo* donorFile, int par
 	}
 
 	return nullptr;
-}
-
-bool DupeArticleFallback::SizesMatch(int64 size1, int64 size2, int div)
-{
-	return nzbget_rs_dupe_fallback_sizes_match(size1, size2, div) != 0;
 }
 
 static int FindArticleIndex(ArticleList* articles, ArticleInfo* articleInfo)
@@ -1150,23 +993,6 @@ bool DupeArticleFallback::MergeDecodedFileSize(FileInfo* fileInfo, int64 article
 	return conflict;
 }
 
-std::vector<DupeArticleFallback::Par2Desc> DupeArticleFallback::ListPar2Files(const char* dir)
-{
-	std::vector<Par2Desc> list;
-	nzbget_rs_dupe_fallback_list_par2_files(
-		dir, &list,
-		[](void* ctx, const char* name, size_t nameLen, uint64_t length, uint64_t blockSize)
-		{
-			auto* out = static_cast<std::vector<Par2Desc>*>(ctx);
-			Par2Desc desc;
-			desc.name.assign(name, nameLen);
-			desc.length = length;
-			desc.blockSize = blockSize;
-			out->push_back(std::move(desc));
-		});
-	return list;
-}
-
 FileInfo::EFirstContent DupeArticleFallback::FirstContent(FileInfo* fileInfo)
 {
 	if (fileInfo->GetFirstContent() != FileInfo::fcUnknown)
@@ -1197,9 +1023,4 @@ FileInfo::EFirstContent DupeArticleFallback::FirstContent(FileInfo* fileInfo)
 	}
 	fileInfo->SetFirstContent(headKind == 1 ? FileInfo::fcPar2 : FileInfo::fcOther);
 	return fileInfo->GetFirstContent();
-}
-
-bool DupeArticleFallback::HasExtension(const char* filename)
-{
-	return nzbget_rs_dupe_fallback_has_extension(filename) != 0;
 }

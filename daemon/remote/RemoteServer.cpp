@@ -303,7 +303,7 @@ void RequestProcessor::Execute()
 	{
 		int warnPort = nzbget_rs_ntw_remote_server_select_port(
 			m_tls ? 1 : 0, g_Options->GetSecurePort(), g_Options->GetControlPort());
-		warn("Non-nzbget request received on port %i from %s", warnPort, m_connection->GetRemoteAddr());
+		warn("Non-RustyGet request received on port %i from %s", warnPort, m_connection->GetRemoteAddr());
 	}
 }
 

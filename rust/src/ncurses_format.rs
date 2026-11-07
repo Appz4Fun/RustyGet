@@ -1220,6 +1220,167 @@ pub fn remote_client_is_empty_edit_target(id_count: usize, name_count: usize) ->
     id_count == 0 && name_count == 0
 }
 
+// ---- Pure-Rust POSIX Terminal / ANSI TUI Backend (replacing C ncurses) ----
+
+struct TermState {
+    saved_termios: Option<libc::termios>,
+    frame_buf: Vec<u8>,
+}
+
+static TERM_STATE: std::sync::Mutex<TermState> = std::sync::Mutex::new(TermState {
+    saved_termios: None,
+    frame_buf: Vec::new(),
+});
+
+/// Initializes the terminal for raw/non-blocking TUI mode and enters alternate screen.
+/// Returns `1` if ANSI colors are supported, `0` if monochrome, or `-1` on error.
+pub fn term_init() -> i32 {
+    let mut guard = TERM_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    unsafe {
+        if libc::isatty(libc::STDIN_FILENO) != 0 {
+            let mut orig: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(libc::STDIN_FILENO, &mut orig) == 0 {
+                let mut raw = orig;
+                raw.c_lflag &= !(libc::ICANON | libc::ECHO);
+                raw.c_cc[libc::VMIN] = 0;
+                raw.c_cc[libc::VTIME] = 0;
+                let _ = libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw);
+                guard.saved_termios = Some(orig);
+            }
+        }
+        let init_seq = b"\x1b[?1049h\x1b[?25l\x1b[2J\x1b[H";
+        let _ = libc::write(
+            libc::STDOUT_FILENO,
+            init_seq.as_ptr().cast(),
+            init_seq.len(),
+        );
+    }
+    guard.frame_buf.clear();
+    let term_env = std::env::var("TERM").unwrap_or_default();
+    if term_env.is_empty() || term_env == "dumb" {
+        0
+    } else {
+        1
+    }
+}
+
+/// Restores terminal state and exits alternate screen.
+pub fn term_shutdown() {
+    let mut guard = TERM_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    unsafe {
+        let exit_seq = b"\x1b[0m\x1b[?25h\x1b[?1049l";
+        let _ = libc::write(
+            libc::STDOUT_FILENO,
+            exit_seq.as_ptr().cast(),
+            exit_seq.len(),
+        );
+        if let Some(orig) = guard.saved_termios.take() {
+            let _ = libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &orig);
+        }
+    }
+    guard.frame_buf.clear();
+}
+
+/// Queries terminal `(rows, cols)` via `TIOCGWINSZ`, defaulting to `(24, 80)`.
+pub fn term_get_size() -> (i32, i32) {
+    unsafe {
+        let mut ws: libc::winsize = std::mem::zeroed();
+        if libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) == 0
+            && ws.ws_row > 0
+            && ws.ws_col > 0
+        {
+            return (ws.ws_row as i32, ws.ws_col as i32);
+        }
+    }
+    (24, 80)
+}
+
+/// Appends a screen clear sequence to the current frame buffer.
+pub fn term_clear() {
+    let mut guard = TERM_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    guard.frame_buf.extend_from_slice(b"\x1b[2J\x1b[H");
+}
+
+fn ansi_color_pair_escape(color_pair: i32) -> &'static [u8] {
+    match color_pair {
+        1 | 5 => b"\x1b[37;40m", // WHITE on BLACK
+        2 | 6 => b"\x1b[32;40m", // GREEN on BLACK
+        3 => b"\x1b[35;40m",     // MAGENTA on BLACK
+        4 => b"\x1b[31;40m",     // RED on BLACK
+        7 => b"\x1b[34;47m",     // BLUE on WHITE (status)
+        8 | 9 => b"\x1b[37;44m", // WHITE on BLUE (keybar / infoline)
+        10 => b"\x1b[30;46m",    // BLACK on CYAN (highlight)
+        11 => b"\x1b[30;43m",    // BLACK on YELLOW (cursor)
+        12 => b"\x1b[37;41m",    // WHITE on RED (hint)
+        _ => b"\x1b[0m",
+    }
+}
+
+/// Appends positioned, colored text to the frame buffer.
+pub fn term_plot_text(text: &[u8], row: i32, col: i32, use_color: bool, color_pair: i32, blink: bool) {
+    let mut guard = TERM_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let r = (row.max(0) + 1) as u32;
+    let c = (col.max(0) + 1) as u32;
+    guard.frame_buf.extend_from_slice(format!("\x1b[{r};{c}H").as_bytes());
+    if use_color {
+        guard.frame_buf.extend_from_slice(ansi_color_pair_escape(color_pair));
+        if blink {
+            guard.frame_buf.extend_from_slice(b"\x1b[5m");
+        }
+    }
+    guard.frame_buf.extend_from_slice(text);
+    if use_color {
+        guard.frame_buf.extend_from_slice(b"\x1b[0m");
+    }
+}
+
+/// Positions the cursor and flushes the accumulated frame buffer to stdout.
+pub fn term_refresh(row: i32, col: i32) {
+    let mut guard = TERM_STATE.lock().unwrap_or_else(|e| e.into_inner());
+    let r = (row.max(0) + 1) as u32;
+    let c = (col.max(0) + 1) as u32;
+    guard.frame_buf.extend_from_slice(format!("\x1b[{r};{c}H").as_bytes());
+    if !guard.frame_buf.is_empty() {
+        unsafe {
+            let _ = libc::write(
+                libc::STDOUT_FILENO,
+                guard.frame_buf.as_ptr().cast(),
+                guard.frame_buf.len(),
+            );
+        }
+        guard.frame_buf.clear();
+    }
+}
+
+/// Reads a single key or ANSI escape sequence from non-blocking stdin.
+/// Returns `-1` when no key is available.
+pub fn term_read_key() -> i32 {
+    let mut b = [0u8; 8];
+    let n = unsafe { libc::read(libc::STDIN_FILENO, b.as_mut_ptr().cast(), b.len()) };
+    if n <= 0 {
+        return -1;
+    }
+    let slice = &b[..n as usize];
+    if slice[0] == 0x7f || slice[0] == 0x08 {
+        return 263; // KEY_BACKSPACE
+    }
+    if slice[0] == 0x1b {
+        if slice.len() == 1 {
+            return 27;
+        }
+        return match &slice[1..] {
+            b"[B" | b"OB" => 258,                  // KEY_DOWN
+            b"[A" | b"OA" => 259,                  // KEY_UP
+            b"[H" | b"OH" | b"[1~" | b"[7~" => 262, // KEY_HOME
+            b"[F" | b"OF" | b"[4~" | b"[8~" => 360, // KEY_END
+            b"[5~" => 339,                         // KEY_PPAGE
+            b"[6~" => 338,                         // KEY_NPAGE
+            _ => 27,
+        };
+    }
+    slice[0] as i32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

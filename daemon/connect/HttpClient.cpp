@@ -1,22 +1,11 @@
 /*
- *  This file is part of nzbget. See <https://nzbget.com>.
- *
- *  Copyright (C) 2024-2025 Denis <denis@nzbget.com>
+ *  This file is part of RustyGet.
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
  *  the Free Software Foundation; either version 2 of the License, or
  *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
-
 
 #include "nzbget.h"
 
@@ -24,140 +13,22 @@
 #include "Util.h"
 #include "nzbget_rs.h"
 
+#include <sstream>
+
 namespace Network
 {
-	namespace asio = boost::asio;
-	using tcp = boost::asio::ip::tcp;
-
-#ifndef DISABLE_TLS
-	namespace ssl = boost::asio::ssl;
-#endif
-
-	HttpClient::HttpClient() noexcept(false)
-		: m_context{}
-		, m_resolver{ m_context }
-	{
-#ifndef DISABLE_TLS
-		m_sslContext.set_default_verify_paths();
-#endif
-	}
-
 	const std::string& HttpClient::GetLocalIP() const
 	{
 		return m_localIP;
 	}
 
-	std::future<Response> HttpClient::GET(std::string host_)
-	{
-		return std::async(std::launch::async, [this, host = std::move(host_)]
-			{
-				auto endpoints = m_resolver.resolve(host, GetProtocol());
-				auto socket = GetSocket();
-
-				Connect(socket, endpoints, host);
-				Write(socket, "GET", host);
-
-#ifndef DISABLE_TLS
-				OpenSSL::StopSSLThread();
-#endif
-				return MakeResponse(socket);
-			}
-		);
-	}
-
 	std::string HttpClient::GetProtocol() const
 	{
 #ifndef DISABLE_TLS
-		return "https";
+		return "443";
 #else
-		return "http";
+		return "80";
 #endif
-	}
-
-	Response HttpClient::MakeResponse(Socket& socket)
-	{
-		Response response;
-
-		asio::streambuf buf;
-		response.statusCode = ReadStatusCode(socket, buf);
-		response.headers = ReadHeaders(socket, buf);
-		response.body = ReadBody(socket, buf);
-
-		return response;
-	}
-
-	void HttpClient::Connect(Socket& socket, const Endpoints& endpoints, const std::string& host)
-	{
-		asio::connect(socket.lowest_layer(), endpoints);
-#ifndef DISABLE_TLS
-		DoHandshake(socket, host);
-#endif
-		SaveLocalIP(socket);
-	}
-
-	void HttpClient::Write(Socket& socket, const std::string& method, const std::string& host)
-	{
-		asio::write(socket, asio::buffer(GetHeaders(method, host)));
-	}
-
-	std::string HttpClient::ReadBody(Socket& socket, boost::asio::streambuf& buf)
-	{
-		boost::system::error_code ec;
-		asio::read_until(socket, buf, "\0", ec);
-		if (ec)
-		{
-			throw std::runtime_error("Failed to read the response body: " + ec.message());
-		}
-
-		auto bodyBuf = buf.data();
-		std::string body(asio::buffers_begin(bodyBuf), asio::buffers_end(bodyBuf));
-		Util::Trim(body);
-
-		return body;
-	}
-
-	Headers HttpClient::ReadHeaders(Socket& socket, boost::asio::streambuf& buf)
-	{
-		asio::read_until(socket, buf, "\r\n\r\n");
-
-		std::istream stream(&buf);
-
-		Headers headers;
-		std::string line;
-		while (std::getline(stream, line) && line != "\r")
-		{
-			size_t colonPos = 0;
-			if (nzbget_rs_snh_http_client_find_header_colon(line.c_str(), line.size(), &colonPos))
-			{
-				std::string key = line.substr(0, colonPos);
-				std::string value = line.substr(colonPos + 1);
-				Util::Trim(value);
-				headers.emplace(std::move(key), std::move(value));
-			}
-		}
-
-		return headers;
-	}
-
-	unsigned HttpClient::ReadStatusCode(Socket& socket, boost::asio::streambuf& buf)
-	{
-		asio::read_until(socket, buf, "\r\n");
-
-		std::istream stream(&buf);
-
-		std::string httpVersion;
-		unsigned statusCode;
-
-		stream >> httpVersion;
-		stream >> statusCode;
-
-		if (!nzbget_rs_snh_http_client_validate_version(
-			httpVersion.data(), httpVersion.size(), stream ? 1 : 0))
-		{
-			throw std::runtime_error("Invalid response");
-		}
-
-		return statusCode;
 	}
 
 	std::string HttpClient::GetHeaders(const std::string& method, const std::string& host) const
@@ -177,31 +48,170 @@ namespace Network
 		return headers;
 	}
 
-	void HttpClient::SaveLocalIP(Socket& socket)
+	std::future<Response> HttpClient::GET(std::string host_)
 	{
-		m_localIP = socket.lowest_layer().local_endpoint().address().to_string();
-	}
+		return std::async(std::launch::async, [this, host = std::move(host_)]() -> Response
+		{
+			addrinfo hints{};
+			hints.ai_family = AF_UNSPEC;
+			hints.ai_socktype = SOCK_STREAM;
+			addrinfo* res = nullptr;
+			std::string port = GetProtocol();
+			if (getaddrinfo(host.c_str(), port.c_str(), &hints, &res) != 0 || !res)
+			{
+				throw std::runtime_error("Failed to resolve host: " + host);
+			}
+
+			int fd = -1;
+			for (addrinfo* p = res; p != nullptr; p = p->ai_next)
+			{
+				fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+				if (fd < 0) continue;
+
+				timeval tv{10, 0};
+				setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+				setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+				if (connect(fd, p->ai_addr, p->ai_addrlen) == 0)
+				{
+					break;
+				}
+				close(fd);
+				fd = -1;
+			}
+			freeaddrinfo(res);
+
+			if (fd < 0)
+			{
+				throw std::runtime_error("Failed to connect to host: " + host);
+			}
+
+			sockaddr_storage localAddr{};
+			socklen_t addrLen = sizeof(localAddr);
+			if (getsockname(fd, reinterpret_cast<sockaddr*>(&localAddr), &addrLen) == 0)
+			{
+				char ipStr[INET6_ADDRSTRLEN] = {0};
+				if (localAddr.ss_family == AF_INET)
+				{
+					inet_ntop(AF_INET, &reinterpret_cast<sockaddr_in*>(&localAddr)->sin_addr, ipStr, sizeof(ipStr));
+				}
+				else if (localAddr.ss_family == AF_INET6)
+				{
+					inet_ntop(AF_INET6, &reinterpret_cast<sockaddr_in6*>(&localAddr)->sin6_addr, ipStr, sizeof(ipStr));
+				}
+				m_localIP = ipStr;
+			}
+
+			std::string req = GetHeaders("GET", host);
+			std::string rawResp;
 
 #ifndef DISABLE_TLS
-	Socket HttpClient::GetSocket()
-	{
-		return ssl::stream<tcp::socket>{ m_context, m_sslContext };
-	}
+			SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+			if (!ctx)
+			{
+				close(fd);
+				throw std::runtime_error("Failed to create SSL_CTX");
+			}
+			SSL_CTX_set_default_verify_paths(ctx);
+			SSL* ssl = SSL_new(ctx);
+			if (!ssl)
+			{
+				SSL_CTX_free(ctx);
+				close(fd);
+				throw std::runtime_error("Failed to create SSL");
+			}
+			SSL_set_fd(ssl, fd);
+			SSL_set_tlsext_host_name(ssl, host.c_str());
+			if (SSL_connect(ssl) != 1)
+			{
+				SSL_free(ssl);
+				SSL_CTX_free(ctx);
+				close(fd);
+				OpenSSL::StopSSLThread();
+				throw std::runtime_error("TLS handshake failed");
+			}
 
-	void HttpClient::DoHandshake(Socket& socket, const std::string& host)
-	{
-		if (!SSL_set_tlsext_host_name(socket.native_handle(), host.c_str()))
-		{
-			throw std::runtime_error("Failed to configure SNI TLS extension.");
-		}
+			size_t written = 0;
+			while (written < req.size())
+			{
+				int n = SSL_write(ssl, req.data() + written, static_cast<int>(req.size() - written));
+				if (n <= 0) break;
+				written += static_cast<size_t>(n);
+			}
 
-		socket.handshake(ssl::stream_base::handshake_type::client);
-	}
+			char chunk[4096];
+			for (;;)
+			{
+				int n = SSL_read(ssl, chunk, sizeof(chunk));
+				if (n <= 0) break;
+				rawResp.append(chunk, static_cast<size_t>(n));
+			}
+
+			SSL_shutdown(ssl);
+			SSL_free(ssl);
+			SSL_CTX_free(ctx);
+			close(fd);
+			OpenSSL::StopSSLThread();
 #else
-	Socket HttpClient::GetSocket()
-	{
-		return tcp::socket{ m_context };
-	}
+			size_t written = 0;
+			while (written < req.size())
+			{
+				ssize_t n = send(fd, req.data() + written, req.size() - written, 0);
+				if (n <= 0) break;
+				written += static_cast<size_t>(n);
+			}
+
+			char chunk[4096];
+			for (;;)
+			{
+				ssize_t n = recv(fd, chunk, sizeof(chunk), 0);
+				if (n <= 0) break;
+				rawResp.append(chunk, static_cast<size_t>(n));
+			}
+			close(fd);
 #endif
 
+			size_t headerEnd = rawResp.find("\r\n\r\n");
+			if (headerEnd == std::string::npos)
+			{
+				throw std::runtime_error("Invalid HTTP response");
+			}
+
+			std::istringstream stream(rawResp.substr(0, headerEnd + 2));
+			std::string httpVersion;
+			unsigned statusCode = 0;
+			stream >> httpVersion >> statusCode;
+			if (!nzbget_rs_snh_http_client_validate_version(
+				httpVersion.data(), httpVersion.size(), stream ? 1 : 0))
+			{
+				throw std::runtime_error("Invalid response");
+			}
+
+			std::string dummyLine;
+			std::getline(stream, dummyLine);
+
+			Headers headers;
+			std::string line;
+			while (std::getline(stream, line) && line != "\r" && !line.empty())
+			{
+				size_t colonPos = 0;
+				if (nzbget_rs_snh_http_client_find_header_colon(line.c_str(), line.size(), &colonPos))
+				{
+					std::string key = line.substr(0, colonPos);
+					std::string value = line.substr(colonPos + 1);
+					Util::Trim(value);
+					headers.emplace(std::move(key), std::move(value));
+				}
+			}
+
+			std::string body = rawResp.substr(headerEnd + 4);
+			Util::Trim(body);
+
+			Response response;
+			response.statusCode = statusCode;
+			response.headers = std::move(headers);
+			response.body = std::move(body);
+			return response;
+		});
+	}
 }

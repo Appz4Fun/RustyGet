@@ -515,6 +515,232 @@ pub extern "C" fn nzbget_rs_crc32_combine(crc1: u32, crc2: u32, len2: u32) -> u3
     crate::crc::combine(crc1, crc2, len2)
 }
 
+/// Crc32::Append: hardware-accelerated IEEE 802.3 CRC-32 update via `crc32fast`.
+///
+/// # Safety
+/// `block` is null with `len == 0`, or points to `len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_crc32_append(block: *const u8, len: u32, init: u32) -> u32 {
+    if block.is_null() || len == 0 {
+        return init;
+    }
+    let slice = std::slice::from_raw_parts(block, len as usize);
+    crate::crc::crc32_append(slice, init)
+}
+
+/// ZLib::GZipLen: returns upper bound on gzip-compressed output size.
+#[no_mangle]
+pub extern "C" fn nzbget_rs_gzip_len(input_len: c_int) -> u32 {
+    let n = input_len.max(0) as u32;
+    n.saturating_add(n >> 12)
+        .saturating_add(n >> 14)
+        .saturating_add(n >> 25)
+        .saturating_add(32)
+}
+
+/// ZLib::GZip: compresses `in_buf[..in_len]` into `out_buf[..out_len]` in gzip format via `flate2`.
+///
+/// # Safety
+/// `in_buf` is readable for `in_len` bytes; `out_buf` is writable for `out_len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_gzip_compress(
+    in_buf: *const u8,
+    in_len: c_int,
+    out_buf: *mut u8,
+    out_len: c_int,
+) -> u32 {
+    if out_buf.is_null() || out_len <= 0 || in_len < 0 || (in_len > 0 && in_buf.is_null()) {
+        return 0;
+    }
+    let in_slice = if in_len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(in_buf, in_len as usize)
+    };
+    let out_slice = std::slice::from_raw_parts_mut(out_buf, out_len as usize);
+    let mut comp = flate2::Compress::new_gzip(flate2::Compression::default(), 15);
+    match comp.compress(in_slice, out_slice, flate2::FlushCompress::Finish) {
+        Ok(flate2::Status::StreamEnd) => comp.total_out() as u32,
+        _ => 0,
+    }
+}
+
+pub struct RsGUnzipStream {
+    decomp: flate2::Decompress,
+    out_buf: Vec<u8>,
+    next_in: *const u8,
+    avail_in: usize,
+}
+
+/// GUnzipStream::GUnzipStream: creates a streaming gzip decompressor backed by `flate2`.
+#[no_mangle]
+pub extern "C" fn nzbget_rs_gunzip_new(buf_size: c_int) -> *mut RsGUnzipStream {
+    let cap = buf_size.max(1) as usize;
+    Box::into_raw(Box::new(RsGUnzipStream {
+        decomp: flate2::Decompress::new_gzip(15),
+        out_buf: vec![0u8; cap],
+        next_in: std::ptr::null(),
+        avail_in: 0,
+    }))
+}
+
+/// GUnzipStream::~GUnzipStream: frees a streaming gzip decompressor.
+///
+/// # Safety
+/// `stream` is null or from `nzbget_rs_gunzip_new`.
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_gunzip_free(stream: *mut RsGUnzipStream) {
+    if !stream.is_null() {
+        drop(Box::from_raw(stream));
+    }
+}
+
+/// GUnzipStream::Write: sets the next compressed input slice.
+///
+/// # Safety
+/// `stream` is null or a valid `RsGUnzipStream`; `in_buf` is readable for `in_len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_gunzip_write(
+    stream: *mut RsGUnzipStream,
+    in_buf: *const u8,
+    in_len: c_int,
+) {
+    let Some(s) = stream.as_mut() else { return };
+    if in_buf.is_null() || in_len <= 0 {
+        s.next_in = std::ptr::null();
+        s.avail_in = 0;
+    } else {
+        s.next_in = in_buf;
+        s.avail_in = in_len as usize;
+    }
+}
+
+/// GUnzipStream::Read: decompresses the next chunk.
+/// Returns `0` (`zlError`), `1` (`zlFinished`), or `2` (`zlOK`).
+///
+/// # Safety
+/// `stream` is null or a valid `RsGUnzipStream`; `out_ptr` and `out_len` are valid output pointers.
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_gunzip_read(
+    stream: *mut RsGUnzipStream,
+    out_ptr: *mut *const c_void,
+    out_len: *mut c_int,
+) -> c_int {
+    if !out_len.is_null() {
+        *out_len = 0;
+    }
+    let Some(s) = stream.as_mut() else { return 0 };
+    let in_slice = if s.next_in.is_null() || s.avail_in == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(s.next_in, s.avail_in)
+    };
+    let before_in = s.decomp.total_in();
+    let before_out = s.decomp.total_out();
+    let status = s
+        .decomp
+        .decompress(in_slice, &mut s.out_buf, flate2::FlushDecompress::None);
+    let consumed = (s.decomp.total_in() - before_in) as usize;
+    let produced = (s.decomp.total_out() - before_out) as usize;
+    if consumed > 0 && !s.next_in.is_null() {
+        s.next_in = s.next_in.add(consumed);
+        s.avail_in = s.avail_in.saturating_sub(consumed);
+    }
+    match status {
+        Ok(flate2::Status::StreamEnd) => {
+            if !out_len.is_null() {
+                *out_len = produced as c_int;
+            }
+            if !out_ptr.is_null() {
+                *out_ptr = s.out_buf.as_ptr().cast();
+            }
+            1 // zlFinished
+        }
+        Ok(flate2::Status::Ok) => {
+            if !out_len.is_null() {
+                *out_len = produced as c_int;
+            }
+            if !out_ptr.is_null() {
+                *out_ptr = s.out_buf.as_ptr().cast();
+            }
+            2 // zlOK
+        }
+        Ok(flate2::Status::BufError) => {
+            if produced > 0 {
+                if !out_len.is_null() {
+                    *out_len = produced as c_int;
+                }
+                if !out_ptr.is_null() {
+                    *out_ptr = s.out_buf.as_ptr().cast();
+                }
+            }
+            2 // zlOK
+        }
+        Err(_) => 0, // zlError
+    }
+}
+
+// ---- Terminal / TUI FFI (replacing C ncurses) ----
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_term_init() -> c_int {
+    crate::ncurses_format::term_init()
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_term_shutdown() {
+    crate::ncurses_format::term_shutdown()
+}
+
+/// # Safety
+/// `rows` and `cols` are null or valid writable pointers.
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_term_get_size(rows: *mut c_int, cols: *mut c_int) {
+    let (r, c) = crate::ncurses_format::term_get_size();
+    if !rows.is_null() {
+        *rows = r;
+    }
+    if !cols.is_null() {
+        *cols = c;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_term_clear() {
+    crate::ncurses_format::term_clear()
+}
+
+/// # Safety
+/// `text` is null or a valid NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_term_plot_text(
+    text: *const c_char,
+    row: c_int,
+    col: c_int,
+    use_color: c_int,
+    color_pair: c_int,
+    blink: c_int,
+) {
+    crate::ncurses_format::term_plot_text(
+        input(text),
+        row,
+        col,
+        use_color != 0,
+        color_pair,
+        blink != 0,
+    );
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_term_refresh(row: c_int, col: c_int) {
+    crate::ncurses_format::term_refresh(row, col);
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_term_read_key() -> c_int {
+    crate::ncurses_format::term_read_key()
+}
+
 /// Runs an in-place text helper on the NUL-terminated `raw` and puts the NUL
 /// at the new end.
 unsafe fn in_place(raw: *mut c_char, f: impl FnOnce(&mut [u8]) -> usize) {
@@ -1323,10 +1549,17 @@ pub unsafe extern "C" fn nzbget_rs_web_authorized_ip(
     crate::webserver::is_authorized_ip(input(option), input(remote), &lower) as c_int
 }
 
-/// Decoder (rust/src/decoder.rs) with rapidyenc's decoder and CRC.
+/// Decoder (rust/src/decoder.rs) with built-in Rust `nntmux-yenc` + `crc32fast` (or custom callbacks).
 #[no_mangle]
 pub extern "C" fn nzbget_rs_decoder_new(decode: Option<crate::decoder::DecodeFn>, crc: Option<crate::decoder::CrcFn>) -> *mut crate::decoder::Decoder {
-    let (Some(decode), Some(crc)) = (decode, crc) else { return std::ptr::null_mut() };
+    let (decode, crc) = match (decode, crc) {
+        (Some(d), Some(c)) => (d, c),
+        (None, None) => (
+            crate::decoder::rust_yenc_decode_incremental as crate::decoder::DecodeFn,
+            crate::decoder::rust_yenc_crc as crate::decoder::CrcFn,
+        ),
+        _ => return std::ptr::null_mut(),
+    };
     Box::into_raw(Box::new(crate::decoder::Decoder::new(decode, crc)))
 }
 
@@ -2669,18 +2902,19 @@ unsafe fn par_filename_input(name: *const c_char) -> [u8; crate::parparser::BSTR
 /// # Safety
 /// `name` is null or readable through the first NUL or 1023 bytes, whichever
 /// comes first. Outputs are null or aligned writable C ints. All storage stays
-/// caller-owned. `fold` takes a byte (0..=255), returns tolower of the caller's
-/// char, and must not unwind. A missing fold fails; panics cannot cross the ABI.
+/// caller-owned.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_parse_par_filename(name: *const c_char, confirmed: c_int, base_len: *mut c_int, blocks: *mut c_int,
-    table: *const c_int, char_signed: c_int, fold: Option<extern "C" fn(c_int) -> c_int>) -> c_int {
+pub unsafe extern "C" fn nzbget_rs_parse_par_filename(
+    name: *const c_char,
+    confirmed: c_int,
+    base_len: *mut c_int,
+    blocks: *mut c_int,
+) -> c_int {
     if name.is_null() {
         return 0;
     }
-    let Some(fold) = fold else { return 0 };
     let name = par_filename_input(name);
-    let lower = par_fold(table, char_signed, fold);
-    match crate::parparser::parse_par_filename(&name, confirmed != 0, &lower) {
+    match crate::parparser::parse_par_filename(&name, confirmed != 0) {
         Some((len, b)) => {
             if !base_len.is_null() {
                 base_len.write(len as c_int);
@@ -2697,21 +2931,23 @@ pub unsafe extern "C" fn nzbget_rs_parse_par_filename(name: *const c_char, confi
 /// ParParser::SameParCollection (0 for null names).
 ///
 /// # Safety
-/// Each name is null or readable through its first NUL or 1023 bytes. `fold`
-/// has the same contract as nzbget_rs_parse_par_filename. Inputs stay borrowed.
+/// Each name is null or readable through its first NUL or 1023 bytes. Inputs stay borrowed.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_same_par_collection(name1: *const c_char, name2: *const c_char, confirmed: c_int,
-    table: *const c_int, char_signed: c_int, fold: Option<extern "C" fn(c_int) -> c_int>) -> c_int {
+pub unsafe extern "C" fn nzbget_rs_same_par_collection(
+    name1: *const c_char,
+    name2: *const c_char,
+    confirmed: c_int,
+) -> c_int {
     if name1.is_null() || name2.is_null() {
         return 0;
     }
-    let Some(fold) = fold else { return 0 };
     let name1 = par_filename_input(name1);
     let name2 = par_filename_input(name2);
-    let lower = par_fold(table, char_signed, fold);
-    // Each local copy has a trailing NUL, even when the input did not.
-    crate::parparser::same_par_collection(CStr::from_ptr(name1.as_ptr().cast()), CStr::from_ptr(name2.as_ptr().cast()), confirmed != 0,
-        &lower) as c_int
+    crate::parparser::same_par_collection(
+        CStr::from_ptr(name1.as_ptr().cast()).to_bytes(),
+        CStr::from_ptr(name2.as_ptr().cast()).to_bytes(),
+        confirmed != 0,
+    ) as c_int
 }
 
 /// ParParser::FindMainPars: scans `path` for confirmed `.par2` files,
@@ -2719,49 +2955,27 @@ pub unsafe extern "C" fn nzbget_rs_same_par_collection(name1: *const c_char, nam
 /// `collect != 0`.
 ///
 /// # Safety
-/// `path` is null or a valid NUL-terminated string; `table` and `fold` follow
-/// `nzbget_rs_parse_par_filename`; `add_file`, if supplied, must not unwind.
+/// `path` is null or a valid NUL-terminated string; `add_file`, if supplied, must not unwind.
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_find_main_pars(
     path: *const c_char,
     collect: c_int,
-    table: *const c_int,
-    char_signed: c_int,
-    fold: Option<extern "C" fn(c_int) -> c_int>,
     add_file: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, usize)>,
     ctx: *mut std::ffi::c_void,
 ) -> c_int {
     if path.is_null() {
         return 0;
     }
-    let Some(fold) = fold else { return 0 };
-    let lower = par_fold(table, char_signed, fold);
     let dir_path = path_arg(path);
     i32::from(crate::parparser::find_main_pars(
         &dir_path,
         collect != 0,
-        &lower,
         |name| {
             if let Some(cb) = add_file {
                 cb(ctx, name.as_ptr().cast(), name.len());
             }
         },
     ))
-}
-
-/// ParParser::FilenameFold: glibc's tolower table read in place for the C++
-/// char's signedness (what tolower((char)byte) reads), else the callback.
-///
-/// # Safety
-/// `table` is null or glibc's tolower table (valid for -128..=255) for the
-/// calling thread's locale.
-unsafe fn par_fold<'t>(table: *const c_int, char_signed: c_int, fold: extern "C" fn(c_int) -> c_int) -> impl Fn(u8) -> u8 + 't {
-    let table = (!table.is_null()).then(|| &*table.sub(128).cast::<[c_int; 384]>());
-    let signed = char_signed != 0;
-    move |b: u8| match table {
-        Some(t) => t[(if signed { b as i8 as i32 } else { b as i32 } + 128) as usize] as u8,
-        None => fold(b as c_int) as u8,
-    }
 }
 
 /// NzbgetRsRarIo: RarVolume's content source and header cipher.
@@ -3170,17 +3384,16 @@ pub struct ParName {
 /// # Safety
 /// `pars` is null or `count` readable entries; their filenames are null or
 /// NUL-terminated (null: needs renaming), set ids null (empty) or
-/// NUL-terminated. `fold` is ParParser's and must not unwind; null returns 0.
+/// NUL-terminated.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_direct_need_rename_pars(pars: *const ParName, count: usize, fold: Option<extern "C" fn(c_int) -> c_int>) -> c_int {
-    let Some(fold) = fold else { return 0 };
+pub unsafe extern "C" fn nzbget_rs_direct_need_rename_pars(pars: *const ParName, count: usize) -> c_int {
     if pars.is_null() {
         return 0;
     }
     let pars: Vec<_> = std::slice::from_raw_parts(pars, count).iter().map(|p| {
         ((!p.filename.is_null()).then(|| CStr::from_ptr(p.filename)), if p.set_id.is_null() { c"" } else { CStr::from_ptr(p.set_id) })
     }).collect();
-    crate::directrenamer::need_rename_pars(&pars, &|b| fold(b as c_int) as u8) as c_int
+    crate::directrenamer::need_rename_pars(&pars) as c_int
 }
 
 /// NzbgetRsManifestSection.
@@ -4795,28 +5008,24 @@ mod tests {
     #[test]
     fn parparser_bounded_input_and_outputs() {
         use std::ptr::{null, null_mut};
-        extern "C" fn fold(b: c_int) -> c_int { (b as u8).to_ascii_lowercase() as c_int }
         unsafe {
             let mut output = 77;
             let p = &mut output as *mut c_int;
             for name in [null(), c"bad".as_ptr()] {
-                assert_eq!(nzbget_rs_parse_par_filename(name, 1, p, p, std::ptr::null(), 0, Some(fold)), 0);
+                assert_eq!(nzbget_rs_parse_par_filename(name, 1, p, p), 0);
                 assert_eq!(output, 77);
             }
-            assert_eq!(nzbget_rs_parse_par_filename(c"a.par2".as_ptr(), 1, p, p, std::ptr::null(), 0, None), 0);
-            assert_eq!(output, 77);
-            assert_eq!(nzbget_rs_parse_par_filename(c"a.vol+2.par2".as_ptr(), -1, p, p, std::ptr::null(), 0, Some(fold)), 1);
+            assert_eq!(nzbget_rs_parse_par_filename(c"a.vol+2.par2".as_ptr(), -1, p, p), 1);
             assert_eq!(output, -1); // blocks wins when outputs alias
-            assert_eq!(nzbget_rs_parse_par_filename(c"a.par2".as_ptr(), 1, null_mut(), null_mut(), std::ptr::null(), 0, Some(fold)), 1);
-            assert_eq!(nzbget_rs_same_par_collection(null(), c"a.par2".as_ptr(), 1, std::ptr::null(), 0, Some(fold)), 0);
-            assert_eq!(nzbget_rs_same_par_collection(c"a.par2".as_ptr(), null(), 1, std::ptr::null(), 0, Some(fold)), 0);
-            assert_eq!(nzbget_rs_same_par_collection(c"a.par2".as_ptr(), c"a.par2".as_ptr(), 1, std::ptr::null(), 0, None), 0);
+            assert_eq!(nzbget_rs_parse_par_filename(c"a.par2".as_ptr(), 1, null_mut(), null_mut()), 1);
+            assert_eq!(nzbget_rs_same_par_collection(null(), c"a.par2".as_ptr(), 1), 0);
+            assert_eq!(nzbget_rs_same_par_collection(c"a.par2".as_ptr(), null(), 1), 0);
 
             let mut name = [b'a'; crate::parparser::BSTRING_MAX];
             name[1018..].copy_from_slice(b".par2");
-            assert_eq!(nzbget_rs_parse_par_filename(name.as_ptr().cast(), 1, p, null_mut(), std::ptr::null(), 0, Some(fold)), 1);
+            assert_eq!(nzbget_rs_parse_par_filename(name.as_ptr().cast(), 1, p, null_mut()), 1);
             assert_eq!(output, 1018);
-            assert_eq!(nzbget_rs_same_par_collection(name.as_ptr().cast(), name.as_ptr().cast(), 1, std::ptr::null(), 0, Some(fold)), 1);
+            assert_eq!(nzbget_rs_same_par_collection(name.as_ptr().cast(), name.as_ptr().cast(), 1), 1);
         }
     }
 
@@ -8922,6 +9131,79 @@ pub unsafe extern "C" fn nzbget_rs_dupe_fallback_classify_first_head(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_fallback_match_donor_file(
+    target: *const crate::dupefallback::NzbgetRsDonorFileSpec,
+    target_nzb_filename: *const c_char,
+    by_content: *const c_char,
+    twin_allowed: c_int,
+    twin_only: c_int,
+    donor_files: *const crate::dupefallback::NzbgetRsDonorFileSpec,
+    donor_count: usize,
+) -> isize {
+    if target.is_null() || (donor_count > 0 && donor_files.is_null()) {
+        return -1;
+    }
+    let to_spec = |raw: &crate::dupefallback::NzbgetRsDonorFileSpec| -> crate::dupefallback::DonorFileSpec<'_> {
+        let filename = if raw.filename.is_null() {
+            &[][..]
+        } else {
+            CStr::from_ptr(raw.filename).to_bytes()
+        };
+        let subject = if raw.subject.is_null() {
+            &[][..]
+        } else {
+            CStr::from_ptr(raw.subject).to_bytes()
+        };
+        let parts = if raw.parts.is_null() || raw.article_count == 0 {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts(raw.parts, raw.article_count)
+        };
+        let sizes = if raw.sizes.is_null() || raw.article_count == 0 {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts(raw.sizes, raw.article_count)
+        };
+        crate::dupefallback::DonorFileSpec {
+            filename,
+            subject,
+            total_articles: raw.total_articles,
+            size: raw.size,
+            is_par_file: raw.is_par_file != 0,
+            parts,
+            sizes,
+        }
+    };
+    let target_spec = to_spec(&*target);
+    let target_nzb_fn = if target_nzb_filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(target_nzb_filename).to_bytes()
+    };
+    let by_content_bytes = if by_content.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(by_content).to_bytes()
+    };
+    let raw_donors = if donor_count == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(donor_files, donor_count)
+    };
+    let donor_specs: Vec<crate::dupefallback::DonorFileSpec<'_>> =
+        raw_donors.iter().map(to_spec).collect();
+    crate::dupefallback::match_donor_file(
+        &target_spec,
+        target_nzb_fn,
+        by_content_bytes,
+        twin_allowed != 0,
+        twin_only != 0,
+        &donor_specs,
+    )
+    .map_or(-1, |idx| idx as isize)
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_par2_range_covered(
     ranges: *const crate::dupefallback::NzbgetRsByteRange,
     count: usize,
@@ -10534,6 +10816,393 @@ pub unsafe extern "C" fn nzbget_rs_parchecker_classify_streambuf_line(
         *out_offset = offset;
     }
     extra_debug as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_new(
+    base_dir: *const c_char,
+    threads_to_use: c_int,
+    mem_to_use_mb: c_int,
+    par_quick: c_int,
+    par_scan_full: c_int,
+    par_ignore_ext: *const c_char,
+) -> *mut crate::parchecker::RustParRepairer {
+    let dir_str = if base_dir.is_null() {
+        ""
+    } else {
+        CStr::from_ptr(base_dir).to_str().unwrap_or("")
+    };
+    let ignore_bytes = if par_ignore_ext.is_null() {
+        Vec::new()
+    } else {
+        CStr::from_ptr(par_ignore_ext).to_bytes().to_vec()
+    };
+    Box::into_raw(Box::new(crate::parchecker::RustParRepairer::new(
+        std::path::PathBuf::from(dir_str),
+        threads_to_use,
+        mem_to_use_mb,
+        par_quick != 0,
+        par_scan_full != 0,
+        ignore_bytes,
+    )))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_free(
+    handle: *mut crate::parchecker::RustParRepairer,
+) {
+    if !handle.is_null() {
+        drop(Box::from_raw(handle));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_cancel(
+    handle: *const crate::parchecker::RustParRepairer,
+) {
+    if let Some(r) = handle.as_ref() {
+        r.cancel();
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_preprocess(
+    handle: *mut crate::parchecker::RustParRepairer,
+    par_filename: *const c_char,
+    cbs: *const crate::parchecker::NzbgetRsParCallbacks,
+) -> c_int {
+    let Some(r) = handle.as_mut() else {
+        return crate::parchecker::PAR_RESULT_LOGIC_ERROR;
+    };
+    if par_filename.is_null() {
+        return crate::parchecker::PAR_RESULT_INVALID_ARGS;
+    }
+    let pf_str = CStr::from_ptr(par_filename).to_str().unwrap_or("");
+    r.preprocess(std::path::Path::new(pf_str), cbs.as_ref())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_process(
+    handle: *mut crate::parchecker::RustParRepairer,
+    do_repair: c_int,
+    cbs: *const crate::parchecker::NzbgetRsParCallbacks,
+) -> c_int {
+    let Some(r) = handle.as_mut() else {
+        return crate::parchecker::PAR_RESULT_LOGIC_ERROR;
+    };
+    let empty_cbs = crate::parchecker::NzbgetRsParCallbacks {
+        ctx: std::ptr::null_mut(),
+        on_filename: None,
+        on_progress: None,
+        on_done: None,
+        on_quick_verify: None,
+        on_quick_verified_inc: None,
+    };
+    let cbs_ref = cbs.as_ref().unwrap_or(&empty_cbs);
+    r.process(do_repair != 0, cbs_ref)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_load_extra_par2_file(
+    handle: *mut crate::parchecker::RustParRepairer,
+    path: *const c_char,
+    cbs: *const crate::parchecker::NzbgetRsParCallbacks,
+) -> c_int {
+    let Some(r) = handle.as_mut() else {
+        return 0;
+    };
+    if path.is_null() {
+        return 0;
+    }
+    let p_str = CStr::from_ptr(path).to_str().unwrap_or("");
+    c_int::from(r.load_extra_par2_file(std::path::Path::new(p_str), cbs.as_ref()))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_verify_extra_file(
+    handle: *mut crate::parchecker::RustParRepairer,
+    path: *const c_char,
+    is_split_fragment: c_int,
+    cbs: *const crate::parchecker::NzbgetRsParCallbacks,
+) -> c_int {
+    let Some(r) = handle.as_mut() else {
+        return 0;
+    };
+    if path.is_null() {
+        return 0;
+    }
+    let empty_cbs = crate::parchecker::NzbgetRsParCallbacks {
+        ctx: std::ptr::null_mut(),
+        on_filename: None,
+        on_progress: None,
+        on_done: None,
+        on_quick_verify: None,
+        on_quick_verified_inc: None,
+    };
+    let cbs_ref = cbs.as_ref().unwrap_or(&empty_cbs);
+    let p_str = CStr::from_ptr(path).to_str().unwrap_or("");
+    c_int::from(r.verify_extra_file(
+        std::path::Path::new(p_str),
+        is_split_fragment != 0,
+        cbs_ref,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_missing_file_count(
+    handle: *const crate::parchecker::RustParRepairer,
+) -> u32 {
+    handle.as_ref().map_or(0, |r| r.missing_file_count())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_damaged_file_count(
+    handle: *const crate::parchecker::RustParRepairer,
+) -> u32 {
+    handle.as_ref().map_or(0, |r| r.damaged_file_count())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_missing_block_count(
+    handle: *const crate::parchecker::RustParRepairer,
+) -> u32 {
+    handle.as_ref().map_or(0, |r| r.missing_block_count())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_recovery_block_count(
+    handle: *const crate::parchecker::RustParRepairer,
+) -> u32 {
+    handle.as_ref().map_or(0, |r| r.recovery_block_count())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_block_size(
+    handle: *const crate::parchecker::RustParRepairer,
+) -> i64 {
+    handle.as_ref().map_or(0, |r| r.block_size())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_creator(
+    handle: *const crate::parchecker::RustParRepairer,
+) -> RsBuf {
+    let Some(r) = handle.as_ref() else {
+        return into_buf(Vec::new());
+    };
+    into_buf(r.creator().into_bytes())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_source_file_count(
+    handle: *const crate::parchecker::RustParRepairer,
+) -> usize {
+    handle.as_ref().map_or(0, |r| r.source_files().len())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_source_file_info(
+    handle: *const crate::parchecker::RustParRepairer,
+    idx: usize,
+    out_target_filename: *mut RsBuf,
+    out_target_path: *mut RsBuf,
+    out_target_exists: *mut c_int,
+    out_is_complete_target: *mut c_int,
+    out_block_count: *mut u32,
+    out_available_blocks: *mut u32,
+) -> c_int {
+    let Some(r) = handle.as_ref() else {
+        return 0;
+    };
+    let Some(sf) = r.source_files().get(idx) else {
+        return 0;
+    };
+    if !out_target_filename.is_null() {
+        *out_target_filename = into_buf(sf.target_filename.as_bytes().to_vec());
+    }
+    if !out_target_path.is_null() {
+        *out_target_path = into_buf(sf.target_path.to_string_lossy().as_bytes().to_vec());
+    }
+    if !out_target_exists.is_null() {
+        *out_target_exists = c_int::from(sf.target_exists);
+    }
+    if !out_is_complete_target.is_null() {
+        let is_complete_target = sf.status == crate::parchecker::FileStatus::Complete
+            && sf.complete_file.as_ref() == Some(&sf.target_path);
+        *out_is_complete_target = c_int::from(is_complete_target);
+    }
+    if !out_block_count.is_null() {
+        *out_block_count = sf.block_count;
+    }
+    if !out_available_blocks.is_null() {
+        *out_available_blocks = sf.available_blocks;
+    }
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_leftover_count(
+    handle: *const crate::parchecker::RustParRepairer,
+) -> usize {
+    handle.as_ref().map_or(0, |r| r.leftovers().len())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_leftover_path(
+    handle: *const crate::parchecker::RustParRepairer,
+    idx: usize,
+) -> RsBuf {
+    let Some(r) = handle.as_ref() else {
+        return into_buf(Vec::new());
+    };
+    let Some(p) = r.leftovers().get(idx) else {
+        return into_buf(Vec::new());
+    };
+    into_buf(p.to_string_lossy().as_bytes().to_vec())
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_streaming_par_has_session(nzb_id: c_int) -> c_int {
+    c_int::from(crate::parchecker::streaming_session_has_session(nzb_id))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_streaming_par_start(
+    nzb_id: c_int,
+    par2_path: *const c_char,
+    base_dir: *const c_char,
+) -> c_int {
+    if par2_path.is_null() || base_dir.is_null() {
+        return 0;
+    }
+    let Some(p_str) = CStr::from_ptr(par2_path).to_str().ok() else {
+        return 0;
+    };
+    let Some(d_str) = CStr::from_ptr(base_dir).to_str().ok() else {
+        return 0;
+    };
+    c_int::from(
+        crate::parchecker::streaming_session_start(
+            nzb_id,
+            std::path::Path::new(p_str),
+            std::path::Path::new(d_str),
+            crate::parchecker::SessionOptions::default(),
+        )
+        .is_ok(),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_streaming_par_register_queued_volume(
+    nzb_id: c_int,
+    volume_id: u64,
+    blocks: c_int,
+    paused: c_int,
+) -> c_int {
+    c_int::from(crate::parchecker::streaming_session_register_queued_volume(
+        nzb_id,
+        volume_id,
+        blocks,
+        paused != 0,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_streaming_par_on_article_finished_by_name(
+    nzb_id: c_int,
+    name: *const c_char,
+    offset: u64,
+    size: u64,
+    crc32: u32,
+    bytes: *const u8,
+    bytes_len: usize,
+) -> c_int {
+    if name.is_null() {
+        return 0;
+    }
+    let name_bytes = CStr::from_ptr(name).to_bytes();
+    let payload = if bytes.is_null() || bytes_len == 0 {
+        None
+    } else {
+        Some(std::slice::from_raw_parts(bytes, bytes_len))
+    };
+    c_int::from(
+        crate::parchecker::streaming_session_on_article_finished_by_name(
+            nzb_id, name_bytes, offset, size, crc32, payload,
+        )
+        .is_some_and(|r| r.is_ok()),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_streaming_par_on_article_failed_permanently_by_name(
+    nzb_id: c_int,
+    name: *const c_char,
+    offset: u64,
+    size: u64,
+) -> c_int {
+    if name.is_null() {
+        return 0;
+    }
+    let name_bytes = CStr::from_ptr(name).to_bytes();
+    c_int::from(
+        crate::parchecker::streaming_session_on_article_failed_permanently_by_name(
+            nzb_id, name_bytes, offset, size,
+        )
+        .is_some_and(|r| r.is_ok()),
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_streaming_par_on_recovery_volume_arrived(
+    nzb_id: c_int,
+    path: *const c_char,
+    queued_id: u64,
+    has_queued_id: c_int,
+) -> c_int {
+    if path.is_null() {
+        return 0;
+    }
+    let Some(p_str) = CStr::from_ptr(path).to_str().ok() else {
+        return 0;
+    };
+    let qid = if has_queued_id != 0 {
+        Some(queued_id)
+    } else {
+        None
+    };
+    c_int::from(
+        crate::parchecker::streaming_session_on_recovery_volume_arrived(
+            nzb_id,
+            std::path::Path::new(p_str),
+            qid,
+        )
+        .is_some_and(|r| r.is_ok()),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_streaming_par_blocks_needed_now(nzb_id: c_int) -> i64 {
+    crate::parchecker::streaming_session_blocks_needed_now(nzb_id).unwrap_or(0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_streaming_par_take_unpause_ids(
+    nzb_id: c_int,
+    out_ids: *mut u64,
+    max_ids: usize,
+) -> usize {
+    let ids = crate::parchecker::streaming_session_take_unpause_ids(nzb_id);
+    let n = ids.len().min(max_ids);
+    if !out_ids.is_null() && n > 0 {
+        std::ptr::copy_nonoverlapping(ids.as_ptr(), out_ids, n);
+    }
+    n
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_streaming_par_forget(nzb_id: c_int) {
+    crate::parchecker::streaming_session_forget(nzb_id);
 }
 
 #[no_mangle]
@@ -23966,9 +24635,6 @@ pub unsafe extern "C" fn nzbget_rs_par_damage_judge(
     queued_count: usize,
     completed: *const NzbgetRsParDamageCompletedFile,
     completed_count: usize,
-    tolower_table: *const c_int,
-    char_is_signed: c_int,
-    fold: Option<extern "C" fn(c_int) -> c_int>,
     out_verdict: *mut crate::pardamage::ParDamageVerdictC,
 ) {
     if out_verdict.is_null() {
@@ -24018,31 +24684,14 @@ pub unsafe extern "C" fn nzbget_rs_par_damage_judge(
         }
     }
 
-    let verdict = match fold {
-        Some(f) => {
-            let lower = par_fold(tolower_table, char_is_signed, f);
-            crate::pardamage::judge(
-                nzb_id,
-                dir_path,
-                nzb_size,
-                nzb_par_size,
-                &q_vec,
-                &c_vec,
-                &lower,
-            )
-        }
-        None => crate::pardamage::judge(
-            nzb_id,
-            dir_path,
-            nzb_size,
-            nzb_par_size,
-            &q_vec,
-            &c_vec,
-            &|b| b.to_ascii_lowercase(),
-        ),
-    };
-
-    *out_verdict = verdict;
+    *out_verdict = crate::pardamage::judge(
+        nzb_id,
+        dir_path,
+        nzb_size,
+        nzb_par_size,
+        &q_vec,
+        &c_vec,
+    );
 }
 
 #[no_mangle]

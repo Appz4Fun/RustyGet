@@ -436,7 +436,7 @@ bool DiskState::LoadDownloadQueue(DownloadQueue* downloadQueue, Servers* servers
 			}
 			else if (verStatus == 2)
 			{
-				error("Failed to read queue and history data. Only queue and history from NZBGet v13 or newer can be converted by this NZBGet version. "
+				error("Failed to read queue and history data. Only queue and history from NZBGet v13 or newer can be converted by this RustyGet version. "
 					"Old queue and history data still can be converted using NZBGet v16 as an intermediate version.");
 				{ queueFilesFailed = true; goto error; }
 			}

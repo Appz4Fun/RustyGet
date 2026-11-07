@@ -1,5 +1,5 @@
 /*
- *  This file is part of nzbget. See <https://nzbget.com>.
+ *  This file is part of RustyGet.
  *
  *  Copyright (C) 2024-2026 Denis <denis@nzbget.com>
  *
@@ -22,7 +22,10 @@
 
 #include <chrono>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
+#include "FileSystem.h"
+#include "nzbget_rs.h"
 
 namespace Benchmark
 {
@@ -34,8 +37,6 @@ namespace Benchmark
 		double readMs = 0.0;
 	};
 
-	// Sequential write followed by sequential read through the regular
-	// buffered file API, i.e. the way the rest of the program accesses files.
 	class DiskBenchmark final
 	{
 	public:
@@ -43,16 +44,49 @@ namespace Benchmark
 		static constexpr size_t MAX_BLOCK_SIZE = size_t{512} * 1024 * 1024;
 		static constexpr uint64_t FREE_SPACE_RESERVE = 100ull * 1024 * 1024;
 
-		// Returns the test file size that keeps FreeSpaceReserve untouched.
-		static uint64_t LimitByFreeSpace(uint64_t requested, uint64_t available);
+		static uint64_t LimitByFreeSpace(uint64_t requested, uint64_t available)
+		{
+			return nzbget_rs_euh_benchmark_limit_by_free_space(requested, available, FREE_SPACE_RESERVE);
+		}
 
-		// blockSizeBytes == 0 selects DefaultBlockSize.
-		// The timeout applies to each phase (write, read) separately.
 		Result Run(
 			const std::string& dir,
 			size_t blockSizeBytes,
 			uint64_t maxFileSizeBytes,
-			std::chrono::seconds timeout) const;
+			std::chrono::seconds timeout) const
+		{
+			fs::error_code ec;
+			const fs::path dirPath = fs::u8path(dir);
+			fs::space_info space = fs::space(dirPath, ec);
+			std::string spaceErr = ec ? ec.message() : std::string();
+
+			uint64_t writeBytes = 0;
+			double writeMs = 0.0;
+			uint64_t readBytes = 0;
+			double readMs = 0.0;
+			NzbgetRsBuf errBuf{nullptr, 0};
+			int rc = nzbget_rs_benchmark_run(
+				dir.data(), dir.size(),
+				blockSizeBytes,
+				maxFileSizeBytes,
+				timeout.count(),
+				ec ? 0 : 1,
+				space.available,
+				spaceErr.data(), spaceErr.size(),
+				&writeBytes, &writeMs, &readBytes, &readMs,
+				&errBuf);
+			std::string errMsg(errBuf.data ? errBuf.data : "", errBuf.len);
+			nzbget_rs_free(errBuf);
+			if (rc == 1)
+			{
+				throw std::invalid_argument(errMsg);
+			}
+			if (rc != 0)
+			{
+				throw std::runtime_error(errMsg);
+			}
+			return Result{writeBytes, writeMs, readBytes, readMs};
+		}
 	};
 }
 

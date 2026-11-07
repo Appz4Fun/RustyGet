@@ -93,7 +93,7 @@ bool RemoteClient::InitConnection()
 	}
 	if (!OK)
 	{
-		printf("Unable to send request to nzbget-server at %s (port %i)\n", controlIp, g_Options->GetControlPort());
+		printf("Unable to send request to RustyGet server at %s (port %i)\n", controlIp, g_Options->GetControlPort());
 	}
 	return OK;
 }
@@ -124,7 +124,7 @@ bool RemoteClient::ReceiveBoolResponse()
 		(uint32)ntohl(BoolResponse.m_messageBase.m_structSize),
 		(uint32)sizeof(BoolResponse)))
 	{
-		printf("No response or invalid response (timeout, not nzbget-server or wrong nzbget-server version)\n");
+		printf("No response or invalid response (timeout, not RustyGet server or wrong RustyGet server version)\n");
 		return false;
 	}
 
@@ -134,7 +134,7 @@ bool RemoteClient::ReceiveBoolResponse()
 	read = m_connection->Recv(buf, textLen);
 	if (!read)
 	{
-		printf("No response or invalid response (timeout, not nzbget-server or wrong nzbget-server version)\n");
+		printf("No response or invalid response (timeout, not RustyGet server or wrong RustyGet server version)\n");
 		return false;
 	}
 
@@ -317,7 +317,7 @@ bool RemoteClient::RequestServerList(bool files, bool groups, const char* patter
 		(uint32)ntohl(ListResponse.m_messageBase.m_structSize),
 		(uint32)sizeof(ListResponse)))
 	{
-		printf("No response or invalid response (timeout, not nzbget-server or wrong nzbget-server version)\n");
+		printf("No response or invalid response (timeout, not RustyGet server or wrong RustyGet server version)\n");
 		return false;
 	}
 
@@ -438,7 +438,7 @@ bool RemoteClient::RequestServerLog(int lines)
 		(uint32)ntohl(LogResponse.m_messageBase.m_structSize),
 		(uint32)sizeof(LogResponse)))
 	{
-		printf("No response or invalid response (timeout, not nzbget-server or wrong nzbget-server version)\n");
+		printf("No response or invalid response (timeout, not RustyGet server or wrong RustyGet server version)\n");
 		return false;
 	}
 
@@ -688,7 +688,7 @@ bool RemoteClient::RequestPostQueue()
 		(uint32)ntohl(PostQueueResponse.m_messageBase.m_structSize),
 		(uint32)sizeof(PostQueueResponse)))
 	{
-		printf("No response or invalid response (timeout, not nzbget-server or wrong nzbget-server version)\n");
+		printf("No response or invalid response (timeout, not RustyGet server or wrong RustyGet server version)\n");
 		return false;
 	}
 
@@ -793,7 +793,7 @@ bool RemoteClient::RequestHistory(bool withHidden)
 		(uint32)ntohl(HistoryResponse.m_messageBase.m_structSize),
 		(uint32)sizeof(HistoryResponse)))
 	{
-		printf("No response or invalid response (timeout, not nzbget-server or wrong nzbget-server version)\n");
+		printf("No response or invalid response (timeout, not RustyGet server or wrong RustyGet server version)\n");
 		return false;
 	}
 

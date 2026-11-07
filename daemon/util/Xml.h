@@ -21,15 +21,27 @@
 #define XML_H
 
 #include <iostream>
-#include <libxml/tree.h>
+#include <memory>
+#include <string>
+#include <vector>
 
 namespace Xml
 {
-using XmlNodePtr = xmlNodePtr;
-std::string Serialize(const xmlNodePtr rootNode);
-void AddNewNode(xmlNodePtr rootNode, const char* name, const char* type, const char* value);
-xmlNodePtr CreateStructNode();
-void AddArrayNode(xmlNodePtr structNode, const char* name, const std::vector<xmlNodePtr>& children);
+struct XmlNode
+{
+	std::string name;
+	std::string text;
+	bool isText = false;
+	XmlNode* parent = nullptr;
+	std::vector<std::unique_ptr<XmlNode>> children;
+};
+using XmlNodePtr = XmlNode*;
+
+std::string Serialize(const XmlNodePtr rootNode);
+void AddNewNode(XmlNodePtr rootNode, const char* name, const char* type, const char* value);
+XmlNodePtr CreateStructNode();
+void AddArrayNode(XmlNodePtr structNode, const char* name, const std::vector<XmlNodePtr>& children);
+void FreeRootNode(XmlNodePtr rootNode);
 const char* BoolToStr(bool value) noexcept;
 }  // namespace Xml
 

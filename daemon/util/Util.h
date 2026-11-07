@@ -439,10 +439,7 @@ public:
 	EStatus Read(const void **outputBuffer, int *outputBufferLength);
 
 private:
-	z_stream m_zStream{};
-	std::unique_ptr<Bytef[]> m_outputBuffer;
-	int m_bufferSize;
-	bool m_active = false;
+	void* m_rsStream = nullptr;
 };
 #endif
 

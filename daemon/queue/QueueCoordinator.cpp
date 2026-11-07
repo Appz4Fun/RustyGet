@@ -905,6 +905,27 @@ void QueueCoordinator::ArticleCompleted(ArticleDownloader* articleDownloader)
 			{
 				DemoteMisalignedDupeNeighbors(fileInfo, articleInfo);
 			}
+
+			if (!fileInfo->GetParFile() &&
+				articleInfo->GetSegmentOffset() >= 0 &&
+				articleInfo->GetSegmentSize() > 0 &&
+				nzbget_rs_streaming_par_has_session(nzbInfo->GetId()) != 0)
+			{
+				const uint8_t* segBytes = articleInfo->GetSegmentContent()
+					? reinterpret_cast<const uint8_t*>(articleInfo->GetSegmentContent())
+					: nullptr;
+				size_t segLen = articleInfo->GetSegmentContent()
+					? static_cast<size_t>(articleInfo->GetSegmentSize())
+					: 0;
+				nzbget_rs_streaming_par_on_article_finished_by_name(
+					nzbInfo->GetId(),
+					fileInfo->GetFilename(),
+					static_cast<uint64_t>(articleInfo->GetSegmentOffset()),
+					static_cast<uint64_t>(articleInfo->GetSegmentSize()),
+					articleInfo->GetCrc(),
+					segBytes,
+					segLen);
+			}
 		}
 		else if ((articleDownloader->GetStatus() == ArticleDownloader::adFailed || misplaced) &&
 			m_dupeArticleFallback.TryFallback(downloadQueue, fileInfo, articleInfo))
@@ -950,6 +971,38 @@ void QueueCoordinator::ArticleCompleted(ArticleDownloader* articleDownloader)
 			nzbInfo->SetParCurrentFailedSize(nextNzbParCurFailedSize);
 			fileInfo->SetFailedArticles(nextFileFailedArticles);
 			nzbInfo->SetCurrentFailedArticles(nextNzbCurFailedArticles);
+
+			if (!fileInfo->GetParFile() &&
+				nzbget_rs_streaming_par_has_session(nzbInfo->GetId()) != 0)
+			{
+				uint64_t failOffset = articleInfo->GetSegmentOffset() >= 0
+					? static_cast<uint64_t>(articleInfo->GetSegmentOffset())
+					: 0;
+				uint64_t failSize = articleInfo->GetSegmentSize() > 0
+					? static_cast<uint64_t>(articleInfo->GetSegmentSize())
+					: static_cast<uint64_t>(std::max(1, articleInfo->GetSize()));
+				nzbget_rs_streaming_par_on_article_failed_permanently_by_name(
+					nzbInfo->GetId(),
+					fileInfo->GetFilename(),
+					failOffset,
+					failSize);
+				uint64_t unpauseIds[32]{};
+				size_t unpauseCount = nzbget_rs_streaming_par_take_unpause_ids(
+					nzbInfo->GetId(), unpauseIds, 32);
+				for (size_t ui = 0; ui < unpauseCount; ++ui)
+				{
+					for (FileInfo* qFile : nzbInfo->GetFileList())
+					{
+						if (qFile && static_cast<uint64_t>(qFile->GetId()) == unpauseIds[ui] &&
+							qFile->GetPaused() && !qFile->GetDeleted())
+						{
+							qFile->SetPaused(false);
+							qFile->SetExtraPriority(true);
+							break;
+						}
+					}
+				}
+			}
 		}
 		else if (articleDownloader->GetStatus() == ArticleDownloader::adRetry)
 		{

@@ -755,11 +755,14 @@ fn entry_base_and_lower_ext(name: &str) -> (&str, Vec<u8>) {
     (base, ext)
 }
 
-/// Inspects an in-memory ZIP archive using `zipview::ZipReader`, enumerating all entries
-/// and classifying the archive's payload (`ZipContentKind`).
-pub fn inspect_zip_bytes(bytes: &[u8]) -> Result<ZipArchiveInspection, zipview::ZipReadError> {
-    let reader = zipview::ZipReader::new(bytes)?;
-    let mut entries = Vec::with_capacity(reader.len());
+fn inspect_zip_entries<F>(
+    raw_entries: &[zipview::ZipEntry],
+    mut read_entry_str: F,
+) -> ZipArchiveInspection
+where
+    F: FnMut(&zipview::ZipEntry) -> Option<String>,
+{
+    let mut entries = Vec::with_capacity(raw_entries.len());
     let mut file_count = 0usize;
     let mut dir_count = 0usize;
     let mut total_uncompressed_size = 0u64;
@@ -775,25 +778,31 @@ pub fn inspect_zip_bytes(bytes: &[u8]) -> Result<ZipArchiveInspection, zipview::
     let mut image_file_count = 0usize;
     let mut largest_file: Option<(String, u64, bool)> = None;
 
-    if reader.contains("[Content_Types].xml")
-        || reader.contains("META-INF/container.xml")
-        || reader.contains("META-INF/manifest.xml")
-        || reader.contains("META-INF/MANIFEST.MF")
-        || reader.contains("AndroidManifest.xml")
-    {
+    if raw_entries.iter().any(|e| {
+        matches!(
+            e.name(),
+            "[Content_Types].xml"
+                | "META-INF/container.xml"
+                | "META-INF/manifest.xml"
+                | "META-INF/MANIFEST.MF"
+                | "AndroidManifest.xml"
+        )
+    }) {
         has_document_marker = true;
-    } else if reader.contains("mimetype") {
-        if let Ok(mime) = reader.read_to_string("mimetype") {
-            let trimmed = mime.trim();
-            if trimmed.starts_with("application/epub+zip")
-                || trimmed.starts_with("application/vnd.oasis.opendocument")
-            {
-                has_document_marker = true;
+    } else if let Some(mime_entry) = raw_entries.iter().find(|e| e.name() == "mimetype") {
+        if !mime_entry.is_encrypted() && mime_entry.size() <= 4096 {
+            if let Some(mime) = read_entry_str(mime_entry) {
+                let trimmed = mime.trim();
+                if trimmed.starts_with("application/epub+zip")
+                    || trimmed.starts_with("application/vnd.oasis.opendocument")
+                {
+                    has_document_marker = true;
+                }
             }
         }
     }
 
-    for entry in reader.entries() {
+    for entry in raw_entries {
         let is_dir = entry.is_dir()
             || entry
                 .unix_mode()
@@ -820,9 +829,12 @@ pub fn inspect_zip_bytes(bytes: &[u8]) -> Result<ZipArchiveInspection, zipview::
             if base.eq_ignore_ascii_case("manifest.json") {
                 if is_encrypted {
                     has_extension_manifest = true;
-                } else if let Ok(manifest_text) = reader.read_to_string(entry.name()) {
-                    if manifest_text.contains("\"name\"") && manifest_text.contains("\"main\"") {
-                        has_extension_manifest = true;
+                } else if entry.size() <= 64 * 1024 {
+                    if let Some(manifest_text) = read_entry_str(entry) {
+                        if manifest_text.contains("\"name\"") && manifest_text.contains("\"main\"")
+                        {
+                            has_extension_manifest = true;
+                        }
                     }
                 }
             }
@@ -885,7 +897,7 @@ pub fn inspect_zip_bytes(bytes: &[u8]) -> Result<ZipArchiveInspection, zipview::
         ZipContentKind::GeneralFiles
     };
 
-    Ok(ZipArchiveInspection {
+    ZipArchiveInspection {
         kind,
         entries,
         file_count,
@@ -897,166 +909,103 @@ pub fn inspect_zip_bytes(bytes: &[u8]) -> Result<ZipArchiveInspection, zipview::
         has_symlinks,
         has_nzb_files,
         largest_file,
-    })
-}
-
-/// Maximum archive size (64 MiB) read wholly into memory for `zipview::ZipReader` payload inspection.
-/// Larger ZIP files on disk are inspected via bounded central-directory seeks (`zipfast::zip::Archive::open`).
-pub const MAX_IN_MEMORY_ZIP_INSPECT_BYTES: u64 = 64 * 1024 * 1024;
-
-fn compression_method_name(method: u16) -> &'static str {
-    match method {
-        0 => "Stored",
-        8 => "Deflate",
-        9 => "Deflate64",
-        12 => "BZip2",
-        14 => "LZMA",
-        93 => "Zstandard",
-        95 => "XZ",
-        99 => "WinZip AES",
-        _ => "Unknown",
     }
 }
 
-/// Inspects a ZIP file's central directory via bounded file seeks without reading entry payloads into memory.
+#[cfg(unix)]
+fn read_file_range_at(
+    file: &mut std::fs::File,
+    offset: u64,
+    buf: &mut [u8],
+) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    file.read_exact_at(buf, offset)
+}
+
+#[cfg(not(unix))]
+fn read_file_range_at(
+    file: &mut std::fs::File,
+    offset: u64,
+    buf: &mut [u8],
+) -> std::io::Result<()> {
+    use std::io::{Read, Seek, SeekFrom};
+    file.seek(SeekFrom::Start(offset))?;
+    file.read_exact(buf)
+}
+
+/// Inspects an in-memory ZIP archive using `zipview::ZipReader`, enumerating all entries
+/// and classifying the archive's payload (`ZipContentKind`). Small metadata payloads
+/// (`mimetype` `<= 4 KiB` and `manifest.json` `<= 64 KiB`) are decoded lossily to identify
+/// document containers and NZBGet extension packages.
+pub fn inspect_zip_bytes(bytes: &[u8]) -> Result<ZipArchiveInspection, zipview::ZipReadError> {
+    let reader = zipview::ZipReader::new(bytes)?;
+    Ok(inspect_zip_entries(reader.entries(), |entry| {
+        reader
+            .read_entry(entry)
+            .ok()
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+    }))
+}
+
+/// Inspects an already-opened `zipview::ZipIndex`, fetching only small metadata entries
+/// (`mimetype` `<= 4 KiB` or `manifest.json` `<= 64 KiB`) on demand via `read` and decoding
+/// them lossily.
+pub fn inspect_zip_index<E: From<zipview::ZipReadError>>(
+    index: &zipview::ZipIndex,
+    mut read: impl FnMut(u64, &mut [u8]) -> Result<(), E>,
+) -> ZipArchiveInspection {
+    inspect_zip_entries(index.entries(), |entry| {
+        index
+            .fetch_entry(entry, None, &mut read)
+            .ok()
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+    })
+}
+
+/// Opens and inspects a ZIP archive of `total_len` bytes a byte range at a time using
+/// `zipview::ZipIndex::open`, without loading the whole archive into memory.
+pub fn inspect_zip_range<E: From<zipview::ZipReadError>>(
+    total_len: u64,
+    mut read: impl FnMut(u64, &mut [u8]) -> Result<(), E>,
+) -> Result<ZipArchiveInspection, E> {
+    let index = zipview::ZipIndex::open(total_len, &mut read)?;
+    Ok(inspect_zip_index(&index, &mut read))
+}
+
+/// Opens a `zipview::ZipIndex` step-by-step using `zipview::ZipIndexOpener` (`next_read` /
+/// `supply` / `finish`), suitable for callers that fetch byte ranges on demand.
+/// Returns `ZipReadError::Truncated` if `fetch_range` returns an empty slice for a requested range.
+pub fn open_zip_index_staged<E: From<zipview::ZipReadError>>(
+    total_len: u64,
+    mut fetch_range: impl FnMut(std::ops::Range<u64>) -> Result<Vec<u8>, E>,
+) -> Result<zipview::ZipIndex, E> {
+    let mut opener = zipview::ZipIndexOpener::new(total_len);
+    while let Some(range) = opener.next_read()? {
+        let bytes = fetch_range(range.clone())?;
+        if bytes.is_empty() {
+            return Err(zipview::ZipReadError::Truncated.into());
+        }
+        opener.supply(range.start, &bytes)?;
+    }
+    Ok(opener.finish()?)
+}
+
+/// Inspects a ZIP file's central directory via bounded range reads (`zipview::ZipIndex`)
+/// without loading the whole archive into memory.
 pub fn inspect_zip_file_via_central_directory(
     path: &std::path::Path,
 ) -> Result<ZipArchiveInspection, String> {
-    let archive = zipfast::zip::Archive::open(path).map_err(|e| e.to_string())?;
-    let mut entries = Vec::with_capacity(archive.entries.len());
-    let mut file_count = 0usize;
-    let mut dir_count = 0usize;
-    let mut total_uncompressed_size = 0u64;
-    let mut total_compressed_size = 0u64;
-    let mut has_encrypted_entries = false;
-    let mut has_compressed_entries = false;
-    let mut has_symlinks = false;
-    let mut has_nzb_files = false;
-    let mut has_extension_manifest = false;
-    let mut has_media_files = false;
-    let mut has_nested_archives = false;
-    let mut has_document_marker = false;
-    let mut image_file_count = 0usize;
-    let mut largest_file: Option<(String, u64, bool)> = None;
-
-    for entry in &archive.entries {
-        let is_dir = entry.is_dir();
-        let is_symlink = entry.is_link();
-        let is_encrypted = entry.encrypted();
-        let eff_comp = entry.effective_method();
-        let is_compressed = !is_dir && eff_comp != 0;
-
-        has_symlinks |= is_symlink;
-        has_encrypted_entries |= is_encrypted;
-
-        if matches!(
-            entry.name.as_str(),
-            "[Content_Types].xml"
-                | "META-INF/container.xml"
-                | "META-INF/manifest.xml"
-                | "META-INF/MANIFEST.MF"
-                | "AndroidManifest.xml"
-                | "mimetype"
-        ) {
-            has_document_marker = true;
-        }
-
-        if is_dir {
-            dir_count += 1;
-        } else {
-            file_count += 1;
-            total_uncompressed_size = total_uncompressed_size.saturating_add(entry.size);
-            total_compressed_size = total_compressed_size.saturating_add(entry.packed);
-            has_compressed_entries |= is_compressed;
-
-            let (base, ext) = entry_base_and_lower_ext(&entry.name);
-            if base.eq_ignore_ascii_case("manifest.json") {
-                has_extension_manifest = true;
-            }
-            if ext == b".nzb" {
-                has_nzb_files = true;
-            } else if crate::filetypes::is_video_ext(&ext)
-                || crate::filetypes::is_audio_ext(&ext)
-                || crate::filetypes::is_disc_structure_ext(&ext)
-                || crate::filetypes::is_disc_descriptor_ext(&ext)
-                || ext == b".iso"
-                || ext == b".img"
-            {
-                has_media_files = true;
-            } else if crate::filetypes::is_rar_ext(&ext)
-                || crate::filetypes::is_seven_zip_ext(&ext)
-                || ext == b".par2"
-            {
-                has_nested_archives = true;
-            } else if is_image_ext(&ext) {
-                image_file_count += 1;
-            }
-
-            if !is_symlink
-                && largest_file
-                    .as_ref()
-                    .is_none_or(|(_, max_sz, _)| entry.size > *max_sz)
-            {
-                largest_file = Some((base.to_string(), entry.size, is_compressed));
-            }
-        }
-
-        entries.push(ZipEntryInfo {
-            name: entry.name.clone(),
-            uncompressed_size: entry.size,
-            compressed_size: entry.packed,
-            compression_method: entry.method,
-            effective_compression: eff_comp,
-            compression_name: compression_method_name(eff_comp),
-            crc32: entry.crc32,
-            local_header_offset: entry.local_at,
-            is_dir,
-            is_encrypted,
-            is_symlink,
-        });
-    }
-
-    let kind = if file_count == 0 {
-        ZipContentKind::Empty
-    } else if has_extension_manifest {
-        ZipContentKind::ExtensionPackage
-    } else if has_nzb_files {
-        ZipContentKind::NzbArchive
-    } else if has_document_marker || (image_file_count == file_count && file_count >= 2) {
-        ZipContentKind::DocumentContainer
-    } else if has_media_files {
-        ZipContentKind::MediaArchive
-    } else if has_nested_archives {
-        ZipContentKind::NestedArchive
-    } else {
-        ZipContentKind::GeneralFiles
-    };
-
-    Ok(ZipArchiveInspection {
-        kind,
-        entries,
-        file_count,
-        dir_count,
-        total_uncompressed_size,
-        total_compressed_size,
-        has_encrypted_entries,
-        has_compressed_entries,
-        has_symlinks,
-        has_nzb_files,
-        largest_file,
-    })
+    inspect_zip_file(path)
 }
 
-/// Inspects a ZIP file on disk using `zipview::ZipReader` when `<= 64 MiB`,
-/// or via bounded central-directory seeks (`zipfast::zip::Archive::open`) for larger files.
+/// Inspects a ZIP file on disk of any size using `zipview::ZipIndex` range reads.
 pub fn inspect_zip_file(path: &std::path::Path) -> Result<ZipArchiveInspection, String> {
-    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
-    if meta.len() <= MAX_IN_MEMORY_ZIP_INSPECT_BYTES {
-        let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-        inspect_zip_bytes(&bytes).map_err(|e| e.to_string())
-    } else {
-        inspect_zip_file_via_central_directory(path)
-    }
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let total_len = file.metadata().map_err(|e| e.to_string())?.len();
+    inspect_zip_range(total_len, |offset, buf| {
+        read_file_range_at(&mut file, offset, buf)
+    })
+    .map_err(|e| e.to_string())
 }
 
 /// Verifies whether `password` satisfies the encryption header check of encrypted entries
@@ -1083,15 +1032,38 @@ pub fn verify_zip_password_bytes(
     Ok(true)
 }
 
-/// Verifies whether `password` is accepted for a ZIP file on disk using `zipview::PasswordCheck`
-/// (bounded to archives `<= 64 MiB`).
-pub fn verify_zip_password_file(path: &std::path::Path, password: &str) -> Result<bool, String> {
-    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
-    if meta.len() > MAX_IN_MEMORY_ZIP_INSPECT_BYTES {
-        return Err("ZIP archive exceeds in-memory inspection limit".to_string());
+/// Verifies whether `password` satisfies the encryption header check of encrypted entries
+/// in a `zipview::ZipIndex` using two small range reads per encrypted entry (`fetch_password_check`).
+pub fn verify_zip_index_password<E: From<zipview::ZipReadError>>(
+    index: &zipview::ZipIndex,
+    password: &str,
+    mut read: impl FnMut(u64, &mut [u8]) -> Result<(), E>,
+) -> Result<bool, E> {
+    for entry in index.entries() {
+        if entry.is_encrypted() {
+            if password.is_empty() {
+                return Ok(false);
+            }
+            if let Some(check) = index.fetch_password_check(entry, &mut read)? {
+                if !check.accepts(password) {
+                    return Ok(false);
+                }
+            }
+        }
     }
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    verify_zip_password_bytes(&bytes, password).map_err(|e| e.to_string())
+    Ok(true)
+}
+
+/// Verifies whether `password` is accepted for a ZIP file on disk of any size using
+/// `zipview::ZipIndex::fetch_password_check` (two small reads per encrypted entry).
+pub fn verify_zip_password_file(path: &std::path::Path, password: &str) -> Result<bool, String> {
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let total_len = file.metadata().map_err(|e| e.to_string())?.len();
+    let mut read = |offset: u64, buf: &mut [u8]| -> std::io::Result<()> {
+        read_file_range_at(&mut file, offset, buf)
+    };
+    let index = zipview::ZipIndex::open(total_len, &mut read).map_err(|e| e.to_string())?;
+    verify_zip_index_password(&index, password, &mut read).map_err(|e| e.to_string())
 }
 
 /// Reads and decompresses a single named entry from an in-memory ZIP archive using `zipview`.
@@ -1102,6 +1074,27 @@ pub fn read_zip_entry_bytes(
 ) -> Result<Vec<u8>, zipview::ZipReadError> {
     let reader = zipview::ZipReader::new(bytes)?;
     reader.read_by_name_with_password(name, password)
+}
+
+/// Reads and decompresses a single named entry from a ZIP file on disk using `zipview::ZipIndex`
+/// (opening the central directory, then two range reads for the entry's local header and data).
+pub fn read_zip_entry_file(
+    path: &std::path::Path,
+    name: &str,
+    password: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let total_len = file.metadata().map_err(|e| e.to_string())?.len();
+    let mut read = |offset: u64, buf: &mut [u8]| -> std::io::Result<()> {
+        read_file_range_at(&mut file, offset, buf)
+    };
+    let index = zipview::ZipIndex::open(total_len, &mut read).map_err(|e| e.to_string())?;
+    let entry = index
+        .by_name(name)
+        .ok_or_else(|| zipview::ZipReadError::EntryNotFound.to_string())?;
+    index
+        .fetch_entry(entry, password, &mut read)
+        .map_err(|e| e.to_string())
 }
 
 fn has_suffix_icase(path: &[u8], suffix: &[u8]) -> bool {
@@ -1210,39 +1203,41 @@ where
 
     let pw_opt = (!password.is_empty()).then_some(password);
 
-    // Pre-inspect ZIP archives with `zipview` when within reasonable in-memory bounds (<= 64 MiB)
+    // Pre-inspect ZIP archives with `zipview::ZipIndex` via bounded range reads
     // to identify inner contents, reject symlinks before writing any file, and verify passwords.
     let path_bytes = path_to_bytes(archive_path);
     if has_suffix_icase(path_bytes, b".zip") || has_suffix_icase(path_bytes, b".cbz") {
-        if let Ok(meta) = std::fs::metadata(archive_path) {
-            if meta.len() <= 64 * 1024 * 1024 {
-                if let Ok(bytes) = std::fs::read(archive_path) {
-                    if let Ok(inspection) = inspect_zip_bytes(&bytes) {
-                        log_cb(
-                            4,
-                            &format!(
-                                "zipview identified {:?} with {} file(s) ({} bytes uncompressed)",
-                                inspection.kind,
-                                inspection.file_count,
-                                inspection.total_uncompressed_size
-                            ),
-                        );
-                        if inspection.has_symlinks {
-                            log_cb(1, "ERROR: Dangerous link path was ignored");
-                            log_cb(0, "Stream repair: archive contains link");
-                            return Err("archive contains link".to_string());
+        if let Ok(mut file) = std::fs::File::open(archive_path) {
+            if let Ok(meta) = file.metadata() {
+                let mut read = |offset: u64, buf: &mut [u8]| -> std::io::Result<()> {
+                    read_file_range_at(&mut file, offset, buf)
+                };
+                if let Ok(index) = zipview::ZipIndex::open(meta.len(), &mut read) {
+                    let inspection = inspect_zip_index(&index, &mut read);
+                    log_cb(
+                        4,
+                        &format!(
+                            "zipview identified {:?} with {} file(s) ({} bytes uncompressed)",
+                            inspection.kind,
+                            inspection.file_count,
+                            inspection.total_uncompressed_size
+                        ),
+                    );
+                    if inspection.has_symlinks {
+                        log_cb(1, "ERROR: Dangerous link path was ignored");
+                        log_cb(0, "Stream repair: archive contains link");
+                        return Err("archive contains link".to_string());
+                    }
+                    if inspection.has_encrypted_entries {
+                        if password.is_empty() {
+                            let msg = "Archive is encrypted and requires a password";
+                            log_cb(1, msg);
+                            return Err(msg.to_string());
                         }
-                        if inspection.has_encrypted_entries {
-                            if password.is_empty() {
-                                let msg = "Archive is encrypted and requires a password";
-                                log_cb(1, msg);
-                                return Err(msg.to_string());
-                            }
-                            if let Ok(false) = verify_zip_password_bytes(&bytes, password) {
-                                let msg = "Archive password rejected by zipview verifier";
-                                log_cb(1, msg);
-                                return Err(msg.to_string());
-                            }
+                        if let Ok(false) = verify_zip_index_password(&index, password, &mut read) {
+                            let msg = "Archive password rejected by zipview verifier";
+                            log_cb(1, msg);
+                            return Err(msg.to_string());
                         }
                     }
                 }
@@ -1754,6 +1749,232 @@ mod tests {
             read_zip_entry_bytes(&enc_zip, "secret.mkv", Some("hunter2")).unwrap(),
             plain
         );
+
+        // 8. Range-based ZipIndex & ZipIndexOpener match in-memory ZipReader
+        for archive in [
+            &empty_zip,
+            &nzb_zip,
+            &ext_zip,
+            &media_zip,
+            &epub_zip,
+            &cbz_zip,
+            &sym_zip,
+            &enc_zip,
+        ] {
+            let mem_info = inspect_zip_bytes(archive).unwrap();
+            let range_info = inspect_zip_range(
+                archive.len() as u64,
+                |offset, buf| -> std::io::Result<()> {
+                    let start = offset as usize;
+                    buf.copy_from_slice(&archive[start..start + buf.len()]);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(range_info, mem_info);
+
+            let staged_index = open_zip_index_staged(
+                archive.len() as u64,
+                |range| -> Result<Vec<u8>, zipview::ZipReadError> {
+                    Ok(archive[range.start as usize..range.end as usize].to_vec())
+                },
+            )
+            .unwrap();
+            assert_eq!(staged_index.len(), mem_info.entries.len());
+        }
+
+        // Staged opener returns Truncated (and does not livelock) if fetch_range yields an empty slice
+        let empty_fetch_err = open_zip_index_staged(
+            empty_zip.len() as u64,
+            |_range| -> Result<Vec<u8>, zipview::ZipReadError> { Ok(Vec::new()) },
+        );
+        assert_eq!(
+            empty_fetch_err.unwrap_err(),
+            zipview::ZipReadError::Truncated
+        );
+
+        // Lossy UTF-8 manifest.json still classifies as ExtensionPackage across both paths
+        let non_utf8_manifest = b"{\"name\": \"Email\xFF\", \"main\": \"main.py\"}";
+        let lossy_ext_zip =
+            build_test_zip(&[("Email/manifest.json", non_utf8_manifest, None, 0, None)]);
+        assert_eq!(
+            inspect_zip_bytes(&lossy_ext_zip).unwrap().kind,
+            ZipContentKind::ExtensionPackage
+        );
+        assert_eq!(
+            inspect_zip_range(
+                lossy_ext_zip.len() as u64,
+                |offset, buf| -> Result<(), zipview::ZipReadError> {
+                    let start = offset as usize;
+                    buf.copy_from_slice(&lossy_ext_zip[start..start + buf.len()]);
+                    Ok(())
+                }
+            )
+            .unwrap()
+            .kind,
+            ZipContentKind::ExtensionPackage
+        );
+
+        // Staged entry_range / password_check_range / read_entry_with_password on enc_zip
+        let enc_index = open_zip_index_staged(
+            enc_zip.len() as u64,
+            |range| -> Result<Vec<u8>, zipview::ZipReadError> {
+                Ok(enc_zip[range.start as usize..range.end as usize].to_vec())
+            },
+        )
+        .unwrap();
+        let secret_entry = enc_index.by_name("secret.mkv").unwrap();
+        let hdr_range = enc_index.header_range(secret_entry).unwrap();
+        let hdr_bytes = &enc_zip[hdr_range.start as usize..hdr_range.end as usize];
+        let pw_range = enc_index
+            .password_check_range(secret_entry, hdr_bytes)
+            .unwrap();
+        let pw_bytes = &enc_zip[pw_range.start as usize..pw_range.end as usize];
+        let pw_check = enc_index.password_check(secret_entry, pw_bytes).unwrap();
+        assert!(!pw_check.accepts("wrongpass"));
+        assert!(pw_check.accepts("hunter2"));
+        let data_range = enc_index.entry_range(secret_entry, hdr_bytes).unwrap();
+        let data_bytes = &enc_zip[data_range.start as usize..data_range.end as usize];
+        assert_eq!(
+            enc_index
+                .read_entry_with_password(secret_entry, data_bytes, Some("hunter2"))
+                .unwrap(),
+            plain
+        );
+
+        // 9. Virtual 50 GiB archive opens with a single ~65 KB read and refuses >256 MiB entries before reading
+        const BIG: u64 = 50 << 30;
+        let mut big_head = Vec::new();
+        big_head.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        big_head.extend_from_slice(&45u16.to_le_bytes());
+        big_head.extend_from_slice(&0x0800u16.to_le_bytes());
+        big_head.extend_from_slice(&0u16.to_le_bytes());
+        big_head.extend_from_slice(&[0u8; 8]);
+        big_head.extend_from_slice(&u32::MAX.to_le_bytes());
+        big_head.extend_from_slice(&u32::MAX.to_le_bytes());
+        big_head.extend_from_slice(&9u16.to_le_bytes());
+        big_head.extend_from_slice(&20u16.to_le_bytes());
+        big_head.extend_from_slice(b"movie.mkv");
+        big_head.extend_from_slice(&1u16.to_le_bytes());
+        big_head.extend_from_slice(&16u16.to_le_bytes());
+        big_head.extend_from_slice(&BIG.to_le_bytes());
+        big_head.extend_from_slice(&BIG.to_le_bytes());
+
+        let readme_at = big_head.len() as u64 + BIG;
+        let body = b"release notes";
+        let body_crc = test_crc32(body);
+        let mut tail = Vec::new();
+        tail.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        tail.extend_from_slice(&20u16.to_le_bytes());
+        tail.extend_from_slice(&0x0800u16.to_le_bytes());
+        tail.extend_from_slice(&0u16.to_le_bytes());
+        tail.extend_from_slice(&[0u8; 4]);
+        tail.extend_from_slice(&body_crc.to_le_bytes());
+        tail.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        tail.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        tail.extend_from_slice(&10u16.to_le_bytes());
+        tail.extend_from_slice(&0u16.to_le_bytes());
+        tail.extend_from_slice(b"readme.txt");
+        tail.extend_from_slice(body);
+
+        let cd_at = readme_at + tail.len() as u64;
+        let make_cd = |name: &[u8], crc: u32, sz: u32, off: u32, extra: &[u8]| {
+            let mut c = Vec::new();
+            c.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+            c.extend_from_slice(&0x032du16.to_le_bytes());
+            c.extend_from_slice(&45u16.to_le_bytes());
+            c.extend_from_slice(&0x0800u16.to_le_bytes());
+            c.extend_from_slice(&0u16.to_le_bytes());
+            c.extend_from_slice(&[0u8; 4]);
+            c.extend_from_slice(&crc.to_le_bytes());
+            c.extend_from_slice(&sz.to_le_bytes());
+            c.extend_from_slice(&sz.to_le_bytes());
+            c.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            c.extend_from_slice(&(extra.len() as u16).to_le_bytes());
+            c.extend_from_slice(&[0u8; 6]);
+            c.extend_from_slice(&(0o100644u32 << 16).to_le_bytes());
+            c.extend_from_slice(&off.to_le_bytes());
+            c.extend_from_slice(name);
+            c.extend_from_slice(extra);
+            c
+        };
+        let mut big_extra = vec![1, 0, 16, 0];
+        big_extra.extend_from_slice(&BIG.to_le_bytes());
+        big_extra.extend_from_slice(&BIG.to_le_bytes());
+        let mut readme_extra = vec![1, 0, 8, 0];
+        readme_extra.extend_from_slice(&readme_at.to_le_bytes());
+        let mut cd = make_cd(b"movie.mkv", 0, u32::MAX, 0, &big_extra);
+        cd.extend_from_slice(&make_cd(
+            b"readme.txt",
+            body_crc,
+            body.len() as u32,
+            u32::MAX,
+            &readme_extra,
+        ));
+        let record_at = cd_at + cd.len() as u64;
+        tail.extend_from_slice(&cd);
+        tail.extend_from_slice(&0x0606_4b50u32.to_le_bytes());
+        tail.extend_from_slice(&44u64.to_le_bytes());
+        tail.extend_from_slice(&45u16.to_le_bytes());
+        tail.extend_from_slice(&45u16.to_le_bytes());
+        tail.extend_from_slice(&[0u8; 8]);
+        tail.extend_from_slice(&2u64.to_le_bytes());
+        tail.extend_from_slice(&2u64.to_le_bytes());
+        tail.extend_from_slice(&(cd.len() as u64).to_le_bytes());
+        tail.extend_from_slice(&cd_at.to_le_bytes());
+        tail.extend_from_slice(&0x0706_4b50u32.to_le_bytes());
+        tail.extend_from_slice(&0u32.to_le_bytes());
+        tail.extend_from_slice(&record_at.to_le_bytes());
+        tail.extend_from_slice(&1u32.to_le_bytes());
+        tail.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        tail.extend_from_slice(&[0u8; 4]);
+        tail.extend_from_slice(&u16::MAX.to_le_bytes());
+        tail.extend_from_slice(&u16::MAX.to_le_bytes());
+        tail.extend_from_slice(&u32::MAX.to_le_bytes());
+        tail.extend_from_slice(&u32::MAX.to_le_bytes());
+        tail.extend_from_slice(&0u16.to_le_bytes());
+
+        let virtual_len = readme_at + tail.len() as u64;
+        let range_reads = std::cell::RefCell::new(Vec::new());
+        let mut sparse_read = |offset: u64, buf: &mut [u8]| -> Result<(), zipview::ZipReadError> {
+            range_reads.borrow_mut().push((offset, buf.len()));
+            buf.fill(0);
+            for (p_start, p_bytes) in [(0u64, big_head.as_slice()), (readme_at, tail.as_slice())] {
+                let p_end = p_start + p_bytes.len() as u64;
+                let r_end = offset + buf.len() as u64;
+                let from = offset.max(p_start);
+                let to = r_end.min(p_end);
+                if from < to {
+                    let dst = (from - offset) as usize..(to - offset) as usize;
+                    let src = (from - p_start) as usize..(to - p_start) as usize;
+                    buf[dst].copy_from_slice(&p_bytes[src]);
+                }
+            }
+            Ok(())
+        };
+        let huge_index = zipview::ZipIndex::open(virtual_len, &mut sparse_read).unwrap();
+        assert_eq!(range_reads.borrow().len(), 1);
+        assert!(range_reads.borrow()[0].1 < 70_000);
+        let huge_info = inspect_zip_index(&huge_index, &mut sparse_read);
+        assert_eq!(huge_info.kind, ZipContentKind::MediaArchive);
+        assert_eq!(
+            huge_info.largest_file,
+            Some(("movie.mkv".to_string(), BIG, false))
+        );
+        let readme_entry = huge_index.by_name("readme.txt").unwrap();
+        assert_eq!(
+            huge_index
+                .fetch_entry(readme_entry, None, &mut sparse_read)
+                .unwrap(),
+            body
+        );
+        let reads_before_big = range_reads.borrow().len();
+        let big_entry = huge_index.by_name("movie.mkv").unwrap();
+        assert_eq!(
+            huge_index.fetch_entry(big_entry, None, &mut sparse_read),
+            Err(zipview::ZipReadError::EntryTooLarge(BIG))
+        );
+        assert_eq!(range_reads.borrow().len(), reads_before_big);
     }
 
     #[test]
@@ -1820,8 +2041,30 @@ mod tests {
         )
         .unwrap();
 
-        assert!(extract_archive_with_zipfast(&enc_zip_path, &enc_out_dir, "wrong-pw", 1, |_, _| {})
-            .is_err());
+        assert!(!verify_zip_password_file(&enc_zip_path, "").unwrap());
+        assert!(!verify_zip_password_file(&enc_zip_path, "wrong-pw").unwrap());
+        assert!(verify_zip_password_file(&enc_zip_path, "correct-pw").unwrap());
+        assert_eq!(
+            read_zip_entry_file(&enc_zip_path, "movie.mkv", Some("correct-pw")).unwrap(),
+            plain
+        );
+
+        assert!(
+            read_zip_entry_file(&enc_zip_path, "missing.mkv", Some("correct-pw")).is_err()
+        );
+
+        let mut wrong_pw_logs = Vec::new();
+        assert!(extract_archive_with_zipfast(
+            &enc_zip_path,
+            &enc_out_dir,
+            "wrong-pw",
+            1,
+            |k, m| wrong_pw_logs.push((k, m.to_string()))
+        )
+        .is_err());
+        assert!(wrong_pw_logs
+            .iter()
+            .any(|(_, m)| m.contains("Archive password rejected by zipview verifier")));
         let enc_summary =
             extract_archive_with_zipfast(&enc_zip_path, &enc_out_dir, "correct-pw", 1, |_, _| {})
                 .unwrap();
@@ -1859,6 +2102,7 @@ mod tests {
         std::fs::write(&rar3_path, b"Rar!\x1a\x07\x00\x99\x00\x00\x00\x00").unwrap();
         assert!(can_extract_with_zipfast(&rar5_path));
         assert!(!can_extract_with_zipfast(&rar3_path));
+        assert!(inspect_zip_file(&rar5_path).is_err());
 
         // 5. Bounded central-directory inspection matches in-memory zipview inspection
         let cd_info = inspect_zip_file_via_central_directory(&sym_zip_path).unwrap();

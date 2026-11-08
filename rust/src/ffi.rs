@@ -9392,19 +9392,6 @@ pub unsafe extern "C" fn nzbget_rs_parchecker_format_twin_err_msg(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_parchecker_maybe_splitted_fragment(
-    filename1: *const c_char,
-    filename2: *const c_char,
-) -> c_int {
-    if filename1.is_null() || filename2.is_null() {
-        return 0;
-    }
-    let f1 = CStr::from_ptr(filename1).to_bytes();
-    let f2 = CStr::from_ptr(filename2).to_bytes();
-    crate::parchecker::maybe_splitted_fragment(f1, f2) as c_int
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_parchecker_calc_dupe_blocks_delta(
     prev_used_blocks: c_int,
     was_blocks_missing2: u32,
@@ -9835,17 +9822,6 @@ pub unsafe extern "C" fn nzbget_rs_streaming_par_take_unpause_ids(
 #[no_mangle]
 pub extern "C" fn nzbget_rs_streaming_par_forget(nzb_id: c_int) {
     crate::parchecker::streaming_session_forget(nzb_id);
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_unpack_detect_rar_signature(
-    sig_bytes: *const u8,
-    sig_len: usize,
-) -> c_int {
-    if sig_bytes.is_null() || sig_len != 8 {
-        return 0;
-    }
-    crate::unpack::detect_rar_signature(std::slice::from_raw_parts(sig_bytes, sig_len))
 }
 
 #[no_mangle]

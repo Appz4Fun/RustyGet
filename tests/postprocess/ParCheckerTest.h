@@ -20,12 +20,7 @@
 
 
 #include "Util.h"
-
 #include "TestFramework.h"
-#include "Util.h"
-#include "Util.h"
-#include "Util.h"
-#include "nzbget_rs.h"
 
 namespace ParCheckerTestNs
 {
@@ -328,51 +323,6 @@ BOOST_AUTO_TEST_CASE(ExtCleanupDiskDatTest)
 	parChecker.Execute();
 
 	BOOST_CHECK_EQUAL(parChecker.GetStatus(), expectedStatus);
-}
-
-BOOST_AUTO_TEST_CASE(ParFilenameBlockCountTest)
-{
-	int baseLen = 0;
-	int blocks = 0;
-	BOOST_CHECK(ParParser::ParseParFilename("movie.vol07+08.par2", true, &baseLen, &blocks));
-	BOOST_CHECK_EQUAL(blocks, 8);
-	BOOST_CHECK_EQUAL(baseLen, 5);
-
-	// numbered volumes without a block count: unknown, not the volume number
-	BOOST_CHECK(ParParser::ParseParFilename("movie.vol-06.par2", true, &baseLen, &blocks));
-	BOOST_CHECK_EQUAL(blocks, -1);
-	BOOST_CHECK_EQUAL(baseLen, 5);
-
-	BOOST_CHECK(ParParser::ParseParFilename("movie.par2", true, &baseLen, &blocks));
-	BOOST_CHECK_EQUAL(blocks, 0);
-}
-
-BOOST_AUTO_TEST_CASE(RustPostRepairFfiParityTest)
-{
-	BOOST_CHECK_NE(nzbget_rs_parchecker_maybe_splitted_fragment("video.mkv.001", "video.mkv"), 0);
-	BOOST_CHECK_NE(nzbget_rs_parchecker_maybe_splitted_fragment("video.001", "video.002"), 0);
-	BOOST_CHECK_EQUAL(nzbget_rs_parchecker_maybe_splitted_fragment("video.rar", "video.r00"), 0);
-
-	int counts[4] = { 1, 2, 4, 8 };
-	size_t indices[4]{};
-	int rem = 0;
-	size_t sel = nzbget_rs_repair_select_more_pars(counts, 4, 5, indices, 4, &rem);
-	BOOST_CHECK_EQUAL(sel, 2u);
-	BOOST_CHECK_EQUAL(indices[0], 2u);
-	BOOST_CHECK_EQUAL(indices[1], 0u);
-	BOOST_CHECK_EQUAL(rem, 0);
-
-	BOOST_CHECK_EQUAL(nzbget_rs_repair_pick_twin_volume(counts, 4, 3), 2);
-	BOOST_CHECK_EQUAL(nzbget_rs_repair_pick_twin_volume(counts, 4, 12), 3);
-
-	int estSec = 0;
-	BOOST_CHECK_NE(nzbget_rs_repair_check_par_time_limit(10, 1, 360, 100, &estSec), 0);
-	BOOST_CHECK_EQUAL(estSec, 3600);
-
-	const uint8_t rar3Sig[8] = { 0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00, 0x73 };
-	const uint8_t rar5Sig[8] = { 0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x01, 0x00 };
-	BOOST_CHECK_EQUAL(nzbget_rs_unpack_detect_rar_signature(rar3Sig, 8), 3);
-	BOOST_CHECK_EQUAL(nzbget_rs_unpack_detect_rar_signature(rar5Sig, 8), 5);
 }
 }
 

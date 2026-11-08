@@ -44562,7 +44562,7 @@ private:
 	static EDispatch Decide(ERpcProtocol protocol, EHttpMethod httpMethod, bool safeMethod, bool error,
 		bool jsonP, int* errCode, const char** errText);
 	void Dispatch();
-	std::unique_ptr<XmlCommand> CreateCommand(const char* methodName);
+	XmlCommand CreateCommand(const char* methodName);
 	void MutliCall();
 	void BuildResponse(const char* response, const char* callbackFunc, bool fault, const char* requestId);
 	void BuildErrorResponse(int errCode, const char* errText);
@@ -44572,9 +44572,15 @@ private:
 class XmlCommand
 {
 public:
-	XmlCommand();
-	virtual ~XmlCommand();
-	virtual void Execute() = 0;
+	explicit XmlCommand(int cmdId) : m_cmdId(cmdId)
+	{
+		m_response.Reserve(1024 * 10 - 1);
+	}
+	XmlCommand(int errCode, const char* errText) : m_cmdId(0), m_errCode(errCode), m_errText(errText)
+	{
+		m_response.Reserve(1024 * 10 - 1);
+	}
+	void Execute();
 	void PrepareParams();
 	void SetRequest(char* request) { m_request = request; m_requestPtr = m_request; }
 	void SetProtocol(XmlRpcProcessor::ERpcProtocol protocol) { m_protocol = protocol; }
@@ -44583,18 +44589,35 @@ public:
 	const char* GetResponse() { return m_response; }
 	const char* GetCallbackFunc() { return m_callbackFunc; }
 	bool GetFault() { return m_fault; }
-	virtual bool IsSafeMethod() { return false; };
-	virtual bool IsError() { return false; };
+	bool IsSafeMethod() { return nzbget_rs_xmlrpc_is_safe_command(m_cmdId) != 0; }
+	bool IsError() { return m_cmdId == 0; }
 
-protected:
+	struct ServerParams
+	{
+		std::string host;
+		std::string username;
+		std::string password;
+		std::string cipher;
+		int port;
+		int timeout;
+		int certVerifLevel;
+		bool encryption;
+	};
+	void PrintTestServerError(const char* errMsg);
+
+private:
+	int m_cmdId = 0;
+	int m_errCode = 0;
+	const char* m_errText = nullptr;
 	char* m_request = nullptr;
 	char* m_requestPtr = nullptr;
 	char* m_callbackFunc = nullptr;
 	StringBuilder m_response;
 	bool m_fault = false;
 	XmlRpcProcessor::ERpcProtocol m_protocol = XmlRpcProcessor::rpUndefined;
-	XmlRpcProcessor::EHttpMethod m_httpMethod;
-	XmlRpcProcessor::EUserAccess m_userAccess;
+	XmlRpcProcessor::EHttpMethod m_httpMethod = XmlRpcProcessor::hmPost;
+	XmlRpcProcessor::EUserAccess m_userAccess = XmlRpcProcessor::uaControl;
+	CString m_testServerErrText;
 
 	void BuildErrorResponse(int errCode, const char* errText, ...);
 	void BuildBoolResponse(bool ok);
@@ -44607,6 +44630,56 @@ protected:
 	bool NextParamAsStr(char** valueBuf);
 	CString EncodeStr(const char* str);
 	void DecodeStr(char* str);
+
+	void ExecutePauseUnpause(bool pause, int pauseAction);
+	void ExecuteScheduleResume();
+	void ExecuteShutdown();
+	void ExecuteReload();
+	void ExecuteVersion();
+	void ExecuteDumpDebug();
+	void ExecuteSetDownloadRate();
+	void ExecuteStatus();
+	void ExecuteSysInfo();
+	void ExecuteSystemHealth();
+	void ExecuteLog(int logSource);
+	void ExecuteListFiles();
+	void AppendNzbInfoFields(NzbInfo* nzbInfo);
+	void AppendPostInfoFields(PostInfo* postInfo, int logEntries, bool postQueue);
+	void ExecuteListGroups();
+	const char* DetectGroupStatus(NzbInfo* nzbInfo);
+	void ExecuteEditQueue();
+	void ExecuteDownload();
+	void ExecuteAppendFleet();
+	void ExecutePostQueue();
+	void ExecuteWriteLog();
+	void ExecuteClearLog();
+	void ExecuteScan();
+	void ExecuteHistory();
+	const char* DetectHistoryStatus(HistoryInfo* historyInfo);
+	void ExecuteUrlQueue();
+	void ExecuteConfig();
+	void ExecuteLoadConfig();
+	void ExecuteLoadExtensions();
+	void ExecuteDownloadExtension();
+	void ExecuteUpdateExtension();
+	void ExecuteDeleteExtension();
+	void ExecuteTestExtension();
+	void ExecuteSaveConfig();
+	void ExecuteConfigTemplates();
+	void ExecuteViewFeed(bool preview);
+	void ExecuteFetchFeed();
+	void ExecuteEditServer();
+	void ExecuteReadUrl();
+	void ExecuteCheckUpdates();
+	void ExecuteStartUpdate();
+	void ExecuteServerVolumes();
+	void ExecuteResetServerVolume();
+	void ExecuteTestServer();
+	void ExecuteTlsCipher(int operation);
+	void ExecuteTestServerSpeed();
+	void ExecuteTestDiskSpeed();
+	void ExecuteTestNetworkSpeed();
+	void ExecuteStartScript();
 };
 
 /*
@@ -46932,411 +47005,6 @@ namespace
 extern void ExitProc();
 extern void Reload();
 
-class SafeXmlCommand : public XmlCommand
-{
-public:
-	~SafeXmlCommand() override;
-	bool IsSafeMethod() override { return true; }
-};
-
-class ErrorXmlCommand final : public XmlCommand
-{
-public:
-	ErrorXmlCommand(int errCode, const char* errText) :
-		m_errCode(errCode), m_errText(errText) {}
-	void Execute() override;
-	bool IsError() override { return true; }
-
-private:
-	int m_errCode;
-	const char* m_errText;
-};
-
-class PauseUnpauseXmlCommand final : public XmlCommand
-{
-public:
-	enum EPauseAction
-	{
-		paDownload,
-		paPostProcess,
-		paScan
-	};
-
-	PauseUnpauseXmlCommand(bool pause, EPauseAction pauseAction) :
-		m_pause(pause), m_pauseAction(pauseAction) {}
-	void Execute() override;
-
-private:
-	bool m_pause;
-	EPauseAction m_pauseAction;
-};
-
-class ScheduleResumeXmlCommand final : public XmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class ShutdownXmlCommand final : public XmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class ReloadXmlCommand final : public XmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class VersionXmlCommand final : public SafeXmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class DumpDebugXmlCommand final : public SafeXmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class SetDownloadRateXmlCommand final : public XmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class StatusXmlCommand final : public SafeXmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class SysInfoXmlCommand final : public SafeXmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class SystemHealthXmlCommand final : public SafeXmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class LogXmlCommand: public SafeXmlCommand
-{
-public:
-	~LogXmlCommand() override;
-	void Execute() override;
-
-protected:
-	int m_idFrom;
-	int m_nrEntries;
-	virtual GuardedMessageList GuardMessages();
-};
-
-class NzbInfoXmlCommand: public SafeXmlCommand
-{
-public:
-	~NzbInfoXmlCommand() override;
-
-protected:
-	void AppendNzbInfoFields(NzbInfo* nzbInfo);
-	void AppendPostInfoFields(PostInfo* postInfo, int logEntries, bool postQueue);
-};
-
-class ListFilesXmlCommand final : public SafeXmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class ListGroupsXmlCommand final : public NzbInfoXmlCommand
-{
-public:
-	void Execute() override;
-private:
-	const char* DetectStatus(NzbInfo* nzbInfo);
-};
-
-class EditQueueXmlCommand final : public XmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class DownloadXmlCommand final : public XmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class AppendFleetXmlCommand final : public XmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class PostQueueXmlCommand final : public NzbInfoXmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class WriteLogXmlCommand final : public XmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class ClearLogXmlCommand final : public XmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class ScanXmlCommand final : public XmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class HistoryXmlCommand final : public NzbInfoXmlCommand
-{
-public:
-	void Execute() override;
-private:
-	const char* DetectStatus(HistoryInfo* historyInfo);
-};
-
-class UrlQueueXmlCommand final : public SafeXmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class ConfigXmlCommand final : public SafeXmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class LoadConfigXmlCommand final : public SafeXmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class LoadExtensionsXmlCommand final : public SafeXmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class DownloadExtensionXmlCommand final : public XmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class UpdateExtensionXmlCommand final : public XmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class DeleteExtensionXmlCommand final : public XmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class TestExtensionXmlCommand final : public XmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class SaveConfigXmlCommand final : public XmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class ConfigTemplatesXmlCommand final : public SafeXmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class ViewFeedXmlCommand final : public XmlCommand
-{
-public:
-	ViewFeedXmlCommand(bool preview) : m_preview(preview) {}
-	void Execute() override;
-private:
-	bool m_preview;
-};
-
-class FetchFeedXmlCommand final : public XmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class EditServerXmlCommand final : public XmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class ReadUrlXmlCommand final : public XmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class CheckUpdatesXmlCommand final : public XmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class StartUpdateXmlCommand final : public XmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class LogUpdateXmlCommand final : public LogXmlCommand
-{
-protected:
-	GuardedMessageList GuardMessages() override;
-};
-
-class ServerVolumesXmlCommand final : public SafeXmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class ResetServerVolumeXmlCommand final : public XmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class LoadLogXmlCommand final : public LogXmlCommand
-{
-protected:
-	void Execute() override;
-	GuardedMessageList GuardMessages() override;
-private:
-	int m_nzbId;
-	NzbInfo* m_nzbInfo;
-	MessageList m_messages;
-	std::unique_ptr<GuardedDownloadQueue> m_downloadQueue;
-};
-
-class TestServerXmlCommand final : public XmlCommand
-{
-public:
-	void Execute() override;
-
-	struct ServerParams
-	{
-		std::string host;
-		std::string username;
-		std::string password;
-		std::string cipher;
-		int port;
-		int timeout;
-		int certVerifLevel;
-		bool encryption;
-	};
-
-private:
-	CString m_errText;
-
-	class TestConnection final : public NntpConnection
-	{
-	public:
-		TestConnection(NewsServer* newsServer, TestServerXmlCommand* owner) :
-			NntpConnection(newsServer), m_owner(owner) {
-		}
-	protected:
-		TestServerXmlCommand* m_owner;
-		void PrintError(const char* errMsg) override { m_owner->PrintError(errMsg); }
-	};
-
-	void PrintError(const char* errMsg);
-};
-
-class TlsCipherXmlCommand final : public XmlCommand
-{
-public:
-	explicit TlsCipherXmlCommand(int operation) : m_operation(operation) {}
-	void Execute() override
-	{
-		const NzbgetRsJsonLimits limits{0x7ffffffeu, 0x7fffffffu / 24u, 0x3fffffffu};
-		int fault = 0;
-		NzbgetRsBuf buf = nzbget_rs_xmlrpc_execute_tls_cipher(
-			m_operation,
-			(int)m_userAccess, (int)XmlRpcProcessor::uaControl,
-			(int)m_protocol, (int)XmlRpcProcessor::rpJsonRpc,
-			(int)m_httpMethod, (int)XmlRpcProcessor::hmPost,
-			IsJson() ? 1 : 0,
-			m_request,
-			limits,
-			nullptr,
-			[](void*, int opKind, const char* jobId) -> NzbgetRsBuf
-			{
-				std::string resp = opKind == 0 ? TlsCipherBackend::Start() :
-					opKind == 1 ? TlsCipherBackend::Status(jobId) :
-					TlsCipherBackend::Cancel(jobId ? jobId : "");
-				return nzbget_rs_alloc_buf(resp.data(), resp.size());
-			},
-			&fault);
-		m_fault = fault != 0;
-		AppendRsBuf(m_response, buf);
-	}
-private:
-	int m_operation;
-};
-
-class TestServerSpeedXmlCommand final : public XmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class TestDiskSpeedXmlCommand final : public XmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class TestNetworkSpeedXmlCommand final : public XmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class StartScriptXmlCommand final : public XmlCommand
-{
-public:
-	void Execute() override;
-};
-
-class LogScriptXmlCommand final : public LogXmlCommand
-{
-protected:
-	virtual GuardedMessageList GuardMessages();
-};
-
-
 //*****************************************************************
 // XmlRpcProcessor
 
@@ -47395,24 +47063,24 @@ inline void XmlRpcProcessor::Dispatch()
 	}
 	else
 	{
-		std::unique_ptr<XmlCommand> command = CreateCommand(methodName);
-		command->SetRequest(request);
-		command->SetProtocol(m_protocol);
-		command->SetHttpMethod(m_httpMethod);
-		command->SetUserAccess(m_userAccess);
-		command->PrepareParams();
-		m_safeMethod = command->IsSafeMethod();
+		XmlCommand command = CreateCommand(methodName);
+		command.SetRequest(request);
+		command.SetProtocol(m_protocol);
+		command.SetHttpMethod(m_httpMethod);
+		command.SetUserAccess(m_userAccess);
+		command.PrepareParams();
+		m_safeMethod = command.IsSafeMethod();
 		int errCode = 0;
 		const char* errText = nullptr;
-		switch (Decide(m_protocol, m_httpMethod, m_safeMethod, command->IsError(), m_jsonP, &errCode, &errText))
+		switch (Decide(m_protocol, m_httpMethod, m_safeMethod, command.IsError(), m_jsonP, &errCode, &errText))
 		{
 			case dpExecute:
-				command->Execute();
-				BuildResponse(command->GetResponse(), command->GetCallbackFunc(), command->GetFault(), requestId);
+				command.Execute();
+				BuildResponse(command.GetResponse(), command.GetCallbackFunc(), command.GetFault(), requestId);
 				break;
 
 			case dpRefuseInCallback:
-				BuildJsonPRefusal(command.get(), errCode, errText, requestId);
+				BuildJsonPRefusal(&command, errCode, errText, requestId);
 				break;
 
 			case dpRefuse:
@@ -47463,26 +47131,26 @@ inline void XmlRpcProcessor::MutliCall()
 		WebUtil::XmlParseTagValue(nameEnd, "string", methodName, sizeof(methodName), nullptr);
 		debug("MutliCall, MethodName=%s", methodName);
 
-		std::unique_ptr<XmlCommand> command = CreateCommand(methodName);
+		XmlCommand command = CreateCommand(methodName);
 		// a call of the multicall runs as the caller, with the caller's access: it ran
 		// with full control access (a restricted user read the passwords through it);
 		// its parameters are its "params" member, not the start of the call
-		command->SetProtocol(m_protocol);
-		command->SetHttpMethod(m_httpMethod);
-		command->SetUserAccess(m_userAccess);
-		command->SetRequest(requestPtr + paramsOff);
-		m_safeMethod |= command->IsSafeMethod();
-		command->Execute();
+		command.SetProtocol(m_protocol);
+		command.SetHttpMethod(m_httpMethod);
+		command.SetUserAccess(m_userAccess);
+		command.SetRequest(requestPtr + paramsOff);
+		m_safeMethod |= command.IsSafeMethod();
+		command.Execute();
 
-		debug("MutliCall, Response=%s", command->GetResponse());
+		debug("MutliCall, Response=%s", command.GetResponse());
 
-		bool wrapArray = nzbget_rs_roc_xmlrpc_multicall_needs_array_wrap(command->GetResponse()) != 0;
+		bool wrapArray = nzbget_rs_roc_xmlrpc_multicall_needs_array_wrap(command.GetResponse()) != 0;
 		if (wrapArray)
 		{
 			response.Append("<array><data>");
 		}
 		response.Append("<value>");
-		response.Append(command->GetResponse());
+		response.Append(command.GetResponse());
 		response.Append("</value>");
 		if (wrapArray)
 		{
@@ -47523,7 +47191,7 @@ inline void XmlRpcProcessor::BuildResponse(const char* response, const char* cal
 
 inline void XmlRpcProcessor::BuildErrorResponse(int errCode, const char* errText)
 {
-	ErrorXmlCommand command(errCode, errText);
+	XmlCommand command(errCode, errText);
 	command.SetProtocol(m_protocol);
 	command.Execute();
 	BuildResponse(command.GetResponse(), "", command.GetFault(), nullptr);
@@ -47534,105 +47202,38 @@ inline void XmlRpcProcessor::BuildErrorResponse(int errCode, const char* errText
 inline void XmlRpcProcessor::BuildJsonPRefusal(XmlCommand* command, int errCode, const char* errText,
 	const char* requestId)
 {
-	ErrorXmlCommand refusal(errCode, errText);
+	XmlCommand refusal(errCode, errText);
 	refusal.SetProtocol(m_protocol);
 	refusal.Execute();
 	BuildResponse(refusal.GetResponse(), command->GetCallbackFunc(), refusal.GetFault(), requestId);
 }
 
-inline std::unique_ptr<XmlCommand> XmlRpcProcessor::CreateCommand(const char* methodName)
+inline XmlCommand XmlRpcProcessor::CreateCommand(const char* methodName)
 {
 	int accessDenied = nzbget_rs_ntw_xmlrpc_check_user_access_denied(
 		(int)m_userAccess, (int)uaAdd, (int)uaRestricted, methodName);
 	if (accessDenied == 1)
 	{
 		warn("Received request \"%s\" from add-user, access denied", methodName);
-		return std::make_unique<ErrorXmlCommand>(401, "Access denied");
+		return XmlCommand(401, "Access denied");
 	}
 	if (accessDenied == 2)
 	{
 		warn("Received request \"%s\" from restricted user, access denied", methodName);
-		return std::make_unique<ErrorXmlCommand>(401, "Access denied");
+		return XmlCommand(401, "Access denied");
 	}
 
-	switch (nzbget_rs_xmlrpc_match_command(methodName))
+	int cmdId = nzbget_rs_xmlrpc_match_command(methodName);
+	if (cmdId <= 0)
 	{
-		case 1: return std::make_unique<PauseUnpauseXmlCommand>(true, PauseUnpauseXmlCommand::paDownload);
-		case 2: return std::make_unique<PauseUnpauseXmlCommand>(false, PauseUnpauseXmlCommand::paDownload);
-		case 3: return std::make_unique<ShutdownXmlCommand>();
-		case 4: return std::make_unique<ReloadXmlCommand>();
-		case 5: return std::make_unique<VersionXmlCommand>();
-		case 6: return std::make_unique<DumpDebugXmlCommand>();
-		case 7: return std::make_unique<SetDownloadRateXmlCommand>();
-		case 8: return std::make_unique<StatusXmlCommand>();
-		case 9: return std::make_unique<SysInfoXmlCommand>();
-		case 10: return std::make_unique<SystemHealthXmlCommand>();
-		case 11: return std::make_unique<LogXmlCommand>();
-		case 12: return std::make_unique<ListFilesXmlCommand>();
-		case 13: return std::make_unique<ListGroupsXmlCommand>();
-		case 14: return std::make_unique<EditQueueXmlCommand>();
-		case 15: return std::make_unique<DownloadXmlCommand>();
-		case 16: return std::make_unique<AppendFleetXmlCommand>();
-		case 17: return std::make_unique<PostQueueXmlCommand>();
-		case 18: return std::make_unique<WriteLogXmlCommand>();
-		case 19: return std::make_unique<ClearLogXmlCommand>();
-		case 20: return std::make_unique<LoadLogXmlCommand>();
-		case 21: return std::make_unique<ScanXmlCommand>();
-		case 22: return std::make_unique<PauseUnpauseXmlCommand>(true, PauseUnpauseXmlCommand::paPostProcess);
-		case 23: return std::make_unique<PauseUnpauseXmlCommand>(false, PauseUnpauseXmlCommand::paPostProcess);
-		case 24: return std::make_unique<PauseUnpauseXmlCommand>(true, PauseUnpauseXmlCommand::paScan);
-		case 25: return std::make_unique<PauseUnpauseXmlCommand>(false, PauseUnpauseXmlCommand::paScan);
-		case 26: return std::make_unique<ScheduleResumeXmlCommand>();
-		case 27: return std::make_unique<HistoryXmlCommand>();
-		case 28: return std::make_unique<UrlQueueXmlCommand>();
-		case 29: return std::make_unique<ConfigXmlCommand>();
-		case 30: return std::make_unique<LoadConfigXmlCommand>();
-		case 31: return std::make_unique<LoadExtensionsXmlCommand>();
-		case 32: return std::make_unique<DownloadExtensionXmlCommand>();
-		case 33: return std::make_unique<UpdateExtensionXmlCommand>();
-		case 34: return std::make_unique<DeleteExtensionXmlCommand>();
-		case 35: return std::make_unique<TestExtensionXmlCommand>();
-		case 36: return std::make_unique<SaveConfigXmlCommand>();
-		case 37: return std::make_unique<ConfigTemplatesXmlCommand>();
-		case 38: return std::make_unique<ViewFeedXmlCommand>(false);
-		case 39: return std::make_unique<ViewFeedXmlCommand>(true);
-		case 40: return std::make_unique<FetchFeedXmlCommand>();
-		case 41: return std::make_unique<EditServerXmlCommand>();
-		case 42: return std::make_unique<ReadUrlXmlCommand>();
-		case 43: return std::make_unique<CheckUpdatesXmlCommand>();
-		case 44: return std::make_unique<StartUpdateXmlCommand>();
-		case 45: return std::make_unique<LogUpdateXmlCommand>();
-		case 46: return std::make_unique<ServerVolumesXmlCommand>();
-		case 47: return std::make_unique<ResetServerVolumeXmlCommand>();
-		case 48: return std::make_unique<TlsCipherXmlCommand>(0);
-		case 49: return std::make_unique<TlsCipherXmlCommand>(1);
-		case 50: return std::make_unique<TlsCipherXmlCommand>(2);
-		case 51: return std::make_unique<TestServerXmlCommand>();
-		case 52: return std::make_unique<TestServerSpeedXmlCommand>();
-		case 53: return std::make_unique<TestDiskSpeedXmlCommand>();
-		case 54: return std::make_unique<TestNetworkSpeedXmlCommand>();
-		case 55: return std::make_unique<StartScriptXmlCommand>();
-		case 56: return std::make_unique<LogScriptXmlCommand>();
-		default: return std::make_unique<ErrorXmlCommand>(1, "Invalid procedure");
+		return XmlCommand(1, "Invalid procedure");
 	}
+	return XmlCommand(cmdId);
 }
 
 
 //*****************************************************************
 // Base command
-
-inline XmlCommand::XmlCommand()
-	: m_protocol(XmlRpcProcessor::rpUndefined)
-	, m_httpMethod(XmlRpcProcessor::hmPost)
-	, m_userAccess(XmlRpcProcessor::uaControl)
-{
-	m_response.Reserve(1024 * 10 - 1);
-}
-
-inline XmlCommand::~XmlCommand() = default;
-inline SafeXmlCommand::~SafeXmlCommand() = default;
-inline LogXmlCommand::~LogXmlCommand() = default;
-inline NzbInfoXmlCommand::~NzbInfoXmlCommand() = default;
 
 inline bool XmlCommand::IsJson()
 {
@@ -47750,29 +47351,88 @@ inline void XmlCommand::DecodeStr(char* str)
 //*****************************************************************
 // Commands
 
-inline void ErrorXmlCommand::Execute()
+inline void XmlCommand::Execute()
 {
-	BuildErrorResponse(m_errCode, m_errText);
+	switch (m_cmdId)
+	{
+		case 1: ExecutePauseUnpause(true, 0); break;
+		case 2: ExecutePauseUnpause(false, 0); break;
+		case 3: ExecuteShutdown(); break;
+		case 4: ExecuteReload(); break;
+		case 5: ExecuteVersion(); break;
+		case 6: ExecuteDumpDebug(); break;
+		case 7: ExecuteSetDownloadRate(); break;
+		case 8: ExecuteStatus(); break;
+		case 9: ExecuteSysInfo(); break;
+		case 10: ExecuteSystemHealth(); break;
+		case 11: ExecuteLog(0); break;
+		case 12: ExecuteListFiles(); break;
+		case 13: ExecuteListGroups(); break;
+		case 14: ExecuteEditQueue(); break;
+		case 15: ExecuteDownload(); break;
+		case 16: ExecuteAppendFleet(); break;
+		case 17: ExecutePostQueue(); break;
+		case 18: ExecuteWriteLog(); break;
+		case 19: ExecuteClearLog(); break;
+		case 20: ExecuteLog(3); break;
+		case 21: ExecuteScan(); break;
+		case 22: ExecutePauseUnpause(true, 1); break;
+		case 23: ExecutePauseUnpause(false, 1); break;
+		case 24: ExecutePauseUnpause(true, 2); break;
+		case 25: ExecutePauseUnpause(false, 2); break;
+		case 26: ExecuteScheduleResume(); break;
+		case 27: ExecuteHistory(); break;
+		case 28: ExecuteUrlQueue(); break;
+		case 29: ExecuteConfig(); break;
+		case 30: ExecuteLoadConfig(); break;
+		case 31: ExecuteLoadExtensions(); break;
+		case 32: ExecuteDownloadExtension(); break;
+		case 33: ExecuteUpdateExtension(); break;
+		case 34: ExecuteDeleteExtension(); break;
+		case 35: ExecuteTestExtension(); break;
+		case 36: ExecuteSaveConfig(); break;
+		case 37: ExecuteConfigTemplates(); break;
+		case 38: ExecuteViewFeed(false); break;
+		case 39: ExecuteViewFeed(true); break;
+		case 40: ExecuteFetchFeed(); break;
+		case 41: ExecuteEditServer(); break;
+		case 42: ExecuteReadUrl(); break;
+		case 43: ExecuteCheckUpdates(); break;
+		case 44: ExecuteStartUpdate(); break;
+		case 45: ExecuteLog(1); break;
+		case 46: ExecuteServerVolumes(); break;
+		case 47: ExecuteResetServerVolume(); break;
+		case 48: ExecuteTlsCipher(0); break;
+		case 49: ExecuteTlsCipher(1); break;
+		case 50: ExecuteTlsCipher(2); break;
+		case 51: ExecuteTestServer(); break;
+		case 52: ExecuteTestServerSpeed(); break;
+		case 53: ExecuteTestDiskSpeed(); break;
+		case 54: ExecuteTestNetworkSpeed(); break;
+		case 55: ExecuteStartScript(); break;
+		case 56: ExecuteLog(2); break;
+		default: BuildErrorResponse(m_errCode, "%s", m_errText ? m_errText : "Invalid procedure"); break;
+	}
 }
 
-inline void PauseUnpauseXmlCommand::Execute()
+inline void XmlCommand::ExecutePauseUnpause(bool pause, int pauseAction)
 {
 	bool ok = true;
 
 	g_WorkState->SetResumeTime(0);
 
-	switch (m_pauseAction)
+	switch (pauseAction)
 	{
-		case paDownload:
-			g_WorkState->SetPauseDownload(m_pause);
+		case 0:
+			g_WorkState->SetPauseDownload(pause);
 			break;
 
-		case paPostProcess:
-			g_WorkState->SetPausePostProcess(m_pause);
+		case 1:
+			g_WorkState->SetPausePostProcess(pause);
 			break;
 
-		case paScan:
-			g_WorkState->SetPauseScan(m_pause);
+		case 2:
+			g_WorkState->SetPauseScan(pause);
 			break;
 
 		default:
@@ -47783,7 +47443,7 @@ inline void PauseUnpauseXmlCommand::Execute()
 }
 
 // bool scheduleresume(int Seconds)
-inline void ScheduleResumeXmlCommand::Execute()
+inline void XmlCommand::ExecuteScheduleResume()
 {
 	int seconds = 0;
 	bool hasParam = NextParamAsInt(&seconds);
@@ -47800,30 +47460,30 @@ inline void ScheduleResumeXmlCommand::Execute()
 	BuildBoolResponse(true);
 }
 
-inline void ShutdownXmlCommand::Execute()
+inline void XmlCommand::ExecuteShutdown()
 {
 	BuildBoolResponse(true);
 	ExitProc();
 }
 
-inline void ReloadXmlCommand::Execute()
+inline void XmlCommand::ExecuteReload()
 {
 	BuildBoolResponse(true);
 	Reload();
 }
 
-inline void VersionXmlCommand::Execute()
+inline void XmlCommand::ExecuteVersion()
 {
 	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_string(IsJson() ? 1 : 0, Util::VersionRevision(), 0, 1023));
 }
 
-inline void DumpDebugXmlCommand::Execute()
+inline void XmlCommand::ExecuteDumpDebug()
 {
 	g_Log->LogDebugInfo();
 	BuildBoolResponse(true);
 }
 
-inline void SetDownloadRateXmlCommand::Execute()
+inline void XmlCommand::ExecuteSetDownloadRate()
 {
 	int rate = 0;
 	// in KB/s: a rate past INT_MAX / 1024 wrapped around to a tiny limit
@@ -47839,7 +47499,7 @@ inline void SetDownloadRateXmlCommand::Execute()
 	BuildBoolResponse(true);
 }
 
-inline void StatusXmlCommand::Execute()
+inline void XmlCommand::ExecuteStatus()
 {
 	int postJobCount = 0;
 	int urlCount = 0;
@@ -47942,7 +47602,7 @@ inline void StatusXmlCommand::Execute()
 		IsJson() ? 1 : 0, &statusFields, servers.data(), servers.size()));
 }
 
-inline void SysInfoXmlCommand::Execute()
+inline void XmlCommand::ExecuteSysInfo()
 {
 	std::string response = IsJson()
 		? System::ToJsonStr(*g_SystemInfo)
@@ -47951,7 +47611,7 @@ inline void SysInfoXmlCommand::Execute()
 	AppendResponse(response.c_str());
 }
 
-inline void SystemHealthXmlCommand::Execute()
+inline void XmlCommand::ExecuteSystemHealth()
 {
 	if (g_Options->GetSystemHealthCheck())
 	{
@@ -47963,28 +47623,65 @@ inline void SystemHealthXmlCommand::Execute()
 	}
 }
 
-// struct[] log(idfrom, entries)
-inline void LogXmlCommand::Execute()
+// struct[] log(idfrom, entries) / loadlog(nzbid, logidfrom, logentries) / logupdate / logscript
+inline void XmlCommand::ExecuteLog(int logSource)
 {
-	m_idFrom = 0;
-	m_nrEntries = 0;
-	if (!NextParamAsInt(&m_idFrom) || !NextParamAsInt(&m_nrEntries) ||
-		!nzbget_rs_roc_xmlrpc_log_params_valid(m_idFrom, m_nrEntries))
+	int nzbId = 0;
+	if (logSource == 3 && !NextParamAsInt(&nzbId))
 	{
 		BuildErrorResponse(2, "Invalid parameter");
 		return;
 	}
 
-	debug("iIDFrom=%i", m_idFrom);
-	debug("iNrEntries=%i", m_nrEntries);
+	int idFrom = 0;
+	int nrEntries = 0;
+	if (!NextParamAsInt(&idFrom) || !NextParamAsInt(&nrEntries) ||
+		!nzbget_rs_roc_xmlrpc_log_params_valid(idFrom, nrEntries))
+	{
+		BuildErrorResponse(2, "Invalid parameter");
+		return;
+	}
 
-	GuardedMessageList messages = GuardMessages();
+	debug("iIDFrom=%i", idFrom);
+	debug("iNrEntries=%i", nrEntries);
+
+	MessageList diskMessages;
+	std::unique_ptr<GuardedDownloadQueue> downloadQueue;
+	auto guardMessages = [&]() -> GuardedMessageList
+	{
+		if (logSource == 1)
+		{
+			return g_Maintenance->GuardMessages();
+		}
+		if (logSource == 2)
+		{
+			return g_CommandScriptLog->GuardMessages();
+		}
+		if (logSource == 3)
+		{
+			g_DiskState->LoadNzbMessages(nzbId, &diskMessages);
+			if (diskMessages.empty())
+			{
+				downloadQueue = std::make_unique<GuardedDownloadQueue>(DownloadQueue::Guard());
+				NzbInfo* nzbInfo = (*downloadQueue)->GetQueue()->Find(nzbId);
+				if (nzbInfo)
+				{
+					return nzbInfo->GuardCachedMessages();
+				}
+				downloadQueue.reset();
+			}
+			return GuardedMessageList(&diskMessages, nullptr);
+		}
+		return g_Log->GuardMessages();
+	};
+
+	GuardedMessageList messages = guardMessages();
 
 	int start = messages->size();
 	nzbget_rs_rco_rpc_log_slice_range(
 		(int)messages->size(),
 		messages->empty() ? 0 : (int)messages->front().GetId(),
-		m_idFrom, m_nrEntries, &start, &m_nrEntries);
+		idFrom, nrEntries, &start, &nrEntries);
 
 	std::vector<NzbgetRsRpcLogEntry> entries;
 	if ((uint32)start < messages->size())
@@ -48006,14 +47703,9 @@ inline void LogXmlCommand::Execute()
 		IsJson() ? 1 : 0, entries.data(), entries.size()));
 }
 
-inline GuardedMessageList LogXmlCommand::GuardMessages()
-{
-	return g_Log->GuardMessages();
-}
-
 // struct[] listfiles(int IDFrom, int IDTo, int NZBID)
 // For backward compatibility with 0.8 parameter "NZBID" is optional
-inline void ListFilesXmlCommand::Execute()
+inline void XmlCommand::ExecuteListFiles()
 {
 	int idStart = 0;
 	int idEnd = 0;
@@ -48081,7 +47773,7 @@ inline void ListFilesXmlCommand::Execute()
 	AppendResponse(IsJson() ? "\n]" : "</data></array>\n");
 }
 
-inline void NzbInfoXmlCommand::AppendNzbInfoFields(NzbInfo* nzbInfo)
+inline void XmlCommand::AppendNzbInfoFields(NzbInfo* nzbInfo)
 {
 	time_t postStartTime = nzbInfo->GetPostInfo() ? nzbInfo->GetPostInfo()->GetStartTime() : 0;
 	time_t curTime = postStartTime ? Util::CurrentTime() : 0;
@@ -48163,7 +47855,7 @@ inline void NzbInfoXmlCommand::AppendNzbInfoFields(NzbInfo* nzbInfo)
 		stats.data(), stats.size()));
 }
 
-inline void NzbInfoXmlCommand::AppendPostInfoFields(PostInfo* postInfo, int logEntries, bool postQueue)
+inline void XmlCommand::AppendPostInfoFields(PostInfo* postInfo, int logEntries, bool postQueue)
 {
 	time_t curTime = postInfo ? Util::CurrentTime() : 0;
 
@@ -48204,7 +47896,7 @@ inline void NzbInfoXmlCommand::AppendPostInfoFields(PostInfo* postInfo, int logE
 }
 
 // struct[] listgroups(int NumberOfLogEntries)
-inline void ListGroupsXmlCommand::Execute()
+inline void XmlCommand::ExecuteListGroups()
 {
 	int nrEntries = 0;
 	NextParamAsInt(&nrEntries);
@@ -48216,7 +47908,7 @@ inline void ListGroupsXmlCommand::Execute()
 	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
 	for (NzbInfo* nzbInfo : downloadQueue->GetQueue())
 	{
-		const char* status = DetectStatus(nzbInfo);
+		const char* status = DetectGroupStatus(nzbInfo);
 
 		AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_group_item_start(
 			IsJson() ? 1 : 0,
@@ -48240,7 +47932,7 @@ inline void ListGroupsXmlCommand::Execute()
 	AppendResponse(IsJson() ? "\n]" : "</data></array>\n");
 }
 
-inline const char* ListGroupsXmlCommand::DetectStatus(NzbInfo* nzbInfo)
+inline const char* XmlCommand::DetectGroupStatus(NzbInfo* nzbInfo)
 {
 	bool hasPostInfo = nzbInfo->GetPostInfo() != nullptr;
 	int postStage = hasPostInfo ? (int)nzbInfo->GetPostInfo()->GetStage() : 0;
@@ -48264,7 +47956,7 @@ inline const char* ListGroupsXmlCommand::DetectStatus(NzbInfo* nzbInfo)
 //    bool editqueue(string Command, string Args, int[] IDs)
 // v17:
 //    bool editqueue(string Command, int Offset, string Args, int[] IDs)
-inline void EditQueueXmlCommand::Execute()
+inline void XmlCommand::ExecuteEditQueue()
 {
 	int action = -1;
 	NzbgetRsBuf argsOrErr{nullptr, 0};
@@ -48309,7 +48001,7 @@ inline void EditQueueXmlCommand::Execute()
 //   bool append(string NZBFilename, string Category, int Priority, bool AddToTop, string Content, bool AddPaused, string DupeKey, int DupeScore, string DupeMode)
 // appendfleet(DupeKey, Category, Priority, Timeout, Name1, Content1, Name2, Content2, ...):
 // a content is the nzb-file in base64 or its url; see Fleet
-inline void AppendFleetXmlCommand::Execute()
+inline void XmlCommand::ExecuteAppendFleet()
 {
 	if (!IsJson())
 	{
@@ -48398,7 +48090,7 @@ inline void AppendFleetXmlCommand::Execute()
 		entries.data(), entries.size()));
 }
 
-inline void DownloadXmlCommand::Execute()
+inline void XmlCommand::ExecuteDownload()
 {
 	bool v13 = true;
 
@@ -48594,7 +48286,7 @@ inline void DownloadXmlCommand::Execute()
 }
 
 // deprecated
-inline void PostQueueXmlCommand::Execute()
+inline void XmlCommand::ExecutePostQueue()
 {
 	int nrEntries = 0;
 	NextParamAsInt(&nrEntries);
@@ -48630,7 +48322,7 @@ inline void PostQueueXmlCommand::Execute()
 	AppendResponse(IsJson() ? "\n]" : "</data></array>\n");
 }
 
-inline void WriteLogXmlCommand::Execute()
+inline void XmlCommand::ExecuteWriteLog()
 {
 	char* kind;
 	char* text;
@@ -48659,14 +48351,14 @@ inline void WriteLogXmlCommand::Execute()
 	BuildBoolResponse(true);
 }
 
-inline void ClearLogXmlCommand::Execute()
+inline void XmlCommand::ExecuteClearLog()
 {
 	g_Log->Clear();
 
 	BuildBoolResponse(true);
 }
 
-inline void ScanXmlCommand::Execute()
+inline void XmlCommand::ExecuteScan()
 {
 	bool syncMode = false;
 	// optional parameter "SyncMode"
@@ -48678,7 +48370,7 @@ inline void ScanXmlCommand::Execute()
 
 // struct[] history(bool hidden)
 // Parameter "hidden" is optional (new in v12)
-inline void HistoryXmlCommand::Execute()
+inline void XmlCommand::ExecuteHistory()
 {
 	AppendResponse(IsJson() ? "[\n" : "<array><data>\n");
 
@@ -48697,7 +48389,7 @@ inline void HistoryXmlCommand::Execute()
 		}
 
 		NzbInfo* nzbInfo = nullptr;
-		const char* status = DetectStatus(historyInfo);
+		const char* status = DetectHistoryStatus(historyInfo);
 		int hasComma = index++ > 0 ? 1 : 0;
 		int entryKind = nzbget_rs_dqh_xmlrpc_classify_history_entry_kind(
 			(int)historyInfo->GetKind(),
@@ -48748,7 +48440,7 @@ inline void HistoryXmlCommand::Execute()
 	AppendResponse(IsJson() ? "\n]" : "</data></array>\n");
 }
 
-inline const char* HistoryXmlCommand::DetectStatus(HistoryInfo* historyInfo)
+inline const char* XmlCommand::DetectHistoryStatus(HistoryInfo* historyInfo)
 {
 	const char* status = "FAILURE/INTERNAL_ERROR";
 	int entryKind = nzbget_rs_dqh_xmlrpc_classify_history_entry_kind(
@@ -48772,7 +48464,7 @@ inline const char* HistoryXmlCommand::DetectStatus(HistoryInfo* historyInfo)
 }
 
 // Deprecated in v13
-inline void UrlQueueXmlCommand::Execute()
+inline void XmlCommand::ExecuteUrlQueue()
 {
 	AppendResponse(IsJson() ? "[\n" : "<array><data>\n");
 
@@ -48799,7 +48491,7 @@ inline void UrlQueueXmlCommand::Execute()
 }
 
 // struct[] config()
-inline void ConfigXmlCommand::Execute()
+inline void XmlCommand::ExecuteConfig()
 {
 	Options::GuardedOptEntries optEntries = g_Options->GuardOptEntries();
 	std::vector<NzbgetRsRpcConfigItem> entries;
@@ -48822,7 +48514,7 @@ inline void ConfigXmlCommand::Execute()
 }
 
 // struct[] loadconfig()
-inline void LoadConfigXmlCommand::Execute()
+inline void XmlCommand::ExecuteLoadConfig()
 {
 	int fault = 0;
 	NzbgetRsBuf buf = nzbget_rs_xmlrpc_execute_load_config(
@@ -48835,7 +48527,7 @@ inline void LoadConfigXmlCommand::Execute()
 	AppendRsBuf(m_response, buf);
 }
 
-inline void LoadExtensionsXmlCommand::Execute()
+inline void XmlCommand::ExecuteLoadExtensions()
 {
 	bool loadFromDisk = false;
 	bool isJson = IsJson();
@@ -48875,7 +48567,7 @@ inline void LoadExtensionsXmlCommand::Execute()
 	AppendResponse(isJson ? "\n]" : "</data></array>\n");
 }
 
-inline void DownloadExtensionXmlCommand::Execute()
+inline void XmlCommand::ExecuteDownloadExtension()
 {
 	char* url;
 	if (!NextParamAsStr(&url))
@@ -48934,7 +48626,7 @@ inline void DownloadExtensionXmlCommand::Execute()
 	BuildBoolResponse(true);
 }
 
-inline void UpdateExtensionXmlCommand::Execute()
+inline void XmlCommand::ExecuteUpdateExtension()
 {
 	char* url;
 	if (!NextParamAsStr(&url))
@@ -48974,7 +48666,7 @@ inline void UpdateExtensionXmlCommand::Execute()
 	BuildBoolResponse(true);
 }
 
-inline void DeleteExtensionXmlCommand::Execute()
+inline void XmlCommand::ExecuteDeleteExtension()
 {
 	char* extName;
 	if (!NextParamAsStr(&extName))
@@ -48994,7 +48686,7 @@ inline void DeleteExtensionXmlCommand::Execute()
 	BuildBoolResponse(true);
 }
 
-inline void TestExtensionXmlCommand::Execute()
+inline void XmlCommand::ExecuteTestExtension()
 {
 	char* extEntryFileName;
 	if (!NextParamAsStr(&extEntryFileName))
@@ -49015,7 +48707,7 @@ inline void TestExtensionXmlCommand::Execute()
 }
 
 // bool saveconfig(struct[] data)
-inline void SaveConfigXmlCommand::Execute()
+inline void XmlCommand::ExecuteSaveConfig()
 {
 	int fault = 0;
 	NzbgetRsBuf buf = nzbget_rs_xmlrpc_execute_save_config(
@@ -49030,7 +48722,7 @@ inline void SaveConfigXmlCommand::Execute()
 
 // struct[] configtemplates(bool loadFromDisk)
 // parameter "loadFromDisk" is optional (new in v14)
-inline void ConfigTemplatesXmlCommand::Execute()
+inline void XmlCommand::ExecuteConfigTemplates()
 {
 	bool loadFromDisk = false;
 	NextParamAsBool(&loadFromDisk);
@@ -49066,12 +48758,12 @@ inline void ConfigTemplatesXmlCommand::Execute()
 // v16:
 // struct[] previewfeed(int id, string name, string url, string filter, bool backlog, bool pauseNzb, string category,
 //		int priority, int interval, string feedfilter, bool includeNonMatching, int cacheTimeSec, string cacheId)
-inline void ViewFeedXmlCommand::Execute()
+inline void XmlCommand::ExecuteViewFeed(bool preview)
 {
 	bool includeNonMatching = false;
 	std::shared_ptr<FeedItemList> feedItems;
 
-	if (m_preview)
+	if (preview)
 	{
 		int id = 0;
 		char* name;
@@ -49194,7 +48886,7 @@ inline void ViewFeedXmlCommand::Execute()
 }
 
 // bool fetchfeed(int ID)
-inline void FetchFeedXmlCommand::Execute()
+inline void XmlCommand::ExecuteFetchFeed()
 {
 	int id;
 	if (!NextParamAsInt(&id))
@@ -49209,7 +48901,7 @@ inline void FetchFeedXmlCommand::Execute()
 }
 
 // bool editserver(int ID, bool Active)
-inline void EditServerXmlCommand::Execute()
+inline void XmlCommand::ExecuteEditServer()
 {
 	bool ok = false;
 	int first = true;
@@ -49251,7 +48943,7 @@ inline void EditServerXmlCommand::Execute()
 }
 
 // string readurl(string url, string infoname)
-inline void ReadUrlXmlCommand::Execute()
+inline void XmlCommand::ExecuteReadUrl()
 {
 	char* url;
 	if (!NextParamAsStr(&url))
@@ -49309,7 +49001,7 @@ inline void ReadUrlXmlCommand::Execute()
 }
 
 // string checkupdates()
-inline void CheckUpdatesXmlCommand::Execute()
+inline void XmlCommand::ExecuteCheckUpdates()
 {
 	CString updateInfo;
 	bool ok = g_Maintenance->CheckUpdates(updateInfo);
@@ -49325,7 +49017,7 @@ inline void CheckUpdatesXmlCommand::Execute()
 }
 
 // bool startupdate(string branch)
-inline void StartUpdateXmlCommand::Execute()
+inline void XmlCommand::ExecuteStartUpdate()
 {
 	char* branchName;
 	if (!NextParamAsStr(&branchName))
@@ -49349,14 +49041,8 @@ inline void StartUpdateXmlCommand::Execute()
 	BuildBoolResponse(ok);
 }
 
-// struct[] logupdate(idfrom, entries)
-inline GuardedMessageList LogUpdateXmlCommand::GuardMessages()
-{
-	return g_Maintenance->GuardMessages();
-}
-
 // struct[] servervolumes(bool BytesPerSeconds, bool BytesPerMinutes, bool BytesPerHours, bool BytesPerDays, bool ArticlesPerDays)
-inline void ServerVolumesXmlCommand::Execute()
+inline void XmlCommand::ExecuteServerVolumes()
 {
 	AppendResponse(IsJson() ? "[\n" : "<array><data>\n");
 
@@ -49429,7 +49115,7 @@ inline void ServerVolumesXmlCommand::Execute()
 }
 
 // bool resetservervolume(int serverid, string counter);
-inline void ResetServerVolumeXmlCommand::Execute()
+inline void XmlCommand::ExecuteResetServerVolume()
 {
 	int serverId;
 	char* counter;
@@ -49472,53 +49158,10 @@ inline void ResetServerVolumeXmlCommand::Execute()
 	BuildBoolResponse(ok);
 }
 
-// struct[] loadlog(nzbid, logidfrom, logentries)
-inline void LoadLogXmlCommand::Execute()
-{
-	m_nzbInfo = nullptr;
-	m_nzbId = 0;
-	if (!NextParamAsInt(&m_nzbId))
-	{
-		BuildErrorResponse(2, "Invalid parameter");
-		return;
-	}
-
-	LogXmlCommand::Execute();
-	m_downloadQueue.reset();
-}
-
-inline GuardedMessageList LoadLogXmlCommand::GuardMessages()
-{
-	// TODO: optimize for m_iIDFrom and m_iNrEntries
-	g_DiskState->LoadNzbMessages(m_nzbId, &m_messages);
-
-	if (m_messages.empty())
-	{
-		// When we returing cached messages from m_nzbInfo we have to make sure that
-		// m_nzbInfo isn't destroyed during we are working with CachedMessages.
-		// For that purpose we set a lock on DownloadQueue,
-		// which will be released later in LoadLogXmlCommand::Execute().
-
-		m_downloadQueue = std::make_unique<GuardedDownloadQueue>(DownloadQueue::Guard());
-		m_nzbInfo = (*m_downloadQueue)->GetQueue()->Find(m_nzbId);
-		if (m_nzbInfo)
-		{
-			return m_nzbInfo->GuardCachedMessages();
-		}
-		else
-		{
-			// No nzb-object available, the lock on DownloadQueue can be released right now.
-			m_downloadQueue.reset();
-		}
-	}
-
-	return GuardedMessageList(&m_messages, nullptr);
-}
-
 // string testserver(string host, int port, string username, string password, bool encryption, string cipher, int timeout, int certVerifLevel);
-inline void TestServerXmlCommand::Execute()
+inline void XmlCommand::ExecuteTestServer()
 {
-	TestServerXmlCommand::ServerParams params;
+	ServerParams params;
 	char* host;
 	int port;
 	char* username;
@@ -49624,6 +49267,15 @@ inline void TestServerXmlCommand::Execute()
 		false,
 		params.certVerifLevel
 	);
+	class TestConnection final : public NntpConnection
+	{
+	public:
+		TestConnection(NewsServer* newsServer, XmlCommand* owner) :
+			NntpConnection(newsServer), m_owner(owner) {}
+	protected:
+		XmlCommand* m_owner;
+		void PrintError(const char* errMsg) override { m_owner->PrintTestServerError(errMsg); }
+	};
 	TestConnection connection(&server, this);
 	connection.SetTimeout(nzbget_rs_rol_xmlrpc_test_server_effective_timeout(
 		params.timeout, g_Options->GetArticleTimeout()));
@@ -49648,20 +49300,45 @@ inline void TestServerXmlCommand::Execute()
 
 	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_string(
 		IsJson() ? 1 : 0,
-		nzbget_rs_dqh_xmlrpc_select_test_server_err_text(ok ? 1 : 0, *m_errText),
+		nzbget_rs_dqh_xmlrpc_select_test_server_err_text(ok ? 1 : 0, *m_testServerErrText),
 		0,
 		1023));
 }
 
-inline void TestServerXmlCommand::PrintError(const char* errMsg)
+inline void XmlCommand::PrintTestServerError(const char* errMsg)
 {
-	if (m_errText.Empty())
+	if (m_testServerErrText.Empty())
 	{
-		m_errText = EncodeStr(errMsg);
+		m_testServerErrText = EncodeStr(errMsg);
 	}
 }
 
-inline void TestServerSpeedXmlCommand::Execute()
+inline void XmlCommand::ExecuteTlsCipher(int operation)
+{
+	const NzbgetRsJsonLimits limits{0x7ffffffeu, 0x7fffffffu / 24u, 0x3fffffffu};
+	int fault = 0;
+	NzbgetRsBuf buf = nzbget_rs_xmlrpc_execute_tls_cipher(
+		operation,
+		(int)m_userAccess, (int)XmlRpcProcessor::uaControl,
+		(int)m_protocol, (int)XmlRpcProcessor::rpJsonRpc,
+		(int)m_httpMethod, (int)XmlRpcProcessor::hmPost,
+		IsJson() ? 1 : 0,
+		m_request,
+		limits,
+		nullptr,
+		[](void*, int opKind, const char* jobId) -> NzbgetRsBuf
+		{
+			std::string resp = opKind == 0 ? TlsCipherBackend::Start() :
+				opKind == 1 ? TlsCipherBackend::Status(jobId) :
+				TlsCipherBackend::Cancel(jobId ? jobId : "");
+			return nzbget_rs_alloc_buf(resp.data(), resp.size());
+		},
+		&fault);
+	m_fault = fault != 0;
+	AppendRsBuf(m_response, buf);
+}
+
+inline void XmlCommand::ExecuteTestServerSpeed()
 {
 	char* nzbFileUrl;
 	if (!NextParamAsStr(&nzbFileUrl))
@@ -49706,7 +49383,7 @@ inline void TestServerSpeedXmlCommand::Execute()
 	BuildBoolResponse(true);
 }
 
-inline void TestDiskSpeedXmlCommand::Execute()
+inline void XmlCommand::ExecuteTestDiskSpeed()
 {
 	NzbgetRsBuf dirPathBuf{nullptr, 0};
 	size_t bufferSizeBytes = 0;
@@ -49770,7 +49447,7 @@ inline void TestDiskSpeedXmlCommand::Execute()
 		IsJson() ? 1 : 0, writeBytes, writeMs, readBytes, readMs));
 }
 
-inline void TestNetworkSpeedXmlCommand::Execute()
+inline void XmlCommand::ExecuteTestNetworkSpeed()
 {
 	// a pause that was on before the test stays on
 	PauseGuard pauseGuard;
@@ -49842,7 +49519,7 @@ inline void TestNetworkSpeedXmlCommand::Execute()
 }
 
 // bool startscript(string script, string command, string context, struct[] options);
-inline void StartScriptXmlCommand::Execute()
+inline void XmlCommand::ExecuteStartScript()
 {
 	NzbgetRsBuf scriptBuf{nullptr, 0};
 	NzbgetRsBuf commandBuf{nullptr, 0};
@@ -49877,12 +49554,6 @@ inline void StartScriptXmlCommand::Execute()
 	nzbget_rs_free(commandBuf);
 
 	BuildBoolResponse(ok);
-}
-
-// struct[] logscript(idfrom, entries)
-inline GuardedMessageList LogScriptXmlCommand::GuardMessages()
-{
-	return g_CommandScriptLog->GuardMessages();
 }
 
 namespace WebServerDetail
@@ -50825,17 +50496,14 @@ public:
 	bool RequestServerList(bool files, bool groups, const char* pattern);
 	bool RequestServerPauseUnpause(bool pause, ERemotePauseUnpauseAction action);
 	bool RequestServerSetDownloadRate(int rate);
-	bool RequestServerDumpDebug();
 	bool RequestServerEditQueue(DownloadQueue::EEditAction action, int offset, const char* text,
 		IdList* idList, NameList* nameList, ERemoteMatchMode matchMode);
 	bool RequestServerLog(int lines);
-	bool RequestServerShutdown();
-	bool RequestServerReload();
-	bool RequestServerVersion();
 	bool RequestPostQueue();
 	bool RequestWriteLog(int kind, const char* text);
 	bool RequestScan(bool syncMode);
 	bool RequestHistory(bool withHidden);
+	bool SendSimpleBoolRequest(ERemoteRequest request);
 	void BuildFileList(SNzbListResponse* listResponse, const char* trailingData, DownloadQueue* downloadQueue);
 
 private:
@@ -50845,7 +50513,6 @@ private:
 	bool InitConnection();
 	void InitMessageBase(SNzbRequestBase* messageBase, int request, int size);
 	bool ReceiveBoolResponse();
-	bool SendSimpleBoolRequest(ERemoteRequest request);
 	void printf(const char* msg, ...);
 	void perror(const char* msg);
 };
@@ -51355,11 +51022,6 @@ inline bool RemoteClient::SendSimpleBoolRequest(ERemoteRequest request)
 	return OK;
 }
 
-inline bool RemoteClient::RequestServerDumpDebug()
-{
-	return SendSimpleBoolRequest(rrDumpDebug);
-}
-
 inline bool RemoteClient::RequestServerEditQueue(DownloadQueue::EEditAction action, int offset, const char* text,
 	IdList* idList, NameList* nameList, ERemoteMatchMode matchMode)
 {
@@ -51423,21 +51085,6 @@ inline bool RemoteClient::RequestServerEditQueue(DownloadQueue::EEditAction acti
 	nzbget_rs_free(trailingBuf);
 	m_connection->Disconnect();
 	return OK;
-}
-
-inline bool RemoteClient::RequestServerShutdown()
-{
-	return SendSimpleBoolRequest(rrShutdown);
-}
-
-inline bool RemoteClient::RequestServerReload()
-{
-	return SendSimpleBoolRequest(rrReload);
-}
-
-inline bool RemoteClient::RequestServerVersion()
-{
-	return SendSimpleBoolRequest(rrVersion);
 }
 
 inline bool RemoteClient::RequestPostQueue()
@@ -51727,7 +51374,9 @@ protected:
 	{
 		if (IsRemoteMode())
 		{
-			RequestPauseUnpause(pause);
+			RemoteClient client;
+			client.SetVerbose(false);
+			client.RequestServerPauseUnpause(pause, rpDownload);
 		}
 		else
 		{
@@ -51736,18 +51385,13 @@ protected:
 		}
 	}
 
-	bool RequestPauseUnpause(bool pause)
-	{
-		RemoteClient client;
-		client.SetVerbose(false);
-		return client.RequestServerPauseUnpause(pause, rpDownload);
-	}
-
 	void ServerSetDownloadRate(int rate)
 	{
 		if (IsRemoteMode())
 		{
-			RequestSetDownloadRate(rate);
+			RemoteClient client;
+			client.SetVerbose(false);
+			client.RequestServerSetDownloadRate(rate);
 		}
 		else
 		{
@@ -51755,18 +51399,14 @@ protected:
 		}
 	}
 
-	bool RequestSetDownloadRate(int rate)
-	{
-		RemoteClient client;
-		client.SetVerbose(false);
-		return client.RequestServerSetDownloadRate(rate);
-	}
-
 	bool ServerEditQueue(DownloadQueue::EEditAction action, int offset, int id)
 	{
 		if (IsRemoteMode())
 		{
-			return RequestEditQueue(action, offset, id);
+			RemoteClient client;
+			client.SetVerbose(false);
+			IdList ids = { id };
+			return client.RequestServerEditQueue(action, offset, nullptr, &ids, nullptr, rmId);
 		}
 		else
 		{
@@ -51775,14 +51415,6 @@ protected:
 			nzbget_rs_free(offBuf);
 			return ok;
 		}
-	}
-
-	bool RequestEditQueue(DownloadQueue::EEditAction action, int offset, int id)
-	{
-		RemoteClient client;
-		client.SetVerbose(false);
-		IdList ids = { id };
-		return client.RequestServerEditQueue(action, offset, nullptr, &ids, nullptr, rmId);
 	}
 
 	void Wait(int milliseconds)
@@ -51952,8 +51584,17 @@ private:
 
 class LoggableFrontend : public Frontend
 {
+public:
+	explicit LoggableFrontend(bool colored = false) : m_colored(colored)
+	{
+		if (colored)
+		{
+			m_summary = true;
+		}
+	}
+
 protected:
-	virtual void Run()
+	void Run() override
 	{
 		debug("Entering LoggableFrontend-loop");
 
@@ -51969,7 +51610,7 @@ protected:
 		debug("Exiting LoggableFrontend-loop");
 	}
 
-	virtual void Update()
+	void Update()
 	{
 		if (!PrepareData())
 		{
@@ -52006,50 +51647,27 @@ protected:
 		fflush(stdout);
 	}
 
-	virtual void BeforePrint() {}
-	virtual void BeforeExit() {}
-
-	virtual void PrintMessage(Message& message)
+	void BeforePrint()
 	{
-		NzbgetRsBuf line = nzbget_rs_frontend_format_log_message(
-			0, (int)message.GetKind(), message.GetText());
-		if (line.data)
-		{
-			fwrite(line.data, 1, line.len, stdout);
-		}
-		nzbget_rs_free(line);
-	}
-
-	virtual void PrintStatus() {}
-
-	virtual void PrintSkip()
-	{
-		printf(".....\n");
-	}
-};
-
-class ColoredFrontend : public LoggableFrontend
-{
-public:
-	ColoredFrontend()
-	{
-		m_summary = true;
-	}
-
-protected:
-	virtual void BeforePrint()
-	{
-		if (m_needGoBack)
+		if (m_colored && m_needGoBack)
 		{
 			printf("\r\033[1A");
 			m_needGoBack = false;
 		}
 	}
 
-	virtual void PrintMessage(Message& message)
+	void BeforeExit()
+	{
+		if (m_colored && IsRemoteMode())
+		{
+			printf("\n");
+		}
+	}
+
+	void PrintMessage(Message& message)
 	{
 		NzbgetRsBuf line = nzbget_rs_frontend_format_log_message(
-			1, (int)message.GetKind(), message.GetText());
+			m_colored ? 1 : 0, (int)message.GetKind(), message.GetText());
 		if (line.data)
 		{
 			fwrite(line.data, 1, line.len, stdout);
@@ -52057,8 +51675,12 @@ protected:
 		nzbget_rs_free(line);
 	}
 
-	virtual void PrintStatus()
+	void PrintStatus()
 	{
+		if (!m_colored)
+		{
+			return;
+		}
 		printf("\033[s");
 		NzbgetRsBuf status = nzbget_rs_colored_frontend_format_status_bar(
 			m_standBy ? 1 : 0,
@@ -52077,20 +51699,13 @@ protected:
 		m_needGoBack = true;
 	}
 
-	virtual void PrintSkip()
+	void PrintSkip()
 	{
-		printf(".....\033[K\n");
-	}
-
-	virtual void BeforeExit()
-	{
-		if (IsRemoteMode())
-		{
-			printf("\n");
-		}
+		printf(m_colored ? ".....\033[K\n" : ".....\n");
 	}
 
 private:
+	bool m_colored = false;
 	bool m_needGoBack = false;
 };
 

@@ -832,6 +832,19 @@ mod tests {
 
         assert_eq!(pick_twin_volume(&counts, 3), Some(2));
         assert_eq!(pick_twin_volume(&counts, 10), Some(3));
+        assert_eq!(check_par_time_limit(10, true, 360, 100), Some(3600));
+        assert_eq!(
+            crate::parparser::parse_par_filename(b"movie.vol07+08.par2", true),
+            Some((5, 8))
+        );
+        assert_eq!(
+            crate::parparser::parse_par_filename(b"movie.vol-06.par2", true),
+            Some((5, -1))
+        );
+        assert_eq!(
+            crate::parparser::parse_par_filename(b"movie.par2", true),
+            Some((5, 0))
+        );
     }
 
     #[test]

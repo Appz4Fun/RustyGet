@@ -371,6 +371,18 @@ pub unsafe extern "C" fn nzbget_rs_xmlrpc_match_command(method_name: *const c_ch
     match_command(unsafe { input(method_name) })
 }
 
+pub fn is_safe_command(cmd_id: c_int) -> bool {
+    matches!(
+        cmd_id,
+        5 | 6 | 8 | 9 | 10 | 11 | 12 | 13 | 17 | 20 | 27 | 28 | 29 | 30 | 31 | 37 | 45 | 46 | 56
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_xmlrpc_is_safe_command(cmd_id: c_int) -> c_int {
+    is_safe_command(cmd_id) as c_int
+}
+
 /// # Safety
 /// `err_text` is null or a valid NUL-terminated string.
 #[no_mangle]
@@ -2597,19 +2609,6 @@ pub fn xmlrpc_encode_str(is_json: bool, raw: &[u8]) -> Vec<u8> {
     v
 }
 
-/// # Safety
-/// `str_ptr` must be null or point to a valid NUL-terminated string.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_xmlrpc_encode_str(
-    is_json: c_int,
-    str_ptr: *const c_char,
-) -> RsBuf {
-    if str_ptr.is_null() {
-        return into_buf(Vec::new());
-    }
-    into_buf(xmlrpc_encode_str(is_json != 0, unsafe { input(str_ptr) }))
-}
-
 /// Decodes `buf` in place using JSON unescaping when `is_json` is true or XML entity
 /// decoding otherwise (`XmlCommand::DecodeStr`), returning the decoded byte length.
 pub fn xmlrpc_decode_str(is_json: bool, buf: &mut [u8]) -> usize {
@@ -2617,24 +2616,6 @@ pub fn xmlrpc_decode_str(is_json: bool, buf: &mut [u8]) -> usize {
         crate::decode::json_decode(buf)
     } else {
         crate::text::xml_decode(buf, &|c| c.to_ascii_lowercase() as c_int)
-    }
-}
-
-/// # Safety
-/// `str_ptr` must be null or point to a writable NUL-terminated string.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_xmlrpc_decode_str(
-    is_json: c_int,
-    str_ptr: *mut c_char,
-) {
-    if str_ptr.is_null() {
-        return;
-    }
-    let len = unsafe { CStr::from_ptr(str_ptr).to_bytes().len() };
-    let buf = unsafe { std::slice::from_raw_parts_mut(str_ptr.cast::<u8>(), len) };
-    let n = xmlrpc_decode_str(is_json != 0, buf);
-    unsafe {
-        *str_ptr.add(n) = 0;
     }
 }
 
@@ -2657,16 +2638,6 @@ pub fn xmlrpc_classify_pause_action(
     }
 }
 
-#[no_mangle]
-pub extern "C" fn nzbget_rs_xmlrpc_classify_pause_action(
-    pause_action: c_int,
-    pa_download: c_int,
-    pa_post_process: c_int,
-    pa_scan: c_int,
-) -> c_int {
-    xmlrpc_classify_pause_action(pause_action, pa_download, pa_post_process, pa_scan)
-}
-
 /// Returns the opening array delimiter for JSON-RPC (`"[\n"`) or XML-RPC (`"<array><data>\n"`).
 pub fn xmlrpc_array_open_tag(is_json: bool) -> &'static CStr {
     if is_json {
@@ -2685,24 +2656,9 @@ pub fn xmlrpc_array_close_tag(is_json: bool) -> &'static CStr {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn nzbget_rs_xmlrpc_array_open_tag(is_json: c_int) -> *const c_char {
-    xmlrpc_array_open_tag(is_json != 0).as_ptr()
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_xmlrpc_array_close_tag(is_json: c_int) -> *const c_char {
-    xmlrpc_array_close_tag(is_json != 0).as_ptr()
-}
-
 /// Computes `ThreadCount` reported by `StatusXmlCommand::Execute` (`total_threads - 1`, excluding the RPC worker thread itself).
 pub fn xmlrpc_status_effective_thread_count(total_threads: i32) -> i32 {
     total_threads.wrapping_sub(1)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_xmlrpc_status_effective_thread_count(total_threads: c_int) -> c_int {
-    xmlrpc_status_effective_thread_count(total_threads)
 }
 
 /// Returns `tier_name` when present and non-empty, or `"NORMAL"` when `MemoryMonitor` is absent (`StatusXmlCommand::Execute`).
@@ -2711,20 +2667,6 @@ pub fn xmlrpc_status_default_memory_pressure_tier(tier_name: Option<&CStr>) -> &
         Some(t) if !t.to_bytes().is_empty() => t,
         _ => c"NORMAL",
     }
-}
-
-/// # Safety
-/// `tier_name` must be null or point to a valid NUL-terminated string.
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_xmlrpc_status_default_memory_pressure_tier(
-    tier_name: *const c_char,
-) -> *const c_char {
-    let opt = if tier_name.is_null() {
-        None
-    } else {
-        Some(unsafe { CStr::from_ptr(tier_name) })
-    };
-    xmlrpc_status_default_memory_pressure_tier(opt).as_ptr()
 }
 
 #[cfg(test)]
@@ -2749,6 +2691,14 @@ mod tests {
         assert_eq!(match_command(b"logscript"), 56);
         assert_eq!(match_command(b"unknown"), 0);
         assert_eq!(match_command(b""), 0);
+        assert!(!is_safe_command(1));
+        assert!(is_safe_command(8));
+        assert!(is_safe_command(13));
+        assert!(is_safe_command(20));
+        assert!(is_safe_command(45));
+        assert!(is_safe_command(56));
+        assert!(!is_safe_command(55));
+        assert!(!is_safe_command(0));
     }
 
     #[test]
@@ -2768,54 +2718,32 @@ mod tests {
             assert!(err_xml.contains("<i4>2</i4>"));
             assert!(err_xml.contains("&lt;param&gt;"));
 
-            assert_eq!(buf_to_string(nzbget_rs_xmlrpc_encode_str(1, std::ptr::null())), "");
-            assert_eq!(buf_to_string(nzbget_rs_xmlrpc_encode_str(1, msg.as_ptr())), "Bad <param> \\\"x\\\"");
-            assert_eq!(buf_to_string(nzbget_rs_xmlrpc_encode_str(0, msg.as_ptr())), "Bad &lt;param&gt; &quot;x&quot;");
+            assert_eq!(xmlrpc_encode_str(true, b""), b"");
+            assert_eq!(xmlrpc_encode_str(true, msg.as_bytes()), b"Bad <param> \\\"x\\\"");
+            assert_eq!(xmlrpc_encode_str(false, msg.as_bytes()), b"Bad &lt;param&gt; &quot;x&quot;");
 
-            nzbget_rs_xmlrpc_decode_str(1, std::ptr::null_mut());
-            let mut json_buf = b"Bad <param> \\\"x\\\"\0".to_vec();
-            nzbget_rs_xmlrpc_decode_str(1, json_buf.as_mut_ptr().cast());
-            assert_eq!(CStr::from_ptr(json_buf.as_ptr().cast()).to_bytes(), b"Bad <param> \"x\"");
+            let mut json_buf = b"Bad <param> \\\"x\\\"".to_vec();
+            let jlen = xmlrpc_decode_str(true, &mut json_buf);
+            assert_eq!(&json_buf[..jlen], b"Bad <param> \"x\"");
 
-            let mut xml_buf = b"Bad &lt;param&gt; &quot;x&quot;\0".to_vec();
-            nzbget_rs_xmlrpc_decode_str(0, xml_buf.as_mut_ptr().cast());
-            assert_eq!(CStr::from_ptr(xml_buf.as_ptr().cast()).to_bytes(), b"Bad <param> \"x\"");
+            let mut xml_buf = b"Bad &lt;param&gt; &quot;x&quot;".to_vec();
+            let xlen = xmlrpc_decode_str(false, &mut xml_buf);
+            assert_eq!(&xml_buf[..xlen], b"Bad <param> \"x\"");
 
-            assert_eq!(nzbget_rs_xmlrpc_classify_pause_action(0, 0, 1, 2), 1);
-            assert_eq!(nzbget_rs_xmlrpc_classify_pause_action(1, 0, 1, 2), 2);
-            assert_eq!(nzbget_rs_xmlrpc_classify_pause_action(2, 0, 1, 2), 3);
-            assert_eq!(nzbget_rs_xmlrpc_classify_pause_action(99, 0, 1, 2), 0);
+            assert_eq!(xmlrpc_classify_pause_action(0, 0, 1, 2), 1);
+            assert_eq!(xmlrpc_classify_pause_action(1, 0, 1, 2), 2);
+            assert_eq!(xmlrpc_classify_pause_action(2, 0, 1, 2), 3);
+            assert_eq!(xmlrpc_classify_pause_action(99, 0, 1, 2), 0);
 
+            assert_eq!(xmlrpc_array_open_tag(true).to_bytes(), b"[\n");
+            assert_eq!(xmlrpc_array_open_tag(false).to_bytes(), b"<array><data>\n");
+            assert_eq!(xmlrpc_array_close_tag(true).to_bytes(), b"\n]");
+            assert_eq!(xmlrpc_array_close_tag(false).to_bytes(), b"</data></array>\n");
+            assert_eq!(xmlrpc_status_effective_thread_count(5), 4);
+            assert_eq!(xmlrpc_status_effective_thread_count(1), 0);
+            assert_eq!(xmlrpc_status_default_memory_pressure_tier(None).to_bytes(), b"NORMAL");
             assert_eq!(
-                CStr::from_ptr(nzbget_rs_xmlrpc_array_open_tag(1)).to_bytes(),
-                b"[\n"
-            );
-            assert_eq!(
-                CStr::from_ptr(nzbget_rs_xmlrpc_array_open_tag(0)).to_bytes(),
-                b"<array><data>\n"
-            );
-            assert_eq!(
-                CStr::from_ptr(nzbget_rs_xmlrpc_array_close_tag(1)).to_bytes(),
-                b"\n]"
-            );
-            assert_eq!(
-                CStr::from_ptr(nzbget_rs_xmlrpc_array_close_tag(0)).to_bytes(),
-                b"</data></array>\n"
-            );
-            assert_eq!(nzbget_rs_xmlrpc_status_effective_thread_count(5), 4);
-            assert_eq!(nzbget_rs_xmlrpc_status_effective_thread_count(1), 0);
-            assert_eq!(
-                CStr::from_ptr(nzbget_rs_xmlrpc_status_default_memory_pressure_tier(
-                    std::ptr::null()
-                ))
-                .to_bytes(),
-                b"NORMAL"
-            );
-            assert_eq!(
-                CStr::from_ptr(nzbget_rs_xmlrpc_status_default_memory_pressure_tier(
-                    c"HIGH".as_ptr()
-                ))
-                .to_bytes(),
+                xmlrpc_status_default_memory_pressure_tier(Some(c"HIGH")).to_bytes(),
                 b"HIGH"
             );
         }

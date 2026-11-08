@@ -1592,7 +1592,7 @@ void RustyGet::StartFrontend()
 #endif
 
 		case Options::omColored:
-			m_frontend = std::make_unique<ColoredFrontend>();
+			m_frontend = std::make_unique<LoggableFrontend>(true);
 			break;
 
 		case Options::omLoggable:
@@ -1865,7 +1865,7 @@ void RustyGet::ProcessClientRequest()
 			break;
 
 		case CommandLineParser::opClientRequestDumpDebug:
-			ok = Client.RequestServerDumpDebug();
+			ok = Client.SendSimpleBoolRequest(rrDumpDebug);
 			break;
 
 		case CommandLineParser::opClientRequestEditQueue:
@@ -1880,11 +1880,11 @@ void RustyGet::ProcessClientRequest()
 			break;
 
 		case CommandLineParser::opClientRequestShutdown:
-			ok = Client.RequestServerShutdown();
+			ok = Client.SendSimpleBoolRequest(rrShutdown);
 			break;
 
 		case CommandLineParser::opClientRequestReload:
-			ok = Client.RequestServerReload();
+			ok = Client.SendSimpleBoolRequest(rrReload);
 			break;
 
 		case CommandLineParser::opClientRequestDownload:
@@ -1902,7 +1902,7 @@ void RustyGet::ProcessClientRequest()
 			break;
 
 		case CommandLineParser::opClientRequestVersion:
-			ok = Client.RequestServerVersion();
+			ok = Client.SendSimpleBoolRequest(rrVersion);
 			break;
 
 		case CommandLineParser::opClientRequestPostQueue:

@@ -1170,7 +1170,6 @@ NzbgetRsBuf nzbget_rs_parchecker_format_not_enough_blocks_errmsg(
     int32_t missing_blocks, int32_t block_found);
 NzbgetRsBuf nzbget_rs_parchecker_format_twin_err_msg(
     int res, int e_repair_not_possible, const char* own_err_msg);
-int nzbget_rs_parchecker_maybe_splitted_fragment(const char* filename1, const char* filename2);
 int nzbget_rs_parchecker_calc_dupe_blocks_delta(
     int prev_used_blocks, uint32_t was_blocks_missing2,
     uint32_t blocks_missing2, uint32_t was_blocks_missing_total,
@@ -1279,7 +1278,6 @@ size_t nzbget_rs_streaming_par_take_unpause_ids(
     size_t max_ids);
 void nzbget_rs_streaming_par_forget(int nzb_id);
 
-int nzbget_rs_unpack_detect_rar_signature(const uint8_t* sig_bytes, size_t sig_len);
 void nzbget_rs_unpack_parse_message(
     const char* text, const char* unpack_extended_dir, int is_seven_zip,
     NzbgetRsUnpackMessageInfo* out_info);
@@ -2495,6 +2493,7 @@ typedef struct {
 } NzbgetRsRpcFleetMember;
 
 int nzbget_rs_xmlrpc_match_command(const char* method_name);
+int nzbget_rs_xmlrpc_is_safe_command(int cmd_id);
 NzbgetRsBuf nzbget_rs_xmlrpc_format_error(int is_json, int err_code, const char* err_text);
 NzbgetRsBuf nzbget_rs_xmlrpc_format_bool(int is_json, int ok);
 NzbgetRsBuf nzbget_rs_xmlrpc_format_int(int is_json, int value);

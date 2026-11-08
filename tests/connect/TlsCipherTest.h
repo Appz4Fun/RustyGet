@@ -1,6 +1,5 @@
 #include "Util.h"
 #include "TestFramework.h"
-#include "Util.h"
 
 #if !defined(DISABLE_TLS) && (defined(__APPLE__) || defined(__linux__))
 #include <openssl/rand.h>

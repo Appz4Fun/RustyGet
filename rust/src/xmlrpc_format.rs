@@ -2705,6 +2705,28 @@ pub extern "C" fn nzbget_rs_xmlrpc_status_effective_thread_count(total_threads: 
     xmlrpc_status_effective_thread_count(total_threads)
 }
 
+/// Returns `tier_name` when present and non-empty, or `"NORMAL"` when `MemoryMonitor` is absent (`StatusXmlCommand::Execute`).
+pub fn xmlrpc_status_default_memory_pressure_tier(tier_name: Option<&CStr>) -> &CStr {
+    match tier_name {
+        Some(t) if !t.to_bytes().is_empty() => t,
+        _ => c"NORMAL",
+    }
+}
+
+/// # Safety
+/// `tier_name` must be null or point to a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_xmlrpc_status_default_memory_pressure_tier(
+    tier_name: *const c_char,
+) -> *const c_char {
+    let opt = if tier_name.is_null() {
+        None
+    } else {
+        Some(unsafe { CStr::from_ptr(tier_name) })
+    };
+    xmlrpc_status_default_memory_pressure_tier(opt).as_ptr()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2782,6 +2804,20 @@ mod tests {
             );
             assert_eq!(nzbget_rs_xmlrpc_status_effective_thread_count(5), 4);
             assert_eq!(nzbget_rs_xmlrpc_status_effective_thread_count(1), 0);
+            assert_eq!(
+                CStr::from_ptr(nzbget_rs_xmlrpc_status_default_memory_pressure_tier(
+                    std::ptr::null()
+                ))
+                .to_bytes(),
+                b"NORMAL"
+            );
+            assert_eq!(
+                CStr::from_ptr(nzbget_rs_xmlrpc_status_default_memory_pressure_tier(
+                    c"HIGH".as_ptr()
+                ))
+                .to_bytes(),
+                b"HIGH"
+            );
         }
     }
 

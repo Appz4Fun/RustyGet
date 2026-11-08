@@ -89,7 +89,6 @@ public:
 	NServFrontend() = default;
 
 private:
-	uint32 m_neededLogEntries = 0;
 	uint32 m_neededLogFirstId = 0;
 	bool m_needGoBack = false;
 

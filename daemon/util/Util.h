@@ -891,9 +891,6 @@ public:
 
 	static void TrimRight(char* str);
 	static void TrimRight(std::string& str);
-	static void TrimLeft(std::string& str);
-	static char* Trim(char* str);
-	static void Trim(std::string& str);
 	static bool EmptyStr(const char* str) { return !str || !*str; }
 	static bool EndsWith(std::string_view str, std::string_view suffix, bool caseSensitive);
 	static bool EndsWith(const char* str, const char* suffix, bool caseSensitive);
@@ -1018,12 +1015,9 @@ public:
 	bool IsValid() { return m_valid; }
 	const char* GetAddress() { return m_address; }
 	const char* GetProtocol() { return m_protocol; }
-	const char* GetUser() { return m_user; }
-	const char* GetPassword() { return m_password; }
 	const char* GetHost() { return m_host; }
 	const char* GetResource() { return m_resource; }
 	int GetPort() { return m_port; }
-	bool GetTls() { return m_tls; }
 
 private:
 	CString m_address;
@@ -1033,7 +1027,6 @@ private:
 	CString m_host;
 	CString m_resource;
 	int m_port = 0;
-	bool m_tls = false;
 	bool m_valid = false;
 
 	void ParseUrl();
@@ -1046,9 +1039,6 @@ public:
 	~RegEx();
 	bool IsValid();
 	bool Match(const char* str);
-	int GetMatchCount();
-	int GetMatchStart(int index);
-	int GetMatchLen(int index);
 
 private:
 #ifdef HAVE_REGEX_H
@@ -1063,9 +1053,7 @@ public:
 	WildMask(const char* pattern, bool wantsPositions = false):
 		m_pattern(pattern), m_wantsPositions(wantsPositions), m_wildCount(0) {}
 	bool Match(const char* text);
-	int GetMatchCount() { return m_wildCount; }
 	int GetMatchStart(int index) { return m_wildStart[index]; }
-	int GetMatchLen(int index) { return m_wildLen[index]; }
 
 private:
 	typedef std::vector<int> IntList;
@@ -1323,26 +1311,6 @@ inline void Util::TrimRight(std::string& str)
 	// rust/src/util.rs
 	size_t start;
 	str.resize(nzbget_rs_trim_string(str.data(), str.size(), 0, 1, 0, &start, TextRightSpace));
-}
-
-inline void Util::TrimLeft(std::string& str)
-{
-	// rust/src/util.rs
-	size_t start;
-	nzbget_rs_trim_string(str.data(), str.size(), 1, 0, 0, &start, TextRightSpace);
-	str.erase(0, start);
-}
-
-inline char* Util::Trim(char* str)
-{
-	// rust/src/util.rs
-	return nzbget_rs_trim_line(str, 0);
-}
-
-inline void Util::Trim(std::string& str)
-{
-	TrimLeft(str);
-	TrimRight(str);
 }
 
 inline char* Util::ReduceStr(char* str, const char* from, const char* to)
@@ -1620,21 +1588,6 @@ inline bool RegEx::Match(const char *str)
 	(void)str;
 	return false;
 #endif
-}
-
-inline int RegEx::GetMatchCount()
-{
-	return nzbget_rs_regex_get_match_count(m_rsRegex);
-}
-
-inline int RegEx::GetMatchStart(int index)
-{
-	return nzbget_rs_regex_get_match_start(m_rsRegex, index);
-}
-
-inline int RegEx::GetMatchLen(int index)
-{
-	return nzbget_rs_regex_get_match_len(m_rsRegex, index);
 }
 
 
@@ -3360,7 +3313,6 @@ public:
 		}
 		const char* GetName() const { return m_name.c_str(); }
 		const char* GetDestDir() const { return m_destDir.c_str(); }
-		const fs::path& GetDestDirPath() const { return m_destDirPath; }
 		bool GetUnpack() const { return m_unpack; }
 		const char* GetExtensions() const { return m_extensions.c_str(); }
 		NameList* GetAliases() { return &m_aliases; }
@@ -3528,7 +3480,6 @@ public:
 	bool GetNzbDirArchiveScan() const { return m_nzbDirArchiveScan; }
 	ENzbDirArchiveAction GetNzbDirArchiveAction() const { return m_nzbDirArchiveAction; }
 	int GetDiskSpace() const { return m_diskSpace; }
-	bool GetTls() const { return m_tls; }
 	bool GetCrashTrace() const { return m_crashTrace; }
 	bool GetCrashDump() const { return m_crashDump; }
 	bool GetParPauseQueue() const { return m_parPauseQueue; }
@@ -6590,9 +6541,6 @@ public:
 	std::unique_ptr<Connection> Accept();
 	void Cancel();
 	const char* GetHost() const { return m_host.c_str(); }
-	int GetPort() { return m_port; }
-	bool GetTls() { return m_tls; }
-	const char* GetCipher() const { return m_cipher.c_str(); }
 	void SetCipher(const char* cipher) { m_cipher = cipher ? cipher : ""; }
 	void SetTimeout(int timeout) { m_timeout = timeout; }
 	void SetResolvedAddresses(const std::vector<std::string>& addresses) { m_resolvedAddresses = addresses; }
@@ -8828,9 +8776,7 @@ public:
 	void SetStatus(EStatus status) { m_status = status; }
 	uint32 GetCrc() { return m_crc; }
 	const char* GetHash16k() { return m_hash16k.c_str(); }
-	void SetHash16k(std::string hash16k) { m_hash16k = std::move(hash16k); }
 	const char* GetParSetId() { return m_parSetId.c_str(); }
-	void SetParSetId(std::string parSetId) { m_parSetId = std::move(parSetId); }
 	bool SameFilename(const char* name) const;
 
 private:
@@ -17270,7 +17216,6 @@ public:
 	const std::string& GetCategoryFromFile() const { return m_category; }
 	std::unique_ptr<NzbInfo> DetachNzbInfo() { return std::move(m_nzbInfo); }
 	const std::string& GetPassword() const { return m_password; }
-	const std::string& GetMetaName() const { return m_metaName; }
 
 	void LogDebugInfo() { info(" NZBFile %s", m_fileName.c_str()); }
 
@@ -24080,7 +24025,6 @@ public:
 	void SetParQuick(bool parQuick) { m_parQuick = parQuick; }
 	bool GetParQuick() { return m_parQuick; }
 	void SetForceRepair(bool forceRepair) { m_forceRepair = forceRepair; }
-	bool GetForceRepair() { return m_forceRepair; }
 	void SetParFull(bool parFull) { m_parFull = parFull; }
 	bool GetParFull() { return m_parFull; }
 	EStatus GetStatus() { return m_status; }
@@ -24207,7 +24151,6 @@ private:
 
 	bool m_queuedParFilesChanged;
 	bool m_verifyingExtraFiles;
-	bool m_cancelled;
 	bool m_hasDamagedFiles;
 	bool m_forceRepair = false;
 
@@ -25555,7 +25498,6 @@ public:
 	static void StartJob(PostInfo* postInfo);
 	static bool HasCompletedArchiveFiles(NzbInfo* nzbInfo);
 	static Mutex& GetUnpackMutex();
-	bool IsUnpacking() const { return m_unpacking; }
 
 	~UnpackController() override;
 
@@ -29434,8 +29376,6 @@ protected:
 
 private:
 	PostInfo* m_postInfo;
-	CString m_destDir;
-	CString m_finalDir;
 };
 
 class RenameController : public Thread, public ScriptController

@@ -883,7 +883,10 @@ mod tests {
     use PosixFsOps as RealPosixFsOps;
 
     fn child_sees_descriptor(fd: i32) -> i32 {
-        let script = CString::new(format!("exec 2>/dev/null; : <&{fd}")).unwrap();
+        let script = CString::new(format!(
+            "exec </dev/null 2>/dev/null; IFS= read -r line <&{fd} && [ \"$line\" = cloexec-probe ]"
+        ))
+        .unwrap();
         let sh = c"/bin/sh";
         let sh_arg = c"sh";
         let c_arg = c"-c";
@@ -1102,6 +1105,7 @@ mod tests {
                 unsafe { sys::close(fd) };
             }
 
+            std::fs::write(&temp_file, b"cloexec-probe\n").unwrap();
             let fd = open_cloexec_fd(&temp_file_c, 0, 0, 1, 2);
             assert!(fd >= 0);
             let inherited = unsafe { sys::dup(fd) };

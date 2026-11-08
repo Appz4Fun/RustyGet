@@ -87,31 +87,9 @@ public:
 	// a huge donor is never extracted for a small target
 	static constexpr int64 MaxDecompressBytes = 16LL * 1024 * 1024 * 1024;
 
-	static bool IsStreamEligible(const char* filename);
 	static StreamRangeList ComputeHoles(FileInfo* fileInfo);
 	static int64 TotalSize(const StreamRangeList& ranges);
 	static StreamRangeList EstimateDonorRanges(FileInfo* donorFile, int64 decodedFileSize);
-	static std::vector<int> SelectPatchParts(const StreamRangeList& donorRanges,
-		const StreamRangeList& holes, int marginParts);
-	static std::vector<int> SelectProbeParts(const StreamRangeList& donorRanges,
-		const StreamRangeList& holes, int probeCount);
-	static void SubtractCovered(StreamRangeList& ranges, const StreamRange& covered);
-
-	/* The scaled identity-compare base floor shared by every verifier:
-	 * everything present must match, capped at MinProbeCompareBytes and
-	 * never below 64 (below that identity is unknowable). */
-	static int64 BaseCompareFloor(int64 presentBytes)
-	{
-		return std::min<int64>(MinProbeCompareBytes, std::max<int64>(64, presentBytes));
-	}
-
-	/* The identity-compare floor for one target/donor pair: everything
-	 * present must match, but never more than the SELECTED probe parts can
-	 * reach (their present overlap with the target), and never less than 64
-	 * bytes - below that identity is unknowable and the unclamped base floor
-	 * keeps the caller's accumulated compare short (reject). */
-	static int64 RequiredCompareFloor(int64 decodedFileSize, const StreamRangeList& holes,
-		const StreamRangeList& donorRanges, const std::vector<int>& probeParts);
 
 	/* Captures a stream-repair job on the owning NzbInfo for a data file
 	 * that completed with missing byte ranges - or without a single article:
@@ -139,20 +117,6 @@ public:
 	 * is no archive volume (an .nfo, a sample, a bare media file). */
 	static std::string VolumeSetKey(const char* filename);
 
-	/* Plausibility of the decoded size a donor's article declares for a
-	 * file whose own size is only known encoded (yEnc adds 1-3%, never more
-	 * than ~12%). */
-	static bool DecodedSizePlausible(int64 decodedFileSize, int64 encodedSize);
-
-	/* The last two dot-separated segments of a filename, lowercased
-	 * ("Rel.part03.rar" -> "part03.rar", "X.R00" -> "r00"): equal-size
-	 * members of a repost pair by this key when names differ. */
-	static std::string SuffixKey(const char* filename);
-	/* SuffixKey with the leading zeros of every number dropped, so volumes
-	 * numbered with different padding pair: "Rel.part003.rar" and
-	 * "Other.part03.rar" -> "part3.rar", "X.r007" and "Y.r07" -> "r7". */
-	static std::string VolumeKey(const char* filename);
-
 	/* Donor files of one duplicate collection, ordered most-likely-identical
 	 * first for the given target member: exact name match, same suffix key
 	 * when it identifies exactly one donor member (volume schemes; shared
@@ -167,62 +131,16 @@ public:
 		NzbInfo* donorNzb, int maxCandidates, uint64 targetStepsHash = 0,
 		const std::set<FileInfo*>* claimed = nullptr);
 
-	/* M4 (option <DupeStreamDecompress>): scans dir recursively for a
-	 * regular file whose size equals innerSize (the extractor's output
-	 * selection - the extracted file matching the target's inner content
-	 * size). Several same-size matches prefer the one whose basename
-	 * case-insensitively equals innerName, else the first by sorted path.
-	 * Returns "" when nothing matches. */
-	static std::string SelectExtractedInner(const char* dir, int64 innerSize, const char* innerName);
-
-	static bool IntersectsAny(const StreamRange& range, const StreamRangeList& ranges);
-
-	/* M4 donor materialization cap check: true if accepting addBytes more
-	 * decoded bytes and/or addExtent more file extent would push the
-	 * accumulated totals past MaxDecompressBytes. A pure function so the
-	 * bound itself is unit-testable without driving real article fetches;
-	 * StreamRepairController::MaterializeDonorSet calls this before every
-	 * write and cancels the remaining fetch window on true. */
-	static bool ExceedsDecompressCap(int64 totalBytes, int64 addBytes,
-		int64 totalExtent, int64 addExtent);
-
 	/* Exact, in-memory identity of a parsed donor's repair inputs. Includes
 	 * groups, archive names, article geometry and password so saved copies of
 	 * one posting can be skipped without hiding useful alternate metadata.
 	 * Contains the password: never persist or log this key. */
 	static std::string BuildDonorKey(NzbInfo* donorNzb, const char* password);
-
-private:
-	// Owned scratch belongs to exceptional geometry, not the ordinary caller.
-	[[gnu::noinline]] static int64 RequiredCompareFloorExact(const StreamRangeList& holes,
-		const StreamRangeList& donorRanges, const std::vector<int>& probeParts);
-	[[gnu::noinline]] static int64 RequiredCompareFloorUnordered(const StreamRangeList& holes,
-		const StreamRangeList& donorRanges, const std::vector<int>& probeParts);
-	[[gnu::always_inline]] static inline int64 RequiredCompareFloorAvailable(const StreamRange* ranges,
-		size_t count, const StreamRangeList& donorRanges, const std::vector<int>& probeParts);
-	static bool RangesIntersect(const StreamRange& range1, const StreamRange& range2)
-	{
-		return range1.Offset < range2.End() && range2.Offset < range1.End();
-	}
 };
 
-#include <array>
-#include <bit>
-#include <cstdlib>
-#include <cstddef>
-#include <type_traits>
-#include <limits>
 #include "nzbget_rs.h"
 #include "DupeArticleFallback.h"
-#include "FileSystem.h"
 #include "Options.h"
-#include "Log.h"
-#include "Util.h"
-
-inline bool DupeStreamRepair::IsStreamEligible(const char* filename)
-{
-	return nzbget_rs_stream_is_eligible(filename) != 0;
-}
 
 inline StreamRangeList DupeStreamRepair::ComputeHoles(FileInfo* fileInfo)
 {
@@ -259,13 +177,6 @@ inline int64 DupeStreamRepair::TotalSize(const StreamRangeList& ranges)
 		reinterpret_cast<const NzbgetRsByteRange*>(ranges.data()), ranges.size());
 }
 
-inline bool DupeStreamRepair::IntersectsAny(const StreamRange& range, const StreamRangeList& ranges)
-{
-	NzbgetRsByteRange r{range.Offset, range.Size};
-	return nzbget_rs_stream_intersects_any(
-		r, reinterpret_cast<const NzbgetRsByteRange*>(ranges.data()), ranges.size()) != 0;
-}
-
 inline StreamRangeList DupeStreamRepair::EstimateDonorRanges(FileInfo* donorFile, int64 decodedFileSize)
 {
 	std::vector<int> sizes;
@@ -284,194 +195,6 @@ inline StreamRangeList DupeStreamRepair::EstimateDonorRanges(FileInfo* donorFile
 		ranges.push_back({rsRanges[i].offset, rsRanges[i].size});
 	}
 	return ranges;
-}
-
-inline std::vector<int> DupeStreamRepair::SelectPatchParts(const StreamRangeList& donorRanges,
-	const StreamRangeList& holes, int marginParts)
-{
-	static_assert(std::is_standard_layout<StreamRange>::value && sizeof(StreamRange) == 2 * sizeof(int64_t) &&
-		alignof(StreamRange) == alignof(int64_t) && offsetof(StreamRange, Offset) == 0 &&
-		offsetof(StreamRange, Size) == sizeof(int64_t), "StreamRange C ABI layout");
-	static_assert(std::is_same<int, int32_t>::value, "patch index C ABI layout");
-	if (donorRanges.empty() || holes.empty() || marginParts < 0)
-	{
-		return {};
-	}
-	std::vector<int> parts(donorRanges.size());
-	parts.resize(nzbget_rs_stream_patch_parts(donorRanges.data(), donorRanges.size(),
-		holes.data(), holes.size(), marginParts, parts.data()));
-	return parts;
-}
-
-inline std::vector<int> DupeStreamRepair::SelectProbeParts(const StreamRangeList& donorRanges,
-	const StreamRangeList& holes, int probeCount)
-{
-	if (probeCount <= 0 || donorRanges.empty())
-	{
-		return {};
-	}
-	std::vector<int> probes(donorRanges.size());
-	size_t count = nzbget_rs_stream_select_probe_parts(
-		reinterpret_cast<const NzbgetRsByteRange*>(donorRanges.data()), donorRanges.size(),
-		reinterpret_cast<const NzbgetRsByteRange*>(holes.data()), holes.size(),
-		probeCount, probes.data(), probes.size());
-	probes.resize(count);
-	return probes;
-}
-
-inline void DupeStreamRepair::SubtractCovered(StreamRangeList& ranges, const StreamRange& covered)
-{
-	std::vector<NzbgetRsByteRange> out(ranges.size() * 2 + 1);
-	NzbgetRsByteRange cov{covered.Offset, covered.Size};
-	size_t count = nzbget_rs_stream_subtract_covered(
-		reinterpret_cast<const NzbgetRsByteRange*>(ranges.data()), ranges.size(),
-		cov, out.data(), out.size());
-	ranges.clear();
-	ranges.reserve(count);
-	for (size_t i = 0; i < count; i++)
-	{
-		ranges.push_back({out[i].offset, out[i].size});
-	}
-}
-
-inline int64 DupeStreamRepair::RequiredCompareFloorAvailable(const StreamRange* ranges, size_t count,
-	const StreamRangeList& donorRanges, const std::vector<int>& probeParts)
-{
-	int64 achievable = 0;
-	const StreamRange* end = ranges + count;
-	for (int partIndex : probeParts)
-	{
-		const auto& donor = donorRanges[partIndex];
-		int64 bytes = donor.Size;
-		auto start = count <= 8 ? ranges : std::lower_bound(ranges, end, donor.Offset,
-			[](const auto& hole, int64 offset) { return hole.End() <= offset; });
-		for (auto hole = start; hole != end && hole->Offset < donor.End(); ++hole)
-		{
-			if (hole->End() <= donor.Offset) continue;
-			bytes -= std::max<int64>(0, std::min(donor.End(), hole->End()) - std::max(donor.Offset, hole->Offset));
-		}
-		achievable += bytes;
-	}
-	return achievable;
-}
-
-inline int64 DupeStreamRepair::RequiredCompareFloorExact(const StreamRangeList& holes,
-	const StreamRangeList& donorRanges, const std::vector<int>& probeParts)
-{
-	int64 achievable = 0;
-	StreamRangeList present, remaining;
-	for (int partIndex : probeParts)
-	{
-		present.clear();
-		present.push_back(donorRanges[partIndex]);
-		for (const auto& hole : holes)
-		{
-			remaining.clear();
-			for (const auto& range : present)
-			{
-				if (!RangesIntersect(range, hole)) remaining.push_back(range);
-				else
-				{
-					if (range.Offset < hole.Offset) remaining.push_back({range.Offset, hole.Offset - range.Offset});
-					if (hole.End() < range.End()) remaining.push_back({hole.End(), range.End() - hole.End()});
-				}
-			}
-			present.swap(remaining);
-		}
-		achievable += TotalSize(present);
-	}
-	return achievable;
-}
-
-inline int64 DupeStreamRepair::RequiredCompareFloorUnordered(const StreamRangeList& holes,
-	const StreamRangeList& donorRanges, const std::vector<int>& probeParts)
-{
-	std::array<StreamRange, 8> small{};
-	StreamRangeList large;
-	StreamRange* ranges;
-	if (holes.size() <= small.size())
-	{
-		std::copy(holes.begin(), holes.end(), small.begin());
-		ranges = small.data();
-	}
-	else
-	{
-		large = holes;
-		ranges = large.data();
-	}
-	std::sort(ranges, ranges + holes.size(), [](auto& left, auto& right) { return left.Offset < right.Offset; });
-	size_t count = 0;
-	for (size_t i = 0; i < holes.size(); ++i)
-	{
-		auto hole = ranges[i];
-		if (count && hole.Offset <= ranges[count - 1].End())
-		{
-			auto& last = ranges[count - 1];
-			last.Size = std::max(last.End(), hole.End()) - last.Offset;
-		}
-		else ranges[count++] = hole;
-	}
-	return RequiredCompareFloorAvailable(ranges, count, donorRanges, probeParts);
-}
-
-inline int64 DupeStreamRepair::RequiredCompareFloor(int64 decodedFileSize, const StreamRangeList& holes,
-	const StreamRangeList& donorRanges, const std::vector<int>& probeParts)
-{
-	static_assert(MinProbeCompareBytes == 16 * 1024, "Rust stream compare floor cap");
-	static_assert(std::is_standard_layout<StreamRange>::value, "StreamRange C ABI layout");
-	static_assert(sizeof(StreamRange) == sizeof(NzbgetRsStreamCompareRange), "StreamRange C ABI size");
-	static_assert(alignof(StreamRange) == alignof(NzbgetRsStreamCompareRange), "StreamRange C ABI alignment");
-	static_assert(offsetof(StreamRange, Offset) == offsetof(NzbgetRsStreamCompareRange, offset), "StreamRange offset");
-	static_assert(offsetof(StreamRange, Size) == offsetof(NzbgetRsStreamCompareRange, size), "StreamRange size");
-	static_assert(sizeof(int) == sizeof(int32_t), "Probe index C ABI size");
-	if (probeParts.empty())
-	{
-		return BaseCompareFloor(decodedFileSize - TotalSize(holes));
-	}
-	if (holes.empty())
-	{
-		int64 achievable = 0;
-		for (int partIndex : probeParts)
-		{
-			if ((unsigned)partIndex >= donorRanges.size()) std::abort();
-			achievable += donorRanges[partIndex].Size;
-		}
-		int64 base = BaseCompareFloor(decodedFileSize);
-		return achievable >= 64 ? std::min(base, achievable) : base;
-	}
-	if (holes.size() >= 4096)
-	{
-		return nzbget_rs_stream_compare_floor(decodedFileSize,
-			reinterpret_cast<const NzbgetRsStreamCompareRange*>(holes.data()), holes.size(),
-			reinterpret_cast<const NzbgetRsStreamCompareRange*>(donorRanges.data()), donorRanges.size(),
-			probeParts.data(), probeParts.size());
-	}
-	auto wrappedEnd = [](const StreamRange& range)
-	{
-		return std::bit_cast<int64>((uint64_t)range.Offset + (uint64_t)range.Size);
-	};
-	int64 sum = 0, previous = std::numeric_limits<int64>::min();
-	bool ordered = true, positive = true;
-	for (const auto& hole : holes)
-	{
-		sum += hole.Size;
-		int64 end = wrappedEnd(hole);
-		positive &= hole.Size >= 0;
-		positive &= end >= hole.Offset;
-		ordered &= hole.Offset >= previous;
-		previous = end;
-	}
-	int64 base = BaseCompareFloor(decodedFileSize - sum);
-	for (int partIndex : probeParts)
-	{
-		if (partIndex < 0 || (size_t)partIndex >= donorRanges.size()) std::abort();
-		positive &= donorRanges[partIndex].Size >= 0;
-		positive &= wrappedEnd(donorRanges[partIndex]) >= donorRanges[partIndex].Offset;
-	}
-	int64 achievable = !positive ? RequiredCompareFloorExact(holes, donorRanges, probeParts) :
-		!ordered ? RequiredCompareFloorUnordered(holes, donorRanges, probeParts) :
-		RequiredCompareFloorAvailable(holes.data(), holes.size(), donorRanges, probeParts);
-	return achievable >= 64 ? std::min(base, achievable) : base;
 }
 
 inline bool DupeStreamRepair::BuildRepairJob(FileInfo* fileInfo, const char* diskBasename)
@@ -566,27 +289,6 @@ inline std::string DupeStreamRepair::VolumeSetKey(const char* filename)
 	return res;
 }
 
-inline bool DupeStreamRepair::DecodedSizePlausible(int64 decodedFileSize, int64 encodedSize)
-{
-	return nzbget_rs_stream_decoded_size_plausible(decodedFileSize, encodedSize) != 0;
-}
-
-inline std::string DupeStreamRepair::VolumeKey(const char* filename)
-{
-	NzbgetRsBuf buf = nzbget_rs_stream_volume_key(filename);
-	std::string res(buf.data ? buf.data : "", buf.len);
-	nzbget_rs_free(buf);
-	return res;
-}
-
-inline std::string DupeStreamRepair::SuffixKey(const char* filename)
-{
-	NzbgetRsBuf buf = nzbget_rs_stream_suffix_key(filename);
-	std::string res(buf.data ? buf.data : "", buf.len);
-	nzbget_rs_free(buf);
-	return res;
-}
-
 inline std::vector<FileInfo*> DupeStreamRepair::SelectDonorCandidates(const char* targetFilename,
 	int64 targetDecodedFileSize, int positionalRank, int positionalWindow,
 	NzbInfo* donorNzb, int maxCandidates, uint64 targetStepsHash,
@@ -634,26 +336,6 @@ inline std::vector<FileInfo*> DupeStreamRepair::SelectDonorCandidates(const char
 		}
 	}
 	return candidates;
-}
-
-inline std::string DupeStreamRepair::SelectExtractedInner(const char* dir, int64 innerSize, const char* innerName)
-{
-	int foundSymlink = 0;
-	NzbgetRsBuf buf = nzbget_rs_stream_select_extracted_inner(dir, innerSize, innerName, &foundSymlink);
-	if (foundSymlink)
-	{
-		info("Stream repair: archive contains link");
-	}
-	std::string res(buf.data ? buf.data : "", buf.len);
-	nzbget_rs_free(buf);
-	return res;
-}
-
-inline bool DupeStreamRepair::ExceedsDecompressCap(int64 totalBytes, int64 addBytes,
-	int64 totalExtent, int64 addExtent)
-{
-	return nzbget_rs_stream_exceeds_decompress_cap(
-		totalBytes, addBytes, totalExtent, addExtent) != 0;
 }
 
 inline std::string DupeStreamRepair::BuildDonorKey(NzbInfo* donorNzb, const char* password)

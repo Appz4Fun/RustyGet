@@ -5955,276 +5955,6 @@ void nzbget_rs_direct_unpack_cleanup(
     void* ctx,
     void (*log_cb)(void* ctx, int kind, const char* msg));
 
-int nzbget_rs_content_map_read_inner_decrypted(
-    int64_t inner_size,
-    const NzbgetRsContentRun* runs,
-    const int64_t* cipher_data_offsets,
-    const int64_t* cipher_sizes,
-    const uint8_t* has_crypto,
-    size_t run_count,
-    const uint8_t* key,
-    size_t key_len,
-    const uint8_t* iv,
-    NzbgetRsByteRange inner_range,
-    uint8_t* out_buf,
-    void* ctx,
-    int (*has_source_cb)(void* ctx, int32_t member_index),
-    int64_t (*size_cb)(void* ctx, int32_t member_index),
-    int (*read_cb)(void* ctx, int32_t member_index, int64_t offset, uint8_t* buf, int64_t size));
-
-int nzbget_rs_content_mapper_build_map(
-    const char* const* member_names,
-    const int64_t* member_sizes,
-    size_t member_count,
-    int32_t set_format,
-    const int32_t* set_members,
-    size_t set_member_count,
-    const char* password,
-    int tls_enabled,
-    void* ctx,
-    int (*has_source_cb)(void* ctx, int32_t member_index),
-    int64_t (*size_cb)(void* ctx, int32_t member_index),
-    int (*read_cb)(void* ctx, int32_t member_index, int64_t offset, uint8_t* buf, int64_t size),
-    void (*on_rar_volume_cb)(
-        void* ctx, const char* filename, int32_t version, int multi_volume,
-        uint32_t volume_no, int new_naming, int has_next_volume, int encrypted,
-        size_t file_count, const uint32_t* file_times, const int64_t* file_sizes,
-        const uint32_t* file_attrs, const uint8_t* file_split_before,
-        const uint8_t* file_split_after, const char* const* file_names),
-    void (*on_map_cb)(
-        void* ctx, const char* inner_name, size_t inner_name_len, int64_t inner_size,
-        const NzbgetRsContentRun* runs, size_t run_count,
-        int encrypted, const uint8_t* key, size_t key_len, const uint8_t* iv,
-        const int64_t* cipher_data_offsets, const int64_t* cipher_sizes),
-    void (*on_skip_cb)(void* ctx, const char* reason));
-
-void nzbget_rs_content_mapper_build_repair_sets(
-    const char* const* member_names,
-    const int64_t* member_sizes,
-    size_t member_count,
-    const size_t* hole_counts,
-    const NzbgetRsByteRange* holes_flat,
-    const char* password,
-    int tls_enabled,
-    void* ctx,
-    int (*has_source_cb)(void* ctx, int32_t member_index),
-    int64_t (*size_cb)(void* ctx, int32_t member_index),
-    int (*read_cb)(void* ctx, int32_t member_index, int64_t offset, uint8_t* buf, int64_t size),
-    void (*on_rar_volume_cb)(
-        void* ctx, const char* filename, int32_t version, int multi_volume,
-        uint32_t volume_no, int new_naming, int has_next_volume, int encrypted,
-        size_t file_count, const uint32_t* file_times, const int64_t* file_sizes,
-        const uint32_t* file_attrs, const uint8_t* file_split_before,
-        const uint8_t* file_split_after, const char* const* file_names),
-    void (*on_set_cb)(
-        void* ctx, int32_t set_format, const int32_t* set_members, size_t set_member_count,
-        int has_map, const char* inner_name, size_t inner_name_len, int64_t inner_size,
-        const NzbgetRsContentRun* runs, size_t run_count,
-        int encrypted, const uint8_t* key, size_t key_len, const uint8_t* iv,
-        const int64_t* cipher_data_offsets, const int64_t* cipher_sizes,
-        const NzbgetRsByteRange* inner_holes, size_t inner_hole_count,
-        const char* skip_reason));
-
-int nzbget_rs_stream_read_donor_inner(
-    const char* donor_inner_name,
-    int64_t donor_inner_size,
-    const NzbgetRsContentRun* donor_runs,
-    const int64_t* donor_cipher_offsets,
-    const int64_t* donor_cipher_sizes,
-    const uint8_t* donor_has_crypto,
-    size_t donor_run_count,
-    const uint8_t* donor_key,
-    size_t donor_key_len,
-    const uint8_t* donor_iv,
-    NzbgetRsByteRange inner_range,
-    uint8_t* out_buf,
-    void* ctx,
-    int (*has_source_cb)(void* ctx, int32_t member_index),
-    int64_t (*size_cb)(void* ctx, int32_t member_index),
-    int (*read_cb)(void* ctx, int32_t member_index, int64_t offset, uint8_t* buf, int64_t size));
-
-int nzbget_rs_stream_verify_donor_set(
-    const char* target_inner_name,
-    int64_t target_inner_size,
-    const NzbgetRsContentRun* target_runs,
-    const int64_t* target_cipher_offsets,
-    const int64_t* target_cipher_sizes,
-    const uint8_t* target_has_crypto,
-    size_t target_run_count,
-    const uint8_t* target_key,
-    size_t target_key_len,
-    const uint8_t* target_iv,
-    const NzbgetRsByteRange* inner_holes,
-    size_t inner_hole_count,
-    const NzbgetRsByteRange* original_inner_holes,
-    size_t original_inner_hole_count,
-    const char* donor_inner_name,
-    int64_t donor_inner_size,
-    const NzbgetRsContentRun* donor_runs,
-    const int64_t* donor_cipher_offsets,
-    const int64_t* donor_cipher_sizes,
-    const uint8_t* donor_has_crypto,
-    size_t donor_run_count,
-    const uint8_t* donor_key,
-    size_t donor_key_len,
-    const uint8_t* donor_iv,
-    void* ctx,
-    int (*has_donor_source_cb)(void* ctx, int32_t member_index),
-    int64_t (*donor_size_cb)(void* ctx, int32_t member_index),
-    int (*donor_read_cb)(void* ctx, int32_t member_index, int64_t offset, uint8_t* buf, int64_t size),
-    int (*is_stopped_cb)(void* ctx),
-    int (*has_target_file_cb)(void* ctx, int32_t member_index),
-    int (*read_target_file_cb)(void* ctx, int32_t member_index, int64_t offset, uint8_t* buf, int64_t size));
-
-int64_t nzbget_rs_stream_patch_from_donor_set(
-    const char* target_inner_name,
-    int64_t target_inner_size,
-    const NzbgetRsContentRun* target_runs,
-    const int64_t* target_cipher_offsets,
-    const int64_t* target_cipher_sizes,
-    const uint8_t* target_has_crypto,
-    size_t target_run_count,
-    const uint8_t* target_key,
-    size_t target_key_len,
-    const uint8_t* target_iv,
-    const NzbgetRsByteRange* inner_holes,
-    size_t inner_hole_count,
-    const char* donor_inner_name,
-    int64_t donor_inner_size,
-    const NzbgetRsContentRun* donor_runs,
-    const int64_t* donor_cipher_offsets,
-    const int64_t* donor_cipher_sizes,
-    const uint8_t* donor_has_crypto,
-    size_t donor_run_count,
-    const uint8_t* donor_key,
-    size_t donor_key_len,
-    const uint8_t* donor_iv,
-    const char* const* set_member_names,
-    const int64_t* set_member_sizes,
-    size_t set_member_count,
-    const int32_t* member_targets,
-    const size_t* target_hole_counts,
-    const NzbgetRsByteRange* target_holes_flat,
-    size_t target_count,
-    const char* donor_name,
-    void* ctx,
-    int (*has_donor_source_cb)(void* ctx, int32_t member_index),
-    int64_t (*donor_size_cb)(void* ctx, int32_t member_index),
-    int (*donor_read_cb)(void* ctx, int32_t member_index, int64_t offset, uint8_t* buf, int64_t size),
-    int (*is_stopped_cb)(void* ctx),
-    int (*has_target_file_cb)(void* ctx, int32_t member_index),
-    int (*read_target_file_cb)(void* ctx, int32_t member_index, int64_t offset, uint8_t* buf, int64_t size),
-    int (*write_target_file_cb)(void* ctx, int32_t member_index, int64_t offset, const uint8_t* data, int64_t size),
-    void (*on_message_cb)(void* ctx, int32_t kind, const char* text),
-    void (*on_holes_updated_cb)(
-        void* ctx,
-        const NzbgetRsByteRange* inner_holes, size_t inner_hole_count,
-        const size_t* target_hole_counts,
-        const NzbgetRsByteRange* target_holes_flat, size_t target_holes_flat_count),
-    int* out_credit_recovery);
-
-int nzbget_rs_stream_verify_donor_inner_file(
-    const char* target_inner_name,
-    int64_t target_inner_size,
-    const NzbgetRsContentRun* target_runs,
-    const int64_t* target_cipher_offsets,
-    const int64_t* target_cipher_sizes,
-    const uint8_t* target_has_crypto,
-    size_t target_run_count,
-    const uint8_t* target_key,
-    size_t target_key_len,
-    const uint8_t* target_iv,
-    const NzbgetRsByteRange* inner_holes,
-    size_t inner_hole_count,
-    const NzbgetRsByteRange* original_inner_holes,
-    size_t original_inner_hole_count,
-    int64_t donor_inner_size,
-    void* ctx,
-    int (*donor_inner_read_cb)(void* ctx, int64_t offset, uint8_t* buf, int64_t size),
-    int (*is_stopped_cb)(void* ctx),
-    int (*has_target_file_cb)(void* ctx, int32_t member_index),
-    int (*read_target_file_cb)(void* ctx, int32_t member_index, int64_t offset, uint8_t* buf, int64_t size));
-
-int64_t nzbget_rs_stream_patch_from_donor_inner_file(
-    const char* target_inner_name,
-    int64_t target_inner_size,
-    const NzbgetRsContentRun* target_runs,
-    const int64_t* target_cipher_offsets,
-    const int64_t* target_cipher_sizes,
-    const uint8_t* target_has_crypto,
-    size_t target_run_count,
-    const uint8_t* target_key,
-    size_t target_key_len,
-    const uint8_t* target_iv,
-    const NzbgetRsByteRange* inner_holes,
-    size_t inner_hole_count,
-    int64_t donor_inner_size,
-    const char* const* set_member_names,
-    const int64_t* set_member_sizes,
-    size_t set_member_count,
-    const int32_t* member_targets,
-    const size_t* target_hole_counts,
-    const NzbgetRsByteRange* target_holes_flat,
-    size_t target_count,
-    const char* donor_name,
-    void* ctx,
-    int (*donor_inner_read_cb)(void* ctx, int64_t offset, uint8_t* buf, int64_t size),
-    int (*is_stopped_cb)(void* ctx),
-    int (*has_target_file_cb)(void* ctx, int32_t member_index),
-    int (*read_target_file_cb)(void* ctx, int32_t member_index, int64_t offset, uint8_t* buf, int64_t size),
-    int (*write_target_file_cb)(void* ctx, int32_t member_index, int64_t offset, const uint8_t* data, int64_t size),
-    void (*on_message_cb)(void* ctx, int32_t kind, const char* text),
-    void (*on_holes_updated_cb)(
-        void* ctx,
-        const NzbgetRsByteRange* inner_holes, size_t inner_hole_count,
-        const size_t* target_hole_counts,
-        const NzbgetRsByteRange* target_holes_flat, size_t target_holes_flat_count),
-    int* out_holes_filled,
-    int* out_credit_recovery);
-
-typedef struct NzbgetRsDonorMemberSource NzbgetRsDonorMemberSource;
-
-NzbgetRsDonorMemberSource* nzbget_rs_donor_member_source_new(
-    const int32_t* article_sizes,
-    size_t article_count);
-void nzbget_rs_donor_member_source_free(NzbgetRsDonorMemberSource* source);
-int nzbget_rs_donor_member_source_take_served_parts(NzbgetRsDonorMemberSource* source);
-int64_t nzbget_rs_donor_member_source_size(
-    NzbgetRsDonorMemberSource* source,
-    void* ctx,
-    int (*fetch_part_cb)(
-        void* ctx,
-        int32_t part_index,
-        int* out_success,
-        int64_t* out_offset,
-        int64_t* out_file_size,
-        const uint8_t** out_data,
-        size_t* out_data_len));
-int nzbget_rs_donor_member_source_read(
-    NzbgetRsDonorMemberSource* source,
-    int64_t offset,
-    uint8_t* buffer,
-    int64_t size,
-    int allow_prefetch,
-    void* ctx,
-    int (*fetch_part_cb)(
-        void* ctx,
-        int32_t part_index,
-        int* out_success,
-        int64_t* out_offset,
-        int64_t* out_file_size,
-        const uint8_t** out_data,
-        size_t* out_data_len),
-    void (*begin_batch_cb)(void* ctx, const int32_t* part_indices, size_t count),
-    int (*next_batch_cb)(
-        void* ctx,
-        int* out_success,
-        int64_t* out_offset,
-        int64_t* out_file_size,
-        const uint8_t** out_data,
-        size_t* out_data_len),
-    void (*cancel_batch_cb)(void* ctx));
-
 int nzbget_rs_stream_verify_donor_file(
     int64_t target_decoded_size,
     const NzbgetRsByteRange* target_holes,
@@ -6286,21 +6016,56 @@ int nzbget_rs_stream_probe_whole_file_donor_size(
     void (*cancel_batch_cb)(void* ctx),
     int64_t* out_file_size);
 
-int nzbget_rs_stream_materialize_donor_set(
-    const int32_t* set_members,
-    size_t set_member_count,
-    const char* const* file_names,
-    const int32_t* file_article_counts,
-    size_t file_count,
-    const char* donor_name,
-    int64_t* inout_total_bytes,
+typedef struct NzbgetRsCrossPackSession NzbgetRsCrossPackSession;
+
+NzbgetRsCrossPackSession* nzbget_rs_cross_pack_session_new(
+    const char* dest_dir,
+    const char* const* member_names,
+    size_t member_count,
+    const char* const* target_filenames,
+    const int64_t* target_decoded_sizes,
+    const uint8_t* target_patch_eligible,
+    const size_t* target_hole_counts,
+    const NzbgetRsByteRange* target_holes_flat,
+    size_t target_count,
+    const char* target_password,
     void* ctx,
     int (*is_stopped_cb)(void* ctx),
-    int (*open_member_cb)(void* ctx, int32_t member_index),
-    int (*write_member_cb)(void* ctx, int64_t offset, const uint8_t* data, int64_t size),
-    void (*close_member_cb)(void* ctx),
-    void (*begin_member_batch_cb)(void* ctx, int32_t member_index),
-    int (*next_article_cb)(
+    void (*emit_message_cb)(void* ctx, int32_t kind, const char* text),
+    void (*emit_debug_cb)(void* ctx, const char* text));
+
+void nzbget_rs_cross_pack_session_free(NzbgetRsCrossPackSession* session);
+
+int nzbget_rs_cross_pack_session_has_inner_holes(const NzbgetRsCrossPackSession* session);
+
+void nzbget_rs_cross_pack_session_process_donor(
+    NzbgetRsCrossPackSession* session,
+    const char* donor_queued_filename,
+    const char* donor_info_name,
+    const char* donor_password,
+    const char* const* donor_file_names,
+    const int64_t* donor_file_sizes,
+    const size_t* donor_article_counts,
+    const int32_t* donor_article_sizes_flat,
+    size_t donor_file_count,
+    int allow_decompress,
+    void* ctx,
+    int (*is_stopped_cb)(void* ctx),
+    int (*fetch_part_cb)(
+        void* ctx,
+        int32_t member_index,
+        int32_t part_index,
+        int* out_success,
+        int64_t* out_offset,
+        int64_t* out_file_size,
+        const uint8_t** out_data,
+        size_t* out_data_len),
+    void (*begin_prefetch_cb)(
+        void* ctx,
+        int32_t member_index,
+        const int32_t* part_indices,
+        size_t count),
+    int (*next_batch_cb)(
         void* ctx,
         int* out_success,
         int64_t* out_offset,
@@ -6308,8 +6073,19 @@ int nzbget_rs_stream_materialize_donor_set(
         const uint8_t** out_data,
         size_t* out_data_len),
     void (*cancel_batch_cb)(void* ctx),
-    void (*update_progress_cb)(void* ctx, const char* label, int32_t stage_progress),
-    void (*emit_message_cb)(void* ctx, int32_t kind, const char* text));
+    void (*begin_materialize_member_cb)(void* ctx, int32_t member_index),
+    void (*set_progress_cb)(void* ctx, const char* label, int32_t stage_progress),
+    void (*set_materializing_cb)(void* ctx, int32_t delta),
+    void (*add_recovered_cb)(void* ctx, int64_t bytes, int32_t holes),
+    void (*sync_target_holes_cb)(
+        void* ctx,
+        const size_t* updated_counts,
+        const NzbgetRsByteRange* updated_flat,
+        size_t target_count),
+    void (*emit_message_cb)(void* ctx, int32_t kind, const char* text),
+    void (*emit_extractor_log_cb)(void* ctx, int32_t kind, const char* text),
+    void (*emit_debug_cb)(void* ctx, const char* text));
+
 
 uint32_t nzbget_rs_crc32_append(const uint8_t* block, uint32_t len, uint32_t init);
 uint32_t nzbget_rs_gzip_len(int input_len);

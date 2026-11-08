@@ -34038,1357 +34038,6 @@ pub unsafe extern "C" fn nzbget_rs_xmlrpc_parse_test_disk_speed(
     }
 }
 
-struct FfiCallbackSource {
-    ctx: *mut std::ffi::c_void,
-    member_index: i32,
-    size_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32) -> i64>,
-    read_cb: Option<
-        unsafe extern "C" fn(*mut std::ffi::c_void, i32, i64, *mut u8, i64) -> c_int,
-    >,
-}
-
-impl crate::streamrepair::ContentSource for FfiCallbackSource {
-    fn size(&self) -> i64 {
-        self.size_cb
-            .map_or(0, |cb| unsafe { cb(self.ctx, self.member_index) })
-    }
-
-    fn read(&self, offset: i64, buf: &mut [u8]) -> bool {
-        self.read_cb.is_some_and(|cb| unsafe {
-            cb(
-                self.ctx,
-                self.member_index,
-                offset,
-                buf.as_mut_ptr(),
-                buf.len() as i64,
-            ) != 0
-        })
-    }
-}
-
-type OnRarVolumeCb = Option<
-    unsafe extern "C" fn(
-        *mut std::ffi::c_void,
-        *const c_char,
-        i32,
-        c_int,
-        u32,
-        c_int,
-        c_int,
-        c_int,
-        usize,
-        *const u32,
-        *const i64,
-        *const u32,
-        *const u8,
-        *const u8,
-        *const *const c_char,
-    ),
->;
-
-struct FfiCallbackSourceSet {
-    ctx: *mut std::ffi::c_void,
-    has_source_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32) -> c_int>,
-    on_rar_volume_cb: OnRarVolumeCb,
-    sources: Vec<FfiCallbackSource>,
-}
-
-impl FfiCallbackSourceSet {
-    fn new(
-        ctx: *mut std::ffi::c_void,
-        member_count: usize,
-        has_source_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32) -> c_int>,
-        size_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32) -> i64>,
-        read_cb: Option<
-            unsafe extern "C" fn(*mut std::ffi::c_void, i32, i64, *mut u8, i64) -> c_int,
-        >,
-        on_rar_volume_cb: OnRarVolumeCb,
-    ) -> Self {
-        let sources = (0..member_count)
-            .map(|i| FfiCallbackSource {
-                ctx,
-                member_index: i as i32,
-                size_cb,
-                read_cb,
-            })
-            .collect();
-        Self {
-            ctx,
-            has_source_cb,
-            on_rar_volume_cb,
-            sources,
-        }
-    }
-}
-
-impl crate::streamrepair::ContentSourceSet for FfiCallbackSourceSet {
-    fn get_source(&self, member_index: i32) -> Option<&dyn crate::streamrepair::ContentSource> {
-        if member_index < 0 {
-            return None;
-        }
-        let src = self.sources.get(member_index as usize)?;
-        if self
-            .has_source_cb
-            .is_some_and(|cb| unsafe { cb(self.ctx, member_index) > 0 })
-        {
-            Some(src as &dyn crate::streamrepair::ContentSource)
-        } else {
-            None
-        }
-    }
-
-    fn aborted(&self) -> bool {
-        self.has_source_cb
-            .is_some_and(|cb| unsafe { cb(self.ctx, -1) < 0 })
-    }
-
-    fn on_rar_volume_parsed(
-        &self,
-        member_name: &[u8],
-        vol: &crate::rarreader::Volume,
-        files: &[crate::rarreader::RarFile],
-    ) {
-        let Some(cb) = self.on_rar_volume_cb else {
-            return;
-        };
-        let mut vol_name_c = member_name.to_vec();
-        vol_name_c.push(0);
-        let mut file_times = Vec::with_capacity(files.len());
-        let mut file_sizes = Vec::with_capacity(files.len());
-        let mut file_attrs = Vec::with_capacity(files.len());
-        let mut file_split_before = Vec::with_capacity(files.len());
-        let mut file_split_after = Vec::with_capacity(files.len());
-        let mut file_name_bufs: Vec<Vec<u8>> = Vec::with_capacity(files.len());
-        for rf in files {
-            file_times.push(rf.time);
-            file_sizes.push(rf.size);
-            file_attrs.push(rf.attr);
-            file_split_before.push(u8::from(rf.split_before));
-            file_split_after.push(u8::from(rf.split_after));
-            let mut n = rf.filename.clone();
-            n.push(0);
-            file_name_bufs.push(n);
-        }
-        let file_name_ptrs: Vec<*const c_char> = file_name_bufs
-            .iter()
-            .map(|b| b.as_ptr().cast::<c_char>())
-            .collect();
-        unsafe {
-            cb(
-                self.ctx,
-                vol_name_c.as_ptr().cast::<c_char>(),
-                vol.version,
-                c_int::from(vol.multi_volume),
-                vol.volume_no,
-                c_int::from(vol.new_naming),
-                c_int::from(vol.has_next_volume),
-                c_int::from(vol.encrypted),
-                files.len(),
-                file_times.as_ptr(),
-                file_sizes.as_ptr(),
-                file_attrs.as_ptr(),
-                file_split_before.as_ptr(),
-                file_split_after.as_ptr(),
-                file_name_ptrs.as_ptr(),
-            );
-        }
-    }
-}
-
-#[no_mangle]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn nzbget_rs_content_map_read_inner_decrypted(
-    inner_size: i64,
-    runs: *const crate::streamrepair::NzbgetRsContentRun,
-    cipher_data_offsets: *const i64,
-    cipher_sizes: *const i64,
-    has_crypto: *const u8,
-    run_count: usize,
-    key: *const u8,
-    key_len: usize,
-    iv: *const u8,
-    inner_range: crate::dupefallback::NzbgetRsByteRange,
-    out_buf: *mut u8,
-    ctx: *mut std::ffi::c_void,
-    has_source_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32) -> c_int>,
-    size_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32) -> i64>,
-    read_cb: Option<
-        unsafe extern "C" fn(*mut std::ffi::c_void, i32, i64, *mut u8, i64) -> c_int,
-    >,
-) -> c_int {
-    let runs_slice = if runs.is_null() || run_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(runs, run_count)
-    };
-    let c_offsets = if cipher_data_offsets.is_null() || run_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(cipher_data_offsets, run_count)
-    };
-    let c_sizes = if cipher_sizes.is_null() || run_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(cipher_sizes, run_count)
-    };
-    let has_c = if has_crypto.is_null() || run_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(has_crypto, run_count)
-    };
-    let crypto_arc = if !key.is_null() && !iv.is_null() && (key_len == 16 || key_len == 32) {
-        let key_slice = std::slice::from_raw_parts(key, key_len);
-        let mut iv_arr = [0u8; 16];
-        iv_arr.copy_from_slice(std::slice::from_raw_parts(iv, 16));
-        crate::streamrepair::RarCryptoContext::from_key_iv(key_slice, iv_arr)
-            .map(std::sync::Arc::new)
-    } else {
-        None
-    };
-
-    let mut map = crate::streamrepair::ContentMap::default();
-    map.set_inner_size(inner_size);
-    *map.runs_mut() = runs_slice.to_vec();
-    if c_offsets.len() == run_count && c_sizes.len() == run_count && has_c.len() == run_count {
-        for i in 0..run_count {
-            map.run_cryptos_mut().push(crate::streamrepair::RunCrypto {
-                crypto: if has_c[i] != 0 {
-                    crypto_arc.clone()
-                } else {
-                    None
-                },
-                cipher_data_offset: c_offsets[i],
-                cipher_size: c_sizes[i],
-            });
-        }
-    }
-
-    let max_member = runs_slice.iter().map(|r| r.member_index).max().unwrap_or(-1);
-    let member_count = if max_member >= 0 {
-        (max_member as usize) + 1
-    } else {
-        0
-    };
-    let source_set =
-        FfiCallbackSourceSet::new(ctx, member_count, has_source_cb, size_cb, read_cb, None);
-    let mut empty_buf = [0u8; 0];
-    let buf_slice: &mut [u8] = if inner_range.size <= 0 {
-        &mut empty_buf
-    } else if out_buf.is_null() {
-        return 0;
-    } else {
-        std::slice::from_raw_parts_mut(out_buf, inner_range.size as usize)
-    };
-    c_int::from(map.read_inner_decrypted(&source_set, inner_range, buf_slice))
-}
-
-#[no_mangle]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn nzbget_rs_content_mapper_build_map(
-    member_names: *const *const c_char,
-    member_sizes: *const i64,
-    member_count: usize,
-    set_format: i32,
-    set_members: *const i32,
-    set_member_count: usize,
-    password: *const c_char,
-    tls_enabled: c_int,
-    ctx: *mut std::ffi::c_void,
-    has_source_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32) -> c_int>,
-    size_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32) -> i64>,
-    read_cb: Option<
-        unsafe extern "C" fn(*mut std::ffi::c_void, i32, i64, *mut u8, i64) -> c_int,
-    >,
-    on_rar_volume_cb: OnRarVolumeCb,
-    on_map_cb: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            *const c_char,
-            usize,
-            i64,
-            *const crate::streamrepair::NzbgetRsContentRun,
-            usize,
-            c_int,
-            *const u8,
-            usize,
-            *const u8,
-            *const i64,
-            *const i64,
-        ),
-    >,
-    on_skip_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
-) -> c_int {
-    let Some(format) = crate::streamrepair::MemberFormat::from_i32(set_format) else {
-        if let Some(cb) = on_skip_cb {
-            cb(
-                ctx,
-                b"format mapper not implemented\0".as_ptr().cast::<c_char>(),
-            );
-        }
-        return 0;
-    };
-    let names_raw = if member_names.is_null() || member_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(member_names, member_count)
-    };
-    let sizes_raw = if member_sizes.is_null() || member_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(member_sizes, member_count)
-    };
-    let mut members = Vec::with_capacity(member_count);
-    for i in 0..member_count {
-        let name = names_raw.get(i).map_or(&[][..], |&p| input(p));
-        let sz = sizes_raw.get(i).copied().unwrap_or(0);
-        members.push(crate::streamrepair::SetMember::new(name, sz));
-    }
-    let set_mem_slice = if set_members.is_null() || set_member_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(set_members, set_member_count)
-    };
-    let set = crate::streamrepair::MemberSet {
-        format,
-        members: set_mem_slice.to_vec(),
-    };
-    let pw = (!password.is_null()).then(|| input(password));
-    let source_set = FfiCallbackSourceSet::new(
-        ctx,
-        member_count,
-        has_source_cb,
-        size_cb,
-        read_cb,
-        on_rar_volume_cb,
-    );
-
-    match crate::streamrepair::ContentMapper::build_map_with_tls(
-        &members,
-        &set,
-        &source_set,
-        pw,
-        tls_enabled != 0,
-    ) {
-        Ok(map) => {
-            if let Some(cb) = on_map_cb {
-                let mut name_c = map.inner_name_bytes().to_vec();
-                let name_len = name_c.len();
-                name_c.push(0);
-                let encrypted = map.encrypted();
-                let mut key_ptr: *const u8 = std::ptr::null();
-                let mut key_len: usize = 0;
-                let mut iv_ptr: *const u8 = std::ptr::null();
-                if let Some(rc0) = map.run_crypto(0) {
-                    if let Some(crypto) = &rc0.crypto {
-                        key_ptr = crypto.key().as_ptr();
-                        key_len = crypto.key().len();
-                        iv_ptr = crypto.iv().as_ptr();
-                    }
-                }
-                let cipher_offsets: Vec<i64> = map
-                    .run_cryptos()
-                    .iter()
-                    .map(|rc| rc.cipher_data_offset)
-                    .collect();
-                let cipher_sizes: Vec<i64> =
-                    map.run_cryptos().iter().map(|rc| rc.cipher_size).collect();
-                cb(
-                    ctx,
-                    name_c.as_ptr().cast(),
-                    name_len,
-                    map.inner_size(),
-                    map.runs().as_ptr(),
-                    map.runs().len(),
-                    c_int::from(encrypted),
-                    key_ptr,
-                    key_len,
-                    iv_ptr,
-                    if cipher_offsets.is_empty() {
-                        std::ptr::null()
-                    } else {
-                        cipher_offsets.as_ptr()
-                    },
-                    if cipher_sizes.is_empty() {
-                        std::ptr::null()
-                    } else {
-                        cipher_sizes.as_ptr()
-                    },
-                );
-            }
-            1
-        }
-        Err(reason) => {
-            if let Some(cb) = on_skip_cb {
-                let mut reason_c = reason.into_bytes();
-                reason_c.push(0);
-                cb(ctx, reason_c.as_ptr().cast());
-            }
-            0
-        }
-    }
-}
-
-#[no_mangle]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn nzbget_rs_content_mapper_build_repair_sets(
-    member_names: *const *const c_char,
-    member_sizes: *const i64,
-    member_count: usize,
-    hole_counts: *const usize,
-    holes_flat: *const crate::dupefallback::NzbgetRsByteRange,
-    password: *const c_char,
-    tls_enabled: c_int,
-    ctx: *mut std::ffi::c_void,
-    has_source_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32) -> c_int>,
-    size_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32) -> i64>,
-    read_cb: Option<
-        unsafe extern "C" fn(*mut std::ffi::c_void, i32, i64, *mut u8, i64) -> c_int,
-    >,
-    on_rar_volume_cb: OnRarVolumeCb,
-    on_set_cb: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            i32,
-            *const i32,
-            usize,
-            c_int,
-            *const c_char,
-            usize,
-            i64,
-            *const crate::streamrepair::NzbgetRsContentRun,
-            usize,
-            c_int,
-            *const u8,
-            usize,
-            *const u8,
-            *const i64,
-            *const i64,
-            *const crate::dupefallback::NzbgetRsByteRange,
-            usize,
-            *const c_char,
-        ),
-    >,
-) {
-    let names_raw = if member_names.is_null() || member_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(member_names, member_count)
-    };
-    let sizes_raw = if member_sizes.is_null() || member_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(member_sizes, member_count)
-    };
-    let counts_raw = if hole_counts.is_null() || member_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(hole_counts, member_count)
-    };
-    let total_holes: usize = counts_raw.iter().sum();
-    let holes_raw = if holes_flat.is_null() || total_holes == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(holes_flat, total_holes)
-    };
-
-    let mut members = Vec::with_capacity(member_count);
-    let mut member_holes = Vec::with_capacity(member_count);
-    let mut h_cursor = 0usize;
-    for i in 0..member_count {
-        let name = names_raw.get(i).map_or(&[][..], |&p| input(p));
-        let sz = sizes_raw.get(i).copied().unwrap_or(0);
-        members.push(crate::streamrepair::SetMember::new(name, sz));
-        let cnt = counts_raw.get(i).copied().unwrap_or(0);
-        let end = (h_cursor + cnt).min(holes_raw.len());
-        member_holes.push(holes_raw[h_cursor..end].to_vec());
-        h_cursor = end;
-    }
-
-    let pw = (!password.is_null()).then(|| input(password));
-    let source_set = FfiCallbackSourceSet::new(
-        ctx,
-        member_count,
-        has_source_cb,
-        size_cb,
-        read_cb,
-        on_rar_volume_cb,
-    );
-    let sets = crate::streamrepair::ContentMapper::build_repair_sets_with_tls(
-        &members,
-        &member_holes,
-        &source_set,
-        pw,
-        tls_enabled != 0,
-    );
-
-    let Some(cb) = on_set_cb else {
-        return;
-    };
-    for data in sets {
-        let mut skip_c = data.skip_reason.into_bytes();
-        skip_c.push(0);
-        if let Some(map) = data.map {
-            let mut name_c = map.inner_name_bytes().to_vec();
-            let name_len = name_c.len();
-            name_c.push(0);
-            let encrypted = map.encrypted();
-            let mut key_ptr: *const u8 = std::ptr::null();
-            let mut key_len: usize = 0;
-            let mut iv_ptr: *const u8 = std::ptr::null();
-            if let Some(rc0) = map.run_crypto(0) {
-                if let Some(crypto) = &rc0.crypto {
-                    key_ptr = crypto.key().as_ptr();
-                    key_len = crypto.key().len();
-                    iv_ptr = crypto.iv().as_ptr();
-                }
-            }
-            let cipher_offsets: Vec<i64> = map
-                .run_cryptos()
-                .iter()
-                .map(|rc| rc.cipher_data_offset)
-                .collect();
-            let cipher_sizes: Vec<i64> =
-                map.run_cryptos().iter().map(|rc| rc.cipher_size).collect();
-            cb(
-                ctx,
-                data.set.format as i32,
-                data.set.members.as_ptr(),
-                data.set.members.len(),
-                1,
-                name_c.as_ptr().cast(),
-                name_len,
-                map.inner_size(),
-                map.runs().as_ptr(),
-                map.runs().len(),
-                c_int::from(encrypted),
-                key_ptr,
-                key_len,
-                iv_ptr,
-                if cipher_offsets.is_empty() {
-                    std::ptr::null()
-                } else {
-                    cipher_offsets.as_ptr()
-                },
-                if cipher_sizes.is_empty() {
-                    std::ptr::null()
-                } else {
-                    cipher_sizes.as_ptr()
-                },
-                data.inner_holes.as_ptr(),
-                data.inner_holes.len(),
-                skip_c.as_ptr().cast(),
-            );
-        } else {
-            cb(
-                ctx,
-                data.set.format as i32,
-                data.set.members.as_ptr(),
-                data.set.members.len(),
-                0,
-                b"\0".as_ptr().cast(),
-                0,
-                0,
-                std::ptr::null(),
-                0,
-                0,
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-                data.inner_holes.as_ptr(),
-                data.inner_holes.len(),
-                skip_c.as_ptr().cast(),
-            );
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-unsafe fn build_content_map_from_ffi(
-    inner_name: *const c_char,
-    inner_size: i64,
-    runs: *const crate::streamrepair::NzbgetRsContentRun,
-    cipher_data_offsets: *const i64,
-    cipher_sizes: *const i64,
-    has_crypto: *const u8,
-    run_count: usize,
-    key: *const u8,
-    key_len: usize,
-    iv: *const u8,
-) -> (crate::streamrepair::ContentMap, usize) {
-    let runs_slice = if runs.is_null() || run_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(runs, run_count)
-    };
-    let c_offsets = if cipher_data_offsets.is_null() || run_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(cipher_data_offsets, run_count)
-    };
-    let c_sizes = if cipher_sizes.is_null() || run_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(cipher_sizes, run_count)
-    };
-    let has_c = if has_crypto.is_null() || run_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(has_crypto, run_count)
-    };
-    let crypto_arc = if !key.is_null() && !iv.is_null() && (key_len == 16 || key_len == 32) {
-        let key_slice = std::slice::from_raw_parts(key, key_len);
-        let mut iv_arr = [0u8; 16];
-        iv_arr.copy_from_slice(std::slice::from_raw_parts(iv, 16));
-        crate::streamrepair::RarCryptoContext::from_key_iv(key_slice, iv_arr)
-            .map(std::sync::Arc::new)
-    } else {
-        None
-    };
-
-    let mut map = crate::streamrepair::ContentMap::default();
-    if !inner_name.is_null() {
-        map.set_inner_name_bytes(input(inner_name));
-    }
-    map.set_inner_size(inner_size);
-    *map.runs_mut() = runs_slice.to_vec();
-    if c_offsets.len() == run_count
-        && c_sizes.len() == run_count
-        && has_c.len() == run_count
-        && has_c.iter().any(|&h| h != 0)
-    {
-        for i in 0..run_count {
-            map.run_cryptos_mut().push(crate::streamrepair::RunCrypto {
-                crypto: if has_c[i] != 0 {
-                    crypto_arc.clone()
-                } else {
-                    None
-                },
-                cipher_data_offset: c_offsets[i],
-                cipher_size: c_sizes[i],
-            });
-        }
-    }
-
-    let max_member = runs_slice.iter().map(|r| r.member_index).max().unwrap_or(-1);
-    let member_count = if max_member >= 0 {
-        (max_member as usize) + 1
-    } else {
-        0
-    };
-    (map, member_count)
-}
-
-struct FfiSingleCallbackSource {
-    ctx: *mut std::ffi::c_void,
-    size: i64,
-    read_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i64, *mut u8, i64) -> c_int>,
-}
-
-impl crate::streamrepair::ContentSource for FfiSingleCallbackSource {
-    fn size(&self) -> i64 {
-        self.size
-    }
-
-    fn read(&self, offset: i64, buf: &mut [u8]) -> bool {
-        let Some(cb) = self.read_cb else {
-            return false;
-        };
-        let ptr = if buf.is_empty() {
-            std::ptr::null_mut()
-        } else {
-            buf.as_mut_ptr()
-        };
-        unsafe { cb(self.ctx, offset, ptr, buf.len() as i64) != 0 }
-    }
-}
-
-struct FfiTargetFileSet {
-    ctx: *mut std::ffi::c_void,
-    is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
-    has_file_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32) -> c_int>,
-    read_file_cb: Option<
-        unsafe extern "C" fn(*mut std::ffi::c_void, i32, i64, *mut u8, i64) -> c_int,
-    >,
-    write_file_cb: Option<
-        unsafe extern "C" fn(*mut std::ffi::c_void, i32, i64, *const u8, i64) -> c_int,
-    >,
-    on_message_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, *const c_char)>,
-}
-
-impl crate::streamrepair::TargetFileSet for FfiTargetFileSet {
-    fn is_stopped(&self) -> bool {
-        self.is_stopped_cb
-            .is_some_and(|cb| unsafe { cb(self.ctx) != 0 })
-    }
-
-    fn has_file(&mut self, member_index: i32) -> bool {
-        self.has_file_cb
-            .is_some_and(|cb| unsafe { cb(self.ctx, member_index) != 0 })
-    }
-
-    fn read_file(&mut self, member_index: i32, offset: i64, buf: &mut [u8]) -> bool {
-        let Some(cb) = self.read_file_cb else {
-            return false;
-        };
-        let ptr = if buf.is_empty() {
-            std::ptr::null_mut()
-        } else {
-            buf.as_mut_ptr()
-        };
-        unsafe { cb(self.ctx, member_index, offset, ptr, buf.len() as i64) != 0 }
-    }
-
-    fn write_file(&mut self, member_index: i32, offset: i64, data: &[u8]) -> bool {
-        let Some(cb) = self.write_file_cb else {
-            return false;
-        };
-        let ptr = if data.is_empty() {
-            std::ptr::null()
-        } else {
-            data.as_ptr()
-        };
-        unsafe { cb(self.ctx, member_index, offset, ptr, data.len() as i64) != 0 }
-    }
-
-    fn on_message(&mut self, kind: crate::streamrepair::TargetMessageKind, text: &str) {
-        let Some(cb) = self.on_message_cb else {
-            return;
-        };
-        let mut msg_c = text.as_bytes().to_vec();
-        msg_c.push(0);
-        unsafe {
-            cb(self.ctx, kind as i32, msg_c.as_ptr().cast::<c_char>());
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-unsafe fn unpack_target_patch_inputs(
-    set_member_names: *const *const c_char,
-    set_member_sizes: *const i64,
-    set_member_count: usize,
-    member_targets: *const i32,
-    target_hole_counts: *const usize,
-    target_holes_flat: *const crate::dupefallback::NzbgetRsByteRange,
-    target_count: usize,
-) -> (
-    Vec<crate::streamrepair::SetMember>,
-    Vec<i32>,
-    Vec<Vec<crate::dupefallback::NzbgetRsByteRange>>,
-) {
-    let names_raw = if set_member_names.is_null() || set_member_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(set_member_names, set_member_count)
-    };
-    let sizes_raw = if set_member_sizes.is_null() || set_member_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(set_member_sizes, set_member_count)
-    };
-    let mut set_members = Vec::with_capacity(set_member_count);
-    for i in 0..set_member_count {
-        let name = names_raw.get(i).map_or(&[][..], |&p| input(p));
-        let sz = sizes_raw.get(i).copied().unwrap_or(0);
-        set_members.push(crate::streamrepair::SetMember::new(name, sz));
-    }
-    let member_targets_vec = if member_targets.is_null() || set_member_count == 0 {
-        vec![-1; set_member_count]
-    } else {
-        std::slice::from_raw_parts(member_targets, set_member_count).to_vec()
-    };
-    let counts_raw = if target_hole_counts.is_null() || target_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(target_hole_counts, target_count)
-    };
-    let total_holes: usize = counts_raw.iter().sum();
-    let holes_raw = if target_holes_flat.is_null() || total_holes == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(target_holes_flat, total_holes)
-    };
-    let mut target_holes = Vec::with_capacity(target_count);
-    let mut cursor = 0usize;
-    for i in 0..target_count {
-        let cnt = counts_raw.get(i).copied().unwrap_or(0);
-        let end = (cursor + cnt).min(holes_raw.len());
-        target_holes.push(holes_raw[cursor..end].to_vec());
-        cursor = end;
-    }
-    (set_members, member_targets_vec, target_holes)
-}
-
-unsafe fn emit_updated_holes(
-    ctx: *mut std::ffi::c_void,
-    inner_holes: &[crate::dupefallback::NzbgetRsByteRange],
-    target_holes: &[Vec<crate::dupefallback::NzbgetRsByteRange>],
-    on_holes_updated_cb: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            *const crate::dupefallback::NzbgetRsByteRange,
-            usize,
-            *const usize,
-            *const crate::dupefallback::NzbgetRsByteRange,
-            usize,
-        ),
-    >,
-) {
-    let Some(cb) = on_holes_updated_cb else {
-        return;
-    };
-    let counts: Vec<usize> = target_holes.iter().map(Vec::len).collect();
-    let flat: Vec<crate::dupefallback::NzbgetRsByteRange> =
-        target_holes.iter().flatten().copied().collect();
-    cb(
-        ctx,
-        if inner_holes.is_empty() {
-            std::ptr::null()
-        } else {
-            inner_holes.as_ptr()
-        },
-        inner_holes.len(),
-        if counts.is_empty() {
-            std::ptr::null()
-        } else {
-            counts.as_ptr()
-        },
-        if flat.is_empty() {
-            std::ptr::null()
-        } else {
-            flat.as_ptr()
-        },
-        flat.len(),
-    );
-}
-
-#[no_mangle]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn nzbget_rs_stream_read_donor_inner(
-    donor_inner_name: *const c_char,
-    donor_inner_size: i64,
-    donor_runs: *const crate::streamrepair::NzbgetRsContentRun,
-    donor_cipher_offsets: *const i64,
-    donor_cipher_sizes: *const i64,
-    donor_has_crypto: *const u8,
-    donor_run_count: usize,
-    donor_key: *const u8,
-    donor_key_len: usize,
-    donor_iv: *const u8,
-    inner_range: crate::dupefallback::NzbgetRsByteRange,
-    out_buf: *mut u8,
-    ctx: *mut std::ffi::c_void,
-    has_source_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32) -> c_int>,
-    size_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32) -> i64>,
-    read_cb: Option<
-        unsafe extern "C" fn(*mut std::ffi::c_void, i32, i64, *mut u8, i64) -> c_int,
-    >,
-) -> c_int {
-    if inner_range.size < 0 || (inner_range.size > 0 && out_buf.is_null()) {
-        return 0;
-    }
-    let (donor_map, donor_member_count) = build_content_map_from_ffi(
-        donor_inner_name,
-        donor_inner_size,
-        donor_runs,
-        donor_cipher_offsets,
-        donor_cipher_sizes,
-        donor_has_crypto,
-        donor_run_count,
-        donor_key,
-        donor_key_len,
-        donor_iv,
-    );
-    let donor_sources = FfiCallbackSourceSet::new(
-        ctx,
-        donor_member_count,
-        has_source_cb,
-        size_cb,
-        read_cb,
-        None,
-    );
-    let mut scratch = Vec::new();
-    if !donor_map.read_donor_inner(&donor_sources, inner_range, &mut scratch) {
-        return 0;
-    }
-    if inner_range.size > 0 {
-        std::slice::from_raw_parts_mut(out_buf, inner_range.size as usize)
-            .copy_from_slice(&scratch);
-    }
-    1
-}
-
-#[no_mangle]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn nzbget_rs_stream_verify_donor_set(
-    target_inner_name: *const c_char,
-    target_inner_size: i64,
-    target_runs: *const crate::streamrepair::NzbgetRsContentRun,
-    target_cipher_offsets: *const i64,
-    target_cipher_sizes: *const i64,
-    target_has_crypto: *const u8,
-    target_run_count: usize,
-    target_key: *const u8,
-    target_key_len: usize,
-    target_iv: *const u8,
-    inner_holes: *const crate::dupefallback::NzbgetRsByteRange,
-    inner_hole_count: usize,
-    original_inner_holes: *const crate::dupefallback::NzbgetRsByteRange,
-    original_inner_hole_count: usize,
-    donor_inner_name: *const c_char,
-    donor_inner_size: i64,
-    donor_runs: *const crate::streamrepair::NzbgetRsContentRun,
-    donor_cipher_offsets: *const i64,
-    donor_cipher_sizes: *const i64,
-    donor_has_crypto: *const u8,
-    donor_run_count: usize,
-    donor_key: *const u8,
-    donor_key_len: usize,
-    donor_iv: *const u8,
-    ctx: *mut std::ffi::c_void,
-    has_donor_source_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32) -> c_int>,
-    donor_size_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32) -> i64>,
-    donor_read_cb: Option<
-        unsafe extern "C" fn(*mut std::ffi::c_void, i32, i64, *mut u8, i64) -> c_int,
-    >,
-    is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
-    has_target_file_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32) -> c_int>,
-    read_target_file_cb: Option<
-        unsafe extern "C" fn(*mut std::ffi::c_void, i32, i64, *mut u8, i64) -> c_int,
-    >,
-) -> c_int {
-    let (target_map, _) = build_content_map_from_ffi(
-        target_inner_name,
-        target_inner_size,
-        target_runs,
-        target_cipher_offsets,
-        target_cipher_sizes,
-        target_has_crypto,
-        target_run_count,
-        target_key,
-        target_key_len,
-        target_iv,
-    );
-    let (donor_map, donor_member_count) = build_content_map_from_ffi(
-        donor_inner_name,
-        donor_inner_size,
-        donor_runs,
-        donor_cipher_offsets,
-        donor_cipher_sizes,
-        donor_has_crypto,
-        donor_run_count,
-        donor_key,
-        donor_key_len,
-        donor_iv,
-    );
-    let holes_slice = if inner_holes.is_null() || inner_hole_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(inner_holes, inner_hole_count)
-    };
-    let orig_holes_slice = if original_inner_holes.is_null() || original_inner_hole_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(original_inner_holes, original_inner_hole_count)
-    };
-    let repair_set = crate::streamrepair::RepairSetData {
-        set: crate::streamrepair::MemberSet {
-            format: crate::streamrepair::MemberFormat::Bare,
-            members: Vec::new(),
-        },
-        map: Some(target_map),
-        inner_holes: holes_slice.to_vec(),
-        original_inner_holes: orig_holes_slice.to_vec(),
-        skip_reason: String::new(),
-    };
-    let donor_sources = FfiCallbackSourceSet::new(
-        ctx,
-        donor_member_count,
-        has_donor_source_cb,
-        donor_size_cb,
-        donor_read_cb,
-        None,
-    );
-    let mut target_files = FfiTargetFileSet {
-        ctx,
-        is_stopped_cb,
-        has_file_cb: has_target_file_cb,
-        read_file_cb: read_target_file_cb,
-        write_file_cb: None,
-        on_message_cb: None,
-    };
-    c_int::from(repair_set.verify_donor_set(&donor_map, &donor_sources, &mut target_files))
-}
-
-#[no_mangle]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn nzbget_rs_stream_patch_from_donor_set(
-    target_inner_name: *const c_char,
-    target_inner_size: i64,
-    target_runs: *const crate::streamrepair::NzbgetRsContentRun,
-    target_cipher_offsets: *const i64,
-    target_cipher_sizes: *const i64,
-    target_has_crypto: *const u8,
-    target_run_count: usize,
-    target_key: *const u8,
-    target_key_len: usize,
-    target_iv: *const u8,
-    inner_holes: *const crate::dupefallback::NzbgetRsByteRange,
-    inner_hole_count: usize,
-    donor_inner_name: *const c_char,
-    donor_inner_size: i64,
-    donor_runs: *const crate::streamrepair::NzbgetRsContentRun,
-    donor_cipher_offsets: *const i64,
-    donor_cipher_sizes: *const i64,
-    donor_has_crypto: *const u8,
-    donor_run_count: usize,
-    donor_key: *const u8,
-    donor_key_len: usize,
-    donor_iv: *const u8,
-    set_member_names: *const *const c_char,
-    set_member_sizes: *const i64,
-    set_member_count: usize,
-    member_targets: *const i32,
-    target_hole_counts: *const usize,
-    target_holes_flat: *const crate::dupefallback::NzbgetRsByteRange,
-    target_count: usize,
-    donor_name: *const c_char,
-    ctx: *mut std::ffi::c_void,
-    has_donor_source_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32) -> c_int>,
-    donor_size_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32) -> i64>,
-    donor_read_cb: Option<
-        unsafe extern "C" fn(*mut std::ffi::c_void, i32, i64, *mut u8, i64) -> c_int,
-    >,
-    is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
-    has_target_file_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32) -> c_int>,
-    read_target_file_cb: Option<
-        unsafe extern "C" fn(*mut std::ffi::c_void, i32, i64, *mut u8, i64) -> c_int,
-    >,
-    write_target_file_cb: Option<
-        unsafe extern "C" fn(*mut std::ffi::c_void, i32, i64, *const u8, i64) -> c_int,
-    >,
-    on_message_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, *const c_char)>,
-    on_holes_updated_cb: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            *const crate::dupefallback::NzbgetRsByteRange,
-            usize,
-            *const usize,
-            *const crate::dupefallback::NzbgetRsByteRange,
-            usize,
-        ),
-    >,
-    out_credit_recovery: *mut c_int,
-) -> i64 {
-    let (target_map, _) = build_content_map_from_ffi(
-        target_inner_name,
-        target_inner_size,
-        target_runs,
-        target_cipher_offsets,
-        target_cipher_sizes,
-        target_has_crypto,
-        target_run_count,
-        target_key,
-        target_key_len,
-        target_iv,
-    );
-    let (donor_map, donor_member_count) = build_content_map_from_ffi(
-        donor_inner_name,
-        donor_inner_size,
-        donor_runs,
-        donor_cipher_offsets,
-        donor_cipher_sizes,
-        donor_has_crypto,
-        donor_run_count,
-        donor_key,
-        donor_key_len,
-        donor_iv,
-    );
-    let holes_slice = if inner_holes.is_null() || inner_hole_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(inner_holes, inner_hole_count)
-    };
-    let (set_members, member_targets_vec, mut target_holes) = unpack_target_patch_inputs(
-        set_member_names,
-        set_member_sizes,
-        set_member_count,
-        member_targets,
-        target_hole_counts,
-        target_holes_flat,
-        target_count,
-    );
-    let donor_name_str = if donor_name.is_null() {
-        String::new()
-    } else {
-        String::from_utf8_lossy(input(donor_name)).into_owned()
-    };
-    let mut repair_set = crate::streamrepair::RepairSetData {
-        set: crate::streamrepair::MemberSet {
-            format: crate::streamrepair::MemberFormat::Bare,
-            members: Vec::new(),
-        },
-        map: Some(target_map),
-        inner_holes: holes_slice.to_vec(),
-        original_inner_holes: Vec::new(),
-        skip_reason: String::new(),
-    };
-    let donor_sources = FfiCallbackSourceSet::new(
-        ctx,
-        donor_member_count,
-        has_donor_source_cb,
-        donor_size_cb,
-        donor_read_cb,
-        None,
-    );
-    let mut target_files = FfiTargetFileSet {
-        ctx,
-        is_stopped_cb,
-        has_file_cb: has_target_file_cb,
-        read_file_cb: read_target_file_cb,
-        write_file_cb: write_target_file_cb,
-        on_message_cb,
-    };
-    let (written, credit_recovery) = repair_set.patch_from_donor_set(
-        &donor_map,
-        &donor_sources,
-        &mut target_files,
-        &mut target_holes,
-        &member_targets_vec,
-        &set_members,
-        &donor_name_str,
-    );
-    emit_updated_holes(
-        ctx,
-        &repair_set.inner_holes,
-        &target_holes,
-        on_holes_updated_cb,
-    );
-    if !out_credit_recovery.is_null() {
-        *out_credit_recovery = c_int::from(credit_recovery);
-    }
-    written
-}
-
-#[no_mangle]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn nzbget_rs_stream_verify_donor_inner_file(
-    target_inner_name: *const c_char,
-    target_inner_size: i64,
-    target_runs: *const crate::streamrepair::NzbgetRsContentRun,
-    target_cipher_offsets: *const i64,
-    target_cipher_sizes: *const i64,
-    target_has_crypto: *const u8,
-    target_run_count: usize,
-    target_key: *const u8,
-    target_key_len: usize,
-    target_iv: *const u8,
-    inner_holes: *const crate::dupefallback::NzbgetRsByteRange,
-    inner_hole_count: usize,
-    original_inner_holes: *const crate::dupefallback::NzbgetRsByteRange,
-    original_inner_hole_count: usize,
-    donor_inner_size: i64,
-    ctx: *mut std::ffi::c_void,
-    donor_inner_read_cb: Option<
-        unsafe extern "C" fn(*mut std::ffi::c_void, i64, *mut u8, i64) -> c_int,
-    >,
-    is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
-    has_target_file_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32) -> c_int>,
-    read_target_file_cb: Option<
-        unsafe extern "C" fn(*mut std::ffi::c_void, i32, i64, *mut u8, i64) -> c_int,
-    >,
-) -> c_int {
-    let (target_map, _) = build_content_map_from_ffi(
-        target_inner_name,
-        target_inner_size,
-        target_runs,
-        target_cipher_offsets,
-        target_cipher_sizes,
-        target_has_crypto,
-        target_run_count,
-        target_key,
-        target_key_len,
-        target_iv,
-    );
-    let holes_slice = if inner_holes.is_null() || inner_hole_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(inner_holes, inner_hole_count)
-    };
-    let orig_holes_slice = if original_inner_holes.is_null() || original_inner_hole_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(original_inner_holes, original_inner_hole_count)
-    };
-    let repair_set = crate::streamrepair::RepairSetData {
-        set: crate::streamrepair::MemberSet {
-            format: crate::streamrepair::MemberFormat::Bare,
-            members: Vec::new(),
-        },
-        map: Some(target_map),
-        inner_holes: holes_slice.to_vec(),
-        original_inner_holes: orig_holes_slice.to_vec(),
-        skip_reason: String::new(),
-    };
-    let donor_source = FfiSingleCallbackSource {
-        ctx,
-        size: donor_inner_size,
-        read_cb: donor_inner_read_cb,
-    };
-    let mut target_files = FfiTargetFileSet {
-        ctx,
-        is_stopped_cb,
-        has_file_cb: has_target_file_cb,
-        read_file_cb: read_target_file_cb,
-        write_file_cb: None,
-        on_message_cb: None,
-    };
-    c_int::from(repair_set.verify_donor_inner(&donor_source, donor_inner_size, &mut target_files))
-}
-
-#[no_mangle]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn nzbget_rs_stream_patch_from_donor_inner_file(
-    target_inner_name: *const c_char,
-    target_inner_size: i64,
-    target_runs: *const crate::streamrepair::NzbgetRsContentRun,
-    target_cipher_offsets: *const i64,
-    target_cipher_sizes: *const i64,
-    target_has_crypto: *const u8,
-    target_run_count: usize,
-    target_key: *const u8,
-    target_key_len: usize,
-    target_iv: *const u8,
-    inner_holes: *const crate::dupefallback::NzbgetRsByteRange,
-    inner_hole_count: usize,
-    donor_inner_size: i64,
-    set_member_names: *const *const c_char,
-    set_member_sizes: *const i64,
-    set_member_count: usize,
-    member_targets: *const i32,
-    target_hole_counts: *const usize,
-    target_holes_flat: *const crate::dupefallback::NzbgetRsByteRange,
-    target_count: usize,
-    donor_name: *const c_char,
-    ctx: *mut std::ffi::c_void,
-    donor_inner_read_cb: Option<
-        unsafe extern "C" fn(*mut std::ffi::c_void, i64, *mut u8, i64) -> c_int,
-    >,
-    is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
-    has_target_file_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32) -> c_int>,
-    read_target_file_cb: Option<
-        unsafe extern "C" fn(*mut std::ffi::c_void, i32, i64, *mut u8, i64) -> c_int,
-    >,
-    write_target_file_cb: Option<
-        unsafe extern "C" fn(*mut std::ffi::c_void, i32, i64, *const u8, i64) -> c_int,
-    >,
-    on_message_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, *const c_char)>,
-    on_holes_updated_cb: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            *const crate::dupefallback::NzbgetRsByteRange,
-            usize,
-            *const usize,
-            *const crate::dupefallback::NzbgetRsByteRange,
-            usize,
-        ),
-    >,
-    out_holes_filled: *mut c_int,
-    out_credit_recovery: *mut c_int,
-) -> i64 {
-    let (target_map, _) = build_content_map_from_ffi(
-        target_inner_name,
-        target_inner_size,
-        target_runs,
-        target_cipher_offsets,
-        target_cipher_sizes,
-        target_has_crypto,
-        target_run_count,
-        target_key,
-        target_key_len,
-        target_iv,
-    );
-    let holes_slice = if inner_holes.is_null() || inner_hole_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(inner_holes, inner_hole_count)
-    };
-    let (set_members, member_targets_vec, mut target_holes) = unpack_target_patch_inputs(
-        set_member_names,
-        set_member_sizes,
-        set_member_count,
-        member_targets,
-        target_hole_counts,
-        target_holes_flat,
-        target_count,
-    );
-    let donor_name_str = if donor_name.is_null() {
-        String::new()
-    } else {
-        String::from_utf8_lossy(input(donor_name)).into_owned()
-    };
-    let mut repair_set = crate::streamrepair::RepairSetData {
-        set: crate::streamrepair::MemberSet {
-            format: crate::streamrepair::MemberFormat::Bare,
-            members: Vec::new(),
-        },
-        map: Some(target_map),
-        inner_holes: holes_slice.to_vec(),
-        original_inner_holes: Vec::new(),
-        skip_reason: String::new(),
-    };
-    let donor_source = FfiSingleCallbackSource {
-        ctx,
-        size: donor_inner_size,
-        read_cb: donor_inner_read_cb,
-    };
-    let mut target_files = FfiTargetFileSet {
-        ctx,
-        is_stopped_cb,
-        has_file_cb: has_target_file_cb,
-        read_file_cb: read_target_file_cb,
-        write_file_cb: write_target_file_cb,
-        on_message_cb,
-    };
-    let (written, holes_filled, credit_recovery) = repair_set.patch_from_donor_inner(
-        &donor_source,
-        &mut target_files,
-        &mut target_holes,
-        &member_targets_vec,
-        &set_members,
-        &donor_name_str,
-    );
-    emit_updated_holes(
-        ctx,
-        &repair_set.inner_holes,
-        &target_holes,
-        on_holes_updated_cb,
-    );
-    if !out_holes_filled.is_null() {
-        *out_holes_filled = holes_filled;
-    }
-    if !out_credit_recovery.is_null() {
-        *out_credit_recovery = c_int::from(credit_recovery);
-    }
-    written
-}
-
-pub struct NzbgetRsDonorMemberSource(pub crate::streamrepair::DonorMemberSource);
-
-type DonorFetchPartFn = Option<
-    unsafe extern "C" fn(
-        *mut std::ffi::c_void,
-        i32,
-        *mut c_int,
-        *mut i64,
-        *mut i64,
-        *mut *const u8,
-        *mut usize,
-    ) -> c_int,
->;
-
 type DonorNextArticleFn = Option<
     unsafe extern "C" fn(
         *mut std::ffi::c_void,
@@ -35399,190 +34048,6 @@ type DonorNextArticleFn = Option<
         *mut usize,
     ) -> c_int,
 >;
-
-struct FfiDonorArticleTransport {
-    ctx: *mut std::ffi::c_void,
-    allow_prefetch: bool,
-    fetch_part_cb: DonorFetchPartFn,
-    begin_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const i32, usize)>,
-    next_batch_cb: DonorNextArticleFn,
-    cancel_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
-}
-
-impl crate::streamrepair::DonorArticleTransport for FfiDonorArticleTransport {
-    fn has_prefetch_batch(&self) -> bool {
-        self.allow_prefetch
-    }
-
-    fn fetch_part(&mut self, part_index: i32) -> Option<crate::streamrepair::FetchedDonorArticle> {
-        let cb = self.fetch_part_cb?;
-        let mut success: c_int = 0;
-        let mut offset: i64 = 0;
-        let mut file_size: i64 = 0;
-        let mut data_ptr: *const u8 = std::ptr::null();
-        let mut data_len: usize = 0;
-        let fetched = unsafe {
-            cb(
-                self.ctx,
-                part_index,
-                &mut success,
-                &mut offset,
-                &mut file_size,
-                &mut data_ptr,
-                &mut data_len,
-            )
-        };
-        if fetched == 0 {
-            return None;
-        }
-        let data = if data_ptr.is_null() || data_len == 0 {
-            Vec::new()
-        } else {
-            unsafe { std::slice::from_raw_parts(data_ptr, data_len).to_vec() }
-        };
-        Some(crate::streamrepair::FetchedDonorArticle {
-            success: success != 0,
-            offset,
-            file_size,
-            data,
-        })
-    }
-
-    fn begin_prefetch_batch(&mut self, part_indices: &[i32]) {
-        if let Some(cb) = self.begin_batch_cb {
-            unsafe { cb(self.ctx, part_indices.as_ptr(), part_indices.len()) };
-        }
-    }
-
-    fn next_prefetch_part(&mut self) -> Option<crate::streamrepair::FetchedDonorArticle> {
-        let cb = self.next_batch_cb?;
-        let mut success: c_int = 0;
-        let mut offset: i64 = 0;
-        let mut file_size: i64 = 0;
-        let mut data_ptr: *const u8 = std::ptr::null();
-        let mut data_len: usize = 0;
-        let ok = unsafe {
-            cb(
-                self.ctx,
-                &mut success,
-                &mut offset,
-                &mut file_size,
-                &mut data_ptr,
-                &mut data_len,
-            )
-        };
-        if ok == 0 {
-            return None;
-        }
-        let data = if data_ptr.is_null() || data_len == 0 {
-            Vec::new()
-        } else {
-            unsafe { std::slice::from_raw_parts(data_ptr, data_len).to_vec() }
-        };
-        Some(crate::streamrepair::FetchedDonorArticle {
-            success: success != 0,
-            offset,
-            file_size,
-            data,
-        })
-    }
-
-    fn cancel_prefetch_batch(&mut self) {
-        if let Some(cb) = self.cancel_batch_cb {
-            unsafe { cb(self.ctx) };
-        }
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_donor_member_source_new(
-    article_sizes: *const i32,
-    article_count: usize,
-) -> *mut NzbgetRsDonorMemberSource {
-    let sizes = if article_sizes.is_null() || article_count == 0 {
-        Vec::new()
-    } else {
-        std::slice::from_raw_parts(article_sizes, article_count).to_vec()
-    };
-    Box::into_raw(Box::new(NzbgetRsDonorMemberSource(
-        crate::streamrepair::DonorMemberSource::new(sizes),
-    )))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_donor_member_source_free(
-    source: *mut NzbgetRsDonorMemberSource,
-) {
-    if !source.is_null() {
-        drop(Box::from_raw(source));
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_donor_member_source_take_served_parts(
-    source: *mut NzbgetRsDonorMemberSource,
-) -> c_int {
-    let Some(source) = source.as_mut() else {
-        return 0;
-    };
-    source.0.take_served_parts()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_donor_member_source_size(
-    source: *mut NzbgetRsDonorMemberSource,
-    ctx: *mut std::ffi::c_void,
-    fetch_part_cb: DonorFetchPartFn,
-) -> i64 {
-    let Some(source) = source.as_mut() else {
-        return 0;
-    };
-    let mut transport = FfiDonorArticleTransport {
-        ctx,
-        allow_prefetch: false,
-        fetch_part_cb,
-        begin_batch_cb: None,
-        next_batch_cb: None,
-        cancel_batch_cb: None,
-    };
-    source.0.size_with_transport(&mut transport)
-}
-
-#[allow(clippy::too_many_arguments)]
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_donor_member_source_read(
-    source: *mut NzbgetRsDonorMemberSource,
-    offset: i64,
-    buffer: *mut u8,
-    size: i64,
-    allow_prefetch: c_int,
-    ctx: *mut std::ffi::c_void,
-    fetch_part_cb: DonorFetchPartFn,
-    begin_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const i32, usize)>,
-    next_batch_cb: DonorNextArticleFn,
-    cancel_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
-) -> c_int {
-    let Some(source) = source.as_mut() else {
-        return 0;
-    };
-    if size < 0 || (size > 0 && buffer.is_null()) {
-        return 0;
-    }
-    let out_slice = if size == 0 {
-        &mut [][..]
-    } else {
-        std::slice::from_raw_parts_mut(buffer, size as usize)
-    };
-    let mut transport = FfiDonorArticleTransport {
-        ctx,
-        allow_prefetch: allow_prefetch != 0,
-        fetch_part_cb,
-        begin_batch_cb,
-        next_batch_cb,
-        cancel_batch_cb,
-    };
-    c_int::from(source.0.read_with_transport(&mut transport, offset, out_slice))
-}
 
 struct FfiDonorBatchClient {
     ctx: *mut std::ffi::c_void,
@@ -35842,50 +34307,112 @@ pub unsafe extern "C" fn nzbget_rs_stream_probe_whole_file_donor_size(
     }
 }
 
-struct FfiDonorMaterializeClient {
+pub struct NzbgetRsCrossPackSession(crate::streamrepair::CrossPackRepairSession);
+
+type DonorFetchMemberPartFn = Option<
+    unsafe extern "C" fn(
+        *mut std::ffi::c_void,
+        i32,
+        i32,
+        *mut c_int,
+        *mut i64,
+        *mut i64,
+        *mut *const u8,
+        *mut usize,
+    ) -> c_int,
+>;
+
+type DonorBeginMemberBatchFn =
+    Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, *const i32, usize)>;
+
+struct FfiCrossPackDonorEnv {
     ctx: *mut std::ffi::c_void,
     is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
-    open_member_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32) -> c_int>,
-    write_member_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i64, *const u8, i64) -> c_int>,
-    close_member_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
-    begin_member_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32)>,
-    next_article_cb: DonorNextArticleFn,
+    fetch_part_cb: DonorFetchMemberPartFn,
+    begin_prefetch_cb: DonorBeginMemberBatchFn,
+    next_batch_cb: DonorNextArticleFn,
     cancel_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
-    update_progress_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, i32)>,
+    begin_materialize_member_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32)>,
+    set_progress_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, i32)>,
+    set_materializing_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32)>,
+    add_recovered_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i64, i32)>,
+    sync_target_holes_cb: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            *const usize,
+            *const crate::dupefallback::NzbgetRsByteRange,
+            usize,
+        ),
+    >,
     emit_message_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, *const c_char)>,
+    emit_extractor_log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, *const c_char)>,
+    emit_debug_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
 }
 
-impl crate::streamrepair::DonorMaterializeClient for FfiDonorMaterializeClient {
+impl crate::streamrepair::CrossPackDonorEnv for FfiCrossPackDonorEnv {
     fn is_stopped(&mut self) -> bool {
         self.is_stopped_cb
             .is_some_and(|cb| unsafe { cb(self.ctx) != 0 })
     }
 
-    fn open_member(&mut self, member_index: i32) -> bool {
-        self.open_member_cb
-            .is_some_and(|cb| unsafe { cb(self.ctx, member_index) != 0 })
+    fn has_batch_fetcher(&self) -> bool {
+        self.begin_prefetch_cb.is_some() && self.next_batch_cb.is_some()
     }
 
-    fn write_member(&mut self, offset: i64, data: &[u8]) -> bool {
-        self.write_member_cb.is_some_and(|cb| unsafe {
-            cb(self.ctx, offset, data.as_ptr(), data.len() as i64) != 0
+    fn fetch_donor_part(
+        &mut self,
+        member_index: i32,
+        part_index: i32,
+    ) -> Option<crate::streamrepair::FetchedDonorArticle> {
+        let cb = self.fetch_part_cb?;
+        let mut success: c_int = 0;
+        let mut offset: i64 = 0;
+        let mut file_size: i64 = 0;
+        let mut data_ptr: *const u8 = std::ptr::null();
+        let mut data_len: usize = 0;
+        let ok = unsafe {
+            cb(
+                self.ctx,
+                member_index,
+                part_index,
+                &mut success,
+                &mut offset,
+                &mut file_size,
+                &mut data_ptr,
+                &mut data_len,
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        let data = if data_ptr.is_null() || data_len == 0 {
+            Vec::new()
+        } else {
+            unsafe { std::slice::from_raw_parts(data_ptr, data_len).to_vec() }
+        };
+        Some(crate::streamrepair::FetchedDonorArticle {
+            success: success != 0,
+            offset,
+            file_size,
+            data,
         })
     }
 
-    fn close_member(&mut self) {
-        if let Some(cb) = self.close_member_cb {
-            unsafe { cb(self.ctx) };
+    fn begin_donor_prefetch(&mut self, member_index: i32, part_indices: &[i32]) {
+        if let Some(cb) = self.begin_prefetch_cb {
+            unsafe {
+                cb(
+                    self.ctx,
+                    member_index,
+                    part_indices.as_ptr(),
+                    part_indices.len(),
+                );
+            }
         }
     }
 
-    fn begin_member_batch(&mut self, member_index: i32) {
-        if let Some(cb) = self.begin_member_batch_cb {
-            unsafe { cb(self.ctx, member_index) };
-        }
-    }
-
-    fn next_article(&mut self) -> Option<crate::streamrepair::FetchedDonorArticle> {
-        let cb = self.next_article_cb?;
+    fn next_donor_prefetch(&mut self) -> Option<crate::streamrepair::FetchedDonorArticle> {
+        let cb = self.next_batch_cb?;
         let mut success: c_int = 0;
         let mut offset: i64 = 0;
         let mut file_size: i64 = 0;
@@ -35917,19 +34444,68 @@ impl crate::streamrepair::DonorMaterializeClient for FfiDonorMaterializeClient {
         })
     }
 
-    fn cancel_remaining(&mut self) {
+    fn cancel_donor_prefetch(&mut self) {
         if let Some(cb) = self.cancel_batch_cb {
             unsafe { cb(self.ctx) };
         }
     }
 
-    fn update_progress(&mut self, label: &[u8], stage_progress: i32) {
-        let Some(cb) = self.update_progress_cb else {
+    fn begin_materialize_member(&mut self, member_index: i32) {
+        if let Some(cb) = self.begin_materialize_member_cb {
+            unsafe { cb(self.ctx, member_index) };
+        }
+    }
+
+    fn next_materialize_article(&mut self) -> Option<crate::streamrepair::FetchedDonorArticle> {
+        self.next_donor_prefetch()
+    }
+
+    fn cancel_materialize_member(&mut self) {
+        self.cancel_donor_prefetch();
+    }
+
+    fn set_progress(&mut self, label: &[u8], stage_progress: i32) {
+        let Some(cb) = self.set_progress_cb else {
             return;
         };
         let mut buf: Vec<u8> = label.iter().copied().filter(|&b| b != 0).collect();
         buf.push(0);
         unsafe { cb(self.ctx, buf.as_ptr() as *const c_char, stage_progress) };
+    }
+
+    fn set_materializing(&mut self, delta: i32) {
+        if let Some(cb) = self.set_materializing_cb {
+            unsafe { cb(self.ctx, delta) };
+        }
+    }
+
+    fn add_recovered(&mut self, bytes: i64, holes: i32) {
+        if let Some(cb) = self.add_recovered_cb {
+            unsafe { cb(self.ctx, bytes, holes) };
+        }
+    }
+
+    fn sync_target_holes(
+        &mut self,
+        target_holes: &[Vec<crate::dupefallback::NzbgetRsByteRange>],
+    ) {
+        let Some(cb) = self.sync_target_holes_cb else {
+            return;
+        };
+        let mut counts = Vec::with_capacity(target_holes.len());
+        let mut flat = Vec::new();
+        for th in target_holes {
+            counts.push(th.len());
+            flat.extend_from_slice(th);
+        }
+        unsafe {
+            cb(
+                self.ctx,
+                counts.as_ptr(),
+                flat.as_ptr(),
+                counts.len(),
+            );
+        }
     }
 
     fn emit_message_bytes(&mut self, kind: crate::streamrepair::TargetMessageKind, text: &[u8]) {
@@ -35940,75 +34516,243 @@ impl crate::streamrepair::DonorMaterializeClient for FfiDonorMaterializeClient {
         buf.push(0);
         unsafe { cb(self.ctx, kind as i32, buf.as_ptr() as *const c_char) };
     }
+
+    fn emit_extractor_log(&mut self, kind: i32, msg: &str) {
+        if let Some(cb) = self.emit_extractor_log_cb {
+            let mut buf: Vec<u8> = msg.bytes().filter(|&b| b != 0).collect();
+            buf.push(0);
+            unsafe { cb(self.ctx, kind, buf.as_ptr() as *const c_char) };
+        }
+    }
+
+    fn on_rar_volume_parsed(
+        &mut self,
+        member_name: &[u8],
+        vol: &crate::rarreader::Volume,
+        files: &[crate::rarreader::RarFile],
+    ) {
+        let Some(cb) = self.emit_debug_cb else {
+            return;
+        };
+        for mut line in crate::streamrepair::format_rar_volume_debug_lines(member_name, vol, files) {
+            line.push(0);
+            unsafe { cb(self.ctx, line.as_ptr() as *const c_char) };
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_stream_materialize_donor_set(
-    set_members: *const i32,
-    set_member_count: usize,
-    file_names: *const *const c_char,
-    file_article_counts: *const i32,
-    file_count: usize,
-    donor_name: *const c_char,
-    inout_total_bytes: *mut i64,
+pub unsafe extern "C" fn nzbget_rs_cross_pack_session_new(
+    dest_dir: *const c_char,
+    member_names: *const *const c_char,
+    member_count: usize,
+    target_filenames: *const *const c_char,
+    target_decoded_sizes: *const i64,
+    target_patch_eligible: *const u8,
+    target_hole_counts: *const usize,
+    target_holes_flat: *const crate::dupefallback::NzbgetRsByteRange,
+    target_count: usize,
+    target_password: *const c_char,
     ctx: *mut std::ffi::c_void,
     is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
-    open_member_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32) -> c_int>,
-    write_member_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i64, *const u8, i64) -> c_int>,
-    close_member_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
-    begin_member_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32)>,
-    next_article_cb: DonorNextArticleFn,
-    cancel_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
-    update_progress_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, i32)>,
     emit_message_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, *const c_char)>,
-) -> c_int {
-    let members = if set_members.is_null() || set_member_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(set_members, set_member_count)
-    };
-    let mut names_vec = Vec::with_capacity(file_count);
-    if !file_names.is_null() && file_count > 0 {
-        for &ptr in std::slice::from_raw_parts(file_names, file_count) {
-            names_vec.push(input(ptr));
+    emit_debug_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
+) -> *mut NzbgetRsCrossPackSession {
+    let mut member_names_vec = Vec::with_capacity(member_count);
+    if !member_names.is_null() && member_count > 0 {
+        for &ptr in std::slice::from_raw_parts(member_names, member_count) {
+            member_names_vec.push(input(ptr));
         }
     }
-    let counts = if file_article_counts.is_null() || file_count == 0 {
+    let mut targets_vec = Vec::with_capacity(target_count);
+    if target_count > 0
+        && !target_filenames.is_null()
+        && !target_decoded_sizes.is_null()
+        && !target_patch_eligible.is_null()
+        && !target_hole_counts.is_null()
+    {
+        let fnames = std::slice::from_raw_parts(target_filenames, target_count);
+        let dsizes = std::slice::from_raw_parts(target_decoded_sizes, target_count);
+        let peligible = std::slice::from_raw_parts(target_patch_eligible, target_count);
+        let hcounts = std::slice::from_raw_parts(target_hole_counts, target_count);
+        let total_holes: usize = hcounts.iter().copied().sum();
+        let flat = if target_holes_flat.is_null() || total_holes == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(target_holes_flat, total_holes)
+        };
+        let mut cursor = 0usize;
+        for t in 0..target_count {
+            let cnt = hcounts[t];
+            let end = cursor.saturating_add(cnt).min(flat.len());
+            targets_vec.push(crate::streamrepair::CrossPackTargetInput {
+                filename: input(fnames[t]).to_vec(),
+                decoded_file_size: dsizes[t],
+                patch_eligible: peligible[t] != 0,
+                holes: flat[cursor..end].to_vec(),
+            });
+            cursor = end;
+        }
+    }
+    let pw = if target_password.is_null() {
+        None
+    } else {
+        let s = input(target_password);
+        (!s.is_empty()).then_some(s)
+    };
+    let aborted = || is_stopped_cb.is_some_and(|cb| unsafe { cb(ctx) != 0 });
+    let mut emit_msg = |kind: crate::streamrepair::TargetMessageKind, text: &[u8]| {
+        if let Some(cb) = emit_message_cb {
+            let mut buf: Vec<u8> = text.iter().copied().filter(|&b| b != 0).collect();
+            buf.push(0);
+            unsafe { cb(ctx, kind as i32, buf.as_ptr() as *const c_char) };
+        }
+    };
+    let rar_vol_cb = |member_name: &[u8],
+                      vol: &crate::rarreader::Volume,
+                      files: &[crate::rarreader::RarFile]| {
+        if let Some(cb) = emit_debug_cb {
+            for mut line in
+                crate::streamrepair::format_rar_volume_debug_lines(member_name, vol, files)
+            {
+                line.push(0);
+                unsafe { cb(ctx, line.as_ptr() as *const c_char) };
+            }
+        }
+    };
+    let rar_vol_ref: Option<
+        &dyn Fn(&[u8], &crate::rarreader::Volume, &[crate::rarreader::RarFile]),
+    > = emit_debug_cb.map(|_| {
+        &rar_vol_cb as &dyn Fn(&[u8], &crate::rarreader::Volume, &[crate::rarreader::RarFile])
+    });
+    let Some(session) = crate::streamrepair::CrossPackRepairSession::new(
+        input(dest_dir),
+        &member_names_vec,
+        &targets_vec,
+        pw,
+        true,
+        Some(&aborted),
+        &mut emit_msg,
+        rar_vol_ref,
+    ) else {
+        return std::ptr::null_mut();
+    };
+    Box::into_raw(Box::new(NzbgetRsCrossPackSession(session)))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_cross_pack_session_free(
+    session: *mut NzbgetRsCrossPackSession,
+) {
+    if !session.is_null() {
+        drop(Box::from_raw(session));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_cross_pack_session_has_inner_holes(
+    session: *const NzbgetRsCrossPackSession,
+) -> c_int {
+    let Some(s) = session.as_ref() else {
+        return 0;
+    };
+    c_int::from(s.0.has_inner_holes())
+}
+
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_cross_pack_session_process_donor(
+    session: *mut NzbgetRsCrossPackSession,
+    donor_queued_filename: *const c_char,
+    donor_info_name: *const c_char,
+    donor_password: *const c_char,
+    donor_file_names: *const *const c_char,
+    donor_file_sizes: *const i64,
+    donor_article_counts: *const usize,
+    donor_article_sizes_flat: *const i32,
+    donor_file_count: usize,
+    allow_decompress: c_int,
+    ctx: *mut std::ffi::c_void,
+    is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
+    fetch_part_cb: DonorFetchMemberPartFn,
+    begin_prefetch_cb: DonorBeginMemberBatchFn,
+    next_batch_cb: DonorNextArticleFn,
+    cancel_batch_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+    begin_materialize_member_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32)>,
+    set_progress_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, i32)>,
+    set_materializing_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32)>,
+    add_recovered_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i64, i32)>,
+    sync_target_holes_cb: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            *const usize,
+            *const crate::dupefallback::NzbgetRsByteRange,
+            usize,
+        ),
+    >,
+    emit_message_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, *const c_char)>,
+    emit_extractor_log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, i32, *const c_char)>,
+    emit_debug_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
+) {
+    let Some(s) = session.as_mut() else {
+        return;
+    };
+    let mut file_names_vec = Vec::with_capacity(donor_file_count);
+    if !donor_file_names.is_null() && donor_file_count > 0 {
+        for &ptr in std::slice::from_raw_parts(donor_file_names, donor_file_count) {
+            file_names_vec.push(input(ptr));
+        }
+    }
+    let file_sizes_slice = if donor_file_sizes.is_null() || donor_file_count == 0 {
         &[]
     } else {
-        std::slice::from_raw_parts(file_article_counts, file_count)
+        std::slice::from_raw_parts(donor_file_sizes, donor_file_count)
     };
-    let mut total_bytes = if inout_total_bytes.is_null() {
-        0
-    } else {
-        *inout_total_bytes
-    };
-    let mut client = FfiDonorMaterializeClient {
+    let mut article_sizes_vec = Vec::with_capacity(donor_file_count);
+    if !donor_article_counts.is_null() && donor_file_count > 0 {
+        let counts = std::slice::from_raw_parts(donor_article_counts, donor_file_count);
+        let total_arts: usize = counts.iter().copied().sum();
+        let flat = if donor_article_sizes_flat.is_null() || total_arts == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(donor_article_sizes_flat, total_arts)
+        };
+        let mut cursor = 0usize;
+        for &cnt in counts {
+            let end = cursor.saturating_add(cnt).min(flat.len());
+            article_sizes_vec.push(flat[cursor..end].to_vec());
+            cursor = end;
+        }
+    }
+    let mut env = FfiCrossPackDonorEnv {
         ctx,
         is_stopped_cb,
-        open_member_cb,
-        write_member_cb,
-        close_member_cb,
-        begin_member_batch_cb,
-        next_article_cb,
+        fetch_part_cb,
+        begin_prefetch_cb,
+        next_batch_cb,
         cancel_batch_cb,
-        update_progress_cb,
+        begin_materialize_member_cb,
+        set_progress_cb,
+        set_materializing_cb,
+        add_recovered_cb,
+        sync_target_holes_cb,
         emit_message_cb,
+        emit_extractor_log_cb,
+        emit_debug_cb,
     };
-    let ok = crate::streamrepair::materialize_donor_set(
-        members,
-        &names_vec,
-        counts,
-        input(donor_name),
-        &mut total_bytes,
-        &mut client,
+    s.0.process_donor(
+        input(donor_queued_filename),
+        input(donor_info_name),
+        input(donor_password),
+        &file_names_vec,
+        file_sizes_slice,
+        &article_sizes_vec,
+        allow_decompress != 0,
+        &mut env,
     );
-    if !inout_total_bytes.is_null() {
-        *inout_total_bytes = total_bytes;
-    }
-    c_int::from(ok)
 }
+
 
 
 

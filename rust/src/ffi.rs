@@ -10995,7 +10995,7 @@ pub unsafe extern "C" fn nzbget_rs_par_repairer_source_file_info(
         *out_target_filename = into_buf(sf.target_filename.as_bytes().to_vec());
     }
     if !out_target_path.is_null() {
-        *out_target_path = into_buf(sf.target_path.to_string_lossy().as_bytes().to_vec());
+        *out_target_path = into_buf(crate::fsops::path_to_bytes(&sf.target_path).to_vec());
     }
     if !out_target_exists.is_null() {
         *out_target_exists = c_int::from(sf.target_exists);
@@ -11032,7 +11032,7 @@ pub unsafe extern "C" fn nzbget_rs_par_repairer_leftover_path(
     let Some(p) = r.leftovers().get(idx) else {
         return into_buf(Vec::new());
     };
-    into_buf(p.to_string_lossy().as_bytes().to_vec())
+    into_buf(crate::fsops::path_to_bytes(p).to_vec())
 }
 
 #[no_mangle]

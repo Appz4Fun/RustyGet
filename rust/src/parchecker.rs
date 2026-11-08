@@ -953,6 +953,179 @@ impl RustParRepairer {
     pub fn recovery_block_count(&self) -> u32 {
         self.repairer.recovery_blocks() as u32
     }
+
+    /// `ParChecker::DeleteLeftovers`: logs and deletes every leftover file recorded by `repair()`.
+    pub fn delete_leftovers(&self, log_cb: &mut dyn FnMut(&[u8])) {
+        for path in &self.leftovers {
+            let path_bytes = crate::fsops::path_to_bytes(path);
+            if !path_bytes.is_empty() {
+                let base = &path_bytes[crate::paths::base_file_name(path_bytes)..];
+                let msg = [b"Deleting file ", base].concat();
+                log_cb(&msg);
+                if let Ok(cpath) = std::ffi::CString::new(path_bytes) {
+                    let _ = crate::fsops::delete_file(&cpath);
+                }
+            }
+        }
+    }
+
+    /// `ParChecker::CheckEmptyFiles`: when `ParQuick` is disabled, checks any source file that was
+    /// not yet added to `processed_files` (e.g., empty damaged files), emits its warning message,
+    /// and returns `true` if any unignored damaged file was found.
+    pub fn check_empty_files(
+        &self,
+        processed_files: &[&[u8]],
+        log_cb: &mut dyn FnMut(&[u8]),
+    ) -> bool {
+        let mut found_unignored_damaged = false;
+        for sf in self.source_files() {
+            let filename = sf.target_filename.as_bytes();
+            if !filename.is_empty() && !is_processed_file(filename, processed_files) {
+                let ignore =
+                    crate::util::match_file_ext_locale(filename, &self.par_ignore_ext, b",;");
+                found_unignored_damaged |= !ignore;
+                let suffix: &[u8] = if ignore { b" (ignored)" } else { b"" };
+                let msg = [
+                    b"File ",
+                    filename,
+                    format!(
+                        " has {} bad block(s) of total {} block(s)",
+                        sf.block_count, sf.block_count
+                    )
+                    .as_bytes(),
+                    suffix,
+                ]
+                .concat();
+                log_cb(&msg);
+            }
+        }
+        found_unignored_damaged
+    }
+
+    /// Used by `ParChecker::SignalDone`: returns `false` if any missing (`!target_exists`) source
+    /// file in this set has a base filename equal to `file_name`.
+    pub fn target_file_exists_by_basename(&self, file_name: &[u8]) -> bool {
+        for sf in self.source_files() {
+            let target_bytes = sf.target_filename.as_bytes();
+            let base = &target_bytes[crate::paths::base_file_name(target_bytes)..];
+            if !sf.target_exists && base == file_name {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Used at the end of `ParChecker::RunParCheck` to update `m_verifiedFiles`: invokes
+    /// `cb(target_path_bytes, keep_verified)` for each source file in the set.
+    pub fn for_each_target_verification(
+        &self,
+        set_succeeded: bool,
+        cb: &mut dyn FnMut(&[u8], bool),
+    ) {
+        for sf in self.source_files() {
+            let target_path = crate::fsops::path_to_bytes(&sf.target_path);
+            let is_complete_target = sf.status == FileStatus::Complete
+                && sf.complete_file.as_ref() == Some(&sf.target_path);
+            cb(target_path, set_succeeded && is_complete_target);
+        }
+    }
+
+    /// `ParChecker::AddSplittedFragments` candidate discovery: scans `dest_dir` for split fragments
+    /// matching any source file in the PAR2 set (or its pre-rename original name).
+    pub fn discover_splitted_fragments(
+        &self,
+        dest_dir: &[u8],
+        processed_files: &[&[u8]],
+        is_parred_cb: &mut dyn FnMut(&[u8]) -> bool,
+        find_origname_cb: &mut dyn FnMut(&[u8]) -> Option<Vec<u8>>,
+        detail_cb: &mut dyn FnMut(&[u8]),
+    ) -> Vec<Vec<u8>> {
+        let mut extrafiles = Vec::new();
+        let sep = crate::paths::PATH_SEPARATOR;
+        for filename in crate::fsops::list_dir_entries(dest_dir) {
+            if !is_parred_cb(&filename) && !is_processed_file(&filename, processed_files) {
+                for sf in self.source_files() {
+                    let target = sf.target_filename.as_bytes();
+                    let current = &target[crate::paths::base_file_name(target)..];
+                    let orig = find_origname_cb(current);
+                    let matched = maybe_splitted_fragment(&filename, current)
+                        || orig.as_deref().is_some_and(|o| {
+                            !o.eq_ignore_ascii_case(current)
+                                && maybe_splitted_fragment(&filename, o)
+                        });
+                    if matched {
+                        let msg = [b"Found splitted fragment ", filename.as_slice()].concat();
+                        detail_cb(&msg);
+                        extrafiles.push([dest_dir, &[sep], filename.as_slice()].concat());
+                        break;
+                    }
+                }
+            }
+        }
+        extrafiles
+    }
+}
+
+/// `ParChecker::IsProcessedFile`: returns `true` if `filename` matches the base filename of any
+/// entry in `processed_files` (case-insensitively).
+pub fn is_processed_file(filename: &[u8], processed_files: &[&[u8]]) -> bool {
+    processed_files.iter().any(|p| {
+        let base = &p[crate::paths::base_file_name(p)..];
+        base.eq_ignore_ascii_case(filename)
+    })
+}
+
+fn collect_extra_files_rec(
+    directory: &[u8],
+    external_dir: bool,
+    processed_files: &[&[u8]],
+    is_parred_cb: &mut dyn FnMut(&[u8]) -> bool,
+    out: &mut Vec<Vec<u8>>,
+) {
+    let sep = crate::paths::PATH_SEPARATOR;
+    for filename in crate::fsops::list_dir_entries(directory) {
+        let full = [directory, &[sep], &filename].concat();
+        if crate::fsops::directory_exists(&full, &crate::fsops::posix_stat) {
+            collect_extra_files_rec(&full, external_dir, processed_files, is_parred_cb, out);
+        } else {
+            let is_parred = !external_dir && is_parred_cb(&filename);
+            let is_processed =
+                !external_dir && !is_parred && is_processed_file(&filename, processed_files);
+            if external_dir || (!is_parred && !is_processed) {
+                out.push(full);
+            }
+        }
+    }
+}
+
+/// `ParChecker::FindExtraFiles` + `ParChecker::SortExtraFiles`:
+/// Recursively collects candidate extra files under `directory` and sorts files whose stem matches
+/// the `.par2` stem ahead of other files.
+pub fn find_and_sort_extra_files(
+    directory: &[u8],
+    external_dir: bool,
+    par_filename: &[u8],
+    processed_files: &[&[u8]],
+    is_parred_cb: &mut dyn FnMut(&[u8]) -> bool,
+) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    collect_extra_files_rec(
+        directory,
+        external_dir,
+        processed_files,
+        is_parred_cb,
+        &mut out,
+    );
+    let base_par_stem = extract_base_par_stem(par_filename);
+    out.sort_by_key(|a| {
+        let base = &a[crate::paths::base_file_name(a)..];
+        let stem = match base.iter().rposition(|&b| b == b'.') {
+            Some(pos) => &base[..pos],
+            None => base,
+        };
+        stem != base_par_stem.as_slice()
+    });
+    out
 }
 
 /// `ParIgnoreExt` as `RepairOptions::ignore_extensions`: the raw option bytes split on `,` /
@@ -1580,6 +1753,223 @@ where
     Some(download_crc)
 }
 
+unsafe fn collect_cstr_slice<'a>(ptrs: *const *const c_char, len: usize) -> Vec<&'a [u8]> {
+    if ptrs.is_null() || len == 0 {
+        return Vec::new();
+    }
+    let slice = unsafe { std::slice::from_raw_parts(ptrs, len) };
+    let mut out = Vec::with_capacity(len);
+    for &p in slice {
+        if !p.is_null() {
+            out.push(unsafe { std::ffi::CStr::from_ptr(p).to_bytes() });
+        }
+    }
+    out
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_parchecker_is_processed_file(
+    filename: *const c_char,
+    processed_files: *const *const c_char,
+    processed_len: usize,
+) -> c_int {
+    if filename.is_null() {
+        return 0;
+    }
+    let fname = unsafe { std::ffi::CStr::from_ptr(filename).to_bytes() };
+    let processed = unsafe { collect_cstr_slice(processed_files, processed_len) };
+    c_int::from(is_processed_file(fname, &processed))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_delete_leftovers(
+    handle: *const RustParRepairer,
+    ctx: *mut c_void,
+    log_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+) {
+    let Some(r) = (unsafe { handle.as_ref() }) else {
+        return;
+    };
+    let mut emit_log = |msg: &[u8]| {
+        if let Some(cb) = log_cb {
+            if let Ok(cmsg) = std::ffi::CString::new(msg) {
+                unsafe { cb(ctx, cmsg.as_ptr()) };
+            }
+        }
+    };
+    r.delete_leftovers(&mut emit_log);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_check_empty_files(
+    handle: *const RustParRepairer,
+    processed_files: *const *const c_char,
+    processed_len: usize,
+    ctx: *mut c_void,
+    log_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+) -> c_int {
+    let Some(r) = (unsafe { handle.as_ref() }) else {
+        return 0;
+    };
+    let processed = unsafe { collect_cstr_slice(processed_files, processed_len) };
+    let mut emit_log = |msg: &[u8]| {
+        if let Some(cb) = log_cb {
+            if let Ok(cmsg) = std::ffi::CString::new(msg) {
+                unsafe { cb(ctx, cmsg.as_ptr()) };
+            }
+        }
+    };
+    c_int::from(r.check_empty_files(&processed, &mut emit_log))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_target_file_exists_by_basename(
+    handle: *const RustParRepairer,
+    file_name: *const c_char,
+) -> c_int {
+    let Some(r) = (unsafe { handle.as_ref() }) else {
+        return 1;
+    };
+    if file_name.is_null() {
+        return 1;
+    }
+    let fname = unsafe { std::ffi::CStr::from_ptr(file_name).to_bytes() };
+    c_int::from(r.target_file_exists_by_basename(fname))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_for_each_target_verification(
+    handle: *const RustParRepairer,
+    set_succeeded: c_int,
+    ctx: *mut c_void,
+    cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char, c_int)>,
+) {
+    let Some(r) = (unsafe { handle.as_ref() }) else {
+        return;
+    };
+    let Some(cb_fn) = cb else {
+        return;
+    };
+    let mut invoke = |path_bytes: &[u8], keep_verified: bool| {
+        if let Ok(cpath) = std::ffi::CString::new(path_bytes) {
+            unsafe { cb_fn(ctx, cpath.as_ptr(), c_int::from(keep_verified)) };
+        }
+    };
+    r.for_each_target_verification(set_succeeded != 0, &mut invoke);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_discover_splitted_fragments(
+    handle: *const RustParRepairer,
+    dest_dir: *const c_char,
+    processed_files: *const *const c_char,
+    processed_len: usize,
+    ctx: *mut c_void,
+    is_parred_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int>,
+    find_origname_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char) -> *const c_char>,
+    detail_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+    add_fragment_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+) {
+    let Some(r) = (unsafe { handle.as_ref() }) else {
+        return;
+    };
+    if dest_dir.is_null() {
+        return;
+    }
+    let dest_bytes = unsafe { std::ffi::CStr::from_ptr(dest_dir).to_bytes() };
+    let processed = unsafe { collect_cstr_slice(processed_files, processed_len) };
+
+    let mut is_parred = |fname: &[u8]| -> bool {
+        let Some(cb) = is_parred_cb else {
+            return false;
+        };
+        let Ok(cf) = std::ffi::CString::new(fname) else {
+            return false;
+        };
+        unsafe { cb(ctx, cf.as_ptr()) != 0 }
+    };
+    let mut find_orig = |current: &[u8]| -> Option<Vec<u8>> {
+        let cb = find_origname_cb?;
+        let cf = std::ffi::CString::new(current).ok()?;
+        let ptr = unsafe { cb(ctx, cf.as_ptr()) };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { std::ffi::CStr::from_ptr(ptr).to_bytes().to_vec() })
+        }
+    };
+    let mut emit_detail = |msg: &[u8]| {
+        if let Some(cb) = detail_cb {
+            if let Ok(cmsg) = std::ffi::CString::new(msg) {
+                unsafe { cb(ctx, cmsg.as_ptr()) };
+            }
+        }
+    };
+
+    let fragments = r.discover_splitted_fragments(
+        dest_bytes,
+        &processed,
+        &mut is_parred,
+        &mut find_orig,
+        &mut emit_detail,
+    );
+    if let Some(cb) = add_fragment_cb {
+        for frag in fragments {
+            if let Ok(cfrag) = std::ffi::CString::new(frag) {
+                unsafe { cb(ctx, cfrag.as_ptr()) };
+            }
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_par_repairer_find_and_sort_extra_files(
+    directory: *const c_char,
+    external_dir: c_int,
+    par_filename: *const c_char,
+    processed_files: *const *const c_char,
+    processed_len: usize,
+    ctx: *mut c_void,
+    is_parred_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char) -> c_int>,
+    add_extra_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char)>,
+) {
+    if directory.is_null() {
+        return;
+    }
+    let dir_bytes = unsafe { std::ffi::CStr::from_ptr(directory).to_bytes() };
+    let par_bytes = if par_filename.is_null() {
+        &b""[..]
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(par_filename).to_bytes() }
+    };
+    let processed = unsafe { collect_cstr_slice(processed_files, processed_len) };
+
+    let mut is_parred = |fname: &[u8]| -> bool {
+        let Some(cb) = is_parred_cb else {
+            return false;
+        };
+        let Ok(cf) = std::ffi::CString::new(fname) else {
+            return false;
+        };
+        unsafe { cb(ctx, cf.as_ptr()) != 0 }
+    };
+
+    let extra_files = find_and_sort_extra_files(
+        dir_bytes,
+        external_dir != 0,
+        par_bytes,
+        &processed,
+        &mut is_parred,
+    );
+    if let Some(cb) = add_extra_cb {
+        for f in extra_files {
+            if let Ok(cf) = std::ffi::CString::new(f) {
+                unsafe { cb(ctx, cf.as_ptr()) };
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2163,6 +2553,107 @@ mod tests {
         assert_eq!(std::fs::read(dir.join("movie.mkv")).unwrap(), data_a);
         assert_eq!(std::fs::read(dir.join("sample.mkv")).unwrap(), data_b);
         assert!(r.leftovers().contains(&dir.join("movie.mkv.001")));
+
+        // Verify target_file_exists_by_basename, for_each_target_verification, and delete_leftovers
+        assert!(r.target_file_exists_by_basename(b"movie.mkv"));
+        let mut verified = Vec::new();
+        r.for_each_target_verification(true, &mut |path, keep| {
+            assert!(keep);
+            verified.push(path.to_vec());
+        });
+        assert_eq!(verified.len(), 2);
+
+        let mut deleted_logs = Vec::new();
+        r.delete_leftovers(&mut |msg| deleted_logs.push(msg.to_vec()));
+        assert!(!deleted_logs.is_empty());
+        assert!(!dir.join("movie.mkv.001").exists());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_parchecker_extra_files_fragments_and_empty_check() {
+        use par_rs::create::{build_set, SetOptions, VolumeScheme};
+
+        let dir = std::env::temp_dir().join(format!(
+            "rustyget-parchecker-helpers-{}-{}",
+            std::process::id(),
+            4
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert!(is_processed_file(
+            b"Archive.R00",
+            &[b"/tmp/sub/archive.r00", b"/tmp/sub/other.r01"]
+        ));
+        assert!(!is_processed_file(b"missing.r02", &[b"/tmp/sub/archive.r00"]));
+
+        let data_a = make_deterministic_bytes(8192, 909);
+        let built = build_set(
+            "hlp",
+            &[("archive.bin", &data_a)],
+            &SetOptions {
+                slice_size: 4096,
+                recovery_blocks: 2,
+                first_exponent: 0,
+                volumes: VolumeScheme::Single,
+                creator: "rustyget-helper-test".to_string(),
+                unicode_names: false,
+                kernel: Kernel::detect(),
+            },
+        )
+        .unwrap();
+
+        let index_path = dir.join("hlp.par2");
+        std::fs::write(&index_path, &built.index).unwrap();
+        std::fs::write(dir.join("archive.bin.001"), &data_a[0..4096]).unwrap();
+        std::fs::write(dir.join("hlp.nfo"), b"info").unwrap();
+        std::fs::write(dir.join("zzz.txt"), b"other").unwrap();
+
+        let empty_cbs = NzbgetRsParCallbacks {
+            ctx: std::ptr::null_mut(),
+            on_filename: None,
+            on_progress: None,
+            on_done: None,
+            on_quick_verify: None,
+            on_quick_verified_inc: None,
+        };
+
+        let mut r = RustParRepairer::new(dir.clone(), 1, 16, false, false, Vec::new());
+        assert_eq!(r.preprocess(&index_path, Some(&empty_cbs)), PAR_RESULT_SUCCESS);
+        let _ = r.process(false, &empty_cbs);
+        assert!(!r.target_file_exists_by_basename(b"archive.bin"));
+
+        let mut empty_logs = Vec::new();
+        let has_damaged = r.check_empty_files(&[], &mut |msg| {
+            empty_logs.push(String::from_utf8_lossy(msg).into_owned())
+        });
+        assert!(has_damaged);
+        assert_eq!(empty_logs.len(), 1);
+        assert!(empty_logs[0].contains("File archive.bin has 2 bad block(s) of total 2 block(s)"));
+
+        let dir_bytes = crate::fsops::path_to_bytes(&dir).to_vec();
+        let frags = r.discover_splitted_fragments(
+            &dir_bytes,
+            &[],
+            &mut |name| name.ends_with(b".par2"),
+            &mut |_| None,
+            &mut |_| {},
+        );
+        assert_eq!(frags.len(), 1);
+        assert!(frags[0].ends_with(b"archive.bin.001"));
+
+        let extras = find_and_sort_extra_files(
+            &dir_bytes,
+            false,
+            b"hlp.par2",
+            &[b"archive.bin.001"],
+            &mut |name| name.ends_with(b".par2"),
+        );
+        assert_eq!(extras.len(), 2);
+        assert!(extras[0].ends_with(b"hlp.nfo"));
+        assert!(extras[1].ends_with(b"zzz.txt"));
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

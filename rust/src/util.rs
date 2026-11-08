@@ -227,6 +227,30 @@ pub fn match_file_ext(filename: &[u8], list: &[u8], separators: &[u8], case_lowe
     })
 }
 
+/// Locale-aware `Util::MatchFileExt` using `libc::tolower` with the same unsigned-byte
+/// (`strcasecmp`) and platform `c_char` (`WildMask`) folding semantics as `Util::MatchFileExt`.
+pub fn match_file_ext_locale(filename: &[u8], list: &[u8], separators: &[u8]) -> bool {
+    let case_fold = |b: u8| -> std::ffi::c_int { unsafe { libc::tolower(std::ffi::c_int::from(b)) } };
+    let mask_fold = |b: u8| -> std::ffi::c_int {
+        let ch = std::ffi::c_int::from(b as std::ffi::c_char);
+        #[cfg(target_env = "gnu")]
+        {
+            unsafe { libc::tolower(ch) }
+        }
+        #[cfg(not(target_env = "gnu"))]
+        {
+            if ch < 0 {
+                ch
+            } else {
+                unsafe { libc::tolower(ch) }
+            }
+        }
+    };
+    let case_lower = Lower::Fold(&case_fold);
+    let mask_lower = Lower::Fold(&mask_fold);
+    match_file_ext(filename, list, separators, &case_lower, &mask_lower)
+}
+
 /// Util::SplitCommandLine: words split at spaces; a word starting with `'`
 /// runs to the next lone `'` (`''` is a quote), each cut to 1023 bytes.
 pub fn split_command_line(s: &[u8]) -> Vec<Vec<u8>> {

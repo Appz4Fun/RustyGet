@@ -26,6 +26,10 @@ pub(crate) fn path(p: &[u8]) -> &Path {
     Path::new(OsStr::from_bytes(&p[..nul]))
 }
 
+pub(crate) fn path_to_bytes(p: &Path) -> &[u8] {
+    p.as_os_str().as_bytes()
+}
+
 pub(crate) fn posix_stat(p: &[u8]) -> i32 {
     match std::fs::metadata(path(p)) {
         Ok(m) if m.is_file() => 1,

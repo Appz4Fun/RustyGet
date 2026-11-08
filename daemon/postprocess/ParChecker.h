@@ -28,8 +28,6 @@
 #include <deque>
 #include <memory>
 #include <mutex>
-#include <ostream>
-#include <streambuf>
 #include <string>
 #include <vector>
 
@@ -57,13 +55,6 @@ public:
 		ptVerifyingSources,
 		ptRepairing,
 		ptVerifyingRepaired,
-	};
-
-	class AbstractRepairer
-	{
-	public:
-		virtual ~AbstractRepairer() = default;
-		virtual Repairer* GetRepairer() = 0;
 	};
 
 	void Execute();
@@ -168,19 +159,7 @@ protected:
 	int GetStageProgress() { return m_stageProgress; }
 
 private:
-	class StreamBuf final : public std::streambuf
-	{
-	public:
-		StreamBuf(ParChecker* owner, Message::EKind kind) : m_owner(owner), m_kind(kind) {}
-		virtual int overflow(int ch) override;
-	private:
-		std::string m_buffer;
-		ParChecker* m_owner;
-		Message::EKind m_kind;
-	};
-
 	typedef std::deque<std::string> FileList;
-	typedef std::vector<bool> ValidBlocks;
 
 	std::string m_infoName;
 	std::string m_destDir;
@@ -204,16 +183,11 @@ private:
 	FileList m_processedFiles;
 	std::vector<std::string> m_verifiedFiles;
 	DupeSourceList m_dupeSources;
-	StreamBuf m_parOutStream{this, Message::mkDetail};
-	StreamBuf m_parErrStream{this, Message::mkError};
-	std::ostream m_parCout{&m_parOutStream};
-	std::ostream m_parCerr{&m_parErrStream};
 	std::mutex m_queuedParFilesMtx;
 	std::mutex m_repairerMtx;
 	std::mutex m_signalMtx;
 
-	// "m_repairer" wraps the Rust par-rs repairer via an abstract class.
-	std::unique_ptr<AbstractRepairer> m_repairer;
+	std::unique_ptr<Repairer> m_repairer;
 
 	std::atomic<bool> m_parQuick{false};
 	std::atomic<bool> m_parFull{false};
@@ -224,7 +198,7 @@ private:
 	bool m_hasDamagedFiles;
 	bool m_forceRepair = false;
 
-	Repairer* GetRepairer() { return m_repairer->GetRepairer(); }
+	Repairer* GetRepairer() { return m_repairer.get(); }
 
 public:
 	// the par-set's block size once a par2-file is loaded, else 0
@@ -244,18 +218,12 @@ private:
 	bool AddDupeFiles();
 	bool AddExtraFiles(bool onlyMissing, bool externalDir, const char* directory);
 	bool IsProcessedFile(const char* filename);
-	void SaveSourceList();
 	void DeleteLeftovers();
 	void SignalFilename(std::string str);
 	void SignalProgress(int progress);
 	void SignalDone(std::string str, int available, int total);
-	void FindExtraFiles(std::vector<std::string>& extrafiles, const char* directory, bool externalDir);
-	void SortExtraFiles(std::vector<std::string>& extrafiles);
-	bool SmartCalcFileRangeCrc(DiskFile& file, int64 start, int64 end, SegmentList& segments, uint32& downloadCrc);
-	bool DumbCalcFileRangeCrc(DiskFile& file, int64 start, int64 end, uint32& downloadCrc);
 	void CheckEmptyFiles();
 	std::string GetPacketCreator();
-	bool MaybeSplittedFragement(const char* filename1, const char* filename2);
 
 	friend class Repairer;
 };
@@ -275,7 +243,7 @@ private:
 #include "FileSystem.h"
 #include "nzbget_rs.h"
 
-class Repairer final : public ParChecker::AbstractRepairer
+class Repairer final
 {
 public:
 	Repairer(ParChecker* owner)
@@ -296,7 +264,7 @@ public:
 			g_Options->GetParIgnoreExt());
 	}
 
-	~Repairer() override
+	~Repairer()
 	{
 		if (m_handle)
 		{
@@ -388,76 +356,7 @@ public:
 		return nzbget_rs_par_repairer_source_file_count(m_handle);
 	}
 
-	bool SourceFileInfo(
-		size_t idx,
-		std::string* targetFilename,
-		std::string* targetPath,
-		bool* targetExists,
-		bool* isCompleteTarget,
-		uint32_t* blockCount,
-		uint32_t* availableBlocks) const
-	{
-		NzbgetRsBuf fnBuf{};
-		NzbgetRsBuf pathBuf{};
-		int exists = 0;
-		int completeTarget = 0;
-		uint32_t bc = 0;
-		uint32_t ab = 0;
-		if (nzbget_rs_par_repairer_source_file_info(
-			m_handle,
-			idx,
-			targetFilename ? &fnBuf : nullptr,
-			targetPath ? &pathBuf : nullptr,
-			targetExists ? &exists : nullptr,
-			isCompleteTarget ? &completeTarget : nullptr,
-			blockCount ? &bc : nullptr,
-			availableBlocks ? &ab : nullptr) == 0)
-		{
-			return false;
-		}
-		if (targetFilename)
-		{
-			targetFilename->assign(fnBuf.data ? fnBuf.data : "", fnBuf.len);
-			nzbget_rs_free(fnBuf);
-		}
-		if (targetPath)
-		{
-			targetPath->assign(pathBuf.data ? pathBuf.data : "", pathBuf.len);
-			nzbget_rs_free(pathBuf);
-		}
-		if (targetExists)
-		{
-			*targetExists = exists != 0;
-		}
-		if (isCompleteTarget)
-		{
-			*isCompleteTarget = completeTarget != 0;
-		}
-		if (blockCount)
-		{
-			*blockCount = bc;
-		}
-		if (availableBlocks)
-		{
-			*availableBlocks = ab;
-		}
-		return true;
-	}
-
-	size_t LeftoverCount() const
-	{
-		return nzbget_rs_par_repairer_leftover_count(m_handle);
-	}
-
-	std::string LeftoverPath(size_t idx) const
-	{
-		NzbgetRsBuf buf = nzbget_rs_par_repairer_leftover_path(m_handle, idx);
-		std::string out(buf.data ? buf.data : "", buf.len);
-		nzbget_rs_free(buf);
-		return out;
-	}
-
-	Repairer* GetRepairer() override { return this; }
+	const NzbgetRsParRepairer* Handle() const { return m_handle; }
 
 private:
 	NzbgetRsParCallbacks MakeCallbacks()
@@ -521,44 +420,6 @@ private:
 
 	friend class ParChecker;
 };
-
-inline int ParChecker::StreamBuf::overflow(int ch)
-{
-	if (ch == '\n' || ch == '\r')
-	{
-		if (m_buffer.empty())
-		{
-			return ch;
-		}
-
-		char* msg = m_buffer.data();
-
-		if (msg)
-		{
-			size_t offset = 0;
-			bool extraDebug = nzbget_rs_parchecker_classify_streambuf_line(msg, &offset) != 0;
-			msg += offset;
-			if (extraDebug)
-			{
-				debug("Par: %s", msg);
-			}
-			else
-			{
-				m_owner->PrintMessage(m_kind, "Par: %s", msg);
-			}
-		}
-
-		m_buffer.clear();
-	}
-	else
-	{
-		char bf[2];
-		bf[0] = (char)ch;
-		bf[1] = '\0';
-		m_buffer.append(std::string(bf));
-	}
-	return ch;
-}
 
 
 inline void ParChecker::Cleanup()
@@ -752,7 +613,6 @@ inline ParChecker::EStatus ParChecker::RunParCheck(std::string parFilename)
 	{
 		PrintMessage(Message::mkInfo, "Repairing %s", m_infoName.c_str());
 
-		SaveSourceList();
 		m_progressLabel = std::string("Repairing ") + m_infoName;
 		m_fileProgress = 0;
 		m_stageProgress = 0;
@@ -805,30 +665,23 @@ inline ParChecker::EStatus ParChecker::RunParCheck(std::string parFilename)
 			m_infoName.c_str(), m_errMsg.c_str(), creator.empty() ? "unknown" : creator.c_str());
 	}
 
-	// A successful set does not cover unrelated files, and ignored damage
-	// can also produce psRepairNotNeeded. Keep only complete final targets
-	// actually established by par-rs, before its source metadata is freed.
-	size_t sfCount = GetRepairer()->SourceFileCount();
-	for (size_t i = 0; i < sfCount; ++i)
-	{
-		std::string targetPath;
-		bool isCompleteTarget = false;
-		if (!GetRepairer()->SourceFileInfo(i, nullptr, &targetPath, nullptr, &isCompleteTarget, nullptr, nullptr))
+	nzbget_rs_par_repairer_for_each_target_verification(
+		GetRepairer()->Handle(),
+		(status == psRepaired || status == psRepairNotNeeded) ? 1 : 0,
+		&m_verifiedFiles,
+		[](void* rawCtx, const char* targetPath, int keepVerified)
 		{
-			continue;
-		}
-		// A later set may have attempted to rewrite the same target; its
-		// result supersedes any earlier proof, including when repair failed.
-		m_verifiedFiles.erase(std::remove_if(m_verifiedFiles.begin(), m_verifiedFiles.end(),
-			[&targetPath](const std::string& previous)
+			auto* verifiedFiles = static_cast<std::vector<std::string>*>(rawCtx);
+			verifiedFiles->erase(std::remove_if(verifiedFiles->begin(), verifiedFiles->end(),
+				[targetPath](const std::string& previous)
+				{
+					return FileSystem::SameFilename(previous.c_str(), targetPath);
+				}), verifiedFiles->end());
+			if (keepVerified != 0)
 			{
-				return FileSystem::SameFilename(previous.c_str(), targetPath.c_str());
-			}), m_verifiedFiles.end());
-		if ((status == psRepaired || status == psRepairNotNeeded) && isCompleteTarget)
-		{
-			m_verifiedFiles.push_back(std::move(targetPath));
-		}
-	}
+				verifiedFiles->emplace_back(targetPath);
+			}
+		});
 
 	Cleanup();
 	return status;
@@ -1114,39 +967,41 @@ inline void ParChecker::QueueChanged()
 inline bool ParChecker::AddSplittedFragments()
 {
 	std::vector<std::string> extrafiles;
-
-	size_t sfCount = GetRepairer()->SourceFileCount();
-	DirBrowser dir(m_destDir.c_str());
-	while (const char* filename = dir.Next())
+	std::vector<const char*> processedPtrs;
+	processedPtrs.reserve(m_processedFiles.size());
+	for (const std::string& p : m_processedFiles)
 	{
-		if (!IsParredFile(filename) && !IsProcessedFile(filename))
-		{
-			for (size_t i = 0; i < sfCount; ++i)
-			{
-				std::string target;
-				if (!GetRepairer()->SourceFileInfo(i, &target, nullptr, nullptr, nullptr, nullptr, nullptr))
-				{
-					continue;
-				}
-				const char* current = FileSystem::BaseFileName(target.c_str());
-
-				// if file was renamed by par-renamer we also check the original filename
-				const char* original = FindFileOrigname(current);
-
-				if (MaybeSplittedFragement(filename, current) ||
-					(original && strcasecmp(original, current) &&
-					MaybeSplittedFragement(filename, original)))
-				{
-					detail("Found splitted fragment %s", filename);
-					NzbgetRsBuf fragBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-						m_destDir.c_str(), PATH_SEPARATOR, filename);
-					extrafiles.emplace_back(fragBuf.data ? fragBuf.data : "", fragBuf.len);
-					nzbget_rs_free(fragBuf);
-					break;
-				}
-			}
-		}
+		processedPtrs.push_back(p.c_str());
 	}
+
+	struct FragCtx
+	{
+		ParChecker* self;
+		std::vector<std::string>* extrafiles;
+	} ctx{this, &extrafiles};
+
+	nzbget_rs_par_repairer_discover_splitted_fragments(
+		GetRepairer()->Handle(),
+		m_destDir.c_str(),
+		processedPtrs.empty() ? nullptr : processedPtrs.data(),
+		processedPtrs.size(),
+		&ctx,
+		[](void* rawCtx, const char* filename) -> int
+		{
+			return static_cast<FragCtx*>(rawCtx)->self->IsParredFile(filename) ? 1 : 0;
+		},
+		[](void* rawCtx, const char* current) -> const char*
+		{
+			return static_cast<FragCtx*>(rawCtx)->self->FindFileOrigname(current);
+		},
+		[](void* /*rawCtx*/, const char* msg)
+		{
+			detail("%s", msg);
+		},
+		[](void* rawCtx, const char* fullPath)
+		{
+			static_cast<FragCtx*>(rawCtx)->extrafiles->emplace_back(fullPath);
+		});
 
 	bool fragmentsAdded = false;
 
@@ -1160,11 +1015,6 @@ inline bool ParChecker::AddSplittedFragments()
 	}
 
 	return fragmentsAdded;
-}
-
-inline bool ParChecker::MaybeSplittedFragement(const char* filename1, const char* filename2)
-{
-	return nzbget_rs_parchecker_maybe_splitted_fragment(filename1, filename2) != 0;
 }
 
 inline bool ParChecker::AddMissingFiles()
@@ -1219,59 +1069,6 @@ inline bool ParChecker::AddDupeFiles()
 	return added;
 }
 
-/*
-* Files with the same name as in par-file (and a differnt extension) are
-* placed at the top of the list to be scanned first.
-*/
-inline void ParChecker::SortExtraFiles(std::vector<std::string>& extrafiles)
-{
-	NzbgetRsBuf stemBuf = nzbget_rs_parchecker_extract_base_par_stem(m_parFilename.c_str());
-	std::string baseParFilename = stemBuf.data ? std::string(stemBuf.data, stemBuf.len) : std::string();
-	nzbget_rs_free(stemBuf);
-
-	std::sort(
-		begin(extrafiles),
-		end(extrafiles),
-		[&baseParFilename](const std::string& a, const std::string& b)
-		{
-			return nzbget_rs_parchecker_compare_extra_file_stems(
-				FileSystem::BaseFileName(a.c_str()),
-				FileSystem::BaseFileName(b.c_str()),
-				baseParFilename.c_str()) != 0;
-		}
-	);
-}
-
-// (the list by reference: taken by value, every file found was thrown away, and the
-// extended and dupe par-scans never added a block)
-inline void ParChecker::FindExtraFiles(std::vector<std::string>& extrafiles, const char* directory, bool externalDir)
-{
-	DirBrowser dir(directory);
-	while (const char* filename = dir.Next())
-	{
-		NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
-			directory, PATH_SEPARATOR, filename);
-		std::string fullFilenameStr(fullFnBuf.data ? fullFnBuf.data : "", fullFnBuf.len);
-		BString<1024> fullFilename;
-		fullFilename.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
-		nzbget_rs_free(fullFnBuf);
-
-		if (FileSystem::DirectoryExists(fullFilename))
-		{
-			FindExtraFiles(extrafiles, fullFilename, externalDir);
-		}
-		else
-		{
-			bool isParred = !externalDir && IsParredFile(filename);
-			bool isProcessed = !externalDir && !isParred && IsProcessedFile(filename);
-			if (externalDir || (!isParred && !isProcessed))
-			{
-				extrafiles.push_back(std::move(fullFilenameStr));
-			}
-		}
-	}
-}
-
 inline bool ParChecker::AddExtraFiles(bool onlyMissing, bool externalDir, const char* directory)
 {
 	if (externalDir)
@@ -1284,10 +1081,34 @@ inline bool ParChecker::AddExtraFiles(bool onlyMissing, bool externalDir, const 
 	}
 
 	std::vector<std::string> extrafiles;
+	std::vector<const char*> processedPtrs;
+	processedPtrs.reserve(m_processedFiles.size());
+	for (const std::string& p : m_processedFiles)
+	{
+		processedPtrs.push_back(p.c_str());
+	}
 
-	FindExtraFiles(extrafiles, directory, externalDir);
+	struct ExtraCtx
+	{
+		ParChecker* self;
+		std::vector<std::string>* extrafiles;
+	} ctx{this, &extrafiles};
 
-	SortExtraFiles(extrafiles);
+	nzbget_rs_par_repairer_find_and_sort_extra_files(
+		directory,
+		externalDir ? 1 : 0,
+		m_parFilename.c_str(),
+		processedPtrs.empty() ? nullptr : processedPtrs.data(),
+		processedPtrs.size(),
+		&ctx,
+		[](void* rawCtx, const char* filename) -> int
+		{
+			return static_cast<ExtraCtx*>(rawCtx)->self->IsParredFile(filename) ? 1 : 0;
+		},
+		[](void* rawCtx, const char* fullPath)
+		{
+			static_cast<ExtraCtx*>(rawCtx)->extrafiles->emplace_back(fullPath);
+		});
 
 	// Scan files
 	bool filesAdded = false;
@@ -1348,15 +1169,16 @@ inline bool ParChecker::AddExtraFiles(bool onlyMissing, bool externalDir, const 
 
 inline bool ParChecker::IsProcessedFile(const char* filename)
 {
-	for (std::string& processedFilename : m_processedFiles)
+	std::vector<const char*> processedPtrs;
+	processedPtrs.reserve(m_processedFiles.size());
+	for (const std::string& p : m_processedFiles)
 	{
-		if (nzbget_rs_dqh_bytes_eq_ignore_case(FileSystem::BaseFileName(processedFilename.c_str()), filename) != 0)
-		{
-			return true;
-		}
+		processedPtrs.push_back(p.c_str());
 	}
-
-	return false;
+	return nzbget_rs_parchecker_is_processed_file(
+		filename,
+		processedPtrs.empty() ? nullptr : processedPtrs.data(),
+		processedPtrs.size()) != 0;
 }
 
 inline void ParChecker::SignalFilename(std::string str)
@@ -1421,23 +1243,8 @@ inline void ParChecker::SignalDone(std::string fileName, int available, int tota
 		m_hasDamagedFiles ? 1 : 0, &newHasDamaged, &badBlocks) != 0)
 	{
 		m_hasDamagedFiles = newHasDamaged != 0;
-		bool fileExists = true;
-		size_t sfCount = GetRepairer()->SourceFileCount();
-		for (size_t i = 0; i < sfCount; ++i)
-		{
-			std::string targetFileName;
-			bool exists = false;
-			if (!GetRepairer()->SourceFileInfo(i, &targetFileName, nullptr, &exists, nullptr, nullptr, nullptr))
-			{
-				continue;
-			}
-			if (!exists &&
-				!strcmp(fileName.c_str(), FileSystem::BaseFileName(targetFileName.c_str())))
-			{
-				fileExists = false;
-				break;
-			}
-		}
+		bool fileExists = nzbget_rs_par_repairer_target_file_exists_by_basename(
+			GetRepairer()->Handle(), fileName.c_str()) != 0;
 
 		const char* ignoreSuffix = ignore ? " (ignored)" : "";
 		if (fileExists)
@@ -1458,30 +1265,25 @@ inline void ParChecker::SignalDone(std::string fileName, int available, int tota
 	}
 }
 
-/*
- * Only if ParQuick isn't enabled:
- * For empty damaged files the callback-function "signal_done" isn't called and the flag "m_bHasDamagedFiles"
- * therefore isn't set. In this function we expicitly check such files.
- */
 inline void ParChecker::CheckEmptyFiles()
 {
-	size_t sfCount = GetRepairer()->SourceFileCount();
-	for (size_t i = 0; i < sfCount; ++i)
+	std::vector<const char*> processedPtrs;
+	processedPtrs.reserve(m_processedFiles.size());
+	for (const std::string& p : m_processedFiles)
 	{
-		std::string filenameObj;
-		uint32_t total = 0;
-		if (!GetRepairer()->SourceFileInfo(i, &filenameObj, nullptr, nullptr, nullptr, &total, nullptr))
+		processedPtrs.push_back(p.c_str());
+	}
+	if (nzbget_rs_par_repairer_check_empty_files(
+		GetRepairer()->Handle(),
+		processedPtrs.empty() ? nullptr : processedPtrs.data(),
+		processedPtrs.size(),
+		this,
+		[](void* rawCtx, const char* msg)
 		{
-			continue;
-		}
-		if (!filenameObj.empty() && !IsProcessedFile(filenameObj.c_str()))
-		{
-			bool ignore = Util::MatchFileExt(filenameObj.c_str(), g_Options->GetParIgnoreExt(), ",;");
-			m_hasDamagedFiles |= !ignore;
-
-			PrintMessage(Message::mkWarning, "File %s has %u bad block(s) of total %u block(s)%s",
-				filenameObj.c_str(), total, total, ignore ? " (ignored)" : "");
-		}
+			static_cast<ParChecker*>(rawCtx)->PrintMessage(Message::mkWarning, "%s", msg);
+		}) != 0)
+	{
+		m_hasDamagedFiles = true;
 	}
 }
 
@@ -1491,93 +1293,21 @@ inline void ParChecker::Cancel()
 		std::lock_guard guard{ m_repairerMtx };
 		if (m_repairer)
 		{
-			m_repairer->GetRepairer()->Cancel();
+			m_repairer->Cancel();
 		}
 	}
 	QueueChanged();
 }
 
-inline void ParChecker::SaveSourceList()
-{
-	// Leftovers are tracked directly by RustParRepairer during repair().
-}
-
 inline void ParChecker::DeleteLeftovers()
 {
-	size_t count = GetRepairer()->LeftoverCount();
-	for (size_t i = 0; i < count; ++i)
-	{
-		std::string fileName = GetRepairer()->LeftoverPath(i);
-		if (!fileName.empty())
+	nzbget_rs_par_repairer_delete_leftovers(
+		GetRepairer()->Handle(),
+		this,
+		[](void* rawCtx, const char* msg)
 		{
-			PrintMessage(Message::mkInfo, "Deleting file %s", FileSystem::BaseFileName(fileName.c_str()));
-			FileSystem::DeleteFile(fileName.c_str());
-		}
-	}
-}
-
-/*
- * Compute CRC of bytes range of file using CRCs of segments and reading some data directly
- * from file if necessary
- */
-inline bool ParChecker::SmartCalcFileRangeCrc(DiskFile& file, int64 start, int64 end, SegmentList& segments,
-	uint32& downloadCrcOut)
-{
-	std::vector<NzbgetRsParSegment> rsSegs;
-	rsSegs.reserve(segments.size());
-	for (Segment& segment : segments)
-	{
-		rsSegs.push_back({segment.GetSuccess() ? 1 : 0, segment.GetOffset(), segment.GetSize(), segment.GetCrc()});
-	}
-	struct DumbCtx
-	{
-		ParChecker* self;
-		DiskFile* file;
-	} ctx{this, &file};
-	auto dumbCb = [](void* rawCtx, int64_t s, int64_t e, uint32_t* outCrc) -> int {
-		auto* c = static_cast<DumbCtx*>(rawCtx);
-		uint32 crc = 0;
-		if (!c->self->DumbCalcFileRangeCrc(*c->file, s, e, crc))
-		{
-			return 0;
-		}
-		*outCrc = crc;
-		return 1;
-	};
-	uint32 outCrc = 0;
-	if (nzbget_rs_parchecker_smart_calc_range_crc(
-		start, end, rsSegs.data(), rsSegs.size(), &ctx, dumbCb, &outCrc) == 0)
-	{
-		return false;
-	}
-	downloadCrcOut = outCrc;
-	return true;
-}
-
-/*
- * Compute CRC of bytes range of file reading the data directly from file
- */
-inline bool ParChecker::DumbCalcFileRangeCrc(DiskFile& file, int64 start, int64 end, uint32& downloadCrcOut)
-{
-	if (!file.Seek(start))
-	{
-		return false;
-	}
-
-	CharBuffer buffer(1024 * 64);
-	Crc32 downloadCrc;
-
-	int cnt = buffer.Size();
-	while (cnt == buffer.Size() && start < end)
-	{
-		int needBytes = end - start + 1 > buffer.Size() ? buffer.Size() : (int)(end - start + 1);
-		cnt = (int)file.Read(buffer, needBytes);
-		downloadCrc.Append((uchar*)(char*)buffer, cnt);
-		start += cnt;
-	}
-
-	downloadCrcOut = downloadCrc.Finish();
-	return true;
+			static_cast<ParChecker*>(rawCtx)->PrintMessage(Message::mkInfo, "%s", msg);
+		});
 }
 
 inline std::string ParChecker::GetPacketCreator()

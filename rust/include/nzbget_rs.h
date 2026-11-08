@@ -6330,6 +6330,48 @@ void nzbget_rs_term_plot_text(
 void nzbget_rs_term_refresh(int row, int col);
 int nzbget_rs_term_read_key(void);
 
+int nzbget_rs_parchecker_is_processed_file(
+    const char* filename,
+    const char* const* processed_files,
+    size_t processed_len);
+void nzbget_rs_par_repairer_delete_leftovers(
+    const NzbgetRsParRepairer* handle,
+    void* ctx,
+    void (*log_cb)(void* ctx, const char* msg));
+int nzbget_rs_par_repairer_check_empty_files(
+    const NzbgetRsParRepairer* handle,
+    const char* const* processed_files,
+    size_t processed_len,
+    void* ctx,
+    void (*log_cb)(void* ctx, const char* msg));
+int nzbget_rs_par_repairer_target_file_exists_by_basename(
+    const NzbgetRsParRepairer* handle,
+    const char* file_name);
+void nzbget_rs_par_repairer_for_each_target_verification(
+    const NzbgetRsParRepairer* handle,
+    int set_succeeded,
+    void* ctx,
+    void (*cb)(void* ctx, const char* target_path, int keep_verified));
+void nzbget_rs_par_repairer_discover_splitted_fragments(
+    const NzbgetRsParRepairer* handle,
+    const char* dest_dir,
+    const char* const* processed_files,
+    size_t processed_len,
+    void* ctx,
+    int (*is_parred_cb)(void* ctx, const char* filename),
+    const char* (*find_origname_cb)(void* ctx, const char* current),
+    void (*detail_cb)(void* ctx, const char* msg),
+    void (*add_fragment_cb)(void* ctx, const char* full_path));
+void nzbget_rs_par_repairer_find_and_sort_extra_files(
+    const char* directory,
+    int external_dir,
+    const char* par_filename,
+    const char* const* processed_files,
+    size_t processed_len,
+    void* ctx,
+    int (*is_parred_cb)(void* ctx, const char* filename),
+    void (*add_extra_cb)(void* ctx, const char* full_path));
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

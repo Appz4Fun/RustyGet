@@ -700,7 +700,7 @@ inline void DonorHealth::CheckPostings(const ServerList& servers, const std::vec
 #include <utility>
 #include "ServerPool.h"
 #include "Connection.h"
-#include "FileSystem.h"
+#include "Util.h"
 #include "ServerPool.h"
 #include "Options.h"
 #include "Log.h"
@@ -2070,7 +2070,7 @@ extern DupeSearch* g_DupeSearch;
 #include "Scanner.h"
 #include <algorithm>
 #include <thread>
-#include "FileSystem.h"
+#include "Util.h"
 #include "Log.h"
 #include "Options.h"
 #include "Util.h"
@@ -4388,7 +4388,7 @@ public:
 #include <chrono>
 #include <mutex>
 #include <thread>
-#include "DupeCoordinator.h"
+#include "HistoryCoordinator.h"
 #include "Scanner.h"
 #include "DownloadInfo.h"
 #include "Options.h"

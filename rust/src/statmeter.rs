@@ -193,6 +193,70 @@ pub fn calc_month_slots_same_month(tm_mday: i32, quota_start_day: i32) -> i32 {
     tm_mday.wrapping_sub(quota_start_day).wrapping_add(1)
 }
 
+fn days_to_ymd(z_days: i64) -> (i64, i32, i32) {
+    let z = z_days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+    (year, m as i32, d as i32)
+}
+
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+fn days_in_month(year: i64, month: i32) -> i32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 30,
+    }
+}
+
+/// Computes `StatMeter::CalcMonthSlots` directly from `loc_cur_time` (seconds since epoch)
+/// and `quota_start_day` (1..=31), matching the UTC civil-calendar month rollover and
+/// short-previous-month clamp to the 1st of the current month.
+pub fn calc_month_slots_utc(loc_cur_time: i64, quota_start_day: i32) -> i32 {
+    let z_days = loc_cur_time.div_euclid(86_400);
+    let (year, month, mday) = days_to_ymd(z_days);
+    if quota_start_day > mday {
+        let (prev_year, prev_month) = if month == 1 {
+            (year - 1, 12)
+        } else {
+            (year, month - 1)
+        };
+        let prev_dim = days_in_month(prev_year, prev_month);
+        if quota_start_day > prev_dim {
+            mday
+        } else {
+            (prev_dim - quota_start_day) + mday + 1
+        }
+    } else {
+        calc_month_slots_same_month(mday, quota_start_day)
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_statmeter_calc_month_slots(
+    loc_cur_time: i64,
+    quota_start_day: std::os::raw::c_int,
+) -> std::os::raw::c_int {
+    calc_month_slots_utc(loc_cur_time, quota_start_day)
+}
+
 pub const SPEEDMETER_SLOTS: usize = 30;
 pub const SPEEDMETER_SLOTSIZE: i32 = 1;
 
@@ -588,5 +652,12 @@ mod tests {
         assert_eq!(day_articles[slots1.day as usize], (40, 60));
         assert_eq!(day_articles[slots2.day as usize], (0, 0));
         assert_eq!(total_bytes, 300);
+
+        // 2025-03-05 12:00:00 UTC -> 20152 days * 86400 + 43200 = 1_741_176_000
+        let mar_5_2025 = 1_741_176_000i64;
+        assert_eq!(calc_month_slots_utc(mar_5_2025, 1), 5);
+        assert_eq!(calc_month_slots_utc(mar_5_2025, 5), 1);
+        assert_eq!(calc_month_slots_utc(mar_5_2025, 20), (28 - 20) + 5 + 1);
+        assert_eq!(calc_month_slots_utc(mar_5_2025, 31), 5);
     }
 }

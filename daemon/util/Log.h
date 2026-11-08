@@ -24,7 +24,7 @@
 
 #include <mutex>
 #include <string>
-#include "FileSystem.h"
+#include "Util.h"
 
 #ifndef LOG_H
 #define LOG_H
@@ -144,7 +144,7 @@ protected:
 #include "Options.h"
 #include "nzbget_rs.h"
 #include "Util.h"
-#include "FileSystem.h"
+#include "Util.h"
 
 inline Log::Log()
 {

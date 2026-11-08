@@ -25,17 +25,17 @@
 #include "Log.h"
 #include "Options.h"
 #include "QueueCoordinator.h"
-#include "UrlCoordinator.h"
+#include "Scanner.h"
 #include "DiskState.h"
 #include "PrePostProcessor.h"
 #include "HistoryCoordinator.h"
-#include "DupeCoordinator.h"
+#include "HistoryCoordinator.h"
 #include "Scanner.h"
 #include "FeedCoordinator.h"
-#include "ArticleWriter.h"
-#include "StatMeter.h"
+#include "ServerPool.h"
+#include "ServerPool.h"
 #include "ExtensionManager.h"
-#include "Scheduler.h"
+#include "FeedCoordinator.h"
 
 extern char** environ;
 char* (*g_EnvironmentVariables)[];

@@ -2855,6 +2855,214 @@ pub unsafe extern "C" fn nzbget_rs_direct_unpack_cleanup(
     );
 }
 
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack.len() >= needle.len()
+        && haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Checks if an unpack error message reports an out-of-disk-space condition
+/// (`UnpackController::AddMessage`).
+pub fn is_unpack_space_error(is_error_kind: bool, text: &[u8]) -> bool {
+    is_error_kind
+        && (contains_subslice(text, b"No space left on device")
+            || contains_subslice(text, b"Disk quota exceeded")
+            || contains_subslice(text, b"os error 28")
+            || contains_subslice(text, b"StorageFull"))
+}
+
+/// Reads password lines from `path` in `510`-byte chunks matching `DiskFile::ReadLine(buf, 511)`
+/// in `UnpackController::UnpackArchives`, stripping trailing `\r`/`\n` and invoking `try_password`
+/// for each non-empty password while `should_continue()` returns `true`.
+/// Returns `true` if `path` was opened successfully, `false` otherwise.
+pub fn try_passwords_from_file(
+    path: &std::path::Path,
+    mut should_continue: impl FnMut() -> bool,
+    mut try_password: impl FnMut(&[u8]),
+) -> bool {
+    use std::io::BufRead;
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut reader = std::io::BufReader::new(file);
+    while should_continue() {
+        let Ok(available) = reader.fill_buf() else {
+            break;
+        };
+        if available.is_empty() {
+            break;
+        }
+        let mut chunk = Vec::with_capacity(64);
+        while chunk.len() < 510 {
+            let Ok(buf) = reader.fill_buf() else {
+                break;
+            };
+            if buf.is_empty() {
+                break;
+            }
+            let max_take = (510 - chunk.len()).min(buf.len());
+            if let Some(nl) = buf[..max_take].iter().position(|&b| b == b'\n') {
+                chunk.extend_from_slice(&buf[..=nl]);
+                reader.consume(nl + 1);
+                break;
+            } else {
+                chunk.extend_from_slice(&buf[..max_take]);
+                reader.consume(max_take);
+            }
+        }
+        if let Some(nul_pos) = chunk.iter().position(|&b| b == 0) {
+            chunk.truncate(nul_pos);
+        }
+        while chunk.last().is_some_and(|&b| b == b'\n' || b == b'\r') {
+            chunk.pop();
+        }
+        if !chunk.is_empty() {
+            try_password(&chunk);
+        }
+    }
+    true
+}
+
+/// Evaluates the failure branch of `UnpackController::Completed`.
+/// Returns `(request_par_check, force_repair, unpack_status)`.
+/// `unpack_status`: `2 = usFailure`, `4 = usSpace`, `5 = usPassword`.
+#[allow(clippy::too_many_arguments)]
+pub fn eval_unpack_completed_failure(
+    parcheck_enabled: bool,
+    unpack_ok: bool,
+    par_status: i32,
+    ps_skipped: i32,
+    par_full: bool,
+    unpack_start_error: bool,
+    unpack_space_error: bool,
+    unpack_password_error: bool,
+    unpack_decrypt_error: bool,
+    terminated: bool,
+    stopped: bool,
+    auto_terminated: bool,
+    has_par_files: bool,
+    has_password: bool,
+    has_unpack_pass_file: bool,
+    pass_list_tried: bool,
+) -> (bool, bool, i32) {
+    let unpack_status = if unpack_space_error {
+        4 // NzbInfo::usSpace
+    } else if unpack_password_error || unpack_decrypt_error {
+        5 // NzbInfo::usPassword
+    } else {
+        2 // NzbInfo::usFailure
+    };
+
+    if parcheck_enabled
+        && !unpack_ok
+        && (par_status <= ps_skipped || !par_full)
+        && !unpack_start_error
+        && !unpack_space_error
+        && !unpack_password_error
+        && (!terminated || auto_terminated)
+        && (!stopped || auto_terminated)
+        && has_par_files
+    {
+        let force_repair = (has_password
+            || !has_unpack_pass_file
+            || pass_list_tried
+            || (!unpack_decrypt_error && !unpack_password_error))
+            && par_status > ps_skipped;
+        (true, force_repair, unpack_status)
+    } else {
+        (false, false, unpack_status)
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_unpack_is_space_error(
+    is_error_kind: c_int,
+    text: *const c_char,
+) -> c_int {
+    if text.is_null() {
+        return 0;
+    }
+    let bytes = unsafe { CStr::from_ptr(text).to_bytes() };
+    c_int::from(is_unpack_space_error(is_error_kind != 0, bytes))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_unpack_controller_try_password_file(
+    path: *const c_char,
+    ctx: *mut std::ffi::c_void,
+    should_continue_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
+    try_password_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
+) -> c_int {
+    let Some(file_path) = cstr_to_path(path) else {
+        return 0;
+    };
+    let mut should_continue = || {
+        should_continue_cb.is_some_and(|cb| unsafe { cb(ctx) != 0 })
+    };
+    let mut try_pw = |pw: &[u8]| {
+        if let Some(cb) = try_password_cb {
+            if let Ok(cpw) = std::ffi::CString::new(pw) {
+                unsafe { cb(ctx, cpw.as_ptr()) };
+            }
+        }
+    };
+    c_int::from(try_passwords_from_file(
+        &file_path,
+        &mut should_continue,
+        &mut try_pw,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_unpack_controller_eval_completed_failure(
+    parcheck_enabled: c_int,
+    unpack_ok: c_int,
+    par_status: c_int,
+    ps_skipped: c_int,
+    par_full: c_int,
+    unpack_start_error: c_int,
+    unpack_space_error: c_int,
+    unpack_password_error: c_int,
+    unpack_decrypt_error: c_int,
+    terminated: c_int,
+    stopped: c_int,
+    auto_terminated: c_int,
+    has_par_files: c_int,
+    has_password: c_int,
+    has_unpack_pass_file: c_int,
+    pass_list_tried: c_int,
+    out_force_repair: *mut c_int,
+    out_unpack_status: *mut c_int,
+) -> c_int {
+    let (req_par, force_repair, status) = eval_unpack_completed_failure(
+        parcheck_enabled != 0,
+        unpack_ok != 0,
+        par_status,
+        ps_skipped,
+        par_full != 0,
+        unpack_start_error != 0,
+        unpack_space_error != 0,
+        unpack_password_error != 0,
+        unpack_decrypt_error != 0,
+        terminated != 0,
+        stopped != 0,
+        auto_terminated != 0,
+        has_par_files != 0,
+        has_password != 0,
+        has_unpack_pass_file != 0,
+        pass_list_tried != 0,
+    );
+    unsafe {
+        if !out_force_repair.is_null() {
+            *out_force_repair = c_int::from(force_repair);
+        }
+        if !out_unpack_status.is_null() {
+            *out_unpack_status = status;
+        }
+    }
+    c_int::from(req_par)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4071,6 +4279,45 @@ mod tests {
         );
         assert!(!du_unpack.exists());
         assert!(!du_final.exists());
+
+        // 8. Space error classification, password file iteration, and completed failure evaluation
+        assert!(is_unpack_space_error(true, b"Unrar: write error (No space left on device)"));
+        assert!(is_unpack_space_error(true, b"7-Zip: StorageFull while extracting"));
+        assert!(!is_unpack_space_error(false, b"No space left on device"));
+        assert!(!is_unpack_space_error(true, b"CRC failed in encrypted file"));
+
+        let pw_file = work_dir.join("passwords.txt");
+        std::fs::write(&pw_file, b"\r\nfirst_pass\r\nsecond_pass\n\nthird_pass\n").unwrap();
+        let mut tried_pws = Vec::new();
+        let count = std::cell::Cell::new(0usize);
+        let opened = try_passwords_from_file(
+            &pw_file,
+            || count.get() < 2,
+            |pw| {
+                tried_pws.push(pw.to_vec());
+                count.set(count.get() + 1);
+            },
+        );
+        assert!(opened);
+        assert_eq!(
+            tried_pws,
+            vec![b"first_pass".to_vec(), b"second_pass".to_vec()]
+        );
+
+        let (req_par, force_rep, st) = eval_unpack_completed_failure(
+            true, false, 3, 1, false, false, false, false, true, false, false, false, true, true,
+            false, false,
+        );
+        assert!(req_par);
+        assert!(force_rep);
+        assert_eq!(st, 5);
+
+        let (req_par2, _, st2) = eval_unpack_completed_failure(
+            true, false, 1, 1, false, false, true, false, false, false, false, false, true, false,
+            false, false,
+        );
+        assert!(!req_par2);
+        assert_eq!(st2, 4);
 
         let _ = std::fs::remove_dir_all(&work_dir);
     }

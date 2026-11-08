@@ -261,7 +261,7 @@ private:
 #include "DiskState.h"
 #include "Log.h"
 #include "Util.h"
-#include "FileSystem.h"
+#include "Util.h"
 #include "nzbget_rs.h"
 
 class DupeStreamRepair
@@ -404,7 +404,7 @@ private:
 	DownloadQueueObserver m_observer;
 };
 
-#include "DupeCoordinator.h"
+#include "HistoryCoordinator.h"
 
 inline StreamRangeList DupeStreamRepair::ComputeHoles(FileInfo* fileInfo)
 {

@@ -5964,6 +5964,21 @@ const char* nzbget_rs_dupecoord_resolve_history_mark(
     int32_t mark_status, int32_t dupe_check, int32_t kind, int32_t dupe_mode,
     int32_t* out_dup_status, int32_t* out_post_action);
 
+int nzbget_rs_statmeter_calc_month_slots(int64_t loc_cur_time, int quota_start_day);
+const char* nzbget_rs_history_coord_split_param_assignment(
+    const char* text, size_t* out_name_len);
+int nzbget_rs_unpack_is_space_error(int is_error_kind, const char* text);
+int nzbget_rs_unpack_controller_try_password_file(
+    const char* path, void* ctx,
+    int (*should_continue_cb)(void*),
+    void (*try_password_cb)(void*, const char*));
+int nzbget_rs_unpack_controller_eval_completed_failure(
+    int parcheck_enabled, int unpack_ok, int par_status, int ps_skipped, int par_full,
+    int unpack_start_error, int unpack_space_error, int unpack_password_error, int unpack_decrypt_error,
+    int terminated, int stopped, int auto_terminated, int has_par_files,
+    int has_password, int has_unpack_pass_file, int pass_list_tried,
+    int* out_force_repair, int* out_unpack_status);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

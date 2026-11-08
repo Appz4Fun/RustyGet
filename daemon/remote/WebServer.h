@@ -208,13 +208,13 @@ protected:
 #include "Util.h"
 #include <cerrno>
 #include <climits>
-#include "FileSystem.h"
-#include "StatMeter.h"
-#include "ArticleWriter.h"
+#include "Util.h"
+#include "ServerPool.h"
+#include "ServerPool.h"
 #include "DiskState.h"
-#include "UrlCoordinator.h"
+#include "Scanner.h"
 #include "ExtensionManager.h"
-#include "Scheduler.h"
+#include "FeedCoordinator.h"
 namespace
 {
 	// Pauses downloads for the duration of a speed test and restores the previous
@@ -3232,7 +3232,7 @@ inline GuardedMessageList LogScriptXmlCommand::GuardMessages()
 #include "Log.h"
 #include "Options.h"
 #include "Util.h"
-#include "FileSystem.h"
+#include "Util.h"
 
 #ifndef DISABLE_TLS
 #include <openssl/rand.h>
@@ -3876,11 +3876,11 @@ private:
 #include "Options.h"
 #include "QueueCoordinator.h"
 #include "Util.h"
-#include "FileSystem.h"
+#include "Util.h"
 #include "DownloadInfo.h"
 #include "Scanner.h"
-#include "StatMeter.h"
-#include "UrlCoordinator.h"
+#include "ServerPool.h"
+#include "Scanner.h"
 #include "nzbget_rs.h"
 
 extern void ExitProc();

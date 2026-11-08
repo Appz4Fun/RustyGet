@@ -24,7 +24,7 @@
 #include <vector>
 #include "DownloadInfo.h"
 #include "Options.h"
-#include "FileSystem.h"
+#include "Util.h"
 #include "Log.h"
 
 #ifndef DISKSTATE_H
@@ -110,12 +110,12 @@ private:
 
 extern DiskState* g_DiskState;
 
-#include "StatMeter.h"
+#include "ServerPool.h"
 
 #include "Options.h"
 #include "Log.h"
 #include "Util.h"
-#include "FileSystem.h"
+#include "Util.h"
 #include "nzbget_rs.h"
 
 static const char* FORMATVERSION_SIGNATURE = "nzbget diskstate file version ";

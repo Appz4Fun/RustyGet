@@ -860,7 +860,7 @@ protected:
 
 #include "nzbget_rs.h"
 #include "Log.h"
-#include "FileSystem.h"
+#include "Util.h"
 #include "Options.h"
 
 // sockets aren't inherited by the scripts nzbget starts: a script that outlived

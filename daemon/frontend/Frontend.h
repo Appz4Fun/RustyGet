@@ -579,7 +579,7 @@ private:
 #include "Options.h"
 #include "Log.h"
 #include "Util.h"
-#include "FileSystem.h"
+#include "Util.h"
 #include "nzbget_rs.h"
 
 // One entry of a list response, read by rust/src/binrpc.rs: its ints (host
@@ -1384,7 +1384,7 @@ inline bool RemoteClient::RequestHistory(bool withHidden)
 #endif
 
 #include "Util.h"
-#include "StatMeter.h"
+#include "ServerPool.h"
 #include "nzbget_rs.h"
 
 class Frontend : public Thread

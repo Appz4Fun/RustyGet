@@ -26,7 +26,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
-#include "FileSystem.h"
+#include "Util.h"
 #include "Util.h"
 #include "nzbget_rs.h"
 
@@ -1295,7 +1295,7 @@ inline MemoryMonitor* g_MemoryMonitor = nullptr;
 #include "Util.h"
 #include "nzbget_rs.h"
 #include "Log.h"
-#include "FileSystem.h"
+#include "Util.h"
 
 inline const char* PossibleConfigLocations[] =
 	{

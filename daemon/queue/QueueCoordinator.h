@@ -36,7 +36,7 @@
 #include "DownloadInfo.h"
 #include "ServerPool.h"
 #include "Options.h"
-#include "ArticleWriter.h"
+#include "ServerPool.h"
 #include "Util.h"
 
 class ArticleContentAnalyzer
@@ -191,7 +191,7 @@ private:
 #include <cstddef>
 #include <memory>
 #include "Options.h"
-#include "FileSystem.h"
+#include "Util.h"
 #include "nzbget_rs.h"
 
 class RenameContentAnalyzer : public ArticleContentAnalyzer
@@ -1143,16 +1143,16 @@ extern QueueCoordinator* g_QueueCoordinator;
 #include <cstdarg>
 #include "Options.h"
 #include "ServerPool.h"
-#include "ArticleWriter.h"
+#include "ServerPool.h"
 #include "DiskState.h"
 #include "Util.h"
-#include "FileSystem.h"
-#include "StatMeter.h"
-#include "DupeCoordinator.h"
+#include "Util.h"
+#include "ServerPool.h"
+#include "HistoryCoordinator.h"
 #include "DupeArticleFallback.h"
 #include "PrePostProcessor.h"
 #include "HistoryCoordinator.h"
-#include "UrlCoordinator.h"
+#include "Scanner.h"
 #include "DupeSearch.h"
 #include "nzbget_rs.h"
 

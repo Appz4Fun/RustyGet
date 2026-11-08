@@ -23,8 +23,8 @@
 
 #include "TestFramework.h"
 #include "Options.h"
-#include "ParChecker.h"
-#include "FileSystem.h"
+#include "PrePostProcessor.h"
+#include "Util.h"
 #include "nzbget_rs.h"
 
 namespace ParCheckerTestNs

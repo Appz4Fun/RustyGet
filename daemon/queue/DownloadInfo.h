@@ -1368,7 +1368,7 @@ private:
 #include "DiskState.h"
 #include "Options.h"
 #include "Util.h"
-#include "FileSystem.h"
+#include "Util.h"
 #include "nzbget_rs.h"
 
 inline std::atomic<int> FileInfo::m_idGen{0};

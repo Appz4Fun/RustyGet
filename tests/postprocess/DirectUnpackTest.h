@@ -22,15 +22,15 @@
 #include "nzbget.h"
 
 #include "TestFramework.h"
-#include "UnpackController.h"
+#include "PrePostProcessor.h"
 #include "Log.h"
 #include "Options.h"
 #include "DiskState.h"
-#include "FileSystem.h"
+#include "Util.h"
 #include "PrePostProcessor.h"
 #include "ExtensionManager.h"
 #include "HistoryCoordinator.h"
-#include "DupeCoordinator.h"
+#include "HistoryCoordinator.h"
 #include "Util.h"
 #include <chrono>
 

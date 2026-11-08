@@ -98,7 +98,6 @@ public:
 #include "NntpHealthServer.h"
 #include "NzbReader.h"
 #include "Posting.h"
-#include "DupeUtil.h"
 #include "ReleaseName.h"
 #include "Scanner.h"
 #include "DownloadInfo.h"

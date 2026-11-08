@@ -288,17 +288,15 @@ private:
 
 		if (ntohl(LogResponse.m_trailingDataLength) > 0)
 		{
-			char* bufPtr = (char*)buf;
-			for (uint32 i = 0; i < ntohl(LogResponse.m_nrTrailingEntries); i++)
-			{
-				SNzbLogResponseEntry* logAnswer = (SNzbLogResponseEntry*) bufPtr;
-
-				char* text = bufPtr + sizeof(SNzbLogResponseEntry);
-
-				m_remoteMessages.emplace_back(ntohl(logAnswer->m_id), (Message::EKind)ntohl(logAnswer->m_kind), ntohl(logAnswer->m_time), text);
-
-				bufPtr += sizeof(SNzbLogResponseEntry) + ntohl(logAnswer->m_textLen);
-			}
+			nzbget_rs_binrpc_decode_log_response_entries(
+				(const uint8_t*)(const char*)buf,
+				(size_t)buf.Size(),
+				ntohl(LogResponse.m_nrTrailingEntries),
+				&m_remoteMessages,
+				[](void* rawCtx, uint32_t id, uint32_t kind, uint32_t time, const char* text) {
+					static_cast<MessageList*>(rawCtx)->emplace_back(
+						id, (Message::EKind)kind, (time_t)time, text ? text : "");
+				});
 		}
 
 		return true;
@@ -380,6 +378,150 @@ private:
 	{
 		m_waitCond.notify_all();
 	}
+};
+
+class LoggableFrontend : public Frontend
+{
+protected:
+	virtual void Run()
+	{
+		debug("Entering LoggableFrontend-loop");
+
+		while (!IsStopped())
+		{
+			Update();
+			Wait(m_updateInterval);
+		}
+		Update();
+
+		BeforeExit();
+
+		debug("Exiting LoggableFrontend-loop");
+	}
+
+	virtual void Update()
+	{
+		if (!PrepareData())
+		{
+			FreeData();
+			return;
+		}
+
+		BeforePrint();
+
+		{
+			GuardedMessageList messages = GuardMessages();
+			if (!messages->empty())
+			{
+				Message& firstMessage = messages->front();
+				int skip = 0;
+				int start = nzbget_rs_feh_frontend_calc_log_start_index(
+					m_neededLogFirstId, firstMessage.GetId(), &skip);
+				if (skip)
+				{
+					PrintSkip();
+				}
+				for (uint32 i = (uint32)start; i < messages->size(); i++)
+				{
+					PrintMessage(messages->at(i));
+					m_neededLogFirstId = messages->at(i).GetId();
+				}
+			}
+		}
+
+		PrintStatus();
+
+		FreeData();
+
+		fflush(stdout);
+	}
+
+	virtual void BeforePrint() {}
+	virtual void BeforeExit() {}
+
+	virtual void PrintMessage(Message& message)
+	{
+		NzbgetRsBuf line = nzbget_rs_frontend_format_log_message(
+			0, (int)message.GetKind(), message.GetText());
+		if (line.data)
+		{
+			fwrite(line.data, 1, line.len, stdout);
+		}
+		nzbget_rs_free(line);
+	}
+
+	virtual void PrintStatus() {}
+
+	virtual void PrintSkip()
+	{
+		printf(".....\n");
+	}
+};
+
+class ColoredFrontend : public LoggableFrontend
+{
+public:
+	ColoredFrontend()
+	{
+		m_summary = true;
+	}
+
+protected:
+	virtual void BeforePrint()
+	{
+		if (m_needGoBack)
+		{
+			printf("\r\033[1A");
+			m_needGoBack = false;
+		}
+	}
+
+	virtual void PrintMessage(Message& message)
+	{
+		NzbgetRsBuf line = nzbget_rs_frontend_format_log_message(
+			1, (int)message.GetKind(), message.GetText());
+		if (line.data)
+		{
+			fwrite(line.data, 1, line.len, stdout);
+		}
+		nzbget_rs_free(line);
+	}
+
+	virtual void PrintStatus()
+	{
+		printf("\033[s");
+		NzbgetRsBuf status = nzbget_rs_colored_frontend_format_status_bar(
+			m_standBy ? 1 : 0,
+			m_pauseDownload ? 1 : 0,
+			m_currentDownloadSpeed,
+			m_remainingSize,
+			m_downloadLimit,
+			m_postJobCount,
+			m_threadCount,
+			"\033[K");
+		if (status.data)
+		{
+			fwrite(status.data, 1, status.len, stdout);
+		}
+		nzbget_rs_free(status);
+		m_needGoBack = true;
+	}
+
+	virtual void PrintSkip()
+	{
+		printf(".....\033[K\n");
+	}
+
+	virtual void BeforeExit()
+	{
+		if (IsRemoteMode())
+		{
+			printf("\n");
+		}
+	}
+
+private:
+	bool m_needGoBack = false;
 };
 
 #endif

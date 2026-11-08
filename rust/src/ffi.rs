@@ -13718,78 +13718,6 @@ pub unsafe extern "C" fn nzbget_rs_snh_sys_parse_par_version(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_yencoder_open(
-    filename: *const c_char,
-    offset: i64,
-    io_size: *mut c_int,
-    out_file_size: *mut i64,
-    out_errmsg: *mut *const c_char,
-) -> *mut crate::nserv::YEncoderFile {
-    if filename.is_null() || io_size.is_null() || out_file_size.is_null() {
-        if !out_errmsg.is_null() {
-            *out_errmsg = c"File not found".as_ptr();
-        }
-        return std::ptr::null_mut();
-    }
-    let mut size = *io_size;
-    let mut file_size = *out_file_size;
-    let path = path_arg(filename);
-    let res = crate::nserv::yencoder_open_file(&path, offset, &mut size, &mut file_size);
-    *io_size = size;
-    *out_file_size = file_size;
-    match res {
-        Ok(handle) => {
-            if !out_errmsg.is_null() {
-                *out_errmsg = std::ptr::null();
-            }
-            Box::into_raw(Box::new(handle))
-        }
-        Err(msg) => {
-            if !out_errmsg.is_null() {
-                *out_errmsg = msg.as_ptr();
-            }
-            std::ptr::null_mut()
-        }
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_yencoder_free(handle: *mut crate::nserv::YEncoderFile) {
-    if !handle.is_null() {
-        drop(Box::from_raw(handle));
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_yencoder_write_segment(
-    handle: *mut crate::nserv::YEncoderFile,
-    filename: *const c_char,
-    part: c_int,
-    offset: i64,
-    size: c_int,
-    file_size: i64,
-    write_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, c_int)>,
-    ctx: *mut std::ffi::c_void,
-) {
-    if handle.is_null() || filename.is_null() {
-        return;
-    }
-    let Some(cb) = write_cb else { return };
-    let filename_bytes = input(filename);
-    crate::nserv::yencoder_write_segment(
-        &mut *handle,
-        filename_bytes,
-        part,
-        offset,
-        size,
-        file_size,
-        |chunk| {
-            cb(ctx, chunk.as_ptr().cast(), chunk.len() as c_int);
-        },
-    );
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_nzb_generator_execute(
     data_dir: *const c_char,
     segment_size: c_int,
@@ -13819,50 +13747,6 @@ pub unsafe extern "C" fn nzbget_rs_nntp_cache_new() -> *mut crate::nserv::NntpCa
 pub unsafe extern "C" fn nzbget_rs_nntp_cache_free(cache: *mut crate::nserv::NntpCache) {
     if !cache.is_null() {
         drop(Box::from_raw(cache));
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nntp_cache_append(
-    cache: *const crate::nserv::NntpCache,
-    key: *const c_char,
-    data: *const c_char,
-    len: c_int,
-) {
-    if cache.is_null() || key.is_null() || data.is_null() {
-        return;
-    }
-    let key_bytes = input(key);
-    let data_bytes = if len > 0 {
-        std::slice::from_raw_parts(data.cast::<u8>(), len as usize)
-    } else {
-        input(data)
-    };
-    (*cache).append(key_bytes, data_bytes);
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nntp_cache_find(
-    cache: *const crate::nserv::NntpCache,
-    key: *const c_char,
-    out_data: *mut *const c_char,
-    out_size: *mut c_int,
-) -> c_int {
-    if cache.is_null() || key.is_null() {
-        return 0;
-    }
-    let key_bytes = input(key);
-    match (*cache).find(key_bytes) {
-        Some(slice) => {
-            if !out_data.is_null() {
-                *out_data = slice.as_ptr().cast();
-            }
-            if !out_size.is_null() {
-                *out_size = slice.len() as c_int;
-            }
-            1
-        }
-        None => 0,
     }
 }
 
@@ -13935,17 +13819,79 @@ pub unsafe extern "C" fn nzbget_rs_nserv_frontend_calc_start_index(
     start
 }
 
+#[allow(clippy::too_many_arguments)]
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_nserv_build_cmd_opts(
-    log_file: *const c_char,
-    verbosity: c_int,
+pub unsafe extern "C" fn nzbget_rs_nserv_parse_args(
+    argc: c_int,
+    argv: *const *const c_char,
     ctx: *mut std::ffi::c_void,
+    set_fields_cb: Option<
+        unsafe extern "C" fn(
+            *mut std::ffi::c_void,
+            *const c_char,
+            *const c_char,
+            *const c_char,
+            c_int,
+            c_int,
+            *const c_char,
+            *const c_char,
+            *const c_char,
+            c_int,
+            c_int,
+            c_int,
+            c_int,
+            c_int,
+            c_int,
+            c_int,
+        ),
+    >,
     push_opt_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
 ) {
-    let lf_opt = (!log_file.is_null()).then(|| input(log_file)).filter(|b| !b.is_empty());
-    let opts = crate::nserv::nserv_build_cmd_opts(lf_opt, verbosity);
+    let mut arg_slices: Vec<&[u8]> = Vec::new();
+    if argc > 0 && !argv.is_null() {
+        for i in 0..argc as usize {
+            let p = *argv.add(i);
+            arg_slices.push(if p.is_null() { b"" } else { input(p) });
+        }
+    }
+    let mut parsed = crate::nserv::nserv_parse_args(&arg_slices);
+    if let Some(cb) = set_fields_cb {
+        let to_opt_ptr = |v: &mut Vec<u8>| -> *const c_char {
+            if v.is_empty() {
+                std::ptr::null()
+            } else {
+                v.push(0);
+                v.as_ptr().cast()
+            }
+        };
+        let data_ptr = to_opt_ptr(&mut parsed.data_dir);
+        let cache_ptr = to_opt_ptr(&mut parsed.cache_dir);
+        parsed.bind_address.push(0);
+        let bind_ptr: *const c_char = parsed.bind_address.as_ptr().cast();
+        let log_ptr = to_opt_ptr(&mut parsed.log_file);
+        let cert_ptr = to_opt_ptr(&mut parsed.secure_cert);
+        let key_ptr = to_opt_ptr(&mut parsed.secure_key);
+        cb(
+            ctx,
+            data_ptr,
+            cache_ptr,
+            bind_ptr,
+            parsed.first_port,
+            parsed.instances,
+            log_ptr,
+            cert_ptr,
+            key_ptr,
+            c_int::from(parsed.generate_nzb),
+            parsed.segment_size,
+            c_int::from(parsed.quit),
+            parsed.latency,
+            parsed.speed,
+            c_int::from(parsed.mem_cache),
+            c_int::from(parsed.param_error),
+        );
+    }
     if let Some(cb) = push_opt_cb {
-        for mut opt in opts {
+        for mut opt in parsed.cmd_opts {
             opt.push(0);
             cb(ctx, opt.as_ptr().cast());
         }
@@ -18370,6 +18316,26 @@ pub unsafe extern "C" fn nzbget_rs_binrpc_init_message_base(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_binrpc_decode_log_response_entries(
+    data: *const u8,
+    len: usize,
+    nr_entries: u32,
+    ctx: *mut std::ffi::c_void,
+    emit_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, u32, u32, u32, *const c_char)>,
+) {
+    if data.is_null() || len == 0 {
+        return;
+    }
+    let Some(cb) = emit_cb else {
+        return;
+    };
+    let slice = std::slice::from_raw_parts(data, len);
+    crate::binrpc::decode_log_response_entries(slice, nr_entries, |id, kind, time, text_ptr| {
+        cb(ctx, id, kind, time, text_ptr.cast());
+    });
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_binrpc_init_download_request(
     out: *mut u8,
     username: *const c_char,
@@ -21566,19 +21532,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_parse_c_atoi(text: *const c_char) -> c_in
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_parse_c_atoi_or_default(
-    text: *const c_char,
-    default_val: c_int,
-) -> c_int {
-    let s = if text.is_null() {
-        None
-    } else {
-        Some(CStr::from_ptr(text).to_bytes())
-    };
-    crate::util::parse_c_atoi_or_default(s, default_val)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_parse_queue_file_id_and_suffix(
     filename: *const c_char,
     out_id: *mut c_int,
@@ -21662,38 +21615,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_tls_is_cipher_list(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_dupe_util_trim_bounds(
-    text: *const c_char,
-    text_len: usize,
-    chars: *const c_char,
-    out_start: *mut usize,
-    out_len: *mut usize,
-) -> c_int {
-    let t = if text.is_null() || text_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(text as *const u8, text_len)
-    };
-    let c = if chars.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(chars).to_bytes()
-    };
-    match crate::dupesearch_nzb::dupe_util_trim_bounds(t, c) {
-        Some((start, len)) => {
-            if !out_start.is_null() {
-                *out_start = start;
-            }
-            if !out_len.is_null() {
-                *out_len = len;
-            }
-            1
-        }
-        None => 0,
-    }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_dupe_util_lower(
     text: *const c_char,
     text_len: usize,
@@ -21707,16 +21628,36 @@ pub unsafe extern "C" fn nzbget_rs_dqh_dupe_util_lower(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_nzb_fetcher_format_parse_err(
-    body: *const c_char,
-    body_len: usize,
-) -> RsBuf {
-    let b = if body.is_null() || body_len == 0 {
+pub unsafe extern "C" fn nzbget_rs_dupe_util_write_atomic(
+    path: *const c_char,
+    path_len: usize,
+    data: *const c_char,
+    data_len: usize,
+) -> c_int {
+    let p = if path.is_null() || path_len == 0 {
         &[][..]
     } else {
-        std::slice::from_raw_parts(body as *const u8, body_len)
+        std::slice::from_raw_parts(path as *const u8, path_len)
     };
-    into_buf(crate::dupesearch_nzb::nzb_fetcher_format_parse_err(b))
+    let d = if data.is_null() || data_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(data as *const u8, data_len)
+    };
+    c_int::from(crate::dupesearch_nzb::dupe_write_atomic_bytes(p, d))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupe_util_read_all(
+    path: *const c_char,
+    path_len: usize,
+) -> RsBuf {
+    let p = if path.is_null() || path_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(path as *const u8, path_len)
+    };
+    into_buf(crate::dupesearch_nzb::dupe_read_all_bytes(p))
 }
 
 #[no_mangle]

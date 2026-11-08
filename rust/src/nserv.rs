@@ -1007,6 +1007,151 @@ pub fn nserv_build_cmd_opts(log_file: Option<&[u8]>, verbosity: i32) -> Vec<Vec<
     opts
 }
 
+fn parse_c_atoi_or_default(bytes: &[u8], default_val: i32) -> i32 {
+    let mut idx = 0;
+    while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    let mut sign: i64 = 1;
+    if idx < bytes.len() {
+        if bytes[idx] == b'-' {
+            sign = -1;
+            idx += 1;
+        } else if bytes[idx] == b'+' {
+            idx += 1;
+        }
+    }
+    let start = idx;
+    let mut acc: i64 = 0;
+    while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+        acc = acc
+            .wrapping_mul(10)
+            .wrapping_add((bytes[idx] - b'0') as i64);
+        idx += 1;
+    }
+    if idx == start {
+        default_val
+    } else {
+        (acc.wrapping_mul(sign)) as i32
+    }
+}
+
+/// Parsed command-line options for `NServOpts` (`daemon/nserv/NServMain.h`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NServParsedArgs {
+    pub data_dir: Vec<u8>,
+    pub cache_dir: Vec<u8>,
+    pub bind_address: Vec<u8>,
+    pub first_port: i32,
+    pub instances: i32,
+    pub log_file: Vec<u8>,
+    pub secure_cert: Vec<u8>,
+    pub secure_key: Vec<u8>,
+    pub generate_nzb: bool,
+    pub segment_size: i32,
+    pub quit: bool,
+    pub latency: i32,
+    pub speed: i32,
+    pub mem_cache: bool,
+    pub param_error: bool,
+    pub cmd_opts: Vec<Vec<u8>>,
+}
+
+/// Parses `NServMain` command-line arguments starting at `args[2..]` (matching `optind = 2`
+/// with `short_options = "b:c:d:l:p:i:ms:v:w:r:z:q"`).
+pub fn nserv_parse_args(args: &[&[u8]]) -> NServParsedArgs {
+    let mut out = NServParsedArgs {
+        data_dir: Vec::new(),
+        cache_dir: Vec::new(),
+        bind_address: b"0.0.0.0".to_vec(),
+        first_port: 6791,
+        instances: 1,
+        log_file: Vec::new(),
+        secure_cert: Vec::new(),
+        secure_key: Vec::new(),
+        generate_nzb: false,
+        segment_size: 500_000,
+        quit: false,
+        latency: 0,
+        speed: 0,
+        mem_cache: false,
+        param_error: false,
+        cmd_opts: Vec::new(),
+    };
+    let mut verbosity: i32 = 2;
+    let mut idx = 2usize;
+
+    while idx < args.len() {
+        let arg = args[idx];
+        if arg == b"--" {
+            idx += 1;
+            break;
+        }
+        if arg.len() < 2 || arg[0] != b'-' {
+            break;
+        }
+        let mut pos = 1usize;
+        while pos < arg.len() {
+            let ch = arg[pos];
+            pos += 1;
+            match ch {
+                b'm' => out.mem_cache = true,
+                b'q' => out.quit = true,
+                b'b' | b'c' | b'd' | b'l' | b'p' | b'i' | b's' | b'v' | b'w' | b'r' | b'z' => {
+                    let optarg: Option<&[u8]> = if pos < arg.len() {
+                        let rest = &arg[pos..];
+                        pos = arg.len();
+                        Some(rest)
+                    } else {
+                        idx += 1;
+                        args.get(idx).copied()
+                    };
+                    let Some(val) = optarg else {
+                        break;
+                    };
+                    match ch {
+                        b'd' => out.data_dir = val.to_vec(),
+                        b'c' => out.cache_dir = val.to_vec(),
+                        b'l' => out.log_file = val.to_vec(),
+                        b'b' => out.bind_address = val.to_vec(),
+                        b'p' => out.first_port = parse_c_atoi_or_default(val, 6791),
+                        b's' => {
+                            out.secure_cert = val.to_vec();
+                            idx += 1;
+                            out.secure_key = args.get(idx).copied().unwrap_or(b"").to_vec();
+                        }
+                        b'i' => out.instances = parse_c_atoi_or_default(val, 1),
+                        b'v' => verbosity = parse_c_atoi_or_default(val, 1),
+                        b'w' => out.latency = parse_c_atoi_or_default(val, 0),
+                        b'r' => out.speed = parse_c_atoi_or_default(val, 0),
+                        b'z' => {
+                            out.generate_nzb = true;
+                            out.segment_size = parse_c_atoi_or_default(val, 500_000);
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        idx += 1;
+    }
+
+    if idx < args.len() {
+        out.param_error = true;
+    }
+
+    out.cmd_opts = nserv_build_cmd_opts(
+        if out.log_file.is_empty() {
+            None
+        } else {
+            Some(&out.log_file)
+        },
+        verbosity,
+    );
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1203,6 +1348,37 @@ mod tests {
                 b"DebugTarget=both".to_vec(),
             ]
         );
+
+        let parsed = nserv_parse_args(&[
+            b"rustyget",
+            b"--nserv",
+            b"-d",
+            b"/tmp/data",
+            b"-c",
+            b"/tmp/cache",
+            b"-m",
+            b"-p",
+            b"7000",
+            b"-s",
+            b"/tmp/cert.pem",
+            b"/tmp/key.pem",
+            b"-z",
+            b"250000",
+            b"-q",
+        ]);
+        assert_eq!(parsed.data_dir, b"/tmp/data");
+        assert_eq!(parsed.cache_dir, b"/tmp/cache");
+        assert!(parsed.mem_cache);
+        assert_eq!(parsed.first_port, 7000);
+        assert_eq!(parsed.secure_cert, b"/tmp/cert.pem");
+        assert_eq!(parsed.secure_key, b"/tmp/key.pem");
+        assert!(parsed.generate_nzb);
+        assert_eq!(parsed.segment_size, 250000);
+        assert!(parsed.quit);
+        assert!(!parsed.param_error);
+
+        let trailing = nserv_parse_args(&[b"rustyget", b"--nserv", b"-d", b"/tmp/data", b"extra"]);
+        assert!(trailing.param_error);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

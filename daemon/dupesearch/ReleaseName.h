@@ -129,4 +129,28 @@ private:
 	}
 };
 
+namespace DupeUtil
+{
+	inline bool WriteAtomic(const std::string& path, const std::string& data)
+	{
+		return nzbget_rs_dupe_util_write_atomic(path.data(), path.size(), data.data(), data.size()) != 0;
+	}
+
+	inline std::string Lower(std::string text)
+	{
+		NzbgetRsBuf buf = nzbget_rs_dqh_dupe_util_lower(text.data(), text.size());
+		std::string out(buf.data ? buf.data : "", buf.len);
+		nzbget_rs_free(buf);
+		return out;
+	}
+
+	inline std::string ReadAll(const std::string& path)
+	{
+		NzbgetRsBuf buf = nzbget_rs_dupe_util_read_all(path.data(), path.size());
+		std::string out(buf.data ? buf.data : "", buf.len);
+		nzbget_rs_free(buf);
+		return out;
+	}
+}
+
 #endif

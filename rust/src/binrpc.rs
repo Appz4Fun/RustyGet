@@ -608,6 +608,22 @@ pub unsafe fn read_many<E: Entry>(data: &[u8], at: &mut usize, out: *mut E, max:
     max
 }
 
+/// Decodes up to `nr_entries` `LogEntry` records from `data` (used by `Frontend::RequestMessages`),
+/// invoking `emit(id, kind, time, text_ptr)` where `text_ptr` is a valid NUL-terminated pointer inside `data`.
+pub fn decode_log_response_entries<F>(data: &[u8], nr_entries: u32, mut emit: F)
+where
+    F: FnMut(u32, u32, u32, *const u8),
+{
+    let mut at = 0usize;
+    for _ in 0..nr_entries {
+        let Some((entry, next)) = read::<LogEntry, false>(data, at) else {
+            break;
+        };
+        emit(entry.id, entry.kind, entry.time, entry.texts[0].data);
+        at = next;
+    }
+}
+
 fn append_listing(out: &mut Vec<u8>, bytes: &[u8]) {
     crate::util::reserve_bytes(out, bytes.len());
     out.extend_from_slice(bytes);

@@ -76,7 +76,6 @@ extern QueueScriptCoordinator* g_QueueScriptCoordinator;
 
 #include <algorithm>
 #include "NString.h"
-#include "NzbScript.h"
 #include "Options.h"
 #include "Log.h"
 #include "Util.h"

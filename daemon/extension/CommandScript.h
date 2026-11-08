@@ -21,7 +21,7 @@
 #ifndef COMMANDSCRIPT_H
 #define COMMANDSCRIPT_H
 
-#include "NzbScript.h"
+#include "ExtensionManager.h"
 #include "Log.h"
 #include "Options.h"
 #include "Util.h"

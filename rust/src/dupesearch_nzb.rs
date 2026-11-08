@@ -1932,6 +1932,31 @@ pub fn dupe_write_atomic(path: &std::path::Path, data: &[u8]) -> bool {
     std::fs::rename(&temp, path).is_ok()
 }
 
+#[cfg(unix)]
+fn dupe_bytes_to_path(bytes: &[u8]) -> &std::path::Path {
+    use std::os::unix::ffi::OsStrExt;
+    std::path::Path::new(std::ffi::OsStr::from_bytes(bytes))
+}
+
+#[cfg(not(unix))]
+fn dupe_bytes_to_path(bytes: &[u8]) -> &std::path::Path {
+    std::path::Path::new(std::str::from_utf8(bytes).unwrap_or(""))
+}
+
+pub fn dupe_write_atomic_bytes(path_bytes: &[u8], data: &[u8]) -> bool {
+    if path_bytes.is_empty() {
+        return false;
+    }
+    dupe_write_atomic(dupe_bytes_to_path(path_bytes), data)
+}
+
+pub fn dupe_read_all_bytes(path_bytes: &[u8]) -> Vec<u8> {
+    if path_bytes.is_empty() {
+        return Vec::new();
+    }
+    std::fs::read(dupe_bytes_to_path(path_bytes)).unwrap_or_default()
+}
+
 pub struct NzbFetcherCore {
     state_path: std::sync::Mutex<String>,
     refused_until: std::sync::Mutex<std::collections::BTreeMap<Vec<u8>, i64>>,

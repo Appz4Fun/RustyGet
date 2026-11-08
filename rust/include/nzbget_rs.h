@@ -2148,16 +2148,6 @@ int nzbget_rs_snh_sys_parse_unpacker_version(
 int nzbget_rs_snh_sys_parse_par_version(
     const char* line, size_t len, size_t* out_pos);
 
-typedef struct NzbgetRsYEncoderFile NzbgetRsYEncoderFile;
-
-NzbgetRsYEncoderFile* nzbget_rs_yencoder_open(
-    const char* filename, int64_t offset, int* io_size, int64_t* out_file_size,
-    const char** out_errmsg);
-void nzbget_rs_yencoder_free(NzbgetRsYEncoderFile* handle);
-void nzbget_rs_yencoder_write_segment(
-    NzbgetRsYEncoderFile* handle, const char* filename, int part, int64_t offset,
-    int size, int64_t file_size,
-    void (*write_cb)(void* ctx, const char* buf, int size), void* ctx);
 void nzbget_rs_nzb_generator_execute(
     const char* data_dir, int segment_size,
     void (*log_cb)(int kind, const char* msg));
@@ -2165,10 +2155,6 @@ void nzbget_rs_nzb_generator_execute(
 typedef struct NzbgetRsNntpCache NzbgetRsNntpCache;
 NzbgetRsNntpCache* nzbget_rs_nntp_cache_new(void);
 void nzbget_rs_nntp_cache_free(NzbgetRsNntpCache* cache);
-void nzbget_rs_nntp_cache_append(
-    const NzbgetRsNntpCache* cache, const char* key, const char* data, int len);
-int nzbget_rs_nntp_cache_find(
-    const NzbgetRsNntpCache* cache, const char* key, const char** out_data, int* out_size);
 int nzbget_rs_nntp_processor_handle_line(
     int server_id, const char* data_dir, const char* cache_dir,
     int latency, int speed, const NzbgetRsNntpCache* cache,
@@ -2178,8 +2164,27 @@ int nzbget_rs_nntp_processor_handle_line(
     void (*log_cb)(void* ctx, int kind, const char* msg));
 int nzbget_rs_nserv_frontend_calc_start_index(
     int needed_first_id, int first_msg_id, int* out_need_skip);
-void nzbget_rs_nserv_build_cmd_opts(
-    const char* log_file, int verbosity, void* ctx,
+void nzbget_rs_nserv_parse_args(
+    int argc,
+    const char* const* argv,
+    void* ctx,
+    void (*set_fields_cb)(
+        void* ctx,
+        const char* data_dir,
+        const char* cache_dir,
+        const char* bind_address,
+        int first_port,
+        int instances,
+        const char* log_file,
+        const char* secure_cert,
+        const char* secure_key,
+        int generate_nzb,
+        int segment_size,
+        int quit,
+        int latency,
+        int speed,
+        int mem_cache,
+        int param_error),
     void (*push_opt_cb)(void* ctx, const char* opt));
 
 int nzbget_rs_snh_nntp_health_cap_for(int connections, int max_cap);
@@ -3460,6 +3465,9 @@ NzbgetRsBuf nzbget_rs_nserv_format_usage(const char* base_name);
 void nzbget_rs_binrpc_init_message_base(
     uint8_t* out, int request_type, int struct_size,
     const char* username, const char* password);
+void nzbget_rs_binrpc_decode_log_response_entries(
+    const uint8_t* data, size_t len, uint32_t nr_entries, void* ctx,
+    void (*emit_cb)(void* ctx, uint32_t id, uint32_t kind, uint32_t time, const char* text));
 void nzbget_rs_binrpc_init_download_request(
     uint8_t* out, const char* username, const char* password,
     const char* nzb_filename, const char* nzb_content, int is_url,
@@ -3918,7 +3926,6 @@ int nzbget_rs_dqh_maintenance_match_sig_line_prefix(
     const char* line, const char* sig_title, size_t* out_offset);
 int64_t nzbget_rs_dqh_parse_c_atoll(const char* text);
 int nzbget_rs_dqh_parse_c_atoi(const char* text);
-int nzbget_rs_dqh_parse_c_atoi_or_default(const char* text, int default_val);
 int nzbget_rs_dqh_diskstate_parse_queue_file_id_and_suffix(
     const char* filename, int* out_id, char* out_suffix);
 void nzbget_rs_dqh_log_parse_rotated_date_fields(
@@ -3926,12 +3933,10 @@ void nzbget_rs_dqh_log_parse_rotated_date_fields(
     int* out_year, int* out_mon, int* out_mday);
 int nzbget_rs_dqh_mem_slices_equal(const void* a, const void* b, size_t len);
 int nzbget_rs_dqh_tls_is_cipher_list(const char* cipher, size_t cipher_len);
-int nzbget_rs_dqh_dupe_util_trim_bounds(
-    const char* text, size_t text_len, const char* chars,
-    size_t* out_start, size_t* out_len);
 NzbgetRsBuf nzbget_rs_dqh_dupe_util_lower(const char* text, size_t text_len);
-NzbgetRsBuf nzbget_rs_dqh_nzb_fetcher_format_parse_err(
-    const char* body, size_t body_len);
+int nzbget_rs_dupe_util_write_atomic(
+    const char* path, size_t path_len, const char* data, size_t data_len);
+NzbgetRsBuf nzbget_rs_dupe_util_read_all(const char* path, size_t path_len);
 int nzbget_rs_dqh_util_classify_executor_ext(
     const char* filename, size_t filename_len, size_t* out_dot_idx);
 int nzbget_rs_dqh_slice_eq_ignore_case(

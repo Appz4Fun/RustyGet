@@ -32,7 +32,7 @@
 #include "CommandLineParser.h"
 #include "ScriptConfig.h"
 #include "Thread.h"
-#include "ColoredFrontend.h"
+#include "Frontend.h"
 #include "NCursesFrontend.h"
 #include "QueueCoordinator.h"
 #include "UrlCoordinator.h"

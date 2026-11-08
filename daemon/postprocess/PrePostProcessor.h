@@ -73,22 +73,2515 @@ private:
 
 extern PrePostProcessor* g_PrePostProcessor;
 
+#include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <map>
+#include <mutex>
+#include <set>
+#include <thread>
+#include <vector>
+#include "ScriptController.h"
+#include "ServerPool.h"
+
+#ifndef DISABLE_PARCHECK
+#include "ParChecker.h"
+#include "DupeArticleFallback.h"
+#endif
+
+class RepairController : public Thread, public ScriptController
+{
+public:
+	RepairController();
+	virtual void Stop();
+
+#ifndef DISABLE_PARCHECK
+	virtual void Run();
+	static void StartJob(PostInfo* postInfo);
+	bool AddPar(FileInfo* fileInfo, bool deleted);
+
+protected:
+	void UpdateParCheckProgress();
+	void ParCheckCompleted();
+	void CheckPauseState(PostInfo* postInfo);
+	bool RequestMorePars(NzbInfo* nzbInfo, const char* parFilename, int blockNeeded, int* blockFound);
+
+private:
+	class PostParChecker final : public ParChecker
+	{
+	public:
+		PostInfo* GetPostInfo() { return m_postInfo; }
+		void SetPostInfo(PostInfo* postInfo) { m_postInfo = postInfo; }
+		time_t GetParTime() { return m_parTime; }
+		void SetParTime(time_t parTime) { m_parTime = parTime; }
+		time_t GetRepairTime() { return m_repairTime; }
+		void SetRepairTime(time_t repairTime) { m_repairTime = repairTime; }
+		int GetDownloadSec() { return m_downloadSec; }
+		void SetDownloadSec(int downloadSec) { m_downloadSec = downloadSec; }
+	protected:
+		bool RequestMorePars(int blockNeeded, int* blockFound) override;
+		void UpdateProgress() override;
+		bool IsStopped() override { return m_owner->IsStopped(); };
+		void Completed() override { m_owner->ParCheckCompleted(); }
+		void PrintMessage(Message::EKind kind, const char* format, ...) override PRINTF_SYNTAX(3);
+		void RegisterParredFile(const char* filename) override;
+		void RegisterVerifiedFile(const char* filename) override;
+		bool IsParredFile(const char* filename) override;
+		EFileStatus FindFileCrc(const char* filename, uint32* crc, SegmentList* segments) override;
+		const char* FindFileOrigname(const char* filename) override;
+		void RequestDupeSources(DupeSourceList* dupeSourceList) override;
+		void StatDupeSources(DupeSourceList* dupeSourceList) override;
+		std::string RequestTwinIndex() override;
+		std::vector<std::string> RequestTwinVolumes(int blockNeeded) override;
+	public:
+		void DeleteTwinFiles();
+	private:
+		std::vector<TwinCheck::NzbEntry> m_twinEntries;
+		std::string m_twinName;
+		std::string m_twinIndex;
+		uint64 m_twinBlockSize = 0;
+		std::vector<std::string> m_twinFiles;
+		ArticleFetcher m_twinFetcher;
+		std::string FetchTwinFile(const TwinCheck::NzbEntry& entry, std::vector<char>* keep = nullptr);
+		RepairController* m_owner;
+		PostInfo* m_postInfo;
+		time_t m_parTime;
+		time_t m_repairTime;
+		int m_downloadSec;
+
+		friend class RepairController;
+	};
+
+	struct BlockInfo
+	{
+		FileInfo* m_fileInfo;
+		int m_blockCount;
+		BlockInfo(FileInfo* fileInfo, int blockCount) :
+			m_fileInfo(fileInfo), m_blockCount(blockCount) {}
+	};
+
+	typedef std::deque<BlockInfo> Blocks;
+
+	PostInfo* m_postInfo;
+	PostParChecker m_parChecker;
+
+	void FindPars(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, const char* parFilename,
+		Blocks& blocks, bool strictParName, bool exactParName, int* blockFound);
+#endif
+};
+
+class StreamRepairController : public Thread, public ScriptController
+{
+public:
+	virtual void Run();
+	virtual void Stop();
+	static void StartJob(PostInfo* postInfo);
+	static void StartLive(NzbInfo* nzbInfo);
+
+protected:
+	virtual void AddMessage(Message::EKind kind, const char* text);
+
+private:
+	struct RepairTarget
+	{
+		int FileId;
+		CString Filename;
+		int64 DecodedFileSize;
+		StreamRangeList Holes;
+		bool NeedsRepair() const { return !Holes.empty() || DecodedFileSize <= 0; }
+		int64 EncodedSize = 0;
+		int ArticleCount = 0;
+		bool Recreated = false;
+		int64 FailedSize = 0;
+		int64 MissedSize = 0;
+		int FailedArticles = 0;
+		bool IsParFile = false;
+		bool PatchEligible = true;
+		int PositionalRank = -1;
+		int PositionalWindow = 0;
+		uint64 StepsHash = 0;
+	};
+
+	struct DonorSource
+	{
+		CString QueuedFilename;
+		CString InfoName;
+		CString Password;
+	};
+
+	PostInfo* m_postInfo = nullptr;
+	bool m_liveMode = false;
+	int m_nzbId = 0;
+	static constexpr int SlowRepairFactor = 3;
+	static constexpr int MaxRunFactor = 5;
+	static constexpr int MaxConnectionWaitSec = 1800;
+	std::thread m_watchdog;
+	std::mutex m_watchdogMutex;
+	std::condition_variable m_watchdogCond;
+	bool m_watchdogDone = false;
+	std::atomic<bool> m_timedOut{false};
+	std::atomic<int64> m_progressBytes{0};
+	int64 m_missingBytes = 0;
+	CString m_slowReason;
+	static constexpr int DonorCheckSec = 20;
+	std::map<std::string, bool> m_donorDead;
+	std::atomic<int> m_checkingDonor{0};
+	std::atomic<int> m_materializing{0};
+	std::atomic<int> m_waitingForConnection{0};
+	bool DonorDead(const DonorSource& donor, NzbInfo* donorNzb);
+	void StartWatchdog(const std::vector<RepairTarget>& targets);
+	void StopWatchdog(const char* nzbName, const std::vector<RepairTarget>& targets);
+	bool Interrupted() { return IsStopped() && !m_timedOut; }
+	ArticleFetcher m_fetcher;
+	ArticleBatchFetcher m_batchFetcher;
+	CString m_targetPassword;
+	int m_recoveredArticles = 0;
+	int64 m_recoveredBytes = 0;
+	int m_recoveredHoles = 0;
+	int64 m_recoveredFailedSize = 0;
+	int64 m_recoveredFailedParSize = 0;
+	bool m_holesRemain = false;
+	bool m_hasParFiles = false;
+	std::vector<RepairTarget> m_targets;
+
+	void RunLive();
+	void RepairCompletedLive(std::vector<RepairTarget>& targets);
+	void RefreshLiveNames(std::vector<RepairTarget>& targets,
+		std::vector<CString>& memberNames);
+	void RefreshLiveTargetName(RepairTarget& target);
+	void CollectTargets(NzbInfo* nzbInfo, std::vector<RepairTarget>& targets,
+		std::vector<CString>& memberNames);
+	void ComputePositionalRanks(const char* destDir, std::vector<RepairTarget>& targets,
+		const std::vector<CString>& memberNames);
+	void CollectDonors(DownloadQueue* downloadQueue, NzbInfo* nzbInfo,
+		std::vector<DonorSource>& donors);
+	void ExecRepair(const char* destDir, std::vector<RepairTarget>& targets,
+		std::vector<DonorSource>& donors, const std::vector<CString>& memberNames);
+	static void MarkRecreated(NzbInfo* nzbInfo, const RepairTarget& target);
+	static void MarkRepaired(NzbInfo* nzbInfo, const RepairTarget& target);
+	void ExecCrossPackRepair(const char* destDir, std::vector<RepairTarget>& targets,
+		std::vector<DonorSource>& donors, const std::vector<CString>& memberNames);
+	void ReportRemainingHoles(std::vector<RepairTarget>& targets);
+	void RepairCompleted();
+};
+
+#include <algorithm>
+#include <chrono>
+#include <exception>
+#include <new>
+#include <mutex>
 #include "Options.h"
 #include "Log.h"
 #include "HistoryCoordinator.h"
+#include "QueueCoordinator.h"
 #include "DupeCoordinator.h"
 #include "ExtensionManager.h"
 #include "Util.h"
 #include "FileSystem.h"
 #include "UnpackController.h"
-#include "Repair.h"
-#include "StreamRepair.h"
 #include "DiskState.h"
-#include "ParDamage.h"
-#include <exception>
-#include <new>
-#include <mutex>
+#include "StatMeter.h"
+#include "DupeArticleFallback.h"
 #include "nzbget_rs.h"
+
+#ifndef DISABLE_PARCHECK
+inline bool RepairController::PostParChecker::RequestMorePars(int blockNeeded, int* blockFound)
+{
+	return m_owner->RequestMorePars(m_postInfo->GetNzbInfo(), GetParFilename(), blockNeeded, blockFound);
+}
+
+inline void RepairController::PostParChecker::UpdateProgress()
+{
+	m_owner->UpdateParCheckProgress();
+}
+
+inline void RepairController::PostParChecker::PrintMessage(Message::EKind kind, const char* format, ...)
+{
+	char text[1024];
+	va_list args;
+	va_start(args, format);
+	vsnprintf(text, 1024, format, args);
+	va_end(args);
+	text[1024-1] = '\0';
+
+	m_postInfo->GetNzbInfo()->AddMessage(kind, text);
+}
+
+inline void RepairController::PostParChecker::RegisterParredFile(const char* filename)
+{
+	m_postInfo->GetParredFiles()->push_back(filename);
+}
+
+inline void RepairController::PostParChecker::RegisterVerifiedFile(const char* filename)
+{
+	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+	NzbInfo* nzbInfo = m_postInfo->GetNzbInfo();
+	StreamRepairJobList* jobs = nzbInfo->GetStreamRepairJobs();
+	std::string verifiedPath = FileSystem::GetRealPath(filename).value_or(filename);
+	size_t previousSize = jobs->size();
+	jobs->erase(std::remove_if(jobs->begin(), jobs->end(),
+		[nzbInfo, &verifiedPath](const StreamRepairJob& job)
+		{
+			std::string currentName = job.GetFilename();
+			for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
+			{
+				if (completedFile.GetId() == job.GetFileId())
+				{
+					currentName = completedFile.GetFilename();
+					break;
+				}
+			}
+			NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+				nzbInfo->GetDestDir(), PATH_SEPARATOR, currentName.c_str());
+			std::string path(pathBuf.data ? pathBuf.data : "", pathBuf.len);
+			nzbget_rs_free(pathBuf);
+			path = FileSystem::GetRealPath(path).value_or(path);
+			return FileSystem::SameFilename(path.c_str(), verifiedPath.c_str());
+		}), jobs->end());
+	if (jobs->size() != previousSize)
+	{
+		nzbInfo->SetChanged(true);
+	}
+}
+
+inline bool RepairController::PostParChecker::IsParredFile(const char* filename)
+{
+	for (CString& parredFile : m_postInfo->GetParredFiles())
+	{
+		if (nzbget_rs_repair_filename_eq_ignore_case(parredFile, filename) != 0)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+inline ParChecker::EFileStatus RepairController::PostParChecker::FindFileCrc(const char* filename,
+	uint32* crc, SegmentList* segments)
+{
+	int id = 0;
+	CompletedFile::EStatus status;
+	bool reprocess;
+	{
+		GuardedDownloadQueue guard = DownloadQueue::Guard();
+		CompletedFile* completedFile = nullptr;
+		for (CompletedFile& completedFile2 : *m_postInfo->GetNzbInfo()->GetCompletedFiles())
+		{
+			if (nzbget_rs_repair_filename_eq_ignore_case(completedFile2.GetFilename(), filename) != 0)
+			{
+				completedFile = &completedFile2;
+				break;
+			}
+		}
+		if (!completedFile)
+		{
+			return ParChecker::fsUnknown;
+		}
+		id = completedFile->GetId();
+		*crc = completedFile->GetCrc();
+		status = completedFile->GetStatus();
+		reprocess = m_postInfo->GetNzbInfo()->GetReprocess();
+	}
+
+	debug("Found completed file: %s, CRC: %.8x, Status: %i", filename, *crc, (int)status);
+
+	if (nzbget_rs_repair_should_load_partial_segments(
+		(int)status, (int)CompletedFile::cfPartial, id, reprocess ? 1 : 0) != 0)
+	{
+		FileInfo tmpFileInfo(id);
+
+		if (!g_DiskState->LoadFileState(&tmpFileInfo, nullptr, true))
+		{
+			return ParChecker::fsUnknown;
+		}
+
+		for (ArticleInfo* pa : tmpFileInfo.GetArticles())
+		{
+			segments->emplace_back(pa->GetStatus() == ArticleInfo::aiFinished,
+				pa->GetSegmentOffset(), pa->GetSegmentSize(), pa->GetCrc());
+		}
+	}
+
+	return (ParChecker::EFileStatus)nzbget_rs_repair_classify_file_crc_status(
+		(int)status, reprocess ? 1 : 0, !segments->empty() ? 1 : 0,
+		(int)CompletedFile::cfSuccess, (int)CompletedFile::cfFailure, (int)CompletedFile::cfPartial,
+		(int)ParChecker::fsSuccess, (int)ParChecker::fsFailure, (int)ParChecker::fsPartial,
+		(int)ParChecker::fsUnknown);
+}
+
+inline const char* RepairController::PostParChecker::FindFileOrigname(const char* filename)
+{
+	thread_local std::string origname;
+	GuardedDownloadQueue guard = DownloadQueue::Guard();
+	for (CompletedFile& completedFile : *m_postInfo->GetNzbInfo()->GetCompletedFiles())
+	{
+		if (nzbget_rs_repair_filename_eq_ignore_case(completedFile.GetFilename(), filename) != 0)
+		{
+			if (!completedFile.GetOrigname())
+			{
+				return nullptr;
+			}
+			origname = completedFile.GetOrigname();
+			return origname.c_str();
+		}
+	}
+
+	return nullptr;
+}
+
+inline void RepairController::PostParChecker::RequestDupeSources(DupeSourceList* dupeSourceList)
+{
+	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+
+	RawNzbList dupeList = g_DupeCoordinator->ListHistoryDupes(downloadQueue, m_postInfo->GetNzbInfo());
+
+	if (!dupeList.empty())
+	{
+		NzbInfo* nzbInfo = m_postInfo->GetNzbInfo();
+		std::vector<const char*> dupeDirs(dupeList.size());
+		for (size_t i = 0; i < dupeList.size(); i++)
+		{
+			dupeDirs[i] = dupeList[i]->GetDestDir();
+		}
+		std::vector<size_t> usableIndices(dupeList.size());
+		size_t usableCount = nzbget_rs_dupematcher_filter_dupe_sources(
+			nzbInfo->GetName(),
+			nzbInfo->GetDestDir(),
+			nzbInfo->GetSize() - nzbInfo->GetParSize(),
+			g_Options->GetUnrarCmd(),
+			dupeDirs.data(),
+			dupeDirs.size(),
+			usableIndices.data(),
+			[](void* ctx, int kind, const char* msg)
+			{
+				auto* self = static_cast<PostParChecker*>(ctx);
+				self->PrintMessage(kind == 3 ? Message::mkDetail : Message::mkInfo, "%s", msg ? msg : "");
+			},
+			this);
+		for (size_t i = 0; i < usableCount; i++)
+		{
+			NzbInfo* dupeNzbInfo = dupeList[usableIndices[i]];
+			dupeSourceList->emplace_back(dupeNzbInfo->GetId(), dupeNzbInfo->GetDestDir());
+		}
+	}
+}
+
+inline std::string RepairController::PostParChecker::FetchTwinFile(const TwinCheck::NzbEntry& entry, std::vector<char>* keep)
+{
+	std::vector<char> data;
+	if (!TwinCheck::FetchEntry(m_twinFetcher, entry, 1024LL * 1024 * 1024, [this]() { return IsStopped(); }, data))
+	{
+		return "";
+	}
+	NzbgetRsBuf nameBuf = nzbget_rs_repair_build_twin_filename(
+		entry.filename.c_str(), m_twinFiles.size());
+	std::string name(nameBuf.data ? nameBuf.data : "", nameBuf.len);
+	nzbget_rs_free(nameBuf);
+	NzbgetRsBuf pathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+		GetDestDir(), PATH_SEPARATOR, name.c_str());
+	BString<1024> path;
+	path.Set(pathBuf.data ? pathBuf.data : "", (int)pathBuf.len);
+	nzbget_rs_free(pathBuf);
+	if (!FileSystem::SaveBufferIntoFile(*path, data.empty() ? "" : data.data(), data.size()))
+	{
+		return "";
+	}
+	m_twinFiles.push_back(*path);
+	if (keep)
+	{
+		*keep = std::move(data);
+	}
+	return *path;
+}
+
+inline std::string RepairController::PostParChecker::RequestTwinIndex()
+{
+	std::vector<TwinCheck::FileSig> own;
+	{
+		CharBuffer parBuf;
+		if (FileSystem::LoadFileIntoBuffer(GetParFilename(), parBuf, false))
+		{
+			own = TwinCheck::ParsePar2(parBuf, parBuf.Size());
+		}
+	}
+	std::string ownPrint = TwinCheck::Fingerprint(own);
+	if (ownPrint.empty())
+	{
+		return "";
+	}
+
+	struct Candidate
+	{
+		std::string name;
+		std::string nzbFilename;
+		bool known;
+	};
+	std::vector<Candidate> candidates;
+	{
+		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+		NzbInfo* nzbInfo = m_postInfo->GetNzbInfo();
+		auto consider = [&](NzbInfo* other)
+			{
+				bool sameNameOrKey = other != nzbInfo && other->GetKind() == NzbInfo::nkNzb &&
+					DupeCoordinator::SameNameOrKey(other->GetName(), other->GetDupeKey(),
+						nzbInfo->GetName(), nzbInfo->GetDupeKey());
+				NzbParameter* print = sameNameOrKey ? other->GetParameters()->Find(TwinCheck::FilesParam) : nullptr;
+				if (!nzbget_rs_repair_should_consider_twin_candidate(
+					other == nzbInfo ? 1 : 0,
+					(int)other->GetKind(),
+					(int)NzbInfo::nkNzb,
+					sameNameOrKey ? 1 : 0,
+					other->GetQueuedFilename(),
+					print != nullptr ? 1 : 0,
+					(print && ownPrint == print->GetValue()) ? 1 : 0) ||
+					!FileSystem::FileExists(other->GetQueuedFilename()))
+				{
+					return;
+				}
+				candidates.push_back({other->GetName(), other->GetQueuedFilename(), print != nullptr});
+			};
+		for (NzbInfo* queued : downloadQueue->GetQueue())
+		{
+			consider(queued);
+		}
+		for (std::unique_ptr<HistoryInfo>& historyInfo : *downloadQueue->GetHistory())
+		{
+			if (historyInfo->GetKind() == HistoryInfo::hkNzb)
+			{
+				consider(historyInfo->GetNzbInfo());
+			}
+		}
+	}
+	std::stable_sort(candidates.begin(), candidates.end(),
+		[](const Candidate& a, const Candidate& b) { return a.known > b.known; });
+
+	std::vector<const char*> ownNames;
+	std::vector<const char*> ownMd5s;
+	ownNames.reserve(own.size());
+	ownMd5s.reserve(own.size());
+	for (const TwinCheck::FileSig& sig : own)
+	{
+		ownNames.push_back(sig.name.c_str());
+		ownMd5s.push_back(sig.md5.c_str());
+	}
+
+	for (const Candidate& candidate : candidates)
+	{
+		if (IsStopped())
+		{
+			break;
+		}
+		std::vector<TwinCheck::NzbEntry> entries = TwinCheck::ReadNzbEntries(candidate.nzbFilename.c_str());
+		std::vector<uint8_t> entryPar2(entries.size());
+		std::vector<int64_t> entrySizes(entries.size());
+		for (size_t i = 0; i < entries.size(); i++)
+		{
+			entryPar2[i] = entries[i].par2 ? 1 : 0;
+			entrySizes[i] = entries[i].size;
+		}
+		ptrdiff_t bestIdx = nzbget_rs_repair_select_best_twin_par2_index(
+			entryPar2.data(), entrySizes.data(), entries.size(), TwinCheck::MaxIndexSize);
+		if (bestIdx < 0 || (size_t)bestIdx >= entries.size())
+		{
+			continue;
+		}
+		const TwinCheck::NzbEntry* index = &entries[(size_t)bestIdx];
+
+		std::vector<char> data;
+		std::string path = FetchTwinFile(*index, &data);
+		if (path.empty())
+		{
+			continue;
+		}
+		int cmp = nzbget_rs_twin_compare_par2_data(
+			ownNames.data(), ownMd5s.data(), own.size(),
+			ownPrint.c_str(),
+			reinterpret_cast<const uint8_t*>(data.data()), data.size());
+		if (cmp != 0)
+		{
+			PrintMessage(Message::mkDetail, "%s: its par2 set %s", candidate.name.c_str(),
+				nzbget_rs_repair_twin_par2_reject_reason(cmp));
+			FileSystem::DeleteFile(path.c_str());
+			m_twinFiles.pop_back();
+			continue;
+		}
+
+		m_twinName = candidate.name;
+		m_twinEntries = std::move(entries);
+		m_twinIndex = index->filename;
+		m_twinBlockSize = TwinCheck::BlockSize(data.data(), data.size());
+		PrintMessage(Message::mkInfo, "Trying the par2 set of twin %s (blocks of %.1f MB)",
+			m_twinName.c_str(), nzbget_rs_dqh_stream_repair_bytes_to_mb(m_twinBlockSize));
+		return path;
+	}
+	return "";
+}
+
+inline std::vector<std::string> RepairController::PostParChecker::RequestTwinVolumes(int blockNeeded)
+{
+	struct Volume
+	{
+		const TwinCheck::NzbEntry* entry;
+		int blocks;
+	};
+	std::vector<Volume> volumes;
+	for (const TwinCheck::NzbEntry& entry : m_twinEntries)
+	{
+		if (nzbget_rs_repair_should_skip_twin_volume_entry(
+			entry.par2 ? 1 : 0, entry.filename.c_str(), m_twinIndex.c_str()) != 0)
+		{
+			continue;
+		}
+		int blocks = TwinCheck::VolumeBlocks(entry.filename);
+		if (blocks < 0 && m_twinBlockSize > 0)
+		{
+			blocks = nzbget_rs_repair_estimate_twin_vol_blocks(entry.size, m_twinBlockSize);
+		}
+		if (blocks > 0)
+		{
+			volumes.push_back({&entry, blocks});
+		}
+	}
+	std::sort(volumes.begin(), volumes.end(), [](const Volume& a, const Volume& b) { return a.blocks < b.blocks; });
+
+	int available = 0;
+	std::vector<int> allVolBlocks;
+	allVolBlocks.reserve(volumes.size());
+	for (const Volume& volume : volumes)
+	{
+		allVolBlocks.push_back(volume.blocks);
+	}
+	bool hasEnoughTwinBlocks = nzbget_rs_repair_sum_and_check_twin_blocks(
+		allVolBlocks.data(), allVolBlocks.size(), blockNeeded, &available) != 0;
+	std::vector<std::string> paths;
+	if (!hasEnoughTwinBlocks)
+	{
+		PrintMessage(Message::mkInfo, "Twin %s holds %i par-block(s), %i needed: not fetched",
+			m_twinName.c_str(), available, blockNeeded);
+		return paths;
+	}
+
+	int left = blockNeeded;
+	while (left > 0 && !volumes.empty() && !IsStopped())
+	{
+		std::vector<int> volBlocks;
+		volBlocks.reserve(volumes.size());
+		for (const Volume& v : volumes)
+		{
+			volBlocks.push_back(v.blocks);
+		}
+		ptrdiff_t idx = nzbget_rs_repair_pick_twin_volume(volBlocks.data(), volBlocks.size(), left);
+		if (idx < 0 || (size_t)idx >= volumes.size())
+		{
+			break;
+		}
+		auto it = volumes.begin() + idx;
+		PrintMessage(Message::mkInfo, "Fetching %s of twin %s for par-repair (%i block(s))",
+			it->entry->filename.c_str(), m_twinName.c_str(), it->blocks);
+		std::string path = FetchTwinFile(*it->entry);
+		if (!path.empty())
+		{
+			paths.push_back(path);
+			left -= it->blocks;
+		}
+		volumes.erase(it);
+	}
+	return paths;
+}
+
+inline void RepairController::PostParChecker::DeleteTwinFiles()
+{
+	for (const std::string& path : m_twinFiles)
+	{
+		FileSystem::DeleteFile(path.c_str());
+	}
+	m_twinFiles.clear();
+	m_twinEntries.clear();
+	m_twinName.clear();
+	m_twinIndex.clear();
+	m_twinBlockSize = 0;
+}
+
+inline void RepairController::PostParChecker::StatDupeSources(DupeSourceList* dupeSourceList)
+{
+	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+
+	int totalExtraParBlocks = 0;
+	for (DupeSource& dupeSource : dupeSourceList)
+	{
+		if (dupeSource.GetUsedBlocks() > 0)
+		{
+			for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
+			{
+				if (historyInfo->GetKind() == HistoryInfo::hkNzb &&
+					historyInfo->GetNzbInfo()->GetId() == dupeSource.GetId())
+				{
+					historyInfo->GetNzbInfo()->SetExtraParBlocks(
+						historyInfo->GetNzbInfo()->GetExtraParBlocks() - dupeSource.GetUsedBlocks());
+				}
+			}
+		}
+		totalExtraParBlocks += dupeSource.GetUsedBlocks();
+	}
+
+	m_postInfo->GetNzbInfo()->SetExtraParBlocks(m_postInfo->GetNzbInfo()->GetExtraParBlocks() + totalExtraParBlocks);
+}
+
+#endif
+
+inline RepairController::RepairController()
+{
+	debug("Creating RepairController");
+
+#ifndef DISABLE_PARCHECK
+	m_parChecker.m_owner = this;
+#endif
+}
+
+inline void RepairController::Stop()
+{
+	debug("Stopping RepairController");
+	Thread::Stop();
+#ifndef DISABLE_PARCHECK
+	m_parChecker.Cancel();
+#endif
+}
+
+#ifndef DISABLE_PARCHECK
+
+inline void RepairController::StartJob(PostInfo* postInfo)
+{
+	RepairController* repairController = new RepairController();
+	repairController->m_postInfo = postInfo;
+	repairController->SetAutoDestroy(false);
+
+	postInfo->SetPostThread(repairController);
+
+	repairController->Start();
+}
+
+inline void RepairController::Run()
+{
+	BString<1024> nzbName;
+	CString destDir;
+	bool dupeRepaired = false;
+	{
+		GuardedDownloadQueue guard = DownloadQueue::Guard();
+		nzbName = m_postInfo->GetNzbInfo()->GetName();
+		destDir = m_postInfo->GetNzbInfo()->GetDestDir();
+		dupeRepaired = m_postInfo->GetNzbInfo()->GetDupeRecoveredBytes() > 0;
+	}
+
+	m_parChecker.SetPostInfo(m_postInfo);
+	m_parChecker.SetDestDir(destDir);
+	m_parChecker.SetNzbName(nzbName);
+	m_parChecker.SetParTime(Util::CurrentTime());
+	m_parChecker.SetDownloadSec(m_postInfo->GetNzbInfo()->GetDownloadSec());
+	m_parChecker.SetParQuick(nzbget_rs_repair_should_use_par_quick(
+		g_Options->GetParQuick() ? 1 : 0,
+		m_postInfo->GetForceParFull() ? 1 : 0,
+		dupeRepaired ? 1 : 0) != 0);
+	m_parChecker.SetForceRepair(m_postInfo->GetForceRepair());
+
+	m_parChecker.PrintMessage(Message::mkInfo, "Checking pars for %s", *nzbName);
+
+	m_parChecker.Execute();
+}
+
+inline bool RepairController::AddPar(FileInfo* fileInfo, bool deleted)
+{
+	bool sameCollection = fileInfo->GetNzbInfo() == m_parChecker.GetPostInfo()->GetNzbInfo();
+	if (sameCollection && !deleted)
+	{
+		NzbgetRsBuf fullFnBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			fileInfo->GetNzbInfo()->GetDestDir(), PATH_SEPARATOR, fileInfo->GetFilename());
+		BString<1024> fullFilename;
+		fullFilename.Set(fullFnBuf.data ? fullFnBuf.data : "", (int)fullFnBuf.len);
+		nzbget_rs_free(fullFnBuf);
+		m_parChecker.AddParFile(fullFilename);
+	}
+	else
+	{
+		m_parChecker.QueueChanged();
+	}
+	return sameCollection;
+}
+
+inline void RepairController::ParCheckCompleted()
+{
+	m_parChecker.DeleteTwinFiles();
+	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+
+	PostInfo* postInfo = m_parChecker.GetPostInfo();
+
+	int rawParStatus = 0, setParRepaired = 0, parRepairedVal = 0, waitTime = 0, parSec = 0;
+	nzbget_rs_repair_complete_par_check(
+		(int)m_parChecker.GetStatus(),
+		(int)postInfo->GetNzbInfo()->GetParStatus(),
+		(int)ParChecker::psRepaired, (int)ParChecker::psRepairNotNeeded, (int)ParChecker::psRepairPossible,
+		(int)NzbInfo::psSkipped, (int)NzbInfo::psSuccess, (int)NzbInfo::psRepairPossible, (int)NzbInfo::psFailure,
+		postInfo->GetNzbInfo()->GetDownloadSec(),
+		m_parChecker.GetDownloadSec(),
+		(int64_t)Util::CurrentTime(),
+		(int64_t)m_parChecker.GetParTime(),
+		&rawParStatus, &setParRepaired, &parRepairedVal, &waitTime, &parSec);
+	postInfo->GetNzbInfo()->SetParStatus((NzbInfo::EParStatus)rawParStatus);
+	if (setParRepaired)
+	{
+		postInfo->SetParRepaired(parRepairedVal != 0);
+	}
+	postInfo->SetStartTime(postInfo->GetStartTime() + (time_t)waitTime);
+	postInfo->GetNzbInfo()->SetParSec(postInfo->GetNzbInfo()->GetParSec() + parSec);
+
+	postInfo->GetNzbInfo()->SetParFull(m_parChecker.GetParFull());
+
+	postInfo->SetWorking(false);
+}
+
+inline bool RepairController::RequestMorePars(NzbInfo* nzbInfo, const char* parFilename, int blockNeeded, int* blockFoundOut)
+{
+	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+
+	Blocks availableBlocks;
+	Blocks selectedBlocks;
+	int blockFound = 0;
+	int curBlockFound = 0;
+
+	FindPars(downloadQueue, nzbInfo, parFilename, availableBlocks, true, true, &curBlockFound);
+	blockFound += curBlockFound;
+	if (blockFound < blockNeeded)
+	{
+		FindPars(downloadQueue, nzbInfo, parFilename, availableBlocks, true, false, &curBlockFound);
+		blockFound += curBlockFound;
+	}
+	if (blockFound < blockNeeded)
+	{
+		FindPars(downloadQueue, nzbInfo, parFilename, availableBlocks, false, false, &curBlockFound);
+		blockFound += curBlockFound;
+	}
+
+	std::sort(availableBlocks.begin(), availableBlocks.end(),
+		[](const BlockInfo& block1, const BlockInfo& block2)
+		{
+			return block1.m_blockCount < block2.m_blockCount;
+		});
+
+	if (blockFound >= blockNeeded)
+	{
+		std::vector<int> sortedCounts;
+		sortedCounts.reserve(availableBlocks.size());
+		for (const BlockInfo& b : availableBlocks)
+		{
+			sortedCounts.push_back(b.m_blockCount);
+		}
+		std::vector<size_t> selectedIdx(availableBlocks.size());
+		int remNeeded = blockNeeded;
+		size_t selCount = nzbget_rs_repair_select_more_pars(
+			sortedCounts.data(), sortedCounts.size(), blockNeeded,
+			selectedIdx.data(), selectedIdx.size(), &remNeeded);
+		blockNeeded = remNeeded;
+		for (size_t i = 0; i < selCount && i < selectedIdx.size(); ++i)
+		{
+			selectedBlocks.push_back(availableBlocks[selectedIdx[i]]);
+		}
+
+		for (BlockInfo& blockInfo : selectedBlocks)
+		{
+			if (blockInfo.m_fileInfo->GetPaused())
+			{
+				m_parChecker.PrintMessage(Message::mkInfo, "Unpausing %s%c%s for par-recovery", nzbInfo->GetName(), PATH_SEPARATOR, blockInfo.m_fileInfo->GetFilename());
+				blockInfo.m_fileInfo->SetPaused(false);
+				blockInfo.m_fileInfo->SetExtraPriority(true);
+			}
+		}
+	}
+
+	bool hasUnpausedParFiles = false;
+	for (FileInfo* fileInfo : nzbInfo->GetFileList())
+	{
+		if (fileInfo->GetParFile() && !fileInfo->GetPaused())
+		{
+			hasUnpausedParFiles = true;
+			break;
+		}
+	}
+
+	if (blockFoundOut)
+	{
+		*blockFoundOut = blockFound;
+	}
+
+	return blockNeeded <= 0 || hasUnpausedParFiles;
+}
+
+inline void RepairController::FindPars(DownloadQueue* downloadQueue, NzbInfo* nzbInfo, const char* parFilename,
+	Blocks& blocks, bool strictParName, bool exactParName, int* blockFound)
+{
+	*blockFound = 0;
+
+	char* baseParFilename = FileSystem::BaseFileName(parFilename);
+	int mainBaseLen = 0;
+	if (!ParParser::ParseParFilename(baseParFilename, true, &mainBaseLen, nullptr))
+	{
+		nzbInfo->PrintMessage(Message::mkError, "Internal error: could not parse filename %s", baseParFilename);
+		return;
+	}
+	BString<1024> mainBaseFilename;
+	if (mainBaseLen > 0)
+	{
+		mainBaseFilename.Set(baseParFilename, mainBaseLen);
+	}
+
+	for (FileInfo* fileInfo : nzbInfo->GetFileList())
+	{
+		int parsedBlocks = 0;
+		bool parsed = ParParser::ParseParFilename(fileInfo->GetFilename(), fileInfo->GetFilenameConfirmed(), nullptr, &parsedBlocks);
+		bool sameCollection = !exactParName ||
+			ParParser::SameParCollection(fileInfo->GetFilename(),
+				FileSystem::BaseFileName(parFilename), fileInfo->GetFilenameConfirmed());
+		int blockCount = 0;
+		if (nzbget_rs_repair_eval_find_pars_candidate(
+			sameCollection ? 1 : 0,
+			0,
+			(!exactParName && strictParName) ? 1 : 0,
+			fileInfo->GetFilename(),
+			mainBaseFilename,
+			parsed ? 1 : 0,
+			parsedBlocks,
+			fileInfo->GetSize(),
+			m_parChecker.GetBlockSize(),
+			&blockCount))
+		{
+			bool alreadyAdded = false;
+			for (BlockInfo& blockInfo : blocks)
+			{
+				if (blockInfo.m_fileInfo == fileInfo)
+				{
+					alreadyAdded = true;
+					break;
+				}
+			}
+
+			if (!alreadyAdded)
+			{
+				blocks.emplace_back(fileInfo, blockCount);
+				*blockFound += blockCount;
+			}
+		}
+	}
+}
+
+inline void RepairController::UpdateParCheckProgress()
+{
+	PostInfo* postInfo;
+
+	{
+		GuardedDownloadQueue guard = DownloadQueue::Guard();
+
+		postInfo = m_parChecker.GetPostInfo();
+		if (m_parChecker.GetFileProgress() == 0)
+		{
+			postInfo->SetProgressLabel(m_parChecker.GetProgressLabel());
+		}
+		postInfo->SetFileProgress(m_parChecker.GetFileProgress());
+		postInfo->SetStageProgress(m_parChecker.GetStageProgress());
+		time_t current = Util::CurrentTime();
+
+		int rawStage = (int)postInfo->GetStage();
+		int setRepairTime = 0;
+		int newRepairSec = postInfo->GetNzbInfo()->GetRepairSec();
+		if (nzbget_rs_repair_eval_par_progress_update(
+			(int)postInfo->GetStage(),
+			(int)m_parChecker.GetStage(),
+			(int)PostInfo::ptLoadingPars,
+			(int)PostInfo::ptVerifyingSources,
+			(int)PostInfo::ptRepairing,
+			(int)PostInfo::ptVerifyingRepaired,
+			(int64)current,
+			(int64)m_parChecker.GetRepairTime(),
+			newRepairSec,
+			&rawStage,
+			&setRepairTime,
+			&newRepairSec) != 0)
+		{
+			postInfo->SetStage((PostInfo::EStage)rawStage);
+			postInfo->SetStageTime(current);
+			if (setRepairTime)
+			{
+				m_parChecker.SetRepairTime(current);
+			}
+			else if (postInfo->GetStage() == PostInfo::ptVerifyingRepaired)
+			{
+				postInfo->GetNzbInfo()->SetRepairSec(newRepairSec);
+			}
+		}
+
+		bool parCancel = false;
+		if (!IsStopped())
+		{
+			int estimatedRepairTime = 0;
+			if (nzbget_rs_repair_check_par_time_limit(
+				g_Options->GetParTimeLimit(),
+				m_parChecker.GetStage() == PostParChecker::ptRepairing ? 1 : 0,
+				(int64)(current - postInfo->GetStageTime()),
+				postInfo->GetStageProgress(),
+				&estimatedRepairTime) != 0)
+			{
+				debug("Estimated repair time %i seconds", estimatedRepairTime);
+				m_parChecker.PrintMessage(Message::mkWarning, "Cancelling par-repair for %s, estimated repair time (%i minutes) exceeds allowed repair time",
+					m_parChecker.GetInfoName(),
+					estimatedRepairTime / 60);
+				parCancel = true;
+			}
+		}
+
+		if (parCancel)
+		{
+			Stop();
+		}
+	}
+
+	CheckPauseState(postInfo);
+}
+
+inline void RepairController::CheckPauseState(PostInfo* postInfo)
+{
+	if (g_WorkState->GetPausePostProcess() && !postInfo->GetNzbInfo()->GetForcePriority())
+	{
+		time_t stageTime = postInfo->GetStageTime();
+		time_t startTime = postInfo->GetStartTime();
+		time_t parTime = m_parChecker.GetParTime();
+		time_t repairTime = m_parChecker.GetRepairTime();
+		time_t waitTime = Util::CurrentTime();
+
+		while (g_WorkState->GetPausePostProcess() &&
+			!postInfo->GetNzbInfo()->GetForcePriority() &&
+			!IsStopped())
+		{
+			Util::Sleep(50);
+
+			int64 newStage = 0, newStart = 0, newPar = 0, newRepair = 0;
+			nzbget_rs_repair_calc_paused_timestamps(
+				(int64)Util::CurrentTime(), (int64)waitTime,
+				(int64)stageTime, (int64)startTime, (int64)parTime, (int64)repairTime,
+				&newStage, &newStart, &newPar, &newRepair);
+			if (stageTime > 0)
+			{
+				postInfo->SetStageTime((time_t)newStage);
+			}
+			if (startTime > 0)
+			{
+				postInfo->SetStartTime((time_t)newStart);
+			}
+			if (parTime > 0)
+			{
+				m_parChecker.SetParTime((time_t)newPar);
+			}
+			if (repairTime > 0)
+			{
+				m_parChecker.SetRepairTime((time_t)newRepair);
+			}
+		}
+	}
+}
+
+#endif
+
+namespace
+{
+	template <typename Ctx, typename R, typename F>
+	R RepairMapCall(void* rawCtx, R failed, F f) noexcept
+	{
+		Ctx* c = static_cast<Ctx*>(rawCtx);
+		if (c->Error)
+		{
+			return failed;
+		}
+		try
+		{
+			return f(c);
+		}
+		catch (...)
+		{
+			c->Error = std::current_exception();
+			return failed;
+		}
+	}
+
+	template <typename Ctx, typename F>
+	void RepairMapCallVoid(void* rawCtx, F f) noexcept
+	{
+		Ctx* c = static_cast<Ctx*>(rawCtx);
+		if (c->Error)
+		{
+			return;
+		}
+		try
+		{
+			f(c);
+		}
+		catch (...)
+		{
+			c->Error = std::current_exception();
+		}
+	}
+}
+
+inline void StreamRepairController::StartJob(PostInfo* postInfo)
+{
+	StreamRepairController* streamRepairController = new StreamRepairController();
+	streamRepairController->m_postInfo = postInfo;
+	streamRepairController->SetAutoDestroy(false);
+
+	postInfo->SetPostThread(streamRepairController);
+
+	streamRepairController->Start();
+}
+
+inline void StreamRepairController::StartLive(NzbInfo* nzbInfo)
+{
+	if (DupeArticleFallback::ShouldDeferToPar(nzbInfo))
+	{
+		return;
+	}
+
+	StreamRepairController* streamRepairController = new StreamRepairController();
+	streamRepairController->m_liveMode = true;
+	streamRepairController->m_nzbId = nzbInfo->GetId();
+	streamRepairController->SetAutoDestroy(true);
+
+	nzbInfo->SetLiveRepairThread(streamRepairController);
+
+	streamRepairController->Start();
+}
+
+inline void StreamRepairController::Run()
+{
+	if (m_liveMode)
+	{
+		RunLive();
+		return;
+	}
+
+	BString<1024> nzbName;
+	CString destDir;
+	std::vector<RepairTarget> targets;
+	std::vector<DonorSource> donors;
+	std::vector<CString> memberNames;
+
+	{
+		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+		NzbInfo* nzbInfo = m_postInfo->GetNzbInfo();
+		nzbName = nzbInfo->GetName();
+		destDir = nzbInfo->GetDestDir();
+		CollectTargets(nzbInfo, targets, memberNames);
+		CollectDonors(downloadQueue, nzbInfo, donors);
+		m_postInfo->SetProgressLabel("Repairing files from duplicates");
+	}
+
+	NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_post_format_info_name("stream repair", *nzbName);
+	BString<1024> infoName;
+	infoName.Set(infoNameBuf.data ? infoNameBuf.data : "", (int)infoNameBuf.len);
+	nzbget_rs_free(infoNameBuf);
+	SetInfoName(infoName);
+
+	if (targets.empty())
+	{
+		PrintMessage(Message::mkInfo, "Nothing to stream-repair for %s", *nzbName);
+	}
+	else if (donors.empty())
+	{
+		PrintMessage(Message::mkInfo,
+			"No duplicate collections found for stream repair of %s", *nzbName);
+	}
+	else
+	{
+		StartWatchdog(targets);
+		ComputePositionalRanks(destDir, targets, memberNames);
+		ExecRepair(destDir, targets, donors, memberNames);
+
+		bool anyHoles = false;
+		for (RepairTarget& target : targets)
+		{
+			anyHoles |= target.NeedsRepair();
+		}
+		if (anyHoles && !IsStopped())
+		{
+			ExecCrossPackRepair(destDir, targets, donors, memberNames);
+		}
+		StopWatchdog(nzbName, targets);
+	}
+
+	ReportRemainingHoles(targets);
+	m_targets = std::move(targets);
+	RepairCompleted();
+}
+
+inline void StreamRepairController::RunLive()
+{
+	BString<1024> nzbName;
+	CString destDir;
+	std::vector<RepairTarget> targets;
+	std::vector<DonorSource> donors;
+	std::vector<CString> memberNames;
+
+	{
+		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+		NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_nzbId);
+		if (!nzbInfo || nzbInfo->GetLiveRepairThread() != this)
+		{
+			return;
+		}
+		nzbName = nzbInfo->GetName();
+		destDir = nzbInfo->GetDestDir();
+		CollectTargets(nzbInfo, targets, memberNames);
+		CollectDonors(downloadQueue, nzbInfo, donors);
+
+		for (RepairTarget& target : targets)
+		{
+			for (StreamRepairJob& job : *nzbInfo->GetStreamRepairJobs())
+			{
+				if (job.GetFileId() == target.FileId)
+				{
+					target.PatchEligible = !job.GetLiveAttempted();
+					job.SetLiveAttempted(true);
+					break;
+				}
+			}
+		}
+	}
+
+	NzbgetRsBuf infoNameBuf = nzbget_rs_tpr_post_format_info_name("live stream repair", *nzbName);
+	BString<1024> infoName;
+	infoName.Set(infoNameBuf.data ? infoNameBuf.data : "", (int)infoNameBuf.len);
+	nzbget_rs_free(infoNameBuf);
+	SetInfoName(infoName);
+
+	bool anyEligible = false;
+	for (RepairTarget& target : targets)
+	{
+		anyEligible |= target.PatchEligible && target.NeedsRepair();
+	}
+
+	if (anyEligible && !donors.empty())
+	{
+		PrintMessage(Message::mkInfo, "Starting live stream repair for %s", *nzbName);
+
+		StartWatchdog(targets);
+		ComputePositionalRanks(destDir, targets, memberNames);
+		ExecRepair(destDir, targets, donors, memberNames);
+
+		bool anyHoles = false;
+		for (RepairTarget& target : targets)
+		{
+			anyHoles |= target.PatchEligible && target.NeedsRepair();
+		}
+		if (anyHoles && !IsStopped())
+		{
+			RefreshLiveNames(targets, memberNames);
+			ExecCrossPackRepair(destDir, targets, donors, memberNames);
+		}
+		StopWatchdog(nzbName, targets);
+	}
+
+	RepairCompletedLive(targets);
+}
+
+inline void StreamRepairController::RefreshLiveNames(std::vector<RepairTarget>& targets,
+	std::vector<CString>& memberNames)
+{
+	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+
+	NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_nzbId);
+	if (!nzbInfo || nzbInfo->GetLiveRepairThread() != this)
+	{
+		return;
+	}
+
+	for (RepairTarget& target : targets)
+	{
+		for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
+		{
+			if (completedFile.GetId() == target.FileId)
+			{
+				target.Filename = completedFile.GetFilename();
+				target.IsParFile = target.IsParFile || completedFile.GetParFile();
+				break;
+			}
+		}
+	}
+
+	memberNames.clear();
+	for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
+	{
+		memberNames.emplace_back(completedFile.GetFilename());
+	}
+}
+
+inline void StreamRepairController::RefreshLiveTargetName(RepairTarget& target)
+{
+	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+
+	NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_nzbId);
+	if (!nzbInfo || nzbInfo->GetLiveRepairThread() != this)
+	{
+		return;
+	}
+
+	for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
+	{
+		if (completedFile.GetId() == target.FileId)
+		{
+			target.Filename = completedFile.GetFilename();
+			break;
+		}
+	}
+}
+
+inline void StreamRepairController::RepairCompletedLive(std::vector<RepairTarget>& targets)
+{
+	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+
+	NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_nzbId);
+	if (!nzbInfo)
+	{
+		return;
+	}
+	if (nzbInfo->GetLiveRepairThread() != this)
+	{
+		nzbInfo->SetDupeRecoveredBytes(nzbInfo->GetDupeRecoveredBytes() + m_recoveredBytes);
+		return;
+	}
+
+	if (m_recoveredBytes > 0 || m_recoveredHoles > 0)
+	{
+		nzbInfo->SetDupeRecoveredBytes(nzbInfo->GetDupeRecoveredBytes() + m_recoveredBytes);
+		nzbInfo->SetDupeRecoveredHoles(nzbInfo->GetDupeRecoveredHoles() + m_recoveredHoles);
+	}
+
+	for (RepairTarget& target : targets)
+	{
+		if (!target.PatchEligible)
+		{
+			continue;
+		}
+		for (StreamRepairJob& job : *nzbInfo->GetStreamRepairJobs())
+		{
+			if (job.GetFileId() == target.FileId)
+			{
+				if (target.Recreated)
+				{
+					job.SetDecodedFileSize(target.DecodedFileSize);
+					MarkRecreated(nzbInfo, target);
+				}
+				job.SetHoles(std::move(target.Holes));
+				break;
+			}
+		}
+	}
+
+	nzbInfo->SetLiveRepairThread(nullptr);
+	if (nzbInfo->GetPostInfo() && !nzbInfo->GetUnpackThread())
+	{
+		nzbInfo->GetPostInfo()->SetWorking(false);
+	}
+
+	downloadQueue->Save();
+}
+
+inline bool StreamRepairController::DonorDead(const DonorSource& donor, NzbInfo* donorNzb)
+{
+	auto it = m_donorDead.find(*donor.QueuedFilename);
+	if (it != m_donorDead.end())
+	{
+		return it->second;
+	}
+
+	std::vector<FileInfo*> files;
+	for (int pass = 0; pass < 2 && files.empty(); pass++)
+	{
+		for (FileInfo* fileInfo : donorNzb->GetFileList())
+		{
+			if (fileInfo->GetTotalArticles() > 0 && (pass == 1 || !fileInfo->GetParFile()))
+			{
+				files.push_back(fileInfo);
+			}
+		}
+	}
+	bool dead = false;
+	std::vector<DupeProbe::Sample> samples = DupeProbe::SamplesOf(files);
+	if ((int)samples.size() >= DupeProbe::MinArticles && !IsStopped())
+	{
+		m_checkingDonor++;
+		DupeProbe::Verdict verdict = DupeProbe::Check(std::move(samples), DonorCheckSec);
+		m_checkingDonor--;
+		dead = verdict.Dead();
+		if (dead)
+		{
+			PrintMessage(Message::mkInfo,
+				"Skipping duplicate %s for stream repair: none of %i sampled articles exists on any server",
+				*donor.InfoName, DupeProbe::SampleCount);
+		}
+	}
+	m_donorDead[*donor.QueuedFilename] = dead;
+	return dead;
+}
+
+inline void StreamRepairController::StartWatchdog(const std::vector<RepairTarget>& targets)
+{
+	m_fetcher.SetWaitCounter(&m_waitingForConnection);
+	m_batchFetcher.SetWaitCounter(&m_waitingForConnection);
+	int timeout = g_Options->GetDupeStreamTimeout();
+	if (timeout <= 0)
+	{
+		return;
+	}
+
+	m_missingBytes = 0;
+	for (const RepairTarget& target : targets)
+	{
+		m_missingBytes += target.DecodedFileSize > 0
+			? DupeStreamRepair::TotalSize(target.Holes)
+			: target.EncodedSize;
+	}
+
+	int upTimeSec = 0, downloadTimeSec = 0;
+	int64 allBytes = 0;
+	bool standBy = false;
+	g_StatMeter->CalcTotalStat(&upTimeSec, &downloadTimeSec, &allBytes, &standBy);
+	int64 downloadRate = downloadTimeSec > 0 ? allBytes / downloadTimeSec : 0;
+
+	m_watchdog = std::thread([this, timeout, downloadRate]()
+		{
+			std::unique_lock<std::mutex> lock(m_watchdogMutex);
+			int64 startProgress = m_progressBytes;
+			int64 progress = startProgress;
+			auto start = std::chrono::steady_clock::now();
+			auto begun = start;
+			auto lastProgress = start;
+			auto lastTick = start;
+			auto waiting = [this]() { return m_waitingForConnection > 0 || m_checkingDonor > 0; };
+			while (!m_watchdogDone)
+			{
+				m_watchdogCond.wait_for(lock, std::chrono::milliseconds(500));
+				if (m_watchdogDone)
+				{
+					break;
+				}
+				auto now = std::chrono::steady_clock::now();
+				if (waiting())
+				{
+					start += now - lastTick;
+				}
+				lastTick = now;
+				int64 sinceLastProgressSec =
+					std::chrono::duration_cast<std::chrono::seconds>(now - lastProgress).count();
+				int64 sinceBegunSec =
+					std::chrono::duration_cast<std::chrono::seconds>(now - begun).count();
+				int64 sinceStartSec =
+					std::chrono::duration_cast<std::chrono::seconds>(now - start).count();
+				double elapsedSec = std::chrono::duration<double>(now - start).count();
+				int64 newProgress = progress;
+				int resetLastProgress = 0;
+				NzbgetRsBuf reasonBuf{nullptr, 0, 0};
+				int shouldStop = nzbget_rs_stream_watchdog_eval_tick(
+					m_progressBytes, progress, waiting() ? 1 : 0, m_materializing.load(),
+					sinceLastProgressSec, sinceBegunSec, sinceStartSec, elapsedSec,
+					timeout, MaxRunFactor, MaxConnectionWaitSec, SlowRepairFactor,
+					downloadRate, startProgress, m_missingBytes,
+					&newProgress, &resetLastProgress, &reasonBuf);
+				progress = newProgress;
+				if (resetLastProgress)
+				{
+					lastProgress = now;
+				}
+				if (shouldStop && reasonBuf.data && reasonBuf.len > 0)
+				{
+					m_slowReason.Set(reasonBuf.data, (int)reasonBuf.len);
+					nzbget_rs_free(reasonBuf);
+					break;
+				}
+				nzbget_rs_free(reasonBuf);
+			}
+			if (!m_watchdogDone)
+			{
+				m_timedOut = true;
+				lock.unlock();
+				Stop();
+			}
+		});
+}
+
+inline void StreamRepairController::StopWatchdog(const char* nzbName, const std::vector<RepairTarget>& targets)
+{
+	if (!m_watchdog.joinable())
+	{
+		return;
+	}
+	{
+		std::lock_guard<std::mutex> lock(m_watchdogMutex);
+		m_watchdogDone = true;
+	}
+	m_watchdogCond.notify_all();
+	m_watchdog.join();
+	if (m_timedOut)
+	{
+		int64 missing = 0;
+		int unsized = 0;
+		for (const RepairTarget& target : targets)
+		{
+			missing += DupeStreamRepair::TotalSize(target.Holes);
+			unsized += target.DecodedFileSize <= 0 ? 1 : 0;
+		}
+		NzbgetRsBuf wholeFilesBuf = nzbget_rs_stream_format_whole_files_suffix(unsized);
+		PrintMessage(Message::mkWarning,
+			"Stream repair of %s stopped: %s (option DupeStreamTimeout); %.1f MB recovered, %.1f MB%s still missing",
+			nzbName, *m_slowReason,
+			nzbget_rs_dqh_stream_repair_bytes_to_mb(m_recoveredBytes),
+			nzbget_rs_dqh_stream_repair_bytes_to_mb(missing),
+			wholeFilesBuf.data ? wholeFilesBuf.data : "");
+		nzbget_rs_free(wholeFilesBuf);
+	}
+}
+
+inline void StreamRepairController::Stop()
+{
+	m_batchFetcher.Stop();
+	m_fetcher.Stop();
+	Thread::Stop();
+}
+
+inline void StreamRepairController::CollectTargets(NzbInfo* nzbInfo, std::vector<RepairTarget>& targets,
+	std::vector<CString>& memberNames)
+{
+	m_hasParFiles = nzbInfo->GetParSize() > 0;
+
+	NzbParameter* parameter = nzbInfo->GetParameters()->Find("*Unpack:Password");
+	if (parameter)
+	{
+		m_targetPassword = parameter->GetValue();
+	}
+
+	for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
+	{
+		memberNames.emplace_back(completedFile.GetFilename());
+	}
+
+	for (StreamRepairJob& job : *nzbInfo->GetStreamRepairJobs())
+	{
+		if (nzbget_rs_stream_is_par2_job_or_file(
+			job.GetParFile() ? 1 : 0, job.GetFilename()) != 0)
+		{
+			continue;
+		}
+		RepairTarget target;
+		target.FileId = job.GetFileId();
+		target.Filename = job.GetFilename();
+		target.DecodedFileSize = job.GetDecodedFileSize();
+		target.FailedSize = job.GetFailedSize();
+		target.MissedSize = job.GetMissedSize();
+		target.FailedArticles = job.GetFailedArticles();
+		target.IsParFile = job.GetParFile();
+		target.Holes = *job.GetHoles();
+		target.StepsHash = job.GetStepsHash();
+		target.EncodedSize = job.GetFailedSize() + job.GetMissedSize();
+		target.ArticleCount = job.GetFailedArticles();
+
+		for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
+		{
+			if (completedFile.GetId() == target.FileId)
+			{
+				target.Filename = completedFile.GetFilename();
+				target.IsParFile = target.IsParFile || completedFile.GetParFile();
+				break;
+			}
+		}
+
+		if (nzbget_rs_stream_is_par2_job_or_file(
+			target.IsParFile ? 1 : 0, target.Filename))
+		{
+			continue;
+		}
+		targets.push_back(std::move(target));
+	}
+}
+
+inline void StreamRepairController::ComputePositionalRanks(const char* destDir,
+	std::vector<RepairTarget>& targets, const std::vector<CString>& memberNames)
+{
+	std::vector<const char*> names;
+	std::vector<int64_t> sizes;
+	names.reserve(memberNames.size());
+	sizes.reserve(memberNames.size());
+	for (const CString& memberName : memberNames)
+	{
+		NzbgetRsBuf memberPathBuf = nzbget_rs_tpr_article_writer_format_dest_file_path(
+			destDir, PATH_SEPARATOR, *memberName);
+		BString<1024> memberPath;
+		memberPath.Set(memberPathBuf.data ? memberPathBuf.data : "", (int)memberPathBuf.len);
+		nzbget_rs_free(memberPathBuf);
+		names.push_back(*memberName);
+		sizes.push_back(FileSystem::FileSize(memberPath));
+	}
+	for (RepairTarget& target : targets)
+	{
+		int rank = -1;
+		int windowSize = 0;
+		nzbget_rs_stream_compute_positional_rank(
+			names.data(), sizes.data(), names.size(),
+			target.Filename, target.DecodedFileSize, &rank, &windowSize);
+		target.PositionalRank = rank;
+		target.PositionalWindow = windowSize;
+	}
+}
+
+inline void StreamRepairController::CollectDonors(DownloadQueue* downloadQueue, NzbInfo* nzbInfo,
+	std::vector<DonorSource>& donors)
+{
+	RawNzbList donorNzbs;
+
+	for (NzbInfo* queuedNzbInfo : downloadQueue->GetQueue())
+	{
+		if (queuedNzbInfo != nzbInfo &&
+			queuedNzbInfo->GetKind() == NzbInfo::nkNzb &&
+			queuedNzbInfo->GetDupeMode() != dmForce &&
+			DupeCoordinator::SameNameOrKey(queuedNzbInfo->GetName(), queuedNzbInfo->GetDupeKey(),
+				nzbInfo->GetName(), nzbInfo->GetDupeKey()))
+		{
+			donorNzbs.push_back(queuedNzbInfo);
+		}
+	}
+
+	for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
+	{
+		if (historyInfo->GetKind() == HistoryInfo::hkNzb &&
+			historyInfo->GetNzbInfo()->GetDupeMode() != dmForce &&
+			DupeCoordinator::SameNameOrKey(historyInfo->GetNzbInfo()->GetName(),
+				historyInfo->GetNzbInfo()->GetDupeKey(), nzbInfo->GetName(), nzbInfo->GetDupeKey()))
+		{
+			donorNzbs.push_back(historyInfo->GetNzbInfo());
+		}
+	}
+
+	if (!donorNzbs.empty())
+	{
+		std::vector<int32_t> dupeScores;
+		std::vector<int32_t> donorIds;
+		std::vector<size_t> order(donorNzbs.size());
+		dupeScores.reserve(donorNzbs.size());
+		donorIds.reserve(donorNzbs.size());
+		for (NzbInfo* d : donorNzbs)
+		{
+			dupeScores.push_back(d->GetDupeScore());
+			donorIds.push_back(d->GetId());
+		}
+		size_t n = nzbget_rs_stream_order_donor_indices(
+			dupeScores.data(), donorIds.data(), donorNzbs.size(), order.data());
+		RawNzbList sortedDonors;
+		sortedDonors.reserve(n);
+		for (size_t i = 0; i < n; i++)
+		{
+			sortedDonors.push_back(donorNzbs[order[i]]);
+		}
+		donorNzbs = std::move(sortedDonors);
+	}
+
+	for (NzbInfo* donorNzbInfo : donorNzbs)
+	{
+		if ((nzbInfo->GetFullContentHash() > 0 &&
+				nzbInfo->GetFullContentHash() == donorNzbInfo->GetFullContentHash()) ||
+			Util::EmptyStr(donorNzbInfo->GetQueuedFilename()))
+		{
+			continue;
+		}
+		{
+			DonorSource donor;
+			donor.QueuedFilename = donorNzbInfo->GetQueuedFilename();
+			donor.InfoName = donorNzbInfo->GetName();
+			NzbParameter* parameter = donorNzbInfo->GetParameters()->Find("*Unpack:Password");
+			if (parameter)
+			{
+				donor.Password = parameter->GetValue();
+			}
+			donors.push_back(std::move(donor));
+		}
+	}
+}
+
+inline void StreamRepairController::ExecRepair(const char* destDir,
+	std::vector<RepairTarget>& targets, std::vector<DonorSource>& donors,
+	const std::vector<CString>& memberNames)
+{
+	int primaryConnections = 0;
+	for (NewsServer* server : g_ServerPool->GetServers())
+	{
+		if (server->GetActive() && server->GetNormLevel() == 0)
+		{
+			primaryConnections += server->GetMaxConnections();
+		}
+	}
+	m_batchFetcher.SetWorkerCount(m_liveMode ? 0 :
+		DupeStreamRepair::StreamFetchWorkerCount(primaryConnections));
+	std::set<std::string> triedPostings;
+
+	for (DonorSource& donor : donors)
+	{
+		if (IsStopped())
+		{
+			break;
+		}
+
+		bool anyHoles = false;
+		for (RepairTarget& target : targets)
+		{
+			anyHoles |= target.PatchEligible && target.NeedsRepair();
+		}
+		if (!anyHoles)
+		{
+			break;
+		}
+
+		std::unique_ptr<NzbInfo> donorNzb = DupeArticleFallback::ParseDonorNzb(donor.QueuedFilename);
+		if (!donorNzb)
+		{
+			continue;
+		}
+		if (!triedPostings.insert(DupeStreamRepair::BuildDonorKey(
+			donorNzb.get(), donor.Password)).second)
+		{
+			PrintMessage(Message::mkInfo,
+				"Skipping another copy of duplicate posting %s", *donor.InfoName);
+			continue;
+		}
+		if (DonorDead(donor, donorNzb.get()))
+		{
+			continue;
+		}
+
+		if (m_postInfo)
+		{
+			GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+			m_postInfo->SetProgressLabel(BString<1024>("Repairing from duplicate %s", *donor.InfoName));
+			m_postInfo->SetStageProgress(0);
+		}
+
+		std::vector<const char*> memberNamePtrs(memberNames.size());
+		for (size_t i = 0; i < memberNames.size(); i++)
+		{
+			memberNamePtrs[i] = *memberNames[i];
+		}
+
+		std::vector<const char*> targetFilenames(targets.size());
+		std::vector<int64_t> targetEncodedSizes(targets.size());
+		std::vector<int64_t> targetDecodedSizes(targets.size());
+		std::vector<int> targetArticleCounts(targets.size());
+		std::vector<int> targetPositionalRanks(targets.size());
+		std::vector<int> targetPositionalWindows(targets.size());
+		std::vector<uint64_t> targetStepsHashes(targets.size());
+		std::vector<uint8_t> targetPatchEligible(targets.size());
+		std::vector<size_t> targetHoleCounts(targets.size());
+		std::vector<NzbgetRsByteRange> targetHolesFlat;
+		for (size_t t = 0; t < targets.size(); t++)
+		{
+			targetFilenames[t] = *targets[t].Filename;
+			targetEncodedSizes[t] = targets[t].EncodedSize;
+			targetDecodedSizes[t] = targets[t].DecodedFileSize;
+			targetArticleCounts[t] = targets[t].ArticleCount;
+			targetPositionalRanks[t] = targets[t].PositionalRank;
+			targetPositionalWindows[t] = targets[t].PositionalWindow;
+			targetStepsHashes[t] = targets[t].StepsHash;
+			targetPatchEligible[t] = targets[t].PatchEligible ? 1 : 0;
+			targetHoleCounts[t] = targets[t].Holes.size();
+			for (const StreamRange& h : targets[t].Holes)
+			{
+				targetHolesFlat.push_back({h.Offset, h.Size});
+			}
+		}
+
+		std::vector<FileInfo*> donorFiles;
+		std::vector<const char*> donorFileNames;
+		std::vector<int64_t> donorFileSizes;
+		std::vector<uint8_t> donorFileIsPar;
+		std::vector<uint64_t> donorFileStepsHashes;
+		std::vector<size_t> donorArticleCounts;
+		std::vector<int32_t> donorArticleSizesFlat;
+		std::vector<std::shared_ptr<std::vector<CString>>> donorGroupsCache;
+		for (FileInfo* df : donorNzb->GetFileList())
+		{
+			donorFiles.push_back(df);
+			donorFileNames.push_back(df->GetFilename());
+			donorFileSizes.push_back(df->GetSize());
+			donorFileIsPar.push_back(df->GetParFile() ? 1 : 0);
+			donorArticleCounts.push_back(df->GetArticles()->size());
+			for (const std::unique_ptr<ArticleInfo>& a : *df->GetArticles())
+			{
+				donorArticleSizesFlat.push_back(a->GetSize());
+			}
+			const std::vector<int32_t>& artSizes = donorArticleCounts.back() > 0
+				? std::vector<int32_t>(
+					donorArticleSizesFlat.end() - (ptrdiff_t)donorArticleCounts.back(),
+					donorArticleSizesFlat.end())
+				: std::vector<int32_t>{};
+			donorFileStepsHashes.push_back(
+				nzbget_rs_dupe_fallback_steps_hash(artSizes.data(), artSizes.size()));
+			auto grp = std::make_shared<std::vector<CString>>();
+			for (const CString& g : *df->GetGroups())
+			{
+				grp->emplace_back(*g);
+			}
+			donorGroupsCache.push_back(std::move(grp));
+		}
+
+		struct M1DonorCtx
+		{
+			StreamRepairController* Controller;
+			std::vector<RepairTarget>* Targets;
+			std::vector<FileInfo*>* DonorFiles;
+			std::vector<std::shared_ptr<std::vector<CString>>>* DonorGroupsCache;
+			ArticleFetcher::FetchedArticle CurrentFetched;
+			std::exception_ptr Error;
+		} donorCtx{this, &targets, &donorFiles, &donorGroupsCache, {}, nullptr};
+
+		nzbget_rs_stream_repair_process_donor(
+			destDir,
+			m_liveMode ? 1 : 0,
+			memberNamePtrs.data(),
+			memberNamePtrs.size(),
+			targetFilenames.data(),
+			targetEncodedSizes.data(),
+			targetDecodedSizes.data(),
+			targetArticleCounts.data(),
+			targetPositionalRanks.data(),
+			targetPositionalWindows.data(),
+			targetStepsHashes.data(),
+			targetPatchEligible.data(),
+			targetHoleCounts.data(),
+			targetHolesFlat.data(),
+			targets.size(),
+			*donor.InfoName,
+			donorFileNames.data(),
+			donorFileSizes.data(),
+			donorFileIsPar.data(),
+			donorFileStepsHashes.data(),
+			donorArticleCounts.data(),
+			donorArticleSizesFlat.data(),
+			donorFiles.size(),
+			&donorCtx,
+			[](void* rawCtx) -> int
+			{
+				return RepairMapCall<M1DonorCtx>(rawCtx, 1, [](M1DonorCtx* c)
+				{
+					return c->Controller->IsStopped() ? 1 : 0;
+				});
+			},
+			[](void* rawCtx, size_t targetIdx) -> const char*
+			{
+				return RepairMapCall<M1DonorCtx>(rawCtx, static_cast<const char*>(nullptr), [=](M1DonorCtx* c) -> const char*
+				{
+					if (targetIdx >= c->Targets->size())
+					{
+						return nullptr;
+					}
+					c->Controller->RefreshLiveTargetName((*c->Targets)[targetIdx]);
+					return *(*c->Targets)[targetIdx].Filename;
+				});
+			},
+			[](void* rawCtx, int32_t memberIndex, const int32_t* partIndices, size_t count)
+			{
+				RepairMapCallVoid<M1DonorCtx>(rawCtx, [=](M1DonorCtx* c)
+				{
+					if (memberIndex < 0 || (size_t)memberIndex >= c->DonorFiles->size())
+					{
+						return;
+					}
+					FileInfo* df = (*c->DonorFiles)[memberIndex];
+					const auto& grp = (*c->DonorGroupsCache)[memberIndex];
+					std::vector<ArticleBatchFetcher::Request> requests;
+					requests.reserve(count);
+					for (size_t i = 0; i < count; i++)
+					{
+						int32_t pi = partIndices[i];
+						if (pi >= 0 && (size_t)pi < df->GetArticles()->size())
+						{
+							ArticleInfo* article = (*df->GetArticles())[pi].get();
+							requests.push_back({article->GetMessageId(), grp});
+						}
+					}
+					c->Controller->m_batchFetcher.Begin(std::move(requests));
+				});
+			},
+			[](void* rawCtx, int* outSuccess, int64_t* outOffset, int64_t* outFileSize,
+				const uint8_t** outData, size_t* outDataLen) -> int
+			{
+				return RepairMapCall<M1DonorCtx>(rawCtx, 0, [=](M1DonorCtx* c)
+				{
+					c->CurrentFetched = ArticleFetcher::FetchedArticle();
+					if (!c->Controller->m_batchFetcher.Next(c->CurrentFetched))
+					{
+						return 0;
+					}
+					*outSuccess = c->CurrentFetched.Success ? 1 : 0;
+					*outOffset = c->CurrentFetched.Offset;
+					*outFileSize = c->CurrentFetched.FileSize;
+					*outData = reinterpret_cast<const uint8_t*>(c->CurrentFetched.Data.data());
+					*outDataLen = c->CurrentFetched.Data.size();
+					return 1;
+				});
+			},
+			[](void* rawCtx)
+			{
+				RepairMapCallVoid<M1DonorCtx>(rawCtx, [](M1DonorCtx* c)
+				{
+					c->Controller->m_batchFetcher.CancelRemaining();
+				});
+			},
+			[](void* rawCtx, int64_t bytes)
+			{
+				RepairMapCallVoid<M1DonorCtx>(rawCtx, [bytes](M1DonorCtx* c)
+				{
+					c->Controller->m_progressBytes += bytes;
+				});
+			},
+			[](void* rawCtx, int64_t bytes)
+			{
+				RepairMapCallVoid<M1DonorCtx>(rawCtx, [bytes](M1DonorCtx* c)
+				{
+					c->Controller->m_recoveredBytes += bytes;
+				});
+			},
+			[](void* rawCtx, size_t targetIdx, const char* filename, int64_t decodedFileSize,
+				int recreated, const NzbgetRsByteRange* holes, size_t holeCount)
+			{
+				RepairMapCallVoid<M1DonorCtx>(rawCtx, [=](M1DonorCtx* c)
+				{
+					if (targetIdx >= c->Targets->size())
+					{
+						return;
+					}
+					RepairTarget& target = (*c->Targets)[targetIdx];
+					if (filename && *filename)
+					{
+						target.Filename = filename;
+					}
+					target.DecodedFileSize = decodedFileSize;
+					if (recreated != 0)
+					{
+						target.Recreated = true;
+					}
+					target.Holes.assign(
+						reinterpret_cast<const StreamRange*>(holes),
+						reinterpret_cast<const StreamRange*>(holes) + holeCount);
+				});
+			},
+			[](void* rawCtx, int32_t kind, const char* text)
+			{
+				RepairMapCallVoid<M1DonorCtx>(rawCtx, [=](M1DonorCtx* c)
+				{
+					Message::EKind msgKind = kind == 3 ? Message::mkDetail :
+						kind == 2 ? Message::mkError :
+						kind == 1 ? Message::mkWarning : Message::mkInfo;
+					c->Controller->PrintMessage(msgKind, "%s", text);
+				});
+			});
+		if (donorCtx.Error)
+		{
+			std::rethrow_exception(donorCtx.Error);
+		}
+	}
+}
+
+inline void StreamRepairController::MarkRepaired(NzbInfo* nzbInfo, const RepairTarget& target)
+{
+	for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
+	{
+		if (completedFile.GetId() == target.FileId &&
+			completedFile.GetStatus() != CompletedFile::cfSuccess)
+		{
+			completedFile.SetStatus(CompletedFile::cfSuccess);
+			g_DiskState->DiscardFile(target.FileId, true, true, true);
+			break;
+		}
+	}
+}
+
+inline void StreamRepairController::MarkRecreated(NzbInfo* nzbInfo, const RepairTarget& target)
+{
+	for (CompletedFile& completedFile : nzbInfo->GetCompletedFiles())
+	{
+		if (completedFile.GetId() == target.FileId &&
+			completedFile.GetStatus() == CompletedFile::cfFailure)
+		{
+			completedFile.SetStatus(CompletedFile::cfPartial);
+			break;
+		}
+	}
+}
+
+inline void StreamRepairController::ReportRemainingHoles(std::vector<RepairTarget>& targets)
+{
+	bool interrupted = Interrupted();
+	if (interrupted)
+	{
+		int unfinished = (int)std::count_if(targets.begin(), targets.end(),
+			[](const RepairTarget& target)
+			{
+				return target.DecodedFileSize <= 0 || !target.Holes.empty();
+			});
+		m_holesRemain |= unfinished > 0;
+		PrintMessage(Message::mkInfo, "Stream repair interrupted with %i file(s) still incomplete", unfinished);
+	}
+
+	const char* parDisposition = m_hasParFiles ? "left to par-repair" : "no par2 files to repair it";
+	for (RepairTarget& target : targets)
+	{
+		int targetStatus = nzbget_rs_stream_classify_remaining_hole_target(
+			interrupted ? 1 : 0, target.DecodedFileSize, target.Holes.empty() ? 1 : 0,
+			target.IsParFile ? 1 : 0, target.FailedArticles, target.FailedSize, target.MissedSize,
+			&m_recoveredArticles, &m_recoveredFailedSize, &m_recoveredFailedParSize);
+		if (targetStatus == 1)
+		{
+			continue;
+		}
+		if (targetStatus == 2)
+		{
+			m_holesRemain = true;
+			PrintMessage(Message::mkInfo,
+				"Stream repair of %s: no duplicate could supply the file (%s)",
+				*target.Filename, parDisposition);
+		}
+		else if (targetStatus == 3)
+		{
+			m_holesRemain = true;
+			int64 missing = DupeStreamRepair::TotalSize(target.Holes);
+			PrintMessage(Message::mkInfo,
+				"Stream repair of %s: %.1f MB still missing after stream repair (%s)",
+				*target.Filename, nzbget_rs_dqh_stream_repair_bytes_to_mb(missing),
+				parDisposition);
+			if (nzbget_rs_stream_is_incomplete_nzb_hole(missing, target.EncodedSize) != 0)
+			{
+				PrintMessage(Message::mkWarning,
+					"%s is %.1f MB according to its articles, but the nzb's articles cover only "
+					"%.1f MB of it: the nzb is incomplete",
+					*target.Filename, nzbget_rs_dqh_stream_repair_bytes_to_mb(target.DecodedFileSize),
+					nzbget_rs_dqh_stream_repair_bytes_to_mb(target.DecodedFileSize - missing));
+			}
+		}
+	}
+}
+
+inline void StreamRepairController::ExecCrossPackRepair(const char* destDir,
+	std::vector<RepairTarget>& targets, std::vector<DonorSource>& donors,
+	const std::vector<CString>& memberNames)
+{
+	std::vector<const char*> memberNamePtrs(memberNames.size());
+	for (size_t i = 0; i < memberNames.size(); i++)
+	{
+		memberNamePtrs[i] = *memberNames[i];
+	}
+
+	std::vector<const char*> targetFilenames(targets.size());
+	std::vector<int64_t> targetDecodedSizes(targets.size());
+	std::vector<uint8_t> targetPatchEligible(targets.size());
+	std::vector<size_t> targetHoleCounts(targets.size());
+	std::vector<NzbgetRsByteRange> targetHolesFlat;
+	for (size_t t = 0; t < targets.size(); t++)
+	{
+		targetFilenames[t] = *targets[t].Filename;
+		targetDecodedSizes[t] = targets[t].DecodedFileSize;
+		targetPatchEligible[t] = targets[t].PatchEligible ? 1 : 0;
+		targetHoleCounts[t] = targets[t].Holes.size();
+		for (const StreamRange& h : targets[t].Holes)
+		{
+			targetHolesFlat.push_back({h.Offset, h.Size});
+		}
+	}
+
+	struct InitCtx
+	{
+		StreamRepairController* Controller;
+		std::exception_ptr Error;
+	} initCtx{this, nullptr};
+
+	NzbgetRsCrossPackSession* session = nzbget_rs_cross_pack_session_new(
+		destDir,
+		memberNamePtrs.data(),
+		memberNamePtrs.size(),
+		targetFilenames.data(),
+		targetDecodedSizes.data(),
+		targetPatchEligible.data(),
+		targetHoleCounts.data(),
+		targetHolesFlat.data(),
+		targets.size(),
+		m_targetPassword.Empty() ? nullptr : *m_targetPassword,
+		&initCtx,
+		[](void* rawCtx) -> int
+		{
+			return RepairMapCall<InitCtx>(rawCtx, 1, [](InitCtx* c)
+			{
+				return c->Controller->IsStopped() ? 1 : 0;
+			});
+		},
+		[](void* rawCtx, int32_t kind, const char* text)
+		{
+			RepairMapCallVoid<InitCtx>(rawCtx, [=](InitCtx* c)
+			{
+				Message::EKind msgKind = kind == 2 ? Message::mkError :
+					kind == 1 ? Message::mkWarning : Message::mkInfo;
+				c->Controller->PrintMessage(msgKind, "%s", text);
+			});
+		},
+#ifdef DEBUG
+		[](void* rawCtx, const char* text)
+		{
+			RepairMapCallVoid<InitCtx>(rawCtx, [=](InitCtx*)
+			{
+				debug("%s", text ? text : "");
+			});
+		}
+#else
+		nullptr
+#endif
+	);
+	if (initCtx.Error)
+	{
+		nzbget_rs_cross_pack_session_free(session);
+		std::rethrow_exception(initCtx.Error);
+	}
+	if (!session)
+	{
+		return;
+	}
+	struct SessionGuard
+	{
+		NzbgetRsCrossPackSession* Ptr;
+		~SessionGuard() { nzbget_rs_cross_pack_session_free(Ptr); }
+	} sessionGuard{session};
+
+	std::set<std::string> triedPostings;
+
+	for (DonorSource& donor : donors)
+	{
+		if (IsStopped() || !nzbget_rs_cross_pack_session_has_inner_holes(session))
+		{
+			break;
+		}
+
+		std::unique_ptr<NzbInfo> donorNzb =
+			DupeArticleFallback::ParseDonorNzb(donor.QueuedFilename);
+		if (!donorNzb)
+		{
+			continue;
+		}
+		if (!triedPostings.insert(DupeStreamRepair::BuildDonorKey(
+			donorNzb.get(), donor.Password)).second)
+		{
+			PrintMessage(Message::mkInfo,
+				"Skipping another copy of duplicate posting %s", *donor.InfoName);
+			continue;
+		}
+		if (DonorDead(donor, donorNzb.get()))
+		{
+			continue;
+		}
+
+		std::vector<FileInfo*> donorFiles;
+		std::vector<const char*> donorFileNames;
+		std::vector<int64_t> donorFileSizes;
+		std::vector<size_t> donorArticleCounts;
+		std::vector<int32_t> donorArticleSizesFlat;
+		for (FileInfo* fileInfo : donorNzb->GetFileList())
+		{
+			donorFiles.push_back(fileInfo);
+			donorFileNames.push_back(fileInfo->GetFilename());
+			donorFileSizes.push_back(fileInfo->GetSize());
+			size_t artCount = fileInfo->GetArticles() ? fileInfo->GetArticles()->size() : 0;
+			donorArticleCounts.push_back(artCount);
+			if (fileInfo->GetArticles())
+			{
+				for (ArticleInfo* article : fileInfo->GetArticles())
+				{
+					donorArticleSizesFlat.push_back(article->GetSize());
+				}
+			}
+		}
+
+		bool allowDecompress = !m_liveMode && g_Options->GetDupeStreamDecompress();
+
+		struct DonorCtx
+		{
+			StreamRepairController* Controller;
+			const std::vector<FileInfo*>* DonorFiles;
+			std::vector<RepairTarget>* Targets;
+			ArticleFetcher::FetchedArticle CurrentFetched;
+			std::exception_ptr Error;
+		} donorCtx{this, &donorFiles, &targets, {}, nullptr};
+
+		nzbget_rs_cross_pack_session_process_donor(
+			session,
+			*donor.QueuedFilename,
+			*donor.InfoName,
+			donor.Password.Empty() ? "" : *donor.Password,
+			donorFileNames.data(),
+			donorFileSizes.data(),
+			donorArticleCounts.data(),
+			donorArticleSizesFlat.data(),
+			donorFiles.size(),
+			allowDecompress ? 1 : 0,
+			&donorCtx,
+			[](void* rawCtx) -> int
+			{
+				return RepairMapCall<DonorCtx>(rawCtx, 1, [](DonorCtx* c)
+				{
+					return c->Controller->IsStopped() ? 1 : 0;
+				});
+			},
+			[](void* rawCtx, int32_t memberIndex, int32_t partIndex, int* outSuccess,
+				int64_t* outOffset, int64_t* outFileSize, const uint8_t** outData, size_t* outDataLen) -> int
+			{
+				return RepairMapCall<DonorCtx>(rawCtx, 0, [=](DonorCtx* c)
+				{
+					if (memberIndex < 0 || (size_t)memberIndex >= c->DonorFiles->size())
+					{
+						return 0;
+					}
+					FileInfo* donorFile = (*c->DonorFiles)[memberIndex];
+					if (!donorFile || !donorFile->GetArticles() || partIndex < 0 ||
+						(size_t)partIndex >= donorFile->GetArticles()->size())
+					{
+						return 0;
+					}
+					ArticleInfo* article = (*donorFile->GetArticles())[partIndex].get();
+					c->CurrentFetched = c->Controller->m_fetcher.Fetch(
+						article->GetMessageId(), *donorFile->GetGroups());
+					*outSuccess = c->CurrentFetched.Success ? 1 : 0;
+					*outOffset = c->CurrentFetched.Offset;
+					*outFileSize = c->CurrentFetched.FileSize;
+					*outData = reinterpret_cast<const uint8_t*>(c->CurrentFetched.Data.data());
+					*outDataLen = c->CurrentFetched.Data.size();
+					return 1;
+				});
+			},
+			[](void* rawCtx, int32_t memberIndex, const int32_t* partIndices, size_t count)
+			{
+				RepairMapCallVoid<DonorCtx>(rawCtx, [=](DonorCtx* c)
+				{
+					if (memberIndex < 0 || (size_t)memberIndex >= c->DonorFiles->size())
+					{
+						return;
+					}
+					FileInfo* donorFile = (*c->DonorFiles)[memberIndex];
+					if (!donorFile || !donorFile->GetArticles())
+					{
+						return;
+					}
+					auto groups = std::make_shared<std::vector<CString>>();
+					for (const CString& group : *donorFile->GetGroups())
+					{
+						groups->emplace_back(*group);
+					}
+					std::vector<ArticleBatchFetcher::Request> requests;
+					requests.reserve(count);
+					for (size_t i = 0; i < count; i++)
+					{
+						int partIndex = partIndices[i];
+						if (partIndex >= 0 && (size_t)partIndex < donorFile->GetArticles()->size())
+						{
+							requests.push_back({
+								(*donorFile->GetArticles())[partIndex]->GetMessageId(),
+								groups
+							});
+						}
+					}
+					c->Controller->m_batchFetcher.Begin(std::move(requests));
+				});
+			},
+			[](void* rawCtx, int* outSuccess, int64_t* outOffset, int64_t* outFileSize,
+				const uint8_t** outData, size_t* outDataLen) -> int
+			{
+				return RepairMapCall<DonorCtx>(rawCtx, 0, [=](DonorCtx* c)
+				{
+					c->CurrentFetched = ArticleFetcher::FetchedArticle();
+					if (!c->Controller->m_batchFetcher.Next(c->CurrentFetched))
+					{
+						return 0;
+					}
+					*outSuccess = c->CurrentFetched.Success ? 1 : 0;
+					*outOffset = c->CurrentFetched.Offset;
+					*outFileSize = c->CurrentFetched.FileSize;
+					*outData = reinterpret_cast<const uint8_t*>(c->CurrentFetched.Data.data());
+					*outDataLen = c->CurrentFetched.Data.size();
+					return 1;
+				});
+			},
+			[](void* rawCtx)
+			{
+				RepairMapCallVoid<DonorCtx>(rawCtx, [](DonorCtx* c)
+				{
+					c->Controller->m_batchFetcher.CancelRemaining();
+				});
+			},
+			[](void* rawCtx, int32_t memberIndex)
+			{
+				RepairMapCallVoid<DonorCtx>(rawCtx, [memberIndex](DonorCtx* c)
+				{
+					if (memberIndex < 0 || (size_t)memberIndex >= c->DonorFiles->size())
+					{
+						return;
+					}
+					FileInfo* donorFile = (*c->DonorFiles)[memberIndex];
+					if (!donorFile || !donorFile->GetArticles())
+					{
+						return;
+					}
+					auto donorGroups = std::make_shared<std::vector<CString>>();
+					for (const CString& group : *donorFile->GetGroups())
+					{
+						donorGroups->emplace_back(*group);
+					}
+					std::vector<ArticleBatchFetcher::Request> requests;
+					requests.reserve(donorFile->GetArticles()->size());
+					for (std::unique_ptr<ArticleInfo>& article : *donorFile->GetArticles())
+					{
+						requests.push_back({article->GetMessageId(), donorGroups});
+					}
+					c->Controller->m_batchFetcher.Begin(std::move(requests));
+				});
+			},
+			[](void* rawCtx, const char* label, int32_t stageProgress)
+			{
+				RepairMapCallVoid<DonorCtx>(rawCtx, [=](DonorCtx* c)
+				{
+					if (c->Controller->m_postInfo)
+					{
+						GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+						c->Controller->m_postInfo->SetProgressLabel(label ? label : "");
+						c->Controller->m_postInfo->SetStageProgress(stageProgress);
+					}
+				});
+			},
+			[](void* rawCtx, int32_t delta)
+			{
+				RepairMapCallVoid<DonorCtx>(rawCtx, [delta](DonorCtx* c)
+				{
+					c->Controller->m_materializing += delta;
+				});
+			},
+			[](void* rawCtx, int64_t bytes, int32_t holes)
+			{
+				RepairMapCallVoid<DonorCtx>(rawCtx, [bytes, holes](DonorCtx* c)
+				{
+					c->Controller->m_recoveredBytes += bytes;
+					c->Controller->m_progressBytes += bytes;
+					c->Controller->m_recoveredHoles += holes;
+				});
+			},
+			[](void* rawCtx, const size_t* updatedCounts, const NzbgetRsByteRange* updatedFlat, size_t)
+			{
+				RepairMapCallVoid<DonorCtx>(rawCtx, [=](DonorCtx* c)
+				{
+					size_t cursor = 0;
+					for (size_t t = 0; t < c->Targets->size(); t++)
+					{
+						size_t cnt = updatedCounts ? updatedCounts[t] : 0;
+						(*c->Targets)[t].Holes.assign(
+							reinterpret_cast<const StreamRange*>(updatedFlat + cursor),
+							reinterpret_cast<const StreamRange*>(updatedFlat + cursor + cnt));
+						cursor += cnt;
+					}
+				});
+			},
+			[](void* rawCtx, int32_t kind, const char* text)
+			{
+				RepairMapCallVoid<DonorCtx>(rawCtx, [=](DonorCtx* c)
+				{
+					Message::EKind msgKind = kind == 2 ? Message::mkError :
+						kind == 1 ? Message::mkWarning : Message::mkInfo;
+					c->Controller->PrintMessage(msgKind, "%s", text);
+				});
+			},
+			[](void* rawCtx, int32_t kind, const char* msg)
+			{
+				RepairMapCallVoid<DonorCtx>(rawCtx, [=](DonorCtx*)
+				{
+					if (!msg) return;
+					switch (kind)
+					{
+						case 0:
+							info("%s", msg);
+							break;
+						case 1:
+							error("%s", msg);
+							break;
+						case 2:
+							warn("%s", msg);
+							break;
+						default:
+							detail("%s", msg);
+							break;
+					}
+				});
+			},
+#ifdef DEBUG
+			[](void* rawCtx, const char* text)
+			{
+				RepairMapCallVoid<DonorCtx>(rawCtx, [=](DonorCtx*)
+				{
+					debug("%s", text ? text : "");
+				});
+			}
+#else
+			nullptr
+#endif
+		);
+		if (donorCtx.Error)
+		{
+			std::rethrow_exception(donorCtx.Error);
+		}
+	}
+}
+
+inline void StreamRepairController::RepairCompleted()
+{
+	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+
+	NzbInfo* nzbInfo = m_postInfo->GetNzbInfo();
+
+	for (const RepairTarget& target : m_targets)
+	{
+		if (target.DecodedFileSize > 0 && target.Holes.empty())
+		{
+			MarkRepaired(nzbInfo, target);
+		}
+		else if (target.Recreated)
+		{
+			MarkRecreated(nzbInfo, target);
+		}
+	}
+
+	if (m_recoveredArticles > 0 || m_recoveredBytes > 0 || m_recoveredHoles > 0)
+	{
+		nzbInfo->SetDupeRecoveredArticles(nzbInfo->GetDupeRecoveredArticles() + m_recoveredArticles);
+		nzbInfo->SetDupeRecoveredBytes(nzbInfo->GetDupeRecoveredBytes() + m_recoveredBytes);
+		nzbInfo->SetDupeRecoveredHoles(nzbInfo->GetDupeRecoveredHoles() + m_recoveredHoles);
+	}
+
+	if (m_recoveredFailedSize > 0)
+	{
+		int64 failedSize = nzbInfo->GetFailedSize();
+		int64 successSize = nzbInfo->GetSuccessSize();
+		int64 curFailedSize = nzbInfo->GetCurrentFailedSize();
+		int64 curSuccessSize = nzbInfo->GetCurrentSuccessSize();
+		int64 parFailedSize = nzbInfo->GetParFailedSize();
+		int64 parSuccessSize = nzbInfo->GetParSuccessSize();
+		int64 parCurFailedSize = nzbInfo->GetParCurrentFailedSize();
+		int64 parCurSuccessSize = nzbInfo->GetParCurrentSuccessSize();
+		nzbget_rs_stream_credit_repaired_sizes(
+			m_recoveredFailedSize, m_recoveredFailedParSize,
+			&failedSize, &successSize, &curFailedSize, &curSuccessSize,
+			&parFailedSize, &parSuccessSize, &parCurFailedSize, &parCurSuccessSize);
+		nzbInfo->SetFailedSize(failedSize);
+		nzbInfo->SetSuccessSize(successSize);
+		nzbInfo->SetCurrentFailedSize(curFailedSize);
+		nzbInfo->SetCurrentSuccessSize(curSuccessSize);
+		nzbInfo->SetParFailedSize(parFailedSize);
+		nzbInfo->SetParSuccessSize(parSuccessSize);
+		nzbInfo->SetParCurrentFailedSize(parCurFailedSize);
+		nzbInfo->SetParCurrentSuccessSize(parCurSuccessSize);
+	}
+
+	for (auto it = nzbInfo->GetStreamRepairJobs()->begin();
+		it != nzbInfo->GetStreamRepairJobs()->end(); )
+	{
+		if (!Interrupted())
+		{
+			it = nzbInfo->GetStreamRepairJobs()->erase(it);
+			continue;
+		}
+		bool matched = false;
+		for (const RepairTarget& target : m_targets)
+		{
+			if (target.FileId == it->GetFileId())
+			{
+				matched = true;
+				if (target.Holes.empty() && target.DecodedFileSize > 0)
+				{
+					it = nzbInfo->GetStreamRepairJobs()->erase(it);
+				}
+				else
+				{
+					if (it->GetDecodedFileSize() <= 0 && target.DecodedFileSize > 0)
+					{
+						it->SetDecodedFileSize(target.DecodedFileSize);
+					}
+					it->SetHoles(target.Holes);
+					++it;
+				}
+				break;
+			}
+		}
+		if (!matched)
+		{
+			++it;
+		}
+	}
+
+	bool recovered = m_recoveredBytes > 0;
+	m_postInfo->SetStreamRepairDone(true);
+	m_postInfo->SetStreamRepairRecovered(recovered);
+
+	{
+		int resetParRename = 0, setParStatus = 0, newParStatus = 0;
+		int forceParFull = 0, setReqParCheckFalse = 0, checkMainPars = 0;
+		nzbget_rs_stream_resolve_completion_par_action(
+			m_recoveredBytes, m_holesRemain ? 1 : 0,
+			(int)nzbInfo->GetParRenameStatus(), (int)NzbInfo::rsNone,
+			(int)nzbInfo->GetParStatus(), (int)NzbInfo::psSkipped,
+			(int)g_Options->GetParCheck(), (int)Options::pcManual,
+			(int)NzbInfo::psManual, (int)NzbInfo::psNone,
+			&resetParRename, &setParStatus, &newParStatus,
+			&forceParFull, &setReqParCheckFalse, &checkMainPars);
+		if (resetParRename)
+		{
+			nzbInfo->SetParRenameStatus(NzbInfo::rsNone);
+		}
+		if (setParStatus)
+		{
+			nzbInfo->SetParStatus((NzbInfo::EParStatus)newParStatus);
+		}
+		if (checkMainPars && ParParser::FindMainPars(nzbInfo->GetDestDir(), nullptr))
+		{
+			m_postInfo->SetRequestParCheck(true);
+		}
+		if (forceParFull)
+		{
+			m_postInfo->SetForceParFull(true);
+		}
+		if (setReqParCheckFalse)
+		{
+			m_postInfo->SetRequestParCheck(false);
+		}
+	}
+
+	downloadQueue->Save();
+
+	m_postInfo->SetWorking(false);
+}
+
+inline void StreamRepairController::AddMessage(Message::EKind kind, const char* text)
+{
+	if (m_liveMode)
+	{
+		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+		NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_nzbId);
+		if (nzbInfo)
+		{
+			nzbInfo->AddMessage(kind, text);
+		}
+		return;
+	}
+
+	m_postInfo->GetNzbInfo()->AddMessage(kind, text);
+}
 
 class MoveController : public Thread, public ScriptController
 {

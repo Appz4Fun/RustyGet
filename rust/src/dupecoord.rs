@@ -567,6 +567,548 @@ pub fn should_list_history_dupe(
         && same_name_or_key(item_name, item_dupe_key, self_name, self_dupe_key)
 }
 
+/// `DupeCoordinator::NzbFound` content hash equality check.
+#[inline]
+pub fn same_content_hash(full1: u32, filtered1: u32, full2: u32, filtered2: u32) -> bool {
+    (full1 > 0 && full1 == full2) || (filtered1 > 0 && filtered1 == filtered2)
+}
+
+/// `DupeCoordinator::NzbFound` property-inheritance match predicate:
+/// returns true when `self_name == other_name` and `other` has a non-empty `other_key` or non-zero `other_score`.
+#[inline]
+pub fn should_inherit_dupe_props(
+    self_name: &[u8],
+    other_name: &[u8],
+    other_key: &[u8],
+    other_score: i32,
+) -> bool {
+    self_name == other_name && (!other_key.is_empty() || other_score != 0)
+}
+
+/// `DupeCoordinator::NzbFound` history duplicate match evaluator.
+/// Returns `Some((same_content, good))` when the history item causes `self` to be skipped.
+#[allow(clippy::too_many_arguments)]
+pub fn eval_history_dupe_match(
+    kind: i32,
+    self_full_hash: u32,
+    self_filtered_hash: u32,
+    self_dupe_mode: i32,
+    self_dupe_score: i32,
+    self_name: &[u8],
+    self_dupe_key: &[u8],
+    item_full_hash: u32,
+    item_filtered_hash: u32,
+    item_dupe_mode: i32,
+    item_mark_status: i32,
+    item_dup_status: i32,
+    item_dupe_score: i32,
+    item_name: &[u8],
+    item_dupe_key: &[u8],
+) -> Option<(bool, bool)> {
+    if (kind == HISTORY_KIND_NZB || kind == HISTORY_KIND_DUP)
+        && same_content_hash(
+            self_full_hash,
+            self_filtered_hash,
+            item_full_hash,
+            item_filtered_hash,
+        )
+    {
+        return Some((true, false));
+    }
+    if kind == HISTORY_KIND_NZB
+        && item_dupe_mode != DUPE_MODE_FORCE
+        && item_mark_status == MARK_STATUS_GOOD
+        && same_name_or_key(item_name, item_dupe_key, self_name, self_dupe_key)
+    {
+        return Some((false, true));
+    }
+    if kind == HISTORY_KIND_DUP
+        && item_dupe_mode != DUPE_MODE_FORCE
+        && (item_dup_status == DUP_STATUS_GOOD
+            || (self_dupe_mode == DUPE_MODE_SCORE
+                && item_dup_status == DUP_STATUS_SUCCESS
+                && self_dupe_score <= item_dupe_score))
+        && same_name_or_key(item_name, item_dupe_key, self_name, self_dupe_key)
+    {
+        return Some((false, item_dup_status == DUP_STATUS_GOOD));
+    }
+    None
+}
+
+/// `DupeCoordinator::NzbFound` `HealthCheck=dupe` same-content history outcome accumulator.
+#[allow(clippy::too_many_arguments)]
+pub fn accum_hc_dupe_same_content_outcome(
+    kind: i32,
+    self_full_hash: u32,
+    self_filtered_hash: u32,
+    item_full_hash: u32,
+    item_filtered_hash: u32,
+    item_delete_status: i32,
+    item_is_dupe_success: bool,
+    item_dup_status: i32,
+    succeeded: &mut bool,
+    failed: &mut bool,
+) {
+    if !same_content_hash(
+        self_full_hash,
+        self_filtered_hash,
+        item_full_hash,
+        item_filtered_hash,
+    ) {
+        return;
+    }
+    if kind == HISTORY_KIND_NZB {
+        if item_delete_status != DELETE_STATUS_DUPE
+            && item_delete_status != DELETE_STATUS_COPY
+            && item_delete_status != DELETE_STATUS_MANUAL
+        {
+            if item_is_dupe_success {
+                *succeeded = true;
+            } else {
+                *failed = true;
+            }
+        }
+    } else if kind == HISTORY_KIND_DUP {
+        if item_dup_status == DUP_STATUS_SUCCESS || item_dup_status == DUP_STATUS_GOOD {
+            *succeeded = true;
+        } else if item_dup_status == DUP_STATUS_FAILED || item_dup_status == DUP_STATUS_BAD {
+            *failed = true;
+        }
+    }
+}
+
+/// `DupeCoordinator::NzbFound` recent-history score-duplicate skip predicate.
+#[allow(clippy::too_many_arguments)]
+pub fn should_skip_recent_history_score_dupe(
+    same_content: bool,
+    good: bool,
+    self_dupe_mode: i32,
+    self_dupe_score: i32,
+    self_name: &[u8],
+    self_dupe_key: &[u8],
+    kind: i32,
+    item_dupe_mode: i32,
+    item_dupe_score: i32,
+    item_is_dupe_success: bool,
+    item_name: &[u8],
+    item_dupe_key: &[u8],
+) -> bool {
+    !same_content
+        && !good
+        && self_dupe_mode == DUPE_MODE_SCORE
+        && (kind == HISTORY_KIND_NZB || kind == HISTORY_KIND_URL)
+        && item_dupe_mode != DUPE_MODE_FORCE
+        && same_name_or_key(item_name, item_dupe_key, self_name, self_dupe_key)
+        && self_dupe_score <= item_dupe_score
+        && item_is_dupe_success
+}
+
+/// `DupeCoordinator::NzbFound` queue score-duplicate evaluator:
+/// - `0`: not a matching duplicate or no action
+/// - `1`: skip `self` (`dsDupe`) and return
+/// - `2`: move `queued` with lower score to history (`dsDupe` + `eaGroupDelete`)
+#[allow(clippy::too_many_arguments)]
+pub fn eval_queue_score_dupe(
+    is_self: bool,
+    queued_delete_status: i32,
+    queued_is_nzb: bool,
+    both_are_url: bool,
+    queued_dupe_mode: i32,
+    queued_name: &[u8],
+    queued_dupe_key: &[u8],
+    self_name: &[u8],
+    self_dupe_key: &[u8],
+    self_dupe_score: i32,
+    queued_dupe_score: i32,
+    health_check: i32,
+    queued_is_redownload_auto: bool,
+    queued_cur_success_articles: i32,
+    queued_health: i32,
+    queued_crit_health: i32,
+    queued_has_post_info: bool,
+) -> i32 {
+    if is_self
+        || queued_delete_status != DELETE_STATUS_NONE
+        || (!queued_is_nzb && !both_are_url)
+        || queued_dupe_mode == DUPE_MODE_FORCE
+        || !same_name_or_key(queued_name, queued_dupe_key, self_name, self_dupe_key)
+    {
+        return 0;
+    }
+    let keep_returned = health_check == HEALTH_CHECK_DUPE
+        && queued_is_redownload_auto
+        && queued_cur_success_articles > 0
+        && queued_health >= queued_crit_health;
+    if self_dupe_score <= queued_dupe_score || keep_returned {
+        return 1;
+    }
+    if !queued_has_post_info {
+        return 2;
+    }
+    0
+}
+
+/// `DupeCoordinator::NzbCompleted` predicate for stopping other queued items of the same key.
+#[allow(clippy::too_many_arguments)]
+pub fn is_other_to_stop_on_completed(
+    is_self: bool,
+    queued_is_nzb: bool,
+    queued_deleting: bool,
+    queued_delete_status: i32,
+    queued_dupe_mode: i32,
+    queued_dupe_key: &[u8],
+    self_dupe_key: &[u8],
+) -> bool {
+    !is_self
+        && queued_is_nzb
+        && !queued_deleting
+        && queued_delete_status == DELETE_STATUS_NONE
+        && queued_dupe_mode != DUPE_MODE_FORCE
+        && strcasecmp_bytes(queued_dupe_key, self_dupe_key)
+}
+
+/// `DupeCoordinator::HistoryMark` status/action resolver.
+pub fn resolve_history_mark(
+    mark_status: i32,
+    dupe_check: bool,
+    kind: i32,
+    dupe_mode: i32,
+) -> (&'static [u8], i32, i32) {
+    let mark_name: &'static [u8] = if mark_status == MARK_STATUS_BAD {
+        b"bad\0"
+    } else if mark_status == MARK_STATUS_GOOD {
+        b"good\0"
+    } else if mark_status == MARK_STATUS_SUCCESS {
+        b"success\0"
+    } else {
+        b"NONE\0"
+    };
+    let dup_status = if mark_status == MARK_STATUS_GOOD {
+        DUP_STATUS_GOOD
+    } else if mark_status == MARK_STATUS_SUCCESS {
+        DUP_STATUS_SUCCESS
+    } else {
+        DUP_STATUS_BAD
+    };
+    if !dupe_check
+        || ((kind == HISTORY_KIND_NZB || kind == HISTORY_KIND_DUP)
+            && dupe_mode == DUPE_MODE_FORCE)
+    {
+        return (mark_name, dup_status, 0);
+    }
+    let post_action = if mark_status == MARK_STATUS_GOOD {
+        1
+    } else if mark_status == MARK_STATUS_BAD {
+        2
+    } else {
+        0
+    };
+    (mark_name, dup_status, post_action)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_dupecoord_same_content_hash(
+    full1: u32,
+    filtered1: u32,
+    full2: u32,
+    filtered2: u32,
+) -> i32 {
+    i32::from(same_content_hash(full1, filtered1, full2, filtered2))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupecoord_should_inherit_dupe_props(
+    self_name: *const c_char,
+    other_name: *const c_char,
+    other_key: *const c_char,
+    other_score: i32,
+) -> i32 {
+    let s_name = if self_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(self_name).to_bytes()
+    };
+    let o_name = if other_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(other_name).to_bytes()
+    };
+    let o_key = if other_key.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(other_key).to_bytes()
+    };
+    i32::from(should_inherit_dupe_props(s_name, o_name, o_key, other_score))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupecoord_eval_history_dupe_match(
+    kind: i32,
+    self_full_hash: u32,
+    self_filtered_hash: u32,
+    self_dupe_mode: i32,
+    self_dupe_score: i32,
+    self_name: *const c_char,
+    self_dupe_key: *const c_char,
+    item_full_hash: u32,
+    item_filtered_hash: u32,
+    item_dupe_mode: i32,
+    item_mark_status: i32,
+    item_dup_status: i32,
+    item_dupe_score: i32,
+    item_name: *const c_char,
+    item_dupe_key: *const c_char,
+    out_same_content: *mut i32,
+    out_good: *mut i32,
+) -> i32 {
+    let s_name = if self_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(self_name).to_bytes()
+    };
+    let s_key = if self_dupe_key.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(self_dupe_key).to_bytes()
+    };
+    let i_name = if item_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(item_name).to_bytes()
+    };
+    let i_key = if item_dupe_key.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(item_dupe_key).to_bytes()
+    };
+    match eval_history_dupe_match(
+        kind,
+        self_full_hash,
+        self_filtered_hash,
+        self_dupe_mode,
+        self_dupe_score,
+        s_name,
+        s_key,
+        item_full_hash,
+        item_filtered_hash,
+        item_dupe_mode,
+        item_mark_status,
+        item_dup_status,
+        item_dupe_score,
+        i_name,
+        i_key,
+    ) {
+        Some((same_content, good)) => {
+            if !out_same_content.is_null() {
+                *out_same_content = i32::from(same_content);
+            }
+            if !out_good.is_null() {
+                *out_good = i32::from(good);
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupecoord_accum_hc_dupe_same_content_outcome(
+    kind: i32,
+    self_full_hash: u32,
+    self_filtered_hash: u32,
+    item_full_hash: u32,
+    item_filtered_hash: u32,
+    item_delete_status: i32,
+    item_is_dupe_success: i32,
+    item_dup_status: i32,
+    inout_succeeded: *mut i32,
+    inout_failed: *mut i32,
+) {
+    let mut succeeded = !inout_succeeded.is_null() && *inout_succeeded != 0;
+    let mut failed = !inout_failed.is_null() && *inout_failed != 0;
+    accum_hc_dupe_same_content_outcome(
+        kind,
+        self_full_hash,
+        self_filtered_hash,
+        item_full_hash,
+        item_filtered_hash,
+        item_delete_status,
+        item_is_dupe_success != 0,
+        item_dup_status,
+        &mut succeeded,
+        &mut failed,
+    );
+    if !inout_succeeded.is_null() {
+        *inout_succeeded = i32::from(succeeded);
+    }
+    if !inout_failed.is_null() {
+        *inout_failed = i32::from(failed);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupecoord_should_skip_recent_history_score_dupe(
+    same_content: i32,
+    good: i32,
+    self_dupe_mode: i32,
+    self_dupe_score: i32,
+    self_name: *const c_char,
+    self_dupe_key: *const c_char,
+    kind: i32,
+    item_dupe_mode: i32,
+    item_dupe_score: i32,
+    item_is_dupe_success: i32,
+    item_name: *const c_char,
+    item_dupe_key: *const c_char,
+) -> i32 {
+    let s_name = if self_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(self_name).to_bytes()
+    };
+    let s_key = if self_dupe_key.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(self_dupe_key).to_bytes()
+    };
+    let i_name = if item_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(item_name).to_bytes()
+    };
+    let i_key = if item_dupe_key.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(item_dupe_key).to_bytes()
+    };
+    i32::from(should_skip_recent_history_score_dupe(
+        same_content != 0,
+        good != 0,
+        self_dupe_mode,
+        self_dupe_score,
+        s_name,
+        s_key,
+        kind,
+        item_dupe_mode,
+        item_dupe_score,
+        item_is_dupe_success != 0,
+        i_name,
+        i_key,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupecoord_eval_queue_score_dupe(
+    is_self: i32,
+    queued_delete_status: i32,
+    queued_is_nzb: i32,
+    both_are_url: i32,
+    queued_dupe_mode: i32,
+    queued_name: *const c_char,
+    queued_dupe_key: *const c_char,
+    self_name: *const c_char,
+    self_dupe_key: *const c_char,
+    self_dupe_score: i32,
+    queued_dupe_score: i32,
+    health_check: i32,
+    queued_is_redownload_auto: i32,
+    queued_cur_success_articles: i32,
+    queued_health: i32,
+    queued_crit_health: i32,
+    queued_has_post_info: i32,
+) -> i32 {
+    let q_name = if queued_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(queued_name).to_bytes()
+    };
+    let q_key = if queued_dupe_key.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(queued_dupe_key).to_bytes()
+    };
+    let s_name = if self_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(self_name).to_bytes()
+    };
+    let s_key = if self_dupe_key.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(self_dupe_key).to_bytes()
+    };
+    eval_queue_score_dupe(
+        is_self != 0,
+        queued_delete_status,
+        queued_is_nzb != 0,
+        both_are_url != 0,
+        queued_dupe_mode,
+        q_name,
+        q_key,
+        s_name,
+        s_key,
+        self_dupe_score,
+        queued_dupe_score,
+        health_check,
+        queued_is_redownload_auto != 0,
+        queued_cur_success_articles,
+        queued_health,
+        queued_crit_health,
+        queued_has_post_info != 0,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupecoord_is_other_to_stop_on_completed(
+    is_self: i32,
+    queued_is_nzb: i32,
+    queued_deleting: i32,
+    queued_delete_status: i32,
+    queued_dupe_mode: i32,
+    queued_dupe_key: *const c_char,
+    self_dupe_key: *const c_char,
+) -> i32 {
+    let q_key = if queued_dupe_key.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(queued_dupe_key).to_bytes()
+    };
+    let s_key = if self_dupe_key.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(self_dupe_key).to_bytes()
+    };
+    i32::from(is_other_to_stop_on_completed(
+        is_self != 0,
+        queued_is_nzb != 0,
+        queued_deleting != 0,
+        queued_delete_status,
+        queued_dupe_mode,
+        q_key,
+        s_key,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_dupecoord_resolve_history_mark(
+    mark_status: i32,
+    dupe_check: i32,
+    kind: i32,
+    dupe_mode: i32,
+    out_dup_status: *mut i32,
+    out_post_action: *mut i32,
+) -> *const c_char {
+    let (mark_name, dup_status, post_action) =
+        resolve_history_mark(mark_status, dupe_check != 0, kind, dupe_mode);
+    if !out_dup_status.is_null() {
+        *out_dup_status = dup_status;
+    }
+    if !out_post_action.is_null() {
+        *out_post_action = post_action;
+    }
+    mark_name.as_ptr().cast()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -820,5 +1362,84 @@ mod tests {
             Some(DUPE_MODE_FORCE)
         );
         assert_eq!(crate::queueeditor::parse_dupe_mode(b"bad"), None);
+
+        // 6. NzbFound / NzbCompleted / HistoryMark evaluators
+        assert!(same_content_hash(42, 0, 42, 99));
+        assert!(same_content_hash(0, 77, 12, 77));
+        assert!(!same_content_hash(0, 0, 0, 0));
+        assert!(should_inherit_dupe_props(b"Show.A", b"Show.A", b"imdb:1", 0));
+        assert!(!should_inherit_dupe_props(b"Show.A", b"Show.A", b"", 0));
+        assert_eq!(
+            eval_history_dupe_match(
+                HISTORY_KIND_NZB,
+                100,
+                0,
+                DUPE_MODE_SCORE,
+                10,
+                b"A",
+                b"k",
+                100,
+                0,
+                DUPE_MODE_SCORE,
+                MARK_STATUS_NONE,
+                0,
+                10,
+                b"B",
+                b"k2"
+            ),
+            Some((true, false))
+        );
+        assert_eq!(
+            eval_queue_score_dupe(
+                false,
+                DELETE_STATUS_NONE,
+                true,
+                false,
+                DUPE_MODE_SCORE,
+                b"Show.B",
+                b"imdb:1",
+                b"Show.A",
+                b"imdb:1",
+                50,
+                80,
+                HEALTH_CHECK_NONE,
+                false,
+                0,
+                1000,
+                900,
+                false
+            ),
+            1
+        );
+        assert_eq!(
+            eval_queue_score_dupe(
+                false,
+                DELETE_STATUS_NONE,
+                true,
+                false,
+                DUPE_MODE_SCORE,
+                b"Show.B",
+                b"imdb:1",
+                b"Show.A",
+                b"imdb:1",
+                90,
+                50,
+                HEALTH_CHECK_NONE,
+                false,
+                0,
+                1000,
+                900,
+                false
+            ),
+            2
+        );
+        assert_eq!(
+            resolve_history_mark(MARK_STATUS_GOOD, true, HISTORY_KIND_NZB, DUPE_MODE_SCORE),
+            (&b"good\0"[..], DUP_STATUS_GOOD, 1)
+        );
+        assert_eq!(
+            resolve_history_mark(MARK_STATUS_BAD, true, HISTORY_KIND_DUP, DUPE_MODE_SCORE),
+            (&b"bad\0"[..], DUP_STATUS_BAD, 2)
+        );
     }
 }

@@ -23,7 +23,7 @@
 #define URLCOORDINATOR_H
 
 #include "Log.h"
-#include "WebDownloader.h"
+#include "Connection.h"
 #include "DownloadInfo.h"
 class UrlDownloader;
 

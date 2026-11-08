@@ -5925,6 +5925,44 @@ NzbgetRsBuf nzbget_rs_fs_expand_home_path(const char* filename);
 int nzbget_rs_fs_get_real_path(
     const char* path, size_t path_len, NzbgetRsBuf* out_buf);
 NzbgetRsBuf nzbget_rs_fs_get_current_directory(void);
+int nzbget_rs_fs_read_first_8_bytes(const char* filename, uint8_t* out_head);
+int nzbget_rs_dupecoord_same_content_hash(
+    uint32_t full1, uint32_t filtered1, uint32_t full2, uint32_t filtered2);
+int nzbget_rs_dupecoord_should_inherit_dupe_props(
+    const char* self_name, const char* other_name, const char* other_key, int32_t other_score);
+int nzbget_rs_dupecoord_eval_history_dupe_match(
+    int32_t kind, uint32_t self_full_hash, uint32_t self_filtered_hash,
+    int32_t self_dupe_mode, int32_t self_dupe_score,
+    const char* self_name, const char* self_dupe_key,
+    uint32_t item_full_hash, uint32_t item_filtered_hash,
+    int32_t item_dupe_mode, int32_t item_mark_status, int32_t item_dup_status, int32_t item_dupe_score,
+    const char* item_name, const char* item_dupe_key,
+    int32_t* out_same_content, int32_t* out_good);
+void nzbget_rs_dupecoord_accum_hc_dupe_same_content_outcome(
+    int32_t kind, uint32_t self_full_hash, uint32_t self_filtered_hash,
+    uint32_t item_full_hash, uint32_t item_filtered_hash,
+    int32_t item_delete_status, int32_t item_is_dupe_success, int32_t item_dup_status,
+    int32_t* inout_succeeded, int32_t* inout_failed);
+int nzbget_rs_dupecoord_should_skip_recent_history_score_dupe(
+    int32_t same_content, int32_t good, int32_t self_dupe_mode, int32_t self_dupe_score,
+    const char* self_name, const char* self_dupe_key,
+    int32_t kind, int32_t item_dupe_mode, int32_t item_dupe_score, int32_t item_is_dupe_success,
+    const char* item_name, const char* item_dupe_key);
+int nzbget_rs_dupecoord_eval_queue_score_dupe(
+    int32_t is_self, int32_t queued_delete_status, int32_t queued_is_nzb, int32_t both_are_url,
+    int32_t queued_dupe_mode, const char* queued_name, const char* queued_dupe_key,
+    const char* self_name, const char* self_dupe_key,
+    int32_t self_dupe_score, int32_t queued_dupe_score,
+    int32_t health_check, int32_t queued_is_redownload_auto,
+    int32_t queued_cur_success_articles, int32_t queued_health, int32_t queued_crit_health,
+    int32_t queued_has_post_info);
+int nzbget_rs_dupecoord_is_other_to_stop_on_completed(
+    int32_t is_self, int32_t queued_is_nzb, int32_t queued_deleting,
+    int32_t queued_delete_status, int32_t queued_dupe_mode,
+    const char* queued_dupe_key, const char* self_dupe_key);
+const char* nzbget_rs_dupecoord_resolve_history_mark(
+    int32_t mark_status, int32_t dupe_check, int32_t kind, int32_t dupe_mode,
+    int32_t* out_dup_status, int32_t* out_post_action);
 
 #include "nzbget_tls_cipher.h"
 

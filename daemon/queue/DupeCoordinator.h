@@ -144,17 +144,12 @@ inline void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzb
 		}
 	}
 
-	auto sameContentHash = [](uint32 full1, uint32 filtered1, uint32 full2, uint32 filtered2) -> bool
-		{
-			return (full1 > 0 && full1 == full2) || (filtered1 > 0 && filtered1 == filtered2);
-		};
-
 	// find duplicates in download queue with exactly same content
 	for (NzbInfo* queuedNzbInfo : downloadQueue->GetQueue())
 	{
-		bool sameContent = sameContentHash(
+		bool sameContent = nzbget_rs_dupecoord_same_content_hash(
 			nzbInfo->GetFullContentHash(), nzbInfo->GetFilteredContentHash(),
-			queuedNzbInfo->GetFullContentHash(), queuedNzbInfo->GetFilteredContentHash());
+			queuedNzbInfo->GetFullContentHash(), queuedNzbInfo->GetFilteredContentHash()) != 0;
 
 		// if there is a duplicate with exactly same content (via hash-check)
 		// in queue - the new item is skipped
@@ -189,8 +184,9 @@ inline void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzb
 	{
 		for (NzbInfo* queuedNzbInfo : downloadQueue->GetQueue())
 		{
-			if (!strcmp(queuedNzbInfo->GetName(), nzbInfo->GetName()) &&
-				(!Util::EmptyStr(queuedNzbInfo->GetDupeKey()) || queuedNzbInfo->GetDupeScore() != 0))
+			if (nzbget_rs_dupecoord_should_inherit_dupe_props(
+				nzbInfo->GetName(), queuedNzbInfo->GetName(),
+				queuedNzbInfo->GetDupeKey(), queuedNzbInfo->GetDupeScore()) != 0)
 			{
 				nzbInfo->SetDupeKey(queuedNzbInfo->GetDupeKey());
 				nzbInfo->SetDupeScore(queuedNzbInfo->GetDupeScore());
@@ -205,8 +201,9 @@ inline void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzb
 		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
 		{
 			if (historyInfo->GetKind() == HistoryInfo::hkNzb &&
-				!strcmp(historyInfo->GetNzbInfo()->GetName(), nzbInfo->GetName()) &&
-				(!Util::EmptyStr(historyInfo->GetNzbInfo()->GetDupeKey()) || historyInfo->GetNzbInfo()->GetDupeScore() != 0))
+				nzbget_rs_dupecoord_should_inherit_dupe_props(
+					nzbInfo->GetName(), historyInfo->GetNzbInfo()->GetName(),
+					historyInfo->GetNzbInfo()->GetDupeKey(), historyInfo->GetNzbInfo()->GetDupeScore()) != 0)
 			{
 				nzbInfo->SetDupeKey(historyInfo->GetNzbInfo()->GetDupeKey());
 				nzbInfo->SetDupeScore(historyInfo->GetNzbInfo()->GetDupeScore());
@@ -215,8 +212,9 @@ inline void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzb
 				break;
 			}
 			if (historyInfo->GetKind() == HistoryInfo::hkDup &&
-				!strcmp(historyInfo->GetDupInfo()->GetName(), nzbInfo->GetName()) &&
-				(!Util::EmptyStr(historyInfo->GetDupInfo()->GetDupeKey()) || historyInfo->GetDupInfo()->GetDupeScore() != 0))
+				nzbget_rs_dupecoord_should_inherit_dupe_props(
+					nzbInfo->GetName(), historyInfo->GetDupInfo()->GetName(),
+					historyInfo->GetDupInfo()->GetDupeKey(), historyInfo->GetDupInfo()->GetDupeScore()) != 0)
 			{
 				nzbInfo->SetDupeKey(historyInfo->GetDupInfo()->GetDupeKey());
 				nzbInfo->SetDupeScore(historyInfo->GetDupInfo()->GetDupeScore());
@@ -239,55 +237,47 @@ inline void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzb
 	// also (only in score mode): nzb-files having success-duplicates in dup-history but not having duplicates in recent history are skipped
 	for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
 	{
-		if (historyInfo->GetKind() == HistoryInfo::hkNzb &&
-			sameContentHash(
+		int outSameContent = 0;
+		int outGood = 0;
+		if (historyInfo->GetKind() == HistoryInfo::hkNzb)
+		{
+			NzbInfo* item = historyInfo->GetNzbInfo();
+			if (nzbget_rs_dupecoord_eval_history_dupe_match(
+				(int)HistoryInfo::hkNzb,
 				nzbInfo->GetFullContentHash(), nzbInfo->GetFilteredContentHash(),
-				historyInfo->GetNzbInfo()->GetFullContentHash(),
-				historyInfo->GetNzbInfo()->GetFilteredContentHash()))
-		{
-			skip = true;
-			sameContent = true;
-			dupeName = historyInfo->GetNzbInfo()->GetName();
-			break;
+				(int)nzbInfo->GetDupeMode(), nzbInfo->GetDupeScore(),
+				nzbInfo->GetName(), nzbInfo->GetDupeKey(),
+				item->GetFullContentHash(), item->GetFilteredContentHash(),
+				(int)item->GetDupeMode(), (int)item->GetMarkStatus(), 0, item->GetDupeScore(),
+				item->GetName(), item->GetDupeKey(),
+				&outSameContent, &outGood) != 0)
+			{
+				skip = true;
+				sameContent = outSameContent != 0;
+				good = outGood != 0;
+				dupeName = item->GetName();
+				break;
+			}
 		}
-
-		if (historyInfo->GetKind() == HistoryInfo::hkDup &&
-			sameContentHash(
+		else if (historyInfo->GetKind() == HistoryInfo::hkDup)
+		{
+			DupInfo* dup = historyInfo->GetDupInfo();
+			if (nzbget_rs_dupecoord_eval_history_dupe_match(
+				(int)HistoryInfo::hkDup,
 				nzbInfo->GetFullContentHash(), nzbInfo->GetFilteredContentHash(),
-				historyInfo->GetDupInfo()->GetFullContentHash(),
-				historyInfo->GetDupInfo()->GetFilteredContentHash()))
-		{
-			skip = true;
-			sameContent = true;
-			dupeName = historyInfo->GetDupInfo()->GetName();
-			break;
-		}
-
-		if (historyInfo->GetKind() == HistoryInfo::hkNzb &&
-			historyInfo->GetNzbInfo()->GetDupeMode() != dmForce &&
-			historyInfo->GetNzbInfo()->GetMarkStatus() == NzbInfo::ksGood &&
-			SameNameOrKey(historyInfo->GetNzbInfo()->GetName(), historyInfo->GetNzbInfo()->GetDupeKey(),
-				nzbInfo->GetName(), nzbInfo->GetDupeKey()))
-		{
-			skip = true;
-			good = true;
-			dupeName = historyInfo->GetNzbInfo()->GetName();
-			break;
-		}
-
-		if (historyInfo->GetKind() == HistoryInfo::hkDup &&
-			historyInfo->GetDupInfo()->GetDupeMode() != dmForce &&
-			((historyInfo->GetDupInfo()->GetStatus() == DupInfo::dsGood) ||
-			 (nzbInfo->GetDupeMode() == dmScore &&
-			  historyInfo->GetDupInfo()->GetStatus() == DupInfo::dsSuccess &&
-			  nzbInfo->GetDupeScore() <= historyInfo->GetDupInfo()->GetDupeScore())) &&
-			SameNameOrKey(historyInfo->GetDupInfo()->GetName(), historyInfo->GetDupInfo()->GetDupeKey(),
-				nzbInfo->GetName(), nzbInfo->GetDupeKey()))
-		{
-			skip = true;
-			good = historyInfo->GetDupInfo()->GetStatus() == DupInfo::dsGood;
-			dupeName = historyInfo->GetDupInfo()->GetName();
-			break;
+				(int)nzbInfo->GetDupeMode(), nzbInfo->GetDupeScore(),
+				nzbInfo->GetName(), nzbInfo->GetDupeKey(),
+				dup->GetFullContentHash(), dup->GetFilteredContentHash(),
+				(int)dup->GetDupeMode(), 0, (int)dup->GetStatus(), dup->GetDupeScore(),
+				dup->GetName(), dup->GetDupeKey(),
+				&outSameContent, &outGood) != 0)
+			{
+				skip = true;
+				sameContent = outSameContent != 0;
+				good = outGood != 0;
+				dupeName = dup->GetName();
+				break;
+			}
 		}
 	}
 
@@ -303,45 +293,29 @@ inline void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzb
 		nzbInfo->GetKind() == NzbInfo::nkNzb &&
 		nzbInfo->GetDupeHint() == NzbInfo::dhNone)
 	{
-		bool succeeded = false;
-		bool failed = false;
+		int succeeded = 0;
+		int failed = 0;
 		for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
 		{
 			if (historyInfo->GetKind() == HistoryInfo::hkNzb)
 			{
 				NzbInfo* item = historyInfo->GetNzbInfo();
-				if (sameContentHash(nzbInfo->GetFullContentHash(), nzbInfo->GetFilteredContentHash(),
-					item->GetFullContentHash(), item->GetFilteredContentHash()))
-				{
-					NzbInfo::EDeleteStatus del = item->GetDeleteStatus();
-					if (del != NzbInfo::dsDupe && del != NzbInfo::dsCopy && del != NzbInfo::dsManual)
-					{
-						if (item->IsDupeSuccess())
-						{
-							succeeded = true;
-						}
-						else
-						{
-							failed = true;
-						}
-					}
-				}
+				nzbget_rs_dupecoord_accum_hc_dupe_same_content_outcome(
+					(int)HistoryInfo::hkNzb,
+					nzbInfo->GetFullContentHash(), nzbInfo->GetFilteredContentHash(),
+					item->GetFullContentHash(), item->GetFilteredContentHash(),
+					(int)item->GetDeleteStatus(), item->IsDupeSuccess() ? 1 : 0, 0,
+					&succeeded, &failed);
 			}
 			else if (historyInfo->GetKind() == HistoryInfo::hkDup)
 			{
 				DupInfo* dup = historyInfo->GetDupInfo();
-				if (sameContentHash(nzbInfo->GetFullContentHash(), nzbInfo->GetFilteredContentHash(),
-					dup->GetFullContentHash(), dup->GetFilteredContentHash()))
-				{
-					if (dup->GetStatus() == DupInfo::dsSuccess || dup->GetStatus() == DupInfo::dsGood)
-					{
-						succeeded = true;
-					}
-					else if (dup->GetStatus() == DupInfo::dsFailed || dup->GetStatus() == DupInfo::dsBad)
-					{
-						failed = true;
-					}
-				}
+				nzbget_rs_dupecoord_accum_hc_dupe_same_content_outcome(
+					(int)HistoryInfo::hkDup,
+					nzbInfo->GetFullContentHash(), nzbInfo->GetFilteredContentHash(),
+					dup->GetFullContentHash(), dup->GetFilteredContentHash(),
+					0, 0, (int)dup->GetStatus(),
+					&succeeded, &failed);
 			}
 		}
 		if (!succeeded && !failed)
@@ -375,11 +349,16 @@ inline void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzb
 		{
 			if ((historyInfo->GetKind() == HistoryInfo::hkNzb ||
 				 historyInfo->GetKind() == HistoryInfo::hkUrl) &&
-				historyInfo->GetNzbInfo()->GetDupeMode() != dmForce &&
-				SameNameOrKey(historyInfo->GetNzbInfo()->GetName(), historyInfo->GetNzbInfo()->GetDupeKey(),
-					nzbInfo->GetName(), nzbInfo->GetDupeKey()) &&
-				nzbInfo->GetDupeScore() <= historyInfo->GetNzbInfo()->GetDupeScore() &&
-				historyInfo->GetNzbInfo()->IsDupeSuccess())
+				nzbget_rs_dupecoord_should_skip_recent_history_score_dupe(
+					sameContent ? 1 : 0, good ? 1 : 0,
+					(int)nzbInfo->GetDupeMode(), nzbInfo->GetDupeScore(),
+					nzbInfo->GetName(), nzbInfo->GetDupeKey(),
+					(int)historyInfo->GetKind(),
+					(int)historyInfo->GetNzbInfo()->GetDupeMode(),
+					historyInfo->GetNzbInfo()->GetDupeScore(),
+					historyInfo->GetNzbInfo()->IsDupeSuccess() ? 1 : 0,
+					historyInfo->GetNzbInfo()->GetName(),
+					historyInfo->GetNzbInfo()->GetDupeKey()) != 0)
 			{
 				// Flag saying QueueCoordinator to skip nzb-file
 				nzbInfo->SetDeleteStatus(NzbInfo::dsDupe);
@@ -426,51 +405,43 @@ inline void DupeCoordinator::NzbFound(DownloadQueue* downloadQueue, NzbInfo* nzb
 		for (NzbList::iterator it = downloadQueue->GetQueue()->begin(); it != downloadQueue->GetQueue()->end(); index++)
 		{
 			NzbInfo* queuedNzbInfo = (*it++).get();
-			if (queuedNzbInfo != nzbInfo &&
-				queuedNzbInfo->GetDeleteStatus() == NzbInfo::dsNone &&
-				(queuedNzbInfo->GetKind() == NzbInfo::nkNzb ||
-				 (queuedNzbInfo->GetKind() == NzbInfo::nkUrl && nzbInfo->GetKind() == NzbInfo::nkUrl)) &&
-				queuedNzbInfo->GetDupeMode() != dmForce &&
-				SameNameOrKey(queuedNzbInfo->GetName(), queuedNzbInfo->GetDupeKey(),
-					nzbInfo->GetName(), nzbInfo->GetDupeKey()))
+			int action = nzbget_rs_dupecoord_eval_queue_score_dupe(
+				queuedNzbInfo == nzbInfo ? 1 : 0,
+				(int)queuedNzbInfo->GetDeleteStatus(),
+				queuedNzbInfo->GetKind() == NzbInfo::nkNzb ? 1 : 0,
+				(queuedNzbInfo->GetKind() == NzbInfo::nkUrl && nzbInfo->GetKind() == NzbInfo::nkUrl) ? 1 : 0,
+				(int)queuedNzbInfo->GetDupeMode(),
+				queuedNzbInfo->GetName(), queuedNzbInfo->GetDupeKey(),
+				nzbInfo->GetName(), nzbInfo->GetDupeKey(),
+				nzbInfo->GetDupeScore(), queuedNzbInfo->GetDupeScore(),
+				(int)g_Options->GetHealthCheck(),
+				queuedNzbInfo->GetDupeHint() == NzbInfo::dhRedownloadAuto ? 1 : 0,
+				queuedNzbInfo->GetCurrentSuccessArticles(),
+				queuedNzbInfo->CalcHealth(),
+				queuedNzbInfo->CalcCriticalHealth(true),
+				queuedNzbInfo->GetPostInfo() != nullptr ? 1 : 0);
+			if (action == 1)
 			{
-				// if queue has a duplicate with the same or higher score - the new item
-				// is moved to history as dupe-backup. With HealthCheck=dupe so is one
-				// arriving while a backup that failover returned downloads in good
-				// health (B73: Las Azules S02E01 4404 lost its progress to a duplicate
-				// a dupe tool appended, scored higher but no better): it is tried next
-				// if that backup fails too
-				bool keepReturned = g_Options->GetHealthCheck() == Options::hcDupe &&
-					queuedNzbInfo->GetDupeHint() == NzbInfo::dhRedownloadAuto &&
-					queuedNzbInfo->GetCurrentSuccessArticles() > 0 &&
-					queuedNzbInfo->CalcHealth() >= queuedNzbInfo->CalcCriticalHealth(true);
-				if (nzbInfo->GetDupeScore() <= queuedNzbInfo->GetDupeScore() || keepReturned)
+				// Flag saying QueueCoordinator to skip nzb-file
+				nzbInfo->SetDeleteStatus(NzbInfo::dsDupe);
+				info("Collection %s is a duplicate to %s", nzbInfo->GetName(), queuedNzbInfo->GetName());
+				return;
+			}
+			else if (action == 2)
+			{
+				// the existing queue item is moved to history as dupe-backup
+				info("Moving collection %s with lower duplicate score to history", queuedNzbInfo->GetName());
+				queuedNzbInfo->SetDeleteStatus(NzbInfo::dsDupe);
+				int oldSize = downloadQueue->GetQueue()->size();
+				downloadQueue->EditEntry(queuedNzbInfo->GetId(),
+					DownloadQueue::eaGroupDelete, nullptr);
+				int newSize = downloadQueue->GetQueue()->size();
+				if (oldSize == newSize)
 				{
-					// Flag saying QueueCoordinator to skip nzb-file
-					nzbInfo->SetDeleteStatus(NzbInfo::dsDupe);
-					info("Collection %s is a duplicate to %s", nzbInfo->GetName(), queuedNzbInfo->GetName());
-					return;
+					index++;
 				}
-
-				// if queue has a duplicate with lower score - the existing item is moved
-				// to history as dupe-backup (unless it is in post-processing stage) and
-				// the new item is added to queue (unless it is in post-processing stage)
-				if (!queuedNzbInfo->GetPostInfo())
-				{
-					// the existing queue item is moved to history as dupe-backup
-					info("Moving collection %s with lower duplicate score to history", queuedNzbInfo->GetName());
-					queuedNzbInfo->SetDeleteStatus(NzbInfo::dsDupe);
-					int oldSize = downloadQueue->GetQueue()->size();
-					downloadQueue->EditEntry(queuedNzbInfo->GetId(),
-						DownloadQueue::eaGroupDelete, nullptr);
-					int newSize = downloadQueue->GetQueue()->size();
-					if (oldSize == newSize)
-					{
-						index++;
-					}
-					it = downloadQueue->GetQueue()->begin() + index;
-					index--;
-				}
+				it = downloadQueue->GetQueue()->begin() + index;
+				index--;
 			}
 		}
 	}
@@ -500,12 +471,14 @@ inline void DupeCoordinator::NzbCompleted(DownloadQueue* downloadQueue, NzbInfo*
 		std::vector<std::pair<int, bool>> others;	// id, in post-processing
 		for (NzbInfo* queued : downloadQueue->GetQueue())
 		{
-			if (queued != nzbInfo &&
-				queued->GetKind() == NzbInfo::nkNzb &&
-				!queued->GetDeleting() &&
-				queued->GetDeleteStatus() == NzbInfo::dsNone &&
-				queued->GetDupeMode() != dmForce &&
-				!strcasecmp(queued->GetDupeKey(), nzbInfo->GetDupeKey()))
+			if (nzbget_rs_dupecoord_is_other_to_stop_on_completed(
+				queued == nzbInfo ? 1 : 0,
+				queued->GetKind() == NzbInfo::nkNzb ? 1 : 0,
+				queued->GetDeleting() ? 1 : 0,
+				(int)queued->GetDeleteStatus(),
+				(int)queued->GetDupeMode(),
+				queued->GetDupeKey(),
+				nzbInfo->GetDupeKey()) != 0)
 			{
 				queued->PrintMessage(Message::mkInfo, "Stopping %s: %s is downloaded and on disk",
 					queued->GetName(), nzbInfo->GetName());
@@ -659,9 +632,17 @@ inline bool DupeCoordinator::DupeFailoverWarranted(int itemScore, int health, in
 
 inline void DupeCoordinator::HistoryMark(DownloadQueue* downloadQueue, HistoryInfo* historyInfo, NzbInfo::EMarkStatus markStatus)
 {
-	const char* markStatusName = markStatus == NzbInfo::ksBad ? "bad" :
-		markStatus == NzbInfo::ksGood ? "good" :
-		markStatus == NzbInfo::ksSuccess ? "success" : "NONE";
+	int itemDupeMode = historyInfo->GetKind() == HistoryInfo::hkNzb ? (int)historyInfo->GetNzbInfo()->GetDupeMode() :
+		historyInfo->GetKind() == HistoryInfo::hkDup ? (int)historyInfo->GetDupInfo()->GetDupeMode() : 0;
+	int dupStatus = 0;
+	int postAction = 0;
+	const char* markStatusName = nzbget_rs_dupecoord_resolve_history_mark(
+		(int)markStatus,
+		g_Options->GetDupeCheck() ? 1 : 0,
+		(int)historyInfo->GetKind(),
+		itemDupeMode,
+		&dupStatus,
+		&postAction);
 	info("Marking %s as %s", historyInfo->GetName(), markStatusName);
 
 	if (historyInfo->GetKind() == HistoryInfo::hkNzb)
@@ -671,10 +652,7 @@ inline void DupeCoordinator::HistoryMark(DownloadQueue* downloadQueue, HistoryIn
 	}
 	else if (historyInfo->GetKind() == HistoryInfo::hkDup)
 	{
-		historyInfo->GetDupInfo()->SetStatus(
-			markStatus == NzbInfo::ksGood ? DupInfo::dsGood :
-			markStatus == NzbInfo::ksSuccess ? DupInfo::dsSuccess :
-			DupInfo::dsBad);
+		historyInfo->GetDupInfo()->SetStatus((DupInfo::EStatus)dupStatus);
 	}
 	else
 	{
@@ -682,22 +660,12 @@ inline void DupeCoordinator::HistoryMark(DownloadQueue* downloadQueue, HistoryIn
 		return;
 	}
 
-	if (!g_Options->GetDupeCheck() ||
-		(historyInfo->GetKind() == HistoryInfo::hkNzb && historyInfo->GetNzbInfo()->GetDupeMode() == dmForce) ||
-		(historyInfo->GetKind() == HistoryInfo::hkDup && historyInfo->GetDupInfo()->GetDupeMode() == dmForce))
+	if (postAction == 1)
 	{
-		return;
-	}
-
-	if (markStatus == NzbInfo::ksGood)
-	{
-		// mark as good
-		// moving all duplicates from history to dup-history
 		HistoryCleanup(downloadQueue, historyInfo);
 	}
-	else if (markStatus == NzbInfo::ksBad)
+	else if (postAction == 2)
 	{
-		// mark as bad
 		const char* dupeKey = historyInfo->GetKind() == HistoryInfo::hkNzb ? historyInfo->GetNzbInfo()->GetDupeKey() :
 			historyInfo->GetKind() == HistoryInfo::hkDup ? historyInfo->GetDupInfo()->GetDupeKey() :
 			nullptr;

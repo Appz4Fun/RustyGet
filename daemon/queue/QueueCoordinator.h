@@ -22,39 +22,109 @@
 
 #ifndef QUEUECOORDINATOR_H
 
+#ifndef ARTICLEDOWNLOADER_H
+#define ARTICLEDOWNLOADER_H
+
 #include <atomic>
+#include <functional>
+#include <memory>
+#include <set>
+#include <string>
+#include <vector>
 #include "Log.h"
 #include "DiskState.h"
-#include "ArticleDownloader.h"
 #include "DownloadInfo.h"
-#include "QueueEditor.h"
 #include "ServerPool.h"
-/*
- *  This file is part of nzbget. See <https://nzbget.com>.
- *
- *  Copyright (C) 2017 Andrey Prygunkov <hugbug@users.sourceforge.net>
- *  Copyright (C) 2025 Denis <denis@nzbget.com>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
- */
+#include "Options.h"
+#include "ArticleWriter.h"
+#include "Util.h"
 
+class ArticleContentAnalyzer
+{
+public:
+	virtual ~ArticleContentAnalyzer() {};
+	virtual void Reset() = 0;
+	virtual void Append(const void* buffer, int len) = 0;
+};
+
+class ArticleDownloader final : public Thread, public Subject
+{
+public:
+	enum EStatus
+	{
+		adUndefined,
+		adRunning,
+		adWaiting,
+		adFinished,
+		adFailed,
+		adRetry,
+		adCrcError,
+		adNotFound,
+		adConnectError,
+		adTransientError,
+		adFatalError
+	};
+
+	ArticleDownloader();
+	virtual ~ArticleDownloader();
+	void SetFileInfo(FileInfo* fileInfo) { m_fileInfo = fileInfo; }
+	FileInfo* GetFileInfo() { return m_fileInfo; }
+	void SetArticleInfo(ArticleInfo* articleInfo) { m_articleInfo = articleInfo; }
+	ArticleInfo* GetArticleInfo() { return m_articleInfo; }
+	EStatus GetStatus() { return m_status; }
+	ServerStatList* GetServerStats() { return &m_serverStats; }
+	void Run() override;
+	void Stop() override;
+	time_t GetLastUpdateTime() { return m_lastUpdateTime; }
+	void SetLastUpdateTimeNow();
+	const char* GetArticleFilename() { return m_articleFilename; }
+	void SetInfoName(const char* infoName);
+	const char* GetInfoName() { return m_infoName; }
+	const char* GetConnectionName() { return m_connectionName; }
+	void SetConnection(NntpConnection* connection) { m_connection = connection; }
+	bool CompleteFileParts() { return m_articleWriter.CompleteFileParts(); }
+	int GetDownloadedSize() { return m_downloadedSize; }
+	int64 GetDecodedFileSize() { return m_decodedFileSize; }
+	void SetContentAnalyzer(std::unique_ptr<ArticleContentAnalyzer> contentAnalyzer) { m_contentAnalyzer = std::move(contentAnalyzer); }
+	ArticleContentAnalyzer* GetContentAnalyzer() { return m_contentAnalyzer.get(); }
+
+	void LogDebugInfo();
+
+private:
+	FileInfo* m_fileInfo;
+	ArticleInfo* m_articleInfo;
+	NntpConnection* m_connection = nullptr;
+	EStatus m_status = adUndefined;
+	Mutex m_connectionMutex;
+	CString m_infoName;
+	CString m_connectionName;
+	CString m_articleFilename;
+	std::atomic<time_t> m_lastUpdateTime;
+	Decoder m_decoder;
+	ArticleWriter m_articleWriter;
+	ServerStatList m_serverStats;
+	bool m_writingStarted;
+	// Distinguish local output failures from malformed/source articles.  Only
+	// the former must bypass duplicate fallback.
+	bool m_localWriteError = false;
+	bool m_contentRejected = false;
+	int m_downloadedSize = 0;
+	int64 m_decodedFileSize = 0;
+	std::unique_ptr<ArticleContentAnalyzer> m_contentAnalyzer;
+
+	EStatus Download();
+	EStatus DecodeCheck();
+	void FreeConnection(bool keepConnected);
+	EStatus CheckResponse(const char* response, const char* comment);
+	void SetStatus(EStatus status) { m_status = status; }
+	bool Write(char* buffer, int len);
+	void AddServerStats();
+};
+
+#endif
 
 #ifndef DIRECTRENAMER_H
 #define DIRECTRENAMER_H
-
-#include <string>
-#include "ArticleDownloader.h"
 
 class DirectRenamer
 {
@@ -792,6 +862,141 @@ inline void RenameContentAnalyzer::Finish()
 #ifndef QUEUECOORDINATOR_H
 #define QUEUECOORDINATOR_H
 
+class QueueEditor
+{
+public:
+	bool EditEntry(DownloadQueue* downloadQueue, int ID, DownloadQueue::EEditAction action, const char* args);
+	bool EditList(DownloadQueue* downloadQueue, IdList* idList, NameList* nameList, DownloadQueue::EMatchMode matchMode, DownloadQueue::EEditAction action, const char* args);
+
+private:
+	class EditItem
+	{
+	public:
+		FileInfo* m_fileInfo;
+		NzbInfo* m_nzbInfo;
+		int m_offset;
+
+		EditItem(FileInfo* fileInfo, NzbInfo* nzbInfo, int offset) :
+			m_fileInfo(fileInfo), m_nzbInfo(nzbInfo), m_offset(offset) {}
+	};
+
+	typedef std::vector<EditItem> ItemList;
+
+	DownloadQueue* m_downloadQueue;
+
+	FileInfo* FindFileInfo(int id);
+	bool InternEditList(ItemList* itemList, IdList* idList, DownloadQueue::EEditAction action, const char* args);
+	void PrepareList(ItemList* itemList, IdList* idList, DownloadQueue::EEditAction action, int offset);
+	bool BuildIdListFromNameList(IdList* idList, NameList* nameList, DownloadQueue::EMatchMode matchMode, DownloadQueue::EEditAction action);
+	bool EditGroup(NzbInfo* nzbInfo, DownloadQueue::EEditAction action, const char* args);
+	void PauseParsInGroups(ItemList* itemList, bool extraParsOnly);
+	void PausePars(RawFileList* fileList, bool extraParsOnly);
+	void SetNzbPriority(NzbInfo* nzbInfo, const char* priority);
+	void SetNzbCategory(NzbInfo* nzbInfo, const char* category, bool applyParams);
+	void SetNzbName(NzbInfo* nzbInfo, const char* name);
+	bool MergeGroups(ItemList* itemList);
+	bool SortGroups(ItemList* itemList, const char* sort);
+	void AlignGroups(ItemList* itemList);
+	bool MoveGroupsTo(ItemList* itemList, IdList* idList, bool before, const char* args);
+	bool SplitGroup(ItemList* itemList, const char* name);
+	bool DeleteUrl(NzbInfo* nzbInfo, DownloadQueue::EEditAction action);
+	void ReorderFiles(ItemList* itemList);
+	void SetNzbParameter(NzbInfo* nzbInfo, const char* paramString);
+	void SetNzbDupeParam(NzbInfo* nzbInfo, DownloadQueue::EEditAction action, const char* args);
+	void PauseUnpauseEntry(FileInfo* fileInfo, bool pause);
+	void DeleteEntry(FileInfo* fileInfo);
+	void MoveEntry(FileInfo* fileInfo, int offset);
+	void MoveGroup(NzbInfo* nzbInfo, int offset);
+	void SortGroupFiles(NzbInfo* nzbInfo);
+	bool ItemListContainsItem(ItemList* itemList, int id);
+
+	friend class GroupSorter;
+};
+
+class DupeProbe : public Thread
+{
+public:
+	struct Sample
+	{
+		CString MessageId;
+		std::shared_ptr<std::vector<CString>> Groups;
+	};
+
+	enum EAnswer
+	{
+		daExists,
+		daMissing,
+		daUnknown
+	};
+
+	static constexpr int SampleCount = 10;
+	static constexpr int MinArticles = 4;
+	static constexpr int MinAliveSamples = 2;
+	static constexpr int RecentBlockSec = 60;
+
+	static std::vector<size_t> SampleIndexes(size_t total, int count);
+	static EAnswer Classify(const char* response);
+	static bool IsDead(int existing, int definitiveServers, int activeServers);
+	static std::vector<Sample> SamplesOf(const std::vector<FileInfo*>& files,
+		const std::function<void(FileInfo*)>& loadArticles = nullptr);
+	static void Start(int nzbId, std::vector<Sample> samples, int recoveredAtStart = 0);
+
+	struct Verdict
+	{
+		int Existing = 0;
+		int MissingServers = 0;
+		std::string FoundOn;
+		int ActiveServers = 0;
+		int UnreachableServers = 0;
+		int ReachedServers = 0;
+		bool Finished = true;
+		bool Dead() const { return Finished && IsDead(Existing, MissingServers, ActiveServers); }
+	};
+
+	static Verdict Check(std::vector<Sample> samples, int limitSec);
+	static void StartRecheck(int nzbId, std::vector<Sample> samples);
+	static constexpr int RecheckSampleCount = 10;
+	static constexpr int RecheckLimitSec = 60;
+
+	static void StopAll();
+	static int ProbingFor(int nzbId);
+	static void WaitAll();
+	static void Reset();
+
+protected:
+	void Run() override;
+
+private:
+	DupeProbe(int nzbId, std::vector<Sample> samples) :
+		m_nzbId(nzbId), m_samples(std::move(samples)), m_found(m_samples.size(), 0) {}
+
+	struct ServerResult
+	{
+		int Exists = 0;
+		int Missing = 0;
+		int Unknown = 0;
+		bool Unreachable = false;
+	};
+
+	int m_nzbId;
+	time_t m_started = 0;
+	int m_recoveredAtStart = 0;
+	std::vector<Sample> m_samples;
+	bool m_countAll = false;
+	std::vector<char> m_found;
+	std::string m_foundOn;
+	NntpConnection* m_connection = nullptr;
+
+	bool ProbeServer(int serverId, std::set<int>& probed, ServerResult& result);
+	void Note(Message::EKind kind, const char* format, ...);
+	Verdict Measure(int limitSec);
+	void Recheck();
+	bool Register();
+	void Unregister();
+	void Cancel();
+	void Abandon(int missingServers, int activeServers);
+};
+
 class QueueCoordinator : public Thread, public Observer, public Debuggable
 {
 public:
@@ -934,22 +1139,2296 @@ private:
 
 extern QueueCoordinator* g_QueueCoordinator;
 
+#include <algorithm>
+#include <cstdarg>
 #include "Options.h"
 #include "ServerPool.h"
-#include "ArticleDownloader.h"
 #include "ArticleWriter.h"
 #include "DiskState.h"
 #include "Util.h"
 #include "FileSystem.h"
 #include "StatMeter.h"
 #include "DupeCoordinator.h"
-#include "DupeProbe.h"
-#include "TwinCheck.h"
-#include "ParDamage.h"
 #include "DupeArticleFallback.h"
-#include "StreamRepair.h"
 #include "PrePostProcessor.h"
+#include "HistoryCoordinator.h"
+#include "UrlCoordinator.h"
+#include "DupeSearch.h"
 #include "nzbget_rs.h"
+
+inline ArticleDownloader::ArticleDownloader()
+	: m_fileInfo(nullptr)
+	, m_articleInfo(nullptr)
+	, m_writingStarted(false)
+{
+	debug("Creating ArticleDownloader");
+
+	SetLastUpdateTimeNow();
+}
+
+inline ArticleDownloader::~ArticleDownloader()
+{
+	debug("Destroying ArticleDownloader");
+
+#ifndef DISABLE_TLS
+	OpenSSL::StopSSLThread();
+#endif
+}
+
+inline void ArticleDownloader::SetInfoName(const char* infoName)
+{
+	m_infoName = infoName;
+	m_articleWriter.SetInfoName(m_infoName);
+}
+
+inline void ArticleDownloader::Run()
+{
+	debug("Entering ArticleDownloader-loop");
+
+	SetStatus(adRunning);
+
+	m_articleWriter.SetFileInfo(m_fileInfo);
+	m_articleWriter.SetArticleInfo(m_articleInfo);
+	m_articleWriter.Prepare();
+
+	EStatus status = adFailed;
+	int retries = g_Options->GetArticleRetries() > 0 ? g_Options->GetArticleRetries() : 1;
+	int remainedRetries = retries;
+	std::unique_ptr<NzbgetRsTransientRetries, decltype(&nzbget_rs_transient_retries_free)> transientRetries(
+		nzbget_rs_transient_retries_new(retries, g_Options->GetArticleInterval()),
+		nzbget_rs_transient_retries_free);
+	ServerPool::RawServerList failedServers;
+	failedServers.reserve(g_ServerPool->GetServers()->size());
+	NewsServer* wantServer = nullptr;
+	NewsServer* lastServer = nullptr;
+	int level = 0;
+	int serverConfigGeneration = g_ServerPool->GetGeneration();
+	bool force = m_fileInfo->GetNzbInfo()->GetForcePriority();
+
+	while (!IsStopped())
+	{
+		status = adFailed;
+
+		SetStatus(adWaiting);
+		while (!m_connection && !IsStopped() && serverConfigGeneration == g_ServerPool->GetGeneration())
+		{
+			if (nzbget_rs_transient_retries_is_empty(transientRetries.get()) != 0)
+			{
+				m_connection = g_ServerPool->GetConnection(level, wantServer, &failedServers);
+			}
+			else
+			{
+				ServerPool::RawServerList ignoreServers = failedServers;
+				std::vector<uintptr_t> waitingPtrs(g_ServerPool->GetServers()->size());
+				size_t waitingCount = nzbget_rs_transient_retries_waiting_servers(
+					transientRetries.get(), (int64)Util::CurrentTime(),
+					waitingPtrs.data(), waitingPtrs.size());
+				bool wantServerWaiting = false;
+				for (size_t wi = 0; wi < waitingCount; ++wi)
+				{
+					NewsServer* waitingServer = reinterpret_cast<NewsServer*>(waitingPtrs[wi]);
+					ignoreServers.push_back(waitingServer);
+					if (waitingServer == wantServer)
+					{
+						wantServerWaiting = true;
+					}
+				}
+				if (!wantServerWaiting)
+				{
+					m_connection = g_ServerPool->GetConnection(level, wantServer, &ignoreServers);
+				}
+			}
+			Util::Sleep(5);
+		}
+		SetLastUpdateTimeNow();
+		SetStatus(adRunning);
+
+		if (IsStopped() ||
+			((g_WorkState->GetPauseDownload() || g_WorkState->GetQuotaReached()) && !force) ||
+			(g_WorkState->GetDownloadHeld() && !m_fileInfo->GetExtraPriority()) ||
+			serverConfigGeneration != g_ServerPool->GetGeneration())
+		{
+			status = adRetry;
+			break;
+		}
+
+		lastServer = m_connection->GetNewsServer();
+		level = lastServer->GetNormLevel();
+		remainedRetries = nzbget_rs_transient_retries_remained_retries(
+			transientRetries.get(), reinterpret_cast<uintptr_t>(lastServer));
+
+		m_connection->SetSuppressErrors(false);
+
+#ifndef DISABLE_TLS
+		m_connection->SetCertVerifLevel(lastServer->GetCertVerificationLevel());
+#endif
+
+		{
+			NzbgetRsBuf connNameBuf = nzbget_rs_dqh_article_dl_format_connection_name(
+				m_connection->GetNewsServer()->GetName(), m_connection->GetHost());
+			m_connectionName.Set(connNameBuf.data ? connNameBuf.data : "", (int)connNameBuf.len);
+			nzbget_rs_free(connNameBuf);
+		}
+
+		// check server retention
+		int fileAgeDays = 0;
+		bool retentionFailure = nzbget_rs_nntp_article_dl_is_retention_failure(
+			m_connection->GetNewsServer()->GetRetention(),
+			(int64)m_fileInfo->GetTime(),
+			(int64)Util::CurrentTime(),
+			&fileAgeDays) != 0;
+		if (retentionFailure)
+		{
+			detail("Article %s @ %s failed: out of server retention (file age: %i, configured retention: %i)",
+				*m_infoName, *m_connectionName, fileAgeDays,
+				m_connection->GetNewsServer()->GetRetention());
+			status = adFailed;
+			FreeConnection(true);
+		}
+
+		if (m_connection && !IsStopped())
+		{
+			detail("Downloading %s @ %s", *m_infoName, *m_connectionName);
+		}
+
+		// test connection
+		bool connected = m_connection && m_connection->Connect();
+		bool transientRetryScheduled = false;
+		bool authRejected = false;
+		if (!connected && m_connection && m_connection->GetAuthRejected())
+		{
+			if (nzbget_rs_transient_retries_register(
+				transientRetries.get(), reinterpret_cast<uintptr_t>(lastServer), (int64)Util::CurrentTime()) != 0)
+			{
+				transientRetryScheduled = true;
+			}
+			else
+			{
+				authRejected = true;
+			}
+		}
+		if (connected && !IsStopped())
+		{
+			NewsServer* newsServer = m_connection->GetNewsServer();
+
+			// Download article
+			status = Download();
+
+			if (status == adTransientError)
+			{
+				if (nzbget_rs_transient_retries_register(
+					transientRetries.get(), reinterpret_cast<uintptr_t>(newsServer), (int64)Util::CurrentTime()) != 0)
+				{
+					status = adConnectError;
+					transientRetryScheduled = true;
+				}
+				else
+				{
+					status = adFailed;
+					remainedRetries = 0;
+				}
+			}
+
+			int success = 0, failed = 0;
+			if (nzbget_rs_nntp_article_dl_classify_attempt_stat(
+				(int)status,
+				(int)adFinished,
+				(int)adFailed,
+				(int)adNotFound,
+				(int)adCrcError,
+				&success,
+				&failed) != 0)
+			{
+				int serverId = newsServer->GetId();
+				m_serverStats.StatOp(serverId, success, failed, ServerStatList::soSet);
+				ServerVolume::Stats stats;
+				stats.bytes = 0;
+				stats.articles.failed = failed;
+				stats.articles.success = success;
+				g_StatMeter->AddServerStats(stats, serverId);
+			}
+		}
+
+		if (m_connection)
+		{
+			AddServerStats();
+		}
+
+		{
+			int shouldBreak = 0;
+			int statusInt = (int)status;
+			int crInt = m_contentRejected ? 1 : 0;
+			if (nzbget_rs_nntp_article_dl_handle_content_rejected(
+				crInt,
+				m_articleInfo->GetDupeFallbackRound(),
+				statusInt,
+				(int)adFailed,
+				remainedRetries,
+				&shouldBreak,
+				&statusInt,
+				&crInt,
+				&remainedRetries) != 0)
+			{
+				FreeConnection(false);
+				status = (EStatus)statusInt;
+				if (shouldBreak != 0)
+				{
+					break;
+				}
+				m_contentRejected = crInt != 0;
+			}
+		}
+
+		if (!connected && m_connection)
+		{
+			detail("Article %s @ %s failed: could not establish connection", *m_infoName, *m_connectionName);
+		}
+
+		int connInt = connected ? 1 : 0;
+		int statusInt = (int)status;
+		nzbget_rs_nntp_article_dl_normalize_connect_and_decrement_retries(
+			connInt, statusInt, (int)adConnectError, (int)adFailed, remainedRetries,
+			&connInt, &statusInt, &remainedRetries);
+		connected = connInt != 0;
+		status = (EStatus)statusInt;
+		nzbget_rs_transient_retries_set_remained_retries(
+			transientRetries.get(), reinterpret_cast<uintptr_t>(lastServer), remainedRetries);
+
+		bool optionalBlocked = false;
+		if (!connected && m_connection && !IsStopped())
+		{
+			g_ServerPool->BlockServer(lastServer);
+			optionalBlocked = lastServer->GetOptional();
+		}
+
+		wantServer = nullptr;
+		if (connected && status == adFailed && remainedRetries > 0 && !retentionFailure)
+		{
+			wantServer = lastServer;
+		}
+		else
+		{
+			FreeConnection(status == adFinished || status == adNotFound);
+			if (transientRetryScheduled && m_fileInfo->GetNzbInfo()->HasDesiredServer())
+			{
+				wantServer = lastServer;
+			}
+		}
+
+		if (nzbget_rs_dqh_article_dl_is_terminal_loop_status(
+			(int)status, (int)adFinished, (int)adFatalError) != 0)
+		{
+			break;
+		}
+
+		if (IsStopped() ||
+			((g_WorkState->GetPauseDownload() || g_WorkState->GetQuotaReached()) && !force) ||
+			(g_WorkState->GetDownloadHeld() && !m_fileInfo->GetExtraPriority()) ||
+			serverConfigGeneration != g_ServerPool->GetGeneration())
+		{
+			status = adRetry;
+			break;
+		}
+
+		if (nzbget_rs_dqh_article_dl_should_fail_for_desired_server(
+			wantServer ? 1 : 0,
+			m_fileInfo->GetNzbInfo()->HasDesiredServer() ? 1 : 0) != 0)
+		{
+			status = adFailed;
+			break;
+		}
+
+		int pushFailedServer = 0;
+		if (nzbget_rs_nntp_article_dl_should_advance_server_list(
+			wantServer ? 1 : 0,
+			connected ? 1 : 0,
+			retentionFailure ? 1 : 0,
+			optionalBlocked ? 1 : 0,
+			authRejected ? 1 : 0,
+			&pushFailedServer) != 0)
+		{
+			if (pushFailedServer)
+			{
+				failedServers.push_back(lastServer);
+			}
+
+			size_t candCount = g_ServerPool->GetServers()->size();
+			std::vector<int32_t> candIds(candCount), candLevels(candCount), candGroups(candCount);
+			std::vector<uint8_t> candAvail(candCount);
+			size_t ci = 0;
+			for (NewsServer* candidateServer : g_ServerPool->GetServers())
+			{
+				candIds[ci] = candidateServer->GetId();
+				candLevels[ci] = candidateServer->GetNormLevel();
+				candGroups[ci] = candidateServer->GetGroup();
+				candAvail[ci] = (uint8_t)nzbget_rs_dqh_article_dl_is_server_available(
+					candidateServer->GetActive() ? 1 : 0,
+					candidateServer->GetMaxConnections(),
+					candidateServer->GetOptional() ? 1 : 0,
+					(candidateServer->GetOptional() && g_ServerPool->IsServerBlocked(candidateServer)) ? 1 : 0);
+				++ci;
+			}
+			size_t failCount = failedServers.size();
+			std::vector<int32_t> failIds(failCount), failLevels(failCount), failGroups(failCount);
+			for (size_t fi = 0; fi < failCount; ++fi)
+			{
+				failIds[fi] = failedServers[fi]->GetId();
+				failLevels[fi] = failedServers[fi]->GetNormLevel();
+				failGroups[fi] = failedServers[fi]->GetGroup();
+			}
+			bool allServersOnLevelFailed = nzbget_rs_nntp_article_dl_all_servers_on_level_failed(
+				level, candIds.data(), candLevels.data(), candGroups.data(), candAvail.data(), candCount,
+				failIds.data(), failLevels.data(), failGroups.data(), failCount) != 0;
+
+			int advanceLevel = 0;
+			int newLevel = level;
+			int breakAllFailed = 0;
+			nzbget_rs_nntp_article_dl_eval_level_exhaustion(
+				allServersOnLevelFailed ? 1 : 0, level, g_ServerPool->GetMaxNormLevel(),
+				&advanceLevel, &newLevel, &breakAllFailed);
+			if (advanceLevel != 0)
+			{
+				detail("Article %s @ all level %i servers failed, increasing level", *m_infoName, level);
+				level = newLevel;
+			}
+			else if (breakAllFailed != 0)
+			{
+				detail("Article %s @ all servers failed", *m_infoName);
+				status = adFailed;
+				break;
+			}
+
+			remainedRetries = retries;
+		}
+	}
+
+	FreeConnection(status == adFinished);
+
+	bool stopped = IsStopped();
+	status = (EStatus)nzbget_rs_nntp_article_dl_resolve_final_status(
+		(int)status,
+		m_articleWriter.GetDuplicate() ? 1 : 0,
+		stopped ? 1 : 0,
+		(int)adFinished, (int)adFailed, (int)adRetry, (int)adFatalError);
+	if (stopped)
+	{
+		detail("Download %s cancelled", *m_infoName);
+	}
+
+	if (status == adFailed && nzbget_rs_transient_retries_is_exhausted(transientRetries.get()) != 0)
+	{
+		detail("Download %s failed: temporary server errors outlasted all attempts, the article may still exist", *m_infoName);
+	}
+	else if (status == adFailed)
+	{
+		detail("Download %s failed", *m_infoName);
+	}
+
+	SetStatus(status);
+	Notify(nullptr);
+
+	debug("Exiting ArticleDownloader-loop");
+}
+
+inline ArticleDownloader::EStatus ArticleDownloader::Download()
+{
+	const char* response = nullptr;
+	EStatus status = adRunning;
+	m_writingStarted = false;
+	m_localWriteError = false;
+	m_contentRejected = false;
+	m_articleInfo->SetCrc(0);
+
+	if (m_contentAnalyzer)
+	{
+		m_contentAnalyzer->Reset();
+	}
+
+	if (m_connection->GetNewsServer()->GetJoinGroup() && !m_fileInfo->GetGroups()->empty())
+	{
+		for (CString& group : m_fileInfo->GetGroups())
+		{
+			response = m_connection->JoinGroup(group);
+			if (nzbget_rs_nntp_article_dl_is_join_group_ok(response) != 0)
+			{
+				break;
+			}
+		}
+
+		status = CheckResponse(response, "could not join group");
+		if (status != adFinished)
+		{
+			return status;
+		}
+	}
+
+	// retrieve article
+	{
+		NzbgetRsBuf cmdBuf = nzbget_rs_dqh_article_dl_format_fetch_command(
+			g_Options->GetRawArticle() ? 1 : 0, m_articleInfo->GetMessageId());
+		response = m_connection->Request(cmdBuf.data ? cmdBuf.data : "");
+		nzbget_rs_free(cmdBuf);
+	}
+
+	status = CheckResponse(response, "could not fetch article");
+	if (status != adFinished)
+	{
+		return status;
+	}
+
+	m_decoder.Clear();
+	m_decoder.SetCrcCheck(g_Options->GetCrcCheck());
+	m_decoder.SetRawMode(g_Options->GetRawArticle());
+
+	status = adRunning;
+	int readChunk = g_Options->GetArticleReadChunkSize();
+	CharBuffer lineBuf(readChunk + 128);
+
+	while (nzbget_rs_dqh_article_dl_should_continue_read_loop(
+		IsStopped() ? 1 : 0, m_decoder.GetEof() ? 1 : 0) != 0)
+	{
+		if (!IsStopped() && !m_articleWriter.HasCachedBuffer() &&
+			g_MemoryMonitor && g_MemoryMonitor->GetTier() == NZBGET_RS_PRESSURE_CRITICAL &&
+			g_ArticleCache && g_ArticleCache->GetFlushing())
+		{
+			Util::Sleep(10);
+		}
+
+		// throttle the bandwidth
+		while (!IsStopped() && (g_WorkState->GetSpeedLimit() > 0.0f) &&
+			(g_StatMeter->CalcCurrentDownloadSpeed() > g_WorkState->GetSpeedLimit() ||
+			 g_StatMeter->CalcMomentaryDownloadSpeed() > g_WorkState->GetSpeedLimit()))
+		{
+			SetLastUpdateTimeNow();
+			Util::Sleep(10);
+		}
+
+		char* buffer;
+		int len;
+		m_connection->ReadBuffer(&buffer, &len);
+		if (len == 0)
+		{
+			len = m_connection->TryRecv(lineBuf, readChunk);
+			buffer = lineBuf;
+		}
+
+		// have we encountered a timeout?
+		if (len <= 0)
+		{
+			if (!IsStopped())
+			{
+				detail("Article %s @ %s failed: Unexpected end of article", *m_infoName, *m_connectionName);
+			}
+			m_connection->SetBroken();
+			m_connection->Disconnect();
+			status = adFailed;
+			break;
+		}
+
+		g_StatMeter->AddSpeedReading(len);
+		time_t oldTime = m_lastUpdateTime;
+		SetLastUpdateTimeNow();
+		if (oldTime != m_lastUpdateTime)
+		{
+			AddServerStats();
+		}
+
+		// decode article data
+		len = m_decoder.DecodeBuffer(buffer, len);
+
+		// write to output file
+		if (len > 0 && !Write(buffer, len))
+		{
+			int crInt = 0;
+			status = (EStatus)nzbget_rs_nntp_article_dl_classify_write_failure(
+				m_localWriteError ? 1 : 0, (int)adFatalError, (int)adFailed, &crInt);
+			if (crInt != 0)
+			{
+				m_contentRejected = true;
+			}
+			break;
+		}
+	}
+
+	if (IsStopped())
+	{
+		status = adFailed;
+	}
+
+	if (nzbget_rs_dqh_article_dl_should_run_decode_check(
+		(int)status, (int)adRunning) != 0)
+	{
+		FreeConnection(true);
+		status = DecodeCheck();
+	}
+
+	if (m_writingStarted)
+	{
+		m_articleWriter.Finish(status == adFinished);
+	}
+
+	if (status == adFinished)
+	{
+		detail("Successfully downloaded %s", *m_infoName);
+	}
+
+	return status;
+}
+
+inline ArticleDownloader::EStatus ArticleDownloader::CheckResponse(const char* response, const char* comment)
+{
+	EStatus status = (EStatus)nzbget_rs_article_downloader_check_response(
+		response, m_connection->GetAuthError() ? 1 : 0);
+	if (status != adFinished)
+	{
+		if (!response)
+		{
+			if (!IsStopped())
+			{
+				detail("Article %s @ %s failed, %s: Connection closed by remote host",
+					*m_infoName, *m_connectionName, comment);
+			}
+		}
+		else
+		{
+			detail("Article %s @ %s failed, %s: %s", *m_infoName, *m_connectionName, comment, response);
+		}
+	}
+	return status;
+}
+
+inline bool ArticleDownloader::Write(char* buffer, int len)
+{
+	const char* articleFilename = nullptr;
+	int64 articleFileSize = 0;
+	int64 articleOffset = 0;
+	int articleSize = 0;
+
+	if (!m_writingStarted)
+	{
+		if (!g_Options->GetRawArticle())
+		{
+			articleFilename = m_decoder.GetArticleFilename();
+			if (m_decoder.GetFormat() == Decoder::efYenc)
+			{
+				int64 beginPos = m_decoder.GetBeginPos();
+				int64 endPos = m_decoder.GetEndPos();
+				articleFileSize = m_decoder.GetSize();
+				int64 expectedFileSize = m_fileInfo->GetDecodedFileSize();
+				int64 dupeExpectedOffset = m_articleInfo->GetDupeExpectedOffset();
+				int64 dupeExpectedEnd = m_articleInfo->GetDupeExpectedEnd();
+				int rc = nzbget_rs_article_downloader_validate_yenc(
+					beginPos, endPos, articleFileSize, expectedFileSize,
+					m_articleInfo->GetDupeFallbackRound(), dupeExpectedOffset, dupeExpectedEnd,
+					&articleOffset, &articleSize);
+				if (rc == 1)
+				{
+					return false;
+				}
+				if (rc == 2)
+				{
+					warn("Malformed article %s: range %lli-%lli out of range (file size %lli)", *m_infoName,
+						(long long)beginPos, (long long)endPos, (long long)articleFileSize);
+					return false;
+				}
+				m_decodedFileSize = articleFileSize;
+				if (rc == 3)
+				{
+					detail("Discarding article %s from duplicate: file size mismatch (%lli vs %lli)",
+						*m_infoName, (long long)articleFileSize, (long long)expectedFileSize);
+					return false;
+				}
+				if (rc == 4)
+				{
+					detail("Discarding article %s from duplicate: decoded offset mismatch (%lli vs %lli)",
+						*m_infoName, (long long)(beginPos - 1), (long long)dupeExpectedOffset);
+					return false;
+				}
+				if (rc == 5)
+				{
+					detail("Discarding article %s from duplicate: decoded end mismatch (%lli vs %lli)",
+						*m_infoName, (long long)endPos, (long long)dupeExpectedEnd);
+					return false;
+				}
+			}
+		}
+
+		if (!m_articleWriter.Start(m_decoder.GetFormat(), articleFilename, articleFileSize, articleOffset, articleSize))
+		{
+			m_localWriteError = true;
+			return false;
+		}
+		m_writingStarted = true;
+	}
+
+	bool ok = m_articleWriter.Write(buffer, len);
+	if (!ok)
+	{
+		m_localWriteError = true;
+	}
+
+	if (m_contentAnalyzer)
+	{
+		m_contentAnalyzer->Append(buffer, len);
+	}
+
+	return ok;
+}
+
+inline ArticleDownloader::EStatus ArticleDownloader::DecodeCheck()
+{
+	bool rawArticle = g_Options->GetRawArticle();
+	if (rawArticle)
+	{
+		return adFinished;
+	}
+	Decoder::EStatus status = m_decoder.Check();
+	bool isYenc = m_decoder.GetFormat() == Decoder::efYenc;
+	switch (nzbget_rs_nntp_article_dl_classify_decode_status(
+		0, (int)status, isYenc ? 1 : 0, m_articleWriter.GetRangeExceeded() ? 1 : 0))
+	{
+		case 1:
+			if (m_decoder.GetArticleFilename())
+			{
+				m_articleFilename = m_decoder.GetArticleFilename();
+			}
+			if (isYenc)
+			{
+				m_articleInfo->SetCrc(nzbget_rs_dqh_article_dl_select_yenc_crc(
+					g_Options->GetCrcCheck() ? 1 : 0,
+					m_decoder.GetCalculatedCrc(), m_decoder.GetExpectedCrc()));
+			}
+			return adFinished;
+		case 2:
+			detail("Decoding %s failed: more data than its range", *m_infoName);
+			return adFailed;
+		case 3:
+			detail("Decoding %s failed: CRC-Error", *m_infoName);
+			return adCrcError;
+		case 4:
+			detail("Decoding %s failed: article incomplete", *m_infoName);
+			return adFailed;
+		case 5:
+			detail("Decoding %s failed: size mismatch", *m_infoName);
+			return adFailed;
+		case 6:
+			detail("Decoding %s failed: no binary data found", *m_infoName);
+			return adFailed;
+		default:
+			detail("Decoding %s failed", *m_infoName);
+			return adFailed;
+	}
+}
+
+inline void ArticleDownloader::SetLastUpdateTimeNow()
+{
+	m_lastUpdateTime = Util::CurrentTime();
+}
+
+inline void ArticleDownloader::LogDebugInfo()
+{
+	info("      Download: status=%i, LastUpdateTime=%s, InfoName=%s", m_status,
+		 *Util::FormatTime(m_lastUpdateTime.load()), *m_infoName);
+}
+
+inline void ArticleDownloader::Stop()
+{
+	debug("Trying to stop ArticleDownloader");
+	Thread::Stop();
+	Guard guard(m_connectionMutex);
+	if (m_connection)
+	{
+		m_connection->SetSuppressErrors(true);
+		m_connection->Cancel();
+	}
+	debug("ArticleDownloader stopped successfully");
+}
+
+inline void ArticleDownloader::FreeConnection(bool keepConnected)
+{
+	if (m_connection)
+	{
+		debug("Releasing connection");
+		Guard guard(m_connectionMutex);
+		if (!keepConnected || m_connection->GetStatus() == Connection::csCancelled)
+		{
+			m_connection->Disconnect();
+		}
+		AddServerStats();
+		g_ServerPool->FreeConnection(m_connection, true);
+		m_connection = nullptr;
+	}
+}
+
+inline void ArticleDownloader::AddServerStats()
+{
+	int serverId = m_connection->GetNewsServer()->GetId();
+	int bytesRead = m_connection->FetchTotalBytesRead();
+	ServerVolume::Stats stats;
+	stats.bytes = Util::SafeIntCast<int, uint32>(bytesRead);
+	stats.articles.failed = 0;
+	stats.articles.success = 0;
+	g_StatMeter->AddServerStats(stats, serverId);
+	m_downloadedSize += bytesRead;
+}
+
+static const int MAX_ID = 1000000000;
+
+class GroupSorter
+{
+public:
+	GroupSorter(NzbList* nzbList, QueueEditor::ItemList* sortItemList) :
+		m_nzbList(nzbList), m_sortItemList(sortItemList), m_sortCriteria(scName), m_sortOrder(soAscending) {}
+	bool Execute(const char* sort);
+	bool operator()(const std::unique_ptr<NzbInfo>& refNzbInfo1, const std::unique_ptr<NzbInfo>& refNzbInfo2) const;
+
+private:
+	enum ESortCriteria
+	{
+		scName,
+		scSize,
+		scRemainingSize,
+		scAge,
+		scCategory,
+		scPriority
+	};
+
+	enum ESortOrder
+	{
+		soAscending,
+		soDescending,
+		soAuto
+	};
+
+	NzbList* m_nzbList;
+	QueueEditor::ItemList* m_sortItemList;
+	ESortCriteria m_sortCriteria;
+	ESortOrder m_sortOrder;
+};
+
+inline bool GroupSorter::Execute(const char* sort)
+{
+	int32_t rsCriteria = 0, rsOrder = 0;
+	if (!nzbget_rs_qhp_parse_sort_spec(sort, &rsCriteria, &rsOrder))
+	{
+		error("Could not sort groups: incorrect sort order (%s)", sort);
+		return false;
+	}
+	m_sortCriteria = (ESortCriteria)rsCriteria;
+	m_sortOrder = (ESortOrder)rsOrder;
+
+	RawNzbList tempList;
+	for (NzbInfo* nzbInfo : m_nzbList)
+	{
+		tempList.push_back(nzbInfo);
+	}
+
+	ESortOrder origSortOrder = m_sortOrder;
+	if (m_sortOrder == soAuto)
+	{
+		m_sortOrder = m_sortCriteria == scPriority ? soDescending : soAscending;
+	}
+
+	std::stable_sort(m_nzbList->begin(), m_nzbList->end(), *this);
+
+	if (origSortOrder == soAuto &&
+		std::equal(tempList.begin(), tempList.end(), m_nzbList->begin(),
+		[](NzbInfo* nzbInfo1, std::unique_ptr<NzbInfo>& nzbInfo2)
+		{
+			return nzbInfo1 == nzbInfo2.get();
+		}))
+	{
+		m_sortOrder = m_sortOrder == soDescending ? soAscending : soDescending;
+		std::stable_sort(m_nzbList->begin(), m_nzbList->end(), *this);
+	} 
+
+	return true;
+}
+
+inline bool GroupSorter::operator()(const std::unique_ptr<NzbInfo>& refNzbInfo1, const std::unique_ptr<NzbInfo>& refNzbInfo2) const
+{
+	NzbInfo* nzbInfo1 = refNzbInfo1.get();
+	NzbInfo* nzbInfo2 = refNzbInfo2.get();
+
+	bool initialSortState = m_sortItemList->empty();
+	bool sortItem1 = initialSortState;
+	bool sortItem2 = initialSortState;
+
+	for (QueueEditor::EditItem& item : m_sortItemList)
+	{
+		sortItem1 |= item.m_nzbInfo == nzbInfo1;
+		sortItem2 |= item.m_nzbInfo == nzbInfo2;
+	}
+
+	if (!sortItem1 || !sortItem2)
+	{
+		return false;
+	}
+
+	return nzbget_rs_queue_editor_group_sorter_compare_values(
+		(int)m_sortCriteria,
+		(int)m_sortOrder,
+		(int)soDescending,
+		strcmp(nzbInfo1->GetName(), nzbInfo2->GetName()),
+		nzbInfo1->GetSize(),
+		nzbInfo2->GetSize(),
+		nzbInfo1->GetRemainingSize() - nzbInfo1->GetPausedSize(),
+		nzbInfo2->GetRemainingSize() - nzbInfo2->GetPausedSize(),
+		(int64)nzbInfo1->GetMinTime(),
+		(int64)nzbInfo2->GetMinTime(),
+		strcmp(nzbInfo1->GetCategory(), nzbInfo2->GetCategory()),
+		nzbInfo1->GetPriority(),
+		nzbInfo2->GetPriority()) != 0;
+}
+
+inline FileInfo* QueueEditor::FindFileInfo(int id)
+{
+	for (NzbInfo* nzbInfo : m_downloadQueue->GetQueue())
+	{
+		FileInfo* fileInfo = nzbInfo->GetFileList()->Find(id);
+		if (fileInfo)
+		{
+			return fileInfo;
+		}
+	}
+	return nullptr;
+}
+
+inline void QueueEditor::PauseUnpauseEntry(FileInfo* fileInfo, bool pause)
+{
+	fileInfo->SetPaused(pause);
+}
+
+inline void QueueEditor::DeleteEntry(FileInfo* fileInfo)
+{
+	if (!fileInfo->GetDeleted())
+	{
+		fileInfo->GetNzbInfo()->PrintMessage(
+			fileInfo->GetNzbInfo()->GetDeleting() ? Message::mkDetail : Message::mkInfo,
+			"Deleting file %s from download queue", fileInfo->GetFilename());
+		g_QueueCoordinator->DeleteQueueEntry(m_downloadQueue, fileInfo);
+	}
+}
+
+inline void QueueEditor::MoveEntry(FileInfo* fileInfo, int offset)
+{
+	int entry = 0;
+	for (FileInfo* fileInfo2 : fileInfo->GetNzbInfo()->GetFileList())
+	{
+		if (fileInfo2 == fileInfo)
+		{
+			break;
+		}
+		entry++;
+	}
+
+	int size = (int)fileInfo->GetNzbInfo()->GetFileList()->size();
+	int newEntry = 0;
+	if (nzbget_rs_queue_editor_clamp_move_target(entry, offset, size, &newEntry) != 0)
+	{
+		std::unique_ptr<FileInfo> movedFileInfo = std::move(*(fileInfo->GetNzbInfo()->GetFileList()->begin() + entry));
+		fileInfo->GetNzbInfo()->GetFileList()->erase(fileInfo->GetNzbInfo()->GetFileList()->begin() + entry);
+		fileInfo->GetNzbInfo()->GetFileList()->insert(fileInfo->GetNzbInfo()->GetFileList()->begin() + newEntry, std::move(movedFileInfo));
+	}
+}
+
+inline void QueueEditor::MoveGroup(NzbInfo* nzbInfo, int offset)
+{
+	int entry = 0;
+	for (NzbInfo* nzbInfo2 : m_downloadQueue->GetQueue())
+	{
+		if (nzbInfo2 == nzbInfo)
+		{
+			break;
+		}
+		entry++;
+	}
+
+	int size = (int)m_downloadQueue->GetQueue()->size();
+	int newEntry = 0;
+	if (nzbget_rs_queue_editor_clamp_move_target(entry, offset, size, &newEntry) != 0)
+	{
+		std::unique_ptr<NzbInfo> movedNzbInfo = std::move(*(m_downloadQueue->GetQueue()->begin() + entry));
+		m_downloadQueue->GetQueue()->erase(m_downloadQueue->GetQueue()->begin() + entry);
+		m_downloadQueue->GetQueue()->insert(m_downloadQueue->GetQueue()->begin() + newEntry, std::move(movedNzbInfo));
+	}
+}
+
+inline bool QueueEditor::EditEntry(DownloadQueue* downloadQueue, int ID, DownloadQueue::EEditAction action, const char* args)
+{
+	m_downloadQueue = downloadQueue;
+	IdList cIdList;
+	cIdList.push_back(ID);
+	return InternEditList(nullptr, &cIdList, action, args);
+}
+
+inline bool QueueEditor::EditList(DownloadQueue* downloadQueue, IdList* idList, NameList* nameList, DownloadQueue::EMatchMode matchMode,
+	DownloadQueue::EEditAction action, const char* args)
+{
+	if (!idList &&
+		(action == DownloadQueue::eaPostDelete ||
+		 (DownloadQueue::eaHistoryDelete <= action && action <= DownloadQueue::eaHistorySetName)))
+	{
+		return false;
+	}
+
+	if (action == DownloadQueue::eaPostDelete)
+	{
+		return g_PrePostProcessor->EditList(downloadQueue, idList, action, args);
+	}
+	else if (DownloadQueue::eaHistoryDelete <= action && action <= DownloadQueue::eaHistorySetName)
+	{
+		return g_HistoryCoordinator->EditList(downloadQueue, idList, action, args);
+	}
+
+	m_downloadQueue = downloadQueue;
+	bool ok = true;
+
+	std::unique_ptr<IdList> nameIdList;
+
+	if (nameList)
+	{
+		nameIdList = std::make_unique<IdList>();
+		idList = nameIdList.get();
+		ok = BuildIdListFromNameList(idList, nameList, matchMode, action);
+	}
+
+	ok = ok && (InternEditList(nullptr, idList, action, args) || matchMode == DownloadQueue::mmRegEx);
+
+	m_downloadQueue->Save();
+
+	return ok;
+}
+
+inline bool QueueEditor::InternEditList(ItemList* itemList,
+	IdList* idList, DownloadQueue::EEditAction action, const char* args)
+{
+	IdList uniqueIds;
+	if (idList)
+	{
+		uniqueIds.resize(idList->size(), 0);
+		size_t uniqueLen = nzbget_rs_queue_editor_dedup_id_list(
+			idList->empty() ? nullptr : idList->data(),
+			idList->size(),
+			uniqueIds.empty() ? nullptr : uniqueIds.data());
+		uniqueIds.resize(uniqueLen);
+		idList = &uniqueIds;
+	}
+
+	ItemList workItems;
+	if (!itemList)
+	{
+		itemList = &workItems;
+		int offset = args && (action == DownloadQueue::eaFileMoveOffset ||
+			action == DownloadQueue::eaGroupMoveOffset) ? atoi(args) : 0;
+		PrepareList(itemList, idList, action, offset);
+	}
+
+	if (action == DownloadQueue::eaFilePauseAllPars || action == DownloadQueue::eaFilePauseExtraPars)
+	{
+		bool any = !itemList->empty();
+		PauseParsInGroups(itemList, action == DownloadQueue::eaFilePauseExtraPars);
+		return any;
+	}
+
+	switch (action)
+	{
+		case DownloadQueue::eaGroupMerge:
+			return MergeGroups(itemList);
+
+		case DownloadQueue::eaGroupSort:
+			return SortGroups(itemList, args);
+
+		case DownloadQueue::eaGroupMoveAfter:
+		case DownloadQueue::eaGroupMoveBefore:
+			return MoveGroupsTo(itemList, idList, action == DownloadQueue::eaGroupMoveBefore, args);
+
+		case DownloadQueue::eaFileSplit:
+			return SplitGroup(itemList, args);
+
+		case DownloadQueue::eaFileReorder:
+			ReorderFiles(itemList);
+			break;
+
+		default:
+			for (EditItem& item : itemList)
+			{
+				switch (action)
+				{
+					case DownloadQueue::eaFilePause:
+						PauseUnpauseEntry(item.m_fileInfo, true);
+						break;
+
+					case DownloadQueue::eaFileResume:
+						PauseUnpauseEntry(item.m_fileInfo, false);
+						break;
+
+					case DownloadQueue::eaFileMoveOffset:
+					case DownloadQueue::eaFileMoveTop:
+					case DownloadQueue::eaFileMoveBottom:
+						MoveEntry(item.m_fileInfo, item.m_offset);
+						break;
+
+					case DownloadQueue::eaFileDelete:
+						DeleteEntry(item.m_fileInfo);
+						break;
+
+					case DownloadQueue::eaGroupSetPriority:
+						SetNzbPriority(item.m_nzbInfo, args);
+						break;
+
+					case DownloadQueue::eaGroupSetCategory:
+					case DownloadQueue::eaGroupApplyCategory:
+						SetNzbCategory(item.m_nzbInfo, args, action == DownloadQueue::eaGroupApplyCategory);
+						break;
+
+					case DownloadQueue::eaGroupSetName:
+						SetNzbName(item.m_nzbInfo, args);
+						break;
+
+					case DownloadQueue::eaGroupSetDupeKey:
+					case DownloadQueue::eaGroupSetDupeScore:
+					case DownloadQueue::eaGroupSetDupeMode:
+						SetNzbDupeParam(item.m_nzbInfo, action, args);
+						break;
+
+					case DownloadQueue::eaGroupSetParameter:
+						SetNzbParameter(item.m_nzbInfo, args);
+						break;
+
+					case DownloadQueue::eaGroupMoveTop:
+					case DownloadQueue::eaGroupMoveBottom:
+					case DownloadQueue::eaGroupMoveOffset:
+						MoveGroup(item.m_nzbInfo, item.m_offset);
+						break;
+
+					case DownloadQueue::eaGroupPause:
+					case DownloadQueue::eaGroupResume:
+					case DownloadQueue::eaGroupPauseAllPars:
+					case DownloadQueue::eaGroupPauseExtraPars:
+						EditGroup(item.m_nzbInfo, action, args);
+						break;
+
+					case DownloadQueue::eaGroupDelete:
+					case DownloadQueue::eaGroupParkDelete:
+					case DownloadQueue::eaGroupDupeDelete:
+					case DownloadQueue::eaGroupFinalDelete:
+						if (item.m_nzbInfo->GetKind() == NzbInfo::nkUrl)
+						{
+							DeleteUrl(item.m_nzbInfo, action);
+						}
+						else
+						{
+							EditGroup(item.m_nzbInfo, action, args);
+						}
+						break;
+
+					case DownloadQueue::eaGroupSortFiles:
+						SortGroupFiles(item.m_nzbInfo);
+						break;
+
+					default:
+						break;
+				}
+			}
+	}
+
+	return itemList->size() > 0;
+}
+
+inline void QueueEditor::PrepareList(ItemList* itemList, IdList* idList,
+	DownloadQueue::EEditAction action, int offset)
+{
+	if (!itemList || !idList)
+	{
+		return;
+	}
+
+	if (action == DownloadQueue::eaFileMoveTop || action == DownloadQueue::eaGroupMoveTop)
+	{
+		offset = -MAX_ID;
+	}
+	else if (action == DownloadQueue::eaFileMoveBottom || action == DownloadQueue::eaGroupMoveBottom)
+	{
+		offset = MAX_ID;
+	}
+
+	itemList->reserve(idList->size());
+	if (offset != 0 &&
+		(action == DownloadQueue::eaFileMoveOffset ||
+		 action == DownloadQueue::eaFileMoveTop ||
+		 action == DownloadQueue::eaFileMoveBottom))
+	{
+		for (NzbInfo* nzbInfo : m_downloadQueue->GetQueue())
+		{
+			int nrEntries = (int)nzbInfo->GetFileList()->size();
+			int lastDestPos = -1;
+			int start = offset < 0 ? 0 : nrEntries - 1;
+			int end = offset < 0 ? nrEntries : -1;
+			int step = offset < 0 ? 1 : -1;
+			for (int index = start; index != end; index += step)
+			{
+				std::unique_ptr<FileInfo>& fileInfo = nzbInfo->GetFileList()->at(index);
+				IdList::iterator it2 = std::find(idList->begin(), idList->end(), fileInfo->GetId());
+				if (it2 != idList->end())
+				{
+					int workOffset = 0;
+					nzbget_rs_qhp_clamp_move_offset(index, nrEntries, offset, lastDestPos, &workOffset, &lastDestPos);
+					itemList->emplace_back(fileInfo.get(), nullptr, workOffset);
+				}
+			}
+		}
+	}
+	else if ((offset != 0 &&
+		(action == DownloadQueue::eaGroupMoveOffset ||
+		 action == DownloadQueue::eaGroupMoveTop ||
+		 action == DownloadQueue::eaGroupMoveBottom)) ||
+		action == DownloadQueue::eaGroupMoveBefore ||
+		action == DownloadQueue::eaGroupMoveAfter)
+	{
+		int nrEntries = (int)m_downloadQueue->GetQueue()->size();
+		int lastDestPos = -1;
+		int start = offset <= 0 ? 0 : nrEntries - 1;
+		int end = offset <= 0 ? nrEntries : -1;
+		int step = offset <= 0 ? 1 : -1;
+		for (int index = start; index != end; index += step)
+		{
+			std::unique_ptr<NzbInfo>& nzbInfo = m_downloadQueue->GetQueue()->at(index);
+			IdList::iterator it2 = std::find(idList->begin(), idList->end(), nzbInfo->GetId());
+			if (it2 != idList->end())
+			{
+				int workOffset = 0;
+				nzbget_rs_qhp_clamp_move_offset(index, nrEntries, offset, lastDestPos, &workOffset, &lastDestPos);
+				itemList->emplace_back(nullptr, nzbInfo.get(), workOffset);
+			}
+		}
+	}
+	else if (action < DownloadQueue::eaGroupMoveOffset)
+	{
+		int maxId = 0;
+		int minId = MAX_ID;
+		for (NzbInfo* nzbInfo : m_downloadQueue->GetQueue())
+		{
+			for (FileInfo* fileInfo : nzbInfo->GetFileList())
+			{
+				int ID = fileInfo->GetId();
+				if (ID > maxId) maxId = ID;
+				if (ID < minId) minId = ID;
+			}
+		}
+
+		for (int id : *idList)
+		{
+			if (minId <= id && id <= maxId)
+			{
+				FileInfo* fileInfo = FindFileInfo(id);
+				if (fileInfo)
+				{
+					itemList->emplace_back(fileInfo, nullptr, offset);
+				}
+			}
+		}
+	}
+	else
+	{
+		int maxId = 0;
+		int minId = MAX_ID;
+		for (NzbInfo* nzbInfo : m_downloadQueue->GetQueue())
+		{
+			int ID = nzbInfo->GetId();
+			if (ID > maxId) maxId = ID;
+			if (ID < minId) minId = ID;
+		}
+
+		for (int id : *idList)
+		{
+			if (minId <= id && id <= maxId)
+			{
+				for (NzbInfo* nzbInfo : m_downloadQueue->GetQueue())
+				{
+					if (id == nzbInfo->GetId())
+					{
+						itemList->emplace_back(nullptr, nzbInfo, offset);
+					}
+				}
+			}
+		}
+	}
+}
+
+inline bool QueueEditor::BuildIdListFromNameList(IdList* idList, NameList* nameList, DownloadQueue::EMatchMode matchMode, DownloadQueue::EEditAction action)
+{
+#ifndef HAVE_REGEX_H
+	if (matchMode == DownloadQueue::mmRegEx)
+	{
+		return false;
+	}
+#endif
+
+	std::set<int> uniqueIds;
+
+	for (CString& name : nameList)
+	{
+		std::unique_ptr<RegEx> regEx;
+		if (matchMode == DownloadQueue::mmRegEx)
+		{
+			regEx = std::make_unique<RegEx>(name);
+			if (!regEx->IsValid())
+			{
+				return false;
+			}
+		}
+
+		bool found = false;
+
+		for (NzbInfo* nzbInfo : m_downloadQueue->GetQueue())
+		{
+			for (FileInfo* fileInfo : nzbInfo->GetFileList())
+			{
+				if (action < DownloadQueue::eaGroupMoveOffset)
+				{
+					BString<1024> filename("%s/%s", fileInfo->GetNzbInfo()->GetName(),
+						FileSystem::BaseFileName(fileInfo->GetFilename()));
+					if (((regEx && regEx->Match(filename)) || (!regEx && !strcmp(filename, name))) &&
+						uniqueIds.find(fileInfo->GetId()) == uniqueIds.end())
+					{
+						uniqueIds.insert(fileInfo->GetId());
+						idList->push_back(fileInfo->GetId());
+						found = true;
+					}
+				}
+			}
+
+			if (action >= DownloadQueue::eaGroupMoveOffset)
+			{
+				const char *filename = nzbInfo->GetName();
+				if (((regEx && regEx->Match(filename)) || (!regEx && !strcmp(filename, name))) &&
+					uniqueIds.find(nzbInfo->GetId()) == uniqueIds.end())
+				{
+					uniqueIds.insert(nzbInfo->GetId());
+					idList->push_back(nzbInfo->GetId());
+					found = true;
+				}
+			}
+		}
+
+		if (!found && (matchMode == DownloadQueue::mmName))
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+inline bool QueueEditor::EditGroup(NzbInfo* nzbInfo, DownloadQueue::EEditAction action, const char* args)
+{
+	ItemList itemList;
+	bool allPaused = true;
+	int id = nzbInfo->GetId();
+
+	for (FileInfo* fileInfo : nzbInfo->GetFileList())
+	{
+		itemList.emplace_back(fileInfo, nullptr, 0);
+		allPaused &= fileInfo->GetPaused();
+	}
+
+	bool isGroupDel = action == DownloadQueue::eaGroupDelete ||
+		action == DownloadQueue::eaGroupParkDelete ||
+		action == DownloadQueue::eaGroupDupeDelete ||
+		action == DownloadQueue::eaGroupFinalDelete;
+	if (isGroupDel)
+	{
+		nzbInfo->SetDeleting(true);
+		int parking = 0, avoidHistory = 0, setDupeStatus = 0, cleanupDisk = 0;
+		nzbget_rs_queue_editor_eval_group_delete_flags(
+			(int)action,
+			(int)DownloadQueue::eaGroupParkDelete,
+			(int)DownloadQueue::eaGroupDupeDelete,
+			(int)DownloadQueue::eaGroupFinalDelete,
+			g_Options->GetKeepHistory(),
+			nzbInfo->GetUnpackCleanedUpDisk() ? 1 : 0,
+			nzbInfo->GetCurrentSuccessArticles(),
+			&parking, &avoidHistory, &setDupeStatus, &cleanupDisk);
+		nzbInfo->SetParking(parking != 0);
+		nzbInfo->SetAvoidHistory(avoidHistory != 0);
+		nzbInfo->SetDeletePaused(allPaused);
+		if (setDupeStatus)
+		{
+			nzbInfo->SetDeleteStatus(NzbInfo::dsDupe);
+		}
+		nzbInfo->SetCleanupDisk(cleanupDisk != 0);
+	}
+
+	DownloadQueue::EEditAction fileAction =
+		(DownloadQueue::EEditAction)nzbget_rs_queue_editor_map_group_to_file_action((int32_t)action);
+	bool ok = InternEditList(&itemList, nullptr, fileAction, args);
+
+	if (isGroupDel &&
+		m_downloadQueue->GetQueue()->Find(id))
+	{
+		DownloadQueue::Aspect deleteAspect = { DownloadQueue::eaNzbDeleted, m_downloadQueue, nzbInfo, nullptr };
+		m_downloadQueue->Notify(&deleteAspect);
+	}
+
+	return ok;
+}
+
+inline void QueueEditor::PauseParsInGroups(ItemList* itemList, bool extraParsOnly)
+{
+	while (true)
+	{
+		RawFileList GroupFileList;
+		FileInfo* firstFileInfo = nullptr;
+
+		for (ItemList::iterator it = itemList->begin(); it != itemList->end(); )
+		{
+			EditItem& item = *it;
+			if (!firstFileInfo ||
+				(firstFileInfo->GetNzbInfo() == item.m_fileInfo->GetNzbInfo()))
+			{
+				GroupFileList.push_back(item.m_fileInfo);
+				if (!firstFileInfo)
+				{
+					firstFileInfo = item.m_fileInfo;
+				}
+				itemList->erase(it);
+				it = itemList->begin();
+				continue;
+			}
+			++it;
+		}
+
+		if (!GroupFileList.empty())
+		{
+			PausePars(&GroupFileList, extraParsOnly);
+		}
+		else
+		{
+			break;
+		}
+	}
+}
+
+inline void QueueEditor::PausePars(RawFileList* fileList, bool extraParsOnly)
+{
+	debug("QueueEditor: Pausing pars");
+
+	size_t count = fileList->size();
+	std::vector<uint8_t> rsIsPar;
+	std::vector<uint8_t> rsHasVol;
+	std::vector<int64_t> rsSizes;
+	rsIsPar.reserve(count);
+	rsHasVol.reserve(count);
+	rsSizes.reserve(count);
+	std::vector<uint8_t> rsOutPause(count, 0);
+	for (FileInfo* fileInfo : fileList)
+	{
+		rsIsPar.push_back(fileInfo->GetParFile() ? 1 : 0);
+		rsHasVol.push_back(
+			nzbget_rs_queue_editor_filename_has_vol(fileInfo->GetFilename()) != 0 ? 1 : 0);
+		rsSizes.push_back(fileInfo->GetSize());
+	}
+	nzbget_rs_qhp_select_pars_to_pause(
+		rsIsPar.empty() ? nullptr : rsIsPar.data(),
+		rsHasVol.empty() ? nullptr : rsHasVol.data(),
+		rsSizes.empty() ? nullptr : rsSizes.data(),
+		count,
+		extraParsOnly ? 1 : 0,
+		rsOutPause.empty() ? nullptr : rsOutPause.data()
+	);
+	for (size_t i = 0; i < count; i++)
+	{
+		if (rsOutPause[i])
+		{
+			(*fileList)[i]->SetPaused(true);
+		}
+	}
+}
+
+inline void QueueEditor::SetNzbPriority(NzbInfo* nzbInfo, const char* priority)
+{
+	debug("Setting priority %s for %s", priority, nzbInfo->GetName());
+
+	nzbInfo->SetPriority(priority ? atoi(priority) : 0);
+}
+
+inline void QueueEditor::SetNzbCategory(NzbInfo* nzbInfo, const char* category, bool applyParams)
+{
+	debug("QueueEditor: setting category '%s' for '%s'", category, nzbInfo->GetName());
+
+	bool oldUnpack = g_Options->GetUnpack();
+	const char* oldExtensions = g_Options->GetExtensions();
+	if (applyParams && !Util::EmptyStr(nzbInfo->GetCategory()))
+	{
+		Options::Category* categoryObj = g_Options->FindCategory(nzbInfo->GetCategory(), false);
+		if (categoryObj)
+		{
+			oldUnpack = categoryObj->GetUnpack();
+			if (!Util::EmptyStr(categoryObj->GetExtensions()))
+			{
+				oldExtensions = categoryObj->GetExtensions();
+			}
+		}
+	}
+
+	g_QueueCoordinator->SetQueueEntryCategory(m_downloadQueue, nzbInfo, category);
+
+	if (!applyParams)
+	{
+		return;
+	}
+
+	bool newUnpack = g_Options->GetUnpack();
+	const char* newExtensions = g_Options->GetExtensions();
+	if (!Util::EmptyStr(nzbInfo->GetCategory()))
+	{
+		Options::Category* categoryObj = g_Options->FindCategory(nzbInfo->GetCategory(), false);
+		if (categoryObj)
+		{
+			newUnpack = categoryObj->GetUnpack();
+			if (!Util::EmptyStr(categoryObj->GetExtensions()))
+			{
+				newExtensions = categoryObj->GetExtensions();
+			}
+		}
+	}
+
+	if (oldUnpack != newUnpack)
+	{
+		nzbInfo->GetParameters()->SetParameter("*Unpack:", newUnpack ? "yes" : "no");
+	}
+
+	nzbget_rs_queue_editor_visit_category_ext_diff(
+		oldExtensions,
+		newExtensions,
+		nzbInfo->GetParameters(),
+		[](void* ctx, const char* paramName, const char* paramVal)
+		{
+			static_cast<NzbParameterList*>(ctx)->SetParameter(paramName, paramVal);
+		});
+}
+
+inline void QueueEditor::SetNzbName(NzbInfo* nzbInfo, const char* name)
+{
+	debug("QueueEditor: renaming '%s' to '%s'", nzbInfo->GetName(), name);
+
+	std::string previous = nzbInfo->GetName();
+	g_QueueCoordinator->SetQueueEntryName(m_downloadQueue, nzbInfo, name);
+	if (previous != nzbInfo->GetName() && g_DupeSearch)
+		g_DupeSearch->NotifyNameChanged(nzbInfo->GetId());
+}
+
+inline bool QueueEditor::MergeGroups(ItemList* itemList)
+{
+	if (itemList->size() == 0)
+	{
+		return false;
+	}
+
+	bool ok = true;
+
+	EditItem& destItem = itemList->front();
+
+	for (EditItem& item : itemList) 
+	{
+		if (item.m_nzbInfo != destItem.m_nzbInfo)
+		{
+			debug("merge %s to %s", item.m_nzbInfo->GetFilename(), destItem.m_nzbInfo->GetFilename());
+			if (!g_QueueCoordinator->MergeQueueEntries(m_downloadQueue, destItem.m_nzbInfo, item.m_nzbInfo))
+			{
+				ok = false;
+			}
+		}
+	}
+
+	return ok;
+}
+
+inline bool QueueEditor::SplitGroup(ItemList* itemList, const char* name)
+{
+	if (itemList->size() == 0)
+	{
+		return false;
+	}
+
+	RawFileList fileList;
+
+	for (EditItem& item : itemList)
+	{
+		fileList.push_back(item.m_fileInfo);
+	}
+
+	NzbInfo* newNzbInfo = nullptr;
+	bool ok = g_QueueCoordinator->SplitQueueEntries(m_downloadQueue, &fileList, name, &newNzbInfo);
+
+	return ok;
+}
+
+inline bool QueueEditor::SortGroups(ItemList* itemList, const char* sort)
+{
+	AlignGroups(itemList);
+	if (!sort)
+	{
+		return false;
+	}
+	GroupSorter sorter(m_downloadQueue->GetQueue(), itemList);
+	return sorter.Execute(sort);
+}
+
+inline void QueueEditor::AlignGroups(ItemList* itemList)
+{
+	NzbList* nzbList = m_downloadQueue->GetQueue();
+	NzbInfo* lastNzbInfo = nullptr;
+	uint32 lastNum = 0;
+	uint32 num = 0;
+	while (num < nzbList->size())
+	{
+		std::unique_ptr<NzbInfo>& nzbInfo = nzbList->at(num);
+
+		bool selected = false;
+		for (QueueEditor::EditItem& item : itemList)
+		{
+			if (item.m_nzbInfo == nzbInfo.get())
+			{
+				selected = true;
+				break;
+			}
+		}
+
+		if (selected)
+		{
+			if (lastNzbInfo && num - lastNum > 1)
+			{
+				std::unique_ptr<NzbInfo> movedNzbInfo = std::move(*(nzbList->begin() + num));
+				nzbList->erase(nzbList->begin() + num);
+				nzbList->insert(nzbList->begin() + lastNum + 1, std::move(movedNzbInfo));
+				lastNum++;
+			}
+			else
+			{
+				lastNum = num;
+			}
+			lastNzbInfo = nzbInfo.get();
+		}
+		num++;
+	}
+}
+
+inline bool QueueEditor::ItemListContainsItem(ItemList* itemList, int id)
+{
+	return std::find_if(itemList->begin(), itemList->end(),
+		[id](const EditItem& item)
+		{
+			return item.m_nzbInfo->GetId() == id;
+		}) != itemList->end();
+}
+
+inline bool QueueEditor::MoveGroupsTo(ItemList* itemList, IdList* idList, bool before, const char* args)
+{
+	if (itemList->size() == 0 || Util::EmptyStr(args))
+	{
+		return false;
+	}
+
+	int targetId = atoi(args);
+	int offset = 0;
+
+	if (!m_downloadQueue->GetQueue()->Find(targetId))
+	{
+		return false;
+	}
+
+	if (ItemListContainsItem(itemList, targetId))
+	{
+		std::vector<int32_t> queueIds;
+		queueIds.reserve(m_downloadQueue->GetQueue()->size());
+		for (NzbInfo* nzbInfo : m_downloadQueue->GetQueue())
+		{
+			queueIds.push_back(nzbInfo->GetId());
+		}
+		std::vector<int32_t> movedIds;
+		movedIds.reserve(itemList->size());
+		for (const EditItem& item : *itemList)
+		{
+			movedIds.push_back(item.m_nzbInfo->GetId());
+		}
+		int32_t newTargetId = targetId, newBefore = before ? 1 : 0, newOffset = offset;
+		nzbget_rs_queue_editor_resolve_move_groups_target(
+			targetId,
+			queueIds.empty() ? nullptr : queueIds.data(),
+			queueIds.size(),
+			movedIds.empty() ? nullptr : movedIds.data(),
+			movedIds.size(),
+			before ? 1 : 0,
+			MAX_ID,
+			&newTargetId,
+			&newBefore,
+			&newOffset);
+		targetId = newTargetId;
+		before = newBefore != 0;
+		offset = newOffset;
+	}
+
+	AlignGroups(itemList);
+
+	if (offset == 0)
+	{
+		int moveId = itemList->at(0).m_nzbInfo->GetId();
+		std::vector<int> queueIds;
+		queueIds.reserve(m_downloadQueue->GetQueue()->size());
+		for (NzbInfo* nzbInfo : m_downloadQueue->GetQueue())
+		{
+			queueIds.push_back(nzbInfo->GetId());
+		}
+		offset = nzbget_rs_queue_editor_calc_move_groups_to_offset(
+			queueIds.data(), queueIds.size(), targetId, moveId,
+			before ? 1 : 0, itemList->size());
+	}
+
+	BString<100> offStr("%i", offset);
+	return InternEditList(nullptr, idList, DownloadQueue::eaGroupMoveOffset, offStr);
+}
+
+inline void QueueEditor::ReorderFiles(ItemList* itemList)
+{
+	if (itemList->size() == 0)
+	{
+		return;
+	}
+
+	EditItem& firstItem = itemList->front();
+	NzbInfo* nzbInfo = firstItem.m_fileInfo->GetNzbInfo();
+	uint32 insertPos = 0;
+
+	for (EditItem& item : itemList)
+	{
+		FileInfo* fileInfo = item.m_fileInfo;
+
+		FileList::iterator it2 = nzbInfo->GetFileList()->Find(fileInfo);
+		if (it2 != nzbInfo->GetFileList()->end())
+		{
+			std::unique_ptr<FileInfo> movedFileInfo = std::move(*it2);
+			nzbInfo->GetFileList()->erase(it2);
+			nzbInfo->GetFileList()->insert(nzbInfo->GetFileList()->begin() + insertPos, std::move(movedFileInfo));
+			insertPos++;
+		}
+	}
+}
+
+inline void QueueEditor::SetNzbParameter(NzbInfo* nzbInfo, const char* paramString)
+{
+	debug("QueueEditor: setting nzb parameter '%s' for '%s'", paramString, FileSystem::BaseFileName(nzbInfo->GetFilename()));
+
+	const char* eq = paramString ? strchr(paramString, '=') : nullptr;
+	if (eq)
+	{
+		std::string name(paramString, (size_t)(eq - paramString));
+		nzbInfo->GetParameters()->SetParameter(name.c_str(), eq + 1);
+	}
+	else
+	{
+		error("Could not set nzb parameter for %s: invalid argument: %s", nzbInfo->GetName(), paramString);
+	}
+}
+
+inline void QueueEditor::SetNzbDupeParam(NzbInfo* nzbInfo, DownloadQueue::EEditAction action, const char* text)
+{
+	debug("QueueEditor: setting dupe parameter %i='%s' for '%s'", (int)action, text, nzbInfo->GetName());
+
+	switch (action)
+	{
+		case DownloadQueue::eaGroupSetDupeKey:
+			nzbInfo->GetParameters()->SetParameter(DupeSearch::OwnedKeyParam, nullptr);
+			nzbInfo->SetDupeKey(text);
+			break;
+
+		case DownloadQueue::eaGroupSetDupeScore:
+			nzbInfo->SetDupeScore(text ? atoi(text) : 0);
+			break;
+
+		case DownloadQueue::eaGroupSetDupeMode:
+			{
+				int parsedMode = 0;
+				if (!nzbget_rs_qhp_parse_dupe_mode(text, &parsedMode))
+				{
+					error("Could not set duplicate mode for %s: incorrect mode (%s)", nzbInfo->GetName(), text);
+					return;
+				}
+				nzbInfo->SetDupeMode((EDupeMode)parsedMode);
+				break;
+			}
+
+		default:
+			break;
+	}
+}
+
+inline void QueueEditor::SortGroupFiles(NzbInfo* nzbInfo)
+{
+	debug("QueueEditor: sorting inner files for '%s'", nzbInfo->GetName());
+
+	std::sort(nzbInfo->GetFileList()->begin(), nzbInfo->GetFileList()->end(),
+		[](const std::unique_ptr<FileInfo>& fileInfo1, const std::unique_ptr<FileInfo>& fileInfo2)
+		{
+			bool samePar = fileInfo1->GetParFile() && fileInfo2->GetParFile() &&
+				ParParser::SameParCollection(fileInfo1->GetFilename(), fileInfo2->GetFilename(),
+					fileInfo1->GetFilenameConfirmed() && fileInfo2->GetFilenameConfirmed());
+			return nzbget_rs_qhp_compare_inner_files(
+				fileInfo1->GetFilename(),
+				fileInfo1->GetParFile() ? 1 : 0,
+				fileInfo1->GetSize(),
+				fileInfo2->GetFilename(),
+				fileInfo2->GetParFile() ? 1 : 0,
+				fileInfo2->GetSize(),
+				samePar ? 1 : 0
+			) != 0;
+		});
+}
+
+inline bool QueueEditor::DeleteUrl(NzbInfo* nzbInfo, DownloadQueue::EEditAction action)
+{
+	return g_UrlCoordinator->DeleteQueueEntry(m_downloadQueue, nzbInfo, action == DownloadQueue::eaGroupFinalDelete);
+}
+
+namespace DupeProbeDetail
+{
+	inline constexpr int ConnectionWaitSec = 10;
+	inline constexpr int ProbeLimitSec = 90;
+
+	inline Mutex g_probeMutex;
+	inline std::set<DupeProbe*> g_probes;
+	inline std::atomic<int> g_probeCount{0};
+	inline bool g_probesStopping = false;
+}
+
+inline std::vector<size_t> DupeProbe::SampleIndexes(size_t total, int count)
+{
+	std::vector<size_t> indexes;
+	if (total == 0 || count <= 0)
+	{
+		return indexes;
+	}
+
+	size_t wanted = std::min(total, (size_t)count);
+	indexes.resize(wanted);
+	nzbget_rs_dupe_probe_sample_indexes(total, count, indexes.data(), indexes.size());
+	return indexes;
+}
+
+inline DupeProbe::EAnswer DupeProbe::Classify(const char* response)
+{
+	return (EAnswer)nzbget_rs_dupe_probe_classify(response);
+}
+
+inline bool DupeProbe::IsDead(int existing, int definitiveServers, int activeServers)
+{
+	return nzbget_rs_dupe_probe_is_dead(existing, definitiveServers, activeServers) != 0;
+}
+
+inline void DupeProbe::Start(int nzbId, std::vector<Sample> samples, int recoveredAtStart)
+{
+	DupeProbe* probe = new DupeProbe(nzbId, std::move(samples));
+	probe->m_recoveredAtStart = recoveredAtStart;
+	if (!probe->Register())
+	{
+		delete probe;
+		return;
+	}
+	probe->SetAutoDestroy(true);
+	probe->Thread::Start();
+}
+
+inline DupeProbe::Verdict DupeProbe::Check(std::vector<Sample> samples, int limitSec)
+{
+	DupeProbe probe(0, std::move(samples));
+	if (!probe.Register())
+	{
+		Verdict stopping;
+		stopping.Finished = false;
+		return stopping;
+	}
+	Verdict verdict = probe.Measure(limitSec);
+	probe.Unregister();
+	return verdict;
+}
+
+inline void DupeProbe::Reset()
+{
+	using namespace DupeProbeDetail;
+	Guard guard(g_probeMutex);
+	g_probesStopping = false;
+}
+
+inline int DupeProbe::ProbingFor(int nzbId)
+{
+	using namespace DupeProbeDetail;
+	Guard guard(g_probeMutex);
+	for (DupeProbe* probe : g_probes)
+	{
+		if (probe->m_nzbId == nzbId && !probe->m_countAll)
+		{
+			return std::max(0, (int)(Util::CurrentTime() - probe->m_started));
+		}
+	}
+	return -1;
+}
+
+inline bool DupeProbe::Register()
+{
+	using namespace DupeProbeDetail;
+	Guard guard(g_probeMutex);
+	if (g_probesStopping)
+	{
+		return false;
+	}
+	m_started = Util::CurrentTime();
+	g_probes.insert(this);
+	g_probeCount++;
+	return true;
+}
+
+inline void DupeProbe::Unregister()
+{
+	using namespace DupeProbeDetail;
+	Guard guard(g_probeMutex);
+	g_probes.erase(this);
+	g_probeCount--;
+}
+
+inline std::vector<DupeProbe::Sample> DupeProbe::SamplesOf(const std::vector<FileInfo*>& files,
+	const std::function<void(FileInfo*)>& loadArticles)
+{
+	size_t total = 0;
+	for (FileInfo* fileInfo : files)
+	{
+		total += fileInfo->GetTotalArticles();
+	}
+
+	std::vector<Sample> samples;
+	for (size_t position : SampleIndexes(total, SampleCount))
+	{
+		size_t offset = 0;
+		for (FileInfo* fileInfo : files)
+		{
+			size_t count = fileInfo->GetTotalArticles();
+			if (position >= offset + count)
+			{
+				offset += count;
+				continue;
+			}
+			size_t index = position - offset;
+
+			if (fileInfo->GetArticles()->empty() && loadArticles)
+			{
+				loadArticles(fileInfo);
+			}
+			if (index < fileInfo->GetArticles()->size())
+			{
+				Sample sample;
+				sample.MessageId = fileInfo->GetArticles()->at(index)->GetMessageId();
+				sample.Groups = std::make_shared<std::vector<CString>>();
+				for (const CString& group : *fileInfo->GetGroups())
+				{
+					sample.Groups->emplace_back(*group);
+				}
+				samples.push_back(std::move(sample));
+			}
+			break;
+		}
+	}
+	return samples;
+}
+
+inline void DupeProbe::StopAll()
+{
+	using namespace DupeProbeDetail;
+	Guard guard(g_probeMutex);
+	g_probesStopping = true;
+	for (DupeProbe* probe : g_probes)
+	{
+		probe->Thread::Stop();
+		probe->Cancel();
+	}
+}
+
+inline void DupeProbe::WaitAll()
+{
+	using namespace DupeProbeDetail;
+	while (g_probeCount > 0)
+	{
+		Util::Sleep(20);
+	}
+}
+
+inline void DupeProbe::Cancel()
+{
+	if (m_connection)
+	{
+		m_connection->SetSuppressErrors(true);
+		m_connection->Cancel();
+	}
+}
+
+inline bool DupeProbe::ProbeServer(int serverId, std::set<int>& probed, ServerResult& result)
+{
+	using namespace DupeProbeDetail;
+	NewsServer* wanted = g_ServerPool->GetServerById(serverId);
+	if (!wanted)
+	{
+		return false;
+	}
+
+	NntpConnection* connection = nullptr;
+	time_t waitStart = Util::CurrentTime();
+	while (!connection && !IsStopped() && Util::CurrentTime() - waitStart <= ConnectionWaitSec)
+	{
+		connection = g_ServerPool->GetConnection(wanted->GetNormLevel(), wanted, nullptr);
+		if (!connection)
+		{
+			Util::Sleep(50);
+		}
+	}
+	if (!connection)
+	{
+		time_t blockTime = wanted->GetBlockTime();
+		result.Unreachable = g_ServerPool->IsServerBlocked(wanted) ||
+			(blockTime > 0 && Util::CurrentTime() - blockTime < RecentBlockSec);
+		return false;
+	}
+
+	NewsServer* server = connection->GetNewsServer();
+	bool fresh = probed.insert(server->GetId()).second;
+	bool probedServer = false;
+	if (fresh)
+	{
+		{
+			Guard guard(g_probeMutex);
+			m_connection = connection;
+		}
+
+		int remaining = (int)m_samples.size();
+		for (size_t index = 0; index < m_samples.size(); index++)
+		{
+			const Sample& sample = m_samples[index];
+			if (IsStopped())
+			{
+				break;
+			}
+			remaining--;
+			if (m_found[index])
+			{
+				continue;
+			}
+
+			if (!connection->Connect())
+			{
+				result.Unknown += remaining + 1;
+				result.Unreachable = result.Exists + result.Missing == 0;
+				break;
+			}
+
+			if (server->GetJoinGroup())
+			{
+				const char* joined = nullptr;
+				for (const CString& group : *sample.Groups)
+				{
+					joined = connection->JoinGroup(group);
+					if (joined && !strncmp(joined, "2", 1))
+					{
+						break;
+					}
+				}
+				if (!joined || strncmp(joined, "2", 1))
+				{
+					result.Unknown += remaining + 1;
+					if (!joined)
+					{
+						connection->Disconnect();
+					}
+					break;
+				}
+			}
+
+			BString<1024> statCmd("STAT %s\r\n", *sample.MessageId);
+			const char* response = connection->Request(statCmd);
+			if (!response)
+			{
+				connection->Disconnect();
+				result.Unknown += remaining + 1;
+				break;
+			}
+
+			switch (Classify(response))
+			{
+				case daExists:
+					result.Exists++;
+					m_found[index] = 1;
+					if (m_foundOn.empty())
+					{
+						m_foundOn = std::string(server->GetName()) + " (" + *sample.MessageId + ")";
+					}
+					break;
+				case daMissing:
+					result.Missing++;
+					break;
+				case daUnknown:
+					result.Unknown++;
+					break;
+			}
+
+			int foundCount = (int)std::count(m_found.begin(), m_found.end(), 1);
+			if (!m_countAll && foundCount >= MinAliveSamples)
+			{
+				break;
+			}
+		}
+		probedServer = true;
+	}
+
+	{
+		Guard guard(g_probeMutex);
+		m_connection = nullptr;
+	}
+	if (IsStopped() || connection->GetStatus() == Connection::csCancelled)
+	{
+		connection->Disconnect();
+	}
+	g_ServerPool->FreeConnection(connection, true);
+	return probedServer;
+}
+
+inline DupeProbe::Verdict DupeProbe::Measure(int limitSec)
+{
+	Verdict verdict;
+	Servers* servers = g_ServerPool->GetServers();
+	std::vector<uint8_t> srvActive;
+	std::vector<int32_t> srvGroups;
+	std::vector<int32_t> srvLevels;
+	std::vector<int32_t> srvIds;
+	srvActive.reserve(servers->size());
+	srvGroups.reserve(servers->size());
+	srvLevels.reserve(servers->size());
+	srvIds.reserve(servers->size());
+	for (NewsServer* server : servers)
+	{
+		srvActive.push_back(server->GetActive() ? 1 : 0);
+		srvGroups.push_back(server->GetGroup());
+		srvLevels.push_back(server->GetNormLevel());
+		srvIds.push_back(server->GetId());
+	}
+	std::vector<int32_t> order(servers->size());
+	size_t orderLen = nzbget_rs_dupe_probe_select_server_order(
+		srvActive.data(), srvGroups.data(), srvLevels.data(), srvIds.data(),
+		servers->size(), order.data(), order.size());
+	order.resize(orderLen);
+	verdict.ActiveServers = (int)orderLen;
+
+	std::set<int> probed;
+	time_t start = Util::CurrentTime();
+
+	for (int serverId : order)
+	{
+		if (IsStopped() || Util::CurrentTime() - start > limitSec)
+		{
+			verdict.Finished = false;
+			break;
+		}
+
+		ServerResult result;
+		bool reached = ProbeServer(serverId, probed, result);
+		if (result.Unreachable)
+		{
+			verdict.ActiveServers--;
+			verdict.UnreachableServers++;
+		}
+		if (!reached)
+		{
+			continue;
+		}
+		verdict.ReachedServers++;
+
+		verdict.Existing = (int)std::count(m_found.begin(), m_found.end(), 1);
+		verdict.FoundOn = m_foundOn;
+		if (m_countAll)
+		{
+			if (verdict.Existing == (int)m_samples.size())
+			{
+				break;
+			}
+			continue;
+		}
+		if (verdict.Existing >= MinAliveSamples)
+		{
+			break;
+		}
+		if (result.Unknown == 0 && result.Exists + result.Missing > 0)
+		{
+			verdict.MissingServers++;
+		}
+	}
+	if (IsStopped())
+	{
+		verdict.Finished = false;
+	}
+	return verdict;
+}
+
+inline void DupeProbe::StartRecheck(int nzbId, std::vector<Sample> samples)
+{
+	DupeProbe* probe = new DupeProbe(nzbId, std::move(samples));
+	probe->m_countAll = true;
+	probe->m_found.assign(probe->m_samples.size(), 0);
+	if (!probe->Register())
+	{
+		delete probe;
+		return;
+	}
+	probe->SetAutoDestroy(true);
+	probe->Thread::Start();
+}
+
+inline void DupeProbe::Recheck()
+{
+	Verdict verdict = Measure(RecheckLimitSec);
+	if (IsStopped() || !verdict.Finished)
+	{
+		return;
+	}
+
+	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+	for (HistoryInfo* historyInfo : downloadQueue->GetHistory())
+	{
+		if (historyInfo->GetKind() != HistoryInfo::hkNzb || historyInfo->GetNzbInfo()->GetId() != m_nzbId)
+		{
+			continue;
+		}
+		NzbInfo* nzbInfo = historyInfo->GetNzbInfo();
+		int sampled = (int)m_samples.size();
+		const char* duplicateQueuedName = "";
+		if (verdict.ReachedServers > 0 && verdict.Existing * 2 >= sampled)
+		{
+			for (NzbInfo* queued : downloadQueue->GetQueue())
+			{
+				if (DupeCoordinator::SameNameOrKey(queued->GetName(), queued->GetDupeKey(),
+					nzbInfo->GetName(), nzbInfo->GetDupeKey()))
+				{
+					duplicateQueuedName = queued->GetName();
+					break;
+				}
+			}
+		}
+
+		int outcome = 0;
+		NzbgetRsBuf msgBuf = nzbget_rs_dupe_probe_eval_recheck_outcome(
+			verdict.Existing, sampled, verdict.ReachedServers, duplicateQueuedName, &outcome);
+		std::string message(msgBuf.data ? msgBuf.data : "", msgBuf.len);
+		nzbget_rs_free(msgBuf);
+
+		nzbInfo->PrintMessage(Message::mkInfo, "%s", message.c_str());
+		if (outcome == 1)
+		{
+			nzbInfo->GetParameters()->SetParameter("*DupeRecheck", nullptr);
+			return;
+		}
+		if (outcome == 2)
+		{
+			return;
+		}
+		if (outcome == 3)
+		{
+			IdList ids = { historyInfo->GetId() };
+			downloadQueue->EditList(&ids, nullptr, DownloadQueue::mmId, DownloadQueue::eaHistoryRetryFailed, nullptr);
+		}
+		break;
+	}
+}
+
+inline void DupeProbe::Run()
+{
+	using namespace DupeProbeDetail;
+	if (m_countAll)
+	{
+		Recheck();
+		Unregister();
+		return;
+	}
+
+	Verdict verdict = Measure(ProbeLimitSec);
+	if (IsStopped())
+	{
+		Unregister();
+		return;
+	}
+
+	int sampled = (int)m_samples.size();
+	int outcome = 0;
+	NzbgetRsBuf msgBuf = nzbget_rs_dupe_probe_eval_run_outcome(
+		verdict.Existing,
+		sampled,
+		verdict.MissingServers,
+		verdict.ActiveServers,
+		verdict.UnreachableServers,
+		verdict.ReachedServers,
+		verdict.Finished ? 1 : 0,
+		verdict.FoundOn.c_str(),
+		&outcome);
+	std::string message(msgBuf.data ? msgBuf.data : "", msgBuf.len);
+	nzbget_rs_free(msgBuf);
+
+	if (outcome == 1)
+	{
+		Note(Message::mkInfo, "%s", message.c_str());
+		Abandon(verdict.MissingServers, verdict.ActiveServers);
+	}
+	else if (outcome == 2)
+	{
+		Note(Message::mkInfo, "%s", message.c_str());
+	}
+	else if (outcome == 3)
+	{
+		GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+		NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_nzbId);
+		if (nzbInfo)
+		{
+			nzbInfo->SetDeadPickProbed(false);
+			nzbInfo->PrintMessage(Message::mkDetail, "%s", message.c_str());
+		}
+	}
+	else if (outcome == 4)
+	{
+		Note(Message::mkInfo, "%s", message.c_str());
+	}
+
+	Unregister();
+}
+
+inline void DupeProbe::Note(Message::EKind kind, const char* format, ...)
+{
+	char text[1024];
+	va_list args;
+	va_start(args, format);
+	vsnprintf(text, sizeof(text), format, args);
+	va_end(args);
+
+	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+	NzbInfo* nzbInfo = downloadQueue->GetQueue()->Find(m_nzbId);
+	if (nzbInfo)
+	{
+		nzbInfo->PrintMessage(kind, "%s", text);
+	}
+	else
+	{
+		detail("Dupe probe of download %i: %s", m_nzbId, text);
+	}
+}
+
+inline void DupeProbe::Abandon(int missingServers, int activeServers)
+{
+	GuardedDownloadQueue downloadQueue = DownloadQueue::Guard();
+	g_QueueCoordinator->FailOverDeadPick(downloadQueue, m_nzbId, (int)m_samples.size(),
+		missingServers, activeServers, m_recoveredAtStart);
+}
 
 inline bool QueueCoordinator::CoordinatorDownloadQueue::EditEntry(
 	int ID, EEditAction action, const char* args)

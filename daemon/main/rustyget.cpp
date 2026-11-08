@@ -34,7 +34,7 @@
 #include "DiskState.h"
 #include "PrePostProcessor.h"
 #include "HistoryCoordinator.h"
-#include "TwinCheck.h"
+#include "DupeArticleFallback.h"
 #include "DupeCoordinator.h"
 #include "Scheduler.h"
 #include "Scanner.h"

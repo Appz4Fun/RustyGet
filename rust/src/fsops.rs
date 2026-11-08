@@ -1115,6 +1115,34 @@ pub fn get_current_directory() -> Vec<u8> {
     str_buf[..len].to_vec()
 }
 
+/// Reads the first 8 bytes of `filename` (`DupeArticleFallback::FirstContent`).
+/// Returns `Some([u8; 8])` only if all 8 bytes are read successfully.
+pub fn read_first_8_bytes(filename: &[u8]) -> Option<[u8; 8]> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path(filename)).ok()?;
+    let mut head = [0u8; 8];
+    f.read_exact(&mut head).ok()?;
+    Some(head)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fs_read_first_8_bytes(
+    filename: *const c_char,
+    out_head: *mut u8,
+) -> c_int {
+    if filename.is_null() || out_head.is_null() {
+        return 0;
+    }
+    let bytes = unsafe { CStr::from_ptr(filename).to_bytes() };
+    let Some(head) = read_first_8_bytes(bytes) else {
+        return 0;
+    };
+    unsafe {
+        std::ptr::copy_nonoverlapping(head.as_ptr(), out_head, 8);
+    }
+    1
+}
+
 pub(crate) struct PosixFsOps;
 
 impl crate::fsdelete::Ops for PosixFsOps {

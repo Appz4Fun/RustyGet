@@ -496,7 +496,7 @@ struct SNzbHistoryResponseEntry
 
 #endif
 
-#include "QueueEditor.h"
+#include "QueueCoordinator.h"
 #include "Options.h"
 #include "Connection.h"
 /*

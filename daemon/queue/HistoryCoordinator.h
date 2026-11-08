@@ -65,8 +65,7 @@ extern HistoryCoordinator* g_HistoryCoordinator;
 #include "DupeCoordinator.h"
 #include "PrePostProcessor.h"
 #include "ServerPool.h"
-#include "DupeProbe.h"
-#include "ParDamage.h"
+#include "DupeArticleFallback.h"
 #include "DupeSearch.h"
 #include "nzbget_rs.h"
 

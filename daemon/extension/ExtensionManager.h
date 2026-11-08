@@ -28,7 +28,7 @@
 #include <optional>
 #include <functional>
 #include "FileSystem.h"
-#include "WebDownloader.h"
+#include "Connection.h"
 #include "Util.h"
 #include "Options.h"
 #include "nzbget_rs.h"

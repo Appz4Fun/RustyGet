@@ -24,7 +24,7 @@
 
 #include <atomic>
 #include "Log.h"
-#include "WebDownloader.h"
+#include "Connection.h"
 #include "DownloadInfo.h"
 #include "Options.h"
 #include "Util.h"

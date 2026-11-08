@@ -218,8 +218,6 @@ namespace OpenSSL
 #endif
 
 using uint8 = uint8_t;
-using int16 = int16_t;
-using uint16 = uint16_t;
 using int32 = int32_t;
 using uint32 = uint32_t;
 using int64 = int64_t;
@@ -3208,7 +3206,6 @@ public:
 	static constexpr std::string_view AUTHORIZEDIP = "AuthorizedIP";
 	static constexpr std::string_view RENAMEIGNOREEXT = "RenameIgnoreExt";
 	static constexpr std::string_view NZBDIRARCHIVESCAN = "NzbDirArchiveScan";
-	static constexpr std::string_view UNPACK = "Unpack";
 	static constexpr std::string_view UNRARCMD = "UnrarCmd";
 	static constexpr std::string_view SEVENZIPCMD = "SevenZipCmd";
 	static constexpr std::string_view UNPACKPASSFILE = "UnpackPassFile";
@@ -3616,7 +3613,6 @@ private:
 	Extender* m_extender;
 
 	// Options
-	fs::path m_appDirPath;
 	fs::path m_configFilePath;
 	fs::path m_mainDirPath;
 	fs::path m_destDirPath;
@@ -3626,8 +3622,6 @@ private:
 	fs::path m_nzbDirPath;
 	fs::path m_webDirPath;
 	fs::path m_configTemplatePath;
-	fs::path m_secureCertPath;
-	fs::path m_secureKeyPath;
 	fs::path m_certStorePath;
 	fs::path m_lockFilePath;
 	fs::path m_logFilePath;
@@ -3756,7 +3750,6 @@ private:
 	CString m_sevenZipCmd;
 	CString m_unpackPassFile;
 	bool m_unpackPauseQueue;
-	bool m_unpackMutexEnforced = false;
 	CString m_extCleanupDisk;
 	CString m_parIgnoreExt;
 	CString m_unpackIgnoreExt;
@@ -3865,8 +3858,6 @@ public:
 private:
 	std::atomic<int> m_tier{NZBGET_RS_PRESSURE_NORMAL};
 	std::atomic<uint32_t> m_effectiveCacheMB{0};
-	std::atomic<uint32_t> m_effectiveParBufferMB{0};
-	std::atomic<uint32_t> m_effectiveDownloadsLimit{0};
 
 	int m_consecutiveSamples = 0;
 	int m_candidateTier = NZBGET_RS_PRESSURE_NORMAL;
@@ -4597,7 +4588,6 @@ inline void Options::Init(const char* exeName, const char* configFilename, bool 
 	nzbget_rs_free(appDirBuf);
 	SetOption(APPDIR.data(), filename);
 	m_appDir = *filename;
-	m_appDirPath = fs::u8path(*m_appDir);
 
 	SetOption(APPVERSION.data(), Util::VersionRevision());
 
@@ -4834,7 +4824,6 @@ inline NzbgetRsParsedOptions Options::ExportParsedScalars() const
 	s.use_temp_unpack_dir = m_useTempUnpackDir ? 1 : 0;
 	s.unpack_cleanup_disk = m_unpackCleanupDisk ? 1 : 0;
 	s.unpack_pause_queue = m_unpackPauseQueue ? 1 : 0;
-	s.unpack_mutex_enforced = m_unpackMutexEnforced ? 1 : 0;
 	s.url_force = m_urlForce ? 1 : 0;
 	s.cert_check = m_certCheck ? 1 : 0;
 	s.reorder_files = m_reorderFiles ? 1 : 0;
@@ -4939,7 +4928,6 @@ inline void Options::ApplyParsedScalars(const NzbgetRsParsedOptions& s)
 	m_useTempUnpackDir = s.use_temp_unpack_dir != 0;
 	m_unpackCleanupDisk = s.unpack_cleanup_disk != 0;
 	m_unpackPauseQueue = s.unpack_pause_queue != 0;
-	m_unpackMutexEnforced = s.unpack_mutex_enforced != 0;
 	m_urlForce = s.url_force != 0;
 	m_certCheck = s.cert_check != 0;
 	m_reorderFiles = s.reorder_files != 0;
@@ -5155,8 +5143,6 @@ inline void Options::InitOptions()
 	m_unpackIgnoreExt		= GetOption(UNPACKIGNOREEXT.data());
 
 	m_configTemplatePath = fs::u8path(*m_configTemplate);
-	m_secureCertPath = fs::u8path(*m_secureCert);
-	m_secureKeyPath = fs::u8path(*m_secureKey);
 	m_certStorePath = fs::u8path(*m_certStore);
 	m_lockFilePath = fs::u8path(*m_lockFile);
 	m_logFilePath = fs::u8path(*m_logFile);
@@ -13107,8 +13093,6 @@ inline void MemoryMonitor::UpdateState()
 		&effPar,
 		&effLimit);
 	m_effectiveCacheMB.store(effCache, std::memory_order_release);
-	m_effectiveParBufferMB.store(effPar, std::memory_order_release);
-	m_effectiveDownloadsLimit.store(effLimit, std::memory_order_release);
 
 	if (transitioned)
 	{
@@ -13153,9 +13137,6 @@ inline void MemoryMonitor::ApplyTierTransition(NzbgetRsPressureTier oldTier, Nzb
 class ArticleFetchLimits
 {
 public:
-	static constexpr int64 MaxDecodedBytes = 64LL * 1024 * 1024;
-	static constexpr int64 MaxHeaderBytes = 64LL * 1024;
-
 	bool AddRawBytes(int64 bytes);
 	bool HeaderWithinLimit(bool declaredRangeKnown) const;
 	bool AddDecodedBytes(int64 bytes, int64 begin, int64 end, int64 fileSize);
@@ -34754,7 +34735,7 @@ public:
 	class Budget
 	{
 	public:
-		explicit Budget(int maxDonors) : m_left(maxDonors > 0 ? (unsigned long long)maxDonors * 3 : 0), m_unlimited(maxDonors <= 0)
+		explicit Budget(int maxDonors)
 		{
 			m_rust = nzbget_rs_dupe_budget_new(maxDonors > 0 ? (uint32_t)maxDonors : 0);
 		}
@@ -34769,8 +34750,6 @@ public:
 		void* RustHandle() const { return m_rust; }
 	private:
 		void* m_rust = nullptr;
-		std::atomic<unsigned long long> m_left;
-		bool m_unlimited;
 	};
 	using FetchFunc = std::function<HttpGet::Reply(const std::string&, const std::string&, size_t, long long)>;
 	NzbFetcher() : m_rust(nzbget_rs_nzb_fetcher_new()) {}
@@ -52844,8 +52823,6 @@ private:
 	int m_inputNumberIndex = 0;
 	int m_inputValue;
 
-	void* m_window; // WINDOW*
-
 	EInputMode m_inputMode = normal;
 	bool m_showNzbname;
 	bool m_showTimestamp;
@@ -52924,7 +52901,6 @@ inline NCursesFrontend::NCursesFrontend()
 	m_groupFiles = g_Options->GetCursesGroup();
 
 	int colorSupport = nzbget_rs_term_init();
-	m_window = reinterpret_cast<void*>(1);
 	m_useColor = colorSupport > 0;
 }
 

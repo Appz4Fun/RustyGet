@@ -2695,6 +2695,16 @@ pub extern "C" fn nzbget_rs_xmlrpc_array_close_tag(is_json: c_int) -> *const c_c
     xmlrpc_array_close_tag(is_json != 0).as_ptr()
 }
 
+/// Computes `ThreadCount` reported by `StatusXmlCommand::Execute` (`total_threads - 1`, excluding the RPC worker thread itself).
+pub fn xmlrpc_status_effective_thread_count(total_threads: i32) -> i32 {
+    total_threads.wrapping_sub(1)
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_xmlrpc_status_effective_thread_count(total_threads: c_int) -> c_int {
+    xmlrpc_status_effective_thread_count(total_threads)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2770,6 +2780,8 @@ mod tests {
                 CStr::from_ptr(nzbget_rs_xmlrpc_array_close_tag(0)).to_bytes(),
                 b"</data></array>\n"
             );
+            assert_eq!(nzbget_rs_xmlrpc_status_effective_thread_count(5), 4);
+            assert_eq!(nzbget_rs_xmlrpc_status_effective_thread_count(1), 0);
         }
     }
 

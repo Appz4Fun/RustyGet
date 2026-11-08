@@ -567,11 +567,6 @@ std::atomic<bool> g_SigHupPending{false};
 std::atomic<bool> g_SigExitPending{false};
 static std::atomic<bool> s_shutdownInitiated{false};
 
-#ifdef DEBUG
-typedef void(*sighandler)(int);
-inline std::vector<sighandler> SignalProcList;
-#endif
-
 static void PrintBacktrace()
 {
 #ifdef HAVE_BACKTRACE
@@ -2173,7 +2168,6 @@ void Reload()
 	std::unique_lock<std::mutex> lock(g_reloadMutex);
 
 	constexpr auto DEBOUNCE_DELAY = std::chrono::milliseconds(100);
-	constexpr auto MAX_BURST_DELAY = std::chrono::milliseconds(1500);
 
 	if (!g_reloadPending)
 	{

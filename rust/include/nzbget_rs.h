@@ -6001,6 +6001,8 @@ NzbgetRsBuf nzbget_rs_xmlrpc_encode_str(int is_json, const char* str_ptr);
 void nzbget_rs_xmlrpc_decode_str(int is_json, char* str_ptr);
 int nzbget_rs_xmlrpc_classify_pause_action(
     int pause_action, int pa_download, int pa_post_process, int pa_scan);
+const char* nzbget_rs_xmlrpc_array_open_tag(int is_json);
+const char* nzbget_rs_xmlrpc_array_close_tag(int is_json);
 
 #include "nzbget_tls_cipher.h"
 

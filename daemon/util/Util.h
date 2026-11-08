@@ -164,7 +164,6 @@ namespace OpenSSL
 {
 	using X509StorePtr = std::unique_ptr<X509_STORE, decltype(&X509_STORE_free)>;
 	using X509Ptr = std::unique_ptr<X509, decltype(&X509_free)>;
-	using EVPMdCtxPtr = std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>;
 	using EVPCipherCtxPtr = std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)>;
 	using SSLCtxPtr = std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)>;
 	using SSLSessionPtr = std::unique_ptr<SSL, decltype(&SSL_free)>;
@@ -3192,164 +3191,33 @@ public:
 	static constexpr std::string_view REQUIREDDIR = "RequiredDir";
 	static constexpr std::string_view LOGFILE = "LogFile";
 	static constexpr std::string_view WRITELOG = "WriteLog";
-	static constexpr std::string_view ROTATELOG = "RotateLog";
-	static constexpr std::string_view APPENDCATEGORYDIR = "AppendCategoryDir";
 	static constexpr std::string_view LOCKFILE = "LockFile";
 	static constexpr std::string_view DAEMONUSERNAME = "DaemonUsername";
-	static constexpr std::string_view OUTPUTMODE = "OutputMode";
-	static constexpr std::string_view DUPECHECK = "DupeCheck";
-	static constexpr std::string_view DUPEARTICLEFALLBACK = "DupeArticleFallback";
-	static constexpr std::string_view DUPESTREAMDECOMPRESS = "DupeStreamDecompress";
-	static constexpr std::string_view DUPESTREAMTIMEOUT = "DupeStreamTimeout";
 	static constexpr std::string_view DUPESEARCH = "DupeSearch";
-	static constexpr std::string_view DUPESEARCHDRYRUN = "DupeSearchDryRun";
 	static constexpr std::string_view DUPESEARCHURL = "DupeSearchUrl";
-	static constexpr std::string_view DUPESEARCHAPIKEY = "DupeSearchApiKey";
-	static constexpr std::string_view DUPESEARCHDELAY = "DupeSearchDelay";
-	static constexpr std::string_view DUPESEARCHMAXDONORS = "DupeSearchMaxDonors";
-	static constexpr std::string_view DUPEHEALTHPERCENT = "DupeHealthPercent";
-	static constexpr std::string_view DUPEHEALTHMIN = "DupeHealthMin";
-	static constexpr std::string_view DUPEHEALTHMAX = "DupeHealthMax";
-	static constexpr std::string_view DUPEBODYCHECKS = "DupeBodyChecks";
-	static constexpr std::string_view DUPEHEALTHBUDGET = "DupeHealthBudget";
-	static constexpr std::string_view DUPEMINALIVE = "DupeMinAlive";
-	static constexpr std::string_view DUPEFASTDONORS = "DupeFastDonors";
-	static constexpr std::string_view DOWNLOADRATE = "DownloadRate";
 	static constexpr std::string_view CONTROLIP = "ControlIP";
-	static constexpr std::string_view CONTROLPORT = "ControlPort";
 	static constexpr std::string_view CONTROLUSERNAME = "ControlUsername";
 	static constexpr std::string_view CONTROLPASSWORD = "ControlPassword";
 	static constexpr std::string_view RESTRICTEDUSERNAME = "RestrictedUsername";
 	static constexpr std::string_view RESTRICTEDPASSWORD = "RestrictedPassword";
 	static constexpr std::string_view ADDUSERNAME = "AddUsername";
 	static constexpr std::string_view ADDPASSWORD = "AddPassword";
-	static constexpr std::string_view FORMAUTH = "FormAuth";
-	static constexpr std::string_view JSONP = "JsonP";
-	static constexpr std::string_view SECURECONTROL = "SecureControl";
-	static constexpr std::string_view SECUREPORT = "SecurePort";
 	static constexpr std::string_view SECURECERT = "SecureCert";
 	static constexpr std::string_view SECUREKEY = "SecureKey";
 	static constexpr std::string_view CERTSTORE = "CertStore";
-	static constexpr std::string_view CERTCHECK = "CertCheck";
 	static constexpr std::string_view AUTHORIZEDIP = "AuthorizedIP";
-	static constexpr std::string_view ARTICLETIMEOUT = "ArticleTimeout";
-	static constexpr std::string_view ARTICLEREADCHUNKSIZE = "ArticleReadChunkSize";
-	static constexpr std::string_view URLTIMEOUT = "UrlTimeout";
-	static constexpr std::string_view REMOTETIMEOUT = "RemoteTimeout";
-	static constexpr std::string_view FLUSHQUEUE = "FlushQueue";
-	static constexpr std::string_view SYSTEMHEALTHCHECK = "SystemHealthCheck";
-	static constexpr std::string_view NZBLOG = "NzbLog";
-	static constexpr std::string_view RAWARTICLE = "RawArticle";
-	static constexpr std::string_view SKIPWRITE = "SkipWrite";
-	static constexpr std::string_view ARTICLERETRIES = "ArticleRetries";
-	static constexpr std::string_view ARTICLEINTERVAL = "ArticleInterval";
-	static constexpr std::string_view URLRETRIES = "UrlRetries";
-	static constexpr std::string_view URLINTERVAL = "UrlInterval";
-	static constexpr std::string_view CONTINUEPARTIAL = "ContinuePartial";
-	static constexpr std::string_view URLCONNECTIONS = "UrlConnections";
-	static constexpr std::string_view LOGBUFFER = "LogBuffer";
-	static constexpr std::string_view INFOTARGET = "InfoTarget";
-	static constexpr std::string_view WARNINGTARGET = "WarningTarget";
-	static constexpr std::string_view ERRORTARGET = "ErrorTarget";
-	static constexpr std::string_view DEBUGTARGET = "DebugTarget";
-	static constexpr std::string_view DETAILTARGET = "DetailTarget";
-	static constexpr std::string_view PARCHECK = "ParCheck";
-	static constexpr std::string_view PARREPAIR = "ParRepair";
-	static constexpr std::string_view PARSCAN = "ParScan";
-	static constexpr std::string_view PARQUICK = "ParQuick";
-	static constexpr std::string_view POSTSTRATEGY = "PostStrategy";
-	static constexpr std::string_view FILENAMING = "FileNaming";
-	static constexpr std::string_view POSTDOWNLOADRENAME = "PostDownloadRename";
-	static constexpr std::string_view RENAMEAFTERUNPACK = "RenameAfterUnpack";
 	static constexpr std::string_view RENAMEIGNOREEXT = "RenameIgnoreExt";
-	static constexpr std::string_view PARRENAME = "ParRename";
-	static constexpr std::string_view PARBUFFER = "ParBuffer";
-	static constexpr std::string_view PARTHREADS = "ParThreads";
-	static constexpr std::string_view RARRENAME = "RarRename";
-	static constexpr std::string_view HEALTHCHECK = "HealthCheck";
-	static constexpr std::string_view DIRECTRENAME = "DirectRename";
-	static constexpr std::string_view HARDLINKING = "HardLinking";
-	static constexpr std::string_view HARDLINKINGIGNOREEXT = "HardLinkingIgnoreExt";
-	static constexpr std::string_view UMASK = "UMask";
-	static constexpr std::string_view UPDATEINTERVAL = "UpdateInterval";
-	static constexpr std::string_view CURSESNZBNAME = "CursesNzbName";
-	static constexpr std::string_view CURSESTIME = "CursesTime";
-	static constexpr std::string_view CURSESGROUP = "CursesGroup";
-	static constexpr std::string_view CRCCHECK = "CrcCheck";
-	static constexpr std::string_view DIRECTWRITE = "DirectWrite";
-	static constexpr std::string_view WRITEBUFFER = "WriteBuffer";
-	static constexpr std::string_view NZBDIRINTERVAL = "NzbDirInterval";
-	static constexpr std::string_view NZBDIRFILEAGE = "NzbDirFileAge";
 	static constexpr std::string_view NZBDIRARCHIVESCAN = "NzbDirArchiveScan";
-	static constexpr std::string_view NZBDIRARCHIVEACTION = "NzbDirArchiveAction";
-	static constexpr std::string_view DISKSPACE = "DiskSpace";
-	static constexpr std::string_view CRASHTRACE = "CrashTrace";
-	static constexpr std::string_view CRASHDUMP = "CrashDump";
-	static constexpr std::string_view PARPAUSEQUEUE = "ParPauseQueue";
-	static constexpr std::string_view SCRIPTPAUSEQUEUE = "ScriptPauseQueue";
-	static constexpr std::string_view NZBCLEANUPDISK = "NzbCleanupDisk";
-	static constexpr std::string_view PARTIMELIMIT = "ParTimeLimit";
-	static constexpr std::string_view KEEPHISTORY = "KeepHistory";
 	static constexpr std::string_view UNPACK = "Unpack";
-	static constexpr std::string_view DIRECTUNPACK = "DirectUnpack";
-	static constexpr std::string_view USETEMPUNPACKDIR = "UseTempUnpackDir";
-	static constexpr std::string_view UNPACKCLEANUPDISK = "UnpackCleanupDisk";
 	static constexpr std::string_view UNRARCMD = "UnrarCmd";
 	static constexpr std::string_view SEVENZIPCMD = "SevenZipCmd";
 	static constexpr std::string_view UNPACKPASSFILE = "UnpackPassFile";
-	static constexpr std::string_view UNPACKPAUSEQUEUE = "UnpackPauseQueue";
 	static constexpr std::string_view SCRIPTORDER = "ScriptOrder";
 	static constexpr std::string_view EXTENSIONS = "Extensions";
 	static constexpr std::string_view EXTCLEANUPDISK = "ExtCleanupDisk";
 	static constexpr std::string_view PARIGNOREEXT = "ParIgnoreExt";
 	static constexpr std::string_view UNPACKIGNOREEXT = "UnpackIgnoreExt";
-	static constexpr std::string_view FEEDHISTORY = "FeedHistory";
-	static constexpr std::string_view URLFORCE = "UrlForce";
-	static constexpr std::string_view TIMECORRECTION = "TimeCorrection";
-	static constexpr std::string_view PROPAGATIONDELAY = "PropagationDelay";
-	static constexpr std::string_view ARTICLECACHE = "ArticleCache";
-	static constexpr std::string_view EVENTINTERVAL = "EventInterval";
 	static constexpr std::string_view SHELLOVERRIDE = "ShellOverride";
-	static constexpr std::string_view MONTHLYQUOTA = "MonthlyQuota";
-	static constexpr std::string_view QUOTASTARTDAY = "QuotaStartDay";
-	static constexpr std::string_view DAILYQUOTA = "DailyQuota";
-	static constexpr std::string_view REORDERFILES = "ReorderFiles";
-	static constexpr std::string_view UPDATECHECK = "UpdateCheck";
-	static constexpr std::string_view MEMORYPRESSUREINTERVAL = "MemoryPressureInterval";
-	static constexpr std::string_view MEMORYPRESSUREPATH = "MemoryPressurePath";
-
-// obsolete options
-	static constexpr std::string_view POSTLOGKIND = "PostLogKind";
-	static constexpr std::string_view NZBLOGKIND = "NZBLogKind";
-	static constexpr std::string_view RETRYONCRCERROR = "RetryOnCrcError";
-	static constexpr std::string_view ALLOWREPROCESS = "AllowReProcess";
-	static constexpr std::string_view POSTPROCESS = "PostProcess";
-	static constexpr std::string_view LOADPARS = "LoadPars";
-	static constexpr std::string_view THREADLIMIT = "ThreadLimit";
-	static constexpr std::string_view PROCESSLOGKIND = "ProcessLogKind";
-	static constexpr std::string_view APPENDNZBDIR = "AppendNzbDir";
-	static constexpr std::string_view RENAMEBROKEN = "RenameBroken";
-	static constexpr std::string_view MERGENZB = "MergeNzb";
-	static constexpr std::string_view STRICTPARNAME = "StrictParName";
-	static constexpr std::string_view RELOADURLQUEUE = "ReloadUrlQueue";
-	static constexpr std::string_view RELOADPOSTQUEUE = "ReloadPostQueue";
-	static constexpr std::string_view NZBPROCESS = "NZBProcess";
-	static constexpr std::string_view NZBADDEDPROCESS = "NZBAddedProcess";
-	static constexpr std::string_view CREATELOG = "CreateLog";
-	static constexpr std::string_view RESETLOG = "ResetLog";
-	static constexpr std::string_view PARCLEANUPQUEUE = "ParCleanupQueue";
-	static constexpr std::string_view DELETECLEANUPDISK = "DeleteCleanupDisk";
-	static constexpr std::string_view HISTORYCLEANUPDISK = "HistoryCleanupDisk";
-	static constexpr std::string_view SCANSCRIPT = "ScanScript";
-	static constexpr std::string_view QUEUESCRIPT = "QueueScript";
-	static constexpr std::string_view FEEDSCRIPT = "FeedScript";
-	static constexpr std::string_view DECODE = "Decode";
-	static constexpr std::string_view SAVEQUEUE = "SaveQueue";
-	static constexpr std::string_view RELOADQUEUE = "ReloadQueue";
-	static constexpr std::string_view TERMINATETIMEOUT = "TerminateTimeout";
-	static constexpr std::string_view ACCURATERATE = "AccurateRate";
-	static constexpr std::string_view CREATEBROKENLOG = "CreateBrokenLog";
-	static constexpr std::string_view BROKENLOG = "BrokenLog";
 
 	enum EWriteLog
 	{
@@ -9571,7 +9439,6 @@ private:
 	bool m_parking = false;
 	bool m_avoidHistory = false;
 	bool m_healthPaused = false;
-	bool m_parManual = false;
 	bool m_cleanupDisk = false;
 	bool m_unpackCleanedUpDisk = false;
 	CString m_dupeKey = "";
@@ -13288,7 +13155,6 @@ class ArticleFetchLimits
 public:
 	static constexpr int64 MaxDecodedBytes = 64LL * 1024 * 1024;
 	static constexpr int64 MaxHeaderBytes = 64LL * 1024;
-	static constexpr int64 MaxRawBytes = MaxDecodedBytes * 3 + MaxHeaderBytes;
 
 	bool AddRawBytes(int64 bytes);
 	bool HeaderWithinLimit(bool declaredRangeKnown) const;
@@ -13348,9 +13214,6 @@ public:
 		std::shared_ptr<const std::vector<CString>> Groups;
 	};
 	using FetchFunc = std::function<ArticleFetcher::FetchedArticle(const Request&)>;
-
-	static constexpr int MaxWindowParts = 8;
-	static constexpr int64 MaxBufferedBytes = 128LL * 1024 * 1024;
 
 	ArticleBatchFetcher();
 	explicit ArticleBatchFetcher(FetchFunc fetchFunc);
@@ -13968,8 +13831,6 @@ inline const int DISKSTATE_FILE_LEGACY_VERSION = 9;
 // the line that starts this build's data after upstream's in a queue, history or progress file
 inline const char* DUPESTATE_TRAILER = "#dupestate 1";
 inline const char* UNPACKSTATE_TRAILER = "#unpackstate 1";
-// the line that carries a file state's decoded file size after upstream's data
-inline const char* DECODED_TRAILER = "#decoded ";
 inline const int DISKSTATE_STATS_VERSION = 4;
 inline const int DISKSTATE_FEEDS_VERSION = 3;
 
@@ -18289,8 +18150,6 @@ public:
 	// damage within this share of the data (per mille) of all that par2 can repair
 	// is not left to par-check: the projection is rough and par2 needs whole blocks
 	static constexpr int ParEdgeMargin = 50;
-	// the largest par2 block size the check of borrowed articles reads (256 MiB)
-	static constexpr int64 MaxPar2BlockSize = 256LL * 1024 * 1024;
 
 	/* Finds the file of the duplicate collection which corresponds to the target
 	 * data file: preferably by filename, otherwise by unambiguous structural identity
@@ -18409,11 +18268,6 @@ public:
 	static bool MergeDecodedFileSize(FileInfo* fileInfo, int64 articleFileSize);
 
 private:
-	// total declared size must match within 1/64 (~1.6%); the slack absorbs
-	// differences in yEnc overhead (header line lengths, filenames)
-	static constexpr int TotalSizeToleranceDiv = 64;
-	// per-article declared size must match within 1/16 (~6%)
-	static constexpr int PartSizeToleranceDiv = 16;
 	// keep enough donors parsed to cover a whole dupe-set without re-parsing per
 	// article; must comfortably exceed the number of duplicates of one release
 	static constexpr int MaxCachedDonors = 16;
@@ -21754,16 +21608,6 @@ private:
 	// articles tried before a download projected below critical (not far below) is
 	// parked without a backup (B74)
 	static constexpr int ParkBelowCriticalSample = 1000;
-	// seconds a dead-pick probe runs before a download nothing arrives of stops waiting for it (B83)
-	static constexpr int SlowProbeSec = 10;
-	// failed articles in a row (first articles of files aside) after which a download is dead (B49)
-	static constexpr int DeadRunFailures = 40;
-	// a download without a better duplicate is parked once this share of its
-	// articles was tried (percent) and fewer than this share of the tried
-	// ones existed (percent; the ParScan=dupe park ratio): nothing of it
-	// exists for par2 or byte-level repair to build on
-	static constexpr int DupeHopelessTriedPercent = 10;
-	static constexpr int DupeHopelessAlivePercent = 10;
 	static bool DownloadHopeless(NzbInfo* nzbInfo);
 	void ResetHangingDownloads();
 	void AdjustDownloadsLimit();
@@ -25758,7 +25602,6 @@ private:
 	EUnpacker m_unpacker;
 	bool m_interDir = false;
 	bool m_allOkMessageReceived = false;
-	bool m_noFilesMessageReceived = false;
 	bool m_hasParFiles = false;
 	bool m_hasRarFiles = false;
 	bool m_hasNotUnpackedRarFiles = false;
@@ -34817,8 +34660,6 @@ struct NzbgetRsDeadPostingsStore;
 class DeadPostings
 {
 public:
-	static constexpr int DeadTtlSec = 3 * 24 * 3600;
-
 	DeadPostings()
 		: m_store(nzbget_rs_deadpostings_store_new())
 	{
@@ -34909,8 +34750,6 @@ public:
 		}
 	};
 
-	static constexpr int CooldownSec = 30 * 60;
-	static constexpr int RetryDelaySec = 2;
 	static constexpr size_t MaxNzbBytes = 64 * 1024 * 1024;
 	class Budget
 	{
@@ -45638,7 +45477,6 @@ private:
 	FeedCache m_feedCache;
 	std::condition_variable m_waitCond;
 	std::atomic<bool> m_force{false};
-	bool m_wokenUp = false;
 	bool m_save = false;
 
 	void StartFeedDownload(FeedInfo* feedInfo, bool force);
@@ -53053,11 +52891,6 @@ inline void curses_clear()
 extern void ExitProc();
 
 static const int NCURSES_COLORPAIR_TEXT		= 1;
-static const int NCURSES_COLORPAIR_INFO		= 2;
-static const int NCURSES_COLORPAIR_WARNING		= 3;
-static const int NCURSES_COLORPAIR_ERROR		= 4;
-static const int NCURSES_COLORPAIR_DEBUG		= 5;
-static const int NCURSES_COLORPAIR_DETAIL		= 6;
 static const int NCURSES_COLORPAIR_STATUS		= 7;
 static const int NCURSES_COLORPAIR_KEYBAR		= 8;
 static const int NCURSES_COLORPAIR_INFOLINE	= 9;

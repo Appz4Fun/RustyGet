@@ -2667,6 +2667,34 @@ pub extern "C" fn nzbget_rs_xmlrpc_classify_pause_action(
     xmlrpc_classify_pause_action(pause_action, pa_download, pa_post_process, pa_scan)
 }
 
+/// Returns the opening array delimiter for JSON-RPC (`"[\n"`) or XML-RPC (`"<array><data>\n"`).
+pub fn xmlrpc_array_open_tag(is_json: bool) -> &'static CStr {
+    if is_json {
+        c"[\n"
+    } else {
+        c"<array><data>\n"
+    }
+}
+
+/// Returns the closing array delimiter for JSON-RPC (`"\n]"`) or XML-RPC (`"</data></array>\n"`).
+pub fn xmlrpc_array_close_tag(is_json: bool) -> &'static CStr {
+    if is_json {
+        c"\n]"
+    } else {
+        c"</data></array>\n"
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_xmlrpc_array_open_tag(is_json: c_int) -> *const c_char {
+    xmlrpc_array_open_tag(is_json != 0).as_ptr()
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_xmlrpc_array_close_tag(is_json: c_int) -> *const c_char {
+    xmlrpc_array_close_tag(is_json != 0).as_ptr()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2725,6 +2753,23 @@ mod tests {
             assert_eq!(nzbget_rs_xmlrpc_classify_pause_action(1, 0, 1, 2), 2);
             assert_eq!(nzbget_rs_xmlrpc_classify_pause_action(2, 0, 1, 2), 3);
             assert_eq!(nzbget_rs_xmlrpc_classify_pause_action(99, 0, 1, 2), 0);
+
+            assert_eq!(
+                CStr::from_ptr(nzbget_rs_xmlrpc_array_open_tag(1)).to_bytes(),
+                b"[\n"
+            );
+            assert_eq!(
+                CStr::from_ptr(nzbget_rs_xmlrpc_array_open_tag(0)).to_bytes(),
+                b"<array><data>\n"
+            );
+            assert_eq!(
+                CStr::from_ptr(nzbget_rs_xmlrpc_array_close_tag(1)).to_bytes(),
+                b"\n]"
+            );
+            assert_eq!(
+                CStr::from_ptr(nzbget_rs_xmlrpc_array_close_tag(0)).to_bytes(),
+                b"</data></array>\n"
+            );
         }
     }
 

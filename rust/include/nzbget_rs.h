@@ -704,11 +704,6 @@ typedef struct
 	uint32_t id, kind, time, sizeLo, sizeHi, fileCount, parStatus, scriptStatus, urlStatus;
 	NzbgetRsBinText name;
 } NzbgetRsBinHistory;
-NzbgetRsBuf nzbget_rs_binrpc_encode_list(const NzbgetRsBinNzb* nzbs, size_t nzbCount, const NzbgetRsBinParam* params,
-	size_t paramCount, const NzbgetRsBinFile* files, size_t fileCount);
-NzbgetRsBuf nzbget_rs_binrpc_encode_log(const NzbgetRsBinLog* log, size_t count);
-NzbgetRsBuf nzbget_rs_binrpc_encode_post_queue(const NzbgetRsBinPost* jobs, size_t count);
-NzbgetRsBuf nzbget_rs_binrpc_encode_history(const NzbgetRsBinHistory* history, size_t count);
 // Small responses can borrow caller scratch. ownedCapacity == 0 means
 // borrowed (never pass it to nzbget_rs_free); otherwise free
 // NzbgetRsBuf {data, len, ownedCapacity}. Null or insufficient scratch uses

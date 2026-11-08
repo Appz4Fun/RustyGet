@@ -721,12 +721,151 @@ pub fn get_disk_state(path: &CStr) -> Option<(i64, i64)> {
     get_disk_state_with(path, &default_statvfs)
 }
 
+/// `FileSystem::FixExecPermission` (`daemon/util/FileSystem.h`):
+/// Adds execute bits (`0o111`) to `filename` if `stat` succeeds.
+pub fn fix_exec_permission(filename: &[u8]) {
+    use std::os::unix::fs::PermissionsExt;
+    let p = path(filename);
+    if let Ok(meta) = std::fs::metadata(p) {
+        let new_mode = meta.permissions().mode() | 0o111;
+        let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(new_mode));
+    }
+}
+
+/// `FileSystem::RestorePermissions` (`daemon/util/FileSystem.h`):
+/// Sets permissions of `filename` to `(mode & !umask) & 0o7777`.
+pub fn restore_permissions(filename: &[u8], mode: u32, umask: u32) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let permissions = (mode & !umask) & 0o7777;
+    std::fs::set_permissions(path(filename), std::fs::Permissions::from_mode(permissions)).is_ok()
+}
+
+/// `FileSystem::RestoreFilePermissions` (`daemon/util/FileSystem.h`):
+/// Restores `0o666 & !umask` permissions on `filename`.
+pub fn restore_file_permissions(filename: &[u8], umask: u32) -> bool {
+    restore_permissions(filename, 0o666, umask)
+}
+
+/// `FileSystem::RestoreDirPermissions` (`daemon/util/FileSystem.h`):
+/// Restores `0o777 & !umask` permissions on `filename`.
+pub fn restore_dir_permissions(filename: &[u8], umask: u32) -> bool {
+    restore_permissions(filename, 0o777, umask)
+}
+
+/// `FileSystem::RestoreFileOrDirPermissions` (`daemon/util/FileSystem.h`):
+/// Restores `0o777 & !umask` if `filename` is a directory, or `0o666 & !umask` if it is a file.
+pub fn restore_file_or_dir_permissions(filename: &[u8], umask: u32) -> bool {
+    let Ok(meta) = std::fs::metadata(path(filename)) else {
+        return false;
+    };
+    if meta.is_dir() {
+        restore_dir_permissions(filename, umask)
+    } else {
+        restore_file_permissions(filename, umask)
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fs_fix_exec_permission(filename: *const c_char) {
+    if filename.is_null() {
+        return;
+    }
+    let bytes = unsafe { CStr::from_ptr(filename).to_bytes() };
+    fix_exec_permission(bytes);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fs_restore_permissions(
+    filename: *const c_char,
+    mode: u32,
+    umask: u32,
+) -> c_int {
+    if filename.is_null() {
+        return 0;
+    }
+    let bytes = unsafe { CStr::from_ptr(filename).to_bytes() };
+    c_int::from(restore_permissions(bytes, mode, umask))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fs_restore_file_or_dir_permissions(
+    filename: *const c_char,
+    umask: u32,
+) -> c_int {
+    if filename.is_null() {
+        return 0;
+    }
+    let bytes = unsafe { CStr::from_ptr(filename).to_bytes() };
+    c_int::from(restore_file_or_dir_permissions(bytes, umask))
+}
+
+pub(crate) struct PosixFsOps;
+
+impl crate::fsdelete::Ops for PosixFsOps {
+    fn path_type(&mut self, p: &[u8]) -> crate::fsdelete::R<crate::fsdelete::PathType> {
+        use crate::fsdelete::PathType;
+        match std::fs::symlink_metadata(path(p)) {
+            Ok(m) => {
+                let ft = m.file_type();
+                if ft.is_symlink() {
+                    Ok(PathType::Link)
+                } else if ft.is_dir() {
+                    Ok(PathType::Directory)
+                } else {
+                    Ok(PathType::File)
+                }
+            }
+            Err(e) => {
+                if let Some(err) = e.raw_os_error() {
+                    set_last_errno(err);
+                }
+                Ok(PathType::Error)
+            }
+        }
+    }
+    fn remove_dir(&mut self, p: &[u8]) -> crate::fsdelete::R<bool> {
+        let Ok(c) = std::ffi::CString::new(p) else {
+            return Ok(false);
+        };
+        Ok(remove_directory(&c))
+    }
+    fn delete_file(&mut self, p: &[u8]) -> crate::fsdelete::R<bool> {
+        let Ok(c) = std::ffi::CString::new(p) else {
+            return Ok(false);
+        };
+        Ok(delete_file(&c))
+    }
+    fn delete_link(&mut self, p: &[u8], _kind: crate::fsdelete::PathType) -> crate::fsdelete::R<bool> {
+        self.delete_file(p)
+    }
+    fn list(&mut self, dir: &[u8]) -> crate::fsdelete::R<Vec<Vec<u8>>> {
+        Ok(list_dir_entries(dir))
+    }
+    fn file_exists(&mut self, p: &[u8]) -> crate::fsdelete::R<bool> {
+        Ok(file_exists(p, &posix_stat))
+    }
+    fn dir_exists(&mut self, p: &[u8]) -> crate::fsdelete::R<bool> {
+        Ok(directory_exists(p, &posix_stat))
+    }
+    fn move_file(&mut self, from: &[u8], to: &[u8]) -> crate::fsdelete::R<bool> {
+        let (Ok(f), Ok(t)) = (std::ffi::CString::new(from), std::ffi::CString::new(to)) else {
+            return Ok(false);
+        };
+        Ok(move_file(&f, &t))
+    }
+    fn last_error(&mut self) -> crate::fsdelete::R<Vec<u8>> {
+        Ok(error_message(last_errno()))
+    }
+    fn too_long(&mut self) -> crate::fsdelete::R<()> {
+        set_last_errno(sys::ENAMETOOLONG);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fsdelete::{
-        delete_directory, delete_directory_with_content, Ops as FsOps, PathType, R as FsR,
-    };
+    use crate::fsdelete::{delete_directory, delete_directory_with_content};
     use crate::paths::{escape_path_for_shell, extract_file_path_from_cmd, split_path_and_filename};
     use std::ffi::CString;
 
@@ -737,68 +876,7 @@ mod tests {
         }
     }
 
-    struct RealPosixFsOps;
-
-    impl FsOps for RealPosixFsOps {
-        fn path_type(&mut self, p: &[u8]) -> FsR<PathType> {
-            match std::fs::symlink_metadata(path(p)) {
-                Ok(m) => {
-                    let ft = m.file_type();
-                    if ft.is_symlink() {
-                        Ok(PathType::Link)
-                    } else if ft.is_dir() {
-                        Ok(PathType::Directory)
-                    } else {
-                        Ok(PathType::File)
-                    }
-                }
-                Err(_) => Ok(PathType::Error),
-            }
-        }
-        fn remove_dir(&mut self, p: &[u8]) -> FsR<bool> {
-            let Ok(c) = CString::new(p) else {
-                return Ok(false);
-            };
-            Ok(remove_directory(&c))
-        }
-        fn delete_file(&mut self, p: &[u8]) -> FsR<bool> {
-            let Ok(c) = CString::new(p) else {
-                return Ok(false);
-            };
-            Ok(delete_file(&c))
-        }
-        fn delete_link(&mut self, p: &[u8], _kind: PathType) -> FsR<bool> {
-            self.delete_file(p)
-        }
-        fn list(&mut self, dir: &[u8]) -> FsR<Vec<Vec<u8>>> {
-            let mut entries = Vec::new();
-            if let Ok(rd) = std::fs::read_dir(path(dir)) {
-                for entry in rd.flatten() {
-                    entries.push(entry.file_name().as_os_str().as_bytes().to_vec());
-                }
-            }
-            Ok(entries)
-        }
-        fn file_exists(&mut self, p: &[u8]) -> FsR<bool> {
-            Ok(super::file_exists(p, &stat))
-        }
-        fn dir_exists(&mut self, p: &[u8]) -> FsR<bool> {
-            Ok(super::directory_exists(p, &stat))
-        }
-        fn move_file(&mut self, from: &[u8], to: &[u8]) -> FsR<bool> {
-            let (Ok(f), Ok(t)) = (CString::new(from), CString::new(to)) else {
-                return Ok(false);
-            };
-            Ok(super::move_file(&f, &t))
-        }
-        fn last_error(&mut self) -> FsR<Vec<u8>> {
-            Ok(error_message(last_errno()))
-        }
-        fn too_long(&mut self) -> FsR<()> {
-            set_last_errno(sys::ENAMETOOLONG);
-            Ok(())
-        }
-    }
+    use PosixFsOps as RealPosixFsOps;
 
     fn child_sees_descriptor(fd: i32) -> i32 {
         let script = CString::new(format!("exec 2>/dev/null; : <&{fd}")).unwrap();

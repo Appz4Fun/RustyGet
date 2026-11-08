@@ -742,39 +742,17 @@ inline std::optional<FileSystem::DiskState> FileSystem::GetDiskState(const char*
 
 inline bool FileSystem::RenameBak(const char* filename, const char* bakPart, bool removeOldExtension, CString& newName)
 {
-	// The Rust ABI treats NULL strings as empty. Preserve the platform C
-	// library's original formatting/syscall behavior for NULL arguments.
-	if (filename && bakPart)
+	if (!filename || !bakPart)
 	{
-		// rust/src/fsdelete.rs
-		RsFsOps ops;
-		NzbgetRsBuf name{};
-		int result = nzbget_rs_rename_bak(&ops.ops, filename, bakPart, removeOldExtension, &name);
-		newName.Set(name.data, (int)name.len);
-		nzbget_rs_free(name);
-		return ops.Finish(result) == 1;
+		return false;
 	}
-	BString<1024> changedFilename;
-
-	if (removeOldExtension)
-	{
-		changedFilename = filename;
-		char* extension = strrchr(changedFilename, '.');
-		if (extension)
-		{
-			*extension = '\0';
-		}
-	}
-
-	newName.Format("%s.%s", removeOldExtension ? *changedFilename : filename, bakPart);
-
-	int i = 2;
-	while (FileExists(newName) || DirectoryExists(newName))
-	{
-		newName.Format("%s.%i.%s", removeOldExtension ? *changedFilename : filename, i++, bakPart);
-	}
-
-	return MoveFile(filename, newName);
+	// rust/src/fsdelete.rs
+	RsFsOps ops;
+	NzbgetRsBuf name{};
+	int result = nzbget_rs_rename_bak(&ops.ops, filename, bakPart, removeOldExtension, &name);
+	newName.Set(name.data, (int)name.len);
+	nzbget_rs_free(name);
+	return ops.Finish(result) == 1;
 }
 
 inline CString FileSystem::ExpandHomePath(const char* filename)
@@ -878,68 +856,28 @@ inline mode_t FileSystem::uMask;
 
 inline void FileSystem::FixExecPermission(const char* filename)
 {
-	struct stat buffer;
-	bool ok = !stat(filename, &buffer);
-	if (ok)
-	{
-		buffer.st_mode = buffer.st_mode | S_IXUSR | S_IXGRP | S_IXOTH;
-		chmod(filename, buffer.st_mode);
-	}
+	nzbget_rs_fs_fix_exec_permission(filename);
 }
 
-inline bool FileSystem::RestoreFileOrDirPermissions(const char* filename) 
+inline bool FileSystem::RestoreFileOrDirPermissions(const char* filename)
 {
-	struct stat buffer;
-	int ec = stat(filename, &buffer);
-	if (ec != 0) 
-	{
-
-#ifdef DEBUG
-		debug("Failed to read information for %s. Errno: %i", filename, ec);
-#endif
-
-		return false;
-	}
-
-	if (S_ISDIR(buffer.st_mode)) 
-	{
-		return RestoreDirPermissions(filename);
-	} 
-
-	return RestoreFilePermissions(filename);
+	return nzbget_rs_fs_restore_file_or_dir_permissions(filename, static_cast<uint32_t>(FileSystem::uMask)) != 0;
 }
 
 inline bool FileSystem::RestoreFilePermissions(const char* filepath)
 {
-	mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH; // 0666
-	return RestorePermissions(filepath, mode);
+	return RestorePermissions(filepath, 0666);
 }
 
 inline bool FileSystem::RestoreDirPermissions(const char* filename)
 {
-	mode_t mode = S_IRWXU | S_IRWXG | S_IRWXO; // 0777
-	return RestorePermissions(filename, mode);
+	return RestorePermissions(filename, 0777);
 }
 
-inline bool FileSystem::RestorePermissions(const char* filename, mode_t mode) 
+inline bool FileSystem::RestorePermissions(const char* filename, mode_t mode)
 {
-	mode_t permissions = mode & ~FileSystem::uMask;
-	int ec = chmod(filename, permissions);
-	if (ec == 0)
-	{
-
-#ifdef DEBUG
-		debug("Permissions %o was set for %s", permissions, filename);
-#endif
-
-		return true;
-	} 
-
-#ifdef DEBUG
-	debug("Failed to set permissions for %s. Errno %i", filename, ec);
-#endif
-
-	return false;
+	return nzbget_rs_fs_restore_permissions(
+		filename, static_cast<uint32_t>(mode), static_cast<uint32_t>(FileSystem::uMask)) != 0;
 }
 
 inline CString FileSystem::MakeExtendedPath(const char* path, [[maybe_unused]] bool force)

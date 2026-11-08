@@ -40,7 +40,6 @@ public:
 	~UnpackController() override;
 
 protected:
-	bool ReadLine(char* buf, int bufSize, FILE* stream) override;
 	void AddMessage(Message::EKind kind, const char* text) override;
 
 private:
@@ -50,19 +49,7 @@ private:
 		upSevenZip
 	};
 
-	typedef std::vector<CString> FileListBase;
-	class FileList : public FileListBase
-	{
-	public:
-		bool Exists(const char* filename);
-	};
-
-	typedef std::vector<CString> ParamListBase;
-	class ParamList : public ParamListBase
-	{
-	public:
-		bool Exists(const char* param);
-	};
+	typedef std::vector<CString> FileList;
 
 	PostInfo* m_postInfo = nullptr;
 	CString m_name;
@@ -100,12 +87,8 @@ private:
 	FileList m_downloadedFiles;
 
 	void ExecuteUnpack(EUnpacker unpacker, const char* password, bool multiVolumes);
-	void ExecuteUnrar(const char* password);
-	void ExecuteSevenZip(const char* password, bool multiVolumes);
 	void UnpackArchives(EUnpacker unpacker, bool multiVolumes);
-	bool IsDownloadedFile(const char* filename);
 	void JoinSplittedFiles();
-	bool JoinFile(const char* fragBaseName);
 	void Completed();
 	void CreateUnpackDir();
 	bool Cleanup();
@@ -114,8 +97,6 @@ private:
 #ifndef DISABLE_PARCHECK
 	void RequestParCheck(bool forceRepair);
 #endif
-	bool FileHasRarSignature(const char* filename);
-	bool PrepareCmdParams(const char* command, ParamList* params, const char* infoName);
 	bool WillRetryWithPass();
 };
 
@@ -131,16 +112,6 @@ inline UnpackController::~UnpackController()
 #ifndef DISABLE_TLS
 	OpenSSL::StopSSLThread();
 #endif
-}
-
-inline bool UnpackController::FileList::Exists(const char* filename)
-{
-	return std::find(begin(), end(), filename) != end();
-}
-
-inline bool UnpackController::ParamList::Exists(const char* param)
-{
-	return std::find(begin(), end(), param) != end();
 }
 
 inline Mutex& UnpackController::GetUnpackMutex()
@@ -361,48 +332,31 @@ inline void UnpackController::UnpackArchives(EUnpacker unpacker, bool multiVolum
 
 inline void UnpackController::ExecuteUnpack(EUnpacker unpacker, const char* password, bool multiVolumes)
 {
-	switch (unpacker)
+	const bool isSevenZip = unpacker == upSevenZip;
+	if (!isSevenZip)
 	{
-		case upUnrar:
-			ExecuteUnrar(password);
-			break;
-
-		case upSevenZip:
-			ExecuteSevenZip(password, multiVolumes);
-			break;
+		m_unpackExtendedDir = FileSystem::MakeExtendedPath(m_unpackDir, true);
 	}
-}
-
-inline void UnpackController::ExecuteUnrar(const char* password)
-{
-	m_unpackExtendedDir = FileSystem::MakeExtendedPath(m_unpackDir, true);
 	m_allOkMessageReceived = false;
 	m_unpackSpaceError = false;
-	m_unpacker = upUnrar;
+	m_unpacker = unpacker;
 
-	std::vector<CString> archives;
+	if (isSevenZip)
 	{
-		DirBrowser dir(m_destDir);
-		while (const char* filename = dir.Next())
-		{
-			BString<1024> fullFilename("%s%c%s", *m_destDir, PATH_SEPARATOR, filename);
-			if (!FileSystem::DirectoryExists(fullFilename) && IsDownloadedFile(filename) &&
-				nzbget_rs_unpack_classify_archive_file(filename) == 1 &&
-				nzbget_rs_unpack_is_main_archive(filename) != 0)
-			{
-				archives.emplace_back(filename);
-			}
-		}
+		PrintMessage(Message::mkInfo, "Executing 7-Zip");
+		SetLogPrefix("7-Zip");
 	}
-	std::sort(archives.begin(), archives.end(), [](const CString& a, const CString& b)
-	{
-		return strcmp(*a, *b) < 0;
-	});
-
 	SetProgressLabel("");
 	Guard unpackGuard(GetUnpackMutex());
 	m_execThreadId = std::this_thread::get_id();
 	m_unpacking = true;
+
+	std::vector<const char*> downloadedPtrs;
+	downloadedPtrs.reserve(m_downloadedFiles.size());
+	for (const CString& f : m_downloadedFiles)
+	{
+		downloadedPtrs.push_back(*f);
+	}
 
 	auto logCb = [](void* ctx, int kind, const char* msg)
 	{
@@ -427,121 +381,34 @@ inline void UnpackController::ExecuteUnrar(const char* password)
 		return (self->IsStopped() || self->GetTerminated()) ? 1 : 0;
 	};
 
-	const char* pw = Util::EmptyStr(password) ? "" : password;
-	const int cleanupDisk = (g_Options && g_Options->GetUnpackCleanupDisk()) ? 1 : 0;
-	bool allOk = !archives.empty();
-	for (const CString& archive : archives)
+	auto resetAllOkCb = [](void* ctx)
 	{
-		if (IsStopped() || GetTerminated())
-		{
-			allOk = false;
-			break;
-		}
-		BString<1024> fullArchivePath("%s%c%s", *m_destDir, PATH_SEPARATOR, *archive);
-		m_allOkMessageReceived = false;
-		if (nzbget_rs_unpack_extract_with_zipfast(
-			fullArchivePath, m_unpackDir, pw, 1, cleanupDisk, logCb, this, isStoppedCb) == 0 || !m_allOkMessageReceived)
-		{
-			allOk = false;
-			break;
-		}
-	}
-
-	m_unpacking = false;
-	m_execThreadId = std::thread::id{};
-	SetLogPrefix(nullptr);
-	SetProgressLabel("");
-
-	m_unpackOk = allOk && m_allOkMessageReceived && !GetTerminated() && !IsStopped();
-	m_unpackStartError = false;
-}
-
-inline void UnpackController::ExecuteSevenZip(const char* password, bool multiVolumes)
-{
-	m_allOkMessageReceived = false;
-	m_unpackSpaceError = false;
-	m_unpacker = upSevenZip;
-
-	std::vector<CString> archives;
-	{
-		DirBrowser dir(m_destDir);
-		while (const char* filename = dir.Next())
-		{
-			BString<1024> fullFilename("%s%c%s", *m_destDir, PATH_SEPARATOR, filename);
-			if (FileSystem::DirectoryExists(fullFilename) || !IsDownloadedFile(filename))
-			{
-				continue;
-			}
-			const int archiveKind = nzbget_rs_unpack_classify_archive_file(filename);
-			if (multiVolumes)
-			{
-				if (archiveKind == 3 &&
-					nzbget_rs_euh_sevenzip_is_supported(filename, strlen(filename)) != 0)
-				{
-					archives.emplace_back(filename);
-				}
-			}
-			else if (archiveKind == 2 ||
-				(archiveKind == 0 && nzbget_rs_unpack_is_zipfast_supported_extension(filename) != 0))
-			{
-				archives.emplace_back(filename);
-			}
-		}
-	}
-	std::sort(archives.begin(), archives.end(), [](const CString& a, const CString& b)
-	{
-		return strcmp(*a, *b) < 0;
-	});
-
-	PrintMessage(Message::mkInfo, "Executing 7-Zip");
-	SetLogPrefix("7-Zip");
-	SetProgressLabel("");
-	Guard unpackGuard(GetUnpackMutex());
-	m_execThreadId = std::this_thread::get_id();
-	m_unpacking = true;
-
-	auto logCb = [](void* ctx, int kind, const char* msg)
-	{
-		if (!ctx || !msg) return;
-		UnpackController* self = static_cast<UnpackController*>(ctx);
-		Message::EKind msgKind = Message::mkDetail;
-		switch (kind)
-		{
-			case 0: msgKind = Message::mkInfo; break;
-			case 1: msgKind = Message::mkError; break;
-			case 2: msgKind = Message::mkWarning; break;
-			case 4: msgKind = Message::mkInfo; break;
-			default: msgKind = Message::mkDetail; break;
-		}
-		self->AddMessage(msgKind, msg);
+		if (ctx) static_cast<UnpackController*>(ctx)->m_allOkMessageReceived = false;
 	};
 
-	auto isStoppedCb = [](void* ctx) -> int
+	auto hasAllOkCb = [](void* ctx) -> int
 	{
-		if (!ctx) return 0;
-		UnpackController* self = static_cast<UnpackController*>(ctx);
-		return (self->IsStopped() || self->GetTerminated()) ? 1 : 0;
+		return (ctx && static_cast<UnpackController*>(ctx)->m_allOkMessageReceived) ? 1 : 0;
 	};
 
 	const char* pw = Util::EmptyStr(password) ? "" : password;
 	const int cleanupDisk = (g_Options && g_Options->GetUnpackCleanupDisk()) ? 1 : 0;
-	bool allOk = !archives.empty();
-	for (const CString& archive : archives)
-	{
-		if (IsStopped() || GetTerminated())
-		{
-			allOk = false;
-			break;
-		}
-		BString<1024> fullArchivePath("%s%c%s", *m_destDir, PATH_SEPARATOR, *archive);
-		m_allOkMessageReceived = false;
-		if (nzbget_rs_unpack_extract_with_zipfast(
-			fullArchivePath, m_unpackDir, pw, 1, cleanupDisk, logCb, this, isStoppedCb) == 0 || !m_allOkMessageReceived)
-		{
-			allOk = false;
-			break;
-		}
-	}
+	const int useTempDir = (g_Options && g_Options->GetUseTempUnpackDir()) ? 1 : 0;
+	bool allOk = nzbget_rs_unpack_controller_extract_archives(
+		m_destDir,
+		m_unpackDir,
+		pw,
+		isSevenZip ? 1 : 0,
+		multiVolumes ? 1 : 0,
+		useTempDir,
+		cleanupDisk,
+		downloadedPtrs.data(),
+		downloadedPtrs.size(),
+		this,
+		resetAllOkCb,
+		hasAllOkCb,
+		logCb,
+		isStoppedCb) != 0;
 
 	m_unpacking = false;
 	m_execThreadId = std::thread::id{};
@@ -558,207 +425,60 @@ inline bool UnpackController::WillRetryWithPass()
 		m_password.Empty() && !g_Options->GetUnpackPassFilePath().empty();
 }
 
-inline bool UnpackController::PrepareCmdParams(const char* command, ParamList* params, const char* infoName)
-{
-	if (FileSystem::FileExists(command))
-	{
-		params->emplace_back(command);
-		return true;
-	}
-
-	std::vector<CString> cmdArgs = Util::SplitCommandLine(command);
-	if (cmdArgs.empty())
-	{
-		PrintMessage(Message::mkError, "Could not start %s, failed to parse command line: %s", infoName, command);
-		m_unpackOk = false;
-		m_unpackStartError = true;
-		return false;
-	}
-
-	std::move(cmdArgs.begin(), cmdArgs.end(), std::back_inserter(*params));
-
-	return true;
-}
-
 inline void UnpackController::JoinSplittedFiles()
 {
 	SetLogPrefix("Join");
 	SetProgressLabel("");
 	m_postInfo->SetStageProgress(0);
 
-	// determine groups
-
-	DirBrowser dir(m_destDir);
-	while (const char* filename = dir.Next())
+	auto logCb = [](void* ctx, int kind, const char* msg)
 	{
-		BString<1024> fullFilename("%s%c%s", *m_destDir, PATH_SEPARATOR, filename);
-
-		if (!FileSystem::DirectoryExists(fullFilename) &&
-			nzbget_rs_unpack_is_split_first_piece(filename) != 0 &&
-			!FileHasRarSignature(fullFilename))
+		if (!ctx || !msg) return;
+		UnpackController* self = static_cast<UnpackController*>(ctx);
+		Message::EKind msgKind = Message::mkInfo;
+		switch (kind)
 		{
-			if (!JoinFile(filename))
-			{
-				m_unpackOk = false;
-				break;
-			}
+			case 0: msgKind = Message::mkInfo; break;
+			case 1: msgKind = Message::mkError; break;
+			case 2: msgKind = Message::mkWarning; break;
+			default: msgKind = Message::mkDetail; break;
 		}
+		self->PrintMessage(msgKind, "%s", msg);
+	};
+
+	auto progressCb = [](void* ctx, const char* label, int stageProgress)
+	{
+		if (!ctx) return;
+		UnpackController* self = static_cast<UnpackController*>(ctx);
+		if (label)
+		{
+			self->SetProgressLabel(label);
+		}
+		if (stageProgress >= 0 && self->m_postInfo)
+		{
+			self->m_postInfo->SetStageProgress(stageProgress);
+		}
+	};
+
+	auto addJoinedCb = [](void* ctx, const char* pieceName)
+	{
+		if (!ctx || !pieceName) return;
+		static_cast<UnpackController*>(ctx)->m_joinedFiles.emplace_back(pieceName);
+	};
+
+	const int parSuccess = (m_postInfo && m_postInfo->GetNzbInfo() &&
+		m_postInfo->GetNzbInfo()->GetParStatus() == NzbInfo::psSuccess) ? 1 : 0;
+	const int writeBufferKb = g_Options ? g_Options->GetWriteBuffer() : 0;
+
+	if (nzbget_rs_unpack_controller_join_splitted_files(
+		m_destDir, m_unpackDir, parSuccess, writeBufferKb,
+		this, logCb, progressCb, addJoinedCb) == 0)
+	{
+		m_unpackOk = false;
 	}
 
 	SetLogPrefix(nullptr);
 	SetProgressLabel("");
-}
-
-inline bool UnpackController::JoinFile(const char* fragBaseName)
-{
-	BString<1024> destBaseName = fragBaseName;
-	if (char* ext = strrchr(destBaseName, '.'))
-	{
-		*ext = '\0';
-	}
-
-	BString<1024> fullFilename("%s%c%s", *m_destDir, PATH_SEPARATOR, fragBaseName);
-	int64 firstSegmentSize = FileSystem::FileSize(fullFilename);
-
-	// Validate joinable file:
-	//  - fragments have continuous numbers (no holes);
-	//  - fragments have the same size (except of the last fragment);
-	//  - the last fragment must be smaller than other fragments,
-	//  if it has the same size it is probably not the last and there are missing fragments.
-
-	int count = 0;
-	int min = -1;
-	int max = -1;
-	int difSizeMin = 999999;
-	DirBrowser dir(m_destDir);
-	while (const char* filename = dir.Next())
-	{
-		fullFilename.Format("%s%c%s", *m_destDir, PATH_SEPARATOR, filename);
-
-		// only this file's pieces (its name plus ".NNN"): with a second set of split
-		// files in the folder, their pieces were counted and compared too, and the join
-		// failed for "missing fragments"
-		if (!FileSystem::DirectoryExists(fullFilename))
-		{
-			int64 segmentSize = FileSystem::FileSize(fullFilename);
-			nzbget_rs_unpack_accumulate_split_piece(
-				filename, destBaseName, segmentSize, firstSegmentSize,
-				&count, &min, &max, &difSizeMin);
-		}
-	}
-
-	if (nzbget_rs_unpack_check_joinable_fragments(
-		count, min, max, difSizeMin,
-		m_postInfo->GetNzbInfo()->GetParStatus() == NzbInfo::psSuccess ? 1 : 0) == 0)
-	{
-		PrintMessage(Message::mkWarning, "Could not join splitted file %s: missing fragments detected", *destBaseName);
-		return false;
-	}
-
-	// Now can join
-	PrintMessage(Message::mkInfo, "Joining splitted file %s", *destBaseName);
-	m_postInfo->SetStageProgress(0);
-
-	BString<1024> destFilename("%s%c%s", *m_unpackDir, PATH_SEPARATOR, *destBaseName);
-
-	DiskFile outFile;
-	if (!outFile.Open(destFilename, DiskFile::omWrite))
-	{
-		PrintMessage(Message::mkError, "Could not create file %s: %s", *destFilename,
-			*FileSystem::GetLastErrorMessage());
-		return false;
-	}
-	if (g_Options->GetWriteBuffer() > 0)
-	{
-		outFile.SetWriteBuffer(g_Options->GetWriteBuffer() * 1024);
-	}
-
-	// the pieces' total, to check the joined size against: first * (count - 1) +
-	// the different one assumed a shorter last piece, and with all pieces of one
-	// size (common) every join failed the check
-	int64 totalSize = 0;
-	for (int i = min; i <= max; i++)
-	{
-		BString<1024> fragFilename("%s%c%s.%.3i", *m_destDir, PATH_SEPARATOR, *destBaseName, i);
-		if (FileSystem::FileExists(fragFilename))
-		{
-			totalSize += FileSystem::FileSize(fragFilename);
-		}
-	}
-	if (totalSize <= 0)
-	{
-		PrintMessage(Message::mkError, "Could not join splitted file %s: file segments are empty", *destBaseName);
-		return false;
-	}
-	int64 written = 0;
-
-	CharBuffer buffer(1024 * 50);
-
-	bool ok = true;
-	for (int i = min; i <= max; i++)
-	{
-		CString pieceName = CString::FormatStr("%s.%.3i", *destBaseName, i);
-		PrintMessage(Message::mkInfo, "Joining from %s", *pieceName);
-		SetProgressLabel(BString<1024>("Joining from %s", *pieceName));
-
-		BString<1024> fragFilename("%s%c%s.%.3i", *m_destDir, PATH_SEPARATOR, *destBaseName, i);
-		if (!FileSystem::FileExists(fragFilename))
-		{
-			break;
-		}
-
-		DiskFile inFile;
-		if (inFile.Open(fragFilename, DiskFile::omRead))
-		{
-			// every write checked: with the disk full the joined file was cut short,
-			// reported a success, and the pieces were then deleted
-			int cnt = buffer.Size();
-			while (cnt == buffer.Size())
-			{
-				cnt = (int)inFile.Read(buffer, buffer.Size());
-				if (cnt > 0 && outFile.Write(buffer, cnt) != cnt)
-				{
-					PrintMessage(Message::mkError, "Could not write file %s: %s", *destFilename,
-						*FileSystem::GetLastErrorMessage());
-					ok = false;
-					break;
-				}
-				if (cnt > 0)
-				{
-					written += cnt;
-				}
-				m_postInfo->SetStageProgress(int(written * 1000 / totalSize));
-			}
-			inFile.Close();
-			if (!ok)
-			{
-				break;
-			}
-
-			m_joinedFiles.push_back(std::move(pieceName));
-		}
-		else
-		{
-			PrintMessage(Message::mkError, "Could not open file %s", *fragFilename);
-			ok = false;
-			break;
-		}
-	}
-
-	if (!outFile.Close() && ok)
-	{
-		PrintMessage(Message::mkError, "Could not write file %s: %s", *destFilename,
-			*FileSystem::GetLastErrorMessage());
-		ok = false;
-	}
-	if (ok && written != totalSize)
-	{
-		PrintMessage(Message::mkError, "Could not join splitted file %s: joined %lli of %lli bytes",
-			*destBaseName, (long long)written, (long long)totalSize);
-		ok = false;
-	}
-
-	return ok;
 }
 
 inline void UnpackController::Completed()
@@ -868,211 +588,100 @@ inline void UnpackController::CreateUnpackDir()
 
 inline void UnpackController::CheckArchiveFiles()
 {
-
-	DirBrowser dir(m_destDir);
-	while (const char* filename = dir.Next())
+	std::vector<const char*> downloadedPtrs;
+	downloadedPtrs.reserve(m_downloadedFiles.size());
+	for (const CString& f : m_downloadedFiles)
 	{
-		BString<1024> fullFilename("%s%c%s", *m_destDir, PATH_SEPARATOR, filename);
+		downloadedPtrs.push_back(*f);
+	}
 
-		if (!FileSystem::DirectoryExists(fullFilename) && IsDownloadedFile(filename))
+	std::vector<const char*> extractedPtrs;
+	if (m_postInfo && m_postInfo->GetExtractedArchives())
+	{
+		extractedPtrs.reserve(m_postInfo->GetExtractedArchives()->size());
+		for (const CString& f : *m_postInfo->GetExtractedArchives())
 		{
-			const int archiveKind = nzbget_rs_unpack_classify_archive_file(filename);
-			if (archiveKind == 1)
-			{
-				const auto begin = m_postInfo->GetExtractedArchives()->cbegin();
-				const auto end = m_postInfo->GetExtractedArchives()->cend();
-				m_hasRarFiles = true;
-				m_hasNotUnpackedRarFiles |= std::find(begin, end, filename) == end;
-			}
-			else if (archiveKind == 2 ||
-				(archiveKind == 0 && nzbget_rs_unpack_is_zipfast_supported_extension(filename) != 0))
-			{
-				m_hasSevenZipFiles = true;
-			}
-			else if (archiveKind == 3)
-			{
-				m_hasSevenZipMultiFiles = true;
-			}
-			else if (archiveKind == 4)
-			{
-				m_hasSplittedFiles = true;
-			}
-			else if (!m_hasRenamedArchiveFiles && (archiveKind == 0 || archiveKind == 6) &&
-				!Util::MatchFileExt(filename, g_Options->GetUnpackIgnoreExt(), ",;") &&
-				FileHasRarSignature(fullFilename))
-			{
-				m_hasRenamedArchiveFiles = true;
-			}
+			extractedPtrs.push_back(*f);
 		}
 	}
-}
 
-// Without a temporary unpack folder, extracted files land next to the downloaded
-// ones (and an archive may hold archives): only the download's own files count as
-// its archives. Without a record of them, every file does.
-inline bool UnpackController::IsDownloadedFile(const char* filename)
-{
-	return g_Options->GetUseTempUnpackDir() || m_downloadedFiles.empty() ||
-		m_downloadedFiles.Exists(filename);
-}
+	int hasRar = 0, hasNotUnpackedRar = 0, hasRenamed = 0;
+	int hasSevenZip = 0, hasSevenZipMulti = 0, hasSplitted = 0;
+	nzbget_rs_unpack_controller_check_archive_files(
+		m_destDir,
+		(g_Options && g_Options->GetUseTempUnpackDir()) ? 1 : 0,
+		downloadedPtrs.data(),
+		downloadedPtrs.size(),
+		extractedPtrs.data(),
+		extractedPtrs.size(),
+		g_Options ? g_Options->GetUnpackIgnoreExt() : "",
+		&hasRar,
+		&hasNotUnpackedRar,
+		&hasRenamed,
+		&hasSevenZip,
+		&hasSevenZipMulti,
+		&hasSplitted);
 
-inline bool UnpackController::FileHasRarSignature(const char* filename)
-{
-	uint8_t fileSignature[8]{};
-	int cnt = 0;
-	DiskFile infile;
-	if (infile.Open(filename, DiskFile::omRead))
-	{
-		cnt = (int)infile.Read(fileSignature, sizeof(fileSignature));
-		infile.Close();
-	}
-	return cnt == (int)sizeof(fileSignature) &&
-		nzbget_rs_unpack_detect_rar_signature(fileSignature, sizeof(fileSignature)) != 0;
+	m_hasRarFiles = hasRar != 0;
+	m_hasNotUnpackedRarFiles = hasNotUnpackedRar != 0;
+	m_hasRenamedArchiveFiles = hasRenamed != 0;
+	m_hasSevenZipFiles = hasSevenZip != 0;
+	m_hasSevenZipMultiFiles = hasSevenZipMulti != 0;
+	m_hasSplittedFiles = hasSplitted != 0;
 }
 
 inline bool UnpackController::Cleanup()
 {
-	// By success:
-	//   - move unpacked files to destination dir;
-	//   - remove _unpack-dir;
-	//   - delete archive-files.
-	// By failure:
-	//   - remove _unpack-dir.
-
-	bool ok = true;
-
-	FileList extractedFiles;
-
-	if (m_unpackOk && g_Options->GetUseTempUnpackDir())
+	std::vector<const char*> downloadedPtrs;
+	downloadedPtrs.reserve(m_downloadedFiles.size());
+	for (const CString& f : m_downloadedFiles)
 	{
-		// moving files back
-		DirBrowser dir(m_unpackDir);
-		const char* destDir = !m_finalDir.Empty() ? *m_finalDir : *m_destDir;
-		while (const char* filename = dir.Next())
+		downloadedPtrs.push_back(*f);
+	}
+
+	std::vector<const char*> joinedPtrs;
+	joinedPtrs.reserve(m_joinedFiles.size());
+	for (const CString& f : m_joinedFiles)
+	{
+		joinedPtrs.push_back(*f);
+	}
+
+	auto logCb = [](void* ctx, int kind, const char* msg)
+	{
+		if (!ctx || !msg) return;
+		UnpackController* self = static_cast<UnpackController*>(ctx);
+		Message::EKind msgKind = Message::mkInfo;
+		switch (kind)
 		{
-			BString<1024> srcFile("%s%c%s", *m_unpackDir, PATH_SEPARATOR, filename);
-			BString<1024> dstFile("%s%c%s", destDir, PATH_SEPARATOR, *FileSystem::MakeValidFilename(filename));
-
-			// silently overwrite existing files
-			FileSystem::DeleteFile(dstFile);
-
-			bool hiddenFile = filename[0] == '.';
-
-			if (!FileSystem::MoveFile(srcFile, dstFile) && !hiddenFile)
-			{
-				PrintMessage(Message::mkError, "Could not move file %s to %s: %s", *srcFile, *dstFile,
-					*FileSystem::GetLastErrorMessage());
-				ok = false;
-			}
-
-			// Fixing file or directory permissions overridden by the unpacker
-			FileSystem::RestoreFileOrDirPermissions(dstFile.Str());
-
-			extractedFiles.push_back(filename);
+			case 0: msgKind = Message::mkInfo; break;
+			case 1: msgKind = Message::mkError; break;
+			case 2: msgKind = Message::mkWarning; break;
+			default: msgKind = Message::mkDetail; break;
 		}
+		self->PrintMessage(msgKind, "%s", msg);
+	};
 
-		// Fixing directory permissions overridden by the unpacker
-		FileSystem::RestoreDirPermissions(destDir);
-
-	}
-
-	CString errmsg;
-	if (ok && g_Options->GetUseTempUnpackDir() && !FileSystem::DeleteDirectoryWithContent(m_unpackDir, errmsg))
-	{
-		PrintMessage(Message::mkError, "Could not delete temporary directory %s: %s", *m_unpackDir, *errmsg);
-	}
-
-	if (!m_unpackOk && m_finalDirCreated)
-	{
-		FileSystem::DeleteDirectory(m_finalDir);
-	}
-
-	if (m_unpackOk && ok && g_Options->GetUnpackCleanupDisk())
-	{
-		PrintMessage(Message::mkInfo, "Deleting archive files");
-
-
-		DirBrowser dir(m_destDir);
-		while (const char* filename = dir.Next())
-		{
-			BString<1024> fullFilename("%s%c%s", *m_destDir, PATH_SEPARATOR, filename);
-
-			int cleanupKind = nzbget_rs_unpack_classify_cleanup_archive_file(
-				FileSystem::DirectoryExists(fullFilename) ? 1 : 0,
-				m_interDir ? 1 : 0,
-				extractedFiles.Exists(filename) ? 1 : 0,
-				IsDownloadedFile(filename) ? 1 : 0,
-				m_hasSplittedFiles ? 1 : 0,
-				m_joinedFiles.Exists(filename) ? 1 : 0,
-				filename);
-			if (cleanupKind == 1 || (cleanupKind == 2 && FileHasRarSignature(fullFilename)))
-			{
-				PrintMessage(Message::mkInfo, "Deleting file %s", filename);
-
-				if (!FileSystem::DeleteFile(fullFilename))
-				{
-					PrintMessage(Message::mkError, "Could not delete file %s: %s", *fullFilename,
-						*FileSystem::GetLastErrorMessage());
-				}
-			}
-		}
-
-		m_cleanedUpDisk = true;
-	}
-
+	int cleanedUpDisk = m_cleanedUpDisk ? 1 : 0;
+	bool ok = nzbget_rs_unpack_controller_cleanup(
+		m_destDir,
+		m_finalDir,
+		m_unpackDir,
+		m_unpackOk ? 1 : 0,
+		(g_Options && g_Options->GetUseTempUnpackDir()) ? 1 : 0,
+		m_finalDirCreated ? 1 : 0,
+		(g_Options && g_Options->GetUnpackCleanupDisk()) ? 1 : 0,
+		m_interDir ? 1 : 0,
+		m_hasSplittedFiles ? 1 : 0,
+		static_cast<uint32_t>(FileSystem::uMask),
+		downloadedPtrs.data(),
+		downloadedPtrs.size(),
+		joinedPtrs.data(),
+		joinedPtrs.size(),
+		&cleanedUpDisk,
+		this,
+		logCb) != 0;
+	m_cleanedUpDisk = cleanedUpDisk != 0;
 	return ok;
-}
-
-/**
- * Unrar prints progress information into the same line using backspace control character.
- * In order to print progress continuously we analyze the output after every char
- * and update post-job progress information.
- */
-inline bool UnpackController::ReadLine(char* buf, int bufSize, FILE* stream)
-{
-	if (bufSize <= 0)
-	{
-		return false;
-	}
-	int32_t printed = 0;
-	size_t idx = 0;
-	ptrdiff_t lastBs = -1;
-
-	while (idx + 1 < (size_t)bufSize)
-	{
-		int ch = fgetc(stream);
-		ptrdiff_t procLen = -1;
-		int32_t progress = -1;
-		int32_t shouldBreak = nzbget_rs_unpack_ctrl_readline_step(
-			reinterpret_cast<uint8_t*>(buf), (size_t)bufSize, &idx, ch,
-			&printed, &lastBs, &procLen, &progress);
-		if (procLen >= 0)
-		{
-			BString<1024> tmp;
-			if (procLen > 0)
-			{
-				tmp.Set(buf, (int)procLen);
-			}
-			ProcessOutput(tmp);
-		}
-		if (progress >= 0)
-		{
-			m_postInfo->SetStageProgress(progress);
-		}
-		if (shouldBreak != 0)
-		{
-			break;
-		}
-	}
-
-	buf[idx] = '\0';
-
-	if (printed != 0)
-	{
-		buf[0] = '\0';
-	}
-
-	return idx > 0;
 }
 
 inline void UnpackController::AddMessage(Message::EKind kind, const char* text)

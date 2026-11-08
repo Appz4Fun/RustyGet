@@ -1869,6 +1869,992 @@ pub unsafe extern "C" fn nzbget_rs_zipview_inspect_file(
     1
 }
 
+// ============================================================================
+// Pure-Rust `UnpackController` and `DirectUnpack` Orchestration
+// ============================================================================
+
+/// `UnpackController::FileHasRarSignature`:
+/// Reads the first 8 bytes of `path` and returns `true` if they match a RAR3/4 or RAR5 signature.
+pub fn file_has_rar_signature(path: &std::path::Path) -> bool {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    use std::io::Read;
+    let mut sig = [0u8; 8];
+    let n = file.read(&mut sig).unwrap_or(0);
+    n == 8 && detect_rar_signature(&sig) != 0
+}
+
+/// `UnpackController::IsDownloadedFile`:
+/// Without a temporary unpack folder, extracted files land next to the downloaded ones
+/// (and an archive may hold archives): only the download's own files count as its archives.
+/// Without a record of them, every file does.
+pub fn is_downloaded_file(
+    filename: &[u8],
+    use_temp_unpack_dir: bool,
+    downloaded_files: &[&[u8]],
+) -> bool {
+    use_temp_unpack_dir || downloaded_files.is_empty() || downloaded_files.contains(&filename)
+}
+
+/// Result of [`check_archive_files`] (`UnpackController::CheckArchiveFiles`).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct UnpackArchiveCheckResult {
+    pub has_rar_files: bool,
+    pub has_not_unpacked_rar_files: bool,
+    pub has_renamed_archive_files: bool,
+    pub has_seven_zip_files: bool,
+    pub has_seven_zip_multi_files: bool,
+    pub has_splitted_files: bool,
+}
+
+/// `UnpackController::CheckArchiveFiles`:
+/// Scans `dest_dir` and classifies downloaded archive files, multi-volume 7z sets, split `.001`
+/// pieces, and obfuscated/renamed RAR archives.
+pub fn check_archive_files(
+    dest_dir: &[u8],
+    use_temp_unpack_dir: bool,
+    downloaded_files: &[&[u8]],
+    extracted_archives: &[&[u8]],
+    unpack_ignore_ext: &[u8],
+) -> UnpackArchiveCheckResult {
+    let mut res = UnpackArchiveCheckResult::default();
+    let sep = crate::paths::PATH_SEPARATOR;
+    let ascii_fold = crate::wildmask::Lower::Ascii;
+
+    for filename in crate::fsops::list_dir_entries(dest_dir) {
+        let full = [dest_dir, &[sep], &filename].concat();
+        if crate::fsops::directory_exists(&full, &crate::fsops::posix_stat)
+            || !is_downloaded_file(&filename, use_temp_unpack_dir, downloaded_files)
+        {
+            continue;
+        }
+        let archive_kind = classify_archive_file(&filename);
+        if archive_kind == 1 {
+            res.has_rar_files = true;
+            res.has_not_unpacked_rar_files |= !extracted_archives.contains(&filename.as_slice());
+        } else if archive_kind == 2
+            || (archive_kind == 0 && is_zipfast_supported_extension(&filename))
+        {
+            res.has_seven_zip_files = true;
+        } else if archive_kind == 3 {
+            res.has_seven_zip_multi_files = true;
+        } else if archive_kind == 4 {
+            res.has_splitted_files = true;
+        } else if !res.has_renamed_archive_files
+            && (archive_kind == 0 || archive_kind == 6)
+            && !crate::util::match_file_ext(
+                &filename,
+                unpack_ignore_ext,
+                b",;",
+                &ascii_fold,
+                &ascii_fold,
+            )
+            && file_has_rar_signature(crate::fsops::path(&full))
+        {
+            res.has_renamed_archive_files = true;
+        }
+    }
+
+    res
+}
+
+/// Discovers and lexicographically sorts archives in `dest_dir` for `UnpackController::ExecuteUnrar`
+/// (`is_seven_zip == false`) or `UnpackController::ExecuteSevenZip` (`is_seven_zip == true`).
+pub fn discover_unpack_archives(
+    dest_dir: &[u8],
+    is_seven_zip: bool,
+    multi_volumes: bool,
+    use_temp_unpack_dir: bool,
+    downloaded_files: &[&[u8]],
+) -> Vec<Vec<u8>> {
+    let mut archives = Vec::new();
+    let sep = crate::paths::PATH_SEPARATOR;
+
+    for filename in crate::fsops::list_dir_entries(dest_dir) {
+        let full = [dest_dir, &[sep], &filename].concat();
+        if crate::fsops::directory_exists(&full, &crate::fsops::posix_stat)
+            || !is_downloaded_file(&filename, use_temp_unpack_dir, downloaded_files)
+        {
+            continue;
+        }
+        let archive_kind = classify_archive_file(&filename);
+        if !is_seven_zip {
+            if archive_kind == 1 && is_main_archive(&filename) {
+                archives.push(filename);
+            }
+        } else if multi_volumes {
+            if archive_kind == 3 && sevenzip_is_supported(&filename) {
+                archives.push(filename);
+            }
+        } else if archive_kind == 2
+            || (archive_kind == 0 && is_zipfast_supported_extension(&filename))
+        {
+            archives.push(filename);
+        }
+    }
+
+    archives.sort();
+    archives
+}
+
+/// Discovers, sorts, and extracts all matching archives in `dest_dir` into `unpack_dir`
+/// for `UnpackController::ExecuteUnrar` / `UnpackController::ExecuteSevenZip`.
+#[allow(clippy::too_many_arguments)]
+pub fn extract_discovered_archives(
+    dest_dir: &[u8],
+    unpack_dir: &std::path::Path,
+    password: &str,
+    is_seven_zip: bool,
+    multi_volumes: bool,
+    use_temp_unpack_dir: bool,
+    cleanup_disk: bool,
+    downloaded_files: &[&[u8]],
+    reset_all_ok: &mut dyn FnMut(),
+    has_all_ok: &mut dyn FnMut() -> bool,
+    log_cb: &mut dyn FnMut(i32, &str),
+    is_stopped: &mut dyn FnMut() -> bool,
+) -> bool {
+    let archives = discover_unpack_archives(
+        dest_dir,
+        is_seven_zip,
+        multi_volumes,
+        use_temp_unpack_dir,
+        downloaded_files,
+    );
+    if archives.is_empty() {
+        return false;
+    }
+
+    let sep = crate::paths::PATH_SEPARATOR;
+    for archive in archives {
+        if is_stopped() {
+            return false;
+        }
+        let full = [dest_dir, &[sep], &archive].concat();
+        reset_all_ok();
+        let res = extract_archive_with_zipfast_cancellable(
+            crate::fsops::path(&full),
+            unpack_dir,
+            password,
+            1,
+            cleanup_disk,
+            &mut *log_cb,
+            is_stopped,
+        );
+        if res.is_err() || !has_all_ok() {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn read_chunk_until_full_or_eof(file: &mut std::fs::File, buf: &mut [u8]) -> usize {
+    use std::io::Read;
+    let mut total = 0usize;
+    while total < buf.len() {
+        match file.read(&mut buf[total..]) {
+            Ok(0) => break,
+            Ok(n) => total += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    total
+}
+
+fn close_output_file(out_writer: std::io::BufWriter<std::fs::File>) -> Result<(), i32> {
+    match out_writer.into_inner() {
+        Ok(out_file) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::io::IntoRawFd;
+                let fd = out_file.into_raw_fd();
+                // SAFETY: `fd` was owned by `out_file` and is closed exactly once here.
+                if unsafe { libc::close(fd) } == 0 {
+                    Ok(())
+                } else {
+                    Err(crate::fsops::last_errno())
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                drop(out_file);
+                Ok(())
+            }
+        }
+        Err(into_err) => {
+            let raw_err = into_err.error().raw_os_error().unwrap_or(0);
+            Err(raw_err)
+        }
+    }
+}
+
+/// `UnpackController::JoinFile`:
+/// Validates and joins a split file (`<base>.000` / `<base>.001` .. `<base>.NNN`) from `dest_dir`
+/// into `unpack_dir/<base>`, appending joined piece filenames to `joined_files`.
+#[allow(clippy::too_many_arguments)]
+pub fn join_file(
+    dest_dir: &[u8],
+    unpack_dir: &[u8],
+    frag_base_name: &[u8],
+    par_success: bool,
+    write_buffer_kb: i32,
+    joined_files: &mut Vec<Vec<u8>>,
+    log_cb: &mut dyn FnMut(i32, &[u8]),
+    progress_cb: &mut dyn FnMut(Option<&[u8]>, i32),
+) -> bool {
+    use std::io::Write;
+
+    let sep = crate::paths::PATH_SEPARATOR;
+    let dest_base_name = unpack_ctrl_strip_last_extension(frag_base_name);
+    let first_full = [dest_dir, &[sep], frag_base_name].concat();
+    let Ok(first_cstr) = std::ffi::CString::new(first_full) else {
+        return false;
+    };
+    let first_segment_size = crate::fsops::file_size(&first_cstr);
+
+    let mut count = 0i32;
+    let mut min = -1i32;
+    let mut max = -1i32;
+    let mut dif_size_min = 999_999i32;
+
+    for filename in crate::fsops::list_dir_entries(dest_dir) {
+        let full = [dest_dir, &[sep], &filename].concat();
+        if !crate::fsops::directory_exists(&full, &crate::fsops::posix_stat) {
+            let segment_size = std::ffi::CString::new(full)
+                .map(|c| crate::fsops::file_size(&c))
+                .unwrap_or(-1);
+            accumulate_split_piece(
+                &filename,
+                &dest_base_name,
+                segment_size,
+                first_segment_size,
+                &mut count,
+                &mut min,
+                &mut max,
+                &mut dif_size_min,
+            );
+        }
+    }
+
+    if !check_joinable_fragments(count, min, max, dif_size_min, par_success) {
+        let msg = [
+            b"Could not join splitted file ",
+            dest_base_name.as_slice(),
+            b": missing fragments detected",
+        ]
+        .concat();
+        log_cb(2, &msg);
+        return false;
+    }
+
+    let joining_header = [b"Joining splitted file ", dest_base_name.as_slice()].concat();
+    log_cb(0, &joining_header);
+    progress_cb(None, 0);
+
+    let dest_filename = [unpack_dir, &[sep], &dest_base_name].concat();
+    let out_file = match std::fs::File::create(crate::fsops::path(&dest_filename)) {
+        Ok(f) => f,
+        Err(e) => {
+            let err_msg = crate::fsops::error_message(e.raw_os_error().unwrap_or(0));
+            let msg = [
+                b"Could not create file ",
+                dest_filename.as_slice(),
+                b": ",
+                err_msg.as_slice(),
+            ]
+            .concat();
+            log_cb(1, &msg);
+            return false;
+        }
+    };
+
+    let mut total_size = 0i64;
+    for i in min..=max {
+        let frag = [
+            dest_dir,
+            &[sep],
+            &dest_base_name,
+            format!(".{i:03}").as_bytes(),
+        ]
+        .concat();
+        if crate::fsops::file_exists(&frag, &crate::fsops::posix_stat) {
+            if let Ok(c) = std::ffi::CString::new(frag) {
+                total_size += crate::fsops::file_size(&c);
+            }
+        }
+    }
+    if total_size <= 0 {
+        let msg = [
+            b"Could not join splitted file ",
+            dest_base_name.as_slice(),
+            b": file segments are empty",
+        ]
+        .concat();
+        log_cb(1, &msg);
+        return false;
+    }
+
+    let buf_cap = if write_buffer_kb > 0 {
+        (write_buffer_kb as usize).saturating_mul(1024)
+    } else {
+        8 * 1024
+    };
+    let mut out_writer = std::io::BufWriter::with_capacity(buf_cap, out_file);
+    let mut written = 0i64;
+    let mut buffer = vec![0u8; 1024 * 50];
+    let mut ok = true;
+
+    for i in min..=max {
+        let piece_name = [dest_base_name.as_slice(), format!(".{i:03}").as_bytes()].concat();
+        let joining_msg = [b"Joining from ", piece_name.as_slice()].concat();
+        log_cb(0, &joining_msg);
+        progress_cb(Some(&joining_msg), -1);
+
+        let frag_filename = [dest_dir, &[sep], &piece_name].concat();
+        if !crate::fsops::file_exists(&frag_filename, &crate::fsops::posix_stat) {
+            break;
+        }
+
+        match std::fs::File::open(crate::fsops::path(&frag_filename)) {
+            Ok(mut in_file) => {
+                let mut cnt = buffer.len();
+                while cnt == buffer.len() {
+                    cnt = read_chunk_until_full_or_eof(&mut in_file, &mut buffer);
+                    if cnt > 0 {
+                        if let Err(e) = out_writer.write_all(&buffer[..cnt]) {
+                            let err_msg =
+                                crate::fsops::error_message(e.raw_os_error().unwrap_or(0));
+                            let msg = [
+                                b"Could not write file ",
+                                dest_filename.as_slice(),
+                                b": ",
+                                err_msg.as_slice(),
+                            ]
+                            .concat();
+                            log_cb(1, &msg);
+                            ok = false;
+                            break;
+                        }
+                        written += cnt as i64;
+                    }
+                    progress_cb(None, ((written * 1000) / total_size) as i32);
+                }
+                if !ok {
+                    break;
+                }
+                joined_files.push(piece_name);
+            }
+            Err(_) => {
+                let msg = [b"Could not open file ", frag_filename.as_slice()].concat();
+                log_cb(1, &msg);
+                ok = false;
+                break;
+            }
+        }
+    }
+
+    if let Err(errno) = close_output_file(out_writer) {
+        if ok {
+            let err_msg = crate::fsops::error_message(errno);
+            let msg = [
+                b"Could not write file ",
+                dest_filename.as_slice(),
+                b": ",
+                err_msg.as_slice(),
+            ]
+            .concat();
+            log_cb(1, &msg);
+            ok = false;
+        }
+    }
+
+    if ok && written != total_size {
+        let msg = [
+            b"Could not join splitted file ",
+            dest_base_name.as_slice(),
+            format!(": joined {written} of {total_size} bytes").as_bytes(),
+        ]
+        .concat();
+        log_cb(1, &msg);
+        ok = false;
+    }
+
+    ok
+}
+
+/// `UnpackController::JoinSplittedFiles`:
+/// Scans `dest_dir` for split `.001` first pieces (excluding RAR files) and joins each group into `unpack_dir`.
+pub fn join_splitted_files(
+    dest_dir: &[u8],
+    unpack_dir: &[u8],
+    par_success: bool,
+    write_buffer_kb: i32,
+    joined_files: &mut Vec<Vec<u8>>,
+    log_cb: &mut dyn FnMut(i32, &[u8]),
+    progress_cb: &mut dyn FnMut(Option<&[u8]>, i32),
+) -> bool {
+    let sep = crate::paths::PATH_SEPARATOR;
+    for filename in crate::fsops::list_dir_entries(dest_dir) {
+        let full = [dest_dir, &[sep], &filename].concat();
+        if !crate::fsops::directory_exists(&full, &crate::fsops::posix_stat)
+            && is_split_first_piece(&filename)
+            && !file_has_rar_signature(crate::fsops::path(&full))
+            && !join_file(
+                dest_dir,
+                unpack_dir,
+                &filename,
+                par_success,
+                write_buffer_kb,
+                joined_files,
+                log_cb,
+                progress_cb,
+            )
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// `UnpackController::Cleanup`:
+/// Moves unpacked files from `unpack_dir` to `final_dir` (or `dest_dir`), restores permissions
+/// using `umask`, removes `unpack_dir`, deletes `final_dir` if unpacking failed and `final_dir_created`
+/// is true, and deletes source archive files if `unpack_cleanup_disk` is enabled.
+/// Returns `(cleanup_ok, cleaned_up_disk)`.
+#[allow(clippy::too_many_arguments)]
+pub fn unpack_controller_cleanup(
+    dest_dir: &[u8],
+    final_dir: &[u8],
+    unpack_dir: &[u8],
+    unpack_ok: bool,
+    use_temp_unpack_dir: bool,
+    final_dir_created: bool,
+    unpack_cleanup_disk: bool,
+    inter_dir: bool,
+    has_splitted_files: bool,
+    umask: u32,
+    downloaded_files: &[&[u8]],
+    joined_files: &[&[u8]],
+    log_cb: &mut dyn FnMut(i32, &[u8]),
+) -> (bool, bool) {
+    let mut ok = true;
+    let mut cleaned_up_disk = false;
+    let mut extracted_files: Vec<Vec<u8>> = Vec::new();
+    let sep = crate::paths::PATH_SEPARATOR;
+
+    if unpack_ok && use_temp_unpack_dir {
+        let target_dest_dir = if !final_dir.is_empty() {
+            final_dir
+        } else {
+            dest_dir
+        };
+        for filename in crate::fsops::list_dir_entries(unpack_dir) {
+            let src_file = [unpack_dir, &[sep], &filename].concat();
+            let valid_name = crate::paths::make_valid_filename(&filename, false);
+            let dst_file = [target_dest_dir, &[sep], &valid_name].concat();
+
+            if let Ok(dst_cstr) = std::ffi::CString::new(dst_file.clone()) {
+                let _ = crate::fsops::delete_file(&dst_cstr);
+            }
+
+            let hidden_file = filename.first() == Some(&b'.');
+            let moved = match (
+                std::ffi::CString::new(src_file.clone()),
+                std::ffi::CString::new(dst_file.clone()),
+            ) {
+                (Ok(s), Ok(d)) => crate::fsops::move_file(&s, &d),
+                _ => false,
+            };
+            if !moved && !hidden_file {
+                let err_msg = crate::fsops::error_message(crate::fsops::last_errno());
+                let msg = [
+                    b"Could not move file ",
+                    src_file.as_slice(),
+                    b" to ",
+                    dst_file.as_slice(),
+                    b": ",
+                    err_msg.as_slice(),
+                ]
+                .concat();
+                log_cb(1, &msg);
+                ok = false;
+            }
+
+            let _ = crate::fsops::restore_file_or_dir_permissions(&dst_file, umask);
+            extracted_files.push(filename);
+        }
+
+        let _ = crate::fsops::restore_dir_permissions(target_dest_dir, umask);
+    }
+
+    if ok && use_temp_unpack_dir {
+        let mut ops = crate::fsops::PosixFsOps;
+        let mut errmsg = Vec::new();
+        if !crate::fsdelete::delete_directory_with_content(&mut ops, unpack_dir, sep, &mut errmsg)
+            .unwrap_or(false)
+        {
+            let msg = [
+                b"Could not delete temporary directory ",
+                unpack_dir,
+                b": ",
+                errmsg.as_slice(),
+            ]
+            .concat();
+            log_cb(1, &msg);
+        }
+    }
+
+    if !unpack_ok && final_dir_created && !final_dir.is_empty() {
+        let mut ops = crate::fsops::PosixFsOps;
+        let _ = crate::fsdelete::delete_directory(&mut ops, final_dir, sep);
+    }
+
+    if unpack_ok && ok && unpack_cleanup_disk {
+        log_cb(0, b"Deleting archive files");
+
+        for filename in crate::fsops::list_dir_entries(dest_dir) {
+            let full = [dest_dir, &[sep], &filename].concat();
+            let is_dir = crate::fsops::directory_exists(&full, &crate::fsops::posix_stat);
+            let in_extracted = extracted_files.iter().any(|f| f == &filename);
+            let is_downloaded = is_downloaded_file(&filename, use_temp_unpack_dir, downloaded_files);
+            let in_joined = joined_files.contains(&filename.as_slice());
+
+            let cleanup_kind = classify_cleanup_archive_file(
+                is_dir,
+                inter_dir,
+                in_extracted,
+                is_downloaded,
+                has_splitted_files,
+                in_joined,
+                &filename,
+            );
+            if cleanup_kind == 1
+                || (cleanup_kind == 2 && file_has_rar_signature(crate::fsops::path(&full)))
+            {
+                let del_msg = [b"Deleting file ", filename.as_slice()].concat();
+                log_cb(0, &del_msg);
+                let deleted = std::ffi::CString::new(full.clone())
+                    .map(|c| crate::fsops::delete_file(&c))
+                    .unwrap_or(false);
+                if !deleted {
+                    let err_msg = crate::fsops::error_message(crate::fsops::last_errno());
+                    let msg = [
+                        b"Could not delete file ",
+                        full.as_slice(),
+                        b": ",
+                        err_msg.as_slice(),
+                    ]
+                    .concat();
+                    log_cb(1, &msg);
+                }
+            }
+        }
+
+        cleaned_up_disk = true;
+    }
+
+    (ok, cleaned_up_disk)
+}
+
+/// `DirectUnpack::IsMainArchive`:
+/// Checks that `filename` has a RAR extension (`FileTypes::IsRarExt`) and is not a non-first `.partN.rar` volume.
+pub fn direct_unpack_is_main_archive(filename: &[u8]) -> bool {
+    let Some(ext) = crate::fsdelete::file_extension(filename) else {
+        return false;
+    };
+    crate::filetypes::is_rar_ext(ext) && is_main_archive(filename)
+}
+
+/// `DirectUnpack::FindArchiveFiles`:
+/// Scans `dest_dir` and returns all non-directory main RAR archive filenames.
+pub fn direct_unpack_find_archive_files(dest_dir: &[u8]) -> Vec<Vec<u8>> {
+    let mut archives = Vec::new();
+    let sep = crate::paths::PATH_SEPARATOR;
+    for filename in crate::fsops::list_dir_entries(dest_dir) {
+        if direct_unpack_is_main_archive(&filename) {
+            let full = [dest_dir, &[sep], &filename].concat();
+            if !crate::fsops::directory_exists(&full, &crate::fsops::posix_stat) {
+                archives.push(filename);
+            }
+        }
+    }
+    archives
+}
+
+/// `DirectUnpack::Cleanup`:
+/// Removes `unpack_dir` (if `use_temp_unpack_dir` is enabled and `unpack_dir` exists) and
+/// `final_dir` (if `final_dir_created` is true).
+pub fn direct_unpack_cleanup(
+    use_temp_unpack_dir: bool,
+    unpack_dir: &[u8],
+    final_dir_created: bool,
+    final_dir: &[u8],
+    log_cb: &mut dyn FnMut(i32, &[u8]),
+) {
+    let sep = crate::paths::PATH_SEPARATOR;
+    if use_temp_unpack_dir
+        && !unpack_dir.is_empty()
+        && crate::fsops::directory_exists(unpack_dir, &crate::fsops::posix_stat)
+    {
+        let mut ops = crate::fsops::PosixFsOps;
+        let mut errmsg = Vec::new();
+        if !crate::fsdelete::delete_directory_with_content(&mut ops, unpack_dir, sep, &mut errmsg)
+            .unwrap_or(false)
+        {
+            let msg = [
+                b"Could not delete temporary directory ",
+                unpack_dir,
+                b": ",
+                errmsg.as_slice(),
+            ]
+            .concat();
+            log_cb(1, &msg);
+        }
+    }
+
+    if final_dir_created && !final_dir.is_empty() {
+        let mut ops = crate::fsops::PosixFsOps;
+        let _ = crate::fsdelete::delete_directory(&mut ops, final_dir, sep);
+    }
+}
+
+unsafe fn collect_cstr_slice<'a>(
+    ptrs: *const *const c_char,
+    len: usize,
+) -> Vec<&'a [u8]> {
+    if ptrs.is_null() || len == 0 {
+        return Vec::new();
+    }
+    let slice = unsafe { std::slice::from_raw_parts(ptrs, len) };
+    let mut out = Vec::with_capacity(len);
+    for &p in slice {
+        if !p.is_null() {
+            out.push(unsafe { CStr::from_ptr(p).to_bytes() });
+        }
+    }
+    out
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_unpack_controller_check_archive_files(
+    dest_dir: *const c_char,
+    use_temp_unpack_dir: c_int,
+    downloaded_files: *const *const c_char,
+    downloaded_len: usize,
+    extracted_archives: *const *const c_char,
+    extracted_len: usize,
+    unpack_ignore_ext: *const c_char,
+    out_has_rar_files: *mut c_int,
+    out_has_not_unpacked_rar_files: *mut c_int,
+    out_has_renamed_archive_files: *mut c_int,
+    out_has_seven_zip_files: *mut c_int,
+    out_has_seven_zip_multi_files: *mut c_int,
+    out_has_splitted_files: *mut c_int,
+) {
+    let dest = if dest_dir.is_null() {
+        &b""[..]
+    } else {
+        unsafe { CStr::from_ptr(dest_dir).to_bytes() }
+    };
+    let ignore = if unpack_ignore_ext.is_null() {
+        &b""[..]
+    } else {
+        unsafe { CStr::from_ptr(unpack_ignore_ext).to_bytes() }
+    };
+    let downloaded = unsafe { collect_cstr_slice(downloaded_files, downloaded_len) };
+    let extracted = unsafe { collect_cstr_slice(extracted_archives, extracted_len) };
+    let res = check_archive_files(
+        dest,
+        use_temp_unpack_dir != 0,
+        &downloaded,
+        &extracted,
+        ignore,
+    );
+    unsafe {
+        if !out_has_rar_files.is_null() {
+            *out_has_rar_files = c_int::from(res.has_rar_files);
+        }
+        if !out_has_not_unpacked_rar_files.is_null() {
+            *out_has_not_unpacked_rar_files = c_int::from(res.has_not_unpacked_rar_files);
+        }
+        if !out_has_renamed_archive_files.is_null() {
+            *out_has_renamed_archive_files = c_int::from(res.has_renamed_archive_files);
+        }
+        if !out_has_seven_zip_files.is_null() {
+            *out_has_seven_zip_files = c_int::from(res.has_seven_zip_files);
+        }
+        if !out_has_seven_zip_multi_files.is_null() {
+            *out_has_seven_zip_multi_files = c_int::from(res.has_seven_zip_multi_files);
+        }
+        if !out_has_splitted_files.is_null() {
+            *out_has_splitted_files = c_int::from(res.has_splitted_files);
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_unpack_controller_extract_archives(
+    dest_dir: *const c_char,
+    unpack_dir: *const c_char,
+    password: *const c_char,
+    is_seven_zip: c_int,
+    multi_volumes: c_int,
+    use_temp_unpack_dir: c_int,
+    cleanup_disk: c_int,
+    downloaded_files: *const *const c_char,
+    downloaded_len: usize,
+    ctx: *mut std::ffi::c_void,
+    reset_all_ok_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+    has_all_ok_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
+    log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
+    is_stopped_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> c_int>,
+) -> c_int {
+    if dest_dir.is_null() {
+        return 0;
+    }
+    let Some(out_dir) = cstr_to_path(unpack_dir) else {
+        return 0;
+    };
+    let dest_bytes = unsafe { CStr::from_ptr(dest_dir).to_bytes() };
+    let pw = if password.is_null() {
+        ""
+    } else {
+        unsafe { CStr::from_ptr(password).to_str().unwrap_or("") }
+    };
+    let downloaded = unsafe { collect_cstr_slice(downloaded_files, downloaded_len) };
+
+    let mut reset_all_ok = || {
+        if let Some(cb) = reset_all_ok_cb {
+            unsafe { cb(ctx) };
+        }
+    };
+    let mut has_all_ok = || {
+        has_all_ok_cb.is_none_or(|cb| unsafe { cb(ctx) != 0 })
+    };
+    let mut emit_log = |kind: i32, msg: &str| {
+        if let Some(cb) = log_cb {
+            if let Ok(cmsg) = std::ffi::CString::new(msg) {
+                unsafe { cb(ctx, kind, cmsg.as_ptr()) };
+            }
+        }
+    };
+    let mut is_stopped = || {
+        is_stopped_cb.is_some_and(|cb| unsafe { cb(ctx) != 0 })
+    };
+
+    c_int::from(extract_discovered_archives(
+        dest_bytes,
+        &out_dir,
+        pw,
+        is_seven_zip != 0,
+        multi_volumes != 0,
+        use_temp_unpack_dir != 0,
+        cleanup_disk != 0,
+        &downloaded,
+        &mut reset_all_ok,
+        &mut has_all_ok,
+        &mut emit_log,
+        &mut is_stopped,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_unpack_controller_join_splitted_files(
+    dest_dir: *const c_char,
+    unpack_dir: *const c_char,
+    par_success: c_int,
+    write_buffer_kb: c_int,
+    ctx: *mut std::ffi::c_void,
+    log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
+    progress_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, c_int)>,
+    add_joined_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
+) -> c_int {
+    if dest_dir.is_null() || unpack_dir.is_null() {
+        return 0;
+    }
+    let dest_bytes = unsafe { CStr::from_ptr(dest_dir).to_bytes() };
+    let unpack_bytes = unsafe { CStr::from_ptr(unpack_dir).to_bytes() };
+    let mut joined_files = Vec::new();
+
+    let mut emit_log = |kind: i32, msg: &[u8]| {
+        if let Some(cb) = log_cb {
+            if let Ok(cmsg) = std::ffi::CString::new(msg) {
+                unsafe { cb(ctx, kind, cmsg.as_ptr()) };
+            }
+        }
+    };
+    let mut emit_progress = |label: Option<&[u8]>, stage_progress: i32| {
+        if let Some(cb) = progress_cb {
+            match label {
+                Some(s) => {
+                    if let Ok(clabel) = std::ffi::CString::new(s) {
+                        unsafe { cb(ctx, clabel.as_ptr(), stage_progress) };
+                    }
+                }
+                None => unsafe { cb(ctx, std::ptr::null(), stage_progress) },
+            }
+        }
+    };
+
+    let ok = join_splitted_files(
+        dest_bytes,
+        unpack_bytes,
+        par_success != 0,
+        write_buffer_kb,
+        &mut joined_files,
+        &mut emit_log,
+        &mut emit_progress,
+    );
+
+    if let Some(cb) = add_joined_cb {
+        for piece in joined_files {
+            if let Ok(cpiece) = std::ffi::CString::new(piece) {
+                unsafe { cb(ctx, cpiece.as_ptr()) };
+            }
+        }
+    }
+
+    c_int::from(ok)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_unpack_controller_cleanup(
+    dest_dir: *const c_char,
+    final_dir: *const c_char,
+    unpack_dir: *const c_char,
+    unpack_ok: c_int,
+    use_temp_unpack_dir: c_int,
+    final_dir_created: c_int,
+    unpack_cleanup_disk: c_int,
+    inter_dir: c_int,
+    has_splitted_files: c_int,
+    umask: u32,
+    downloaded_files: *const *const c_char,
+    downloaded_len: usize,
+    joined_files: *const *const c_char,
+    joined_len: usize,
+    out_cleaned_up_disk: *mut c_int,
+    ctx: *mut std::ffi::c_void,
+    log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
+) -> c_int {
+    let dest_bytes = if dest_dir.is_null() {
+        &b""[..]
+    } else {
+        unsafe { CStr::from_ptr(dest_dir).to_bytes() }
+    };
+    let final_bytes = if final_dir.is_null() {
+        &b""[..]
+    } else {
+        unsafe { CStr::from_ptr(final_dir).to_bytes() }
+    };
+    let unpack_bytes = if unpack_dir.is_null() {
+        &b""[..]
+    } else {
+        unsafe { CStr::from_ptr(unpack_dir).to_bytes() }
+    };
+    let downloaded = unsafe { collect_cstr_slice(downloaded_files, downloaded_len) };
+    let joined = unsafe { collect_cstr_slice(joined_files, joined_len) };
+
+    let mut emit_log = |kind: i32, msg: &[u8]| {
+        if let Some(cb) = log_cb {
+            if let Ok(cmsg) = std::ffi::CString::new(msg) {
+                unsafe { cb(ctx, kind, cmsg.as_ptr()) };
+            }
+        }
+    };
+
+    let (ok, cleaned_up) = unpack_controller_cleanup(
+        dest_bytes,
+        final_bytes,
+        unpack_bytes,
+        unpack_ok != 0,
+        use_temp_unpack_dir != 0,
+        final_dir_created != 0,
+        unpack_cleanup_disk != 0,
+        inter_dir != 0,
+        has_splitted_files != 0,
+        umask,
+        &downloaded,
+        &joined,
+        &mut emit_log,
+    );
+
+    if !out_cleaned_up_disk.is_null() && cleaned_up {
+        unsafe { *out_cleaned_up_disk = 1 };
+    }
+
+    c_int::from(ok)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_direct_unpack_is_main_archive(
+    filename: *const c_char,
+) -> c_int {
+    if filename.is_null() {
+        return 0;
+    }
+    let bytes = unsafe { CStr::from_ptr(filename).to_bytes() };
+    c_int::from(direct_unpack_is_main_archive(bytes))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_direct_unpack_find_archive_files(
+    dest_dir: *const c_char,
+    ctx: *mut std::ffi::c_void,
+    add_archive_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
+) {
+    if dest_dir.is_null() {
+        return;
+    }
+    let dest_bytes = unsafe { CStr::from_ptr(dest_dir).to_bytes() };
+    let archives = direct_unpack_find_archive_files(dest_bytes);
+    if let Some(cb) = add_archive_cb {
+        for arch in archives {
+            if let Ok(carch) = std::ffi::CString::new(arch) {
+                unsafe { cb(ctx, carch.as_ptr()) };
+            }
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_direct_unpack_cleanup(
+    use_temp_unpack_dir: c_int,
+    unpack_dir: *const c_char,
+    final_dir_created: c_int,
+    final_dir: *const c_char,
+    ctx: *mut std::ffi::c_void,
+    log_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
+) {
+    let unpack_bytes = if unpack_dir.is_null() {
+        &b""[..]
+    } else {
+        unsafe { CStr::from_ptr(unpack_dir).to_bytes() }
+    };
+    let final_bytes = if final_dir.is_null() {
+        &b""[..]
+    } else {
+        unsafe { CStr::from_ptr(final_dir).to_bytes() }
+    };
+    let mut emit_log = |kind: i32, msg: &[u8]| {
+        if let Some(cb) = log_cb {
+            if let Ok(cmsg) = std::ffi::CString::new(msg) {
+                unsafe { cb(ctx, kind, cmsg.as_ptr()) };
+            }
+        }
+    };
+    direct_unpack_cleanup(
+        use_temp_unpack_dir != 0,
+        unpack_bytes,
+        final_dir_created != 0,
+        final_bytes,
+        &mut emit_log,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2902,6 +3888,189 @@ mod tests {
             );
             assert!(nested_rar_out.join("testfile5.dat").exists());
         }
+
+        let _ = std::fs::remove_dir_all(&work_dir);
+    }
+
+    #[test]
+    fn test_unpack_controller_and_direct_unpack_rust_orchestration() {
+        let work_dir = std::env::temp_dir().join(format!(
+            "rustyget_unpack_ctrl_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let dest_dir = work_dir.join("dest");
+        let unpack_dir = dest_dir.join("_unpack");
+        let final_dir = work_dir.join("final");
+        std::fs::create_dir_all(&unpack_dir).unwrap();
+        std::fs::create_dir_all(&final_dir).unwrap();
+
+        // 1. Write split pieces, RAR, 7z, and obfuscated RAR into dest_dir
+        std::fs::write(dest_dir.join("movie.mkv.001"), b"PART_ONE_DATA!").unwrap();
+        std::fs::write(dest_dir.join("movie.mkv.002"), b"PART2").unwrap();
+        std::fs::write(dest_dir.join("archive.part01.rar"), b"Rar!\x1a\x07\x00\x00").unwrap();
+        std::fs::write(dest_dir.join("archive.part02.rar"), b"Rar!\x1a\x07\x00\x00").unwrap();
+        std::fs::write(dest_dir.join("bundle.7z"), b"7z\xbc\xaf\x27\x1c\x00\x04").unwrap();
+        std::fs::write(dest_dir.join("multi.7z.001"), b"7z\xbc\xaf\x27\x1c\x00\x04").unwrap();
+        std::fs::write(dest_dir.join("obfuscated.bin"), b"Rar!\x1a\x07\x01\x00").unwrap();
+
+        let dest_bytes = path_to_bytes(&dest_dir);
+        let unpack_bytes = path_to_bytes(&unpack_dir);
+        let final_bytes = path_to_bytes(&final_dir);
+
+        // 2. CheckArchiveFiles
+        let chk = check_archive_files(
+            dest_bytes,
+            true,
+            &[],
+            &[b"archive.part01.rar"],
+            b".nfo;.txt",
+        );
+        assert!(chk.has_rar_files);
+        assert!(
+            chk.has_not_unpacked_rar_files,
+            "archive.part02.rar was not in extracted_archives"
+        );
+        assert!(chk.has_renamed_archive_files);
+        assert!(chk.has_seven_zip_files);
+        assert!(chk.has_seven_zip_multi_files);
+        assert!(chk.has_splitted_files);
+
+        // 3. DirectUnpack::FindArchiveFiles finds only main RAR archives
+        let direct_main = direct_unpack_find_archive_files(dest_bytes);
+        assert_eq!(direct_main, vec![b"archive.part01.rar".to_vec()]);
+
+        // 4. discover_unpack_archives for Unrar, 7z single, and 7z multi
+        assert_eq!(
+            discover_unpack_archives(dest_bytes, false, false, true, &[]),
+            vec![b"archive.part01.rar".to_vec()]
+        );
+        assert_eq!(
+            discover_unpack_archives(dest_bytes, true, false, true, &[]),
+            vec![b"bundle.7z".to_vec()]
+        );
+        assert_eq!(
+            discover_unpack_archives(dest_bytes, true, true, true, &[]),
+            vec![b"multi.7z.001".to_vec()]
+        );
+
+        // 5. JoinSplittedFiles joins movie.mkv.001 + movie.mkv.002 -> _unpack/movie.mkv
+        let mut joined_files = Vec::new();
+        let mut join_logs = Vec::new();
+        let mut last_progress = -1;
+        let join_ok = join_splitted_files(
+            dest_bytes,
+            unpack_bytes,
+            false,
+            64,
+            &mut joined_files,
+            &mut |kind, msg| join_logs.push((kind, msg.to_vec())),
+            &mut |_label, prog| {
+                if prog >= 0 {
+                    last_progress = prog;
+                }
+            },
+        );
+        assert!(join_ok);
+        assert_eq!(last_progress, 1000);
+        assert_eq!(
+            joined_files,
+            vec![b"movie.mkv.001".to_vec(), b"movie.mkv.002".to_vec()]
+        );
+        assert_eq!(
+            std::fs::read(unpack_dir.join("movie.mkv")).unwrap(),
+            b"PART_ONE_DATA!PART2"
+        );
+
+        // Non-UTF8 filename bytes are preserved verbatim in join diagnostics
+        let mut non_utf8_logs = Vec::new();
+        let non_utf8_ok = join_file(
+            dest_bytes,
+            unpack_bytes,
+            b"m\xffvie.mkv.001",
+            false,
+            64,
+            &mut Vec::new(),
+            &mut |kind, msg| non_utf8_logs.push((kind, msg.to_vec())),
+            &mut |_, _| {},
+        );
+        assert!(!non_utf8_ok);
+        assert_eq!(
+            non_utf8_logs,
+            vec![(
+                2,
+                b"Could not join splitted file m\xffvie.mkv: missing fragments detected".to_vec()
+            )]
+        );
+
+        // Output-file close errors are detected and reported by close_output_file
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let probe_path = work_dir.join("close_probe.bin");
+            let probe_file = std::fs::File::create(&probe_path).unwrap();
+            let raw_fd = probe_file.as_raw_fd();
+            let writer = std::io::BufWriter::new(probe_file);
+            // Close the underlying descriptor early so close_output_file observes EBADF on close.
+            unsafe {
+                libc::close(raw_fd);
+            }
+            assert_eq!(close_output_file(writer), Err(libc::EBADF));
+        }
+
+        // 6. UnpackController::Cleanup moves _unpack/movie.mkv to final_dir, removes _unpack, and deletes archives
+        let joined_refs: Vec<&[u8]> = joined_files.iter().map(Vec::as_slice).collect();
+        let mut cleanup_logs = Vec::new();
+        let (cleanup_ok, cleaned_disk) = unpack_controller_cleanup(
+            dest_bytes,
+            final_bytes,
+            unpack_bytes,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            0o022,
+            &[],
+            &joined_refs,
+            &mut |kind, msg| cleanup_logs.push((kind, msg.to_vec())),
+        );
+        assert!(cleanup_ok);
+        assert!(cleaned_disk);
+        assert!(!unpack_dir.exists());
+        assert_eq!(
+            std::fs::read(final_dir.join("movie.mkv")).unwrap(),
+            b"PART_ONE_DATA!PART2"
+        );
+        assert!(!dest_dir.join("movie.mkv.001").exists());
+        assert!(!dest_dir.join("movie.mkv.002").exists());
+        assert!(!dest_dir.join("archive.part01.rar").exists());
+        assert!(!dest_dir.join("bundle.7z").exists());
+        assert!(!dest_dir.join("multi.7z.001").exists());
+        assert!(
+            dest_dir.join("obfuscated.bin").exists(),
+            "unrelated non-archive extension stays untouched"
+        );
+
+        // 7. DirectUnpack::Cleanup removes temp unpack dir and empty final_dir
+        let du_unpack = work_dir.join("du_unpack");
+        let du_final = work_dir.join("du_final");
+        std::fs::create_dir_all(&du_unpack).unwrap();
+        std::fs::write(du_unpack.join("partial.dat"), b"partial").unwrap();
+        std::fs::create_dir_all(&du_final).unwrap();
+        direct_unpack_cleanup(
+            true,
+            path_to_bytes(&du_unpack),
+            true,
+            path_to_bytes(&du_final),
+            &mut |_, _| {},
+        );
+        assert!(!du_unpack.exists());
+        assert!(!du_final.exists());
 
         let _ = std::fs::remove_dir_all(&work_dir);
     }

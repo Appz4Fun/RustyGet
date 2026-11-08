@@ -5882,6 +5882,79 @@ int nzbget_rs_zipview_inspect_file(
     uint64_t* out_total_uncompressed, int* out_has_encrypted,
     int* out_has_compressed, int* out_has_symlinks, int* out_has_nzb);
 
+void nzbget_rs_fs_fix_exec_permission(const char* filename);
+int nzbget_rs_fs_restore_permissions(const char* filename, uint32_t mode, uint32_t umask);
+int nzbget_rs_fs_restore_file_or_dir_permissions(const char* filename, uint32_t umask);
+
+void nzbget_rs_unpack_controller_check_archive_files(
+    const char* dest_dir,
+    int use_temp_unpack_dir,
+    const char* const* downloaded_files,
+    size_t downloaded_len,
+    const char* const* extracted_archives,
+    size_t extracted_len,
+    const char* unpack_ignore_ext,
+    int* out_has_rar_files,
+    int* out_has_not_unpacked_rar_files,
+    int* out_has_renamed_archive_files,
+    int* out_has_seven_zip_files,
+    int* out_has_seven_zip_multi_files,
+    int* out_has_splitted_files);
+int nzbget_rs_unpack_controller_extract_archives(
+    const char* dest_dir,
+    const char* unpack_dir,
+    const char* password,
+    int is_seven_zip,
+    int multi_volumes,
+    int use_temp_unpack_dir,
+    int cleanup_disk,
+    const char* const* downloaded_files,
+    size_t downloaded_len,
+    void* ctx,
+    void (*reset_all_ok_cb)(void* ctx),
+    int (*has_all_ok_cb)(void* ctx),
+    void (*log_cb)(void* ctx, int kind, const char* msg),
+    int (*is_stopped_cb)(void* ctx));
+int nzbget_rs_unpack_controller_join_splitted_files(
+    const char* dest_dir,
+    const char* unpack_dir,
+    int par_success,
+    int write_buffer_kb,
+    void* ctx,
+    void (*log_cb)(void* ctx, int kind, const char* msg),
+    void (*progress_cb)(void* ctx, const char* label, int stage_progress),
+    void (*add_joined_cb)(void* ctx, const char* piece_name));
+int nzbget_rs_unpack_controller_cleanup(
+    const char* dest_dir,
+    const char* final_dir,
+    const char* unpack_dir,
+    int unpack_ok,
+    int use_temp_unpack_dir,
+    int final_dir_created,
+    int unpack_cleanup_disk,
+    int inter_dir,
+    int has_splitted_files,
+    uint32_t umask,
+    const char* const* downloaded_files,
+    size_t downloaded_len,
+    const char* const* joined_files,
+    size_t joined_len,
+    int* out_cleaned_up_disk,
+    void* ctx,
+    void (*log_cb)(void* ctx, int kind, const char* msg));
+int nzbget_rs_direct_unpack_is_main_archive(const char* filename);
+void nzbget_rs_direct_unpack_find_archive_files(
+    const char* dest_dir,
+    void* ctx,
+    void (*add_archive_cb)(void* ctx, const char* archive_name));
+void nzbget_rs_direct_unpack_cleanup(
+    int use_temp_unpack_dir,
+    const char* unpack_dir,
+    int final_dir_created,
+    const char* final_dir,
+    void* ctx,
+    void (*log_cb)(void* ctx, int kind, const char* msg));
+
 int nzbget_rs_content_map_read_inner_decrypted(
     int64_t inner_size,
     const NzbgetRsContentRun* runs,

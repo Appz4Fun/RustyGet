@@ -42,16 +42,9 @@ public:
 	bool IsWaitingVolume() const { return m_waitingVolume; }
 
 protected:
-	virtual bool ReadLine(char* buf, int bufSize, FILE* stream);
 	virtual void AddMessage(Message::EKind kind, const char* text);
 
 private:
-	class ParamList : public std::vector<CString>
-	{
-	public:
-		bool Exists(const char* param) { return std::find(begin(), end(), param) != end(); }
-	};
-
 	/**
 	 *  @brief Checks if Direct unpack can proceed.
 	 *
@@ -89,7 +82,6 @@ private:
 	void CreateUnpackDir();
 	void FindArchiveFiles();
 	void ExecuteUnrar(const char* archiveName);
-	bool PrepareCmdParams(const char* command, ParamList* params, const char* infoName);
 	void WaitNextVolume(const char* filename);
 	void Cleanup();
 	bool IsMainArchive(const char* filename);
@@ -313,27 +305,6 @@ inline void DirectUnpack::ExecuteUnrar(const char* archiveName)
 	m_unpackOk = ok != 0 && m_allOkMessageReceived && !GetTerminated() && !IsStopped();
 }
 
-inline bool DirectUnpack::PrepareCmdParams(const char* command, ParamList* params, const char* infoName)
-{
-	if (FileSystem::FileExists(command))
-	{
-		params->emplace_back(command);
-		return true;
-	}
-
-	std::vector<CString> cmdArgs = Util::SplitCommandLine(command);
-	if (cmdArgs.empty())
-	{
-		PrintMessage(Message::mkError, "Could not start %s, failed to parse command line: %s", infoName, command);
-		m_unpackOk = false;
-		return false;
-	}
-
-	std::move(cmdArgs.begin(), cmdArgs.end(), std::back_inserter(*params));
-
-	return true;
-}
-
 inline void DirectUnpack::CreateUnpackDir()
 {
 	bool useInterDir = nzbget_rs_unpack_use_inter_dir(
@@ -364,62 +335,17 @@ inline void DirectUnpack::CreateUnpackDir()
 inline void DirectUnpack::FindArchiveFiles()
 {
 	Guard guard(m_volumeMutex);
-
-	DirBrowser dir(m_destDir);
-	while (const char* filename = dir.Next())
+	auto addArchiveCb = [](void* ctx, const char* archiveName)
 	{
-		if (IsMainArchive(filename))
-		{
-			BString<1024> fullFilename("%s%c%s", *m_destDir, PATH_SEPARATOR, filename);
-			if (!FileSystem::DirectoryExists(fullFilename))
-			{
-				m_archives.emplace_back(filename);
-			}
-		}
-	}
+		if (!ctx || !archiveName) return;
+		static_cast<DirectUnpack*>(ctx)->m_archives.emplace_back(archiveName);
+	};
+	nzbget_rs_direct_unpack_find_archive_files(m_destDir, this, addArchiveCb);
 }
 
 inline bool DirectUnpack::IsMainArchive(const char* filename)
 {
-	if (!filename)
-	{
-		return false;
-	}
-
-	auto ext = FileSystem::GetFileExtension(filename);
-	if (!ext || !FileTypes::IsRarExt(*ext))
-	{
-		return false;
-	}
-
-	return nzbget_rs_unpack_is_main_archive(filename) != 0;
-}
-
-inline bool DirectUnpack::ReadLine(char* buf, int bufSize, FILE* stream)
-{
-	int i = 0;
-	int backspace = 0;
-
-	for (; i < bufSize - 1; i++)
-	{
-		int ch = fgetc(stream);
-		size_t outIdx = (size_t)i;
-		if (nzbget_rs_unpack_direct_readline_step(
-			reinterpret_cast<uint8_t*>(buf), (size_t)bufSize, (size_t)i, ch, &backspace, &outIdx) != 0)
-		{
-			i = (int)outIdx;
-			break;
-		}
-	}
-
-	if (!strncmp(buf, "...", 3))
-	{
-		buf[0] = '\0';
-	}
-
-	buf[i] = '\0';
-
-	return i > 0;
+	return nzbget_rs_direct_unpack_is_main_archive(filename) != 0;
 }
 
 inline void DirectUnpack::AddMessage(Message::EKind kind, const char* text)
@@ -541,7 +467,6 @@ inline void DirectUnpack::WaitNextVolume(const char* filename)
 	if (FileSystem::FileExists(fullFilename))
 	{
 		m_waitingVolume = false;
-		Write("\n");
 	}
 	else
 	{
@@ -577,7 +502,6 @@ inline void DirectUnpack::FileDownloaded(DownloadQueue* downloadQueue, FileInfo*
 	{
 		m_waitingFile = nullptr;
 		m_waitingVolume = false;
-		Write("\n");
 	}
 
 	if (IsMainArchive(fileInfo->GetFilename()))
@@ -626,17 +550,20 @@ inline void DirectUnpack::Cleanup()
 {
 	debug("Cleanup for %s", *m_infoName);
 
-	CString errmsg;
-	if (g_Options->GetUseTempUnpackDir() && FileSystem::DirectoryExists(m_unpackDir) &&
-		!FileSystem::DeleteDirectoryWithContent(m_unpackDir, errmsg))
+	auto logCb = [](void* ctx, int kind, const char* msg)
 	{
-		PrintMessage(Message::mkError, "Could not delete temporary directory %s: %s", *m_unpackDir, *errmsg);
-	}
+		if (!ctx || !msg) return;
+		DirectUnpack* self = static_cast<DirectUnpack*>(ctx);
+		self->PrintMessage(kind == 1 ? Message::mkError : Message::mkInfo, "%s", msg);
+	};
 
-	if (m_finalDirCreated)
-	{
-		FileSystem::DeleteDirectory(m_finalDir);
-	}
+	nzbget_rs_direct_unpack_cleanup(
+		(g_Options && g_Options->GetUseTempUnpackDir()) ? 1 : 0,
+		m_unpackDir,
+		m_finalDirCreated ? 1 : 0,
+		m_finalDir,
+		this,
+		logCb);
 }
 
 inline void DirectUnpack::SetProgressLabel(NzbInfo* nzbInfo, const char* progressLabel)

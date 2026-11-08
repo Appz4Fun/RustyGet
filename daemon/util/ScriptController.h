@@ -806,8 +806,11 @@ inline void ScriptController::PrintMessage(Message::EKind kind, const char* form
 
 inline void ScriptController::Write(const char* str)
 {
-	fwrite(str, 1, strlen(str), m_writepipe);
-	fflush(m_writepipe);
+	if (m_writepipe && str)
+	{
+		fwrite(str, 1, strlen(str), m_writepipe);
+		fflush(m_writepipe);
+	}
 }
 
 inline void ScriptController::CheckEnvSize(const std::vector<char*>& envs)

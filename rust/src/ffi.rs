@@ -12455,16 +12455,6 @@ pub unsafe extern "C" fn nzbget_rs_df_eval_fleet_outcome_reason(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_df_donor_health_alive(
-    present: c_int,
-    missing: c_int,
-    error: c_int,
-    min_known: c_int,
-) -> f64 {
-    crate::dupesearch_nzb::donor_health_alive(present, missing, error, min_known)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_df_donor_health_dead_probe(
     present: c_int,
     missing: c_int,
@@ -12475,60 +12465,6 @@ pub unsafe extern "C" fn nzbget_rs_df_donor_health_dead_probe(
     } else {
         0
     }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_df_donor_sample_count(
-    total_ids: usize,
-    percent: c_int,
-    minimum: c_int,
-    maximum: c_int,
-) -> usize {
-    crate::dupesearch_nzb::donor_sample_count(total_ids, percent, minimum, maximum)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_df_adjust_pipeline_depth(
-    depth: c_int,
-    took_ms: i64,
-    pipeline_max: c_int,
-) -> c_int {
-    crate::dupesearch_nzb::adjust_pipeline_depth(depth, took_ms, pipeline_max)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_df_eval_article_votes(
-    votes: *const c_int,
-    count: usize,
-) -> c_int {
-    if votes.is_null() || count == 0 {
-        return 0;
-    }
-    crate::dupesearch_nzb::eval_article_votes(std::slice::from_raw_parts(votes, count))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_df_resolve_unsettled_vote(
-    votes: *const c_int,
-    count: usize,
-) -> c_int {
-    if votes.is_null() || count == 0 {
-        return 0;
-    }
-    crate::dupesearch_nzb::resolve_unsettled_vote(std::slice::from_raw_parts(votes, count))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_df_parse_newznab_date(
-    text: *const c_char,
-    len: usize,
-) -> i64 {
-    let slice = if text.is_null() || len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(text as *const u8, len)
-    };
-    crate::dupesearch_nzb::parse_newznab_date(slice)
 }
 
 #[no_mangle]
@@ -14315,15 +14251,6 @@ pub unsafe extern "C" fn nzbget_rs_nntp_server_pool_eval_block_server(
 // ArticleWriter, ArticleCache & MemoryMonitor FFI (`rust/src/artwritercore.rs`)
 // ============================================================================
 
-unsafe fn write_bytes_to_c_buf(src: &[u8], out_buf: *mut c_char, out_cap: usize) -> usize {
-    if !out_buf.is_null() && out_cap > 0 {
-        let copy_len = src.len().min(out_cap - 1);
-        std::ptr::copy_nonoverlapping(src.as_ptr(), out_buf.cast::<u8>(), copy_len);
-        *out_buf.add(copy_len) = 0;
-    }
-    src.len()
-}
-
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_awc_article_writer_build_output_filenames(
     tmp_dir: *const c_char,
@@ -14984,61 +14911,6 @@ pub unsafe extern "C" fn nzbget_rs_ccm_remote_client_is_http_url(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_ccm_remote_client_calc_file_completed_pct(
-    remaining_size: i64,
-    total_size: i64,
-) -> c_int {
-    crate::binrpc::remote_client_calc_file_completed_pct(remaining_size, total_size)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ccm_remote_client_calc_hms(
-    sec: i64,
-    out_h: *mut c_int,
-    out_m: *mut c_int,
-    out_s: *mut c_int,
-) {
-    let (h, m, s) = crate::binrpc::remote_client_calc_hms(sec);
-    if !out_h.is_null() {
-        *out_h = h;
-    }
-    if !out_m.is_null() {
-        *out_m = m;
-    }
-    if !out_s.is_null() {
-        *out_s = s;
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ccm_remote_client_calc_avg_speed(
-    all_bytes: i64,
-    download_time_sec: i64,
-) -> c_int {
-    crate::binrpc::remote_client_calc_avg_speed(all_bytes, download_time_sec)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ccm_remote_client_format_server_state(
-    download_paused: c_int,
-    download2_paused: c_int,
-    download_standby: c_int,
-    post_job_count: u32,
-    post_paused: c_int,
-    out_buf: *mut c_char,
-    out_cap: usize,
-) -> usize {
-    let formatted = crate::binrpc::remote_client_format_server_state(
-        download_paused != 0,
-        download2_paused != 0,
-        download_standby != 0,
-        post_job_count,
-        post_paused != 0,
-    );
-    write_bytes_to_c_buf(&formatted, out_buf, out_cap)
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_ccm_nzbget_is_valid_umask(umask_val: u32) -> c_int {
     i32::from(crate::options::nzbget_is_valid_umask(umask_val))
 }
@@ -15125,23 +14997,6 @@ pub extern "C" fn nzbget_rs_ccm_ncurses_select_edit_queue_keybar(
     crate::ncurses_format::ncurses_select_edit_queue_keybar(selected_entry, queue_size)
         .as_ptr()
         .cast::<c_char>()
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ccm_ncurses_calc_group_name_len(
-    screen_width: c_int,
-    calc_col_width: c_int,
-    col_files: c_int,
-    col_total: c_int,
-    col_left: c_int,
-) -> c_int {
-    crate::ncurses_format::ncurses_calc_group_name_len(
-        screen_width,
-        calc_col_width != 0,
-        col_files,
-        col_total,
-        col_left,
-    )
 }
 
 #[no_mangle]
@@ -27075,61 +26930,6 @@ pub unsafe extern "C" fn nzbget_rs_repair_calc_paused_timestamps(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_content_map_calc_decrypt_cipher_bounds(
-    inner_offset: i64,
-    inner_size: i64,
-    inner_size_total: i64,
-    block_size: i64,
-    cipher_stream_size: i64,
-    out_empty: *mut c_int,
-    out_cipher_from: *mut i64,
-    out_cipher_to: *mut i64,
-) -> c_int {
-    let (valid, empty, from, to) = crate::streamrepair::content_map_calc_decrypt_cipher_bounds(
-        inner_offset,
-        inner_size,
-        inner_size_total,
-        block_size,
-        cipher_stream_size,
-    );
-    if !out_empty.is_null() {
-        *out_empty = i32::from(empty);
-    }
-    if !out_cipher_from.is_null() {
-        *out_cipher_from = from;
-    }
-    if !out_cipher_to.is_null() {
-        *out_cipher_to = to;
-    }
-    i32::from(valid)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_content_mapper_is_compressible_archive(
-    format: c_int,
-    _mf_rar: c_int,
-    _mf_zip: c_int,
-    _mf_seven_zip: c_int,
-) -> c_int {
-    i32::from(crate::streamrepair::content_mapper_is_compressible_archive(
-        format,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_content_mapper_classify_unreadable_rar_vol(
-    has_source: c_int,
-    is_encrypted: c_int,
-    unknown_volume: c_int,
-) -> c_int {
-    crate::streamrepair::content_mapper_classify_unreadable_rar_vol(
-        has_source != 0,
-        is_encrypted != 0,
-        unknown_volume,
-    )
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_twin_select_min_par2_index(
     is_par2_ptr: *const u8,
     sizes_ptr: *const i64,
@@ -28402,78 +28202,6 @@ pub unsafe extern "C" fn nzbget_rs_donor_stopping() -> c_int {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_donor_sample(
-    ids_ptr: *const *const c_char,
-    ids_lens: *const usize,
-    ids_count: usize,
-    percent: c_int,
-    minimum: c_int,
-    maximum: c_int,
-    seed: u32,
-    ctx: *mut c_void,
-    emit_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize)>,
-) {
-    let mut ids = Vec::with_capacity(ids_count);
-    if !ids_ptr.is_null() && !ids_lens.is_null() {
-        for i in 0..ids_count {
-            let p = *ids_ptr.add(i);
-            let l = *ids_lens.add(i);
-            ids.push(String::from_utf8_lossy(bytes(p, l)).into_owned());
-        }
-    }
-    let sampled = crate::dupesearch_nzb::donor_sample(&ids, percent, minimum, maximum, seed);
-    if let Some(cb) = emit_cb {
-        for s in &sampled {
-            cb(ctx, s.as_ptr().cast::<c_char>(), s.len());
-        }
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_donor_plan(
-    ids_ptr: *const *const c_char,
-    ids_lens: *const usize,
-    ids_count: usize,
-    percent: c_int,
-    minimum: c_int,
-    maximum: c_int,
-    body_percent: c_int,
-    max_body: c_int,
-    seed: u32,
-    ctx: *mut c_void,
-    emit_cb: Option<unsafe extern "C" fn(*mut c_void, *const c_char, usize, c_int)>,
-) {
-    let mut ids = Vec::with_capacity(ids_count);
-    if !ids_ptr.is_null() && !ids_lens.is_null() {
-        for i in 0..ids_count {
-            let p = *ids_ptr.add(i);
-            let l = *ids_lens.add(i);
-            ids.push(String::from_utf8_lossy(bytes(p, l)).into_owned());
-        }
-    }
-    let groups = std::sync::Arc::new(Vec::new());
-    let opts = crate::dupesearch_nzb::DonorSampleOptions {
-        percent,
-        minimum,
-        maximum,
-        body_percent,
-        max_body,
-        seed,
-    };
-    let items = crate::dupesearch_nzb::donor_plan(&ids, &groups, &opts);
-    if let Some(cb) = emit_cb {
-        for item in &items {
-            cb(
-                ctx,
-                item.message_id.as_ptr().cast::<c_char>(),
-                item.message_id.len(),
-                i32::from(item.body),
-            );
-        }
-    }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_donor_body_gate_done(rust_gate: *mut c_void) -> c_int {
     if rust_gate.is_null() {
         return 0;
@@ -28657,109 +28385,6 @@ pub unsafe extern "C" fn nzbget_rs_donor_server_cap(handle: *const c_void) -> c_
     srv.cap()
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_donor_server_depth(handle: *const c_void) -> c_int {
-    if handle.is_null() {
-        return 4;
-    }
-    let srv = &*handle.cast::<std::sync::Arc<crate::dupesearch_nzb::DonorServer>>();
-    srv.depth()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_donor_server_paused(handle: *const c_void) -> c_int {
-    if handle.is_null() {
-        return 0;
-    }
-    let srv = &*handle.cast::<std::sync::Arc<crate::dupesearch_nzb::DonorServer>>();
-    i32::from(srv.paused())
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_donor_server_max_active(handle: *const c_void) -> c_int {
-    if handle.is_null() {
-        return 0;
-    }
-    let srv = &*handle.cast::<std::sync::Arc<crate::dupesearch_nzb::DonorServer>>();
-    srv.max_active()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_donor_server_set_retry_after_ms(
-    handle: *const c_void,
-    ms: c_int,
-) {
-    if !handle.is_null() {
-        let srv = &*handle.cast::<std::sync::Arc<crate::dupesearch_nzb::DonorServer>>();
-        srv.set_retry_after_ms(ms);
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_donor_server_ask(
-    handle: *const c_void,
-    count: usize,
-    msg_ids: *const *const c_char,
-    msg_lens: *const usize,
-    rust_gates: *const *mut c_void,
-    group_ptrs: *const *const *const c_char,
-    group_lens: *const *const usize,
-    group_counts: *const usize,
-    cancel_ctx: *mut c_void,
-    cancel_cb: Option<unsafe extern "C" fn(*mut c_void) -> c_int>,
-    out_answers: *mut c_int,
-) {
-    if handle.is_null() || out_answers.is_null() {
-        return;
-    }
-    let srv = &*handle.cast::<std::sync::Arc<crate::dupesearch_nzb::DonorServer>>();
-    let mut batch = Vec::with_capacity(count);
-    for i in 0..count {
-        let mid = if !msg_ids.is_null() && !msg_lens.is_null() {
-            String::from_utf8_lossy(bytes(*msg_ids.add(i), *msg_lens.add(i))).into_owned()
-        } else {
-            String::new()
-        };
-        let gate_ptr = if !rust_gates.is_null() {
-            *rust_gates.add(i)
-        } else {
-            std::ptr::null_mut()
-        };
-        let gate = if !gate_ptr.is_null() {
-            let arc = std::sync::Arc::from_raw(
-                gate_ptr as *const crate::dupesearch_nzb::DonorBodyGate,
-            );
-            let cloned = arc.clone();
-            let _ = std::sync::Arc::into_raw(arc);
-            Some(cloned)
-        } else {
-            None
-        };
-        let mut groups = Vec::new();
-        if !group_ptrs.is_null() && !group_lens.is_null() && !group_counts.is_null() {
-            let g_cnt = *group_counts.add(i);
-            let g_p = *group_ptrs.add(i);
-            let g_l = *group_lens.add(i);
-            if !g_p.is_null() && !g_l.is_null() {
-                for j in 0..g_cnt {
-                    groups.push(String::from_utf8_lossy(bytes(*g_p.add(j), *g_l.add(j))).into_owned());
-                }
-            }
-        }
-        batch.push(crate::dupesearch_nzb::DonorRequest {
-            message_id: mid,
-            gate,
-            groups: std::sync::Arc::new(groups),
-        });
-    }
-    let answers = srv.ask(&batch, || {
-        cancel_cb.is_some_and(|cb| unsafe { cb(cancel_ctx) != 0 })
-    });
-    for (i, ans) in answers.into_iter().take(count).enumerate() {
-        *out_answers.add(i) = ans as c_int;
-    }
-}
-
 struct CppKeepAlive {
     ptr: usize,
     drop_fn: unsafe extern "C" fn(*mut c_void),
@@ -28770,92 +28395,6 @@ impl Drop for CppKeepAlive {
         if self.ptr != 0 {
             unsafe { (self.drop_fn)(self.ptr as *mut c_void) };
         }
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_donor_check_items(
-    server_handles: *const *mut c_void,
-    server_count: usize,
-    keepalive_ptr: *mut c_void,
-    keepalive_drop: Option<unsafe extern "C" fn(*mut c_void)>,
-    msg_ids: *const *const c_char,
-    msg_lens: *const usize,
-    bodies: *const c_int,
-    group_ptrs: *const *const *const c_char,
-    group_lens: *const *const usize,
-    group_counts: *const usize,
-    item_count: usize,
-    budget_ms: c_int,
-    out_checked: *mut c_int,
-    out_present: *mut c_int,
-    out_missing: *mut c_int,
-    out_error: *mut c_int,
-    out_body_checked: *mut c_int,
-    out_body_bad: *mut c_int,
-) {
-    let keepalive: Option<std::sync::Arc<dyn Send + Sync>> =
-        keepalive_drop.map(|drop_fn| {
-            std::sync::Arc::new(CppKeepAlive {
-                ptr: keepalive_ptr as usize,
-                drop_fn,
-            }) as std::sync::Arc<dyn Send + Sync>
-        });
-    let mut servers = Vec::with_capacity(server_count);
-    if !server_handles.is_null() {
-        for i in 0..server_count {
-            let h = *server_handles.add(i);
-            if !h.is_null() {
-                let srv = &*h.cast::<std::sync::Arc<crate::dupesearch_nzb::DonorServer>>();
-                servers.push(srv.clone());
-            }
-        }
-    }
-    let mut items = Vec::with_capacity(item_count);
-    for i in 0..item_count {
-        let mid = if !msg_ids.is_null() && !msg_lens.is_null() {
-            String::from_utf8_lossy(bytes(*msg_ids.add(i), *msg_lens.add(i))).into_owned()
-        } else {
-            String::new()
-        };
-        let body = !bodies.is_null() && *bodies.add(i) != 0;
-        let mut groups = Vec::new();
-        if !group_ptrs.is_null() && !group_lens.is_null() && !group_counts.is_null() {
-            let g_cnt = *group_counts.add(i);
-            let g_p = *group_ptrs.add(i);
-            let g_l = *group_lens.add(i);
-            if !g_p.is_null() && !g_l.is_null() {
-                for j in 0..g_cnt {
-                    groups.push(String::from_utf8_lossy(bytes(*g_p.add(j), *g_l.add(j))).into_owned());
-                }
-            }
-        }
-        items.push(crate::dupesearch_nzb::DonorItem {
-            message_id: mid,
-            body,
-            groups: std::sync::Arc::new(groups),
-        });
-    }
-    let res = crate::dupesearch_nzb::donor_check_items_guarded(
-        &servers, &items, budget_ms, keepalive,
-    );
-    if !out_checked.is_null() {
-        *out_checked = res.checked;
-    }
-    if !out_present.is_null() {
-        *out_present = res.present;
-    }
-    if !out_missing.is_null() {
-        *out_missing = res.missing;
-    }
-    if !out_error.is_null() {
-        *out_error = res.error;
-    }
-    if !out_body_checked.is_null() {
-        *out_body_checked = res.body_checked;
-    }
-    if !out_body_bad.is_null() {
-        *out_body_bad = res.body_bad;
     }
 }
 

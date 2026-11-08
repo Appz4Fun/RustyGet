@@ -1938,18 +1938,9 @@ size_t nzbget_rs_df_rank_fleet_candidates(
 int nzbget_rs_df_eval_fleet_outcome_reason(
     int any_usable, int any_alive, int any_unknown, int on_disk);
 
-double nzbget_rs_df_donor_health_alive(
-    int present, int missing, int error, int min_known);
 int nzbget_rs_df_donor_health_dead_probe(
     int present, int missing, int min_known);
-size_t nzbget_rs_df_donor_sample_count(
-    size_t total_ids, int percent, int minimum, int maximum);
-int nzbget_rs_df_adjust_pipeline_depth(
-    int depth, int64_t took_ms, int pipeline_max);
-int nzbget_rs_df_eval_article_votes(const int* votes, size_t count);
-int nzbget_rs_df_resolve_unsettled_vote(const int* votes, size_t count);
 
-int64_t nzbget_rs_df_parse_newznab_date(const char* text, size_t len);
 NzbgetRsBuf nzbget_rs_df_build_newznab_url(
     const char* base, const char* const* param_keys, const char* const* param_vals,
     size_t param_count, const char* api_key);
@@ -2319,15 +2310,6 @@ int nzbget_rs_ccm_conn_poll_timeout_ms(int timeout_sec);
 int nzbget_rs_ccm_conn_poll_revents_ready(int revents, int mask);
 
 int nzbget_rs_ccm_remote_client_is_http_url(const char* nzb_content);
-int nzbget_rs_ccm_remote_client_calc_file_completed_pct(
-    int64_t remaining_size, int64_t total_size);
-void nzbget_rs_ccm_remote_client_calc_hms(
-    int64_t sec, int* out_h, int* out_m, int* out_s);
-int nzbget_rs_ccm_remote_client_calc_avg_speed(
-    int64_t all_bytes, int64_t download_time_sec);
-size_t nzbget_rs_ccm_remote_client_format_server_state(
-    int download_paused, int download2_paused, int download_standby,
-    uint32_t post_job_count, int post_paused, char* out_buf, size_t out_cap);
 
 int nzbget_rs_ccm_nzbget_is_valid_umask(uint32_t umask_val);
 int nzbget_rs_ccm_nzbget_should_start_secure_server(
@@ -2342,8 +2324,6 @@ void nzbget_rs_ccm_ncurses_calc_msg_lines(
 void nzbget_rs_ccm_ncurses_sanitize_message_chars(char* buf, size_t len);
 const char* nzbget_rs_ccm_ncurses_select_edit_queue_keybar(
     int selected_entry, int queue_size);
-int nzbget_rs_ccm_ncurses_calc_group_name_len(
-    int screen_width, int calc_col_width, int col_files, int col_total, int col_left);
 int nzbget_rs_ccm_ncurses_next_queue_win_pct(int cur_pct, int is_edit_queue);
 
 int nzbget_rs_ntw_nntp_map_ip_version(
@@ -4953,15 +4933,6 @@ void nzbget_rs_repair_calc_paused_timestamps(
     int64_t stage_time, int64_t start_time, int64_t par_time, int64_t repair_time,
     int64_t* out_stage, int64_t* out_start, int64_t* out_par, int64_t* out_repair);
 
-int nzbget_rs_content_map_calc_decrypt_cipher_bounds(
-    int64_t inner_offset, int64_t inner_size, int64_t inner_size_total,
-    int64_t block_size, int64_t cipher_stream_size,
-    int* out_empty, int64_t* out_cipher_from, int64_t* out_cipher_to);
-int nzbget_rs_content_mapper_is_compressible_archive(
-    int format, int mf_rar, int mf_zip, int mf_seven_zip);
-int nzbget_rs_content_mapper_classify_unreadable_rar_vol(
-    int has_source, int is_encrypted, int unknown_volume);
-
 ptrdiff_t nzbget_rs_twin_select_min_par2_index(
     const uint8_t* is_par2_ptr, const int64_t* sizes_ptr, size_t len, int64_t max_index_size);
 int nzbget_rs_twin_parse_fingerprint_files(const char* fingerprint);
@@ -5117,15 +5088,6 @@ void nzbget_rs_donor_stop_all(void);
 void nzbget_rs_donor_wait_all(void);
 void nzbget_rs_donor_reset(void);
 int nzbget_rs_donor_stopping(void);
-void nzbget_rs_donor_sample(
-    const char* const* ids_ptr, const size_t* ids_lens, size_t ids_count,
-    int percent, int minimum, int maximum, uint32_t seed, void* ctx,
-    void (*emit_cb)(void* ctx, const char* id_ptr, size_t id_len));
-void nzbget_rs_donor_plan(
-    const char* const* ids_ptr, const size_t* ids_lens, size_t ids_count,
-    int percent, int minimum, int maximum, int body_percent, int max_body,
-    uint32_t seed, void* ctx,
-    void (*emit_cb)(void* ctx, const char* id_ptr, size_t id_len, int body));
 int nzbget_rs_donor_body_gate_done(void* rust_gate);
 int nzbget_rs_donor_body_once(
     void* rust_gate, void* ctx, int (*download_cb)(void* ctx));
@@ -5138,23 +5100,6 @@ void* nzbget_rs_donor_server_new(
         int* out_answers, size_t* out_count, int* out_busy));
 void nzbget_rs_donor_server_free(void* handle);
 int nzbget_rs_donor_server_cap(const void* handle);
-int nzbget_rs_donor_server_depth(const void* handle);
-int nzbget_rs_donor_server_paused(const void* handle);
-int nzbget_rs_donor_server_max_active(const void* handle);
-void nzbget_rs_donor_server_set_retry_after_ms(const void* handle, int ms);
-void nzbget_rs_donor_server_ask(
-    const void* handle, size_t count, const char* const* msg_ids, const size_t* msg_lens,
-    void* const* rust_gates, const char* const* const* group_ptrs,
-    const size_t* const* group_lens, const size_t* group_counts,
-    void* cancel_ctx, int (*cancel_cb)(void* cancel_ctx), int* out_answers);
-void nzbget_rs_donor_check_items(
-    void* const* server_handles, size_t server_count,
-    void* keepalive_ptr, void (*keepalive_drop)(void* keepalive_ptr),
-    const char* const* msg_ids, const size_t* msg_lens, const int* bodies,
-    const char* const* const* group_ptrs, const size_t* const* group_lens,
-    const size_t* group_counts, size_t item_count, int budget_ms,
-    int* out_checked, int* out_present, int* out_missing, int* out_error,
-    int* out_body_checked, int* out_body_bad);
 void nzbget_rs_donor_check_posting(
     void* const* server_handles, size_t server_count,
     void* keepalive_ptr, void (*keepalive_drop)(void* keepalive_ptr),

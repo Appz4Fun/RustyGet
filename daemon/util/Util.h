@@ -768,11 +768,6 @@ protected:
 
 #endif /* NZBGET_H */
 
-#include <optional>
-#include <type_traits>
-#include <string_view>
-
-
 class Util
 {
 public:
@@ -1041,15 +1036,10 @@ private:
 	void* State() { return &m_state; }
 };
 
-#include <optional>
 #include <sstream>
 #include <array>
-#include <algorithm>
-#include "nzbget_rs.h"
 #include <climits>
 #include <stdexcept>
-#include <limits>
-#include <memory>
 
 // Keep the Rust allocation owned even if std::string's allocation throws.
 static inline std::string CopyRustPathText(NzbgetRsBuf buf)
@@ -1638,8 +1628,6 @@ inline uint32 Crc32::Finish()
 #ifndef FILESYSTEM_H
 #define FILESYSTEM_H
 
-#include <optional>
-#include <chrono>
 #include <filesystem>
 
 namespace fs
@@ -1785,10 +1773,6 @@ public:
 private:
 	FILE* m_file = nullptr;
 };
-
-#include "nzbget_rs.h"
-#include <exception>
-#include <memory>
 
 // Keep the platform's stat ABI and errno behavior (Rust metadata can use
 // statx, whose availability probe changes errno, and different time widths).
@@ -2426,9 +2410,6 @@ inline bool DiskFile::Sync(CString& errmsg)
 
 #ifndef LOG_H
 #define LOG_H
-#include <mutex>
-#include <string>
-
 
 void error(const char* msg, ...) PRINTF_SYNTAX(1);
 void warn(const char* msg, ...) PRINTF_SYNTAX(1);
@@ -2475,7 +2456,6 @@ typedef std::deque<Message> MessageList;
 typedef GuardedPtr<MessageList> GuardedMessageList;
 
 class Debuggable;
-class DiskFile;
 
 class Log
 {
@@ -2544,12 +2524,6 @@ protected:
 
 #ifndef OPTIONS_H
 #define OPTIONS_H
-#include <atomic>
-#include <cstdint>
-#include <string>
-#include <string_view>
-#include "nzbget_rs.h"
-
 
 #ifndef FEEDINFO_H
 #define FEEDINFO_H

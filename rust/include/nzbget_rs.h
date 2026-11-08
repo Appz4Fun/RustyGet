@@ -5991,6 +5991,12 @@ int nzbget_rs_options_load_config_file(
     const char* path, void* ctx,
     void (*on_line_cb)(void*, int, const char*));
 
+int nzbget_rs_feed_is_download_hanging(
+    int64_t cur_time, int64_t last_update_time, int url_timeout, int status, int running_status);
+int nzbget_rs_feed_is_url_and_filter_updated(
+    const char* existing_url, const char* preview_url,
+    const char* existing_filter, const char* preview_filter, int64_t existing_last_update);
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

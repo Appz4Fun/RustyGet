@@ -32951,4 +32951,60 @@ pub extern "C" fn nzbget_rs_fs_get_current_directory() -> RsBuf {
     into_buf(crate::fsops::get_current_directory())
 }
 
+#[no_mangle]
+pub extern "C" fn nzbget_rs_feed_is_download_hanging(
+    cur_time: i64,
+    last_update_time: i64,
+    url_timeout: c_int,
+    status: c_int,
+    running_status: c_int,
+) -> c_int {
+    c_int::from(crate::feed::is_feed_download_hanging(
+        cur_time,
+        last_update_time,
+        url_timeout,
+        status,
+        running_status,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_feed_is_url_and_filter_updated(
+    existing_url: *const c_char,
+    preview_url: *const c_char,
+    existing_filter: *const c_char,
+    preview_filter: *const c_char,
+    existing_last_update: i64,
+) -> c_int {
+    let e_url = if existing_url.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(existing_url).to_bytes()
+    };
+    let p_url = if preview_url.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(preview_url).to_bytes()
+    };
+    let e_filt = if existing_filter.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(existing_filter).to_bytes()
+    };
+    let p_filt = if preview_filter.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(preview_filter).to_bytes()
+    };
+    c_int::from(crate::feed::is_feed_url_and_filter_updated(
+        e_url,
+        p_url,
+        e_filt,
+        p_filt,
+        existing_last_update,
+    ))
+}
+
+
+
 

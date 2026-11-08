@@ -971,6 +971,32 @@ pub fn is_feed_cache_expired(last_usage: i64, cache_time_sec: i32, cur_time: i64
     last_usage.saturating_add(cache_time_sec as i64) < cur_time || last_usage > cur_time
 }
 
+/// Evaluates whether an active feed download has exceeded `url_timeout + 10` seconds
+/// (`FeedCoordinator::ResetHangingDownloads`).
+pub fn is_feed_download_hanging(
+    cur_time: i64,
+    last_update_time: i64,
+    url_timeout: i32,
+    status: i32,
+    running_status: i32,
+) -> bool {
+    url_timeout != 0
+        && status == running_status
+        && cur_time.wrapping_sub(last_update_time) > i64::from(url_timeout.wrapping_add(10))
+}
+
+/// Evaluates whether an existing configured feed matches the preview feed's URL and filter
+/// and has already been updated at least once (`FeedCoordinator::PreviewFeed`).
+pub fn is_feed_url_and_filter_updated(
+    existing_url: &[u8],
+    preview_url: &[u8],
+    existing_filter: &[u8],
+    preview_filter: &[u8],
+    existing_last_update: i64,
+) -> bool {
+    existing_last_update > 0 && existing_url == preview_url && existing_filter == preview_filter
+}
+
 // ============================================================================
 // 4. C ABI Boundary (`nzbget_rs_feed_*`)
 // ============================================================================
@@ -1768,5 +1794,22 @@ mod tests {
             ),
             "Café_Beta_Gamma.nzb".as_bytes()
         );
+        assert!(is_feed_download_hanging(200, 100, 60, 1, 1));
+        assert!(!is_feed_download_hanging(170, 100, 60, 1, 1));
+        assert!(!is_feed_download_hanging(200, 100, 0, 1, 1));
+        assert!(is_feed_url_and_filter_updated(
+            b"https://example.com/rss",
+            b"https://example.com/rss",
+            b"A: *",
+            b"A: *",
+            12345
+        ));
+        assert!(!is_feed_url_and_filter_updated(
+            b"https://example.com/rss",
+            b"https://example.com/rss",
+            b"A: *",
+            b"A: *",
+            0
+        ));
     }
 }

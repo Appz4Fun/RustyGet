@@ -5374,8 +5374,6 @@ int nzbget_rs_fs_get_disk_state(
 
 void nzbget_rs_bstring_set(char* buf, int size, const char* str_ptr, int len);
 void nzbget_rs_bstring_append(char* buf, int size, const char* str_ptr, int len);
-void nzbget_rs_bstring_append_fmt(
-    char* buf, int size, void* ctx, int (*fmt_cb)(void*, char*, size_t));
 int nzbget_rs_bstring_format(
     char* buf, int size, void* ctx, int (*fmt_cb)(void*, char*, size_t));
 int nzbget_rs_cstring_eq(const char* a, const char* b);
@@ -5384,25 +5382,13 @@ void nzbget_rs_cstring_bind(char** m_data, char* str_ptr);
 char* nzbget_rs_cstring_unbind(char** m_data);
 void nzbget_rs_cstring_set(char** m_data, const char* str_ptr, int len);
 void nzbget_rs_cstring_append(char** m_data, const char* str_ptr, int len);
-void nzbget_rs_cstring_append_fmt(
-    char** m_data, int add_len, void* ctx, int (*fmt_cb)(void*, char*, size_t));
 int nzbget_rs_cstring_format(
     char** m_data, int new_len_no_nul, void* ctx, int (*fmt_cb)(void*, char*, size_t));
-int nzbget_rs_cstring_find(const char* m_data, const char* str_ptr, int pos);
-void nzbget_rs_cstring_replace_range(
-    char** m_data, int pos, int len, const char* str_ptr, int str_len);
-void nzbget_rs_cstring_replace_all(
-    char** m_data, const char* from_ptr, const char* to_ptr);
 void nzbget_rs_cstring_reserve(char** m_data, int capacity);
-void nzbget_rs_cstring_trim_right(char* m_data);
 void nzbget_rs_string_builder_clear(char** m_data, int* m_length, int* m_capacity);
-char* nzbget_rs_string_builder_unbind(char** m_data, int* m_length, int* m_capacity);
 void nzbget_rs_string_builder_reserve(char** m_data, int* m_capacity, int capacity, int exact);
 void nzbget_rs_string_builder_append(
     char** m_data, int* m_length, int* m_capacity, const char* str_ptr, int len);
-void nzbget_rs_string_builder_append_fmt(
-    char** m_data, int* m_length, int* m_capacity, int add_len,
-    void* ctx, int (*fmt_cb)(void*, char*, size_t));
 void nzbget_rs_char_buffer_reserve(char** m_data, int* m_size, int size);
 void nzbget_rs_char_buffer_clear(char** m_data, int* m_size);
 
@@ -6005,8 +5991,6 @@ const char* nzbget_rs_xmlrpc_array_open_tag(int is_json);
 const char* nzbget_rs_xmlrpc_array_close_tag(int is_json);
 int nzbget_rs_xmlrpc_status_effective_thread_count(int total_threads);
 const char* nzbget_rs_xmlrpc_status_default_memory_pressure_tier(const char* tier_name);
-int nzbget_rs_xmlrpc_status_effective_article_cache_mb(
-    int has_monitor, int monitor_cache_mb, int options_cache_mb);
 
 #include "nzbget_tls_cipher.h"
 

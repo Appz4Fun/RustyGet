@@ -30597,18 +30597,6 @@ pub unsafe extern "C" fn nzbget_rs_bstring_append(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_bstring_append_fmt(
-    buf: *mut c_char,
-    size: c_int,
-    ctx: *mut c_void,
-    fmt_cb: Option<unsafe extern "C" fn(*mut c_void, *mut c_char, usize) -> c_int>,
-) {
-    if let Some(cb) = fmt_cb {
-        crate::nstring::bstring_append_fmt_raw(buf, size, |dst, sz| cb(ctx, dst, sz));
-    }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_bstring_format(
     buf: *mut c_char,
     size: c_int,
@@ -30660,18 +30648,6 @@ pub unsafe extern "C" fn nzbget_rs_cstring_append(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cstring_append_fmt(
-    m_data: *mut *mut c_char,
-    add_len: c_int,
-    ctx: *mut c_void,
-    fmt_cb: Option<unsafe extern "C" fn(*mut c_void, *mut c_char, usize) -> c_int>,
-) {
-    if let Some(cb) = fmt_cb {
-        crate::nstring::cstring_append_fmt_raw(m_data, add_len, |dst, sz| cb(ctx, dst, sz));
-    }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_cstring_format(
     m_data: *mut *mut c_char,
     new_len_no_nul: c_int,
@@ -30687,42 +30663,8 @@ pub unsafe extern "C" fn nzbget_rs_cstring_format(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cstring_find(
-    m_data: *const c_char,
-    str_ptr: *const c_char,
-    pos: c_int,
-) -> c_int {
-    crate::nstring::cstring_find_raw(m_data, str_ptr, pos)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cstring_replace_range(
-    m_data: *mut *mut c_char,
-    pos: c_int,
-    len: c_int,
-    str_ptr: *const c_char,
-    str_len: c_int,
-) {
-    crate::nstring::cstring_replace_range_raw(m_data, pos, len, str_ptr, str_len);
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cstring_replace_all(
-    m_data: *mut *mut c_char,
-    from_ptr: *const c_char,
-    to_ptr: *const c_char,
-) {
-    crate::nstring::cstring_replace_all_raw(m_data, from_ptr, to_ptr);
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_cstring_reserve(m_data: *mut *mut c_char, capacity: c_int) {
     crate::nstring::cstring_reserve_raw(m_data, capacity);
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cstring_trim_right(m_data: *mut c_char) {
-    crate::nstring::cstring_trim_right_raw(m_data);
 }
 
 #[no_mangle]
@@ -30732,15 +30674,6 @@ pub unsafe extern "C" fn nzbget_rs_string_builder_clear(
     m_capacity: *mut c_int,
 ) {
     crate::nstring::string_builder_clear_raw(m_data, m_length, m_capacity);
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_string_builder_unbind(
-    m_data: *mut *mut c_char,
-    m_length: *mut c_int,
-    m_capacity: *mut c_int,
-) -> *mut c_char {
-    crate::nstring::string_builder_unbind_raw(m_data, m_length, m_capacity)
 }
 
 #[no_mangle]
@@ -30762,26 +30695,6 @@ pub unsafe extern "C" fn nzbget_rs_string_builder_append(
     len: c_int,
 ) {
     crate::nstring::string_builder_append_raw(m_data, m_length, m_capacity, str_ptr, len);
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_string_builder_append_fmt(
-    m_data: *mut *mut c_char,
-    m_length: *mut c_int,
-    m_capacity: *mut c_int,
-    add_len: c_int,
-    ctx: *mut c_void,
-    fmt_cb: Option<unsafe extern "C" fn(*mut c_void, *mut c_char, usize) -> c_int>,
-) {
-    if let Some(cb) = fmt_cb {
-        crate::nstring::string_builder_append_fmt_raw(
-            m_data,
-            m_length,
-            m_capacity,
-            add_len,
-            |dst, sz| cb(ctx, dst, sz),
-        );
-    }
 }
 
 #[no_mangle]

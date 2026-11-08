@@ -6005,6 +6005,8 @@ const char* nzbget_rs_xmlrpc_array_open_tag(int is_json);
 const char* nzbget_rs_xmlrpc_array_close_tag(int is_json);
 int nzbget_rs_xmlrpc_status_effective_thread_count(int total_threads);
 const char* nzbget_rs_xmlrpc_status_default_memory_pressure_tier(const char* tier_name);
+int nzbget_rs_xmlrpc_status_effective_article_cache_mb(
+    int has_monitor, int monitor_cache_mb, int options_cache_mb);
 
 #include "nzbget_tls_cipher.h"
 

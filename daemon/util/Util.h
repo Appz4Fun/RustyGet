@@ -576,7 +576,6 @@ public:
 	int Capacity() const { return size - 1; }
 	bool Empty() const { return !*m_data; }
 	void Clear() { m_data[0] = '\0'; }
-	const char* Str() const { return m_data; }
 	operator char*() const { return const_cast<char*>(m_data); }
 	char* operator*() const { return const_cast<char*>(m_data); }
 	void Set(const char* str, int len = 0)
@@ -586,21 +585,6 @@ public:
 	void Append(const char* str, int len = 0)
 	{
 		nzbget_rs_bstring_append(m_data, size, str, len);
-	}
-	void AppendFmt(const char* format, ...) PRINTF_SYNTAX(2)
-	{
-		va_list ap;
-		va_start(ap, format);
-		AppendFmtV(format, ap);
-		va_end(ap);
-	}
-	void AppendFmtV(const char* format, va_list ap)
-	{
-		va_list apCopy;
-		va_copy(apCopy, ap);
-		nstring_detail::VsnprintfCtx ctx{ format, &apCopy };
-		nzbget_rs_bstring_append_fmt(m_data, size, &ctx, nstring_detail::RunVsnprintf);
-		va_end(apCopy);
 	}
 	int Format(const char* format, ...) PRINTF_SYNTAX(2)
 	{
@@ -698,25 +682,6 @@ public:
 	{
 		nzbget_rs_cstring_append(&m_data, str, len);
 	}
-	void AppendFmt(const char* format, ...) PRINTF_SYNTAX(2)
-	{
-		va_list ap;
-		va_start(ap, format);
-		AppendFmtV(format, ap);
-		va_end(ap);
-	}
-	void AppendFmtV(const char* format, va_list ap)
-	{
-		va_list ap2;
-		va_copy(ap2, ap);
-		int addLen = vsnprintf(nullptr, 0, format, ap);
-		if (addLen > 0)
-		{
-			nstring_detail::VsnprintfCtx ctx{ format, &ap2 };
-			nzbget_rs_cstring_append_fmt(&m_data, addLen, &ctx, nstring_detail::RunVsnprintf);
-		}
-		va_end(ap2);
-	}
 	int Format(const char* format, ...) PRINTF_SYNTAX(2)
 	{
 		va_list ap;
@@ -738,22 +703,6 @@ public:
 		}
 		va_end(ap2);
 		return res;
-	}
-	int Find(const char* str, int pos = 0)
-	{
-		return nzbget_rs_cstring_find(m_data, str, pos);
-	}
-	void Replace(int pos, int len, const char* str, int strLen = 0)
-	{
-		nzbget_rs_cstring_replace_range(&m_data, pos, len, str, strLen);
-	}
-	void Replace(const char* from, const char* to)
-	{
-		nzbget_rs_cstring_replace_all(&m_data, from, to);
-	}
-	void TrimRight()
-	{
-		nzbget_rs_cstring_trim_right(m_data);
 	}
 
 protected:
@@ -778,7 +727,6 @@ public:
 	explicit operator char*() { return m_data; }
 	const char* operator*() const { return m_data; }
 	int Length() const { return m_length; }
-	int Capacity() const { return m_capacity; }
 	void Reserve(int capacity, bool exact = false)
 	{
 		nzbget_rs_string_builder_reserve(&m_data, &m_capacity, capacity, exact ? 1 : 0);
@@ -791,30 +739,6 @@ public:
 	void Append(const char* str, int len = 0)
 	{
 		nzbget_rs_string_builder_append(&m_data, &m_length, &m_capacity, str, len);
-	}
-	void AppendFmt(const char* format, ...) PRINTF_SYNTAX(2)
-	{
-		va_list ap;
-		va_start(ap, format);
-		AppendFmtV(format, ap);
-		va_end(ap);
-	}
-	void AppendFmtV(const char* format, va_list ap)
-	{
-		va_list ap2;
-		va_copy(ap2, ap);
-		int addLen = vsnprintf(nullptr, 0, format, ap);
-		if (addLen > 0)
-		{
-			nstring_detail::VsnprintfCtx ctx{ format, &ap2 };
-			nzbget_rs_string_builder_append_fmt(
-				&m_data, &m_length, &m_capacity, addLen, &ctx, nstring_detail::RunVsnprintf);
-		}
-		va_end(ap2);
-	}
-	char* Unbind()
-	{
-		return nzbget_rs_string_builder_unbind(&m_data, &m_length, &m_capacity);
 	}
 
 protected:
@@ -890,10 +814,7 @@ public:
 	static uint64_t SafeCastUnsignedToUnsigned(uint64_t num, uint64_t maxTo) noexcept;
 
 	static void TrimRight(char* str);
-	static void TrimRight(std::string& str);
 	static bool EmptyStr(const char* str) { return !str || !*str; }
-	static bool EndsWith(std::string_view str, std::string_view suffix, bool caseSensitive);
-	static bool EndsWith(const char* str, const char* suffix, bool caseSensitive);
 
 	template <typename From, typename To,
 	 	typename std::enable_if_t<std::is_integral_v<From> && std::is_integral_v<To>, bool> = true>
@@ -1290,53 +1211,11 @@ inline void Util::TrimRight(char* str)
 	nzbget_rs_trim_line(str, 1);
 }
 
-namespace
-{
-	int TextRightSpace(int byte)
-	{
-		// The caller can override char's signedness independently of Rust.
-		int ch = static_cast<char>(byte);
-#ifdef __GLIBC__
-		// glibc supports negative signed chars, keeping EOF distinct from 255.
-		return std::isspace(ch);
-#else
-		// Negative chars other than EOF are outside the portable ctype domain.
-		return ch < 0 ? 0 : std::isspace(ch);
-#endif
-	}
-}
-
-inline void Util::TrimRight(std::string& str)
-{
-	// rust/src/util.rs
-	size_t start;
-	str.resize(nzbget_rs_trim_string(str.data(), str.size(), 0, 1, 0, &start, TextRightSpace));
-}
-
 inline char* Util::ReduceStr(char* str, const char* from, const char* to)
 {
 	// rust/src/util.rs
 	nzbget_rs_reduce_str(str, from, to);
 	return str;
-}
-
-inline bool Util::EndsWith(std::string_view str, std::string_view suffix, bool caseSensitive)
-{
-	// rust/src/util.rs
-	return nzbget_rs_ends_with(str.data(), str.size(), suffix.data(), suffix.size(), caseSensitive) != 0;
-}
-
-inline bool Util::EndsWith(const char* str, const char* suffix, bool caseSensitive)
-{
-	if (!str)
-	{
-		return false;
-	}
-	if (EmptyStr(suffix))
-	{
-		return true;
-	}
-	return EndsWith(std::string_view(str), std::string_view(suffix), caseSensitive);
 }
 
 inline time_t Util::CurrentTime()
@@ -1929,7 +1808,6 @@ public:
 	int64 Write(const void* buffer, int64 size);
 	int64 Position();
 	bool Seek(int64 position, ESeekOrigin origin = soSet);
-	bool Error();
 	int64 Print(const char* format, ...) PRINTF_SYNTAX(2);
 	virtual char* ReadLine(char* buffer, int64 size);
 	bool SetWriteBuffer(int size);
@@ -2559,11 +2437,6 @@ inline bool DiskFile::Seek(int64 position, ESeekOrigin origin)
 	return fseek(m_file, position,
 		nzbget_rs_ufs_disk_file_select_seek_origin(
 			(int)origin, (int)soCur, (int)soEnd, SEEK_SET, SEEK_CUR, SEEK_END)) == 0;
-}
-
-inline bool DiskFile::Error()
-{
-	return ferror(m_file) != 0;
 }
 
 inline bool DiskFile::SetWriteBuffer(int size)
@@ -17216,8 +17089,6 @@ public:
 	const std::string& GetCategoryFromFile() const { return m_category; }
 	std::unique_ptr<NzbInfo> DetachNzbInfo() { return std::move(m_nzbInfo); }
 	const std::string& GetPassword() const { return m_password; }
-
-	void LogDebugInfo() { info(" NZBFile %s", m_fileName.c_str()); }
 
 	const std::set<FileInfo*>& GetCutShortFiles() const { return m_cutShortFiles; }
 
@@ -45137,11 +45008,6 @@ public:
 	}
 
 	std::unique_ptr<FeedItemList> DetachFeedItems() { return std::move(m_feedItems); }
-
-	void LogDebugInfo()
-	{
-		info(" FeedFile %s", m_fileName.c_str());
-	}
 
 private:
 	std::unique_ptr<FeedItemList> m_feedItems;

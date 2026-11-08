@@ -2727,6 +2727,28 @@ pub unsafe extern "C" fn nzbget_rs_xmlrpc_status_default_memory_pressure_tier(
     xmlrpc_status_default_memory_pressure_tier(opt).as_ptr()
 }
 
+/// Returns `monitor_cache_mb` when `has_monitor` is true, or `options_cache_mb` when `MemoryMonitor` is absent (`StatusXmlCommand::Execute`).
+pub fn xmlrpc_status_effective_article_cache_mb(
+    has_monitor: bool,
+    monitor_cache_mb: i32,
+    options_cache_mb: i32,
+) -> i32 {
+    if has_monitor {
+        monitor_cache_mb
+    } else {
+        options_cache_mb
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_xmlrpc_status_effective_article_cache_mb(
+    has_monitor: c_int,
+    monitor_cache_mb: c_int,
+    options_cache_mb: c_int,
+) -> c_int {
+    xmlrpc_status_effective_article_cache_mb(has_monitor != 0, monitor_cache_mb, options_cache_mb)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5386,6 +5408,20 @@ mod remote_xmlrpc_tests {
         assert_eq!(
             entries,
             vec![(b"ControlPassword".to_vec(), b"secret".to_vec())]
+        );
+    }
+
+    #[test]
+    fn test_xmlrpc_status_effective_article_cache_mb() {
+        assert_eq!(xmlrpc_status_effective_article_cache_mb(true, 128, 256), 128);
+        assert_eq!(xmlrpc_status_effective_article_cache_mb(false, 128, 256), 256);
+        assert_eq!(
+            nzbget_rs_xmlrpc_status_effective_article_cache_mb(1, 64, 512),
+            64
+        );
+        assert_eq!(
+            nzbget_rs_xmlrpc_status_effective_article_cache_mb(0, 64, 512),
+            512
         );
     }
 }

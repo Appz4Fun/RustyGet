@@ -78,7 +78,7 @@ extern DupeCoordinator* g_DupeCoordinator;
 #include "Util.h"
 #include "FileSystem.h"
 #include "HistoryCoordinator.h"
-#include "QueueScript.h"
+#include "ExtensionManager.h"
 #include "nzbget_rs.h"
 
 inline bool DupeCoordinator::SameNameOrKey(const char* name1, const char* dupeKey1,

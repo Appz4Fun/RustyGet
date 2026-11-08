@@ -23,7 +23,6 @@
 #define SCRIPTCONTROLLER_H
 
 #include <atomic>
-#include "NString.h"
 #include "Log.h"
 
 class EnvironmentStrings

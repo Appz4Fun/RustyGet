@@ -24,7 +24,6 @@
 
 #include <mutex>
 #include <string>
-#include "NString.h"
 #include "FileSystem.h"
 
 #ifndef LOG_H

@@ -23,7 +23,6 @@
 #include <functional>
 #include <vector>
 #include "DownloadInfo.h"
-#include "FeedInfo.h"
 #include "Options.h"
 #include "FileSystem.h"
 #include "Log.h"
@@ -113,7 +112,6 @@ extern DiskState* g_DiskState;
 
 #include "StatMeter.h"
 
-#include "NString.h"
 #include "Options.h"
 #include "Log.h"
 #include "Util.h"

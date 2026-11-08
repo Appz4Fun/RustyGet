@@ -944,6 +944,177 @@ pub fn get_exe_file_name(argv0: &[u8]) -> Vec<u8> {
     expand_file_name(argv0)
 }
 
+/// `FileSystem::ExpandHomePath` (`daemon/util/FileSystem.h`):
+/// Looks up `HOME` from the environment or `getpwuid(getuid())->pw_dir` when `filename`
+/// begins with `"~/"`, and delegates to `expand_home_path`.
+pub fn expand_home_path_auto(filename: Option<&CStr>) -> Vec<u8> {
+    let Some(f) = filename else {
+        return Vec::new();
+    };
+    let b = f.to_bytes();
+    if b.starts_with(b"~/") {
+        #[cfg(unix)]
+        unsafe {
+            let mut home_ptr = libc::getenv(c"HOME".as_ptr());
+            if home_ptr.is_null() {
+                let pw = libc::getpwuid(libc::getuid());
+                if !pw.is_null() {
+                    home_ptr = (*pw).pw_dir;
+                }
+            }
+            let home_bytes = if home_ptr.is_null() {
+                None
+            } else {
+                Some(CStr::from_ptr(home_ptr).to_bytes())
+            };
+            return expand_home_path(filename, home_bytes);
+        }
+    }
+    b.to_vec()
+}
+
+/// `fs::make_unique_filename(const fs::path& targetPath)` (`daemon/util/FileSystem.h`):
+/// Returns `target_path` if it does not exist, otherwise appends `" (<counter>)"`
+/// between stem and extension until a free path is found.
+pub fn make_unique_path(target_path: &[u8]) -> Vec<u8> {
+    let exists_without_err = |p: &Path| -> bool { std::fs::metadata(p).is_ok() };
+    let p = path(target_path);
+    if !exists_without_err(p) {
+        return path_to_bytes(p).to_vec();
+    }
+    let base_dir = p.parent().unwrap_or_else(|| Path::new(""));
+    let stem = p.file_stem().map(|s| s.as_bytes()).unwrap_or(b"");
+    let ext = p.extension().map(|e| e.as_bytes());
+    let mut counter: i32 = 1;
+    loop {
+        let mut name = Vec::new();
+        name.extend_from_slice(stem);
+        name.extend_from_slice(b" (");
+        name.extend_from_slice(counter.to_string().as_bytes());
+        name.push(b')');
+        if let Some(ext_bytes) = ext {
+            name.push(b'.');
+            name.extend_from_slice(ext_bytes);
+        }
+        counter += 1;
+        let unique_path = base_dir.join(OsStr::from_bytes(&name));
+        if !exists_without_err(&unique_path) {
+            return path_to_bytes(&unique_path).to_vec();
+        }
+    }
+}
+
+/// `FileSystem::CreateHardLink` (`daemon/util/FileSystem.h`):
+/// Ensures the parent directory of `to` exists via `force_directories`, then creates
+/// a hard link via `libc::link(from, to)`.
+pub fn create_hard_link(
+    from: &CStr,
+    to: &CStr,
+    stat: &Stat<'_>,
+    errmsg: &mut Vec<u8>,
+) -> bool {
+    let (new_path, _) = crate::paths::split_path_and_filename(to.to_bytes());
+    if !force_directories(new_path, errmsg, stat) {
+        return false;
+    }
+    if unsafe { libc::link(from.as_ptr(), to.as_ptr()) != 0 } {
+        *errmsg = error_message(last_errno());
+        return false;
+    }
+    true
+}
+
+/// `FileSystem::LoadFileIntoBuffer` (`daemon/util/FileSystem.h`):
+/// Verifies `filename` is a regular file via `stat`, opens it with `O_RDONLY | O_CLOEXEC`,
+/// determines its size via `lseek`, reserves the caller's buffer via `reserve_fn(buf_size)`,
+/// reads `size` bytes into the reserved buffer, and appends a trailing NUL when `add_trailing_null` is true.
+pub fn load_file_into_buffer(
+    filename: &CStr,
+    add_trailing_null: bool,
+    stat: &Stat<'_>,
+    reserve_fn: impl FnOnce(i32) -> *mut u8,
+) -> bool {
+    if !file_exists(filename.to_bytes(), stat) {
+        return false;
+    }
+    let fd = open_cloexec_fd(filename, 0, 0, 1, 2);
+    if fd == -1 {
+        return false;
+    }
+    let file_size = unsafe { libc::lseek(fd, 0, libc::SEEK_END) as i64 };
+    if unsafe { libc::lseek(fd, 0, libc::SEEK_SET) } < 0 {
+        unsafe { sys::close(fd) };
+        return false;
+    }
+    let Some((size, buf_size)) =
+        crate::util::fs_validate_load_file_size(file_size, i32::from(add_trailing_null))
+    else {
+        unsafe { sys::close(fd) };
+        return false;
+    };
+    let ptr = reserve_fn(buf_size);
+    if buf_size > 0 && ptr.is_null() {
+        unsafe { sys::close(fd) };
+        return false;
+    }
+    if size > 0 {
+        let target = size as usize;
+        let mut read_total = 0usize;
+        while read_total < target {
+            let n = unsafe { sys::read(fd, ptr.add(read_total).cast(), target - read_total) };
+            if n <= 0 {
+                unsafe { sys::close(fd) };
+                return false;
+            }
+            read_total += n as usize;
+        }
+    }
+    unsafe { sys::close(fd) };
+    if add_trailing_null && !ptr.is_null() {
+        unsafe { *ptr.add(size as usize) = 0 };
+    }
+    true
+}
+
+/// `FileSystem::GetRealPath` (`daemon/util/FileSystem.h`):
+/// Resolves `path_bytes` via `realpath(..., nullptr)` when non-empty.
+pub fn get_real_path(path_bytes: &[u8]) -> Option<Vec<u8>> {
+    if path_bytes.is_empty() {
+        return None;
+    }
+    let c_path = std::ffi::CString::new(path_bytes).ok()?;
+    #[cfg(unix)]
+    unsafe {
+        let real_ptr = libc::realpath(c_path.as_ptr(), std::ptr::null_mut());
+        if real_ptr.is_null() {
+            return None;
+        }
+        let res = CStr::from_ptr(real_ptr).to_bytes().to_vec();
+        libc::free(real_ptr.cast());
+        Some(res)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = c_path;
+        None
+    }
+}
+
+/// `FileSystem::GetCurrentDirectory` (`daemon/util/FileSystem.h`):
+/// Returns `getcwd(..., 1024)` as a byte vector.
+pub fn get_current_directory() -> Vec<u8> {
+    let mut str_buf = [0u8; 1024];
+    #[cfg(unix)]
+    unsafe {
+        let _ = libc::getcwd(str_buf.as_mut_ptr().cast(), 1024);
+    }
+    let len = str_buf
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(str_buf.len());
+    str_buf[..len].to_vec()
+}
+
 pub(crate) struct PosixFsOps;
 
 impl crate::fsdelete::Ops for PosixFsOps {
@@ -1435,6 +1606,44 @@ mod tests {
                 }
                 let _ = std::fs::remove_dir_all(&shm_src_dir);
             }
+        }
+
+        // 18. MakeUniquePath, CreateHardLink, LoadFileIntoBuffer, GetRealPath, GetCurrentDirectory
+        {
+            let sub = base_dir.join("ops-sub");
+            std::fs::create_dir_all(&sub).unwrap();
+            let f1 = sub.join("report.txt");
+            let f1_bytes = f1.as_os_str().as_bytes();
+            assert_eq!(make_unique_path(f1_bytes), f1_bytes);
+            std::fs::write(&f1, b"hello").unwrap();
+            let u1 = make_unique_path(f1_bytes);
+            assert!(u1.ends_with(b"/report (1).txt"));
+            std::fs::write(path(&u1), b"hello2").unwrap();
+            let u2 = make_unique_path(f1_bytes);
+            assert!(u2.ends_with(b"/report (2).txt"));
+
+            let hl_target = sub.join("nested/hardlink.txt");
+            let f1_c = CString::new(f1_bytes).unwrap();
+            let hl_c = CString::new(hl_target.as_os_str().as_bytes()).unwrap();
+            let mut errmsg = Vec::new();
+            assert!(
+                create_hard_link(&f1_c, &hl_c, &posix_stat, &mut errmsg),
+                "{}",
+                String::from_utf8_lossy(&errmsg)
+            );
+            assert_eq!(std::fs::read(&hl_target).unwrap(), b"hello");
+
+            let mut loaded = Vec::new();
+            assert!(load_file_into_buffer(&hl_c, true, &posix_stat, |sz| {
+                loaded.resize(sz as usize, 0);
+                loaded.as_mut_ptr()
+            }));
+            assert_eq!(loaded, b"hello\0");
+
+            assert!(get_real_path(b"").is_none());
+            assert!(get_real_path(f1_bytes).is_some());
+            assert!(!get_current_directory().is_empty());
+            assert!(!expand_home_path_auto(Some(c"~/test")).is_empty());
         }
 
         let _ = std::fs::remove_dir_all(&base_dir);

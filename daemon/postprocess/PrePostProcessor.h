@@ -84,8 +84,6 @@ extern PrePostProcessor* g_PrePostProcessor;
 #include "Repair.h"
 #include "StreamRepair.h"
 #include "DiskState.h"
-#include "QueueScript.h"
-#include "DirectUnpack.h"
 #include "ParDamage.h"
 #include <exception>
 #include <new>

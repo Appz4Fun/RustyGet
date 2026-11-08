@@ -22,7 +22,6 @@
 #ifndef WEBDOWNLOADER_H
 #define WEBDOWNLOADER_H
 
-#include "NString.h"
 #include "Connection.h"
 #include "FileSystem.h"
 #include "Util.h"

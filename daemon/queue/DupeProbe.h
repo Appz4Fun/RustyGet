@@ -21,7 +21,6 @@
 #ifndef DUPEPROBE_H
 #define DUPEPROBE_H
 
-#include "NString.h"
 #include "Log.h"
 #include <functional>
 #include <memory>

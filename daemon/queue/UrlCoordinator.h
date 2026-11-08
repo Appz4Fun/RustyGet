@@ -22,7 +22,6 @@
 #ifndef URLCOORDINATOR_H
 #define URLCOORDINATOR_H
 
-#include "NString.h"
 #include "Log.h"
 #include "WebDownloader.h"
 #include "DownloadInfo.h"
@@ -92,7 +91,7 @@ private:
 #include "FileSystem.h"
 #include "Scanner.h"
 #include "DiskState.h"
-#include "QueueScript.h"
+#include "ExtensionManager.h"
 #include "nzbget_rs.h"
 
 inline void UrlDownloader::ProcessHeader(const char* line)

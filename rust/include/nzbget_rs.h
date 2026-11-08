@@ -5910,6 +5910,21 @@ int nzbget_rs_fs_save_buffer_into_file(
     const char* filename, const char* buffer, size_t buf_len);
 NzbgetRsBuf nzbget_rs_fs_expand_file_name(const char* filename);
 NzbgetRsBuf nzbget_rs_fs_get_exe_file_name(const char* argv0);
+int nzbget_rs_util_find_executor_program(
+    const char* filename, size_t filename_len,
+    const char* custom_path, size_t custom_path_len,
+    NzbgetRsBuf* out_buf);
+void nzbget_rs_util_format_time(int64_t time_sec, char* buffer, int bufsize);
+NzbgetRsBuf nzbget_rs_fs_make_unique_path(const char* target_path);
+int nzbget_rs_fs_create_hard_link(
+    const char* from, const char* to, NzbgetRsFsStat stat, NzbgetRsBuf* errmsg);
+int nzbget_rs_fs_load_file_into_buffer(
+    const char* filename, int add_trailing_null, NzbgetRsFsStat stat,
+    void* ctx, uint8_t* (*reserve_cb)(void* ctx, int buf_size));
+NzbgetRsBuf nzbget_rs_fs_expand_home_path(const char* filename);
+int nzbget_rs_fs_get_real_path(
+    const char* path, size_t path_len, NzbgetRsBuf* out_buf);
+NzbgetRsBuf nzbget_rs_fs_get_current_directory(void);
 
 #include "nzbget_tls_cipher.h"
 

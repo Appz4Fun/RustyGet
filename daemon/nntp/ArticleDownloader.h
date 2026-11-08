@@ -24,7 +24,6 @@
 #define ARTICLEDOWNLOADER_H
 
 #include <atomic>
-#include "NString.h"
 #include "DownloadInfo.h"
 #include "ServerPool.h"
 #include "Options.h"

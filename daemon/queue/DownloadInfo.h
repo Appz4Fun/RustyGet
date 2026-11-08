@@ -26,7 +26,6 @@
 #include <algorithm>
 #include <set>
 #include <string>
-#include "NString.h"
 #include "Log.h"
 #ifndef DOWNLOADINFO_H
 #define DOWNLOADINFO_H

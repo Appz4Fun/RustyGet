@@ -26,7 +26,6 @@
 #include <functional>
 #include <memory>
 #include <vector>
-#include "NString.h"
 /*
  * Fetches and decodes a single yEnc article body into memory, outside the
  * regular download pipeline. Used by post-processing stream repair to pull

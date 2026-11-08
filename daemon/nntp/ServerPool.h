@@ -25,7 +25,6 @@
 
 #include <exception>
 #include "Log.h"
-#include "NString.h"
 #include "Options.h"
 #include "Connection.h"
 #include "nzbget_rs.h"

@@ -25,7 +25,6 @@
 #include <type_traits>
 #include <string_view>
 #include "FileSystem.h"
-#include "NString.h"
 
 #ifndef UTIL_H
 #define UTIL_H
@@ -36,11 +35,6 @@ public:
 	static bool MatchFileExt(const char* filename, const char* extensionList, const char* listSeparator);
 	static std::optional<std::string> 
 	FindExecutorProgram(const std::string& filename, const std::string& customPath);
-	static std::optional<std::string> 
-	FindShellOverriddenExecutor(const std::string& fileExt, const std::string& customPath);
-	static std::optional<std::string> FindPython();
-
-	static std::optional<fs::path> ResolvePathFromEnv(std::string_view path);
 
 	/*
 	* Split command line into arguments.
@@ -198,11 +192,6 @@ public:
 
 	/* Calculate Hash using Bob Jenkins (1996) algorithm */
 	static uint32 HashBJ96(const char* buffer, int bufSize, uint32 initValue);
-
-	static std::unique_ptr<FILE, std::function<void(FILE*)>> MakePipe(const std::string& cmd);
-
-	static const char* NULL_OUTPUT;
-	static const char* FIND_CMD;
 
 	static void SetStandByMode(bool standBy);
 
@@ -484,9 +473,6 @@ private:
 #include <stdexcept>
 #include <limits>
 
-inline const char* Util::NULL_OUTPUT = " > /dev/null 2> /dev/null";
-inline const char* Util::FIND_CMD = "which ";
-
 inline char Util::VersionRevisionBuf[100];
 
 inline void Util::Init()
@@ -496,118 +482,19 @@ inline void Util::Init()
 	CurrentTicks();
 }
 
-/**
- * @brief Determines the appropriate program to execute a given file.
- *
- * @param filename    The name of the file to be executed.
- * @param customPath  A custom path for finding the executor.
- *
- * @return std::optional<std::string>
- * The path to the executor program if found,
- * std::nullopt otherwise.  If the file is directly
- * executable, the original filename is returned.
- */
 inline std::optional<std::string>
 Util::FindExecutorProgram(const std::string& filename, const std::string& customPath)
 {
-	size_t idx = 0;
-	int extKind = nzbget_rs_dqh_util_classify_executor_ext(
-		filename.data(), filename.size(), &idx);
-	if (extKind == 0)
+	NzbgetRsBuf buf{};
+	if (nzbget_rs_util_find_executor_program(
+		filename.data(), filename.size(), customPath.data(), customPath.size(), &buf) == 0)
 	{
-		return filename;
-	}
-
-	const std::string fileExt = filename.substr(idx);
-
-	auto res = FindShellOverriddenExecutor(fileExt, customPath);
-	if (res.has_value())
-	{
-		return res;
-	}
-
-	if (extKind == 1)
-	{
-		return FindPython();
-	}
-
-	if (extKind == 2)
-	{
-		std::string cmd = std::string("bash --version") + NULL_OUTPUT;
-		if (std::system(cmd.c_str()) == 0)
-		{
-			return std::string("bash");
-		}
-		cmd = std::string("sh --version") + NULL_OUTPUT;
-		if (std::system(cmd.c_str()) == 0)
-		{
-			return std::string("sh");
-		}
+		nzbget_rs_free(buf);
 		return std::nullopt;
 	}
-
-	if (extKind == 3)
-	{
-		const std::string cmd = std::string("node --version") + NULL_OUTPUT;
-		if (std::system(cmd.c_str()) == 0)
-		{
-			return std::string("node");
-		}
-		return std::nullopt;
-	}
-
-	return filename;
+	return CopyRustPathText(buf);
 }
 
-inline std::optional<std::string>
-Util::FindShellOverriddenExecutor(const std::string& fileExt, const std::string& customPath)
-{
-	if (fileExt.empty() || customPath.empty())
-	{
-		return std::nullopt;
-	}
-
-	Tokenizer tok(customPath.c_str(), ",;");
-	while (char* shellover = tok.Next())
-	{
-		size_t cmdOffset = 0;
-		if (nzbget_rs_ufs_util_match_shell_overridden_token(
-			shellover, fileExt.data(), fileExt.size(), &cmdOffset) != 0)
-		{
-			return std::string(shellover + cmdOffset);
-		}
-	}
-
-	return std::nullopt;
-}
-
-inline std::optional<fs::path> Util::ResolvePathFromEnv(std::string_view path)
-{
-	const char* envPath = std::getenv("PATH");
-	if (!envPath) return std::nullopt;
-	NzbgetRsBuf buf = nzbget_rs_ufs_util_resolve_path_from_env(path.data(), path.size(), envPath);
-	std::string resolved(buf.data ? buf.data : "", buf.len);
-	nzbget_rs_free(buf);
-	if (resolved.empty()) return std::nullopt;
-	return fs::path(resolved);
-}
-
-inline std::optional<std::string> Util::FindPython()
-{
-	std::array<std::string, 3> pythonExecutables{ "python3", "python", "py" }; 
-
-	for (const auto& executable : pythonExecutables) 
-	{
-		std::string cmd = executable + " --version" + NULL_OUTPUT;
-		if (std::system(cmd.c_str()) == 0) 
-		{
-			return executable;
-		}
-	}
-
-	return std::nullopt;
-}
- 
 inline int64 Util::JoinInt64(uint32 Hi, uint32 Lo)
 {
 	return nzbget_rs_ufs_util_join_int64(Hi, Lo);
@@ -693,15 +580,7 @@ inline CString Util::FormatSpeed(int64 bytesPerSecond)
 
 inline void Util::FormatTime(time_t timeSec, char* buffer, int bufsize)
 {
-#ifdef HAVE_CTIME_R_3
-	ctime_r(&timeSec, buffer, bufsize);
-#else
-	ctime_r(&timeSec, buffer);
-#endif
-	buffer[bufsize-1] = '\0';
-
-	// trim LF
-	buffer[strlen(buffer) - 1] = '\0';
+	nzbget_rs_util_format_time(static_cast<int64_t>(timeSec), buffer, bufsize);
 }
 
 inline CString Util::FormatTime(time_t timeSec)
@@ -878,20 +757,6 @@ inline uint32 Util::HashBJ96(const char* buffer, int bufSize, uint32 initValue)
 {
 	// rust/src/util.rs
 	return nzbget_rs_hash_bj96(buffer, bufSize, initValue);
-}
-
-inline std::unique_ptr<FILE, std::function<void(FILE*)>> Util::MakePipe(const std::string& cmd)
-{
-	FILE* pipe = popen(cmd.c_str(), "r");
-
-	return std::unique_ptr<FILE, std::function<void(FILE*)>>(pipe, [](FILE* pipe)
-		{
-			if (pipe)
-			{
-				std::ignore = pclose(pipe);
-			}
-		}
-	);
 }
 
 inline time_t Util::CurrentTime()

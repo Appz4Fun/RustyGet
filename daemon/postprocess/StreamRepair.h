@@ -29,7 +29,6 @@
 #include <set>
 #include <thread>
 #include <vector>
-#include "NString.h"
 #include "DownloadInfo.h"
 #include "ScriptController.h"
 #include "ArticleFetcher.h"

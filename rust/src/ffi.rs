@@ -32717,3 +32717,141 @@ pub unsafe extern "C" fn nzbget_rs_fs_get_exe_file_name(argv0: *const c_char) ->
     into_buf(crate::fsops::get_exe_file_name(input(argv0)))
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_util_find_executor_program(
+    filename: *const c_char,
+    filename_len: usize,
+    custom_path: *const c_char,
+    custom_path_len: usize,
+    out_buf: *mut RsBuf,
+) -> c_int {
+    let fname = if filename.is_null() || filename_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(filename.cast::<u8>(), filename_len)
+    };
+    let cpath = if custom_path.is_null() || custom_path_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(custom_path.cast::<u8>(), custom_path_len)
+    };
+    match crate::util::util_find_executor_program(fname, cpath) {
+        Some(res) => {
+            if !out_buf.is_null() {
+                *out_buf = into_buf(res);
+            }
+            1
+        }
+        None => {
+            if !out_buf.is_null() {
+                *out_buf = into_buf(Vec::new());
+            }
+            0
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_util_format_time(
+    time_sec: i64,
+    buffer: *mut c_char,
+    bufsize: c_int,
+) {
+    if buffer.is_null() || bufsize <= 0 {
+        return;
+    }
+    let slice = std::slice::from_raw_parts_mut(buffer.cast::<u8>(), bufsize as usize);
+    crate::util::util_format_time(time_sec, slice);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fs_make_unique_path(target_path: *const c_char) -> RsBuf {
+    into_buf(crate::fsops::make_unique_path(input(target_path)))
+}
+
+#[cfg(unix)]
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fs_create_hard_link(
+    from: *const c_char,
+    to: *const c_char,
+    stat: Option<FsStat>,
+    errmsg: *mut RsBuf,
+) -> c_int {
+    if from.is_null() || to.is_null() || stat.is_none() {
+        if !errmsg.is_null() {
+            *errmsg = into_buf(Vec::new());
+        }
+        return 0;
+    }
+    let mut msg = Vec::new();
+    let ok = crate::fsops::create_hard_link(
+        CStr::from_ptr(from),
+        CStr::from_ptr(to),
+        &|p| fs_stat(stat, p),
+        &mut msg,
+    );
+    if !errmsg.is_null() {
+        *errmsg = into_buf(msg);
+    }
+    c_int::from(ok)
+}
+
+#[cfg(unix)]
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fs_load_file_into_buffer(
+    filename: *const c_char,
+    add_trailing_null: c_int,
+    stat: Option<FsStat>,
+    ctx: *mut c_void,
+    reserve_cb: Option<unsafe extern "C" fn(ctx: *mut c_void, buf_size: c_int) -> *mut u8>,
+) -> c_int {
+    let (Some(reserve), false, true) = (reserve_cb, filename.is_null(), stat.is_some()) else {
+        return 0;
+    };
+    c_int::from(crate::fsops::load_file_into_buffer(
+        CStr::from_ptr(filename),
+        add_trailing_null != 0,
+        &|p| fs_stat(stat, p),
+        |sz| reserve(ctx, sz),
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fs_expand_home_path(filename: *const c_char) -> RsBuf {
+    let fname = (!filename.is_null()).then(|| CStr::from_ptr(filename));
+    into_buf(crate::fsops::expand_home_path_auto(fname))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fs_get_real_path(
+    path: *const c_char,
+    path_len: usize,
+    out_buf: *mut RsBuf,
+) -> c_int {
+    let p = if path.is_null() || path_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(path.cast::<u8>(), path_len)
+    };
+    match crate::fsops::get_real_path(p) {
+        Some(res) => {
+            if !out_buf.is_null() {
+                *out_buf = into_buf(res);
+            }
+            1
+        }
+        None => {
+            if !out_buf.is_null() {
+                *out_buf = into_buf(Vec::new());
+            }
+            0
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_fs_get_current_directory() -> RsBuf {
+    into_buf(crate::fsops::get_current_directory())
+}
+
+

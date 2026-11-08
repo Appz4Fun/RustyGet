@@ -24,7 +24,6 @@
 #include <map>
 #include <set>
 #include <vector>
-#include "NString.h"
 #include "DownloadInfo.h"
 
 /*

@@ -32,10 +32,8 @@
 #include "DupeCoordinator.h"
 #include "Scanner.h"
 #include "FeedCoordinator.h"
-#include "Maintenance.h"
 #include "ArticleWriter.h"
 #include "StatMeter.h"
-#include "QueueScript.h"
 #include "ExtensionManager.h"
 #include "Scheduler.h"
 

@@ -635,6 +635,118 @@ pub fn util_match_shell_overridden_token(shellover: &[u8], file_ext: &[u8]) -> O
     }
 }
 
+/// `Util::FindShellOverriddenExecutor` (`daemon/util/Util.h`):
+/// Tokenizes `custom_path` on `",;"` and returns the command after `'='` for the first
+/// token whose extension prefix matches `file_ext`.
+pub fn util_find_shell_overridden_executor(file_ext: &[u8], custom_path: &[u8]) -> Option<Vec<u8>> {
+    if file_ext.is_empty() || custom_path.is_empty() {
+        return None;
+    }
+    let nul_end = custom_path
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(custom_path.len());
+    for token in tokens(&custom_path[..nul_end], b",;") {
+        if let Some(cmd_offset) = util_match_shell_overridden_token(token, file_ext) {
+            return Some(token[cmd_offset..].to_vec());
+        }
+    }
+    None
+}
+
+/// `Util::FindExecutorProgram` (`daemon/util/Util.h`) parameterized by an executable probe `probe(exe_name) -> bool`.
+pub fn util_find_executor_program_with(
+    filename: &[u8],
+    custom_path: &[u8],
+    probe: impl Fn(&[u8]) -> bool,
+) -> Option<Vec<u8>> {
+    let (ext_kind, idx) = util_classify_executor_ext(filename);
+    if ext_kind == 0 {
+        return Some(filename.to_vec());
+    }
+    let file_ext = &filename[idx..];
+    if let Some(res) = util_find_shell_overridden_executor(file_ext, custom_path) {
+        return Some(res);
+    }
+    match ext_kind {
+        1 => {
+            for &exe in &[&b"python3"[..], &b"python"[..], &b"py"[..]] {
+                if probe(exe) {
+                    return Some(exe.to_vec());
+                }
+            }
+            None
+        }
+        2 => {
+            for &exe in &[&b"bash"[..], &b"sh"[..]] {
+                if probe(exe) {
+                    return Some(exe.to_vec());
+                }
+            }
+            None
+        }
+        3 => {
+            if probe(b"node") {
+                Some(b"node".to_vec())
+            } else {
+                None
+            }
+        }
+        _ => Some(filename.to_vec()),
+    }
+}
+
+/// `Util::FindExecutorProgram` (`daemon/util/Util.h`):
+/// Resolves the executor program for `filename` using `custom_path` overrides or probing
+/// system interpreters (`python3`/`python`/`py`, `bash`/`sh`, `node`) via `system("<exe> --version > /dev/null 2> /dev/null")`.
+pub fn util_find_executor_program(filename: &[u8], custom_path: &[u8]) -> Option<Vec<u8>> {
+    util_find_executor_program_with(filename, custom_path, |exe| {
+        #[cfg(unix)]
+        unsafe {
+            let cmd: &std::ffi::CStr = match exe {
+                b"python3" => c"python3 --version > /dev/null 2> /dev/null",
+                b"python" => c"python --version > /dev/null 2> /dev/null",
+                b"py" => c"py --version > /dev/null 2> /dev/null",
+                b"bash" => c"bash --version > /dev/null 2> /dev/null",
+                b"sh" => c"sh --version > /dev/null 2> /dev/null",
+                b"node" => c"node --version > /dev/null 2> /dev/null",
+                _ => return false,
+            };
+            libc::system(cmd.as_ptr()) == 0
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = exe;
+            false
+        }
+    })
+}
+
+/// `Util::FormatTime` (`daemon/util/Util.h`):
+/// Formats `time_sec` with `ctime_r` into `buf`, NUL-terminates `buf`, and strips the trailing newline.
+pub fn util_format_time(time_sec: i64, buf: &mut [u8]) {
+    if buf.is_empty() {
+        return;
+    }
+    buf.fill(0);
+    #[cfg(unix)]
+    unsafe {
+        let t = time_sec as libc::time_t;
+        let mut tmp = [0 as std::ffi::c_char; 64];
+        let _ = libc::ctime_r(&t, tmp.as_mut_ptr());
+        let c_len = tmp.iter().position(|&c| c == 0).unwrap_or(tmp.len());
+        let copy_len = c_len.min(buf.len() - 1);
+        for i in 0..copy_len {
+            buf[i] = tmp[i] as u8;
+        }
+        buf[buf.len() - 1] = 0;
+        let s_len = buf.iter().position(|&b| b == 0).unwrap_or(0);
+        if s_len > 0 {
+            buf[s_len - 1] = 0;
+        }
+    }
+}
+
 /// Resolves `path` against colon-separated directories in `env_path`, returning the
 /// first directory entry where `dir/path` exists and is a regular file (`Util::ResolvePathFromEnv`).
 pub fn util_resolve_path_from_env(path: &[u8], env_path: &[u8]) -> Option<Vec<u8>> {
@@ -2219,5 +2331,49 @@ mod tests {
         let mut numeric_xml = b"ab&#65".to_vec();
         let len = crate::text::xml_decode(&mut numeric_xml, &ascii_lower);
         assert_eq!(&numeric_xml[..len], b"abA");
+
+        // 16. FindExecutorProgram & FormatTime
+        assert_eq!(
+            util_find_shell_overridden_executor(b".py", b".sh=/bin/zsh; .py=/opt/py3 , .js=/usr/bin/node"),
+            Some(b"/opt/py3".to_vec())
+        );
+        assert_eq!(
+            util_find_shell_overridden_executor(b".rb", b".py=/opt/py3"),
+            None
+        );
+        assert_eq!(
+            util_find_executor_program_with(b"/usr/local/bin/tool", b"", |_| false),
+            Some(b"/usr/local/bin/tool".to_vec())
+        );
+        assert_eq!(
+            util_find_executor_program_with(b"script.py", b".py=/custom/python", |_| false),
+            Some(b"/custom/python".to_vec())
+        );
+        assert_eq!(
+            util_find_executor_program_with(b"script.py", b"", |exe| exe == b"python"),
+            Some(b"python".to_vec())
+        );
+        assert_eq!(
+            util_find_executor_program_with(b"script.sh", b"", |exe| exe == b"sh"),
+            Some(b"sh".to_vec())
+        );
+        assert_eq!(
+            util_find_executor_program_with(b"script.js", b"", |exe| exe == b"node"),
+            Some(b"node".to_vec())
+        );
+        assert_eq!(
+            util_find_executor_program_with(b"script.js", b"", |_| false),
+            None
+        );
+        assert_eq!(
+            util_find_executor_program_with(b"script.unknown", b"", |_| false),
+            Some(b"script.unknown".to_vec())
+        );
+
+        let mut time_buf = [0u8; 50];
+        util_format_time(0, &mut time_buf);
+        let t_len = time_buf.iter().position(|&b| b == 0).unwrap_or(0);
+        assert_eq!(t_len, 24);
+        assert!(!time_buf[..t_len].contains(&b'\n'));
     }
 }

@@ -24,7 +24,6 @@
 
 #include <optional>
 #include <chrono>
-#include "NString.h"
 #include <filesystem>
 
 namespace fs
@@ -53,27 +52,7 @@ inline path make_unique_filename()
 	return std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
 }
 
-inline fs::path make_unique_filename(const fs::path& targetPath)
-{
-	fs::error_code ec;
-	if (!fs::exists(targetPath, ec) && !ec)
-	{
-		return targetPath;
-	}
-
-	const fs::path baseDir = targetPath.parent_path();
-	const std::string stem = fs::u8string(targetPath.stem());
-	const std::string ext = fs::u8string(targetPath.extension());
-
-	int counter = 1;
-	fs::path uniquePath;
-	do
-	{
-		uniquePath = baseDir / u8path(stem + " (" + std::to_string(counter++) + ")" + ext);
-	} while (fs::exists(uniquePath, ec) && !ec);
-
-	return uniquePath;
-}
+fs::path make_unique_filename(const fs::path& targetPath);
 
 void move_file(const fs::path& src, const fs::path& dest, fs::error_code& ec) noexcept;
 
@@ -103,7 +82,6 @@ public:
 	static bool LoadFileIntoBuffer(const char* filename, CharBuffer& buffer, bool addTrailingNull);
 	static bool SaveBufferIntoFile(const char* filename, const char* buffer, int bufLen);
 	static bool AllocateFile(const char* filename, int64 size, bool sparse, CString& errmsg);
-	static bool TruncateFile(const char* filename, int size);
 	static CString MakeValidFilename(const char* filename, bool allowSlashes = false);
 	static std::string SanitizePathSegment(std::string_view name);
 	static std::string SanitizeRelativePath(std::string_view path);
@@ -132,7 +110,6 @@ public:
 	static bool ForceDirectories(const char* path, CString& errmsg);
 	static bool CreateHardLink(const char *from, const char *to, CString& errmsg);
 	static CString GetCurrentDirectory();
-	static bool SetCurrentDirectory(const char* dirFilename);
 	static int64 FileSize(const char* filename);
 	static std::optional<DiskState> GetDiskState(const char* path);
 	static bool DirEmpty(const char* dirFilename);
@@ -272,16 +249,13 @@ inline void FileSystem::NormalizePathSeparators(char* path)
 
 inline std::optional<std::string> FileSystem::GetRealPath(const std::string& path)
 {
-	if (path.empty()) return std::nullopt;
-
-	if (char* realPath = realpath(path.c_str(), nullptr))
+	NzbgetRsBuf buf{};
+	if (nzbget_rs_fs_get_real_path(path.data(), path.size(), &buf) == 0)
 	{
-		std::string res = realPath;
-		free(realPath);
-		return res;
+		nzbget_rs_free(buf);
+		return std::nullopt;
 	}
-
-	return std::nullopt;
+	return CopyRustPathText(buf);
 }
 
 inline bool FileSystem::ForceDirectories(const char* path, CString& errmsg)
@@ -300,31 +274,23 @@ inline bool FileSystem::ForceDirectories(const char* path, CString& errmsg)
 
 inline bool FileSystem::CreateHardLink(const char *from, const char *to, CString& errmsg)
 {
-	const auto [newPath, _] = SplitPathAndFilename(to);
-	if (!ForceDirectories(newPath.c_str(), errmsg))
+	NzbgetRsBuf msg{};
+	bool ok = nzbget_rs_fs_create_hard_link(from, to, RustStat, &msg) != 0;
+	errmsg.Clear();
+	if (!ok)
 	{
-		return false;
+		errmsg.Set(msg.data ? msg.data : "", static_cast<int>(msg.len));
 	}
-
-	if (link(from, to) != 0)
-	{
-		errmsg = GetLastErrorMessage();
-		return false;
-	}
-
-	return true;
+	nzbget_rs_free(msg);
+	return ok;
 }
 
 inline CString FileSystem::GetCurrentDirectory()
 {
-	char str[1024];
-	getcwd(str, 1024);
-	return str;
-}
-
-inline bool FileSystem::SetCurrentDirectory(const char* dirFilename)
-{
-	return chdir(dirFilename) == 0;
+	NzbgetRsBuf buf = nzbget_rs_fs_get_current_directory();
+	CString res(buf.data ? buf.data : "", static_cast<int>(buf.len));
+	nzbget_rs_free(buf);
+	return res;
 }
 
 inline bool FileSystem::DirEmpty(const char* dirFilename)
@@ -335,50 +301,16 @@ inline bool FileSystem::DirEmpty(const char* dirFilename)
 
 inline bool FileSystem::LoadFileIntoBuffer(const char* filename, CharBuffer& buffer, bool addTrailingNull)
 {
-	// a regular file only: a directory opens too, and its "size" (-1, or a block
-	// size it can't be read for) gave a null buffer written through, or unread
-	// bytes passed on as its content
-	if (!FileExists(filename))
-	{
-		return false;
-	}
-
-	DiskFile file;
-	if (!file.Open(filename, DiskFile::omRead))
-	{
-		return false;
-	}
-
-	// obtain file size.
-	file.Seek(0, DiskFile::soEnd);
-	int64 fileSize = file.Position();
-	file.Seek(0);
-	int size = 0;
-	int bufSize = 0;
-	if (nzbget_rs_ufs_fs_validate_load_file_size(
-		fileSize, addTrailingNull ? 1 : 0, &size, &bufSize) == 0)
-	{
-		return false;
-	}
-	buffer.Reserve(bufSize);
-	if (bufSize > 0 && !buffer)
-	{
-		return false;
-	}
-
-	// copy the file into the buffer.
-	if (size > 0 && file.Read(buffer, size) != size)
-	{
-		return false;
-	}
-	file.Close();
-
-	if (addTrailingNull)
-	{
-		buffer[size] = 0;
-	}
-
-	return true;
+	return nzbget_rs_fs_load_file_into_buffer(
+		filename,
+		addTrailingNull ? 1 : 0,
+		RustStat,
+		&buffer,
+		[](void* ctx, int bufSize) -> uint8_t* {
+			auto* b = static_cast<CharBuffer*>(ctx);
+			b->Reserve(bufSize);
+			return reinterpret_cast<uint8_t*>(static_cast<char*>(*b));
+		}) != 0;
 }
 
 inline bool FileSystem::SaveBufferIntoFile(const char* filename, const char* buffer, int bufLen)
@@ -401,11 +333,6 @@ inline bool FileSystem::AllocateFile(const char* filename, int64 size, [[maybe_u
 	}
 	nzbget_rs_free(errBuf);
 	return ok;
-}
-
-inline bool FileSystem::TruncateFile(const char* filename, int size)
-{
-	return truncate(filename, size) == 0;
 }
 
 inline char* FileSystem::BaseFileName(const char* filename)
@@ -460,6 +387,11 @@ inline CString FileSystem::MakeUniqueFilename(const char* destDir, const char* b
 	CString result(buf.data, static_cast<int>(buf.len));
 	nzbget_rs_free(buf);
 	return result;
+}
+
+inline fs::path fs::make_unique_filename(const fs::path& targetPath)
+{
+	return fs::u8path(CopyRustPathText(nzbget_rs_fs_make_unique_path(targetPath.c_str())));
 }
 
 inline void fs::move_file(const fs::path& src, const fs::path& dest, fs::error_code& ec) noexcept
@@ -749,21 +681,7 @@ inline bool FileSystem::RenameBak(const char* filename, const char* bakPart, boo
 
 inline CString FileSystem::ExpandHomePath(const char* filename)
 {
-	// rust/src/fsops.rs; the home directory looked up as before
-	const char* home = nullptr;
-	if (filename && filename[0] == '~' && filename[1] == '/')
-	{
-		home = getenv("HOME");
-		if (!home)
-		{
-			struct passwd* pw = getpwuid(getuid());
-			if (pw)
-			{
-				home = pw->pw_dir;
-			}
-		}
-	}
-	NzbgetRsBuf buf = nzbget_rs_expand_home_path(filename, home);
+	NzbgetRsBuf buf = nzbget_rs_fs_expand_home_path(filename);
 	CString result(buf.data, static_cast<int>(buf.len));
 	nzbget_rs_free(buf);
 	return result;

@@ -25,7 +25,6 @@
 #include <atomic>
 #include <optional>
 #include <string>
-#include "NString.h"
 #include "DownloadInfo.h"
 #include "Options.h"
 #include "FileSystem.h"

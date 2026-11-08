@@ -22,7 +22,6 @@
 #ifndef XMLRPC_H
 #define XMLRPC_H
 
-#include "NString.h"
 #include "Connection.h"
 #include "Util.h"
 
@@ -137,7 +136,7 @@ protected:
 };
 
 #include "nzbget_rs.h"
-#include "Fleet.h"
+#include "DupeSearch.h"
 #include "Log.h"
 #include "Options.h"
 #include "Scanner.h"
@@ -147,11 +146,9 @@ protected:
 #include <cerrno>
 #include <climits>
 #include "FileSystem.h"
-#include "Maintenance.h"
 #include "StatMeter.h"
 #include "ArticleWriter.h"
 #include "DiskState.h"
-#include "QueueScript.h"
 #include "UrlCoordinator.h"
 #include "ExtensionManager.h"
 #include "Scheduler.h"

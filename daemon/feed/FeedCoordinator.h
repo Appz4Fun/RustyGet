@@ -23,11 +23,10 @@
 #define FEEDCOORDINATOR_H
 
 #include <atomic>
-#include "NString.h"
 #include "Log.h"
 #include "WebDownloader.h"
 #include "DownloadInfo.h"
-#include "FeedInfo.h"
+#include "Options.h"
 #include "Util.h"
 #include "nzbget_rs.h"
 

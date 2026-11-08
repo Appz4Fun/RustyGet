@@ -396,8 +396,6 @@ public:
 
 private:
 	std::mutex m_mutexObj;
-
-	friend class ConditionVar;
 };
 
 class Guard
@@ -439,29 +437,6 @@ private:
 	Mutex* m_mutex;
 
 	void Unlock() { if (m_mutex) { m_mutex->Unlock(); m_mutex = nullptr; } }
-};
-
-class ConditionVar
-{
-public:
-	ConditionVar() {}
-	ConditionVar(const ConditionVar& other) = delete;
-	void Wait(Mutex& mutex) { Lock l(mutex); m_condObj.wait(l); }
-	template <typename Pred> void Wait(Mutex& mutex, Pred pred) { Lock l(mutex); m_condObj.wait(l, pred); }
-	void WaitFor(Mutex& mutex, int msec) { Lock l(mutex); m_condObj.wait_for(l, std::chrono::milliseconds(msec)); }
-	template <typename Pred> void WaitFor(Mutex& mutex, int msec, Pred pred)
-		{ Lock l(mutex); m_condObj.wait_for(l, std::chrono::milliseconds(msec), pred); }
-	void NotifyOne() { m_condObj.notify_one(); }
-	void NotifyAll() { m_condObj.notify_all(); }
-
-private:
-	std::condition_variable m_condObj;
-
-	struct Lock : public std::unique_lock<std::mutex>
-	{
-		Lock(Mutex& mutex) : std::unique_lock<std::mutex>(mutex.m_mutexObj, std::adopt_lock) {}
-		~Lock() { release(); }
-	};
 };
 
 class Thread
@@ -523,7 +498,6 @@ public:
 
 	bool IsStopped() { return m_stopped; };
 	bool IsRunning() const { return m_running; }
-	bool GetAutoDestroy() { return m_autoDestroy; }
 	void SetAutoDestroy(bool autoDestroy) { m_autoDestroy = autoDestroy; }
 	static int GetThreadCount() { return m_threadCount; }
 
@@ -807,7 +781,6 @@ public:
 	explicit operator char*() { return m_data; }
 	const char* operator*() const { return m_data; }
 	int Length() const { return m_length; }
-	void SetLength(int length) { m_length = length; }
 	int Capacity() const { return m_capacity; }
 	void Reserve(int capacity, bool exact = false)
 	{
@@ -928,64 +901,6 @@ public:
 	static bool EndsWith(std::string_view str, std::string_view suffix, bool caseSensitive);
 	static bool EndsWith(const char* str, const char* suffix, bool caseSensitive);
 
-	template<typename T, typename U>
-	static constexpr bool CmpEqual(T t, U u) noexcept
-	{
-		if constexpr (std::is_signed_v<T> == std::is_signed_v<U>)
-		{
-			return t == u;
-		}
-		else if constexpr (std::is_signed_v<T>)
-		{
-			return t >= 0 && std::make_unsigned_t<T>(t) == u;
-		}
-		else
-		{
-			return u >= 0 && std::make_unsigned_t<U>(u) == t;
-		}
-	}
-	
-	template<typename T, typename U>
-	static constexpr bool CmpNotEqual(T t, U u) noexcept
-	{
-		return !CmpEqual(t, u);
-	}
-	
-	template<typename T, typename U>
-	static constexpr bool CmpLess(T t, U u) noexcept
-	{
-		if constexpr (std::is_signed_v<T> == std::is_signed_v<U>)
-		{
-			return t < u;
-		}
-		else if constexpr (std::is_signed_v<T>)
-		{
-			return t < 0 || std::make_unsigned_t<T>(t) < u;
-		}
-		else
-		{
-			return u >= 0 && t < std::make_unsigned_t<U>(u);
-		}
-	}
-	
-	template<typename T, typename U>
-	static constexpr bool CmpGreater(T t, U u) noexcept
-	{
-		return CmpLess(u, t);
-	}
-	
-	template<typename T, typename U>
-	static constexpr bool CmpLessEqual(T t, U u) noexcept
-	{
-		return !CmpLess(u, t);
-	}
-	
-	template<typename T, typename U>
-	static constexpr bool CmpGreaterEqual(T t, U u) noexcept
-	{
-		return !CmpLess(t, u);
-	}
-	
 	template <typename From, typename To,
 	 	typename std::enable_if_t<std::is_integral_v<From> && std::is_integral_v<To>, bool> = true>
 	static To SafeIntCast(From num) noexcept
@@ -1163,8 +1078,6 @@ private:
 	int m_wildCount;
 	IntList m_wildStart;
 	IntList m_wildLen;
-
-	void ExpandArray();
 };
 
 #ifndef DISABLE_GZIP
@@ -2939,12 +2852,9 @@ public:
 	void SetOutputFilename(const char* outputFilename) { m_outputFilename = outputFilename ? outputFilename : ""; }
 	bool GetFetch() { return m_fetch; }
 	void SetFetch(bool fetch) { m_fetch = fetch; }
-	bool GetForce() { return m_force; }
 	void SetForce(bool force) { m_force = force; }
 	bool GetBacklog() { return m_backlog; }
-	void SetBacklog(bool backlog) { m_backlog = backlog; }
 	CategorySource GetCategorySource() const { return m_categorySource; }
-	void SetCategorySource(CategorySource categorySource) { m_categorySource = categorySource; }
 
 private:
 	int m_id;
@@ -3639,7 +3549,6 @@ public:
 			ESchedulerCommand command,
 			const char* param
 		) = 0;
-		virtual void SetupFirstStart() {}
 	};
 
 	Options(const char* exeName, const char* configFilename, bool noConfig,
@@ -3657,7 +3566,6 @@ public:
 	// Options
 	const char* GetConfigFilename() const { return m_configFilename; }
 	bool GetConfigErrors() const { return m_configErrors; }
-	const char* GetMainDir() const { return m_mainDir; }
 	const char* GetAppDir() const { return m_appDir; }
 	const char* GetDestDir() const { return m_destDir; }
 	const char* GetInterDir() const { return m_interDir; }
@@ -3768,11 +3676,8 @@ public:
 	bool GetUseTempUnpackDir() const { return m_useTempUnpackDir; }
 	bool GetUnpackCleanupDisk() const { return m_unpackCleanupDisk; }
 	const char* GetUnrarCmd() const { return m_unrarCmd; }
-	const char* GetSevenZipCmd() const { return m_sevenZipCmd; }
 	const char* GetUnpackPassFile() const { return m_unpackPassFile; }
 	bool GetUnpackPauseQueue() const { return m_unpackPauseQueue; }
-	bool GetUnpackMutexEnforced() const { return m_unpackMutexEnforced; }
-	void SetUnpackMutexEnforced(bool unpackMutexEnforced) { m_unpackMutexEnforced = unpackMutexEnforced; }
 	const char* GetExtCleanupDisk() const { return m_extCleanupDisk; }
 	const char* GetParIgnoreExt() const { return m_parIgnoreExt; }
 	bool GetPostDownloadRename() const { return m_postDownloadRename; }
@@ -3813,7 +3718,6 @@ public:
 	void SetDirectClientMode(bool directClientMode) { m_directClientMode = directClientMode; }
 	bool GetDirectClientMode() const { return m_directClientMode; }
 
-	const fs::path& GetAppDirPath() const { return m_appDirPath; }
 	const fs::path& GetConfigFilePath() const { return m_configFilePath; }
 	const fs::path& GetMainDirPath() const { return m_mainDirPath; }
 	const fs::path& GetDestDirPath() const { return m_destDirPath; }
@@ -3823,8 +3727,6 @@ public:
 	const fs::path& GetNzbDirPath() const { return m_nzbDirPath; }
 	const fs::path& GetWebDirPath() const { return m_webDirPath; }
 	const fs::path& GetConfigTemplatePath() const { return m_configTemplatePath; }
-	const fs::path& GetSecureCertPath() const { return m_secureCertPath; }
-	const fs::path& GetSecureKeyPath() const { return m_secureKeyPath; }
 	const fs::path& GetCertStorePath() const { return m_certStorePath; }
 	const fs::path& GetLockFilePath() const { return m_lockFilePath; }
 	const fs::path& GetLogFilePath() const { return m_logFilePath; }
@@ -5842,7 +5744,6 @@ public:
 	bool GetDownloadHeld() const { return m_tempPauseDownload || m_fleetHold > 0; }
 	void SetTempPausePostprocess(bool tempPausePostprocess) { m_tempPausePostprocess = tempPausePostprocess; Changed(); }
 	bool GetTempPausePostprocess() const { return m_tempPausePostprocess; }
-	void SetPauseFrontend(bool pauseFrontend) { m_pauseFrontend = pauseFrontend; Changed(); }
 	bool GetPauseFrontend() const { return m_pauseFrontend; }
 	void SetSpeedLimit(int speedLimit) { m_speedLimit = speedLimit; Changed(); }
 	int GetSpeedLimit() const { return m_speedLimit; }
@@ -6855,9 +6756,7 @@ public:
 	// nothing and waits for nothing
 	void SetBroken() { m_status = csBroken; }
 	void SetSuppressErrors(bool suppressErrors);
-	bool GetSuppressErrors() { return m_suppressErrors; }
 	const char* GetRemoteAddr();
-	bool GetGracefull() { return m_gracefull; }
 	void SetGracefull(bool gracefull) { m_gracefull = gracefull; }
 	void SetForceClose(bool forceClose) { m_forceClose = forceClose; }
 #ifndef DISABLE_TLS
@@ -8062,7 +7961,6 @@ public:
 	void SetOutputFilename(const char* outputFilename) { m_outputFilename = outputFilename; }
 	time_t GetLastUpdateTime() { return m_lastUpdateTime; }
 	void SetLastUpdateTimeNow();
-	bool GetConfirmedLength() { return m_confirmedLength; }
 	// the status code of the last response (0 before any)
 	int GetHttpStatus() const { return m_httpStatus; }
 	const char* GetOriginalFilename() { return m_originalFilename; }
@@ -9099,7 +8997,6 @@ struct StreamRange
 {
 	int64 Offset = 0;
 	int64 Size = 0;
-	int64 End() const { return Offset + Size; }
 };
 
 typedef std::vector<StreamRange> StreamRangeList;
@@ -14192,7 +14089,6 @@ public:
 	bool FinishWrite();
 	StateDiskFile* BeginRead();
 	int GetFileVersion() { return m_fileVersion; }
-	const char* GetDestFilename() { return m_destFilename; }
 
 private:
 	BString<1024> m_destFilename;
@@ -17519,7 +17415,6 @@ public:
 
 		m_password = summary.password ? summary.password : "";
 		m_metaName = summary.meta_name ? summary.meta_name : "";
-		m_metaTitle = summary.meta_title ? summary.meta_title : "";
 		m_category = summary.category ? summary.category : "";
 
 		if (!m_metaName.empty() && m_nzbInfo)
@@ -17530,20 +17425,12 @@ public:
 		return true;
 	}
 
-	const char* GetFileName() const { return m_fileName.c_str(); }
 	const std::string& GetCategoryFromFile() const { return m_category; }
 	std::unique_ptr<NzbInfo> DetachNzbInfo() { return std::move(m_nzbInfo); }
 	const std::string& GetPassword() const { return m_password; }
 	const std::string& GetMetaName() const { return m_metaName; }
-	const std::string& GetMetaTitle() const { return m_metaTitle; }
 
 	void LogDebugInfo() { info(" NZBFile %s", m_fileName.c_str()); }
-
-	static int DeclaredParts(const char* subject)
-	{
-		NzbgetRsCtype ct = RsCtype();
-		return nzbget_rs_nzb_declared_parts(subject, &ct);
-	}
 
 	const std::set<FileInfo*>& GetCutShortFiles() const { return m_cutShortFiles; }
 
@@ -17573,7 +17460,6 @@ private:
 	std::string m_category;
 	std::string m_password;
 	std::string m_metaName;
-	std::string m_metaTitle;
 	std::set<FileInfo*> m_cutShortFiles;
 };
 
@@ -22288,7 +22174,6 @@ public:
 	void Run() override;
 	void Stop() override;
 	bool HasMoreJobs() { return m_queuedJobs > 0; }
-	int GetJobCount() { return m_queuedJobs; }
 	bool HasActiveUnpack(bool includeWaitingVolume = true);
 	bool HasActiveUnpack(DownloadQueue* downloadQueue, bool includeWaitingVolume = true);
 	bool EditList(DownloadQueue* downloadQueue, IdList* idList, DownloadQueue::EEditAction action,
@@ -22829,7 +22714,6 @@ public:
 	void SetEnvVar(const char* name, const char* value);
 	void SetEnvVarSpecial(const char* prefix, const char* name, const char* value);
 	void SetIntEnvVar(const char* name, int value);
-	bool IsTerminated() const { return m_terminated; }
 	bool HasActiveProcess();
 
 protected:
@@ -22844,7 +22728,6 @@ protected:
 	virtual const char* GetOptValue([[maybe_unused]] const char* name, const char* value) { return value; }
 	void StartProcess(int* pipein, int* pipeout);
 	int WaitProcess();
-	void SetNeedWrite(bool needWrite) { m_needWrite = needWrite; }
 	void Write(const char* str);
 	void UnregisterRunningScript();
 
@@ -32064,13 +31947,6 @@ protected:
 		ScriptController::AddMessage(kind, text);
 	}
 
-	void SetPriority(int* priority) { m_priority = priority; }
-	void SetDupeScore(int* dupeScore) { m_dupeScore = dupeScore; }
-	void SetDupeMode(EDupeMode* dupeMode) { m_dupeMode = dupeMode; }
-	void SetAddTop(bool* addTop) { m_addTop = addTop; }
-	void SetAddPaused(bool* addPaused) { m_addPaused = addPaused; }
-	void SetParameters(NzbParameterList* parameters) { m_parameters = parameters; }
-
 private:
 	const char* m_nzbFilename;
 	const char* m_url;
@@ -34089,83 +33965,9 @@ inline void DonorHealth::CheckPostings(const ServerList& servers, const std::vec
 class ReleaseName
 {
 public:
-	static constexpr size_t MaxNameLength = 512;
-	struct Attrs
-	{
-		std::set<std::string> resolution;
-		std::set<std::string> quality;
-		std::set<std::string> codec;
-		std::set<std::string> bitDepth;
-		std::set<std::string> audio;
-		std::set<std::string> channels;
-		std::set<std::string> network;
-		std::set<std::string> edition;
-		std::set<std::string> hdr;
-		std::string title;
-		std::string group;
-		std::vector<int> seasons;
-		std::vector<int> episodes;
-		int year = 0;
-		bool repack = false;
-		bool proper = false;
-	};
-
-	static std::string Clean(const std::string& name)
-	{
-		return Take(nzbget_rs_releasename_clean(name.data(), name.size()));
-	}
-
 	static std::string Normalize(const std::string& name)
 	{
 		return Take(nzbget_rs_releasename_normalize(name.data(), name.size()));
-	}
-
-	static std::string ShortQuery(const std::string& title)
-	{
-		return Take(nzbget_rs_releasename_short_query(title.data(), title.size()));
-	}
-
-	static Attrs Parse(const std::string& name)
-	{
-		std::string raw = Take(nzbget_rs_releasename_parse(name.data(), name.size()));
-		struct Reader
-		{
-			const char* p;
-			const char* end;
-			uint32_t U32()
-			{
-				if (end - p < 4) { p = end; return 0; }
-				const unsigned char* b = (const unsigned char*)p;
-				p += 4;
-				return (uint32_t)b[0] | (uint32_t)b[1] << 8 | (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24;
-			}
-			std::string Str() { uint32_t n = U32(); n = std::min<uint32_t>(n, end - p); std::string s(p, n); p += n; return s; }
-			int I32() { return (int)U32(); }
-			bool Byte() { return p < end ? *p++ != 0 : false; }
-		} in{raw.data(), raw.data() + raw.size()};
-
-		Attrs attrs;
-		for (std::set<std::string>* set : {&attrs.resolution, &attrs.quality, &attrs.codec, &attrs.bitDepth, &attrs.audio,
-			&attrs.channels, &attrs.network, &attrs.edition, &attrs.hdr})
-		{
-			for (uint32_t n = in.U32(); n > 0 && in.p < in.end; n--)
-			{
-				set->insert(in.Str());
-			}
-		}
-		attrs.title = in.Str();
-		attrs.group = in.Str();
-		for (std::vector<int>* list : {&attrs.seasons, &attrs.episodes})
-		{
-			for (uint32_t n = in.U32(); n > 0 && in.p < in.end; n--)
-			{
-				list->push_back(in.I32());
-			}
-		}
-		attrs.year = in.I32();
-		attrs.repack = in.Byte();
-		attrs.proper = in.Byte();
-		return attrs;
 	}
 
 	static bool Readable(const std::string& name)
@@ -34692,10 +34494,7 @@ public:
 class Posting
 {
 public:
-	static constexpr int RelistWindowSec = 120;
-	static constexpr double SamePostingShare = 0.01;
 	static constexpr size_t SketchSize = 64;
-	static constexpr double ListingMismatchShare = 0.02;
 
 	using Sketch = std::vector<uint32_t>;
 	using Group = std::vector<Newznab::Result>;
@@ -34733,15 +34532,6 @@ public:
 		Strings x(a), y(b);
 		return nzbget_rs_posting_same_posting(x.data.data(), x.lens.data(), x.data.size(), y.data.data(), y.lens.data(),
 			y.data.size()) != 0;
-	}
-
-	static std::vector<Group> GroupListings(std::vector<Newznab::Result> results)
-	{
-		std::vector<NzbgetRsListing> raw = Listings(results);
-		std::vector<size_t> indices(raw.size()), sizes(raw.size());
-		size_t count = 0;
-		nzbget_rs_posting_group(raw.data(), raw.size(), indices.data(), sizes.data(), &count);
-		return Groups(results, indices, sizes, count);
 	}
 
 	static bool ListingMismatch(const Newznab::Result& listing, long long nzbBytes)
@@ -34802,8 +34592,6 @@ public:
 	static constexpr int ConnectionWaitSec = 10;
 
 	NntpHealthServer(int serverId, int cap) : Server(cap), m_serverId(serverId) {}
-
-	int ServerId() const { return m_serverId; }
 
 	static int CapFor(int connections)
 	{
@@ -46794,8 +46582,6 @@ public:
 		int GetHours() const { return m_hours; }
 		int GetMinutes() const { return m_minutes; }
 		int GetWeeDaysBits() const { return m_weekDaysBits; }
-		ECommand GetCommand() const { return m_command; }
-		const std::string& GetParam() const { return m_param; }
 
 	private:
 		const int m_id;

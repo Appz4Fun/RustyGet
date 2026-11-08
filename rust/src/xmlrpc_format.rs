@@ -2638,6 +2638,35 @@ pub unsafe extern "C" fn nzbget_rs_xmlrpc_decode_str(
     }
 }
 
+/// Classifies `PauseUnpauseXmlCommand::Execute` pause action:
+/// `1` = `pa_download`, `2` = `pa_post_process`, `3` = `pa_scan`, `0` = invalid.
+pub fn xmlrpc_classify_pause_action(
+    pause_action: i32,
+    pa_download: i32,
+    pa_post_process: i32,
+    pa_scan: i32,
+) -> i32 {
+    if pause_action == pa_download {
+        1
+    } else if pause_action == pa_post_process {
+        2
+    } else if pause_action == pa_scan {
+        3
+    } else {
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_xmlrpc_classify_pause_action(
+    pause_action: c_int,
+    pa_download: c_int,
+    pa_post_process: c_int,
+    pa_scan: c_int,
+) -> c_int {
+    xmlrpc_classify_pause_action(pause_action, pa_download, pa_post_process, pa_scan)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2691,6 +2720,11 @@ mod tests {
             let mut xml_buf = b"Bad &lt;param&gt; &quot;x&quot;\0".to_vec();
             nzbget_rs_xmlrpc_decode_str(0, xml_buf.as_mut_ptr().cast());
             assert_eq!(CStr::from_ptr(xml_buf.as_ptr().cast()).to_bytes(), b"Bad <param> \"x\"");
+
+            assert_eq!(nzbget_rs_xmlrpc_classify_pause_action(0, 0, 1, 2), 1);
+            assert_eq!(nzbget_rs_xmlrpc_classify_pause_action(1, 0, 1, 2), 2);
+            assert_eq!(nzbget_rs_xmlrpc_classify_pause_action(2, 0, 1, 2), 3);
+            assert_eq!(nzbget_rs_xmlrpc_classify_pause_action(99, 0, 1, 2), 0);
         }
     }
 

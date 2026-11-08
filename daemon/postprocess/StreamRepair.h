@@ -30,7 +30,6 @@
 #include <thread>
 #include <vector>
 #include "NString.h"
-#include "Thread.h"
 #include "DownloadInfo.h"
 #include "ScriptController.h"
 #include "ArticleFetcher.h"
@@ -221,7 +220,6 @@ private:
 #include "DupeArticleFallback.h"
 #include "DupeCoordinator.h"
 #include "DupeProbe.h"
-#include "NewsServer.h"
 #include "ServerPool.h"
 #include "StatMeter.h"
 #include "DiskState.h"
@@ -229,7 +227,6 @@ private:
 #include "Log.h"
 #include "Util.h"
 #include "FileSystem.h"
-#include "ParParser.h"
 #include "nzbget_rs.h"
 
 namespace

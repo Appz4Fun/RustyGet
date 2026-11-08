@@ -91,7 +91,6 @@ private:
 #include <memory>
 #include "Options.h"
 #include "FileSystem.h"
-#include "ParParser.h"
 #include "nzbget_rs.h"
 
 class RenameContentAnalyzer : public ArticleContentAnalyzer

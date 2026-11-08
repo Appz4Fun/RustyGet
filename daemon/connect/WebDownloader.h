@@ -23,8 +23,6 @@
 #define WEBDOWNLOADER_H
 
 #include "NString.h"
-#include "Observer.h"
-#include "Thread.h"
 #include "Connection.h"
 #include "FileSystem.h"
 #include "Util.h"
@@ -114,8 +112,6 @@ private:
 
 #include "nzbget_rs.h"
 #include "Log.h"
-#include "WorkState.h"
-
 inline WebDownloader::WebDownloader()
 	: m_contentLen(0)
 	, m_redirecting(false)

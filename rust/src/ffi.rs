@@ -13572,37 +13572,6 @@ pub unsafe extern "C" fn nzbget_rs_feh_ncurses_step_rate_input(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feh_maintenance_extract_package_info_str(
-    json: *const c_char,
-    key: *const c_char,
-    max_len: usize,
-    out_start: *mut usize,
-    out_len: *mut usize,
-) -> c_int {
-    if json.is_null() || key.is_null() {
-        return 0;
-    }
-    let json_bytes = crate::diskstate_format::cstr_to_bytes(json);
-    let key_bytes = crate::diskstate_format::cstr_to_bytes(key);
-    match crate::extension::maintenance_extract_package_info_str(
-        json_bytes,
-        key_bytes,
-        max_len,
-    ) {
-        Some((start, len)) => {
-            if !out_start.is_null() {
-                *out_start = start;
-            }
-            if !out_len.is_null() {
-                *out_len = len;
-            }
-            1
-        }
-        None => 0,
-    }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_feh_maintenance_classify_update_message(
     text: *const c_char,
 ) -> c_int {
@@ -13622,21 +13591,6 @@ pub unsafe extern "C" fn nzbget_rs_feh_maintenance_classify_update_info_message(
     }
     let bytes = crate::diskstate_format::cstr_to_bytes(text);
     crate::extension::maintenance_classify_update_info_message(bytes)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feh_maintenance_decode_hex_signature(
-    hex_sig: *const c_char,
-    out_sig: *mut u8,
-) -> c_int {
-    if hex_sig.is_null() || out_sig.is_null() {
-        return 0;
-    }
-    let bytes = crate::diskstate_format::cstr_to_bytes(hex_sig);
-    let out_arr = &mut *out_sig.cast::<[u8; 256]>();
-    c_int::from(crate::extension::maintenance_decode_hex_signature(
-        bytes, out_arr,
-    ))
 }
 
 // ============================================================================
@@ -13936,32 +13890,6 @@ pub unsafe extern "C" fn nzbget_rs_snh_http_get_calc_watchdog_wait(
         *out_wait_ms = wait;
     }
     i32::from(stop)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_http_client_parse_response(
-    raw_resp: *const c_char,
-    raw_resp_len: usize,
-    out_status_code: *mut u32,
-    out_body: *mut RsBuf,
-) -> c_int {
-    let s = if raw_resp.is_null() || raw_resp_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(raw_resp.cast::<u8>(), raw_resp_len)
-    };
-    match crate::webdownload::http_client_parse_response(s) {
-        Some((status, body)) => {
-            if !out_status_code.is_null() {
-                *out_status_code = status;
-            }
-            if !out_body.is_null() {
-                *out_body = into_buf(body);
-            }
-            1
-        }
-        None => 0,
-    }
 }
 
 #[no_mangle]
@@ -16831,20 +16759,6 @@ pub unsafe extern "C" fn nzbget_rs_ufs_fs_validate_load_file_size(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ufs_fs_classify_expand_file_name(
-    filename: *const c_char,
-    out_skip_dot_slash: *mut usize,
-) -> c_int {
-    let (is_rel, skip) = crate::util::fs_classify_expand_file_name(
-        crate::queuecoord::cstr_to_bytes(filename),
-    );
-    if !out_skip_dot_slash.is_null() {
-        *out_skip_dot_slash = skip;
-    }
-    is_rel
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_ufs_dir_browser_is_dot_or_dotdot(
     filename: *const c_char,
 ) -> c_int {
@@ -19141,34 +19055,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_fleet_visit_pipe_names(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_snh_http_client_build_headers(
-    method_ptr: *const c_char,
-    method_len: usize,
-    host_ptr: *const c_char,
-    host_len: usize,
-    version_cstr: *const c_char,
-    include_gzip: i32,
-) -> RsBuf {
-    let method = if method_ptr.is_null() || method_len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(method_ptr.cast::<u8>(), method_len)
-    };
-    let host = if host_ptr.is_null() || host_len == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(host_ptr.cast::<u8>(), host_len)
-    };
-    let version = input(version_cstr);
-    into_buf(crate::webdownload::http_client_build_headers(
-        method,
-        host,
-        version,
-        include_gzip != 0,
-    ))
-}
-
-#[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn nzbget_rs_stream_build_donor_key(
     password: *const c_char,
@@ -20474,21 +20360,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_maintenance_resolve_script_path(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_maintenance_format_package_info_path(
-    web_dir: *const c_char,
-    sep: c_char,
-) -> RsBuf {
-    let wd = if web_dir.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(web_dir).to_bytes()
-    };
-    into_buf(
-        crate::systemhealth::maintenance_format_package_info_path(wd, sep as u8),
-    )
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_maintenance_format_script_info_name(
     is_info_script: i32,
     base_name: *const c_char,
@@ -20541,18 +20412,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_maintenance_strip_ext_and_calc_prefix_len
         *out_prefix_len = prefix_len;
     }
     into_buf(stem)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_maintenance_format_sig_title(
-    base_name: *const c_char,
-) -> RsBuf {
-    let bn = if base_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(base_name).to_bytes()
-    };
-    into_buf(crate::systemhealth::maintenance_format_sig_title(bn))
 }
 
 #[no_mangle]
@@ -21091,24 +20950,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_ncurses_format_plot_line(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_fs_format_expanded_rel_path(
-    cur_dir: *const c_char,
-    rel_filename: *const c_char,
-) -> RsBuf {
-    let c = if cur_dir.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(cur_dir).to_bytes()
-    };
-    let r = if rel_filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(rel_filename).to_bytes()
-    };
-    into_buf(crate::util::fs_format_expanded_rel_path(c, r))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_benchmark_format_unique_filename(
     epoch_ticks: i64,
 ) -> RsBuf {
@@ -21138,11 +20979,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_statmeter_format_indexed_bytes_line(
         std::slice::from_raw_parts(values, count)
     };
     into_buf(crate::statmeter::statmeter_format_indexed_bytes_line(first_idx, slice))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_sysinfo_format_rapidyenc_version(ver: c_int) -> RsBuf {
-    into_buf(crate::systemhealth::sysinfo_format_rapidyenc_version(ver))
 }
 
 #[no_mangle]
@@ -21368,24 +21204,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_log_split_basename_and_ext(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_sysinfo_line_contains_marker(
-    line: *const c_char,
-    marker: *const c_char,
-) -> c_int {
-    let l = if line.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(line).to_bytes()
-    };
-    let m = if marker.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(marker).to_bytes()
-    };
-    c_int::from(crate::systemhealth::sysinfo_line_contains_marker(l, m))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_bytes_equal(
     a: *const c_char,
     b: *const c_char,
@@ -21454,33 +21272,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_tls_resolve_probe_result(
         auth_error != 0,
         tls_probe_failure,
     )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_maintenance_match_sig_line_prefix(
-    line: *const c_char,
-    sig_title: *const c_char,
-    out_offset: *mut usize,
-) -> c_int {
-    let l = if line.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(line).to_bytes()
-    };
-    let s = if sig_title.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(sig_title).to_bytes()
-    };
-    match crate::systemhealth::maintenance_match_sig_line_prefix(l, s) {
-        Some(off) => {
-            if !out_offset.is_null() {
-                *out_offset = off;
-            }
-            1
-        }
-        None => 0,
-    }
 }
 
 #[no_mangle]
@@ -32751,6 +32542,178 @@ pub unsafe extern "C" fn nzbget_rs_http_get_read_and_delete(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_system_info_fetch_network(
+    host: *const c_char,
+    use_tls: c_int,
+    include_gzip: c_int,
+    version_rev: *const c_char,
+    ctx: *mut c_void,
+    tls_cb: Option<
+        unsafe extern "C" fn(
+            ctx: *mut c_void,
+            fd: c_int,
+            host: *const c_char,
+            req: *const c_char,
+            req_len: usize,
+            out_resp: *mut RsBuf,
+        ) -> c_int,
+    >,
+    out_public_ip: *mut RsBuf,
+    out_private_ip: *mut RsBuf,
+    out_err: *mut RsBuf,
+) -> c_int {
+    let host_str = String::from_utf8_lossy(input(host));
+    let ver_bytes = input(version_rev);
+    match crate::systemhealth::system_info_fetch_network(
+        &host_str,
+        use_tls != 0,
+        include_gzip != 0,
+        ver_bytes,
+        |fd, host_cstr, req| {
+            let Some(cb) = tls_cb else {
+                return Err("TLS callback missing".to_string());
+            };
+            let mut resp_buf = RsBuf {
+                data: std::ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            };
+            let ok = cb(
+                ctx,
+                fd,
+                host_cstr.as_ptr(),
+                req.as_ptr().cast(),
+                req.len(),
+                &mut resp_buf,
+            );
+            let vec = if resp_buf.data.is_null() {
+                Vec::new()
+            } else {
+                Vec::from_raw_parts(resp_buf.data.cast::<u8>(), resp_buf.len, resp_buf.cap)
+            };
+            if ok != 0 {
+                Ok(vec)
+            } else {
+                Err(String::from_utf8_lossy(&vec).into_owned())
+            }
+        },
+    ) {
+        Ok((pub_ip, priv_ip)) => {
+            if !out_public_ip.is_null() {
+                *out_public_ip = into_buf(pub_ip);
+            }
+            if !out_private_ip.is_null() {
+                *out_private_ip = into_buf(priv_ip);
+            }
+            1
+        }
+        Err(err) => {
+            if !out_err.is_null() {
+                *out_err = into_buf(err.into_bytes());
+            }
+            0
+        }
+    }
+}
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_maintenance_read_package_info_str(
+    web_dir: *const c_char,
+    sep: c_char,
+    key: *const c_char,
+    out_err_kind: *mut c_int,
+    out_file_name: *mut RsBuf,
+) -> RsBuf {
+    match crate::extension::maintenance_read_package_info_str(
+        input(web_dir),
+        sep as u8,
+        input(key),
+    ) {
+        Ok(val) => {
+            if !out_err_kind.is_null() {
+                *out_err_kind = 0;
+            }
+            if !out_file_name.is_null() {
+                *out_file_name = into_buf(Vec::new());
+            }
+            into_buf(val)
+        }
+        Err((err_kind, file_name)) => {
+            if !out_err_kind.is_null() {
+                *out_err_kind = err_kind;
+            }
+            if !out_file_name.is_null() {
+                *out_file_name = into_buf(file_name);
+            }
+            into_buf(Vec::new())
+        }
+    }
+}
 
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_maintenance_prepare_signature_inputs(
+    in_filename: *const c_char,
+    sig_filename: *const c_char,
+    pub_key_filename: *const c_char,
+    out_in_hash: *mut u8,
+    out_signature: *mut u8,
+    out_pub_key: *mut RsBuf,
+) -> c_int {
+    match crate::extension::maintenance_prepare_signature_inputs(
+        input(in_filename),
+        input(sig_filename),
+        input(pub_key_filename),
+    ) {
+        Some((hash, sig, pub_key)) => {
+            if !out_in_hash.is_null() {
+                std::ptr::copy_nonoverlapping(hash.as_ptr(), out_in_hash, 32);
+            }
+            if !out_signature.is_null() {
+                std::ptr::copy_nonoverlapping(sig.as_ptr(), out_signature, 256);
+            }
+            if !out_pub_key.is_null() {
+                *out_pub_key = into_buf(pub_key);
+            }
+            1
+        }
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn nzbget_rs_scheduler_calc_next_work_interval(cur_time: i64) -> i32 {
+    crate::scheduler::scheduler_calc_next_work_interval(cur_time)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fs_save_buffer_into_file(
+    filename: *const c_char,
+    buffer: *const c_char,
+    buf_len: usize,
+) -> c_int {
+    if filename.is_null() {
+        return 0;
+    }
+    let data = if buffer.is_null() || buf_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(buffer.cast::<u8>(), buf_len)
+    };
+    c_int::from(crate::fsops::save_buffer_into_file(
+        CStr::from_ptr(filename),
+        data,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fs_expand_file_name(filename: *const c_char) -> RsBuf {
+    into_buf(crate::fsops::expand_file_name(input(filename)))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_fs_get_exe_file_name(argv0: *const c_char) -> RsBuf {
+    into_buf(crate::fsops::get_exe_file_name(input(argv0)))
+}
 

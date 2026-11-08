@@ -1,6 +1,6 @@
 #include "nzbget.h"
 #include "TestFramework.h"
-#include "TlsCipherBackend.h"
+#include "ServerPool.h"
 
 #if !defined(DISABLE_TLS) && (defined(__APPLE__) || defined(__linux__))
 #include <openssl/rand.h>

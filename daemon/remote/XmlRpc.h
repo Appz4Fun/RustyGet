@@ -140,7 +140,6 @@ protected:
 #include "Fleet.h"
 #include "Log.h"
 #include "Options.h"
-#include "WorkState.h"
 #include "Scanner.h"
 #include "FeedCoordinator.h"
 #include "ServerPool.h"
@@ -152,15 +151,10 @@ protected:
 #include "StatMeter.h"
 #include "ArticleWriter.h"
 #include "DiskState.h"
-#include "ScriptConfig.h"
 #include "QueueScript.h"
-#include "CommandScript.h"
 #include "UrlCoordinator.h"
 #include "ExtensionManager.h"
-#include "SystemInfo.h"
-#include "SystemHealth.h"
-#include "TlsCipherBackend.h"
-
+#include "Scheduler.h"
 namespace
 {
 	// Pauses downloads for the duration of a speed test and restores the previous

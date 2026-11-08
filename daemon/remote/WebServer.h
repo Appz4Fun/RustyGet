@@ -689,8 +689,6 @@ inline const char* WebProcessor::DetectContentType(const char* filename)
 }
 
 #include <system_error>
-#include "Thread.h"
-#include "Observer.h"
 #include "BinRpc.h"
 
 class RequestProcessor : public Thread, public Subject

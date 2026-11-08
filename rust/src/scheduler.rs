@@ -280,6 +280,31 @@ pub fn scheduler_command_name(command: i32) -> &'static [u8] {
     }
 }
 
+/// Computes seconds until the next UTC minute boundary (`gmtime_r` + `tm_min + 1`, `tm_sec = 0` + `timegm`)
+/// for `Scheduler::ScheduleNextWork`.
+pub fn scheduler_calc_next_work_interval(cur_time: i64) -> i32 {
+    #[cfg(unix)]
+    unsafe {
+        let t = cur_time as libc::time_t;
+        let mut fields: libc::tm = std::mem::zeroed();
+        libc::gmtime_r(&t, &mut fields);
+        let next = timegm(&Tm {
+            year: fields.tm_year as i64 + 1900,
+            mon: fields.tm_mon as i64,
+            mday: fields.tm_mday as i64,
+            hour: fields.tm_hour as i64,
+            min: fields.tm_min as i64 + 1,
+            sec: 0,
+            wday: fields.tm_wday as i64,
+        });
+        (next - cur_time) as i32
+    }
+    #[cfg(not(unix))]
+    {
+        (60 - cur_time.rem_euclid(60)) as i32
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

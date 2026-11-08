@@ -106,8 +106,6 @@ public:
 
 #include "DupeArticleFallback.h"
 #include "Options.h"
-#include "ParParser.h"
-
 inline StreamRangeList DupeStreamRepair::ComputeHoles(FileInfo* fileInfo)
 {
 	int64 fileSize = fileInfo->GetDecodedFileSize();

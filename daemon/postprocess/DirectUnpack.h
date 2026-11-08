@@ -24,7 +24,6 @@
 
 #include <atomic>
 #include "Log.h"
-#include "Thread.h"
 #include "DownloadInfo.h"
 #include "ScriptController.h"
 

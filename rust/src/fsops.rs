@@ -864,6 +864,86 @@ pub fn disk_service_check_required_dirs(
     (all_exist, cur_waiting_reported)
 }
 
+/// `FileSystem::SaveBufferIntoFile` (`daemon/util/FileSystem.h`):
+/// Opens `filename` in write mode (`O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC`, `0o666`),
+/// writes all bytes in `buffer`, and closes the descriptor.
+pub fn save_buffer_into_file(filename: &CStr, buffer: &[u8]) -> bool {
+    let fd = open_cloexec_fd(filename, 2, 0, 1, 2);
+    if fd == -1 {
+        return false;
+    }
+    let mut written = 0usize;
+    let mut ok = true;
+    while written < buffer.len() {
+        let w = unsafe {
+            sys::write(
+                fd,
+                buffer[written..].as_ptr().cast(),
+                buffer.len() - written,
+            )
+        };
+        if w <= 0 {
+            ok = false;
+            break;
+        }
+        written += w as usize;
+    }
+    let close_ok = unsafe { sys::close(fd) == 0 };
+    ok && close_ok && written == buffer.len()
+}
+
+/// `FileSystem::ExpandFileName` (`daemon/util/FileSystem.h`):
+/// Expands relative `filename` against `getcwd()` up to `BSTRING_MAX` (1023) bytes.
+pub fn expand_file_name(filename: &[u8]) -> Vec<u8> {
+    let (is_rel, skip) = crate::util::fs_classify_expand_file_name(filename);
+    if is_rel != 0 {
+        let mut cur_dir_buf = [0u8; 1025];
+        #[cfg(unix)]
+        unsafe {
+            let _ = libc::getcwd(cur_dir_buf.as_mut_ptr().cast(), cur_dir_buf.len() - 1);
+        }
+        let cur_len = cur_dir_buf
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(cur_dir_buf.len());
+        let rel = if skip <= filename.len() {
+            &filename[skip..]
+        } else {
+            &[][..]
+        };
+        crate::util::fs_format_expanded_rel_path(&cur_dir_buf[..cur_len], rel)
+    } else {
+        filename.to_vec()
+    }
+}
+
+/// `FileSystem::GetExeFileName` (`daemon/util/FileSystem.h`):
+/// Resolves `/proc/self/exe` (Linux) or `/proc/curproc/file` (FreeBSD), falling back
+/// to `expand_file_name(argv0)`.
+pub fn get_exe_file_name(argv0: &[u8]) -> Vec<u8> {
+    #[cfg(unix)]
+    unsafe {
+        let mut buf = [0u8; BSTRING_MAX];
+        let r = libc::readlink(
+            c"/proc/self/exe".as_ptr(),
+            buf.as_mut_ptr().cast(),
+            BSTRING_MAX,
+        );
+        if r > 0 {
+            return buf[..(r as usize).min(BSTRING_MAX)].to_vec();
+        }
+        let r2 = libc::readlink(
+            c"/proc/curproc/file".as_ptr(),
+            buf.as_mut_ptr().cast(),
+            BSTRING_MAX,
+        );
+        if r2 > 0 {
+            return buf[..(r2 as usize).min(BSTRING_MAX)].to_vec();
+        }
+    }
+    expand_file_name(argv0)
+}
+
 pub(crate) struct PosixFsOps;
 
 impl crate::fsdelete::Ops for PosixFsOps {

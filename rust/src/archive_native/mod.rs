@@ -1631,7 +1631,7 @@ const SHA256_K: [u32; 64] = [
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
-struct Sha256State {
+pub(crate) struct Sha256State {
     h: [u32; 8],
     buf: [u8; 64],
     buf_len: usize,
@@ -1639,7 +1639,7 @@ struct Sha256State {
 }
 
 impl Sha256State {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             h: [
                 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
@@ -1696,7 +1696,7 @@ impl Sha256State {
         h[7] = h[7].wrapping_add(hh);
     }
 
-    fn update(&mut self, mut data: &[u8]) {
+    pub(crate) fn update(&mut self, mut data: &[u8]) {
         self.total_len = self.total_len.wrapping_add(data.len() as u64);
         if self.buf_len > 0 {
             let take = (64 - self.buf_len).min(data.len());
@@ -1720,7 +1720,7 @@ impl Sha256State {
         }
     }
 
-    fn finalize(mut self) -> [u8; 32] {
+    pub(crate) fn finalize(mut self) -> [u8; 32] {
         let bit_len = self.total_len.wrapping_mul(8);
         self.buf[self.buf_len] = 0x80;
         self.buf_len += 1;

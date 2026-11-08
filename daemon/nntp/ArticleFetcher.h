@@ -27,8 +27,6 @@
 #include <memory>
 #include <vector>
 #include "NString.h"
-#include "Thread.h"
-
 /*
  * Fetches and decodes a single yEnc article body into memory, outside the
  * regular download pipeline. Used by post-processing stream repair to pull
@@ -186,15 +184,11 @@ private:
 
 #include <map>
 #include <set>
-#include "NntpConnection.h"
-#include "NewsServer.h"
 #include "ServerPool.h"
-#include "Decoder.h"
 #include "Log.h"
 #include "Options.h"
 #include "StatMeter.h"
 #include "Util.h"
-#include "WorkState.h"
 #include "nzbget_rs.h"
 
 namespace ArticleFetcherDetail

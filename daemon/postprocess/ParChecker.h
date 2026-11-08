@@ -235,8 +235,6 @@ private:
 #include <vector>
 #include <string>
 #include <algorithm>
-
-#include "ParParser.h"
 #include "Log.h"
 #include "Options.h"
 #include "Util.h"

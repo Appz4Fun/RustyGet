@@ -20,9 +20,6 @@
 
 #ifndef DUPESEARCH_H
 #define DUPESEARCH_H
-
-#include "Observer.h"
-#include "Thread.h"
 #include "DownloadInfo.h"
 #include <condition_variable>
 #include <atomic>

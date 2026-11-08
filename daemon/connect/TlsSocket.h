@@ -496,4 +496,205 @@ private:
 };
 
 #endif
+
+#ifndef SYSTEM_INFO_H
+#define SYSTEM_INFO_H
+
+#include <ostream>
+#include <string>
+
+namespace System
+{
+	inline const char* IP_SERVICE = "ip.nzbget.com";
+
+	struct Network
+	{
+		std::string publicIP;
+		std::string privateIP;
+	};
+
+	inline Network GetNetwork()
+	{
+		Network network;
+
+#ifndef DISABLE_TLS
+		int useTls = 1;
+#else
+		int useTls = 0;
+#endif
+#ifndef DISABLE_GZIP
+		int includeGzip = 1;
+#else
+		int includeGzip = 0;
+#endif
+		NzbgetRsBuf pubBuf{};
+		NzbgetRsBuf privBuf{};
+		NzbgetRsBuf errBuf{};
+		int ok = nzbget_rs_system_info_fetch_network(
+			IP_SERVICE,
+			useTls,
+			includeGzip,
+			Util::VersionRevision(),
+			nullptr,
+			[](void*, int fd, const char* host, const char* req, size_t reqLen, NzbgetRsBuf* outResp) -> int
+			{
+#ifndef DISABLE_TLS
+				SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+				if (!ctx)
+				{
+					const char* msg = "Failed to create SSL_CTX";
+					*outResp = nzbget_rs_alloc_buf(msg, strlen(msg));
+					return 0;
+				}
+				SSL_CTX_set_default_verify_paths(ctx);
+				SSL* ssl = SSL_new(ctx);
+				if (!ssl)
+				{
+					SSL_CTX_free(ctx);
+					const char* msg = "Failed to create SSL";
+					*outResp = nzbget_rs_alloc_buf(msg, strlen(msg));
+					return 0;
+				}
+				SSL_set_fd(ssl, fd);
+				SSL_set_tlsext_host_name(ssl, host);
+				if (SSL_connect(ssl) != 1)
+				{
+					SSL_free(ssl);
+					SSL_CTX_free(ctx);
+					OpenSSL::StopSSLThread();
+					const char* msg = "TLS handshake failed";
+					*outResp = nzbget_rs_alloc_buf(msg, strlen(msg));
+					return 0;
+				}
+
+				size_t written = 0;
+				while (written < reqLen)
+				{
+					int n = SSL_write(ssl, req + written, static_cast<int>(reqLen - written));
+					if (n <= 0) break;
+					written += static_cast<size_t>(n);
+				}
+
+				std::string rawResp;
+				char chunk[4096];
+				for (;;)
+				{
+					int n = SSL_read(ssl, chunk, sizeof(chunk));
+					if (n <= 0) break;
+					rawResp.append(chunk, static_cast<size_t>(n));
+				}
+
+				SSL_shutdown(ssl);
+				SSL_free(ssl);
+				SSL_CTX_free(ctx);
+				OpenSSL::StopSSLThread();
+				*outResp = nzbget_rs_alloc_buf(rawResp.data(), rawResp.size());
+				return 1;
+#else
+				(void)fd;
+				(void)host;
+				(void)req;
+				(void)reqLen;
+				(void)outResp;
+				return 0;
+#endif
+			},
+			&pubBuf,
+			&privBuf,
+			&errBuf);
+		if (ok)
+		{
+			network.publicIP.assign(pubBuf.data ? pubBuf.data : "", pubBuf.len);
+			network.privateIP.assign(privBuf.data ? privBuf.data : "", privBuf.len);
+		}
+		else if (errBuf.data && errBuf.len > 0)
+		{
+			detail("Failed to get public and private IP: %s", errBuf.data);
+		}
+		nzbget_rs_free(pubBuf);
+		nzbget_rs_free(privBuf);
+		nzbget_rs_free(errBuf);
+
+		return network;
+	}
+
+	class SystemInfo final
+	{
+	public:
+		SystemInfo(std::function<Network()> networkFetcher = GetNetwork)
+			: m_networkFetcher{std::move(networkFetcher)}
+		{
+#ifndef DISABLE_TLS
+#ifdef LIBRESSL_VERSION_TEXT
+			m_sslLibName = "LibreSSL";
+			m_sslRawVersion = LIBRESSL_VERSION_TEXT;
+			m_sslExtractAfterSpace = true;
+#elif defined(OPENSSL_FULL_VERSION_STR)
+			m_sslLibName = "OpenSSL";
+			m_sslRawVersion = OPENSSL_FULL_VERSION_STR;
+			m_sslExtractAfterSpace = false;
+#else
+			m_sslLibName = "OpenSSL";
+			m_sslRawVersion = OPENSSL_VERSION_TEXT;
+			m_sslExtractAfterSpace = true;
+#endif
+#endif
+		}
+
+		~SystemInfo() = default;
+
+		Network GetNetworkInfo() const
+		{
+			return m_networkFetcher();
+		}
+
+		std::string Format(int mode, bool withNetwork) const
+		{
+			Network net = withNetwork ? GetNetworkInfo() : Network{};
+			NzbgetRsBuf buf = nzbget_rs_system_info_format(
+				mode,
+				"",
+				"",
+				"",
+				m_sslLibName.c_str(),
+				m_sslRawVersion.c_str(),
+				m_sslExtractAfterSpace ? 1 : 0,
+				net.publicIP.data(), net.publicIP.size(),
+				net.privateIP.data(), net.privateIP.size());
+			std::string result(buf.data ? buf.data : "", buf.len);
+			nzbget_rs_free(buf);
+			return result;
+		}
+
+		friend std::ostream& operator<<(std::ostream& os, const SystemInfo& sysinfo)
+		{
+			std::string text = sysinfo.Format(0, false);
+			if (!text.empty())
+			{
+				os.write(text.data(), static_cast<std::streamsize>(text.size()));
+			}
+			return os;
+		}
+
+	private:
+		std::string m_sslLibName;
+		std::string m_sslRawVersion;
+		bool m_sslExtractAfterSpace = false;
+		std::function<Network()> m_networkFetcher;
+	};
+
+	inline std::string ToJsonStr(const SystemInfo& sysInfo)
+	{
+		return sysInfo.Format(1, true);
+	}
+
+	inline std::string ToXmlStr(const SystemInfo& sysInfo)
+	{
+		return sysInfo.Format(2, true);
+	}
+}
+
+extern System::SystemInfo* g_SystemInfo;
+
+#endif
 #endif

@@ -254,7 +254,6 @@ private:
 #include "ParDamage.h"
 #include "TwinCheck.h"
 #include "DupeCoordinator.h"
-#include "NzbFile.h"
 #include "Options.h"
 #include "DiskState.h"
 #include "Log.h"

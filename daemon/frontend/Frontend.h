@@ -22,15 +22,11 @@
 
 #ifndef FRONTEND_H
 #define FRONTEND_H
-
-#include "Thread.h"
 #include "Log.h"
 #include "DownloadInfo.h"
 #include "MessageBase.h"
 #include "QueueEditor.h"
-#include "Observer.h"
 #include "Options.h"
-#include "WorkState.h"
 #include "Connection.h"
 #include "RemoteClient.h"
 #include "Util.h"

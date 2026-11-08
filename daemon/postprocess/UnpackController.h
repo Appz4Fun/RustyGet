@@ -23,7 +23,6 @@
 #define UNPACK_CONTROLLER_H
 
 #include "Log.h"
-#include "Thread.h"
 #include "DownloadInfo.h"
 #include "ScriptController.h"
 
@@ -103,7 +102,6 @@ private:
 #include "Log.h"
 #include "Util.h"
 #include "FileSystem.h"
-#include "ParParser.h"
 #include "Options.h"
 #include "nzbget_rs.h"
 

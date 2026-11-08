@@ -83,7 +83,6 @@ private:
 #include "PrePostProcessor.h"
 #include "HistoryCoordinator.h"
 #include "UrlCoordinator.h"
-#include "ParParser.h"
 #include "DupeSearch.h"
 #include "nzbget_rs.h"
 

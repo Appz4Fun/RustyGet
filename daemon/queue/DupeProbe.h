@@ -23,7 +23,6 @@
 
 #include "NString.h"
 #include "Log.h"
-#include "Thread.h"
 #include <functional>
 #include <memory>
 #include <set>
@@ -184,8 +183,6 @@ private:
 #include "QueueCoordinator.h"
 #include "DupeCoordinator.h"
 #include "ServerPool.h"
-#include "NewsServer.h"
-#include "NntpConnection.h"
 #include "Util.h"
 #include "nzbget_rs.h"
 

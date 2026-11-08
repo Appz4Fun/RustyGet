@@ -25,7 +25,6 @@
 #include <mutex>
 #include <string>
 #include "NString.h"
-#include "Thread.h"
 #include "FileSystem.h"
 
 #ifndef LOG_H
@@ -617,6 +616,141 @@ inline void Log::UpdateLogPath(const char* newPath)
 #endif
 #else
 #define debug(...) do { } while(0)
+#endif
+
+#ifndef SERVICE_H
+#define SERVICE_H
+
+#include "Util.h"
+#include "nzbget_rs.h"
+
+class ServiceCoordinator;
+extern ServiceCoordinator* g_ServiceCoordinator;
+
+class Service
+{
+public:
+	Service();
+	virtual ~Service() = default;
+
+	static const int Now = 0;
+	static const int Sleep = -1;
+
+protected:
+	virtual int ServiceInterval() = 0;
+	virtual void ServiceWork() = 0;
+	void WakeUp();
+
+private:
+	time_t m_lastWork = 0;
+
+	friend class ServiceCoordinator;
+};
+
+class ServiceCoordinator : public Thread
+{
+public:
+	using ServiceList = std::vector<Service*>;
+
+	ServiceCoordinator()
+	{
+		debug("Creating ServiceCoordinator");
+	}
+
+	~ServiceCoordinator() override
+	{
+		debug("Destroying ServiceCoordinator");
+	}
+
+	void Run() override
+	{
+		debug("Entering ServiceCoordinator-loop");
+
+		while (!IsStopped())
+		{
+			// perform service work
+			for (Service* service : m_services)
+			{
+				int serviceInterval = service->ServiceInterval();
+				if (nzbget_rs_euh_service_should_work_now(
+						serviceInterval, Service::Now,
+						static_cast<int64_t>(Util::CurrentTime()),
+						static_cast<int64_t>(service->m_lastWork)) != 0)
+				{
+					service->ServiceWork();
+					service->m_lastWork = Util::CurrentTime();
+				}
+			}
+
+			// calculate wait interval
+			int waitInterval = 60 * 60 * 24; // something very large
+			time_t curTime = Util::CurrentTime();
+			for (Service* service : m_services)
+			{
+				int serviceInterval = service->ServiceInterval();
+				int remaining = Service::Sleep;
+				nzbget_rs_euh_service_calc_remaining_wait(
+					serviceInterval, Service::Now, Service::Sleep,
+					static_cast<int64_t>(curTime),
+					static_cast<int64_t>(service->m_lastWork),
+					waitInterval, &remaining, &waitInterval);
+				debug("serviceInterval: %i, remaining: %i", serviceInterval, remaining);
+			}
+
+			debug("Waiting in ServiceCoordinator: %i", waitInterval);
+			if (waitInterval > 0)
+			{
+				std::unique_lock<std::mutex> lk(m_waitMutex);
+				m_waitCond.wait_for(lk, std::chrono::milliseconds(waitInterval * 1000), [&] { return m_workenUp || IsStopped(); });
+				m_workenUp = false;
+			}
+		}
+
+		debug("Exiting ServiceCoordinator-loop");
+	}
+
+	void Stop() override
+	{
+		Thread::Stop();
+
+		// Resume Run() to exit it
+		std::lock_guard<std::mutex> guard(m_waitMutex);
+		m_waitCond.notify_all();
+	}
+
+private:
+	ServiceList m_services;
+	std::mutex m_waitMutex;
+	std::condition_variable m_waitCond;
+	bool m_workenUp = false;
+
+	void RegisterService(Service* service)
+	{
+		m_services.push_back(service);
+	}
+
+	void WakeUp()
+	{
+		debug("Waking up ServiceCoordinator");
+		// Resume Run()
+		std::lock_guard<std::mutex> guard(m_waitMutex);
+		m_workenUp = true;
+		m_waitCond.notify_all();
+	}
+
+	friend class Service;
+};
+
+inline Service::Service()
+{
+	g_ServiceCoordinator->RegisterService(this);
+}
+
+inline void Service::WakeUp()
+{
+	g_ServiceCoordinator->WakeUp();
+}
+
 #endif
 
 #endif

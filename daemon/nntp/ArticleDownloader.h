@@ -25,11 +25,9 @@
 
 #include <atomic>
 #include "NString.h"
-#include "Observer.h"
 #include "DownloadInfo.h"
-#include "Thread.h"
-#include "NntpConnection.h"
-#include "Decoder.h"
+#include "ServerPool.h"
+#include "Options.h"
 #include "ArticleWriter.h"
 #include "Util.h"
 
@@ -117,7 +115,6 @@ private:
 
 #include "Log.h"
 #include "Options.h"
-#include "WorkState.h"
 #include "ServerPool.h"
 #include "StatMeter.h"
 #include "nzbget_rs.h"

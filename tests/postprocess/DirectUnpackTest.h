@@ -29,7 +29,6 @@
 #include "FileSystem.h"
 #include "PrePostProcessor.h"
 #include "QueueScript.h"
-#include "WorkState.h"
 #include "HistoryCoordinator.h"
 #include "DupeCoordinator.h"
 #include "Util.h"

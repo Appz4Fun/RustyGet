@@ -41,7 +41,6 @@ private:
 
 #include "Log.h"
 #include "Options.h"
-#include "WorkState.h"
 #include "QueueEditor.h"
 #include "Util.h"
 #include "FileSystem.h"

@@ -24,8 +24,6 @@
 #include "ServerPool.h"
 #include "Log.h"
 #include "Options.h"
-#include "WorkState.h"
-#include "ScriptConfig.h"
 #include "QueueCoordinator.h"
 #include "UrlCoordinator.h"
 #include "DiskState.h"
@@ -34,15 +32,12 @@
 #include "DupeCoordinator.h"
 #include "Scanner.h"
 #include "FeedCoordinator.h"
-#include "Service.h"
 #include "Maintenance.h"
 #include "ArticleWriter.h"
 #include "StatMeter.h"
 #include "QueueScript.h"
-#include "CommandScript.h"
 #include "ExtensionManager.h"
-#include "SystemInfo.h"
-#include "SystemHealth.h"
+#include "Scheduler.h"
 
 extern char** environ;
 char* (*g_EnvironmentVariables)[];

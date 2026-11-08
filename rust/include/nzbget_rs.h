@@ -2133,13 +2133,8 @@ int nzbget_rs_feh_ncurses_resolve_group_pause_action(
 int nzbget_rs_feh_ncurses_step_rate_input(
     int key, int key_backspace, int* inout_index, int* inout_value);
 
-int nzbget_rs_feh_maintenance_extract_package_info_str(
-    const char* json, const char* key, size_t max_len,
-    size_t* out_start, size_t* out_len);
 int nzbget_rs_feh_maintenance_classify_update_message(const char* text);
 int nzbget_rs_feh_maintenance_classify_update_info_message(const char* text);
-int nzbget_rs_feh_maintenance_decode_hex_signature(
-    const char* hex_sig, uint8_t* out_sig);
 
 int nzbget_rs_snh_sys_extract_python_version(
     const char* line, size_t len, size_t* out_start, size_t* out_len);
@@ -2193,8 +2188,6 @@ int nzbget_rs_snh_http_get_calc_watchdog_wait(
     int64_t deadline_ms, int64_t now_ms, int64_t file_size, size_t max_bytes,
     int64_t* out_wait_ms);
 
-int nzbget_rs_http_client_parse_response(
-    const char* raw_ptr, size_t raw_len, uint32_t* out_status, NzbgetRsBuf* out_body);
 int nzbget_rs_network_speed_test_run(
     void* ctx,
     int (*execute_iter_cb)(
@@ -2604,8 +2597,6 @@ int nzbget_rs_ufs_regex_calc_match_len(int rm_so, int rm_eo);
 int nzbget_rs_ufs_tokenizer_fits_short_string(int len, int capacity);
 int nzbget_rs_ufs_fs_validate_load_file_size(
     int64_t file_size, int add_trailing_null, int* out_size, int* out_buf_size);
-int nzbget_rs_ufs_fs_classify_expand_file_name(
-    const char* filename, size_t* out_skip_dot_slash);
 int nzbget_rs_ufs_dir_browser_is_dot_or_dotdot(const char* filename);
 int nzbget_rs_ufs_disk_file_select_seek_origin(
     int origin, int so_cur, int so_end, int seek_set, int seek_cur, int seek_end);
@@ -3592,10 +3583,6 @@ void nzbget_rs_dqh_fleet_visit_pipe_names(
     const char* names_ptr, size_t names_len, void* ctx,
     void (*visit)(void* ctx, const char* part_ptr, size_t part_len));
 
-NzbgetRsBuf nzbget_rs_snh_http_client_build_headers(
-    const char* method_ptr, size_t method_len,
-    const char* host_ptr, size_t host_len,
-    const char* version_cstr, int32_t include_gzip);
 NzbgetRsBuf nzbget_rs_stream_build_donor_key(
     const char* password,
     const char* const* file_names_ptr,
@@ -3780,8 +3767,6 @@ NzbgetRsBuf nzbget_rs_tpr_ncurses_format_download_rate_hint(int32_t input_val);
 const char* nzbget_rs_tpr_ncurses_pause_log_msg(int32_t pause_download);
 NzbgetRsBuf nzbget_rs_dqh_maintenance_resolve_script_path(
     const char* app_dir, char sep, const char* script);
-NzbgetRsBuf nzbget_rs_dqh_maintenance_format_package_info_path(
-    const char* web_dir, char sep);
 NzbgetRsBuf nzbget_rs_dqh_maintenance_format_script_info_name(
     int32_t is_info_script, const char* base_name);
 const char* nzbget_rs_dqh_maintenance_branch_name(int32_t branch);
@@ -3789,7 +3774,6 @@ const char* nzbget_rs_dqh_maintenance_run_mode_name(int32_t daemon_mode);
 NzbgetRsBuf nzbget_rs_dqh_maintenance_format_cmdline_env_name(int32_t index);
 NzbgetRsBuf nzbget_rs_dqh_maintenance_strip_ext_and_calc_prefix_len(
     const char* base_name, size_t max_len, size_t* out_prefix_len);
-NzbgetRsBuf nzbget_rs_dqh_maintenance_format_sig_title(const char* base_name);
 int32_t nzbget_rs_dqh_scheduler_bytes_to_kb(int32_t bytes);
 const char* nzbget_rs_dqh_scheduler_pause_action_str(int32_t paused);
 const char* nzbget_rs_dqh_scheduler_server_action_str(int32_t active);
@@ -3847,14 +3831,11 @@ NzbgetRsBuf nzbget_rs_dqh_log_format_rotated_path(
     int32_t year, int32_t month, int32_t mday, const char* base_ext);
 NzbgetRsBuf nzbget_rs_dqh_ncurses_format_plot_line(
     const char* text, int32_t screen_width, int32_t pos, int32_t max_screen_width);
-NzbgetRsBuf nzbget_rs_dqh_fs_format_expanded_rel_path(
-    const char* cur_dir, const char* rel_filename);
 NzbgetRsBuf nzbget_rs_dqh_benchmark_format_unique_filename(int64_t epoch_ticks);
 size_t nzbget_rs_dqh_benchmark_resolve_block_size(
     size_t block_size_bytes, size_t default_block_size);
 NzbgetRsBuf nzbget_rs_dqh_statmeter_format_indexed_bytes_line(
     int32_t first_idx, const int64_t* values, size_t count);
-NzbgetRsBuf nzbget_rs_dqh_sysinfo_format_rapidyenc_version(int32_t ver);
 NzbgetRsBuf nzbget_rs_dqh_fs_format_null_delete_errmsg(const char* last_err);
 NzbgetRsBuf nzbget_rs_dqh_fs_extract_parent_dir_path(const char* filename, char sep);
 int nzbget_rs_dqh_diskstate_is_candidate_queue_file_name(const char* filename);
@@ -3877,8 +3858,6 @@ int nzbget_rs_dqh_scanner_find_last_char_pos(
     const char* text, char ch, size_t* out_pos);
 NzbgetRsBuf nzbget_rs_dqh_log_split_basename_and_ext(
     const char* base_name, NzbgetRsBuf* out_ext);
-int nzbget_rs_dqh_sysinfo_line_contains_marker(
-    const char* line, const char* marker);
 int nzbget_rs_dqh_bytes_equal(const char* a, const char* b);
 int nzbget_rs_dqh_bytes_eq_ignore_case(const char* a, const char* b);
 int nzbget_rs_newznab_parse_response(
@@ -3919,8 +3898,6 @@ int nzbget_rs_dqh_tls_resolve_probe_result(
     int connected, const char* negotiated_cipher, const char* expected_cipher,
     int negotiated_version, int protocol, int tls13_ver, int tls12_ver,
     int auth_error, int tls_probe_failure);
-int nzbget_rs_dqh_maintenance_match_sig_line_prefix(
-    const char* line, const char* sig_title, size_t* out_offset);
 int64_t nzbget_rs_dqh_parse_c_atoll(const char* text);
 int nzbget_rs_dqh_parse_c_atoi(const char* text);
 int nzbget_rs_dqh_diskstate_parse_queue_file_id_and_suffix(
@@ -5915,6 +5892,24 @@ int nzbget_rs_disk_service_check_required_dirs(
     void* ctx, void (*on_missing_cb)(void* ctx, const char* dir));
 NzbgetRsBuf nzbget_rs_http_get_read_and_delete(
     const char* path, size_t path_len, size_t max_bytes, int read_body, int* out_ok);
+int nzbget_rs_system_info_fetch_network(
+    const char* host, int use_tls, int include_gzip, const char* version_rev,
+    void* ctx,
+    int (*tls_cb)(
+        void* ctx, int fd, const char* host, const char* req, size_t req_len,
+        NzbgetRsBuf* out_resp),
+    NzbgetRsBuf* out_public_ip, NzbgetRsBuf* out_private_ip, NzbgetRsBuf* out_err);
+NzbgetRsBuf nzbget_rs_maintenance_read_package_info_str(
+    const char* web_dir, char sep, const char* key,
+    int* out_err_kind, NzbgetRsBuf* out_file_name);
+int nzbget_rs_maintenance_prepare_signature_inputs(
+    const char* in_filename, const char* sig_filename, const char* pub_key_filename,
+    uint8_t* out_in_hash, uint8_t* out_signature, NzbgetRsBuf* out_pub_key);
+int32_t nzbget_rs_scheduler_calc_next_work_interval(int64_t cur_time);
+int nzbget_rs_fs_save_buffer_into_file(
+    const char* filename, const char* buffer, size_t buf_len);
+NzbgetRsBuf nzbget_rs_fs_expand_file_name(const char* filename);
+NzbgetRsBuf nzbget_rs_fs_get_exe_file_name(const char* argv0);
 
 #include "nzbget_tls_cipher.h"
 

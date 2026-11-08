@@ -102,8 +102,8 @@ build profile="release" jobs="3":
 
     daemon_Comparison_dirs = [
         "connect", "extension", "feed", "frontend", "main",
-        "nntp", "nserv", "postprocess", "queue", "dupesearch",
-        "remote", "system", "util", "systemhealth",
+        "nntp", "postprocess", "queue", "dupesearch",
+        "remote", "util",
     ]
     include_flags = [f"-I{root}", f"-I{os.path.join(root, 'rust', 'include')}"]
     for d in daemon_Comparison_dirs:
@@ -256,8 +256,8 @@ test-daemon jobs="3": (debug jobs)
 
     daemon_dirs = [
         "connect", "extension", "feed", "frontend", "main",
-        "nntp", "nserv", "postprocess", "queue", "dupesearch",
-        "remote", "system", "util", "systemhealth",
+        "nntp", "postprocess", "queue", "dupesearch",
+        "remote", "util",
     ]
     include_flags = [
         f"-I{root}",

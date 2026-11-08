@@ -28,8 +28,8 @@
 #include "FileSystem.h"
 #include "DownloadInfo.h"
 #include "Options.h"
-#include "Service.h"
-#include "NzbFile.h"
+#include "Log.h"
+#include "DiskState.h"
 
 class Scanner final : public Service
 {
@@ -245,7 +245,6 @@ extern Scanner* g_Scanner;
 #include <optional>
 
 #include "Options.h"
-#include "WorkState.h"
 #include "Log.h"
 #include "QueueCoordinator.h"
 #include "ExtensionManager.h"

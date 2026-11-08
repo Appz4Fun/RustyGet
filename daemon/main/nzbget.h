@@ -250,4 +250,312 @@ typedef unsigned char uchar;
 #define SCANF_SYNTAX(strindex)
 #endif
 
+#ifndef OBSERVER_H
+#define OBSERVER_H
+
+class Subject;
+
+class Observer
+{
+protected:
+	virtual void Update(Subject* caller, void* aspect) = 0;
+	friend class Subject;
+};
+
+class Subject
+{
+public:
+	void Attach(Observer* observer)
+	{
+		m_observers.push_back(observer);
+	}
+
+	void Detach(Observer* observer)
+	{
+		m_observers.erase(std::remove(m_observers.begin(), m_observers.end(), observer), m_observers.end());
+	}
+
+	void Notify(void* aspect)
+	{
+		for (Observer* observer : m_observers)
+		{
+			observer->Update(this, aspect);
+		}
+	}
+
+private:
+	std::vector<Observer*> m_observers;
+};
+
+#endif
+
+#ifndef CONTAINER_H
+#define CONTAINER_H
+
+// for-range loops on pointers to std-containers (avoiding dereferencing)
+template <typename T> typename std::deque<T>::iterator begin(std::deque<T>* c) { return c->begin(); }
+template <typename T> typename std::deque<T>::iterator end(std::deque<T>* c) { return c->end(); }
+template <typename T> typename std::vector<T>::iterator begin(std::vector<T>* c) { return c->begin(); }
+template <typename T> typename std::vector<T>::iterator end(std::vector<T>* c) { return c->end(); }
+template <typename T> typename std::list<T>::iterator begin(std::list<T>* c) { return c->begin(); }
+template <typename T> typename std::list<T>::iterator end(std::list<T>* c) { return c->end(); }
+
+template <typename T>
+struct RawDequeIterator
+{
+	RawDequeIterator(typename std::deque<std::unique_ptr<T>>::iterator baseIterator) : m_baseIterator(baseIterator) {}
+	typename std::deque<std::unique_ptr<T>>::iterator m_baseIterator;
+};
+template <typename T> bool operator!=(RawDequeIterator<T>& it1, RawDequeIterator<T>& it2) { return it1.m_baseIterator != it2.m_baseIterator; }
+template <typename T> T* operator*(RawDequeIterator<T>& it) { return (*it.m_baseIterator).get(); }
+template <typename T> RawDequeIterator<T> operator++(RawDequeIterator<T>& it) { return RawDequeIterator<T>(it.m_baseIterator++); }
+template <typename T> RawDequeIterator<T> begin(std::deque<std::unique_ptr<T>>* c) { return RawDequeIterator<T>(c->begin()); }
+template <typename T> RawDequeIterator<T> end(std::deque<std::unique_ptr<T>>* c) { return RawDequeIterator<T>(c->end()); }
+
+template <typename T>
+struct RawVectorIterator
+{
+	RawVectorIterator(typename std::vector<std::unique_ptr<T>>::iterator baseIterator) : m_baseIterator(baseIterator) {}
+	typename std::vector<std::unique_ptr<T>>::iterator m_baseIterator;
+};
+template <typename T> bool operator!=(RawVectorIterator<T>& it1, RawVectorIterator<T>& it2) { return it1.m_baseIterator != it2.m_baseIterator; }
+template <typename T> T* operator*(RawVectorIterator<T>& it) { return (*it.m_baseIterator).get(); }
+template <typename T> RawVectorIterator<T> operator++(RawVectorIterator<T>& it) { return RawVectorIterator<T>(it.m_baseIterator++); }
+template <typename T> RawVectorIterator<T> begin(std::vector<std::unique_ptr<T>>* c) { return RawVectorIterator<T>(c->begin()); }
+template <typename T> RawVectorIterator<T> end(std::vector<std::unique_ptr<T>>* c) { return RawVectorIterator<T>(c->end()); }
+
+/* Template class for deque of unique_ptr with useful utility functions */
+template <typename T>
+class UniqueDeque : public std::deque<std::unique_ptr<T>>
+{
+public:
+	void Add(std::unique_ptr<T> uptr, bool addTop = false)
+	{
+		if (addTop)
+		{
+			this->push_front(std::move(uptr));
+		}
+		else
+		{
+			this->push_back(std::move(uptr));
+		}
+	}
+
+	std::unique_ptr<T> Remove(T* p)
+	{
+		std::unique_ptr<T> uptr;
+
+		typename UniqueDeque::iterator it = Find(p);
+		if (it != this->end())
+		{
+			uptr = std::move(*it);
+			this->erase(it);
+		}
+
+		return uptr;
+	}
+
+	typename UniqueDeque::iterator Find(T* p)
+	{
+		return std::find_if(this->begin(), this->end(),
+			[p](std::unique_ptr<T>& uptr)
+			{
+				return uptr.get() == p;
+			});
+	}
+
+	T* Find(int id)
+	{
+		for (std::unique_ptr<T>& uptr : *this)
+		{
+			if (uptr->GetId() == id)
+			{
+				return uptr.get();
+			}
+		}
+
+		return nullptr;
+	}
+};
+
+#endif
+
+#ifndef THREAD_H
+#define THREAD_H
+
+class Mutex
+{
+public:
+	Mutex() {};
+	Mutex(const Mutex&) = delete;
+	void Lock() { m_mutexObj.lock(); }
+	void Unlock() { m_mutexObj.unlock(); }
+
+private:
+	std::mutex m_mutexObj;
+
+	friend class ConditionVar;
+};
+
+class Guard
+{
+public:
+	Guard() : m_mutex(nullptr) {}
+	Guard(Mutex& mutex) : m_mutex(&mutex) { if (m_mutex) m_mutex->Lock(); }
+	Guard(Mutex* mutex) : m_mutex(mutex) { if (m_mutex) m_mutex->Lock(); }
+	Guard(std::unique_ptr<Mutex>& mutex) : m_mutex(mutex.get()) { if (m_mutex) m_mutex->Lock(); }
+	Guard(Guard&& other) : m_mutex(other.m_mutex) { other.m_mutex = nullptr; }
+	Guard(const Guard&) = delete;
+	~Guard() { Unlock(); }
+	Guard& operator=(Guard&& other) { m_mutex = other.m_mutex; other.m_mutex = nullptr; return *this; }
+	operator bool() { return m_mutex; }
+
+private:
+	Mutex* m_mutex;
+
+	void Unlock() { if (m_mutex) { m_mutex->Unlock(); m_mutex = nullptr; } }
+};
+
+template<typename T>
+class GuardedPtr
+{
+public:
+	GuardedPtr(T* ptr, Mutex* mutex) : m_ptr(ptr), m_mutex(mutex) { if (m_mutex) m_mutex->Lock(); }
+	GuardedPtr(GuardedPtr&& other) : m_ptr(other.m_ptr), m_mutex(other.m_mutex) { other.m_mutex = nullptr; }
+	GuardedPtr(const GuardedPtr& other) = delete;
+	~GuardedPtr() { Unlock(); }
+	T* operator->() { return m_ptr; }
+	operator T*() { return m_ptr; }
+
+	// for-range loops on GuardedPtr
+	auto begin() { return m_ptr->begin(); }
+	auto end() { return m_ptr->end(); }
+
+private:
+	T* m_ptr;
+	Mutex* m_mutex;
+
+	void Unlock() { if (m_mutex) { m_mutex->Unlock(); m_mutex = nullptr; } }
+};
+
+class ConditionVar
+{
+public:
+	ConditionVar() {}
+	ConditionVar(const ConditionVar& other) = delete;
+	void Wait(Mutex& mutex) { Lock l(mutex); m_condObj.wait(l); }
+	template <typename Pred> void Wait(Mutex& mutex, Pred pred) { Lock l(mutex); m_condObj.wait(l, pred); }
+	void WaitFor(Mutex& mutex, int msec) { Lock l(mutex); m_condObj.wait_for(l, std::chrono::milliseconds(msec)); }
+	template <typename Pred> void WaitFor(Mutex& mutex, int msec, Pred pred)
+		{ Lock l(mutex); m_condObj.wait_for(l, std::chrono::milliseconds(msec), pred); }
+	void NotifyOne() { m_condObj.notify_one(); }
+	void NotifyAll() { m_condObj.notify_all(); }
+
+private:
+	std::condition_variable m_condObj;
+
+	struct Lock : public std::unique_lock<std::mutex>
+	{
+		Lock(Mutex& mutex) : std::unique_lock<std::mutex>(mutex.m_mutexObj, std::adopt_lock) {}
+		~Lock() { release(); }
+	};
+};
+
+class Thread
+{
+public:
+	Thread() = default;
+	Thread(const Thread&) = delete;
+	virtual ~Thread() = default;
+
+	virtual void Start()
+	{
+		m_running = true;
+
+		// NOTE: "m_threadMutex" ensures that "t" lives until the very end of the function
+		std::lock_guard<std::mutex> guard(m_threadMutex);
+
+		// start the new thread
+		std::thread t([&]{
+			{
+				// trying to lock "m_threadMutex", this will wait until function "Start()" is completed
+				// and "t" is detached.
+				std::lock_guard<std::mutex> threadGuard(m_threadMutex);
+			}
+
+			thread_handler();
+		});
+
+		// save the native handle to be able to cancel (Kill) the thread and then detach
+		m_threadObj = t.native_handle();
+		t.detach();
+	}
+
+	virtual void Stop()
+	{
+		m_stopped = true;
+	}
+
+	virtual void Resume()
+	{
+		m_stopped = false;
+	}
+
+	bool Kill()
+	{
+		std::lock_guard<std::mutex> guard(m_threadMutex);
+
+#ifdef HAVE_PTHREAD_CANCEL
+		bool terminated = pthread_cancel(m_threadObj) == 0;
+#else
+		bool terminated = false;
+#endif
+
+		if (terminated)
+		{
+			--m_threadCount;
+		}
+		return terminated;
+	}
+
+	bool IsStopped() { return m_stopped; };
+	bool IsRunning() const { return m_running; }
+	bool GetAutoDestroy() { return m_autoDestroy; }
+	void SetAutoDestroy(bool autoDestroy) { m_autoDestroy = autoDestroy; }
+	static int GetThreadCount() { return m_threadCount; }
+
+protected:
+	virtual void Run() {} // Virtual function - override in derivatives
+
+private:
+	inline static std::mutex m_threadMutex;
+	inline static std::atomic<int> m_threadCount{1};
+	std::thread::native_handle_type m_threadObj = 0;
+	std::atomic<bool> m_running{false};
+	std::atomic<bool> m_stopped{false};
+	std::atomic<bool> m_autoDestroy{false};
+
+	void thread_handler()
+	{
+		++m_threadCount;
+
+		Run();
+
+		// read before m_running goes false: an owner waiting for that may destroy
+		// the object right away
+		const bool autoDestroy = m_autoDestroy;
+
+		--m_threadCount;
+
+		m_running = false;
+
+		if (autoDestroy)
+		{
+			delete this;
+		}
+	}
+};
+
+#endif
+
 #endif /* NZBGET_H */

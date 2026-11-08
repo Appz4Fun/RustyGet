@@ -669,8 +669,6 @@ inline void DonorHealth::CheckPostings(const ServerList& servers, const std::vec
 #include "ArticleFetcher.h"
 #include "WebDownloader.h"
 #include "FileSystem.h"
-#include "NewsServer.h"
-#include "NntpConnection.h"
 #include "ServerPool.h"
 #include "Options.h"
 #include "Log.h"

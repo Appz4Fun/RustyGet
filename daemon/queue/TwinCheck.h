@@ -22,7 +22,7 @@
 #include <string>
 #include <functional>
 #include <vector>
-#include "Service.h"
+#include "Log.h"
 #include "DownloadInfo.h"
 
 class ArticleFetcher;
@@ -160,7 +160,6 @@ private:
 #include "ArticleFetcher.h"
 #include "DupeCoordinator.h"
 #include "Options.h"
-#include "Thread.h"
 #include "Util.h"
 #include "FileSystem.h"
 #include "nzbget_rs.h"

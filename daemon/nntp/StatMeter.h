@@ -25,7 +25,6 @@
 #include <atomic>
 #include <array>
 #include "Log.h"
-#include "Thread.h"
 #include "Util.h"
 
 class ServerVolume
@@ -167,7 +166,6 @@ extern StatMeter* g_StatMeter;
 
 #include "nzbget_rs.h"
 #include "Options.h"
-#include "WorkState.h"
 #include "ServerPool.h"
 #include "DiskState.h"
 

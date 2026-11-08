@@ -22,7 +22,7 @@
 #define HISTORYCOORDINATOR_H
 
 #include "DownloadInfo.h"
-#include "Service.h"
+#include "Log.h"
 
 class HistoryCoordinator : public Service
 {
@@ -62,9 +62,7 @@ extern HistoryCoordinator* g_HistoryCoordinator;
 #include "DiskState.h"
 #include "Util.h"
 #include "FileSystem.h"
-#include "NzbFile.h"
 #include "DupeCoordinator.h"
-#include "ParParser.h"
 #include "PrePostProcessor.h"
 #include "ServerPool.h"
 #include "DupeProbe.h"

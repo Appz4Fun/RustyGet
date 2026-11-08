@@ -24,7 +24,6 @@
 
 #include <atomic>
 #include "NString.h"
-#include "Thread.h"
 #include "Log.h"
 
 class EnvironmentStrings

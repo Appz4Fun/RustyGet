@@ -3229,6 +3229,34 @@ pub fn system_info_format(
     public_ip: &[u8],
     private_ip: &[u8],
 ) -> Vec<u8> {
+    let mut uname_sys = Vec::new();
+    let mut uname_rel = Vec::new();
+    let mut uname_mach = Vec::new();
+    let (uts_sysname, uts_release, uts_machine) =
+        if uts_sysname.is_empty() && uts_release.is_empty() && uts_machine.is_empty() {
+            #[cfg(unix)]
+            unsafe {
+                let mut uts: libc::utsname = std::mem::zeroed();
+                if libc::uname(&mut uts) == 0 {
+                    uname_sys = std::ffi::CStr::from_ptr(uts.sysname.as_ptr())
+                        .to_bytes()
+                        .to_vec();
+                    uname_rel = std::ffi::CStr::from_ptr(uts.release.as_ptr())
+                        .to_bytes()
+                        .to_vec();
+                    uname_mach = std::ffi::CStr::from_ptr(uts.machine.as_ptr())
+                        .to_bytes()
+                        .to_vec();
+                }
+            }
+            (
+                uname_sys.as_slice(),
+                uname_rel.as_slice(),
+                uname_mach.as_slice(),
+            )
+        } else {
+            (uts_sysname, uts_release, uts_machine)
+        };
     let (os_name, os_version) = os_detect_info(uts_sysname, uts_release);
     let (cpu_model, cpu_arch) = cpu_detect_info(uts_machine);
     let tools = [
@@ -3292,6 +3320,81 @@ pub fn system_info_format(
         1 => system_info_to_json(&view),
         2 => system_info_to_xml(&view),
         _ => system_info_to_display_text(&view),
+    }
+}
+
+/// Connects to `host` (`port = 443` when `use_tls` else `80`) with a 10-second socket
+/// timeout, queries the local socket IP (`getsockname`), exchanges the HTTP GET request
+/// (either via `tls_exchange` on the connected fd or directly over the TCP stream),
+/// and parses the HTTP 200 response body as `(public_ip, private_ip)`.
+pub fn system_info_fetch_network<F>(
+    host: &str,
+    use_tls: bool,
+    include_gzip: bool,
+    version_revision: &[u8],
+    tls_exchange: F,
+) -> Result<(Vec<u8>, Vec<u8>), String>
+where
+    F: FnOnce(i32, &std::ffi::CStr, &[u8]) -> Result<Vec<u8>, String>,
+{
+    use std::io::{Read, Write};
+    use std::net::{TcpStream, ToSocketAddrs};
+    use std::time::Duration;
+
+    let port = if use_tls { 443u16 } else { 80u16 };
+    let addrs = (host, port)
+        .to_socket_addrs()
+        .map_err(|_| format!("Failed to resolve host: {host}"))?;
+
+    let timeout = Duration::from_secs(10);
+    let mut connected: Option<TcpStream> = None;
+    for addr in addrs {
+        if let Ok(stream) = TcpStream::connect_timeout(&addr, timeout) {
+            let _ = stream.set_read_timeout(Some(timeout));
+            let _ = stream.set_write_timeout(Some(timeout));
+            connected = Some(stream);
+            break;
+        }
+    }
+    let mut stream = connected.ok_or_else(|| format!("Failed to connect to host: {host}"))?;
+    let local_ip = stream
+        .local_addr()
+        .map(|a| a.ip().to_string().into_bytes())
+        .unwrap_or_default();
+
+    let req = crate::webdownload::http_client_build_headers(
+        b"GET",
+        host.as_bytes(),
+        version_revision,
+        include_gzip,
+    );
+
+    let raw_resp = if use_tls {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let fd = stream.as_raw_fd();
+            let host_c = std::ffi::CString::new(host).unwrap_or_default();
+            tls_exchange(fd, &host_c, &req)?
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tls_exchange;
+            return Err("TLS not supported on non-unix".to_string());
+        }
+    } else {
+        let _ = stream.write_all(&req);
+        let mut buf = Vec::new();
+        let _ = stream.read_to_end(&mut buf);
+        buf
+    };
+
+    let (status_code, body) = crate::webdownload::http_client_parse_response(&raw_resp)
+        .ok_or_else(|| "Invalid HTTP response".to_string())?;
+    if status_code == 200 {
+        Ok((body, local_ip))
+    } else {
+        Ok((Vec::new(), Vec::new()))
     }
 }
 

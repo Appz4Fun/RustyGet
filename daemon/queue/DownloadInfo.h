@@ -27,11 +27,7 @@
 #include <set>
 #include <string>
 #include "NString.h"
-#include "Container.h"
-#include "Observer.h"
 #include "Log.h"
-#include "Thread.h"
-
 #ifndef DOWNLOADINFO_H
 #define DOWNLOADINFO_H
 

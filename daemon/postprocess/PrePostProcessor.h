@@ -21,9 +21,6 @@
 
 #ifndef PREPOSTPROCESSOR_H
 #define PREPOSTPROCESSOR_H
-
-#include "Thread.h"
-#include "Observer.h"
 #include "DownloadInfo.h"
 
 class PrePostProcessor : public Thread, public Observer
@@ -77,7 +74,6 @@ private:
 extern PrePostProcessor* g_PrePostProcessor;
 
 #include "Options.h"
-#include "WorkState.h"
 #include "Log.h"
 #include "HistoryCoordinator.h"
 #include "DupeCoordinator.h"
@@ -87,9 +83,8 @@ extern PrePostProcessor* g_PrePostProcessor;
 #include "UnpackController.h"
 #include "Repair.h"
 #include "StreamRepair.h"
-#include "NzbFile.h"
+#include "DiskState.h"
 #include "QueueScript.h"
-#include "ParParser.h"
 #include "DirectUnpack.h"
 #include "ParDamage.h"
 #include <exception>

@@ -25,11 +25,9 @@
 #include <atomic>
 #include "NString.h"
 #include "Log.h"
-#include "Thread.h"
 #include "WebDownloader.h"
 #include "DownloadInfo.h"
 #include "FeedInfo.h"
-#include "Observer.h"
 #include "Util.h"
 #include "nzbget_rs.h"
 
@@ -392,7 +390,6 @@ private:
 };
 
 #include "Options.h"
-#include "WorkState.h"
 #include "FileSystem.h"
 #include "ExtensionManager.h"
 #include "DiskState.h"

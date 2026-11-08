@@ -23,7 +23,6 @@
 #define REPAIR_H
 
 #include "DownloadInfo.h"
-#include "Thread.h"
 #include "ScriptController.h"
 
 #ifndef DISABLE_PARCHECK
@@ -115,9 +114,7 @@ private:
 };
 
 #include "DupeCoordinator.h"
-#include "ParParser.h"
 #include "Options.h"
-#include "WorkState.h"
 #include "DiskState.h"
 #include "Log.h"
 #include "FileSystem.h"

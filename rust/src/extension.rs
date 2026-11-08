@@ -957,6 +957,121 @@ pub fn maintenance_decode_hex_signature(hex_sig: &[u8], out_sig: &mut [u8; 256])
     out_idx == 256
 }
 
+fn load_regular_file_bytes(path_bytes: &[u8], add_trailing_null: bool) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let p = bytes_to_path(path_bytes);
+    let meta = std::fs::metadata(&p).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let file_size = i64::try_from(meta.len()).ok()?;
+    let (size, buf_size) =
+        crate::util::fs_validate_load_file_size(file_size, i32::from(add_trailing_null))?;
+    let size_usize = size as usize;
+    let mut file = std::fs::File::open(&p).ok()?;
+    let mut buf = vec![0u8; buf_size as usize];
+    if size_usize > 0 {
+        file.read_exact(&mut buf[..size_usize]).ok()?;
+    }
+    if add_trailing_null {
+        buf.truncate(size_usize);
+    }
+    Some(buf)
+}
+
+/// Loads `<web_dir>/package-info.json` (using `LoadFileIntoBuffer` regular-file rules),
+/// extracts `"<key>"` and JSON-decodes the string value.
+/// Returns `Ok(decoded_value)` on success, or `Err((1, file_name))` when loading fails,
+/// or `Err((2, file_name))` when parsing fails.
+pub fn maintenance_read_package_info_str(
+    web_dir: &[u8],
+    sep: u8,
+    key: &[u8],
+) -> Result<Vec<u8>, (i32, Vec<u8>)> {
+    let mut file_name = crate::systemhealth::maintenance_format_package_info_path(web_dir, sep);
+    if file_name.len() > 1023 {
+        file_name.truncate(1023);
+    }
+    let package_info =
+        load_regular_file_bytes(&file_name, true).ok_or_else(|| (1, file_name.clone()))?;
+    let c_len = package_info
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(package_info.len());
+    let (val_start, val_len) =
+        maintenance_extract_package_info_str(&package_info[..c_len], key, 1024)
+            .ok_or_else(|| (2, file_name))?;
+    let mut val = package_info[val_start..val_start + val_len].to_vec();
+    let decoded_len = crate::decode::json_decode(&mut val);
+    val.truncate(decoded_len);
+    Ok(val)
+}
+
+/// Computes the SHA-256 digest of `in_filename`, extracts and decodes the 256-byte
+/// signature from `sig_filename`, and loads `pub_key_filename` bytes for
+/// `Maintenance::Signature::Verify`.
+pub fn maintenance_prepare_signature_inputs(
+    in_filename: &[u8],
+    sig_filename: &[u8],
+    pub_key_filename: &[u8],
+) -> Option<([u8; 32], [u8; 256], Vec<u8>)> {
+    use std::io::{BufRead, BufReader, Read};
+
+    let mut in_file = std::fs::File::open(bytes_to_path(in_filename)).ok()?;
+    let mut hasher = crate::archive_native::Sha256State::new();
+    let mut chunk = vec![0u8; 32 * 1024];
+    loop {
+        let n = in_file.read(&mut chunk).ok()?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&chunk[..n]);
+    }
+    let in_hash = hasher.finalize();
+    drop(in_file);
+
+    let base_idx = crate::paths::base_file_name(in_filename);
+    let mut sig_title =
+        crate::systemhealth::maintenance_format_sig_title(&in_filename[base_idx..]);
+    if sig_title.len() > 1023 {
+        sig_title.truncate(1023);
+    }
+
+    let sig_file = std::fs::File::open(bytes_to_path(sig_filename)).ok()?;
+    let mut reader = BufReader::new(sig_file);
+    let mut signature = [0u8; 256];
+    let mut sig_ok = false;
+    loop {
+        let mut line_buf = Vec::with_capacity(1022);
+        let n = reader
+            .by_ref()
+            .take(1022)
+            .read_until(b'\n', &mut line_buf)
+            .ok()?;
+        if n == 0 {
+            break;
+        }
+        let c_len = line_buf
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(line_buf.len());
+        let line_slice = &line_buf[..c_len];
+        if let Some(hex_offset) =
+            crate::systemhealth::maintenance_match_sig_line_prefix(line_slice, &sig_title)
+        {
+            sig_ok = maintenance_decode_hex_signature(&line_slice[hex_offset..], &mut signature);
+            break;
+        }
+    }
+    drop(reader);
+    if !sig_ok {
+        return None;
+    }
+
+    let pub_key = load_regular_file_bytes(pub_key_filename, false)?;
+    Some((in_hash, signature, pub_key))
+}
+
 /// Phase 1 of `ExtensionManager::Manager::UpdateExtension`: validates lookup and
 /// `use_count`, moves `target_path` aside to `<target_path>.update-backup`, and
 /// cleans up `archive_path` if moving aside fails.
@@ -4010,5 +4125,29 @@ mod tests {
             );
             assert_eq!(std::fs::read(&file.path).unwrap(), snapshot);
         }
+    }
+
+    #[test]
+    fn maintenance_read_package_info_str_truncates_json_decoded_escapes() {
+        let dir = std::env::temp_dir().join(format!(
+            "nzbget_rs_pkginfo_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pkg_path = dir.join("package-info.json");
+        std::fs::write(
+            &pkg_path,
+            br#"{"update-info-script": "https:\/\/example.com\/update.sh"}"#,
+        )
+        .unwrap();
+        let val = maintenance_read_package_info_str(
+            dir.to_string_lossy().as_bytes(),
+            std::path::MAIN_SEPARATOR as u8,
+            b"update-info-script",
+        )
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(val, b"https://example.com/update.sh");
     }
 }

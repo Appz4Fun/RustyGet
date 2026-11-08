@@ -21,7 +21,6 @@
 #define MAINTENANCE_H
 
 #include "NString.h"
-#include "Thread.h"
 #include "ScriptController.h"
 #include "Log.h"
 #include "Util.h"
@@ -146,8 +145,36 @@ public:
 	static bool VerifySignature(const char* inFilename, const char* sigFilename, const char* pubKeyFilename)
 	{
 #ifndef DISABLE_TLS
-		Signature signature(inFilename, sigFilename, pubKeyFilename);
-		return signature.Verify();
+		uint8_t inHash[32]{};
+		uint8_t signature[256]{};
+		NzbgetRsBuf pubKeyBuf{};
+		if (!nzbget_rs_maintenance_prepare_signature_inputs(
+			inFilename, sigFilename, pubKeyFilename, inHash, signature, &pubKeyBuf))
+		{
+			nzbget_rs_free(pubKeyBuf);
+			return false;
+		}
+		BIO* mem = BIO_new_mem_buf(pubKeyBuf.data, static_cast<int>(pubKeyBuf.len));
+		EVP_PKEY* pubKey = PEM_read_bio_PUBKEY(mem, nullptr, nullptr, nullptr);
+		BIO_free(mem);
+		nzbget_rs_free(pubKeyBuf);
+		if (!pubKey)
+		{
+			return false;
+		}
+		EVP_PKEY_CTX* pctx = EVP_PKEY_CTX_new(pubKey, nullptr);
+		if (!pctx)
+		{
+			EVP_PKEY_free(pubKey);
+			return false;
+		}
+		bool ok = EVP_PKEY_verify_init(pctx) == 1 &&
+			EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PADDING) > 0 &&
+			EVP_PKEY_CTX_set_signature_md(pctx, EVP_sha256()) > 0 &&
+			EVP_PKEY_verify(pctx, signature, sizeof(signature), inHash, sizeof(inHash)) == 1;
+		EVP_PKEY_CTX_free(pctx);
+		EVP_PKEY_free(pubKey);
+		return ok;
 #else
 		(void)inFilename;
 		(void)sigFilename;
@@ -157,132 +184,6 @@ public:
 	}
 
 private:
-#ifndef DISABLE_TLS
-	class Signature
-	{
-	public:
-		Signature(const char* inFilename, const char* sigFilename, const char* pubKeyFilename)
-			: m_inFilename(inFilename)
-			, m_sigFilename(sigFilename)
-			, m_pubKeyFilename(pubKeyFilename)
-			, m_inHash{}
-			, m_signature{}
-			, m_pubKey(nullptr)
-		{
-		}
-
-		~Signature()
-		{
-			EVP_PKEY_free(m_pubKey);
-		}
-
-		bool Verify()
-		{
-			if (!ComputeInHash() || !ReadSignature() || !ReadPubKey())
-			{
-				return false;
-			}
-			EVP_PKEY_CTX* pctx = EVP_PKEY_CTX_new(m_pubKey, nullptr);
-			if (!pctx)
-			{
-				return false;
-			}
-			bool ok = EVP_PKEY_verify_init(pctx) == 1 &&
-				EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PADDING) > 0 &&
-				EVP_PKEY_CTX_set_signature_md(pctx, EVP_sha256()) > 0 &&
-				EVP_PKEY_verify(pctx, m_signature, sizeof(m_signature), m_inHash, sizeof(m_inHash)) == 1;
-			EVP_PKEY_CTX_free(pctx);
-			return ok;
-		}
-
-	private:
-		const char* m_inFilename;
-		const char* m_sigFilename;
-		const char* m_pubKeyFilename;
-		uchar m_inHash[SHA256_DIGEST_LENGTH];
-		uchar m_signature[256];
-		EVP_PKEY* m_pubKey;
-
-		bool ComputeInHash()
-		{
-			DiskFile infile;
-			if (!infile.Open(m_inFilename, DiskFile::omRead))
-			{
-				return false;
-			}
-			EVP_MD_CTX* mdctx = EVP_MD_CTX_new();
-			if (!mdctx)
-			{
-				infile.Close();
-				return false;
-			}
-			bool ok = EVP_DigestInit_ex(mdctx, EVP_sha256(), nullptr) == 1;
-			CharBuffer buffer(32*1024);
-			while (ok)
-			{
-				int bytesRead = (int)infile.Read(buffer, buffer.Size());
-				if (bytesRead <= 0)
-				{
-					break;
-				}
-				ok = EVP_DigestUpdate(mdctx, buffer, bytesRead) == 1;
-			}
-			unsigned int hashLen = 0;
-			ok = ok && EVP_DigestFinal_ex(mdctx, m_inHash, &hashLen) == 1;
-			EVP_MD_CTX_free(mdctx);
-			infile.Close();
-			return ok;
-		}
-
-		bool ReadSignature()
-		{
-			BString<1024> sigTitle;
-			{
-				NzbgetRsBuf sigBuf = nzbget_rs_dqh_maintenance_format_sig_title(
-					FileSystem::BaseFileName(m_inFilename));
-				sigTitle.Set(sigBuf.data ? sigBuf.data : "", (int)sigBuf.len);
-				nzbget_rs_free(sigBuf);
-			}
-
-			DiskFile infile;
-			if (!infile.Open(m_sigFilename, DiskFile::omRead))
-			{
-				return false;
-			}
-
-			bool ok = false;
-			char buf[1024];
-			while (infile.ReadLine(buf, sizeof(buf) - 1))
-			{
-				size_t hexSigOffset = 0;
-				if (nzbget_rs_dqh_maintenance_match_sig_line_prefix(buf, sigTitle, &hexSigOffset) != 0)
-				{
-					char* hexSig = buf + hexSigOffset;
-					ok = nzbget_rs_feh_maintenance_decode_hex_signature(hexSig, m_signature) != 0;
-
-					break;
-				}
-			}
-
-			infile.Close();
-			return ok;
-		}
-
-		bool ReadPubKey()
-		{
-			CharBuffer keybuf;
-			if (!FileSystem::LoadFileIntoBuffer(m_pubKeyFilename, keybuf, false))
-			{
-				return false;
-			}
-			BIO* mem = BIO_new_mem_buf(keybuf, keybuf.Size());
-			m_pubKey = PEM_read_bio_PUBKEY(mem, nullptr, nullptr, nullptr);
-			BIO_free(mem);
-			return m_pubKey != nullptr;
-		}
-	};
-#endif
-
 	MessageList m_messages;
 	Mutex m_logMutex;
 	Mutex m_controllerMutex;
@@ -292,35 +193,28 @@ private:
 
 	bool ReadPackageInfoStr(const char* key, CString& value)
 	{
-		BString<1024> fileName;
+		int errKind = 0;
+		NzbgetRsBuf fnBuf{};
+		NzbgetRsBuf valBuf = nzbget_rs_maintenance_read_package_info_str(
+			g_Options->GetWebDir(), PATH_SEPARATOR, key, &errKind, &fnBuf);
+		if (errKind != 0)
 		{
-			NzbgetRsBuf fnBuf = nzbget_rs_dqh_maintenance_format_package_info_path(
-				g_Options->GetWebDir(), PATH_SEPARATOR);
-			fileName.Set(fnBuf.data ? fnBuf.data : "", (int)fnBuf.len);
+			const char* fn = fnBuf.data ? fnBuf.data : "";
+			if (errKind == 1)
+			{
+				error("Could not load file %s", fn);
+			}
+			else
+			{
+				error("Could not parse file %s", fn);
+			}
 			nzbget_rs_free(fnBuf);
-		}
-
-		CharBuffer packageInfo;
-		if (!FileSystem::LoadFileIntoBuffer(fileName, packageInfo, true))
-		{
-			error("Could not load file %s", *fileName);
+			nzbget_rs_free(valBuf);
 			return false;
 		}
-
-		size_t valStart = 0, valLen = 0;
-		if (!nzbget_rs_feh_maintenance_extract_package_info_str(
-			packageInfo, key, sizeof(fileName), &valStart, &valLen))
-		{
-			error("Could not parse file %s", *fileName);
-			return false;
-		}
-		const char* p = (const char*)packageInfo + valStart;
-		size_t len = valLen;
-
-		value.Set(len > 0 ? p : "", (int)len);
-
-		WebUtil::JsonDecode(value);
-
+		value.Set(valBuf.data ? valBuf.data : "", static_cast<int>(valBuf.len));
+		nzbget_rs_free(fnBuf);
+		nzbget_rs_free(valBuf);
 		return true;
 	}
 };

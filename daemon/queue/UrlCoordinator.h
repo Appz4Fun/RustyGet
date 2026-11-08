@@ -24,11 +24,8 @@
 
 #include "NString.h"
 #include "Log.h"
-#include "Thread.h"
 #include "WebDownloader.h"
 #include "DownloadInfo.h"
-#include "Observer.h"
-
 class UrlDownloader;
 
 class UrlCoordinator : public Thread, public Observer, public Debuggable
@@ -91,10 +88,8 @@ private:
 
 #include <algorithm>
 #include "Options.h"
-#include "WorkState.h"
 #include "Util.h"
 #include "FileSystem.h"
-#include "NzbFile.h"
 #include "Scanner.h"
 #include "DiskState.h"
 #include "QueueScript.h"

@@ -27,7 +27,7 @@
 #include <string>
 #include "NString.h"
 #include "DownloadInfo.h"
-#include "Decoder.h"
+#include "Options.h"
 #include "FileSystem.h"
 
 class CachedSegmentData final : public SegmentData

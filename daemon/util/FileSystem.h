@@ -383,16 +383,8 @@ inline bool FileSystem::LoadFileIntoBuffer(const char* filename, CharBuffer& buf
 
 inline bool FileSystem::SaveBufferIntoFile(const char* filename, const char* buffer, int bufLen)
 {
-	DiskFile file;
-	if (!file.Open(filename, DiskFile::omWrite))
-	{
-		return false;
-	}
-
-	int writtenBytes = (int)file.Write(buffer, bufLen);
-	file.Close();
-
-	return writtenBytes == bufLen;
+	return nzbget_rs_fs_save_buffer_into_file(
+		filename, buffer, bufLen > 0 ? static_cast<size_t>(bufLen) : 0) != 0;
 }
 
 inline bool FileSystem::AllocateFile(const char* filename, int64 size, [[maybe_unused]] bool sparse, CString& errmsg)
@@ -779,48 +771,18 @@ inline CString FileSystem::ExpandHomePath(const char* filename)
 
 inline CString FileSystem::ExpandFileName(const char* filename)
 {
-	CString result;
-	result.Reserve(1024 - 1);
-	size_t skipDotSlash = 0;
-	if (nzbget_rs_ufs_fs_classify_expand_file_name(filename, &skipDotSlash) != 0)
-	{
-		char curDir[MAX_PATH + 1];
-		getcwd(curDir, sizeof(curDir) - 1); // 1 char reserved for adding backslash
-		NzbgetRsBuf expBuf = nzbget_rs_dqh_fs_format_expanded_rel_path(curDir, filename + skipDotSlash);
-		result.Set(expBuf.data ? expBuf.data : "", (int)expBuf.len);
-		nzbget_rs_free(expBuf);
-	}
-	else
-	{
-		result = filename;
-	}
+	NzbgetRsBuf expBuf = nzbget_rs_fs_expand_file_name(filename);
+	CString result(expBuf.data ? expBuf.data : "", static_cast<int>(expBuf.len));
+	nzbget_rs_free(expBuf);
 	return result;
 }
 
 inline CString FileSystem::GetExeFileName(const char* argv0)
 {
-	CString exename;
-	exename.Reserve(1024 - 1);
-	exename[1024 - 1] = '\0';
-
-	// Linux
-	int r = readlink("/proc/self/exe", exename, 1024 - 1);
-	if (r > 0)
-	{
-		exename[r] = '\0';
-		return exename;
-	}
-	// FreeBSD
-	r = readlink("/proc/curproc/file", exename, 1024 - 1);
-	if (r > 0)
-	{
-		exename[r] = '\0';
-		return exename;
-	}
-
-	exename = ExpandFileName(argv0);
-
-	return exename;
+	NzbgetRsBuf exeBuf = nzbget_rs_fs_get_exe_file_name(argv0);
+	CString result(exeBuf.data ? exeBuf.data : "", static_cast<int>(exeBuf.len));
+	nzbget_rs_free(exeBuf);
+	return result;
 }
 
 inline bool FileSystem::SameFilename(const char* filename1, const char* filename2)

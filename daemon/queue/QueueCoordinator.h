@@ -24,13 +24,11 @@
 
 #include <atomic>
 #include "Log.h"
-#include "Thread.h"
-#include "NzbFile.h"
+#include "DiskState.h"
 #include "ArticleDownloader.h"
 #include "DownloadInfo.h"
-#include "Observer.h"
 #include "QueueEditor.h"
-#include "NntpConnection.h"
+#include "ServerPool.h"
 #include "DirectRenamer.h"
 #include "DupeArticleFallback.h"
 
@@ -180,14 +178,12 @@ private:
 extern QueueCoordinator* g_QueueCoordinator;
 
 #include "Options.h"
-#include "WorkState.h"
 #include "ServerPool.h"
 #include "ArticleDownloader.h"
 #include "ArticleWriter.h"
 #include "DiskState.h"
 #include "Util.h"
 #include "FileSystem.h"
-#include "Decoder.h"
 #include "StatMeter.h"
 #include "DupeCoordinator.h"
 #include "DupeProbe.h"

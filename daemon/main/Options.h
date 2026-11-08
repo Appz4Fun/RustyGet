@@ -26,7 +26,6 @@
 #include <cstdint>
 #include <string_view>
 #include "NString.h"
-#include "Thread.h"
 #include "FeedInfo.h"
 #include "FileSystem.h"
 #include "nzbget_rs.h"
@@ -1934,6 +1933,425 @@ inline void Options::ConvertOldOptions(OptEntries* optEntries)
 			}
 		});
 }
+
+#ifndef DECODER_H
+#define DECODER_H
+
+class Decoder
+{
+public:
+	enum EStatus
+	{
+		dsUnknownError,
+		dsFinished,
+		dsArticleIncomplete,
+		dsCrcError,
+		dsInvalidSize,
+		dsNoBinaryData
+	};
+
+	enum EFormat
+	{
+		efUnknown,
+		efYenc,
+		efUx,
+	};
+
+	// rust/src/decoder.rs
+	Decoder() : m_decoder(nzbget_rs_decoder_new(nullptr, nullptr)) {}
+	~Decoder() { nzbget_rs_decoder_free(m_decoder); }
+	Decoder(const Decoder&) = delete;
+	Decoder& operator=(const Decoder&) = delete;
+	EStatus Check() { return static_cast<EStatus>(nzbget_rs_decoder_check(m_decoder)); }
+	void Clear() { nzbget_rs_decoder_clear(m_decoder); }
+	int DecodeBuffer(char* buffer, int len) { return nzbget_rs_decoder_decode(m_decoder, buffer, len); }
+	void SetCrcCheck(bool crcCheck) { nzbget_rs_decoder_set(m_decoder, 0, crcCheck); }
+	void SetRawMode(bool rawMode) { nzbget_rs_decoder_set(m_decoder, 1, rawMode); }
+	EFormat GetFormat() { return static_cast<EFormat>(nzbget_rs_decoder_get(m_decoder, 0)); }
+	int64 GetBeginPos() { return nzbget_rs_decoder_get(m_decoder, 1); }
+	int64 GetEndPos() { return nzbget_rs_decoder_get(m_decoder, 2); }
+	int64 GetSize() { return nzbget_rs_decoder_get(m_decoder, 3); }
+	uint32 GetExpectedCrc() { return static_cast<uint32>(nzbget_rs_decoder_get(m_decoder, 4)); }
+	uint32 GetCalculatedCrc() { return static_cast<uint32>(nzbget_rs_decoder_get(m_decoder, 5)); }
+	bool GetEof() { return nzbget_rs_decoder_get(m_decoder, 6) != 0; }
+	const char* GetArticleFilename() { return nzbget_rs_decoder_filename(m_decoder); }
+
+private:
+	struct NzbgetRsDecoder* m_decoder;
+};
+
+#endif
+
+#ifndef PARPARSER_H
+#define PARPARSER_H
+
+class ParParser
+{
+public:
+	typedef std::vector<std::string> ParFileList;
+
+	static bool FindMainPars(const char* path, ParFileList* fileList)
+	{
+		if (fileList)
+		{
+			fileList->clear();
+		}
+		return nzbget_rs_find_main_pars(
+			path,
+			fileList != nullptr ? 1 : 0,
+			fileList ? +[](void* ctx, const char* name, size_t len)
+			{
+				static_cast<ParFileList*>(ctx)->emplace_back(name, len);
+			} : nullptr,
+			fileList) != 0;
+	}
+
+	static bool ParseParFilename(const char* parFilename, bool confirmedFilename, int* baseNameLen, int* blocks)
+	{
+		return nzbget_rs_parse_par_filename(parFilename, confirmedFilename, baseNameLen, blocks) != 0;
+	}
+
+	static bool SameParCollection(const char* filename1, const char* filename2, bool confirmedFilenames)
+	{
+		return nzbget_rs_same_par_collection(filename1, filename2, confirmedFilenames) != 0;
+	}
+
+	static constexpr int64 MaxIndexParSize = 16 * 1024 * 1024;
+
+	static bool ListParredFiles(const char* parFilename, std::vector<std::string>& filenames)
+	{
+		return nzbget_rs_par_renamer_list_parred_files(
+			parFilename,
+			MaxIndexParSize,
+			&filenames,
+			+[](void* rawCtx, const char* name) noexcept
+			{
+				if (name)
+				{
+					static_cast<std::vector<std::string>*>(rawCtx)->emplace_back(name);
+				}
+			}) != 0;
+	}
+};
+
+#endif
+
+#ifndef WORKSTATE_H
+#define WORKSTATE_H
+
+class WorkState final : public Subject
+{
+public:
+	void SetPauseDownload(bool pauseDownload) { m_pauseDownload = pauseDownload; Changed(); }
+	bool GetPauseDownload() const { return m_pauseDownload; }
+	void SetPausePostProcess(bool pausePostProcess) { m_pausePostProcess = pausePostProcess; Changed(); }
+	bool GetPausePostProcess() const { return m_pausePostProcess; }
+	void SetPauseScan(bool pauseScan) { m_pauseScan = pauseScan; Changed(); }
+	bool GetPauseScan() const { return m_pauseScan; }
+	void SetTempPauseDownload(bool tempPauseDownload) { m_tempPauseDownload = tempPauseDownload; Changed(); }
+	bool GetTempPauseDownload() const { return m_tempPauseDownload; }
+	void HoldDownloadForFleet(bool hold) { m_fleetHold += hold ? 1 : -1; Changed(); }
+	bool GetDownloadHeld() const { return m_tempPauseDownload || m_fleetHold > 0; }
+	void SetTempPausePostprocess(bool tempPausePostprocess) { m_tempPausePostprocess = tempPausePostprocess; Changed(); }
+	bool GetTempPausePostprocess() const { return m_tempPausePostprocess; }
+	void SetPauseFrontend(bool pauseFrontend) { m_pauseFrontend = pauseFrontend; Changed(); }
+	bool GetPauseFrontend() const { return m_pauseFrontend; }
+	void SetSpeedLimit(int speedLimit) { m_speedLimit = speedLimit; Changed(); }
+	int GetSpeedLimit() const { return m_speedLimit; }
+	void SetResumeTime(time_t resumeTime) { m_resumeTime = resumeTime; Changed(); }
+	time_t GetResumeTime() const { return m_resumeTime; }
+	void SetLocalTimeOffset(int localTimeOffset) { m_localTimeOffset = localTimeOffset; Changed(); }
+	int GetLocalTimeOffset() { return m_localTimeOffset; }
+	void SetQuotaReached(bool quotaReached) { m_quotaReached = quotaReached; Changed(); }
+	bool GetQuotaReached() { return m_quotaReached; }
+	void SetDownloading(bool downloading) { m_downloading = downloading; Changed(); }
+	bool GetDownloading() { return m_downloading; }
+
+private:
+	std::atomic<time_t> m_resumeTime{0};
+	std::atomic<int> m_localTimeOffset{0};
+	std::atomic<int> m_speedLimit{0};
+	std::atomic<bool> m_tempPauseDownload{true};
+	std::atomic<int> m_fleetHold{0};
+	std::atomic<bool> m_tempPausePostprocess{true};
+	std::atomic<bool> m_pauseDownload{false};
+	std::atomic<bool> m_pausePostProcess{false};
+	std::atomic<bool> m_pauseScan{false};
+	std::atomic<bool> m_pauseFrontend{false};
+	std::atomic<bool> m_downloading{false};
+	std::atomic<bool> m_quotaReached{false};
+
+	void Changed() { Notify(nullptr); }
+};
+
+extern WorkState* g_WorkState;
+
+#endif
+
+#ifndef NEWSSERVER_H
+#define NEWSSERVER_H
+
+class NewsServer
+{
+public:
+	NewsServer(int id, bool active, const char* name, const char* host, int port, int ipVersion,
+		const char* user, const char* pass, bool joinGroup,
+		bool tls, const char* cipher, int maxConnections, int retention,
+		int level, int group, bool optional, unsigned int certVerificationfLevel) :
+		m_id(id), m_active(active), m_name(name), m_host(host ? host : ""), m_port(port), m_ipVersion(ipVersion),
+		m_user(user ? user : ""), m_password(pass ? pass : ""), m_joinGroup(joinGroup), m_tls(tls),
+		m_cipher(cipher ? cipher : ""), m_maxConnections(maxConnections), m_retention(retention),
+		m_level(level), m_normLevel(level), m_group(group), m_optional(optional), m_certVerificationfLevel(certVerificationfLevel)
+	{
+		if (m_name.Empty())
+		{
+			m_name.Format("Server%i", id);
+		}
+	}
+	int GetId() const { return m_id; }
+	int GetStateId() const { return m_stateId; }
+	void SetStateId(int stateId) { m_stateId = stateId; }
+	bool GetActive() const { return m_active; }
+	void SetActive(bool active) { m_active = active; }
+	const char* GetName() const { return m_name; }
+	int GetGroup() const { return m_group; }
+	const char* GetHost() const { return m_host; }
+	int GetPort() const { return m_port; }
+	int GetIpVersion() const { return m_ipVersion; }
+	const char* GetUser() const { return m_user; }
+	const char* GetPassword() const { return m_password; }
+	int GetMaxConnections() const { return m_maxConnections; }
+	int GetLevel() const { return m_level; }
+	int GetNormLevel() const { return m_normLevel; }
+	void SetNormLevel(int level) { m_normLevel = level; }
+	bool GetJoinGroup() const { return m_joinGroup; }
+	bool GetTls() const { return m_tls; }
+	const char* GetCipher() const { return m_cipher; }
+	int GetRetention() const { return m_retention; }
+	bool GetOptional() const { return m_optional; }
+	time_t GetBlockTime() const { return m_blockTime; }
+	void SetBlockTime(time_t blockTime) { m_blockTime = blockTime; }
+	unsigned int GetCertVerificationLevel() const { return m_certVerificationfLevel; }
+
+private:
+	int m_id;
+	int m_stateId = 0;
+	bool m_active;
+	CString m_name;
+	CString m_host;
+	int m_port;
+	int m_ipVersion;
+	CString m_user;
+	CString m_password;
+	bool m_joinGroup;
+	bool m_tls;
+	CString m_cipher;
+	int m_maxConnections;
+	int m_retention;
+	int m_level;
+	int m_normLevel;
+	int m_group;
+	bool m_optional = false;
+	time_t m_blockTime = 0;
+	unsigned int m_certVerificationfLevel;
+};
+
+typedef std::vector<std::unique_ptr<NewsServer>> Servers;
+
+#endif
+
+#ifndef SCRIPTCONFIG_H
+#define SCRIPTCONFIG_H
+
+#include <functional>
+
+class ScriptConfig
+{
+public:
+
+	class ConfigTemplate
+	{
+	public:
+		ConfigTemplate(const char* templ)
+			: m_template(templ) {}
+		const char* GetTemplate() { return m_template; }
+
+	private:
+		CString m_template;
+	};
+
+	using ConfigTemplates = std::deque<ConfigTemplate>;
+
+	void InitOptions()
+	{
+		InitConfigTemplates();
+	}
+
+	bool LoadConfig(Options::OptEntries* optEntries)
+	{
+		if (!optEntries || !g_Options || !g_Options->GetConfigFilename())
+		{
+			return false;
+		}
+		return nzbget_rs_script_config_load(
+			g_Options->GetConfigFilename(),
+			optEntries,
+			[](void* ctx, const char* name, const char* value)
+			{
+				try
+				{
+					static_cast<Options::OptEntries*>(ctx)->emplace_back(name, value);
+				}
+				catch (...)
+				{
+				}
+			}) != 0;
+	}
+
+	bool SaveConfig(Options::OptEntries* optEntries, const char* cipherBaseline = nullptr, bool* conflict = nullptr)
+	{
+		if (conflict) *conflict = false;
+		if (!optEntries || !g_Options || !g_Options->GetConfigFilename())
+		{
+			return false;
+		}
+		std::vector<const char*> names;
+		std::vector<const char*> values;
+		names.reserve(optEntries->size());
+		values.reserve(optEntries->size());
+		for (const auto& entry : *optEntries)
+		{
+			if (entry.GetName() && entry.GetValue())
+			{
+				names.push_back(entry.GetName());
+				values.push_back(entry.GetValue());
+			}
+		}
+		int conflictFlag = 0;
+		int saved = nzbget_rs_script_config_save(
+			g_Options->GetConfigFilename(),
+			names.data(),
+			values.data(),
+			names.size(),
+			cipherBaseline,
+			&conflictFlag);
+		if (conflict)
+		{
+			*conflict = conflictFlag != 0;
+		}
+		return saved != 0;
+	}
+
+	static std::string CipherBaseline(const Options::OptEntries& optEntries)
+	{
+		std::vector<const char*> names;
+		std::vector<const char*> values;
+		names.reserve(optEntries.size());
+		values.reserve(optEntries.size());
+		for (const auto& entry : optEntries)
+		{
+			if (!entry.GetName() || !entry.GetValue()) continue;
+			names.push_back(entry.GetName());
+			values.push_back(entry.GetValue());
+		}
+		NzbgetRsBuf buf = nzbget_rs_sus_build_cipher_baseline(names.data(), values.data(), names.size());
+		std::string token(buf.data ? buf.data : "", buf.len);
+		nzbget_rs_free(buf);
+		return token;
+	}
+
+	enum class CipherCommit { Saved, Unchanged, Conflict, Cancelled, Failed };
+
+	bool ReadCipherSnapshot(std::string& bytes)
+	{
+		if (!g_Options || !g_Options->GetConfigFilename())
+		{
+			return false;
+		}
+		NzbgetRsBuf buf{};
+		if (!nzbget_rs_script_config_read_cipher_snapshot(g_Options->GetConfigFilename(), &buf))
+		{
+			return false;
+		}
+		bytes.assign(buf.data ? buf.data : "", buf.len);
+		nzbget_rs_free(buf);
+		return true;
+	}
+
+	CipherCommit CommitCipherPatch(std::string_view expected, std::string_view replacement, const std::function<bool()>& cancel)
+	{
+		if (!g_Options || !g_Options->GetConfigFilename())
+		{
+			return CipherCommit::Failed;
+		}
+		int res = nzbget_rs_script_config_commit_cipher_patch(
+			g_Options->GetConfigFilename(),
+			expected.data(),
+			expected.size(),
+			replacement.data(),
+			replacement.size(),
+			const_cast<std::function<bool()>*>(&cancel),
+			[](void* ctx) -> int
+			{
+				try
+				{
+					const auto* fn = static_cast<const std::function<bool()>*>(ctx);
+					return (*fn)() ? 1 : 0;
+				}
+				catch (...)
+				{
+					return 1;
+				}
+			},
+			[](void*)
+			{
+				try
+				{
+					warn("TLS cipher settings were replaced, but the configuration directory could not be synchronized");
+				}
+				catch (...)
+				{
+				}
+			});
+		switch (res)
+		{
+			case 0: return CipherCommit::Saved;
+			case 1: return CipherCommit::Unchanged;
+			case 2: return CipherCommit::Conflict;
+			case 3: return CipherCommit::Cancelled;
+			default: return CipherCommit::Failed;
+		}
+	}
+
+	bool LoadConfigTemplates(ConfigTemplates* configTemplates)
+	{
+		CharBuffer buffer;
+		if (!FileSystem::LoadFileIntoBuffer(g_Options->GetConfigTemplate(), buffer, true))
+		{
+			return false;
+		}
+		configTemplates->emplace_back(ConfigTemplate(buffer));
+
+		return true;
+	}
+
+	ConfigTemplates* GetConfigTemplates() { return &m_configTemplates; }
+
+private:
+	ConfigTemplates m_configTemplates;
+
+	void InitConfigTemplates()
+	{
+		if (!LoadConfigTemplates(&m_configTemplates))
+		{
+			error("Could not read configuration templates");
+		}
+	}
+};
+
+extern ScriptConfig* g_ScriptConfig;
+
+#endif
 
 #endif
 #endif

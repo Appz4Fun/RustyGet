@@ -22,7 +22,6 @@
 #include "nzbget.h"
 
 #include "TestFramework.h"
-#include "ParParser.h"
 #include "Options.h"
 #include "ParChecker.h"
 #include "FileSystem.h"

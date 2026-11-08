@@ -98,7 +98,6 @@ public:
 #include "DownloadInfo.h"
 #include "Options.h"
 #include "Log.h"
-#include "WorkState.h"
 #include "nzbget_rs.h"
 
 namespace FleetDetail

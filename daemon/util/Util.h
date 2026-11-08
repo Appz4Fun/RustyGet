@@ -46229,11 +46229,6 @@ private:
 #ifndef SYSTEM_HEALTH_H
 #define SYSTEM_HEALTH_H
 
-#include <string>
-#include <string_view>
-#include <thread>
-#include <vector>
-
 namespace SystemHealth
 {
 class Service
@@ -46885,7 +46880,6 @@ inline bool Maintenance::StartUpdate(EBranch branch)
 
 #endif
 #include <cerrno>
-#include <climits>
 namespace
 {
 	// Pauses downloads for the duration of a speed test and restores the previous
@@ -49891,12 +49885,6 @@ inline GuardedMessageList LogScriptXmlCommand::GuardMessages()
 	return g_CommandScriptLog->GuardMessages();
 }
 
-
-
-#ifndef DISABLE_TLS
-#include <openssl/rand.h>
-#endif
-
 namespace WebServerDetail
 {
 	inline constexpr const char* ERR_HTTP_BAD_REQUEST = "400 Bad Request";
@@ -50700,24 +50688,10 @@ struct SNzbListResponse
 	// SNzbListResponseEntry m_fileEntries[m_nrTrailingFileEntries] // variable sized
 };
 
-// A list response file entry
-struct SNzbListResponseFileEntry
-{
-	int32 m_id; // Entry-ID
-	int32 m_nzbIndex; // Index of NZB-Entry in m_NZBEntries-list
-	int32 m_fileSizeLo; // Filesize in bytes, Low 32-bits of 64-bit value
-	int32 m_fileSizeHi; // Filesize in bytes, High 32-bits of 64-bit value
-	int32 m_remainingSizeLo; // Remaining size in bytes, Low 32-bits of 64-bit value
-	int32 m_remainingSizeHi; // Remaining size in bytes, High 32-bits of 64-bit value
-	int32 m_paused; // 1 - file is paused
-	int32 m_filenameConfirmed; // 1 - Filename confirmed (read from article body), 0 - Filename parsed from subject (can be changed after reading of article)
-	int32 m_activeDownloads; // Number of active downloads for this file
-	int32 m_match; // 1 - file matches the pattern (only when Request has eRemoteMatchModeRegEx)
-	int32 m_subjectLen; // Length of Subject-string (m_szSubject), following to this record
-	int32 m_filenameLen; // Length of Filename-string (m_szFilename), following to this record
-	//char m_subject[m_subjectLen]; // variable sized
-	//char m_filename[m_filenameLen]; // variable sized
-};
+static constexpr uint32 NZBLIST_FILE_ENTRY_WIRE_SIZE = 12 * sizeof(int32);
+static constexpr uint32 NZBLOG_ENTRY_WIRE_SIZE = 4 * sizeof(int32);
+static constexpr uint32 NZBPOSTQUEUE_ENTRY_WIRE_SIZE = 10 * sizeof(int32);
+static constexpr uint32 NZBHISTORY_ENTRY_WIRE_SIZE = 10 * sizeof(int32);
 
 // A log request
 struct SNzbLogRequest
@@ -50735,16 +50709,6 @@ struct SNzbLogResponse
 	int32 m_nrTrailingEntries; // Number of Log-entries, following to this structure
 	int32 m_trailingDataLength; // Length of all Log-entries, following to this structure
 	// SNZBLogResponseEntry m_entries[m_trailingEntries] // variable sized
-};
-
-// A log response entry
-struct SNzbLogResponseEntry
-{
-	int32 m_id; // ID of Log-entry
-	int32 m_kind; // see Message::Kind in "Log.h"
-	int32 m_time; // time since the Epoch (00:00:00 UTC, January 1, 1970), measured in seconds.
-	int32 m_textLen; // Length of Text-string (m_szText), following to this record
-	//char m_text[m_textLen]; // variable sized
 };
 
 // A Pause/Unpause request
@@ -50779,36 +50743,6 @@ struct SNzbEditQueueRequest
 	//char* m_names[m_nrTrailingNameEntries]; // variable sized array of strings. For File-Actions - name of file incl. nzb-name as path, for Group-Actions - name of group
 };
 
-// Request dumping of debug info
-struct SNzbDumpDebugRequest
-{
-	SNzbRequestBase m_messageBase; // Must be the first in the struct
-};
-
-// Shutdown server request
-struct SNzbShutdownRequest
-{
-	SNzbRequestBase m_messageBase; // Must be the first in the struct
-};
-
-// Reload server request
-struct SNzbReloadRequest
-{
-	SNzbRequestBase m_messageBase; // Must be the first in the struct
-};
-
-// Server version request
-struct SNzbVersionRequest
-{
-	SNzbRequestBase m_messageBase; // Must be the first in the struct
-};
-
-// PostQueue request
-struct SNzbPostQueueRequest
-{
-	SNzbRequestBase m_messageBase; // Must be the first in the struct
-};
-
 // A PostQueue response
 struct SNzbPostQueueResponse
 {
@@ -50817,25 +50751,6 @@ struct SNzbPostQueueResponse
 	int32 m_nrTrailingEntries; // Number of PostQueue-entries, following to this structure
 	int32 m_trailingDataLength; // Length of all PostQueue-entries, following to this structure
 	// SNZBPostQueueResponseEntry m_entries[m_nrTrailingEntries] // variable sized
-};
-
-// A PostQueue response entry
-struct SNzbPostQueueResponseEntry
-{
-	int32 m_id; // ID of Post-entry
-	int32 m_stage; // See PrePostProcessor::EPostJobStage
-	int32 m_stageProgress; // Progress of current stage, value in range 0..1000
-	int32 m_fileProgress; // Progress of current file, value in range 0..1000
-	int32 m_totalTimeSec; // Number of seconds this post-job is beeing processed (after it first changed the state from QUEUED).
-	int32 m_stageTimeSec; // Number of seconds the current stage is beeing processed.
-	int32 m_nzbFilenameLen; // Length of NZBFileName-string (m_szNZBFilename), following to this record
-	int32 m_infoNameLen; // Length of Filename-string (m_szFilename), following to this record
-	int32 m_destDirLen; // Length of DestDir-string (m_szDestDir), following to this record
-	int32 m_progressLabelLen; // Length of ProgressLabel-string (m_szProgressLabel), following to this record
-	//char m_nzbFilename[m_nzbFilenameLen]; // variable sized, may contain full path (local path on client) or only filename
-	//char m_infoName[m_infoNameLen]; // variable sized
-	//char m_destDir[m_destDirLen]; // variable sized
-	//char m_progressLabel[m_progressLabelLen]; // variable sized
 };
 
 // Write log request
@@ -50869,25 +50784,6 @@ struct SNzbHistoryResponse
 	int32 m_nrTrailingEntries; // Number of History-entries, following to this structure
 	int32 m_trailingDataLength; // Length of all History-entries, following to this structure
 	// SNZBHistoryResponseEntry m_entries[m_nrTrailingEntries] // variable sized
-};
-
-// history entry
-struct SNzbHistoryResponseEntry
-{
-	int32 m_id; // History-ID
-	int32 m_kind; // Kind of Item: 1 - Collection (NZB), 2 - URL, 3 - DUP (hidden record)
-	int32 m_time; // When the item was added to history. time since the Epoch (00:00:00 UTC, January 1, 1970), measured in seconds.
-	int32 m_nicenameLen; // Length of Nicename-string (m_szNicename), following to this record
-	// for Collection and Dup items (m_iKind = 1 or 2)
-	int32 m_sizeLo; // Size of all files in bytes, Low 32-bits of 64-bit value
-	int32 m_sizeHi; // Size of all files in bytes, High 32-bits of 64-bit value
-	// for Collection items (m_iKind = 1)
-	int32 m_fileCount; // Initial number of files included in NZB-file
-	int32 m_parStatus; // See NZBInfo::EParStatus
-	int32 m_scriptStatus; // See NZBInfo::EScriptStatus
-	// for URL items (m_iKind = 2)
-	int32 m_urlStatus; // See NZBInfo::EUrlStatus
-	//char m_nicename[m_nicenameLen]; // variable sized
 };
 
 #endif
@@ -50943,29 +50839,16 @@ public:
 	void BuildFileList(SNzbListResponse* listResponse, const char* trailingData, DownloadQueue* downloadQueue);
 
 private:
-	class MatchedNzbInfo: public NzbInfo
-	{
-	public:
-		bool m_match;
-	};
-
-	class MatchedFileInfo: public FileInfo
-	{
-	public:
-		bool m_match;
-	};
-
 	std::unique_ptr<Connection> m_connection;
 	bool m_verbose = true;
 
 	bool InitConnection();
 	void InitMessageBase(SNzbRequestBase* messageBase, int request, int size);
 	bool ReceiveBoolResponse();
+	bool SendSimpleBoolRequest(ERemoteRequest request);
 	void printf(const char* msg, ...);
 	void perror(const char* msg);
 };
-
-#include "nzbget_rs.h"
 
 // One entry of a list response, read by rust/src/binrpc.rs: its ints (host
 // order) and strings; Next is false at an entry that doesn't fit the data,
@@ -51160,7 +51043,7 @@ inline void RemoteClient::BuildFileList(SNzbListResponse* listResponse, const ch
 		{
 			return;
 		}
-		std::unique_ptr<MatchedNzbInfo> nzbInfo = std::make_unique<MatchedNzbInfo>();
+		std::unique_ptr<NzbInfo> nzbInfo = std::make_unique<NzbInfo>();
 		nzbInfo->SetId(e.ints[0]);
 		nzbInfo->SetKind((NzbInfo::EKind)e.ints[1]);
 		nzbInfo->SetSize(Util::JoinInt64(e.ints[3], e.ints[2]));
@@ -51174,7 +51057,6 @@ inline void RemoteClient::BuildFileList(SNzbListResponse* listResponse, const ch
 		nzbInfo->SetCategory(e.strings[3]);
 		nzbInfo->SetQueuedFilename(e.strings[4]);
 		nzbInfo->SetPriority(e.ints[10]);
-		nzbInfo->m_match = e.ints[11];
 
 		downloadQueue->GetQueue()->Add(std::move(nzbInfo));
 	}
@@ -51201,7 +51083,7 @@ inline void RemoteClient::BuildFileList(SNzbListResponse* listResponse, const ch
 		{
 			return;
 		}
-		std::unique_ptr<MatchedFileInfo> fileInfo = std::make_unique<MatchedFileInfo>();
+		std::unique_ptr<FileInfo> fileInfo = std::make_unique<FileInfo>();
 		fileInfo->SetId(e.ints[0]);
 		fileInfo->SetSize(Util::JoinInt64(e.ints[3], e.ints[2]));
 		fileInfo->SetRemainingSize(Util::JoinInt64(e.ints[5], e.ints[4]));
@@ -51210,7 +51092,6 @@ inline void RemoteClient::BuildFileList(SNzbListResponse* listResponse, const ch
 		fileInfo->SetFilename(e.strings[1]);
 		fileInfo->SetFilenameConfirmed(e.ints[7]);
 		fileInfo->SetActiveDownloads(e.ints[8]);
-		fileInfo->m_match = e.ints[9];
 
 		std::unique_ptr<NzbInfo>& nzbInfo = downloadQueue->GetQueue()->at(e.ints[1] - 1);
 		// the group's count is its files' (the answer has none per group): it
@@ -51453,24 +51334,30 @@ inline bool RemoteClient::RequestServerSetDownloadRate(int rate)
 	return OK;
 }
 
-inline bool RemoteClient::RequestServerDumpDebug()
+inline bool RemoteClient::SendSimpleBoolRequest(ERemoteRequest request)
 {
 	if (!InitConnection()) return false;
 
-	SNzbDumpDebugRequest DumpDebugInfo = {};
-	InitMessageBase(&DumpDebugInfo.m_messageBase, rrDumpDebug, sizeof(DumpDebugInfo));
+	SNzbRequestBase req = {};
+	InitMessageBase(&req, request, sizeof(req));
 
-	if (!m_connection->Send((char*)(&DumpDebugInfo), sizeof(DumpDebugInfo)))
+	bool OK = m_connection->Send((char*)(&req), sizeof(req));
+	if (OK)
+	{
+		OK = ReceiveBoolResponse();
+	}
+	else
 	{
 		perror("m_pConnection->Send");
-		m_connection->Disconnect();
-		return false;
 	}
 
-	bool OK = ReceiveBoolResponse();
 	m_connection->Disconnect();
-
 	return OK;
+}
+
+inline bool RemoteClient::RequestServerDumpDebug()
+{
+	return SendSimpleBoolRequest(rrDumpDebug);
 }
 
 inline bool RemoteClient::RequestServerEditQueue(DownloadQueue::EEditAction action, int offset, const char* text,
@@ -51540,73 +51427,25 @@ inline bool RemoteClient::RequestServerEditQueue(DownloadQueue::EEditAction acti
 
 inline bool RemoteClient::RequestServerShutdown()
 {
-	if (!InitConnection()) return false;
-
-	SNzbShutdownRequest ShutdownRequest = {};
-	InitMessageBase(&ShutdownRequest.m_messageBase, rrShutdown, sizeof(ShutdownRequest));
-
-	bool OK = m_connection->Send((char*)(&ShutdownRequest), sizeof(ShutdownRequest));
-	if (OK)
-	{
-		OK = ReceiveBoolResponse();
-	}
-	else
-	{
-		perror("m_pConnection->Send");
-	}
-
-	m_connection->Disconnect();
-	return OK;
+	return SendSimpleBoolRequest(rrShutdown);
 }
 
 inline bool RemoteClient::RequestServerReload()
 {
-	if (!InitConnection()) return false;
-
-	SNzbReloadRequest ReloadRequest = {};
-	InitMessageBase(&ReloadRequest.m_messageBase, rrReload, sizeof(ReloadRequest));
-
-	bool OK = m_connection->Send((char*)(&ReloadRequest), sizeof(ReloadRequest));
-	if (OK)
-	{
-		OK = ReceiveBoolResponse();
-	}
-	else
-	{
-		perror("m_pConnection->Send");
-	}
-
-	m_connection->Disconnect();
-	return OK;
+	return SendSimpleBoolRequest(rrReload);
 }
 
 inline bool RemoteClient::RequestServerVersion()
 {
-	if (!InitConnection()) return false;
-
-	SNzbVersionRequest VersionRequest = {};
-	InitMessageBase(&VersionRequest.m_messageBase, rrVersion, sizeof(VersionRequest));
-
-	bool OK = m_connection->Send((char*)(&VersionRequest), sizeof(VersionRequest));
-	if (OK)
-	{
-		OK = ReceiveBoolResponse();
-	}
-	else
-	{
-		perror("m_pConnection->Send");
-	}
-
-	m_connection->Disconnect();
-	return OK;
+	return SendSimpleBoolRequest(rrVersion);
 }
 
 inline bool RemoteClient::RequestPostQueue()
 {
 	if (!InitConnection()) return false;
 
-	SNzbPostQueueRequest PostQueueRequest = {};
-	InitMessageBase(&PostQueueRequest.m_messageBase, rrPostQueue, sizeof(PostQueueRequest));
+	SNzbRequestBase PostQueueRequest = {};
+	InitMessageBase(&PostQueueRequest, rrPostQueue, sizeof(PostQueueRequest));
 
 	if (!m_connection->Send((char*)(&PostQueueRequest), sizeof(PostQueueRequest)))
 	{
@@ -51767,8 +51606,6 @@ inline bool RemoteClient::RequestHistory(bool withHidden)
 }
 
 #endif
-
-#include "nzbget_rs.h"
 
 class Frontend : public Thread
 {
@@ -52284,8 +52121,6 @@ private:
 
 #ifndef DISABLE_CURSES
 
-#include <string>
-
 class NCursesFrontend : public Frontend
 {
 public:
@@ -52362,8 +52197,6 @@ private:
 #endif
 
 #ifndef DISABLE_CURSES
-
-#include "nzbget_rs.h"
 
 inline void curses_clear()
 {
@@ -53209,9 +53042,20 @@ private:
 	Connection* m_connection;
 
 	void Dispatch();
+	bool ReceiveRequest(void* buffer, int size);
+	bool ReceiveTrailing(CharBuffer& buffer, int64 len, int64 maxLen);
+	void SendBoolResponse(bool success, const char* text);
+	void ExecuteDownload();
+	void ExecuteList();
+	void ExecuteLog();
+	void ExecutePauseUnpause();
+	void ExecuteEditQueue();
+	void ExecuteSetDownloadRate();
+	void ExecutePostQueue();
+	void ExecuteWriteLog();
+	void ExecuteScan();
+	void ExecuteHistory();
 };
-
-#include "nzbget_rs.h"
 
 extern void ExitProc();
 extern void Reload();
@@ -53222,13 +53066,13 @@ inline const uint32 g_MessageRequestSizes[] =
 		sizeof(SNzbPauseUnpauseRequest),
 		sizeof(SNzbListRequest),
 		sizeof(SNzbSetDownloadRateRequest),
-		sizeof(SNzbDumpDebugRequest),
+		sizeof(SNzbRequestBase),
 		sizeof(SNzbEditQueueRequest),
 		sizeof(SNzbLogRequest),
-		sizeof(SNzbShutdownRequest),
-		sizeof(SNzbReloadRequest),
-		sizeof(SNzbVersionRequest),
-		sizeof(SNzbPostQueueRequest),
+		sizeof(SNzbRequestBase),
+		sizeof(SNzbRequestBase),
+		sizeof(SNzbRequestBase),
+		sizeof(SNzbRequestBase),
 		sizeof(SNzbWriteLogRequest),
 		sizeof(SNzbScanRequest),
 		sizeof(SNzbHistoryRequest)
@@ -53236,110 +53080,8 @@ inline const uint32 g_MessageRequestSizes[] =
 
 static_assert(sizeof(g_MessageRequestSizes) / sizeof(g_MessageRequestSizes[0]) == rrHistory + 1);
 
-
-class BinCommand
-{
-public:
-	virtual ~BinCommand() {}
-	virtual void Execute() = 0;
-	void SetConnection(Connection* connection) { m_connection = connection; }
-	void SetMessageBase(SNzbRequestBase* messageBase) { m_messageBase = messageBase; }
-
-protected:
-	Connection* m_connection;
-	SNzbRequestBase* m_messageBase;
-
-	bool ReceiveRequest(void* buffer, int size);
-	bool ReceiveTrailing(CharBuffer& buffer, int64 len, int64 maxLen);
-	void SendBoolResponse(bool success, const char* text);
-};
-
 // a fixed-size string field of a request ends within its field
 template <size_t N> inline void TerminateField(char (&field)[N]) { field[N - 1] = '\0'; }
-
-class DownloadBinCommand: public BinCommand
-{
-public:
-	virtual void Execute();
-};
-
-class ListBinCommand: public BinCommand
-{
-public:
-	virtual void Execute();
-};
-
-class LogBinCommand: public BinCommand
-{
-public:
-	virtual void Execute();
-};
-
-class PauseUnpauseBinCommand: public BinCommand
-{
-public:
-	virtual void Execute();
-};
-
-class EditQueueBinCommand: public BinCommand
-{
-public:
-	virtual void Execute();
-};
-
-class SetDownloadRateBinCommand: public BinCommand
-{
-public:
-	virtual void Execute();
-};
-
-class DumpDebugBinCommand: public BinCommand
-{
-public:
-	virtual void Execute();
-};
-
-class ShutdownBinCommand: public BinCommand
-{
-public:
-	virtual void Execute();
-};
-
-class ReloadBinCommand: public BinCommand
-{
-public:
-	virtual void Execute();
-};
-
-class VersionBinCommand: public BinCommand
-{
-public:
-	virtual void Execute();
-};
-
-class PostQueueBinCommand: public BinCommand
-{
-public:
-	virtual void Execute();
-};
-
-class WriteLogBinCommand: public BinCommand
-{
-public:
-	virtual void Execute();
-};
-
-class ScanBinCommand: public BinCommand
-{
-public:
-	virtual void Execute();
-};
-
-class HistoryBinCommand: public BinCommand
-{
-public:
-	virtual void Execute();
-};
 
 //*****************************************************************
 // BinProcessor
@@ -53384,76 +53126,70 @@ inline void BinRpcProcessor::Dispatch()
 		return;
 	}
 
-	std::unique_ptr<BinCommand> command;
-
 	switch (ntohl(m_messageBase.m_type))
 	{
 		case rrDownload:
-			command = std::make_unique<DownloadBinCommand>();
+			ExecuteDownload();
 			break;
 
 		case rrList:
-			command = std::make_unique<ListBinCommand>();
+			ExecuteList();
 			break;
 
 		case rrLog:
-			command = std::make_unique<LogBinCommand>();
+			ExecuteLog();
 			break;
 
 		case rrPauseUnpause:
-			command = std::make_unique<PauseUnpauseBinCommand>();
+			ExecutePauseUnpause();
 			break;
 
 		case rrEditQueue:
-			command = std::make_unique<EditQueueBinCommand>();
+			ExecuteEditQueue();
 			break;
 
 		case rrSetDownloadRate:
-			command = std::make_unique<SetDownloadRateBinCommand>();
+			ExecuteSetDownloadRate();
 			break;
 
 		case rrDumpDebug:
-			command = std::make_unique<DumpDebugBinCommand>();
+			g_Log->LogDebugInfo();
+			SendBoolResponse(true, "Debug-Command completed successfully");
 			break;
 
 		case rrShutdown:
-			command = std::make_unique<ShutdownBinCommand>();
+			SendBoolResponse(true, "Stopping server");
+			ExitProc();
 			break;
 
 		case rrReload:
-			command = std::make_unique<ReloadBinCommand>();
+			SendBoolResponse(true, "Reloading server");
+			Reload();
 			break;
 
 		case rrVersion:
-			command = std::make_unique<VersionBinCommand>();
+			SendBoolResponse(true, Util::VersionRevision());
 			break;
 
 		case rrPostQueue:
-			command = std::make_unique<PostQueueBinCommand>();
+			ExecutePostQueue();
 			break;
 
 		case rrWriteLog:
-			command = std::make_unique<WriteLogBinCommand>();
+			ExecuteWriteLog();
 			break;
 
 		case rrScan:
-			command = std::make_unique<ScanBinCommand>();
+			ExecuteScan();
 			break;
 
 		case rrHistory:
-			command = std::make_unique<HistoryBinCommand>();
+			ExecuteHistory();
 			break;
 
 		default:
 			error("Received unsupported request %i", ntohl(m_messageBase.m_type));
 			break;
-	}
-
-	if (command)
-	{
-		command->SetConnection(m_connection);
-		command->SetMessageBase(&m_messageBase);
-		command->Execute();
 	}
 }
 
@@ -53567,7 +53303,7 @@ private:
 //*****************************************************************
 // Commands
 
-inline void BinCommand::SendBoolResponse(bool success, const char* text)
+inline void BinRpcProcessor::SendBoolResponse(bool success, const char* text)
 {
 	// rust/src/binrpc.rs: the response, then the text and its NUL
 	NzbgetRsBuf response = nzbget_rs_binrpc_bool_response(success, text);
@@ -53577,9 +53313,9 @@ inline void BinCommand::SendBoolResponse(bool success, const char* text)
 }
 
 
-inline bool BinCommand::ReceiveRequest(void* buffer, int size)
+inline bool BinRpcProcessor::ReceiveRequest(void* buffer, int size)
 {
-	memcpy(buffer, m_messageBase, sizeof(SNzbRequestBase));
+	memcpy(buffer, &m_messageBase, sizeof(SNzbRequestBase));
 	size -= sizeof(SNzbRequestBase);
 	if (size > 0)
 	{
@@ -53596,7 +53332,7 @@ inline bool BinCommand::ReceiveRequest(void* buffer, int size)
 // buffer was allocated for 0 or a negative one, and the data was used all the
 // same); the buffer gets a terminator after it, as its strings are read with
 // the C string functions
-inline bool BinCommand::ReceiveTrailing(CharBuffer& buffer, int64 len, int64 maxLen)
+inline bool BinRpcProcessor::ReceiveTrailing(CharBuffer& buffer, int64 len, int64 maxLen)
 {
 	if (!nzbget_rs_binrpc_trailing_ok(len, maxLen))
 	{
@@ -53618,7 +53354,7 @@ inline bool BinCommand::ReceiveTrailing(CharBuffer& buffer, int64 len, int64 max
 	return true;
 }
 
-inline void PauseUnpauseBinCommand::Execute()
+inline void BinRpcProcessor::ExecutePauseUnpause()
 {
 	SNzbPauseUnpauseRequest PauseUnpauseRequest;
 	if (!ReceiveRequest(&PauseUnpauseRequest, sizeof(PauseUnpauseRequest)))
@@ -53646,7 +53382,7 @@ inline void PauseUnpauseBinCommand::Execute()
 	SendBoolResponse(true, "Pause-/Unpause-Command completed successfully");
 }
 
-inline void SetDownloadRateBinCommand::Execute()
+inline void BinRpcProcessor::ExecuteSetDownloadRate()
 {
 	SNzbSetDownloadRateRequest SetDownloadRequest;
 	if (!ReceiveRequest(&SetDownloadRequest, sizeof(SetDownloadRequest)))
@@ -53658,54 +53394,7 @@ inline void SetDownloadRateBinCommand::Execute()
 	SendBoolResponse(true, "Rate-Command completed successfully");
 }
 
-inline void DumpDebugBinCommand::Execute()
-{
-	SNzbDumpDebugRequest DumpDebugRequest;
-	if (!ReceiveRequest(&DumpDebugRequest, sizeof(DumpDebugRequest)))
-	{
-		return;
-	}
-
-	g_Log->LogDebugInfo();
-	SendBoolResponse(true, "Debug-Command completed successfully");
-}
-
-inline void ShutdownBinCommand::Execute()
-{
-	SNzbShutdownRequest ShutdownRequest;
-	if (!ReceiveRequest(&ShutdownRequest, sizeof(ShutdownRequest)))
-	{
-		return;
-	}
-
-	SendBoolResponse(true, "Stopping server");
-	ExitProc();
-}
-
-inline void ReloadBinCommand::Execute()
-{
-	SNzbReloadRequest ReloadRequest;
-	if (!ReceiveRequest(&ReloadRequest, sizeof(ReloadRequest)))
-	{
-		return;
-	}
-
-	SendBoolResponse(true, "Reloading server");
-	Reload();
-}
-
-inline void VersionBinCommand::Execute()
-{
-	SNzbVersionRequest VersionRequest;
-	if (!ReceiveRequest(&VersionRequest, sizeof(VersionRequest)))
-	{
-		return;
-	}
-
-	SendBoolResponse(true, Util::VersionRevision());
-}
-
-inline void DownloadBinCommand::Execute()
+inline void BinRpcProcessor::ExecuteDownload()
 {
 	SNzbDownloadRequest DownloadRequest;
 	if (!ReceiveRequest(&DownloadRequest, sizeof(DownloadRequest)))
@@ -53782,7 +53471,7 @@ inline void DownloadBinCommand::Execute()
 	}
 }
 
-inline void ListBinCommand::Execute()
+inline void BinRpcProcessor::ExecuteList()
 {
 	SNzbListRequest ListRequest;
 	if (!ReceiveRequest(&ListRequest, sizeof(ListRequest)))
@@ -53794,7 +53483,7 @@ inline void ListBinCommand::Execute()
 	memset(&ListResponse, 0, sizeof(ListResponse));
 	ListResponse.m_messageBase.m_signature = htonl(NZBMESSAGE_SIGNATURE);
 	ListResponse.m_messageBase.m_structSize = htonl(sizeof(ListResponse));
-	ListResponse.m_entrySize = htonl(sizeof(SNzbListResponseFileEntry));
+	ListResponse.m_entrySize = htonl(NZBLIST_FILE_ENTRY_WIRE_SIZE);
 	ListResponse.m_regExValid = 0;
 
 	RsBytes entries;
@@ -53961,7 +53650,7 @@ inline void ListBinCommand::Execute()
 }
 
 
-inline void LogBinCommand::Execute()
+inline void BinRpcProcessor::ExecuteLog()
 {
 	SNzbLogRequest LogRequest;
 	if (!ReceiveRequest(&LogRequest, sizeof(LogRequest)))
@@ -54003,7 +53692,7 @@ inline void LogBinCommand::Execute()
 	SNzbLogResponse LogResponse;
 	LogResponse.m_messageBase.m_signature = htonl(NZBMESSAGE_SIGNATURE);
 	LogResponse.m_messageBase.m_structSize = htonl(sizeof(LogResponse));
-	LogResponse.m_entrySize = htonl(sizeof(SNzbLogResponseEntry));
+	LogResponse.m_entrySize = htonl(NZBLOG_ENTRY_WIRE_SIZE);
 	LogResponse.m_nrTrailingEntries = htonl(nrEntries);
 	LogResponse.m_trailingDataLength = htonl(bufsize);
 
@@ -54018,7 +53707,7 @@ inline void LogBinCommand::Execute()
 }
 
 
-inline void EditQueueBinCommand::Execute()
+inline void BinRpcProcessor::ExecuteEditQueue()
 {
 	SNzbEditQueueRequest EditQueueRequest;
 	if (!ReceiveRequest(&EditQueueRequest, sizeof(EditQueueRequest)))
@@ -54110,19 +53799,13 @@ inline void EditQueueBinCommand::Execute()
 	}
 }
 
-inline void PostQueueBinCommand::Execute()
+inline void BinRpcProcessor::ExecutePostQueue()
 {
-	SNzbPostQueueRequest PostQueueRequest;
-	if (!ReceiveRequest(&PostQueueRequest, sizeof(PostQueueRequest)))
-	{
-		return;
-	}
-
 	SNzbPostQueueResponse PostQueueResponse;
 	memset(&PostQueueResponse, 0, sizeof(PostQueueResponse));
 	PostQueueResponse.m_messageBase.m_signature = htonl(NZBMESSAGE_SIGNATURE);
 	PostQueueResponse.m_messageBase.m_structSize = htonl(sizeof(PostQueueResponse));
-	PostQueueResponse.m_entrySize = htonl(sizeof(SNzbPostQueueResponseEntry));
+	PostQueueResponse.m_entrySize = htonl(NZBPOSTQUEUE_ENTRY_WIRE_SIZE);
 
 	RsBytes entries;
 
@@ -54168,7 +53851,7 @@ inline void PostQueueBinCommand::Execute()
 }
 
 
-inline void WriteLogBinCommand::Execute()
+inline void BinRpcProcessor::ExecuteWriteLog()
 {
 	SNzbWriteLogRequest WriteLogRequest;
 	if (!ReceiveRequest(&WriteLogRequest, sizeof(WriteLogRequest)))
@@ -54206,7 +53889,7 @@ inline void WriteLogBinCommand::Execute()
 	SendBoolResponse(OK, nzbget_rs_dqh_binrpc_write_log_response_msg(OK ? 1 : 0));
 }
 
-inline void ScanBinCommand::Execute()
+inline void BinRpcProcessor::ExecuteScan()
 {
 	SNzbScanRequest ScanRequest;
 	if (!ReceiveRequest(&ScanRequest, sizeof(ScanRequest)))
@@ -54220,7 +53903,7 @@ inline void ScanBinCommand::Execute()
 	SendBoolResponse(true, nzbget_rs_dqh_binrpc_scan_response_msg(syncMode ? 1 : 0));
 }
 
-inline void HistoryBinCommand::Execute()
+inline void BinRpcProcessor::ExecuteHistory()
 {
 	SNzbHistoryRequest HistoryRequest;
 	if (!ReceiveRequest(&HistoryRequest, sizeof(HistoryRequest)))
@@ -54234,7 +53917,7 @@ inline void HistoryBinCommand::Execute()
 	memset(&HistoryResponse, 0, sizeof(HistoryResponse));
 	HistoryResponse.m_messageBase.m_signature = htonl(NZBMESSAGE_SIGNATURE);
 	HistoryResponse.m_messageBase.m_structSize = htonl(sizeof(HistoryResponse));
-	HistoryResponse.m_entrySize = htonl(sizeof(SNzbHistoryResponseEntry));
+	HistoryResponse.m_entrySize = htonl(NZBHISTORY_ENTRY_WIRE_SIZE);
 
 	RsBytes entries;
 

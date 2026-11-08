@@ -17,30 +17,11 @@ typedef struct
 	size_t cap;
 } NzbgetRsBuf;
 
-// Stream-repair floor: arrays remain C++ owned and borrowed only during the call.
-// Nonempty arrays are readable/aligned for count entries; empty arrays may be NULL.
-// Probe indexes must identify donor entries. Invalid indexes abort before an
-// out-of-bounds read. Overflowing reference C++ arithmetic is outside parity.
-typedef struct { int64_t offset; int64_t size; } NzbgetRsStreamCompareRange;
-int64_t nzbget_rs_stream_compare_floor(int64_t decoded_size,
-    const NzbgetRsStreamCompareRange* holes, size_t hole_count,
-    const NzbgetRsStreamCompareRange* donors, size_t donor_count,
-    const int32_t* probes, size_t probe_count);
-
 // raw may be NULL (treated as empty); otherwise it must point to a readable
 // NUL-terminated string for the duration of the call. Results own their storage.
 // Allocation failure or a Rust panic aborts; unwinding never crosses this ABI.
 NzbgetRsBuf nzbget_rs_json_encode(const char* raw);
 NzbgetRsBuf nzbget_rs_xml_encode(const char* raw);
-// Caller-owned output; input_len is the known first-NUL position, not measured
-// again. raw is readable through that NUL (NULL only when input_len==0).
-// out is NULL (measure; cap ignored) or writable for cap bytes. SIZE_MAX rejects
-// unrepresentable lengths/endpoints or overlap with input including its NUL,
-// before any borrow/write. Never retry SIZE_MAX. Otherwise n excludes NUL:
-// n<cap initializes result+NUL; insufficient output is unusable, retry with n+1.
-// Output may be uninitialized; Rust never allocates/frees it. Latin1 requires
-// at most 2*input_len bytes, plus one for NUL.
-size_t nzbget_rs_latin1_to_utf8_n(const char* raw, size_t input_len, char* out, size_t cap);
 // Twins and alts (rust/src/twin.rs). Lists are text lines: a file list is
 // "length\tmd5\tname" per file. A download is given by its id and its
 // identity "fingerprint#posting" (DupeFiles and the posting's message-id
@@ -92,31 +73,19 @@ NzbgetRsWildResult nzbget_rs_wild_match(const char* pattern, const char* text,
 unsigned int nzbget_rs_decode_base64(const char* input, int length, char* output);
 // raw is NULL (no-op) or a writable NUL-terminated string, decoded in place.
 void nzbget_rs_json_decode(char* raw);
-// text is NULL or NUL-terminated; valueLength is NULL or a writable int.
-// Returns a pointer into text, or NULL on failure (including either NULL
-// argument). Leaves valueLength unchanged on failure.
-const char* nzbget_rs_json_next_value(const char* text, int* valueLength);
 
 // WebUtil's text helpers (rust/src/text.rs): the in-place ones take NULL (no-op)
 // or a caller-owned writable NUL-terminated string. Panics abort.
 // lower receives an ASCII hex letter and returns the caller's tolower result.
 // It must not unwind or access raw. NULL lower is a no-op.
 void nzbget_rs_xml_decode(char* raw, int (*lower)(int));
-void nzbget_rs_xml_strip_tags(char* raw);
-// isAlpha receives a byte in 0..255 and classifies it using the caller's locale
-// and char signedness. It must not unwind or access raw. NULL isAlpha is a no-op.
-void nzbget_rs_xml_remove_entities(char* raw, int (*isAlpha)(int));
-void nzbget_rs_http_unquote(char* raw);
-void nzbget_rs_url_decode(char* raw);
 // NULL input means empty. Results are Rust-owned NUL-terminated buffers:
 // copy before freeing with nzbget_rs_free, never with the C allocator.
 NzbgetRsBuf nzbget_rs_url_encode(const char* raw);
-NzbgetRsBuf nzbget_rs_latin1_to_utf8(const char* raw);
 
 // WebUtil's finders (rust/src/webutil.rs): a pointer into the text and the
 // value length, or NULL with valueLength untouched
 const char* nzbget_rs_xml_find_tag(const char* xml, const char* tag, int* valueLength);
-const char* nzbget_rs_json_find_field(const char* text, const char* field, int* valueLength);
 // WebUtil::ParseContentDispositionFilename: data is NULL for no file name.
 // Case folding as strncasecmp: glibc's tolower table (*__ctype_tolower_loc(),
 // entries -128..255) indexed by unsigned byte, or fold(byte 0..255) when NULL.
@@ -127,11 +96,6 @@ NzbgetRsBuf nzbget_rs_content_disposition_filename(const char* contentDispositio
 // copy and release with nzbget_rs_free. Numeric formatting uses LC_NUMERIC.
 // Panics abort and never unwind through C++.
 NzbgetRsBuf nzbget_rs_format_size(long long size);
-NzbgetRsBuf nzbget_rs_format_speed(long long bytesPerSecond);
-// NULL is treated as an empty string.
-int nzbget_rs_alpha_num(const char* str);
-// buffer is NULL (hashed as empty) or readable for (unsigned int)bufSize bytes.
-unsigned int nzbget_rs_hash_bj96(const char* buffer, int bufSize, unsigned int initValue);
 // Caller-owned writable NUL-terminated str; from/to are NUL-terminated and
 // may point into str. Any NULL argument is a no-op. Empty patterns and growing
 // replacements are no-ops; equal-length replacements retain C++ truncation.
@@ -249,7 +213,6 @@ typedef struct
 } NzbgetRsWebCheck;
 // NULL input denies access; NULL out is a no-op. Output must not alias inputs.
 void nzbget_rs_web_check_credentials(const NzbgetRsWebCredentials* input, NzbgetRsWebCheck* out);
-int nzbget_rs_web_authorized_ip(const char* option, const char* remote, const int* table, int charSigned, int (*fold)(int));
 
 // Decoder (rust/src/decoder.rs), with rapidyenc's incremental decoder (its
 // state as an int) and CRC. Get: 0 format, 1 begin, 2 end, 3 size,
@@ -356,10 +319,6 @@ int nzbget_rs_rpc_decide(int protocol, int httpMethod, int safe, int error, int 
 // Free returned buffers with nzbget_rs_free.
 NzbgetRsBuf nzbget_rs_split_command_line(const char* s);
 char* nzbget_rs_trim_line(char* s, int rightOnly);
-size_t nzbget_rs_trim_string(char* data, size_t len, int left, int right, int sanitize, size_t* start, int (*rightSpace)(int));
-int nzbget_rs_ends_with(const char* s, size_t len, const char* suffix, size_t suffixLen, int caseSensitive);
-NzbgetRsBuf nzbget_rs_format_buffer(const char* buf, int len);
-long long nzbget_rs_parse_rfc822_date_time(const char* s);
 
 // ServerVolume's slots (rust/src/statmeter.rs). calc_slots: CalcSlots for a
 // local time (cut to an int as before), updating *firstDay; day is -1 outside
@@ -400,13 +359,8 @@ void nzbget_rs_volume_add(int64_t* seconds, size_t secondsLen, int64_t* minutes,
 // compiler overrides such as -funsigned-char; Rust's target default may differ.
 // A non-NULL name must be readable and NUL-terminated within one allocation,
 // and remain unchanged for the duration of the call.
-int nzbget_rs_parse_time(const char* time, int* hours, int* minutes);
-int nzbget_rs_parse_week_days(const char* weekDays, int* bits);
 int nzbget_rs_validate_option_name(const char* name, int (*predefined)(void* ctx, const char* name), void* ctx);
 int nzbget_rs_option_restricted(const char* name, int signedChar);
-void nzbget_rs_convert_old_option(const char* option, const char* value, NzbgetRsBuf* newOption, NzbgetRsBuf* newValue);
-int nzbget_rs_has_script(const char* list, const char* name);
-int nzbget_rs_parse_category_source(const char* value);
 
 typedef struct NzbgetRsStr
 {
@@ -515,8 +469,6 @@ int nzbget_rs_directory_exists(const char* path, NzbgetRsFsStat stat);
 int nzbget_rs_force_directories(const char* path, NzbgetRsBuf* errmsg, NzbgetRsFsStat stat);
 // NULL dir/basename mean empty strings; a NULL stat reports no collisions.
 NzbgetRsBuf nzbget_rs_make_unique_filename(const char* dir, const char* basename, NzbgetRsFsStat stat);
-// NULL filename means empty; NULL home leaves the filename unchanged.
-NzbgetRsBuf nzbget_rs_expand_home_path(const char* filename, const char* home);
 
 // ParParser's name checks (rust/src/parparser.rs).
 // Names are borrowed and read only through the first NUL or 1023 bytes.
@@ -530,78 +482,6 @@ int nzbget_rs_parse_par_filename(const char* name, int confirmed, int* baseLen, 
 int nzbget_rs_same_par_collection(const char* name1, const char* name2, int confirmed);
 int nzbget_rs_find_main_pars(const char* path, int collect,
 	void (*addFile)(void* ctx, const char* name, size_t len), void* ctx);
-
-// RarVolume's header parsing (rust/src/rarreader.rs). rar_read parses the
-// content source into *state (read and written back) and calls addFile for each
-// file read, in order, also when the parse fails; 1 when the volume was read
-// to its end. size/read are the ContentSource; rar3Prepare, rar5Prepare, init
-// (iv NULL: rar3's derived IV), decrypt (one 16-byte block) and free are the
-// header cipher. addFile commits a completed header before the trailing seek;
-// setDataOffset updates the last file to position minus its packed size after
-// that seek succeeds. File/name pointers are borrowed only for addFile: copy
-// their contents there; never retain or free them. read/decrypt buffers are
-// borrowed writable storage of len/16 bytes. Callbacks must not throw; int
-// callbacks return nonzero for success; a rejected addFile stops parsing. NULL io/state
-// fails without callbacks; NULL callbacks are allowed (missing addFile drops
-// files and suppresses setDataOffset). ctx is opaque and may be NULL if the
-// callbacks support it. io must remain immutable and state exclusively borrowed
-// until rar_read returns, including during callbacks.
-typedef struct NzbgetRsRarFile
-{
-	const char* filename;
-	size_t filenameLen;
-	uint32_t time;
-	uint32_t attr;
-	int64_t size;
-	int splitBefore;
-	int splitAfter;
-	uint32_t method;
-	int stored;
-	int64_t packedSize;
-	int64_t dataOffset;
-	int encryptedData;
-	int hasSalt;
-	uint8_t salt[8];
-	int hasCrypt;
-	uint64_t cryptVersion;
-	uint64_t cryptFlags;
-	uint8_t cryptKdfCount;
-	uint8_t cryptSalt[16];
-	uint8_t cryptIv[16];
-	uint8_t cryptCheckValue[12];
-	int cryptHasCheck;
-} NzbgetRsRarFile;
-typedef struct NzbgetRsRarIo
-{
-	void* ctx;
-	int64_t (*size)(void* ctx);
-	int (*read)(void* ctx, int64_t offset, uint8_t* buffer, int64_t len);
-	int (*rar3Prepare)(void* ctx, const uint8_t* salt);
-	int (*rar5Prepare)(void* ctx, uint8_t kdfCount, const uint8_t* salt);
-	int (*init)(void* ctx, int keyBits, const uint8_t* iv);
-	int (*decrypt)(void* ctx, const uint8_t* in, uint8_t* out);
-	void (*free)(void* ctx);
-	int (*addFile)(void* ctx, const NzbgetRsRarFile* file);
-	void (*setDataOffset)(void* ctx, int64_t position);
-} NzbgetRsRarIo;
-typedef struct NzbgetRsRarVolume
-{
-	int version;
-	uint32_t volumeNo;
-	int newNaming;
-	int hasNextVolume;
-	int multiVolume;
-	int encrypted;
-	int hasPassword;
-	uint8_t decryptBuf[16];
-	uint8_t decryptPos;
-	int useNativeCipher;
-	const char* password;
-	size_t passwordLen;
-	uint8_t decryptKey[32];
-	uint8_t decryptIv[16];
-} NzbgetRsRarVolume;
-int nzbget_rs_rar_read(const NzbgetRsRarIo* io, NzbgetRsRarVolume* state);
 
 // RarRenamer::Execute (rust/src/rarrenamer.rs): recursively scans dest_dir,
 // parses RAR3/RAR5 volumes, and renames misnamed archive sets. Callbacks return
@@ -848,9 +728,6 @@ NzbgetRsBinResponse nzbget_rs_binrpc_encode_post_queue_into(const NzbgetRsBinPos
     char* scratch, size_t capacity);
 NzbgetRsBinResponse nzbget_rs_binrpc_encode_history_into(const NzbgetRsBinHistory* history, size_t count,
     char* scratch, size_t capacity);
-size_t nzbget_rs_binrpc_read_nzbs(const char* data, size_t len, size_t* at, NzbgetRsBinNzb* out, size_t max);
-size_t nzbget_rs_binrpc_read_params(const char* data, size_t len, size_t* at, NzbgetRsBinParam* out, size_t max);
-size_t nzbget_rs_binrpc_read_files(const char* data, size_t len, size_t* at, NzbgetRsBinFile* out, size_t max);
 NzbgetRsBuf nzbget_rs_binrpc_log_listing(const char* data, size_t len, uint32_t count);
 NzbgetRsBuf nzbget_rs_binrpc_post_queue_listing(const char* data, size_t len, uint32_t count);
 NzbgetRsBuf nzbget_rs_binrpc_history_listing(const char* data, size_t len, uint32_t count);
@@ -956,23 +833,11 @@ typedef struct
     const char* extension;
     size_t extension_len;
 } NzbgetRsDupeIdentityInput;
-NzbgetRsBuf nzbget_rs_dupe_inner(const char* data, size_t len, const char* name, size_t nameLen,
-    uint64_t total, uint64_t minimum);
 int nzbget_rs_dupe_same_data(uint64_t aBytes, uint32_t aFiles, uint64_t bBytes, uint32_t bFiles);
 int nzbget_rs_dupe_candidate(const char* title, size_t titleLen, uint64_t bytes,
     const char* name, size_t nameLen, uint64_t size);
 int nzbget_rs_dupe_lenient_ok(const char* title, size_t titleLen, const char* mainName, size_t mainLen,
     const NzbgetRsDupeIdentityInput* mine, const NzbgetRsDupeIdentityInput* theirs);
-
-// Stream repair patch selection (rust/src/streampatchparts.rs). Ranges are
-// caller-owned aligned pairs of int64_t offset,size (the native StreamRange
-// representation). Output is caller-owned and writable for donorCount ints;
-// returns the number written, in ascending zero-based index order. No buffers
-// overlap. NULL is allowed for empty slices. donorCount must fit int32_t;
-// endpoint addition and original int index +/- margin overflow are outside the
-// defined C++ parity domain. All sizes and offsets otherwise retain semantics.
-size_t nzbget_rs_stream_patch_parts(const void* donors, size_t donorCount,
-    const void* holes, size_t holeCount, int32_t margin, int32_t* output);
 
 // Dead-posting store (rust/src/deadpostings.rs).
 struct NzbgetRsDeadPostingsStore;
@@ -1049,37 +914,7 @@ void nzbget_rs_memory_pressure_trim_heap(void);
 // Daemon Lifecycle Coordination C ABI (Requirement R2, Milestone M5)
 // ============================================================================
 
-typedef enum {
-    NZBGET_RS_PHASE_UNINITIALIZED = 0,
-    NZBGET_RS_PHASE_OPTIONS_LOGGING = 1,
-    NZBGET_RS_PHASE_SUBSYSTEMS_RECOVERY = 2,
-    NZBGET_RS_PHASE_SERVERS_ACTIVE = 3,
-    NZBGET_RS_PHASE_SHUTDOWN_RELOAD = 4,
-    NZBGET_RS_PHASE_TERMINATED = 5
-} NzbgetRsLifecyclePhase;
-
-typedef struct {
-    void (*set_process_args)(int argc, char* argv[], char* argp[]);
-    void (*util_init)(void);
-    int  (*nserv_main)(int argc, char* argv[]);
-    int  (*win_service_check)(int argc, char* argv[]);
-    int  (*phase1_init)(bool reloading);
-    int  (*phase2_subsystems_create_and_recover)(bool reloading);
-    int  (*phase3_server_activate)(void);
-    void (*phase4_shutdown)(bool reloading);
-    bool (*has_active_unpack)(void);
-    bool (*is_reloading)(void);
-    void (*stop_server)(bool reloading);
-    void (*reload)(void);
-    void (*exit_proc)(void);
-} NzbgetCLifecycleHooks;
-
 int nzbget_rs_main(int argc, char* argv[], char* argp[]);
-void nzbget_rs_register_lifecycle_hooks(const NzbgetCLifecycleHooks* hooks);
-NzbgetRsLifecyclePhase nzbget_rs_lifecycle_get_phase(void);
-void nzbget_rs_lifecycle_set_phase(NzbgetRsLifecyclePhase phase);
-bool nzbget_rs_is_reloading(void);
-bool nzbget_rs_is_stopping(void);
 void nzbget_rs_signal_notify(int signum);
 
 // C++ subsystem bridge functions exported to Rust
@@ -1239,87 +1074,10 @@ int nzbget_rs_article_downloader_validate_yenc(
     int fallback_round, int64_t dupe_expected_offset, int64_t dupe_expected_end,
     int64_t* out_offset, int* out_size);
 
-typedef struct NzbgetRsMemberRange {
-    int32_t member_index;
-    int64_t offset;
-    int64_t size;
-} NzbgetRsMemberRange;
-
-typedef struct NzbgetRsContentRun {
-    int64_t inner_offset;
-    int32_t member_index;
-    int64_t member_offset;
-    int64_t size;
-} NzbgetRsContentRun;
-
-int nzbget_rs_stream_is_eligible(const char* filename);
 size_t nzbget_rs_stream_compute_holes(
     const NzbgetRsByteRange* covered, size_t count, int64_t file_size,
     NzbgetRsByteRange* out_holes, size_t cap);
 int64_t nzbget_rs_stream_total_size(const NzbgetRsByteRange* ranges, size_t count);
-int nzbget_rs_stream_intersects_any(
-    NzbgetRsByteRange range, const NzbgetRsByteRange* ranges, size_t count);
-size_t nzbget_rs_stream_select_probe_parts(
-    const NzbgetRsByteRange* donor_ranges, size_t donor_count,
-    const NzbgetRsByteRange* holes, size_t hole_count, int count,
-    int* out_parts, size_t cap);
-size_t nzbget_rs_stream_subtract_covered(
-    const NzbgetRsByteRange* holes, size_t hole_count, NzbgetRsByteRange covered,
-    NzbgetRsByteRange* out_holes, size_t cap);
-int nzbget_rs_stream_decoded_size_plausible(int64_t decoded_size, int64_t encoded_size);
-NzbgetRsBuf nzbget_rs_stream_suffix_key(const char* filename);
-NzbgetRsBuf nzbget_rs_stream_volume_key(const char* filename);
-int nzbget_rs_stream_exceeds_decompress_cap(
-    int64_t total_bytes, int64_t next_chunk, int64_t total_extent, int64_t member_declared_size);
-
-size_t nzbget_rs_composite_to_members(
-    const int32_t* member_indexes, const int64_t* disk_bases, const int64_t* member_sizes,
-    size_t member_count, NzbgetRsByteRange range, NzbgetRsMemberRange* out_pieces, size_t cap);
-int nzbget_rs_holed_source_intersects(
-    const NzbgetRsByteRange* holes, size_t hole_count, int64_t offset, int64_t size);
-size_t nzbget_rs_content_map_to_inner(
-    const NzbgetRsContentRun* runs, size_t run_count, int32_t member_index,
-    NzbgetRsByteRange member_range, NzbgetRsByteRange* out_ranges, size_t cap);
-size_t nzbget_rs_content_map_from_inner(
-    const NzbgetRsContentRun* runs, size_t run_count, NzbgetRsByteRange inner_range,
-    NzbgetRsMemberRange* out_pieces, size_t cap);
-size_t nzbget_rs_content_map_cipher_range(
-    const NzbgetRsContentRun* runs, const int64_t* cipher_data_offsets,
-    const int64_t* cipher_sizes, const uint8_t* has_crypto, size_t run_count,
-    NzbgetRsByteRange cipher_range, NzbgetRsMemberRange* out_pieces, size_t cap);
-void nzbget_rs_content_mapper_group_sets(
-    const char* const* member_names, size_t count, void* ctx,
-    void (*on_set)(void* ctx, int32_t format, const int32_t* members, size_t member_count));
-size_t nzbget_rs_content_mapper_coalesce_ranges(
-    const NzbgetRsByteRange* ranges, size_t count, NzbgetRsByteRange* out_ranges, size_t cap);
-int nzbget_rs_content_mapper_build_zip_map(
-    const int32_t* member_indexes, const int64_t* member_sizes, size_t count,
-    void* ctx,
-    int (*read_cb)(void* ctx, int32_t member_index, int64_t offset, uint8_t* buf, int64_t size),
-    void (*on_success)(void* ctx, const char* inner_name, int64_t inner_size,
-        const NzbgetRsContentRun* runs, size_t run_count),
-    void (*on_error)(void* ctx, const char* skip_reason));
-int nzbget_rs_content_mapper_build_seven_zip_map(
-    const int32_t* member_indexes, const int64_t* member_sizes, size_t count,
-    void* ctx,
-    int (*read_cb)(void* ctx, int32_t member_index, int64_t offset, uint8_t* buf, int64_t size),
-    void (*on_success)(void* ctx, const char* inner_name, int64_t inner_size,
-        const NzbgetRsContentRun* runs, size_t run_count),
-    void (*on_error)(void* ctx, const char* skip_reason));
-
-size_t nzbget_rs_stream_build_probe_windows(
-    int64_t inner_size, const NzbgetRsByteRange* holes, size_t hole_count,
-    const NzbgetRsByteRange* original_holes, size_t orig_count,
-    int probe_count, int64_t min_probe_compare_bytes,
-    NzbgetRsByteRange* out_windows, size_t cap);
-int64_t nzbget_rs_stream_plain_compare_floor(
-    const NzbgetRsContentRun* runs, size_t run_count,
-    const NzbgetRsByteRange* original_inner_holes, size_t orig_count,
-    const NzbgetRsByteRange* windows, size_t window_count);
-int64_t nzbget_rs_stream_encrypted_chain_start(
-    int64_t window_offset, int64_t window_end, int64_t block_size,
-    const NzbgetRsByteRange* original_holes, size_t orig_count);
-int nzbget_rs_stream_buffer_has_varied_data(const uint8_t* data, size_t len);
 void nzbget_rs_stream_compute_positional_rank(
     const char* const* member_names, const int64_t* member_sizes, size_t member_count,
     const char* target_filename, int64_t target_decoded_size,
@@ -5087,21 +4845,14 @@ int nzbget_rs_xmlrpc_parse_test_disk_speed(
     NzbgetRsBuf* out_dir_path, size_t* out_buffer_bytes, uint64_t* out_max_file_bytes,
     int* out_timeout_sec, const char** out_err_msg);
 
-int nzbget_rs_unpack_is_zipfast_supported_extension(const char* archive_path);
 int nzbget_rs_unpack_can_extract_with_zipfast(const char* archive_path);
 int nzbget_rs_unpack_extract_with_zipfast(
     const char* archive_path, const char* output_dir, const char* password,
     int overwrite_mode, int cleanup_disk,
     void (*log_cb)(void* ctx, int kind, const char* msg), void* log_ctx,
     int (*is_stopped_cb)(void* ctx));
-int nzbget_rs_zipview_inspect_file(
-    const char* archive_path, int* out_kind, size_t* out_file_count,
-    uint64_t* out_total_uncompressed, int* out_has_encrypted,
-    int* out_has_compressed, int* out_has_symlinks, int* out_has_nzb);
 
 void nzbget_rs_fs_fix_exec_permission(const char* filename);
-int nzbget_rs_fs_restore_permissions(const char* filename, uint32_t mode, uint32_t umask);
-int nzbget_rs_fs_restore_file_or_dir_permissions(const char* filename, uint32_t umask);
 
 void nzbget_rs_unpack_controller_check_archive_files(
     const char* dest_dir,
@@ -5471,15 +5222,6 @@ int nzbget_rs_feed_is_download_hanging(
 int nzbget_rs_feed_is_url_and_filter_updated(
     const char* existing_url, const char* preview_url,
     const char* existing_filter, const char* preview_filter, int64_t existing_last_update);
-
-NzbgetRsBuf nzbget_rs_xmlrpc_encode_str(int is_json, const char* str_ptr);
-void nzbget_rs_xmlrpc_decode_str(int is_json, char* str_ptr);
-int nzbget_rs_xmlrpc_classify_pause_action(
-    int pause_action, int pa_download, int pa_post_process, int pa_scan);
-const char* nzbget_rs_xmlrpc_array_open_tag(int is_json);
-const char* nzbget_rs_xmlrpc_array_close_tag(int is_json);
-int nzbget_rs_xmlrpc_status_effective_thread_count(int total_threads);
-const char* nzbget_rs_xmlrpc_status_default_memory_pressure_tier(const char* tier_name);
 
 #include "nzbget_tls_cipher.h"
 

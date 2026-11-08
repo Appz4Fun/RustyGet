@@ -7981,33 +7981,6 @@ pub extern "C" fn nzbget_rs_dupe_fallback_par_cannot_cover(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupe_fallback_has_extension(filename: *const c_char) -> c_int {
-    if filename.is_null() {
-        return 0;
-    }
-    let bytes = CStr::from_ptr(filename).to_bytes();
-    crate::dupefallback::has_extension(bytes) as c_int
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dupe_fallback_sizes_match(
-    size1: i64,
-    size2: i64,
-    div: c_int,
-) -> c_int {
-    crate::dupefallback::sizes_match(size1, size2, div) as c_int
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupe_fallback_declared_parts(subject: *const c_char) -> c_int {
-    if subject.is_null() {
-        return 0;
-    }
-    let bytes = CStr::from_ptr(subject).to_bytes();
-    crate::dupefallback::declared_parts(bytes)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dupe_fallback_steps_hash(
     sizes: *const c_int,
     count: usize,
@@ -8568,51 +8541,6 @@ pub extern "C" fn nzbget_rs_dupe_fallback_is_bad_donor_in_cooldown(
         bad_time,
         retry_sec as i64,
     ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupe_fallback_classify_content_name_match(
-    donor_filename: *const c_char,
-    by_content: *const c_char,
-) -> c_int {
-    crate::dupefallback::classify_content_name_match(
-        crate::queuecoord::cstr_to_bytes(donor_filename),
-        crate::queuecoord::cstr_to_bytes(by_content),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dupe_fallback_select_named_content_match(
-    exact_count: usize,
-    folded_count: usize,
-) -> c_int {
-    crate::dupefallback::select_named_content_match(exact_count, folded_count)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupe_fallback_is_donor_filename_match(
-    target_filename: *const c_char,
-    target_nzb_filename: *const c_char,
-    donor_filename: *const c_char,
-) -> c_int {
-    i32::from(crate::dupefallback::is_donor_filename_match(
-        crate::queuecoord::cstr_to_bytes(target_filename),
-        crate::queuecoord::cstr_to_bytes(target_nzb_filename),
-        crate::queuecoord::cstr_to_bytes(donor_filename),
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dupe_fallback_resolve_structural_or_filename_match(
-    filename_ambiguous: c_int,
-    has_filename_match: c_int,
-    structural_matches_len: usize,
-) -> c_int {
-    crate::dupefallback::resolve_structural_or_filename_match(
-        filename_ambiguous != 0,
-        has_filename_match != 0,
-        structural_matches_len,
-    )
 }
 
 #[no_mangle]
@@ -17460,52 +17388,6 @@ pub extern "C" fn nzbget_rs_dqh_fleet_calc_member_add_score(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_donor_health_error_increment(busy: c_int) -> c_int {
-    crate::dupesearch_nzb::donor_health_error_increment(busy != 0)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_donor_health_should_pause_server(
-    errors: c_int,
-    server_give_up: c_int,
-) -> c_int {
-    i32::from(
-        crate::dupesearch_nzb::donor_health_should_pause_server(errors, server_give_up),
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_donor_health_accum_verdict_counts(
-    verdict: c_int,
-    f_present: c_int,
-    f_missing: c_int,
-    f_error: c_int,
-    soft: c_int,
-    io_present: *mut c_int,
-    io_missing: *mut c_int,
-    io_error: *mut c_int,
-    io_body_bad: *mut c_int,
-) {
-    if !io_present.is_null()
-        && !io_missing.is_null()
-        && !io_error.is_null()
-        && !io_body_bad.is_null()
-    {
-        crate::dupesearch_nzb::donor_health_accum_verdict_counts(
-            verdict,
-            f_present,
-            f_missing,
-            f_error,
-            soft != 0,
-            &mut *io_present,
-            &mut *io_missing,
-            &mut *io_error,
-            &mut *io_body_bad,
-        );
-    }
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dupesearch_is_rank_only_queued_member(
     rank_only: c_int,
     is_self: c_int,
@@ -18331,186 +18213,6 @@ pub unsafe extern "C" fn nzbget_rs_stream_partition_encrypted_chunk(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_content_mapper_collect_inner_holes(
-    runs: *const crate::streamrepair::NzbgetRsContentRun,
-    run_count: usize,
-    hole_member_indices: *const i32,
-    holes: *const crate::dupefallback::NzbgetRsByteRange,
-    hole_count: usize,
-    ctx: *mut std::ffi::c_void,
-    on_holes_cb: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            *const crate::dupefallback::NzbgetRsByteRange,
-            usize,
-        ),
-    >,
-) {
-    if runs.is_null()
-        || run_count == 0
-        || hole_member_indices.is_null()
-        || holes.is_null()
-        || hole_count == 0
-    {
-        return;
-    }
-    let res = crate::streamrepair::content_mapper_collect_inner_holes(
-        std::slice::from_raw_parts(runs, run_count),
-        std::slice::from_raw_parts(hole_member_indices, hole_count),
-        std::slice::from_raw_parts(holes, hole_count),
-    );
-    if let Some(cb) = on_holes_cb {
-        if !res.is_empty() {
-            cb(ctx, res.as_ptr(), res.len());
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct NzbgetRsRarFileEntry {
-    pub volume_index: i32,
-    pub filename: *const c_char,
-    pub size: i64,
-    pub packed_size: i64,
-    pub data_offset: i64,
-    pub stored: u8,
-    pub encrypted_data: u8,
-    pub has_salt: u8,
-    pub salt: [u8; 8],
-    pub has_crypt: u8,
-    pub crypt_version: i32,
-    pub crypt_kdf_count: i32,
-    pub crypt_salt: [u8; 16],
-    pub crypt_iv: [u8; 16],
-}
-
-#[no_mangle]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn nzbget_rs_content_mapper_build_rar_map(
-    unknown_volume: c_int,
-    has_password: c_int,
-    vol_readable: *const u8,
-    vol_versions: *const i32,
-    vol_member_indices: *const i32,
-    vol_has_source: *const u8,
-    vol_source_sizes: *const i64,
-    vol_count: usize,
-    entries: *const NzbgetRsRarFileEntry,
-    entry_count: usize,
-    ctx: *mut std::ffi::c_void,
-    make_crypto_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, usize, c_int) -> c_int>,
-    on_map_cb: Option<
-        unsafe extern "C" fn(
-            *mut std::ffi::c_void,
-            *const c_char,
-            i64,
-            *const crate::streamrepair::NzbgetRsContentRun,
-            usize,
-            c_int,
-            *const i64,
-            *const i64,
-        ),
-    >,
-    on_skip_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char)>,
-) {
-    let readable_slice = if vol_readable.is_null() || vol_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(vol_readable, vol_count)
-    };
-    let versions_slice = if vol_versions.is_null() || vol_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(vol_versions, vol_count)
-    };
-    let member_idx_slice = if vol_member_indices.is_null() || vol_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(vol_member_indices, vol_count)
-    };
-    let has_src_slice = if vol_has_source.is_null() || vol_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(vol_has_source, vol_count)
-    };
-    let src_sizes_slice = if vol_source_sizes.is_null() || vol_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(vol_source_sizes, vol_count)
-    };
-    let raw_entries = if entries.is_null() || entry_count == 0 {
-        &[]
-    } else {
-        std::slice::from_raw_parts(entries, entry_count)
-    };
-    let mut entry_inputs = Vec::with_capacity(raw_entries.len());
-    for e in raw_entries {
-        entry_inputs.push(crate::streamrepair::RarFileEntryInput {
-            volume_index: e.volume_index,
-            filename: input(e.filename),
-            size: e.size,
-            packed_size: e.packed_size,
-            data_offset: e.data_offset,
-            stored: e.stored != 0,
-            encrypted_data: e.encrypted_data != 0,
-            has_salt: e.has_salt != 0,
-            salt: e.salt,
-            has_crypt: e.has_crypt != 0,
-            crypt_version: e.crypt_version,
-            crypt_kdf_count: e.crypt_kdf_count,
-            crypt_salt: e.crypt_salt,
-            crypt_iv: e.crypt_iv,
-        });
-    }
-    match crate::streamrepair::content_mapper_build_rar_map(
-        unknown_volume,
-        has_password != 0,
-        readable_slice,
-        versions_slice,
-        member_idx_slice,
-        has_src_slice,
-        src_sizes_slice,
-        &entry_inputs,
-        |first_vol, ver| {
-            make_crypto_cb.map_or(false, |cb| cb(ctx, first_vol, ver) != 0)
-        },
-    ) {
-        Ok(out) => {
-            if let Some(cb) = on_map_cb {
-                let mut name_c = out.inner_name;
-                name_c.push(0);
-                cb(
-                    ctx,
-                    name_c.as_ptr().cast(),
-                    out.inner_size,
-                    out.runs.as_ptr(),
-                    out.runs.len(),
-                    if out.encrypted { 1 } else { 0 },
-                    if out.cipher_data_offsets.is_empty() {
-                        std::ptr::null()
-                    } else {
-                        out.cipher_data_offsets.as_ptr()
-                    },
-                    if out.cipher_sizes.is_empty() {
-                        std::ptr::null()
-                    } else {
-                        out.cipher_sizes.as_ptr()
-                    },
-                );
-            }
-        }
-        Err(reason) => {
-            if let Some(cb) = on_skip_cb {
-                let mut reason_c = reason.as_bytes().to_vec();
-                reason_c.push(0);
-                cb(ctx, reason_c.as_ptr().cast());
-            }
-        }
-    }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_stream_select_extracted_inner(
     dir: *const c_char,
     inner_size: i64,
@@ -18526,29 +18228,6 @@ pub unsafe extern "C" fn nzbget_rs_stream_select_extracted_inner(
         *out_found_symlink = if found_link { 1 } else { 0 };
     }
     into_buf(selected)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupe_fallback_list_par2_files(
-    dir: *const c_char,
-    ctx: *mut std::ffi::c_void,
-    on_entry: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char, usize, u64, u64)>,
-) {
-    let dir_bytes = input(dir);
-    if dir_bytes.is_empty() {
-        return;
-    }
-    use std::ffi::OsStr;
-    use std::os::unix::ffi::OsStrExt;
-    let path = std::path::Path::new(OsStr::from_bytes(dir_bytes));
-    let entries = crate::dupefallback::list_par2_files(path);
-    if let Some(cb) = on_entry {
-        for (mut name, length, block_size) in entries {
-            let name_len = name.len();
-            name.push(0);
-            cb(ctx, name.as_ptr().cast(), name_len, length, block_size);
-        }
-    }
 }
 
 #[no_mangle]
@@ -19100,74 +18779,6 @@ pub unsafe extern "C" fn nzbget_rs_stream_order_donor_indices(
     let n = order.len().min(count);
     std::ptr::copy_nonoverlapping(order.as_ptr(), out_indices_ptr, n);
     n
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_donor_health_accum_health(
-    checked: *mut i32,
-    present: *mut i32,
-    missing: *mut i32,
-    error: *mut i32,
-    body_checked: *mut i32,
-    body_bad: *mut i32,
-    add_checked: i32,
-    add_present: i32,
-    add_missing: i32,
-    add_error: i32,
-    add_body_checked: i32,
-    add_body_bad: i32,
-) {
-    if checked.is_null()
-        || present.is_null()
-        || missing.is_null()
-        || error.is_null()
-        || body_checked.is_null()
-        || body_bad.is_null()
-    {
-        return;
-    }
-    crate::dupesearch_nzb::donor_health_accum_health(
-        &mut *checked,
-        &mut *present,
-        &mut *missing,
-        &mut *error,
-        &mut *body_checked,
-        &mut *body_bad,
-        add_checked,
-        add_present,
-        add_missing,
-        add_error,
-        add_body_checked,
-        add_body_bad,
-    );
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_donor_health_calc_worker_budget_ms(
-    deadline_ms: i64,
-    now_ms: i64,
-    cur_budget_ms: i32,
-    out_budget_ms: *mut i32,
-) -> i32 {
-    let mut b = cur_budget_ms;
-    let ok = crate::dupesearch_nzb::donor_health_calc_worker_budget_ms(
-        deadline_ms,
-        now_ms,
-        cur_budget_ms,
-        &mut b,
-    );
-    if !out_budget_ms.is_null() {
-        *out_budget_ms = b;
-    }
-    i32::from(ok)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_donor_health_calc_thread_count(
-    postings_len: usize,
-    concurrency: i32,
-) -> usize {
-    crate::dupesearch_nzb::donor_health_calc_thread_count(postings_len, concurrency)
 }
 
 #[no_mangle]
@@ -20513,18 +20124,6 @@ pub unsafe extern "C" fn nzbget_rs_queue_coord_format_par_damage_summary(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_unpack_ctrl_strip_last_extension(
-    frag_base_name: *const c_char,
-) -> RsBuf {
-    let f = if frag_base_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(frag_base_name).to_bytes()
-    };
-    into_buf(crate::unpack::unpack_ctrl_strip_last_extension(f))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_article_fetcher_format_body_cmd(
     message_id: *const c_char,
 ) -> RsBuf {
@@ -20614,13 +20213,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_dupesearch_format_indexed_base_path(
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_dupesearch_format_usize_str(idx: usize) -> RsBuf {
     into_buf(crate::dupesearch_nzb::dupesearch_format_usize_str(idx))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_nzb_fetcher_format_http_status_err(
-    status: c_int,
-) -> RsBuf {
-    into_buf(crate::dupesearch_nzb::nzb_fetcher_format_http_status_err(status))
 }
 
 #[no_mangle]
@@ -20747,36 +20339,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_log_format_deleting_old_msg(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_log_format_rotated_path(
-    directory: *const c_char,
-    sep: c_char,
-    base_name: *const c_char,
-    year: c_int,
-    month: c_int,
-    mday: c_int,
-    base_ext: *const c_char,
-) -> RsBuf {
-    let d = if directory.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(directory).to_bytes()
-    };
-    let n = if base_name.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(base_name).to_bytes()
-    };
-    let e = if base_ext.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(base_ext).to_bytes()
-    };
-    into_buf(crate::systemhealth::log_format_rotated_path(
-        d, sep as u8, n, year, month, mday, e,
-    ))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_ncurses_format_plot_line(
     text: *const c_char,
     screen_width: c_int,
@@ -20794,24 +20356,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_ncurses_format_plot_line(
         pos,
         max_screen_width,
     ))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_benchmark_format_unique_filename(
-    epoch_ticks: i64,
-) -> RsBuf {
-    into_buf(crate::tlscipher::benchmark_format_unique_filename(epoch_ticks))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_benchmark_resolve_block_size(
-    block_size_bytes: usize,
-    default_block_size: usize,
-) -> usize {
-    crate::tlscipher::benchmark_resolve_block_size(
-        block_size_bytes,
-        default_block_size,
-    )
 }
 
 #[no_mangle]
@@ -21122,16 +20666,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_tls_resolve_probe_result(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_parse_c_atoll(text: *const c_char) -> i64 {
-    let s = if text.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(text).to_bytes()
-    };
-    crate::util::parse_c_atoll(s)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_parse_c_atoi(text: *const c_char) -> c_int {
     let s = if text.is_null() {
         &[][..]
@@ -21163,34 +20697,6 @@ pub unsafe extern "C" fn nzbget_rs_dqh_diskstate_parse_queue_file_id_and_suffix(
             1
         }
         None => 0,
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_log_parse_rotated_date_fields(
-    filename: *const c_char,
-    year_off: usize,
-    mon_off: usize,
-    mday_off: usize,
-    out_year: *mut c_int,
-    out_mon: *mut c_int,
-    out_mday: *mut c_int,
-) {
-    let f = if filename.is_null() {
-        &[][..]
-    } else {
-        CStr::from_ptr(filename).to_bytes()
-    };
-    let (y, m, d) =
-        crate::systemhealth::log_parse_rotated_date_fields(f, year_off, mon_off, mday_off);
-    if !out_year.is_null() {
-        *out_year = y;
-    }
-    if !out_mon.is_null() {
-        *out_mon = m;
-    }
-    if !out_mday.is_null() {
-        *out_mday = d;
     }
 }
 
@@ -21365,44 +20871,6 @@ pub unsafe extern "C" fn nzbget_rs_dupe_util_read_all(
         std::slice::from_raw_parts(path as *const u8, path_len)
     };
     into_buf(crate::dupesearch_nzb::dupe_read_all_bytes(p))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_util_classify_executor_ext(
-    filename: *const c_char,
-    filename_len: usize,
-    out_dot_idx: *mut usize,
-) -> c_int {
-    let f = if filename.is_null() || filename_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(filename as *const u8, filename_len)
-    };
-    let (kind, idx) = crate::util::util_classify_executor_ext(f);
-    if !out_dot_idx.is_null() {
-        *out_dot_idx = idx;
-    }
-    kind
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dqh_slice_eq_ignore_case(
-    a: *const c_char,
-    a_len: usize,
-    b: *const c_char,
-    b_len: usize,
-) -> c_int {
-    let sa = if a.is_null() || a_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(a as *const u8, a_len)
-    };
-    let sb = if b.is_null() || b_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(b as *const u8, b_len)
-    };
-    i32::from(crate::util::bytes_eq_ignore_case(sa, sb))
 }
 
 #[no_mangle]
@@ -21809,34 +21277,6 @@ pub extern "C" fn nzbget_rs_dqh_article_fetcher_has_more_transient_attempts(
             max_transient_attempts,
         ),
     )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_article_batch_can_store_result(
-    batch_id: c_int,
-    current_batch_id: c_int,
-    cancelled: c_int,
-) -> c_int {
-    i32::from(crate::nntp::article_batch_can_store_result(
-        batch_id,
-        current_batch_id,
-        cancelled != 0,
-    ))
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_article_batch_can_deliver_next(
-    cancelled: c_int,
-    stopped: c_int,
-    next_deliver: usize,
-    total_requests: usize,
-) -> c_int {
-    i32::from(crate::nntp::article_batch_can_deliver_next(
-        cancelled != 0,
-        stopped != 0,
-        next_deliver,
-        total_requests,
-    ))
 }
 
 #[no_mangle]
@@ -22328,32 +21768,6 @@ pub extern "C" fn nzbget_rs_dqh_statmeter_has_any_quota_configured(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_statmeter_is_before_quota_start_day(
-    quota_start_day: c_int,
-    cur_mday: c_int,
-) -> c_int {
-    i32::from(
-        crate::statmeter::statmeter_is_before_quota_start_day(
-            quota_start_day,
-            cur_mday,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_statmeter_did_prev_month_day_overflow(
-    prev_mday: c_int,
-    quota_start_day: c_int,
-) -> c_int {
-    i32::from(
-        crate::statmeter::statmeter_did_prev_month_day_overflow(
-            prev_mday,
-            quota_start_day,
-        ),
-    )
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_dqh_nntp_conn_classify_handshake_result(result: c_int) -> c_int {
     crate::nntp::nntp_conn_classify_handshake_result(result)
 }
@@ -22395,19 +21809,6 @@ pub extern "C" fn nzbget_rs_dqh_article_fetcher_is_join_group_failure_transient(
     i32::from(
         crate::nntp::article_fetcher_is_join_group_failure_transient(
             has_response != 0,
-        ),
-    )
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_dqh_article_batch_should_ensure_workers(
-    worker_count: c_int,
-    is_stopped: c_int,
-) -> c_int {
-    i32::from(
-        crate::nntp::article_batch_should_ensure_workers(
-            worker_count,
-            is_stopped != 0,
         ),
     )
 }

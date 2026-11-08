@@ -4074,8 +4074,6 @@ inline void Log::UpdateLogPath(const char* newPath)
 #ifndef SERVICE_H
 #define SERVICE_H
 
-#include "nzbget_rs.h"
-
 class ServiceCoordinator;
 extern ServiceCoordinator* g_ServiceCoordinator;
 
@@ -5598,10 +5596,6 @@ extern ScriptConfig* g_ScriptConfig;
 #ifndef CONNECTION_H
 #define CONNECTION_H
 
-#include <atomic>
-#include <string>
-#include <memory>
-#include <vector>
 /*
  *  This file is part of nzbget. See <https://nzbget.com>.
  *
@@ -5624,11 +5618,6 @@ extern ScriptConfig* g_ScriptConfig;
 
 #ifndef TLSSOCKET_H
 #define TLSSOCKET_H
-
-#include <chrono>
-#include <functional>
-#include <cstdint>
-#include "nzbget_rs.h"
 
 struct SocketDeadline
 {

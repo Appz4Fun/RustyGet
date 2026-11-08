@@ -5451,8 +5451,6 @@ typedef std::vector<std::unique_ptr<NewsServer>> Servers;
 #ifndef SCRIPTCONFIG_H
 #define SCRIPTCONFIG_H
 
-#include <functional>
-
 class ScriptConfig
 {
 public:
@@ -5643,7 +5641,6 @@ struct SocketDeadline
 
 #ifndef DISABLE_TLS
 
-#include <string_view>
 #include <openssl/sslerr.h>
 
 class TlsSocket
@@ -6091,7 +6088,6 @@ private:
 #define SYSTEM_INFO_H
 
 #include <ostream>
-#include <string>
 
 namespace System
 {
@@ -6413,8 +6409,6 @@ protected:
 	void CloseTls();
 #endif
 };
-
-#include "nzbget_rs.h"
 
 // sockets aren't inherited by the scripts nzbget starts: a script that outlived
 // the program kept the control port listening, and copies of client sockets kept
@@ -8192,14 +8186,6 @@ inline void WebDownloader::FreeConnection()
 #ifndef DISKSTATE_H
 #define DISKSTATE_H
 
-#include <atomic>
-#include <algorithm>
-#include <functional>
-#include <set>
-#include <string>
-#include <vector>
-#include "nzbget_rs.h"
-
 #ifndef DOWNLOADINFO_H
 #define DOWNLOADINFO_H
 class NzbInfo;
@@ -9635,23 +9621,6 @@ extern DiskState* g_DiskState;
 
 
 #ifndef SERVERPOOL_H
-
-#include <algorithm>
-#include <array>
-#include <atomic>
-#include <exception>
-#include <functional>
-#include <iomanip>
-#include <map>
-#include <memory>
-#include <optional>
-#include <set>
-#include <sstream>
-#include <string>
-#include <vector>
-#include "nzbget_rs.h"
-
-#ifndef SERVERPOOL_H
 #define SERVERPOOL_H
 
 #ifndef NNTPCONNECTION_H
@@ -9906,9 +9875,6 @@ private:
 };
 
 extern ServerPool* g_ServerPool;
-
-#include <algorithm>
-#include "nzbget_rs.h"
 
 inline constexpr int CONNECTION_HOLD_SECODNS = 5;
 
@@ -10293,10 +10259,6 @@ inline void ServerPool::LogDebugInfo()
 
 #if !defined(DISABLE_TLS) && (defined(__APPLE__) || defined(__linux__))
 #include <openssl/rand.h>
-#include <array>
-#include <limits>
-#include <memory>
-#include <vector>
 
 namespace TlsCipherBackend
 {
@@ -13525,7 +13487,6 @@ inline void ArticleBatchFetcher::Stop()
 	nzbget_rs_article_batch_fetcher_stop(m_rsBatch);
 }
 
-#endif
 #endif
 
 static const char* FORMATVERSION_SIGNATURE = "nzbget diskstate file version ";

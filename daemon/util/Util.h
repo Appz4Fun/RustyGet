@@ -31178,13 +31178,6 @@ inline void PrePostProcessor::FileDownloaded(DownloadQueue* downloadQueue, NzbIn
 
 #endif
 
-#include <filesystem>
-#include <fstream>
-#include <memory>
-#include <optional>
-
-#include "nzbget_rs.h"
-
 class ScanScriptCheck : public NzbScriptController
 {
 protected:
@@ -32895,15 +32888,7 @@ inline void UrlCoordinator::AddUrlToQueue(std::unique_ptr<NzbInfo> nzbInfo, bool
 
 #ifndef DUPESEARCH_H
 #define DUPESEARCH_H
-#include <condition_variable>
-#include <atomic>
 #include <ctime>
-#include <functional>
-#include <map>
-#include <memory>
-#include <mutex>
-#include <set>
-#include <string>
 /*
  *  This file is part of nzbget. See <https://nzbget.com>.
  *
@@ -32926,15 +32911,6 @@ inline void UrlCoordinator::AddUrlToQueue(std::unique_ptr<NzbInfo> nzbInfo, bool
 
 #ifndef DONORHEALTH_H
 #define DONORHEALTH_H
-
-#include <atomic>
-#include <chrono>
-#include <condition_variable>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <vector>
 
 /*
  * How much of a posting still exists on the news servers: a sample of its
@@ -33090,10 +33066,6 @@ public:
 	static void Reset();
 	static bool Stopping();
 };
-
-#include <algorithm>
-#include <exception>
-#include "nzbget_rs.h"
 
 inline long long DonorHealth::NowMs()
 {
@@ -33354,15 +33326,6 @@ inline void DonorHealth::CheckPostings(const ServerList& servers, const std::vec
 			}
 		});
 }
-
-#include <algorithm>
-#include <cstdint>
-#include <ctime>
-#include <map>
-#include <set>
-#include <thread>
-#include <utility>
-#include "nzbget_rs.h"
 
 class ReleaseName
 {
@@ -34212,8 +34175,6 @@ private:
 
 #endif
 
-#include "nzbget_rs.h"
-
 struct NzbgetRsDeadPostingsStore;
 
 class DeadPostings
@@ -34606,14 +34567,6 @@ private:
 };
 
 extern DupeSearch* g_DupeSearch;
-
-#include <chrono>
-#include <limits>
-#include <fstream>
-#include <sstream>
-#include <algorithm>
-#include <thread>
-#include "nzbget_rs.h"
 
 class DonorScore
 {
@@ -36831,9 +36784,6 @@ inline bool DupeSearch::SaveState()
 #ifndef FLEET_H
 #define FLEET_H
 
-#include <string>
-#include <vector>
-
 /*
  * A fleet: several nzb-files a client believes are copies of one release,
  * sent at once (JSON-RPC method "appendfleet"). Nothing downloads before
@@ -36895,13 +36845,6 @@ public:
 	/* checks, ranks and adds the members; blocks for up to request.timeoutSec */
 	static Result Append(Request request);
 };
-
-#include <algorithm>
-#include <map>
-#include <chrono>
-#include <mutex>
-#include <thread>
-#include "nzbget_rs.h"
 
 namespace FleetDetail
 {
@@ -37382,9 +37325,6 @@ inline Fleet::Result Fleet::Append(Request request)
 #endif
 
 #endif
-
-#include <set>
-#include "nzbget_rs.h"
 
 /**
  * Removes old entries from (recent) history
@@ -44560,9 +44500,6 @@ private:
 	bool CheckCredentials();
 };
 
-#include <climits>
-#include "nzbget_rs.h"
-
 class XmlCommand;
 
 class XmlRpcProcessor
@@ -44672,7 +44609,6 @@ protected:
 	void DecodeStr(char* str);
 };
 
-#include "nzbget_rs.h"
 /*
  *  This file is part of nzbget. See <https://nzbget.com>.
  *
@@ -44696,9 +44632,6 @@ protected:
 
 #ifndef FEEDCOORDINATOR_H
 #define FEEDCOORDINATOR_H
-
-#include <atomic>
-#include "nzbget_rs.h"
 
 struct NzbgetRsFeedFileParser;
 
@@ -45052,8 +44985,6 @@ private:
 	FeedInfo* m_feedInfo;
 };
 
-#include "nzbget_rs.h"
-
 class FeedScriptController : public NzbScriptController
 {
 public:
@@ -45317,8 +45248,12 @@ inline void FeedCoordinator::ResetHangingDownloads()
 
 	for (FeedDownloader* feedDownloader: m_activeDownloads)
 	{
-		if (tm - feedDownloader->GetLastUpdateTime() > urlTimeout + 10 &&
-			feedDownloader->GetStatus() == FeedDownloader::adRunning)
+		if (nzbget_rs_feed_is_download_hanging(
+			(int64_t)tm,
+			(int64_t)feedDownloader->GetLastUpdateTime(),
+			urlTimeout,
+			(int)feedDownloader->GetStatus(),
+			(int)FeedDownloader::adRunning))
 		{
 			error("Cancelling hanging feed download %s", feedDownloader->GetInfoName());
 			feedDownloader->Stop();
@@ -45605,9 +45540,12 @@ inline std::shared_ptr<FeedItemList> FeedCoordinator::PreviewFeed(int id,
 
 			for (FeedInfo* feedInfo2 : &m_feeds)
 			{
-				if (!strcmp(feedInfo2->GetUrl(), feedInfo->GetUrl()) &&
-					!strcmp(feedInfo2->GetFilter(), feedInfo->GetFilter()) &&
-					feedInfo2->GetLastUpdate() > 0)
+				if (nzbget_rs_feed_is_url_and_filter_updated(
+					feedInfo2->GetUrl(),
+					feedInfo->GetUrl(),
+					feedInfo2->GetFilter(),
+					feedInfo->GetFilter(),
+					(int64_t)feedInfo2->GetLastUpdate()))
 				{
 					firstFetch = false;
 					break;
@@ -45826,7 +45764,6 @@ inline void FeedCoordinator::CleanupCache()
 
 #ifndef SCHEDULER_H
 #define SCHEDULER_H
-#include "nzbget_rs.h"
 
 class SchedulerScriptController : public Thread, public NzbScriptController
 {

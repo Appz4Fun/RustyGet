@@ -4593,37 +4593,12 @@ NzbgetRsBuf nzbget_rs_twin_resolve_kind(
     int is_primary, int is_dupe, int by_par2, const char* by_files, int listed, int same_print,
     int sampleable, int sampled_now, const char* sampled_val);
 
-int nzbget_rs_streamcrypto_derive_rar3(
-    const char* password, const uint8_t* salt8, uint8_t* key16_out, uint8_t* iv16_out);
-int nzbget_rs_streamcrypto_derive_rar5(
-    const char* password, uint8_t kdf_count, const uint8_t* salt16, uint8_t* key32_out);
-int nzbget_rs_streamcrypto_derive_rar5_psw_check(
-    const char* password, uint8_t kdf_count, const uint8_t* salt16, uint8_t* check8_out);
-int nzbget_rs_streamcrypto_crypt_cbc(
-    int encrypt, const uint8_t* key, size_t key_len, const uint8_t* iv16,
-    const uint8_t* in_buf, uint8_t* out_buf, int64_t blocks);
-
 int nzbget_rs_stream_eval_build_repair_job(
     int fallback_mode, int daf_stream, int raw_article, int is_par_file,
     const char* disk_basename, int has_nzb, int delete_status, int ds_none,
     int ds_health, int deleting, int parking, int has_post_info,
     int articles_empty, int success_articles, int64_t encoded_size,
     int64_t decoded_file_size);
-int nzbget_rs_stream_donor_check_fetched_part(
-    int success, size_t data_len, int64_t offset, int64_t fetched_file_size,
-    int64_t member_size, int* out_mark_member_bad);
-int nzbget_rs_stream_donor_index_for_offset(
-    int64_t offset, int64_t drift,
-    const NzbgetRsByteRange* ranges, size_t ranges_len);
-int nzbget_rs_stream_donor_step_part_for_offset(
-    int64_t offset, int64_t fetched_offset, size_t fetched_len,
-    int index, size_t ranges_len, int* out_new_index);
-void nzbget_rs_stream_donor_calc_prefetch_bounds(
-    int first_est, int last_est, size_t ranges_len,
-    int* out_first, int* out_last);
-void nzbget_rs_stream_donor_calc_read_chunk(
-    int64_t pos, int64_t fetched_offset, size_t fetched_data_len,
-    int64_t end_offset, int64_t* out_from, int64_t* out_len);
 int nzbget_rs_stream_watchdog_eval_tick(
     int64_t progress_bytes, int64_t prev_progress, int waiting, int materializing,
     int64_t since_last_progress_sec, int64_t since_begun_sec, int64_t since_start_sec,
@@ -4633,49 +4608,12 @@ int nzbget_rs_stream_watchdog_eval_tick(
     NzbgetRsBuf* out_reason);
 NzbgetRsBuf nzbget_rs_stream_format_whole_files_suffix(int unsized_count);
 int nzbget_rs_stream_is_par2_job_or_file(int is_par_file, const char* filename);
-size_t nzbget_rs_stream_select_probe_replacements(
-    int missing, const int* reserve, size_t reserve_len, int max_probe_fetches,
-    size_t attempted_len, int* out_batch, size_t max_out);
-int nzbget_rs_stream_check_probe_article(
-    int success, size_t data_len, int64_t file_size, int64_t offset,
-    int64_t target_decoded_size, int* out_is_missing);
-int nzbget_rs_stream_is_patch_article_usable(
-    int success, int64_t fetched_file_size, int64_t target_decoded_size,
-    size_t data_len, int64_t fetched_offset);
-int nzbget_rs_stream_clip_hole_to_fetched(
-    int64_t hole_offset, int64_t hole_size, int64_t fetched_offset, size_t fetched_len,
-    int64_t* out_from, int64_t* out_to);
 int nzbget_rs_stream_classify_remaining_hole_target(
     int interrupted, int64_t decoded_file_size, int holes_empty, int is_par_file,
     int failed_articles, int64_t failed_size, int64_t missed_size,
     int* inout_recovered_articles, int64_t* inout_recovered_failed_size,
     int64_t* inout_recovered_failed_par_size);
 int nzbget_rs_stream_is_incomplete_nzb_hole(int64_t missing, int64_t encoded_size);
-int nzbget_rs_stream_patch_donor_set_step_failure(
-    int64_t chunk, int64_t min_chunk, int64_t* inout_size, int64_t* inout_pos,
-    int* inout_failed_pieces, int max_failed_pieces);
-int nzbget_rs_stream_calc_encrypted_window_bounds(
-    int64_t window_offset, int64_t window_end_raw, int64_t last_computable,
-    int64_t block_from, int64_t block_size,
-    int64_t* out_window_end, int64_t* out_from, int64_t* out_block_to);
-int nzbget_rs_stream_encrypted_clip_live_hole(
-    int64_t hole_offset, int64_t hole_size,
-    const NzbgetRsByteRange* live_holes, size_t live_holes_len,
-    int64_t last_computable, int64_t block_size,
-    int64_t* inout_uncomputable_tail, int64_t* out_hole_from,
-    int64_t* out_patch_to, int64_t* out_block_from, int64_t* out_block_to);
-int nzbget_rs_stream_encrypted_is_prev_block_present(
-    int64_t block_from, int64_t block_size,
-    const NzbgetRsByteRange* live_holes, size_t live_holes_len);
-void nzbget_rs_stream_calc_encrypted_chunk_end(
-    int64_t block_from, int64_t block_to, int64_t max_chunk, int64_t block_size,
-    int64_t* out_chunk_end, int64_t* out_block_count);
-NzbgetRsBuf nzbget_rs_stream_format_materialize_progress(
-    const char* donor_name, int member_num, int total_members,
-    int delivered_articles, int total_articles, int64_t total_bytes);
-int nzbget_rs_stream_materialize_article_valid(
-    int success, size_t data_len, int64_t offset, int64_t fetched_file_size,
-    int64_t member_size);
 void nzbget_rs_stream_credit_repaired_sizes(
     int64_t recovered_failed_size, int64_t recovered_failed_par_size,
     int64_t* inout_failed_size, int64_t* inout_success_size,
@@ -4749,8 +4687,6 @@ void* nzbget_rs_nzb_fetcher_new(void);
 void nzbget_rs_nzb_fetcher_free(void* handle);
 void nzbget_rs_nzb_fetcher_set_state_path(void* handle, const char* path, size_t path_len);
 void nzbget_rs_nzb_fetcher_load(void* handle, int64_t now);
-int nzbget_rs_nzb_fetcher_is_refused(void* handle, const char* indexer, size_t indexer_len, int64_t now);
-int nzbget_rs_nzb_fetcher_refuse(void* handle, const char* indexer, size_t indexer_len, int64_t now);
 int nzbget_rs_nzb_fetcher_fetch(
     void* handle, const char* indexer, size_t indexer_len,
     const char* title, size_t title_len, const char* link, size_t link_len,
@@ -4809,13 +4745,6 @@ int nzbget_rs_benchmark_run(
     uint64_t* out_read_bytes, double* out_read_ms,
     NzbgetRsBuf* out_err);
 
-int nzbget_rs_util_is_control_char(uint8_t c);
-int nzbget_rs_util_str_to_f64_checked(
-    const char* s, size_t s_len, double min_val, double max_val, double* out_val);
-int nzbget_rs_util_str_to_i64_checked(
-    const char* s, size_t s_len, int64_t min_val, int64_t max_val, int64_t* out_val);
-int nzbget_rs_util_str_to_u64_checked(
-    const char* s, size_t s_len, uint64_t max_val, uint64_t* out_val);
 int64_t nzbget_rs_util_safe_int_cast_i64_to_i64(int64_t num, int64_t min_to, int64_t max_to);
 int64_t nzbget_rs_util_safe_int_cast_u64_to_i64(uint64_t num, uint64_t max_to);
 uint64_t nzbget_rs_util_safe_int_cast_i64_to_u64(int64_t num, uint64_t max_to);
@@ -4827,9 +4756,6 @@ int nzbget_rs_regex_is_valid(const void* handle);
 int nzbget_rs_regex_match(
     void* handle, void* ctx,
     int (*exec_cb)(void* ctx, int32_t* out_so, int32_t* out_eo, size_t nmatch));
-int nzbget_rs_regex_get_match_count(const void* handle);
-int nzbget_rs_regex_get_match_start(const void* handle, int index);
-int nzbget_rs_regex_get_match_len(const void* handle, int index);
 
 void* nzbget_rs_article_batch_fetcher_new(
     void* ctx,
@@ -4841,7 +4767,6 @@ void* nzbget_rs_article_batch_fetcher_new(
     void (*stop_cb)(void* ctx));
 void nzbget_rs_article_batch_fetcher_free(void* handle);
 void nzbget_rs_article_batch_fetcher_set_worker_count(void* handle, int worker_count);
-int nzbget_rs_article_batch_fetcher_get_window_parts(const void* handle);
 void nzbget_rs_article_batch_fetcher_begin(
     void* handle, size_t req_count, void* ctx,
     size_t (*get_req_cb)(
@@ -4929,7 +4854,6 @@ int nzbget_rs_fs_open_cloexec_fd(const char* filename, int mode, int om_read, in
 int nzbget_rs_fs_flush_file_buffers(int file_descriptor, NzbgetRsBuf* out_errmsg);
 int nzbget_rs_fs_flush_dir_buffers(const char* filename, char path_sep, NzbgetRsBuf* out_errmsg);
 int nzbget_rs_fs_allocate_file(const char* filename, int64_t size, NzbgetRsBuf* out_errmsg);
-int nzbget_rs_fs_copy_file(const char* src_filename, const char* dst_filename);
 int nzbget_rs_fs_move_file(const char* src_filename, const char* dst_filename);
 int nzbget_rs_fs_move_file_no_overwrite(const char* src_filename, const char* dst_filename);
 int nzbget_rs_fs_get_disk_state(

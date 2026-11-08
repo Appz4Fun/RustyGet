@@ -22,8 +22,8 @@
 
 #ifndef FRONTEND_H
 #define FRONTEND_H
-#include "Log.h"
-#include "DownloadInfo.h"
+#include "Util.h"
+#include "DiskState.h"
 /*
  *  This file is part of nzbget. See <https://nzbget.com>.
  *
@@ -497,7 +497,7 @@ struct SNzbHistoryResponseEntry
 #endif
 
 #include "QueueCoordinator.h"
-#include "Options.h"
+#include "Util.h"
 #include "Connection.h"
 /*
  *  This file is part of nzbget. See <https://nzbget.com>.
@@ -524,9 +524,9 @@ struct SNzbHistoryResponseEntry
 #ifndef REMOTECLIENT_H
 #define REMOTECLIENT_H
 
-#include "Options.h"
+#include "Util.h"
 #include "Connection.h"
-#include "DownloadInfo.h"
+#include "DiskState.h"
 
 class RemoteClient
 {
@@ -575,9 +575,9 @@ private:
 	void perror(const char* msg);
 };
 
-#include "DownloadInfo.h"
-#include "Options.h"
-#include "Log.h"
+#include "DiskState.h"
+#include "Util.h"
+#include "Util.h"
 #include "Util.h"
 #include "Util.h"
 #include "nzbget_rs.h"
@@ -1902,8 +1902,8 @@ private:
 #ifndef DISABLE_CURSES
 
 #include <string>
-#include "Log.h"
-#include "DownloadInfo.h"
+#include "Util.h"
+#include "DiskState.h"
 
 class NCursesFrontend : public Frontend
 {
@@ -1984,7 +1984,7 @@ private:
 
 #ifndef DISABLE_CURSES
 
-#include "Options.h"
+#include "Util.h"
 #include "Util.h"
 #include "nzbget_rs.h"
 

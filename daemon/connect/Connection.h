@@ -81,9 +81,9 @@ struct SocketDeadline
 
 #include <string_view>
 #include <openssl/sslerr.h>
-#include "Log.h"
 #include "Util.h"
-#include "Options.h"
+#include "Util.h"
+#include "Util.h"
 
 class TlsSocket
 {
@@ -859,9 +859,9 @@ protected:
 };
 
 #include "nzbget_rs.h"
-#include "Log.h"
 #include "Util.h"
-#include "Options.h"
+#include "Util.h"
+#include "Util.h"
 
 // sockets aren't inherited by the scripts nzbget starts: a script that outlived
 // the program kept the control port listening, and copies of client sockets kept

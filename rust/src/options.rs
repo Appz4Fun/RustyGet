@@ -1039,6 +1039,88 @@ pub fn options_trim_and_check_config_line(line: &[u8]) -> (usize, bool) {
     (len, skip)
 }
 
+pub const POSSIBLE_CONFIG_LOCATIONS: &[&[u8]] = &[
+    b"~/.rustyget",
+    b"~/.config/rustyget.conf",
+    b"~/.config/rustyget/rustyget.conf",
+    b"/etc/rustyget.conf",
+    b"/usr/etc/rustyget.conf",
+    b"/usr/local/etc/rustyget.conf",
+    b"/opt/etc/rustyget.conf",
+    b"~/usr/etc/rustyget.conf",
+    b"~/.nzbget",
+    b"~/.config/nzbget.conf",
+    b"~/.config/nzbget/nzbget.conf",
+    b"/etc/nzbget.conf",
+    b"/usr/etc/nzbget.conf",
+    b"/usr/local/etc/nzbget.conf",
+    b"/opt/etc/nzbget.conf",
+    b"~/usr/etc/nzbget.conf",
+];
+
+/// Searches for a default configuration file in `app_dir` first, then in `POSSIBLE_CONFIG_LOCATIONS`
+/// (with `~` expanded via `HOME` or passwd fallback).
+pub fn find_default_config_file(
+    app_dir: &[u8],
+    sep: u8,
+    mut file_exists: impl FnMut(&CStr) -> bool,
+) -> Option<Vec<u8>> {
+    let first = options_format_default_conf_path(app_dir, sep);
+    let first_c = cstring(first.clone());
+    if file_exists(&first_c) {
+        return Some(first);
+    }
+
+    for &alt in POSSIBLE_CONFIG_LOCATIONS {
+        let alt_c = cstring(alt.to_vec());
+        let expanded = crate::fsops::expand_home_path_auto(Some(&alt_c));
+        let exp_c = cstring(expanded.clone());
+        if file_exists(&exp_c) {
+            return Some(expanded);
+        }
+    }
+    None
+}
+
+/// Reads a configuration file line by line, trimming CR/LF and skipping blank/comment lines,
+/// invoking `on_line(line_no, trimmed_line)` for each non-skipped line (`Options::LoadConfigFile`).
+pub fn load_config_file_lines(path: &CStr, mut on_line: impl FnMut(i32, &CStr)) -> bool {
+    #[cfg(unix)]
+    let os_path = {
+        use std::os::unix::ffi::OsStrExt;
+        std::path::Path::new(std::ffi::OsStr::from_bytes(path.to_bytes()))
+    };
+    #[cfg(not(unix))]
+    let os_path = std::path::Path::new(path.to_str().unwrap_or(""));
+
+    let Ok(file) = std::fs::File::open(os_path) else {
+        return false;
+    };
+    use std::io::BufRead;
+    let mut reader = std::io::BufReader::new(file);
+    let mut raw = Vec::new();
+    let mut line_no = 0i32;
+    loop {
+        raw.clear();
+        match reader.read_until(b'\n', &mut raw) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                line_no += 1;
+                if let Some(nul) = raw.iter().position(|&b| b == 0) {
+                    raw.truncate(nul);
+                }
+                let (trimmed_len, skip) = options_trim_and_check_config_line(&raw);
+                if skip {
+                    continue;
+                }
+                let c_line = cstring(raw[..trimmed_len].to_vec());
+                on_line(line_no, &c_line);
+            }
+        }
+    }
+    true
+}
+
 const SCHEDULER_COMMAND_MAP: [(&[u8], i32); 27] = [
     (b"pausedownload", 0),
     (b"pause", 0),
@@ -3878,6 +3960,30 @@ mod options_full_suite_port_from_cpp {
         let long_web_dir = format!("/{long_seg}").into_bytes();
         let default_conf = options_format_default_conf_path(&long_web_dir, crate::paths::PATH_SEPARATOR);
         assert_eq!(default_conf.len(), 2501 + "/nzbget.conf".len());
+    }
+
+    #[test]
+    fn find_default_and_load_config_file_test() {
+        let found = find_default_config_file(b"/opt/app", b'/', |p| {
+            p.to_bytes() == b"/etc/rustyget.conf"
+        });
+        assert_eq!(found.as_deref(), Some(b"/etc/rustyget.conf".as_slice()));
+
+        let tmp = std::env::temp_dir().join(format!("rustyget_opts_test_{}.conf", std::process::id()));
+        std::fs::write(&tmp, b"# comment\n\nControlPort=6789\r\n  \nMainDir=/tmp/rg\n").unwrap();
+        let c_tmp = CString::new(tmp.to_str().unwrap()).unwrap();
+        let mut lines = Vec::new();
+        assert!(load_config_file_lines(&c_tmp, |ln, s| {
+            lines.push((ln, s.to_bytes().to_vec()));
+        }));
+        let _ = std::fs::remove_file(&tmp);
+        assert_eq!(
+            lines,
+            vec![
+                (3, b"ControlPort=6789".to_vec()),
+                (5, b"MainDir=/tmp/rg".to_vec())
+            ]
+        );
     }
 }
 

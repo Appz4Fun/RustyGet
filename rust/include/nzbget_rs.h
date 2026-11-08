@@ -5979,6 +5979,18 @@ int nzbget_rs_unpack_controller_eval_completed_failure(
     int has_password, int has_unpack_pass_file, int pass_list_tried,
     int* out_force_repair, int* out_unpack_status);
 
+int nzbget_rs_log_should_delete_rotated_file_by_name(
+    const char* filename, size_t year_off, size_t mon_off, size_t mday_off,
+    int64_t cur_time, int rotate_log);
+NzbgetRsBuf nzbget_rs_log_format_rotated_path_for_time(
+    const char* directory, char sep, const char* base_name, int64_t cur_time, const char* base_ext);
+NzbgetRsBuf nzbget_rs_options_find_default_config_file(
+    const char* app_dir, char sep, void* ctx,
+    int (*file_exists_cb)(void*, const char*), int* out_found);
+int nzbget_rs_options_load_config_file(
+    const char* path, void* ctx,
+    void (*on_line_cb)(void*, int, const char*));
+
 #include "nzbget_tls_cipher.h"
 
 #ifdef __cplusplus

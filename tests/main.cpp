@@ -17,24 +17,24 @@
  *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "nzbget.h"
+#include "Util.h"
 
 #include "TestFramework.h"
 
 #include "ServerPool.h"
-#include "Log.h"
-#include "Options.h"
+#include "Util.h"
+#include "Util.h"
 #include "QueueCoordinator.h"
-#include "Scanner.h"
+#include "QueueCoordinator.h"
 #include "DiskState.h"
 #include "PrePostProcessor.h"
-#include "HistoryCoordinator.h"
-#include "HistoryCoordinator.h"
-#include "Scanner.h"
+#include "QueueCoordinator.h"
+#include "QueueCoordinator.h"
+#include "QueueCoordinator.h"
 #include "FeedCoordinator.h"
 #include "ServerPool.h"
 #include "ServerPool.h"
-#include "ExtensionManager.h"
+#include "PrePostProcessor.h"
 #include "FeedCoordinator.h"
 
 extern char** environ;

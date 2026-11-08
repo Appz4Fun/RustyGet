@@ -1,4 +1,4 @@
-#include "nzbget.h"
+#include "Util.h"
 #include "TestFramework.h"
 #include "ServerPool.h"
 

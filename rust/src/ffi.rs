@@ -21348,6 +21348,103 @@ pub unsafe extern "C" fn nzbget_rs_dqh_log_parse_rotated_date_fields(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_log_should_delete_rotated_file_by_name(
+    filename: *const c_char,
+    year_off: usize,
+    mon_off: usize,
+    mday_off: usize,
+    cur_time: i64,
+    rotate_log: c_int,
+) -> c_int {
+    let f = if filename.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(filename).to_bytes()
+    };
+    i32::from(crate::systemhealth::log_should_delete_rotated_file_by_name(
+        f, year_off, mon_off, mday_off, cur_time, rotate_log,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_log_format_rotated_path_for_time(
+    directory: *const c_char,
+    sep: c_char,
+    base_name: *const c_char,
+    cur_time: i64,
+    base_ext: *const c_char,
+) -> RsBuf {
+    let dir = if directory.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(directory).to_bytes()
+    };
+    let base = if base_name.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(base_name).to_bytes()
+    };
+    let ext = if base_ext.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(base_ext).to_bytes()
+    };
+    into_buf(crate::systemhealth::log_format_rotated_path_for_time(
+        dir, sep as u8, base, cur_time, ext,
+    ))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_options_find_default_config_file(
+    app_dir: *const c_char,
+    sep: c_char,
+    ctx: *mut std::ffi::c_void,
+    file_exists_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, *const c_char) -> c_int>,
+    out_found: *mut c_int,
+) -> RsBuf {
+    if !out_found.is_null() {
+        *out_found = 0;
+    }
+    let dir = if app_dir.is_null() {
+        &[][..]
+    } else {
+        CStr::from_ptr(app_dir).to_bytes()
+    };
+    match crate::options::find_default_config_file(dir, sep as u8, |path| {
+        if let Some(cb) = file_exists_cb {
+            cb(ctx, path.as_ptr()) != 0
+        } else {
+            false
+        }
+    }) {
+        Some(found) => {
+            if !out_found.is_null() {
+                *out_found = 1;
+            }
+            into_buf(found)
+        }
+        None => into_buf(Vec::new()),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nzbget_rs_options_load_config_file(
+    path: *const c_char,
+    ctx: *mut std::ffi::c_void,
+    on_line_cb: Option<unsafe extern "C" fn(*mut std::ffi::c_void, c_int, *const c_char)>,
+) -> c_int {
+    if path.is_null() {
+        return 0;
+    }
+    let c_path = CStr::from_ptr(path);
+    i32::from(crate::options::load_config_file_lines(c_path, |line_no, line| {
+        if let Some(cb) = on_line_cb {
+            cb(ctx, line_no, line.as_ptr());
+        }
+    }))
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dqh_mem_slices_equal(
     a: *const u8,
     b: *const u8,

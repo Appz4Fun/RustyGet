@@ -193,7 +193,7 @@ pub fn calc_month_slots_same_month(tm_mday: i32, quota_start_day: i32) -> i32 {
     tm_mday.wrapping_sub(quota_start_day).wrapping_add(1)
 }
 
-fn days_to_ymd(z_days: i64) -> (i64, i32, i32) {
+pub(crate) fn days_to_ymd(z_days: i64) -> (i64, i32, i32) {
     let z = z_days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = (z - era * 146_097) as u32;

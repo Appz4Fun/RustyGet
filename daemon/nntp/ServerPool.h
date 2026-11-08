@@ -35,11 +35,11 @@
 #include <sstream>
 #include <string>
 #include <vector>
-#include "Log.h"
-#include "Options.h"
+#include "Util.h"
+#include "Util.h"
 #include "Util.h"
 #include "Connection.h"
-#include "DownloadInfo.h"
+#include "DiskState.h"
 #include "DiskState.h"
 #include "nzbget_rs.h"
 

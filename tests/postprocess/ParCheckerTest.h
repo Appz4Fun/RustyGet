@@ -19,10 +19,10 @@
  */
 
 
-#include "nzbget.h"
+#include "Util.h"
 
 #include "TestFramework.h"
-#include "Options.h"
+#include "Util.h"
 #include "PrePostProcessor.h"
 #include "Util.h"
 #include "nzbget_rs.h"

@@ -199,10 +199,10 @@ protected:
 };
 
 #include "nzbget_rs.h"
-#include "DupeSearch.h"
-#include "Log.h"
-#include "Options.h"
-#include "Scanner.h"
+#include "QueueCoordinator.h"
+#include "Util.h"
+#include "Util.h"
+#include "QueueCoordinator.h"
 #include "FeedCoordinator.h"
 #include "ServerPool.h"
 #include "Util.h"
@@ -212,8 +212,8 @@ protected:
 #include "ServerPool.h"
 #include "ServerPool.h"
 #include "DiskState.h"
-#include "Scanner.h"
-#include "ExtensionManager.h"
+#include "QueueCoordinator.h"
+#include "PrePostProcessor.h"
 #include "FeedCoordinator.h"
 namespace
 {
@@ -3229,8 +3229,8 @@ inline GuardedMessageList LogScriptXmlCommand::GuardMessages()
 }
 
 
-#include "Log.h"
-#include "Options.h"
+#include "Util.h"
+#include "Util.h"
 #include "Util.h"
 #include "Util.h"
 
@@ -3872,15 +3872,15 @@ private:
 	void Dispatch();
 };
 
-#include "Log.h"
-#include "Options.h"
+#include "Util.h"
+#include "Util.h"
 #include "QueueCoordinator.h"
 #include "Util.h"
 #include "Util.h"
-#include "DownloadInfo.h"
-#include "Scanner.h"
+#include "DiskState.h"
+#include "QueueCoordinator.h"
 #include "ServerPool.h"
-#include "Scanner.h"
+#include "QueueCoordinator.h"
 #include "nzbget_rs.h"
 
 extern void ExitProc();

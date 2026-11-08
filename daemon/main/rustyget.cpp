@@ -20,30 +20,30 @@
  */
 
 
-#include "nzbget.h"
+#include "Util.h"
 #include "nzbget_rs.h"
 
 #include "ServerPool.h"
-#include "Log.h"
-#include "Options.h"
+#include "Util.h"
+#include "Util.h"
 #include "Frontend.h"
 #include "QueueCoordinator.h"
-#include "Scanner.h"
-#include "DupeSearch.h"
+#include "QueueCoordinator.h"
+#include "QueueCoordinator.h"
 #include "WebServer.h"
 #include "DiskState.h"
 #include "PrePostProcessor.h"
-#include "HistoryCoordinator.h"
-#include "DupeArticleFallback.h"
-#include "HistoryCoordinator.h"
+#include "QueueCoordinator.h"
+#include "DiskState.h"
+#include "QueueCoordinator.h"
 #include "FeedCoordinator.h"
-#include "Scanner.h"
+#include "QueueCoordinator.h"
 #include "FeedCoordinator.h"
 #include "ServerPool.h"
 #include "ServerPool.h"
 #include "Util.h"
 #include "Util.h"
-#include "ExtensionManager.h"
+#include "PrePostProcessor.h"
 
 #ifndef DISABLE_NSERV
 class NzbGenerator

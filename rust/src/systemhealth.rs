@@ -2518,6 +2518,37 @@ pub fn log_parse_rotated_date_fields(
     (year, mon, mday)
 }
 
+/// Evaluates whether a rotated log file should be deleted based on the date fields parsed from
+/// `filename` at `(year_off, mon_off, mday_off)`, `cur_time` (seconds since epoch), and `rotate_log`.
+pub fn log_should_delete_rotated_file_by_name(
+    filename: &[u8],
+    year_off: usize,
+    mon_off: usize,
+    mday_off: usize,
+    cur_time: i64,
+    rotate_log: i32,
+) -> bool {
+    let (tm_year, tm_mon, tm_mday) =
+        log_parse_rotated_date_fields(filename, year_off, mon_off, mday_off);
+    let file_time = crate::util::util_internal_timegm(tm_year, tm_mon, tm_mday, 0, 0, 0);
+    let file_day = (file_time / 86_400) as i32;
+    let cur_day = (cur_time / 86_400) as i32;
+    crate::util::log_should_delete_old_rotated(file_day, cur_day, rotate_log)
+}
+
+/// Formats `"<directory><sep><base_name>-<year>-<month:02>-<mday:02><base_ext>"` for `cur_time`
+/// (seconds since epoch, UTC civil date) for `Log::RotateLog`.
+pub fn log_format_rotated_path_for_time(
+    directory: &[u8],
+    sep: u8,
+    base_name: &[u8],
+    cur_time: i64,
+    base_ext: &[u8],
+) -> Vec<u8> {
+    let (year, month, mday) = crate::statmeter::days_to_ymd(cur_time.div_euclid(86_400));
+    log_format_rotated_path(directory, sep, base_name, year as i32, month, mday, base_ext)
+}
+
 /// Extracts the substring after the first ASCII space in `text` (or `text` if no space exists),
 /// for `SystemInfo::InitLibraries`.
 pub fn sysinfo_extract_version_after_space(text: &[u8]) -> Vec<u8> {
@@ -4862,6 +4893,19 @@ mod tests {
         ))
         .unwrap();
         assert!(xml.contains("<Network><member><name>PublicIP</name><value><string>1.2.3.4</string></value></member>"));
+    }
+
+    #[test]
+    fn test_log_rotate_time_helpers() {
+        // 2026-03-10 00:00:00 UTC
+        let cur_time = crate::util::util_internal_timegm(2026 - 1900, 2, 10, 0, 0, 0);
+        let path = log_format_rotated_path_for_time(b"/var/log", b'/', b"rustyget", cur_time, b".log");
+        assert_eq!(path, b"/var/log/rustyget-2026-03-10.log");
+
+        // rustyget-2026-03-05.log -> 5 days older than 2026-03-10
+        let fname = b"rustyget-2026-03-05.log";
+        assert!(log_should_delete_rotated_file_by_name(fname, 9, 14, 17, cur_time, 3));
+        assert!(!log_should_delete_rotated_file_by_name(fname, 9, 14, 17, cur_time, 10));
     }
 }
 

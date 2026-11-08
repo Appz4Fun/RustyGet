@@ -19,18 +19,18 @@
  */
 
 
-#include "nzbget.h"
+#include "Util.h"
 
 #include "TestFramework.h"
 #include "PrePostProcessor.h"
-#include "Log.h"
-#include "Options.h"
+#include "Util.h"
+#include "Util.h"
 #include "DiskState.h"
 #include "Util.h"
 #include "PrePostProcessor.h"
-#include "ExtensionManager.h"
-#include "HistoryCoordinator.h"
-#include "HistoryCoordinator.h"
+#include "PrePostProcessor.h"
+#include "QueueCoordinator.h"
+#include "QueueCoordinator.h"
 #include "Util.h"
 #include <chrono>
 

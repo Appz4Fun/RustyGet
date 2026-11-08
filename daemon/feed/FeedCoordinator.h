@@ -23,10 +23,10 @@
 #define FEEDCOORDINATOR_H
 
 #include <atomic>
-#include "Log.h"
+#include "Util.h"
 #include "Connection.h"
-#include "DownloadInfo.h"
-#include "Options.h"
+#include "DiskState.h"
+#include "Util.h"
 #include "Util.h"
 #include "nzbget_rs.h"
 
@@ -388,12 +388,12 @@ private:
 	FeedInfo* m_feedInfo;
 };
 
-#include "Options.h"
 #include "Util.h"
-#include "ExtensionManager.h"
+#include "Util.h"
+#include "PrePostProcessor.h"
 #include "DiskState.h"
-#include "HistoryCoordinator.h"
-#include "Scanner.h"
+#include "QueueCoordinator.h"
+#include "QueueCoordinator.h"
 #include "nzbget_rs.h"
 
 class FeedScriptController : public NzbScriptController
@@ -1167,10 +1167,10 @@ inline void FeedCoordinator::CleanupCache()
 
 #ifndef SCHEDULER_H
 #define SCHEDULER_H
-#include "Options.h"
-#include "Log.h"
+#include "Util.h"
+#include "Util.h"
 #include "ServerPool.h"
-#include "ExtensionManager.h"
+#include "PrePostProcessor.h"
 #include "nzbget_rs.h"
 
 class SchedulerScriptController : public Thread, public NzbScriptController
@@ -1953,7 +1953,7 @@ extern SystemHealth::Service* g_SystemHealth;
 #ifndef MAINTENANCE_H
 #define MAINTENANCE_H
 
-#include "ExtensionManager.h"
+#include "PrePostProcessor.h"
 
 extern void ExitProc();
 extern int g_ArgumentCount;

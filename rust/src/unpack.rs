@@ -1751,17 +1751,6 @@ fn cstr_to_path(ptr: *const c_char) -> Option<std::path::PathBuf> {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_unpack_is_zipfast_supported_extension(
-    archive_path: *const c_char,
-) -> c_int {
-    if archive_path.is_null() {
-        return 0;
-    }
-    let bytes = unsafe { CStr::from_ptr(archive_path).to_bytes() };
-    i32::from(is_zipfast_supported_extension(bytes))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_unpack_can_extract_with_zipfast(
     archive_path: *const c_char,
 ) -> c_int {
@@ -1824,49 +1813,6 @@ pub unsafe extern "C" fn nzbget_rs_unpack_extract_with_zipfast(
         )
     };
     i32::from(res.is_ok())
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_zipview_inspect_file(
-    archive_path: *const c_char,
-    out_kind: *mut c_int,
-    out_file_count: *mut usize,
-    out_total_uncompressed: *mut u64,
-    out_has_encrypted: *mut c_int,
-    out_has_compressed: *mut c_int,
-    out_has_symlinks: *mut c_int,
-    out_has_nzb: *mut c_int,
-) -> c_int {
-    let Some(path) = cstr_to_path(archive_path) else {
-        return 0;
-    };
-    let Ok(info) = inspect_zip_file(&path) else {
-        return 0;
-    };
-    unsafe {
-        if !out_kind.is_null() {
-            *out_kind = info.kind as c_int;
-        }
-        if !out_file_count.is_null() {
-            *out_file_count = info.file_count;
-        }
-        if !out_total_uncompressed.is_null() {
-            *out_total_uncompressed = info.total_uncompressed_size;
-        }
-        if !out_has_encrypted.is_null() {
-            *out_has_encrypted = i32::from(info.has_encrypted_entries);
-        }
-        if !out_has_compressed.is_null() {
-            *out_has_compressed = i32::from(info.has_compressed_entries);
-        }
-        if !out_has_symlinks.is_null() {
-            *out_has_symlinks = i32::from(info.has_symlinks);
-        }
-        if !out_has_nzb.is_null() {
-            *out_has_nzb = i32::from(info.has_nzb_files);
-        }
-    }
-    1
 }
 
 // ============================================================================

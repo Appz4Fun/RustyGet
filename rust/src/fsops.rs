@@ -778,31 +778,6 @@ pub unsafe extern "C" fn nzbget_rs_fs_fix_exec_permission(filename: *const c_cha
     fix_exec_permission(bytes);
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_fs_restore_permissions(
-    filename: *const c_char,
-    mode: u32,
-    umask: u32,
-) -> c_int {
-    if filename.is_null() {
-        return 0;
-    }
-    let bytes = unsafe { CStr::from_ptr(filename).to_bytes() };
-    c_int::from(restore_permissions(bytes, mode, umask))
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_fs_restore_file_or_dir_permissions(
-    filename: *const c_char,
-    umask: u32,
-) -> c_int {
-    if filename.is_null() {
-        return 0;
-    }
-    let bytes = unsafe { CStr::from_ptr(filename).to_bytes() };
-    c_int::from(restore_file_or_dir_permissions(bytes, umask))
-}
-
 /// Checks `dest_dir` and (when non-empty) `inter_dir` free disk space against `disk_space_mb`.
 /// Returns `(dest_low, inter_low)`.
 pub fn disk_service_check_disk_space(

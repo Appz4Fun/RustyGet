@@ -100,22 +100,6 @@ pub fn name_of_subject_range(subject: &[u8]) -> (usize, usize) {
 /// # Safety
 /// data must point to len readable bytes (or be null for zero len).
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupesearch_name_of_subject(
-    data: *const u8,
-    len: usize,
-) -> SubjectRange {
-    let (start, end) = unsafe { bytes(data, len) }
-        .map(name_of_subject_range)
-        .unwrap_or((0, 0));
-    SubjectRange {
-        start,
-        len: end - start,
-    }
-}
-
-/// # Safety
-/// data must point to len readable bytes (or be null for zero len).
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dupesearch_unquoted_subject(
     data: *const u8,
     len: usize,

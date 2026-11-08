@@ -24,42 +24,7 @@
 #include "nzbget_rs.h"
 
 #ifndef DISABLE_NSERV
-class NzbGenerator
-{
-public:
-	NzbGenerator(const char* dataDir, int segmentSize) :
-		m_dataDir(dataDir), m_segmentSize(segmentSize) {};
-
-	void Execute()
-	{
-		auto logCb = +[](int kind, const char* msg)
-		{
-			switch (kind)
-			{
-			case 0:
-				info("Generating nzbs for %s", msg);
-				break;
-			case 1:
-				info("Generating nzb for %s", msg);
-				break;
-			case 2:
-				error("Could not create file %s", msg);
-				break;
-			case 3:
-				detail("Processing %s", msg);
-				break;
-			case 4:
-				info("Nzb generation finished");
-				break;
-			}
-		};
-		nzbget_rs_nzb_generator_execute(m_dataDir, m_segmentSize, logCb);
-	}
-
-private:
-	CString m_dataDir;
-	int m_segmentSize;
-};
+struct NzbgetRsNntpCache;
 
 class NServFrontend : public Thread
 {
@@ -68,7 +33,6 @@ public:
 
 private:
 	uint32 m_neededLogFirstId = 0;
-	bool m_needGoBack = false;
 
 	void Run()
 	{
@@ -82,8 +46,6 @@ private:
 
 	void Update()
 	{
-		BeforePrint();
-
 		{
 			GuardedMessageList messages = g_Log->GuardMessages();
 			if (!messages->empty())
@@ -94,65 +56,32 @@ private:
 					m_neededLogFirstId, firstMessage.GetId(), &needSkip);
 				if (needSkip)
 				{
-					PrintSkip();
+					printf(".....\033[K\n");
 				}
 				for (uint32 i = (uint32)start; i < messages->size(); i++)
 				{
-					PrintMessage(messages->at(i));
-					m_neededLogFirstId = messages->at(i).GetId();
+					Message& message = messages->at(i);
+					NzbgetRsBuf line = nzbget_rs_frontend_format_log_message(
+						1, (int)message.GetKind(), message.GetText());
+					if (line.data)
+					{
+						fwrite(line.data, 1, line.len, stdout);
+					}
+					nzbget_rs_free(line);
+					m_neededLogFirstId = message.GetId();
 				}
 			}
 		}
 
 		fflush(stdout);
 	}
-
-	void BeforePrint()
-	{
-		if (m_needGoBack)
-		{
-			printf("\r\033[1A");
-			m_needGoBack = false;
-		}
-	}
-
-	void PrintMessage(Message& message)
-	{
-		NzbgetRsBuf line = nzbget_rs_frontend_format_log_message(
-			1, (int)message.GetKind(), message.GetText());
-		if (line.data)
-		{
-			fwrite(line.data, 1, line.len, stdout);
-		}
-		nzbget_rs_free(line);
-	}
-
-	void PrintSkip()
-	{
-		printf(".....\033[K\n");
-	}
-};
-
-struct NzbgetRsNntpCache;
-
-class NntpCache
-{
-public:
-	NntpCache() : m_handle(nzbget_rs_nntp_cache_new()) {}
-	~NntpCache() { nzbget_rs_nntp_cache_free(m_handle); }
-	NntpCache(const NntpCache&) = delete;
-	NntpCache& operator=(const NntpCache&) = delete;
-	const NzbgetRsNntpCache* GetRustHandle() const { return m_handle; }
-
-private:
-	NzbgetRsNntpCache* m_handle = nullptr;
 };
 
 class NntpProcessor : public Thread
 {
 public:
 	NntpProcessor(int id, int serverId, const char* dataDir, const char* cacheDir,
-		const char* secureCert, const char* secureKey, int latency, int speed, NntpCache* cache) :
+		const char* secureCert, const char* secureKey, int latency, int speed, const NzbgetRsNntpCache* cache) :
 		m_id(id), m_serverId(serverId), m_dataDir(dataDir), m_cacheDir(cacheDir),
 		m_secureCert(secureCert), m_secureKey(secureKey), m_latency(latency),
 		m_speed(speed), m_cache(cache) {}
@@ -190,7 +119,7 @@ public:
 				m_cacheDir,
 				m_latency,
 				m_speed,
-				m_cache ? m_cache->GetRustHandle() : nullptr,
+				m_cache,
 				*line,
 				this,
 				[](void* rawCtx, const char* replyLine) {
@@ -239,7 +168,7 @@ private:
 	const char* m_secureKey;
 	int m_latency;
 	int m_speed;
-	NntpCache* m_cache;
+	const NzbgetRsNntpCache* m_cache;
 };
 
 class NntpServer : public Thread
@@ -247,7 +176,7 @@ class NntpServer : public Thread
 public:
 	NntpServer(int id, const char* host, int port, const char* secureCert,
 		const char* secureKey, const char* dataDir, const char* cacheDir,
-		int latency, int speed, NntpCache* cache) :
+		int latency, int speed, const NzbgetRsNntpCache* cache) :
 		m_id(id), m_host(host), m_port(port), m_secureCert(secureCert),
 		m_secureKey(secureKey), m_dataDir(dataDir), m_cacheDir(cacheDir),
 		m_latency(latency), m_speed(speed), m_cache(cache) {}
@@ -326,7 +255,7 @@ private:
 	CString m_cacheDir;
 	int m_latency;
 	int m_speed;
-	NntpCache* m_cache;
+	const NzbgetRsNntpCache* m_cache;
 };
 
 struct NServOpts
@@ -402,16 +331,6 @@ struct NServOpts
 	}
 };
 
-inline void NServPrintUsage(const char* com)
-{
-	NzbgetRsBuf buf = nzbget_rs_nserv_format_usage(FileSystem::BaseFileName(com));
-	if (buf.data)
-	{
-		fwrite(buf.data, 1, buf.len, stdout);
-	}
-	nzbget_rs_free(buf);
-}
-
 inline int NServMain(int argc, char* argv[])
 {
 	Log log;
@@ -423,7 +342,12 @@ inline int NServMain(int argc, char* argv[])
 
 	if (opts.dataDir.Empty() || opts.paramError)
 	{
-		NServPrintUsage(argv[0]);
+		NzbgetRsBuf buf = nzbget_rs_nserv_format_usage(FileSystem::BaseFileName(argv[0]));
+		if (buf.data)
+		{
+			fwrite(buf.data, 1, buf.len, stdout);
+		}
+		nzbget_rs_free(buf);
 		return 1;
 	}
 
@@ -454,8 +378,27 @@ inline int NServMain(int argc, char* argv[])
 
 	if (opts.generateNzb)
 	{
-		NzbGenerator gen(opts.dataDir, opts.segmentSize);
-		gen.Execute();
+		nzbget_rs_nzb_generator_execute(opts.dataDir, opts.segmentSize, +[](int kind, const char* msg)
+		{
+			switch (kind)
+			{
+			case 0:
+				info("Generating nzbs for %s", msg);
+				break;
+			case 1:
+				info("Generating nzb for %s", msg);
+				break;
+			case 2:
+				error("Could not create file %s", msg);
+				break;
+			case 3:
+				detail("Processing %s", msg);
+				break;
+			case 4:
+				info("Nzb generation finished");
+				break;
+			}
+		});
 		if (opts.quit)
 		{
 			return 0;
@@ -469,13 +412,14 @@ inline int NServMain(int argc, char* argv[])
 	}
 
 	std::vector<std::unique_ptr<NntpServer>> instances;
-	NntpCache cache;
+	std::unique_ptr<NzbgetRsNntpCache, decltype(&nzbget_rs_nntp_cache_free)> cache(
+		opts.memCache ? nzbget_rs_nntp_cache_new() : nullptr, nzbget_rs_nntp_cache_free);
 
 	for (int i = 0; i < opts.instances; i++)
 	{
 		instances.emplace_back(std::make_unique<NntpServer>(i + 1, opts.bindAddress,
 			opts.firstPort + i, opts.secureCert, opts.secureKey, opts.dataDir, opts.cacheDir,
-			opts.latency, opts.speed, opts.memCache ? &cache : nullptr));
+			opts.latency, opts.speed, cache.get()));
 		instances.back()->Start();
 	}
 
@@ -688,12 +632,51 @@ protected:
 		if (nzbget_rs_dqh_disk_service_should_check_disk_space(
 			g_Options->GetDiskSpace(), g_WorkState->GetDownloading() ? 1 : 0) != 0)
 		{
-			CheckDiskSpace();
+			debug("Disk service work: check disk space");
+			int destLow = 0;
+			int interLow = 0;
+			nzbget_rs_disk_service_check_disk_space(
+				g_Options->GetDestDir(),
+				g_Options->GetInterDir(),
+				g_Options->GetDiskSpace(),
+				&destLow,
+				&interLow);
+			if (destLow != 0)
+			{
+				warn("Low disk space on %s. Pausing download", g_Options->GetDestDir());
+				g_WorkState->SetPauseDownload(true);
+			}
+			if (interLow != 0)
+			{
+				warn("Low disk space on %s. Pausing download", g_Options->GetInterDir());
+				g_WorkState->SetPauseDownload(true);
+			}
 		}
 
 		if (m_waitingRequiredDir)
 		{
-			CheckRequiredDir();
+			debug("Disk service work: check required dir");
+			int nextWaitingReported = m_waitingReported ? 1 : 0;
+			int allExist = nzbget_rs_disk_service_check_required_dirs(
+				g_Options->GetRequiredDir(),
+				m_waitingReported ? 1 : 0,
+				&nextWaitingReported,
+				nullptr,
+				+[](void*, const char* dir)
+				{
+					info("Waiting for required directory %s", dir);
+				});
+			m_waitingReported = nextWaitingReported != 0;
+			if (allExist)
+			{
+				if (m_waitingReported)
+				{
+					info("All required directories available");
+				}
+				g_WorkState->SetTempPauseDownload(false);
+				g_WorkState->SetTempPausePostprocess(false);
+				m_waitingRequiredDir = false;
+			}
 		}
 	}
 
@@ -706,61 +689,10 @@ protected:
 private:
 	bool m_waitingRequiredDir = true;
 	bool m_waitingReported = false;
-
-	void CheckDiskSpace()
-	{
-		debug("Disk service work: check disk space");
-		int destLow = 0;
-		int interLow = 0;
-		nzbget_rs_disk_service_check_disk_space(
-			g_Options->GetDestDir(),
-			g_Options->GetInterDir(),
-			g_Options->GetDiskSpace(),
-			&destLow,
-			&interLow);
-		if (destLow != 0)
-		{
-			warn("Low disk space on %s. Pausing download", g_Options->GetDestDir());
-			g_WorkState->SetPauseDownload(true);
-		}
-		if (interLow != 0)
-		{
-			warn("Low disk space on %s. Pausing download", g_Options->GetInterDir());
-			g_WorkState->SetPauseDownload(true);
-		}
-	}
-
-	void CheckRequiredDir()
-	{
-		debug("Disk service work: check required dir");
-		int nextWaitingReported = m_waitingReported ? 1 : 0;
-		int allExist = nzbget_rs_disk_service_check_required_dirs(
-			g_Options->GetRequiredDir(),
-			m_waitingReported ? 1 : 0,
-			&nextWaitingReported,
-			nullptr,
-			+[](void*, const char* dir)
-			{
-				info("Waiting for required directory %s", dir);
-			});
-		m_waitingReported = nextWaitingReported != 0;
-		if (!allExist)
-		{
-			return;
-		}
-		if (m_waitingReported)
-		{
-			info("All required directories available");
-		}
-		g_WorkState->SetTempPauseDownload(false);
-		g_WorkState->SetTempPausePostprocess(false);
-		m_waitingRequiredDir = false;
-	}
 };
 
-class CommandLineParser
+struct CommandLineParser
 {
-public:
 	enum EClientOperation
 	{
 		opClientNoOperation,
@@ -798,98 +730,6 @@ public:
 	typedef std::vector<int> IdList;
 	typedef std::vector<CString> NameList;
 
-	CommandLineParser(int argc, const char* argv[])
-	{
-		if (argc < 1 || !argv)
-		{
-			throw std::invalid_argument("Invalid command line");
-		}
-		m_args.reserve(argc);
-		for (int i = 0; i < argc; i++)
-		{
-			m_args.emplace_back(argv[i]);
-		}
-
-		std::vector<char*> args;
-		args.reserve(static_cast<size_t>(argc) + 1);
-		for (CString& arg : m_args) args.push_back(arg);
-		args.push_back(nullptr);
-		RsSink sink{this, args.data(), nullptr};
-		NzbgetRsCmdlineSink rsSink{nullptr, &sink, RsSetInt, RsSetStr, RsSteal, RsPushOption, RsPushId, RsPushName, RsError};
-#ifdef HAVE_GETOPT_LONG
-		const int useLong = 1;
-#else
-		const int useLong = 0;
-#endif
-		int result = nzbget_rs_cmdline_parse(argc, args.data(), useLong, &rsSink);
-		sink.SyncArgs();
-		if (sink.error)
-		{
-			std::rethrow_exception(sink.error);
-		}
-		if (result != 0)
-		{
-			throw std::runtime_error("Command line parsing failed");
-		}
-	}
-
-	void PrintUsage(const char* com)
-	{
-		NzbgetRsBuf buf = nzbget_rs_cmdline_format_usage(
-			FileSystem::BaseFileName(com), PATH_SEPARATOR, 1);
-		if (buf.data)
-		{
-			printf("%s", buf.data);
-		}
-		nzbget_rs_free(buf);
-	}
-
-	bool GetErrors() { return m_errors; }
-	bool GetNoConfig() { return m_noConfig; }
-	const char* GetConfigFilename() { return m_configFilename; }
-	bool GetServerMode() { return m_serverMode; }
-	bool GetDaemonMode() { return m_daemonMode; }
-	bool GetRemoteClientMode() { return m_remoteClientMode; }
-	EClientOperation GetClientOperation() { return m_clientOperation; }
-	NameList* GetOptionList() { return &m_optionList; }
-	int GetEditQueueAction() { return m_editQueueAction; }
-	int GetEditQueueOffset() { return m_editQueueOffset; }
-	IdList* GetEditQueueIdList() { return &m_editQueueIdList; }
-	NameList* GetEditQueueNameList() { return &m_editQueueNameList; }
-	EMatchMode GetMatchMode() { return m_matchMode; }
-	const char* GetEditQueueText() { return m_editQueueText; }
-	const char* GetArgFilename() { return m_argFilename; }
-	const char* GetAddCategory() { return m_addCategory; }
-	bool GetAutoCategory() const { return m_autoCategory; }
-	bool GetAddPaused() { return m_addPaused; }
-	const char* GetLastArg() { return m_lastArg; }
-	int GetAddPriority() { return m_addPriority; }
-	const char* GetAddNzbFilename() { return m_addNzbFilename; }
-	bool GetAddTop() { return m_addTop; }
-	const char* GetAddDupeKey() { return m_addDupeKey; }
-	int GetAddDupeScore() { return m_addDupeScore; }
-	int GetAddDupeMode() { return m_addDupeMode; }
-	int GetSetRate() { return m_setRate; }
-	int GetLogLines() { return m_logLines; }
-	int GetWriteLogKind() { return m_writeLogKind; }
-	bool GetTestBacktrace() { return m_testBacktrace; }
-	bool GetWebGet() { return m_webGet; }
-	const char* GetWebGetFilename() { return m_webGetFilename; }
-	bool GetSigVerify() { return m_sigVerify; }
-	const char* GetPubKeyFilename() { return m_pubKeyFilename; }
-	const char* GetSigFilename() { return m_sigFilename; }
-	bool GetPrintOptions() { return m_printOptions; }
-	bool GetPrintVersion() { return m_printVersion; }
-	bool GetPrintUsage() { return m_printUsage; }
-	bool GetPauseDownload() const { return m_pauseDownload; }
-
-private:
-	void SetAddCategory(const char* category)
-	{
-		m_addCategory = category;
-		m_autoCategory = false;
-	}
-
 	bool m_noConfig = false;
 	CString m_configFilename;
 	bool m_errors = false;
@@ -898,7 +738,7 @@ private:
 	bool m_serverMode = false;
 	bool m_daemonMode = false;
 	bool m_remoteClientMode = false;
-	EClientOperation m_clientOperation;
+	EClientOperation m_clientOperation = opClientNoOperation;
 	NameList m_optionList;
 	int m_editQueueAction = 0;
 	int m_editQueueOffset = 0;
@@ -929,24 +769,58 @@ private:
 	CString m_sigFilename;
 	bool m_pauseDownload = false;
 
-	std::vector<CString> m_args;
-	void ReportError(const char* errMessage)
+	CommandLineParser(int argc, const char* argv[])
 	{
-		m_errors = true;
-		printf("%s\n", errMessage);
+		if (argc < 1 || !argv)
+		{
+			throw std::invalid_argument("Invalid command line");
+		}
+		std::vector<CString> ownedArgs;
+		ownedArgs.reserve(argc);
+		for (int i = 0; i < argc; i++)
+		{
+			ownedArgs.emplace_back(argv[i]);
+		}
+
+		std::vector<char*> args;
+		args.reserve(static_cast<size_t>(argc) + 1);
+		for (CString& arg : ownedArgs) args.push_back(arg);
+		args.push_back(nullptr);
+		RsSink sink{this, args.data(), nullptr};
+		NzbgetRsCmdlineSink rsSink{nullptr, &sink, RsSetInt, RsSetStr, RsSteal, RsPushOption, RsPushId, RsPushName, RsError};
+#ifdef HAVE_GETOPT_LONG
+		const int useLong = 1;
+#else
+		const int useLong = 0;
+#endif
+		int result = nzbget_rs_cmdline_parse(argc, args.data(), useLong, &rsSink);
+		if (sink.error)
+		{
+			std::rethrow_exception(sink.error);
+		}
+		if (result != 0)
+		{
+			throw std::runtime_error("Command line parsing failed");
+		}
 	}
 
+	void PrintUsage(const char* com)
+	{
+		NzbgetRsBuf buf = nzbget_rs_cmdline_format_usage(
+			FileSystem::BaseFileName(com), PATH_SEPARATOR, 1);
+		if (buf.data)
+		{
+			printf("%s", buf.data);
+		}
+		nzbget_rs_free(buf);
+	}
+
+private:
 	struct RsSink
 	{
 		CommandLineParser* parser;
 		char** argv;
 		std::exception_ptr error;
-
-		void SyncArgs() noexcept
-		{
-			for (CString& arg : parser->m_args) arg.Unbind();
-			for (size_t i = 0; i < parser->m_args.size(); i++) parser->m_args[i].Bind(argv[i]);
-		}
 
 		template <typename F>
 		static int Call(void* ctx, F f) noexcept
@@ -1024,7 +898,7 @@ private:
 				case 31: p->m_webGetFilename = value; break;
 				case 32: p->m_pubKeyFilename = value; break;
 				case 33: p->m_sigFilename = value; break;
-				case 34: p->SetAddCategory(value); break;
+				case 34: p->m_addCategory = value; p->m_autoCategory = false; break;
 				case 35: p->m_lastArg = value; break;
 				case 36: p->m_argFilename = value; break;
 				case 40: p->m_setRate = (int)(atof(value) * 1024); break;
@@ -1037,15 +911,13 @@ private:
 		return RsSink::Call(ctx, [ctx, field, index](CommandLineParser* p)
 		{
 			RsSink* sink = static_cast<RsSink*>(ctx);
-			sink->SyncArgs();
-			CString& arg = p->m_args[index];
 			switch (field)
 			{
-				case 37: p->m_addNzbFilename = std::move(arg); break;
-				case 38: p->m_addDupeKey = std::move(arg); break;
-				case 39: p->m_editQueueText = std::move(arg); break;
+				case 37: p->m_addNzbFilename = sink->argv[index]; break;
+				case 38: p->m_addDupeKey = sink->argv[index]; break;
+				case 39: p->m_editQueueText = sink->argv[index]; break;
 			}
-			sink->argv[index] = arg;
+			sink->argv[index] = nullptr;
 		});
 	}
 
@@ -1066,35 +938,389 @@ private:
 
 	static int RsError(void* ctx, const char* msg)
 	{
-		return RsSink::Call(ctx, [msg](CommandLineParser* p) { p->ReportError(msg); });
+		return RsSink::Call(ctx, [msg](CommandLineParser* p)
+		{
+			p->m_errors = true;
+			printf("%s\n", msg);
+		});
 	}
 };
+
+// the daemon holds the lock on the lock-file: only then is it ours to delete
+// at shutdown. Not a member: a reload makes a new NZBGet without daemonizing,
+// and a second daemon that fails to get the lock must leave it in place.
+static bool g_LockFileOwned = false;
+
+static std::mutex g_reloadMutex;
+static std::condition_variable g_reloadCond;
+static bool g_reloadPending{false};
+static bool g_reloadWorkerRunning{false};
+static std::chrono::steady_clock::time_point g_reloadTargetTime;
+static std::chrono::steady_clock::time_point g_reloadFirstRequestTime;
+static std::thread g_reloadThread;
+
+static void CancelAndJoinReloadThread()
+{
+	std::unique_lock<std::mutex> lock(g_reloadMutex);
+	g_reloadPending = false;
+	g_reloadCond.notify_all();
+	if (g_reloadThread.joinable() && g_reloadThread.get_id() != std::this_thread::get_id())
+	{
+		g_reloadCond.wait(lock, [] { return !g_reloadWorkerRunning; });
+		g_reloadThread.join();
+	}
+}
 
 class RustyGet final : public Options::Extender
 {
 public:
-	~RustyGet() override;
-	void Stop(bool reload);
+	~RustyGet() override
+	{
+		Cleanup();
+	}
+
 	bool GetReloading() { return m_reloading; }
 	bool GetStopped() const { return m_stopped; }
 
-	int Phase1_Init(bool reload);
-	int Phase2_SubsystemsAndState(bool reload);
-	int Phase3_ServerActivation();
-	void Phase4_Shutdown(bool reload);
-	bool HasActiveUnpack() const;
+	int Phase1_Init(bool reload)
+	{
+		m_reloading = reload;
+		m_log = std::make_unique<Log>();
+
+		debug("RustyGet %s", Util::VersionRevision());
+
+		if (!m_reloading)
+		{
+			Connection::Init();
+#ifndef DISABLE_TLS
+			TlsSocket::Init();
+#endif
+		}
+
+		CreateGlobals();
+
+		BootConfig();
+
+		if (m_memoryMonitor)
+		{
+			m_memoryMonitor->InitOptions();
+		}
+
+		mode_t uMask = static_cast<mode_t>(m_options->GetUMask());
+		if (nzbget_rs_ccm_nzbget_is_valid_umask((uint32_t)uMask) != 0)
+		{
+			/* set newly created file permissions */
+			FileSystem::uMask = uMask;
+			umask(FileSystem::uMask);
+		}
+		else
+		{
+			FileSystem::uMask = umask(0);
+			umask(FileSystem::uMask);
+		}
+
+#ifdef DEBUG
+		debug("Using %o umask", FileSystem::uMask);
+#endif
+
+		m_scanner->InitOptions();
+		m_queueScriptCoordinator->InitOptions();
+#ifndef DISABLE_TLS
+		TlsSocket::InitOptions(g_Options->GetCertCheck() ? g_Options->GetCertStore() : "");
+#endif
+
+		ProcessDirect();
+
+		if (nzbget_rs_dqh_nzbget_should_run_system_health_check(
+			g_Options->GetServerMode() ? 1 : 0,
+			g_Options->GetSystemHealthCheck() ? 1 : 0) != 0)
+		{
+			m_systemHealth = std::make_unique<SystemHealth::Service>(
+				*g_Options,
+				*g_ServerPool->GetServers(),
+				*g_FeedCoordinator->GetFeeds(),
+				m_scheduler->GetTasks(),
+				*g_Log);
+			g_SystemHealth = m_systemHealth.get();
+
+			m_systemHealth->DiagnoseAndLog();
+		}
+
+		if (m_commandLineParser->m_daemonMode)
+		{
+			if (!m_reloading)
+			{
+				int f = fork();
+				if (f < 0) exit(1); /* fork error */
+				if (f > 0) exit(0); /* parent exits */
+
+				/* child (daemon) continues */
+				setsid();
+
+				int lockOwned = 0;
+				int warnTruncate = 0;
+				int err = nzbget_rs_daemonize_setup(
+					m_options->GetLockFile(),
+					m_options->GetDaemonUsername(),
+					&lockOwned,
+					&warnTruncate);
+				if (err == 1)
+				{
+					error("Starting daemon failed: could not create lock-file %s", m_options->GetLockFile());
+					exit(1);
+				}
+				if (err == 2)
+				{
+					error("Starting daemon failed: lock-file %s is not a regular file", m_options->GetLockFile());
+					exit(1);
+				}
+				if (err == 3)
+				{
+					error("Starting daemon failed: could not acquire lock on lock-file %s", m_options->GetLockFile());
+					exit(1);
+				}
+				if (err == 4)
+				{
+					error("Starting daemon failed: invalid DaemonUsername");
+					exit(1);
+				}
+				if (err == 5)
+				{
+					error("Starting daemon failed: could not drop privileges");
+					exit(1);
+				}
+				if (lockOwned != 0)
+				{
+					g_LockFileOwned = true;
+				}
+				if (warnTruncate != 0)
+				{
+					warn("Could not truncate lock-file %s", m_options->GetLockFile());
+				}
+			}
+			info("RustyGet %s daemon-mode", Util::VersionRevision());
+		}
+		else if (m_options->GetServerMode())
+		{
+			info("RustyGet %s server-mode", Util::VersionRevision());
+		}
+		else if (m_commandLineParser->m_remoteClientMode)
+		{
+			info("RustyGet %s remote-mode", Util::VersionRevision());
+		}
+
+		if (m_options->GetServerMode())
+		{
+			info("using %s", m_options->GetConfigFilename());
+			info("RustyGet runs on %s:%i", m_options->GetControlIp(), m_options->GetControlPort());
+		}
+
+#ifdef DEBUG
+		std::stringstream ss;
+		ss << *m_systemInfo;
+		std::string line;
+		while (std::getline(ss, line))
+		{
+			detail("%s", line.c_str());
+		}
+#endif
+
+		m_reloading = false;
+
+		InstallErrorHandler();
+
+		return 0;
+	}
+
+	int Phase2_SubsystemsAndState(bool reload)
+	{
+		(void)reload;
+		if (!m_commandLineParser->m_remoteClientMode)
+		{
+			m_serverPool->InitConnections();
+			m_statMeter->Init();
+		}
+		return 0;
+	}
+
+	int Phase3_ServerActivation()
+	{
+		StartRemoteServer();
+		StartFrontend();
+
+		if (!m_commandLineParser->m_remoteClientMode)
+		{
+			if (!m_commandLineParser->m_serverMode && !g_SigExitPending.load())
+			{
+				const char* category = m_commandLineParser->m_addCategory ? *m_commandLineParser->m_addCategory : "";
+				NzbFile nzbFile(m_commandLineParser->m_argFilename, category);
+				if (!nzbFile.Parse())
+				{
+					printf("Parsing NZB-document %s failed\n\n",
+						m_commandLineParser->m_argFilename ? *m_commandLineParser->m_argFilename : "N/A");
+				}
+				else
+				{
+					std::unique_ptr<NzbInfo> nzbInfo = nzbFile.DetachNzbInfo();
+					if (!nzbFile.GetPassword().empty())
+					{
+						nzbInfo->GetParameters()->SetParameter("*Unpack:Password", nzbFile.GetPassword().c_str());
+					}
+					m_scanner->InitPPParameters(category, nzbInfo->GetParameters(), false);
+					m_queueCoordinator->AddNzbFileToQueue(std::move(nzbInfo), nullptr, false);
+				}
+			}
+
+			DoMainLoop();
+		}
+		else
+		{
+			if (g_SigExitPending.exchange(false))
+			{
+				ExitProc();
+			}
+			while (m_frontend && !m_stopped && !m_reloading && m_frontend->IsRunning())
+			{
+				if (g_SigExitPending.exchange(false))
+				{
+					ExitProc();
+				}
+				else if (g_SigHupPending.exchange(false))
+				{
+					Reload();
+				}
+				Util::Sleep(50);
+			}
+		}
+
+		return 0;
+	}
+
+	void Phase4_Shutdown(bool reload)
+	{
+		m_reloading = reload;
+		CancelAndJoinReloadThread();
+		ScriptController::TerminateAll();
+
+		StopRemoteServer();
+		StopFrontend();
+		CancelAndJoinReloadThread();
+
+		TlsCipherBackend::Shutdown();
+		if (!m_reloading)
+		{
+#ifndef DISABLE_TLS
+			TlsSocket::Final();
+#endif
+			Connection::Final();
+		}
+	}
+
+	bool HasActiveUnpack() const
+	{
+		return m_prePostProcessor ? m_prePostProcessor->HasActiveUnpack(false) : false;
+	}
+
+	void Stop(bool reload)
+	{
+		if (!reload)
+		{
+			{
+				std::lock_guard<std::mutex> reloadGuard(g_reloadMutex);
+				g_reloadPending = false;
+				g_reloadCond.notify_all();
+			}
+			nzbget_rs_signal_notify(SIGTERM);
+		}
+
+		{
+			std::lock_guard<std::mutex> guard(m_waitMutex);
+			if (m_stopped && !m_reloading && reload)
+			{
+				debug("Ignoring reload request because shutdown is already in progress");
+				return;
+			}
+			m_reloading = reload;
+		}
+
+		if (!m_reloading)
+		{
+			g_SigHupPending.store(false);
+			info("Stopping, please wait...");
+		}
+
+		if (m_reloading && m_prePostProcessor && m_prePostProcessor->HasActiveUnpack(false))
+		{
+			info("Waiting for active unpack to complete before in-process reload...");
+			while (m_prePostProcessor && m_prePostProcessor->HasActiveUnpack(false) && !g_SigExitPending.load())
+			{
+				Util::Sleep(100);
+			}
+		}
+		if (g_SigExitPending.exchange(false))
+		{
+			m_reloading = false;
+			nzbget_rs_signal_notify(SIGTERM);
+		}
+		if (m_commandLineParser->m_remoteClientMode)
+		{
+			if (m_frontend)
+			{
+				debug("Stopping Frontend");
+				m_frontend->Stop();
+			}
+		}
+		else
+		{
+			if (m_queueCoordinator)
+			{
+				debug("Stopping QueueCoordinator");
+				m_serviceCoordinator->Stop();
+				m_queueCoordinator->Stop();
+				m_urlCoordinator->Stop();
+				m_dupeSearch->Stop();
+				m_prePostProcessor->Stop();
+				m_feedCoordinator->Stop();
+				m_articleCache->Stop();
+				if (m_memoryMonitor)
+				{
+					m_memoryMonitor->Stop();
+				}
+				m_queueScriptCoordinator->Stop();
+			}
+		}
+
+		// trigger stop/reload signal
+		std::lock_guard<std::mutex> guard(m_waitMutex);
+		m_stopped = true;
+		m_waitCond.notify_all();
+	}
 
 	// Options::Extender
 	void AddNewsServer(int id, bool active, const char* name, const char* host,
 		int port, int ipVersion, const char* user, const char* pass, bool joinGroup,
 		bool tls, const char* cipher, int maxConnections, int retention,
-		int level, int group, bool optional, unsigned int certVerificationfLevel) override;
+		int level, int group, bool optional, unsigned int certVerificationfLevel) override
+	{
+		m_serverPool->AddServer(std::make_unique<NewsServer>(id, active, name, host, port, ipVersion, user, pass, joinGroup,
+			tls, cipher, maxConnections, retention, level, group, optional, certVerificationfLevel));
+	}
+
 	void AddFeed(int id, const char* name, const char* url, int interval,
 		const char* filter, bool backlog, bool pauseNzb, const char* category,
 		FeedInfo::CategorySource categorySource, int priority, const char* feedScript,
-		unsigned int certVerifLevel) override;
+		unsigned int certVerifLevel) override
+	{
+		m_feedCoordinator->AddFeed(std::make_unique<FeedInfo>(id, name, url, backlog, interval, filter,
+			pauseNzb, category, categorySource, priority, feedScript, certVerifLevel));
+	}
+
 	void AddTask(int id, int hours, int minutes, int weekDaysBits,
-		Options::ESchedulerCommand command, const char* param) override;
+		Options::ESchedulerCommand command, const char* param) override
+	{
+		m_scheduler->AddTask(std::make_unique<Scheduler::Task>(id, hours, minutes, weekDaysBits,
+			(Scheduler::ECommand)command, param));
+	}
 
 private:
 	// globals
@@ -1137,668 +1363,389 @@ private:
 	std::mutex m_waitMutex;
 	std::condition_variable m_waitCond;
 
-	void Final();
-	void BootConfig();
-	void CreateGlobals();
-	void Cleanup();
-	void PrintOptions();
-	void ProcessDirect();
-	void ProcessClientRequest();
-	void ProcessWebGet();
-	void ProcessSigVerify();
-	void StartRemoteServer();
-	void StopRemoteServer();
-	void StartFrontend();
-	void StopFrontend();
-	void ProcessStandalone();
-	void DoMainLoop();
-	void Daemonize();
-};
-
-std::unique_ptr<RustyGet> g_RustyGet;
-
-// the daemon holds the lock on the lock-file: only then is it ours to delete
-// at shutdown. Not a member: a reload makes a new NZBGet without daemonizing,
-// and a second daemon that fails to get the lock must leave it in place.
-static bool g_LockFileOwned = false;
-
-RustyGet::~RustyGet()
-{
-	Cleanup();
-}
-
-int RustyGet::Phase1_Init(bool reload)
-{
-	m_reloading = reload;
-	m_log = std::make_unique<Log>();
-
-	debug("RustyGet %s", Util::VersionRevision());
-
-	if (!m_reloading)
+	void CreateGlobals()
 	{
-		Connection::Init();
-#ifndef DISABLE_TLS
-		TlsSocket::Init();
-#endif
+		m_workState = std::make_unique<WorkState>();
+		g_WorkState = m_workState.get();
+
+		m_serviceCoordinator = std::make_unique<ServiceCoordinator>();
+		g_ServiceCoordinator = m_serviceCoordinator.get();
+
+		m_serverPool = std::make_unique<ServerPool>();
+		g_ServerPool = m_serverPool.get();
+
+		m_queueCoordinator = std::make_unique<QueueCoordinator>();
+		g_QueueCoordinator = m_queueCoordinator.get();
+
+		m_statMeter = std::make_unique<StatMeter>();
+		g_StatMeter = m_statMeter.get();
+
+		m_scanner = std::make_unique<Scanner>();
+		g_Scanner = m_scanner.get();
+
+		m_prePostProcessor = std::make_unique<PrePostProcessor>();
+		g_PrePostProcessor = m_prePostProcessor.get();
+
+		m_historyCoordinator = std::make_unique<HistoryCoordinator>();
+		m_twinCheck = std::make_unique<TwinCheck>();
+		g_HistoryCoordinator = m_historyCoordinator.get();
+
+		m_dupeCoordinator = std::make_unique<DupeCoordinator>();
+		g_DupeCoordinator = m_dupeCoordinator.get();
+
+		m_urlCoordinator = std::make_unique<UrlCoordinator>();
+		g_UrlCoordinator = m_urlCoordinator.get();
+
+		m_dupeSearch = std::make_unique<DupeSearch>();
+		g_DupeSearch = m_dupeSearch.get();
+
+		m_feedCoordinator = std::make_unique<FeedCoordinator>();
+		g_FeedCoordinator = m_feedCoordinator.get();
+
+		m_articleCache = std::make_unique<ArticleCache>();
+		g_ArticleCache = m_articleCache.get();
+
+		m_memoryMonitor = std::make_unique<MemoryMonitor>();
+		g_MemoryMonitor = m_memoryMonitor.get();
+
+		m_maintenance = std::make_unique<Maintenance>();
+		g_Maintenance = m_maintenance.get();
+
+		m_queueScriptCoordinator = std::make_unique<QueueScriptCoordinator>();
+		g_QueueScriptCoordinator = m_queueScriptCoordinator.get();
+
+		m_diskState = std::make_unique<DiskState>();
+		g_DiskState = m_diskState.get();
+
+		m_scriptConfig = std::make_unique<ScriptConfig>();
+		g_ScriptConfig = m_scriptConfig.get();
+
+		m_commandScriptLog = std::make_unique<CommandScriptLog>();
+		g_CommandScriptLog = m_commandScriptLog.get();
+
+		m_extensionManager = std::make_unique<ExtensionManager::Manager>();
+		g_ExtensionManager = m_extensionManager.get();
+
+		m_systemInfo = std::make_unique<System::SystemInfo>();
+		g_SystemInfo = m_systemInfo.get();
+
+		m_scheduler = std::make_unique<Scheduler>();
+
+		m_diskService = std::make_unique<DiskService>();
 	}
 
-	CreateGlobals();
-
-	BootConfig();
-
-	if (m_memoryMonitor)
+	void BootConfig()
 	{
-		m_memoryMonitor->InitOptions();
-	}
-
-	mode_t uMask = static_cast<mode_t>(m_options->GetUMask());
-	if (nzbget_rs_ccm_nzbget_is_valid_umask((uint32_t)uMask) != 0)
-	{
-		/* set newly created file permissions */
-		FileSystem::uMask = uMask;
-		umask(FileSystem::uMask);
-	}
-	else
-	{
-		FileSystem::uMask = umask(0);
-		umask(FileSystem::uMask);
-	}
-
-#ifdef DEBUG
-	debug("Using %o umask", FileSystem::uMask);
-#endif
-
-	m_scanner->InitOptions();
-	m_queueScriptCoordinator->InitOptions();
-#ifndef DISABLE_TLS
-	TlsSocket::InitOptions(g_Options->GetCertCheck() ? g_Options->GetCertStore() : "");
-#endif
-
-	ProcessDirect();
-
-	if (nzbget_rs_dqh_nzbget_should_run_system_health_check(
-		g_Options->GetServerMode() ? 1 : 0,
-		g_Options->GetSystemHealthCheck() ? 1 : 0) != 0)
-	{
-		m_systemHealth = std::make_unique<SystemHealth::Service>(
-			*g_Options,
-			*g_ServerPool->GetServers(),
-			*g_FeedCoordinator->GetFeeds(),
-			m_scheduler->GetTasks(),
-			*g_Log);
-		g_SystemHealth = m_systemHealth.get();
-
-		m_systemHealth->DiagnoseAndLog();
-	}
-
-	if (m_commandLineParser->GetDaemonMode())
-	{
-		if (!m_reloading)
+		debug("Parsing command line");
+		m_commandLineParser = std::make_unique<CommandLineParser>(g_ArgumentCount, (const char**)(*g_Arguments));
+		if (m_commandLineParser->m_printVersion)
 		{
-			Daemonize();
+			printf("RustyGet version: %s\n", Util::VersionRevision());
+			exit(0);
 		}
-		info("RustyGet %s daemon-mode", Util::VersionRevision());
-	}
-	else if (m_options->GetServerMode())
-	{
-		info("RustyGet %s server-mode", Util::VersionRevision());
-	}
-	else if (m_commandLineParser->GetRemoteClientMode())
-	{
-		info("RustyGet %s remote-mode", Util::VersionRevision());
-	}
-
-	if (m_options->GetServerMode())
-	{
-		info("using %s", m_options->GetConfigFilename());
-		info("RustyGet runs on %s:%i", m_options->GetControlIp(), m_options->GetControlPort());
-	}
-
-#ifdef DEBUG
-	std::stringstream ss;
-	ss << *m_systemInfo;
-	std::string line;
-	while (std::getline(ss, line))
-	{
-		detail("%s", line.c_str());
-	}
-#endif
-
-	m_reloading = false;
-
-	InstallErrorHandler();
-
-	return 0;
-}
-
-int RustyGet::Phase2_SubsystemsAndState(bool reload)
-{
-	(void)reload;
-	if (!m_commandLineParser->GetRemoteClientMode())
-	{
-		m_serverPool->InitConnections();
-		m_statMeter->Init();
-	}
-	return 0;
-}
-
-void RustyGet::Final()
-{
-	TlsCipherBackend::Shutdown();
-	if (!m_reloading)
-	{
-#ifndef DISABLE_TLS
-		TlsSocket::Final();
-#endif
-		Connection::Final();
-	}
-}
-
-void RustyGet::CreateGlobals()
-{
-	m_workState = std::make_unique<WorkState>();
-	g_WorkState = m_workState.get();
-
-	m_serviceCoordinator = std::make_unique<ServiceCoordinator>();
-	g_ServiceCoordinator = m_serviceCoordinator.get();
-
-	m_serverPool = std::make_unique<ServerPool>();
-	g_ServerPool = m_serverPool.get();
-
-	m_queueCoordinator = std::make_unique<QueueCoordinator>();
-	g_QueueCoordinator = m_queueCoordinator.get();
-
-	m_statMeter = std::make_unique<StatMeter>();
-	g_StatMeter = m_statMeter.get();
-
-	m_scanner = std::make_unique<Scanner>();
-	g_Scanner = m_scanner.get();
-
-	m_prePostProcessor = std::make_unique<PrePostProcessor>();
-	g_PrePostProcessor = m_prePostProcessor.get();
-
-	m_historyCoordinator = std::make_unique<HistoryCoordinator>();
-	m_twinCheck = std::make_unique<TwinCheck>();
-	g_HistoryCoordinator = m_historyCoordinator.get();
-
-	m_dupeCoordinator = std::make_unique<DupeCoordinator>();
-	g_DupeCoordinator = m_dupeCoordinator.get();
-
-	m_urlCoordinator = std::make_unique<UrlCoordinator>();
-	g_UrlCoordinator = m_urlCoordinator.get();
-
-	m_dupeSearch = std::make_unique<DupeSearch>();
-	g_DupeSearch = m_dupeSearch.get();
-
-	m_feedCoordinator = std::make_unique<FeedCoordinator>();
-	g_FeedCoordinator = m_feedCoordinator.get();
-
-	m_articleCache = std::make_unique<ArticleCache>();
-	g_ArticleCache = m_articleCache.get();
-
-	m_memoryMonitor = std::make_unique<MemoryMonitor>();
-	g_MemoryMonitor = m_memoryMonitor.get();
-
-	m_maintenance = std::make_unique<Maintenance>();
-	g_Maintenance = m_maintenance.get();
-
-	m_queueScriptCoordinator = std::make_unique<QueueScriptCoordinator>();
-	g_QueueScriptCoordinator = m_queueScriptCoordinator.get();
-
-	m_diskState = std::make_unique<DiskState>();
-	g_DiskState = m_diskState.get();
-
-	m_scriptConfig = std::make_unique<ScriptConfig>();
-	g_ScriptConfig = m_scriptConfig.get();
-
-	m_commandScriptLog = std::make_unique<CommandScriptLog>();
-	g_CommandScriptLog = m_commandScriptLog.get();
-
-	m_extensionManager = std::make_unique<ExtensionManager::Manager>();
-	g_ExtensionManager = m_extensionManager.get();
-
-	m_systemInfo = std::make_unique<System::SystemInfo>();
-	g_SystemInfo = m_systemInfo.get();
-
-	m_scheduler = std::make_unique<Scheduler>();
-
-	m_diskService = std::make_unique<DiskService>();
-}
-
-void RustyGet::BootConfig()
-{
-	debug("Parsing command line");
-	m_commandLineParser = std::make_unique<CommandLineParser>(g_ArgumentCount, (const char**)(*g_Arguments));
-	if (m_commandLineParser->GetPrintVersion())
-	{
-		printf("RustyGet version: %s\n", Util::VersionRevision());
-		exit(0);
-	}
-	int bootExitCode = 0;
-	if (nzbget_rs_dqh_nzbget_classify_boot_usage_or_error(
-		m_commandLineParser->GetPrintUsage() ? 1 : 0,
-		m_commandLineParser->GetErrors() ? 1 : 0,
-		g_ArgumentCount,
-		&bootExitCode) != 0)
-	{
-		m_commandLineParser->PrintUsage(((const char**)(*g_Arguments))[0]);
-		exit(bootExitCode);
-	}
-
-	debug("Reading options");
-	m_options = std::make_unique<Options>((*g_Arguments)[0], m_commandLineParser->GetConfigFilename(),
-		m_commandLineParser->GetNoConfig(), (Options::CmdOptList*)m_commandLineParser->GetOptionList(), this);
-	m_options->SetRemoteClientMode(m_commandLineParser->GetRemoteClientMode());
-	m_options->SetServerMode(m_commandLineParser->GetServerMode());
-	m_options->SetDaemonMode(m_commandLineParser->GetDaemonMode());
-	int testBacktrace = 0;
-#ifdef DEBUG
-	testBacktrace = m_commandLineParser->GetTestBacktrace() ? 1 : 0;
-#endif
-	m_options->SetDirectClientMode(nzbget_rs_roc_nzbget_boot_is_direct_client_mode(
-		testBacktrace,
-		m_commandLineParser->GetWebGet() ? 1 : 0,
-		m_commandLineParser->GetSigVerify() ? 1 : 0,
-		(int)m_commandLineParser->GetClientOperation(),
-		(int)CommandLineParser::opClientNoOperation,
-		m_commandLineParser->GetPrintOptions() ? 1 : 0) != 0);
-	m_workState->SetPauseDownload(m_commandLineParser->GetPauseDownload());
-	m_workState->SetSpeedLimit(g_Options->GetDownloadRate());
-
-	m_log->InitOptions();
-
-	if (m_options->GetFatalError())
-	{
-		exit(1);
-	}
-	else if (nzbget_rs_roc_nzbget_boot_should_pause_on_config_errors(
-		m_options->GetConfigErrors() ? 1 : 0,
-		(int)m_commandLineParser->GetClientOperation(),
-		(int)CommandLineParser::opClientNoOperation))
-	{
-		info("Pausing all activities due to errors in configuration");
-		m_workState->SetPauseDownload(true);
-		m_workState->SetPausePostProcess(true);
-		m_workState->SetPauseScan(true);
-	}
-
-	m_serverPool->SetTimeout(m_options->GetArticleTimeout());
-	m_serverPool->SetRetryInterval(m_options->GetArticleInterval());
-
-	m_scriptConfig->InitOptions();
-
-	m_extensionManager->LoadExtensions();
-}
-
-void RustyGet::Cleanup()
-{
-	debug("Cleaning up global objects");
-
-	if (m_options && !m_reloading && g_LockFileOwned)
-	{
-		info("Deleting lock file");
-		FileSystem::DeleteFile(m_options->GetLockFile());
-	}
-
-	g_UrlCoordinator = nullptr;
-	g_DupeSearch = nullptr;
-	g_PrePostProcessor = nullptr;
-	g_Scanner = nullptr;
-	g_HistoryCoordinator = nullptr;
-	g_DupeCoordinator = nullptr;
-	g_QueueCoordinator = nullptr;
-	g_DiskState = nullptr;
-	g_ScriptConfig = nullptr;
-	g_ServerPool = nullptr;
-	g_FeedCoordinator = nullptr;
-	g_ArticleCache = nullptr;
-	if (m_memoryMonitor)
-	{
-		m_memoryMonitor->Stop();
-		while (m_memoryMonitor->IsRunning())
+		int bootExitCode = 0;
+		if (nzbget_rs_dqh_nzbget_classify_boot_usage_or_error(
+			m_commandLineParser->m_printUsage ? 1 : 0,
+			m_commandLineParser->m_errors ? 1 : 0,
+			g_ArgumentCount,
+			&bootExitCode) != 0)
 		{
-			Util::Sleep(10);
+			m_commandLineParser->PrintUsage(((const char**)(*g_Arguments))[0]);
+			exit(bootExitCode);
+		}
+
+		debug("Reading options");
+		m_options = std::make_unique<Options>((*g_Arguments)[0], m_commandLineParser->m_configFilename,
+			m_commandLineParser->m_noConfig, (Options::CmdOptList*)&m_commandLineParser->m_optionList, this);
+		m_options->SetRemoteClientMode(m_commandLineParser->m_remoteClientMode);
+		m_options->SetServerMode(m_commandLineParser->m_serverMode);
+		m_options->SetDaemonMode(m_commandLineParser->m_daemonMode);
+		int testBacktrace = 0;
+#ifdef DEBUG
+		testBacktrace = m_commandLineParser->m_testBacktrace ? 1 : 0;
+#endif
+		m_options->SetDirectClientMode(nzbget_rs_roc_nzbget_boot_is_direct_client_mode(
+			testBacktrace,
+			m_commandLineParser->m_webGet ? 1 : 0,
+			m_commandLineParser->m_sigVerify ? 1 : 0,
+			(int)m_commandLineParser->m_clientOperation,
+			(int)CommandLineParser::opClientNoOperation,
+			m_commandLineParser->m_printOptions ? 1 : 0) != 0);
+		m_workState->SetPauseDownload(m_commandLineParser->m_pauseDownload);
+		m_workState->SetSpeedLimit(g_Options->GetDownloadRate());
+
+		m_log->InitOptions();
+
+		if (m_options->GetFatalError())
+		{
+			exit(1);
+		}
+		else if (nzbget_rs_roc_nzbget_boot_should_pause_on_config_errors(
+			m_options->GetConfigErrors() ? 1 : 0,
+			(int)m_commandLineParser->m_clientOperation,
+			(int)CommandLineParser::opClientNoOperation))
+		{
+			info("Pausing all activities due to errors in configuration");
+			m_workState->SetPauseDownload(true);
+			m_workState->SetPausePostProcess(true);
+			m_workState->SetPauseScan(true);
+		}
+
+		m_serverPool->SetTimeout(m_options->GetArticleTimeout());
+		m_serverPool->SetRetryInterval(m_options->GetArticleInterval());
+
+		m_scriptConfig->InitOptions();
+
+		m_extensionManager->LoadExtensions();
+	}
+
+	void Cleanup()
+	{
+		debug("Cleaning up global objects");
+
+		if (m_options && !m_reloading && g_LockFileOwned)
+		{
+			info("Deleting lock file");
+			FileSystem::DeleteFile(m_options->GetLockFile());
+		}
+
+		g_UrlCoordinator = nullptr;
+		g_DupeSearch = nullptr;
+		g_PrePostProcessor = nullptr;
+		g_Scanner = nullptr;
+		g_HistoryCoordinator = nullptr;
+		g_DupeCoordinator = nullptr;
+		g_QueueCoordinator = nullptr;
+		g_DiskState = nullptr;
+		g_ScriptConfig = nullptr;
+		g_ServerPool = nullptr;
+		g_FeedCoordinator = nullptr;
+		g_ArticleCache = nullptr;
+		if (m_memoryMonitor)
+		{
+			m_memoryMonitor->Stop();
+			while (m_memoryMonitor->IsRunning())
+			{
+				Util::Sleep(10);
+			}
+		}
+		g_MemoryMonitor = nullptr;
+		m_memoryMonitor.reset();
+		g_QueueScriptCoordinator = nullptr;
+		// destroyed while the global still points to it: its destructor waits for
+		// a running update-script, whose thread finishes through g_Maintenance
+		m_maintenance.reset();
+		g_Maintenance = nullptr;
+		g_StatMeter = nullptr;
+		g_CommandScriptLog = nullptr;
+		g_ExtensionManager = nullptr;
+	}
+
+	void ProcessDirect()
+	{
+#ifdef DEBUG
+		if (m_commandLineParser->m_testBacktrace)
+		{
+			TestSegFault(); // never returns
+		}
+#endif
+
+		if (m_commandLineParser->m_webGet)
+		{
+			WebDownloader downloader;
+			downloader.SetUrl(m_commandLineParser->m_lastArg);
+			downloader.SetForce(true);
+			downloader.SetRetry(false);
+			downloader.SetOutputFilename(m_commandLineParser->m_webGetFilename);
+			downloader.SetInfoName("WebGet");
+
+			WebDownloader::EStatus status = downloader.DownloadWithRedirects(5);
+			exit(nzbget_rs_ccm_nzbget_webget_exit_code((int)status, (int)WebDownloader::adFinished));
+		}
+
+		if (m_commandLineParser->m_sigVerify)
+		{
+#ifndef DISABLE_TLS
+			bool ok = Maintenance::VerifySignature(m_commandLineParser->m_lastArg,
+				m_commandLineParser->m_sigFilename, m_commandLineParser->m_pubKeyFilename);
+			exit(nzbget_rs_ccm_nzbget_sigverify_exit_code(ok ? 1 : 0));
+#else
+			printf("ERROR: Could not verify signature, the program was compiled without OpenSSL support\n");
+			exit(1);
+#endif
+		}
+
+		// client request
+		if (m_commandLineParser->m_clientOperation != CommandLineParser::opClientNoOperation)
+		{
+			ProcessClientRequest(); // never returns
+		}
+
+		if (m_commandLineParser->m_printOptions)
+		{
+			for (Options::OptEntry& optEntry : g_Options->GuardOptEntries())
+			{
+				printf("%s = \"%s\"\n", optEntry.GetName(), optEntry.GetValue());
+			}
+			exit(0);
 		}
 	}
-	g_MemoryMonitor = nullptr;
-	m_memoryMonitor.reset();
-	g_QueueScriptCoordinator = nullptr;
-	// destroyed while the global still points to it: its destructor waits for
-	// a running update-script, whose thread finishes through g_Maintenance
-	m_maintenance.reset();
-	g_Maintenance = nullptr;
-	g_StatMeter = nullptr;
-	g_CommandScriptLog = nullptr;
-	g_ExtensionManager = nullptr;
-}
 
-void RustyGet::ProcessDirect()
-{
-#ifdef DEBUG
-	if (m_commandLineParser->GetTestBacktrace())
+	void StartRemoteServer()
 	{
-		TestSegFault(); // never returns
-	}
-#endif
-
-	if (m_commandLineParser->GetWebGet())
-	{
-		ProcessWebGet(); // never returns
-	}
-
-	if (m_commandLineParser->GetSigVerify())
-	{
-		ProcessSigVerify(); // never returns
-	}
-
-	// client request
-	if (m_commandLineParser->GetClientOperation() != CommandLineParser::opClientNoOperation)
-	{
-		ProcessClientRequest(); // never returns
-	}
-
-	if (m_commandLineParser->GetPrintOptions())
-	{
-		PrintOptions(); // never returns
-	}
-}
-
-void RustyGet::StartRemoteServer()
-{
-	if (!m_options->GetServerMode())
-	{
-		return;
-	}
-
-	WebProcessor::Init();
-	m_remoteServer = std::make_unique<RemoteServer>(false);
-	m_remoteServer->Start();
-
-	if (nzbget_rs_ccm_nzbget_should_start_secure_server(
-		m_options->GetSecureControl() ? 1 : 0, 1, m_options->GetControlIp()) != 0)
-	{
-		m_remoteSecureServer = std::make_unique<RemoteServer>(true);
-		m_remoteSecureServer->Start();
-	}
-}
-
-void RustyGet::StopRemoteServer()
-{
-	if (m_remoteServer)
-	{
-		debug("stopping RemoteServer");
-		m_remoteServer->Stop();
-	}
-
-	if (m_remoteSecureServer)
-	{
-		debug("stopping RemoteSecureServer");
-		m_remoteSecureServer->Stop();
-	}
-
-	int maxWaitMSec = 5000;
-	while (((m_remoteServer && m_remoteServer->IsRunning()) ||
-		(m_remoteSecureServer && m_remoteSecureServer->IsRunning())) &&
-		maxWaitMSec > 0)
-	{
-		Util::Sleep(100);
-		maxWaitMSec -= 100;
-	}
-
-	if (m_remoteServer && m_remoteServer->IsRunning())
-	{
-		m_remoteServer->ForceStop();
-	}
-
-	if (m_remoteSecureServer && m_remoteSecureServer->IsRunning())
-	{
-		m_remoteSecureServer->ForceStop();
-	}
-
-	maxWaitMSec = 5000;
-	while (((m_remoteServer && m_remoteServer->IsRunning()) ||
-		(m_remoteSecureServer && m_remoteSecureServer->IsRunning())) &&
-		maxWaitMSec > 0)
-	{
-		Util::Sleep(100);
-		maxWaitMSec -= 100;
-	}
-
-	if (m_remoteServer && m_remoteServer->IsRunning())
-	{
-		debug("Killing RemoteServer");
-		m_remoteServer->Kill();
-	}
-
-	if (m_remoteSecureServer && m_remoteSecureServer->IsRunning())
-	{
-		debug("Killing RemoteSecureServer");
-		m_remoteSecureServer->Kill();
-	}
-
-	debug("RemoteServer stopped");
-}
-
-void RustyGet::StartFrontend()
-{
-	if (!m_commandLineParser->GetDaemonMode())
-	{
-		switch (m_options->GetOutputMode())
+		if (!m_options->GetServerMode())
 		{
-		case Options::omNCurses:
+			return;
+		}
+
+		WebProcessor::Init();
+		m_remoteServer = std::make_unique<RemoteServer>(false);
+		m_remoteServer->Start();
+
+		if (nzbget_rs_ccm_nzbget_should_start_secure_server(
+			m_options->GetSecureControl() ? 1 : 0, 1, m_options->GetControlIp()) != 0)
+		{
+			m_remoteSecureServer = std::make_unique<RemoteServer>(true);
+			m_remoteSecureServer->Start();
+		}
+	}
+
+	void StopRemoteServer()
+	{
+		if (m_remoteServer)
+		{
+			debug("stopping RemoteServer");
+			m_remoteServer->Stop();
+		}
+
+		if (m_remoteSecureServer)
+		{
+			debug("stopping RemoteSecureServer");
+			m_remoteSecureServer->Stop();
+		}
+
+		int maxWaitMSec = 5000;
+		while (((m_remoteServer && m_remoteServer->IsRunning()) ||
+			(m_remoteSecureServer && m_remoteSecureServer->IsRunning())) &&
+			maxWaitMSec > 0)
+		{
+			Util::Sleep(100);
+			maxWaitMSec -= 100;
+		}
+
+		if (m_remoteServer && m_remoteServer->IsRunning())
+		{
+			m_remoteServer->ForceStop();
+		}
+
+		if (m_remoteSecureServer && m_remoteSecureServer->IsRunning())
+		{
+			m_remoteSecureServer->ForceStop();
+		}
+
+		maxWaitMSec = 5000;
+		while (((m_remoteServer && m_remoteServer->IsRunning()) ||
+			(m_remoteSecureServer && m_remoteSecureServer->IsRunning())) &&
+			maxWaitMSec > 0)
+		{
+			Util::Sleep(100);
+			maxWaitMSec -= 100;
+		}
+
+		if (m_remoteServer && m_remoteServer->IsRunning())
+		{
+			debug("Killing RemoteServer");
+			m_remoteServer->Kill();
+		}
+
+		if (m_remoteSecureServer && m_remoteSecureServer->IsRunning())
+		{
+			debug("Killing RemoteSecureServer");
+			m_remoteSecureServer->Kill();
+		}
+
+		debug("RemoteServer stopped");
+	}
+
+	void StartFrontend()
+	{
+		if (!m_commandLineParser->m_daemonMode)
+		{
+			switch (m_options->GetOutputMode())
+			{
+			case Options::omNCurses:
 #ifndef DISABLE_CURSES
-			m_frontend = std::make_unique<NCursesFrontend>();
-			break;
+				m_frontend = std::make_unique<NCursesFrontend>();
+				break;
 #endif
 
-		case Options::omColored:
-			m_frontend = std::make_unique<LoggableFrontend>(true);
-			break;
+			case Options::omColored:
+				m_frontend = std::make_unique<LoggableFrontend>(true);
+				break;
 
-		case Options::omLoggable:
-			m_frontend = std::make_unique<LoggableFrontend>();
-			break;
+			case Options::omLoggable:
+				m_frontend = std::make_unique<LoggableFrontend>();
+				break;
+			}
+		}
+
+		if (m_frontend)
+		{
+			m_frontend->Start();
 		}
 	}
 
-	if (m_frontend)
+	void StopFrontend()
 	{
-		m_frontend->Start();
-	}
-}
-
-void RustyGet::StopFrontend()
-{
-	if (m_frontend)
-	{
-		if (nzbget_rs_dqh_nzbget_should_stop_frontend_immediately(
-			m_commandLineParser->GetRemoteClientMode() ? 1 : 0,
-			m_stopped ? 1 : 0) != 0)
+		if (m_frontend)
 		{
-			debug("Stopping Frontend");
-			m_frontend->Stop();
-		}
-		while (m_frontend->IsRunning())
-		{
-			if (g_SigExitPending.exchange(false))
+			if (nzbget_rs_dqh_nzbget_should_stop_frontend_immediately(
+				m_commandLineParser->m_remoteClientMode ? 1 : 0,
+				m_stopped ? 1 : 0) != 0)
 			{
-				ExitProc();
+				debug("Stopping Frontend");
+				m_frontend->Stop();
 			}
-			Util::Sleep(50);
-		}
-		debug("Frontend stopped");
-	}
-}
-
-void RustyGet::ProcessStandalone()
-{
-	const char* category = m_commandLineParser->GetAddCategory() ? m_commandLineParser->GetAddCategory() : "";
-	NzbFile nzbFile(m_commandLineParser->GetArgFilename(), category);
-	if (!nzbFile.Parse())
-	{
-		printf("Parsing NZB-document %s failed\n\n",
-			m_commandLineParser->GetArgFilename() ? m_commandLineParser->GetArgFilename() : "N/A");
-		return;
-	}
-	std::unique_ptr<NzbInfo> nzbInfo = nzbFile.DetachNzbInfo();
-
-	if (!nzbFile.GetPassword().empty())
-	{
-		nzbInfo->GetParameters()->SetParameter("*Unpack:Password", nzbFile.GetPassword().c_str());
-	}
-
-	m_scanner->InitPPParameters(category, nzbInfo->GetParameters(), false);
-	m_queueCoordinator->AddNzbFileToQueue(std::move(nzbInfo), nullptr, false);
-}
-
-static std::mutex g_reloadMutex;
-static std::condition_variable g_reloadCond;
-static bool g_reloadPending{false};
-static bool g_reloadWorkerRunning{false};
-static std::chrono::steady_clock::time_point g_reloadTargetTime;
-static std::chrono::steady_clock::time_point g_reloadFirstRequestTime;
-static std::thread g_reloadThread;
-
-static void CancelAndJoinReloadThread()
-{
-	std::unique_lock<std::mutex> lock(g_reloadMutex);
-	g_reloadPending = false;
-	g_reloadCond.notify_all();
-	if (g_reloadThread.joinable() && g_reloadThread.get_id() != std::this_thread::get_id())
-	{
-		g_reloadCond.wait(lock, [] { return !g_reloadWorkerRunning; });
-		g_reloadThread.join();
-	}
-}
-
-void RustyGet::DoMainLoop()
-{
-	debug("Entering main program loop");
-
-	m_queueCoordinator->Start();
-	m_urlCoordinator->Start();
-	m_dupeSearch->Start();
-	m_prePostProcessor->Start();
-	m_feedCoordinator->Start();
-	m_serviceCoordinator->Start();
-	if (m_options->GetArticleCache() > 0)
-	{
-		m_articleCache->Start();
-	}
-	if (m_memoryMonitor)
-	{
-		m_memoryMonitor->Start();
-	}
-
-	// enter main program-loop
-	while (m_queueCoordinator->IsRunning() ||
-		m_urlCoordinator->IsRunning() ||
-		m_dupeSearch->IsRunning() ||
-		m_prePostProcessor->IsRunning() ||
-		m_feedCoordinator->IsRunning() ||
-		m_serviceCoordinator->IsRunning() ||
-		(m_memoryMonitor && m_memoryMonitor->IsRunning()) ||
-		m_articleCache->IsRunning())
-	{
-		if (g_SigExitPending.exchange(false))
-		{
-			ExitProc();
-		}
-		else if (g_SigHupPending.exchange(false))
-		{
-			Reload();
-		}
-
-		if (nzbget_rs_ccm_nzbget_should_stop_standalone(
-			m_options->GetServerMode() ? 1 : 0,
-			m_queueCoordinator->HasMoreJobs() ? 1 : 0,
-			m_urlCoordinator->HasMoreJobs() ? 1 : 0,
-			m_prePostProcessor->HasMoreJobs() ? 1 : 0) != 0)
-		{
-			// Standalone-mode: download completed
-			if (!m_queueCoordinator->IsStopped())
+			while (m_frontend->IsRunning())
 			{
-				m_queueCoordinator->Stop();
-			}
-			if (!m_urlCoordinator->IsStopped())
-			{
-				m_urlCoordinator->Stop();
-			}
-			if (!m_dupeSearch->IsStopped())
-			{
-				m_dupeSearch->Stop();
-			}
-			if (!m_prePostProcessor->IsStopped())
-			{
-				m_prePostProcessor->Stop();
-			}
-			if (!m_feedCoordinator->IsStopped())
-			{
-				m_feedCoordinator->Stop();
-			}
-			if (!m_articleCache->IsStopped())
-			{
-				m_articleCache->Stop();
-			}
-			if (m_memoryMonitor && !m_memoryMonitor->IsStopped())
-			{
-				m_memoryMonitor->Stop();
-			}
-			if (!m_serviceCoordinator->IsStopped())
-			{
-				m_serviceCoordinator->Stop();
-			}
-		}
-		Util::Sleep(100);
-
-		if (m_options->GetServerMode() && !m_stopped)
-		{
-			// wait for stop signal or pending POSIX signal
-			while (!m_stopped)
-			{
-				{
-					std::unique_lock<std::mutex> lk(m_waitMutex);
-					m_waitCond.wait_for(lk, std::chrono::milliseconds(50), [&]{
-						return m_stopped || g_SigExitPending.load() || g_SigHupPending.load();
-					});
-				}
-
 				if (g_SigExitPending.exchange(false))
 				{
 					ExitProc();
 				}
-				else if (g_SigHupPending.exchange(false))
-				{
-					Reload();
-				}
+				Util::Sleep(50);
 			}
+			debug("Frontend stopped");
 		}
 	}
 
-	debug("Main program loop terminated");
-}
-
-int RustyGet::Phase3_ServerActivation()
-{
-	StartRemoteServer();
-	StartFrontend();
-
-	if (!m_commandLineParser->GetRemoteClientMode())
+	void DoMainLoop()
 	{
-		if (!m_commandLineParser->GetServerMode() && !g_SigExitPending.load())
+		debug("Entering main program loop");
+
+		m_queueCoordinator->Start();
+		m_urlCoordinator->Start();
+		m_dupeSearch->Start();
+		m_prePostProcessor->Start();
+		m_feedCoordinator->Start();
+		m_serviceCoordinator->Start();
+		if (m_options->GetArticleCache() > 0)
 		{
-			ProcessStandalone();
+			m_articleCache->Start();
+		}
+		if (m_memoryMonitor)
+		{
+			m_memoryMonitor->Start();
 		}
 
-		DoMainLoop();
-	}
-	else
-	{
-		if (g_SigExitPending.exchange(false))
-		{
-			ExitProc();
-		}
-		while (m_frontend && !m_stopped && !m_reloading && m_frontend->IsRunning())
+		// enter main program-loop
+		while (m_queueCoordinator->IsRunning() ||
+			m_urlCoordinator->IsRunning() ||
+			m_dupeSearch->IsRunning() ||
+			m_prePostProcessor->IsRunning() ||
+			m_feedCoordinator->IsRunning() ||
+			m_serviceCoordinator->IsRunning() ||
+			(m_memoryMonitor && m_memoryMonitor->IsRunning()) ||
+			m_articleCache->IsRunning())
 		{
 			if (g_SigExitPending.exchange(false))
 			{
@@ -1808,330 +1755,194 @@ int RustyGet::Phase3_ServerActivation()
 			{
 				Reload();
 			}
-			Util::Sleep(50);
-		}
-	}
 
-	return 0;
-}
-
-void RustyGet::Phase4_Shutdown(bool reload)
-{
-	m_reloading = reload;
-	CancelAndJoinReloadThread();
-	ScriptController::TerminateAll();
-
-	StopRemoteServer();
-	StopFrontend();
-	CancelAndJoinReloadThread();
-
-	Final();
-}
-
-bool RustyGet::HasActiveUnpack() const
-{
-	return m_prePostProcessor ? m_prePostProcessor->HasActiveUnpack(false) : false;
-}
-
-void RustyGet::ProcessClientRequest()
-{
-	RemoteClient Client;
-	bool ok = false;
-
-	switch (m_commandLineParser->GetClientOperation())
-	{
-		case CommandLineParser::opClientRequestListFiles:
-			ok = Client.RequestServerList(true, false, m_commandLineParser->GetMatchMode() == CommandLineParser::mmRegEx ? m_commandLineParser->GetEditQueueText() : nullptr);
-			break;
-
-		case CommandLineParser::opClientRequestListGroups:
-			ok = Client.RequestServerList(false, true, m_commandLineParser->GetMatchMode() == CommandLineParser::mmRegEx ? m_commandLineParser->GetEditQueueText() : nullptr);
-			break;
-
-		case CommandLineParser::opClientRequestListStatus:
-			ok = Client.RequestServerList(false, false, nullptr);
-			break;
-
-		case CommandLineParser::opClientRequestDownloadPause:
-			ok = Client.RequestServerPauseUnpause(true, rpDownload);
-			break;
-
-		case CommandLineParser::opClientRequestDownloadUnpause:
-			ok = Client.RequestServerPauseUnpause(false, rpDownload);
-			break;
-
-		case CommandLineParser::opClientRequestSetRate:
-			ok = Client.RequestServerSetDownloadRate(m_commandLineParser->GetSetRate());
-			break;
-
-		case CommandLineParser::opClientRequestDumpDebug:
-			ok = Client.SendSimpleBoolRequest(rrDumpDebug);
-			break;
-
-		case CommandLineParser::opClientRequestEditQueue:
-			ok = Client.RequestServerEditQueue((DownloadQueue::EEditAction)m_commandLineParser->GetEditQueueAction(),
-				m_commandLineParser->GetEditQueueOffset(), m_commandLineParser->GetEditQueueText(),
-				m_commandLineParser->GetEditQueueIdList(), m_commandLineParser->GetEditQueueNameList(),
-				(ERemoteMatchMode)m_commandLineParser->GetMatchMode());
-			break;
-
-		case CommandLineParser::opClientRequestLog:
-			ok = Client.RequestServerLog(m_commandLineParser->GetLogLines());
-			break;
-
-		case CommandLineParser::opClientRequestShutdown:
-			ok = Client.SendSimpleBoolRequest(rrShutdown);
-			break;
-
-		case CommandLineParser::opClientRequestReload:
-			ok = Client.SendSimpleBoolRequest(rrReload);
-			break;
-
-		case CommandLineParser::opClientRequestDownload:
-			ok = Client.RequestServerDownload(
-				m_commandLineParser->GetAddNzbFilename(),
-				m_commandLineParser->GetArgFilename(),
-				m_commandLineParser->GetAddCategory(),
-				m_commandLineParser->GetAutoCategory(),
-				m_commandLineParser->GetAddTop(),
-				m_commandLineParser->GetAddPaused(),
-				m_commandLineParser->GetAddPriority(),
-				m_commandLineParser->GetAddDupeKey(),
-				m_commandLineParser->GetAddDupeMode(),
-				m_commandLineParser->GetAddDupeScore());
-			break;
-
-		case CommandLineParser::opClientRequestVersion:
-			ok = Client.SendSimpleBoolRequest(rrVersion);
-			break;
-
-		case CommandLineParser::opClientRequestPostQueue:
-			ok = Client.RequestPostQueue();
-			break;
-
-		case CommandLineParser::opClientRequestWriteLog:
-			ok = Client.RequestWriteLog(m_commandLineParser->GetWriteLogKind(), m_commandLineParser->GetLastArg());
-			break;
-
-		case CommandLineParser::opClientRequestScanAsync:
-			ok = Client.RequestScan(false);
-			break;
-
-		case CommandLineParser::opClientRequestScanSync:
-			ok = Client.RequestScan(true);
-			break;
-
-		case CommandLineParser::opClientRequestPostPause:
-			ok = Client.RequestServerPauseUnpause(true, rpPostProcess);
-			break;
-
-		case CommandLineParser::opClientRequestPostUnpause:
-			ok = Client.RequestServerPauseUnpause(false, rpPostProcess);
-			break;
-
-		case CommandLineParser::opClientRequestScanPause:
-			ok = Client.RequestServerPauseUnpause(true, rpScan);
-			break;
-
-		case CommandLineParser::opClientRequestScanUnpause:
-			ok = Client.RequestServerPauseUnpause(false, rpScan);
-			break;
-
-		case CommandLineParser::opClientRequestHistory:
-		case CommandLineParser::opClientRequestHistoryAll:
-			ok = Client.RequestHistory(m_commandLineParser->GetClientOperation() == CommandLineParser::opClientRequestHistoryAll);
-			break;
-
-		case CommandLineParser::opClientNoOperation:
-			return;
-	}
-
-	exit(ok ? 0 : 1);
-}
-
-void RustyGet::ProcessWebGet()
-{
-	WebDownloader downloader;
-	downloader.SetUrl(m_commandLineParser->GetLastArg());
-	downloader.SetForce(true);
-	downloader.SetRetry(false);
-	downloader.SetOutputFilename(m_commandLineParser->GetWebGetFilename());
-	downloader.SetInfoName("WebGet");
-
-	WebDownloader::EStatus status = downloader.DownloadWithRedirects(5);
-	exit(nzbget_rs_ccm_nzbget_webget_exit_code((int)status, (int)WebDownloader::adFinished));
-}
-
-void RustyGet::ProcessSigVerify()
-{
-#ifndef DISABLE_TLS
-	bool ok = Maintenance::VerifySignature(m_commandLineParser->GetLastArg(),
-		m_commandLineParser->GetSigFilename(), m_commandLineParser->GetPubKeyFilename());
-	exit(nzbget_rs_ccm_nzbget_sigverify_exit_code(ok ? 1 : 0));
-#else
-	printf("ERROR: Could not verify signature, the program was compiled without OpenSSL support\n");
-	exit(1);
-#endif
-}
-
-void RustyGet::Stop(bool reload)
-{
-	if (!reload)
-	{
-		{
-			std::lock_guard<std::mutex> reloadGuard(g_reloadMutex);
-			g_reloadPending = false;
-			g_reloadCond.notify_all();
-		}
-		nzbget_rs_signal_notify(SIGTERM);
-	}
-
-	{
-		std::lock_guard<std::mutex> guard(m_waitMutex);
-		if (m_stopped && !m_reloading && reload)
-		{
-			debug("Ignoring reload request because shutdown is already in progress");
-			return;
-		}
-		m_reloading = reload;
-	}
-
-	if (!m_reloading)
-	{
-		g_SigHupPending.store(false);
-		info("Stopping, please wait...");
-	}
-
-	if (m_reloading && m_prePostProcessor && m_prePostProcessor->HasActiveUnpack(false))
-	{
-		info("Waiting for active unpack to complete before in-process reload...");
-		while (m_prePostProcessor && m_prePostProcessor->HasActiveUnpack(false) && !g_SigExitPending.load())
-		{
-			Util::Sleep(100);
-		}
-	}
-	if (g_SigExitPending.exchange(false))
-	{
-		m_reloading = false;
-		nzbget_rs_signal_notify(SIGTERM);
-	}
-	if (m_commandLineParser->GetRemoteClientMode())
-	{
-		if (m_frontend)
-		{
-			debug("Stopping Frontend");
-			m_frontend->Stop();
-		}
-	}
-	else
-	{
-		if (m_queueCoordinator)
-		{
-			debug("Stopping QueueCoordinator");
-			m_serviceCoordinator->Stop();
-			m_queueCoordinator->Stop();
-			m_urlCoordinator->Stop();
-			m_dupeSearch->Stop();
-			m_prePostProcessor->Stop();
-			m_feedCoordinator->Stop();
-			m_articleCache->Stop();
-			if (m_memoryMonitor)
+			if (nzbget_rs_ccm_nzbget_should_stop_standalone(
+				m_options->GetServerMode() ? 1 : 0,
+				m_queueCoordinator->HasMoreJobs() ? 1 : 0,
+				m_urlCoordinator->HasMoreJobs() ? 1 : 0,
+				m_prePostProcessor->HasMoreJobs() ? 1 : 0) != 0)
 			{
-				m_memoryMonitor->Stop();
+				// Standalone-mode: download completed
+				if (!m_queueCoordinator->IsStopped())
+				{
+					m_queueCoordinator->Stop();
+				}
+				if (!m_urlCoordinator->IsStopped())
+				{
+					m_urlCoordinator->Stop();
+				}
+				if (!m_dupeSearch->IsStopped())
+				{
+					m_dupeSearch->Stop();
+				}
+				if (!m_prePostProcessor->IsStopped())
+				{
+					m_prePostProcessor->Stop();
+				}
+				if (!m_feedCoordinator->IsStopped())
+				{
+					m_feedCoordinator->Stop();
+				}
+				if (!m_articleCache->IsStopped())
+				{
+					m_articleCache->Stop();
+				}
+				if (m_memoryMonitor && !m_memoryMonitor->IsStopped())
+				{
+					m_memoryMonitor->Stop();
+				}
+				if (!m_serviceCoordinator->IsStopped())
+				{
+					m_serviceCoordinator->Stop();
+				}
 			}
-			m_queueScriptCoordinator->Stop();
+			Util::Sleep(100);
+
+			if (m_options->GetServerMode() && !m_stopped)
+			{
+				// wait for stop signal or pending POSIX signal
+				while (!m_stopped)
+				{
+					{
+						std::unique_lock<std::mutex> lk(m_waitMutex);
+						m_waitCond.wait_for(lk, std::chrono::milliseconds(50), [&]{
+							return m_stopped || g_SigExitPending.load() || g_SigHupPending.load();
+						});
+					}
+
+					if (g_SigExitPending.exchange(false))
+					{
+						ExitProc();
+					}
+					else if (g_SigHupPending.exchange(false))
+					{
+						Reload();
+					}
+				}
+			}
 		}
+
+		debug("Main program loop terminated");
 	}
 
-	// trigger stop/reload signal
-	std::lock_guard<std::mutex> guard(m_waitMutex);
-	m_stopped = true;
-	m_waitCond.notify_all();
-}
+	void ProcessClientRequest()
+	{
+		RemoteClient Client;
+		bool ok = false;
 
-void RustyGet::PrintOptions()
-{
-	for (Options::OptEntry& optEntry : g_Options->GuardOptEntries())
-	{
-		printf("%s = \"%s\"\n", optEntry.GetName(), optEntry.GetValue());
-	}
-	exit(0);
-}
+		switch (m_commandLineParser->m_clientOperation)
+		{
+			case CommandLineParser::opClientRequestListFiles:
+				ok = Client.RequestServerList(true, false, m_commandLineParser->m_matchMode == CommandLineParser::mmRegEx ? *m_commandLineParser->m_editQueueText : nullptr);
+				break;
 
-void RustyGet::Daemonize()
-{
-	int f = fork();
-	if (f < 0) exit(1); /* fork error */
-	if (f > 0) exit(0); /* parent exits */
+			case CommandLineParser::opClientRequestListGroups:
+				ok = Client.RequestServerList(false, true, m_commandLineParser->m_matchMode == CommandLineParser::mmRegEx ? *m_commandLineParser->m_editQueueText : nullptr);
+				break;
 
-	/* child (daemon) continues */
-	setsid();
+			case CommandLineParser::opClientRequestListStatus:
+				ok = Client.RequestServerList(false, false, nullptr);
+				break;
 
-	int lockOwned = 0;
-	int warnTruncate = 0;
-	int err = nzbget_rs_daemonize_setup(
-		m_options->GetLockFile(),
-		m_options->GetDaemonUsername(),
-		&lockOwned,
-		&warnTruncate);
-	if (err == 1)
-	{
-		error("Starting daemon failed: could not create lock-file %s", m_options->GetLockFile());
-		exit(1);
-	}
-	if (err == 2)
-	{
-		error("Starting daemon failed: lock-file %s is not a regular file", m_options->GetLockFile());
-		exit(1);
-	}
-	if (err == 3)
-	{
-		error("Starting daemon failed: could not acquire lock on lock-file %s", m_options->GetLockFile());
-		exit(1);
-	}
-	if (err == 4)
-	{
-		error("Starting daemon failed: invalid DaemonUsername");
-		exit(1);
-	}
-	if (err == 5)
-	{
-		error("Starting daemon failed: could not drop privileges");
-		exit(1);
-	}
-	if (lockOwned != 0)
-	{
-		g_LockFileOwned = true;
-	}
-	if (warnTruncate != 0)
-	{
-		warn("Could not truncate lock-file %s", m_options->GetLockFile());
-	}
-}
+			case CommandLineParser::opClientRequestDownloadPause:
+				ok = Client.RequestServerPauseUnpause(true, rpDownload);
+				break;
 
-void RustyGet::AddNewsServer(int id, bool active, const char* name, const char* host,
-	int port, int ipVersion, const char* user, const char* pass, bool joinGroup, bool tls,
-	const char* cipher, int maxConnections, int retention, int level, int group, bool optional,
-	unsigned int certVerificationfLevel)
-{
-	m_serverPool->AddServer(std::make_unique<NewsServer>(id, active, name, host, port, ipVersion, user, pass, joinGroup,
-		tls, cipher, maxConnections, retention, level, group, optional, certVerificationfLevel));
-}
+			case CommandLineParser::opClientRequestDownloadUnpause:
+				ok = Client.RequestServerPauseUnpause(false, rpDownload);
+				break;
 
-void RustyGet::AddFeed(int id, const char* name, const char* url, int interval, const char* filter,
-	bool backlog, bool pauseNzb, const char* category, FeedInfo::CategorySource categorySource, int priority, const char* feedScript,
-	unsigned int certVeriflevel)
-{
-	m_feedCoordinator->AddFeed(std::make_unique<FeedInfo>(id, name, url, backlog, interval, filter,
-		pauseNzb, category, categorySource, priority, feedScript, certVeriflevel));
-}
+			case CommandLineParser::opClientRequestSetRate:
+				ok = Client.RequestServerSetDownloadRate(m_commandLineParser->m_setRate);
+				break;
 
-void RustyGet::AddTask(int id, int hours, int minutes, int weekDaysBits,
-	Options::ESchedulerCommand command, const char* param)
-{
-	m_scheduler->AddTask(std::make_unique<Scheduler::Task>(id, hours, minutes, weekDaysBits,
-		(Scheduler::ECommand)command, param));
-}
+			case CommandLineParser::opClientRequestDumpDebug:
+				ok = Client.SendSimpleBoolRequest(rrDumpDebug);
+				break;
+
+			case CommandLineParser::opClientRequestEditQueue:
+				ok = Client.RequestServerEditQueue((DownloadQueue::EEditAction)m_commandLineParser->m_editQueueAction,
+					m_commandLineParser->m_editQueueOffset, m_commandLineParser->m_editQueueText,
+					&m_commandLineParser->m_editQueueIdList, &m_commandLineParser->m_editQueueNameList,
+					(ERemoteMatchMode)m_commandLineParser->m_matchMode);
+				break;
+
+			case CommandLineParser::opClientRequestLog:
+				ok = Client.RequestServerLog(m_commandLineParser->m_logLines);
+				break;
+
+			case CommandLineParser::opClientRequestShutdown:
+				ok = Client.SendSimpleBoolRequest(rrShutdown);
+				break;
+
+			case CommandLineParser::opClientRequestReload:
+				ok = Client.SendSimpleBoolRequest(rrReload);
+				break;
+
+			case CommandLineParser::opClientRequestDownload:
+				ok = Client.RequestServerDownload(
+					m_commandLineParser->m_addNzbFilename,
+					m_commandLineParser->m_argFilename,
+					m_commandLineParser->m_addCategory,
+					m_commandLineParser->m_autoCategory,
+					m_commandLineParser->m_addTop,
+					m_commandLineParser->m_addPaused,
+					m_commandLineParser->m_addPriority,
+					m_commandLineParser->m_addDupeKey,
+					m_commandLineParser->m_addDupeMode,
+					m_commandLineParser->m_addDupeScore);
+				break;
+
+			case CommandLineParser::opClientRequestVersion:
+				ok = Client.SendSimpleBoolRequest(rrVersion);
+				break;
+
+			case CommandLineParser::opClientRequestPostQueue:
+				ok = Client.RequestPostQueue();
+				break;
+
+			case CommandLineParser::opClientRequestWriteLog:
+				ok = Client.RequestWriteLog(m_commandLineParser->m_writeLogKind, m_commandLineParser->m_lastArg);
+				break;
+
+			case CommandLineParser::opClientRequestScanAsync:
+				ok = Client.RequestScan(false);
+				break;
+
+			case CommandLineParser::opClientRequestScanSync:
+				ok = Client.RequestScan(true);
+				break;
+
+			case CommandLineParser::opClientRequestPostPause:
+				ok = Client.RequestServerPauseUnpause(true, rpPostProcess);
+				break;
+
+			case CommandLineParser::opClientRequestPostUnpause:
+				ok = Client.RequestServerPauseUnpause(false, rpPostProcess);
+				break;
+
+			case CommandLineParser::opClientRequestScanPause:
+				ok = Client.RequestServerPauseUnpause(true, rpScan);
+				break;
+
+			case CommandLineParser::opClientRequestScanUnpause:
+				ok = Client.RequestServerPauseUnpause(false, rpScan);
+				break;
+
+			case CommandLineParser::opClientRequestHistory:
+			case CommandLineParser::opClientRequestHistoryAll:
+				ok = Client.RequestHistory(m_commandLineParser->m_clientOperation == CommandLineParser::opClientRequestHistoryAll);
+				break;
+
+			case CommandLineParser::opClientNoOperation:
+				return;
+		}
+
+		exit(ok ? 0 : 1);
+	}
+};
+
+std::unique_ptr<RustyGet> g_RustyGet;
 
 void Reload()
 {

@@ -7738,26 +7738,6 @@ pub unsafe extern "C" fn nzbget_rs_register_lifecycle_hooks(hooks: *const crate:
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_lifecycle_get_phase() -> u32 {
-    crate::lifecycle::LifecycleManager::global().get_phase() as u32
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_lifecycle_set_phase(phase: u32) {
-    crate::lifecycle::LifecycleManager::global().set_phase(phase.into());
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_is_reloading() -> bool {
-    crate::lifecycle::LifecycleManager::global().is_reloading()
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_is_stopping() -> bool {
-    crate::lifecycle::LifecycleManager::global().is_stopping()
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_signal_notify(signum: std::ffi::c_int) {
     crate::lifecycle::LifecycleManager::global().notify_signal(signum);
 }
@@ -7771,13 +7751,14 @@ mod lifecycle_ffi_tests {
         let _guard = crate::lifecycle::TEST_MUTEX
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        nzbget_rs_lifecycle_set_phase(1);
-        assert_eq!(nzbget_rs_lifecycle_get_phase(), 1);
-        nzbget_rs_lifecycle_set_phase(0);
-        assert_eq!(nzbget_rs_lifecycle_get_phase(), 0);
+        let mgr = crate::lifecycle::LifecycleManager::global();
+        mgr.set_phase(1.into());
+        assert_eq!(mgr.get_phase() as u32, 1);
+        mgr.set_phase(0.into());
+        assert_eq!(mgr.get_phase() as u32, 0);
 
-        assert!(!nzbget_rs_is_reloading());
-        assert!(!nzbget_rs_is_stopping());
+        assert!(!mgr.is_reloading());
+        assert!(!mgr.is_stopping());
 
         nzbget_rs_signal_notify(0); // no-op for signum 0
     }

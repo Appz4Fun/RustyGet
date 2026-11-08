@@ -5942,14 +5942,6 @@ pub unsafe extern "C" fn nzbget_rs_dupe_budget_free(budget: *mut crate::dupewatc
 /// # Safety
 /// Budget is live; concurrent calls are allowed, but free must not run concurrently.
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupe_budget_take(budget: *const crate::dupewatch::FetchBudget) -> c_int {
-    if budget.is_null() { return 0; }
-    c_int::from((*budget).take())
-}
-
-/// # Safety
-/// Budget is live; concurrent calls are allowed, but free must not run concurrently.
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dupe_budget_spent(budget: *const crate::dupewatch::FetchBudget) -> c_int {
     if budget.is_null() { return 1; }
     c_int::from((*budget).spent())
@@ -25576,20 +25568,6 @@ pub unsafe extern "C" fn nzbget_rs_downloadinfo_update_deleted_stats(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_downloadinfo_completed_same_filename(
-    a: *const c_char,
-    b: *const c_char,
-) -> c_int {
-    if a.is_null() || b.is_null() {
-        return 0;
-    }
-    crate::downloadinfo::completed_same_filename(
-        CStr::from_ptr(a).to_bytes(),
-        CStr::from_ptr(b).to_bytes(),
-    ) as c_int
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_dupe_probe_select_server_order(
     active: *const u8,
     groups: *const i32,
@@ -30636,15 +30614,6 @@ pub unsafe extern "C" fn nzbget_rs_cstring_set(
     len: c_int,
 ) {
     crate::nstring::cstring_set_raw(m_data, str_ptr, len);
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_cstring_append(
-    m_data: *mut *mut c_char,
-    str_ptr: *const c_char,
-    len: c_int,
-) {
-    crate::nstring::cstring_append_raw(m_data, str_ptr, len);
 }
 
 #[no_mangle]

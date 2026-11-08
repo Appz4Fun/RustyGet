@@ -1036,7 +1036,6 @@ int nzbget_rs_dupe_should_expand(double alive, int32_t missing, int failed, int 
 // All concurrent callers must have joined before free.
 void* nzbget_rs_dupe_budget_new(uint32_t maxDonors);
 void nzbget_rs_dupe_budget_free(void* budget);
-int nzbget_rs_dupe_budget_take(const void* budget);
 int nzbget_rs_dupe_budget_spent(const void* budget);
 
 typedef struct { int64_t number, bytes; } NzbgetRsDupePart;
@@ -4770,7 +4769,6 @@ void nzbget_rs_downloadinfo_update_deleted_stats(
     int64_t* inout_par_size, int64_t* inout_par_cur_success_size,
     int64_t* inout_par_failed_size, int64_t* inout_par_cur_failed_size,
     int* inout_paused_file_count, int64_t* inout_paused_size);
-int nzbget_rs_downloadinfo_completed_same_filename(const char* a, const char* b);
 
 size_t nzbget_rs_dupe_probe_select_server_order(
     const uint8_t* active, const int32_t* groups, const int32_t* norm_levels,
@@ -5381,7 +5379,6 @@ void nzbget_rs_cstring_clear(char** m_data);
 void nzbget_rs_cstring_bind(char** m_data, char* str_ptr);
 char* nzbget_rs_cstring_unbind(char** m_data);
 void nzbget_rs_cstring_set(char** m_data, const char* str_ptr, int len);
-void nzbget_rs_cstring_append(char** m_data, const char* str_ptr, int len);
 int nzbget_rs_cstring_format(
     char** m_data, int new_len_no_nul, void* ctx, int (*fmt_cb)(void*, char*, size_t));
 void nzbget_rs_cstring_reserve(char** m_data, int capacity);

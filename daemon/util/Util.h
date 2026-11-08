@@ -405,7 +405,6 @@ public:
 	Guard(Guard&& other) : m_mutex(other.m_mutex) { other.m_mutex = nullptr; }
 	Guard(const Guard&) = delete;
 	~Guard() { Unlock(); }
-	Guard& operator=(Guard&& other) { m_mutex = other.m_mutex; other.m_mutex = nullptr; return *this; }
 	operator bool() { return m_mutex; }
 
 private:
@@ -636,10 +635,6 @@ public:
 		return *this;
 	}
 	CString& operator=(const char* str) { Set(str); return *this; }
-	bool operator==(const CString& other) const
-	{
-		return nzbget_rs_cstring_eq(m_data, other.m_data) != 0;
-	}
 	bool operator==(const char* other) const
 	{
 		return nzbget_rs_cstring_eq(m_data, other) != 0;
@@ -677,10 +672,6 @@ public:
 	void Set(const char* str, int len = 0)
 	{
 		nzbget_rs_cstring_set(&m_data, str, len);
-	}
-	void Append(const char* str, int len = 0)
-	{
-		nzbget_rs_cstring_append(&m_data, str, len);
 	}
 	int Format(const char* format, ...) PRINTF_SYNTAX(2)
 	{
@@ -724,8 +715,6 @@ public:
 	StringBuilder& operator=(const StringBuilder& other) = delete;
 	StringBuilder& operator=(StringBuilder&& other) = delete;
 	operator const char*() const { return m_data ? m_data : ""; }
-	explicit operator char*() { return m_data; }
-	const char* operator*() const { return m_data; }
 	int Length() const { return m_length; }
 	void Reserve(int capacity, bool exact = false)
 	{
@@ -774,13 +763,6 @@ protected:
 	char* m_data = nullptr;
 	int m_size = 0;
 };
-
-#ifdef DEBUG
-// helper declarations to identify incorrect calls to "free" at compile time
-void free(CString str);
-void free(StringBuilder str);
-void free(CharBuffer str);
-#endif
 
 #endif
 
@@ -1035,7 +1017,6 @@ class Tokenizer
 {
 public:
 	Tokenizer(const char* dataString, const char* separators);
-	Tokenizer(char* dataString, const char* separators, bool inplaceBuf);
 	char* Next();
 
 private:
@@ -1604,20 +1585,6 @@ inline Tokenizer::Tokenizer(const char* dataString, const char* separators) :
 		m_dataString = m_longString;
 	}
 
-}
-
-inline Tokenizer::Tokenizer(char* dataString, const char* separators, bool inplaceBuf) :
-	m_separators(separators)
-{
-	if (inplaceBuf)
-	{
-		m_dataString = dataString;
-	}
-	else
-	{
-		m_longString.Set(dataString);
-		m_dataString = m_longString;
-	}
 }
 
 inline char* Tokenizer::Next()
@@ -2959,22 +2926,6 @@ typedef std::deque<FeedHistoryInfo> FeedHistoryBase;
 class FeedHistory : public FeedHistoryBase
 {
 public:
-	void Remove(const char* url)
-	{
-		if (!url)
-		{
-			return;
-		}
-		for (iterator it = begin(); it != end(); ++it)
-		{
-			if (!strcmp(it->GetUrl(), url))
-			{
-				erase(it);
-				break;
-			}
-		}
-	}
-
 	FeedHistoryInfo* Find(const char* url)
 	{
 		if (!url)
@@ -3189,7 +3140,6 @@ public:
 		bool GetUnpack() const { return m_unpack; }
 		const char* GetExtensions() const { return m_extensions.c_str(); }
 		NameList* GetAliases() { return &m_aliases; }
-		const NameList* GetAliases() const { return &m_aliases; }
 
 	private:
 		const std::string m_name;
@@ -3206,7 +3156,6 @@ public:
 	{
 	public:
 		Category* FindCategory(const char* name, bool searchAliases);
-		const Category* FindCategory(const char* name, bool searchAliases) const;
 	};
 
 	class Extender
@@ -8650,7 +8599,6 @@ public:
 	uint32 GetCrc() { return m_crc; }
 	const char* GetHash16k() { return m_hash16k.c_str(); }
 	const char* GetParSetId() { return m_parSetId.c_str(); }
-	bool SameFilename(const char* name) const;
 
 private:
 	int m_id;
@@ -10610,7 +10558,7 @@ namespace TlsCipherBackend
 		}
 	}
 
-	inline bool Available() { return true; }
+	inline constexpr bool Available() { return true; }
 	inline NzbgetTlsBackend Create()
 	{
 		return {new Detail::Context(), Detail::Snapshot, Detail::Suites, Detail::Prepare, Detail::PrepareBatch, Detail::Record, Detail::FreeCrypto, Detail::Probe, Detail::Commit, Detail::Destroy};
@@ -10627,7 +10575,7 @@ namespace TlsCipherBackend
 #else
 namespace TlsCipherBackend
 {
-	inline bool Available() { return false; }
+	inline constexpr bool Available() { return false; }
 	inline std::string Status(const char*) { return R"({"Available":false,"State":"unavailable","Message":"TLS cipher optimization requires a TLS-enabled Rust backend and a supported atomic configuration adapter."})"; }
 	inline std::string Start() { return Status(nullptr); }
 	inline std::string Cancel(const char*) { return Status(nullptr); }
@@ -11272,7 +11220,6 @@ public:
 	    std::string tempPath;
 	};
 	void SetInfoName(const char* infoName) { m_infoName = infoName ? infoName : ""; }
-	void SetInfoName(std::string infoName) { m_infoName = std::move(infoName); }
 	void SetFileInfo(FileInfo* fileInfo) { m_fileInfo = fileInfo; }
 	void SetArticleInfo(ArticleInfo* articleInfo) { m_articleInfo = articleInfo; }
 	void Prepare();
@@ -17780,11 +17727,6 @@ inline CompletedFile::CompletedFile(int id, std::string filename, std::string or
 	}
 }
 
-inline bool CompletedFile::SameFilename(const char* name) const
-{
-	return nzbget_rs_downloadinfo_completed_same_filename(m_filename.c_str(), name) != 0;
-}
-
 inline void DupInfo::SetId(int id)
 {
 	m_id = id;
@@ -17915,9 +17857,6 @@ public:
 	// after this many articles of a file are recovered from duplicates, lead
 	// with the duplicate for the file's remaining articles (cutover)
 	static constexpr int CutoverThreshold = 3;
-	// after this many consecutive articles missed by the lead duplicate, the
-	// next duplicate becomes the lead for the file's fresh articles
-	static constexpr int LeadDemoteThreshold = 3;
 
 	bool TryFallback(DownloadQueue* downloadQueue, FileInfo* fileInfo, ArticleInfo* articleInfo);
 
@@ -17942,8 +17881,6 @@ public:
 	 * can't be counted on then; download-time article fallback stops deferring.
 	 * Must be called within DownloadQueue-lock. */
 	static bool ParCannotCover(NzbInfo* nzbInfo, bool withMargin = true);
-	// articles tried before the damage of a download is projected
-	static constexpr int ProjectionSample = 200;
 	// damage within this share of the data (per mille) of all that par2 can repair
 	// is not left to par-check: the projection is rough and par2 needs whole blocks
 	static constexpr int ParEdgeMargin = 50;
@@ -21395,16 +21332,10 @@ private:
 	// failed articles the duplicates must have been asked for before the
 	// early dupe failover judges the download-time recovery
 	static constexpr int DupeFailoverSample = 32;
-	// failed articles beyond the first of each file, with none of its own downloaded,
-	// after which a download counts as dead (HealthCheck=dupe)
-	static constexpr int DeadDownloadFailures = 64;
 	// articles of its own tried before a download's final health is projected (B48)
 	static constexpr int ProjectedFailureSample = 200;
 	// how much wholer (per mille) a backup must be than a doomed download's projection
 	static constexpr int BackupLead = 100;
-	// articles tried before a download projected below critical (not far below) is
-	// parked without a backup (B74)
-	static constexpr int ParkBelowCriticalSample = 1000;
 	static bool DownloadHopeless(NzbInfo* nzbInfo);
 	void ResetHangingDownloads();
 	void AdjustDownloadsLimit();
@@ -21917,7 +21848,7 @@ namespace Extension
 		Script(const Script&) = delete;
 
 		Script(Script&& other) = default;
-		Script& operator=(Script&& other) = default;
+		Script& operator=(Script&& other) = delete;
 
 		void SetEntry(std::string entry) { m_entry = std::move(entry); }
 		const char* GetEntry() const { return m_entry.c_str(); }
@@ -22369,7 +22300,6 @@ protected:
 	virtual const char* GetOptValue([[maybe_unused]] const char* name, const char* value) { return value; }
 	void StartProcess(int* pipein, int* pipeout);
 	int WaitProcess();
-	void Write(const char* str);
 	void UnregisterRunningScript();
 
 private:
@@ -23086,15 +23016,6 @@ inline void ScriptController::PrintMessage(Message::EKind kind, const char* form
 	else
 	{
 		AddMessage(kind, tmp2);
-	}
-}
-
-inline void ScriptController::Write(const char* str)
-{
-	if (m_writepipe && str)
-	{
-		fwrite(str, 1, strlen(str), m_writepipe);
-		fflush(m_writepipe);
 	}
 }
 
@@ -34542,7 +34463,6 @@ public:
 		}
 	};
 
-	static constexpr size_t MaxNzbBytes = 64 * 1024 * 1024;
 	class Budget
 	{
 	public:
@@ -34556,7 +34476,6 @@ public:
 		}
 		Budget(const Budget&) = delete;
 		Budget& operator=(const Budget&) = delete;
-		bool Take() { return nzbget_rs_dupe_budget_take(m_rust) != 0; }
 		bool Spent() const { return nzbget_rs_dupe_budget_spent(m_rust) != 0; }
 		void* RustHandle() const { return m_rust; }
 	private:
@@ -34564,7 +34483,6 @@ public:
 	};
 	using FetchFunc = std::function<HttpGet::Reply(const std::string&, const std::string&, size_t, long long)>;
 	NzbFetcher() : m_rust(nzbget_rs_nzb_fetcher_new()) {}
-	explicit NzbFetcher(FetchFunc fetch) : m_rust(nzbget_rs_nzb_fetcher_new()), m_fetch(std::move(fetch)) {}
 	~NzbFetcher()
 	{
 		nzbget_rs_nzb_fetcher_free(m_rust);
@@ -34715,8 +34633,6 @@ public:
 	void Stop() override;
     void NotifyNameChanged(int nzbId);
 
-	// seconds a key is not searched again, unless a higher-scored pick arrives
-	static constexpr int SearchWindowSec = 6 * 3600;
 	// a pick still in post-processing when its search is due is asked again this much later
 	static constexpr int PostProcessRetrySec = 30;
 	// a pick that failed this recently is searched from history at start (B64)

@@ -92,7 +92,6 @@ private:
 #include <iterator>
 #include "Util.h"
 #include "FileSystem.h"
-#include "FileTypes.h"
 #include "Options.h"
 #include "UnpackController.h"
 #include "PrePostProcessor.h"
@@ -593,7 +592,7 @@ inline bool DirectUnpack::IsArchiveFilename(const char* filename)
 		return false;
 	}
 
-	return FileTypes::IsRarFile(filename);
+	return nzbget_rs_file_type(22, filename, strlen(filename)) != 0;
 }
 
 #endif

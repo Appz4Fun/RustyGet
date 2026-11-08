@@ -21,10 +21,10 @@
 #define MANIFEST_FILE_H
 
 #include <exception>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include <variant>
-#include "Json.h"
 #include "FileSystem.h"
 #include "Log.h"
 #include "Util.h"
@@ -204,7 +204,7 @@ namespace ManifestFile
 			Manifest* manifest;
 			std::exception_ptr error;
 		} context{&manifest, nullptr};
-		const NzbgetRsJsonLimits limits{Json::string::max_size(), Json::JsonArray::max_size(), Json::JsonObject::max_size()};
+		const NzbgetRsJsonLimits limits{0x7ffffffeu, 0x7fffffffu / 24u, 0x3fffffffu};
 		int loaded = nzbget_rs_manifest_load(jsonStr.data(), jsonStr.size(), limits, &context,
 			[](void* ctx, const NzbgetRsManifest* from) noexcept
 			{
@@ -238,8 +238,7 @@ namespace ManifestFile
 			}
 			if (loaded == -3)
 			{
-				const Json::JsonValue notObject;
-				(void)notObject.as_object();
+				throw std::runtime_error("not an object");
 			}
 		}
 		catch (const std::exception& e)

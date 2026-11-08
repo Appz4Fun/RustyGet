@@ -189,7 +189,6 @@ extern QueueCoordinator* g_QueueCoordinator;
 #include "FileSystem.h"
 #include "Decoder.h"
 #include "StatMeter.h"
-#include "Deobfuscation.h"
 #include "DupeCoordinator.h"
 #include "DupeProbe.h"
 #include "TwinCheck.h"
@@ -1241,7 +1240,9 @@ inline void QueueCoordinator::ArticleCompleted(ArticleDownloader* articleDownloa
 			// if the name from article seems to be obfuscated
 			bool useFilenameFromArticle = g_Options->GetFileNaming() == Options::nfArticle ||
 				(g_Options->GetFileNaming() == Options::nfAuto &&
-					!Deobfuscation::IsExcessivelyObfuscated(articleDownloader->GetArticleFilename()) &&
+					nzbget_rs_is_excessively_obfuscated(
+						articleDownloader->GetArticleFilename(),
+						strlen(articleDownloader->GetArticleFilename())) == 0 &&
 					!nzbInfo->GetManyDupeFiles());
 			if (useFilenameFromArticle)
 			{

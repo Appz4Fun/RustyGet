@@ -260,8 +260,7 @@ int RustyGet::Phase1_Init(bool reload)
 			*g_Log);
 		g_SystemHealth = m_systemHealth.get();
 
-		const auto report = m_systemHealth->Diagnose();
-		SystemHealth::Log(report);
+		m_systemHealth->DiagnoseAndLog();
 	}
 
 	if (m_commandLineParser->GetDaemonMode())

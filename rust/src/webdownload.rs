@@ -250,6 +250,90 @@ pub fn speed_test_make_request(
     req
 }
 
+/// Port of `Network::SpeedTest::RunTest` (`daemon/connect/NetworkSpeedTest.h`).
+/// `on_log(0, msg)` emits `info`, `on_log(1, msg)` emits `error`.
+pub fn run_network_speed_test<E, L>(
+    mut execute_iter: E,
+    mut on_log: L,
+) -> Result<f64, &'static str>
+where
+    E: FnMut(&[u8], i64) -> (u32, f64),
+    L: FnMut(i32, &str),
+{
+    const SPECS: &[(&str, u32, i32, i64)] = &[
+        ("100 KiB", 1024 * 100, 10, 1),
+        ("1 MiB", 1024 * 1024, 8, 2),
+        ("10 MiB", 1024 * 1024 * 10, 6, 2),
+        ("25 MiB", 1024 * 1024 * 25, 4, 2),
+        ("100 MiB", 1024 * 1024 * 100, 3, 3),
+        ("250 MiB", 1024 * 1024 * 250, 2, 4),
+        ("1 GiB", 1024 * 1024 * 1024, 2, 5),
+    ];
+
+    on_log(0, "Download speed test starting...");
+
+    // (median, p25, p90)
+    let mut dataset: Vec<(f64, f64, f64)> = Vec::new();
+
+    for &(name, size, mut iterations, timeout_sec) in SPECS {
+        let mut measurements = Vec::new();
+        let mut failures = 0i32;
+        let mut spec_ok = true;
+        let req = speed_test_make_request(b"__down", b"?bytes=", size, b"speed.cloudflare.com");
+
+        while {
+            iterations -= 1;
+            iterations != 0
+        } {
+            let (downloaded, elapsed) = execute_iter(&req, timeout_sec);
+            if crate::nntp::speed_test_is_iteration_failed(elapsed, downloaded, size) {
+                failures += 1;
+                if speed_test_exceeded_max_failures(failures, iterations) {
+                    spec_ok = false;
+                    break;
+                }
+                continue;
+            }
+            let speed = speed_test_calc_mbps(downloaded, elapsed);
+            measurements.push(speed);
+            on_log(0, &format!("Downloaded {name} at {speed:.2} Mbps"));
+        }
+
+        if !spec_ok {
+            break;
+        }
+
+        let (_, _, _, median, p25, _, p90) = crate::util::data_analytics_compute(&mut measurements)
+            .unwrap_or((0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
+        dataset.push((median, p25, p90));
+
+        let more = if dataset.len() < 2 {
+            speed_test_is_required_more(dataset.len(), 0.0, 0.0)
+        } else {
+            speed_test_is_required_more(
+                dataset.len(),
+                dataset[dataset.len() - 1].0,
+                dataset[dataset.len() - 2].1,
+            )
+        };
+        if !more {
+            break;
+        }
+    }
+
+    if dataset.is_empty() {
+        const ERR_MSG: &str = "No speed data was collected during the network speed test";
+        on_log(1, ERR_MSG);
+        return Err(ERR_MSG);
+    }
+
+    let first_median = dataset[0].0;
+    let p90s: Vec<f64> = dataset.iter().map(|d| d.2).collect();
+    let final_speed = speed_test_final_speed(first_median, &p90s);
+    on_log(0, &format!("Download speed {final_speed:.2} Mbps"));
+    Ok(final_speed)
+}
+
 /// Computes initial `(remained_download_retries, remained_connect_retries)` for `WebDownloader::Run`.
 pub fn webdl_calc_initial_retries(url_retries: i32, retry_enabled: bool) -> (i32, i32) {
     let dl = if !retry_enabled {
@@ -492,5 +576,29 @@ mod tests {
         assert_eq!(redirect(old, c"next?y"), b"https://example.com:8443/a/b/next?y");
         assert_eq!(redirect(c"http://h", c"rel"), b"http://h/rel");
         assert_eq!(redirect(c"bad", c"rel"), b"(null)://(null)rel");
+    }
+
+    #[test]
+    fn test_run_network_speed_test() {
+        let mut logs = Vec::new();
+        let res = run_network_speed_test(
+            |req, _timeout_sec| {
+                assert!(req.starts_with(b"GET /__down?bytes="));
+                (100 * 1024, 0.01)
+            },
+            |kind, msg| {
+                logs.push((kind, msg.to_string()));
+            },
+        );
+        let mbps = res.expect("speed test should succeed");
+        assert!((mbps - 81.92).abs() < 0.1, "mbps={mbps}");
+        assert!(logs.iter().any(|(k, m)| *k == 0 && m == "Download speed test starting..."));
+        assert!(logs.iter().any(|(k, m)| *k == 0 && m.starts_with("Download speed ")));
+
+        let err = run_network_speed_test(|_, _| (0, 0.0), |_, _| {});
+        assert_eq!(
+            err.unwrap_err(),
+            "No speed data was collected during the network speed test"
+        );
     }
 }

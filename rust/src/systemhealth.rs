@@ -3224,6 +3224,642 @@ pub fn xml_serialize_struct_member(name: &[u8], tag: &[u8], value: &[u8]) -> Vec
     out
 }
 
+pub struct HealthServerInput<'a> {
+    pub id: i32,
+    pub section: NewsServerSectionInput<'a>,
+}
+
+pub struct HealthTaskInput {
+    pub id: i32,
+    pub hours: i32,
+    pub minutes: i32,
+    pub week_days_bits: i32,
+}
+
+pub struct HealthCategoryInput<'a> {
+    pub name: &'a [u8],
+    pub unpack: bool,
+}
+
+pub struct HealthFeedInput<'a> {
+    pub id: i32,
+    pub name: &'a [u8],
+    pub url: &'a [u8],
+    pub interval: i32,
+    pub cert_level: u32,
+}
+
+pub struct SystemHealthDiagnoseInput<'a> {
+    pub paths: PathsSectionInput<'a>,
+    pub servers: &'a [HealthServerInput<'a>],
+    pub output_mode: i32,
+    pub update_interval: i32,
+    pub curses_nzb_name: bool,
+    pub curses_group: bool,
+    pub curses_time: bool,
+    pub rotate_log: i32,
+    pub log_buffer: i32,
+    pub crash_dump: bool,
+    pub time_correction: i32,
+    pub article_retries: i32,
+    pub hc_dupe: bool,
+    pub dupe_search: bool,
+    pub article_interval: i32,
+    pub article_timeout: i32,
+    pub article_read_chunk_size: i32,
+    pub url_retries: i32,
+    pub url_interval: i32,
+    pub url_timeout: i32,
+    pub url_connections: i32,
+    pub remote_timeout: i32,
+    pub download_rate: i32,
+    pub monthly_quota: i32,
+    pub quota_start_day: i32,
+    pub daily_quota: i32,
+    pub flush_queue: bool,
+    pub continue_partial: bool,
+    pub propagation_delay: i32,
+    pub article_cache: i32,
+    pub direct_write: bool,
+    pub write_buffer: i32,
+    pub file_naming: i32,
+    pub post_strategy: i32,
+    pub disk_space: i32,
+    pub nzb_cleanup_disk: bool,
+    pub keep_history: i32,
+    pub feed_history: i32,
+    pub skip_write: bool,
+    pub raw_article: bool,
+    pub security: SecuritySectionInput<'a>,
+    pub append_category_dir: bool,
+    pub nzb_dir_interval: i32,
+    pub nzb_dir_file_age: i32,
+    pub dupe_check: bool,
+    pub health_check: i32,
+    pub crc_check: bool,
+    pub par_check: i32,
+    pub par_repair: bool,
+    pub par_quick: bool,
+    pub par_buffer: i32,
+    pub par_threads: i32,
+    pub hw_threads: usize,
+    pub par_rename: bool,
+    pub rar_rename: bool,
+    pub direct_rename: bool,
+    pub hard_linking: bool,
+    pub par_time_limit: i32,
+    pub unpack: bool,
+    pub direct_unpack: bool,
+    pub unpack_pause_queue: bool,
+    pub unrar_path: &'a Path,
+    pub seven_zip_path: &'a Path,
+    pub ext_cleanup_disk: &'a [u8],
+    pub unpack_pass_file: &'a Path,
+    pub unpack_ignore_ext: &'a [u8],
+    pub options_log_file: &'a Path,
+    pub tasks: &'a [HealthTaskInput],
+    pub categories: &'a [HealthCategoryInput<'a>],
+    pub feeds: &'a [HealthFeedInput<'a>],
+}
+
+struct HealthOptionEntry {
+    name: String,
+    severity: Severity,
+    message: Vec<u8>,
+}
+
+struct HealthSubsectionEntry {
+    name: String,
+    options: Vec<HealthOptionEntry>,
+}
+
+struct HealthSectionEntry {
+    name: String,
+    issues: Vec<HealthStatus>,
+    options: Vec<HealthOptionEntry>,
+    subsections: Vec<HealthSubsectionEntry>,
+}
+
+fn push_health_option(
+    options: &mut Vec<HealthOptionEntry>,
+    name: &str,
+    sev: Severity,
+    msg: &[u8],
+) {
+    if sev != Severity::Ok {
+        options.push(HealthOptionEntry {
+            name: name.to_string(),
+            severity: sev,
+            message: msg.to_vec(),
+        });
+    }
+}
+
+fn build_health_sections(input: &SystemHealthDiagnoseInput<'_>) -> Vec<HealthSectionEntry> {
+    let mut sections = Vec::with_capacity(13);
+
+    // 1. Paths
+    {
+        let mut options = Vec::new();
+        validate_paths_section(&input.paths, |name, sev, msg| {
+            push_health_option(&mut options, name, sev, msg);
+        });
+        sections.push(HealthSectionEntry {
+            name: "Paths".to_string(),
+            issues: Vec::new(),
+            options,
+            subsections: Vec::new(),
+        });
+    }
+
+    // 2. NewsServers
+    {
+        let mut subsections = Vec::with_capacity(input.servers.len());
+        let mut hosts = Vec::with_capacity(input.servers.len());
+        let mut actives = Vec::with_capacity(input.servers.len());
+        let mut max_conns = Vec::with_capacity(input.servers.len());
+        let mut levels = Vec::with_capacity(input.servers.len());
+
+        for srv in input.servers {
+            let mut sub_opts = Vec::new();
+            validate_news_server_section(&srv.section, |name, sev, msg| {
+                push_health_option(&mut sub_opts, name, sev, msg);
+            });
+            subsections.push(HealthSubsectionEntry {
+                name: format!("Server{}", srv.id),
+                options: sub_opts,
+            });
+            hosts.push(srv.section.host);
+            actives.push(u8::from(srv.section.active));
+            max_conns.push(srv.section.max_connections);
+            levels.push(srv.section.level);
+        }
+
+        let mut issues = Vec::new();
+        validate_news_servers_group(&hosts, &actives, &max_conns, &levels, |sev, msg| {
+            if sev != Severity::Ok {
+                issues.push(HealthStatus {
+                    severity: sev,
+                    message: msg.to_vec(),
+                });
+            }
+        });
+
+        sections.push(HealthSectionEntry {
+            name: "NewsServers".to_string(),
+            issues,
+            options: Vec::new(),
+            subsections,
+        });
+    }
+
+    // 3. Display
+    {
+        let mut options = Vec::new();
+        validate_display_section(
+            input.output_mode,
+            input.update_interval,
+            input.curses_nzb_name,
+            input.curses_group,
+            input.curses_time,
+            |name, sev, msg| push_health_option(&mut options, name, sev, msg),
+        );
+        sections.push(HealthSectionEntry {
+            name: "Display".to_string(),
+            issues: Vec::new(),
+            options,
+            subsections: Vec::new(),
+        });
+    }
+
+    // 4. Logging
+    {
+        let mut options = Vec::new();
+        validate_logging_section(
+            input.paths.write_log,
+            input.options_log_file,
+            input.rotate_log,
+            input.log_buffer,
+            input.crash_dump,
+            input.time_correction,
+            |name, sev, msg| push_health_option(&mut options, name, sev, msg),
+        );
+        sections.push(HealthSectionEntry {
+            name: "Logging".to_string(),
+            issues: Vec::new(),
+            options,
+            subsections: Vec::new(),
+        });
+    }
+
+    // 6. Connection
+    {
+        let mut options = Vec::new();
+        validate_connection_section(
+            input.article_retries,
+            input.hc_dupe,
+            input.dupe_search,
+            input.article_interval,
+            input.article_timeout,
+            input.article_read_chunk_size,
+            input.url_retries,
+            input.url_interval,
+            input.url_timeout,
+            input.url_connections,
+            input.remote_timeout,
+            input.download_rate,
+            input.monthly_quota,
+            input.quota_start_day,
+            input.daily_quota,
+            |name, sev, msg| push_health_option(&mut options, name, sev, msg),
+        );
+        sections.push(HealthSectionEntry {
+            name: "Connection".to_string(),
+            issues: Vec::new(),
+            options,
+            subsections: Vec::new(),
+        });
+    }
+
+    // 7. DownloadQueue
+    {
+        let mut options = Vec::new();
+        validate_download_queue_section(
+            input.flush_queue,
+            input.continue_partial,
+            input.propagation_delay,
+            input.article_cache,
+            input.direct_write,
+            input.write_buffer,
+            input.file_naming,
+            input.post_strategy,
+            input.disk_space,
+            input.nzb_cleanup_disk,
+            input.keep_history,
+            input.feed_history,
+            input.skip_write,
+            input.raw_article,
+            |name, sev, msg| push_health_option(&mut options, name, sev, msg),
+        );
+        sections.push(HealthSectionEntry {
+            name: "DownloadQueue".to_string(),
+            issues: Vec::new(),
+            options,
+            subsections: Vec::new(),
+        });
+    }
+
+    // 8. Security
+    {
+        let mut options = Vec::new();
+        validate_security_section(&input.security, |name, sev, msg| {
+            push_health_option(&mut options, name, sev, msg);
+        });
+        sections.push(HealthSectionEntry {
+            name: "Security".to_string(),
+            issues: Vec::new(),
+            options,
+            subsections: Vec::new(),
+        });
+    }
+
+    // 9. IncomingNzbs
+    {
+        let mut options = Vec::new();
+        validate_incoming_nzb_section(
+            input.append_category_dir,
+            input.nzb_dir_interval,
+            input.nzb_dir_file_age,
+            input.dupe_check,
+            input.dupe_search,
+            input.health_check,
+            |name, sev, msg| push_health_option(&mut options, name, sev, msg),
+        );
+        sections.push(HealthSectionEntry {
+            name: "IncomingNzbs".to_string(),
+            issues: Vec::new(),
+            options,
+            subsections: Vec::new(),
+        });
+    }
+
+    // 10. CheckAndRepair
+    {
+        let mut options = Vec::new();
+        validate_check_and_repair_section(
+            input.crc_check,
+            input.par_check,
+            input.par_repair,
+            input.par_quick,
+            input.par_buffer,
+            input.par_threads,
+            input.hw_threads,
+            input.par_rename,
+            input.rar_rename,
+            input.direct_rename,
+            input.hard_linking,
+            input.health_check,
+            input.par_time_limit,
+            |name, sev, msg| push_health_option(&mut options, name, sev, msg),
+        );
+        sections.push(HealthSectionEntry {
+            name: "CheckAndRepair".to_string(),
+            issues: Vec::new(),
+            options,
+            subsections: Vec::new(),
+        });
+    }
+
+    // 11. Unpack
+    {
+        let mut options = Vec::new();
+        validate_unpack_section(
+            input.unpack,
+            input.direct_unpack,
+            input.unpack_pause_queue,
+            input.unrar_path,
+            input.seven_zip_path,
+            input.ext_cleanup_disk,
+            input.unpack_pass_file,
+            input.unpack_ignore_ext,
+            |name, sev, msg| push_health_option(&mut options, name, sev, msg),
+        );
+        sections.push(HealthSectionEntry {
+            name: "Unpack".to_string(),
+            issues: Vec::new(),
+            options,
+            subsections: Vec::new(),
+        });
+    }
+
+    // 12. Scheduler
+    {
+        let mut subsections = Vec::with_capacity(input.tasks.len());
+        for task in input.tasks {
+            let mut sub_opts = Vec::new();
+            validate_scheduler_task_section(
+                task.hours,
+                task.minutes,
+                task.week_days_bits,
+                |name, sev, msg| push_health_option(&mut sub_opts, name, sev, msg),
+            );
+            subsections.push(HealthSubsectionEntry {
+                name: format!("Task{}", task.id),
+                options: sub_opts,
+            });
+        }
+        sections.push(HealthSectionEntry {
+            name: "Scheduler".to_string(),
+            issues: Vec::new(),
+            options: Vec::new(),
+            subsections,
+        });
+    }
+
+    // 13. Categories
+    {
+        let mut subsections = Vec::with_capacity(input.categories.len());
+        let mut cat_names = Vec::with_capacity(input.categories.len());
+        for (i, cat) in input.categories.iter().enumerate() {
+            cat_names.push(cat.name);
+            let mut sub_opts = Vec::new();
+            validate_category_section(cat.name, input.unpack, cat.unpack, |name, sev, msg| {
+                push_health_option(&mut sub_opts, name, sev, msg);
+            });
+            subsections.push(HealthSubsectionEntry {
+                name: format!("Category{}", i + 1),
+                options: sub_opts,
+            });
+        }
+        let mut issues = Vec::new();
+        if !cat_names.is_empty() {
+            let dup = validate_duplicate_category_names(&cat_names);
+            if !dup.is_ok() {
+                issues.push(dup);
+            }
+        }
+        sections.push(HealthSectionEntry {
+            name: "Categories".to_string(),
+            issues,
+            options: Vec::new(),
+            subsections,
+        });
+    }
+
+    // 14. Feeds
+    {
+        let mut subsections = Vec::with_capacity(input.feeds.len());
+        let mut feed_pairs = Vec::with_capacity(input.feeds.len());
+        for feed in input.feeds {
+            feed_pairs.push((feed.name, feed.url));
+            let mut sub_opts = Vec::new();
+            validate_feed_section(
+                feed.name,
+                feed.url,
+                feed.interval,
+                feed.cert_level,
+                |name, sev, msg| push_health_option(&mut sub_opts, name, sev, msg),
+            );
+            subsections.push(HealthSubsectionEntry {
+                name: format!("Feed{}", feed.id),
+                options: sub_opts,
+            });
+        }
+        let mut issues = Vec::new();
+        if !feed_pairs.is_empty() {
+            let dup = validate_duplicate_feed_urls(&feed_pairs);
+            if !dup.is_ok() {
+                issues.push(dup);
+            }
+        }
+        sections.push(HealthSectionEntry {
+            name: "Feeds".to_string(),
+            issues,
+            options: Vec::new(),
+            subsections,
+        });
+    }
+
+    sections
+}
+
+fn write_xml_node_escaped(out: &mut Vec<u8>, raw: &[u8]) {
+    let nul_pos = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+    crate::escape::xml_encode(&raw[..nul_pos], out);
+}
+
+fn write_xml_node_member(out: &mut Vec<u8>, name: &[u8], tag: &[u8], value: &[u8]) {
+    out.extend_from_slice(b"<member><name>");
+    write_xml_node_escaped(out, name);
+    out.extend_from_slice(b"</name><value><");
+    out.extend_from_slice(tag);
+    out.push(b'>');
+    write_xml_node_escaped(out, value);
+    out.extend_from_slice(b"</");
+    out.extend_from_slice(tag);
+    out.extend_from_slice(b"></value></member>");
+}
+
+/// Runs all 13 `SystemHealth` section validators:
+/// - `format_mode == 0`: logs warnings (`1`) and errors (`2`) via `on_log`, returns empty `Vec<u8>`.
+/// - `format_mode == 1`: returns JSON string (`SystemHealth::ToJsonStr`).
+/// - `format_mode == 2`: returns XML string (`SystemHealth::ToXmlStr`).
+pub fn diagnose_system_health<L>(
+    input: &SystemHealthDiagnoseInput<'_>,
+    format_mode: i32,
+    mut on_log: L,
+) -> Vec<u8>
+where
+    L: FnMut(i32, &[u8]),
+{
+    let sections = build_health_sections(input);
+
+    if format_mode == 0 {
+        for sec in &sections {
+            for issue in &sec.issues {
+                if issue.severity == Severity::Error {
+                    on_log(2, &issue.message);
+                } else if issue.severity == Severity::Warning {
+                    on_log(1, &issue.message);
+                }
+            }
+            for opt in &sec.options {
+                if opt.severity == Severity::Error || opt.severity == Severity::Warning {
+                    let mut line = format!("[{}][{}]: ", sec.name, opt.name).into_bytes();
+                    line.extend_from_slice(&opt.message);
+                    on_log(if opt.severity == Severity::Error { 2 } else { 1 }, &line);
+                }
+            }
+            for sub in &sec.subsections {
+                for opt in &sub.options {
+                    if opt.severity == Severity::Error || opt.severity == Severity::Warning {
+                        let mut line =
+                            format!("[{}][{}.{}]: ", sec.name, sub.name, opt.name).into_bytes();
+                        line.extend_from_slice(&opt.message);
+                        on_log(if opt.severity == Severity::Error { 2 } else { 1 }, &line);
+                    }
+                }
+            }
+        }
+        return Vec::new();
+    }
+
+    if format_mode == 1 {
+        let mut out = Vec::with_capacity(2048);
+        out.extend_from_slice(b"{\"Alerts\":[],\"Sections\":[");
+        for (sec_idx, sec) in sections.iter().enumerate() {
+            if sec_idx > 0 {
+                out.push(b',');
+            }
+            out.extend_from_slice(b"{\"Name\":");
+            write_boost_json_str(&mut out, sec.name.as_bytes());
+            out.extend_from_slice(b",\"Issues\":[");
+            for (i, issue) in sec.issues.iter().enumerate() {
+                if i > 0 {
+                    out.push(b',');
+                }
+                out.extend_from_slice(b"{\"Severity\":");
+                write_boost_json_str(&mut out, issue.severity.as_cstr().to_bytes());
+                out.extend_from_slice(b",\"Message\":");
+                write_boost_json_str(&mut out, &issue.message);
+                out.push(b'}');
+            }
+            out.extend_from_slice(b"],\"Options\":[");
+            for (i, opt) in sec.options.iter().enumerate() {
+                if i > 0 {
+                    out.push(b',');
+                }
+                out.extend_from_slice(b"{\"Name\":");
+                write_boost_json_str(&mut out, opt.name.as_bytes());
+                out.extend_from_slice(b",\"Severity\":");
+                write_boost_json_str(&mut out, opt.severity.as_cstr().to_bytes());
+                out.extend_from_slice(b",\"Message\":");
+                write_boost_json_str(&mut out, &opt.message);
+                out.push(b'}');
+            }
+            out.extend_from_slice(b"],\"Subsections\":[");
+            for (i, sub) in sec.subsections.iter().enumerate() {
+                if i > 0 {
+                    out.push(b',');
+                }
+                out.extend_from_slice(b"{\"Name\":");
+                write_boost_json_str(&mut out, sub.name.as_bytes());
+                out.extend_from_slice(b",\"Options\":[");
+                for (j, opt) in sub.options.iter().enumerate() {
+                    if j > 0 {
+                        out.push(b',');
+                    }
+                    out.extend_from_slice(b"{\"Name\":");
+                    write_boost_json_str(&mut out, opt.name.as_bytes());
+                    out.extend_from_slice(b",\"Severity\":");
+                    write_boost_json_str(&mut out, opt.severity.as_cstr().to_bytes());
+                    out.extend_from_slice(b",\"Message\":");
+                    write_boost_json_str(&mut out, &opt.message);
+                    out.push(b'}');
+                }
+                out.extend_from_slice(b"]}");
+            }
+            out.extend_from_slice(b"]}");
+        }
+        out.extend_from_slice(b"]}");
+        return out;
+    }
+
+    let mut out = Vec::with_capacity(4096);
+    out.extend_from_slice(b"<value><struct><member><name>Alerts</name><value><array><data></data></array></value></member><member><name>Sections</name><value><array><data>");
+    for sec in &sections {
+        out.extend_from_slice(b"<value><struct>");
+        write_xml_node_member(&mut out, b"Name", b"string", sec.name.as_bytes());
+        out.extend_from_slice(b"<member><name>Issues</name><value><array><data>");
+        for issue in &sec.issues {
+            out.extend_from_slice(b"<value><struct>");
+            write_xml_node_member(
+                &mut out,
+                b"Severity",
+                b"string",
+                issue.severity.as_cstr().to_bytes(),
+            );
+            write_xml_node_member(&mut out, b"Message", b"string", &issue.message);
+            out.extend_from_slice(b"</struct></value>");
+        }
+        out.extend_from_slice(b"</data></array></value></member><member><name>Options</name><value><array><data>");
+        for opt in &sec.options {
+            out.extend_from_slice(b"<value><struct>");
+            write_xml_node_member(&mut out, b"Name", b"string", opt.name.as_bytes());
+            write_xml_node_member(
+                &mut out,
+                b"Severity",
+                b"string",
+                opt.severity.as_cstr().to_bytes(),
+            );
+            write_xml_node_member(&mut out, b"Message", b"string", &opt.message);
+            out.extend_from_slice(b"</struct></value>");
+        }
+        out.extend_from_slice(b"</data></array></value></member><member><name>Subsections</name><value><array><data>");
+        for sub in &sec.subsections {
+            out.extend_from_slice(b"<value><struct>");
+            write_xml_node_member(&mut out, b"Name", b"string", sub.name.as_bytes());
+            out.extend_from_slice(b"<member><name>Options</name><value><array><data>");
+            for opt in &sub.options {
+                out.extend_from_slice(b"<value><struct>");
+                write_xml_node_member(&mut out, b"Name", b"string", opt.name.as_bytes());
+                write_xml_node_member(
+                    &mut out,
+                    b"Severity",
+                    b"string",
+                    opt.severity.as_cstr().to_bytes(),
+                );
+                write_xml_node_member(&mut out, b"Message", b"string", &opt.message);
+                out.extend_from_slice(b"</struct></value>");
+            }
+            out.extend_from_slice(b"</data></array></value></member></struct></value>");
+        }
+        out.extend_from_slice(b"</data></array></value></member></struct></value>");
+    }
+    out.extend_from_slice(b"</data></array></value></member></struct></value>");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3814,6 +4450,188 @@ mod tests {
         assert!(std::str::from_utf8(&utf8_json).unwrap().contains("\"/opt/café/python3\""));
         let utf8_xml = system_info_to_xml(&utf8_view);
         assert!(std::str::from_utf8(&utf8_xml).unwrap().contains("<string>/opt/café/python3</string>"));
+    }
+
+    #[test]
+    fn test_diagnose_system_health_modes() {
+        let tmp = TempDir::new("diagnose");
+        let main_dir = tmp.path.join("main");
+        let dest_dir = tmp.path.join("dest");
+        let inter_dir = tmp.path.join("inter");
+        let nzb_dir = tmp.path.join("nzb");
+        let queue_dir = tmp.path.join("queue");
+        let temp_dir = tmp.path.join("temp");
+        let cfg_file = tmp.path.join("rustyget.conf");
+        for d in [&main_dir, &dest_dir, &inter_dir, &nzb_dir, &queue_dir, &temp_dir] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(&cfg_file, b"MainDir=/tmp\n").unwrap();
+
+        let servers = [HealthServerInput {
+            id: 1,
+            section: NewsServerSectionInput {
+                active: true,
+                name: b"Primary",
+                level: 0,
+                optional: false,
+                group: 0,
+                host: b"news.example.com",
+                port: 563,
+                username: b"user",
+                password: b"strongpassword",
+                tls: true,
+                cipher: b"",
+                max_connections: 20,
+                retention: 1000,
+                cert_level: 2,
+                ip_version: 0,
+                dupe_search: false,
+            },
+        }];
+        let tasks = [HealthTaskInput {
+            id: 1,
+            hours: 25,
+            minutes: 0,
+            week_days_bits: 127,
+        }];
+        let categories = [HealthCategoryInput {
+            name: b"",
+            unpack: true,
+        }];
+        let feeds = [HealthFeedInput {
+            id: 1,
+            name: b"Feed1",
+            url: b"https://example.com/rss&a=1",
+            interval: 15,
+            cert_level: 0,
+        }];
+
+        let input = SystemHealthDiagnoseInput {
+            paths: PathsSectionInput {
+                main_dir: &main_dir,
+                dest_dir: &dest_dir,
+                inter_dir: &inter_dir,
+                nzb_dir: &nzb_dir,
+                queue_dir: &queue_dir,
+                web_dir: Path::new(""),
+                temp_dir: &temp_dir,
+                script_dirs: &[],
+                config_template: Path::new(""),
+                log_file: Path::new("/dev/null"),
+                cert_store: Path::new(""),
+                cert_store_path: Path::new(""),
+                config_file: &cfg_file,
+                lock_file: Path::new(""),
+                write_log: 0,
+                cert_check: false,
+                daemon_mode: false,
+            },
+            servers: &servers,
+            output_mode: 0,
+            update_interval: 100,
+            curses_nzb_name: false,
+            curses_group: false,
+            curses_time: false,
+            rotate_log: 3,
+            log_buffer: 1000,
+            crash_dump: false,
+            time_correction: 0,
+            article_retries: 3,
+            hc_dupe: false,
+            dupe_search: false,
+            article_interval: 10,
+            article_timeout: 60,
+            article_read_chunk_size: 4,
+            url_retries: 3,
+            url_interval: 10,
+            url_timeout: 60,
+            url_connections: 4,
+            remote_timeout: 90,
+            download_rate: 0,
+            monthly_quota: 0,
+            quota_start_day: 1,
+            daily_quota: 0,
+            flush_queue: true,
+            continue_partial: true,
+            propagation_delay: 0,
+            article_cache: 250,
+            direct_write: true,
+            write_buffer: 1024,
+            file_naming: 0,
+            post_strategy: 1,
+            disk_space: 250,
+            nzb_cleanup_disk: true,
+            keep_history: 30,
+            feed_history: 7,
+            skip_write: false,
+            raw_article: false,
+            security: SecuritySectionInput {
+                control_ip: b"127.0.0.1",
+                control_port: 6789,
+                control_username: b"admin",
+                control_password: b"strongpassword",
+                restricted_username: b"",
+                restricted_password: b"",
+                add_username: b"",
+                add_password: b"",
+                form_auth: false,
+                secure_control: false,
+                secure_cert: Path::new(""),
+                secure_key: Path::new(""),
+                secure_port: 6791,
+                cert_check: false,
+                cert_store_path_empty: true,
+                daemon_mode: false,
+                daemon_username: b"",
+                umask: 0o022,
+            },
+            append_category_dir: false,
+            nzb_dir_interval: 5,
+            nzb_dir_file_age: 60,
+            dupe_check: true,
+            health_check: 1,
+            crc_check: true,
+            par_check: 0,
+            par_repair: true,
+            par_quick: true,
+            par_buffer: 250,
+            par_threads: 1,
+            hw_threads: 4,
+            par_rename: true,
+            rar_rename: true,
+            direct_rename: false,
+            hard_linking: false,
+            par_time_limit: 0,
+            unpack: true,
+            direct_unpack: false,
+            unpack_pause_queue: false,
+            unrar_path: Path::new(""),
+            seven_zip_path: Path::new(""),
+            ext_cleanup_disk: b"",
+            unpack_pass_file: Path::new(""),
+            unpack_ignore_ext: b"",
+            options_log_file: Path::new("/dev/null"),
+            tasks: &tasks,
+            categories: &categories,
+            feeds: &feeds,
+        };
+
+        let mut logs = Vec::new();
+        let out_log = diagnose_system_health(&input, 0, |sev, msg| {
+            logs.push((sev, String::from_utf8_lossy(msg).into_owned()));
+        });
+        assert!(out_log.is_empty());
+        assert!(logs.iter().any(|(sev, m)| *sev == 2 && m.contains("[Scheduler][Task1.Time]: Invalid hour: 25")));
+        assert!(logs.iter().any(|(sev, m)| *sev == 1 && m.contains("[Categories][Category1.Name]: Category name is empty")));
+
+        let json_out = String::from_utf8(diagnose_system_health(&input, 1, |_, _| {})).unwrap();
+        assert!(json_out.starts_with("{\"Alerts\":[],\"Sections\":["));
+        assert!(json_out.contains("\"Name\":\"Scheduler\""));
+        assert!(json_out.contains("\"Name\":\"Task1\""));
+
+        let xml_out = String::from_utf8(diagnose_system_health(&input, 2, |_, _| {})).unwrap();
+        assert!(xml_out.starts_with("<value><struct><member><name>Alerts</name>"));
+        assert!(xml_out.contains("<string>Invalid hour: 25</string>"));
     }
 }
 

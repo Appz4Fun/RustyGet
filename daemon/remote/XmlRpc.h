@@ -158,9 +158,6 @@ protected:
 #include "UrlCoordinator.h"
 #include "ExtensionManager.h"
 #include "SystemInfo.h"
-#include "Benchmark.h"
-#include "NetworkSpeedTest.h"
-#include "Xml.h"
 #include "SystemHealth.h"
 #include "TlsCipherBackend.h"
 
@@ -564,11 +561,7 @@ public:
 	explicit TlsCipherXmlCommand(int operation) : m_operation(operation) {}
 	void Execute() override
 	{
-		const NzbgetRsJsonLimits limits{
-			Json::string::max_size(),
-			Json::JsonArray::max_size(),
-			Json::JsonObject::max_size()
-		};
+		const NzbgetRsJsonLimits limits{0x7ffffffeu, 0x7fffffffu / 24u, 0x3fffffffu};
 		int fault = 0;
 		NzbgetRsBuf buf = nzbget_rs_xmlrpc_execute_tls_cipher(
 			m_operation,
@@ -1251,11 +1244,7 @@ inline void SystemHealthXmlCommand::Execute()
 {
 	if (g_Options->GetSystemHealthCheck())
 	{
-		const auto report = g_SystemHealth->Diagnose();
-		const std::string response =
-			IsJson() ? SystemHealth::ToJsonStr(report) : SystemHealth::ToXmlStr(report);
-
-		AppendResponse(response.c_str());	
+		AppendRsBuf(m_response, g_SystemHealth->DiagnoseSerialized(IsJson()));
 	}
 	else
 	{
@@ -2840,7 +2829,7 @@ inline void TestServerXmlCommand::Execute()
 			ServerParams* params;
 			bool failed;
 		} context{&params, false};
-		const NzbgetRsJsonLimits limits{Json::string::max_size(), Json::JsonArray::max_size(), Json::JsonObject::max_size()};
+		const NzbgetRsJsonLimits limits{0x7ffffffeu, 0x7fffffffu / 24u, 0x3fffffffu};
 		int parsed = nzbget_rs_test_server_params(m_request, limits, &context,
 			[](void* ctx, const NzbgetRsTestServerParams* from) noexcept
 			{
@@ -3030,46 +3019,115 @@ inline void TestDiskSpeedXmlCommand::Execute()
 	CString dirPath(dirPathBuf.data ? dirPathBuf.data : "");
 	nzbget_rs_free(dirPathBuf);
 
-	try
+	PauseGuard pauseGuard;
+
+	std::string dir(*dirPath ? *dirPath : "");
+	fs::error_code ec;
+	const fs::path fsDirPath = fs::u8path(dir);
+	fs::space_info space = fs::space(fsDirPath, ec);
+	std::string spaceErr = ec ? ec.message() : std::string();
+
+	uint64_t writeBytes = 0;
+	double writeMs = 0.0;
+	uint64_t readBytes = 0;
+	double readMs = 0.0;
+	NzbgetRsBuf errBuf{nullptr, 0};
+	int rc = nzbget_rs_benchmark_run(
+		dir.data(), dir.size(),
+		bufferSizeBytes,
+		maxFileSizeBytes,
+		timeoutSec,
+		ec ? 0 : 1,
+		space.available,
+		spaceErr.data(), spaceErr.size(),
+		&writeBytes, &writeMs, &readBytes, &readMs,
+		&errBuf);
+	if (rc != 0)
 	{
-		PauseGuard pauseGuard;
-
-		Benchmark::DiskBenchmark db;
-		Benchmark::Result res = db.Run(
-			*dirPath,
-			bufferSizeBytes,
-			maxFileSizeBytes,
-			std::chrono::seconds(timeoutSec)
-		);
-
-		info("Disk speed test for %s: write %.1f MiB/s, read %.1f MiB/s",
-			*dirPath, MiBPerSec(res.writeBytes, res.writeMs), MiBPerSec(res.readBytes, res.readMs));
-
-		AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_disk_speed(
-			IsJson() ? 1 : 0, res.writeBytes, res.writeMs, res.readBytes, res.readMs));
+		std::string err(errBuf.data ? errBuf.data : "", errBuf.len);
+		nzbget_rs_free(errBuf);
+		warn("Disk speed test for %s failed: %s", *dirPath, err.c_str());
+		BuildErrorResponse(2, "%s", err.c_str());
+		return;
 	}
-	catch (const std::exception& e)
-	{
-		warn("Disk speed test for %s failed: %s", *dirPath, e.what());
-		BuildErrorResponse(2, "%s", e.what());
-	}
+	nzbget_rs_free(errBuf);
+
+	info("Disk speed test for %s: write %.1f MiB/s, read %.1f MiB/s",
+		*dirPath, MiBPerSec(writeBytes, writeMs), MiBPerSec(readBytes, readMs));
+
+	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_disk_speed(
+		IsJson() ? 1 : 0, writeBytes, writeMs, readBytes, readMs));
 }
 
 inline void TestNetworkSpeedXmlCommand::Execute()
 {
 	// a pause that was on before the test stays on
 	PauseGuard pauseGuard;
-	try
+	auto executeIterCb = [](
+		void*,
+		const char* reqPtr,
+		size_t reqLen,
+		int64_t timeoutSec,
+		uint32_t* outDownloaded,
+		double* outElapsed) -> int
 	{
-		Network::SpeedTest sp;
-		double speedMbps = sp.RunTest();
-		AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_network_speed(
-			IsJson() ? 1 : 0, speedMbps));
-	}
-	catch (const std::exception& e)
+		using namespace std::chrono;
+#ifdef DISABLE_TLS
+		Connection connection("speed.cloudflare.com", 80, false);
+#else
+		Connection connection("speed.cloudflare.com", 443, true);
+#endif
+		connection.SetTimeout(1);
+		if (!connection.Connect() || !connection.Send(reqPtr, reqLen))
+		{
+			if (outDownloaded) *outDownloaded = 0;
+			if (outElapsed) *outElapsed = 0.0;
+			return 0;
+		}
+		uint32_t totalReceived = 0;
+		char buffer[8 * 1024];
+		auto start = steady_clock::now();
+		while (int received = connection.TryRecv(buffer, sizeof(buffer)))
+		{
+			if (nzbget_rs_dqh_speed_test_should_stop_recv_loop(
+				received,
+				duration<double>(steady_clock::now() - start).count(),
+				static_cast<double>(timeoutSec)) != 0)
+			{
+				break;
+			}
+			totalReceived += static_cast<uint32_t>(received);
+		}
+		auto finish = steady_clock::now();
+		if (outDownloaded) *outDownloaded = totalReceived;
+		if (outElapsed) *outElapsed = duration<double>(finish - start).count();
+		return 1;
+	};
+	auto logCb = [](void*, int kind, const char* msg)
 	{
-		BuildErrorResponse(2, "%s", e.what());
+		if (!msg) return;
+		if (kind == 1)
+		{
+			error("%s", msg);
+		}
+		else
+		{
+			info("%s", msg);
+		}
+	};
+	double speedMbps = 0.0;
+	NzbgetRsBuf errBuf{nullptr, 0};
+	int ok = nzbget_rs_network_speed_test_run(nullptr, executeIterCb, logCb, &speedMbps, &errBuf);
+	if (!ok)
+	{
+		std::string err(errBuf.data ? errBuf.data : "", errBuf.len);
+		nzbget_rs_free(errBuf);
+		BuildErrorResponse(2, "%s", err.c_str());
+		return;
 	}
+	nzbget_rs_free(errBuf);
+	AppendRsBuf(m_response, nzbget_rs_xmlrpc_format_network_speed(
+		IsJson() ? 1 : 0, speedMbps));
 }
 
 // bool startscript(string script, string command, string context, struct[] options);

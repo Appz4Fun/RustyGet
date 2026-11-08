@@ -12111,26 +12111,6 @@ pub unsafe extern "C" fn nzbget_rs_sus_parse_scan_script_cmd(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_sus_build_cipher_baseline(
-    names: *const *const c_char,
-    values: *const *const c_char,
-    count: usize,
-) -> RsBuf {
-    let mut name_slices: Vec<&[u8]> = Vec::with_capacity(count);
-    let mut val_slices: Vec<&[u8]> = Vec::with_capacity(count);
-    if !names.is_null() && !values.is_null() {
-        for i in 0..count {
-            name_slices.push(crate::diskstate_format::cstr_to_bytes(*names.add(i)));
-            val_slices.push(crate::diskstate_format::cstr_to_bytes(*values.add(i)));
-        }
-    }
-    into_buf(crate::extension::build_cipher_baseline(
-        &name_slices,
-        &val_slices,
-    ))
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_sus_is_nzbget_internal_env_var(var: *const c_char) -> c_int {
     if crate::extension::is_nzbget_internal_env_var(crate::diskstate_format::cstr_to_bytes(var)) {
         1
@@ -12314,23 +12294,6 @@ pub unsafe extern "C" fn nzbget_rs_rco_rpc_parse_update_branch(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rco_rpc_save_config_parse_bool(
-    val: *const c_char,
-    def_val: c_int,
-) -> c_int {
-    let opt = if val.is_null() {
-        None
-    } else {
-        Some(crate::diskstate_format::cstr_to_bytes(val))
-    };
-    if crate::xmlrpc_format::rpc_save_config_parse_bool(opt, def_val != 0) {
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_rco_remote_classify_signature(
     sig_ptr: *const c_char,
     nzb_magic_be: u32,
@@ -12475,19 +12438,6 @@ pub unsafe extern "C" fn nzbget_rs_rco_webdl_check_body_chunk(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rco_options_trim_and_check_config_line(
-    line: *mut c_char,
-) -> c_int {
-    if line.is_null() {
-        return 1;
-    }
-    let bytes = crate::diskstate_format::cstr_to_bytes(line);
-    let (new_len, skip) = crate::options::options_trim_and_check_config_line(bytes);
-    *line.add(new_len) = 0;
-    if skip { 1 } else { 0 }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_rco_log_should_rotate(
     rawtime: i64,
     last_written: i64,
@@ -12516,20 +12466,6 @@ pub unsafe extern "C" fn nzbget_rs_rco_log_init_message_disposition(
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rco_wstring_decode_utf8_to_utf16(
-    utf8: *const c_char,
-    out: *mut u16,
-    out_cap: usize,
-) -> usize {
-    if utf8.is_null() || out.is_null() || out_cap == 0 {
-        return 0;
-    }
-    let bytes = crate::diskstate_format::cstr_to_bytes(utf8);
-    let out_slice = std::slice::from_raw_parts_mut(out, out_cap);
-    crate::util::wstring_decode_utf8_to_utf16(bytes, out_slice)
-}
-
 // ============================================================================
 // Frontend, NCurses, Maintenance, ExtensionManager, NntpServer & SystemHealth FFI
 // ============================================================================
@@ -12546,38 +12482,6 @@ pub unsafe extern "C" fn nzbget_rs_feh_frontend_calc_log_start_index(
         *out_skip = c_int::from(skip);
     }
     start
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feh_frontend_calc_remaining_hms(
-    remaining_size: i64,
-    current_speed: i64,
-    stand_by: c_int,
-    pause_download: c_int,
-    out_h: *mut c_int,
-    out_m: *mut c_int,
-    out_s: *mut c_int,
-) -> c_int {
-    match crate::ncurses_format::frontend_calc_remaining_hms(
-        remaining_size,
-        current_speed,
-        stand_by != 0,
-        pause_download != 0,
-    ) {
-        Some((h, m, s)) => {
-            if !out_h.is_null() {
-                *out_h = h;
-            }
-            if !out_m.is_null() {
-                *out_m = m;
-            }
-            if !out_s.is_null() {
-                *out_s = s;
-            }
-            1
-        }
-        None => 0,
-    }
 }
 
 #[no_mangle]
@@ -12641,29 +12545,6 @@ pub unsafe extern "C" fn nzbget_rs_feh_ncurses_calc_scroll_and_selection(
     }
     if !out_scroll_offset.is_null() {
         *out_scroll_offset = off;
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_feh_ncurses_calc_top_header_time(
-    time_sec: c_int,
-    out_d: *mut c_int,
-    out_h: *mut c_int,
-    out_m: *mut c_int,
-    out_s: *mut c_int,
-) {
-    let (d, h, m, s) = crate::ncurses_format::ncurses_calc_top_header_time(time_sec);
-    if !out_d.is_null() {
-        *out_d = d;
-    }
-    if !out_h.is_null() {
-        *out_h = h;
-    }
-    if !out_m.is_null() {
-        *out_m = m;
-    }
-    if !out_s.is_null() {
-        *out_s = s;
     }
 }
 
@@ -12739,80 +12620,6 @@ pub unsafe extern "C" fn nzbget_rs_feh_maintenance_classify_update_info_message(
 // ============================================================================
 // System, NServ, DupeSearch, Connect, PostRenamer & SystemHealth Hot-Path FFI
 // ============================================================================
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_snh_sys_extract_python_version(
-    line: *const c_char,
-    len: usize,
-    out_start: *mut usize,
-    out_len: *mut usize,
-) -> c_int {
-    let s = if line.is_null() || len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(line.cast::<u8>(), len)
-    };
-    match crate::systemhealth::sys_extract_python_version(s) {
-        Some((st, ln)) => {
-            if !out_start.is_null() {
-                *out_start = st;
-            }
-            if !out_len.is_null() {
-                *out_len = ln;
-            }
-            1
-        }
-        None => 0,
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_snh_sys_parse_unpacker_version(
-    line: *const c_char,
-    len: usize,
-    out_start: *mut usize,
-    out_len: *mut usize,
-) -> c_int {
-    let s = if line.is_null() || len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(line.cast::<u8>(), len)
-    };
-    match crate::systemhealth::sys_parse_unpacker_version(s) {
-        Some((st, ln)) => {
-            if !out_start.is_null() {
-                *out_start = st;
-            }
-            if !out_len.is_null() {
-                *out_len = ln;
-            }
-            1
-        }
-        None => 0,
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_snh_sys_parse_par_version(
-    line: *const c_char,
-    len: usize,
-    out_pos: *mut usize,
-) -> c_int {
-    let s = if line.is_null() || len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(line.cast::<u8>(), len)
-    };
-    match crate::systemhealth::sys_parse_par_version(s) {
-        Some(pos) => {
-            if !out_pos.is_null() {
-                *out_pos = pos;
-            }
-            1
-        }
-        None => 0,
-    }
-}
 
 #[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_nzb_generator_execute(
@@ -14396,11 +14203,6 @@ pub unsafe extern "C" fn nzbget_rs_ntw_remote_server_should_warn_cap(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_ntw_web_proc_max_post_content_len(authorized: c_int) -> c_int {
-    crate::webserver::web_proc_max_post_content_len(authorized != 0)
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_ntw_web_proc_is_content_len_valid(
     content_len: c_int,
     authorized: c_int,
@@ -14493,18 +14295,6 @@ pub unsafe extern "C" fn nzbget_rs_ntw_xmlrpc_validate_reset_counter(
 // ============================================================================
 // QueueCoordinator & Options consolidated FFI exports
 // ============================================================================
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_queue_coord_is_smaller_dupe_file(
-    size1: i64,
-    idx1: c_int,
-    size2: i64,
-    idx2: c_int,
-) -> c_int {
-    i32::from(crate::queuecoord::is_smaller_dupe_file(
-        size1, idx1, size2, idx2,
-    ))
-}
 
 #[no_mangle]
 pub extern "C" fn nzbget_rs_queue_coord_should_skip_health_check(
@@ -14646,33 +14436,6 @@ pub unsafe extern "C" fn nzbget_rs_nntp_article_fetcher_eval_decoded_yenc(
         *out_success = i32::from(success);
     }
     i32::from(valid)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_nntp_article_batch_can_claim_next(
-    batch_id: c_int,
-    cur_batch_id: c_int,
-    cancelled: c_int,
-    stopped: c_int,
-    next_claim: usize,
-    requests_len: usize,
-    next_deliver: usize,
-    window_parts: c_int,
-    buffered_bytes: i64,
-    max_buffered_bytes: i64,
-) -> c_int {
-    i32::from(crate::nntp::article_batch_can_claim_next(
-        batch_id,
-        cur_batch_id,
-        cancelled != 0,
-        stopped != 0,
-        next_claim,
-        requests_len,
-        next_deliver,
-        window_parts,
-        buffered_bytes,
-        max_buffered_bytes,
-    ))
 }
 
 // ============================================================================
@@ -15309,22 +15072,6 @@ pub extern "C" fn nzbget_rs_statmeter_calc_resumed_download_start(
     )
 }
 
-#[no_mangle]
-pub extern "C" fn nzbget_rs_statmeter_calc_month_slots_prev_month(
-    loc_cur_time: i64,
-    prev_month_time: i64,
-) -> c_int {
-    crate::statmeter::calc_month_slots_prev_month(loc_cur_time, prev_month_time)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_statmeter_calc_month_slots_same_month(
-    tm_mday: c_int,
-    quota_start_day: c_int,
-) -> c_int {
-    crate::statmeter::calc_month_slots_same_month(tm_mday, quota_start_day)
-}
-
 // ============================================================================
 // Scheduler, Frontend, ColoredFrontend, NCursesFrontend, RemoteClient &
 // WebServer Hot-Path C ABI
@@ -15428,20 +15175,6 @@ pub extern "C" fn nzbget_rs_sfw_rpc_is_response_header_valid(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_sfw_frontend_select_pause_status_suffix(
-    pause_download: c_int,
-    stand_by: c_int,
-) -> *const c_char {
-    crate::ncurses_format::frontend_select_pause_status_suffix(pause_download != 0, stand_by != 0)
-        .as_ptr()
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sfw_frontend_calc_limit_kb(download_limit: c_int) -> c_int {
-    crate::ncurses_format::frontend_calc_limit_kb(download_limit)
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn nzbget_rs_sfw_ncurses_decide_loop_update(
     key_pressed: c_int,
     update_next_time: *mut c_int,
@@ -15474,94 +15207,6 @@ pub extern "C" fn nzbget_rs_sfw_ncurses_is_hint_active(time: i64, start_hint: i6
 #[no_mangle]
 pub extern "C" fn nzbget_rs_sfw_ncurses_select_normal_keybar(group_files: c_int) -> *const c_char {
     crate::ncurses_format::ncurses_select_normal_keybar(group_files != 0).as_ptr()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_sfw_ncurses_select_row_highlight(
-    is_edit_queue: c_int,
-    selected: c_int,
-    use_color: c_int,
-    highl_color: c_int,
-    text_color: c_int,
-    out_brace1: *mut c_char,
-    out_brace2: *mut c_char,
-) -> c_int {
-    let (color, b1, b2) = crate::ncurses_format::ncurses_select_row_highlight(
-        is_edit_queue != 0,
-        selected != 0,
-        use_color != 0,
-        highl_color,
-        text_color,
-    );
-    if !out_brace1.is_null() {
-        *out_brace1 = b1 as c_char;
-    }
-    if !out_brace2.is_null() {
-        *out_brace2 = b2 as c_char;
-    }
-    color
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sfw_ncurses_select_top_header_caption(
-    chars_left: c_int,
-    time_len: c_int,
-    long_cap_len: c_int,
-    short_cap_len: c_int,
-) -> c_int {
-    crate::ncurses_format::ncurses_select_top_header_caption(
-        chars_left,
-        time_len,
-        long_cap_len,
-        short_cap_len,
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_sfw_ncurses_calc_group_remain_hms_capped(
-    unpaused_remaining_size: i64,
-    current_download_speed: i64,
-    pause_download: c_int,
-    out_h: *mut c_int,
-    out_m: *mut c_int,
-    out_s: *mut c_int,
-) -> c_int {
-    match crate::ncurses_format::ncurses_calc_group_remain_hms_capped(
-        unpaused_remaining_size,
-        current_download_speed,
-        pause_download != 0,
-    ) {
-        Some((h, m, s)) => {
-            if !out_h.is_null() {
-                *out_h = h;
-            }
-            if !out_m.is_null() {
-                *out_m = m;
-            }
-            if !out_s.is_null() {
-                *out_s = s;
-            }
-            1
-        }
-        None => 0,
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_sfw_remote_client_should_print_remaining_time(
-    download_rate: u32,
-    download_paused: u32,
-    download2_paused: u32,
-    download_standby: u32,
-) -> c_int {
-    i32::from(
-        crate::binrpc::remote_client_should_print_remaining_time(
-            download_rate,
-            download_paused,
-            download2_paused,
-            download_standby,
-        ),
-    )
 }
 
 #[no_mangle]
@@ -15601,41 +15246,6 @@ pub unsafe extern "C" fn nzbget_rs_rol_xmlrpc_validate_download_rate(
         *out_bytes_per_sec = bps;
     }
     i32::from(ok)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_rol_xmlrpc_calc_average_download_rate(
-    download_time_sec: c_int,
-    all_bytes: i64,
-) -> i64 {
-    crate::xmlrpc_format::xmlrpc_calc_average_download_rate(download_time_sec, all_bytes)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_rol_xmlrpc_nzb_message_and_post_time(
-    message_count: c_int,
-    cached_message_count: c_int,
-    post_total_sec: c_int,
-    has_post_start_time: c_int,
-    cur_time: i64,
-    post_start_time: i64,
-    out_message_count: *mut c_int,
-    out_post_total_time_sec: *mut c_int,
-) {
-    let (msg_cnt, post_sec) = crate::xmlrpc_format::xmlrpc_nzb_message_and_post_time(
-        message_count,
-        cached_message_count,
-        post_total_sec,
-        has_post_start_time != 0,
-        cur_time,
-        post_start_time,
-    );
-    if !out_message_count.is_null() {
-        *out_message_count = msg_cnt;
-    }
-    if !out_post_total_time_sec.is_null() {
-        *out_post_total_time_sec = post_sec;
-    }
 }
 
 #[no_mangle]
@@ -15708,17 +15318,6 @@ pub extern "C" fn nzbget_rs_rol_log_should_close_idle(
     ))
 }
 
-#[no_mangle]
-pub extern "C" fn nzbget_rs_rol_log_should_delete_old_rotated(
-    file_day: c_int,
-    cur_day: c_int,
-    rotate_log: c_int,
-) -> c_int {
-    i32::from(crate::util::log_should_delete_old_rotated(
-        file_day, cur_day, rotate_log,
-    ))
-}
-
 // ============================================================================
 // Util, FileSystem, ScriptController, UnpackController & ScriptConfig Hot-Path FFI
 // ============================================================================
@@ -15744,43 +15343,6 @@ pub unsafe extern "C" fn nzbget_rs_ufs_util_split_int64(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ufs_util_match_shell_overridden_token(
-    shellover: *const c_char,
-    file_ext: *const c_char,
-    file_ext_len: usize,
-    out_cmd_offset: *mut usize,
-) -> c_int {
-    let ext_slice = if file_ext.is_null() || file_ext_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(file_ext.cast::<u8>(), file_ext_len)
-    };
-    if let Some(off) = crate::util::util_match_shell_overridden_token(
-        crate::queuecoord::cstr_to_bytes(shellover),
-        ext_slice,
-    ) {
-        if !out_cmd_offset.is_null() {
-            *out_cmd_offset = off;
-        }
-        1
-    } else {
-        0
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_ufs_util_internal_timegm(
-    tm_year: c_int,
-    tm_mon: c_int,
-    tm_mday: c_int,
-    tm_hour: c_int,
-    tm_min: c_int,
-    tm_sec: c_int,
-) -> i64 {
-    crate::util::util_internal_timegm(tm_year, tm_mon, tm_mday, tm_hour, tm_min, tm_sec)
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_ufs_webutil_xml_calc_copy_len(
     value_len: c_int,
     value_buf_size: c_int,
@@ -15789,35 +15351,8 @@ pub extern "C" fn nzbget_rs_ufs_webutil_xml_calc_copy_len(
 }
 
 #[no_mangle]
-pub extern "C" fn nzbget_rs_ufs_regex_calc_match_len(rm_so: c_int, rm_eo: c_int) -> c_int {
-    crate::util::regex_calc_match_len(rm_so, rm_eo)
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_ufs_tokenizer_fits_short_string(len: c_int, capacity: c_int) -> c_int {
     crate::util::tokenizer_fits_short_string(len, capacity)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_ufs_fs_validate_load_file_size(
-    file_size: i64,
-    add_trailing_null: c_int,
-    out_size: *mut c_int,
-    out_buf_size: *mut c_int,
-) -> c_int {
-    if let Some((size, buf_size)) =
-        crate::util::fs_validate_load_file_size(file_size, add_trailing_null)
-    {
-        if !out_size.is_null() {
-            *out_size = size;
-        }
-        if !out_buf_size.is_null() {
-            *out_buf_size = buf_size;
-        }
-        1
-    } else {
-        0
-    }
 }
 
 #[no_mangle]
@@ -16165,70 +15700,6 @@ pub unsafe extern "C" fn nzbget_rs_roc_xmlrpc_multicall_needs_array_wrap(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_roc_xmlrpc_status_calc_mbytes(
-    remaining_size: i64,
-    forced_size: i64,
-    article_cache: i64,
-    all_bytes: i64,
-    month_bytes: i64,
-    day_bytes: i64,
-    out_remaining_mb: *mut c_int,
-    out_forced_mb: *mut c_int,
-    out_cache_mb: *mut c_int,
-    out_downloaded_mb: *mut c_int,
-    out_month_mb: *mut c_int,
-    out_day_mb: *mut c_int,
-) {
-    unsafe {
-        crate::xmlrpc_format::roc_xmlrpc_status_calc_mbytes(
-            remaining_size,
-            forced_size,
-            article_cache,
-            all_bytes,
-            month_bytes,
-            day_bytes,
-            out_remaining_mb,
-            out_forced_mb,
-            out_cache_mb,
-            out_downloaded_mb,
-            out_month_mb,
-            out_day_mb,
-        )
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_roc_xmlrpc_status_calc_disk_space_mb(
-    free_disk: i64,
-    total_disk: i64,
-    inter_dir_empty: c_int,
-    free_inter: i64,
-    total_inter: i64,
-    out_free_inter: *mut i64,
-    out_total_inter: *mut i64,
-    out_free_disk_mb: *mut c_int,
-    out_total_disk_mb: *mut c_int,
-    out_free_inter_mb: *mut c_int,
-    out_total_inter_mb: *mut c_int,
-) {
-    unsafe {
-        crate::xmlrpc_format::roc_xmlrpc_status_calc_disk_space_mb(
-            free_disk,
-            total_disk,
-            inter_dir_empty,
-            free_inter,
-            total_inter,
-            out_free_inter,
-            out_total_inter,
-            out_free_disk_mb,
-            out_total_disk_mb,
-            out_free_inter_mb,
-            out_total_inter_mb,
-        )
-    }
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_roc_xmlrpc_log_params_valid(
     id_from: c_int,
     nr_entries: c_int,
@@ -16254,78 +15725,12 @@ pub extern "C" fn nzbget_rs_roc_xmlrpc_list_files_params_valid(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_roc_xmlrpc_post_info_elapsed_sec(
-    cur_time: i64,
-    stage_time: i64,
-    start_time: i64,
-    out_stage_sec: *mut c_int,
-    out_total_sec: *mut c_int,
-) {
-    unsafe {
-        crate::xmlrpc_format::roc_xmlrpc_post_info_elapsed_sec(
-            cur_time,
-            stage_time,
-            start_time,
-            out_stage_sec,
-            out_total_sec,
-        )
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_roc_xmlrpc_list_groups_calc_mb(
-    remaining_size: i64,
-    paused_size: i64,
-    out_remaining_mb: *mut c_int,
-    out_paused_mb: *mut c_int,
-) {
-    unsafe {
-        crate::xmlrpc_format::roc_xmlrpc_list_groups_calc_mb(
-            remaining_size,
-            paused_size,
-            out_remaining_mb,
-            out_paused_mb,
-        )
-    }
-}
-
-#[no_mangle]
 pub extern "C" fn nzbget_rs_roc_xmlrpc_history_should_skip_dup(
     kind: c_int,
     hk_dup: c_int,
     include_dup: c_int,
 ) -> c_int {
     crate::xmlrpc_format::roc_xmlrpc_history_should_skip_dup(kind, hk_dup, include_dup)
-}
-
-#[no_mangle]
-pub extern "C" fn nzbget_rs_roc_xmlrpc_config_should_mask_value(
-    user_access: c_int,
-    ua_restricted: c_int,
-    opt_restricted: c_int,
-) -> c_int {
-    crate::xmlrpc_format::roc_xmlrpc_config_should_mask_value(
-        user_access,
-        ua_restricted,
-        opt_restricted,
-    )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_roc_xmlrpc_server_volumes_calc_mb(
-    total_bytes: i64,
-    custom_bytes: i64,
-    out_total_mb: *mut u32,
-    out_custom_mb: *mut u32,
-) {
-    unsafe {
-        crate::xmlrpc_format::roc_xmlrpc_server_volumes_calc_mb(
-            total_bytes,
-            custom_bytes,
-            out_total_mb,
-            out_custom_mb,
-        )
-    }
 }
 
 #[no_mangle]
@@ -16384,25 +15789,6 @@ pub extern "C" fn nzbget_rs_roc_nzbget_reload_clamp_debounce_ms(
         debounce_delay_ms,
         max_burst_delay_ms,
     )
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_roc_remote_client_calc_group_unpaused_remaining(
-    remaining_size: i64,
-    paused_size: i64,
-    active_downloads: c_int,
-    out_has_threads: *mut c_int,
-    out_threads_plural: *mut c_int,
-) -> i64 {
-    unsafe {
-        crate::binrpc::roc_remote_client_calc_group_unpaused_remaining(
-            remaining_size,
-            paused_size,
-            active_downloads,
-            out_has_threads,
-            out_threads_plural,
-        )
-    }
 }
 
 #[no_mangle]
@@ -16714,41 +16100,6 @@ pub extern "C" fn nzbget_rs_dupesearch_calc_expand_budget_ms(
     now: i64,
 ) -> c_int {
     crate::dupesearch_nzb::dupesearch_calc_expand_budget_ms(budget_sec, deadline, now)
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn nzbget_rs_dupe_identity_decode_inner_buf(
-    raw_data: *const c_char,
-    raw_len: usize,
-    out_bytes: *mut u64,
-    out_ext_len: *mut usize,
-    out_name_offset: *mut usize,
-    out_name_len: *mut usize,
-) -> c_int {
-    let slice = if raw_data.is_null() || raw_len == 0 {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(raw_data.cast::<u8>(), raw_len)
-    };
-    if let Some((bytes, ext_len, name_offset, name_len)) =
-        crate::dupeidentity::decode_inner_buf(slice)
-    {
-        if !out_bytes.is_null() {
-            *out_bytes = bytes;
-        }
-        if !out_ext_len.is_null() {
-            *out_ext_len = ext_len;
-        }
-        if !out_name_offset.is_null() {
-            *out_name_offset = name_offset;
-        }
-        if !out_name_len.is_null() {
-            *out_name_len = name_len;
-        }
-        1
-    } else {
-        0
-    }
 }
 
 #[no_mangle]

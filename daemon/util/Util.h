@@ -16789,9 +16789,6 @@ exit:
 #ifndef NZBFILE_H
 #define NZBFILE_H
 
-#include <algorithm>
-#include <set>
-
 class NzbFile
 {
 public:
@@ -17735,9 +17732,6 @@ inline void DownloadQueue::CalcRemainingSize(int64* remaining, int64* remainingF
 
 #ifndef DUPEARTICLEFALLBACK_H
 #define DUPEARTICLEFALLBACK_H
-#include <map>
-#include <set>
-#include <vector>
 
 /*
  * Recovers articles missing on all news servers from duplicate collections
@@ -17947,17 +17941,6 @@ private:
 		bool twinOnly = false);
 	NzbInfo* GetParsedDonor(NzbInfo* donorNzb);
 };
-
-#include <algorithm>
-#include <atomic>
-#include <climits>
-#include <functional>
-#include <map>
-#include <mutex>
-#include <set>
-#include <string>
-#include <vector>
-#include "nzbget_rs.h"
 
 class DupeStreamRepair
 {
@@ -20190,13 +20173,6 @@ inline FileInfo::EFirstContent DupeArticleFallback::FirstContent(FileInfo* fileI
 #ifndef ARTICLEDOWNLOADER_H
 #define ARTICLEDOWNLOADER_H
 
-#include <atomic>
-#include <functional>
-#include <memory>
-#include <set>
-#include <string>
-#include <vector>
-
 class ArticleContentAnalyzer
 {
 public:
@@ -20347,8 +20323,6 @@ private:
 };
 
 #include <cstddef>
-#include <memory>
-#include "nzbget_rs.h"
 
 class RenameContentAnalyzer : public ArticleContentAnalyzer
 {
@@ -21363,8 +21337,6 @@ extern DupeCoordinator* g_DupeCoordinator;
 
 #ifndef SCANNER_H
 #define SCANNER_H
-#include <mutex>
-#include <string>
 
 class Scanner final : public Service
 {
@@ -21637,7 +21609,6 @@ private:
 
 
 
-#include <algorithm>
 #include <cstdarg>
 /*
  *  This file is part of nzbget. See <https://nzbget.com>.
@@ -21712,14 +21683,6 @@ private:
 
 extern PrePostProcessor* g_PrePostProcessor;
 
-#include <atomic>
-#include <condition_variable>
-#include <deque>
-#include <map>
-#include <mutex>
-#include <set>
-#include <thread>
-#include <vector>
 /*
  *  This file is part of nzbget. See <https://nzbget.com>.
  *
@@ -21741,15 +21704,6 @@ extern PrePostProcessor* g_PrePostProcessor;
 
 #ifndef EXTENSION_MANAGER_H
 #define EXTENSION_MANAGER_H
-
-#include <atomic>
-#include <vector>
-#include <utility>
-#include <memory>
-#include <shared_mutex>
-#include <optional>
-#include <functional>
-#include "nzbget_rs.h"
 
 namespace Extension
 {
